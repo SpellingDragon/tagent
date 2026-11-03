@@ -40,7 +40,11 @@
 <a id="outbound-delivery"></a>
 ## 四、出站投递：一条通路，正文与附件一次算清
 
-`hostSender` 是宿主**唯一的出网发送通路**：回合交付（`Send`）与主动通道（`send` 工具）都汇合到 `sendToUser`，实现 `assembly.MessageSender`。
+`hostSender` 是宿主**唯一的出网发送通路**，实现 `assembly.MessageSender`：正文只有回合交付（`Send`）这一条来源。
+
+这条通路的落点是 `sendToUser`：正文与附件在那里一次算清，顺序见下。
+
+`send` 工具不走这条通路——它不出网，唯一职责是跨 task、会话通信（`target` 二选一：`{"task"}` 重入 task，`{"agent","session"}` 投递同级会话）。
 
 `sendToUser` 的顺序不可调换：按**精确会址**解析目标（解析不到即 `no-target` 回执 + `errNoSendTarget`，扣留而非猜测）→ 清 typing（60s 内残留才停）→ 正文 > 2000 字节时先试 context-token 长文接口，拿不到 token 或长文失败就 `truncateBytes` 到 2000 并标注 `[Message truncated]` → 文本失败回 `send-failed` 回执并把原因原样交回调用方 → **附件投递照常发生**（`deliverFiles` 用 `originalContent`，不受文本截断影响）。
 
@@ -66,7 +70,9 @@
 
 **owed 账**（`assembly/host_delivery.go`）保证**崩溃不漏送**：正文在任何出海之前先落成一条 durable 交付义务（key 前缀 `tagent/task/v1/delivery:`，状态 `owed`）；发送被审核插件挂起即 `held`、被通道拒绝即 `retry`、被接受即 `sent`、被人工拒绝即 `refused`，非入口会址的欠账以 `headless` 退役（保留正文供查）。重启时 `restorePendingDeliveries` 扫回全部记录：`owed` 的入口会址**重新投递**，`held`／`retry` 重新挂回待裁决——同一身份只结算一次。
 
-**两种"投递"不是一个东西**：本节说的是示例侧把最终响应送回 IM；框架另有**进程内跨 agent 投递**（`deliver_to` 白名单 + `runtime/state/send.go` 的 `WithDeliverTo`，越界目标以 `RefusalNotAuthorized` 拒绝），两者共用谱系白名单却方向不同，判据见[持久投递·谱系可见性](../reliability/durable-delivery.md#lineage-visibility)。本示例的冥想采用默认形态：回看业务链、把卡片回流入口 agent，循环跑在保留会话上，内部叙述不进微信对话。
+**两种"投递"不是一个东西**：本节说的是示例侧把回合正文送回 IM；框架另有**进程内通信**，模型面唯一入口是 `send`（职责=跨 task、会话通信，正文永不出网）：`target` 写 `{"task": …}` 时重入本进程服务的 task（已 settle 的 task 被重新激活、以新 Round 续行，failed/cancelled 具名拒绝），写 `{"agent": …, "session": …}` 时经宿主投递面的**四道门**向同级会话投递——`deliver_to` 白名单、反思观察面够得到目标、目标会话已在本 run 绑定、宿主未停机且存储能为该地址建立席位，每道门各按自己的名字拒绝；过门后正文以这次调用的身份入链，目标空闲被驱动一轮、忙则在自己的下一条决策边界上读到它（`assembly/host_tools.go` 的 `DeliverToSession`），两者方向不同，判据见[持久投递·谱系可见性](../reliability/durable-delivery.md#lineage-visibility)。本示例的冥想采用默认形态：回看业务链、把卡片经 `send` 回流入口 agent，循环跑在保留会话上，内部叙述不进微信对话。
+
+**探活不是一根 200 就够**：`restart-tagent.sh` / `restart-maintenance.sh` 的重启门把 `/healthz` 的答复分成五态判定——`healthy`（200）继续；`auth_fail`（401/403）告警并中止（不 kill、不重建、不回滚，鉴权失败不等于进程死了）；`timeout`（探针超时）与 `unavailable`（拒连等）在各自的等待窗内视为正常（进程可能还在初始化），窗口走完仍如此就报不可用并继续，也不据此判定进程已死。这道门排在脚本里第一个 `kill -TERM` 之前，逐态判据由 `tests/gates/test_health_probe_states.sh` 用真实 curl 打本地桩驱动。
 
 | 症状锚 | 断言 | 测试 |
 |---|---|---|

@@ -3,7 +3,7 @@ package host
 import (
 	"context"
 	"errors"
-	"reflect"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -23,6 +23,8 @@ import (
 // - a cancelled request is never read as a stopped producer while the tool still runs
 // - a producer answering false keeps the drain open and only its real stop lets the close report one
 // - the close refuses new input before the drain empties and keeps refusing it afterwards
+// - a close naming no budget or two that disagree is refused by name beside a broken report that read nothing
+// - the run a refused close stood beside keeps its production flying, admits new input and still takes a work-ending close
 // 契约: docs/wiki/agent/execution-generations.md#lifecycle-convergence
 func TestCloseRefusesWhileModelInFlight(t *testing.T) {
 	t.Run("a model in flight holds no task at all and is still named beside its unconfirmed stop", func(t *testing.T) {
@@ -41,17 +43,34 @@ func TestCloseRefusesWhileModelInFlight(t *testing.T) {
 		}()
 		provider.awaitRequest(t)
 		report, err := run.Close(ctx, agent.CloseRequest{Address: addr, Deadline: time.Now().Add(300 * time.Millisecond)})
-		if !errors.Is(err, agent.ErrDrainUnsettled) || report.Drained {
-			t.Fatalf("close beside the model in flight = (%+v, %v), want the named unsettled state instead of a clean drain", report, err)
+		if err != nil || report.Outcome != agent.CloseCut || report.Drained {
+			t.Fatalf("close beside the model in flight = (%+v, %v), want a cut close instead of a clean quiesce", report, err)
 		}
-		wantOne := agent.UnsettledObligation{TaskID: "inv-model-flight", Reason: "the producer has not confirmed its stop"}
-		if len(report.Unsettled) != 2 {
-			t.Fatalf("unsettled = %+v, want the drive and the model production each named beside its unconfirmed stop", report.Unsettled)
+		wantOne := "this writer has not confirmed its stop: "
+		if len(report.Unsettled) != 3 {
+			t.Fatalf("unsettled = %+v, want the drive and the model production each named beside its unconfirmed stop, beside the input round the drive holds with no answer", report.Unsettled)
 		}
+		named := make([]string, 0, 2)
+		rounds := 0
 		for _, entry := range report.Unsettled {
-			if !reflect.DeepEqual(entry, wantOne) {
-				t.Fatalf("unsettled entry = %+v, want the named production %v", entry, wantOne)
+			name, writer := strings.CutPrefix(entry.Reason, wantOne)
+			if !writer {
+				if entry.FactKey == "" || entry.Address != addr {
+					t.Fatalf("unsettled entry = %+v, want the unanswered input round of %v named beside the writers", entry, addr)
+				}
+				rounds++
+				continue
 			}
+			if entry.TaskID != "" {
+				t.Fatalf("unsettled entry = %+v, want the writer named beside no task: a model in flight is not a task", entry)
+			}
+			named = append(named, name)
+		}
+		if rounds != 1 {
+			t.Fatalf("unsettled = %+v, want the one input round the driving turn committed and no answer closed", report.Unsettled)
+		}
+		if len(named) != 2 || named[0] != "drive:inv-model-flight" || !strings.HasPrefix(named[1], "model:") {
+			t.Fatalf("writers named = %v, want the drive and the model production each named beside its own identity", named)
 		}
 		provider.unblock()
 		if err := <-driving; err != nil {
@@ -90,22 +109,22 @@ func TestCloseRefusesWhileModelInFlight(t *testing.T) {
 			t.Fatal("the tool reported its end beside the cancellation, want the production still running")
 		}
 		report, err := run.Close(context.Background(), agent.CloseRequest{Address: addr, Deadline: time.Now().Add(300 * time.Millisecond)})
-		if !errors.Is(err, agent.ErrDrainUnsettled) || report.Drained {
-			t.Fatalf("close beside the running tool = (%+v, %v), want the drain kept open by the production that never stopped", report, err)
+		if err != nil || report.Outcome != agent.CloseCut || report.Drained {
+			t.Fatalf("close beside the running tool = (%+v, %v), want a cut close kept open by the production that never stopped", report, err)
 		}
 		tasks := runTasks(t, run, context.Background(), addr)
 		if len(tasks) != 1 {
 			t.Fatalf("tasks beside the cancelled drive = %v, want the one admitted call", tasks)
 		}
-		want := agent.UnsettledObligation{TaskID: tasks[0], Reason: "the producer has not confirmed its stop"}
+		want := "this writer has not confirmed its stop: call:call-1"
 		found := false
 		for _, entry := range report.Unsettled {
-			if entry == want {
+			if entry.Reason == want {
 				found = true
 			}
 		}
 		if !found {
-			t.Fatalf("unsettled = %+v, want the tool production %v named beside its unconfirmed stop", report.Unsettled, want)
+			t.Fatalf("unsettled = %+v, want the tool production %q named beside its unconfirmed stop", report.Unsettled, want)
 		}
 		if got := tool.callCount(); got != 1 {
 			t.Fatalf("tool executions = %d, want the single production the close stood beside", got)
@@ -220,6 +239,107 @@ func TestCloseRefusesWhileModelInFlight(t *testing.T) {
 		}
 		if got := tool.callCount(); got != 1 {
 			t.Fatalf("tool executions = %d, want the single production the drain settled", got)
+		}
+	})
+
+	t.Run("writers_not_stopped_blocks_quiesce", func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		run, provider, _ := newModelFlightRun(t, ctx)
+		addr := event.Address{AgentID: "agent-a", SessionID: "session-writers-barrier"}
+		driving := make(chan error, 1)
+		go func() {
+			_, err := run.Invoke(ctx, assembly.InvokeRequest{
+				InvocationID: "inv-writers-barrier",
+				Address:      addr,
+				Input:        []model.Message{{Role: model.RoleUser, Content: "hello"}},
+			})
+			driving <- err
+		}()
+		provider.awaitRequest(t)
+		report, err := run.Close(ctx, agent.CloseRequest{Timeout: time.Now().Add(200 * time.Millisecond)})
+		if err != nil || report.Drained || report.Outcome != agent.CloseCut {
+			t.Fatalf("close beside the unstopped writer = (%+v, %v), want a cut close: the barrier alone keeps the run open", report, err)
+		}
+		read := run.Unsettled(ctx)
+		if len(read.Work) != 0 || len(read.Notices) != 0 || len(read.Inputs) != 1 || read.Inputs[0].Address != addr {
+			t.Fatalf("criterion = %+v, want the one input round the drive holds with no answer beside no other work, so the writer barrier is what else keeps the close open", read)
+		}
+		named := 0
+		for _, entry := range report.Unsettled {
+			if strings.HasPrefix(entry.Reason, "this writer has not confirmed its stop: ") {
+				named++
+			}
+		}
+		if named == 0 {
+			t.Fatalf("unsettled = %+v, want the writer that has not stopped named in the report", report.Unsettled)
+		}
+		provider.unblock()
+		if err := <-driving; err != nil {
+			t.Fatalf("invoke beside the released model: %v", err)
+		}
+		report, err = run.Close(ctx, agent.CloseRequest{Timeout: time.Now().Add(5 * time.Second)})
+		if err != nil || !report.Drained {
+			t.Fatalf("close beside the stopped writers = (%+v, %v), want the quiesce reached once every writer stopped", report, err)
+		}
+	})
+
+	t.Run("close_missing_timeout_refused_before_side_effects", func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		run, _, tool := newSlowToolRun(t, ctx)
+		addr := event.Address{AgentID: "agent-a", SessionID: "session-close-refused"}
+		driving := make(chan error, 1)
+		go func() {
+			_, err := run.Invoke(ctx, assembly.InvokeRequest{
+				InvocationID: "inv-close-refused",
+				Address:      addr,
+				Input:        []model.Message{{Role: model.RoleUser, Content: "hello"}},
+			})
+			driving <- err
+		}()
+		tool.awaitCall(t)
+
+		report, err := run.Close(ctx, agent.CloseRequest{Address: addr})
+		if !errors.Is(err, agent.ErrCloseTimeoutMissing) {
+			t.Fatalf("close naming no timeout = %v, want the named refusal %v", err, agent.ErrCloseTimeoutMissing)
+		}
+		if report.Outcome != agent.CloseBroken || report.Drained || len(report.Unsettled) != 0 {
+			t.Fatalf("report beside the refused close = %+v, want a broken report that read no obligation", report)
+		}
+		if tool.finished() {
+			t.Fatal("the tool confirmed its stop beside the refused close, want the production untouched")
+		}
+
+		report, err = run.Close(ctx, agent.CloseRequest{
+			Address:  addr,
+			Timeout:  time.Now().Add(time.Second),
+			Deadline: time.Now().Add(2 * time.Second),
+		})
+		if !errors.Is(err, agent.ErrCloseTimeoutConflict) {
+			t.Fatalf("close naming two disagreeing timeouts = %v, want the named refusal %v", err, agent.ErrCloseTimeoutConflict)
+		}
+		if report.Outcome != agent.CloseBroken || report.Drained || len(report.Unsettled) != 0 {
+			t.Fatalf("report beside the conflicting close = %+v, want a broken report that read no obligation", report)
+		}
+
+		tool.unblock()
+		if err := <-driving; err != nil {
+			t.Fatalf("invoke the refused close stood beside = %v, want the drive untouched", err)
+		}
+		if !tool.finished() {
+			t.Fatal("the drive ended before the released production returned, want the production really run out")
+		}
+		if _, err := run.Invoke(ctx, assembly.InvokeRequest{
+			InvocationID: "inv-beside-refusal",
+			Address:      addr,
+			Input:        []model.Message{{Role: model.RoleUser, Content: "after the refusal"}},
+		}); err != nil {
+			t.Fatalf("invoke beside the refused close = %v, want the run still admitting input", err)
+		}
+		report, err = run.Close(ctx, agent.CloseRequest{Address: addr, Timeout: time.Now().Add(10 * time.Second)})
+		if err != nil || !report.Drained || report.Outcome != agent.CloseQuiesced {
+			t.Fatalf("close beside the run the refusals stood beside = (%+v, %v), want the quiesce the refusals left reachable", report, err)
 		}
 	})
 }

@@ -43,17 +43,15 @@ var (
 )
 
 // The event-driven model replacement wiring keeps its declared shapes: the
-// lease attached per agent beside the rebuild a replacement fact runs, the
-// capture the loop is driven through, and the explicit filing entry a host
-// drives when its own configuration source observed a change.
+// lease attached per agent beside the rebuild a model configuration change
+// runs, the capture the loop is driven through, and the diagnostic faces of the
+// versions the leases installed and the changes that could not be filed.
 var (
 	_ func(event.AgentID, *rl.ModelLease, ...ModelLeaseOption) Option = WithModelLease
 
 	_ func(func(string) (model.Model, error)) ModelLeaseOption = WithLeaseRebuild
 
 	_ func(rl.Capture) Option = WithCapture
-
-	_ func(*Run, event.AgentID, string, string, string) (event.EventID, error) = (*Run).NoteModelChange
 
 	_ func(*Run) []rl.ModelIdentity = (*Run).LeasePublications
 
@@ -125,4 +123,43 @@ var (
 	_ func(FoldWindow) int = FoldWindow.VolumeThresholdBytes
 
 	_ func(*Run, event.SessionID) ([]replay.ProjectionEntry, bool) = (*Run).ReplayEntries
+)
+
+// The compression consumer is the execution half of the same flow: an instance
+// of the fact→observation port that reads the judgments a producer filed, the
+// session face it reads them through, and the handoff a producer reaches it by.
+var (
+	_ plugin.Instance           = (*CompressionConsumer)(nil)
+	_ plugin.PostCommitObserver = (*CompressionConsumer)(nil)
+	_ compressExecutor          = (*CompressionConsumer)(nil)
+	_ compressSessions          = ageFoldSessions{}
+
+	_ func(compressSessions) *CompressionConsumer = NewCompressionConsumer
+	_ func(*AgeFoldPlugin, compressExecutor)      = (*AgeFoldPlugin).setExecutor
+
+	_ func(*CompressionConsumer, context.Context, event.SessionID) error = (*CompressionConsumer).Execute
+	_ func(*CompressionConsumer, event.SessionID, event.CompressRequest) = (*CompressionConsumer).Record
+	_ func(*CompressionConsumer, event.CompressProduct)                  = (*CompressionConsumer).NoteProduct
+	_ func(*CompressionConsumer) string                                  = (*CompressionConsumer).Name
+	_ func(*CompressionConsumer) plugin.Port                             = (*CompressionConsumer).Port
+
+	_ string = CompressionConsumerName
+)
+
+// The producer of the closing round serves the same fact→observation port: it
+// reads the segment a commit grew through the run's own chain face and files the
+// judgment of a spent budget back on that chain.
+var (
+	_ plugin.Instance           = (*agent.FinalRoundPlanner)(nil)
+	_ plugin.PostCommitObserver = (*agent.FinalRoundPlanner)(nil)
+	_ agent.FinalRoundChain     = finalRoundChain{}
+
+	_ func(agent.FinalRoundChain, func(event.AgentID) agent.FinalRoundPolicy) *agent.FinalRoundPlanner = agent.NewFinalRoundPlanner
+
+	_ func(*agent.FinalRoundPlanner) string      = (*agent.FinalRoundPlanner).Name
+	_ func(*agent.FinalRoundPlanner) plugin.Port = (*agent.FinalRoundPlanner).Port
+
+	_ = agent.FinalRoundSegment{}
+
+	_ string = agent.FinalRoundPlannerName
 )

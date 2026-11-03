@@ -3,9 +3,11 @@ package task
 import (
 	"context"
 	"errors"
-	"testing"
-
 	"github.com/SpellingDragon/tagent/api/event"
+	"strings"
+	"sync"
+	"testing"
+	"time"
 )
 
 // invariantTaskAddress is the explicit address the invariants' tasks are declared from and delivered to.
@@ -275,4 +277,253 @@ func invariantObligationCount(t *testing.T, manager *MemoryManager, taskID event
 		t.Fatalf("read the obligations of %s: %v", taskID, err)
 	}
 	return held.Count
+}
+
+// TestReentryRefusalAndStaleSignals pins the refusal face of a re-entry and the round-local life of the detector's verdict.
+// - a round still in flight refuses the re-entry by name and leaves the task as it stands
+// - a round reported as suspected is still a round in flight: the observation never opens a re-entry of its own
+// - the named refusals guide the caller to the way out (wait for the terminal, relaunch or re-spawn)
+// - the verdict the detector read over the round before is not carried into the new round
+// - the new round is classified by its own silence, so its suspicion is its own and arrives only when its own threshold passes
+// 契约: docs/wiki/agent/task-lifecycle.md#detach-suppression
+func TestReentryRefusalAndStaleSignals(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("rejects_inflight_reentry", func(t *testing.T) {
+		registry, carrier := invariantRegistry(t)
+		taskID := invariantRegister(t, registry, "call-1", "dedup-1")
+		if result, err := registry.Advance(ctx, taskID, StatusRunning, "running", nil); err != nil || result != CommitCommitted {
+			t.Fatalf("move the task under way = (%v, %v), want a committed change", result, err)
+		}
+		stored := len(carrier.Facts(taskID))
+		if _, err := registry.Reactivate(ctx, taskID); !errors.Is(err, ErrRoundInFlight) {
+			t.Fatalf("re-entering a task whose round is in flight = %v, want %v", err, ErrRoundInFlight)
+		}
+		if _, status, err := registry.Lookup(ctx, taskID); err != nil || status != StatusRunning {
+			t.Fatalf("status after the refused re-entry = (%v, %v), want the round already running", status, err)
+		}
+		if got := len(carrier.Facts(taskID)); got != stored {
+			t.Fatalf("facts after the refused re-entry = %d, want the stored ones alone", got)
+		}
+		if result, err := registry.Advance(ctx, taskID, StatusSettled, "settled", []Envelope{invariantEnvelope(taskID, NoticeSettled, 0)}); err != nil || result != CommitCommitted {
+			t.Fatalf("settle the round = (%v, %v), want a committed change", result, err)
+		}
+		if round, err := registry.Reactivate(ctx, taskID); err != nil || round != 2 {
+			t.Fatalf("re-entering the task once its round settled = (%d, %v), want the second round", round, err)
+		}
+	})
+
+	t.Run("a suspected round is still a round in flight", func(t *testing.T) {
+		registry := logicalRegistry(logicalThresholds).registry
+		taskID := invariantRegister(t, registry, "call-1", "dedup-1")
+		if result, err := registry.Advance(ctx, taskID, StatusRunning, "running", nil); err != nil || result != CommitCommitted {
+			t.Fatalf("move the task under way = (%v, %v), want a committed change", result, err)
+		}
+		probe := time.Now().Add(logicalThresholds.SuspectAfter + logicalMargin)
+		if got, err := registry.Logical(ctx, taskID, probe); err != nil || got != LogicalSuspect {
+			t.Fatalf("logical status of the silent round = (%q, %v), want %q", got, err, LogicalSuspect)
+		}
+		if _, err := registry.Reactivate(ctx, taskID); !errors.Is(err, ErrRoundInFlight) {
+			t.Fatalf("re-entering a suspected round = %v, want %v", err, ErrRoundInFlight)
+		}
+		if _, status, err := registry.Lookup(ctx, taskID); err != nil || status != StatusRunning {
+			t.Fatalf("status after the refused re-entry = (%v, %v), want the round the observation never moved", status, err)
+		}
+	})
+
+	t.Run("the named refusals guide the caller", func(t *testing.T) {
+		for _, one := range []struct {
+			err     error
+			guides  string
+			subject string
+		}{
+			{ErrReactivationFailed, "relaunch", "a failed task"},
+			{ErrReactivationCancelled, "re-spawn", "a cancelled task"},
+			{ErrRoundInFlight, "in flight", "a round under way"},
+		} {
+			if !strings.Contains(one.err.Error(), one.guides) {
+				t.Fatalf("the refusal of %s = %q, want it to name %q", one.subject, one.err.Error(), one.guides)
+			}
+		}
+	})
+
+	t.Run("stale_signal_ignored", func(t *testing.T) {
+		registry := logicalRegistry(logicalThresholds).registry
+		taskID := invariantRegister(t, registry, "call-1", "dedup-1")
+		if result, err := registry.Advance(ctx, taskID, StatusRunning, "running", nil); err != nil || result != CommitCommitted {
+			t.Fatalf("move the task under way = (%v, %v), want a committed change", result, err)
+		}
+		probe := time.Now().Add(logicalThresholds.SuspectAfter + logicalMargin)
+		if changes := registry.Watch(ctx, probe); len(changes) != 1 || changes[0].To != LogicalSuspect {
+			t.Fatalf("changes the old round was reported under = %+v, want the one suspected verdict", changes)
+		}
+		if result, err := registry.Advance(ctx, taskID, StatusSettled, "settled", []Envelope{invariantEnvelope(taskID, NoticeSettled, 0)}); err != nil || result != CommitCommitted {
+			t.Fatalf("settle the round = (%v, %v), want a committed change", result, err)
+		}
+		if _, err := registry.Reactivate(ctx, taskID); err != nil {
+			t.Fatalf("re-enter the settled task: %v", err)
+		}
+		if changes := registry.Watch(ctx, time.Now()); len(changes) != 0 {
+			t.Fatalf("changes the new round was reported under = %+v, want none: the old round's verdict belongs to the round it was read over", changes)
+		}
+		if got, err := registry.Logical(ctx, taskID, time.Now()); err != nil || got != LogicalActive {
+			t.Fatalf("logical status of the new round = (%q, %v), want %q", got, err, LogicalActive)
+		}
+	})
+
+	t.Run("the new round is classified by its own silence", func(t *testing.T) {
+		registry := logicalRegistry(logicalThresholds).registry
+		taskID := invariantRegister(t, registry, "call-1", "dedup-1")
+		if result, err := registry.Advance(ctx, taskID, StatusRunning, "running", nil); err != nil || result != CommitCommitted {
+			t.Fatalf("move the task under way = (%v, %v), want a committed change", result, err)
+		}
+		if changes := registry.Watch(ctx, time.Now().Add(logicalThresholds.SuspectAfter+logicalMargin)); len(changes) != 1 {
+			t.Fatalf("changes the old round was reported under = %+v, want the one suspected verdict", changes)
+		}
+		if result, err := registry.Advance(ctx, taskID, StatusSettled, "settled", []Envelope{invariantEnvelope(taskID, NoticeSettled, 0)}); err != nil || result != CommitCommitted {
+			t.Fatalf("settle the round = (%v, %v), want a committed change", result, err)
+		}
+		if _, err := registry.Reactivate(ctx, taskID); err != nil {
+			t.Fatalf("re-enter the settled task: %v", err)
+		}
+		if changes := registry.Watch(ctx, time.Now()); len(changes) != 0 {
+			t.Fatalf("changes at the opening of the new round = %+v, want none", changes)
+		}
+		if changes := registry.Watch(ctx, time.Now().Add(logicalThresholds.SuspectAfter+logicalMargin)); len(changes) != 1 || changes[0].To != LogicalSuspect {
+			t.Fatalf("changes the new round reached on its own = %+v, want the one suspected verdict of the new round", changes)
+		}
+	})
+}
+
+// TestTerminalTTLPrunesTheAccount pins the terminal TTL of one registry: task_terminal_ttl read as the bound of the in-memory account, never of the fact chain.
+// - a terminal record older than the bound is dropped by a sweep, and a call naming it answers ErrTaskNotFound
+// - a terminal record inside the bound is kept, and a task in flight is never dropped however long it stands
+// - an admission sweeps beside the record it adds, so an account that keeps admitting stays bounded
+// - a task whose record was pruned is admitted fresh again instead of answering the record that left
+// - a registry built beside no bound keeps every record it ever admitted
+// 契约: docs/wiki/agent/task-lifecycle.md#status-machine
+func TestTerminalTTLPrunesTheAccount(t *testing.T) {
+	ctx := context.Background()
+	const ttl = time.Hour
+	start := time.Date(2026, 11, 2, 12, 0, 0, 0, time.UTC)
+
+	t.Run("a_terminal_record_past_its_bound_is_dropped", func(t *testing.T) {
+		registry, _, clock := ttlRegistry(t, ttl, start)
+		taskID := ttlSettled(t, registry, "call-1", "dedup-1")
+		clock.advance(ttl / 2)
+		if dropped := registry.PruneTerminal(clock.now()); dropped != 0 {
+			t.Fatalf("records dropped inside the bound = %d, want none", dropped)
+		}
+		if _, _, err := registry.Lookup(ctx, taskID); err != nil {
+			t.Fatalf("lookup of a terminal task inside its bound = %v, want the record it keeps", err)
+		}
+		clock.advance(ttl)
+		if dropped := registry.PruneTerminal(clock.now()); dropped != 1 {
+			t.Fatalf("records dropped past the bound = %d, want the one terminal record", dropped)
+		}
+		if _, _, err := registry.Lookup(ctx, taskID); !errors.Is(err, ErrTaskNotFound) {
+			t.Fatalf("lookup of a pruned task = %v, want %v", err, ErrTaskNotFound)
+		}
+		if err := registry.Reentrant(ctx, taskID); !errors.Is(err, ErrTaskNotFound) {
+			t.Fatalf("re-entry of a pruned task = %v, want %v", err, ErrTaskNotFound)
+		}
+	})
+
+	t.Run("a_round_in_flight_is_never_dropped", func(t *testing.T) {
+		registry, _, clock := ttlRegistry(t, ttl, start)
+		taskID := invariantRegister(t, registry, "call-1", "dedup-1")
+		if result, err := registry.Advance(ctx, taskID, StatusRunning, "running", nil); err != nil || result != CommitCommitted {
+			t.Fatalf("move the task under way = (%v, %v), want a committed change", result, err)
+		}
+		clock.advance(10 * ttl)
+		if dropped := registry.PruneTerminal(clock.now()); dropped != 0 {
+			t.Fatalf("records dropped beside a round in flight = %d, want none", dropped)
+		}
+		if _, status, err := registry.Lookup(ctx, taskID); err != nil || status != StatusRunning {
+			t.Fatalf("the round in flight after the sweep = (%v, %v), want the round it stands in", status, err)
+		}
+	})
+
+	t.Run("an_admission_sweeps_beside_the_record_it_adds", func(t *testing.T) {
+		registry, _, clock := ttlRegistry(t, ttl, start)
+		first := ttlSettled(t, registry, "call-1", "dedup-1")
+		clock.advance(2 * ttl)
+		second := invariantRegister(t, registry, "call-2", "dedup-2")
+		if _, _, err := registry.Lookup(ctx, first); !errors.Is(err, ErrTaskNotFound) {
+			t.Fatalf("lookup of the settled task after the next admission = %v, want %v", err, ErrTaskNotFound)
+		}
+		if _, status, err := registry.Lookup(ctx, second); err != nil || status != StatusAccepted {
+			t.Fatalf("the task the admission added = (%v, %v), want the accepted task it registered", status, err)
+		}
+	})
+
+	t.Run("a_pruned_task_is_admitted_fresh_again", func(t *testing.T) {
+		registry, _, clock := ttlRegistry(t, ttl, start)
+		first := ttlSettled(t, registry, "call-1", "dedup-1")
+		clock.advance(2 * ttl)
+		registry.PruneTerminal(clock.now())
+		receipt, err := registry.Register(ctx, invariantTaskSpec("call-1", "dedup-1"))
+		if err != nil {
+			t.Fatalf("admit the pruned call again: %v", err)
+		}
+		if receipt.Kind != AdmissionFresh || receipt.TaskID == first {
+			t.Fatalf("admission of the pruned call = %+v, want a fresh admission: the dedup index holds no record that left the account", receipt)
+		}
+	})
+
+	t.Run("a_registry_beside_no_bound_keeps_every_record", func(t *testing.T) {
+		registry, _, clock := ttlRegistry(t, 0, start)
+		taskID := ttlSettled(t, registry, "call-1", "dedup-1")
+		clock.advance(100 * ttl)
+		if dropped := registry.PruneTerminal(clock.now()); dropped != 0 {
+			t.Fatalf("records dropped beside no bound = %d, want none", dropped)
+		}
+		if _, status, err := registry.Lookup(ctx, taskID); err != nil || status != StatusSettled {
+			t.Fatalf("the settled task beside no bound = (%v, %v), want the terminal it holds", status, err)
+		}
+	})
+}
+
+// ttlClock is the clock one registry of the bounds is read under: the check moves it instead of
+// waiting for a real hour to pass.
+type ttlClock struct {
+	mu sync.Mutex
+	at time.Time
+}
+
+// now reports the instant this clock stands at.
+func (c *ttlClock) now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.at
+}
+
+// advance moves the clock by one interval.
+func (c *ttlClock) advance(by time.Duration) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.at = c.at.Add(by)
+}
+
+// ttlRegistry returns a registry read under its own clock and bounded by the named terminal TTL.
+func ttlRegistry(t *testing.T, ttl time.Duration, start time.Time) (*MemoryRegistry, *MemoryCommit, *ttlClock) {
+	t.Helper()
+	clock := &ttlClock{at: start}
+	carrier := NewMemoryCommit(nil)
+	registry := NewMemoryRegistry(carrier, NewMemoryAdmission(), WithClock(clock.now), WithTerminalTTL(ttl))
+	return registry, carrier, clock
+}
+
+// ttlSettled admits one task and settles it, so the check starts from the terminal a sweep reads.
+func ttlSettled(t *testing.T, registry *MemoryRegistry, callID, dedup string) event.TaskID {
+	t.Helper()
+	ctx := context.Background()
+	taskID := invariantRegister(t, registry, callID, dedup)
+	if result, err := registry.Advance(ctx, taskID, StatusRunning, "running", nil); err != nil || result != CommitCommitted {
+		t.Fatalf("move the task of %s under way = (%v, %v), want a committed change", callID, result, err)
+	}
+	if result, err := registry.Advance(ctx, taskID, StatusSettled, "settled", []Envelope{invariantEnvelope(taskID, NoticeSettled, 0)}); err != nil || result != CommitCommitted {
+		t.Fatalf("settle the task of %s = (%v, %v), want a committed change", callID, result, err)
+	}
+	return taskID
 }

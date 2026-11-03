@@ -10,6 +10,16 @@ on:
   pull_request:
   workflow_dispatch:
 
+# Stale-PR cancellation (05/5.2): only pull_request runs of the same PR share
+# a concurrency domain, so a superseded push cancels its own stale run and
+# nothing else. Every other event (push to main/dev, workflow_dispatch,
+# merge_group once the merge queue lands) falls back to the per-run
+# github.run_id: a proof run can never share a group with a PR run or with
+# another proof run, so no PR push can cancel it.
+concurrency:
+  group: ${{ github.workflow }}-pr-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: true
+
 # API key secrets (F5, design-report-closeout): none are required — the
 # deterministic suite is fully mocked. If real-LLM contract layers are added
 # later, BOTH keys are optional and independent: ZAI_API_KEY (GLM Coding
@@ -124,8 +134,25 @@ jobs:
       # event work touched runtime/{agent,task,state}, memory, evolution, rl,
       # tool, api/{event,plugin} and all six integration trees, and a shrunken
       # set would quietly drop them from the race gate.
-      - name: Race (root + memory + runtime + evolution + api + tool + rl + all integration suites)
-        run: ./scripts/gates/race_check.sh . ./memory/... ./runtime/agent/... ./runtime/task/... ./runtime/state/... ./features/... ./api/event/... ./tool/... ./api/plugin/... ./tests/integration/execution/... ./tests/integration/history/... ./tests/integration/host/... ./tests/integration/capabilities/... ./tests/integration/evolution/... ./tests/integration/learning/...
+      #
+      # The leading `.` stays in the set as the root-module entry and is SKIPPED
+      # by the gate: the module root itself carries no Go files (the composition
+      # root is its own directory), so `go test -race .` answers `[setup failed]`
+      # beside "no Go files" and a root-only failure would mask the whole job.
+      # The skip is narrower than "go list failed" — only that exact answer is
+      # skipped, a misspelt package still turns the gate red, and a set left with
+      # no Go package at all is refused — so the declared surface is unchanged and
+      # a directory that gains Go files joins it without a second edit.
+      - name: Race (every first-party package + all integration suites)
+        run: ./scripts/gates/race_check.sh . ./assembly/... ./cli/... ./api/event/... ./api/config/... ./api/document/... ./api/model/... ./api/view/... ./api/plugin/... ./runtime/agent/... ./runtime/task/... ./runtime/state/... ./memory/... ./features/... ./tool/... ./internal/... ./tests/integration/execution/... ./tests/integration/history/... ./tests/integration/host/... ./tests/integration/capabilities/... ./tests/integration/evolution/... ./tests/integration/learning/...
+      # 05/5.7: the wechat-bot module is an independent module (no go.work), so
+      # the root module's ./... never reaches it. It runs the same race flags as
+      # the root gate (race, -count=1, package-serial -p 1); its plain tests (the
+      # channel lock, notice delivery/re-delivery) are the concurrency surface,
+      # while the smoke-tagged anchors stay out of this job's build. go test's
+      # own exit status is the verdict, so a compile error is never green.
+      - name: Race (wechat-bot module)
+        run: go -C examples/wechat-bot test -race -count=1 -p 1 ./...
 
   validators:
     # resident-remaining-hardening 3.5: the doc/restart prefix checkers are the
@@ -191,10 +218,15 @@ jobs:
   # source rather than papered over in the summary job.
   event-integrity-short:
     runs-on: ubuntu-latest
-    # 03.10 did not measure the short scope; 05.1 measured one full short round
-    # at 2m58s, so ten independent rounds are ~30m. 45m is that measurement
-    # times 1.5 headroom - the candidate 20m would kill the ten-round job.
-    timeout-minutes: 45
+    # 05/5.4: one matrix shard per round. 05.1 measured one full short round at
+    # 2m58s, so 15m is the per-shard budget (round + checkout/toolchain/tmux);
+    # the old 45m bound covered all ten rounds in one job. fail-fast stays false
+    # so a red shard cannot cancel the other nine rounds' evidence.
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        repeat-index: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
     steps:
       - uses: actions/checkout@v4
         with:
@@ -207,28 +239,45 @@ jobs:
           python-version: '3.11'
       - name: Install tmux
         run: sudo apt-get update && sudo apt-get install -y tmux
-      # Ten independent runner processes, each its own `go test -count=1 -race
-      # -json`: ten logs, ten UUID run-ids, repeat_index 1..10. No `-count`
-      # amplification, and no --test-id subset: CI runs the complete scope.
-      - name: Event integrity short (ten independent rounds)
-        run: python3 scripts/scenarios/run_runtime_scenarios.py --contract golden/runtime/event_integrity_scenarios.json --scope event-short --repeat 10 --out "$RUNNER_TEMP/event-short"
+      # 05/5.4: one shard is one independent runner process, its own go test
+      # -count=1 -race -json log and UUID run-id. --repeat-index runs exactly
+      # one round while the contract keeps repeat_total=10; no --repeat batch,
+      # no -count amplification, no --test-id subset: every shard runs the
+      # complete scope. The matrix value reaches the command only via env.
+      - name: Event integrity short (one independent round)
+        env:
+          REPEAT_INDEX: ${{ matrix.repeat-index }}
+        run: python3 scripts/scenarios/run_runtime_scenarios.py --contract golden/runtime/event_integrity_scenarios.json --scope event-short --repeat-index "$REPEAT_INDEX" --out "$RUNNER_TEMP/event-short"
       - name: Upload event-short evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: event-integrity-short
+          name: event-integrity-short-${{ matrix.repeat-index }}
           path: ${{ runner.temp }}/event-short
           if-no-files-found: error
 
   event-integrity-long:
     runs-on: ubuntu-latest
-    # 03.11 measured all six shards end to end: 533/799/623/792/530/878s, so
-    # the slowest shard is 878s. --timeout 1200 gives ~1.4x headroom on that
-    # shard, and timeout-minutes 25 (1500s) leaves ~300s for checkout, toolchain
-    # setup, tmux install and the artifact upload. The 03.10 extrapolation
-    # (2.39min) and the earlier 109-110s-per-shard claim were both wrong by
-    # 5-8x; 4/6 shards exceeded the old 600s bound.
-    timeout-minutes: 45
+    # 03.11 measured all six shards end to end at 533-878s before the resident
+    # consumption loops landed. The 32768-token shards still pass comfortably
+    # (1340-1600s of test time on run 41406032474). The 256-token window is the
+    # slowest shard by construction, not by accident: its fold threshold is 256
+    # tokens x 4 chars/token x 0.3 = 307 bytes, which is less than the material of
+    # one turn, so the age fold is due on every turn and files a compress request
+    # and a compress product beside it (measured on the production Drive path over
+    # 300 turns: 3.99 committed facts per turn at window 256 against 2.02 at
+    # window 32768), and every commit rewrites the ledger's shard snapshot. On run
+    # 41406032474 that shard reached host generation 108 of 121 in 5153.1s (seed
+    # 7) and 5251.0s (seed 42) before failing on the delegation assertion fixed in
+    # bc506fbb; seed 1 was killed at the 5400s bound and wrote no evidence at all.
+    # Per-generation cost grows with the chain, so the 13 generations left project
+    # to ~7400s end to end. --timeout 10800 bounds one shard at ~1.46x that
+    # projection, and timeout-minutes 240 (14400s) leaves 3600s for checkout,
+    # toolchain setup, tmux install and the upload. The 5400s this replaces was
+    # calibrated on a 3086s local -race run x 1.75, which assumed a runner costs
+    # what the measuring workstation costs; a shard the bound kills uploads no
+    # evidence, so the bound has to leave the shard room to write its record.
+    timeout-minutes: 240
     strategy:
       # A red shard must not cancel the other five: every combination keeps
       # its own evidence.
@@ -252,13 +301,14 @@ jobs:
       # shards add up to 7200 inputs / 720 restarts, and a single shard is never
       # written as 7200/720. --repeat 1 keeps one independent process per
       # combination. --timeout bounds ONE go test process, cold build included:
-      # 03.11 measured 533-878s per shard, so 1200s (~1.4x the 878s maximum)
-      # replaces the uncalibrated 600s that 4/6 shards exceeded.
+      # the 256-window shard projects to ~7400s from the 108-generation sample on
+      # run 41406032474, so 10800s (~1.46x) replaces the 5400s calibrated on a
+      # 3086s local run x 1.75.
       - name: Event integrity long (one 1200-input/120-restart shard)
         env:
           SEED: ${{ matrix.seed }}
           WINDOW: ${{ matrix.window }}
-        run: python3 scripts/scenarios/run_runtime_scenarios.py --contract golden/runtime/event_integrity_scenarios.json --scope event-long --seed "$SEED" --window "$WINDOW" --repeat 1 --timeout 2400 --out "$RUNNER_TEMP/event-long/seed-$SEED-window-$WINDOW"
+        run: python3 scripts/scenarios/run_runtime_scenarios.py --contract golden/runtime/event_integrity_scenarios.json --scope event-long --seed "$SEED" --window "$WINDOW" --repeat 1 --timeout 10800 --out "$RUNNER_TEMP/event-long/seed-$SEED-window-$WINDOW"
       - name: Upload event-long shard evidence
         if: always()
         uses: actions/upload-artifact@v4

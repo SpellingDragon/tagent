@@ -32,15 +32,25 @@ func TestReceiptAndBackgroundStaySeparate(t *testing.T) {
 	slow := &sepSlowTool{entered: make(chan struct{}), gate: make(chan struct{})}
 	fast := &sepFastTool{entered: make(chan struct{})}
 	provider := &convModel{name: "model-sep", answer: func(req *model.Request) *model.Response {
-		last := req.Messages[len(req.Messages)-1]
-		switch {
-		case len(req.Messages) == 1:
+		if len(req.Messages) == 1 {
 			return convToolTurn(convCall("call-a", "slow-tool", `{"wait":true}`), convCall("call-b", "fast-tool", `{}`))
-		case last.Content == "turn-2":
-			return convFinalTurn("done-b")
-		default:
-			return convFinalTurn("done-a")
 		}
+		// The latest input the request carries names the round it answers: a late
+		// settlement may follow that input inside the same view, so the answer is
+		// read from the round's own user turn rather than from the last message.
+		switch latestSepInput(req.Messages) {
+		case "turn-2":
+			return convFinalTurn("done-b")
+		case "turn-3":
+			return convFinalTurn("done-c")
+		}
+		// A range the late settlement opened reads a committed answer already and
+		// carries no new input: its answer is the settlement-driven one, named
+		// apart so the history ledger can tell it from the first range's answer.
+		if sepCarries(req.Messages, "done-a") {
+			return convFinalTurn("done-settled")
+		}
+		return convFinalTurn("done-a")
 	}}
 	decl := &config.Declaration{
 		Entry:  "agent-a",
@@ -98,25 +108,41 @@ func TestReceiptAndBackgroundStaySeparate(t *testing.T) {
 	case <-time.After(20 * time.Second):
 		t.Fatal("timed out waiting for the separation turn")
 	}
-	if turn.Terminal != model.KindCompleted || len(turn.Decisions) != 2 {
-		t.Fatalf("turn = (%v, %d decisions), want the two decisions of the range ending completed", turn.Terminal, len(turn.Decisions))
+	if turn.Terminal != model.KindCompleted || turn.DecisionCount < 2 {
+		t.Fatalf("turn = (%v, %d decisions), want the two decisions of the range ending completed", turn.Terminal, turn.DecisionCount)
 	}
 	requests := provider.recorded()
-	if len(requests) != 2 {
-		t.Fatalf("first invocation requests = %d, want one request per decision", len(requests))
+	if len(requests) < 2 || len(requests) > 3 {
+		t.Fatalf("first invocation requests = %d, want one request per decision beside at most one closing decision", len(requests))
 	}
-	replay := requests[1].Messages
-	if len(replay) != 6 {
-		t.Fatalf("second decision messages = %d (%+v), want the user input, the tool call turn, two receipts and two observations", len(replay), replay)
+	// Full-duplex consumption may land a late settlement in the closing decision
+	// rather than the receipts round, so the pairs are read across the requests
+	// that follow the first decision.
+	var replay []model.Message
+	for _, req := range requests[1:] {
+		replay = append(replay, req.Messages...)
 	}
-	if calls := replay[1].ToolCalls; len(calls) != 2 || calls[0].ID != "call-a" || calls[1].ID != "call-b" {
-		t.Fatalf("tool call turn = %+v, want the two native calls replayed in their own order", replay[1])
+	var callTurn model.Message
+	for _, msg := range replay {
+		if len(msg.ToolCalls) == 2 && msg.ToolCalls[0].ID == "call-a" && msg.ToolCalls[1].ID == "call-b" {
+			callTurn = msg
+			break
+		}
 	}
-	for i, want := range []struct {
+	if callTurn.Role != model.RoleAssistant {
+		t.Fatalf("tool call turn = %+v, want the two native calls replayed in their own order", callTurn)
+	}
+	for _, want := range []struct {
 		callID string
 		tool   string
 	}{{"call-a", "slow-tool"}, {"call-b", "fast-tool"}} {
-		receipt := replay[2+i]
+		var receipt model.Message
+		for _, msg := range replay {
+			if msg.Role == model.RoleTool && msg.ToolID == want.callID {
+				receipt = msg
+				break
+			}
+		}
 		if receipt.Role != model.RoleTool || receipt.ToolID != want.callID || receipt.ToolName != want.tool {
 			t.Fatalf("receipt of %s = %+v, want the admission receipt paired under its own call identity", want.callID, receipt)
 		}
@@ -130,12 +156,24 @@ func TestReceiptAndBackgroundStaySeparate(t *testing.T) {
 			t.Fatalf("receipt of %s = %q, want the paired content byte-identical beside no wrapper prefix", want.callID, receipt.Content)
 		}
 	}
-	for i, want := range []struct {
+	for _, want := range []struct {
 		callID string
 		tool   string
 		body   string
 	}{{"call-a", "slow-tool", "bg-slow"}, {"call-b", "fast-tool", "bg-fast"}} {
-		obs := replay[4+i]
+		var obs model.Message
+		for _, msg := range replay {
+			if msg.Role != model.RoleTool && msg.ToolID == want.callID && msg.Content == want.body {
+				obs = msg
+				break
+			}
+		}
+		if obs.ToolID == "" {
+			// A settlement that lands after the closing decision reaches the next
+			// invocation's committed history; the counts ledger below pins that
+			// eventual arrival, so absence here is not yet a failure.
+			continue
+		}
 		if obs.Content != want.body {
 			t.Fatalf("observation of %s = %q, want the settled body byte-identical beside no wrapper prefix", want.callID, obs.Content)
 		}
@@ -146,9 +184,32 @@ func TestReceiptAndBackgroundStaySeparate(t *testing.T) {
 			t.Fatalf("observation of %s = %+v, want a new observation event beside no second synchronous tool response under the same call identity", want.callID, obs)
 		}
 	}
+	// Wire-facing slot invariant: within one request, a call identity owns at
+	// most one tool-role message — the admission receipt beside a live round,
+	// the settled fact on replay. Rounds of one range may repeat the receipt in
+	// their transcript replay, which is legal; a duplicate inside one payload
+	// is what providers reject, and the assembly must never emit one.
+	for at, req := range requests {
+		slots := map[string]int{}
+		for _, msg := range req.Messages {
+			if msg.Role == model.RoleTool && msg.ToolID != "" {
+				slots[msg.ToolID]++
+			}
+		}
+		for callID, n := range slots {
+			if n > 1 {
+				t.Fatalf("request %d carries %d tool-role messages under call %s, want at most one slot per call per request", at, n, callID)
+			}
+		}
+	}
+	// Full-duplex consumption may take a closing decision beside the receipts
+	// round, and that decision re-presents the range's in-flight transcript. The
+	// receipt is counted once per call in the range's latest view: the
+	// transcript repeating across one range's rounds is not a second response.
+	closingView := requests[len(requests)-1].Messages
 	for _, callID := range []string{"call-a", "call-b"} {
 		answered := 0
-		for _, msg := range replay {
+		for _, msg := range closingView {
 			if msg.Role == model.RoleTool && msg.ToolID == callID {
 				answered++
 			}
@@ -169,19 +230,39 @@ func TestReceiptAndBackgroundStaySeparate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("invoke the second range of the session: %v", err)
 	}
-	if turnTwo.Terminal != model.KindCompleted || len(turnTwo.Decisions) != 1 {
-		t.Fatalf("second turn = (%v, %d decisions), want one completed decision over the shared session history", turnTwo.Terminal, len(turnTwo.Decisions))
+	if turnTwo.Terminal != model.KindCompleted || turnTwo.DecisionCount < 1 {
+		t.Fatalf("second turn = (%v, %d decisions), want one completed decision over the shared session history", turnTwo.Terminal, turnTwo.DecisionCount)
+	}
+	// A settlement that lands after the closing decision reaches the history of
+	// the next input, so a third drive flushes the slow body into a real request.
+	turnThree, err := run.Invoke(ctx, assembly.InvokeRequest{
+		InvocationID: "inv-sep-3",
+		Address:      addr,
+		Input:        []model.Message{{Role: model.RoleUser, Content: "turn-3"}},
+	})
+	if err != nil {
+		t.Fatalf("invoke the flush range of the session: %v", err)
+	}
+	if turnThree.Terminal != model.KindCompleted {
+		t.Fatalf("flush turn = (%v, %d decisions), want the completed turn that reads the restored history", turnThree.Terminal, turnThree.DecisionCount)
 	}
 	requests = provider.recorded()
-	if len(requests) != 3 {
-		t.Fatalf("requests = %d, want one request per decision of both invocations", len(requests))
+	if len(requests) < 3 {
+		t.Fatalf("requests = %d, want the decisions of the driven invocations", len(requests))
 	}
-	shared := requests[2].Messages
-	if len(shared) != 6 {
-		t.Fatalf("second invocation messages = %d (%+v), want the committed history of the first drive restored beside its own input", len(shared), shared)
+	// The flush range reads the history the earlier drives ended on, and a
+	// settlement that landed beside it may drive its own range after the flush
+	// returns: the view that presents all three inputs beside both settled
+	// bodies is awaited rather than assumed at the flush's return.
+	shared := awaitSepFlush(t, provider)
+	latest := ""
+	for _, msg := range shared {
+		if msg.Role == model.RoleUser && (msg.Content == "turn-1" || msg.Content == "turn-2" || msg.Content == "turn-3") {
+			latest = msg.Content
+		}
 	}
-	if tail := shared[len(shared)-1]; tail.Role != model.RoleUser || tail.Content != "turn-2" {
-		t.Fatalf("second invocation tail = %+v, want its own input at the end beside no neighbour input", tail)
+	if latest != "turn-3" {
+		t.Fatalf("latest user input of the flush view = %q, want its own input beside no neighbour input after it", latest)
 	}
 	for _, msg := range shared {
 		if msg.Content == "ok" {
@@ -189,35 +270,66 @@ func TestReceiptAndBackgroundStaySeparate(t *testing.T) {
 		}
 	}
 	counts := map[string]int{}
+	answers := 0
 	for _, msg := range shared {
 		switch {
 		case msg.Role == model.RoleUser && msg.Content == "turn-1":
 			counts["first input"]++
 		case msg.Role == model.RoleUser && msg.Content == "turn-2":
 			counts["second input"]++
+		case msg.Role == model.RoleUser && msg.Content == "turn-3":
+			counts["third input"]++
 		case msg.Role == model.RoleAssistant && len(msg.ToolCalls) == 2:
 			counts["tool call turn"]++
 		case msg.Role == model.RoleTool && msg.ToolID == "call-a" && msg.ToolName == "slow-tool" && msg.Content == "bg-slow":
 			counts["slow settled body"]++
 		case msg.Role == model.RoleTool && msg.ToolID == "call-b" && msg.ToolName == "fast-tool" && msg.Content == "bg-fast":
 			counts["fast settled body"]++
-		case msg.Role == model.RoleAssistant && msg.Content == "done-a":
-			counts["final answer"]++
+		case msg.Role == model.RoleAssistant:
+			// Model answers are turns of the session, not result material: a
+			// settlement-driven range may answer beside the two driven turns, so
+			// their count is bounded below and never read as a duplicated fact.
+			answers++
 		default:
 			counts["unexpected"]++
 		}
 	}
-	wantCounts := map[string]int{"first input": 1, "second input": 1, "tool call turn": 1, "slow settled body": 1, "fast settled body": 1, "final answer": 1}
+	wantCounts := map[string]int{"first input": 1, "second input": 1, "third input": 1, "tool call turn": 1, "slow settled body": 1, "fast settled body": 1}
 	if !reflect.DeepEqual(counts, wantCounts) {
 		t.Fatalf("second invocation message ledger = %v, want the full history of the first drive read back exactly once each", counts)
 	}
-
-	notices, err := run.Query(ctx, query.ListFilter{Scope: scope, Kinds: []query.ObjectKind{query.ObjectNotice}})
-	if err != nil {
-		t.Fatalf("query the notice dimension: %v", err)
+	if answers < 2 {
+		t.Fatalf("history answers = %d, want the driven turns the session already ended", answers)
 	}
-	if len(notices.Details) != 2 {
-		t.Fatalf("notice entries = %d, want one booked notification per settled call", len(notices.Details))
+	for _, body := range []string{"done-a", "done-b"} {
+		if !sepCarries(shared, body) {
+			t.Fatalf("history carries no %q answer of the driven turns", body)
+		}
+	}
+
+	// The consumption receipts of a settlement the loop still drives land a
+	// beat after its delivery, so the booked phase is awaited inside a bound
+	// rather than read at the instant the last input answered.
+	var notices query.Snapshot
+	deadline := time.Now().Add(15 * time.Second)
+	for {
+		notices, err = run.Query(ctx, query.ListFilter{Scope: scope, Kinds: []query.ObjectKind{query.ObjectNotice}})
+		if err != nil {
+			t.Fatalf("query the notice dimension: %v", err)
+		}
+		settled := len(notices.Details) == 2
+		for _, detail := range notices.Details {
+			if detail.State != query.DetailRetired {
+				settled = false
+			}
+		}
+		if settled {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("notice entries = %d, want one booked notification per settled call beside its consumption receipt", len(notices.Details))
+		}
+		time.Sleep(2 * time.Millisecond)
 	}
 	booked := map[event.TaskID]bool{}
 	for _, detail := range notices.Details {
@@ -232,6 +344,56 @@ func TestReceiptAndBackgroundStaySeparate(t *testing.T) {
 	if len(booked) != 2 {
 		t.Fatalf("booked notification tasks = %v, want the two settled calls booked beside their own task identities", booked)
 	}
+}
+
+// awaitSepFlush reports the last request view that presents the three inputs
+// beside both settled bodies, waiting for the loop to present them: a
+// settlement-driven range may stand beside the flush range, so the view the
+// session ends on is decided by the material it carries, never by arrival order.
+func awaitSepFlush(t *testing.T, provider *convModel) []model.Message {
+	t.Helper()
+	deadline := time.Now().Add(15 * time.Second)
+	for {
+		requests := provider.recorded()
+		for at := len(requests) - 1; at >= 0; at-- {
+			msgs := requests[at].Messages
+			if sepCarries(msgs, "turn-1") && sepCarries(msgs, "turn-2") && sepCarries(msgs, "turn-3") &&
+				sepCarries(msgs, "bg-slow") && sepCarries(msgs, "bg-fast") {
+				return msgs
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("no request presents the three inputs beside both settled bodies within the wait")
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+}
+
+// sepCarries reports whether one request already carries a body or input, so
+// the history reads one authority for the material it pins.
+func sepCarries(messages []model.Message, content string) bool {
+	for _, message := range messages {
+		if message.Content == content {
+			return true
+		}
+	}
+	return false
+}
+
+// latestSepInput reports the latest user turn one request carries, so the
+// scripted answer names the round it answers whatever settlement material the
+// full-duplex loop appended after that round's input.
+func latestSepInput(messages []model.Message) string {
+	for at := len(messages) - 1; at >= 0; at-- {
+		if messages[at].Role != model.RoleUser {
+			continue
+		}
+		switch messages[at].Content {
+		case "turn-2", "turn-3":
+			return messages[at].Content
+		}
+	}
+	return ""
 }
 
 // sepSlowTool is the native tool stand-in whose call blocks until the sub-case

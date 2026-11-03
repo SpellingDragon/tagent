@@ -2,6 +2,7 @@ package acceptance
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -84,32 +85,55 @@ func TestScenario15TaskLogicalStatus(t *testing.T) {
 	}
 
 	loop, provider := scenarioProgressLoop(t)
-	const invocationID = event.InvocationID("inv-progress-15")
 	facts := &scenarioProgressFacts{}
 	loop.SetFactCommit(facts.commit)
+	loop.SetHistory(facts)
+	consumers := agent.NewConsumers(loop, context.Background(), nil)
+	loop.SetConsumers(consumers)
+	t.Cleanup(consumers.Stop)
 	rangeAddress := event.Address{AgentID: "agent-a", SessionID: "session-s15"}
 	instance := event.InstanceID("inst-s15")
-	if _, err := loop.Drive(ctx, agent.Invocation{
-		InvocationID: invocationID,
-		Address:      rangeAddress,
-		Instance:     instance,
-		Ready:        []event.Event{{Key: "event-s15", Message: model.Message{Role: model.RoleUser, Content: scenarioS15Input}}},
-	}); err != nil {
+	firstKey := facts.land(rangeAddress, event.Event{
+		Key:        "event-s15",
+		Type:       event.TypeExternalInput,
+		Timestamp:  time.Now(),
+		Message:    model.Message{Role: model.RoleUser, Content: scenarioS15Input},
+		InstanceID: instance,
+	})
+	consumer := consumers.Ensure(rangeAddress)
+	if consumer == nil {
+		t.Fatalf("the resident consumer of %s/%s is unavailable", rangeAddress.AgentID, rangeAddress.SessionID)
+	}
+	consumer.Wake()
+	first, err := consumer.WaitAnswer(ctx, []event.EventID{firstKey})
+	if err != nil {
 		t.Fatalf("open the range the progress lane drives: %v", err)
 	}
+	invocationID := first.Turn.InvocationID
 	progress := task.Notice{TaskID: "task-progress-15", Round: 1, Kind: task.NoticeProgress, Seq: 0, Event: "fact-progress-15"}
 	loop.Backflow(invocationID, progress)
-	if _, err := loop.Drive(ctx, agent.Invocation{
-		InvocationID: invocationID,
-		Address:      rangeAddress,
-		Instance:     instance,
-		Ready:        []event.Event{{Key: "event-s15-next", Message: model.Message{Role: model.RoleUser, Content: scenarioS15Input}}},
-	}); err != nil {
+	nextKey := facts.land(rangeAddress, event.Event{
+		Key:        "event-s15-next",
+		Type:       event.TypeExternalInput,
+		Timestamp:  time.Now(),
+		Message:    model.Message{Role: model.RoleUser, Content: scenarioS15Input},
+		InstanceID: instance,
+	})
+	consumer.Wake()
+	second, err := consumer.WaitAnswer(ctx, []event.EventID{nextKey})
+	if err != nil {
 		t.Fatalf("drive the range beside a progress notification: %v", err)
+	}
+	if second.Turn.InvocationID == first.Turn.InvocationID {
+		t.Fatalf("second input closed the segment %q, want its own segment: an answer closes the segment it read and a later input belongs to the next one",
+			second.Turn.InvocationID)
+	}
+	if want := event.InvocationID("session-s15#c2"); second.Turn.InvocationID != want {
+		t.Fatalf("second segment = %q, want the next segment of the address (%q)", second.Turn.InvocationID, want)
 	}
 	requests := provider.recorded()
 	if len(requests) != 2 {
-		t.Fatalf("model requests = %d, want the one decision per drive", len(requests))
+		t.Fatalf("model requests = %d, want one decision per consumed segment", len(requests))
 	}
 	carried, answered := false, false
 	for _, message := range requests[1].Messages {
@@ -165,14 +189,51 @@ func scenarioProgressLoop(t *testing.T) (*agent.Loop, *scenarioModel) {
 type scenarioProgressFacts struct {
 	mu   sync.Mutex
 	seen []event.Event
+	seq  int
 }
 
-// commit keeps one fact as it stands and reports the identity it carries.
+// land commits one input on the range address and reports the identity it
+// carries, so the resident consumer pulls the very input the scenario admits.
+func (f *scenarioProgressFacts) land(addr event.Address, evt event.Event) event.EventID {
+	evt.Owner = addr
+	evt.Source = addr
+	evt.Target = addr
+	key, _ := f.commit(evt)
+	return key
+}
+
+// commit keeps one fact as it stands and reports the identity it carries,
+// minting one for the output and delivery facts that carry none.
 func (f *scenarioProgressFacts) commit(evt event.Event) (event.EventID, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if evt.Key == "" {
+		f.seq++
+		evt.Key = event.EventID(fmt.Sprintf("fact-s15-chain-%d", f.seq))
+	}
 	f.seen = append(f.seen, evt)
 	return evt.Key, nil
+}
+
+// SessionHistory reports no separate transcript: the chain facts are the one
+// history of this scenario.
+func (f *scenarioProgressFacts) SessionHistory(event.Address) []model.Message { return nil }
+
+// CommitHistory keeps no second copy of the transcript.
+func (f *scenarioProgressFacts) CommitHistory(event.Address, []model.Message) {}
+
+// SessionFacts reports the facts of one address in commit order.
+func (f *scenarioProgressFacts) SessionFacts(addr event.Address) []event.Event {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([]event.Event, 0, len(f.seen))
+	for _, evt := range f.seen {
+		if evt.Owner != addr && evt.Source != addr && evt.Target != addr {
+			continue
+		}
+		out = append(out, evt)
+	}
+	return out
 }
 
 // under reports the facts committed under one identity.

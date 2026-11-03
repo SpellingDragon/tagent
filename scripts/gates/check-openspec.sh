@@ -14,7 +14,9 @@
 # (they are WIP); only openspec/specs/ (the source of truth) is enforced.
 set -euo pipefail
 
-cd "$(dirname "$0")/.."
+# The script lives in scripts/gates/, so the repo root (where openspec/
+# resolves) is two levels up; one level up silently validated nothing.
+cd "$(dirname "$0")/../.."
 
 if ! command -v openspec >/dev/null 2>&1; then
   echo "openspec CLI not found; install it before running the spec gate." >&2

@@ -46,37 +46,59 @@ import (
 // settle-lineage meta key and is the only fact family that does, so a wrapped
 // tool's own settle, which the live invocation reads through its backflow,
 // never fires a second turn.
+//
+// - Only a target that refused the notification is a rejection: the refusal is the consumption result of its notification, and the ledger keeps it as the feedback fact it is.
+// - A route the mailbox cannot open — an address this run never established, an instance another one replaced — is not a refusal by anyone: the notification stands undelivered, answers pending, and the reason is recorded beside it for the next attempt.
+// - A terminal notification whose settle fact the storage path refused is none of those either: the acceptance reports it pending beside the refusal, so the obligation stands for the next offer and no reader is told a fact landed that no storage holds. No offer is retained beside the delivery: a storage path that recovers is read through the flush the close offers on its own drain path, never by a window or a poll of the delivery.
 func (r *Run) deliver(ctx context.Context, envelope task.Envelope) (task.DeliveryAcceptance, error) {
 	if err := r.store.TrackDelivery(ctx, envelope.Notice.TaskID, task.HandoffTarget{
 		Target:         envelope.Target,
 		TargetInstance: envelope.TargetInstance,
 	}); err != nil {
-		return task.DeliveryRejected, err
-	}
-	if err := r.store.AcceptNotice(ctx, envelope.Notice); err != nil {
 		return task.DeliveryPending, err
 	}
-	r.observeSettleDelivery(ctx, envelope)
+	if err := r.store.AcceptNotice(ctx, envelope.Notice); err != nil {
+		if errors.Is(err, state.ErrDeliveryRefused) {
+			return task.DeliveryRejected, err
+		}
+		return task.DeliveryPending, err
+	}
+	if err := r.observeSettleDelivery(ctx, envelope); err != nil {
+		return task.DeliveryPending, err
+	}
 	return task.DeliveryAccepted, nil
+}
+
+// settleFactLanded reports whether the live ledger of this run holds one fact
+// identity, which is the observable a second commit of the same family reads
+// before writing again.
+func (r *Run) settleFactLanded(key event.EventID) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	_, held := r.facts[key]
+	return held
 }
 
 // observeSettleDelivery commits the delivery fact of one terminal notification
 // and runs its After pass, so the settle that no live invocation reads is
 // observed exactly as every other committed fact of this run is.
 //
-// The commit is best effort beside the acceptance: a run beside no published
-// pipeline still commits the fact and reports the missing face as a gap, and a
-// delivery that already landed the fact commits no second one.
-func (r *Run) observeSettleDelivery(ctx context.Context, envelope task.Envelope) {
+// The commit participates in the acceptance the delivery reports: a refusal is
+// answered to the caller, which leaves the delivery pending beside it, so the
+// notification keeps its obligation and a later offer commits the fact then. A
+// run beside no published pipeline still commits the fact and reports the
+// missing face as a gap, and a delivery that already landed the fact commits no
+// second one.
+func (r *Run) observeSettleDelivery(ctx context.Context, envelope task.Envelope) error {
 	notice := envelope.Notice
 	switch notice.Kind {
 	case task.NoticeSettled, task.NoticeFailed, task.NoticeCancelled:
 	default:
-		return
+		return nil
 	}
 	addr := envelope.Target
 	if !addr.IsComplete() {
-		return
+		return nil
 	}
 	fact := event.Event{
 		Key:       settleDeliveryKey(notice),
@@ -106,19 +128,22 @@ func (r *Run) observeSettleDelivery(ctx context.Context, envelope task.Envelope)
 	_, held := r.facts[fact.Key]
 	r.mu.Unlock()
 	if held {
-		return
+		return nil
 	}
 	key, err := r.commitFactChecked(ctx, fact)
 	if err != nil || key == "" {
-		assemblyWarn("tagent: the settle of %s at %s did not commit err=%v", notice.TaskID, addr.AgentID, err)
-		return
+		if err == nil {
+			err = errors.New("tagent: the commit reported no identity")
+		}
+		return fmt.Errorf("tagent: the settle of %s at %s did not commit: %w", notice.TaskID, addr.AgentID, err)
 	}
 	pipeline, err := r.factPipeline(addr.AgentID)
 	if err != nil {
 		assemblyWarn("tagent: the settle of %s at %s committed beside no pipeline: %v", notice.TaskID, addr.AgentID, err)
-		return
+		return nil
 	}
 	r.takePresentation(pipeline.After(ctx, key))
+	return nil
 }
 
 // settleDeliveryKey reports the canonical identity the delivery fact of one
@@ -372,7 +397,7 @@ func (r *Run) agentTarget(ctx context.Context, decl *config.Declaration, agents 
 	if err != nil {
 		return nil, err
 	}
-	assembly, err := presetAssembly(ctx, spec, surface)
+	assembly, err := r.presetAssembly(ctx, event.AgentID(target), spec, surface)
 	if err != nil {
 		return nil, err
 	}
@@ -463,6 +488,48 @@ func (r *Run) surfaceBuilder(agents map[event.AgentID]NativeAgent, spec config.A
 	return builder
 }
 
+// errDelegatedBuilderUnbacked reports a delegated round asked to rebuild its
+// builder beside no published declaration or no construction contribution, so
+// the model and tool references the declaration names cannot be resolved.
+var errDelegatedBuilderUnbacked = errors.New("assembly: the delegated round carries no live declaration to rebuild its builder from")
+
+// delegatedBuilder rebuilds the builder one delegated round is served through
+// after a restart: the caller that issued the delegation is the agent whose
+// assembled surface resolved the round's tools, so its native contribution and
+// declared surface are assembled again from the generation in effect and handed
+// to the same builder shape the delegating tool runs on. The round keeps the
+// declaration the chain recorded; only the process-local model and tool
+// resolution is rebuilt.
+//
+// The read is the construction the publisher already runs for that agent, so no
+// second tool factory sits beside the real one: a tool the declaration no longer
+// grants is refused by the same resolver that would refuse it at the next
+// publication.
+func (r *Run) delegatedBuilder(ctx context.Context, issuer event.AgentID) (subagent.Builder, error) {
+	r.mu.Lock()
+	decl := r.current.Plan.Declaration
+	agents := r.natives
+	r.mu.Unlock()
+	if decl == nil || len(agents) == 0 {
+		return subagent.Builder{}, fmt.Errorf("%w: caller %q", errDelegatedBuilderUnbacked, issuer)
+	}
+	spec := specOfLocked(decl, issuer)
+	if spec.ID == "" {
+		return subagent.Builder{}, fmt.Errorf("%w: caller %q", errDelegatedBuilderUnbacked, issuer)
+	}
+	contributed := agents[issuer].Tools
+	native := make([]trpctool.Tool, 0, len(contributed))
+	for _, tool := range contributed {
+		native = append(native, tool)
+	}
+	presets, err := r.presetTools(ctx, decl, agents, issuer, spec, native, nil)
+	if err != nil {
+		return subagent.Builder{}, err
+	}
+	surface := append(append([]trpctool.Tool(nil), native...), presets...)
+	return r.surfaceBuilder(agents, spec, surface), nil
+}
+
 // delegatedModel wraps one resolved model with the sampling the authorizing
 // declaration names, when the model is the one that declaration names: a
 // delegated turn then carries the declared sampling exactly as a turn of the
@@ -502,9 +569,11 @@ func splitRefParam(value string) []string {
 // tools assembled beside it and the prompt its files carry — and the builder
 // resolves the model, skill and tool references of a delegated assembly against
 // the same pieces. The delegation and borrowing faces are this run's own, so a
-// delegated call is admitted as a task of this run.
+// delegated call is admitted as a task of this run, and the continuation account
+// its rounds are parked in is the one account this run shares among its tools:
+// the first tool mints it and every later tool is built beside it.
 func (r *Run) presetSubagent(ctx context.Context, agents map[event.AgentID]NativeAgent, id event.AgentID, spec config.AgentSpec, assembled []trpctool.Tool) (*subagent.Tool, error) {
-	parent, err := presetAssembly(ctx, spec, assembled)
+	parent, err := r.presetAssembly(ctx, id, spec, assembled)
 	if err != nil {
 		return nil, err
 	}
@@ -547,19 +616,33 @@ func (r *Run) presetSubagent(ctx context.Context, agents map[event.AgentID]Nativ
 		}
 		builder.Skills = func(context.Context, []string) (skill.Repository, error) { return repository, nil }
 	}
-	return subagent.NewTool(subagent.ToolOptions{
+	// The first tool of the run mints the continuation account its delegated
+	// rounds are parked in; every later tool of the run is built beside the
+	// account the first one answered with, so a re-entry after a generation
+	// change reaches the task through the tool that served it.
+	r.mu.Lock()
+	tool, shared, err := subagent.NewTool(subagent.ToolOptions{
 		Parent:     parent,
 		Builder:    builder,
 		Delegation: r.delegations,
 		Bindings:   r.bindings,
-	})
+	}, r.continuations)
+	if err != nil {
+		r.mu.Unlock()
+		return nil, err
+	}
+	r.continuations = shared
+	r.mu.Unlock()
+	return tool, nil
 }
 
 // presetAssembly resolves the assembly a delegated declaration inherits from:
 // the declaration's own identity, model and assembled tool names beside the
-// prompt its prompt files carry.
-func presetAssembly(ctx context.Context, spec config.AgentSpec, assembled []trpctool.Tool) (*subagent.Assembly, error) {
-	prompt, err := presetPrompt(ctx, spec)
+// prompt its prompt files carry. The prompt text is read through the file source
+// of the agent the files belong to, so the instruction a delegated declaration
+// hands over is the content the chain carries, never a second read beside it.
+func (r *Run) presetAssembly(ctx context.Context, id event.AgentID, spec config.AgentSpec, assembled []trpctool.Tool) (*subagent.Assembly, error) {
+	prompt, err := r.presetPrompt(ctx, id, spec)
 	if err != nil {
 		return nil, err
 	}
@@ -580,9 +663,16 @@ func presetAssembly(ctx context.Context, spec config.AgentSpec, assembled []trpc
 }
 
 // presetPrompt reads the prompt text the declared prompt files carry, in the
-// declaration order, through the request-boundary file source.
-func presetPrompt(ctx context.Context, spec config.AgentSpec) (string, error) {
-	fixer, err := newFileFixer(spec.Files)
+// declaration order, through the file source of the agent the files belong to:
+// the read fixes the content version and files the file change fact when the
+// chain does not carry it yet, so the instruction a delegated assembly hands
+// over is the content the fact projects. Reading the body around the chain would
+// be the third path the file dimension exists to close. The fact states the
+// content the assembly read, never that a generation took it: the file dimension
+// claims no publication, so a candidate that does not take effect leaves the
+// observation it made and nothing else.
+func (r *Run) presetPrompt(ctx context.Context, id event.AgentID, spec config.AgentSpec) (string, error) {
+	fixer, err := r.delegatedFileFixer(id, spec.Files)
 	if err != nil {
 		return "", err
 	}
@@ -621,8 +711,28 @@ func (r *Run) wrap(tool trpctool.CallableTool) trpctool.Tool {
 	} else if approve == nil && r.enforcement == governance.EnforcementStrict {
 		approve = denyWithoutApprover
 	}
-	return &admissionGate{run: r, inner: task.Wrap(r.manager, &toolProducer{run: r, inner: tool},
-		task.WithResultRecorder(r.record), task.WithMailbox(r.sink), task.WithApprover(approve))}
+	return &admissionGate{run: r, inner: r.wrappedTool(tool, approve)}
+}
+
+// wrappedTool builds the registration wrapper of one native callable tool and
+// files its waiting table beside the waits of this run, so the close reads the
+// holds of this process as the waits a ruling can still rejoin.
+func (r *Run) wrappedTool(tool trpctool.CallableTool, approve task.Approver) *task.Wrapper {
+	wrapped := task.Wrap(r.manager, &toolProducer{run: r, inner: tool},
+		task.WithResultRecorder(r.record), task.WithMailbox(r.sink), task.WithApprover(approve))
+	r.hold(wrapped.Holds())
+	return wrapped
+}
+
+// hold files one waiting table of the approval channel this run parks calls
+// through, so the cut of a close reads every hold of the process.
+func (r *Run) hold(book *task.HoldBook) {
+	if book == nil {
+		return
+	}
+	r.mu.Lock()
+	r.holds = append(r.holds, book)
+	r.mu.Unlock()
 }
 
 // admissionGate is the refusal gate one registered tool's calls pass through
@@ -651,34 +761,12 @@ func (g *admissionGate) Call(ctx context.Context, jsonArgs []byte) (any, error) 
 	return g.inner.Call(ctx, jsonArgs)
 }
 
-// toolProduction is the stop confirmation of one wrapped call's tool
-// production: the production runs on the detached execution the task wrapper
-// drives beside the admission and confirms its stop only when the tool really
-// returned. The detachment keeps the production running through the caller's
-// cancellation, so a cancellation is never read as a stop here.
-type toolProduction struct {
-	mu      sync.Mutex
-	stopped bool
-}
-
-// Stopped reports whether this tool production really stopped.
-func (p *toolProduction) Stopped() bool {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	return p.stopped
-}
-
-// stop confirms the real stop of this tool production.
-func (p *toolProduction) stop() {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	p.stopped = true
-}
-
-// toolProducer registers the production of one wrapped call beside the task
-// identity the call was admitted as: the registration happens where the
-// production actually runs, on the detached execution the task wrapper drives,
-// where the call frame of the admission still travels on the context.
+// toolProducer registers the production of one wrapped call beside the writer
+// ledger of the run: the registration happens where the production actually
+// runs, on the detached execution the task wrapper drives, where the call frame
+// of the admission still travels on the context. The registration names the
+// call, never a task identity: a call in flight is a writer of the run, and its
+// stop is the one the close waits for.
 type toolProducer struct {
 	run   *Run
 	inner trpctool.CallableTool
@@ -692,22 +780,31 @@ func (p *toolProducer) Declaration() *trpctool.Declaration {
 	return p.inner.Declaration()
 }
 
-// Call registers the tool production beside the task the call was admitted as,
-// runs the tool, and confirms the production's stop when the tool returned.
+// Call registers the tool production beside the call it runs, runs the tool, and
+// confirms the production's stop when the tool returned. The stop is confirmed
+// by the tool's own return alone: a cancelled request that leaves the detached
+// execution running is never read as one.
 func (p *toolProducer) Call(ctx context.Context, jsonArgs []byte) (any, error) {
-	production := &toolProduction{}
-	defer production.stop()
-	if frame, ok := task.CallFrameFrom(ctx); ok {
-		taskID, found := p.run.admission.Lookup(frame.Identity.DedupKey())
-		if !found {
-			taskID = event.TaskID(frame.Identity.InvocationID)
-		}
-		if taskID != "" {
-			p.run.shutdown.Track(taskID)
-			_ = p.run.shutdown.Watch(taskID, production.Stopped)
-		}
-	}
+	stop := p.run.writers.Begin(toolWriterName(ctx))
+	defer stop()
 	return p.inner.Call(ctx, jsonArgs)
+}
+
+// toolWriterName names one tool production by the call it runs: the call
+// identity the frame carries, the dedup key of the frame beside no call identity,
+// or the bare production name beside no frame at all.
+func toolWriterName(ctx context.Context) string {
+	frame, ok := task.CallFrameFrom(ctx)
+	if !ok {
+		return "call"
+	}
+	if frame.Identity.CallID != "" {
+		return "call:" + frame.Identity.CallID
+	}
+	if key := frame.Identity.DedupKey(); key != "" {
+		return "call:" + string(key)
+	}
+	return "call"
 }
 
 // policyRuling adapts one governance policy onto the approval face the task

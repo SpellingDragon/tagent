@@ -51,7 +51,7 @@ var (
 		DecisionID:   "",
 		CallID:       "",
 		TaskID:       "",
-		Target:       event.Address{},
+		Sites:        DelegationSites{},
 		Ref:          state.BindingRef{},
 		Status:       task.StatusUnknown,
 		Progress:     []task.Notice{},
@@ -100,29 +100,20 @@ var (
 	_ func(*Delegator, event.TaskID) (state.Borrow, error) = (*Delegator).TurnBorrow
 )
 
-// The close face keeps its declared shape: the gate new input is refused at over
-// the task face it fronts, the setter of the ledger it lands terminals through,
-// the constructor beside it, the producer registration with its named refusals,
-// and the named unsettled state the close reports beside real settlement.
+// The writer ledger lives inside the loop: the registration that opens one
+// production and answers its confirmation and the read a close takes of the
+// stopped ones are read through the loop itself, and the report entries render
+// the open names. A writer is named by the production it runs and never by a
+// task identity: the model stream in flight holds none.
 var (
-	_ DelegationTasks = (*Shutdown)(nil)
+	_ func(*Loop, string) func() = (*Loop).Begin
 
-	_ func(DelegationTasks) *Shutdown = NewShutdown
+	_ func(*Loop) (bool, []string) = (*Loop).Stopped
 
-	_ func(*Shutdown, Reconciler) = (*Shutdown).SetReconciler
-
-	_ func(*Shutdown, event.TaskID, func() bool) error = (*Shutdown).Watch
-
-	_ func(*Shutdown, event.TaskID) = (*Shutdown).Track
-
-	_ func(*Shutdown, context.Context, CloseRequest) (DrainReport, error) = (*Shutdown).Close
-
-	_ Reconciler = (Reconciler)(nil)
+	_ func([]string) []UnsettledObligation = WriterObligations
 
 	_ error = ErrShutdownRefused
 	_ error = ErrDrainUnsettled
-	_ error = ErrProducerIdentityMissing
-	_ error = ErrProducerMissing
 )
 
 // The persistent event loop keeps its declared shape: the turn one drive
@@ -131,15 +122,15 @@ var (
 // the native message through.
 var (
 	_ = Turn{
-		InvocationID: "",
-		Decisions:    []Decision{},
-		Terminal:     model.KindUnknown,
-		FinalRound:   FinalRoundNone,
+		InvocationID:  "",
+		DecisionCount: 0,
+		Terminal:      model.KindUnknown,
+		FinalRound:    FinalRoundNone,
 	}
 
 	_ func(state.Borrow, *state.Occupancy, event.InstanceID, FactResolver) *Loop = NewLoop
 
-	_ func(*Loop, context.Context, Invocation) (Turn, error) = (*Loop).Drive
+	_ func(*Loop, context.Context, Invocation) (Turn, error) = (*Loop).drive
 
 	_ func(*Loop, event.InvocationID, task.Notice) = (*Loop).Backflow
 
@@ -154,12 +145,6 @@ var (
 	// the pass runs once per committed fact and a nil sink drops the presentation
 	// only, never the fact.
 	_ func(*Loop, PresentationSink) = (*Loop).SetPresentations
-
-	// The producer registration is attached through its own setter, so the
-	// declared construction shape above stays exactly as it is: the loop
-	// registers each in-flight production beside the work identity it runs
-	// behind and the close confirms its real stop through the predicate.
-	_ func(*Loop, func(event.TaskID, func() bool) error) = (*Loop).SetWatch
 
 	// The watchdog budget is attached through its own setter, so the declared
 	// construction shape above stays exactly as it is: a zero policy keeps every

@@ -85,8 +85,8 @@ func TestCriticalCallsHoldThroughFormalPath(t *testing.T) {
 		if err != nil {
 			t.Fatalf("invoke the approval runtime: %v", err)
 		}
-		if turn.Terminal != model.KindCompleted || len(turn.Decisions) != 2 {
-			t.Fatalf("turn = (%v, %d decisions), want the waits closing the turn completed beside two decisions", turn.Terminal, len(turn.Decisions))
+		if turn.Terminal != model.KindCompleted || turn.DecisionCount != 2 {
+			t.Fatalf("turn = (%v, %d decisions), want the waits closing the turn completed beside two decisions", turn.Terminal, turn.DecisionCount)
 		}
 		if got := ruleProbe.calls() + plainProbe.calls(); got != 0 {
 			t.Fatalf("critical executions = %d, want the parked calls to execute nothing", got)
@@ -217,8 +217,8 @@ func TestCriticalCallsHoldThroughFormalPath(t *testing.T) {
 		if err != nil {
 			t.Fatalf("invoke the refusal runtime: %v", err)
 		}
-		if turn.Terminal != model.KindCompleted || len(turn.Decisions) != 2 {
-			t.Fatalf("turn = (%v, %d decisions), want the refusal closing the turn completed beside two decisions", turn.Terminal, len(turn.Decisions))
+		if turn.Terminal != model.KindCompleted || turn.DecisionCount != 2 {
+			t.Fatalf("turn = (%v, %d decisions), want the refusal closing the turn completed beside two decisions", turn.Terminal, turn.DecisionCount)
 		}
 		if got := probe.calls(); got != 0 {
 			t.Fatalf("danger_tool executions = %d, want the strict refusal leaving zero executions", got)
@@ -297,13 +297,7 @@ func TestCriticalCallsHoldThroughFormalPath(t *testing.T) {
 				return ntToolTurn(ntCall("call-crit-1", "critical_tool", args))
 			}
 			if round == 2 {
-				approvalID := task.NewApprovalID()
-				if _, err := approvals.Request(ctx, approvalID, "critical_tool", []byte(args), plugin.RiskCritical, "needs-human", "critical_tool always awaits a human ruling"); err != nil {
-					t.Errorf("register the approval request: %v", err)
-				}
-				if _, err := approvals.Decide(approvalID, approval.ApprovalApproved, "operator"); err != nil {
-					t.Errorf("decide the approval request: %v", err)
-				}
+				approveParkedCall(t, approvals)
 				return ntToolTurn(ntCall("call-crit-2", "critical_tool", args))
 			}
 			return ntFinalTurn("settled")
@@ -329,8 +323,8 @@ func TestCriticalCallsHoldThroughFormalPath(t *testing.T) {
 		if err != nil {
 			t.Fatalf("invoke the approved runtime: %v", err)
 		}
-		if turn.Terminal != model.KindCompleted || len(turn.Decisions) != 3 {
-			t.Fatalf("turn = (%v, %d decisions), want the wait, the approved retry and the closing answer as three decisions", turn.Terminal, len(turn.Decisions))
+		if turn.Terminal != model.KindCompleted || turn.DecisionCount != 3 {
+			t.Fatalf("turn = (%v, %d decisions), want the wait, the approved retry and the closing answer as three decisions", turn.Terminal, turn.DecisionCount)
 		}
 		if got := probe.calls(); got != 1 {
 			t.Fatalf("critical_tool executions = %d, want the approved retry executed exactly once", got)
@@ -358,6 +352,25 @@ func TestCriticalCallsHoldThroughFormalPath(t *testing.T) {
 			t.Fatalf("ruling of the approved retry = %+v, want the approval named beside its rule", approved)
 		}
 	})
+}
+
+// approveParkedCall states the ruling on the question the gate itself filed: the
+// parked call is one question on the attention chain — a repeated registration of
+// the same (tool, digest) pair is that same question — so the approver answers the
+// presence it reads back instead of an identity of its own choice.
+func approveParkedCall(t *testing.T, approvals *approval.ApprovalManager) {
+	t.Helper()
+	pending := approvals.Pending()
+	if len(pending) != 1 {
+		t.Errorf("pending approval questions = %d, want the one question the parked call filed", len(pending))
+		return
+	}
+	if held := pending[0]; held.ToolName != "critical_tool" || held.RuleID != "needs-human" {
+		t.Errorf("pending question = (%q, %q), want the parked call under the rule it was parked by", held.ToolName, held.RuleID)
+	}
+	if _, err := approvals.Decide(pending[0].ID, approval.ApprovalApproved, "operator"); err != nil {
+		t.Errorf("decide the approval question the parked call filed: %v", err)
+	}
 }
 
 // pairedOf returns the paired tool message the recorded request answers the named call with.

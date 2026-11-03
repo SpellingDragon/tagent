@@ -2,377 +2,179 @@
 
 ## Purpose
 
-以 `agent_output` 为段边界、按 `tool > assistant` 优先级丢弃中间事件、保留 `external_input + agent_output` 任务骨架，并在骨架仍超预算时触发多段合并压缩（rolling summary 归档出口）的压缩能力。段 = 一次完整任务回合，骨架 = 用户原话与最终结论。
+压缩折叠规则：以 `agent_output` 闭合、按其 `input_events` 消费关系归段的任务回合为段，按线性段龄把已闭合段归入新/中/老三带；新带的过程细节折叠为一条段折叠产物，中/老带整段折叠为一条历史综述。折叠只由投影渲染容量触发，判定与执行各成 `compress.request`/`compress.product` 事实，恢复从产物事实重建。
+
 ## Requirements
+
 ### Requirement: 以 agent_output 为段边界切分任务回合
 
-系统 SHALL 以 `agent_output` 事件为段闭合边界，将历史时间线切分为任务回合段：一个段 SHALL 包含 `[external_input, (thinking_plan|action_command)*, agent_output]`。`agent_output` 的识别 SHALL 优先依据消息的 event 类型前缀（`[evt_KEY|agent_output]`），对缺失前缀的输入 SHALL 退回启发式（`assistant` 且无 `tool_calls` 视为回合收尾）。
+系统 SHALL 以 `agent_output` 条目为段闭合边界，用 `SegmentsOf` 把投影条目切分为任务回合段，段边界 SHALL 按该输出事实的 `input_events` 消费关系归段：它命名的输入键 SHALL 归入它所在的段并随该段闭合，段内已见但未被它命名的输入 SHALL 滚入下一段，段间的过程条目 SHALL 留在闭合它的段内。`agent_output` 不带 `input_events`（legacy 链）、`input_events` 解析失败或为空数组时，段 SHALL 回退为位置式闭合：输出之前的全部条目归该段，老链 MUST NOT 被重切。尾部没有任何 `agent_output` 闭合的条目 SHALL 成为进行中段。段切分 SHALL 是投影条目的纯函数，MUST NOT 读取消息内容或以消息前缀猜测边界。段龄 SHALL 从最新段向旧计数（0 = 最新段）。
 
 #### Scenario: 完整回合闭合成一个段
 
-- **GIVEN** 消息序列 `[external_input(A), thinking_plan, action_command, agent_output(A), external_input(B), agent_output(B)]`
+- **GIVEN** 条目序列 `[external_input(A), thinking_plan, action_command, agent_output(A), external_input(B), agent_output(B)]`，且两个 `agent_output` 的 `input_events` 各自命名其开段输入
 - **WHEN** 执行切段
-- **THEN** 产出 2 个段：段1=`[external_input(A), thinking_plan, action_command, agent_output(A)]`，段2=`[external_input(B), agent_output(B)]`
-- **AND** 两个段均为 `IsComplete=true`
+- **THEN** 产出 2 个已闭合段：段1=`[external_input(A), thinking_plan, action_command, agent_output(A)]`，段2=`[external_input(B), agent_output(B)]`
 
-#### Scenario: 连续 external_input 归入同一进行中段
+#### Scenario: 未消费输入滚入下一段
 
-- **GIVEN** 消息序列 `[external_input(A), agent_output(A), external_input(B), external_input(C)]`（用户连发 B、C，agent 未回）
+- **GIVEN** 条目序列 `[external_input(1), external_input(2), external_input(3), thinking_plan, agent_output(A)]`，且 `agent_output(A)` 的 `input_events` 只命名 1 与 2
 - **WHEN** 执行切段
-- **THEN** 段2 包含 `[external_input(B), external_input(C)]`
-- **AND** 段2 为 `IsComplete=false`
+- **THEN** 段 A SHALL 为 `[external_input(1), external_input(2), thinking_plan, agent_output(A)]`，`external_input(3)` SHALL 成为下一段的首个条目（尚无输出闭合时该段为进行中段）
+
+#### Scenario: legacy 输出回退位置式闭合
+
+- **GIVEN** 条目序列 `[external_input(1), external_input(2), agent_output(A), external_input(3)]`，其中 `agent_output(A)` 不带 `input_events`
+- **WHEN** 执行切段
+- **THEN** 段 A SHALL 为 `[external_input(1), external_input(2), agent_output(A)]`（位置式闭合），`external_input(3)` SHALL 属于其后的进行中段
+
+#### Scenario: 空或不可解析的 input_events 回退位置式闭合
+
+- **GIVEN** 一个 `agent_output` 的 `input_events` 为空数组、`null` 或不可解析的 JSON
+- **WHEN** 执行切段
+- **THEN** 该输出 SHALL 按 legacy 位置式闭合处理，MUST NOT 伪造任何输入关系
+
+#### Scenario: 连续输入留在进行中段
+
+- **GIVEN** 条目序列 `[external_input(A), agent_output(A), external_input(B), external_input(C)]`
+- **WHEN** 执行切段
+- **THEN** 最后一段包含 `[external_input(B), external_input(C)]`，且为进行中段
 
 #### Scenario: 无 agent_output 的尾部为进行中段
 
-- **GIVEN** 消息序列 `[external_input(A), agent_output(A), external_input(B), thinking_plan, action_command]`
+- **GIVEN** 条目序列 `[external_input(A), agent_output(A), external_input(B), thinking_plan, action_command]`
 - **WHEN** 执行切段
-- **THEN** 最后一段 `[external_input(B), thinking_plan, action_command]` 为 `IsComplete=false`
+- **THEN** 最后一段为进行中段，其全部条目保留在段内
 
-### Requirement: 段内事件按事件类型二分骨架与中间事件
+### Requirement: 新带段折叠过程细节为段折叠产物
 
-系统 SHALL 将段内事件二分为骨架与中间事件，判定 SHALL 为事件类型的纯函数，SHALL NOT 读取消息内容。骨架为 `external_input` 与 `agent_output`；中间事件为 `action_command` 与 `thinking_plan`。
+对已闭合且处于新带（`BandNew`，段龄 < `KeepRecentTasks`）的段，折叠 SHALL 只把段内过程细节（`thinking_plan` 与 `action_command`）替换为一条 `segment_fold` 产物，开段输入与闭合 `agent_output` SHALL 原样保留。无过程细节的段 SHALL NOT 产生产物；进行中段 SHALL NOT 折叠；已含合成键的条目 MUST NOT 再次折叠。产物正文 SHALL 是过程条目的一行读法（类型 + 摘要），MUST NOT 是 LLM 生成文本。
 
-#### Scenario: 骨架事件识别
+#### Scenario: 新带段折叠为一条段折叠产物
 
-- **WHEN** 段内一条消息的事件类型为 `external_input` 或 `agent_output`
-- **THEN** 该消息 SHALL 被归类为骨架（保留候选）
+- **GIVEN** 两个已闭合的新带段，每段各有若干 `thinking_plan` 与 `action_command`
+- **WHEN** 投影容量超过阈值并执行折叠
+- **THEN** 每段的过程细节 SHALL 各自折叠为一条 `segment_fold` 产物
+- **AND** 产物 SHALL 站在原过程条目第一位的位置，输入保持在前、`agent_output` 保持在后
 
-#### Scenario: 中间事件识别
+#### Scenario: 无过程细节不产生产物
 
-- **WHEN** 段内一条消息的事件类型为 `action_command` 或 `thinking_plan`
-- **THEN** 该消息 SHALL 被归类为中间事件（可丢弃候选）
+- **GIVEN** 一个只含 `external_input` 与 `agent_output` 的已闭合新带段
+- **WHEN** 执行折叠
+- **THEN** 该段 SHALL NOT 产生段折叠产物，条目保持不变
 
-### Requirement: 中间事件按 tool > assistant 优先级丢弃
+#### Scenario: 进行中段不折叠
 
-系统在段内压缩中间事件时 SHALL 按 `action_command`（tool）优先于 `thinking_plan`（assistant）的顺序丢弃：先丢弃全部 `action_command`，仍需进一步压缩时才丢弃 `thinking_plan`。骨架事件（`external_input`、`agent_output`）在该级别下 SHALL 保留。
+- **GIVEN** 一个无 `agent_output` 闭合且含过程细节的进行中段
+- **WHEN** 执行折叠
+- **THEN** 该段的过程细节 SHALL 原样保留，MUST NOT 产生段折叠产物
 
-#### Scenario: 第一档丢弃 tool 保留 assistant
+### Requirement: 中带与老带整段折叠为一条历史综述
 
-- **GIVEN** 段 `[external_input, thinking_plan, action_command, agent_output]` 被定为"丢弃 tool"档
-- **WHEN** 执行段内压缩
-- **THEN** 保留 `[external_input, thinking_plan, agent_output]`
-- **AND** 仅 `action_command` 被丢弃
+段龄达到 `KeepRecentTasks` 的段（`BandMid` 与 `BandOld`）SHALL 整段离开时间线，并合并为一条 `history_summary` 产物置于投影首位。综述正文 SHALL 逐条保留被折条目的类型与摘要读法，MUST NOT 改写为 LLM 生成文本；既有历史综述 SHALL 原样并入，MUST NOT 重复嵌套或丢失其正文。被折叠的原始事件 SHALL 仍留在事实链，可经 `[evt_key]` 票据召回。
 
-#### Scenario: 第二档丢弃 tool 与 assistant 仅留骨架
+#### Scenario: 中带段折成一条历史综述
 
-- **GIVEN** 段 `[external_input, thinking_plan, action_command, agent_output]` 被定为"仅留骨架"档
-- **WHEN** 执行段内压缩
-- **THEN** 保留 `[external_input, agent_output]`
-- **AND** `action_command` 与 `thinking_plan` 均被丢弃
+- **GIVEN** keepRecent=1，历史含 4 个已闭合段，容量超过阈值
+- **WHEN** 执行折叠
+- **THEN** 段龄 1–3 的段 SHALL 全部离开时间线，合并为投影首位的一条 `history_summary`
+- **AND** 综述正文 SHALL 含这些段的类型 + 摘要读法，最新段仍保留输入、段折叠产物与 `agent_output`
 
-### Requirement: 骨架仍超预算时触发多段压缩归档
+#### Scenario: 老带段并入同一综述
 
-当骨架（L2 仅保留边界事件）仍超预算时，SHALL 触发多段压缩归档（L3）：最老段整段离场并由 `buildRetainedRefs` 折叠进滚动摘要。L3 SHALL 仅由预算升级抵达——基础定级封顶 L2（见"段定级采用指数段龄边界"需求），段龄/段数 SHALL NOT 触发归档。L3 折叠为**双层结构**：
+- **GIVEN** keepRecent=2，历史含段龄 6 及以上的段
+- **WHEN** 执行折叠
+- **THEN** 老带段 SHALL 与中带段一起并入同一条历史综述，MUST NOT 产生第二条综述
 
-- **工程票据层（恒在，零 LLM）**：每个离场骨架事件折叠为一行卡片（`- [time] [evt_key] 骨架摘要`），`[evt_key]` 为召回票据；
-- **LLM 滚动综述层（可选，`summary_model` 配置时启用）**：以旧综述 + 本轮新折叠段骨架**原文**（素材律：从 MemoryStore 取真实存储文本，非二手卡片行）为素材，增量合成为单行 `〔历史综述〕`，置于卡片层之上；综述长度与单轮素材量受编译期常量约束（`rollingNarrativeCapChars` / `narrativeSkeletonCapChars` / `narrativeEventCap`），不新增配置旋钮。
+#### Scenario: 被折原文仍可召回
 
-降级契约：无模型 / 无新折叠素材 / 调用失败时 SHALL 保留旧综述原样、以纯工程形态继续（票据不丢、压缩不被阻塞）。SHALL NOT 存在 legacy 回退路径（`skeleton_segmentation` 配置及其 L3 LLM 段摘要、`segmentContentHash` 归档缓存、`level3Failed` 降级标记随 legacy 管线一并移除——本综述层是折叠点上的单次增量合成，非 legacy 的逐段摘要+分批管线）。
+- **GIVEN** 一批事件已被折进历史综述
+- **WHEN** 用其 `[evt_key]` 票据 recall / GetEvent
+- **THEN** SHALL 仍能取回原文（折叠不删事实链原文）
 
-#### Scenario: L3 双层折叠进滚动摘要
+### Requirement: 段龄定级为线性三带
 
-- **GIVEN** 骨架化后仍超预算，最老段被定为 L3，且配置了 summary 模型
-- **WHEN** 执行多段压缩
-- **THEN** 该段 SHALL 整段离场，工程票据层 SHALL 折叠为滚动摘要卡片行
-- **AND** SHALL 发生恰好一次 LLM 综述调用（旧综述 + 新折叠骨架原文 → 新单行综述），输出以 `〔历史综述〕` 前缀置于卡片层之上
-- **AND** SHALL NOT 读写归档缓存
+折叠 SHALL 使用 `LevelOfAge`/`BandOfLevel` 的线性段龄规则：`age < KeepRecentTasks` 为 L0（新带），`age < 2×KeepRecentTasks` 为 L1（中带），`age < 3×KeepRecentTasks` 为 L2（中带），其余为 L3（老带）。进行中段 SHALL 读 L0/新带。MUST NOT 使用指数段龄边界（`keepRecent × 2^level`），也 MUST NOT 把基础定级封顶于 L2。`KeepRecentTasks < 1` SHALL 读默认值 2。
 
-#### Scenario: 综述层降级不阻塞折叠
+#### Scenario: keepRecent=2 的线性边界
 
-- **GIVEN** summary 模型未配置或调用失败
-- **WHEN** 执行多段压缩
-- **THEN** 折叠 SHALL 以纯工程形态完成（无综述行或保留旧综述原样），卡片票据完整无损
+- **GIVEN** KeepRecentTasks=2
+- **WHEN** 计算已闭合段的级别与带
+- **THEN** age=1 SHALL 为 L0/新带，age=2 与 age=4 SHALL 为 L1/L2（中带），age=6 SHALL 为 L3/老带
+- **AND** SHALL NOT 出现指数边界的更早降级（例如 age=4 仍应为 L2 而非 L3）
 
-#### Scenario: 纯携带轮零 LLM 成本
+#### Scenario: 未设置窗口读默认值
 
-- **GIVEN** 本轮无新折叠事件（仅携带既有滚动摘要）
-- **WHEN** `buildRetainedRefs` 执行
-- **THEN** SHALL NOT 发起 LLM 综述调用，既有综述与卡片原样携带
-
-### Requirement: 进行中段永不归档且始终保留
-
-未完成（`IsComplete=false`）的进行中段 SHALL 不参与任何级别的压缩，其全部消息（含 `external_input` pending 输入）SHALL 完整保留，以驱动 LLM 的当前回合。
-
-#### Scenario: 进行中段完整保留
-
-- **GIVEN** 历史中存在一个 `IsComplete=false` 的进行中段
-- **WHEN** 执行任意级别压缩
-- **THEN** 该进行中段的全部消息 SHALL 原样保留，不被丢弃、归档或摘要
-
-### Requirement: 保留消息携带 event key 前缀以衔接 rolling summary
-
-压缩输出中所有被保留的消息 SHALL 保留其原 event key 前缀（`[evt_KEY|type]`），使 `buildRetainedRefs` 能据此判定存活 ref：存活 ref 留存 projection，未存活 ref（被丢弃的中间事件与被多段压缩的整段）汇入 rolling summary。
-
-#### Scenario: 存活判定基于 event key
-
-- **GIVEN** 压缩后某条骨架消息仍携带 `[evt_KEY|agent_output]` 前缀
-- **WHEN** `buildRetainedRefs` 处理压缩结果
-- **THEN** 该 `KEY` 对应的 ref SHALL 被保留在 projection
-- **AND** 未出现在压缩结果中的 ref SHALL 被收编进 rolling summary
-
-### Requirement: LLM 文摘作为工程层之上的可选叠加层
-
-骨架压缩（`compressSkeleton`）的定级与丢弃是纯工程、零 LLM；L3 折叠的工程票据层亦恒在。管线中的 LLM 文摘恰有两处，均为可选叠加层，失败或无模型时 SHALL 降级为工程形态：
-
-1. **L3 滚动综述 `synthesizeRollingNarrative`**：折叠点的增量单行综述（见"多段压缩归档"需求）；
-2. **卡片浓缩 `condenseCardLines`**（`curateCards` 内）：卡片超 `cardMaxChars` 时 SHALL 用 summary 模型浓缩较旧一半卡片、保留最新卡片原文；无模型时 SHALL 将最旧行沉底为计数（不报错）。
-
-所有 LLM 生成的文摘/浓缩内容 SHALL 保留 `[evt_key]` 召回票据，使卡片始终是召回锚点。
-
-**折叠即事实链 compaction 事件（event-sourced-projection 新增）**：折叠产出的 composed 综述 ref（负 key、仅投影）含**两处 LLM 不可重算产物**——滚动综述 narrative 与浓缩后卡片文本——且折叠 path-dependent（`deterministicLevel` 的 age 依赖累积投影段数）、并存负 key `tool_chain` 合成 ref（store 无对应事件），故整条折叠态**不可从原始事件重算**。为兑现「投影 = 事实链纯回放」（见 `event-sourced-projection` 能力）并支持重启逐字节重建，折叠点 SHALL 向事实链**追加一条 `context_compress_summary` 正 key compaction 事件**（载综述正文逐字节 + 综述 ref 身份 + 有序 retained-ref 列表含负 key `tool_chain` 合成 ref 全身份+EventSummary + fullBoundary；Metadata 带 `compaction=v1` 代际标记），并滚动 supersede 上一条（写前查 prior、限定代际标记——legacy 固化物不删不选）；仅真折叠时发射（`Compressed` 门控，under-budget 轮不写）。此为对 `context-efficiency-and-trajectory`「`context_compress_summary` 固化物产生源移除」的**定向逆转**——按减法判定标准（删除后行为信息变少 = 缺失补最小量）：累积综述不可重算、prefix-cache 重启要求逐字节 → 属「缺失」而非冗余副本。**scope**：持久化的是折叠态（composed 综述含浓缩卡片 + retained-ref 列表含 tool_chain 合成 ref）；被折叠的**原始事件不删**（冷存，`[evt_key]` 票据仍 recall 回补），不因 compaction 事件而移除原文。
-
-（`compressLegacy` 管线、其 LLM 段摘要、`segmentContentHash` 归档缓存仍随 legacy 移除；`context_compress_summary` 的产生源由 event-sourced-projection **为 compaction 事件**恢复，载体是折叠态（composed 综述 + retained-ref 列表），非 legacy 逐段原文副本。存量固化物读路径容错、TTL 自然清退不变。）
-
-#### Scenario: condenseCardLines 浓缩旧卡且保留票据
-
-- **GIVEN** 滚动摘要卡片超过 `cardMaxChars` 且配置了 summary 模型
-- **WHEN** 执行 `curateCards`
-- **THEN** SHALL 浓缩较旧一半卡片、保留最新卡片原文与 `[evt_key]` 票据
-
-#### Scenario: 无模型时沉底计数不报错
-
-- **GIVEN** 卡片超 `cardMaxChars` 但无 summary 模型
-- **WHEN** 执行 `curateCards`
-- **THEN** SHALL 将最旧行沉底为 `(earlier n items)` 计数，SHALL NOT 报错
-
-#### Scenario: 折叠点追加 compaction 事件
-
-- **GIVEN** 一次压缩触发真折叠（`Compressed`=true）、产出新 composed 综述 ref
-- **WHEN** 折叠完成
-- **THEN** SHALL StoreEvent 一条 `context_compress_summary` 正 key compaction 事件，载综述正文逐字节 + 综述 ref 身份 + 有序 retained-ref 列表（含负 key tool_chain 合成 ref 全身份+EventSummary）+ fullBoundary
-- **AND** SHALL DeleteEvent 上一条代际标记的 compaction 事件（滚动 supersede；限定 `compaction=v1`，legacy 固化物不删不选）
-- **AND** 被折叠的原始事件 SHALL NOT 被删除（冷存供 recall 票据回补）
-
-#### Scenario: under-budget 轮不发射
-
-- **GIVEN** 投影首位仍是历史折叠的综述负 key ref
-- **WHEN** 本轮压缩 under-budget（`Compressed`=false，RetainedRefs 原样返回）
-- **THEN** SHALL NOT 写 compaction 事件（仪靠首位负 key 判定拦不住此情形，须 Compressed 门控）
-
-#### Scenario: 无 summary_model 时折叠态仍持久化
-
-- **GIVEN** 未配置 summary_model（综述层降级为纯工程，无 LLM narrative）
-- **WHEN** 折叠产出 composed 综述 ref（纯工程卡片 + 计数）
-- **THEN** compaction 事件 SHALL 仍追加（composed 正文 + retained-ref 列表），使重启逐字节重建不依赖是否有 LLM（工程折叠态同样 path-dependent 不可重折，须持久化）
-
-### Requirement: 滚动摘要消息豁免 L3 压缩（常驻可见）
-
-骨架压缩 SHALL 把领先的 `context_compress` 滚动摘要消息从段结构中摘出（类比 `SplitSystemMessage`），使其不参与分段与定级，并在压缩后无条件回填到结果最前（紧随系统消息）。由此滚动摘要消息 SHALL 在任何段龄/级别下都保留在模型上下文中，SHALL NOT 被 L3 整段丢弃。
-
-#### Scenario: K≥7 段0 升 L3 时摘要仍可见
-
-- **GIVEN** 投影含滚动摘要 + 8 个完整任务回合（段0 段龄达 L3 阈值）
-- **WHEN** 执行骨架压缩
-- **THEN** `result.Messages` SHALL 仍含 `context_compress` 滚动摘要消息（位于系统消息之后）
-- **AND** 段0 SHALL NOT 包含该滚动摘要消息（它已被摘出，不参与定级）
-
-#### Scenario: 摘要 ref 仍被投影携带
-
-- **GIVEN** 骨架压缩保护了滚动摘要消息
-- **WHEN** `buildRetainedRefs` 构建 RetainedRefs
-- **THEN** SHALL 仍吸收并重建滚动摘要 ref（负 key），投影照常携带到下一轮
-
-### Requirement: 段定级采用指数段龄边界且封顶于 L2
-
-`deterministicLevel` 的段龄阈值 SHALL 为指数边界 `keepRecent × 2^level`（即 L0 < k、L1 < 2k、L2 ≥ 2k），而非线性 `{k, 2k, 3k}`，以使段在每个老化级别驻留更久（前级渲染变化更少，缓存更稳定）。指数底数 SHALL 固定为 2。
-
-**封顶律（触发器单维化对齐）**：基础定级 SHALL 封顶于 L2——段龄 SHALL NOT 触发 L3 归档，否则"段数够多"成为隐性第二触发器，在预算宽裕时执行有损归档（连带 LLM 综述调用）。L3 SHALL 仅由预算升级路径抵达（见"多段压缩归档"需求）。`keepRecent` 为整理后状态约束：最近 k 段在一切路径（含升级）下恒为 L0。
-
-#### Scenario: 指数边界老化定级
-
-- **GIVEN** keepRecent=2
-- **WHEN** 计算段龄 age 的基础级别
-- **THEN** age=3 SHALL 为 L1、age=5 SHALL 为 L2、age=7 SHALL 为 L2、age=8 SHALL 为 L2（基础阶梯永不抵达 L3；线性下 age=5/6 已为最高档）
-
-#### Scenario: 预算升级才抵达 L3
-
-- **GIVEN** keepRecent=2，历史含 10 个完整段且总 token 超预算
-- **WHEN** 执行骨架压缩，骨架化后仍超预算
-- **THEN** 预算升级 SHALL 自最老段起逐段升 L3（age ≥ keepRecent 才可升级），达标即停
-- **AND** 同样历史在预算内时 SHALL 全部保持在基础老化级别（无 L3、无归档）
-
-### Requirement: 压缩配置参数公式化默认值
-
-压缩相关配置 SHALL 以 `max_tokens`（M）与 `keep_recent_tasks`（k）为主变量，未显式设置时其余参数按简单公式派生默认值：token 阈值 = `compress_threshold × M`；`recent_full_count` = `k × 每轮引用数`；`card_max_chars` = `M / 20`；`compact_keys_listed` = `card_max_chars / 200`。显式设置的值 SHALL 优先于公式默认值（向后兼容）。
-
-#### Scenario: 未设置时按公式派生
-
-- **GIVEN** M=128000、k=2，且 card_max_chars / compact_keys_listed 未显式设置
-- **WHEN** 初始化压缩器
-- **THEN** card_max_chars SHALL 默认 6400（M/20）、compact_keys_listed SHALL 默认 32（6400/200）
-
-#### Scenario: 显式设置优先
-
-- **GIVEN** 显式设置 card_max_chars=6000
-- **WHEN** 初始化压缩器
-- **THEN** SHALL 使用 6000 而非公式默认值
-
-### Requirement: 纯工具调用 thinking_plan 生成工具调用摘要
-
-`GenerateEventSummary` 对 `thinking_plan` 且 `Content` 为空且 `ToolCalls` 非空的事件，SHALL 用 ToolCalls 生成 `调用 <工具名>` 摘要（工程提取、零 LLM），使老化渲染不再退化为空摘要占位符。`Content` 非空的 thinking_plan SHALL 仍取原文。
-
-#### Scenario: 纯工具调用生成摘要
-
-- **GIVEN** 一个 thinking_plan 事件，`Content=""` 且 `ToolCalls=[read_file, grep]`
-- **WHEN** 生成 EventSummary
-- **THEN** SHALL 返回 `调用 read_file、grep`，而非空字符串
-
-### Requirement: 老化工具运行折叠为工具链合成引用
-
-骨架压缩 SHALL 在**整理轮**（容量触发的压缩路径内）把**连续的老化完整工具对**（thinking_plan + action_command 序列，中间不被 external_input/agent_output 打断，且处于位置式尾部窗口之外——最近 `recent_full_count` 条 refs 不折叠）折叠为一个 `tool_chain` 合成引用（负 key），其 EventSummary 为一行工具链（`- 工具链: name1→name2→…（N步）[evt_first→evt_last]`）。原工具事件 refs SHALL 从投影移除、由该合成引用替代（无双重表示）。该合成引用 SHALL 使用独立的 `tool_chain` 事件类型（区别于 `context_compress`，不被吸收进滚动摘要计数），且 `buildRetainedRefs` SHALL 一律保留它。工具名 SHALL 取自 ref.EventSummary（无需回取全文）。整理间（未触发轮）SHALL NOT 执行折叠——老化区间外的工具对按 EventSummary 渲染（有界且字节稳定），待下次整理统一折叠。
-
-#### Scenario: 连续工具对折叠为单行工具链
-
-- **GIVEN** 整理轮的老化区间内有连续 3 对工具事件（read_file/grep/edit 及其结果）
-- **WHEN** 执行整理路径内的工具链折叠
-- **THEN** SHALL 折叠为一个 `tool_chain` 合成引用，EventSummary 为 `- 工具链: read_file→grep→edit（3步）[evt_first→evt_last]`
-- **AND** 原 6 条工具事件 refs SHALL 从投影移除
-
-#### Scenario: 不跨回合边界折叠
-
-- **GIVEN** 工具运行中间隔着一个 agent_output 边界事件
-- **WHEN** 折叠
-- **THEN** SHALL 在边界处断开，两侧分别折叠，不跨回合合并
-
-#### Scenario: 未触发轮不折叠
-
-- **GIVEN** 摘要区间内有连续工具对，但 `usedTokens` 低于阈值（未触发整理）
-- **WHEN** 执行 `ContextCompressor.Compress`
-- **THEN** 工具对 SHALL 保持原生 refs（按 EventSummary 渲染），SHALL NOT 产生或扩展 `tool_chain` 合成引用
-
-### Requirement: 活跃前沿与近期配对不折叠
-
-工具链折叠 SHALL 只作用于已老化的完整工具对；最近 `recentFullCount` 条（full=true）消息、当前进行中的未完成 tool_call（无 result）、以及边界事件 SHALL 不折叠、保持原生协议形态（tool_call 配对合法）。
-
-#### Scenario: 活跃前沿保持原生
-
-- **GIVEN** 进行中段的最近若干工具对处于 full=true 区间，且存在一个无 result 的未完成 tool_call
-- **WHEN** 折叠
-- **THEN** 这些消息 SHALL 保持原生（含 tool_calls），不被折叠
-- **AND** 渲染后 tool_call 配对合法性保持
-
-### Requirement: 上下文维护五项不变量
-
-上下文维护 SHALL 满足：I1 有界（进行中段工具历史折叠为 O(工具链行数)，与循环长度解耦）；I2 稠密（无空摘要零信息占位符）；I3 锚定（滚动摘要常驻可见）；I4 无损（工具事件本体永在 MemoryStore，工具链行带票据可经 memory_turn 取回完整链）；I5 原生前沿（活跃前沿与近期配对保持原生）。
-
-#### Scenario: 长进行中段上下文有界且无占位符
-
-- **GIVEN** 一个 ~60 步工具调用的进行中段
-- **WHEN** 渲染模型上下文
-- **THEN** 工具历史 SHALL 收敛为少量工具链行（而非 ~130 条逐条消息）
-- **AND** 上下文中 SHALL NOT 出现 `(历史事件摘要为空，可用 recall 检索)` 占位符
+- **GIVEN** KeepRecentTasks=0 或未设置
+- **WHEN** 计算段龄或规划折叠
+- **THEN** SHALL 以默认 keepRecent=2 计算，而不是返回错误或零值窗口
 
 ### Requirement: 压缩触发器单维化（token 容量阈值）
 
-`ContextCompressor.Compress` SHALL 以**单一维度**触发整理：仅当 `usedTokens > compress_threshold × max_tokens` 时才调用 `SmartCompressor.Compress` 与投影重写；未超阈值时 SHALL pass-through——直接返回按投影渲染的消息且**不触碰投影**（不折叠、不定级、不重建 refs）。完整回合计数 SHALL NOT 参与触发判断。`SmartCompressor.Compress` 内部提前退出 SHALL 同样仅以 token 预算判断（完整段数/段龄 SHALL NOT 作为触发条件，仅作为 keepRecent 保留保护的状态约束）。
+压缩整理 SHALL 只由投影渲染容量超过声明阈值触发；候选是否实际存在 SHALL 只作为执行门，不得成为第二容量阈值。容量未超阈时 MUST 提前返回且不触碰投影；容量超阈但无新候选时 SHALL no-op，不写空 `compress.request`/`compress.product`。存在可折候选时，不得因其材料量单独未超阈而抑制整理。段数、段龄与完整回合计数 SHALL NOT 作为触发条件，只作为保留窗口的状态约束。
 
 #### Scenario: 未超阈值时完全直通
 
-- **GIVEN** 会话已有远超 `keep_recent_tasks` 的完整回合数，但 `usedTokens` 低于阈值
-- **WHEN** 执行 `ContextCompressor.Compress`
-- **THEN** SHALL NOT 调用 `SmartCompressor.Compress`，SHALL NOT 执行工具链折叠，投影 refs SHALL 原样返回
+- **GIVEN** 投影渲染容量低于阈值
+- **WHEN** 执行压缩判定
+- **THEN** SHALL 直接返回，不折叠、不定级、不重建 refs
 
-#### Scenario: 超阈值但折叠后低于预算则 SmartCompressor 原样返回
+#### Scenario: 超阈值但无可折候选
 
-- **GIVEN** `usedTokens` 超过阈值触发整理，但工具链折叠后渲染 token 已低于 `SmartCompressor` 预算
-- **WHEN** 执行 `SmartCompressor.Compress`
-- **THEN** SHALL 原样返回消息（不老化、不定级、不归档），投影仅发生工具链折叠
+- **GIVEN** 投影容量超过阈值且没有本轮新候选
+- **WHEN** 执行压缩判定
+- **THEN** SHALL 不写压缩事实、不重写投影；实际模型请求仍由既有预算装配约束
 
-#### Scenario: 超阈值触发整理（回归）
+#### Scenario: 超阈值且候选材料自身较小
 
-- **GIVEN** `usedTokens` 超过 `compress_threshold × max_tokens`
-- **WHEN** 执行 `ContextCompressor.Compress`
-- **THEN** SHALL 调用 `SmartCompressor.Compress`（与既有 token 触发行为一致）
+- **GIVEN** 总容量超过阈值，可折过程材料自身低于阈值
+- **WHEN** 执行压缩判定
+- **THEN** SHALL 仍产生该真实候选，不得用第二材料阈值拒绝它
 
-### Requirement: 整理间渲染冻结（前缀字节稳定）
+#### Scenario: 计划与直接折叠等价
 
-整理（容量触发的压缩轮）之间，投影渲染 SHALL 是 **append-only 稳定**的：全文解析窗口（`recent_full_count`）SHALL 在整理轮锚定为投影内的边界 key（最近 `recent_full_count` 条 retained refs 的最前一条），整理间该边界 SHALL NOT 随 refs 追加而移动。整理后新增事件 SHALL 全文渲染（活跃前沿），既有 refs 的渲染方式（全文/摘要）SHALL 冻结不变——连续未触发轮发出的消息序列 SHALL 保持公共前缀字节级相同。
+- **WHEN** 同一投影分别经 PlanByAge+ApplyProducts 与 FoldByAge 处理
+- **THEN** 两者的产物、覆盖键与最终投影 SHALL 等价，重复执行不得新增同义事实
 
-#### Scenario: 整理间追加新事件不改变旧渲染
+### Requirement: 进行中段与近期窗口保持原样
 
-- **GIVEN** 上次整理后投影含 refs R1..R50，其中 R35..R50 为全文窗口
-- **WHEN** 新事件 R51..R53 追加且未触发整理，渲染下一轮请求
-- **THEN** R1..R50 的渲染输出 SHALL 与上一轮逐字节相同（R35..R50 仍全文，R1..R34 仍摘要）
-- **AND** R51..R53 SHALL 全文渲染（活跃前沿）
+无 `agent_output` 闭合的进行中段 SHALL 不参与任何折叠，其全部条目（含 pending 输入与过程细节）SHALL 原样保留。最近 `KeepRecentTasks` 个已闭合段 SHALL 保持输入与输出骨架；只有其段内过程细节可被折为段折叠产物。折叠 MUST NOT 移动进行中段、改变其条目顺序或改写其渲染内容。
 
-#### Scenario: 整理轮重设边界
+#### Scenario: 进行中段完整保留
 
-- **GIVEN** token 超阈值触发整理
-- **WHEN** `buildRetainedRefs` 产出新的 retained refs
-- **THEN** 全文窗口边界 SHALL 重设为最近 `recent_full_count` 条 retained refs 的最前一条
-- **AND** 之后整理间的渲染方式以新边界冻结
+- **GIVEN** 历史中存在一个含 pending 输入与过程细节的进行中段
+- **WHEN** 执行任意折叠
+- **THEN** 该进行中段的全部条目 SHALL 原样保留，不被丢弃、归档或改写
 
-### Requirement: 浓缩卡片票据机器校验
+#### Scenario: 最近窗口骨架保留
 
-curateCards 接纳 LLM 浓缩文本前 MUST 校验：输出票据是输入旧半区票据集合的子集，且包含首尾与所有高亮条目的必需票据；缺失、伪造、格式不可解析时 SHALL 拒绝该文本并复用原卡片的确定性下沉。校验 SHALL 不新增 LLM 调用，不改变容量单维触发与整理间冻结。
+- **GIVEN** keepRecent=2，历史含 3 个已闭合段
+- **WHEN** 执行折叠且最老段进入历史综述
+- **THEN** 最近 2 段的 `external_input` 与 `agent_output` SHALL 保持原样，仅其过程细节可被折为段折叠产物
 
-#### Scenario: 模型省略必需票据
-- **WHEN** 浓缩文本短且非空但丢失首尾或高亮 key
-- **THEN** 不采用该文本，确定性回退，原始 FullEvent 不变
+### Requirement: 压缩窗口由三字段界定
 
-#### Scenario: 模型生成未知票据
-- **WHEN** 输出包含输入没有的 key
-- **THEN** 判失败，不把伪造票据写进 compaction 载荷
+压缩参数 SHALL 由 `FoldWindow` 的 `MaxTokens`、`CompressThreshold`、`KeepRecentTasks` 三字段界定；`VolumeThresholdBytes` SHALL 按 `MaxTokens × BudgetCharsPerToken × CompressThreshold` 派生折叠触发的渲染字节阈值，`CompressThreshold` 非法或未设置 SHALL 读默认值。`KeepRecentTasks` 未设置 SHALL 读默认值 2。卡片字段（`card_max_chars`/`compact_keys_listed`）MUST NOT 再作为压缩配置存在。
 
-#### Scenario: 合法浓缩
-- **WHEN** 输出只含输入票据并完整包含必需集合且满足预算
-- **THEN** 接纳并在序列化/恢复后保留相同可解析票据
+#### Scenario: 阈值按窗口派生
 
-### Requirement: 卡片预算与失去导航显式化
+- **GIVEN** MaxTokens=128000、CompressThreshold 为默认值
+- **WHEN** 读取折叠窗口的阈值
+- **THEN** `VolumeThresholdBytes` SHALL 等于按预算字符/令牌比换算后的窗口份额，而不是固定的卡片预算
 
-下沉 SHALL 只减少导航视图，不修改原始事实；earlier 计数 SHALL 表示下沉项。单条卡片超预算仍 SHALL 有明确处理，保留票据与截断标记；必需票据无法在预算内表达时 SHALL 返回 budget-unrepresentable 状态并可观测，不无界扩张或静默删票据。under-budget 轮 SHALL 不触发新整理、不改变既有前缀。
+#### Scenario: 显式窗口优先
 
-#### Scenario: 无模型或调用失败
-- **WHEN** 卡片超限且模型缺失/失败
-- **THEN** 原卡片走确定性下沉，有计数，原文仍受原有 TTL 而非被本次压缩删除
+- **GIVEN** 显式设置 KeepRecentTasks=7 且 MaxTokens 为正
+- **WHEN** 规划折叠
+- **THEN** SHALL 使用 7 作为保留窗口，而不是默认的 2
 
-#### Scenario: 单条超长卡片
-- **WHEN** 只余一条卡片仍超上限
-- **THEN** 截短文字并保留票据与标记；若连必需票据也放不下，明确报告预算无法表达
+### Requirement: 上下文维护五项不变量
 
-### Requirement: task settled 类外部输入纳入票据化折叠
+上下文维护 SHALL 满足：I1 有界（折叠后投影条目数与段数、窗口成界，不随历史长度无界增长）；I2 稠密（不产生空摘要或零信息占位符）；I3 锚定（历史综述常驻投影首位并参与装配）；I4 无损（被折原文永在事实链，可经 `[evt_key]` 票据召回）；I5 原生前沿（进行中段与最近窗口保持原生条目，不改写为摘要）。
 
-压缩折叠判定 SHALL 把 content 以 `[task settled]` 前缀（或等价 Metadata 子型标记）的 external_input 事件识别为「结算通知类」，无论其所处段龄一律纳入折叠范围；多条连续结算 ref SHALL 合并为单张汇总卡片，每条一行 `✗/✓ [evt_key] 摘要行`，卡片 SHALL 携带「原文可用 recall 按 evt_key 召回」的提示。结算通知的落库语义不变（逐事件事实链记录 + registry 归并），本折叠只作用于投影呈现层。
+#### Scenario: 长上下文有界且无占位符
 
-#### Scenario: 结算风暴被折叠回收
-
-- **WHEN** 投影中存在 50 条 `[task settled]` external_input 且压缩触发
-- **THEN** 它们合并为单张汇总卡片（50 行票据），投影字符量下降 ≥80%，事实链与 registry 归并不受影响
-
-#### Scenario: 原文可按 evt_key 召回
-
-- **WHEN** 模型或宿主对折叠卡片中任一 `[evt_key]` 发起 recall
-- **THEN** 对应原始结算事件全文可从事实链取回
-
-### Requirement: 批量退役在源头汇总为单事件
-
-reconcile/orphan 通道的批量退役 SHALL 在任务层聚合：per-task 的 settle 记录保持逐条 record-only 落链（registry 归并数据源不变），bus 对外只发布一条汇总 external_input（N 行票据摘要）。该回调为可选——未注册时保持逐个 settle 发布的既有行为。
-
-#### Scenario: 批量退役不再产生事件风暴
-
-- **WHEN** 一次 reconcile 退役 30 个孤儿任务且宿主注册了批量回调
-- **THEN** 事实链新增 30 条 settle 记录（record-only），bus/投影只出现 1 条汇总 external_input
-
-### Requirement: 浓缩导航丢失可观测
-
-浓缩守卫的必需集（首尾/★）之外，被浓缩文本吞入散文的每张 recall 票据都是导航地址丢失。守卫 SHALL 保持浓缩的压缩权衡不因此失效，但此类消亡 MUST NOT 静默：接纳前 SHALL 计数并告警（累计值可经诊断面读取），事件本体仍按时间范围可召回的事实不受影响。
-
-#### Scenario: 非必需票据被折入散文被计数
-
-- **WHEN** 合法浓缩输出保留首尾/★ 票据但省略了旧半区其他票据
-- **THEN** 该文本仍被接纳，但丢失票据数计入累计计数并记 Warn，诊断 getter 可读出非零值
-
-#### Scenario: 全票据存活不告警
-
-- **WHEN** 浓缩输出携带输入旧半区全部票据
-- **THEN** 计数不增长、无告警
-
-### Requirement: L3 预算升级的未消费遥测豁免
-
-compaction 的 L3 升档路径（buildRetainedRefs 预算升级）MUST 跳过含未消费遥测通知的段——未读事件不得被预算判决静默归档；豁免导致无法达标时 SHALL 如实报告而非强行归档。对话通道的定级表（deterministicLevel）、骨架红线与滚动综述机制保持不变。
-
-#### Scenario: 混合段的豁免判定
-
-- **WHEN** 一个候选 L3 段同时含对话消息与一条未消费 settle
-- **THEN** 该段被跳过，压缩继续评估其他段；全部候选被豁免时本轮 compaction 报告未达标原因
-
+- **GIVEN** 一个含大量历史回合与一个进行中段的投影，容量超过阈值
+- **WHEN** 执行折叠并装配上下文
+- **THEN** 历史回合 SHALL 收敛为少量历史综述/段折叠条目，而非逐条重放
+- **AND** 上下文中 SHALL NOT 出现空摘要或零信息占位符

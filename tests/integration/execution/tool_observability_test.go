@@ -90,10 +90,10 @@ func TestToolRoundLeavesADebugTrail(t *testing.T) {
 
 	trail := capture.join()
 	for _, want := range []string{
-		"tagent: consumer drive start agent=agent-a session=session-observability invocation=inv-observability",
-		"tagent: consumer tool admitted invocation=inv-observability call=call-1 tool=probe task=task-",
+		"tagent: consumer segment open agent=agent-a session=session-observability invocation=session-observability#",
+		"tagent: consumer tool admitted invocation=session-observability#",
 		"tagent: consumer after-pass agent=agent-a fact=",
-		"tagent: consumer drive end invocation=inv-observability decisions=2 terminal=completed",
+		"tagent: consumer segment close invocation=session-observability#",
 	} {
 		if !strings.Contains(trail, want) {
 			t.Fatalf("the debug trail lacks %q;\ntrail:\n%s", want, trail)

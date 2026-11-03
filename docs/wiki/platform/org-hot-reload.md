@@ -104,17 +104,17 @@ flowchart TD
 <a id="close-drain"></a>
 ## 八、关闭必须覆盖排空期间落位的义务
 
-`agent.Shutdown.Close`：先立 `refusing`（此后新输入 `ErrShutdownRefused`），再轮询真实结算，最后交 `DrainReport{Drained, Unsettled}` 或 `ErrDrainUnsettled`。登记面（`Track`）覆盖"经 task face 受理的调用"，所以排空期间落位的义务同样被结算——同一任务登记两次仍是同一个任务。
+关闭分两段：先 `Host.Quiesce` 关 intake 闸门（外部新输入被具名拒绝，关闭期内由已受理义务派生的回合仍受受理）并**静止到不动点**，再由 `Host.Close` 停消费者与设施。不动点由同源判据 `Unsettled()` 求值——关闭、重启、报告读同一处。出口三态：`Quiesced`（自然收束）／`Cut`（预算到点，余量在链上由重启续上，**正常返回**）／`Broken`（不可判，告警）；`Cut`/`Broken` 的 `DrainReport.Unsettled` 逐地址报出未消费通知与未终态工作。
 
 宿主关闭次序（次序即契约）：
 
 | 序 | 动作 | 为什么在这个位置 |
 |---|---|---|
-| 1 | 结算驱动 `Stop` | 先停会自己发起回合的那一面 |
-| 2 | 反思调度 `Stop` | 再停周期性的自省 |
+| 1 | `Quiesce`（关 intake 闸门 + 静止到不动点） | 先拒绝新输入再等已受理的收敛；静止期派生回合仍受受理 |
+| 2 | 消费循环 / 结算驱动 / 反思调度 `Stop` | 不动点已判，会自己发起回合的面才依次停 |
 | 3 | HTTP face `stop` | 不再接新请求，不再有新 reload |
-| 4 | 执行资源 `Close` | 归还进程内执行槽；未释放的具名告警 |
-| 5 | `Run.Close`（排空） | 等真实结算；排空失败也必须继续收尾 |
+| 4 | 执行资源 `Close` + 等收尾 | 归还进程内执行槽；未释放的具名告警 |
+| 5 | `Run.Close` | 排空之后再关运行；失败也必须继续收尾 |
 | 6 | `CloseMCPServers` | **共享资源最后**：仍被借用的服务器不在中途拆除 |
 | 7 | `sealCapture` | 排空之后再封轨迹，一次账户覆盖整次运行 |
 | 8 | `stopTelemetry` | 观测最后退出，前面的失败仍然可见 |
@@ -165,7 +165,7 @@ flowchart TD
 |---|---|---|
 | `providers.*` 端点热切换 | 只在"版本身份（provider/model）移动触发租约重建"时被重读；只改端点不动模型名时既不换代也不被拒，现值静默失效。它没进拒表，因为"新增 provider 键 + 换模型"是当前可用的热路径，按字段拒会误伤 | 端点并入版本身份，或"端点热切换"独立提案 |
 | 回滚无生产入口 | `Publisher.Rollback` / `RollbackConfig` 已实现（上一代单槽、指纹必须与来源一致、回滚同样前进序号、结果记 `PublishRolledBack`），但只有测试调用它，`Host` 没有暴露回滚入口 | 接上宿主入口时必须同时给出"何时可回滚"的可观察判据 |
-| 四通道热矩阵无生产消费者 | `runtime/state/channels.go` 的 `Channel` / `Dimension` / `ChannelMatrix` / `Route` / `Router` 承载"每个维度只归一个通道"的判据，目前只有测试引用；宿主真正的三档判据在 `assembly/host_reload.go` | 二者合流成一条判据（把宿主档位读成矩阵的一个视图），或明确矩阵只服务别的接缝 |
+| 四通道热矩阵（已删除） | `runtime/state/channels.go` 已删除，矩阵不是第二权威、也不再被任何代码读取。每个维度只归一条热通道的唯一判据是 `assembly/host_reload.go` 的三档；每次判档落下的 `config_change` 事实链（`config_change_dimension`）就是通道归属的唯一记录 | 不恢复矩阵；若要只读视图，只从 `config_change` 事实链生成 |
 | 重入判定缺位 | 宿主当前不允许 agent 集合变化，所以"同名成员在排空 / 已开始关闭 / 已退出"三态重入不存在；退役台账只覆盖"代被取代" | 集合热增删若解禁，必须在任何资源建立之前补回三态门 |
 | `app` 段无常驻消费者 | 原样携带、不声称应用、也不拒绝 | 部署方若缓存该段需自行重读源文件 |
 

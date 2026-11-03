@@ -79,14 +79,12 @@ flowchart TB
 | 遇到的问题 | tagent 中的机制与取舍 |
 |---|---|
 | 工具受理了，结果却没有回到后续处理 | 区分受理、任务终态、通知投递与消费；结果走正式回流路径 |
-| 后台执行仍拖住新消息，输入被每次调用边界拆开 | next 正在收敛到每会话持续消费；相关红锚公开保留 |
+| 后台执行拖住新消息 | 每地址一个常驻消费循环：慢工具不挡新输入，先到先消费，晚到进下一段 |
 | 历史越来越长，压缩后又需要查原文 | 三龄段折叠、Full／Ticket／Summary 预算呈现、`recall_get` 分段续读与 `recall_trace` |
 | 正文已经产生，发送中断后永久漏送 | 发送前记录持久 `owed`，确认后销账，重启补交；存在发送成功但回执未落盘的重复窗口 |
 | 异步工作跨越模型／配置更新 | 发起时绑定与在途执行快照；新发布不改写已借用的执行依据 |
 | 环境输入与反思反复激活，产生无效工作或打扰 | 输入策略、授权范围、反思水位与节奏、调用治理和交付审核；需要运行证据检验 |
 | 进程已死，靠内部逻辑无法自救 | 外部环境监督和恢复信息；进程存活与任务语义进展分别监督 |
-
-记录实际模型请求与工具结果，也能为评测、排查和训练数据导出提供证据；这不表示框架已实现自动在线权重训练。
 
 ## 冒烟与吞吐评估
 
@@ -105,7 +103,7 @@ flowchart TB
 
 | 入口 | 用途 |
 |---|---|
-| [项目导览](docs/PROJECT.md)、[机制导览](docs/wiki/mechanism-tour.md) | 理解问题、数据流与核心机制 |
+| [机制导览](docs/wiki/mechanism-tour.md)、[事件流](docs/wiki/agent/event-flow.md) | 理解数据流与核心机制：一条事实链、每地址一个常驻消费循环、折叠按消费关系归段 |
 | [扩展契约](docs/EXTENSIONS.md)、[API](docs/api/index.md) | 嵌入框架、实现插件与宿主 |
 | [WeChat 示例](examples/wechat-bot/)、[CLI 示例](examples/cli-host/) | 两种传输与装配形态 |
 | [运行与门禁](docs/OPERATION.md)、[实测报告](docs/SMOKE-RESULTS.md) | 验证、恢复、可观测与当前边界 |
@@ -123,10 +121,7 @@ go test ./tests/integration/... -short -count=1
 
 ## 参考与致谢
 
-- 感谢 [tRPC-Agent-Go](https://github.com/trpc-group/trpc-agent-go) 的维护者与贡献者，为 tagent 提供底层框架与工具生态。
-- 感谢 DeepSeek Harness 团队公开 [Super-agent 设计探索](https://mp.weixin.qq.com/s/zoS7GlReWPhfCjENGxXCdg)、[DSH 架构文档](https://github.com/deepseek-ai/deepseek-harness/blob/master/docs/architecture.md)和 [dsh-superagent-prototype](https://github.com/deepseek-ai/dsh-superagent-prototype)。这些材料为持续运行的 Agent、事件驱动与插件组合提供了值得学习的讨论和实践。
-- 相关探索：[SpellingDragon/dsh-superagent-prototype](https://github.com/SpellingDragon/dsh-superagent-prototype) 是基于上述上游原型的实验 fork。其 `tagent` 分支尝试将调用边界约束、可恢复交付责任和渐进治理（record → warn → enforce）等实践用于原型；运行仍由 DSH 承担，未移植 tagent 运行时。
-
-tagent 是独立维护的项目，以上引用仅供技术阅读参考，不表示与 DeepSeek 存在隶属、合作或背书关系。实际依赖见 [go.mod](go.mod)。
+- 感谢 [tRPC-Agent-Go](https://github.com/trpc-group/trpc-agent-go) 的维护者与贡献者，为 tagent 提供底层框架与工具生态；感谢 DeepSeek Harness 团队公开的 [Super-agent 设计探索](https://mp.weixin.qq.com/s/zoS7GlReWPhfCjENGxXCdg)、[DSH 架构文档](https://github.com/deepseek-ai/deepseek-harness/blob/master/docs/architecture.md)与 [dsh-superagent-prototype](https://github.com/deepseek-ai/dsh-superagent-prototype)。
+- 相关探索：[SpellingDragon/dsh-superagent-prototype](https://github.com/SpellingDragon/dsh-superagent-prototype) 是上述上游原型的实验 fork，未移植 tagent 运行时。tagent 独立维护，以上引用仅供技术阅读参考，不表示隶属、合作或背书；实际依赖见 [go.mod](go.mod)。
 
 [Apache-2.0](LICENSE)

@@ -263,12 +263,13 @@ func TestEnvironmentBlockClosesTheRequestAssembly(t *testing.T) {
 		"- tools: (none)",
 		"- skills: (none)",
 		"- mcp: (none)",
-		"- tasks: 0 open",
-		"  - (none)",
 	} {
 		if !strings.Contains(block.Content, want) {
-			t.Fatalf("environment block = %q, want it to name %q beside the empty task table", block.Content, want)
+			t.Fatalf("environment block = %q, want it to name %q", block.Content, want)
 		}
+	}
+	if strings.Contains(block.Content, "- tasks:") {
+		t.Fatalf("environment block = %q, want no task line: the prompt carries no task account of the run", block.Content)
 	}
 }
 
@@ -362,7 +363,6 @@ func TestEnvironmentBlockNamesTheAvailableFaces(t *testing.T) {
 	for _, want := range []string{
 		"- skills: greet",
 		"- mcp: docs@http://mcp.local",
-		"- tasks: 0 open",
 	} {
 		if !strings.Contains(block.Content, want) {
 			t.Fatalf("environment block = %q, want it to name %q", block.Content, want)
@@ -388,12 +388,11 @@ func TestEnvironmentBlockNamesTheAvailableFaces(t *testing.T) {
 	}
 }
 
-// TestEnvironmentBlockNamesTheOpenObligations checks the asynchronous work the block reports.
-//   - a call another range left open is named as one open obligation under its task
-//   - the block of a run holding no obligation still carries the empty task table
+// TestEnvironmentBlockCarriesNoTaskTable checks that the block reports the faces a call can use and no account of the run's work.
+//   - a call another range left in flight adds no task line and no task row to the block
 //
 // 契约: docs/wiki/platform/platform-subsystems.md#composition-root
-func TestEnvironmentBlockNamesTheOpenObligations(t *testing.T) {
+func TestEnvironmentBlockCarriesNoTaskTable(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	started := make(chan struct{})
@@ -470,16 +469,12 @@ func TestEnvironmentBlockNamesTheOpenObligations(t *testing.T) {
 		t.Fatalf("message 0 = (%q, %q), want the range input ahead of the block", got[0].Role, got[0].Content)
 	}
 	block := got[1].Content
-	if !strings.Contains(block, "- tasks: 1 open") {
-		t.Fatalf("environment block = %q, want the one open obligation counted", block)
+	if strings.Contains(block, "- tasks:") {
+		t.Fatalf("environment block = %q, want no task line beside a call in flight: the prompt carries no task account of the run", block)
 	}
-	named := false
 	for _, line := range strings.Split(block, "\n") {
-		if strings.HasPrefix(line, "  - ") && strings.Contains(line, "task=") {
-			named = true
+		if strings.HasPrefix(line, "  - ") {
+			t.Fatalf("environment block = %q, want no task row: the prompt carries no task account of the run", block)
 		}
-	}
-	if !named {
-		t.Fatalf("environment block = %q, want the open obligation named beside the task it belongs to", block)
 	}
 }

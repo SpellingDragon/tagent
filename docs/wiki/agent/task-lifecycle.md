@@ -8,6 +8,8 @@
 ## 一、状态机：写权唯一，progress 是链上事实而非状态位
 `Status` 枚举 `StatusUnknown`（零值）/`StatusAccepted`/`StatusRunning`/`StatusSettled`/`StatusFailed`/`StatusCancelled`/`StatusAwaitingApproval`，外加一枚墓碑 `statusProgressRetired`：序号保留（状态按 ordinal 存储），读回即 `Running`——progress 从此是链上事实，不再是一种状态。`Advance` 四类具名拒绝：目标为零值（`ErrStatusUnknown`）、目标为 `Accepted`（`ErrIllegalTransition`）、已有终结事实（`ErrTerminalState`——终结一次性，迟到的结算信号被拒而**不复活**已终结任务）、审批等待的进出违规；迁移先经 commit carrier 落成事实才可见，重复 `MutationID` 幂等、同 id 异内容按 `ErrMutationConflict` 拒，终结即关执行义务。`ProgressReported` 只读：全链扫描（**不按 round**——折叠会推进 round），要求 `status==Running` 且有 `NoticeProgress`，不写 status/revision/mutation/obligation。task id 随机化：`mintTaskID` = `task-` + 16 随机字节十六进制（`crypto/rand`），取不到随机源即 panic——不猜、不排序、不做可预测编号。
 
+重入还有一条**同 id 新轮**的路：`Reactivate` 把一条 `Settled` 任务当成它的下一轮重新进入——任务身份不变，新轮拿到新的通知身份，并在提交口按 `ExpectedRevision` 判定，两次并发重激活只有一次落轮。它不是无条件的：`Failed` 与 `Cancelled` 各按名拒绝（`ErrReactivationFailed`／`ErrReactivationCancelled`，二者应改走新的派生身份，就地重入会盖掉链上已存的结局），轮次仍在飞同样按名拒绝（`ErrRoundInFlight`）。重激活落成 `reactivate:` 前缀的迁移事实，因此链上前一格是 `settled`、这一格是 `Running`，不需要额外报告字段。
+
 <a id="detach-suppression"></a>
 ## 二、脱离后的信号抑制：脱离态随执行现场外移，抑制判据留在这层
 判据原样保留：任务一旦脱离前台，此后的稳定/可疑信号被抑制、不外发，**完成与失败永远外发**；抑制的动机可核查——否则一个长期静默的服务会让看板反复摆动、回收日志刷屏。当前承载点已换：`tool/exec/state.go` 的 `StatePhase`（`stable`/`suspect`/`exited`/`released`）是**对资源的观测，不是对工作的裁定**（stable 不是成功、半帧不是完成），`runtime/task/logical.go` 的 `LogicalStatus`（`watch`/`stable`/`suspect`/`expired`/`timed-out`）只标记、不改状态机、不自动处置。于是本层只剩一条抑制判据：**只有终结外发**（`settled`/`failed`/`cancelled`），`accepted`/`progress` 从不点火。

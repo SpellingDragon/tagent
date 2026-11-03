@@ -47,8 +47,17 @@ var ErrResumeCancelled = errors.New("task: a cancelled task is resumed by relaun
 // change is reconciled before any repeat of it.
 var ErrCommitUncertain = errors.New("task: the commit outcome of this change is unknown")
 
-// RegistryOption configures an in-memory task registry at construction.
+// RegistryOption configures one in-memory task registry beyond its commit carrier
+// and admission face.
 type RegistryOption func(*MemoryRegistry)
+
+// WithActivity attaches the pulse the registry reports each time it applied a
+// committed fact: a close waiting on the rest criterion reads the pulse instead
+// of polling the account for the movement it already made. The pulse is a
+// report, never a judgment.
+func WithActivity(report func()) RegistryOption {
+	return func(r *MemoryRegistry) { r.activity = report }
+}
 
 // WithConcurrencyLimit caps how many tasks the registry holds non-terminal at once. An
 // admission past that limit is refused by name, and the tasks already admitted are kept.
@@ -56,21 +65,27 @@ func WithConcurrencyLimit(limit int) RegistryOption {
 	return func(r *MemoryRegistry) { r.limit = limit }
 }
 
-// obligationEntry pairs one open obligation with the delivery routing its
-// notification froze beside its delivery bookkeeping.
+// DefaultTerminalTTL is how long a registry keeps the record of a task after the terminal
+// outcome it holds, once its run applies the terminal TTL: the task_terminal_ttl of the
+// declaration vocabulary, read as the bound of the in-memory account rather than of the fact
+// chain. The record is a live read of a task, never the fact of it — every fact stays on the
+// chain — so a record pruned here costs a re-entry its target, not the history of the task.
+const DefaultTerminalTTL = 2 * time.Hour
+
+// WithTerminalTTL bounds how long the record of a terminal task is kept. A record whose
+// task reached a terminal outcome at least that long before a sweep reads is dropped, and a
+// call naming it answers ErrTaskNotFound — the refusal the send face renders as a task this
+// host holds no record of. A zero TTL keeps every record the registry ever admitted, so a
+// registry built beside none behaves exactly as it did before the bound existed.
+func WithTerminalTTL(ttl time.Duration) RegistryOption {
+	return func(r *MemoryRegistry) { r.terminalTTL = ttl }
+}
+
+// obligationEntry is one obligation the account still holds for a task: the
+// obligation itself and the routing its notification froze.
 type obligationEntry struct {
 	obligation Obligation
 	envelope   Envelope
-	// answered reports whether the target already refused this notification.
-	// The flag keeps its write authority because the answer it records has no
-	// fact carrier: the durable account stores the state of an obligation and
-	// never the words the target answered with, so no chain reads the refusal
-	// back. It also changes what the flush may do — a notification already
-	// answered is not offered again as though nothing had been said — so it is a
-	// decision input rather than a report. Recording the refusal in the account
-	// would be a new persistent surface, which the responsibility range of this
-	// change does not carry.
-	answered bool
 }
 
 // specDeclarer is the optional admission-material face a commit carrier may
@@ -120,7 +135,17 @@ type memoryTask struct {
 	admittedAt      time.Time
 	changedAt       time.Time
 	runSince        time.Time
-	reported        LogicalStatus
+	// ttlAnchor is the instant the task's time to live is counted from once a
+	// write-type re-entry moved it: the round the re-entry opened. It is a
+	// movement stamp like changedAt — reading it classifies the task and moves
+	// nothing — and a record whose anchor stands at its admission reads the same
+	// deadline it always did.
+	ttlAnchor time.Time
+	// reported is the verdict the detector read over the round the task is in, so it
+	// restarts where the round restarts: a suspected verdict read over the round before
+	// is never reported against the new one, and the new round is suspected only when
+	// its own threshold passes.
+	reported LogicalStatus
 }
 
 // MemoryRegistry is the in-memory task registry: it admits a task declaration, moves a
@@ -135,6 +160,17 @@ type MemoryRegistry struct {
 	limit     int
 	tasks     map[event.TaskID]*memoryTask
 	policy    Policy
+	now       func() time.Time
+	// terminalTTL is how long the record of a terminal task is kept: the sweep reads it on
+	// every admission, and a zero bound keeps every record.
+	terminalTTL time.Duration
+	// activity is the pulse the registry reports each time it applied a
+	// committed fact; nil reports nothing.
+	activity func()
+	// *movement is the private sequence of this account: every write of it
+	// advances the sequence, so a judgment that spans several accounts reads the
+	// accounts' sequences together instead of a mechanism wired beside them.
+	*movement
 }
 
 // The registry satisfies the task registry port.
@@ -150,6 +186,8 @@ func NewMemoryRegistry(carrier Commit, admission *MemoryAdmission, opts ...Regis
 		seq:       NewNoticeSequencer(),
 		tasks:     map[event.TaskID]*memoryTask{},
 		policy:    DefaultPolicy,
+		now:       time.Now,
+		movement:  newMovement(),
 	}
 	for _, opt := range opts {
 		opt(r)
@@ -168,6 +206,7 @@ func NewMemoryRegistry(carrier Commit, admission *MemoryAdmission, opts ...Regis
 func (r *MemoryRegistry) Register(ctx context.Context, spec Spec) (AdmissionReceipt, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	r.pruneTerminalLocked(r.now())
 	if spec.DedupKey != "" {
 		if existing, ok := r.admission.Lookup(spec.DedupKey); ok {
 			return AdmissionReceipt{
@@ -181,7 +220,7 @@ func (r *MemoryRegistry) Register(ctx context.Context, spec Spec) (AdmissionRece
 	if r.limit > 0 && r.activeCountLocked() >= r.limit {
 		return AdmissionReceipt{CallID: spec.CallID, Accepted: false, Kind: AdmissionRejected}, ErrConcurrencyLimit
 	}
-	admitted := time.Now()
+	admitted := r.now()
 	taskID := mintTaskID()
 	entry := &memoryTask{
 		spec:       spec,
@@ -275,6 +314,13 @@ func (r *MemoryRegistry) Advance(ctx context.Context, taskID event.TaskID, to St
 // lifecycle under the same task identity. A round already in flight refuses the
 // declaration, and so does a cancelled task. A repeated declaration of the same input
 // returns the fact already stored and opens no second obligation.
+//
+// The channel belongs to the state machine and carries no model tool face: the resume
+// tool the model used to call is gone (design DEL-3, a tool member the model never
+// sees again). The send tool's re-entry of a task reaches this state machine through
+// Reactivate and the continuation table instead, so the input channel stays beneath
+// both without a declaration of its own. It carries an event identity rather than free
+// text, so a call naming no identity opens no round.
 func (r *MemoryRegistry) Resume(ctx context.Context, taskID event.TaskID, input event.Event) (AdmissionReceipt, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -322,13 +368,15 @@ func (r *MemoryRegistry) Resume(ctx context.Context, taskID event.TaskID, input 
 
 // applyCommitLocked submits one record to the commit carrier and applies the stored
 // fact to the task: its status and revision move, the mutation is remembered, and each
-// notification the record carries opens a delivery obligation.
+// notification the record carries opens a delivery obligation. The applied fact is
+// reported through the activity pulse once it is visible to every reader, so a close
+// waiting on the account re-reads it instead of polling for it.
 func (r *MemoryRegistry) applyCommitLocked(ctx context.Context, entry *memoryTask, record CommitRecord) (CommitResult, bool, error) {
 	result, err := r.carrier.Commit(ctx, record)
 	if result != CommitCommitted {
 		return result, false, err
 	}
-	entry.markMovement(record.Status, time.Now())
+	entry.markMovement(record.Status, r.now())
 	entry.status = record.Status
 	entry.revision = record.ExpectedRevision + 1
 	entry.mutations[record.MutationID] = record
@@ -338,7 +386,19 @@ func (r *MemoryRegistry) applyCommitLocked(ctx context.Context, entry *memoryTas
 			envelope:   envelope,
 		})
 	}
+	r.noteActivity()
 	return CommitCommitted, true, nil
+}
+
+// noteActivity reports one applied fact through the attached pulse, or nothing
+// while no pulse is attached, and advances the sequence the rest criterion is
+// fenced by. The caller holds the registry lock, so both the pulse and the
+// movement are reported from the one writer that applied the fact.
+func (r *MemoryRegistry) noteActivity() {
+	r.movement.Add(1)
+	if r.activity != nil {
+		r.activity()
+	}
 }
 
 // repeatOf reports the outcome of a mutation the task already stores and whether the
@@ -383,6 +443,44 @@ func (r *MemoryRegistry) activeCountLocked() int {
 		}
 	}
 	return count
+}
+
+// PruneTerminal drops the records whose task reached a terminal outcome at least the
+// terminal TTL of this registry before at, and reports how many it dropped. The sweep is the
+// one place a record leaves the registry, so a re-entry naming a pruned task answers
+// ErrTaskNotFound instead of opening a round of a state nobody kept.
+//
+// The sweep reads the movement stamp that placed the task at its terminal, so a task that was
+// re-entered after it settled counts from the terminal of the round it ended in. A
+// non-terminal task is never dropped however long it stands: a round in flight is the one
+// state a sweep must not silently withdraw, and a task stuck in one is what the broken-round
+// account reports instead.
+func (r *MemoryRegistry) PruneTerminal(at time.Time) int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.pruneTerminalLocked(at)
+}
+
+// pruneTerminalLocked drops one registry's expired terminal records under the lock its reads
+// take and reports how many it dropped. Every admission sweeps beside the record it adds, so
+// the account of a run that keeps admitting is bounded by the terminal TTL it was built with.
+func (r *MemoryRegistry) pruneTerminalLocked(at time.Time) int {
+	if r.terminalTTL <= 0 {
+		return 0
+	}
+	dropped := 0
+	for taskID, entry := range r.tasks {
+		if !isTerminal(entry.status) || entry.changedAt.IsZero() {
+			continue
+		}
+		if at.Sub(entry.changedAt) < r.terminalTTL {
+			continue
+		}
+		delete(r.tasks, taskID)
+		r.admission.forget(taskID)
+		dropped++
+	}
+	return dropped
 }
 
 // envelope freezes the delivery routing of one notification of this task: the

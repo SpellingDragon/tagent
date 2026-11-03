@@ -28,3 +28,26 @@ wechat-bot 的 HTTP API server MUST 由宿主代码持有（http.Server）：重
 - **WHEN** 进程收到 SIGTERM 且 HTTP 正在重试等待
 - **THEN** 重试循环 MUST 立即取消并走 Shutdown，进程 MUST NOT 因 HTTP goroutine 阻塞退出
 
+### Requirement: 探针五态分类
+
+restart / maintenance 健康探针 SHALL 区分五态：200→健康；401/403→AUTH_FAIL（告警、**不触发杀进程**）；超时→等待窗口内正常状态；连接拒绝→等待窗口内正常状态。鉴权失败 MUST NOT 被视作进程失效。
+
+#### Scenario: 鉴权失败不杀进程
+
+- **WHEN** 前置探测收到 401 或 403
+- **THEN** 记 AUTH_FAIL 告警并退出判定，不进入重建/停止旧进程路径
+
+#### Scenario: 五态各自可辨
+
+- **WHEN** 分别模拟 200/401/403/超时/拒连
+- **THEN** 各态进入正确分支（健康/告警/等待/等待/等待）
+
+### Requirement: 契约与说明一致
+
+healthz 的鉴权契约 SHALL 与运维脚本注释一致（实现鉴权不豁免，或显式修订条款并同步全部说明）；MUST NOT 存在"注释称受保护而实现免鉴权"的脱节。
+
+#### Scenario: 注释与实现一致
+
+- **WHEN** 阅读脚本注释并实测 healthz
+- **THEN** 二者对鉴权的陈述一致
+

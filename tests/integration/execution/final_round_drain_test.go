@@ -2,6 +2,7 @@ package execution
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -56,23 +57,27 @@ func TestFinalRoundClosesBesideRealDrain(t *testing.T) {
 	rig := newFinalRoundRig(t, provider, tool, owner)
 	rig.loop.SetFinalRound(agent.FinalRoundPolicy{MaxRounds: 1, Timeout: 5 * time.Second, Prompt: finalRoundPrompt})
 
-	turn, err := rig.loop.Drive(ctx, agent.Invocation{
-		InvocationID: rig.invocationID,
-		Address:      owner,
-		Instance:     rig.instance,
-		Ready: []event.Event{{
-			Key:     "event-final",
-			Message: model.Message{Role: model.RoleUser, Content: "start"},
-		}},
+	key := rig.history.land(owner, event.Event{
+		Key:     "event-final",
+		Type:    event.TypeExternalInput,
+		Message: model.Message{Role: model.RoleUser, Content: "start"},
 	})
+	consumer := rig.consumers.Ensure(owner)
+	if consumer == nil {
+		t.Fatalf("the resident consumer of %s/%s is unavailable", owner.AgentID, owner.SessionID)
+	}
+	consumer.Wake()
+	closed, err := consumer.WaitAnswer(ctx, []event.EventID{key})
 	if err != nil {
 		t.Fatalf("drive to the spent round budget: %v", err)
 	}
+	awaitFinalRoundRest(t, consumer)
+	turn := closed.Turn
 	if turn.FinalRound != agent.FinalRoundRounds {
 		t.Fatalf("final round reason = %q, want %q", turn.FinalRound, agent.FinalRoundRounds)
 	}
-	if len(turn.Decisions) != 2 || turn.Terminal != model.KindCompleted {
-		t.Fatalf("turn = (%v, %d decisions), want the tool round beside the closing round", turn.Terminal, len(turn.Decisions))
+	if turn.DecisionCount != 2 || turn.Terminal != model.KindCompleted {
+		t.Fatalf("turn = (%v, %d decisions), want the tool round beside the closing round", turn.Terminal, turn.DecisionCount)
 	}
 	if got := rig.marks.recorded(); len(got) != 2 || got[0] || !got[1] {
 		t.Fatalf("closing-round marks of the request boundaries = %v, want only the closing round marked", got)
@@ -95,35 +100,34 @@ func TestFinalRoundClosesBesideRealDrain(t *testing.T) {
 		t.Fatalf("model requests = %d, want the tool round beside the closing round", got)
 	}
 
-	report, err := rig.shutdown.Close(ctx, agent.CloseRequest{
-		Address:  owner,
-		Deadline: time.Now().Add(10 * time.Second),
-	})
+	report, err := rig.close(ctx)
 	if err != nil || !report.Drained || len(report.Unsettled) != 0 {
-		t.Fatalf("close after the closing round = (%+v, %v), want the drain beside real termination", report, err)
+		t.Fatalf("close after the closing round = (%+v, %v), want the quiesce beside real termination", report, err)
 	}
 	admitted := rig.gate.taskIDs()
 	if len(admitted) != 1 {
-		t.Fatalf("tasks tracked by the close face = %v, want the one task the tool round opened", admitted)
+		t.Fatalf("tasks admitted by the tool face = %v, want the one task the tool round opened", admitted)
 	}
-	open, err := rig.shutdown.Obligations(ctx, admitted[0])
+	open, err := rig.manager.Obligations(ctx, admitted[0])
 	if err != nil || open.Count != 0 {
-		t.Fatalf("obligations of the admitted task after the drain = (%+v, %v), want every obligation settled for real", open, err)
+		t.Fatalf("obligations of the admitted task after the quiesce = (%+v, %v), want every obligation settled for real", open, err)
 	}
 }
 
 // finalRoundRig is the host loop of the closing-round case: the task manager
-// whose mailbox is the delivery face, the close face that fronts those
-// obligations, and the transcript face the drive commits into.
+// whose mailbox is the delivery face, the task face its criterion reads, the
+// writer ledger of the loop, and the transcript face the drive commits into.
 type finalRoundRig struct {
 	instance     event.InstanceID
 	invocationID event.InvocationID
 	bindings     *state.Bindings
 	loop         *agent.Loop
-	shutdown     *agent.Shutdown
+	manager      *task.MemoryManager
+	registry     *task.MemoryRegistry
 	gate         *finalRoundGate
 	history      *finalRoundHistory
 	marks        *finalRoundMarks
+	consumers    *agent.Consumers
 
 	mu    sync.Mutex
 	facts map[event.EventID]model.Message
@@ -131,8 +135,8 @@ type finalRoundRig struct {
 }
 
 // newFinalRoundRig builds the host loop over the given provider and tool, with
-// the tool registered through the task wrapper and its admissions tracked
-// beside the close face.
+// the tool registered through the task wrapper and the loop's productions
+// registered beside the writer ledger the close reads.
 func newFinalRoundRig(t *testing.T, provider model.Model, tool *convTool, owner event.Address) *finalRoundRig {
 	t.Helper()
 	rig := &finalRoundRig{
@@ -146,13 +150,11 @@ func newFinalRoundRig(t *testing.T, provider model.Model, tool *convTool, owner 
 	admission := task.NewMemoryAdmission()
 	registry := task.NewMemoryRegistry(task.NewMemoryCommit(nil), admission)
 	manager := task.NewMemoryManager(registry, nil, task.WithEnvelopeDeliverer(rig.envelope))
-	rig.shutdown = agent.NewShutdown(&delegationFace{MemoryManager: manager, MemoryRegistry: registry})
-	ledger := agent.NewDelegator(rig.shutdown, rig.bindings, rig.instance)
-	rig.shutdown.SetReconciler(ledger)
+	rig.manager = manager
+	rig.registry = registry
 	rig.gate = &finalRoundGate{
 		inner: task.Wrap(manager, tool,
 			task.WithResultRecorder(rig.record), task.WithMailbox(rig.mail)),
-		shutdown: rig.shutdown,
 	}
 	plan, err := state.NewStatePlan(state.OrgPlan{Declaration: &config.Declaration{
 		Entry:  string(owner.AgentID),
@@ -171,8 +173,45 @@ func newFinalRoundRig(t *testing.T, provider model.Model, tool *convTool, owner 
 	rig.loop = agent.NewLoop(rig.bindings, state.NewOccupancy(), rig.instance, rig.resolve)
 	rig.loop.SetHistory(rig.history)
 	rig.loop.SetRequestFace(rig.marks.face)
-	rig.loop.SetWatch(rig.shutdown.Watch)
+	rig.consumers = agent.NewConsumers(rig.loop, context.Background(), nil)
+	rig.loop.SetConsumers(rig.consumers)
+	t.Cleanup(rig.consumers.Stop)
 	return rig
+}
+
+// finalRoundCriterion is the rest criterion of the closing-round case: the task
+// face of the rig, beside the mailbox answer no notification of this case stands
+// in.
+type finalRoundCriterion struct {
+	*task.MemoryManager
+	*task.MemoryRegistry
+}
+
+// Unconsumed reports the notifications no consumption confirmed; this case
+// settles its notifications through the manager alone.
+func (c finalRoundCriterion) Unconsumed(ctx context.Context) ([]task.UnsettledNotice, error) {
+	return c.MemoryManager.Owed(ctx)
+}
+
+// Unanswered reports the input rounds a session chain holds with no answer; this
+// case drives its ranges through the manager alone.
+func (finalRoundCriterion) Unanswered(context.Context) ([]task.UnsettledInput, error) {
+	return nil, nil
+}
+
+// close evaluates one close over the rest criterion of the rig and the writer
+// ledger beside it, so the case reports exactly what the production close reads.
+func (r *finalRoundRig) close(ctx context.Context) (agent.DrainReport, error) {
+	read := task.ReadUnsettled(ctx, finalRoundCriterion{MemoryManager: r.manager, MemoryRegistry: r.registry}, nil)
+	stopped, open := r.loop.Stopped()
+	report := agent.DrainReport{Drained: read.Resting() && stopped}
+	if !stopped {
+		report.Unsettled = agent.WriterObligations(open)
+	}
+	if !report.Drained {
+		return report, agent.ErrDrainUnsettled
+	}
+	return report, nil
 }
 
 // envelope reports the acceptance of every notification the manager offers for
@@ -182,9 +221,15 @@ func (r *finalRoundRig) envelope(context.Context, task.Envelope) (task.DeliveryA
 }
 
 // mail admits one settled notification into the mailbox of this rig and hands
-// it back into the invocation that issued the call.
-func (r *finalRoundRig) mail(_ context.Context, notice task.Notice) error {
-	r.loop.Backflow(r.invocationID, notice)
+// it back into the invocation that issued the call: the call frame names the
+// resident segment, so the result reaches that segment rather than a drive
+// identity minted beside it.
+func (r *finalRoundRig) mail(ctx context.Context, notice task.Notice) error {
+	invocation := r.invocationID
+	if frame, ok := task.CallFrameFrom(ctx); ok && frame.Identity.InvocationID != "" {
+		invocation = frame.Identity.InvocationID
+	}
+	r.loop.Backflow(invocation, notice)
 	return nil
 }
 
@@ -215,11 +260,9 @@ func (r *finalRoundRig) resolve(id event.EventID) (model.Message, bool) {
 }
 
 // finalRoundGate is the tool face of the closing-round case: it hands every
-// call to the task wrapper and records the task of each fresh admission beside
-// the close face, so the drain settles the obligations the drive really opened.
+// call to the task wrapper and records the task each fresh admission opened.
 type finalRoundGate struct {
-	inner    trpctool.CallableTool
-	shutdown *agent.Shutdown
+	inner trpctool.CallableTool
 
 	mu    sync.Mutex
 	count int
@@ -229,7 +272,7 @@ type finalRoundGate struct {
 // Declaration returns the declaration of the wrapped tool unchanged.
 func (g *finalRoundGate) Declaration() *trpctool.Declaration { return g.inner.Declaration() }
 
-// Call admits one call through the task wrapper and tracks the task it opened.
+// Call admits one call through the task wrapper and records the task it opened.
 func (g *finalRoundGate) Call(ctx context.Context, jsonArgs []byte) (any, error) {
 	answer, err := g.inner.Call(ctx, jsonArgs)
 	if receipt, ok := answer.(task.AdmissionReceipt); ok && receipt.Accepted {
@@ -237,7 +280,6 @@ func (g *finalRoundGate) Call(ctx context.Context, jsonArgs []byte) (any, error)
 		g.count++
 		g.tasks = append(g.tasks, receipt.TaskID)
 		g.mu.Unlock()
-		g.shutdown.Track(receipt.TaskID)
 	}
 	return answer, err
 }
@@ -278,15 +320,32 @@ func (m *finalRoundMarks) recorded() []bool {
 	return append([]bool(nil), m.marks...)
 }
 
-// finalRoundHistory keeps one transcript per session address.
+// finalRoundHistory keeps one transcript per session address beside the facts
+// the resident consumer pulls the next decision from.
 type finalRoundHistory struct {
 	mu        sync.Mutex
 	bySession map[event.SessionID][]model.Message
+	facts     []event.Event
 }
 
 // newFinalRoundHistory returns an empty session transcript face.
 func newFinalRoundHistory() *finalRoundHistory {
 	return &finalRoundHistory{bySession: map[event.SessionID][]model.Message{}}
+}
+
+// land commits one event on the rig's own chain and answers the identity it
+// carries, so the resident consumer pulls the very input the case admitted.
+func (h *finalRoundHistory) land(addr event.Address, evt event.Event) event.EventID {
+	evt.Owner = addr
+	evt.Source = addr
+	evt.Target = addr
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if evt.Key == "" {
+		evt.Key = event.EventID(fmt.Sprintf("fact-final-chain-%d", len(h.facts)+1))
+	}
+	h.facts = append(h.facts, evt)
+	return evt.Key
 }
 
 // SessionHistory reports the transcript accumulated for one session.
@@ -303,9 +362,37 @@ func (h *finalRoundHistory) CommitHistory(addr event.Address, msgs []model.Messa
 	h.bySession[addr.SessionID] = append(h.bySession[addr.SessionID], msgs...)
 }
 
-// SessionFacts reports no fact of the session: this rig keeps the transcript alone and
-// commits no chain beside it, so a decision boundary of a drive reads no input again.
-func (h *finalRoundHistory) SessionFacts(event.Address) []event.Event { return nil }
+// SessionFacts reports the facts of one session in commit order: the input the
+// resident consumer pulls its segment from.
+func (h *finalRoundHistory) SessionFacts(addr event.Address) []event.Event {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	out := make([]event.Event, 0, len(h.facts))
+	for _, evt := range h.facts {
+		if chainSessionOf(evt) != addr.SessionID {
+			continue
+		}
+		if addr.AgentID != "" && chainAgentOf(evt) != addr.AgentID {
+			continue
+		}
+		out = append(out, evt)
+	}
+	return out
+}
+
+// awaitFinalRoundRest waits until the address consumer stands between segments:
+// the close that follows reads the writer ledger and must see the pass the
+// segment ran already released.
+func awaitFinalRoundRest(t *testing.T, consumer *agent.Consumer) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for !consumer.Resting() {
+		if time.Now().After(deadline) {
+			t.Fatal("the address consumer never returned to rest after its segment closed")
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
 
 // finalRoundAnswer reports the content of the message one transcript carries in
 // answer of the named call.

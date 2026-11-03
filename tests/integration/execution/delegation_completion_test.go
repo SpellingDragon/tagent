@@ -36,9 +36,9 @@ func TestDelegationCompletion(t *testing.T) {
 		addrB := event.Address{AgentID: "agent-b", SessionID: "session-b"}
 		addrC := event.Address{AgentID: "agent-c", SessionID: "session-c"}
 
-		turnA := rig.driveTurn(t, ctx, rig.bindings, "inv-a", event.Address{AgentID: "agent-a", SessionID: "session-a"}, "run a")
-		if len(turnA.Decisions) != 1 || turnA.Decisions[0].Binding.Model != modelA1 {
-			t.Fatalf("turn a = %d decisions on %v, want one decision on the first generation", len(turnA.Decisions), turnA.Decisions)
+		turnA, decisionA := rig.driveTurn(t, ctx, rig.bindings, "inv-a", event.Address{AgentID: "agent-a", SessionID: "session-a"}, "run a")
+		if turnA.DecisionCount != 1 || len(modelA1.recorded()) != 1 {
+			t.Fatalf("turn a = (%d decisions, %d first-generation requests), want one decision on the first generation", turnA.DecisionCount, len(modelA1.recorded()))
 		}
 		handleA, err := rig.bindings.Borrow(ctx, "agent-a")
 		if err != nil {
@@ -48,9 +48,9 @@ func TestDelegationCompletion(t *testing.T) {
 
 		receiptA, err := rig.ledger.Delegate(ctx, agent.Delegation{
 			InvocationID: "inv-a",
-			DecisionID:   turnA.Decisions[0].DecisionID,
+			DecisionID:   decisionA,
 			CallID:       "call-a-1",
-			Target:       addrB,
+			Sites:        agent.DelegationSites{Target: addrB},
 			Ref:          refA,
 		})
 		if err != nil {
@@ -72,8 +72,8 @@ func TestDelegationCompletion(t *testing.T) {
 			t.Fatalf("view of inv-a = %+v, want exactly the one delegation it issued", recordA)
 		}
 		rec := recordA[0]
-		if rec.TaskID != t1 || rec.InvocationID != "inv-a" || rec.DecisionID != turnA.Decisions[0].DecisionID ||
-			rec.CallID != "call-a-1" || rec.Target != addrB || rec.Ref != refA {
+		if rec.TaskID != t1 || rec.InvocationID != "inv-a" || rec.DecisionID != decisionA ||
+			rec.CallID != "call-a-1" || rec.Sites.Target != addrB || rec.Ref != refA {
 			t.Fatalf("delegation record = %+v, want the call association of the admitted call on target %v", rec, addrB)
 		}
 		if rec.Status != task.StatusAccepted {
@@ -89,9 +89,9 @@ func TestDelegationCompletion(t *testing.T) {
 		if err != nil {
 			t.Fatalf("take the delegated turn's borrowing face: %v", err)
 		}
-		turnB := rig.driveTurn(t, ctx, borrowB, "inv-b", addrB, "run b")
-		if len(turnB.Decisions) != 1 || turnB.Decisions[0].Binding.Model != modelB1 {
-			t.Fatalf("turn b bound %v, want the generation the initiating reference named", turnB.Decisions)
+		turnB, decisionB := rig.driveTurn(t, ctx, borrowB, "inv-b", addrB, "run b")
+		if turnB.DecisionCount != 1 || len(modelB1.recorded()) != 1 {
+			t.Fatalf("turn b = (%d decisions, %d initiating-generation requests), want the generation the initiating reference named", turnB.DecisionCount, len(modelB1.recorded()))
 		}
 		latest, err := rig.bindings.Borrow(ctx, "agent-b")
 		if err != nil {
@@ -111,9 +111,9 @@ func TestDelegationCompletion(t *testing.T) {
 		refB := handleB.Ref
 		receiptB, err := rig.ledger.Delegate(ctx, agent.Delegation{
 			InvocationID: "inv-b",
-			DecisionID:   turnB.Decisions[0].DecisionID,
+			DecisionID:   decisionB,
 			CallID:       "call-b-1",
-			Target:       addrC,
+			Sites:        agent.DelegationSites{Target: addrC},
 			Ref:          refB,
 		})
 		if err != nil {
@@ -127,9 +127,9 @@ func TestDelegationCompletion(t *testing.T) {
 		if err != nil {
 			t.Fatalf("take the nested turn's borrowing face: %v", err)
 		}
-		turnC := rig.driveTurn(t, ctx, borrowC, "inv-c", addrC, "run c")
-		if len(turnC.Decisions) != 1 || turnC.Decisions[0].Binding.Model != modelC1 {
-			t.Fatalf("turn c bound %v, want the initiating generation carried through the chain", turnC.Decisions)
+		turnC, _ := rig.driveTurn(t, ctx, borrowC, "inv-c", addrC, "run c")
+		if turnC.DecisionCount != 1 || len(modelC1.recorded()) != 1 {
+			t.Fatalf("turn c = (%d decisions, %d initiating-generation requests), want the initiating generation carried through the chain", turnC.DecisionCount, len(modelC1.recorded()))
 		}
 
 		if got := rig.ledger.View("inv-b"); len(got) != 1 || got[0].TaskID != t2 {
@@ -181,16 +181,16 @@ func TestDelegationCompletion(t *testing.T) {
 			InvocationID: "inv-a",
 			DecisionID:   "decision-a",
 			CallID:       "call-1",
-			Target:       addrB,
+			Sites:        agent.DelegationSites{Target: addrB},
 			Ref:          refA,
 		}
 
-		if _, err := rig.ledger.Delegate(ctx, agent.Delegation{Target: addrB, Ref: refA}); !errors.Is(err, agent.ErrDelegationIdentityMissing) {
+		if _, err := rig.ledger.Delegate(ctx, agent.Delegation{Sites: agent.DelegationSites{Target: addrB}, Ref: refA}); !errors.Is(err, agent.ErrDelegationIdentityMissing) {
 			t.Fatalf("delegate without a call identity = %v, want the named refusal", err)
 		}
 		incomplete := req
 		incomplete.CallID = "call-incomplete"
-		incomplete.Target = event.Address{AgentID: "agent-b"}
+		incomplete.Sites.Target = event.Address{AgentID: "agent-b"}
 		if _, err := rig.ledger.Delegate(ctx, incomplete); !errors.Is(err, agent.ErrDelegationAddressIncomplete) {
 			t.Fatalf("delegate to an incomplete target = %v, want the named refusal", err)
 		}
@@ -315,14 +315,14 @@ func TestDelegationCompletion(t *testing.T) {
 
 		receipt1, err := rig.ledger.Delegate(ctx, agent.Delegation{
 			InvocationID: "inv-a", DecisionID: "decision-a", CallID: "call-a-1",
-			Target: event.Address{AgentID: "agent-b", SessionID: "session-b"}, Ref: refA,
+			Sites: agent.DelegationSites{Target: event.Address{AgentID: "agent-b", SessionID: "session-b"}}, Ref: refA,
 		})
 		if err != nil {
 			t.Fatalf("delegate the first level: %v", err)
 		}
 		receipt2, err := rig.ledger.Delegate(ctx, agent.Delegation{
 			InvocationID: "inv-b", DecisionID: "decision-b", CallID: "call-b-1",
-			Target: event.Address{AgentID: "agent-c", SessionID: "session-c"}, Ref: refB,
+			Sites: agent.DelegationSites{Target: event.Address{AgentID: "agent-c", SessionID: "session-c"}}, Ref: refB,
 		})
 		if err != nil {
 			t.Fatalf("delegate the second level: %v", err)
@@ -471,25 +471,46 @@ func (r *delegationRig) publish(t *testing.T, models map[event.AgentID]model.Mod
 }
 
 // driveTurn drives one real invocation on the given borrowing face to its
-// terminal and reports the turn it ran.
-func (r *delegationRig) driveTurn(t *testing.T, ctx context.Context, borrow state.Borrow, invocation event.InvocationID, addr event.Address, input string) agent.Turn {
+// terminal and reports the turn it ran. The input lands on the address chain
+// and the address's own resident consumer runs the turn, so the case exercises
+// the one drive path production uses rather than a second driver beside it.
+func (r *delegationRig) driveTurn(t *testing.T, ctx context.Context, borrow state.Borrow, invocation event.InvocationID, addr event.Address, input string) (agent.Turn, event.DecisionID) {
 	t.Helper()
 	loop := agent.NewLoop(borrow, r.occupancy, r.instance, delegationFact)
-	turn, err := loop.Drive(ctx, agent.Invocation{
+	capture := &decisionCapture{}
+	loop.SetCapture(capture)
+	chain := &delegatedFactLedger{}
+	loop.SetHistory(chain)
+	consumers := agent.NewConsumers(loop, context.Background(), nil)
+	loop.SetConsumers(consumers)
+	defer consumers.Stop()
+	key, err := chain.commit(event.Event{
+		Key:          event.EventID("ev-" + string(invocation)),
+		Type:         event.TypeExternalInput,
+		Timestamp:    time.Now(),
+		Message:      model.Message{Role: model.RoleUser, Content: input},
+		Owner:        addr,
+		Source:       addr,
+		Target:       addr,
 		InvocationID: invocation,
-		Address:      addr,
-		Instance:     r.instance,
-		Ready: []event.Event{{
-			Key:       event.EventID("ev-" + string(invocation)),
-			Type:      event.TypeExternalInput,
-			Timestamp: time.Now(),
-			Message:   model.Message{Role: model.RoleUser, Content: input},
-		}},
+		InstanceID:   r.instance,
 	})
+	if err != nil {
+		t.Fatalf("commit the input of %s: %v", invocation, err)
+	}
+	consumer := consumers.Ensure(addr)
+	if consumer == nil {
+		t.Fatalf("the resident consumer of %s/%s is unavailable", addr.AgentID, addr.SessionID)
+	}
+	consumer.Wake()
+	answer, err := consumer.WaitAnswer(ctx, []event.EventID{key})
 	if err != nil {
 		t.Fatalf("drive the turn of %s: %v", invocation, err)
 	}
-	return turn
+	if capture.decision == "" {
+		t.Fatalf("drive %s fixed no decision identity", invocation)
+	}
+	return answer.Turn, capture.decision
 }
 
 // borrowRef takes one borrow of the current generation and reports the stable
@@ -557,6 +578,24 @@ func delegationNotice(taskID event.TaskID, kind task.NoticeKind, seq int64) task
 		Event:  event.EventID(fmt.Sprintf("fact-%s-%s-%d", taskID, kind, seq)),
 	}
 }
+
+// decisionCapture keeps the first real decision identity a driven turn fixed.
+type decisionCapture struct {
+	decision event.DecisionID
+}
+
+func (c *decisionCapture) Snapshot(_ context.Context, id event.DecisionID, _, _ string, _, _ []string, _ model.Request) error {
+	if c.decision == "" {
+		c.decision = id
+	}
+	return nil
+}
+
+func (*decisionCapture) Record(context.Context, event.AttemptID, event.DecisionID, event.EpisodeID, model.Outcome) error {
+	return nil
+}
+
+func (*decisionCapture) Seal(context.Context) error { return nil }
 
 // delegationFact reports no native message: the turns of these sub-cases drive
 // no tool call, so no fact pairing is ever read.

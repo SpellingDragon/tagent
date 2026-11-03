@@ -206,10 +206,10 @@ func TestEventVocabularyInvariants(t *testing.T) {
 		}
 		if parsed.EventSummary != "summary" || parsed.TriggerSource != "trigger" ||
 			parsed.SettleTriggerSource != "settle" || parsed.BundleID != "bundle" ||
-			parsed.NoticeKind != "settled" || parsed.TaskID != "task-1" {
+			parsed.Notice.Kind != "settled" || parsed.Notice.TaskID != "task-1" {
 			t.Fatalf("frozen descriptive entries = (%q, %q, %q, %q, %q, %q), want every named entry",
 				parsed.EventSummary, parsed.TriggerSource, parsed.SettleTriggerSource, parsed.BundleID,
-				parsed.NoticeKind, parsed.TaskID)
+				parsed.Notice.Kind, parsed.Notice.TaskID)
 		}
 		if len(parsed.PassThrough) != 2 || parsed.PassThrough[MetaPrefix+"tenant"] != "tenant-1" ||
 			parsed.PassThrough[MetaPrefix+"trace"] != "trace-1" {

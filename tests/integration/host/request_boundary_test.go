@@ -97,7 +97,7 @@ func TestFileChangesReachNextRequest(t *testing.T) {
 }
 
 // TestSkillBodyReachesNextRequest checks the 04.1 boundary on the formal entry.
-//   - a skill body loaded through the skill tool enters the next request's model context
+//   - a skill body loaded through the skill tool enters the model context of a request after the load
 //   - the declared skill bodies the fixed files already carry appear exactly once each
 func TestSkillBodyReachesNextRequest(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -143,25 +143,42 @@ func TestSkillBodyReachesNextRequest(t *testing.T) {
 		t.Fatalf("invoke the skill loads: %v", err)
 	}
 	requests := provider.recorded()
-	if len(requests) != 2 {
-		t.Fatalf("recorded requests = %d, want the load decision and the closing decision", len(requests))
+	if len(requests) < 2 {
+		t.Fatalf("recorded requests = %d, want at least the load decision and the closing decision", len(requests))
 	}
+	closing := requests[len(requests)-1]
 	if containsBody(requests[0], "extra body v1") {
 		t.Fatal("first request carried the extra skill body before the load, want no unloaded body")
 	}
-	if !containsBody(requests[1], "extra body v1") {
-		t.Fatalf("second request = %+v, want the loaded extra skill body in the next request's model context", requests[1].Messages)
+	if !containsBody(closing, "extra body v1") {
+		t.Fatalf("closing request = %+v, want the loaded extra skill body in the closing request's model context", closing.Messages)
 	}
-	if !carriesSystemBody(requests[1], "extra body v1") {
-		t.Fatalf("second request = %+v, want the loaded skill body carried as boundary material", requests[1].Messages)
+	if !carriesSystemBody(closing, "extra body v1") {
+		t.Fatalf("closing request = %+v, want the loaded skill body carried as boundary material", closing.Messages)
 	}
-	if trailing := requests[1].Messages[len(requests[1].Messages)-1]; trailing.Role != model.RoleSystem ||
+	if trailing := closing.Messages[len(closing.Messages)-1]; trailing.Role != model.RoleSystem ||
 		!strings.Contains(trailing.Content, "extra body v1") {
 		t.Fatalf("last message = (%q, %q), want the dynamic section closing the request with the loaded body",
 			trailing.Role, trailing.Content)
 	}
-	if got := countBody(requests[1], "greet body v1"); got != 1 {
-		t.Fatalf("second request carries the greet body %d times, want exactly once beside its load", got)
+	if got := countBody(closing, "greet body v1"); got != 1 {
+		t.Fatalf("closing request carries the greet body %d times, want exactly once beside its load", got)
+	}
+	// 结果完整性: every admitted load's answer reaches a real request whatever
+	// decision batching the full-duplex drive chooses, so a result that never
+	// arrived keeps this red even though the count above is only a lower bound.
+	loaded := func(text string) bool {
+		for _, req := range requests[1:] {
+			if containsBody(req, text) {
+				return true
+			}
+		}
+		return false
+	}
+	for _, text := range []string{"loaded: greet", "loaded: extra"} {
+		if !loaded(text) {
+			t.Fatalf("requests = %+v, want every loaded result in the model context after the load", requests)
+		}
 	}
 }
 
@@ -289,12 +306,12 @@ func TestNativeToolFamiliesAdmitted(t *testing.T) {
 	if err != nil {
 		t.Fatalf("invoke the tool families: %v", err)
 	}
-	if turn.Terminal != model.KindCompleted || len(turn.Decisions) != 2 {
-		t.Fatalf("turn = (%v, %d decisions), want the completed terminal beside two decisions", turn.Terminal, len(turn.Decisions))
-	}
 	requests := provider.recorded()
-	if len(requests) != 2 {
-		t.Fatalf("recorded requests = %d, want the call decision and the closing decision", len(requests))
+	if turn.Terminal != model.KindCompleted || turn.DecisionCount < 2 {
+		t.Fatalf("turn = (%v, %d decisions), want the completed terminal beside at least the call and the closing decisions", turn.Terminal, turn.DecisionCount)
+	}
+	if len(requests) < 2 {
+		t.Fatalf("recorded requests = %d, want at least the call decision and the closing decision", len(requests))
 	}
 	tools := requests[0].Tools
 	for _, name := range []string{"fn_tool", "read_file", "save_file", "skill_load"} {
@@ -305,14 +322,15 @@ func TestNativeToolFamiliesAdmitted(t *testing.T) {
 	if tools["evaluation"] != nil {
 		t.Fatal("request tools carry the evaluation criterion reference, want it skipped and never on the model tool face")
 	}
+	closing := requests[len(requests)-1]
 	receipts := 0
-	for _, msg := range requests[1].Messages {
+	for _, msg := range closing.Messages {
 		if msg.Role == model.RoleTool && msg.Content == "ok" {
 			receipts++
 		}
 	}
 	if receipts != 3 {
-		t.Fatalf("second request carries %d minimal ok admission receipts, want one real receipt per admitted call", receipts)
+		t.Fatalf("closing request carries %d minimal ok admission receipts, want one real receipt per admitted call", receipts)
 	}
 }
 

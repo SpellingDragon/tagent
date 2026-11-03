@@ -27,6 +27,16 @@ derives an identity, a lineage or a redaction on its own.
 CONSTANTS
 
 const (
+	// DefaultCaptureBudgetBytes is the resident byte budget a capture takes when
+	// its construction names none: 64MB of fixed request snapshots.
+	DefaultCaptureBudgetBytes int64 = 64 << 20
+	// MinCaptureBudgetBytes is the smallest resident budget a capture obeys: a
+	// budget below it, a negative one included, is tightened to it, because a set
+	// smaller than it keeps no full request view and a negative budget is never
+	// read as unlimited.
+	MinCaptureBudgetBytes int64 = 1 << 20
+)
+const (
 	// DefaultMaxRecordBytes is the per-record byte bound one sink takes when its
 	// config names none: a marshaled record line above it is refused as a
 	// counted loss.
@@ -234,6 +244,11 @@ var ErrCaptureSnapshotMissing = errors.New("rl: the capture holds no snapshot be
     snapshot behind: a reference is read back only when its content is held,
     so a missing snapshot is named rather than answered empty.
 
+var ErrCaptureSwapFailed = errors.New("rl: the capture could not swap the evicted snapshot out")
+    ErrCaptureSwapFailed reports a fixed snapshot the capture could not swap
+    out of its resident set: the snapshot stays resident and readable, and the
+    overrun is named here rather than hidden as a bound the capture kept.
+
 var ErrCaptureUnscoped = errors.New("rl: the capture cannot be scoped to one request view")
     ErrCaptureUnscoped reports a capture the trajectory cannot scope to one
     request view: a capture that cannot name the view of the decision it serves
@@ -247,13 +262,14 @@ var ErrCaptureViewMissing = errors.New("rl: the capture is not scoped to one req
 
 var ErrLeaseObserverLookupMissing = errors.New("rl: the model lease observer was built beside no fact lookup")
     ErrLeaseObserverLookupMissing reports a lease observer built beside no
-    fact lookup: the observer reads the fact it applies back from the chain,
-    and an unreachable chain is refused rather than read as no replacement.
+    fact lookup: the observer reads the change it applies back from the chain,
+    and an unreachable chain is refused rather than read as no move.
 
-var ErrLeaseStaleReplacement = errors.New("rl: the model replacement starts from a version the lease does not hold")
-    ErrLeaseStaleReplacement reports a replacement fact that starts from a
-    version the lease does not hold: a move judged against an older version is
-    refused by name rather than applied on top of the version in effect.
+var ErrLeaseStaleReplacement = errors.New("rl: the model configuration change starts from a version the lease does not hold")
+    ErrLeaseStaleReplacement reports a model configuration change that starts
+    from a version the lease does not hold: a move judged against an older
+    version is refused by name rather than applied on top of the version in
+    effect.
 
 var ErrLogprobsSourceMissing = errors.New("rl: the logprobs unsupported state carries no declaration source")
     ErrLogprobsSourceMissing reports an attempt carrying a LogprobsUnsupported
@@ -300,7 +316,7 @@ func NewFileCaptureWriter(dir string, maxOpenFiles int) (*FileCaptureWriter, err
 
 func NewLeaseObserver(agent event.AgentID, lease *ModelLease, lookup plugin.FactLookup, rebuild func(version string) (model.Model, error), publish func(ModelIdentity, model.Model) error) (*LeaseObserver, error)
     NewLeaseObserver returns the replacement consumer of one agent's lease:
-    the fact lookup that reads a committed replacement back, the rebuild that
+    the fact lookup that reads a committed model change back, the rebuild that
     produces the requested version and the publication entry that accepts the
     rebuilt model beside the version in effect.
 
@@ -315,6 +331,13 @@ func NewTrajectoryCapture(id string, sink *CaptureSink, policy SnapshotPolicy) (
     sink, under the projection policy its snapshots are taken with. A missing
     capture identity or sink is refused by name: a capture seals the account of
     the identity it belongs to and drains into exactly one write point.
+
+func NewTrajectoryCaptureWithBudget(id string, sink *CaptureSink, policy SnapshotPolicy, budget CaptureBudget) (*TrajectoryCapture, error)
+    NewTrajectoryCaptureWithBudget returns the capture of one trajectory under
+    the resident byte budget of its fixed snapshots and the store an evicted
+    snapshot is swapped out to. A missing capture identity or sink is refused by
+    name, and a budget below the floor is tightened to it rather than obeyed:
+    a capture never runs unbounded because it was built with a small bound.
 
 func ParseLine(data []byte) (Line, error)
     ParseLine decodes one versioned record line: it reads the declared schema
@@ -540,6 +563,24 @@ const (
 	// BoundClosed marks a record refused because the capture was already closed.
 	BoundClosed CaptureBound = "closed"
 )
+type CaptureBudget struct {
+	// Bytes is the resident byte budget of the fixed snapshots; zero takes
+	// DefaultCaptureBudgetBytes and a value below MinCaptureBudgetBytes is
+	// tightened to the floor.
+	Bytes int64
+	// SwapDir is the directory evicted snapshots are written to and read back
+	// from; an empty directory leaves the fixed snapshots resident.
+	SwapDir string
+}
+    CaptureBudget is the resident bound of one capture's fixed snapshots beside
+    the store its evicted snapshots are swapped out to: the resident set stays
+    within Bytes, and a snapshot that does not fit leaves the heap for SwapDir
+    while its index stays, so it is still read back in fix order.
+
+    A capture beside no SwapDir keeps what it fixes resident: there is nowhere
+    to swap a view out to, and a release with nowhere to write would be a loss
+    rather than a release.
+
 type CaptureFileDigest struct {
 	// Name identifies the file within the capture.
 	Name string
@@ -723,24 +764,26 @@ type ChainExporter struct {
 
     The redline list (3 rules): MUST read the chain through the read-only fact
     face and write nothing back. MUST pair one turn's input with the assistant
-    output of the same invocation. MUST NOT invent a sample for a turn that
-    presented no input or produced no assistant output. ChainExporter assembles
-    SFT sample rows from the fact chain of sessions. It holds the read-only
-    fact face and keeps no state of its own, so one exporter may export the same
-    chain again and again without moving it.
+    output that answered it on the chain. MUST NOT invent a sample for a turn
+    that presented no input or produced no assistant output. ChainExporter
+    assembles SFT sample rows from the fact chain of sessions. It holds the
+    read-only fact face and keeps no state of its own, so one exporter may
+    export the same chain again and again without moving it.
 
 func NewChainExporter(facts FactReader) *ChainExporter
     NewChainExporter returns the exporter reading the chain through facts.
 
 func (e *ChainExporter) Export(ctx context.Context, opts ExportOptions) ([]SFTSample, error)
     Export assembles the SFT sample rows of the named sessions: it reads each
-    session's chain in commit order, groups the facts by episode, pairs the
-    input events with the assistant output events of the same invocation,
-    and emits one row per paired turn, in the order the turns first appeared.
+    session's chain in commit order and pairs by order — the input events a
+    segment presents open the turn, the assistant output that answers them
+    closes it. The input fact carries the identity of the entry that committed
+    it and the output fact the identity of the segment that answered, so the
+    pairing never keys on invocation identity: the chain order is the pair.
 
     A turn that presented no input or produced no assistant output is skipped
-    rather than filled with an invented side, and a fact carrying no invocation
-    is not paired at all. The limit bounds the rows emitted, never the pairing.
+    rather than filled with an invented side. The limit bounds the rows emitted,
+    never the pairing.
 
 type DecisionRecord struct {
 	// Schema is the record schema version the line was written with.
@@ -966,28 +1009,31 @@ type LeaseObserver struct {
 	// Has unexported fields.
 }
 
-    LeaseObserver is the event-driven replacement consumer of one agent's model
-    lease. It observes the facts the agent's own pipeline commits, reads back
-    the one a commit identity names, and applies a model replacement fact to the
-    lease it serves: the rebuild, the publication and the installation run in
-    the lease's existing order, so a refused rebuild or a refused publication
-    installs no version and leaves the version in effect untouched.
+    LeaseObserver is the event-driven replacement consumer of one agent's
+    model lease. It observes the facts the agent's own pipeline commits,
+    reads back the one a commit identity names, and applies the model
+    dimension of a configuration change to the lease it serves: the rebuild,
+    the publication and the installation run in the lease's existing order,
+    so a refused rebuild or a refused publication installs no version and leaves
+    the version in effect untouched.
 
     The observer serves the fact-to-observation port exactly as the reflection
     driver does: one committed fact in, one read-only observation out. A fact of
-    another type, or of another agent's ownership, is not the observation this
-    instance serves and is passed over.
+    another type, another dimension, another owner or another stated result is
+    not the observation this instance serves and is passed over.
 
 func (o *LeaseObserver) Name() string
     Name reports the stable name of this plugin instance.
 
 func (o *LeaseObserver) ObserveCommit(ctx context.Context, id event.EventID) error
-    ObserveCommit reads the fact one commit wrote and applies a model
-    replacement fact owned by this observer's agent to the lease. A fact of
-    another type or another owner is passed over; a replacement whose start
-    version is not the version in effect is refused by name; and the replacement
-    itself is the lease's own rebuild, publication and installation, so a
-    refused step installs no version.
+    ObserveCommit reads the fact one commit wrote and applies the model
+    dimension of a configuration change owned by this observer's agent to the
+    lease: the version move is carried under the model replacement metadata
+    keys, and only a change stating the requested result asks the lease to
+    install. A fact of another type, dimension, owner or result is passed over;
+    a move whose start version is not the version in effect is refused by
+    name; and the move itself is the lease's own rebuild, publication and
+    installation, so a refused step installs no version.
 
 func (o *LeaseObserver) Port() plugin.Port
     Port reports the consumption the observer serves: one committed fact in,
@@ -1504,6 +1550,9 @@ type TrajectoryCapture struct {
         writer: a refused record is a named loss, not a blocked request.
       - A capture seals at the end of the turn it observed and reports what the
         writer actually confirmed.
+      - The fixed snapshots are a bounded resident set: a snapshot the budget
+        cannot hold leaves the heap for the swap store and stays readable by
+        reference.
 
 func (c *TrajectoryCapture) CaptureID() string
     CaptureID reports the identity of the capture this trajectory seals under.
@@ -1521,9 +1570,11 @@ func (c *TrajectoryCapture) Scope(view ModelViewRef, decisionID event.DecisionID
     request was declared against beside the decision whose request it is.
 
 func (c *TrajectoryCapture) Seal(ctx context.Context) (CaptureManifest, error)
-    Seal closes the capture through its sink and reports the manifest the writer
-    confirmed. A second seal returns the first manifest, so the seal of a turn
-    that was already sealed is never a second account.
+    Seal closes the capture through its sink and reports the manifest the
+    writer confirmed, then releases the resident snapshots to the swap store: a
+    sealed capture keeps the views it fixed readable while they leave the heap.
+    A second seal returns the first manifest, so the seal of a turn that was
+    already sealed is never a second account.
 
 func (c *TrajectoryCapture) Snapshot(context.Context, model.Request) (ModelViewRef, error)
     Snapshot refuses a snapshot asked of the capture itself: a view is fixed by
@@ -1531,21 +1582,25 @@ func (c *TrajectoryCapture) Snapshot(context.Context, model.Request) (ModelViewR
 
 func (c *TrajectoryCapture) SnapshotOf(ref SnapshotRef) (RequestSnapshot, error)
     SnapshotOf reads one fixed snapshot back through its reference: the content
-    is rechecked against the reference digest, so a snapshot that does not match
-    is refused as a mismatch rather than answered as the referenced one.
+    is rechecked against the reference digest, so a snapshot that does not
+    match is refused as a mismatch rather than answered as the referenced one.
+    A snapshot the resident budget released reads back from the swap store under
+    the same digest recheck.
 
 func (c *TrajectoryCapture) SnapshotRefs() []SnapshotRef
     SnapshotRefs reports the references of the snapshots this capture fixed,
     in fix order, as a copy the caller owns.
 
 func (c *TrajectoryCapture) Snapshots() []DecisionSnapshot
-    Snapshots reports every safe request snapshot this capture fixed,
-    in fix order, each beside the decision whose request it was fixed for,
-    answered from the copies the capture keeps: a snapshot reads back as the
-    content it fixed and is never rebuilt from the options of a finished call.
-    The slices of one snapshot are the kept slices, so a caller that writes
-    them edits the kept copy; SnapshotOf is the persisted read that rechecks a
-    reference's digest. A capture beside no fixed snapshot answers none.
+    Snapshots reports every safe request snapshot this capture fixed, in fix
+    order, each beside the decision whose request it was fixed for, answered
+    from the copies the capture keeps or from the swap store it released them
+    to: a snapshot reads back as the content it fixed and is never rebuilt from
+    the options of a finished call. The slices of one resident snapshot are the
+    kept slices, so a caller that writes them edits the kept copy; a released
+    snapshot reads back as a copy the caller owns. SnapshotOf is the persisted
+    read that rechecks a reference's digest. A capture beside no fixed snapshot
+    answers none.
 
 type VersionedModel struct {
 	// Has unexported fields.

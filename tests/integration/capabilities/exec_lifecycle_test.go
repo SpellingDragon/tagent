@@ -339,8 +339,8 @@ func TestExecutionResourceLifecycle(t *testing.T) {
 		if err != nil {
 			t.Fatalf("invoke the execution lifecycle: %v", err)
 		}
-		if turn.Terminal != model.KindCompleted || len(turn.Decisions) != 4 {
-			t.Fatalf("turn = (%v, %d decisions), want the completed terminal beside the run, reuse, release and closing decisions", turn.Terminal, len(turn.Decisions))
+		if turn.Terminal != model.KindCompleted || turn.DecisionCount != 4 {
+			t.Fatalf("turn = (%v, %d decisions), want the completed terminal beside the run, reuse, release and closing decisions", turn.Terminal, turn.DecisionCount)
 		}
 		if manager.Acquired() != 1 || manager.Reused() != 1 || manager.Released() != 1 || manager.Held() != 0 {
 			t.Errorf("manager accounting = (acquired %d, reused %d, released %d, held %d), want one started resource reused once and freed once", manager.Acquired(), manager.Reused(), manager.Released(), manager.Held())

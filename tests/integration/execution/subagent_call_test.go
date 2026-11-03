@@ -116,8 +116,8 @@ func TestSubagentCallAdmitsTask(t *testing.T) {
 		rig.start(t, caller, []trpctool.Tool{tool}, issuer)
 
 		turn := rig.drive(t, ctx, issuer, "review the change")
-		if turn.Terminal != model.KindCompleted || len(turn.Decisions) != 2 {
-			t.Fatalf("turn = (%v, %d decisions), want one completed terminal beside two decisions", turn.Terminal, len(turn.Decisions))
+		if turn.Terminal != model.KindCompleted || turn.DecisionCount != 2 {
+			t.Fatalf("turn = (%v, %d decisions), want one completed terminal beside two decisions", turn.Terminal, turn.DecisionCount)
 		}
 		requests := caller.recorded()
 		if len(requests) != 2 {
@@ -138,7 +138,7 @@ func TestSubagentCallAdmitsTask(t *testing.T) {
 		if envelope.Notice.TaskID == "" || envelope.Notice.Kind != task.NoticeSettled {
 			t.Fatalf("terminal notification = %+v, want the settled identity of the admitted call", envelope.Notice)
 		}
-		if got := rig.ledger.View(rig.invocationID); len(got) != 1 || got[0].Status != task.StatusSettled {
+		if got := rig.ledger.View(turn.InvocationID); len(got) != 1 || got[0].Status != task.StatusSettled {
 			t.Fatalf("delegation view = %+v, want the call landed at its terminal", got)
 		}
 		if got := delegated.count(); got != 1 {
@@ -157,6 +157,8 @@ type subagentCallRig struct {
 	tasks        *admissionFace
 	ledger       *agent.Delegator
 	loop         *agent.Loop
+	consumers    *agent.Consumers
+	facts        *delegatedFactLedger
 	arrived      chan task.Envelope
 }
 
@@ -212,7 +214,7 @@ func newSubagentCallRig(t *testing.T) *subagentCallRig {
 // faces and the builder the subtest fixes.
 func (r *subagentCallRig) newTool(t *testing.T, builder subagent.Builder) *subagent.Tool {
 	t.Helper()
-	tool, err := subagent.NewTool(subagent.ToolOptions{
+	tool, _, err := subagent.NewTool(subagent.ToolOptions{
 		Parent:     &subagent.Assembly{Definition: subagent.Definition{Name: "caller", Model: "model-caller"}},
 		Builder:    builder,
 		Delegation: r.ledger,
@@ -224,8 +226,10 @@ func (r *subagentCallRig) newTool(t *testing.T, builder subagent.Builder) *subag
 	return tool
 }
 
-// start holds the generation the call borrows and builds the loop of the invoking
-// session over it.
+// start holds the generation the call borrows, builds the loop of the invoking session
+// over it and attaches the resident instances the delegated turns run on, so a call runs
+// its round on the instance of its own execution site rather than as a drive of the
+// goroutine that admitted it.
 func (r *subagentCallRig) start(t *testing.T, provider model.Model, tools []trpctool.Tool, issuer event.Address) {
 	t.Helper()
 	binding := state.AgentBinding{
@@ -244,6 +248,13 @@ func (r *subagentCallRig) start(t *testing.T, provider model.Model, tools []trpc
 		t.Fatalf("hold the state plan: %v", err)
 	}
 	r.loop = agent.NewLoop(r.bindings, state.NewOccupancy(), r.instance, nil)
+	r.facts = &delegatedFactLedger{}
+	r.loop.SetFactCommit(r.facts.commit)
+	r.loop.SetHistory(r.facts)
+	r.consumers = agent.NewConsumers(r.loop, context.Background(), nil)
+	r.loop.SetConsumers(r.consumers)
+	t.Cleanup(r.consumers.Stop)
+	r.ledger.SetResident(r.loop)
 }
 
 // accept reports the delivery-layer outcome of one notification beside the routing its
@@ -253,29 +264,65 @@ func (r *subagentCallRig) accept(ctx context.Context, envelope task.Envelope) (t
 	if err := r.ledger.Observe(ctx, envelope.Notice); err != nil {
 		return task.DeliveryRejected, err
 	}
-	r.loop.Backflow(r.invocationID, envelope.Notice)
+	r.loop.Backflow(r.noticeInvocation(ctx), envelope.Notice)
 	r.arrived <- envelope
 	return task.DeliveryAccepted, nil
+}
+
+// noticeInvocation reports the invocation a notification belongs to: the call
+// frame the delivery context carries names the segment that issued the call, so
+// the settlement reaches that segment of the issuing address rather than a
+// drive identity minted beside it. A delivery beside no frame falls back to the
+// rig's declared invocation.
+func (r *subagentCallRig) noticeInvocation(ctx context.Context) event.InvocationID {
+	if frame, ok := task.CallFrameFrom(ctx); ok && frame.Identity.InvocationID != "" {
+		return frame.Identity.InvocationID
+	}
+	return r.invocationID
 }
 
 // drive runs one invocation of the issuing session to its terminal.
 func (r *subagentCallRig) drive(t *testing.T, ctx context.Context, issuer event.Address, input string) agent.Turn {
 	t.Helper()
-	turn, err := r.loop.Drive(ctx, agent.Invocation{
-		InvocationID: r.invocationID,
-		Address:      issuer,
-		Instance:     r.instance,
-		Ready: []event.Event{{
-			Key:       event.EventID("ev-" + string(r.invocationID)),
-			Type:      event.TypeExternalInput,
-			Timestamp: time.Now(),
-			Message:   model.Message{Role: model.RoleUser, Content: input},
-		}},
-	})
+	turn, err := r.submit(ctx, issuer, input)
 	if err != nil {
 		t.Fatalf("drive the invocation that issues the call: %v", err)
 	}
 	return turn
+}
+
+// submit commits one input on the issuing address and waits for the segment the
+// resident consumer opens on it, so the turn is driven by the address's own
+// consumption loop rather than by a second driver beside it.
+func (r *subagentCallRig) submit(ctx context.Context, issuer event.Address, input string) (agent.Turn, error) {
+	key, err := r.facts.commit(event.Event{
+		Key:          event.EventID("ev-" + string(r.invocationID)),
+		Type:         event.TypeExternalInput,
+		Timestamp:    time.Now(),
+		Message:      model.Message{Role: model.RoleUser, Content: input},
+		Owner:        issuer,
+		Source:       issuer,
+		Target:       issuer,
+		InvocationID: r.invocationID,
+		InstanceID:   r.instance,
+	})
+	if err != nil {
+		return agent.Turn{}, fmt.Errorf("commit the input of %s: %w", issuer.SessionID, err)
+	}
+	consumer := r.consumers.Ensure(issuer)
+	if consumer == nil {
+		return agent.Turn{}, fmt.Errorf("the resident consumer of %s/%s is unavailable", issuer.AgentID, issuer.SessionID)
+	}
+	consumer.Wake()
+	answer, err := consumer.WaitAnswer(ctx, []event.EventID{key})
+	if err != nil {
+		return agent.Turn{}, err
+	}
+	// The resident segment mints its own range identity; the rig records it so
+	// later reads of this drive's delegation view name the range that issued the
+	// call rather than the input identity declared before the mount.
+	r.invocationID = answer.Turn.InvocationID
+	return answer.Turn, nil
 }
 
 // subagentCallFrame returns the frame the loop of the issuing session gives one call.

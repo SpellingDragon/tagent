@@ -507,10 +507,20 @@ func lineageFact(key, summary, lineage string, at time.Time) event.Event {
 // production query semantics, and answers the committed-fact hydration out of the
 // very records it stored.
 type reflectionLedger struct {
-	mu      sync.Mutex
-	query   *memory.MemoryEventQuery
-	facts   map[event.EventID]event.Event
-	parts   map[event.EventID]int
+	mu    sync.Mutex
+	query *memory.MemoryEventQuery
+	facts map[event.EventID]event.Event
+	parts map[event.EventID]int
+	// order names the facts by commit order: the session chain a resident
+	// consumer pulls its segment from reads them in that order, never by map
+	// iteration.
+	order []event.EventID
+	// closed names the facts a loop committed as closed turns: they belong to
+	// the session chain but are not observed material the reflection judges.
+	closed map[event.EventID]bool
+	// outputs counts the closed-turn facts this chain committed, so a restarted
+	// fixture mints identities beyond the ones it restored.
+	outputs int
 	failErr error
 	seeded  int
 	read    int
@@ -519,9 +529,10 @@ type reflectionLedger struct {
 // newReflectionLedger returns an empty fact chain.
 func newReflectionLedger() *reflectionLedger {
 	return &reflectionLedger{
-		query: memory.NewMemoryEventQuery(),
-		facts: map[event.EventID]event.Event{},
-		parts: map[event.EventID]int{},
+		query:  memory.NewMemoryEventQuery(),
+		facts:  map[event.EventID]event.Event{},
+		parts:  map[event.EventID]int{},
+		closed: map[event.EventID]bool{},
 	}
 }
 
@@ -533,6 +544,9 @@ func (l *reflectionLedger) record(evt event.Event, partition int) event.EventID 
 	if evt.Key == "" {
 		l.seeded++
 		evt.Key = event.EventID(fmt.Sprintf("seeded-%d", l.seeded))
+	}
+	if _, held := l.facts[evt.Key]; !held {
+		l.order = append(l.order, evt.Key)
 	}
 	l.facts[evt.Key] = evt
 	l.parts[evt.Key] = partition
@@ -548,6 +562,37 @@ func (l *reflectionLedger) record(evt event.Event, partition int) event.EventID 
 	return evt.Key
 }
 
+// recordOutput files one closed-turn fact a loop committed: the fact joins the
+// session chain and the commit order, but not the observation query, because a
+// closed turn is chain material the reflection never judges as fresh input.
+func (l *reflectionLedger) recordOutput(evt event.Event, partition int) (event.EventID, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if evt.Key == "" {
+		l.outputs++
+		evt.Key = event.EventID(fmt.Sprintf("output-%d", l.outputs))
+	}
+	l.facts[evt.Key] = evt
+	l.parts[evt.Key] = partition
+	l.closed[evt.Key] = true
+	l.order = append(l.order, evt.Key)
+	return evt.Key, nil
+}
+
+// reflectionCount reports how many reflection inputs the chain already holds, so
+// the input face of a restarted rig mints identities beyond the ones it restored.
+func (l *reflectionLedger) reflectionCount() int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	count := 0
+	for _, id := range l.order {
+		if strings.HasPrefix(string(id), "reflection-") {
+			count++
+		}
+	}
+	return count
+}
+
 // restore files every fact another ledger holds into this one, so a sub-case can
 // read one face from a restarted assembly.
 func (l *reflectionLedger) restore(other *reflectionLedger) {
@@ -558,15 +603,30 @@ func (l *reflectionLedger) restore(other *reflectionLedger) {
 		snapshot[id] = evt
 		partitions[id] = other.parts[id]
 	}
+	order := append([]event.EventID(nil), other.order...)
+	closed := make(map[event.EventID]bool, len(other.closed))
+	for id, wasClosed := range other.closed {
+		closed[id] = wasClosed
+	}
+	outputs := other.outputs
 	other.mu.Unlock()
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	for id, evt := range snapshot {
+	for _, id := range order {
+		evt, held := snapshot[id]
+		if !held {
+			continue
+		}
 		if _, held := l.facts[id]; held {
 			continue
 		}
 		l.facts[id] = evt
 		l.parts[id] = partitions[id]
+		l.order = append(l.order, id)
+		if closed[id] {
+			l.closed[id] = true
+			continue
+		}
 		_ = l.query.Store(context.Background(), memory.EventRecord{
 			Key:         id,
 			PartitionID: partitions[id],
@@ -576,6 +636,9 @@ func (l *reflectionLedger) restore(other *reflectionLedger) {
 			Timestamp:   evt.Timestamp.UnixMilli(),
 			WindowTS:    evt.Timestamp.UnixMilli(),
 		})
+	}
+	if outputs > l.outputs {
+		l.outputs = outputs
 	}
 }
 
@@ -644,7 +707,35 @@ func (l *reflectionLedger) reads() int {
 	return l.read
 }
 
+// SessionHistory reports no separate transcript: the facts of the chain are the
+// one history this rig keeps, and a segment reads its material from them.
+func (l *reflectionLedger) SessionHistory(event.Address) []model.Message { return nil }
+
+// CommitHistory keeps no second transcript: the chain of facts is the history
+// the next segment opens on.
+func (l *reflectionLedger) CommitHistory(event.Address, []model.Message) {}
+
+// SessionFacts reports the facts one address owns in commit order: the chain the
+// resident consumer of that address pulls its next segment from.
+func (l *reflectionLedger) SessionFacts(addr event.Address) []event.Event {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	out := make([]event.Event, 0, len(l.order))
+	for _, id := range l.order {
+		evt, held := l.facts[id]
+		if !held {
+			continue
+		}
+		if evt.Owner != addr && evt.Source != addr && evt.Target != addr {
+			continue
+		}
+		out = append(out, evt)
+	}
+	return out
+}
+
 var _ meditation.ObservedFacts = (*reflectionLedger)(nil)
+var _ agent.HistoryFace = (*reflectionLedger)(nil)
 
 // The reflection loop satisfies the declared observation-source face of the plugin
 // layer, which is the face a consumer of the loop holds it by.
@@ -684,15 +775,15 @@ func (m *reflectionModel) recorded() []model.Request {
 }
 
 // loopSessionInput is the loop-session face of these tests: it commits the
-// reflection input as a fact of the agent's own partition, drives the agent's own
-// loop session with it through the real loop entry, and reports what became of the
-// turn. A sub-case arms the outcome a drive reports when the loop cannot report one
+// reflection input as a fact of the agent's own partition, hands it to the
+// resident consumer of that address and reports what became of the segment. A
+// sub-case arms the outcome the injection reports when the turn cannot report one
 // itself.
 type loopSessionInput struct {
 	loop      *agent.Loop
+	consumers *agent.Consumers
 	ledger    *reflectionLedger
 	address   event.Address
-	instance  event.InstanceID
 	partition int
 
 	mu       sync.Mutex
@@ -708,10 +799,18 @@ func (i *loopSessionInput) arm(outcome meditation.ReflectionOutcome) {
 	i.armed = outcome
 }
 
-// InjectReflection commits the input, drives the agent's own loop session with it
-// and reports the outcome of that turn.
+// InjectReflection commits the input, hands it to the address's resident consumer
+// and reports the outcome of the segment the consumer closed on it.
 func (i *loopSessionInput) InjectReflection(ctx context.Context, evt event.Event) (meditation.ReflectionReceipt, error) {
 	i.mu.Lock()
+	if i.seq == 0 {
+		i.mu.Unlock()
+		restored := i.ledger.reflectionCount()
+		i.mu.Lock()
+		if i.seq == 0 {
+			i.seq = restored
+		}
+	}
 	i.seq++
 	key := event.EventID(fmt.Sprintf("reflection-%d", i.seq))
 	armed := i.armed
@@ -723,19 +822,19 @@ func (i *loopSessionInput) InjectReflection(ctx context.Context, evt event.Event
 	i.injected = append(i.injected, evt)
 	i.mu.Unlock()
 
-	turn, err := i.loop.Drive(ctx, agent.Invocation{
-		InvocationID: event.InvocationID("invocation-" + string(key)),
-		Address:      i.address,
-		Instance:     i.instance,
-		Ready:        []event.Event{evt},
-	})
+	consumer := i.consumers.Ensure(i.address)
+	if consumer == nil {
+		return meditation.ReflectionReceipt{}, fmt.Errorf("the resident consumer of %s/%s is unavailable", i.address.AgentID, i.address.SessionID)
+	}
+	consumer.Wake()
+	answer, err := consumer.WaitAnswer(ctx, []event.EventID{key})
 	if err != nil {
 		return meditation.ReflectionReceipt{}, err
 	}
 	if armed != "" {
 		return meditation.ReflectionReceipt{Key: key, Outcome: armed, At: evt.Timestamp, Reason: "the sub-case armed this outcome"}, nil
 	}
-	if turn.Terminal != model.KindCompleted {
+	if answer.Turn.Terminal != model.KindCompleted {
 		return meditation.ReflectionReceipt{Key: key, Outcome: meditation.ReflectionDeferred, At: evt.Timestamp, Reason: "the reflection turn did not reach a completed terminal"}, nil
 	}
 	return meditation.ReflectionReceipt{Key: key, Outcome: meditation.ReflectionConsumed, At: evt.Timestamp}, nil
@@ -759,6 +858,7 @@ type reflectionRig struct {
 	store      *meditation.AnchorStore
 	input      *loopSessionInput
 	reflection *meditation.Reflection
+	consumers  *agent.Consumers
 
 	address   event.Address
 	partition int
@@ -789,7 +889,15 @@ func newReflectionRig(t *testing.T, cfg meditation.ReflectionConfig, dir string)
 	if err := bindings.Hold(plan); err != nil {
 		t.Fatalf("hold the state plan: %v", err)
 	}
+	partition := memory.PartitionIDFromName(cfg.Loop.Agent)
 	loop := agent.NewLoop(bindings, state.NewOccupancy(), instance, nil)
+	loop.SetHistory(ledger)
+	loop.SetFactCommit(func(evt event.Event) (event.EventID, error) {
+		return ledger.recordOutput(evt, partition)
+	})
+	consumers := agent.NewConsumers(loop, context.Background(), nil)
+	loop.SetConsumers(consumers)
+	t.Cleanup(consumers.Stop)
 
 	store, err := meditation.NewAnchorStore(filepath.Join(dir, "anchors.json"))
 	if err != nil {
@@ -797,10 +905,10 @@ func newReflectionRig(t *testing.T, cfg meditation.ReflectionConfig, dir string)
 	}
 	input := &loopSessionInput{
 		loop:      loop,
+		consumers: consumers,
 		ledger:    ledger,
 		address:   address,
-		instance:  instance,
-		partition: memory.PartitionIDFromName(cfg.Loop.Agent),
+		partition: partition,
 	}
 	reflection, err := meditation.NewReflection(cfg, store, ledger, input)
 	if err != nil {
@@ -812,8 +920,9 @@ func newReflectionRig(t *testing.T, cfg meditation.ReflectionConfig, dir string)
 		store:      store,
 		input:      input,
 		reflection: reflection,
+		consumers:  consumers,
 		address:    address,
-		partition:  memory.PartitionIDFromName(cfg.Loop.Agent),
+		partition:  partition,
 	}
 }
 

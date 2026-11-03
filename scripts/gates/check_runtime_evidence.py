@@ -2226,6 +2226,53 @@ def check_mutation_evidence(report, where, payload):
                      .format(where))
 
 
+def check_mutation_baseline(report, where, payload, runner_baseline):
+    """The mutation verdicts must describe the same baseline the runs tested.
+
+    A mutation report can be perfectly green on its own and still come from an
+    older tree; tied against the runner evidence it must name the same contract
+    digest and the same per-module source fingerprint for every module both of
+    them cover.  A report that declares no baseline at all cannot be tied and
+    therefore cannot count.
+    """
+    if not runner_baseline["modules"]:
+        return  # no runner evidence survived parsing; already reported above
+    digest = payload.get("contract_digest")
+    if not isinstance(digest, str) or not digest.strip():
+        report.error("{}: must declare contract_digest to tie the mutations to the tested "
+                     "baseline".format(where))
+    elif (runner_baseline["contract_digest"] is not None
+          and digest != runner_baseline["contract_digest"]):
+        report.error("{}: contract_digest {} does not match the runner baseline {}; mutations "
+                     "from another contract baseline cannot count".format(
+                         where, digest, runner_baseline["contract_digest"]))
+    fingerprints = payload.get("module_fingerprints")
+    if not isinstance(fingerprints, list) or not fingerprints:
+        report.error("{}: module_fingerprints must be a non-empty list tying the mutations "
+                     "to the tested source tree".format(where))
+        return
+    check_event_fingerprints(report, fingerprints)
+    shared = set()
+    for entry in fingerprints:
+        if not isinstance(entry, dict):
+            continue
+        module_path = entry.get("module_path")
+        if module_path not in runner_baseline["modules"]:
+            continue
+        shared.add(module_path)
+        runner = runner_baseline["modules"][module_path]
+        for field, label in (("content_hash", "content digest"), ("revision", "revision")):
+            value = entry.get(field)
+            if isinstance(value, str) and value.strip() and value != runner[field]:
+                report.error("{}: module {!r} {} {} does not match the runner baseline {}; the "
+                             "mutations were driven against another source baseline".format(
+                                 where, module_path, label, value, runner[field]))
+    if not shared:
+        report.error("{}: fingerprints no module the runner evidence tested ({}); its "
+                     "baseline cannot be tied to the tested source tree".format(
+                         where, sorted(runner_baseline["modules"])))
+
+
 def check_bundle_module_fingerprints(report, runner_entries):
     """Every evidence must describe one source tree, module by module.
 
@@ -2314,6 +2361,9 @@ def run_event_bundle_mode(report, contract, contract_path, bundle_dir, as_json):
     logs = {}
     repeats = {}
     test_sets = set()
+    expected_short_ids = frozenset(
+        test_id for test_id, spec in index["tests"].items()
+        if isinstance(spec, dict) and spec.get("scope") == "event-short")
     for path, payload, info in short:
         repeat_index = info["repeat_index"]
         if repeat_index in repeats:
@@ -2322,6 +2372,16 @@ def run_event_bundle_mode(report, contract, contract_path, bundle_dir, as_json):
         else:
             repeats[repeat_index] = path
         test_sets.add(tuple(sorted(info["test_ids"])))
+        # Equal-set gate: every round must run exactly the contract's event-short
+        # parent set.  Consistency alone is not evidence — ten rounds that all
+        # shrink to the same subset agree with each other while proving nothing.
+        covered = set(info["test_ids"])
+        if covered != expected_short_ids:
+            report.error(
+                "event-short evidence {} must run the full contract event-short parent set: "
+                "{} of {} parent(s) covered (missing {}, unexpected {})".format(
+                    path, len(covered), len(expected_short_ids),
+                    sorted(expected_short_ids - covered), sorted(covered - expected_short_ids)))
     if type(expected_short) is int and set(repeats) != set(range(1, expected_short + 1)):
         report.error("bundle event-short repeat_index coverage {} does not equal 1..{}".format(
             sorted(repeats), expected_short))
@@ -2374,11 +2434,31 @@ def run_event_bundle_mode(report, contract, contract_path, bundle_dir, as_json):
         report.error("bundle mixes contract digests {}; every evidence must share one baseline"
                      .format(sorted(str(digest) for digest in digests)))
     check_bundle_module_fingerprints(report, runner_entries)
+    # The baseline the runner evidence agreed on (first-seen wins; disagreement
+    # was already reported above), so the mutation report can be tied to it.
+    runner_baseline = {"contract_digest": None, "modules": {}}
+    if len(digests) == 1:
+        runner_baseline["contract_digest"] = next(iter(digests))
+    for _path, payload, _info in runner_entries:
+        fingerprints = payload.get("module_fingerprints")
+        if not isinstance(fingerprints, list):
+            continue
+        for entry in fingerprints:
+            if not isinstance(entry, dict):
+                continue
+            module_path = entry.get("module_path")
+            if (isinstance(module_path, str) and module_path.strip()
+                    and module_path not in runner_baseline["modules"]):
+                runner_baseline["modules"][module_path] = {
+                    "content_hash": entry.get("content_hash"),
+                    "revision": entry.get("revision")}
     if len(mutations) != 1:
         report.error("bundle must hold exactly one mutation evidence file, found {}".format(
             len(mutations)))
     for path, payload in mutations:
-        check_mutation_evidence(report, "mutations evidence {}".format(path), payload)
+        where = "mutations evidence {}".format(path)
+        check_mutation_evidence(report, where, payload)
+        check_mutation_baseline(report, where, payload, runner_baseline)
     report.count("mode", "bundle")
     report.count("bundle_evidence_files", len(entries))
     report.count("bundle_short_evidence", len(short))

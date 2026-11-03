@@ -534,8 +534,15 @@ func (s RequestSnapshot) Ref(snapshotID, readEntry string) (SnapshotRef, error) 
 	if err != nil {
 		return SnapshotRef{}, err
 	}
+	return snapshotRef(content, snapshotID, readEntry), nil
+}
+
+// snapshotRef reports the reference to one already encoded snapshot: the digest
+// covers exactly the bytes the caller holds, so a fix that encoded the snapshot
+// to bound it never encodes it a second time to name it.
+func snapshotRef(content []byte, snapshotID, readEntry string) SnapshotRef {
 	sum := sha256.Sum256(content)
-	return SnapshotRef{SnapshotID: snapshotID, Digest: hex.EncodeToString(sum[:]), ReadEntry: readEntry}, nil
+	return SnapshotRef{SnapshotID: snapshotID, Digest: hex.EncodeToString(sum[:]), ReadEntry: readEntry}
 }
 
 // VerifySnapshot rechecks snapshot content against the reference it is read

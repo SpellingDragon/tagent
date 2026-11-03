@@ -65,7 +65,7 @@ func TestScenario02DualInvocationIsolation(t *testing.T) {
 		t.Fatalf("invoke the second invocation: %v", err)
 	}
 	requests := provider.recorded()
-	observations["decisions_per_session"] = len(firstTurn.Decisions) + len(secondTurn.Decisions)
+	observations["decisions_per_session"] = firstTurn.DecisionCount + secondTurn.DecisionCount
 	shared := false
 	for _, req := range requests[1:] {
 		for _, message := range req.Messages {
@@ -75,8 +75,14 @@ func TestScenario02DualInvocationIsolation(t *testing.T) {
 		}
 	}
 	observations["shared_session_history"] = shared
-	refs = append(refs, scenarioDecisionIDs(firstTurn.Decisions)...)
-	refs = append(refs, scenarioDecisionIDs(secondTurn.Decisions)...)
+	for _, invocation := range []event.InvocationID{firstTurn.InvocationID, secondTurn.InvocationID} {
+		for _, fact := range run.SessionFacts(address) {
+			if fact.InvocationID == invocation && fact.DecisionID != "" &&
+				(fact.Type == event.TypeThinkingPlan || fact.Type == event.TypeAgentOutput) {
+				refs = append(refs, string(fact.DecisionID))
+			}
+		}
+	}
 
 	cancelCtx, cancel := context.WithCancel(ctx)
 	doneC := make(chan error, 1)

@@ -352,10 +352,11 @@ func smokeRecallDriveQuery(w http.ResponseWriter, messages []smokeModelMessage) 
 }
 
 // smokeRecallDriveRecent answers the recent page call, then the final text carrying its count.
+//   - the page names its ceiling: the runtime commits its own facts per turn (consumer segment facts beside the request/action ones), so a page of this size stays inside them
 func smokeRecallDriveRecent(w http.ResponseWriter, messages []smokeModelMessage) bool {
 	answer, _, held := smokeRecallToolAnswer(messages, recall.RecentToolName)
 	if !held {
-		fmt.Fprint(w, smokeToolCallBody("call-recall-recent-r601", recall.RecentToolName, `{"limit":12}`))
+		fmt.Fprint(w, smokeToolCallBody("call-recall-recent-r601", recall.RecentToolName, `{"limit":100}`))
 		return true
 	}
 	fmt.Fprint(w, smokeAnswerBody(fmt.Sprintf("recall recent count=%d", smokeRecallInt(answer, "count"))))

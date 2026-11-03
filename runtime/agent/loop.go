@@ -2,7 +2,9 @@ package agent
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strconv"
@@ -138,13 +140,13 @@ type Capture interface {
 	Seal(ctx context.Context) error
 }
 
-// Turn is the outcome one invocation's drive reports: the decisions it ran in
-// order and the terminal its latest decision reduced to.
+// Turn is the outcome one invocation's drive reports: the number of decisions
+// it ran and the terminal its latest decision reduced to.
 type Turn struct {
 	// InvocationID is the range the turn belongs to.
 	InvocationID event.InvocationID
-	// Decisions lists the model decisions the turn ran, in execution order.
-	Decisions []Decision
+	// DecisionCount is the number of model decisions the turn ran.
+	DecisionCount int
 	// Terminal is the terminal the latest decision reduced to, or KindUnknown
 	// while no decision reached one.
 	Terminal model.Kind
@@ -179,9 +181,14 @@ type Loop struct {
 	instance event.InstanceID
 	facts    FactResolver
 
-	mu        sync.Mutex
-	seq       uint64
-	intakes   map[event.InvocationID]*intake
+	mu      sync.Mutex
+	seq     uint64
+	intakes map[event.InvocationID]*intake
+	// ended names the ranges whose intake this loop may recycle, oldest first: a
+	// range mints its intake once and a resident run mints one range per segment, so
+	// the bookkeeping of the least recently ended range leaves the map once
+	// intakeWindow ended ranges stand in it.
+	ended     []event.InvocationID
 	history   HistoryFace
 	capture   Capture
 	commit    FactCommit
@@ -189,10 +196,31 @@ type Loop struct {
 	notices   NoticeFeed
 	present   PresentationSink
 	boundary  RequestFace
-	watch     func(taskID event.TaskID, stopped func() bool) error
-	final     FinalRoundPolicy
-	finals    map[event.AgentID]FinalRoundPolicy
-	losses    []RecordingLoss
+	// *writers is the ledger the close of this agent reads the real stop of every
+	// production of this loop through: the loop builds it for itself, so the
+	// registration stays private to the productions it names while a close reads
+	// it through the loop's own Begin and Stopped.
+	*writers
+	final  FinalRoundPolicy
+	finals map[event.AgentID]FinalRoundPolicy
+	losses []RecordingLoss
+	// consumers is the loop's only Consumer set. Once assigned it is never replaced;
+	// its own stopped bit is the permanent terminal marker.
+	consumers *Consumers
+	// instances names the one consumption instance of each address this loop drives,
+	// whoever mounted it. Uniqueness is read here rather than from a set's own map, so
+	// a loop that carries two sets still drives one instance per address.
+	instances map[event.Address]*Consumer
+	flight    map[event.Address]modelFlight
+	// fuses holds the execution-side storm fuses this loop admits under: the
+	// per-response call cap and the long-context threshold a drive declares for
+	// itself replaces. A member at zero is its fuse off, so a loop beside no
+	// declaration admits exactly what it admitted before the fuses existed.
+	fuses FuseLimits
+	// book is the approval face a fuse parks a batch through. A loop beside no
+	// book refuses a parked batch whole instead of truncating it, so a storm is
+	// never cut down to a limit nobody approved.
+	book ApprovalBook
 }
 
 // NewLoop returns the event loop over the state owner's borrowing face, the
@@ -200,105 +228,33 @@ type Loop struct {
 // result fact into the native tool message it carries.
 func NewLoop(borrow state.Borrow, slots *state.Occupancy, instance event.InstanceID, facts FactResolver) *Loop {
 	return &Loop{
-		borrow:   borrow,
-		slots:    slots,
-		instance: instance,
-		facts:    facts,
-		intakes:  map[event.InvocationID]*intake{},
+		borrow:    borrow,
+		slots:     slots,
+		instance:  instance,
+		facts:     facts,
+		intakes:   map[event.InvocationID]*intake{},
+		instances: map[event.Address]*Consumer{},
+		flight:    map[event.Address]modelFlight{},
+		fuses:     DefaultFuseLimits(),
+		book:      DefaultApprovalBook(),
+		writers:   newWriters(),
 	}
 }
 
-// Drive runs one invocation until its latest decision reaches a terminal that
-// dispatches no tool: every decision aggregates the transcript the range has
-// accumulated beside the session history the drives that already ended on this
-// session committed, and the receipts and settled observations of the tools one
-// decision admitted enter that transcript before the next decision begins. The
-// ready input of the range is never mixed with the input of another invocation.
-// - The episode record is written where the business process actually starts: at the first drive of the invocation's own ready input.
-// - The settled result facts one decision paired are the stored input the next decision reduces.
-// - The drive reads its range's chain again at every decision boundary: input that landed in the range while a decision ran enters the next decision of that same range, and a decision that opened no obligation still ends the round while that input stands unread. The read starts behind the head the chain held when the drive began, so the material an earlier range already took is never this range's input.
-// - The transcript of this drive is committed beside the terminal answer of its last decision, so the next invocation of this session reads the range's history as it actually ended.
-// - The whole drive is watched as one in-flight production beside its invocation identity — the queueing waits included — and confirms its stop only when the drive really ended.
-// - A progress notification of the range's own call commits as a fact of its chain and enters no round head: the report is audit and projection material, never input a decision speaks from.
-// - A terminal notification of the range's own call enters the round head as input material: a settle, a failure or a cancellation is what an unattended follow-up turn speaks from, and the progress reports beside it are skipped by their own category.
-// - A drive whose budget is spent runs one closing round and ends there: the closing round delivers what the range already produced, its transcript is committed the same way, and the obligation it opens is none.
-// - The drive is observed as one consumer run: its start and its end are DEBUG lines carrying identities, counts and the terminal, never transcript content.
-func (l *Loop) Drive(ctx context.Context, inv Invocation) (turn Turn, err error) {
-	turn = Turn{InvocationID: inv.InvocationID, Terminal: model.KindUnknown}
-	consumerStarted := time.Now()
-	consumerDebug("tagent: consumer drive start agent=%s session=%s invocation=%s ready=%d",
-		inv.Address.AgentID, inv.Address.SessionID, inv.InvocationID, len(inv.Ready))
-	defer func() {
-		consumerDebug("tagent: consumer drive end invocation=%s decisions=%d terminal=%s elapsed=%s failed=%t",
-			inv.InvocationID, len(turn.Decisions), turn.Terminal, time.Since(consumerStarted).Round(time.Microsecond), err != nil)
-	}()
-	production := &inFlightProducer{}
-	l.watchProducer(event.TaskID(inv.InvocationID), production.Stopped)
-	defer l.sealCapture(ctx)
-	defer production.stop()
-	l.intakeFor(inv.InvocationID).setAddress(inv.Address)
-	l.markRangeHead(inv)
-	l.observeReady(ctx, inv)
-	l.markConsumed(inv.InvocationID, inv.Ready)
-	history := l.sessionHistory(inv.Address)
-	ready, err := aggregateReady(inv.Ready)
-	if err != nil {
-		return turn, err
-	}
-	transcript := append(append([]model.Message(nil), history...), ready...)
-	policy := l.finalRoundFor(inv.Address.AgentID)
-	started := time.Now()
-	rounds := 0
-	var landed []model.Message
-	for {
-		transcript = append(transcript, landed...)
-		transcript = append(transcript, l.terminalNotes(inv)...)
-		round := closingRound(policy, rounds, time.Since(started))
-		decision, outcome, receipts, observations, decideErr := l.decide(ctx, inv, transcript, round)
-		if decideErr != nil {
-			return turn, decideErr
-		}
-		turn.Decisions = append(turn.Decisions, decision)
-		turn.Terminal = outcome.Kind
-		turn.Failure = ""
-		if outcome.Kind == model.KindFailed {
-			if cause := outcome.Cause(); cause != nil {
-				turn.Failure = strings.TrimSpace(cause.Error())
-			}
-		}
-		next, readErr := l.boundaryInput(ctx, inv)
-		if readErr != nil {
-			return turn, readErr
-		}
-		landed = next
-		if round.final {
-			turn.FinalRound = round.reason
-			l.commitTranscript(inv.Address, append(transcript[len(history):], append([]model.Message{assistantOf(outcome)}, receipts...)...))
-			if commitErr := l.commitOutput(ctx, inv, decision, outcome); commitErr != nil {
-				return l.failCommit(turn, commitErr)
-			}
-			return turn, nil
-		} else if len(receipts) == 0 && len(observations) == 0 && len(landed) == 0 {
-			l.commitTranscript(inv.Address, append(transcript[len(history):], assistantOf(outcome)))
-			if commitErr := l.commitOutput(ctx, inv, decision, outcome); commitErr != nil {
-				return l.failCommit(turn, commitErr)
-			}
-			return turn, nil
-		}
-		transcript = append(transcript, assistantOf(outcome))
-		transcript = append(transcript, receipts...)
-		transcript = append(transcript, observations...)
-		rounds++
-	}
-}
-
-// failCommit reports one drive whose output fact did not commit: the turn ends
-// beside the failed terminal and the named cause of the refusal, so a caller
-// never reads a completed turn over a fact that never landed.
-func (l *Loop) failCommit(turn Turn, cause error) (Turn, error) {
-	turn.Terminal = model.KindFailed
-	turn.Failure = strings.TrimSpace(cause.Error())
-	return turn, fmt.Errorf("tagent: the output fact of the drive did not commit: %w", cause)
+// drive runs one explicit invocation on the Consumer of its address: the
+// invocation's ready facts are handed to that consumer as the segment it opens
+// on, the consumer flies the segment, and drive answers the turn the segment
+// closed on. The loop keeps no second decision, harvest or seal path: every
+// round, every paired result and every sealed turn belong to the Consumer, so
+// this face is a submission beside a wait and nothing else.
+// - The consumer is assembled for this invocation and never mounted, so no
+// wake opens a second segment beside the one this call flies.
+// - The turn is the closed segment's own immutable result, never a value
+// re-derived from the chain after the segment ended.
+func (l *Loop) drive(ctx context.Context, inv Invocation) (Turn, error) {
+	consumer := newConsumer(inv.Address, l, nil)
+	consumer.explicit = true
+	return consumer.driveInvocation(ctx, inv)
 }
 
 // consumerDebug renders one line of the consumer face at DEBUG: the drive's start
@@ -345,6 +301,20 @@ func consumerWarn(format string, args ...any) {
 // on, so the delivery boundary of a call is observed as the fact it is; the
 // After pass of that fact runs beside the notification rather than under the
 // cancellation of the caller that delivered it, because observation is a bypass.
+//
+// The committed delivery fact is named to the consumer of the range beside the
+// wake: a result whose segment already closed stands behind the answer that
+// segment landed, so no position of the chain opens a segment on it by itself,
+// and the wake that names it is the account that says this fact still drives.
+// The observation the result carries rides on the fact, so the segment the name
+// opens reads the very result the notification delivered instead of a second
+// reading of it.
+//
+// - The wake names the fact only while the task is not awaited by a flying
+// segment and not already consumed: an awaited result is paired by that
+// segment's harvest, and a consumed one drives nothing, so neither is read twice.
+// - A loop that drives no set keeps its backflow parked in the intake; a set
+// that carries no instance for the address wakes nothing and starts none.
 func (l *Loop) Backflow(invocationID event.InvocationID, notice task.Notice) {
 	switch notice.Kind {
 	case task.NoticeProgress:
@@ -361,8 +331,41 @@ func (l *Loop) Backflow(invocationID event.InvocationID, notice task.Notice) {
 		}
 	}
 	in := l.intakeFor(invocationID)
-	l.commitSettled(context.Background(), invocationID, in.rangeAddress(), notice)
+	addr := in.rangeAddress()
+	// The body of the settled result is already the one text of its result
+	// fact: carrying it again on the delivery fact would present the same
+	// observation twice in the replayed history, once under the result fact and
+	// once under the delivery. The delivery fact carries the observation only
+	// when the chain holds no result fact to read it from — the settled body a
+	// producer lands without a result fact of its own — so a segment drives on
+	// the one text and the history reads each result exactly once.
+	delivery := msg
+	if l.resultFactOnChain(addr, notice.Event) {
+		delivery = model.Message{Role: model.RoleTool}
+	}
+	key, commitErr := l.commitSettled(context.Background(), invocationID, addr, notice, delivery)
+	if commitErr != nil {
+		consumerWarn("tagent: the delivery fact of task %s did not commit: %v", notice.TaskID, commitErr)
+	}
 	in.deliver(notice.TaskID, delivered{msg: msg, fact: notice.Event})
+	if consumers := l.drivingSet(); consumers != nil {
+		consumers.wakeFact(addr, key)
+	}
+}
+
+// WakeAddress ensures the resident Consumer of one address and signals that facts
+// arrived. A committed body never needs a separate drive, whether its target was busy,
+// idle, or already bound without a mounted Consumer.
+func (l *Loop) WakeAddress(addr event.Address) *Consumer {
+	if l == nil {
+		return nil
+	}
+	consumer := l.residentOf().Ensure(addr)
+	if consumer == nil {
+		return nil
+	}
+	consumer.Wake()
+	return consumer
 }
 
 // commitProgressFact commits one progress notification as a notice fact of the
@@ -431,19 +434,6 @@ func noticeKeyPrefix(invocationID string) string {
 	return "notice\x00" + strconv.Itoa(len(invocationID)) + "\x00" + invocationID + "\x00"
 }
 
-// observeReady runs the After pass of the ready input of one invocation: every
-// ready event carries the identity it committed under at the entry of its
-// range, so the turn-start boundary of this drive is observed as the fact the
-// run already holds. A ready event that carries no identity names no committed
-// fact and is not observed; the drive itself reads the event either way. The
-// pass is idempotent per range: a fact one boundary already observed is not
-// observed again by a later boundary of the same range.
-func (l *Loop) observeReady(ctx context.Context, inv Invocation) {
-	for _, ev := range inv.Ready {
-		l.observeFact(ctx, inv, ev)
-	}
-}
-
 // observeFact runs the After pass of one fact of one range, once: the identity
 // the fact committed under is remembered by the range, so the fact a boundary
 // meets again — the head input of the drive, or the input that landed in flight
@@ -454,6 +444,12 @@ func (l *Loop) observeFact(ctx context.Context, inv Invocation, evt event.Event)
 	}
 	in := l.intakeFor(inv.InvocationID)
 	in.mu.Lock()
+	// The material a range opens on names the lineage its answer leaves under, so
+	// the first stamp observed before the range took a decision is the trigger of
+	// the turn; a fact that lands in flight never rewrites it.
+	if in.decisions == 0 && in.trigger == "" {
+		in.trigger = evt.Meta[event.MetaKeyTriggerSource]
+	}
 	observed := in.observed[evt.Key]
 	in.observed[evt.Key] = true
 	in.mu.Unlock()
@@ -461,82 +457,6 @@ func (l *Loop) observeFact(ctx context.Context, inv Invocation, evt event.Event)
 		return
 	}
 	l.afterPass(ctx, inv.Address.AgentID, evt.Key)
-}
-
-// markConsumed records the keys of one batch of input as material its range has
-// taken into the transcript, so the boundary read reports each fact once: the
-// identity a fact committed under is the de-duplication, never the content the
-// fact reads as.
-func (l *Loop) markConsumed(invocationID event.InvocationID, events []event.Event) {
-	in := l.intakeFor(invocationID)
-	in.mu.Lock()
-	defer in.mu.Unlock()
-	for _, evt := range events {
-		if evt.Key != "" {
-			in.read[evt.Key] = true
-		}
-	}
-}
-
-// markRangeHead records where the range of one drive begins on the chain of its session: the identity of the last fact the chain already held when the drive started, remembered by the range's intake. The boundary read of that drive starts behind it, so the material an earlier range committed under the same invocation identity is never read as input this range has not taken yet.
-// - The marker is an identity, never a position: the age fold rewrites the sequence the commits record, so a position names other material after a rewrite.
-// - The marker is recorded before the drive reads anything, so the head input of the drive itself stands behind it and is never re-read.
-// - A chain that held no fact at the start names no head, and the read of that drive starts at the head of the chain as it stands.
-func (l *Loop) markRangeHead(inv Invocation) {
-	in := l.intakeFor(inv.InvocationID)
-	in.mu.Lock()
-	defer in.mu.Unlock()
-	in.head = ""
-	if n := len(inv.Ready); n > 0 {
-		in.head = inv.Ready[n-1].Key
-	} else if facts := l.sessionFacts(inv.Address); len(facts) > 0 {
-		in.head = facts[len(facts)-1].Key
-	}
-}
-
-// boundaryInput reads the range's own facts again at one decision boundary and answers the messages of the facts the range has not taken yet, in commit order: the input that landed in this range while the decision that just ended was running enters the next decision of that same range.
-// - Only the facts of this range are read: a fact of another invocation of the session is that range's input and never this one's.
-// - Only the facts that start a range are read: the reasoning, the calls, the output and the notices belong to the range in flight and are carried by the transcript.
-// - Only the facts behind the head the drive recorded are read: a fact the chain already held when the drive began belongs to a range that already ran, even when it carries this range's own identity — a restarted process counts its invocation identities from the start again, so the facts of the earlier process are material that already ended.
-// - The identity a fact committed under is what de-duplicates it, so the same text sent twice is two facts and stands in the request twice.
-//
-// 契约: docs/wiki/agent/event-flow.md#projection-lifecycle
-func (l *Loop) boundaryInput(ctx context.Context, inv Invocation) ([]model.Message, error) {
-	facts := l.sessionFacts(inv.Address)
-	if len(facts) == 0 {
-		return nil, nil
-	}
-	fresh := make([]event.Event, 0, len(facts))
-	in := l.intakeFor(inv.InvocationID)
-	in.mu.Lock()
-	for _, evt := range behindRangeHead(facts, in.head) {
-		if evt.InvocationID != inv.InvocationID || evt.Key == "" || !startsRange(evt) {
-			continue
-		}
-		if in.read[evt.Key] {
-			continue
-		}
-		in.read[evt.Key] = true
-		fresh = append(fresh, evt)
-	}
-	in.mu.Unlock()
-	for _, evt := range fresh {
-		l.observeFact(ctx, inv, evt)
-	}
-	return aggregateReady(fresh)
-}
-
-// behindRangeHead reports the facts of one chain that stand behind the head its drive recorded: the fact the head names, and every fact before it, belongs to a range that already ran, so no boundary of this drive reads them. The head names an identity rather than a position because a fold rewrites the sequence the commits record. A chain that does not carry the head is answered whole: the marker names material this read cannot locate, and a chain read as empty would silently drop the input that landed in flight.
-func behindRangeHead(facts []event.Event, head event.EventID) []event.Event {
-	if head == "" {
-		return facts
-	}
-	for at, evt := range facts {
-		if evt.Key == head {
-			return facts[at+1:]
-		}
-	}
-	return facts
 }
 
 // startsRange reports whether one committed fact starts the range it belongs to:
@@ -551,19 +471,83 @@ func behindRangeHead(facts []event.Event, head event.EventID) []event.Event {
 // same judgement.
 func startsRange(evt event.Event) bool {
 	if evt.Type == event.TypeExternalInput {
+		// A delegated input commits as a batch at its execution site: the
+		// instruction and the materials of the batch are carried into the range
+		// its task opens, so they start no range of their own and a batch whose
+		// task never landed drives no segment here or after a restart. The
+		// request boundary keeps the same judgement (assembly admitsRange), so
+		// these facts never move the ended-material boundary either.
+		switch evt.Meta[delegatedPartMeta] {
+		case delegatedPartInstruction, delegatedPartMaterial:
+			return false
+		}
 		return true
 	}
 	return evt.Type == event.TypeFeedback && evt.Meta[event.MetaKeyTriggerSource] == "task"
 }
 
+// The delegated input of one round commits as a batch of facts at its execution
+// site: the instruction the round runs under (a system message), one projection
+// per material the call handed over, and the task that closes the batch. The
+// part a fact states is stamped on it, so a reader tells the parts of the batch
+// from every other input of the chain: the instruction and the material
+// projections are the material of the range the task opens, and only the task
+// starts it. The source key of one material rides its fact's meta as lineage —
+// the material is the projection of that committed source event, never the
+// source's identity reused as a key of the site's chain.
+const (
+	delegatedPartMeta        = "delegated_part"
+	delegatedPartInstruction = "instruction"
+	delegatedPartMaterial    = "material"
+	delegatedPartTask        = "task"
+	delegatedSourceMeta      = "delegated_source"
+)
+
+// delegatedSiteStamp renders the stable identity of one execution site inside
+// the keys its instruction and material projections commit under: the complete
+// address, never a stamp of the round itself, so two sites that share a caller
+// session never share a projection key while a retried round of one site lands
+// no second fact under the key its instruction already names.
+func delegatedSiteStamp(site event.Address) string {
+	return string(site.AgentID) + "@" + string(site.SessionID)
+}
+
+// The entries one agent_output records its closed turn under: the terminal the
+// latest decision reduced to, the raw cause of a failed turn, the reason the
+// closing round ran, the trigger lineage the range opened on, and the number of
+// decisions the turn ran. They stand beside the input relation and never replace
+// it, so a reader rebuilds the whole closed turn from the chain.
+const (
+	outputMetaTerminal      = "terminal"
+	outputMetaFailure       = "failure"
+	outputMetaFinalRound    = "final_round"
+	outputMetaTrigger       = "trigger"
+	outputMetaDecisionCount = "decision_count"
+)
+
 // commitOutput commits the assistant output one ended drive answers with as the
 // turn-end fact of the range and runs its After pass: the message the drive
 // commits to the transcript of its session beside the decision, invocation and
 // address it belongs to, so the turn end is one committed fact of the run and
-// not a line derived from the outcome afterwards. A commit the ledger refuses
-// is reported to the caller of the drive beside a failed terminal, so a turn
-// never answers completed over a fact that never landed.
-func (l *Loop) commitOutput(ctx context.Context, inv Invocation, decision Decision, outcome model.Outcome) error {
+// not a line derived from the outcome afterwards. The fact records the stable
+// fields of the closed turn beside the input relation it consumed — the
+// terminal, the failure cause, the closing-round reason, the trigger lineage and
+// the decision count — so a reader of the chain rebuilds the turn itself. A
+// commit the ledger refuses is reported to the caller of the drive beside a
+// failed terminal, so a turn never answers completed over a fact that never
+// landed.
+func (l *Loop) commitOutput(ctx context.Context, inv Invocation, decision Decision, outcome model.Outcome, inputs []event.EventID) error {
+	encoded, err := json.Marshal(inputs)
+	if err != nil {
+		return fmt.Errorf("tagent: encode the output's input relations: %w", err)
+	}
+	failure := ""
+	if outcome.Kind == model.KindFailed {
+		if cause := outcome.Cause(); cause != nil {
+			failure = strings.TrimSpace(cause.Error())
+		}
+	}
+	decisionCount, finalRound, trigger := l.closingTurnOf(inv.InvocationID)
 	return l.commitFact(ctx, inv.Address.AgentID, event.Event{
 		Type:         event.TypeAgentOutput,
 		Timestamp:    time.Now(),
@@ -575,7 +559,57 @@ func (l *Loop) commitOutput(ctx context.Context, inv Invocation, decision Decisi
 		InstanceID:   inv.Instance,
 		DecisionID:   decision.DecisionID,
 		EpisodeID:    episodeOfReady(inv.Ready),
+		Meta: map[string]string{
+			event.MetaKeyInputEvents: string(encoded),
+			outputMetaTerminal:       outcome.Kind.String(),
+			outputMetaFailure:        failure,
+			outputMetaFinalRound:     string(finalRound),
+			outputMetaTrigger:        trigger,
+			outputMetaDecisionCount:  strconv.Itoa(decisionCount),
+		},
 	})
+}
+
+// closingTurnOf reports the stable closing fields of one range's turn: the
+// number of decisions it ran, the reason its closing round ran, and the trigger
+// lineage its opening material carried.
+func (l *Loop) closingTurnOf(invocationID event.InvocationID) (decisions int, finalRound FinalRoundReason, trigger string) {
+	in := l.intakeFor(invocationID)
+	in.mu.Lock()
+	defer in.mu.Unlock()
+	return in.decisions, in.finalRound, in.trigger
+}
+
+// inputKeysOf returns the stable identities of the facts a direct drive consumed,
+// in their original order and without duplicates.
+func inputKeysOf(events []event.Event) []event.EventID {
+	keys := make([]event.EventID, 0, len(events))
+	seen := map[event.EventID]bool{}
+	for _, evt := range events {
+		if evt.Key == "" || seen[evt.Key] {
+			continue
+		}
+		seen[evt.Key] = true
+		keys = append(keys, evt.Key)
+	}
+	return keys
+}
+
+// appendInputKeys appends only identities not already consumed, preserving the
+// order in which the facts actually entered the drive.
+func appendInputKeys(keys []event.EventID, additions []event.EventID) []event.EventID {
+	seen := make(map[event.EventID]bool, len(keys))
+	for _, key := range keys {
+		seen[key] = true
+	}
+	for _, key := range additions {
+		if key == "" || seen[key] {
+			continue
+		}
+		seen[key] = true
+		keys = append(keys, key)
+	}
+	return keys
 }
 
 // commitCalls commits the assistant message one decision issued its tool calls
@@ -603,18 +637,38 @@ func (l *Loop) commitCalls(ctx context.Context, inv Invocation, decision Decisio
 	})
 }
 
+// resultFactOnChain reports whether the chain of one address already carries the
+// result fact a settled notification points at. The result fact is the one text
+// of the tool result — the delivery fact names the delivery and never a second
+// copy of the body — so a delivery that finds it on the chain commits the fact
+// of the delivery alone and leaves the observation to the result fact the pull
+// reads.
+func (l *Loop) resultFactOnChain(addr event.Address, key event.EventID) bool {
+	if key == "" {
+		return false
+	}
+	for _, evt := range l.sessionFacts(addr) {
+		if evt.Key == key {
+			return true
+		}
+	}
+	return false
+}
+
 // commitSettled commits one settled notification as the delivery fact of the
 // range it settles into, beside the task it belongs to and the address the
-// notification was accepted at, and runs the After pass of that fact. A
-// notification that arrived before the range recorded its own address commits
-// no delivery fact: the fact of a delivery names the range it lands in. A
-// commit the ledger refuses answers no caller, so it is reported at WARN and
-// the delivery itself still settles into its range.
-func (l *Loop) commitSettled(ctx context.Context, invocationID event.InvocationID, addr event.Address, notice task.Notice) {
+// notification was accepted at, and answers the identity it landed under. The
+// observation the notification delivered rides on the fact, so a segment that
+// opens on that fact reads the result itself; a notification that carries no
+// observation commits the fact of the delivery alone. A notification that
+// arrived before the range recorded its own address commits no fact: the fact
+// of a delivery names the range it lands in. A refused commit answers no
+// identity beside the named cause.
+func (l *Loop) commitSettled(ctx context.Context, invocationID event.InvocationID, addr event.Address, notice task.Notice, msg model.Message) (event.EventID, error) {
 	if addr.AgentID == "" || addr.SessionID == "" {
-		return
+		return "", nil
 	}
-	if err := l.commitFact(ctx, addr.AgentID, event.Event{
+	evt := event.Event{
 		Type:         event.TypeTaskSettled,
 		Timestamp:    time.Now(),
 		TaskID:       notice.TaskID,
@@ -623,9 +677,11 @@ func (l *Loop) commitSettled(ctx context.Context, invocationID event.InvocationI
 		Target:       addr,
 		InvocationID: invocationID,
 		InstanceID:   l.instance,
-	}); err != nil {
-		consumerWarn("tagent: the delivery fact of task %s did not commit: %v", notice.TaskID, err)
 	}
+	if msg.Content != "" || msg.ToolID != "" || msg.ToolName != "" || len(msg.ToolCalls) > 0 {
+		evt.Message = msg
+	}
+	return l.commitFactKey(ctx, addr.AgentID, evt)
 }
 
 // commitFact commits one fact of the run through the attached commit face and
@@ -837,58 +893,15 @@ func (l *Loop) sealCapture(ctx context.Context) {
 	}
 }
 
-// SetWatch attaches the registration the close of this agent confirms the real
-// stop of every in-flight production through: the whole drive of one invocation
-// and the model stream of each of its decisions, each registered beside the work
-// identity it runs behind, with the stop confirmation that work is polled
-// through. A nil registration keeps the loop registering nothing. The setter is
-// separate from the constructor so the declared construction shape of the loop
-// stays as it is.
-//
-// The redline list (2 rules):
-// MUST register a production when it really starts and confirm its stop only when it really ended.
-// MUST NOT read a cancelled request, an emptied queue or an elapsed timeout as a stop.
-func (l *Loop) SetWatch(watch func(taskID event.TaskID, stopped func() bool) error) {
+// beginWriter registers one production of this loop that is starting now and
+// answers the confirmation that closes its registration. The ledger is the
+// loop's own: a production of a loop is not a task, so the registration names
+// the production and mints no identity the task account would have to carry.
+func (l *Loop) beginWriter(name string) func() {
 	l.mu.Lock()
-	defer l.mu.Unlock()
-	l.watch = watch
-}
-
-// watchProducer registers one in-flight production behind the named work
-// identity through the attached face, or registers nothing while no face is
-// attached.
-func (l *Loop) watchProducer(taskID event.TaskID, stopped func() bool) {
-	l.mu.Lock()
-	watch := l.watch
+	writers := l.writers
 	l.mu.Unlock()
-	if watch == nil {
-		return
-	}
-	_ = watch(taskID, stopped)
-}
-
-// inFlightProducer is the stop confirmation of one in-flight production of
-// this loop: the model stream one decision reduces, or the whole drive of one
-// invocation with the queueing waits it stands in. The production confirms its
-// stop only when the work really ended: a cancelled request is never read as
-// one.
-type inFlightProducer struct {
-	mu      sync.Mutex
-	stopped bool
-}
-
-// Stopped reports whether this production really stopped.
-func (p *inFlightProducer) Stopped() bool {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	return p.stopped
-}
-
-// stop confirms the real stop of this production.
-func (p *inFlightProducer) stop() {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	p.stopped = true
+	return writers.Begin(name)
 }
 
 // requestBoundary assembles the request-boundary material of one decision
@@ -962,6 +975,533 @@ func (l *Loop) SetPresentations(sink PresentationSink) {
 	l.present = sink
 }
 
+// SetConsumers assigns the loop's only Consumer set during assembly and returns
+// the actual current set. The first non-nil set wins; later replacement or clearing
+// does not change it. A loop with no assigned set mounts one on first resident use,
+// while a backflow beside no current set only parks its result and never mounts one.
+func (l *Loop) SetConsumers(consumers *Consumers) *Consumers {
+	if l == nil {
+		return nil
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.consumers == nil && consumers != nil {
+		l.consumers = consumers
+	}
+	// The actual current set is the answer, including when a late caller tried
+	// to replace or clear it. A stopped current remains the permanent tombstone.
+	return l.consumers
+}
+
+// drivingSet reports the consumption loops that drive the addresses of this loop's
+// ranges: the set a host attached, or the set this loop mounted for itself, and none
+// beside a loop that runs neither. The read mounts nothing — a settled backflow wakes
+// the set that already drives its range and never starts one of its own to wake.
+func (l *Loop) drivingSet() *Consumers {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.drivingSetLocked()
+}
+
+// drivingSetLocked reports the set that drives this loop's addresses under the lock
+// the mount and the attach take.
+func (l *Loop) drivingSetLocked() *Consumers {
+	return l.consumers
+}
+
+// residentOf reports the consumption loops this loop drives delegated turns on:
+// the set attached to it, or the set it mounts for itself when none is attached.
+//
+// The set mounted here is the loop's own, so a run assembled beside no host still
+// drives every delegated execution site on a resident instance of that site. Once
+// mounted, this same current set also receives the settled backflow of its ranges.
+func (l *Loop) residentOf() *Consumers {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.residentLocked()
+}
+
+// residentLocked reports the set this loop drives its resident addresses through,
+// mounting its own beside no attached one, under the lock the mount and the attach
+// take.
+func (l *Loop) residentLocked() *Consumers {
+	if l.consumers == nil {
+		l.consumers = NewConsumers(l, context.Background(), nil)
+	}
+	return l.consumers
+}
+
+// StopResidents ends the loop's one current Consumer set: no further instance mounts,
+// each flying segment is answered by cancellation, and its inputs stay on the chain
+// for restart. The current set remains as the stopped tombstone. No Loop lock is held
+// while joining consumers, so a Consumer tool may synchronously re-enter WakeAddress.
+func (l *Loop) StopResidents() {
+	if l == nil {
+		return
+	}
+	l.mu.Lock()
+	resident := l.residentLocked()
+	l.mu.Unlock()
+	// Stop marks the current set before joining it, and no Loop lock is held while
+	// waiting. The current pointer stays as the permanent stopped tombstone.
+	resident.Stop()
+}
+
+// StopResidentsWithin ends the loop's one current Consumer set inside the named
+// deadline: the set is marked first — no further instance mounts, no context
+// of a flying loop is cancelled by the mark itself, and each loop the set
+// already holds ends its own life once the work it holds really ends — and
+// the join that follows waits for those exits under the same deadline, so a
+// close whose budget arrived returns beside the loops still flying instead of
+// blocking on them. A loop the budget ended beside inside a model production
+// is left flying and named in the answer; its production stays named by the
+// writer ledger of the run, so the close that spent its budget reports it and
+// a later drive finishes it for real. A loop the budget ended beside between
+// turns is closed by its own loop (see Consumers.awaitStopped), so no entry
+// waits on a driver that already spent its close. A zero deadline joins
+// without one.
+func (l *Loop) StopResidentsWithin(deadline time.Time) []string {
+	if l == nil {
+		return nil
+	}
+	l.mu.Lock()
+	resident := l.residentLocked()
+	l.mu.Unlock()
+	// The mark closes the set's terminal marker and no Loop lock is held while
+	// joining. The current pointer stays as the permanent stopped tombstone.
+	resident.markStopped()
+	return resident.awaitStopped(deadline)
+}
+
+// instanceFor answers the one consumption instance of one address, mounting it
+// through the given set when this loop carries none: the registry of this loop, not
+// the map of a set, is what answers "one instance per address".
+//
+// - An address this loop already drives answers the instance it carries, whatever set asks: a second set never starts a second driver of the same decisions.
+// - A loop that already drives its addresses through one set mounts through that set alone: a second set answers no instance instead of opening a driver the close of this loop would not stop, and never takes an instance another set already mounted.
+// - A loop beside no driving set mounts through whichever set asks first, exactly as a set assembled over a loop by a test or an embedder always could.
+// - The chain is read for the cursor of a fresh instance outside the registry lock, so the mount never reads the chain under the lock it answers the registry by.
+// - A quiet mount marks a fresh instance for a delegated batch: see Consumers.mount.
+func (l *Loop) instanceFor(addr event.Address, cs *Consumers, quiet bool) *Consumer {
+	l.mu.Lock()
+	if cs == nil {
+		l.mu.Unlock()
+		return nil
+	}
+	if l.consumers == nil {
+		l.consumers = cs
+	}
+	if l.currentStoppedLocked() {
+		l.mu.Unlock()
+		return nil
+	}
+	if instance, held := l.instances[addr]; held {
+		l.mu.Unlock()
+		return instance
+	}
+	if l.consumers != cs {
+		l.mu.Unlock()
+		return nil
+	}
+	l.mu.Unlock()
+	cursor := lastOutputOf(l.sessionFacts(addr))
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.currentStoppedLocked() {
+		return nil
+	}
+	if instance, held := l.instances[addr]; held {
+		return instance
+	}
+	if l.consumers != cs {
+		return nil
+	}
+	instance := cs.mountLocked(l, addr, cursor, quiet)
+	if instance == nil {
+		return nil
+	}
+	l.instances[addr] = instance
+	return instance
+}
+
+// currentStoppedLocked reads the one current set's terminal marker. Existing
+// instances and fresh mounts both pass this check before any input is accepted.
+func (l *Loop) currentStoppedLocked() bool {
+	if l.consumers == nil {
+		return false
+	}
+	l.consumers.mu.Lock()
+	defer l.consumers.mu.Unlock()
+	return l.consumers.stopped
+}
+
+// forgetInstance drops one ended instance from the registry and from the set that
+// mounted it, so the address that mounts next is a new driver instead of the dead
+// one this loop left behind.
+func (l *Loop) forgetInstance(c *Consumer) {
+	if c == nil {
+		return
+	}
+	l.mu.Lock()
+	if held, ok := l.instances[c.addr]; ok && held == c {
+		delete(l.instances, c.addr)
+	}
+	l.mu.Unlock()
+	c.set.forget(c)
+}
+
+// forgetInstancesOf drops every instance the named set mounted: the stop of a set
+// answers no address of its own, so the registry never names a driver that ended.
+func (l *Loop) forgetInstancesOf(cs *Consumers) {
+	if cs == nil {
+		return
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	for addr, instance := range l.instances {
+		if instance.set == cs {
+			delete(l.instances, addr)
+		}
+	}
+}
+
+// drivesAddress reports whether one address carries a consumption instance this loop
+// drives, whoever mounted it.
+func (l *Loop) drivesAddress(addr event.Address) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	_, held := l.instances[addr]
+	return held
+}
+
+// DelegatedInput is what one delegated turn hands the resident instance of its
+// execution site: the site, the binding its decisions run on, the instruction it runs
+// under, the materials the task reads from and the request it starts from.
+type DelegatedInput struct {
+	// Site is the execution address the delegated turn runs in.
+	Site event.Address
+	// Binding is the binding the decisions of that site run on: the assembled
+	// sub-agent's own material, never a generation held for a declared agent.
+	Binding state.AgentBinding
+	// Instruction is the instruction the turn runs under; empty declares none.
+	Instruction string
+	// Request is the task this event states: the direct content of the task
+	// fact that closes the delegated input batch and drives the round.
+	Request string
+	// Materials are the source events the task reads from, resolved by the
+	// caller: the framework projects each into the site's chain as the material
+	// the round receives, and a source the call could not resolve stands here as
+	// none. The consuming agent stays unaware of the resolution.
+	Materials []event.Event
+	// declaration is the resolved declaration of the turn as its caller rendered
+	// it: opaque JSON stamped on the task fact that closes the input batch, so a
+	// re-entry after a restart rebuilds the assembly from the site's own chain
+	// instead of holding a second durable copy of it in process memory. It is
+	// framework metadata, not a face of the input, so it stays unexported.
+	declaration []byte
+}
+
+// WithDeclaration stamps the resolved declaration of one delegated turn onto the
+// input, so the task fact that closes its batch carries the assembly a re-entry
+// after a restart serves the next round on. The body stays opaque here: the
+// caller that assembled the declaration owns its vocabulary.
+func (in DelegatedInput) WithDeclaration(declaration []byte) DelegatedInput {
+	in.declaration = append([]byte(nil), declaration...)
+	return in
+}
+
+// DelegatedAnswer is the outcome of one delegated round as its execution site reported
+// it: the body its last decision produced and the terminal it ended at.
+type DelegatedAnswer struct {
+	// Body is the assistant text the round ended on; empty when it produced none.
+	Body string
+	// Status is the terminal the delegated task reports.
+	Status task.Status
+	// Failure is the named cause a failed round ended at, empty otherwise.
+	Failure string
+}
+
+// ErrDelegatedSiteIncomplete reports a delegated turn whose execution site names no
+// complete agent session, so no resident instance could run it.
+var ErrDelegatedSiteIncomplete = errors.New("agent: the delegated site names no complete agent session")
+
+// ErrDelegatedInstanceUnavailable reports a delegated turn asked for while the loop
+// carries no set of resident instances, or while the set already stopped.
+var ErrDelegatedInstanceUnavailable = errors.New("agent: no resident instance is available for the delegated site")
+
+// SubmitDelegated hands one delegated turn to the resident instance of its execution
+// site and answers the segment that consumed it: the input commits at that site under
+// the delegation lineage, the instance mounted with the binding the turn runs on is
+// woken, and the round is the one that segment flies. The caller keeps the task face —
+// admission, settle and notice stay where they are — and reads only what the turn
+// produced.
+// - The input commits as the site's own external input before the wake, so the segment the wake reads as its own material.
+// - The answer is the chain the segment closed on: a body that never committed is a failed round rather than a copy kept beside the chain.
+// - The body is the one the closing decision of that segment produced, never whatever the chain of the site ended at meanwhile: a second segment that closed beside this wait has no body of its own to lend.
+// - A cancelled wait reports the cancelled terminal beside no error, so a closing run settles what it already admitted instead of leaving it owed. A wait the end of the loop answers is the same cancellation: the segment stays owed on the chain for the restart, and the round reports the terminal it really reached.
+func (l *Loop) SubmitDelegated(ctx context.Context, in DelegatedInput) (DelegatedAnswer, error) {
+	return l.submitDelegated(ctx, in, nil)
+}
+
+// SubmitDelegatedBeside hands one delegated turn to the resident instance of its site
+// exactly as SubmitDelegated does, and reports the round's first commit beside it: the callback
+// hears nil once the input has landed at the site, and the named cause of a turn that never
+// landed. A caller that answers a delivery receipt uses it to answer only for a body that
+// arrived, instead of answering before the input reached the chain the receipt claims.
+//
+// The report is the input's commit and nothing else: a round that lands its input and then
+// fails still reported nil, because the body did arrive and what became of the round is its
+// own terminal's to report.
+func (l *Loop) SubmitDelegatedBeside(ctx context.Context, in DelegatedInput, started func(error)) (DelegatedAnswer, error) {
+	return l.submitDelegated(ctx, in, started)
+}
+
+// submitDelegated is the one body of a delegated turn: the caller that reads only the answer
+// and the caller that also has to hear the first commit share it, so a turn reports the same
+// input, the same wake and the same terminal whichever way it was handed over.
+func (l *Loop) submitDelegated(ctx context.Context, in DelegatedInput, started func(error)) (DelegatedAnswer, error) {
+	report := delegationStart(started)
+	if !in.Site.IsComplete() {
+		report(ErrDelegatedSiteIncomplete)
+		return DelegatedAnswer{}, ErrDelegatedSiteIncomplete
+	}
+	consumers := l.residentOf()
+	if consumers == nil {
+		report(ErrDelegatedInstanceUnavailable)
+		return DelegatedAnswer{}, ErrDelegatedInstanceUnavailable
+	}
+	consumer := consumers.mount(in.Site, &in.Binding)
+	if consumer == nil {
+		report(ErrDelegatedInstanceUnavailable)
+		return DelegatedAnswer{}, ErrDelegatedInstanceUnavailable
+	}
+	drive, taskKey, err := l.delegatedInputOf(ctx, in)
+	if err != nil {
+		report(err)
+		return DelegatedAnswer{Status: task.StatusFailed, Failure: err.Error()}, err
+	}
+	report(nil)
+	// The batch is carried by name: the instruction and the material facts start
+	// no range of their own, so the wake of the round names every fact it
+	// committed beside the task and the one pull of the task reads the whole
+	// batch. The wait reads the task key alone: the task is the identity of the
+	// round, while an instruction or material key a previous round already
+	// consumed would answer with that round's body.
+	consumer.Drive(drive...)
+	consumer.Wake()
+	answer, waitErr := consumer.WaitAnswer(ctx, delegationWaitKeys(taskKey))
+	if waitErr != nil {
+		if ctx.Err() != nil || errors.Is(waitErr, ErrSegmentCancelled) {
+			return DelegatedAnswer{Status: task.StatusCancelled}, nil
+		}
+		return DelegatedAnswer{Status: task.StatusFailed, Failure: waitErr.Error()}, waitErr
+	}
+	status, failure := delegatedTerminalOf(answer)
+	return DelegatedAnswer{Body: answer.Body, Status: status, Failure: failure}, nil
+}
+
+// delegationStart reports the first commit of one delegated round, at most once: the input's
+// commit is the one report a started round makes, and every early refusal reports the cause
+// it never started for. The callback is read at most once because a round that reports its
+// start and then fails reports the start, never a second, later answer to the same question.
+func delegationStart(started func(error)) func(error) {
+	if started == nil {
+		return func(error) {}
+	}
+	var once sync.Once
+	return func(err error) {
+		once.Do(func() { started(err) })
+	}
+}
+
+// delegatedInputOf commits the input of one delegated turn at its execution site
+// as a batch of ordinary input facts, in the order the round reads them: the
+// instruction it runs under lands first as a system message of its own, the
+// sources the call handed over land beside it as the material projections their
+// keys name, and the task the caller stated lands last as the fact that closes
+// the batch. The framework assembles and the agent consumes; no fact of the
+// batch is a second structure beside the chain, and the facts the batch already
+// committed stay readable by key after a restart.
+//
+// The task is the only fact of the batch that starts a range: the delegated tool
+// names the whole batch when it wakes the site (see submitDelegated), so a batch
+// whose task never landed leaves its instruction and materials inert instead of
+// driving half a round. Each part commits under the key its execution site
+// derives, so a retried round lands no second fact while the next round carries
+// its own input and its own fact.
+func (l *Loop) delegatedInputOf(ctx context.Context, in DelegatedInput) ([]event.EventID, event.EventID, error) {
+	drive := make([]event.EventID, 0, 2+len(in.Materials))
+	if strings.TrimSpace(in.Instruction) != "" {
+		// The instruction is one system message fact of the site: the round it
+		// belongs to runs under it, and a later round of the same site commits the
+		// same fact identity instead of a second system message. Only the stable
+		// fields of the fact travel — the instruction, the part it states and the
+		// delegation lineage — never a stamp of the round, so the re-commit is
+		// judged the fact the chain already holds.
+		key, err := l.commitFactKey(ctx, in.Site.AgentID, l.delegatedFactOf(in.Site,
+			delegatedPartInstruction, "",
+			event.EventID("delegated-"+delegatedSiteStamp(in.Site)+"-instruction"),
+			model.Message{Role: model.RoleSystem, Content: in.Instruction}, nil))
+		if err != nil {
+			return nil, "", err
+		}
+		if key != "" {
+			drive = append(drive, key)
+		}
+	}
+	for _, material := range in.Materials {
+		if material.Key == "" {
+			continue
+		}
+		// The material is the projection of one committed source event: the site's
+		// own fact carries the body the round reads, and the source key rides its
+		// meta as lineage. The key is derived from that source key, so a retried
+		// round of the same call lands no second projection, and the same source
+		// referenced twice is one material.
+		message := material.Message
+		if message.Role == "" {
+			role, err := RoleOf(material.Type)
+			if err != nil {
+				return nil, "", err
+			}
+			message.Role = role
+		}
+		key, err := l.commitFactKey(ctx, in.Site.AgentID, l.delegatedFactOf(in.Site,
+			delegatedPartMaterial, string(material.Key),
+			event.EventID("delegated-"+delegatedSiteStamp(in.Site)+"-material-"+string(material.Key)),
+			message, nil))
+		if err != nil {
+			return nil, "", err
+		}
+		if key != "" {
+			drive = append(drive, key)
+		}
+	}
+	var key event.EventID
+	if in.Site.SessionID != "" {
+		// The identity is the execution site beside the input it serves: the site
+		// is minted for the delegated turn itself and carries its call identity,
+		// so a retried round of one input lands no second fact, while the next
+		// round of the same task carries its own input and its own fact.
+		digest := sha256.Sum256([]byte(in.Request))
+		key = event.EventID(fmt.Sprintf("delegated-%s-%x", in.Site.SessionID, digest[:8]))
+	}
+	committed, err := l.commitFactKey(ctx, in.Site.AgentID, l.delegatedFactOf(in.Site,
+		delegatedPartTask, "", key, model.Message{Role: model.RoleUser, Content: in.Request}, in.declaration))
+	if err != nil {
+		return nil, "", err
+	}
+	if committed != "" {
+		drive = append(drive, committed)
+	}
+	return drive, committed, nil
+}
+
+// delegatedFactOf projects one part of a delegated input batch onto the fact the
+// site's chain commits: the site as owner, source and target, the delegation
+// lineage beside the part the fact states, and the instance the round runs on.
+// The parts of a batch are the material of one delegated round and never a
+// host-facing delivery or a freshness fact.
+func (l *Loop) delegatedFactOf(site event.Address, part, source string, key event.EventID, message model.Message, declaration []byte) event.Event {
+	meta := map[string]string{
+		event.MetaKeyTriggerSource: event.LineageDelegation,
+		delegatedPartMeta:          part,
+	}
+	if source != "" {
+		meta[delegatedSourceMeta] = source
+	}
+	// The declaration travels on the task fact the batch closes with and nowhere
+	// else: the instruction and material facts are material of the round, while the
+	// task is the identity a re-entry names when it serves the next one.
+	if part == delegatedPartTask && len(declaration) > 0 {
+		meta[event.MetaKeyDelegation] = string(declaration)
+	}
+	return event.Event{
+		Type:       event.TypeExternalInput,
+		Timestamp:  time.Now(),
+		Key:        key,
+		Message:    message,
+		Owner:      site,
+		Source:     site,
+		Target:     site,
+		InstanceID: l.instance,
+		Meta:       meta,
+	}
+}
+
+// delegationWaitKeys names the fact one delegated round waits on: the task key
+// that closes its batch, or no key beside a loop that committed nothing.
+func delegationWaitKeys(taskKey event.EventID) []event.EventID {
+	if taskKey == "" {
+		return nil
+	}
+	return []event.EventID{taskKey}
+}
+
+// delegatedTerminalOf reports the terminal one closed segment answers with: the
+// reduction's own terminal when the segment ended on one, the named cause when it ended
+// beside an error, and the settled outcome only when neither stands.
+func delegatedTerminalOf(answer SegmentAnswer) (task.Status, string) {
+	switch {
+	case answer.Err != nil || answer.Turn.Terminal == model.KindFailed:
+		failure := answer.Turn.Failure
+		if failure == "" && answer.Err != nil {
+			failure = answer.Err.Error()
+		}
+		return task.StatusFailed, failure
+	case answer.Turn.Terminal == model.KindCancelled:
+		return task.StatusCancelled, answer.Turn.Failure
+	default:
+		return task.StatusSettled, ""
+	}
+}
+
+// modelFlight is the model decision one address runs: the range it serves and
+// the identity of the decision itself.
+type modelFlight struct {
+	invocation event.InvocationID
+	decision   event.DecisionID
+}
+
+// InFlightModel reports the model decision the consumption state of one address
+// carries, or that no model request of that address is executing.
+//
+// The redline list (3 rules):
+// MUST report the decision this loop runs, never a decision another loop runs.
+// MUST report no flight once the decision of that address ended.
+// MUST NOT take a decision just to read it: the read starts nothing.
+func (l *Loop) InFlightModel(addr event.Address) (event.InvocationID, event.DecisionID, bool) {
+	if l == nil {
+		return "", "", false
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	flight, held := l.flight[addr]
+	if !held {
+		return "", "", false
+	}
+	return flight.invocation, flight.decision, true
+}
+
+// markModelInFlight records the decision one address is running and answers the
+// release that clears it: the consumption state a reader sees is the decision
+// the loop actually flies, and a released decision leaves no flight behind.
+func (l *Loop) markModelInFlight(addr event.Address, invocation event.InvocationID, decision event.DecisionID) func() {
+	l.mu.Lock()
+	if l.flight == nil {
+		l.flight = map[event.Address]modelFlight{}
+	}
+	l.flight[addr] = modelFlight{invocation: invocation, decision: decision}
+	l.mu.Unlock()
+	return func() {
+		l.mu.Lock()
+		defer l.mu.Unlock()
+		if flight, held := l.flight[addr]; held && flight.decision == decision {
+			delete(l.flight, addr)
+		}
+	}
+}
+
 // publish hands one After pass presentation to the attached sink, or drops the
 // presentation while no sink is attached: the drop is the presentation's own,
 // and the committed fact it was rendered from stays untouched.
@@ -974,7 +1514,7 @@ func (l *Loop) publish(presentation view.Presentation) {
 	}
 }
 
-// decide runs one model decision over the range's transcript: it takes the
+// decideOn runs one model decision over the range's transcript: it takes the
 // session decision slot, borrows the generation effective at this moment,
 // assembles the native request, reduces the model stream to its single terminal
 // through the model package's only reduction entry, and then admits every tool
@@ -989,19 +1529,34 @@ func (l *Loop) publish(presentation view.Presentation) {
 // - The handle is released once the work the decision set in motion has ended, never because a newer generation was published meanwhile.
 // - The model production of one decision is watched beside its invocation identity and confirms its stop when the reduction really ended.
 // - The closing round marks its request on the boundary, carries the closing instruction after the transcript, runs under the short closing timeout and admits none of the calls it issues.
+// - The fuses of one decision are read off the request as it stands before the dispatch: the usage of a response lands after the dispatch the fuses rule.
 // - The environment block the boundary rendered trails the request as its last message, behind the transcript and the closing instruction, so the dynamic material never enters the prefix.
-func (l *Loop) decide(ctx context.Context, inv Invocation, transcript []model.Message, round decisionRound) (Decision, model.Outcome, []model.Message, []model.Message, error) {
+// decideOn runs one decision of an address whose material names the binding it decides
+// on: the execution site of a delegated turn decides on the binding the caller resolved
+// for it, and never on a generation a published declaration holds.
+func (l *Loop) decideOn(ctx context.Context, inv Invocation, transcript []model.Message, round decisionRound, bound *state.AgentBinding) (Decision, model.Outcome, []model.Message, []admittedCall, error) {
+	return l.decideWith(ctx, inv, transcript, round, bound)
+}
+
+// decideWith is the one decision body both entries run: the handle is the named binding
+// when the material names one and the generation the borrowing face serves at this
+// moment otherwise. A decision on a named binding is captured by that binding's own
+// model beside the turn it serves, so the loop fixes no second view of the same calls
+// and records no second attempt.
+func (l *Loop) decideWith(ctx context.Context, inv Invocation, transcript []model.Message, round decisionRound, bound *state.AgentBinding) (Decision, model.Outcome, []model.Message, []admittedCall, error) {
 	if round.final {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, round.timeout)
 		defer cancel()
 	}
 	decisionID := l.nextDecisionID(inv)
+	release := l.markModelInFlight(inv.Address, inv.InvocationID, decisionID)
+	defer release()
 	attemptID := event.AttemptID(fmt.Sprintf("attempt-%s", decisionID))
 	if err := l.occupy(ctx, inv, decisionID); err != nil {
 		return Decision{}, model.Outcome{}, nil, nil, err
 	}
-	handle, err := l.borrow.Borrow(ctx, inv.Address.AgentID)
+	handle, err := l.decisionHandle(ctx, inv, bound)
 	if err != nil {
 		_ = l.slots.Vacate(inv.Address, l.instance, inv.InvocationID)
 		return Decision{}, model.Outcome{}, nil, nil, err
@@ -1035,19 +1590,40 @@ func (l *Loop) decide(ctx context.Context, inv Invocation, transcript []model.Me
 		messages = append(messages, model.Message{Role: model.RoleSystem, Content: boundary.DynamicSystem})
 	}
 	req := model.Request{Messages: messages, Tools: tools, ToolOrder: toolOrder}
-	l.fixCapture(ctx, decisionID, view, req)
+	if bound == nil {
+		l.fixCapture(ctx, decisionID, view, req)
+	}
+	ruling := l.rulingOf(messages)
 
-	production := &inFlightProducer{}
-	l.watchProducer(event.TaskID(inv.InvocationID), production.Stopped)
+	production := l.beginWriter("model:" + string(decisionID))
+	// Every resource a decision takes is released by an idempotent guard as
+	// well as at its explicit point: a panic or a Goexit inside the model or
+	// the reduction skips plain statements, and a writer, a decision slot or a
+	// binding handle left held would strand every later drive of this address
+	// (the slot waits a dead instance forever). The guard runs exactly once
+	// whichever path reached it first.
+	var productionOnce, vacateOnce, releaseOnce sync.Once
+	stopProduction := func() { productionOnce.Do(production) }
+	defer stopProduction()
+	vacateSlot := func() { vacateOnce.Do(func() { _ = l.slots.Vacate(inv.Address, l.instance, inv.InvocationID) }) }
+	defer vacateSlot()
+	releaseHandle := func() { releaseOnce.Do(func() { _ = handle.Release(ctx) }) }
+	defer releaseHandle()
 	stream, entryErr := handle.Binding.Model.GenerateContent(ctx, &req)
 	if entryErr != nil {
 		stream = failedStream(entryErr)
 	}
 	outcome := model.ReduceChannel(ctx, stream, nil)
-	production.stop()
-	l.recordAttempt(ctx, inv, decisionID, attemptID, outcome)
+	stopProduction()
+	if bound == nil {
+		l.recordAttempt(ctx, inv, decisionID, attemptID, outcome)
+	}
 	consumerDebug("tagent: consumer decision invocation=%s decision=%s terminal=%s calls=%d closing=%t",
 		inv.InvocationID, decisionID, outcome.Kind, len(callsOf(outcome)), round.final)
+	if ruling.threshold > 0 && ruling.tokens > ruling.threshold {
+		consumerDebug("tagent: consumer long-context fuse invocation=%s decision=%s approx_tokens=%d threshold=%d calls=%d",
+			inv.InvocationID, decisionID, ruling.tokens, ruling.threshold, len(callsOf(outcome)))
+	}
 
 	decision := Decision{
 		DecisionID:   decisionID,
@@ -1056,37 +1632,64 @@ func (l *Loop) decide(ctx context.Context, inv Invocation, transcript []model.Me
 		Request:      req,
 		Terminal:     outcome.Kind,
 	}
-	_ = l.slots.Vacate(inv.Address, l.instance, inv.InvocationID)
+	vacateSlot()
 
 	var receipts []model.Message
-	var observations []model.Message
+	var running []admittedCall
 	if outcome.Kind == model.KindCompleted && outcome.Body != nil && outcome.Body.IsToolCallResponse() {
 		if round.final {
 			receipts = refuseClosingCalls(callsOf(outcome))
 		} else {
 			if commitErr := l.commitCalls(ctx, inv, decision, outcome); commitErr != nil {
-				_ = handle.Release(ctx)
+				releaseHandle()
 				return decision, outcome, nil, nil, commitErr
 			}
-			receipts, observations, err = l.dispatch(ctx, inv, decision, callsOf(outcome), callable)
+			receipts, running, err = l.dispatch(ctx, inv, decision, callsOf(outcome), callable, ruling)
 			if err != nil {
-				_ = handle.Release(ctx)
+				releaseHandle()
 				return decision, outcome, nil, nil, err
 			}
 		}
 	}
-	_ = handle.Release(ctx)
-	return decision, outcome, receipts, observations, nil
+	releaseHandle()
+	l.noteClosedDecision(inv.InvocationID, round)
+	return decision, outcome, receipts, running, nil
+}
+
+// noteClosedDecision records one decision that ended successfully as a field of
+// the turn its range closes on: the number of decisions the turn ran and, when
+// this decision was the closing round, the reason that round ran. A decision
+// that ended beside an error is recorded by nothing: the range it would have
+// committed closes without an output fact.
+func (l *Loop) noteClosedDecision(invocationID event.InvocationID, round decisionRound) {
+	in := l.intakeFor(invocationID)
+	in.mu.Lock()
+	defer in.mu.Unlock()
+	in.decisions++
+	if round.final {
+		in.finalRound = round.reason
+	}
+}
+
+// decisionHandle reports the binding handle one decision runs on: the binding the
+// material named for the address when it names one — held as it stands, for an address
+// no published generation serves — and the generation the borrowing face serves at this
+// moment otherwise.
+func (l *Loop) decisionHandle(ctx context.Context, inv Invocation, bound *state.AgentBinding) (*state.BindingHandle, error) {
+	if bound != nil {
+		named := *bound
+		return &state.BindingHandle{Binding: named}, nil
+	}
+	return l.borrow.Borrow(ctx, inv.Address.AgentID)
 }
 
 // dispatch admits every tool call of one decision through the task wrapper of
 // the borrowed generation and answers each call with the single receipt of its
 // admission as the paired tool message of that call. The admission loop admits
-// every call first — one call's wait for its settlement never blocks the next
-// call's admission — and the wait for the settled results happens outside that
-// loop. Each settled result returns as the observation of its call beside the
-// receipts, entering the next decision as input material rather than as a
-// second synchronous response under the same call identifier.
+// every call first, and the drive ends beside the receipts it answered — the
+// settled result of each admitted call returns as the event the follow-up
+// decision the settle path fires reads, never as a synchronous response this
+// dispatch waits for.
 // - The plugin pipeline of the borrowed generation runs its one Before pass per call before that call is admitted, and its After pass only over facts whose canonical commit already happened.
 // - The pipeline is assembled from the instances of that generation: every declared port dispatches its instance exactly as NewFlow dispatches it, so the loop and the plugin set share one dispatch and no second assembly arises here.
 // - The one Before pass travels on the context into the admission ruling beside the call frame, so the pre-execution ruling consumes the risk grade its risk faces rendered and never runs a second risk face of its own.
@@ -1095,18 +1698,25 @@ func (l *Loop) decide(ctx context.Context, inv Invocation, transcript []model.Me
 // - Every call of this decision is already admitted and answered with its receipt before the first wait for a settled result begins.
 // - The settled result fact is the stored event the next decision of this range reduces; a call that recorded no fact contributes none.
 // - The After pass reads only a fact whose canonical commit already happened: a failed observation is a visible gap in the returned presentation and never rolls the committed fact back, and a dropped presentation drops the presentation only. The presentation is the read-out the inspection face consumes; the loop keeps the committed fact itself.
-func (l *Loop) dispatch(ctx context.Context, inv Invocation, decision Decision, calls []model.ToolCall, tools map[string]trpctool.CallableTool) ([]model.Message, []model.Message, error) {
+// - The ruling of the response rules the calls before the first admission: a response the fuse holds is parked as one approval batch inside this dispatch, answered call by call when the batch does not run, and admitted whole in the order it was issued when the batch is approved. A call of a held response is never dispatched before the ruling that allows it, so the storm it belongs to leaves no task, no result fact and no degraded message behind.
+// - The wait of a parked batch holds no model seat (the decision slot is vacated before this dispatch runs) and ends with the ruling, the expiry of the request or the cancellation of the invocation.
+func (l *Loop) dispatch(ctx context.Context, inv Invocation, decision Decision, calls []model.ToolCall, tools map[string]trpctool.CallableTool, ruling callRuling) ([]model.Message, []admittedCall, error) {
 	pipeline, err := plugin.NewFlow(decision.Binding.Plugins)
 	if err != nil {
 		return nil, nil, err
 	}
-	in := l.intakeFor(inv.InvocationID)
-	receipts := make([]model.Message, 0, len(calls))
-	type admittedCall struct {
-		callID string
-		tool   string
-		taskID event.TaskID
+	var notice []model.Message
+	if fuse := ruling.fuseOver(len(calls)); fuse != "" {
+		batch := parkedBatchOf(decision, calls, ruling, fuse)
+		outcome, by := l.awaitBatch(ctx, batch)
+		consumerDebug("tagent: consumer tool fuse invocation=%s decision=%s fuse=%s calls=%d cap=%d threshold=%d tokens=%d ruling=%s approval=%s",
+			inv.InvocationID, decision.DecisionID, fuse, len(calls), ruling.cap, ruling.threshold, ruling.tokens, outcome, batch.id)
+		if outcome != batchApproved {
+			return batchReceipts(calls, batchRefusalText(outcome, batch, len(calls), ruling, by)), nil, nil
+		}
+		notice = append(notice, batchApprovalNotice(len(calls), batch, by))
 	}
+	receipts := make([]model.Message, 0, len(calls)+len(notice))
 	var running []admittedCall
 	for _, call := range calls {
 		pass, beforeErr := pipeline.Before(ctx, call)
@@ -1150,22 +1760,8 @@ func (l *Loop) dispatch(ctx context.Context, inv Invocation, decision Decision, 
 			receipts = append(receipts, paired(call.ID, name, answerText(callErr, out)))
 		}
 	}
-	observations := make([]model.Message, 0, len(running))
-	for _, adm := range running {
-		arrival, ok := in.await(ctx, adm.taskID)
-		if !ok {
-			if err := ctx.Err(); err != nil {
-				return nil, nil, err
-			}
-			observations = append(observations, observationOf(model.Message{Content: "tagent: the tool result did not arrive before the wait ended"}, adm.callID, adm.tool))
-			continue
-		}
-		observations = append(observations, observationOf(arrival.msg, adm.callID, adm.tool))
-		if arrival.fact != "" {
-			l.publish(pipeline.After(ctx, arrival.fact))
-		}
-	}
-	return receipts, observations, nil
+	receipts = append(receipts, notice...)
+	return receipts, running, nil
 }
 
 // occupy takes the session decision slot for the named decision, waiting for
@@ -1196,8 +1792,20 @@ func (l *Loop) nextDecisionID(inv Invocation) event.DecisionID {
 	return event.DecisionID(fmt.Sprintf("decision-%s-%d", inv.InvocationID, l.seq))
 }
 
+// intakeWindow bounds how many ended ranges keep their backflow bookkeeping in this
+// loop: a range is minted per drive and per consumption segment, so a resident run
+// mints one per segment, and the bookkeeping of the least recently ended range leaves
+// the map once this many ended ranges stand in it. A range that has not ended is never
+// recycled, so a drive in flight keeps the read set it accumulated.
+const intakeWindow = 4096
+
 // intakeFor returns the backflow intake of one invocation, creating it on first
 // use.
+//
+// - A range that ended long enough ago mints an empty intake again: the address it ran
+// at is not kept beside the recycled entry, so a notification landing after that many
+// further ranges of the session commits no notice fact and is reported by its task
+// account alone.
 func (l *Loop) intakeFor(invocationID event.InvocationID) *intake {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -1207,6 +1815,28 @@ func (l *Loop) intakeFor(invocationID event.InvocationID) *intake {
 		l.intakes[invocationID] = in
 	}
 	return in
+}
+
+// retireIntake records that one range ended, so the window may recycle its
+// bookkeeping: the settled cache, the waits and the read/observed sets of the range
+// are read by nothing once the range ended, and a resident run mints a range per
+// segment.
+func (l *Loop) retireIntake(invocationID event.InvocationID) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.retireIntakeLocked(invocationID)
+}
+
+// retireIntakeLocked appends one ended range to the recycle order and drops the
+// least recently ended ranges past the window. The read is taken under the lock the
+// creation of every intake takes, so a recycled entry is never one a drive reopens.
+func (l *Loop) retireIntakeLocked(invocationID event.InvocationID) {
+	l.ended = append(l.ended, invocationID)
+	for len(l.ended) > intakeWindow {
+		oldest := l.ended[0]
+		l.ended = l.ended[1:]
+		delete(l.intakes, oldest)
+	}
 }
 
 // intake is one invocation's backflow intake: the address its range runs at,
@@ -1221,25 +1851,37 @@ func (l *Loop) intakeFor(invocationID event.InvocationID) *intake {
 // result is committed as the delivery fact of its range before it lands here,
 // and the wait of its call pairs it through this cache. A notification of one
 // invocation never reaches the intake of another.
-// - The read set names the facts standing in this range's transcript: the head input of its drive, the notices it read, and the input a decision boundary reported.
-// - The head names the fact the chain held when this range's drive began: the boundary reads of that drive start behind it, so the material an earlier range committed under this range's identity is never read again.
+// - The read set names the facts standing in this range's transcript: the notices it read and the input a decision boundary reported.
 // - The observed set names the facts whose After pass this loop already ran, so neither set is exported and a boundary that meets the same fact again doubles nothing.
 type intake struct {
 	mu       sync.Mutex
 	address  event.Address
-	head     event.EventID
 	waiters  map[event.TaskID][]chan delivered
 	settled  map[event.TaskID][]delivered
 	read     map[event.EventID]bool
 	observed map[event.EventID]bool
+	// decisions, finalRound and trigger are the stable fields of the turn this
+	// range closes on: the decisions it ran successfully, the reason its closing
+	// round ran, and the trigger lineage its opening material carried. The output
+	// fact commits them beside its input relation, so the chain states the closed
+	// turn itself rather than a word derived after the fact landed.
+	decisions  int
+	finalRound FinalRoundReason
+	trigger    string
 }
 
 // setAddress records the address the range of this intake runs at, so the
-// delivery fact of a settled call names the range it lands in.
+// delivery fact of a settled call names the range it lands in. Opening a range
+// also starts the closing fields of its turn: a range identity a later
+// consumption loop reuses begins a turn of its own instead of inheriting the
+// count, closing round and trigger of the range that ended before it.
 func (in *intake) setAddress(addr event.Address) {
 	in.mu.Lock()
 	defer in.mu.Unlock()
 	in.address = addr
+	in.decisions = 0
+	in.finalRound = FinalRoundNone
+	in.trigger = ""
 }
 
 // rangeAddress reports the address the range of this intake runs at, or the
@@ -1612,6 +2254,13 @@ func observationOf(msg model.Message, callID, tool string) model.Message {
 // none of its own beside it — and the facts of that chain are what the drive
 // reads its range's input again from at every decision boundary.
 //
+// The face may also answer the presentation capability: an implementation whose
+// chain already knows which facts the request prefix of its session presents
+// reports them through SessionPresented(addr event.Address) map[event.EventID]bool,
+// and the resident consumption loop reads that capability from this same face
+// rather than from a second seam. A face that keeps no prefix answers no
+// presentation, and the pull keeps the chain's own boundary.
+//
 // The redline list (4 rules):
 // MUST report the history the named session accumulated, as a copy the caller owns.
 // MUST report the facts of the named session in commit order, as a copy the caller owns.
@@ -1635,7 +2284,10 @@ type HistoryFace interface {
 // SetHistory attaches the session transcript face this loop reads the shared
 // session history from and commits one ended drive's transcript back to. The
 // setter is separate from the constructor so the declared construction shape of
-// the loop stays as it is.
+// the loop stays as it is. The face also carries the optional presentation
+// capability: a chain that knows which facts its request prefix presents is
+// read through this same attachment, so the loop has no second presentation
+// seam to inject.
 func (l *Loop) SetHistory(face HistoryFace) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -1666,6 +2318,29 @@ func (l *Loop) sessionFacts(addr event.Address) []event.Event {
 		return nil
 	}
 	return face.SessionFacts(addr)
+}
+
+// sessionPresented reports the facts of the named session whose text the request
+// prefix presents, and whether the attached chain face answered the presentation
+// capability at all: a loop beside no face, or beside a chain that keeps no
+// prefix, assembles no presentation and the caller keeps its own boundary. The
+// read is derived from the chain attachment itself — the very ledger the pull
+// already reads its facts from — so presentation is never a second seam that
+// could disagree with the chain.
+func (l *Loop) sessionPresented(addr event.Address) (map[event.EventID]bool, bool) {
+	l.mu.Lock()
+	face := l.history
+	l.mu.Unlock()
+	if face == nil {
+		return nil, false
+	}
+	presented, ok := face.(interface {
+		SessionPresented(addr event.Address) map[event.EventID]bool
+	})
+	if !ok {
+		return nil, false
+	}
+	return presented.SessionPresented(addr), true
 }
 
 // commitTranscript appends the transcript one ended drive accumulated to the

@@ -38,11 +38,11 @@
 - **THEN** 新任务使用有效默认值，已有显式 TTL 与寿命锚点保持；回执与真实任务行为一致
 
 ### Requirement: 压缩参数同代快照
-热更后的压缩参数 MUST 作为同一有效代快照应用：外层触发线（ContextCompressor）与内层压缩目标（SmartCompressor 的 maxTokens/triggerBudget/keepRecent 及派生容量）MUST 在一次应用中同步换装，单次压缩 MUST 读取同一快照。
+热更后的压缩参数 MUST 作为同一有效代快照应用：会话折叠窗口（`FoldWindow` 的 MaxTokens/CompressThreshold/KeepRecentTasks 及派生 `VolumeThresholdBytes`）MUST 在一次应用中同步换装，单次压缩的判定与执行 MUST 读取同一快照。MUST NOT 由判定侧与执行侧各自持有可独立写入的旧值。
 
 #### Scenario: 运行中缩小窗口后触发压缩
 - **WHEN** 运行中把 max_tokens 从 512k 调小到 128k 并随后触发压缩
-- **THEN** 内层压缩目标 MUST 按新预算执行（最终请求降到新预算内），而非沿用冷构造旧值导致 no-op
+- **THEN** 折叠判定与执行 MUST 按新窗口执行（最终请求降到新预算内），而非沿用冷构造旧值导致 no-op
 
 ### Requirement: 热更回执报告 effective 状态
 
@@ -129,9 +129,11 @@
 
 ### Requirement: 配置热更维度矩阵
 
-每个子 agent 配置维度 SHALL 归属且仅归属一条热通道：**FP 代际面**（视图变更，下回合生效、在途钉定）、**SRC 源拉取面**（参数变更，下一次消费即生效）或 **FILE 懒读面**（文件即真源、消费边界按 mtime 懒读，如 prompt 正文与 mcp_servers）；或明示的 **RESTART 拒**（目录/端点类不可迁移资源，拒绝即正确行为）。维度归属与消费点 SHALL 以矩阵形式登记，每行 SHALL 携带代码行号或测试名证据；**携带而消费点未读＝假热更**，SHALL 视为缺陷而非"部分支持"。（三通道划分系域 01 执行期情报 C1 回写：初稿"FP/源"二分与既有 FILE 懒读通道冲突，不得为凑二分法拆毁既有机制）
+控制面的三层语义 SHALL 如此分工：配置文件是**声明源**（静态真源，声明哪些维度存在）；`config_change` 事实是**控制流水**（谁在何时把哪个维度从什么改成了什么的唯一记录）；**行为投影**是生效路径（发布换代与请求边界从声明源与控制流水投影实际值）。结构性维度（model/prompt/binding/org.*）的生效经发布换代、事实为其变更流水；FILE 维度的内容以事实为正源（声明只引用路径，正文住在链上）。MUST NOT 存在这三层之外的第四条生效路径。
 
-FILE 懒读面 SHALL 在**请求边界**读取并固化实际版本：文件变化直接生效，MUST NOT 等待 register、后验评估或结构前置质量门；在途请求 MUST NOT 被半途拼接新文件，后续请求 SHALL 读到新版本。FILE 变化 MUST NOT 触发结构 generation 换代。
+每个子 agent 配置维度 SHALL 归属且仅归属一条热通道：**FP 代际面**（视图变更，下回合生效、在途钉定；入口移动与代理集合增删属此面——随发布换代生效、在途回合保持旧视图、移除代理的地址对新输入具名拒绝）、**SRC 源拉取面**（参数变更，下一次消费即生效）或 **FILE 事实面**（文件是声明来源，其变更落 `config_change` 事实（dimension=file），消费边界从事实投影，如 prompt 正文与 mcp_servers）；或明示的 **RESTART 拒**（目录/端点类不可迁移资源，拒绝即正确行为）。维度归属与消费点 SHALL 以矩阵形式登记，每行 SHALL 携带代码行号或测试名证据；**携带而消费点未读＝假热更**，SHALL 视为缺陷而非"部分支持"。（三通道划分系域 01 执行期情报 C1 回写：初稿"FP/源"二分与既有 FILE 懒读通道冲突，不得为凑二分法拆毁既有机制）
+
+FILE 变化 SHALL 落 `config_change` 事实（dimension=file）并在**请求边界**从事实投影生效并固化实际版本：MUST NOT 裸读文件绕过事实，MUST NOT 等待 register、后验评估或结构前置质量门；在途请求 MUST NOT 被半途拼接新内容，后续请求 SHALL 读到新版本。FILE 变化 MUST NOT 触发结构 generation 换代。
 
 #### Scenario: 已登记维度的消费点有契约测
 
@@ -146,7 +148,7 @@ FILE 懒读面 SHALL 在**请求边界**读取并固化实际版本：文件变�
 #### Scenario: 文件正文变化直接生效
 
 - **WHEN** prompt/skill 文件在两次请求之间被修改
-- **THEN** 下一请求边界 SHALL 读取新版本并固化；结构 generation SHALL NOT 变化；在途请求 SHALL 保持其已固化版本
+- **THEN** 该修改 SHALL 落 `config_change` 事实（dimension=file），下一请求边界 SHALL 从事实读取新版本并固化；结构 generation SHALL NOT 变化；在途请求 SHALL 保持其已固化版本
 
 ### Requirement: 提交点记录即消费值
 
@@ -164,7 +166,7 @@ org 热更在提交点把某 agent 的热参记为 `applied` 时，该 agent 的
 
 ### Requirement: 结构变更与文件直接生效分路及错误原因链
 
-结构变更（模型/工具/插件/任务策略/资源引用/memory）与文件懒读（prompt/skill）是**两条独立消费路径**：结构变更 SHALL 走 `config.DecodeStrict → config.Fingerprint → Run.Publish → state.Publisher.Publish`（候选装配、基线复检、治理裁决、台账提交后一次切换）；文件变更 SHALL 直接生效。结构性变化 MUST NOT 借文件通道绕开前置检查，文件变化也 MUST NOT 被宣称经过前置质量门。
+结构变更（模型/工具/插件/任务策略/资源引用/memory）与文件变更（prompt/skill）SHALL 共用 `config_change` 事实通道（dimension 区分）：结构变更 SHALL 走 `config.DecodeStrict → config.Fingerprint → Run.Publish → state.Publisher.Publish`（候选装配、基线复检、治理裁决、台账提交后一次切换）并落对应维度事实；文件变更 SHALL 落 dimension=file 事实并在下一请求边界生效，MUST NOT 裸读文件绕过事实。结构性变化 MUST NOT 借文件通道绕开前置检查，文件变化也 MUST NOT 被宣称经过前置质量门。
 
 结构路径失败时系统 SHALL 保留**错误原因链**（源文件 → 归一行 → 具名原因），使失败可定位；MUST NOT 以笼统「reload 失败」吞掉原因。
 

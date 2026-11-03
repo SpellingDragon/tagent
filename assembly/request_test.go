@@ -31,25 +31,25 @@ func TestRequestSnapshotsSingleSource(t *testing.T) {
 		capture := snapshotTestCapture(t)
 		run := snapshotTestRun(t, ctx, WithCapture(capture))
 		turn := snapshotTestInvoke(t, ctx, run)
-		if len(turn.Decisions) != 2 {
-			t.Fatalf("decisions = %d, want the tool call and the closing decision of one turn", len(turn.Decisions))
+		if turn.DecisionCount != 2 {
+			t.Fatalf("decisions = %d, want the tool call and the closing decision of one turn", turn.DecisionCount)
 		}
 		records := run.RequestSnapshots()
 		refs := capture.SnapshotRefs()
 		if len(records) != len(refs) {
 			t.Fatalf("read face = %d snapshots, want the %d the capture holds", len(records), len(refs))
 		}
-		if len(records) != len(turn.Decisions) {
-			t.Fatalf("read face = %d snapshots, want one per decision beside the %d decisions", len(records), len(turn.Decisions))
+		if len(records) != turn.DecisionCount {
+			t.Fatalf("read face = %d snapshots, want one per decision beside the %d decisions", len(records), turn.DecisionCount)
 		}
 		fixed := capture.Snapshots()
 		if len(fixed) != len(records) {
 			t.Fatalf("capture account = %d snapshots, want the %d the read face answers", len(fixed), len(records))
 		}
 		for i := range records {
-			if records[i].Decision != turn.Decisions[i].DecisionID {
+			if records[i].Decision != fixed[i].Decision {
 				t.Fatalf("snapshot %d decision = %s, want the decision whose request it was fixed for %s",
-					i, records[i].Decision, turn.Decisions[i].DecisionID)
+					i, records[i].Decision, fixed[i].Decision)
 			}
 			if fixed[i].Decision != records[i].Decision {
 				t.Fatalf("capture snapshot %d decision = %s, want the %s the read face answers",

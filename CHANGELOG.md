@@ -11,6 +11,45 @@
 - 公开 2026-11-01 开发快照的冒烟与吞吐证据：18 组 benchmark 通过；完整长冒烟反思失败、消费红锚和真实 provider 跳过状态分别记录，不混作通过。
 - 中英文 README 将 DeepSeek 材料移至文末参考与致谢，澄清引用不表示项目隶属、合作或背书，感谢实际底层依赖项目 tRPC-Agent-Go，并关联实验 fork、保留官方上游归属。
 
+### Breaking Changes（模型面：send 收敛为唯一跨 task、会话通信工具；`deliver_summary`、`resume_task` 退役）
+
+五条均按四要素记（**内容 / 影响范围 / 触发条件 / 自查方法**）；可检索关键字：`send`、`deliver_summary`、`resume_task`、`reactivate`。契约归属见 `wechat-host-send-tool`、`task-reentry`、`async-task-execution`、`cross-session-delivery`、`meditation-delivery-tool`。
+
+#### 1. send 职责重定义：跨 task、会话通信，不再出网
+
+- **内容**：`send` 的唯一职责是跨 task、会话通信。参数面收敛为 `target` 对象（二选一：`{"task": …}` 重入/续行 task，或 `{"agent": …, "session": …}` 投递同级会话）+ `content`（上限 8KiB，超限具名拒绝）；Declaration 只承诺这两类寻址，不再承诺“送达本次调用的用户会址”。回执两态：成功裸 `ok`（语义是送达——任务形态待该轮首个 commit 落地、会话形态待入链，拒绝即 `[send_denied] <reason>`，拒收也落一条 delivery 事实）；治理挂起不在 send 方言内，走受理回执的 `task.HoldReceipt` 形状；error 只留给参数形状非法。
+- **影响范围**：任一 agent 的模型工具面；教模型“用 send 说话到渠道”的部署提示、skill 与自动化；`assembly/host_tools.go` 的 send 声明、参数解析与分派面。
+- **触发条件**：模型调 `send`；参数面仍按旧的单参数形态（只给 `content`）调用——缺 `target` 现以 `[send_denied]` 拒绝，不再默认投给本次调用的用户会址；部署提示仍把 send 说成对用户说话的通路。
+- **自查方法**：`go test ./assembly -run '^TestSendDeclarationRewrite$' -count=1`（负锚子测 `declaration_has_no_channel_wording`：声明出现“user address”/“deliver to the user”即红）与 `go test ./assembly -run '^TestSendTargetResolution$' -count=1`（负锚：双目标同现 / 皆缺 / 未知字段逐个具名拒绝）；工具面观察 `send` 的入参只有 `target`+`content`。
+
+#### 2. `deliver_summary` 删除归并（DEL-2）
+
+- **内容**：冥想跨会话写不再走 `deliver_summary`，改经 `send{target:{agent, session}}`；`DeliverSummaryTool`（`features/evolution/meditation/deliver.go`）、`meditation.DeliverSummaryToolName` 与工具面挂载点一并删除——清除式归并，不并存、不设运行时开关（回退=回滚提交）。`deliver_to` 白名单语义保留，只换运输工具。
+- **影响范围**：冥想会话的模型工具面与其交付实现；提示词、smoke 场景与自动化中“用 deliver_summary 汇报”的写法；`hostMeditationPort` 随之降为单使用方或无使用方而回卷。
+- **触发条件**：冥想回合尝试跨会话写；提示词/自动化仍按工具名 `deliver_summary` 调用（该工具已不存在）；`grep` 到残留代码引用即未迁移完。
+- **自查方法**：`grep -rn "deliver_summary\|DeliverSummaryTool" --include=*.go .` 零命中；`grep -rn "deliver_summary" resources/ examples/wechat-bot/resources/` 零命中；冥想跨会话写由 `send{agent,session}` 承载（入链+驱动目标一轮）。
+
+#### 3. `resume_task` 作为模型工具删除归并（DEL-3）
+
+- **内容**：task 重入不再以 `resume_task` 名义存在，改经 `send{target:{task}, content}`——main agent 面前的 agent tool 与异步命令统一按 task 寻址。`resume_task` 的模型工具面（`task-reentry` 主 spec 的声明与 prompt 资产里的调用写法）删除，模型语境下不再有第二个通信工具名；被 send 复用的底层 Resume/注入通道保留（新机制的实现基座，不沿用旧工具名）。
+- **影响范围**：`resources/prompts/`、`examples/wechat-bot/resources/prompts/` 中的重入指引；按 `resume_task(task_id, input)` 签名编排的提示与自动化。
+- **触发条件**：提示词/自动化仍按 `resume_task(task_id, input)` 调用（该工具名已不在任何模型语境）；或模型面仍出现第二个通信工具。
+- **自查方法**：`grep -rn "resume_task" resources/ examples/wechat-bot/resources/` 零命中；`grep -rn "resume_task" --include=*.go .` 零命中（保留的底层通道不沿用该名）；重入改由 `send{target:{task}}` 承载。
+
+#### 4. settled task 可被重新激活（`reactivate` 状态迁移）
+
+- **内容**：对 settled task 发 `send{target:{task}}` 触发重激活：状态 settled→活跃（registry 新增 `reactivate` 迁移，`MutationID("reactivate:<task>:<seq>")` + `ExpectedRevision` 乐观并发，两路并发只有一路占坑成功），以新 Round 续行、可再次 settle；翻转以链上事实可追溯（前一条 holding settled，本条 holding active）。新 Round 的结算通知是新身份（TaskID+Round+Kind+Seq 不与旧合并），发起方后续回合恰好被驱动一次。failed/cancelled 具名拒绝并引导 relaunch / 重新 spawn；round 在飞（running/suspect）拒绝并引导等待。
+- **影响范围**：task 状态机与其审计事实；消费结算通知的驱动面；既有 `task-reentry`/`async-task-execution` 中“完成态（含 **failed**）可重入”条款按用户裁定翻转——failed 不再原地重入。
+- **触发条件**：对已 settle 的 task 发 `send{target:{task}}`（task 不再“一轮即终结”）；对 failed/cancelled task 发同一形态（必须得到具名拒绝，而非重入）。
+- **自查方法**：`go test ./runtime/task -run '^TestTaskReactivation$' -count=1`（负锚：`rejects_failed_reactivation`、`rejects_cancelled_reactivation`、`rejects_concurrent_reactivation`）；`grep -c "reactivate:" runtime/task/reactivate.go` > 0；端到端锚 `go test ./tests/integration/execution -run '^TestSendSymptomReentersAgentTask$' -count=1`。
+
+#### 5. 旧出网 send 语义移除（DEL-1）
+
+- **内容**：`hostSendTool` 不再持有出网交付缝——`deliver` 字段与 send 侧的 `plugin.Delivery` 构造删除；出网唯一路径是回合正文经发送插件自动投递（v0.4.0 既定，本次不变）。send 指向本 host 未接线的寻址面时具名拒绝，绝不回退成“投给本次调用的用户会址”（那会回答模型没问的问题）。
+- **影响范围**：`assembly/host_tools.go` 的装配面；`tests/integration/host` 的 send 出网场景（场景迁移不删场景、不改断言语义）；依赖“send 即出网”的部署提示。
+- **触发条件**：部署提示仍以 send 作为对用户说话的手段；或对未接线的寻址面调 send——应得 `[send_denied]`，而不是投递。
+- **自查方法**：`grep -rn "hostSendLineage" --include=*.go .` 零命中（若保留须有注释写明保留理由）；`grep -c "user address of this call" assembly/host_tools.go` 为 0；对照 `assembly/host_tools.go` 的 dispatch：task 走重入面、其余寻址面在未装配时拒绝而非出网。
+
 ## [v0.4.0] - 2026-10-26
 
 ### Breaking Changes（事件语义边界与发送/审核解耦；发送不再是模型工具）

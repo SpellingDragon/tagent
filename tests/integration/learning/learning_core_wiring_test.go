@@ -18,8 +18,8 @@ import (
 )
 
 // TestReplacementFactInstallsNewVersion pins the event-driven replacement lifecycle over the formal assembly entry.
-//   - a model change noted by the configuration source commits one model.replacement fact on the agent's own chain
-//   - the fact is consumed through the agent's production pipeline by the mounted lease observer
+//   - a model configuration change of the configuration change family commits on the agent's own chain under the model dimension
+//   - the change is consumed through the agent's production pipeline by the mounted lease observer
 //   - the lease rebuilds, publishes and installs the requested version, so later requests borrow it while earlier records keep theirs
 //
 // 契约: docs/wiki/rl/rl-architecture.md#swappable-model
@@ -53,28 +53,28 @@ func TestReplacementFactInstallsNewVersion(t *testing.T) {
 		t.Fatalf("the lease holds %q before any replacement, want the version it was built with", lease.CurrentVersion())
 	}
 
-	key, err := run.NoteModelChange("agent-a", "model-a@v1", "v2", "config")
-	if err != nil {
-		t.Fatalf("note the model change: %v", err)
-	}
-	if key == "" {
-		t.Fatal("the noted model change committed no fact")
-	}
+	key := fileModelChange(t, ctx, run, "session-fact", "model-a@v1", "v2")
 	if lease.CurrentVersion() != "model-a@v2" {
-		t.Fatalf("the lease holds %q after the replacement fact, want the version the fact installed", lease.CurrentVersion())
+		t.Fatalf("the lease holds %q after the model configuration change, want the version the change installed", lease.CurrentVersion())
 	}
 
 	fact, err := run.CommittedEvent(ctx, key)
 	if err != nil {
-		t.Fatalf("read the committed replacement fact: %v", err)
+		t.Fatalf("read the committed model change: %v", err)
 	}
-	if fact.Type != event.ModelReplacementType {
-		t.Fatalf("committed fact type = %q, want %q", fact.Type, event.ModelReplacementType)
+	if fact.Type != event.TypeConfigChange {
+		t.Fatalf("committed fact type = %q, want the configuration change family", fact.Type)
 	}
 	if fact.Owner.AgentID != "agent-a" {
 		t.Fatalf("committed fact owner = %q, want the agent whose model moved", fact.Owner.AgentID)
 	}
-	if got := fact.Meta[event.MetaKeyTriggerSource]; got != event.ModelReplacementSourceConfig {
+	if got := fact.Meta[event.MetaKeyConfigChangeDimension]; got != event.ConfigChangeDimensionModel {
+		t.Fatalf("committed fact dimension = %q, want the model dimension", got)
+	}
+	if got := fact.Meta[event.MetaKeyConfigChangeGeneration]; got != "0" {
+		t.Fatalf("committed fact generation = %q, want no publication generation on an explicit judgment", got)
+	}
+	if got := fact.Meta[event.MetaKeyTriggerSource]; got != event.ConfigChangeSourceConfig {
 		t.Fatalf("committed fact trigger source = %q, want the configuration source", got)
 	}
 	if got := fact.Meta[event.MetaKeyModelFromVersion]; got != "model-a@v1" {
@@ -82,6 +82,9 @@ func TestReplacementFactInstallsNewVersion(t *testing.T) {
 	}
 	if got := fact.Meta[event.MetaKeyModelToVersion]; got != "v2" {
 		t.Fatalf("committed fact to version = %q, want the version the move asked for", got)
+	}
+	if got := fact.Meta[event.MetaKeyModelReplacementResult]; got != event.ModelReplacementResultRequested {
+		t.Fatalf("committed fact result = %q, want the requested result", got)
 	}
 	history := lease.Replacements()
 	if len(history) != 1 || history[0].State != rl.ReplacementApplied {
@@ -104,58 +107,6 @@ func TestReplacementFactInstallsNewVersion(t *testing.T) {
 	publications := run.LeasePublications()
 	if len(publications) != 1 || publications[0].Name() != "model-a@v2" {
 		t.Fatalf("lease publications = %+v, want the one version the replacement installed", publications)
-	}
-}
-
-// TestDeclaredModelChangeFilesReplacementFact pins the configuration source of the replacement fact over the formal publication entry.
-//   - a publication whose declaration moves one agent's model reference files one model.replacement fact with the configuration source stamp
-//   - the model the publication contributed is the rebuild source when the host named no explicit one
-//   - the lease installs the requested version, so a request that begins afterwards borrows it
-//
-// 契约: docs/wiki/rl/rl-architecture.md#swappable-model
-func TestDeclaredModelChangeFilesReplacementFact(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-	defer cancel()
-	records := &collector{}
-	first := newReplacementModel("model-a", "version one answer")
-	lease, err := rl.NewModelLease(first, "v1")
-	if err != nil {
-		t.Fatalf("build the model lease: %v", err)
-	}
-	run, err := assembly.Assemble(ctx, replacementDecl("model-a"), map[event.AgentID]assembly.NativeAgent{
-		"agent-a": {Model: first},
-	}, assembly.WithGovernance(formalPolicy{}),
-		assembly.WithRecorder(records),
-		assembly.WithModelLease("agent-a", lease))
-	if err != nil {
-		t.Fatalf("assemble the runtime: %v", err)
-	}
-	replacementInvoke(t, ctx, run, "inv-fingerprint-1", "session-fingerprint", "ep-fingerprint")
-
-	second := newReplacementModel("model-a", "version two answer")
-	if _, err := run.Publish(ctx, replacementDecl("model-a@v2"), map[event.AgentID]assembly.NativeAgent{
-		"agent-a": {Model: second},
-	}); err != nil {
-		t.Fatalf("publish the changed declaration: %v", err)
-	}
-	if lease.CurrentVersion() != "model-a@v2" {
-		t.Fatalf("the lease holds %q after the declared model change, want the version the new reference names", lease.CurrentVersion())
-	}
-	if losses := run.LeaseLosses(); len(losses) != 0 {
-		t.Fatalf("lease losses = %v, want the declared change filed without a loss", losses)
-	}
-	publications := run.LeasePublications()
-	if len(publications) != 1 || publications[0].Name() != "model-a@v2" {
-		t.Fatalf("lease publications = %+v, want the one version the declared change installed", publications)
-	}
-
-	replacementInvoke(t, ctx, run, "inv-fingerprint-2", "session-fingerprint", "ep-fingerprint")
-	attempts := records.snapshot().attempts
-	if len(attempts) != 2 {
-		t.Fatalf("attempt records = %d, want one per decision the two versions served", len(attempts))
-	}
-	if attempts[0].ModelVersion != "v1" || attempts[1].ModelVersion != "v2" {
-		t.Fatalf("attempt versions = (%q, %q), want the version that served each attempt", attempts[0].ModelVersion, attempts[1].ModelVersion)
 	}
 }
 
@@ -248,7 +199,7 @@ func TestCaptureSealsAttemptsFile(t *testing.T) {
 }
 
 // TestFailedReplacementKeepsOldVersion pins the negative anchor: a refused rebuild installs no version.
-//   - a replacement fact whose rebuild fails installs no version: the lease keeps the version in effect
+//   - a model configuration change whose rebuild fails installs no version: the lease keeps the version in effect
 //   - the refused attempt is recorded beside its named reason, and the version in effect is never closed
 //   - the committed fact still reads back, the refusal presents as a gap on the agent's pipeline, and later requests keep borrowing the old version
 //
@@ -275,13 +226,7 @@ func TestFailedReplacementKeepsOldVersion(t *testing.T) {
 	}
 	replacementInvoke(t, ctx, run, "inv-refused-fact-1", "session-refused-fact", "ep-refused-fact")
 
-	key, err := run.NoteModelChange("agent-a", "model-a@v1", "v2", "config")
-	if err != nil {
-		t.Fatalf("note the model change: %v", err)
-	}
-	if key == "" {
-		t.Fatal("the noted model change committed no fact")
-	}
+	key := fileModelChange(t, ctx, run, "session-refused-fact", "model-a@v1", "v2")
 	if lease.CurrentVersion() != "model-a@v1" {
 		t.Fatalf("the lease holds %q after a refused rebuild, want the version in effect untouched", lease.CurrentVersion())
 	}
@@ -301,10 +246,13 @@ func TestFailedReplacementKeepsOldVersion(t *testing.T) {
 
 	fact, err := run.CommittedEvent(ctx, key)
 	if err != nil {
-		t.Fatalf("read the committed replacement fact: %v", err)
+		t.Fatalf("read the committed model change: %v", err)
 	}
-	if fact.Type != event.ModelReplacementType || fact.Owner.AgentID != "agent-a" {
-		t.Fatalf("committed fact = %+v, want the replacement fact owned by the agent", fact)
+	if fact.Type != event.TypeConfigChange || fact.Owner.AgentID != "agent-a" {
+		t.Fatalf("committed fact = %+v, want the model dimension of the configuration change family owned by the agent", fact)
+	}
+	if got := fact.Meta[event.MetaKeyConfigChangeDimension]; got != event.ConfigChangeDimensionModel {
+		t.Fatalf("committed fact dimension = %q, want the model dimension", got)
 	}
 	refusal := replacementGapOf(t, run, key)
 	if !errors.Is(refusal, rl.ErrLeaseRebuildFailed) || !errors.Is(refusal, cause) {
@@ -324,6 +272,21 @@ func TestFailedReplacementKeepsOldVersion(t *testing.T) {
 	if publications := run.LeasePublications(); len(publications) != 0 {
 		t.Fatalf("lease publications = %+v, want none beside a refused rebuild", publications)
 	}
+}
+
+// fileModelChange commits one model dimension configuration change on the
+// agent's session chain and runs its After pass, the same fact a reload files.
+func fileModelChange(t *testing.T, ctx context.Context, run *assembly.Run, session event.SessionID, from, to string) event.EventID {
+	t.Helper()
+	fact := event.ConfigChangeModelFor("agent-a", 0, from, to, event.ModelReplacementResultRequested)
+	key, err := run.CommitToSession(ctx, event.Address{AgentID: "agent-a", SessionID: session}, fact.Event(time.Now().UTC()))
+	if err != nil {
+		t.Fatalf("file the model configuration change: %v", err)
+	}
+	if key == "" {
+		t.Fatal("the model configuration change committed no fact")
+	}
+	return key
 }
 
 // replacementGapOf reports the observation gap the named fact presented through

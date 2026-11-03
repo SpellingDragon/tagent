@@ -57,29 +57,54 @@ var (
 // CompressRequestType is a frozen type word, not a computed value.
 const _ = CompressRequestType
 
-// The model replacement family keeps its declared shapes: the judgment a
-// producer files, its identity derivation and the event it commits as.
-var (
-	_ = ModelReplacement{ID: "", AgentID: "", FromVersion: "", ToVersion: "", Source: "", Result: "", At: time.Time{}}
+// CompressProductType is a frozen type word, not a computed value.
+const _ = CompressProductType
 
-	_ Fact = ModelReplacement{}
+// FinalRoundRequestType is a frozen type word, not a computed value.
+const _ = FinalRoundRequestType
 
-	_ func(AgentID, string, string, string, string) ModelReplacement = ModelReplacementFor
-
-	_ func(ModelReplacement, time.Time) Event = ModelReplacement.Event
-
-	_ func(ModelReplacement) string = ModelReplacement.FactKey
-)
-
-// The model replacement type, its source and result stamps and the metadata
-// keys it carries are frozen names, not computed values.
+// The model dimension vocabulary of a configuration change keeps its frozen
+// names: the result stamp a producer states and the metadata keys the move is
+// rendered under. The independent replacement family is retired, so no fact type
+// stands here beside the change that carries the move.
 const (
-	_ = ModelReplacementType
-	_ = ModelReplacementSourceConfig
 	_ = ModelReplacementResultRequested
 	_ = MetaKeyModelFromVersion
 	_ = MetaKeyModelToVersion
 	_ = MetaKeyModelReplacementResult
+)
+
+// The configuration change family keeps its declared shapes: the judgment a
+// reload files, its identity derivation, the event it commits as and the frozen
+// words it is read by.
+var (
+	_ = ConfigChange{ID: "", AgentID: "", Dimension: "", Generation: 0, Description: ""}
+
+	_ func(AgentID, uint64, string, string, string) ConfigChange = ConfigChangeModelFor
+
+	_ Fact = ConfigChange{}
+
+	_ func(AgentID, string, uint64, string) ConfigChange = ConfigChangeFor
+
+	_ func(ConfigChange, time.Time) Event = ConfigChange.Event
+
+	_ func(ConfigChange) string = ConfigChange.FactKey
+)
+
+// The configuration change type, its source and dimension stamps and the
+// metadata keys it carries are frozen names, not computed values.
+const (
+	_ = TypeConfigChange
+	_ = ConfigChangeSourceConfig
+	_ = ConfigChangeDimensionPrompt
+	_ = ConfigChangeDimensionBinding
+	_ = ConfigChangeDimensionModel
+	_ = ConfigChangeDimensionFile
+	_ = ConfigChangeDimensionOrgAgents
+	_ = ConfigChangeDimensionOrgEntry
+	_ = ConfigChangeDimensionOrgAssembly
+	_ = MetaKeyConfigChangeDimension
+	_ = MetaKeyConfigChangeGeneration
 )
 
 // The frozen type and metadata names must stay compile-time constants: a
@@ -94,6 +119,10 @@ const (
 	_ = TypeFeedback
 	_ = TypeGovernance
 
+	_ = TypeAttentionQuestion
+	_ = TypeAttentionAnswer
+	_ = TypeAttentionClearance
+
 	_ = MetaKeyEventKey
 	_ = MetaKeyPartitionID
 	_ = MetaKeyEventType
@@ -103,6 +132,12 @@ const (
 	_ = MetaKeyBundleID
 	_ = MetaKeyNoticeKind
 	_ = MetaKeyTaskID
+
+	_ = MetaKeyAttentionKind
+	_ = MetaKeyAttentionTarget
+	_ = MetaKeyAttentionLineage
+	_ = MetaKeyAttentionExpiresMs
+	_ = MetaKeyAttentionClearance
 
 	_ = MetaPrefix
 )

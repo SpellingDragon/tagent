@@ -270,12 +270,13 @@ func requireEnvironmentFields(t *testing.T, block string) {
 		"- tools: (none)",
 		"- skills: (none)",
 		"- mcp: (none)",
-		"- tasks: 0 open",
-		"  - (none)",
 	} {
 		if !strings.Contains(block, want) {
 			t.Fatalf("environment block = %q, want it to name %q", block, want)
 		}
+	}
+	if strings.Contains(block, "- tasks:") {
+		t.Fatalf("environment block = %q, want no task line: the prompt carries no task account of the run", block)
 	}
 }
 

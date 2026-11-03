@@ -1,5 +1,11 @@
 package assembly // import "github.com/SpellingDragon/tagent/assembly"
 
+The compression consumer: the execution half of compression. A producer judges
+material over its bound and files a compress request; the consumer reads the
+material that request names, folds it through the projection and files the
+compress product the execution minted. Judgment and execution share no step,
+so what material went is a fact of the chain beside why it went.
+
 Boot is the turnkey entry of the composition root: it reads one host document,
 resolves the declaration it carries, and returns the Host the application
 drives. The Host owns the assembled run, the scheduled reflection and the
@@ -43,9 +49,10 @@ declaration reads it, and only the application section stays opaque.
 
 The loopback endpoints of the host: the liveness probe a supervisor polls, the
 task endpoint an inbound channel posts to, and the reload endpoint a supervisor
-posts to after it rewrites the configuration source. Every endpoint authorizes
-before it reads a body, and a face that is switched off names that state in its
-reason instead of answering a request it never accepted.
+posts to after it rewrites the configuration source. Every endpoint but the
+counter face authorizes through the one gate before it answers, and a face that
+is switched off names that state in its reason instead of answering a request it
+never accepted.
 
 The model sampling of one declared agent: the temperature, thinking switch
 and reasoning effort a host document declares flow onto every request of that
@@ -58,22 +65,23 @@ The wrapper fills a value only while the request itself names none:
 an undeclared parameter is never written as a zero, and a sampling a request
 already carries is never overridden.
 
-The configuration reload of a booted host: the document is read again, the
-declaration it carries is published through the one publication entry, and every
-agent whose model reference moved has the move judged as a model replacement
-fact on its own pipeline. The lease mounted on the agent runs the rebuild,
-publication and installation order, so a reload never installs a model outside
-the event-driven replacement path the run already owns.
+The configuration reload of a booted host: the document is read again,
+the declaration it carries is published through the one publication entry, and
+every agent whose lease holds a version other than the one the document names
+has the move judged as one configuration change of the model dimension on its
+own pipeline. The lease mounted on the agent runs the rebuild, publication and
+installation order, so a reload never installs a model outside the event-driven
+configuration path the run already owns.
 
 The document is the host's own dialect, so a reload reads it with the same
 strict decoder Boot reads it with; a document the decoder refuses changes
 nothing at all.
 
-The host-owned tools and ports: the outbound send tool the model calls,
-the scheduled reflection plan and the port that commits its body to a session,
-and the request shape an inbound channel posts to the task endpoint. Each one is
-a face the host contributes to the assembly, so the host builds it here rather
-than leaving the wiring to every deployment.
+The host-owned tools and ports: the send tool the model calls across tasks and
+sessions, the scheduled reflection plan and the port that commits its body to a
+session, and the request shape an inbound channel posts to the task endpoint.
+Each one is a face the host contributes to the assembly, so the host builds it
+here rather than leaving the wiring to every deployment.
 
 The minimal public assembly entry of the runtime: one Run assembles the shared
 faces once, publishes the candidate bindings of one declaration through the
@@ -130,8 +138,35 @@ durable fact chain instead of restoring a body snapshot kept beside the facts.
 
 CONSTANTS
 
+const (
+	// DeliveryReceiptDenied is the receipt of an attempt that reached no target.
+	DeliveryReceiptDenied = "denied"
+	// DeliveryReceiptBroken is the receipt of an attempt whose round could not be withdrawn.
+	DeliveryReceiptBroken = "broken"
+)
+    DeliveryReceiptDenied and DeliveryReceiptBroken are the two receipts an
+    attempt that reached nothing stands at: denied for a delivery the face
+    turned away — a gate, a task table or a round that never landed the body
+    — and broken for one whose round nothing served could not be put back,
+    so the account of the attempt is the only place that failure survives.
+
+    Both are receipts of an account, never result text: the model reads the
+    two-state dialect of the send face, and the record is what makes the refusal
+    queryable afterwards rather than living only in the sentence the caller was
+    answered with.
+
 const AgeFoldPluginName = "age-fold"
     AgeFoldPluginName is the stable name the age fold plugin instance answers.
+
+const CompressionConsumerName = "compress-consumer"
+    CompressionConsumerName is the stable name the compression consumer answers.
+
+const DeliveryReceiptSent = "sent"
+    DeliveryReceiptSent is the one receipt a body that reached its target stands
+    at: the body landed in the chain of the destination it named. It is the
+    frozen word of the delivery receipt entry, so both delivery families read
+    the same receipt for a body that landed and a receipt no fact states reads
+    as this one.
 
 const DiagnosticSwitchEnv = "TAGENT_DIAGNOSTICS"
     DiagnosticSwitchEnv names the environment variable the host reads the
@@ -163,8 +198,8 @@ var (
 	ErrCaptureUnscoped = errors.New("tagent: the capture cannot be scoped to one request view")
 )
     ErrModelLeaseMissing and the lease wiring errors beside it name the way the
-    model replacement wiring was refused, so a host routes each by name instead
-    of matching on message text.
+    model lease wiring was refused, so a host routes each by name instead of
+    matching on message text.
 
 var ErrCommittedFactMissing = errors.New("tagent: the committed fact is not held by this run")
     ErrCommittedFactMissing reports a fact identity this run holds neither in
@@ -190,6 +225,14 @@ var ErrHostAddressMissing = errors.New("tagent: the invocation names no complete
     address: the runtime is driven at an explicit address and never at a
     most-recent one.
 
+var ErrHostAgentUndeclared = errors.New("tagent: the invocation names an agent the published organization does not declare")
+    ErrHostAgentUndeclared reports an invocation whose address names an agent
+    the declaration in effect does not declare: a generation that removed an
+    agent answers new input at that address by name, while every fact the agent
+    already committed stays on the chain and no cancellation is invented for it.
+    The address of an agent the generation still declares is never refused here,
+    even when it stopped being the entry.
+
 var ErrHostClosed = errors.New("tagent: the host is closed")
     ErrHostClosed reports an invocation or endpoint drive that reached a host
     whose close already began.
@@ -206,8 +249,8 @@ var ErrHostMeditationToolMisplaced = errors.New("tagent: a meditation tool is gr
     ErrHostMeditationToolMisplaced reports a document that grants the
     cross-session write tool outside the meditation session, or grants the
     send tool to the meditation session itself: the summary tool belongs to the
-    reflection turn alone, and send is a host channel face a reflection session
-    never carries.
+    reflection turn alone, and the communication face a reflection session never
+    carries stays outside it.
 
 var ErrHostNoActiveSession = errors.New("tagent: no user session has been admitted yet")
     ErrHostNoActiveSession reports a task request arriving before any user turn:
@@ -223,17 +266,20 @@ var ErrHostReloadRestartRequired error = errHostReloadRestartRequired{}
     than answering success for a value nothing reads; a host that needs it is
     restarted with the document.
 
-var ErrHostReloadStructural = errors.New("tagent: the reload changes the declared agent set")
-    ErrHostReloadStructural reports a reload that changes the entry agent or the
-    declared agent set. Boot wires the model leases, the reflection plan and the
-    contributed tool faces of the declared agents once, so a structural change
-    is refused by name instead of being half-applied; a host that needs another
-    organization is restarted with it.
+var ErrHostReloadStructural = errors.New("tagent: the reload cannot apply its change without a restart")
+    ErrHostReloadStructural is the family of reload refusals the running host
+    cannot take into service. The entry agent and the declared agent set are
+    no longer refused by it: a reload publishes them as one generation, builds
+    the native pieces of an added agent and judges the next turn and delivery
+    against the generation in effect. What stays in the family is the change
+    whose only consumer Boot built — the restart-required fields — so every face
+    that maps the family answers the refusal the same way.
 
 var ErrHostSenderMissing = errors.New("tagent: the host carries no outbound message sender")
-    ErrHostSenderMissing reports a host that grants the send tool or admits an
-    invocation at the user address beside no outbound message sender: the turn
-    would produce output nothing can deliver, so the run is refused by name.
+    ErrHostSenderMissing reports a host that admits an invocation or a drive at
+    the user address beside no outbound message sender: the turn would produce
+    output nothing can deliver, so the run is refused by name. A document that
+    grants the send tool demands no sender, because a send reaches no channel.
 
 var ErrHostUnauthenticated = errors.New("tagent: the task request is not authenticated")
     ErrHostUnauthenticated reports a task request whose subject did not
@@ -303,6 +349,16 @@ func Assemble(ctx context.Context, decl *config.Declaration, agents map[event.Ag
     acquired. MUST NOT carry a stand-in governance in a formal assembly.
     MUST NOT return a half-assembled run beside a publication failure.
 
+    - The producer of the closing round reads the budget its own agent declares
+    over the same declaration the loop's table was set from, so the judgment
+    the chain carries names the policy the drive runs under. - The consumer of
+    compression judgments is an instance of the material flow like the fold that
+    judges them, so every agent's After pass executes the judgments already
+    filed instead of waiting for a producer to hand them over. - The producer of
+    the closing round is an instance of the same flow: every agent's After pass
+    judges the budget of the segment its commit grew, so the closing round of a
+    spent budget stands on the chain as the fact it is.
+
 func Boot(configPath string, opts ...HostOption) (*Host, error)
     Boot reads one host document and returns the assembled host: the declaration
     is resolved from the document, the models, tool instances, storage tier,
@@ -310,6 +366,34 @@ func Boot(configPath string, opts ...HostOption) (*Host, error)
     Assemble, and the reflection driver and the loopback endpoints start beside
     it. Every failure before the assembly returns the named refusal and leaves
     nothing running.
+
+    - The meditation pass yields to the model requests of the observed session,
+    and the read of them is the consumption loop's own: the driver is assembled
+    before the loop is, so the face is a method value that reads it when a pass
+    runs.
+
+    - Every decision of a segment runs under the lineage of the material that
+    opened it, so a body a call of that decision sends leaves under the line of
+    its own turn instead of the send tool's own default; the direct drive stamps
+    the same line on its context.
+
+    - The one approval book of a boot is the host-attached book when the
+    caller mounted it, and a boot-local book under <root>/approvals only fills
+    a process that declared none, so a caller that mounted the default book
+    keeps ruling the very book it handed over; the risk-rule gate, the loop's
+    batch fuse and the assembly's attention reading read that same book,
+    so the presence a reader sees and the seat a held call is parked through are
+    one book and never two.
+
+    - A fuse declaration on the entry agent wires the loop: a response above the
+    call cap or past the long-context threshold parks its whole batch on that
+    one book before anything executes, and a declaration that names neither knob
+    leaves the limits the process already declared in place.
+
+    - TAGENT_GCTRACE=1 asks for the runtime's GC trace, which the runtime reads
+    when the process starts: a boot merges GODEBUG=gctrace=1 so the subprocesses
+    this host starts trace, and names in one line that the host process itself
+    traces only when it was launched beside it.
 
 func DiagnosticSwitchesFromEnv() (DiagnosticSwitches, error)
     DiagnosticSwitchesFromEnv reads the diagnostic switches the host process
@@ -340,24 +424,30 @@ func NewSkillLoadSink(agent event.AgentID) knowledge.LoadSink
     the next request of that agent and no other. A host that mounts no sink
     keeps the load's name-level answer exactly as before.
 
+func SetAttentionClock(now func() time.Time) (restore func())
+    SetAttentionClock replaces the clock the attention read face judges a
+    notification's validity with and returns the restore of the clock in effect.
+    A nil clock restores the wall clock, so a caller that names none reads one
+    time axis with every other read of this package.
+
 TYPES
 
 type AgeFoldPlugin struct {
 	// Has unexported fields.
 }
-    AgeFoldPlugin folds the projection of the session the committed fact belongs
-    to once its rendered volume passes the window threshold: the process detail
-    of the older task turns collapses into fold products and the middle band
-    into one history summary, so a long session replays into the window it
-    declared instead of over it.
+    AgeFoldPlugin judges the projection of the session the committed fact
+    belongs to once its rendered volume passes the window threshold: the process
+    detail of the older task turns is due for a fold and the middle band for one
+    history summary. The plugin files each judgment as a compress request and
+    executes nothing of it, so why material goes is a fact beside the product
+    that says what went, and the consumer that reads the request does the
+    folding.
 
     The plugin is an instance of the material flow like any other: it reads
-    the fact material and answers an observation, so the pipeline dispatches
-    it beside the reflection driver and the commit that grew the projection
-    is the trigger. How material folds stays the projection's own rule — the
-    plugin judges nothing about it. Every judgment the fold answered is filed
-    as a compress request on the chain, so why material went is a fact like any
-    other.
+    the fact material and answers an observation, so the pipeline dispatches it
+    beside the reflection driver and the commit that grew the projection is the
+    trigger. How material folds stays the projection's own rule — the plugin
+    judges nothing about it.
 
 func NewAgeFoldPlugin(sessions SessionFolds) *AgeFoldPlugin
     NewAgeFoldPlugin assembles the fold plugin over the session face of one run.
@@ -368,19 +458,147 @@ func (p *AgeFoldPlugin) Name() string
     Name reports the stable name of this plugin instance.
 
 func (p *AgeFoldPlugin) ObserveCommit(ctx context.Context, id event.EventID) error
-    ObserveCommit folds the projection of the session the committed fact belongs
-    to once that projection's rendered volume passes the window threshold,
-    and files the compression judgment of every product the fold minted.
+    ObserveCommit judges the projection of the session the committed fact
+    belongs to once that projection's rendered volume passes the window
+    threshold, and files the judgment of every product the fold would mint. The
+    material itself is left as it stands: the consumer that reads the judgment
+    does the folding.
 
-    The duty is read-only over the fact: a fact whose session registered no
-    projection, a session whose window names no positive token window and a
-    projection still inside its threshold each leave the commit as it stands.
-    A fold that ran rewrote the projection only, and a failed fold is reported
-    without rolling the commit back.
+    The duty is read-only over the fact and over the projection: a fact whose
+    session registered no projection, a session whose window names no positive
+    token window and a projection still inside its threshold each leave the
+    commit as it stands. A failed judgment is reported without rolling the
+    commit back.
 
 func (p *AgeFoldPlugin) Port() plugin.Port
     Port reports the consumption the plugin serves: one committed fact in,
     one observation out. The observation is the fold the fact may trigger.
+
+type CompressionConsumer struct {
+	// Has unexported fields.
+}
+    CompressionConsumer executes the compression judgments filed on a chain.
+    It reads the material one request names, executes the fold the judgment
+    already made and files the product, so the projection restores that product
+    from the chain instead of folding the material a second time.
+
+    The redline list (3 rules): MUST file at most one product per request:
+    the product identity is content-addressed over the judgment. MUST NOT judge
+    material of its own: only the requests already on the chain are executed.
+    MUST NOT execute a judgment whose material does not stand: it stays pending
+    rather than answering a product of other material.
+
+func NewCompressionConsumer(sessions compressSessions) *CompressionConsumer
+    NewCompressionConsumer assembles the consumer over the session face of
+    one run. A nil face answers no session, so an assembly mounted beside none
+    executes nothing instead of failing on the first commit.
+
+func (c *CompressionConsumer) Execute(ctx context.Context, session event.SessionID) error
+    Execute runs every judgment of one session no product answers yet: it reads
+    the material the judgment named, folds it and files the product beside it.
+    A session whose chain registered no projection, and a window naming no
+    positive token window, execute nothing — the judgment stays pending as the
+    unexecuted judgment it is.
+
+    The pass reads the projection and never judges it: whether material is over
+    its bound is already the request on the chain, and the plan only answers
+    which product that request names.
+
+func (c *CompressionConsumer) Name() string
+    Name reports the stable name of this plugin instance.
+
+func (c *CompressionConsumer) NoteProduct(product event.CompressProduct)
+    NoteProduct notes one product a chain already carries, so the judgment it
+    answers is never executed a second time: this is the restart path, where the
+    products of a chain answer judgments the process does not hold.
+
+func (c *CompressionConsumer) ObserveCommit(ctx context.Context, id event.EventID) error
+    ObserveCommit executes the judgments one session filed that no product
+    answers yet: the fact that triggered it names the session, and every
+    judgment of that session stands where the producer left it.
+
+func (c *CompressionConsumer) Port() plugin.Port
+    Port reports the consumption the consumer serves: one committed fact in,
+    one execution of the judgments already on the chain.
+
+func (c *CompressionConsumer) Record(session event.SessionID, request event.CompressRequest)
+    Record notes one judgment a producer filed for a session, so the consumer
+    executes it. A judgment already noted is noted once: the identity is
+    content-addressed, so a re-filed judgment is the same judgment.
+
+type DeliveryLedger struct {
+	// Has unexported fields.
+}
+    DeliveryLedger is the delivery account of one assembled run (design D9):
+    the projections of the delivery facts the run committed, read back by
+    source event and by target. It holds no state of its own — the facts are the
+    account, and the tier the run keeps makes them durable — so a query never
+    parses a body: the four entries, the identity and the type of the fact are
+    all it reads.
+
+func (l *DeliveryLedger) BySource(source event.EventID) []DeliveryRecord
+    BySource reports the deliveries one source event is accounted for: every
+    target the event reached, each beside its own identity and receipt.
+
+func (l *DeliveryLedger) ByTarget(addr event.Address) []DeliveryRecord
+    ByTarget reports the deliveries one address received, whichever family
+    carried them.
+
+func (l *DeliveryLedger) Records() []DeliveryRecord
+    Records reports every delivery the run accounts for, ordered by source
+    event, then by target and identity, so two reads of one chain answer the
+    same order. One identity answers one record: a repeated delivery of the
+    identity the chain already holds lands no second fact and therefore no
+    second record.
+
+func (l *DeliveryLedger) Refusals() []DeliveryRefusal
+    Refusals reports every attempt the run turned away, ordered by source event,
+    then target, then identity and category, so two reads of one chain answer
+    the same order. The attempts are read from the same account as the landings,
+    so a refusal is queryable after the fact rather than only from the sentence
+    the caller was answered with.
+
+type DeliveryRecord struct {
+	// Source is the event the delivery is filed under.
+	Source event.EventID
+	// Target is the address the delivery reached.
+	Target event.Address
+	// Identity is the canonical identity the delivery is deduplicated under.
+	Identity string
+	// Receipt is the receipt the delivery stands at.
+	Receipt string
+	// FactType is the frozen type of the fact that carried the delivery.
+	FactType string
+}
+    DeliveryRecord is one single-target delivery of one run: the source event
+    it is filed under, the target it reached, the identity it is deduplicated
+    under, the receipt it stands at and the type of the fact that carried it.
+    The fact type keeps the two delivery families apart — an agent's own body
+    is an external input and a framework state change is a task settle — while
+    every other field is read through the same four entries for both.
+
+func (r DeliveryRecord) Meta() map[string]string
+    Meta reports the four delivery entries of one record under the frozen keys,
+    so two records of different families are compared and consumed by the same
+    vocabulary instead of by the shape of the fact behind them.
+
+type DeliveryRefusal struct {
+	// Source is the event the attempt is filed under.
+	Source event.EventID
+	// Target is the address the call named, which the body never reached.
+	Target event.Address
+	// Identity is the identity the attempt is deduplicated under.
+	Identity string
+	// Receipt is the receipt the attempt stands at: denied, or broken for a round that
+	// could not be put back.
+	Receipt string
+	// Category is the stage that turned the body away.
+	Category string
+}
+    DeliveryRefusal is one attempt the delivery face turned away: the source
+    event it is filed under, the target the call named, the identity it is
+    deduplicated under, the receipt it stands at and the stage that turned the
+    body away.
 
 type DiagnosticFace struct {
 	// Subsystem names the face this reading belongs to.
@@ -617,10 +835,30 @@ func (h *Host) ApproveDelivery(ctx context.Context, id string) error
     account did not — a restart delivers the body once more, which is the one
     extra copy an unconfirmed receipt tolerates.
 
-func (h *Host) Close(ctx context.Context) error
-    Close stops the endpoints and the reflection driver, drains the run and
-    closes the MCP servers. A repeated close reports the first result and runs
-    no second drain.
+func (h *Host) Close(ctx context.Context) (first error)
+    Close stops injection into this host, quiesces the run it drives and only
+    then stops the consumers, the settle driver and the facilities behind them.
+    One deadline bounds the quiesce and the run close behind it, so a cancelled
+    caller never abandons the run close half-way. Every stop here is a join:
+    a consumer set, a driver and a face answer only once the writers they
+    cancelled returned, so the writer barrier this close reads is a barrier
+    over writers that are truly stopped — a segment a cancelled decision
+    still unwinds is landed by that loop before the close reads its stop,
+    never after the close returned. A repeated close reports the first result
+    and runs no second quiesce; a close that follows a bare quiesce still stops
+    the facilities that quiesce left running. - Every facility behind the run
+    is torn down however the close ended: a close that could not judge the run
+    still stops its servers, seals the trajectory, stops telemetry and releases
+    the execution face, and a broken judgment is what a repeated close reports.
+    - The producers stop before the host declares itself halted: only past their
+    join does a closed host refuse a delivery, so what a stopping producer hands
+    in is settled instead of dropped. - The report of the run close is folded
+    in whichever way that close ended, so the two faces of one close never
+    disagree.
+
+func (h *Host) CloseReport() agent.DrainReport
+    CloseReport reports the state the last close of this host ended in, beside
+    the work it could not settle.
 
 func (h *Host) FaceAddr() string
     FaceAddr reports the address the loopback endpoints listen on, and an empty
@@ -633,16 +871,44 @@ func (h *Host) HeldDeliveries() []HeldDelivery
     hold, and only ApproveDelivery or RefuseDelivery resolves one.
 
 func (h *Host) Invoke(ctx context.Context, req InvokeRequest) (agent.Turn, error)
-    Invoke drives one invocation through the assembled run. An invocation at the
-    user address of the entry agent delivers the fresh assistant output through
-    the message sender; every other address is driven headless.
+    Invoke drives one invocation through the resident instance of its address:
+    the input commits as the facts of its session, the instance of that address
+    pulls the message with whatever else arrived, batches them into one model
+    request, and the call answers with the aggregated turn of the segment that
+    consumed it — a second entry whose message the same segment consumed answers
+    the same turn. The segment identity the answer carries is the one the
+    instance minted, never the arrival identity the caller named: the address is
+    driven by its instance and by nothing beside it.
 
-    A user message that arrives while a drive of that address is already running
-    is admitted into the chain of that running range instead of parking outside
-    the gate: the message reaches the next decision boundary of the turn in
-    flight, and the call answers the admission itself — no decision reached and
-    no error. Every other arrival, and a user arrival beside a gate no drive
-    holds, takes the gate and drives a turn of its own, exactly as before.
+    An invocation at the user address of the entry agent delivers the fresh
+    assistant output through the message sender from the delivery face of
+    that instance, once per closed segment, so an entry that only waits on the
+    segment never delivers a body a second time. Every other declared agent's
+    address is driven headless: its answer stays on its own chain.
+
+    The entry agent and the declared agent set are read from the generation in
+    effect: a reload that moves the entry speaks for the next turn, while a turn
+    already running keeps the entry it was admitted under, and an address the
+    generation removed answers new input by name.
+
+func (h *Host) Quiesce(ctx context.Context, req agent.CloseRequest) (agent.DrainReport, error)
+    Quiesce stops injection into this host and runs it to its fixed point:
+    no external input is admitted, the work the run already accepted converges,
+    the derived turns those accepted obligations owe keep running, and no
+    consumption stays unconfirmed. The consumers and the settle driver stay
+    mounted for the whole quiesce, because the derived work is driven through
+    them.
+
+    A host that reached rest answers Quiesced; one that spent its timeout with
+    work still on the chain answers Cut, which is a normal return because the
+    remaining work is on the chain and a restart resumes it; and one whose
+    criterion could not be read answers Broken. The redline list (4 rules):
+    MUST refuse external input before the first read of the rest criterion. MUST
+    admit the derived turns an accepted obligation owes for the whole quiesce.
+    MUST NOT report a run at rest while a consumer still flies or a writer has
+    not stopped. MUST answer a cancelled caller as Cut where the run stands:
+    the criterion is read beside a context that does not carry the caller's
+    cancellation.
 
 func (h *Host) RefuseDelivery(ctx context.Context, id string) error
     RefuseDelivery discards one held body: nothing is delivered, the hold is
@@ -654,13 +920,24 @@ func (h *Host) RefuseDelivery(ctx context.Context, id string) error
     fact the tier refused answers the caller by name and leaves the body in the
     review table, so a refusal no account accepted is never read as a decision.
 
+func (h *Host) Rejections() []state.Rejection
+    Rejections reports the feedback fact of every notification a target refused,
+    as the state account of this host holds it: the notification each refusal
+    answers beside the routing it was offered to and the reason the target gave.
+    A refusal is a consumption result, so it is the diagnostic face of what the
+    account already answered rather than a second criterion of the close.
+
 func (h *Host) Reload(ctx context.Context) (hostReloadReport, error)
     Reload reads the configuration source again, publishes the declaration
-    it carries, and files the model replacement of every agent whose model
-    reference moved. The publication is the one entry the run already owns;
-    the replacement facts are the same facts a declaration-driven change files,
-    so the lease mounted on each agent decides whether the new version takes
-    effect.
+    it carries, and files the configuration facts the move judged: one config
+    change per declaration dimension that moved and one model configuration
+    change per agent whose lease holds a version the document no longer names.
+    The publication is the one entry the run already owns; the model change
+    is the configuration change family's model dimension, committed after
+    the publication settled — including a carried document, so a move whose
+    install failed is judged again. The lease mounted on each agent runs its
+    own rebuild, publication and installation order and decides whether the new
+    version takes effect.
 
 func (h *Host) Run() *Run
     Run reports the assembled run the host drives.
@@ -695,6 +972,10 @@ type InvokeRequest struct {
 	TriggerSource string
 	// Input is the native input of the range, in the order the caller admits it.
 	Input []model.Message
+	// InputMeta carries the per-message metadata of Input, one entry per
+	// message in the same order; a nil entry stamps nothing, so a caller that
+	// names none behaves exactly as it did before the face existed.
+	InputMeta []map[string]string
 }
     InvokeRequest is one invocation admitted at the assembly entry: the
     responsibility range identity, the explicit agent session address it belongs
@@ -748,10 +1029,10 @@ type ModelLeaseOption func(*leaseState)
     ModelLeaseOption configures the model lease one agent is assembled with.
 
 func WithLeaseRebuild(rebuild func(version string) (model.Model, error)) ModelLeaseOption
-    WithLeaseRebuild names the rebuild step a model replacement fact runs:
-    the step receives the version the fact asks for and answers the model that
-    version is installed as. A rebuild that fails installs no version, and the
-    lease keeps the version in effect.
+    WithLeaseRebuild names the rebuild step a model configuration change runs:
+    the step receives the version the change asks for and answers the model
+    that version is installed as. A rebuild that fails installs no version,
+    and the lease keeps the version in effect.
 
 type NativeAgent struct {
 	// Model is the native model of the agent; a nil model refuses the assembly.
@@ -842,12 +1123,12 @@ func WithMemoryPlan(plan *MemoryPlan) Option
 func WithModelLease(agentID event.AgentID, lease *rl.ModelLease, opts ...ModelLeaseOption) Option
     WithModelLease attaches the model lease of one agent to this assembly:
     the agent's binding carries the lease's stable model handle instead of the
-    model the host contributed, every committed model replacement fact owned
+    model the host contributed, every committed model configuration change owned
     by the agent is consumed by the lease observer mounted on its pipeline,
     and the lease's rebuild-publication-installation order decides whether
     the requested version takes effect. A rebuild and a publication entry are
-    configured through the model lease options; a replacement beside no rebuild
-    takes the model the publication that judged the change contributed.
+    configured through the model lease options; a lease attached beside no
+    rebuild refuses every change at that step by name.
 
     The lease agent must be declared by the assembly's declaration: the
     declaration is the authorization, and a lease beside no declared agent is
@@ -894,6 +1175,15 @@ func WithStorage(cfg ledger.StorageConfig) Option
     fact log, and the chains that log already holds are folded back at assembly.
     An assembly beside no storage keeps its facts in memory and restores
     nothing.
+
+func WithTaskTerminalTTL(ttl time.Duration) Option
+    WithTaskTerminalTTL sets how long a task record outlives the terminal
+    outcome it holds: the record of a settled, failed or cancelled task older
+    than this is dropped beside the next admission, so this run's account of
+    tasks is bounded by it. A call naming a pruned task is refused by name,
+    and every fact of that task stays on the chain — the bound is the live
+    account, never the history. The zero value keeps task.DefaultTerminalTTL,
+    and a negative one keeps every record for the life of the run.
 
 func WithTelemetry(observer plugin.Observer) Option
     WithTelemetry attaches the post-commit observation face this assembly
@@ -1011,19 +1301,30 @@ func (r *Run) AttachReplay(chain agent.RequestChain, window FoldWindow, projecti
     attachScopedReplay, so they never cross agents that share a session id.
 
 func (r *Run) Close(ctx context.Context, req agent.CloseRequest) (agent.DrainReport, error)
-    Close closes the runtime's own side for the named session address and
-    drains what it already holds, exactly as the close face of the execution
-    domain prescribes: new input is refused before the first settlement pass,
-    the obligations already accepted settle only by real settlement beside the
-    real stop confirmations of the producers behind them, and a drain that did
-    not converge is reported beside the named reason of everything that stayed
-    open. The session side closes only after that settlement, so the mailbox
-    bookkeeping an in-flight tool result still lands through stays open exactly
-    as long as the drain may need it. A repeated close returns the first result
-    and runs no second settlement. The redline list (3 rules): MUST refuse new
-    input before the first settlement pass. MUST report a drain only beside
-    real settlement and the real stop confirmations behind it. MUST NOT read a
-    cancelled request, an emptied queue or an elapsed timeout as settlement.
+    Close closes the runtime's own side for the named session address: the
+    request is judged first, new input is refused next, the run quiesces to its
+    fixed point, and only then does the session side close. The close reports
+    one of three states: a run at rest, a run that spent its budget with work
+    still on the chain, or a run it could not judge. The session side closes
+    after the quiesce, so the mailbox bookkeeping an in-flight tool result still
+    lands through stays open exactly as long as the quiesce may need it.
+
+    The one absolute budget of the request covers every join and teardown the
+    close takes: the resident consumption loops are marked first — without
+    cancelling anything they fly, so the obligations they hold are finished
+    for real inside the budget or stay named on the chain — and joined under
+    the same deadline, so a close beside a producer that never stops answers
+    Cut beside that producer's name instead of waiting on it without an end. A
+    repeated close retries the quiesce the same way until the run reaches rest.
+    The redline list (5 rules): MUST judge the timeout of the close before any
+    side effect it would take, so a close naming none is refused with the run
+    untouched. MUST refuse new input before the first quiesce of the close.
+    MUST mark the resident consumption loops the loop mounted for itself before
+    the first read of the rest criterion, and join them inside the budget the
+    request named, so a segment those loops still fly is waited out or named
+    — never unbounded before Cut and never cancelled by the close itself. MUST
+    judge the run by the one rest criterion, never by an emptied queue or an
+    elapsed wait. MUST NOT report a run at rest while a writer has not stopped.
 
 func (r *Run) CloseMCPServers() error
     CloseMCPServers releases every MCP server the live registry holds: the close
@@ -1047,12 +1348,10 @@ func (r *Run) CommitHistory(addr event.Address, msgs []model.Message)
 
 func (r *Run) CommitToSession(ctx context.Context, addr event.Address, evt event.Event) (event.EventID, error)
     CommitToSession commits one event into the fact chain of an explicit
-    address, under a fresh invocation identity when the caller states none.
-    It is the cross-session write face a reflection turn delivers a summary
-    through: the event keeps the address it names, the commit is observed
-    through the target agent's own published pipeline exactly as any other
-    commit of this run, and an address the run cannot establish is refused by
-    name.
+    address, under a fresh invocation identity when the caller states none,
+    and runs the target agent's own published pipeline over the fact exactly as
+    any other commit of this run: an address the run cannot establish is refused
+    by name.
 
     The commit is a write of this run, never a second store beside it: the fact
     lands in the same live ledger, on the same durable log and in the same
@@ -1060,7 +1359,17 @@ func (r *Run) CommitToSession(ctx context.Context, addr event.Address, evt event
     assembly reads it like any other external input. The address block of the
     event is backfilled, never overwritten: a source, target or owner the caller
     already stamped is kept as the caller wrote it, and only an unstated stamp
-    reads as the target address of the commit.
+    reads as the target address of the commit. The purposes it serves are these:
+
+    - a task notification's material: the notice lands as the user message its
+    address pulls, so the attention projection reads it as input rather than
+    as a line beside it - the audit facts of the host: an execution state,
+    a refused delivery and a delivered failure notice each land as one
+    feedback fact that carries no model payload - the shared write seam of
+    the full-duplex face: a send from one session to another and a reflection
+    delivery both land their body through the commit-only segment below, which
+    backfills the address block by this face's rule and leaves the observation
+    to the target's own next boundary
 
 func (r *Run) CommittedEvent(ctx context.Context, id event.EventID) (event.Event, error)
     CommittedEvent reports the fact an identity names: the live fact of this
@@ -1072,6 +1381,10 @@ func (r *Run) CommittedEvent(ctx context.Context, id event.EventID) (event.Event
 func (r *Run) CommittedFacts() int
     CommittedFacts reports how many facts this run holds: the counter the
     metrics endpoint reports beside the turns and deliveries of the host.
+
+func (r *Run) DeliveryLedger() *DeliveryLedger
+    DeliveryLedger reports the delivery account of this run, or nil beside no
+    run.
 
 func (r *Run) Diagnostics(ctx context.Context, filter query.ListFilter, switches DiagnosticSwitches) (DiagnosticReport, error)
     Diagnostics reads every diagnostic face of this run under the caller's
@@ -1094,15 +1407,15 @@ func (r *Run) ExecState(key tagentexec.ResourceKey) (tagentexec.Explanation, err
     read by name instead of answering an empty state.
 
 func (r *Run) InjectEvent(ctx context.Context, evt event.Event, invocationID event.InvocationID) (agent.Turn, event.EventID, error)
-    InjectEvent commits one explicit input event of the named responsibility
-    range and drives the loop session of its address with it, exactly as the
-    Invoke entry drives a range the host admitted. The caller owns the event's
-    address and lineage; this entry backfills only the stamps the caller left
-    unstated — an unstated source and target read as the owner of the event, an
-    unstated invocation identity as the one this call names — while the runtime
-    instance stamp is always this run's own and never the caller's to write.
-    The fact commits under the identity the event carries after the backfill,
-    and the drive runs the range under that same identity.
+    InjectEvent commits one explicit input event and wakes its address Consumer,
+    exactly as Invoke does. The input keeps its source invocation, while the
+    Consumer mints the segment identity that answers it. The caller owns the
+    event's address and lineage; this entry backfills only the stamps the caller
+    left unstated — an unstated source and target read as the owner of the
+    event, an unstated invocation identity as the one this call names — while
+    the runtime instance stamp is always this run's own and never the caller's
+    to write. The fact commits under the identity the event carries after the
+    backfill, and the drive runs the range under that same identity.
 
 func (r *Run) Invoke(ctx context.Context, req InvokeRequest) (agent.Turn, error)
 
@@ -1111,7 +1424,9 @@ func (r *Run) Invoke(ctx context.Context, req InvokeRequest) (agent.Turn, error)
     the binding generation effective at its own start, and the settled tool
     notifications backflow to this invocation to drive its next decision. The
     turn reports the decisions it ran and the terminal the latest one reduced
-    to; two invocations of one session are never batched together.
+    to. One address Consumer may batch inputs while preserving each source
+    invocation; Run.Invoke waits for the segment that actually consumed its own
+    input facts.
 
     The composition root establishes the session site of the explicit address on
     this instance and grants the diagnostic read face of the run a read of it,
@@ -1124,14 +1439,20 @@ func (r *Run) Invoke(ctx context.Context, req InvokeRequest) (agent.Turn, error)
     start. MUST NOT let an admission receipt stand for the result of the call.
 
 func (r *Run) LeaseLosses() []error
-    LeaseLosses reports the declared model changes whose replacement fact could
-    not commit, as a copy the caller owns: a judgment that reached no ledger is
-    named here rather than read as a replacement that happened.
+    LeaseLosses reports the model configuration changes whose fact could not
+    commit, as a copy the caller owns: a judgment that reached no ledger is
+    named here rather than read as a move that happened.
 
 func (r *Run) LeasePublications() []rl.ModelIdentity
     LeasePublications reports the versions the model leases installed through
     this run's default publication entry, in installation order, as a copy the
     caller owns.
+
+func (r *Run) ModelInFlight(addr event.Address, instance event.InstanceID) (event.InvocationID, event.DecisionID, bool)
+    ModelInFlight reports the model request one site is executing, read off the
+    consumption loop of this run: the range the decision serves and the identity
+    of the decision itself. A site in another instance, a run beside no loop and
+    a site running no request each answer no flight.
 
 func (r *Run) NarrowFace(ctx context.Context, agent event.AgentID, selection state.VisibleSelection) error
     NarrowFace narrows the face one agent may see from the next request boundary
@@ -1139,20 +1460,6 @@ func (r *Run) NarrowFace(ctx context.Context, agent event.AgentID, selection sta
     republished, so the change reaches the very next request. The host and the
     plugins that guard one agent call this; the request's tools, the environment
     block and the capture view all read the narrowed face.
-
-func (r *Run) NoteModelChange(agentID event.AgentID, from, to, source string) (event.EventID, error)
-    NoteModelChange files the judgment that one agent's model reference moves
-    from one version to another and commits it as a model replacement fact
-    on the agent's own pipeline, the explicit entry a host drives when its
-    own configuration source observed the change; a publication that moves
-    an agent's declared model reference files the same fact itself, with the
-    configuration source stamp. The lease mounted on the agent runs the rebuild,
-    publication and installation order and decides whether the version takes
-    effect.
-
-    The identity of the committed fact is returned; a change this run cannot
-    file — no lease for the agent, no target version, no commit face — is
-    refused by name, and an empty from version is the version the lease holds.
 
 func (r *Run) ObservationFacts() meditation.ObservedFacts
     ObservationFacts returns the read-only fact-chain face the scheduled
@@ -1171,6 +1478,10 @@ func (r *Run) Presentations() []view.Presentation
     after the canonical commit of its own fact — as a copy the caller owns.
     The presentations are read-out material beside the committed facts; reading
     them moves nothing.
+
+func (r *Run) Progress() <-chan struct{}
+    Progress reports the channel a close waits on: one pulse per movement of the
+    account, merged so a close never misses the movement it has not read yet.
 
 func (r *Run) Publish(ctx context.Context, decl *config.Declaration, agents map[event.AgentID]NativeAgent) (state.PublishOutcome, error)
     Publish runs one declaration's candidate binding through the sole
@@ -1227,6 +1538,14 @@ func (r *Run) ReflectionInput() meditation.ReflectionInput
     as a fact of the observing agent's own partition, drives that agent's loop
     session with it and reports what became of the turn.
 
+func (r *Run) Rejections() []state.Rejection
+    Rejections reports the feedback fact of every notification a target refused,
+    as the state account of this run holds it: the notification each refusal
+    answers beside the routing it was offered to and the reason the target gave.
+    A refusal is a consumption result and never an obligation the criterion
+    waits on, so the read is the diagnostic face of what the account already
+    answered.
+
 func (r *Run) ReplayEntries(session event.SessionID) ([]replay.ProjectionEntry, bool)
     ReplayEntries reports the projection entries one session chain registered
     for replay, in canonical form, and whether the session registered one
@@ -1266,6 +1585,30 @@ func (r *Run) SessionHistory(addr event.Address) []model.Message
     would present a different history than the live process, because the copy is
     not a durability record while the sequence is replayed from the durable fact
     chain.
+
+func (r *Run) SessionPresented(addr event.Address) map[event.EventID]bool
+    SessionPresented reports the facts of one session chain whose own text
+    the request prefix of that session presents: the entries the registered
+    projection still holds ahead of the boundary its ended material reaches,
+    kept to the ones the assembly presents at their own text rather than at the
+    ticket, the summary or the product a tight budget or a fold leaves in their
+    place.
+
+    The resident consumption loop judges the material of a pull by this read,
+    so the request prefix and the segment transcript present one fact between
+    them exactly once: a fact the prefix carries is left out of the transcript,
+    and a fact the prefix carries nowhere — behind the boundary, or consumed
+    by a fold before any decision read it — is carried by the segment that
+    drives it. The read is the assembly the request itself runs, never a second
+    judgment of the same material. A session this run registered no sequence
+    for answers nothing, because no prefix is assembled for it and no fact is
+    presented there.
+
+func (r *Run) Unsettled(ctx context.Context) task.Unsettled
+    Unsettled reports the rest criterion of this run: the work it accepted
+    and has not finished beside the notifications no consumption confirmed.
+    The close, the restart and the report read it and no other, so the task
+    chain and the consumption ledger are judged once.
 
 type SessionFolds interface {
 	// SessionOf reports the session chain one committed fact belongs to.
@@ -1308,6 +1651,15 @@ func NewSettleDriver(
     the mailbox account of that run and the follow-up drive of its host.
     The pump starts beside the driver and rests until a wake or an observation
     asks it to read the account.
+
+func (d *SettleDriver) DeclareScope(declaring string, targets ...string)
+    DeclareScope declares the dispatch white list of this driver: the party
+    the declaration belongs to and the target agent names it froze. The table
+    starts absent, so a driver that never declares one refuses every dispatch;
+    a declaration that names no target refuses every dispatch too, exactly as an
+    empty deliver_to table does on the send face.
+
+    The face is read by the pump, so the write takes the driver's own lock.
 
 func (d *SettleDriver) DrivesObligation()
     DrivesObligation marks this face's duty: the observation wakes the pump,

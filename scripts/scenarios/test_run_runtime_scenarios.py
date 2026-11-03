@@ -612,5 +612,99 @@ class EventRunnerTest(unittest.TestCase):
                                               "--repeat", "2"]))
 
 
+class TestEventRepeatIndexPreservesTotal(unittest.TestCase):
+    """05/5.3: one shard runs one round; the contract still fixes the total.
+
+    The workflow runs ten matrix shards, each producing one evidence file whose
+    repeat_index is its shard number while repeat_total stays the contract's
+    ten. A shard that shrank repeat_total to one would let the bundle checker's
+    equal-count / 1..N index rule pass on ten copies of round 1.
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self._tmp.name)
+        self.contract = fixture_event_contract()
+        self.contract_path = self.root / "event-contract.json"
+        self.contract_path.write_text(json.dumps(self.contract), encoding="utf-8")
+        self.write_module("", "example.com/app")
+        self.write_module("examples/wechat-bot", "wechat-bot")
+        (self.root / "main.go").write_text("package app\n", encoding="utf-8")
+        alpha = self.root / "tests" / "integration" / "alpha"
+        alpha.mkdir(parents=True)
+        (alpha / "alpha_test.go").write_text("package alpha\n", encoding="utf-8")
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def write_module(self, relative, module_path):
+        base = self.root / relative if relative else self.root
+        base.mkdir(parents=True, exist_ok=True)
+        (base / "go.mod").write_text("module {}\n".format(module_path), encoding="utf-8")
+        (base / "go.sum").write_text("", encoding="utf-8")
+        if relative:
+            (base / "smoke_test.go").write_text("package smoke\n", encoding="utf-8")
+
+    def argv(self, *extra):
+        return ["--root", str(self.root), "--contract", str(self.contract_path),
+                "--out", str(self.root / "out")] + list(extra)
+
+    def execute(self, fake, *extra):
+        args = runner.parse_args(self.argv(*extra))
+        with mock.patch.object(runner, "git_revision", lambda _root: "0" * 40):
+            with mock.patch.object(runner, "run_go_test", fake):
+                return runner.execute(args)
+
+    def main(self, fake, *extra):
+        output = io.StringIO()
+        with mock.patch.object(runner, "git_revision", lambda _root: "0" * 40):
+            with mock.patch.object(runner, "run_go_test", fake):
+                with redirect_stdout(output), redirect_stderr(output):
+                    code = runner.main(self.argv(*extra))
+        return code, output.getvalue()
+
+    def test_one_shard_keeps_the_contract_total(self):
+        fake = FakeGo(self.contract)
+        report = self.execute(fake, "--scope", "event-short", "--repeat-index", "2")
+        # One independent process, one evidence file, shard 2 of the contract's 2.
+        self.assertEqual(report["repeat_total"], 2)
+        self.assertEqual(report["counts"]["repeat_total"], 2)
+        self.assertEqual(len(report["repeats"]), 1)
+        self.assertEqual(report["repeats"][0]["repeat_index"], 2)
+        self.assertEqual(report["counts"]["repeats_passed"], 1)
+        self.assertEqual(len(fake.commands), 3, "one shard runs exactly one round")
+        evidence = json.loads(Path(report["repeats"][0]["evidence"]).read_text(encoding="utf-8"))
+        self.assertEqual(evidence["repeat_index"], 2)
+        self.assertEqual(evidence["repeat_total"], 2, "a shard must not shrink the contract total")
+        # Without --repeat-index the ten (fixture: two) independent rounds remain.
+        default = self.execute(FakeGo(self.contract), "--scope", "event-short")
+        self.assertEqual([repeat["repeat_index"] for repeat in default["repeats"]], [1, 2])
+
+    def test_repeat_index_rejects_mixing_out_of_range_and_v1(self):
+        cases = (
+            ("zero index", ("--scope", "event-short", "--repeat-index", "0")),
+            ("index past the contract total", ("--scope", "event-short", "--repeat-index", "3")),
+            ("mixed with the batch flag",
+             ("--scope", "event-short", "--repeat", "2", "--repeat-index", "1")),
+        )
+        for label, extra in cases:
+            with self.subTest(case=label):
+                fake = FakeGo(self.contract)
+                with self.assertRaises(runner.RunnerError) as caught:
+                    self.execute(fake, *extra)
+                self.assertIn("repeat-index", str(caught.exception))
+                self.assertEqual(fake.commands, [], "a rejected shard must not run go test")
+        code, output = self.main(FakeGo(self.contract), "--scope", "event-short",
+                                 "--repeat-index", "3")
+        self.assertEqual(code, runner.EXIT_USAGE)
+        self.assertIn("repeat-index", output)
+        # ---repeat-index is a schema v2 flag, never a silent v1 no-op.
+        with self.assertRaises(runner.RunnerError) as caught:
+            runner.execute(runner.parse_args(["--root", str(REPO),
+                                              "--contract", str(REAL_CONTRACT),
+                                              "--repeat-index", "1"]))
+        self.assertIn("schema v2", str(caught.exception))
+
+
 if __name__ == "__main__":
     unittest.main()

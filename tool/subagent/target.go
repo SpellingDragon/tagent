@@ -68,7 +68,7 @@ type TargetOptions struct {
 	// Bindings is the state owner's borrowing face.
 	Bindings state.Borrow
 	// EventParams lists the call arguments whose values are handed over as the
-	// envelope's refs, in declaration order.
+	// source refs of the delegated input, in declaration order.
 	EventParams []string
 }
 
@@ -173,11 +173,8 @@ func (t *Target) Call(ctx context.Context, jsonArgs []byte) (any, error) {
 	if err != nil {
 		return t.denied(err), nil
 	}
-	envelope, err := t.envelope(args)
-	if err != nil {
-		return t.denied(err), nil
-	}
-	receipt, err := t.faces.admit(ctx, t.builder, frame, t.assembly, args.Input, envelope)
+	envelope := t.envelope(args)
+	receipt, err := t.faces.admit(ctx, t.builder, frame, t.assembly, args.Input, args.refs(), envelope)
 	if err != nil {
 		return t.denied(err), nil
 	}
@@ -194,9 +191,6 @@ type targetArgs struct {
 	// Refs lists the event references the declared params carried, in
 	// declaration order.
 	Refs []event.EventID
-	// Declared reports whether the call carried a handoff or any event
-	// reference at all.
-	Declared bool
 }
 
 // parseArgs reads one call's arguments against the key set this tool declares:
@@ -236,7 +230,6 @@ func (t *Target) parseArgs(jsonArgs []byte) (targetArgs, error) {
 			return targetArgs{}, fmt.Errorf("%s: malformed handoff: %w", t.name, err)
 		}
 		args.Handoff = &handoff
-		args.Declared = true
 	}
 	for _, param := range t.params {
 		raw, ok := probe[param]
@@ -250,41 +243,50 @@ func (t *Target) parseArgs(jsonArgs []byte) (targetArgs, error) {
 		for _, ref := range refs {
 			if trimmed := strings.TrimSpace(ref); trimmed != "" {
 				args.Refs = append(args.Refs, event.EventID(trimmed))
-				args.Declared = true
 			}
 		}
 	}
 	return args, nil
 }
 
-// envelope builds the handoff one target call hands its turn: the intent the
-// declaration fixes, the constraints, pending decisions and refs the call
-// states beside the declared event references. A call that declares neither a
-// handoff nor an event reference hands no envelope, so the turn runs on the
-// request alone.
-func (t *Target) envelope(args targetArgs) (*agent.HandoffEnvelope, error) {
-	if !args.Declared {
-		return nil, nil
+// envelope renders the handoff one target call hands its turn: the intent the
+// declaration fixes, the constraints, pending decisions and refs the call states
+// beside the declared event references. The envelope is rendered here, at the call
+// boundary, and held to Validate where the call is admitted. A call that declares
+// no handoff hands no envelope: its event references travel as the refs beside the
+// task, resolved into the material facts of the input batch, so a refs-only call
+// is not a handoff.
+func (t *Target) envelope(args targetArgs) *agent.HandoffEnvelope {
+	if args.Handoff == nil {
+		return nil
 	}
 	envelope := agent.HandoffEnvelope{Intent: t.purpose()}
-	if handoff := args.Handoff; handoff != nil {
-		if intent := strings.TrimSpace(handoff.Intent); intent != "" {
-			envelope.Intent = intent
-		}
-		envelope.Constraints = append([]string(nil), handoff.Constraints...)
-		envelope.PendingDecisions = append([]string(nil), handoff.PendingDecisions...)
-		for _, ref := range handoff.Refs {
-			envelope.Refs = append(envelope.Refs, event.EventID(ref))
-		}
+	handoff := args.Handoff
+	if intent := strings.TrimSpace(handoff.Intent); intent != "" {
+		envelope.Intent = intent
+	}
+	envelope.Constraints = append([]string(nil), handoff.Constraints...)
+	envelope.PendingDecisions = append([]string(nil), handoff.PendingDecisions...)
+	for _, ref := range handoff.Refs {
+		envelope.Refs = append(envelope.Refs, event.EventID(ref))
 	}
 	envelope.Refs = append(envelope.Refs, args.Refs...)
 	envelope.Grants = grantsOf(t.assembly)
-	if args.Handoff != nil {
-		if err := envelope.Validate(); err != nil {
-			return nil, err
+	return &envelope
+}
+
+// refs reports the event references one call hands its turn, in declaration order:
+// the refs the handoff states first, then the values of the declared event params.
+// They ride beside the task and are resolved into the material facts of the input
+// batch; a call naming none hands none.
+func (a targetArgs) refs() []event.EventID {
+	refs := make([]event.EventID, 0, len(a.Refs))
+	if a.Handoff != nil {
+		for _, ref := range a.Handoff.Refs {
+			refs = append(refs, event.EventID(ref))
 		}
 	}
-	return &envelope, nil
+	return append(refs, a.Refs...)
 }
 
 // denied renders one refusal as result text: the named case beside the source,

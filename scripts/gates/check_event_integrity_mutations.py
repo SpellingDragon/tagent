@@ -31,6 +31,12 @@
 一致：`control_tree_green`、`mutations[].{id,status,expect_assertion,assertion_hit}`、
 `not_evidence_backed`、`pending[]`。
 
+报告同时携带 `contract_digest` 与 `module_fingerprints`：前者是 runner 消费的
+schema v2 事件合同（默认 `golden/runtime/event_integrity_scenarios.json`）的
+sha256，后者复用 runner 的 `module_fingerprint` 给受测（根）模块取 content_hash
+与 revision。`--bundle` 据此把变异判决与同一次 runner 证据绑定到同一基线；来自
+另一棵树的报告即使自身全绿也不得计数。
+
 写树纪律（R26）：只在 `TMPDIR` 下的副本树内替换产品文件；仓库工作树零写入、
 零 index 变更；原始日志只写 `--out` 指定的仓库外目录。
 """
@@ -39,6 +45,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import re
 import os
 import shutil
 import subprocess
@@ -58,6 +65,10 @@ DEFAULT_FROZEN_CONTRACT = (
     "openspec/changes/archive/2026-10-25-event-consumption-integrity/changes/"
     "00-contract-evidence/evidence/00.3-frozen-contract.json"
 )
+# The schema v2 event contract is the file the runner digests into every
+# evidence envelope and the bundle gate re-digests; the mutation report names
+# the same digest so the two can be tied to one baseline.
+DEFAULT_EVENT_CONTRACT = "golden/runtime/event_integrity_scenarios.json"
 # examples/ holds two nested Go modules (1.3G); the root-module tests never
 # build them, so the isolated copy keeps only the module under test.
 COPY_EXCLUDED_PREFIXES = ("examples/",)
@@ -143,29 +154,52 @@ MUTATIONS: Tuple[Mutation, ...] = (
             file="assembly/host.go",
             # Anchor migrated per the clearance ruling (G5/G6b follow-up turn
             # checking turn.Terminal): the call assigns the returned turn now.
-            # The injected defect is unchanged — the notice material re-enters
-            # the follow-up range as a second input fact beside its notice fact.
+            # Re-anchored again after the quiesce restructure moved the wake block
+            # of `fireNoticeTurn` out of its enclosing branch (04.2: intake gate →
+            # quiesce → stop consumers), so the statements stand one level in
+            # instead of two. The injected defect is unchanged — the notice
+            # material re-enters the follow-up range as a second input fact beside
+            # its notice fact.
             old=(
-                "\tturn, err := h.driveLocked(ctx, InvokeRequest{\n"
-                "\t\tInvocationID:  invocationID,\n"
-                "\t\tAddress:       addr,\n"
-                "\t\tTriggerSource: \"task\",\n"
-                "\t})\n"
+                "\tkey, err := h.commitNoticeMaterial(ctx, addr, fact)\n"
+                "\tif err != nil {\n"
+                "\t\treturn err\n"
+                "\t}\n"
+                "\tconsumer := consumers.Ensure(addr)\n"
             ),
             new=(
-                "\tturn, err := h.driveLocked(ctx, InvokeRequest{\n"
-                "\t\tInvocationID:  invocationID,\n"
-                "\t\tAddress:       addr,\n"
-                "\t\tTriggerSource: \"task\",\n"
-                "\t\tInput:         []model.Message{{Role: model.RoleUser, Content: material}},\n"
-                "\t})\n"
+                "\tkey, err := h.commitNoticeMaterial(ctx, addr, fact)\n"
+                "\tif err != nil {\n"
+                "\t\treturn err\n"
+                "\t}\n"
+                "\tif extra := strings.TrimSpace(fact.Message.Content); extra != \"\" {\n"
+                "\t\t_, _ = h.run.commitOnly(ctx, addr, event.Event{\n"
+                "\t\t\tType:         event.TypeExternalInput,\n"
+                "\t\t\tTimestamp:    time.Now(),\n"
+                "\t\t\tMessage:      model.Message{Role: model.RoleUser, Content: extra},\n"
+                "\t\t\tOwner:        addr,\n"
+                "\t\t\tSource:       addr,\n"
+                "\t\t\tTarget:       addr,\n"
+                "\t\t\tInvocationID: noticeInvocation(task.Notice{TaskID: noticeTaskIDOf(fact), Kind: noticeKindOf(fact), Event: fact.Key}),\n"
+                "\t\t})\n"
+                "\t}\n"
+                "\tconsumer := consumers.Ensure(addr)\n"
             ),
         ),
         test_package="./tests/integration/host",
         test_file="tests/integration/host/event_integrity_test.go",
         test_name="TestEventIntegrityTaskContinuation",
         test_selector="^TestEventIntegrityTaskContinuation$",
-        expect_assertion="new user-input facts carrying",
+        # The witness moved from the fact-count wording to the request wording
+        # after the quiesce restructure: the duplicate material now trips the
+        # consumer-side copy check on the follow-up request before the fact count
+        # is read, so two named assertions inside the anchored subtest kill this
+        # mutation and which one speaks first varies run to run. The literal is
+        # the static part of that copy check — a request carrying more than one
+        # copy of one notice material — and it was observed on every run of the
+        # three probed, where the two single-site literals each spoke on only
+        # some of them.
+        expect_assertion="user copies of",
     ),
     Mutation(
         id="MUT-EVID-03-busy-notice-drop",
@@ -360,35 +394,30 @@ MUTATIONS: Tuple[Mutation, ...] = (
         basis="CAND-02.2-wrong-target",
         evidence_kind="named_assertion",
         evidence_ref=(
-            "02.2 negative anchor TestEventIntegrityReflectionDelivery/"
-            "wrong_target_no_extra_write (existing named business assertion)"
+            "02.2 send 形态的负锚 TestSendCrossSessionGates/denies_out_of_whitelist "
+            "(existing named business assertion: the deliver_to white list names no "
+            "target outside it); 2026-11-01 D 方案重锚：旧锚 features/evolution/"
+            "meditation/deliver.go 已删，等价变异落到 assembly/host_tools.go 的白名单门"
         ),
         description=(
-            "Let a deliver_summary argument name a target outside deliver_to, "
-            "so the declaration no longer refuses the argument."
+            "Let a send call name a target outside the deliver_to white list, so the "
+            "declared white list no longer refuses the argument at its own gate."
         ),
         replacement=Replacement(
-            file="features/evolution/meditation/deliver.go",
+            file="assembly/host_tools.go",
             old=(
-                "\tfor key := range probe {\n"
-                "\t\tif key != \"content\" {\n"
-                "\t\t\tout = append(out, \"'\"+key+\"'\")\n"
-                "\t\t}\n"
+                "\tif !hostSendNames(p.plan.targets, string(addr.AgentID)) {\n"
+                "\t\treturn deliveryRefused, fmt.Sprintf(\"the deliver_to white list of %q names no %q, and a body delivered outside it would reach a session the reflection never declared\",\n"
+                "\t\t\tp.plan.agent, addr.AgentID)\n"
                 "\t}\n"
             ),
-            new=(
-                "\tfor key := range probe {\n"
-                "\t\tif key != \"content\" && key != \"target\" {\n"
-                "\t\t\tout = append(out, \"'\"+key+\"'\")\n"
-                "\t\t}\n"
-                "\t}\n"
-            ),
+            new="",
         ),
-        test_package="./tests/integration/host",
-        test_file="tests/integration/host/event_integrity_test.go",
-        test_name="TestEventIntegrityReflectionDelivery",
-        test_selector="^TestEventIntegrityReflectionDelivery$",
-        expect_assertion="want the named refusal of the target argument",
+        test_package="./tests/integration/execution",
+        test_file="tests/integration/execution/send_cross_session_gates_test.go",
+        test_name="TestSendCrossSessionGates",
+        test_selector="^TestSendCrossSessionGates$",
+        expect_assertion="want the white list refusal naming",
     ),
     Mutation(
         id="MUT-EVID-04-position-boundary",
@@ -416,7 +445,7 @@ MUTATIONS: Tuple[Mutation, ...] = (
                 "\t// or falls past the shortened sequence and silently moves the in-flight\n"
                 "\t// notice into the budgeted prefix. An empty identity names a chain with no\n"
                 "\t// range in flight, so every entry is ended material.\n"
-                "\tendedAt         event.EventID\n"
+                "\tendedAt event.EventID\n"
             ),
             new="\tended           int\n",
         ),
@@ -426,10 +455,13 @@ MUTATIONS: Tuple[Mutation, ...] = (
                 old=(
                     "// endedPrefix reports the position the ended material of the registered sequence\n"
                     "// ends at, resolved against the sequence as it stands now: the position of the\n"
-                    "// entry the boundary names by identity. A boundary naming no entry — a chain\n"
-                    "// that admitted no range yet, or one whose opening entry a fold has already\n"
-                    "// consumed — reports the end of the sequence, so every entry is ended material\n"
-                    "// and none of the range in flight is presented twice.\n"
+                    "// entry the boundary names by identity — inclusive for the agent_output that\n"
+                    "// closed a segment (its answer is ended material the next segment presents),\n"
+                    "// exclusive for the input that opened the next range (it belongs to that range\n"
+                    "// and the drive or loop of it carries it). A boundary naming no entry — a\n"
+                    "// chain that admitted no range yet, or one whose opening entry a fold has\n"
+                    "// already consumed — reports the end of the sequence, so every entry is ended\n"
+                    "// material and none of the range in flight is presented twice.\n"
                     "func (h replayEntry) endedPrefix() int {\n"
                     "\tif h.projection == nil {\n"
                     "\t\treturn 0\n"
@@ -439,6 +471,9 @@ MUTATIONS: Tuple[Mutation, ...] = (
                     "\t}\n"
                     "\tfor at, entry := range h.projection.Entries() {\n"
                     "\t\tif entry.Key == h.endedAt {\n"
+                    "\t\t\tif entry.Type == event.TypeAgentOutput {\n"
+                    "\t\t\t\treturn at + 1\n"
+                    "\t\t\t}\n"
                     "\t\t\treturn at\n"
                     "\t\t}\n"
                     "\t}\n"
@@ -477,15 +512,25 @@ MUTATIONS: Tuple[Mutation, ...] = (
                 file="assembly/facts.go",
                 old=(
                     "\theld.projection.Append(context.Background(), entry)\n"
-                    "\tif admitsRange(evt) && held.rangeInvocation != evt.InvocationID {\n"
-                    "\t\theld.endedAt = evt.Key\n"
+                    "\tif evt.Type == event.TypeAgentOutput {\n"
+                    "\t\theld.endedAt = entry.Key\n"
+                    "\t\theld.rangeOpen = false\n"
+                    "\t}\n"
+                    "\tif admitsRange(evt) && !held.rangeOpen {\n"
+                    "\t\theld.endedAt = entry.Key\n"
+                    "\t\theld.rangeOpen = true\n"
                     "\t}\n"
                 ),
                 new=(
                     "\tposition := held.projection.Len()\n"
                     "\theld.projection.Append(context.Background(), entry)\n"
-                    "\tif admitsRange(evt) && held.rangeInvocation != evt.InvocationID {\n"
+                    "\tif evt.Type == event.TypeAgentOutput {\n"
                     "\t\theld.ended = position\n"
+                    "\t\theld.rangeOpen = false\n"
+                    "\t}\n"
+                    "\tif admitsRange(evt) && !held.rangeOpen {\n"
+                    "\t\theld.ended = position\n"
+                    "\t\theld.rangeOpen = true\n"
                     "\t}\n"
                 ),
             ),
@@ -501,6 +546,14 @@ MUTATIONS: Tuple[Mutation, ...] = (
                 file="assembly/facts.go",
                 old="\tboundary := held.endedPrefix()\n",
                 new="\tboundary := held.ended\n",
+            ),
+            # The presentation read resolves its prefix from the same position:
+            # the mutant keeps the position here too, so the read compiles and
+            # stays wrong in the same way as the boundary it follows.
+            Replacement(
+                file="assembly/request.go",
+                old="\tprefix := held.endedPrefix()\n",
+                new="\tprefix := held.ended\n",
             ),
         ),
         test_package="./tests/integration/history",
@@ -518,22 +571,21 @@ MUTATIONS: Tuple[Mutation, ...] = (
             "restore anchor TestEventIntegrityProjection/restart_restores_fold_form"
         ),
         description=(
-            "Restore the replay of the chain flat: seedReplay registers the raw mapped "
-            "sequence without re-folding it at the commit boundaries the chain recorded, "
-            "so a restart presents material the fold had already consumed and the fold "
-            "rule mints a second set of products over it instead of restoring the form "
-            "the process left."
+            "Restore the replay of the chain without its fold products: seedReplay "
+            "skips rebuilding the synthetic entries the committed compress.product "
+            "facts carry, so a restart presents the material those products had "
+            "already covered as raw detail instead of the folded form the process "
+            "left."
         ),
         replacement=Replacement(
             file="assembly/run.go",
             old=(
-                "\t\tseed.projection.Append(ctx, entry)\n"
-                "\t\tif err := restoreFoldForm(ctx, seed.projection, seed.window); err != nil {\n"
-                "\t\t\treturn err\n"
-                "\t\t}\n"
+                "\t\tseed := seeds[addr]\n"
+                "\t\tseed.projection.RestoreProducts(products[addr])\n"
             ),
             new=(
-                "\t\tseed.projection.Append(ctx, entry)\n"
+                "\t\tseed := seeds[addr]\n"
+                "\t\t_ = products[addr]\n"
             ),
         ),
         test_package="./tests/integration/history",
@@ -849,13 +901,46 @@ def classify(result: RunResult, expect_assertion: str) -> Dict[str, object]:
     return {"verdict": NOT_KILLED, "reason": "assertion_not_matched", "assertion_hit": False}
 
 
+# CONTROL_RACE_WAIVERS mirrors the RACE_WAIVER_SIGNATURES table of
+# scripts/gates/race_check.sh (single source of upstream race rulings): a
+# control whose only failures are races whose top frames match a registered
+# waiver stays green for this gate exactly as the race gate already rules.
+CONTROL_RACE_WAIVERS = (
+    r'trpc-agent-go.*steer',
+    r'trpc-agent-go.*invocation',
+    r'trpc-agent-go/session.*inmemory',
+    r'trpc-agent-go.*session/session\.go',
+    r'trpc-mcp-go.*streamableHTTPClientTransport',
+    r'trpc-mcp-go.*streamable_client\.go',
+)
+
+
+def _race_waived(result: RunResult) -> bool:
+    text = result.raw_text or ""
+    text += "".join(str(ev.get("Output") or "") for ev in result.events)
+    if "WARNING: DATA RACE" not in text:
+        return False
+    frames = re.findall(
+        r"WARNING: DATA RACE.*?==================", text, re.S)
+    for frame in frames:
+        if not any(re.search(w, frame) for w in CONTROL_RACE_WAIVERS):
+            return False
+    return bool(frames)
+
+
 def classify_control(result: RunResult) -> Dict[str, object]:
-    """The unmutated control must run the selector and end green."""
+    """The unmutated control must run the selector and end green.
+
+    A race the race gate already waives (registered upstream signatures whose
+    frames are the whole race report) stays green here: the two gates share one
+    ruling table, so a control never flips on a waived upstream race."""
     if result.timed_out:
         return {"verdict": "red", "reason": "timeout", "exit_code": result.exit_code}
     if not _ran_test(result):
         return {"verdict": "red", "reason": "zero_match", "exit_code": result.exit_code}
     failures = _failing_tests(result)
+    if (result.exit_code != 0 or failures) and _race_waived(result):
+        return {"verdict": "green", "reason": "green_race_waived", "exit_code": result.exit_code}
     if result.exit_code != 0 or failures:
         return {"verdict": "red", "reason": "test_failed", "exit_code": result.exit_code,
                 "failing": failures}
@@ -1162,6 +1247,58 @@ def git_dirty(root: Path) -> bool:
         return False
 
 
+def _runner_module():
+    """The scenario runner that owns the baseline vocabulary.
+
+    `scripts/scenarios/run_runtime_scenarios.py` writes the contract digest and
+    the per-module fingerprint every runner evidence carries. Reusing its
+    `module_fingerprint` keeps one definition, so the mutation report and the
+    runs it is tied to cannot drift apart through two implementations.
+    """
+    scenarios = str(SCRIPTS.parent / "scenarios")
+    if scenarios not in sys.path:
+        sys.path.insert(0, scenarios)
+    try:
+        import run_runtime_scenarios
+    except ImportError as exc:
+        raise GateError(
+            "cannot load the scenario runner for the baseline fingerprint: {}"
+            .format(exc))
+    return run_runtime_scenarios
+
+
+def baseline_evidence(root: Path, contract_path: Optional[str]) -> Dict[str, object]:
+    """The baseline a `--bundle` ties this mutation report to.
+
+    The report only counts when it names the same contract digest and the same
+    per-module source fingerprint as the evidence the runner produced. The
+    digest is the sha256 of the schema-v2 event contract — the very file the
+    runner digests — and the fingerprint comes from the runner's own
+    `module_fingerprint`. Every registered mutation drives `go -C <root> test`,
+    so the tested module is the root module.
+    """
+    relative = contract_path or DEFAULT_EVENT_CONTRACT
+    path = Path(relative)
+    if not path.is_absolute():
+        path = root / relative
+    if not path.is_file():
+        raise GateError("event contract is missing: {}".format(path))
+    contract = load_json(path)
+    if contract.get("schema_version") != 2 or contract.get("profile") != PROFILE:
+        raise GateError(
+            "{} is not the schema v2 {} contract; its digest cannot tie the "
+            "mutations to the runner baseline".format(path, PROFILE))
+    runner = _runner_module()
+    try:
+        fingerprint = runner.module_fingerprint(str(root), ".", runner.MODULE_PATH)
+    except runner.RunnerError as exc:
+        raise GateError("cannot fingerprint the tested module: {}".format(exc))
+    return {
+        "contract_digest": file_digest(path),
+        "module_fingerprints": [fingerprint],
+    }
+
+
 # ---------------------------------------------------------------------------
 # 运行器
 # ---------------------------------------------------------------------------
@@ -1278,8 +1415,9 @@ def pending_record(mutation: Mutation, landed: bool) -> Dict[str, object]:
 def summarize(records: Sequence[Dict[str, object]],
               controls: Sequence[Dict[str, object]],
               gate: Dict[str, object],
-              root: Path, source_digest: str) -> Dict[str, object]:
-    return {
+              root: Path, source_digest: str,
+              baseline: Optional[Dict[str, object]] = None) -> Dict[str, object]:
+    payload = {
         "schema_version": SCHEMA_VERSION,
         "profile": PROFILE,
         "phase": "04.4",
@@ -1298,6 +1436,8 @@ def summarize(records: Sequence[Dict[str, object]],
             "source_digest": source_digest,
         },
     }
+    payload.update(baseline_evidence(root, None) if baseline is None else baseline)
+    return payload
 
 
 def write_evidence(out_dir: Path, payload: Dict[str, object]) -> Path:
@@ -1310,13 +1450,14 @@ def write_evidence(out_dir: Path, payload: Dict[str, object]) -> Path:
 
 def run_gate(root: Path, out_dir: Path, timeout: int,
              requested: Sequence[str], keep_tree: bool,
-             contract_path: Optional[str]) -> Dict[str, object]:
+             frozen_contract: Optional[str],
+             event_contract: Optional[str] = None) -> Dict[str, object]:
     if shutil.which("go") is None:
         raise GateError("go toolchain is not on PATH")
     problems = validate_registry(root, MUTATIONS)
     if problems:
         raise GateError("mutation registry is stale or incomplete: " + "; ".join(problems))
-    confirmed = confirmed_defect_ids(root, contract_path)
+    confirmed = confirmed_defect_ids(root, frozen_contract)
     selected = select_mutations(MUTATIONS, requested)
     if not requested:
         mapping_problems = []
@@ -1333,6 +1474,9 @@ def run_gate(root: Path, out_dir: Path, timeout: int,
         if mapping_problems:
             raise GateError("; ".join(mapping_problems))
 
+    # The report must name the runner's baseline even when a control or a
+    # mutation later fails: a red report from another tree is still another tree.
+    baseline = baseline_evidence(root, event_contract)
     files = source_files(root)
     tree_root = Path(tempfile.mkdtemp(prefix="event-integrity-mutations-"))
     tree = tree_root / "tree"
@@ -1394,7 +1538,8 @@ def run_gate(root: Path, out_dir: Path, timeout: int,
             gate["failures"].append(
                 "not_evidence_backed mutations cannot count: " + ", ".join(not_backed))
             gate["ok"] = False
-        payload = summarize(records, controls, gate, root, source_digest)
+        payload = summarize(records, controls, gate, root, source_digest,
+                            baseline=baseline)
         write_evidence(out_dir, payload)
         return payload
     finally:
@@ -1424,6 +1569,10 @@ def build_parser() -> argparse.ArgumentParser:
                         help="repository root (default: two levels above scripts/gates/)")
     parser.add_argument("--frozen-contract", default=None,
                         help="override the 00.3 frozen contract path")
+    parser.add_argument("--contract", default=DEFAULT_EVENT_CONTRACT,
+                        help="schema v2 event contract whose sha256 ties this report "
+                             "to the runner evidence (default: {})".format(
+                                 DEFAULT_EVENT_CONTRACT))
     parser.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT_SECONDS,
                         help="per go test timeout in seconds")
     parser.add_argument("--keep-tree", action="store_true",
@@ -1469,7 +1618,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         out_dir = Path(tempfile.mkdtemp(prefix="event-integrity-mutations-out-"))
     try:
         payload = run_gate(root, out_dir, args.timeout, args.mutation,
-                           args.keep_tree, args.frozen_contract)
+                           args.keep_tree, args.frozen_contract, args.contract)
     except GateError as exc:
         failure = {
             "schema_version": SCHEMA_VERSION,
@@ -1482,6 +1631,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             "not_evidence_backed": [],
             "gate": {"ok": False, "failures": [str(exc)]},
         }
+        try:
+            failure.update(baseline_evidence(root, args.contract))
+        except GateError:
+            # The failure itself may be the missing/unreadable baseline; report
+            # the named gate failure rather than inventing fields.
+            pass
         write_evidence(out_dir, failure)
         print("gate failed: {}".format(exc), file=sys.stderr)
         if args.json:

@@ -369,6 +369,98 @@ func TestMailboxSnapshotInvariants(t *testing.T) {
 	})
 }
 
+// TestMovementCoversTheMailbox pins the sequence the rest criterion is fenced by
+// against the mailbox this store writes: the sequence belongs to the mailbox
+// account and is built beside it, never wired in from outside.
+// - an accepted entry, a completed consumption and the refusal a closed target answers each advance it
+// - a judgment reads that account's own sequence instead of a mechanism kept beside it
+// 契约: docs/wiki/reliability/durable-delivery.md#envelope-states
+func TestMovementCoversTheMailbox(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("an accepted entry advances the sequence", func(t *testing.T) {
+		store := invariantStore(t)
+		at := store.Load()
+		if err := store.AcceptNotice(ctx, invariantNotice("task-1", 1)); err != nil {
+			t.Fatalf("accept the delivered notification: %v", err)
+		}
+		if got := store.Load(); got == at {
+			t.Fatalf("the sequence stood at %d after an accepted entry, want the write of the mailbox to advance it", got)
+		}
+	})
+
+	t.Run("a completed consumption advances the sequence", func(t *testing.T) {
+		store := invariantStore(t)
+		if err := store.AcceptNotice(ctx, invariantNotice("task-1", 1)); err != nil {
+			t.Fatalf("accept the delivered notification: %v", err)
+		}
+		if err := store.Claim(ctx, invariantAddress, "instance-a", 1); err != nil {
+			t.Fatalf("claim the accepted entry: %v", err)
+		}
+		at := store.Load()
+		if err := store.Consume(ctx, invariantAddress, "instance-a", 1); err != nil {
+			t.Fatalf("consume the claimed entry: %v", err)
+		}
+		if got := store.Load(); got == at {
+			t.Fatalf("the sequence stood at %d after a completed consumption, want the write of the mailbox to advance it", got)
+		}
+	})
+
+	t.Run("a refused delivery advances the sequence", func(t *testing.T) {
+		store := invariantStore(t)
+		if err := store.CloseSession(ctx, invariantAddress); err != nil {
+			t.Fatalf("close the session of the delivery target: %v", err)
+		}
+		at := store.Load()
+		err := store.AcceptNotice(ctx, invariantNotice("task-1", 1))
+		if !errors.Is(err, ErrDeliveryRefused) {
+			t.Fatalf("acceptance at a closed target = %v, want the named refusal %v", err, ErrDeliveryRefused)
+		}
+		if got := store.Load(); got == at {
+			t.Fatalf("the sequence stood at %d after a refusal, want the write of the mailbox to advance it", got)
+		}
+	})
+}
+
+// TestRoutingIsNotARefusal pins that a route the mailbox cannot open names routing and never an answer its target gave.
+// - an unestablished address and a retired instance answer as themselves, and no rejection is recorded for a notification nobody refused
+// - a routing failure wrapped as a refusal writes a feedback fact the target never authored
+// 契约: docs/wiki/reliability/durable-delivery.md#envelope-states
+func TestRoutingIsNotARefusal(t *testing.T) {
+	ctx := context.Background()
+	store := invariantStore(t)
+
+	unrouted := invariantNotice("task-1", 1)
+	if err := store.TrackDelivery(ctx, "task-1", task.HandoffTarget{
+		Target:         invariantAddress,
+		TargetInstance: "instance-retired",
+	}); err != nil {
+		t.Fatalf("register the delivery route: %v", err)
+	}
+	if err := store.AcceptNotice(ctx, unrouted); err == nil {
+		t.Fatal("acceptance at an instance this store never established = nil, want the named routing failure")
+	}
+	if got := store.Rejections(); len(got) != 0 {
+		t.Fatalf("rejections after a routing failure = %+v, want none: nobody refused the notification", got)
+	}
+	if store.Refused(unrouted) {
+		t.Fatal("the notification stands recorded as refused, want it still owed: a routing failure is not an answer")
+	}
+	if err := store.TrackDelivery(ctx, "task-1", task.HandoffTarget{
+		Target:         event.Address{AgentID: "agent-never", SessionID: "session-never"},
+		TargetInstance: "instance-a",
+	}); err != nil {
+		t.Fatalf("reroute the delivery: %v", err)
+	}
+	err := store.AcceptNotice(ctx, invariantNotice("task-1", 2))
+	if err == nil || errors.Is(err, ErrDeliveryRefused) {
+		t.Fatalf("acceptance at an address this run never established = %v, want a routing failure that is not a refusal", err)
+	}
+	if !errors.Is(err, ErrUnknownTarget) {
+		t.Fatalf("acceptance at an unestablished address = %v, want %v", err, ErrUnknownTarget)
+	}
+}
+
 // invariantReader is the subject reads are granted for in these invariants.
 const invariantReader Subject = "reader-a"
 
@@ -865,4 +957,150 @@ func TestSettleAttemptRecordInvariants(t *testing.T) {
 			t.Fatalf("record beside no notice identity = %v, want the missing identity by name", err)
 		}
 	})
+}
+
+// TestRestoredTaskRoundHighWater pins the round a rebuilt task continues from:
+// - a task whose terminal notices the log already consumed re-enters at the round after the one it reached, not at the round its remaining outbox still names
+// - a task whose terminal notice is still owed re-enters at the same round, so an unconsumed notice neither rewinds nor skips the round identity
+// - a reactivation fact whose round never settled still consumes the round it opened, so its rollback names that round and the next re-entry takes the one after it
+// 契约: docs/wiki/agent/task-lifecycle.md#status-machine
+func TestRestoredTaskRoundHighWater(t *testing.T) {
+	ctx := context.Background()
+	const taskID = event.TaskID("task-round-water")
+	settled := func(round int64) *task.Notice {
+		return &task.Notice{
+			TaskID: taskID,
+			Round:  round,
+			Kind:   task.NoticeSettled,
+			Seq:    0,
+			Event:  event.EventID(fmt.Sprintf("%s-settled-%d", taskID, round)),
+		}
+	}
+	links := func(settleSecond bool) []roundLink {
+		chain := []roundLink{
+			{mutation: task.MutationID("admit:" + string(taskID)), status: task.StatusAccepted},
+			{mutation: task.MutationID("run:" + string(taskID)), status: task.StatusRunning},
+			{mutation: task.MutationID("settle:" + string(taskID) + ":1"), status: task.StatusSettled, notice: settled(1)},
+			{mutation: task.MutationID("reactivate:" + string(taskID) + ":1"), status: task.StatusRunning},
+		}
+		if settleSecond {
+			chain = append(chain, roundLink{
+				mutation: task.MutationID("settle:" + string(taskID) + ":2"),
+				status:   task.StatusSettled,
+				notice:   settled(2),
+			})
+		}
+		return chain
+	}
+	restore := func(t *testing.T, links []roundLink, consumed []int64) *task.MemoryRegistry {
+		t.Helper()
+		carrier, chain := durableRoundChain(t, taskID, links, consumed)
+		registry := task.NewMemoryRegistry(carrier, task.NewMemoryAdmission())
+		if _, err := registry.Restore(ctx, chain, roundOwners{}); err != nil {
+			t.Fatalf("restore the task chain: %v", err)
+		}
+		return registry
+	}
+
+	t.Run("consumed notices continue at the next round", func(t *testing.T) {
+		registry := restore(t, links(true), []int64{1, 2})
+		round, err := registry.Reactivate(ctx, taskID)
+		if err != nil || round != 3 {
+			t.Fatalf("re-entry after the restart = (%d, %v), want the third round of the task", round, err)
+		}
+	})
+
+	t.Run("unconsumed notices do not advance the next round", func(t *testing.T) {
+		registry := restore(t, links(true), nil)
+		round, err := registry.Reactivate(ctx, taskID)
+		if err != nil || round != 3 {
+			t.Fatalf("re-entry beside the owed notices = (%d, %v), want the third round of the task", round, err)
+		}
+	})
+
+	t.Run("a reactivation that settled nothing still consumes its round", func(t *testing.T) {
+		registry := restore(t, links(false), []int64{1})
+		if err := registry.RollbackReactivation(ctx, taskID, 2); err != nil {
+			t.Fatalf("put back the round the reactivation opened = %v, want the round 2 of the chain", err)
+		}
+		round, err := registry.Reactivate(ctx, taskID)
+		if err != nil || round != 3 {
+			t.Fatalf("re-entry after the rolled-back round = (%d, %v), want the third round of the task", round, err)
+		}
+	})
+}
+
+// roundLink is one fact of the round-chain fixture: the mutation identity the fact
+// commits under, the status it moves the task to and the terminal notice it carries.
+type roundLink struct {
+	mutation task.MutationID
+	status   task.Status
+	notice   *task.Notice
+}
+
+// durableRoundChain stores one task's chain on a fresh durable log, consumes the
+// terminal notices of the rounds named, and reopens the carrier over the log, so a
+// restored registry reads the chain the way a restarted process does.
+func durableRoundChain(t *testing.T, taskID event.TaskID, links []roundLink, consumed []int64) (*DurableCommit, []task.TaskRecord) {
+	t.Helper()
+	ctx := context.Background()
+	log := newInvariantFactLog()
+	carrier, err := NewDurableCommit(log, nil)
+	if err != nil {
+		t.Fatalf("open the durable carrier: %v", err)
+	}
+	if err := carrier.Declare(ctx, taskID, invariantSpec()); err != nil {
+		t.Fatalf("declare the admission material: %v", err)
+	}
+	for at, link := range links {
+		record := task.CommitRecord{
+			MutationID:       link.mutation,
+			TaskID:           taskID,
+			ExpectedRevision: int64(at),
+			Status:           link.status,
+		}
+		if link.notice != nil {
+			record.Outbox = []task.Envelope{{
+				Notice:         *link.notice,
+				Target:         invariantAddress,
+				Source:         invariantAddress,
+				TargetInstance: "instance-a",
+			}}
+		}
+		if result, err := carrier.Commit(ctx, record); err != nil || result != task.CommitCommitted {
+			t.Fatalf("commit %s = (%v, %v), want a committed fact", link.mutation, result, err)
+		}
+	}
+	for _, round := range consumed {
+		var notice task.Notice
+		for _, link := range links {
+			if link.notice != nil && link.notice.Round == round {
+				notice = *link.notice
+			}
+		}
+		if notice.TaskID == "" {
+			t.Fatalf("the chain carries no notice of round %d to consume", round)
+		}
+		if err := carrier.recordConsumption(ctx, notice); err != nil {
+			t.Fatalf("record the consumption of round %d: %v", round, err)
+		}
+	}
+	reopened, err := NewDurableCommit(log, nil)
+	if err != nil {
+		t.Fatalf("reopen the durable carrier: %v", err)
+	}
+	chain, err := reopened.Records(ctx, taskID)
+	if err != nil {
+		t.Fatalf("read the restored chain: %v", err)
+	}
+	return reopened, chain
+}
+
+// roundOwners resolves every restored target to itself, so the round checks read
+// the chain alone.
+type roundOwners struct{}
+
+// OwnerOf reports the target as its own owner.
+func (roundOwners) OwnerOf(_ context.Context, _ event.AgentID, target event.AgentID) (event.AgentID, error) {
+	return target, nil
 }

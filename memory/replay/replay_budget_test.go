@@ -319,3 +319,211 @@ func TestNoticeCardKeepsItsBound(t *testing.T) {
 		}
 	})
 }
+
+// TestFoldDropsTheMaterialOfTheEntriesItFolded pins the cleanup the compaction fold owes the projection's keyed maps.
+//   - a key the summary alone represents keeps neither its kept original, its dedup key nor its consumed mark
+//   - the retained ref keeps its kept original and is appended once, so the rewrite loses no material it still carries
+//   - every key the three maps speak for is a key the entries carry
+//   - the rewritten sequence presents the summary and the retained ref, and nothing of the entries it folded
+//
+// 契约: docs/wiki/agent/event-flow.md#projection-lifecycle
+func TestFoldDropsTheMaterialOfTheEntriesItFolded(t *testing.T) {
+	ctx := context.Background()
+	base := time.Date(2026, 10, 30, 9, 0, 0, 0, time.UTC)
+	projection := NewReplayProjection()
+	for _, entry := range []ProjectionEntry{
+		{Key: "c-in", Type: event.TypeExternalInput, Summary: "in", Content: "输入的原文正文", Time: base},
+		{Key: "c-plan", Type: event.TypeThinkingPlan, Summary: "plan", Content: "计划的原文正文", Time: base.Add(time.Minute)},
+		{Key: "c-cmd", Type: event.TypeActionCommand, Summary: "call", Content: "工具结果的原文正文", Time: base.Add(2 * time.Minute)},
+		{Key: "c-out", Type: event.TypeAgentOutput, Summary: "out", Content: "回答的原文正文", Time: base.Add(3 * time.Minute)},
+		{Key: "c-note", Type: event.TypeFeedback, Summary: "note", Content: "通知的原文正文", Time: base.Add(4 * time.Minute)},
+	} {
+		projection.Append(ctx, entry)
+	}
+	if _, err := projection.Fold(ctx); err != nil {
+		t.Fatalf("Fold: %v", err)
+	}
+
+	for _, key := range []event.EventID{"c-in", "c-plan", "c-out", "c-note"} {
+		if original, kept := projection.Original(key); kept {
+			t.Fatalf("the folded key %q still answers the original %q", key, original)
+		}
+		projection.mu.Lock()
+		_, seen := projection.seen[key]
+		_, consumed := projection.consumed[key]
+		projection.mu.Unlock()
+		if seen || consumed {
+			t.Fatalf("the folded key %q still speaks for material the projection dropped (seen=%v consumed=%v)", key, seen, consumed)
+		}
+	}
+	if consumed := projection.ConsumedKeys(); len(consumed) != 0 {
+		t.Fatalf("consumed keys = %v, want the consumed marks of the folded plans dropped with them", consumed)
+	}
+
+	if original, kept := projection.Original("c-cmd"); !kept || original != "工具结果的原文正文" {
+		t.Fatalf("retained ref c-cmd original = %q kept=%v, want its own text kept", original, kept)
+	}
+	held := projection.Len()
+	projection.Append(ctx, ProjectionEntry{Key: "c-cmd", Type: event.TypeActionCommand, Summary: "call", Content: "工具结果的原文正文", Time: base.Add(2 * time.Minute)})
+	if projection.Len() != held {
+		t.Fatalf("a second append of the retained ref moved the projection: %d -> %d", held, projection.Len())
+	}
+
+	assertMapsSpeakForEntries(t, projection)
+
+	assembled, err := projection.AssembleBudget(ctx, 4096)
+	if err != nil {
+		t.Fatalf("AssembleBudget: %v", err)
+	}
+	var presented strings.Builder
+	for _, entry := range assembled {
+		presented.WriteString(entry.Content)
+		presented.WriteString("\n")
+	}
+	if !strings.Contains(presented.String(), "工具结果的原文正文") {
+		t.Fatalf("assembly = %q, want the retained ref presented from the entry it still carries", presented.String())
+	}
+	if !strings.Contains(presented.String(), "compaction: in; plan; call; out; note") {
+		t.Fatalf("assembly = %q, want the compaction summary presented first", presented.String())
+	}
+	for _, folded := range []string{"输入的原文正文", "计划的原文正文", "回答的原文正文", "通知的原文正文"} {
+		if strings.Contains(presented.String(), folded) {
+			t.Fatalf("assembly still carries %q, want nothing of the entries the summary speaks for", folded)
+		}
+	}
+}
+
+// TestApplyProductsDropsTheMaterialOfTheCoveredEntries pins the same cleanup on the production fold face: the products a consumer applies under PlanByAge.
+//   - every covered process-detail key leaves the kept originals, the dedup keys and the consumed marks
+//   - the entries no product covers keep their originals, so a later assembly still presents them whole
+//   - every key the three maps speak for is a key the entries carry, and applying the same products twice drops nothing more
+//
+// 契约: docs/wiki/agent/event-flow.md#projection-lifecycle
+func TestApplyProductsDropsTheMaterialOfTheCoveredEntries(t *testing.T) {
+	ctx := context.Background()
+	plan := AgeFoldPlan{KeepRecent: 1, VolumeThreshold: 1}
+	entries := append(ageTurn("t1", 0, 2), ageTurn("t2", 1, 2)...)
+	projection := ageProjection(t, entries)
+	report, err := projection.PlanByAge(ctx, plan)
+	if err != nil {
+		t.Fatalf("PlanByAge: %v", err)
+	}
+	if len(report.Products) == 0 {
+		t.Fatal("the plan minted no product, want the material folded under the threshold")
+	}
+	projection.ApplyProducts(report.Products)
+
+	covered := make(map[event.EventID]struct{}, len(entries))
+	for _, product := range report.Products {
+		for _, key := range product.Covered {
+			covered[key] = struct{}{}
+		}
+	}
+	if len(covered) == 0 {
+		t.Fatal("the applied products cover no key, want the folded entries named")
+	}
+	for key := range covered {
+		if original, kept := projection.Original(key); kept {
+			t.Fatalf("the covered key %q still answers the original %q", key, original)
+		}
+		projection.mu.Lock()
+		_, seen := projection.seen[key]
+		_, consumed := projection.consumed[key]
+		projection.mu.Unlock()
+		if seen || consumed {
+			t.Fatalf("the covered key %q still speaks for material the projection dropped (seen=%v consumed=%v)", key, seen, consumed)
+		}
+	}
+	for _, kept := range []struct {
+		key   event.EventID
+		opens string
+	}{{"t2-in", "用户输入 t2"}, {"t2-out", "回答 t2"}} {
+		original, holds := projection.Original(kept.key)
+		if !holds || !strings.HasPrefix(original, kept.opens) {
+			t.Fatalf("kept key %q original = %q kept=%v, want the text of the entry the projection still carries", kept.key, original, holds)
+		}
+	}
+	assertMapsSpeakForEntries(t, projection)
+
+	held := RenderProjection(projection.Entries())
+	projection.ApplyProducts(report.Products)
+	if string(RenderProjection(projection.Entries())) != string(held) {
+		t.Fatal("applying the same products twice moved the projection")
+	}
+	assertMapsSpeakForEntries(t, projection)
+}
+
+// TestFoldByAgeDropsTheMaterialOfTheCoveredEntries pins the cleanup on the direct age-band fold.
+//   - the process detail a segment product consumes leaves the three maps with the entries
+//   - the input and output entries the fold keeps still answer their original text
+//   - every key the three maps speak for is a key the entries carry
+//
+// 契约: docs/wiki/agent/event-flow.md#projection-lifecycle
+func TestFoldByAgeDropsTheMaterialOfTheCoveredEntries(t *testing.T) {
+	ctx := context.Background()
+	entries := append(ageTurn("t1", 0, 2), ageTurn("t2", 1, 2)...)
+	projection := ageProjection(t, entries)
+	before := make(map[event.EventID]struct{}, len(entries))
+	for _, entry := range entries {
+		before[entry.Key] = struct{}{}
+	}
+	report, err := projection.FoldByAge(ctx, AgeFoldPlan{KeepRecent: 1, VolumeThreshold: 1})
+	if err != nil {
+		t.Fatalf("FoldByAge: %v", err)
+	}
+	if !report.Triggered || len(report.Products) == 0 {
+		t.Fatalf("report = %+v, want the material folded", report)
+	}
+
+	carried := make(map[event.EventID]struct{}, projection.Len())
+	for _, entry := range projection.Entries() {
+		carried[entry.Key] = struct{}{}
+	}
+	for key := range before {
+		if _, still := carried[key]; still {
+			continue
+		}
+		if original, kept := projection.Original(key); kept {
+			t.Fatalf("the folded key %q still answers the original %q", key, original)
+		}
+		projection.mu.Lock()
+		_, seen := projection.seen[key]
+		_, consumed := projection.consumed[key]
+		projection.mu.Unlock()
+		if seen || consumed {
+			t.Fatalf("the folded key %q still speaks for material the projection dropped (seen=%v consumed=%v)", key, seen, consumed)
+		}
+	}
+	for _, kept := range []event.EventID{"t2-in", "t2-out"} {
+		if original, holds := projection.Original(kept); !holds || original == "" {
+			t.Fatalf("kept key %q original = %q kept=%v, want the text of the entry the projection still carries", kept, original, holds)
+		}
+	}
+	assertMapsSpeakForEntries(t, projection)
+}
+
+// assertMapsSpeakForEntries pins the invariant every rewrite leaves behind: the kept originals, the dedup keys and the consumed marks name keys of entries the projection carries, and nothing else.
+func assertMapsSpeakForEntries(t *testing.T, projection *ReplayProjection) {
+	t.Helper()
+	carried := make(map[event.EventID]struct{}, projection.Len())
+	for _, entry := range projection.Entries() {
+		carried[entry.Key] = struct{}{}
+	}
+	projection.mu.Lock()
+	defer projection.mu.Unlock()
+	for key := range projection.originals {
+		if _, holds := carried[key]; !holds {
+			t.Fatalf("the kept originals still answer the key %q, want a key of an entry the projection carries", key)
+		}
+	}
+	for key := range projection.seen {
+		if _, holds := carried[key]; !holds {
+			t.Fatalf("the dedup keys still hold %q, want a key of an entry the projection carries", key)
+		}
+	}
+	for key := range projection.consumed {
+		if _, holds := carried[key]; !holds {
+			t.Fatalf("the consumed marks still hold %q, want a key of an entry the projection carries", key)
+		}
+	}
+}

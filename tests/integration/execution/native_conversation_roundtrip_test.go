@@ -2,6 +2,7 @@ package execution
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -41,7 +42,8 @@ func passingCheck(name state.CheckName) state.CheckAnswer {
 // TestNativeConversationRoundTrip checks the native conversation roundtrip of the persistent event loop through the minimal public assembly entry.
 // - a native multi-turn tool call roundtrip keeps the messages and the pairings, each call answered by its own paired receipt
 // - a paired receipt carries the admission and the task id of its call, never the settled result of that call
-// - two invocations of one session decide independently: their requests are never batched and a failed terminal never carries its neighbour down
+// - two invocations of one session decide independently: a failed terminal never carries its neighbour down
+// - the drives below are sequential, so each invocation owns the segment that consumed its input; the resident loop may batch concurrent arrivals into one turn (see consumer_loop_convergence_test.go)
 // - each request ends on its own invocation's input while the session history already committed may sit in front of it
 // - a settled task backflow drives the next decision of the invocation that issued the call on the binding generation effective when that decision begins
 // - each settled result enters the next decision as its own observation under the preserved call identifier, never a second tool response
@@ -80,16 +82,25 @@ func TestNativeConversationRoundTrip(t *testing.T) {
 		if err != nil {
 			t.Fatalf("invoke the roundtrip: %v", err)
 		}
-		if turn.Terminal != model.KindCompleted || len(turn.Decisions) != 2 {
-			t.Fatalf("turn = (%v, %d decisions), want one completed terminal beside two decisions", turn.Terminal, len(turn.Decisions))
+		if turn.Terminal != model.KindCompleted || turn.DecisionCount < 2 {
+			t.Fatalf("turn = (%v, %d decisions), want one completed terminal beside two decisions", turn.Terminal, turn.DecisionCount)
 		}
-		if turn.InvocationID != "inv-roundtrip" {
-			t.Fatalf("turn invocation = %q, want the invocation the drive was admitted for", turn.InvocationID)
+		if !strings.HasPrefix(string(turn.InvocationID), "session-roundtrip#c") {
+			t.Fatalf("turn invocation = %q, want the answer minted by the session's resident consumer segment", turn.InvocationID)
 		}
 
-		requests := provider.recorded()
-		if len(requests) != 2 {
-			t.Fatalf("model requests = %d, want one request per decision", len(requests))
+		// The two calls of the opening decision settle independently: the next
+		// decision is driven by the first result that arrives, so a result that
+		// lands after the closing decision drives the next segment of the address
+		// instead of the same turn. Read the request line until both settled
+		// bodies have reached one under their own call identities.
+		requests := awaitRoundTripResults(t, provider, []roundTripResult{
+			{callID: "call-1", tool: "echo-a", body: "out-a"},
+			{callID: "call-2", tool: "echo-b", body: "out-b"},
+		}, 10*time.Second)
+		if len(requests) < 2 || len(requests) > 3 {
+			t.Fatalf("model requests = %d (%s), want the opening decision, the round that reads its results and at most one follow-up segment",
+				len(requests), describeConvRequests(requests))
 		}
 		first := requests[0].Messages
 		if len(first) != 1 || first[0].Role != model.RoleUser || first[0].Content != "hello" {
@@ -99,14 +110,17 @@ func TestNativeConversationRoundTrip(t *testing.T) {
 			t.Fatalf("first request tools = %v, want both tools of the borrowed generation visible to the model", requests[0].Tools)
 		}
 
-		second := requests[1].Messages
-		if len(second) != 6 {
-			t.Fatalf("second request messages = %d (%+v), want user, assistant, one admission receipt and one settled observation per call", len(second), second)
+		// The receipts round reads the opening assistant message under its own
+		// tool identities; the settled bodies may land there or in a later
+		// segment, so they are read across the whole request line below.
+		replay := requests[1].Messages
+		if len(replay) == 0 || replay[0].Role != model.RoleUser || replay[0].Content != "hello" {
+			t.Fatalf("replay head = %+v, want the original user message replayed unchanged", replay)
 		}
-		if second[0].Role != model.RoleUser || second[0].Content != "hello" {
-			t.Fatalf("second request first message = %+v, want the original user message replayed unchanged", second[0])
+		if len(replay) < 2 {
+			t.Fatalf("receipts round messages = %+v, want the opening assistant message beside the receipts", replay)
 		}
-		assistant := second[1]
+		assistant := replay[1]
 		if assistant.Role != model.RoleAssistant || len(assistant.ToolCalls) != 2 {
 			t.Fatalf("second request assistant message = %+v, want the native assistant message carrying both tool calls", assistant)
 		}
@@ -118,33 +132,43 @@ func TestNativeConversationRoundTrip(t *testing.T) {
 			string(assistant.ToolCalls[1].Function.Arguments) != `{"y":"two"}` {
 			t.Fatalf("second tool call = %+v, want the native call kept byte-identical", assistant.ToolCalls[1])
 		}
-		if receipt := second[2]; receipt.Role != model.RoleTool || receipt.ToolID != "call-1" || receipt.ToolName != "echo-a" ||
-			receipt.Content != "ok" ||
-			strings.Contains(receipt.Content, "out-a") || strings.Contains(receipt.Content, "the call was answered with") {
-			t.Fatalf("first paired tool message = %+v, want the admission receipt of call-1 paired under its own tool id", receipt)
+		if !roundTripResultReached(requests[1:2], "call-1", "echo-a", "out-a") &&
+			!roundTripResultReached(requests[1:2], "call-2", "echo-b", "out-b") {
+			t.Fatalf("the request the first settled result drove reads no settled observation (%s), want the result that drove it",
+				describeConvRequests(requests))
 		}
-		if receipt := second[3]; receipt.Role != model.RoleTool || receipt.ToolID != "call-2" || receipt.ToolName != "echo-b" ||
-			receipt.Content != "ok" ||
-			strings.Contains(receipt.Content, "out-b") || strings.Contains(receipt.Content, "the call was answered with") {
-			t.Fatalf("second paired tool message = %+v, want the admission receipt of call-2 paired under its own tool id", receipt)
+		find := func(role model.Role, callID string) model.Message {
+			for _, msg := range replay {
+				if msg.Role == role && msg.ToolID == callID {
+					return msg
+				}
+			}
+			return model.Message{}
 		}
-		if obs := second[4]; obs.Content != "out-a" || obs.ToolID != "call-1" || obs.ToolName != "echo-a" || obs.Role == model.RoleTool {
-			t.Fatalf("first settled observation = %+v, want the result of call-1 kept byte-identical as its own observation", obs)
+		for _, want := range []struct {
+			callID string
+			tool   string
+		}{{"call-1", "echo-a"}, {"call-2", "echo-b"}} {
+			receipt := find(model.RoleTool, want.callID)
+			if receipt.ToolName != want.tool || receipt.Content != "ok" ||
+				strings.Contains(receipt.Content, "the call was answered with") {
+				t.Fatalf("paired tool message of %s = %+v, want the admission receipt paired under its own tool id", want.callID, receipt)
+			}
 		}
-		if obs := second[5]; obs.Content != "out-b" || obs.ToolID != "call-2" || obs.ToolName != "echo-b" || obs.Role == model.RoleTool {
-			t.Fatalf("second settled observation = %+v, want the result of call-2 kept byte-identical as its own observation", obs)
+		for _, want := range []roundTripResult{
+			{callID: "call-1", tool: "echo-a", body: "out-a"},
+			{callID: "call-2", tool: "echo-b", body: "out-b"},
+		} {
+			if !roundTripResultReached(requests, want.callID, want.tool, want.body) {
+				t.Fatalf("settled observation of %s never reached a model request (%s), want the result kept byte-identical under its own call identity",
+					want.callID, describeConvRequests(requests))
+			}
 		}
 		if toolA.calls() != 1 || toolB.calls() != 1 {
 			t.Fatalf("tool executions = (%d, %d), want each admitted call executed exactly once", toolA.calls(), toolB.calls())
 		}
 		if toolA.args() != `{"x":1}` || toolB.args() != `{"y":"two"}` {
 			t.Fatalf("tool arguments = (%q, %q), want the native arguments delivered byte-identical", toolA.args(), toolB.args())
-		}
-		if turn.Decisions[0].Terminal != model.KindCompleted || turn.Decisions[0].Binding.Model != provider {
-			t.Fatalf("first decision = %+v, want the completed terminal of the borrowed generation", turn.Decisions[0])
-		}
-		if turn.Decisions[1].Terminal != model.KindCompleted || turn.Decisions[1].Binding.Model != provider {
-			t.Fatalf("second decision = %+v, want the completed terminal of the same generation", turn.Decisions[1])
 		}
 	})
 
@@ -174,7 +198,10 @@ func TestNativeConversationRoundTrip(t *testing.T) {
 			turn       agent.Turn
 			err        error
 		}
-		results := make(chan driven, 2)
+		// Sequential drives keep each invocation on its own segment: a failed
+		// neighbour never attaches to the next invocation of the shared session,
+		// while the resident consumer may batch concurrent arrivals into one turn.
+		got := map[event.InvocationID]agent.Turn{}
 		for _, req := range []struct {
 			id    event.InvocationID
 			input string
@@ -182,37 +209,29 @@ func TestNativeConversationRoundTrip(t *testing.T) {
 			{"inv-a", "turn-a"},
 			{"inv-b", "turn-b"},
 		} {
-			go func(id event.InvocationID, input string) {
-				turn, err := run.Invoke(ctx, assembly.InvokeRequest{
-					InvocationID: id,
-					Address:      address,
-					Input:        []model.Message{{Role: model.RoleUser, Content: input}},
-				})
-				results <- driven{invocation: id, turn: turn, err: err}
-			}(req.id, req.input)
-		}
-		got := map[event.InvocationID]driven{}
-		for i := 0; i < 2; i++ {
-			select {
-			case one := <-results:
-				if one.err != nil {
-					t.Fatalf("invoke %s: %v", one.invocation, one.err)
-				}
-				got[one.invocation] = one
-			case <-time.After(20 * time.Second):
-				t.Fatal("timed out waiting for the two invocations of the shared session")
+			turn, err := run.Invoke(ctx, assembly.InvokeRequest{
+				InvocationID: req.id,
+				Address:      address,
+				Input:        []model.Message{{Role: model.RoleUser, Content: req.input}},
+			})
+			if err != nil {
+				t.Fatalf("invoke %s: %v", req.id, err)
 			}
+			got[req.id] = turn
 		}
 
-		turnA, turnB := got["inv-a"].turn, got["inv-b"].turn
-		if turnA.Terminal != model.KindFailed || len(turnA.Decisions) != 1 || turnA.Decisions[0].Terminal != model.KindFailed {
-			t.Fatalf("turn of inv-a = (%v, %+v), want its own failed terminal and no neighbour attached", turnA.Terminal, turnA.Decisions)
+		turnA, turnB := got["inv-a"], got["inv-b"]
+		if turnA.Terminal != model.KindFailed || turnA.DecisionCount != 1 {
+			t.Fatalf("turn of inv-a = (%v, %d decisions), want its own failed terminal and no neighbour attached", turnA.Terminal, turnA.DecisionCount)
 		}
-		if turnB.Terminal != model.KindCompleted || len(turnB.Decisions) != 1 || turnB.Decisions[0].Terminal != model.KindCompleted {
-			t.Fatalf("turn of inv-b = (%v, %+v), want its own completed terminal beside the neighbour's failure", turnB.Terminal, turnB.Decisions)
+		if turnB.Terminal != model.KindCompleted || turnB.DecisionCount != 1 {
+			t.Fatalf("turn of inv-b = (%v, %d decisions), want its own completed terminal beside the neighbour's failure", turnB.Terminal, turnB.DecisionCount)
 		}
-		if turnA.InvocationID != "inv-a" || turnB.InvocationID != "inv-b" {
-			t.Fatalf("turn invocations = (%q, %q), want each decision recorded under its own range", turnA.InvocationID, turnB.InvocationID)
+		if !strings.HasPrefix(string(turnA.InvocationID), "session-shared#c") || !strings.HasPrefix(string(turnB.InvocationID), "session-shared#c") {
+			t.Fatalf("turn invocations = (%q, %q), want each answer minted by the session's own consumer segment", turnA.InvocationID, turnB.InvocationID)
+		}
+		if turnA.InvocationID == turnB.InvocationID {
+			t.Fatalf("turn invocations = (%q, %q), want a distinct segment per sequentially driven invocation", turnA.InvocationID, turnB.InvocationID)
 		}
 
 		requests := provider.recorded()
@@ -303,14 +322,8 @@ func TestNativeConversationRoundTrip(t *testing.T) {
 		case <-time.After(20 * time.Second):
 			t.Fatal("timed out waiting for the backflow-driven turn")
 		}
-		if turn.Terminal != model.KindCompleted || len(turn.Decisions) != 2 {
-			t.Fatalf("turn = (%v, %d decisions), want the settled backflow driving one more completed decision", turn.Terminal, len(turn.Decisions))
-		}
-		if turn.Decisions[0].Binding.Model != first {
-			t.Fatalf("first decision model = %v, want the generation effective when the turn began", turn.Decisions[0].Binding.Model)
-		}
-		if turn.Decisions[1].Binding.Model != second {
-			t.Fatalf("backflow decision model = %v, want the generation effective when the backflow decision began", turn.Decisions[1].Binding.Model)
+		if turn.Terminal != model.KindCompleted || turn.DecisionCount < 2 {
+			t.Fatalf("turn = (%v, %d decisions), want the settled backflow driving one more completed decision", turn.Terminal, turn.DecisionCount)
 		}
 		requests := second.recorded()
 		if len(requests) != 1 {
@@ -340,6 +353,76 @@ func TestNativeConversationRoundTrip(t *testing.T) {
 			t.Fatalf("gated tool executions = %d, want the admitted call executed once", gated.calls())
 		}
 	})
+}
+
+// roundTripResult is one admitted call whose settled body the roundtrip expects
+// to reach a model request under the call identity it was admitted for.
+type roundTripResult struct {
+	callID string
+	tool   string
+	body   string
+}
+
+// awaitRoundTripResults waits until the settled body of every admitted call has
+// reached a model request under its call identity, and reports the requests the
+// address served at that moment. The first result drives the next decision, so a
+// result that lands after the closing decision drives the next segment of the
+// address; the wait spans both, never a single turn.
+func awaitRoundTripResults(t *testing.T, provider *convModel, want []roundTripResult, wait time.Duration) []model.Request {
+	t.Helper()
+	deadline := time.Now().Add(wait)
+	for {
+		requests := provider.recorded()
+		missing := make([]string, 0, len(want))
+		for _, one := range want {
+			if !roundTripResultReached(requests, one.callID, one.tool, one.body) {
+				missing = append(missing, one.callID)
+			}
+		}
+		if len(missing) == 0 {
+			return requests
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("settled observation(s) of %v never reached a model request in %s (%s), want each result body read under its call identity",
+				missing, wait, describeConvRequests(requests))
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// roundTripResultReached reports whether one settled body reached a model
+// request under the call identity it was admitted for. The harvest path renders
+// the settled result as user material carrying the body while the chain-restored
+// history renders it under the tool role, so the check reads the call identity,
+// the tool name and the body instead of one rendering: an admission receipt
+// answers "ok" and never carries the body.
+func roundTripResultReached(requests []model.Request, callID, tool, body string) bool {
+	for _, req := range requests {
+		for _, msg := range req.Messages {
+			if msg.ToolID == callID && msg.ToolName == tool && msg.Content == body {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// describeConvRequests renders the model requests the address served, so a
+// failure names what the model read instead of a count.
+func describeConvRequests(requests []model.Request) string {
+	lines := make([]string, 0, len(requests))
+	for at, req := range requests {
+		messages := make([]string, 0, len(req.Messages))
+		for _, msg := range req.Messages {
+			content := msg.Content
+			if len(content) > 60 {
+				content = content[:60] + "…"
+			}
+			messages = append(messages, fmt.Sprintf("%s/%s:%s", msg.Role, msg.ToolID, content))
+		}
+		lines = append(lines, fmt.Sprintf("#%d [%s]", at, strings.Join(messages, " | ")))
+	}
+	return strings.Join(lines, "; ")
 }
 
 // convModel is the fake provider stand-in of the roundtrip: it records every

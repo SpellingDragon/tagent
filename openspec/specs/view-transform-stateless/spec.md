@@ -2,36 +2,15 @@
 
 ## Purpose
 
-本规范定义 view-transform-stateless 能力。When `oldSegments` is empty (all segments moved to recentSegments or total segment count is too small), SmartCompressor SHALL return the original messages witho
-
-> **符号与形态对照（2026-09-09 核验）**：`oldSegments`/`recentSegments` 为撰写时实现命名——现实现为段龄定级（`deterministicLevel`，`agent/compress/task_segmenter.go`），无同名变量；「无事不产压缩通知」的契约由 `SmartCompressor.Compress` 的阈值判定 pass-through 分支承载（未超阈返回原消息不变）。压缩通知现形态为负 key 滚动摘要 ref 的 **user 侧**渲染（`〔历史归档〕`注记，时间线渲染红线：永不进 system），非本文所述 `[context_compress]` system message。Req2 的 `protectPendingAsyncSegments` 移除断言仍真（该函数及其 `{status:running}` 保护假设已不存在）。
+> **superseded（2026-11-03 归档核验）**：本规范描述的 `SmartCompressor` 无段早退与 `protectPendingAsyncSegments` 移除断言已随压缩实现退役（两符号在 Go 树 0 定义）。现行早退是容量门：`PlanByAge`/`FoldByAge` 在投影渲染容量未超阈时直接返回且不触碰投影，见 `task-skeleton-compression` 与 `compression-pipeline`。本文件只作历史记录，不再承载现行规范命令。
 
 ## Requirements
 
-### Requirement: SmartCompressor returns original messages when no segments to compress
+### Requirement: 历史条款已退役
 
-When `oldSegments` is empty (all segments moved to recentSegments or total segment count is too small), SmartCompressor SHALL return the original messages without adding any `[context_compress]` system message. This prevents token waste from empty compress notifications that confuse the LLM.
+本文件保留已退役的无段早退与 pending 段保护移除的历史记录。原条款中的规范化关键词（SHALLs/MUSTs）已全部迁出或退役；现行要求见 `task-skeleton-compression` 与 `compression-pipeline`，公共行为锚见 `memory/replay/age_segments_test.go` 的 `TestAgeFoldWaitsForTheVolumeThreshold`。
 
-#### Scenario: oldSegments empty after split
+#### Scenario: 查现行早退要求
 
-- **WHEN** SmartCompressor splits messages into oldSegments and recentSegments
-- **AND** oldSegments is empty (length 0)
-- **THEN** SmartCompressor SHALL return the original messages unchanged
-- **AND** no `[context_compress]` system message SHALL be added
-
-### Requirement: protectPendingAsyncSegments removed from Compress
-
-The `protectPendingAsyncSegments` function SHALL be removed from the Compress method. This function was based on the incorrect assumption that `{status:running}` in tool results indicates a pending async operation. In reality, ActionTool's TmuxExecResponse always returns `status:running`, causing nearly all segments with tool results to be "protected" and preventing SmartCompressor from discarding any old segments.
-
-#### Scenario: Segments with running status are not protected
-
-- **WHEN** oldSegments contains a segment with a RoleTool message containing `{"status":"running"}`
-- **THEN** the segment SHALL NOT be moved to recentSegments
-- **AND** the segment SHALL be discarded as part of normal compression
-
-#### Scenario: SmartCompressor discards old segments normally
-
-- **WHEN** token count exceeds threshold and oldSegments is non-empty
-- **THEN** oldSegments SHALL be discarded
-- **AND** recentSegments SHALL be retained
-- **AND** a `[context_compress]` message with key+type+summary list SHALL be generated
+- **WHEN** 需要查询容量内早退或无候选 no-op 的现行要求
+- **THEN** 读 `task-skeleton-compression` 与 `compression-pipeline` 及其公共行为锚，而不是本历史文件

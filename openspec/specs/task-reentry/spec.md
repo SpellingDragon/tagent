@@ -2,24 +2,9 @@
 
 ## Purpose
 
-本规范定义 resume_task 重入原语:统一生命周期复用 spawn 的 dense→ACK→settle,tmux/subagent 特异出入口,并发占坑单胜,陈旧信号不串轮。
+对 task 的重入经唯一通信工具 `send{target:{task}, content}` 表达；settled 可重激活（修改状态、新 Round 续行），failed/cancelled 具名拒绝。
 
 ## Requirements
-### Requirement: resume_task 重入原语
-
-任务层 SHALL 提供 `resume_task(id, input)` 工具:对可重入任务继续输入,生命周期完全复用 spawn 的 dense→内联/ACK→settle;resume 产生的 ACK 与 settle 事件 SHALL 携带同一 task id。合法源状态:存活类（alive-detached / stable,tmux 会话仍活）与完成态（completed / failed,round 型执行器如 subagent 以新 Run 续行）。running / suspect（轮次在飞）与 cancelled（会话已杀）的 resume SHALL 返回明确错误并引导（等待重试 / relaunch 或新调用）。并发 resume SHALL 单胜（占坑式状态转移,后到者获 running 态错误）。
-
-#### Scenario: 服务会话重入取增量输出
-
-- **WHEN** 对 alive-detached 的 tmux 服务任务 resume 一条命令
-- **THEN** dense 窗口内结算则内联返回本次命令的增量输出;超窗则返回 ACK,结算后以 task_settled 通知回写
-- **AND** 输出 SHALL 为 resume 时刻基线之后的增量（非全屏历史）
-
-#### Scenario: 非法状态 resume 被拒绝
-
-- **WHEN** 对 running 或 terminal 状态的任务 resume
-- **THEN** SHALL 返回明确错误说明当前状态与可行动作
-
 ### Requirement: 特异出入口
 
 resume 的执行 SHALL 按任务类型分派:
@@ -37,11 +22,6 @@ resume 的执行 SHALL 按任务类型分派:
 - **WHEN** plan 任务 settle 后被 resume 追加指令
 - **THEN** 新 Run 的 external_context SHALL 含上次 settle 结果,使其能直接引用上次结论继续工作
 
-#### Scenario: 完成态 subagent 任务可重入
-
-- **WHEN** subagent 任务处于 completed/failed 终态（其 detector 只发 completed,不会到达 alive-detached）
-- **THEN** resume SHALL 允许并以新 Run + 任务链还原器续行（终态对 round 型执行器是自然续行点,而非拒绝理由）
-
 #### Scenario: 并发 resume 单胜
 
 - **WHEN** 并行工具执行中对同一任务并发 resume
@@ -52,16 +32,16 @@ resume 的执行 SHALL 按任务类型分派:
 - **WHEN** resume 已换绑新 detector 后,旧 detector 的存量信号到达
 - **THEN** 旧信号 SHALL NOT 影响新轮次的状态与结算（旧 watch 已退役）
 
-### Requirement: plan 计划生命周期经 resume_task 续行
+### Requirement: plan 计划生命周期经重入续行
 
-顶层 agent 与 plan 的计划生命周期交互 SHALL 遵循"一个 change ≙ 一个 task id"：`create` 以新工具调用发起并记住返回的 task id 与计划名；create settle 之后的 `update` / `progress` / `archive` SHALL 经 `resume_task(task_id, ...)` 续行（任务链还原器自动注入前序轮次上下文），SHALL NOT 为同一计划的后续操作发起新的并发工具调用。create 尚未 settle（任务 running）期间，同一计划的后续操作 SHALL 被任务层"轮次在飞"错误拒绝——拿到 ACK 不等于计划已建立。`update` 报账 SHALL 携带产物证据（路径或结论摘要），供归档审计核对。
+顶层 agent 与 plan 的计划生命周期交互 SHALL 遵循"一个 change ≙ 一个 task id"：`create` 以新工具调用发起并记住返回的 task id 与计划名；create settle 之后的 `update` / `progress` / `archive` SHALL 经 `send{target:{task}, content}` 续行（任务链还原器自动注入前序轮次上下文），SHALL NOT 为同一计划的后续操作发起新的并发工具调用。create 尚未 settle（任务 running）期间，同一计划的后续操作 SHALL 被任务层"轮次在飞"错误拒绝——拿到 ACK 不等于计划已建立。`update` 报账 SHALL 携带产物证据（路径或结论摘要），供归档审计核对。
 
-超出终态保留期（`task_terminal_ttl`）后任务被 prune、resume 不可达时，调用方 SHALL 改为携带 `name` 的新调用继续该计划的生命周期。
+超出终态保留期（`task_terminal_ttl`）后任务被 prune、重入不可达时，调用方 SHALL 改为携带 `name` 的新调用继续该计划的生命周期。
 
 #### Scenario: create settle 后经 resume 续行
 
 - **WHEN** plan 的 create 任务 settle 返回计划（name + task id）后，父 agent 需要更新进度
-- **THEN** 父 agent SHALL 调用 `resume_task(task_id, "update name=X: 步骤N完成, 产物=...")`
+- **THEN** 父 agent SHALL 调用 `send{target:{task: <task_id>}, content: "update name=X: 步骤N完成, 产物=..."}`
 - **AND** 新 Run 的任务链上下文 SHALL 含上轮计划结论，plan 无需重新定位 change
 
 #### Scenario: create 未 settle 时 update 被拒
@@ -72,7 +52,7 @@ resume 的执行 SHALL 按任务类型分派:
 #### Scenario: 重入窗口过期后按 name 续行
 
 - **WHEN** 计划任务已被终态 prune（超出 task_terminal_ttl）
-- **THEN** `resume_task` SHALL 返回任务不存在的明确错误
+- **THEN** `send` SHALL 返回任务不存在的明确错误
 - **AND** 父 agent SHALL 以携带 `name` 的新 plan 调用继续该计划的生命周期
 
 ### Requirement: 重建任务的 resume nil 安全
@@ -81,7 +61,7 @@ TaskManager 对经 RestoreTask 重建（detector/watchDone/firstSettle 未初始
 
 #### Scenario: 冷启动重建后的任务被 resume
 
-- **WHEN** 进程重启后 RestoreTask 重建历史任务（detector=nil）且模型调用 resume_task 触发 Resume
+- **WHEN** 进程重启后 RestoreTask 重建历史任务（detector=nil）且模型经 `send{target:{task}}` 触发 Resume
 - **THEN** Resume 正常换装新 watch 并返回 SpawnResult，进程不出现 nil channel close 或 nil 接口调用的 panic
 
 ### Requirement: nil 接口模式级审计留痕
@@ -92,3 +72,40 @@ TaskManager 对经 RestoreTask 重建（detector/watchDone/firstSettle 未初始
 
 - **WHEN** 审计在某调用点发现对可能为 nil 的 detector/channel 的裸操作
 - **THEN** 该点获得守卫修复并附回归测试，或以注释与 LEDGER 条目显式豁免（含不可达论证）
+
+### Requirement: 重入经 send 表达
+
+task 重入 SHALL 经 `send{target:{task}, content}` 提供；`resume_task` MUST NOT 出现在模型工具面。重入产生的 ACK 与 settle 事件 SHALL 携带同一 task id。
+
+#### Scenario: 工具面无 resume_task
+
+- **WHEN** 读取模型工具面
+- **THEN** 无 `resume_task`；重入语义由 `send` 承载
+
+### Requirement: settled 重激活
+
+settled task SHALL 可被重激活：状态 settled→活跃（修改状态），以新 Round 续行，可再次 settle。重激活 SHALL 留审计事实（settled→reactivated）。新 Round 的 settle 通知 SHALL 为新身份（TaskID+Round+Kind+Seq 不与旧 Round 合并），SHALL 恰好一次驱动发起方。
+
+#### Scenario: settled 被重激活续行
+
+- **WHEN** 对 settled 的 subagent task 调 `send{target:{task}}`
+- **THEN** 状态改为活跃、新 Round 执行注入输入，完成后再次 settle 且通知为新 Round 身份
+
+#### Scenario: 翻转可追溯
+
+- **WHEN** 任一重激活发生
+- **THEN** 持久事实含 settled→reactivated 审计记录
+
+### Requirement: 合法源状态收敛为仅 settled
+
+存活类（轮次不在飞）SHALL 接受注入续行；settled SHALL 重激活；**failed/cancelled SHALL 具名拒绝**（`[send_denied]`，引导 relaunch 或新调用）；running/suspect（轮次在飞）SHALL 拒绝并引导。并发重入 SHALL 占坑单胜；陈旧信号 MUST NOT 串入新轮次。
+
+#### Scenario: failed 拒绝重入
+
+- **WHEN** 对 failed task 调 `send{target:{task}}`
+- **THEN** `[send_denied]` 具名拒绝，状态不变，引导另起新 task
+
+#### Scenario: 并发重入单胜
+
+- **WHEN** 并发对同一 task 重入
+- **THEN** 恰好一个获得轮次，后到者获"轮次在飞"错误

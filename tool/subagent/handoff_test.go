@@ -24,7 +24,7 @@ import (
 // - the grants of that envelope are the tool, skill and MCP references the assembly declares, each with its kind
 // - the refs of that envelope are the stored fact identities the call named
 // - a call declaring no handoff builds no envelope, so its request keeps the shape it carried without one
-// - a handoff naming no intent or no acceptance constraint is refused by name
+// - a handoff naming no intent or no acceptance constraint is refused at admission by name
 // - a handoff object naming a key the declaration does not name is refused by name
 // - the declaration the model reads names the four declared handoff keys
 // 契约: docs/wiki/agent/agent-architecture.md#subagent-loop
@@ -45,10 +45,7 @@ func TestDeclaredHandoffEnvelope(t *testing.T) {
 			Constraints:      []string{"every finding names a file"},
 			PendingDecisions: []string{"whether the change ships"},
 		}}
-		envelope, err := args.envelope(assembly)
-		if err != nil {
-			t.Fatalf("build the declared envelope = %v, want it accepted", err)
-		}
+		envelope := args.envelope(assembly)
 		if envelope == nil {
 			t.Fatal("envelope = nil, want the handoff the call declared")
 		}
@@ -68,10 +65,7 @@ func TestDeclaredHandoffEnvelope(t *testing.T) {
 			Intent:      "review the change",
 			Constraints: []string{"an explicit verdict"},
 		}}
-		envelope, err := args.envelope(assembly)
-		if err != nil {
-			t.Fatalf("build the declared envelope = %v, want it accepted", err)
-		}
+		envelope := args.envelope(assembly)
 		want := []string{"tool:exec_run", "skill:go-service-ops", "mcp:mcp-lsp"}
 		if len(envelope.Grants) != len(want) {
 			t.Fatalf("envelope grants = %v, want %v", envelope.Grants, want)
@@ -89,20 +83,14 @@ func TestDeclaredHandoffEnvelope(t *testing.T) {
 			Constraints: []string{"an explicit verdict"},
 			Refs:        []string{"ev-context-1", "ev-context-2"},
 		}}
-		envelope, err := args.envelope(assembly)
-		if err != nil {
-			t.Fatalf("build the declared envelope = %v, want it accepted", err)
-		}
+		envelope := args.envelope(assembly)
 		if len(envelope.Refs) != 2 || string(envelope.Refs[0]) != "ev-context-1" || string(envelope.Refs[1]) != "ev-context-2" {
 			t.Fatalf("envelope refs = %v, want the declared fact identities", envelope.Refs)
 		}
 	})
 
 	t.Run("a call declaring no handoff builds none", func(t *testing.T) {
-		envelope, err := callArgs{}.envelope(assembly)
-		if err != nil {
-			t.Fatalf("build the envelope of a call declaring no handoff = %v, want none", err)
-		}
+		envelope := callArgs{}.envelope(assembly)
 		if envelope != nil {
 			t.Fatalf("envelope = %+v, want nil so the request keeps its shape", envelope)
 		}
@@ -110,17 +98,19 @@ func TestDeclaredHandoffEnvelope(t *testing.T) {
 
 	t.Run("a handoff naming no intent is refused", func(t *testing.T) {
 		args := callArgs{Handoff: &handoffArgs{Constraints: []string{"an explicit verdict"}}}
-		_, err := args.envelope(assembly)
+		envelope := args.envelope(assembly)
+		_, err := (delegationFaces{}).admit(context.Background(), Builder{}, task.CallFrame{}, assembly, "", envelope.Refs, envelope)
 		if !errors.Is(err, agent.ErrHandoffIntentMissing) {
-			t.Fatalf("build an envelope with no intent = %v, want %v", err, agent.ErrHandoffIntentMissing)
+			t.Fatalf("admit a call with no intent = %v, want %v", err, agent.ErrHandoffIntentMissing)
 		}
 	})
 
 	t.Run("a handoff naming no acceptance constraint is refused", func(t *testing.T) {
 		args := callArgs{Handoff: &handoffArgs{Intent: "review the change"}}
-		_, err := args.envelope(assembly)
+		envelope := args.envelope(assembly)
+		_, err := (delegationFaces{}).admit(context.Background(), Builder{}, task.CallFrame{}, assembly, "", envelope.Refs, envelope)
 		if !errors.Is(err, agent.ErrHandoffConstraintsMissing) {
-			t.Fatalf("build an envelope with no constraint = %v, want %v", err, agent.ErrHandoffConstraintsMissing)
+			t.Fatalf("admit a call with no constraint = %v, want %v", err, agent.ErrHandoffConstraintsMissing)
 		}
 	})
 
@@ -146,107 +136,6 @@ func TestDeclaredHandoffEnvelope(t *testing.T) {
 
 // The handoff declaration carries the shape the tool declaration embeds.
 var _ *trpctool.Schema = handoffSchema()
-
-// TestHandoffRefsCarryTheirCommittedFacts holds the refs section one delegated turn reads:
-// - a ref renders the content of the fact it names under its own identity, not the bare identity alone
-// - a fact too large for the budget degrades to a ticket, then to its summary, exactly as a projection entry does
-// - a ref the read face refuses states it is missing and leaves the rest of the handoff usable
-// - a ref is rendered once however often it is named, and a handoff carrying none renders unchanged
-// - a turn carrying no reader renders the bare identities it always carried
-// 契约: docs/wiki/agent/agent-architecture.md#subagent-loop
-func TestHandoffRefsCarryTheirCommittedFacts(t *testing.T) {
-	ctx := context.Background()
-	small := strings.Repeat("the migration decision is recorded under 0a01. ", 2)
-	large := strings.Repeat("migration ", 200)
-
-	t.Run("a fact that fits renders in full under its reference", func(t *testing.T) {
-		envelope := refEnvelope("ev-small")
-		block := externalContext(ctx, envelope, factTable{"ev-small": fact("ev-small", small)}.read, 0)
-		if want := "refs:\n- ev-small\n  " + small + "\n"; !strings.Contains(block, want) {
-			t.Fatalf("block carries no refs detail %q:\n%s", want, block)
-		}
-		if strings.Index(block, "pending_decisions:") > strings.Index(block, "refs:") {
-			t.Fatalf("refs section is not the last section of the block:\n%s", block)
-		}
-		for _, want := range []string{"intent: review the change", "- every finding names a file", "- tool:exec_run", "- whether the change ships"} {
-			if !strings.Contains(block, want) {
-				t.Fatalf("block carries no %q of the envelope:\n%s", want, block)
-			}
-		}
-	})
-
-	t.Run("a fact over the budget degrades to a ticket", func(t *testing.T) {
-		block := externalContext(ctx, refEnvelope("ev-large"), factTable{"ev-large": fact("ev-large", large)}.read, 0)
-		if !strings.Contains(block, "[ticket ev-large: full text retrievable by segment]") {
-			t.Fatalf("block carries no ticket for the fact over the budget:\n%s", block)
-		}
-		if preview := string([]rune(large)[:refTicketPreviewRunes]) + "…"; !strings.Contains(block, preview) {
-			t.Fatalf("block carries no bounded preview %q:\n%s", preview, block)
-		}
-		if strings.Contains(block, large) {
-			t.Fatalf("block carries the whole fact the budget refused:\n%s", block)
-		}
-	})
-
-	t.Run("a fact the ticket does not fit degrades to its summary", func(t *testing.T) {
-		evt := event.Event{
-			Key:     "ev-large",
-			Type:    event.TypeAgentOutput,
-			Meta:    map[string]string{event.MetaKeyEventSummary: "a one-line read of the large fact"},
-			Message: model.Message{Content: large},
-		}
-		block := externalContext(ctx, refEnvelope("ev-large"), factTable{"ev-large": evt}.read, refSummaryBudget)
-		if !strings.Contains(block, "  a one-line read of the large fact\n") {
-			t.Fatalf("block carries no summary of the fact the ticket did not fit:\n%s", block)
-		}
-		if strings.Contains(block, "[ticket") || strings.Contains(block, large) {
-			t.Fatalf("block carries a level the remaining budget refused:\n%s", block)
-		}
-	})
-
-	t.Run("a fact the budget cannot place states its bound", func(t *testing.T) {
-		block := externalContext(ctx, refEnvelope("ev-large"), factTable{"ev-large": fact("ev-large", large)}.read, 1)
-		if want := "refs:\n- ev-large\n" + overBudgetRefLine; !strings.Contains(block, want) {
-			t.Fatalf("block carries no %q:\n%s", want, block)
-		}
-	})
-
-	t.Run("a ref the read face refuses is missing beside the material that resolved", func(t *testing.T) {
-		envelope := refEnvelope("ev-small", "ev-missing")
-		block := externalContext(ctx, envelope, factTable{"ev-small": fact("ev-small", small)}.read, 0)
-		if want := "- ev-small\n  " + small + "\n"; !strings.Contains(block, want) {
-			t.Fatalf("block carries no resolved ref %q:\n%s", want, block)
-		}
-		if want := "- ev-missing\n" + missingRefLine; !strings.Contains(block, want) {
-			t.Fatalf("block carries no %q:\n%s", want, block)
-		}
-		if !strings.Contains(block, "intent: review the change") {
-			t.Fatalf("a missing ref refused the handoff instead of stating the miss:\n%s", block)
-		}
-	})
-
-	t.Run("a ref is rendered once however often it is named", func(t *testing.T) {
-		envelope := refEnvelope("ev-small", "ev-small")
-		block := externalContext(ctx, envelope, factTable{"ev-small": fact("ev-small", small)}.read, 0)
-		if got := strings.Count(block, "- ev-small\n"); got != 1 {
-			t.Fatalf("ref rendered %d times, want once:\n%s", got, block)
-		}
-	})
-
-	t.Run("a handoff carrying no refs renders the envelope unchanged", func(t *testing.T) {
-		envelope := agent.HandoffEnvelope{Intent: "review the change", Constraints: []string{"every finding names a file"}}
-		if got, want := externalContext(ctx, envelope, factTable{}.read, 0), envelope.ExternalContext(); got != want {
-			t.Fatalf("block = %q, want the unchanged envelope %q", got, want)
-		}
-	})
-
-	t.Run("a builder beside no reader renders the bare identities", func(t *testing.T) {
-		envelope := refEnvelope("ev-small")
-		if got, want := externalContext(ctx, envelope, nil, 0), envelope.ExternalContext(); got != want {
-			t.Fatalf("block = %q, want the unchanged envelope %q", got, want)
-		}
-	})
-}
 
 // TestDelegatedTurnReadsTheRefsContent holds the request one served turn carrying refs reads:
 // - the external-context block of that request carries the content of each ref
@@ -317,8 +206,9 @@ func TestTargetDelegationReadsTheRefsContent(t *testing.T) {
 
 	t.Run("the recall-shaped call hands the delegated turn the event content", func(t *testing.T) {
 		provider := &serveModel{name: "model-recall", answer: "the recall turn was admitted"}
+		facts := factTable{"0a01": fact("0a01", content)}
 		delegation := &stubDelegation{}
-		target := newRecallTarget(t, addr, provider, delegation, factTable{"0a01": fact("0a01", content)})
+		target := newRecallTarget(t, addr, provider, delegation, facts)
 
 		out, err := target.Call(callFrameContext(addr), []byte(`{"input":"what did we decide about the migration?","event_keys":["0a01"]}`))
 		if err != nil {
@@ -329,16 +219,23 @@ func TestTargetDelegationReadsTheRefsContent(t *testing.T) {
 		}
 		waitCompletions(t, delegation, 1)
 
-		got := requestContent(provider.recorded()[0])
-		if want := "refs:\n- 0a01\n  " + content + "\n"; !strings.Contains(got, want) {
-			t.Fatalf("delegated request carries no refs content %q:\n%s", want, got)
+		// The source materializes as its own message beside the task (the stub
+		// stands in for the resident loop), so presence is read across every
+		// message the round produced.
+		got := requestAllText(provider.recorded()[0])
+		if !strings.Contains(got, content) {
+			t.Fatalf("delegated request carries no refs content %q:\n%s", content, got)
+		}
+		if !strings.Contains(got, "what did we decide about the migration?") {
+			t.Fatalf("delegated request dropped the natural-language request: %q", got)
 		}
 	})
 
 	t.Run("a ref the run does not hold keeps the delegation usable", func(t *testing.T) {
 		provider := &serveModel{name: "model-recall", answer: "the recall turn was admitted"}
+		facts := factTable{}
 		delegation := &stubDelegation{}
-		target := newRecallTarget(t, addr, provider, delegation, factTable{})
+		target := newRecallTarget(t, addr, provider, delegation, facts)
 
 		out, err := target.Call(callFrameContext(addr), []byte(`{"input":"what did we decide about the migration?","event_keys":["0a01"]}`))
 		if err != nil {
@@ -349,11 +246,31 @@ func TestTargetDelegationReadsTheRefsContent(t *testing.T) {
 		}
 		waitCompletions(t, delegation, 1)
 
-		got := requestContent(provider.recorded()[0])
-		if want := "refs:\n- 0a01\n" + missingRefLine; !strings.Contains(got, want) {
-			t.Fatalf("delegated request carries no %q:\n%s", want, got)
+		// A reference the run does not hold is noise a hallucination produced:
+		// it silently does not materialize (Q2 ruling) — the turn still runs, the
+		// bare identity stays in the envelope block, and no missing-marker text
+		// is invented for what nothing backs.
+		got := requestAllText(provider.recorded()[0])
+		if strings.Contains(got, "  (missing)\n") {
+			t.Fatalf("delegated request carries a missing-marker %q for an unbacked reference: %q", "  (missing)\n", got)
+		}
+		if strings.Contains(got, "0a01") {
+			t.Fatalf("delegated request carries the bare identity of an unbacked reference: %q", got)
+		}
+		if !strings.Contains(got, "what did we decide about the migration?") {
+			t.Fatalf("delegated request dropped the task beside an unbacked reference: %q", got)
 		}
 	})
+}
+
+// requestAllText renders every message of one request, so a presence check
+// reads material that arrives as its own message beside the task.
+func requestAllText(req trpcmodel.Request) string {
+	parts := make([]string, 0, len(req.Messages))
+	for _, message := range req.Messages {
+		parts = append(parts, message.Content)
+	}
+	return strings.Join(parts, "\n")
 }
 
 // newRecallTarget returns the target tool of one declared agent reference under the
@@ -405,14 +322,6 @@ func waitCompletions(t *testing.T, delegation *stubDelegation, want int) {
 		time.Sleep(5 * time.Millisecond)
 	}
 }
-
-// refTicketPreviewRunes is the preview bound the projection records on a ticket
-// decision; a test reads it so the expected preview is never a copy that drifts.
-const refTicketPreviewRunes = 128
-
-// refSummaryBudget is a token budget that fits a summary but neither the full text
-// nor its ticket, so the ladder settles on the summary of one 2000-byte fact.
-const refSummaryBudget = 38
 
 // refEnvelope returns the envelope a call declares beside its request, naming the
 // refs the test holds.

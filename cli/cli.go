@@ -132,7 +132,7 @@ func (c *CLI) invoke(ctx context.Context, args []string, stdout, stderr io.Write
 		InvocationID event.InvocationID `json:"invocation_id"`
 		Terminal     model.Kind         `json:"terminal"`
 		Decisions    int                `json:"decisions"`
-	}{InvocationID: turn.InvocationID, Terminal: turn.Terminal, Decisions: len(turn.Decisions)})
+	}{InvocationID: turn.InvocationID, Terminal: turn.Terminal, Decisions: turn.DecisionCount})
 }
 
 // query serves one bounded diagnostic reading of the assembled run under the

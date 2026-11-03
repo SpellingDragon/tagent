@@ -46,9 +46,10 @@ func chainOutput(invocation event.InvocationID, episode event.EpisodeID, content
 	}
 }
 
-// TestChainExporterPairsTurns pins the chain export: rows are paired by invocation inside one episode.
+// TestChainExporterPairsTurns pins the chain export: rows are paired by chain order inside one episode.
 // - one episode spanning two sessions stays one episode with its turns numbered in order
-// - a turn that produced no assistant output and a fact carrying no invocation are skipped, not filled
+// - inputs that land before an answer arrive batch into the turn that answer closes, and a turn that produced no assistant output is skipped, not filled
+// - q4 lands, the late input batches beside it, and the output that follows answers both in one turn
 // - a repeated session is read once, and the limit bounds the rows emitted
 // 契约: docs/wiki/rl/rl-architecture.md#training-export
 func TestChainExporterPairsTurns(t *testing.T) {
@@ -83,13 +84,14 @@ func TestChainExporterPairsTurns(t *testing.T) {
 	if err != nil {
 		t.Fatalf("export the chain: %v", err)
 	}
-	if len(samples) != 4 {
-		t.Fatalf("samples = %+v, want the four paired turns", samples)
+	if len(samples) != 5 {
+		t.Fatalf("samples = %+v, want the five paired turns", samples)
 	}
 	expected := []SFTSample{
 		{SessionID: "session-1", Turn: 1, Input: "q1", Label: "a1", EpisodeID: string(episodeA)},
 		{SessionID: "session-1", Turn: 2, Input: "q2", Label: "a2", EpisodeID: string(episodeA)},
 		{SessionID: "session-1", Turn: 1, Input: "q3", Label: "a3", EpisodeID: string(episodeB)},
+		{SessionID: "session-1", Turn: 2, Input: "q4\nunpaired", Label: "unpaired", EpisodeID: string(episodeB)},
 		{SessionID: "session-2", Turn: 3, Input: "q5", Label: "a5", EpisodeID: string(episodeA)},
 	}
 	if !reflect.DeepEqual(samples, expected) {

@@ -7,6 +7,7 @@ registry and the real 00.3 contract so a stale patch anchor or a missing defect
 mapping fails the selftest before any product run.
 """
 import dataclasses
+import json
 import sys
 import tempfile
 import unittest
@@ -15,8 +16,13 @@ from pathlib import Path
 SCRIPTS = Path(__file__).resolve().parent
 if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
+SCENARIOS = SCRIPTS.parent / "scenarios"
+if str(SCENARIOS) not in sys.path:
+    sys.path.insert(0, str(SCENARIOS))
 
 import check_event_integrity_mutations as gate  # noqa: E402
+import run_runtime_scenarios as runtime_runner  # noqa: E402
+import test_check_runtime_evidence as runtime_evidence  # noqa: E402
 
 
 def event(action, test="", output=""):
@@ -340,7 +346,7 @@ class MutationGateTest(unittest.TestCase):
     def test_patch_set_is_applied_and_restored_as_one(self):
         mutation = [item for item in gate.MUTATIONS
                     if item.id == "MUT-EVID-04-position-boundary"][0]
-        self.assertEqual(len(mutation.patch_set()), 7)
+        self.assertEqual(len(mutation.patch_set()), 8)
         files = {replacement.file for replacement in mutation.patch_set()}
         self.assertEqual(files, {"assembly/request.go", "assembly/facts.go"})
 
@@ -363,6 +369,96 @@ class MutationGateTest(unittest.TestCase):
             for name in files:
                 self.assertEqual((tree / name).read_text(encoding="utf-8"),
                                  pristine[name])
+
+
+class MutationBaselineTest(unittest.TestCase):
+    """The report must name the runner's baseline so --bundle can tie it.
+
+    A mutation report can be perfectly green on its own and still come from
+    another tree; the bundle only counts it when it names the same contract
+    digest and the same per-module fingerprint as the runs that stayed green.
+    These anchors drive the producer through summarize() and the public consumer
+    through check_runtime_evidence.py --bundle, never a private copy of the rule.
+    """
+
+    def setUp(self):
+        self.root = gate.DEFAULT_ROOT
+        mutations = enabled_mutations()
+        confirmed = gate.confirmed_defect_ids(self.root, None)
+        controls = green_controls(mutations)
+        records = judged_records(mutations, confirmed)
+        decision = gate.evaluate_gate(records, controls, confirmed)
+        self.assertTrue(decision["ok"], decision["failures"])
+        self.payload = gate.summarize(records, controls, decision, self.root,
+                                      "sha256:test")
+
+    def test_report_names_contract_digest_and_tested_module_fingerprints(self):
+        self.assertEqual(
+            self.payload["contract_digest"],
+            runtime_evidence.event_digest(runtime_evidence.REAL_EVENT_CONTRACT))
+        fingerprints = self.payload["module_fingerprints"]
+        self.assertEqual(len(fingerprints), 1)
+        entry = fingerprints[0]
+        self.assertEqual(entry["dir"], ".")
+        self.assertEqual(entry["module_path"], runtime_runner.MODULE_PATH)
+        self.assertRegex(entry["revision"], r"^[0-9a-f]{7,40}$")
+        self.assertRegex(entry["content_hash"], r"^sha256:[0-9a-f]{64}$")
+        # One definition: the report names exactly what the runner fingerprints.
+        self.assertEqual(
+            entry,
+            runtime_runner.module_fingerprint(str(self.root), ".",
+                                              runtime_runner.MODULE_PATH))
+
+    def _bundle(self, name="producer-baseline"):
+        """A legal runner bundle whose root fingerprint is the real tested tree.
+
+        EventFixture's fingerprints are synthetic; the producer names the tree
+        it really fingerprinted, so the fixture's root module entry is replaced
+        with that same runner-side value and everything else stays untouched.
+        """
+        fixture = runtime_evidence.EventFixture()
+        fixture.setUp()
+        self.addCleanup(fixture.tearDown)
+        bundle = fixture.write_bundle(name, mutation=False)
+        tested = self.payload["module_fingerprints"][0]
+        for directory in sorted(bundle.glob("short-*")):
+            path = directory / "evidence.json"
+            evidence = json.loads(path.read_text(encoding="utf-8"))
+            evidence["module_fingerprints"] = [
+                tested if item.get("module_path") == tested["module_path"] else item
+                for item in evidence["module_fingerprints"]]
+            path.write_text(json.dumps(evidence, ensure_ascii=False, indent=2),
+                            encoding="utf-8")
+        mutations = bundle / "mutations"
+        mutations.mkdir()
+        return bundle, mutations
+
+    def _check_bundle(self, bundle):
+        return runtime_evidence.run_checker(
+            "--contract", str(runtime_evidence.REAL_EVENT_CONTRACT),
+            "--bundle", str(bundle), "--json")
+
+    def test_produced_report_passes_the_bundle_same_baseline_gate(self):
+        bundle, mutations = self._bundle()
+        (mutations / "evidence.json").write_text(
+            json.dumps(self.payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        code, out, err = self._check_bundle(bundle)
+        self.assertEqual(code, 0, out + err)
+        payload = json.loads(out)
+        self.assertEqual(payload["counts"]["bundle_mutation_evidence"], 1)
+        self.assertIsNone(payload["productVerified"])
+
+    def test_old_report_without_baseline_fields_is_rejected(self):
+        bundle, mutations = self._bundle("legacy-report")
+        legacy = json.loads(json.dumps(self.payload))
+        del legacy["contract_digest"]
+        del legacy["module_fingerprints"]
+        (mutations / "evidence.json").write_text(
+            json.dumps(legacy, ensure_ascii=False, indent=2), encoding="utf-8")
+        code, out, err = self._check_bundle(bundle)
+        self.assertNotEqual(code, 0, out + err)
+        self.assertIn("must declare contract_digest", out)
+        self.assertIn("module_fingerprints must be a non-empty list", out)
 
 
 if __name__ == "__main__":

@@ -5,7 +5,6 @@ import (
 	"errors"
 	"sync"
 	"testing"
-	"time"
 
 	"github.com/SpellingDragon/tagent/api/event"
 	"github.com/SpellingDragon/tagent/runtime/agent"
@@ -53,6 +52,37 @@ type scenarioTaskFace struct {
 // newScenarioTaskFace builds the task face of one close drive.
 func newScenarioTaskFace(manager *task.MemoryManager, registry *task.MemoryRegistry) *scenarioTaskFace {
 	return &scenarioTaskFace{MemoryManager: manager, MemoryRegistry: registry}
+}
+
+// Unconsumed reports the notifications no consumption confirmed. The scenario
+// settles its notifications through the manager, so the task face answers every
+// one of them and no mailbox answer stands beside it.
+func (f *scenarioTaskFace) Unconsumed(ctx context.Context) ([]task.UnsettledNotice, error) {
+	return f.MemoryManager.Owed(ctx)
+}
+
+// Unanswered reports the input rounds a session chain holds with no answer. This
+// scenario drives its ranges through the task face, so no chain answer stands
+// unanswered beside it.
+func (f *scenarioTaskFace) Unanswered(context.Context) ([]task.UnsettledInput, error) {
+	return nil, nil
+}
+
+// scenarioClose evaluates one close over the rest criterion of a task face and
+// the writer ledger beside it: a drive is at rest only when nothing it accepted
+// is unfinished, no notification stands unconsumed and every writer confirmed
+// its stop, and any of the three still open answers the named unsettled state.
+func scenarioClose(ctx context.Context, face *scenarioTaskFace, loop *agent.Loop) (agent.DrainReport, error) {
+	read := task.ReadUnsettled(ctx, face, nil)
+	stopped, open := loop.Stopped()
+	report := agent.DrainReport{Drained: read.Resting() && stopped}
+	if !stopped {
+		report.Unsettled = agent.WriterObligations(open)
+	}
+	if !report.Drained {
+		return report, agent.ErrDrainUnsettled
+	}
+	return report, nil
 }
 
 // scenarioAdmitRunning admits one task and moves it to running.
@@ -161,8 +191,9 @@ func TestScenario05CloseHandoffReincarnation(t *testing.T) {
 	openRegistry := task.NewMemoryRegistry(task.NewMemoryCommit(nil), task.NewMemoryAdmission())
 	openManager := task.NewMemoryManager(openRegistry, nil, task.WithEnvelopeDeliverer(openDeliveries.deliver))
 	openFace := newScenarioTaskFace(openManager, openRegistry)
-	open := agent.NewShutdown(openFace)
-	receipt, err := open.Admit(ctx, task.Spec{
+	openLoop := agent.NewLoop(nil, nil, "instance-scenario", nil)
+	_ = openLoop.Begin("producer-drain")
+	receipt, err := openManager.Admit(ctx, task.Spec{
 		CallID:       "call-drain",
 		DedupKey:     task.DedupKey("dedup-drain"),
 		InvocationID: event.InvocationID("inv-drain"),
@@ -173,25 +204,19 @@ func TestScenario05CloseHandoffReincarnation(t *testing.T) {
 	if err != nil || !receipt.Accepted {
 		t.Fatalf("admit the drained task = (%+v, %v), want one accepted admission", receipt, err)
 	}
-	if result, err := open.Advance(ctx, receipt.TaskID, task.StatusRunning, "run-drain", nil); result != task.CommitCommitted || err != nil {
+	if result, err := openRegistry.Advance(ctx, receipt.TaskID, task.StatusRunning, "run-drain", nil); result != task.CommitCommitted || err != nil {
 		t.Fatalf("advance the drained task = (%v, %v), want the task running", result, err)
 	}
-	running := true
-	if err := open.Watch(receipt.TaskID, func() bool { return !running }); err != nil {
-		t.Fatalf("watch the producer: %v", err)
-	}
-	beforeReport, beforeErr := open.Close(ctx, agent.CloseRequest{
-		Address:  event.Address{AgentID: "agent-src", SessionID: "session-src"},
-		Deadline: time.Now().Add(100 * time.Millisecond),
-	})
+	beforeReport, beforeErr := scenarioClose(ctx, openFace, openLoop)
 	refs = append(refs, string(receipt.TaskID))
 
 	closedDeliveries := &scenarioDeliveries{accept: task.DeliveryAccepted}
 	closedRegistry := task.NewMemoryRegistry(task.NewMemoryCommit(nil), task.NewMemoryAdmission())
 	closedManager := task.NewMemoryManager(closedRegistry, nil, task.WithEnvelopeDeliverer(closedDeliveries.deliver))
 	closedFace := newScenarioTaskFace(closedManager, closedRegistry)
-	closed := agent.NewShutdown(closedFace)
-	closedReceipt, err := closed.Admit(ctx, task.Spec{
+	closedLoop := agent.NewLoop(nil, nil, "instance-scenario", nil)
+	stopClosed := closedLoop.Begin("producer-stopped")
+	closedReceipt, err := closedManager.Admit(ctx, task.Spec{
 		CallID:       "call-stopped",
 		DedupKey:     task.DedupKey("dedup-stopped"),
 		InvocationID: event.InvocationID("inv-stopped"),
@@ -202,19 +227,14 @@ func TestScenario05CloseHandoffReincarnation(t *testing.T) {
 	if err != nil || !closedReceipt.Accepted {
 		t.Fatalf("admit the stopped task = (%+v, %v), want one accepted admission", closedReceipt, err)
 	}
-	if result, err := closed.Advance(ctx, closedReceipt.TaskID, task.StatusRunning, "run-stopped", nil); result != task.CommitCommitted || err != nil {
+	if result, err := closedRegistry.Advance(ctx, closedReceipt.TaskID, task.StatusRunning, "run-stopped", nil); result != task.CommitCommitted || err != nil {
 		t.Fatalf("advance the stopped task = (%v, %v), want the task running", result, err)
 	}
-	if result, err := closed.Advance(ctx, closedReceipt.TaskID, task.StatusSettled, "settle-stopped", nil); result != task.CommitCommitted || err != nil {
+	if result, err := closedRegistry.Advance(ctx, closedReceipt.TaskID, task.StatusSettled, "settle-stopped", nil); result != task.CommitCommitted || err != nil {
 		t.Fatalf("settle the stopped task = (%v, %v), want the settle committed", result, err)
 	}
-	if err := closed.Watch(closedReceipt.TaskID, func() bool { return true }); err != nil {
-		t.Fatalf("watch the stopped producer: %v", err)
-	}
-	afterReport, afterErr := closed.Close(ctx, agent.CloseRequest{
-		Address:  event.Address{AgentID: "agent-src", SessionID: "session-src"},
-		Deadline: time.Now().Add(10 * time.Second),
-	})
+	stopClosed()
+	afterReport, afterErr := scenarioClose(ctx, closedFace, closedLoop)
 	refs = append(refs, string(closedReceipt.TaskID))
 
 	observations["drain_phases"] = map[string]any{

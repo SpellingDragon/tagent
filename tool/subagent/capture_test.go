@@ -51,6 +51,7 @@ func requireWorkerCallsEnterTrajectory(t *testing.T, provider workerProvider) {
 		Accepted: true,
 		Kind:     task.AdmissionFresh,
 	}}
+	attachResidentWorker(t, delegation)
 	tool := newWorkerTool(t, delegation, provider, capture)
 
 	out := callTool(t, tool, map[string]any{"agents_file": writeWorkerAgentsFile(t)})
@@ -131,6 +132,7 @@ func TestNoCaptureZeroRecords(t *testing.T) {
 		Accepted: true,
 		Kind:     task.AdmissionFresh,
 	}}
+	attachResidentWorker(t, delegation)
 	provider := &scriptedWorker{name: "model-worker"}
 	tool := newWorkerTool(t, delegation, provider, nil)
 
@@ -182,7 +184,7 @@ func newWorkerTool(t *testing.T, delegation *stubDelegation, provider workerProv
 	t.Helper()
 	bindings := state.NewBindings()
 	holdBinding(t, bindings, event.Address{AgentID: "agent-caller", SessionID: "session-caller"})
-	tool, err := NewTool(ToolOptions{
+	tool, _, err := NewTool(ToolOptions{
 		Parent: &Assembly{Definition: Definition{Description: "the caller", Model: "model-caller"}},
 		Builder: Builder{
 			Model: func(context.Context, string) (trpcmodel.Model, error) { return provider, nil },

@@ -16,6 +16,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -136,15 +138,23 @@ func fidelityCountToolMessages(request scriptedRequest) int {
 }
 
 // fidelityEntrySections renders the entry agent section of one fidelity host:
-// the entry agent under the named model window beside the declared send tool.
-// The window is the replay window that registers the mapped sequence, so the
-// requests of the session are rebuilt from the projection the commits record.
-func fidelityEntrySections(window string) string {
+// the entry agent under the named model window beside the declared send tool and
+// the delivery white list that tool reaches. The window is the replay window that
+// registers the mapped sequence, so the requests of the session are rebuilt from
+// the projection the commits record.
+func fidelityEntrySections(root, window string) string {
 	return "  user:\n" +
 		"    model: model-entry\n" +
 		window +
 		"    tools:\n" +
-		"      - { kind: tool, id: send }\n"
+		"      - { kind: tool, id: send }\n" +
+		"    meditation:\n" +
+		"      enabled: true\n" +
+		"      interval: 10h\n" +
+		"      min_gap: 10h\n" +
+		"      prompt_file: " + filepath.Join(root, "meditation.md") + "\n" +
+		"      observed_namespaces: [user]\n" +
+		"      deliver_to: [user]\n"
 }
 
 // bootFidelityHost boots the fidelity entry document over the given root and
@@ -152,8 +162,11 @@ func fidelityEntrySections(window string) string {
 // the same storage root after a close.
 func bootFidelityHost(t *testing.T, provider *scriptedProvider, sender recordingSender, root, window string) (*assembly.Host, string) {
 	t.Helper()
+	if err := os.WriteFile(filepath.Join(root, "meditation.md"), []byte("Reflect over the session.\n"), 0o644); err != nil {
+		t.Fatalf("write the meditation prompt: %v", err)
+	}
 	configPath := writeScriptedHostDocument(t, root, provider.endpoint(), "model-entry")
-	writeHostDocumentFile(t, configPath, scriptedHostDocumentWithAgentSections(root, provider.endpoint(), "model-entry", fidelityEntrySections(window)))
+	writeHostDocumentFile(t, configPath, scriptedHostDocumentWithAgentSections(root, provider.endpoint(), "model-entry", fidelityEntrySections(root, window)))
 	host, err := assembly.Boot(configPath, assembly.WithSender(sender))
 	if err != nil {
 		t.Fatalf("boot the fidelity host: %v", err)
@@ -169,6 +182,24 @@ func bootFidelityHost(t *testing.T, provider *scriptedProvider, sender recording
 func fidelityFillInput(turn int) string {
 	return fmt.Sprintf("fidelity fill turn %02d\n%s", turn, strings.Repeat("material ", 95))
 }
+
+// fidelityDeliveredFacts counts the facts of one chain that carry a delivered
+// body: a session delivery commits one input fact into the target chain, so the
+// delivery is read there instead of on an outbound face it never reaches.
+func fidelityDeliveredFacts(host *assembly.Host, addr event.Address, body string) int {
+	count := 0
+	for _, fact := range host.Run().SessionFacts(addr) {
+		if fact.Type == event.TypeExternalInput && strings.Contains(fact.Message.Content, body) {
+			count++
+		}
+	}
+	return count
+}
+
+// fidelityElsewhereInput is the message that opens the session the compressed
+// turn delivers to: the delivery target must be a session this run already
+// bound, so the scenario binds it before the turn that names it.
+const fidelityElsewhereInput = "fidelity elsewhere session opens the delivery target"
 
 // TestRequestFidelity requires every request the replay path rebuilds to carry complete call-result pairing on the wire.
 //   - positive: each scenario's request stream carries complete call-result pairs (tool_call_id / ToolCalls / function name and arguments)
@@ -221,8 +252,8 @@ func runFidelityNextTurnAfterToolCall(t *testing.T) {
 	if err != nil {
 		t.Fatalf("the tool-call turn ended by error: %v", err)
 	}
-	if turn.Terminal != model.KindCompleted || len(turn.Decisions) != 2 {
-		t.Fatalf("the tool-call turn = (%v, %d decisions), want the completed turn of its two decisions", turn.Terminal, len(turn.Decisions))
+	if turn.Terminal != model.KindCompleted || turn.DecisionCount != 2 {
+		t.Fatalf("the tool-call turn = (%v, %d decisions), want the completed turn of its two decisions", turn.Terminal, turn.DecisionCount)
 	}
 	turnTwo, turnTwoErr := driveIntegrityTurn(ctx, host, addr, inputTwo)
 
@@ -241,7 +272,7 @@ func runFidelityNextTurnAfterToolCall(t *testing.T) {
 		t.Fatalf("the turn after a tool call ended by error: %v", turnTwoErr)
 	}
 	if turnTwo.Terminal != model.KindCompleted {
-		t.Fatalf("the turn after a tool call = (%v, %d decisions), want the completed turn", turnTwo.Terminal, len(turnTwo.Decisions))
+		t.Fatalf("the turn after a tool call = (%v, %d decisions), want the completed turn", turnTwo.Terminal, turnTwo.DecisionCount)
 	}
 	t.Logf("[fidelity 1] positive: the turn-after request carries the complete pair of %q (name=send, arguments=%q) beside its tool result", callID, arguments)
 	closeIntegrityHost(t, ctx, host)
@@ -264,7 +295,7 @@ func runFidelityRequestAfterCompression(t *testing.T) {
 		inputTwo  = "fidelity compressed turn speaks from the chain"
 		answerTwo = "the compressed fidelity turn two answer"
 		callID    = "call-fidelity-compressed"
-		arguments = `{"content":"the compressed fidelity note"}`
+		arguments = `{"target":{"agent":"user","session":"session-fidelity-elsewhere"},"content":"the compressed fidelity note"}`
 	)
 	provider := newScriptedProvider(t)
 	script := newIntegrityScript()
@@ -275,8 +306,7 @@ func runFidelityRequestAfterCompression(t *testing.T) {
 			delivers(fmt.Sprintf("answer for the fidelity fill turn %d", turn+1))
 	}
 	script.expect("model-entry", "the compressed turn issues the tool call", requestTail(inputOne)).
-		answers(settleToolCallAnswer("send", callID, arguments)).
-		delivers(note)
+		answers(settleToolCallAnswer("send", callID, arguments))
 	script.expect("model-entry", "the compressed turn ends on its answer", requestCarriesToolResult(callID)).
 		answers(scriptedAnswerOf(answerOne)).
 		delivers(answerOne)
@@ -295,6 +325,13 @@ func runFidelityRequestAfterCompression(t *testing.T) {
 	defer cancel()
 	addr := event.Address{AgentID: "user", SessionID: "session-request-fidelity-compression"}
 
+	script.expect("model-entry", "the elsewhere session opens the delivery target", requestTail(fidelityElsewhereInput)).
+		answers(scriptedAnswerOf("the elsewhere session answered")).delivers("the elsewhere session answered")
+	script.expect("model-entry", "the elsewhere session reads the delivered note", requestTail(note)).
+		answers(scriptedAnswerOf("the elsewhere session read the note")).delivers("the elsewhere session read the note").optional()
+	if _, err := driveIntegrityTurn(ctx, host, event.Address{AgentID: "user", SessionID: "session-fidelity-elsewhere"}, fidelityElsewhereInput); err != nil {
+		t.Fatalf("open the delivery target ended by error: %v", err)
+	}
 	for turn := 0; turn < 3; turn++ {
 		if _, err := driveIntegrityTurn(ctx, host, addr, fidelityFillInput(turn)); err != nil {
 			t.Fatalf("fill turn %d ended by error: %v", turn+1, err)
@@ -317,6 +354,10 @@ func runFidelityRequestAfterCompression(t *testing.T) {
 	if _, err := driveIntegrityTurn(ctx, host, addr, inputOne); err != nil {
 		t.Fatalf("the tool-call turn after compression ended by error: %v", err)
 	}
+	if delivered := fidelityDeliveredFacts(host, event.Address{AgentID: "user", SessionID: "session-fidelity-elsewhere"}, note); delivered != 1 {
+		t.Fatalf("the delivered body stands in the target chain %d time(s), want exactly once: "+
+			"the call is a session delivery, so the body lands in the session it names", delivered)
+	}
 	turnTwo, turnTwoErr := driveIntegrityTurn(ctx, host, addr, inputTwo)
 
 	var target scriptedRequest
@@ -326,15 +367,18 @@ func runFidelityRequestAfterCompression(t *testing.T) {
 		}
 	}
 	requireFidelityPairing(t, provider, "the request after compression")
-	if fidelityCountToolMessages(target) == 0 {
-		t.Fatalf("the compressed request carries no role=tool call-result material, so the pairing check proves nothing: %+v", target.Messages)
+	// The fold that landed while the tool turn was in progress kept the pair
+	// whole: the request carries exactly the one call-result message of the call,
+	// never the same observation admitted a second time beside the fold product.
+	if tools := fidelityCountToolMessages(target); tools != 1 {
+		t.Fatalf("the compressed request carries %d role=tool call-result message(s), want the one result of %q the fold kept whole: %+v", tools, callID, target.Messages)
 	}
 	requireCallResultPair(t, target, callID, "send", arguments)
 	if turnTwoErr != nil {
 		t.Fatalf("the turn after compression ended by error: %v", turnTwoErr)
 	}
 	if turnTwo.Terminal != model.KindCompleted {
-		t.Fatalf("the turn after compression = (%v, %d decisions), want the completed turn", turnTwo.Terminal, len(turnTwo.Decisions))
+		t.Fatalf("the turn after compression = (%v, %d decisions), want the completed turn", turnTwo.Terminal, turnTwo.DecisionCount)
 	}
 	t.Logf("[fidelity 2] positive: the compressed request (fold products=%d) carries the complete pair of %q beside its tool result", synthetic, callID)
 	closeIntegrityHost(t, ctx, host)
@@ -384,8 +428,8 @@ func runFidelityRequestAfterColdBoot(t *testing.T) {
 	if err != nil {
 		t.Fatalf("the tool-call turn of the first boot ended by error: %v", err)
 	}
-	if turn.Terminal != model.KindCompleted || len(turn.Decisions) != 2 {
-		t.Fatalf("the tool-call turn of the first boot = (%v, %d decisions), want the completed turn of its two decisions", turn.Terminal, len(turn.Decisions))
+	if turn.Terminal != model.KindCompleted || turn.DecisionCount != 2 {
+		t.Fatalf("the tool-call turn of the first boot = (%v, %d decisions), want the completed turn of its two decisions", turn.Terminal, turn.DecisionCount)
 	}
 	closeIntegrityHost(t, ctx, host)
 
@@ -411,7 +455,7 @@ func runFidelityRequestAfterColdBoot(t *testing.T) {
 		t.Fatalf("the turn after a cold boot ended by error: %v", turnTwoErr)
 	}
 	if turnTwo.Terminal != model.KindCompleted {
-		t.Fatalf("the turn after a cold boot = (%v, %d decisions), want the completed turn", turnTwo.Terminal, len(turnTwo.Decisions))
+		t.Fatalf("the turn after a cold boot = (%v, %d decisions), want the completed turn", turnTwo.Terminal, turnTwo.DecisionCount)
 	}
 	t.Logf("[fidelity 3] positive: the cold-boot request carries the complete pair of %q beside its tool result", callID)
 	closeIntegrityHost(t, ctx, rebooted)

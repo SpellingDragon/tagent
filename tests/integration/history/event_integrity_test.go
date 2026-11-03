@@ -1044,6 +1044,7 @@ func restoreAssertSeed(t *testing.T, o restoreOutcome) {
 		{"call identity", o.Seed.CallID},
 		{"task identity", string(o.Seed.TaskID)},
 		{"invocation identity", string(o.Seed.Invocation)},
+		{"turn range identity", string(o.Seed.TurnInvocation)},
 		{"runtime instance", string(o.Seed.Instance)},
 		{"input event identity", string(o.Seed.InputFact)},
 		{"result event identity", string(o.Seed.ResultFact)},
@@ -1118,17 +1119,17 @@ func restoreAssertAttribution(t *testing.T, outcome func(*testing.T, string) res
 			t.Fatalf("the %s restart rebuilt no task %s; recovery=%+v", mode, o.Seed.TaskID, o.Recover.Recovery)
 		}
 
-		invocation, held := restoreInvocationOf(o.Recover, o.Seed.Invocation)
+		invocation, held := restoreInvocationOf(o.Recover, o.Seed.TurnInvocation)
 		if !held {
-			t.Fatalf("the %s restart read no invocation %s; invocations=%+v", mode, o.Seed.Invocation, o.Recover.Invocations)
+			t.Fatalf("the %s restart read no invocation %s; invocations=%+v", mode, o.Seed.TurnInvocation, o.Recover.Invocations)
 		}
 		if invocation.Address != o.Seed.Address {
 			t.Fatalf("the %s restart attributed invocation %s to %+v, want the committed site %+v",
-				mode, o.Seed.Invocation, invocation.Address, o.Seed.Address)
+				mode, o.Seed.TurnInvocation, invocation.Address, o.Seed.Address)
 		}
 		if invocation.Instance != o.Seed.Instance {
 			t.Fatalf("the %s restart attributed invocation %s to instance %q, want the admitting instance %q",
-				mode, o.Seed.Invocation, invocation.Instance, o.Seed.Instance)
+				mode, o.Seed.TurnInvocation, invocation.Instance, o.Seed.Instance)
 		}
 
 		taskView, held := restoreTaskOf(o.Recover, o.Seed.TaskID)
@@ -1166,9 +1167,9 @@ func restoreAssertPairing(t *testing.T, outcome func(*testing.T, string) restore
 			t.Fatalf("the %s restart paired task %s with call %q, want the call the provider issued %q",
 				mode, chain.TaskID, chain.CallID, o.Seed.CallID)
 		}
-		if chain.Invocation != o.Seed.Invocation {
-			t.Fatalf("the %s restart paired task %s with invocation %q, want %q",
-				mode, chain.TaskID, chain.Invocation, o.Seed.Invocation)
+		if chain.Invocation != o.Seed.TurnInvocation {
+			t.Fatalf("the %s restart paired task %s with invocation %q, want the range %q the turn ran under",
+				mode, chain.TaskID, chain.Invocation, o.Seed.TurnInvocation)
 		}
 		if chain.Source != o.Seed.Address {
 			t.Fatalf("the %s restart paired task %s with source %+v, want %+v",
@@ -1834,6 +1835,7 @@ func TestEventIntegrityProjection(t *testing.T) {
 	t.Run("fold_product_no_self_trigger", runFoldProductNoSelfTrigger)
 	t.Run("actual_request_assembly", runActualRequestAssembly)
 	t.Run("notice_visible_under_fold", runNoticeVisibleUnderFold)
+	t.Run("range_head_survives_fold_rewrite", runRangeHeadSurvivesFoldRewrite)
 }
 
 // runSmallWindowFoldAndRestore is the positive anchor of the projection fold.
@@ -2327,8 +2329,11 @@ func runFoldProductNoSelfTrigger(t *testing.T) {
 	if err != nil {
 		t.Fatalf("fold the folded projection again: %v", err)
 	}
-	if !second.Triggered {
-		t.Fatalf("second fold report = %+v, want the forced fold to run", second)
+	// The forced fold (threshold<=1 always triggering) is retired by the
+	// capacity/candidate rules: a fold with no candidates mints nothing and
+	// reports not triggered, while the products it already minted stand.
+	if second.Triggered {
+		t.Fatalf("second fold report = %+v, want the candidate-gated fold to report not triggered", second)
 	}
 	if second.NewFolded != 0 || second.MidFolded != 0 || len(second.Products) != 0 || len(second.Requests) != 0 {
 		t.Fatalf("second fold report = %+v, want a fold that consumes and mints nothing", second)
@@ -2351,8 +2356,10 @@ func runFoldProductNoSelfTrigger(t *testing.T) {
 	if err != nil {
 		t.Fatalf("fold the synthetic-keyed segment: %v", err)
 	}
-	if !guardedReport.Triggered {
-		t.Fatalf("synthetic fold report = %+v, want the forced fold to run", guardedReport)
+	// The forced trigger beside no candidates is retired with the capacity
+	// gate: the synthetic-keyed plan reports not triggered and never folds.
+	if guardedReport.Triggered {
+		t.Fatalf("synthetic fold report = %+v, want the candidate-gated fold to report not triggered", guardedReport)
 	}
 	if guardedReport.NewFolded != 0 || len(guardedReport.Products) != 0 {
 		t.Fatalf("synthetic fold report = %+v, want the synthetic-keyed plan never folded", guardedReport)
@@ -3260,6 +3267,13 @@ func writeRestartReport(t *testing.T, path string, report restartChildReport) {
 	}
 }
 
+// restartWorkStandingAtAccepted is the phrase the close report prints for the work
+// an accepted task still owes: the report names the status the machine holds with
+// the obligation vocabulary gone, so an accepted task awaiting its execution reads
+// as work standing at accepted. The phrase is pinned here, so a silent re-wording
+// of the report fails this consumer instead of passing unread.
+const restartWorkStandingAtAccepted = "the task stands at accepted"
+
 // restartAssertNothingCommitted proves an interruption before the settle commit
 // leaves the admitted task behind and only the admitted task: the restart
 // rebuilds it as accepted beside the awaited execution, reads no notification
@@ -3289,8 +3303,8 @@ func restartAssertNothingCommitted(t *testing.T, o restartOutcome) {
 	if o.Recover.Drain.Drained || len(o.Recover.Drain.Unsettled) != 1 {
 		t.Fatalf("the %s restart drain = %+v, want the admitted task's execution reported open", o.Phase, o.Recover.Drain)
 	}
-	if open := o.Recover.Drain.Unsettled[0]; !strings.Contains(open, taskID) || !strings.Contains(open, string(task.ObligationAwaitingTool)) {
-		t.Fatalf("the %s restart reports %q open, want the awaited execution of the task %s kept visible", o.Phase, open, taskID)
+	if open := o.Recover.Drain.Unsettled[0]; !strings.Contains(open, taskID) || !strings.Contains(open, restartWorkStandingAtAccepted) {
+		t.Fatalf("the %s restart reports %q open, want the awaited execution of the task %s kept visible at the status it stands in", o.Phase, open, taskID)
 	}
 }
 
@@ -3569,6 +3583,74 @@ func runNoticeVisibleUnderFold(t *testing.T) {
 	if !containsMessage(request.Messages, material, model.RoleUser) {
 		t.Fatalf("the request of the notice range = %+v, want the notice identity and its material %q; the notice fact is in the chain, so the loss is the visibility the rewrite left, not the ledger",
 			request.Messages, material)
+	}
+}
+
+// runRangeHeadSurvivesFoldRewrite pins that the ended boundary of the range in
+// flight is an identity, never a position: the age fold rewrites the sequence
+// the commits record, so a stored position names other material or falls past
+// the shortened sequence — the request of that range then presents the notice
+// that opened it a second time as ended material beside the transcript.
+// - the notice that opens the range lands, then a fold rewrites the sequence under it
+// - the request of that range reads the notice material exactly once
+func runRangeHeadSurvivesFoldRewrite(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	provider := &replayModel{name: "model-a"}
+	run, addr := newFoldWindowRun(t, ctx, provider)
+	for turn := 0; turn < 3; turn++ {
+		commitProjectionTurn(t, ctx, run, addr, turn)
+	}
+
+	const (
+		invocation = event.InvocationID("inv-range-head-under-fold")
+		taskID     = event.TaskID("task-77")
+		material   = "tagent: task task-77 settled\nresult:\nthe fold-rewritten head worker reports 91"
+	)
+	notice := task.Notice{TaskID: taskID, Kind: task.NoticeSettled}
+	before := len(projectionEntriesOf(t, run, addr.SessionID))
+	if _, err := run.CommitToSession(ctx, addr, event.Event{
+		Key:       agent.NoticeFactKey(invocation, notice),
+		Type:      event.TypeFeedback,
+		Timestamp: projectionBase.Add(time.Hour),
+		Meta: map[string]string{
+			event.MetaKeyTriggerSource: "task",
+			event.MetaKeyEventSummary:  string(task.NoticeSettled),
+			event.MetaKeyNoticeKind:    string(task.NoticeSettled),
+			event.MetaKeyTaskID:        string(taskID),
+		},
+		Message:      model.Message{Role: model.RoleUser, Content: material},
+		InvocationID: invocation,
+		TaskID:       taskID,
+	}); err != nil {
+		t.Fatalf("commit the notice: %v", err)
+	}
+	after := projectionEntriesOf(t, run, addr.SessionID)
+	if len(after) >= before {
+		t.Fatalf("the notice commit folded nothing (entries before=%d after=%d), so the sequence the boundary was measured on still stands", before, len(after))
+	}
+
+	if _, err := run.Invoke(ctx, assembly.InvokeRequest{
+		InvocationID:  invocation,
+		Address:       addr,
+		TriggerSource: "task",
+	}); err != nil {
+		t.Fatalf("drive the notice range: %v", err)
+	}
+	requests := provider.recorded()
+	if len(requests) == 0 {
+		t.Fatal("the notice range drove no model request")
+	}
+	copies := 0
+	for _, msg := range requests[len(requests)-1].Messages {
+		if strings.Contains(msg.Content, "task-77 settled") {
+			copies++
+		}
+	}
+	if copies != 1 {
+		t.Fatalf("copies of the range-opening notice in its own request = %d, want exactly 1: "+
+			"a position boundary the fold rewrote presents the notice a second time as ended material (request = %+v)",
+			copies, requests[len(requests)-1].Messages)
 	}
 }
 
@@ -4530,9 +4612,14 @@ type restoreChildReport struct {
 	Mode  string `json:"mode"`
 	PID   int    `json:"pid"`
 
-	Invocation event.InvocationID `json:"invocation,omitempty"`
-	Instance   event.InstanceID   `json:"instance,omitempty"`
-	Address    event.Address      `json:"address,omitempty"`
+	// Invocation is the identity the entry submitted the turn under, and
+	// TurnInvocation is the range the consumption loop minted for the segment
+	// that ran it: the committed input fact keeps the submitter's identity, and
+	// the facts the turn itself committed name its own range.
+	Invocation     event.InvocationID `json:"invocation,omitempty"`
+	TurnInvocation event.InvocationID `json:"turn_invocation,omitempty"`
+	Instance       event.InstanceID   `json:"instance,omitempty"`
+	Address        event.Address      `json:"address,omitempty"`
 
 	Input      string        `json:"input,omitempty"`
 	InputFact  event.EventID `json:"input_fact,omitempty"`
@@ -4819,7 +4906,10 @@ func seedRestoreProcess(t *testing.T, mode, root, out string) {
 	defer cancel()
 	rig := newRestoreRig(t, root)
 	rig.scriptToolTurn(recall.QueryToolName, restoreCallID, restoreWatchArguments, restoreSeedAnswer)
-	rig.mustInvoke(ctx, restoreSeedInvocation, restoreSeedInput)
+	turn, err := rig.invoke(ctx, restoreSeedInvocation, restoreSeedInput)
+	if err != nil {
+		t.Fatalf("drive the seed turn: %v", err)
+	}
 	run := rig.host.Run()
 
 	input := persistenceFactByContent(t, run, restoreSeedInput)
@@ -4832,22 +4922,30 @@ func seedRestoreProcess(t *testing.T, mode, root, out string) {
 		t.Fatalf("the seed turn sent no model request")
 	}
 	call := restoreCallOf(t, requests)
+	if input.InvocationID != event.InvocationID(restoreSeedInvocation) {
+		t.Fatalf("the committed input fact of the seed turn attributed to %q, want the submitter identity %q: the segment the loop ran mints its own range beside it",
+			input.InvocationID, restoreSeedInvocation)
+	}
+	if !strings.HasPrefix(string(turn.InvocationID), string(persistenceAddress.SessionID)+"#c") {
+		t.Fatalf("the seed turn ran under the range %q, want a segment range of %s", turn.InvocationID, persistenceAddress.SessionID)
+	}
 	report := restoreChildReport{
-		Mode:       mode,
-		PID:        os.Getpid(),
-		Invocation: restoreSeedInvocation,
-		Address:    persistenceAddress,
-		Instance:   input.InstanceID,
-		Input:      input.Message.Content,
-		InputFact:  input.Key,
-		CallID:     call.ToolCalls[0].ID,
-		CallText:   call.Content,
-		ToolName:   call.ToolCalls[0].Name,
-		ResultText: result.Message.Content,
-		ResultFact: result.Key,
-		Answer:     answer.Message.Content,
-		AnswerFact: answer.Key,
-		TaskID:     result.TaskID,
+		Mode:           mode,
+		PID:            os.Getpid(),
+		Invocation:     restoreSeedInvocation,
+		TurnInvocation: turn.InvocationID,
+		Address:        persistenceAddress,
+		Instance:       input.InstanceID,
+		Input:          input.Message.Content,
+		InputFact:      input.Key,
+		CallID:         call.ToolCalls[0].ID,
+		CallText:       call.Content,
+		ToolName:       call.ToolCalls[0].Name,
+		ResultText:     result.Message.Content,
+		ResultFact:     result.Key,
+		Answer:         answer.Message.Content,
+		AnswerFact:     answer.Key,
+		TaskID:         result.TaskID,
 	}
 	t.Logf("restore seed: committed input=%s result=%s answer=%s task=%s call=%s instance=%s",
 		report.InputFact, report.ResultFact, report.AnswerFact, report.TaskID, report.CallID, report.Instance)

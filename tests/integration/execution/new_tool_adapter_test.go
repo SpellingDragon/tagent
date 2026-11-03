@@ -53,8 +53,8 @@ func TestNewToolAdapterNeedsNoHostCompensation(t *testing.T) {
 		if err != nil {
 			t.Fatalf("invoke the adapter range: %v", err)
 		}
-		if turn.Terminal != model.KindCompleted || len(turn.Decisions) != 2 {
-			t.Fatalf("turn = (%v, %d decisions), want the tool call turn and the final answer", turn.Terminal, len(turn.Decisions))
+		if turn.Terminal != model.KindCompleted || turn.DecisionCount != 2 {
+			t.Fatalf("turn = (%v, %d decisions), want the tool call turn and the final answer", turn.Terminal, turn.DecisionCount)
 		}
 
 		requests := provider.recorded()
@@ -167,8 +167,8 @@ func TestNewToolAdapterNeedsNoHostCompensation(t *testing.T) {
 		if err != nil {
 			t.Fatalf("invoke the adapter range: %v", err)
 		}
-		if len(turn.Decisions) != 2 {
-			t.Fatalf("turn = %d decisions, want the tool call turn and the decision beside its settled failure", len(turn.Decisions))
+		if turn.DecisionCount != 2 {
+			t.Fatalf("turn = %d decisions, want the tool call turn and the decision beside its settled failure", turn.DecisionCount)
 		}
 		requests := provider.recorded()
 		if len(requests) != 2 {

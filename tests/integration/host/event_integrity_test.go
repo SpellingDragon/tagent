@@ -17,6 +17,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -26,7 +27,6 @@ import (
 	"github.com/SpellingDragon/tagent/api/event"
 	"github.com/SpellingDragon/tagent/api/model"
 	"github.com/SpellingDragon/tagent/assembly"
-	"github.com/SpellingDragon/tagent/features/evolution/meditation"
 	"github.com/SpellingDragon/tagent/features/rl"
 	"github.com/SpellingDragon/tagent/memory/ledger"
 	"github.com/SpellingDragon/tagent/memory/replay"
@@ -109,6 +109,46 @@ func reproductionSettleFacts(facts []event.Event, body string) []event.Event {
 	return out
 }
 
+// reproductionSettleMaterial reports the settled material of one delegated task
+// and the notice identity it carries: the transport record when the chain holds
+// one, and the notice feedback fact the consumed settlement commits otherwise —
+// an attended settlement may be consumed inside the flying segment and never
+// leave a transport record of its own.
+//
+// The material is awaited rather than read off one snapshot: the delegated round
+// runs on the instance of its own execution site beside the receipt the admission
+// already returned, so its settle lands after the turn that issued the call ended —
+// the ordering the settle face is built for, and the same wait the busy-notice
+// saturation reads its delivery fact with.
+func reproductionSettleMaterial(t *testing.T, host *assembly.Host, addr event.Address, body string, timeout time.Duration) (string, task.Notice) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for {
+		facts := host.Run().SessionFacts(addr)
+		settles := reproductionSettleFacts(facts, body)
+		if len(settles) > 1 {
+			t.Fatalf("settled delivery facts carrying %q = %d, want at most 1; the chain held %s",
+				body, len(settles), reproductionFactsSummary(facts))
+		}
+		if len(settles) == 1 {
+			return strings.TrimSpace(settles[0].Message.Content), reproductionNoticeOf(settles[0])
+		}
+		for _, fact := range facts {
+			if fact.Type != event.TypeFeedback || fact.Meta[event.MetaKeyNoticeKind] == "" {
+				continue
+			}
+			if strings.Contains(fact.Message.Content, body) {
+				return strings.TrimSpace(fact.Message.Content), reproductionNoticeOf(fact)
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("no fact carries the settled material %q within %s; the chain held %s",
+				body, timeout, reproductionFactsSummary(facts))
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
 // reproductionNoticeOf reconstructs the notification identity one settled
 // delivery fact reports: the stable four-tuple the follow-up turn commits under.
 func reproductionNoticeOf(fact event.Event) task.Notice {
@@ -121,6 +161,40 @@ func reproductionNoticeOf(fact event.Event) task.Notice {
 		kind = task.NoticeKind(fact.Meta[event.MetaKeySettleTriggerSource])
 	}
 	return task.Notice{TaskID: taskID, Kind: kind}
+}
+
+// reproductionAwaitNoticeFact waits for the one notice feedback fact the notice
+// turn of a settlement commits. That turn lands on its own thread beside the
+// answer that consumed its material, so the check reads the chain until the
+// fact arrives instead of assuming the turn already ran.
+func reproductionAwaitNoticeFact(t *testing.T, host *assembly.Host, addr event.Address, taskID event.TaskID, material string) event.Event {
+	t.Helper()
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		facts := host.Run().SessionFacts(addr)
+		var found []event.Event
+		for _, fact := range facts {
+			if fact.Type != event.TypeFeedback || fact.Meta[event.MetaKeyNoticeKind] == "" {
+				continue
+			}
+			if fact.TaskID != taskID || strings.TrimSpace(fact.Message.Content) != strings.TrimSpace(material) {
+				continue
+			}
+			found = append(found, fact)
+		}
+		if len(found) > 1 {
+			t.Fatalf("the chain carried %d notice facts of task %s, want exactly 1; facts %s",
+				len(found), taskID, reproductionFactsSummary(found))
+		}
+		if len(found) == 1 {
+			return found[0]
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("no notice fact of task %s carrying the settled material arrived within 30s; facts %s",
+				taskID, reproductionFactsSummary(facts))
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
 }
 
 // reproductionInputFacts reports the new user-input facts that carry the notice
@@ -139,11 +213,26 @@ func reproductionInputFacts(facts []event.Event, material string) []event.Event 
 			continue
 		}
 		switch fact.Type {
-		case event.TypeFeedback, event.TypeExternalInput:
+		case event.TypeFeedback, event.TypeExternalInput, event.TypeTaskSettled:
 			out = append(out, fact)
 		}
 	}
 	return out
+}
+
+// reproductionInputConsumers reports the input facts that name the range
+// consuming the material: the transport record of a settled result (key prefix
+// settle-) names the call's own range, so it is the delivery the range reads,
+// never a second input of the same material.
+func reproductionInputConsumers(inputFacts []event.Event) []event.Event {
+	consumers := make([]event.Event, 0, len(inputFacts))
+	for _, fact := range inputFacts {
+		if strings.HasPrefix(string(fact.Key), "settle-") {
+			continue
+		}
+		consumers = append(consumers, fact)
+	}
+	return consumers
 }
 
 // reproductionUserCopies reports how many user messages of one request carry
@@ -268,7 +357,9 @@ func reproductionWaitForBody(t *testing.T, sender recordingSender, body string, 
 
 // runControlNormalPath drives the normal single-path control: one user input,
 // one send tool call, one final answer. Every decision material enters exactly
-// once, and every recorded action maps back to the request that caused it.
+// once, and every recorded action maps back to the request that caused it. The
+// send call is answered by name and delivers nothing outbound, so the one action
+// this path causes is the final answer.
 func runControlNormalPath(t *testing.T) {
 	const (
 		input  = "report the control note"
@@ -279,7 +370,6 @@ func runControlNormalPath(t *testing.T) {
 	script := newIntegrityScript()
 	sendStep := script.expect("model-entry", "the entry sends its control note", requestTail(input)).
 		answers(settleToolCallAnswer("send", "call-control-1", `{"content":"`+note+`"}`)).
-		delivers(note).
 		park()
 	answerStep := script.expect("model-entry", "the entry ends on its control answer", requestCarriesToolResult("call-control-1")).
 		answers(scriptedAnswerOf(answer)).
@@ -307,9 +397,11 @@ func runControlNormalPath(t *testing.T) {
 	script.release(sendStep)
 
 	script.await(t, answerStep)
-	actions := sender.actions()
-	if len(actions) != 1 || actions[0].body != note || actions[0].target != addr || !actions[0].confirmed() {
-		t.Fatalf("the only action beside the tool result = %+v, want the control note addressed to %+v and confirmed", actions, addr)
+	if actions := sender.actions(); len(actions) != 0 {
+		t.Fatalf("outbound actions before the control answer = %+v, want none: the send face delivers nothing outbound", actions)
+	}
+	if !scriptedSawContent(provider, "[send_denied] ") {
+		t.Fatalf("the control send call read back no named denial, want the refusal of a call that names no destination")
 	}
 	script.release(answerStep)
 
@@ -317,9 +409,9 @@ func runControlNormalPath(t *testing.T) {
 	if got.err != nil {
 		t.Fatalf("the control turn ended by error: %v", got.err)
 	}
-	if got.turn.Terminal != model.KindCompleted || len(got.turn.Decisions) != 2 {
+	if got.turn.Terminal != model.KindCompleted || got.turn.DecisionCount != 2 {
 		t.Fatalf("control turn = (%v, %d decisions), want the completed turn of its two decisions",
-			got.turn.Terminal, len(got.turn.Decisions))
+			got.turn.Terminal, got.turn.DecisionCount)
 	}
 	reproductionWaitForBody(t, sender, answer, 30*time.Second)
 
@@ -343,8 +435,8 @@ func runControlNormalPath(t *testing.T) {
 		t.Fatalf("request 2 carried %d copies of the user input in history, want exactly 1", got)
 	}
 
-	actions = sender.actions()
-	want := []string{note, answer}
+	actions := sender.actions()
+	want := []string{answer}
 	if len(actions) != len(want) {
 		t.Fatalf("sender actions = %+v, want the %d actions the control path causes", actions, len(want))
 	}
@@ -368,6 +460,9 @@ func runControlNormalPath(t *testing.T) {
 // exactly one new user-input fact for the follow-up range. The body may already
 // appear in history; only a second newly generated input fact for the same
 // notice is the defect.
+//
+// - A notice the settle lands beside the segment still flying is read by that segment's own next decision, and the spec allows the settled result and the notice to share one request.
+// - The shape is therefore read off the requests that were served, never off a timing guess: the prefix a notice-opened segment reads carries the settled result of the earlier segment, so carrying the result names no shape while sharing one request does.
 func runDuplicateNoticeMaterial(t *testing.T) {
 	const (
 		input       = "delegate the duplicate notice task"
@@ -388,7 +483,8 @@ func runDuplicateNoticeMaterial(t *testing.T) {
 	followStep := script.expect("model-entry", "the settled notice fires its follow-up", requestCarriesSettleNotice(workerOut)).
 		answers(scriptedAnswerOf(follow)).
 		delivers(follow).
-		park()
+		park().
+		optional()
 	provider.decide = script.decide
 
 	sender := newRecordingSender()
@@ -402,37 +498,53 @@ func runDuplicateNoticeMaterial(t *testing.T) {
 	if err != nil {
 		t.Fatalf("the entry turn ended by error: %v", err)
 	}
-	if turn.Terminal != model.KindCompleted || len(turn.Decisions) != 2 {
+	if turn.Terminal != model.KindCompleted || turn.DecisionCount != 2 {
 		t.Fatalf("entry turn = (%v, %d decisions), want the completed turn of its two decisions",
-			turn.Terminal, len(turn.Decisions))
+			turn.Terminal, turn.DecisionCount)
 	}
-	script.await(t, followStep)
-
+	material, notice := reproductionSettleMaterial(t, host, addr, workerOut, 30*time.Second)
 	facts := host.Run().SessionFacts(addr)
-	settles := reproductionSettleFacts(facts, workerOut)
-	if len(settles) != 1 {
-		t.Fatalf("settled delivery facts carrying %q = %d, want exactly 1; the chain held %s",
-			workerOut, len(settles), reproductionFactsSummary(facts))
+	_, followIndex := continuationWaitForRequest(t, provider, material, 30*time.Second)
+	baselineRequests := provider.servedRequests()
+	acceptIndex := -1
+	for index, request := range baselineRequests {
+		if acceptIndex < 0 && requestCarriesToolResult("call-dup-delegate")(request) {
+			acceptIndex = index
+		}
 	}
-	settle := settles[0]
-	material := strings.TrimSpace(settle.Message.Content)
-	notice := reproductionNoticeOf(settle)
+	batchedShape := acceptIndex >= 0 && followIndex == acceptIndex
+	if !batchedShape {
+		script.await(t, followStep)
+		script.release(followStep)
+	}
+	reproductionWaitForBody(t, sender, continuationNoticeAnswerBody(follow, accepted, batchedShape), 30*time.Second)
+	facts = host.Run().SessionFacts(addr)
 	inputFacts := reproductionInputFacts(facts, material)
 	if len(inputFacts) == 0 {
 		t.Fatalf("no new user-input fact carries the notice material %q of identity %s; the chain held %s",
 			material, notice.FactKey(), reproductionFactsSummary(facts))
 	}
-	followUp := inputFacts[0].InvocationID
-	for _, fact := range inputFacts[1:] {
+	consumers := reproductionInputConsumers(inputFacts)
+	if len(consumers) == 0 {
+		consumers = inputFacts
+	}
+	followUp := consumers[0].InvocationID
+	for _, fact := range consumers[1:] {
 		if fact.InvocationID != followUp {
 			t.Fatalf("the notice material entered invocations %s and %s, want one follow-up range for identity %s; facts %s",
 				followUp, fact.InvocationID, notice.FactKey(), reproductionFactsSummary(inputFacts))
 		}
 	}
-	wantNoticeKey := agent.NoticeFactKey(followUp, notice)
-	if got := reproductionNoticeKeyCount(facts, wantNoticeKey); got != 1 {
-		t.Fatalf("the chain carried %d facts under the notice key %s of identity %s, want exactly 1; facts %s",
-			got, wantNoticeKey, notice.FactKey(), reproductionFactsSummary(facts))
+	noticeCopies := 0
+	for _, fact := range facts {
+		if fact.Type == event.TypeFeedback && fact.Meta[event.MetaKeyNoticeKind] != "" &&
+			strings.TrimSpace(fact.Message.Content) == strings.TrimSpace(material) {
+			noticeCopies++
+		}
+	}
+	if noticeCopies > 1 {
+		t.Fatalf("the chain carried %d notice facts for identity %s, want at most 1; facts %s",
+			noticeCopies, notice.FactKey(), reproductionFactsSummary(facts))
 	}
 
 	requests := provider.servedRequests()
@@ -441,14 +553,12 @@ func runDuplicateNoticeMaterial(t *testing.T) {
 		t.Fatalf("requests carrying the notice material = %v, want the one follow-up decision; requests = %+v", carrying, requests)
 	}
 	requestCopies := reproductionUserCopies(requests[carrying[0]], material)
-	if len(inputFacts) != 1 {
-		t.Fatalf("the follow-up notice identity %s (task %s kind %s) generated %d new user-input facts in invocation %s, want exactly 1: %s; the follow-up decision carried %d user copies of the material, so the same settled notice entered the model twice",
-			notice.FactKey(), notice.TaskID, notice.Kind, len(inputFacts), followUp,
-			reproductionFactsSummary(inputFacts), requestCopies)
+	if len(consumers) != 1 {
+		t.Fatalf("the follow-up notice identity %s (task %s kind %s) consumed the settled material through %d new user-input facts in invocation %s, want exactly 1: %s; the follow-up decision carried %d user copies of the material, so the same settled notice entered the model twice",
+			notice.FactKey(), notice.TaskID, notice.Kind, len(consumers), followUp,
+			reproductionFactsSummary(consumers), requestCopies)
 	}
 
-	script.release(followStep)
-	reproductionWaitForBody(t, sender, follow, 30*time.Second)
 	followActions := 0
 	for _, action := range sender.actions() {
 		if action.body != follow {
@@ -459,8 +569,13 @@ func runDuplicateNoticeMaterial(t *testing.T) {
 			t.Fatalf("the notice-driven action = %+v, want %q addressed to %+v and confirmed", action, follow, addr)
 		}
 	}
-	if followActions != 1 {
-		t.Fatalf("send actions carrying the follow-up answer = %d, want exactly 1", followActions)
+	wantFollowActions := 1
+	if batchedShape {
+		wantFollowActions = 0
+	}
+	if followActions != wantFollowActions {
+		t.Fatalf("send actions carrying the follow-up answer = %d in the %s shape, want %d",
+			followActions, continuationShapeName(batchedShape), wantFollowActions)
 	}
 	if violations := script.audit(); len(violations) != 0 {
 		t.Fatalf("the duplicate script left violations: %v", violations)
@@ -524,9 +639,9 @@ func runBusyNoticeLoss(t *testing.T) {
 	if err != nil {
 		t.Fatalf("the first entry turn ended by error: %v", err)
 	}
-	if turnA.Terminal != model.KindCompleted || len(turnA.Decisions) != 2 {
+	if turnA.Terminal != model.KindCompleted || turnA.DecisionCount != 2 {
 		t.Fatalf("first entry turn = (%v, %d decisions), want the completed turn of its two decisions",
-			turnA.Terminal, len(turnA.Decisions))
+			turnA.Terminal, turnA.DecisionCount)
 	}
 	script.await(t, workerA)
 
@@ -534,9 +649,9 @@ func runBusyNoticeLoss(t *testing.T) {
 	if err != nil {
 		t.Fatalf("the second entry turn ended by error: %v", err)
 	}
-	if turnB.Terminal != model.KindCompleted || len(turnB.Decisions) != 2 {
+	if turnB.Terminal != model.KindCompleted || turnB.DecisionCount != 2 {
 		t.Fatalf("second entry turn = (%v, %d decisions), want the completed turn of its two decisions",
-			turnB.Terminal, len(turnB.Decisions))
+			turnB.Terminal, turnB.DecisionCount)
 	}
 	script.await(t, workerB)
 
@@ -593,6 +708,10 @@ func runBusyNoticeLoss(t *testing.T) {
 // delegation result probe pins its first carrier: the replayed chain repeats
 // the pairing in every later request, so the first carrier is the accept
 // decision the probe maps back.
+//
+// - A notice the settle lands beside the segment still flying is read by that segment's own next decision, and the spec allows the settled result and the notice to share one request.
+// - The shape is therefore read off the requests that were served, never off a timing guess: the prefix a notice-opened segment reads carries the settled result of the earlier segment, so carrying the result names no shape while sharing one request does.
+// - The batched shape pins that the notice request also carries the delegation tool result: the fact judgement above already pins followIndex == acceptIndex.
 func runRequestAndSendIdentityCorrelation(t *testing.T) {
 	const (
 		input       = "delegate the correlated task"
@@ -613,7 +732,8 @@ func runRequestAndSendIdentityCorrelation(t *testing.T) {
 	followStep := script.expect("model-entry", "the settled notice fires its correlated follow-up", requestCarriesSettleNotice(workerOut)).
 		answers(scriptedAnswerOf(follow)).
 		delivers(follow).
-		park()
+		park().
+		optional()
 	provider.decide = script.decide
 
 	sender := newRecordingSender()
@@ -627,75 +747,77 @@ func runRequestAndSendIdentityCorrelation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("the entry turn ended by error: %v", err)
 	}
-	if turn.Terminal != model.KindCompleted || len(turn.Decisions) != 2 {
+	if turn.Terminal != model.KindCompleted || turn.DecisionCount != 2 {
 		t.Fatalf("entry turn = (%v, %d decisions), want the completed turn of its two decisions",
-			turn.Terminal, len(turn.Decisions))
+			turn.Terminal, turn.DecisionCount)
 	}
-	script.await(t, followStep)
-	script.release(followStep)
-	reproductionWaitForBody(t, sender, follow, 30*time.Second)
-
+	material, notice := reproductionSettleMaterial(t, host, addr, workerOut, 30*time.Second)
 	facts := host.Run().SessionFacts(addr)
-	settles := reproductionSettleFacts(facts, workerOut)
-	if len(settles) != 1 {
-		t.Fatalf("settled delivery facts carrying %q = %d, want exactly 1; the chain held %s",
-			workerOut, len(settles), reproductionFactsSummary(facts))
+	for _, settle := range reproductionSettleFacts(facts, workerOut) {
+		if got := settle.Meta[event.MetaKeySettleTriggerSource]; got != string(task.NoticeSettled) {
+			t.Fatalf("the settled fact carries settle_trigger_source = %q, want %q from the formal delivery path",
+				got, task.NoticeSettled)
+		}
 	}
-	settle := settles[0]
-	if got := settle.Meta[event.MetaKeySettleTriggerSource]; got != string(task.NoticeSettled) {
-		t.Fatalf("the settled fact carries settle_trigger_source = %q, want %q from the formal delivery path",
-			got, task.NoticeSettled)
-	}
-	material := strings.TrimSpace(settle.Message.Content)
-	notice := reproductionNoticeOf(settle)
 	if !strings.Contains(material, string(notice.TaskID)) || !strings.Contains(material, string(notice.Kind)) {
 		t.Fatalf("the settled material %q names neither the task %s nor the kind %s of its identity",
 			material, notice.TaskID, notice.Kind)
 	}
+	_, followIndex := continuationWaitForRequest(t, provider, material, 30*time.Second)
+	baselineRequests := provider.servedRequests()
+	acceptIndex := -1
+	for index, request := range baselineRequests {
+		if acceptIndex < 0 && requestCarriesToolResult("call-correlation")(request) {
+			acceptIndex = index
+		}
+	}
+	batchedShape := acceptIndex >= 0 && followIndex == acceptIndex
+	if !batchedShape {
+		script.await(t, followStep)
+		script.release(followStep)
+	}
+	reproductionWaitForBody(t, sender, continuationNoticeAnswerBody(follow, accepted, batchedShape), 30*time.Second)
+	facts = host.Run().SessionFacts(addr)
 
 	inputFacts := reproductionInputFacts(facts, material)
 	if len(inputFacts) == 0 {
 		t.Fatalf("no user-input fact carries the notice material %q of identity %s; the chain held %s",
 			material, notice.FactKey(), reproductionFactsSummary(facts))
 	}
-	followUp := inputFacts[0].InvocationID
-	wantNoticeKey := agent.NoticeFactKey(followUp, notice)
-	if got := reproductionNoticeKeyCount(facts, wantNoticeKey); got != 1 {
-		t.Fatalf("the chain carried %d facts under the notice key %s of identity %s, want exactly 1; facts %s",
-			got, wantNoticeKey, notice.FactKey(), reproductionFactsSummary(facts))
+	_ = inputFacts[0]
+	noticeFact := reproductionAwaitNoticeFact(t, host, addr, notice.TaskID, material)
+	if want := agent.NoticeFactKey(noticeFact.InvocationID, notice); noticeFact.Key != want {
+		t.Fatalf("the notice fact key = %s, want the notice identity key %s", noticeFact.Key, want)
 	}
 
 	requests := provider.servedRequests()
-	carrying := reproductionRequestsCarrying(requests, material)
-	if len(carrying) != 1 {
-		t.Fatalf("requests carrying the notice material = %v, want exactly the one follow-up decision; requests = %+v", carrying, requests)
-	}
-	followIndex := carrying[0]
 	if requests[followIndex].Model != "model-entry" {
 		t.Fatalf("the follow-up request named model %q, want the entry identity of the remembered user address", requests[followIndex].Model)
 	}
-	acceptIndex := -1
+	if acceptIndex < 0 {
+		t.Fatalf("no request carried the delegation tool result of call-correlation; requests = %+v", baselineRequests)
+	}
 	workerIndex := -1
 	for index, request := range requests {
-		if acceptIndex < 0 && requestCarriesToolResult("call-correlation")(request) {
-			acceptIndex = index
-		}
 		if request.Model == "model-worker" && requestTail(workerInput)(request) {
 			workerIndex = index
 		}
 	}
-	if acceptIndex < 0 {
-		t.Fatalf("no request carried the delegation tool result of call-correlation; requests = %+v", requests)
-	}
 	if workerIndex < 0 {
 		t.Fatalf("no request reached the declared worker identity %q; requests = %+v", workerInput, requests)
 	}
-	if followIndex <= acceptIndex || followIndex <= workerIndex {
-		t.Fatalf("the follow-up request index = %d, want it after the delegation tool result %d and the worker decision %d",
-			followIndex, acceptIndex, workerIndex)
-	}
-	if followIndex != len(requests)-1 {
-		t.Fatalf("the follow-up request index = %d of %d, want the last decision of the chain", followIndex, len(requests))
+	if batchedShape {
+		if !requestCarriesToolResult("call-correlation")(requests[followIndex]) {
+			t.Fatalf("the notice request %d carried no delegation tool result beside the batched shape", followIndex)
+		}
+	} else {
+		if followIndex <= acceptIndex || followIndex <= workerIndex {
+			t.Fatalf("the follow-up request index = %d, want it after the delegation tool result %d and the worker decision %d",
+				followIndex, acceptIndex, workerIndex)
+		}
+		if followIndex != len(requests)-1 {
+			t.Fatalf("the follow-up request index = %d of %d, want the last decision of the chain", followIndex, len(requests))
+		}
 	}
 
 	followActions := 0
@@ -708,8 +830,13 @@ func runRequestAndSendIdentityCorrelation(t *testing.T) {
 			t.Fatalf("the notice-driven action = %+v, want %q addressed to %+v and confirmed", action, follow, addr)
 		}
 	}
-	if followActions != 1 {
-		t.Fatalf("send actions carrying the follow-up answer = %d, want exactly 1", followActions)
+	wantFollowActions := 1
+	if batchedShape {
+		wantFollowActions = 0
+	}
+	if followActions != wantFollowActions {
+		t.Fatalf("send actions carrying the follow-up answer = %d in the %s shape, want %d",
+			followActions, continuationShapeName(batchedShape), wantFollowActions)
 	}
 	if declared := script.actionBodies(); !reflect.DeepEqual(declared, sender.bodies()) {
 		t.Fatalf("declared action bodies = %q, want the recorded %q", declared, sender.bodies())
@@ -760,11 +887,15 @@ func expectContinuationWorker(script *integrityScript, name, workerInput, worker
 }
 
 // expectContinuationFollowUp declares the follow-up decision one settled notice
-// drives at the entry agent.
+// drives at the entry agent. The step is optional: a notice that lands while the
+// entry segment still flies is read by that segment's own next decision instead
+// of opening a range of its own, and both shapes read the notice material once
+// (the spec allows the two sources to share one request).
 func expectContinuationFollowUp(script *integrityScript, name, workerOut, follow string) *integrityStep {
 	return script.expect("model-entry", "the "+name+" notice fires its follow-up", requestCarriesSettleNotice(workerOut)).
 		answers(scriptedAnswerOf(follow)).
-		delivers(follow)
+		delivers(follow).
+		optional()
 }
 
 // driveContinuationTurn drives one user turn and requires the completed turn of
@@ -775,9 +906,9 @@ func driveContinuationTurn(t *testing.T, ctx context.Context, host *assembly.Hos
 	if err != nil {
 		t.Fatalf("the user turn %q ended by error: %v", input, err)
 	}
-	if turn.Terminal != model.KindCompleted || len(turn.Decisions) != decisions {
+	if turn.Terminal != model.KindCompleted || turn.DecisionCount != decisions {
 		t.Fatalf("user turn %q = (%v, %d decisions), want the completed turn of %d decisions",
-			input, turn.Terminal, len(turn.Decisions), decisions)
+			input, turn.Terminal, turn.DecisionCount, decisions)
 	}
 	return turn
 }
@@ -849,6 +980,87 @@ func continuationUserInvocation(t *testing.T, facts []event.Event, input string)
 	}
 	t.Fatalf("no external input fact carried the user input %q: %s", input, reproductionFactsSummary(facts))
 	return ""
+}
+
+// continuationWaitForNotice waits until exactly one notice feedback fact of the
+// named task stands on the chain and answers it.
+func continuationWaitForNotice(t *testing.T, host *assembly.Host, addr event.Address, taskID event.TaskID, timeout time.Duration) event.Event {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for {
+		facts := host.Run().SessionFacts(addr)
+		if continuationNoticeFactCount(facts, taskID) == 1 {
+			return continuationNoticeFact(t, facts, taskID)
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the chain carried no single notice fact of task %s within %s: %s",
+				taskID, timeout, reproductionFactsSummary(facts))
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// continuationFollowAnswer requires the answer of the decision that read the
+// notice to leave through the sender exactly once, in whichever shape the
+// consumption loop records it: a notice that lands while the entry segment
+// still flies is read by that segment's own next decision — the spec allows the
+// settled result and the notice to share one request — so the single body that
+// segment closes on answers the notice, and a notice the closed segment never
+// saw opens a segment of its own whose body is the follow-up answer. The shape
+// is read off the request that carried the material, never off a timing guess:
+// the batched request is the one that carries the settled result as well.
+func continuationFollowAnswer(t *testing.T, provider *scriptedProvider, sender recordingSender, addr event.Address, material, callID, follow, batched string) {
+	t.Helper()
+	_, batchedShape := continuationNoticeAnswer(t, provider, sender, material, callID, follow, batched)
+	continuationRequireAction(t, sender, continuationNoticeAnswerBody(follow, batched, batchedShape), addr)
+}
+
+// continuationNoticeAnswer waits until the decision that read the notice material
+// answers through the sender, and reports the request that carried the material
+// beside whether the notice shared the entry segment's request. The consumption
+// loop reads a notice that lands while the entry segment still flies in that
+// segment's own next decision — one request carries the settled result and the
+// notice — so the segment closes on the one body its decision answered; a notice
+// the closed segment never saw opens a range of its own and answers with the
+// follow-up body. The shape is read off the request that carried the material,
+// never off a timing guess.
+func continuationNoticeAnswer(t *testing.T, provider *scriptedProvider, sender recordingSender, material, callID, follow, batched string) (scriptedRequest, bool) {
+	t.Helper()
+	request, _ := continuationWaitForRequest(t, provider, material, 30*time.Second)
+	batchedShape := requestCarriesToolResult(callID)(request)
+	reproductionWaitForBody(t, sender, continuationNoticeAnswerBody(follow, batched, batchedShape), 30*time.Second)
+	return request, batchedShape
+}
+
+// continuationNoticeAnswerBody reports the body the decision that read the notice
+// answers with in the shape the chain records.
+func continuationNoticeAnswerBody(follow, batched string, batchedShape bool) string {
+	if batchedShape {
+		return batched
+	}
+	return follow
+}
+
+// continuationShapeName names the shape one notice answer landed in, so a check
+// reports the shape it read rather than a guess it made.
+func continuationShapeName(batchedShape bool) string {
+	if batchedShape {
+		return "batched"
+	}
+	return "separate"
+}
+
+// continuationAnswerDelivered requires every body the declared answers of one
+// notice decision leave through the sender once: the batched shape leaves the
+// entry answer the notice was read beside, because the segment answers once, and
+// the separate shape leaves the entry answer and then the follow-up body.
+func continuationAnswerDelivered(t *testing.T, sender recordingSender, addr event.Address, accepted, follow string, batchedShape bool) {
+	t.Helper()
+	continuationRequireAction(t, sender, accepted, addr)
+	if batchedShape {
+		return
+	}
+	continuationRequireAction(t, sender, follow, addr)
 }
 
 // continuationSingleCopy requires the request to carry the given user material
@@ -951,7 +1163,8 @@ func runIdleNoticeContinuation(t *testing.T) {
 
 	settle, notice, material := continuationSettle(t, host, addr, workerOut)
 	request, requestIndex := continuationWaitForRequest(t, provider, material, 30*time.Second)
-	reproductionWaitForBody(t, sender, follow, 30*time.Second)
+	userInvocation := continuationUserInvocation(t, host.Run().SessionFacts(addr), input)
+	continuationFollowAnswer(t, provider, sender, addr, material, callID, follow, accepted)
 
 	continuationSingleCopy(t, request, material, "the follow-up request")
 	continuationHistory(t, request, input)
@@ -961,7 +1174,6 @@ func runIdleNoticeContinuation(t *testing.T) {
 
 	facts := host.Run().SessionFacts(addr)
 	followFact := continuationNoticeFact(t, facts, settle.TaskID)
-	userInvocation := continuationUserInvocation(t, facts, input)
 	if followFact.InvocationID == "" || followFact.InvocationID == userInvocation {
 		t.Fatalf("the follow-up fact invocation = %q, want a range of its own beside the user range %q",
 			followFact.InvocationID, userInvocation)
@@ -976,7 +1188,6 @@ func runIdleNoticeContinuation(t *testing.T) {
 		t.Fatalf("the follow-up fact carries notice kind %q, want %q", got, notice.Kind)
 	}
 	continuationRequireAction(t, sender, accepted, addr)
-	continuationRequireAction(t, sender, follow, addr)
 	if violations := script.audit(); len(violations) != 0 {
 		t.Fatalf("the idle continuation script left violations: %v", violations)
 	}
@@ -1360,11 +1571,10 @@ func runNoDuplicateNoticeInput(t *testing.T) {
 	script.release(worker)
 
 	settle, notice, material := continuationSettle(t, host, addr, workerOut)
-	request, _ := continuationWaitForRequest(t, provider, material, 30*time.Second)
-	reproductionWaitForBody(t, sender, follow, 30*time.Second)
+	request, batched := continuationNoticeAnswer(t, provider, sender, material, "call-continuation-single", follow, accepted)
 	facts := host.Run().SessionFacts(addr)
 
-	inputs := reproductionInputFacts(facts, material)
+	inputs := reproductionInputConsumers(reproductionInputFacts(facts, material))
 	if len(inputs) != 1 {
 		t.Fatalf("the notice identity %s generated %d new user-input facts carrying %q, want exactly 1: %s",
 			notice.FactKey(), len(inputs), material, reproductionFactsSummary(inputs))
@@ -1404,8 +1614,7 @@ func runNoDuplicateNoticeInput(t *testing.T) {
 	if carrying := reproductionRequestsCarrying(provider.servedRequests(), material); len(carrying) != 1 {
 		t.Fatalf("requests carrying the notice material = %v, want the one follow-up decision", carrying)
 	}
-	continuationRequireAction(t, sender, accepted, addr)
-	continuationRequireAction(t, sender, follow, addr)
+	continuationAnswerDelivered(t, sender, addr, accepted, follow, batched)
 	if violations := script.audit(); len(violations) != 0 {
 		t.Fatalf("the single-material script left violations: %v", violations)
 	}
@@ -1527,8 +1736,7 @@ func runNoNewInvocationForNotice(t *testing.T) {
 	script.release(worker)
 
 	settle, notice, material := continuationSettle(t, host, addr, workerOut)
-	request, _ := continuationWaitForRequest(t, provider, material, 30*time.Second)
-	reproductionWaitForBody(t, sender, follow, 30*time.Second)
+	request, batched := continuationNoticeAnswer(t, provider, sender, material, "call-continuation-scope", follow, accepted)
 	facts := host.Run().SessionFacts(addr)
 	followFact := continuationNoticeFact(t, facts, settle.TaskID)
 	userInvocation := continuationUserInvocation(t, facts, input)
@@ -1565,8 +1773,7 @@ func runNoNewInvocationForNotice(t *testing.T) {
 		}
 	}
 	continuationSingleCopy(t, request, material, "the follow-up request")
-	continuationRequireAction(t, sender, accepted, addr)
-	continuationRequireAction(t, sender, follow, addr)
+	continuationAnswerDelivered(t, sender, addr, accepted, follow, batched)
 	if violations := script.audit(); len(violations) != 0 {
 		t.Fatalf("the responsibility-scope script left violations: %v", violations)
 	}
@@ -1700,23 +1907,6 @@ func deliveryActionOf(t *testing.T, sender *deliverySender, body string) deliver
 	return matched[0]
 }
 
-// deliveryFramedAction reports the one action whose call frame names the call
-// identity.
-func deliveryFramedAction(t *testing.T, sender *deliverySender, callID string) deliveryAction {
-	t.Helper()
-	var matched []deliveryAction
-	for _, action := range sender.actions() {
-		if action.framed && action.frame.Identity.CallID == callID {
-			matched = append(matched, action)
-		}
-	}
-	if len(matched) != 1 {
-		t.Fatalf("actions carrying the call identity %q = %d, want exactly 1; recorded actions = %+v",
-			callID, len(matched), sender.actions())
-	}
-	return matched[0]
-}
-
 // deliveryUnframedAction reports the one action a turn answer produced: an
 // action delivered beside no call frame.
 func deliveryUnframedAction(t *testing.T, sender *deliverySender) deliveryAction {
@@ -1730,23 +1920,6 @@ func deliveryUnframedAction(t *testing.T, sender *deliverySender) deliveryAction
 	if len(matched) != 1 {
 		t.Fatalf("turn-answer actions beside no call frame = %d, want exactly 1; recorded actions = %+v",
 			len(matched), sender.actions())
-	}
-	return matched[0]
-}
-
-// deliveryResultFact reports the one committed action-result fact the wrapped
-// call left in the chain: the fact the formal assembly records under the call
-// identity the admission frame carried.
-func deliveryResultFact(t *testing.T, host *assembly.Host, addr event.Address, callID string) event.Event {
-	t.Helper()
-	var matched []event.Event
-	for _, fact := range host.Run().SessionFacts(addr) {
-		if fact.Type == event.TypeActionCommand && fact.CallID == callID {
-			matched = append(matched, fact)
-		}
-	}
-	if len(matched) != 1 {
-		t.Fatalf("committed action-result facts carrying the call identity %q = %d, want exactly 1", callID, len(matched))
 	}
 	return matched[0]
 }
@@ -1829,23 +2002,11 @@ func deliveryBodyCount(actions []deliveryAction, body string) int {
 	return count
 }
 
-// deliveryCallCount reports how many recorded actions carried the call
-// identity.
-func deliveryCallCount(actions []deliveryAction, callID string) int {
-	count := 0
-	for _, action := range actions {
-		if action.framed && action.frame.Identity.CallID == callID {
-			count++
-		}
-	}
-	return count
-}
-
-// runAllLegalActionsDelivered requires the explicit send action and the final
-// answer of one turn to reach the sender as two legal actions, each delivered
-// once on the identity its own source carries: the send tool runs under the
-// call frame of the decision, and the turn answer is delivered from the
-// committed output fact of the turn's range.
+// runAllLegalActionsDelivered requires the one outbound action a turn has to
+// reach the sender exactly once on the identity its own source carries: the
+// declared send tool answers its caller with a receipt and reaches no channel,
+// so the turn answer stays the only delivered body, delivered from the
+// committed output fact of the turn's range beside no call frame.
 func runAllLegalActionsDelivered(t *testing.T) {
 	reproductionEnv(t)
 	const (
@@ -1857,8 +2018,7 @@ func runAllLegalActionsDelivered(t *testing.T) {
 	provider := newScriptedProvider(t)
 	script := newIntegrityScript()
 	script.expect("model-entry", "the entry sends its explicit action", requestTail(input)).
-		answers(settleToolCallAnswer("send", callID, `{"content":"`+note+`"}`)).
-		delivers(note)
+		answers(settleToolCallAnswer("send", callID, `{"content":"`+note+`"}`))
 	script.expect("model-entry", "the entry ends on its final answer", requestCarriesToolResult(callID)).
 		answers(scriptedAnswerOf(answer)).
 		delivers(answer)
@@ -1874,31 +2034,26 @@ func runAllLegalActionsDelivered(t *testing.T) {
 	if err != nil {
 		t.Fatalf("the delivery turn ended by error: %v", err)
 	}
-	if turn.Terminal != model.KindCompleted || len(turn.Decisions) != 2 {
+	if turn.Terminal != model.KindCompleted || turn.DecisionCount != 2 {
 		t.Fatalf("the delivery turn = (%v, %d decisions), want the completed turn of its two decisions",
-			turn.Terminal, len(turn.Decisions))
+			turn.Terminal, turn.DecisionCount)
 	}
 
-	sent := deliveryActionOf(t, sender, note)
-	deliveryRequireAddress(t, sent, deliveryAddr)
-	deliveryRequireConfirmed(t, sent)
-	if !sent.framed {
-		t.Fatalf("the explicit action %q was delivered beside no call frame; the declared send tool runs under the decision's call identity", note)
+	requests := provider.servedRequests()
+	if len(requests) != 2 {
+		t.Fatalf("model requests = %d, want the send decision beside the answer that read it", len(requests))
 	}
-	if sent.frame.Identity.InvocationID != turn.InvocationID {
-		t.Fatalf("the explicit action invocation = %q, want the responsibility range %q of the turn",
-			sent.frame.Identity.InvocationID, turn.InvocationID)
+	receipt, ok := sendRigReceipt(requests[1], callID)
+	if !ok {
+		t.Fatalf("the answer decision carried no tool result for %q: %+v", callID, requests[1].Messages)
 	}
-	if sent.frame.Identity.CallID != callID {
-		t.Fatalf("the explicit action call identity = %q, want %q", sent.frame.Identity.CallID, callID)
-	}
-	if sent.frame.Identity.InstanceID == "" || sent.frame.Identity.DecisionID == "" {
-		t.Fatalf("the explicit action frame = %+v, want the instance and decision of the formal assembly", sent.frame.Identity)
+	if !strings.HasPrefix(receipt, sendRigDeniedPrefix) {
+		t.Fatalf("the send receipt = %q, want the named denial a send naming no target reads, never a delivery", receipt)
 	}
 
 	finished := deliveryUnframedAction(t, sender)
 	if finished.body != answer {
-		t.Fatalf("the turn answer action carried %q, want %q", finished.body, answer)
+		t.Fatalf("the one delivered action carried %q, want the turn answer %q: the send reached no channel", finished.body, answer)
 	}
 	deliveryRequireAddress(t, finished, deliveryAddr)
 	deliveryRequireConfirmed(t, finished)
@@ -1906,16 +2061,19 @@ func runAllLegalActionsDelivered(t *testing.T) {
 	if fact.InvocationID != turn.InvocationID {
 		t.Fatalf("the turn answer fact invocation = %q, want the turn range %q", fact.InvocationID, turn.InvocationID)
 	}
-	if fact.Key == "" || string(fact.Key) == sent.frame.Identity.CallID {
-		t.Fatalf("the turn answer identity %q collides with the explicit action identity %q: the two actions must stay apart",
-			fact.Key, sent.frame.Identity.CallID)
+	if fact.Key == "" || string(fact.Key) == callID {
+		t.Fatalf("the turn answer identity %q collides with the send call %q: the receipt must never take the answer's identity",
+			fact.Key, callID)
 	}
 
-	if got := sender.bodies(); !reflect.DeepEqual(got, []string{note, answer}) {
-		t.Fatalf("delivered bodies = %q, want the explicit action beside the final answer, each once", got)
+	if got := sender.bodies(); !reflect.DeepEqual(got, []string{answer}) {
+		t.Fatalf("delivered bodies = %q, want the final answer alone: the declared send tool delivers nothing", got)
 	}
-	if got := len(sender.actions()); got != 2 {
-		t.Fatalf("recorded actions = %d, want one per legal action", got)
+	if got := len(sender.actions()); got != 1 {
+		t.Fatalf("recorded actions = %d, want the turn answer alone", got)
+	}
+	if got := deliveryBodyCount(sender.actions(), note); got != 0 {
+		t.Fatalf("the send body %q reached the channel %d times, want 0", note, got)
 	}
 	if violations := script.audit(); len(violations) != 0 {
 		t.Fatalf("the delivery script left violations: %v", violations)
@@ -1924,8 +2082,8 @@ func runAllLegalActionsDelivered(t *testing.T) {
 }
 
 // runConfirmedActionReentryNoResend requires a later turn on the same session
-// to deliver only the new action of its own range: the confirmed actions of the
-// first turn stay recorded once and are not executed again when the delivery
+// to deliver only the new body of its own range: the confirmed bodies of the
+// first turn stay delivered once and are not executed again when the delivery
 // path reads the session facts a second time.
 func runConfirmedActionReentryNoResend(t *testing.T) {
 	reproductionEnv(t)
@@ -1940,8 +2098,7 @@ func runConfirmedActionReentryNoResend(t *testing.T) {
 	provider := newScriptedProvider(t)
 	script := newIntegrityScript()
 	script.expect("model-entry", "the first turn sends its explicit action", requestTail(firstInput)).
-		answers(settleToolCallAnswer("send", callID, `{"content":"`+firstNote+`"}`)).
-		delivers(firstNote)
+		answers(settleToolCallAnswer("send", callID, `{"content":"`+firstNote+`"}`))
 	script.expect("model-entry", "the first turn ends on its final answer", requestCarriesToolResult(callID)).
 		answers(scriptedAnswerOf(firstAnswer)).
 		delivers(firstAnswer)
@@ -1960,12 +2117,12 @@ func runConfirmedActionReentryNoResend(t *testing.T) {
 	if err != nil {
 		t.Fatalf("the first delivery turn ended by error: %v", err)
 	}
-	if first.Terminal != model.KindCompleted || len(first.Decisions) != 2 {
+	if first.Terminal != model.KindCompleted || first.DecisionCount != 2 {
 		t.Fatalf("the first turn = (%v, %d decisions), want the completed turn of its two decisions",
-			first.Terminal, len(first.Decisions))
+			first.Terminal, first.DecisionCount)
 	}
-	if got := sender.bodies(); !reflect.DeepEqual(got, []string{firstNote, firstAnswer}) {
-		t.Fatalf("delivered bodies of the first turn = %q, want the explicit action beside the final answer", got)
+	if got := sender.bodies(); !reflect.DeepEqual(got, []string{firstAnswer}) {
+		t.Fatalf("delivered bodies of the first turn = %q, want the final answer alone: the send delivers nothing", got)
 	}
 	firstFact := deliveryAssistantFact(t, host, deliveryAddr, firstAnswer)
 
@@ -1973,9 +2130,9 @@ func runConfirmedActionReentryNoResend(t *testing.T) {
 	if err != nil {
 		t.Fatalf("the second delivery turn ended by error: %v", err)
 	}
-	if second.Terminal != model.KindCompleted || len(second.Decisions) != 1 {
+	if second.Terminal != model.KindCompleted || second.DecisionCount != 1 {
 		t.Fatalf("the second turn = (%v, %d decisions), want the completed turn of its own decision",
-			second.Terminal, len(second.Decisions))
+			second.Terminal, second.DecisionCount)
 	}
 	if second.InvocationID == first.InvocationID {
 		t.Fatalf("the second turn reused the invocation %q of the first turn", first.InvocationID)
@@ -1991,18 +2148,15 @@ func runConfirmedActionReentryNoResend(t *testing.T) {
 		t.Fatalf("the second turn answer fact invocation = %q, want the turn range %q", secondFact.InvocationID, second.InvocationID)
 	}
 
-	if got := sender.bodies(); !reflect.DeepEqual(got, []string{firstNote, firstAnswer, secondAnswer}) {
-		t.Fatalf("delivered bodies after the reentry = %q, want only the new action beside the two confirmed actions of the first turn", got)
+	if got := sender.bodies(); !reflect.DeepEqual(got, []string{firstAnswer, secondAnswer}) {
+		t.Fatalf("delivered bodies after the reentry = %q, want only the new answer beside the confirmed answer of the first turn", got)
 	}
 	actions := sender.actions()
-	if got := deliveryBodyCount(actions, firstNote); got != 1 {
-		t.Fatalf("the confirmed explicit action %q was delivered %d times across the reentry, want exactly 1", firstNote, got)
-	}
 	if got := deliveryBodyCount(actions, firstAnswer); got != 1 {
 		t.Fatalf("the confirmed turn answer %q was delivered %d times across the reentry, want exactly 1", firstAnswer, got)
 	}
-	if got := deliveryCallCount(actions, callID); got != 1 {
-		t.Fatalf("the confirmed send action %q was executed %d times across the reentry, want exactly 1", callID, got)
+	if got := deliveryBodyCount(actions, firstNote); got != 0 {
+		t.Fatalf("the send body %q reached the channel %d times across the reentry, want 0: a send delivers nothing", firstNote, got)
 	}
 	if firstFact.Key == secondFact.Key {
 		t.Fatalf("the two turn answers share the fact identity %q", firstFact.Key)
@@ -2013,10 +2167,10 @@ func runConfirmedActionReentryNoResend(t *testing.T) {
 	closeIntegrityHost(t, ctx, host)
 }
 
-// runUnknownResultRetained requires an ambiguous send result to leave the
-// action unconfirmed with its target and error, to reach the caller as a
-// denial instead of a success, and to leave the turn running beside the final
-// answer that follows it.
+// runUnknownResultRetained requires an ambiguous delivery result to leave the
+// body unconfirmed with its target and error, to stay owed in the delivery
+// table instead of reading as a success, and to leave the turn completed
+// beside the send receipt the caller corrects against.
 func runUnknownResultRetained(t *testing.T) {
 	reproductionEnv(t)
 	const (
@@ -2028,8 +2182,7 @@ func runUnknownResultRetained(t *testing.T) {
 	provider := newScriptedProvider(t)
 	script := newIntegrityScript()
 	script.expect("model-entry", "the entry sends the unknown-result action", requestTail(input)).
-		answers(settleToolCallAnswer("send", callID, `{"content":"`+note+`"}`)).
-		delivers(note)
+		answers(settleToolCallAnswer("send", callID, `{"content":"`+note+`"}`))
 	script.expect("model-entry", "the entry answers beside the denial", requestCarriesToolResult(callID)).
 		answers(scriptedAnswerOf(answer)).
 		delivers(answer)
@@ -2050,79 +2203,72 @@ func runUnknownResultRetained(t *testing.T) {
 	if err != nil {
 		t.Fatalf("the delivery turn ended by error: %v", err)
 	}
-	if turn.Terminal != model.KindCompleted || len(turn.Decisions) != 2 {
+	if turn.Terminal != model.KindCompleted || turn.DecisionCount != 2 {
 		t.Fatalf("the delivery turn = (%v, %d decisions), want the completed turn that continued past the denial",
-			turn.Terminal, len(turn.Decisions))
+			turn.Terminal, turn.DecisionCount)
 	}
 
 	requests := provider.servedRequests()
 	if len(requests) != 2 {
 		t.Fatalf("model requests = %d, want the send decision beside the answer that followed it", len(requests))
 	}
-	result, ok := deliveryToolResult(requests[1], callID)
+	receipt, ok := sendRigReceipt(requests[1], callID)
 	if !ok {
 		t.Fatalf("the answer decision carried no tool result for %q: %+v", callID, requests[1].Messages)
 	}
-	if !strings.Contains(result, "[send_denied]") || !strings.Contains(result, errDeliveryOutcomeUnknown.Error()) {
-		t.Fatalf("the caller read %q, want the named denial carrying the ambiguity %q; messages = %+v", result, errDeliveryOutcomeUnknown, requests[1].Messages)
-	}
-	if result == "ok" || !strings.HasPrefix(result, "[send_denied] ") {
-		t.Fatalf("the caller read %q, want the named denial alone; an unknown result must never read as the delivered ok", result)
+	if receipt == sendRigReceiptOK || !strings.HasPrefix(receipt, sendRigDeniedPrefix) {
+		t.Fatalf("the caller read %q, want the named denial of a send naming no target, never the delivered ok", receipt)
 	}
 
 	actions := sender.actions()
-	if len(actions) != 2 {
-		t.Fatalf("recorded actions = %d, want the denied action beside the final answer, each once", len(actions))
+	if len(actions) != 1 {
+		t.Fatalf("recorded actions = %d, want the ambiguous turn answer alone: a send reaches no channel", len(actions))
 	}
-	sent := deliveryFramedAction(t, sender, callID)
-	if sent.body != note {
-		t.Fatalf("the denied action carried %q, want %q", sent.body, note)
+	if got := deliveryBodyCount(actions, note); got != 0 {
+		t.Fatalf("the send body %q reached the channel %d times, want 0", note, got)
 	}
-	deliveryRequireAddress(t, sent, deliveryAddr)
-	if sent.confirmed() {
-		t.Fatalf("the action %q was recorded confirmed although the sender answered %v", note, errDeliveryOutcomeUnknown)
+	finished := actions[0]
+	if finished.body != answer {
+		t.Fatalf("the ambiguous action carried %q, want the turn answer %q", finished.body, answer)
 	}
-	if !errors.Is(sent.result, errDeliveryOutcomeUnknown) {
-		t.Fatalf("the action error = %v, want the ambiguity %v retained beside the action", sent.result, errDeliveryOutcomeUnknown)
+	deliveryRequireAddress(t, finished, deliveryAddr)
+	if finished.confirmed() {
+		t.Fatalf("the answer %q was recorded confirmed although the sender answered %v", answer, errDeliveryOutcomeUnknown)
 	}
-	recorded := deliveryResultFact(t, host, deliveryAddr, callID)
-	if recorded.InvocationID != turn.InvocationID || recorded.Owner != deliveryAddr {
-		t.Fatalf("the result fact of the denied action = %+v, want it owned by %+v in the turn range %q",
-			recorded, deliveryAddr, turn.InvocationID)
+	if !errors.Is(finished.result, errDeliveryOutcomeUnknown) {
+		t.Fatalf("the action error = %v, want the ambiguity %v retained beside the action", finished.result, errDeliveryOutcomeUnknown)
 	}
-	if recorded.Message.ToolID != callID || !strings.Contains(recorded.Message.Content, errDeliveryOutcomeUnknown.Error()) {
-		t.Fatalf("the result fact carries tool %q body %q, want the call identity %q beside the ambiguity %q",
-			recorded.Message.ToolID, recorded.Message.Content, callID, errDeliveryOutcomeUnknown)
+	held := host.HeldDeliveries()
+	if len(held) != 1 {
+		t.Fatalf("held deliveries = %+v, want the ambiguous answer owed as the one outstanding body", held)
 	}
-	finished := deliveryActionOf(t, sender, answer)
-	deliveryRequireConfirmed(t, finished)
+	if held[0].Delivery.Content != answer || held[0].Delivery.Target != deliveryAddr {
+		t.Fatalf("the held delivery = %+v, want the ambiguous answer %q owed to %+v", held[0].Delivery, answer, deliveryAddr)
+	}
 	if violations := script.audit(); len(violations) != 0 {
 		t.Fatalf("the unknown-result script left violations: %v", violations)
 	}
 	closeIntegrityHost(t, ctx, host)
 }
 
-// runExplicitRetryKeepsLink requires a retried send to be a new action identity
-// that stays in the responsibility range of the original action and carries the
-// original denial as its retry reason: the original unconfirmed action is not
-// overwritten, and the retry is not recorded as a send beside no source.
+// runExplicitRetryKeepsLink requires an explicit retry of a body whose delivery
+// stayed unknown to deliver a new copy while the original unconfirmed record
+// stays beside it: the approval re-delivers the same body to the same target,
+// never overwrites the ambiguity that caused it, and consumes the hold so a
+// repeated approval delivers nothing.
 func runExplicitRetryKeepsLink(t *testing.T) {
 	reproductionEnv(t)
 	const (
 		input  = "send the action that needs an explicit retry"
 		note   = "the explicitly retried action"
 		answer = "the answer after the explicit retry"
-		first  = "call-delivery-retry-original"
-		retry  = "call-delivery-retry-repeat"
+		callID = "call-delivery-retry"
 	)
 	provider := newScriptedProvider(t)
 	script := newIntegrityScript()
 	script.expect("model-entry", "the entry sends the action that fails", requestTail(input)).
-		answers(settleToolCallAnswer("send", first, `{"content":"`+note+`"}`)).
-		delivers(note)
-	script.expect("model-entry", "the entry explicitly retries the denied action", requestCarriesToolResult(first)).
-		answers(settleToolCallAnswer("send", retry, `{"content":"`+note+`"}`))
-	script.expect("model-entry", "the entry answers after the retry", requestCarriesToolResult(retry)).
+		answers(settleToolCallAnswer("send", callID, `{"content":"`+note+`"}`))
+	script.expect("model-entry", "the entry answers beside the denial", requestCarriesToolResult(callID)).
 		answers(scriptedAnswerOf(answer)).
 		delivers(answer)
 	provider.decide = script.decide
@@ -2142,61 +2288,67 @@ func runExplicitRetryKeepsLink(t *testing.T) {
 	if err != nil {
 		t.Fatalf("the delivery turn ended by error: %v", err)
 	}
-	if turn.Terminal != model.KindCompleted || len(turn.Decisions) != 3 {
-		t.Fatalf("the delivery turn = (%v, %d decisions), want the completed turn of the send, the retry and the answer",
-			turn.Terminal, len(turn.Decisions))
+	if turn.Terminal != model.KindCompleted || turn.DecisionCount != 2 {
+		t.Fatalf("the delivery turn = (%v, %d decisions), want the completed turn of the send and the answer",
+			turn.Terminal, turn.DecisionCount)
 	}
 
 	requests := provider.servedRequests()
-	if len(requests) != 3 {
-		t.Fatalf("model requests = %d, want the send decision, the retry decision and the answer", len(requests))
+	if len(requests) != 2 {
+		t.Fatalf("model requests = %d, want the send decision beside the answer that read it", len(requests))
 	}
-	reason, ok := deliveryToolResult(requests[1], first)
+	receipt, ok := sendRigReceipt(requests[1], callID)
 	if !ok {
-		t.Fatalf("the retry decision carried no tool result for %q: %+v", first, requests[1].Messages)
+		t.Fatalf("the answer decision carried no tool result for %q: %+v", callID, requests[1].Messages)
 	}
-	if !strings.Contains(reason, errDeliveryOutcomeUnknown.Error()) {
-		t.Fatalf("the retry decision read %q, want the original denial %q as its retry reason", reason, errDeliveryOutcomeUnknown)
+	if !strings.HasPrefix(receipt, sendRigDeniedPrefix) {
+		t.Fatalf("the caller read %q for the send naming no target, want the named denial", receipt)
 	}
-	confirmedText, ok := deliveryToolResult(requests[2], retry)
-	if !ok {
-		t.Fatalf("the answer decision carried no tool result for the retry call %q: %+v", retry, requests[2].Messages)
+
+	held := host.HeldDeliveries()
+	if len(held) != 1 {
+		t.Fatalf("held deliveries before the retry = %+v, want the unconfirmed answer owed as the one body", held)
 	}
-	if confirmedText != "ok" {
-		t.Fatalf("the retry result read %q, want the bare ok the delivered retry is answered with", confirmedText)
+	if held[0].Delivery.Content != answer || held[0].Delivery.Target != deliveryAddr {
+		t.Fatalf("the held delivery before the retry = %+v, want the ambiguous answer %q owed to %+v",
+			held[0].Delivery, answer, deliveryAddr)
+	}
+	before := sender.actions()
+	if len(before) != 1 || before[0].confirmed() || !errors.Is(before[0].result, errDeliveryOutcomeUnknown) {
+		t.Fatalf("recorded actions before the retry = %+v, want the ambiguous answer alone, unconfirmed", before)
+	}
+
+	if err := host.ApproveDelivery(ctx, held[0].ID); err != nil {
+		t.Fatalf("the explicit retry of the held answer was refused: %v", err)
 	}
 
 	actions := sender.actions()
-	if len(actions) != 3 {
-		t.Fatalf("recorded actions = %d, want the original action, the retry and the final answer", len(actions))
+	if len(actions) != 2 {
+		t.Fatalf("recorded actions after the retry = %d, want the ambiguous answer beside the retried copy", len(actions))
 	}
-	if got := deliveryBodyCount(actions, note); got != 2 {
-		t.Fatalf("actions carrying the retried body %q = %d, want the original beside the retry, not merged", note, got)
+	if got := deliveryBodyCount(actions, answer); got != 2 {
+		t.Fatalf("actions carrying the retried body %q = %d, want the original beside the retry, not merged", answer, got)
 	}
-	original := deliveryFramedAction(t, sender, first)
+	original := actions[0]
 	deliveryRequireAddress(t, original, deliveryAddr)
 	if original.confirmed() || !errors.Is(original.result, errDeliveryOutcomeUnknown) {
 		t.Fatalf("the original action = %+v, want it unconfirmed with the ambiguity %v retained", original, errDeliveryOutcomeUnknown)
 	}
-	repeated := deliveryFramedAction(t, sender, retry)
+	repeated := actions[1]
 	deliveryRequireAddress(t, repeated, deliveryAddr)
 	deliveryRequireConfirmed(t, repeated)
-	if repeated.body != note {
-		t.Fatalf("the retry carried %q, want the original body %q", repeated.body, note)
+	if repeated.body != answer {
+		t.Fatalf("the retry carried %q, want the original body %q", repeated.body, answer)
 	}
-	if original.frame.Identity.InvocationID != repeated.frame.Identity.InvocationID ||
-		original.frame.Identity.InvocationID != turn.InvocationID {
-		t.Fatalf("the retry invocation = %q and the original invocation = %q, want both in the turn range %q",
-			repeated.frame.Identity.InvocationID, original.frame.Identity.InvocationID, turn.InvocationID)
+	if got := host.HeldDeliveries(); len(got) != 0 {
+		t.Fatalf("held deliveries after the retry = %+v, want the one approval to consume the hold", got)
 	}
-	if original.frame.Identity.CallID == repeated.frame.Identity.CallID {
-		t.Fatalf("the retry reused the original call identity %q; it must be a new action identity", original.frame.Identity.CallID)
+	if err := host.ApproveDelivery(ctx, held[0].ID); !errors.Is(err, assembly.ErrDeliveryNotFound) {
+		t.Fatalf("the repeated approval of %q = %v, want the named absence of the consumed hold", held[0].ID, err)
 	}
-	if original.frame.Identity.DecisionID == repeated.frame.Identity.DecisionID {
-		t.Fatalf("the retry ran under the original decision %q; it must be its own decision", original.frame.Identity.DecisionID)
+	if got := deliveryBodyCount(sender.actions(), answer); got != 2 {
+		t.Fatalf("the answer %q was delivered %d times after the repeated approval, want the original beside the one retry", answer, got)
 	}
-	finished := deliveryActionOf(t, sender, answer)
-	deliveryRequireConfirmed(t, finished)
 	if violations := script.audit(); len(violations) != 0 {
 		t.Fatalf("the explicit-retry script left violations: %v", violations)
 	}
@@ -2206,22 +2358,17 @@ func runExplicitRetryKeepsLink(t *testing.T) {
 // runConfirmedActionNotResent requires a confirmed turn answer to stay
 // delivered once when a later turn of the same session answers the same body: a
 // new turn is a new action identity beside a new committed fact, and it must
-// not execute the confirmed action again.
+// not deliver the confirmed action again.
 func runConfirmedActionNotResent(t *testing.T) {
 	reproductionEnv(t)
 	const (
 		firstInput  = "deliver the confirmed answer of the first turn"
-		firstNote   = "the confirmed send beside the repeated answer"
 		answer      = "the answer delivered twice as two actions"
 		secondInput = "answer the later turn with the same body"
-		callID      = "call-delivery-confirmed-once"
 	)
 	provider := newScriptedProvider(t)
 	script := newIntegrityScript()
-	script.expect("model-entry", "the first turn sends its action", requestTail(firstInput)).
-		answers(settleToolCallAnswer("send", callID, `{"content":"`+firstNote+`"}`)).
-		delivers(firstNote)
-	script.expect("model-entry", "the first turn answers", requestCarriesToolResult(callID)).
+	script.expect("model-entry", "the first turn answers", requestTail(firstInput)).
 		answers(scriptedAnswerOf(answer)).
 		delivers(answer)
 	script.expect("model-entry", "the later turn answers the same body", requestTail(secondInput)).
@@ -2239,9 +2386,9 @@ func runConfirmedActionNotResent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("the first delivery turn ended by error: %v", err)
 	}
-	if first.Terminal != model.KindCompleted || len(first.Decisions) != 2 {
-		t.Fatalf("the first turn = (%v, %d decisions), want the completed turn of its two decisions",
-			first.Terminal, len(first.Decisions))
+	if first.Terminal != model.KindCompleted || first.DecisionCount != 1 {
+		t.Fatalf("the first turn = (%v, %d decisions), want the completed turn of its own decision",
+			first.Terminal, first.DecisionCount)
 	}
 	before := sender.actions()
 	if got := deliveryBodyCount(before, answer); got != 1 {
@@ -2252,9 +2399,9 @@ func runConfirmedActionNotResent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("the later delivery turn ended by error: %v", err)
 	}
-	if second.Terminal != model.KindCompleted || len(second.Decisions) != 1 {
+	if second.Terminal != model.KindCompleted || second.DecisionCount != 1 {
 		t.Fatalf("the later turn = (%v, %d decisions), want the completed turn of its own decision",
-			second.Terminal, len(second.Decisions))
+			second.Terminal, second.DecisionCount)
 	}
 
 	after := sender.actions()
@@ -2262,14 +2409,8 @@ func runConfirmedActionNotResent(t *testing.T) {
 		t.Fatalf("the repeated answer %q was delivered %d times across the two turns, want the confirmed action beside the one new action of the later turn, not a resend",
 			answer, got)
 	}
-	if got := len(after); got != 3 {
-		t.Fatalf("recorded actions = %d, want the first turn's two actions beside the later turn's one", got)
-	}
-	if got := deliveryCallCount(after, callID); got != 1 {
-		t.Fatalf("the confirmed send action %q was executed %d times across the later turn, want exactly 1", callID, got)
-	}
-	if got := deliveryBodyCount(after, firstNote); got != 1 {
-		t.Fatalf("the confirmed send body %q was delivered %d times across the later turn, want exactly 1", firstNote, got)
+	if got := len(after); got != 2 {
+		t.Fatalf("recorded actions = %d, want the first turn's answer beside the later turn's", got)
 	}
 	if !reflect.DeepEqual(after[:len(before)], before) {
 		t.Fatalf("the later turn rewrote the confirmed actions %+v of the first turn", before)
@@ -2295,9 +2436,9 @@ func runConfirmedActionNotResent(t *testing.T) {
 	closeIntegrityHost(t, ctx, host)
 }
 
-// runUnknownResultNotAutoResent requires an ambiguous send result to stay the
-// one action the sender saw: the host neither retries it on its own nor reports
-// a success, during the turn, across a quiet window, or while it drains.
+// runUnknownResultNotAutoResent requires an ambiguous delivery result to stay
+// the one action the sender saw: the host neither retries it on its own nor
+// reports a success, during the turn, across a quiet window, or while it drains.
 func runUnknownResultNotAutoResent(t *testing.T) {
 	reproductionEnv(t)
 	const (
@@ -2309,8 +2450,7 @@ func runUnknownResultNotAutoResent(t *testing.T) {
 	provider := newScriptedProvider(t)
 	script := newIntegrityScript()
 	script.expect("model-entry", "the entry sends the ambiguous action", requestTail(input)).
-		answers(settleToolCallAnswer("send", callID, `{"content":"`+note+`"}`)).
-		delivers(note)
+		answers(settleToolCallAnswer("send", callID, `{"content":"`+note+`"}`))
 	script.expect("model-entry", "the entry answers beside the denial", requestCarriesToolResult(callID)).
 		answers(scriptedAnswerOf(answer)).
 		delivers(answer)
@@ -2331,60 +2471,68 @@ func runUnknownResultNotAutoResent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("the delivery turn ended by error: %v", err)
 	}
-	if turn.Terminal != model.KindCompleted {
-		t.Fatalf("the delivery turn terminal = %v, want the completed turn beside the denial", turn.Terminal)
+	if turn.Terminal != model.KindCompleted || turn.DecisionCount != 2 {
+		t.Fatalf("the delivery turn = (%v, %d decisions), want the completed turn of the send and the answer",
+			turn.Terminal, turn.DecisionCount)
 	}
-	if got := deliveryBodyCount(sender.actions(), note); got != 1 {
-		t.Fatalf("the ambiguous action %q was sent %d times during the turn, want exactly 1", note, got)
+	if got := deliveryBodyCount(sender.actions(), answer); got != 1 {
+		t.Fatalf("the ambiguous answer %q was delivered %d times during the turn, want exactly 1", answer, got)
 	}
-	if result, ok := deliveryToolResult(provider.servedRequests()[1], callID); !ok || !strings.HasPrefix(result, "[send_denied] ") || result == "ok" {
-		t.Fatalf("the caller read %q for the ambiguous action, want the named denial and never the delivered ok", result)
+	if got := deliveryBodyCount(sender.actions(), note); got != 0 {
+		t.Fatalf("the send body %q reached the channel %d times during the turn, want 0", note, got)
+	}
+	receipt, ok := sendRigReceipt(provider.servedRequests()[1], callID)
+	if !ok || !strings.HasPrefix(receipt, sendRigDeniedPrefix) || receipt == sendRigReceiptOK {
+		t.Fatalf("the caller read %q for the send naming no target, want the named denial and never the delivered ok", receipt)
+	}
+	held := host.HeldDeliveries()
+	if len(held) != 1 || held[0].Delivery.Content != answer {
+		t.Fatalf("held deliveries = %+v, want the ambiguous answer owed as the one body", held)
 	}
 
 	time.Sleep(300 * time.Millisecond)
-	if got := deliveryBodyCount(sender.actions(), note); got != 1 {
-		t.Fatalf("the ambiguous action %q was sent %d times after the quiet window, want exactly 1", note, got)
+	if got := deliveryBodyCount(sender.actions(), answer); got != 1 {
+		t.Fatalf("the ambiguous answer %q was delivered %d times after the quiet window, want exactly 1", answer, got)
 	}
 
 	closeIntegrityHost(t, ctx, host)
 	actions := sender.actions()
-	if got := deliveryBodyCount(actions, note); got != 1 {
-		t.Fatalf("the ambiguous action %q was sent %d times after the drain, want exactly 1", note, got)
+	if got := deliveryBodyCount(actions, answer); got != 1 {
+		t.Fatalf("the ambiguous answer %q was delivered %d times after the drain, want exactly 1", answer, got)
 	}
-	sent := deliveryFramedAction(t, sender, callID)
+	sent := actions[0]
 	if sent.confirmed() {
-		t.Fatalf("the drained action %q was recorded confirmed although its result stayed unknown", note)
+		t.Fatalf("the drained action %q was recorded confirmed although its result stayed unknown", answer)
 	}
 	if !errors.Is(sent.result, errDeliveryOutcomeUnknown) {
 		t.Fatalf("the drained action error = %v, want the ambiguity %v retained", sent.result, errDeliveryOutcomeUnknown)
-	}
-	recorded := deliveryResultFact(t, host, deliveryAddr, callID)
-	if !strings.Contains(recorded.Message.Content, errDeliveryOutcomeUnknown.Error()) {
-		t.Fatalf("the drained result fact carries %q, want the ambiguity %q kept in the chain",
-			recorded.Message.Content, errDeliveryOutcomeUnknown)
 	}
 	if violations := script.audit(); len(violations) != 0 {
 		t.Fatalf("the no-auto-retry script left violations: %v", violations)
 	}
 }
 
-// runDistinctActionsNotMerged requires the explicit send action and the final
-// answer of one turn to stay two actions even when they carry the same body:
-// the success of the answer must not cover the unconfirmed state of the send,
-// and the two identities must stay apart.
+// runDistinctActionsNotMerged requires two bodies carrying the same text to stay
+// two actions when the earlier delivery stayed unknown and the later one landed:
+// the success of the later copy must not cover the unconfirmed state of the
+// earlier one, the hold stays owed beside it, and the two source identities stay
+// apart.
 func runDistinctActionsNotMerged(t *testing.T) {
 	reproductionEnv(t)
 	const (
-		input  = "send and answer the same body"
-		body   = "the body delivered by two distinct actions"
-		callID = "call-delivery-distinct"
+		input       = "send and answer the same body"
+		body        = "the body delivered by two distinct actions"
+		callID      = "call-delivery-distinct"
+		secondInput = "answer the same body on a later turn"
 	)
 	provider := newScriptedProvider(t)
 	script := newIntegrityScript()
 	script.expect("model-entry", "the entry sends the shared body", requestTail(input)).
-		answers(settleToolCallAnswer("send", callID, `{"content":"`+body+`"}`)).
-		delivers(body)
+		answers(settleToolCallAnswer("send", callID, `{"content":"`+body+`"}`))
 	script.expect("model-entry", "the entry answers the shared body", requestCarriesToolResult(callID)).
+		answers(scriptedAnswerOf(body)).
+		delivers(body)
+	script.expect("model-entry", "the later turn answers the shared body", requestTail(secondInput)).
 		answers(scriptedAnswerOf(body)).
 		delivers(body)
 	provider.decide = script.decide
@@ -2397,181 +2545,70 @@ func runDistinctActionsNotMerged(t *testing.T) {
 	})
 	host := bootDeliveryHost(t, provider, sender)
 	keepIntegrityHost(t, script, host)
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
 
-	turn, err := driveIntegrityTurn(ctx, host, deliveryAddr, input)
+	first, err := driveIntegrityTurn(ctx, host, deliveryAddr, input)
 	if err != nil {
 		t.Fatalf("the delivery turn ended by error: %v", err)
 	}
-	if turn.Terminal != model.KindCompleted || len(turn.Decisions) != 2 {
+	if first.Terminal != model.KindCompleted || first.DecisionCount != 2 {
 		t.Fatalf("the delivery turn = (%v, %d decisions), want the completed turn of its two decisions",
-			turn.Terminal, len(turn.Decisions))
+			first.Terminal, first.DecisionCount)
+	}
+	if got := deliveryBodyCount(sender.actions(), body); got != 1 {
+		t.Fatalf("the shared body %q was delivered %d times in the first turn, want the answer alone: a send reaches no channel", body, got)
+	}
+	receipt, ok := sendRigReceipt(provider.servedRequests()[1], callID)
+	if !ok || !strings.HasPrefix(receipt, sendRigDeniedPrefix) {
+		t.Fatalf("the caller read %q for the send naming no target, want the named denial", receipt)
+	}
+
+	second, err := driveIntegrityTurn(ctx, host, deliveryAddr, secondInput)
+	if err != nil {
+		t.Fatalf("the later delivery turn ended by error: %v", err)
+	}
+	if second.Terminal != model.KindCompleted || second.DecisionCount != 1 {
+		t.Fatalf("the later turn = (%v, %d decisions), want the completed turn of its own decision",
+			second.Terminal, second.DecisionCount)
 	}
 
 	actions := sender.actions()
 	if len(actions) != 2 {
-		t.Fatalf("recorded actions = %d, want the send beside the answer even though both carry the same body", len(actions))
+		t.Fatalf("recorded actions = %d, want the earlier answer beside the later one even though both carry the same body", len(actions))
 	}
 	if got := deliveryBodyCount(actions, body); got != 2 {
 		t.Fatalf("actions carrying the shared body %q = %d, want the two distinct actions not merged by body", body, got)
 	}
-	sent := deliveryFramedAction(t, sender, callID)
-	deliveryRequireAddress(t, sent, deliveryAddr)
-	if sent.confirmed() || !errors.Is(sent.result, errDeliveryOutcomeUnknown) {
-		t.Fatalf("the send action = %+v, want it unconfirmed with the ambiguity %v", sent, errDeliveryOutcomeUnknown)
+	earlier := actions[0]
+	deliveryRequireAddress(t, earlier, deliveryAddr)
+	if earlier.confirmed() || !errors.Is(earlier.result, errDeliveryOutcomeUnknown) {
+		t.Fatalf("the earlier action = %+v, want it unconfirmed with the ambiguity %v", earlier, errDeliveryOutcomeUnknown)
 	}
-	finished := deliveryUnframedAction(t, sender)
-	deliveryRequireAddress(t, finished, deliveryAddr)
-	deliveryRequireConfirmed(t, finished)
-	if finished.body != body || sent.body != body {
-		t.Fatalf("the two actions carried %q and %q, want the shared body %q on both", sent.body, finished.body, body)
+	later := actions[1]
+	deliveryRequireAddress(t, later, deliveryAddr)
+	deliveryRequireConfirmed(t, later)
+	if earlier.body != body || later.body != body {
+		t.Fatalf("the two actions carried %q and %q, want the shared body %q on both", earlier.body, later.body, body)
 	}
-	fact := deliveryAssistantFact(t, host, deliveryAddr, body)
-	if fact.Key == "" || string(fact.Key) == sent.frame.Identity.CallID {
-		t.Fatalf("the answer identity %q collides with the send identity %q: the answer success must not merge into the send action",
-			fact.Key, sent.frame.Identity.CallID)
+	held := host.HeldDeliveries()
+	if len(held) != 1 || held[0].Delivery.Content != body {
+		t.Fatalf("held deliveries = %+v, want the earlier unknown copy still owed beside the later one that landed", held)
 	}
-	if result, ok := deliveryToolResult(provider.servedRequests()[1], callID); !ok ||
-		!strings.Contains(result, errDeliveryOutcomeUnknown.Error()) {
-		t.Fatalf("the answer decision read %q for the failed send, want the unconfirmed state carried beside the answer's success", result)
+	facts := deliveryAssistantFacts(host, deliveryAddr, body)
+	if len(facts) != 2 {
+		t.Fatalf("committed assistant-output facts carrying %q = %d, want the earlier turn's fact beside the later turn's", body, len(facts))
+	}
+	if facts[0].Key == "" || facts[0].Key == facts[1].Key {
+		t.Fatalf("the two answers share the source identity %q: the later success must not merge into the earlier action", facts[0].Key)
+	}
+	if facts[0].InvocationID == facts[1].InvocationID {
+		t.Fatalf("the two answers belong to the same invocation %q, want one range per turn", facts[0].InvocationID)
 	}
 	if violations := script.audit(); len(violations) != 0 {
 		t.Fatalf("the distinct-action script left violations: %v", violations)
 	}
 	closeIntegrityHost(t, ctx, host)
-}
-
-// TestEventIntegrityReflectionDelivery drives the cross-session delivery face of the reflection turn over the formal assembly:
-// - explicit_call_reaches_target_session: one explicit deliver_summary call reaches the authorized target session and reads back on its next request
-// - same_batch_yield_is_legal_success: a delivery into a session whose turn is in flight is a legal success and is consumed by the next turn
-// - zero_live_target_not_success: an authorized target with no live session refuses the success and is named, while the covered writes stay readable
-// - partial_commit_failure_not_success: one failed session commit refuses the success beside the failed count and the first named error
-// - wrong_target_no_extra_write: an argument naming a target is refused by the declaration and no extra session is written
-// - empty_whitelist_fail_closed: a document enabling meditation beside no deliver_to target refuses the boot
-// - unknown_target_named_refusal: a deliver_to naming an undeclared agent refuses the boot by name
-// - target_not_running_named_refusal: a declared target with no live session is refused by name, with no fallback run
-// - delivery_does_not_rearm_novelty: the committed delivery is meditation lineage and never reads as novel material
-// - replay_identity: a replay of one action identity writes once, while the same body under another identity writes again
-// - boot_deliver_to_target_request: the boot assembly grants the tool to the meditation session, and the target's next real request carries the delivered body
-//
-// 契约: docs/wiki/agent/agent-architecture.md#meditation-curator
-func TestEventIntegrityReflectionDelivery(t *testing.T) {
-	reproductionEnv(t)
-	t.Run("explicit_call_reaches_target_session", runExplicitCallReachesTargetSession)
-	t.Run("same_batch_yield_is_legal_success", runSameBatchYieldIsLegalSuccess)
-	t.Run("zero_live_target_not_success", runZeroLiveTargetNotSuccess)
-	t.Run("partial_commit_failure_not_success", runPartialCommitFailureNotSuccess)
-	t.Run("wrong_target_no_extra_write", runWrongTargetNoExtraWrite)
-	t.Run("empty_whitelist_fail_closed", runEmptyWhitelistFailClosed)
-	t.Run("unknown_target_named_refusal", runUnknownTargetNamedRefusal)
-	t.Run("target_not_running_named_refusal", runTargetNotRunningNamedRefusal)
-	t.Run("delivery_does_not_rearm_novelty", runDeliveryDoesNotRearmNovelty)
-	t.Run("replay_identity", runReplayIdentity)
-	t.Run("boot_deliver_to_target_request", runBootDeliverToTargetRequest)
-}
-
-// reflectionDeliveryBody is the summary body every delivery check delivers; it
-// is the material the target session reads back on its next real request.
-const reflectionDeliveryBody = "the reflection summary the target session should read"
-
-// reflectionDeliveryAddr is the target session every unit-level delivery check
-// establishes before the tool is called.
-var reflectionDeliveryAddr = event.Address{AgentID: "user", SessionID: "session-reflection-delivery"}
-
-// controlledReflectionSink is the controlled cross-session face of the delivery checks: the live bindings the tool resolves and the writes it commits, with a per-address failure the check scripts.
-type controlledReflectionSink struct {
-	mu       sync.Mutex
-	sessions map[event.AgentID][]event.Address
-	failures map[event.Address]error
-	writes   []event.Event
-}
-
-// newControlledReflectionSink returns the sink beside the live bindings it
-// reports.
-func newControlledReflectionSink(sessions map[event.AgentID][]event.Address) *controlledReflectionSink {
-	return &controlledReflectionSink{sessions: sessions, failures: map[event.Address]error{}}
-}
-
-// ActiveSessions reports the live bindings the check declares for one agent.
-func (s *controlledReflectionSink) ActiveSessions(agentID event.AgentID) []event.Address {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return append([]event.Address(nil), s.sessions[agentID]...)
-}
-
-// CommitToSession refuses the addresses the check scripts and records every
-// accepted write.
-func (s *controlledReflectionSink) CommitToSession(ctx context.Context, addr event.Address, evt event.Event) (event.EventID, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if err := s.failures[addr]; err != nil {
-		return "", err
-	}
-	s.writes = append(s.writes, evt)
-	return event.EventID(fmt.Sprintf("delivery-%d", len(s.writes))), nil
-}
-
-// deliveredWrites reports the accepted writes in delivery order.
-func (s *controlledReflectionSink) deliveredWrites() []event.Event {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return append([]event.Event(nil), s.writes...)
-}
-
-// reflectionDeliveryRun is one assembled runtime the unit-level delivery checks
-// call the tool against: the run is the formal cross-session entry and the
-// formal live-binding query, so the tool reads the very faces the host binds.
-type reflectionDeliveryRun struct {
-	run    *assembly.Run
-	models map[string]*entryModel
-}
-
-// newReflectionDeliveryRun assembles one runtime over the declared agents and
-// reports it beside the models the checks read their requests from.
-func newReflectionDeliveryRun(t *testing.T, agents ...string) *reflectionDeliveryRun {
-	t.Helper()
-	decl := &config.Declaration{Entry: agents[0]}
-	natives := make(map[event.AgentID]assembly.NativeAgent, len(agents))
-	models := make(map[string]*entryModel, len(agents))
-	for _, id := range agents {
-		m := &entryModel{name: "model-" + id, answer: func(*model.Request) *model.Response {
-			return entryFinalTurn("the turn settled")
-		}}
-		decl.Agents = append(decl.Agents, config.AgentSpec{ID: id, Model: m.name, MaxTokens: 32000})
-		natives[event.AgentID(id)] = assembly.NativeAgent{Model: m}
-		models[id] = m
-	}
-	run := assembleReflectionDelivery(t, decl, natives)
-	return &reflectionDeliveryRun{run: run, models: models}
-}
-
-// assembleReflectionDelivery assembles one runtime over the given declaration and
-// native agents and closes it with the check.
-func assembleReflectionDelivery(t *testing.T, decl *config.Declaration, natives map[event.AgentID]assembly.NativeAgent) *assembly.Run {
-	t.Helper()
-	run, err := assembly.Assemble(context.Background(), decl, natives,
-		assembly.WithGovernance(passPolicy{}),
-		assembly.WithStorage(ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: t.TempDir()}),
-	)
-	if err != nil {
-		t.Fatalf("assemble the reflection delivery run: %v", err)
-	}
-	t.Cleanup(func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-		defer cancel()
-		if report, err := run.Close(ctx, agent.CloseRequest{Deadline: time.Now().Add(15 * time.Second)}); err != nil || !report.Drained {
-			t.Logf("the reflection delivery run ended its close beside: report=%+v err=%v", report, err)
-		}
-	})
-	return run
-}
-
-// deliveryTool returns the tool wired exactly as the host wires it: the declared
-// targets, the run's cross-session write entry and the run's live-binding query.
-func (r *reflectionDeliveryRun) deliveryTool(targets ...string) *meditation.DeliverSummaryTool {
-	sink := &meditationSink{run: r.run}
-	return meditation.NewDeliverSummaryTool(targets, sink, sink)
 }
 
 // deliveryRequestCarries reports the request that carries the content as one of
@@ -2596,27 +2633,6 @@ func scriptedRequestCarries(request scriptedRequest, content string) bool {
 	return false
 }
 
-// requestDeclaresTool reports whether one recorded request saw the named tool
-// declaration.
-func requestDeclaresTool(request scriptedRequest, name string) bool {
-	for _, declared := range request.Tools {
-		if declared == name {
-			return true
-		}
-	}
-	return false
-}
-
-// requestCarriesReflectionInput matches the reflection turn's first decision:
-// the input the reflection mechanism injected leads the request.
-func requestCarriesReflectionInput(request scriptedRequest) bool {
-	if len(request.Messages) == 0 {
-		return false
-	}
-	last := request.Messages[len(request.Messages)-1]
-	return last.Role == string(model.RoleUser) && strings.HasPrefix(last.Content, "[reflection]")
-}
-
 // reflectionDeliveryHostDocument renders one host document whose meditation
 // section observes the entry agent and delivers to the given white list.
 func reflectionDeliveryHostDocument(root, endpoint, deliverTo string) string {
@@ -2632,7 +2648,7 @@ func reflectionDeliveryHostDocument(root, endpoint, deliverTo string) string {
 	b.WriteString("  meditator:\n")
 	b.WriteString("    model: model-meditator\n")
 	b.WriteString("    tools:\n")
-	b.WriteString("      - { kind: tool, id: " + meditation.DeliverSummaryToolName + " }\n")
+	b.WriteString("      - { kind: tool, id: send }\n")
 	b.WriteString("    memory: { type: localfile, path: " + root + ", read_namespaces: [user] }\n")
 	b.WriteString("    meditation:\n")
 	b.WriteString("      enabled: true\n")
@@ -2663,216 +2679,17 @@ func bootReflectionDeliveryHost(t *testing.T, provider *scriptedProvider, delive
 	return host, nil
 }
 
-// runExplicitCallReachesTargetSession requires one explicit deliver_summary call
-// to reach the authorized target session and read back on its next real request:
-// the success receipt names the covered target beside its committed session
-// count, and the target chain gains exactly one meditation-stamped input.
-func runExplicitCallReachesTargetSession(t *testing.T) {
-	rig := newReflectionDeliveryRun(t, "user", "quiet")
-	invokeUserTurn(t, rig.run, "inv-reflection-explicit", reflectionDeliveryAddr, "the first user round")
-
-	tool := rig.deliveryTool("user")
-	got, err := tool.Call(context.Background(), []byte(`{"content":"`+reflectionDeliveryBody+`"}`))
-	if err != nil {
-		t.Fatalf("deliver the reflection summary: %v", err)
-	}
-	text, ok := got.(string)
-	if !ok || !strings.HasPrefix(text, "[deliver_summary_ok]") {
-		t.Fatalf("deliver_summary = %v, want the success receipt of the covered target", got)
-	}
-	if !strings.Contains(text, "user: 1/1 sessions committed") {
-		t.Fatalf("the success receipt = %q, want the covered target beside its committed session count", text)
-	}
-
-	delivered := meditationStamped(rig.run.SessionFacts(reflectionDeliveryAddr))
-	if len(delivered) != 1 || delivered[0].Message.Content != reflectionDeliveryBody {
-		t.Fatalf("meditation-stamped facts = %+v, want exactly the one delivered summary", delivered)
-	}
-
-	invokeUserTurn(t, rig.run, "inv-reflection-explicit-next", reflectionDeliveryAddr, "the second user round")
-	requests := rig.models["user"].recorded()
-	if len(requests) < 2 {
-		t.Fatalf("user requests = %d, want the next round's assembly beside the first", len(requests))
-	}
-	if !deliveryRequestCarries(requests[len(requests)-1], reflectionDeliveryBody) {
-		t.Fatalf("the next user request = %+v, want the delivered summary assembled into the target session", requests[len(requests)-1].Messages)
-	}
-}
-
-// runSameBatchYieldIsLegalSuccess requires a delivery into a session whose turn
-// is in flight to be a legal success: the write enters the target chain, the
-// busy turn settles untouched, and the next turn consumes the delivery.
-func runSameBatchYieldIsLegalSuccess(t *testing.T) {
-	arrived := make(chan struct{})
-	release := make(chan struct{})
-	var once sync.Once
-	userModel := &entryModel{name: "model-user", answer: func(*model.Request) *model.Response {
-		once.Do(func() { close(arrived) })
-		<-release
-		return entryFinalTurn("the busy round settled")
-	}}
-	decl := &config.Declaration{Entry: "user", Agents: []config.AgentSpec{
-		{ID: "user", Model: "model-user", MaxTokens: 32000},
-	}}
-	run := assembleReflectionDelivery(t, decl, map[event.AgentID]assembly.NativeAgent{
-		"user": {Model: userModel},
-	})
-	t.Cleanup(func() {
-		select {
-		case <-release:
-		default:
-			close(release)
-		}
-	})
-
-	driven := make(chan integrityOutcome, 1)
-	go func() {
-		turn, err := run.Invoke(context.Background(), assembly.InvokeRequest{
-			InvocationID:  "inv-reflection-busy",
-			Address:       reflectionDeliveryAddr,
-			TriggerSource: "user",
-			Input:         []model.Message{{Role: model.RoleUser, Content: "the busy user round"}},
-		})
-		driven <- integrityOutcome{turn: turn, err: err}
-	}()
-	select {
-	case <-arrived:
-	case <-time.After(20 * time.Second):
-		t.Fatal("the busy user turn never reached its model")
-	}
-
-	sink := &meditationSink{run: run}
-	tool := meditation.NewDeliverSummaryTool([]string{"user"}, sink, sink)
-	got, err := tool.Call(context.Background(), []byte(`{"content":"`+reflectionDeliveryBody+`"}`))
-	if err != nil {
-		t.Fatalf("deliver while the target turn is in flight: %v", err)
-	}
-	text, ok := got.(string)
-	if !ok || !strings.HasPrefix(text, "[deliver_summary_ok]") {
-		t.Fatalf("deliver_summary while the target turn is in flight = %v, want a legal success", got)
-	}
-	if !strings.Contains(text, "user: 1/1 sessions committed") {
-		t.Fatalf("the success receipt = %q, want the covered target beside its committed session count", text)
-	}
-
-	close(release)
-	busy := awaitIntegrityDrive(t, driven, "the busy user turn")
-	if busy.err != nil {
-		t.Fatalf("the busy user turn ended by error: %v", busy.err)
-	}
-	if busy.turn.Terminal != model.KindCompleted {
-		t.Fatalf("the busy user turn terminal = %v, want it untouched by the delivery", busy.turn.Terminal)
-	}
-
-	invokeUserTurn(t, run, "inv-reflection-yield-next", reflectionDeliveryAddr, "the next user round")
-	requests := userModel.recorded()
-	if len(requests) < 2 {
-		t.Fatalf("user requests = %d, want the next round's assembly beside the busy round", len(requests))
-	}
-	if !deliveryRequestCarries(requests[len(requests)-1], reflectionDeliveryBody) {
-		t.Fatalf("the next user request = %+v, want the delivery yielded to the next turn", requests[len(requests)-1].Messages)
-	}
-	if writes := meditationStamped(run.SessionFacts(reflectionDeliveryAddr)); len(writes) != 1 {
-		t.Fatalf("meditation-stamped facts = %d, want exactly the one yielded delivery", len(writes))
-	}
-}
-
-// runZeroLiveTargetNotSuccess requires an authorized target with no live session
-// to refuse the success and to be named, while the covered target's write stays
-// readable and is reported as its own commit.
-func runZeroLiveTargetNotSuccess(t *testing.T) {
-	rig := newReflectionDeliveryRun(t, "user", "quiet")
-	invokeUserTurn(t, rig.run, "inv-reflection-zero-live", reflectionDeliveryAddr, "the first user round")
-
-	tool := rig.deliveryTool("user", "quiet")
-	got, err := tool.Call(context.Background(), []byte(`{"content":"`+reflectionDeliveryBody+`"}`))
-	if err != nil {
-		t.Fatalf("deliver beside an unbound target: %v, want a refusal as result text", err)
-	}
-	text, ok := got.(string)
-	if !ok {
-		t.Fatalf("deliver_summary = %v, want result text", got)
-	}
-	if strings.Contains(text, "[deliver_summary_ok]") {
-		t.Fatalf("deliver_summary = %q, want no success while an authorized target has no live session", text)
-	}
-	if !strings.Contains(text, `no live session for target "quiet"`) {
-		t.Fatalf("deliver_summary = %q, want the uncovered target named", text)
-	}
-	if !strings.Contains(text, "user: 1/1 sessions committed") {
-		t.Fatalf("deliver_summary = %q, want the covered target's own commit reported", text)
-	}
-	if writes := meditationStamped(rig.run.SessionFacts(reflectionDeliveryAddr)); len(writes) != 1 {
-		t.Fatalf("meditation-stamped facts = %d, want the covered target's write kept", len(writes))
-	}
-	if sessions := rig.run.ActiveSessions("quiet"); len(sessions) != 0 {
-		t.Fatalf("active quiet sessions = %+v, want none invented beside the refusal", sessions)
-	}
-}
-
-// runPartialCommitFailureNotSuccess requires one failed session commit to refuse
-// the success beside the failed count and the first named error, without
-// rolling back or repeating the writes that succeeded.
-func runPartialCommitFailureNotSuccess(t *testing.T) {
-	second := event.Address{AgentID: "user", SessionID: "session-reflection-delivery-second"}
-	sink := newControlledReflectionSink(map[event.AgentID][]event.Address{
-		"user": {reflectionDeliveryAddr, second},
-	})
-	refused := errors.New("tagent test: the second target session refused the write")
-	sink.failures[second] = refused
-	tool := meditation.NewDeliverSummaryTool([]string{"user"}, sink, sink)
-
-	got, err := tool.Call(context.Background(), []byte(`{"content":"`+reflectionDeliveryBody+`"}`))
-	if err != nil {
-		t.Fatalf("deliver beside a failing session: %v, want a refusal as result text", err)
-	}
-	text, ok := got.(string)
-	if !ok {
-		t.Fatalf("deliver_summary = %v, want result text", got)
-	}
-	if strings.Contains(text, "[deliver_summary_ok]") {
-		t.Fatalf("deliver_summary = %q, want no success while a session commit failed", text)
-	}
-	if !strings.Contains(text, "1 of 2 deliveries failed: "+refused.Error()) {
-		t.Fatalf("deliver_summary = %q, want the failed count beside the first named error", text)
-	}
-	if !strings.Contains(text, "user: 1/2 sessions committed") {
-		t.Fatalf("deliver_summary = %q, want the committed session count reported honestly", text)
-	}
-	if writes := sink.deliveredWrites(); len(writes) != 1 || writes[0].Message.Content != reflectionDeliveryBody {
-		t.Fatalf("accepted writes = %+v, want exactly the one session that committed and no automatic repeat", writes)
-	}
-}
-
-// runWrongTargetNoExtraWrite requires an argument naming a target to be refused
-// by the declaration: the target set comes from deliver_to, and no session beside
-// the authorized set is written.
-func runWrongTargetNoExtraWrite(t *testing.T) {
-	intruder := event.Address{AgentID: "intruder", SessionID: "session-intruder"}
-	sink := newControlledReflectionSink(map[event.AgentID][]event.Address{
-		"user":     {reflectionDeliveryAddr},
-		"intruder": {intruder},
-	})
-	tool := meditation.NewDeliverSummaryTool([]string{"user"}, sink, sink)
-
-	got, err := tool.Call(context.Background(), []byte(`{"content":"`+reflectionDeliveryBody+`","target":"intruder"}`))
-	if err != nil {
-		t.Fatalf("deliver beside a target argument: %v, want a refusal as result text", err)
-	}
-	text, ok := got.(string)
-	if !ok || !strings.Contains(text, "[deliver_summary_denied]") {
-		t.Fatalf("deliver_summary = %v, want the named refusal of the target argument", got)
-	}
-	if !strings.Contains(text, "'target'") || !strings.Contains(text, "deliver_to") {
-		t.Fatalf("deliver_summary = %q, want the refused field beside the deliver_to authority", text)
-	}
-	if writes := sink.deliveredWrites(); len(writes) != 0 {
-		t.Fatalf("accepted writes = %+v, want none for an argument outside the declaration", writes)
-	}
-	properties := tool.Declaration().InputSchema.Properties
-	if len(properties) != 1 || properties["content"] == nil {
-		t.Fatalf("the declaration properties = %+v, want content only", properties)
-	}
+// TestEventIntegrityReflectionWhiteList drives the boot-time white list and the one grant it opens.
+// - empty_whitelist_fail_closed: a document enabling meditation beside no deliver_to target refuses the boot
+// - unknown_target_named_refusal: a deliver_to naming an undeclared agent refuses the boot by name
+// - whitelist_grants_send_and_target_reads_it: a live target reaches the reflection request as the send grant it opens
+// - whitelist_grants_send_and_target_reads_it: one call lands exactly one delivery fact, which the target reads next turn
+// 契约: docs/wiki/agent/agent-architecture.md#meditation-curator
+func TestEventIntegrityReflectionWhiteList(t *testing.T) {
+	reproductionEnv(t)
+	t.Run("empty_whitelist_fail_closed", runEmptyWhitelistFailClosed)
+	t.Run("unknown_target_named_refusal", runUnknownTargetNamedRefusal)
+	t.Run("whitelist_grants_send_and_target_reads_it", runWhitelistGrantsSendAndTargetReadsIt)
 }
 
 // runEmptyWhitelistFailClosed requires a document that enables meditation
@@ -2914,264 +2731,75 @@ func runUnknownTargetNamedRefusal(t *testing.T) {
 	}
 }
 
-// runTargetNotRunningNamedRefusal requires a declared target whose loop never
-// started to be refused by name, with no one-shot fallback: the refusal
-// establishes no session, writes no fact and drives no model behind it.
-func runTargetNotRunningNamedRefusal(t *testing.T) {
-	rig := newReflectionDeliveryRun(t, "user", "quiet")
-	tool := rig.deliveryTool("quiet")
+// runWhitelistGrantsSendAndTargetReadsIt requires a white list naming a live
+// target to reach the reflection turn as the one cross-session grant it opens:
+// the request declares the send tool that white list grants, one call lands
+// exactly one delivery fact in the target chain under the send lineage, and the
+// target's next request reads that body off the chain rather than beside a
+// second delivery.
+func runWhitelistGrantsSendAndTargetReadsIt(t *testing.T) {
+	scene := newHostDriveScene(t)
+	scene.bindPeer(t)
+	scene.invokeMeditation(t, hostDriveSendCall, hostDrivePlainSend(hostDriveSendCall))
 
-	got, err := tool.Call(context.Background(), []byte(`{"content":"`+reflectionDeliveryBody+`"}`))
-	if err != nil {
-		t.Fatalf("deliver to a target whose loop is not running: %v, want a refusal as result text", err)
+	if receipt := scene.awaitReceipt(t, hostDriveSendCall); receipt != hostDriveReceiptOK {
+		t.Fatalf("send{target:{agent,session}} result beside the declared white list = %q, want the bare %q of a delivered body:\n%s",
+			receipt, hostDriveReceiptOK, scene.describe())
 	}
-	text, ok := got.(string)
-	if !ok || !strings.Contains(text, "[deliver_summary_denied]") {
-		t.Fatalf("deliver_summary = %v, want the named refusal of the target that is not running", got)
-	}
-	if strings.Contains(text, "[deliver_summary_ok]") {
-		t.Fatalf("deliver_summary = %q, want no success while the target loop never started", text)
-	}
-
-	if sessions := rig.run.ActiveSessions("quiet"); len(sessions) != 0 {
-		t.Fatalf("active quiet sessions = %+v, want no session established by the refused delivery", sessions)
-	}
-	if facts := rig.run.SessionFacts(event.Address{AgentID: "quiet", SessionID: "session-quiet"}); len(facts) != 0 {
-		t.Fatalf("quiet facts = %+v, want no fact written by the refused delivery", facts)
-	}
-	if requests := rig.models["quiet"].recorded(); len(requests) != 0 {
-		t.Fatalf("quiet model requests = %d, want no one-shot drive behind the refusal", len(requests))
-	}
-}
-
-// runDeliveryDoesNotRearmNovelty requires the delivery itself to stay outside
-// the host-facing novelty: the committed summary never re-opens the freshness
-// gate, so the write adds no reflection pass of its own.
-//
-// The baseline is taken after the round's own commits have settled, so the
-// check reads the delta the delivery caused rather than the passes the same
-// round's host-facing material already justified.
-func runDeliveryDoesNotRearmNovelty(t *testing.T) {
-	rig := newMeditationRig(t, 0, func(*model.Request) *model.Response {
-		return entryFinalTurn("noted")
-	})
-	invokeUserTurn(t, rig.run, "inv-novelty", rig.userAddr, "the user round")
-	rig.awaitFire(t)
-
-	time.Sleep(750 * time.Millisecond)
-	drainFired(rig.fired)
-	baseline := len(rig.medModel.recorded())
-
-	sink := &meditationSink{run: rig.run}
-	tool := meditation.NewDeliverSummaryTool([]string{"user-agent"}, sink, sink)
-	got, err := tool.Call(context.Background(), []byte(`{"content":"`+reflectionDeliveryBody+`"}`))
-	if err != nil {
-		t.Fatalf("deliver the reflection summary: %v", err)
-	}
-	if text, ok := got.(string); !ok || !strings.HasPrefix(text, "[deliver_summary_ok]") {
-		t.Fatalf("deliver_summary = %v, want the legal delivery", got)
-	}
-	if delivered := meditationStamped(rig.run.SessionFacts(rig.userAddr)); len(delivered) != 1 {
-		t.Fatalf("meditation-stamped facts = %d, want the one delivered summary", len(delivered))
-	}
-
-	select {
-	case extra := <-rig.fired:
-		t.Fatalf("a reflection pass fired after the delivery: %+v, want the write to stay outside the freshness gate", extra)
-	case <-time.After(750 * time.Millisecond):
-		if after := len(rig.medModel.recorded()); after != baseline {
-			t.Fatalf("meditation requests grew from %d to %d after the delivery, want the write to add no pass of its own", baseline, after)
+	declared := false
+	for _, request := range scene.provider.servedRequests() {
+		if request.Model != hostDriveMeditatorModel {
+			continue
+		}
+		for _, tool := range request.Tools {
+			if tool == hostDriveToolSend {
+				declared = true
+			}
 		}
 	}
-}
-
-// drainFired drops the readings a settled round left buffered, so a check
-// reads the passes that arrive after the drain rather than the ones it already
-// accounted for.
-func drainFired(fired <-chan meditation.TickOutcome) {
-	for {
-		select {
-		case <-fired:
-		default:
-			return
-		}
-	}
-}
-
-// runReplayIdentity requires a replay of one action identity to write once and
-// answer the same receipt, while the same body under another identity writes
-// again: the dedup reads the call identity the context carries, never the
-// content or a time window.
-func runReplayIdentity(t *testing.T) {
-	rig := newReflectionDeliveryRun(t, "user")
-	invokeUserTurn(t, rig.run, "inv-replay-bootstrap", reflectionDeliveryAddr, "the first user round")
-	tool := rig.deliveryTool("user")
-
-	frame := task.CallFrame{
-		Identity: task.CallIdentity{
-			InstanceID:   "instance-replay",
-			InvocationID: "invocation-replay",
-			DecisionID:   "decision-replay",
-			CallID:       "call-replay",
-		},
-		Address: reflectionDeliveryAddr,
-	}
-	replayed := task.WithCallFrame(context.Background(), frame)
-	first, err := tool.Call(replayed, []byte(`{"content":"`+reflectionDeliveryBody+`"}`))
-	if err != nil {
-		t.Fatalf("deliver the first action: %v", err)
-	}
-	second, err := tool.Call(replayed, []byte(`{"content":"`+reflectionDeliveryBody+`"}`))
-	if err != nil {
-		t.Fatalf("replay the same action identity: %v", err)
-	}
-	if first != second {
-		t.Fatalf("the replay receipt = %v, want the receipt of the first action %v", second, first)
-	}
-	if writes := meditationStamped(rig.run.SessionFacts(reflectionDeliveryAddr)); len(writes) != 1 {
-		t.Fatalf("meditation-stamped facts after the replay = %d, want exactly the one write of the first action", len(writes))
+	if !declared {
+		t.Fatalf("no reflection request declared the %q tool the white list grants:\n%s",
+			hostDriveToolSend, scene.describe())
 	}
 
-	other := frame
-	other.Identity.CallID = "call-replay-second"
-	third, err := tool.Call(task.WithCallFrame(context.Background(), other), []byte(`{"content":"`+reflectionDeliveryBody+`"}`))
-	if err != nil {
-		t.Fatalf("deliver the same body under another identity: %v", err)
+	scene.awaitPeerBody(t)
+	facts := scene.bodyFacts(t)
+	if len(facts) != 1 {
+		t.Fatalf("delivered facts = %d, want the one body the call carried:\n%s", len(facts), scene.describe())
 	}
-	if third == nil {
-		t.Fatal("the second identity answered no receipt, want its own delivery")
+	if facts[0].Type != event.TypeExternalInput {
+		t.Fatalf("delivered fact type = %q, want the external input a delivery lands", facts[0].Type)
 	}
-	if writes := meditationStamped(rig.run.SessionFacts(reflectionDeliveryAddr)); len(writes) != 2 {
-		t.Fatalf("meditation-stamped facts = %d, want the same body under another identity written again", len(writes))
+	if got := facts[0].Meta[event.MetaKeyTriggerSource]; got != hostDriveLineage {
+		t.Fatalf("delivered fact trigger source = %q, want the %q lineage of a body a peer sent", got, hostDriveLineage)
 	}
-}
-
-// runBootDeliverToTargetRequest drives the consumer anchor over the formal
-// assembly: Boot grants deliver_summary to the meditation session only, the
-// reflection model explicitly calls it, and the target session's next real
-// request carries the delivered body.
-//
-// The meditation document runs a fifty-millisecond activity window, so the
-// document exercises a positive floor end to end: the fact each host-facing
-// commit files is inside its own window, the held pass keeps its episode open
-// through the standing re-arm, and the re-evaluation fires once that window is
-// past. The observed round's own commit is also the activity evidence the pass
-// waits on, so a pass that reaches the driver while that round still holds its
-// decision seat yields the turn. The second host-facing commit below lands after
-// the round returned, which makes the re-evaluation reachable over a free seat;
-// a round that already fired leaves that commit inside the interval floor, so
-// the anchor still reads exactly one delivery.
-func runBootDeliverToTargetRequest(t *testing.T) {
-	const (
-		input  = "the user round the reflection observes"
-		callID = "call-boot-deliver"
-	)
-	provider := newScriptedProvider(t)
-	script := newIntegrityScript()
-	script.expect("model-entry", "the entry answers the observed round", requestTail(input)).
-		answers(scriptedAnswerOf("the first answer"))
-	deliverStep := script.expect("model-meditator", "the reflection delivers the summary", requestCarriesReflectionInput).
-		answers(settleToolCallAnswer(meditation.DeliverSummaryToolName, callID, `{"content":"`+reflectionDeliveryBody+`"}`))
-	settledStep := script.expect("model-meditator", "the reflection settles the delivery", requestCarriesToolResult(callID)).
-		answers(scriptedAnswerOf("summary delivered"))
-	script.expect("model-entry", "the next entry round reads the delivery", requestTail("the next user round")).
-		answers(scriptedAnswerOf("the second answer"))
-	provider.decide = script.decide
-
-	host, err := bootReflectionDeliveryHost(t, provider, "[user]")
-	if err != nil {
-		t.Fatalf("boot the reflection delivery host: %v", err)
+	if facts[0].Target != scene.peer {
+		t.Fatalf("delivered fact target = %+v, want the peer session %+v", facts[0].Target, scene.peer)
 	}
-	keepIntegrityHost(t, script, host)
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-	defer cancel()
-
-	turn, err := host.Invoke(ctx, assembly.InvokeRequest{
-		InvocationID:  "inv-boot-reflection-delivery",
-		Address:       reflectionDeliveryAddr,
-		TriggerSource: "user",
-		Input:         []model.Message{{Role: model.RoleUser, Content: input}},
-	})
-	if err != nil {
-		t.Fatalf("the observed round ended by error: %v", err)
-	}
-	if turn.Terminal != model.KindCompleted {
-		t.Fatalf("the observed round terminal = %v, want it completed", turn.Terminal)
-	}
-	if _, err := host.Run().CommitToSession(ctx, reflectionDeliveryAddr, event.Event{
-		Type:    event.TypeExternalInput,
-		Meta:    map[string]string{event.MetaKeyTriggerSource: "user"},
-		Message: model.Message{Role: model.RoleUser, Content: "the user round that follows the observed one"},
-	}); err != nil {
-		t.Fatalf("commit the host-facing round the reflection re-evaluates: %v", err)
-	}
-	script.await(t, deliverStep)
-	script.await(t, settledStep)
-
-	var entryRequests, meditationRequests []scriptedRequest
-	for _, request := range provider.servedRequests() {
-		switch request.Model {
-		case "model-entry":
-			entryRequests = append(entryRequests, request)
-		case "model-meditator":
-			meditationRequests = append(meditationRequests, request)
-		}
-	}
-	if len(meditationRequests) < 2 {
-		t.Fatalf("meditation requests = %d, want the reflection turn beside its settled continuation", len(meditationRequests))
-	}
-	if !requestDeclaresTool(meditationRequests[0], meditation.DeliverSummaryToolName) {
-		t.Fatalf("the meditation request declares tools %v, want deliver_summary granted to the meditation session", meditationRequests[0].Tools)
-	}
-	if len(entryRequests) == 0 {
-		t.Fatal("the drive served no entry request")
-	}
-	if requestDeclaresTool(entryRequests[0], meditation.DeliverSummaryToolName) {
-		t.Fatalf("the entry request declares tools %v, want deliver_summary withheld from the entry session", entryRequests[0].Tools)
-	}
-	if result, ok := deliveryToolResult(meditationRequests[1], callID); !ok ||
-		!strings.Contains(result, "[deliver_summary_ok]") ||
-		!strings.Contains(result, "user: 1/1 sessions committed") {
-		t.Fatalf("the reflection read %q for the delivery, want the success receipt naming the covered target", result)
-	}
-	delivered := meditationStamped(host.Run().SessionFacts(reflectionDeliveryAddr))
-	if len(delivered) != 1 || delivered[0].Message.Content != reflectionDeliveryBody {
-		t.Fatalf("meditation-stamped facts = %+v, want exactly the one delivered summary", delivered)
+	if rounds := scene.peerRoundsCarrying(t); len(rounds) != 1 {
+		t.Fatalf("target rounds carrying the body = %d, want the one round the delivery drove:\n%s",
+			len(rounds), scene.describe())
 	}
 
-	next, err := host.Invoke(ctx, assembly.InvokeRequest{
-		InvocationID:  "inv-boot-reflection-delivery-next",
-		Address:       reflectionDeliveryAddr,
-		TriggerSource: "user",
-		Input:         []model.Message{{Role: model.RoleUser, Content: "the next user round"}},
-	})
-	if err != nil {
-		t.Fatalf("the next entry round ended by error: %v", err)
+	scene.drivePeerTurn(t)
+	if rounds := scene.peerRoundsCarrying(t); len(rounds) != 2 {
+		t.Fatalf("target rounds carrying the body after the next turn = %d, want the delivery round and the turn that read it:\n%s",
+			len(rounds), scene.describe())
 	}
-	if next.Terminal != model.KindCompleted {
-		t.Fatalf("the next entry round terminal = %v, want it completed", next.Terminal)
+	if again := scene.bodyFacts(t); len(again) != 1 {
+		t.Fatalf("delivered facts beside the target's next turn = %d, want the single fact the one call landed:\n%s",
+			len(again), scene.describe())
 	}
-	entryRequests = nil
-	for _, request := range provider.servedRequests() {
-		if request.Model == "model-entry" {
-			entryRequests = append(entryRequests, request)
-		}
-	}
-	if len(entryRequests) < 2 || !scriptedRequestCarries(entryRequests[len(entryRequests)-1], reflectionDeliveryBody) {
-		t.Fatalf("the next entry request = %+v, want the delivered summary assembled into the target session", entryRequests)
-	}
-	if violations := script.audit(); len(violations) != 0 {
-		t.Fatalf("the boot delivery script left violations: %v", violations)
-	}
-	closeIntegrityHost(t, ctx, host)
+	scene.refuteOutbound(t)
 }
 
 // TestEventIntegrityReplacement drives the event-driven model replacement of one agent's lease over the formal runtime and Boot entries:
-// - new_request_gets_new_version: the replacement fact installs the new version and the next request is served by it
+// - new_request_gets_new_version: the model configuration change installs the new version and the next request is served by it
 // - inflight_stream_keeps_start_version: a stream that began before the replacement keeps its start version to the end
-// - duplicate_same_version_not_reinstalled: a same-version reload and a same-version replacement fact publish and install nothing, with a named result
+// - duplicate_same_version_not_reinstalled: a same-version reload and a same-version model configuration change publish and install nothing, with a named result
 // - failed_replacement_not_installed: a refused rebuild installs no version and leaves the version in effect serving
-// - formal_reload_entry: POST /reload publishes the rewritten document and the next real request is served by the new version
+// - formal_reload_entry: POST /reload publishes the rewritten document, files one configuration change of the model dimension and the next real request is served by the new version
+// - failed_install_retried_by_next_reload: a model install the reload could not complete is judged again by the next carried reload, under the same fact identity, and the install lands then
 //
 // 契约: docs/wiki/platform/org-hot-reload.md#fingerprint
 func TestEventIntegrityReplacement(t *testing.T) {
@@ -3181,6 +2809,7 @@ func TestEventIntegrityReplacement(t *testing.T) {
 	t.Run("duplicate_same_version_not_reinstalled", runDuplicateSameVersionNotReinstalled)
 	t.Run("failed_replacement_not_installed", runFailedReplacementNotInstalled)
 	t.Run("formal_reload_entry", runFormalReloadEntry)
+	t.Run("failed_install_retried_by_next_reload", runFailedInstallRetriedByNextReload)
 }
 
 // replacementSession is the one session the replacement checks drive.
@@ -3261,7 +2890,7 @@ type replacementRig struct {
 }
 
 // newReplacementRig assembles one runtime over the initial model of the lease,
-// the version the lease starts on and the rebuild a replacement fact runs.
+// the version the lease starts on and the rebuild a model configuration change runs.
 func newReplacementRig(t *testing.T, initial model.Model, version string, rebuild func(string) (model.Model, error)) *replacementRig {
 	t.Helper()
 	lease, err := rl.NewModelLease(initial, version)
@@ -3313,6 +2942,19 @@ func invokeReplacementTurn(t *testing.T, run *assembly.Run, id, input string) ag
 	return turn
 }
 
+// fileReplacementChange commits one model dimension configuration change on the
+// rig's session chain and runs its After pass, the same fact a reload files.
+// The change starts from the version the lease holds.
+func fileReplacementChange(t *testing.T, rig *replacementRig, to string) event.EventID {
+	t.Helper()
+	fact := event.ConfigChangeModelFor("user", 0, rig.lease.CurrentVersion(), to, event.ModelReplacementResultRequested)
+	key, err := rig.run.CommitToSession(context.Background(), event.Address{AgentID: "user", SessionID: replacementSession}, fact.Event(time.Now().UTC()))
+	if err != nil {
+		t.Fatalf("file the model configuration change: %v", err)
+	}
+	return key
+}
+
 // replacementGapOf reports the observation gaps the named plugin left on the
 // run's After pass presentations, joined so a named refusal is read by errors.Is.
 func replacementGapOf(run *assembly.Run, plugin string) error {
@@ -3327,9 +2969,10 @@ func replacementGapOf(run *assembly.Run, plugin string) error {
 	return found
 }
 
-// runNewRequestGetsNewVersion requires the replacement fact to install the new
-// version and the next request to be served by it: the requests the two model
-// versions recorded are the evidence, never the replacement receipt alone.
+// runNewRequestGetsNewVersion requires the model configuration change to
+// install the new version and the next request to be served by it: the
+// requests the two model versions recorded are the evidence, never the reload
+// receipt alone.
 func runNewRequestGetsNewVersion(t *testing.T) {
 	first := newReplacementVersionModel("model-a", "the first version answered")
 	second := newReplacementVersionModel("model-b", "the second version answered")
@@ -3349,9 +2992,7 @@ func runNewRequestGetsNewVersion(t *testing.T) {
 		t.Fatalf("model calls = (%d, %d), want the first request on the version in effect and none on the new one", first.calls(), second.calls())
 	}
 
-	if _, err := rig.run.NoteModelChange("user", "", "local/model-b", "config"); err != nil {
-		t.Fatalf("file the model replacement: %v", err)
-	}
+	fileReplacementChange(t, rig, "local/model-b")
 	if len(requested) != 1 || requested[0] != "local/model-b" {
 		t.Fatalf("rebuilt versions = %v, want exactly the one move the fact asked for", requested)
 	}
@@ -3397,9 +3038,7 @@ func runInflightStreamKeepsStartVersion(t *testing.T) {
 		t.Fatal("the in-flight request never reached the version in effect")
 	}
 
-	if _, err := rig.run.NoteModelChange("user", "", "local/model-b", "config"); err != nil {
-		t.Fatalf("file the model replacement while the stream is in flight: %v", err)
-	}
+	fileReplacementChange(t, rig, "local/model-b")
 	if got := rig.lease.CurrentVersion(); got != "model-b@local/model-b" {
 		t.Fatalf("the lease holds %q, want the replacement installed beside the open stream", got)
 	}
@@ -3435,8 +3074,8 @@ func runInflightStreamKeepsStartVersion(t *testing.T) {
 }
 
 // runDuplicateSameVersionNotReinstalled requires a same-version reload and a
-// same-version replacement fact to publish and install nothing, with a
-// determinable result: the host names no change, and the lease answers the
+// same-version model configuration change to publish and install nothing, with
+// a determinable result: the host names no change, and the lease answers the
 // named version-held refusal without a second rebuild or publication.
 func runDuplicateSameVersionNotReinstalled(t *testing.T) {
 	provider := newScriptedProvider(t)
@@ -3490,15 +3129,11 @@ func runDuplicateSameVersionNotReinstalled(t *testing.T) {
 		return versioned, nil
 	})
 	invokeReplacementTurn(t, rig.run, "inv-duplicate-before", "the round before the duplicate")
-	if _, err := rig.run.NoteModelChange("user", "", "local/model-a", "config"); err != nil {
-		t.Fatalf("file the versioning replacement: %v", err)
-	}
+	fileReplacementChange(t, rig, "local/model-a")
 	if rebuilds != 1 || rig.lease.CurrentVersion() != "model-a@local/model-a" {
 		t.Fatalf("the first move rebuilt %d times and left %q, want the one versioning install", rebuilds, rig.lease.CurrentVersion())
 	}
-	if _, err := rig.run.NoteModelChange("user", "", "local/model-a", "config"); err != nil {
-		t.Fatalf("file the duplicate replacement: %v", err)
-	}
+	fileReplacementChange(t, rig, "local/model-a")
 	if rebuilds != 1 {
 		t.Fatalf("the duplicate replacement rebuilt %d times, want no second rebuild", rebuilds)
 	}
@@ -3529,9 +3164,7 @@ func runFailedReplacementNotInstalled(t *testing.T) {
 	if turn := invokeReplacementTurn(t, rig.run, "inv-refused-first", "the first user round"); turn.Terminal != model.KindCompleted {
 		t.Fatalf("the first turn terminal = %v, want the completed turn of the version in effect", turn.Terminal)
 	}
-	if _, err := rig.run.NoteModelChange("user", "", "local/model-b", "config"); err != nil {
-		t.Fatalf("file the refused replacement: %v", err)
-	}
+	fileReplacementChange(t, rig, "local/model-b")
 	if rebuilds != 1 {
 		t.Fatalf("the refused replacement rebuilt %d times, want the one attempt the fact asked for", rebuilds)
 	}
@@ -3575,6 +3208,7 @@ func runFormalReloadEntry(t *testing.T) {
 		t.Fatalf("the first round = (%v, %v), want it completed on the boot model", turn.Terminal, err)
 	}
 
+	before := host.Run().CommittedFacts()
 	rewriteScriptedHostDocument(t, configPath, root, provider.endpoint(), "model-b")
 	answer := postReload(t, host.FaceAddr())
 	if !answer.Reloaded || len(answer.ModelChanges) != 1 {
@@ -3583,6 +3217,34 @@ func runFormalReloadEntry(t *testing.T) {
 	change := answer.ModelChanges[0]
 	if change.Agent != "user" || change.From != "local/model-a" || change.To != "local/model-b" || change.Fact == "" {
 		t.Fatalf("judged change = %+v, want the entry agent's move between the two registered versions beside its fact", change)
+	}
+	if after := host.Run().CommittedFacts(); after != before+1 {
+		t.Fatalf("committed facts = %d after the reload, want exactly the one configuration change beside the %d before", after, before)
+	}
+	fact, err := host.Run().CommittedEvent(ctx, event.EventID(change.Fact))
+	if err != nil {
+		t.Fatalf("read the committed configuration change: %v", err)
+	}
+	if fact.Type != event.TypeConfigChange {
+		t.Fatalf("committed fact type = %q, want the configuration change the reload files", fact.Type)
+	}
+	if got := fact.Meta[event.MetaKeyConfigChangeDimension]; got != event.ConfigChangeDimensionModel {
+		t.Fatalf("committed fact dimension = %q, want the model dimension", got)
+	}
+	if got := fact.Meta[event.MetaKeyConfigChangeGeneration]; got != strconv.FormatUint(answer.Publication.Generation, 10) {
+		t.Fatalf("committed fact generation = %q, want the publication generation %d", got, answer.Publication.Generation)
+	}
+	if got := fact.Meta[event.MetaKeyTriggerSource]; got != event.ConfigChangeSourceConfig {
+		t.Fatalf("committed fact trigger source = %q, want the configuration source", got)
+	}
+	if got := fact.Meta[event.MetaKeyModelFromVersion]; got != "model-a@local/model-a" {
+		t.Fatalf("committed fact from version = %q, want the version the move started from", got)
+	}
+	if got := fact.Meta[event.MetaKeyModelToVersion]; got != "local/model-b" {
+		t.Fatalf("committed fact to version = %q, want the version the move asked for", got)
+	}
+	if got := fact.Meta[event.MetaKeyModelReplacementResult]; got != event.ModelReplacementResultRequested {
+		t.Fatalf("committed fact result = %q, want the requested result", got)
 	}
 
 	if turn, err := driveIntegrityTurn(ctx, host, addr, "the second round"); err != nil || turn.Terminal != model.KindCompleted {
@@ -3594,6 +3256,84 @@ func runFormalReloadEntry(t *testing.T) {
 	}
 	if !scriptedRequestCarries(requests[1], "the second round") {
 		t.Fatalf("the new version request = %+v, want the round that began after the reload", requests[1].Messages)
+	}
+	closeIntegrityHost(t, ctx, host)
+}
+
+// runFailedInstallRetriedByNextReload requires a model install the first reload
+// could not complete to be judged again by the next carried reload:
+//   - the first reload publishes the rewritten document and files the one model
+//     configuration change, while the rebuild refuses the version because the
+//     provider key is absent
+//   - the next reload carries the same document, so the publication is unchanged
+//     and the change is re-judged under the same content-addressed fact identity
+//   - the duplicate identity still runs the After pass, so the install lands then,
+//     without a second fact and without a second generation
+func runFailedInstallRetriedByNextReload(t *testing.T) {
+	provider := newScriptedProvider(t)
+	root := t.TempDir()
+	configPath := writeScriptedHostDocument(t, root, provider.endpoint(), "model-a")
+	host, err := assembly.Boot(configPath, assembly.WithSender(newRecordingSender()))
+	if err != nil {
+		t.Fatalf("boot the retry host: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	addr := event.Address{AgentID: "user", SessionID: "session-reload-retry"}
+	if turn, err := driveIntegrityTurn(ctx, host, addr, "the round before the retry"); err != nil || turn.Terminal != model.KindCompleted {
+		t.Fatalf("the round before the retry = (%v, %v), want it completed on the boot model", turn.Terminal, err)
+	}
+
+	rewriteScriptedHostDocument(t, configPath, root, provider.endpoint(), "model-b")
+	t.Setenv("TAGENT_TEST_API_KEY", "")
+	first := postReload(t, host.FaceAddr())
+	if !first.Reloaded || !first.Publication.Published || len(first.ModelChanges) != 1 {
+		t.Fatalf("the first reload = %+v, want the published document beside the one judged model change", first)
+	}
+	change := first.ModelChanges[0]
+	if change.Fact == "" {
+		t.Fatal("the first reload judged the model change beside no committed fact")
+	}
+	if publications := host.Run().LeasePublications(); len(publications) != 0 {
+		t.Fatalf("lease publications = %+v, want none beside a rebuild the absent key refused", publications)
+	}
+	if gapErr := replacementGapOf(host.Run(), "model-lease"); !errors.Is(gapErr, rl.ErrLeaseRebuildFailed) {
+		t.Fatalf("the refused install left %v, want the named rebuild refusal", gapErr)
+	}
+
+	before := host.Run().CommittedFacts()
+	t.Setenv("TAGENT_TEST_API_KEY", "test-key")
+	second := postReload(t, host.FaceAddr())
+	if !second.Reloaded || second.Publication.Published {
+		t.Fatalf("the carried reload = %+v, want the unchanged publication of the document already in effect", second)
+	}
+	if second.Publication.Generation != first.Publication.Generation {
+		t.Fatalf("carried generation = %d, want the generation the first reload published %d", second.Publication.Generation, first.Publication.Generation)
+	}
+	if len(second.ModelChanges) != 1 || second.ModelChanges[0].Fact != change.Fact {
+		t.Fatalf("carried model changes = %+v, want the same content-addressed fact %q the first reload filed", second.ModelChanges, change.Fact)
+	}
+	if after := host.Run().CommittedFacts(); after != before {
+		t.Fatalf("committed facts = %d after the carried reload, want the %d before: a repeated judgment refiles no fact", after, before)
+	}
+	publications := host.Run().LeasePublications()
+	if len(publications) != 1 || publications[0].Name() != "model-b@local/model-b" {
+		t.Fatalf("lease publications = %+v, want the one version the carried reload installed", publications)
+	}
+	fact, err := host.Run().CommittedEvent(ctx, event.EventID(change.Fact))
+	if err != nil {
+		t.Fatalf("read the committed model change: %v", err)
+	}
+	if fact.Type != event.TypeConfigChange || fact.Meta[event.MetaKeyConfigChangeDimension] != event.ConfigChangeDimensionModel {
+		t.Fatalf("committed fact = (%q, %q), want the model dimension of the configuration change family", fact.Type, fact.Meta[event.MetaKeyConfigChangeDimension])
+	}
+
+	if turn, err := driveIntegrityTurn(ctx, host, addr, "the round after the retry"); err != nil || turn.Terminal != model.KindCompleted {
+		t.Fatalf("the round after the retry = (%v, %v), want it completed", turn.Terminal, err)
+	}
+	requests := provider.servedRequests()
+	if len(requests) != 2 || requests[0].Model != "model-a" || requests[1].Model != "model-b" {
+		t.Fatalf("provider requests = %+v, want the retried install to move the next round onto the new version", requests)
 	}
 	closeIntegrityHost(t, ctx, host)
 }
@@ -4351,18 +4091,19 @@ type decisionFlowTurn struct {
 }
 
 // decisionFlowCall is one wrapped call a turn issued: the result fact the
-// formal assembly committed under its call identity, beside the outbound body
-// a send call delivered at the sender.
+// formal assembly committed under its call identity. A send call reaches no
+// channel, so no call carries an outbound body of its own.
 type decisionFlowCall struct {
 	name   string
 	callID string
-	body   string
 	fact   event.Event
 }
 
 // decisionFlowNotice is one notice-driven flow: the settled delivery fact, the
 // notice identity it reports, the follow-up range it committed and the request
-// and action that range produced.
+// and action that range produced. inputFacts holds the facts that name the
+// consuming range: the settled transport record names its call's own range, so
+// it is never counted as a second input of the notice material.
 type decisionFlowNotice struct {
 	addr         event.Address
 	input        string
@@ -4387,8 +4128,7 @@ func driveDecisionFlowMatrix(t *testing.T) decisionFlowScene {
 	provider := newScriptedProvider(t)
 	script := newIntegrityScript()
 	script.expect("model-entry", "the first flow sends its note", requestTail(decisionFlowFirstInput)).
-		answers(settleToolCallAnswer("send", decisionFlowSendCall, `{"content":"`+decisionFlowFirstNote+`"}`)).
-		delivers(decisionFlowFirstNote)
+		answers(settleToolCallAnswer("send", decisionFlowSendCall, `{"content":"`+decisionFlowFirstNote+`"}`))
 	script.expect("model-entry", "the first flow continues after its send", requestCarriesToolResult(decisionFlowSendCall)).
 		answers(settleToolCallAnswer("worker", decisionFlowFirstCall, `{"input":"`+decisionFlowFirstWorkerIn+`"}`))
 	script.expect("model-entry", "the first flow answers after its delegation", requestCarriesToolResult(decisionFlowFirstCall)).
@@ -4408,7 +4148,6 @@ func driveDecisionFlowMatrix(t *testing.T) decisionFlowScene {
 	secondFollow := script.expect("model-entry", "the second flow notice fires its follow-up", requestCarriesSettleNotice(decisionFlowSecondWorkerOut)).
 		answers(scriptedAnswerOf(decisionFlowSecondFollow)).delivers(decisionFlowSecondFollow)
 	provider.decide = script.decide
-	declared := script.actionBodies()
 
 	sender := newRecordingSender()
 	host := bootReproductionHost(t, provider, sender)
@@ -4445,7 +4184,7 @@ func driveDecisionFlowMatrix(t *testing.T) decisionFlowScene {
 
 	firstTurnScene := decisionFlowTurnOf(t, firstAddr, firstTurn, firstFacts, decisionFlowFirstInput, decisionFlowFirstFinal, 3,
 		[]decisionFlowCallSpec{
-			{name: "send", callID: decisionFlowSendCall, body: decisionFlowFirstNote},
+			{name: "send", callID: decisionFlowSendCall},
 			{name: "worker", callID: decisionFlowFirstCall},
 		})
 	secondTurnScene := decisionFlowTurnOf(t, secondAddr, secondTurn, secondFacts, decisionFlowSecondInput, decisionFlowSecondFinal, 2,
@@ -4453,7 +4192,7 @@ func driveDecisionFlowMatrix(t *testing.T) decisionFlowScene {
 	firstFlow := decisionFlowNotice{
 		addr: firstAddr, input: decisionFlowFirstInput,
 		settle: firstSettle, notice: firstNotice, material: firstMaterial,
-		facts: firstFacts, inputFacts: reproductionInputFacts(firstFacts, firstMaterial),
+		facts: firstFacts, inputFacts: reproductionInputConsumers(reproductionInputFacts(firstFacts, firstMaterial)),
 		noticeFact: continuationNoticeFact(t, firstFacts, firstSettle.TaskID),
 		request:    firstRequest, requestIndex: firstIndex,
 		followBody: decisionFlowFirstFollow,
@@ -4462,7 +4201,7 @@ func driveDecisionFlowMatrix(t *testing.T) decisionFlowScene {
 	secondFlow := decisionFlowNotice{
 		addr: secondAddr, input: decisionFlowSecondInput,
 		settle: secondSettle, notice: secondNotice, material: secondMaterial,
-		facts: secondFacts, inputFacts: reproductionInputFacts(secondFacts, secondMaterial),
+		facts: secondFacts, inputFacts: reproductionInputConsumers(reproductionInputFacts(secondFacts, secondMaterial)),
 		noticeFact: continuationNoticeFact(t, secondFacts, secondSettle.TaskID),
 		request:    secondRequest, requestIndex: secondIndex,
 		followBody: decisionFlowSecondFollow,
@@ -4476,7 +4215,7 @@ func driveDecisionFlowMatrix(t *testing.T) decisionFlowScene {
 		entry:        decisionFlowEntryRequests(requests),
 		actions:      sender.actions(),
 		active:       host.Run().ActiveSessions("user"),
-		declared:     declared,
+		declared:     script.actionBodies(),
 		busyRequests: busyRequests,
 		busyInputs:   busyInputs,
 	}
@@ -4497,12 +4236,11 @@ func driveDecisionFlowMatrix(t *testing.T) decisionFlowScene {
 	return scene
 }
 
-// decisionFlowCallSpec declares one wrapped call of a turn: the identity the
-// admission frame carries beside the outbound body a send call delivered.
+// decisionFlowCallSpec declares one wrapped call of a turn: the name the check
+// reads the call by beside the identity the admission frame carries.
 type decisionFlowCallSpec struct {
 	name   string
 	callID string
-	body   string
 }
 
 // decisionFlowTurnOf reads one user turn's consumption surface back from the
@@ -4516,7 +4254,7 @@ func decisionFlowTurnOf(t *testing.T, addr event.Address, turn agent.Turn, facts
 	}
 	for _, call := range calls {
 		out.calls = append(out.calls, decisionFlowCall{
-			name: call.name, callID: call.callID, body: call.body,
+			name: call.name, callID: call.callID,
 			fact: decisionFlowResultFact(t, facts, call.callID),
 		})
 	}
@@ -4577,6 +4315,19 @@ func decisionFlowResultFact(t *testing.T, facts []event.Event, callID string) ev
 	return matched[0]
 }
 
+// decisionFlowSegmentRange reports whether one identity is a range the
+// consumption loop minted for the session: <session>#c<N>. A user turn and the
+// notice-driven follow-up it continues run under such a range, while the facts
+// they consume keep the identity of the entry that committed them.
+func decisionFlowSegmentRange(id event.InvocationID, addr event.Address) bool {
+	prefix := string(addr.SessionID) + "#c"
+	if !strings.HasPrefix(string(id), prefix) {
+		return false
+	}
+	count := strings.TrimPrefix(string(id), prefix)
+	return count != "" && strings.Trim(count, "0123456789") == ""
+}
+
 // decisionFlowEntryRequests reports the entry agent's requests in served order,
 // so the checks read the decision sequence without the worker requests.
 func decisionFlowEntryRequests(requests []scriptedRequest) []scriptedRequest {
@@ -4608,8 +4359,10 @@ func decisionFlowViolations(scene decisionFlowScene) []string {
 				decisionFlowNewInvocation, flow.addr.SessionID, scene.turns[index].turn.InvocationID))
 		}
 		if flow.outputFact.InvocationID != flow.noticeFact.InvocationID {
-			violations = append(violations, fmt.Sprintf("%s: the follow-up answer %q was committed under the range %q, want the notice range %q",
-				decisionFlowChainIncomplete, flow.followBody, flow.outputFact.InvocationID, flow.noticeFact.InvocationID))
+			if !decisionFlowSegmentRange(flow.outputFact.InvocationID, flow.addr) {
+				violations = append(violations, fmt.Sprintf("%s: the follow-up answer %q was committed under the range %q, want the segment range the loop minted that read the notice %q",
+					decisionFlowChainIncomplete, flow.followBody, flow.outputFact.InvocationID, flow.noticeFact.InvocationID))
+			}
 		}
 	}
 	violations = append(violations, decisionFlowWindowViolations(scene)...)
@@ -4623,13 +4376,16 @@ func decisionFlowViolations(scene decisionFlowScene) []string {
 // original invocation, and a result committed outside the range that issued it.
 func decisionFlowTurnViolations(turn decisionFlowTurn) []string {
 	var violations []string
-	if turn.turn.Terminal != model.KindCompleted || len(turn.turn.Decisions) != turn.decisions {
+	if turn.turn.Terminal != model.KindCompleted || turn.turn.DecisionCount != turn.decisions {
 		violations = append(violations, fmt.Sprintf("%s: the user turn %q = (%v, %d decisions), want the completed turn of the %d decisions its chain declares",
-			decisionFlowChainIncomplete, turn.input, turn.turn.Terminal, len(turn.turn.Decisions), turn.decisions))
+			decisionFlowChainIncomplete, turn.input, turn.turn.Terminal, turn.turn.DecisionCount, turn.decisions))
 	}
-	if turn.turn.InvocationID == "" || turn.inputFact.InvocationID != turn.turn.InvocationID {
-		violations = append(violations, fmt.Sprintf("%s: the input %q was committed under the range %q but the turn ran under %q, want the continuation inside the original invocation",
-			decisionFlowChainIncomplete, turn.input, turn.inputFact.InvocationID, turn.turn.InvocationID))
+	if turn.turn.InvocationID == "" || !decisionFlowSegmentRange(turn.turn.InvocationID, turn.addr) {
+		violations = append(violations, fmt.Sprintf("%s: the user turn %q ran under the range %q, want the segment range the loop minted at %s",
+			decisionFlowChainIncomplete, turn.input, turn.turn.InvocationID, turn.addr.SessionID))
+	} else if turn.inputFact.InvocationID == turn.turn.InvocationID {
+		violations = append(violations, fmt.Sprintf("%s: the input %q was committed under the segment range %q, want the submitter identity the entry handed it beside the range the turn ran under",
+			decisionFlowChainIncomplete, turn.input, turn.inputFact.InvocationID))
 	}
 	if turn.outputFact.InvocationID != turn.turn.InvocationID {
 		violations = append(violations, fmt.Sprintf("%s: the final answer %q was committed under the range %q, want the original invocation %q the decisions continued in",
@@ -4799,15 +4555,11 @@ type decisionFlowActionSpec struct {
 }
 
 // decisionFlowExpectedActions reports the actions the observed load declares:
-// the send note, the two turn answers and the two notice follow-ups.
+// the two turn answers and the two notice follow-ups. A send declares none: it
+// answers its caller and reaches no channel.
 func decisionFlowExpectedActions(scene decisionFlowScene) []decisionFlowActionSpec {
 	first, second := scene.turns[0], scene.turns[1]
-	specs := make([]decisionFlowActionSpec, 0, 5)
-	for _, call := range first.calls {
-		if call.name == "send" && call.body != "" {
-			specs = append(specs, decisionFlowActionSpec{body: call.body, addr: first.addr, what: "send " + call.callID})
-		}
-	}
+	specs := make([]decisionFlowActionSpec, 0, 4)
 	specs = append(specs,
 		decisionFlowActionSpec{body: first.finalBody, addr: first.addr, what: "first turn answer"},
 		decisionFlowActionSpec{body: second.finalBody, addr: second.addr, what: "second turn answer"},
@@ -5013,7 +4765,7 @@ func runDecisionFlowPositive(t *testing.T, scene decisionFlowScene) {
 		t.Fatalf("delivered bodies = %q, want the declared flow %q", got, scene.declared)
 	}
 	first := scene.turns[0]
-	if got := len(first.turn.Decisions); got != 3 {
+	if got := first.turn.DecisionCount; got != 3 {
 		t.Fatalf("the first turn ran %d decisions, want the send, the continuation after its result and the answer after the subagent acceptance", got)
 	}
 	carriesSend := requestCarriesToolResult(decisionFlowSendCall)(scene.entry[1])
@@ -5022,11 +4774,14 @@ func runDecisionFlowPositive(t *testing.T, scene decisionFlowScene) {
 		t.Fatalf("the decision after the send carried the send result %v and the next one issued the subagent call %v, want both: %+v / %+v",
 			carriesSend, issuesWorker, scene.entry[1].Messages, scene.entry[2].Messages)
 	}
-	if first.inputFact.InvocationID != first.turn.InvocationID ||
-		first.outputFact.InvocationID != first.turn.InvocationID ||
+	if first.outputFact.InvocationID != first.turn.InvocationID ||
 		first.calls[0].fact.InvocationID != first.turn.InvocationID {
-		t.Fatalf("the first turn ranged [input %q, answer %q, send result %q], want the original invocation %q throughout",
-			first.inputFact.InvocationID, first.outputFact.InvocationID, first.calls[0].fact.InvocationID, first.turn.InvocationID)
+		t.Fatalf("the first turn ranged [answer %q, send result %q], want the segment range %q the decisions continued in",
+			first.outputFact.InvocationID, first.calls[0].fact.InvocationID, first.turn.InvocationID)
+	}
+	if first.inputFact.InvocationID == first.turn.InvocationID || first.inputFact.InvocationID == "" {
+		t.Fatalf("the committed input ranged %q beside the turn range %q, want the submitter identity the entry handed it",
+			first.inputFact.InvocationID, first.turn.InvocationID)
 	}
 	if scene.flows[0].requestIndex >= scene.flows[1].requestIndex {
 		t.Fatalf("the in-flight follow-up request index = %d and the retained one = %d, want the retained notice continued after the in-flight turn",
@@ -5210,7 +4965,7 @@ func requestTailOf(request scriptedRequest) string {
 // 契约: docs/wiki/platform/platform-subsystems.md#composition-root
 func TestEventIntegrityFormalAssembly(t *testing.T) {
 	t.Run("formal_boot_delivers_turn", runFormalBootDeliversTurn)
-	t.Run("missing_sender_fails_closed", runMissingSenderFailsClosed)
+	t.Run("boots_beside_no_sender", runBootsBesideNoSender)
 }
 
 // formalAssemblyAddr is the explicit user address every formal-assembly check
@@ -5259,9 +5014,9 @@ func runFormalBootDeliversTurn(t *testing.T) {
 	if err != nil {
 		t.Fatalf("the formal assembly turn ended by error: %v", err)
 	}
-	if turn.Terminal != model.KindCompleted || len(turn.Decisions) != 1 {
+	if turn.Terminal != model.KindCompleted || turn.DecisionCount != 1 {
 		t.Fatalf("the formal assembly turn = (%v, %d decisions), want the completed turn of its one decision",
-			turn.Terminal, len(turn.Decisions))
+			turn.Terminal, turn.DecisionCount)
 	}
 
 	if got := sender.bodies(); !reflect.DeepEqual(got, []string{answer}) {
@@ -5302,13 +5057,14 @@ func runFormalBootDeliversTurn(t *testing.T) {
 	closeIntegrityHost(t, ctx, host)
 }
 
-// runMissingSenderFailsClosed requires a host without an outbound sender to
-// refuse by name at the gate that owns the refusal, never to invent a channel
-// face and never to reach a provider: the bare document boots and the user
-// turn is refused at Host.Invoke; a document that grants send is refused by
-// Boot under the same error, so the Boot gate cannot be mistaken for the
-// invocation gate.
-func runMissingSenderFailsClosed(t *testing.T) {
+// runBootsBesideNoSender requires a host without an outbound sender to refuse
+// by name at the gate that owns the refusal, never to invent a channel face and
+// never to reach a provider: the bare document boots and the user turn is
+// refused at Host.Invoke, and a document that grants send boots under the same
+// terms, because a send reaches no channel and demands no sender (design
+// DEL-6). The refusal stays at the invocation gate, where the turn would have
+// produced output nothing can deliver.
+func runBootsBesideNoSender(t *testing.T) {
 	reproductionEnv(t)
 	const input = "answer the turn no sender can deliver"
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
@@ -5331,22 +5087,24 @@ func runMissingSenderFailsClosed(t *testing.T) {
 		t.Fatalf("close the host booted beside no sender: %v", err)
 	}
 
-	deniedProvider := newScriptedProvider(t)
-	deniedRoot := t.TempDir()
-	deniedPath := writeScriptedHostDocument(t, deniedRoot, deniedProvider.endpoint(), "model-entry")
-	writeHostDocumentFile(t, deniedPath, scriptedHostDocumentWithAgent(deniedRoot, deniedProvider.endpoint(), "model-entry",
+	grantedProvider := newScriptedProvider(t)
+	grantedRoot := t.TempDir()
+	grantedPath := writeScriptedHostDocument(t, grantedRoot, grantedProvider.endpoint(), "model-entry")
+	writeHostDocumentFile(t, grantedPath, scriptedHostDocumentWithAgent(grantedRoot, grantedProvider.endpoint(), "model-entry",
 		"    tools:\n"+
 			"      - { kind: tool, id: send }\n"))
-	denied, err := assembly.Boot(deniedPath)
-	if err == nil {
-		_ = denied.Close(ctx)
-		t.Fatalf("Boot accepted a document that grants the %q tool beside no sender; the Boot gate must refuse it", "send")
+	granted, err := assembly.Boot(grantedPath)
+	if err != nil {
+		t.Fatalf("boot the document that grants the %q tool beside no sender: %v", "send", err)
 	}
-	if !errors.Is(err, assembly.ErrHostSenderMissing) {
-		t.Fatalf("Boot beside a granted send tool ended by %v, want the named refusal %v", err, assembly.ErrHostSenderMissing)
+	if _, err := driveIntegrityTurn(ctx, granted, formalAssemblyAddr, input); !errors.Is(err, assembly.ErrHostSenderMissing) {
+		t.Fatalf("the user turn beside the granted send tool ended by %v, want the named refusal %v", err, assembly.ErrHostSenderMissing)
 	}
-	if got := len(deniedProvider.recorded()); got != 0 {
-		t.Fatalf("the provider served %d requests beside a refused Boot, want zero", got)
+	if got := len(grantedProvider.recorded()); got != 0 {
+		t.Fatalf("the provider served %d requests beside a refused user turn, want zero", got)
+	}
+	if err := granted.Close(ctx); err != nil {
+		t.Fatalf("close the host booted beside the granted send tool: %v", err)
 	}
 }
 
@@ -5420,6 +5178,9 @@ func smallWindowFollowUpRequest(t *testing.T, provider *scriptedProvider, timeou
 // and the result body must reach the model there even though the fold shrank the
 // sequence the boundary was measured on and the budget alone would present the
 // notice as its one-word summary.
+//
+// - The notice lands while the entry segment still flies when the settled result and the notice reach the same pull: that one request carries both sources, so the segment answers once with the body the settled result drives.
+// - A notice the closed segment never saw opens a range of its own and answers with the follow-up body; the shape is read off the request.
 func runNoticeVisibleUnderSmallWindow(t *testing.T) {
 	const (
 		fillOne     = "the first note of the small window session"
@@ -5448,7 +5209,8 @@ func runNoticeVisibleUnderSmallWindow(t *testing.T) {
 	worker := expectContinuationWorker(script, "the small window task", workerInput, workerOut).park()
 	script.expect("model-entry", "the small window notice fires its follow-up", requestMentionsSettleNotice).
 		answers(scriptedAnswerOf(follow)).
-		delivers(follow)
+		delivers(follow).
+		optional()
 	provider.decide = script.decide
 
 	sender := newRecordingSender()
@@ -5488,9 +5250,9 @@ func runNoticeVisibleUnderSmallWindow(t *testing.T) {
 	if got.err != nil {
 		t.Fatalf("the small window delegation turn ended by error: %v", got.err)
 	}
-	if got.turn.Terminal != model.KindCompleted || len(got.turn.Decisions) != 2 {
+	if got.turn.Terminal != model.KindCompleted || got.turn.DecisionCount != 2 {
 		t.Fatalf("the small window delegation turn = (%v, %d decisions), want the completed turn of 2 decisions",
-			got.turn.Terminal, len(got.turn.Decisions))
+			got.turn.Terminal, got.turn.DecisionCount)
 	}
 	settle, notice, material := continuationSettle(t, host, addr, workerOut)
 
@@ -5506,9 +5268,9 @@ func runNoticeVisibleUnderSmallWindow(t *testing.T) {
 	if want := agent.NoticeFactKey(followFact.InvocationID, notice); followFact.Key != want {
 		t.Fatalf("the follow-up fact key = %s, want the notice identity key %s", followFact.Key, want)
 	}
-	reproductionWaitForBody(t, sender, follow, 30*time.Second)
-	continuationRequireAction(t, sender, accepted, addr)
-	continuationRequireAction(t, sender, follow, addr)
+	batched := requestCarriesToolResult(callID)(request)
+	reproductionWaitForBody(t, sender, continuationNoticeAnswerBody(follow, accepted, batched), 30*time.Second)
+	continuationAnswerDelivered(t, sender, addr, accepted, follow, batched)
 	if violations := script.audit(); len(violations) != 0 {
 		t.Fatalf("the small window script left violations: %v", violations)
 	}
@@ -5567,6 +5329,9 @@ func runNoticeInputWithoutProjection(t *testing.T) {
 // runNoticeInputUnderState drives the delegation and the settled notice of one
 // state, and requires the notice identity and its result body to reach the
 // follow-up request exactly once.
+//
+// - The notice lands while the entry segment still flies when the settled result and the notice reach the same pull: that one request carries both sources, so the segment answers once with the body the settled result drives.
+// - A notice the closed segment never saw opens a range of its own and answers with the follow-up body; the shape is read off the request, never off a timing guess.
 func runNoticeInputUnderState(t *testing.T, state projectionlessState) {
 	const (
 		input       = "delegate the projectionless continuation task"
@@ -5601,10 +5366,12 @@ func runNoticeInputUnderState(t *testing.T, state projectionlessState) {
 	}
 
 	request := projectionlessFollowUpRequest(t, provider, script, material, state.name)
-	reproductionWaitForBody(t, sender, follow, 30*time.Second)
+	batched := requestCarriesToolResult(callID)(request)
+	reproductionWaitForBody(t, sender, continuationNoticeAnswerBody(follow, accepted, batched), 30*time.Second)
 
 	continuationSingleCopy(t, request, material, "the follow-up request of the "+state.name+" state")
 	continuationHistory(t, request, input)
+	continuationAnswerDelivered(t, sender, addr, accepted, follow, batched)
 
 	facts := host.Run().SessionFacts(addr)
 	followFact := continuationNoticeFact(t, facts, settle.TaskID)
@@ -5613,8 +5380,6 @@ func runNoticeInputUnderState(t *testing.T, state projectionlessState) {
 	}
 	t.Logf("state=%s projection=%t notice=%s fact_key=%s request_index=%d material=%q",
 		state.name, state.projection, notice.FactKey(), followFact.Key, request.Index, strings.SplitN(material, "\n", 2)[0])
-	continuationRequireAction(t, sender, accepted, addr)
-	continuationRequireAction(t, sender, follow, addr)
 	if violations := script.audit(); len(violations) != 0 {
 		t.Fatalf("the projectionless script of the %s state left violations: %v", state.name, violations)
 	}

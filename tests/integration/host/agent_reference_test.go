@@ -115,12 +115,15 @@ func TestAgentReferenceDelegatesToTheDeclaredTarget(t *testing.T) {
 		if got := knowledgeRequests[0].Tools["knowledge"]; got != nil {
 			t.Fatalf("the delegated turn's request carries the caller's own target tool")
 		}
-		first := handoffBlockOf(t, knowledgeRequests[0].Messages)
-		if !strings.Contains(first, "refs:\n- ev-knowledge-1\n") {
-			t.Fatalf("the delegated turn's request carries no declared event reference in its handoff block:\n%s", first)
+		// The envelope block dissolved (r98): a declared event reference the
+		// run backs materializes as its own content beside the task, and one
+		// nothing backs silently stays out (Q2).
+		joined := messageTextOf(knowledgeRequests[0].Messages)
+		if strings.Contains(joined, "[handoff envelope]") {
+			t.Fatalf("the delegated turn carries the dissolved envelope block:\n%s", joined)
 		}
-		if !strings.Contains(first, "find the deploy procedure") {
-			t.Fatalf("the delegated turn's request carries no request of the caller:\n%s", first)
+		if !strings.Contains(joined, "find the deploy procedure") {
+			t.Fatalf("the delegated turn's request carries no request of the caller:\n%s", joined)
 		}
 		if got := skillTool.calls(); got != 1 {
 			t.Fatalf("skill_search calls = %d, want the one the delegated turn issued", got)
@@ -246,4 +249,14 @@ func findToolMessage(messages []model.Message, callID string) *model.Message {
 		}
 	}
 	return nil
+}
+
+// messageTextOf renders every message of one request for presence checks that
+// read material arriving as its own message beside the task.
+func messageTextOf(messages []model.Message) string {
+	parts := make([]string, 0, len(messages))
+	for _, message := range messages {
+		parts = append(parts, message.Content)
+	}
+	return strings.Join(parts, "\n")
 }

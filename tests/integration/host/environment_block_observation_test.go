@@ -62,8 +62,11 @@ func TestEnvironmentBlockGenerationIsObserved(t *testing.T) {
 	for _, line := range logger.at("debug") {
 		if strings.Contains(line, "environment block generated") {
 			generations++
-			if !strings.Contains(line, "reason=request-boundary") || !strings.Contains(line, "agent=agent-a") || !strings.Contains(line, "tasks=0") {
-				t.Fatalf("generation line = %q, want the trigger, the agent and the task count", line)
+			if !strings.Contains(line, "reason=request-boundary") || !strings.Contains(line, "agent=agent-a") {
+				t.Fatalf("generation line = %q, want the trigger and the agent", line)
+			}
+			if strings.Contains(line, "tasks=") {
+				t.Fatalf("generation line = %q, want no task count: the block carries no task account of the run", line)
 			}
 			if strings.Contains(line, "带上环境块") || strings.Contains(line, "不带环境块") {
 				t.Fatalf("generation line = %q, want no task or boundary text rendered", line)

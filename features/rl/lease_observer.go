@@ -10,29 +10,30 @@ import (
 	"github.com/SpellingDragon/tagent/api/plugin"
 )
 
-// ErrLeaseStaleReplacement reports a replacement fact that starts from a
-// version the lease does not hold: a move judged against an older version is
+// ErrLeaseStaleReplacement reports a model configuration change that starts from
+// a version the lease does not hold: a move judged against an older version is
 // refused by name rather than applied on top of the version in effect.
-var ErrLeaseStaleReplacement = errors.New("rl: the model replacement starts from a version the lease does not hold")
+var ErrLeaseStaleReplacement = errors.New("rl: the model configuration change starts from a version the lease does not hold")
 
 // ErrLeaseObserverLookupMissing reports a lease observer built beside no fact
-// lookup: the observer reads the fact it applies back from the chain, and an
-// unreachable chain is refused rather than read as no replacement.
+// lookup: the observer reads the change it applies back from the chain, and an
+// unreachable chain is refused rather than read as no move.
 var ErrLeaseObserverLookupMissing = errors.New("rl: the model lease observer was built beside no fact lookup")
 
 // 契约: docs/wiki/rl/rl-architecture.md#swappable-model
 //
 // LeaseObserver is the event-driven replacement consumer of one agent's model
 // lease. It observes the facts the agent's own pipeline commits, reads back the
-// one a commit identity names, and applies a model replacement fact to the
-// lease it serves: the rebuild, the publication and the installation run in the
-// lease's existing order, so a refused rebuild or a refused publication installs
-// no version and leaves the version in effect untouched.
+// one a commit identity names, and applies the model dimension of a
+// configuration change to the lease it serves: the rebuild, the publication and
+// the installation run in the lease's existing order, so a refused rebuild or a
+// refused publication installs no version and leaves the version in effect
+// untouched.
 //
 // The observer serves the fact-to-observation port exactly as the reflection
 // driver does: one committed fact in, one read-only observation out. A fact of
-// another type, or of another agent's ownership, is not the observation this
-// instance serves and is passed over.
+// another type, another dimension, another owner or another stated result is not
+// the observation this instance serves and is passed over.
 type LeaseObserver struct {
 	agent   event.AgentID
 	lease   *ModelLease
@@ -47,7 +48,7 @@ var (
 )
 
 // NewLeaseObserver returns the replacement consumer of one agent's lease: the
-// fact lookup that reads a committed replacement back, the rebuild that
+// fact lookup that reads a committed model change back, the rebuild that
 // produces the requested version and the publication entry that accepts the
 // rebuilt model beside the version in effect.
 func NewLeaseObserver(agent event.AgentID, lease *ModelLease, lookup plugin.FactLookup, rebuild func(version string) (model.Model, error), publish func(ModelIdentity, model.Model) error) (*LeaseObserver, error) {
@@ -76,12 +77,14 @@ func (o *LeaseObserver) Port() plugin.Port {
 	return plugin.PortFactObservation
 }
 
-// ObserveCommit reads the fact one commit wrote and applies a model replacement
-// fact owned by this observer's agent to the lease. A fact of another type or
-// another owner is passed over; a replacement whose start version is not the
-// version in effect is refused by name; and the replacement itself is the
-// lease's own rebuild, publication and installation, so a refused step installs
-// no version.
+// ObserveCommit reads the fact one commit wrote and applies the model dimension
+// of a configuration change owned by this observer's agent to the lease: the
+// version move is carried under the model replacement metadata keys, and only a
+// change stating the requested result asks the lease to install. A fact of
+// another type, dimension, owner or result is passed over; a move whose start
+// version is not the version in effect is refused by name; and the move itself
+// is the lease's own rebuild, publication and installation, so a refused step
+// installs no version.
 func (o *LeaseObserver) ObserveCommit(ctx context.Context, id event.EventID) error {
 	if o == nil || o.lease == nil {
 		return nil
@@ -90,20 +93,26 @@ func (o *LeaseObserver) ObserveCommit(ctx context.Context, id event.EventID) err
 	if err != nil {
 		return err
 	}
-	if fact.Type != event.ModelReplacementType {
+	if fact.Type != event.TypeConfigChange {
 		return nil
 	}
 	if fact.Owner.AgentID != o.agent {
 		return nil
 	}
+	if fact.Meta[event.MetaKeyConfigChangeDimension] != event.ConfigChangeDimensionModel {
+		return nil
+	}
+	if fact.Meta[event.MetaKeyModelReplacementResult] != event.ModelReplacementResultRequested {
+		return nil
+	}
 	to := fact.Meta[event.MetaKeyModelToVersion]
 	if to == "" {
-		return fmt.Errorf("%w: the replacement fact %s names no target version", ErrLeaseVersionMissing, id)
+		return fmt.Errorf("%w: the model configuration change %s names no target version", ErrLeaseVersionMissing, id)
 	}
 	from := fact.Meta[event.MetaKeyModelFromVersion]
 	held := o.lease.CurrentVersion()
 	if from != "" && from != held {
-		return fmt.Errorf("%w: the replacement fact %s starts at %q and the lease holds %q", ErrLeaseStaleReplacement, id, from, held)
+		return fmt.Errorf("%w: the model configuration change %s starts at %q and the lease holds %q", ErrLeaseStaleReplacement, id, from, held)
 	}
 	_, err = o.lease.Replace(ctx, to, func() (model.Model, error) {
 		return o.rebuild(to)

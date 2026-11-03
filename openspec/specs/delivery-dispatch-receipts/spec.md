@@ -78,3 +78,15 @@ lineage 为 `delivery_receipt` 的最终响应被消化时 SHALL 不再产生回
 - **WHEN** 一个未确认动作经显式重试再次发送
 - **THEN** 新动作 SHALL 关联原动作身份与重试原因
 - **AND** MUST NOT 被记作一次无来源的全新发送
+
+
+### Requirement: 投递前审核四态
+工具结果向模型的投递在发出前 MUST 经审核裁定：Hold SHALL 阻塞至裁定、Send SHALL 携带裁定放行、默认放行 MUST 仅在无审核规则时成立、审核失败 SHALL 以回执可见。
+
+#### Scenario: Hold 阻塞至裁定后放行
+- **WHEN** 审核裁定为 Hold 且随后被批准
+- **THEN** 投递在批准后才发生，且携带该裁定身份
+
+#### Scenario: 审核失败以回执可见
+- **WHEN** 审核自身失败
+- **THEN** 产生具名失败回执，投递不静默消失

@@ -101,17 +101,6 @@ RecallAgent（sub agent）SHALL 保留,定位收窄为 `recall` 工具 `orchestr
 - **WHEN** 模型需要了解某轮的具体工具执行过程
 - **THEN** SHALL 经 `recall(turn_key=...)` 用边界卡片上的 `agent_output` key 一次性召回被丢弃的 tool 步骤
 
-### Requirement: 卡片行标注可追溯提示
-
-`buildRetainedRefs` 压缩时 SHALL 统计每轮被丢弃的 tool 步数，并在 L3（整段离场）回合的 agent_output 卡片行标注"含 N 步工具调用，可用 memory_turn 追溯"的提示，使模型知晓该回合存在可召回的执行过程及其召回入口（agent_output 卡片 key）。计数 SHALL 只在 agent_output（回合结束）重置，SHALL NOT 被回合中途 bus 注入的 external_input（task_settled 等）误清零。
-
-#### Scenario: 含 tool 步骤的回合卡片带追溯提示
-
-- **GIVEN** 一个含 3 步工具调用的回合被压缩成边界卡片
-- **WHEN** 渲染该卡片行
-- **THEN** SHALL 含"含 3 步工具调用，可用 memory_turn 追溯"或等效提示
-
-
 ### Requirement: items 批量水合有界
 
 recall 的 items 路径（票据批量精确回补）SHALL 施加条数上限（默认与 engine 路径钳制同源，超限显式截断并在返回中说明丢弃数量）；模型传入超量票据 MUST NOT 无界放大水合成本。

@@ -134,8 +134,8 @@ func TestBootAppliesMaxToolIterations(t *testing.T) {
 	if turn.FinalRound != agent.FinalRoundRounds {
 		t.Fatalf("final round reason = %q, want the spent round budget of max_tool_iterations", turn.FinalRound)
 	}
-	if len(turn.Decisions) != 2 {
-		t.Fatalf("turn decisions = %d, want the one ordinary round beside its closing round", len(turn.Decisions))
+	if turn.DecisionCount != 2 {
+		t.Fatalf("turn decisions = %d, want the one ordinary round beside its closing round", turn.DecisionCount)
 	}
 	if models := provider.servedModels(); len(models) != 2 {
 		t.Fatalf("model requests = %d, want one per round of the budgeted drive", len(models))

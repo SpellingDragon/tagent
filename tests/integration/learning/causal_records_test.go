@@ -26,7 +26,7 @@ import (
 // TestCausalTrainingRecords drives the runtime's one evidence face — the event loop's capture admission — and the record pipeline attached to it:
 // - the loop admits one attempt per observable attempt, so every decision's outcome is replayable, the last one and the intermediate ones alike
 // - the request view material of every decision is fixed at admission: the model, the prompt version and the tools the request saw
-// - the causal chain one decision reduced is the request the loop handed the model, read from the turn itself
+// - the causal chain one decision reduced is the request the loop handed the model, read from the provider's recorded requests
 // - a failed attempt keeps its error text beside the shared terminal
 // - every record line carries its schema version and never the v2 capture shape
 // - a record round-trips through its versioned line without losing fields
@@ -45,8 +45,8 @@ func TestCausalTrainingRecords(t *testing.T) {
 		h := newHarness(t, provider, []*learnTool{{name: "echo-a", output: "out-a"}}, "inv-learn-1")
 		turn := h.drive(ctx, "ep-learn-1", "learn me")
 
-		if turn.Terminal != model.KindCompleted || len(turn.Decisions) != 2 {
-			t.Fatalf("turn = (%v, %d decisions), want one completed terminal beside two decisions", turn.Terminal, len(turn.Decisions))
+		if turn.Terminal != model.KindCompleted || turn.DecisionCount != 2 {
+			t.Fatalf("turn = (%v, %d decisions), want one completed terminal beside two decisions", turn.Terminal, turn.DecisionCount)
 		}
 		records := h.records.snapshot()
 		if len(records.attempts) != 2 {
@@ -63,8 +63,8 @@ func TestCausalTrainingRecords(t *testing.T) {
 			t.Fatalf("fixed request views = %d, want one per decision boundary", len(views))
 		}
 		for i, view := range views {
-			if view.decisionID != turn.Decisions[i].DecisionID {
-				t.Fatalf("view %d decision = %q, want the real decision identity %q", i, view.decisionID, turn.Decisions[i].DecisionID)
+			if view.decisionID != records.attempts[i].DecisionID {
+				t.Fatalf("view %d decision = %q, want the real decision identity %q", i, view.decisionID, records.attempts[i].DecisionID)
 			}
 			if view.model != "model-a" {
 				t.Fatalf("view %d model = %q, want the model the request ran on", i, view.model)
@@ -76,7 +76,7 @@ func TestCausalTrainingRecords(t *testing.T) {
 				t.Fatalf("view %d visible tools = %v, want the tools the request actually saw", i, view.tools)
 			}
 		}
-		if second := turn.Decisions[1].Request.Messages; !carriesToolOutput(second, "out-a") {
+		if second := learnRequests(provider)[1].Messages; !carriesToolOutput(second, "out-a") {
 			t.Fatalf("second decision request = %+v, want the settled tool observation of the first round", second)
 		}
 
@@ -84,14 +84,14 @@ func TestCausalTrainingRecords(t *testing.T) {
 			if attempt.Schema != rl.SchemaCurrent {
 				t.Fatalf("attempt %d schema = %q, want %q", i, attempt.Schema, rl.SchemaCurrent)
 			}
-			if attempt.ID == "" || attempt.DecisionID != turn.Decisions[i].DecisionID {
-				t.Fatalf("attempt %d identity = (%q, %q), want one attempt bound to decision %q", i, attempt.ID, attempt.DecisionID, turn.Decisions[i].DecisionID)
+			if attempt.ID == "" || attempt.DecisionID != views[i].decisionID {
+				t.Fatalf("attempt %d identity = (%q, %q), want one attempt bound to decision %q", i, attempt.ID, attempt.DecisionID, views[i].decisionID)
 			}
 			if attempt.EpisodeID != "ep-learn-1" {
 				t.Fatalf("attempt %d episode = %q, want the episode it belongs to", i, attempt.EpisodeID)
 			}
-			if attempt.Terminal != turn.Decisions[i].Terminal || attempt.Terminal != model.KindCompleted {
-				t.Fatalf("attempt %d terminal = %v, want the shared terminal %v", i, attempt.Terminal, turn.Decisions[i].Terminal)
+			if attempt.Terminal != turn.Terminal || attempt.Terminal != model.KindCompleted {
+				t.Fatalf("attempt %d terminal = %v, want the shared terminal %v", i, attempt.Terminal, turn.Terminal)
 			}
 			if attempt.Usage.TotalTokens != 15 {
 				t.Fatalf("attempt %d usage = %+v, want the usage the reduction accumulated", i, attempt.Usage)
@@ -136,7 +136,7 @@ func TestCausalTrainingRecords(t *testing.T) {
 			t.Fatalf("attempt records = %d, want one per observable attempt of the failed decision", len(records.attempts))
 		}
 		attempt := records.attempts[0]
-		if attempt.Terminal != model.KindFailed || attempt.Terminal != turn.Decisions[0].Terminal {
+		if attempt.Terminal != model.KindFailed || attempt.Terminal != turn.Terminal {
 			t.Fatalf("attempt terminal = %v, want the shared failed terminal", attempt.Terminal)
 		}
 		if !strings.Contains(attempt.Error, "provider refused") {
@@ -151,7 +151,7 @@ func TestCausalTrainingRecords(t *testing.T) {
 			return learnFinalTurn("done")
 		}}
 		h := newHarness(t, provider, nil, "inv-learn-1")
-		turn := h.drive(ctx, "ep-learn-version", "run")
+		h.drive(ctx, "ep-learn-version", "run")
 		records := h.records.snapshot()
 		if len(records.attempts) != 1 {
 			t.Fatalf("attempt records = %d, want the one attempt the drive admitted", len(records.attempts))
@@ -165,7 +165,7 @@ func TestCausalTrainingRecords(t *testing.T) {
 		}
 		decision := rl.DecisionRecord{
 			Schema:       rl.SchemaCurrent,
-			ID:           turn.Decisions[0].DecisionID,
+			ID:           records.attempts[0].DecisionID,
 			InvocationID: h.invocationID,
 			EpisodeID:    "ep-learn-version",
 			Timestamp:    time.Unix(1700000000, 0).UTC(),
@@ -298,6 +298,11 @@ func TestCausalTrainingRecords(t *testing.T) {
 		}}
 		first := newHarness(t, provider, nil, "inv-concurrent-a")
 		second := newHarness(t, provider, nil, "inv-concurrent-b")
+		// One resident consumer owns each address, so the two concurrent drives
+		// are two addresses: the case proves their attempts stay independent
+		// without asking one address to carry two drivers at once.
+		first.session = event.SessionID("session-concurrent-a")
+		second.session = event.SessionID("session-concurrent-b")
 		var wg sync.WaitGroup
 		wg.Add(2)
 		go func() {
@@ -425,8 +430,61 @@ type harness struct {
 	records      *collector
 	evidence     *evidenceCapture
 	facts        *factTable
+	chain        *learningChain
+	consumers    *agent.Consumers
 	session      event.SessionID
 	invocationID event.InvocationID
+}
+
+// learningChain is the committed chain of one harness: the facts the resident
+// consumer pulls its segment from, kept in commit order.
+type learningChain struct {
+	mu    sync.Mutex
+	facts []event.Event
+	seq   int
+}
+
+// commit lands one fact on the chain and answers the identity it carries.
+func (c *learningChain) commit(evt event.Event) (event.EventID, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if evt.Key == "" {
+		c.seq++
+		evt.Key = event.EventID(fmt.Sprintf("fact-learn-chain-%d", c.seq))
+	}
+	c.facts = append(c.facts, evt)
+	return evt.Key, nil
+}
+
+// SessionHistory reports no separate transcript: the chain facts are the one
+// history of this harness.
+func (c *learningChain) SessionHistory(event.Address) []model.Message { return nil }
+
+// CommitHistory keeps no second copy of the transcript.
+func (c *learningChain) CommitHistory(event.Address, []model.Message) {}
+
+// SessionFacts reports the facts of one address in commit order.
+func (c *learningChain) SessionFacts(addr event.Address) []event.Event {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	out := make([]event.Event, 0, len(c.facts))
+	for _, evt := range c.facts {
+		if addressOf(evt) != addr {
+			continue
+		}
+		out = append(out, evt)
+	}
+	return out
+}
+
+// addressOf reports the address one fact names in its ownership block.
+func addressOf(evt event.Event) event.Address {
+	for _, addr := range []event.Address{evt.Owner, evt.Source, evt.Target} {
+		if addr.IsComplete() {
+			return addr
+		}
+	}
+	return event.Address{}
 }
 
 // newHarness assembles the real loop and task layer around one scripted model
@@ -457,7 +515,11 @@ func newHarness(t *testing.T, provider *learnModel, tools []*learnTool, invocati
 				return id, nil
 			}),
 			task.WithMailbox(func(ctx context.Context, notice task.Notice) error {
-				h.loop.Backflow(h.invocationID, notice)
+				invocation := h.invocationID
+				if frame, ok := task.CallFrameFrom(ctx); ok && frame.Identity.InvocationID != "" {
+					invocation = frame.Identity.InvocationID
+				}
+				h.loop.Backflow(invocation, notice)
 				return nil
 			}),
 		)
@@ -482,7 +544,12 @@ func newHarness(t *testing.T, provider *learnModel, tools []*learnTool, invocati
 	}
 	h.loop = agent.NewLoop(bindings, state.NewOccupancy(), "instance-learn", h.facts.resolve)
 	h.evidence = &evidenceCapture{records: h.records}
+	h.chain = &learningChain{}
 	h.loop.SetCapture(h.evidence)
+	h.loop.SetHistory(h.chain)
+	h.consumers = agent.NewConsumers(h.loop, context.Background(), nil)
+	h.loop.SetConsumers(h.consumers)
+	t.Cleanup(h.consumers.Stop)
 	return h
 }
 
@@ -536,26 +603,35 @@ func (c *evidenceCapture) views() []evidenceView {
 }
 
 // drive runs one invocation of the harness to its terminal over the named
-// episode boundary.
+// episode boundary: the input lands on the harness chain and the address's own
+// resident consumer runs the segment the entries wait on.
 func (h *harness) drive(ctx context.Context, episode event.EpisodeID, input string) agent.Turn {
-	turn, err := h.loop.Drive(ctx, agent.Invocation{
+	addr := event.Address{AgentID: "agent-a", SessionID: h.session}
+	key, err := h.chain.commit(event.Event{
+		Key:          "ev-input-1",
+		Type:         event.TypeExternalInput,
+		Timestamp:    time.Now(),
+		EpisodeID:    episode,
+		Message:      model.Message{Role: model.RoleUser, Content: input},
+		Owner:        addr,
+		Source:       addr,
+		Target:       addr,
 		InvocationID: h.invocationID,
-		Address:      event.Address{AgentID: "agent-a", SessionID: h.session},
-		Instance:     "instance-learn",
-		Ready: []event.Event{
-			{
-				Key:       "ev-input-1",
-				Type:      "user_input",
-				Timestamp: time.Now(),
-				EpisodeID: episode,
-				Message:   model.Message{Role: model.RoleUser, Content: input},
-			},
-		},
+		InstanceID:   "instance-learn",
 	})
+	if err != nil {
+		panic(fmt.Sprintf("commit the invocation input: %v", err))
+	}
+	consumer := h.consumers.Ensure(addr)
+	if consumer == nil {
+		panic("the resident consumer of the harness is unavailable")
+	}
+	consumer.Wake()
+	answer, err := consumer.WaitAnswer(ctx, []event.EventID{key})
 	if err != nil {
 		panic(fmt.Sprintf("drive the invocation: %v", err))
 	}
-	return turn
+	return answer.Turn
 }
 
 // learnModel is the scripted provider stand-in: it records every native request

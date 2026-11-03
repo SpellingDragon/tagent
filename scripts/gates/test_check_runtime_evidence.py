@@ -653,10 +653,19 @@ def event_digest(path):
     return "sha256:" + hashlib.sha256(Path(path).read_bytes()).hexdigest()
 
 
-def mutation_evidence():
+def mutation_evidence(contract_digest=None, fingerprints=None):
+    """The 04.4 mutation report plus the baseline the bundle ties it to.
+
+    A legal report names the tested baseline in the runner's own vocabulary —
+    the contract digest and the per-module source fingerprints — so the bundle
+    can prove the mutations were driven against the tree the runs exercised.
+    """
     return {
         "schema_version": 2,
         "profile": "event-integrity",
+        "contract_digest": contract_digest,
+        "module_fingerprints": (event_fingerprints("event-short")
+                                if fingerprints is None else fingerprints),
         "control_tree_green": True,
         "mutations": [
             {"id": "M01", "status": "killed", "expect_assertion": "TestAlpha/positive",
@@ -830,19 +839,19 @@ class EventContractTest(unittest.TestCase):
         payload = json.loads(out)
         self.assertTrue(payload["ok"])
         counts = payload["counts"]
-        self.assertEqual(counts["event_tests_total"], 29)
+        self.assertEqual(counts["event_tests_total"], 30)
         self.assertEqual(counts["event_diagnostic_tests"], 1)
-        self.assertEqual(counts["event_product_green_tests"], 28)
-        self.assertEqual(counts["event_subtests_unique"], 143)
-        self.assertEqual(counts["event_green_subtests"], 139)
+        self.assertEqual(counts["event_product_green_tests"], 29)
+        self.assertEqual(counts["event_subtests_unique"], 138)
+        self.assertEqual(counts["event_green_subtests"], 134)
         self.assertEqual(counts["event_diagnostic_subtests"], 4)
         self.assertEqual(counts["event_families_covered"], 8)
         self.assertEqual(counts["event_non_product_leaves"], 13)
         self.assertEqual(counts["event_whole_chain_entries"], 10)
         self.assertEqual(counts["event_matrix_inputs_total"], 7200)
         self.assertEqual(counts["event_matrix_restarts_total"], 720)
-        self.assertEqual(counts["event_scope_event_short_parents"], 28)
-        self.assertEqual(counts["event_scope_event_short_anchors"], 140)
+        self.assertEqual(counts["event_scope_event_short_parents"], 29)
+        self.assertEqual(counts["event_scope_event_short_anchors"], 135)
         self.assertEqual(counts["event_scope_event_long_parents"], 1)
         self.assertEqual(counts["event_scope_event_long_anchors"], 3)
         # Source discovery grows as the 00—03 leaves land their tests; the exact
@@ -851,7 +860,7 @@ class EventContractTest(unittest.TestCase):
         self.assertGreaterEqual(counts["event_source_discovered_tests"], 4)
         self.assertGreaterEqual(counts["event_source_discovered_subtests"], 19)
         self.assertEqual(counts["event_source_discovered_tests"]
-                         + counts["event_source_pending_tests"], 29)
+                         + counts["event_source_pending_tests"], 30)
         # The superseded control monolith was removed from the tree by the
         # 03.4—03.8 split; the graph still declares it as retained source-only,
         # so the gate lists it as absent instead of pretending the declaration
@@ -934,8 +943,8 @@ class EventContractTest(unittest.TestCase):
         code, out, err = self.contract_check(contract)
         self.assertEqual(code, 0, out + err)
         payload = json.loads(out)
-        self.assertEqual(payload["counts"]["event_dual_role_subtests"], 11)
-        self.assertEqual(payload["counts"]["event_subtests_unique"], 143)
+        self.assertEqual(payload["counts"]["event_dual_role_subtests"], 12)
+        self.assertEqual(payload["counts"]["event_subtests_unique"], 138)
 
     def test_event_contract_rejects_reviving_superseded_source_only_test(self):
         contract = load_event_contract()
@@ -1110,7 +1119,7 @@ class EventFixture:
             mutations = bundle / "mutations"
             mutations.mkdir()
             (mutations / "evidence.json").write_text(
-                json.dumps(mutation_evidence(), ensure_ascii=False, indent=2),
+                json.dumps(mutation_evidence(self.digest), ensure_ascii=False, indent=2),
                 encoding="utf-8")
         return bundle
 
@@ -1132,8 +1141,8 @@ class EventEvidenceTest(EventFixture, unittest.TestCase):
                                      event_log(self.contract, tests))
         self.assertEqual(code, 0, out + err)
         payload = json.loads(out)
-        self.assertEqual(payload["counts"]["event_tests_checked"], 28)
-        self.assertEqual(payload["counts"]["event_anchors_checked"], 140)
+        self.assertEqual(payload["counts"]["event_tests_checked"], 29)
+        self.assertEqual(payload["counts"]["event_anchors_checked"], 135)
         self.assertEqual(payload["extra"]["repeat_index"], 1)
         self.assertEqual(payload["extra"]["repeat_total"], 10)
         self.assertIsNone(payload["productVerified"])
@@ -1278,7 +1287,7 @@ class EventBundleTest(EventFixture, unittest.TestCase):
         self.assertEqual(len(summary["short_run_ids"]), 10)
         self.assertEqual(summary["long_combos"],
                          [[1, 256], [1, 32768], [7, 256], [7, 32768], [42, 256], [42, 32768]])
-        self.assertEqual(len(summary["test_ids"]), 28)
+        self.assertEqual(len(summary["test_ids"]), 29)
         self.assertIsNone(payload["productVerified"])
 
     def test_bundle_is_readable_after_it_is_copied_off_the_producer(self):
@@ -1368,11 +1377,11 @@ class EventBundleTest(EventFixture, unittest.TestCase):
         self.assertIn("bundle reuses run_id", out)
 
     def test_execution_credential_impersonation_fails(self):
-        # Positive control: one round legally carries all 27 cases of the scope.
+        # Positive control: one round legally carries all 29 cases of the scope.
         baseline = self.write_bundle("baseline")
         code, out, err = self.check_bundle(baseline)
         self.assertEqual(code, 0, out + err)
-        self.assertEqual(len(json.loads(out)["extra"]["bundle"]["test_ids"]), 28)
+        self.assertEqual(len(json.loads(out)["extra"]["bundle"]["test_ids"]), 29)
 
         # One run_id cannot stand for two independent rounds.
         shared = str(uuid.uuid4())
@@ -1434,7 +1443,7 @@ class EventBundleTest(EventFixture, unittest.TestCase):
 
     def test_mutation_evidence_structure_is_enforced(self):
         bundle = self.write_bundle("mutations-survived", mutation=False)
-        payload = mutation_evidence()
+        payload = mutation_evidence(self.digest)
         payload["mutations"][0]["status"] = "survived"
         payload["not_evidence_backed"] = ["candidate-01"]
         directory = bundle / "mutations"
@@ -1445,6 +1454,62 @@ class EventBundleTest(EventFixture, unittest.TestCase):
         self.assertNotEqual(code, 0)
         self.assertIn("is not 'killed'", out)
         self.assertIn("not_evidence_backed must be empty", out)
+
+    def test_ten_rounds_all_shrunk_to_the_same_parent_are_rejected(self):
+        # 负锚（等集）：十份 short 证据逐份合法、repeat_index 恰为 1..10、
+        # run_id 与日志互不相同，但每轮都只跑同一个 parent。旧门只查
+        # "各轮一致"，十轮一致缩成同一子集必须被具名拒收。
+        bundle = self.write_bundle("shrunk-to-one-parent")
+        parent = event_tests(self.contract, "event-short")[0]
+        rows = event_log(self.contract, [parent])
+        for index in range(1, 11):
+            evidence = self.evidence("event-short", [parent], repeat_index=index,
+                                     repeat_total=10)
+            self.write_run(bundle / "short-{}".format(index), evidence, rows)
+        code, out, _ = self.check_bundle(bundle)
+        self.assertNotEqual(code, 0, out)
+        self.assertIn("full contract event-short parent set", out)
+        self.assertIn("1 of 29 parent(s) covered", out)
+        self.assertIn(os.path.join("short-1", "evidence.json"), out)
+        # The missing parents are named, so the shrink is auditable.
+        missing_parent = event_tests(self.contract, "event-short")[1]["id"]
+        self.assertIn(missing_parent, out)
+
+    def test_mutation_evidence_from_another_baseline_is_rejected(self):
+        # 负锚（同基线）：mutation 报告结构合法、全 killed，但基线来自旧树，
+        # 不得混入本基线 bundle 计数。
+        bundle = self.write_bundle("mutation-old-contract")
+        path = bundle / "mutations" / "evidence.json"
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        payload["contract_digest"] = "sha256:" + "9" * 64
+        path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        code, out, _ = self.check_bundle(bundle)
+        self.assertNotEqual(code, 0, out)
+        self.assertIn("does not match the runner baseline", out)
+        self.assertIn("another contract baseline", out)
+
+        # 旧源码基线同样具名拒收：共享模块的 content_hash 漂移。
+        bundle = self.write_bundle("mutation-old-source")
+        path = bundle / "mutations" / "evidence.json"
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        payload["module_fingerprints"][0]["content_hash"] = "sha256:" + "9" * 64
+        path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        code, out, _ = self.check_bundle(bundle)
+        self.assertNotEqual(code, 0, out)
+        self.assertIn("another source baseline", out)
+        self.assertIn(MODULE, out)
+
+        # 不申报任何基线字段的报告无法 tying，不得按"未知即同基线"放行。
+        bundle = self.write_bundle("mutation-untied-baseline")
+        path = bundle / "mutations" / "evidence.json"
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        del payload["contract_digest"]
+        del payload["module_fingerprints"]
+        path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        code, out, _ = self.check_bundle(bundle)
+        self.assertNotEqual(code, 0, out)
+        self.assertIn("must declare contract_digest", out)
+        self.assertIn("module_fingerprints must be a non-empty list", out)
 
 
 if __name__ == "__main__":

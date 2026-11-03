@@ -1,4 +1,4 @@
-# runtime-contracts — runtime-rebuild 的检查资产 CI（格式/结构/契约检查 + 根 module 产品编译门，不跑真实资源）。
+# runtime-contracts — runtime-rebuild 的检查资产 CI（格式/结构/契约检查，不跑真实资源）。
 #
 # 三类证据严格分开，本 workflow 默认只覆盖前两类：
 #   1) 格式/规范有效：计划、政策表、场景合同可解析且自洽（contracts job，默认）。
@@ -10,9 +10,10 @@
 # 皆空则根本不跑（不把空 dispatch 冒充空绿）。evidence_json 与 test_log 必须成对提供，
 # 只给一半即失败，不静默跳过。输入经 env 传入，绝不插值进带引号的 shell 参数。
 #
-# 产品门（随 00.6 迁移进本 workflow，与本地验证同口径；Go ≥1.24.1）：根 module 的
-# go build ./...、go vet ./...、go test ./... -short -count=1，产品包上的 gofmt -l、
-# comment_policy -no-baseline、codetools tracked-hygiene，加 openspec strict。
+# 静态产品门（随 00.6 迁移进本 workflow，与本地验证同口径；Go ≥1.24.1）：产品包上的
+# gofmt -l、comment_policy -no-baseline、codetools tracked-hygiene，加 openspec strict。
+# 根 module 的 go build/vet/test -short 由 ci.yml 的 test job 唯一持有（05/5.5），本
+# workflow 不再重复执行：同一 commit 两个 owner 只会让同一失败被报两次。
 # 产品包口径 = golden/runtime/architecture.json 登记的第一方包（其 scope 明确排除
 # scripts/tests/examples/docs/resources）；PRODUCT_PACKAGES 的顶层目录集由
 # scripts/gates/test_check_runtime_workflow.py 对 golden 钉住，防漂移。组合根是目录
@@ -24,10 +25,10 @@
 # 的干净树实测：
 #   go -C examples/wechat-bot  build ./... / vet ./... / test ./... -short -count=1 → RC=0
 #   go -C examples/cli-host    build ./... / vet ./... / test ./... -short -count=1 → RC=0
-# 这些步骤由 ci.yml 的 Build/Vet/Test (bot module) 与 Build/Vet/Test (cli-host module)
-# 承担；本 workflow 只管根 module 产品门，不重复示例 module 步骤（重复会造两处升级点）。
+# 这些步骤以及根 module 的 build/vet/test 全部由 ci.yml 承担（05/5.5：root
+# build/vet/short 恰有一个 owner）；本 workflow 只管静态格式/合同检查，不重复执行。
 #
-# 本 workflow 不代表产品行为通过；openspec strict 步骤以 `--specs` 只校验主规格
+# 本 workflow 不代表产品行为通过（行为门在 ci.yml）；openspec strict 步骤以 `--specs` 只校验主规格
 # （openspec/specs/ 是唯一真源；in-flight change 属 WIP，由 scripts/gates/check-openspec.sh
 # 报告而不判红），任一主规格未 strict-valid 即如实红。不替代 ci.yml/lint.sh/
 # race_check.sh/gen_godoc.sh。不使用 continue-on-error，不内嵌第二套校验器；检查器本体
@@ -55,6 +56,16 @@ on:
         description: "Path to the matching real go test -json JSONL log."
         type: string
         default: ""
+
+# Stale-PR cancellation (05/5.2): only pull_request runs of the same PR share
+# a concurrency domain, so a superseded push cancels its own stale run and
+# nothing else. Every other event (push to main/dev/next, workflow_dispatch,
+# merge_group once the merge queue lands) falls back to the per-run
+# github.run_id: a proof run can never share a group with a PR run or with
+# another proof run, so no PR push can cancel it.
+concurrency:
+  group: ${{ github.workflow }}-pr-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
@@ -119,16 +130,6 @@ jobs:
 
       - name: Scenarios contract
         run: "if compgen -G 'openspec/changes/*/task-graph.json' > /dev/null; then python scripts/gates/check_runtime_evidence.py --check-contract --plan-graph openspec/changes/archive/2026-10-18-runtime-rebuild/task-graph.json --json; else echo 'no active change; the scenarios contract gate has no object (archive-only), skipped'; fi"
-
-      # ---- root-module product gates (same scope as local verification) ----
-      - name: Build (root module)
-        run: go build ./...
-
-      - name: Vet (root module)
-        run: go vet ./...
-
-      - name: Test (root module, short)
-        run: go test ./... -short -count=1
 
       - name: gofmt (product packages)
         run: |

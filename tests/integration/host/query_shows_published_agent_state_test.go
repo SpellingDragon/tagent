@@ -156,6 +156,45 @@ func invocationReading(t *testing.T, snap query.Snapshot, id event.InvocationID)
 	return query.DetailState{}
 }
 
+// invocationSegment locates the invocation entry the resident Consumer minted
+// for the named site, proving the two identities one turn answers under: the
+// segment identity carries the session prefix, while the caller's own
+// invocation survives on the input fact of the chain. A turn never claims the
+// caller's identity, so a reading located by the caller alone is absent.
+func invocationSegment(t *testing.T, run *assembly.Run, snap query.Snapshot, addr event.Address, caller event.InvocationID) (event.InvocationID, query.DetailState) {
+	t.Helper()
+	prefix := string(addr.SessionID) + "#"
+	var segment event.InvocationID
+	var reading query.DetailState
+	for _, d := range snap.Details {
+		if d.Ref.Kind != query.ObjectInvocation || d.Ref.Address != addr {
+			continue
+		}
+		if segment != "" {
+			t.Fatalf("地址 %v 读出多个 invocation 段: %s 与 %s", addr, segment, d.Ref.InvocationID)
+		}
+		segment = d.Ref.InvocationID
+		reading = d.State
+	}
+	if segment == "" {
+		t.Fatalf("地址 %v 缺席读代: %+v", addr, snap.Details)
+	}
+	if !strings.HasPrefix(string(segment), prefix) {
+		t.Fatalf("turn invocation = %q, want the segment identity of %s under prefix %q", segment, addr.SessionID, prefix)
+	}
+	callerHeld := false
+	for _, fact := range run.SessionFacts(addr) {
+		if fact.Type == event.TypeExternalInput && fact.InvocationID == caller {
+			callerHeld = true
+			break
+		}
+	}
+	if !callerHeld {
+		t.Fatalf("链上缺席调用方 %q 的输入事实", caller)
+	}
+	return segment, reading
+}
+
 // taskReadings counts the native task statuses of one reading off the task
 // entries alone.
 func taskReadings(snap query.Snapshot) map[task.Status]int {
@@ -327,8 +366,9 @@ func TestQueryShowsPublishedAgentState(t *testing.T) {
 		if got := agentReading(t, snap, "agent-b"); got != (query.AgentState{Configured: true}) {
 			t.Fatalf("未驻留 agent-b 读数 = %+v, want 仅 configured", got)
 		}
-		if got := invocationReading(t, snap, "inv-1"); got.Decision == "" {
-			t.Fatalf("inv-1 活动决策 = %+v, want 模型在途时持有决策", got)
+		segment, reading := invocationSegment(t, run, snap, addr1, "inv-1")
+		if reading.Decision == "" {
+			t.Fatalf("段 %s 活动决策 = %+v, want 模型在途时持有决策", segment, reading)
 		}
 		modelGate.open()
 
@@ -373,8 +413,8 @@ func TestQueryShowsPublishedAgentState(t *testing.T) {
 		if got := agentReading(t, snap, "agent-a"); got != (query.AgentState{Configured: true, Resident: true}) {
 			t.Fatalf("落定后 agent-a 读数 = %+v, want configured/resident", got)
 		}
-		if got := invocationReading(t, snap, "inv-1"); got.Decision != "" {
-			t.Fatalf("落定后 inv-1 活动决策 = %+v, want 槽位已释放", got)
+		if got := invocationReading(t, snap, segment); got.Decision != "" {
+			t.Fatalf("落定后段 %s 活动决策 = %+v, want 槽位已释放", segment, got)
 		}
 	})
 

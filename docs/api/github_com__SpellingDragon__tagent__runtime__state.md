@@ -1,18 +1,5 @@
 package state // import "github.com/SpellingDragon/tagent/runtime/state"
 
-The heat matrix of the configuration dimensions beside the routing that keeps
-the two consumption paths apart. Every dimension of every sub-agent belongs to
-exactly one channel — the FP generation face, the SRC source-pull face, the FILE
-lazy-read face, or the named RESTART refusal — and one change takes effect only
-on the channel its dimension belongs to.
-
-The two paths never stand in for each other: a structural change runs the strict
-decode → Compile → Prepare → the precondition checks → commit and commits only
-through the sole publication entry, while a file change takes effect directly
-at the request boundary. A structural difference never rides the file channel
-around the precondition checks, and a file change is never claimed to have
-passed them.
-
 The failure cause chain of the two reload paths: a structural change that is
 refused or fails keeps the chain of the causes it rests on — the source file,
 the normalized line within it and the named reason beside it — so the failure is
@@ -97,33 +84,6 @@ var (
 	ErrBindingGenerationReleased = fmt.Errorf("%w: the generation it names is already released", ErrBindingRefUnknown)
 )
 var (
-	// ErrDimensionUnknown reports a change touching a dimension the matrix does
-	// not register: the change takes no path until the dimension is registered
-	// beside a consumption point.
-	ErrDimensionUnknown = errors.New("state: the change touches no registered configuration dimension")
-	// ErrChannelMismatch reports a change arriving through a channel other than
-	// the one its dimension belongs to. The matrix gives each dimension exactly
-	// one channel, and no change chooses a second one to take effect on.
-	ErrChannelMismatch = errors.New("state: the change arrives through a channel its dimension does not belong to")
-	// ErrStructuralViaFile reports the named case of ErrChannelMismatch the
-	// matrix forbids outright: a structural change arriving through the file
-	// channel. The structural path runs the precondition checks first, and a
-	// structural difference never takes effect through the file channel around
-	// them. It is a named case of ErrChannelMismatch, so a caller matching the
-	// refusal of any misrouted change matches it too.
-	ErrStructuralViaFile = fmt.Errorf("%w: a structural change never takes effect through the file channel", ErrChannelMismatch)
-	// ErrRestartRefused reports a change to a dimension the matrix declares
-	// RESTART: the resource it names cannot migrate, and refusing the change is
-	// the correct behavior rather than a failure to support it.
-	ErrRestartRefused = errors.New("state: the dimension names a resource that cannot migrate and is refused until restart")
-	// ErrRouterFileSourceMissing reports a file read through a router that
-	// carries no file source.
-	ErrRouterFileSourceMissing = errors.New("state: the router carries no file source")
-	// ErrRouterGateMissing reports a structural change routed through a router
-	// that carries no publication entry to gate it.
-	ErrRouterGateMissing = errors.New("state: the router carries no publication entry")
-)
-var (
 	// ErrFileRootMissing reports a prompt file read through a file source that
 	// names no root to read it under.
 	ErrFileRootMissing = errors.New("state: the file source names no root")
@@ -162,6 +122,11 @@ var (
 	// as the settled record, and the repeat is refused by name instead of
 	// answering the success the first consumption already recorded.
 	ErrClaimSettled = errors.New("state: the mailbox entry is already consumed")
+	// ErrDeliveryRefused reports a notification whose target refused the delivery
+	// beside the site that owns it, so the notification is answered: the refusal
+	// is the consumption result of that notification and the account keeps it as
+	// the feedback fact it is rather than retrying the same delivery.
+	ErrDeliveryRefused = errors.New("state: the target refused the delivery of the notification")
 )
 var (
 	// ErrIncompleteAddress reports an address that does not name both an agent
@@ -249,15 +214,6 @@ var (
     while a request is under way is never spliced into it, and the next request
     boundary reads the rewritten content anew.
 
-var (
-	// ErrSendTargetMissing reports an internal send that names no complete
-	// target address, so the delivery is refused rather than aimed at a default
-	// or at the most recent peer.
-	ErrSendTargetMissing = errors.New("state: the send names no explicit target")
-	// ErrDeliveryTargetNotRunning reports a delivery to a target whose loop is
-	// not running. Opening a loop for that target is never this seam's answer.
-	ErrDeliveryTargetNotRunning = errors.New("state: the delivery target is not running")
-)
 var ErrArchiveUnreadable = errors.New("state: archive checkpoint cannot be read")
     ErrArchiveUnreadable reports an archive root whose checkpoint cannot be read
     or decoded, so neither an import nor a rollback can classify anything under
@@ -331,14 +287,6 @@ func RollbackArchive(ctx context.Context, root string, tasks ArchiveTaskReader, 
     rewrites nothing and removes nothing: an item the new path still holds
     is reported as residue, and one the new path holds nothing under is named
     absent rather than written back.
-
-func Route(change Change) (Channel, error)
-    Route decides the one channel a submitted change takes effect on. The matrix
-    registers each dimension beside exactly one channel, so a change arriving
-    on any other channel is refused by name — a structural change never rides
-    the file channel — and a change to a RESTART dimension is refused outright,
-    because refusing it is the correct behavior. A change the matrix registers
-    nowhere is refused by name as well and takes no path at all.
 
 func ToolFace(binding AgentBinding) (map[string]trpctool.Tool, []string)
     ToolFace reports the native tools one binding's request carries beside the
@@ -610,12 +558,6 @@ type Cause struct {
     The wrapped failure is kept rather than flattened, so no link ever collapses
     a chain into one generic message.
 
-func CauseChain(err error) []*Cause
-    CauseChain reports the cause links a failure carries, ordered from the
-    outermost link to the innermost one. A failure that carries no link reports
-    an empty chain, and a chain never loses the links sitting under a joined
-    failure.
-
 func NewCause(source string, line int, reason string, err error) *Cause
     NewCause returns one cause chain link over the given source, normalized
     line and named reason, wrapping the failure it reports. The failure is kept
@@ -629,78 +571,6 @@ func (c *Cause) Error() string
 func (c *Cause) Unwrap() error
     Unwrap reports the failure the link wraps, so a caller matching the named
     refusal underneath matches it through the chain.
-
-type Change struct {
-	// Dimension is the configuration dimension the change touches.
-	Dimension Dimension
-	// Via is the channel the change arrives through.
-	Via Channel
-	// Source is the source file the change was written in.
-	Source string
-	// Line is the normalized line within that source.
-	Line int
-}
-    Change is one submitted configuration change attempt: the dimension it
-    touches, the channel it arrives through and the source origin it was written
-    in, so a refusal stays locatable beside the normalized line it names.
-
-type Channel int
-    Channel names the one heat channel a configuration dimension belongs to.
-
-const (
-	// ChannelFP is the FP generation face: a view change takes effect at the
-	// next round, a request already under way keeps the generation it took, and
-	// the change commits only through the publish precondition gate.
-	ChannelFP Channel = iota
-	// ChannelSRC is the SRC source-pull face: a parameter change takes effect
-	// at the next consumption of that parameter, with no generation assigned.
-	ChannelSRC
-	// ChannelFile is the FILE lazy-read face: the file is the source of truth
-	// and its content is read at the consumption boundary, as the prompt body
-	// and the skill body are. No register, no evaluation and no precondition
-	// gate stands between the change and its effect.
-	ChannelFile
-	// ChannelRestart is the named restart refusal: the dimension names a
-	// resource that cannot migrate, and refusing the change is the correct
-	// behavior.
-	ChannelRestart
-)
-func ChannelOf(d Dimension) (Channel, bool)
-    ChannelOf reports the single channel one registered dimension belongs to and
-    whether the matrix registers that dimension at all.
-
-func (c Channel) String() string
-    String reports the channel by the name the matrix registers it under.
-
-type ChannelRow struct {
-	// Dimension is the configuration dimension the row registers.
-	Dimension Dimension
-	// Channel is the single channel the dimension belongs to.
-	Channel Channel
-	// Evidence names the contract test or code line of the consumption point.
-	Evidence string
-}
-    ChannelRow is one row of the heat matrix: the dimension, the single channel
-    it belongs to and the evidence its consumption point carries — a contract
-    test name or a code line. A row whose consumption point never reads what it
-    registers is a fake hot update and is a defect rather than partial support,
-    so a dimension registers its row only beside the consumption point that is
-    wired for it.
-
-func ChannelMatrix() []ChannelRow
-    ChannelMatrix returns the registered heat matrix: one row per registered
-    dimension beside the channel it belongs to and the evidence of its
-    consumption point.
-
-    Rows grow with their consumption points: a later change that wires the
-    consumption of another dimension adds its row here beside its evidence. The
-    model parameter dimension takes the SRC source-pull face (a parameter change
-    takes effect at the next consumption) and the mcp-servers dimension takes
-    the FILE lazy-read face; neither is registered yet because their consumption
-    points land outside this change, and a row carried without a consumption
-    point would be a fake hot update. The RESTART rows are registered beside the
-    refusal this matrix itself performs: refusing such a change is the correct
-    behavior.
 
 type CheckAnswer struct {
 	// Name names the check this answer dispositions.
@@ -757,48 +627,6 @@ type ConsumeReceipt struct {
 }
     ConsumeReceipt is the third mailbox time point: the receipt recorded when
     one accepted input was fully consumed.
-
-type Delivery struct {
-	// Target is the address of the site the notification enters.
-	Target event.Address
-	// TargetInstance is the runtime instance serving that site.
-	TargetInstance event.InstanceID
-	// Notice is the notification the target mailbox accepts. Its stable
-	// identity is what a repeated delivery of the same send is recognized by.
-	Notice task.Notice
-}
-    Delivery is one internal send: the explicit target site one notification
-    enters.
-
-type Dimension string
-    Dimension names one configuration dimension of a sub-agent.
-
-const (
-	// DimensionModel names the model the agent runs against.
-	DimensionModel Dimension = "model"
-	// DimensionTools names the tool and delegation references of the agent.
-	DimensionTools Dimension = "tools"
-	// DimensionPlugins names the ordered plugin pipeline of the agent.
-	DimensionPlugins Dimension = "plugins"
-	// DimensionTaskPolicy names the task policy applied to the agent's tasks.
-	DimensionTaskPolicy Dimension = "task-policy"
-	// DimensionResourceRefs names the resource references the agent holds.
-	DimensionResourceRefs Dimension = "resource-refs"
-	// DimensionMemory names the memory bindings of the agent.
-	DimensionMemory Dimension = "memory"
-	// DimensionPromptBody names the prompt file body of the agent.
-	DimensionPromptBody Dimension = "prompt-body"
-	// DimensionSkillBody names the skill file body of the agent.
-	DimensionSkillBody Dimension = "skill-body"
-	// DimensionRoots names a directory the agent serves from.
-	DimensionRoots Dimension = "roots"
-	// DimensionEndpoints names a remote endpoint the agent is wired to.
-	DimensionEndpoints Dimension = "endpoints"
-)
-    DimensionModel and the other dimensions of one sub-agent the matrix
-    registers: a structural dimension names a view the generation carries, a
-    file dimension names content that is its own source of truth, and a restart
-    dimension names a resource that cannot migrate.
 
 type DurableCommit struct {
 	// Has unexported fields.
@@ -861,6 +689,10 @@ func (d *DurableCommit) Records(ctx context.Context, taskID event.TaskID) ([]tas
     every later link carries its fact alone. A notification whose consumption
     receipt the log holds is left out of the outbox of its link, so a rebuild
     opens no delivery obligation for a notice already confirmed as consumed.
+
+func (d *DurableCommit) Rejections() []Rejection
+    Rejections reports every refusal the carrier holds, in the stable task,
+    round, kind and sequence order of the notifications they answer.
 
 func (d *DurableCommit) Revision(taskID event.TaskID) int64
     Revision returns the revision the task is at after the records stored for
@@ -1067,6 +899,10 @@ func NewMemoryStore(authority *Authority, consumptions ...*DurableCommit) *Memor
     every completed logical consumption behind its own sync barrier before the
     mailbox confirms the entry, and serves the attempt record of every follow-up
     turn beside it; a store beside none keeps both in its own bookkeeping alone.
+    The same account receives the feedback fact of every notification a
+    target refused, so a restart over the same log reads the refusals the
+    stopped process landed; a store beside none keeps its refusals in its own
+    bookkeeping alone.
 
 func (m *MemoryStore) AcceptNotice(ctx context.Context, notice task.Notice) error
 
@@ -1079,6 +915,13 @@ func (m *MemoryStore) AcceptNotice(ctx context.Context, notice task.Notice) erro
     and the notification that produced it. Acceptance is idempotent by the
     notification's stable identity, so a replayed delivery records no second
     fact and keeps the target the first acceptance recorded.
+
+    A route the mailbox cannot open is not a refusal: an address this run never
+    established, or an instance another one replaced, names routing the delivery
+    could not reach at all, so the notification stands undelivered for the
+    next attempt instead of being recorded as an answer its target never gave.
+    A target that closed its session did answer: the site refused the input,
+    and that refusal is the feedback fact the criterion reads.
 
 func (m *MemoryStore) Attempt(ctx context.Context, notice task.Notice) (SettleAttempt, bool, error)
     Attempt reports the attempt record of one notification and whether
@@ -1116,6 +959,13 @@ func (m *MemoryStore) Establish(ctx context.Context, addr event.Address, instanc
     while the obligations already accepted there stay readable. The pair already
     serving the address returns its own bookkeeping.
 
+func (m *MemoryStore) InstanceOf(addr event.Address) event.InstanceID
+    InstanceOf reports the runtime instance that currently serves one address,
+    and the empty identity beside an address this store never established.
+    A report of a site reads it to name the reader's own instance beside the
+    address, so the instance a judgment names is the one that owns the site now
+    rather than the one a caller remembered.
+
 func (m *MemoryStore) Publish(ctx context.Context, plan StatePlan) (Publication, error)
     Publish implements Store.Publish and reports that the memory store carries
     no effective binding publication.
@@ -1136,6 +986,19 @@ func (m *MemoryStore) RecordAttempt(ctx context.Context, notice task.Notice, att
     a second process reads the same attempt; a record the account already holds
     with the same content stages no second pair, and a write the account refused
     is reported instead of confirmed.
+
+func (m *MemoryStore) Refused(notice task.Notice) bool
+    Refused reports whether one notification already carries a refusal:
+    the refusal is that notification's consumption result, so the rest criterion
+    reads it instead of waiting on a delivery the target will never accept.
+
+func (m *MemoryStore) Rejections() []Rejection
+    Rejections reports the feedback fact of every notification a target refused,
+    across the durable account this store was opened over and the refusals of
+    this process, ordered by task, round, kind and sequence so the same account
+    always answers in the same order. A refusal names the notification it
+    answered, so a reader decides which notification is answered and which one
+    is still owed.
 
 func (m *MemoryStore) Release(ctx context.Context, addr event.Address, instance event.InstanceID, seq AcceptSeq) error
     Release returns one claimed input to the pending pool of the mailbox of
@@ -1514,32 +1377,25 @@ func (p *Publisher) RollbackConfig() (OrgPlan, bool)
     live objects and submits that candidate through Rollback; the source stays
     the same across consecutive rollbacks.
 
-type Refusal struct {
-	// Notice is the notification the refused delivery carried.
-	Notice task.Notice
-	// Target is the address the refused delivery named.
-	Target event.Address
-	// Category names the gate that refused the delivery.
-	Category RefusalCategory
-	// At is the time the delivery was refused.
-	At time.Time
+type Rejection struct {
+	Notice   task.Notice      `json:"notice"`
+	Target   event.Address    `json:"target"`
+	Instance event.InstanceID `json:"instance"`
+	Reason   string           `json:"reason"`
+	At       time.Time        `json:"at"`
 }
-    Refusal is one refused delivery in the sender's ledger: the notification it
-    carried, the target it named, the gate that refused it and the time of the
-    refusal, so the refusal is queryable by the target it named.
+    Rejection is the durable feedback fact of one notification a target refused:
+    the identity of the notification it answers, the routing the delivery was
+    offered to, and the reason the target gave. The record is the consumption
+    result of that notification, so a carrier opened over the same log reads the
+    refusal back and owes the notification no delivery a second time.
 
-type RefusalCategory string
-    RefusalCategory names the gate one delivery was refused at.
+func (r Rejection) Feedback() event.Event
+    Feedback reports the refusal as the feedback fact it is: an audit fact of
+    the target address, carrying the notification it answers beside the reason
+    in its metadata and no model payload in its message, so the fact enters no
+    model request.
 
-const (
-	// RefusalNotAuthorized is a target outside the sender's deliver_to
-	// whitelist.
-	RefusalNotAuthorized RefusalCategory = "not_authorized"
-	// RefusalUnknownTarget is a target no established site serves.
-	RefusalUnknownTarget RefusalCategory = "unknown_target"
-	// RefusalTargetNotRunning is a target whose loop is not running.
-	RefusalTargetNotRunning RefusalCategory = "target_not_running"
-)
 type RollbackItem struct {
 	// Name names the item: the task identity or the archive file it came from.
 	Name string
@@ -1562,97 +1418,6 @@ type RollbackReport struct {
     RollbackReport is the report one rollback returns: the digest of the archive
     observed under read-only access and the state of every migrated item in the
     new path, residue named as residue and absence named as absence.
-
-type Router struct {
-	// Has unexported fields.
-}
-    Router routes one submitted change onto the single path its dimension
-    belongs to: the FILE face takes effect at the request boundary with
-    no gate in its way, and the structural face commits only through the
-    publish precondition gate of the sole publication entry — for a fresh
-    structural change and for a rollback alike. The two paths never stand in
-    for each other, and every refusal keeps its cause chain: the source file,
-    the normalized line and the named reason.
-
-func NewRouter(files *FileSource, gate *Publisher) *Router
-    NewRouter returns the router over the given file source and publication
-    entry. Either may be nil for a caller that only uses the other face;
-    a read without a file source and a structural change without a gate are each
-    refused by name.
-
-func (r *Router) Commit(ctx context.Context, change Change, cand Candidate) (PublishOutcome, error)
-    Commit takes the structural face: the change is routed by the matrix first,
-    then committed through the publish precondition gate of the sole publication
-    entry. A refusal anywhere leaves the effective binding as it was and reports
-    the failure beside its cause chain — the source file, the normalized line
-    and the named reason — never as a generic reload failure.
-
-func (r *Router) Read(ctx context.Context, prompt PromptSource) (FileSnapshot, error)
-    Read takes the FILE face: the content is read and fixed at the request
-    boundary and takes effect at once — no register, no evaluation and no
-    precondition gate stands in its way, and no structural generation is
-    assigned or advanced.
-
-func (r *Router) Rollback(ctx context.Context, change Change, cand Candidate) (PublishOutcome, error)
-    Rollback takes the structural face as well: a rollback rebuilds the previous
-    full configuration as one more generation through the same gate and the
-    same publication entry, and a rollback arriving through the file channel is
-    refused like any other structural change.
-
-type RunningCheck func(addr event.Address, instance event.InstanceID) bool
-    RunningCheck reports whether the execution loop of one target site is
-    running.
-
-type SendFace struct {
-	// Has unexported fields.
-}
-
-    SendFace is the internal send seam of one sender: it delivers a notification
-    into an explicitly addressed mailbox after the permission, residency and
-    liveness gates, and keeps the ledger of the deliveries it refused.
-
-    The seam resolves no target of its own. A delivery naming no complete target
-    is refused, and a target outside the registered whitelist is refused beside
-    a ledger entry naming it.
-
-func NewSendFace(store *MemoryStore, options ...SendOption) *SendFace
-    NewSendFace returns the send seam of one sender over the given store.
-
-func (f *SendFace) Refusals() []Refusal
-    Refusals reports the deliveries this sender refused, in the order it refused
-    them.
-
-func (f *SendFace) Send(ctx context.Context, delivery Delivery) (SendReceipt, error)
-    Send delivers one notification into the explicit target it names. The gates
-    run in order — target named, whitelist, residency, liveness — and the first
-    one that refuses records a ledger entry and returns its named error.
-
-    A notification already accepted is answered with the entry it took and the
-    site the first acceptance chose: a repeat records no second fact and reopens
-    no gate.
-
-type SendOption func(*SendFace)
-    SendOption configures the send seam at construction.
-
-func WithDeliverTo(targets ...event.AgentID) SendOption
-    WithDeliverTo registers the sender's deliver_to whitelist: the agent names
-    it may deliver to. The whitelist starts empty, so a sender that registers
-    none refuses every target.
-
-func WithRunningCheck(check RunningCheck) SendOption
-    WithRunningCheck attaches the liveness check of the execution loops the
-    sender delivers to.
-
-type SendReceipt struct {
-	// AcceptSeq is the acceptance sequence of the mailbox entry the
-	// notification entered.
-	AcceptSeq AcceptSeq
-	// Duplicate reports that the notification was already accepted, so this
-	// delivery appended no second entry and kept the site the first acceptance
-	// recorded.
-	Duplicate bool
-}
-    SendReceipt is the outcome of one delivery that passed the gates.
 
 type Session struct {
 	// Address is the explicit address this site was established for.

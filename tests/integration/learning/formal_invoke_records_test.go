@@ -104,15 +104,17 @@ func TestFormalInvokeProducesTrainingRecords(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 		records := &collector{}
+		var requests []model.Request
 		run := formalRun(t, ctx, records, func(req *model.Request) *model.Response {
+			requests = append(requests, *req)
 			if last := req.Messages[len(req.Messages)-1]; last.Content == "learn me" {
 				return learnToolTurn(learnCall("call-1", "echo-a", `{"x":1}`))
 			}
 			return learnFinalTurn("settled")
 		})
 		turn := formalInvoke(t, ctx, run, "inv-formal-1", "session-formal-1", "ep-formal-1")
-		if turn.Terminal != model.KindCompleted || len(turn.Decisions) != 2 {
-			t.Fatalf("turn = (%v, %d decisions), want one completed terminal beside two decisions", turn.Terminal, len(turn.Decisions))
+		if turn.Terminal != model.KindCompleted || turn.DecisionCount != 2 {
+			t.Fatalf("turn = (%v, %d decisions), want one completed terminal beside two decisions", turn.Terminal, turn.DecisionCount)
 		}
 		snap := records.snapshot()
 		if len(snap.episodes) != 0 || len(snap.decisions) != 0 {
@@ -121,18 +123,23 @@ func TestFormalInvokeProducesTrainingRecords(t *testing.T) {
 		if len(snap.attempts) != 2 {
 			t.Fatalf("attempt records = %d, want one per observable model attempt", len(snap.attempts))
 		}
+		facts := run.SessionFacts(event.Address{AgentID: "agent-a", SessionID: "session-formal-1"})
+		wantDecisions := []event.DecisionID{
+			integrityFactWithContent(t, facts, event.TypeThinkingPlan, "").DecisionID,
+			integrityFactWithContent(t, facts, event.TypeAgentOutput, "settled").DecisionID,
+		}
 		for i, attempt := range snap.attempts {
 			if attempt.Schema != rl.SchemaCurrent {
 				t.Fatalf("attempt %d schema = %q, want %q", i, attempt.Schema, rl.SchemaCurrent)
 			}
-			if attempt.ID == "" || attempt.DecisionID != turn.Decisions[i].DecisionID {
-				t.Fatalf("attempt %d identity = (%q, %q), want one attempt bound to decision %q", i, attempt.ID, attempt.DecisionID, turn.Decisions[i].DecisionID)
+			if attempt.ID == "" || attempt.DecisionID != wantDecisions[i] {
+				t.Fatalf("attempt %d identity = (%q, %q), want one attempt bound to decision %q", i, attempt.ID, attempt.DecisionID, wantDecisions[i])
 			}
 			if attempt.EpisodeID != "ep-formal-1" {
 				t.Fatalf("attempt %d episode = %q, want the episode boundary the invocation named", i, attempt.EpisodeID)
 			}
-			if attempt.Terminal != turn.Decisions[i].Terminal || attempt.Terminal != model.KindCompleted {
-				t.Fatalf("attempt %d terminal = %v, want the shared terminal %v", i, attempt.Terminal, turn.Decisions[i].Terminal)
+			if attempt.Terminal != turn.Terminal || attempt.Terminal != model.KindCompleted {
+				t.Fatalf("attempt %d terminal = %v, want the shared terminal %v", i, attempt.Terminal, turn.Terminal)
 			}
 			if attempt.Timestamp.IsZero() {
 				t.Fatalf("attempt %d timestamp = %v, want the time the record was written", i, attempt.Timestamp)
@@ -148,7 +155,10 @@ func TestFormalInvokeProducesTrainingRecords(t *testing.T) {
 		if len(second.Choices) != 1 || second.Choices[0].Message.Content != "settled" {
 			t.Fatalf("second attempt response = %+v, want the native final content kept as it stood", second)
 		}
-		if second := turn.Decisions[1].Request.Messages; !carriesToolOutput(second, "out-a") {
+		if len(requests) != 2 {
+			t.Fatalf("provider requests = %d, want the two real model requests", len(requests))
+		}
+		if second := requests[1].Messages; !carriesToolOutput(second, "out-a") {
 			t.Fatalf("second decision request = %+v, want the settled tool observation of the first round", second)
 		}
 	})
@@ -161,8 +171,8 @@ func TestFormalInvokeProducesTrainingRecords(t *testing.T) {
 			return learnFinalTurn("settled")
 		})
 		turn := formalInvoke(t, ctx, run, "inv-formal-2", "session-formal-2", "")
-		if turn.Terminal != model.KindCompleted || len(turn.Decisions) != 1 {
-			t.Fatalf("turn = (%v, %d decisions), want one completed terminal beside one decision", turn.Terminal, len(turn.Decisions))
+		if turn.Terminal != model.KindCompleted || turn.DecisionCount != 1 {
+			t.Fatalf("turn = (%v, %d decisions), want one completed terminal beside one decision", turn.Terminal, turn.DecisionCount)
 		}
 		snap := records.snapshot()
 		if len(snap.episodes) != 0 || len(snap.decisions) != 0 {
@@ -186,8 +196,8 @@ func TestFormalInvokeProducesTrainingRecords(t *testing.T) {
 			return learnFinalTurn("settled")
 		})
 		turn := formalInvoke(t, ctx, run, "inv-formal-3", "session-formal-3", "ep-formal-3")
-		if turn.Terminal != model.KindCompleted || len(turn.Decisions) != 2 {
-			t.Fatalf("turn = (%v, %d decisions), want the completed turn unaffected by the refused record writes", turn.Terminal, len(turn.Decisions))
+		if turn.Terminal != model.KindCompleted || turn.DecisionCount != 2 {
+			t.Fatalf("turn = (%v, %d decisions), want the completed turn unaffected by the refused record writes", turn.Terminal, turn.DecisionCount)
 		}
 		counts := map[string]int{}
 		for _, loss := range run.RecordingLosses() {

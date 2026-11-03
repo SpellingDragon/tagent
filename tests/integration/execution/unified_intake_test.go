@@ -20,16 +20,19 @@ import (
 	"github.com/SpellingDragon/tagent/assembly"
 	"github.com/SpellingDragon/tagent/memory/replay"
 	"github.com/SpellingDragon/tagent/runtime/agent"
+	mcpgw "github.com/SpellingDragon/tagent/tool/mcp"
 
 	trpctool "trpc.group/trpc-go/trpc-agent-go/tool"
+	tmcp "trpc.group/trpc-go/trpc-mcp-go"
 )
 
 // intakeEntryAgent names the material this anchor is written in, so every message is
 // material the endpoint served and every invocation reaches an address the document
 // really declares.
 //
-// - intakeSlowBody is the body the in-flight call delivers, and the outbound face parks on it
-// - intakeSlowCallID is the call identity of that call, so a decision is read from the tool message that pairs it
+//   - intakeSlowBody is the material the in-flight call carries, and the park tool the call
+//     reaches holds its handler open on it
+//   - intakeSlowCallID is the call identity of that call, so a decision is read from the tool message that pairs it
 const (
 	intakeEntryAgent       = "user"
 	intakeEntryModel       = "model-entry"
@@ -38,10 +41,23 @@ const (
 	intakeSecondInvocation = "inv-intake-second"
 	intakeSlowCallID       = "call-intake-slow"
 	intakeSlowBody         = "intake: the slow call is running"
-	intakeFirstBody        = "intake: the message that opens the turn"
-	intakeSecondBody       = "intake: the message that arrives in flight"
-	intakeRepeatBody       = "intake: the same text sent twice"
-	intakeFinalBody        = "intake: the slow call finished"
+	// intakeAnchorServer, intakeAnchorTool and intakeAnchorBody name the in-process MCP
+	// server the slow call runs on: its one tool parks its handler until the anchor
+	// releases it, so the admitted call is in flight because its execution has not
+	// returned — the non-communication slow path D6 leaves beside the synchronous send.
+	intakeAnchorServer = "anchor"
+	intakeAnchorTool   = "park"
+	// intakeShortcutServer, intakeShortcutTool and intakeShortcutBody name the second
+	// in-process server, whose one tool answers at once: the fast call of the two-call
+	// anchor settles while the parked one is still running, and the body it settles with
+	// is the minimal ok a settled call hands the decision that reads it.
+	intakeShortcutServer = "shortcut"
+	intakeShortcutTool   = "answer"
+	intakeShortcutBody   = "ok"
+	intakeFirstBody      = "intake: the message that opens the turn"
+	intakeSecondBody     = "intake: the message that arrives in flight"
+	intakeRepeatBody     = "intake: the same text sent twice"
+	intakeFinalBody      = "intake: the slow call finished"
 	// intakeInFlightBody is the message that lands in the chain of the turn in flight,
 	// committed through the run's own write face while the slow call is parked.
 	intakeInFlightBody = "intake: the message that lands in the chain in flight"
@@ -57,11 +73,12 @@ const (
 	intakeEnvironmentTool = "env-probe"
 )
 
-// intakeAcceptWindow bounds how long an in-flight invocation may take to answer (the
-// anchor's red assertion is that it answers nothing at all), intakeBootWindow bounds
-// the wait for the call to park, intakeSettleWindow guards a harness that broke, and
-// intakeParkCeiling bounds one parked delivery so a call nothing releases fails by
-// name instead of hanging the package.
+// intakeAcceptWindow bounds how long an in-flight invocation is read for an answer
+// before the parked call is released: the answer of such an invocation belongs to the
+// segment that reads the release, so one that answers earlier drove a turn of its own.
+// intakeBootWindow bounds the wait for the call to park, intakeSettleWindow guards a
+// harness that broke, and intakeParkCeiling bounds one parked delivery so a call
+// nothing releases fails by name instead of hanging the package.
 const (
 	intakeAcceptWindow = 2 * time.Second
 	intakeBootWindow   = 20 * time.Second
@@ -71,12 +88,15 @@ const (
 
 // TestMessageReachesTheNextDecisionOfAInFlightTurn checks that a message arriving inside a slow call reaches the next decision of the same turn.
 //
-// - positive: the invocation of that message is answered as accepted and the message stands in the next decision once
+// - positive: the invocation of that message is answered by the segment the turn in flight drives, the completed turn of its two decisions
+// - positive: the message stands in the next decision of that segment once, and lands as one fact
 // - negative: the decision already running reads nothing of it, and the turn in flight ends by its own terminal
-// - negative: on the gate-shaped intake the message opens a turn of its own, which is the shape this anchor measures against
+// - negative: the message drives no segment of its own, so the run serves the two decisions of the one turn in flight
 // - negative: a fact landing beside unfinished material only appends, so the projection prefix that stood stays an exact prefix
 // - negative: a progress notice enters no decision input, in this window too
-// - negative: two identical texts sent in one turn stand in the input twice, since the consumed identity de-duplicates
+// - negative: two identical texts sent in one turn are read twice, since the consumed identity de-duplicates
+// - no request may carry the text more times than the two facts hold it: a third copy in one request would be a fact read twice as fresh material
+// - the identity each fact commits under keeps the two apart, so the text is never collapsed into one read
 // - consumer: every invocation is one Host.Invoke over a host booted from a real document, read back from the requests served
 //
 // 契约: docs/wiki/agent/event-flow.md
@@ -86,17 +106,18 @@ func TestMessageReachesTheNextDecisionOfAInFlightTurn(t *testing.T) {
 
 		t.Run("positive: the in-flight invocation is accepted and the message reaches the next decision once", func(t *testing.T) {
 			accepted := scene.accepted[0]
-			if accepted.waited {
-				t.Fatalf("the invocation of the in-flight message returned nothing within %s: it parked on the session gate, "+
-					"so the message waits for the turn to end instead of reaching the decision boundary of the turn in flight "+
-					"(requests served beside it = %d)", intakeAcceptWindow, len(scene.requests))
-			}
 			if accepted.err != nil {
-				t.Fatalf("invoke beside the in-flight turn = %v, want the message accepted beside no error", accepted.err)
+				t.Fatalf("invoke beside the in-flight turn = %v, want the message answered beside no error", accepted.err)
 			}
-			if accepted.turn.Terminal != model.KindUnknown || len(accepted.turn.Decisions) != 0 {
-				t.Fatalf("accepted turn = (%v, %d decisions), want the receipt the host answers an in-flight message with: "+
-					"no decision reached and no error", accepted.turn.Terminal, len(accepted.turn.Decisions))
+			if accepted.turn.Terminal != model.KindCompleted || accepted.turn.DecisionCount != 2 {
+				t.Fatalf("accepted turn = (%v, %d decisions), want the completed turn of the segment that consumed the message: "+
+					"the call that was parked beside the decision that read its result (%s)",
+					accepted.turn.Terminal, accepted.turn.DecisionCount, intakeDescribe(scene.requests))
+			}
+			if accepted.turn.InvocationID != scene.first.InvocationID {
+				t.Fatalf("the message was answered by the turn %q, want the segment %q the turn already runs: "+
+					"a message that lands in flight is read by the decision of that segment, not by a turn of its own",
+					accepted.turn.InvocationID, scene.first.InvocationID)
 			}
 			at, ok := intakeDecisionAfterCall(scene.requests)
 			if !ok {
@@ -121,24 +142,6 @@ func TestMessageReachesTheNextDecisionOfAInFlightTurn(t *testing.T) {
 				t.Fatalf("copies of the in-flight message in the decision already running = %d, want 0: "+
 					"a running decision is never fed the message that arrives beside it (%s)",
 					copies, intakeDescribe(scene.requests))
-			}
-			accepted := scene.accepted[0]
-			at, ok := intakeDecisionAfterCall(scene.requests)
-			if !ok {
-				t.Fatalf("requests = %s, want the decision that reads the result of %s", intakeDescribe(scene.requests), intakeSlowCallID)
-			}
-			copies := intakeUserCopies(scene.requests[at], intakeSecondBody)
-			if accepted.waited {
-				// TODO(A5): migrate this branch onto the added requirement when the anchor set moves
-				if copies != 0 {
-					t.Fatalf("copies of the in-flight message in the next decision = %d, want the baseline shape of 0 "+
-						"beside an invocation that never returned (%s)", copies, intakeDescribe(scene.requests))
-				}
-				if carriers := intakeRequestsCarryingUser(scene.requests, intakeSecondBody); len(carriers) == 0 {
-					t.Fatalf("requests = %s, want the baseline to read the message in a turn of its own after the gate freed it",
-						intakeDescribe(scene.requests))
-				}
-				return
 			}
 			if len(scene.requests) != 2 {
 				t.Fatalf("model requests = %d (%s), want the two decisions of the one in-flight turn: "+
@@ -184,22 +187,39 @@ func TestMessageReachesTheNextDecisionOfAInFlightTurn(t *testing.T) {
 
 	t.Run("the same text sent twice in one turn stands in the input twice", func(t *testing.T) {
 		scene := intakeDrive(t, intakeRepeatBody, intakeRepeatBody)
-		at, ok := intakeDecisionAfterCall(scene.requests)
-		if !ok {
-			t.Fatalf("requests = %s, want the decision that reads the result of %s", intakeDescribe(scene.requests), intakeSlowCallID)
+		landed := intakeFactsCarrying(scene.facts, intakeRepeatBody)
+		if len(landed) != 2 {
+			t.Fatalf("facts carrying the same text = %d, want the two facts the two entries committed (%s)",
+				len(landed), intakeDescribe(scene.requests))
 		}
-		if copies := intakeUserCopies(scene.requests[at], intakeRepeatBody); copies != 2 {
-			t.Fatalf("copies of the same text in the next decision = %d, want 2: the consumed identity de-duplicates "+
-				"and the content does not (%s)", copies, intakeDescribe(scene.requests))
+		if landed[0].Key == landed[1].Key {
+			t.Fatalf("fact keys of the two entries = %q, want two identities beside one text: "+
+				"the chain de-duplicates by the identity a fact commits under, never by the content it reads as", landed[0].Key)
+		}
+		read := make([]int, 0, 2)
+		copies := 0
+		for _, request := range scene.requests {
+			if got := intakeUserCopies(request, intakeRepeatBody); got > 0 {
+				read = append(read, request.Index)
+				copies += got
+				if got > len(landed) {
+					t.Fatalf("request %d carries the same text %d times, want at most the %d facts that hold it",
+						request.Index, got, len(landed))
+				}
+			}
+		}
+		if copies < len(landed) {
+			t.Fatalf("the same text served to the model %d times in requests %v, want each of the %d facts read: "+
+				"the consumed identity de-duplicates and the content does not (%s)", copies, read, len(landed), intakeDescribe(scene.requests))
 		}
 	})
 }
 
 // TestInflightUserMessageIsAcceptedNotQueued checks that a message arriving beside a running turn is accepted onto that turn's chain, not queued behind the gate.
 //
-// - positive: the call answers while the turn in flight is still parked, with no decision and no error
-// - positive: the fact commits under the identity of the range in flight, which is the input that range reads at its next decision
-// - negative: the in-flight turn reads the message once and drives no turn of its own for it, so nothing is queued beside the gate
+// - positive: the message is answered by the segment the turn in flight drives, the completed turn of its two decisions
+// - positive: the fact commits under the identity of the entry that submitted it, which is the source association the segment reads
+// - negative: the in-flight turn reads the message once and drives no segment of its own for it, so nothing is queued beside the gate
 // - consumer: Host.Invoke over a host booted from a real document, read back from the requests served and the run's own chain
 //
 // 契约: docs/wiki/agent/event-flow.md
@@ -207,28 +227,27 @@ func TestInflightUserMessageIsAcceptedNotQueued(t *testing.T) {
 	scene := intakeDrive(t, intakeSecondBody)
 
 	accepted := scene.accepted[0]
-	if accepted.waited {
-		t.Fatalf("the invocation of the in-flight message answered nothing within %s: a message beside a running turn is accepted, not queued behind the gate that turn holds", intakeAcceptWindow)
-	}
 	if accepted.err != nil {
-		t.Fatalf("invoke beside the in-flight turn = %v, want the message accepted beside no error", accepted.err)
+		t.Fatalf("invoke beside the in-flight turn = %v, want the message answered beside no error", accepted.err)
 	}
-	if accepted.turn.Terminal != model.KindUnknown || len(accepted.turn.Decisions) != 0 {
-		t.Fatalf("accepted turn = (%v, %d decisions), want the receipt of an admission: no decision reached and no error",
-			accepted.turn.Terminal, len(accepted.turn.Decisions))
+	if accepted.turn.Terminal != model.KindCompleted || accepted.turn.DecisionCount != 2 {
+		t.Fatalf("accepted turn = (%v, %d decisions), want the completed turn of the segment that consumed the message (%s)",
+			accepted.turn.Terminal, accepted.turn.DecisionCount, intakeDescribe(scene.requests))
 	}
-	if accepted.turn.InvocationID != intakeFirstInvocation {
-		t.Fatalf("the accepted receipt names the range %q, want the range in flight %q: the message is input of the turn already running",
-			accepted.turn.InvocationID, intakeFirstInvocation)
+	if accepted.turn.InvocationID != scene.first.InvocationID {
+		t.Fatalf("the message was answered by the turn %q, want the segment %q the turn already runs: "+
+			"a message accepted beside a running turn is material of that segment, so it queues nothing beside the gate",
+			accepted.turn.InvocationID, scene.first.InvocationID)
 	}
 
 	landed := intakeFactsCarrying(scene.facts, intakeSecondBody)
 	if len(landed) != 1 {
 		t.Fatalf("facts carrying the in-flight message = %d, want the one fact the acceptance commits: a queued message is committed later, and only once it drives its own turn", len(landed))
 	}
-	if landed[0].InvocationID != intakeFirstInvocation {
-		t.Fatalf("the landed fact belongs to the range %q, want the range in flight %q: an input admitted beside a running turn is that range's material",
-			landed[0].InvocationID, intakeFirstInvocation)
+	submitted := event.InvocationID(intakeSecondInvocation + "-0")
+	if landed[0].InvocationID != submitted {
+		t.Fatalf("the landed fact belongs to %q, want the entry identity %q: each source keeps its own association beside the segment that reads it",
+			landed[0].InvocationID, submitted)
 	}
 
 	at, ok := intakeDecisionAfterCall(scene.requests)
@@ -334,7 +353,7 @@ func TestTheEnvironmentBlockClosesTheSystemMaterial(t *testing.T) {
 						at, index, intakeEnvironmentShape(requests))
 				}
 			}
-			for _, want := range []string{"- agent: " + intakeEntryAgent, "- model: " + intakeEntryModel, "- skills: (none)", "- mcp: (none)", "- tasks: 0 open"} {
+			for _, want := range []string{"- agent: " + intakeEntryAgent, "- model: " + intakeEntryModel, "- skills: (none)", "- mcp: (none)"} {
 				if !strings.Contains(block.Content, want) {
 					t.Fatalf("environment block = %q, want it to name %q", block.Content, want)
 				}
@@ -479,7 +498,7 @@ func intakeLandingDrive(t *testing.T, landed ...string) *intakeLandingScene {
 		})
 		firstDone <- intakeLandingScene{turn: turn, err: err}
 	}()
-	sender.awaitParked(t)
+	provider.anchor.awaitParked(t)
 	for _, body := range landed {
 		if _, err := host.Run().CommitToSession(ctx, addr, event.Event{
 			Type:         event.TypeExternalInput,
@@ -489,7 +508,7 @@ func intakeLandingDrive(t *testing.T, landed ...string) *intakeLandingScene {
 			t.Fatalf("commit the message %q into the chain of the turn in flight: %v", body, err)
 		}
 	}
-	sender.release()
+	provider.anchor.release()
 
 	scene := &intakeLandingScene{}
 	select {
@@ -553,7 +572,7 @@ func intakeDrive(t *testing.T, inFlight ...string) *intakeScene {
 			Input:        []model.Message{{Role: model.RoleUser, Content: intakeFirstBody}},
 		})
 	}()
-	sender.awaitParked(t)
+	provider.anchor.awaitParked(t)
 	scene.before, scene.beforeCarried = host.Run().ReplayEntries(scene.addr.SessionID)
 
 	type arrival struct {
@@ -582,7 +601,7 @@ func intakeDrive(t *testing.T, inFlight ...string) *intakeScene {
 		}
 	}
 
-	sender.release()
+	provider.anchor.release()
 	select {
 	case <-firstDone:
 	case <-time.After(intakeSettleWindow):
@@ -608,18 +627,31 @@ func intakeDrive(t *testing.T, inFlight ...string) *intakeScene {
 // intakeProvider is the OpenAI-compatible endpoint the anchor boots against: the
 // first request of the run issues the slow call, every later request ends the
 // turn that reads it, and every request is recorded in the shape the anchor
-// reads its evidence from.
+// reads its evidence from. The two MCP servers the slow and the settled call
+// reach are held beside it, so both calls stay real executions and this endpoint
+// records the entry agent's requests alone.
 type intakeProvider struct {
-	server *httptest.Server
-	mu     sync.Mutex
-	models []string
-	bodies []map[string]json.RawMessage
+	server   *httptest.Server
+	anchor   *intakeMCP
+	shortcut *intakeMCP
+	mu       sync.Mutex
+	models   []string
+	bodies   []map[string]json.RawMessage
+	// firstAnswer overrides the answer of the first request, so an anchor
+	// scripts the calls its opening decision issues; empty serves the one slow
+	// send call the in-flight anchors park on.
+	firstAnswer string
+	// answers overrides the answer of the request at one index, so an anchor
+	// scripts the calls of a round that is not the first one; an index beside no
+	// entry serves the final answer, or the slow call for the first request.
+	answers map[int]string
 }
 
 // newIntakeProvider starts the endpoint and closes it with the test.
 func newIntakeProvider(t *testing.T) *intakeProvider {
 	t.Helper()
-	provider := &intakeProvider{}
+	anchor, shortcut := newIntakeMCPPair(t)
+	provider := &intakeProvider{anchor: anchor, shortcut: shortcut}
 	provider.server = httptest.NewServer(http.HandlerFunc(provider.serve))
 	t.Cleanup(provider.server.Close)
 	return provider
@@ -644,7 +676,13 @@ func (p *intakeProvider) serve(w http.ResponseWriter, r *http.Request) {
 	p.mu.Unlock()
 	payload := intakeFinalAnswer(intakeFinalBody)
 	if index == 0 {
-		payload = intakeToolCallAnswer("send", intakeSlowCallID, `{"content":`+intakeQuoted(intakeSlowBody)+`}`)
+		payload = intakeToolCallAnswer(mcpgw.ToolNameMCPCall, intakeSlowCallID, p.anchor.callArgs(intakeSlowBody))
+		if p.firstAnswer != "" {
+			payload = p.firstAnswer
+		}
+	}
+	if scripted, held := p.answers[index]; held {
+		payload = scripted
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
@@ -760,64 +798,189 @@ func intakeFinalAnswer(content string) string {
 		`"message":{"role":"assistant","content":` + intakeQuoted(content) + `},"finish_reason":"stop"}]}`
 }
 
-// intakeSender is the outbound face of the booted host: it records every body it
-// accepted, and it parks the one body the slow call delivers until the anchor
-// releases it, so the in-flight window is a real tool execution rather than an
-// elapsed timeout.
+// intakeSender is the outbound face of the booted host: it records every body the
+// host delivers to the channel of a turn that ended, so an anchor reads what
+// really left the host rather than what it meant to send.
 type intakeSender struct {
 	mu      sync.Mutex
 	targets []event.Address
 	bodies  []string
-	parked  chan struct{}
-	freed   chan struct{}
-	once    sync.Once
-	opened  sync.Once
 }
 
 // newIntakeSender returns the recording outbound face of one run.
 func newIntakeSender() *intakeSender {
-	return &intakeSender{parked: make(chan struct{}), freed: make(chan struct{})}
+	return &intakeSender{}
 }
 
-// Send records one accepted body and parks the slow call's body until release.
+// Send records one accepted body.
 func (s *intakeSender) Send(ctx context.Context, target event.Address, content string) error {
 	s.mu.Lock()
 	s.targets = append(s.targets, target)
 	s.bodies = append(s.bodies, content)
 	s.mu.Unlock()
-	if content != intakeSlowBody {
-		return nil
+	return nil
+}
+
+// accepted reports the bodies the outbound face accepted so far, in send order.
+func (s *intakeSender) accepted() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]string(nil), s.bodies...)
+}
+
+// intakeMCP is one in-process MCP server the calls of these anchors reach: the locked
+// protocol implementation behind httptest, so both ends of every call run inside the
+// dependency stack and nothing reaches an external service. Its one tool either parks
+// its handler until the anchor releases it — the slow path an admitted call stays in
+// flight on, because its execution has not returned — or answers at once, so one
+// decision can hold a settled call beside a pending one.
+type intakeMCP struct {
+	name   string
+	tool   string
+	answer string
+	park   bool
+	srv    *tmcp.Server
+	server *httptest.Server
+
+	mu      sync.Mutex
+	touched int
+	parked  chan struct{}
+	freed   chan struct{}
+	opened  sync.Once
+	once    sync.Once
+}
+
+// newIntakeMCP starts one in-process server carrying the named tool and stops it with
+// the test. A parked server holds the first call until the anchor releases it; one that
+// is not parked answers every call at once. Both answer the material the call carried,
+// so a settled call hands the decision that reads it its own body back.
+//
+// The server runs the stateless JSON transport on purpose: a session-issuing server
+// makes the client transport keep a GET SSE stream beside its requests, and every POST
+// that answers as an event stream writes the transport's last event id, so trpc-mcp-go
+// v0.0.10 races one request against another over both fields (LEDGER 红色耦合台账 U5).
+// What these anchors read is the intake of call results — a parked handler beside a
+// fast one — never a session identity or a resumable stream, so the fixture pins the
+// stateless JSON shape the upstream examples recommend and the race detector sees the
+// intake these checks are about instead of the upstream defect.
+func newIntakeMCP(t *testing.T, name, tool, answer string, park bool) *intakeMCP {
+	t.Helper()
+	server := &intakeMCP{name: name, tool: tool, answer: answer, park: park,
+		srv: tmcp.NewServer(name, "0.0.1-test", tmcp.WithStatelessMode(true),
+			tmcp.WithPostSSEEnabled(false), tmcp.WithGetSSEEnabled(false)),
+		parked: make(chan struct{}), freed: make(chan struct{})}
+	server.srv.RegisterTool(
+		tmcp.NewTool(tool, tmcp.WithDescription("the non-communication slow path of the intake anchors")),
+		server.handle,
+	)
+	server.server = httptest.NewServer(server.srv.Handler())
+	t.Cleanup(server.stop)
+	return server
+}
+
+// newIntakeMCPPair starts the two servers the intake document names, so a case that
+// only boots the document holds the same pair every other case reaches.
+func newIntakeMCPPair(t *testing.T) (*intakeMCP, *intakeMCP) {
+	t.Helper()
+	return newIntakeMCP(t, intakeAnchorServer, intakeAnchorTool, intakeSlowBody, true),
+		newIntakeMCP(t, intakeShortcutServer, intakeShortcutTool, intakeShortcutBody, false)
+}
+
+// handle executes the one tool of this server: a parked server holds its first call
+// until the anchor releases it, and every other call answers at once. Either way the
+// tool answers the material the call carried, so a settled call hands the decision that
+// reads it its own body back.
+func (m *intakeMCP) handle(ctx context.Context, req *tmcp.CallToolRequest) (*tmcp.CallToolResult, error) {
+	m.mu.Lock()
+	first := m.touched == 0
+	m.touched++
+	m.mu.Unlock()
+	if first && m.park {
+		m.opened.Do(func() { close(m.parked) })
+		select {
+		case <-m.freed:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(intakeParkCeiling):
+			return nil, fmt.Errorf("the slow call of %q was never released", m.name)
+		}
 	}
-	s.opened.Do(func() { close(s.parked) })
-	select {
-	case <-s.freed:
-		return nil
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-time.After(intakeParkCeiling):
-		return fmt.Errorf("execution: the slow call was never released")
+	return tmcp.NewTextResult(m.answerOf(req)), nil
+}
+
+// answerOf reports the material one call carried: the tool echoes its own input, and a
+// call that carried none answers the body this server was started with.
+func (m *intakeMCP) answerOf(req *tmcp.CallToolRequest) string {
+	if req != nil {
+		if text, ok := req.Params.Arguments["text"].(string); ok && strings.TrimSpace(text) != "" {
+			return text
+		}
+	}
+	return m.answer
+}
+
+// executions reports how often the one tool of this server really ran, so a check reads
+// an execution the run made instead of a copy some other face accepted.
+func (m *intakeMCP) executions() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.touched
+}
+
+// awaitExecutions waits until the one tool ran the named number of times, so a check
+// reads a call that finished instead of racing it.
+func (m *intakeMCP) awaitExecutions(t *testing.T, want int) {
+	t.Helper()
+	deadline := time.Now().Add(intakeBootWindow)
+	for {
+		if got := m.executions(); got >= want {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the tool of %q ran %d time(s) within %s, want %d", m.name, m.executions(), intakeBootWindow, want)
+		}
+		time.Sleep(5 * time.Millisecond)
 	}
 }
 
-// awaitParked waits until the slow call really reached the outbound face.
-func (s *intakeSender) awaitParked(t *testing.T) {
+// url reports the endpoint the document's mcp_servers entry names.
+func (m *intakeMCP) url() string { return m.server.URL + m.srv.Path() }
+
+// callArgs renders the mcp_call argument object one decision issues to reach the one
+// tool of this server.
+func (m *intakeMCP) callArgs(text string) string {
+	return `{"server":` + intakeQuoted(m.name) + `,"tool":` + intakeQuoted(m.tool) + `,"args":{"text":` + intakeQuoted(text) + `}}`
+}
+
+// awaitParked waits until a call really reached the parked tool.
+func (m *intakeMCP) awaitParked(t *testing.T) {
 	t.Helper()
 	select {
-	case <-s.parked:
+	case <-m.parked:
 	case <-time.After(intakeBootWindow):
 		t.Fatalf("no decision reached the slow call within %s, so the in-flight window was never opened", intakeBootWindow)
 	}
 }
 
-// release frees the parked call, exactly once.
-func (s *intakeSender) release() {
-	s.once.Do(func() { close(s.freed) })
+// release frees the parked handler, exactly once.
+func (m *intakeMCP) release() {
+	m.once.Do(func() { close(m.freed) })
 }
 
-// intakeHostDocument renders the one document the anchor boots: the entry agent
-// keeps the declared send tool, whose outbound face the anchor supplies, so one
-// real decision can be parked inside a real tool execution.
-func intakeHostDocument(root, endpoint string) string {
+// stop frees a handler nothing released and stops the listener, so a case whose call
+// was never released still ends instead of hanging the teardown. The client holds the
+// one event stream of the session open, so its connections are closed first and the
+// listener only after them.
+func (m *intakeMCP) stop() {
+	m.release()
+	m.server.CloseClientConnections()
+	m.server.Close()
+}
+
+// intakeHostDocument renders the one document the anchor boots: the entry agent holds
+// the MCP gateway and the document names the two in-process servers the anchor holds, so
+// one real decision reaches a real tool execution that parks until the anchor releases it.
+func intakeHostDocument(root, endpoint, anchorURL, shortcutURL string) string {
 	var b strings.Builder
 	b.WriteString("entry: " + intakeEntryAgent + "\n")
 	b.WriteString("provider: local\n")
@@ -828,7 +991,10 @@ func intakeHostDocument(root, endpoint string) string {
 	b.WriteString("  " + intakeEntryAgent + ":\n")
 	b.WriteString("    model: " + intakeEntryModel + "\n")
 	b.WriteString("    tools:\n")
-	b.WriteString("      - { kind: tool, id: send }\n")
+	b.WriteString("      - { kind: tool, id: mcp_call }\n")
+	b.WriteString("mcp_servers:\n")
+	b.WriteString("  " + intakeAnchorServer + ": { transport: streamable-http, url: \"" + anchorURL + "\" }\n")
+	b.WriteString("  " + intakeShortcutServer + ": { transport: streamable-http, url: \"" + shortcutURL + "\" }\n")
 	b.WriteString("storage: { type: localfile, root: " + root + " }\n")
 	return b.String()
 }
@@ -837,12 +1003,22 @@ func intakeHostDocument(root, endpoint string) string {
 // reaches the runtime through the public entry the deployment uses.
 func intakeBoot(t *testing.T, provider *intakeProvider, sender assembly.MessageSender) *assembly.Host {
 	t.Helper()
+	return intakeBootDocument(t, provider, sender, func(root, endpoint string) string {
+		return intakeHostDocument(root, endpoint, provider.anchor.url(), provider.shortcut.url())
+	})
+}
+
+// intakeBootDocument boots the formal host of the document one anchor renders,
+// so a test that declares a budget reaches the runtime through the very
+// document face a deployment declares it under.
+func intakeBootDocument(t *testing.T, provider *intakeProvider, sender assembly.MessageSender, render func(root, endpoint string) string) *assembly.Host {
+	t.Helper()
 	t.Setenv("TAGENT_TEST_API_KEY", "test-key")
 	t.Setenv("TAGENT_HTTP_PORT", "0")
 	t.Setenv("TAGENT_RL_AUTH_TOKEN", "")
 	root := t.TempDir()
 	configPath := filepath.Join(root, "tagent.yaml")
-	if err := os.WriteFile(configPath, []byte(intakeHostDocument(root, provider.endpoint())), 0o644); err != nil {
+	if err := os.WriteFile(configPath, []byte(render(root, provider.endpoint())), 0o644); err != nil {
 		t.Fatalf("write the host document: %v", err)
 	}
 	host, err := assembly.Boot(configPath, assembly.WithSender(sender))
@@ -892,18 +1068,6 @@ func intakeFactsCarrying(facts []event.Event, material string) []event.Event {
 	for _, fact := range facts {
 		if strings.Contains(fact.Message.Content, material) && fact.Type == event.TypeExternalInput {
 			out = append(out, fact)
-		}
-	}
-	return out
-}
-
-// intakeRequestsCarryingUser reports the requests that carry the named material
-// as user input.
-func intakeRequestsCarryingUser(requests []intakeRequest, material string) []int {
-	out := make([]int, 0, len(requests))
-	for at, request := range requests {
-		if intakeUserCopies(request, material) > 0 {
-			out = append(out, at)
 		}
 	}
 	return out

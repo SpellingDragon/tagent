@@ -90,10 +90,11 @@ func fileCandidate(t *testing.T, baseline, fingerprint string, m model.Model, to
 	return orgstate.Candidate{Plan: built, Resources: leases}
 }
 
-// fileRig is the rig one sub-case drives: the router over the file source and
-// the sole publication entry, beside the binding holder a request borrows from.
+// fileRig is the rig one sub-case drives: the file source a request fixes its
+// content through and the sole publication entry a structural change commits
+// through, beside the binding holder a request borrows from.
 type fileRig struct {
-	router     *orgstate.Router
+	source     *orgstate.FileSource
 	pub        *orgstate.Publisher
 	holder     *orgstate.Bindings
 	probe      *gateProbe
@@ -127,7 +128,7 @@ func newFileRig(t *testing.T) *fileRig {
 		Required: []orgstate.CheckName{"eval", "benchmark", "apply-gate"},
 	}, probe, records)
 	return &fileRig{
-		router:     orgstate.NewRouter(orgstate.NewFileSource(root, repo), pub),
+		source:     orgstate.NewFileSource(root, repo),
 		pub:        pub,
 		holder:     holder,
 		probe:      probe,
@@ -142,10 +143,14 @@ func newFileRig(t *testing.T) *fileRig {
 // - a prompt or skill file rewritten between two requests is read and fixed anew at the next request boundary while the structural generation stays where it is
 // - a replayed historical snapshot never pins the content a later request reads by source
 // - a structural change commits only through the publish precondition gate and a refused one leaves the effective binding as it was
-// - a structural difference arriving through the file channel is refused by name and never takes effect around the gate
 // - a request under way keeps one generation of model, tools and plugins while the file content it reads keeps updating
-// - a failed structural change keeps its cause chain: source file, normalized line and named reason
-// - a rollback rides the structural path as one more generation and is refused on the file channel like any other structural change
+//
+// The semantics the deleted routing face used to carry are anchored where they
+// now live: the host reload refuses a structural move by name
+// (tests/integration/host/reload_tiers_test.go), the sole publication entry
+// rolls back as one more generation (TestGenerationPublication), and the strict
+// decoder keeps the source and normalized line of a refused document
+// (TestDecodeStrictRefusesKeysOutsideTheCallerSchema).
 // 契约: docs/wiki/platform/org-hot-reload.md#generations
 func TestFileAndStructuralChange(t *testing.T) {
 	t.Run("a file change is read at the next request boundary while the structural generation stays", func(t *testing.T) {
@@ -153,7 +158,7 @@ func TestFileAndStructuralChange(t *testing.T) {
 		rig := newFileRig(t)
 		leases := orgstate.NewLeases()
 		cand := fileCandidate(t, rig.pub.Baseline(), "fp-1", &stubModel{name: "gen-1"}, nil, nil, rig.files, leases)
-		out, err := rig.router.Commit(ctx, orgstate.Change{Dimension: orgstate.DimensionModel, Via: orgstate.ChannelFP, Source: "org.yaml", Line: 3}, cand)
+		out, err := rig.pub.Publish(ctx, cand)
 		if err != nil || out.Result != orgstate.PublishApplied || out.Publication.Generation != 1 {
 			t.Fatalf("publish the structural generation = (%+v, %v), want one applied generation", out, err)
 		}
@@ -161,7 +166,7 @@ func TestFileAndStructuralChange(t *testing.T) {
 			t.Fatalf("gate consultations = %d, want the structural publication to pass the precondition gate exactly once", rig.probe.asked)
 		}
 
-		snap1, err := rig.router.Read(ctx, orgstate.PromptSource{Files: rig.files})
+		snap1, err := rig.source.Fixate(ctx, orgstate.PromptSource{Files: rig.files})
 		if err != nil {
 			t.Fatalf("fixate the file content at the request boundary: %v", err)
 		}
@@ -182,7 +187,7 @@ func TestFileAndStructuralChange(t *testing.T) {
 		writePromptFile(t, rig.root, "prompts/a.md", "prompt v2\n")
 		writeSkillFile(t, rig.skillsRoot, "greet", "body v2\n")
 
-		snap2, err := rig.router.Read(ctx, orgstate.PromptSource{Files: rig.files})
+		snap2, err := rig.source.Fixate(ctx, orgstate.PromptSource{Files: rig.files})
 		if err != nil {
 			t.Fatalf("fixate the rewritten content at the next request boundary: %v", err)
 		}
@@ -203,7 +208,7 @@ func TestFileAndStructuralChange(t *testing.T) {
 	t.Run("a replayed historical snapshot never pins the content of a later request", func(t *testing.T) {
 		ctx := context.Background()
 		rig := newFileRig(t)
-		snap1, err := rig.router.Read(ctx, orgstate.PromptSource{Files: rig.files})
+		snap1, err := rig.source.Fixate(ctx, orgstate.PromptSource{Files: rig.files})
 		if err != nil {
 			t.Fatalf("fixate the file content at the request boundary: %v", err)
 		}
@@ -211,7 +216,7 @@ func TestFileAndStructuralChange(t *testing.T) {
 
 		writePromptFile(t, rig.root, "prompts/a.md", "prompt v2\n")
 
-		replayed, err := rig.router.Read(ctx, historical)
+		replayed, err := rig.source.Fixate(ctx, historical)
 		if err != nil {
 			t.Fatalf("fixate beside the replayed historical snapshot: %v", err)
 		}
@@ -231,7 +236,7 @@ func TestFileAndStructuralChange(t *testing.T) {
 		rig := newFileRig(t)
 		leases := orgstate.NewLeases()
 		cand := fileCandidate(t, rig.pub.Baseline(), "fp-1", &stubModel{name: "gen-1"}, nil, nil, rig.files, leases)
-		out, err := rig.router.Commit(ctx, orgstate.Change{Dimension: orgstate.DimensionTools, Via: orgstate.ChannelFP, Source: "org.yaml", Line: 7}, cand)
+		out, err := rig.pub.Publish(ctx, cand)
 		if err != nil || out.Publication.Generation != 1 {
 			t.Fatalf("commit the structural change = (%+v, %v), want it admitted through the gate", out, err)
 		}
@@ -245,7 +250,7 @@ func TestFileAndStructuralChange(t *testing.T) {
 			"apply-gate": passing("apply-gate"),
 		}
 		refused := fileCandidate(t, rig.pub.Baseline(), "fp-2", &stubModel{name: "gen-2"}, nil, nil, rig.files, orgstate.NewLeases())
-		if _, err := rig.router.Commit(ctx, orgstate.Change{Dimension: orgstate.DimensionTools, Via: orgstate.ChannelFP, Source: "org.yaml", Line: 9}, refused); !errors.Is(err, orgstate.ErrCheckRefused) {
+		if _, err := rig.pub.Publish(ctx, refused); !errors.Is(err, orgstate.ErrCheckRefused) {
 			t.Fatalf("commit beside a refusing check = %v, want %v beside the refusal that names the check", err, orgstate.ErrCheckRefused)
 		}
 		if got := rig.pub.Current(); got.Generation != 1 || got.Fingerprint != "fp-1" {
@@ -264,48 +269,6 @@ func TestFileAndStructuralChange(t *testing.T) {
 		}
 	})
 
-	t.Run("a structural change never rides the file channel around the gate", func(t *testing.T) {
-		ctx := context.Background()
-		rig := newFileRig(t)
-		leases := orgstate.NewLeases()
-		cand := fileCandidate(t, rig.pub.Baseline(), "fp-1", &stubModel{name: "gen-1"}, nil, nil, rig.files, leases)
-		_, err := rig.router.Commit(ctx, orgstate.Change{Dimension: orgstate.DimensionTools, Via: orgstate.ChannelFile, Source: "org.yaml", Line: 11}, cand)
-		if !errors.Is(err, orgstate.ErrStructuralViaFile) {
-			t.Fatalf("structural change through the file channel = %v, want %v beside the refusal that names the bypass", err, orgstate.ErrStructuralViaFile)
-		}
-		if !errors.Is(err, orgstate.ErrChannelMismatch) {
-			t.Fatalf("structural change through the file channel = %v, want the named case matched through %v", err, orgstate.ErrChannelMismatch)
-		}
-		if got := rig.pub.Current(); got.Generation != 0 {
-			t.Fatalf("structural generation = %+v, want nothing published beside the refused bypass", got)
-		}
-		if rig.probe.asked != 0 || len(rig.records.records) != 0 {
-			t.Fatalf("gate consultations = %d beside %d records, want the bypass to reach neither", rig.probe.asked, len(rig.records.records))
-		}
-
-		writePromptFile(t, rig.root, "prompts/a.md", "tools: [smuggled]\n")
-		snap, err := rig.router.Read(ctx, orgstate.PromptSource{Files: rig.files})
-		if err != nil {
-			t.Fatalf("fixate the rewritten file: %v", err)
-		}
-		if snap.Files[0].Content != "tools: [smuggled]\n" {
-			t.Fatalf("fixed content = %q, want the rewritten body and nothing else", snap.Files[0].Content)
-		}
-		if got := rig.pub.Current(); got.Generation != 0 || got.Fingerprint != "" {
-			t.Fatalf("structural generation = %+v, want a file edit to carry no structural effect at all", got)
-		}
-
-		if _, err := orgstate.Route(orgstate.Change{Dimension: orgstate.DimensionRoots, Via: orgstate.ChannelFP}); !errors.Is(err, orgstate.ErrRestartRefused) {
-			t.Fatalf("route a restart dimension = %v, want %v beside the refusal that is its correct behavior", err, orgstate.ErrRestartRefused)
-		}
-		if _, err := orgstate.Route(orgstate.Change{Dimension: "params", Via: orgstate.ChannelSRC}); !errors.Is(err, orgstate.ErrDimensionUnknown) {
-			t.Fatalf("route a dimension the matrix registers nowhere = %v, want %v beside the refusal that names it", err, orgstate.ErrDimensionUnknown)
-		}
-		if _, err := orgstate.Route(orgstate.Change{Dimension: orgstate.DimensionPromptBody, Via: orgstate.ChannelFP}); !errors.Is(err, orgstate.ErrChannelMismatch) {
-			t.Fatalf("route a file dimension onto the structural channel = %v, want %v beside the refusal that names the mismatch", err, orgstate.ErrChannelMismatch)
-		}
-	})
-
 	t.Run("an in-flight request keeps one generation of model tools and plugins while the file updates", func(t *testing.T) {
 		ctx := context.Background()
 		rig := newFileRig(t)
@@ -315,7 +278,7 @@ func TestFileAndStructuralChange(t *testing.T) {
 			&stubPlugin{name: "risk", port: plugin.PortCallRuling},
 		}
 		first := fileCandidate(t, rig.pub.Baseline(), "fp-1", &stubModel{name: "gen-1"}, tools, pipeline, rig.files, orgstate.NewLeases())
-		if _, err := rig.router.Commit(ctx, orgstate.Change{Dimension: orgstate.DimensionPlugins, Via: orgstate.ChannelFP, Source: "org.yaml", Line: 4}, first); err != nil {
+		if _, err := rig.pub.Publish(ctx, first); err != nil {
 			t.Fatalf("publish the first generation: %v", err)
 		}
 		handle, err := rig.holder.Borrow(ctx, "agent-a")
@@ -328,7 +291,7 @@ func TestFileAndStructuralChange(t *testing.T) {
 			[]trpctool.Tool{&stubTool{name: "tool-2"}},
 			[]plugin.Instance{&stubPlugin{name: "present", port: plugin.PortFactView}},
 			rig.files, orgstate.NewLeases())
-		if _, err := rig.router.Commit(ctx, orgstate.Change{Dimension: orgstate.DimensionPlugins, Via: orgstate.ChannelFP, Source: "org.yaml", Line: 5}, second); err != nil {
+		if _, err := rig.pub.Publish(ctx, second); err != nil {
 			t.Fatalf("publish the second generation beside the in-flight request: %v", err)
 		}
 
@@ -343,7 +306,7 @@ func TestFileAndStructuralChange(t *testing.T) {
 		}
 
 		writePromptFile(t, rig.root, "prompts/a.md", "prompt v2\n")
-		snap, err := rig.router.Read(ctx, handle.Binding.PromptSource)
+		snap, err := rig.source.Fixate(ctx, handle.Binding.PromptSource)
 		if err != nil {
 			t.Fatalf("fixate the file content beside the in-flight request: %v", err)
 		}
@@ -359,92 +322,12 @@ func TestFileAndStructuralChange(t *testing.T) {
 		if fresh.Binding.Model.Info().Name != "gen-2" {
 			t.Fatalf("later model = %s, want the newer generation taken at the request boundary", fresh.Binding.Model.Info().Name)
 		}
-		later, err := rig.router.Read(ctx, fresh.Binding.PromptSource)
+		later, err := rig.source.Fixate(ctx, fresh.Binding.PromptSource)
 		if err != nil {
 			t.Fatalf("fixate for the later request: %v", err)
 		}
 		if later.Files[0].Content != "prompt v2\n" {
 			t.Fatalf("later fixed content = %q, want the same current file content read by source", later.Files[0].Content)
-		}
-	})
-
-	t.Run("a failed structural change keeps its cause chain", func(t *testing.T) {
-		ctx := context.Background()
-		rig := newFileRig(t)
-		rig.probe.answers = map[orgstate.CheckName]orgstate.CheckAnswer{
-			"eval":       {Name: "eval", Verdict: orgstate.CheckReject, Reason: "the memory binding is not admissible", Scope: "org"},
-			"benchmark":  passing("benchmark"),
-			"apply-gate": passing("apply-gate"),
-		}
-		cand := fileCandidate(t, rig.pub.Baseline(), "fp-1", &stubModel{name: "gen-1"}, nil, nil, rig.files, orgstate.NewLeases())
-		_, err := rig.router.Commit(ctx, orgstate.Change{Dimension: orgstate.DimensionMemory, Via: orgstate.ChannelFP, Source: "org.yaml", Line: 12}, cand)
-		if !errors.Is(err, orgstate.ErrCheckRefused) {
-			t.Fatalf("failed structural change = %v, want %v kept underneath the chain", err, orgstate.ErrCheckRefused)
-		}
-		chain := orgstate.CauseChain(err)
-		if len(chain) == 0 {
-			t.Fatalf("cause chain of %v, want the failure kept as its cause chain", err)
-		}
-		if chain[0].Source != "org.yaml" || chain[0].Line != 12 {
-			t.Fatalf("outermost cause = %+v, want the source file and the normalized line it locates", *chain[0])
-		}
-		if chain[0].Reason == "" {
-			t.Fatalf("outermost cause = %+v, want the named reason it rests on", *chain[0])
-		}
-		if !strings.Contains(err.Error(), "org.yaml:12") || !strings.Contains(err.Error(), "check eval") {
-			t.Fatalf("failure message = %q, want the source and line beside the named cause, never a generic reload failure", err.Error())
-		}
-		if got := rig.pub.Current(); got.Generation != 0 {
-			t.Fatalf("structural generation = %+v, want the effective binding kept as it was", got)
-		}
-
-		decl := &config.Declaration{Entry: "agent-a", Agents: []config.AgentSpec{{ID: "agent-a", Model: "model-a"}}}
-		_, buildErr := orgstate.NewStatePlan(orgstate.OrgPlan{Declaration: decl, Baseline: "0:", Fingerprint: "fp-1"}, map[event.AgentID]orgstate.AgentBinding{}, nil)
-		if !errors.Is(buildErr, orgstate.ErrAgentBindingMissing) {
-			t.Fatalf("candidate construction failure = %v, want %v beside the refusal that names the agent", buildErr, orgstate.ErrAgentBindingMissing)
-		}
-		wrapped := orgstate.NewCause("org.yaml", 3, "construct the candidate binding of the structural change", buildErr)
-		links := orgstate.CauseChain(wrapped)
-		if len(links) != 1 || links[0].Source != "org.yaml" || links[0].Line != 3 {
-			t.Fatalf("cause chain of a construction failure = %+v, want one locatable link beside it", links)
-		}
-		if !errors.Is(wrapped, orgstate.ErrAgentBindingMissing) {
-			t.Fatalf("wrapped construction failure = %v, want the named refusal kept matchable through the chain", wrapped)
-		}
-	})
-
-	t.Run("a rollback rides the structural path as one more generation", func(t *testing.T) {
-		ctx := context.Background()
-		rig := newFileRig(t)
-		first := fileCandidate(t, rig.pub.Baseline(), "fp-1", &stubModel{name: "gen-1"}, nil, nil, rig.files, orgstate.NewLeases())
-		if _, err := rig.router.Commit(ctx, orgstate.Change{Dimension: orgstate.DimensionModel, Via: orgstate.ChannelFP, Source: "org.yaml", Line: 3}, first); err != nil {
-			t.Fatalf("publish the startup generation: %v", err)
-		}
-		second := fileCandidate(t, rig.pub.Baseline(), "fp-2", &stubModel{name: "gen-2"}, nil, nil, rig.files, orgstate.NewLeases())
-		if _, err := rig.router.Commit(ctx, orgstate.Change{Dimension: orgstate.DimensionModel, Via: orgstate.ChannelFP, Source: "org.yaml", Line: 5}, second); err != nil {
-			t.Fatalf("publish the second generation: %v", err)
-		}
-
-		source, ok := rig.pub.RollbackConfig()
-		if !ok {
-			t.Fatalf("rollback source = absent, want the previous full configuration to rebuild")
-		}
-		rolled := fileCandidate(t, rig.pub.Baseline(), source.Fingerprint, &stubModel{name: "gen-3"}, nil, nil, rig.files, orgstate.NewLeases())
-		out, err := rig.router.Rollback(ctx, orgstate.Change{Dimension: orgstate.DimensionModel, Via: orgstate.ChannelFP, Source: "org.yaml", Line: 7}, rolled)
-		if err != nil || out.Result != orgstate.PublishRolledBack || out.Publication.Generation != 3 {
-			t.Fatalf("rollback = (%+v, %v), want one more generation built from the previous full configuration", out, err)
-		}
-		record := rig.records.records[len(rig.records.records)-1]
-		if record.Result != orgstate.PublishRolledBack || record.RollbackSource != 1 {
-			t.Fatalf("publication record = %+v, want the rollback recorded beside the generation it came back from", record)
-		}
-
-		smuggled := fileCandidate(t, rig.pub.Baseline(), source.Fingerprint, &stubModel{name: "gen-4"}, nil, nil, rig.files, orgstate.NewLeases())
-		if _, err := rig.router.Rollback(ctx, orgstate.Change{Dimension: orgstate.DimensionModel, Via: orgstate.ChannelFile, Source: "org.yaml", Line: 9}, smuggled); !errors.Is(err, orgstate.ErrStructuralViaFile) {
-			t.Fatalf("rollback through the file channel = %v, want %v beside the refusal that names the bypass", err, orgstate.ErrStructuralViaFile)
-		}
-		if got := rig.pub.Current(); got.Generation != 3 {
-			t.Fatalf("structural generation = %+v, want the rollback kept and the refused bypass ignored", got)
 		}
 	})
 }

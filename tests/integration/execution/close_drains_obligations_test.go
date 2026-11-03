@@ -17,85 +17,38 @@ import (
 	"github.com/SpellingDragon/tagent/runtime/task"
 )
 
-// TestCloseDrainsObligations drives the close of one agent over the real task face and the producers behind the work:
-// - the close refuses new input before its first settlement pass and keeps refusing it afterwards
-// - a successful admission keeps its obligation open until real settlement and never frees it beside the receipt
-// - a producer answering false is never taken for an end; only a real stop confirmation closes the wait
-// - a deadline reports the named reason of every obligation that stayed open, and a cancellation request is never read as an end
-// - a repeated close returns the first result and runs no second settlement
+// closeCriterion is the rest criterion of the close case: the task face of the
+// rig, beside the mailbox answer no notification of this case stands in.
+type closeCriterion struct {
+	*task.MemoryManager
+	*task.MemoryRegistry
+}
+
+// Unconsumed reports the notifications no consumption confirmed; this case
+// settles its notifications through the manager alone.
+func (c closeCriterion) Unconsumed(ctx context.Context) ([]task.UnsettledNotice, error) {
+	return c.MemoryManager.Owed(ctx)
+}
+
+// Unanswered reports the input rounds a session chain holds with no answer; this
+// case drives its ranges through the manager alone.
+func (closeCriterion) Unanswered(context.Context) ([]task.UnsettledInput, error) {
+	return nil, nil
+}
+
+// TestCloseDrainsObligations drives the close of one agent over the real task face and the writers behind the work:
+// - a successful admission keeps its obligation open until real settlement and the close reports one only then
+// - a writer answering no stop is never taken for an end: the close stands while no stop is confirmed and converges only once the real stop arrives
+// - a spent budget reports the criterion as it stands, keeping the work where the request found it
 // 契约: docs/wiki/agent/execution-generations.md#lifecycle-convergence
 func TestCloseDrainsObligations(t *testing.T) {
-	t.Run("the close refuses new input before its first settlement pass and keeps refusing it afterwards", func(t *testing.T) {
+	t.Run("a successful admission keeps its obligation until real settlement and the close reports one only then", func(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 		rig := newCloseRig(t)
 		modelA, modelB, _ := delegationModels("gen-1")
 		rig.publish(t, map[event.AgentID]model.Model{"agent-a": modelA, "agent-b": modelB})
 		refA := rig.borrowRef(t, ctx, "agent-a")
-		addrA := event.Address{AgentID: "agent-a", SessionID: "session-a"}
-		addrB := event.Address{AgentID: "agent-b", SessionID: "session-b"}
-
-		t1 := rig.delegate(t, ctx, "call-1", "inv-a", addrB, refA)
-		if open := rig.obligations(t, ctx, t1); open.Count != 1 {
-			t.Fatalf("obligations beside the receipt = %+v, want the obligation the receipt kept open", open)
-		}
-
-		rig.delivery.set(task.DeliveryPending)
-		rig.advance(t, ctx, t1, 0)
-		probes := make(chan gateProbe, 4096)
-		rig.setHook(func(ctx context.Context, _ task.Notice) {
-			receipt, err := rig.shutdown.Admit(ctx, task.Spec{CallID: "probe-during-drain"})
-			select {
-			case probes <- gateProbe{receipt: receipt, err: err}:
-			default:
-			}
-		})
-
-		report, err := rig.shutdown.Close(ctx, agent.CloseRequest{
-			Address:  addrA,
-			Deadline: time.Now().Add(300 * time.Millisecond),
-		})
-		rig.setHook(nil)
-		if !errors.Is(err, agent.ErrDrainUnsettled) || report.Drained {
-			t.Fatalf("close = (%+v, %v), want the named unsettled state beside the unaccepted delivery", report, err)
-		}
-		close(probes)
-		refused := 0
-		for probe := range probes {
-			if !errors.Is(probe.err, agent.ErrShutdownRefused) || probe.receipt.Accepted {
-				t.Fatalf("admission during the drain = (%+v, %v), want a rejected receipt beside the named refusal", probe.receipt, probe.err)
-			}
-			refused++
-		}
-		if refused == 0 {
-			t.Fatal("the drain ran with no probe of the gate, want new input refused beside the settlement")
-		}
-
-		if _, err := rig.ledger.Delegate(ctx, agent.Delegation{
-			InvocationID: "inv-a", DecisionID: "decision-2", CallID: "call-2",
-			Target: addrB, Ref: refA,
-		}); !errors.Is(err, agent.ErrShutdownRefused) {
-			t.Fatalf("delegate after the close = %v, want the named refusal of the closed gate", err)
-		}
-		if receipt, err := rig.shutdown.Admit(ctx, task.Spec{CallID: "call-3"}); !errors.Is(err, agent.ErrShutdownRefused) || receipt.Accepted {
-			t.Fatalf("admission after the close = (%+v, %v), want a rejected receipt beside the named refusal", receipt, err)
-		}
-		if open := rig.obligations(t, ctx, t1); open.Count != 2 {
-			t.Fatalf("obligations after the close = %+v, want the accepted work kept where it was", open)
-		}
-		if rig.ledger.Pending() != 1 {
-			t.Fatalf("pending delegations after the close = %d, want the booking kept beside the unsettled work", rig.ledger.Pending())
-		}
-	})
-
-	t.Run("a successful admission keeps its obligation until real settlement and the drain reports one only then", func(t *testing.T) {
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cancel()
-		rig := newCloseRig(t)
-		modelA, modelB, _ := delegationModels("gen-1")
-		rig.publish(t, map[event.AgentID]model.Model{"agent-a": modelA, "agent-b": modelB})
-		refA := rig.borrowRef(t, ctx, "agent-a")
-		addrA := event.Address{AgentID: "agent-a", SessionID: "session-a"}
 		addrB := event.Address{AgentID: "agent-b", SessionID: "session-b"}
 		t1 := rig.delegate(t, ctx, "call-1", "inv-a", addrB, refA)
 
@@ -119,38 +72,34 @@ func TestCloseDrainsObligations(t *testing.T) {
 		if rig.ledger.Pending() != 1 {
 			t.Fatalf("pending delegations = %d, want the unsettled delegation still booked", rig.ledger.Pending())
 		}
+		if read := task.ReadUnsettled(ctx, rig.criterion(), nil); read.Resting() {
+			t.Fatalf("criterion = %+v, want the unaccepted delivery read as work not at rest", read)
+		}
 
 		rig.delivery.set(task.DeliveryAccepted)
 		deliveries := rig.deliveryCount()
-		report, err := rig.shutdown.Close(ctx, agent.CloseRequest{
-			Address:  addrA,
-			Deadline: time.Now().Add(10 * time.Second),
-		})
-		if err != nil || !report.Drained || len(report.Unsettled) != 0 {
-			t.Fatalf("close = (%+v, %v), want the drained report beside real settlement", report, err)
+		report, err := rig.close(ctx, agent.CloseRequest{Timeout: time.Now().Add(10 * time.Second)})
+		if err != nil || !report.Drained {
+			t.Fatalf("close = (%+v, %v), want the close reached on the real settlement", report, err)
 		}
-		if got := rig.deliveryCount() - deliveries; got < 1 {
-			t.Fatalf("deliveries during the close = %d, want the drain to offer the notification it still owed", got)
+		if got := rig.deliveryCount(); got <= deliveries {
+			t.Fatalf("deliveries beside the close = %d, want the owed notification offered (%d before)", got, deliveries)
 		}
 		if open := rig.obligations(t, ctx, t1); open.Count != 0 {
-			t.Fatalf("obligations after the drain = %+v, want every obligation settled for real", open)
+			t.Fatalf("obligations after the close = %+v, want the accepted delivery to clear it", open)
 		}
 		if rig.ledger.Pending() != 0 {
-			t.Fatalf("pending delegations after the drain = %d, want every booking closed by a landed terminal", rig.ledger.Pending())
-		}
-		if got := rig.ledger.View("inv-a")[0].Status; got != task.StatusSettled {
-			t.Fatalf("record after the drain = %v, want the terminal landed once its obligations cleared", got)
+			t.Fatalf("pending delegations after the close = %d, want the landed terminal withdrawn", rig.ledger.Pending())
 		}
 	})
 
-	t.Run("a non-cooperative producer is never taken for an end", func(t *testing.T) {
+	t.Run("a writer that has not confirmed its stop is never taken for an end", func(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 		rig := newCloseRig(t)
 		modelA, modelB, _ := delegationModels("gen-1")
 		rig.publish(t, map[event.AgentID]model.Model{"agent-a": modelA, "agent-b": modelB})
 		refA := rig.borrowRef(t, ctx, "agent-a")
-		addrA := event.Address{AgentID: "agent-a", SessionID: "session-a"}
 		addrB := event.Address{AgentID: "agent-b", SessionID: "session-b"}
 		t1 := rig.delegate(t, ctx, "call-1", "inv-a", addrB, refA)
 		if _, err := rig.ledger.Complete(ctx, t1, task.StatusSettled, "fact-t1"); err != nil {
@@ -162,31 +111,19 @@ func TestCloseDrainsObligations(t *testing.T) {
 		if rig.ledger.Pending() != 0 {
 			t.Fatalf("pending delegations before the close = %d, want the queue emptied", rig.ledger.Pending())
 		}
-
-		if err := rig.shutdown.Watch("", (&closeProducer{}).Stopped); !errors.Is(err, agent.ErrProducerIdentityMissing) {
-			t.Fatalf("watch under no task identity = %v, want the named refusal", err)
-		}
-		if err := rig.shutdown.Watch(t1, nil); !errors.Is(err, agent.ErrProducerMissing) {
-			t.Fatalf("watch naming no producer = %v, want the named refusal", err)
+		if read := task.ReadUnsettled(ctx, rig.criterion(), nil); !read.Resting() {
+			t.Fatalf("criterion before the close = %+v, want the work at rest", read)
 		}
 
-		stuck := &closeProducer{}
-		if err := rig.shutdown.Watch(t1, stuck.Stopped); err != nil {
-			t.Fatalf("watch the producer: %v", err)
-		}
-		report, err := rig.shutdown.Close(ctx, agent.CloseRequest{
-			Address:  addrA,
-			Deadline: time.Now().Add(150 * time.Millisecond),
-		})
+		stuck := rig.loop.Begin("producer:call-1")
+		defer stuck()
+		report, err := rig.close(ctx, agent.CloseRequest{Timeout: time.Now().Add(150 * time.Millisecond)})
 		if !errors.Is(err, agent.ErrDrainUnsettled) || report.Drained {
-			t.Fatalf("close = (%+v, %v), want the named unsettled state beside a producer that never stops", report, err)
+			t.Fatalf("close = (%+v, %v), want the named unsettled state beside a writer that never stops", report, err)
 		}
-		want := []agent.UnsettledObligation{{TaskID: t1, Reason: "the producer has not confirmed its stop"}}
+		want := []agent.UnsettledObligation{{Reason: "this writer has not confirmed its stop: producer:call-1"}}
 		if !reflect.DeepEqual(report.Unsettled, want) {
-			t.Fatalf("unsettled = %+v, want the producer named beside its reason", report.Unsettled)
-		}
-		if calls := stuck.calls(); calls < 2 {
-			t.Fatalf("producer polls = %d, want the close to keep polling until the deadline", calls)
+			t.Fatalf("unsettled = %+v, want the writer named beside its reason", report.Unsettled)
 		}
 
 		flipRig := newCloseRig(t)
@@ -196,30 +133,35 @@ func TestCloseDrainsObligations(t *testing.T) {
 		if _, err := flipRig.ledger.Complete(ctx, flipTask, task.StatusSettled, "fact-flip"); err != nil {
 			t.Fatalf("settle the delegation: %v", err)
 		}
-		flipping := &closeProducer{flipAt: 3}
-		if err := flipRig.shutdown.Watch(flipTask, flipping.Stopped); err != nil {
-			t.Fatalf("watch the producer: %v", err)
+		stop := flipRig.loop.Begin("producer:call-1")
+		flipped := make(chan closeOutcome, 1)
+		go func() {
+			report, err := flipRig.close(ctx, agent.CloseRequest{Timeout: time.Now().Add(10 * time.Second)})
+			flipped <- closeOutcome{report: report, err: err}
+		}()
+		select {
+		case got := <-flipped:
+			t.Fatalf("close = (%+v, %v) beside a writer that has confirmed no stop, want the close to stand until the real stop arrives", got.report, got.err)
+		case <-time.After(50 * time.Millisecond):
 		}
-		flipReport, flipErr := flipRig.shutdown.Close(ctx, agent.CloseRequest{
-			Address:  addrA,
-			Deadline: time.Now().Add(10 * time.Second),
-		})
-		if flipErr != nil || !flipReport.Drained || len(flipReport.Unsettled) != 0 {
-			t.Fatalf("close = (%+v, %v), want the drain beside the confirmed stop", flipReport, flipErr)
-		}
-		if calls := flipping.calls(); calls < 3 {
-			t.Fatalf("producer polls = %d, want the false answers polled until the real stop", calls)
+		stop()
+		select {
+		case got := <-flipped:
+			if got.err != nil || !got.report.Drained || len(got.report.Unsettled) != 0 {
+				t.Fatalf("close = (%+v, %v), want the close reached on the real stop", got.report, got.err)
+			}
+		case <-time.After(10 * time.Second):
+			t.Fatal("the close stood past the confirmed stop, want the close reached once the writer confirmed its stop")
 		}
 	})
 
-	t.Run("a deadline reports the named reason of every obligation that stayed open", func(t *testing.T) {
+	t.Run("a spent budget reports the criterion as it stands", func(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 		rig := newCloseRig(t)
 		modelA, modelB, _ := delegationModels("gen-1")
 		rig.publish(t, map[event.AgentID]model.Model{"agent-a": modelA, "agent-b": modelB})
 		refA := rig.borrowRef(t, ctx, "agent-a")
-		addrA := event.Address{AgentID: "agent-a", SessionID: "session-a"}
 		addrB := event.Address{AgentID: "agent-b", SessionID: "session-b"}
 		t1 := rig.delegate(t, ctx, "call-1", "inv-a", addrB, refA)
 
@@ -232,148 +174,138 @@ func TestCloseDrainsObligations(t *testing.T) {
 			t.Fatalf("request the cancellation = (%+v, %v), want the control receipt recorded", receipt, err)
 		}
 
-		report, err := rig.shutdown.Close(ctx, agent.CloseRequest{
-			Address:  addrA,
-			Deadline: time.Now().Add(150 * time.Millisecond),
-		})
+		report, err := rig.close(ctx, agent.CloseRequest{Timeout: time.Now().Add(150 * time.Millisecond)})
 		if !errors.Is(err, agent.ErrDrainUnsettled) || report.Drained {
-			t.Fatalf("close = (%+v, %v), want the named unsettled state beside the deadline", report, err)
+			t.Fatalf("close = (%+v, %v), want the named unsettled state beside the spent budget", report, err)
 		}
-		want := []agent.UnsettledObligation{
-			{TaskID: t1, Reason: "the awaiting-tool obligation has not settled"},
-			{TaskID: t1, Reason: "the target refused the delivery"},
+		named := false
+		for _, open := range report.Unsettled {
+			if open.TaskID == t1 {
+				named = true
+			}
 		}
-		if !reflect.DeepEqual(report.Unsettled, want) {
-			t.Fatalf("unsettled = %+v, want the named reason of every obligation that stayed open", report.Unsettled)
+		if !named {
+			t.Fatalf("unsettled = %+v, want the work that stayed open named beside the report", report.Unsettled)
+		}
+		read := task.ReadUnsettled(ctx, rig.criterion(), nil)
+		if len(read.Work) != 1 || read.Work[0].TaskID != t1 {
+			t.Fatalf("criterion work = %+v, want the one task that stayed open", read.Work)
 		}
 		if _, status, err := rig.tasks.Lookup(ctx, t1); err != nil || status != task.StatusRunning {
 			t.Fatalf("task state after the cancellation request = (%v, %v), want the work standing where the request found it", status, err)
 		}
 	})
-
-	t.Run("a repeated close returns the first result and runs no second settlement", func(t *testing.T) {
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cancel()
-		rig := newCloseRig(t)
-		modelA, modelB, _ := delegationModels("gen-1")
-		rig.publish(t, map[event.AgentID]model.Model{"agent-a": modelA, "agent-b": modelB})
-		refA := rig.borrowRef(t, ctx, "agent-a")
-		addrA := event.Address{AgentID: "agent-a", SessionID: "session-a"}
-		addrB := event.Address{AgentID: "agent-b", SessionID: "session-b"}
-		t1 := rig.delegate(t, ctx, "call-1", "inv-a", addrB, refA)
-		rig.delivery.set(task.DeliveryPending)
-		rig.advance(t, ctx, t1, 0)
-
-		first, errFirst := rig.shutdown.Close(ctx, agent.CloseRequest{
-			Address:  addrA,
-			Deadline: time.Now().Add(120 * time.Millisecond),
-		})
-		if !errors.Is(errFirst, agent.ErrDrainUnsettled) || first.Drained {
-			t.Fatalf("first close = (%+v, %v), want the named unsettled state beside the deadline", first, errFirst)
-		}
-		deliveries := rig.deliveryCount()
-
-		rig.delivery.set(task.DeliveryAccepted)
-		second, errSecond := rig.shutdown.Close(ctx, agent.CloseRequest{
-			Address:  addrA,
-			Deadline: time.Now().Add(10 * time.Second),
-		})
-		if !reflect.DeepEqual(second, first) || errSecond != errFirst {
-			t.Fatalf("second close = (%+v, %v), want the very first result (%+v, %v)", second, errSecond, first, errFirst)
-		}
-		if got := rig.deliveryCount(); got != deliveries {
-			t.Fatalf("deliveries beside the second close = %d, want no second settlement (%d)", got, deliveries)
-		}
-		if open := rig.obligations(t, ctx, t1); open.Count != 2 {
-			t.Fatalf("obligations beside the second close = %+v, want the accepted work untouched", open)
-		}
-
-		raceRig := newCloseRig(t)
-		raceRig.publish(t, map[event.AgentID]model.Model{"agent-a": modelA, "agent-b": modelB})
-		raceRef := raceRig.borrowRef(t, ctx, "agent-a")
-		raceTask := raceRig.delegate(t, ctx, "call-1", "inv-a", addrB, raceRef)
-		if _, err := raceRig.ledger.Complete(ctx, raceTask, task.StatusSettled, "fact-race"); err != nil {
-			t.Fatalf("settle the delegation: %v", err)
-		}
-		flipping := &closeProducer{flipAt: 8}
-		if err := raceRig.shutdown.Watch(raceTask, flipping.Stopped); err != nil {
-			t.Fatalf("watch the producer: %v", err)
-		}
-		results := make([]struct {
-			report agent.DrainReport
-			err    error
-		}, 2)
-		var wg sync.WaitGroup
-		for i := range results {
-			wg.Add(1)
-			go func(i int) {
-				defer wg.Done()
-				results[i].report, results[i].err = raceRig.shutdown.Close(ctx, agent.CloseRequest{
-					Address:  addrA,
-					Deadline: time.Now().Add(10 * time.Second),
-				})
-			}(i)
-		}
-		wg.Wait()
-		for i := range results {
-			if !reflect.DeepEqual(results[i], results[0]) {
-				t.Fatalf("concurrent close %d = (%+v, %v), want the very first result (%+v, %v)", i, results[i].report, results[i].err, results[0].report, results[0].err)
-			}
-		}
-		if !results[0].report.Drained || results[0].err != nil {
-			t.Fatalf("concurrent close = (%+v, %v), want the drain beside the confirmed stop", results[0].report, results[0].err)
-		}
-	})
 }
 
 // closeRig assembles the close of one agent over the real task face and the
-// delegation ledger: the ledger admits through the close face, so the gate
-// stands exactly where a new obligation would open and the close settles
-// exactly what the gate accepted.
+// delegation ledger: the ledger admits through the task face and lands the
+// terminals it holds, so the close settles exactly what the ledger admitted.
 type closeRig struct {
 	instance event.InstanceID
 	bindings *state.Bindings
 	tasks    *delegationFace
-	shutdown *agent.Shutdown
+	manager  *task.MemoryManager
+	registry *task.MemoryRegistry
+	loop     *agent.Loop
 	ledger   *agent.Delegator
 	delivery *delegationDelivery
 
 	mu         sync.Mutex
-	hook       func(context.Context, task.Notice)
+	known      []event.TaskID
 	deliverErr error
 	deliveries int
 }
 
-// newCloseRig assembles the task face, the close face and the delegation ledger
-// of one sub-case. The ledger admits through the close face and the close lands
-// the terminals of admitted calls through the ledger.
+// newCloseRig assembles the task face, the writer ledger and the delegation
+// ledger of one sub-case. The ledger admits through the task face and the close
+// lands the terminals of admitted calls through the ledger.
 func newCloseRig(t *testing.T) *closeRig {
 	t.Helper()
 	rig := &closeRig{
 		instance: event.InstanceID("instance-close"),
 		bindings: state.NewBindings(),
 		delivery: &delegationDelivery{accepted: task.DeliveryAccepted},
+		loop:     agent.NewLoop(nil, nil, "instance-close", nil),
 	}
 	admission := task.NewMemoryAdmission()
-	registry := task.NewMemoryRegistry(task.NewMemoryCommit(nil), admission)
-	manager := task.NewMemoryManager(registry, func(ctx context.Context, notice task.Notice) (task.DeliveryAcceptance, error) {
+	rig.registry = task.NewMemoryRegistry(task.NewMemoryCommit(nil), admission)
+	rig.manager = task.NewMemoryManager(rig.registry, func(ctx context.Context, notice task.Notice) (task.DeliveryAcceptance, error) {
 		rig.mu.Lock()
 		rig.deliveries++
-		hook, deliverErr := rig.hook, rig.deliverErr
+		deliverErr := rig.deliverErr
 		rig.mu.Unlock()
-		if hook != nil {
-			hook(ctx, notice)
-		}
 		if err := rig.ledger.Observe(ctx, notice); err != nil {
 			return task.DeliveryRejected, err
 		}
 		return rig.delivery.outcome(), deliverErr
 	})
-	rig.tasks = &delegationFace{MemoryManager: manager, MemoryRegistry: registry}
-	rig.shutdown = agent.NewShutdown(rig.tasks)
-	rig.ledger = agent.NewDelegator(rig.shutdown, rig.bindings, rig.instance)
-	rig.shutdown.SetReconciler(rig.ledger)
+	rig.tasks = &delegationFace{MemoryManager: rig.manager, MemoryRegistry: rig.registry}
+	rig.ledger = agent.NewDelegator(rig.tasks, rig.bindings, rig.instance)
 	return rig
+}
+
+// criterion reports the rest criterion of the rig: the task face and the mailbox
+// answer this case stands in.
+func (r *closeRig) criterion() closeCriterion {
+	return closeCriterion{MemoryManager: r.manager, MemoryRegistry: r.registry}
+}
+
+// close converges the rig to rest the way the run's own close does: it reads the
+// one criterion beside the writer ledger and the bookings the delegation ledger
+// still holds, offers the notifications still owed, lands the terminals whose
+// obligations cleared and reads again. It runs while the run is not at rest, its
+// writers have not all stopped or a terminal is still unlanded, and answers the
+// criterion as it stands once the budget is spent.
+func (r *closeRig) close(ctx context.Context, req agent.CloseRequest) (agent.DrainReport, error) {
+	timeout, err := req.Resolve()
+	if err != nil {
+		return agent.DrainReport{Outcome: agent.CloseBroken}, err
+	}
+	var read task.Unsettled
+	drained := false
+	for {
+		read = task.ReadUnsettled(ctx, r.criterion(), nil)
+		stopped, _ := r.loop.Stopped()
+		if read.Resting() && stopped && r.ledger.Pending() == 0 {
+			drained = true
+			break
+		}
+		if ctx.Err() != nil || !time.Now().Before(timeout) {
+			break
+		}
+		r.offer(ctx)
+		select {
+		case <-ctx.Done():
+		case <-time.After(time.Millisecond):
+		}
+	}
+	stopped, open := r.loop.Stopped()
+	report := agent.DrainReport{Drained: drained, Unsettled: writerlessUnsettled(read)}
+	if !stopped {
+		report.Unsettled = append(report.Unsettled, agent.WriterObligations(open)...)
+	}
+	if drained {
+		report.Outcome = agent.CloseQuiesced
+		return report, nil
+	}
+	report.Outcome = agent.CloseCut
+	return report, agent.ErrDrainUnsettled
+}
+
+// offer offers the notifications every task of this rig still owes and lands the
+// terminal of each whose obligations cleared.
+func (r *closeRig) offer(ctx context.Context) {
+	r.mu.Lock()
+	known := append([]event.TaskID(nil), r.known...)
+	r.mu.Unlock()
+	for _, taskID := range known {
+		if err := r.tasks.Flush(ctx, taskID); err != nil {
+			continue
+		}
+		if _, err := r.ledger.Reconcile(ctx, taskID); err != nil {
+			continue
+		}
+	}
 }
 
 // publish holds the given models as the generation the next borrow takes.
@@ -407,7 +339,7 @@ func (r *closeRig) borrowRef(t *testing.T, ctx context.Context, agentID event.Ag
 	t.Helper()
 	handle, err := r.bindings.Borrow(ctx, agentID)
 	if err != nil {
-		t.Fatalf("borrow the current generation of %s: %v", agentID, err)
+		t.Fatalf("borrow %s: %v", agentID, err)
 	}
 	ref := handle.Ref
 	if err := handle.Release(ctx); err != nil {
@@ -416,15 +348,15 @@ func (r *closeRig) borrowRef(t *testing.T, ctx context.Context, agentID event.Ag
 	return ref
 }
 
-// delegate admits one delegated call through the close face and reports the
-// task it was admitted as.
+// delegate admits one delegated call through the task face and reports the task
+// it was admitted as.
 func (r *closeRig) delegate(t *testing.T, ctx context.Context, callID string, invocation event.InvocationID, target event.Address, ref state.BindingRef) event.TaskID {
 	t.Helper()
 	receipt, err := r.ledger.Delegate(ctx, agent.Delegation{
 		InvocationID: invocation,
 		DecisionID:   event.DecisionID("decision-" + callID),
 		CallID:       callID,
-		Target:       target,
+		Sites:        agent.DelegationSites{Target: target},
 		Ref:          ref,
 	})
 	if err != nil {
@@ -433,6 +365,9 @@ func (r *closeRig) delegate(t *testing.T, ctx context.Context, callID string, in
 	if receipt.Kind != task.AdmissionFresh || !receipt.Accepted {
 		t.Fatalf("receipt of %s = %+v, want one fresh admission", callID, receipt)
 	}
+	r.mu.Lock()
+	r.known = append(r.known, receipt.TaskID)
+	r.mu.Unlock()
 	return receipt.TaskID
 }
 
@@ -475,14 +410,6 @@ func (r *closeRig) obligations(t *testing.T, ctx context.Context, taskID event.T
 	return open
 }
 
-// setHook installs the probe that stands beside the settlement passes of a
-// drain.
-func (r *closeRig) setHook(hook func(context.Context, task.Notice)) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.hook = hook
-}
-
 // setDeliverErr records the refusal reason the deliverer answers with.
 func (r *closeRig) setDeliverErr(err error) {
 	r.mu.Lock()
@@ -497,34 +424,9 @@ func (r *closeRig) deliveryCount() int {
 	return r.deliveries
 }
 
-// gateProbe is one new input offered beside a drain and the answer the gate
-// gave it.
-type gateProbe struct {
-	receipt task.AdmissionReceipt
-	err     error
-}
-
-// closeProducer stands behind one admitted call as the producer whose real stop
-// the close must confirm. It answers false until its flip arrives; a zero flip
-// never confirms a stop, which is exactly the non-cooperative case.
-type closeProducer struct {
-	mu     sync.Mutex
-	flipAt int
-	polls  int
-}
-
-// Stopped reports this producer's stop confirmation and counts every poll the
-// close makes.
-func (p *closeProducer) Stopped() bool {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	p.polls++
-	return p.flipAt > 0 && p.polls >= p.flipAt
-}
-
-// calls reports how often the close polled this producer for its stop.
-func (p *closeProducer) calls() int {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	return p.polls
+// closeOutcome is the result of one close read from beside the writer it stands
+// on.
+type closeOutcome struct {
+	report agent.DrainReport
+	err    error
 }

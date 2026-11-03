@@ -33,7 +33,7 @@ func TestDelegationLineageLandsOnTheAdmissionRecord(t *testing.T) {
 		InvocationID:  event.InvocationID("inv-lineage"),
 		DecisionID:    event.DecisionID("dec-lineage"),
 		CallID:        "call-lineage",
-		Target:        target,
+		Sites:         agent.DelegationSites{Target: target},
 		TriggerSource: event.LineageDelegation,
 		Ref:           orgstate.BindingRef{AgentID: target.AgentID, InstanceID: "instance-lineage", Generation: 1},
 	})

@@ -170,7 +170,11 @@ func (g *approvalGateway) Resolve(from, text string) (handled bool, reply string
 }
 
 // match reports the one pending request whose digest starts with the prefix. An
-// unknown prefix and an ambiguous prefix are refused by name.
+// unknown prefix and an ambiguous prefix are refused by name. The pending set it
+// reads is the one presence the attention chain holds - the very set the
+// projection reads its approval questions from - so the face a person answers on
+// and the presence every other reader sees name the same questions, and the
+// ruling is bound by the digest only this channel keeps.
 func (g *approvalGateway) match(prefix string) (*approval.ApprovalRequest, error) {
 	prefix = strings.ToLower(strings.TrimSpace(prefix))
 	if len(prefix) < minApprovalPrefix {

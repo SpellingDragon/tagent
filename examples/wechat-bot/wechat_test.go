@@ -31,6 +31,7 @@ import (
 	"github.com/SpellingDragon/tagent/runtime/task"
 	"github.com/SpellingDragon/tagent/runtime/task/approval"
 	"github.com/SpellingDragon/wechat-robot-go/wechat"
+	"trpc.group/trpc-go/trpc-agent-go/log"
 	trpcmodel "trpc.group/trpc-go/trpc-agent-go/model"
 )
 
@@ -237,7 +238,7 @@ func newRoutingRig(t *testing.T) *routingRig {
 		t.Fatalf("new router: %v", err)
 	}
 	out := &mockOutbound{}
-	inbox := newInternalInbox()
+	inbox := memoryInbox(t)
 	sender := &hostSender{
 		bot:          out,
 		router:       router,
@@ -292,6 +293,28 @@ func (r *routingRig) recorded() []assembly.InvokeRequest {
 
 func discardLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
+}
+
+// memoryInbox opens an inbox that keeps its admission records in memory alone: a
+// check that reads the inbox inside one process needs no directory.
+func memoryInbox(t *testing.T) *internalInbox {
+	t.Helper()
+	inbox, err := newInternalInbox("")
+	if err != nil {
+		t.Fatalf("open the memory inbox: %v", err)
+	}
+	return inbox
+}
+
+// durableInbox opens the inbox under the named directory, the way a restarted
+// process opens the one its predecessor left behind.
+func durableInbox(t *testing.T, dir string) *internalInbox {
+	t.Helper()
+	inbox, err := newInternalInbox(dir)
+	if err != nil {
+		t.Fatalf("open the notice inbox %s: %v", dir, err)
+	}
+	return inbox
 }
 
 func textMessage(from, text string) *wechat.Message {
@@ -629,7 +652,7 @@ func TestHostSenderIsTheOnlyOutboundPath(t *testing.T) {
 		t.Fatal(err)
 	}
 	addr, _ := router.AddressFor("chat-a")
-	inbox := newInternalInbox()
+	inbox := memoryInbox(t)
 	out := &mockOutbound{}
 	sender := &hostSender{bot: out, router: router, typingActive: &sync.Map{}, inj: inbox, workspaceDir: t.TempDir()}
 
@@ -717,10 +740,30 @@ func TestHostSenderIsTheOnlyOutboundPath(t *testing.T) {
 	}
 }
 
+// sharedDigestPrefixArgs answers two argument bodies that differ but whose digests
+// share the prefix a ruling may name, beside that prefix: the one shape a prefix
+// ambiguity is a real ambiguity, since two registrations of one body read the
+// standing request back and are reported once.
+func sharedDigestPrefixArgs(t *testing.T, width int) (first, second []byte, prefix string) {
+	t.Helper()
+	seen := make(map[string][]byte, 512)
+	for at := 0; at < 4096; at++ {
+		args := []byte(fmt.Sprintf(`{"cmd":"rm","round":%d}`, at))
+		digest := approval.ArgsDigest(args)
+		if held, ok := seen[digest[:width]]; ok {
+			return held, args, digest[:width]
+		}
+		seen[digest[:width]] = args
+	}
+	t.Fatalf("no two argument bodies share a %d-character digest prefix", width)
+	return nil, nil, ""
+}
+
 // TestApprovalGateway 钉住审批请求的下行广播、白名单裁决与无审批人的可见 gap。
 //
 //   - The announcement fans out to every configured approver.
 //   - A gateway beside no approver records a visible delivery gap and stays answerable.
+//   - A repeated registration aliases its own request, so an approver's prefix still names one candidate.
 func TestApprovalGateway(t *testing.T) {
 	ctx := context.Background()
 	gateway := newApprovalGateway(governanceEntry{Enabled: true, Dir: t.TempDir()}, []string{"boss"})
@@ -736,11 +779,15 @@ func TestApprovalGateway(t *testing.T) {
 		!strings.Contains(out.texts()[0].Body, shortDigest(held.ArgsDigest)) {
 		t.Fatalf("approval announcement = %+v, want the digest over the approver chat", out.texts())
 	}
-	twinArgs := []byte(`{"cmd":"rm"}`)
-	for _, id := range []string{"req-twin-1", "req-twin-2"} {
-		if _, err := manager.Request(ctx, id, "exec", twinArgs, plugin.RiskCritical, "critical", "held critical call"); err != nil {
+	twinHeld, twinArgs, twinPrefix := sharedDigestPrefixArgs(t, minApprovalPrefix)
+	for at, args := range [][]byte{twinHeld, twinArgs} {
+		id := fmt.Sprintf("req-twin-%d", at+1)
+		if _, err := manager.Request(ctx, id, "exec", args, plugin.RiskCritical, "critical", "held critical call"); err != nil {
 			t.Fatalf("register %s: %v", id, err)
 		}
+	}
+	if _, err := manager.Request(ctx, "req-unique-again", "exec", []byte(`{"cmd":"ls"}`), plugin.RiskCritical, "critical", "held critical call"); err != nil {
+		t.Fatalf("register the held call a second time: %v", err)
 	}
 
 	if handled, _, err := gateway.Resolve("stranger", "approve "+held.ArgsDigest[:6]); !handled || !errors.Is(err, ErrApprovalNotApprover) {
@@ -752,11 +799,11 @@ func TestApprovalGateway(t *testing.T) {
 	if handled, _, err := gateway.Resolve("boss", "approve zzzz"); !handled || !errors.Is(err, approval.ErrApprovalNotFound) {
 		t.Fatalf("an unknown digest = (%v,%v), want ErrApprovalNotFound", handled, err)
 	}
-	if handled, _, err := gateway.Resolve("boss", "approve "+approval.ArgsDigest(twinArgs)[:6]); !handled || !errors.Is(err, ErrApprovalAmbiguous) {
+	if handled, _, err := gateway.Resolve("boss", "approve "+twinPrefix); !handled || !errors.Is(err, ErrApprovalAmbiguous) {
 		t.Fatalf("an ambiguous digest = (%v,%v), want ErrApprovalAmbiguous", handled, err)
 	}
 	if got := len(manager.Pending()); got != 3 {
-		t.Fatalf("pending after refusals = %d, want all three untouched", got)
+		t.Fatalf("pending after refusals = %d, want the three standing questions untouched: a second registration of the held call aliases its request, never the waiting set", got)
 	}
 
 	handled, reply, err := gateway.Resolve("boss", "approve "+held.ArgsDigest[:8])
@@ -959,13 +1006,14 @@ func TestEventIntegrityApprovalWeChat(t *testing.T) {
 		gateway := newApprovalGateway(governanceEntry{Enabled: true, Dir: dir}, []string{"boss"})
 		gateway.SetSender(&mockOutbound{})
 
-		args := []byte(`{"cmd":"rm"}`)
-		for _, id := range []string{"req-twin-1", "req-twin-2"} {
+		heldArgs, twinArgs, prefix := sharedDigestPrefixArgs(t, minApprovalPrefix)
+		for at, args := range [][]byte{heldArgs, twinArgs} {
+			id := fmt.Sprintf("req-twin-%d", at+1)
 			if _, err := gateway.Manager().Request(ctx, id, "exec", args, plugin.RiskCritical, "critical", "held"); err != nil {
 				t.Fatalf("register %s: %v", id, err)
 			}
 		}
-		handled, reply, err := gateway.Resolve("boss", "approve "+shortDigest(approval.ArgsDigest(args)))
+		handled, reply, err := gateway.Resolve("boss", "approve "+prefix)
 		if !handled || !errors.Is(err, ErrApprovalAmbiguous) {
 			t.Fatalf("an ambiguous prefix = (%v,%v), want ErrApprovalAmbiguous", handled, err)
 		}
@@ -1117,12 +1165,15 @@ func TestEventIntegrityApprovalWeChat(t *testing.T) {
 	})
 }
 
-func TestReincarnationNotice(t *testing.T) {
+// TestReincarnationNoticePreserved pins the body of the reincarnation notice: every word the deployment reads survives the move to the fixed ops target.
+// - the freshness window decides what a reincarnation is: a marker new at the window is one, a marker older than the window is not (restartDoneFreshWindow)
+// - the body keeps its three sections: the [转世通报] opening, the == 元数据 == archive (pid: …) and the scene block, degraded by name when no face reads it
+// - the log keeps the [reincarnation] keyword the deployment greps for
+// - the consumed marker is the confirmation's word alone, and a redelivery after the confirmation opens no second record
+func TestReincarnationNoticePreserved(t *testing.T) {
+	ops := opsNoticeAddress(t)
 	dir := t.TempDir()
-	notice := filepath.Join(dir, "REINCARNATION_NOTICE")
-	if err := os.WriteFile(notice, []byte("pid: 42\ngen: 2\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	notice := writeNoticeMarker(t, dir, "REINCARNATION_NOTICE", "pid: 42\ngen: 2\n")
 	if !detectReincarnation(notice, time.Now()) {
 		t.Fatal("a fresh notice was not detected")
 	}
@@ -1137,22 +1188,30 @@ func TestReincarnationNotice(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	inbox := newInternalInbox()
-	maybeInjectReincarnationNotice(inbox, nil, "tagent", dir, 0)
-	msgs := inbox.Drain(event.Address{})
+	logs := captureNoticeLogs(t)
+	inbox := memoryInbox(t)
+	maybeInjectReincarnationNotice(inbox, noticeOps{address: ops}, nil, "tagent", dir, 0)
+	msgs, ids := inbox.take(ops)
 	if len(msgs) != 1 {
-		t.Fatalf("reincarnation notices = %d, want one", len(msgs))
+		t.Fatalf("reincarnation notices the ops session reads = %d, want one", len(msgs))
 	}
-	for _, want := range []string{"转世通报", "pid: 42", "现场块不可用"} {
+	for _, want := range []string{"[转世通报]", "== 元数据 ==", "pid: 42", "现场块不可用"} {
 		if !strings.Contains(msgs[0].Content, want) {
 			t.Fatalf("notice = %q, missing %q", msgs[0].Content, want)
 		}
 	}
-	if _, err := os.Stat(notice + noticeConsumedSuffix); err != nil {
-		t.Fatalf("the consumed marker was not written: %v", err)
+	if !strings.Contains(logs.String(), "[reincarnation]") {
+		t.Fatalf("the log carried no [reincarnation] keyword: %s", logs.String())
 	}
-	maybeInjectReincarnationNotice(inbox, nil, "tagent", dir, 0)
-	if got := len(inbox.Drain(event.Address{})); got != 0 {
+	if _, err := os.Stat(notice + noticeConsumedSuffix); err == nil {
+		t.Fatal("the consumed marker was written beside the admission, want it only after the confirmation")
+	}
+	inbox.Confirm(ids)
+	if _, err := os.Stat(notice + noticeConsumedSuffix); err != nil {
+		t.Fatalf("the consumed marker was not written by the confirmation: %v", err)
+	}
+	maybeInjectReincarnationNotice(inbox, noticeOps{address: ops}, nil, "tagent", dir, 0)
+	if got := len(inbox.Drain(ops)); got != 0 {
 		t.Fatalf("a consumed notice was injected again (%d messages)", got)
 	}
 
@@ -1169,25 +1228,300 @@ func TestReincarnationNotice(t *testing.T) {
 	}
 }
 
+// captureNoticeLogs swaps the logger the notice logs through for one the check
+// reads, so a keyword the deployment greps for is pinned in the test rather than
+// trusted to survive a rewrite.
+func captureNoticeLogs(t *testing.T) *strings.Builder {
+	t.Helper()
+	logs := &strings.Builder{}
+	prior := log.Default
+	log.Default = noticeLogRecorder{logs: logs}
+	t.Cleanup(func() { log.Default = prior })
+	return logs
+}
+
+// noticeLogRecorder is the logger one check reads: every grade lands in the same
+// buffer, so a keyword is found whichever grade carried it.
+type noticeLogRecorder struct{ logs *strings.Builder }
+
+func (r noticeLogRecorder) Debug(args ...any)                 { r.line(args...) }
+func (r noticeLogRecorder) Debugf(format string, args ...any) { r.linef(format, args...) }
+func (r noticeLogRecorder) Info(args ...any)                  { r.line(args...) }
+func (r noticeLogRecorder) Infof(format string, args ...any)  { r.linef(format, args...) }
+func (r noticeLogRecorder) Warn(args ...any)                  { r.line(args...) }
+func (r noticeLogRecorder) Warnf(format string, args ...any)  { r.linef(format, args...) }
+func (r noticeLogRecorder) Error(args ...any)                 { r.line(args...) }
+func (r noticeLogRecorder) Errorf(format string, args ...any) { r.linef(format, args...) }
+func (r noticeLogRecorder) Fatal(args ...any)                 { r.line(args...) }
+func (r noticeLogRecorder) Fatalf(format string, args ...any) { r.linef(format, args...) }
+
+func (r noticeLogRecorder) line(args ...any) {
+	fmt.Fprintln(r.logs, args...)
+}
+
+func (r noticeLogRecorder) linef(format string, args ...any) {
+	fmt.Fprintf(r.logs, format, args...)
+	r.logs.WriteString("\n")
+}
+
 func TestSystemAlertConsumption(t *testing.T) {
+	ops := opsNoticeAddress(t)
 	dir := t.TempDir()
-	alert := filepath.Join(dir, "SYSTEM_ALERT")
-	if err := os.WriteFile(alert, []byte("raw failure"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	inbox := newInternalInbox()
-	maybeConsumeSystemAlert(inbox, dir, 0)
-	msgs := inbox.Drain(event.Address{})
+	alert := writeNoticeMarker(t, dir, "SYSTEM_ALERT", "raw failure")
+	inbox := memoryInbox(t)
+	maybeConsumeSystemAlert(inbox, noticeOps{address: ops}, dir, 0)
+	msgs, ids := inbox.take(ops)
 	if len(msgs) != 1 || !strings.Contains(msgs[0].Content, "raw failure") {
 		t.Fatalf("system alerts = %+v, want the staged failure", msgs)
 	}
-	if _, err := os.Stat(alert + systemAlertConsumedSuffix); err != nil {
-		t.Fatalf("the consumed marker was not written: %v", err)
+	if _, err := os.Stat(alert + systemAlertConsumedSuffix); err == nil {
+		t.Fatal("the consumed marker was written beside the admission, want it only after the confirmation")
 	}
-	maybeConsumeSystemAlert(inbox, dir, 0)
-	if got := len(inbox.Drain(event.Address{})); got != 0 {
+	inbox.Confirm(ids)
+	if _, err := os.Stat(alert + systemAlertConsumedSuffix); err != nil {
+		t.Fatalf("the consumed marker was not written by the confirmation: %v", err)
+	}
+	maybeConsumeSystemAlert(inbox, noticeOps{address: ops}, dir, 0)
+	if got := len(inbox.Drain(ops)); got != 0 {
 		t.Fatalf("a consumed alert was injected again (%d messages)", got)
 	}
+}
+
+// opsNoticeAddress is the address the two startup notices are admitted for: the
+// ops session every chat address of this host is spelled beside. The check
+// spells it from the same prefix rule the router uses, so a production resolver
+// that drifts from that rule is red here.
+func opsNoticeAddress(t *testing.T) event.Address {
+	t.Helper()
+	t.Setenv("TAGENT_SESSION_ID", "routing-test")
+	return testAddress("ops")
+}
+
+// TestNoticeOpsFixedTarget pins the fixed target of the two startup notices: the ops session address this host declares.
+// - both startup notices wait for the ops session, and an unaddressed read takes none of them
+// - the declared ops session spells its address from the one prefix rule a chat of this host gets its session from
+// - 负锚 no_pending_for_ops_notice: an admission that names no complete address is refused by name instead of landing in a pending queue
+// - the target is the one production wiring reports, so a resolver that drifts from the ops session is red here
+// - the declared ops session is the session its chat identity gets: a document naming a chat as its ops session lands the notices in that chat
+// - it is never the empty address a later reading session would take by arrival order
+func TestNoticeOpsFixedTarget(t *testing.T) {
+	ops := opsNoticeAddress(t)
+	dir := t.TempDir()
+	writeNoticeMarker(t, dir, "REINCARNATION_NOTICE", "pid: 42\ngen: 2\n")
+	writeNoticeMarker(t, dir, "SYSTEM_ALERT", "raw failure")
+	inbox := durableInbox(t, filepath.Join(dir, testNoticeInboxDir))
+	app := &wechatApp{cfg: wechatConfig{Entry: "tagent"}}
+	app.host = &hostRuntime{}
+	target, scene := app.noticeWiring(nil)
+
+	maybeInjectReincarnationNotice(inbox, target, scene, "tagent", dir, 0)
+	maybeConsumeSystemAlert(inbox, target, dir, 0)
+
+	if got := len(inbox.Drain(event.Address{})); got != 0 {
+		t.Fatalf("an unaddressed read took %d notices, want the fixed target to decide", got)
+	}
+	msgs, ids := inbox.take(ops)
+	if len(msgs) != 2 || len(ids) != 2 {
+		t.Fatalf("the ops session reads %d notices under %d records, want the two startup notices", len(msgs), len(ids))
+	}
+	for i, want := range []string{"[转世通报]", "raw failure"} {
+		if !strings.Contains(msgs[i].Content, want) {
+			t.Fatalf("notice %d = %q, missing %q", i, msgs[i].Content, want)
+		}
+	}
+	for _, id := range ids {
+		if addr := inbox.records[id].addressOf(); addr != ops {
+			t.Fatalf("the notice %s waits for %v, want the ops session %v", id, addr, ops)
+		}
+	}
+
+	t.Run("declared_ops_session_keeps_the_chat_spelling", func(t *testing.T) {
+		router, err := NewSessionRouter("tagent", sessionPrefixOf("tagent"))
+		if err != nil {
+			t.Fatalf("new router: %v", err)
+		}
+		chat, err := router.AddressFor("wxid_ops")
+		if err != nil {
+			t.Fatalf("the chat address: %v", err)
+		}
+		declaring := &wechatApp{cfg: wechatConfig{Entry: "tagent"}}
+		declaring.host = &hostRuntime{}
+		declaring.cfg.App.Wechat.OpsSession = "wxid_ops"
+		declared, _ := declaring.noticeWiring(nil)
+		if declared.address != chat {
+			t.Fatalf("the declared ops session = %v, want the address that chat identity gets %v", declared.address, chat)
+		}
+		if own := opsSessionAddress("tagent", ""); own != ops {
+			t.Fatalf("the ops session of a document that declares none = %v, want %v", own, ops)
+		}
+	})
+
+	t.Run("no_pending_for_ops_notice", func(t *testing.T) {
+		fresh := memoryInbox(t)
+		_, err := fresh.AdmitNotice(event.Address{}, "reincarnation", tagentmodel.Message{Content: "the notice"}, "", "")
+		if err == nil {
+			t.Fatal("an admission naming no complete address was accepted, want the named refusal")
+		}
+		if !errors.Is(err, ErrNoticeAddressIncomplete) {
+			t.Fatalf("the refusal = %v, want it named as an incomplete address", err)
+		}
+		fresh.InjectInternal(event.Address{}, "delivery_receipt", tagentmodel.Message{Content: "the receipt"})
+		if got := fresh.Drain(event.Address{}); len(got) != 0 {
+			t.Fatalf("an unaddressed admission landed %d notices in a pending queue", len(got))
+		}
+		if len(fresh.records) != 0 {
+			t.Fatalf("records after two refused admissions = %d, want none", len(fresh.records))
+		}
+	})
+}
+
+// TestNoticeSymptomOpsWakeupFixedTarget is the symptom anchor N2.
+// - without any user input, a startup notice drives the ops session through one round
+// - the session that reads it is the declared one rather than whichever session spoke last
+// - the notice alone drives one round, at the ops address, carrying the notice and the source it came from
+// - 负锚 arrival_order_does_not_decide_target: two sessions drive in one order and the notice still reaches the ops session, in either order
+func TestNoticeSymptomOpsWakeupFixedTarget(t *testing.T) {
+	ops := opsNoticeAddress(t)
+
+	t.Run("no user input drives one round", func(t *testing.T) {
+		dir := t.TempDir()
+		marker := writeNoticeMarker(t, dir, "REINCARNATION_NOTICE", "pid: 42\ngen: 2\n")
+		rig := newRoutingRig(t)
+
+		maybeInjectReincarnationNotice(rig.host.inbox, noticeOps{address: ops, wake: rig.host}, nil, "tagent", dir, 0)
+
+		waitFor(t, "the ops session turn", func() bool { return rig.callCount() == 1 })
+		req := rig.recorded()[0]
+		if req.Address != ops {
+			t.Fatalf("the notice drove %v, want the ops session %v", req.Address, ops)
+		}
+		if req.TriggerSource != "reincarnation" {
+			t.Fatalf("round trigger source = %q, want the notice source", req.TriggerSource)
+		}
+		if !requestCarries(req, "[转世通报]") {
+			t.Fatalf("the ops turn carried no notice: %+v", req.Input)
+		}
+		if got := req.InputMeta[0][event.MetaKeyNoticeSource]; got != "reincarnation" {
+			t.Fatalf("notice source handed to the host = %q, want the source it was admitted from", got)
+		}
+		if _, err := os.Stat(marker + noticeConsumedSuffix); err != nil {
+			t.Fatalf("the woken ops turn wrote no consumed marker: %v", err)
+		}
+	})
+
+	t.Run("arrival_order_does_not_decide_target", func(t *testing.T) {
+		ctx := context.Background()
+		for _, order := range [][]string{{"chat-a", "chat-b"}, {"chat-b", "chat-a"}} {
+			dir := t.TempDir()
+			writeNoticeMarker(t, dir, "REINCARNATION_NOTICE", "pid: 42\ngen: 2\n")
+			rig := newRoutingRig(t)
+			for _, chat := range order {
+				rig.then("answer-" + chat)
+				if _, err := rig.host.Drive(ctx, inboundMessage{ChatID: chat, Text: "q-" + chat}); err != nil {
+					t.Fatalf("drive %s: %v", chat, err)
+				}
+			}
+
+			maybeInjectReincarnationNotice(rig.host.inbox, noticeOps{address: ops, wake: rig.host}, nil, "tagent", dir, 0)
+			waitFor(t, "the ops session turn beside two active sessions", func() bool { return rig.callCount() == 3 })
+
+			for _, req := range rig.recorded() {
+				if requestCarries(req, "[转世通报]") && req.Address != ops {
+					t.Fatalf("the notice reached %v after arrival order %v, want the ops session %v", req.Address, order, ops)
+				}
+			}
+			if !requestCarries(rig.recorded()[2], "[转世通报]") || rig.recorded()[2].Address != ops {
+				t.Fatalf("the third turn = %+v, want the notice at the ops session", rig.recorded()[2])
+			}
+		}
+	})
+}
+
+// TestNoticeSymptomSceneRealOrDegraded is the symptom anchor N4.
+// - the notice the next generation reads carries the recent scene of the previous one: real events, restricted to a few
+// - it says by name what it could not read instead of printing an empty block
+// - the real store answers the tail: the block carries the last walTailEventLimit events of the agent, newest first
+// - 负锚 nil_scene_path_absent: the production wiring never leaves the notices beside a nil face, and a run that observes no tier refuses the read by name
+// - 负锚 degraded_reported_clearly: a read that fails is reported in the block with its cause, never silently omitted
+func TestNoticeSymptomSceneRealOrDegraded(t *testing.T) {
+	ops := opsNoticeAddress(t)
+
+	t.Run("nil_scene_path_absent", func(t *testing.T) {
+		app := &wechatApp{cfg: wechatConfig{Entry: "tagent"}}
+		app.host = &hostRuntime{}
+		for _, host := range []*assembly.Host{nil, {}} {
+			target, scene := app.noticeWiring(host)
+			if scene == nil {
+				t.Fatal("the notices were started beside a nil scene face, want a face that reports the degradation")
+			}
+			if target.wake == nil {
+				t.Fatal("the notices were started beside no wake path, want the host drive face")
+			}
+			if target.address != ops {
+				t.Fatalf("the notices wait for %v, want the ops session %v", target.address, ops)
+			}
+			if _, err := fetchWALTail(context.Background(), scene, "tagent", walTailEventLimit); !errors.Is(err, errSceneUnwired) {
+				t.Fatalf("the read of a run that observes no tier = %v, want the named degradation", err)
+			}
+		}
+	})
+
+	t.Run("real_tail_restricted", func(t *testing.T) {
+		dir := t.TempDir()
+		writeNoticeMarker(t, dir, "REINCARNATION_NOTICE", "pid: 42\ngen: 2\n")
+		store := memory.NewMemoryEventQuery()
+		partition := memory.PartitionIDFromName("tagent")
+		now := time.Now().UnixMilli()
+		for i := 0; i < walTailEventLimit+3; i++ {
+			record := memory.EventRecord{
+				Key:         event.EventID(fmt.Sprintf("scene-%02d", i)),
+				PartitionID: partition,
+				Type:        "agent_output",
+				Summary:     fmt.Sprintf("the work of %02d", i),
+				Timestamp:   now + int64(i),
+			}
+			if err := store.Store(context.Background(), record); err != nil {
+				t.Fatalf("store the event %d: %v", i, err)
+			}
+		}
+
+		inbox := memoryInbox(t)
+		maybeInjectReincarnationNotice(inbox, noticeOps{address: ops}, sceneFace{read: store.QueryEvents}, "tagent", dir, 0)
+		msgs, _ := inbox.take(ops)
+		if len(msgs) != 1 {
+			t.Fatalf("the ops session reads %d notices, want the one reincarnation notice", len(msgs))
+		}
+		block := msgs[0].Content
+		if strings.Contains(block, "现场块不可用") {
+			t.Fatalf("the notice of a readable store degraded: %q", block)
+		}
+		if got := strings.Count(block, "- [evt_"); got != walTailEventLimit {
+			t.Fatalf("the scene block carried %d events, want the last %d", got, walTailEventLimit)
+		}
+		newest := fmt.Sprintf("the work of %02d", walTailEventLimit+2)
+		if !strings.Contains(block, newest) {
+			t.Fatalf("the scene block = %q, missing the newest event %q", block, newest)
+		}
+	})
+
+	t.Run("degraded_reported_clearly", func(t *testing.T) {
+		dir := t.TempDir()
+		writeNoticeMarker(t, dir, "REINCARNATION_NOTICE", "pid: 42\ngen: 2\n")
+		down := sceneFace{read: func(context.Context, memory.QueryOptions) ([]memory.EventReference, error) {
+			return nil, errors.New("wal down")
+		}}
+		inbox := memoryInbox(t)
+		maybeInjectReincarnationNotice(inbox, noticeOps{address: ops}, down, "tagent", dir, 0)
+		msgs, _ := inbox.take(ops)
+		if len(msgs) != 1 {
+			t.Fatalf("the degraded notice = %d messages, want the one the ops session reads", len(msgs))
+		}
+		for _, want := range []string{"现场块不可用", "wal down"} {
+			if !strings.Contains(msgs[0].Content, want) {
+				t.Fatalf("degraded notice = %q, missing %q", msgs[0].Content, want)
+			}
+		}
+	})
 }
 
 // TestRegisteredHandlersDriveTheChannel 钉住真实挂点链路：去重、长文落盘与审批裁决。
@@ -1386,5 +1720,337 @@ func TestHostDrivesSessionsAndTheActiveChannel(t *testing.T) {
 
 	if b == a {
 		t.Fatal("two chats collapsed onto one address")
+	}
+}
+
+// testNoticeInboxDir is the directory under one check's root that keeps the
+// admission records, the way the configuration directory keeps them.
+const testNoticeInboxDir = "inbox"
+
+// writeNoticeMarker lands one startup marker the way the restart script left it:
+// fresh, at the path the notice hook polls.
+func writeNoticeMarker(t *testing.T, dir, name, body string) string {
+	t.Helper()
+	path := filepath.Join(dir, name)
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatalf("write the %s marker: %v", name, err)
+	}
+	return path
+}
+
+// noticeDriveRig is one application-side runtime whose turns answer beside the
+// material they read: a check counts the turns that read a notice instead of
+// trusting the inbox the notices were taken from.
+type noticeDriveRig struct {
+	inbox *internalInbox
+	host  *hostRuntime
+
+	mu       sync.Mutex
+	requests []assembly.InvokeRequest
+	refusal  error
+}
+
+// newNoticeDriveRig builds the runtime over the inbox under check.
+func newNoticeDriveRig(t *testing.T, inbox *internalInbox) *noticeDriveRig {
+	t.Helper()
+	t.Setenv("TAGENT_SESSION_ID", "notice-drive-test")
+	router, err := NewSessionRouter("tagent", testSessionPrefix)
+	if err != nil {
+		t.Fatalf("new router: %v", err)
+	}
+	rig := &noticeDriveRig{inbox: inbox}
+	rig.host = &hostRuntime{
+		router: router,
+		inbox:  inbox,
+		seen:   NewSeenStore(t.TempDir(), discardLogger()),
+	}
+	rig.host.invoke = func(_ context.Context, req assembly.InvokeRequest) (bool, error) {
+		rig.mu.Lock()
+		defer rig.mu.Unlock()
+		rig.requests = append(rig.requests, req)
+		if rig.refusal != nil {
+			err := rig.refusal
+			rig.refusal = nil
+			return false, err
+		}
+		return false, nil
+	}
+	return rig
+}
+
+// refuseNext makes the next turn answer the named host error.
+func (r *noticeDriveRig) refuseNext(err error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.refusal = err
+}
+
+// turns counts the turns whose material carried the named body.
+func (r *noticeDriveRig) turns(body string) int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	count := 0
+	for _, req := range r.requests {
+		if requestCarries(req, body) {
+			count++
+		}
+	}
+	return count
+}
+
+// drive runs one delivery of the named chat through the runtime.
+func (r *noticeDriveRig) drive(t *testing.T, chat, text string) error {
+	t.Helper()
+	_, err := r.host.Drive(context.Background(), inboundMessage{ChatID: chat, Text: text})
+	return err
+}
+
+// TestNoticeDurableAdmission pins the durable admission of one startup notice: the notice is a record under a stable identity before any turn reads it.
+// - the consumed marker is written only by the confirmation of the turn that read it
+// - the marker stays where the admission left it, so the consumed suffix is the confirmation's word alone (负锚 rename_before_confirm_absent)
+// - a second process opened on the same directory reads the owed notice back, body and source alike
+// - a redelivery of one notice opens no second record
+// - a restarted hook rebuilds the same marker with a body the last process never wrote, and the marker rather than the body is the identity
+// - a receipt carries no marker: its identity is the source beside the body, and the same receipt read twice is one record
+func TestNoticeDurableAdmission(t *testing.T) {
+	ops := opsNoticeAddress(t)
+	t.Run("rename_before_confirm_absent", func(t *testing.T) {
+		dir := t.TempDir()
+		marker := writeNoticeMarker(t, dir, "REINCARNATION_NOTICE", "pid: 42\ngen: 2\n")
+		inbox := durableInbox(t, filepath.Join(dir, testNoticeInboxDir))
+		maybeInjectReincarnationNotice(inbox, noticeOps{address: ops}, nil, "tagent", dir, 0)
+
+		if _, err := os.Stat(marker + noticeConsumedSuffix); err == nil {
+			t.Fatal("the consumed marker was written beside the admission, want the confirmation to write it")
+		}
+		msgs, ids := inbox.take(ops)
+		if len(msgs) != 1 || len(ids) != 1 {
+			t.Fatalf("the admitted notice = %d messages under %d records, want one", len(msgs), len(ids))
+		}
+		if _, err := os.Stat(marker + noticeConsumedSuffix); err == nil {
+			t.Fatal("the read wrote the consumed marker, want the confirmation to write it")
+		}
+		inbox.Confirm(ids)
+		if _, err := os.Stat(marker + noticeConsumedSuffix); err != nil {
+			t.Fatalf("the confirmation wrote no consumed marker: %v", err)
+		}
+		if _, err := os.Stat(marker); err == nil {
+			t.Fatal("the source marker survived its confirmation")
+		}
+	})
+
+	t.Run("the owed notice reads back in the next process", func(t *testing.T) {
+		dir := t.TempDir()
+		inboxDir := filepath.Join(dir, testNoticeInboxDir)
+		marker := writeNoticeMarker(t, dir, "SYSTEM_ALERT", "raw failure")
+		first := durableInbox(t, inboxDir)
+		if _, err := first.AdmitNotice(testAddress("chat-a"), "system_alert", tagentmodel.Message{Content: "the staged failure"}, marker, systemAlertConsumedSuffix); err != nil {
+			t.Fatalf("admit the alert: %v", err)
+		}
+
+		second := durableInbox(t, inboxDir)
+		msgs, ids := second.take(testAddress("chat-a"))
+		if len(msgs) != 1 || msgs[0].Content != "the staged failure" {
+			t.Fatalf("the notice a second process read = %+v, want the one the first admitted", msgs)
+		}
+		if got := second.records[ids[0]].Source; got != "system_alert" {
+			t.Fatalf("the admitted source = %q, want the source the notice came from", got)
+		}
+	})
+
+	t.Run("a redelivery opens no second record", func(t *testing.T) {
+		dir := t.TempDir()
+		marker := writeNoticeMarker(t, dir, "REINCARNATION_NOTICE", "pid: 42\n")
+		inbox := durableInbox(t, filepath.Join(dir, testNoticeInboxDir))
+		admit := func(source, body, at string) string {
+			id, err := inbox.AdmitNotice(testAddress("chat-a"), source, tagentmodel.Message{Content: body}, at, noticeConsumedSuffix)
+			if err != nil {
+				t.Fatalf("admit the %s notice: %v", source, err)
+			}
+			return id
+		}
+
+		first := admit("reincarnation", "the notice of the previous generation", marker)
+		second := admit("reincarnation", "the notice of the previous generation, rebuilt", marker)
+		if first != second {
+			t.Fatalf("the redelivery opened a second record (%s then %s)", first, second)
+		}
+		receipt := admit("delivery_receipt", "the receipt of an undelivered body", "")
+		if again := admit("delivery_receipt", "the receipt of an undelivered body", ""); again != receipt {
+			t.Fatalf("the receipt redelivery opened a second record (%s then %s)", receipt, again)
+		}
+		if len(inbox.records) != 2 {
+			t.Fatalf("records = %d, want the startup notice and the receipt", len(inbox.records))
+		}
+	})
+}
+
+// TestNoticeRedeliveryIdempotent pins the idempotence of the redelivery: the same notice admitted again keeps one record and reaches exactly one turn.
+// - the duplicate admission in this process and the one in the next process both keep the single record
+// - the process stops after the admission and before the confirmation, and the next one admits the same marker again to read the notice it owes
+func TestNoticeRedeliveryIdempotent(t *testing.T) {
+	const body = "the notice the previous generation owed"
+
+	t.Run("duplicate_admission_single_effect", func(t *testing.T) {
+		dir := t.TempDir()
+		inboxDir := filepath.Join(dir, testNoticeInboxDir)
+		marker := writeNoticeMarker(t, dir, "REINCARNATION_NOTICE", "pid: 42\n")
+
+		first := durableInbox(t, inboxDir)
+		if _, err := first.AdmitNotice(testAddress("chat-a"), "reincarnation", tagentmodel.Message{Content: body}, marker, noticeConsumedSuffix); err != nil {
+			t.Fatalf("admit the notice: %v", err)
+		}
+		second := durableInbox(t, inboxDir)
+		if _, err := second.AdmitNotice(testAddress("chat-a"), "reincarnation", tagentmodel.Message{Content: body + " (rebuilt)"}, marker, noticeConsumedSuffix); err != nil {
+			t.Fatalf("admit the redelivery: %v", err)
+		}
+		if len(second.records) != 1 {
+			t.Fatalf("records after the redelivery = %d, want the one the first process admitted", len(second.records))
+		}
+
+		rig := newNoticeDriveRig(t, second)
+		if err := rig.drive(t, "chat-a", "the question after the restart"); err != nil {
+			t.Fatalf("drive the recovered turn: %v", err)
+		}
+		if got := rig.turns(body); got != 1 {
+			t.Fatalf("turns that read the redelivered notice = %d, want exactly one effective processing", got)
+		}
+		if _, err := os.Stat(marker + noticeConsumedSuffix); err != nil {
+			t.Fatalf("the recovered notice wrote no consumed marker: %v", err)
+		}
+
+		third := durableInbox(t, inboxDir)
+		if len(third.records) != 0 {
+			t.Fatalf("records read back after the confirmation = %d, want none", len(third.records))
+		}
+		maybeInjectReincarnationNotice(third, noticeOps{address: opsNoticeAddress(t)}, nil, "tagent", dir, 0)
+		if len(third.records) != 0 {
+			t.Fatalf("a consumed notice was admitted again (%d records)", len(third.records))
+		}
+	})
+
+	t.Run("a consumed notice reads back once across restarts", func(t *testing.T) {
+		dir := t.TempDir()
+		inboxDir := filepath.Join(dir, testNoticeInboxDir)
+		marker := writeNoticeMarker(t, dir, "SYSTEM_ALERT", "raw failure")
+		inbox := durableInbox(t, inboxDir)
+		if _, err := inbox.AdmitNotice(testAddress("chat-a"), "system_alert", tagentmodel.Message{Content: body}, marker, systemAlertConsumedSuffix); err != nil {
+			t.Fatalf("admit the alert: %v", err)
+		}
+		rig := newNoticeDriveRig(t, inbox)
+		if err := rig.drive(t, "chat-a", "the first question"); err != nil {
+			t.Fatalf("the first turn: %v", err)
+		}
+		if err := rig.drive(t, "chat-a", "the second question"); err != nil {
+			t.Fatalf("the second turn: %v", err)
+		}
+		if got := rig.turns(body); got != 1 {
+			t.Fatalf("turns that read the consumed notice = %d, want the one turn that took it", got)
+		}
+	})
+}
+
+// TestNoticeDrainAckSemantics pins the three steps of one notice.
+// - the drain hands back copies and leaves the record admitted
+// - a host that refuses the material keeps the notice owed
+// - only the confirmation of a turn the host took retires the record and writes the consumed marker
+// - the notice waits for the session the turn drives, so the ack semantics are the subject here rather than the address a startup notice is fixed to
+func TestNoticeDrainAckSemantics(t *testing.T) {
+	t.Run("failed_invoke_keeps_notice", func(t *testing.T) {
+		dir := t.TempDir()
+		marker := writeNoticeMarker(t, dir, "SYSTEM_ALERT", "raw failure")
+		inbox := durableInbox(t, filepath.Join(dir, testNoticeInboxDir))
+		if _, err := inbox.AdmitNotice(testAddress("chat-a"), "system_alert", tagentmodel.Message{Content: "raw failure"}, marker, systemAlertConsumedSuffix); err != nil {
+			t.Fatalf("admit the alert: %v", err)
+		}
+		rig := newNoticeDriveRig(t, inbox)
+
+		rig.refuseNext(errors.New("the host refused the material"))
+		if err := rig.drive(t, "chat-a", "the first question"); err == nil {
+			t.Fatal("a refused submit answered no error")
+		}
+		if got := rig.turns("raw failure"); got != 1 {
+			t.Fatalf("turns that read the notice beside the refused submit = %d, want the one that was refused", got)
+		}
+		if len(inbox.records) != 1 {
+			t.Fatalf("records after a refused submit = %d, want the notice still admitted", len(inbox.records))
+		}
+		if _, err := os.Stat(marker + systemAlertConsumedSuffix); err == nil {
+			t.Fatal("a refused submit wrote the consumed marker")
+		}
+
+		if err := rig.drive(t, "chat-a", "the second question"); err != nil {
+			t.Fatalf("the accepted submit: %v", err)
+		}
+		if got := rig.turns("raw failure"); got != 2 {
+			t.Fatalf("turns that read the notice = %d, want the refused one and the one that took it", got)
+		}
+		if len(inbox.records) != 0 {
+			t.Fatalf("records after the accepted submit = %d, want the notice confirmed", len(inbox.records))
+		}
+		if _, err := os.Stat(marker + systemAlertConsumedSuffix); err != nil {
+			t.Fatalf("the confirmation wrote no consumed marker: %v", err)
+		}
+	})
+
+	t.Run("the drain hands back copies and keeps the record admitted", func(t *testing.T) {
+		inbox := memoryInbox(t)
+		if _, err := inbox.AdmitNotice(testAddress("chat-a"), "delivery_receipt", tagentmodel.Message{Content: "the receipt"}, "", ""); err != nil {
+			t.Fatalf("admit the receipt: %v", err)
+		}
+		msgs, ids := inbox.take(testAddress("chat-a"))
+		if len(msgs) != 1 || len(ids) != 1 {
+			t.Fatalf("the drain = %d messages under %d records, want one", len(msgs), len(ids))
+		}
+		msgs[0].Content = "tampered"
+		if got := inbox.records[ids[0]].Content; got != "the receipt" {
+			t.Fatalf("the drain handed back the record itself: %q", got)
+		}
+		if again, _ := inbox.take(testAddress("chat-a")); len(again) != 0 {
+			t.Fatalf("a second turn read the notice the first one holds: %+v", again)
+		}
+		inbox.Release(ids)
+		replayed, _ := inbox.take(testAddress("chat-a"))
+		if len(replayed) != 1 || replayed[0].Content != "the receipt" {
+			t.Fatalf("the released notice reads = %+v, want the one the failed turn left owed", replayed)
+		}
+	})
+}
+
+// lastRequest answers the request of the last turn the rig drove.
+func (r *noticeDriveRig) lastRequest(t *testing.T) assembly.InvokeRequest {
+	t.Helper()
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if len(r.requests) == 0 {
+		t.Fatal("the rig drove no turn")
+	}
+	return r.requests[len(r.requests)-1]
+}
+
+// TestNoticeSourceReachesTheTurnMeta pins the app side of the source split: the notice a turn reads reaches the host beside its admitted source.
+// - one entry per message, while the round trigger source stays the user lineage
+// - the user message of the same delivery carries no notice source
+func TestNoticeSourceReachesTheTurnMeta(t *testing.T) {
+	inbox := memoryInbox(t)
+	if _, err := inbox.AdmitNotice(testAddress("chat-a"), "reincarnation", tagentmodel.Message{Content: "the notice"}, "", ""); err != nil {
+		t.Fatalf("admit the notice: %v", err)
+	}
+	rig := newNoticeDriveRig(t, inbox)
+	if err := rig.drive(t, "chat-a", "the question"); err != nil {
+		t.Fatalf("drive the turn: %v", err)
+	}
+	req := rig.lastRequest(t)
+	if len(req.Input) != 2 || len(req.InputMeta) != 2 {
+		t.Fatalf("the turn carried %d messages under %d meta entries, want the notice and the question", len(req.Input), len(req.InputMeta))
+	}
+	if got := req.InputMeta[0][event.MetaKeyNoticeSource]; got != "reincarnation" {
+		t.Fatalf("notice source handed to the host = %q, want the source it was admitted from", got)
+	}
+	if got, ok := req.InputMeta[1][event.MetaKeyNoticeSource]; ok {
+		t.Fatalf("the user message carried the notice source %q", got)
+	}
+	if req.TriggerSource != "user" {
+		t.Fatalf("round trigger source = %q, want the user lineage", req.TriggerSource)
 	}
 }

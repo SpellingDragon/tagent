@@ -112,7 +112,8 @@ type Advancer string
 // independent readings one agent may carry all at once — a session reads as
 // its mailbox readings, an invocation reads as the decision currently holding
 // its execution slot, a task reads as its own task status, a notice reads as
-// its delivery phase and a lease reads as the registration its holder signed.
+// its delivery phase, a lease reads as the registration its holder signed and an
+// attention reads as the phase the question stands in.
 // Only the fields belonging to the kind of the object carry a reading; every
 // other field stays zero and is never read as a second vocabulary for that
 // kind. The states are kept apart and never collapse into one aggregate
@@ -136,6 +137,20 @@ type DetailState struct {
 	// Holder carries the registration of a lease object as its holder signed
 	// it, the release reference included.
 	Holder state.LeaseRef
+	// attention carries the phase an attention object stands in: the question
+	// phase while nobody answered or cleared it and its validity has not run
+	// out, the expired phase beside a validity that ran out. It is read through
+	// AttentionPhase, so the phase an attention object is read in stays one
+	// reading of its state rather than one more field on the state vocabulary.
+	attention AttentionPhase
+}
+
+// AttentionPhase answers the phase the attention object of this detail stands
+// in at the revision the detail was read at. A detail of another kind answers
+// the empty phase, so a reader telling one phase from another reads the phase
+// itself and never the presence of an entry.
+func (s DetailState) AttentionPhase() AttentionPhase {
+	return s.attention
 }
 
 // AgentState is the agent reading of one detail state: the three readings of
@@ -496,14 +511,17 @@ func (p *Projection) Detail(at Revision, cursor Cursor, filter ListFilter, ref O
 // a changed reason keeps its identity and is explained as one named upsert
 // rather than as a new object and a vanished one.
 type refID struct {
-	kind       ObjectKind
-	addr       event.Address
-	instance   event.InstanceID
-	invocation event.InvocationID
-	task       event.TaskID
-	notice     noticeID
-	leaseKind  string
-	leaseKey   string
+	kind          ObjectKind
+	addr          event.Address
+	instance      event.InstanceID
+	invocation    event.InvocationID
+	task          event.TaskID
+	notice        noticeID
+	leaseKind     string
+	leaseKey      string
+	attentionKind string
+	target        string
+	lineage       string
 }
 
 // refIDOf returns the identity one reference names.
@@ -524,6 +542,8 @@ func refIDOf(ref ObjectRef) refID {
 	case ObjectLease:
 		id.leaseKind = ref.Lease.Kind
 		id.leaseKey = ref.Lease.Key
+	case ObjectAttention:
+		id.attentionKind, id.target, id.lineage = attentionKeyOf(ref.attention)
 	}
 	return id
 }
@@ -543,8 +563,10 @@ func kindRank(kind ObjectKind) int {
 		return 4
 	case ObjectLease:
 		return 5
+	case ObjectAttention:
+		return 6
 	}
-	return 6
+	return 7
 }
 
 // refIDLess orders two identities into one total order: object kinds first,
@@ -580,6 +602,8 @@ func refIDLess(a, b refID) bool {
 			return a.leaseKind < b.leaseKind
 		}
 		return a.leaseKey < b.leaseKey
+	case ObjectAttention:
+		return attentionRefLess(a, b)
 	}
 	return false
 }
@@ -775,13 +799,19 @@ func detailEqual(a, b Detail) bool {
 // covers that agent and the sessions it runs, and a session-level entry covers
 // that exact session. A resource lease names no session of its own and is
 // covered by any non-empty scope: it is visible to an authorized reader and
-// named by the resource it holds rather than by an address it does not have.
+// named by the resource it holds rather than by an address it does not have. An
+// attention question that names the session it was put to is scoped to that
+// session exactly as every other object is, so a session-scoped read keeps the
+// questions of its own session and drops the ones another session holds; a
+// question whose target names no session is covered by any non-empty scope the
+// way a lease is, and an agent or session narrowing of the filter drops such an
+// addressless question beside every addressless object.
 func scopeCovers(scope AuthorizationScope, ref ObjectRef) bool {
 	if ref.Kind == ObjectLease {
 		return len(scope.Agents) > 0 || len(scope.Sessions) > 0
 	}
 	if ref.Address.IsZero() {
-		return false
+		return ref.Kind == ObjectAttention && (len(scope.Agents) > 0 || len(scope.Sessions) > 0)
 	}
 	for _, id := range scope.Agents {
 		if id == ref.Address.AgentID {
@@ -800,7 +830,8 @@ func scopeCovers(scope AuthorizationScope, ref ObjectRef) bool {
 // dimensions of the filter keep the object the reference names. The scope is
 // applied first, and each active dimension list only ever narrows the view
 // further; a resource lease carries no address and drops out of an agent or
-// session narrowing the same way an addressless object must.
+// session narrowing the same way an addressless object must, and so does an
+// attention question whose target names no session.
 func refAllowed(filter ListFilter, ref ObjectRef) bool {
 	if !scopeCovers(filter.Scope, ref) {
 		return false
@@ -966,10 +997,11 @@ func DetailBytes(d Detail) int {
 	total += len(d.Ref.InstanceID) + len(d.Ref.InvocationID) + len(d.Ref.TaskID)
 	total += len(d.Ref.Notice.TaskID) + len(d.Ref.Notice.Kind) + len(d.Ref.Notice.Event)
 	total += len(d.Ref.Lease.Kind) + len(d.Ref.Lease.Key) + len(d.Ref.Lease.Ref)
+	total += len(d.Ref.attention.Kind) + len(d.Ref.attention.Target) + len(d.Ref.attention.Lineage)
 	total += 3 * wordBytes
 	total += 4 * wordBytes
 	total += len(d.State.Decision) + wordBytes + len(d.State.NoticePhase)
-	total += len(d.State.Holder.Kind) + len(d.State.Holder.Key) + len(d.State.Holder.Ref)
+	total += len(d.State.attention) + len(d.State.Holder.Kind) + len(d.State.Holder.Key) + len(d.State.Holder.Ref)
 	for _, b := range d.Blocked {
 		total += blockedEntryBytes
 		total += len(b.Obligation.Notice.TaskID) + len(b.Obligation.Notice.Kind) + len(b.Obligation.Notice.Event)

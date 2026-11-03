@@ -2,41 +2,15 @@
 
 ## Purpose
 
-本规范定义 llm-summary-generator 能力。`LLMSummarizer` SHALL implement the `SummaryGenerator` interface defined by the upstream `l3-archive-summarization` capability.
-
-> **状态核验（2026-09-09）**：本规范描述的逐事件 LLM 语义摘要管线（`LLMSummarizer`/`PassthroughSummarizer`/`GenerateBatch`/`Config.ArchiveSummarizer.Enabled`，及上游 `l3-archive-summarization` 能力）**已随 legacy 压缩管线移除**。L3 摘要现由双层折叠承载：工程票据层（卡片行 + `[evt_key]` 召回票据，纯工程零 LLM）恒在，`summary_model` 配置时叠加单行滚动综述 `synthesizeRollingNarrative`（增量合成、编译期常量限长、失败降级纯工程），卡片超限由 `condenseCardLines` 浓缩。本文 SHALL 条款不再约束当前实现，保留作为设计决策记录；现状契约见 [task-skeleton-compression](../task-skeleton-compression/spec.md)。
+> **superseded（2026-11-03 归档核验）**：本规范描述的 `LLMSummarizer` 逐事件语义摘要、批量摘要与配置门已随压缩实现退役（`LLMSummarizer` 与 `SummaryGenerator` 在 Go 树 0 定义）。现行折叠零 LLM：段折叠与历史综述都是确定性工程产物，见 `task-skeleton-compression`。本文件只作历史记录，不再承载现行规范命令。
 
 ## Requirements
 
-### Requirement: LLMSummarizer implements SummaryGenerator interface
+### Requirement: 历史条款已退役
 
-`LLMSummarizer` SHALL implement the `SummaryGenerator` interface defined by the upstream `l3-archive-summarization` capability. Its `Generate(event FullEvent) (string, error)` method SHALL invoke an LLM to produce a semantic summary of the event content, respecting the `archive_summary_types[event.type]` strategy (only invoked for `summary` strategy events).
+本文件保留已退役的 LLM 摘要管线历史记录。原条款中的规范化关键词（SHALLs/MUSTs）已全部迁出或退役；现行要求见 `task-skeleton-compression` 与 `compression-pipeline`，公共行为锚见 `memory/replay/age_segments_test.go` 的 `TestAgeFoldFoldsTheOlderBandsIntoOneHistorySummary`。
 
-#### Scenario: LLMSummarizer generates semantic summary
+#### Scenario: 查现行折叠要求
 
-- **WHEN** `LLMSummarizer.Generate` is called with an `assistant_response` event whose content is a 5 KB response
-- **THEN** the returned summary SHALL be a concise string capturing the core decision / action / conclusion, substantially shorter than the original content
-
-#### Scenario: LLMSummarizer falls back on failure
-
-- **WHEN** the LLM call fails (timeout, error, rate limit)
-- **THEN** `Generate` SHALL return the result of the configured fallback (default `PassthroughSummarizer`), NOT an error
-- **AND** a `summarizer_fallback_total{reason}` metric SHALL be incremented
-
-### Requirement: Batched LLM calls reduce round-trip overhead
-
-`LLMSummarizer` SHALL support a `GenerateBatch([]FullEvent) ([]string, error)` method. The Compactor's L2→L3 merge path SHALL bucket events by type and invoke `GenerateBatch` per bucket, respecting `max_batch_size` configuration.
-
-#### Scenario: Batched call for same-type events
-
-- **WHEN** an L2→L3 compaction batch contains 20 `assistant_response` events and `max_batch_size=8`
-- **THEN** `GenerateBatch` SHALL be called 3 times (8 + 8 + 4 events) rather than 20 single `Generate` calls
-
-### Requirement: Configuration gates LLM summarization
-
-`Config.ArchiveSummarizer.Enabled` SHALL control whether `tagent.go` constructs `LLMSummarizer` or `PassthroughSummarizer` at wiring time. When disabled (default), the behavior SHALL be identical to `harden-event-storage-for-scale` baseline.
-
-#### Scenario: Disabled config uses pass-through
-
-- **WHEN** `Config.ArchiveSummarizer.Enabled = false`
-- **THEN** `resolveMemoryStore` SHALL wire `PassthroughSummarizer` into the Compactor; no LLM client SHALL be constructed
+- **WHEN** 需要查询折叠是否调用 LLM 或如何生成正文的现行要求
+- **THEN** 读 `task-skeleton-compression` 及其公共行为锚，而不是本历史文件

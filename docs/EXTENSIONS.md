@@ -63,7 +63,7 @@
 
 扩展者只需做两件事：把事件放进某个 invocation 的 ready 输入，并为终态通知准备一个投递面。消费点只有这一条链（`runtime/agent/loop.go`）：
 
-1. **`Invocation.Ready []event.Event`** 是一次责任范围**独占**的输入。`Loop.Drive` 把它拼在会话历史之后交给 `aggregateReady`：事件的 `Message` 原样保留（多工具 assistant 消息与逐调用配对的工具消息不被拆开），只有自身没带角色的消息才用 `agent.RoleOf` 按类型补。
+1. **`Invocation.Ready []event.Event`** 是一次责任范围**独占**的输入。常驻消费循环把它拼在会话历史之后交给 `aggregateReady`：事件的 `Message` 原样保留（多工具 assistant 消息与逐调用配对的工具消息不被拆开），只有自身没带角色的消息才用 `agent.RoleOf` 按类型补。
 2. **消费即一次决策**。模型产出的工具调用经受理路径变成**受理回执**与**结算观察**，两者在下一次决策前进入 transcript；当一次决策既没有回执也没有观察时，这一趟以终态收束并提交 transcript。
 3. **`Loop.Backflow(invocationID, notice)` 只驱动发起了该调用的那次 invocation 的下一次决策**，不驱动别的。它只接受 `settled` / `failed` / `cancelled` 三种终态：非终态通知没有可配对的结果，在这里被忽略，而不是被当作空结果。
 4. **投递面由宿主给**：`task.WithEnvelopeDeliverer` 把 envelope 交给宿主，`Run` 的 sink 把工作通知记进邮箱（`assembly/facts.go`）。loop 自己不选传输、不猜目标。
@@ -83,7 +83,7 @@
 
 | 实例 | 驱动源 | 读的事实 | 产出的新事实（族） |
 |---|---|---|---|
-| `Loop.Drive`（回合驱动，`runtime/agent/loop.go`） | 一次 invocation 的 `Ready` 输入，以及终态通知的 `Backflow` 回填 | ready 输入里的事件，身份即 `event.EventID` | 决策记录与尝试记录（`rl.DecisionRecord` / `rl.AttemptRecord`，经 `agent.Recorder` 在产生点提交） |
+| 常驻消费循环（回合驱动，`runtime/agent/consumer.go`） | 一次 invocation 的 `Ready` 输入，以及终态通知的 `Backflow` 回填 | ready 输入里的事件，身份即 `event.EventID` | 决策记录与尝试记录（`rl.DecisionRecord` / `rl.AttemptRecord`，经 `agent.Recorder` 在产生点提交） |
 | `Reflection.Tick`（时间驱动，`features/evolution/meditation/reflection.go`） | 宿主按节拍调用 `Tick`，节奏下限由 `ReflectionCadence` 判定 | 事实链上 watermark 之后、lineage 非自管的已提交事实（观察面） | 反思输入事件（`event.TypeExternalInput`，lineage 为 reflection）；它再交给回合驱动消费 |
 | 宿主循环（外部驱动） | 宿主自己的调度与传输（`Run` 的 sink、`task.WithEnvelopeDeliverer`） | 宿主选中并交进 `Ready` 的事实 | 宿主自己提交的事实：框架在此只给边界，不给循环 |
 

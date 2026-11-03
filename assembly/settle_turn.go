@@ -18,8 +18,12 @@ package assembly
 import (
 	"context"
 	"errors"
+	"fmt"
+	"strings"
 	"sync"
+	"sync/atomic"
 
+	"github.com/SpellingDragon/tagent/api/config"
 	"github.com/SpellingDragon/tagent/api/event"
 	"github.com/SpellingDragon/tagent/api/model"
 	"github.com/SpellingDragon/tagent/api/plugin"
@@ -58,11 +62,18 @@ func noticeTaskIDOf(fact event.Event) event.TaskID {
 	return event.TaskID(fact.Meta[event.MetaKeyTaskID])
 }
 
-// settleCompletedTerminal is the one terminal a follow-up turn reports when its
-// notification was delivered: the settled, failed and cancelled notifications
-// all ask the same question of the turn, and a turn that ended on any other
-// terminal never delivered anything.
-var settleCompletedTerminal = model.KindCompleted.String()
+// settleLandedTerminal reports whether one recorded attempt terminal is a result
+// the follow-up turn really landed: completed, failed and cancelled each end the
+// turn, so the notification they answered is consumed beside its receipt and no
+// second turn is driven. An empty terminal is the in-flight marker, and a
+// terminal outside the closed set names no result the account can close on.
+func settleLandedTerminal(terminal string) bool {
+	switch terminal {
+	case model.KindCompleted.String(), model.KindFailed.String(), model.KindCancelled.String():
+		return true
+	}
+	return false
+}
 
 // settleAttempts is the attempt face one mailbox may serve beside the seats it
 // owes: the durable record of the one follow-up turn a notification started,
@@ -98,6 +109,33 @@ type settleBarrier struct {
 	settle func(ctx context.Context, terminal model.Kind) error
 	// consume writes the consumption receipt of the entry the turn drove.
 	consume func(ctx context.Context) error
+	// settled is the one settlement the account takes: the delivery face of the
+	// segment that consumed the notice and the fire face of the turn the notice
+	// drove both close the same entry, and only the face that takes this marker
+	// settles it. A nil marker keeps every call a settlement of its own, so a
+	// barrier built outside the driver changes nothing.
+	settled *atomic.Bool
+}
+
+// claimSettlement takes the one settlement of the account this barrier closes
+// and reports whether this call took it. The delivery of the segment that
+// consumed the notice stands before the answer reaches the fire face that waits
+// on it, so the face that settles second reads the marker as taken and skips a
+// closed account: the obligation of a body the first face already registered is
+// never read again beside a stopping drive, and one entry takes one receipt.
+// A settlement that stops before its receipt hands the marker back, so the
+// other face or the next wake still closes the entry.
+func (b settleBarrier) claimSettlement() bool {
+	return b.settled == nil || b.settled.CompareAndSwap(false, true)
+}
+
+// releaseSettlement hands the claim back when the settlement stopped before the
+// account was closed: the entry stays owed for the other face of the drive or
+// the next wake instead of standing behind a claim that never became a receipt.
+func (b settleBarrier) releaseSettlement() {
+	if b.settled != nil {
+		b.settled.Store(false)
+	}
 }
 
 // settleBarrierKey is the context key the barrier of one follow-up drive travels
@@ -115,6 +153,22 @@ func withSettleBarrier(ctx context.Context, barrier settleBarrier) context.Conte
 func settleBarrierFrom(ctx context.Context) (settleBarrier, bool) {
 	barrier, ok := ctx.Value(settleBarrierKey{}).(settleBarrier)
 	return barrier, ok
+}
+
+// settleScope is the declared white list one settle dispatch reads: the party
+// whose declaration it is and the target agent names it froze. The white list is
+// the target set the host document declares for the plugin dispatch path, so the
+// dispatch and the cross-session send path are judged by one vocabulary: the
+// membership test of the delivery face's white list tier.
+//
+// A driver beside no scope refuses every dispatch, the way a host that declared
+// no deliver_to delivers nothing.
+type settleScope struct {
+	// declaring names the party whose declaration this scope is: the entry agent
+	// of the host document that froze the target set.
+	declaring string
+	// targets is the declared target agent names, in declaration order.
+	targets []string
 }
 
 // settleHandoff is the face one landed attempt is closed through: it registers
@@ -190,6 +244,11 @@ type SettleDriver struct {
 	// without one, exactly as a run keeping no durable delivery account does.
 	handoff settleHandoff
 
+	// scope is the declared white list the plugin dispatch path reads; a driver
+	// wired beside none dispatches nothing, because a dispatch outside a
+	// declared target set would reach a session nobody authorized.
+	scope *settleScope
+
 	stopCtx    context.Context
 	stopCancel context.CancelFunc
 
@@ -247,6 +306,57 @@ func (d *SettleDriver) Port() plugin.Port {
 // work it woke is owed on the mailbox account, so a failed observation leaves the
 // follow-up turn owed and the account hands it to the next decision.
 func (d *SettleDriver) DrivesObligation() {}
+
+// DeclareScope declares the dispatch white list of this driver: the party the
+// declaration belongs to and the target agent names it froze. The table starts
+// absent, so a driver that never declares one refuses every dispatch; a
+// declaration that names no target refuses every dispatch too, exactly as an
+// empty deliver_to table does on the send face.
+//
+// The face is read by the pump, so the write takes the driver's own lock.
+func (d *SettleDriver) DeclareScope(declaring string, targets ...string) {
+	if d == nil {
+		return
+	}
+	declared := settleScope{declaring: declaring, targets: append([]string(nil), targets...)}
+	d.mu.Lock()
+	d.scope = &declared
+	d.mu.Unlock()
+}
+
+// scopeOf reports the declared dispatch white list of this driver and whether one
+// is declared at all.
+func (d *SettleDriver) scopeOf() (settleScope, bool) {
+	if d == nil {
+		return settleScope{}, false
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.scope == nil || len(d.scope.targets) == 0 {
+		return settleScope{}, false
+	}
+	return *d.scope, true
+}
+
+// settleDispatchAllowed judges one plugin dispatch against the declared white
+// list of this driver: the membership test is the one the cross-session delivery
+// face keeps on its white list tier, so the two dispatch families are judged by
+// one rule instead of two. A dispatch outside the declared targets, and every
+// dispatch beside an undeclared or empty table, is refused by name.
+func (d *SettleDriver) settleDispatchAllowed(addr event.Address) (bool, string) {
+	declared, held := d.scopeOf()
+	if !held {
+		return false, "this settle driver declares no delivery target set, and a plugin dispatch is refused closed beside none"
+	}
+	if addr.AgentID == "" {
+		return false, fmt.Sprintf("the plugin dispatch names no target agent, and the target set declared by the host document of %q names no unnamed target", declared.declaring)
+	}
+	if !hostSendNames(declared.targets, string(addr.AgentID)) {
+		return false, fmt.Sprintf("the target set declared by the host document of %q names no %q, and a plugin dispatch outside it would reach a session no declaration named",
+			declared.declaring, addr.AgentID)
+	}
+	return true, ""
+}
 
 // setHandoff wires the delivery account one landed attempt is closed through:
 // the bodies the landed turn generated are registered there before the mailbox
@@ -393,11 +503,12 @@ func (d *SettleDriver) drain() {
 // runs beside the committed fact the notification points at. The entry is closed
 // beside the terminal the turn landed through the barrier this drive stamps on
 // the context its fire face reads. A turn that returned settles the entry as
-// consumed, and a turn that failed hands the entry back so the next wake retries
-// it. A seat whose recorded attempt already landed a completed terminal is closed
-// with its receipt and no turn is driven for it: the receipt the stopped process
-// never wrote is written here, so one notification starts one turn however many
-// processes over the same account read it. That receipt is written only behind the
+// consumed, and a fire face that reports the account still open hands the entry
+// back so the next wake reads it again. A seat whose recorded attempt already
+// landed a completed, failed or cancelled terminal is closed with its receipt and
+// no turn is driven for it: the receipt the stopped process never wrote is
+// written here, so one notification starts one turn however many processes over
+// the same account read it. That receipt is written only behind the
 // hand-off, which registers the delivery obligation of the bodies the landed turn
 // generated: an obligation the account refuses keeps the entry owed for the next
 // wake instead of closing it beside a body nothing carries. A stop ends the turn in flight and
@@ -424,7 +535,7 @@ func (d *SettleDriver) driveSeat(ctx context.Context, wake SettleWake, seat stat
 			assemblyWarn("tagent: the settle attempt of %s could not be read: %v", seat.Notice.FactKey(), err)
 			d.releaseSeat(wake, seat)
 			return
-		case held && landed.Terminal == settleCompletedTerminal:
+		case held && settleLandedTerminal(landed.Terminal):
 			if handoff, wired := d.handoffOf(); wired {
 				if err := handoff(context.WithoutCancel(ctx), seat.Address, seat.Notice); err != nil {
 					assemblyWarn("tagent: the landed settle of %s kept its entry owed: %v", seat.Notice.FactKey(), err)
@@ -445,14 +556,21 @@ func (d *SettleDriver) driveSeat(ctx context.Context, wake SettleWake, seat stat
 		}
 	}
 
+	if allowed, cause := d.settleDispatchAllowed(seat.Address); !allowed {
+		assemblyWarn("tagent: the plugin dispatch of %s is refused: %s", seat.Notice.FactKey(), cause)
+		d.releaseSeat(wake, seat)
+		return
+	}
+
 	fireCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	stop := context.AfterFunc(d.stopCtx, cancel)
 	defer stop()
 
 	barrier := settleBarrier{
-		addr:   seat.Address,
-		notice: seat.Notice,
+		addr:    seat.Address,
+		notice:  seat.Notice,
+		settled: &atomic.Bool{},
 		settle: func(bctx context.Context, terminal model.Kind) error {
 			assemblyDebug("tagent: settle turn landed notice=%s terminal=%s", seat.Notice.FactKey(), terminal)
 			if attempts == nil {
@@ -475,10 +593,31 @@ func (d *SettleDriver) driveSeat(ctx context.Context, wake SettleWake, seat stat
 	assemblyDebug("tagent: settle entry consumed notice=%s", seat.Notice.FactKey())
 }
 
+// settleScopeOfDocument reports the target set one host's document declares for
+// the plugin dispatch path: every agent the document names is a session the
+// dispatch may reach, and a document that names no agent declares no target at
+// all. The dispatch reads that declaration instead of resolving targets of its
+// own, so a dispatch naming a session the document never declared is refused.
+func settleScopeOfDocument(decl *config.Declaration) (settleScope, bool) {
+	if decl == nil {
+		return settleScope{}, false
+	}
+	targets := make([]string, 0, len(decl.Agents))
+	for _, spec := range decl.Agents {
+		if id := strings.TrimSpace(spec.ID); id != "" {
+			targets = append(targets, id)
+		}
+	}
+	if len(targets) == 0 {
+		return settleScope{}, false
+	}
+	return settleScope{declaring: decl.Entry, targets: targets}, true
+}
+
 // releaseSeat hands one entry this drive claimed back to the pending pool, so
 // the work stays owed and the next wake picks it up again.
 func (d *SettleDriver) releaseSeat(wake SettleWake, seat state.WorkSeat) {
-	if err := wake.Release(context.WithoutCancel(context.Background()), seat.Address, seat.Instance, seat.AcceptSeq); err != nil {
+	if err := wake.Release(context.WithoutCancel(context.Background()), seat.Address, seat.Instance, seat.AcceptSeq); err != nil && !errors.Is(err, state.ErrClaimSettled) {
 		assemblyWarn("tagent: the settle release of %s reported: %v", seat.Notice.FactKey(), err)
 	}
 }

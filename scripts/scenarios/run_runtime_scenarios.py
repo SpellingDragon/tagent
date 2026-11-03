@@ -34,6 +34,8 @@ schema v2（`event-integrity` 合同）额外能力，v1 行为不变：
     -count=1 [-tags …] [-race] -json`，一个 (module, tags, race) 组一次调用；
   * `--repeat N`：N 次独立进程（每次独立 UUID run_id、目录 `repeat-<i>/`、
     test-log 与 evidence）；底层一律 `-count=1`，禁止用 `-count=N` 冒充多轮；
+  * `--repeat-index I`：只跑第 I 轮（1..合同 repeat）并写该轮证据，repeat_total
+    仍取合同值；与 `--repeat` 混用、越界或用于 v1 合同均具名拒绝；
   * `--seed`/`--window`：必须是合同 matrix 内的成对组合，追加 `-args`；
   * `--test-id <leaf>/<TestName>`（可重复）：按合同 id 精确选择子集，未登记即用法错误；
   * 零匹配即失败：进程退出 0 但日志里没有该测试的 run 终局时判 unattested，
@@ -913,12 +915,23 @@ def execute_event(args, root: str, contract: dict, contract_path: str) -> dict:
     index = index_event_tests(contract)
     selected, remaining = event_selection(contract, index, args.scope, args.test_id)
     seed, window = event_matrix_pair(contract, args.seed, args.window)
-    if args.repeat is not None:
+    if args.repeat_index is not None:
+        if args.repeat is not None:
+            raise RunnerError("--repeat-index and --repeat are mutually exclusive: a shard runs "
+                              "exactly one round and repeat_total always comes from the contract")
+        repeat_total = event_scope_repeat(contract, args.scope)
+        if not 1 <= args.repeat_index <= repeat_total:
+            raise RunnerError("--repeat-index must be between 1 and {} for scope {!r}, got {}"
+                              .format(repeat_total, args.scope, args.repeat_index))
+        repeat_indexes = [args.repeat_index]
+    elif args.repeat is not None:
         if type(args.repeat) is not int or args.repeat < 1:
             raise RunnerError("--repeat must be a positive integer")
         repeat_total = args.repeat
+        repeat_indexes = range(1, repeat_total + 1)
     else:
         repeat_total = event_scope_repeat(contract, args.scope)
+        repeat_indexes = range(1, repeat_total + 1)
     groups = event_groups(index, selected)
     collected = {}
     for group in groups:
@@ -934,7 +947,7 @@ def execute_event(args, root: str, contract: dict, contract_path: str) -> dict:
         tempfile.gettempdir(), "tagent-runtime-scenarios", "{}-{}".format(stamp, args.scope))
     os.makedirs(out_dir, exist_ok=True)
     repeats = []
-    for repeat_index in range(1, repeat_total + 1):
+    for repeat_index in repeat_indexes:
         repeats.append(run_event_repeat(args, root, index, groups, selected, seed, window,
                                         repeat_index, repeat_total, out_dir,
                                         contract_digest, fingerprints))
@@ -1037,6 +1050,9 @@ def parse_args(argv):
     parser.add_argument("--timeout", type=float, default=900.0, help="go test 超时秒数")
     parser.add_argument("--repeat", type=int, default=None,
                         help="v2：独立进程重复次数（默认取合同 scope 声明的 repeat；禁止 -count=N 冒充）")
+    parser.add_argument("--repeat-index", type=int, default=None,
+                        help="v2：只跑第 I 轮分片（1..合同 repeat；repeat_total 仍取合同值，"
+                             "不可与 --repeat 混用）")
     parser.add_argument("--seed", type=int, default=None,
                         help="v2：矩阵 seed（必须与 --window 成对且落在合同 matrix 内）")
     parser.add_argument("--window", type=int, default=None,
@@ -1054,9 +1070,10 @@ def execute(args) -> dict:
     contract = read_contract_object(contract_path)
     if contract.get("schema_version") == EVENT_SCHEMA_VERSION:
         return execute_event(args, root, contract, contract_path)
-    if args.repeat is not None or args.seed is not None or args.window is not None or args.test_id:
-        raise RunnerError("--repeat/--seed/--window/--test-id require a schema v2 event contract; "
-                          "the v1 contract keeps its single fixed command")
+    if (args.repeat is not None or args.repeat_index is not None or args.seed is not None
+            or args.window is not None or args.test_id):
+        raise RunnerError("--repeat/--repeat-index/--seed/--window/--test-id require a schema v2 "
+                          "event contract; the v1 contract keeps its single fixed command")
     contract = load_contract(contract_path)
     index = index_scenarios(contract)
     validate_axes(index)

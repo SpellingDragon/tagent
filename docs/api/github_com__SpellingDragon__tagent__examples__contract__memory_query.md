@@ -7,6 +7,12 @@ caller.
 
 FUNCTIONS
 
+func ExampleAttentionReading()
+    ExampleAttentionReading gathers the attention dimension through the optional
+    read face: the questions the owners still hold as questions are read from
+    that face, and a port that wires none refuses the dimension by name instead
+    of answering an empty presence.
+
 func ExampleDetailSource()
     ExampleDetailSource materializes one page of a frozen reading and reports
     an identity outside that reading as not held instead of serving an empty

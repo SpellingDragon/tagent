@@ -148,10 +148,12 @@ type decisionRound struct {
 	timeout time.Duration
 }
 
-// closingRoundDue reports why the closing round of one drive is due now, or
-// FinalRoundNone while the drive may continue. Both budgets are read at a round
-// boundary, so a decision already in flight is never cut by this reading.
-func closingRoundDue(policy FinalRoundPolicy, rounds int, elapsed time.Duration) FinalRoundReason {
+// FinalRoundDue reports why the closing round of one range is due at the budget
+// it has spent, or FinalRoundNone while the range may continue: the judgment the
+// loop reads at its own decision boundary, and the one a producer files as the
+// final_round.request fact of the range it judged. Both budgets are read at a
+// round boundary, so a decision already in flight is never cut by this reading.
+func FinalRoundDue(policy FinalRoundPolicy, rounds int, elapsed time.Duration) FinalRoundReason {
 	if policy.MaxRounds > 0 && rounds >= policy.MaxRounds {
 		return FinalRoundRounds
 	}
@@ -165,7 +167,7 @@ func closingRoundDue(policy FinalRoundPolicy, rounds int, elapsed time.Duration)
 // closing round a spent budget owes, or the ordinary round the drive continues
 // with.
 func closingRound(policy FinalRoundPolicy, rounds int, elapsed time.Duration) decisionRound {
-	reason := closingRoundDue(policy, rounds, elapsed)
+	reason := FinalRoundDue(policy, rounds, elapsed)
 	if reason == FinalRoundNone {
 		return decisionRound{}
 	}

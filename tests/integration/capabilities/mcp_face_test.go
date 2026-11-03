@@ -58,8 +58,8 @@ func TestMCPFaceBindsTheDeclaredServers(t *testing.T) {
 		if err != nil {
 			t.Fatalf("invoke the MCP face: %v", err)
 		}
-		if turn.Terminal != model.KindCompleted || len(turn.Decisions) != 2 {
-			t.Fatalf("turn = (%v, %d decisions), want the completed terminal beside two decisions", turn.Terminal, len(turn.Decisions))
+		if turn.Terminal != model.KindCompleted || turn.DecisionCount != 2 {
+			t.Fatalf("turn = (%v, %d decisions), want the completed terminal beside two decisions", turn.Terminal, turn.DecisionCount)
 		}
 		if got := alpha.callCount("echo"); got != 1 {
 			t.Errorf("fake server calls = %d, want the gateway to reach the declared server exactly once", got)

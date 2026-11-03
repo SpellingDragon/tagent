@@ -26,6 +26,23 @@ import (
 // smokeDataRounds 是导出对账驱动的轮数：落在 5-10 轮的窗口里，每轮一个唯一标记。
 const smokeDataRounds = 6
 
+// smokeChainTurn 是导出配对的一个单位：一个段呈现的输入与回答它的那次 assistant 输出。
+type smokeChainTurn struct {
+	input string
+	label string
+}
+
+// smokeChainAppend 把一段正文接到配对的一侧：空正文不占一侧，也不添空行。
+func smokeChainAppend(acc, content string) string {
+	if content == "" {
+		return acc
+	}
+	if acc == "" {
+		return content
+	}
+	return acc + "\n" + content
+}
+
 // TestLocalSmokeWave2Data 是第二波数据面入口。
 // - chain export: the formal Run answers rl.FactReader and every row pairs one round
 // - call_subagent: the document grants the tool and one call runs the assembly end to end
@@ -51,34 +68,42 @@ func TestLocalSmokeWave2Data(t *testing.T) {
 
 		inputs := map[event.InvocationID]string{}
 		outputs := map[event.InvocationID]string{}
+		turns := make([]smokeChainTurn, 0, len(markers))
+		open := -1
 		for _, fact := range rig.sessionFacts(chat) {
 			switch fact.Type {
 			case event.TypeExternalInput:
 				inputs[fact.InvocationID] = fact.Message.Content
+				if open < 0 {
+					turns = append(turns, smokeChainTurn{})
+					open = len(turns) - 1
+				}
+				turns[open].input = smokeChainAppend(turns[open].input, fact.Message.Content)
 			case event.TypeAgentOutput:
 				outputs[fact.InvocationID] = fact.Message.Content
-			}
-		}
-		for _, marker := range markers {
-			var invocation event.InvocationID
-			for id, input := range inputs {
-				if strings.Contains(input, marker) {
-					invocation = id
-					break
+				if open < 0 {
+					turns = append(turns, smokeChainTurn{})
+					open = len(turns) - 1
 				}
-			}
-			if invocation == "" {
-				t.Fatalf("round %s committed no external input on %s", marker, addr.SessionID)
-			}
-			if want := "answer " + marker; outputs[invocation] != want {
-				t.Fatalf("round %s output = %q, want %q (invocation %s)",
-					marker, outputs[invocation], want, invocation)
+				turns[open].label = smokeChainAppend(turns[open].label, fact.Message.Content)
+				open = -1
 			}
 		}
-		t.Logf("[wave2-data] chain facts: %d external inputs, %d agent outputs, %d invocations",
-			len(inputs), len(outputs), len(inputs))
+		if len(turns) != len(markers) {
+			t.Fatalf("the chain closed %d turn(s) on %s, want %d", len(turns), addr.SessionID, len(markers))
+		}
+		for i, marker := range markers {
+			if want := marker + " plain question"; turns[i].input != want {
+				t.Fatalf("round %d input = %q, want the round's own question %q", i+1, turns[i].input, want)
+			}
+			if want := "answer " + marker; turns[i].label != want {
+				t.Fatalf("round %d output = %q, want %q", i+1, turns[i].label, want)
+			}
+		}
+		t.Logf("[wave2-data] chain turns: %d external inputs over %d invocation(s), %d agent outputs",
+			len(inputs), len(inputs), len(outputs))
 
-		// 导出面可达：正式 Run 直接满足 FactReader，导出按 invocation 配对。
+		// 导出面可达：正式 Run 直接满足 FactReader，导出按链序配对（输入开口、回答闭口）。
 		var reader rl.FactReader = rig.host.Run()
 		exporter := rl.NewChainExporter(reader)
 		samples, err := exporter.Export(context.Background(), rl.ExportOptions{

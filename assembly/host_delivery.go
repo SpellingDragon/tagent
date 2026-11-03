@@ -41,19 +41,23 @@ const failureNoticeTruncated = "（已截断）"
 // by.
 const failureNoticeSummary = "failure-notice"
 
-// deliverFresh delivers the assistant bodies the session's committed facts carry past
-// the invocation baseline through the sender; a session the chain maps onto a projection
-// commits no transcript history, so the facts are the one read face both session kinds share.
+// deliverFresh delivers the assistant bodies the invocation that just ended
+// generated through the sender; a session the chain maps onto a projection
+// commits no transcript history, so the facts are the one read face both session
+// kinds share. The bodies are read by the identity of that invocation, never by a
+// position of the chain: the chain is held to the hot window of its session, so a
+// position read at an earlier moment names other material.
 //   - A body wins over a failure: a turn that produced a deliverable answer delivers it.
 //   - A failed turn without a body delivers the raw recorded cause; no cause stays silent.
 //   - Each body stands as a durable delivery obligation before its send: a stop between the
 //     record and the confirmed send is answered by a restart that sends the body, and the
 //     obligation is settled under the identity the generation registered.
-func (h *Host) deliverFresh(ctx context.Context, addr event.Address, baseline int, sender MessageSender, lineage string, turn agent.Turn) {
+//   - Only a body whose obligation is still owed is sent: a body an earlier process delivered under the same invocation identity carries a settled receipt and is left as it stands. A run beside no durable account sends every body it generated, because nothing outside it ever recorded a discharge.
+func (h *Host) deliverFresh(ctx context.Context, addr event.Address, sender MessageSender, lineage string, turn agent.Turn) {
 	if sender == nil {
 		return
 	}
-	bodies := freshAssistantOf(h.run.SessionFacts(addr), baseline)
+	bodies := generatedBodiesOf(h.run.SessionFacts(addr), turn.InvocationID)
 	if len(bodies) == 0 {
 		if turn.Terminal == model.KindFailed {
 			if notice := failureNoticeText(turn.Failure); notice != "" {
@@ -67,10 +71,16 @@ func (h *Host) deliverFresh(ctx context.Context, addr event.Address, baseline in
 		assemblyDebug("tagent: the invocation of %s produced no deliverable assistant body", addr.SessionID)
 		return
 	}
-	if _, err := h.recordDeliveryOwed(ctx, addr, lineage, bodies); err != nil {
-		assemblyWarn("tagent: the delivery obligations of %s were not registered: %v", addr.SessionID, err)
+	owed := bodies
+	if h.deliveryDurable() != nil && addr.AgentID == h.entryAgent() {
+		filtered, err := h.recordDeliveryOwed(ctx, addr, lineage, bodies)
+		if err != nil {
+			assemblyWarn("tagent: the delivery obligations of %s were not registered: %v", addr.SessionID, err)
+		} else {
+			owed = filtered
+		}
 	}
-	for _, body := range bodies {
+	for _, body := range owed {
 		obligation, _ := freshObligationOf(body)
 		delivery := plugin.Delivery{Content: body.content, Lineage: lineage, Target: addr}
 		if _, cause := h.deliverObligation(ctx, obligation, sender, delivery); cause != "" {
@@ -302,15 +312,16 @@ func (h *Host) recordDeliveryState(ctx context.Context, held *heldDelivery, stat
 // barrier is taken only by a batch that staged a record: a set made entirely of
 // records an earlier call already committed carries nothing new to sync.
 //
-// Only a body generated at the entry address takes an obligation at all: every
-// other address is driven headless, which means its answer is read by the caller
-// that drove it and never pushed to a message channel. That is the same reader
-// the live delivery applies, so the record and the send agree on which addresses
-// own a delivery. A run beside no storage tier registers nothing: its deliveries
-// are process-local.
+// Only a body generated at the entry address the generation in effect declares
+// takes an obligation at all: every other address is driven headless, which means
+// its answer is read by the caller that drove it and never pushed to a message
+// channel. That is the same reader the live delivery applies, so the record and
+// the send agree on which addresses own a delivery, including after a reload moves
+// the entry. A run beside no storage tier registers nothing: its deliveries are
+// process-local.
 func (h *Host) recordDeliveryOwed(ctx context.Context, addr event.Address, lineage string, bodies []freshBody) ([]freshBody, error) {
 	log := h.deliveryDurable()
-	if log == nil || len(bodies) == 0 || addr.AgentID != h.entry {
+	if log == nil || len(bodies) == 0 || addr.AgentID != h.entryAgent() {
 		return nil, nil
 	}
 	owed := make([]freshBody, 0, len(bodies))
@@ -470,11 +481,12 @@ func (h *Host) holdDelivery(ctx context.Context, obligation string, delivery plu
 // behind the identities continues past the restored ones. A body the account
 // holds as owed — generated and never sent — is sent here through the review
 // ruling the live path applies, so a restart delivers what a stop left behind
-// instead of dropping it; an owed body whose target is not the entry address is
-// retired without a send instead, because a headless address's answer belongs to
-// the caller that drove it and never to a message channel. A record that names no
-// identity, or a body that does not unmarshal, refuses the boot by name: the host
-// never starts beside an obligation it cannot honor.
+// instead of dropping it; an owed body whose target is not the entry address the
+// generation in effect declares is retired without a send instead, because a
+// headless address's answer belongs to the caller that drove it and never to a
+// message channel. A record that names no identity, or a body that does not
+// unmarshal, refuses the boot by name: the host never starts beside an obligation
+// it cannot honor.
 func (h *Host) restorePendingDeliveries(ctx context.Context) error {
 	log := h.deliveryDurable()
 	if log == nil {
@@ -503,7 +515,7 @@ func (h *Host) restorePendingDeliveries(ctx context.Context) error {
 		}
 		switch record.Status {
 		case hostDeliveryOwed:
-			if record.Target.AgentID != h.entry {
+			if record.Target.AgentID != h.entryAgent() {
 				h.retireHeadlessDelivery(ctx, record)
 				continue
 			}
@@ -808,38 +820,42 @@ func assistantBodyOf(evt event.Event) (freshBody, bool) {
 	return freshBody{fact: evt.Key, content: content}, true
 }
 
-// freshAssistantOf reports the plain assistant bodies one session's committed
-// facts carry past the baseline: the bodies the invocation that just ended
-// produced, and nothing an earlier delivery already carried.
-func freshAssistantOf(facts []event.Event, baseline int) []freshBody {
-	if baseline > len(facts) {
-		baseline = len(facts)
-	}
-	bodies := make([]freshBody, 0, 4)
-	for _, evt := range facts[baseline:] {
-		if body, ok := assistantBodyOf(evt); ok {
-			bodies = append(bodies, body)
-		}
-	}
-	return bodies
-}
-
 // generatedBodiesOf reports the plain assistant bodies one invocation generated:
-// the bodies the follow-up turn of a notification committed under its own
-// four-part identity, read back from the chain a restart rebuilt. A drive names
-// its facts by invocation identity, so the bodies of the turn are recoverable
-// after the process that generated them is gone.
+// the bodies the turn committed under its own four-part identity, read back from
+// the chain a restart rebuilt. A drive names its facts by invocation identity, so
+// the bodies of the turn are recoverable after the process that generated them is
+// gone, and the delivery of a closed segment, the hand-off of a settled notice and
+// the registration a follow-up turn leaves all read the same set.
 func generatedBodiesOf(facts []event.Event, invocation event.InvocationID) []freshBody {
 	if invocation == "" {
 		return nil
 	}
-	bodies := make([]freshBody, 0, 2)
+	inputs := map[event.EventID]bool{}
 	for _, evt := range facts {
-		if evt.InvocationID != invocation {
+		if evt.InvocationID == invocation && evt.Type != event.TypeAgentOutput && evt.Key != "" {
+			inputs[evt.Key] = true
+		}
+	}
+	bodies := make([]freshBody, 0, 2)
+	seen := map[event.EventID]bool{}
+	for _, evt := range facts {
+		related := evt.InvocationID == invocation
+		if evt.Type == event.TypeAgentOutput {
+			var consumed []event.EventID
+			if err := json.Unmarshal([]byte(evt.Meta[event.MetaKeyInputEvents]), &consumed); err == nil {
+				for _, key := range consumed {
+					related = related || inputs[key]
+				}
+			}
+		}
+		if !related || (evt.Key != "" && seen[evt.Key]) {
 			continue
 		}
 		if body, ok := assistantBodyOf(evt); ok {
 			bodies = append(bodies, body)
+			if evt.Key != "" {
+				seen[evt.Key] = true
+			}
 		}
 	}
 	return bodies

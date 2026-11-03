@@ -62,10 +62,10 @@ func TestDeclarationDrivesTheClosingRound(t *testing.T) {
 		if turn.FinalRound != agent.FinalRoundRounds {
 			t.Fatalf("final round reason = %q, want %q", turn.FinalRound, agent.FinalRoundRounds)
 		}
-		if len(turn.Decisions) != 2 || turn.Terminal != model.KindCompleted {
-			t.Fatalf("turn = (%v, %d decisions), want the tool round beside the closing round", turn.Terminal, len(turn.Decisions))
+		if turn.DecisionCount != 2 || turn.Terminal != model.KindCompleted {
+			t.Fatalf("turn = (%v, %d decisions), want the tool round beside the closing round", turn.Terminal, turn.DecisionCount)
 		}
-		if got := closingTail(t, turn); got != budgetPrompt {
+		if got := closingTail(t, provider); got != budgetPrompt {
 			t.Fatalf("closing request ends on %q, want the instruction the declaration names", got)
 		}
 		if got := tool.calls(); got != 1 {
@@ -105,11 +105,12 @@ func TestDeclarationDrivesTheClosingRound(t *testing.T) {
 		}
 		cases := []struct {
 			agent     event.AgentID
+			provider  *convModel
 			decisions int
 			prompt    string
 		}{
-			{agent: "agent-a", decisions: 3, prompt: budgetPrompt},
-			{agent: "agent-b", decisions: 2, prompt: "close agent b out"},
+			{agent: "agent-a", provider: modelA, decisions: 3, prompt: budgetPrompt},
+			{agent: "agent-b", provider: modelB, decisions: 2, prompt: "close agent b out"},
 		}
 		for _, tc := range cases {
 			turn, err := run.Invoke(ctx, assembly.InvokeRequest{
@@ -123,10 +124,10 @@ func TestDeclarationDrivesTheClosingRound(t *testing.T) {
 			if turn.FinalRound != agent.FinalRoundRounds {
 				t.Fatalf("final round reason of %q = %q, want %q", tc.agent, turn.FinalRound, agent.FinalRoundRounds)
 			}
-			if len(turn.Decisions) != tc.decisions {
-				t.Fatalf("decisions of %q = %d, want %d beside its own round budget", tc.agent, len(turn.Decisions), tc.decisions)
+			if turn.DecisionCount != tc.decisions {
+				t.Fatalf("decisions of %q = %d, want %d beside its own round budget", tc.agent, turn.DecisionCount, tc.decisions)
 			}
-			if got := closingTail(t, turn); got != tc.prompt {
+			if got := closingTail(t, tc.provider); got != tc.prompt {
 				t.Fatalf("closing request of %q ends on %q, want %q", tc.agent, got, tc.prompt)
 			}
 		}
@@ -169,8 +170,8 @@ func TestDeclarationDrivesTheClosingRound(t *testing.T) {
 		if turn.FinalRound != agent.FinalRoundNone {
 			t.Fatalf("final round reason = %q, want no closing round on a declaration naming no budget", turn.FinalRound)
 		}
-		if len(turn.Decisions) != 2 || turn.Terminal != model.KindCompleted {
-			t.Fatalf("turn = (%v, %d decisions), want the tool round beside the answer", turn.Terminal, len(turn.Decisions))
+		if turn.DecisionCount != 2 || turn.Terminal != model.KindCompleted {
+			t.Fatalf("turn = (%v, %d decisions), want the tool round beside the answer", turn.Terminal, turn.DecisionCount)
 		}
 		if got := tool.calls(); got != 1 {
 			t.Fatalf("tool executions = %d, want the admitted call executed once", got)
@@ -208,11 +209,11 @@ func TestDeclarationDrivesTheClosingRound(t *testing.T) {
 		if turn.FinalRound != agent.FinalRoundBudget {
 			t.Fatalf("final round reason = %q, want %q", turn.FinalRound, agent.FinalRoundBudget)
 		}
-		if got := closingTail(t, turn); got != budgetPrompt {
+		if got := closingTail(t, provider); got != budgetPrompt {
 			t.Fatalf("closing request ends on %q, want the instruction the declaration names", got)
 		}
-		if got, want := tool.calls(), len(turn.Decisions)-1; got != want {
-			t.Fatalf("tool executions = %d, want one per ordinary round and none past the spent time budget (%d decisions)", got, len(turn.Decisions))
+		if got, want := tool.calls(), turn.DecisionCount-1; got != want {
+			t.Fatalf("tool executions = %d, want one per ordinary round and none past the spent time budget (%d decisions)", got, turn.DecisionCount)
 		}
 	})
 }
@@ -247,12 +248,13 @@ func assembleBudgeted(t *testing.T, ctx context.Context, decl *config.Declaratio
 
 // closingTail reports the content of the last message the latest decision
 // assembled, which is where a drive appends the closing instruction.
-func closingTail(t *testing.T, turn agent.Turn) string {
+func closingTail(t *testing.T, provider *convModel) string {
 	t.Helper()
-	if len(turn.Decisions) == 0 {
-		t.Fatal("turn carries no decision, want the closing round among them")
+	requests := provider.recorded()
+	if len(requests) == 0 {
+		t.Fatal("provider recorded no request, want the closing round among them")
 	}
-	messages := turn.Decisions[len(turn.Decisions)-1].Request.Messages
+	messages := requests[len(requests)-1].Messages
 	if len(messages) == 0 {
 		t.Fatal("closing request carries no message")
 	}

@@ -28,3 +28,8 @@ func ExampleRegistry()
     of the same task, resumes it under the same identity and cancels it without
     touching any other task.
 
+func ExampleUnsettledSource()
+    ExampleUnsettledSource reads one rest criterion at the commit sequence the
+    account stands at: the account answers at rest while it holds nothing open
+    and names the one task it still holds once the work is admitted.
+

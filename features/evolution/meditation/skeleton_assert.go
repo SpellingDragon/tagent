@@ -15,8 +15,6 @@ import (
 	"github.com/SpellingDragon/tagent/api/event"
 	"github.com/SpellingDragon/tagent/api/plugin"
 	"github.com/SpellingDragon/tagent/memory"
-
-	trpctool "trpc.group/trpc-go/trpc-agent-go/tool"
 )
 
 // The domain's judgments keep their declared shapes: one event in and one verdict
@@ -56,10 +54,11 @@ var (
 // The loop's config, receipt and tick records keep every documented field.
 var (
 	_ = ReflectionConfig{
-		Loop:    ReflectionLoop{Agent: "", Session: ""},
-		Face:    ReflectionFace{ObservedNamespaces: []string{}, ReadNamespaces: []string{}, PageLimit: 0, FactLimit: 0},
-		Cadence: ReflectionCadence{Interval: 0, MinGap: 0},
-		Prompt:  "",
+		Loop:     ReflectionLoop{Agent: "", Session: ""},
+		Face:     ReflectionFace{ObservedNamespaces: []string{}, ReadNamespaces: []string{}, PageLimit: 0, FactLimit: 0},
+		Cadence:  ReflectionCadence{Interval: 0, MinGap: 0},
+		Prompt:   "",
+		Delivery: ReflectionDelivery{Targets: []string{}, Sessions: nil},
 	}
 
 	_ = ReflectionReceipt{Key: "", Outcome: ReflectionConsumed, At: time.Time{}, Reason: ""}
@@ -167,21 +166,10 @@ var (
 	_ plugin.PostCommitObserver = (*Driver)(nil)
 )
 
-// The cross-session write face keeps its declared shapes: one event committed
-// into the chain of an explicit address, the live bindings a target resolves
-// against, and the model-visible tool that decides to write.
+// The live-binding face a delivery target resolves against keeps its declared shape:
+// the complete addresses of the sessions one agent is bound to.
 var (
-	_ func(EventSink, context.Context, event.Address, event.Event) (event.EventID, error) = EventSink.CommitToSession
-	_ func(SessionQuery, event.AgentID) []event.Address                                   = SessionQuery.ActiveSessions
+	_ func(SessionQuery, event.AgentID) []event.Address = SessionQuery.ActiveSessions
 
-	_ func([]string, EventSink, SessionQuery) *DeliverSummaryTool = NewDeliverSummaryTool
-
-	_ func(*DeliverSummaryTool) *trpctool.Declaration                 = (*DeliverSummaryTool).Declaration
-	_ func(*DeliverSummaryTool, context.Context, []byte) (any, error) = (*DeliverSummaryTool).Call
-
-	_ trpctool.CallableTool = (*DeliverSummaryTool)(nil)
-
-	_ = DeliverSummaryContentMax
-	_ = DeliverSummarySummaryMax
-	_ = DeliverSummaryToolName
+	_ = ReflectionDelivery{Targets: []string{}, Sessions: nil}
 )

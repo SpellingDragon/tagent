@@ -1,0 +1,11 @@
+# 01 send-tool-face 孙任务
+
+验证约定：`go test -run '^TestName$' -count=1` 与测试名逐字符一致；正锚具名测试、负锚具名错误路径、消费者锚经 `assembly.Boot` 正式入口。质量门：本域触碰 `assembly/` 导出面时跑 `bash scripts/gates/gen_godoc.sh --check`（5.7 零容忍门自清）。
+
+- [x] 0.1 S2 红锚立起：`tests/integration/execution/send_symptom_test.go` 写 `TestSendSymptomReentersAgentTask`（main 调 `send{target:{task}}` 重入 agent tool task 并续行），当前必红且红因命中"重入不可达/参数面不存在" —— 验证：`go test ./tests/integration/execution -run '^TestSendSymptomReentersAgentTask$' -count=1 -json` 红项含语义红因（编译失败/零匹配不算红）
+- [x] 0.2 冻结参数面常数：`hostSendTargetTaskKey`/`hostSendTargetAgentKey`/`hostSendTargetSessionKey` 与回执前缀常量入 `assembly/host_tools.go`，design D6 词表逐字符一致 —— 验证：`go test ./assembly -run '^TestSendTargetConstants$' -count=1`；负锚 `rejects_dialect_drift`
+- [x] 1.1 重写 Declaration：职责文案"Deliver one body across tasks and sessions"类语义（跨 task、会话通信），删出网承诺；InputSchema 换 `target` 对象二选一 + `content` —— 验证：`go test ./assembly -run '^TestSendDeclarationRewrite$' -count=1`；负锚 `declaration_has_no_channel_wording`（描述含"user address"/"deliver to the user"即红）
+- [x] 1.2 target 解析与拒绝面：双目标同现/皆缺/未知字段/空 content 具名拒绝，回执 `[send_denied]` —— 验证：`go test ./assembly -run '^TestSendTargetResolution$' -count=1`；负锚 `rejects_both_targets`、`rejects_missing_target`、`rejects_unknown_fields`
+- [x] 1.3 旧出网语义删除（DEL-1）：删除 `hostSendTool.deliver` 字段与 send 侧 `plugin.Delivery` 构造；`hostSendLineage`/`hostSendLineageOf` 无新消费者则一并删；伴生引用降级检查（单使用方回卷）；`bootDeliveryHost` 类测试（tests/integration/host）**场景迁移不删场景**（改为回合正文出网或新语义） —— 验证：`go test ./tests/integration/host -run '^TestSendDeliversNoChannelBody$' -count=1`；`grep -c "hostSendLineage" --include=*.go -r .` 零残留或注释说明保留理由；消费者锚：`assembly.Boot` 装配面（编排者复验：host 全量 -skip Attention 绿 50.4s、grep 零残留）
+- [x] 1.4 装配规则更新（DEL-6）：删除 `declaresSendOutside` 的 send 校验分支（`ErrHostSenderMissing` 的 send 分支随之删，函数单使用方回卷）；冥想会话禁 send 规则保留并回归 —— 验证：`go test ./assembly -run '^TestHostSendAssemblyRules$' -count=1`；负锚 `rejects_send_on_meditation_agent`、`boots_beside_no_sender`；`grep -c "declaresSendOutside" --include=*.go -r .` 零残留或收缩后单使用说明（编排者复验：锚绿+grep 零残留）
+- [ ] 1.5 S1 症状锚立起：`TestSendSymptomOnlyOneCommunicationTool`（工具面恰一个通信工具、无 deliver_summary/resume_task）随本域+03 域完成转绿 —— 验证：`go test ./tests/integration/execution -run '^TestSendSymptomOnlyOneCommunicationTool$' -count=1`（本叶先红，03 合并后绿）

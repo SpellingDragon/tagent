@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strconv"
 	"sync"
+	"time"
 
 	trpclog "trpc.group/trpc-go/trpc-agent-go/log"
 
@@ -40,11 +41,12 @@ type FactLog interface {
 	Sync(ctx context.Context) error
 }
 
-// factPrefix, specPrefix, consumePrefix and attemptPrefix locate the four
-// durable record kinds the carrier keeps on one log: the commit facts, the
-// admission material of their tasks, the receipt of each logical consumption a
-// notification completed, and the attempt the follow-up turn of one notification
-// is. Each reuses the existing persistent identity material (the task_spawned
+// factPrefix, specPrefix, consumePrefix, attemptPrefix and rejectPrefix locate
+// the five durable record kinds the carrier keeps on one log: the commit facts,
+// the admission material of their tasks, the receipt of each logical
+// consumption a notification completed, the attempt the follow-up turn of one
+// notification is, and the feedback fact of each notification a target refused.
+// Each reuses the existing persistent identity material (the task_spawned
 // record, the settle records and the notice identity), so the durable commit
 // needs no other database and no second consumption state.
 const (
@@ -52,6 +54,7 @@ const (
 	specPrefix    = "tagent/task/v1/spec:"
 	consumePrefix = "tagent/task/v1/consume:"
 	attemptPrefix = "tagent/task/v1/attempt:"
+	rejectPrefix  = "tagent/task/v1/reject:"
 )
 
 // mutationKey is the idempotency identity of one mutation: the task it changes
@@ -98,6 +101,53 @@ type attemptRecorder interface {
 	attemptOf(notice task.Notice) (SettleAttempt, bool)
 }
 
+// Rejection is the durable feedback fact of one notification a target refused:
+// the identity of the notification it answers, the routing the delivery was
+// offered to, and the reason the target gave. The record is the consumption
+// result of that notification, so a carrier opened over the same log reads the
+// refusal back and owes the notification no delivery a second time.
+type Rejection struct {
+	Notice   task.Notice      `json:"notice"`
+	Target   event.Address    `json:"target"`
+	Instance event.InstanceID `json:"instance"`
+	Reason   string           `json:"reason"`
+	At       time.Time        `json:"at"`
+}
+
+// Feedback reports the refusal as the feedback fact it is: an audit fact of the
+// target address, carrying the notification it answers beside the reason in its
+// metadata and no model payload in its message, so the fact enters no model
+// request.
+func (r Rejection) Feedback() event.Event {
+	return event.Event{
+		Type:      event.TypeFeedback,
+		Timestamp: r.At,
+		TaskID:    r.Notice.TaskID,
+		Owner:     r.Target,
+		Source:    r.Target,
+		Target:    r.Target,
+		Meta: map[string]string{
+			event.MetaKeyEventSummary: r.Reason,
+			event.MetaKeyTaskID:       string(r.Notice.TaskID),
+			event.MetaKeyNoticeKind:   string(r.Notice.Kind),
+		},
+	}
+}
+
+// rejectionRecorder is the durable record of the notifications a target refused:
+// it is staged beside the consumption receipts, so a mailbox restored over the
+// same log reads the refusals the stopped process landed.
+type rejectionRecorder interface {
+	// recordRejection stages one refusal behind the sync barrier, and a repeated
+	// refusal of the same notification stages no second one.
+	recordRejection(ctx context.Context, rejection Rejection) error
+	// refusalOf reports the refusal of one notification and whether the log
+	// holds one at all.
+	refusalOf(notice task.Notice) (Rejection, bool)
+	// refusals reports every refusal the log holds.
+	refusals() []Rejection
+}
+
 // ErrNoticeNotOwed reports an acceptance of a notification the carrier holds no
 // delivery obligation for, so there is no delivery state to advance.
 var ErrNoticeNotOwed = errors.New("state: the notification carries no delivery obligation")
@@ -130,6 +180,7 @@ type DurableCommit struct {
 	owed      map[noticeKey]task.OutboxNotice
 	consumed  map[noticeKey]struct{}
 	attempts  map[noticeKey]SettleAttempt
+	rejected  map[noticeKey]Rejection
 }
 
 // DurableCommit satisfies the task commit port.
@@ -152,6 +203,7 @@ func NewDurableCommit(log FactLog, uncertain task.UncertainProbe) (*DurableCommi
 		owed:      map[noticeKey]task.OutboxNotice{},
 		consumed:  map[noticeKey]struct{}{},
 		attempts:  map[noticeKey]SettleAttempt{},
+		rejected:  map[noticeKey]Rejection{},
 	}
 	if err := d.load(context.Background()); err != nil {
 		durableError("tagent: durable commit load failed err=%v", err)
@@ -202,6 +254,17 @@ func (d *DurableCommit) load(ctx context.Context) error {
 		d.attempts[noticeKey{task: record.TaskID, round: record.Round,
 			kind: record.Kind, seq: record.Seq}] = record.Attempt
 	}
+	rejections, err := d.log.Scan(ctx, rejectPrefix)
+	if err != nil {
+		return err
+	}
+	for _, body := range rejections {
+		var rejection Rejection
+		if err := json.Unmarshal(body, &rejection); err != nil {
+			return err
+		}
+		d.rejected[noticeKeyOf(rejection.Notice)] = rejection
+	}
 	facts, err := d.log.Scan(ctx, factPrefix)
 	if err != nil {
 		return err
@@ -226,6 +289,9 @@ func (d *DurableCommit) load(ctx context.Context) error {
 			}
 			for _, envelope := range record.Outbox {
 				if _, consumed := d.consumed[noticeKeyOf(envelope.Notice)]; consumed {
+					continue
+				}
+				if _, rejected := d.rejected[noticeKeyOf(envelope.Notice)]; rejected {
 					continue
 				}
 				d.owed[noticeKey{task: envelope.Notice.TaskID, round: envelope.Notice.Round,
@@ -343,6 +409,94 @@ func (d *DurableCommit) recordConsumption(ctx context.Context, notice task.Notic
 	d.consumed[key] = struct{}{}
 	delete(d.owed, key)
 	return nil
+}
+
+// recordRejection stores the feedback fact of one notification a target refused
+// behind the sync barrier, so a carrier opened over the same log reads that
+// refusal and owes the notification no delivery a second time. The refusal is
+// keyed by the notice's four-part identity: a repeated refusal of the same
+// identity stages no second fact and reports success. A barrier that did not
+// complete reports the write failure and confirms nothing, so the caller keeps
+// the notification owed rather than closing it on an unconfirmed write.
+func (d *DurableCommit) recordRejection(ctx context.Context, rejection Rejection) error {
+	if d == nil {
+		return nil
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	notice := rejection.Notice
+	if notice.TaskID == "" {
+		return ErrNoticeIdentityMissing
+	}
+	key := noticeKeyOf(notice)
+	if _, done := d.rejected[key]; done {
+		return nil
+	}
+	body, err := json.Marshal(rejection)
+	if err != nil {
+		durableError("tagent: durable refusal encode failed task=%s notice=%s err=%v",
+			notice.TaskID, notice.FactKey(), err)
+		return err
+	}
+	if err := d.log.Put(ctx, rejectKey(notice), body); err != nil {
+		durableError("tagent: durable refusal write failed task=%s notice=%s result=owed err=%v",
+			notice.TaskID, notice.FactKey(), err)
+		return err
+	}
+	if err := d.log.Sync(ctx); err != nil {
+		durableError("tagent: durable refusal barrier failed task=%s notice=%s result=owed err=%v",
+			notice.TaskID, notice.FactKey(), err)
+		return err
+	}
+	d.rejected[key] = rejection
+	delete(d.owed, key)
+	return nil
+}
+
+// Rejections reports every refusal the carrier holds, in the stable task, round,
+// kind and sequence order of the notifications they answer.
+func (d *DurableCommit) Rejections() []Rejection {
+	return d.refusals()
+}
+
+// refusalOf reports the refusal one notification carries, and whether the log
+// holds one at all: a notification with no refusal is still owed its delivery.
+func (d *DurableCommit) refusalOf(notice task.Notice) (Rejection, bool) {
+	if d == nil {
+		return Rejection{}, false
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	rejection, held := d.rejected[noticeKeyOf(notice)]
+	return rejection, held
+}
+
+// refusals reports every refusal the carrier holds, in the stable task, round,
+// kind and sequence order of the notifications they answer.
+func (d *DurableCommit) refusals() []Rejection {
+	if d == nil {
+		return nil
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	refusals := make([]Rejection, 0, len(d.rejected))
+	for _, rejection := range d.rejected {
+		refusals = append(refusals, rejection)
+	}
+	sort.Slice(refusals, func(i, j int) bool {
+		left, right := refusals[i].Notice, refusals[j].Notice
+		if left.TaskID != right.TaskID {
+			return left.TaskID < right.TaskID
+		}
+		if left.Round != right.Round {
+			return left.Round < right.Round
+		}
+		if left.Kind != right.Kind {
+			return left.Kind < right.Kind
+		}
+		return left.Seq < right.Seq
+	})
+	return refusals
 }
 
 // Commit implements the task commit port. A record of a mutation identity the
@@ -550,9 +704,11 @@ func (d *DurableCommit) Records(ctx context.Context, taskID event.TaskID) ([]tas
 
 // unowedLocked returns one stored fact as a restore link: the notifications of
 // its outbox whose consumption receipt the log holds are left out, so a rebuild
-// opens no obligation for them. The stored record itself keeps the outbox it
-// committed, so a repeated commit compares against the content the transition
-// carried.
+// opens no obligation for them; so is the notification a target refused, because
+// the refusal the log holds is that notification's consumption result and a
+// rebuild owes it no delivery a second time. The stored record itself keeps the
+// outbox it committed, so a repeated commit compares against the content the
+// transition carried.
 func (d *DurableCommit) unowedLocked(fact task.CommitRecord) task.CommitRecord {
 	if len(fact.Outbox) == 0 {
 		return fact
@@ -560,6 +716,9 @@ func (d *DurableCommit) unowedLocked(fact task.CommitRecord) task.CommitRecord {
 	outbox := make([]task.Envelope, 0, len(fact.Outbox))
 	for _, envelope := range fact.Outbox {
 		if _, consumed := d.consumed[noticeKeyOf(envelope.Notice)]; consumed {
+			continue
+		}
+		if _, rejected := d.rejected[noticeKeyOf(envelope.Notice)]; rejected {
 			continue
 		}
 		outbox = append(outbox, envelope)
@@ -611,6 +770,13 @@ func consumeKey(notice task.Notice) string {
 // by the same four parts, so the record and its receipt name one identity.
 func attemptKey(notice task.Notice) string {
 	return attemptPrefix + string(notice.TaskID) + "\x00" + strconv.FormatInt(notice.Round, 10) +
+		"\x00" + string(notice.Kind) + "\x00" + strconv.FormatInt(notice.Seq, 10)
+}
+
+// rejectKey locates the feedback fact of one notification a target refused on the
+// log by the same four parts, so the refusal names the notification it answers.
+func rejectKey(notice task.Notice) string {
+	return rejectPrefix + string(notice.TaskID) + "\x00" + strconv.FormatInt(notice.Round, 10) +
 		"\x00" + string(notice.Kind) + "\x00" + strconv.FormatInt(notice.Seq, 10)
 }
 

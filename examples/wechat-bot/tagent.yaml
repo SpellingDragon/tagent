@@ -234,10 +234,11 @@ agents:
       files: [meditator_agent.md]
     # 冥想自己的窗口:反思上下文同样按窗口管理。
     max_tokens: 32000
-    # 跨会话写面:只有模型在反思回合内显式调用 deliver_summary 才落链;
-    # 目标=deliver_to 白名单里的活跃绑定会话,不声明则工具不可见,机制侧不代投。
+    # 跨会话写面:唯一通信工具 send,只有模型在反思回合内显式调用
+    # send{target:{agent,session}} 才落链;目标=deliver_to 白名单里的活跃绑定会话,
+    # 具体 agent/session 由反思输入里的 delivery targets 段给出,机制侧不代投。
     tools:
-      - { kind: tool, id: deliver_summary }
+      - { kind: tool, id: send }
     # 观察面:与 tagent 同一 tier;read_namespaces 授权它读业务分区,
     # meditation.observed_namespaces 再从中圈定真正反思的分区(越界拒启动)。
     memory:
@@ -247,8 +248,8 @@ agents:
     # 事件驱动策展:enabled 即挂载冥想驱动——事实提交推进计时器,水位后有新素材且
     # interval(默认 30m)期满、min_gap(两次已消费反思的最小间隔)满足才反思一轮;
     # prompt_file 是每次注入随摘要携带的静态提示(相对 prompt_dir);
-    # observed_namespaces 必须落在各自 read 授权内;deliver_to 是 deliver_summary 的目标白名单——
-    # 工具一次调用给这些 agent 的每个活跃绑定会话各落一条 summary 事件;不调用则不投递。
+    # observed_namespaces 必须落在各自 read 授权内;deliver_to 是 send 对外投递的目标白名单——
+    # 反思回合按输入里列出的每个活跃会话各发一次 send{target:{agent,session}};不调用则不投递。
     # 一个进程只驱动一条反思循环:第二个 enabled 的 agent 拒启动。
     meditation:
       enabled: true
@@ -267,4 +268,5 @@ app:
     token_file: "token.json"
     context_token_dir: ".wechat-context-tokens"
     workspace_dir: ".tagent-workspace"   # 入站附件/长文本落盘(容器内 TAGENT_WECHAT_WORKSPACE_DIR 覆盖)
+    # ops_session: "wxid_owner"          # 启动通知(转世通报/系统告警)的固定目标会话;空=宿主运维会址 <session-prefix>ops
     # approvers: ["wxid_owner"]          # critical 操作的消息批准白名单;空=消息批准关闭,只经 CLI 批准

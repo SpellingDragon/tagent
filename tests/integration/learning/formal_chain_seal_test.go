@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/SpellingDragon/tagent/api/event"
 	"github.com/SpellingDragon/tagent/api/model"
 	"github.com/SpellingDragon/tagent/features/rl"
 )
@@ -67,8 +68,8 @@ func TestFormalChainSealsCapture(t *testing.T) {
 		}
 		run := formalRun(t, ctx, sink, sealAnswer)
 		turn := formalInvoke(t, ctx, run, "inv-seal-1", "session-seal-1", "ep-seal-1")
-		if turn.Terminal != model.KindCompleted || len(turn.Decisions) != 2 {
-			t.Fatalf("turn = (%v, %d decisions), want the completed turn of two decisions driving the record writes", turn.Terminal, len(turn.Decisions))
+		if turn.Terminal != model.KindCompleted || turn.DecisionCount != 2 {
+			t.Fatalf("turn = (%v, %d decisions), want the completed turn of two decisions driving the record writes", turn.Terminal, turn.DecisionCount)
 		}
 		manifest, err := sink.Seal(ctx)
 		if err != nil {
@@ -112,9 +113,14 @@ func TestFormalChainSealsCapture(t *testing.T) {
 			}
 			attempts = append(attempts, *line.Attempt)
 		}
+		facts := run.SessionFacts(event.Address{AgentID: "agent-a", SessionID: "session-seal-1"})
+		wantDecisions := []event.DecisionID{
+			integrityFactWithContent(t, facts, event.TypeThinkingPlan, "").DecisionID,
+			integrityFactWithContent(t, facts, event.TypeAgentOutput, "settled").DecisionID,
+		}
 		for i, attempt := range attempts {
-			if attempt.Schema != rl.SchemaCurrent || attempt.ID == "" || attempt.DecisionID != turn.Decisions[i].DecisionID {
-				t.Fatalf("attempt %d = (schema %q, id %q, decision %q), want the versioned attempt of decision %q", i, attempt.Schema, attempt.ID, attempt.DecisionID, turn.Decisions[i].DecisionID)
+			if attempt.Schema != rl.SchemaCurrent || attempt.ID == "" || attempt.DecisionID != wantDecisions[i] {
+				t.Fatalf("attempt %d = (schema %q, id %q, decision %q), want the versioned attempt of decision %q", i, attempt.Schema, attempt.ID, attempt.DecisionID, wantDecisions[i])
 			}
 			if attempt.EpisodeID != "ep-seal-1" || attempt.Terminal != model.KindCompleted {
 				t.Fatalf("attempt %d = (episode %q, terminal %v), want the shared completed terminal of ep-seal-1", i, attempt.EpisodeID, attempt.Terminal)
@@ -148,8 +154,8 @@ func TestFormalChainSealsCapture(t *testing.T) {
 		}
 		run := formalRun(t, ctx, sink, sealAnswer)
 		turn := formalInvoke(t, ctx, run, "inv-seal-2", "session-seal-2", "ep-seal-2")
-		if turn.Terminal != model.KindCompleted || len(turn.Decisions) != 2 {
-			t.Fatalf("turn = (%v, %d decisions), want the completed turn unaffected by the refused record writes", turn.Terminal, len(turn.Decisions))
+		if turn.Terminal != model.KindCompleted || turn.DecisionCount != 2 {
+			t.Fatalf("turn = (%v, %d decisions), want the completed turn unaffected by the refused record writes", turn.Terminal, turn.DecisionCount)
 		}
 		losses := run.RecordingLosses()
 		counts := map[string]int{}
@@ -198,8 +204,8 @@ func TestFormalChainSealsCapture(t *testing.T) {
 		}
 		run := formalRun(t, ctx, sink, sealAnswer)
 		turn := formalInvoke(t, ctx, run, "inv-seal-3", "session-seal-3", "ep-seal-3")
-		if turn.Terminal != model.KindCompleted || len(turn.Decisions) != 2 {
-			t.Fatalf("turn = (%v, %d decisions), want the completed turn unaffected by the storage refusals", turn.Terminal, len(turn.Decisions))
+		if turn.Terminal != model.KindCompleted || turn.DecisionCount != 2 {
+			t.Fatalf("turn = (%v, %d decisions), want the completed turn unaffected by the storage refusals", turn.Terminal, turn.DecisionCount)
 		}
 		manifest, err := sink.Seal(ctx)
 		if err != nil {

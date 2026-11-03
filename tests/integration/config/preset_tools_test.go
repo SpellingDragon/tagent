@@ -4,6 +4,7 @@ package config
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -79,15 +80,6 @@ func TestPresetToolsAssemble(t *testing.T) {
 				presetCall("call-recall", "recall", `{"text":"预设召回标记","strategy":"keyword_only","partitions":["`+presetRecallPartition+`"]}`),
 			)
 		}
-		checkPresetDeclarations(t, req)
-		knowledge := presetObservation(t, req.Messages, "call-knowledge")
-		if !strings.Contains(knowledge.Content, presetKnowledgeText) {
-			t.Errorf("knowledge observation = %q, want the declared source text the tRPC knowledge search answered", knowledge.Content)
-		}
-		recall := presetObservation(t, req.Messages, "call-recall")
-		if !strings.Contains(recall.Content, string(presetRecallKey)) {
-			t.Errorf("recall observation = %q, want the seeded event key the memory retrieval answered", recall.Content)
-		}
 		return presetFinalTurn("preset tools settled")
 	}}
 
@@ -101,7 +93,7 @@ func TestPresetToolsAssemble(t *testing.T) {
 		t.Fatalf("assemble the preset declaration: %v", err)
 	}
 	t.Cleanup(func() {
-		if _, err := run.Close(context.Background(), agent.CloseRequest{}); err != nil {
+		if _, err := run.Close(context.Background(), agent.CloseRequest{Timeout: time.Now().Add(200 * time.Millisecond)}); err != nil {
 			t.Errorf("Close: %v", err)
 		}
 	})
@@ -114,9 +106,28 @@ func TestPresetToolsAssemble(t *testing.T) {
 	if err != nil {
 		t.Fatalf("invoke the preset tools: %v", err)
 	}
-	if turn.Terminal != model.KindCompleted || len(turn.Decisions) != 2 {
-		t.Fatalf("turn = (%v, %d decisions), want the completed terminal beside two decisions", turn.Terminal, len(turn.Decisions))
+	if turn.Terminal != model.KindCompleted || turn.DecisionCount != 2 {
+		t.Fatalf("turn = (%v, %d decisions), want the completed terminal beside two decisions", turn.Terminal, turn.DecisionCount)
 	}
+
+	requests := provider.recorded()
+	if len(requests) < 2 {
+		t.Fatalf("model requests = %d (%s), want the opening decision beside the one that reads its first settled result",
+			len(requests), describePresetRequests(requests))
+	}
+	checkPresetDeclarations(t, &requests[1])
+	if !presetResultReached(requests[1:2], "call-knowledge", "knowledge_search", presetKnowledgeText) &&
+		!presetResultReached(requests[1:2], "call-recall", "recall", string(presetRecallKey)) {
+		t.Fatalf("the request the first settled result drove reads no settled observation (%s), want the decision it drove to read that result",
+			describePresetRequests(requests))
+	}
+
+	// The two calls of the opening decision settle independently: the knowledge
+	// search answers inside the turn while the memory retrieval may land after the
+	// closing decision and drive the next segment of the address, exactly as the
+	// resident loop's fast-result law says. Either way the settled body of each
+	// call must reach a model request under its own call identity.
+	awaitPresetResults(t, provider, 10*time.Second)
 }
 
 // checkPresetDeclarations checks the three preset tool instances the first
@@ -144,18 +155,62 @@ func checkPresetDeclarations(t *testing.T, req *model.Request) {
 	}
 }
 
-// presetObservation returns the settled observation of one call: the message
-// carrying the call identity outside the tool role, so an admission receipt is
-// never read as the settled body.
-func presetObservation(t *testing.T, messages []model.Message, callID string) model.Message {
+// awaitPresetResults waits until both settled bodies have reached a model
+// request under their own call identities. The knowledge search normally answers
+// inside the turn; the memory retrieval may settle after the closing decision and
+// drive the next segment of the address, so the wait spans the requests the
+// address serves rather than one turn.
+func awaitPresetResults(t *testing.T, provider *presetModel, wait time.Duration) {
 	t.Helper()
-	for _, msg := range messages {
-		if msg.ToolID == callID && msg.Role != model.RoleTool {
-			return msg
+	deadline := time.Now().Add(wait)
+	for {
+		requests := provider.recorded()
+		knowledge := presetResultReached(requests, "call-knowledge", "knowledge_search", presetKnowledgeText)
+		recall := presetResultReached(requests, "call-recall", "recall", string(presetRecallKey))
+		if knowledge && recall {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("settled observations reached the model = (knowledge %t, recall %t) in %s (%s), want each settled body read under its own call identity",
+				knowledge, recall, wait, describePresetRequests(requests))
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// presetResultReached reports whether one settled body reached a model request
+// under the call identity it was admitted for. The harvest path renders the
+// settled result as user material carrying the body while the chain-restored
+// history renders it under the tool role, so the check reads the call identity
+// and the body instead of one rendering: an admission receipt answers "ok" and
+// never carries the body.
+func presetResultReached(requests []model.Request, callID, tool, marker string) bool {
+	for _, req := range requests {
+		for _, msg := range req.Messages {
+			if msg.ToolID == callID && msg.ToolName == tool && strings.Contains(msg.Content, marker) {
+				return true
+			}
 		}
 	}
-	t.Fatalf("messages = %+v, want the settled observation of call %q", messages, callID)
-	return model.Message{}
+	return false
+}
+
+// describePresetRequests renders the model requests the address served, so a
+// failure names what the model read instead of a count.
+func describePresetRequests(requests []model.Request) string {
+	lines := make([]string, 0, len(requests))
+	for at, req := range requests {
+		messages := make([]string, 0, len(req.Messages))
+		for _, msg := range req.Messages {
+			content := msg.Content
+			if len(content) > 60 {
+				content = content[:60] + "…"
+			}
+			messages = append(messages, fmt.Sprintf("%s/%s:%s", msg.Role, msg.ToolID, content))
+		}
+		lines = append(lines, fmt.Sprintf("#%d [%s]", at, strings.Join(messages, " | ")))
+	}
+	return strings.Join(lines, "; ")
 }
 
 // seedPresetRecall commits one event into a real storage tier, so the recall
@@ -242,6 +297,13 @@ func (m *presetModel) GenerateContent(ctx context.Context, req *model.Request) (
 // Info reports the scripted provider's descriptor.
 func (m *presetModel) Info() model.Info {
 	return model.Info{Name: m.name}
+}
+
+// recorded reports the native requests the scripted provider served.
+func (m *presetModel) recorded() []model.Request {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return append([]model.Request(nil), m.requests...)
 }
 
 // presetCall builds one native tool call of a scripted assistant message.

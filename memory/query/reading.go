@@ -52,6 +52,29 @@ type Reading interface {
 	Tasks(ctx context.Context) ([]TaskReading, error)
 }
 
+// AttentionReading is the optional read face an assembly may wire beside the
+// three readings of the port: the attention questions the owners still hold as
+// questions at read time, each in the typed form the attention chain answers it
+// in — the kind it was asked under, the target it was put to, the lineage it came
+// from and the validity it was filed under. It is optional on purpose: the six
+// dimensions of the inventory keep answering from the three readings alone, and a
+// port that wires no attention face refuses the attention dimension by name
+// instead of answering an empty presence.
+//
+// 红线清单（4 条）：
+// MUST 每次调用从持有该问题的 owner 现读，逐项如实返回或具名失败
+// MUST 以提问时的 kind、target、lineage 作为身份原样返回，不合成第二个身份
+// MUST NOT 在本题面补造 question 或 clearance 事实：notice 与 summary 的在场是读时推导
+// MUST NOT 记录、缓存或自行过期任何问题：过期与清除由持有该事实的读面判定
+//
+// 契约: docs/wiki/agent/agent-architecture.md#core-components
+type AttentionReading interface {
+	// AttentionQuestions reads every attention question still present at read
+	// time: the questions no answer and no clearance closed and whose validity
+	// has not run out, in whatever order the owners answer them.
+	AttentionQuestions(ctx context.Context) ([]task.AttentionQuestion, error)
+}
+
 // Generation is what one published binding generation names: the agents it
 // configures and the resources it registers. The two readings are taken from
 // the same generation, so a lease is never reported beside an agent set that a

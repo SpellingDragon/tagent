@@ -48,54 +48,6 @@
 - **AND** the adapter does NOT publish it back to the bus as agent_output
 - **AND** the framework executes the tools synchronously inside Flow.Run
 
-### Requirement: Adapter registers SmartCompressor as BeforeModel callback
-
-`FrameworkFlowAdapter` SHALL register a `BeforeModel` callback that invokes `SmartCompressor.Compress` on `args.Request.Messages`. The callback SHALL:
-
-1. Compute token estimate of `args.Request.Messages`.
-2. If tokens exceed threshold, invoke `SmartCompressor.Compress` and replace `args.Request.Messages` with the compressed result.
-3. Restore `KeepRecentTasks` to its original value after compression (to prevent cross-request state leakage).
-4. NOT modify `SessionProjection`.
-
-The callback SHALL be registered via `model.NewCallbacks` and passed to the framework `LLMAgent` as the first `BeforeModel` callback.
-
-#### Scenario: BeforeModel compresses messages
-
-- **WHEN** the framework constructs a request with messages exceeding the token threshold
-- **THEN** the SmartCompressor callback reduces `args.Request.Messages` before the model is called
-- **AND** the model receives the compressed messages
-- **AND** `SessionProjection` is not modified
-
-#### Scenario: Below threshold skips compression
-
-- **WHEN** the framework constructs a request with messages below the token threshold
-- **THEN** the SmartCompressor callback does nothing
-- **AND** `args.Request.Messages` is unchanged
-
-### Requirement: Adapter registers Compactor as second BeforeModel callback
-
-`FrameworkFlowAdapter` SHALL register a second `BeforeModel` callback (registered after SmartCompressor) that invokes `Compactor.Compact` on the `SessionProjection` when the token count still exceeds `maxTokens` after SmartCompressor has run. The callback SHALL:
-
-1. Re-estimate tokens of `args.Request.Messages` (which SmartCompressor may have modified).
-2. If tokens still exceed `maxTokens`, invoke `Compactor.Compact` on `SessionProjection.GetAll()`.
-3. If compaction reduced the reference count, call `SessionProjection.Replace(compacted)` and rebuild `args.Request.Messages` from the compacted projection (using the same `Preprocessor.buildMessagesFromRefs` logic).
-4. Re-inject event_key prefixes on the rebuilt messages.
-
-The callback SHALL NOT invoke `Compactor` when `SessionProjection` is nil or when SmartCompressor did not run (tokens were below threshold).
-
-#### Scenario: BeforeModel compacts projection when still over budget
-
-- **WHEN** SmartCompressor cannot bring token count below `maxTokens`
-- **THEN** the Compactor callback replaces the `SessionProjection` with compacted references
-- **AND** `args.Request.Messages` is rebuilt from the compacted projection
-- **AND** event_key prefixes are re-injected
-
-#### Scenario: Compactor is skipped when SmartCompressor resolved the budget
-
-- **WHEN** SmartCompressor successfully brought token count below `maxTokens`
-- **THEN** the Compactor callback does nothing
-- **AND** `SessionProjection` is not modified
-
 ### Requirement: Adapter preserves tmux asynchronous semantics
 
 When a tool call inside the framework Flow returns a tmux-async marker, `FrameworkFlowAdapter` SHALL let the Flow complete without blocking. The tmux result SHALL arrive later via `InjectMessage` / `EventBus`, trigger the next bus Pull, and be fed into a new `Flow.Run` invocation.
@@ -153,22 +105,6 @@ For `TagentAgent.Run`, `FrameworkFlowAdapter` SHALL use a fresh `EventBus`, fres
 - **THEN** the assistant response is sent to `outputCh`
 - **AND** the adapter does NOT publish it back to the bus as agent_output
 - **AND** the framework executes the tools synchronously inside Flow.Run
-
-### Requirement: Adapter registers SmartCompressor and Compactor as BeforeModel callbacks
-
-`FrameworkFlowAdapter` SHALL register a `BeforeModel` callback that invokes `SmartCompressor.Compress` on `args.Request.Messages`. It SHALL also register a second `BeforeModel` callback (or embed the logic in the first) that invokes `Compactor.Compact` on the `SessionProjection` when the token count still exceeds the budget after compression. Both callbacks SHALL be registered via `model.NewCallbacks` and passed to the framework LLMAgent.
-
-#### Scenario: BeforeModel compresses messages
-
-- **WHEN** the framework constructs a request with messages exceeding the token threshold
-- **THEN** the SmartCompressor callback reduces `args.Request.Messages` before the model is called
-- **AND** the model receives the compressed messages
-
-#### Scenario: BeforeModel compacts projection when still over budget
-
-- **WHEN** SmartCompressor cannot bring token count below `maxTokens`
-- **THEN** the Compactor callback replaces the `SessionProjection` with compacted references
-- **AND** the subsequent request messages are rebuilt from the compacted projection
 
 ### Requirement: Adapter preserves tmux asynchronous semantics
 

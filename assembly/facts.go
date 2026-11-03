@@ -28,6 +28,14 @@ import (
 // mapped sequence speaks.
 const mappedSummaryRunes = 120
 
+// factWindow bounds the live facts one session chain of this run keeps: the most
+// recent entries beside the whole segment still in flight — the turn-end fact that
+// closed the previous segment together with every entry committed after it. A
+// drive reads the segment it flies and the transcript it presents, so the window is
+// the bound of what a live read reaches; the durable chain of the storage tier
+// keeps the whole history.
+const factWindow = 2048
+
 // factCommitFormat and factCommitRetention name the reference registration
 // every committed fact of this run carries: the original format and the
 // retention policy the recall reference is registered under.
@@ -45,6 +53,7 @@ const (
 // - The commit is the one ledger write of a fact of this run: the recorded call result, the ready input of a range, the assistant output of a drive, the settled delivery and the compression judgment all land here.
 // - A committed fact is never withheld from a reader and never rolled back for what an observation of it reports.
 // - A committed fact enters the mapped sequence of its own session chain right after it lands, so every consumption of that chain assembles the sequence the commits recorded.
+// - A committed fact advances the movement sequence the rest criterion is fenced by, because a committed fact is an input round a consumer may still owe.
 //
 // The failure is the caller's to observe, never a line this entry writes and
 // swallows: the identity is empty beside a commit that did not land, a caller
@@ -81,13 +90,116 @@ func (r *Run) commitFactChecked(ctx context.Context, evt event.Event) (event.Eve
 	r.mu.Lock()
 	r.facts[evt.Key] = evt
 	r.factOrder = append(r.factOrder, evt.Key)
+	if session := sessionOf(evt); session != "" {
+		r.sessionFactCount[session]++
+		if r.sessionFactCount[session] >= factWindow {
+			r.trimFactsLocked(session)
+		}
+	}
 	r.mu.Unlock()
+	r.movement.Advance()
 	if !mapped {
 		return evt.Key, nil
 	}
 	r.attachDeclaredReplay(evt)
 	r.recordMapped(evt, entry)
 	return evt.Key, nil
+}
+
+// trimFactsLocked holds the chain of one session to its hot window: the entries
+// before the window and before the segment in flight leave the live ledger, and
+// the commit order is trimmed beside the map so neither grows with the history of
+// the chain. The durable chain of the storage tier is untouched, so a fact outside
+// the window is still read back by identity. The read is taken under the run lock
+// the caller holds; the per-session live count the caller guards with keeps a
+// far-below-window chain at O(1) per commit, so the full scan only starts once
+// a chain can actually hold a cut.
+func (r *Run) trimFactsLocked(session event.SessionID) {
+	if session == "" {
+		return
+	}
+	keys := make([]event.EventID, 0, len(r.factOrder))
+	for _, key := range r.factOrder {
+		if evt, held := r.facts[key]; held && sessionOf(evt) == session {
+			keys = append(keys, key)
+		}
+	}
+	cut := keys[:r.windowCutLocked(keys)]
+	for _, key := range cut {
+		delete(r.facts, key)
+	}
+	r.sessionFactCount[session] -= len(cut)
+	dropped := map[event.EventID]struct{}{}
+	for _, key := range cut {
+		dropped[key] = struct{}{}
+	}
+	r.compactFactOrderLocked(dropped)
+}
+
+// trimSeededFacts holds every chain a restart replayed to its hot window: the
+// seeded ledger is read as the live one, so a restart answers the window a
+// process that stayed up carries. The chains are grouped in one pass and the
+// commit order is trimmed once.
+func (r *Run) trimSeededFacts() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	chains := make(map[event.SessionID][]event.EventID, 8)
+	for _, key := range r.factOrder {
+		evt, held := r.facts[key]
+		if !held {
+			continue
+		}
+		if session := sessionOf(evt); session != "" {
+			chains[session] = append(chains[session], key)
+		}
+	}
+	dropped := make(map[event.EventID]struct{}, len(r.factOrder))
+	for session, keys := range chains {
+		cut := keys[:r.windowCutLocked(keys)]
+		for _, key := range cut {
+			dropped[key] = struct{}{}
+			delete(r.facts, key)
+		}
+		r.sessionFactCount[session] = len(keys) - len(cut)
+	}
+	r.compactFactOrderLocked(dropped)
+}
+
+// windowCutLocked reports how many leading entries of one chain its hot window
+// drops: the window keeps the most recent factWindow entries beside the segment a
+// drive may still read, which is the turn-end fact that closed the previous
+// segment together with every entry committed after it. A chain beside no
+// turn-end fact is one segment in flight from its head, so it is kept whole.
+func (r *Run) windowCutLocked(keys []event.EventID) int {
+	cut := len(keys) - factWindow
+	if cut < 0 {
+		cut = 0
+	}
+	for at := len(keys) - 1; at >= 0; at-- {
+		if r.facts[keys[at]].Type == event.TypeAgentOutput {
+			if at < cut {
+				cut = at
+			}
+			return cut
+		}
+	}
+	return 0
+}
+
+// compactFactOrderLocked removes the named identities from the commit order of
+// this run, so the order reads the facts the live ledger still holds.
+func (r *Run) compactFactOrderLocked(dropped map[event.EventID]struct{}) {
+	if len(dropped) == 0 {
+		return
+	}
+	kept := r.factOrder[:0]
+	for _, key := range r.factOrder {
+		if _, gone := dropped[key]; gone {
+			continue
+		}
+		kept = append(kept, key)
+	}
+	r.factOrder = kept
 }
 
 // persistFact writes one fact of this run to the storage tier it declares: the
@@ -207,19 +319,21 @@ func storedFactConflict(key event.EventID, stored ledger.StoredEvent, body memor
 
 // recordMapped appends one mapped entry to the sequence of its session and
 // moves the boundary between the material that ended and the material still in
-// flight: a new range is admitted by the input material that starts it under an
-// invocation of its own, and that first fact is where everything the earlier
-// ranges committed becomes ended material the next request presents while the
-// transcript stops carrying it. Facts of the range in flight — the reasoning,
-// the calls, the output of a round and the notice of a call it admitted — stay
-// behind that boundary, because the transcript of the drive carries them. A
-// notice fact is a mapped fact like any other, so a notification enters the
+// flight: the boundary advances only where a segment stands closed — the
+// agent_output fact that closed it — so the input that starts the next range
+// lands every earlier segment committed as ended material the next request
+// presents while the transcript stops carrying it. Facts of the range in
+// flight — the input a second entry lands beside the open segment, the
+// reasoning, the calls, the output of a round and the notice of a call it
+// admitted — stay behind that boundary, because the consumer of the open
+// segment carries them: the resident loop pulls what arrives into the segment
+// it flies, and a drive reads its own range's input again at its next decision
+// boundary (runtime/agent Loop boundaryInput).
+// A notice fact is a mapped fact like any other, so a notification enters the
 // chain's projection as it commits and the range reads it back as a projection
 // increment instead of from a lane of its own.
-// - The boundary never moves for a fact of the range it already stands at: input that
-// lands under the invocation of the range in flight is that drive's own material, so
-// the drive reads it again at its next decision boundary instead of the boundary
-// presenting it as ended material (runtime/agent Loop boundaryInput).
+//
+// - Boundary move on close: the agent_output that closed a segment lands the segment itself as ended material — the boundary moves onto it (inclusive, see endedPrefix), so a later arrival presents everything the closed segment committed, the input that reached the chain while it flew but no decision of it read included.
 func (r *Run) recordMapped(evt event.Event, entry replay.ProjectionEntry) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -228,26 +342,49 @@ func (r *Run) recordMapped(evt event.Event, entry replay.ProjectionEntry) {
 		return
 	}
 	held.projection.Append(context.Background(), entry)
-	if admitsRange(evt) && held.rangeInvocation != evt.InvocationID {
-		held.endedAt = evt.Key
+	if evt.Type == event.TypeAgentOutput {
+		held.endedAt = entry.Key
+		held.rangeOpen = false
 	}
-	held.rangeInvocation = evt.InvocationID
+	if admitsRange(evt) && !held.rangeOpen {
+		held.endedAt = entry.Key
+		held.rangeOpen = true
+	}
 	r.replays[slot] = held
 }
+
+// The part one fact of a delegated input batch states. The delegated tool commits
+// the batch at its execution site — the instruction the round runs under, one
+// projection per material the call handed over, and the task that closes the
+// batch — and stamps each fact with the part it is, so a reader tells the parts
+// apart from every other input of the chain.
+const (
+	delegatedPartMeta        = "delegated_part"
+	delegatedPartInstruction = "instruction"
+	delegatedPartMaterial    = "material"
+)
 
 // admitsRange reports whether one committed fact starts a range: the ready
 // input an invocation aggregates, and the notice fact an unattended follow-up
 // turn commits as the material its drive reads at the head. Every other fact —
-// the reasoning, the calls and the output of a round, and the progress notice a
-// running call admits — belongs to the range already in flight and never moves
-// the boundary. The notice fact is recognised by the trigger source its
-// committing path stamps, so a progress notice of the same type under the same
-// range is never mistaken for the start of another one. The drive's own
-// boundary read keeps the same criterion (runtime/agent startsRange), so a fact
-// that starts a range here and a fact a drive reads again there are one
-// judgement.
+// the reasoning, the calls and the output of a round, the progress notice a
+// running call admits, and the instruction and material facts of a delegated
+// input batch — belongs to the range already in flight and never moves the
+// boundary. The notice fact is recognised by the trigger source its committing
+// path stamps, so a progress notice of the same type under the same range is
+// never mistaken for the start of another one. A delegated batch is carried into
+// the range its task opens by name (runtime/agent SubmitDelegated), so its
+// instruction and materials never open a range of their own: a batch whose task
+// never landed leaves them as ended material no request reads as a new range.
+// The drive's own boundary read keeps the same criterion (runtime/agent
+// startsRange), so a fact that starts a range here and a fact a drive reads
+// again there are one judgement.
 func admitsRange(evt event.Event) bool {
 	if evt.Type == event.TypeExternalInput {
+		switch evt.Meta[delegatedPartMeta] {
+		case delegatedPartInstruction, delegatedPartMaterial:
+			return false
+		}
 		return true
 	}
 	return evt.Type == event.TypeFeedback && evt.Meta[event.MetaKeyTriggerSource] == "task"
@@ -465,19 +602,28 @@ func agentOf(evt event.Event) event.AgentID {
 // fact that carries no model payload maps onto no entry, so the mapped sequence
 // never carries an empty message the model would read.
 //
+// A configuration change is control-plane material, never a transcript line: the
+// fact names what moved and is read by its identity and metadata, so it maps
+// onto no entry even though it carries a message body. The skip is explicit by
+// type — a producer that stamps a session on the fact still cannot leak the
+// change into a model request.
+//
 // 契约: docs/wiki/agent/event-flow.md#projection-lifecycle
 func mappedEntryOf(evt event.Event) (replay.ProjectionEntry, bool) {
+	if evt.Type == event.TypeConfigChange {
+		return replay.ProjectionEntry{}, false
+	}
 	content := mappedContentOf(evt.Message)
 	if content == "" {
 		return replay.ProjectionEntry{}, false
 	}
-	return replay.ProjectionEntry{
+	return replay.WithInputEvents(replay.ProjectionEntry{
 		Key:     evt.Key,
 		Type:    evt.Type,
 		Summary: oneLineOf(evt.Meta[event.MetaKeyEventSummary], content),
 		Content: content,
 		Time:    evt.Timestamp,
-	}, true
+	}, evt.Meta[event.MetaKeyInputEvents]), true
 }
 
 // mappedContentOf reports the text one committed message speaks for on the
@@ -583,6 +729,13 @@ func (r *Run) factPipeline(agentID event.AgentID) (plugin.Pipeline, error) {
 // again. The backflow drives that invocation's next decision and never reaches a
 // neighbour, and a notice the mailbox refused to book is neither handed on nor
 // confirmed.
+//
+// A result that lands after the close of this run returned is booked but never
+// handed on or consumed: the consumer set that would drive the range stopped
+// with the close, so the entry is handed back to the pending pool and the next
+// process reads the notification as the work it still owes. While the close still
+// runs, the result is handed over exactly as it is beside no close at all — the
+// quiesce is the turn that finishes it, not a stop that strands it.
 func (r *Run) sink(ctx context.Context, notice task.Notice) error {
 	frame, ok := task.CallFrameFrom(ctx)
 	if !ok {
@@ -592,8 +745,24 @@ func (r *Run) sink(ctx context.Context, notice task.Notice) error {
 	if err != nil {
 		return err
 	}
+	if r.closeFinished() {
+		return r.retainNoticeOwed(ctx, frame, notice, seq)
+	}
 	r.loop.Backflow(frame.Identity.InvocationID, notice)
 	return r.store.Consume(ctx, frame.Address, frame.Identity.InstanceID, seq)
+}
+
+// retainNoticeOwed keeps one booked notification owed on the mailbox after the
+// close of this run returned: the acceptance stays the record the next process
+// restores, and the claimed entry is handed back to the pending pool so no
+// current that stopped with the close can consume it. A seat already consumed by
+// the turn the close waited out is answered as settled and keeps its receipt.
+func (r *Run) retainNoticeOwed(ctx context.Context, frame task.CallFrame, notice task.Notice, seq state.AcceptSeq) error {
+	if err := r.store.Release(context.WithoutCancel(ctx), frame.Address, frame.Identity.InstanceID, seq); err != nil && !errors.Is(err, state.ErrClaimSettled) {
+		return fmt.Errorf("tagent: keep the notice of task %s owed after the close: %w", notice.TaskID, err)
+	}
+	assemblyDebug("tagent: the notice of task %s stays owed after the close returned", notice.TaskID)
+	return nil
 }
 
 // bookNotice records the mailbox time points of one settled notification that

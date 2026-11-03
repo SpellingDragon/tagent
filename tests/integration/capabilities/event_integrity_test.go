@@ -529,8 +529,8 @@ func TestEventIntegrityApproval(t *testing.T) {
 		if approvedID == "" {
 			t.Fatalf("no approval request was registered through the formal governance path")
 		}
-		if turn.Terminal != model.KindCompleted || len(turn.Decisions) != 3 {
-			t.Fatalf("turn = (%v, %d decisions), want the wait, the approved retry and the closing answer as three decisions", turn.Terminal, len(turn.Decisions))
+		if turn.Terminal != model.KindCompleted || turn.DecisionCount != 3 {
+			t.Fatalf("turn = (%v, %d decisions), want the wait, the approved retry and the closing answer as three decisions", turn.Terminal, turn.DecisionCount)
 		}
 		if got := probe.calls(); got != 1 {
 			t.Fatalf("%s executions = %d, want the formally approved retry executed exactly once", toolName, got)

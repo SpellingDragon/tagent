@@ -2,75 +2,15 @@
 
 ## Purpose
 
-本规范定义 llm-event-valuation 能力。The `agent` package SHALL define an `EventValuator` interface.
-
-> **状态核验（2026-09-09）**：本规范描述的 LLM 事件估值机制（`EventValuator`/`LLMEventValuator`/`ValueScore`/`KeyFacts`/`processing` 策略）**已被骨架模型替代**——事件价值分级现由 `agent/compress/task_segmenter.go` 的段龄纯函数 `deterministicLevel` 承载（L0-L3 确定性定级，零 LLM、零失败路径），价值语义由 `event/registry.go` EventTypeSpec 的 LowValue/TTLDays 元数据与 `consolidation` 策展承载。本文 SHALL 条款不再约束当前实现，保留作为设计决策记录（为何放弃 LLM 打分：不可确定性、失败路径、成本）；现状契约见 [task-skeleton-compression](../task-skeleton-compression/spec.md)。
+> **superseded（2026-11-03 归档核验）**：本规范描述的 `EventValuator` LLM 事件估值、批量合并与类型下限已随压缩实现退役（`EventValuator` 在 Go 树 0 定义）。现行段龄定级是确定性纯函数 `LevelOfAge`/`BandOfLevel`，见 `deterministic-compress-level` 与 `task-skeleton-compression`。本文件只作历史记录，不再承载现行规范命令。
 
 ## Requirements
 
-### Requirement: EventValuator interface evaluates events in batch
+### Requirement: 历史条款已退役
 
-The `agent` package SHALL define an `EventValuator` interface. Given a slice of `*TaskSegment`, the implementation SHALL return a slice of `EventValue` containing at minimum `EventKey`, `ValueScore` (0.0 to 1.0), `Processing` strategy, and `KeyFacts`.
+本文件保留已退役的 LLM 事件估值历史记录。原条款中的规范化关键词（SHALLs/MUSTs）已全部迁出或退役；现行要求见 `deterministic-compress-level` 与 `task-skeleton-compression`，公共行为锚见 `memory/replay/age_segments_test.go` 的 `TestAgeLevelReadsTheSharedRule`。
 
-#### Scenario: Interface contract
+#### Scenario: 查现行定级要求
 
-- **WHEN** a caller invokes `EventValuator.Evaluate(ctx, segments)`
-- **THEN** the returned slice SHALL have the same length as the input segment slice
-- **AND** each `EventValue.EventKey` SHALL match the first valid event key found in that segment
-
-#### Scenario: Default no-op evaluator
-
-- **WHEN** `SmartCompressor` is constructed without an `EventValuator`
-- **THEN** a default pass-through evaluator SHALL be used
-- **AND** it SHALL return `processing=summary` and `value_score=0.5` for every segment
-
-### Requirement: LLM-based valuation outputs structured JSON
-
-`LLMEventValuator` SHALL prompt the configured `model.Model` to evaluate each event and return a JSON array. Each element SHALL contain:
-- `event_key`: int64
-- `value_score`: float64 in [0.0, 1.0]
-- `processing`: one of `keep`, `truncate`, `keyfacts`, `summary`, `reference`, `drop`
-- `key_facts`: string (concise bullet list)
-- `reason`: string (optional)
-
-#### Scenario: Valid JSON valuation
-
-- **WHEN** the LLM returns `[{"event_key":123,"value_score":0.9,"processing":"keep","key_facts":"用户原始需求"}]`
-- **THEN** `LLMEventValuator` SHALL parse it into one `EventValue`
-- **AND** `ValueScore` SHALL equal 0.9 and `Processing` SHALL equal `keep`
-
-#### Scenario: Missing fields use safe defaults
-
-- **WHEN** the LLM returns `[{"event_key":123,"value_score":0.9}]` without `processing`
-- **THEN** `Processing` SHALL default to `summary`
-- **AND** `KeyFacts` SHALL default to the empty string
-
-### Requirement: Batch valuation combines with summary in one LLM call
-
-`LLMEventValuator` SHALL request the LLM to produce both per-event valuation JSON and an overall batch summary in a single response. The summary SHALL be returned separately from the valuation array.
-
-#### Scenario: Single call returns both
-
-- **WHEN** `LLMEventValuator.Evaluate` is called with 5 segments
-- **THEN** the LLM SHALL be invoked exactly once
-- **AND** the result SHALL contain 5 `EventValue` entries plus one combined summary string
-
-#### Scenario: Malformed response triggers fallback
-
-- **WHEN** the LLM response cannot be parsed as the required structure
-- **THEN** `LLMEventValuator` SHALL return a non-nil error
-- **AND** `SmartCompressor` SHALL catch the error and fall back to rule-based compression
-
-### Requirement: Value score respects event type floor
-
-`LLMEventValuator` SHALL apply per-event-type floor values before returning. For example, `external_input` SHALL never receive a `value_score` below 0.5, regardless of LLM output.
-
-#### Scenario: Floor clamps user input
-
-- **WHEN** the LLM assigns `value_score=0.1` to an `external_input` event
-- **THEN** the returned `EventValue.ValueScore` SHALL be 0.5
-
-#### Scenario: Non-floor types pass through
-
-- **WHEN** the LLM assigns `value_score=0.1` to a `thinking_plan` event and no floor is configured for that type
-- **THEN** the returned `EventValue.ValueScore` SHALL be 0.1
+- **WHEN** 需要查询事件或段龄如何定级的现行要求
+- **THEN** 读 `deterministic-compress-level`、`task-skeleton-compression` 及其公共行为锚，而不是本历史文件

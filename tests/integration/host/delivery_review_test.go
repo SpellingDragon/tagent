@@ -154,13 +154,14 @@ func TestDeliveryReviewHold(t *testing.T) {
 	})
 }
 
-// TestDeliveryReviewSend pins the one delivery outlet on the model-visible send tool.
-// - positive: an allowed send reaches the review with its body, its turn's lineage and the call's address, and the channel delivers it exactly once
-// - negative: a held send stays off the channel, the call is answered as held, and only an approval delivers the body
-//
+// TestDeliveryReviewSend pins the one delivery outlet beside the model-visible send face.
+// - positive: an allowed turn body reaches the review with its body, its turn's lineage and the call's address, and the channel delivers it exactly once
+// - negative: a held turn body stays off the channel and only an approval delivers it
+// - negative: the send face is not a delivery outlet, so a send call is answered by name
+// - negative: its body reaches neither the review nor the channel
 // 契约: docs/wiki/platform/platform-subsystems.md#composition-root
 func TestDeliveryReviewSend(t *testing.T) {
-	t.Run("an allowed send reaches the review and the channel", func(t *testing.T) {
+	t.Run("a send is not a delivery the review rules", func(t *testing.T) {
 		provider := newScriptedProvider(t)
 		provider.decide = func(request scriptedRequest) (string, error) {
 			if request.Index == 0 {
@@ -189,25 +190,31 @@ func TestDeliveryReviewSend(t *testing.T) {
 		}
 
 		send := plugin.Delivery{Content: sendReviewBody, Lineage: "user", Target: addr}
+		closing := plugin.Delivery{Content: sendReviewClosing, Lineage: "user", Target: addr}
 		reviewed := ruler.seenDeliveries()
-		if len(reviewed) != 2 {
-			t.Fatalf("reviewed deliveries = %+v, want the send body beside the closing body", reviewed)
+		if len(reviewed) != 1 {
+			t.Fatalf("reviewed deliveries = %+v, want the closing turn body alone beside a send the host never delivered", reviewed)
 		}
-		if reviewed[0] != send {
-			t.Fatalf("reviewed send = %+v, want the call's body, lineage and address %+v", reviewed[0], send)
+		if reviewed[0] != closing {
+			t.Fatalf("reviewed delivery = %+v, want the closing turn body %+v", reviewed[0], closing)
 		}
-		if bodies := sender.bodies(); len(bodies) != 2 || bodies[0] != sendReviewBody {
-			t.Fatalf("delivered bodies = %q, want the send body before the closing body", bodies)
+		for _, ruled := range reviewed {
+			if ruled == send {
+				t.Fatalf("reviewed deliveries = %+v, want no send body: a send names a destination and delivers nothing outbound", reviewed)
+			}
 		}
-		if scriptedSawContent(provider, "[send_denied] ") || scriptedSawContent(provider, "[send_held] ") {
-			t.Fatal("the send call read back a refusal or a hold beside the allow ruling")
+		if bodies := sender.bodies(); len(bodies) != 1 || bodies[0] != sendReviewClosing {
+			t.Fatalf("delivered bodies = %q, want the closing turn body alone", bodies)
+		}
+		if !scriptedSawContent(provider, "[send_denied] ") {
+			t.Fatal("the send call read back no named refusal, want the denial of a call that names no destination")
 		}
 		if held := host.HeldDeliveries(); len(held) != 0 {
 			t.Fatalf("held deliveries = %+v, want none beside the allow ruling", held)
 		}
 	})
 
-	t.Run("a held send waits and its receipt is not a delivery", func(t *testing.T) {
+	t.Run("a held body waits and its receipt is not a delivery", func(t *testing.T) {
 		provider := newScriptedProvider(t)
 		provider.decide = func(request scriptedRequest) (string, error) {
 			if request.Index == 0 {
@@ -233,37 +240,30 @@ func TestDeliveryReviewSend(t *testing.T) {
 		if bodies := sender.bodies(); len(bodies) != 0 {
 			t.Fatalf("delivered bodies = %q, want none while the review holds", bodies)
 		}
-		if !scriptedSawContent(provider, "[send_held] ") {
-			t.Fatal("the send call read back no held receipt; a hold must never read as a delivery")
+		if !scriptedSawContent(provider, "[send_denied] ") {
+			t.Fatal("the send call read back no named denial, want the refusal of a call that names no destination")
 		}
 
 		held := host.HeldDeliveries()
-		if len(held) != 2 {
-			t.Fatalf("held deliveries = %+v, want the send body beside the closing body", held)
+		if len(held) != 1 {
+			t.Fatalf("held deliveries = %+v, want the closing turn body the review held", held)
 		}
-		var sendID string
-		for _, entry := range held {
-			if entry.Delivery.Content == sendReviewBody {
-				sendID = entry.ID
-				if want := (plugin.Delivery{Content: sendReviewBody, Lineage: "user", Target: addr}); entry.Delivery != want {
-					t.Fatalf("held send = %+v, want the call's body, lineage and address %+v", entry.Delivery, want)
-				}
-			}
+		want := plugin.Delivery{Content: sendReviewClosing, Lineage: "user", Target: addr}
+		if held[0].Delivery != want {
+			t.Fatalf("held delivery = %+v, want the closing turn body with its lineage and address %+v", held[0].Delivery, want)
 		}
-		if sendID == "" {
-			t.Fatalf("held deliveries = %+v, want the held send body", held)
+		if err := host.ApproveDelivery(ctx, held[0].ID); err != nil {
+			t.Fatalf("approve the held body: %v", err)
 		}
-		if err := host.ApproveDelivery(ctx, sendID); err != nil {
-			t.Fatalf("approve the held send: %v", err)
-		}
-		if bodies := sender.bodies(); len(bodies) != 1 || bodies[0] != sendReviewBody {
-			t.Fatalf("delivered bodies after approval = %q, want the held send body exactly once", bodies)
+		if bodies := sender.bodies(); len(bodies) != 1 || bodies[0] != sendReviewClosing {
+			t.Fatalf("delivered bodies after approval = %q, want the held turn body exactly once", bodies)
 		}
 	})
 }
 
-// TestDeliveryReviewDefaultAllow pins a host with no ruler attached: the send body and the turn body are ordinary deliveries, holding nothing.
-//
+// TestDeliveryReviewDefaultAllow pins a host with no ruler attached.
+// - the turn body is an ordinary delivery and nothing is held
+// - the send face delivers nothing outbound either way
 // 契约: docs/wiki/platform/platform-subsystems.md#composition-root
 func TestDeliveryReviewDefaultAllow(t *testing.T) {
 	provider := newScriptedProvider(t)
@@ -287,8 +287,11 @@ func TestDeliveryReviewDefaultAllow(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("invoke the send turn beside no ruler: %v", err)
 	}
-	if bodies := sender.bodies(); len(bodies) != 2 || bodies[0] != sendReviewBody || bodies[1] != sendReviewClosing {
-		t.Fatalf("delivered bodies = %q, want the send body and the closing body", bodies)
+	if bodies := sender.bodies(); len(bodies) != 1 || bodies[0] != sendReviewClosing {
+		t.Fatalf("delivered bodies = %q, want the closing turn body alone: a send delivers nothing beside no ruler too", bodies)
+	}
+	if scriptedSawContent(provider, sendReviewBody) {
+		t.Fatalf("a request carried the send body %q, want it handed to the task it names and never to the channel", sendReviewBody)
 	}
 	if held := host.HeldDeliveries(); len(held) != 0 {
 		t.Fatalf("held deliveries = %+v, want none beside no ruler", held)

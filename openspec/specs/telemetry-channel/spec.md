@@ -43,15 +43,6 @@ task_settled 通知 SHALL 以独立的遥测通道身份参与上下文装配，
 - **THEN** 该通知 SHALL 保持完整形态
 - **AND** MUST NOT 被降级为票据行
 
-### Requirement: compaction 豁免未消费遥测
-
-compaction 的 L3 预算升级 MUST NOT 归档含未消费遥测的段（跳过或先促成其消费）——防止积压峰值触线时未读事件被静默归档。
-
-#### Scenario: 积压峰值触线
-
-- **WHEN** 未消费 settle 存量较大且对话窗口溢出触发 compaction
-- **THEN** 含未消费通知的段被 L3 豁免，压缩通过其他段完成或如实报告无法达标
-
 ### Requirement: 召回暂存的生命周期闭环
 
 recall 取回的详情 SHALL 以标记来源的暂存 ref 进入投影，消费完成后按遥测降级规则退出——MUST NOT 无限期常驻（防召回洪水重新膨胀）。

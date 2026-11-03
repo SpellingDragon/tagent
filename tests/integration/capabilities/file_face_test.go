@@ -38,6 +38,15 @@ func TestFileFaceServesTheDeclaredTools(t *testing.T) {
 			t.Fatalf("write the extra file: %v", err)
 		}
 
+		pairs := []nativePair{
+			{callID: "call-save", tool: tagentfile.SaveFileToolName, settled: "Successfully saved: notes/written.txt"},
+			{callID: "call-replace", tool: tagentfile.ReplaceContentToolName, settled: "replaced"},
+			{callID: "call-read", tool: tagentfile.ReadFileToolName, settled: "extra line"},
+			{callID: "call-read-many", tool: tagentfile.ReadMultipleFilesToolName, settled: "Read 1 file(s)"},
+			{callID: "call-list", tool: tagentfile.ListFileToolName, settled: "extra.md"},
+			{callID: "call-search-file", tool: tagentfile.SearchFileToolName, settled: "extra.md"},
+			{callID: "call-search-content", tool: tagentfile.SearchContentToolName, settled: "Found 1 files matching"},
+		}
 		round := 0
 		provider := &ntModel{name: "model-file", answer: func(req *model.Request) *model.Response {
 			round++
@@ -52,6 +61,12 @@ func TestFileFaceServesTheDeclaredTools(t *testing.T) {
 					ntCall("call-search-content", tagentfile.SearchContentToolName, `{"path":"notes","file_pattern":"*.md","content_pattern":"extra"}`),
 				)
 			}
+			for _, pair := range pairs {
+				if !nativeRequestHasObservation(*req, pair.callID) {
+					time.Sleep(10 * time.Millisecond)
+					return ntFinalTurn("awaiting settled observations")
+				}
+			}
 			if len(req.Tools) != len(tagentfile.Names()) {
 				t.Errorf("second request tools = %d (%v), want exactly the seven declared file tools", len(req.Tools), req.Tools)
 			}
@@ -59,17 +74,6 @@ func TestFileFaceServesTheDeclaredTools(t *testing.T) {
 				if req.Tools[name] == nil {
 					t.Errorf("second request tools carry no %q, want every declared file id granted", name)
 				}
-			}
-			for _, want := range []struct{ callID, tool, body string }{
-				{callID: "call-save", tool: tagentfile.SaveFileToolName, body: "Successfully saved: notes/written.txt"},
-				{callID: "call-replace", tool: tagentfile.ReplaceContentToolName, body: "replaced"},
-				{callID: "call-read", tool: tagentfile.ReadFileToolName, body: "extra line"},
-				{callID: "call-read-many", tool: tagentfile.ReadMultipleFilesToolName, body: "Read 1 file(s)"},
-				{callID: "call-list", tool: tagentfile.ListFileToolName, body: "extra.md"},
-				{callID: "call-search-file", tool: tagentfile.SearchFileToolName, body: "extra.md"},
-				{callID: "call-search-content", tool: tagentfile.SearchContentToolName, body: "Found 1 files matching"},
-			} {
-				checkObservedBody(t, req, want.callID, want.tool, want.body)
 			}
 			return ntFinalTurn("the declared file tools answered")
 		}}
@@ -88,9 +92,10 @@ func TestFileFaceServesTheDeclaredTools(t *testing.T) {
 		if err != nil {
 			t.Fatalf("invoke the file face: %v", err)
 		}
-		if turn.Terminal != model.KindCompleted || len(turn.Decisions) != 2 {
-			t.Fatalf("turn = (%v, %d decisions), want the completed terminal beside two decisions", turn.Terminal, len(turn.Decisions))
+		if turn.Terminal != model.KindCompleted || turn.DecisionCount < 2 {
+			t.Fatalf("turn = (%v, %d decisions), want the completed terminal beside at least the tool and closing decisions", turn.Terminal, turn.DecisionCount)
 		}
+		awaitNativePairs(t, provider, pairs)
 		written, err := os.ReadFile(filepath.Join(root, "notes", "written.txt"))
 		if err != nil || string(written) != "written\n" {
 			t.Fatalf("written file = (%q, %v), want save_file to write the real file under the base directory", written, err)
@@ -121,9 +126,12 @@ func TestFileFaceServesTheDeclaredTools(t *testing.T) {
 					ntCall("call-write-climb", tagentfile.SaveFileToolName, `{"file_name":"../escape.txt","contents":"overwritten\n","overwrite":true}`),
 				)
 			}
-			checkObservedBody(t, req, "call-climb", tagentfile.ReadFileToolName, "'..'")
-			checkObservedBody(t, req, "call-absolute", tagentfile.ReadFileToolName, "outside base_directory")
-			checkObservedBody(t, req, "call-write-climb", tagentfile.SaveFileToolName, "'..'")
+			for _, callID := range []string{"call-climb", "call-absolute", "call-write-climb"} {
+				if !nativeRequestHasObservation(*req, callID) {
+					time.Sleep(10 * time.Millisecond)
+					return ntFinalTurn("awaiting settled observations")
+				}
+			}
 			return ntFinalTurn("the outside paths were refused")
 		}}
 
@@ -140,6 +148,11 @@ func TestFileFaceServesTheDeclaredTools(t *testing.T) {
 		}); err != nil {
 			t.Fatalf("invoke the file face: %v", err)
 		}
+		awaitNativePairs(t, provider, []nativePair{
+			{callID: "call-climb", tool: tagentfile.ReadFileToolName, settled: "'..'"},
+			{callID: "call-absolute", tool: tagentfile.ReadFileToolName, settled: "outside base_directory"},
+			{callID: "call-write-climb", tool: tagentfile.SaveFileToolName, settled: "'..'"},
+		})
 		untouched, err := os.ReadFile(outsideFile)
 		if err != nil || string(untouched) != "outside\n" {
 			t.Fatalf("outside file = (%q, %v), want the refused write to leave it untouched", untouched, err)

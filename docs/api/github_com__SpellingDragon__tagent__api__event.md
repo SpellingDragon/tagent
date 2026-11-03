@@ -1,5 +1,12 @@
 package event // import "github.com/SpellingDragon/tagent/api/event"
 
+The compress product family: the product a consumer minted for one compress
+request, stated as the fact it is — which request it answers, which producer
+executed it, the product key the projection carries, the entries the product
+covers and the product text. A product is filed once per request: the identity
+is content-addressed over the request and the key, so a retried execution
+answers the same identity instead of filing a second product.
+
 The compress request family: the judgment that material is due for compression,
 stated as the fact it is — who judged, why, what was judged and the identity
 the judgment is quoted by — and never as the instruction that performs the
@@ -16,19 +23,38 @@ and the event axis is the one package all three already speak. The producer and
 the reason a mechanism states stay with that mechanism; this file states the
 fact they are quoted by.
 
-The model replacement family: the judgment that one agent's model reference
-moves from the version in effect to another version, stated as the fact it is —
-which agent, which versions, what source judged it and the result the producer
-states — and never as the instruction that rebuilds and installs a model. A
-producer files the replacement it judged, the lease that serves the agent reads
-it and runs its own rebuild, publication and installation steps. A repeated
-judgment keeps the identity and the first filing moment of the replacement
-already on record, so one move of one agent carries one fact however often it is
-judged.
+The configuration change family: the judgment that one dimension of one agent's
+configuration moved onto a published generation, stated as the fact it is —
+which agent, which dimension, the generation it landed in and what changed — and
+never as the instruction that applies the change. A reload states the judgment
+once per agent dimension that moved: the prompt and binding dimensions read
+their move from the description, the model dimension carries its version move in
+the payload beside the exported fields, rendered under the replacement metadata
+keys, the file dimension names the file and the content version it observed,
+and the organization dimensions state the structure the declaration moved — one
+five-field fact per dimension, never a second family.
 
-The configuration change is one source of the fact, never the fact itself:
-the source stamp names what judged the move ("config" for a declaration change)
-and another source states its own stamp without a second type.
+A configuration change is control-plane material: it names the change,
+not a transcript line, so the frozen request role table does not map its type
+and a drive never reads it as input. The fact is read by its identity and its
+metadata, exactly as the publication ledger it reports beside is read.
+
+The final round request family: the judgment that one range's budget is spent
+and its next decision is the closing round, stated as the fact it is — which
+range, why, and the inputs the judgment read. A producer files the judgment,
+the loop reads it at a decision boundary and runs the closing round; a range
+carries one request however often the judgment is re-evaluated.
+
+The model dimension vocabulary of a configuration change: the metadata keys a
+config_change fact of the model dimension carries — the version the move starts
+from, the version it asks for and the result the producer states — and the
+result stamp a producer writes when it asks a lease to apply the move.
+
+The independent model replacement family is retired: a model move is one
+configuration change of the model dimension, never a second fact family.
+No type, constructor or event shape stands beside the five-field change; a lease
+observer reads the same fact under these keys, exactly as it reads the dimension
+and the publication generation beside them.
 
 Package event is the runtime's event identity and fact carrier: it defines the
 typed identifiers an event carries, the address of the agent session an event
@@ -44,6 +70,57 @@ page.
 CONSTANTS
 
 const (
+	// ConfigChangeDimensionPrompt names the prompt sources the agent reads.
+	ConfigChangeDimensionPrompt = "prompt"
+	// ConfigChangeDimensionBinding names the declaration binding of the agent
+	// outside its prompt sources and model reference.
+	ConfigChangeDimensionBinding = "binding"
+	// ConfigChangeDimensionModel names the model reference the agent's lease
+	// serves: the move carries the versions between it in the fact payload.
+	ConfigChangeDimensionModel = "model"
+	// ConfigChangeDimensionFile names the declared file content the request
+	// boundary read: the fact carries which file and which content version it
+	// observed, and the boundary projects the content back from it.
+	ConfigChangeDimensionFile = "file"
+	// ConfigChangeDimensionOrgAgents names the declared agent set: a member
+	// added to or removed from the declaration.
+	ConfigChangeDimensionOrgAgents = "org.agents"
+	// ConfigChangeDimensionOrgEntry names the entry agent the organization
+	// speaks to.
+	ConfigChangeDimensionOrgEntry = "org.entry"
+	// ConfigChangeDimensionOrgAssembly names the config-declared delegation
+	// assembly: the agent references one declaration wires — the declared target,
+	// the tool name it is reached by, its description file and its event params.
+	ConfigChangeDimensionOrgAssembly = "org.assembly"
+)
+    ConfigChangeDimensionPrompt, ConfigChangeDimensionBinding,
+    ConfigChangeDimensionModel and ConfigChangeDimensionFile name the per-agent
+    configuration dimensions this family states: the prompt sources one agent is
+    assembled from, the remaining declaration binding of that agent, the model
+    reference a lease serves the agent through and the declared file content a
+    request boundary reads.
+
+    ConfigChangeDimensionOrgAgents, ConfigChangeDimensionOrgEntry and
+    ConfigChangeDimensionOrgAssembly name the organization dimensions the
+    declaration diff states: the declared agent set, the entry agent the
+    organization speaks to and the delegation assembly the declaration wires.
+    The organization is the control plane, so a move of its structure is a
+    change of this same family under its own dimension instead of a second fact
+    type.
+
+const (
+	// MetaKeyConfigChangeDimension names the configuration dimension that moved.
+	MetaKeyConfigChangeDimension = "config_change_dimension"
+	// MetaKeyConfigChangeGeneration names the generation the change landed in.
+	MetaKeyConfigChangeGeneration = "config_change_generation"
+)
+    MetaKeyConfigChangeDimension and MetaKeyConfigChangeGeneration name the
+    metadata keys a configuration change fact carries beside the frozen trigger
+    source stamp: the dimension that moved and the generation the publication
+    assigned. The generation is the publication identity, never a content
+    fingerprint, so a reader compares it with the publication ledger directly.
+
+const (
 	TypeExternalInput   = "external_input"
 	TypeAgentOutput     = "agent_output"
 	TypeActionCommand   = "action_command"
@@ -53,6 +130,16 @@ const (
 	TypeFeedback        = "feedback"
 	TypeGovernance      = "governance"
 
+	// TypeAttentionQuestion is the frozen type of a question put to a target
+	// thread or person: the opening fact of one attention lifecycle.
+	TypeAttentionQuestion = "attention.question"
+	// TypeAttentionAnswer is the frozen type of the ruling a question is
+	// answered with.
+	TypeAttentionAnswer = "attention.answer"
+	// TypeAttentionClearance is the frozen type of the fact that removes a
+	// question from the presence read.
+	TypeAttentionClearance = "attention.clearance"
+
 	// LineageDelegation is the trigger-source stamp of a delegated call: the
 	// delegated turn is traffic the agent manages for itself, so the stamp
 	// opens no host-facing gate and is never a freshness fact.
@@ -60,8 +147,8 @@ const (
 )
 
     TypeExternalInput, TypeAgentOutput, TypeActionCommand, TypeThinkingPlan,
-    TypeContextCompress, TypeTaskSettled, TypeFeedback and TypeGovernance are
-    the frozen skeleton event type strings.
+    TypeContextCompress, TypeTaskSettled, TypeFeedback, TypeGovernance and the
+    three TypeAttention roles are the frozen skeleton event type strings.
 
     LineageDelegation is the trigger-source stamp a delegated call carries on
     its admission record: the delegated turn is traffic the agent manages for
@@ -80,13 +167,80 @@ const (
 	MetaKeyBundleID            = "bundle_id"
 	MetaKeyNoticeKind          = "kind"
 	MetaKeyTaskID              = "task_id"
+
+	// MetaKeyNoticeSource names the source one notice message came from: the
+	// reincarnation notice, the system alert, a delivery receipt and the like.
+	// It is the per-message key the round-level trigger source is read beside —
+	// the input of one turn may mix both, so "where this message came from" and
+	// "who triggered this turn" are two entries and neither overwrites the
+	// other. A notice fact is queryable by source without reading its body.
+	MetaKeyNoticeSource = "notice_source"
+
+	// MetaKeyInputEvents names the ordered input fact identities an agent_output
+	// actually consumed. It is a causal relation on the existing output fact, not
+	// a second answer ledger; the value is a JSON array of event.EventID strings.
+	MetaKeyInputEvents = "input_events"
+
+	// MetaKeyDelegation names the resolved declaration one delegated input fact
+	// carries: the assembly the delegated round runs on — its name, model,
+	// instruction, skill, tool and MCP references and the sampling its requests
+	// carry — rendered as JSON. The declaration travels on the fact, so a re-entry
+	// after a restart rebuilds the assembly from the site's own chain instead of
+	// holding a second durable copy of it in process memory. The key is read on the
+	// task fact that closes one delegated input batch; the instruction and material
+	// facts of that batch carry none.
+	MetaKeyDelegation = "delegation"
+
+	// MetaKeyDeliveryTarget names the one address a delivery reached: the site whose
+	// chain took the body. Both delivery families stamp it, so the account of a
+	// delivery is read from the same entry whichever path carried it.
+	MetaKeyDeliveryTarget = "delivery.target"
+	// MetaKeyDeliveryIdentity names the identity one delivery is deduplicated
+	// under: the call frame of the sender for an agent's own body, the notification
+	// identity for a framework state change. A repeated delivery of one identity
+	// lands no second record.
+	MetaKeyDeliveryIdentity = "delivery.identity"
+	// MetaKeyDeliveryReceipt names the receipt a delivery stands at: the body
+	// reached the chain of the target.
+	MetaKeyDeliveryReceipt = "delivery.receipt"
+	// MetaKeyDeliverySource names the source event one delivery is filed under, so
+	// the deliveries of one source event are read as one account beside the
+	// identity of the delivery itself.
+	MetaKeyDeliverySource = "delivery.source"
+	// MetaKeyDeliveryDenial names the category one refused delivery was turned away
+	// under: the gate that refused it, or the stage of the round that never landed
+	// it. A receipt that stands at delivery or at a sent body carries no category,
+	// so the entry is read as the reason word of a refusal and of nothing else.
+	MetaKeyDeliveryDenial = "delivery.denial"
+
+	// MetaKeyAttentionKind names the kind a question is asked under: approval,
+	// notice or summary, an absent entry reading as approval.
+	MetaKeyAttentionKind = "attention.kind"
+	// MetaKeyAttentionTarget names the thread or person a question is put to.
+	MetaKeyAttentionTarget = "attention.target"
+	// MetaKeyAttentionLineage names the context a question came from: a call
+	// identity, a task identity or a reflection source.
+	MetaKeyAttentionLineage = "attention.lineage"
+	// MetaKeyAttentionExpiresMs names the validity of a question as an absolute
+	// millisecond stamp; zero reads as cleared when the work ends.
+	MetaKeyAttentionExpiresMs = "attention.expires_ms"
+	// MetaKeyAttentionClearance names the word a clearance carries: answer,
+	// expiry or work-end.
+	MetaKeyAttentionClearance = "attention.clearance"
 )
     MetaKeyEventKey, MetaKeyPartitionID, MetaKeyEventType, MetaKeyEventSummary,
     MetaKeyTriggerSource, MetaKeySettleTriggerSource, MetaKeyBundleID,
-    MetaKeyNoticeKind and MetaKeyTaskID name the frozen metadata keys: the event
-    identity, its partition, its type and summary, the trigger source, the
-    settle trigger lineage, the bundle attribution, the kind of the notification
-    a notice fact reports and the task it reports on.
+    MetaKeyNoticeKind, MetaKeyTaskID, MetaKeyNoticeSource, the five
+    MetaKeyDelivery entries and the five MetaKeyAttention entries
+    name the frozen metadata keys: the event identity, its partition,
+    its type and summary, the trigger source, the settle trigger lineage,
+    the bundle attribution, the kind of the notification a notice fact reports,
+    the task it reports on, the source one notice message came from,
+    the five entries that account one delivery, and the kind, target, lineage,
+    validity and clearance word an attention fact carries. MetaKeyInputEvents
+    and MetaKeyDelegation name the two facts an event carries beyond its own
+    account: the input relation its output consumed and the resolved declaration
+    its delegated round runs on.
 
 const (
 	// MetaKeyModelFromVersion names the version the move starts from.
@@ -97,12 +251,28 @@ const (
 	MetaKeyModelReplacementResult = "model_replacement_result"
 )
     MetaKeyModelFromVersion, MetaKeyModelToVersion and
-    MetaKeyModelReplacementResult name the metadata keys a model replacement
-    fact carries beside the frozen trigger source stamp: the version the move
-    starts from, the version it asks for and the result the producer states.
+    MetaKeyModelReplacementResult name the metadata keys a configuration change
+    of the model dimension carries beside the frozen trigger source stamp:
+    the version the move starts from, the version it asks for and the result
+    the producer states. The model move adds no exported field to the change:
+    these keys are its payload.
+
+const CompressProductType = "compress.product"
+    CompressProductType is the frozen type of a compress product fact.
 
 const CompressRequestType = "compress.request"
     CompressRequestType is the frozen type of a compress request fact.
+
+const ConfigChangeSourceConfig = "config"
+    ConfigChangeSourceConfig is the source stamp of a change judged by a
+    declaration reload: the configuration source observed the move and the host
+    filed the fact when the new generation settled. The stamp is a vocabulary
+    constant, never a field of the fact: every configuration change of this
+    family is judged by the same source, so a reader compares it with the
+    trigger source stamp the event commit carries.
+
+const FinalRoundRequestType = "final_round.request"
+    FinalRoundRequestType is the frozen type of a final round request fact.
 
 const MetaPrefix = "meta_"
     MetaPrefix marks a pass-through business metadata key: any key carrying
@@ -115,13 +285,8 @@ const ModelReplacementResultRequested = "requested"
     and the lease records whether the replacement actually took effect in its
     own history.
 
-const ModelReplacementSourceConfig = "config"
-    ModelReplacementSourceConfig is the source stamp of a replacement judged
-    by a declaration change: the agent's declared model reference moved and the
-    configuration reload filed the fact.
-
-const ModelReplacementType = "model.replacement"
-    ModelReplacementType is the frozen type of a model replacement fact.
+const TypeConfigChange = "config_change"
+    TypeConfigChange is the frozen type of a configuration change fact.
 
 TYPES
 
@@ -146,6 +311,40 @@ type AgentID string
 type AttemptID string
     AttemptID identifies one observable model attempt; a retry hidden below the
     decision boundary does not fake a new attempt.
+
+type CompressProduct struct {
+	// ID is the identity of the product: content-addressed over the answers and
+	// the product key, so one request answers one product identity.
+	ID EventID
+	// Answers names the judgment this product answers and the mechanism that
+	// executed the compression.
+	Answers ProductAnswers
+	// Key is the product key the projection carries the entry under; its prefix
+	// states the kind.
+	Key EventID
+	// Covered lists the entry keys the product covers, in their original order.
+	Covered []EventID
+	// Text is the product text the projection presents.
+	Text string
+}
+    CompressProduct is one compress product fact: the material a consumer folded
+    for one judgment. It is immutable once filed, and it is the only source the
+    projection restores a synthetic product entry from. What the product is — a
+    folded segment or a history summary — is read off the key's prefix, and the
+    filing moment is the commit stamp of the fact, so neither is stated twice.
+
+func CompressProductFor(request EventID, producer string, key EventID, covered []EventID, text string) CompressProduct
+    CompressProductFor returns the product fact one execution files:
+    the identity is content-addressed over the request it answers and the key
+    it carries, so a repeated execution of the same judgment files nothing new.
+    The filing moment stays zero for the log to stamp on first filing.
+
+func (p CompressProduct) FactKey() string
+    FactKey returns the product's identity as a fact key: the identity one
+    execution is quoted by, unchanged by every retry of that execution.
+
+func (p CompressProduct) FactType() string
+    FactType returns the frozen type a compress product is read as.
 
 type CompressRequest struct {
 	// ID is the identity of the judgment: the content-addressed key the request
@@ -181,8 +380,92 @@ func (r CompressRequest) FactKey() string
 func (r CompressRequest) FactType() string
     FactType returns the frozen type a compress request is read as.
 
+type ConfigChange struct {
+	// ID is the identity of the judgment: the content-addressed key the change
+	// is quoted by, derived from every field that states the move.
+	ID EventID
+	// AgentID names the agent whose declared dimension moved; the fact is owned
+	// by this agent.
+	AgentID AgentID
+	// Dimension names the configuration dimension that moved.
+	Dimension string
+	// Generation is the publication identity the change landed in.
+	Generation uint64
+	// Description states the change the fact reports.
+	Description string
+
+	// Has unexported fields.
+}
+    ConfigChange is one configuration change fact: the judgment that one
+    dimension of one agent's configuration moved onto a published generation.
+    It names the agent the fact is owned by, the dimension that moved,
+    the generation the publication assigned and the change it describes,
+    and it is immutable once filed — the same judgment files the same identity,
+    and a retry never refiles it under a second one.
+
+    The five exported fields state every configuration change. The model
+    dimension's version move is carried in the unexported payload beside them
+    and rendered by Event under the replacement metadata keys, so the model move
+    adds no exported field and no second fact family: a reader of a model change
+    reads the same five-field fact under the model dimension.
+
+func ConfigChangeFor(agentID AgentID, dimension string, generation uint64, description string) ConfigChange
+    ConfigChangeFor returns the change fact one reload files for a dimension
+    stated by its description: the identity is content-addressed over the agent,
+    the dimension, the generation, the description and the frozen source,
+    so the same judgment always answers the same identity and a re-judgment adds
+    no second fact. The filing moment stays zero for the log to stamp on first
+    filing.
+
+func ConfigChangeModelFor(agentID AgentID, generation uint64, from, to, result string) ConfigChange
+    ConfigChangeModelFor returns the change fact of one model reference move:
+    the identity is content-addressed over the agent, the model dimension, the
+    generation and the versions and result the move states, so the same judgment
+    always answers the same identity and a re-judgment adds no second fact.
+    The description names the move; the versions and result ride in the payload
+    and are rendered under the replacement metadata keys by Event.
+
+func (c ConfigChange) Event(at time.Time) Event
+    Event renders the change fact as the event it commits as: the frozen type,
+    the fact identity as the event key, the agent as the owner, the trigger
+    source stamp the observation gate reads, the dimension and the publication
+    generation in the event metadata — and, for the model dimension, the version
+    move under the model replacement metadata keys. The message carries the
+    change description, so a committed configuration change is readable on the
+    chain exactly as it was filed; the projection boundary maps no entry for the
+    type, so a model request never reads the judgment as transcript.
+
+func (c ConfigChange) FactKey() string
+    FactKey returns the change's identity as a fact key: the content-addressed
+    key one judgment is quoted by, unchanged by every re-filing of that
+    judgment.
+
+func (c ConfigChange) FactType() string
+    FactType returns the frozen type a configuration change is read as.
+
 type DecisionID string
     DecisionID identifies one model decision boundary.
+
+type DeliveryMeta struct {
+	// Target is the address a delivery reached.
+	Target string
+	// Identity is the identity one delivery is deduplicated under.
+	Identity string
+	// Receipt is the receipt a delivery stands at.
+	Receipt string
+	// Source is the source event one delivery is filed under.
+	Source string
+	// Denial is the category one refused delivery was turned away under, empty for
+	// a delivery that landed.
+	Denial string
+}
+    DeliveryMeta is the entries that account one delivery: the address the
+    body reached, the identity the delivery is deduplicated under, the receipt
+    it stands at, the source event it is filed under and, for an attempt that
+    reached nothing, the stage that turned it away. Both delivery families stamp
+    the same landed entries, so one delivery is read as one block whichever
+    route carried the body, and a refusal reads through the same block beside
+    the one extra entry.
 
 type EpisodeID string
     EpisodeID identifies an application level episode and its causal lineage;
@@ -294,6 +577,37 @@ type Fact interface {
     one fact is asked MUST NOT re-derive an identity from a non-identity field
     or rewrite a quoted identity
 
+type FinalRoundRequest struct {
+	// ID is the identity of the judgment: content-addressed over the range and
+	// the reason, so the same judgment never files a second request.
+	ID EventID
+	// Range is the invocation whose budget the judgment read.
+	Range InvocationID
+	// Reason states why the budget is spent: the round count or the elapsed time.
+	Reason string
+	// Rounds is the number of tool rounds the range had run when judged.
+	Rounds int
+	// Elapsed is the time the range had spent when judged.
+	Elapsed time.Duration
+}
+    FinalRoundRequest is one final round request fact: the judgment that a
+    range's budget is spent. It is immutable once filed, and its identity is
+    independent of the moment and the measured inputs, so one range answers one
+    request.
+
+func FinalRoundRequestFor(rangeID InvocationID, reason string, rounds int, elapsed time.Duration) FinalRoundRequest
+    FinalRoundRequestFor returns the request fact one judgment files:
+    the identity is content-addressed over the range and the reason, so a
+    re-evaluation of the same spent budget answers the same identity. The filing
+    moment stays zero for the log to stamp on first filing.
+
+func (r FinalRoundRequest) FactKey() string
+    FactKey returns the request's identity as a fact key: the identity one range
+    is quoted by, unchanged by every re-evaluation of the same budget.
+
+func (r FinalRoundRequest) FactType() string
+    FactType returns the frozen type a final round request is read as.
+
 type InstanceID string
     InstanceID identifies one runtime instance. Rebuilding an agent under the
     same name yields a different instance.
@@ -302,55 +616,15 @@ type InvocationID string
     InvocationID identifies one responsibility scope: a trusted admission or a
     delegation entry. One session may hold several invocations at the same time.
 
-type ModelReplacement struct {
-	// ID is the identity of the judgment: the content-addressed key the
-	// replacement is quoted by, derived from every field that states the move.
-	ID EventID
-	// AgentID names the agent whose model reference moves; the fact is owned by
-	// this agent.
-	AgentID AgentID
-	// FromVersion is the version the move starts from, as the rendered identity
-	// name it was declared under.
-	FromVersion string
-	// ToVersion is the version the move asks for: the version a rebuilt model
-	// is installed under, never a rendered name.
-	ToVersion string
-	// Source names what judged the move ("config" for a declaration change).
-	Source string
-	// Result states the result the producer records for the move.
-	Result string
-	// At is the moment the judgment was filed.
-	At time.Time
+type NoticeMeta struct {
+	// Kind is the kind of the notification a notice fact reports.
+	Kind string
+	// TaskID is the task a notice fact reports on.
+	TaskID string
 }
-    ModelReplacement is one model replacement fact: the judgment that one
-    agent's model reference moves from one version to another. It names the
-    agent the fact is owned by, the version it starts from, the version it asks
-    for, the source that judged the move and the result the producer states,
-    and it is immutable once filed — the same judgment files the same identity,
-    and a retry never refiles it under a second one.
-
-func ModelReplacementFor(agentID AgentID, from, to, source, result string) ModelReplacement
-    ModelReplacementFor returns the replacement fact one judgment files:
-    the identity is content-addressed over every field that states the move,
-    so the same judgment always answers the same identity and a re-judgment adds
-    no second fact. The filing moment stays zero for the log to stamp on first
-    filing.
-
-func (r ModelReplacement) Event(at time.Time) Event
-    Event renders the replacement fact as the event it commits as: the frozen
-    type, the fact identity as the event key, the agent as the owner, the
-    trigger source stamp the observation gate reads and the versions and result
-    in the event metadata. The message carries the one-line read of the move,
-    so a committed replacement is readable in the mapped sequence exactly as it
-    was filed.
-
-func (r ModelReplacement) FactKey() string
-    FactKey returns the replacement's identity as a fact key: the
-    content-addressed key one judgment is quoted by, unchanged by every
-    re-filing of that judgment.
-
-func (r ModelReplacement) FactType() string
-    FactType returns the frozen type a model replacement is read as.
+    NoticeMeta is the pair a notice fact states: the kind of the notification it
+    reports and the task it reports on. The two entries are read and written as
+    one block, so a fact either names the notification it carries or names none.
 
 type ParsedMeta struct {
 	// EventKey is the canonical event identity the entry names.
@@ -367,10 +641,11 @@ type ParsedMeta struct {
 	SettleTriggerSource string
 	// BundleID is the bundle attribution of the event.
 	BundleID string
-	// NoticeKind is the kind of the notification a notice fact reports.
-	NoticeKind string
-	// TaskID is the task a notice fact reports on.
-	TaskID string
+	// Notice is the notice-fact pair the fact states: the kind of the
+	// notification it reports and the task it reports on.
+	Notice NoticeMeta
+	// Delivery is the five entries that account one delivery the fact carried.
+	Delivery DeliveryMeta
 	// PassThrough holds every MetaPrefix entry verbatim: such an entry is
 	// forwarded as it stands and is never read as a frozen business field.
 	PassThrough map[string]string
@@ -380,13 +655,25 @@ type ParsedMeta struct {
 }
     ParsedMeta is the structured form of one event metadata map: the frozen keys
     declared above, the business entries carried by the pass-through prefix,
-    and every other entry kept verbatim.
+    and every other entry kept verbatim. The notice pair and the delivery
+    entries are each read as one block, so the metadata of one notice fact and
+    the account of one delivery are named by the concept they belong to rather
+    than by a run of sibling fields.
 
 func ParseEventMeta(meta map[string]string) ParsedMeta
     ParseEventMeta projects one metadata map into its structured form. A frozen
     key lands in its named field, a MetaPrefix entry lands in PassThrough,
     and any other entry lands in Unknown; no entry is dropped and the input map
     is left exactly as it was.
+
+type ProductAnswers struct {
+	// Request is the judgment this product answers.
+	Request EventID
+	// Producer names the mechanism that executed the compression.
+	Producer string
+}
+    ProductAnswers names the judgment one product answers beside the mechanism
+    that executed it.
 
 type SessionID string
     SessionID identifies one conversation session of an agent.

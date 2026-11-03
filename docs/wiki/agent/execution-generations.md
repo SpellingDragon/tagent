@@ -1,4 +1,4 @@
-> **本篇是当期契约**：代码注释 `// 契约: docs/wiki/agent/execution-generations.md#<锚>` 指向本页各节。实现面在 `runtime/state/`（`publish.go`/`binding.go`/`lease.go`/`retire.go`/`occupancy.go`）、`runtime/agent/`（`loop.go`/`shutdown.go`/`delegate.go`）、`assembly/`（`host_reload.go`/`prepare.go`），模型租约在 `features/rl/`（`lease_model.go`/`replacement.go`）。更细的换代面见 [platform/org-hot-reload.md](../platform/org-hot-reload.md#generations)。
+> **本篇是当期契约**：代码注释 `// 契约: docs/wiki/agent/execution-generations.md#<锚>` 指向本页各节。实现面在 `runtime/state/`（`publish.go`/`binding.go`/`lease.go`/`retire.go`/`occupancy.go`）、`runtime/agent/`（`loop.go`/`consumer.go`/`delegate.go`）、`assembly/`（`host_reload.go`/`prepare.go`），模型租约在 `features/rl/`（`lease_model.go`/`replacement.go`）。更细的换代面见 [platform/org-hot-reload.md](../platform/org-hot-reload.md#generations)。
 
 # 执行代际、租约与生命周期收敛
 
@@ -13,8 +13,8 @@
 `Borrow` 四条红线就是这一节的全文：请求**开始执行**那一刻取当时生效的代，并整段持有；委派请求取**发起者那一代**；不得预先绑定排队输入，也不得在请求在途时换掉它的代；不得服务本持有者从未发过的引用。四种情形各有唯一期望：已收敛关闭的代**拒绝**新引用（`ErrBindingGenerationReleased`），且**绝不拿当前代顶替**；已退出但仍有借用的代由引用计数撑着，不因「标了退役」就断；引用里的实例号不认识即 `ErrBindingRefUnknown`（零引用、别人的持有者发的、上一次运行留下的，一律拒）；借来的壳不得当有效执行面用；**跨回合的长期闭包（任务、重入）不得借用发起方的租约**，必须按自己这次调用另取一份。回收判定的唯一输入是「借用是否全部落账」——`Inflight()` 一次答出，不让人去数日志；退役资源的释放由 `retirement` 账本在「已被取代且再无请求」时各释放一次，释放失败不阻断其余释放。
 
 <a id="lifecycle-convergence"></a>
-## 三、关闭：必须收敛，且诚实优先于干净
-`Shutdown.Close` 先拒绝新输入（`ErrShutdownRefused`），再把已接受的义务结清：`Reconciler` 三条红线——只有该调用的义务清空才落它的终结、仍持有的预约必须报出（绝不一边说排空一边压着未落的终结）、不得早于也不得晚于它等的义务。排空轮询真实结算（`shutdownPollInterval` 2ms），不假设。**未收敛就报错**：`ErrDrainUnsettled` 报「没到真实终结」并附上还没停的东西的理由（如 `reasonProducerNotStopped`），绝不在写入者未确认停止期间退出存储。**「报错＋仍然持有」是诚实结果，「干净返回」是假象。**
+## 三、关闭：静止收束，且诚实优先于干净
+关闭是消费循环的终止相位，不是另起一套排空动作：先关 intake 闸门（外部新输入被具名拒绝，关闭期内由已有义务派生的回合仍受受理），再**静止到不动点**，最后才停消费者与设施。落终结仍守 `Reconciler` 三条红线——只有该调用的义务清空才落它的终结、仍持有的预约必须报出、不得早于也不得晚于它等的义务。不动点由三集合共同判定——工作收敛（链上无已受理未终态 task）∧ 消费收敛（权威未消费账清空：mailbox 未消费 + 持久欠通知）∧ 写入者停止（写入存储/外部系统的执行体未确认停止即不退出，数据安全屏障）。三集合经**同源函数 `Unsettled()`** 求值：关闭、重启、报告读同一处，进程内影子账本（不可从链上算回的字段）不作判据；求值以提交序号栅栏取快照并复核 seq 未变（原子），按权威账增量维护而不扫全链。**等待挂事件不挂时钟**：新事实提交与执行体收尾信号驱动重判，禁定时轮询、也禁拿零 deadline 空等。出口三态——`Quiesced`（自然收束）／`Cut`（预算到点，余量在链上由重启续上，**正常返回**）／`Broken`（不可判，告警）；`Cut`/`Broken` 逐地址报告未消费通知、未终态工作与未停写入者，全权威读。**「报错＋仍然持有」是诚实结果，「干净返回」是假象。**
 
 <a id="turn-local-execution-face"></a>
 ## 四、回合本地状态与执行面的边界
@@ -52,5 +52,5 @@
 | 缺口 | 现状与防线 | 候选方向 |
 |---|---|---|
 | 诊断面只有计数与名字 | `Inflight()` 给总数，缺「哪个持有者长期不落账」的直接定位；借用壳的误用只能靠测试钉住 | 按代与持有者分组的在途账，带上取得时刻 |
-| 关闭未收敛的报告可读不可机读 | `ErrDrainUnsettled` 附理由，但理由是人类字符串 | 一个可解析的 `DrainReport` 结构，供运维二次判断 |
+| 关闭未收束的报告可读不可机读 | `Cut`/`Broken` 分档给出，但逐地址理由仍是人类字符串 | 一个可解析的收束报告结构，供运维二次判断 |
 | 换代窗口的经验只在本仓 | 判据靠 `compatibleWith` 的三档拒绝，缺跨进程实测 | 一次「换代 + 重启」演练，正负两腿各一 |

@@ -5,6 +5,8 @@
 （只降不升）、stale 清零提示、--rule 单跑、--self-check 自校、JSON 报告形状。
 """
 import json
+import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -23,7 +25,65 @@ ARCH = {
     "schema_version": 1,
     "scope": {"exclude_dir_names": ["examples"]},
     "packages": [{"pattern": "^.*$"}],
+    # domain-surface 判定的夹具政策：基线用本地树快照（真实树用 git commit）。
+    "concept_bindings": {"baseline": {"tree": ".baseline-tree"}, "bindings": {}},
 }
+
+# 非 superseded 主 spec 夹具：拥有 SHALL 是正常形态，只有 superseded+SHALL 才红。
+LIVE_SPEC = """# {capability} Specification
+
+## Purpose
+
+该能力拥有自己的领域事实与读面，是活的规范权威。
+
+## Requirements
+
+### Requirement: 事实可恢复
+
+领域事实 SHALL 可由事件链恢复，读投影 SHALL 只从既有事实计算。
+
+#### Scenario: 重放恢复
+
+- **WHEN** 重放事件链
+- **THEN** 恢复领域事实
+"""
+
+# 负锚 B 夹具：镜像真实 persistent-event-loop 的形状——blockquote superseded 标记
+# ＋「保留为历史记录」注释＋Requirements 里仍有 SHALL。
+SUPERSEDED_SPEC = """# {capability} Specification
+
+## Purpose
+
+> **superseded（2026-11-02 核验）**：本规范描述的常驻循环已退役。以下 Purpose 与 Requirements 保留为历史记录；现行契约见现行能力的主 spec。
+## Requirements
+
+### Requirement: Loop goroutine 持续运行不退出
+
+Loop goroutine SHALL 循环执行 drain mailbox，并 SHALL NOT 在 Flow.Run 返回时退出。
+
+#### Scenario: StopLoop 终止 Loop
+
+- **WHEN** 调用 StopLoop()
+- **THEN** Loop goroutine 退出
+"""
+
+SUPERSEDED_EMPTY_SPEC = """# {capability} Specification
+
+## Purpose
+
+> **superseded（2026-11-02 核验）**：有效条款已全部迁移到现行能力；本文件不再保留任何现行命令。
+
+## Requirements
+
+### Requirement: 历史条款已迁移
+
+历史条款的现行版本见现行能力的规范。
+
+#### Scenario: 查现行要求
+
+- **WHEN** 需要现行要求
+- **THEN** 读现行能力的规范
+"""
 
 GOOD_FACE = """package good
 
@@ -75,6 +135,9 @@ class FixtureCase(unittest.TestCase):
         self._tmp = tempfile.TemporaryDirectory()
         self.root = Path(self._tmp.name)
         self.write(".concept-arch.json", json.dumps(ARCH))
+        # domain-surface 的基线树：默认空目录（缺基线＝fail-closed），
+        # 需要合观证据的夹具用 write_baseline 镜像内容。
+        (self.root / ".baseline-tree").mkdir()
 
     def tearDown(self):
         self._tmp.cleanup()
@@ -83,6 +146,23 @@ class FixtureCase(unittest.TestCase):
         path = self.root / rel_path
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(text, encoding="utf-8")
+
+    def write_baseline(self, rel_path, text):
+        self.write(os.path.join(".baseline-tree", rel_path), text)
+
+    def write_spec(self, capability, text):
+        self.write(os.path.join("openspec", "specs", capability, "spec.md"), text)
+
+    def rewrite_bindings(self, bindings, baseline=None):
+        config = dict(ARCH)
+        config["concept_bindings"] = {
+            "baseline": baseline if baseline is not None else {"tree": ".baseline-tree"},
+            "bindings": bindings,
+        }
+        self.write(".concept-arch.json", json.dumps(config))
+
+    def domain(self, *args):
+        return self.cli("--rule", "domain-surface", *args)
 
     def findings(self, rules=budget.RULES):
         collected, _metrics = budget.collect_findings(
@@ -100,6 +180,9 @@ class FixtureCase(unittest.TestCase):
     def write_good_tree(self):
         self.write("good/faces.go", GOOD_FACE)
         self.write("examples/contract/good/Face_example.go", GOOD_EXAMPLE)
+        # domain-surface 合规件：基线镜像（当前面==基线面，无新增）＋活的 spec 锚。
+        self.write_baseline("good/faces.go", GOOD_FACE)
+        self.write_spec("delivery-facts", LIVE_SPEC.format(capability="delivery-facts"))
 
 
 class CompliantTreeTest(FixtureCase):
@@ -456,6 +539,417 @@ func leak(ctx context.Context) interface{} { return ctx.Value("k") }
         code, out, _err = self.cli()
         self.assertEqual(code, 1)
         self.assertIn("implementation not present", out)
+
+
+class DomainSurfaceTest(FixtureCase):
+    """D1 domain-surface：新增/改名公共命名类型的绑定门＋superseded 规范权威门。
+
+    判定与 S1–S4 分门：domain 结果独立成节，不进形状 BASELINE 棘轮，也不能被其豁免。
+    """
+
+    def setUp(self):
+        super().setUp()
+        # 公共夹具：一个两侧都在的导出类型（无新增面）＋一个活的 spec 锚。
+        stable = "package stable\n\ntype Anchor struct{ A int }\n"
+        self.write("stable/types.go", stable)
+        self.write_baseline("stable/types.go", stable)
+        self.write_spec("delivery-facts", LIVE_SPEC.format(capability="delivery-facts"))
+
+    # ---- 负锚 A：机制无绑定具名拒 ----
+
+    def test_unbound_new_mechanism_types_are_named_rejected(self):
+        self.write("runtime/agent/consumer.go",
+                   "package agent\n\ntype Writers struct{ Next int }\n")
+        self.write("runtime/task/movement.go",
+                   "package task\n\ntype Movement struct{ Seq int }\n")
+        self.write("tool/subagent/continuation.go",
+                   "package subagent\n\ntype Continuations struct{ Key string }\n")
+        code, out, _err = self.domain()
+        payload = json.loads(out)
+        self.assertEqual(code, 1, out)
+        keys = [f["key"] for f in payload["extra"]["domain_surface"]]
+        self.assertEqual(keys, [
+            "runtime/agent/consumer.go:Writers",
+            "runtime/task/movement.go:Movement",
+            "tool/subagent/continuation.go:Continuations",
+        ])
+        for message in payload["errors"]:
+            if "Writers" in message:
+                self.assertIn("has no concept binding", message)
+        self.assertTrue(any("no concept binding" in message for message in payload["errors"]))
+        self.assertEqual(payload["counts"]["findings.domain-surface"], 3)
+
+    def test_invalid_binding_kind_is_rejected(self):
+        self.write("runtime/agent/consumer.go",
+                   "package agent\n\ntype Writers struct{ Next int }\n")
+        self.rewrite_bindings({
+            "Writers": {"concept": "writer-ledger", "kind": "mechanism",
+                        "spec": "delivery-facts"},
+        })
+        code, out, _err = self.domain()
+        payload = json.loads(out)
+        self.assertEqual(code, 1, out)
+        self.assertTrue(any("kind must be one of fact/read/declaration/port" in message
+                            for message in payload["errors"]))
+
+    # ---- 负锚 B：superseded spec 含 SHALL/MUST 必红 ----
+
+    def test_superseded_spec_with_shall_is_red(self):
+        self.write_spec("persistent-event-loop",
+                        SUPERSEDED_SPEC.format(capability="persistent-event-loop"))
+        code, out, _err = self.domain()
+        payload = json.loads(out)
+        self.assertEqual(code, 1, out)
+        self.assertTrue(any("persistent-event-loop" in message
+                            and "superseded" in message
+                            for message in payload["errors"]))
+        self.assertEqual(payload["counts"]["domain_surface.superseded_specs_with_requirements"], 1)
+
+    def test_superseded_spec_without_normative_requirements_is_green(self):
+        self.write_spec("persistent-event-loop",
+                        SUPERSEDED_EMPTY_SPEC.format(capability="persistent-event-loop"))
+        code, out, _err = self.domain()
+        self.assertEqual(code, 0, out)
+
+    def test_live_spec_with_shall_is_green(self):
+        # 非 superseded 的主 spec 拥有 SHALL 是正常形态，不得到处红。
+        code, out, _err = self.domain()
+        self.assertEqual(code, 0, out)
+
+    # ---- 正锚：合法绑定不误伤 ----
+
+    def test_new_fact_binding_is_accepted(self):
+        # CompressProduct：request→product→恢复所需事实，绑 fact。
+        self.write("api/event/compress_product.go",
+                   "package event\n\n// CompressProduct 记录压缩产物与恢复所需事实。\n"
+                   "type CompressProduct struct{ Product string }\n")
+        self.write_spec("compression-pipeline",
+                        LIVE_SPEC.format(capability="compression-pipeline"))
+        self.rewrite_bindings({
+            "CompressProduct": {"concept": "compress-product", "kind": "fact",
+                                "spec": "compression-pipeline"},
+        })
+        code, out, _err = self.domain()
+        payload = json.loads(out)
+        self.assertEqual(code, 0, out)
+        self.assertEqual(payload["counts"]["domain_surface.new"], 1)
+        self.assertEqual(payload["counts"]["domain_surface.net_facts"], 1)
+        self.assertEqual(payload["extra"]["domain_surface"], [])
+
+    def test_new_read_binding_is_accepted_and_adds_no_fact(self):
+        # DeliveryLedger：投递事实读投影，绑 read，不计新领域事实。
+        self.write("assembly/host_tools.go",
+                   "package assembly\n\ntype DeliveryLedger struct{ Rows int }\n")
+        self.write_spec("unified-task-semantics",
+                        LIVE_SPEC.format(capability="unified-task-semantics"))
+        self.rewrite_bindings({
+            "DeliveryLedger": {"concept": "delivery-record", "kind": "read",
+                               "spec": "unified-task-semantics"},
+        })
+        code, out, _err = self.domain()
+        payload = json.loads(out)
+        self.assertEqual(code, 0, out)
+        self.assertEqual(payload["counts"]["domain_surface.new"], 1)
+        self.assertEqual(payload["counts"]["domain_surface.net_facts"], 0)
+
+    def test_same_name_relocation_is_net_zero(self):
+        # Reconciler：同名搬迁（runtime/agent → runtime/task），语义权威不变。
+        self.write_baseline("runtime/agent/consumer.go",
+                            "package agent\n\ntype Reconciler interface{ Apply() error }\n")
+        self.write("runtime/task/reconcile.go",
+                   "package task\n\ntype Reconciler interface{ Apply() error }\n")
+        code, out, _err = self.domain()
+        payload = json.loads(out)
+        self.assertEqual(code, 0, out)
+        self.assertEqual(payload["counts"]["domain_surface.new"], 0)
+        self.assertEqual(payload["counts"]["domain_surface.relocations"], 1)
+
+    def test_pure_rename_accounts_net_zero(self):
+        # 纯改名：OldLedger → DeliveryLedger，renamed_from 对账，净额 0。
+        self.write_baseline("memory/ledger.go",
+                            "package memory\n\ntype OldLedger struct{ Rows int }\n")
+        self.write("memory/ledger.go",
+                   "package memory\n\ntype DeliveryLedger struct{ Rows int }\n")
+        self.write_spec("unified-task-semantics",
+                        LIVE_SPEC.format(capability="unified-task-semantics"))
+        self.rewrite_bindings({
+            "DeliveryLedger": {"concept": "delivery-record", "kind": "read",
+                               "spec": "unified-task-semantics",
+                               "renamed_from": "OldLedger"},
+        })
+        code, out, _err = self.domain()
+        payload = json.loads(out)
+        self.assertEqual(code, 0, out)
+        self.assertEqual(payload["counts"]["domain_surface.renames"], 1)
+        self.assertEqual(payload["counts"]["domain_surface.removed"], 1)
+        self.assertEqual(payload["counts"]["domain_surface.net_facts"], 0)
+
+    def test_rename_with_old_name_still_present_is_red(self):
+        self.write_baseline("memory/ledger.go",
+                            "package memory\n\ntype OldLedger struct{ Rows int }\n")
+        self.write("memory/ledger.go",
+                   "package memory\n\ntype OldLedger struct{ Rows int }\n"
+                   "type DeliveryLedger struct{ Rows int }\n")
+        self.write_spec("unified-task-semantics",
+                        LIVE_SPEC.format(capability="unified-task-semantics"))
+        self.rewrite_bindings({
+            "DeliveryLedger": {"concept": "delivery-record", "kind": "read",
+                               "spec": "unified-task-semantics",
+                               "renamed_from": "OldLedger"},
+        })
+        code, out, _err = self.domain()
+        payload = json.loads(out)
+        self.assertEqual(code, 1, out)
+        self.assertTrue(any("still present" in message for message in payload["errors"]))
+
+    def test_rename_from_name_absent_in_baseline_is_red(self):
+        self.write("memory/ledger.go",
+                   "package memory\n\ntype DeliveryLedger struct{ Rows int }\n")
+        self.write_spec("unified-task-semantics",
+                        LIVE_SPEC.format(capability="unified-task-semantics"))
+        self.rewrite_bindings({
+            "DeliveryLedger": {"concept": "delivery-record", "kind": "read",
+                               "spec": "unified-task-semantics",
+                               "renamed_from": "GhostLedger"},
+        })
+        code, out, _err = self.domain()
+        payload = json.loads(out)
+        self.assertEqual(code, 1, out)
+        self.assertTrue(any("absent from the baseline" in message
+                            for message in payload["errors"]))
+
+    # ---- fail-closed：基线/锚/表缺失不得静默通过 ----
+
+    def test_missing_concept_bindings_section_fails_closed(self):
+        config = dict(ARCH)
+        del config["concept_bindings"]
+        self.write(".concept-arch.json", json.dumps(config))
+        code, out, _err = self.domain()
+        payload = json.loads(out)
+        self.assertEqual(code, 1, out)
+        self.assertTrue(any("concept_bindings" in message for message in payload["errors"]))
+
+    def test_missing_baseline_config_fails_closed(self):
+        self.rewrite_bindings({}, baseline={})
+        code, out, _err = self.domain()
+        payload = json.loads(out)
+        self.assertEqual(code, 1, out)
+        self.assertTrue(any("concept_bindings.baseline" in message
+                            for message in payload["errors"]))
+
+    def test_empty_baseline_tree_fails_closed(self):
+        self.rewrite_bindings({}, baseline={"tree": ".baseline-empty"})
+        (self.root / ".baseline-empty").mkdir()
+        code, out, _err = self.domain()
+        payload = json.loads(out)
+        self.assertEqual(code, 1, out)
+        self.assertTrue(any("implementation not present" in message
+                            for message in payload["errors"]))
+
+    def test_unresolvable_baseline_commit_fails_closed(self):
+        self.rewrite_bindings({}, baseline={"commit": "0" * 40})
+        code, out, _err = self.domain()
+        payload = json.loads(out)
+        self.assertEqual(code, 1, out)
+        self.assertTrue(any("cannot read baseline commit" in message
+                            for message in payload["errors"]))
+
+    def test_binding_to_missing_spec_anchor_fails_closed(self):
+        self.write("api/event/compress_product.go",
+                   "package event\n\ntype CompressProduct struct{ Product string }\n")
+        self.rewrite_bindings({
+            "CompressProduct": {"concept": "compress-product", "kind": "fact",
+                                "spec": "no-such-capability"},
+        })
+        code, out, _err = self.domain()
+        payload = json.loads(out)
+        self.assertEqual(code, 1, out)
+        self.assertTrue(any("no-such-capability" in message
+                            and "spec anchor" in message
+                            for message in payload["errors"]))
+
+    def test_binding_to_superseded_spec_anchor_is_red(self):
+        self.write("api/event/compress_product.go",
+                   "package event\n\ntype CompressProduct struct{ Product string }\n")
+        self.write_spec("persistent-event-loop",
+                        SUPERSEDED_EMPTY_SPEC.format(capability="persistent-event-loop"))
+        self.rewrite_bindings({
+            "CompressProduct": {"concept": "compress-product", "kind": "fact",
+                                "spec": "persistent-event-loop"},
+        })
+        code, out, _err = self.domain()
+        payload = json.loads(out)
+        self.assertEqual(code, 1, out)
+        self.assertTrue(any("persistent-event-loop" in message
+                            and "superseded" in message
+                            for message in payload["errors"]))
+
+    # ---- 表卫生与口径 ----
+
+    def test_unexported_new_type_is_not_gated(self):
+        self.write("runtime/agent/consumer.go",
+                   "package agent\n\ntype writers struct{ next int }\n")
+        code, out, _err = self.domain()
+        payload = json.loads(out)
+        self.assertEqual(code, 0, out)
+        self.assertEqual(payload["counts"]["domain_surface.new"], 0)
+
+    def test_stale_binding_for_unchanged_name_warns_but_passes(self):
+        self.rewrite_bindings({
+            "Anchor": {"concept": "anchor", "kind": "declaration",
+                       "spec": "delivery-facts"},
+        })
+        code, out, _err = self.domain()
+        payload = json.loads(out)
+        self.assertEqual(code, 0, out)
+        self.assertTrue(any("not required" in message for message in payload["warnings"]))
+
+    def test_domain_findings_are_reported_separately_from_shapes(self):
+        self.write("runtime/agent/consumer.go",
+                   "package agent\n\ntype Writers struct{ Next int }\n")
+        code, out, _err = self.cli()
+        payload = json.loads(out)
+        self.assertEqual(code, 1, out)
+        # 形状面与领域面分门：domain 结果独立成节，形状 findings 不含 domain。
+        self.assertEqual(payload["counts"]["findings"], 0)
+        self.assertEqual(payload["counts"]["findings.domain-surface"], 1)
+        self.assertEqual(payload["extra"]["domain_surface"][0]["rule"], "domain-surface")
+        self.assertTrue(all(f["rule"] != "domain-surface"
+                            for f in payload["extra"]["findings"]))
+
+
+class RealTreeDomainSurfaceTest(unittest.TestCase):
+    """真实树锚：persistent-event-loop 的 superseded+SHALL 债必须被具名检出。"""
+
+    @staticmethod
+    def _persistent_event_loop_debt():
+        text = (REPO_ROOT / "openspec" / "specs" / "persistent-event-loop" / "spec.md") \
+            .read_text(encoding="utf-8")
+        lines = text.splitlines()
+        superseded = any(
+            line.lstrip().startswith(">") and re.search(r"superseded", line, re.I)
+            for line in lines
+        )
+        requirements, started = [], False
+        for line in lines:
+            if line.startswith("## Requirements"):
+                started = True
+                continue
+            if started and re.match(r"^##\s", line):
+                break
+            if started:
+                requirements.append(line)
+        block = "\n".join(requirements) if started else text
+        normative = bool(re.search(r"\b(SHALL|MUST)\b", block))
+        return superseded and normative
+
+    def test_real_tree_superseded_debt_is_detected(self):
+        code, out, _err = run_checker(
+            "--repo-root", str(REPO_ROOT), "--rule", "domain-surface", "--json")
+        payload = json.loads(out)
+        named = any("persistent-event-loop" in message for message in payload["errors"])
+        self.assertEqual(self._persistent_event_loop_debt(), named,
+                         "superseded+SHALL 债与门的红必须一一对应: " + out)
+        if named:
+            self.assertEqual(code, 1)
+
+    def test_real_tree_has_no_unbound_new_public_types(self):
+        _code, out, _err = run_checker(
+            "--repo-root", str(REPO_ROOT), "--rule", "domain-surface", "--json")
+        payload = json.loads(out)
+        self.assertFalse([message for message in payload["errors"]
+                          if "has no concept binding" in message],
+                         "本波写集不得新增未绑定公共命名类型: " + out)
+
+
+class ConceptRatchetTest(unittest.TestCase):
+    """concept_ratchet 三档 floor 的变异红→绿自测，连同缺键与错误的告警语义。
+
+    三档 floor 分别冻结 removed_min、new_max、exported_interfaces_max：把任一档
+    收紧到当前实测值之外必须具名变红，恢复 golden 的冻结值必须回到绿；红时不得
+    留下 "held" 的安心理由。
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.path = Path(self._tmp.name) / "architecture.json"
+        self.metrics = {"exported_interfaces": 70}
+        self.domain_counts = {
+            "domain_surface.removed": 12,
+            "domain_surface.new": 0,
+        }
+
+    def write_ratchet(self, **overrides):
+        ratchet = {
+            "removed_min": 10,
+            "new_max": 1,
+            "exported_interfaces_max": 77,
+        }
+        ratchet.update(overrides)
+        self.path.write_text(json.dumps({"concept_ratchet": ratchet}), encoding="utf-8")
+
+    def check(self):
+        report = lib.Report("selftest-ratchet")
+        budget.check_ratchet(
+            report, str(self.path), dict(self.metrics), dict(self.domain_counts)
+        )
+        return report
+
+    def assert_red_then_green(self, error_fragment):
+        mutated = self.check()
+        self.assertFalse(mutated.ok)
+        self.assertTrue(
+            any(error_fragment in message for message in mutated.errors),
+            mutated.errors,
+        )
+        self.assertFalse(
+            any("held" in message for message in mutated.notes),
+            "a failed ratchet must not print the held note: " + str(mutated.notes),
+        )
+
+        self.write_ratchet()
+        restored = self.check()
+        self.assertTrue(restored.ok, restored.errors)
+        self.assertTrue(any("concept ratchet held" in message for message in restored.notes))
+
+    def test_removed_floor_mutation_turns_red_then_green(self):
+        # removed 实测 12，把 floor 提到 13 即低于 floor 变红。
+        self.write_ratchet(removed_min=13)
+        self.assert_red_then_green("below the frozen floor")
+
+    def test_new_ceiling_mutation_turns_red_then_green(self):
+        # new 实测 0，把 ceiling 压到 -1 即超过 ceiling 变红。
+        self.write_ratchet(new_max=-1)
+        self.assert_red_then_green("exceeds the frozen ceiling")
+
+    def test_interface_ceiling_mutation_turns_red_then_green(self):
+        # exported_interfaces 实测 70，把 ceiling 压到 69 即超过 ceiling 变红。
+        self.write_ratchet(exported_interfaces_max=69)
+        self.assert_red_then_green("exported_interfaces")
+
+    def test_missing_ratchet_key_warns_instead_of_passing_silently(self):
+        self.path.write_text(json.dumps({"schema_version": 1}), encoding="utf-8")
+        report = self.check()
+        self.assertTrue(report.ok, report.errors)
+        self.assertTrue(
+            any("concept_ratchet" in message for message in report.warnings),
+            report.warnings,
+        )
+        self.assertFalse(any("held" in message for message in report.notes))
+
+    def test_existing_error_suppresses_the_held_note(self):
+        self.write_ratchet()
+        report = lib.Report("selftest-ratchet")
+        report.error("another rule failed")
+        budget.check_ratchet(
+            report, str(self.path), dict(self.metrics), dict(self.domain_counts)
+        )
+        self.assertFalse(report.ok)
+        self.assertFalse(
+            any("held" in message for message in report.notes),
+            "the held note must not accompany a failed report: " + str(report.notes),
+        )
 
 
 class WorkflowRegistrationTest(unittest.TestCase):

@@ -131,6 +131,21 @@ type stamps struct {
 	admitted time.Time
 	changed  time.Time
 	running  time.Time
+	// reentered is the instant a write-type re-entry last moved the task's time to
+	// live: it stands at the zero time while the deadline is the admission's own.
+	reentered time.Time
+}
+
+// ttlFrom reports the instant the task's time to live is counted from: the later
+// of its admission and the round a write-type re-entry opened. A re-entry of a
+// task whose admission already outlived the deadline therefore reads the deadline
+// of the round it started rather than the one the task outlived, and a task never
+// re-entered reads the deadline its admission set.
+func (s stamps) ttlFrom() time.Time {
+	if s.reentered.After(s.admitted) {
+		return s.reentered
+	}
+	return s.admitted
 }
 
 // classify reports the logical status of one task at the given instant. A task
@@ -140,8 +155,10 @@ func (p Policy) classify(status Status, s stamps, at time.Time) LogicalStatus {
 	if status == StatusUnknown || isTerminal(status) {
 		return LogicalActive
 	}
-	if p.TTL > 0 && !s.admitted.IsZero() && at.Sub(s.admitted) >= p.TTL {
-		return LogicalExpired
+	if p.TTL > 0 {
+		if from := s.ttlFrom(); !from.IsZero() && at.Sub(from) >= p.TTL {
+			return LogicalExpired
+		}
 	}
 	if p.ExecutionTimeout > 0 && isExecuting(status) && !s.running.IsZero() && at.Sub(s.running) >= p.ExecutionTimeout {
 		return LogicalTimedOut
@@ -174,6 +191,16 @@ func isExecuting(status Status) bool {
 // registry built beside no policy reads its tasks under DefaultPolicy.
 func WithPolicy(policy Policy) RegistryOption {
 	return func(r *MemoryRegistry) { r.policy = policy }
+}
+
+// WithClock sets the time source the admission and movement stamps of a task are
+// read from. A registry built beside no clock stamps its tasks with the wall
+// clock, so an unwired deployment behaves exactly as it did before this seam
+// existed; the source is injectable because a task's time to live is a guarantee
+// about instants, and a guarantee about instants is checked by moving them rather
+// than by waiting for them.
+func WithClock(now func() time.Time) RegistryOption {
+	return func(r *MemoryRegistry) { r.now = now }
 }
 
 // LogicalChange is one identified logical status change of one task: the task it
@@ -242,7 +269,7 @@ func (r *MemoryRegistry) Watch(ctx context.Context, at time.Time) []LogicalChang
 
 // stamps reports the movement points this record was read under.
 func (t *memoryTask) stamps() stamps {
-	return stamps{admitted: t.admittedAt, changed: t.changedAt, running: t.runSince}
+	return stamps{admitted: t.admittedAt, changed: t.changedAt, running: t.runSince, reentered: t.ttlAnchor}
 }
 
 // markMovement records the movement one committed transition left on this task:

@@ -3,12 +3,15 @@ package rl
 import (
 	"context"
 	"errors"
+	"fmt"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/SpellingDragon/tagent/api/event"
+	"github.com/SpellingDragon/tagent/api/model"
 )
 
 // TestCaptureSinkAccountsEveryBound pins the capture loss ledger: each bound counts its own loss, and a seal without a writer seal is partial.
@@ -194,6 +197,73 @@ func TestCaptureSinkAccountsEveryBound(t *testing.T) {
 		}
 		close(writer.release)
 	})
+}
+
+// boundedAnchorBudgetBytes names the resident byte budget the capture must keep:
+// the anchor fixes fifty snapshots of about one hundred kilobytes each and reads
+// every one of them back, so a capture that keeps all of them resident grows by
+// about five megabytes — five times the budget.
+const (
+	boundedAnchorDecisions = 50
+	boundedAnchorBudget    = 1 << 20
+	boundedAnchorBodyKB    = 100
+)
+
+// TestTrajectoryCaptureStaysBounded pins the resident bound of the fixed snapshots: their growth stays inside the stated byte budget while every one reads back.
+//   - fifty decisions fix a snapshot of about 100KB each beside one capture
+//   - the resident growth after a full collection stays within the 1MB budget
+//   - every fixed snapshot still reads back through its reference, digest-checked
+//
+// 契约: docs/wiki/rl/rl-architecture.md#trajectory-capture
+func TestTrajectoryCaptureStaysBounded(t *testing.T) {
+	ctx := context.Background()
+	sink, err := NewCaptureSink("cap:bounded", SinkConfig{}, &recordingWriter{synced: true})
+	if err != nil {
+		t.Fatalf("open the sink: %v", err)
+	}
+	capture, err := NewTrajectoryCaptureWithBudget("bounded", sink, SnapshotPolicy{}, CaptureBudget{
+		Bytes:   boundedAnchorBudget,
+		SwapDir: t.TempDir(),
+	})
+	if err != nil {
+		t.Fatalf("open the capture: %v", err)
+	}
+
+	body := strings.Repeat("s", boundedAnchorBodyKB<<10)
+	runtime.GC()
+	var before runtime.MemStats
+	runtime.ReadMemStats(&before)
+
+	refs := make([]SnapshotRef, 0, boundedAnchorDecisions)
+	for at := 0; at < boundedAnchorDecisions; at++ {
+		decision := event.DecisionID(fmt.Sprintf("decision-bounded-%d", at))
+		scope := capture.Scope(ModelViewRef{Model: "model-a"}, decision)
+		view, err := scope.Snapshot(ctx, model.Request{
+			Messages: []model.Message{{Role: model.RoleUser, Content: body}},
+		})
+		if err != nil {
+			t.Fatalf("fix snapshot %d: %v", at, err)
+		}
+		refs = append(refs, view.Snapshot)
+	}
+
+	runtime.GC()
+	var after runtime.MemStats
+	runtime.ReadMemStats(&after)
+	if grew := int64(after.HeapAlloc) - int64(before.HeapAlloc); grew > boundedAnchorBudget {
+		t.Fatalf("resident growth after %d snapshots of %dKB = %d bytes, want at most the %d-byte budget: "+
+			"the fixed snapshots the capture keeps are unbounded",
+			boundedAnchorDecisions, boundedAnchorBodyKB, grew, boundedAnchorBudget)
+	}
+
+	for at, ref := range refs {
+		if _, err := capture.SnapshotOf(ref); err != nil {
+			t.Fatalf("read snapshot %d back through %s: %v", at, ref.SnapshotID, err)
+		}
+	}
+	if got := len(capture.Snapshots()); got != boundedAnchorDecisions {
+		t.Fatalf("snapshots readable = %d, want all %d fixed ones", got, boundedAnchorDecisions)
+	}
 }
 
 // mentions reports whether one reason line carries the given text.

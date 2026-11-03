@@ -132,9 +132,9 @@ func runAgentSessionIsolation(t *testing.T) {
 		if err != nil {
 			t.Fatalf("the drive of %q ended by error: %v", step.input, err)
 		}
-		if turn.Terminal != model.KindCompleted || len(turn.Decisions) != 1 {
+		if turn.Terminal != model.KindCompleted || turn.DecisionCount != 1 {
 			t.Fatalf("the drive of %q = (%v, %d decisions), want the completed turn of its one decision",
-				step.input, turn.Terminal, len(turn.Decisions))
+				step.input, turn.Terminal, turn.DecisionCount)
 		}
 	}
 

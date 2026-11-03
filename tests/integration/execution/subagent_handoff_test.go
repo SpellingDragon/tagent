@@ -52,26 +52,19 @@ func TestSubagentHandoffEnvelope(t *testing.T) {
 		if !ok {
 			t.Fatal("the delegated turn recorded no model request")
 		}
+		// The structured envelope dissolved (r98): the caller states the task in
+		// its own words — the assembled instruction leads as a system message,
+		// the natural-language task follows — and a reference nothing backs
+		// silently does not materialize (Q2) instead of rendering a bare identity.
 		content := lastMessageContent(request)
-		block := strings.Index(content, "[handoff envelope]")
-		natural := strings.Index(content, "the change under review")
-		if block < 0 {
-			t.Fatalf("delegated request carries no handoff block: %q", content)
+		if strings.Contains(content, "[handoff envelope]") {
+			t.Fatalf("delegated request carries the dissolved envelope block: %q", content)
 		}
-		if natural < 0 || block > natural {
-			t.Fatalf("handoff block sits at %d and the request at %d, want the block in front of the request: %q", block, natural, content)
+		if !strings.Contains(content, "the change under review") {
+			t.Fatalf("delegated request carries no natural-language task: %q", content)
 		}
-		for _, want := range []string{
-			"intent: review the change",
-			"- every finding names a file",
-			"- tool:exec_run",
-			"pending_decisions:",
-			"- whether the change ships",
-			"- ev-context-1",
-		} {
-			if !strings.Contains(content, want) {
-				t.Fatalf("delegated request carries no %q of the handoff: %q", want, content)
-			}
+		if strings.Contains(content, "ev-context-1") {
+			t.Fatalf("delegated request carries an unbacked reference identity: %q", content)
 		}
 		if !carriesInstruction(request, "review the change") {
 			t.Fatalf("delegated request carries no assembled instruction: %+v", request.Messages)

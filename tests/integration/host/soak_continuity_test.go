@@ -577,11 +577,24 @@ func soakDriveInvocation(t *testing.T, ctx context.Context, run *assembly.Run, i
 	if err != nil {
 		t.Fatalf("invoke %s: %v", invocation, err)
 	}
-	if turn.Terminal != model.KindCompleted || len(turn.Decisions) != 2 {
-		t.Fatalf("turn %s = (%v, %d decisions), want one completed turn of two decisions", invocation, turn.Terminal, len(turn.Decisions))
+	if turn.Terminal != model.KindCompleted || turn.DecisionCount != 2 {
+		t.Fatalf("turn %s = (%v, %d decisions), want one completed turn of two decisions", invocation, turn.Terminal, turn.DecisionCount)
 	}
-	if string(turn.InvocationID) != invocation {
-		t.Fatalf("turn invocation = %q, want the invocation the drive was admitted for %q", turn.InvocationID, invocation)
+	// The turn answer names the consumption segment its drive ran under (the
+	// resident loop mints it), while the caller's invocation survives on the
+	// input fact the segment consumed: both identities are proven.
+	if !strings.HasPrefix(string(turn.InvocationID), string(addr.SessionID)+"#") {
+		t.Fatalf("turn invocation = %q, want the consumption segment of %q", turn.InvocationID, addr.SessionID)
+	}
+	carriesCaller := false
+	for _, fact := range run.SessionFacts(addr) {
+		if fact.Type == event.TypeExternalInput && string(fact.InvocationID) == invocation {
+			carriesCaller = true
+			break
+		}
+	}
+	if !carriesCaller {
+		t.Fatalf("chain carries no input fact named %q, want the caller invocation the segment consumed", invocation)
 	}
 }
 

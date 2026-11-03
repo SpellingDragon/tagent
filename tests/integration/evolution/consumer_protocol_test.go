@@ -13,7 +13,6 @@ import (
 	"github.com/SpellingDragon/tagent/api/event"
 	"github.com/SpellingDragon/tagent/api/model"
 	"github.com/SpellingDragon/tagent/features/rl"
-	"github.com/SpellingDragon/tagent/runtime/agent"
 
 	"github.com/SpellingDragon/tagent/features/evolution/meditation"
 )
@@ -31,20 +30,23 @@ func TestConsumersShareTheProtocol(t *testing.T) {
 
 		rig := newReflectionRig(t, reflectionConfig(), t.TempDir())
 		source := externalFact("turn-source", "the fact the turn consumes", time.Unix(0, 0))
+		source.Owner, source.Source, source.Target = rig.address, rig.address, rig.address
 		sourceKey := rig.ledger.record(source, rig.partition)
 		before := rig.ledger.snapshot()
 		records := &consumerRecords{ledger: rig.ledger, partition: rig.partition}
-		rig.input.loop.SetCapture(rl.NewRecorderAdapter(records))
+		capture := &consumerCapture{RecorderAdapter: rl.NewRecorderAdapter(records)}
+		rig.input.loop.SetCapture(capture)
 
-		turn, err := rig.input.loop.Drive(ctx, agent.Invocation{
-			InvocationID: event.InvocationID("invocation-turn"),
-			Address:      rig.address,
-			Instance:     event.InstanceID("instance-reflect"),
-			Ready:        []event.Event{source},
-		})
-		if err != nil {
-			t.Fatalf("drive the turn over the fact it read: %v", err)
+		consumer := rig.consumers.Ensure(rig.address)
+		if consumer == nil {
+			t.Fatalf("the resident consumer of %s/%s is unavailable", rig.address.AgentID, rig.address.SessionID)
 		}
+		consumer.Wake()
+		answer, err := consumer.WaitAnswer(ctx, []event.EventID{sourceKey})
+		if err != nil {
+			t.Fatalf("wait for the segment the consumer opened on the fact it read: %v", err)
+		}
+		turn := answer.Turn
 		if turn.Terminal != model.KindCompleted {
 			t.Fatalf("turn terminal = %q, want the completed terminal of its one decision", turn.Terminal)
 		}
@@ -55,11 +57,12 @@ func TestConsumersShareTheProtocol(t *testing.T) {
 		}
 
 		decisions, attempts := records.produced()
-		if len(decisions) != 0 || len(attempts) != 1 {
-			t.Fatalf("records = (%d decisions, %d attempts), want the one attempt admission the loop keeps", len(decisions), len(attempts))
+		fixed := capture.fixedDecisions()
+		if len(decisions) != 0 || len(attempts) != 1 || len(fixed) != 1 {
+			t.Fatalf("records = (%d decisions, %d attempts, %d snapshots), want one attempt beside its one fixed decision", len(decisions), len(attempts), len(fixed))
 		}
-		if attempts[0].DecisionID != turn.Decisions[0].DecisionID || attempts[0].Terminal != model.KindCompleted {
-			t.Fatalf("attempt = (%s, %v), want it to belong to decision %s with the reduced terminal", attempts[0].DecisionID, attempts[0].Terminal, turn.Decisions[0].DecisionID)
+		if attempts[0].DecisionID != fixed[0] || attempts[0].Terminal != model.KindCompleted {
+			t.Fatalf("attempt = (%s, %v), want it to belong to decision %s with the reduced terminal", attempts[0].DecisionID, attempts[0].Terminal, fixed[0])
 		}
 		assertFactProduced(t, rig.ledger, before, sourceKey, event.EventID(attempts[0].ID))
 		attemptFact, err := rig.ledger.CommittedFact(ctx, event.EventID(attempts[0].ID))
@@ -126,6 +129,26 @@ func carriesContent(req model.Request, content string) bool {
 		}
 	}
 	return false
+}
+
+// consumerCapture keeps the decision identity the existing recorder adapter does not retain.
+type consumerCapture struct {
+	rl.RecorderAdapter
+	mu          sync.Mutex
+	decisionIDs []event.DecisionID
+}
+
+func (c *consumerCapture) Snapshot(_ context.Context, decisionID event.DecisionID, _, _ string, _, _ []string, _ model.Request) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.decisionIDs = append(c.decisionIDs, decisionID)
+	return nil
+}
+
+func (c *consumerCapture) fixedDecisions() []event.DecisionID {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return append([]event.DecisionID(nil), c.decisionIDs...)
 }
 
 // consumerRecords is the training record production face of the turn-driven case:

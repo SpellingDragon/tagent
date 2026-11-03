@@ -3,6 +3,8 @@ package state
 import (
 	"context"
 	"errors"
+	"fmt"
+	"time"
 
 	"github.com/SpellingDragon/tagent/api/event"
 	"github.com/SpellingDragon/tagent/runtime/task"
@@ -36,6 +38,11 @@ var (
 	// as the settled record, and the repeat is refused by name instead of
 	// answering the success the first consumption already recorded.
 	ErrClaimSettled = errors.New("state: the mailbox entry is already consumed")
+	// ErrDeliveryRefused reports a notification whose target refused the delivery
+	// beside the site that owns it, so the notification is answered: the refusal
+	// is the consumption result of that notification and the account keeps it as
+	// the feedback fact it is rather than retrying the same delivery.
+	ErrDeliveryRefused = errors.New("state: the target refused the delivery of the notification")
 )
 
 // consumptionRecorder is the optional durable face of a mailbox: it stores the
@@ -77,6 +84,13 @@ type noticeKey struct {
 // that produced it. Acceptance is idempotent by the notification's stable
 // identity, so a replayed delivery records no second fact and keeps the target
 // the first acceptance recorded.
+//
+// A route the mailbox cannot open is not a refusal: an address this run never
+// established, or an instance another one replaced, names routing the delivery
+// could not reach at all, so the notification stands undelivered for the next
+// attempt instead of being recorded as an answer its target never gave. A target
+// that closed its session did answer: the site refused the input, and that
+// refusal is the feedback fact the criterion reads.
 func (m *MemoryStore) AcceptNotice(ctx context.Context, notice task.Notice) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -90,10 +104,41 @@ func (m *MemoryStore) AcceptNotice(ctx context.Context, notice task.Notice) erro
 	target := siteKey{addr: route.Target, instance: route.TargetInstance}
 	held, err := m.openTarget(target)
 	if err != nil {
+		if errors.Is(err, ErrSessionClosed) {
+			return m.refuse(ctx, notice, target, err)
+		}
 		return err
 	}
 	m.appendEntry(ctx, held, notice, target)
 	return nil
+}
+
+// refuse answers one notification the target site refused: the refusal lands as
+// the feedback fact it is, carrying the notification it answers beside the
+// routing it was offered to and the reason the site gave, and the notification is
+// reported as answered beside that fact. A refusal the account does not confirm
+// reports the write failure instead, so a caller never reads a notification as
+// answered on an unconfirmed write and keeps it owed for the next flush.
+// - The refusal is the consumption result of its notification, so it advances the movement sequence a judgment is fenced by.
+//
+// 契约: docs/wiki/reliability/durable-delivery.md#envelope-states
+func (m *MemoryStore) refuse(ctx context.Context, notice task.Notice, target siteKey, cause error) error {
+	rejection := Rejection{
+		Notice:   notice,
+		Target:   target.addr,
+		Instance: target.instance,
+		Reason:   cause.Error(),
+		At:       time.Now(),
+	}
+	m.refusals[noticeKeyOf(notice)] = rejection
+	if m.rejections != nil {
+		if err := m.rejections.recordRejection(ctx, rejection); err != nil {
+			delete(m.refusals, noticeKeyOf(notice))
+			return fmt.Errorf("state: the refusal of %s left no fact: %w", notice.FactKey(), err)
+		}
+	}
+	m.moved()
+	return fmt.Errorf("%w: %w", ErrDeliveryRefused, cause)
 }
 
 // noticeKeyOf is the stable identity of one notification, taken from the
@@ -141,6 +186,7 @@ func (m *MemoryStore) appendEntry(ctx context.Context, held *site, notice task.N
 		Receipt:      ConsumeReceipt{},
 	})
 	m.accepted[noticeKeyOf(notice)] = acceptedNotice{notice: notice, site: target, seq: seq}
+	m.moved()
 	return seq
 }
 
@@ -252,6 +298,7 @@ func (m *MemoryStore) Consume(ctx context.Context, addr event.Address, instance 
 		}
 		held.session.Consumed++
 	}
+	m.moved()
 	return nil
 }
 

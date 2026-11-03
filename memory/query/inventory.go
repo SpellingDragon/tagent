@@ -277,6 +277,7 @@ type InventoryView struct {
 	tasks       []TaskEntry
 	notices     []NoticeEntry
 	leases      []LeaseEntry
+	attention   []task.AttentionQuestion
 }
 
 // Agents returns a copy of the agent detail of this view.
@@ -323,6 +324,13 @@ func (v InventoryView) Notices() []NoticeEntry {
 // Leases returns a copy of the resource-lease detail of this view.
 func (v InventoryView) Leases() []LeaseEntry {
 	return append([]LeaseEntry(nil), v.leases...)
+}
+
+// Attention returns a copy of the attention detail of this view: the questions
+// the read face still held as questions at the reading, each in the typed form
+// its owner answered in.
+func (v InventoryView) Attention() []task.AttentionQuestion {
+	return append([]task.AttentionQuestion(nil), v.attention...)
 }
 
 // Counts derives the per-dimension readings of this view from its own detail
@@ -391,7 +399,7 @@ type AgentCounts struct {
 
 // inventoryDimensions fixes the order affected dimensions are named in when a
 // read fails on more than one of them.
-var inventoryDimensions = []ObjectKind{ObjectAgent, ObjectSession, ObjectInvocation, ObjectTask, ObjectNotice, ObjectLease}
+var inventoryDimensions = []ObjectKind{ObjectAgent, ObjectSession, ObjectInvocation, ObjectTask, ObjectNotice, ObjectLease, ObjectAttention}
 
 // siteReading is one site's owner reading shared by every dimension projecting
 // it: the session snapshot of the site beside the execution slot it currently
@@ -414,6 +422,7 @@ type gathering struct {
 	tasks       []TaskEntry
 	notices     []NoticeEntry
 	leases      []LeaseEntry
+	attention   []task.AttentionQuestion
 	owed        []task.OutboxNotice
 	errs        map[ObjectKind]error
 }
@@ -456,6 +465,7 @@ func (g *gathering) view() InventoryView {
 		tasks:       g.tasks,
 		notices:     g.notices,
 		leases:      g.leases,
+		attention:   g.attention,
 	}
 }
 
@@ -472,6 +482,7 @@ func (inv *Inventory) gather(ctx context.Context) *gathering {
 	inv.readTasks(ctx, g)
 	inv.readInvocations(g)
 	inv.readNotices(g)
+	inv.readAttention(ctx, g)
 	return g
 }
 
@@ -849,6 +860,11 @@ func freezeView(view InventoryView) *viewDetailSource {
 		entry := entry
 		ref := ObjectRef{Kind: ObjectLease, Lease: entry.Lease}
 		add(ref, func() Detail { return leaseDetailOf(entry) })
+	}
+	for _, question := range view.Attention() {
+		question := question
+		ref := ObjectRef{Kind: ObjectAttention, Address: attentionAddressOf(question.Target), attention: question}
+		add(ref, func() Detail { return attentionDetailOf(question) })
 	}
 	src.order = make([]ObjectRef, 0, len(refs))
 	for _, ref := range refs {

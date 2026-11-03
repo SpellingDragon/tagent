@@ -83,7 +83,7 @@ type SFTSample struct {
 //
 // The redline list (3 rules):
 // MUST read the chain through the read-only fact face and write nothing back.
-// MUST pair one turn's input with the assistant output of the same invocation.
+// MUST pair one turn's input with the assistant output that answered it on the chain.
 // MUST NOT invent a sample for a turn that presented no input or produced no assistant output.
 // ChainExporter assembles SFT sample rows from the fact chain of sessions. It
 // holds the read-only fact face and keeps no state of its own, so one exporter
@@ -97,9 +97,9 @@ func NewChainExporter(facts FactReader) *ChainExporter {
 	return &ChainExporter{facts: facts}
 }
 
-// chainTurn is the pairing unit of one export: the input events and the
-// assistant output events one invocation presented and produced on one session
-// of one episode.
+// chainTurn is the pairing unit of one export: the input events one segment
+// presented and the assistant output that answered them, on one session of one
+// episode.
 type chainTurn struct {
 	episode event.EpisodeID
 	session event.SessionID
@@ -107,23 +107,16 @@ type chainTurn struct {
 	label   []string
 }
 
-// turnIdentity is the identity one turn is paired on: the episode, the
-// invocation and the session whose chain carried it. A fact carrying no
-// invocation names no turn boundary and is never paired into one.
-type turnIdentity struct {
-	episode    event.EpisodeID
-	invocation event.InvocationID
-	session    event.SessionID
-}
-
 // Export assembles the SFT sample rows of the named sessions: it reads each
-// session's chain in commit order, groups the facts by episode, pairs the input
-// events with the assistant output events of the same invocation, and emits one
-// row per paired turn, in the order the turns first appeared.
+// session's chain in commit order and pairs by order — the input events a
+// segment presents open the turn, the assistant output that answers them
+// closes it. The input fact carries the identity of the entry that committed
+// it and the output fact the identity of the segment that answered, so the
+// pairing never keys on invocation identity: the chain order is the pair.
 //
 // A turn that presented no input or produced no assistant output is skipped
-// rather than filled with an invented side, and a fact carrying no invocation
-// is not paired at all. The limit bounds the rows emitted, never the pairing.
+// rather than filled with an invented side. The limit bounds the rows emitted,
+// never the pairing.
 func (e *ChainExporter) Export(ctx context.Context, opts ExportOptions) ([]SFTSample, error) {
 	if e == nil || e.facts == nil {
 		return nil, ErrExportReaderMissing
@@ -135,7 +128,6 @@ func (e *ChainExporter) Export(ctx context.Context, opts ExportOptions) ([]SFTSa
 		return nil, err
 	}
 	turns := make([]*chainTurn, 0)
-	byIdentity := make(map[turnIdentity]*chainTurn)
 	visited := make(map[event.SessionID]bool, len(opts.SessionIDs))
 	for _, sessionID := range opts.SessionIDs {
 		if sessionID == "" || visited[sessionID] {
@@ -145,22 +137,22 @@ func (e *ChainExporter) Export(ctx context.Context, opts ExportOptions) ([]SFTSa
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
+		var open *chainTurn
 		for _, fact := range e.facts.SessionFacts(event.Address{SessionID: sessionID}) {
-			if fact.InvocationID == "" {
-				continue
-			}
-			identity := turnIdentity{episode: fact.EpisodeID, invocation: fact.InvocationID, session: sessionID}
-			turn, held := byIdentity[identity]
-			if !held {
-				turn = &chainTurn{episode: fact.EpisodeID, session: sessionID}
-				byIdentity[identity] = turn
-				turns = append(turns, turn)
-			}
 			switch fact.Type {
 			case event.TypeExternalInput:
-				turn.input = appendText(turn.input, fact.Message.Content)
+				if open == nil {
+					open = &chainTurn{episode: fact.EpisodeID, session: sessionID}
+					turns = append(turns, open)
+				}
+				open.input = appendText(open.input, fact.Message.Content)
 			case event.TypeAgentOutput:
-				turn.label = appendText(turn.label, fact.Message.Content)
+				if open == nil {
+					open = &chainTurn{episode: fact.EpisodeID, session: sessionID}
+					turns = append(turns, open)
+				}
+				open.label = appendText(open.label, fact.Message.Content)
+				open = nil
 			}
 		}
 	}

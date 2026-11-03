@@ -85,6 +85,9 @@ type ReplayProjection struct {
 	fold      *CompactionFact
 	boundary  event.EventID
 	recovery  *ProjectionEntry
+	// volume is the rendered volume of the entries, kept as they change so a
+	// judgment inside its threshold answers without reading the material.
+	volume int
 }
 
 // NewReplayProjection returns an empty replayable projection.
@@ -116,6 +119,13 @@ func (p *ReplayProjection) Append(_ context.Context, entry ProjectionEntry) {
 		}
 	}
 	p.entries = append(p.entries, entry)
+	p.volume += renderedEntryVolume(entry)
+}
+
+// recomputeVolumeLocked reseeds the rendered volume after a rewrite of the
+// entries the projection holds.
+func (p *ReplayProjection) recomputeVolumeLocked() {
+	p.volume = len(RenderProjection(p.entries))
 }
 
 // AssembleBudget packs the projection into one agent request of the given token
@@ -267,6 +277,42 @@ func (p *ReplayProjection) originalOf(entry ProjectionEntry) string {
 		}
 	}
 	return entry.Content
+}
+
+// forgetDroppedLocked drops the per-key material of every entry the projection
+// does not carry: the kept original a presentation reads, the dedup key an
+// append answers with and the consumed mark a fold reseeds are all read by the
+// key of an entry the projection holds, so a key no entry carries names material
+// a rewrite dropped and holds nothing a reader can reach. A rewrite — the fold,
+// the age-band fold and every product applied to the sequence — calls this after
+// it restates the entries, so the three maps say exactly what the entries say
+// instead of growing with every fact the chain ever committed.
+//
+// The material of a key the rewrite kept stays where it is: the kept original of
+// a retained ref is still the text its entry presents, and its dedup key still
+// refuses a second append of an entry the projection already carries.
+func (p *ReplayProjection) forgetDroppedLocked() {
+	kept := make(map[event.EventID]struct{}, len(p.entries))
+	for _, entry := range p.entries {
+		if entry.Key != "" {
+			kept[entry.Key] = struct{}{}
+		}
+	}
+	for key := range p.originals {
+		if _, carries := kept[key]; !carries {
+			delete(p.originals, key)
+		}
+	}
+	for key := range p.seen {
+		if _, carries := kept[key]; !carries {
+			delete(p.seen, key)
+		}
+	}
+	for key := range p.consumed {
+		if _, carries := kept[key]; !carries {
+			delete(p.consumed, key)
+		}
+	}
 }
 
 // ticketText renders the ticket that reaches the full original by segment, so a

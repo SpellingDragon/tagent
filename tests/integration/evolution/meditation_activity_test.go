@@ -2,19 +2,19 @@ package evolution
 
 import (
 	"context"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/SpellingDragon/tagent/api/event"
 	"github.com/SpellingDragon/tagent/features/evolution/meditation"
-	"github.com/SpellingDragon/tagent/runtime/state"
 )
 
 // TestMeditationYieldsBesideAnActiveSession drives the activity side of the rhythm gate through the production driver and loop.
 // - It checks the structural judgments the gate reads beside the execution interval.
 //   - the newest host-facing fact younger than the min gap holds the tick, and the same face fires once that fact has aged
-//   - the decision seat of the session that fact belongs to holds the pass while a model decision is in flight there
-//   - the next host-facing commit fires once that seat is released
+//   - the model request of the session that fact belongs to holds the pass while it executes there
+//   - the next host-facing commit fires once that request has ended
 //   - a self-managed round beside an older host-facing fact still fires on the rhythm
 //   - a held tick leaves the watermark and the pending input untouched, so the reflection is postponed, never dropped
 //
@@ -57,36 +57,34 @@ func TestMeditationYieldsBesideAnActiveSession(t *testing.T) {
 		}
 	})
 
-	t.Run("held_decision_seat_holds_the_tick", func(t *testing.T) {
+	t.Run("held_model_request_holds_the_tick", func(t *testing.T) {
 		ctx := context.Background()
 		cfg := reflectionConfig()
 		cfg.Cadence.MinGap = 0
 		rig := newReflectionRig(t, cfg, t.TempDir())
 		owner := activitySession()
 		instance := event.InstanceID("instance-activity")
-		seats := state.NewOccupancy()
-		if err := seats.Occupy(owner, instance, "invocation-held", "decision-held"); err != nil {
-			t.Fatalf("hold the decision seat: %v", err)
-		}
-		driver := meditation.NewDriver(rig.reflection, 0, 0, seats.Slot, instance)
+		flight := newActivityModelFlight(instance)
+		flight.hold(owner, "invocation-held", "decision-held")
+		driver := meditation.NewDriver(rig.reflection, 0, 0, flight.modelInFlight, instance)
 		outcomes := make(chan meditation.TickOutcome, 4)
 		driver.SetObserver(func(outcome meditation.TickOutcome) { outcomes <- outcome })
 		t.Cleanup(driver.Stop)
 
-		first := rig.ledger.record(ownedFact("activity-seat", "the material committed while the seat is held", time.Now().Add(-time.Minute), owner), rig.partition)
+		first := rig.ledger.record(ownedFact("activity-seat", "the material committed while the model request runs", time.Now().Add(-time.Minute), owner), rig.partition)
 		if err := driver.ObserveCommit(ctx, first); err != nil {
 			t.Fatalf("observe the commit: %v", err)
 		}
 		select {
 		case outcome := <-outcomes:
 			if outcome.Decision.Disposition != meditation.TickRhythm {
-				t.Fatalf("pass beside the held seat = (%q, %s), want the reflection waiting for the seat", outcome.Decision.Disposition, outcome.Decision.Reason)
+				t.Fatalf("pass beside the executing model request = (%q, %s), want the reflection waiting for that request to end", outcome.Decision.Disposition, outcome.Decision.Reason)
 			}
 		case <-time.After(10 * time.Second):
-			t.Fatal("the driver reported no pass beside the held seat")
+			t.Fatal("the driver reported no pass beside the executing model request")
 		}
 		if got := rig.input.injectedCount(); got != 0 {
-			t.Fatalf("injected inputs = %d, want none while the seat is held", got)
+			t.Fatalf("injected inputs = %d, want none while the model request executes", got)
 		}
 		if _, pending := rig.reflection.Pending(); pending {
 			t.Fatal("the held pass left a reflection input pending, want the gate open for the next commit")
@@ -95,9 +93,7 @@ func TestMeditationYieldsBesideAnActiveSession(t *testing.T) {
 			t.Fatalf("watermark after the held pass = %s, want it unmoved", got)
 		}
 
-		if err := seats.Vacate(owner, instance, "invocation-held"); err != nil {
-			t.Fatalf("release the decision seat: %v", err)
-		}
+		flight.release(owner)
 		second := rig.ledger.record(ownedFact("activity-seat-next", "the next host-facing commit of that session", time.Now(), owner), rig.partition)
 		if err := driver.ObserveCommit(ctx, second); err != nil {
 			t.Fatalf("observe the next commit: %v", err)
@@ -105,10 +101,10 @@ func TestMeditationYieldsBesideAnActiveSession(t *testing.T) {
 		select {
 		case outcome := <-outcomes:
 			if outcome.Decision.Disposition != meditation.TickFired || outcome.Injection == nil {
-				t.Fatalf("pass after the seat was released = (%q, %s), want the postponed reflection firing", outcome.Decision.Disposition, outcome.Decision.Reason)
+				t.Fatalf("pass after the model request ended = (%q, %s), want the postponed reflection firing", outcome.Decision.Disposition, outcome.Decision.Reason)
 			}
 		case <-time.After(10 * time.Second):
-			t.Fatal("the driver fired no pass after the seat was released")
+			t.Fatal("the driver fired no pass after the model request ended")
 		}
 		if got := rig.input.injectedCount(); got != 1 {
 			t.Fatalf("injected inputs = %d, want exactly the one postponed reflection", got)
@@ -267,6 +263,52 @@ func activityOutcome(t *testing.T, outcomes <-chan meditation.TickOutcome, what 
 // session every host-facing fact of these sub-cases belongs to.
 func activitySession() event.Address {
 	return event.Address{AgentID: "agent-a", SessionID: "session-activity"}
+}
+
+// activityModelFlight is the consumption state one anchor holds: the model
+// request executing on each address, keyed the way the loop keys its own state.
+// It stands where the loop's own read stands, so a pass reads the pair the
+// consumption loop reports while a request executes.
+type activityModelFlight struct {
+	mu       sync.Mutex
+	instance event.InstanceID
+	flight   map[event.Address]activityFlight
+}
+
+// activityFlight is the one model request one address runs.
+type activityFlight struct {
+	invocation event.InvocationID
+	decision   event.DecisionID
+}
+
+// newActivityModelFlight returns an empty consumption state for one instance.
+func newActivityModelFlight(instance event.InstanceID) *activityModelFlight {
+	return &activityModelFlight{instance: instance, flight: map[event.Address]activityFlight{}}
+}
+
+// modelInFlight reports the model request one address executes, or that none is.
+func (f *activityModelFlight) modelInFlight(addr event.Address, instance event.InstanceID) (event.InvocationID, event.DecisionID, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if instance == "" || instance != f.instance {
+		return "", "", false
+	}
+	flight, held := f.flight[addr]
+	return flight.invocation, flight.decision, held
+}
+
+// hold marks one address as running the named model request.
+func (f *activityModelFlight) hold(addr event.Address, invocation event.InvocationID, decision event.DecisionID) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.flight[addr] = activityFlight{invocation: invocation, decision: decision}
+}
+
+// release ends the model request of one address.
+func (f *activityModelFlight) release(addr event.Address) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	delete(f.flight, addr)
 }
 
 // ownedFact builds one host-facing fact recorded by the named session, so the

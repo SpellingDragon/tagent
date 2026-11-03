@@ -21,7 +21,11 @@ A builder beside no capture hands the model on as it stands.
 
 The structured handoff one call_subagent call declares beside its
 natural-language request: the fields the call names, the grants the assembled
-sub-agent actually holds, and the envelope the delegated turn receives.
+sub-agent actually holds, and the envelope the boundary renders from those
+flat parameters. The envelope is held to Validate where the call is admitted;
+the delegated turn itself receives a batch of ordinary input facts the framework
+commits — the instruction it runs under, one material projection per source the
+call handed over, and the task that closes the batch.
 
 The preset tools of the configuration face live beside the sub-agent tool
 because they share one composition-root seam: a declared `knowledge`
@@ -127,6 +131,21 @@ var ErrAssemblyMissing = errors.New("subagent: no assembly was given")
 var ErrBindingsMissing = errors.New("call_subagent: no borrowing face is attached")
     ErrBindingsMissing reports a tool constructed with no borrowing face.
 
+var ErrContinuationBusy = errors.New("subagent: a round of that delegated task is in flight")
+    ErrContinuationBusy reports a re-entry that names a task whose round is
+    still running. One round of one task runs at a time, so a re-entry arriving
+    inside a round is refused by name rather than queued behind it.
+
+var ErrContinuationMissing = errors.New("subagent: no delegated turn of that task is served here")
+    ErrContinuationMissing reports a re-entry that names a task this tool serves
+    no round of: the task was never delegated here, or its continuation was
+    released.
+
+var ErrContinuationUnclaimed = errors.New("subagent: the round of that task was not claimed before it was served")
+    ErrContinuationUnclaimed reports a round served for a task whose one slot no
+    caller claimed: the input the round would read was never owned by this call,
+    so serving it would hand a body to a round a second caller believes it owns.
+
 var ErrDelegationMissing = errors.New("call_subagent: no delegation face is attached")
     ErrDelegationMissing reports a tool constructed with no delegation face.
 
@@ -166,6 +185,11 @@ var ErrModelUnresolved = errors.New("subagent: the model reference resolved to n
 var ErrNameMissing = errors.New("the name is required")
     ErrNameMissing reports a definition that declares no name.
 
+var ErrPipelineMissing = errors.New("call_subagent: the delegation face carries no resident instance")
+    ErrPipelineMissing reports a delegated round asked for from a delegation
+    face that carries no resident-instance face: nothing would run the round the
+    call admitted.
+
 var ErrPresetNotWired = errors.New("preset: the declared tool carries no wiring")
     ErrPresetNotWired reports a declared preset the assembly carries no face
     for.
@@ -198,10 +222,27 @@ var ErrUnknownField = errors.New("unknown field")
 
 FUNCTIONS
 
+func DelegatedSiteSession(caller event.SessionID, callID string) event.SessionID
+    DelegatedSiteSession reports the session of the execution site one delegated
+    call runs in: the caller session the call was issued from beside the native
+    call identity the site was minted for. The site's agent is the assembled
+    name, so this session alone locates the site's chain before the declaration
+    travelling on it names that agent. The identity is the frozen one the tool
+    mints the site under, never a stamp of the round.
+
 func NewRecallTool(recall RecallFunc) trpctool.Tool
     NewRecallTool returns the recall tool over the memory retrieval face the
     caller injects: the tool holds no retrieval of its own, so its behaviour is
     exactly the face it was assembled over.
+
+func NewTool(opts ToolOptions, shared ...continuationTable) (*Tool, continuationTable, error)
+    NewTool returns the call_subagent tool over the faces the caller fixes,
+    beside the continuation account it parks its delegated rounds in: a tool
+    built beside no account mints the one account its rounds are parked in,
+    and every later tool of the same run is built beside the account the first
+    tool answered with, so a re-entry after a generation change reaches the task
+    through the tool that served it. The account stays opaque to the caller:
+    this package is the only one that can construct or extend it.
 
 func ResolvePresets(ctx context.Context, refs []config.ToolRef, opts PresetOptions) ([]trpctool.Tool, error)
     ResolvePresets resolves every preset reference of one declaration into the
@@ -245,10 +286,11 @@ type Builder struct {
 	// Sessions is the session service a delegated turn runs on; nil gives every turn
 	// an in-memory session service of its own.
 	Sessions session.Service
-	// Facts reads the committed fact one handoff reference names, so the block a
-	// delegated turn receives carries the content of each ref under the projection
-	// budget instead of its bare identity. A builder beside no reader renders the
-	// identities alone, exactly as it did before the reader existed.
+	// Facts reads the committed fact one handoff reference names: the delegated
+	// round resolves the references of its call into the materials it commits, and
+	// the external face renders the content of each ref under the projection budget
+	// instead of its bare identity. A builder beside no reader resolves no material
+	// and renders the identities alone, exactly as it did before the reader existed.
 	Facts FactReader
 	// RefBudget is the token budget the handoff refs render under; zero keeps the
 	// package default, the budget unit the request assembly packs under.
@@ -262,6 +304,22 @@ type Builder struct {
     Builder resolves one assembly and hands it to the tRPC agent builder.
     Every resolver is injected: this package holds no model registry, no skill
     repository and no tool store of its own.
+
+func (b Builder) Bind(ctx context.Context, a *Assembly) (state.AgentBinding, error)
+    Bind resolves the live material one assembly binds a delegated turn to:
+    the model the assembly names, wrapped with the capture scope and the
+    declared sampling every request of that turn carries, beside the tools the
+    assembly declares and the skill and MCP faces it declares. The binding is
+    what the resident instance of the delegated execution site decides on,
+    so the turn runs on the sub-agent's own material rather than on a generation
+    a declared agent holds.
+
+    The declared skill repository and MCP tool sets ride the binding's tool-set
+    connection: a delegated turn assembles its own requests from the binding,
+    so the skill load tool fixes the body it read on the same resources the
+    request assembly publishes, and the tools of a resolved MCP server are
+    registered beside them. A declared face the builder holds no resolver for is
+    refused by name.
 
 func (b Builder) Build(ctx context.Context, a *Assembly) (trpcagent.Agent, error)
     Build returns the live agent one assembly describes: the model, the skill
@@ -440,7 +498,7 @@ type TargetOptions struct {
 	// Bindings is the state owner's borrowing face.
 	Bindings state.Borrow
 	// EventParams lists the call arguments whose values are handed over as the
-	// envelope's refs, in declaration order.
+	// source refs of the delegated input, in declaration order.
 	EventParams []string
 }
     TargetOptions fixes what the composition root hands one target tool:
@@ -454,9 +512,6 @@ type Tool struct {
     Tool is the call_subagent tool: one declaration naming both assembly
     sources, and a call that assembles one sub-agent, admits it as a task and
     answers with its receipt.
-
-func NewTool(opts ToolOptions) (*Tool, error)
-    NewTool returns the call_subagent tool over the faces the caller fixes.
 
 func (t *Tool) Call(ctx context.Context, jsonArgs []byte) (any, error)
     Call implements the native callable tool port: it resolves exactly one

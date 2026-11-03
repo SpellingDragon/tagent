@@ -170,22 +170,21 @@ func runOwedDeliveryAcrossKill(t *testing.T) {
 
 	provider := newScriptedProvider(t)
 	tally := &settleDriveTally{}
-	provider.answer = func(index int) string {
-		if provider.servedModels()[index] == "model-worker" {
-			return scriptedAnswerOf(settleDriveWorkerBody)
+	provider.decide = func(request scriptedRequest) (string, error) {
+		if request.Model == "model-worker" {
+			return scriptedAnswerOf(settleDriveWorkerBody), nil
 		}
 		tally.mu.Lock()
 		defer tally.mu.Unlock()
-		tally.entryCalls++
-		switch tally.entryCalls {
-		case 1:
-			return wakeDelegate("call-worker", "compute the total")
-		case 2:
-			return scriptedAnswerOf(settleDriveEntryBody)
-		default:
+		if settleDriveReadsMaterial(request, settleDriveWorkerBody) {
 			tally.followUps++
-			return scriptedAnswerOf(settleDriveFollowUpBody)
+			return scriptedAnswerOf(settleDriveFollowUpBody), nil
 		}
+		tally.entryCalls++
+		if tally.entryCalls == 1 {
+			return wakeDelegate("call-worker", "compute the total"), nil
+		}
+		return scriptedAnswerOf(settleDriveEntryBody), nil
 	}
 	root, out := t.TempDir(), t.TempDir()
 	configPath := writeScriptedHostDocument(t, root, provider.endpoint(), "model-entry")
@@ -218,8 +217,11 @@ func runOwedDeliveryAcrossKill(t *testing.T) {
 		t.Fatalf("delivered bodies after the restart = %q, want the owed body exactly once", bodies)
 	}
 	entryCalls, followUps := tally.counts()
-	if entryCalls != 3 || followUps != 1 {
-		t.Fatalf("entry turns after the restart = %d beside %d follow-ups, want the three the kill left and no second follow-up", entryCalls, followUps)
+	if followUps != 1 {
+		t.Fatalf("settlement answers after the restart = %d, want the one the delegating turn owes", followUps)
+	}
+	if entryCalls != 1 && entryCalls != 2 {
+		t.Fatalf("decisions answered beside the settlement = %d, want the delegating decision and, only when the settlement opened a range of its own, the accept decision beside it: the kill left no second follow-up", entryCalls)
 	}
 	if err := restored.Close(context.Background()); err != nil {
 		t.Fatalf("close the restored host: %v", err)

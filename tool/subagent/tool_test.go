@@ -4,17 +4,17 @@ package subagent
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"github.com/SpellingDragon/tagent/api/config"
+	"github.com/SpellingDragon/tagent/api/event"
+	"github.com/SpellingDragon/tagent/api/model"
+	"github.com/SpellingDragon/tagent/runtime/agent"
+	"github.com/SpellingDragon/tagent/runtime/state"
+	"github.com/SpellingDragon/tagent/runtime/task"
 	"strings"
 	"sync"
 	"testing"
 	"time"
-
-	"github.com/SpellingDragon/tagent/api/config"
-	"github.com/SpellingDragon/tagent/api/event"
-	"github.com/SpellingDragon/tagent/runtime/agent"
-	"github.com/SpellingDragon/tagent/runtime/state"
-	"github.com/SpellingDragon/tagent/runtime/task"
-
 	trpcmodel "trpc.group/trpc-go/trpc-agent-go/model"
 	trpctool "trpc.group/trpc-go/trpc-agent-go/tool"
 )
@@ -301,7 +301,7 @@ func newSamplingTool(t *testing.T, delegation *stubDelegation, provider *serveMo
 	t.Helper()
 	bindings := state.NewBindings()
 	holdBinding(t, bindings, event.Address{AgentID: "agent-caller", SessionID: "session-caller"})
-	tool, err := NewTool(ToolOptions{
+	tool, _, err := NewTool(ToolOptions{
 		Parent: &Assembly{Definition: Definition{Description: "the caller", Model: "model-caller"}},
 		Builder: Builder{Model: func(context.Context, string) (trpcmodel.Model, error) {
 			return provider, nil
@@ -336,7 +336,7 @@ func newToolForDeclarationTest(t *testing.T, delegation *stubDelegation) *Tool {
 	t.Helper()
 	bindings := state.NewBindings()
 	holdBinding(t, bindings, event.Address{AgentID: "agent-caller", SessionID: "session-caller"})
-	tool, err := NewTool(ToolOptions{
+	tool, _, err := NewTool(ToolOptions{
 		Parent:     &Assembly{Definition: Definition{Description: "the caller", Model: "model-caller"}},
 		Delegation: delegation,
 		Bindings:   bindings,
@@ -421,6 +421,10 @@ type stubDelegation struct {
 	err         error
 	terminal    []task.Status
 	terminalErr error
+	rounds      []agent.DelegatedInput
+	roundStatus task.Status
+	roundBody   string
+	resident    *agent.Loop
 }
 
 // Delegate records the admission request and reports the scripted receipt.
@@ -439,6 +443,70 @@ func (s *stubDelegation) Complete(_ context.Context, _ event.TaskID, status task
 	return task.Notice{}, s.terminalErr
 }
 
+// attachResident hands the stand-in the resident instances a check runs its rounds on: a
+// round served beside one is handed to the instance of its execution site, and a
+// stand-in beside none decides the round itself.
+func (s *stubDelegation) attachResident(loop *agent.Loop) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.resident = loop
+}
+
+// Submit records the round the tool handed to the resident instance of its execution
+// site and answers the terminal the stub was fixed with: the stand-in decides on the
+// binding it was handed, so the request the round carries reaches the model that binding
+// names exactly as the resident instance would drive it.
+func (s *stubDelegation) Submit(ctx context.Context, in agent.DelegatedInput) (agent.DelegatedAnswer, error) {
+	s.mu.Lock()
+	resident := s.resident
+	s.mu.Unlock()
+	if resident != nil {
+		return resident.SubmitDelegated(ctx, in)
+	}
+	s.mu.Lock()
+	s.rounds = append(s.rounds, in)
+	status, body := s.roundStatus, s.roundBody
+	s.mu.Unlock()
+	if status == task.StatusUnknown {
+		status = task.StatusSettled
+	}
+	if in.Binding.Model == nil {
+		return agent.DelegatedAnswer{Status: task.StatusFailed, Failure: ErrResolverMissing.Error()}, nil
+	}
+	// The materials arrive resolved: the tool read every committed source the call
+	// named, and the stand-in renders them beside the instruction and the task the
+	// way the resident consumption would.
+	messages := make([]trpcmodel.Message, 0, 2+len(in.Materials))
+	if in.Instruction != "" {
+		messages = append(messages, trpcmodel.NewSystemMessage(in.Instruction))
+	}
+	for _, material := range in.Materials {
+		if material.Message.Content == "" {
+			continue
+		}
+		messages = append(messages, trpcmodel.NewUserMessage(material.Message.Content))
+	}
+	if in.Request != "" {
+		messages = append(messages, trpcmodel.NewUserMessage(in.Request))
+	}
+	req := trpcmodel.Request{Messages: messages}
+	stream, err := in.Binding.Model.GenerateContent(ctx, &req)
+	if err != nil {
+		return agent.DelegatedAnswer{Status: task.StatusFailed, Failure: err.Error()}, nil
+	}
+	for response := range stream {
+		if response == nil {
+			continue
+		}
+		for _, choice := range response.Choices {
+			if choice.Message.Role == trpcmodel.RoleAssistant && choice.Message.Content != "" {
+				body = choice.Message.Content
+			}
+		}
+	}
+	return agent.DelegatedAnswer{Body: body, Status: status}, nil
+}
+
 // calls reports how often the tool asked for an admission.
 func (s *stubDelegation) calls() int {
 	s.mu.Lock()
@@ -451,6 +519,13 @@ func (s *stubDelegation) completions() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return len(s.terminal)
+}
+
+// terminals reports the terminal statuses the tool reported, in report order.
+func (s *stubDelegation) terminals() []task.Status {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]task.Status(nil), s.terminal...)
 }
 
 // jsonArgs encodes one call's arguments.
@@ -473,3 +548,85 @@ Review the change and report findings.
 
 // The tool answers the native callable tool port.
 var _ trpctool.CallableTool = (*Tool)(nil)
+
+// attachResidentWorker hands the delegation stand-in the resident instances its delegated
+// rounds run on: the round is served by the segment of its own execution site, so every
+// model call of the turn is the turn's own and the stand-in reports what that segment
+// ended at.
+func attachResidentWorker(t *testing.T, delegation *stubDelegation) {
+	t.Helper()
+	loop := agent.NewLoop(state.NewBindings(), state.NewOccupancy(), "instance-worker", nil)
+	facts := &workerChain{}
+	loop.SetFactCommit(facts.commit)
+	loop.SetHistory(facts)
+	loop.SetConsumers(agent.NewConsumers(loop, context.Background(), nil))
+	delegation.attachResident(loop)
+}
+
+// workerChain is the chain face one delegated round commits through: every fact as it
+// committed, in commit order, read back per agent session.
+type workerChain struct {
+	mu    sync.Mutex
+	count int
+	facts []event.Event
+}
+
+// commit keeps one fact as it stands, minting the identity of a fact that carries none.
+func (c *workerChain) commit(evt event.Event) (event.EventID, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if evt.Key == "" {
+		c.count++
+		evt.Key = event.EventID(fmt.Sprintf("fact-worker-%d", c.count))
+	}
+	c.facts = append(c.facts, evt)
+	return evt.Key, nil
+}
+
+// SessionHistory reports the transcript one session accumulated across the drives that
+// ended on it: the worker chain keeps its material as facts, so no separate transcript
+// stands beside it.
+func (c *workerChain) SessionHistory(event.Address) []model.Message { return nil }
+
+// CommitHistory keeps the transcript one ended drive accumulated: the worker chain reads
+// its material off the facts, so nothing is appended a second time here.
+func (c *workerChain) CommitHistory(event.Address, []model.Message) {}
+
+// SessionFacts reports the facts one agent session committed, in commit order.
+func (c *workerChain) SessionFacts(addr event.Address) []event.Event {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	out := make([]event.Event, 0, len(c.facts))
+	for _, evt := range c.facts {
+		if workerSessionOf(evt) != addr.SessionID {
+			continue
+		}
+		if addr.AgentID != "" && workerAgentOf(evt) != addr.AgentID {
+			continue
+		}
+		out = append(out, evt)
+	}
+	return out
+}
+
+// workerSessionOf reports the session one fact belongs to: the first address of the fact
+// that names one.
+func workerSessionOf(evt event.Event) event.SessionID {
+	for _, addr := range []event.Address{evt.Owner, evt.Target, evt.Source} {
+		if addr.SessionID != "" {
+			return addr.SessionID
+		}
+	}
+	return ""
+}
+
+// workerAgentOf reports the agent one fact belongs to: the first address of the fact that
+// names one.
+func workerAgentOf(evt event.Event) event.AgentID {
+	for _, addr := range []event.Address{evt.Owner, evt.Target, evt.Source} {
+		if addr.AgentID != "" {
+			return addr.AgentID
+		}
+	}
+	return ""
+}

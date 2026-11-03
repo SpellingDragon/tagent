@@ -55,7 +55,7 @@ func TestSkillLoadBodyEntersNextRequest(t *testing.T) {
 
 	var mu sync.Mutex
 	round := 0
-	provider := &ntModel{name: "model-a", answer: func(*model.Request) *model.Response {
+	provider := &ntModel{name: "model-a", answer: func(req *model.Request) *model.Response {
 		mu.Lock()
 		round++
 		current := round
@@ -63,19 +63,29 @@ func TestSkillLoadBodyEntersNextRequest(t *testing.T) {
 		if current == 1 {
 			return ntToolTurn(ntCall(skillBodyToolCall, knowledge.SkillLoadToolName, `{"skill":"greet"}`))
 		}
+		if !nativeRequestHasObservation(*req, skillBodyToolCall) {
+			time.Sleep(10 * time.Millisecond)
+			return ntFinalTurn("awaiting the skill load observation")
+		}
 		return ntFinalTurn("settled")
 	}}
 
 	turn := skillBodyTurn(t, ctx, surface, provider, skillBodyAgent)
-	if turn.Terminal != model.KindCompleted || len(turn.Decisions) != 2 {
-		t.Fatalf("turn = (%v, %d decisions), want the completed terminal beside the load and the answer decision", turn.Terminal, len(turn.Decisions))
+	if turn.Terminal != model.KindCompleted || turn.DecisionCount < 2 {
+		t.Fatalf("turn = (%v, %d decisions), want the completed terminal beside at least the load and answer decisions", turn.Terminal, turn.DecisionCount)
 	}
-	if requestCarries(turn.Decisions[0].Request.Messages, skillBodyLoadedMarker) {
-		t.Fatalf("the request before the load already carries the skill body: %+v", turn.Decisions[0].Request.Messages)
+	awaitNativePairs(t, provider, []nativePair{{callID: skillBodyToolCall, tool: knowledge.SkillLoadToolName, settled: "loaded: greet"}})
+	requests := provider.recorded()
+	if len(requests) < 2 {
+		t.Fatalf("requests = %d, want at least the load and answer requests", len(requests))
+	}
+	before := requests[0].Messages
+	if requestCarries(before, skillBodyLoadedMarker) {
+		t.Fatalf("the request before the load already carries the skill body: %+v", before)
 	}
 
-	next := turn.Decisions[1].Request.Messages
-	settled := settledObservationOf(t, next, skillBodyToolCall)
+	next := requests[1].Messages
+	settled := settledObservationOf(t, requests, skillBodyToolCall)
 	if settled.Content != "loaded: greet" {
 		t.Fatalf("the load settled with %q, want the framework name-level answer \"loaded: greet\"", settled.Content)
 	}
@@ -107,7 +117,7 @@ func TestUnknownSkillStillRefused(t *testing.T) {
 
 	var mu sync.Mutex
 	round := 0
-	provider := &ntModel{name: "model-a", answer: func(*model.Request) *model.Response {
+	provider := &ntModel{name: "model-a", answer: func(req *model.Request) *model.Response {
 		mu.Lock()
 		round++
 		current := round
@@ -115,16 +125,25 @@ func TestUnknownSkillStillRefused(t *testing.T) {
 		if current == 1 {
 			return ntToolTurn(ntCall(skillBodyToolCall, knowledge.SkillLoadToolName, `{"skill":"`+skillBodyMissing+`"}`))
 		}
+		if !nativeRequestHasObservation(*req, skillBodyToolCall) {
+			time.Sleep(10 * time.Millisecond)
+			return ntFinalTurn("awaiting the refused skill observation")
+		}
 		return ntFinalTurn("settled")
 	}}
 
 	turn := skillBodyTurn(t, ctx, surface, provider, skillBodyAgent)
-	if turn.Terminal != model.KindCompleted || len(turn.Decisions) != 2 {
-		t.Fatalf("turn = (%v, %d decisions), want the refused load decision beside the answer decision", turn.Terminal, len(turn.Decisions))
+	if turn.Terminal != model.KindCompleted || turn.DecisionCount < 2 {
+		t.Fatalf("turn = (%v, %d decisions), want the refused load decision beside at least the answer decision", turn.Terminal, turn.DecisionCount)
 	}
 
-	next := turn.Decisions[1].Request.Messages
-	settled := settledObservationOf(t, next, skillBodyToolCall)
+	awaitNativePairs(t, provider, []nativePair{{callID: skillBodyToolCall, tool: knowledge.SkillLoadToolName, settled: "unknown skill: " + skillBodyMissing}})
+	requests := provider.recorded()
+	if len(requests) < 2 {
+		t.Fatalf("requests = %d, want at least the refused load and answer requests", len(requests))
+	}
+	next := requests[1].Messages
+	settled := settledObservationOf(t, requests, skillBodyToolCall)
 	if settled.Content != "unknown skill: "+skillBodyMissing {
 		t.Fatalf("the refused load settled with %q, want the framework refusal naming %q", settled.Content, skillBodyMissing)
 	}
@@ -182,17 +201,19 @@ func skillBodyTurn(t *testing.T, ctx context.Context, surface []trpctool.Callabl
 	return turn
 }
 
-// settledObservationOf reports the settled observation one request carries
-// under the given call identity: the settled body enters the next decision as
-// input material under that identity, never as a second tool-role response.
-func settledObservationOf(t *testing.T, messages []model.Message, callID string) model.Message {
+// settledObservationOf reports the settled observation the real provider
+// requests carry under the given call identity, without assuming all results
+// share one request. It is a user-role observation, never a second tool reply.
+func settledObservationOf(t *testing.T, requests []model.Request, callID string) model.Message {
 	t.Helper()
-	for _, msg := range messages {
-		if msg.ToolID == callID && msg.Role != model.RoleTool {
-			return msg
+	for _, request := range requests {
+		for _, msg := range request.Messages {
+			if msg.ToolID == callID && msg.Role == model.RoleUser {
+				return msg
+			}
 		}
 	}
-	t.Fatalf("no settled observation for %s in the request: %+v", callID, messages)
+	t.Fatalf("no settled observation for %s in the requests: %+v", callID, requests)
 	return model.Message{}
 }
 

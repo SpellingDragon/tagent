@@ -2,6 +2,7 @@ package replay
 
 import (
 	"context"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -120,11 +121,13 @@ func TestAgeLevelReadsTheSharedRule(t *testing.T) {
 	}
 }
 
-// TestSegmentsCloseAtAgentOutput pins the partition of a projection into task-turn segments.
+// testSegmentsCloseAtAgentOutput pins the legacy partition of a projection into
+// task-turn segments: an output that records no readable input relation closes
+// every entry before it, so the positional boundary stands.
 //   - a segment spans an input beside the process detail up to the output that closes it
 //   - a tail no output closed stays its own segment, in progress and never over the recent window
 //   - the ages run from the newest segment backwards
-func TestSegmentsCloseAtAgentOutput(t *testing.T) {
+func testSegmentsCloseAtAgentOutput(t *testing.T) {
 	entries := append(ageTurn("t1", 0, 1), ageTurn("t2", 1, 1)...)
 	entries = append(entries, ProjectionEntry{
 		Key:     "t3-in",
@@ -153,6 +156,128 @@ func TestSegmentsCloseAtAgentOutput(t *testing.T) {
 	if spanned != len(entries) {
 		t.Fatalf("segments span %d entries, want every one of the %d entries", spanned, len(entries))
 	}
+}
+
+// TestSegmentsCloseByConsumptionRelation pins the relation a segment closes on:
+// an agent_output closes the inputs its fact records as consumed, an input it
+// leaves unnamed rolls into the segment the next output closes, and an output
+// beside no readable relation keeps the positional boundary.
+//   - named inputs and the closing output form one segment; an input the output
+//     did not name rolls into the next segment instead of closing with it
+//   - a legacy output without input_events closes every entry before it
+//   - an empty, empty-identity or unparseable input_events is no relation either,
+//     so it closes positionally rather than guessing one
+func TestSegmentsCloseByConsumptionRelation(t *testing.T) {
+	input := func(key string) ProjectionEntry {
+		return ProjectionEntry{
+			Key:     event.EventID(key),
+			Type:    event.TypeExternalInput,
+			Summary: "input " + key,
+			Content: "用户输入 " + key + "。",
+			Time:    ageBase,
+		}
+	}
+	output := func(key, relation string) ProjectionEntry {
+		entry := ProjectionEntry{
+			Key:     event.EventID(key),
+			Type:    event.TypeAgentOutput,
+			Summary: "output " + key,
+			Content: "回答 " + key + "。",
+			Time:    ageBase,
+		}
+		if relation == "" {
+			return entry
+		}
+		return WithInputEvents(entry, relation)
+	}
+	keysOf := func(segments []Segment) [][]event.EventID {
+		out := make([][]event.EventID, 0, len(segments))
+		for _, segment := range segments {
+			keys := make([]event.EventID, 0, len(segment.Entries))
+			for _, entry := range segment.Entries {
+				keys = append(keys, entry.Key)
+			}
+			out = append(out, keys)
+		}
+		return out
+	}
+	assertSegments := func(t *testing.T, got []Segment, want [][]event.EventID) {
+		t.Helper()
+		gotKeys := keysOf(got)
+		if len(gotKeys) != len(want) {
+			t.Fatalf("segments = %v, want %v", gotKeys, want)
+		}
+		for i := range want {
+			if !slices.Equal(gotKeys[i], want[i]) {
+				t.Fatalf("segment %d = %v, want %v (all segments %v)", i, gotKeys[i], want[i], gotKeys)
+			}
+		}
+	}
+
+	t.Run("the consumption relation closes the segment", func(t *testing.T) {
+		// The input that landed while the output flew was never named by the
+		// request that closed the turn, so it rolls into the next segment while
+		// the process detail of the closing turn stays with its output.
+		entries := []ProjectionEntry{
+			input("i-1"),
+			// A notice is material of the turn it landed in, not an input: no
+			// relation names it, so it closes with the output beside it instead
+			// of rolling into every later segment.
+			{Key: "i-notice", Type: event.TypeFeedback, Summary: "notice", Content: "进度通知。", Time: ageBase},
+			input("i-2"),
+			{Key: "i-plan", Type: event.TypeThinkingPlan, Summary: "plan", Content: "过程细节。", Time: ageBase},
+			input("i-3"),
+			output("a", `["i-1","i-2"]`),
+			input("i-4"),
+			output("b", `["i-3","i-4"]`),
+		}
+		segments := SegmentsOf(entries, DefaultAgeKeepRecent)
+		assertSegments(t, segments, [][]event.EventID{
+			{"i-1", "i-notice", "i-2", "i-plan", "a"},
+			{"i-3", "i-4", "b"},
+		})
+		if !segments[0].Complete || !segments[1].Complete {
+			t.Fatalf("segments = %+v, want both closed by their output", segments)
+		}
+		// An input that lands after the output already stands in the next
+		// segment, so the positional boundary and the relation agree here.
+		entries = []ProjectionEntry{
+			input("i-1"), input("i-2"),
+			output("a", `["i-1","i-2"]`),
+			input("i-3"),
+			output("b", `["i-3"]`),
+		}
+		segments = SegmentsOf(entries, DefaultAgeKeepRecent)
+		assertSegments(t, segments, [][]event.EventID{
+			{"i-1", "i-2", "a"},
+			{"i-3", "b"},
+		})
+	})
+
+	t.Run("legacy output without input_events", testSegmentsCloseAtAgentOutput)
+
+	t.Run("unreadable input_events", func(t *testing.T) {
+		for name, relation := range map[string]string{
+			"empty array":      "[]",
+			"empty identities": `["",""]`,
+			"null":             "null",
+			"not a list":       `"i-1"`,
+			"unparseable":      `{"input_events":`,
+		} {
+			t.Run(name, func(t *testing.T) {
+				entries := []ProjectionEntry{
+					input("i-1"), input("i-2"),
+					output("a", relation),
+					input("i-3"),
+					output("b", relation),
+				}
+				assertSegments(t, SegmentsOf(entries, DefaultAgeKeepRecent), [][]event.EventID{
+					{"i-1", "i-2", "a"},
+					{"i-3", "b"},
+				})
+			})
+		}
+	})
 }
 
 // TestAgeFoldWaitsForTheVolumeThreshold pins the trigger of an age fold.

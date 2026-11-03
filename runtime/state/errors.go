@@ -60,30 +60,3 @@ func (c *Cause) Error() string {
 // Unwrap reports the failure the link wraps, so a caller matching the named
 // refusal underneath matches it through the chain.
 func (c *Cause) Unwrap() error { return c.Err }
-
-// CauseChain reports the cause links a failure carries, ordered from the
-// outermost link to the innermost one. A failure that carries no link reports
-// an empty chain, and a chain never loses the links sitting under a joined
-// failure.
-func CauseChain(err error) []*Cause {
-	var out []*Cause
-	var walk func(error)
-	walk = func(err error) {
-		if err == nil {
-			return
-		}
-		if cause, ok := err.(*Cause); ok {
-			out = append(out, cause)
-		}
-		switch inner := err.(type) {
-		case interface{ Unwrap() []error }:
-			for _, e := range inner.Unwrap() {
-				walk(e)
-			}
-		case interface{ Unwrap() error }:
-			walk(inner.Unwrap())
-		}
-	}
-	walk(err)
-	return out
-}

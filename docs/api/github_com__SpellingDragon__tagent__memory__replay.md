@@ -1,14 +1,20 @@
 package replay // import "github.com/SpellingDragon/tagent/memory/replay"
 
-The segment-age axis of the mapped sequence: a projection is partitioned
-into task-turn segments that close at an agent output, exactly the way the
-deterministic compress level reads them, and each segment is placed in one
-of three age bands by its age — the newest band the segments still inside the
-recent window, the middle band the segments one and two windows back, the oldest
-band everything before that. A fold acts on the band next to the material it
-consumes: the process detail of the newest band folds into one middle-band
-product, and the middle band folds into the one history summary the oldest band
-reads as.
+The fold plan: the judgment one producer files and one consumer executes.
+A plan reads a projection and answers the products a fold would mint without
+touching it; applying the products answers the entries one direct fold answers,
+so the two halves of compression never share a step.
+
+The segment-age axis of the mapped sequence: a projection is partitioned into
+task-turn segments that an agent output closes — the inputs its fact records as
+consumed beside the process detail, with the inputs it did not name rolling into
+the next segment — exactly the way the deterministic compress level reads them,
+and each segment is placed in one of three age bands by its age — the newest
+band the segments still inside the recent window, the middle band the segments
+one and two windows back, the oldest band everything before that. A fold acts
+on the band next to the material it consumes: the process detail of the newest
+band folds into one middle-band product, and the middle band folds into the one
+history summary the oldest band reads as.
 
 The fold is segment-grained while AssembleBudget is entry-grained: the assembly
 decides how one entry is presented under its budget and never removes an entry,
@@ -192,12 +198,28 @@ type AgeFoldPlan struct {
     and the rendered volume a projection may carry before a fold is due.
     A plan naming no window or no threshold reads the defaults.
 
+type AgeFoldPlanReport struct {
+	// Volume is the rendered volume the judgment read.
+	Volume int
+	// Threshold is the volume the plan measures against.
+	Threshold int
+	// Triggered reports whether the plan minted products to fold.
+	Triggered bool
+	// Counts reports what the products would consume.
+	Counts FoldedCounts
+	// Products lists the products the plan would mint, in application order.
+	Products []FoldProduct
+}
+    AgeFoldPlanReport is the judgment of one fold plan: what the plan would
+    consume and the products it would mint, beside the volume it read. Reading a
+    plan never touches the projection.
+
 type AgeFoldReport struct {
 	// Volume is the rendered volume the projection carried, in bytes.
 	Volume int
 	// Threshold is the volume the fold was judged under, in bytes.
 	Threshold int
-	// Triggered reports whether the volume passed the threshold and a fold ran.
+	// Triggered reports whether the fold minted a product to write.
 	Triggered bool
 	// NewFolded is how many entries the new-band fold consumed.
 	NewFolded int
@@ -330,6 +352,28 @@ type EventChain interface {
     after the given key. MUST refuse a page limit below one by name. MUST NOT
     answer a failed read as an empty chain.
 
+type FoldProduct struct {
+	// Entry is the synthetic entry the projection carries under Entry.Key.
+	Entry ProjectionEntry
+	// Covered lists the entry keys the product consumes, in their original
+	// order: the process detail of one closed segment, or the middle bands.
+	Covered []event.EventID
+	// Request is the judgment this product answers.
+	Request event.CompressRequest
+}
+    FoldProduct is one product a plan would mint: the synthetic entry to place,
+    the entries it covers and the compress request it answers. A product is
+    what a producer judges and what a consumer executes, so the judgment and the
+    execution never share a step.
+
+type FoldedCounts struct {
+	// Segment counts the process-detail entries a segment product consumes.
+	Segment int
+	// Middle counts the entries a history summary consumes.
+	Middle int
+}
+    FoldedCounts reports what one fold judgment would consume.
+
 type MemoryEventChain struct {
 	// Has unexported fields.
 }
@@ -402,12 +446,31 @@ type ProjectionEntry struct {
 	// fact stated it, so the same entry presents differently under different
 	// budgets.
 	Content string
+
 	// Time is the time the fact was recorded.
 	Time time.Time
+	// Has unexported fields.
 }
     ProjectionEntry is one ordered item of a projection: the canonical identity
     of a committed fact, its type and summary, the original text it carries,
     and its time, in the same shape a recall card entry uses.
+
+func WithInputEvents(entry ProjectionEntry, raw string) ProjectionEntry
+    WithInputEvents returns the entry beside the input relation its fact
+    recorded: the input_events metadata entry, a JSON array of the input
+    fact identities the output consumed. A missing, empty, identity-less or
+    unparseable value is no relation — the same rule the chain-authority answer
+    rebuild reads one under — so the segment rule treats the output as legacy
+    and closes it positionally instead of guessing inputs it never named.
+
+func WithMessageRole(entry ProjectionEntry, role string) ProjectionEntry
+    WithMessageRole returns the entry beside the role its own message carried:
+    the one setter for a field a cross-package assembly fills, so the entry's
+    public shape stays closed.
+
+func (e ProjectionEntry) StatedRole() string
+    StatedRole reports the role the fact's own message carried, empty beside a
+    fact whose message stated none.
 
 type RebuildOptions struct {
 	// PageSize is the minimum-event-key page size of the tail pagination; zero
@@ -497,6 +560,15 @@ func (p *ReplayProjection) Append(_ context.Context, entry ProjectionEntry)
     budgets and the fact reads back unchanged either way. An append is an
     in-memory mutation, so it takes the port's context with nothing to cancel.
 
+func (p *ReplayProjection) ApplyProducts(products []FoldProduct)
+    ApplyProducts places the products a judgment minted onto the projection:
+    each covered entry is replaced by its product, a history summary lands ahead
+    of the material it summarizes, and a product whose entry is already held
+    changes nothing — applying one judgment twice is applying it once. A covered
+    entry leaves the projection with its per-key material (the kept original,
+    the dedup key and the consumed mark), so the maps say what the rewritten
+    entries say.
+
 func (p *ReplayProjection) AssembleBudget(ctx context.Context, budget int) ([]ProjectionEntry, error)
     AssembleBudget packs the projection into one agent request of the given
     token budget and returns the entries the request is assembled from,
@@ -545,21 +617,32 @@ func (p *ReplayProjection) Fold(ctx context.Context) (ProjectionEntry, error)
     payload records the fullBoundary value the tail is replayed after, and the
     summary entry is returned first on every restore.
 
+    - The entries the summary alone represents leave the projection with their
+    per-key material (the original text, the dedup key and the consumed mark)
+    while a retained ref keeps its own, so the rewritten sequence carries no
+    copy of the material the summary speaks for.
+
     - A projection already carrying a compaction payload answers that payload's
     summary entry and moves nothing, so one body of material folds once even
     when a rebuilt projection is offered to the fold again.
 
 func (p *ReplayProjection) FoldByAge(ctx context.Context, plan AgeFoldPlan) (AgeFoldReport, error)
     FoldByAge folds the projection along its segment-age bands once its rendered
-    volume passes the plan's threshold: the process detail of every closed
-    new-band segment is replaced by one segment-fold product, and the middle and
-    oldest bands are replaced by one history summary placed first. A projection
-    whose volume stays inside the threshold is left exactly as it stands.
+    volume passes the plan's threshold and the round has a candidate to fold:
+    the process detail of every closed new-band segment is replaced by one
+    segment-fold product, and the middle and oldest bands are replaced by
+    one history summary placed first. A projection whose volume stays inside
+    the threshold, or whose volume passes it without a new candidate, is left
+    exactly as it stands.
 
-    The fold is deterministic over the sequence it reads and files the judgment
-    as a compress request rather than rewriting any fact: the products enter
-    the projection under content-addressed synthetic keys, so folding the same
-    sequence twice mints the same keys and appends no second product.
+    - The entries a product replaces leave the projection with their per-key
+    material (the kept original, the dedup key and the consumed mark), so a fold
+    of the same sequence twice finds nothing left to drop.
+
+    - The fold is deterministic over the sequence it reads and files the
+    judgment as a compress request rather than rewriting any fact: the products
+    enter the projection under content-addressed synthetic keys, so folding the
+    same sequence twice mints the same keys and appends no second product.
 
 func (p *ReplayProjection) FullBoundary() event.EventID
     FullBoundary returns the event-key boundary the compaction payload carried.
@@ -570,8 +653,22 @@ func (p *ReplayProjection) Len() int
 func (p *ReplayProjection) Original(key event.EventID) (string, bool)
     Original returns the kept original text of one keyed entry.
 
+func (p *ReplayProjection) PlanByAge(ctx context.Context, plan AgeFoldPlan) (AgeFoldPlanReport, error)
+    PlanByAge judges one fold plan without touching the projection: it answers
+    the products the fold would mint, so a producer can file the judgment and a
+    consumer can execute it later, each on its own.
+
 func (p *ReplayProjection) RecoveryHint() *ProjectionEntry
     RecoveryHint returns the recovery hint entry a rebuild left, nil before one.
+
+func (p *ReplayProjection) RestoreProducts(products []event.CompressProduct)
+    RestoreProducts places the products a chain recorded onto the projection:
+    the product fact names the key, the text and the entries it covers, so a
+    restore rebuilds the entry the fold minted instead of folding the material
+    again. The kind of product is read off the key's prefix and its moment off
+    the first entry it covers, which is the moment the fold itself gave it.
+    A key no fold mints, and a product whose entry the projection already holds,
+    change nothing.
 
 type Segment struct {
 	// Index is the position of the segment in the projection, oldest first.
@@ -594,6 +691,9 @@ type Segment struct {
 
 func SegmentsOf(entries []ProjectionEntry, keepRecent int) []Segment
     SegmentsOf partitions the entries of one projection into its task-turn
-    segments, oldest first: a segment spans an external input beside the process
-    entries that follow it up to the agent output that closes it, and a tail no
-    agent output closed stays its own segment in progress.
+    segments, oldest first: an agent output closes the segment of the inputs
+    its fact records as consumed, an input it leaves unnamed rolls into the
+    segment the next output closes, and the process entries between stay with
+    the closing output. An output beside no readable relation closes every entry
+    before it at the positional boundary. A tail no agent output closed stays
+    its own segment in progress.

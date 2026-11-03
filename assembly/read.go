@@ -27,6 +27,23 @@ func (r *Run) Query(ctx context.Context, filter query.ListFilter) (query.Snapsho
 	return snapshot, err
 }
 
+// ModelInFlight reports the model request one site is executing, read off the
+// consumption loop of this run: the range the decision serves and the identity
+// of the decision itself. A site in another instance, a run beside no loop and
+// a site running no request each answer no flight.
+func (r *Run) ModelInFlight(addr event.Address, instance event.InstanceID) (event.InvocationID, event.DecisionID, bool) {
+	if !addr.IsComplete() || instance == "" || instance != r.instance {
+		return "", "", false
+	}
+	r.mu.Lock()
+	loop := r.loop
+	r.mu.Unlock()
+	if loop == nil {
+		return "", "", false
+	}
+	return loop.InFlightModel(addr)
+}
+
 // recall runs one retrieval over the recall face of this run and answers the
 // reference set the query hit. The retrieval reads through the observation table
 // over the committed store and the searcher fusing its two legs, so a hit is
@@ -142,7 +159,9 @@ func (a runReading) Published(context.Context) (query.Generation, error) {
 // Sites returns one owner snapshot per site this run established, each beside
 // the invocation and decision currently holding its execution slot. The site
 // snapshots are read back through the state owner's own authorized read, so an
-// ungranted subject is refused by the owner rather than by the run.
+// ungranted subject is refused by the owner rather than by the run. The slot a
+// snapshot names is the model request the consumption loop of the run actually
+// flies, never a copy the read keeps on the side.
 func (s runReading) Sites(ctx context.Context) ([]query.SiteReading, error) {
 	s.run.mu.Lock()
 	addrs := make([]event.Address, 0, len(s.run.sites))
@@ -162,7 +181,7 @@ func (s runReading) Sites(ctx context.Context) ([]query.SiteReading, error) {
 		if err != nil {
 			return nil, err
 		}
-		invocation, decision, held := s.run.occupancy.Slot(addr, s.run.instance)
+		invocation, decision, held := s.run.ModelInFlight(addr, s.run.instance)
 		sites = append(sites, query.SiteReading{
 			Session:    *site,
 			Invocation: invocation,

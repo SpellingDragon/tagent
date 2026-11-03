@@ -1,4 +1,10 @@
 {
+  "concept_ratchet": {
+    "removed_min": 10,
+    "new_max": 1,
+    "exported_interfaces_max": 77,
+    "note": "frozen at the convergence change; tighten new_max to 0 once the baseline commit advances"
+  },
   "schema_version": 1,
   "change": "runtime-rebuild",
   "module_path": "github.com/SpellingDragon/tagent",
@@ -111,7 +117,7 @@
       "pattern": "runtime/task/approval",
       "role": "task-approval",
       "required": true,
-      "reason": "审批是任务生命周期的一环：ApprovalChannel 与 ApprovalManager 的台账/扫描/裁决归 task 域的子包，只引 plugin 的裁决词汇（package-zero-debt 终审反转显式登记）。"
+      "reason": "审批是任务生命周期的一环：ApprovalChannel 与 ApprovalManager 的台账/扫描/裁决归 task 域的子包，引 plugin 的裁决词汇、event 的注意力事实词汇与父包的 Attention 面（package-zero-debt 终审反转显式登记；注意力原语统一后显式登记父包边）。"
     },
     {
       "pattern": "api/model",
@@ -382,12 +388,13 @@
       "from": "runtime/agent",
       "allow": [
         "api/event",
-        "runtime/state",
         "api/model",
         "api/plugin",
-        "runtime/task",
         "api/view",
-        "features/evolution/governance"
+        "features/evolution/governance",
+        "runtime/state",
+        "runtime/task",
+        "runtime/task/approval"
       ],
       "forbidden": [
         "features/rl",
@@ -578,7 +585,9 @@
     {
       "from": "runtime/task/approval",
       "allow": [
-        "api/plugin"
+        "api/event",
+        "api/plugin",
+        "runtime/task"
       ],
       "forbidden": [
         "runtime/agent",
@@ -591,7 +600,7 @@
         "features/telemetry",
         "assembly"
       ],
-      "reason": "审批是任务生命周期的子包：只引 plugin 的 RiskLevel/Decision 裁决词汇，不反向依赖治理或执行器（package-zero-debt 终审反转）。"
+      "reason": "审批是任务生命周期的子包：引 plugin 的 RiskLevel/Decision 裁决词汇与 event 的注意力事实词汇，并以 runtime/task 的 Attention 面承载在场与裁决（父包只导出注意力原语，子包不反向持真源）；不反向依赖治理或执行器（package-zero-debt 终审反转，注意力原语统一后显式登记父子边）。"
     },
     {
       "from": "features/rl",
@@ -607,7 +616,7 @@
         "features/evolution",
         "assembly"
       ],
-      "reason": "采集与导出消费者：可从 model/memory 取真实产出与原文，但禁止依赖 agent、根组合根（plan 明确禁止 rl→agent/root）。; LeaseObserver implements plugin.Instance to consume model.replacement facts through the pipeline - the same PostCommitObserver pattern as the meditation driver and the age fold"
+      "reason": "采集与导出消费者：可从 model/memory 取真实产出与原文，但禁止依赖 agent、根组合根（plan 明确禁止 rl→agent/root）。; LeaseObserver implements plugin.Instance to consume config_change facts of the model dimension through the pipeline - the same PostCommitObserver pattern as the meditation driver and the age fold"
     },
     {
       "from": "features/evolution",
@@ -1041,5 +1050,17 @@
         "reason": "组合根的提交面只把 task.Manager 注入的状态迁移转交 MemoryRegistry.Advance；它不另写通知身份，也不碰邮箱。"
       }
     ]
+  },
+  "concept_bindings": {
+    "baseline": {
+      "commit": "dfdfa72e70d2cdd91ce8b1db408d5543481dc499"
+    },
+    "bindings": {
+      "ConfigChange": {
+        "concept": "configuration change",
+        "kind": "fact",
+        "spec": "config-hot-reload"
+      }
+    }
   }
 }

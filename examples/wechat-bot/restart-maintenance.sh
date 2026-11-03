@@ -32,16 +32,6 @@ DONEF="$DONEDIR/restart.done"
 # 端口与宿主 HTTP 面同源（env TAGENT_HTTP_PORT，缺省 8089）：改端口后探针与
 # 监听校验都跟着改，不在脚本里另存一份默认值。
 PORT="${TAGENT_HTTP_PORT:-8089}"
-HEALTH="http://127.0.0.1:$PORT/healthz"
-# hardening-review-batch2 4.4：healthz 受 token 保护——探针与 Go 侧
-# rl.AuthTokenFromEnv 同源（env TAGENT_RL_AUTH_TOKEN）；401 视为 AUTH_FAIL，
-# 不判死进程、不触发重启。
-RL_TOKEN="${TAGENT_RL_AUTH_TOKEN:-}"
-AUTH_ARGS=()
-[ -n "$RL_TOKEN" ] && AUTH_ARGS=(-H "Authorization: Bearer $RL_TOKEN")
-healthz_code() {
-  curl -s -o /dev/null -w '%{http_code}' ${AUTH_ARGS[@]+"${AUTH_ARGS[@]}"} -m 3 "$HEALTH" 2>/dev/null
-}
 log(){ echo "[$(date '+%F %T')] $*"; }
 
 # 5.8 system-alert dead-man switch (mirror of restart-tagent.sh)
@@ -52,11 +42,72 @@ trap on_exit58 EXIT TERM INT
 log(){ echo "[$(date '+%F %T')] $*"; S58_LAST="$*"; }
 mkdir -p "$DONEDIR" 2>/dev/null
 
-# ---- 0. 幂等门: 哨兵 pid 仍健康则无事可做 ----
+# hardening-review-batch2 4.4：healthz 受 token 保护——探针与 Go 侧同源（assembly
+# 的 hostFaceTokenEnv 读 env TAGENT_RL_AUTH_TOKEN，host_face.go 的 healthz 经
+# authorize 判定）；401 视为 AUTH_FAIL，
+# 不判死进程、不触发重启。
+# >>> health-probe-block（五态探测 R6/D12；tests/gates/test_health_probe_states.sh 逐字提取本区间断言）
+# 类别枚举：healthy(200) / auth_fail(401|403) / timeout(curl 28) / unavailable(拒连 curl 7 及其他)
+# 分支语义：healthy→继续；auth_fail→AUTH_FAIL 告警并中止判定（**不 kill、不重建、不回滚**）；
+#          unavailable|timeout→等待窗口内视为正常状态（进程可能仍在初始化）。
+# 注释口径与 healthz 鉴权契约一致（08/8.1 裁决，已实测对齐）：healthz 在
+# assembly/host_face.go 经与 /task 同一个 authorize 判定——配了 TAGENT_RL_AUTH_TOKEN
+# 就必须带 Bearer，未配则只放行回环对端；因此未带凭据的探针收到 401 +
+# WWW-Authenticate，落上面的 auth_fail 类别，绝不被读成健康。
+HEALTH_URL="http://127.0.0.1:$PORT/healthz"
+PROBE_WAIT_TRIES="${PROBE_WAIT_TRIES:-3}"
+PROBE_WAIT_INTERVAL="${PROBE_WAIT_INTERVAL:-2}"
+PROBE_MAX_TIME="${PROBE_MAX_TIME:-3}"
+PROBE_CODE=""
+PROBE_CLASS=""
+RL_TOKEN="${TAGENT_RL_AUTH_TOKEN:-}"
+AUTH_ARGS=()
+[ -n "$RL_TOKEN" ] && AUTH_ARGS=(-H "Authorization: Bearer $RL_TOKEN")
+probe_classify(){ # $1=http_code $2=curl 退出码 → stdout 类别
+    case "$2" in
+        0)  case "$1" in
+                200)     echo healthy ;;
+                401|403) echo auth_fail ;;
+                *)       echo unavailable ;;
+            esac ;;
+        28) echo timeout ;;
+        *)  echo unavailable ;;
+    esac
+}
+probe_healthz(){ # 打一次探针：置 PROBE_CODE/PROBE_CLASS；返回 curl 退出码
+    local rc
+    PROBE_CODE=$(curl -s -o "${PROBE_OUT:-/dev/null}" -w '%{http_code}' \
+        ${AUTH_ARGS[@]+"${AUTH_ARGS[@]}"} -m "$PROBE_MAX_TIME" "$HEALTH_URL" 2>/dev/null)
+    rc=$?
+    PROBE_CLASS=$(probe_classify "$PROBE_CODE" "$rc")
+    return "$rc"
+}
+probe_guard(){ # 前置守卫：0=继续（healthy 或等待窗口走完）；3=AUTH_FAIL，调用方须立即 exit 3
+    local i
+    for i in $(seq 1 "$PROBE_WAIT_TRIES"); do
+        probe_healthz
+        if [ "$PROBE_CLASS" = "auth_fail" ]; then
+            log "AUTH_FAIL: healthz returned $PROBE_CODE — token missing/mismatch (TAGENT_RL_AUTH_TOKEN). NOT killing; manual fix required"
+            return 3
+        fi
+        if [ "$PROBE_CLASS" = "healthy" ]; then return 0; fi
+        log "probe: $PROBE_CLASS (http=$PROBE_CODE) — waiting window $i/$PROBE_WAIT_TRIES"
+        if [ "$i" -lt "$PROBE_WAIT_TRIES" ]; then sleep "$PROBE_WAIT_INTERVAL"; fi
+    done
+    log "probe: waiting window elapsed, still $PROBE_CLASS (http=$PROBE_CODE) — treat as unavailable"
+    return 0
+}
+# <<< health-probe-block
+
+# ---- 0. 幂等门: 哨兵 pid 仍健康则无事可做（D12：鉴权失败不等于进程失效） ----
 if [ -f "$DONEF" ]; then
     BPID=$(cat "$DONEF" 2>/dev/null)
-    if [ -n "$BPID" ] && kill -0 "$BPID" 2>/dev/null && [ "$(healthz_code)" = "200" ]; then
-        exit 0   # 健康, 静默退出 —— 不写日志, 不打扰
+    if [ -n "$BPID" ] && kill -0 "$BPID" 2>/dev/null; then
+        PROBE_RC=0; probe_guard || PROBE_RC=$?
+        if [ "$PROBE_RC" = 3 ]; then log "=== insurance session end (AUTH_FAIL) ==="; exit 3; fi
+        if [ "$PROBE_CLASS" = "healthy" ]; then
+            exit 0   # 健康, 静默退出 —— 不写日志, 不打扰
+        fi
     fi
     log "note: done sentinel pid=$BPID no longer healthy — insurance engaging"
 fi
@@ -71,10 +122,15 @@ if [ -z "$OLD_PID" ]; then
     OLD_PID=$(ss -tlnp 2>/dev/null | grep ":$PORT " | grep -oE 'pid=[0-9]+' | head -1 | cut -d= -f2)
 fi
 
-# bot 活着且健康 → 一切正常, 静默退出（含首次部署场景）
-if [ -n "$OLD_PID" ] && [ "$(healthz_code)" = "200" ]; then
-    echo "$OLD_PID" > "$DONEF" 2>/dev/null   # 基线校准: 当前健康 pid 即基线
-    exit 0
+# bot 活着且健康 → 一切正常, 静默退出（含首次部署场景）；401/403 → AUTH_FAIL
+# 告警后退出判定，绝不进入重建/杀进程路径（R6/D12）。
+if [ -n "$OLD_PID" ]; then
+    PROBE_RC=0; probe_guard || PROBE_RC=$?
+    if [ "$PROBE_RC" = 3 ]; then log "=== insurance session end (AUTH_FAIL) ==="; exit 3; fi
+    if [ "$PROBE_CLASS" = "healthy" ]; then
+        echo "$OLD_PID" > "$DONEF" 2>/dev/null   # 基线校准: 当前健康 pid 即基线
+        exit 0
+    fi
 fi
 
 log "=== insurance session start (old_pid=${OLD_PID:-none}, shell $$) ==="
@@ -166,15 +222,15 @@ log "launched bot pid=$SPAWN_PID (real child from posix_spawn; fds 3+ closed bef
 # ---- 6. 健康门控 ----
 for i in $(seq 1 90); do
     sleep 2
-    HC=$(healthz_code)
-    if [ "$HC" = "401" ] || [ "$HC" = "403" ]; then
-        log "AUTH_FAIL: healthz returned $HC — token missing/mismatch. NOT killing; manual fix required"
+    probe_healthz
+    if [ "$PROBE_CLASS" = "auth_fail" ]; then
+        log "AUTH_FAIL: healthz returned $PROBE_CODE — token missing/mismatch. NOT killing; manual fix required"
         exit 3
     fi
-    if [ "$HC" = "200" ]; then
+    if [ "$PROBE_CLASS" = "healthy" ]; then
         NEW_PID=$(ss -tlnp 2>/dev/null | grep ":$PORT " | grep -oE 'pid=[0-9]+' | head -1 | cut -d= -f2)
         echo "${NEW_PID:-$SPAWN_PID}" > "$DONEDIR/restart.done"
-        log "RESTART OK: healthz=$HC new_pid=${NEW_PID:-?} after ~$((i*2))s"
+        log "RESTART OK: healthz=$PROBE_CODE new_pid=${NEW_PID:-?} after ~$((i*2))s"
 # reincarnation notice: metadata archive for the next process (task 2.1, D3)
         # 归档 env 快照后再清 /tmp：下次转世时若 /tmp 被清理（重启即清），
         # $BASE/run/env.snapshot 作为兜底环境来源（含 API keys 等启动必需变量）。

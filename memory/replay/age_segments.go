@@ -1,8 +1,10 @@
 // 契约: docs/wiki/memory/memory-architecture.md#event-shape
 //
 // The segment-age axis of the mapped sequence: a projection is partitioned into
-// task-turn segments that close at an agent output, exactly the way the
-// deterministic compress level reads them, and each segment is placed in one of
+// task-turn segments that an agent output closes — the inputs its fact records
+// as consumed beside the process detail, with the inputs it did not name rolling
+// into the next segment — exactly the way the deterministic compress level reads
+// them, and each segment is placed in one of
 // three age bands by its age — the newest band the segments still inside the
 // recent window, the middle band the segments one and two windows back, the
 // oldest band everything before that. A fold acts on the band next to the
@@ -21,6 +23,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"strings"
 
 	"github.com/SpellingDragon/tagent/api/event"
@@ -68,6 +71,12 @@ const (
 	// ProjectionTypeHistorySummary names the product entry the middle and
 	// oldest bands fold into.
 	ProjectionTypeHistorySummary = "history_summary"
+
+	// ageSegmentKeyPrefix and ageHistoryKeyPrefix are the prefixes the two
+	// product keys are minted under: the prefix is what a product fact states
+	// about the kind of entry it restores.
+	ageSegmentKeyPrefix = "seg"
+	ageHistoryKeyPrefix = "hist"
 
 	// AgeProducerSegmentAge names the mechanism that judges a projection due for
 	// an age fold.
@@ -136,9 +145,12 @@ type Segment struct {
 }
 
 // SegmentsOf partitions the entries of one projection into its task-turn
-// segments, oldest first: a segment spans an external input beside the process
-// entries that follow it up to the agent output that closes it, and a tail no
-// agent output closed stays its own segment in progress.
+// segments, oldest first: an agent output closes the segment of the inputs its
+// fact records as consumed, an input it leaves unnamed rolls into the segment
+// the next output closes, and the process entries between stay with the closing
+// output. An output beside no readable relation closes every entry before it at
+// the positional boundary. A tail no agent output closed stays its own segment
+// in progress.
 func SegmentsOf(entries []ProjectionEntry, keepRecent int) []Segment {
 	runs := splitSegments(entries)
 	out := make([]Segment, 0, len(runs))
@@ -160,23 +172,136 @@ type segmentRun struct {
 	complete bool
 }
 
-// splitSegments cuts the projection at every agent output, so each run holds
-// one turn: the input of the turn beside the process entries and the output
-// that closed it. A tail no output closed stays one run in progress.
+// WithInputEvents returns the entry beside the input relation its fact recorded:
+// the input_events metadata entry, a JSON array of the input fact identities the
+// output consumed. A missing, empty, identity-less or unparseable value is no
+// relation — the same rule the chain-authority answer rebuild reads one under —
+// so the segment rule treats the output as legacy and closes it positionally
+// instead of guessing inputs it never named.
+func WithInputEvents(entry ProjectionEntry, raw string) ProjectionEntry {
+	entry.inputEvents = raw
+	return entry
+}
+
+// parseInputEvents reads one recorded relation: a JSON array of input fact
+// identities with empty and repeated identities dropped. A relation naming no
+// identity is not a relation at all, so it answers unheld rather than every
+// input.
+func parseInputEvents(raw string) ([]event.EventID, bool) {
+	if raw == "" {
+		return nil, false
+	}
+	var decoded []event.EventID
+	if err := json.Unmarshal([]byte(raw), &decoded); err != nil {
+		return nil, false
+	}
+	inputs := make([]event.EventID, 0, len(decoded))
+	seen := make(map[event.EventID]bool, len(decoded))
+	for _, key := range decoded {
+		if key == "" || seen[key] {
+			continue
+		}
+		seen[key] = true
+		inputs = append(inputs, key)
+	}
+	if len(inputs) == 0 {
+		return nil, false
+	}
+	return inputs, true
+}
+
+// splitSegments cuts the projection at every agent output. An output that
+// records the input relation its fact carried closes only the inputs it names
+// beside the process entries and rolls the inputs it leaves unnamed into the
+// run the next segment opens with; an output beside no readable relation keeps
+// the positional boundary and closes the whole run, so a legacy chain is never
+// re-cut. A tail no output closed stays one run in progress.
+//
+// Segments group by arrival order by default; an entry that carries a
+// consumption relation folds along that relation instead (r145: production
+// wires the relation through assembly mappedEntryOf, so live outputs fold by
+// what they consumed; facts without the relation keep the positional
+// bracket).
 func splitSegments(entries []ProjectionEntry) []segmentRun {
+	driving := drivingInputsOf(entries)
 	var runs []segmentRun
 	var current []ProjectionEntry
 	for _, entry := range entries {
 		current = append(current, entry)
-		if entry.Type == event.TypeAgentOutput {
+		if entry.Type != event.TypeAgentOutput {
+			continue
+		}
+		consumed, held := parseInputEvents(entry.inputEvents)
+		if !held {
 			runs = append(runs, segmentRun{entries: current, complete: true})
 			current = nil
+			continue
 		}
+		closed, carried := closeByConsumption(current, consumed, driving)
+		runs = append(runs, segmentRun{entries: closed, complete: true})
+		current = carried
 	}
 	if len(current) > 0 {
 		runs = append(runs, segmentRun{entries: current})
 	}
 	return runs
+}
+
+// drivingInputsOf reports the identities any readable relation of the sequence
+// names: a feedback notice is read as an input only where a relation proves the
+// notice drove a turn, so a notice that is only material of a turn never rolls
+// out of the segment it landed in. An external input is an input by its own
+// type, because an input no output carried yet has no relation to be named
+// under and still belongs to the segment in progress.
+func drivingInputsOf(entries []ProjectionEntry) map[event.EventID]bool {
+	driving := map[event.EventID]bool{}
+	for _, entry := range entries {
+		if entry.Type != event.TypeAgentOutput {
+			continue
+		}
+		inputs, held := parseInputEvents(entry.inputEvents)
+		if !held {
+			continue
+		}
+		for _, key := range inputs {
+			driving[key] = true
+		}
+	}
+	return driving
+}
+
+// closeByConsumption splits the accumulated run at the output that closes it:
+// the inputs the output names stay in the closing segment beside every process
+// entry, and the inputs it leaves unnamed roll into the run the next segment
+// opens with. The projection order is kept on both sides.
+func closeByConsumption(entries []ProjectionEntry, consumed []event.EventID, driving map[event.EventID]bool) (closed, carried []ProjectionEntry) {
+	named := make(map[event.EventID]bool, len(consumed))
+	for _, key := range consumed {
+		named[key] = true
+	}
+	for _, entry := range entries {
+		if isSegmentInput(entry, driving) && !named[entry.Key] {
+			carried = append(carried, entry)
+			continue
+		}
+		closed = append(closed, entry)
+	}
+	return closed, carried
+}
+
+// isSegmentInput reports whether one entry is an input a segment can close: an
+// external input always is one, while a feedback notice is one only where a
+// relation names it as consumed — an unconsumed notice is material of the turn
+// beside it, not an input waiting for a segment of its own.
+func isSegmentInput(entry ProjectionEntry, driving map[event.EventID]bool) bool {
+	switch entry.Type {
+	case event.TypeExternalInput:
+		return true
+	case event.TypeFeedback:
+		return driving[entry.Key]
+	default:
+		return false
+	}
 }
 
 // AgeFoldPlan shapes one age-band fold: the window the age rule keeps whole
@@ -199,7 +324,7 @@ type AgeFoldReport struct {
 	Volume int
 	// Threshold is the volume the fold was judged under, in bytes.
 	Threshold int
-	// Triggered reports whether the volume passed the threshold and a fold ran.
+	// Triggered reports whether the fold minted a product to write.
 	Triggered bool
 	// NewFolded is how many entries the new-band fold consumed.
 	NewFolded int
@@ -215,15 +340,15 @@ type AgeFoldReport struct {
 }
 
 // FoldByAge folds the projection along its segment-age bands once its rendered
-// volume passes the plan's threshold: the process detail of every closed
-// new-band segment is replaced by one segment-fold product, and the middle and
-// oldest bands are replaced by one history summary placed first. A projection
-// whose volume stays inside the threshold is left exactly as it stands.
+// volume passes the plan's threshold and the round has a candidate to fold: the
+// process detail of every closed new-band segment is replaced by one segment-fold
+// product, and the middle and oldest bands are replaced by one history summary
+// placed first. A projection whose volume stays inside the threshold, or whose
+// volume passes it without a new candidate, is left exactly as it stands.
 //
-// The fold is deterministic over the sequence it reads and files the judgment
-// as a compress request rather than rewriting any fact: the products enter the
-// projection under content-addressed synthetic keys, so folding the same
-// sequence twice mints the same keys and appends no second product.
+// - The entries a product replaces leave the projection with their per-key material (the kept original, the dedup key and the consumed mark), so a fold of the same sequence twice finds nothing left to drop.
+//
+// - The fold is deterministic over the sequence it reads and files the judgment as a compress request rather than rewriting any fact: the products enter the projection under content-addressed synthetic keys, so folding the same sequence twice mints the same keys and appends no second product.
 func (p *ReplayProjection) FoldByAge(ctx context.Context, plan AgeFoldPlan) (AgeFoldReport, error) {
 	if err := ctx.Err(); err != nil {
 		return AgeFoldReport{}, err
@@ -238,11 +363,10 @@ func (p *ReplayProjection) FoldByAge(ctx context.Context, plan AgeFoldPlan) (Age
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	report := AgeFoldReport{Volume: len(RenderProjection(p.entries)), Threshold: threshold}
+	report := AgeFoldReport{Volume: p.volume, Threshold: threshold}
 	if len(p.entries) == 0 || report.Volume <= threshold {
 		return report, nil
 	}
-	report.Triggered = true
 	kept := make([]ProjectionEntry, 0, len(p.entries))
 	var middle []ProjectionEntry
 	for _, segment := range SegmentsOf(p.entries, keepRecent) {
@@ -267,7 +391,13 @@ func (p *ReplayProjection) FoldByAge(ctx context.Context, plan AgeFoldPlan) (Age
 		report.Products = append(report.Products, summary)
 		report.Requests = append(report.Requests, ageRequest(AgeReasonHistorySummary, summary))
 	}
+	if len(report.Products) == 0 {
+		return report, nil
+	}
+	report.Triggered = true
 	p.entries = kept
+	p.recomputeVolumeLocked()
+	p.forgetDroppedLocked()
 	return report, nil
 }
 
@@ -293,7 +423,7 @@ func foldProcessDetail(entries []ProjectionEntry, complete bool) (int, *Projecti
 		return 0, nil
 	}
 	product := ProjectionEntry{
-		Key:     ageKey("seg", process),
+		Key:     ageKey(ageSegmentKeyPrefix, process),
 		Type:    ProjectionTypeSegmentFold,
 		Summary: "segment fold",
 		Content: "folded segment process: " + strings.Join(lines, "; "),
@@ -343,7 +473,7 @@ func historySummaryOf(entries []ProjectionEntry) ProjectionEntry {
 		lines = append(lines, historySummaryLine(entry))
 	}
 	return ProjectionEntry{
-		Key:     ageKey("hist", entries),
+		Key:     ageKey(ageHistoryKeyPrefix, entries),
 		Type:    ProjectionTypeHistorySummary,
 		Summary: "history summary",
 		Content: strings.Join(lines, "; "),

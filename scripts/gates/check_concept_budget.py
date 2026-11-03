@@ -23,7 +23,20 @@
   * 当前不再超标 / 符号消失 → warn「stale，删除该行」。
   S4 的豁免是布尔（observed=None）：范例与红线都补齐后该行即 stale。
 
-规则可单独运行（--rule S1|S2|S3|S4，或规则名），下游收敛叶按规则对账。
+规则可单独运行（--rule S1|S2|S3|S4/D1，或规则名），下游收敛叶按规则对账。
+
+D1 domain-surface（与 S1–S4 分门的独立结果，不进形状 BASELINE 棘轮、不可被其豁免）：
+  只回答「相对基线新增/改名的公共命名面是否经过裁定」：
+  * 基线：golden/runtime/architecture.json 的 concept_bindings.baseline（commit=git 提交，
+    或 tree=本地树快照供夹具用）。基线/目标缺失或解析失败一律 fail-closed。
+  * 新增＝当前登记包里的导出命名类型（struct/interface/别名/定义类型）其名字不在基线
+    任何登记包中；同名搬迁不算新增（净额 0）；纯改名用 renamed_from 对账且净额 0。
+  * 每个新增名必须在 concept_bindings.bindings 绑定 canonical concept＋kind
+    （fact/read/declaration/port，没有 mechanism 捷径）＋非 superseded 主 spec 锚；
+    无绑定即具名拒绝——实现机制不能借绑定成为领域词。
+  * 规范单主：标 superseded 的主 spec 在 ## Requirements 里仍含 SHALL/MUST 即红；
+    注释/历史备注不是迁移。
+  * 方法、普通函数、测试支架不逐个登记；未导出类型不管。
 
 局限（如实登记，不冒充 type-check）：
   * 纯正则＋括号匹配的静态解析，不做 Go 类型检查；方法集按名字匹配，跨包同名类型
@@ -42,10 +55,13 @@ productVerified 恒为 null：静态上限通过不等于产品成立。
 from __future__ import annotations
 
 import argparse
+import io
 import json
 import os
 import re
+import subprocess
 import sys
+import tarfile
 import tempfile
 
 import runtime_checklib as lib
@@ -65,15 +81,31 @@ RULE_IFACE = "iface-methods"
 RULE_STRUCT = "struct-fields"
 RULE_CTX = "ctx-bare"
 RULE_CONTRACT = "contract-surface"
-RULES = (RULE_IFACE, RULE_STRUCT, RULE_CTX, RULE_CONTRACT)
+# D1 与 S1–S4 分门：形状规则共用 BASELINE 棘轮；domain-surface 是独立结果，
+# 不进 apply_baseline（无豁免路径），默认随全量运行。
+RULE_DOMAIN = "domain-surface"
+SHAPE_RULES = (RULE_IFACE, RULE_STRUCT, RULE_CTX, RULE_CONTRACT)
+RULES = SHAPE_RULES + (RULE_DOMAIN,)
 RULE_LABELS = {
     RULE_IFACE: "S1",
     RULE_STRUCT: "S2",
     RULE_CTX: "S3",
     RULE_CONTRACT: "S4",
+    RULE_DOMAIN: "D1",
 }
 RULE_ALIASES = {label: rule for rule, label in RULE_LABELS.items()}
 NUMERIC_RULES = (RULE_IFACE, RULE_STRUCT, RULE_CTX)
+
+# ---- D1 domain-surface 常量 ----
+# 绑定类别只有四种；机制/测试支架没有绑定捷径（Writers/Movement/Continuations 应内化）。
+DOMAIN_KINDS = ("fact", "read", "declaration", "port")
+CONCEPT_BINDINGS_KEY = "concept_bindings"
+# 导出命名类型声明（struct/interface/别名/定义类型一并纳入；函数内声明因缩进不匹配）。
+TYPE_DECL_RE = re.compile(r"^type\s+(?P<name>[A-Za-z_]\w*)\s*(?P<rest>\S)", re.M)
+# superseded 标记：blockquote 备注或标题行里出现 superseded（与主 spec 现行约定一致）。
+SUPERSEDED_MARK_RE = re.compile(r"(?i)^\s*(>|#{1,6}\s).*\bsuperseded\b")
+NORMATIVE_RE = re.compile(r"\b(SHALL|MUST)\b")
+SPECS_SUBPATH = ("openspec", "specs")
 
 # ---- 债务清单（baseline）：现状超标件，只降不升；每清一户删一行 ----
 # 生成口径：本检查器对当前树的实测值。S1 的 observed 是接口方法数，S2 是导出字段数，
@@ -88,7 +120,6 @@ BASELINE = (
     ("iface-methods", "features/rl/capture.go:Capture", 3),
     ("iface-methods", "features/rl/capture_wiring.go:CaptureScope", 4),
     ("iface-methods", "runtime/agent/loop.go:Capture", 3),
-    ("struct-fields", "api/event/model_replacement.go:ModelReplacement", 7),
     ("struct-fields", "runtime/agent/delegate.go:Delegation", 9),
     ("struct-fields", "runtime/task/spec.go:Spec", 9),
     ("struct-fields", "tool/subagent/builder.go:Builder", 8),
@@ -113,8 +144,8 @@ BASELINE = (
     ("struct-fields", "tool/subagent/subagent.go:Definition", 10),
     # Declaration 6f（声明面本体）：组织声明=入口/代理/引用/基线/MCP 服务器代际/原始文档，MCP 面随 mcp_servers 声明下沉各成一格，拆开会让声明面出现影子结构。
     ("struct-fields", "api/config/config.go:Declaration", 6),
-    # AgentSpec 17f（声明面本体）：单个 agent 的声明格＝核心（身份/模型/引用/参数/回合预算/回放窗口）＋ memory/meditation/file/exec 四个域段平铺在同一格；窗口三字段（max_tokens/compress_threshold/keep_recent_tasks）替代 replay_budget，回放预算由窗口推导。段是声明字段，不是影子结构，拆开会让声明面重新长出机制层。
-    ("struct-fields", "api/config/config.go:AgentSpec", 21),
+    # AgentSpec 24f（声明面本体）：单个 agent 的声明格＝核心（身份/模型/引用/参数/回合预算/回放窗口）＋熔断两镜（max_calls_per_response/long_context_tokens，单响应调用量与长上下文阈值，人审挂起式）＋捕获预算（capture_budget_mb，轨迹常驻上限）＋ memory/meditation/file/exec 四个域段平铺在同一格；窗口三字段（max_tokens/compress_threshold/keep_recent_tasks）替代 replay_budget；三个熔断/预算键与 max_tool_iterations 同模式，是声明字段不是影子结构（oom-bounded-capture-and-storm-fuse）。
+    ("struct-fields", "api/config/config.go:AgentSpec", 24),
     # MeditationSpec 6f：冥想运行声明本体，六个格分别是启用、节奏两格、提示、观察面与回流白名单，字段即声明形状。
     ("struct-fields", "api/config/config.go:MeditationSpec", 6),
     # event.ParsedMeta 9f（00.25 具名登记）：ParseEventMeta 的解析结果本体＝数据面，
@@ -132,7 +163,7 @@ BASELINE = (
     ("struct-fields", "features/evolution/posterior.go:Evaluation", 6),
     ("struct-fields", "cli/host_face.go:ApprovalDecision", 8),
     ("struct-fields", "memory/event_body.go:EventBody", 20),  # 2026-10-26: full-fact fidelity (fidelity-and-recovery 2.2) names every field a restore needs; ratchet kept, count follows the declared design
-    ("struct-fields", "memory/replay/projection.go:ChainFact", 6),
+    ("struct-fields", "memory/replay/projection.go:ChainFact", 7),
     ("struct-fields", "memory/replay/projection.go:RebuildReport", 9),
     ("struct-fields", "memory/query_events.go:EventRecord", 7),
     ("struct-fields", "memory/query_events.go:QueryOptions", 9),
@@ -142,6 +173,9 @@ BASELINE = (
     ("struct-fields", "features/evolution/governance/denial.go:DenialRecord", 9),
     ("struct-fields", "features/evolution/governance/goal.go:Goal", 6),
     ("struct-fields", "memory/query/inventory.go:InventoryCounts", 6),
+    # assembly.InvokeRequest 6f：投递元数据随输入行（send 线 2026-11-01，InputMeta
+    # 与 Input 同生命周期），不拆块；可读性由字段块文档承担。
+    ("struct-fields", "assembly/run.go:InvokeRequest", 6),
     ("struct-fields", "memory/query/inventory.go:NoticeEntry", 9),
     ("struct-fields", "memory/query/inventory.go:SessionEntry", 6),
     ("struct-fields", "memory/query/snapshot.go:DetailState", 6),
@@ -685,6 +719,284 @@ def apply_baseline(report, findings, baseline):
     report.count("baseline_exempted", hit)
     report.count("baseline_stale", stale)
     return findings
+
+
+# ---- D1 domain-surface：新增/改名公共命名面的绑定门＋规范单主门 ----
+
+def read_text_fail_closed(path, what):
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            return handle.read()
+    except OSError as exc:
+        raise lib.CheckFailure("cannot read {} ({}): {}".format(what, path, exc))
+
+
+def spec_path(repo_root, capability):
+    return os.path.join(repo_root, *SPECS_SUBPATH, capability, "spec.md")
+
+
+def spec_is_superseded(repo_root, capability):
+    """主 spec 是否带 superseded 标记（blockquote 备注或标题行）。"""
+    text = read_text_fail_closed(spec_path(repo_root, capability),
+                                 "spec anchor of a concept binding")
+    return any(SUPERSEDED_MARK_RE.search(line) for line in text.splitlines())
+
+
+def requirements_block(text):
+    """## Requirements 节的正文；节标题被删掉但还有 Requirement 块时按全文算。
+
+    后者防止「删了节标题躲检查」：superseded 文件只要还留 Requirement 块，
+    其中的 SHALL/MUST 仍会被读到。
+    """
+    lines = text.splitlines()
+    start = None
+    for index, line in enumerate(lines):
+        if line.startswith("## Requirements"):
+            start = index + 1
+            break
+    if start is None:
+        return text if any(line.startswith("### Requirement:") for line in lines) else ""
+    collected = []
+    for line in lines[start:]:
+        if re.match(r"^##\s", line):
+            break
+        collected.append(line)
+    return "\n".join(collected)
+
+
+def superseded_spec_findings(repo_root):
+    """标 superseded 的主 spec 不得在 Requirements 里继续含现行 SHALL/MUST。"""
+    specs_root = os.path.join(repo_root, *SPECS_SUBPATH)
+    if not os.path.isdir(specs_root):
+        raise lib.CheckFailure(
+            "openspec/specs not found under {}: spec authority cannot be audited "
+            "(fail-closed)".format(repo_root))
+    findings = []
+    for capability in sorted(os.listdir(specs_root)):
+        path = os.path.join(specs_root, capability, "spec.md")
+        if not os.path.isfile(path):
+            continue
+        text = read_text_fail_closed(path, "main spec")
+        if not any(SUPERSEDED_MARK_RE.search(line) for line in text.splitlines()):
+            continue
+        hits = NORMATIVE_RE.findall(requirements_block(text))
+        if not hits:
+            continue
+        findings.append({
+            "rule": RULE_DOMAIN,
+            "key": "openspec/specs/{}/spec.md".format(capability),
+            "file": "openspec/specs/{}/spec.md".format(capability),
+            "line": 0,
+            "value": len(hits),
+            "detail": "superseded spec keeps {} current SHALL/MUST statement(s) in "
+                      "## Requirements: migrate effective clauses to the owning "
+                      "capability, then strip the old Requirements; a historical note "
+                      "is not a migration".format(len(hits)),
+        })
+    return findings
+
+
+def exported_type_inventory(repo_root, arch_path):
+    """登记包内全部导出命名类型：name → 排序后的文件列表。"""
+    sources, _metrics = collect_sources(repo_root, arch_path)
+    inventory = {}
+    for rel_path, _pkg, text in sources:
+        _no_comments, code = strip_go(text)
+        for match in TYPE_DECL_RE.finditer(code):
+            name = match.group("name")
+            if not name[:1].isupper():
+                continue
+            inventory.setdefault(name, set()).add(rel_path)
+    return {name: sorted(files) for name, files in inventory.items()}
+
+
+def extract_baseline_commit(repo_root, commit, dest):
+    """git archive 基线提交，落盘其中的 .go 成员；失败即 fail-closed。"""
+    try:
+        proc = subprocess.run(["git", "-C", repo_root, "archive", commit],
+                              capture_output=True)
+    except OSError as exc:
+        raise lib.CheckFailure("cannot run git for baseline commit {}: {} "
+                               "(fail-closed)".format(commit, exc))
+    if proc.returncode != 0:
+        detail = proc.stderr.decode("utf-8", "replace").strip()
+        raise lib.CheckFailure("cannot read baseline commit {} in {}: {} (fail-closed)"
+                               .format(commit, repo_root, detail))
+    os.makedirs(dest, exist_ok=True)
+    try:
+        with tarfile.open(fileobj=io.BytesIO(proc.stdout), mode="r:") as archive:
+            for member in archive.getmembers():
+                if not member.isfile() or not member.name.endswith(".go"):
+                    continue
+                parts = member.name.split("/")
+                if member.name.startswith("/") or ".." in parts:
+                    raise lib.CheckFailure("baseline archive member escapes the tree: {}"
+                                           .format(member.name))
+                target = os.path.join(dest, *parts)
+                parent = os.path.dirname(target)
+                if parent:
+                    os.makedirs(parent, exist_ok=True)
+                handle = archive.extractfile(member)
+                if handle is None:
+                    continue
+                with open(target, "wb") as out:
+                    out.write(handle.read())
+    except tarfile.TarError as exc:
+        raise lib.CheckFailure("baseline commit {} is not a readable archive: {} "
+                               "(fail-closed)".format(commit, exc))
+    return dest
+
+
+def materialize_baseline(repo_root, baseline_cfg, dest):
+    """按 concept_bindings.baseline 解析基线树：commit（git）或 tree（本地快照）。"""
+    if not isinstance(baseline_cfg, dict):
+        raise lib.CheckFailure("concept_bindings.baseline must be an object with "
+                               "commit or tree (fail-closed)")
+    commit = baseline_cfg.get("commit")
+    tree = baseline_cfg.get("tree")
+    if isinstance(commit, str) and isinstance(tree, str):
+        raise lib.CheckFailure(
+            "concept_bindings.baseline: provide exactly one of commit/tree")
+    if isinstance(commit, str) and commit.strip():
+        return extract_baseline_commit(repo_root, commit.strip(), dest)
+    if isinstance(tree, str) and tree.strip():
+        path = tree.strip()
+        if not os.path.isabs(path):
+            path = os.path.join(repo_root, path)
+        if not os.path.isdir(path):
+            raise lib.CheckFailure(
+                "concept_bindings.baseline tree not found: {} (fail-closed)".format(path))
+        return path
+    raise lib.CheckFailure(
+        "concept_bindings.baseline needs a commit or a tree (fail-closed)")
+
+
+def binding_anchor_problem(repo_root, spec):
+    spec_file = spec_path(repo_root, spec)
+    if not os.path.isfile(spec_file):
+        return "spec anchor openspec/specs/{}/spec.md not found (fail-closed)".format(spec)
+    if spec_is_superseded(repo_root, spec):
+        return "spec anchor {} is superseded; bind the live owning capability".format(spec)
+    return None
+
+
+def _binding_structural_problems(repo_root, binding):
+    if not isinstance(binding, dict):
+        return ["binding must be an object"]
+    problems = []
+    kind = binding.get("kind")
+    if kind not in DOMAIN_KINDS:
+        problems.append("kind must be one of fact/read/declaration/port, got {!r}"
+                        .format(kind))
+    concept = binding.get("concept")
+    if not isinstance(concept, str) or not concept.strip():
+        problems.append("concept must name the canonical concept")
+    spec = binding.get("spec")
+    if not isinstance(spec, str) or not spec.strip():
+        problems.append("spec must name the owning capability")
+    else:
+        anchor = binding_anchor_problem(repo_root, spec.strip())
+        if anchor:
+            problems.append(anchor)
+    return problems
+
+
+def domain_surface_report(repo_root, arch_path):
+    """D1 主判定：返回 (findings, warnings, counts)；fail-closed 输入抛 CheckFailure。"""
+    policy = lib.load_json_object(arch_path)
+    config = policy.get(CONCEPT_BINDINGS_KEY)
+    if not isinstance(config, dict):
+        raise lib.CheckFailure(
+            "{}: concept_bindings section missing or not an object; the domain-surface "
+            "gate refuses to run without its binding table (fail-closed)".format(arch_path))
+    unknown = sorted(set(config) - {"baseline", "bindings"})
+    if unknown:
+        raise lib.CheckFailure("concept_bindings has unknown key(s) {}: use "
+                               "baseline/bindings only".format(", ".join(unknown)))
+    bindings = config.get("bindings")
+    if not isinstance(bindings, dict):
+        raise lib.CheckFailure("concept_bindings.bindings must be an object: symbol -> "
+                               "{concept, kind, spec, renamed_from?}")
+    current = exported_type_inventory(repo_root, arch_path)
+    with tempfile.TemporaryDirectory() as tmp:
+        baseline_root = materialize_baseline(repo_root, config.get("baseline"),
+                                             os.path.join(tmp, "baseline"))
+        base = exported_type_inventory(baseline_root, arch_path)
+
+    new_names = sorted(set(current) - set(base))
+    removed_names = sorted(set(base) - set(current))
+    relocations = sorted(name for name in set(current) & set(base)
+                         if set(current[name]) != set(base[name]))
+    findings = []
+    warnings = []
+    renames = 0
+    net_facts = 0
+
+    for name in new_names:
+        key = "{}:{}".format(current[name][0], name)
+        binding = bindings.get(name)
+        if not isinstance(binding, dict):
+            findings.append({
+                "rule": RULE_DOMAIN, "key": key, "file": current[name][0],
+                "line": 0, "value": None,
+                "detail": "new exported named type has no concept binding: mechanism is "
+                          "not a domain concept — bind concept/kind "
+                          "(fact/read/declaration/port)/spec to a live main spec, or "
+                          "internalize it",
+            })
+            continue
+        problems = _binding_structural_problems(repo_root, binding)
+        renamed_from = binding.get("renamed_from")
+        if renamed_from is not None:
+            if not isinstance(renamed_from, str) or not renamed_from.strip():
+                problems.append("renamed_from must name the previous public symbol")
+            elif renamed_from not in base:
+                problems.append("renamed_from {!r} is absent from the baseline; a pure "
+                                "rename must start from an existing public name"
+                                .format(renamed_from))
+            elif renamed_from in current:
+                problems.append("renamed_from {!r} is still present; a rename must "
+                                "retire the old public name".format(renamed_from))
+        if problems:
+            findings.append({
+                "rule": RULE_DOMAIN, "key": key, "file": current[name][0],
+                "line": 0, "value": None, "detail": "; ".join(problems),
+            })
+            continue
+        if renamed_from is not None:
+            renames += 1
+        elif binding.get("kind") == "fact":
+            net_facts += 1
+
+    # 表卫生：非新增名的绑定不被需要——结构仍要合法（红），合法则 warn 防烂账。
+    for name in sorted(bindings):
+        if name in new_names:
+            continue
+        problems = _binding_structural_problems(repo_root, bindings[name])
+        if problems:
+            findings.append({
+                "rule": RULE_DOMAIN, "key": "concept_bindings:{}".format(name),
+                "file": os.path.basename(arch_path), "line": 0, "value": None,
+                "detail": "; ".join(problems),
+            })
+        else:
+            warnings.append("concept_bindings[{!r}] is not required: the name is "
+                            "unchanged since the baseline (remove the entry or it rots)"
+                            .format(name))
+
+    findings.extend(superseded_spec_findings(repo_root))
+    findings.sort(key=lambda item: (item["file"], item["key"]))
+    counts = {
+        "domain_surface.new": len(new_names),
+        "domain_surface.renames": renames,
+        "domain_surface.relocations": len(relocations),
+        "domain_surface.removed": len(removed_names),
+        "domain_surface.net_facts": net_facts,
+        "domain_surface.bindings": len(bindings),
+        "domain_surface.superseded_specs_with_requirements": sum(
+            1 for item in findings if item["key"].startswith("openspec/specs/")),
+    }
+    return findings, warnings, counts
 FIXTURE_ARCH_NAME = ".concept-arch.json"
 FIXTURE_ARCH = {
     "schema_version": 1,
@@ -833,10 +1145,14 @@ def check_baseline_table(report, repo_root):
 
 
 def check_fixture_rules(report, good_root, bad_root):
-    """正反样例：合规件零发现、超标件被点名；每条规则必须能单独跑。"""
+    """正反样例：合规件零发现、超标件被点名；每条形状规则必须能单独跑。
+
+    只迭代 SHAPE_RULES：D1 的正反样例由 unittest 夹具覆盖（需要基线树与 specs
+    目录，不适合塞进 --self-check 的极简夹具）。
+    """
     good_arch = os.path.join(good_root, FIXTURE_ARCH_NAME)
     bad_arch = os.path.join(bad_root, FIXTURE_ARCH_NAME)
-    for rule in RULES:
+    for rule in SHAPE_RULES:
         label = RULE_LABELS[rule]
         findings, _metrics = collect_findings(good_root, good_arch, (rule,))
         if findings:
@@ -847,7 +1163,7 @@ def check_fixture_rules(report, good_root, bad_root):
         if keys != [BAD_EXPECTED[rule]]:
             report.error("self-check {}: expected exactly [{}] on the violation fixture, got {}".format(
                 label, BAD_EXPECTED[rule], keys))
-    report.count("selfcheck_fixture_cases", len(RULES) * 2)
+    report.count("selfcheck_fixture_cases", len(SHAPE_RULES) * 2)
 
 
 def check_baseline_ratchet(report, bad_root):
@@ -891,7 +1207,8 @@ def self_check(report, repo_root, arch_path):
         write_fixture_tree(bad_root, BAD_FIXTURE)
         check_fixture_rules(report, good_root, bad_root)
         check_baseline_ratchet(report, bad_root)
-    report.count("selfcheck_rules", len(RULES))
+    # 自校只跑形状规则夹具；D1 的正反锚在 unittest 里（需要基线树与 specs 目录）。
+    report.count("selfcheck_rules", len(SHAPE_RULES))
     report.note("self-check runs rule fixtures only; it never claims the real tree passes")
 
 
@@ -911,7 +1228,7 @@ def parse_args(argv):
         "--rule",
         action="append",
         default=[],
-        help="只跑某条规则：S1..S4 或规则名（可重复；默认全部）",
+        help="只跑某条规则：S1..S4、D1(domain-surface) 或规则名（可重复；默认全部）",
     )
     parser.add_argument("--self-check", action="store_true",
                         help="规则自校：baseline 表完整性＋S1–S4 正反样例＋棘轮三路径")
@@ -949,6 +1266,10 @@ def run(argv):
             return report.emit(args.json)
         rules = resolve_rules(args.rule)
         findings, metrics = collect_findings(repo_root, arch_path, rules)
+        domain_findings, domain_warnings, domain_counts = [], [], {}
+        if RULE_DOMAIN in rules:
+            domain_findings, domain_warnings, domain_counts = domain_surface_report(
+                repo_root, arch_path)
         report.count("rules_run", len(rules))
         report.count("go_files", metrics["files"])
         report.count("packages", metrics["packages"])
@@ -956,7 +1277,8 @@ def run(argv):
         report.count("exported_interfaces", metrics["exported_interfaces"])
         report.count("structs", metrics["structs"])
         for rule in RULES:
-            report.count("findings." + rule, sum(1 for f in findings if f["rule"] == rule))
+            pool = domain_findings if rule == RULE_DOMAIN else findings
+            report.count("findings." + rule, sum(1 for f in pool if f["rule"] == rule))
         report.count("findings", len(findings))
         if metrics["skipped_unregistered_packages"]:
             report.warn("packages not registered in {} were not scanned (the architecture gate "
@@ -964,12 +1286,62 @@ def run(argv):
                             args.architecture, ", ".join(metrics["skipped_unregistered_packages"])))
         scope_baseline = [entry for entry in BASELINE if entry[0] in rules]
         apply_baseline(report, findings, scope_baseline)
+        # D1 与形状面分门：独立成节、独立计数，不走 BASELINE 豁免，也不并入 findings。
+        for finding in domain_findings:
+            report.error("D1 {} {}: {}".format(
+                finding["rule"], finding["key"], finding["detail"]))
+        for message in domain_warnings:
+            report.warn(message)
+        for key in sorted(domain_counts):
+            report.count(key, domain_counts[key])
         report.extra["findings"] = findings
+        report.extra["domain_surface"] = domain_findings
         report.note("static limits only: field/redline semantics still need review; "
                     "productVerified stays null")
+        check_ratchet(report, arch_path, metrics, domain_counts)
     except lib.CheckFailure as exc:
         report.error(str(exc))
     return report.emit(args.json)
+
+
+def check_ratchet(report, arch_path, metrics, domain_counts):
+    """The ratchet freezes the convergence this change proved: floors live in the
+    golden architecture beside the bindings, so a later change that re-adds a
+    removed public face or grows the interface count past the frozen ceiling
+    turns the gate red by name instead of passing at a new, larger normal.
+
+    A golden file without the concept_ratchet key is a missing ratchet, not a
+    passing one: it warns by name so the unenforced floors stay visible. The
+    held note prints only beside a green report; a gate that failed for any
+    other reason must not end with the ratchet saying it held."""
+    try:
+        with open(arch_path, encoding="utf-8") as handle:
+            policy = json.load(handle)
+    except (OSError, ValueError) as exc:
+        report.error("concept ratchet: cannot read {}: {}".format(arch_path, exc))
+        return
+    ratchet = policy.get("concept_ratchet") if isinstance(policy, dict) else None
+    if not isinstance(ratchet, dict):
+        report.warn("concept ratchet: {} names no concept_ratchet; the frozen "
+                    "floors are not enforced".format(arch_path))
+        return
+    removed = domain_counts.get("domain_surface.removed", 0)
+    new = domain_counts.get("domain_surface.new", 0)
+    interfaces = metrics["exported_interfaces"]
+    if removed < int(ratchet.get("removed_min", 0)):
+        report.error("concept ratchet: domain_surface.removed={} below the frozen floor {}".format(
+            removed, ratchet["removed_min"]))
+    if new > int(ratchet.get("new_max", 0)):
+        report.error("concept ratchet: domain_surface.new={} exceeds the frozen ceiling {}".format(
+            new, ratchet["new_max"]))
+    if interfaces > int(ratchet.get("exported_interfaces_max", 1000000000)):
+        report.error("concept ratchet: exported_interfaces={} exceeds the frozen ceiling {}".format(
+            interfaces, ratchet["exported_interfaces_max"]))
+    if report.errors:
+        return
+    report.note("concept ratchet held: removed>={}, new<={}, interfaces<={}".format(
+        ratchet.get("removed_min", 0), ratchet.get("new_max", 0),
+        ratchet.get("exported_interfaces_max", 0)))
 
 
 if __name__ == "__main__":

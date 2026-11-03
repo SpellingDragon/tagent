@@ -22,18 +22,6 @@ const (
 	// DefaultDigestFactLimit bounds how many hydrated facts one digest lists.
 	DefaultDigestFactLimit = 8
 )
-const DeliverSummaryContentMax = 8 * 1024
-    DeliverSummaryContentMax is the byte ceiling of one summary body.
-
-const DeliverSummarySummaryMax = 120
-    DeliverSummarySummaryMax is the rune ceiling of the stored event summary.
-
-const DeliverSummaryToolName = "deliver_summary"
-
-    DeliverSummaryToolName is the model-visible name of the cross-session write
-    face a reflection turn may call: one summary, delivered by the model's own
-    decision, never by the reflection mechanism in silence.
-
 const LineageReflection = "meditation"
 
     LineageReflection is the trigger-source stamp a reflection input carries:
@@ -169,30 +157,6 @@ type Anchors struct {
     and an entry this structure does not name is ignored when the record is read
     rather than refused.
 
-type DeliverSummaryTool struct {
-	// Has unexported fields.
-}
-    DeliverSummaryTool is the meditation session's cross-session write tool:
-    it delivers one summary to every active session of the declared deliver_to
-    agents.
-
-    Every refusal is answered as result text and the turn continues; an error is
-    reserved for an argument shape that is not JSON at all.
-
-func NewDeliverSummaryTool(targets []string, sink EventSink, sessions SessionQuery) *DeliverSummaryTool
-    NewDeliverSummaryTool assembles the cross-session write tool over the
-    declared target agents, the write face and the live-binding face.
-
-func (t *DeliverSummaryTool) Call(ctx context.Context, jsonArgs []byte) (any, error)
-    Call delivers one summary to every active session of the declared targets.
-    Refusals — malformed fields, an empty or oversized body, an unwired write
-    face and a target with no bound session — are answered as result text,
-    so the reflection turn continues and the model sees why nothing was written.
-
-func (t *DeliverSummaryTool) Declaration() *trpctool.Declaration
-    Declaration reports the tool declaration: one content argument, delivered to
-    the sessions the declaration's deliver_to targets bind.
-
 type DeliveryPolicy struct{}
     DeliveryPolicy is the meditation domain's delivery policy: one fired
     reflection's own input in, whether its output may leave through the delivery
@@ -248,19 +212,20 @@ type Driver struct {
     commit the held session may never send.
 
 func NewDriver(reflection *Reflection, interval, minGap time.Duration,
-	slot func(addr event.Address, instance event.InstanceID) (event.InvocationID, event.DecisionID, bool),
+	modelInFlight func(addr event.Address, instance event.InstanceID) (event.InvocationID, event.DecisionID, bool),
 	instance event.InstanceID) *Driver
     NewDriver assembles the event-driven reflection face over one reflection
     loop, the floor between two fires, the floor between two consumed
-    reflections, the read of the observed session's execution seat and the
-    instance that seat is held in.
+    reflections, the read of whether a model request of the observed session is
+    executing and the instance that request runs in.
 
     The interval is measured from the last fire; the first fire is never
     held back, so the first event of a process is answered at once,
-    and a non-positive interval disables that floor. The min gap stays the
-    reflection's own rhythm floor, read from the execution watermark, so a fired
-    but not yet consumed reflection is never re-fired early. A nil seat read or
-    an empty instance leaves the pass its rhythm alone.
+    and a non-positive interval disables that floor. The min gap stays
+    the reflection's own rhythm floor, read from the execution watermark,
+    so a fired but not yet consumed reflection is never re-fired early.
+    A nil consumption-state read or an empty instance leaves the pass its rhythm
+    alone.
 
 func (d *Driver) Name() string
     Name reports the stable name of this plugin instance.
@@ -269,13 +234,17 @@ func (d *Driver) ObserveCommit(ctx context.Context, id event.EventID) error
     ObserveCommit reads the fact one commit wrote and advances the driver's
     timer state when that fact names an interaction someone awaits, recording
     the session that material belongs to beside it: the pass reflects on that
-    session's seat.
+    session's model request.
 
     The pass itself runs detached from the committing turn: a reflection spends
     a model call, and a user turn never waits for it. A failed read is reported
     and never rolls the commit back, and a stamp outside the host-facing
     vocabulary leaves the timer untouched, so an agent's own reflection never
-    reflects again.
+    reflects again. Every accepted commit is answered: one that lands while a
+    pass is in flight is retained for the evaluation that settles it, and one
+    that lands inside the rhythm floor opens the episode on the window the floor
+    opens, so the floor postpones the pass that answers it and never drops the
+    commit.
 
 func (d *Driver) Port() plugin.Port
     Port reports the consumption the driver serves: one committed fact in, one
@@ -288,20 +257,6 @@ func (d *Driver) SetObserver(observer func(TickOutcome))
 func (d *Driver) Stop()
     Stop ends the driver: no further commit fires a pass, a pass in flight is
     cancelled, and Stop waits for it to return. A repeated stop is a no-op.
-
-type EventSink interface {
-	// CommitToSession commits evt into the fact chain of addr.
-	CommitToSession(ctx context.Context, addr event.Address, evt event.Event) (event.EventID, error)
-}
-    EventSink is the cross-session write face of the runtime: one event
-    committed into the fact chain of the address it names, under a fresh
-    identity of its own.
-
-    It is the only way a reflection summary reaches another session: the tool
-    decides to write, the sink files the fact, and the target session's own next
-    assembly reads it like any other external input. 红线清单（2 条）： MUST commit
-    the event into the chain of the address it names. MUST NOT write into the
-    caller's chain or answer an identity the commit did not record.
 
 type FactAttribution struct {
 	// Lineage is the trigger-source stamp the fact carries; empty means the fact
@@ -520,12 +475,31 @@ type ReflectionConfig struct {
 	Cadence ReflectionCadence
 	// Prompt is the static reflection prompt carried beside the digest.
 	Prompt string
+	// Delivery is the declared delivery face, whose live sessions are rendered
+	// into the input of every fired reflection.
+	Delivery ReflectionDelivery
 }
     ReflectionConfig is the assembly input of one reflecting agent's loop:
     the loop session it reflects into, the face it observes and the bounds it
-    reads it under, its cadence and the static prompt its input carries.
+    reads it under, its cadence, the static prompt its input carries and the
+    delivery face its turn reads send calls off.
 
     The prompt is text the reflection renders without spending a model call.
+
+type ReflectionDelivery struct {
+	// Targets are the declared deliver_to agent names, in declaration order.
+	Targets []string
+	// Sessions resolves the live sessions one target binds.
+	Sessions SessionQuery
+}
+    ReflectionDelivery is the delivery face one reflection turn reads its send
+    calls off: the declared deliver_to targets and the live-binding face each of
+    them resolves against.
+
+    The reflection renders the sessions a target currently binds into the input
+    it injects, so the turn reads the exact agent and session pair a send call
+    names instead of guessing one. The delivery itself stays the turn's own
+    decision: this face only states where a body could go.
 
 type ReflectionFace struct {
 	// ObservedNamespaces declares the face; empty means the agent's own partition.
@@ -579,7 +553,6 @@ type ReflectionLoop struct {
 	// always this agent's own session.
 	Session string
 }
-
     ReflectionLoop is the loop session one reflection reflects into: the
     observing agent's own identity and namespace, and the session its input is
     injected into.
@@ -713,9 +686,9 @@ type SessionQuery interface {
 	// agentID, in a deterministic order.
 	ActiveSessions(agentID event.AgentID) []event.Address
 }
+
     SessionQuery is the live-binding face of the runtime: the sessions currently
-    bound to one agent. A summary is delivered to the sessions that exist,
-    and an agent with no bound session is a named refusal, never a silent skip.
+    bound to one agent.
 
     红线清单（2 条）： MUST answer the complete addresses of the sessions actually bound
     to the agent. MUST NOT invent a session or report an address the run has not

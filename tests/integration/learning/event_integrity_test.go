@@ -373,6 +373,14 @@ func (s *integritySteps) reply(name string, reply integrityReply) (integrityRepl
 	return reply, nil
 }
 
+// reached reports how many times one named step was served, the read a check
+// takes to tell the two legal shapes of a settle notice apart.
+func (s *integritySteps) reached(name string) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.seen[name]
+}
+
 // audit reports every step whose reach count differs from the declared one.
 func (s *integritySteps) audit(t *testing.T, want map[string]int) {
 	t.Helper()
@@ -700,6 +708,21 @@ func integrityAttemptHasToolCall(attempt rl.AttemptRecord, callID string) bool {
 	return false
 }
 
+// integrityAttemptWithToolCall reports the one captured attempt that issued the named call.
+func integrityAttemptWithToolCall(t *testing.T, attempts []rl.AttemptRecord, callID string) rl.AttemptRecord {
+	t.Helper()
+	var found []rl.AttemptRecord
+	for _, attempt := range attempts {
+		if integrityAttemptHasToolCall(attempt, callID) {
+			found = append(found, attempt)
+		}
+	}
+	if len(found) != 1 {
+		t.Fatalf("attempts issuing %q = %d, want exactly one", callID, len(found))
+	}
+	return found[0]
+}
+
 // integrityFactWithContent reports the one fact of the named type carrying the
 // named content in the session facts.
 func integrityFactWithContent(t *testing.T, facts []event.Event, kind, content string) event.Event {
@@ -739,16 +762,20 @@ func integritySampleKeys(t *testing.T, samples []rl.SFTSample) []map[string]json
 }
 
 // runIntegrityRequestsAndAttempts drives one delegated turn and checks every real model request has exactly one attempt record:
-// - the entry decisions, the delegated worker decision and the settle follow-up each produced one request
+// - the settle notice is answered either inside the decision already flying (the batched shape) or by a follow-up range of its own (the separate shape); both shapes read the notice and answer the same body, and the range the notice opens still presents the delegated result in its prefix, so the carried result does not tell the shapes apart and the step names only the answer
+// - the shape is read from the material the requests carried, never from a step label or a count: a request that read the delegated result without the notice is the parked decision answering alone, so the notice opened a range of its own, and the batched shape leaves the entry with two requests while the separate shape answers the notice beside the closed entry decisions and takes three
+// - the batched shape reads the settlement in the decision that parked on the call, so that request carries the result it parked on beside the notice, and that decision belongs to the entry segment and carries the application episode
+// - the second entry decision answers whatever the segment read: the delegation result alone in the separate shape, and the result beside the settlement material in the batched one
+// - the entry decisions, the delegated worker decision and the settle notice each produced one request; the notice is answered either inside the decision already flying (the batched shape) or by a follow-up range of its own (the separate shape), and both shapes keep one attempt per request — the shape is read from what the requests carried, because the range a notice opens still presents the delegated result in its prefix, so a step label would read the same request as either shape
 // - the worker attempt is captured beside the entry attempts and names no episode, because the delegated turn carries no application episode
-// - every attempt identity is derived from its decision, and the sealed manifest accounts all four attempts
+// - every attempt identity is derived from its decision, and the sealed manifest accounts every attempt of the shape it read
 func runIntegrityRequestsAndAttempts(t *testing.T) {
 	provider := newIntegrityProvider(t)
 	steps := newIntegritySteps()
 	provider.decide = func(request integrityRequest) (integrityReply, error) {
 		switch {
 		case request.Model == integrityEntryModel && integrityCarriesNotice(request, "worker final answer"):
-			return steps.reply("follow-up", integrityFinalReply("follow-up acknowledged"))
+			return steps.reply("notice-answer", integrityFinalReply("follow-up acknowledged"))
 		case request.Model == integrityEntryModel && integrityCarriesToolResult(request, "call-worker-1"):
 			return steps.reply("entry-accept", integrityFinalReply("entry accepted the delegation"))
 		case request.Model == integrityEntryModel && integrityTail(request) == "delegate the worker task":
@@ -764,27 +791,49 @@ func runIntegrityRequestsAndAttempts(t *testing.T) {
 	addr := event.Address{AgentID: "user", SessionID: "session-integrity-delegate"}
 
 	turn := integrityInvoke(t, ctx, host, addr, "inv-integrity-delegate", "episode-integrity-delegate", "delegate the worker task")
-	if turn.Terminal != model.KindCompleted || len(turn.Decisions) != 2 {
-		t.Fatalf("entry turn = (%v, %d decisions), want the completed two-decision turn", turn.Terminal, len(turn.Decisions))
+	if turn.Terminal != model.KindCompleted || turn.DecisionCount != 2 {
+		t.Fatalf("entry turn = (%v, %d decisions), want the completed two-decision turn", turn.Terminal, turn.DecisionCount)
 	}
 	sender.await(t, addr, "follow-up acknowledged")
-	steps.audit(t, map[string]int{
-		"entry-delegate": 1,
-		"entry-accept":   1,
-		"worker":         1,
-		"follow-up":      1,
-	})
-
 	requests := provider.recordedRequests()
-	if len(requests) != 4 {
-		t.Fatalf("model requests = %d, want one per scripted decision", len(requests))
+	batched := steps.reached("entry-accept") == 0
+	shape := "batched"
+	entryRequests := 2
+	want := map[string]int{
+		"entry-delegate": 1,
+		"entry-accept":   0,
+		"notice-answer":  1,
+		"worker":         1,
+	}
+	if !batched {
+		shape = "separate"
+		entryRequests = 3
+		want["entry-accept"] = 1
+	}
+	steps.audit(t, want)
+
+	if len(requests) != entryRequests+1 {
+		t.Fatalf("model requests = %d in the %s shape, want the %d entry requests beside the worker's one", len(requests), shape, entryRequests)
+	}
+	noticeAnswers := 0
+	for _, request := range requests {
+		if request.Model != integrityEntryModel || !integrityCarriesNotice(request, "worker final answer") {
+			continue
+		}
+		noticeAnswers++
+		if batched && !integrityCarriesToolResult(request, "call-worker-1") {
+			t.Fatalf("the request reading the settle notice carries no result of the call it settles: %s", request.describe())
+		}
+	}
+	if noticeAnswers != 1 {
+		t.Fatalf("requests carrying the settle notice = %d in the %s shape, want the one answer both shapes hold", noticeAnswers, shape)
 	}
 	models := map[string]int{}
 	for _, request := range requests {
 		models[request.Model]++
 	}
-	if models[integrityEntryModel] != 3 || models[integrityWorkerModel] != 1 {
-		t.Fatalf("request models = %v, want three entry and one worker request", models)
+	if models[integrityEntryModel] != entryRequests || models[integrityWorkerModel] != 1 {
+		t.Fatalf("request models = %v in the %s shape, want %d entry and one worker request", models, shape, entryRequests)
 	}
 	declaredWorker := false
 	for _, request := range requests {
@@ -797,17 +846,22 @@ func runIntegrityRequestsAndAttempts(t *testing.T) {
 	}
 
 	integrityClose(t, ctx, host)
-	attempts := integrityAttemptsQuiet(t, root, 4)
-	if len(attempts) != 4 {
-		t.Fatalf("attempt records = %d, want one per real model request", len(attempts))
+	total := entryRequests + 1
+	attempts := integrityAttemptsQuiet(t, root, total)
+	if len(attempts) != total {
+		t.Fatalf("attempt records = %d in the %s shape, want one per real model request", len(attempts), shape)
 	}
-	entryOne := integrityAttemptOfDecision(t, attempts, turn.Decisions[0].DecisionID)
-	entryTwo := integrityAttemptOfDecision(t, attempts, turn.Decisions[1].DecisionID)
+	entryOne := integrityAttemptWithToolCall(t, attempts, "call-worker-1")
 	if !integrityAttemptHasToolCall(entryOne, "call-worker-1") {
 		t.Fatalf("first entry attempt response = %+v, want the worker call it issued", entryOne.Response)
 	}
-	if integrityAttemptContent(entryTwo) != "entry accepted the delegation" {
-		t.Fatalf("second entry attempt content = %q, want the accepted delegation", integrityAttemptContent(entryTwo))
+	wantEntryTwo := "entry accepted the delegation"
+	if batched {
+		wantEntryTwo = "follow-up acknowledged"
+	}
+	entryTwo := integrityAttemptByContent(t, attempts, wantEntryTwo)
+	if integrityAttemptContent(entryTwo) != wantEntryTwo {
+		t.Fatalf("second entry attempt content = %q in the %s shape, want %q", integrityAttemptContent(entryTwo), shape, wantEntryTwo)
 	}
 	worker := integrityAttemptByContent(t, attempts, "worker final answer")
 	if worker.EpisodeID != "" {
@@ -819,12 +873,18 @@ func runIntegrityRequestsAndAttempts(t *testing.T) {
 	if !strings.HasPrefix(string(worker.ID), "attempt-worker-"+integrityWorkerAgent+"-") {
 		t.Fatalf("worker attempt id = %q, want the attempt identity derived from its decision", worker.ID)
 	}
-	followUp := integrityAttemptByContent(t, attempts, "follow-up acknowledged")
-	if followUp.EpisodeID != "" {
-		t.Fatalf("follow-up attempt episode = %q, want none for the host notice turn", followUp.EpisodeID)
-	}
-	if followUp.DecisionID == turn.Decisions[0].DecisionID || followUp.DecisionID == turn.Decisions[1].DecisionID {
-		t.Fatalf("follow-up decision = %q, want a range beside the entry decisions", followUp.DecisionID)
+	if batched {
+		if entryTwo.EpisodeID != event.EpisodeID("episode-integrity-delegate") {
+			t.Fatalf("batched entry attempt episode = %q, want the application episode the segment runs under", entryTwo.EpisodeID)
+		}
+	} else {
+		followUp := integrityAttemptByContent(t, attempts, "follow-up acknowledged")
+		if followUp.EpisodeID != "" {
+			t.Fatalf("follow-up attempt episode = %q, want none for the host notice turn", followUp.EpisodeID)
+		}
+		if followUp.DecisionID == entryOne.DecisionID || followUp.DecisionID == entryTwo.DecisionID {
+			t.Fatalf("follow-up decision = %q, want a range beside the entry decisions", followUp.DecisionID)
+		}
 	}
 
 	seen := map[event.DecisionID]bool{}
@@ -852,16 +912,19 @@ func runIntegrityRequestsAndAttempts(t *testing.T) {
 			t.Fatalf("entry attempt %s episode = %q, want the application episode or none for the follow-up", attempt.ID, attempt.EpisodeID)
 		}
 	}
-	if entryAttempts != 3 || workerAttempts != 1 {
-		t.Fatalf("attempts = (%d entry, %d worker), want three entry and one delegated attempt", entryAttempts, workerAttempts)
+	if entryAttempts != entryRequests || workerAttempts != 1 {
+		t.Fatalf("attempts = (%d entry, %d worker) in the %s shape, want %d entry and one delegated attempt", entryAttempts, workerAttempts, shape, entryRequests)
 	}
 	if losses := host.Run().RecordingLosses(); len(losses) != 0 {
 		t.Fatalf("recording losses = %+v, want none for the admitted capture", losses)
 	}
-	integrityRequireCleanSeal(t, root, 4)
+	integrityRequireCleanSeal(t, root, total)
 }
 
 // runIntegrityFailedAttempt drives one entry failure and one delegated worker failure and checks both are recorded as failures:
+// - the failed settlement is answered either inside the decision already flying (the batched shape) or by a range beside the entry decisions (the separate shape); both read the notice and answer the same body, and the range the notice opens still presents the failed result in its prefix, so the carried result does not tell the shapes apart and the step names only the answer
+// - the shape is read from the material the requests carried: a request that read the failed result without the notice is the parked decision answering alone, so the notice opened a range of its own
+// - the batched shape reads the notice in the decision that parked on the failing call, so that request carries the failed result beside it, and that decision belongs to the entry segment and therefore carries the application episode; the synthesized accept reply is not on the chain and carries no assertion
 // - the failed entry attempt keeps the provider refusal text
 // - the failed worker attempt is recorded by the capture wrapper with its provider refusal text
 // - the delegated observation does not swallow the worker refusal
@@ -878,7 +941,7 @@ func runIntegrityFailedAttempt(t *testing.T) {
 		case request.Model == integrityEntryModel && integrityTail(request) == "fail the entry attempt":
 			return steps.reply("entry-fail", integrityFailureReply(entrySentinel))
 		case request.Model == integrityEntryModel && integrityCarriesFailedNotice(request):
-			return steps.reply("follow-up-fail", integrityFinalReply("follow-up after worker failure"))
+			return steps.reply("notice-fail", integrityFinalReply("follow-up after worker failure"))
 		case request.Model == integrityEntryModel && integrityCarriesToolResult(request, "call-worker-fail"):
 			return steps.reply("accept-fail", integrityFinalReply("entry accepted the failing delegation"))
 		case request.Model == integrityEntryModel && integrityTail(request) == "delegate the failing worker":
@@ -894,30 +957,58 @@ func runIntegrityFailedAttempt(t *testing.T) {
 
 	entryAddr := event.Address{AgentID: "user", SessionID: "session-integrity-fail-entry"}
 	entryTurn := integrityInvoke(t, ctx, host, entryAddr, "inv-integrity-fail-entry", "episode-integrity-fail-entry", "fail the entry attempt")
-	if entryTurn.Terminal != model.KindFailed || len(entryTurn.Decisions) != 1 {
-		t.Fatalf("entry failure turn = (%v, %d decisions), want one failed decision", entryTurn.Terminal, len(entryTurn.Decisions))
+	if entryTurn.Terminal != model.KindFailed || entryTurn.DecisionCount != 1 {
+		t.Fatalf("entry failure turn = (%v, %d decisions), want one failed decision", entryTurn.Terminal, entryTurn.DecisionCount)
 	}
 
 	workerAddr := event.Address{AgentID: "user", SessionID: "session-integrity-fail-worker"}
 	workerTurn := integrityInvoke(t, ctx, host, workerAddr, "inv-integrity-fail-worker", "episode-integrity-fail-worker", "delegate the failing worker")
-	if workerTurn.Terminal != model.KindCompleted || len(workerTurn.Decisions) != 2 {
-		t.Fatalf("delegated turn = (%v, %d decisions), want the completed two-decision turn", workerTurn.Terminal, len(workerTurn.Decisions))
+	if workerTurn.Terminal != model.KindCompleted || workerTurn.DecisionCount != 2 {
+		t.Fatalf("delegated turn = (%v, %d decisions), want the completed two-decision turn", workerTurn.Terminal, workerTurn.DecisionCount)
 	}
 	sender.await(t, workerAddr, "follow-up after worker failure")
-	steps.audit(t, map[string]int{
-		"entry-fail":     1,
-		"delegate-fail":  1,
-		"accept-fail":    1,
-		"worker-fail":    1,
-		"follow-up-fail": 1,
-	})
+	requests := provider.recordedRequests()
+	batched := steps.reached("accept-fail") == 0
+	shape := "batched"
+	entryRequests := 2
+	want := map[string]int{
+		"entry-fail":    1,
+		"delegate-fail": 1,
+		"accept-fail":   0,
+		"notice-fail":   1,
+		"worker-fail":   1,
+	}
+	if !batched {
+		shape = "separate"
+		entryRequests = 3
+		want["accept-fail"] = 1
+	}
+	steps.audit(t, want)
+	if len(requests) != entryRequests+2 {
+		t.Fatalf("model requests = %d in the %s shape, want the %d entry requests of the delegated turn beside the failed entry and the worker's one", len(requests), shape, entryRequests)
+	}
+	noticeRequests := 0
+	for _, request := range requests {
+		if request.Model != integrityEntryModel || !integrityCarriesFailedNotice(request) {
+			continue
+		}
+		noticeRequests++
+		if batched && !integrityCarriesToolResult(request, "call-worker-fail") {
+			t.Fatalf("the request reading the failed settlement carries no result of the call it settles: %s", request.describe())
+		}
+	}
+	if noticeRequests != 1 {
+		t.Fatalf("requests carrying the failed settlement = %d in the %s shape, want the one answer both shapes hold", noticeRequests, shape)
+	}
 
 	integrityClose(t, ctx, host)
-	attempts := integrityAttemptsQuiet(t, root, 5)
-	if len(attempts) != 5 {
-		t.Fatalf("attempt records = %d, want the five real model requests", len(attempts))
+	total := entryRequests + 2
+	attempts := integrityAttemptsQuiet(t, root, total)
+	if len(attempts) != total {
+		t.Fatalf("attempt records = %d in the %s shape, want one per real model request", len(attempts), shape)
 	}
-	entryFailure := integrityAttemptOfDecision(t, attempts, entryTurn.Decisions[0].DecisionID)
+	entryOutput := integrityFactWithContent(t, host.Run().SessionFacts(entryAddr), event.TypeAgentOutput, "")
+	entryFailure := integrityAttemptOfDecision(t, attempts, entryOutput.DecisionID)
 	if entryFailure.Terminal != model.KindFailed {
 		t.Fatalf("entry failure terminal = %v, want the failed terminal of the reduction", entryFailure.Terminal)
 	}
@@ -939,11 +1030,16 @@ func runIntegrityFailedAttempt(t *testing.T) {
 		t.Fatalf("worker failure episode = %q, want none for a delegated turn", workerFailure.EpisodeID)
 	}
 
-	for content, wantEpisode := range map[string]event.EpisodeID{
+	carried := map[string]event.EpisodeID{
 		"calling":                               "episode-integrity-fail-worker",
 		"entry accepted the failing delegation": "episode-integrity-fail-worker",
 		"follow-up after worker failure":        "",
-	} {
+	}
+	if batched {
+		delete(carried, "entry accepted the failing delegation")
+		carried["follow-up after worker failure"] = "episode-integrity-fail-worker"
+	}
+	for content, wantEpisode := range carried {
 		attempt := integrityAttemptByContent(t, attempts, content)
 		if attempt.Terminal != model.KindCompleted || attempt.Error != "" {
 			t.Fatalf("attempt carrying %q = (terminal %v, error %q), want a completed attempt", integrityTruncate(content), attempt.Terminal, attempt.Error)
@@ -970,7 +1066,7 @@ func runIntegrityFailedAttempt(t *testing.T) {
 	if losses := host.Run().RecordingLosses(); len(losses) != 0 {
 		t.Fatalf("recording losses = %+v, want the failures recorded as attempts instead", losses)
 	}
-	integrityRequireCleanSeal(t, root, 5)
+	integrityRequireCleanSeal(t, root, total)
 }
 
 // runIntegrityRejectedAdmission checks a record the capture refused at admission is a counted loss and never a silent disappearance:
@@ -999,8 +1095,8 @@ func integrityRejectedEntryScenario(t *testing.T) {
 	addr := event.Address{AgentID: "user", SessionID: "session-integrity-oversized-entry"}
 
 	turn := integrityInvoke(t, ctx, host, addr, "inv-integrity-oversized-entry", "episode-integrity-oversized-entry", "oversize the entry attempt")
-	if turn.Terminal != model.KindCompleted || len(turn.Decisions) != 1 {
-		t.Fatalf("oversized turn = (%v, %d decisions), want the completed single-decision turn", turn.Terminal, len(turn.Decisions))
+	if turn.Terminal != model.KindCompleted || turn.DecisionCount != 1 {
+		t.Fatalf("oversized turn = (%v, %d decisions), want the completed single-decision turn", turn.Terminal, turn.DecisionCount)
 	}
 	steps.audit(t, map[string]int{"entry-oversized": 1})
 
@@ -1008,7 +1104,9 @@ func integrityRejectedEntryScenario(t *testing.T) {
 	if len(losses) != 1 {
 		t.Fatalf("recording losses = %+v, want the one refused attempt", losses)
 	}
-	wantID := "attempt-" + string(turn.Decisions[0].DecisionID)
+	output := integrityFactWithContent(t, host.Run().SessionFacts(addr), event.TypeAgentOutput,
+		"oversized entry answer "+strings.Repeat("x", integrityOversized))
+	wantID := "attempt-" + string(output.DecisionID)
 	if losses[0].Kind != "capture-attempt" || losses[0].ID != wantID {
 		t.Fatalf("recording loss = (%q, %q), want the refused attempt %q", losses[0].Kind, losses[0].ID, wantID)
 	}
@@ -1067,8 +1165,8 @@ func integrityRejectedWorkerScenario(t *testing.T) {
 	addr := event.Address{AgentID: "user", SessionID: "session-integrity-oversized-worker"}
 
 	turn := integrityInvoke(t, ctx, host, addr, "inv-integrity-oversized-worker", "episode-integrity-oversized-worker", "delegate the oversized worker")
-	if turn.Terminal != model.KindCompleted || len(turn.Decisions) != 2 {
-		t.Fatalf("oversized delegated turn = (%v, %d decisions), want the completed two-decision turn", turn.Terminal, len(turn.Decisions))
+	if turn.Terminal != model.KindCompleted || turn.DecisionCount != 2 {
+		t.Fatalf("oversized delegated turn = (%v, %d decisions), want the completed two-decision turn", turn.Terminal, turn.DecisionCount)
 	}
 	sender.await(t, addr, "follow-up after oversized worker")
 	steps.audit(t, map[string]int{
@@ -1235,6 +1333,7 @@ func runIntegrityExportCorrelationIsNotReward(t *testing.T) {
 }
 
 // runIntegrityFormalCaptureThenOfflineExport drives two real turns through Boot, exports the chain with the public API and correlates every sample:
+// - the pairing keys on the chain rather than on one shared invocation: the input fact keeps the identity of the entry that committed it and the output fact the range identity of the segment that answered, so a sample pairs the two beside their distinct identities rather than under one range
 // - the per-turn seal stays a no-op while the run serves, so the capture is open when the export reads it
 // - exporting one session emits one row, and exporting both emits the two rows with turn numbers restarting per episode
 // - each sample's input and label are facts of the same invocation and episode, and the output decision names exactly one stored attempt
@@ -1302,16 +1401,16 @@ func runIntegrityFormalCaptureThenOfflineExport(t *testing.T) {
 		facts := host.Run().SessionFacts(sessionAddr)
 		input := integrityFactWithContent(t, facts, event.TypeExternalInput, sample.Input)
 		output := integrityFactWithContent(t, facts, event.TypeAgentOutput, sample.Label)
-		if input.InvocationID != output.InvocationID {
-			t.Fatalf("sample %q input invocation = %q, output invocation = %q, want the same range",
-				sample.Input, input.InvocationID, output.InvocationID)
-		}
-		wantInvocation := map[event.SessionID]event.InvocationID{
+		if want := map[event.SessionID]event.InvocationID{
 			addrA.SessionID: "inv-integrity-export-a",
 			addrB.SessionID: "inv-integrity-export-b",
-		}[event.SessionID(sample.SessionID)]
-		if input.InvocationID != wantInvocation {
-			t.Fatalf("sample %q invocation = %q, want the formal invocation %q", sample.Input, input.InvocationID, wantInvocation)
+		}[event.SessionID(sample.SessionID)]; input.InvocationID != want {
+			t.Fatalf("sample %q input invocation = %q, want the formal invocation the entry committed under %q",
+				sample.Input, input.InvocationID, want)
+		}
+		if output.InvocationID == input.InvocationID {
+			t.Fatalf("sample %q output invocation = %q, want the segment range the answer closed on, not the entry identity %q",
+				sample.Input, output.InvocationID, input.InvocationID)
 		}
 		if input.EpisodeID != event.EpisodeID(sample.EpisodeID) || output.EpisodeID != event.EpisodeID(sample.EpisodeID) {
 			t.Fatalf("sample %q facts = (input episode %q, output episode %q), want %q",

@@ -2,14 +2,18 @@ package assembly
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"path/filepath"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/SpellingDragon/tagent/api/config"
 	"github.com/SpellingDragon/tagent/api/event"
@@ -108,15 +112,49 @@ func visibleSkillsOf(binding state.AgentBinding) []string {
 	return names
 }
 
+// fileFactDimension names the configuration dimension one file content move
+// states: the file face is a declaration source, so a content change lands as a
+// config_change fact of this dimension and the request boundary projects the
+// content from that fact instead of reading the file around it. The vocabulary
+// is one list in the event package, so a reader of the dimension reads the same
+// constant every producer writes.
+const fileFactDimension = event.ConfigChangeDimensionFile
+
+// fileFactGeneration is the publication generation a file change fact names: a
+// file content change takes effect at the request boundary without entering a
+// publication — the frozen configuration contract forbids it from moving the
+// structural generation — so the judgment claims no publication and answers the
+// zero one. The zero generation also keeps the identity of one content version
+// stable across publications and restarts.
+const fileFactGeneration uint64 = 0
+
 // fileFixer is the request-boundary file read of one agent: the file source
 // that reads the declared prompt and skill bodies under the root those
 // declarations resolve against. The structural binding keeps naming the
-// files themselves — which files, in which order — while this source only
-// reads their content afresh at every request boundary and fixes the content
-// version one request runs on.
+// files themselves — which files, in which order — while this source reads
+// their content afresh at every request boundary, files the content version it
+// read as a config_change fact of the file dimension, and fixes the version one
+// request runs on.
+//
+// The read is the one in-process observation of the files: the content a
+// request runs on is projected from the fact the read files, so no second path
+// hands a later request a file body the chain does not carry. A fixer the run
+// never installed has no chain to file through and keeps the direct read, and a
+// fixer built for a delegated assembly is bound to the run and the agent the
+// same way, so the instruction that assembly hands over is projected from the
+// chain too.
 type fileFixer struct {
 	source *state.FileSource
 	root   string
+	// run is the runtime the file change facts are filed through and read back
+	// from; it stays nil for a fixer the run never installed.
+	run *Run
+	// agent names the agent whose file face this fixer fixes; it stays empty
+	// beside no run.
+	agent event.AgentID
+	// mu serializes the fact resolution of this fixer, so two boundaries of one
+	// agent never race one content identity into two commits.
+	mu sync.Mutex
 }
 
 // newFileFixer opens the request-boundary file source of one declared agent:
@@ -138,13 +176,36 @@ func newFileFixer(files []config.FileRef) (*fileFixer, error) {
 }
 
 // rememberFixer records the request-boundary file source of one agent, so
-// every request of that agent fixes its file contents through it. A
-// republishing of the declaration replaces the source with the one the new
-// construction opened.
+// every request of that agent fixes its file contents through it. The run and
+// the agent are bound here: the fixer files and reads back the file change
+// facts of that agent's face. A republishing of the declaration replaces the
+// source with the one the new construction opened.
 func (r *Run) rememberFixer(id event.AgentID, fixer *fileFixer) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	fixer.run = r
+	fixer.agent = id
 	r.fixers[id] = fixer
+}
+
+// delegatedFileFixer opens the file source one delegated assembly reads its
+// prompt through and binds the run and the agent whose file change facts the
+// read files and reads back. The binding is the one rememberFixer gives the
+// request-boundary source, so the instruction a delegated assembly hands over is
+// projected from the same fact family the request boundary projects; the request
+// boundary keeps the source its own construction registered, because the
+// delegated read is built over the file list of the declaration it assembles and
+// may front-run that registration while the generation is still being prepared.
+// The fact identity is content-addressed, so a read beside the registered source
+// files the very same fact.
+func (r *Run) delegatedFileFixer(id event.AgentID, files []config.FileRef) (*fileFixer, error) {
+	fixer, err := newFileFixer(files)
+	if err != nil {
+		return nil, err
+	}
+	fixer.run = r
+	fixer.agent = id
+	return fixer, nil
 }
 
 // fileRootOf reports the directory the declared files resolve against: the
@@ -196,8 +257,15 @@ func skillNameOf(path string) string {
 
 // fixate reads the contents one request uses afresh and fixes their version:
 // every reference is resolved against the source root before it is read, so a
-// file rewritten between two requests is read anew by the later one while the
-// structural generation the binding belongs to stays where it is.
+// file rewritten between two requests is observed anew by the later one while
+// the structural generation the binding belongs to stays where it is.
+//
+// The read is the observation, never the projection: each read content is filed
+// as a config_change fact of the file dimension and the content the request runs
+// on is read back from that fact. A filing that cannot land does not refuse the
+// request — the content the boundary read stands in for it — and is warned about
+// instead, so a broken fact chain never stops the business while the failure
+// stays visible.
 func (f *fileFixer) fixate(ctx context.Context, source state.PromptSource) (state.FileSnapshot, error) {
 	normalized := state.PromptSource{Version: source.Version}
 	for _, ref := range source.Files {
@@ -206,14 +274,123 @@ func (f *fileFixer) fixate(ctx context.Context, source state.PromptSource) (stat
 			Kind: ref.Kind,
 		})
 	}
-	return f.source.Fixate(ctx, normalized)
+	observed, err := f.source.Fixate(ctx, normalized)
+	if err != nil {
+		return state.FileSnapshot{}, err
+	}
+	if f.run == nil || f.agent == "" {
+		return observed, nil
+	}
+	return state.FileSnapshot{
+		Files:   f.projectThroughFacts(ctx, observed.Files),
+		Version: observed.Version,
+	}, nil
+}
+
+// projectThroughFacts projects the read contents through the file change facts
+// of this agent: each fixed file is named by a content-addressed fact, the fact
+// is filed when the chain does not carry it yet, and the content the request
+// runs on is read back from that fact. The content version stays the version the
+// read computed: a fact that does not carry exactly the description the read
+// names is a filing failure and leaves the read content in place, so the
+// projected contents always answer the same version.
+func (f *fileFixer) projectThroughFacts(ctx context.Context, files []state.FixedFile) []state.FixedFile {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	projected := make([]state.FixedFile, 0, len(files))
+	for _, file := range files {
+		content := file.Content
+		factContent, err := f.fileFact(ctx, file.Ref, file.Content)
+		if err == nil {
+			content = factContent
+		} else {
+			f.warnFileFact(file.Ref, err)
+		}
+		projected = append(projected, state.FixedFile{Ref: file.Ref, Content: content})
+	}
+	return projected
+}
+
+// fileFact returns the content the file change fact of one read names: the
+// content-addressed fact is read first, so a request whose content the chain
+// already carries runs on the fact exactly as a later request does; a content
+// the chain does not carry yet is filed as one config_change fact of the file
+// dimension and read back. The answered content is the content the fact carries.
+func (f *fileFixer) fileFact(ctx context.Context, ref config.FileRef, content string) (string, error) {
+	header := fileFactHeader(ref, content)
+	description := header + "\n" + content
+	change := event.ConfigChangeFor(f.agent, fileFactDimension, fileFactGeneration, description)
+	fact, err := f.run.CommittedEvent(ctx, change.ID)
+	switch {
+	case err == nil:
+		return fileFactContent(fact, description)
+	case errors.Is(err, ErrCommittedFactMissing):
+	default:
+		return "", fmt.Errorf("read the committed file change fact %s: %w", change.ID, err)
+	}
+	committed := change.Event(time.Now().UTC())
+	// The summary names the file and the content version in one line, so a
+	// reader of the fact names the change without rendering its body.
+	committed.Meta[event.MetaKeyEventSummary] = header
+	if _, err := f.run.commitFactChecked(ctx, committed); err != nil {
+		return "", fmt.Errorf("commit the file change fact %s: %w", change.ID, err)
+	}
+	fact, err = f.run.CommittedEvent(ctx, change.ID)
+	if err != nil {
+		return "", fmt.Errorf("read the committed file change fact %s: %w", change.ID, err)
+	}
+	return fileFactContent(fact, description)
+}
+
+// fileFactContent reads the content one committed file change fact carries: the
+// fact must be the configuration change of the file dimension and must carry
+// exactly the description the boundary computed for the content it read. A fact
+// under the identity carrying other content is refused as a filing failure
+// instead of being projected, so a conflicting fact never rewrites a request.
+func fileFactContent(fact event.Event, description string) (string, error) {
+	if fact.Type != event.TypeConfigChange {
+		return "", fmt.Errorf("the fact under the identity is of type %q, not %q", fact.Type, event.TypeConfigChange)
+	}
+	if dimension := fact.Meta[event.MetaKeyConfigChangeDimension]; dimension != fileFactDimension {
+		return "", fmt.Errorf("the fact under the identity names dimension %q, not %q", dimension, fileFactDimension)
+	}
+	if fact.Message.Content != description {
+		return "", errors.New("the fact under the identity carries other content")
+	}
+	_, content, found := strings.Cut(description, "\n")
+	if !found {
+		return "", errors.New("the file change description carries no content")
+	}
+	return content, nil
+}
+
+// fileFactHeader states the one-line identity of one fixed file: the reference
+// the boundary read and the version of the content it fixed. It is the summary
+// the fact commits with, so a reader names the file and the version without
+// rendering the body.
+func fileFactHeader(ref config.FileRef, content string) string {
+	sum := sha256.Sum256([]byte(content))
+	kind := string(ref.Kind)
+	if kind == "" {
+		kind = string(config.FileKindPrompt)
+	}
+	return "file " + strconv.Quote(ref.Path) + " kind=" + kind + " version=" + hex.EncodeToString(sum[:])
+}
+
+// warnFileFact reports a file change fact the boundary could not read or file.
+// The line stays a bypass: the request runs on the content the boundary read,
+// and the warning is the account of the fact that never landed. The line names
+// the agent, the file and the failure but never the content, so the prompt
+// material stays out of the log.
+func (f *fileFixer) warnFileFact(ref config.FileRef, err error) {
+	assemblyWarn("tagent: the file change fact of agent %q for %q was not filed: %v", f.agent, ref.Path, err)
 }
 
 // replayEntry is one session chain's mapped sequence registered for replay: the
 // projection itself beside the window the declaration replays it into, how many
 // of its leading entries have ended — the material a request presents, while the
-// entries still in flight stay with the transcript that carries them — and the
-// invocation whose range those in-flight entries belong to.
+// entries still in flight stay with the transcript that carries them — and
+// whether the chain carries a segment that has not closed yet.
 type replayEntry struct {
 	projection *replay.ReplayProjection
 	window     FoldWindow
@@ -224,16 +401,23 @@ type replayEntry struct {
 	// or falls past the shortened sequence and silently moves the in-flight
 	// notice into the budgeted prefix. An empty identity names a chain with no
 	// range in flight, so every entry is ended material.
-	endedAt         event.EventID
-	rangeInvocation event.InvocationID
+	endedAt event.EventID
+	// rangeOpen reports whether the chain carries a segment that has not
+	// closed yet: the input that started it opened it, and only the
+	// agent_output that closed it ends it. Input that lands beside the open
+	// segment belongs to that segment and never moves the ended boundary.
+	rangeOpen bool
 }
 
 // endedPrefix reports the position the ended material of the registered sequence
 // ends at, resolved against the sequence as it stands now: the position of the
-// entry the boundary names by identity. A boundary naming no entry — a chain
-// that admitted no range yet, or one whose opening entry a fold has already
-// consumed — reports the end of the sequence, so every entry is ended material
-// and none of the range in flight is presented twice.
+// entry the boundary names by identity — inclusive for the agent_output that
+// closed a segment (its answer is ended material the next segment presents),
+// exclusive for the input that opened the next range (it belongs to that range
+// and the drive or loop of it carries it). A boundary naming no entry — a
+// chain that admitted no range yet, or one whose opening entry a fold has
+// already consumed — reports the end of the sequence, so every entry is ended
+// material and none of the range in flight is presented twice.
 func (h replayEntry) endedPrefix() int {
 	if h.projection == nil {
 		return 0
@@ -243,10 +427,65 @@ func (h replayEntry) endedPrefix() int {
 	}
 	for at, entry := range h.projection.Entries() {
 		if entry.Key == h.endedAt {
+			if entry.Type == event.TypeAgentOutput {
+				return at + 1
+			}
 			return at
 		}
 	}
 	return h.projection.Len()
+}
+
+// SessionPresented reports the facts of one session chain whose own text the
+// request prefix of that session presents: the entries the registered
+// projection still holds ahead of the boundary its ended material reaches, kept
+// to the ones the assembly presents at their own text rather than at the ticket,
+// the summary or the product a tight budget or a fold leaves in their place.
+//
+// The resident consumption loop judges the material of a pull by this read, so
+// the request prefix and the segment transcript present one fact between them
+// exactly once: a fact the prefix carries is left out of the transcript, and a
+// fact the prefix carries nowhere — behind the boundary, or consumed by a fold
+// before any decision read it — is carried by the segment that drives it. The
+// read is the assembly the request itself runs, never a second judgment of the
+// same material. A session this run registered no sequence for answers nothing,
+// because no prefix is assembled for it and no fact is presented there.
+func (r *Run) SessionPresented(addr event.Address) map[event.EventID]bool {
+	if addr.SessionID == "" {
+		return nil
+	}
+	r.mu.Lock()
+	_, held, carried := r.replaySlotLocked(addr)
+	r.mu.Unlock()
+	if !carried || held.projection == nil {
+		return nil
+	}
+	entries := held.projection.Entries()
+	prefix := held.endedPrefix()
+	if prefix > len(entries) {
+		prefix = len(entries)
+	}
+	text := make(map[event.EventID]string, prefix)
+	for at := 0; at < prefix; at++ {
+		if key := entries[at].Key; key != "" {
+			text[key] = entries[at].Content
+		}
+	}
+	if len(text) == 0 {
+		return nil
+	}
+	views, err := held.projection.AssembleBudgetPrefix(context.Background(),
+		projectionBudget(held.projection, held.window, prefix), prefix)
+	if err != nil {
+		return nil
+	}
+	presented := make(map[event.EventID]bool, len(views))
+	for _, view := range views {
+		if full, held := text[view.Key]; held && full == view.Content {
+			presented[view.Key] = true
+		}
+	}
+	return presented
 }
 
 // AttachReplay registers the replayed projection of one session chain on this
@@ -844,13 +1083,17 @@ func projectedSegment(ctx context.Context, run *Run, projection *replay.ReplayPr
 	messages := make([]model.Message, 0, len(entries))
 	paired := make(map[string]bool, len(entries))
 	for _, entry := range entries {
-		role, err := agent.RoleOf(entry.Type)
-		if err != nil {
-			return nil, err
+		role := model.Role(entry.StatedRole())
+		if role == "" {
+			filled, err := agent.RoleOf(entry.Type)
+			if err != nil {
+				return nil, err
+			}
+			role = filled
 		}
 		message := model.Message{Role: role, Content: presentedProjectionContent(entry)}
 		if run != nil {
-			run.restoreCallPairing(&messages, &message, entry, paired)
+			run.restoreCallPairing(ctx, &messages, &message, entry, paired)
 		}
 		messages = append(messages, message)
 	}
@@ -901,8 +1144,16 @@ func projectionBudget(projection *replay.ReplayProjection, window FoldWindow, pr
 // live fact recovers — a restarted run whose facts left with its process —
 // presents as it stands: the entry keeps no pairing and the protocol gate names
 // the break rather than the request silently carrying a broken pair.
-func (r *Run) restoreCallPairing(out *[]model.Message, message *model.Message, entry replay.ProjectionEntry, paired map[string]bool) {
+//
+// - A fact the hot window trimmed from the live ledger still pairs: the storage tier holds the committed body, so the pairing follows the entry wherever the window cut it and a long chain presents whole.
+func (r *Run) restoreCallPairing(ctx context.Context, out *[]model.Message, message *model.Message, entry replay.ProjectionEntry, paired map[string]bool) {
 	fact, held := r.factOf(entry.Key)
+	if !held {
+		restored, err := r.CommittedEvent(ctx, entry.Key)
+		if err == nil {
+			fact, held = restored, true
+		}
+	}
 	switch message.Role {
 	case model.RoleAssistant:
 		if held && len(fact.Message.ToolCalls) > 0 {
@@ -1016,11 +1267,6 @@ func presentedProjectionContent(entry replay.ProjectionEntry) string {
 	return entry.Content
 }
 
-// environmentTaskLines bounds how many open obligations one environment block
-// names: a run holding more reports the count it left out rather than growing
-// the request without bound.
-const environmentTaskLines = 16
-
 // environmentBlockGenerations counts the environment blocks the request boundary
 // has rendered in this process, so the block's rewrite frequency is a measured
 // face for a later throttle decision rather than an inference from the lines.
@@ -1031,9 +1277,9 @@ var environmentBlockGenerations atomic.Int64
 func EnvironmentBlockGenerations() int64 { return environmentBlockGenerations.Load() }
 
 // environmentBlockDebug renders one line of the environment-block face at DEBUG:
-// the trigger reason, the agent and the task count one generation named. One line
-// per generation keeps the rewrite frequency observable, and the line carries no
-// task text.
+// the trigger reason, the agent and the content version one generation named.
+// One line per generation keeps the rewrite frequency observable, and the line
+// carries no task text.
 //
 // The redline list (3 rules):
 // MUST stay a bypass: a failing logger is a missing line, never a failed assembly.
@@ -1060,9 +1306,8 @@ func environmentBlockDebug(format string, args ...any) {
 // follows, and no marker of our own is invented beside the adapter's framing.
 func (r *Run) environmentBlock(ctx context.Context, boundary agent.RequestBoundary, promptVersion string) string {
 	spec := r.agentSpecOf(boundary.Agent)
-	open, omitted := r.openTaskLines(ctx)
 	environmentBlockGenerations.Add(1)
-	environmentBlockDebug("tagent: environment block generated reason=request-boundary agent=%s tasks=%d omitted=%d", boundary.Agent, len(open)+omitted, omitted)
+	environmentBlockDebug("tagent: environment block generated reason=request-boundary agent=%s", boundary.Agent)
 	var b strings.Builder
 	b.WriteString("## Environment\n")
 	fmt.Fprintf(&b, "- agent: %s\n", boundary.Agent)
@@ -1073,42 +1318,7 @@ func (r *Run) environmentBlock(ctx context.Context, boundary agent.RequestBounda
 	fmt.Fprintf(&b, "- skills: %s\n", listOrNone(narrowedSkillsOf(boundary.Binding)))
 	fmt.Fprintf(&b, "- mcp: %s\n", listOrNone(visibleMCPOf(spec, boundary.Binding)))
 	fmt.Fprintf(&b, "- prompt_version: %s\n", versionOrNone(promptVersion))
-	fmt.Fprintf(&b, "- tasks: %d open\n", len(open)+omitted)
-	if len(open) == 0 {
-		b.WriteString("  - (none)\n")
-	}
-	for _, line := range open {
-		fmt.Fprintf(&b, "  - %s\n", line)
-	}
-	if omitted > 0 {
-		fmt.Fprintf(&b, "  - (+%d more)\n", omitted)
-	}
 	return strings.TrimSuffix(b.String(), "\n")
-}
-
-// openTaskLines reports the obligations this run owes as the environment block
-// names them — the class each waits in beside the task it belongs to — in stable
-// order, bounded. The obligations left out are counted, and a task this run has
-// released contributes no line.
-func (r *Run) openTaskLines(ctx context.Context) ([]string, int) {
-	if r.commit == nil || r.manager == nil {
-		return nil, 0
-	}
-	var lines []string
-	for _, id := range r.commit.TaskIDs() {
-		open, err := r.manager.Obligations(ctx, id)
-		if err != nil {
-			continue
-		}
-		for _, obligation := range open.Open {
-			lines = append(lines, fmt.Sprintf("%s task=%s", obligation.Kind, obligation.TaskID))
-		}
-	}
-	sort.Strings(lines)
-	if len(lines) <= environmentTaskLines {
-		return lines, 0
-	}
-	return lines[:environmentTaskLines], len(lines) - environmentTaskLines
 }
 
 // toolNamesOf reports the tool names one binding's request carries, in the

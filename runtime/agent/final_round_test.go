@@ -28,12 +28,12 @@ func TestFinalRoundClosingSemantics(t *testing.T) {
 		loop, history, marks := closingRoundLoop(t, script)
 		loop.SetFinalRound(FinalRoundPolicy{MaxRounds: 1, Timeout: 5 * time.Second, Prompt: "close it out"})
 
-		turn, err := loop.Drive(context.Background(), closingRoundInvocation())
+		turn, err := loop.drive(context.Background(), closingRoundInvocation())
 		if err != nil {
 			t.Fatalf("drive under a spent round budget = %v, want the closing round delivered", err)
 		}
-		if len(turn.Decisions) != 2 {
-			t.Fatalf("decisions of the drive = %d, want the one tool round beside the closing round", len(turn.Decisions))
+		if turn.DecisionCount != 2 {
+			t.Fatalf("decisions of the drive = %d, want the one tool round beside the closing round", turn.DecisionCount)
 		}
 		if turn.FinalRound != FinalRoundRounds {
 			t.Fatalf("final round reason = %q, want %q beside the spent round budget", turn.FinalRound, FinalRoundRounds)
@@ -41,11 +41,12 @@ func TestFinalRoundClosingSemantics(t *testing.T) {
 		if got := marks.recorded(); len(got) != 2 || got[0] || !got[1] {
 			t.Fatalf("closing-round marks of the request boundaries = %v, want the closing round marked and the tool round not", got)
 		}
-		closing := turn.Decisions[1].Request.Messages
+		requests := script.handed()
+		closing := requests[1].Messages
 		if last := closing[len(closing)-1]; last.Role != model.RoleUser || last.Content != "close it out" {
 			t.Fatalf("last message of the closing request = %+v, want the closing instruction carried after the transcript", last)
 		}
-		ordinary := turn.Decisions[0].Request.Messages
+		ordinary := requests[0].Messages
 		if invariantCarries(ordinary, "close it out") {
 			t.Fatalf("tool round request carries the closing instruction before the budget was spent: %+v", ordinary)
 		}
@@ -68,12 +69,12 @@ func TestFinalRoundClosingSemantics(t *testing.T) {
 		loop, _, _ := closingRoundLoop(t, script)
 		loop.SetFinalRound(FinalRoundPolicy{MaxRounds: 2, Timeout: 5 * time.Second})
 
-		turn, err := loop.Drive(context.Background(), closingRoundInvocation())
+		turn, err := loop.drive(context.Background(), closingRoundInvocation())
 		if err != nil {
 			t.Fatalf("drive under a round budget of two = %v, want the closing round delivered", err)
 		}
-		if len(turn.Decisions) != 3 {
-			t.Fatalf("decisions of the drive = %d, want two tool rounds beside exactly one closing round", len(turn.Decisions))
+		if turn.DecisionCount != 3 {
+			t.Fatalf("decisions of the drive = %d, want two tool rounds beside exactly one closing round", turn.DecisionCount)
 		}
 		if turn.FinalRound != FinalRoundRounds {
 			t.Fatalf("final round reason = %q, want %q beside the spent round budget", turn.FinalRound, FinalRoundRounds)
@@ -91,15 +92,15 @@ func TestFinalRoundClosingSemantics(t *testing.T) {
 		loop, history, marks := closingRoundLoop(t, script)
 		loop.SetFinalRound(FinalRoundPolicy{Budget: 20 * time.Millisecond, Timeout: 5 * time.Second})
 
-		turn, err := loop.Drive(context.Background(), closingRoundInvocation())
+		turn, err := loop.drive(context.Background(), closingRoundInvocation())
 		if err != nil {
 			t.Fatalf("drive under a spent time budget = %v, want the closing round delivered", err)
 		}
 		if turn.FinalRound != FinalRoundBudget {
 			t.Fatalf("final round reason = %q, want %q beside the spent time budget", turn.FinalRound, FinalRoundBudget)
 		}
-		if len(turn.Decisions) != 2 || turn.Terminal != model.KindCompleted {
-			t.Fatalf("turn = (%v, %d decisions), want the closing answer beside the spent budget", turn.Terminal, len(turn.Decisions))
+		if turn.DecisionCount != 2 || turn.Terminal != model.KindCompleted {
+			t.Fatalf("turn = (%v, %d decisions), want the closing answer beside the spent budget", turn.Terminal, turn.DecisionCount)
 		}
 		if got := marks.recorded(); len(got) != 2 || got[0] || !got[1] {
 			t.Fatalf("closing-round marks of the request boundaries = %v, want only the closing round marked", got)
@@ -118,7 +119,7 @@ func TestFinalRoundClosingSemantics(t *testing.T) {
 		loop.SetFinalRound(FinalRoundPolicy{MaxRounds: 1, Timeout: 150 * time.Millisecond})
 
 		started := time.Now()
-		turn, err := loop.Drive(context.Background(), closingRoundInvocation())
+		turn, err := loop.drive(context.Background(), closingRoundInvocation())
 		elapsed := time.Since(started)
 		if err != nil {
 			t.Fatalf("drive beside a closing round that never answers = %v, want the timeout reduced as a terminal", err)
@@ -129,8 +130,8 @@ func TestFinalRoundClosingSemantics(t *testing.T) {
 		if turn.Terminal != model.KindCancelled {
 			t.Fatalf("terminal of the timed-out closing round = %v, want %v", turn.Terminal, model.KindCancelled)
 		}
-		if turn.FinalRound != FinalRoundRounds || len(turn.Decisions) != 2 {
-			t.Fatalf("turn = (%q, %d decisions), want the closing round marked beside the tool round", turn.FinalRound, len(turn.Decisions))
+		if turn.FinalRound != FinalRoundRounds || turn.DecisionCount != 2 {
+			t.Fatalf("turn = (%q, %d decisions), want the closing round marked beside the tool round", turn.FinalRound, turn.DecisionCount)
 		}
 	})
 
@@ -141,15 +142,15 @@ func TestFinalRoundClosingSemantics(t *testing.T) {
 		)
 		loop, _, marks := closingRoundLoop(t, script)
 
-		turn, err := loop.Drive(context.Background(), closingRoundInvocation())
+		turn, err := loop.drive(context.Background(), closingRoundInvocation())
 		if err != nil {
 			t.Fatalf("drive under no budget = %v, want the drive to end on its own terminal", err)
 		}
 		if turn.FinalRound != FinalRoundNone {
 			t.Fatalf("final round reason = %q, want no closing round under no budget", turn.FinalRound)
 		}
-		if len(turn.Decisions) != 2 || turn.Terminal != model.KindCompleted {
-			t.Fatalf("turn = (%v, %d decisions), want the drive's own terminal", turn.Terminal, len(turn.Decisions))
+		if turn.DecisionCount != 2 || turn.Terminal != model.KindCompleted {
+			t.Fatalf("turn = (%v, %d decisions), want the drive's own terminal", turn.Terminal, turn.DecisionCount)
 		}
 		for _, marked := range marks.recorded() {
 			if marked {
@@ -191,17 +192,18 @@ func TestSubAgentFinalRoundBounds(t *testing.T) {
 		{agent: "agent-c", decision: "c", decisions: 2, closing: "close the default"},
 	}
 	for _, tc := range cases {
-		turn, err := loop.Drive(context.Background(), finalRoundBoundsInvocation(tc.agent, tc.decision))
+		turn, err := loop.drive(context.Background(), finalRoundBoundsInvocation(tc.agent, tc.decision))
 		if err != nil {
 			t.Fatalf("drive of %q = %v, want the closing round delivered", tc.agent, err)
 		}
 		if turn.FinalRound != FinalRoundRounds {
 			t.Fatalf("final round reason of %q = %q, want %q beside its own spent round budget", tc.agent, turn.FinalRound, FinalRoundRounds)
 		}
-		if len(turn.Decisions) != tc.decisions {
-			t.Fatalf("decisions of %q = %d, want %d beside its own round budget", tc.agent, len(turn.Decisions), tc.decisions)
+		if turn.DecisionCount != tc.decisions {
+			t.Fatalf("decisions of %q = %d, want %d beside its own round budget", tc.agent, turn.DecisionCount, tc.decisions)
 		}
-		closing := turn.Decisions[len(turn.Decisions)-1].Request.Messages
+		requests := script.handed()
+		closing := requests[len(requests)-1].Messages
 		if last := closing[len(closing)-1]; last.Role != model.RoleUser || last.Content != tc.closing {
 			t.Fatalf("closing instruction of %q = %+v, want %q", tc.agent, last, tc.closing)
 		}

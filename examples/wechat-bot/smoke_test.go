@@ -186,7 +186,7 @@ func TestLocalSmoke(t *testing.T) {
 
 	runSmokePump(t, rig, provider, cfg, logs, obs)
 	runSmokeFoldChecks(t, rig, provider, obs)
-	runSmokeMeditationCheck(t, rig, provider, logs, obs)
+	runSmokeMeditationCheck(t, rig, provider, cfg, logs, obs)
 	runSmokeTrajectoryCheck(t, rig, cfg, provider, obs)
 	reportSmokeObservability(t, logs, obs)
 }
@@ -443,11 +443,7 @@ func driveSmokeRound(t *testing.T, rig *smokeRig, provider *smokeProvider, cfg *
 		}
 	case smokeDelegate:
 		rig.postTask(text)
-		rig.waitText(chat, "delegate ack "+marker, 120*time.Second)
-		rig.waitText(chat, "settle-ack "+marker, 120*time.Second)
-		if !smokeSettleRequestSeen(provider, marker) {
-			t.Fatalf("round %d settle follow-up carries no worker body %q", round, "worker result "+marker)
-		}
+		smokeAwaitDelegateAck(t, rig, provider, chat, marker, 120*time.Second)
 	case smokeApproval:
 		rig.postTask(text)
 		held := rig.waitHeldDelivery(chat, "hold-ack "+marker, 120*time.Second)
@@ -465,15 +461,73 @@ func driveSmokeRound(t *testing.T, rig *smokeRig, provider *smokeProvider, cfg *
 	}
 }
 
-// smokeSettleRequestSeen 报告是否有一次结转回合读到了该轮的结算通知（正文含
-// 子 agent 结果）。
+// smokeAwaitDelegateAck 等委派轮收尾并核对它的投递形态：段语义下工具轮之后段挂起
+// （工具轮的叙述不作为文本投递），结算通知与子 agent 结果并进同一个消费批次时由同一次
+// 请求读入，那一次回答闭合段、只投递一条正文；两者分两次请求读入时才是旧的两条投递。
+// - 结算答复（settle-ack）在两种形态下都恰好投递一次：它就是闭合段的那次回答
+// - 工具轮的 mid-flight 叙述（delegate ack）只在它由一次自己的请求作答时投递，并合形态下不投递
+// - 形态只从请求实际携带的材料判，不看投递条数或轮次名
+func smokeAwaitDelegateAck(t *testing.T, rig *smokeRig, provider *smokeProvider, chat, marker string, timeout time.Duration) {
+	t.Helper()
+	rig.waitText(chat, "settle-ack "+marker, timeout)
+	if !smokeSettleRequestSeen(provider, marker) {
+		t.Fatalf("the settle answer for %s read no request carrying the worker body %q\nrecent requests:\n%s",
+			marker, "worker result "+marker, rig.recentRequests(8))
+	}
+	if got := smokeErrorsTextCount(rig, chat, "settle-ack "+marker); got != 1 {
+		t.Fatalf("the settle answer for %s was delivered %d time(s), want exactly one", marker, got)
+	}
+	alone := smokeDelegateAnsweredAlone(provider, marker)
+	switch got := smokeErrorsTextCount(rig, chat, "delegate ack "+marker); {
+	case alone && got != 1:
+		t.Fatalf("the separate delegate answer for %s was delivered %d time(s), want exactly one\nrecent outbound:\n%s",
+			marker, got, rig.recentOutbound(8))
+	case !alone && got != 0:
+		t.Fatalf("the batched delegate turn of %s delivered its tool-round body %d time(s), want none: one closed segment delivers one answer\nrecent outbound:\n%s",
+			marker, got, rig.recentOutbound(8))
+	}
+}
+
+// smokeSettleRequestSeen 报告是否有一次请求读到了该轮的结算通知（正文含子 agent 结果）。
+// 段语义下通知与工具结果可以并进同一次请求，所以判据是“请求里有这条通知”，而不是
+// “最后一条用户消息就是通知”：并合形态里最后一条用户消息可能是工具结果帧。
 func smokeSettleRequestSeen(provider *smokeProvider, marker string) bool {
 	for _, req := range provider.recorded() {
-		last := smokeLastUserText(req.Messages)
-		if strings.Contains(last, "tagent: task") && strings.Contains(last, "settled") &&
-			strings.Contains(last, "worker result "+marker) {
+		if smokeSettleNoticeOf(req.Messages, marker) != "" {
 			return true
 		}
+	}
+	return false
+}
+
+// smokeSettleNoticeOf 报告请求里那条结算通知的正文，没有时回报空串：通知是循环折成
+// 用户角色帧之外的独立材料，正文以 tagent: task 起、带 settled 字样并携带子 agent 结果。
+func smokeSettleNoticeOf(messages []smokeModelMessage, marker string) string {
+	for _, msg := range messages {
+		if msg.Role != string(tagentmodel.RoleUser) {
+			continue
+		}
+		content := strings.TrimSpace(msg.Content)
+		if strings.HasPrefix(content, "tagent: task") && strings.Contains(content, "settled") &&
+			strings.Contains(content, "worker result "+marker) {
+			return content
+		}
+	}
+	return ""
+}
+
+// smokeDelegateAnsweredAlone 报告委派结果是否由一次还没读到结算通知的请求回答：那次
+// 请求里工具结果在、通知不在，是挂起的决策单独作答（旧的两条投递）。并合形态下唯一的
+// 那次请求同时读入结果与通知，这里回报 false。
+func smokeDelegateAnsweredAlone(provider *smokeProvider, marker string) bool {
+	for _, req := range provider.recorded() {
+		if !smokePairedResult(req.Messages, "call-worker-"+marker) {
+			continue
+		}
+		if smokeSettleNoticeOf(req.Messages, marker) != "" {
+			continue
+		}
+		return true
 	}
 	return false
 }
@@ -563,47 +617,29 @@ func runSmokeFoldChecks(t *testing.T, rig *smokeRig, provider *smokeProvider, ob
 	}
 }
 
-// runSmokeMeditationCheck 断言冥想：事件驱动触发 → 反思 → deliver_summary →
+// runSmokeMeditationCheck 断言冥想：事件驱动触发 → 反思 → send 跨会话投递 →
 // 用户会话链可见，并由下一轮请求读到。
 // - the reflection summary lands on the driven session first: production Drive moves the injection address, then /task
-// - the driver is event-driven: after a quiet pump only new host-facing traffic opens the rhythm floor, so the wait drives probe turns
-func runSmokeMeditationCheck(t *testing.T, rig *smokeRig, provider *smokeProvider, logs *smokeLogRecorder, obs *smokeObservation) {
+// - the driver is event-driven: only new host-facing traffic opens a pass, and the rhythm floor reads the age of the newest such fact
+// - every probe turn is followed by a window quiet for longer than the declared floor, so the held pass re-evaluates and lands
+func runSmokeMeditationCheck(t *testing.T, rig *smokeRig, provider *smokeProvider, cfg *smokeConfig, logs *smokeLogRecorder, obs *smokeObservation) {
 	t.Helper()
+	floor := smokeMeditationFloor(t, cfg)
 	deadline := time.Now().Add(120 * time.Second)
 	reflectionChat := ""
-	probe := 0
-	for {
-		for _, chat := range smokeChats {
-			for _, evt := range rig.sessionFacts(chat) {
-				if evt.Type != event.TypeExternalInput {
-					continue
-				}
-				if evt.Meta[event.MetaKeyTriggerSource] != "meditation" {
-					continue
-				}
-				if !strings.Contains(evt.Message.Content, smokeReflectionMarker) {
-					continue
-				}
-				obs.ReflectionFact = string(evt.Key)
-				obs.ReflectionSeen = true
-				reflectionChat = chat
-				t.Logf("[matrix 7] the reflection summary reached the session chain of %s: key=%s", chat, evt.Key)
-			}
-		}
-		if obs.ReflectionSeen {
-			break
-		}
+	for probe := 1; !smokeScanReflection(t, rig, obs, &reflectionChat); probe++ {
 		if time.Now().After(deadline) {
 			t.Fatalf("no meditation summary landed in a user session chain within %s (reflect requests=%d)\nfacts:\n%s\nreflect requests:\n%s\nlogs:\n%s",
-				120*time.Second, smokeRequestsFor(provider, smokeReflectModel), rig.factDigest(), smokeRequestDetail(provider, smokeReflectModel), logs.digest("reflection", "deliver_summary", "meditation", "tool", "budget"))
+				120*time.Second, smokeRequestsFor(provider, smokeReflectModel), rig.factDigest(), smokeRequestDetail(provider, smokeReflectModel), logs.digest("reflection", "send", "meditation", "tool", "budget"))
 		}
-		probe++
 		marker := fmt.Sprintf("SMOKE-R75%02d", probe)
 		chat := smokeChats[probe%len(smokeChats)]
 		rig.drive(chat, marker+" meditation probe")
 		rig.waitText(chat, "answer "+marker, 30*time.Second)
-		time.Sleep(time.Second)
+		smokeAwaitMeditationWindow(t, rig, obs, &reflectionChat, floor+2*time.Second)
 	}
+	t.Logf("[matrix 7] the reflection summary reached a user session chain: chat=%s key=%s",
+		reflectionChat, obs.ReflectionFact)
 	if smokeRequestsFor(provider, smokeReflectModel) == 0 {
 		t.Fatal("the reflection loop answered no model request")
 	}
@@ -616,6 +652,57 @@ func runSmokeMeditationCheck(t *testing.T, rig *smokeRig, provider *smokeProvide
 	}
 	t.Logf("[matrix 7] the next user turn read the reflection summary: reflect requests=%d",
 		smokeRequestsFor(provider, smokeReflectModel))
+}
+
+// smokeMeditationFloor 读出文档渲染的反思节律下限：冥想判据按「最新 host-facing 事实」
+// 的年龄计时，夹具要在这个下限之外留出静默窗口，不能自造比它更密的事实。
+func smokeMeditationFloor(t *testing.T, cfg *smokeConfig) time.Duration {
+	t.Helper()
+	floor, err := time.ParseDuration(cfg.meditationMinGap())
+	if err != nil {
+		t.Fatalf("parse the documented reflection min gap %q: %v", cfg.meditationMinGap(), err)
+	}
+	if floor <= 0 {
+		t.Fatalf("the documented reflection min gap %q is not a positive window", cfg.meditationMinGap())
+	}
+	return floor
+}
+
+// smokeScanReflection 扫各用户会话链上是否有冥想摘要事实，并把它记进观测与目标会话。
+func smokeScanReflection(t *testing.T, rig *smokeRig, obs *smokeObservation, chat *string) bool {
+	t.Helper()
+	landed := false
+	for _, session := range smokeChats {
+		for _, evt := range rig.sessionFacts(session) {
+			if evt.Type != event.TypeExternalInput {
+				continue
+			}
+			if evt.Meta[event.MetaKeyTriggerSource] != smokeSendLineage {
+				continue
+			}
+			if !strings.Contains(evt.Message.Content, smokeReflectionMarker) {
+				continue
+			}
+			obs.ReflectionFact = string(evt.Key)
+			obs.ReflectionSeen = true
+			*chat = session
+			landed = true
+		}
+	}
+	return landed
+}
+
+// smokeAwaitMeditationWindow 在不制造新事实的前提下等一个节律窗口：窗口内反复扫摘要是否
+// 落地，扫到就提前返回，窗口走完仍未落地交回调用方再开一次探测。
+func smokeAwaitMeditationWindow(t *testing.T, rig *smokeRig, obs *smokeObservation, chat *string, window time.Duration) {
+	t.Helper()
+	until := time.Now().Add(window)
+	for time.Now().Before(until) {
+		if smokeScanReflection(t, rig, obs, chat) {
+			return
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
 }
 
 // smokeRequestsFor 报告某个模型名已经回答的请求数。
@@ -845,6 +932,25 @@ func smokeEntryDigest(entries []replay.ProjectionEntry) string {
 	return strings.Join(lines, "\n")
 }
 
+// smokeIntegrityFoldVolume 量折叠后的投影体积：只量折叠自己可达的材料。负向档把
+// 冥想节奏放到 1ms/0s，反思回合的注入（SMOKE-REFLECTION …）与入口 agent 对这条无标记
+// 注入的兜底回答（脚本无标记时答 "answer SMOKE-R0"）会在测量期间落链：它们是折叠之后
+// 到达的新事实，不是折叠产物，计进去会把“折完回到窗口内”变成时序抽奖。正向档把冥想
+// 钉在 1h，这里没有可排除的条目。
+func smokeIntegrityFoldVolume(entries []replay.ProjectionEntry) int {
+	windowed := make([]replay.ProjectionEntry, 0, len(entries))
+	for _, entry := range entries {
+		if strings.Contains(entry.Content, smokeReflectionMarker) {
+			continue
+		}
+		if entry.Type == string(event.TypeAgentOutput) && smokeMarkerRE.FindString(entry.Content) == "" {
+			continue
+		}
+		windowed = append(windowed, entry)
+	}
+	return len(replay.RenderProjection(windowed))
+}
+
 // smokeRequestsContaining 渲染所有含该子串的模型请求片段，供"投影有、组装没有"的对照。
 func smokeRequestsContaining(provider *smokeProvider, needle string) string {
 	lines := make([]string, 0, 8)
@@ -906,12 +1012,16 @@ const (
 	smokeIntegrityRouteTurn = "SMOKE-R7401"
 	// smokeIntegrityRouteDenied 是越权目标企图投递的正文：它不得落到任何会话链。
 	smokeIntegrityRouteDenied = "SMOKE-EI-ROUTE-DENIED"
+	// smokeIntegrityRouteDeniedAgent 是 deliver_to 白名单之外的 agent：投给它
+	// 必须按名拒绝。
+	smokeIntegrityRouteDeniedAgent = smokeWorkerModel
 	// smokeIntegrityRouteOK 是合法目标投递的正文。
 	smokeIntegrityRouteOK = "SMOKE-EI-ROUTE-OK"
 	// smokeIntegrityRouteAfter 是读到合法摘要的下一轮。
 	smokeIntegrityRouteAfter = "SMOKE-R7402"
-	// smokeIntegrityRouteDenial 是模型可读的具名拒绝片段。
-	smokeIntegrityRouteDenial = "the arguments name fields outside the declaration 'target'"
+	// smokeIntegrityRouteDenial 是模型可读的具名拒绝片段：拒绝既说出白名单属于
+	// 哪个 agent，也说出投递目标是谁。
+	smokeIntegrityRouteDenial = `the deliver_to white list of "smoke-reflect" names no "smoke-worker"`
 	// smokeIntegritySelfTurn 是自激场景的开场轮。
 	smokeIntegritySelfTurn = "SMOKE-R7501"
 	// smokeIntegritySelfFoldTurn 是自激场景里触发折叠的会话切换轮。
@@ -957,12 +1067,12 @@ func TestEventIntegrityApprovalControl(t *testing.T) {
 	t.Run("consumer", smokeIntegrityApprovalConsumer)
 }
 
-// TestEventIntegrityReflectionDeliveryControl pins the reflection delivery:
+// TestEventIntegrityReflectionWhiteListControl pins the reflection delivery:
 // - positive checks the authorised target receives the summary once
 // - negative checks an out-of-scope target is refused by name and the legal path still works
 // - negative also checks the delivery does not reopen the novelty gate
-// - consumer checks deliver_summary -> InjectReflection -> the target's next request over the formal chain
-func TestEventIntegrityReflectionDeliveryControl(t *testing.T) {
+// - consumer checks send{target:{agent,session}} -> the target's next request over the formal chain
+func TestEventIntegrityReflectionWhiteListControl(t *testing.T) {
 	t.Run("positive", smokeIntegrityReflectionPositive)
 	t.Run("negative", smokeIntegrityReflectionNegative)
 	t.Run("consumer", smokeIntegrityReflectionConsumer)
@@ -970,7 +1080,8 @@ func TestEventIntegrityReflectionDeliveryControl(t *testing.T) {
 
 // TestEventIntegrityFoldControl pins the compression projection:
 // - positive checks the fold triggers, the original text stays reachable and the summary enters the request
-// - negative checks a fold product does not self-trigger and a rebuild does not fold again
+// - negative checks a fold product does not self-trigger, a rebuild keeps serving the original, and a restore files no new judgment
+// - the re-derived fold key is not asserted: a shutdown commits late notices behind the boundary the live fold read
 // - consumer checks later formal requests keep consuming the fold product
 func TestEventIntegrityFoldControl(t *testing.T) {
 	t.Run("positive", smokeIntegrityFoldPositive)
@@ -1009,17 +1120,45 @@ type smokeIntegrityHost struct {
 
 // bootSmokeIntegrityHost 装配一段场景的宿主。interval/minGap 决定冥想节奏：
 // "1h" 让首次宿主可见提交触发唯一一次反思（计数可确定），"1ms" 放开节奏用于
-// 判定自身产物是否重开新颖门。
+// 判定自身产物是否重开新颖门。默认文档给入口不声明 send、也不带风险规则：
+// D6 之后 send 是冥想唯一的通信工具，一条按工具名分级的 critical 规则会把冥想
+// 自己的投递也扣留，所以只有审批类场景（bootSmokeApprovalHost）用审批夹具。
 func bootSmokeIntegrityHost(t *testing.T, interval, minGap string) *smokeIntegrityHost {
+	t.Helper()
+	return bootSmokeIntegrityHostOver(t, interval, minGap, nil)
+}
+
+// bootSmokeApprovalHost 装配审批类场景的宿主：文档只把 send 标成 critical，不给
+// 入口声明 send——跨会话投递面属于声明 meditation 的冥想 agent（D6），所以这次
+// 练刀由冥想面自己发出，入口一次都不发跨会话 send 调用。冥想面的响应由 relay
+// 接管，交付次数因此由场景放行，而不是看节奏碰运气。
+func bootSmokeApprovalHost(t *testing.T, interval, minGap string, relay *smokeApprovalRelay) *smokeIntegrityHost {
+	t.Helper()
+	return bootSmokeIntegrityHostScripted(t, interval, minGap, smokeApprovalSendDocument, relay.script)
+}
+
+// bootSmokeIntegrityHostOver 装配一段场景的宿主：doc 决定这份文档是否额外
+// 声明审批夹具（nil = 默认文档）。
+func bootSmokeIntegrityHostOver(t *testing.T, interval, minGap string, doc func(*smokeConfig) string) *smokeIntegrityHost {
+	t.Helper()
+	return bootSmokeIntegrityHostScripted(t, interval, minGap, doc, nil)
+}
+
+// bootSmokeIntegrityHostScripted 在文档之外再接管冥想面的脚本：审批场景的冥想
+// 只在场景放行时投递，交付次数因此可断言。
+func bootSmokeIntegrityHostScripted(t *testing.T, interval, minGap string, doc func(*smokeConfig) string, script func(http.ResponseWriter, int, string, []smokeModelMessage) bool) *smokeIntegrityHost {
 	t.Helper()
 	logs := installSmokeLog(t)
 	cfg := newSmokeConfig(t, "http://127.0.0.1:1/v1")
 	cfg.MeditationInterval = interval
-	cfg.Doc = smokeApprovalDocument
+	cfg.Doc = doc
 	if minGap != "" {
 		cfg.MeditationMinGap = minGap
 	}
 	provider := newSmokeProvider(t, filepath.Join(cfg.WorkspaceDir, smokeFileMarker))
+	if script != nil {
+		provider.hook = script
+	}
 	cfg.Endpoint = provider.endpoint()
 	cfg.write(t)
 	rig := bootSmokeRig(t, cfg, provider)
@@ -1034,25 +1173,172 @@ func (h *smokeIntegrityHost) close(t *testing.T) {
 	}
 }
 
-// smokeIntegrityApprovalPositive 判定审批门：critical 调用被扣留，批准只记录裁决，
-// 重试才执行一次，正文只归审批会话。
+// smokeApprovalRelay 是审批场景的冥想脚本：每放行一次，它就发出同一份固定正文的
+// 一次 send 调用。
+//   - 正文逐字节固定：审批绑定参数摘要，重试必须重放同一摘要才叫“补投”；
+//   - 投递次数由场景放行：节奏开到 1ms，多出来的反思只记录、不投递，交付次数
+//     因此可断言为恰一次，而不是看节奏碰运气。
+type smokeApprovalRelay struct {
+	mu     sync.Mutex
+	body   string
+	budget int
+	sent   int
+}
+
+// arm 放行接下来一次反思的投递：正文换成 body，预算为 1。
+func (r *smokeApprovalRelay) arm(body string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.body, r.budget = body, 1
+}
+
+// sends 报告冥想面已经发出的 send 调用次数。
+func (r *smokeApprovalRelay) sends() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.sent
+}
+
+// smokeApprovalRelayCall 渲染第 n 次投递的调用标识：回执按这个 id 配对。
+func smokeApprovalRelayCall(n int) string {
+	return fmt.Sprintf("call-reflect-approval-%d", n)
+}
+
+// script 是冥想面的 provider 钩子：读到工具交代就收尾，有预算就投递固定正文，
+// 没有预算就只记录一次反思。
+func (r *smokeApprovalRelay) script(w http.ResponseWriter, _ int, modelName string, messages []smokeModelMessage) bool {
+	if modelName != smokeReflectModel {
+		return false
+	}
+	if smokeEndedWithTool(messages) {
+		fmt.Fprint(w, smokeAnswerBody("reflection recorded"))
+		return true
+	}
+	r.mu.Lock()
+	body, budget := r.body, r.budget
+	if budget <= 0 {
+		r.mu.Unlock()
+		fmt.Fprint(w, smokeAnswerBody("reflection recorded"))
+		return true
+	}
+	r.budget--
+	r.sent++
+	call := smokeApprovalRelayCall(r.sent)
+	r.mu.Unlock()
+	agent, session := smokeReflectionTarget(messages)
+	fmt.Fprint(w, smokeToolCallBody(call, sendToolID,
+		fmt.Sprintf(`{"target":{"agent":%q,"session":%q},"content":%q}`, agent, session, body)))
+	return true
+}
+
+// smokeApprovalFace 是审批场景读冥想面的那一扇窗：relay 说脚本已经发出几次投递，
+// provider 说冥想面真正读到了什么请求与工具结果，logs 说驱动每一次 pass 的决策。
+// 场景等的是这扇窗里的一条事实——一次投递被工具结果配对——而不是脚本计数穿过某个
+// 时刻；超时时这扇窗把三者一起带出来，说明第二次投递停在哪一道门。
+type smokeApprovalFace struct {
+	relay    *smokeApprovalRelay
+	provider *smokeProvider
+	logs     *smokeLogRecorder
+}
+
+// waitCall 等到第 n 次投递被工具结果配对，交回那段正文：投递的结局（凭据或等待）
+// 是工具真的答了这次调用，迟到也只迟到那一条事实，与驱动跑完一轮的早晚无关。
+func (f smokeApprovalFace) waitCall(t *testing.T, n int, timeout time.Duration) string {
+	t.Helper()
+	callID := smokeApprovalRelayCall(n)
+	deadline := time.Now().Add(timeout)
+	for {
+		if receipt := smokeApprovalReceipt(f.provider, callID); receipt != "" {
+			return receipt
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the meditation face issued %d send call(s) and never settled %s within %s\nreflect requests:\n%s\ndriver decisions:\n%s",
+				f.relay.sends(), callID, timeout,
+				smokeRequestDetail(f.provider, smokeReflectModel), f.logs.trace(smokeApprovalDriverLine))
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// smokeApprovalDriverLine 是冥想驱动每次 pass 交给宿主的决策行（assembly 侧
+// "tagent: meditation driver of <agent>: <disposition> (<reason>)" 的字面前缀）。
+const smokeApprovalDriverLine = "meditation driver of "
+
+// smokeApprovalReceipt 报告冥想面在给定调用下读到的工具结果；读不到返回空串。
+func smokeApprovalReceipt(provider *smokeProvider, callID string) string {
+	for _, req := range provider.recorded() {
+		if req.Model != smokeReflectModel {
+			continue
+		}
+		for _, msg := range req.Messages {
+			if msg.Role == string(tagentmodel.RoleTool) && msg.ToolCallID == callID {
+				return msg.Content
+			}
+		}
+	}
+	return ""
+}
+
+// smokeApprovalDelivered 报告目标会话链上带给定正文的投递事实条数（trigger=send）。
+func smokeApprovalDelivered(rig *smokeRig, chat, body string) int {
+	count := 0
+	for _, evt := range rig.sessionFacts(chat) {
+		if evt.Type != event.TypeExternalInput || evt.Meta[event.MetaKeyTriggerSource] != smokeSendLineage {
+			continue
+		}
+		if strings.Contains(evt.Message.Content, body) {
+			count++
+		}
+	}
+	return count
+}
+
+// smokeApprovalShortTTLDocument 把审批夹具（只给 send 一个 critical 分级）的有效
+// 期改到最小分钟值：过期裁决/重试仍被扣留只能由 tool+digest 的审批登记表达，
+// 投递挂起没有 TTL 与摘要，故这个场景保留在审批通道上。
+func smokeApprovalShortTTLDocument(c *smokeConfig) string {
+	base := *c
+	base.Doc = smokeApprovalSendDocument
+	document := base.document()
+	patched := strings.Replace(document, "approval_ttl_minutes: 30",
+		fmt.Sprintf("approval_ttl_minutes: %d", smokeErrorsTTLMinutes), 1)
+	if patched == document {
+		panic("smoke: the rendered document carries no approval validity to shorten")
+	}
+	return patched
+}
+
+// smokeIntegrityApprovalPositive 判定审批门：冥想面的 critical 投递被扣留，批准只
+// 记录裁决，重试同一份正文才落地一次，正文只归目标会话。
 func smokeIntegrityApprovalPositive(t *testing.T) {
-	host := bootSmokeIntegrityHost(t, "1h", "")
+	relay := &smokeApprovalRelay{}
+	host := bootSmokeApprovalHost(t, "1ms", "0s", relay)
 	defer host.close(t)
 	rig, provider := host.rig, host.provider
+	face := smokeApprovalFace{relay: relay, provider: provider, logs: host.logs}
 	chat := smokeChats[0]
+	body := smokeApprovalMarker + " " + smokeIntegrityApprovalTurn
 
-	rig.drive(chat, smokeIntegrityApprovalTurn+" smoke approval request")
-	rig.waitText(chat, "hold-ack "+smokeIntegrityApprovalTurn, 60*time.Second)
+	relay.arm(body)
+	rig.drive(chat, smokeIntegrityApprovalTurn+" plain question")
+	rig.waitText(chat, "answer "+smokeIntegrityApprovalTurn, 120*time.Second)
+	held := face.waitCall(t, 1, 120*time.Second)
+	if held == smokeSendCredential || !strings.Contains(held, "parked awaiting approval") {
+		t.Fatalf("the held delivery read back %q, want the wait and never the delivered credential", held)
+	}
 	pending := rig.pendingApproval(30 * time.Second)
+	if pending.ToolName != sendToolID || pending.RiskLevel != plugin.RiskCritical {
+		t.Fatalf("the parked request = tool %q risk %q, want the critical send", pending.ToolName, pending.RiskLevel)
+	}
 	digest := shortDigest(pending.ArgsDigest)
 	announce := rig.waitText(smokeApproverChat, digest, 30*time.Second)
 	if !strings.Contains(announce.Body, "审批请求") {
 		t.Fatalf("the approval announcement = %q, want the request text carrying %s", announce.Body, digest)
 	}
-	if got := smokeErrorsTextCount(rig, chat, smokeApprovalMarker); got != 0 {
-		t.Fatalf("the held call delivered its body %d time(s) before the ruling, want none", got)
+	if got := smokeApprovalDelivered(rig, chat, body); got != 0 {
+		t.Fatalf("the held body landed %d time(s), want none: a hold executes nothing", got)
 	}
+
 	entryBefore := smokeRequestsFor(provider, smokeEntryModel)
 	handled, reply, err := rig.gateway.Resolve(smokeApproverChat, "approve "+digest)
 	if err != nil || !handled || !strings.Contains(reply, "approved") {
@@ -1068,11 +1354,22 @@ func smokeIntegrityApprovalPositive(t *testing.T) {
 	if got := smokeRequestsFor(provider, smokeEntryModel); got != entryBefore {
 		t.Fatalf("the ruling drove %d entry request(s), want none: a ruling records the decision, the retry performs the call", got-entryBefore)
 	}
-	rig.postTask(smokeIntegrityApprovalTurn + " smoke retry")
-	rig.waitText(chat, "approved-done "+smokeIntegrityApprovalTurn, 120*time.Second)
-	rig.waitText(chat, smokeApprovalMarker+" "+smokeIntegrityApprovalTurn, 120*time.Second)
-	if got := smokeErrorsTextCount(rig, chat, smokeApprovalMarker+" "+smokeIntegrityApprovalTurn); got != 1 {
+	if got := smokeApprovalDelivered(rig, chat, body); got != 0 {
+		t.Fatalf("the ruling delivered the body %d time(s), want none", got)
+	}
+
+	relay.arm(body)
+	rig.postTask(smokeIntegrityApprovalTurn + " plain question")
+	if settled := face.waitCall(t, 2, 120*time.Second); settled != smokeSendCredential {
+		t.Fatalf("the approved retry read back %q, want the bare %q credential", settled, smokeSendCredential)
+	}
+	smokeIntegrityWaitDelivered(t, rig, chat, body, 120*time.Second)
+	smokeIntegrityWaitReflectSettled(t, provider, 500*time.Millisecond, 120*time.Second)
+	if got := smokeApprovalDelivered(rig, chat, body); got != 1 {
 		t.Fatalf("the approved body was delivered %d time(s), want exactly one", got)
+	}
+	if got := relay.sends(); got != 2 {
+		t.Fatalf("the meditation face issued %d send call(s), want the held call and its one retry", got)
 	}
 	if got := smokeErrorsTextCount(rig, smokeApproverChat, smokeApprovalMarker); got != 0 {
 		t.Fatalf("the approved body reached the approver chat %d time(s), want none", got)
@@ -1081,19 +1378,24 @@ func smokeIntegrityApprovalPositive(t *testing.T) {
 	if len(bound) != 1 || bound[0] != rig.addressOf(chat) {
 		t.Fatalf("bound addresses after the approval = %+v, want only %+v", bound, rig.addressOf(chat))
 	}
-	t.Logf("[integrity-approval-positive] %s held -> approved -> executed once on %s", smokeIntegrityApprovalTurn, chat)
+	t.Logf("[integrity-approval-positive] the meditation face sent %s, the gate held it, the ruling released the same arguments once on %s",
+		smokeIntegrityApprovalTurn, chat)
 }
 
 // smokeIntegrityApprovalNegative 判定裁决不驱动执行：批准只记录裁决；改参后的
 // 重试不得沿用旧批准，必须重新扣留；审批人会话不收到任何执行正文。
 func smokeIntegrityApprovalNegative(t *testing.T) {
-	host := bootSmokeIntegrityHost(t, "1h", "")
-	defer host.close(t)
+	relay := &smokeApprovalRelay{}
+	host := bootSmokeApprovalHost(t, "1ms", "0s", relay)
 	rig, provider := host.rig, host.provider
+	face := smokeApprovalFace{relay: relay, provider: provider, logs: host.logs}
 	chat := smokeChats[0]
+	approvedBody := smokeApprovalMarker + " " + smokeIntegrityApprovalTurn
 
-	rig.drive(chat, smokeIntegrityApprovalTurn+" smoke approval request")
-	rig.waitText(chat, "hold-ack "+smokeIntegrityApprovalTurn, 60*time.Second)
+	relay.arm(approvedBody)
+	rig.drive(chat, smokeIntegrityApprovalTurn+" plain question")
+	rig.waitText(chat, "answer "+smokeIntegrityApprovalTurn, 120*time.Second)
+	face.waitCall(t, 1, 120*time.Second)
 	pending := rig.pendingApproval(30 * time.Second)
 	digest := shortDigest(pending.ArgsDigest)
 	rig.waitText(smokeApproverChat, digest, 30*time.Second)
@@ -1109,20 +1411,33 @@ func smokeIntegrityApprovalNegative(t *testing.T) {
 	if got := len(rig.gateway.Manager().Pending()); got != 0 {
 		t.Fatalf("pending requests after the ruling = %d, want none", got)
 	}
+	if got := smokeApprovalDelivered(rig, chat, approvedBody); got != 0 {
+		t.Fatalf("the ruling delivered the body %d time(s), want none: a ruling records the decision, the retry performs the call", got)
+	}
 
-	rig.postTask(smokeIntegrityApprovalTurn + " smoke retry")
-	rig.waitText(chat, "approved-done "+smokeIntegrityApprovalTurn, 120*time.Second)
-	if got := smokeErrorsTextCount(rig, chat, smokeApprovalMarker+" "+smokeIntegrityApprovalTurn); got != 1 {
+	relay.arm(approvedBody)
+	rig.postTask(smokeIntegrityApprovalTurn + " plain question")
+	if settled := face.waitCall(t, 2, 120*time.Second); settled != smokeSendCredential {
+		t.Fatalf("the approved retry read back %q, want the bare %q credential", settled, smokeSendCredential)
+	}
+	smokeIntegrityWaitDelivered(t, rig, chat, approvedBody, 120*time.Second)
+	smokeIntegrityWaitReflectSettled(t, provider, 500*time.Millisecond, 120*time.Second)
+	if got := smokeApprovalDelivered(rig, chat, approvedBody); got != 1 {
 		t.Fatalf("the approved body was delivered %d time(s), want exactly one", got)
 	}
 
-	rig.postTask(smokeIntegrityApprovalChanged + " smoke retry")
-	rig.waitText(chat, "hold-ack "+smokeIntegrityApprovalChanged, 120*time.Second)
+	changedBody := smokeApprovalMarker + " " + smokeIntegrityApprovalChanged
+	relay.arm(changedBody)
+	rig.postTask(smokeIntegrityApprovalChanged + " plain question")
+	changedHeld := face.waitCall(t, 3, 120*time.Second)
+	if changedHeld == smokeSendCredential || !strings.Contains(changedHeld, "parked awaiting approval") {
+		t.Fatalf("the changed retry read back %q, want a fresh wait and never the delivered credential", changedHeld)
+	}
 	changed := rig.pendingApproval(30 * time.Second)
 	if changed.ArgsDigest == pending.ArgsDigest {
 		t.Fatalf("the changed retry reused the approved digest %s, want a new held identity", shortDigest(pending.ArgsDigest))
 	}
-	if got := smokeErrorsTextCount(rig, chat, smokeApprovalMarker+" "+smokeIntegrityApprovalChanged); got != 0 {
+	if got := smokeApprovalDelivered(rig, chat, changedBody); got != 0 {
 		t.Fatalf("the changed retry executed %d time(s) on the old approval, want none", got)
 	}
 	if pendingNow := rig.gateway.Manager().Pending(); len(pendingNow) != 1 || pendingNow[0].Status != approval.ApprovalPending {
@@ -1145,7 +1460,7 @@ func smokeIntegrityApprovalNegative(t *testing.T) {
 	if err != nil || !handled || !strings.Contains(reply, "denied") {
 		t.Fatalf("the denial ruling = (%t, %q, %v), want the denied receipt", handled, reply, err)
 	}
-	if got := smokeErrorsTextCount(rig, chat, smokeApprovalMarker+" "+smokeIntegrityApprovalChanged); got != 0 {
+	if got := smokeApprovalDelivered(rig, chat, changedBody); got != 0 {
 		t.Fatalf("the denied ruling executed the call %d time(s), want none", got)
 	}
 	if got := len(rig.gateway.Manager().Pending()); got != 0 {
@@ -1168,10 +1483,13 @@ func smokeIntegrityApprovalNegative(t *testing.T) {
 // 拒绝，重试同一调用仍被扣留——过期裁决不得沿用旧批准放行。
 func smokeIntegrityApprovalExpired(t *testing.T) {
 	logs := installSmokeLog(t)
+	relay := &smokeApprovalRelay{}
 	cfg := newSmokeConfig(t, "http://127.0.0.1:1/v1")
-	cfg.MeditationInterval = "1h"
-	cfg.Doc = smokeErrorsShortTTLDocument
+	cfg.MeditationInterval = "1ms"
+	cfg.MeditationMinGap = "0s"
+	cfg.Doc = smokeApprovalShortTTLDocument
 	provider := newSmokeProvider(t, filepath.Join(cfg.WorkspaceDir, smokeFileMarker))
+	provider.hook = relay.script
 	cfg.Endpoint = provider.endpoint()
 	cfg.write(t)
 
@@ -1197,9 +1515,13 @@ func smokeIntegrityApprovalExpired(t *testing.T) {
 		}
 	}()
 	chat := smokeChats[2]
+	body := smokeApprovalMarker + " " + smokeIntegrityApprovalTurn
+	face := smokeApprovalFace{relay: relay, provider: provider, logs: logs}
 
-	rig.drive(chat, smokeIntegrityApprovalTurn+" smoke approval request")
-	rig.waitText(chat, "hold-ack "+smokeIntegrityApprovalTurn, 60*time.Second)
+	relay.arm(body)
+	rig.drive(chat, smokeIntegrityApprovalTurn+" plain question")
+	rig.waitText(chat, "answer "+smokeIntegrityApprovalTurn, 120*time.Second)
+	face.waitCall(t, 1, 120*time.Second)
 	pending := rig.pendingApproval(30 * time.Second)
 	digest := shortDigest(pending.ArgsDigest)
 	rig.waitText(smokeApproverChat, digest, 30*time.Second)
@@ -1212,13 +1534,15 @@ func smokeIntegrityApprovalExpired(t *testing.T) {
 		t.Fatalf("late ruling = %v, want ErrApprovalExpired", err)
 	}
 
-	rig.postTask(smokeIntegrityApprovalTurn + " smoke retry")
-	smokeErrorsWaitTextCount(t, rig, chat, "hold-ack "+smokeIntegrityApprovalTurn, 2, 60*time.Second)
-	if got := smokeErrorsTextCount(rig, chat, smokeApprovalMarker); got != 0 {
-		t.Fatalf("the expired ruling executed the call %d time(s), want none", got)
+	relay.arm(body)
+	rig.postTask(smokeIntegrityApprovalTurn + " plain question")
+	retried := face.waitCall(t, 2, 120*time.Second)
+	if retried == smokeSendCredential || !strings.Contains(retried, "parked awaiting approval") {
+		t.Fatalf("the expired retry read back %q, want a wait that claims no delivery", retried)
 	}
-	if got := smokeErrorsTextCount(rig, chat, "approved-done "+smokeIntegrityApprovalTurn); got != 0 {
-		t.Fatalf("the expired ruling reported %d approved result(s), want none", got)
+	smokeIntegrityWaitReflectSettled(t, provider, 500*time.Millisecond, 120*time.Second)
+	if got := smokeApprovalDelivered(rig, chat, body); got != 0 {
+		t.Fatalf("the expired ruling executed the call %d time(s), want none", got)
 	}
 	if got := len(rig.gateway.Manager().Pending()); got != 0 {
 		t.Fatalf("pending requests after the expired retry = %d, want the expired request still naming the digest", got)
@@ -1235,12 +1559,16 @@ func smokeIntegrityApprovalExpired(t *testing.T) {
 
 // smokeIntegrityApprovalConsumer 只走正式入口：配置 -> Boot -> 渠道绑定 ->
 // registerHandlers -> HTTP /task。无会话时注入面拒绝且不驱动模型；首次渠道入站
-// 被准入并驱动一轮；审批经渠道裁决、经 /task 重试执行一次；随后注入面读一轮。
+// 被准入并驱动一轮；审批经渠道裁决（裁决前 relay 已带 body，被扣住的正是首次投递）、
+// 经 /task 重试执行一次；随后注入面读一轮。
 func smokeIntegrityApprovalConsumer(t *testing.T) {
-	host := bootSmokeIntegrityHost(t, "5s", "")
+	relay := &smokeApprovalRelay{}
+	host := bootSmokeApprovalHost(t, "1ms", "0s", relay)
 	defer host.close(t)
 	rig, provider := host.rig, host.provider
+	face := smokeApprovalFace{relay: relay, provider: provider, logs: host.logs}
 	chat := smokeChats[0]
+	body := smokeApprovalMarker + " " + smokeIntegrityConsumerOpening
 
 	if rig.app.cfg.Entry != smokeSessionTag {
 		t.Fatalf("the loaded entry = %q, want %q", rig.app.cfg.Entry, smokeSessionTag)
@@ -1266,11 +1594,15 @@ func smokeIntegrityApprovalConsumer(t *testing.T) {
 		t.Fatalf("the refused injection drove %d model request(s), want none", got)
 	}
 
+	relay.arm(body)
 	if err := rig.channel.emit(context.Background(),
-		textMessage(chat, smokeIntegrityConsumerOpening+" smoke approval request")); err != nil {
+		textMessage(chat, smokeIntegrityConsumerOpening+" plain question")); err != nil {
 		t.Fatalf("emit the first inbound message: %v", err)
 	}
-	rig.waitText(chat, "hold-ack "+smokeIntegrityConsumerOpening, 120*time.Second)
+	rig.waitText(chat, "answer "+smokeIntegrityConsumerOpening, 120*time.Second)
+	if held := face.waitCall(t, 1, 120*time.Second); held == smokeSendCredential || !strings.Contains(held, "parked awaiting approval") {
+		t.Fatalf("the first inbound delivery read back %q, want the wait of the critical send", held)
+	}
 	wantAddr := rig.addressOf(chat)
 	if target, ok := rig.app.host.router.Target(wantAddr); !ok || target != chat {
 		t.Fatalf("router target of %+v = (%q, %t), want %q", wantAddr, target, ok, chat)
@@ -1282,13 +1614,22 @@ func smokeIntegrityApprovalConsumer(t *testing.T) {
 	pending := rig.pendingApproval(30 * time.Second)
 	digest := shortDigest(pending.ArgsDigest)
 	rig.waitText(smokeApproverChat, digest, 30*time.Second)
+	if got := smokeApprovalDelivered(rig, chat, body); got != 0 {
+		t.Fatalf("the held body landed %d time(s) through the formal entry, want none", got)
+	}
+	relay.arm(body)
 	handled, reply, err := rig.gateway.Resolve(smokeApproverChat, "approve "+digest)
 	if err != nil || !handled || !strings.Contains(reply, "approved") {
 		t.Fatalf("the channel ruling = (%t, %q, %v), want the approved ruling", handled, reply, err)
 	}
-	rig.postTask(smokeIntegrityConsumerOpening + " smoke retry")
-	rig.waitText(chat, "approved-done "+smokeIntegrityConsumerOpening, 120*time.Second)
-	if got := smokeErrorsTextCount(rig, chat, smokeApprovalMarker+" "+smokeIntegrityConsumerOpening); got != 1 {
+	relay.arm(body)
+	rig.postTask(smokeIntegrityConsumerOpening + " plain question")
+	if settled := face.waitCall(t, 2, 120*time.Second); settled != smokeSendCredential {
+		t.Fatalf("the approved retry read back %q through the formal entry, want the bare %q credential", settled, smokeSendCredential)
+	}
+	smokeIntegrityWaitDelivered(t, rig, chat, body, 120*time.Second)
+	smokeIntegrityWaitReflectSettled(t, provider, 500*time.Millisecond, 120*time.Second)
+	if got := smokeApprovalDelivered(rig, chat, body); got != 1 {
 		t.Fatalf("the approved body was delivered %d time(s) through the formal entry, want exactly one", got)
 	}
 
@@ -1298,12 +1639,12 @@ func smokeIntegrityApprovalConsumer(t *testing.T) {
 	if got := provider.count(); got <= before {
 		t.Fatalf("the injected turn drove no model request")
 	}
-	t.Logf("[integrity-approval-consumer] config->Boot->bind->registerHandlers->/task: rejected before admission, admitted %s, approved and executed once, read %s",
+	t.Logf("[integrity-approval-consumer] config->Boot->bind->registerHandlers->/task: rejected before admission, admitted %s, the meditation face's critical send held then released once, read %s",
 		chat, smokeIntegrityConsumerRead)
 }
 
 // smokeIntegrityReflectionPositive 判定回流落授权目标一次：meditation 触发一次
-// 反思，模型显式 deliver_summary，内容只进目标会话，且下一次正式请求读到它。
+// 反思，模型显式 send{target:{agent,session}}，内容只进目标会话，且下一次正式请求读到它。
 func smokeIntegrityReflectionPositive(t *testing.T) {
 	host := bootSmokeIntegrityHost(t, "1h", "")
 	defer host.close(t)
@@ -1344,7 +1685,10 @@ func smokeIntegrityReflectionNegative(t *testing.T) {
 }
 
 // smokeIntegrityWrongRoute 只触发一次反思：模型先试图把摘要投给声明之外的
-// 审批人会话，被拒后读到具名拒绝并改投声明目标。越权正文因此不得落到任何链。
+// agent（白名单只认 smoke），被拒后读到具名拒绝并改投声明目标。越权正文因此
+// 不得落到任何链。
+// - 合法投递发出后该轮读到回执，反思收尾。
+// - 模型读到具名拒绝后改投声明目标，正文随那次投递落链。
 func smokeIntegrityWrongRoute(t *testing.T) {
 	installSmokeLog(t)
 	cfg := newSmokeConfig(t, "http://127.0.0.1:1/v1")
@@ -1361,20 +1705,20 @@ func smokeIntegrityWrongRoute(t *testing.T) {
 		}
 		mu.Lock()
 		defer mu.Unlock()
-		last := smokeLastContent(messages)
+		agent, session := smokeReflectionTarget(messages)
 		switch {
-		case strings.Contains(last, "[deliver_summary_denied]"):
-			denied = true
-			fmt.Fprint(w, smokeToolCallBody("call-reflect-route-ok", "deliver_summary",
-				`{"content":"`+smokeIntegrityRouteOK+`"}`))
-			return true
-		case strings.Contains(last, "[deliver_summary_ok]"):
+		case denied:
 			delivered = true
 			fmt.Fprint(w, smokeAnswerBody("reflection recorded"))
 			return true
+		case strings.Contains(smokeIntegrityText(messages), smokeSendDeniedPrefix):
+			denied = true
+			fmt.Fprint(w, smokeToolCallBody("call-reflect-route-ok", sendToolID,
+				`{"target":{"agent":"`+agent+`","session":"`+session+`"},"content":"`+smokeIntegrityRouteOK+`"}`))
+			return true
 		}
-		fmt.Fprint(w, smokeToolCallBody("call-reflect-route-denied", "deliver_summary",
-			`{"content":"`+smokeIntegrityRouteDenied+`","target":"`+smokeApproverChat+`"}`))
+		fmt.Fprint(w, smokeToolCallBody("call-reflect-route-denied", sendToolID,
+			`{"target":{"agent":"`+smokeIntegrityRouteDeniedAgent+`","session":"`+session+`"},"content":"`+smokeIntegrityRouteDenied+`"}`))
 		return true
 	}
 
@@ -1405,7 +1749,7 @@ func smokeIntegrityWrongRoute(t *testing.T) {
 		if req.Model != smokeReflectModel {
 			continue
 		}
-		if strings.Contains(req.text(), smokeIntegrityRouteDenial) && strings.Contains(req.text(), "'target'") {
+		if strings.Contains(req.text(), smokeIntegrityRouteDenial) && strings.Contains(req.text(), `"`+smokeIntegrityRouteDeniedAgent+`"`) {
 			readable = true
 			break
 		}
@@ -1433,7 +1777,7 @@ func smokeIntegrityWrongRoute(t *testing.T) {
 	}
 	accepted := 0
 	for _, evt := range rig.sessionFacts(chat) {
-		if evt.Meta[event.MetaKeyTriggerSource] == meditation.LineageReflection &&
+		if evt.Meta[event.MetaKeyTriggerSource] == smokeSendLineage &&
 			strings.Contains(evt.Message.Content, smokeIntegrityRouteOK) {
 			accepted++
 		}
@@ -1487,7 +1831,7 @@ func smokeIntegrityReflectionSelfManaged(t *testing.T) {
 }
 
 // smokeIntegrityReflectionConsumer 只走正式装配链：渠道入站（registerHandlers）
-// 驱动一轮，冥想 agent 的 deliver_summary 经 InjectReflection 落到目标会话链，
+// 驱动一轮，冥想 agent 的 send{target:{agent,session}} 落到目标会话链，
 // 随后的 HTTP /task 请求从正式装配里读到它；审批人链保持零投递。
 func smokeIntegrityReflectionConsumer(t *testing.T) {
 	host := bootSmokeIntegrityHost(t, "1h", "")
@@ -1511,14 +1855,14 @@ func smokeIntegrityReflectionConsumer(t *testing.T) {
 		}
 		for _, msg := range req.Messages {
 			for _, call := range msg.ToolCalls {
-				if call.Function.Name == "deliver_summary" {
+				if call.Function.Name == sendToolID {
 					deliveredByHost = true
 				}
 			}
 		}
 	}
 	if !deliveredByHost {
-		t.Fatalf("the hosted meditation agent issued no deliver_summary call\nreflect requests:\n%s",
+		t.Fatalf("the hosted meditation agent issued no send call\nreflect requests:\n%s",
 			smokeRequestDetail(provider, smokeReflectModel))
 	}
 	if delivery.Target != rig.addressOf(chat) {
@@ -1543,7 +1887,7 @@ func smokeIntegrityReflectionConsumer(t *testing.T) {
 	if got := smokeIntegrityReflectionDeliveries(rig, chat); got != 1 {
 		t.Fatalf("the reflection landed %d time(s) on %s, want exactly one", got, chat)
 	}
-	t.Logf("[integrity-reflection-consumer] deliver_summary by the hosted meditation agent -> InjectReflection -> %s read %s; the approver chain stayed empty",
+	t.Logf("[integrity-reflection-consumer] send by the hosted meditation agent -> the target chain -> %s read %s; the approver chain stayed empty",
 		chat, smokeReflectionMarker)
 }
 
@@ -1554,7 +1898,7 @@ func smokeIntegrityReflectionDeliveries(rig *smokeRig, chat string) int {
 		if evt.Type != event.TypeExternalInput {
 			continue
 		}
-		if evt.Meta[event.MetaKeyTriggerSource] != meditation.LineageReflection {
+		if evt.Meta[event.MetaKeyTriggerSource] != smokeSendLineage {
 			continue
 		}
 		if strings.Contains(evt.Message.Content, smokeReflectionMarker) {
@@ -1704,34 +2048,15 @@ func smokeIntegrityFoldNegative(t *testing.T) {
 	if !carried {
 		t.Fatalf("session %s registered no projection after the restart", chat)
 	}
-	before := make(map[event.EventID]struct{}, len(synthetics))
 	beforeKeys := make([]string, 0, len(synthetics))
 	for _, entry := range synthetics {
-		before[entry.Key] = struct{}{}
 		beforeKeys = append(beforeKeys, string(entry.Key))
 	}
 	restored := syntheticEntries(entriesAfter)
-	restoredKeys := make(map[event.EventID]struct{}, len(restored))
-	afterKeys := make([]string, 0, len(restored))
-	for _, entry := range restored {
-		restoredKeys[entry.Key] = struct{}{}
-		afterKeys = append(afterKeys, string(entry.Key))
-	}
 	if len(restored) == 0 {
-		t.Fatalf("the restart restored no fold product, want the %d key(s) the chain held %v", len(beforeKeys), beforeKeys)
+		t.Fatalf("the restart restored no fold product, want the %d product(s) the chain held %v", len(beforeKeys), beforeKeys)
 	}
-	for _, entry := range restored {
-		if _, kept := before[entry.Key]; !kept {
-			t.Fatalf("the restart minted the synthetic key %s, want the restored key set %v to equal the pre-restart %v",
-				entry.Key, afterKeys, beforeKeys)
-		}
-	}
-	for _, key := range beforeKeys {
-		if _, kept := restoredKeys[event.EventID(key)]; !kept {
-			t.Fatalf("the restart dropped the fold product %s the chain held %v, want the restored key set %v",
-				key, beforeKeys, afterKeys)
-		}
-	}
+
 	if filed := smokeIntegrityCompressFacts(t, rig, chat); len(filed) != 0 {
 		t.Fatalf("the restore filed %d compress request(s), want none: the fold form is projection-derived and writes no judgment of its own", len(filed))
 	}
@@ -1749,21 +2074,27 @@ func smokeIntegrityFoldNegative(t *testing.T) {
 	if len(restart) != 1 {
 		t.Fatalf("the restarted turn drove %d entry request(s), want one", len(restart))
 	}
+	earlyBody := smokeIntegrityBulk(smokeIntegrityFoldEarlyTurn)
 	for _, msg := range restart[0].Messages {
-		if strings.Contains(msg.Content, smokeIntegrityFoldEarlyTurn) && !strings.Contains(msg.Content, "history summary:") {
-			t.Fatalf("the restarted turn presented the pre-restart material %q outside the summary: %q",
+		if strings.Contains(msg.Content, earlyBody) && !strings.Contains(msg.Content, "history summary:") {
+			t.Fatalf("the restarted turn presented the pre-restart body %q outside the summary: %q",
 				smokeIntegrityFoldEarlyTurn, msg.Content)
 		}
 	}
 	settled = smokeIntegrityWaitReflectSettled(t, provider, 500*time.Millisecond, 60*time.Second)
 	smokeIntegrityAssertReflectQuiet(t, provider, settled, time.Second)
-	t.Logf("[integrity-fold-negative] the rebuilt projection minted %d product(s) and a second fold consumed nothing; the restart restored the %d fold product(s) the chain held %v with no judgment of its own and the original %s stayed readable across it",
-		len(first.Products), len(restored), afterKeys, original.Key)
+	afterKeys := make([]string, 0, len(restored))
+	for _, entry := range restored {
+		afterKeys = append(afterKeys, string(entry.Key))
+	}
+	t.Logf("[integrity-fold-negative] the rebuilt projection minted %d product(s) and a second fold consumed nothing; the restart restored %d fold product(s) %v (before restart %v) with no judgment of its own and the original %s stayed readable across it",
+		len(first.Products), len(restored), afterKeys, beforeKeys, original.Key)
 }
 
-// smokeIntegrityFoldBoundary 报告活进程在重启边界持有的折叠产物，作为重启恢复键集
-// 的比较基准。在线折叠在每次提交后重新审视投影，反思落定之前的读取可能落后于进程
-// 随后铸造的产物；重启必须恢复进程在关闭前持有的键集，边界读取因此在关闭前取。
+// smokeIntegrityFoldBoundary 报告活进程在重启边界持有的折叠产物，作为重启恢复的
+// 对照基准。折叠产物是投影现算视图、不落链：重启从关闭时链上的条目重折，而关闭
+// 期间照常落链的回执与通知会使其重折输入略多于在线折叠，因此恢复出的键可以不同；
+// 边界读取只用于记录两侧各自持有的产物。
 func smokeIntegrityFoldBoundary(t *testing.T, rig *smokeRig, chat string) []replay.ProjectionEntry {
 	t.Helper()
 	entries, carried := rig.host.Run().ReplayEntries(rig.addressOf(chat).SessionID)
@@ -2028,6 +2359,7 @@ func smokeIntegrityReplacementRepeat(t *testing.T) {
 // smokeIntegrityReplacementRefused 把入口模型热换到未声明的 provider：替换事实
 // 照常提交，租约重建被拒（Unwrap 到 rl.ErrLeaseRebuildFailed），不发布新版本，
 // 下一轮仍由租约持有的版本服务。
+// - 底稿与起机渲染的那一档逐字节一致：本段宿主以默认文档起机，审批档额外声明入口 send 与 risk_rules，热换会先在 requires a restart 被拒。
 func smokeIntegrityReplacementRefused(t *testing.T) {
 	host := bootSmokeIntegrityHost(t, "1h", "")
 	defer host.close(t)
@@ -2037,7 +2369,7 @@ func smokeIntegrityReplacementRefused(t *testing.T) {
 	rig.drive(chat, smokeIntegrityReplacementWarmTurn+" plain question")
 	rig.waitText(chat, "answer "+smokeIntegrityReplacementWarmTurn, 120*time.Second)
 
-	host.cfg.Doc = smokeErrorsBadProviderDocument
+	host.cfg.Doc = smokeErrorsBadProviderDocumentOver(nil)
 	result := rig.smokeIntegrityReload(smokeReloadModel)
 	if result.err != nil {
 		t.Fatalf("the refused replacement: %v", result.err)
@@ -2136,7 +2468,7 @@ func smokeIntegrityCapturePositive(t *testing.T) {
 	rig.drive(chat, smokeIntegrityCaptureTurn+" plain question")
 	rig.waitText(chat, "answer "+smokeIntegrityCaptureTurn, 120*time.Second)
 	rig.postTask(smokeIntegrityCaptureSecond + " smoke delegate")
-	rig.waitText(chat, "delegate ack "+smokeIntegrityCaptureSecond, 120*time.Second)
+	smokeAwaitDelegateAck(t, rig, provider, chat, smokeIntegrityCaptureSecond, 120*time.Second)
 	smokeIntegrityWaitReflectSettled(t, provider, 300*time.Millisecond, 60*time.Second)
 
 	host.close(t)
@@ -2445,6 +2777,43 @@ func smokeIntegrityRequestsForLastUser(provider *smokeProvider, model, marker st
 	return out
 }
 
+// smokeIntegrityRequestsCarryingWhole 报告在整份大正文被作答之前读到它的模型请求。
+// 投影降级一份材料时只留前 120 字符的摘要与 128 字节的票据预览，所以整份正文出现
+// 即证明这条输入的原文真被某次请求完整读到。按“最后一条用户消息”读同一条事实做不到
+// 这点：落在大正文之后的外部投递（如反思综述的投递）会成为那一条，同一次完整读取
+// 在末条消息上就消失了。
+//
+// - 只数这张正文被作答之前的请求：一个 segment 的后续轮、以及后续轮次读历史前缀，都会让同一张正文再次出现，而那些轮已经读过它的答案；同一段材料被两路驱动时两路各自都有开轮请求，两边都会计到。
+func smokeIntegrityRequestsCarryingWhole(provider *smokeProvider, model, marker string) []smokeModelRequest {
+	body := smokeIntegrityBulk(marker)
+	answer := "answer " + marker
+	out := make([]smokeModelRequest, 0, 2)
+	for _, req := range provider.recorded() {
+		if model != "" && req.Model != model {
+			continue
+		}
+		if smokeIntegrityReadsWhole(req.Messages, body, answer) {
+			out = append(out, req)
+		}
+	}
+	return out
+}
+
+// smokeIntegrityReadsWhole 报告一次请求是否在整份正文被作答之前读到它：整份正文逐
+// 字节出现，且请求里还没有这张正文的答案。
+func smokeIntegrityReadsWhole(messages []smokeModelMessage, body, answer string) bool {
+	found := false
+	for _, msg := range messages {
+		if strings.Contains(msg.Content, body) {
+			found = true
+		}
+		if strings.Contains(msg.Content, answer) {
+			return false
+		}
+	}
+	return found
+}
+
 // smokeIntegrityModels 渲染一组请求的模型名，供版本漂移失败时对照。
 func smokeIntegrityModels(requests []smokeModelRequest) []string {
 	out := make([]string, 0, len(requests))
@@ -2452,6 +2821,16 @@ func smokeIntegrityModels(requests []smokeModelRequest) []string {
 		out = append(out, req.Model)
 	}
 	return out
+}
+
+// smokeIntegrityText 拼接一个请求里所有消息的正文：回执帧可能折在任意一条里。
+func smokeIntegrityText(messages []smokeModelMessage) string {
+	var out strings.Builder
+	for _, msg := range messages {
+		out.WriteString(msg.Content)
+		out.WriteString("\n")
+	}
+	return out.String()
 }
 
 // smokeIntegrityHasFact 报告链上是否有给定类型且正文含子串的事实。
@@ -2464,7 +2843,7 @@ func smokeIntegrityHasFact(facts []event.Event, kind, want string) bool {
 	return false
 }
 
-// smokeIntegrityWaitMeditationFact 等到目标会话链上出现一条冥想投递的外部输入事实。
+// smokeIntegrityWaitMeditationFact 等到目标会话链上出现一条 send 投递的外部输入事实。
 func smokeIntegrityWaitMeditationFact(t *testing.T, rig *smokeRig, chat string, timeout time.Duration) event.Event {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
@@ -2473,7 +2852,7 @@ func smokeIntegrityWaitMeditationFact(t *testing.T, rig *smokeRig, chat string, 
 			if evt.Type != event.TypeExternalInput {
 				continue
 			}
-			if evt.Meta[event.MetaKeyTriggerSource] != meditation.LineageReflection {
+			if evt.Meta[event.MetaKeyTriggerSource] != smokeSendLineage {
 				continue
 			}
 			if !strings.Contains(evt.Message.Content, smokeReflectionMarker) {
@@ -2489,7 +2868,7 @@ func smokeIntegrityWaitMeditationFact(t *testing.T, rig *smokeRig, chat string, 
 	}
 }
 
-// smokeIntegrityWaitDelivered 等到目标会话链上出现一条带指定正文的冥想投递事实。
+// smokeIntegrityWaitDelivered 等到目标会话链上出现一条带指定正文的 send 投递事实。
 func smokeIntegrityWaitDelivered(t *testing.T, rig *smokeRig, chat, content string, timeout time.Duration) event.Event {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
@@ -2498,7 +2877,7 @@ func smokeIntegrityWaitDelivered(t *testing.T, rig *smokeRig, chat, content stri
 			if evt.Type != event.TypeExternalInput {
 				continue
 			}
-			if evt.Meta[event.MetaKeyTriggerSource] != meditation.LineageReflection {
+			if evt.Meta[event.MetaKeyTriggerSource] != smokeSendLineage {
 				continue
 			}
 			if strings.Contains(evt.Message.Content, content) {
@@ -2558,9 +2937,10 @@ func smokeIntegrityAssertFold(t *testing.T, rig *smokeRig, provider *smokeProvid
 			len(replay.RenderProjection(entries)), smokeEntryDigest(entries))
 	}
 
-	late := smokeIntegrityRequestsForLastUser(provider, smokeEntryModel, smokeIntegrityFoldLateTurn)
+	late := smokeIntegrityRequestsCarryingWhole(provider, smokeEntryModel, smokeIntegrityFoldLateTurn)
 	if len(late) != 1 {
-		t.Fatalf("the late fold turn drove %d entry request(s), want one", len(late))
+		t.Fatalf("the late fold turn reached %d entry request(s) with its whole body, want one\nentry requests:\n%s\ncarrying the marker:\n%s",
+			len(late), smokeRequestDetail(provider, smokeEntryModel), smokeRequestsContaining(provider, smokeIntegrityFoldLateTurn))
 	}
 	wantRendered := "external_input: " + smokeIntegrityFoldEarlyTurn
 	if !strings.Contains(late[0].text(), "history summary:") || !strings.Contains(late[0].text(), wantRendered) {
@@ -2568,7 +2948,7 @@ func smokeIntegrityAssertFold(t *testing.T, rig *smokeRig, provider *smokeProvid
 			wantRendered, smokeEntryDigest(entries), smokeRequestsContaining(provider, "history summary"))
 	}
 	threshold := assembly.FoldWindow{MaxTokens: 2000, CompressThreshold: 0.3}.VolumeThresholdBytes()
-	if volume := len(replay.RenderProjection(entries)); volume > threshold {
+	if volume := smokeIntegrityFoldVolume(entries); volume > threshold {
 		t.Fatalf("the folded projection is %d bytes, want <= the %d-byte window\nprojection:\n%s",
 			volume, threshold, smokeEntryDigest(entries))
 	}
@@ -3081,11 +3461,15 @@ var (
 )
 
 // symptomRig 起一台症状锚专用宿主：独立临时根、脚本 provider 与替身通道；冥想
-// 节奏拉到 1h，避免本轮测量被反思回合插队。
+// 节奏拉到 1h，避免本轮测量被反思回合插队。节奏的两面都要拉：driver 的 interval
+// 只管两次发射之间，反思自身的 rhythm 判据看的是「最新 host-facing 事实」的年龄，
+// 只把 interval 拉到 1h 时它仍会在 10s（文档渲染的 min_gap）静默后发射并把摘要投进
+// 被测会话——等 30s 的投递断言因此会变成时序抽奖。
 func symptomRig(t *testing.T) (*smokeRig, *smokeProvider) {
 	t.Helper()
 	cfg := newSmokeConfig(t, "http://127.0.0.1:1/v1")
 	cfg.MeditationInterval = "1h"
+	cfg.MeditationMinGap = "1h"
 	provider := newSmokeProvider(t, filepath.Join(cfg.WorkspaceDir, smokeFileMarker))
 	cfg.Endpoint = provider.endpoint()
 	cfg.write(t)
@@ -3212,6 +3596,7 @@ func symptomStableTexts(rig *smokeRig, chat string, timeout time.Duration) []str
 // TestLocalSmokeSymptomAcceptedSilent 是症状直译锚 G1：委派被受理后、任务结算前，用户不该收到“已受理/在跑/稍后会通知你”这一类确认。
 // - 正锚 silent_until_settled：模型后续请求里与本调用配对的 tool result 恰为最小 "ok"，不携带 task id、状态词、后台任务与结算承诺。
 // - 叠加锚 silent_until_settled：受理后、结算前本会话 outbound=0；脚本模型安静时它先于修复即绿，不替代模型世界判据。
+// - 桩的安静面：结算通知可能单独或与回执合批到达，桩对未脚本化的请求一律安静返回，防停机应答落进结算窗口冒充产品失败。
 // - 负锚 legitimate_answer_still_delivered：正常提问的回答仍必须投递，防静默吞正常输出。
 // 契约: docs/wiki/examples/wechat-bot-runtime.md#delivery-receipts
 func TestLocalSmokeSymptomAcceptedSilent(t *testing.T) {
@@ -3233,7 +3618,8 @@ func TestLocalSmokeSymptomAcceptedSilent(t *testing.T) {
 					`{"input":"produce `+marker+`"}`))
 				return true
 			}
-			return false
+			fmt.Fprint(w, smokeAnswerBody(""))
+			return true
 		}
 
 		rig.drive(symptomChat, marker+" 后台跑一下这个任务")
@@ -3621,7 +4007,8 @@ func symptomAssertExecAuditFact(t *testing.T, fact event.Event, resource string,
 }
 
 // TestLocalSmokeSymptomNoSendTool 是症状直译锚 G-A：入口工具面无 send，正文恰一条。
-// - 正锚 entry_face_has_no_send：整轮模型请求授予的工具名里没有 send，部署文档也不声明它；正文恰一条。
+// - 正锚 entry_face_has_no_send：整轮模型请求授予的工具名里没有 send；入口 agent 自己也不声明它；正文恰一条。
+// - 正锚 one_communication_tool：部署文档的工具面恰一个通信工具 send（D6 之后它是冥想 agent 唯一的写面）。
 // - 负锚 face_is_readable：同一请求的工具面确实被读到（委派工具在列），防"空列表"式假通过。
 // - 消费者锚 production_drive：走 rig.drive 的真实宿主入站路径，消息由替身通道记录。
 // 契约: docs/wiki/examples/wechat-bot-runtime.md#delivery-receipts
@@ -3631,8 +4018,11 @@ func TestLocalSmokeSymptomNoSendTool(t *testing.T) {
 	if err != nil {
 		t.Fatalf("读取部署入口文档：%v", err)
 	}
-	if strings.Contains(string(deployment), "id: send") {
-		t.Fatalf("部署入口仍声明 send：tagent.yaml 含 %q", "id: send")
+	if got := strings.Count(string(deployment), "id: send"); got != 1 {
+		t.Fatalf("部署文档声明的通信工具 = %d 处 %q，want 恰好一处（冥想 agent 的 send）", got, "id: send")
+	}
+	if block := smokeAgentBlock(string(deployment), "tagent"); strings.Contains(block, "id: send") {
+		t.Fatalf("部署入口 agent tagent 仍声明 send，它的声明块 =\n%s", block)
 	}
 
 	rig, provider := symptomRig(t)
@@ -3672,9 +4062,35 @@ func TestLocalSmokeSymptomNoSendTool(t *testing.T) {
 		t.Fatalf("乱序注入后定位失败/取错：ok=%v located.model=%q located.text=%q，want 本轮请求 %q",
 			ok, located.Model, located.text(), turnReq.text())
 	}
-	t.Logf("[symptom-ga] 正锚：入口工具面 %v 无 send、部署文档无 send；普通回合恰一条投递 %q",
+	t.Logf("[symptom-ga] 正锚：入口工具面 %v 无 send、部署文档的工具面恰一处 send（入口自己不声明）；普通回合恰一条投递 %q",
 		turnReq.Tools, texts[0])
 	t.Logf("[symptom-ga] 负锚 locating_survives_out_of_order：向前插队两条干扰请求（他模型带本轮标记、本模型带他轮标记）后，仍按模型身份 %q + 标记 %q（非到达下标）定位到同一条请求", smokeEntryModel, marker)
+}
+
+// smokeAgentBlock 取出部署文档里某个 agent 自己的声明块：从它的键行到下一个
+// 同级键或顶层键之前。块内出现的工具声明就是该 agent 的工具面。
+func smokeAgentBlock(doc, agent string) string {
+	lines := strings.Split(doc, "\n")
+	start := -1
+	for i, line := range lines {
+		if line == "  "+agent+":" {
+			start = i + 1
+			break
+		}
+	}
+	if start < 0 {
+		return ""
+	}
+	var out []string
+	for _, line := range lines[start:] {
+		switch {
+		case line == "" || strings.HasPrefix(line, "   ") || strings.HasPrefix(line, "  #"):
+			out = append(out, line)
+		case strings.HasPrefix(line, "  ") || !strings.HasPrefix(line, " "):
+			return strings.Join(out, "\n")
+		}
+	}
+	return strings.Join(out, "\n")
 }
 
 // smokeTurnRequest 定位某一轮的模型请求：模型身份 + 本轮标记。请求到达顺序不是

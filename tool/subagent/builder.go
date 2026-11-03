@@ -8,12 +8,17 @@ package subagent
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
 
 	"github.com/SpellingDragon/tagent/features/rl"
 	"github.com/SpellingDragon/tagent/runtime/agent"
+	"github.com/SpellingDragon/tagent/runtime/state"
+	"github.com/SpellingDragon/tagent/runtime/task"
 
 	trpcagent "trpc.group/trpc-go/trpc-agent-go/agent"
 	"trpc.group/trpc-go/trpc-agent-go/agent/llmagent"
@@ -23,6 +28,7 @@ import (
 	"trpc.group/trpc-go/trpc-agent-go/session"
 	"trpc.group/trpc-go/trpc-agent-go/skill"
 	trpctool "trpc.group/trpc-go/trpc-agent-go/tool"
+	toolskill "trpc.group/trpc-go/trpc-agent-go/tool/skill"
 )
 
 // ModelResolver resolves one model reference name into the model it names.
@@ -53,10 +59,11 @@ type Builder struct {
 	// Sessions is the session service a delegated turn runs on; nil gives every turn
 	// an in-memory session service of its own.
 	Sessions session.Service
-	// Facts reads the committed fact one handoff reference names, so the block a
-	// delegated turn receives carries the content of each ref under the projection
-	// budget instead of its bare identity. A builder beside no reader renders the
-	// identities alone, exactly as it did before the reader existed.
+	// Facts reads the committed fact one handoff reference names: the delegated
+	// round resolves the references of its call into the materials it commits, and
+	// the external face renders the content of each ref under the projection budget
+	// instead of its bare identity. A builder beside no reader resolves no material
+	// and renders the identities alone, exactly as it did before the reader existed.
 	Facts FactReader
 	// RefBudget is the token budget the handoff refs render under; zero keeps the
 	// package default, the budget unit the request assembly packs under.
@@ -103,22 +110,6 @@ type Turn struct {
 	Handoff *agent.HandoffEnvelope
 }
 
-// request returns the input one delegated turn hands its agent: the external-context
-// block of the handoff in front of the natural-language request when the turn carries
-// one, and the request alone when it carries none. A handoff carrying refs renders each
-// of them with the fact it names under the refs budget, so the block carries content
-// and not the bare identities; a turn carrying none renders exactly as it always did.
-func (t Turn) request(ctx context.Context, facts FactReader, budget int) string {
-	if t.Handoff == nil {
-		return t.Input
-	}
-	block := externalContext(ctx, *t.Handoff, facts, budget)
-	if t.Input == "" {
-		return block
-	}
-	return block + "\n" + t.Input
-}
-
 // Build returns the live agent one assembly describes: the model, the skill repository,
 // the tools and the MCP tool sets the assembly names are resolved through the injected
 // resolvers and handed to the tRPC builder, and a reference that cannot be resolved
@@ -162,6 +153,46 @@ func (b Builder) Build(ctx context.Context, a *Assembly) (trpcagent.Agent, error
 	return llmagent.New(a.Name, opts...), nil
 }
 
+// Bind resolves the live material one assembly binds a delegated turn to: the model the
+// assembly names, wrapped with the capture scope and the declared sampling every request
+// of that turn carries, beside the tools the assembly declares and the skill and MCP
+// faces it declares. The binding is what the resident instance of the delegated execution
+// site decides on, so the turn runs on the sub-agent's own material rather than on a
+// generation a declared agent holds.
+//
+// The declared skill repository and MCP tool sets ride the binding's tool-set connection:
+// a delegated turn assembles its own requests from the binding, so the skill load tool
+// fixes the body it read on the same resources the request assembly publishes, and the
+// tools of a resolved MCP server are registered beside them. A declared face the builder
+// holds no resolver for is refused by name.
+func (b Builder) Bind(ctx context.Context, a *Assembly) (state.AgentBinding, error) {
+	if a == nil {
+		return state.AgentBinding{}, ErrAssemblyMissing
+	}
+	model, err := b.resolveModel(ctx, a)
+	if err != nil {
+		return state.AgentBinding{}, err
+	}
+	bound := state.AgentBinding{
+		Model: withSampling(withCapture(model, a.Name, b.Capture), a.Definition),
+	}
+	if len(a.Tools) > 0 {
+		tools, err := b.resolveTools(ctx, a.Tools)
+		if err != nil {
+			return state.AgentBinding{}, err
+		}
+		bound.Tools = tools
+	}
+	face, err := b.bindFaces(ctx, a)
+	if err != nil {
+		return state.AgentBinding{}, err
+	}
+	if face != nil {
+		bound.Set = face
+	}
+	return bound, nil
+}
+
 // Serve builds the agent of one assembly and runs one turn of it through the tRPC
 // runner, reporting the assistant text the turn ended on. The runner owns the session
 // append of the turn, so a turn that ends never waits on a completion no one signals.
@@ -178,7 +209,7 @@ func (b Builder) Serve(ctx context.Context, a *Assembly, turn Turn) (TurnResult,
 	driven := runner.NewRunner(a.Name, built, opts...)
 	defer func() { _ = driven.Close() }()
 	var input trpcmodel.Message
-	if content := turn.request(ctx, b.Facts, b.RefBudget); content != "" {
+	if content := externalMaterial(ctx, turn, b.Facts); content != "" {
 		input = trpcmodel.NewUserMessage(content)
 	}
 	events, err := driven.Run(ctx, turn.UserID, turn.SessionID, input)
@@ -273,4 +304,104 @@ func (b Builder) resolveToolSets(ctx context.Context, names []string) ([]trpctoo
 		return nil, fmt.Errorf("subagent: mcp %v: %w", names, err)
 	}
 	return sets, nil
+}
+
+// bindFaces resolves the skill and MCP faces one assembly declares into the tool-set
+// connection a delegated binding carries, and reports no connection when the assembly
+// declares neither. The resources hold the load tool of the declared skills beside the
+// tools of the declared MCP servers, and the request assembly reads the bodies a load
+// fixed off exactly these resources: a delegated turn mounts no tRPC agent, so the load
+// state flows back through the binding rather than through a state delta.
+func (b Builder) bindFaces(ctx context.Context, a *Assembly) (*state.ToolResources, error) {
+	if len(a.Skills) == 0 && len(a.MCP) == 0 {
+		return nil, nil
+	}
+	var sets []trpctool.ToolSet
+	if len(a.MCP) > 0 {
+		resolved, err := b.resolveToolSets(ctx, a.MCP)
+		if err != nil {
+			return nil, err
+		}
+		sets = resolved
+	}
+	face := state.NewToolResources(a.Name, sets...)
+	for _, set := range sets {
+		if set == nil {
+			continue
+		}
+		face.Register(state.ToolKindFunction, set.Name(), set.Tools(ctx)...)
+	}
+	if len(a.Skills) > 0 {
+		repository, err := b.resolveSkills(ctx, a.Skills)
+		if err != nil {
+			return nil, err
+		}
+		loader := &skillLoadTool{inner: toolskill.NewLoadTool(repository), repo: repository, resources: face}
+		face.Register(state.ToolKindSkill, strings.Join(a.Skills, ","), loader)
+	}
+	return face, nil
+}
+
+// skillLoadTool is the request-boundary glue of the framework skill load tool on a
+// delegated binding: the framework declaration beside the read that goes through the
+// skill repository and fixes what it read on the binding's tool resources. The scanner
+// and the parsing stay inside the framework, and the body a load fixed reaches the next
+// decision of the delegated turn as system material of its request.
+type skillLoadTool struct {
+	inner     *toolskill.LoadTool
+	repo      skill.Repository
+	resources *state.ToolResources
+}
+
+// Declaration returns the declaration of the framework skill load tool.
+func (t *skillLoadTool) Declaration() *trpctool.Declaration {
+	return t.inner.Declaration()
+}
+
+// Call fixes the named skill at the request boundary it is called on and answers with
+// the load it recorded: the first load of one skill in a request reads and fixes the
+// body, the loads that follow in the same request answer from that fixed view, and the
+// next request reads anew.
+func (t *skillLoadTool) Call(ctx context.Context, jsonArgs []byte) (any, error) {
+	var in struct {
+		Skill string `json:"skill"`
+	}
+	if err := json.Unmarshal(jsonArgs, &in); err != nil {
+		return nil, fmt.Errorf("invalid args: %w", err)
+	}
+	if in.Skill == "" {
+		return nil, errors.New("skill is required")
+	}
+	requestID, agent := "", ""
+	if frame, ok := task.CallFrameFrom(ctx); ok {
+		requestID = string(frame.Identity.DecisionID)
+		agent = string(frame.Address.AgentID)
+	}
+	load, err := t.resources.FixateSkillLoad(requestID, agent, in.Skill, t.read)
+	if err != nil {
+		return nil, err
+	}
+	return fmt.Sprintf("loaded: %s", load.Skill), nil
+}
+
+// read reads one skill body through the framework skill repository at the request
+// boundary and reports the content version it fixes.
+func (t *skillLoadTool) read(name string) (state.SkillLoad, error) {
+	if refreshable, ok := t.repo.(skill.RefreshableRepository); ok {
+		if err := refreshable.Refresh(); err != nil {
+			return state.SkillLoad{}, fmt.Errorf("refresh the skill repository: %w", err)
+		}
+	}
+	got, err := t.repo.Get(name)
+	if err != nil {
+		return state.SkillLoad{}, fmt.Errorf("unknown skill: %s", name)
+	}
+	return state.SkillLoad{Body: got.Body, Version: skillContentVersion(got.Body)}, nil
+}
+
+// skillContentVersion reports the content version of one skill body fixed at a request
+// boundary: the version names exactly that body and never a structural generation.
+func skillContentVersion(body string) string {
+	sum := sha256.Sum256([]byte(body))
+	return hex.EncodeToString(sum[:])
 }

@@ -7,7 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"strings"
+	"strconv"
 	"testing"
 	"time"
 
@@ -39,7 +39,7 @@ type reloadAnswer struct {
 // TestReloadEndpointSwapsModel moves the declared model and posts the reload endpoint:
 //   - the first turn is served by the model the boot document names
 //   - the endpoint answers the judged move from the version in effect to the new one
-//   - the replacement fact is committed under the configuration source and the versions
+//   - the model configuration change is committed under the configuration source and the versions
 //   - the lease installs and publishes exactly the version the move asked for
 //   - the next turn is served by the new model name the provider actually saw
 //
@@ -86,7 +86,7 @@ func TestReloadEndpointSwapsModel(t *testing.T) {
 		t.Fatalf("judged change = %q -> %q, want the move between the two registered versions", change.From, change.To)
 	}
 	if change.Fact == "" {
-		t.Fatal("the judged change names no committed replacement fact")
+		t.Fatal("the judged change names no committed model configuration change")
 	}
 
 	publications := host.Run().LeasePublications()
@@ -96,15 +96,21 @@ func TestReloadEndpointSwapsModel(t *testing.T) {
 
 	fact, err := host.Run().CommittedEvent(ctx, event.EventID(change.Fact))
 	if err != nil {
-		t.Fatalf("read the committed replacement fact: %v", err)
+		t.Fatalf("read the committed model configuration change: %v", err)
 	}
-	if fact.Type != event.ModelReplacementType {
-		t.Fatalf("committed fact type = %q, want %q", fact.Type, event.ModelReplacementType)
+	if fact.Type != event.TypeConfigChange {
+		t.Fatalf("committed fact type = %q, want the configuration change family", fact.Type)
 	}
 	if fact.Owner.AgentID != "user" {
 		t.Fatalf("committed fact owner = %q, want the agent whose model moved", fact.Owner.AgentID)
 	}
-	if got := fact.Meta[event.MetaKeyTriggerSource]; got != event.ModelReplacementSourceConfig {
+	if got := fact.Meta[event.MetaKeyConfigChangeDimension]; got != event.ConfigChangeDimensionModel {
+		t.Fatalf("committed fact dimension = %q, want the model dimension", got)
+	}
+	if got := fact.Meta[event.MetaKeyConfigChangeGeneration]; got != strconv.FormatUint(answer.Publication.Generation, 10) {
+		t.Fatalf("committed fact generation = %q, want the publication generation %d", got, answer.Publication.Generation)
+	}
+	if got := fact.Meta[event.MetaKeyTriggerSource]; got != event.ConfigChangeSourceConfig {
 		t.Fatalf("committed fact trigger source = %q, want the configuration source", got)
 	}
 	if got := fact.Meta[event.MetaKeyModelFromVersion]; got != "model-a@local/model-a" {
@@ -128,17 +134,20 @@ func TestReloadEndpointSwapsModel(t *testing.T) {
 	}
 }
 
-// TestReloadEndpointRefusesStructuralChange posts a document that adds an agent:
-//   - the endpoint answers the structural refusal instead of publishing
-//   - no replacement version is installed and no lease publishes a version
-//   - the next turn is still served by the model the boot document named
+// TestReloadEndpointPublishesTheAddedAgent posts a document that adds an agent:
+//   - the endpoint answers the publication instead of a structural refusal
+//   - the receipt names the one organization agents change, owned by the agent the
+//     document added, and no replacement version is installed
+//   - the next turn of the entry is still served by the model the boot document
+//     named, and the added address serves a real turn on the model it declares
 //
-// 契约: docs/wiki/platform/org-hot-reload.md#fingerprint
-func TestReloadEndpointRefusesStructuralChange(t *testing.T) {
+// 契约: docs/wiki/platform/org-hot-reload.md#generations
+func TestReloadEndpointPublishesTheAddedAgent(t *testing.T) {
 	t.Setenv("TAGENT_TEST_API_KEY", "test-key")
 	t.Setenv("TAGENT_HTTP_PORT", "0")
 	t.Setenv("TAGENT_RL_AUTH_TOKEN", "")
 	provider := newScriptedProvider(t)
+	provider.answer = func(int) string { return scriptedAnswerOf("ok") }
 	root := t.TempDir()
 	configPath := writeScriptedHostDocument(t, root, provider.endpoint(), "model-a")
 	host, err := assembly.Boot(configPath, assembly.WithSender(recordingSender{}))
@@ -147,37 +156,51 @@ func TestReloadEndpointRefusesStructuralChange(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
-	if turn := invokeScriptedTurn(t, ctx, host, "session-refused"); turn.Terminal != model.KindCompleted {
+	if turn := invokeScriptedTurn(t, ctx, host, "session-published"); turn.Terminal != model.KindCompleted {
 		t.Fatalf("first turn terminal = %v, want the completed turn of the boot model", turn.Terminal)
 	}
 
 	writeHostDocumentFile(t, configPath, structuralScriptedHostDocument(root, provider.endpoint()))
 
-	resp, err := http.Post(fmt.Sprintf("http://%s/reload", host.FaceAddr()), "application/json", nil)
-	if err != nil {
-		t.Fatalf("post the structural reload: %v", err)
+	status, body := postReloadAttempt(t, host.FaceAddr())
+	if status != http.StatusOK {
+		t.Fatalf("added-agent reload status = %d, want 200: %s", status, body)
 	}
-	defer resp.Body.Close()
-	body, err := io.ReadAll(io.LimitReader(resp.Body, hostBodyLimit))
-	if err != nil {
-		t.Fatalf("read the structural refusal: %v", err)
+	answer := decodeConfigChangeAnswer(t, body)
+	if !answer.Publication.Published || answer.Publication.Generation == 0 {
+		t.Fatalf("publication = %+v, want the added agent published as a new generation", answer.Publication)
 	}
-	if resp.StatusCode != http.StatusConflict {
-		t.Fatalf("structural reload status = %d, want 409: %s", resp.StatusCode, body)
+	if len(answer.ModelChanges) != 0 {
+		t.Fatalf("judged model changes = %s, want none beside the added agent", answer.ModelChanges)
 	}
-	if !strings.Contains(string(body), "declared agent set") {
-		t.Fatalf("structural refusal body = %q, want the declared agent set named", body)
+	if len(answer.ConfigChanges) != 1 {
+		t.Fatalf("filed config changes = %+v, want the one organization agents change", answer.ConfigChanges)
+	}
+	change := answer.ConfigChanges[0]
+	if change.Agent != "other" || change.Dimension != "org.agents" {
+		t.Fatalf("filed config change = %+v, want the organization agents dimension of the added agent", change)
+	}
+	if change.Fact == "" {
+		t.Fatal("the filed agents change names no committed fact")
 	}
 	if publications := host.Run().LeasePublications(); len(publications) != 0 {
-		t.Fatalf("lease publications = %+v, want none after a refused reload", publications)
+		t.Fatalf("lease publications = %+v, want none beside an added agent", publications)
 	}
 
-	if turn := invokeScriptedTurn(t, ctx, host, "session-refused"); turn.Terminal != model.KindCompleted {
+	if turn := invokeScriptedTurn(t, ctx, host, "session-published"); turn.Terminal != model.KindCompleted {
 		t.Fatalf("second turn terminal = %v, want the completed turn of the unchanged model", turn.Terminal)
 	}
 	models := provider.servedModels()
 	if len(models) != 2 || models[0] != "model-a" || models[1] != "model-a" {
-		t.Fatalf("served models = %v, want both turns served by the model the boot document named", models)
+		t.Fatalf("served models = %v, want both entry turns served by the model the boot document named", models)
+	}
+	added := invokeAgentTurn(t, ctx, host, "other", "session-published-agent")
+	if added.Terminal != model.KindCompleted {
+		t.Fatalf("added agent turn terminal = %v, want the completed turn of the added address", added.Terminal)
+	}
+	models = provider.servedModels()
+	if len(models) != 3 || models[2] != "model-a" {
+		t.Fatalf("served models = %v, want the added agent served by the model its declaration names", models)
 	}
 
 	if err := host.Close(ctx); err != nil {

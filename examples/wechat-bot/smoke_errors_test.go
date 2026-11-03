@@ -297,21 +297,30 @@ func smokeErrorsShortTTLDocument(c *smokeConfig) string {
 	return patched
 }
 
-// smokeErrorsBadProviderDocument 让入口 agent 引用未声明的 provider，并改到热换
-// 后的模型名：热换期的重建因此被拒，agent 集合与工具面保持不变。文档以起机
-// 渲染（smokeApprovalDocument，即起机文档）为底注入 provider 行，变更面只有
-// 这一行（一档），不会先撞二档拒绝。
+// smokeErrorsBadProviderDocument 让入口 agent 引用未声明的 provider，并改到热换后的
+// 模型名：热换期的租约重建因此被拒，agent 集合与工具面保持不变。底稿用默认文档
+// （入口不声明 send），即 Wave2Errors 起机渲染的那一档。
 func smokeErrorsBadProviderDocument(c *smokeConfig) string {
-	base := *c
-	base.Doc = smokeApprovalDocument
-	entry := fmt.Sprintf("  %s:\n    model: %s\n", smokeSessionTag, c.Model)
-	document := base.document()
-	patched := strings.Replace(document, entry,
-		entry+fmt.Sprintf("    provider: %s\n", smokeErrorsMissingProvider), 1)
-	if patched == document {
-		panic("smoke: the rendered document carries no entry agent block to move")
+	return smokeErrorsBadProviderDocumentOver(nil)(c)
+}
+
+// smokeErrorsBadProviderDocumentOver 在给定底稿上只注入 provider 行：热换只该改这一行，
+// 底稿必须与宿主起机渲染的那一档逐字节一致——工具面或治理一旦与起机不同，热换在二档
+// （requires a restart）就先被拒，走不到租约重建。默认文档的入口不声明 send，审批档额外
+// 声明 send 与 risk_rules，两者不能互替。
+func smokeErrorsBadProviderDocumentOver(base func(*smokeConfig) string) func(*smokeConfig) string {
+	return func(c *smokeConfig) string {
+		seeded := *c
+		seeded.Doc = base
+		entry := fmt.Sprintf("  %s:\n    model: %s\n", smokeSessionTag, c.Model)
+		document := seeded.document()
+		patched := strings.Replace(document, entry,
+			entry+fmt.Sprintf("    provider: %s\n", smokeErrorsMissingProvider), 1)
+		if patched == document {
+			panic("smoke: the rendered document carries no entry agent block to move")
+		}
+		return patched
 	}
-	return patched
 }
 
 // smokeErrorsClock 是可推进的审批时钟。

@@ -58,8 +58,8 @@ func TestPluginPhaseOrdering(t *testing.T) {
 		rig := newPhaseRig(t, provider, []*phaseTool{raw, cooked}, []plugin.Instance{renamer, grader}, nil, log)
 
 		turn := rig.drive(t, ctx, "run")
-		if turn.Terminal != model.KindCompleted || len(turn.Decisions) != 2 {
-			t.Fatalf("turn = (%v, %d decisions), want one completed terminal beside two decisions", turn.Terminal, len(turn.Decisions))
+		if turn.Terminal != model.KindCompleted || turn.DecisionCount != 2 {
+			t.Fatalf("turn = (%v, %d decisions), want one completed terminal beside two decisions", turn.Terminal, turn.DecisionCount)
 		}
 		if got := log.count("transform:renamer"); got != 1 {
 			t.Fatalf("transform entries = %d, want the Before transform run exactly once per call", got)
@@ -132,10 +132,13 @@ func TestPluginPhaseOrdering(t *testing.T) {
 			return task.Ruling{Kind: task.RulingDeny, Reason: "risk rule"}, nil
 		})
 		rig := newPhaseRig(t, provider, []*phaseTool{cooked}, []plugin.Instance{observer, presenter}, deny, log)
+		capture := &decisionCapture{}
+		rig.loop.SetCapture(capture)
 
 		turn := rig.drive(t, ctx, "run")
-		if turn.Terminal != model.KindCompleted || len(turn.Decisions) != 2 {
-			t.Fatalf("turn = (%v, %d decisions), want the refusal paired and the turn closed completed", turn.Terminal, len(turn.Decisions))
+		decisionID := capture.decision
+		if turn.Terminal != model.KindCompleted || turn.DecisionCount != 2 {
+			t.Fatalf("turn = (%v, %d decisions), want the refusal paired and the turn closed completed", turn.Terminal, turn.DecisionCount)
 		}
 		if cooked.calls() != 0 || log.count("exec:echo-final") != 0 {
 			t.Fatalf("tool executions = (%d log entries), want a denied call executing nothing", log.count("exec:echo-final"))
@@ -152,10 +155,13 @@ func TestPluginPhaseOrdering(t *testing.T) {
 		if paired.TaskID != "" {
 			t.Fatalf("paired result task = %q, want a refusal that registers no task", paired.TaskID)
 		}
+		if decisionID == "" {
+			t.Fatal("denied call carried no decision identity")
+		}
 		identity := task.CallIdentity{
 			InstanceID:   rig.instance,
 			InvocationID: rig.invocationID,
-			DecisionID:   turn.Decisions[0].DecisionID,
+			DecisionID:   decisionID,
 			CallID:       "call-2",
 		}
 		if _, known := rig.admission.Lookup(identity.DedupKey()); known {
@@ -197,8 +203,8 @@ func TestPluginPhaseOrdering(t *testing.T) {
 			rig = newPhaseRig(t, provider, []*phaseTool{cooked}, []plugin.Instance{observer, presenter}, nil, log)
 
 			turn := rig.drive(t, ctx, "run")
-			if turn.Terminal != model.KindCompleted || len(turn.Decisions) != 2 {
-				t.Fatalf("turn = (%v, %d decisions), want one completed terminal beside two decisions", turn.Terminal, len(turn.Decisions))
+			if turn.Terminal != model.KindCompleted || turn.DecisionCount != 2 {
+				t.Fatalf("turn = (%v, %d decisions), want one completed terminal beside two decisions", turn.Terminal, turn.DecisionCount)
 			}
 			if !(log.indexOf("commit:call-3") < log.indexOf("observe:observer")) ||
 				!(log.indexOf("commit:call-3") < log.indexOf("present:presenter")) {
@@ -252,8 +258,8 @@ func TestPluginPhaseOrdering(t *testing.T) {
 			rig.failRecord(errors.New("the recorder is down"))
 
 			turn := rig.drive(t, ctx, "run")
-			if turn.Terminal != model.KindCompleted || len(turn.Decisions) != 2 {
-				t.Fatalf("turn = (%v, %d decisions), want the unsettled fact still closing the turn completed", turn.Terminal, len(turn.Decisions))
+			if turn.Terminal != model.KindCompleted || turn.DecisionCount != 2 {
+				t.Fatalf("turn = (%v, %d decisions), want the unsettled fact still closing the turn completed", turn.Terminal, turn.DecisionCount)
 			}
 			if log.count("exec:echo-final") != 1 {
 				t.Fatalf("execution entries = %d, want the tool run once beside the failed commit", log.count("exec:echo-final"))
@@ -289,8 +295,8 @@ func TestPluginPhaseOrdering(t *testing.T) {
 		rig := newPhaseRig(t, provider, []*phaseTool{cooked}, []plugin.Instance{bad, presenter}, nil, log)
 
 		turn := rig.drive(t, ctx, "run")
-		if turn.Terminal != model.KindCompleted || len(turn.Decisions) != 2 {
-			t.Fatalf("turn = (%v, %d decisions), want the failed observation never breaking the turn", turn.Terminal, len(turn.Decisions))
+		if turn.Terminal != model.KindCompleted || turn.DecisionCount != 2 {
+			t.Fatalf("turn = (%v, %d decisions), want the failed observation never breaking the turn", turn.Terminal, turn.DecisionCount)
 		}
 		if log.count("observe:bad-observer") != 1 || log.count("present:presenter") != 1 {
 			t.Fatalf("after pass entries = %v, want the failed observation recorded beside the presentation that followed", log.snapshot())
@@ -335,11 +341,13 @@ type phaseRig struct {
 	admission    *task.MemoryAdmission
 	log          *phaseLog
 	facts        *phaseFacts
+	consumers    *agent.Consumers
 	instance     event.InstanceID
 	session      event.SessionID
 	invocationID event.InvocationID
 
 	mu        sync.Mutex
+	chain     []event.Event
 	recorded  []task.Result
 	shown     []approvalSeen
 	after     []view.Presentation
@@ -397,29 +405,73 @@ func newPhaseRig(t *testing.T, provider *convModel, tools []*phaseTool, faces []
 	}
 	rig.loop = agent.NewLoop(bindings, state.NewOccupancy(), rig.instance, rig.facts.resolve)
 	rig.loop.SetPresentations(rig.capture)
+	rig.loop.SetHistory(rig)
+	rig.consumers = agent.NewConsumers(rig.loop, context.Background(), nil)
+	rig.loop.SetConsumers(rig.consumers)
+	t.Cleanup(rig.consumers.Stop)
 	return rig
 }
 
-// drive runs one invocation of the rig to its terminal.
+// drive commits one input on the rig's address chain and answers the turn of
+// the segment the resident consumer opens on it: the address's own consumption
+// loop runs the decisions, and the identity the assertions read is the segment
+// identity that loop minted.
 func (r *phaseRig) drive(t *testing.T, ctx context.Context, input string) agent.Turn {
 	t.Helper()
-	turn, err := r.loop.Drive(ctx, agent.Invocation{
-		InvocationID: r.invocationID,
-		Address:      event.Address{AgentID: "agent-a", SessionID: r.session},
-		Instance:     r.instance,
-		Ready: []event.Event{
-			{
-				Key:       "ev-phase-input",
-				Type:      "user_input",
-				Timestamp: time.Now(),
-				Message:   model.Message{Role: model.RoleUser, Content: input},
-			},
-		},
+	addr := event.Address{AgentID: "agent-a", SessionID: r.session}
+	key := r.land(addr, event.Event{
+		Key:       "ev-phase-input",
+		Type:      event.TypeExternalInput,
+		Timestamp: time.Now(),
+		Message:   model.Message{Role: model.RoleUser, Content: input},
 	})
+	consumer := r.consumers.Ensure(addr)
+	if consumer == nil {
+		t.Fatalf("the resident consumer of %s/%s is unavailable", addr.AgentID, addr.SessionID)
+	}
+	consumer.Wake()
+	answer, err := consumer.WaitAnswer(ctx, []event.EventID{key})
 	if err != nil {
 		t.Fatalf("drive the invocation: %v", err)
 	}
-	return turn
+	r.invocationID = answer.Turn.InvocationID
+	return answer.Turn
+}
+
+// land commits one event on the rig's own chain and answers its identity, so
+// the resident consumer pulls the very event the case admitted.
+func (r *phaseRig) land(addr event.Address, evt event.Event) event.EventID {
+	evt.Owner = addr
+	evt.Source = addr
+	evt.Target = addr
+	r.mu.Lock()
+	r.chain = append(r.chain, evt)
+	r.mu.Unlock()
+	return evt.Key
+}
+
+// SessionHistory reports no separate transcript: the chain facts are the one
+// history of this rig.
+func (r *phaseRig) SessionHistory(event.Address) []model.Message { return nil }
+
+// CommitHistory keeps no second copy of the transcript.
+func (r *phaseRig) CommitHistory(event.Address, []model.Message) {}
+
+// SessionFacts reports the facts of one address in commit order.
+func (r *phaseRig) SessionFacts(addr event.Address) []event.Event {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make([]event.Event, 0, len(r.chain))
+	for _, evt := range r.chain {
+		if chainSessionOf(evt) != addr.SessionID {
+			continue
+		}
+		if addr.AgentID != "" && chainAgentOf(evt) != addr.AgentID {
+			continue
+		}
+		out = append(out, evt)
+	}
+	return out
 }
 
 // failRecord makes the next fact commit fail, so the call settles without a
@@ -458,9 +510,14 @@ func (r *phaseRig) record(_ context.Context, result task.Result) (event.EventID,
 }
 
 // sink routes one settled notification back into the intake of the invocation
-// that issued the call.
-func (r *phaseRig) sink(_ context.Context, notice task.Notice) error {
-	r.loop.Backflow(r.invocationID, notice)
+// that issued the call: the call frame names the resident segment, so the
+// settlement reaches that segment rather than a drive identity minted beside it.
+func (r *phaseRig) sink(ctx context.Context, notice task.Notice) error {
+	invocation := r.invocationID
+	if frame, ok := task.CallFrameFrom(ctx); ok && frame.Identity.InvocationID != "" {
+		invocation = frame.Identity.InvocationID
+	}
+	r.loop.Backflow(invocation, notice)
 	return nil
 }
 

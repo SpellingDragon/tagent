@@ -22,7 +22,7 @@ TBD - created by archiving change budget-full-model-requests. Update Purpose aft
 - **THEN** 保留现有请求能力并报告unknown，不宣称已保证provider总窗口安全。
 
 ### Requirement: 单一压缩及安全消费
-历史压缩 SHALL 只由ContextCompressor执行；同轮内外预算取同一热参组。最终模型门禁 MUST 保留凭据与惰性语义，不允许provider隐藏裁剪充当本能力。
+历史压缩 SHALL 只由现行判定—执行—恢复链承担：`AgeFoldPlugin.ObserveCommit` 判定并提交 `compress.request`，`CompressionConsumer.Execute` 读该 request 执行 `FoldByAge` 并提交 `compress.product`；同轮内外预算取同一热参组。最终模型门禁 MUST 保留凭据与惰性语义，不允许 provider 隐藏裁剪充当本能力。
 
 #### Scenario: 拒发或未消费迭代器
 - **WHEN** 请求未实际进入模型

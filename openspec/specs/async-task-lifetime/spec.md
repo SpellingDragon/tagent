@@ -25,14 +25,14 @@
 - **WHEN** 一个显式设了 `ttl` 的 subagent 委派在重启后经声明式回放重建
 - **THEN** 其到期锚点与重启前一致，看板呈现的剩余寿命延续同一锚点
 
-### Requirement: 写入型重入续期锚点，只读观察不续期
+### Requirement: 写入型重入经 send 且刷新 TTL
 
-模型对既有任务会话的**写入型重入**（向会话注入输入的 `send`、以及 `resume`）SHALL 把该任务的 TTL 锚点重置为本次重入时刻，到期按新锚点计算；只读观察（`peek`）MUST NOT 刷新锚点。一次性无会话命令没有重入通路，其锚点恒为派生时刻。续期 MUST NOT 覆盖显式声明：内建默认只补齐未带 `ttl` 的任务，显式值优先。
+对存活任务会话的写入型重入（`send{target:{task}}` 或 `exec op=send`）SHALL 把任务 TTL 锚点重置为 `now + ttl`；只读 `op=peek` MUST NOT 刷新。IsTUI 会话 SHALL 拒绝注入。两条注入入口 SHALL 共用同一注入路径。一次性无会话命令没有重入通路，其锚点恒为派生时刻。续期 MUST NOT 覆盖显式声明：内建默认只补齐未带 `ttl` 的任务，显式值优先。
 
-#### Scenario: 重入注入输入即续命
+#### Scenario: 注入刷新锚点
 
-- **WHEN** 模型对一个已脱离前台的会话执行写入型重入并成功注入输入
-- **THEN** 锚点重置为本次重入，剩余寿命顺延一个完整 TTL，看板相应更新
+- **WHEN** 对存活 tmux 任务经 send 注入输入
+- **THEN** TTL 锚点重置，peek 不刷新，TUI 会话被拒
 
 #### Scenario: 只读观察不改变到期时刻
 

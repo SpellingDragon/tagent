@@ -206,7 +206,7 @@ go list -f '{{.ImportPath}} {{if or .TestGoFiles .XTestGoFiles}}HAS-WHITEBOX{{el
 |---|---|---|---|---|
 | 插件端口派发 | `plugin.Pipeline` 的 Before/InjectEnvironment/After 派发处：`api/plugin/phases.go`、`api/plugin/present.go` | DEBUG 日志 | phase、face、plugin、port、result、elapsed、call 或 fact 身份（After 每个 presenter 各一行，同 fact） | `tagent: plugin phase` |
 | 事件流（事实生产提交） | 主提交之后的 After 趟：`telemetry.LogObserver`（经 `commit-observer` 元素派发） | DEBUG 逐事实 / INFO 回合边界 | 事实类型、tool、task、call、invocation | `tagent: tool call`、`tagent: turn start`、`tagent: turn end` |
-| 事件消费 | `runtime/agent/loop.go`：`Loop.Drive` 的起止与每个 decision | DEBUG 日志 | agent、session、invocation、ready 数、decisions、terminal、calls、elapsed | `tagent: consumer drive start`、`tagent: consumer drive end`、`tagent: consumer decision` |
+| 事件消费 | `runtime/agent`：常驻消费循环的起止与每个 decision | DEBUG 日志 | agent、session、invocation、ready 数、decisions、terminal、calls、elapsed | `tagent: consumer drive start`、`tagent: consumer drive end`、`tagent: consumer decision` |
 | 模型响应 | `model.ReduceChannel`、`model.ReduceSeq`（唯一终端归约入口） | INFO 日志 | model、terminal、prompt/completion/total token、responses、latency_ms | `tagent: model response` |
 
 - **开 DEBUG**：默认 zap 级别是 Info，端口派发与消费面需 `log.SetLevel("debug")` 才出；模型响应是 INFO 级，开箱即见、每请求一行。
@@ -239,8 +239,9 @@ defer clean(ctx)
 | 恢复与存储 tier | `assembly/run.go` 的 `Assemble` 与 `restoreChains` | INFO 折叠、WARN 非持久 tier、ERROR 中断 | tier、durable、chains、recovered、dropped、elapsed | `tagent: storage tier`、`tagent: restore` |
 | 环境块生成 | `assembly/request.go` 的 `environmentBlock` | DEBUG 日志 | reason、agent、tasks、omitted；进程计数 `assembly.EnvironmentBlockGenerations()` | `tagent: environment block generated` |
 
-- **级别纪律与旁路**：写盘失败、屏障失败、装载失败一律 ERROR（静默的语义改变必须显式）；非持久 tier 的"进程退出即失忆"是 WARN；审批的每次裁定 INFO，同一等待的重复判定留 DEBUG；其余逐事件 DEBUG。五个专用观察点的 logger 调用都在 `recover` 保护内，且先判 `log.Default` 非 nil——日志失败只丢一条行，不改判定、不改落定、不改恢复结果、不改请求装配。
+- **级别纪律与旁路**：写盘失败、屏障失败、装载失败一律 ERROR（静默的语义改变必须显式）；非持久 tier 的“进程退出即失忆”是 WARN；审批的每次裁定 INFO，同一等待的重复判定留 DEBUG；其余逐事件 DEBUG。五个专用观察点的 logger 调用都在 `recover` 保护内，且先判 `log.Default` 非 nil——日志失败只丢一条行，不改判定、不改落定、不改恢复结果、不改请求装配。
 - **可复跑**：`go test ./runtime/agent ./features/evolution/governance ./runtime/state -run 'Observation' -count=1` 验三个机制（委派、审批、持久化）与事件消费面各一条输出断言与一条失败不阻断断言；消费者锚 `go test ./tests/integration/history ./tests/integration/execution -run 'Observation' -count=1` 走真实路径（委派受理与落定、重启折叠）读观测行；环境块计数锚 `go test ./tests/integration/host -run 'EnvironmentBlockGenerationIsObserved' -count=1`。压缩请求没有专用观察行，断言面只到 `telemetry.LogObserver` 的通用事实行。
+- **运行时内存观测面**（`oom-bounded-capture-and-storm-fuse`）：host face 提供 `/debug/pprof/{heap,goroutine,allocs}`（同 face 凭据门，仅回环）；`TAGENT_GCTRACE=1` 合并进 GODEBUG（子进程继承；对已启动进程库内不生效，Boot 打边界提示）。锚：`go test ./tests/integration/execution -run '^TestDebugPprofServesHeap$|^TestGCTraceSwitchStatesItsBoundary$' -count=1`。
 
 ---
 

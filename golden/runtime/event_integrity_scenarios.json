@@ -523,7 +523,7 @@
           "mandatory": true
         },
         {
-          "name": "missing_sender_fails_closed",
+          "name": "boots_beside_no_sender",
           "roles": [
             "negative"
           ],
@@ -1024,47 +1024,26 @@
       "consumer_anchor": "formal_reflection_consumer"
     },
     {
-      "id": "02.2/TestEventIntegrityReflectionDelivery",
+      "id": "02.2/TestEventIntegrityReflectionWhiteList",
       "leaf": "02.2",
       "kind": "product-green",
       "module": ".",
       "module_path": "github.com/SpellingDragon/tagent",
       "dir": ".",
       "test_package": "./tests/integration/host",
-      "test_name": "TestEventIntegrityReflectionDelivery",
+      "test_name": "TestEventIntegrityReflectionWhiteList",
       "file": "tests/integration/host/event_integrity_test.go",
-      "selector": "^TestEventIntegrityReflectionDelivery$",
+      "selector": "^TestEventIntegrityReflectionWhiteList$",
       "tags": [],
       "race": true,
       "tier": "event-short",
       "scope": "event-short",
       "subtests": [
         {
-          "name": "explicit_call_reaches_target_session",
+          "name": "whitelist_grants_send_and_target_reads_it",
           "roles": [
-            "positive"
-          ],
-          "families": [
-            "E3",
-            "E5"
-          ],
-          "mandatory": true
-        },
-        {
-          "name": "same_batch_yield_is_legal_success",
-          "roles": [
-            "positive"
-          ],
-          "families": [
-            "E3",
-            "E5"
-          ],
-          "mandatory": true
-        },
-        {
-          "name": "delivery_does_not_rearm_novelty",
-          "roles": [
-            "negative"
+            "positive",
+            "consumer"
           ],
           "families": [
             "E3",
@@ -1084,39 +1063,6 @@
           "mandatory": true
         },
         {
-          "name": "partial_commit_failure_not_success",
-          "roles": [
-            "negative"
-          ],
-          "families": [
-            "E3",
-            "E5"
-          ],
-          "mandatory": true
-        },
-        {
-          "name": "replay_identity",
-          "roles": [
-            "negative"
-          ],
-          "families": [
-            "E3",
-            "E5"
-          ],
-          "mandatory": true
-        },
-        {
-          "name": "target_not_running_named_refusal",
-          "roles": [
-            "negative"
-          ],
-          "families": [
-            "E3",
-            "E5"
-          ],
-          "mandatory": true
-        },
-        {
           "name": "unknown_target_named_refusal",
           "roles": [
             "negative"
@@ -1126,9 +1072,45 @@
             "E5"
           ],
           "mandatory": true
+        }
+      ],
+      "consumer_anchor": "whitelist_grants_send_and_target_reads_it",
+      "anchor_notes": [
+        "positive/consumer 由 2026-11-01 裁定新落的正锚 whitelist_grants_send_and_target_reads_it 兼任：白名单含目标 -> 请求 tools 含 send -> 一次投递落恰 1 条事实 -> 目标下一轮读到正文。",
+        "partial_commit_failure_not_success 已从合同移除：send 单目标逐次投递下多目标部分失败结构性不成立（2026-11-01 裁定）。",
+        "delivery_does_not_rearm_novelty 归 03.5 计（TestEventIntegrityReflectionWhiteListControl/negative 的 scenario_notes 已记“回流不重置目标新颖度”）。",
+        "跨会话 send 的投递语义锚登记在 02.2/TestSendDrivesTargetTurn（busy_target_never_blocks_the_sender 正锚、duplicate_delivery_idempotent 负锚、delivery_drives_target_turn 消费者锚）。"
+      ]
+    },
+    {
+      "id": "02.2/TestSendDrivesTargetTurn",
+      "leaf": "02.2",
+      "kind": "product-green",
+      "module": ".",
+      "module_path": "github.com/SpellingDragon/tagent",
+      "dir": ".",
+      "test_package": "./tests/integration/host",
+      "test_name": "TestSendDrivesTargetTurn",
+      "file": "tests/integration/host/send_cross_session_delivery_test.go",
+      "selector": "^TestSendDrivesTargetTurn$",
+      "tags": [],
+      "race": true,
+      "tier": "event-short",
+      "scope": "event-short",
+      "subtests": [
+        {
+          "name": "busy_target_never_blocks_the_sender",
+          "roles": [
+            "positive"
+          ],
+          "families": [
+            "E3",
+            "E5"
+          ],
+          "mandatory": true
         },
         {
-          "name": "wrong_target_no_extra_write",
+          "name": "duplicate_delivery_idempotent",
           "roles": [
             "negative"
           ],
@@ -1139,18 +1121,7 @@
           "mandatory": true
         },
         {
-          "name": "zero_live_target_not_success",
-          "roles": [
-            "negative"
-          ],
-          "families": [
-            "E3",
-            "E5"
-          ],
-          "mandatory": true
-        },
-        {
-          "name": "boot_deliver_to_target_request",
+          "name": "delivery_drives_target_turn",
           "roles": [
             "consumer"
           ],
@@ -1161,7 +1132,11 @@
           "mandatory": true
         }
       ],
-      "consumer_anchor": "boot_deliver_to_target_request"
+      "consumer_anchor": "delivery_drives_target_turn",
+      "anchor_notes": [
+        "send 新形态的投递语义锚（父测试不改名，故不在 TestEventIntegrity* 发现集内，selector 由 04.1 登记口径与 04.4 变异门守护）。",
+        "父测试的三个子测试守住投递面：delivery_drives_target_turn 是投递消费者锚，busy_target_never_blocks_the_sender 是忙时不阻塞的正锚，duplicate_delivery_idempotent 是重放幂等的负锚。"
+      ]
     },
     {
       "id": "02.3/TestEventIntegrityProjection",
@@ -1799,16 +1774,16 @@
       "consumer_anchor": "consumer"
     },
     {
-      "id": "03.5/TestEventIntegrityReflectionDeliveryControl",
+      "id": "03.5/TestEventIntegrityReflectionWhiteListControl",
       "leaf": "03.5",
       "kind": "product-green",
       "module": "wechat-bot",
       "module_path": "wechat-bot",
       "dir": "examples/wechat-bot",
       "test_package": ".",
-      "test_name": "TestEventIntegrityReflectionDeliveryControl",
+      "test_name": "TestEventIntegrityReflectionWhiteListControl",
       "file": "examples/wechat-bot/smoke_test.go",
-      "selector": "^TestEventIntegrityReflectionDeliveryControl$",
+      "selector": "^TestEventIntegrityReflectionWhiteListControl$",
       "tags": [
         "smoke"
       ],
@@ -2154,7 +2129,7 @@
     },
     {
       "id": "EI04",
-      "test_id": "03.5/TestEventIntegrityReflectionDeliveryControl",
+      "test_id": "03.5/TestEventIntegrityReflectionWhiteListControl",
       "families": [
         "E1",
         "E3",
@@ -2321,8 +2296,8 @@
     {
       "name": "event-short",
       "repeat": 10,
-      "parent_tests": 28,
-      "named_anchors": 140,
+      "parent_tests": 29,
+      "named_anchors": 135,
       "description": "event-short：全部绿测 + 00.2 诊断（03.11 除外）"
     },
     {
@@ -2357,11 +2332,13 @@
     }
   },
   "notes": [
-    "subtests[] 以 (parent,name) 为唯一键；137 个绿测具名子场景 + 4 个 00.2 诊断锚 = 141，按唯一键计，不按 positive/negative/consumer 引用求和。",
+    "subtests[] 以 (parent,name) 为唯一键；134 个绿测具名子场景 + 4 个 00.2 诊断锚 = 138，按唯一键计，不按 positive/negative/consumer 引用求和。",
     "consumer_anchor 可引用同时具有 positive 角色的行（dual-role），不复制同名行。",
     "EI01—EI10 仅为 03 整链聚合组（aggregate_only），不计入测试/子场景数量，不替代 00/01/02/CLI 独立测试。",
     "00.2 修复前红证单列；修复后 4 个诊断锚 mandatory 并纳入 event-short。",
     "旧 03.3/TestEventIntegrityControls 已 superseded（见 task-graph.source_only_tests），不再登记合同；03.10 一次性只读校准为 non_product off_contract，不进入本合同。",
-    "01.2/handover_before_confirmation 与 01.3/notice_input_without_projection 为补差锚：源码落地前由 task-graph verification.pending_anchors 门控，合同先登记；补齐并过三锚+十轮前不得宣称已执行。"
+    "01.2/handover_before_confirmation 与 01.3/notice_input_without_projection 为补差锚：源码落地前由 task-graph verification.pending_anchors 门控，合同先登记；补齐并过三锚+十轮前不得宣称已执行。",
+    "02.2 leaf 按 2026-11-01 D 方案重映射：旧 9 个锚（explicit_call_reaches_target_session/same_batch_yield_is_legal_success/delivery_does_not_rearm_novelty/partial_commit_failure_not_success/replay_identity/target_not_running_named_refusal/wrong_target_no_extra_write/zero_live_target_not_success/boot_deliver_to_target_request）随 features/evolution/meditation/deliver.go 删除而失效，现已重映射到 send 新形态的 6 个真实锚：TestEventIntegrityReflectionWhiteList 三条 + TestSendDrivesTargetTurn 三条。",
+    "MUT-CAND-02.2-wrong-target 同步重锚到 assembly/host_tools.go 的 deliver_to 白名单门，由 TestSendCrossSessionGates/denies_out_of_whitelist 的具名拒绝断言杀死（04.4 变异门）。"
   ]
 }

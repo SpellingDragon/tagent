@@ -86,8 +86,8 @@ func TestFormalLoopEnforcesPolicy(t *testing.T) {
 		if err != nil {
 			t.Fatalf("invoke the policy runtime: %v", err)
 		}
-		if turn.Terminal != model.KindCompleted || len(turn.Decisions) != 2 {
-			t.Fatalf("turn = (%v, %d decisions), want the refusal closing the turn completed beside two decisions", turn.Terminal, len(turn.Decisions))
+		if turn.Terminal != model.KindCompleted || turn.DecisionCount != 2 {
+			t.Fatalf("turn = (%v, %d decisions), want the refusal closing the turn completed beside two decisions", turn.Terminal, turn.DecisionCount)
 		}
 		if got := probe.calls(); got != 0 {
 			t.Fatalf("danger_tool executions = %d, want the strict refusal leaving zero executions", got)
@@ -154,8 +154,8 @@ func TestFormalLoopEnforcesPolicy(t *testing.T) {
 		if err != nil {
 			t.Fatalf("invoke the presentation runtime: %v", err)
 		}
-		if turn.Terminal != model.KindCompleted || len(turn.Decisions) != 2 {
-			t.Fatalf("turn = (%v, %d decisions), want the settled observation closing the turn completed", turn.Terminal, len(turn.Decisions))
+		if turn.Terminal != model.KindCompleted || turn.DecisionCount != 2 {
+			t.Fatalf("turn = (%v, %d decisions), want the settled observation closing the turn completed", turn.Terminal, turn.DecisionCount)
 		}
 		if got := probe.calls(); got != 1 {
 			t.Fatalf("echo_tool executions = %d, want the allowed call executed once", got)

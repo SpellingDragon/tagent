@@ -133,11 +133,13 @@ type customEventRig struct {
 	bindings     *state.Bindings
 	manager      *task.MemoryManager
 	loop         *agent.Loop
+	consumerSet  *agent.Consumers
 	arrived      chan task.Notice
 	delivered    chan string
 
 	mu    sync.Mutex
 	facts map[event.EventID]model.Message
+	chain []event.Event
 	seq   uint64
 }
 
@@ -146,8 +148,12 @@ type customEventRig struct {
 func newCustomEventRig(t *testing.T, provider model.Model, tools []trpctool.Tool, owner event.Address) *customEventRig {
 	t.Helper()
 	rig := &customEventRig{
-		instance:     event.InstanceID("instance-custom-event"),
-		invocationID: event.InvocationID("inv-custom-event"),
+		instance: event.InstanceID("instance-custom-event"),
+		// The first segment the address's resident consumer opens is the range
+		// the case hands its progress notification to; the identity is minted by
+		// the consumer, so the rig reads it before the mount rather than naming
+		// a second drive identity beside it.
+		invocationID: event.InvocationID(fmt.Sprintf("%s#c1", owner.SessionID)),
 		owner:        owner,
 		bindings:     state.NewBindings(),
 		arrived:      make(chan task.Notice, 4),
@@ -182,24 +188,32 @@ func newCustomEventRig(t *testing.T, provider model.Model, tools []trpctool.Tool
 		t.Fatalf("hold the state plan: %v", err)
 	}
 	rig.loop = agent.NewLoop(rig.bindings, state.NewOccupancy(), rig.instance, rig.resolve)
+	rig.loop.SetHistory(rig)
+	rig.consumerSet = agent.NewConsumers(rig.loop, context.Background(), nil)
+	rig.loop.SetConsumers(rig.consumerSet)
+	t.Cleanup(rig.consumerSet.Stop)
 	return rig
 }
 
-// consume drives the host loop over one custom event and hands the consumed
-// result to the delivery face: an empty result is refused by name instead of
-// being delivered as nothing.
+// consume commits one custom event on the owner's chain and hands the segment
+// the resident consumer opens on it to the delivery face: an empty result is
+// refused by name instead of being delivered as nothing. The event type drives
+// no range by itself, so the consumer is named the fact it must pull — the
+// drive is the address's own loop, never a second driver beside it.
 func (r *customEventRig) consume(ctx context.Context, provider *customEventModel, ready event.Event) (string, error) {
-	turn, err := r.loop.Drive(ctx, agent.Invocation{
-		InvocationID: r.invocationID,
-		Address:      r.owner,
-		Instance:     r.instance,
-		Ready:        []event.Event{ready},
-	})
+	key := r.land(ready)
+	consumer := r.consumerSet.Ensure(r.owner)
+	if consumer == nil {
+		return "", fmt.Errorf("the resident consumer of %s/%s is unavailable", r.owner.AgentID, r.owner.SessionID)
+	}
+	consumer.Drive(key)
+	consumer.Wake()
+	answer, err := consumer.WaitAnswer(ctx, []event.EventID{key})
 	if err != nil {
 		return "", err
 	}
-	if turn.Terminal != model.KindCompleted {
-		return "", fmt.Errorf("%w: the turn ended %v", errCustomEventNoResult, turn.Terminal)
+	if answer.Turn.Terminal != model.KindCompleted {
+		return "", fmt.Errorf("%w: the turn ended %v", errCustomEventNoResult, answer.Turn.Terminal)
 	}
 	result := strings.TrimSpace(provider.reply())
 	if result == "" {
@@ -209,6 +223,54 @@ func (r *customEventRig) consume(ctx context.Context, provider *customEventModel
 	return result, nil
 }
 
+// land commits one event on the rig's own chain and answers the identity it
+// carries, so the resident consumer pulls the very event the case admitted.
+func (r *customEventRig) land(evt event.Event) event.EventID {
+	if evt.Owner.IsZero() {
+		evt.Owner = r.owner
+	}
+	if evt.Source.IsZero() {
+		evt.Source = r.owner
+	}
+	if evt.Target.IsZero() {
+		evt.Target = r.owner
+	}
+	if evt.Key == "" {
+		r.mu.Lock()
+		r.seq++
+		evt.Key = event.EventID(fmt.Sprintf("fact-custom-chain-%d", r.seq))
+		r.mu.Unlock()
+	}
+	r.mu.Lock()
+	r.chain = append(r.chain, evt)
+	r.mu.Unlock()
+	return evt.Key
+}
+
+// SessionHistory reports no separate transcript: the chain facts are the one
+// history of this rig.
+func (r *customEventRig) SessionHistory(event.Address) []model.Message { return nil }
+
+// CommitHistory keeps no second copy of the transcript.
+func (r *customEventRig) CommitHistory(event.Address, []model.Message) {}
+
+// SessionFacts reports the facts of one address in commit order.
+func (r *customEventRig) SessionFacts(addr event.Address) []event.Event {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make([]event.Event, 0, len(r.chain))
+	for _, evt := range r.chain {
+		if chainSessionOf(evt) != addr.SessionID {
+			continue
+		}
+		if addr.AgentID != "" && chainAgentOf(evt) != addr.AgentID {
+			continue
+		}
+		out = append(out, evt)
+	}
+	return out
+}
+
 // envelope reports the acceptance of every notification the manager offers for
 // delivery, so the delivery face of this rig books the outcomes it is handed.
 func (r *customEventRig) envelope(context.Context, task.Envelope) (task.DeliveryAcceptance, error) {
@@ -216,9 +278,15 @@ func (r *customEventRig) envelope(context.Context, task.Envelope) (task.Delivery
 }
 
 // mail admits one settled notification into the mailbox of this rig and hands it
-// back into the invocation that issued the call.
+// back into the invocation that issued the call: the call frame names the
+// segment of the resident consumer, so the settlement reaches that segment
+// rather than a drive identity minted beside it.
 func (r *customEventRig) mail(ctx context.Context, notice task.Notice) error {
-	r.loop.Backflow(r.invocationID, notice)
+	invocation := r.invocationID
+	if frame, ok := task.CallFrameFrom(ctx); ok && frame.Identity.InvocationID != "" {
+		invocation = frame.Identity.InvocationID
+	}
+	r.loop.Backflow(invocation, notice)
 	r.arrived <- notice
 	return nil
 }

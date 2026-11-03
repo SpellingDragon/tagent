@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -41,6 +42,7 @@ import (
 	"github.com/SpellingDragon/tagent/runtime/state"
 	"github.com/SpellingDragon/tagent/runtime/task"
 	"github.com/SpellingDragon/tagent/runtime/task/approval"
+	"github.com/SpellingDragon/tagent/tool/subagent"
 
 	trpclog "trpc.group/trpc-go/trpc-agent-go/log"
 	trpctool "trpc.group/trpc-go/trpc-agent-go/tool"
@@ -98,6 +100,82 @@ type InvokeRequest struct {
 	TriggerSource string
 	// Input is the native input of the range, in the order the caller admits it.
 	Input []model.Message
+	// InputMeta carries the per-message metadata of Input, one entry per
+	// message in the same order; a nil entry stamps nothing, so a caller that
+	// names none behaves exactly as it did before the face existed.
+	InputMeta []map[string]string
+}
+
+// writerLedger is the writer account of one run as its close reads it: the
+// registration one production opens and the read of the ones that confirmed no
+// stop. The loop builds and owns the ledger of its productions; the run only
+// reads it through these two operations, so the mechanism never becomes a second
+// public surface beside the productions it names.
+type writerLedger interface {
+	// Begin registers one production that is starting now and answers the
+	// confirmation that closes its registration.
+	Begin(name string) func()
+	// Stopped reports whether every registered production confirmed its stop,
+	// and names the ones that did not in registration order.
+	Stopped() (bool, []string)
+}
+
+// continuationTable is the continuation account one run shares among the tools
+// of its agents: the round a delegated task is served again by. The table itself
+// is built inside the subagent package; the run only holds the one a re-entry
+// claims and serves through, so the mechanism never becomes a public type here.
+type continuationTable = interface {
+	// Served reports whether the table still serves the named task a round.
+	Served(taskID event.TaskID) bool
+	// Release ends the continuation of one task.
+	Release(taskID event.TaskID)
+	// Reenter hands fresh input to the named task and serves its next round.
+	Reenter(ctx context.Context, taskID event.TaskID, input string) error
+	// Claim takes the one round slot of the named task.
+	Claim(taskID event.TaskID) error
+	// Abandon gives back a claimed slot without serving a round.
+	Abandon(taskID event.TaskID)
+	// Serve serves the next round of a task a caller already claimed.
+	Serve(ctx context.Context, taskID event.TaskID, input string, after func(error)) error
+	// Seed rebuilds the continuation of one task from the declaration its
+	// delegated input fact carries, so a re-entry after a restart serves the next
+	// round of a task this process never admitted in memory.
+	Seed(taskID event.TaskID, declaration []byte, siteSession event.SessionID, builder subagent.Builder) error
+}
+
+// runMovement is the fence of one run: it reads the private sequences the
+// accounts of the run advance — the task chain and its obligations, and the
+// mailbox — through the accounts that own them. Either account moving changes
+// the sum, so a judgment that unions their sets detects a write between its
+// reads; a run beside no account reads the zero every instant equals. The
+// sequence belongs to the account itself, so the fence never becomes a second
+// authority beside it.
+type runMovement struct {
+	registry *task.MemoryRegistry
+	store    *state.MemoryStore
+}
+
+// Advance records one write of the session chain this run keeps: the fact chain
+// is an input round a consumer may still owe, so a committed fact moves the task
+// account's sequence at the write point.
+func (m runMovement) Advance() {
+	if m.registry != nil {
+		m.registry.Add(1)
+	}
+}
+
+// Read reports the accounts of this run at the instant a rest judgment stands:
+// the task chain's sequence beside the mailbox's, each read from the account
+// that advances it.
+func (m runMovement) Read() uint64 {
+	var seq uint64
+	if m.registry != nil {
+		seq += m.registry.Load()
+	}
+	if m.store != nil {
+		seq += m.store.Load()
+	}
+	return seq
 }
 
 // Run is the assembled runtime of the minimal entry: the shared faces, the
@@ -119,37 +197,75 @@ type InvokeRequest struct {
 // MUST NOT keep a second live copy of the scene inside the run.
 // MUST NOT admit new input past the gate the close already closed.
 type Run struct {
-	mu          sync.Mutex
-	instance    event.InstanceID
-	current     state.StatePlan
-	recovery    task.RestoreReport
-	bindings    *state.Bindings
-	publisher   *state.Publisher
-	occupancy   *state.Occupancy
-	authority   *state.Authority
-	store       *state.MemoryStore
-	inspector   state.Subject
-	admission   *task.MemoryAdmission
-	commit      *runCommit
-	registry    *task.MemoryRegistry
-	manager     *task.MemoryManager
-	shutdown    *agent.Shutdown
+	mu       sync.Mutex
+	instance event.InstanceID
+	current  state.StatePlan
+	// natives is the construction contribution each declared agent's live pieces
+	// were assembled from — the models and tools the embedding process supplies —
+	// read beside the publication so a delegated round rebuilt after a restart
+	// resolves the same model and tool references the generation in effect names.
+	// It is configuration material, never a copy of the scene.
+	natives   map[event.AgentID]NativeAgent
+	recovery  task.RestoreReport
+	bindings  *state.Bindings
+	publisher *state.Publisher
+	occupancy *state.Occupancy
+	authority *state.Authority
+	store     *state.MemoryStore
+	inspector state.Subject
+	admission *task.MemoryAdmission
+	commit    *runCommit
+	registry  *task.MemoryRegistry
+	manager   *task.MemoryManager
+	// writers is the ledger of the productions this run started — the drives, the
+	// model streams of their decisions and the tool productions of their calls —
+	// and the close reads it as the writer-stopped criterion of the run. The loop
+	// builds and owns it; the run reads it through the loop itself.
+	writers     writerLedger
 	delegations *agent.Delegator
-	watermark   meditation.WatermarkGate
-	projection  *query.Projection
-	retrieval   *retrievalSupply
-	tier        *ledger.Tier
-	observed    *memory.MemoryEventQuery
-	embedder    memory.Embedder
-	loop        *agent.Loop
-	sites       map[event.Address]bool
-	facts       map[event.EventID]event.Event
+	// progress pulses whenever the account behind this run moved: a fact
+	// committed, a notification consumed, a segment closed, a production stopped.
+	// The close waits on it instead of polling the criterion, so the wait is an
+	// event and the close's own budget its only clock.
+	progress chan struct{}
+
+	// continuations is the account of the delegated rounds this run serves again
+	// after a task of theirs settled and was reactivated: the first tool of the
+	// run mints it and every later tool is built beside the same account, because
+	// a re-entered round is a round of the same task the delegation ledger admits
+	// and settles under. The run only holds the shared account by its two faces —
+	// the tool parking a round and the host re-entry claiming it.
+	continuations continuationTable
+	watermark     meditation.WatermarkGate
+	projection    *query.Projection
+	retrieval     *retrievalSupply
+	tier          *ledger.Tier
+	observed      *memory.MemoryEventQuery
+	embedder      memory.Embedder
+	loop          *agent.Loop
+	sites         map[event.Address]bool
+	facts         map[event.EventID]event.Event
 	// factOrder keeps the commit order of the live facts, so a read of one
 	// session's chain answers in the order that chain was written.
 	factOrder []event.EventID
+	// sessionFactCount counts the live facts each session chain holds, so the
+	// per-commit window trim stays O(1) until a chain can actually hold a cut.
+	sessionFactCount map[event.SessionID]int
 	// plugins holds the run-level instances every agent generation carries.
 	plugins []plugin.Instance
 	factSeq uint64
+	// movement is the fence of this run: it reads the private sequences the
+	// accounts of the run advance whenever they are written — the task chain and
+	// its obligations, and the mailbox — through the accounts themselves, so a
+	// judgment that spans them detects a write between its reads instead of
+	// trusting one account's sequence as if the others moved with it. The run
+	// keeps no sequence of its own.
+	movement runMovement
+	// holds is the waiting table of every approval channel this run parks a call
+	// through: the one account of the waits a ruling of this process can still
+	// resume, since a hold lives in memory alone and a wait restored from the
+	// chain carries none.
+	holds []*task.HoldBook
 	// landing serializes the sequence slot of one partition beside the segment
 	// commit that takes it, so two facts committed at once never claim one slot.
 	landing sync.Mutex
@@ -175,21 +291,21 @@ type Run struct {
 	observer    plugin.Observer
 	// leases holds the model leases the host attached per agent, in the shape
 	// the assembly mounted them with: the lease that serves the agent, the
-	// rebuild a replacement fact runs and the publication entry it installs
-	// the rebuilt model through.
+	// rebuild a model configuration change runs and the publication entry it
+	// installs the rebuilt model through. Boot fills the table for the first
+	// generation; a publication that adds a declared agent extends it under the
+	// run lock, and the lease of an agent a later generation removes stays in the
+	// table, so a re-added address serves the version in effect instead of a
+	// second lease beside it.
 	leases map[event.AgentID]*leaseState
-	// pendingModels holds the models a publication contributed for a declared
-	// model change, so the replacement fact that publication judged has a
-	// rebuild source even when the host named no explicit one.
-	pendingModels map[event.AgentID]model.Model
 	// leaseObservers holds the replacement consumer mounted on each leased
 	// agent's pipeline: one fact->observation face per leased agent.
 	leaseObservers map[event.AgentID]*rl.LeaseObserver
 	// leasePublications records every version a lease installed through this
 	// run's default publication entry, in installation order.
 	leasePublications []rl.ModelIdentity
-	// leaseLosses records every declared model change whose replacement fact
-	// could not commit, so a failed judgment is readable beside the run.
+	// leaseLosses records every model configuration change whose fact could not
+	// commit, so a failed judgment is readable beside the run.
 	leaseLosses []error
 	// capture is the trajectory capture this run fixes, admits and seals
 	// through, or nil beside no capture. It is the one home of the safe request
@@ -206,10 +322,24 @@ type Run struct {
 	// the AttachReplay seam made names no agent and is kept under the bare
 	// session for every user of it.
 	replays map[event.Address]replayEntry
-	// ageFold folds a session's projection once its replay fills the window the
+	// ageFold judges a session's projection once its replay fills the window the
 	// declaration gave it; it is mounted on every agent that declares a window.
 	ageFold *AgeFoldPlugin
+	// compress executes the judgments the age fold files: the consumer folds the
+	// material a compress request names and files the product beside it.
+	compress *CompressionConsumer
+	// finalRound judges the watchdog budget of a range off its chain and files
+	// the closing round it answered: the judgment is a fact, and the consumer
+	// that runs the closing round reads it at its own decision boundary.
+	finalRound *agent.FinalRoundPlanner
+	// closing reports that a close of this run has begun, so the intake refuses
+	// new work before the first read of the rest criterion.
 	closing bool
+	// closeReturned reports that a close of this run has returned to its caller.
+	// The consumer set that backed the run stopped with that close, so a result
+	// that lands afterwards is kept owed on the mailbox instead of being handed
+	// to a range nobody drives any more.
+	closeReturned bool
 }
 
 // Assemble builds the minimal public assembly of the runtime and publishes the
@@ -230,6 +360,10 @@ type Run struct {
 // MUST free only what the failed candidate acquired.
 // MUST NOT carry a stand-in governance in a formal assembly.
 // MUST NOT return a half-assembled run beside a publication failure.
+//
+// - The producer of the closing round reads the budget its own agent declares over the same declaration the loop's table was set from, so the judgment the chain carries names the policy the drive runs under.
+// - The consumer of compression judgments is an instance of the material flow like the fold that judges them, so every agent's After pass executes the judgments already filed instead of waiting for a producer to hand them over.
+// - The producer of the closing round is an instance of the same flow: every agent's After pass judges the budget of the segment its commit grew, so the closing round of a spent budget stands on the chain as the fact it is.
 func Assemble(ctx context.Context, decl *config.Declaration, agents map[event.AgentID]NativeAgent, opts ...Option) (*Run, error) {
 	if decl == nil {
 		return nil, errors.New("tagent: the assembly carries no declaration")
@@ -253,32 +387,36 @@ func Assemble(ctx context.Context, decl *config.Declaration, agents map[event.Ag
 		}
 	}
 	r := &Run{
-		instance:       newInstanceID(),
-		bindings:       state.NewBindings(),
-		occupancy:      state.NewOccupancy(),
-		inspector:      inspectorSubject,
-		admission:      task.NewMemoryAdmission(),
-		sites:          map[event.Address]bool{},
-		facts:          map[event.EventID]event.Event{},
-		fixers:         map[event.AgentID]*fileFixer{},
-		replays:        map[event.Address]replayEntry{},
-		landedSeq:      map[int]int64{},
-		approver:       cfg.approver,
-		policy:         cfg.policy,
-		enforcement:    cfg.enforcement,
-		recorder:       cfg.recorder,
-		observer:       cfg.observer,
-		execManager:    cfg.execManager,
-		capture:        cfg.capture,
-		leases:         map[event.AgentID]*leaseState{},
-		pendingModels:  map[event.AgentID]model.Model{},
-		leaseObservers: map[event.AgentID]*rl.LeaseObserver{},
+		instance:         newInstanceID(),
+		bindings:         state.NewBindings(),
+		occupancy:        state.NewOccupancy(),
+		inspector:        inspectorSubject,
+		admission:        task.NewMemoryAdmission(),
+		progress:         make(chan struct{}, 1),
+		sites:            map[event.Address]bool{},
+		facts:            map[event.EventID]event.Event{},
+		sessionFactCount: map[event.SessionID]int{},
+		fixers:           map[event.AgentID]*fileFixer{},
+		replays:          map[event.Address]replayEntry{},
+		landedSeq:        map[int]int64{},
+		approver:         cfg.approver,
+		policy:           cfg.policy,
+		enforcement:      cfg.enforcement,
+		recorder:         cfg.recorder,
+		observer:         cfg.observer,
+		execManager:      cfg.execManager,
+		capture:          cfg.capture,
+		leases:           map[event.AgentID]*leaseState{},
+		leaseObservers:   map[event.AgentID]*rl.LeaseObserver{},
 	}
 	for id, held := range cfg.leases {
 		lease := held
 		r.leases[id] = &lease
 	}
+	r.compress = NewCompressionConsumer(ageFoldSessions{run: r})
 	r.ageFold = NewAgeFoldPlugin(ageFoldSessions{run: r})
+	r.ageFold.setExecutor(r.compress)
+	r.finalRound = agent.NewFinalRoundPlanner(finalRoundChain{run: r}, r.finalRoundPolicyOf)
 	if cfg.reflectionAnchors != "" {
 		anchors, err := meditation.NewAnchorStore(cfg.reflectionAnchors)
 		if err != nil {
@@ -292,6 +430,12 @@ func Assemble(ctx context.Context, decl *config.Declaration, agents map[event.Ag
 			return nil, err
 		}
 		r.plugins = instances
+	}
+	if r.compress != nil {
+		r.plugins = append(r.plugins, r.compress)
+	}
+	if r.finalRound != nil {
+		r.plugins = append(r.plugins, r.finalRound)
 	}
 	r.authority = state.NewAuthority()
 	var durable *state.DurableCommit
@@ -321,22 +465,24 @@ func Assemble(ctx context.Context, decl *config.Declaration, agents map[event.Ag
 	} else {
 		r.store = state.NewMemoryStore(r.authority)
 	}
-	r.registry = task.NewMemoryRegistry(r.commit, r.admission)
+	r.registry = task.NewMemoryRegistry(r.commit, r.admission, task.WithActivity(r.noteProgress), task.WithTerminalTTL(cfg.terminalTTL()))
+	r.movement = runMovement{registry: r.registry, store: r.store}
 	r.manager = task.NewMemoryManager(r.registry, nil, task.WithEnvelopeDeliverer(r.deliver))
-	r.shutdown = agent.NewShutdown(closeFace{manager: r.manager, registry: r.registry})
-	r.delegations = agent.NewDelegator(r.shutdown, r.bindings, r.instance)
-	r.shutdown.SetReconciler(r.delegations)
+	r.delegations = agent.NewDelegator(closeGate{run: r, face: closeFace{manager: r.manager, registry: r.registry}}, r.bindings, r.instance)
 	r.publisher = state.NewPublisher(r.bindings, publishContract, cfg.governance, &r.records)
 	r.loop = agent.NewLoop(r.publisher, r.occupancy, r.instance, r.resolveFact)
+	// The loop builds the writer ledger for itself; the run reads it through the
+	// loop, so the close judges the very registrations the productions made.
+	r.writers = r.loop
+	r.delegations.SetResident(r.loop)
 	r.loop.SetHistory(r)
-	r.loop.SetWatch(r.shutdown.Watch)
 	r.loop.SetPresentations(r.takePresentation)
 	r.loop.SetFactCommit(func(evt event.Event) (event.EventID, error) {
 		return r.commitFactChecked(context.Background(), evt)
 	})
 	r.loop.SetFactPipelines(r.factPipeline)
 	r.loop.SetRequestFace(r.requestBoundary)
-	inventory := query.NewInventory(runReading{run: r})
+	inventory := query.NewInventory(hostReading{runReading: runReading{run: r}, approvals: cfg.approvals})
 	r.projection = query.NewProjection(inventory, projectionWindow)
 	r.mcpServers = mcpgw.NewServerRegistry()
 	r.mcpGateways = mcpgw.NewGateways(r.mcpServers, mcpgw.NewRegistryDiscovery())
@@ -422,20 +568,17 @@ func (r *Run) Publish(ctx context.Context, decl *config.Declaration, agents map[
 	if err != nil {
 		return state.PublishOutcome{}, err
 	}
-	r.mu.Lock()
-	previous := r.current
-	r.mu.Unlock()
 	outcome, err := r.publisher.Publish(ctx, cand)
 	if err == nil {
 		r.loop.SetFinalRound(finalRoundPolicy(decl))
 		r.loop.SetAgentFinalRounds(agentFinalRoundPolicies(decl))
 		r.mu.Lock()
 		r.current = cand.Plan
+		r.natives = agents
 		r.mu.Unlock()
 		if err := r.bindMCPServers(ctx, servers); err != nil {
 			return outcome, err
 		}
-		r.noteDeclaredModelChanges(ctx, previous, decl, agents)
 	}
 	return outcome, err
 }
@@ -559,6 +702,34 @@ func (r *Run) agentSpecOf(id event.AgentID) config.AgentSpec {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return specOfLocked(r.current.Plan.Declaration, id)
+}
+
+// publishedEntry reports the entry agent the declaration in effect names, and the
+// empty identity beside a run that published no declaration.
+func (r *Run) publishedEntry() event.AgentID {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return entryOfDeclaration(r.current.Plan.Declaration)
+}
+
+// publishedOrganization reports the entry agent the declaration in effect names
+// beside whether it declares the named agent. Both halves are read under the run
+// lock, so one generation answers them together: a concurrent publication never
+// lends the entry of one generation to the declared set of another.
+func (r *Run) publishedOrganization(agentID event.AgentID) (event.AgentID, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	decl := r.current.Plan.Declaration
+	return entryOfDeclaration(decl), decl == nil || declaresAgent(decl, agentID)
+}
+
+// entryOfDeclaration reports the entry agent one declaration names, and the empty
+// identity beside no declaration.
+func entryOfDeclaration(decl *config.Declaration) event.AgentID {
+	if decl == nil {
+		return ""
+	}
+	return event.AgentID(strings.TrimSpace(decl.Entry))
 }
 
 // finalRoundSpecOf reports the watchdog budget a declaration names for its entry
@@ -774,12 +945,39 @@ type assemblyConfig struct {
 	leases map[event.AgentID]leaseState
 	// capture is the trajectory capture the assembly attaches to the loop.
 	capture rl.Capture
+	// taskTerminalTTL is how long a task record outlives the terminal outcome it holds,
+	// read as task_terminal_ttl: an assembly that names none keeps DefaultTerminalTTL, and
+	// a negative one keeps every record the run ever admitted.
+	taskTerminalTTL time.Duration
 }
 
 // Option configures the formal assembly at construction. It is the assembly
 // name of the host option: one config struct, so the manual and the host entry
 // accept the same constructors.
 type Option = HostOption
+
+// WithTaskTerminalTTL sets how long a task record outlives the terminal outcome it holds: the
+// record of a settled, failed or cancelled task older than this is dropped beside the next
+// admission, so this run's account of tasks is bounded by it. A call naming a pruned task is
+// refused by name, and every fact of that task stays on the chain — the bound is the live
+// account, never the history. The zero value keeps task.DefaultTerminalTTL, and a negative
+// one keeps every record for the life of the run.
+func WithTaskTerminalTTL(ttl time.Duration) Option {
+	return func(c *assemblyConfig) { c.taskTerminalTTL = ttl }
+}
+
+// terminalTTL reports the bound this assembly builds its task table under.
+func (c *assemblyConfig) terminalTTL() time.Duration {
+	switch {
+	case c == nil:
+		return task.DefaultTerminalTTL
+	case c.taskTerminalTTL < 0:
+		return 0
+	case c.taskTerminalTTL == 0:
+		return task.DefaultTerminalTTL
+	}
+	return c.taskTerminalTTL
+}
 
 // WithGovernance attaches the governance every publication of this assembly is
 // decided under. The formal assembly carries no stand-in governance: an
@@ -977,9 +1175,9 @@ func (r *Run) establish(ctx context.Context, addr event.Address) error {
 	return nil
 }
 
-// InjectEvent commits one explicit input event of the named responsibility
-// range and drives the loop session of its address with it, exactly as the
-// Invoke entry drives a range the host admitted. The caller owns the event's
+// InjectEvent commits one explicit input event and wakes its address Consumer,
+// exactly as Invoke does. The input keeps its source invocation, while the Consumer
+// mints the segment identity that answers it. The caller owns the event's
 // address and lineage; this entry backfills only the stamps the caller left
 // unstated — an unstated source and target read as the owner of the event, an
 // unstated invocation identity as the one this call names — while the runtime
@@ -1013,22 +1211,14 @@ func (r *Run) InjectEvent(ctx context.Context, evt event.Event, invocationID eve
 	if err != nil {
 		return agent.Turn{}, "", fmt.Errorf("tagent: commit the injected event: %w", err)
 	}
-	evt.Key = key
-	turn, err := r.loop.Drive(ctx, agent.Invocation{
-		InvocationID: evt.InvocationID,
-		Address:      evt.Owner,
-		Instance:     r.instance,
-		Ready:        []event.Event{evt},
-	})
+	turn, err := r.waitResident(ctx, evt.Owner, evt.InvocationID, []event.EventID{key})
 	return turn, key, err
 }
 
 // CommitToSession commits one event into the fact chain of an explicit address,
-// under a fresh invocation identity when the caller states none. It is the
-// cross-session write face a reflection turn delivers a summary through: the
-// event keeps the address it names, the commit is observed through the target
-// agent's own published pipeline exactly as any other commit of this run, and
-// an address the run cannot establish is refused by name.
+// under a fresh invocation identity when the caller states none, and runs the
+// target agent's own published pipeline over the fact exactly as any other
+// commit of this run: an address the run cannot establish is refused by name.
 //
 // The commit is a write of this run, never a second store beside it: the fact
 // lands in the same live ledger, on the same durable log and in the same mapped
@@ -1036,7 +1226,11 @@ func (r *Run) InjectEvent(ctx context.Context, evt event.Event, invocationID eve
 // reads it like any other external input. The address block of the event is
 // backfilled, never overwritten: a source, target or owner the caller already
 // stamped is kept as the caller wrote it, and only an unstated stamp reads as
-// the target address of the commit.
+// the target address of the commit. The purposes it serves are these:
+//
+// - a task notification's material: the notice lands as the user message its address pulls, so the attention projection reads it as input rather than as a line beside it
+// - the audit facts of the host: an execution state, a refused delivery and a delivered failure notice each land as one feedback fact that carries no model payload
+// - the shared write seam of the full-duplex face: a send from one session to another and a reflection delivery both land their body through the commit-only segment below, which backfills the address block by this face's rule and leaves the observation to the target's own next boundary
 func (r *Run) CommitToSession(ctx context.Context, addr event.Address, evt event.Event) (event.EventID, error) {
 	key, err := r.commitOnly(ctx, addr, evt)
 	if err != nil {
@@ -1248,9 +1442,16 @@ func seedObservedEvents(ctx context.Context, tier *ledger.Tier) (*memory.MemoryE
 // seedReplay registers the mapped sequence every session chain already
 // committed, so a restarted run presents the material the tier holds to its
 // next request instead of reading a transcript no process carries any more.
-// Every committed fact is held in the live ledger of this run beside the
-// registration (see seedFact), so a projected entry resolves the fact it was
-// minted from and the call-result pairing survives the restart. The whole
+// Every committed fact enters the live ledger of this run beside the
+// registration (see seedFact), which is held to the hot window of its chain at
+// the end of the replay, so a restart reads the ledger a process that stayed up
+// carries; a projected entry resolves the fact it was minted from and the
+// call-result pairing survives the restart. A compression
+// product the chain holds is placed onto the projection of its session as the
+// synthetic entry it recorded: the chain says which entries the product covered,
+// so the restart restores the fold form the process left without folding the
+// material again, and a judgment whose product the chain misses is read as the
+// unexecuted judgment it is. The whole
 // registered sequence reads as ended material: a cold start has no range in
 // flight, and the next committed input opens the first one, which
 // moves the boundary without dropping a restored entry. A session whose
@@ -1267,6 +1468,7 @@ func (r *Run) seedReplay(ctx context.Context, tier *ledger.Tier) error {
 		window     FoldWindow
 	}
 	seeds := map[event.Address]*sessionSeed{}
+	products := map[event.Address][]event.CompressProduct{}
 	var order []event.Address
 	for _, stored := range events {
 		body, err := memory.DecodeEventBody(stored.Body)
@@ -1278,6 +1480,16 @@ func (r *Run) seedReplay(ctx context.Context, tier *ledger.Tier) error {
 		r.seedFact(evt)
 		addr := replayAddressOf(evt)
 		if addr.SessionID == "" {
+			continue
+		}
+		if evt.Type == event.CompressProductType {
+			product, stated := compressProductOf(evt)
+			if !stated {
+				assemblyWarn("tagent: the compression product %s states no readable product and is not restored", evt.Key)
+				continue
+			}
+			products[addr] = append(products[addr], product)
+			r.compress.NoteProduct(product)
 			continue
 		}
 		entry, ok := mappedEntryOf(evt)
@@ -1294,16 +1506,15 @@ func (r *Run) seedReplay(ctx context.Context, tier *ledger.Tier) error {
 			order = append(order, addr)
 		}
 		seed.projection.Append(ctx, entry)
-		if err := restoreFoldForm(ctx, seed.projection, seed.window); err != nil {
-			return err
-		}
 	}
 	for _, addr := range order {
 		seed := seeds[addr]
+		seed.projection.RestoreProducts(products[addr])
 		if err := r.attachScopedReplay(addr, seed.window, seed.projection); err != nil {
 			return err
 		}
 	}
+	r.trimSeededFacts()
 	if len(order) > 0 {
 		r.attachNoticeFeed()
 	}
@@ -1323,38 +1534,6 @@ func (r *Run) seedFact(evt event.Event) {
 	r.facts[evt.Key] = evt
 	r.factOrder = append(r.factOrder, evt.Key)
 }
-
-// restoreFoldForm folds one replayed projection at the commit boundaries the
-// chain recorded, exactly as the age fold plugin judges every live commit: the
-// registered sequence then carries the fold form the process left instead of the
-// raw sequence the fold had already consumed, so the first request after the
-// restart reads the same summary the live process read. The fold is
-// projection-derived: every judgment it re-derives is already a compress request
-// on the chain, so the restore files nothing back and writes no fact of its own.
-// The fold threshold is one identity of the window and never the registration
-// gate: a window naming no tokens measures its fold against the default model
-// window instead of folding nothing, so the restored chain keeps the fold form
-// the age rules give it. A fold refused by the context fails the boot instead
-// of silently leaving the material at one shape the chain never had.
-func restoreFoldForm(ctx context.Context, projection *replay.ReplayProjection, window FoldWindow) error {
-	if projection == nil {
-		return nil
-	}
-	measured := window
-	if measured.MaxTokens <= 0 {
-		measured.MaxTokens = defaultFoldWindowTokens
-	}
-	_, err := projection.FoldByAge(ctx, replay.AgeFoldPlan{
-		KeepRecent:      measured.KeepRecentTasks,
-		VolumeThreshold: measured.VolumeThresholdBytes(),
-	})
-	return err
-}
-
-// defaultFoldWindowTokens is the model window a fold measures against when the
-// declaration names no tokens: the fold threshold is the window's own identity,
-// so a zero window reads the default measure instead of dissolving the fold.
-const defaultFoldWindowTokens = 32000
 
 // seedLandedSeq reports the last sequence slot every partition already
 // committed, so the landing path of a restarted run continues the positions the
@@ -1398,14 +1577,13 @@ func eventRecordOf(evt event.Event) (memory.EventRecord, bool) {
 	}, true
 }
 
-// inspectorSubject, projectionWindow and agentShutdownPollInterval are the
-// named constants of the assembly: the subject the diagnostic read face of the
-// run reads the state owner's sites under, how many recent readings the
-// projection keeps servable, and how often a close looks at real settlement.
+// inspectorSubject and projectionWindow are the named constants of the
+// assembly: the subject the diagnostic read face of the run reads the state
+// owner's sites under, and how many recent readings the projection keeps
+// servable.
 const (
-	inspectorSubject          = state.Subject("tagent-assembly-inspector")
-	projectionWindow          = 8
-	agentShutdownPollInterval = 2 * time.Millisecond
+	inspectorSubject = state.Subject("tagent-assembly-inspector")
+	projectionWindow = 8
 )
 
 // ErrMemoryDeclaration reports a memory declaration that cannot be merged into
@@ -1608,8 +1786,8 @@ func validateEngine(engine config.EngineSpec) error {
 }
 
 // ErrModelLeaseMissing and the lease wiring errors beside it name the way the
-// model replacement wiring was refused, so a host routes each by name instead
-// of matching on message text.
+// model lease wiring was refused, so a host routes each by name instead of
+// matching on message text.
 var (
 	// ErrModelLeaseMissing reports a model lease option that names no lease: a
 	// version in effect is never invented by the assembly.
@@ -1635,10 +1813,11 @@ var (
 )
 
 // leaseState is one agent's attached model lease at assembly: the lease that
-// serves the agent, the rebuild a replacement fact runs and the publication
-// entry the rebuilt model is installed through. A nil rebuild takes the model
-// the publication that judged the change contributed; a nil publish records the
-// installed identity beside the run and installs the version in the lease only.
+// serves the agent, the rebuild a model configuration change runs and the
+// publication entry the rebuilt model is installed through. A lease attached
+// beside no rebuild refuses every change at that step by name; a nil publish
+// records the installed identity beside the run and installs the version in the
+// lease only.
 type leaseState struct {
 	lease   *rl.ModelLease
 	rebuild func(version string) (model.Model, error)
@@ -1648,8 +1827,8 @@ type leaseState struct {
 // ModelLeaseOption configures the model lease one agent is assembled with.
 type ModelLeaseOption func(*leaseState)
 
-// WithLeaseRebuild names the rebuild step a model replacement fact runs: the
-// step receives the version the fact asks for and answers the model that
+// WithLeaseRebuild names the rebuild step a model configuration change runs:
+// the step receives the version the change asks for and answers the model that
 // version is installed as. A rebuild that fails installs no version, and the
 // lease keeps the version in effect.
 func WithLeaseRebuild(rebuild func(version string) (model.Model, error)) ModelLeaseOption {
@@ -1658,12 +1837,12 @@ func WithLeaseRebuild(rebuild func(version string) (model.Model, error)) ModelLe
 
 // WithModelLease attaches the model lease of one agent to this assembly: the
 // agent's binding carries the lease's stable model handle instead of the model
-// the host contributed, every committed model replacement fact owned by the
+// the host contributed, every committed model configuration change owned by the
 // agent is consumed by the lease observer mounted on its pipeline, and the
 // lease's rebuild-publication-installation order decides whether the requested
 // version takes effect. A rebuild and a publication entry are configured
-// through the model lease options; a replacement beside no rebuild takes the
-// model the publication that judged the change contributed.
+// through the model lease options; a lease attached beside no rebuild refuses
+// every change at that step by name.
 //
 // The lease agent must be declared by the assembly's declaration: the
 // declaration is the authorization, and a lease beside no declared agent is
@@ -1701,51 +1880,86 @@ func declaresAgent(decl *config.Declaration, agentID event.AgentID) bool {
 }
 
 // leaseOf reports the lease state attached to one agent, or nil beside none.
-// The map is written once at assembly and never after, and the lock keeps a
-// concurrent publication from reading it mid-write.
+// Boot writes the table for the first generation, and a publication that adds a
+// declared agent extends it; the lock keeps a concurrent publication from reading
+// either write mid-way.
 func (r *Run) leaseOf(agentID event.AgentID) *leaseState {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.leases[agentID]
 }
 
+// modelLeaseBinding is one model lease a publication attaches to this run: the
+// lease state the agent's binding borrows the version from and the replacement
+// consumer mounted on its pipeline.
+type modelLeaseBinding struct {
+	agent    event.AgentID
+	held     leaseState
+	observer *rl.LeaseObserver
+}
+
 // mountLeaseObservers mounts the replacement consumer of every attached lease
 // on the agent's pipeline: one fact->observation face that reads a committed
-// model replacement fact back and applies it through the lease's own rebuild,
+// model configuration change back and applies it through the lease's own rebuild,
 // publication and installation order. A lease observer the run cannot build is
 // refused before the first publication, so a half-wired assembly is never
 // returned.
 func (r *Run) mountLeaseObservers() error {
 	for id, held := range r.leases {
-		observer, err := rl.NewLeaseObserver(id, held.lease, runFacts{run: r}, r.rebuildLeaseModel(id), r.publishLease(id))
+		binding, err := r.buildModelLeaseBinding(id, *held)
 		if err != nil {
-			return fmt.Errorf("tagent: mount the model lease observer of agent %q: %w", id, err)
+			return err
 		}
-		r.leaseObservers[id] = observer
+		r.leaseObservers[id] = binding.observer
 	}
 	return nil
 }
 
+// buildModelLeaseBinding builds the replacement consumer of one attached lease
+// through the same construction mountLeaseObservers runs at assembly. It builds
+// beside the run and mounts nothing: a lease the assembly did not attach is
+// mounted only after the generation that declared its agent published.
+func (r *Run) buildModelLeaseBinding(agentID event.AgentID, held leaseState) (modelLeaseBinding, error) {
+	observer, err := rl.NewLeaseObserver(agentID, held.lease, runFacts{run: r}, r.rebuildLeaseModel(agentID), r.publishLease(agentID))
+	if err != nil {
+		return modelLeaseBinding{}, fmt.Errorf("tagent: mount the model lease observer of agent %q: %w", agentID, err)
+	}
+	return modelLeaseBinding{agent: agentID, held: held, observer: observer}, nil
+}
+
+// installModelLeases mounts the lease and observer of every agent a published
+// generation added, under the run lock: the next publication reads them through
+// the lease table and observer map the assembly filled, so a model change of an
+// agent added at runtime is served by the lease path. A lease the run already
+// holds is left as it stands, so re-adding an agent serves the version in effect
+// instead of a second lease beside it.
+func (r *Run) installModelLeases(bindings []modelLeaseBinding) {
+	if len(bindings) == 0 {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, binding := range bindings {
+		if _, held := r.leases[binding.agent]; held {
+			continue
+		}
+		held := binding.held
+		r.leases[binding.agent] = &held
+		r.leaseObservers[binding.agent] = binding.observer
+	}
+}
+
 // rebuildLeaseModel reports the rebuild step one agent's lease replacement
-// runs: the explicit rebuild the host named when it attached the lease, or the
-// model the publication that judged the change contributed. The pending model
-// is consumed once, so one contributed model installs one version and a second
-// replacement beside none is refused by name.
+// runs: the explicit rebuild the host named when it attached the lease. A lease
+// attached beside no rebuild answers a named refusal, so no model is invented
+// for a version nothing can build.
 func (r *Run) rebuildLeaseModel(agentID event.AgentID) func(version string) (model.Model, error) {
 	return func(version string) (model.Model, error) {
-		if held := r.leaseOf(agentID); held != nil && held.rebuild != nil {
-			return held.rebuild(version)
+		held := r.leaseOf(agentID)
+		if held == nil || held.rebuild == nil {
+			return nil, fmt.Errorf("%w: no rebuild is attached for agent %q version %q", rl.ErrLeaseRebuildFailed, agentID, version)
 		}
-		r.mu.Lock()
-		next, pending := r.pendingModels[agentID]
-		if pending {
-			delete(r.pendingModels, agentID)
-		}
-		r.mu.Unlock()
-		if !pending || next == nil {
-			return nil, fmt.Errorf("%w: no model is pending for agent %q version %q", rl.ErrLeaseRebuildFailed, agentID, version)
-		}
-		return next, nil
+		return held.rebuild(version)
 	}
 }
 
@@ -1834,28 +2048,18 @@ func (f captureFaces) Seal(ctx context.Context) error {
 	return nil
 }
 
-// NoteModelChange files the judgment that one agent's model reference moves
-// from one version to another and commits it as a model replacement fact on the
-// agent's own pipeline, the explicit entry a host drives when its own
-// configuration source observed the change; a publication that moves an
-// agent's declared model reference files the same fact itself, with the
-// configuration source stamp. The lease mounted on the agent runs the rebuild,
-// publication and installation order and decides whether the version takes
-// effect.
+// noteModelConfigurationChange files the judgment that one agent's model
+// reference moves onto a published generation as one configuration change of
+// the model dimension. The fact commits through the loop's commit face so the
+// After pass of the owning agent's pipeline observes it exactly as the loop's
+// own facts are observed. A repeated judgment commits no second fact but still
+// runs that pass, so an install the lease refused is retried by the next
+// judgment that names the same move.
 //
 // The identity of the committed fact is returned; a change this run cannot
 // file — no lease for the agent, no target version, no commit face — is refused
 // by name, and an empty from version is the version the lease holds.
-func (r *Run) NoteModelChange(agentID event.AgentID, from, to, source string) (event.EventID, error) {
-	return r.noteModelReplacement(context.Background(), agentID, from, to, source)
-}
-
-// noteModelReplacement is the one filing path of a model replacement judgment:
-// it resolves the lease of the owning agent, defaults the from version to the
-// version in effect and the source to the configuration source, and commits the
-// fact through the loop's commit face so the After pass of the owning agent's
-// pipeline observes it exactly as the loop's own facts are observed.
-func (r *Run) noteModelReplacement(ctx context.Context, agentID event.AgentID, from, to, source string) (event.EventID, error) {
+func (r *Run) noteModelConfigurationChange(ctx context.Context, agentID event.AgentID, generation uint64, from, to string) (event.EventID, error) {
 	held := r.leaseOf(agentID)
 	if held == nil || held.lease == nil {
 		return "", fmt.Errorf("%w: agent %q", ErrModelChangeOwnerMissing, agentID)
@@ -1863,16 +2067,16 @@ func (r *Run) noteModelReplacement(ctx context.Context, agentID event.AgentID, f
 	if to == "" {
 		return "", fmt.Errorf("%w: agent %q", ErrModelChangeTargetMissing, agentID)
 	}
-	if source == "" {
-		source = event.ModelReplacementSourceConfig
-	}
 	if from == "" {
 		from = held.lease.CurrentVersion()
 	}
-	fact := event.ModelReplacementFor(agentID, from, to, source, event.ModelReplacementResultRequested)
+	fact := event.ConfigChangeModelFor(agentID, generation, from, to, event.ModelReplacementResultRequested)
+	if r.loop == nil {
+		return "", fmt.Errorf("%w: agent %q", ErrModelChangeUncommitted, agentID)
+	}
 	key, commitErr := r.loop.CommitFactFor(ctx, agentID, fact.Event(time.Now().UTC()))
 	if commitErr != nil {
-		return "", fmt.Errorf("tagent: commit the model replacement fact of agent %q: %w", agentID, commitErr)
+		return "", fmt.Errorf("tagent: commit the model configuration change of agent %q: %w", agentID, commitErr)
 	}
 	if key == "" {
 		return "", fmt.Errorf("%w: agent %q", ErrModelChangeUncommitted, agentID)
@@ -1880,45 +2084,16 @@ func (r *Run) noteModelReplacement(ctx context.Context, agentID event.AgentID, f
 	return key, nil
 }
 
-// noteDeclaredModelChanges files the replacement judgments one successful
-// publication implies: every leased agent whose declared model reference moved
-// since the generation in effect is judged once, from the version its lease
-// holds to the version the new reference names, with the configuration source
-// stamp. The model the publication contributed for the agent is kept as the
-// rebuild source when the host named no explicit one.
-//
-// The declared model reference is the configuration fingerprint of the model
-// dimension: a byte-identical reload publishes nothing and judges nothing, and
-// a changed reference is the change itself. A change whose fact cannot commit
-// is recorded beside the run rather than read as a replacement that happened.
-func (r *Run) noteDeclaredModelChanges(ctx context.Context, previous state.StatePlan, decl *config.Declaration, agents map[event.AgentID]NativeAgent) {
-	if previous.Plan.Declaration == nil || decl == nil {
+// recordLeaseLoss records one model configuration change whose fact did not
+// commit beside the run, so a judgment that reached no ledger is readable as the
+// loss it is.
+func (r *Run) recordLeaseLoss(err error) {
+	if err == nil {
 		return
 	}
-	before := make(map[event.AgentID]string, len(previous.Plan.Declaration.Agents))
-	for _, spec := range previous.Plan.Declaration.Agents {
-		before[event.AgentID(spec.ID)] = spec.Model
-	}
-	for _, spec := range decl.Agents {
-		id := event.AgentID(spec.ID)
-		if r.leaseOf(id) == nil || before[id] == spec.Model {
-			continue
-		}
-		target := rl.ParseModelIdentity(spec.Model).Version
-		if target == "" {
-			continue
-		}
-		if native, contributed := agents[id]; contributed && native.Model != nil {
-			r.mu.Lock()
-			r.pendingModels[id] = native.Model
-			r.mu.Unlock()
-		}
-		if _, err := r.noteModelReplacement(ctx, id, "", target, event.ModelReplacementSourceConfig); err != nil {
-			r.mu.Lock()
-			r.leaseLosses = append(r.leaseLosses, err)
-			r.mu.Unlock()
-		}
-	}
+	r.mu.Lock()
+	r.leaseLosses = append(r.leaseLosses, err)
+	r.mu.Unlock()
 }
 
 // LeasePublications reports the versions the model leases installed through
@@ -1930,11 +2105,197 @@ func (r *Run) LeasePublications() []rl.ModelIdentity {
 	return append([]rl.ModelIdentity(nil), r.leasePublications...)
 }
 
-// LeaseLosses reports the declared model changes whose replacement fact could
-// not commit, as a copy the caller owns: a judgment that reached no ledger is
-// named here rather than read as a replacement that happened.
+// LeaseLosses reports the model configuration changes whose fact could not
+// commit, as a copy the caller owns: a judgment that reached no ledger is named
+// here rather than read as a move that happened.
 func (r *Run) LeaseLosses() []error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return append([]error(nil), r.leaseLosses...)
+}
+
+// metaKeyFinalRoundRange, metaKeyFinalRoundReason, metaKeyFinalRoundRounds and
+// metaKeyFinalRoundElapsed are the metadata keys a final round request fact states
+// the fields of its judgment under: a request is a judgment about a range and never
+// material of a transcript, so the event metadata is the one durable carrier of
+// what it judged.
+const (
+	metaKeyFinalRoundRange   = "final_round_range"
+	metaKeyFinalRoundReason  = "final_round_reason"
+	metaKeyFinalRoundRounds  = "final_round_rounds"
+	metaKeyFinalRoundElapsed = "final_round_elapsed"
+)
+
+// finalRoundChain is the chain face the final round planner reads one commit
+// through: the live ledger of this run beside the declaration it published last.
+type finalRoundChain struct{ run *Run }
+
+// The face satisfies the chain port the planner judges and files through.
+var _ agent.FinalRoundChain = finalRoundChain{}
+
+// AddressOf reports the (agent, session) address one committed fact belongs to;
+// a fact this run holds no record of, and a fact naming no agent or no session,
+// belongs to no chain.
+func (c finalRoundChain) AddressOf(_ context.Context, id event.EventID) (event.Address, bool) {
+	c.run.mu.Lock()
+	evt, held := c.run.facts[id]
+	c.run.mu.Unlock()
+	if !held {
+		return event.Address{}, false
+	}
+	addr := event.Address{AgentID: agentOf(evt), SessionID: sessionOf(evt)}
+	return addr, addr.IsComplete()
+}
+
+// SegmentOf reports the segment one address flies, as one budget judgment reads
+// it.
+func (c finalRoundChain) SegmentOf(_ context.Context, addr event.Address) (agent.FinalRoundSegment, bool) {
+	return c.run.finalRoundSegmentOf(addr)
+}
+
+// FileFinalRoundRequest files one judgment on the chain of the address whose
+// budget it judged.
+func (c finalRoundChain) FileFinalRoundRequest(ctx context.Context, addr event.Address, request event.FinalRoundRequest) error {
+	return c.run.fileFinalRoundRequest(ctx, addr, request)
+}
+
+// finalRoundSegmentOf reports the segment one address flies, read as one budget
+// judgment reads it: the facts committed past the last agent_output of that
+// chain, the range the newest of them names, the tool rounds that range ran and
+// the moment the earliest of them landed. The agent_output fact closes the
+// segment before it, so the material a closed range produced is never judged as
+// the material of the range in flight.
+//
+// The redline list (3 rules):
+// MUST read the segment from the committed facts of the address alone.
+// MUST answer no segment for an address beside no fact past its last agent_output.
+// MUST NOT count a round the range did not run: only the call facts of the range in flight are rounds.
+func (r *Run) finalRoundSegmentOf(addr event.Address) (agent.FinalRoundSegment, bool) {
+	if !addr.IsComplete() {
+		return agent.FinalRoundSegment{}, false
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	segment := make([]event.Event, 0, len(r.factOrder))
+	for at := len(r.factOrder) - 1; at >= 0; at-- {
+		evt, held := r.facts[r.factOrder[at]]
+		if !held || sessionOf(evt) != addr.SessionID || agentOf(evt) != addr.AgentID {
+			continue
+		}
+		if evt.Type == event.TypeAgentOutput {
+			break
+		}
+		segment = append(segment, evt)
+	}
+	if len(segment) == 0 {
+		return agent.FinalRoundSegment{}, false
+	}
+	rangeID := event.InvocationID("")
+	for _, evt := range segment {
+		if evt.InvocationID != "" {
+			rangeID = evt.InvocationID
+			break
+		}
+	}
+	started := segment[len(segment)-1].Timestamp
+	if rangeID == "" || started.IsZero() {
+		return agent.FinalRoundSegment{}, false
+	}
+	rounds := 0
+	for _, evt := range segment {
+		if evt.Type == event.TypeThinkingPlan && evt.InvocationID == rangeID {
+			rounds++
+		}
+	}
+	return agent.FinalRoundSegment{Range: rangeID, Rounds: rounds, Started: started}, true
+}
+
+// fileFinalRoundRequest lands one final round judgment in the live ledger of
+// this run under the identity the judgment is quoted by. The fact is the
+// judgment itself: it carries no message, so it never enters the projection it
+// judged, and it commits outside the After pass, so the judgment just filed
+// never re-enters the observation that filed it.
+// A range already carrying a request answers as filed, whatever reason that
+// earlier judgment named: one range carries one request, so a later evaluation
+// of the same range never rewrites the fact the first one filed. A judgment the
+// ledger refused is recorded at this call site rather than answered as filed.
+func (r *Run) fileFinalRoundRequest(ctx context.Context, addr event.Address, request event.FinalRoundRequest) error {
+	if !addr.IsComplete() {
+		return errors.New("tagent: the final round judgment names no agent address")
+	}
+	if request.ID == "" || request.Range == "" {
+		return errors.New("tagent: the final round judgment names no identity")
+	}
+	r.mu.Lock()
+	filed := r.finalRoundFiledLocked(request.Range)
+	r.mu.Unlock()
+	if filed {
+		return nil
+	}
+	if _, err := r.commitFactChecked(ctx, finalRoundRequestEvent(addr, request, time.Now())); err != nil {
+		if errors.Is(err, memory.ErrFactKeyConflict) {
+			return nil
+		}
+		assemblyWarn("tagent: the final round judgment of range %s was not committed err=%v", request.Range, err)
+	}
+	return nil
+}
+
+// finalRoundFiledLocked reports whether the chain already carries a request for
+// one range: the judgment identity is content-addressed over the range and the
+// reason, so both reasons a judgment can name are read back by the identity they
+// would file. The read is taken under the run lock the caller holds.
+func (r *Run) finalRoundFiledLocked(rangeID event.InvocationID) bool {
+	for _, reason := range []string{string(agent.FinalRoundRounds), string(agent.FinalRoundBudget)} {
+		if _, held := r.facts[event.FinalRoundRequestFor(rangeID, reason, 0, 0).ID]; held {
+			return true
+		}
+	}
+	return false
+}
+
+// finalRoundRequestEvent renders one judgment as the fact it commits as: the
+// judgment identity as the event key, the address whose range was judged as the
+// owner and as the range the fact belongs to, and the five fields of the
+// judgment in the event metadata. The message stays empty, because a judgment
+// about a range is not material of its transcript and must never enter the
+// projection it judged.
+func finalRoundRequestEvent(addr event.Address, request event.FinalRoundRequest, at time.Time) event.Event {
+	if at.IsZero() {
+		at = time.Now().UTC()
+	}
+	return event.Event{
+		Key:       request.ID,
+		Type:      request.FactType(),
+		Timestamp: at,
+		Meta: map[string]string{
+			event.MetaKeyEventSummary: "final round request " + request.Reason,
+			metaKeyFinalRoundRange:    string(request.Range),
+			metaKeyFinalRoundReason:   request.Reason,
+			metaKeyFinalRoundRounds:   strconv.Itoa(request.Rounds),
+			metaKeyFinalRoundElapsed:  request.Elapsed.String(),
+		},
+		Owner:        addr,
+		InvocationID: request.Range,
+	}
+}
+
+// finalRoundPolicyOf reports the watchdog budget the drives of one agent run
+// under: the budget the declaration in effect names for that agent, and the
+// entry agent's budget while it names none of its own. The read runs over the
+// same declaration the loop's budget table was set from, so the judgment the
+// planner files names the policy the drive runs under. An assembly beside no
+// published declaration answers the zero policy, which keeps every drive
+// unbounded.
+func (r *Run) finalRoundPolicyOf(agentID event.AgentID) agent.FinalRoundPolicy {
+	r.mu.Lock()
+	decl := r.current.Plan.Declaration
+	r.mu.Unlock()
+	if decl == nil {
+		return agent.FinalRoundPolicy{}
+	}
+	if policy, held := agentFinalRoundPolicies(decl)[agentID]; held {
+		return policy
+	}
+	return finalRoundPolicy(decl)
 }

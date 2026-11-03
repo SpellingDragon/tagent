@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strconv"
+	"strings"
 
 	"github.com/SpellingDragon/tagent/api/event"
 )
@@ -194,6 +196,16 @@ func (r *MemoryRegistry) Restore(ctx context.Context, chain []TaskRecord, owners
 // ordinal, and replayedStatus reads it as the running phase that fact
 // described. The progress notification the same link carries stays on the
 // chain, so the task still answers progress through ProgressReported.
+//
+// The fold is also where the round the task stands at is rebuilt, because a
+// re-entry opens the round after it and every notification identity names that
+// round. The round is the highest one the chain really opened, never one past
+// it: a terminal notice names its round, a settle or rollback mutation encodes
+// the round it consumed, and a reactivation or resume mutation opens exactly one
+// new round. The notices a restart still owes are stripped from the outbox they
+// travel in when the log already confirmed their consumption, so the round is
+// read from the mutations beside them as well — a round whose terminal is
+// confirmed is consumed, not unopened.
 func (r *MemoryRegistry) foldLocked(record TaskRecord) (bool, error) {
 	fact := record.Fact
 	if fact.MutationID == "" {
@@ -240,18 +252,65 @@ func (r *MemoryRegistry) foldLocked(record TaskRecord) (bool, error) {
 	if target, carried := handoffTargetOf(fact.MutationID); carried {
 		entry.applyHandoff(taskID, target)
 	}
+	entry.round = replayedRound(taskID, entry.round, fact)
 	for _, envelope := range fact.Outbox {
 		entry.obligations = append(entry.obligations, obligationEntry{
 			obligation: Obligation{Kind: ObligationAwaitingDelivery, TaskID: taskID, Notice: envelope.Notice},
 			envelope:   envelope,
 		})
 		r.seq.Observe(envelope.Notice)
-		if envelope.Notice.Round >= entry.round {
-			entry.round = envelope.Notice.Round + 1
+		if envelope.Notice.Round > entry.round {
+			entry.round = envelope.Notice.Round
 		}
 	}
 	if isTerminal(fact.Status) {
 		entry.closeExecutionObligation("")
 	}
 	return recovered, nil
+}
+
+// replayedRound reports the execution round a chain stands at after one fact:
+// a reactivation or resume mutation opens one round, a settle or rollback
+// mutation names the round it consumed, and the task keeps the highest round it
+// has seen. The round is the current one, so a later re-entry opens the one
+// after it; returning the next round here would count the re-entry itself a
+// second time.
+func replayedRound(taskID event.TaskID, round int64, fact CommitRecord) int64 {
+	if opensRound(taskID, fact.MutationID) {
+		round++
+	}
+	if carried, ok := roundOfMutation(taskID, fact.MutationID); ok && carried > round {
+		round = carried
+	}
+	return round
+}
+
+// opensRound reports whether one mutation identity opens a new execution round
+// of the named task: a reactivation of a settled task and a resume of an
+// existing one each move the task into a round of its own.
+func opensRound(taskID event.TaskID, mutation MutationID) bool {
+	text := string(mutation)
+	task := string(taskID) + ":"
+	return strings.HasPrefix(text, reactivatePrefix+task) || strings.HasPrefix(text, "resume:"+task)
+}
+
+// roundOfMutation reports the execution round one mutation identity encodes, if
+// it encodes one: a settle names the round whose terminal it records and a
+// reactivation rollback names the round it puts back, because both stay
+// consumed and the next re-entry opens the following round. An identity that
+// carries no round (a legacy archive settle, a handoff or a stop) reports none.
+func roundOfMutation(taskID event.TaskID, mutation MutationID) (int64, bool) {
+	text := string(mutation)
+	for _, prefix := range []string{"settle:", rollbackPrefix} {
+		head := prefix + string(taskID) + ":"
+		if !strings.HasPrefix(text, head) {
+			continue
+		}
+		round, err := strconv.ParseInt(strings.TrimPrefix(text, head), 10, 64)
+		if err != nil || round < 1 {
+			return 0, false
+		}
+		return round, true
+	}
+	return 0, false
 }

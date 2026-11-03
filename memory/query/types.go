@@ -74,6 +74,10 @@ const (
 	ObjectNotice ObjectKind = "notice"
 	// ObjectLease is a resource lease object.
 	ObjectLease ObjectKind = "lease"
+	// ObjectAttention is an attention object: one question the owners still
+	// hold as a question at read time, read through the attention read face
+	// beside the three readings of the port.
+	ObjectAttention ObjectKind = "attention"
 )
 
 // ObjectRef names one object of the projection without carrying its detail: the
@@ -87,6 +91,7 @@ const (
 //   - an agent is named by Address.AgentID, a session by Address and InstanceID
 //   - an invocation is named by InvocationID, a task by TaskID, a lease by Lease.Kind and Lease.Key
 //   - a notice is named by the TaskID, Round, Kind and Seq of Notice
+//   - an attention is named by the Kind, Target and Lineage of Attention; the validity it was filed under is content beside that identity
 //   - every other field of a reference is content beside that identity and takes no part in equality
 //   - two agent references that differ only in SessionID name one agent, not two
 //   - compare references by that identity, never by struct equality or field by field: a key of the whole struct splits one object into several
@@ -109,6 +114,23 @@ type ObjectRef struct {
 	Notice task.Notice
 	// Lease names a resource lease object; it is empty for another kind.
 	Lease state.LeaseRef
+	// attention names an attention object in the typed form its owner already
+	// answers in: the kind it was asked under, the target it was put to, the
+	// lineage it came from and the validity it was filed under. It is empty for
+	// another kind and is read through AttentionQuestion, so an attention
+	// reference carries the whole question its owner answered as one value
+	// instead of growing the reference vocabulary one field per dimension.
+	attention task.AttentionQuestion
+}
+
+// AttentionQuestion answers the attention object this reference names: the
+// question exactly as the owner that holds it answers it, so a reader telling
+// one attention object from another reads the kind it was asked under, the
+// target it was put to and the lineage it came from, and never the identity of
+// another kind's object. A reference that names no attention object answers the
+// zero question.
+func (r ObjectRef) AttentionQuestion() task.AttentionQuestion {
+	return r.attention
 }
 
 // Cursor is the opaque continuation token of one bounded, paged read.

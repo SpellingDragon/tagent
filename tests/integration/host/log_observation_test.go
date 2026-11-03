@@ -14,6 +14,7 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
 
+	"github.com/SpellingDragon/tagent/api/event"
 	"github.com/SpellingDragon/tagent/assembly"
 	"github.com/SpellingDragon/tagent/features/telemetry"
 	trpclog "trpc.group/trpc-go/trpc-agent-go/log"
@@ -111,6 +112,32 @@ func (l *observationLogger) all() []string {
 	return out
 }
 
+// observedLine reports the one line carrying the fragment.
+func observedLine(t *testing.T, lines []string, fragment string) string {
+	t.Helper()
+	for _, line := range lines {
+		if strings.Contains(line, fragment) {
+			return line
+		}
+	}
+	t.Fatalf("lines = %v, want one line carrying %q", lines, fragment)
+	return ""
+}
+
+// boundaryInvocation reads the invocation identity one rendered turn-boundary
+// line names, so the identity a boundary reports is held against the chain the
+// turn answered on instead of being assumed from the caller's own invocation.
+func boundaryInvocation(t *testing.T, line string) event.InvocationID {
+	t.Helper()
+	for _, field := range strings.Fields(line) {
+		if value, ok := strings.CutPrefix(field, "invocation="); ok {
+			return event.InvocationID(value)
+		}
+	}
+	t.Fatalf("line %q carries no invocation identity", line)
+	return ""
+}
+
 // mentions reports whether any line taken at the level carries every fragment.
 func (l *observationLogger) mentions(level string, fragments ...string) bool {
 	for _, text := range l.at(level) {
@@ -160,11 +187,19 @@ func TestLogObservationThroughTheFormalEntry(t *testing.T) {
 		run, _ := visibilityRun(t, ctx, assembly.WithTelemetry(telemetry.NewLogObserver(logger)))
 		visibilityInvoke(t, ctx, run, "inv-log-boundary", "session-log-boundary")
 		if !logger.mentions("info", "turn start", "agent=agent-a", "invocation=inv-log-boundary") {
-			t.Fatalf("info lines = %v, want the turn-start boundary of the invocation", logger.at("info"))
+			t.Fatalf("info lines = %v, want the turn-start boundary of the caller input", logger.at("info"))
 		}
-		if !logger.mentions("info", "turn end", "agent=agent-a", "invocation=inv-log-boundary") {
-			t.Fatalf("info lines = %v, want the turn-end boundary of the invocation", logger.at("info"))
+		if !logger.mentions("info", "turn end", "agent=agent-a", "session=session-log-boundary") {
+			t.Fatalf("info lines = %v, want the turn-end boundary of the session", logger.at("info"))
 		}
+		// The end boundary names the segment the resident Consumer minted for the
+		// session; the caller's own invocation survives on the chain, so the
+		// identity is proven from the rendered line and the chain input fact it
+		// consumed, never from the caller identity alone.
+		segment := boundaryInvocation(t, observedLine(t, logger.at("info"), "turn end"))
+		addr := event.Address{AgentID: "agent-a", SessionID: "session-log-boundary"}
+		input := entryAnswerIdentity(t, run, addr, segment, "inv-log-boundary")
+		t.Logf("[log-boundary] turn end names segment %s, which consumed the caller input %s", segment, input.Key)
 		if len(logger.at("info")) != 2 {
 			t.Fatalf("info lines = %v, want the INFO stream bounded by the two turn boundaries", logger.at("info"))
 		}
@@ -254,7 +289,7 @@ func watchObservationFaces(tb testing.TB, logger trpclog.Logger, tracer trace.Tr
 // TestFourFacesObservationThroughTheFormalEntry checks the four faces of the observation bypass through the formal assembly entry.
 // - 事件流: the committed tool-call fact writes its DEBUG line after its commit
 // - 插件相位: every executed face of the pipeline writes one DEBUG line carrying the phase, the plugin and its result
-// - 事件消费: the drive writes its start, its decision and its end lines beside the invocation identity
+// - 事件消费: the segment the drive opens closes beside the segment identity the resident Consumer minted for the session
 // - 模型响应: each model request writes one INFO line and leaves the generation span to the framework that drives the model
 // - the INFO stream stays bounded by the turn boundaries and the model responses, and no line renders payload content
 //
@@ -274,11 +309,11 @@ func TestFourFacesObservationThroughTheFormalEntry(t *testing.T) {
 	if !logger.mentions("debug", "plugin face", "port=fact->observation", "face=observe", "plugin=commit-observer", "result=ok") {
 		t.Fatalf("debug lines = %v, want the dispatched post-commit face of the pipeline", logger.at("debug"))
 	}
-	if !logger.mentions("debug", "consumer drive start", "agent=agent-a", "session=session-faces", "invocation=inv-faces") {
-		t.Fatalf("debug lines = %v, want the start line of the drive", logger.at("debug"))
+	if !logger.mentions("debug", "consumer segment open", "agent=agent-a", "session=session-faces", "invocation=session-faces#c1") {
+		t.Fatalf("debug lines = %v, want the open line of the segment driven for the session", logger.at("debug"))
 	}
-	if !logger.mentions("debug", "consumer drive end", "invocation=inv-faces", "decisions=2", "terminal=completed") {
-		t.Fatalf("debug lines = %v, want the end line of the drive beside its two decisions", logger.at("debug"))
+	if !logger.mentions("debug", "consumer segment close", "invocation=session-faces#c1", "decisions=2", "terminal=completed", "consumed=1") {
+		t.Fatalf("debug lines = %v, want the close line of the segment beside its two decisions", logger.at("debug"))
 	}
 	if !logger.mentions("info", "model response", "model=model-a", "terminal=completed", "responses=1") {
 		t.Fatalf("info lines = %v, want the model-response line of a served request", logger.at("info"))

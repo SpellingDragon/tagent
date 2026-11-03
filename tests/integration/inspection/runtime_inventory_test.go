@@ -184,6 +184,15 @@ func taskEntry(tasks []query.TaskEntry, id event.TaskID) (query.TaskEntry, bool)
 	return query.TaskEntry{}, false
 }
 
+// normalizedObligations hands an empty open set back as no slice at all, the shape
+// the projection's defensive copy returns, so an owner reading and the projected
+// one compare field for field instead of an empty set reading as two different
+// things. Membership of the set is unchanged.
+func normalizedObligations(held task.Obligations) task.Obligations {
+	held.Open = append([]task.Obligation(nil), held.Open...)
+	return held
+}
+
 // newRuntimeFixture assembles the real owners and drives them into one known
 // multi-dimensional state: three session sites, one held execution slot, two
 // tasks, four notifications standing in four delivery phases and two held
@@ -418,8 +427,33 @@ func TestRuntimeInventory(t *testing.T) {
 		if invocations[0].InvocationID != "inv-a1" || invocations[0].Address != f.addrA || invocations[0].Instance != f.instance || invocations[0].Decision != "dec-a1" {
 			t.Fatalf("first invocation = %+v, want inv-a1 on agent-a/s1 holding dec-a1", invocations[0])
 		}
-		if len(invocations[0].Pending) != 1 || invocations[0].Pending[0] != f.notices[3] {
-			t.Fatalf("inv-a1 pending = %+v, want the refused notification only", invocations[0].Pending)
+		wantPending := map[event.InvocationID][]task.Notice{}
+		for _, id := range f.durable.TaskIDs() {
+			held, err := f.manager.Obligations(f.ctx, id)
+			if err != nil {
+				t.Fatalf("Obligations(%s): %v", id, err)
+			}
+			for _, open := range held.Open {
+				if open.Notice != (task.Notice{}) {
+					wantPending[held.Owner] = append(wantPending[held.Owner], open.Notice)
+				}
+			}
+		}
+		for _, invocation := range invocations {
+			want := wantPending[invocation.InvocationID]
+			if len(invocation.Pending) != len(want) {
+				t.Fatalf("invocation %s pending = %+v, want the %d open notifications its owner holds %+v", invocation.InvocationID, invocation.Pending, len(want), want)
+			}
+			for i := range want {
+				if invocation.Pending[i] != want[i] {
+					t.Fatalf("invocation %s pending = %+v, want the open notifications of its owner %+v", invocation.InvocationID, invocation.Pending, want)
+				}
+			}
+			for _, pending := range invocation.Pending {
+				if pending == f.notices[3] {
+					t.Fatalf("invocation %s pending = %+v, want the refused notification standing no pending slot", invocation.InvocationID, invocation.Pending)
+				}
+			}
 		}
 		if invocations[1].InvocationID != "inv-c1" || invocations[1].Address != f.addrC || invocations[1].Decision != "" || len(invocations[1].Pending) != 0 {
 			t.Fatalf("second invocation = %+v, want inv-c1 on agent-c/s1 with no slot and no pending notification", invocations[1])
@@ -440,11 +474,12 @@ func TestRuntimeInventory(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Obligations(%s): %v", f.task1, err)
 		}
+		ownerObligations = normalizedObligations(ownerObligations)
 		if !reflect.DeepEqual(settledTask.Obligations, ownerObligations) {
 			t.Fatalf("task-1 obligations = %+v, want owner reading %+v", settledTask.Obligations, ownerObligations)
 		}
-		if settledTask.Obligations.Count != 1 || settledTask.Obligations.Blocked[0].Reason != f.refusal.Error() {
-			t.Fatalf("task-1 obligations = %+v, want one refused delivery beside its reason", settledTask.Obligations)
+		if settledTask.Obligations.Count != 0 || len(settledTask.Obligations.Open) != 0 || len(settledTask.Obligations.Blocked) != 1 || settledTask.Obligations.Blocked[0].Reason != f.refusal.Error() {
+			t.Fatalf("task-1 obligations = %+v, want no open obligation beside the refused delivery still recorded with its reason", settledTask.Obligations)
 		}
 		acceptedTask, ok := taskEntry(tasks, f.task2)
 		if !ok || acceptedTask.Spec != f.spec2 || acceptedTask.Status != task.StatusAccepted || acceptedTask.Obligations.Count != 1 || acceptedTask.Obligations.Open[0].Kind != task.ObligationAwaitingTool {
@@ -654,7 +689,7 @@ func TestRuntimeInventory(t *testing.T) {
 		mutatedNotices := view.Notices()
 		mutatedNotices[3].Blocked[0].Reason = "tampered"
 		mutatedInvocations := view.Invocations()
-		mutatedInvocations[0].Pending[0] = task.Notice{}
+		mutatedInvocations[0].Decision = "tampered"
 		if !view.Agents()[0].Busy {
 			t.Fatalf("agent reading changed through a returned slice: %+v", view.Agents()[0])
 		}
@@ -664,8 +699,8 @@ func TestRuntimeInventory(t *testing.T) {
 		if view.Notices()[3].Blocked[0].Reason == "tampered" {
 			t.Fatalf("notice blocked reason changed through a returned slice: %+v", view.Notices()[3])
 		}
-		if view.Invocations()[0].Pending[0] == (task.Notice{}) {
-			t.Fatalf("pending notification changed through a returned slice: %+v", view.Invocations()[0])
+		if view.Invocations()[0].Decision == "tampered" {
+			t.Fatalf("invocation decision changed through a returned slice: %+v", view.Invocations()[0])
 		}
 		if counts := view.Counts(); counts.Agents.Busy != 1 {
 			t.Fatalf("counts changed through a returned slice: %+v", counts)

@@ -7,6 +7,7 @@ package inspection
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"reflect"
 	"strings"
@@ -182,8 +183,11 @@ func obsKindCounts(snapshot query.Snapshot) map[query.ObjectKind]int {
 	return out
 }
 
-// obsInvoke drives one tool-calling turn through the assembled run.
-func obsInvoke(t *testing.T, ctx context.Context, run *assembly.Run, invocation, session string) assembly.InvokeRequest {
+// obsInvoke drives one tool-calling turn through the assembled run and reports
+// the request it was driven with beside the segment identity the resident
+// Consumer minted to answer it: the caller's invocation stays on the input fact
+// of the chain, never on the answer the segment commits.
+func obsInvoke(t *testing.T, ctx context.Context, run *assembly.Run, invocation, session string) (assembly.InvokeRequest, event.InvocationID) {
 	t.Helper()
 	req := assembly.InvokeRequest{
 		InvocationID: event.InvocationID(invocation),
@@ -197,7 +201,48 @@ func obsInvoke(t *testing.T, ctx context.Context, run *assembly.Run, invocation,
 	if turn.Terminal != model.KindCompleted {
 		t.Fatalf("turn terminal = %v, want the turn to complete regardless of the observation", turn.Terminal)
 	}
-	return req
+	return req, turn.InvocationID
+}
+
+// observationAnswerIdentity checks the identity evidence one turn answers under
+// as the observation face reads it back: the turn's own facts carry the segment
+// identity the resident Consumer minted for the session, while the caller's
+// invocation survives on the input fact of the chain, which the segment's answer
+// states it consumed. The returned input fact is the caller's own, proven from
+// the chain and never assumed from the caller identity alone.
+func observationAnswerIdentity(t *testing.T, run *assembly.Run, addr event.Address, segment, caller event.InvocationID) event.Event {
+	t.Helper()
+	if prefix := string(addr.SessionID) + "#"; !strings.HasPrefix(string(segment), prefix) {
+		t.Fatalf("turn invocation = %q, want the segment identity of %s under prefix %q", segment, addr.SessionID, prefix)
+	}
+	var input event.Event
+	inputHeld := false
+	var consumed []event.EventID
+	answerHeld := false
+	for _, fact := range run.SessionFacts(addr) {
+		if !inputHeld && fact.Type == event.TypeExternalInput && fact.InvocationID == caller {
+			input = fact
+			inputHeld = true
+		}
+		if !answerHeld && fact.Type == event.TypeAgentOutput && fact.InvocationID == segment {
+			if err := json.Unmarshal([]byte(fact.Meta[event.MetaKeyInputEvents]), &consumed); err == nil {
+				answerHeld = true
+			}
+		}
+	}
+	if !inputHeld {
+		t.Fatalf("the chain carries no input fact of the caller invocation %q", caller)
+	}
+	if !answerHeld {
+		t.Fatalf("the chain carries no answer of segment %q stating its consumed inputs", segment)
+	}
+	for _, key := range consumed {
+		if key == input.Key {
+			return input
+		}
+	}
+	t.Fatalf("the segment %q consumed inputs %v, want the caller input %q", segment, consumed, input.Key)
+	return event.Event{}
 }
 
 // obsKindCoverage counts the observed facts of one turn per frozen fact type,
@@ -270,6 +315,7 @@ func (c obsKindCoverage) want(t *testing.T) {
 // - 五类事实全达: the entry input, the assistant call, the assistant output, the call result and the settled delivery each reach the observer as committed
 // - 观察逐字节保真: the observed call result is byte-identical beside the call identity, and each boundary carries the very message of the turn
 // - 边界次序真实: the turn-start fact is observed first and the turn-end fact last, so the boundaries frame the facts between them
+// - 答案身份属消费段: the turn's own facts name the segment the resident Consumer minted and prove it from the caller input fact the segment consumed
 // - 缺口可从诊断读到: a failed observation lands as a named gap on the read face of the run and drops nothing
 // - 观察不建第二真源: the observation hangs off the committed ledger read-only and moves no query reading
 // 契约: docs/wiki/rl/rl-architecture.md#trajectory-capture
@@ -284,7 +330,9 @@ func TestObservationReachDiagnostics(t *testing.T) {
 		}
 		spy := &obsObserver{inner: sdk}
 		run := newObservedRun(t, ctx, spy)
-		req := obsInvoke(t, ctx, run, "inv-obs", "session-obs")
+		req, segment := obsInvoke(t, ctx, run, "inv-obs", "session-obs")
+		input := observationAnswerIdentity(t, run, req.Address, segment, req.InvocationID)
+		t.Logf("[observation-reach] turn answer names segment %s, which consumed the caller input %s", segment, input.Key)
 
 		observed := spy.observed()
 		if len(observed) == 0 {
@@ -320,8 +368,12 @@ func TestObservationReachDiagnostics(t *testing.T) {
 			if records[i].Fact != evt.Key {
 				t.Fatalf("审计事实 = %s, want the observed fact identity %s", records[i].Fact, evt.Key)
 			}
-			if evt.InvocationID != req.InvocationID {
-				t.Fatalf("观察事实 invocation = %q, want the range %q", evt.InvocationID, req.InvocationID)
+			if evt.Type == event.TypeExternalInput {
+				if evt.Key != input.Key || evt.InvocationID != req.InvocationID {
+					t.Fatalf("turn-start 事实 = (%s, %q), want the caller input (%s, %q) the segment consumed", evt.Key, evt.InvocationID, input.Key, req.InvocationID)
+				}
+			} else if evt.InvocationID != segment {
+				t.Fatalf("观察事实 %s invocation = %q, want the consumed segment identity %q", evt.Type, evt.InvocationID, segment)
 			}
 			if evt.Owner != req.Address || evt.Target != req.Address {
 				t.Fatalf("观察事实地址 = %+v, want the address the fact committed at %+v", evt, req.Address)
@@ -343,7 +395,7 @@ func TestObservationReachDiagnostics(t *testing.T) {
 		refusal := errors.New("the collector refused the observation")
 		spy := &obsObserver{err: refusal}
 		run := newObservedRun(t, ctx, spy)
-		req := obsInvoke(t, ctx, run, "inv-gap", "session-gap")
+		req, _ := obsInvoke(t, ctx, run, "inv-gap", "session-gap")
 
 		if len(spy.observed()) == 0 {
 			t.Fatalf("失败观察未尝试: the observer was never reached")
@@ -390,7 +442,7 @@ func TestObservationReachDiagnostics(t *testing.T) {
 		spy := &obsObserver{inner: sdk}
 		observedRun := newObservedRun(t, ctx, spy)
 		plainRun := newObservedRun(t, ctx, nil)
-		req := obsInvoke(t, ctx, observedRun, "inv-readonly", "session-readonly")
+		req, _ := obsInvoke(t, ctx, observedRun, "inv-readonly", "session-readonly")
 		obsInvoke(t, ctx, plainRun, "inv-readonly", "session-readonly")
 
 		scope := query.AuthorizationScope{

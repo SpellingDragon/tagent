@@ -1,6 +1,7 @@
 // J3 is the meditation backflow journey: a reflection turn delivers one summary
-// into the user session, the chain records it under the meditation lineage, and
-// the next user turn's request presents that summary to the model.
+// into the user session through send, the chain records it under the send lineage
+// the cross-session delivery stamps, and the next user turn's request presents that
+// summary to the model.
 //
 // 契约: docs/wiki/agent/agent-architecture.md#meditation-curator
 package journey
@@ -12,16 +13,35 @@ import (
 	"time"
 
 	"github.com/SpellingDragon/tagent/api/event"
+	"github.com/SpellingDragon/tagent/assembly"
 )
 
 // journeyReflectionModel is the model name the meditation agent resolves: its
 // own queue keeps the reflection turn apart from the entry agent's.
 const journeyReflectionModel = "model-reflect"
 
-// TestJourneyMeditationSummaryVisible drives a reflection delivery and reads it back on the next turn:
-// - the user session chain carries a meditation-stamped summary event with the delivered body
+// journeyMappedSummary reports the one-line summary the projection of one
+// session keeps beside the content of the named fact: the stored read a request
+// and a human reader reach without opening the full text.
+func journeyMappedSummary(run *assembly.Run, session string, key event.EventID) (string, bool) {
+	entries, registered := run.ReplayEntries(event.SessionID(session))
+	if !registered {
+		return "", false
+	}
+	for _, entry := range entries {
+		if entry.Key == key {
+			return entry.Summary, true
+		}
+	}
+	return "", false
+}
+
+// TestJourneyMeditationSummaryVisible drives a reflection delivery and reads it back on the next turn.
+// - the reflection turn names the one destination it delivers to: send with the session target its deliver_to white list reaches
+// - the body lands in the user session the document declared instead of an outbound channel
+// - the user session chain carries a send-stamped summary event with the delivered body
 // - the next turn's request carries that body, so the delivery is visible to the assembly
-//
+// - the one-line read of the delivery is the summary the chain serves beside the body, so a reader that never opens the full text still reaches it
 // 契约: docs/wiki/agent/agent-architecture.md#meditation-curator
 func TestJourneyMeditationSummaryVisible(t *testing.T) {
 	const (
@@ -32,7 +52,8 @@ func TestJourneyMeditationSummaryVisible(t *testing.T) {
 	)
 	provider := newJourneyProvider(t)
 	provider.scriptAnswers(journeyEntryModel, firstAnswer, secondAnswer)
-	provider.script(journeyReflectionModel, journeyReply{body: journeyToolCall("call-summary-1", "deliver_summary", `{"content":`+journeyQuote(summary)+`}`)})
+	provider.script(journeyReflectionModel, journeyReply{body: journeyToolCall("call-summary-1", "send",
+		`{"target":{"agent":"user","session":`+journeyQuote(session)+`},"content":`+journeyQuote(summary)+`}`)})
 	provider.scriptAnswers(journeyReflectionModel, "reflection recorded")
 	host := bootJourney(t, provider, journeySpec{
 		MaxTokens: 4096,
@@ -43,7 +64,7 @@ func TestJourneyMeditationSummaryVisible(t *testing.T) {
 			"meditator": {
 				"    model: " + journeyReflectionModel,
 				"    tools:",
-				"      - { kind: tool, id: deliver_summary }",
+				"      - { kind: tool, id: send }",
 				"    memory:",
 				"      read_namespaces: [user]",
 				"    meditation:",
@@ -63,10 +84,15 @@ func TestJourneyMeditationSummaryVisible(t *testing.T) {
 
 	fact := host.waitForFact(t, session, func(fact event.Event) bool {
 		return fact.Type == event.TypeExternalInput &&
-			fact.Meta[event.MetaKeyTriggerSource] == "meditation" &&
+			fact.Meta[event.MetaKeyTriggerSource] == "send" &&
 			strings.Contains(fact.Message.Content, summary)
 	}, 15*time.Second)
-	if summaryLine := fact.Meta[event.MetaKeyEventSummary]; summaryLine == "" {
+	summaryLine, mapped := journeyMappedSummary(host.host.Run(), session, fact.Key)
+	if !mapped {
+		t.Fatalf("the projection of %q carries no entry for the delivered fact %q, so the delivery records no summary beside its body",
+			session, fact.Key)
+	}
+	if summaryLine == "" {
 		t.Fatalf("meditation summary event = %+v, want its one-line summary recorded beside the body", fact)
 	} else if !strings.Contains(summaryLine, "MEDITATION-SUMMARY") {
 		t.Fatalf("meditation summary line = %q, want the delivered body's first line", summaryLine)

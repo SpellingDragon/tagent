@@ -136,20 +136,27 @@ func (m *MemoryManager) Handoff(ctx context.Context, taskID event.TaskID, target
 // Flush delivers the notifications of a task whose obligations are still open, each
 // beside the routing its envelope froze, and retries the ones no target has answered
 // yet — including the ones a handoff moved beside the task. Only an acceptance the
-// target states explicitly clears an obligation; a refusal keeps the obligation and
-// records the reason beside that notification. A notification whose frozen receiving
-// instance is closed is retained by name as ErrInstanceClosed: it is neither dropped
-// nor delivered into a later instance that reuses the address.
+// target states explicitly clears an obligation. A refusal is a consumption result
+// of its notification, carried by the feedback fact the state account records: the
+// obligation ends with it, so no flush offers a refused notification again, and the
+// reason stays beside the notification on the diagnostic face. A notification whose
+// frozen receiving instance is closed is retained by name as ErrInstanceClosed: it is
+// neither dropped nor delivered into a later instance that reuses the address.
+//
+// A notification no target accepted stays owed, and the reason it could not be
+// accepted is recorded beside it, so a report names why a delivery waits instead
+// of only that it waits.
 func (m *MemoryManager) Flush(ctx context.Context, taskID event.TaskID) error {
 	m.registry.mu.Lock()
 	defer m.registry.mu.Unlock()
+	defer m.registry.noteActivity()
 	entry, ok := m.registry.tasks[taskID]
 	if !ok {
 		return ErrTaskNotFound
 	}
 	if m.deliver == nil && m.deliverEnvelope == nil {
 		for _, open := range entry.obligations {
-			if owesDelivery(open.obligation.Kind) && !open.answered {
+			if owesDelivery(open.obligation.Kind) {
 				return ErrNoDeliverer
 			}
 		}
@@ -158,7 +165,7 @@ func (m *MemoryManager) Flush(ctx context.Context, taskID event.TaskID) error {
 	open := entry.obligations[:0]
 	delivery := deliveryContext(ctx, entry.spec)
 	for _, held := range entry.obligations {
-		if !owesDelivery(held.obligation.Kind) || held.answered {
+		if !owesDelivery(held.obligation.Kind) {
 			open = append(open, held)
 			continue
 		}
@@ -173,10 +180,12 @@ func (m *MemoryManager) Flush(ctx context.Context, taskID event.TaskID) error {
 			entry.dropBlocked(held.obligation.Notice)
 			continue
 		case DeliveryRejected:
-			held.answered = true
 			entry.recordBlocked(held.obligation.Notice, err)
-			open = append(open, held)
+			continue
 		default:
+			if err != nil {
+				entry.recordBlocked(held.obligation.Notice, err)
+			}
 			open = append(open, held)
 		}
 	}

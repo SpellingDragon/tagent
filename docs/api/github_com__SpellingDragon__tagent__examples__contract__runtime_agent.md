@@ -1,6 +1,12 @@
 package agentexample // import "github.com/SpellingDragon/tagent/examples/contract/runtime_agent"
 
+Package agentexample shows the approval book the response fuse parks a whole
+oversized batch on and reads the ruling back through.
+
 Package agentexample shows the loop-side capture port.
+
+Package agentexample shows the final round chain the budget planner reads and
+files through.
 
 Package agentexample shows the notice feed the loop reads.
 
@@ -14,14 +20,35 @@ FUNCTIONS
 func ExampleAgent()
     ExampleAgent drives one invocation through the three faces of its execution:
     the decision entry, the delegation it admits and the close that ends it.
+    The close names the instant its budget fires, because a request naming none
+    is refused by name before the close takes any step.
+
+func ExampleApprovalBook()
+    ExampleApprovalBook wires the loop's batch fuse onto a real approval
+    manager: the fuse hands its whole oversized response over as one request
+    and waits for the human ruling the same manager serves every other approval
+    through. - MUST NOT park a batch beside no book: an unwired fuse refuses the
+    whole response rather than executing any of it unruled.
 
 func ExampleCapture()
     ExampleCapture demonstrates the three points one turn fires.
+
+func ExampleChainPresentation()
+    ExampleChainPresentation reads the presentation of one session chain back:
+    the input the prefix carries in full is reported, so a resident consumption
+    loop leaves it to the prefix instead of carrying it a second time, while the
+    input the fold replaced with a summary is not reported and therefore stays
+    the material of the segment that reads it. The loop derives this read from
+    the chain face it already has; no presentation face is attached beside it.
 
 func ExampleDelegationTasks()
     ExampleDelegationTasks admits one delegated call, settles it beside its
     notification and reports that the obligation cleared only once it was
     delivered.
+
+func ExampleFinalRoundChain()
+    ExampleFinalRoundChain demonstrates the budget judgment read off one chain
+    and filed back on it as the fact it is.
 
 func ExampleHandoffEnvelope()
     ExampleHandoffEnvelope renders one cross-agent handoff in structured form:

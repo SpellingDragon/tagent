@@ -31,19 +31,22 @@ func TestExecFaceRunsTheDeclaredRhythm(t *testing.T) {
 		round := 0
 		provider := &ntModel{name: "model-exec", answer: func(req *model.Request) *model.Response {
 			round++
-			switch round {
-			case 1:
+			if round == 1 {
 				return ntToolTurn(ntCall("call-run", "exec_run", `{"command":"probe","kind":"probe","resource":"r1"}`))
-			case 2:
-				for _, name := range []string{"exec_run", "exec_release"} {
-					if req.Tools[name] == nil {
-						t.Errorf("second request tools carry no %q, want the declared exec face granted", name)
-					}
+			}
+			for _, name := range []string{"exec_run", "exec_release"} {
+				if req.Tools[name] == nil {
+					t.Errorf("second request tools carry no %q, want the declared exec face granted", name)
 				}
-				if req.Tools[tagentexec.PresetName] != nil {
-					t.Errorf("second request tools carry %q, want the declaration id to name the face and never become a tool", tagentexec.PresetName)
-				}
-				checkObservedBody(t, req, "call-run", "exec_run", "executed probe/r1: frame:r1")
+			}
+			if req.Tools[tagentexec.PresetName] != nil {
+				t.Errorf("second request tools carry %q, want the declaration id to name the face and never become a tool", tagentexec.PresetName)
+			}
+			if !nativeRequestHasObservation(*req, "call-run") {
+				time.Sleep(10 * time.Millisecond)
+				return ntFinalTurn("awaiting the run observation")
+			}
+			if !nativeRequestHasCall(*req, "call-release") {
 				explanation, err := manager.Explain(tagentexec.ResourceKey{Kind: "probe", Key: "r1"})
 				if err != nil || !explanation.Held {
 					t.Fatalf("explanation of the held resource = (%+v, %v), want the run to hold the acquisition it opened", explanation, err)
@@ -52,10 +55,12 @@ func TestExecFaceRunsTheDeclaredRhythm(t *testing.T) {
 					t.Errorf("held rhythm = %+v, want the monitor rhythm the declaration fixed", explanation.Rhythm)
 				}
 				return ntToolTurn(ntCall("call-release", "exec_release", `{"kind":"probe","resource":"r1"}`))
-			default:
-				checkObservedBody(t, req, "call-release", "exec_release", "released probe/r1 after confirmed stop: exit=0")
-				return ntFinalTurn("the execution face ran and released")
 			}
+			if !nativeRequestHasObservation(*req, "call-release") {
+				time.Sleep(10 * time.Millisecond)
+				return ntFinalTurn("awaiting the release observation")
+			}
+			return ntFinalTurn("the execution face ran and released")
 		}}
 
 		run, err := assembly.Assemble(ctx, execFaceDeclaration(), map[event.AgentID]assembly.NativeAgent{
@@ -72,9 +77,13 @@ func TestExecFaceRunsTheDeclaredRhythm(t *testing.T) {
 		if err != nil {
 			t.Fatalf("invoke the exec face: %v", err)
 		}
-		if turn.Terminal != model.KindCompleted || len(turn.Decisions) != 3 {
-			t.Fatalf("turn = (%v, %d decisions), want the completed terminal beside three decisions", turn.Terminal, len(turn.Decisions))
+		if turn.Terminal != model.KindCompleted || turn.DecisionCount < 3 {
+			t.Fatalf("turn = (%v, %d decisions), want the completed terminal beside at least the run, release and closing decisions", turn.Terminal, turn.DecisionCount)
 		}
+		awaitNativePairs(t, provider, []nativePair{
+			{callID: "call-run", tool: "exec_run", settled: "executed probe/r1: frame:r1"},
+			{callID: "call-release", tool: "exec_release", settled: "released probe/r1 after confirmed stop: exit=0"},
+		})
 		if got := executor.starts; got != 1 {
 			t.Errorf("execution starts = %d, want the run tool to start exactly one execution", got)
 		}
@@ -100,9 +109,12 @@ func TestExecFaceRunsTheDeclaredRhythm(t *testing.T) {
 					ntCall("call-release", "exec_release", `{"kind":"probe","resource":"r1"}`),
 				)
 			}
-			refusal := tagentexec.ErrUnwired.Error()
-			checkObservedBody(t, req, "call-run", "exec_run", refusal)
-			checkObservedBody(t, req, "call-release", "exec_release", refusal)
+			for _, callID := range []string{"call-run", "call-release"} {
+				if !nativeRequestHasObservation(*req, callID) {
+					time.Sleep(10 * time.Millisecond)
+					return ntFinalTurn("awaiting the unwired refusals")
+				}
+			}
 			return ntFinalTurn("the unwired execution face refused both calls")
 		}}
 
@@ -119,6 +131,10 @@ func TestExecFaceRunsTheDeclaredRhythm(t *testing.T) {
 		}); err != nil {
 			t.Fatalf("invoke the exec face: %v", err)
 		}
+		awaitNativePairs(t, provider, []nativePair{
+			{callID: "call-run", tool: "exec_run", settled: tagentexec.ErrUnwired.Error()},
+			{callID: "call-release", tool: "exec_release", settled: tagentexec.ErrUnwired.Error()},
+		})
 		if got := executor.starts; got != 0 {
 			t.Errorf("execution starts = %d, want the refusal to start nothing", got)
 		}

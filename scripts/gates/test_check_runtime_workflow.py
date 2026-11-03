@@ -31,6 +31,13 @@ hatch must each turn the check red. The cancelled/skipped/empty upstream
 results and the mixed-baseline bundle are executed for real, not asserted as
 text: the results step runs under bash with each upstream value, and the
 checker itself runs over a bundle whose evidence files disagree on the baseline.
+
+The stale-PR cancellation anchor (05/5.2) pins the workflow-level concurrency
+of both product workflows: cancel-in-progress may only ever bite inside one
+pull request's domain — same-PR runs collide, every push/merge_group proof run
+lands in a per-run group no PR push can reach — and the group template stays
+inside the small expression subset this suite can render for hypothetical
+events, so a group nobody can evaluate cannot pass as isolated.
 """
 import copy
 import fnmatch
@@ -55,6 +62,9 @@ INTEGRATION_BRANCHES = ("main", "dev", "next")
 
 # Every gate step the contracts job must carry, with the command keywords that
 # make the gate real. A step that disappears or loses its command fails here.
+# The root-module product gates moved to ci.yml (05/5.5); ROOT_GATE_STEPS below
+# keeps the same declaration assertion for them, against the workflow that now
+# owns them.
 GATE_STEPS = [
     ("Checker selftests",
      ["unittest discover -s scripts/gates", "test_check_runtime_*.py"]),
@@ -65,12 +75,6 @@ GATE_STEPS = [
     ("Scenarios contract",
      ["check_runtime_evidence.py --check-contract",
       "--plan-graph openspec/changes/archive/2026-10-18-runtime-rebuild/task-graph.json"]),
-    ("Build (root module)",
-     ["go build ./..."]),
-    ("Vet (root module)",
-     ["go vet ./..."]),
-    ("Test (root module, short)",
-     ["go test ./... -short", "-count=1"]),
     ("gofmt (product packages)",
      ["gofmt -l $PRODUCT_PACKAGES", "exit 1"]),
     ("Comment policy (product packages, measurement mode)",
@@ -79,6 +83,18 @@ GATE_STEPS = [
      ["codetools tracked-hygiene"]),
     ("OpenSpec strict (main specs)",
      ["openspec validate --specs --strict", "--no-interactive"]),
+]
+
+# 05/5.5: root build/vet/short now live in ci.yml's test job. The old pin
+# still checks that each gate is declared — it reads the workflow that owns it
+# instead of the contracts job that no longer runs it.
+ROOT_GATE_STEPS = [
+    ("Build",
+     ["go build ./..."]),
+    ("Vet",
+     ["go vet ./..."]),
+    ("Test (short)",
+     ["go test ./... -short", "-count=1"]),
 ]
 
 
@@ -91,22 +107,35 @@ def step_body(step):
     return "{}\n{}".format(step.get("name", ""), step.get("run", ""))
 
 
-def assert_gate_steps_present(workflow):
-    bodies = [step_body(step)
-              for job in (workflow.get("jobs") or {}).values()
-              for step in (job.get("steps") or [])]
+def _missing_steps(bodies, expected):
     missing = []
-    for name, keywords in GATE_STEPS:
-        body = next((b for b in bodies if name in b), "")
+    for name, keywords in expected:
+        body = next((b for b in bodies if b.split("\n", 1)[0] == name), "")
         if not body:
             missing.append(name)
             continue
         for keyword in keywords:
             if keyword not in body:
                 missing.append("{} (missing {!r})".format(name, keyword))
+    return missing
+
+
+def assert_gate_steps_present(workflow):
+    bodies = [step_body(step)
+              for job in (workflow.get("jobs") or {}).values()
+              for step in (job.get("steps") or [])]
+    missing = _missing_steps(bodies, GATE_STEPS)
     if missing:
         raise AssertionError(
             "workflow is missing gate steps/commands: {}".format(missing))
+
+
+def assert_root_gate_steps_present(ci_workflow):
+    steps = ((ci_workflow.get("jobs") or {}).get("test") or {}).get("steps") or []
+    missing = _missing_steps([step_body(step) for step in steps], ROOT_GATE_STEPS)
+    if missing:
+        raise AssertionError(
+            "ci.yml is missing root product gate steps/commands: {}".format(missing))
 
 
 def assert_push_covers_integration_branches(workflow):
@@ -122,6 +151,7 @@ class WorkflowTest(unittest.TestCase):
     def setUpClass(cls):
         cls.text = WORKFLOW.read_text(encoding="utf-8")
         cls.workflow = yaml.safe_load(cls.text)
+        cls.ci_workflow = yaml.safe_load(CI_WORKFLOW.read_text(encoding="utf-8"))
 
     def test_workflow_file_exists(self):
         self.assertTrue(WORKFLOW.is_file(), "runtime-contracts.yml is missing")
@@ -140,6 +170,7 @@ class WorkflowTest(unittest.TestCase):
 
     def test_gate_steps_present_with_expected_commands(self):
         assert_gate_steps_present(self.workflow)
+        assert_root_gate_steps_present(self.ci_workflow)
 
     def test_negative_control_removing_any_gate_step_turns_the_check_red(self):
         # The negative control proves the gate check bites: a YAML copy with one
@@ -154,6 +185,16 @@ class WorkflowTest(unittest.TestCase):
             with self.assertRaises(AssertionError,
                                    msg="removing {!r} must fail the gate check".format(name)):
                 assert_gate_steps_present(mutated)
+        for name, _ in ROOT_GATE_STEPS:
+            mutated = copy.deepcopy(self.ci_workflow)
+            steps = mutated["jobs"]["test"]["steps"]
+            kept = [step for step in steps if step.get("name") != name]
+            self.assertEqual(len(kept), len(steps) - 1,
+                             "root gate step {!r} must exist exactly once".format(name))
+            mutated["jobs"]["test"]["steps"] = kept
+            with self.assertRaises(AssertionError,
+                                   msg="removing {!r} must fail the root gate check".format(name)):
+                assert_root_gate_steps_present(mutated)
 
     def test_push_covers_all_integration_branches(self):
         assert_push_covers_integration_branches(self.workflow)
@@ -247,6 +288,7 @@ class WorkflowTest(unittest.TestCase):
 
 CI_WORKFLOW = REPO / ".github" / "workflows" / "ci.yml"
 PREFLIGHT = REPO / "scripts" / "gates" / "preflight.sh"
+RACE_SCRIPT = REPO / "scripts" / "gates" / "race_check.sh"
 
 EVENT_CONTRACT = "golden/runtime/event_integrity_scenarios.json"
 EVENT_PRODUCER_JOBS = ("event-integrity-short",
@@ -303,7 +345,7 @@ PREFLIGHT_EVENT_STEPS = (
      ["--contract " + EVENT_CONTRACT, "--scope event-short", "--repeat 10"]),
     ("event integrity long",
      ["--scope event-long", '--seed "$seed"', '--window "$window"',
-      "--repeat 1", "--timeout 1200"]),
+      "--repeat 1", "--timeout 10800"]),
     ("event integrity mutations",
      ["check_event_integrity_mutations.py", "--all", "--json"]),
 )
@@ -372,33 +414,56 @@ def assert_event_producer_jobs(workflow):
             "replacement for them: {}".format(removed))
 
     short_job = jobs["event-integrity-short"]
-    short_run = run_with(short_job, "run_runtime_scenarios.py")
+    short_step = step_with(short_job, "run_runtime_scenarios.py")
+    short_run = short_step.get("run") or ""
     for needle in ("--contract " + EVENT_CONTRACT, "--scope event-short",
-                   "--repeat 10", '--out "$RUNNER_TEMP/event-short"'):
+                   '--repeat-index "$REPEAT_INDEX"',
+                   '--out "$RUNNER_TEMP/event-short"'):
         if needle not in short_run:
             raise AssertionError(
                 "event-integrity-short command is missing {!r}: {!r}".format(needle, short_run))
+    if re.search(r"--repeat(?![-\w])", short_run):
+        raise AssertionError(
+            "event-integrity-short must run one round per shard via --repeat-index, "
+            "not a --repeat batch")
     if "--test-id" in short_run:
         raise AssertionError(
             "event-integrity-short must run the complete scope, not a --test-id subset")
     assert_no_count_amplification("event-integrity-short", short_run)
-    if short_job.get("timeout-minutes") != 45:
+    short_strategy = short_job.get("strategy") or {}
+    if short_strategy.get("fail-fast") is not False:
+        raise AssertionError("event-integrity-short must keep fail-fast: false")
+    matrix = short_strategy.get("matrix") or {}
+    if matrix.get("repeat-index") != list(range(1, 11)):
         raise AssertionError(
-            "event-integrity-short timeout-minutes must be the measured budget "
-            "(one round 2m58s x 10 x 1.5 headroom = 45; the 03.10 20m candidate "
-            "would kill the ten-round job)")
+            "event-integrity-short matrix.repeat-index must be exactly 1..10, "
+            "found {!r}".format(matrix.get("repeat-index")))
+    short_env = short_step.get("env") or {}
+    if short_env.get("REPEAT_INDEX") != "${{ matrix.repeat-index }}":
+        raise AssertionError(
+            "the short matrix value must reach the command through env REPEAT_INDEX")
+    if short_job.get("timeout-minutes") != 15:
+        raise AssertionError(
+            "event-integrity-short timeout-minutes must be the per-shard budget "
+            "(one 2m58s round + cold compile = 15; 45 was the ten-round bound)")
     assert_single_artifact_upload("event-integrity-short", short_job,
-                                  "event-integrity-short",
+                                  "event-integrity-short-${{ matrix.repeat-index }}",
                                   "${{ runner.temp }}/event-short")
 
     long_job = jobs["event-integrity-long"]
     long_step = step_with(long_job, "--scope event-long")
     long_run = long_step.get("run") or ""
-    # --timeout bounds ONE go test process, cold compile included: 03.11
-    # re-measured 2026-10-28 at up to 1149s per shard (and over the old
-    # 1200s on slow push runs), so 2400s must fit inside the 45m job cap.
+    # --timeout bounds ONE go test process, cold compile included. The 256-token
+    # window makes the age fold due on every turn (its threshold is 307 bytes,
+    # smaller than one turn's material), so that shard files a compress request
+    # and a compress product beside every turn and rewrites the ledger shard on
+    # every commit. Run 41406032474 sampled it at 108 of 121 host generations in
+    # 5251s (seed 42) and 5153s (seed 7); per-generation cost grows with the
+    # chain, so the 13 generations left project to ~7400s. 10800s bounds that
+    # shard at ~1.46x and must fit inside the 240m job cap; the 32768-window
+    # shards measure 1410-1680s on the same run.
     for needle in ('--seed "$SEED"', '--window "$WINDOW"', "--repeat 1",
-                   "--timeout 2400",
+                   "--timeout 10800",
                    '--out "$RUNNER_TEMP/event-long/seed-$SEED-window-$WINDOW"'):
         if needle not in long_run:
             raise AssertionError(
@@ -410,10 +475,11 @@ def assert_event_producer_jobs(workflow):
     long_env = long_step.get("env") or {}
     if long_env.get("SEED") != "${{ matrix.seed }}" or long_env.get("WINDOW") != "${{ matrix.window }}":
         raise AssertionError("matrix values must reach the long command via env")
-    if long_job.get("timeout-minutes") != 45:
+    if long_job.get("timeout-minutes") != 240:
         raise AssertionError(
-            "event-integrity-long timeout-minutes must be the 03.11 measurement "
-            "(1149s max shard, 2400s --timeout, 45m job cap)")
+            "event-integrity-long timeout-minutes must be the measured budget "
+            "(256-window shard ~7400s projected from run 41406032474, 10800s "
+            "--timeout, 240m job cap)")
     assert_single_artifact_upload(
         "event-integrity-long", long_job,
         "event-integrity-long-seed-${{ matrix.seed }}-window-${{ matrix.window }}",
@@ -629,6 +695,32 @@ def assert_race_covers_affected_packages(workflow):
         raise AssertionError(
             "race package set is missing {}: the set is mapped from every modified "
             "product package and formal test package, not just host/history".format(missing))
+
+
+# The no-Go-files skip is pinned as script text because it is a behaviour of the
+# gate ci.yml calls, not of the workflow itself: the declared set opens with `.`,
+# the module root carries no Go files (the composition root is its own directory),
+# and `go test -race .` answers `[setup failed]` beside "no Go files", which the
+# classifier can only report as a plain failure. The needles keep the skip exactly
+# as narrow as the fix made it — the exact go list answer is skipped, a misspelt
+# package still fails the job, and a set that keeps no package is refused rather
+# than passing vacuously.
+RACE_SKIP_NEEDLES = (
+    'if out=$(go list "$pattern" 2>&1); then',
+    '[[ "$out" == *"no Go files in "* ]]',
+    'the directory carries no Go files',
+    'no package in the declared set carries Go files',
+)
+
+
+def assert_race_skip_is_narrow(script):
+    for needle in RACE_SKIP_NEEDLES:
+        if needle not in script:
+            raise AssertionError(
+                "race_check.sh no longer skips the no-Go-files entry ({!r} is gone): "
+                "ci.yml declares `.` in the race set, so the whole job would fail with "
+                "`[setup failed]`, and a blanket skip would hide a misspelt package's "
+                "failure or pass a set that proves nothing".format(needle))
 
 
 def assert_soak_command(workflow):
@@ -1042,9 +1134,9 @@ class CiWorkflowTest(unittest.TestCase):
     def test_negative_control_single_count_amplification_turns_check_red(self):
         mutated = copy.deepcopy(self.workflow)
         step = step_with(mutated["jobs"]["event-integrity-short"], "run_runtime_scenarios.py")
-        self.assertIn("--repeat 10", step["run"])
-        # Keep the ten-round flag and add a count amplification beside it: the
-        # no-count rule alone must catch the mutation.
+        self.assertIn('--repeat-index "$REPEAT_INDEX"', step["run"])
+        # Keep the single-round binding and add a count amplification beside it:
+        # the no-count rule alone must catch the mutation.
         step["run"] = step["run"] + " -count=10"
         with self.assertRaises(AssertionError):
             assert_event_producer_jobs(mutated)
@@ -1057,6 +1149,27 @@ class CiWorkflowTest(unittest.TestCase):
                                 "./tests/integration/history/..."]))
         with self.assertRaises(AssertionError):
             assert_race_covers_affected_packages(mutated)
+
+    def test_race_script_skips_the_no_go_files_root_entry(self):
+        assert_race_skip_is_narrow(RACE_SCRIPT.read_text(encoding="utf-8"))
+        # `.` stays declared in the workflow set; the script turns that entry into a
+        # printed skip instead of a red job, so the detection surface is unchanged.
+        self.assertIn(".", RACE_PACKAGES)
+
+    def test_negative_control_widening_or_dropping_the_skip_turns_check_red(self):
+        script = RACE_SCRIPT.read_text(encoding="utf-8")
+        for needle in RACE_SKIP_NEEDLES:
+            with self.subTest(needle=needle):
+                mutated = script.replace(needle, "true")
+                self.assertNotEqual(mutated, script)
+                with self.assertRaises(AssertionError):
+                    assert_race_skip_is_narrow(mutated)
+        # Dropping the no-Go-files answer entirely is the original CI bug: the root
+        # entry must be skippABLE, so its disappearance has to turn this red too.
+        dropped = script.replace('no Go files in ', 'none')
+        self.assertNotEqual(dropped, script)
+        with self.assertRaises(AssertionError):
+            assert_race_skip_is_narrow(dropped)
 
     def test_negative_control_preflight_opt_in_long_turns_check_red(self):
         guarded = self.preflight.replace(
@@ -1137,11 +1250,10 @@ class CiWorkflowTest(unittest.TestCase):
         mutated["jobs"]["event-integrity-long"]["strategy"]["matrix"]["seed"] = [1, 7]
         with self.assertRaises(AssertionError):
             assert_long_matrix(mutated)
-        # Short run: one round instead of ten independent rounds.
+        # Short run: one shard instead of the ten independent rounds.
         mutated = copy.deepcopy(self.workflow)
-        short = step_with(mutated["jobs"]["event-integrity-short"],
-                          "run_runtime_scenarios.py")
-        short["run"] = short["run"].replace("--repeat 10", "--repeat 1")
+        short = mutated["jobs"]["event-integrity-short"]
+        short["strategy"]["matrix"]["repeat-index"] = [1]
         with self.assertRaises(AssertionError):
             assert_event_producer_jobs(mutated)
 
@@ -1207,6 +1319,241 @@ class CiWorkflowTest(unittest.TestCase):
         self.assertNotEqual(proc.returncode, 0, proc.stdout + proc.stderr)
         self.assertIn("mixes contract digests", proc.stdout,
                       "a bundle that mixes baselines must be named, not just red")
+
+
+# --- 05/5.2: stale-PR cancellation domain ----------------------------------
+#
+# Both product CI workflows carry exactly one workflow-level concurrency
+# policy: a superseded pull_request run of the same PR is cancelled, and
+# nothing else ever is. The isolation lives in the group template: the PR
+# number keys the PR domain and a per-run value (github.run_id) keys every
+# other event, so a push to main/dev or a merge_group proof run can never
+# share a group with a PR run, let alone with another proof run.
+CONTRACT_WORKFLOW_FILES = (
+    ("ci.yml", CI_WORKFLOW),
+    ("runtime-contracts.yml", WORKFLOW),
+)
+
+# (label, event_name, ref) for the merge-proof domain: the complete evidence a
+# merge decision relies on. The simulation deliberately reuses one ref for both
+# runs of each pair: the isolation must come from the group template, not from
+# an assumption that GitHub happens to mint unique merge-queue refs.
+PROOF_EVENT_PAIRS = (
+    ("merge_group", "merge_group", "refs/heads/gh-readonly-queue/main/pr-7-abc123"),
+    ("push to main", "push", "refs/heads/main"),
+    ("push to dev", "push", "refs/heads/dev"),
+)
+
+
+def github_event_context(workflow_name, event_name, run_id, pr_number, ref):
+    # Only the context reads a group template may legally use. A property the
+    # event does not carry reads as the empty string, like GitHub's context.
+    event = {}
+    if pr_number is not None:
+        event["pull_request"] = {"number": pr_number}
+    return {
+        "github": {
+            "workflow": workflow_name,
+            "event_name": event_name,
+            "event": event,
+            "ref": ref,
+            "run_id": run_id,
+        },
+    }
+
+
+def render_concurrency_group(group, context, workflow_label):
+    """Render the group template for a hypothetical event the way GitHub
+    renders the subset the contract allows: `${{ a.b || c.d }}` over dotted
+    context reads. Anything richer is rejected, not guessed: a group whose
+    isolation this checker cannot evaluate is a group whose isolation nobody
+    has proven."""
+    def render(match):
+        expr = match.group(1).strip()
+        for alternative in expr.split("||"):
+            alternative = alternative.strip()
+            if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)*",
+                                alternative):
+                raise AssertionError(
+                    "{} concurrency group must stay a template over dotted "
+                    "context reads joined by || (the subset this checker can "
+                    "render), found {!r}".format(workflow_label, expr))
+            value = context
+            for part in alternative.split("."):
+                if not isinstance(value, dict) or part not in value:
+                    value = ""
+                    break
+                value = value[part]
+            if value not in ("", None, False):
+                return str(value)
+        return ""
+    return re.sub(r"\$\{\{([^}]*)\}\}", render, group)
+
+
+def assert_pr_cancel_policy(parsed, workflow_label):
+    """The structural half of the 05/5.2 contract for one workflow."""
+    block = parsed.get("concurrency")
+    if not isinstance(block, dict):
+        raise AssertionError(
+            "{} must declare a workflow-level concurrency block: without one a "
+            "superseded pull-request run keeps burning runner minutes on a "
+            "result nobody will read".format(workflow_label))
+    cancel = block.get("cancel-in-progress")
+    if cancel is not True:
+        raise AssertionError(
+            "{} concurrency.cancel-in-progress must be the literal true: "
+            "{!r} lets stale PR runs pile up instead of being cancelled".format(
+                workflow_label, cancel))
+    group = block.get("group")
+    if not isinstance(group, str) or "${{" not in group or "}}" not in group:
+        raise AssertionError(
+            "{} concurrency.group must be a template over the github context, "
+            "found {!r}".format(workflow_label, group))
+    for job_name, job in (parsed.get("jobs") or {}).items():
+        if isinstance(job, dict) and job.get("concurrency") is not None:
+            raise AssertionError(
+                "{} job {!r} carries its own concurrency block: cancellation "
+                "policy is workflow-level, and a per-job hatch could cancel "
+                "proof work outside the checked domain".format(
+                    workflow_label, job_name))
+
+
+def assert_concurrency_domains_separate(parsed, workflow_label):
+    """The behavioural half: render the real group for hypothetical events.
+
+    The two runs of one PR must collide -- that collision is what makes
+    cancel-in-progress kill the stale run -- while any two proof runs
+    (merge_group, push to main/dev) and any PR-vs-proof pair must land in
+    different groups: that is what keeps a PR push from cancelling a proof.
+    """
+    assert_pr_cancel_policy(parsed, workflow_label)
+    group = parsed["concurrency"]["group"]
+    workflow_name = str(parsed.get("name") or workflow_label)
+
+    def domain(event_name, run_id, pr_number, ref):
+        return render_concurrency_group(
+            group,
+            github_event_context(workflow_name, event_name, run_id,
+                                 pr_number, ref),
+            workflow_label)
+
+    stale_pr_push = domain("pull_request", 101, 7, "refs/pull/7/merge")
+    fresh_pr_push = domain("pull_request", 202, 7, "refs/pull/7/merge")
+    other_pr = domain("pull_request", 303, 8, "refs/pull/8/merge")
+
+    if stale_pr_push != fresh_pr_push:
+        raise AssertionError(
+            "{}: two runs of PR 7 must share one concurrency group -- that "
+            "collision is what makes cancel-in-progress kill the stale run "
+            "({!r} vs {!r})".format(workflow_label, stale_pr_push, fresh_pr_push))
+    if stale_pr_push == other_pr:
+        raise AssertionError(
+            "{}: PR 7 and PR 8 must not share a concurrency group: "
+            "cancel-in-progress would let one PR cancel another PR's runs "
+            "({!r})".format(workflow_label, stale_pr_push))
+
+    for label, event_name, ref in PROOF_EVENT_PAIRS:
+        # Both runs of the pair share the ref on purpose (see
+        # PROOF_EVENT_PAIRS): isolation must come from the template.
+        first = domain(event_name, 404, None, ref)
+        second = domain(event_name, 505, None, ref)
+        if first == second:
+            raise AssertionError(
+                "{}: two {} runs must never share a concurrency group: "
+                "cancel-in-progress would kill a complete proof run "
+                "({!r})".format(workflow_label, label, first))
+        for pr_domain, pr_label in ((stale_pr_push, "PR 7"),
+                                    (other_pr, "PR 8")):
+            if pr_domain in (first, second):
+                raise AssertionError(
+                    "{}: a pull_request push ({}) lands in the {} concurrency "
+                    "domain ({!r}): the PR push would cancel that proof "
+                    "run".format(workflow_label, pr_label, label, pr_domain))
+
+
+class TestCIConcurrencySeparatesPRAndMergeProof(unittest.TestCase):
+    """05/5.2: only stale pull_request work is ever cancelled.
+
+    The class name is the anchor the plan pins. The PR domain and the
+    merge-proof domain (merge_group, push to main/dev) must stay separate,
+    and only the former may be cancelled in progress.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.workflows = []
+        for label, path in CONTRACT_WORKFLOW_FILES:
+            text = path.read_text(encoding="utf-8")
+            cls.workflows.append((label, text, yaml.safe_load(text)))
+
+    def test_workflows_declare_pr_scoped_cancel_in_progress(self):
+        # Red first: today neither workflow declares any concurrency block.
+        for label, _, parsed in self.workflows:
+            with self.subTest(workflow=label):
+                assert_pr_cancel_policy(parsed, label)
+
+    def test_pr_push_cannot_cancel_merge_group_or_push_proof_runs(self):
+        # The domain isolation, rendered for hypothetical events: green only
+        # when same-PR runs collide and every proof run stays outside.
+        for label, _, parsed in self.workflows:
+            with self.subTest(workflow=label):
+                assert_concurrency_domains_separate(parsed, label)
+
+    def test_negative_control_missing_pr_concurrency_turns_check_red(self):
+        # The bite proof for the structural half, on parsed COPIES (the real
+        # files are never touched). The precondition keeps this red until the
+        # real workflows carry the policy.
+        for label, _, parsed in self.workflows:
+            with self.subTest(workflow=label):
+                assert_pr_cancel_policy(parsed, label)
+                deleted = copy.deepcopy(parsed)
+                del deleted["concurrency"]
+                with self.assertRaises(AssertionError, msg=label):
+                    assert_pr_cancel_policy(deleted, label)
+                for mutation, value in (
+                        ("cancel-in-progress: false", False),
+                        ("cancel-in-progress removed", "__del__"),
+                        ("string cancel-in-progress", "true")):
+                    mutated = copy.deepcopy(parsed)
+                    if value == "__del__":
+                        del mutated["concurrency"]["cancel-in-progress"]
+                    else:
+                        mutated["concurrency"]["cancel-in-progress"] = value
+                    with self.subTest(mutation=mutation):
+                        with self.assertRaises(AssertionError, msg=label):
+                            assert_pr_cancel_policy(mutated, label)
+                static = copy.deepcopy(parsed)
+                static["concurrency"]["group"] = "one-shared-group"
+                with self.assertRaises(AssertionError, msg=label):
+                    assert_pr_cancel_policy(static, label)
+                hatch = copy.deepcopy(parsed)
+                first_job = next(iter(hatch["jobs"]))
+                hatch["jobs"][first_job]["concurrency"] = {
+                    "group": "per-job", "cancel-in-progress": True}
+                with self.assertRaises(AssertionError, msg=label):
+                    assert_pr_cancel_policy(hatch, label)
+
+    def test_negative_control_proof_run_cancelled_turns_check_red(self):
+        # Mutations that put a proof run inside a cancelled domain: the bare
+        # workflow-name group lets a PR push cancel everything; the
+        # github.ref-keyed group (the GitHub starter default) lets two push
+        # runs of the same branch cancel each other; a group without the
+        # per-run fallback parks every proof run in one shared group.
+        for label, _, parsed in self.workflows:
+            with self.subTest(workflow=label):
+                assert_concurrency_domains_separate(parsed, label)
+                for mutation, group in (
+                        ("bare workflow-name group",
+                         "${{ github.workflow }}"),
+                        ("github.ref-keyed group",
+                         "${{ github.workflow }}-${{ github.ref }}"),
+                        ("no per-run fallback",
+                         "${{ github.workflow }}-pr-${{ github.event.pull_request.number }}")):
+                    mutated = copy.deepcopy(parsed)
+                    mutated["concurrency"]["group"] = group
+                    with self.subTest(mutation=mutation):
+                        with self.assertRaises(AssertionError, msg=label):
+                            assert_concurrency_domains_separate(mutated, label)
 
 
 if __name__ == "__main__":

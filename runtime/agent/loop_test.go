@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -12,11 +13,10 @@ import (
 	"github.com/SpellingDragon/tagent/api/config"
 	"github.com/SpellingDragon/tagent/api/event"
 	"github.com/SpellingDragon/tagent/api/model"
-	"github.com/SpellingDragon/tagent/api/plugin"
-	"github.com/SpellingDragon/tagent/api/view"
 	"github.com/SpellingDragon/tagent/runtime/state"
 	"github.com/SpellingDragon/tagent/runtime/task"
 	trpclog "trpc.group/trpc-go/trpc-agent-go/log"
+	trpctool "trpc.group/trpc-go/trpc-agent-go/tool"
 )
 
 // invariantLoopAddress is the session address the invariants' drives run in.
@@ -24,6 +24,15 @@ var invariantLoopAddress = event.Address{AgentID: "agent-a", SessionID: "session
 
 // invariantLoopOtherAddress is the neighbouring session address the invariants' drives never mix with.
 var invariantLoopOtherAddress = event.Address{AgentID: "agent-a", SessionID: "session-b"}
+
+// TestLoopDriveNotExported pins the public face of the loop to the resident
+// consumer: no caller outside this package can start a turn beside the
+// consumption loop, so the drive stays an unexported test seam.
+func TestLoopDriveNotExported(t *testing.T) {
+	if method, ok := reflect.TypeOf((*Loop)(nil)).MethodByName("Drive"); ok {
+		t.Fatalf("Loop.%s is exported, want the drive folded into the unexported consumption face", method.Name)
+	}
+}
 
 // TestLoopTurnInvariants pins the decision slot, the single reduction and the session-scoped request chain of one drive.
 // - one session runs one effective model decision at a time, and the slot is free again once both drives ended
@@ -39,7 +48,7 @@ func TestLoopTurnInvariants(t *testing.T) {
 		loop, _, slots := invariantLoop(t, behaviour)
 		results := make(chan invariantLoopResult, 2)
 		drive := func(invocation event.InvocationID) {
-			turn, err := loop.Drive(ctx, Invocation{
+			turn, err := loop.drive(ctx, Invocation{
 				InvocationID: invocation,
 				Address:      invariantLoopAddress,
 				Instance:     "instance-a",
@@ -68,8 +77,8 @@ func TestLoopTurnInvariants(t *testing.T) {
 				if out.err != nil {
 					t.Fatalf("drive %d ended with %v, want a completed turn", i, out.err)
 				}
-				if out.turn.Terminal != model.KindCompleted || len(out.turn.Decisions) != 1 {
-					t.Fatalf("turn %d = (%v, %d decisions), want one completed decision", i, out.turn.Terminal, len(out.turn.Decisions))
+				if out.turn.Terminal != model.KindCompleted || out.turn.DecisionCount != 1 {
+					t.Fatalf("turn %d = (%v, %d decisions), want one completed decision", i, out.turn.Terminal, out.turn.DecisionCount)
 				}
 			case <-time.After(5 * time.Second):
 				t.Fatal("a drive did not end after the queued decision was let through")
@@ -88,7 +97,7 @@ func TestLoopTurnInvariants(t *testing.T) {
 		loop, _, _ := invariantLoop(t, behaviour)
 		capture := &invariantLoopCapture{}
 		loop.SetCapture(capture)
-		turn, err := loop.Drive(ctx, Invocation{
+		turn, err := loop.drive(ctx, Invocation{
 			InvocationID: "invocation-1",
 			Address:      invariantLoopAddress,
 			Instance:     "instance-a",
@@ -104,17 +113,18 @@ func TestLoopTurnInvariants(t *testing.T) {
 		if turn.Terminal != model.KindFailed {
 			t.Fatalf("terminal beside a refused model entry = %v, want %v", turn.Terminal, model.KindFailed)
 		}
-		if len(turn.Decisions) != 1 {
-			t.Fatalf("decisions beside a refused model entry = %d, want the one attempt", len(turn.Decisions))
+		if turn.DecisionCount != 1 {
+			t.Fatalf("decisions beside a refused model entry = %d, want the one attempt", turn.DecisionCount)
 		}
 		admitted := capture.admissions()
-		if len(admitted) != 1 || len(capture.views()) != 1 {
+		views := capture.views()
+		if len(admitted) != 1 || len(views) != 1 {
 			t.Fatalf("admissions beside a refused model entry = (%d attempts, %d views), want one of each", len(admitted), len(capture.views()))
 		}
 		if got := admitted[0].outcome.Kind; got != model.KindFailed {
 			t.Fatalf("admitted attempt outcome = %v, want the reduced terminal itself", got)
 		}
-		if admitted[0].episodeID != "episode-1" || admitted[0].decisionID != turn.Decisions[0].DecisionID {
+		if admitted[0].episodeID != "episode-1" || admitted[0].decisionID != views[0].decisionID {
 			t.Fatalf("admitted attempt = (%s, %s), want the episode the ready input named beside the decision it belongs to", admitted[0].episodeID, admitted[0].decisionID)
 		}
 	})
@@ -127,7 +137,7 @@ func TestLoopTurnInvariants(t *testing.T) {
 		loop, history, _ := closingRoundLoop(t, script)
 		capture := &invariantLoopCapture{}
 		loop.SetCapture(capture)
-		turn, err := loop.Drive(ctx, Invocation{
+		turn, err := loop.drive(ctx, Invocation{
 			InvocationID: "invocation-1",
 			Address:      closingRoundAddress,
 			Instance:     "instance-a",
@@ -140,16 +150,17 @@ func TestLoopTurnInvariants(t *testing.T) {
 		if err != nil {
 			t.Fatalf("drive over a tool round and its answer = %v, want both decisions run", err)
 		}
-		if len(turn.Decisions) != 2 || turn.Terminal != model.KindCompleted {
-			t.Fatalf("turn = (%v, %d decisions), want the tool round beside the answering one", turn.Terminal, len(turn.Decisions))
+		if turn.DecisionCount != 2 || turn.Terminal != model.KindCompleted {
+			t.Fatalf("turn = (%v, %d decisions), want the tool round beside the answering one", turn.Terminal, turn.DecisionCount)
 		}
 		admitted := capture.admissions()
-		if len(admitted) != 2 {
-			t.Fatalf("admitted attempts = %d, want one per decision of the drive", len(admitted))
+		views := capture.views()
+		if len(admitted) != 2 || len(views) != 2 {
+			t.Fatalf("capture = (%d attempts, %d views), want one per decision of the drive", len(admitted), len(views))
 		}
 		for i, admission := range admitted {
-			if admission.decisionID != turn.Decisions[i].DecisionID {
-				t.Fatalf("admitted attempt %d names decision %q, want %q", i, admission.decisionID, turn.Decisions[i].DecisionID)
+			if admission.decisionID != views[i].decisionID {
+				t.Fatalf("admitted attempt %d names decision %q, want %q", i, admission.decisionID, views[i].decisionID)
 			}
 			if admission.episodeID != "episode-1" {
 				t.Fatalf("admitted attempt %d names episode %q, want the ready input's own", i, admission.episodeID)
@@ -168,14 +179,12 @@ func TestLoopTurnInvariants(t *testing.T) {
 		}
 	})
 
-	t.Run("a production registered for a drive confirms its stop only after that drive ended", func(t *testing.T) {
+	t.Run("a drive in flight keeps its writer registered until that drive ended", func(t *testing.T) {
 		behaviour := &invariantLoopModel{gate: make(chan struct{})}
 		loop, _, _ := invariantLoop(t, behaviour)
-		watch := &invariantLoopWatch{}
-		loop.SetWatch(watch.register)
 		done := make(chan invariantLoopResult, 1)
 		go func() {
-			turn, err := loop.Drive(ctx, Invocation{
+			turn, err := loop.drive(ctx, Invocation{
 				InvocationID: "invocation-1",
 				Address:      invariantLoopAddress,
 				Instance:     "instance-a",
@@ -187,14 +196,8 @@ func TestLoopTurnInvariants(t *testing.T) {
 			done <- invariantLoopResult{turn: turn, err: err}
 		}()
 		invariantAwait(t, func() bool { return behaviour.inFlightCount() == 1 })
-		registered := watch.list()
-		if len(registered) == 0 {
-			t.Fatal("a drive in flight registered no production")
-		}
-		for _, stopped := range registered {
-			if stopped() {
-				t.Fatal("a production still in flight confirmed its stop")
-			}
+		if stopped, open := loop.Stopped(); stopped || len(open) == 0 {
+			t.Fatalf("writers beside a drive in flight = (%v, %v), want the drive registered as one that has not stopped", stopped, open)
 		}
 		close(behaviour.gate)
 		select {
@@ -205,10 +208,8 @@ func TestLoopTurnInvariants(t *testing.T) {
 		case <-time.After(5 * time.Second):
 			t.Fatal("the drive did not end after the model stream was let through")
 		}
-		for _, stopped := range watch.list() {
-			if !stopped() {
-				t.Fatal("a production of an ended drive never confirmed its stop")
-			}
+		if stopped, open := loop.Stopped(); !stopped {
+			t.Fatalf("writers left open after the drive ended = %v, want every writer stopped", open)
 		}
 	})
 
@@ -220,7 +221,7 @@ func TestLoopTurnInvariants(t *testing.T) {
 		loop.SetHistory(history)
 		chains := &invariantLoopChains{}
 		loop.SetRequestFace(chains.face)
-		turn, err := loop.Drive(ctx, Invocation{
+		turn, err := loop.drive(ctx, Invocation{
 			InvocationID: "invocation-b",
 			Address:      invariantLoopOtherAddress,
 			Instance:     "instance-a",
@@ -255,300 +256,6 @@ func TestLoopTurnInvariants(t *testing.T) {
 			t.Fatalf("history of the driven session = %+v, want the ready input beside the answer it committed", got)
 		}
 	})
-}
-
-// TestTheBoundaryReadsTheChainAgain pins the boundary read of one drive: the input that landed in a range while its decision was running.
-// - a fact of the driven range that landed in flight reaches the next decision exactly once
-// - a fact of another invocation of the same session enters no decision of this drive
-// - the head input of the drive is not read back as a second copy of itself
-// - the identity a fact committed under is what de-duplicates it, never the text it carries
-// - the After pass of a fact runs once, however many boundaries read it
-//
-// 契约: docs/wiki/agent/event-flow.md#projection-lifecycle
-func TestTheBoundaryReadsTheChainAgain(t *testing.T) {
-	t.Run("a fact that landed in flight reaches the next decision once", func(t *testing.T) {
-		behaviour, ledger, out := boundaryDrive(t, func(history *invariantLoopHistory) {
-			history.land(invariantLandedFact("fact-landed", "invocation-1", "the message that arrived in flight"))
-		})
-		if out.err != nil {
-			t.Fatalf("drive beside input that landed in flight = %v, want the second decision to run", out.err)
-		}
-		if len(out.turn.Decisions) != 2 {
-			t.Fatalf("decisions = %d (%s), want the decision in flight beside the one that reads the landed input",
-				len(out.turn.Decisions), invariantRequests(behaviour.requestMessages()))
-		}
-		sent := behaviour.requestMessages()
-		if got := invariantCopies(sent[len(sent)-1], "the message that arrived in flight"); got != 1 {
-			t.Fatalf("copies of the landed input in the next decision = %d, want exactly 1 (%s)",
-				got, invariantRequests(sent))
-		}
-		if got := ledger.count("fact-landed"); got != 1 {
-			t.Fatalf("After passes of the landed fact = %d, want the fact observed once", got)
-		}
-	})
-
-	t.Run("a fact of another invocation enters no decision of this drive", func(t *testing.T) {
-		behaviour, ledger, out := boundaryDrive(t, func(history *invariantLoopHistory) {
-			history.land(invariantLandedFact("fact-neighbour", "invocation-2", "the message of another range"))
-		})
-		if out.err != nil {
-			t.Fatalf("drive beside a fact of another range = %v, want its own terminal", out.err)
-		}
-		if len(out.turn.Decisions) != 1 {
-			t.Fatalf("decisions = %d, want the one decision: a neighbouring range's input opens no round here",
-				len(out.turn.Decisions))
-		}
-		for _, sent := range behaviour.requestMessages() {
-			if got := invariantCopies(sent, "the message of another range"); got != 0 {
-				t.Fatalf("copies of a neighbouring range's input = %d, want 0 (%s)", got, invariantRequests(behaviour.requestMessages()))
-			}
-		}
-		if got := ledger.count("fact-neighbour"); got != 0 {
-			t.Fatalf("After passes of a neighbouring range's fact = %d, want this drive to observe none of it", got)
-		}
-	})
-
-	t.Run("the head input of the drive is not read back as a second copy", func(t *testing.T) {
-		behaviour, ledger, out := boundaryDrive(t, func(history *invariantLoopHistory) {
-			history.land(invariantLandedFact("event-1", "invocation-1", "the message that opens the turn"))
-		})
-		if out.err != nil {
-			t.Fatalf("drive whose head input stands in the chain = %v, want its own terminal", out.err)
-		}
-		if len(out.turn.Decisions) != 1 {
-			t.Fatalf("decisions = %d, want the one decision: the head input is already in the transcript",
-				len(out.turn.Decisions))
-		}
-		if got := invariantCopies(behaviour.requestMessages()[0], "the message that opens the turn"); got != 1 {
-			t.Fatalf("copies of the head input = %d, want 1 (%s)", got, invariantRequests(behaviour.requestMessages()))
-		}
-		if got := ledger.count("event-1"); got != 1 {
-			t.Fatalf("After passes of the head input = %d, want the fact observed once", got)
-		}
-	})
-
-	t.Run("the identity de-duplicates, never the text", func(t *testing.T) {
-		behaviour, _, out := boundaryDrive(t, func(history *invariantLoopHistory) {
-			history.land(invariantLandedFact("fact-first", "invocation-1", "the same text sent twice"))
-			history.land(invariantLandedFact("fact-second", "invocation-1", "the same text sent twice"))
-			history.land(invariantLandedFact("fact-second", "invocation-1", "the same text sent twice"))
-		})
-		if out.err != nil {
-			t.Fatalf("drive beside two facts carrying one text = %v, want both read", out.err)
-		}
-		sent := behaviour.requestMessages()
-		if len(sent) != 2 {
-			t.Fatalf("requests = %d, want the decision in flight beside the one that reads the landed facts", len(sent))
-		}
-		if got := invariantCopies(sent[1], "the same text sent twice"); got != 2 {
-			t.Fatalf("copies of one text landed as two facts = %d, want 2: the identity de-duplicates and the text does not (%s)",
-				got, invariantRequests(sent))
-		}
-	})
-}
-
-// TestTheBoundaryStartsAtTheRangeHead pins where the boundary read of one drive begins: behind the head the chain already held when the drive started.
-// - a fact an earlier process left under this range's own identity enters no decision of this drive
-// - the input that lands after the drive began is still read, so the head never ends the read of the chain
-// - the After pass of a fact the earlier process observed runs never here
-//
-// 契约: docs/wiki/agent/event-flow.md#projection-lifecycle
-func TestTheBoundaryStartsAtTheRangeHead(t *testing.T) {
-	earlier := []event.Event{
-		invariantLandedFact("event-earlier-input", "invocation-1", "the input of the earlier turn"),
-		{Key: "event-earlier-output", Type: event.TypeAgentOutput, Timestamp: time.Now(),
-			Message: model.Message{Role: model.RoleAssistant, Content: "the answer of the earlier turn"},
-			Owner:   invariantLoopAddress, InvocationID: "invocation-1"},
-	}
-
-	t.Run("the facts of an earlier process under this identity enter no decision", func(t *testing.T) {
-		behaviour, ledger, out := rangeHeadDrive(t, earlier, nil)
-		if out.err != nil {
-			t.Fatalf("drive over a chain another process wrote = %v, want its own terminal", out.err)
-		}
-		if len(out.turn.Decisions) != 1 {
-			t.Fatalf("decisions = %d (%s), want the one decision: the input of the earlier turn is material that already ended",
-				len(out.turn.Decisions), invariantRequests(behaviour.requestMessages()))
-		}
-		for _, sent := range behaviour.requestMessages() {
-			if got := invariantCopies(sent, "the input of the earlier turn"); got != 0 {
-				t.Fatalf("copies of the earlier turn's input = %d, want 0: a restarted process counts this range's identity again, so the old fact stands before the head (%s)",
-					got, invariantRequests(behaviour.requestMessages()))
-			}
-		}
-		if got := ledger.count("event-earlier-input"); got != 0 {
-			t.Fatalf("After passes of the earlier turn's fact = %d, want none: that process observed it already", got)
-		}
-	})
-
-	t.Run("the input that lands after the drive began is still read", func(t *testing.T) {
-		behaviour, _, out := rangeHeadDrive(t, earlier, func(history *invariantLoopHistory) {
-			history.land(invariantLandedFact("event-landed", "invocation-1", "the message that arrived in flight"))
-		})
-		if out.err != nil {
-			t.Fatalf("drive beside input that landed in flight = %v, want the second decision to run", out.err)
-		}
-		if len(out.turn.Decisions) != 2 {
-			t.Fatalf("decisions = %d (%s), want the decision in flight beside the one that reads the landed input: the head begins the read, it never ends it",
-				len(out.turn.Decisions), invariantRequests(behaviour.requestMessages()))
-		}
-		sent := behaviour.requestMessages()
-		if got := invariantCopies(sent[len(sent)-1], "the message that arrived in flight"); got != 1 {
-			t.Fatalf("copies of the landed input in the next decision = %d, want exactly 1 (%s)",
-				got, invariantRequests(sent))
-		}
-	})
-}
-
-// rangeHeadDrive drives one invocation over a chain that already carries the facts the
-// caller names — the shape a restarted process leaves, because a session counts its
-// invocation identities from the start again — and lands the facts the caller names
-// while the decision of the drive runs.
-func rangeHeadDrive(t *testing.T, held []event.Event, land func(history *invariantLoopHistory)) (*invariantLoopModel, *invariantAfterLedger, invariantLoopResult) {
-	t.Helper()
-	behaviour := &invariantLoopModel{gate: make(chan struct{}), answer: "answer-a"}
-	loop, _, _ := invariantLoop(t, behaviour)
-	history := newInvariantLoopHistory()
-	loop.SetHistory(history)
-	for _, evt := range held {
-		history.land(evt)
-	}
-	history.land(invariantLandedFact("event-probe", "invocation-1", "the message that opens this turn"))
-	ledger := &invariantAfterLedger{}
-	loop.SetFactPipelines(ledger.pipeline)
-	loop.SetPresentations(ledger.present)
-	done := make(chan invariantLoopResult, 1)
-	go func() {
-		turn, err := loop.Drive(context.Background(), Invocation{
-			InvocationID: "invocation-1",
-			Address:      invariantLoopAddress,
-			Instance:     "instance-a",
-			Ready: []event.Event{{
-				Key:     "event-probe",
-				Message: model.Message{Role: model.RoleUser, Content: "the message that opens this turn"},
-			}},
-		})
-		done <- invariantLoopResult{turn: turn, err: err}
-	}()
-	invariantAwait(t, func() bool { return behaviour.inFlightCount() == 1 })
-	if land != nil {
-		land(history)
-	}
-	close(behaviour.gate)
-	select {
-	case out := <-done:
-		return behaviour, ledger, out
-	case <-time.After(5 * time.Second):
-		t.Fatal("the drive did not end after the decision was let through")
-		return nil, nil, invariantLoopResult{}
-	}
-}
-
-// boundaryDrive drives one invocation whose single decision is held at the model gate,
-// lands the facts the caller names while that decision runs, and answers the drive.
-func boundaryDrive(t *testing.T, land func(history *invariantLoopHistory)) (*invariantLoopModel, *invariantAfterLedger, invariantLoopResult) {
-	t.Helper()
-	behaviour := &invariantLoopModel{gate: make(chan struct{}), answer: "answer-a"}
-	loop, _, _ := invariantLoop(t, behaviour)
-	history := newInvariantLoopHistory()
-	loop.SetHistory(history)
-	ledger := &invariantAfterLedger{}
-	loop.SetFactPipelines(ledger.pipeline)
-	loop.SetPresentations(ledger.present)
-	done := make(chan invariantLoopResult, 1)
-	go func() {
-		turn, err := loop.Drive(context.Background(), Invocation{
-			InvocationID: "invocation-1",
-			Address:      invariantLoopAddress,
-			Instance:     "instance-a",
-			Ready: []event.Event{{
-				Key:     "event-1",
-				Message: model.Message{Role: model.RoleUser, Content: "the message that opens the turn"},
-			}},
-		})
-		done <- invariantLoopResult{turn: turn, err: err}
-	}()
-	invariantAwait(t, func() bool { return behaviour.inFlightCount() == 1 })
-	land(history)
-	close(behaviour.gate)
-	select {
-	case out := <-done:
-		return behaviour, ledger, out
-	case <-time.After(5 * time.Second):
-		t.Fatal("the drive did not end after the decision was let through")
-		return nil, nil, invariantLoopResult{}
-	}
-}
-
-// invariantLandedFact is one fact as a producer outside the drive lands it in the chain
-// of its session: the identity it committed under beside the input it reads as.
-func invariantLandedFact(key event.EventID, invocation event.InvocationID, content string) event.Event {
-	return event.Event{
-		Key:          key,
-		Type:         event.TypeExternalInput,
-		Timestamp:    time.Now(),
-		Message:      model.Message{Role: model.RoleUser, Content: content},
-		Owner:        invariantLoopAddress,
-		Source:       invariantLoopAddress,
-		Target:       invariantLoopAddress,
-		InvocationID: invocation,
-	}
-}
-
-// invariantAfterLedger records the fact every After pass of the loop was presented for.
-type invariantAfterLedger struct {
-	mu    sync.Mutex
-	facts []event.EventID
-}
-
-// pipeline answers the empty pipeline: the pass runs and presents the fact it read.
-func (l *invariantAfterLedger) pipeline(event.AgentID) (plugin.Pipeline, error) {
-	return plugin.Pipeline{}, nil
-}
-
-// present records the fact one After pass was presented for.
-func (l *invariantAfterLedger) present(presentation view.Presentation) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	l.facts = append(l.facts, presentation.Fact)
-}
-
-// count reports how many After passes the named fact was presented for.
-func (l *invariantAfterLedger) count(key event.EventID) int {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	seen := 0
-	for _, fact := range l.facts {
-		if fact == key {
-			seen++
-		}
-	}
-	return seen
-}
-
-// invariantCopies counts the messages of one request that carry the named material.
-func invariantCopies(msgs []model.Message, content string) int {
-	seen := 0
-	for _, msg := range msgs {
-		if strings.Contains(msg.Content, content) {
-			seen++
-		}
-	}
-	return seen
-}
-
-// invariantRequests renders the requests one drive sent, so a failure states what the
-// model really saw.
-func invariantRequests(requests [][]model.Message) string {
-	described := make([]string, 0, len(requests))
-	for at, msgs := range requests {
-		roles := make([]string, 0, len(msgs))
-		for _, msg := range msgs {
-			roles = append(roles, string(msg.Role)+":"+msg.Content)
-		}
-		described = append(described, fmt.Sprintf("#%d %v", at, roles))
-	}
-	return strings.Join(described, " | ")
 }
 
 // invariantLoopResult is one finished drive as the goroutine hands it back.
@@ -693,27 +400,6 @@ func (h *invariantLoopHistory) land(evt event.Event) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.facts[evt.Owner.SessionID] = append(h.facts[evt.Owner.SessionID], evt)
-}
-
-// invariantLoopWatch records the in-flight productions a drive registers.
-type invariantLoopWatch struct {
-	mu    sync.Mutex
-	stops []func() bool
-}
-
-// register records one production stop confirmation.
-func (w *invariantLoopWatch) register(_ event.TaskID, stopped func() bool) error {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	w.stops = append(w.stops, stopped)
-	return nil
-}
-
-// list reports the stop confirmations registered so far.
-func (w *invariantLoopWatch) list() []func() bool {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	return append([]func() bool(nil), w.stops...)
 }
 
 // invariantLoopView is the request view material one decision was admitted with.
@@ -897,7 +583,7 @@ func TestConsumerObservation(t *testing.T) {
 		watchConsumerLog(t, logger)
 		loop, _, _ := invariantLoop(t, newInvariantLoopModel("answer-a", nil))
 
-		turn, err := loop.Drive(ctx, Invocation{
+		turn, err := loop.drive(ctx, Invocation{
 			InvocationID: "invocation-1",
 			Address:      invariantLoopAddress,
 			Instance:     "instance-a",
@@ -935,7 +621,7 @@ func TestConsumerObservation(t *testing.T) {
 		watchConsumerLog(t, logger)
 		loop, _, _ := invariantLoop(t, newInvariantLoopModel("", errors.New("agent: the model entry refused the request")))
 
-		if _, err := loop.Drive(ctx, Invocation{
+		if _, err := loop.drive(ctx, Invocation{
 			InvocationID: "invocation-2",
 			Address:      invariantLoopAddress,
 			Instance:     "instance-a",
@@ -959,7 +645,7 @@ func TestConsumerObservation(t *testing.T) {
 		watchConsumerLog(t, &consumerLog{panicsLeft: 3})
 		loop, _, _ := invariantLoop(t, newInvariantLoopModel("answer-c", nil))
 
-		turn, err := loop.Drive(ctx, Invocation{
+		turn, err := loop.drive(ctx, Invocation{
 			InvocationID: "invocation-3",
 			Address:      invariantLoopAddress,
 			Instance:     "instance-a",
@@ -969,8 +655,8 @@ func TestConsumerObservation(t *testing.T) {
 			}},
 		})
 
-		if err != nil || turn.Terminal != model.KindCompleted || len(turn.Decisions) != 1 {
-			t.Fatalf("drive through a failing logger = (%v, %d decisions, %v), want the one completed decision", turn.Terminal, len(turn.Decisions), err)
+		if err != nil || turn.Terminal != model.KindCompleted || turn.DecisionCount != 1 {
+			t.Fatalf("drive through a failing logger = (%v, %d decisions, %v), want the one completed decision", turn.Terminal, turn.DecisionCount, err)
 		}
 	})
 }
@@ -1129,7 +815,7 @@ func TestBackflowNotificationLanes(t *testing.T) {
 			t.Fatalf("intake beside a progress notification = (%d parked, %d waits), want the settled wait left open", parked, waiters)
 		}
 
-		turn, err := loop.Drive(ctx, Invocation{
+		turn, err := loop.drive(ctx, Invocation{
 			InvocationID: "invocation-progress",
 			Address:      invariantLoopAddress,
 			Instance:     "instance-a",
@@ -1172,7 +858,7 @@ func TestBackflowNotificationLanes(t *testing.T) {
 			t.Fatalf("terminal notes = %+v, want nothing to read beside no fact", notes)
 		}
 
-		if _, err := loop.Drive(ctx, Invocation{
+		if _, err := loop.drive(ctx, Invocation{
 			InvocationID: "invocation-cache",
 			Address:      invariantLoopAddress,
 			Instance:     "instance-a",
@@ -1223,7 +909,7 @@ func TestBackflowNotificationLanes(t *testing.T) {
 			t.Fatalf("notification cache beside an accepted notification = %+v, want it empty", notes)
 		}
 
-		if _, err := loop.Drive(ctx, Invocation{
+		if _, err := loop.drive(ctx, Invocation{
 			InvocationID: "invocation-accepted",
 			Address:      invariantLoopAddress,
 			Instance:     "instance-a",
@@ -1310,7 +996,7 @@ func TestQuietProgressNotice(t *testing.T) {
 		if facts := ledger.list(); len(facts) != 1 {
 			t.Fatalf("committed notice facts = %d, want the report committed as its fact beside the silence", len(facts))
 		}
-		turn, err := loop.Drive(ctx, Invocation{
+		turn, err := loop.drive(ctx, Invocation{
 			InvocationID: "invocation-quiet-absent",
 			Address:      invariantLoopAddress,
 			Instance:     "instance-a",
@@ -1358,7 +1044,7 @@ func TestQuietProgressNotice(t *testing.T) {
 		if facts := ledger.list(); len(facts) != 1 {
 			t.Fatalf("committed notice facts = %d, want the observation committed as its fact", len(facts))
 		}
-		turn, err := loop.Drive(ctx, Invocation{
+		turn, err := loop.drive(ctx, Invocation{
 			InvocationID: "invocation-quiet-observation",
 			Address:      invariantLoopAddress,
 			Instance:     "instance-a",
@@ -1398,7 +1084,7 @@ func TestQuietProgressNotice(t *testing.T) {
 			Message: model.Message{Role: model.RoleUser, Content: material},
 		})
 
-		turn, err := loop.Drive(ctx, Invocation{
+		turn, err := loop.drive(ctx, Invocation{
 			InvocationID: "invocation-quiet-terminal",
 			Address:      invariantLoopAddress,
 			Instance:     "instance-a",
@@ -1478,4 +1164,573 @@ func (l *quietNoticeLedger) deliveries() int {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	return len(l.attempts)
+}
+
+// backflowNestedSite is the delegated execution site a nested call runs in: the
+// address whose resident instance issues a call of its own.
+var backflowNestedSite = event.Address{AgentID: "agent-nested", SessionID: "session-nested"}
+
+// backflowNestedNeighbour is the declared address beside the delegated site: the
+// wake of one range stays on its own address and never drives the neighbour.
+var backflowNestedNeighbour = event.Address{AgentID: "agent-nested", SessionID: "session-neighbour"}
+
+// backflowNestedAnswer is the body the delegated turn closes on.
+const backflowNestedAnswer = "the body the nested call produced"
+
+// backflowNestedTask is the task the nested call is admitted as.
+const backflowNestedTask = event.TaskID("task-nested")
+
+// backflowNestedBudget bounds the delegated turn itself: the wait the calling entry
+// spends on the segment that consumed its input.
+const backflowNestedBudget = 2 * time.Second
+
+// backflowNestedWindow bounds the checks' own waits, wider than the delegated turn's
+// budget so a wake that never came is read as the terminal the wait fell back on
+// instead of as the check hanging.
+const backflowNestedWindow = 5 * backflowNestedBudget
+
+// TestBackflowWakesSelfRegisteredResidents pins the wake a settled call leaves beside no host.
+// - backflow_wakes_self_registered_residents: a settled notification wakes the loop the loop mounted for itself
+// - the delegated turn answers the settled terminal beside the body its own chain ended on, never a cancelled one
+// - the set that mounted the instance keeps one instance for the address, and the result lands on that chain alone
+// - a loop beside no set at all mounts none: its backflow stays parked in the intake
+func TestBackflowWakesSelfRegisteredResidents(t *testing.T) {
+	t.Run("backflow_wakes_self_registered_residents", func(t *testing.T) {
+		tool := &backflowNestedCallTool{settle: make(chan struct{}), backflowed: make(chan struct{})}
+		script := newClosingRoundScript(
+			closingRoundStep{calls: []model.ToolCall{closingRoundCall("call-nested", backflowNestedCallToolName)}},
+			closingRoundStep{answer: backflowNestedAnswer},
+		)
+		loop, history := newBackflowNestedLoop(t, script, tool)
+		binding := state.AgentBinding{Model: script, Tools: []trpctool.Tool{tool}, PromptSource: state.PromptSource{Version: "v1"}}
+
+		ctx, cancel := context.WithTimeout(context.Background(), backflowNestedBudget)
+		defer cancel()
+		type submission struct {
+			answer DelegatedAnswer
+			err    error
+		}
+		submitted := make(chan submission, 1)
+		go func() {
+			answer, err := loop.SubmitDelegated(ctx, DelegatedInput{
+				Site:        backflowNestedSite,
+				Binding:     binding,
+				Instruction: "run the delegated turn",
+				Request:     "write the nested answer",
+			})
+			submitted <- submission{answer: answer, err: err}
+		}()
+
+		resident := loop.residentOf().Ensure(backflowNestedSite)
+		if resident == nil {
+			t.Fatalf("the set the loop mounted for itself holds no instance of %s", backflowNestedSite.SessionID)
+		}
+		invariantAwait(t, func() bool { return resident.TaskState(backflowNestedTask) == TaskAwaited })
+		close(tool.settle)
+		select {
+		case <-tool.backflowed:
+		case <-time.After(backflowNestedWindow):
+			t.Fatal("the settled notification never reached the loop")
+		}
+
+		select {
+		case got := <-submitted:
+			if got.err != nil {
+				t.Fatalf("the delegated turn ended beside %v, want the settled answer of its own chain", got.err)
+			}
+			if got.answer.Status != task.StatusSettled {
+				t.Fatalf("the delegated turn ended as status %d, want the settled status %d (the cancelled status is %d): a result that woke no resident loop leaves the segment to a cancellation",
+					got.answer.Status, task.StatusSettled, task.StatusCancelled)
+			}
+			if got.answer.Body != backflowNestedAnswer {
+				t.Fatalf("the body of the delegated turn = %q, want %q", got.answer.Body, backflowNestedAnswer)
+			}
+		case <-time.After(backflowNestedWindow):
+			t.Fatal("the delegated turn never answered: the settled result woke no resident loop")
+		}
+
+		if again := loop.residentOf().Ensure(backflowNestedSite); again != resident {
+			t.Fatalf("the instance of %s = %p, want the one instance %p the address runs on", backflowNestedSite.SessionID, again, resident)
+		}
+		if outputs := backflowNestedOutputs(history, backflowNestedSite); len(outputs) != 1 || outputs[0].Message.Content != backflowNestedAnswer {
+			t.Fatalf("agent_output facts of %s = %+v, want the one answer the delegated turn closed on", backflowNestedSite.SessionID, outputs)
+		}
+		if outputs := backflowNestedOutputs(history, backflowNestedNeighbour); len(outputs) != 0 {
+			t.Fatalf("agent_output facts of %s = %+v, want the result on the range that issued the call alone", backflowNestedNeighbour.SessionID, outputs)
+		}
+	})
+
+	t.Run("a_loop_beside_no_consumers_mounts_nothing", func(t *testing.T) {
+		tool := &backflowNestedCallTool{settle: make(chan struct{}), backflowed: make(chan struct{})}
+		script := newClosingRoundScript(closingRoundStep{answer: backflowNestedAnswer})
+		loop, _ := newBackflowNestedLoop(t, script, tool)
+
+		loop.Backflow("invocation-idle", task.Notice{TaskID: "task-idle", Round: 1, Kind: task.NoticeSettled, Seq: 0, Event: "fact-idle"})
+
+		loop.mu.Lock()
+		consumers := loop.consumers
+		loop.mu.Unlock()
+		if consumers != nil {
+			t.Fatal("a settled backflow beside no current set mounted one, want none")
+		}
+		in := loop.intakeFor("invocation-idle")
+		if item, ok := in.await(context.Background(), "task-idle"); !ok || item.fact != "fact-idle" {
+			t.Fatalf("parked result = (%+v, %v), want the settled result kept in the intake", item, ok)
+		}
+	})
+}
+
+// TestStoppedResidentsRejectDelegatedWork uses the public delegated-entry verdict
+// to prove that stopping residents is terminal for new work: no replacement set or
+// Consumer may appear beside the stopped one.
+func TestStoppedResidentsRejectDelegatedWork(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		transition func(*testing.T, *Loop)
+	}{
+		{name: "immediately_after_stop", transition: func(*testing.T, *Loop) {}},
+		{name: "after_clearing_the_set", transition: func(_ *testing.T, loop *Loop) {
+			loop.SetConsumers(nil)
+		}},
+		{name: "after_replacing_the_set", transition: func(t *testing.T, loop *Loop) {
+			replacement := NewConsumers(loop, context.Background(), nil)
+			t.Cleanup(replacement.Stop)
+			loop.SetConsumers(replacement)
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			tool := &backflowNestedCallTool{settle: make(chan struct{}), backflowed: make(chan struct{})}
+			script := newClosingRoundScript(closingRoundStep{answer: backflowNestedAnswer})
+			loop, _ := newBackflowNestedLoop(t, script, tool)
+			loop.StopResidents()
+			test.transition(t, loop)
+
+			ctx, cancel := context.WithTimeout(context.Background(), backflowNestedBudget)
+			defer cancel()
+			_, err := loop.SubmitDelegated(ctx, DelegatedInput{
+				Site:        backflowNestedSite,
+				Binding:     state.AgentBinding{Model: script, PromptSource: state.PromptSource{Version: "v1"}},
+				Instruction: "run only if the loop is still open",
+				Request:     "this input must not revive a stopped Consumer",
+			})
+			if !errors.Is(err, ErrDelegatedInstanceUnavailable) {
+				t.Fatalf("delegated work after StopResidents returned %v, want ErrDelegatedInstanceUnavailable", err)
+			}
+		})
+	}
+}
+
+// gatedHistoryFace holds the first chain read so a set-attachment attempt can be
+// ordered against a public WakeAddress without inspecting Loop's private maps.
+type gatedHistoryFace struct {
+	HistoryFace
+	started chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (h *gatedHistoryFace) SessionFacts(addr event.Address) []event.Event {
+	h.once.Do(func() {
+		close(h.started)
+		<-h.release
+	})
+	return h.HistoryFace.SessionFacts(addr)
+}
+
+// TestConsumerSetDoesNotReplaceMountedAddress proves the assembly-time boundary:
+// once an address mounted through one set, another set cannot silently take it over.
+// Stopping that current set must make public delegated work unavailable.
+func TestConsumerSetDoesNotReplaceMountedAddress(t *testing.T) {
+	tool := &backflowNestedCallTool{settle: make(chan struct{}), backflowed: make(chan struct{})}
+	script := newClosingRoundScript(closingRoundStep{answer: backflowNestedAnswer})
+	loop, history := newBackflowNestedLoop(t, script, tool)
+	gated := &gatedHistoryFace{HistoryFace: history, started: make(chan struct{}), release: make(chan struct{})}
+	loop.SetHistory(gated)
+	first := NewConsumers(loop, context.Background(), nil)
+	second := NewConsumers(loop, context.Background(), nil)
+	t.Cleanup(first.Stop)
+	t.Cleanup(second.Stop)
+	loop.SetConsumers(first)
+
+	woke := make(chan struct{})
+	go func() {
+		loop.WakeAddress(backflowNestedSite)
+		close(woke)
+	}()
+	select {
+	case <-gated.started:
+	case <-time.After(backflowNestedWindow):
+		t.Fatal("WakeAddress did not read the address chain")
+	}
+	attached := make(chan struct{})
+	go func() {
+		loop.SetConsumers(second)
+		close(attached)
+	}()
+	close(gated.release)
+	for _, done := range []chan struct{}{woke, attached} {
+		select {
+		case <-done:
+		case <-time.After(backflowNestedWindow):
+			t.Fatal("the address mount/attach interleaving did not finish")
+		}
+	}
+
+	first.Stop()
+	ctx, cancel := context.WithTimeout(context.Background(), backflowNestedBudget)
+	defer cancel()
+	_, err := loop.SubmitDelegated(ctx, DelegatedInput{
+		Site:        backflowNestedSite,
+		Binding:     state.AgentBinding{Model: script, PromptSource: state.PromptSource{Version: "v1"}},
+		Instruction: "check which set owns the mounted address",
+		Request:     "a stopped current set must not be replaced by another runtime",
+	})
+	if !errors.Is(err, ErrDelegatedInstanceUnavailable) {
+		t.Fatalf("stopping the mounted address's set returned %v, want ErrDelegatedInstanceUnavailable", err)
+	}
+}
+
+// wakeFromConsumerToolName is the tool that re-enters WakeAddress from a Consumer.
+const wakeFromConsumerToolName = "wake_from_consumer"
+
+// wakeFromConsumerTool waits for StopResidents to cancel its decision, then re-enters
+// the public wake path. No private lock or registry is inspected by the test.
+type wakeFromConsumerTool struct {
+	loop      *Loop
+	site      event.Address
+	entered   chan struct{}
+	cancelled chan struct{}
+	hold      chan struct{}
+}
+
+func (t *wakeFromConsumerTool) Declaration() *trpctool.Declaration {
+	return &trpctool.Declaration{Name: wakeFromConsumerToolName, Description: "wake the current address during cancellation"}
+}
+
+func (t *wakeFromConsumerTool) Call(ctx context.Context, _ []byte) (any, error) {
+	close(t.entered)
+	<-ctx.Done()
+	if t.cancelled != nil {
+		close(t.cancelled)
+	}
+	if t.hold != nil {
+		<-t.hold
+	}
+	t.loop.WakeAddress(t.site)
+	return "woke", nil
+}
+
+// TestStopResidentsAllowsWakeFromConsumerTool proves that stop never holds a state
+// lock while joining a Consumer whose tool synchronously re-enters WakeAddress.
+func TestStopResidentsAllowsWakeFromConsumerTool(t *testing.T) {
+	tool := &wakeFromConsumerTool{site: backflowNestedSite, entered: make(chan struct{})}
+	script := newClosingRoundScript(closingRoundStep{calls: []model.ToolCall{
+		closingRoundCall("call-wake-from-consumer", wakeFromConsumerToolName),
+	}})
+	loop := NewLoop(state.NewBindings(), state.NewOccupancy(), "instance-wake", nil)
+	history := newInvariantLoopHistory()
+	loop.SetHistory(history)
+	var mu sync.Mutex
+	seq := 0
+	loop.SetFactCommit(func(evt event.Event) (event.EventID, error) {
+		mu.Lock()
+		seq++
+		key := event.EventID(fmt.Sprintf("%s#wake-fact-%d", evt.Owner.SessionID, seq))
+		mu.Unlock()
+		evt.Key = key
+		history.land(evt)
+		return key, nil
+	})
+	tool.loop = loop
+	binding := state.AgentBinding{Model: script, Tools: []trpctool.Tool{tool}, PromptSource: state.PromptSource{Version: "v1"}}
+
+	ctx, cancel := context.WithTimeout(context.Background(), backflowNestedWindow)
+	defer cancel()
+	submitted := make(chan error, 1)
+	go func() {
+		_, err := loop.SubmitDelegated(ctx, DelegatedInput{
+			Site:        backflowNestedSite,
+			Binding:     binding,
+			Instruction: "exercise the consumer re-entry boundary",
+			Request:     "stop while this tool is inside the consumer",
+		})
+		submitted <- err
+	}()
+	select {
+	case <-tool.entered:
+	case <-time.After(backflowNestedWindow):
+		t.Fatal("the delegated Consumer never entered the wake tool")
+	}
+	stopped := make(chan struct{})
+	go func() {
+		loop.StopResidents()
+		close(stopped)
+	}()
+	select {
+	case <-stopped:
+	case <-time.After(backflowNestedBudget):
+		t.Fatal("StopResidents is blocked beside a Consumer tool re-entering WakeAddress")
+	}
+	select {
+	case err := <-submitted:
+		if err != nil && !errors.Is(err, context.Canceled) {
+			t.Fatalf("the stopped delegated call returned %v, want a cancellation or named unavailability", err)
+		}
+	case <-time.After(backflowNestedBudget):
+		t.Fatal("the delegated call did not return after StopResidents")
+	}
+}
+
+// TestStoppedSetRejectsSubmitBeforeExistingInstanceJoin keeps an existing Consumer
+// inside its tool after Stop marks the set, then proves a new public Submit neither
+// reuses it nor commits another input before the old Consumer has joined.
+func TestStoppedSetRejectsSubmitBeforeExistingInstanceJoin(t *testing.T) {
+	tool := &wakeFromConsumerTool{
+		site:      backflowNestedSite,
+		entered:   make(chan struct{}),
+		cancelled: make(chan struct{}),
+		hold:      make(chan struct{}),
+	}
+	script := newClosingRoundScript(closingRoundStep{calls: []model.ToolCall{
+		closingRoundCall("call-stopped-existing", wakeFromConsumerToolName),
+	}})
+	loop := NewLoop(state.NewBindings(), state.NewOccupancy(), "instance-stopped-existing", nil)
+	history := newInvariantLoopHistory()
+	loop.SetHistory(history)
+	var mu sync.Mutex
+	seq := 0
+	loop.SetFactCommit(func(evt event.Event) (event.EventID, error) {
+		mu.Lock()
+		seq++
+		key := event.EventID(fmt.Sprintf("%s#stopped-existing-%d", evt.Owner.SessionID, seq))
+		mu.Unlock()
+		evt.Key = key
+		history.land(evt)
+		return key, nil
+	})
+	tool.loop = loop
+	binding := state.AgentBinding{Model: script, Tools: []trpctool.Tool{tool}, PromptSource: state.PromptSource{Version: "v1"}}
+	ctx, cancel := context.WithTimeout(context.Background(), backflowNestedWindow)
+	defer cancel()
+	first := make(chan error, 1)
+	go func() {
+		_, err := loop.SubmitDelegated(ctx, DelegatedInput{Site: backflowNestedSite, Binding: binding, Request: "hold the first consumer"})
+		first <- err
+	}()
+	select {
+	case <-tool.entered:
+	case <-time.After(backflowNestedWindow):
+		t.Fatal("the first delegated Consumer never entered its tool")
+	}
+	stopped := make(chan struct{})
+	go func() {
+		loop.StopResidents()
+		close(stopped)
+	}()
+	select {
+	case <-tool.cancelled:
+	case <-time.After(backflowNestedWindow):
+		t.Fatal("StopResidents did not cancel the existing Consumer")
+	}
+
+	before := len(history.SessionFacts(backflowNestedSite))
+	secondCtx, secondCancel := context.WithTimeout(context.Background(), backflowNestedBudget)
+	defer secondCancel()
+	second := make(chan error, 1)
+	go func() {
+		_, err := loop.SubmitDelegated(secondCtx, DelegatedInput{
+			Site:    backflowNestedSite,
+			Binding: binding,
+			Request: "this second input must be refused before commit",
+		})
+		second <- err
+	}()
+	var secondErr error
+	select {
+	case secondErr = <-second:
+	case <-time.After(backflowNestedBudget):
+		secondErr = errors.New("the second Submit did not return")
+	}
+	close(tool.hold)
+	select {
+	case <-stopped:
+	case <-time.After(backflowNestedWindow):
+		t.Fatal("StopResidents did not finish after releasing the existing Consumer")
+	}
+	if !errors.Is(secondErr, ErrDelegatedInstanceUnavailable) {
+		t.Fatalf("Submit beside stopped existing Consumer returned %v, want ErrDelegatedInstanceUnavailable", secondErr)
+	}
+	if after := len(history.SessionFacts(backflowNestedSite)); after != before {
+		t.Fatalf("facts after the refused Submit = %d, want the unchanged %d", after, before)
+	}
+}
+
+// backflowNestedCallToolName is the name the scripted round calls.
+const backflowNestedCallToolName = "nested_call"
+
+// backflowNestedCallTool is the tool one round of the delegated site calls: it admits
+// the call as a task and hands that task's settled notification to the loop's own
+// backflow path, which is the delivery a task pipeline makes from outside the loop.
+type backflowNestedCallTool struct {
+	loop *Loop
+	// settle lets the check fire the settled notification of the admitted task.
+	settle chan struct{}
+	// backflowed closes once the notification reached the loop.
+	backflowed chan struct{}
+}
+
+var _ trpctool.CallableTool = (*backflowNestedCallTool)(nil)
+
+// Declaration names the tool the scripted round calls.
+func (t *backflowNestedCallTool) Declaration() *trpctool.Declaration {
+	return &trpctool.Declaration{Name: backflowNestedCallToolName, Description: "admits one nested call as a task"}
+}
+
+// Call admits the call and delivers its settled notification once the check fires it.
+func (t *backflowNestedCallTool) Call(ctx context.Context, _ []byte) (any, error) {
+	frame, ok := task.CallFrameFrom(ctx)
+	if !ok {
+		return nil, errors.New("agent: the nested call carries no frame")
+	}
+	go func() {
+		<-t.settle
+		t.loop.Backflow(frame.Identity.InvocationID, task.Notice{
+			TaskID: backflowNestedTask,
+			Round:  1,
+			Kind:   task.NoticeSettled,
+			Seq:    0,
+			Event:  "fact-nested-settled",
+		})
+		close(t.backflowed)
+	}()
+	return task.AdmissionReceipt{CallID: frame.Identity.CallID, TaskID: backflowNestedTask, Accepted: true, Kind: task.AdmissionFresh}, nil
+}
+
+// newBackflowNestedLoop assembles one loop beside no host: no consumption set is
+// attached through SetConsumers, so the delegated site's resident instance belongs to
+// the set the loop mounts for itself, which is the shape an embedder or a test drives
+// the assembled runtime in.
+func newBackflowNestedLoop(t *testing.T, m model.Model, tool *backflowNestedCallTool) (*Loop, *invariantLoopHistory) {
+	t.Helper()
+	loop := NewLoop(state.NewBindings(), state.NewOccupancy(), "instance-a", nil)
+	history := newInvariantLoopHistory()
+	var mu sync.Mutex
+	seq := 0
+	loop.SetHistory(history)
+	loop.SetFactCommit(func(evt event.Event) (event.EventID, error) {
+		mu.Lock()
+		seq++
+		key := event.EventID(fmt.Sprintf("%s#fact-%d", evt.Owner.SessionID, seq))
+		mu.Unlock()
+		evt.Key = key
+		history.land(evt)
+		return key, nil
+	})
+	tool.loop = loop
+	t.Cleanup(loop.StopResidents)
+	return loop, history
+}
+
+// backflowNestedOutputs reports the agent_output facts one address's chain carries.
+func backflowNestedOutputs(history *invariantLoopHistory, addr event.Address) []event.Event {
+	var out []event.Event
+	for _, evt := range history.SessionFacts(addr) {
+		if evt.Type == event.TypeAgentOutput {
+			out = append(out, evt)
+		}
+	}
+	return out
+}
+
+// TestOutputFactCarriesStableTurnMetadata pins the closing fields of one
+// segment's agent_output fact to the answer the same segment delivered: the
+// output fact states the turn it closed, so the chain rebuilds the closed turn
+// itself instead of deriving it from the process cache afterwards.
+//   - a completed segment records its terminal, the empty failure and closing
+//     round, its trigger lineage and its decision count
+//   - a failed segment records the failed terminal beside the trimmed cause
+//   - the input relation the fact commits stays beside the new entries
+//
+// 契约: docs/wiki/agent/event-flow.md#runner-flow
+func TestOutputFactCarriesStableTurnMetadata(t *testing.T) {
+	t.Run("a completed segment commits its turn fields", func(t *testing.T) {
+		rig := newResidentInstanceRig(t)
+		addr := rig.otherAddress()
+		consumer := rig.consumers.Ensure(addr)
+		if consumer == nil {
+			t.Fatalf("the instance of %s/%s = nil, want one instance to drive the material", addr.AgentID, addr.SessionID)
+		}
+		rig.landInput(addr, residentInstanceInput)
+		consumer.Wake()
+		answer := rig.awaitAnswer(t, addr)
+		if answer.Err != nil {
+			t.Fatalf("the segment of %s closed beside %v, want a completed turn", addr.SessionID, answer.Err)
+		}
+		outputs := rig.outputs(addr)
+		if len(outputs) != 1 {
+			t.Fatalf("agent_output facts of %s = %d, want the one the closed segment committed", addr.SessionID, len(outputs))
+		}
+		if outputs[0].InvocationID != answer.Turn.InvocationID {
+			t.Fatalf("output fact invocation = %q, want the closed segment %q", outputs[0].InvocationID, answer.Turn.InvocationID)
+		}
+		expectOutputTurnMetadata(t, outputs[0], answer)
+		if _, held := outputs[0].Meta[event.MetaKeyInputEvents]; !held {
+			t.Fatalf("output fact carries no %q entry: the turn metadata stands beside the input relation", event.MetaKeyInputEvents)
+		}
+	})
+
+	t.Run("a failed segment commits the cause its turn reported", func(t *testing.T) {
+		failure := errors.New("agent: the model entry refused the request")
+		rig := newResidentInstanceRigWithModel(t, newInvariantLoopModel("", failure))
+		addr := rig.otherAddress()
+		consumer := rig.consumers.Ensure(addr)
+		if consumer == nil {
+			t.Fatalf("the instance of %s/%s = nil, want one instance to drive the material", addr.AgentID, addr.SessionID)
+		}
+		rig.landNotice(addr, residentInstanceNotice)
+		consumer.Wake()
+		answer := rig.awaitAnswer(t, addr)
+		if answer.Err != nil {
+			t.Fatalf("the failed segment of %s ended beside %v, want the turn's failed terminal alone", addr.SessionID, answer.Err)
+		}
+		if answer.Turn.Terminal != model.KindFailed {
+			t.Fatalf("the segment of %s closed on %v, want the failed terminal", addr.SessionID, answer.Turn.Terminal)
+		}
+		if strings.TrimSpace(answer.Turn.Failure) == "" {
+			t.Fatalf("the failed segment of %s reports no cause, want the model's refusal", addr.SessionID)
+		}
+		if answer.Trigger != "task" {
+			t.Fatalf("the segment of %s opened on trigger %q, want the notice's %q lineage", addr.SessionID, answer.Trigger, "task")
+		}
+		outputs := rig.outputs(addr)
+		if len(outputs) != 1 {
+			t.Fatalf("agent_output facts of %s = %d, want the one the failed segment committed", addr.SessionID, len(outputs))
+		}
+		expectOutputTurnMetadata(t, outputs[0], answer)
+	})
+}
+
+// expectOutputTurnMetadata pins the five stable entries one agent_output fact
+// commits to the turn the same segment delivered.
+func expectOutputTurnMetadata(t *testing.T, fact event.Event, answer SegmentAnswer) {
+	t.Helper()
+	wants := []struct {
+		key  string
+		want string
+	}{
+		{key: "terminal", want: answer.Turn.Terminal.String()},
+		{key: "failure", want: answer.Turn.Failure},
+		{key: "final_round", want: string(answer.Turn.FinalRound)},
+		{key: "trigger", want: answer.Trigger},
+		{key: "decision_count", want: fmt.Sprint(answer.Turn.DecisionCount)},
+	}
+	for _, want := range wants {
+		got, held := fact.Meta[want.key]
+		if !held {
+			t.Fatalf("agent_output metadata carries no %q entry: got %v, want the closed turn's %q", want.key, fact.Meta, want.want)
+		}
+		if got != want.want {
+			t.Fatalf("agent_output metadata %q = %q, want the closed turn's %q", want.key, got, want.want)
+		}
+	}
 }

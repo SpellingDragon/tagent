@@ -12,6 +12,7 @@ import (
 	"net"
 	"net/http"
 	"reflect"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -48,12 +49,11 @@ func TestPublicRuntimeEntry(t *testing.T) {
 		if err != nil {
 			t.Fatalf("invoke the assembled run: %v", err)
 		}
-		if turn.Terminal != model.KindCompleted || len(turn.Decisions) != 2 {
-			t.Fatalf("turn = (%v, %d decisions), want one completed terminal beside two decisions", turn.Terminal, len(turn.Decisions))
+		if turn.Terminal != model.KindCompleted || turn.DecisionCount != 2 {
+			t.Fatalf("turn = (%v, %d decisions), want one completed terminal beside two decisions", turn.Terminal, turn.DecisionCount)
 		}
-		if turn.InvocationID != "inv-start" {
-			t.Fatalf("turn invocation = %q, want the invocation the drive was admitted for", turn.InvocationID)
-		}
+		input := entryAnswerIdentity(t, run, addr, turn.InvocationID, "inv-start")
+		t.Logf("[public-entry 1] answer identity: segment %s consumed the caller input %s filed under %s", turn.InvocationID, input.Key, input.InvocationID)
 		if tool.calls() != 1 {
 			t.Fatalf("tool executions = %d, want the admitted call executed exactly once", tool.calls())
 		}
@@ -218,9 +218,11 @@ func TestPublicRuntimeEntry(t *testing.T) {
 		if err := json.Unmarshal(stdout.Bytes(), &outcome); err != nil {
 			t.Fatalf("decode the cli turn: %v", err)
 		}
-		if outcome.Terminal != model.KindCompleted || outcome.Decisions != 2 || outcome.InvocationID != "inv-cli" {
-			t.Fatalf("cli turn = %+v, want one completed turn of two decisions under its own invocation", outcome)
+		if outcome.Terminal != model.KindCompleted || outcome.Decisions != 2 {
+			t.Fatalf("cli turn = %+v, want one completed turn of two decisions", outcome)
 		}
+		input := entryAnswerIdentity(t, run, addr, outcome.InvocationID, "inv-cli")
+		t.Logf("[public-entry 4] answer identity: segment %s consumed the caller input %s filed under %s", outcome.InvocationID, input.Key, input.InvocationID)
 
 		requests := provider.recorded()
 		seen := map[string]bool{}
@@ -302,6 +304,45 @@ func newEntryRun(t *testing.T, ctx context.Context) (*assembly.Run, *entryModel,
 		t.Fatalf("assemble the runtime: %v", err)
 	}
 	return run, provider, tool
+}
+
+// entryAnswerIdentity checks the public identity evidence one turn answers under:
+// the answer names the segment the resident Consumer minted for the session, while
+// the caller's invocation survives on the input fact of the chain, which the
+// segment's answer states it consumed. A turn never claims the caller's identity.
+func entryAnswerIdentity(t *testing.T, run *assembly.Run, addr event.Address, segment event.InvocationID, caller event.InvocationID) event.Event {
+	t.Helper()
+	if prefix := string(addr.SessionID) + "#"; !strings.HasPrefix(string(segment), prefix) {
+		t.Fatalf("turn invocation = %q, want the segment identity of %s under prefix %q", segment, addr.SessionID, prefix)
+	}
+	var input event.Event
+	inputHeld := false
+	var consumed []event.EventID
+	answerHeld := false
+	for _, fact := range run.SessionFacts(addr) {
+		if !inputHeld && fact.Type == event.TypeExternalInput && fact.InvocationID == caller {
+			input = fact
+			inputHeld = true
+		}
+		if !answerHeld && fact.Type == event.TypeAgentOutput && fact.InvocationID == segment {
+			if err := json.Unmarshal([]byte(fact.Meta[event.MetaKeyInputEvents]), &consumed); err == nil {
+				answerHeld = true
+			}
+		}
+	}
+	if !inputHeld {
+		t.Fatalf("the chain carries no input fact of the caller invocation %q", caller)
+	}
+	if !answerHeld {
+		t.Fatalf("the chain carries no answer of segment %q stating its consumed inputs", segment)
+	}
+	for _, key := range consumed {
+		if key == input.Key {
+			return input
+		}
+	}
+	t.Fatalf("the segment %q consumed inputs %v, want the caller input %q", segment, consumed, input.Key)
+	return event.Event{}
 }
 
 // kindCounts derives the per-kind count of one reading from its detail

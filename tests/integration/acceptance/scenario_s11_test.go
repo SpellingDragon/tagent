@@ -3,6 +3,7 @@ package acceptance
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
@@ -22,9 +23,12 @@ import (
 )
 
 // TestScenario11ConfigDrivenSubagentAndPipeline drives one declaration of a parent beside its child.
-// - the child is assembled on the model, prompt file and tool reference its own declaration names
-// - the parent pipeline runs its Before and After passes in the declared plugin order
-// - the parent's sub-agent call is admitted as a task and the parent reads its admission receipt
+//   - the child is assembled on the model, prompt file and tool reference its own declaration names
+//   - the parent pipeline runs its Before and After passes in the declared plugin order
+//   - the parent's sub-agent call is admitted as a task: the model reads the minimal
+//     admission confirmation and the admitted task is read from the chain
+//   - the child result settles back to the parent address as a fact of its own
+//
 // 契约: docs/EXTENSIONS.md#pipeline-phases
 func TestScenario11ConfigDrivenSubagentAndPipeline(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*scenarioTimeout)
@@ -63,7 +67,7 @@ func TestScenario11ConfigDrivenSubagentAndPipeline(t *testing.T) {
 
 	recorder := &scenarioPhaseRecorder{}
 	child := &scenarioModel{name: "model-child", answer: func(*model.Request) *model.Response {
-		return scenarioFinalTurn("the child recorded the review")
+		return scenarioFinalTurn(scenarioChildAnswer)
 	}}
 	turns := 0
 	parent := &scenarioModel{name: "model-parent"}
@@ -91,9 +95,9 @@ func TestScenario11ConfigDrivenSubagentAndPipeline(t *testing.T) {
 	if err != nil {
 		t.Fatalf("invoke the parent: %v", err)
 	}
-	if parentTurn.Terminal != model.KindCompleted || len(parentTurn.Decisions) != 2 {
+	if parentTurn.Terminal != model.KindCompleted || parentTurn.DecisionCount != 2 {
 		t.Fatalf("parent turn = (%v, %d decisions), want the completed terminal beside two decisions",
-			parentTurn.Terminal, len(parentTurn.Decisions))
+			parentTurn.Terminal, parentTurn.DecisionCount)
 	}
 	parentRequests := parent.recorded()
 	if len(parentRequests) != 2 {
@@ -105,17 +109,60 @@ func TestScenario11ConfigDrivenSubagentAndPipeline(t *testing.T) {
 	}
 	childRequests := child.recorded()
 
+	addr := event.Address{AgentID: "agent-parent", SessionID: "session-config-parent"}
+	// The receipt the model reads is the minimal admission confirmation and
+	// never the task identity: read the call→task link from the action command
+	// under the native call identity, and the child result from the settle fact
+	// that returns it to this address, as S03 reads its call→task link.
+	taskID, childResultDelivered := scenarioSubagentFacts(t, run, addr, "call-subagent", scenarioChildAnswer)
+
+	for at, req := range parentRequests {
+		parts := []string{}
+		for _, m := range req.Messages {
+			parts = append(parts, fmt.Sprintf("%s/%s/%q", m.Role, m.ToolID, m.Content))
+		}
+		t.Logf("S11 parent view %d: %s", at, strings.Join(parts, "; "))
+	}
+	{
+		deadline := time.Now().Add(3 * time.Second)
+		for len(parent.recorded()) <= 2 && time.Now().Before(deadline) {
+			time.Sleep(2 * time.Millisecond)
+		}
+		for at, req := range parent.recorded() {
+			parts := []string{}
+			for _, m := range req.Messages {
+				parts = append(parts, fmt.Sprintf("%s/%s/%q", m.Role, m.ToolID, m.Content))
+			}
+			t.Logf("S11 final view %d: %s", at, strings.Join(parts, "; "))
+		}
+	}
 	declared := decl.Agents[0].Plugins
 	declaredAfter := scenarioDeclaredPortOrder(declared, recorder.plugins(),
 		plugin.PortFactObservation,
 		plugin.PortFactView)
+	// One After pass per committed fact is the process quantity. How many facts
+	// a turn commits is delivery-order dependent — a late settlement commits a
+	// fact of its own — so pin every group's declared order and the coverage of
+	// every committed fact, not the timing-dependent group count.
 	settleDeadline := time.Now().Add(5 * time.Second)
-	for len(recorder.afterGroups()) < len(parentRequests)+1 && time.Now().Before(settleDeadline) {
+	var afterGroups []scenarioAfterGroup
+	var afterFacts []event.Event
+	for {
+		afterGroups = recorder.afterGroups()
+		afterFacts = run.SessionFacts(addr)
+		if len(afterGroups) >= len(parentRequests)+1 &&
+			scenarioAfterCoversFacts(afterGroups, afterFacts) {
+			break
+		}
+		if time.Now().After(settleDeadline) {
+			break
+		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	afterGroups := recorder.afterGroups()
 	observations["parent_pipeline_before_order"] = recorder.beforeOrder()
-	observations["parent_pipeline_after_order"] = afterGroups
+	observations["parent_pipeline_after_order"] = scenarioDistinctGroups(afterGroups)
+	observations["parent_pipeline_after_covers_facts"] =
+		scenarioAfterCoversFacts(afterGroups, afterFacts)
 	observations["parent_pipeline_matches_declaration"] =
 		scenarioSameOrder(recorder.beforeOrder(), scenarioDeclaredOrder(declared, recorder.plugins(),
 			plugin.PortCallTransform)) &&
@@ -124,8 +171,10 @@ func TestScenario11ConfigDrivenSubagentAndPipeline(t *testing.T) {
 		scenarioAnyMessage(parentRequests[0].Messages, scenarioParentInstruction)
 
 	spec := scenarioDeclaredAgent(t, decl)
-	taskID, accepted := scenarioAdmissionReceipt(parentRequests[1].Messages, "call-subagent")
-	observations["subagent_call_admits_task"] = accepted && strings.HasPrefix(taskID, "task-")
+	observations["subagent_call_admits_task"] =
+		scenarioAdmissionConfirmed(parentRequests[1].Messages, "call-subagent") &&
+			strings.HasPrefix(taskID, "task-")
+	observations["subagent_result_delivered"] = childResultDelivered
 	observations["child_agent_model_requests"] = len(childRequests)
 	observations["child_agent_runs_declared_model"] = len(childRequests) == 1 &&
 		child.Info().Name == spec.Model
@@ -134,7 +183,19 @@ func TestScenario11ConfigDrivenSubagentAndPipeline(t *testing.T) {
 	observations["child_agent_tool_names"] = scenarioToolNames(childRequests[0].Tools)
 	observations["child_agent_declares_own_tool"] = scenarioDeclaresTool(spec, scenarioToolNames(childRequests[0].Tools))
 
-	refs = append(refs, string(parentTurn.Decisions[0].DecisionID), string(parentTurn.Decisions[1].DecisionID))
+	parentDecisionIDs := []event.DecisionID{}
+	for _, fact := range run.SessionFacts(event.Address{AgentID: "agent-parent", SessionID: "session-config-parent"}) {
+		if fact.InvocationID == parentTurn.InvocationID && fact.DecisionID != "" &&
+			(fact.Type == event.TypeThinkingPlan || fact.Type == event.TypeAgentOutput) {
+			parentDecisionIDs = append(parentDecisionIDs, fact.DecisionID)
+		}
+	}
+	if len(parentDecisionIDs) != parentTurn.DecisionCount {
+		t.Fatalf("parent decision facts = %d, want the %d decisions of the parent turn", len(parentDecisionIDs), parentTurn.DecisionCount)
+	}
+	for _, decisionID := range parentDecisionIDs {
+		refs = append(refs, string(decisionID))
+	}
 	refs = append(refs, taskID)
 	EmitScenarioRecord(t, scenario, refs, observations)
 }
@@ -144,6 +205,12 @@ const (
 	scenarioParentInstruction = "scenario-parent-instruction"
 	// scenarioChildInstruction marks the prompt file the child agent declares.
 	scenarioChildInstruction = "scenario-child-instruction"
+	// scenarioChildAnswer is the scripted child body the parent address reads back
+	// from the delegated task's settle fact.
+	scenarioChildAnswer = "the child recorded the review"
+	// scenarioAdmissionReceiptText is the minimal confirmation an admitted call
+	// answers; the task identity never travels in it.
+	scenarioAdmissionReceiptText = "ok"
 )
 
 // scenarioPhaseRecorder records the order in which the pipeline passes reach
@@ -183,23 +250,34 @@ func (r *scenarioPhaseRecorder) beforeOrder() []string {
 	return append([]string{}, r.before...)
 }
 
-// afterGroups reports the elements each committed fact's After pass visited, one
-// group per fact in the order the facts committed. The After pass runs once per
-// committed fact through the pipeline of the fact's own agent — the turn-start
-// input, the turn-end output and the settled delivery of a range each commit a
-// fact of their own — so a fact is observed in the declaration's order while two
-// distinct facts carry no order between them.
-func (r *scenarioPhaseRecorder) afterGroups() [][]string {
+// scenarioAfterGroup is one committed fact's After pass: the fact it was
+// reached for beside the elements it visited, in visit order.
+type scenarioAfterGroup struct {
+	fact  string
+	names []string
+}
+
+// afterGroups reports one group per committed fact, in the order the facts first
+// reached the pass. A fact is grouped by its own identity rather than by
+// consecutive visits: two facts' passes may interleave, and each fact still
+// carries its own order. The After pass runs once per committed fact through the
+// pipeline of the fact's own agent — the turn-start input, the turn-end output
+// and the settled delivery of a range each commit a fact of their own — so a
+// fact is observed in the declaration's order while two distinct facts carry no
+// order between them.
+func (r *scenarioPhaseRecorder) afterGroups() []scenarioAfterGroup {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	out := make([][]string, 0, len(r.after))
-	last := ""
+	at := make(map[string]int, len(r.after))
+	out := make([]scenarioAfterGroup, 0, len(r.after))
 	for _, visit := range r.after {
-		if len(out) == 0 || visit.fact != last {
-			out = append(out, []string{})
+		index, held := at[visit.fact]
+		if !held {
+			index = len(out)
+			at[visit.fact] = index
+			out = append(out, scenarioAfterGroup{fact: visit.fact})
 		}
-		out[len(out)-1] = append(out[len(out)-1], visit.name)
-		last = visit.fact
+		out[index].names = append(out[index].names, visit.name)
 	}
 	return out
 }
@@ -332,12 +410,57 @@ func scenarioDeclaredOrder(names []string, elements []plugin.Instance, ports ...
 // scenarioEveryGroupIs reports whether every group of a per-fact grouping of one
 // pass visited exactly the declared order, and at least one fact was observed: a
 // pass that reached no fact at all matches no declaration.
-func scenarioEveryGroupIs(groups [][]string, want []string) bool {
+func scenarioEveryGroupIs(groups []scenarioAfterGroup, want []string) bool {
 	if len(groups) == 0 {
 		return false
 	}
 	for _, group := range groups {
-		if !scenarioSameOrder(group, want) {
+		if !scenarioSameOrder(group.names, want) {
+			return false
+		}
+	}
+	return true
+}
+
+// scenarioDistinctGroups reports the distinct element orders the pass visited, in
+// first-seen order. The number of committed facts is delivery-order dependent, so
+// only the distinct order is pinned; scenarioAfterCoversFacts carries the
+// coverage quantity instead.
+func scenarioDistinctGroups(groups []scenarioAfterGroup) [][]string {
+	out := make([][]string, 0, len(groups))
+	seen := make(map[string]bool, len(groups))
+	for _, group := range groups {
+		key := strings.Join(group.names, "\x00")
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		out = append(out, append([]string{}, group.names...))
+	}
+	return out
+}
+
+// scenarioAfterCoversFacts reports whether every fact on the chain got exactly
+// one After group and every group names a fact of that chain. This is the process
+// quantity the old group count carried: the count itself varies with delivery
+// order, but each committed fact must still be observed once.
+func scenarioAfterCoversFacts(groups []scenarioAfterGroup, facts []event.Event) bool {
+	if len(facts) == 0 {
+		return false
+	}
+	want := make(map[string]bool, len(facts))
+	for _, fact := range facts {
+		want[string(fact.Key)] = true
+	}
+	seen := make(map[string]int, len(groups))
+	for _, group := range groups {
+		if !want[group.fact] {
+			return false
+		}
+		seen[group.fact]++
+	}
+	for key := range want {
+		if seen[key] != 1 {
 			return false
 		}
 	}
@@ -413,19 +536,58 @@ func scenarioMessageOf(messages []model.Message, callID string, role model.Role)
 	return model.Message{}
 }
 
-// scenarioAdmissionReceipt reports the task identity and acceptance the next
-// model view reads back for one call.
-func scenarioAdmissionReceipt(messages []model.Message, callID string) (string, bool) {
+// scenarioAdmissionConfirmed reports whether the next model view reads back the
+// minimal admission confirmation of one call. The task identity and the state
+// word never travel to the model, so this read confirms admission only; the
+// call→task link is read from the chain by scenarioSubagentFacts.
+func scenarioAdmissionConfirmed(messages []model.Message, callID string) bool {
 	receipt := scenarioMessageOf(messages, callID, model.RoleTool)
-	observation := scenarioMessageOf(messages, callID, model.RoleUser)
-	if !strings.HasPrefix(receipt.Content, "accepted ") {
-		return "", false
+	return receipt.Content == scenarioAdmissionReceiptText
+}
+
+// scenarioSubagentFacts waits inside a bound for the chain facts of one
+// sub-agent call and reports the task the call was admitted as and whether the
+// child result was delivered back to the parent address. The receipt never
+// names the task, so both are read from the chain: the action command under the
+// native call identity names the admitted task, and a settled fact carrying the
+// child result names the delivery.
+func scenarioSubagentFacts(t *testing.T, run *assembly.Run, addr event.Address, callID, resultMarker string) (string, bool) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		taskID, delivered := scenarioSubagentCallFacts(run.SessionFacts(addr), callID, resultMarker)
+		if taskID != "" && delivered {
+			return taskID, true
+		}
+		if time.Now().After(deadline) {
+			return taskID, delivered
+		}
+		time.Sleep(2 * time.Millisecond)
 	}
-	fields := strings.Fields(strings.Trim(observation.Content, "{}"))
-	if len(fields) != 4 || fields[0] != callID {
-		return "", false
+}
+
+// scenarioSubagentCallFacts reads the call→task link and the child-result
+// delivery from one chain snapshot.
+func scenarioSubagentCallFacts(facts []event.Event, callID, resultMarker string) (string, bool) {
+	taskID := ""
+	delivered := false
+	for _, fact := range facts {
+		switch fact.Type {
+		case event.TypeActionCommand:
+			identity := fact.Message.ToolID
+			if identity == "" {
+				identity = fact.CallID
+			}
+			if identity == callID && fact.TaskID != "" {
+				taskID = string(fact.TaskID)
+			}
+		case event.TypeTaskSettled:
+			if fact.TaskID != "" && strings.Contains(fact.Message.Content, resultMarker) {
+				delivered = true
+			}
+		}
 	}
-	return fields[1], fields[2] == "true"
+	return taskID, delivered
 }
 
 // scenarioWritePrompt writes one prompt or declaration file of the drive.

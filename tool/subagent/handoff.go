@@ -2,7 +2,11 @@
 //
 // The structured handoff one call_subagent call declares beside its
 // natural-language request: the fields the call names, the grants the assembled
-// sub-agent actually holds, and the envelope the delegated turn receives.
+// sub-agent actually holds, and the envelope the boundary renders from those flat
+// parameters. The envelope is held to Validate where the call is admitted; the
+// delegated turn itself receives a batch of ordinary input facts the framework
+// commits — the instruction it runs under, one material projection per source
+// the call handed over, and the task that closes the batch.
 package subagent
 
 import (
@@ -11,11 +15,8 @@ import (
 	"errors"
 	"fmt"
 	"sort"
-	"strings"
 
 	"github.com/SpellingDragon/tagent/api/event"
-	"github.com/SpellingDragon/tagent/api/model"
-	"github.com/SpellingDragon/tagent/memory/replay"
 	"github.com/SpellingDragon/tagent/runtime/agent"
 
 	trpctool "trpc.group/trpc-go/trpc-agent-go/tool"
@@ -46,12 +47,15 @@ var handoffFields = map[string]bool{
 // ErrHandoffArguments reports a handoff object naming a key the declaration does not name.
 var ErrHandoffArguments = errors.New("call_subagent: the handoff names no declared field")
 
-// envelope builds the handoff envelope one call declares, beside the grants the
-// assembled sub-agent holds. A call that declares no handoff builds none, so its
-// request keeps the shape it carried without one.
-func (a callArgs) envelope(assembly *Assembly) (*agent.HandoffEnvelope, error) {
+// envelope renders the handoff envelope one call declares, beside the grants the
+// assembled sub-agent holds. The envelope is rendered here, at the call boundary,
+// and held to Validate where the call is admitted: rendering never decides whether
+// the call may pass, so the acceptance gate stays in one place. A call that
+// declares no handoff builds none, so its request keeps the shape it carried
+// without one.
+func (a callArgs) envelope(assembly *Assembly) *agent.HandoffEnvelope {
 	if a.Handoff == nil {
-		return nil, nil
+		return nil
 	}
 	envelope := agent.HandoffEnvelope{
 		Intent:           a.Handoff.Intent,
@@ -62,10 +66,7 @@ func (a callArgs) envelope(assembly *Assembly) (*agent.HandoffEnvelope, error) {
 	for _, ref := range a.Handoff.Refs {
 		envelope.Refs = append(envelope.Refs, event.EventID(ref))
 	}
-	if err := envelope.Validate(); err != nil {
-		return nil, err
-	}
-	return &envelope, nil
+	return &envelope
 }
 
 // grantsOf reports the capabilities one assembly hands the delegated turn: the
@@ -144,177 +145,37 @@ func handoffSchema() *trpctool.Schema {
 // refuses the identity renders as the missing reference it is.
 type FactReader func(ctx context.Context, id event.EventID) (event.Event, error)
 
-const (
-	// defaultRefBudget is the token budget one handoff's refs render under when
-	// the builder names none. It is the token budget the request assembly packs
-	// under, so a ref degrades exactly as a projection entry does: its full text
-	// while it fits, then a ticket, then its summary.
-	defaultRefBudget = 256
-
-	// refSummaryRunes bounds the one-line read a ref entry carries when the
-	// committed fact stored no summary of its own: the read is a prefix of the
-	// original, never a rewrite of it.
-	refSummaryRunes = 120
-
-	// refsHeading is the heading the envelope block renders its refs section
-	// under; the refs section is the last one ExternalContext writes.
-	refsHeading = "\nrefs:\n"
-
-	// missingRefLine states a reference the read face holds no fact for, so the
-	// turn reads a miss beside the material that did resolve.
-	missingRefLine = "  (missing)\n"
-	// overBudgetRefLine states a reference the budget assembly placed under no
-	// level, so the turn reads the bound instead of a silently absent fact.
-	overBudgetRefLine = "  (over budget)\n"
-	// emptyRefLine states a reference whose fact carries no text to present.
-	emptyRefLine = "  (no content)\n"
-)
-
-// externalContext renders the block one delegated turn carries in front of its
-// request. A handoff that carries refs beside a reader renders each ref with the
-// committed fact it names, under the same budget assembly the request boundary
-// uses; every other case renders the envelope exactly as ExternalContext states
-// it, so a handoff carrying no refs keeps the block it always carried.
-func externalContext(ctx context.Context, h agent.HandoffEnvelope, read FactReader, budget int) string {
-	envelope := h.ExternalContext()
-	if read == nil || len(h.Refs) == 0 {
-		return envelope
+// externalMaterial renders the input one external agent face reads: the face
+// has no consumption loop of its own, so the framework performs the same
+// mechanical assembly a resident loop performs — the sources a handoff names
+// render in front of the task, each under its own heading, and the task
+// statement follows as it stands. A face beside no handoff reads the task
+// alone.
+func externalMaterial(ctx context.Context, turn Turn, read FactReader) string {
+	if turn.Handoff == nil {
+		return turn.Input
 	}
-	details, ok := refDetails(ctx, h.Refs, read, budget)
-	if !ok {
-		return envelope
-	}
-	return withRefDetails(envelope, details)
-}
-
-// refDetails renders the refs section of one handoff: every reference in its
-// declared order and once each, beside the fact it names. A reference the read
-// face refuses states that it is missing instead of refusing the whole handoff —
-// the material that did resolve stays usable — and a reference the budget
-// assembly could not place states its bound instead of vanishing.
-func refDetails(ctx context.Context, refs []event.EventID, read FactReader, budget int) ([]string, bool) {
-	if budget < 1 {
-		budget = defaultRefBudget
-	}
-	projection := replay.NewReplayProjection()
-	order := make([]event.EventID, 0, len(refs))
-	missing := make(map[event.EventID]bool, len(refs))
-	seen := make(map[event.EventID]bool, len(refs))
-	for _, ref := range refs {
-		if seen[ref] {
-			continue
-		}
-		seen[ref] = true
-		order = append(order, ref)
-		if ref == "" {
-			missing[ref] = true
-			continue
-		}
-		evt, err := read(ctx, ref)
-		if err != nil {
-			missing[ref] = true
-			continue
-		}
-		projection.Append(ctx, refEntry(ref, evt))
-	}
-	assembled, err := projection.AssembleBudgetPrefix(ctx, budget, -1)
-	if err != nil {
-		return nil, false
-	}
-	shown := make(map[event.EventID]string, len(assembled))
-	for _, entry := range assembled {
-		shown[entry.Key] = entry.Content
-	}
-	lines := make([]string, 0, 2*len(order))
-	for _, ref := range order {
-		lines = append(lines, "- "+string(ref)+"\n")
-		content, held := shown[ref]
-		switch {
-		case missing[ref]:
-			lines = append(lines, missingRefLine)
-		case !held:
-			lines = append(lines, overBudgetRefLine)
-		case strings.TrimSpace(content) == "":
-			lines = append(lines, emptyRefLine)
-		default:
-			lines = append(lines, indentContent(content)...)
+	block := turn.Handoff.ExternalContext()
+	if read != nil {
+		for _, ref := range turn.Handoff.Refs {
+			named, err := read(ctx, ref)
+			if err != nil || named.Key == "" {
+				continue
+			}
+			body := named.Message.Content
+			if body == "" {
+				body = named.Type
+			}
+			if runes := []rune(body); len(runes) > 128 {
+				// The same ticket a projection entry carries: the leading text
+				// beside the promise the whole fact stays retrievable.
+				body = string(runes[:128]) + "…\n  full text retrievable by segment"
+			}
+			block += fmt.Sprintf("refs:\n- %s\n  %s\n", named.Key, body)
 		}
 	}
-	return lines, true
-}
-
-// refEntry projects one committed fact onto the entry the budget assembly
-// presents it as: the canonical identity of the reference, the frozen type of the
-// fact, the one-line read stored beside it and the text the model view speaks for
-// it. It is the mapped entry of a committed fact, so a ref degrades exactly as
-// the fact does on the request path.
-func refEntry(ref event.EventID, evt event.Event) replay.ProjectionEntry {
-	content := refContentOf(evt.Message)
-	return replay.ProjectionEntry{
-		Key:     ref,
-		Type:    evt.Type,
-		Summary: refSummaryOf(evt.Meta[event.MetaKeyEventSummary], content),
-		Content: content,
-		Time:    evt.Timestamp,
+	if turn.Input == "" {
+		return block
 	}
-}
-
-// refContentOf reports the text one committed message speaks for: the content as
-// it stands, and otherwise the call or the tool face the message carries, so a
-// ref naming a call the model issued is never presented as an empty fact.
-func refContentOf(msg model.Message) string {
-	if msg.Content != "" {
-		return msg.Content
-	}
-	calls := make([]string, 0, len(msg.ToolCalls))
-	for _, call := range msg.ToolCalls {
-		calls = append(calls, "[call "+call.Function.Name+"]")
-	}
-	if len(calls) > 0 {
-		return strings.Join(calls, " ")
-	}
-	if msg.ToolName != "" {
-		return "[tool " + msg.ToolName + " returned no text]"
-	}
-	return ""
-}
-
-// refSummaryOf reports the one-line read a ref entry carries: the summary the
-// fact stored beside its original, and otherwise the first line of the original
-// itself, bounded. It reads the original and never rewrites it.
-func refSummaryOf(summary, content string) string {
-	if summary != "" {
-		return summary
-	}
-	line := content
-	if at := strings.IndexByte(line, '\n'); at >= 0 {
-		line = line[:at]
-	}
-	runes := []rune(line)
-	if len(runes) <= refSummaryRunes {
-		return line
-	}
-	return string(runes[:refSummaryRunes]) + "…"
-}
-
-// indentContent renders one presented fact under its reference, one indented line
-// per line of the fact, so each entry of the refs section stays readable.
-func indentContent(content string) []string {
-	lines := strings.Split(strings.TrimRight(content, "\n"), "\n")
-	out := make([]string, 0, len(lines))
-	for _, line := range lines {
-		out = append(out, "  "+line+"\n")
-	}
-	return out
-}
-
-// withRefDetails replaces the bare identity list of the envelope block with the
-// rendered refs section. The refs section is the last one the block states, so
-// every field before it keeps the text ExternalContext wrote.
-func withRefDetails(envelope string, details []string) string {
-	at := strings.LastIndex(envelope, refsHeading)
-	if at < 0 {
-		return envelope
-	}
-	return envelope[:at+1] + "refs:\n" + strings.Join(details, "")
+	return block + "\n" + turn.Input
 }

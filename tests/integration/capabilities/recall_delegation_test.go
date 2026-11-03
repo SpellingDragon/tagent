@@ -20,10 +20,11 @@ import (
 )
 
 // TestRecallDelegationConsumesBothStages runs both stages of a recall delegation over the real surface:
-// - the delegated turn's request carries the four recall tools and none of the caller's own
-// - the rule stage runs for real: the retrieval tool answers the landed hits of the corpus
-// - the model stage consumes that answer: the second request of the turn carries the retrieved keys
-// - the values of the declared event params travel as the handoff refs of that turn
+//   - the delegated turn's request carries the four recall tools and none of the caller's own
+//   - the rule stage runs for real: the retrieval tool answers the landed hits of the corpus
+//   - the model stage consumes that answer: the second request of the turn carries the retrieved keys
+//   - the values of the declared event params travel as the input refs the delegated
+//     input fact commits, and an unbacked reference renders nothing (Q2)
 //
 // 契约: docs/wiki/tool/tool-architecture.md#recall-subtools
 func TestRecallDelegationConsumesBothStages(t *testing.T) {
@@ -126,9 +127,49 @@ func TestRecallDelegationConsumesBothStages(t *testing.T) {
 		}
 	}
 
-	handoff := handoffMessageOf(t, requests[0].Messages)
-	if !strings.Contains(handoff, "refs:\n- 0a01\n") {
-		t.Fatalf("the delegated turn's request carries no declared event reference in its handoff block:\n%s", handoff)
+	// The structured envelope dissolved (r98): the declared event params are
+	// resolved by the delegated tool into the materials of the batch, and an
+	// unbacked reference silently does not materialize instead of rendering a
+	// bare identity. The batch of one round lands as ordinary input facts of the
+	// site — the instruction the round runs under and the task that closes the
+	// batch — and this run's chain holds no event under the named identity, so
+	// the reference projects no material fact at all.
+	site := event.Address{AgentID: "recall", SessionID: "session-recall-delegation#sub:call-recall"}
+	var task *event.Event
+	materials := 0
+	for _, fact := range run.SessionFacts(site) {
+		if fact.Type != event.TypeExternalInput || fact.Meta[event.MetaKeyTriggerSource] != event.LineageDelegation {
+			continue
+		}
+		switch fact.Meta["delegated_part"] {
+		case "task":
+			named := fact
+			task = &named
+		case "material":
+			materials++
+			if got := fact.Meta["delegated_source"]; got == "0a01" {
+				t.Fatalf("the unbacked reference 0a01 projected a material fact: %+v", fact)
+			}
+		}
+	}
+	if task == nil {
+		t.Fatalf("the delegated site %s/%s committed no task fact that closes its batch", site.AgentID, site.SessionID)
+	}
+	if task.Message.Content != "what did we decide about the migration?" {
+		t.Fatalf("the delegated task fact body = %q, want the request the caller stated", task.Message.Content)
+	}
+	if materials != 0 {
+		t.Fatalf("material facts of the delegated round = %d, want none for a reference this run does not hold", materials)
+	}
+	rendered := requestText(requests[0].Messages)
+	if strings.Contains(rendered, "[handoff envelope]") {
+		t.Fatalf("the delegated turn carries the dissolved envelope block:\n%s", rendered)
+	}
+	if !strings.Contains(rendered, "what did we decide about the migration?") {
+		t.Fatalf("the delegated turn carries no request of the caller:\n%s", rendered)
+	}
+	if strings.Contains(rendered, "0a01") {
+		t.Fatalf("the delegated turn carries the bare identity of an unbacked reference:\n%s", rendered)
 	}
 	if got := probe.calls(); got != 0 {
 		t.Fatalf("the caller's probe tool ran %d times, want none: the delegated turn runs on the target's surface alone", got)
@@ -175,15 +216,13 @@ func findToolResult(messages []model.Message, callID string) *model.Message {
 	return nil
 }
 
-// handoffMessageOf returns the external-context block the delegated turn's
-// request carries, or fails the check when the request carries none.
-func handoffMessageOf(t *testing.T, messages []model.Message) string {
-	t.Helper()
+// requestText renders every message of one delegated request, so a presence
+// check reads material that arrives as its own message beside the task.
+func requestText(messages []model.Message) string {
+	var out strings.Builder
 	for _, message := range messages {
-		if strings.Contains(message.Content, "[handoff envelope]") {
-			return message.Content
-		}
+		out.WriteString(message.Content)
+		out.WriteString("\n")
 	}
-	t.Fatalf("the request carries no handoff block: %+v", messages)
-	return ""
+	return out.String()
 }

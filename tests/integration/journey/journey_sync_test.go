@@ -23,7 +23,7 @@ func TestJourneySyncReplyDelivers(t *testing.T) {
 	defer cancel()
 
 	turn := host.invokeOK(t, ctx, "session-journey-sync", "hello")
-	if got := len(turn.Decisions); got != 1 {
+	if got := turn.DecisionCount; got != 1 {
 		t.Fatalf("decisions = %d, want the one decision of the scripted answer", got)
 	}
 	deliveries := host.sender.deliveries()

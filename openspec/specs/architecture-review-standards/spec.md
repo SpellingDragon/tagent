@@ -32,21 +32,26 @@
 #### Scenario: StateDelta 写回验证
 
 - **WHEN** 审查者检查 MemoryPlugin.onEvent 的 StateDelta 写回步骤
-- **THEN** SHALL 验证 event_key、partition_id、event_type 三个字段被正确写入 evt.StateDelta，且下游消费者（SmartCompressor、AgentToolWrapper）能够读取
+- **THEN** SHALL 验证 event_key、partition_id、event_type 三个字段被正确写入 evt.StateDelta，且下游消费者（投影装配、压缩消费者、AgentToolWrapper）能够读取
 
-### Requirement: 审查 SHALL 验证视图转换完整性
+### Requirement: 审查 SHALL 验证压缩判定与执行分层
 
-审查者 SHALL 检查上下文压缩是否只修改发给 LLM 的 Request.Messages，不破坏 Session/MemoryStore 原始数据。检查项包括：SmartCompressor 的压缩流程是否纯函数（输入 messages → 输出 messages，无副作用）；context_compress 事件是否包含足够的回溯信息（被压缩事件的 key 列表）；ContextIntervention 的 BeforeModel 回调是否只修改 args.Request.Messages。
+审查者 SHALL 检查压缩是否保持判定与执行各成事实：判定只提交 `compress.request`，执行只读链上 request 并提交 `compress.product`；投影按 product 恢复产物条目，MUST NOT 在恢复时重新折叠，也 MUST NOT 从内存 pending 创造链上没有 request 的 product。检查项包括：判定是否越权改写投影；执行是否只执行 request 命名的材料；折叠是否按线性段龄三带执行（新带折过程细节，中/老带整段折为历史综述）；被折原文是否仍留在事实链供召回。
 
-#### Scenario: 压缩回溯信息验证
+#### Scenario: 判定只提交 request
 
-- **WHEN** 审查者检查 SmartCompressor.collectCompressedKeys 和 buildCompressEvent
-- **THEN** SHALL 验证压缩后被压缩事件的 EventKey 是否被正确收集并传递到 context_compress 消息中，使 LLM 可通过 recall agent 回溯
+- **WHEN** 审查者检查 `AgeFoldPlugin.ObserveCommit` 的判定路径
+- **THEN** SHALL 验证判定只提交 `compress.request`，不改写投影、不生成 product
 
-#### Scenario: 视图转换无副作用验证
+#### Scenario: 执行只按 request 产 product
 
-- **WHEN** 审查者检查 ContextIntervention.BeforeModel 和 SmartCompressor.Compress
-- **THEN** SHALL 验证这些函数只修改 args.Request.Messages，不修改 inv.Session 或 MemoryStore 中的任何数据
+- **WHEN** 审查者检查 `CompressionConsumer.Execute` 的执行路径
+- **THEN** SHALL 验证执行只读链上已提交的 request，至多提交一条同 request 的 `compress.product`，且无 request 时不得生成 product
+
+#### Scenario: 恢复不重折
+
+- **WHEN** 审查者检查重启恢复路径
+- **THEN** SHALL 验证投影从 `compress.product` 恢复产物条目，MUST NOT 重新折叠，也 MUST NOT 因恢复写入新的压缩事实
 
 ### Requirement: 审查 SHALL 验证因果关系完整性
 
@@ -76,19 +81,19 @@
 - **WHEN** 审查者检查 config.go 的 ReadNamespaces 和 tool/recall/recall_subtools.go 的 readPartitionIDs 注入
 - **THEN** SHALL 验证 ReadNamespaces 正确转换为 ReadPartitionIDs，且 recall 子工具的查询自动注入分区过滤
 
-### Requirement: 审查 SHALL 验证分层存储与生命周期一致性
+### Requirement: 审查 SHALL 验证段存储与生命周期一致性
 
-审查者 SHALL 检查 L0→L1→L2→L3 压实流程是否完整，墓碑过滤是否在合并时生效。检查项包括：Compactor 的 CompactL1ToL2/CompactL2ToL3 流程（Merge→Filter→Repair→Write→Cleanup）；filterTombstoned 是否实际过滤已删除事件；LifecycleManager 的 TTL 过期和容量驱逐；Compactor 的 repairDanglingRefs 是否通过 RelationStore 修复悬空引用。
+审查者 SHALL 检查段存储与生命周期清扫是否完整：`memory/ledger.Lifecycle` 的 TTL 过期、容量驱逐与墓碑回收是否在扫描中执行；被回收的 key 是否在墓碑化后不再对读取可见；恢复登记与清扫之间是否存在未核对窗口。检查项包括：`Lifecycle.Scan`/`Reclaim`/`Tombstoned` 的实际调用；生命周期配置（TTL/容量）是否从声明解析；回收失败是否如实报告而非静默跳过。
 
-#### Scenario: 墓碑过滤有效性验证
+#### Scenario: 墓碑回收有效性验证
 
-- **WHEN** 审查者检查 memory/compaction.go 的 filterTombstoned 方法
-- **THEN** SHALL 验证该方法是否实际调用 TombstoneSet.IsTombstone() 过滤已删除事件，并记录其实际行为
+- **WHEN** 审查者检查 `memory/ledger.Lifecycle` 的扫描与回收路径
+- **THEN** SHALL 验证过期或超容量的 key 被墓碑化并从可见集合移除，`Tombstoned` 对已回收 key 返回真
 
-#### Scenario: 悬空引用修复验证
+#### Scenario: 生命周期路径无静默跳过
 
-- **WHEN** 审查者检查 Compactor 的 repairDanglingRefs 方法
-- **THEN** SHALL 验证该方法通过 RelationStore 查找最近存活祖先修复悬空引用，而非简单删除
+- **WHEN** 审查者检查生命周期清扫的错误路径
+- **THEN** SHALL 验证读取/删除失败被如实报告并保留待核对状态，不以静默跳过冒充完成
 
 ### Requirement: 审查 SHALL 验证并发安全
 
@@ -129,11 +134,11 @@
 
 ### Requirement: 审查 SHALL 验证生产接线完整性
 
-审查者 SHALL 从生产入口（tagent.go）出发，纵向追踪每个组件是否被正确创建、配置、启动和关闭。检查项包括：MemoryStore 的创建路径是否完整接入所有依赖组件（LifecycleManager、Compactor、TombstoneSet）；每个有 Start()/Stop() 方法的组件是否在生产入口被调用；工厂函数（如 commandFactory）是否将安全配置（runAsUser、workspace）传递给所有子组件（CommandExecutor 和 TmuxExecutor）；组件的关闭顺序是否正确（先停后台 goroutine，再 flush 持久化）。
+审查者 SHALL 从生产入口（tagent.go）出发，纵向追踪每个组件是否被正确创建、配置、启动和关闭。检查项包括：MemoryStore 的创建路径是否完整接入所有依赖组件（生命周期清扫 `memory/ledger.Lifecycle`、段存储与墓碑回收）；每个有 Start()/Stop() 方法的组件是否在生产入口被调用；工厂函数（如 commandFactory）是否将安全配置（runAsUser、workspace）传递给所有子组件（CommandExecutor 和 TmuxExecutor）；组件的关闭顺序是否正确（先停后台 goroutine，再 flush 持久化）。
 
 #### Scenario: 后台组件启动验证
 
-- **WHEN** 审查者检查任何有 Start() 方法的组件（LifecycleManager、Compactor、TmuxMonitor 等）
+- **WHEN** 审查者检查任何有 Start() 方法的组件（生命周期清扫、段存储、TmuxMonitor 等）
 - **THEN** SHALL 追踪从生产入口（tagent.go resolveMemoryStore / builtin.go 工厂）到该组件 Start() 调用的完整路径，验证组件在生产环境中确实被启动
 
 #### Scenario: 依赖注入完整性验证
@@ -158,7 +163,7 @@
 
 #### Scenario: 生产入口创建验证
 
-- **WHEN** 审查者检查任何有 Start() 方法的后台组件（LifecycleManager、Compactor、TmuxMonitor 等）
+- **WHEN** 审查者检查任何有 Start() 方法的后台组件（生命周期清扫、段存储、TmuxMonitor 等）
 - **THEN** SHALL 追踪从生产入口（tagent.go resolveMemoryStore / builtin.go 工厂）到该组件构造函数（NewXXX）的完整路径，验证组件在生产环境中确实被创建，而非仅在测试代码中创建；若组件未在生产入口创建，SHALL 记录为 P0 级发现
 
 #### Scenario: 状态回收闭环验证

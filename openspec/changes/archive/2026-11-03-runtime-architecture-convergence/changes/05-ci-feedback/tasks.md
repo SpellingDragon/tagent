@@ -1,0 +1,10 @@
+# CI 反馈孙任务
+
+- [x] 5.1 补齐 bundle 等集与同基线负锚，冻结分片前置 —— 验证：正锚 `python3 scripts/gates/test_check_runtime_evidence.py`；新增负例“十轮都缩成同一 parent 必红”“mutation 来自另一 baseline 必红”“合法十轮+六组合可通过”，均以公共 `check_runtime_evidence.py --bundle` 判定；消费者锚为现有 required summary 仍调用同一 checker；写入限 `scripts/gates/check_runtime_evidence.py`、`scripts/gates/test_check_runtime_evidence.py`，先重读既有未提交 hunks。 【对账 r138：r36（锚 EventBundleTest 等集/同基线）】
+- [x] 5.2 只为 stale PR 工作增加取消策略 —— 验证：`python3 scripts/gates/test_check_runtime_workflow.py` 中 `TestCIConcurrencySeparatesPRAndMergeProof` 先红后绿；负锚为 merge_group/main/dev 不被同 PR push 取消；消费者锚为实际 PR A→B 的 A 取消、B 保留且 artifacts 可查；写入限两个 workflow 与该既有 workflow 自测文件。 【对账 r138：r49（锚 TestCIConcurrencySeparatesPRAndMergeProof）】
+- [x] 5.3 给 runner 增加单轮 repeat-index 且保持合同总数 —— 验证：`python3 scripts/scenarios/test_run_runtime_scenarios.py` 或现有等价公共 CLI 自测中 `TestEventRepeatIndexPreservesTotal` 先红后绿；负锚为越界、与批量 --repeat 混用、非 v2 均具名拒绝；消费者锚复跑 5.1 bundle；写入限 runner 与其既有测试，不新增第二 runner。 【对账 r138：r49（锚 TestEventRepeatIndexPreservesTotal）】
+- [x] 5.4 将 short 十轮拆成十个独立证据分片 —— 验证：workflow 合同 `TestCIShortMatrixPreservesTenIndependentRounds` 先红后绿；负锚缺/重 index、重复 artifact、count 放大、零 parent 等集均红；消费者锚为真实 run 的十个唯一 run_id/log 与 bundle exit 0；依赖 5.1、5.3，与 5.2 同文件串行。 【对账 r138：r49（锚 TestCIShortMatrixPreservesTenIndependentRounds）】
+- [x] 5.5 去除同一 commit 的重复 root 产品门并保留稳定检查名 —— 验证：workflow 合同 `TestRootProductGatesHaveOneOwner`；负锚为 root build/vet/short 任一缺失即红；消费者锚为真实 CI 的 ci/test 与 format-and-contract 均绿且步骤职责不重复；与 5.2/5.4 串行。 【对账 r138：r49（锚 TestRootProductGatesHaveOneOwner）】
+- [ ] 5.6 在外部 merge queue/required checks 启用后迁移完整六组合 —— 验证：先附仓库规则与一次真实 merge_group run 证据，再让 `TestCIMergeGroupPreservesCompleteEvidence` 红转绿；负锚为 schedule/main-push-only、缺任一组合或 required check 均红；未满足外部启动门前本叶不得实施或勾选。
+- [x] 5.7 对齐 race 主规格的全第一方包与 wechat 覆盖 —— 验证：workflow/race gate 合同负锚证明漏包即红，真实 race run 非空转；本项独立记录成本和修复，不得借提速删规。 【对账 r138：r49（锚 TestRaceGateCoversEveryFirstPartyPackage）】
+- [ ] 5.8 以真实运行核验 PR fast ≤10m、merge proof 与 stale/runner 成本分账 —— 验证：记录 run-id、各 required job 起止、完整 bundle 与 stale 取消数；未达 PR 目标则依据实测继续去重/分片，禁止修改断言行或删除证据冒充达成。 【对账 r138：外部依赖——merge queue 启用/真实 CI 运行，随终局 push 取证】

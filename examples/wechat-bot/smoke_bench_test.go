@@ -427,6 +427,80 @@ func BenchmarkFoldRound(b *testing.B) {
 	}
 }
 
+// benchDepthLastTurns is the tail of the chain board one depth run averages its
+// latency over, so the number reads the cost at depth rather than at boot.
+const benchDepthLastTurns = 50
+
+// benchKvBytes reports the bytes one storage root holds under its kv directory.
+func benchKvBytes(b *testing.B, root string) int64 {
+	b.Helper()
+	var total int64
+	_ = filepath.Walk(filepath.Join(root, "kv"), func(_ string, info os.FileInfo, err error) error {
+		if err != nil || info == nil || info.IsDir() {
+			return nil
+		}
+		total += info.Size()
+		return nil
+	})
+	return total
+}
+
+// BenchmarkFoldDepthCost measures one turn at the end of a -benchtime-long chain
+// at each window the event-integrity-long matrix names: the facts and the
+// compression judgments the chain commits per turn, the ledger bytes it grows
+// per turn, the projection entries it keeps and the mean latency of its last
+// fifty turns. The 256-token window is the slowest matrix shard because its fold
+// threshold (256 tokens x 4 chars/token x 0.3 = 307 bytes) is smaller than the
+// material of one turn, so its age fold is due on every turn and files a compress
+// request and a compress product beside it; the 32768-token window folds a few
+// times in the same chain. Both windows commit through the same ledger, which
+// rewrites the touched shard snapshot on every commit, so the fold churn doubles
+// both the commit count and the bytes each commit rewrites. The numbers this
+// benchmark reports are the ones the --timeout in .github/workflows/ci.yml is
+// sized from.
+func BenchmarkFoldDepthCost(b *testing.B) {
+	for _, window := range []int{256, 32768} {
+		b.Run(fmt.Sprintf("window-%d", window), func(b *testing.B) {
+			rig := bootBenchRig(b, window)
+			chat := "bench-depth"
+			kvBefore := benchKvBytes(b, rig.cfg.StorageRoot)
+			latency := make([]time.Duration, 0, b.N)
+			for i := 0; i < b.N; i++ {
+				start := time.Now()
+				rig.mustDrive(chat, benchMarker(benchFoldMarkers, i)+" plain question")
+				latency = append(latency, time.Since(start))
+			}
+			kvAfter := benchKvBytes(b, rig.cfg.StorageRoot)
+			session := rig.addressOf(chat).SessionID
+			facts := 0
+			for range rig.host.Run().SessionFacts(event.Address{SessionID: session}) {
+				facts++
+			}
+			entries, carried := rig.host.Run().ReplayEntries(session)
+			if !carried {
+				b.Fatalf("session %s carries no projection", chat)
+			}
+			if b.N == 0 {
+				return
+			}
+			tail := latency
+			if len(tail) > benchDepthLastTurns {
+				tail = tail[len(tail)-benchDepthLastTurns:]
+			}
+			var sum time.Duration
+			for _, took := range tail {
+				sum += took
+			}
+			turns := float64(b.N)
+			b.ReportMetric(float64(facts)/turns, "facts/op")
+			b.ReportMetric(float64(rig.compressFacts(chat))/turns, "folds/op")
+			b.ReportMetric(float64(kvAfter-kvBefore)/turns, "kv-bytes/op")
+			b.ReportMetric(float64(len(entries)), "entries")
+			b.ReportMetric(float64(sum.Milliseconds())/float64(len(tail)), "tail-ms")
+		})
+	}
+}
+
 // BenchmarkConcurrentSessions measures parallel drives over distinct sessions.
 func BenchmarkConcurrentSessions(b *testing.B) {
 	for _, threads := range []int{3, 10} {

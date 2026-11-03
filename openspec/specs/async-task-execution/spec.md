@@ -143,9 +143,19 @@ settle 信号 SHALL 携带分档 `kind`：`completed`（进程退出，确定完
 - **WHEN** 后台任务结算
 - **THEN** 结果 SHALL 作为独立 observation 驱动新的下一步 decision，MUST NOT 冒充原调用同一 CallID 的第二次同步 response
 
-### Requirement: 任务状态机 resume 边
+### Requirement: resume 边合法源状态收敛
 
-任务状态机 SHALL 新增 resume 边:合法源状态 {alive-detached, stable, completed, failed} --resume(input)--> running(dense)（存活类=会话重入;完成态=round 型执行器的自然续行点）;running/suspect/cancelled SHALL 拒绝并引导。resume 后的结算复用既有 settle 三档分类与 task_settled 通知路径,通知 SHALL 携带原 task id。任务工具族 SHALL 加入 `resume_task`（与 list/get/cancel/relaunch 并列）。
+任务状态机的重入边 SHALL 为：合法源状态 {alive-detached, stable, completed(settled)} → running/活跃（存活类=会话注入续行；settled=重激活并**修改状态**）；**failed / cancelled SHALL 拒绝**并引导（relaunch 或新调用）；running / suspect（轮次在飞）SHALL 拒绝并引导。任务工具族 MUST NOT 再含 `resume_task`（由 `send{target:{task}}` 承载）。
+
+#### Scenario: failed 不在合法集合
+
+- **WHEN** 对 failed 任务发起重入
+- **THEN** 明确错误+引导文本返回，状态机不动
+
+#### Scenario: settled 重入修改状态
+
+- **WHEN** 对 settled 任务重入
+- **THEN** 状态迁移到活跃（非仅"以新 Run 续行"不改状态），结算复用既有 settle 三档分类与 task_settled 通知路径，通知携原 task id
 
 #### Scenario: resume 后的结算走既有通知路径
 
@@ -238,10 +248,12 @@ spawnGate 判定链 SHALL 支持行为审计触发源（self-telemetry-audit L3 
 
 后台任务的通知义务 SHALL 存活到该通知被逻辑消费确认，MUST NOT 因下列任一状态提前结清：运输层接收（EventBus、邮箱、claim）、发送动作成功、任务终态（settled/completed/failed）、宿主 `Close` 返回 nil。义务是否结清 SHALL 以消费方记录的已提交事实键与消费位置为准（见 `committed-event-attribution`、`persistent-event-loop`「通知消费位置连续且不跨空洞」）。重启恢复 SHALL 重新暴露未结义务，MUST NOT 把“已发出”当作“已消费”。显式 Handoff 的改投边界沿用 `persistent-event-loop`「Handoff 未来通知的目标、实例与稳定序号」，本要求不改写。
 
+未消费通知（下称通知义务）的判据载体 SHALL 为权威未消费账（mailbox 未消费 ∪ 持久欠通知），经同源函数 `Unsettled()`（未终态工作 ∪ 未消费通知）求值，关闭、重启、报告三处同源；MUST NOT 以进程内影子账本（不可从链上算回的记忆字段）作为结清判据。
+
 #### Scenario: 运输接收不等于消费
 
 - **WHEN** 通知已进入 EventBus 或邮箱并被 claim，但消费方尚未记录逻辑消费确认
-- **THEN** 该义务 SHALL 保持未结清
+- **THEN** 该义务 SHALL 保持未结清（`Unsettled()` 非空）
 - **AND** MUST NOT 从待办中移除或计为已完成
 
 #### Scenario: 发送成功不等于消费
@@ -255,3 +267,36 @@ spawnGate 判定链 SHALL 支持行为审计触发源（self-telemetry-audit L3 
 - **WHEN** 进程重启时存在已发出但未逻辑消费的通知
 - **THEN** 该义务 SHALL 在恢复后重新可见并可被消费
 - **AND** MUST NOT 被当作已完成或静默丢弃
+
+### Requirement: 拒收落事实
+
+通知被拒收 SHALL 落 feedback 事实（携带原通知引用与拒收原因），跨重启可见、可重试、可归档；拒收是**明确的消费结果**，不构成欠账。拒收事实 SHALL 可驱动后续清理/重试决策。
+
+#### Scenario: 拒收跨重启可见
+
+- **WHEN** 一条通知被拒收后进程重启
+- **THEN** 拒收事实仍在链上可读
+- **AND** 不被当作未消费通知
+
+### Requirement: 静止收束三态
+
+关闭 SHALL 表达为静止收束（quiesce）：停止注入（intake 关）→ 静止到不动点（工作收敛 ∧ 消费收敛 ∧ 写入者停止）→ 三态返回（`Quiesced` 自然收束／`Cut` 预算到点／`Broken` 不可判告警）。`Cut` SHALL 为正常返回：余量在链上，重启续上。`CloseRequest` 禁零 deadline。
+
+#### Scenario: 预算到点 Cut
+
+- **WHEN** 静止到点仍有未消费/未终态项
+- **THEN** 返回 `Cut` 并逐地址报告清单（非错误），重启后续拉
+
+#### Scenario: 拒收后仍可关闭
+
+- **WHEN** 一条通知被拒收且未再消费
+- **THEN** 关闭仍可完成（`Cut` 合法）
+- **AND** 拒收事实跨重启可见
+
+
+### Requirement: 移交路由与稳定序号
+一次移交（handoff）的路由决定与序号 MUST 在重启后保持稳定：重启后的未来通知仍按移交时裁定的执行地址送达，SHALL 不因进程重启而改道或丢失。
+
+#### Scenario: 重启后未来通知沿原路由送达
+- **WHEN** 一项移交已裁定执行地址后运行重启
+- **THEN** 该地址的未来通知在重启后仍送达原执行地址，且序号连续不重放

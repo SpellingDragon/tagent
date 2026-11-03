@@ -244,61 +244,16 @@ var (
 	_ error = ErrSpecConflict
 )
 
-// The heat matrix, the file source and the failure cause chain keep their
-// documented shapes: the routing face beside its channel and dimension
-// vocabularies, the request-boundary file fixation, and the cause link beside
-// its chain walker.
+// The file source and the failure cause keep their documented shapes: the
+// request-boundary file fixation, and the cause link beside the failure it wraps.
 var (
-	_ func(Change) (Channel, error) = Route
-
-	_ func(*Router, context.Context, PromptSource) (FileSnapshot, error)        = (*Router).Read
-	_ func(*Router, context.Context, Change, Candidate) (PublishOutcome, error) = (*Router).Commit
-	_ func(*Router, context.Context, Change, Candidate) (PublishOutcome, error) = (*Router).Rollback
-	_ func(*FileSource, *Publisher) *Router                                     = NewRouter
-
 	_ func(string, skill.Repository) *FileSource                             = NewFileSource
 	_ func(*FileSource, context.Context, PromptSource) (FileSnapshot, error) = (*FileSource).Fixate
 
 	_ func(string, int, string, error) *Cause = NewCause
-	_ func(error) []*Cause                    = CauseChain
-)
-
-// The channel and dimension vocabularies stay compile-time constants of their
-// declared types, and the matrix rows keep every documented field.
-const (
-	_ Channel = ChannelFP
-	_ Channel = ChannelSRC
-	_ Channel = ChannelFile
-	_ Channel = ChannelRestart
-
-	_ Dimension = DimensionModel
-	_ Dimension = DimensionTools
-	_ Dimension = DimensionPlugins
-	_ Dimension = DimensionTaskPolicy
-	_ Dimension = DimensionResourceRefs
-	_ Dimension = DimensionMemory
-	_ Dimension = DimensionPromptBody
-	_ Dimension = DimensionSkillBody
-	_ Dimension = DimensionRoots
-	_ Dimension = DimensionEndpoints
 )
 
 var (
-	_ func(Channel) string = Channel.String
-
-	_ = ChannelRow{
-		Dimension: "",
-		Channel:   ChannelFP,
-		Evidence:  "",
-	}
-
-	_ = Change{
-		Dimension: "",
-		Via:       ChannelFP,
-		Source:    "",
-		Line:      0,
-	}
-
 	_ = FixedFile{
 		Ref:     config.FileRef{},
 		Content: "",
@@ -351,15 +306,9 @@ var (
 	_ func(*Cause) error = (*Cause).Unwrap
 )
 
-// The routing and file-face refusals stay named errors of the chain they are
-// matched through.
+// The file-face refusals stay named errors of the chain they are matched
+// through.
 var (
-	_ error = ErrDimensionUnknown
-	_ error = ErrChannelMismatch
-	_ error = ErrStructuralViaFile
-	_ error = ErrRestartRefused
-	_ error = ErrRouterFileSourceMissing
-	_ error = ErrRouterGateMissing
 	_ error = ErrFileRootMissing
 	_ error = ErrSkillRepositoryMissing
 	_ error = ErrFileKindUnknown

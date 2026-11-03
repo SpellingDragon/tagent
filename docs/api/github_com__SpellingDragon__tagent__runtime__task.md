@@ -1,5 +1,28 @@
 package task // import "github.com/SpellingDragon/tagent/runtime/task"
 
+The attention face: one question put to a target thread or person, the answer
+it is ruled with, and the clearance that removes it, each kept as a fact on
+the chain instead of in a store of its own. The face offers two methods — a
+commit that files one question, answer or clearance, and a read that answers the
+questions the chain still holds as questions — and every reading is derived from
+the facts alone, so a process that starts over the same chain reads back what it
+held before it stopped.
+
+- a question names the kind it is asked under, the target it is put to,
+the lineage it came from and how long it stands - one question identity is that
+kind, target and lineage; the role a fact plays is hashed beside it - an answer
+and a clearance name a question the chain already holds, and one naming no such
+question is refused by name - presence is a question no answer and no clearance
+names, judged against the validity it was filed under - validity is judged when
+the chain is read, with the clock the face reads its time from
+
+The redline list (4 rules): MUST derive every reading from the facts the chain
+holds, never from process memory. MUST refuse an answer or a clearance naming
+no question on the chain, by name, before anything lands. MUST NOT hold,
+scan or expire an attention fact on a goroutine or a timer of its own. MUST NOT
+reach the composition root: the chain is a narrow port the composition supplies
+to this package.
+
 This file holds the logical status of a task: the classification of how long
 the task's recorded state has stood unchanged. It is a second read-out beside
 the status machine, never a value the machine stores: the status a task holds is
@@ -8,6 +31,21 @@ the movement stamps those transitions leave, so reading one leaves the other
 exactly as it stands.
 
 红线: 逻辑状态=纯观测：只标记，不改状态机、不自动处置（不 kill 不中断）——处置走 Governor 策略面。
+
+This file holds the private sequence a run's accounts are judged at:
+every account the rest criterion reads advances its own sequence whenever it is
+written, and the judgment reads the accounts' sequences together.
+
+The sequence is one counter, never a lock: the accounts it fences are written
+under their own locks and in their own order, so a judgment that held them all
+at once would order two of those locks against each other. A counter moves no
+lock and makes no reader wait for a writer: a read that spans a write sees a
+sequence move and is re-read, and a read that never holds is answered unjudged
+rather than as a snapshot of instants that never stood together.
+
+The sequence belongs to the account that advances it, never to a mechanism wired
+beside it: the task registry and the mailbox each build their own, and the close
+only reads them.
 
 This file holds the progress read of a task. Progress is a fact a running task
 reports, not a state it is moved to: the report travels as a NoticeProgress in
@@ -30,7 +68,41 @@ commit and scheduling behaviour runs behind those ports in this package:
 the registry owns the life of a task, the manager owns its obligations, and the
 commit carrier records the transitions.
 
+This file holds the one criterion that answers whether a run is at rest: the
+work it accepted and has not finished, beside the notifications no consumption
+confirmed. The close, the restart and the report read this criterion and no
+other, so the two accounts of a run — the task chain and the consumption ledger
+— are judged once.
+
+The criterion is a read: it moves no status, clears no obligation and delivers
+nothing. Every set it unions is read through the account that owns it,
+and the commit sequence of that account fences the read so the sets belong to
+one instant.
+
 CONSTANTS
+
+const (
+	// AttentionKindApproval is the kind of a question a pending approval raises.
+	AttentionKindApproval = "approval"
+	// AttentionKindNotice is the kind of a question the human half of a notification raises.
+	AttentionKindNotice = "notice"
+	// AttentionKindSummary is the kind of a question a reflection delivery asks.
+	AttentionKindSummary = "summary"
+)
+    AttentionKindApproval, AttentionKindNotice and AttentionKindSummary name the
+    kind words an attention question is asked under.
+
+const (
+	// AttentionClearanceAnswer is the clearance of a question its answer removed.
+	AttentionClearanceAnswer = "answer"
+	// AttentionClearanceExpiry is the clearance of a question whose validity ran out.
+	AttentionClearanceExpiry = "expiry"
+	// AttentionClearanceWorkEnd is the clearance of a question the work ended on.
+	AttentionClearanceWorkEnd = "work-end"
+)
+    AttentionClearanceAnswer, AttentionClearanceExpiry and
+    AttentionClearanceWorkEnd name the clearance words one clearance fact
+    carries.
 
 const (
 	// PolicyDefault is the name of DefaultPolicy; the empty name selects it too.
@@ -51,6 +123,14 @@ const AdmissionReceiptText = "ok"
     receipt: the minimal confirmation that the call was admitted. The task id,
     the state word and the settlement promise never travel to the model — an
     admission is the system's own confirmation, never speaking material.
+
+const DefaultTerminalTTL = 2 * time.Hour
+    DefaultTerminalTTL is how long a registry keeps the record of a task after
+    the terminal outcome it holds, once its run applies the terminal TTL:
+    the task_terminal_ttl of the declaration vocabulary, read as the bound of
+    the in-memory account rather than of the fact chain. The record is a live
+    read of a task, never the fact of it — every fact stays on the chain — so a
+    record pruned here costs a re-entry its target, not the history of the task.
 
 VARIABLES
 
@@ -75,6 +155,30 @@ var ErrApprovalIdentityMismatch = errors.New("task: the approval response names 
     ErrApprovalIdentityMismatch reports an approval response that does not name
     the approval identity the hold was issued under. The response is refused by
     name and never applied to another call or to another hold.
+
+var ErrAttentionClearanceUnknown = errors.New("task: the clearance names no known clearance word")
+    ErrAttentionClearanceUnknown reports a clearance fact whose word is none of
+    answer, expiry and work-end.
+
+var ErrAttentionIdentityMissing = errors.New("task: the attention fact names no target or no lineage")
+    ErrAttentionIdentityMissing reports an attention fact naming no target or no
+    lineage, so two questions could not be told apart by identity.
+
+var ErrAttentionKindUnknown = errors.New("task: the attention question names no known kind")
+    ErrAttentionKindUnknown reports a question asked under a kind word the
+    frozen vocabulary does not carry.
+
+var ErrAttentionNoChain = errors.New("task: the attention face is attached to no fact chain")
+    ErrAttentionNoChain reports a face attached to no fact chain, so nothing can
+    be filed and no presence can be read.
+
+var ErrAttentionQuestionMissing = errors.New("task: the attention fact names a question the chain does not hold")
+    ErrAttentionQuestionMissing reports an answer or a clearance naming a
+    question the chain does not hold, so no orphan answer or clearance lands.
+
+var ErrAttentionRoleUnknown = errors.New("task: the attention fact names no question, answer or clearance role")
+    ErrAttentionRoleUnknown reports an attention fact whose type is none of the
+    three frozen roles, so the chain is offered nothing.
 
 var ErrCallFrameMissing = errors.New("task: the wrapped call carries no call frame")
     ErrCallFrameMissing reports a wrapped call carrying no call frame, so it
@@ -143,6 +247,24 @@ var ErrNoOwnerBinding = errors.New("task: no owner binding is attached to this r
 var ErrNoResultRecorder = errors.New("task: no result recorder is attached to this wrapper")
     ErrNoResultRecorder reports a wrapped call that could not record its result,
     because no recorder is attached to the wrapper.
+
+var ErrReactivationCancelled = errors.New("task: a cancelled task is re-entered by re-spawn under a fresh identity")
+    ErrReactivationCancelled reports a reactivation refused for a cancelled
+    task. A cancelled task is re-entered by re-spawning it under a fresh
+    identity: the cancellation is the caller's own decision, and re-entering the
+    same task in place would answer it with a round nobody asked for.
+
+var ErrReactivationFailed = errors.New("task: a failed task is re-entered by relaunch under a fresh identity")
+
+    ErrReactivationFailed reports a reactivation refused for a failed task.
+    A failed task is re-entered by relaunching it under a fresh identity:
+    its terminal fact is kept, and re-entering the same task in place would
+    overwrite an outcome the chain already holds.
+
+var ErrReactivationRollback = errors.New("task: the task holds no round of that re-entry in flight")
+    ErrReactivationRollback reports a rollback naming no round of that task in
+    flight, so there is nothing of that re-entry left to withdraw. The rollback
+    is refused by name and moves nothing.
 
 var ErrResumeCancelled = errors.New("task: a cancelled task is resumed by relaunch or re-spawn")
     ErrResumeCancelled reports a resume refused for a cancelled task.
@@ -288,6 +410,113 @@ type Approver func(ctx context.Context, tool string, jsonArgs []byte) (Ruling, e
     Approver reports the approval decision one call is admitted under,
     judging the tool name and the native arguments the call carries. An approver
     reporting an error refuses the call closed rather than guessing a decision.
+
+type Attention struct {
+	// Has unexported fields.
+}
+    Attention is the attention face over one fact chain: it files questions,
+    answers and clearances, and reads the questions the chain still holds as
+    questions. The face keeps no state of its own, so a rebuilt face over the
+    same chain answers the same presence.
+
+func NewAttention(chain attentionChain, opts ...AttentionOption) *Attention
+    NewAttention returns the attention face over one fact chain. A nil chain is
+    accepted, and every call on the face is refused beside ErrAttentionNoChain,
+    so a composition that attaches no chain fails loudly instead of reading an
+    empty presence.
+
+func (a *Attention) Commit(ctx context.Context, fact AttentionFact) (event.EventID, error)
+    Commit files one attention fact on the chain and answers the identity
+    it is filed under. A question is filed under the kind, target and
+    lineage it names. An answer or a clearance names a question the chain
+    already holds, and one naming no such question is refused beside
+    ErrAttentionQuestionMissing before anything lands. A repeated filing of one
+    role answers the identity already on the chain and records no second fact,
+    and the fact already recorded stands.
+
+func (a *Attention) Present(ctx context.Context, filter AttentionFilter) ([]AttentionQuestion, error)
+    Present answers the questions the chain still holds as questions: those no
+    answer and no clearance names, each beside whether its validity had run out
+    when the chain was read. An answered or cleared question is not reported at
+    all, and one whose validity ran out is reported expired rather than as one
+    awaiting an answer.
+
+type AttentionDetail struct {
+	// Text is the question a question puts or the ruling an answer states; a
+	// clearance states no model-readable text.
+	Text string
+	// By names the person who ruled, on an answer, and is empty on every other role.
+	By string
+	// ExpiresMs is the validity of a question as an absolute millisecond stamp;
+	// zero reads as cleared when the work ends.
+	ExpiresMs int64
+	// Clearance is the word a clearance names: answer, expiry or work-end.
+	Clearance string
+}
+    AttentionDetail is the detail one attention fact states beside its identity:
+    the text a question puts or an answer rules, the person who ruled,
+    the validity a question stands under and the word a clearance names. A field
+    is zero on the roles that state nothing through it.
+
+type AttentionFact struct {
+	// Type is the role the fact plays: question, answer or clearance.
+	Type string
+	// Kind is the kind word the question is asked under, empty reading as approval.
+	Kind string
+	// Target is the thread or person the question is put to.
+	Target string
+	// Lineage is the context the question came from: a call identity, a task
+	// identity or a reflection source.
+	Lineage string
+	// Detail is what the role states beside its identity.
+	Detail AttentionDetail
+}
+    AttentionFact is one attention fact offered to the commit face: the role it
+    plays, the question identity it names and the detail that role states. Kind,
+    Target and Lineage together name one question, so a question, its answer and
+    its clearance always meet on the same identity.
+
+func (f AttentionFact) FactKey() string
+    FactKey returns the fact's stable identity: the role it plays hashed beside
+    the question identity it names, so a repeated filing of one role answers the
+    key already on the chain.
+
+func (f AttentionFact) FactType() string
+    FactType returns the frozen type the fact is read as: the role it plays.
+
+type AttentionFilter struct {
+	// Kind matches the questions asked under that kind word, empty matching every kind.
+	Kind string
+	// Target matches the questions put to that thread or person, empty matching every target.
+	Target string
+}
+    AttentionFilter narrows a presence read to one kind, one target or both;
+    an empty field matches every value.
+
+type AttentionOption func(*Attention)
+    AttentionOption configures an attention face at construction.
+
+func WithAttentionClock(now func() time.Time) AttentionOption
+    WithAttentionClock injects the clock a presence read judges validity by,
+    so a test drives an expiry deterministically instead of waiting for one.
+
+type AttentionQuestion struct {
+	// Kind is the kind word the question was asked under.
+	Kind string
+	// Target is the thread or person the question was put to.
+	Target string
+	// Lineage is the context the question came from.
+	Lineage string
+	// ExpiresMs is the validity the question was filed under, zero reading as
+	// cleared when the work ends.
+	ExpiresMs int64
+	// Expired reports whether the validity had run out at the read, so the
+	// question is reported expired and never as one awaiting an answer.
+	Expired bool
+}
+    AttentionQuestion is one question the chain still holds as a question:
+    the identity it was asked under, the validity it stands on and whether that
+    validity had run out when the chain was read.
 
 type BlockedObligation struct {
 	// Notice is the identity of the notification whose obligation is blocked.
@@ -545,17 +774,23 @@ type HoldBook struct {
 	// Has unexported fields.
 }
     HoldBook is the waiting table of the approval channel: it records the hold
-    of one parked task beside the first approval response that hold received,
-    and answers a query with that hold while the wait is open. The book consumes
-    one response per hold and observes waits otherwise, so a query resolves and
-    finalizes nothing.
+    of one parked task as an attention question, files the first approval
+    response the hold received as that question's answer, and answers a query
+    with that hold while the wait is open. The attention chain carries which
+    holds are still waiting and which response took effect; the response
+    cache beside it is the first ruling's own detail, never a second truth.
+    The book consumes one response per hold and observes waits otherwise,
+    so a query resolves and finalizes nothing.
 
 func NewHoldBook() *HoldBook
-    NewHoldBook returns an empty waiting table of the approval channel.
+    NewHoldBook returns an empty waiting table of the approval channel, filing
+    on the in-memory attention chain it keeps for the holds no composition
+    supplies one for.
 
 func (b *HoldBook) Record(hold Hold)
-    Record stores the waiting state of one parked task. A repeated record of the
-    same task keeps the waiting state already stored.
+    Record stores the waiting state of one parked task as the attention question
+    it waits under. A repeated record of the same task keeps the waiting state
+    already stored.
 
 func (b *HoldBook) Resolve(taskID event.TaskID, answer ApprovalAnswer) (ApprovalAnswer, error)
     Resolve consumes one approval response for the hold of the named task and
@@ -565,9 +800,10 @@ func (b *HoldBook) Resolve(taskID event.TaskID, answer ApprovalAnswer) (Approval
     the arguments that were held. A response that matches neither is refused
     beside ErrApprovalIdentityMismatch or ErrApprovalDigestMismatch and is
     never applied to another call or to the same call over changed arguments.
-    A repeated response under the same approval identity is idempotent: the
-    first response takes effect and the repeat reports that first ruling without
-    consuming a second one.
+    The response lands as the answer of the question the hold raised,
+    so a repeated response under the same approval identity is idempotent:
+    the first response takes effect, the chain refuses the second landing and
+    the repeat reports the first ruling without consuming a second one.
 
 func (b *HoldBook) Waiting(taskID event.TaskID) (Hold, bool)
     Waiting reports the waiting state of one parked task and whether the task is
@@ -758,12 +994,18 @@ func (m *MemoryManager) CloseInstance(ctx context.Context, instance event.Instan
 func (m *MemoryManager) Flush(ctx context.Context, taskID event.TaskID) error
     Flush delivers the notifications of a task whose obligations are still open,
     each beside the routing its envelope froze, and retries the ones no target
-    has answered yet — including the ones a handoff moved beside the task. Only
-    an acceptance the target states explicitly clears an obligation; a refusal
-    keeps the obligation and records the reason beside that notification.
-    A notification whose frozen receiving instance is closed is retained by
-    name as ErrInstanceClosed: it is neither dropped nor delivered into a later
-    instance that reuses the address.
+    has answered yet — including the ones a handoff moved beside the task.
+    Only an acceptance the target states explicitly clears an obligation.
+    A refusal is a consumption result of its notification, carried by the
+    feedback fact the state account records: the obligation ends with it, so no
+    flush offers a refused notification again, and the reason stays beside the
+    notification on the diagnostic face. A notification whose frozen receiving
+    instance is closed is retained by name as ErrInstanceClosed: it is neither
+    dropped nor delivered into a later instance that reuses the address.
+
+    A notification no target accepted stays owed, and the reason it could not
+    be accepted is recorded beside it, so a report names why a delivery waits
+    instead of only that it waits.
 
 func (m *MemoryManager) Handoff(ctx context.Context, taskID event.TaskID, target HandoffTarget) error
     Handoff moves a task's future notifications to the target address and the
@@ -789,6 +1031,12 @@ func (m *MemoryManager) Obligations(ctx context.Context, taskID event.TaskID) (O
     Obligations reports the obligations the manager still holds for a task,
     each entry classified by the wait it is in beside the task and notification
     it points at.
+
+func (m *MemoryManager) Owed(ctx context.Context) ([]UnsettledNotice, error)
+    Owed reports the notifications the tasks of this manager still owe
+    a delivery for, read from the obligation index it keeps per task: a
+    notification a target explicitly accepted is settled, and one whose delivery
+    is still open is owed whatever the transport did with it.
 
 func (m *MemoryManager) RecordStop(ctx context.Context, evidence StopEvidence) error
     RecordStop records the executor's stop evidence beside one task. A report
@@ -865,6 +1113,42 @@ func (r *MemoryRegistry) ProgressReported(ctx context.Context, taskID event.Task
     read would answer differently for a live task and for the task restored from
     its own chain. The chain-wide read is the one both faces agree on.
 
+func (r *MemoryRegistry) PruneTerminal(at time.Time) int
+    PruneTerminal drops the records whose task reached a terminal outcome at
+    least the terminal TTL of this registry before at, and reports how many
+    it dropped. The sweep is the one place a record leaves the registry, so a
+    re-entry naming a pruned task answers ErrTaskNotFound instead of opening a
+    round of a state nobody kept.
+
+    The sweep reads the movement stamp that placed the task at its terminal,
+    so a task that was re-entered after it settled counts from the terminal of
+    the round it ended in. A non-terminal task is never dropped however long
+    it stands: a round in flight is the one state a sweep must not silently
+    withdraw, and a task stuck in one is what the broken-round account reports
+    instead.
+
+func (r *MemoryRegistry) Reactivate(ctx context.Context, taskID event.TaskID) (int64, error)
+    Reactivate re-enters a settled task as a new execution round and reports the
+    round it opened. The task keeps its identity: the round that opens is the
+    next one of the same task, so the notification its settlement carries is a
+    new identity rather than a repeat of the round before it.
+
+    Only a settled task is re-entered. A failed or a cancelled task holds a
+    terminal outcome that re-entering in place would overwrite, so each is
+    refused by name beside the relaunch or re-spawn that answers it; a task
+    whose round is still in flight is refused by name beside the round already
+    running. The transition is committed on the commit port with the revision
+    it applies to, so two reactivations racing on one task commit one round:
+    the first moves the task out of its settled status and the second is refused
+    by name.
+
+func (r *MemoryRegistry) Reentrant(ctx context.Context, taskID event.TaskID) error
+    Reentrant reports whether the task may be re-entered, without moving it:
+    the settled status design D7 admits, and the named refusal of every status
+    it does not. A caller that settles more than one precondition before it
+    opens a round reads this first, so the round it opens is the only thing it
+    has to put back when a later precondition turns out to be gone.
+
 func (r *MemoryRegistry) Register(ctx context.Context, spec Spec) (AdmissionReceipt, error)
     Register admits one task declaration and returns its admission receipt.
     A repeated admission of the same dedup key reports the task of the
@@ -900,6 +1184,46 @@ func (r *MemoryRegistry) Resume(ctx context.Context, taskID event.TaskID, input 
     flight refuses the declaration, and so does a cancelled task. A repeated
     declaration of the same input returns the fact already stored and opens no
     second obligation.
+
+    The channel belongs to the state machine and carries no model tool face:
+    the resume tool the model used to call is gone (design DEL-3, a tool member
+    the model never sees again). The send tool's re-entry of a task reaches
+    this state machine through Reactivate and the continuation table instead,
+    so the input channel stays beneath both without a declaration of its own.
+    It carries an event identity rather than free text, so a call naming no
+    identity opens no round.
+
+func (r *MemoryRegistry) RollbackReactivation(ctx context.Context, taskID event.TaskID, round int64) error
+    RollbackReactivation puts one task back to the settled outcome the
+    reactivation of that round re-entered it from, because nothing served the
+    round it opened.
+
+    The rollback exists for the re-entry that opened a round and then found a
+    later precondition gone: without it the task keeps a round in flight that
+    no turn will ever settle, so every later re-entry is refused by name until
+    the task expires. The compensating fact is committed on the commit port
+    before it becomes visible, like every other transition, so the chain replays
+    the task at the outcome it holds rather than at the round nobody served.
+    The obligation the reactivation opened is withdrawn with it, so a task put
+    back is read as settled and owes nothing.
+
+    - Only a round reactivation really opened is put back: a task holding
+    another round, or no round in flight at all, is refused by name and moves
+    nothing. - Only an attempt that never happened is compensated: a round whose
+    input already committed is never put back to the settled outcome it came
+    from. Its failure is the round's own real result, recorded along that round,
+    and a caller holding the ok answered for the committed input may not
+    withdraw it here. - The round number stays consumed — a round identity
+    is never reused, so the notification identities of the attempts that
+    followed keep their own — and the re-entry deadline keeps counting from the
+    reactivation, which reads no differently for a task that holds its terminal
+    fact.
+
+func (r *MemoryRegistry) Unfinished(ctx context.Context) ([]UnsettledWork, error)
+    Unfinished reports the work this registry holds with no terminal, read from
+    the index it keeps per task identity: a task that reached a terminal fact is
+    finished, and a task whose status is not determinable stays listed because
+    its outcome was never read.
 
 func (r *MemoryRegistry) Watch(ctx context.Context, at time.Time) []LogicalChange
     Watch identifies the logical status changes of every task the registry holds
@@ -1138,7 +1462,22 @@ type Registry interface {
     is cancelled.
 
 type RegistryOption func(*MemoryRegistry)
-    RegistryOption configures an in-memory task registry at construction.
+    RegistryOption configures one in-memory task registry beyond its commit
+    carrier and admission face.
+
+func WithActivity(report func()) RegistryOption
+    WithActivity attaches the pulse the registry reports each time it applied
+    a committed fact: a close waiting on the rest criterion reads the pulse
+    instead of polling the account for the movement it already made. The pulse
+    is a report, never a judgment.
+
+func WithClock(now func() time.Time) RegistryOption
+    WithClock sets the time source the admission and movement stamps of a task
+    are read from. A registry built beside no clock stamps its tasks with the
+    wall clock, so an unwired deployment behaves exactly as it did before this
+    seam existed; the source is injectable because a task's time to live is
+    a guarantee about instants, and a guarantee about instants is checked by
+    moving them rather than by waiting for them.
 
 func WithConcurrencyLimit(limit int) RegistryOption
     WithConcurrencyLimit caps how many tasks the registry holds non-terminal at
@@ -1148,6 +1487,14 @@ func WithConcurrencyLimit(limit int) RegistryOption
 func WithPolicy(policy Policy) RegistryOption
     WithPolicy sets the threshold set every task of the registry is read under.
     A registry built beside no policy reads its tasks under DefaultPolicy.
+
+func WithTerminalTTL(ttl time.Duration) RegistryOption
+    WithTerminalTTL bounds how long the record of a terminal task is kept.
+    A record whose task reached a terminal outcome at least that long before
+    a sweep reads is dropped, and a call naming it answers ErrTaskNotFound —
+    the refusal the send face renders as a task this host holds no record of.
+    A zero TTL keeps every record the registry ever admitted, so a registry
+    built beside none behaves exactly as it did before the bound existed.
 
 type RestoreOutcome struct {
 	// TaskID is the task the outcome is about.
@@ -1335,6 +1682,118 @@ type UncertainProbe func(CommitRecord) bool
     UncertainProbe reports whether one commit attempt is observed as uncertain:
     the storage outcome of that attempt is unknown and is reconciled before any
     repeat.
+
+type Unsettled struct {
+	// Seq is the commit sequence the sets were read at.
+	Seq uint64
+	// Work lists the accepted work with no terminal, in task identity order.
+	Work []UnsettledWork
+	// Notices lists the notifications no consumption confirmed, in identity
+	// order.
+	Notices []UnsettledNotice
+	// Inputs lists the input rounds the session chains hold with no answer, in
+	// address and commit order.
+	Inputs []UnsettledInput
+	// Unjudged is the named reason the criterion was not judged, and empty when
+	// it was.
+	Unjudged string
+}
+    Unsettled is one evaluation of the rest criterion: the unsettled work,
+    the unconsumed notices, the input rounds no answer closed, and the commit
+    sequence the sets were read at.
+
+    Unjudged is the named reason the criterion could not be read: an account
+    that refused the read, or a commit sequence that moved under every attempt,
+    leaves the run unjudged rather than rested.
+
+func ReadUnsettled(ctx context.Context, source UnsettledSource, fence UnsettledFence) Unsettled
+    ReadUnsettled evaluates the rest criterion under the commit sequence fence:
+    the sequence is read before the sets and again after them, and only a
+    sequence that held answers the sets as one snapshot of the account.
+    A sequence that moved is re-read, and one that never holds leaves the run
+    unjudged by name. A read beside no fence evaluates the sets once, for an
+    account whose own reads are already one snapshot.
+
+func (u Unsettled) Resting() bool
+    Resting reports whether a run is at rest: nothing it accepted is unfinished,
+    no notification of it stands unconsumed, and no input round it holds stands
+    unanswered. A criterion that could not be read is never at rest.
+
+type UnsettledFence func(ctx context.Context) uint64
+    UnsettledFence reports the commit sequence of the account a read stands at,
+    so the sets of one evaluation belong to one instant. A nil fence reads the
+    sets once and answers them as the account stands.
+
+type UnsettledInput struct {
+	// Address is the address of the site the input was committed at.
+	Address event.Address
+	// Instance is the runtime instance that owns that site.
+	Instance event.InstanceID
+	// Event is the identity of the driving fact the round opened on.
+	Event event.EventID
+	// Source is the address the input came from.
+	Source event.Address
+	// Reason is the readable reason the round stands unanswered.
+	Reason string
+}
+    UnsettledInput is one input round a session chain holds with no answer: a
+    driving fact the chain committed whose round no answer closed yet. It is the
+    fourth account of the criterion: the work a run accepted as input and has
+    not consumed, read off the chain rather than off a ledger kept beside it.
+
+type UnsettledNotice struct {
+	// Notice is the stable identity of the notification.
+	Notice Notice
+	// Address is the address the notification belongs to: the target of a notice
+	// a task still owes, or the site that accepted it into a mailbox.
+	Address event.Address
+	// Instance is the runtime instance that holds that address.
+	Instance event.InstanceID
+	// Source is the address the notification came from.
+	Source event.Address
+	// Reason is the readable reason the notification stands unconsumed.
+	Reason string
+}
+    UnsettledNotice is one notification no consumption confirmed: a notification
+    the task still owes a delivery for, or one accepted into a mailbox that was
+    never consumed.
+
+type UnsettledSource interface {
+	// Unfinished reports the tasks accepted and not terminal.
+	Unfinished(ctx context.Context) ([]UnsettledWork, error)
+	// Unconsumed reports the notifications no consumption confirmed, from the two
+	// accounts that own them: the notifications a task still owes a delivery for
+	// and the ones a mailbox accepted and nobody consumed. One notification may
+	// stand in both, and the criterion states it once.
+	Unconsumed(ctx context.Context) ([]UnsettledNotice, error)
+	// Unanswered reports the input rounds a session chain holds with no answer:
+	// the driving facts that stand past the round the chain last answered.
+	Unanswered(ctx context.Context) ([]UnsettledInput, error)
+}
+    UnsettledSource is the authoritative account the rest criterion reads:
+    the task chain that answers the work it holds, the consumption ledger that
+    answers the notifications no consumption confirmed — those a task still owes
+    a delivery for and those a mailbox accepted with nobody consuming them — and
+    the session chains that answer the input rounds they hold with no answer.
+
+    The redline list (3 rules): MUST answer each set from the account that owns
+    it, never from a copy kept beside it. MUST answer a set without a second
+    ledger of its own: the commit sequence that fences a read is handed to
+    ReadUnsettled by the account, not held here. MUST NOT answer a set from an
+    in-process shadow ledger the chain cannot compute back.
+
+type UnsettledWork struct {
+	// TaskID is the task the work runs under.
+	TaskID event.TaskID
+	// Status is the status the machine holds for it.
+	Status Status
+	// Owner is the invocation the work was admitted under.
+	Owner event.InvocationID
+	// Address is the address the work's notifications return to.
+	Address event.Address
+}
+    UnsettledWork is one accepted task that has not reached a terminal: the work
+    a run still owes an outcome for.
 
 type WrapOption func(*Wrapper)
     WrapOption configures a registration wrapper at construction.

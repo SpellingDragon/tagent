@@ -39,6 +39,19 @@ type ProjectionEntry struct {
 	// fact stated it, so the same entry presents differently under different
 	// budgets.
 	Content string
+	// inputEvents is the input_events metadata the fact carried: the JSON array
+	// of the input identities an agent_output consumed. It stays private so the
+	// entry's public shape remains the five fields of a projection record, and it
+	// stays a string so the entry remains comparable; the segment rule reads it
+	// through WithInputEvents and reads an empty or unreadable value as no
+	// relation, so a legacy output closes at the positional boundary.
+	inputEvents string
+	// messageRole is the role the fact's own message carried: the assembly
+	// renders this role when the fact states one and fills the frozen type's
+	// role only beside a message that carries none — one rule shared with the
+	// consumption path. The field stays private so the entry's public shape
+	// remains the five fields of a projection record.
+	messageRole string
 	// Time is the time the fact was recorded.
 	Time time.Time
 }
@@ -447,6 +460,28 @@ func RebuildProjectionFromWAL(ctx context.Context, target *ReplayProjection, cha
 	return report, nil
 }
 
+// renderEntryLine reports the canonical line RenderProjection writes for one
+// entry: the JSON form of the entry, without the newline after it. An entry the
+// encoder refuses answers false and adds nothing to the render.
+func renderEntryLine(entry ProjectionEntry) ([]byte, bool) {
+	line, err := json.Marshal(entry)
+	if err != nil {
+		return nil, false
+	}
+	return line, true
+}
+
+// renderedEntryVolume reports the bytes one entry adds to the rendered
+// projection: its canonical line and the newline RenderProjection writes after
+// it.
+func renderedEntryVolume(entry ProjectionEntry) int {
+	line, ok := renderEntryLine(entry)
+	if !ok {
+		return 0
+	}
+	return len(line) + 1
+}
+
 // RenderProjection renders the projection in its canonical form: one JSON line
 // per entry, in order, carrying the entry's identity, type, summary, model view
 // content and time. A rebuild that replays the same fact chain reproduces these
@@ -455,12 +490,24 @@ func RebuildProjectionFromWAL(ctx context.Context, target *ReplayProjection, cha
 func RenderProjection(entries []ProjectionEntry) []byte {
 	var out []byte
 	for _, entry := range entries {
-		line, err := json.Marshal(entry)
-		if err != nil {
+		line, ok := renderEntryLine(entry)
+		if !ok {
 			continue
 		}
 		out = append(out, line...)
 		out = append(out, '\n')
 	}
 	return out
+}
+
+// StatedRole reports the role the fact's own message carried, empty beside a
+// fact whose message stated none.
+func (e ProjectionEntry) StatedRole() string { return e.messageRole }
+
+// WithMessageRole returns the entry beside the role its own message carried:
+// the one setter for a field a cross-package assembly fills, so the entry's
+// public shape stays closed.
+func WithMessageRole(entry ProjectionEntry, role string) ProjectionEntry {
+	entry.messageRole = role
+	return entry
 }

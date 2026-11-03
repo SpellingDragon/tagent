@@ -77,11 +77,15 @@ run python3 scripts/scenarios/run_runtime_scenarios.py \
   --scope event-short --repeat 10 --out "$event_out/event-short"
 
 step "event integrity long"
+# One bound for both sides: the 256-window shard folds on every turn and rewrites
+# the ledger shard on every commit, so it is the slowest of the six and projects
+# to ~7400s on a runner (run 41406032474) and ~2800s locally. The 1200s this
+# replaces was calibrated when all six shards measured 533-878s.
 for seed in 1 7 42; do
   for window in 256 32768; do
     run python3 scripts/scenarios/run_runtime_scenarios.py \
       --contract golden/runtime/event_integrity_scenarios.json \
-      --scope event-long --seed "$seed" --window "$window" --repeat 1 --timeout 1200 \
+      --scope event-long --seed "$seed" --window "$window" --repeat 1 --timeout 10800 \
       --out "$event_out/event-long/seed-$seed-window-$window"
   done
 done

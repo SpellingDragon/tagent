@@ -76,8 +76,8 @@ func TestFormalRequestSnapshotHasNoSecrets(t *testing.T) {
 		if err := run.AttachReplay(chain, assembly.FoldWindow{MaxTokens: 100}, proj); err != nil {
 			t.Fatalf("AttachReplay: %v", err)
 		}
-		firstTurn := invokeSnapshot(t, ctx, run, "inv-snapshot-1", chain.SessionID, "first")
-		secondTurn := invokeSnapshot(t, ctx, run, "inv-snapshot-2", chain.SessionID, "second")
+		invokeSnapshot(t, ctx, run, "inv-snapshot-1", chain.SessionID, "first")
+		invokeSnapshot(t, ctx, run, "inv-snapshot-2", chain.SessionID, "second")
 		requests := learnRequests(provider)
 		snaps := run.RequestSnapshots()
 		if len(requests) != 2 || len(snaps) != 2 {
@@ -131,7 +131,16 @@ func TestFormalRequestSnapshotHasNoSecrets(t *testing.T) {
 		if !namedHas(view.VisibleSkills, "greet") {
 			t.Fatalf("visible skills = %+v, want the greet skill pinned on the view", view.VisibleSkills)
 		}
-		if snaps[0].Decision != firstTurn.Decisions[0].DecisionID || snaps[1].Decision != secondTurn.Decisions[0].DecisionID {
+		var outputs []event.Event
+		for _, fact := range run.SessionFacts(event.Address{AgentID: "agent-a", SessionID: chain.SessionID}) {
+			if fact.Type == event.TypeAgentOutput {
+				outputs = append(outputs, fact)
+			}
+		}
+		if len(outputs) != 2 {
+			t.Fatalf("output facts = %d, want one per invocation", len(outputs))
+		}
+		if snaps[0].Decision != outputs[0].DecisionID || snaps[1].Decision != outputs[1].DecisionID {
 			t.Fatalf("snapshot decisions = (%s, %s), want the decisions whose requests they were fixed for", snaps[0].Decision, snaps[1].Decision)
 		}
 		if seen != 2 {
@@ -217,16 +226,21 @@ func TestFormalRequestSnapshotHasNoSecrets(t *testing.T) {
 		}
 		run = assembled
 		turn := invokeSnapshot(t, ctx, run, "inv-snapshot-tool", "session-snapshot-tool", "drive the tool")
-		if turn.Terminal != model.KindCompleted || len(turn.Decisions) != 2 {
-			t.Fatalf("turn = (%v, %d decisions), want one completed terminal beside two decisions", turn.Terminal, len(turn.Decisions))
+		if turn.Terminal != model.KindCompleted || turn.DecisionCount != 2 {
+			t.Fatalf("turn = (%v, %d decisions), want one completed terminal beside two decisions", turn.Terminal, turn.DecisionCount)
 		}
 		snaps := run.RequestSnapshots()
 		if len(snaps) != 2 {
 			t.Fatalf("snapshots = %d, want exactly one per model request beside the tool result that ran between them", len(snaps))
 		}
+		facts := run.SessionFacts(event.Address{AgentID: "agent-a", SessionID: "session-snapshot-tool"})
+		wantDecisions := []event.DecisionID{
+			integrityFactWithContent(t, facts, event.TypeThinkingPlan, "").DecisionID,
+			integrityFactWithContent(t, facts, event.TypeAgentOutput, "settled").DecisionID,
+		}
 		for i := range snaps {
-			if snaps[i].Decision != turn.Decisions[i].DecisionID {
-				t.Fatalf("snapshot %d decision = %s, want the decision whose request it was fixed for %s", i, snaps[i].Decision, turn.Decisions[i].DecisionID)
+			if snaps[i].Decision != wantDecisions[i] {
+				t.Fatalf("snapshot %d decision = %s, want the decision whose request it was fixed for %s", i, snaps[i].Decision, wantDecisions[i])
 			}
 		}
 		earlier := mustSnapshotJSON(t, snaps[0].Snapshot)

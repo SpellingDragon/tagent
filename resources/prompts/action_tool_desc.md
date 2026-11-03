@@ -12,8 +12,8 @@ Describe in natural language what you want done and this tool runs it. Use this 
 **Working directory (IMPORTANT):**
 - Each `action` call runs in a **fresh shell** at the workspace root. `cd` does **NOT** carry over between **separate** `action` calls.
 - To work inside a subdirectory in one call, chain (`cd sub/dir && …`) or use paths relative to the workspace root / absolute paths.
-- **Re-entry is different**: a still-running session (a long-running command or interactive shell that is alive) is re-entered by `resume_task` into that **same shell** — so `cd`, exported variables and other shell state **DO persist across resumes**.
-- A command that has already exited has its session reaped; `resume_task` then fails — use `relaunch_task` instead.
+- **Re-entry is different**: a still-running session (a long-running command or interactive shell that is alive) is re-entered by `send` with the task target (`send({target: {task: "<task-id>"}, content: "..."})`) into that **same shell** — so `cd`, exported variables and other shell state **DO persist across resumes**.
+- A command that has already exited has its session reaped; the same `send({target: {task: ...}})` re-entry then fails by name — use `relaunch_task` instead.
 - For destructive commands (`rm`/`mv`) prefer workspace-rooted or absolute paths regardless of mode.
 
 **Operational lessons (hard-won, do not relearn):**

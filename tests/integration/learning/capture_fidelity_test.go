@@ -322,11 +322,8 @@ func TestCaptureFidelityAndRedaction(t *testing.T) {
 		if token := content.Content[0]; token.Token != "settled" || token.Logprob != -0.125 {
 			t.Fatalf("attempt logprob value = %+v, want the returned token kept verbatim", token)
 		}
-		if attempt.Terminal != model.KindCompleted || turn.Terminal != model.KindCompleted || turn.Decisions[0].Terminal != model.KindCompleted {
-			t.Fatalf("terminals = (attempt %v, turn %v, decision %v), want the one shared reduction terminal", attempt.Terminal, turn.Terminal, turn.Decisions[0].Terminal)
-		}
-		if attempt.Terminal != turn.Decisions[0].Terminal {
-			t.Fatalf("attempt terminal = %v, want the decision terminal it shares the reduction with", attempt.Terminal)
+		if attempt.Terminal != model.KindCompleted || turn.Terminal != attempt.Terminal {
+			t.Fatalf("terminals = (attempt %v, turn %v), want the one shared reduction terminal", attempt.Terminal, turn.Terminal)
 		}
 	})
 
@@ -344,8 +341,8 @@ func TestCaptureFidelityAndRedaction(t *testing.T) {
 			t.Fatalf("attempt records = %d, want exactly one observable attempt", len(records.attempts))
 		}
 		attempt := records.attempts[0]
-		if attempt.Terminal != model.KindFailed || turn.Terminal != model.KindFailed || turn.Decisions[0].Terminal != model.KindFailed {
-			t.Fatalf("terminals = (attempt %v, turn %v, decision %v), want the one shared failed terminal", attempt.Terminal, turn.Terminal, turn.Decisions[0].Terminal)
+		if attempt.Terminal != model.KindFailed || turn.Terminal != attempt.Terminal {
+			t.Fatalf("terminals = (attempt %v, turn %v), want the one shared failed terminal", attempt.Terminal, turn.Terminal)
 		}
 		if attempt.Error != "provider exploded" {
 			t.Fatalf("attempt error = %q, want the observed error text kept", attempt.Error)

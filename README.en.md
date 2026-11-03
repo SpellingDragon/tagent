@@ -79,7 +79,7 @@ This measures one production-host assembly with a scripted local HTTP model and 
 
 ## Explore and contribute
 
-[Project overview](docs/PROJECT.md) · [Mechanism tour](docs/wiki/mechanism-tour.md) · [Extensions](docs/EXTENSIONS.md) · [API](docs/api/index.md) · [Operations](docs/OPERATION.md) · [Contributing](CONTRIBUTING.md) · [Changelog](CHANGELOG.md)
+[Mechanism tour](docs/wiki/mechanism-tour.md) · [Event flow](docs/wiki/agent/event-flow.md) · [Extensions](docs/EXTENSIONS.md) · [API](docs/api/index.md) · [Operations](docs/OPERATION.md) · [Contributing](CONTRIBUTING.md) · [Changelog](CHANGELOG.md)
 
 Module map: `assembly/` composition and hosts; `api/` contracts; `runtime/` agents and task responsibility; `memory/` facts and projections; `tool/` adapters; `features/` optional capabilities. Both example hosts are separate Go modules.
 

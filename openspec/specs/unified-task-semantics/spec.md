@@ -1,7 +1,9 @@
 # unified-task-semantics Specification
 
 ## Purpose
-TBD - created by archiving change unify-task-evolution. Update Purpose after archive.
+启动通知与任务同享"接纳≠交付≠确认"语义：标记完成的唯一依据是消费确认，重投同身份幂等。
+
+归档溯源：三层分离语义由 `unify-task-evolution` 归档建立；通知接纳、投递元数据契约与投递账目条款由 `send-cross-task-session`（06）与 `agent-instances-and-delivery`（02）手工并入。
 ## Requirements
 ### Requirement: 任务统一语义
 
@@ -86,4 +88,36 @@ TBD - created by archiving change unify-task-evolution. Update Purpose after arc
 
 - **WHEN** 一个调用被拒绝或提交失败
 - **THEN** `After` 呈现 SHALL NOT 在被拒后仍呈现成功事实，MUST NOT 先于 canonical commit
+
+### Requirement: 通知接纳与消费确认分离
+
+启动通知 SHALL 先入稳定身份的持久接纳记录；`.notified`/`.consumed` 标记 SHALL 仅在消费确认（输入提交成功）后完成。入箱、取走 MUST NOT 被当作完成。重投 SHALL 复用同一接纳身份，MUST NOT 产生重复有效处理。
+
+#### Scenario: 确认后才标记
+
+- **WHEN** 通知入箱但输入提交失败
+- **THEN** 标记不完成，通知在册可重投；恢复后恰被消费一次
+
+#### Scenario: 重复恢复幂等
+
+- **WHEN** 进程在标记完成后再次重启
+- **THEN** 同身份通知不产生第二次有效处理
+
+### Requirement: 投递元数据契约同构
+
+agent 主动投递与框架状态变更投递 SHALL 是两类不同事实（类型保留区分），但其投递元数据契约 SHALL 同构：目标、投递身份、回执键、来源分账键字段集合一致（键走 `MetaKey*` 单点定义），去重与回执规则一致。下游 SHALL 可按同一账目口径消费两路投递。
+
+#### Scenario: 两路投递一账可查
+
+- **WHEN** 同一条源事件分别经 send 与经 settle 路径投到同一目标
+- **THEN** 账目中两条记录元数据字段集合同构、去重规则一致，事实类型各自保留
+
+### Requirement: 投递账目
+
+一条源事件产生的多次单目标投递 SHALL 有可查询账目：逐目标的投递身份与回执状态可查可对账，查询 MUST NOT 要求解析正文。账目记录 SHALL 持久（随事实层），逐目标恰一次语义由投递身份去重保证。
+
+#### Scenario: 多目标逐目标可对账
+
+- **WHEN** 一条事件投给三个会话（三次单目标调用）
+- **THEN** 账目列出三个目标各自的投递身份与回执，重复投递不产生第二条有效记录
 
