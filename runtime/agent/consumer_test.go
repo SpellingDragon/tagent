@@ -482,19 +482,57 @@ func (r *residentInstanceRig) deliver(_ context.Context, addr event.Address, ans
 	r.answers <- answer
 }
 
-// awaitAnswer waits for the closed segment of the named address.
+// awaitAnswer waits for the closed segment of the named address, and for the
+// answer it delivered to join the answer index the window and the ttl judge: the
+// delivery face of one settle stands before the index write of the same settle, so
+// a check that reads the window beside the delivery waits for that write here.
 func (r *residentInstanceRig) awaitAnswer(t *testing.T, addr event.Address) SegmentAnswer {
 	t.Helper()
 	deadline := time.After(10 * time.Second)
 	for {
 		select {
 		case answer := <-r.answers:
+			r.awaitIndexedAnswer(t, addr, answer)
 			return answer
 		case <-deadline:
 			t.Fatalf("the instance of %s/%s closed no segment: the material that landed on the address drove nothing",
 				addr.AgentID, addr.SessionID)
 			return SegmentAnswer{}
 		}
+	}
+}
+
+// awaitIndexedAnswer waits for the answer one delivered segment closed on to
+// enter the answer index: a settle hands the answer to the delivery face before
+// it records the index entry and evicts the window, so the answer a check reads
+// off the channel is not yet the answer the window holds. The wait is bounded by
+// the same budget the delivery read uses and reads the index under its own lock,
+// so a settle that never records the answer answers this gap by name.
+func (r *residentInstanceRig) awaitIndexedAnswer(t *testing.T, addr event.Address, answer SegmentAnswer) {
+	t.Helper()
+	consumer := r.consumers.Ensure(addr)
+	if consumer == nil {
+		t.Fatalf("the instance of %s/%s = nil beside the answer %q it delivered", addr.AgentID, addr.SessionID, answer.Turn.InvocationID)
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		consumer.mu.Lock()
+		indexed := false
+		for _, closed := range consumer.order {
+			if closed.answer.Turn.InvocationID == answer.Turn.InvocationID {
+				indexed = true
+				break
+			}
+		}
+		consumer.mu.Unlock()
+		if indexed {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the answer of the closed segment %q never entered the answer index of %s",
+				answer.Turn.InvocationID, addr.SessionID)
+		}
+		time.Sleep(time.Millisecond)
 	}
 }
 
