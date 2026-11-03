@@ -146,9 +146,34 @@ func TestSkillBodyReachesNextRequest(t *testing.T) {
 	if len(requests) < 2 {
 		t.Fatalf("recorded requests = %d, want at least the load decision and the closing decision", len(requests))
 	}
-	closing := requests[1]
 	if containsBody(requests[0], "extra body v1") {
 		t.Fatal("first request carried the extra skill body before the load, want no unloaded body")
+	}
+	loaded := func(req model.Request, want loadedResult) bool {
+		for _, msg := range req.Messages {
+			if presentsLoadedResult(msg, want) {
+				return true
+			}
+		}
+		return false
+	}
+	wants := []loadedResult{
+		{callID: "call-greet", text: "loaded: greet"},
+		{callID: "call-extra", text: "loaded: extra"},
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	var closing model.Request
+	for {
+		requests = provider.recorded()
+		last := requests[len(requests)-1]
+		if carriesSystemBody(last, "extra body v1") && loaded(last, wants[0]) && loaded(last, wants[1]) {
+			closing = last
+			break
+		}
+		if !time.Now().Before(deadline) {
+			t.Fatalf("requests = %+v, want every loaded result in the model context after the load", requests)
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 	if !containsBody(closing, "extra body v1") {
 		t.Fatalf("closing request = %+v, want the loaded extra skill body in the closing request's model context", closing.Messages)
@@ -163,28 +188,6 @@ func TestSkillBodyReachesNextRequest(t *testing.T) {
 	}
 	if got := countBody(closing, "greet body v1"); got != 1 {
 		t.Fatalf("closing request carries the greet body %d times, want exactly once beside its load", got)
-	}
-	loaded := func(requests []model.Request, want loadedResult) bool {
-		for _, req := range requests[1:] {
-			for _, msg := range req.Messages {
-				if presentsLoadedResult(msg, want) {
-					return true
-				}
-			}
-		}
-		return false
-	}
-	deadline := time.Now().Add(10 * time.Second)
-	for _, want := range []loadedResult{
-		{callID: "call-greet", text: "loaded: greet"},
-		{callID: "call-extra", text: "loaded: extra"},
-	} {
-		for !loaded(provider.recorded(), want) {
-			if !time.Now().Before(deadline) {
-				t.Fatalf("requests = %+v, want every loaded result in the model context after the load", provider.recorded())
-			}
-			time.Sleep(10 * time.Millisecond)
-		}
 	}
 }
 
