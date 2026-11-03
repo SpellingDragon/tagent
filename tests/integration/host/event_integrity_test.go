@@ -504,16 +504,9 @@ func runDuplicateNoticeMaterial(t *testing.T) {
 			turn.Terminal, turn.DecisionCount)
 	}
 	material, notice := reproductionSettleMaterial(t, host, addr, workerOut, 30*time.Second)
+	noticeFact := reproductionAwaitNoticeFact(t, host, addr, notice.TaskID, material)
 	facts := host.Run().SessionFacts(addr)
-	_, followIndex := continuationWaitForRequest(t, provider, material, 30*time.Second)
-	baselineRequests := provider.servedRequests()
-	acceptIndex := -1
-	for index, request := range baselineRequests {
-		if acceptIndex < 0 && requestCarriesToolResult("call-dup-delegate")(request) {
-			acceptIndex = index
-		}
-	}
-	batchedShape := acceptIndex >= 0 && followIndex == acceptIndex
+	batchedShape := continuationTurnConsumed(facts, turn.InvocationID, noticeFact.Key)
 	if !batchedShape {
 		script.await(t, followStep)
 		script.release(followStep)
