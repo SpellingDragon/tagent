@@ -208,7 +208,7 @@ func TestNativeToolsAndSkillState(t *testing.T) {
 					ntCall("call-load-1", "skill_load", `{"skill":"greet"}`),
 					ntCall("call-load-2", "skill_load", `{"skill":"greet"}`),
 				)
-			case nativeRequestHasObservation(*req, "call-load-1") && nativeRequestHasObservation(*req, "call-load-2") && !nativeRequestHasCall(*req, "call-save"):
+			case !nativeRequestHasCall(*req, "call-save"):
 				return ntToolTurn(ntCall("call-save", "save_file", fmt.Sprintf(`{"file_name":"skills/greet/SKILL.md","contents":%q,"overwrite":true}`, rewritten)))
 			case nativeRequestCarries(*req, "invoke two") && !nativeRequestHasCall(*req, "call-load-3"):
 				return ntToolTurn(ntCall("call-load-3", "skill_load", `{"skill":"greet"}`))
@@ -389,12 +389,27 @@ func nativePairComplete(requests []model.Request, pair nativePair) bool {
 			if message.Role == model.RoleTool && message.Content == "ok" {
 				receipt = true
 			}
-			if message.Role == model.RoleUser && strings.Contains(message.Content, pair.settled) {
+			if nativePairObservation(message, pair) {
 				observation = true
 			}
 		}
 	}
 	return receipt && observation
+}
+
+// nativePairObservation reports whether one message presents the settled body
+// of the pair's call: the live observation the decision of the range reads as
+// its own input (user role), or the result fact the decision after a closed
+// range reads as material (tool role). Both presentations carry the settled
+// body under the call identity, and the receipt "ok" carries none of it.
+func nativePairObservation(message model.Message, pair nativePair) bool {
+	if message.ToolID != pair.callID || message.ToolName != pair.tool {
+		return false
+	}
+	if message.Role != model.RoleUser && message.Role != model.RoleTool {
+		return false
+	}
+	return strings.Contains(message.Content, pair.settled)
 }
 
 // declarationOf declares one agent assembled from the prompt and skill files
