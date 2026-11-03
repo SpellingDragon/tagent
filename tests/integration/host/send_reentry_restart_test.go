@@ -27,11 +27,10 @@ const sendRigRestartWindow = 60 * time.Second
 // process made and not the replayed result of the call the first process made.
 const sendRigRestartedSendCall = "call-send-rig-send-after-restart"
 
-// TestReenteredTaskServesAfterRestart pins the continuation of a delegated task across
-// a process restart:
+// TestReenteredTaskServesAfterRestart pins the continuation of a delegated task across a process restart:
 // - positive: the terminal the first process leaves behind is re-entered by the second process, and the body reaches the reviewing round
-// - high-water: a task the first process already re-entered once continues at the round after the one it reached, so the restarted round is the third and never a reused identity
-// - declaration: the re-entered round runs under the instruction and model the delegated input fact recorded, not under a declaration of the second process
+// - high-water: a task already re-entered once continues at the round after the one it reached, so the restarted round is the third and never a reused identity
+// - declaration: the re-entered round runs under the instruction and model the delegated input fact recorded, not a second-process declaration
 // - round identity: the re-entered round settles under its own notification identity, so the rounds are read apart
 // 契约: docs/wiki/agent/task-lifecycle.md#status-machine
 func TestReenteredTaskServesAfterRestart(t *testing.T) {
@@ -39,9 +38,6 @@ func TestReenteredTaskServesAfterRestart(t *testing.T) {
 	defer cancel()
 	root := t.TempDir()
 
-	// The first process delegates the review, re-enters it once when its terminal lands,
-	// and then leaves a task that already reached the second round behind: the restart
-	// must continue at the third.
 	first := newSendRig(t)
 	firstHost := bootSendRigOverRoot(t, first, newDeliverySender(nil), root)
 	if _, err := driveIntegrityTurn(ctx, firstHost, sendRigAddress, sendRigRequest); err != nil {
@@ -58,9 +54,6 @@ func TestReenteredTaskServesAfterRestart(t *testing.T) {
 		t.Fatalf("the second round's notice = %q, want the verdict the in-process re-entry produced %q", notice, sendRigSecondRound)
 	}
 
-	// The declaration travels on the task fact of each delegated input batch and
-	// nowhere else: the instruction and material facts are material of the round, so a
-	// re-entry reads the assembly from the one fact that closes the batch.
 	site := event.Address{
 		AgentID:   event.AgentID(sendRigReviewerAgent),
 		SessionID: subagent.DelegatedSiteSession(sendRigAddress.SessionID, sendRigDelegateCall),
@@ -92,8 +85,6 @@ func TestReenteredTaskServesAfterRestart(t *testing.T) {
 	}
 	closeSendRigHost(t, firstHost)
 
-	// The restart: a fresh process over the same storage, a fresh endpoint and a fresh
-	// decision script that hands the body back to the task the first process left.
 	second := newSendRig(t)
 	second.reentryTask = task
 	second.sendCall = sendRigRestartedSendCall
@@ -107,8 +98,6 @@ func TestReenteredTaskServesAfterRestart(t *testing.T) {
 	}
 	sendRigAwaitRestartedReviewerBody(t, second)
 
-	// The declaration the delegated input fact carried is the one the re-entered round
-	// runs under: the second process never declared the reviewing instruction itself.
 	carried := false
 	for _, request := range second.provider.servedRequests() {
 		if request.Model != sendRigReviewerModel || !sendRigCarries(request, sendRigBody) {
@@ -123,17 +112,16 @@ func TestReenteredTaskServesAfterRestart(t *testing.T) {
 		t.Fatal("the restarted process served no reviewing request carrying the re-entry body")
 	}
 
-	// The restarted round is the third round of the same task: the two rounds the first
-	// process reached are consumed, not unopened, and the notice keeps its own identity.
 	notice := sendRigAwaitNotice(t, secondHost, task, 3)
 	if !strings.Contains(notice, sendRigSecondRound) {
 		t.Fatalf("the third round's notice = %q, want the verdict the restarted reviewing round produced %q", notice, sendRigSecondRound)
 	}
 }
 
-// TestReentryOfNoTaskServesNoRound pins the negative half of the continuation's
-// rebuild: a body naming a task the table holds no record of is refused by name,
-// so no round — and therefore no continuation slot — is built for it.
+// TestReentryOfNoTaskServesNoRound pins the negative half of the continuation's rebuild.
+//   - a body naming a task the table holds no record of is refused by name
+//   - no round, and therefore no continuation slot, is built for it
+//
 // 契约: docs/wiki/agent/task-lifecycle.md#status-machine
 func TestReentryOfNoTaskServesNoRound(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)

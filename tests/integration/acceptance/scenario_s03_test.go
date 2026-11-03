@@ -45,9 +45,6 @@ func TestScenario03ToolReceiptAndBackground(t *testing.T) {
 				scenarioCall("call-b", "receipt-marker-b", `{"y":2}`),
 			)
 		case 2, 3:
-			// Full-duplex consumption may take one closing decision after the
-			// tool round when a settlement lands late; the scripted answer is
-			// the same completed turn either way.
 			return scenarioFinalTurn("settled")
 		default:
 			violations = append(violations, "the drive requested a decision outside the scripted roundtrip")
@@ -73,12 +70,6 @@ func TestScenario03ToolReceiptAndBackground(t *testing.T) {
 		t.Fatalf("invoke the roundtrip: %v", err)
 	}
 	requests := provider.recorded()
-	// Full-duplex consumption may take one closing decision when a settlement
-	// lands after the receipts round, so the scenario pins the closed roundtrip
-	// and reads its observations from the decision that closes it: the last view
-	// that carries both admission receipts. The closing view is the one the
-	// model answered the turn from, and the one that presents receipts and
-	// backgrounds side by side.
 	if len(requests) < 2 || len(requests) > 3 || turn.DecisionCount < 2 || turn.DecisionCount > 3 || turn.Terminal != model.KindCompleted {
 		t.Fatalf("requests = %d, decisions = %d, terminal = %v, want one admitted roundtrip beside its final decision", len(requests), turn.DecisionCount, turn.Terminal)
 	}
@@ -101,12 +92,6 @@ func TestScenario03ToolReceiptAndBackground(t *testing.T) {
 	if len(calls) != 2 {
 		t.Fatalf("the closing view carries %d native calls, want the scripted two", len(calls))
 	}
-	// The settled bodies may land in the closing decision itself or in the next
-	// request the late settlement drives, and that request may present a body as
-	// the result message of its call rather than as a second observation. Read
-	// both bodies once, then pin the stable receipt round of the closing view:
-	// the trailing observation count is delivery-order dependent, so the body
-	// arrival below is the result assertion that carries it.
 	bodies := map[string]string{calls[0]: toolA.output, calls[1]: toolB.output}
 	backgroundsSeen := scenarioAwaitBackgrounds(t, provider, bodies)
 	observations["model_message_roles"] = scenarioReceiptRoles(closing)
@@ -122,11 +107,6 @@ func TestScenario03ToolReceiptAndBackground(t *testing.T) {
 	issuingDecision := event.DecisionID("")
 	issuingCount := 0
 	decisionIDs := []event.DecisionID{}
-	// The call→task link is read from the chain, never from the receipt text:
-	// the receipt is the minimal admission confirmation, and the result fact
-	// under the native call identity is what names the task it settled. A
-	// settlement the roundtrip answered before may still be landing, so the two
-	// results are awaited inside a bound before the link is read.
 	facts, taskOfCall := scenarioCallTasks(t, run, event.Address{AgentID: "agent-a", SessionID: "session-receipt"}, calls)
 	for _, fact := range facts {
 		if fact.InvocationID != turn.InvocationID || fact.DecisionID == "" {
@@ -177,11 +157,6 @@ func TestScenario03ToolReceiptAndBackground(t *testing.T) {
 			}
 		}
 	}
-	// The settled body reaches the model view that reads it: the closing decision
-	// of the roundtrip when it is still in flight, or the next request the
-	// settlement drives when the roundtrip answered first. The read is the body
-	// under its own call identity in a request after the tool round, never a value
-	// copied from the fixture and never one presentation role.
 	captured["background_original"] = backgroundsSeen[calls[0]]
 	observations["receipts"] = receipts
 	observations["backgrounds"] = backgrounds

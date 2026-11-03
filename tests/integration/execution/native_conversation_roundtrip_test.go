@@ -43,7 +43,8 @@ func passingCheck(name state.CheckName) state.CheckAnswer {
 // - a native multi-turn tool call roundtrip keeps the messages and the pairings, each call answered by its own paired receipt
 // - a paired receipt carries the admission and the task id of its call, never the settled result of that call
 // - two invocations of one session decide independently: a failed terminal never carries its neighbour down
-// - the drives below are sequential, so each invocation owns the segment that consumed its input; the resident loop may batch concurrent arrivals into one turn (see consumer_loop_convergence_test.go)
+// - the drives are sequential, so each invocation owns the segment that consumed its input
+// - the resident loop may batch concurrent arrivals into one turn (see consumer_loop_convergence_test.go)
 // - each request ends on its own invocation's input while the session history already committed may sit in front of it
 // - a settled task backflow drives the next decision of the invocation that issued the call on the binding generation effective when that decision begins
 // - each settled result enters the next decision as its own observation under the preserved call identifier, never a second tool response
@@ -89,11 +90,6 @@ func TestNativeConversationRoundTrip(t *testing.T) {
 			t.Fatalf("turn invocation = %q, want the answer minted by the session's resident consumer segment", turn.InvocationID)
 		}
 
-		// The two calls of the opening decision settle independently: the next
-		// decision is driven by the first result that arrives, so a result that
-		// lands after the closing decision drives the next segment of the address
-		// instead of the same turn. Read the request line until both settled
-		// bodies have reached one under their own call identities.
 		requests := awaitRoundTripResults(t, provider, []roundTripResult{
 			{callID: "call-1", tool: "echo-a", body: "out-a"},
 			{callID: "call-2", tool: "echo-b", body: "out-b"},
@@ -110,9 +106,6 @@ func TestNativeConversationRoundTrip(t *testing.T) {
 			t.Fatalf("first request tools = %v, want both tools of the borrowed generation visible to the model", requests[0].Tools)
 		}
 
-		// The receipts round reads the opening assistant message under its own
-		// tool identities; the settled bodies may land there or in a later
-		// segment, so they are read across the whole request line below.
 		replay := requests[1].Messages
 		if len(replay) == 0 || replay[0].Role != model.RoleUser || replay[0].Content != "hello" {
 			t.Fatalf("replay head = %+v, want the original user message replayed unchanged", replay)
@@ -198,9 +191,6 @@ func TestNativeConversationRoundTrip(t *testing.T) {
 			turn       agent.Turn
 			err        error
 		}
-		// Sequential drives keep each invocation on its own segment: a failed
-		// neighbour never attaches to the next invocation of the shared session,
-		// while the resident consumer may batch concurrent arrivals into one turn.
 		got := map[event.InvocationID]agent.Turn{}
 		for _, req := range []struct {
 			id    event.InvocationID

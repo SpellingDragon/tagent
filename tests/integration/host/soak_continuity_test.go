@@ -580,9 +580,6 @@ func soakDriveInvocation(t *testing.T, ctx context.Context, run *assembly.Run, i
 	if turn.Terminal != model.KindCompleted || turn.DecisionCount != 2 {
 		t.Fatalf("turn %s = (%v, %d decisions), want one completed turn of two decisions", invocation, turn.Terminal, turn.DecisionCount)
 	}
-	// The turn answer names the consumption segment its drive ran under (the
-	// resident loop mints it), while the caller's invocation survives on the
-	// input fact the segment consumed: both identities are proven.
 	if !strings.HasPrefix(string(turn.InvocationID), string(addr.SessionID)+"#") {
 		t.Fatalf("turn invocation = %q, want the consumption segment of %q", turn.InvocationID, addr.SessionID)
 	}

@@ -298,9 +298,6 @@ func TestCausalTrainingRecords(t *testing.T) {
 		}}
 		first := newHarness(t, provider, nil, "inv-concurrent-a")
 		second := newHarness(t, provider, nil, "inv-concurrent-b")
-		// One resident consumer owns each address, so the two concurrent drives
-		// are two addresses: the case proves their attempts stay independent
-		// without asking one address to carry two drivers at once.
 		first.session = event.SessionID("session-concurrent-a")
 		second.session = event.SessionID("session-concurrent-b")
 		var wg sync.WaitGroup

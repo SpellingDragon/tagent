@@ -27,13 +27,10 @@ import (
 // fileFactAddress is the one agent session the file fact anchors drive.
 var fileFactAddress = event.Address{AgentID: "agent-a", SessionID: "session-file-fact"}
 
-// TestFileChangeLandsAFileFactOnTheChain checks the file change boundary on the
-// formal assembly entry:
+// TestFileChangeLandsAFileFactOnTheChain checks the file change boundary on the formal assembly entry.
 //   - the request under way keeps the content it fixed at its own boundary
-//   - the rewritten file files one config_change fact of the file dimension on
-//     the chain, and its body carries the rewritten content
-//   - the next request carries the rewritten content, so the file change takes
-//     effect at the boundary with no reload in between
+//   - the rewritten file files one config_change fact of the file dimension on the chain, and its body carries the rewritten content
+//   - the next request carries the rewritten content, so the file change takes effect at the boundary with no reload in between
 //   - the file change files no structural publication: the generation stays
 //
 // 契约: docs/wiki/platform/org-hot-reload.md#generations
@@ -81,8 +78,6 @@ func TestFileChangeLandsAFileFactOnTheChain(t *testing.T) {
 		t.Fatal("the first request never reached the model")
 	}
 
-	// The first request fixed its view at its own boundary and is parked in the
-	// model call: the rewrite happens strictly after that fixing.
 	writePromptAt(t, promptPath, nextBody+"\n")
 	close(releaseFirst)
 	if err := <-firstDone; err != nil {
@@ -117,8 +112,6 @@ func TestFileChangeLandsAFileFactOnTheChain(t *testing.T) {
 		t.Fatalf("second request = %+v, want no stale body from the earlier read", requests[1].Messages)
 	}
 
-	// The chain carries the content the boundary fixed: one file change fact per
-	// content version, both owned by the agent and both of the file dimension.
 	facts := fileFactsOf(t, ctx, run)
 	if len(facts) != 2 {
 		t.Fatalf("file change facts = %d, want one per content version the boundary fixed: %+v", len(facts), facts)
@@ -145,8 +138,6 @@ func TestFileChangeLandsAFileFactOnTheChain(t *testing.T) {
 			t.Fatalf("file change facts carry %v, want the body %q on the chain", bodies, body)
 		}
 	}
-	// The judgment's identity is control-plane material: the request carries the
-	// content the fact projects and never the fact key it is quoted by.
 	for _, request := range requests {
 		for _, message := range request.Messages {
 			for _, fact := range facts {
@@ -162,15 +153,11 @@ func TestFileChangeLandsAFileFactOnTheChain(t *testing.T) {
 	}
 }
 
-// TestFileFactFilingFailureDoesNotRefuseTheRequest checks the best-effort edge
-// of the file fact boundary:
-//   - a first run files the content-addressed file change fact of one content
-//     version on its chain
-//   - a second run over a fresh storage plants another fact under that same
-//     identity, so the fact the boundary would file is already occupied by
-//     content it does not name
-//   - the request is still served with the content read at its boundary: a
-//     filing that cannot land never stands in front of the business
+// TestFileFactFilingFailureDoesNotRefuseTheRequest checks the best-effort edge of the file fact boundary.
+//   - a first run files the content-addressed file change fact of one content version on its chain
+//   - a second run over a fresh storage plants another fact under that same identity
+//   - the fact the boundary would file is already occupied by content it does not name
+//   - the request is still served with the content read at its boundary: a filing that cannot land never stands in front of the business
 //   - the refused filing is warned about, and the planted fact stays as it stood
 //
 // 契约: docs/wiki/platform/org-hot-reload.md#generations

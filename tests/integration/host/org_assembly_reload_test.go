@@ -19,19 +19,13 @@ import (
 	"github.com/SpellingDragon/tagent/memory"
 )
 
-// TestReloadJudgesTheDeclaredDelegationAssembly rewrites the agent reference the
-// entry declaration wires and posts the reload entry:
-//   - the boot request carries the tool of the declared target, described by the
-//     file the reference names
-//   - the reload publishes the moved reference as a new generation and files one
-//     configuration change of the organization assembly dimension, owned by the
-//     declaring agent, and no binding entry beside it
-//   - the committed fact names the assembly move, the publication generation and
-//     the configuration source
-//   - the next request carries the tool of the new target, described by the new
-//     description file, and no longer the target of the generation before
-//   - the call the new request issues runs on the new target, so the delegated
-//     turn is served by the target the declaration now names
+// TestReloadJudgesTheDeclaredDelegationAssembly rewrites the agent reference the entry declaration wires and posts the reload entry.
+//   - the boot request carries the tool of the declared target, described by the file the reference names
+//   - the reload publishes the moved reference as a new generation and files one configuration change
+//   - the change belongs to the organization assembly dimension and is owned by the declaring agent, with no binding entry beside it
+//   - the committed fact names the assembly move, the publication generation and the configuration source
+//   - the next request carries the tool of the new target, described by the new description file, never the target of the generation before
+//   - the call the new request issues runs on the new target, so the delegated turn is served by the target the declaration now names
 //
 // 契约: docs/wiki/platform/org-hot-reload.md#generations
 func TestReloadJudgesTheDeclaredDelegationAssembly(t *testing.T) {
@@ -203,14 +197,11 @@ func TestReloadJudgesTheDeclaredDelegationAssembly(t *testing.T) {
 	}
 }
 
-// TestReloadJudgesTheRemovedAgent removes a declared agent between two turns:
-//   - the reload publishes the removal as a new generation and files the one
-//     organization agents change, owned by the agent the document removed
-//   - the facts the removed agent already committed stay on the chain and no
-//     cancellation is invented for the address: the reload judges the declaration
-//     move alone
-//   - new input at the removed address is refused by name, while the entry still
-//     serves its turns
+// TestReloadJudgesTheRemovedAgent removes a declared agent between two turns.
+//   - the reload publishes the removal as a new generation and files the one organization agents change, owned by the agent the document removed
+//   - the facts the removed agent already committed stay on the chain and no cancellation is invented for the address
+//   - the reload judges the declaration move alone
+//   - new input at the removed address is refused by name, while the entry still serves its turns
 //
 // 契约: docs/wiki/platform/org-hot-reload.md#generations
 func TestReloadJudgesTheRemovedAgent(t *testing.T) {

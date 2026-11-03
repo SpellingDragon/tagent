@@ -230,10 +230,6 @@ func longContextRequestTokens(t *testing.T, provider *convModel, at int) int {
 	return bytes / 4
 }
 
-// awaitToolCalls waits, bounded, for the fake tool to reach the expected final
-// dispatch count and then holds the count over a short quiet window. The turn
-// can return while the last dispatch is still in flight, so the count is read
-// at its final value instead of racing the turn's return.
 // awaitRecorded waits, bounded, for the model to record at least want requests
 // and reports the recorded list: the follow-up decision that reads the receipts
 // runs on the settle path, so its request can land after the turn returns.
@@ -246,6 +242,10 @@ func awaitRecorded(t *testing.T, provider *convModel, want int) []model.Request 
 	return provider.recorded()
 }
 
+// awaitToolCalls waits, bounded, for the fake tool to reach the expected final
+// dispatch count and then holds the count over a short quiet window. The turn
+// can return while the last dispatch is still in flight, so the count is read
+// at its final value instead of racing the turn's return.
 func awaitToolCalls(t *testing.T, tool *convTool, want int) int {
 	t.Helper()
 	deadline := time.Now().Add(10 * time.Second)

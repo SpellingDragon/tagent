@@ -134,12 +134,11 @@ func TestReloadEndpointSwapsModel(t *testing.T) {
 	}
 }
 
-// TestReloadEndpointPublishesTheAddedAgent posts a document that adds an agent:
+// TestReloadEndpointPublishesTheAddedAgent posts a document that adds an agent.
 //   - the endpoint answers the publication instead of a structural refusal
-//   - the receipt names the one organization agents change, owned by the agent the
-//     document added, and no replacement version is installed
-//   - the next turn of the entry is still served by the model the boot document
-//     named, and the added address serves a real turn on the model it declares
+//   - the receipt names the one organization agents change, owned by the agent the document added, and no replacement version is installed
+//   - the next turn of the entry is still served by the model the boot document named
+//   - the added address serves a real turn on the model it declares
 //
 // 契约: docs/wiki/platform/org-hot-reload.md#generations
 func TestReloadEndpointPublishesTheAddedAgent(t *testing.T) {

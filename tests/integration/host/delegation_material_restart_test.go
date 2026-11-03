@@ -15,15 +15,11 @@ import (
 	"github.com/SpellingDragon/tagent/tool/subagent"
 )
 
-// TestDelegatedMaterialSurvivesRestart is the restart guard of the delegated
-// materials: a material fact is the execution site's own record of the source it
-// projects, so a restarted run reads it back from the chain and presents it to
-// the site's next request without the source chain or the tool that delegated it.
-//
+// TestDelegatedMaterialSurvivesRestart is the restart guard of the delegated materials.
+//   - a material fact is the execution site's own record of the source it projects
 //   - the site chain holds one material fact carrying the resolved source content
-//   - a second assembly over the same storage holds the same material fact, key
-//     for key, with its source lineage intact
-//   - a request driven at the site after the restart presents that content
+//   - a second assembly over the same storage holds the same material fact, key for key, with its source lineage intact
+//   - a request driven at the site after the restart presents that content without the source chain or the delegating tool
 //
 // 契约: docs/wiki/agent/agent-architecture.md#subagent-loop
 func TestDelegatedMaterialSurvivesRestart(t *testing.T) {
@@ -96,8 +92,6 @@ func TestDelegatedMaterialSurvivesRestart(t *testing.T) {
 		t.Fatalf("material facts of the site before the restart = %+v, want the one fact carrying %q", online, brief)
 	}
 
-	// The restart: a second assembly over the same storage reads the site's chain
-	// back from the durable record and drives a request at the site with it.
 	restartedCaller := &entryModel{name: "model-caller", answer: func(*model.Request) *model.Response {
 		return entryFinalTurn("the restarted caller decides alone")
 	}}

@@ -164,9 +164,6 @@ func TestSkillBodyReachesNextRequest(t *testing.T) {
 	if got := countBody(closing, "greet body v1"); got != 1 {
 		t.Fatalf("closing request carries the greet body %d times, want exactly once beside its load", got)
 	}
-	// 结果完整性: every admitted load's answer reaches a real request whatever
-	// decision batching the full-duplex drive chooses, so a result that never
-	// arrived keeps this red even though the count above is only a lower bound.
 	loaded := func(text string) bool {
 		for _, req := range requests[1:] {
 			if containsBody(req, text) {

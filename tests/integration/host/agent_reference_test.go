@@ -115,9 +115,6 @@ func TestAgentReferenceDelegatesToTheDeclaredTarget(t *testing.T) {
 		if got := knowledgeRequests[0].Tools["knowledge"]; got != nil {
 			t.Fatalf("the delegated turn's request carries the caller's own target tool")
 		}
-		// The envelope block dissolved (r98): a declared event reference the
-		// run backs materializes as its own content beside the task, and one
-		// nothing backs silently stays out (Q2).
 		joined := messageTextOf(knowledgeRequests[0].Messages)
 		if strings.Contains(joined, "[handoff envelope]") {
 			t.Fatalf("the delegated turn carries the dissolved envelope block:\n%s", joined)

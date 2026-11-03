@@ -11,14 +11,11 @@ import (
 	"github.com/SpellingDragon/tagent/api/event"
 )
 
-// TestConfigChangeLandsOnTheChain drives the configuration change fact over the
-// formal reload entry:
+// TestConfigChangeLandsOnTheChain drives the configuration change fact over the formal reload entry.
 //   - a prompt declaration change lands one config_change fact on the chain
-//   - the fact names the prompt dimension, the generation the publication
-//     assigned and the change it describes
+//   - the fact names the prompt dimension, the publication generation and the change it describes
 //   - a refused reload lands no fact
-//   - a model-only change files the replacement fact and no duplicate config
-//     change
+//   - a model-only change files the replacement fact and no duplicate config change
 //
 // 契约: docs/wiki/platform/org-hot-reload.md#generations
 func TestConfigChangeLandsOnTheChain(t *testing.T) {

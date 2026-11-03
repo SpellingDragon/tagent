@@ -148,11 +148,7 @@ type customEventRig struct {
 func newCustomEventRig(t *testing.T, provider model.Model, tools []trpctool.Tool, owner event.Address) *customEventRig {
 	t.Helper()
 	rig := &customEventRig{
-		instance: event.InstanceID("instance-custom-event"),
-		// The first segment the address's resident consumer opens is the range
-		// the case hands its progress notification to; the identity is minted by
-		// the consumer, so the rig reads it before the mount rather than naming
-		// a second drive identity beside it.
+		instance:     event.InstanceID("instance-custom-event"),
 		invocationID: event.InvocationID(fmt.Sprintf("%s#c1", owner.SessionID)),
 		owner:        owner,
 		bindings:     state.NewBindings(),

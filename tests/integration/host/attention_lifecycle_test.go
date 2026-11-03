@@ -202,9 +202,6 @@ func TestAttentionNoticeQuestionClearsOnWorkEnd(t *testing.T) {
 		closed <- host.Close(closeCtx)
 	}()
 	<-begun
-	// The held follow-up is the work the close drains: the read above is taken
-	// while it stands unconsumed, and the release below lands after the intake
-	// already refuses new work, so only the close's own drain answers the notice.
 	time.Sleep(300 * time.Millisecond)
 	if _, err := host.Invoke(ctx, assembly.InvokeRequest{
 		Address: addr,
@@ -241,7 +238,7 @@ func TestAttentionNoticeQuestionClearsOnWorkEnd(t *testing.T) {
 // The script answers by invocation rather than by call ordinal. The notification
 // really lands and its follow-up really arrives, and the turn is held instead of
 // refused: a refusal is a consumption result of its own since the A+ close (a
-// failed answer settles the notice), so it can no longer leave the notification
+// failed answer settles the notice), so it cannot leave the notification
 // unconsumed. The held turn is what the close's drain owes, so the work end is the
 // gate that settles the notice the case read as a question.
 func bootUnconsumedNoticeScene(t *testing.T) (host *assembly.Host, addr event.Address, followUp <-chan struct{}, releaseFollowUp func()) {

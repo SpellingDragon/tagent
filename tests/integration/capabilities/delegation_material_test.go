@@ -15,17 +15,10 @@ import (
 	"github.com/SpellingDragon/tagent/tool/subagent"
 )
 
-// TestDelegatedMaterialReachesTheRequest is the positive anchor of the delegated
-// materials: the source events one call hands over are resolved by the delegated
-// tool and projected into the execution site's chain as material facts of their
-// own, and the round's request reads them beside the instruction and the task.
-//
-//   - the site's chain holds one material fact per resolved source, under the
-//     site's projection key and carrying the source key as its lineage
-//   - the delegated request carries the source content as material beside the
-//     task, on the real assembly surface rather than a stand-in chain
-//   - a reference the run holds nothing under lands no material fact at all and
-//     reaches no request: hallucinated references are silent (Q2)
+// TestDelegatedMaterialReachesTheRequest is the positive anchor of the delegated materials.
+//   - the site's chain holds one material fact per resolved source, under the site's projection key and with the source key as lineage
+//   - the delegated request carries the source content as material beside the task, on the real assembly surface
+//   - a reference the run holds nothing under lands no material fact and reaches no request: hallucinated references are silent (Q2)
 //
 // 契约: docs/wiki/agent/agent-architecture.md#subagent-loop
 func TestDelegatedMaterialReachesTheRequest(t *testing.T) {

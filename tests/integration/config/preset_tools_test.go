@@ -122,11 +122,6 @@ func TestPresetToolsAssemble(t *testing.T) {
 			describePresetRequests(requests))
 	}
 
-	// The two calls of the opening decision settle independently: the knowledge
-	// search answers inside the turn while the memory retrieval may land after the
-	// closing decision and drive the next segment of the address, exactly as the
-	// resident loop's fast-result law says. Either way the settled body of each
-	// call must reach a model request under its own call identity.
 	awaitPresetResults(t, provider, 10*time.Second)
 }
 

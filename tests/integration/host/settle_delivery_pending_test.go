@@ -51,9 +51,12 @@ const settlePendingMarker = "did not commit"
 const settlePendingQuiet = time.Second
 
 // TestSettleDeliveryCommitFailureStaysPending pins the settle fact commit as part of the acceptance a delivery reports.
-//   - positive (failed window): a settle delivery whose fact commit the storage path refuses reports Pending — the notification stands owed beside the named refusal, no settle fact lands and no follow-up turn runs
-//   - negative (recovery): once the refusal is lifted, the offer the close makes re-writes the settle fact exactly once and the follow-up turn the notification owes answers exactly once
-//   - consumer: the settle rides the formal host assembly — the delegated round of an admission the entry turn already ended, the unattended settle delivery and the settle driver path — and the refusal is injected through the storage tier the run commits its facts under, never by calling the delivery internals
+//   - positive (failed window): a settle delivery whose fact commit the storage path refuses reports Pending
+//   - the notification stands owed beside the named refusal, no settle fact lands and no follow-up turn runs
+//   - negative (recovery): once the refusal is lifted, the offer the close makes re-writes the settle fact exactly once
+//   - the follow-up turn the notification owes answers exactly once
+//   - consumer: the settle rides the formal host assembly: the delegated round of an ended admission and the unattended settle delivery
+//   - the refusal is injected through the storage tier the run commits its facts under, never by calling the delivery internals
 //
 // 契约: docs/wiki/reliability/durable-delivery.md#envelope-states
 func TestSettleDeliveryCommitFailureStaysPending(t *testing.T) {
@@ -107,10 +110,6 @@ func TestSettleDeliveryCommitFailureStaysPending(t *testing.T) {
 	defer cancel()
 	addr := event.Address{AgentID: "user", SessionID: settlePendingSession}
 
-	// The entry turn delegates once, reads the admission it was answered with and
-	// ends on its own answer, so the settle of the delegated round arrives beside
-	// no live invocation of it: the unattended settle whose delivery fact only
-	// the delivery itself commits.
 	invoked := make(chan error, 1)
 	go func() {
 		_, err := host.Invoke(ctx, assembly.InvokeRequest{
@@ -133,17 +132,11 @@ func TestSettleDeliveryCommitFailureStaysPending(t *testing.T) {
 	time.Sleep(300 * time.Millisecond)
 	close(releaseReviewer)
 
-	// The settle delivery reached its target mailbox: the notification stands in
-	// the owed account the host itself reads.
 	waitForSettle(t, "the settle notice to stand in the owed account", func() bool {
 		return settlePendingNotice(t, host, "") != nil
 	})
 	time.Sleep(settlePendingQuiet)
 
-	// The failed window: the delivery may not report acceptance over a fact the
-	// storage tier refused. The notification keeps its delivery obligation with
-	// the refusal named beside it, the settle fact landed nowhere and no
-	// follow-up turn opened.
 	notice := settlePendingNotice(t, host, "")
 	if notice == nil {
 		t.Fatal("the settle notice left the owed account beside a refused fact commit")
@@ -162,9 +155,6 @@ func TestSettleDeliveryCommitFailureStaysPending(t *testing.T) {
 		t.Fatalf("follow-up turns in the failed window = %d, want none beside a settle fact no storage holds", fired)
 	}
 
-	// The recovery: the refusal lifted, the offer the close makes delivers the
-	// retained obligation again, so the settle fact is re-written exactly once
-	// and the follow-up turn the notification owes answers exactly once.
 	if err := settlePendingUnblockShard(root); err != nil {
 		t.Fatalf("lift the refusal off the entry partition snapshot: %v", err)
 	}

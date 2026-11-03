@@ -12,17 +12,11 @@ import (
 	"github.com/SpellingDragon/tagent/assembly"
 )
 
-// TestReloadRefusesRestartOnlySectionsOfAnAddedAgent pins the boundary of the
-// added-agent hot path:
-//   - an agent the reload adds is constructed through the same native path Boot
-//     ran, so its tool, skill, read and file sections take effect with the
-//     generation
-//   - the memory, meditation and exec sections are not rebuilt by that path:
-//     their consumers (the memory plan, the reflection driver and the execution
-//     manager) are constructed once at Boot, so carrying one on an added agent
-//     would answer success for a value nothing reads
-//   - the reload refuses such an agent by name inside the restart-required
-//     family, the endpoint answers 409, and no configuration fact lands
+// TestReloadRefusesRestartOnlySectionsOfAnAddedAgent pins the boundary of the added-agent hot path.
+//   - an added agent is constructed through the native Boot path, so its tool, skill, read and file sections take effect with the generation
+//   - the memory, meditation and exec sections are not rebuilt by that path: their consumers are constructed once at Boot
+//   - carrying such a section on an added agent would answer success for a value nothing reads, so the reload refuses it by name
+//   - the endpoint answers 409 and no configuration fact lands
 //
 // 契约: docs/wiki/platform/org-hot-reload.md#restart-required-dimensions
 func TestReloadRefusesRestartOnlySectionsOfAnAddedAgent(t *testing.T) {

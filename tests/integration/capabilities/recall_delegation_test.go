@@ -19,12 +19,11 @@ import (
 	trpctool "trpc.group/trpc-go/trpc-agent-go/tool"
 )
 
-// TestRecallDelegationConsumesBothStages runs both stages of a recall delegation over the real surface:
+// TestRecallDelegationConsumesBothStages runs both stages of a recall delegation over the real surface.
 //   - the delegated turn's request carries the four recall tools and none of the caller's own
 //   - the rule stage runs for real: the retrieval tool answers the landed hits of the corpus
 //   - the model stage consumes that answer: the second request of the turn carries the retrieved keys
-//   - the values of the declared event params travel as the input refs the delegated
-//     input fact commits, and an unbacked reference renders nothing (Q2)
+//   - the declared event params travel as the input refs the delegated input fact commits, and an unbacked reference renders nothing (Q2)
 //
 // 契约: docs/wiki/tool/tool-architecture.md#recall-subtools
 func TestRecallDelegationConsumesBothStages(t *testing.T) {
@@ -127,13 +126,6 @@ func TestRecallDelegationConsumesBothStages(t *testing.T) {
 		}
 	}
 
-	// The structured envelope dissolved (r98): the declared event params are
-	// resolved by the delegated tool into the materials of the batch, and an
-	// unbacked reference silently does not materialize instead of rendering a
-	// bare identity. The batch of one round lands as ordinary input facts of the
-	// site — the instruction the round runs under and the task that closes the
-	// batch — and this run's chain holds no event under the named identity, so
-	// the reference projects no material fact at all.
 	site := event.Address{AgentID: "recall", SessionID: "session-recall-delegation#sub:call-recall"}
 	var task *event.Event
 	materials := 0

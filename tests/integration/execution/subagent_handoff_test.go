@@ -52,10 +52,6 @@ func TestSubagentHandoffEnvelope(t *testing.T) {
 		if !ok {
 			t.Fatal("the delegated turn recorded no model request")
 		}
-		// The structured envelope dissolved (r98): the caller states the task in
-		// its own words — the assembled instruction leads as a system message,
-		// the natural-language task follows — and a reference nothing backs
-		// silently does not materialize (Q2) instead of rendering a bare identity.
 		content := lastMessageContent(request)
 		if strings.Contains(content, "[handoff envelope]") {
 			t.Fatalf("delegated request carries the dissolved envelope block: %q", content)

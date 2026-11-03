@@ -11,8 +11,9 @@ import (
 	"github.com/SpellingDragon/tagent/assembly"
 )
 
-// TestRunInputsUseResidentConsumer proves that the public Run entries share the
-// address Consumer instead of directly driving a second loop beside it.
+// TestRunInputsUseResidentConsumer proves that the public Run entries share the address Consumer instead of directly driving a second loop beside it.
+//
+// 契约: docs/wiki/agent/event-flow.md#runner-flow
 func TestRunInputsUseResidentConsumer(t *testing.T) {
 	for _, entry := range []string{"invoke", "inject_event"} {
 		t.Run(entry, func(t *testing.T) {

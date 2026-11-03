@@ -11,15 +11,11 @@ import (
 	"github.com/SpellingDragon/tagent/api/model"
 )
 
-// TestConfigChangeSurvivesRestart keeps the configuration change fact as the
-// ledger a restart reads:
-//   - a prompt change files one config_change fact naming the publication
-//     generation
-//   - the host is closed and a fresh host is booted over the same storage root,
-//     so no live memory of the old process remains
-//   - the fact reads back from the durable chain with its identity, dimension,
-//     generation and body intact, which is the account the publication record
-//     cannot offer after a restart
+// TestConfigChangeSurvivesRestart keeps the configuration change fact as the ledger a restart reads.
+//   - a prompt change files one config_change fact naming the publication generation
+//   - the host is closed and a fresh host boots over the same storage root, so no live memory of the old process remains
+//   - the fact reads back from the durable chain with identity, dimension, generation and body intact
+//   - that is the account the publication record cannot offer after a restart
 //
 // 契约: docs/wiki/platform/org-hot-reload.md#generations
 func TestConfigChangeSurvivesRestart(t *testing.T) {
@@ -91,14 +87,10 @@ func TestConfigChangeSurvivesRestart(t *testing.T) {
 	}
 }
 
-// TestConfigChangeNeverReachesARequest keeps the configuration change fact out
-// of every model request:
-//   - the prompt change files a config_change fact that stays readable on the
-//     chain by its identity and body
-//   - the next request carries the published prompt body, so the request was
-//     assembled from the new generation
-//   - no request message carries the fact key, its summary or its body: the
-//     control-plane judgment never becomes transcript material
+// TestConfigChangeNeverReachesARequest keeps the configuration change fact out of every model request.
+//   - the prompt change files a config_change fact that stays readable on the chain by its identity and body
+//   - the next request carries the published prompt body, so the request was assembled from the new generation
+//   - no request message carries the fact key, summary or body: the control-plane judgment never becomes transcript material
 //
 // 契约: docs/wiki/agent/event-flow.md#projection-lifecycle
 func TestConfigChangeNeverReachesARequest(t *testing.T) {

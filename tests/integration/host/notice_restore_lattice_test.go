@@ -319,8 +319,6 @@ func runLatticeFailedFollowUp(t *testing.T) {
 			return scriptedAnswerOf(workerBody), nil
 		}
 		if scriptedRequestCarriesText(request, failureCause) {
-			// The failure observation landed as material of a request: the model
-			// really read the cause the receipt settled.
 			observationOnce.Do(func() { close(observationSeen) })
 			return scriptedAnswerOf("the failure observation reached the model"), nil
 		}

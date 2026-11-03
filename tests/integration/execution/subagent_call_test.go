@@ -318,9 +318,6 @@ func (r *subagentCallRig) submit(ctx context.Context, issuer event.Address, inpu
 	if err != nil {
 		return agent.Turn{}, err
 	}
-	// The resident segment mints its own range identity; the rig records it so
-	// later reads of this drive's delegation view name the range that issued the
-	// call rather than the input identity declared before the mount.
 	r.invocationID = answer.Turn.InvocationID
 	return answer.Turn, nil
 }

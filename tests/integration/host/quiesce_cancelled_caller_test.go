@@ -19,9 +19,6 @@ func TestQuiesceCancelledCallerAnswersCut(t *testing.T) {
 	defer scene.releaseWorker()
 	defer scene.releaseFollowUp()
 
-	// The notification's follow-up turn is on the chain but has not answered;
-	// waiting for it to reach the provider reads the close beside work the run
-	// still owes, not beside the failure a fast endpoint would have settled.
 	select {
 	case <-scene.followUpSeen:
 	case <-ctx.Done():

@@ -20,15 +20,11 @@ import (
 	"github.com/SpellingDragon/tagent/runtime/agent"
 )
 
-// TestReloadMovesTheEntryAgent moves the declared entry while one user turn runs:
-//   - the reload publishes the entry move as a new generation and files the one
-//     organization entry change, owned by the entry the document now names
-//   - the turn that began under the entry before the move still delivers through
-//     the outbound face: the in-flight turn keeps the view it was admitted under
-//   - the next turn at the entry the generation now declares is the user turn and
-//     delivers through the outbound face
-//   - a turn at the entry before the move is headless: it runs and delivers
-//     nothing, so the user port follows the entry the generation declares
+// TestReloadMovesTheEntryAgent moves the declared entry while one user turn runs.
+//   - the reload publishes the entry move as a new generation and files the one organization entry change, owned by the entry the document now names
+//   - the turn that began under the entry before the move still delivers through the outbound face: it keeps the view it was admitted under
+//   - the next turn at the entry the generation now declares is the user turn and delivers through the outbound face
+//   - a turn at the entry before the move is headless: it runs and delivers nothing, so the user port follows the entry the generation declares
 //
 // 契约: docs/wiki/platform/org-hot-reload.md#generations
 func TestReloadMovesTheEntryAgent(t *testing.T) {
@@ -39,9 +35,6 @@ func TestReloadMovesTheEntryAgent(t *testing.T) {
 	release := make(chan struct{})
 	var releaseOnce sync.Once
 	unblock := func() { releaseOnce.Do(func() { close(release) }) }
-	// A failed check must unblock the parked provider handler too: the scripted
-	// server waits for its requests when it closes, and a turn left in flight
-	// would hold the cleanup open instead of reporting the failure.
 	defer unblock()
 	provider.answer = func(index int) string {
 		if index == 0 {
@@ -171,14 +164,10 @@ func TestReloadMovesTheEntryAgent(t *testing.T) {
 	}
 }
 
-// TestReloadAddsAnAgentThatServesItsFirstTurn adds a declared agent between two
-// turns:
-//   - the reload publishes the added agent as a new generation and files the one
-//     organization agents change, owned by the added agent
-//   - the address the generation added answers a real turn on the model the
-//     document names for it, so the consumer mounts it on first use
-//   - the lease the publication mounted for the added agent serves a later model
-//     move: the next turn at that address runs on the installed version
+// TestReloadAddsAnAgentThatServesItsFirstTurn adds a declared agent between two turns.
+//   - the reload publishes the added agent as a new generation and files the one organization agents change, owned by the added agent
+//   - the address the generation added answers a real turn on the model the document names for it, so the consumer mounts it on first use
+//   - the lease the publication mounted for the added agent serves a later model move: the next turn at that address runs on the installed version
 //
 // 契约: docs/wiki/platform/org-hot-reload.md#generations
 func TestReloadAddsAnAgentThatServesItsFirstTurn(t *testing.T) {

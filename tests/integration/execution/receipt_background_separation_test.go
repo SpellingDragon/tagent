@@ -35,18 +35,12 @@ func TestReceiptAndBackgroundStaySeparate(t *testing.T) {
 		if len(req.Messages) == 1 {
 			return convToolTurn(convCall("call-a", "slow-tool", `{"wait":true}`), convCall("call-b", "fast-tool", `{}`))
 		}
-		// The latest input the request carries names the round it answers: a late
-		// settlement may follow that input inside the same view, so the answer is
-		// read from the round's own user turn rather than from the last message.
 		switch latestSepInput(req.Messages) {
 		case "turn-2":
 			return convFinalTurn("done-b")
 		case "turn-3":
 			return convFinalTurn("done-c")
 		}
-		// A range the late settlement opened reads a committed answer already and
-		// carries no new input: its answer is the settlement-driven one, named
-		// apart so the history ledger can tell it from the first range's answer.
 		if sepCarries(req.Messages, "done-a") {
 			return convFinalTurn("done-settled")
 		}
@@ -169,9 +163,6 @@ func TestReceiptAndBackgroundStaySeparate(t *testing.T) {
 			}
 		}
 		if obs.ToolID == "" {
-			// A settlement that lands after the closing decision reaches the next
-			// invocation's committed history; the counts ledger below pins that
-			// eventual arrival, so absence here is not yet a failure.
 			continue
 		}
 		if obs.Content != want.body {
@@ -184,11 +175,6 @@ func TestReceiptAndBackgroundStaySeparate(t *testing.T) {
 			t.Fatalf("observation of %s = %+v, want a new observation event beside no second synchronous tool response under the same call identity", want.callID, obs)
 		}
 	}
-	// Wire-facing slot invariant: within one request, a call identity owns at
-	// most one tool-role message — the admission receipt beside a live round,
-	// the settled fact on replay. Rounds of one range may repeat the receipt in
-	// their transcript replay, which is legal; a duplicate inside one payload
-	// is what providers reject, and the assembly must never emit one.
 	for at, req := range requests {
 		slots := map[string]int{}
 		for _, msg := range req.Messages {
@@ -202,10 +188,6 @@ func TestReceiptAndBackgroundStaySeparate(t *testing.T) {
 			}
 		}
 	}
-	// Full-duplex consumption may take a closing decision beside the receipts
-	// round, and that decision re-presents the range's in-flight transcript. The
-	// receipt is counted once per call in the range's latest view: the
-	// transcript repeating across one range's rounds is not a second response.
 	closingView := requests[len(requests)-1].Messages
 	for _, callID := range []string{"call-a", "call-b"} {
 		answered := 0
@@ -233,8 +215,6 @@ func TestReceiptAndBackgroundStaySeparate(t *testing.T) {
 	if turnTwo.Terminal != model.KindCompleted || turnTwo.DecisionCount < 1 {
 		t.Fatalf("second turn = (%v, %d decisions), want one completed decision over the shared session history", turnTwo.Terminal, turnTwo.DecisionCount)
 	}
-	// A settlement that lands after the closing decision reaches the history of
-	// the next input, so a third drive flushes the slow body into a real request.
 	turnThree, err := run.Invoke(ctx, assembly.InvokeRequest{
 		InvocationID: "inv-sep-3",
 		Address:      addr,
@@ -250,10 +230,6 @@ func TestReceiptAndBackgroundStaySeparate(t *testing.T) {
 	if len(requests) < 3 {
 		t.Fatalf("requests = %d, want the decisions of the driven invocations", len(requests))
 	}
-	// The flush range reads the history the earlier drives ended on, and a
-	// settlement that landed beside it may drive its own range after the flush
-	// returns: the view that presents all three inputs beside both settled
-	// bodies is awaited rather than assumed at the flush's return.
 	shared := awaitSepFlush(t, provider)
 	latest := ""
 	for _, msg := range shared {
@@ -286,9 +262,6 @@ func TestReceiptAndBackgroundStaySeparate(t *testing.T) {
 		case msg.Role == model.RoleTool && msg.ToolID == "call-b" && msg.ToolName == "fast-tool" && msg.Content == "bg-fast":
 			counts["fast settled body"]++
 		case msg.Role == model.RoleAssistant:
-			// Model answers are turns of the session, not result material: a
-			// settlement-driven range may answer beside the two driven turns, so
-			// their count is bounded below and never read as a duplicated fact.
 			answers++
 		default:
 			counts["unexpected"]++

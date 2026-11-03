@@ -10,15 +10,11 @@ import (
 	"github.com/SpellingDragon/tagent/assembly"
 )
 
-// TestConfigChangeReachesRequestBoundary drives the three anchors of the
-// metadata eventization leaf over the formal configuration entry:
-//   - prompt change: the request under way keeps the view it fixed, and the
-//     next request carries the newly published prompt source
-//   - model change: the decision under way keeps the model it began on, and the
-//     next decision runs the installed model its capture records
-//   - same request fixed view: further changes while one request is in flight
-//     leave that request entirely on its boundary view, and the next request
-//     reads only the latest published generation
+// TestConfigChangeReachesRequestBoundary drives the three anchors of the metadata eventization leaf over the formal configuration entry.
+//   - prompt change: the request under way keeps the view it fixed, and the next request carries the newly published prompt source
+//   - model change: the decision under way keeps the model it began on, and the next decision runs the installed model its capture records
+//   - same request fixed view: further changes while one request is in flight leave that request on its boundary view
+//   - the next request reads only the latest published generation
 //
 // 契约: docs/wiki/platform/org-hot-reload.md#generations
 func TestConfigChangeReachesRequestBoundary(t *testing.T) {

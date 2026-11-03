@@ -124,8 +124,6 @@ func TestNativeToolsAndSkillState(t *testing.T) {
 				t.Fatalf("first request tools = %v, want the registered %q carried into Request.Tools", requests[0].Tools, name)
 			}
 		}
-		// The real function/file/skill executions and the provider's visible tool
-		// table prove the public behavior formerly asserted through Binding.Set.
 	})
 
 	t.Run("the skill load state flows back into the state the effective binding carries", func(t *testing.T) {
@@ -313,7 +311,7 @@ func (m *ntModel) recorded() []model.Request {
 	return append([]model.Request(nil), m.requests...)
 }
 
-// requestCarries reports whether the actual native request presents the text.
+// nativeRequestCarries reports whether the actual native request presents the text.
 func nativeRequestCarries(request model.Request, text string) bool {
 	for _, message := range request.Messages {
 		if strings.Contains(message.Content, text) {

@@ -25,8 +25,7 @@ import (
 // TestScenario11ConfigDrivenSubagentAndPipeline drives one declaration of a parent beside its child.
 //   - the child is assembled on the model, prompt file and tool reference its own declaration names
 //   - the parent pipeline runs its Before and After passes in the declared plugin order
-//   - the parent's sub-agent call is admitted as a task: the model reads the minimal
-//     admission confirmation and the admitted task is read from the chain
+//   - the parent's sub-agent call is admitted as a task: the model reads the minimal admission confirmation and the task is read from the chain
 //   - the child result settles back to the parent address as a fact of its own
 //
 // 契约: docs/EXTENSIONS.md#pipeline-phases
@@ -110,10 +109,6 @@ func TestScenario11ConfigDrivenSubagentAndPipeline(t *testing.T) {
 	childRequests := child.recorded()
 
 	addr := event.Address{AgentID: "agent-parent", SessionID: "session-config-parent"}
-	// The receipt the model reads is the minimal admission confirmation and
-	// never the task identity: read the call→task link from the action command
-	// under the native call identity, and the child result from the settle fact
-	// that returns it to this address, as S03 reads its call→task link.
 	taskID, childResultDelivered := scenarioSubagentFacts(t, run, addr, "call-subagent", scenarioChildAnswer)
 
 	for at, req := range parentRequests {
@@ -140,10 +135,6 @@ func TestScenario11ConfigDrivenSubagentAndPipeline(t *testing.T) {
 	declaredAfter := scenarioDeclaredPortOrder(declared, recorder.plugins(),
 		plugin.PortFactObservation,
 		plugin.PortFactView)
-	// One After pass per committed fact is the process quantity. How many facts
-	// a turn commits is delivery-order dependent — a late settlement commits a
-	// fact of its own — so pin every group's declared order and the coverage of
-	// every committed fact, not the timing-dependent group count.
 	settleDeadline := time.Now().Add(5 * time.Second)
 	var afterGroups []scenarioAfterGroup
 	var afterFacts []event.Event

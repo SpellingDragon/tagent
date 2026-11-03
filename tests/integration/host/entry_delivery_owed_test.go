@@ -30,13 +30,10 @@ const (
 	entryOwedEntryModel = "model-reviewer"
 )
 
-// TestReloadMovedEntryDeliveryLandsOwedAcrossRestart pins the delivery account
-// to the entry the generation in effect declares, not the entry Boot froze:
+// TestReloadMovedEntryDeliveryLandsOwedAcrossRestart pins the delivery account to the entry the generation in effect declares.
 //   - a reload moves the declared entry from user to reviewer
-//   - a real turn at the moved entry registers its body as a durable owed
-//     obligation before the sender runs
-//   - the process is killed inside that send, and a fresh host booted over the
-//     same durable root delivers the owed body once to the entry in effect
+//   - a real turn at the moved entry registers its body as a durable owed obligation before the sender runs
+//   - the process is killed inside that send, and a fresh host booted over the same durable root delivers the owed body once to the entry in effect
 //
 // 契约: docs/wiki/platform/org-hot-reload.md#generations
 func TestReloadMovedEntryDeliveryLandsOwedAcrossRestart(t *testing.T) {

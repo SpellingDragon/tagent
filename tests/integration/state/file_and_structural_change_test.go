@@ -139,18 +139,13 @@ func newFileRig(t *testing.T) *fileRig {
 	}
 }
 
-// TestFileAndStructuralChange checks how the file face and the structural face of a configuration change stay on their own paths:
-// - a prompt or skill file rewritten between two requests is read and fixed anew at the next request boundary while the structural generation stays where it is
+// TestFileAndStructuralChange checks how the file face and the structural face of a configuration change stay on their own paths.
+// - a prompt or skill file rewritten between two requests is read and fixed anew at the next request boundary
+// - the structural generation stays where it is
 // - a replayed historical snapshot never pins the content a later request reads by source
-// - a structural change commits only through the publish precondition gate and a refused one leaves the effective binding as it was
+// - a structural change commits only through the publish precondition gate; a refused one leaves the effective binding as it was
 // - a request under way keeps one generation of model, tools and plugins while the file content it reads keeps updating
 //
-// The semantics the deleted routing face used to carry are anchored where they
-// now live: the host reload refuses a structural move by name
-// (tests/integration/host/reload_tiers_test.go), the sole publication entry
-// rolls back as one more generation (TestGenerationPublication), and the strict
-// decoder keeps the source and normalized line of a refused document
-// (TestDecodeStrictRefusesKeysOutsideTheCallerSchema).
 // 契约: docs/wiki/platform/org-hot-reload.md#generations
 func TestFileAndStructuralChange(t *testing.T) {
 	t.Run("a file change is read at the next request boundary while the structural generation stays", func(t *testing.T) {

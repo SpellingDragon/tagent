@@ -164,9 +164,9 @@ func TestSendDrivesTargetTurn(t *testing.T) {
 	})
 }
 
-// TestSendIdleTargetUsesResidentConsumer proves that an idle send is answered by the
-// target address's resident Consumer, not by a separate drive whose identity comes
-// from the send call. It observes only the formal Host, model tool and public chain.
+// TestSendIdleTargetUsesResidentConsumer proves an idle send is answered by the target address's resident Consumer.
+//   - the answering drive is the target's own Consumer, not a separate drive whose identity comes from the send call
+//   - the observations come only from the formal Host, model tool and public chain
 func TestSendIdleTargetUsesResidentConsumer(t *testing.T) {
 	scene := newHostDriveScene(t)
 	scene.bindPeer(t)
@@ -183,8 +183,8 @@ func TestSendIdleTargetUsesResidentConsumer(t *testing.T) {
 	scene.refuteOutbound(t)
 }
 
-// TestSendMountsBoundIdleConsumer covers a bound address that no Host.Invoke has
-// mounted. The public send must ensure its Consumer rather than leaving the input idle.
+// TestSendMountsBoundIdleConsumer covers a bound address that no Host.Invoke has mounted.
+//   - the public send must ensure its Consumer rather than leaving the input idle
 func TestSendMountsBoundIdleConsumer(t *testing.T) {
 	scene := newHostDriveScene(t)
 	ctx, cancel := context.WithTimeout(context.Background(), hostDriveWindow)
@@ -212,8 +212,8 @@ func TestSendMountsBoundIdleConsumer(t *testing.T) {
 	residentOutputAfter(t, scene, inputs[0])
 }
 
-// TestIdleSendReceiptDoesNotWaitForTargetAnswer proves that ok reports the committed
-// input, not the target's answer: the peer model remains parked after the receipt.
+// TestIdleSendReceiptDoesNotWaitForTargetAnswer proves that ok reports the committed input, not the target's answer.
+//   - the peer model remains parked after the receipt
 func TestIdleSendReceiptDoesNotWaitForTargetAnswer(t *testing.T) {
 	scene := newHostDriveScene(t)
 	scene.bindPeer(t)

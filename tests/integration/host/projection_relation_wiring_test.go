@@ -26,13 +26,12 @@ func (quietModel) GenerateContent(context.Context, *model.Request) (<-chan *mode
 
 func (quietModel) Info() model.Info { return model.Info{Name: "model-quiet"} }
 
-// TestProjectionFoldsByTheWiredConsumptionRelation pins the production wiring
-// of the consumption relation: the entry assembly hands each fact's
-// input_events to the projection, so an output that names only part of the
-// inputs it arrived beside closes its segment with the named ones and the
-// unnamed one rolls to the next segment. Remove the wiring line and every
-// entry reads position only — the late input would fold into the answered
-// segment and this anchor goes red by name.
+// TestProjectionFoldsByTheWiredConsumptionRelation pins the production wiring of the consumption relation.
+//   - the entry assembly hands each fact's input_events to the projection
+//   - an output that names only part of the inputs it arrived beside closes its segment with the named ones and the unnamed one rolls to the next segment
+//   - without the wiring line every entry reads position only, the late input folds into the answered segment, and this anchor goes red by name
+//
+// 契约: docs/wiki/agent/event-flow.md#projection-lifecycle
 func TestProjectionFoldsByTheWiredConsumptionRelation(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()

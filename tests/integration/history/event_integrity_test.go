@@ -2329,9 +2329,6 @@ func runFoldProductNoSelfTrigger(t *testing.T) {
 	if err != nil {
 		t.Fatalf("fold the folded projection again: %v", err)
 	}
-	// The forced fold (threshold<=1 always triggering) is retired by the
-	// capacity/candidate rules: a fold with no candidates mints nothing and
-	// reports not triggered, while the products it already minted stand.
 	if second.Triggered {
 		t.Fatalf("second fold report = %+v, want the candidate-gated fold to report not triggered", second)
 	}
@@ -2356,8 +2353,6 @@ func runFoldProductNoSelfTrigger(t *testing.T) {
 	if err != nil {
 		t.Fatalf("fold the synthetic-keyed segment: %v", err)
 	}
-	// The forced trigger beside no candidates is retired with the capacity
-	// gate: the synthetic-keyed plan reports not triggered and never folds.
 	if guardedReport.Triggered {
 		t.Fatalf("synthetic fold report = %+v, want the candidate-gated fold to report not triggered", guardedReport)
 	}
@@ -3643,10 +3638,6 @@ func runRangeHeadSurvivesFoldRewrite(t *testing.T) {
 	}
 	copies := 0
 	for _, msg := range requests[len(requests)-1].Messages {
-		// The budget prefix presents the notice at the first form the room
-		// allows — full text, ticket, stored summary or identity card — so a
-		// second presentation counts in every one of those forms, not only in
-		// the full material.
 		if strings.Contains(msg.Content, "task-77 settled") ||
 			strings.HasPrefix(msg.Content, "[ticket ") ||
 			strings.HasPrefix(msg.Content, "[notice ") ||

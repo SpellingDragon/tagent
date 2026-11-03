@@ -30,20 +30,11 @@ import (
 // after the identity lane is armed.
 const causalityTurns = 4
 
-// TestCompressionRequestCommitFailureKeepsFactChainConsistent is the causality
-// anchor of the request half of compression: the commit entry's refusal of a
-// judgment is the producer's error, never a silent hand-off to consumer
-// memory.
-//   - positive: the identity a judgment is quoted by already names another
-//     fact, so the fold's filing meets the named refusal of the one commit
-//     entry, and the observation answers that refusal as a visible gap
-//   - negative: no product answers the refused judgment and no synthetic
-//     entry presents one, so the consumer never executed memory the chain
-//     does not back
-//   - consumer: the whole scene runs over the public commit entry of a
-//     formally assembled run — the armed identities and the task turns all
-//     commit through CommitToSession, and the fold observes them through the
-//     published pipeline
+// TestCompressionRequestCommitFailureKeepsFactChainConsistent is the causality anchor of compression's request half.
+//   - positive: the identity a judgment is quoted by already names another fact, so the fold's filing meets the named refusal
+//   - the observation answers that refusal as a visible gap
+//   - negative: no product answers the refused judgment and no synthetic entry presents one
+//   - consumer: the scene runs over the public commit entry of a formally assembled run, from armed identities to published pipeline
 //
 // 契约: docs/wiki/agent/event-flow.md#projection-lifecycle
 func TestCompressionRequestCommitFailureKeepsFactChainConsistent(t *testing.T) {
@@ -64,11 +55,6 @@ func TestCompressionRequestCommitFailureKeepsFactChainConsistent(t *testing.T) {
 		t.Fatalf("assemble the runtime: %v", err)
 	}
 
-	// Predict the judgment identities the fold will quote, over the public
-	// planning face, for every prefix of the material the session will commit:
-	// the fold observes every commit, so every prefix of the chain is a state
-	// it judges, and every judgment it quotes at that state is content-addressed
-	// over the entries that prefix carries.
 	window := assembly.FoldWindow{
 		MaxTokens:         100,
 		CompressThreshold: config.DefaultCompressThreshold,
@@ -105,10 +91,6 @@ func TestCompressionRequestCommitFailureKeepsFactChainConsistent(t *testing.T) {
 	}
 	sort.Slice(identities, func(i, j int) bool { return identities[i] < identities[j] })
 
-	// Arm the identity lane: one foreign fact under every judgment identity,
-	// committed through the public entry, so the fold's filing of that judgment
-	// meets the named refusal of the one commit entry of the run — the very
-	// refusal a second fact under one identity answers.
 	lane := event.Address{AgentID: "agent-a", SessionID: "session-causality-lane"}
 	for at, id := range identities {
 		if _, err := run.CommitToSession(ctx, lane, event.Event{
@@ -121,18 +103,11 @@ func TestCompressionRequestCommitFailureKeepsFactChainConsistent(t *testing.T) {
 		}
 	}
 
-	// Drive the same material into the anchor session through the public
-	// commit entry: every commit's observation judges the session's projection
-	// and files the judgments the plan quoted — each into the refusal the lane
-	// armed.
 	addr := event.Address{AgentID: "agent-a", SessionID: "session-causality"}
 	for turn := 0; turn < causalityTurns; turn++ {
 		commitCompressTurn(t, ctx, run, addr, turn)
 	}
 
-	// The observation entry answered the refusal by name: the failed filing is
-	// a visible gap of the age-fold observer, carried on the fact of the
-	// session whose judgment was refused.
 	refused := 0
 	for _, presented := range run.Presentations() {
 		for _, gap := range presented.Gaps {
@@ -152,17 +127,12 @@ func TestCompressionRequestCommitFailureKeepsFactChainConsistent(t *testing.T) {
 		t.Fatalf("the refused judgment commit reached no observation gap: the fold answered a commit the entry refused as a filed judgment of session %s", addr.SessionID)
 	}
 
-	// The refused judgments stand on no chain: no committed request of the
-	// session answers an armed identity.
 	for _, evt := range compressFactsOf(run, addr.SessionID, event.CompressRequestType) {
 		if armed[evt.Key] {
 			t.Fatalf("the judgment %s the commit entry refused stands on the chain of %s", evt.Key, addr.SessionID)
 		}
 	}
 
-	// No product answers a refused judgment: the consumer executed no memory
-	// the chain does not back, so no product fact exists without a committed
-	// request of its own chain.
 	committed := compressRequestIDsOf(run, addr.SessionID)
 	products, _ := compressProductsOf(t, run, addr.SessionID)
 	for _, product := range products {
@@ -174,14 +144,10 @@ func TestCompressionRequestCommitFailureKeepsFactChainConsistent(t *testing.T) {
 		}
 	}
 
-	// No synthetic entry presents a refused judgment's fold: the projection
-	// carries no material a product placed, because no execution ran.
 	if synthetic := compressSyntheticKeysOf(t, run, addr.SessionID); len(synthetic) != 0 {
 		t.Fatalf("the projection of %s carries %d synthetic entr(ies) %v beside refused judgments, want none: the consumer folded material no fact judged", addr.SessionID, len(synthetic), synthetic)
 	}
 
-	// The business facts the refused fold judged stand exactly as they
-	// committed: a failed observation retracts nothing.
 	for turn := 0; turn < causalityTurns; turn++ {
 		for _, leg := range compressTurnLegs(turn) {
 			key := event.EventID(fmt.Sprintf("%02d-%s", turn, leg.position))
@@ -195,8 +161,6 @@ func TestCompressionRequestCommitFailureKeepsFactChainConsistent(t *testing.T) {
 		}
 	}
 
-	// The armed identities still name the lane facts the run committed under
-	// them: the refusal refused the judgment, not the standing facts.
 	for _, id := range identities {
 		held, err := run.CommittedEvent(ctx, id)
 		if err != nil || held.Type != event.TypeExternalInput {

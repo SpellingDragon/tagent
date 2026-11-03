@@ -104,21 +104,14 @@ var (
 	}
 )
 
-// TestCommittedReentryIsNotRetroactivelyDenied drives one delegated task
-// through the formal send{target:task} and pins what a failure after the
-// committed input may and may not do (design D3):
-//   - positive (committed_input_survives_unrecorded_terminal): a round that
-//     landed its input and then could not record its terminal leaves the ok it
-//     answered standing, files no denied and no broken receipt, and puts
-//     nothing back, so the task keeps the round it really holds and the replay
-//     of the same identity copies neither the body nor a second round.
-//   - positive (committed_round_failure_keeps_real_terminal): a round that
-//     genuinely fails settles the failed terminal of its own round, and the ok
-//     it already answered stands beside it.
-//   - negative (pre_commit_failure_stays_denied): a body sent before its own
-//     input can commit is still answered as a named denial, and the task stays
-//     re-enterable for a fresh identity that serves the later body exactly once
-//     after the round already in flight settles.
+// TestCommittedReentryIsNotRetroactivelyDenied drives one delegated task through the formal send{target:task} and pins post-commit failure behavior (design D3).
+//   - positive (committed_input_survives_unrecorded_terminal): a round that landed its input then could not record its terminal keeps its ok
+//   - it files no denied and no broken receipt and puts nothing back, so the task keeps the round it really holds
+//   - the replay of the same identity copies neither the body nor a second round
+//   - positive (committed_round_failure_keeps_real_terminal): a genuinely failing round settles the failed terminal of its own round
+//   - the ok it already answered stands beside it
+//   - negative (pre_commit_failure_stays_denied): a body sent before its own input can commit is still answered as a named denial
+//   - the task stays re-enterable for a fresh identity that serves the later body exactly once after the round in flight settles
 //
 // 契约: docs/wiki/agent/task-lifecycle.md#status-machine
 func TestCommittedReentryIsNotRetroactivelyDenied(t *testing.T) {
@@ -199,8 +192,6 @@ func (r *retroRig) decide(request scriptedRequest) (string, error) {
 	if task := retroNoticeTask(request, "failed"); task != "" && r.claim("replay") {
 		return retroSendAnswer(task, retroCallSend), nil
 	}
-	// A check that sends beside the in-flight round waits for the ok the first
-	// send answered, so the task is already running when the second body leaves.
 	if r.busySend != nil {
 		if task := sendRigSettledTask(request); task != "" {
 			if receipt, ok := sendRigReceipt(request, retroCallSend); ok && receipt == retroReceiptOK && r.claim("busy") {
@@ -208,9 +199,6 @@ func (r *retroRig) decide(request scriptedRequest) (string, error) {
 			}
 		}
 	}
-	// The later send waits for the settled terminal of the round the first send
-	// opened: its notice carries the round's verdict, so the request proves the
-	// terminal landed before the body is handed over again.
 	if sendRigCarries(request, retroDeniedPrefix) && sendRigCarries(request, retroSecondRound) && r.claim("resend") {
 		if task := sendRigSettledTask(request); task != "" {
 			return retroSendAnswerWithBody(task, retroCallResend, retroLaterBody), nil
@@ -629,8 +617,6 @@ func retroLegUnrecordedTerminal(t *testing.T) {
 		round2.hold()
 		return sendRigAnswered(retroSecondRound), nil
 	}
-	// The send decision replays the same identity beside the committed one, so
-	// the leg reads what a repeated delivery of an in-flight round answers.
 	rig.sendAnswer = func(task string) string {
 		call := wiringCall{id: retroCallSend, name: retroToolSend,
 			arguments: `{"target":{"task":"` + task + `"},"content":"` + retroBody + `"}`}
@@ -652,11 +638,6 @@ func retroLegUnrecordedTerminal(t *testing.T) {
 	retroAwaitReviewerBody(t, rig)
 	round2.awaitArrived(t)
 
-	// The input fact is committed and the receipt answered ok; the round is held
-	// at its verdict. Failing the task-fact commit now fails exactly the settle
-	// the closed round owes. The checks read the public task and delegation state
-	// while the shard is held, so what they assert is the settle path's own
-	// behavior rather than a receipt the failing account could not have filed.
 	shard := retroTaskFactShard(t, root)
 	retroHoldTaskFacts(t, shard)
 	round2.open()
@@ -768,9 +749,6 @@ func retroLegPreCommitRefusal(t *testing.T) {
 	retroAwaitReviewerBody(t, rig)
 	round2.awaitArrived(t)
 
-	// The first re-entry is in flight and held at its verdict. The second body
-	// arrives under a fresh identity, so the task table refuses it before any
-	// round of it is opened and its input never commits.
 	refused := retroAwaitReceipt(t, rig, retroCallBusy)
 	if !strings.HasPrefix(refused, retroDeniedPrefix) {
 		t.Fatalf("the receipt of the body sent beside the round in flight = %q, want the named denial of the task table", refused)
@@ -792,16 +770,12 @@ func retroLegPreCommitRefusal(t *testing.T) {
 		t.Fatalf("reviewing rounds carrying the refused body = %d, want none beside an input that never committed", len(rounds))
 	}
 
-	// The round the first send opened was never touched by the refusal: it
-	// settles its own terminal, and the task is settled again for a later send.
 	round2.open()
 	material := retroAwaitNotice(t, host, task, 2, "settled")
 	if !strings.Contains(material, retroSecondRound) {
 		t.Fatalf("the notice of the re-entered round = %q, want the verdict the round produced", material)
 	}
 
-	// The refusal compensated nothing it had moved, so the task stays
-	// re-enterable: a fresh identity serves the later body exactly once.
 	if receipt := retroAwaitReceipt(t, rig, retroCallResend); receipt != retroReceiptOK {
 		t.Fatalf("the later send after the terminal = %q, want the bare %q of a task the refusal left re-enterable", receipt, retroReceiptOK)
 	}

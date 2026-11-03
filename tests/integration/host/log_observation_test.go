@@ -192,10 +192,6 @@ func TestLogObservationThroughTheFormalEntry(t *testing.T) {
 		if !logger.mentions("info", "turn end", "agent=agent-a", "session=session-log-boundary") {
 			t.Fatalf("info lines = %v, want the turn-end boundary of the session", logger.at("info"))
 		}
-		// The end boundary names the segment the resident Consumer minted for the
-		// session; the caller's own invocation survives on the chain, so the
-		// identity is proven from the rendered line and the chain input fact it
-		// consumed, never from the caller identity alone.
 		segment := boundaryInvocation(t, observedLine(t, logger.at("info"), "turn end"))
 		addr := event.Address{AgentID: "agent-a", SessionID: "session-log-boundary"}
 		input := entryAnswerIdentity(t, run, addr, segment, "inv-log-boundary")

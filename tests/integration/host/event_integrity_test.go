@@ -2798,8 +2798,10 @@ func runWhitelistGrantsSendAndTargetReadsIt(t *testing.T) {
 // - inflight_stream_keeps_start_version: a stream that began before the replacement keeps its start version to the end
 // - duplicate_same_version_not_reinstalled: a same-version reload and a same-version model configuration change publish and install nothing, with a named result
 // - failed_replacement_not_installed: a refused rebuild installs no version and leaves the version in effect serving
-// - formal_reload_entry: POST /reload publishes the rewritten document, files one configuration change of the model dimension and the next real request is served by the new version
-// - failed_install_retried_by_next_reload: a model install the reload could not complete is judged again by the next carried reload, under the same fact identity, and the install lands then
+// - formal_reload_entry: POST /reload publishes the rewritten document and files one model configuration change
+// - the next real request is served by the new version
+// - failed_install_retried_by_next_reload: a model install the reload could not complete is judged again by the next carried reload
+// - the install lands then, under the same fact identity
 //
 // 契约: docs/wiki/platform/org-hot-reload.md#fingerprint
 func TestEventIntegrityReplacement(t *testing.T) {
@@ -3260,15 +3262,11 @@ func runFormalReloadEntry(t *testing.T) {
 	closeIntegrityHost(t, ctx, host)
 }
 
-// runFailedInstallRetriedByNextReload requires a model install the first reload
-// could not complete to be judged again by the next carried reload:
-//   - the first reload publishes the rewritten document and files the one model
-//     configuration change, while the rebuild refuses the version because the
-//     provider key is absent
-//   - the next reload carries the same document, so the publication is unchanged
-//     and the change is re-judged under the same content-addressed fact identity
-//   - the duplicate identity still runs the After pass, so the install lands then,
-//     without a second fact and without a second generation
+// runFailedInstallRetriedByNextReload requires a model install the first reload could not complete to be judged again by the next carried reload.
+//   - the first reload publishes the rewritten document and files the one model configuration change
+//   - the rebuild refuses the version because the provider key is absent
+//   - the next reload carries the same document, so the publication is unchanged and the change is re-judged under the same content-addressed fact identity
+//   - the duplicate identity still runs the After pass, so the install lands then, without a second fact and without a second generation
 func runFailedInstallRetriedByNextReload(t *testing.T) {
 	provider := newScriptedProvider(t)
 	root := t.TempDir()

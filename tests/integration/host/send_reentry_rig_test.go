@@ -96,8 +96,6 @@ func (r *sendRig) decide(request scriptedRequest) (string, error) {
 		return sendRigAnswered(sendRigFirstRound), nil
 	}
 	if task := r.reentryTask; task != "" {
-		// A restarted process re-enters the task its predecessor left: it neither
-		// delegates a second review nor reads a terminal off a chain of its own.
 		if r.claim("send") {
 			return settleToolCallAnswer(sendRigToolSend, r.sendCall, `{"target":{"task":"`+string(task)+
 				`"},"content":"`+sendRigBody+`"}`), nil

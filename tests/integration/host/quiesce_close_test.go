@@ -144,10 +144,11 @@ func runQuiesceDerivedNotSelfLocked(t *testing.T) {
 	}
 }
 
-// TestQuiesceOfflineCutReport pins the three-state exit of one close over the formal host assembly:
+// TestQuiesceOfflineCutReport pins the three-state exit of one close over the formal host assembly.
 // - a close that names no timeout is refused by name instead of waiting
 // - a close that names two disagreeing timeouts is refused by name
-// - a close beside an unreachable model settles the failed follow-up with its receipt, names the failure in the report, and lets the failure observation reach a real model request
+// - a close beside an unreachable model settles the failed follow-up with its receipt
+// - the report names the failure and lets the failure observation reach a real model request
 //
 // 契约: docs/wiki/agent/execution-generations.md#lifecycle-convergence
 func TestQuiesceOfflineCutReport(t *testing.T) {
@@ -225,8 +226,6 @@ func runQuiesceOfflineCutReport(t *testing.T) {
 			return scriptedAnswerOf(workerBody), nil
 		}
 		if scriptedRequestCarriesText(request, failureCause) {
-			// The failure observation landed as material of a request: the model
-			// really read the cause the close settled.
 			observationOnce.Do(func() { close(observationSeen) })
 			return "", errors.New(failureCause)
 		}

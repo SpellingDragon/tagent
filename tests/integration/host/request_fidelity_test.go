@@ -367,9 +367,6 @@ func runFidelityRequestAfterCompression(t *testing.T) {
 		}
 	}
 	requireFidelityPairing(t, provider, "the request after compression")
-	// The fold that landed while the tool turn was in progress kept the pair
-	// whole: the request carries exactly the one call-result message of the call,
-	// never the same observation admitted a second time beside the fold product.
 	if tools := fidelityCountToolMessages(target); tools != 1 {
 		t.Fatalf("the compressed request carries %d role=tool call-result message(s), want the one result of %q the fold kept whole: %+v", tools, callID, target.Messages)
 	}
