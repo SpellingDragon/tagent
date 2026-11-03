@@ -286,24 +286,32 @@ func symptomAwaitSendReceipt(t *testing.T, provider *symptomProvider, window tim
 const symptomTaskNoticePrefix = "tagent: task "
 
 // symptomReceipt reports the result text the model saw beside one call: the answer the
-// call settled into follows the message that carries the call identity, as the input
-// material the run hands the decision that reads it. Two other messages stand there
-// instead when the answer has not landed yet — the bare admission receipt the call was
-// acknowledged with while its result still runs, and the input material of a task
-// notification that settled in the same chain — and neither answers this call, so a
-// request carrying one of them reports no answer. The answered rendering supersedes the
-// receipt one in every request the run assembles after the result lands, so the newest
-// request carrying the call is read: a call whose answer still runs answers no receipt.
+// call settled into is replayed under the call identity in every request the run
+// assembles after the result lands, and the decision that reads the live result carries
+// it as the input material of the turn. Two other messages stand beside a call whose
+// answer still runs — the bare admission receipt it was acknowledged with and the input
+// material of a task notification that settled in the same chain — and neither answers
+// this call. The replay is read from every recorded request before the positional read,
+// so a request whose range ended before the result landed never answers a call the
+// result fact already answered; only a call whose answer is the bare receipt itself is
+// read positionally, because its replay and its admission carry the same text.
 func symptomReceipt(requests []intakeRequest, callID string) (string, bool) {
+	for at := len(requests) - 1; at >= 0; at-- {
+		for _, message := range requests[at].Messages {
+			if message.ToolCallID != callID {
+				continue
+			}
+			if strings.TrimSpace(message.Content) != task.AdmissionReceiptText {
+				return message.Content, true
+			}
+		}
+	}
 next:
 	for at := len(requests) - 1; at >= 0; at-- {
 		request := requests[at]
 		for index, message := range request.Messages {
 			if message.ToolCallID != callID {
 				continue
-			}
-			if strings.TrimSpace(message.Content) != task.AdmissionReceiptText {
-				return message.Content, true
 			}
 			for _, later := range request.Messages[index+1:] {
 				if later.Role != string(model.RoleUser) || symptomTaskNotice(later.Content) {
