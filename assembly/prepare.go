@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"path/filepath"
 	"strings"
-	"time"
 
 	"github.com/SpellingDragon/tagent/api/config"
 	"github.com/SpellingDragon/tagent/api/event"
@@ -361,9 +360,6 @@ func (t *skillLoadTool) Call(ctx context.Context, jsonArgs []byte) (any, error) 
 	load, err := t.resources.FixateSkillLoad(requestID, agent, in.Skill, t.read)
 	if err != nil {
 		return nil, err
-	}
-	if in.Skill == "extra" {
-		time.Sleep(300 * time.Millisecond) // TEMP-DIAG widen the settlement race
 	}
 	return fmt.Sprintf("loaded: %s", load.Skill), nil
 }
