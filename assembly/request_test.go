@@ -3,6 +3,9 @@ package assembly
 import (
 	"bytes"
 	"context"
+	"os"
+	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -11,8 +14,10 @@ import (
 	"github.com/SpellingDragon/tagent/api/event"
 	"github.com/SpellingDragon/tagent/api/model"
 	"github.com/SpellingDragon/tagent/features/rl"
+	"github.com/SpellingDragon/tagent/memory/replay"
 	"github.com/SpellingDragon/tagent/runtime/agent"
 	"github.com/SpellingDragon/tagent/runtime/state"
+	"github.com/SpellingDragon/tagent/tool/subagent"
 
 	trpctool "trpc.group/trpc-go/trpc-agent-go/tool"
 )
@@ -116,6 +121,145 @@ func TestRequestSnapshotsSingleSource(t *testing.T) {
 			t.Fatalf("call arguments beside no capture = %q, want the empty argument object", got)
 		}
 	})
+}
+
+// TestProjectionRendersTheStatedMessageRole pins the one message-role rendering rule both assembly paths share.
+//
+// 契约: docs/wiki/memory/memory-architecture.md#event-shape
+func TestProjectionRendersTheStatedMessageRole(t *testing.T) {
+	projection := replay.NewReplayProjection()
+	projection.Append(context.Background(), replay.WithMessageRole(replay.ProjectionEntry{
+		Key:     "1-instruction",
+		Type:    event.TypeExternalInput,
+		Content: "review the change",
+	}, string(model.RoleSystem)))
+	projection.Append(context.Background(), replay.ProjectionEntry{
+		Key:     "2-task",
+		Type:    event.TypeExternalInput,
+		Content: "the change under review",
+	})
+	messages, err := projectedSegment(context.Background(), nil, projection, FoldWindow{}, 2)
+	if err != nil {
+		t.Fatalf("project the entries: %v", err)
+	}
+	if len(messages) != 2 {
+		t.Fatalf("projected messages = %d, want the two entries", len(messages))
+	}
+	if messages[0].Role != model.RoleSystem {
+		t.Fatalf("instruction role = %q, want the role its own message stated", messages[0].Role)
+	}
+	if messages[1].Role != model.RoleUser {
+		t.Fatalf("task role = %q, want the frozen type's role beside a message stating none", messages[1].Role)
+	}
+}
+
+// TestDelegatedAssemblyReadsItsInstructionThroughTheFileFact pins the preset read of a delegated assembly through the file change fact.
+//
+// 契约: docs/wiki/agent/event-flow.md#event-pipeline-atomic
+func TestDelegatedAssemblyReadsItsInstructionThroughTheFileFact(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	const (
+		bootBody = "PRESET-FACT-BOOT-INSTRUCTION"
+		nextBody = "PRESET-FACT-NEXT-INSTRUCTION"
+	)
+	dir := t.TempDir()
+	promptPath := filepath.Join(dir, "system.md")
+	writePresetPrompt(t, promptPath, bootBody+"\n")
+
+	spec := config.AgentSpec{
+		ID:    "agent-a",
+		Model: "model-a",
+		Files: []config.FileRef{{Path: promptPath, Kind: config.FileKindPrompt}},
+		Tools: []config.ToolRef{{Name: subagent.CallSubagentRef}},
+	}
+	decl := &config.Declaration{Entry: "agent-a", Agents: []config.AgentSpec{spec}}
+	run, err := Assemble(ctx, decl, map[event.AgentID]NativeAgent{
+		"agent-a": {Model: &snapshotTestModel{answer: func(*model.Request) *model.Response {
+			return &model.Response{
+				Choices: []model.Choice{{Message: model.Message{Role: model.RoleAssistant, Content: "settled"}}},
+				Done:    true,
+			}
+		}}},
+	}, WithGovernance(snapshotTestGovernance{}))
+	if err != nil {
+		t.Fatalf("assemble the runtime: %v", err)
+	}
+
+	filed := presetFileFact(t, ctx, run, promptPath, bootBody+"\n")
+	if filed.Type != event.TypeConfigChange {
+		t.Fatalf("preset file fact type = %q, want the configuration change family", filed.Type)
+	}
+	if got := filed.Meta[event.MetaKeyConfigChangeDimension]; got != event.ConfigChangeDimensionFile {
+		t.Fatalf("preset file fact dimension = %q, want the file dimension", got)
+	}
+	if filed.Owner.AgentID != "agent-a" {
+		t.Fatalf("preset file fact owner = %q, want the agent whose prompt files carry the instruction", filed.Owner.AgentID)
+	}
+
+	assembly, err := run.presetAssembly(ctx, "agent-a", spec, nil)
+	if err != nil {
+		t.Fatalf("resolve the delegated assembly: %v", err)
+	}
+	if assembly.Instruction != bootBody {
+		t.Fatalf("delegated instruction = %q, want the %q the file fact carries", assembly.Instruction, bootBody)
+	}
+	if after := run.CommittedFacts(); after != 1 {
+		t.Fatalf("committed facts = %d after re-reading the same content, want the one fact the content names", after)
+	}
+
+	writePresetPrompt(t, promptPath, nextBody+"\n")
+	assembly, err = run.presetAssembly(ctx, "agent-a", spec, nil)
+	if err != nil {
+		t.Fatalf("resolve the delegated assembly of the rewritten prompt: %v", err)
+	}
+	if assembly.Instruction != nextBody {
+		t.Fatalf("delegated instruction beside the rewrite = %q, want the rewritten body %q", assembly.Instruction, nextBody)
+	}
+	if after := run.CommittedFacts(); after != 2 {
+		t.Fatalf("committed facts = %d after the rewrite, want one fact per content version the assembly read", after)
+	}
+	rewritten := presetFileFact(t, ctx, run, promptPath, nextBody+"\n")
+	if body := rewritten.Message.Content; !strings.Contains(body, nextBody) {
+		t.Fatalf("rewritten preset file fact body = %q, want the rewritten body", body)
+	}
+	if earlier, err := run.CommittedEvent(ctx, presetFileFactID(promptPath, bootBody+"\n")); err != nil {
+		t.Fatalf("read the earlier preset file fact back: %v", err)
+	} else if earlier.Message.Content != filed.Message.Content {
+		t.Fatalf("earlier preset file fact body = %q, want the content it filed, %q", earlier.Message.Content, filed.Message.Content)
+	}
+}
+
+// writePresetPrompt writes one prompt body under the given path.
+func writePresetPrompt(t *testing.T, path, body string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("create the prompt directory: %v", err)
+	}
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatalf("write the prompt file %s: %v", path, err)
+	}
+}
+
+// presetFileFact reports the file change fact one preset read of the prompt files
+// files: the identity is the one the boundary derives for the content, so a check
+// reads the committed fact by it instead of scanning the chain.
+func presetFileFact(t *testing.T, ctx context.Context, run *Run, path, content string) event.Event {
+	t.Helper()
+	fact, err := run.CommittedEvent(ctx, presetFileFactID(path, content))
+	if err != nil {
+		t.Fatalf("read the preset file fact of %s: %v", path, err)
+	}
+	return fact
+}
+
+// presetFileFactID derives the identity one preset read files for the content:
+// the file reference the boundary reads the content under beside the content
+// itself, exactly as the request boundary derives the file dimension identity.
+func presetFileFactID(path, content string) event.EventID {
+	ref := config.FileRef{Path: filepath.Base(filepath.FromSlash(path)), Kind: config.FileKindPrompt}
+	return event.ConfigChangeFor("agent-a", event.ConfigChangeDimensionFile, fileFactGeneration,
+		fileFactHeader(ref, content)+"\n"+content).ID
 }
 
 // snapshotTestCapture builds the trajectory capture one assembled run fixes its
