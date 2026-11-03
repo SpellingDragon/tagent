@@ -502,8 +502,8 @@ var errDelegatedBuilderUnbacked = errors.New("assembly: the delegated round carr
 // resolution is rebuilt.
 //
 // The read is the construction the publisher already runs for that agent, so no
-// second tool factory sits beside the real one: a tool the declaration no longer
-// grants is refused by the same resolver that would refuse it at the next
+// second tool factory sits beside the real one: a tool the declaration does not
+// grant is refused by the same resolver that would refuse it at the next
 // publication.
 func (r *Run) delegatedBuilder(ctx context.Context, issuer event.AgentID) (subagent.Builder, error) {
 	r.mu.Lock()
@@ -616,10 +616,6 @@ func (r *Run) presetSubagent(ctx context.Context, agents map[event.AgentID]Nativ
 		}
 		builder.Skills = func(context.Context, []string) (skill.Repository, error) { return repository, nil }
 	}
-	// The first tool of the run mints the continuation account its delegated
-	// rounds are parked in; every later tool of the run is built beside the
-	// account the first one answered with, so a re-entry after a generation
-	// change reaches the task through the tool that served it.
 	r.mu.Lock()
 	tool, shared, err := subagent.NewTool(subagent.ToolOptions{
 		Parent:     parent,

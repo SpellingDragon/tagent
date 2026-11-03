@@ -7,10 +7,12 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	trpclog "trpc.group/trpc-go/trpc-agent-go/log"
 
 	"github.com/SpellingDragon/tagent/api/event"
+	"github.com/SpellingDragon/tagent/api/model"
 	"github.com/SpellingDragon/tagent/runtime/state"
 	"github.com/SpellingDragon/tagent/runtime/task"
 )
@@ -392,8 +394,7 @@ func watchDelegationLog(t *testing.T, observer trpclog.Logger) func() {
 	return restore
 }
 
-// TestDelegationEntryRestored pins the ledger entry a restarted process rebuilds
-// from the task the record already carries:
+// TestDelegationEntryRestored pins the ledger entry a restarted process rebuilds from the task the record carries.
 // - a settled delegated task restores into a settled entry that reopens onto the round a reactivation opens, and books that round
 // - the rebuilt entry carries the invocation, call, decision and return site the task recorded
 // - a running task restores into an entry the reopen still refuses by name
@@ -486,4 +487,390 @@ func TestDelegationEntryRestored(t *testing.T) {
 			t.Fatalf("precheck after the refused restore = %v, want %v", err, ErrDelegationUnknown)
 		}
 	})
+}
+
+// TestDelegatedTaskCommitFailureLeavesNoSegment pins that a refused task commit leaves the delegated round unstarted.
+// - the caller reads the named cause of the refusal beside the failed terminal
+// - the chain holds the instruction and the material facts and no task fact
+// - no segment of the site was driven: no model request and the resident instance rests
+// - a restarted loop over the same chain drives nothing either: the batch is read only through its task fact
+//
+// 契约: docs/wiki/agent/agent-architecture.md#subagent-loop
+func TestDelegatedTaskCommitFailureLeavesNoSegment(t *testing.T) {
+	refused := errors.New("agent: the ledger refused the task fact")
+	site := event.Address{AgentID: "agent-reviewer", SessionID: "session-caller#sub:call-review"}
+	loop := NewLoop(state.NewBindings(), state.NewOccupancy(), "instance-batch", nil)
+	history := newInvariantLoopHistory()
+	loop.SetHistory(history)
+	ledger := &batchCommitFace{history: history, refuse: delegatedPartTask, cause: refused}
+	loop.SetFactCommit(ledger.commit)
+
+	script := newInvariantLoopModel("the round must not run", nil)
+	binding := state.AgentBinding{Model: script, PromptSource: state.PromptSource{Version: "v1"}}
+	consumers := NewConsumers(loop, context.Background(), nil)
+	loop.SetConsumers(consumers)
+	t.Cleanup(consumers.Stop)
+
+	ctx, cancel := context.WithTimeout(context.Background(), backflowNestedBudget)
+	defer cancel()
+	answer, err := loop.SubmitDelegated(ctx, DelegatedInput{
+		Site:        site,
+		Binding:     binding,
+		Instruction: "record every finding beside the file it names",
+		Request:     "the task whose commit the ledger refuses",
+		Materials: []event.Event{{
+			Key:     "ev-source",
+			Type:    event.TypeExternalInput,
+			Message: model.Message{Role: model.RoleUser, Content: "the material the batch projects"},
+		}},
+	})
+	if err == nil {
+		t.Fatalf("the refused task commit answered no error: the round ran beside a batch that never closed (answer=%+v)", answer)
+	}
+	if !errors.Is(err, refused) {
+		t.Fatalf("the refused task commit answered %v, want the named cause %v", err, refused)
+	}
+	if answer.Status != task.StatusFailed || !strings.Contains(answer.Failure, refused.Error()) {
+		t.Fatalf("the refused round = (%q, %q), want the failed terminal naming %q", answer.Failure, answer.Status, refused.Error())
+	}
+
+	facts := history.SessionFacts(site)
+	parts := map[string]int{}
+	for _, fact := range facts {
+		parts[fact.Meta[delegatedPartMeta]]++
+	}
+	if parts[delegatedPartInstruction] != 1 || parts[delegatedPartMaterial] != 1 || parts[delegatedPartTask] != 0 {
+		t.Fatalf("facts of the refused batch = %v, want the instruction and the material landed and no task: %+v", parts, facts)
+	}
+
+	if requests := script.requestMessages(); len(requests) != 0 {
+		t.Fatalf("model requests = %d beside a batch whose task never landed, want no segment driven: %+v", len(requests), requests)
+	}
+	resident := consumers.Ensure(site)
+	if resident == nil {
+		t.Fatalf("the resident instance of %s = nil, want the mounted instance the round would run on", site.SessionID)
+	}
+	invariantAwait(t, resident.Resting)
+
+	restarted := NewLoop(state.NewBindings(), state.NewOccupancy(), "instance-batch-restart", nil)
+	restarted.SetHistory(history)
+	restartedScript := newInvariantLoopModel("the restarted round must not run", nil)
+	restartedBinding := state.AgentBinding{Model: restartedScript, PromptSource: state.PromptSource{Version: "v1"}}
+	restartedScripts := NewConsumers(restarted, context.Background(), nil)
+	restarted.SetConsumers(restartedScripts)
+	t.Cleanup(restartedScripts.Stop)
+	mounted := make(chan struct{}, 4)
+	restartedScripts.SetProgress(func() {
+		select {
+		case mounted <- struct{}{}:
+		default:
+		}
+	})
+	instance := restartedScripts.mount(site, &restartedBinding)
+	if instance == nil {
+		t.Fatalf("the restarted loop mounted no instance for %s", site.SessionID)
+	}
+	instance.Wake()
+	select {
+	case <-mounted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the restarted loop never finished its first read of the chain")
+	}
+	if requests := restartedScript.requestMessages(); len(requests) != 0 {
+		t.Fatalf("model requests = %d after the restart, want the orphan facts to drive nothing: %+v", len(requests), requests)
+	}
+}
+
+// batchCommitFace is the commit face of one delegated batch that refuses the
+// named part: every other fact lands into the chain face the way the run's
+// ledger lands it, and the part it was fixed to refuse answers the named cause
+// beside no record.
+type batchCommitFace struct {
+	mu      sync.Mutex
+	history *invariantLoopHistory
+	refuse  string
+	cause   error
+	seq     int
+}
+
+// commit keeps one fact of the batch, or answers the refusal the face was fixed
+// with when the fact states the refused part.
+func (f *batchCommitFace) commit(evt event.Event) (event.EventID, error) {
+	if evt.Meta[delegatedPartMeta] == f.refuse {
+		return "", f.cause
+	}
+	f.mu.Lock()
+	if evt.Key == "" {
+		f.seq++
+		evt.Key = event.EventID(fmt.Sprintf("minted-batch-%d", f.seq))
+	}
+	f.mu.Unlock()
+	f.history.land(evt)
+	return evt.Key, nil
+}
+
+// TestDelegatedInstructionLandsOncePerSite pins that a delegated instruction commits once per execution site.
+// - the site's chain holds exactly one system-message fact under the stable site key, carrying the instruction, its part and the delegation lineage
+// - the fact carries no stamp of the round it was committed beside
+// - a second round of the same site re-commits that identity and lands no second fact, while both rounds read it as a system message
+//
+// 契约: docs/wiki/agent/agent-architecture.md#subagent-loop
+func TestDelegatedInstructionLandsOncePerSite(t *testing.T) {
+	const instruction = "record every finding beside the file it names"
+	site := event.Address{AgentID: "agent-reviewer", SessionID: "session-caller#sub:call-review"}
+	loop := NewLoop(state.NewBindings(), state.NewOccupancy(), "instance-instruction", nil)
+	history := newInvariantLoopHistory()
+	loop.SetHistory(history)
+	ledger := newDelegatedBatchLedger(history)
+	loop.SetFactCommit(ledger.commit)
+
+	script := newInvariantLoopModel("review recorded", nil)
+	binding := state.AgentBinding{Model: script, PromptSource: state.PromptSource{Version: "v1"}}
+	consumers := NewConsumers(loop, context.Background(), nil)
+	loop.SetConsumers(consumers)
+	t.Cleanup(consumers.Stop)
+
+	ctx, cancel := context.WithTimeout(context.Background(), backflowNestedBudget)
+	defer cancel()
+	for _, body := range []string{"review the first change", "review the second change"} {
+		answer, err := loop.SubmitDelegated(ctx, DelegatedInput{
+			Site:        site,
+			Binding:     binding,
+			Instruction: instruction,
+			Request:     body,
+		})
+		if err != nil {
+			t.Fatalf("the delegated round of %q = %v, want the settled answer", body, err)
+		}
+		if answer.Status != task.StatusSettled || answer.Body != "review recorded" {
+			t.Fatalf("the delegated round of %q = (%q, %q), want the settled body the site produced", body, answer.Body, answer.Status)
+		}
+	}
+
+	facts := history.SessionFacts(site)
+	instructions := make([]event.Event, 0, 1)
+	for _, fact := range facts {
+		if fact.Meta[delegatedPartMeta] == delegatedPartInstruction {
+			instructions = append(instructions, fact)
+		}
+	}
+	if len(instructions) != 1 {
+		t.Fatalf("instruction facts on the site chain = %d, want the one instruction of the site: %+v", len(instructions), facts)
+	}
+	got := instructions[0]
+	if want := "delegated-agent-reviewer@session-caller#sub:call-review-instruction"; string(got.Key) != want {
+		t.Fatalf("instruction fact key = %q, want the stable site key %q", got.Key, want)
+	}
+	if got.Type != event.TypeExternalInput {
+		t.Fatalf("instruction fact type = %q, want the external input %q", got.Type, event.TypeExternalInput)
+	}
+	if got.Message.Role != model.RoleSystem {
+		t.Fatalf("instruction fact role = %q, want the system message the instruction lands as", got.Message.Role)
+	}
+	if got.Message.Content != instruction {
+		t.Fatalf("instruction fact body = %q, want the instruction the round runs under", got.Message.Content)
+	}
+	if got.Meta[event.MetaKeyTriggerSource] != event.LineageDelegation {
+		t.Fatalf("instruction fact lineage = %q, want the delegation lineage %q", got.Meta[event.MetaKeyTriggerSource], event.LineageDelegation)
+	}
+	if got.DecisionID != "" || got.AttemptID != "" || got.CallID != "" || got.EpisodeID != "" || got.TaskID != "" {
+		t.Fatalf("instruction fact carries round stamps (%q, %q, %q, %q, %q): the fact is one fact of the site",
+			got.DecisionID, got.AttemptID, got.CallID, got.EpisodeID, got.TaskID)
+	}
+
+	if attempted := ledger.attempted(delegatedPartInstruction); attempted != 2 {
+		t.Fatalf("instruction commits attempted = %d, want one per round so a re-entry keeps the fact of the site", attempted)
+	}
+	if landed := ledger.landed(delegatedPartInstruction); landed != 1 {
+		t.Fatalf("instruction facts landed = %d, want the one identity the site already names", landed)
+	}
+
+	tasks := 0
+	for _, fact := range facts {
+		if fact.Meta[delegatedPartMeta] == delegatedPartTask {
+			tasks++
+		}
+	}
+	if tasks != 2 {
+		t.Fatalf("task facts on the site chain = %d, want one per round", tasks)
+	}
+
+	requests := script.requestMessages()
+	if len(requests) != 2 {
+		t.Fatalf("model requests = %d, want the one request of each round", len(requests))
+	}
+	for at, messages := range requests {
+		if !carriesSystemMessage(messages, instruction) {
+			t.Fatalf("round %d request carries no system message with the instruction: %+v", at+1, messages)
+		}
+	}
+}
+
+// carriesSystemMessage reports whether one request carries the text as a system
+// message.
+func carriesSystemMessage(messages []model.Message, text string) bool {
+	for _, message := range messages {
+		if message.Role == model.RoleSystem && message.Content == text {
+			return true
+		}
+	}
+	return false
+}
+
+// delegatedBatchLedger is the commit face of one delegated batch. It lands each
+// fact into the chain face the way the run's ledger does — one record per
+// identity, and a second commit under an identity the ledger already names is
+// the commitment it already is — and counts what it saw per delegated part, so a
+// check tells a commit that landed from one that was answered as an idempotent
+// replay.
+type delegatedBatchLedger struct {
+	mu      sync.Mutex
+	history *invariantLoopHistory
+	facts   map[event.EventID]event.Event
+	seq     int
+	seen    map[string]int
+	land    map[string]int
+}
+
+// newDelegatedBatchLedger returns a ledger landing into the named chain face.
+func newDelegatedBatchLedger(history *invariantLoopHistory) *delegatedBatchLedger {
+	return &delegatedBatchLedger{
+		history: history,
+		facts:   map[event.EventID]event.Event{},
+		seen:    map[string]int{},
+		land:    map[string]int{},
+	}
+}
+
+// commit keeps one committed fact under its identity: a key the ledger already
+// holds is answered as the fact it already names and lands nothing.
+func (l *delegatedBatchLedger) commit(evt event.Event) (event.EventID, error) {
+	l.mu.Lock()
+	if evt.Key == "" {
+		l.seq++
+		evt.Key = event.EventID(fmt.Sprintf("minted-instruction-%d", l.seq))
+	}
+	part := evt.Meta[delegatedPartMeta]
+	l.seen[part]++
+	_, held := l.facts[evt.Key]
+	if !held {
+		l.facts[evt.Key] = evt
+		l.land[part]++
+	}
+	l.mu.Unlock()
+	if !held {
+		l.history.land(evt)
+	}
+	return evt.Key, nil
+}
+
+// attempted reports how many commits of one delegated part the ledger saw.
+func (l *delegatedBatchLedger) attempted(part string) int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.seen[part]
+}
+
+// landed reports how many facts of one delegated part the ledger kept.
+func (l *delegatedBatchLedger) landed(part string) int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.land[part]
+}
+
+// TestDelegatedInputRefusalLandsNothing pins that a refused delegated input commit leaves the round unstarted and the chain empty.
+// - the caller reads the named cause of the refusal, not a silently empty round
+// - the chain holds no input fact of the site: the refused fact was never landed
+// - exactly one commit was attempted, and it is the instruction as a system message under the stable site key, stamped with its part and lineage
+// - no segment of the site was driven: no model request and the resident instance rests
+//
+// 契约: docs/wiki/agent/agent-architecture.md#subagent-loop
+func TestDelegatedInputRefusalLandsNothing(t *testing.T) {
+	refused := errors.New("agent: the ledger refused the delegated input")
+	site := event.Address{AgentID: "agent-refused", SessionID: "session-refused"}
+	loop := NewLoop(state.NewBindings(), state.NewOccupancy(), "instance-refused", nil)
+	history := newInvariantLoopHistory()
+	loop.SetHistory(history)
+
+	var mu sync.Mutex
+	var attempts []event.Event
+	loop.SetFactCommit(func(evt event.Event) (event.EventID, error) {
+		mu.Lock()
+		attempts = append(attempts, evt)
+		mu.Unlock()
+		return "", refused
+	})
+
+	consumers := NewConsumers(loop, context.Background(), nil)
+	loop.SetConsumers(consumers)
+	t.Cleanup(consumers.Stop)
+	script := newInvariantLoopModel("the delegated turn must not run", nil)
+	binding := state.AgentBinding{Model: script, PromptSource: state.PromptSource{Version: "v1"}}
+
+	ctx, cancel := context.WithTimeout(context.Background(), backflowNestedBudget)
+	defer cancel()
+	answer, err := loop.SubmitDelegated(ctx, DelegatedInput{
+		Site:        site,
+		Binding:     binding,
+		Instruction: "run only after the input commits",
+		Request:     "the task whose commit the ledger refuses",
+		Materials:   []event.Event{{Key: "ev-refused-source", Type: event.TypeExternalInput}},
+	})
+	if err == nil {
+		t.Fatalf("the refused delegated input answered no error: the round ran beside a fact that never landed (answer=%+v)", answer)
+	}
+	if !errors.Is(err, refused) {
+		t.Fatalf("the refused delegated input answered %v, want the named cause %v", err, refused)
+	}
+	if !strings.Contains(err.Error(), refused.Error()) {
+		t.Fatalf("the refusal text %q does not name the cause %q", err.Error(), refused.Error())
+	}
+
+	if facts := history.SessionFacts(site); len(facts) != 0 {
+		t.Fatalf("the chain of %s holds %d fact(s) beside a refused commit: %+v", site.SessionID, len(facts), facts)
+	}
+
+	mu.Lock()
+	got := append([]event.Event(nil), attempts...)
+	mu.Unlock()
+	if len(got) != 1 {
+		t.Fatalf("commit attempts = %d, want exactly the first fact of the batch the round commits", len(got))
+	}
+	if got[0].Type != event.TypeExternalInput {
+		t.Fatalf("the attempted fact type = %q, want the external input %q", got[0].Type, event.TypeExternalInput)
+	}
+	if got[0].Message.Role != model.RoleSystem {
+		t.Fatalf("the attempted fact role = %q, want the system message the instruction lands as", got[0].Message.Role)
+	}
+	if got[0].Message.Content != "run only after the input commits" {
+		t.Fatalf("the attempted fact body = %q, want the instruction the round runs under", got[0].Message.Content)
+	}
+	if want := "delegated-agent-refused@session-refused-instruction"; string(got[0].Key) != want {
+		t.Fatalf("the attempted fact key = %q, want the stable site key %q of the instruction", got[0].Key, want)
+	}
+	if got[0].Meta[delegatedPartMeta] != delegatedPartInstruction {
+		t.Fatalf("the attempted fact part = %q, want the instruction part %q", got[0].Meta[delegatedPartMeta], delegatedPartInstruction)
+	}
+	if got[0].Meta[event.MetaKeyTriggerSource] != event.LineageDelegation {
+		t.Fatalf("the attempted fact lineage = %q, want the delegation lineage %q", got[0].Meta[event.MetaKeyTriggerSource], event.LineageDelegation)
+	}
+	if got[0].DecisionID != "" || got[0].AttemptID != "" || got[0].CallID != "" || got[0].EpisodeID != "" {
+		t.Fatalf("the attempted fact carries round stamps (%q, %q, %q, %q): the instruction is one fact of the site, never a fact of the round",
+			got[0].DecisionID, got[0].AttemptID, got[0].CallID, got[0].EpisodeID)
+	}
+
+	if requests := script.requestMessages(); len(requests) != 0 {
+		t.Fatalf("model requests = %d beside a refused input commit, want no segment driven: %+v", len(requests), requests)
+	}
+	resident := consumers.Ensure(site)
+	if resident == nil {
+		t.Fatalf("the resident instance of %s = nil, want the mounted instance the round would run on", site.SessionID)
+	}
+	invariantAwait(t, resident.Resting)
+	if answer.Status != task.StatusFailed {
+		t.Fatalf("the refused round answered status %d, want the failed terminal %d", answer.Status, task.StatusFailed)
+	}
+	if !strings.Contains(answer.Failure, refused.Error()) {
+		t.Fatalf("the refused round answers failure %q, want it to name the cause %q", answer.Failure, refused.Error())
+	}
 }

@@ -629,7 +629,7 @@ func (r *Run) markCloseReturned() {
 }
 
 // closeFinished reports whether a close of this run has already returned to its
-// caller, so a late result may no longer drive a range of this process.
+// caller, so a late result cannot drive a range of this process.
 func (r *Run) closeFinished() bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()

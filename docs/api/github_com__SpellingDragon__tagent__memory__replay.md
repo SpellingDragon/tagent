@@ -460,8 +460,8 @@ func WithInputEvents(entry ProjectionEntry, raw string) ProjectionEntry
     recorded: the input_events metadata entry, a JSON array of the input
     fact identities the output consumed. A missing, empty, identity-less or
     unparseable value is no relation — the same rule the chain-authority answer
-    rebuild reads one under — so the segment rule treats the output as legacy
-    and closes it positionally instead of guessing inputs it never named.
+    rebuild reads one under — so the segment rule closes the output positionally
+    instead of guessing inputs it never named.
 
 func WithMessageRole(entry ProjectionEntry, role string) ProjectionEntry
     WithMessageRole returns the entry beside the role its own message carried:

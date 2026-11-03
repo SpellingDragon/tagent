@@ -10,16 +10,9 @@ import (
 	"github.com/SpellingDragon/tagent/api/model"
 )
 
-// TestConfigChangeMapsNoProjectionEntry pins the explicit skip of the
-// configuration change type at the projection boundary:
-//   - the committed fact carries a message body, so an empty-payload skip is not
-//     what keeps it out of the mapped sequence
-//   - mappedEntryOf answers no entry for the fact, even when a producer stamps a
-//     session address on it
-//   - an ordinary transcript fact still maps, so the skip is the type and not
-//     the mapping being broken
+// TestConfigChangeMapsNoProjectionEntry pins the explicit type skip of a configuration change at the projection boundary.
 //
-// 契约: docs/wiki/agent/event-flow.md#projection-lifecycle
+// 契约: docs/wiki/agent/compression-and-telemetry.md#projection-fold
 func TestConfigChangeMapsNoProjectionEntry(t *testing.T) {
 	at := time.Date(2026, time.November, 3, 12, 0, 0, 0, time.UTC)
 	change := event.ConfigChangeFor("user", event.ConfigChangeDimensionPrompt, 3, "agent user prompt source changed: [boot.md] -> [next.md]")

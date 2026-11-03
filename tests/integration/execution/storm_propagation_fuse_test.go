@@ -96,10 +96,10 @@ func TestStormPropagationFuse(t *testing.T) {
 
 		decideBatch(t, book, req.ID, approval.ApprovalApproved)
 		awaitAsync(t, errs)
-		if got := tool.calls(); got != stormFuseCalls {
+		if got := awaitToolCalls(t, tool, stormFuseCalls); got != stormFuseCalls {
 			t.Fatalf("dispatched calls of the approved storm = %d, want every call of it ran exactly once", got)
 		}
-		requests := provider.recorded()
+		requests := awaitRecorded(t, provider, 2)
 		if len(requests) < 2 || len(requests) > 3 {
 			t.Fatalf("model requests of the approved storm = %d, want the storm round beside the round that reads its receipts and at most one closing decision", len(requests))
 		}
@@ -119,7 +119,7 @@ func TestStormPropagationFuse(t *testing.T) {
 		if settled := readRegisteredBatch(t, dir, req.ID); settled.Status != approval.ApprovalApproved || settled.DecidedBy != approvalTestApprover {
 			t.Fatalf("stored request status = %q by %q, want the ruling that let the batch run", settled.Status, settled.DecidedBy)
 		}
-		if got := tool.calls(); got != stormFuseCalls {
+		if got := awaitToolCalls(t, tool, stormFuseCalls); got != stormFuseCalls {
 			t.Fatalf("dispatched calls after the round that read the receipts = %d, want the batch to run once and never twice", got)
 		}
 	})
@@ -134,7 +134,7 @@ func TestStormPropagationFuse(t *testing.T) {
 		req := awaitBatchRequest(t, book, dir)
 		decideBatch(t, book, req.ID, approval.ApprovalApproved)
 		awaitAsync(t, errs)
-		if got := tool.calls(); got != stormFuseCalls {
+		if got := awaitToolCalls(t, tool, stormFuseCalls); got != stormFuseCalls {
 			t.Fatalf("dispatched calls of the approved storm = %d, want every call of it", got)
 		}
 
@@ -145,7 +145,7 @@ func TestStormPropagationFuse(t *testing.T) {
 		if results >= 2*stormFuseCalls {
 			t.Fatalf("result facts of the approved storm = %d, want no degraded fallback beside the admitted calls", results)
 		}
-		requests := provider.recorded()
+		requests := awaitRecorded(t, provider, 2)
 		if len(requests) < 2 || len(requests) > 3 {
 			t.Fatalf("model requests of the approved storm = %d, want the storm round beside the round that reads its receipts and at most one closing decision", len(requests))
 		}

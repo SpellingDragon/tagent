@@ -167,8 +167,6 @@ func externalMaterial(ctx context.Context, turn Turn, read FactReader) string {
 				body = named.Type
 			}
 			if runes := []rune(body); len(runes) > 128 {
-				// The same ticket a projection entry carries: the leading text
-				// beside the promise the whole fact stays retrievable.
 				body = string(runes[:128]) + "…\n  full text retrievable by segment"
 			}
 			block += fmt.Sprintf("refs:\n- %s\n  %s\n", named.Key, body)

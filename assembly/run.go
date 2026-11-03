@@ -364,6 +364,7 @@ type Run struct {
 // - The producer of the closing round reads the budget its own agent declares over the same declaration the loop's table was set from, so the judgment the chain carries names the policy the drive runs under.
 // - The consumer of compression judgments is an instance of the material flow like the fold that judges them, so every agent's After pass executes the judgments already filed instead of waiting for a producer to hand them over.
 // - The producer of the closing round is an instance of the same flow: every agent's After pass judges the budget of the segment its commit grew, so the closing round of a spent budget stands on the chain as the fact it is.
+// - The loop builds the writer ledger for itself and the run reads it through the loop, so the close judges the very registrations the productions made.
 func Assemble(ctx context.Context, decl *config.Declaration, agents map[event.AgentID]NativeAgent, opts ...Option) (*Run, error) {
 	if decl == nil {
 		return nil, errors.New("tagent: the assembly carries no declaration")
@@ -471,8 +472,6 @@ func Assemble(ctx context.Context, decl *config.Declaration, agents map[event.Ag
 	r.delegations = agent.NewDelegator(closeGate{run: r, face: closeFace{manager: r.manager, registry: r.registry}}, r.bindings, r.instance)
 	r.publisher = state.NewPublisher(r.bindings, publishContract, cfg.governance, &r.records)
 	r.loop = agent.NewLoop(r.publisher, r.occupancy, r.instance, r.resolveFact)
-	// The loop builds the writer ledger for itself; the run reads it through the
-	// loop, so the close judges the very registrations the productions made.
 	r.writers = r.loop
 	r.delegations.SetResident(r.loop)
 	r.loop.SetHistory(r)

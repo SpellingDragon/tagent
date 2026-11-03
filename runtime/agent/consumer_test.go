@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"runtime"
 	"sync"
 	"testing"
 	"time"
@@ -594,14 +595,10 @@ func TestConsumerWritesConsumptionBesideDelivery(t *testing.T) {
 	})
 }
 
-// TestAwaitedBookReleasesClosedRound pins that the book of a consumed result is
-// released once the terminal notice of its round is received:
-//   - positive: the delivery fact of the round the segment closed on is the
-//     notice the pull receives, and receiving it releases the round's entry
-//   - negative: a book that keeps the consumed entry after its notice was
-//     received reads the next round of the same task as one already answered
-//   - negative: the delivery fact of the closed round drives no second segment,
-//     however often a wake names it
+// TestAwaitedBookReleasesClosedRound pins that the book of a consumed result releases its round when the terminal notice is received.
+// - positive: the delivery fact of the closed round is the notice the pull receives, and receiving it releases the round's entry
+// - negative: a kept consumed entry reads the next round of the same task as one already answered
+// - negative: the delivery fact of the closed round drives no second segment, however often a wake names it
 //
 // 契约: docs/wiki/agent/event-flow.md#e2e-turn-sequence
 func TestAwaitedBookReleasesClosedRound(t *testing.T) {
@@ -633,8 +630,6 @@ func TestAwaitedBookReleasesClosedRound(t *testing.T) {
 	delivery := rig.lastDeliveryOf(t, addr, receiptTask)
 	rig.awaitReleased(t, consumer, receiptTask)
 
-	// The same notice cannot drive twice: the round it reports was already
-	// answered, so its wake must find the fact accounted.
 	consumer.Drive(delivery.Key)
 	consumer.Wake()
 	rig.expectNoAnswer(t, "the delivery fact of the closed round drove a second segment")
@@ -643,12 +638,9 @@ func TestAwaitedBookReleasesClosedRound(t *testing.T) {
 	}
 }
 
-// TestAwaitedBookDoesNotSuppressNextRoundNotice pins that a closed round's
-// book does not drop the terminal notice of the next round of the same task:
-//   - positive: the next round lands its own delivery fact, and the pull drives a
-//     segment on it because the round before it was released
-//   - negative: a book that keeps the consumed state reads the next round's fact
-//     as material a segment already read, so the result never reaches the model
+// TestAwaitedBookDoesNotSuppressNextRoundNotice pins that a released round's book does not drop the next round's terminal notice.
+// - positive: the next round lands its own delivery fact, and the pull drives a segment on it because the round before it was released
+// - negative: a book that keeps the consumed state reads the next round's fact as material already read, so the result never reaches the model
 //
 // 契约: docs/wiki/agent/event-flow.md#e2e-turn-sequence
 func TestAwaitedBookDoesNotSuppressNextRoundNotice(t *testing.T) {
@@ -680,8 +672,6 @@ func TestAwaitedBookDoesNotSuppressNextRoundNotice(t *testing.T) {
 		t.Fatalf("the segment of %s closed = (%+v, %v), want one completed turn", addr.SessionID, closed, closed.Err)
 	}
 
-	// The task re-enters a second round the way a settled task does, and that
-	// round settles again: its notice is the input the next pull must drive.
 	rig.loop.Backflow(invocation, task.Notice{
 		TaskID: receiptTask,
 		Round:  2,
@@ -1231,13 +1221,12 @@ func TestLateWaitReadsAnAnswerPastTheSegmentWindow(t *testing.T) {
 	}
 }
 
-// TestWaitAnswerSurvivesAnswerCacheEviction pins the answer a late entry reads to the
-// output fact that closed its segment, not to the process-internal cache that may drop it:
-// - positive: the segment that consumed the input closes and its answer is indexed, as the wait beside the segment reads it
-// - the answer index is dropped whole, the way the window or the ttl drops one, so the wait below starts with no entry in memory
-// - positive: that late wait still reads the turn of the segment that consumed its input from the agent_output fact, with the same invocation identity and body
-// - the rebuild reads and never drives: no second model request and no second output fact stand beside the wait
-// - negative: an output fact that records no input relation answers no key, so a wait whose key it never records consumed keeps waiting instead of reading that output as its own
+// TestWaitAnswerSurvivesAnswerCacheEviction pins that a late wait reads its answer from the output fact after the cache drops it.
+// - the segment that consumed the input closes and its answer is indexed, as the wait beside it reads
+// - the answer index is dropped whole, so the wait below starts with no entry in memory
+// - positive: the late wait reads the same invocation identity and body from the agent_output fact
+// - the rebuild reads and never drives: no second model request and no second output fact stand beside it
+// - negative: an output fact that records no input relation answers no key, so the wait keeps waiting
 //
 // 契约: docs/wiki/agent/event-flow.md#runner-flow
 func TestWaitAnswerSurvivesAnswerCacheEviction(t *testing.T) {
@@ -1291,8 +1280,6 @@ func TestWaitAnswerSurvivesAnswerCacheEviction(t *testing.T) {
 		t.Fatalf("model requests after the rebuilt wait = %d, want the %d that stood before: a read starts no segment", got, served)
 	}
 
-	// A legacy output committed before the causal relation was recorded names no key:
-	// it must not be read as the answer of an input it never records consuming.
 	rig.history.land(event.Event{
 		Key:          rig.mint(addr),
 		Type:         event.TypeAgentOutput,
@@ -1310,14 +1297,12 @@ func TestWaitAnswerSurvivesAnswerCacheEviction(t *testing.T) {
 	}
 }
 
-// TestChainRebuildCarriesFullTurnMetadata pins the answer a late wait rebuilds from
-// the chain to every stable field its agent_output fact records, not to the
-// process-internal answer cache that may drop the entry:
+// TestChainRebuildCarriesFullTurnMetadata pins that a late wait rebuilds every stable field of the turn its segment closed.
 // - a completed segment closes and its answer is indexed, as the wait beside the segment reads it
 // - a failed segment closes with the cause its own decision reported
 // - the answer index is dropped whole, so each wait below starts with no entry in memory
-// - positive: the late wait rebuilds the turn of its own segment field by field — the invocation, the decisions it ran, the terminal, the failure cause and the closing round — beside the trigger lineage, the input keys and the body the segment delivered
-// - the rebuild reads the fact and never derives a field from the wait: neither the completed nor the failed turn loses the metadata the chain carries
+// - positive: the late wait rebuilds the invocation, decisions, terminal, failure, closing round, lineage, keys and body field by field
+// - the rebuild reads the fact and never derives a field from the wait: neither turn loses the metadata the chain carries
 //
 // 契约: docs/wiki/agent/event-flow.md#runner-flow
 func TestChainRebuildCarriesFullTurnMetadata(t *testing.T) {
@@ -1359,9 +1344,6 @@ func expectRebuiltTurnMetadata(t *testing.T, rig *residentInstanceRig, addr even
 	if want == model.KindFailed && closed.Turn.Failure == "" {
 		t.Fatalf("the failed segment of %s reports no cause, want the cause its decision reported", addr.SessionID)
 	}
-	// The delivery face answers before the closed answer enters the index the
-	// eviction drops, so wait for that entry: a wait racing the index would read
-	// the cache by accident of scheduling instead of reading the chain below.
 	deadline := time.Now().Add(5 * time.Second)
 	for {
 		consumer.mu.Lock()
@@ -1421,8 +1403,7 @@ func expectRebuiltTurnMetadata(t *testing.T, rig *residentInstanceRig, addr even
 	}
 }
 
-// TestWaitAnswerNeverReturnsNeighbourAnswer pins the rebuilt answer to the input that
-// names it, never to the segment that closed beside it:
+// TestWaitAnswerNeverReturnsNeighbourAnswer pins that a wait reads the answer of the segment that consumed its key, never a neighbour's.
 // - two segments close on one address, each consuming its own input
 // - the answer index is dropped, so every wait below reads the chain alone
 // - positive: each key reads the turn of the segment that consumed it, with its own invocation identity
@@ -1481,20 +1462,13 @@ func TestWaitAnswerNeverReturnsNeighbourAnswer(t *testing.T) {
 	}
 }
 
-// TestEvictionKeepsUnrecoverableAnswers pins the answer cache to the closure the chain
-// can actually rebuild:
-//   - negative: a segment whose agent_output fact the ledger refused closes beside a named
-//     failure and leaves no fact that records the input it consumed
-//   - the answer is aged past answerTTL, the way an entry that starts waiting long after its
-//     segment closed reads it: the ttl evicts the answers the chain can rebuild
-//   - positive: the wait on the same input still reads the failed turn instead of outliving
-//     the probe: an eviction must not turn an answered input into a wait no segment answers
-//   - the only copy of the result stays indexed after the read, because no output fact can
-//     rebuild it
-//   - the window makes the same judgment: after answerWindow further answers close, the
-//     oldest answer the chain rebuilds is evicted while the refused one stays indexed
-//   - positive: the evicted recoverable answer is rebuilt from its output fact, so keeping
-//     the only copy narrows the window instead of turning the window off
+// TestEvictionKeepsUnrecoverableAnswers pins that the answer cache keeps the answers no output fact can rebuild.
+// - negative: a segment whose agent_output the ledger refused closes failed and leaves no fact recording its input
+// - the answer is aged past answerTTL, as a wait that starts long after its segment closed reads it
+// - positive: the wait on the same input still reads the failed turn instead of waiting forever
+// - the only copy of the result stays indexed after the read, because no output fact can rebuild it
+// - the window judges the same way: after answerWindow further answers close, the rebuildable oldest is evicted
+// - positive: the evicted recoverable answer is rebuilt from its output fact, so keeping the only copy narrows the window
 //
 // 契约: docs/wiki/agent/event-flow.md#runner-flow
 func TestEvictionKeepsUnrecoverableAnswers(t *testing.T) {
@@ -1848,14 +1822,10 @@ func TestRestingCoversThePassBeforeTheSegment(t *testing.T) {
 	}
 }
 
-// TestRestingCoversTheWakeTakenBeforeThePass pins that a wake the loop already
-// took off its channel is still the pass it owes:
-//   - positive: a wake the channel accepted is a pass the loop will enter, so the
-//     loop that took the token and has not entered the pass yet is a writer at work
-//   - negative: the token leaving the channel is not the pass ending; only the
-//     entry of the pass returns the loop to rest
-//   - the merged wake of a full channel queues no second pass: the one token it
-//     meets already owes a pass of its own
+// TestRestingCoversTheWakeTakenBeforeThePass pins that a wake taken off the channel is still the pass the loop owes.
+// - positive: a wake the channel accepted is a pass the loop will enter, so the wait before it is a writer at work
+// - negative: the token leaving the channel is not the pass ending; only entering the pass rests the loop
+// - the merged wake of a full channel queues no second pass: the one token already owes a pass
 //
 // 契约: docs/wiki/agent/event-flow.md#runner-flow
 func TestRestingCoversTheWakeTakenBeforeThePass(t *testing.T) {
@@ -1923,4 +1893,215 @@ func keysOf(events []event.Event) []string {
 		out = append(out, string(evt.Key))
 	}
 	return out
+}
+
+// TestOrphanSettlementDrivesNewSegment pins that a late settlement fact alone opens the next segment of its address.
+// - an address closes its first segment on the input it was handed
+// - a settlement fact lands after that segment closed, and nothing else lands
+// - the fact alone wakes the consumer and opens the next segment
+// - the observation the fact carries is the material of the next request, not a value re-read from the chain
+//
+// 契约: docs/wiki/agent/event-flow.md#runner-flow
+func TestOrphanSettlementDrivesNewSegment(t *testing.T) {
+	rig := newResidentInstanceRig(t)
+	addr := rig.otherAddress()
+	firstKey := rig.landInput(addr, "the input of the segment that closes first")
+	consumer := rig.consumers.Ensure(addr)
+	if consumer == nil {
+		t.Fatalf("the instance of %s/%s = nil, want the resident consumer of the address", addr.AgentID, addr.SessionID)
+	}
+	consumer.Wake()
+	first := rig.awaitAnswer(t, addr)
+	if first.Err != nil || first.Turn.Terminal != model.KindCompleted {
+		t.Fatalf("the first segment of %s = (%+v, %v), want one completed turn", addr.SessionID, first, first.Err)
+	}
+	if len(first.Consumed) != 1 || first.Consumed[0] != firstKey {
+		t.Fatalf("the first segment of %s consumed %v, want the input it was handed (%q)", addr.SessionID, first.Consumed, firstKey)
+	}
+	if served := len(rig.behaviour.requestMessages()); served != 1 {
+		t.Fatalf("model requests after the first segment = %d, want the one decision that closed it", served)
+	}
+
+	const lateFact = event.EventID("fact-late-settlement")
+	const observation = "the observation the late settlement carries"
+	rig.loop.facts = func(id event.EventID) (model.Message, bool) {
+		if id != lateFact {
+			return model.Message{}, false
+		}
+		return model.Message{Role: model.RoleTool, Content: observation, ToolID: "call-late", ToolName: "late"}, true
+	}
+	rig.loop.Backflow(first.Turn.InvocationID, task.Notice{
+		TaskID: "task-late-settlement",
+		Kind:   task.NoticeSettled,
+		Event:  lateFact,
+	})
+
+	second := rig.awaitAnswer(t, addr)
+	if second.Err != nil || second.Turn.Terminal != model.KindCompleted {
+		t.Fatalf("the segment the late settlement drove = (%+v, %v), want one completed turn", second, second.Err)
+	}
+	if want := event.InvocationID(string(addr.SessionID) + "#c2"); second.Turn.InvocationID != want {
+		t.Fatalf("the late settlement opened the segment %q, want the next segment of the address (%q)", second.Turn.InvocationID, want)
+	}
+	requests := rig.behaviour.requestMessages()
+	if len(requests) != 2 {
+		t.Fatalf("model requests of %s = %d, want the closing answer beside the one the late settlement drove", addr.SessionID, len(requests))
+	}
+	if !invariantCarries(requests[1], observation) {
+		t.Fatalf("the request the late settlement drove carries no observation: %+v", requests[1])
+	}
+	if got := len(rig.outputs(addr)); got != 2 {
+		t.Fatalf("agent_output facts of %s = %d, want the closed segment beside the one the settlement drove", addr.SessionID, got)
+	}
+}
+
+// TestIdleMountConsumesFirstEvent pins that a fact which arrived before its address was mounted needs no second event.
+// - the event lands on an idle address, before any consumer exists for it
+// - the first mount of that address reads the chain and drives the event
+// - no wake and no second event stands beside the one request the event drives
+//
+// 契约: docs/wiki/agent/event-flow.md#runner-flow
+func TestIdleMountConsumesFirstEvent(t *testing.T) {
+	rig := newResidentInstanceRig(t)
+	addr := rig.otherAddress()
+	key := rig.landInput(addr, "the event that lands before the mount")
+	consumer := rig.consumers.Ensure(addr)
+	if consumer == nil {
+		t.Fatalf("the instance of %s/%s = nil, want the resident consumer of the address", addr.AgentID, addr.SessionID)
+	}
+	answer := rig.awaitAnswer(t, addr)
+	if answer.Err != nil || answer.Turn.Terminal != model.KindCompleted {
+		t.Fatalf("the first mount of %s closed = (%+v, %v), want the event it found on the chain driven", addr.SessionID, answer, answer.Err)
+	}
+	if len(answer.Consumed) != 1 || answer.Consumed[0] != key {
+		t.Fatalf("the mounted segment of %s consumed %v, want the event that landed before it (%q)", addr.SessionID, answer.Consumed, key)
+	}
+	requests := rig.behaviour.requestMessages()
+	if len(requests) != 1 || !invariantCarries(requests[0], "the event that lands before the mount") {
+		t.Fatalf("model requests of the first mount = %+v, want the one request carrying the event", requests)
+	}
+}
+
+// TestNoOrphanNoSpin pins that a wake beside no related fact opens no segment and sends no model request.
+// - a chain that already closed its segment carries no driving fact
+// - a wake of that address opens no segment and sends no request
+// - the output the chain already held stays the only one
+//
+// 契约: docs/wiki/agent/event-flow.md#runner-flow
+func TestNoOrphanNoSpin(t *testing.T) {
+	rig := newResidentInstanceRig(t)
+	addr := rig.otherAddress()
+	rig.landAnswer(addr, "the answer the chain already holds")
+	consumer := rig.consumers.Ensure(addr)
+	if consumer == nil {
+		t.Fatalf("the instance of %s/%s = nil, want the resident consumer of the address", addr.AgentID, addr.SessionID)
+	}
+	consumer.Wake()
+	rig.expectQuiet(t, addr, "a wake beside no related fact opened a segment out of its own wake")
+	if got := len(rig.outputs(addr)); got != 1 {
+		t.Fatalf("agent_output facts of %s = %d, want the one the chain already held", addr.SessionID, got)
+	}
+}
+
+// exitModel kills the goroutine that drives it: its GenerateContent calls
+// runtime.Goexit the way a helper that fails a check inside a decision would,
+// leaving the segment that admitted the call flying beside a consumer
+// goroutine that already ended.
+type exitModel struct{}
+
+func (exitModel) GenerateContent(context.Context, *model.Request) (<-chan *model.Response, error) {
+	runtime.Goexit()
+	return nil, nil
+}
+
+func (exitModel) Info() model.Info { return model.Info{Name: "model-exit"} }
+
+// TestAbandonedFlyingSettlesOnAbnormalExit pins that a consumer goroutine dying inside a decision still settles the segment it left flying.
+func TestAbandonedFlyingSettlesOnAbnormalExit(t *testing.T) {
+	rig := newResidentInstanceRigWithModel(t, &exitOnceModel{})
+	addr := rig.otherAddress()
+	consumer := rig.consumers.Ensure(addr)
+	if consumer == nil {
+		t.Fatalf("the instance of %s/%s = nil, want one consumer to hold", addr.AgentID, addr.SessionID)
+	}
+	rig.landInput(addr, "the input whose decision kills the driver")
+	consumer.Wake()
+	time.Sleep(100 * time.Millisecond)
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if consumer.Resting() {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	consumer.mu.Lock()
+	busy, flying, wake := consumer.busy, consumer.flying != nil, len(consumer.wake)
+	consumer.mu.Unlock()
+	t.Fatalf("the consumer did not rest within 2s beside an ended goroutine: busy=%v flying=%v wake=%d", busy, flying, wake)
+}
+
+// exitOnceModel kills the goroutine that drives its first decision and answers
+// every later one normally: the first call proves the abnormal exit path, the
+// later ones prove the decision resources the killed one held were released —
+// a model writer, a decision slot or a binding handle left held would strand
+// the next decision of the address on a dead instance forever.
+type exitOnceModel struct {
+	mu     sync.Mutex
+	served int
+}
+
+func (m *exitOnceModel) GenerateContent(context.Context, *model.Request) (<-chan *model.Response, error) {
+	m.mu.Lock()
+	m.served++
+	first := m.served == 1
+	m.mu.Unlock()
+	if first {
+		runtime.Goexit()
+		return nil, nil
+	}
+	ch := make(chan *model.Response, 1)
+	ch <- &model.Response{Done: true, Choices: []model.Choice{{Message: model.Message{Role: model.RoleAssistant, Content: "alive again"}}}}
+	close(ch)
+	return ch, nil
+}
+
+func (m *exitOnceModel) Info() model.Info { return model.Info{Name: "model-exit-once"} }
+
+// TestDecisionResourcesReleaseBesideAnAbnormalExit pins that a decision that dies releases the writer, slot and binding its address needs to decide again.
+func TestDecisionResourcesReleaseBesideAnAbnormalExit(t *testing.T) {
+	rig := newResidentInstanceRigWithModel(t, &exitOnceModel{})
+	addr := rig.otherAddress()
+	consumer := rig.consumers.Ensure(addr)
+	if consumer == nil {
+		t.Fatalf("the instance of %s/%s = nil, want one consumer to hold", addr.AgentID, addr.SessionID)
+	}
+	rig.landInput(addr, "the input whose decision kills the driver")
+	consumer.Wake()
+	time.Sleep(100 * time.Millisecond)
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if stopped, live := rig.loop.Stopped(); stopped {
+			if len(live) != 0 {
+				t.Fatalf("writers = %v, want none beside an ended goroutine", live)
+			}
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if stopped, live := rig.loop.Stopped(); !stopped {
+		t.Fatalf("writers = %v, want the model writer of the dead decision released", live)
+	}
+	fresh := rig.consumers.Ensure(addr)
+	if fresh == nil {
+		t.Fatalf("the instance of %s/%s = nil after the abnormal exit, want a fresh one", addr.AgentID, addr.SessionID)
+	}
+	rig.landInput(addr, "the input the restored drive answers")
+	fresh.Wake()
+	answer := rig.awaitAnswer(t, addr)
+	if answer.Err != nil {
+		t.Fatalf("the restored drive closed beside %v, want the completed turn of the alive decision", answer.Err)
+	}
+	if answer.Body != "alive again" {
+		t.Fatalf("restored answer = %q, want the body the alive decision produced", answer.Body)
+	}
 }

@@ -32,6 +32,10 @@ type admittedCall struct {
 	callID string
 	tool   string
 	taskID event.TaskID
+	// batch marks a call admitted as part of one whole response the fuse held for
+	// an approver and the approval released: the follow-up decision of the
+	// segment waits for every call of that batch and reads their results as one.
+	batch bool
 }
 
 // segment is one in-flight consumption segment of an address: the range
@@ -53,6 +57,10 @@ type segment struct {
 	decisions  []Decision
 	consumed   []event.EventID
 	pending    map[event.TaskID]admittedCall
+	// whole counts the calls of one approved batch whose settled results this
+	// segment has not paired yet: the follow-up decision fires once, after the
+	// last of them lands, so the decision reads every result as one batch.
+	whole int
 	// paired names the tasks whose settled result this segment took: the
 	// consumption of each is written beside the delivery of this segment, never
 	// beside the pairing alone.
@@ -138,9 +146,8 @@ type Consumer struct {
 	// window between the wake and the pass, never the channel length alone. The
 	// count lives in this process only: no restart reads it.
 	pendingPass int
-	// must reach the same pull: a pull that meets the flag takes nothing, so a
-	// multi-message delegated input is never split into two segments. The caller
-	// clears it before it wakes the loop.
+	// segCount counts the segments this consumer opened, so each minted
+	// invocation identity names the segment it belongs to.
 	segCount int
 	// answers indexes the closed answers by the key of every input the closing
 	// segment consumed, so an entry that starts waiting after its segment closed
@@ -211,12 +218,10 @@ func newConsumer(addr event.Address, loop *Loop, deliver SegmentDelivery) *Consu
 // reads the turn the segment closed on. It is the whole body Loop.Drive keeps, so
 // the loop holds no second decision, harvest or seal path beside the Consumer.
 //
-// - The consumer is never mounted, so no wake can start a second segment beside
-// the one this call flies.
-// - The capture is sealed once, when this face returns, exactly as the direct
-// drive sealed its turn.
-// - The closed answer is read from the segment this consumer settled, never
-// re-derived from the chain.
+// - The consumer is never mounted, so no wake can start a second segment beside the one this call flies.
+// - The capture is sealed once, when this face returns, exactly as the direct drive sealed its turn.
+// - The closed answer is read from the segment this consumer settled, never re-derived from the chain.
+// - A context that ends before the segment closes answers the named cancellation of the abandoned segment.
 func (c *Consumer) driveInvocation(ctx context.Context, inv Invocation) (turn Turn, err error) {
 	turn = Turn{InvocationID: inv.InvocationID, Terminal: model.KindUnknown}
 	started := time.Now()
@@ -233,8 +238,6 @@ func (c *Consumer) driveInvocation(ctx context.Context, inv Invocation) (turn Tu
 	c.consume(ctx)
 	answer, ok := c.closedAnswer()
 	if !ok {
-		// The context ended before the segment closed: the loop closes what it
-		// flew with the named cancellation, exactly as the resident loop does.
 		c.abandonSegment()
 		answer, _ = c.closedAnswer()
 	}
@@ -258,48 +261,21 @@ func (c *Consumer) closedAnswer() (SegmentAnswer, bool) {
 
 // run is the resident loop: wait for a wake, consume everything that arrived,
 // wait again. A cancelled context ends the loop, and the segment it still flies
-// is closed by this loop before it returns (see abandonSegment): the closure
-// this stop promises is the loop's own, so a set that joins on this loop's done
-// channel reads a segment that really ended rather than one left flying.
+// is closed by this loop before it returns (see abandonSegment), so a set that
+// joins on this loop's done channel reads a segment that really ended.
 //
 // A set marked stopped ends this loop on its own, and only at rest: the mark
-// cancels nothing, so the obligations the loop already holds — the segment it
-// flies, the settlements it waits for — are finished for real inside the
-// budget of the close that marked the set, and the loop leaves the last word on
-// the chain instead of a cancellation the close invented. A wake that already
-// arrived outranks the mark: the material it names was admitted before the set
-// marked, so the pass it asks for is owed and only the pass may answer it.
+// cancels nothing, so the obligations the loop already holds are finished for
+// real inside the budget of the close that marked the set, and a wake that
+// already arrived outranks the mark because the pass it asks for is owed.
 //
-// The turn of work one pass drives is registered as one writer of the run's
-// writer ledger (see consume), so the close of the run reads a loop that still
-// consumes as a writer that has not stopped — the flying segment it would write
-// beside included — instead of as an address at rest.
+// - The turn of work one pass drives is registered as one writer of the run's writer ledger (see consume), so a close reads a loop that still consumes as a writer that has not stopped.
+// - An abnormal exit settles the flying segment before done closes, so the address rests honestly beside ended work.
+// - A fresh mount reads the chain once before it waits; a quiet mount or a chain that holds no fact gives the queued boot pass back.
 func (c *Consumer) run(ctx context.Context) {
 	defer close(c.done)
-	// An abnormal exit — a panic or a Goexit inside a decision — leaves the
-	// flying segment unsettled; settle it before done closes, so the address
-	// rests honestly and a close beside ended work never burns its whole
-	// budget waiting for a goroutine that already died.
 	defer c.abandonIfFlying()
 	defer c.loop.forgetInstance(c)
-	// A fresh mount reads the chain once before it waits: a fact committed
-	// before the instance was live had no wake to answer, so the mount itself is
-	// the read that consumes it. A pull that finds no driving fact opens no
-	// segment and returns to the wait.
-	//
-	// The read is skipped beside two mounts. A consumer mounted for a delegated
-	// batch is quiet: its batch is committed after the mount and woken on once it
-	// is whole, so a read that ran before that wake could take one fact of the
-	// batch and drive half a round. A chain that holds no fact at all is skipped
-	// too: the read has nothing it could consume, and the input a producer
-	// commits beside the mount reaches this loop through the wake that producer
-	// sends after the commit.
-	// The mount queued the boot pass before this loop started (see
-	// mountLocked), so a close that reads the loop in the window before this
-	// read reads a writer that owes a pass instead of a loop between segments.
-	// A mount whose read is skipped gives the queued pass back: no read will run
-	// for it, and the input a producer commits beside the mount reaches this loop
-	// through the wake that producer sends after the commit.
 	if !c.set.halted() && !c.quiet && c.chainHeldAtMount() {
 		c.consume(ctx)
 		if ctx.Err() != nil {
@@ -324,9 +300,6 @@ func (c *Consumer) run(ctx context.Context) {
 				if c.Resting() {
 					return
 				}
-				// The mark found work in hand: nothing but a wake or the end of
-				// the base context moves this loop now, so the halt is answered
-				// and the wait no longer selects it.
 				select {
 				case <-ctx.Done():
 					c.abandonSegment()
@@ -403,10 +376,8 @@ func (c *Consumer) noteProgress() {
 // Wake signals the loop that events may have arrived: the signal merges, so a
 // wake that lands while the loop consumes keeps it turning once more.
 //
-// - Only a wake the channel really accepted queues a pass: a merged wake asks
-// for the pass an earlier token already owes, so it repeats no count.
-// - The pass is queued before the token lands, so the loop that takes the token
-// and has not entered the pass yet is never read as resting.
+// - Only a wake the channel really accepted queues a pass: a merged wake asks for the pass an earlier token already owes, so it repeats no count.
+// - The pass is queued before the token lands, so the loop that takes the token and has not entered the pass yet is never read as resting.
 func (c *Consumer) Wake() {
 	c.queuePass()
 	select {
@@ -474,9 +445,6 @@ func (c *Consumer) Drive(keys ...event.EventID) {
 // production that holds it open. A loop beside no writer ledger registers
 // nothing.
 func (c *Consumer) consume(ctx context.Context) {
-	// The pass the wake or the mount queued is entered here: from this moment
-	// the busy flag reports the writer, and the count of passes still owed
-	// names only the wakes the channel has not handed over yet.
 	c.takePass()
 	c.setBusy(true)
 	defer c.setBusy(false)
@@ -492,9 +460,6 @@ func (c *Consumer) consume(ctx context.Context) {
 			return
 		default:
 		}
-		// An explicit drive flies exactly the segment it submitted: once that
-		// segment closes, the wait that submitted it owns the answer, and the
-		// consumer opens no further segment of its own.
 		if c.explicit && c.flyingSegment() == nil {
 			return
 		}
@@ -711,13 +676,6 @@ func (c *Consumer) pullDriving() pulledEvents {
 			continue
 		}
 		if named && evt.TaskID != "" {
-			// The named fact is the delivery of a task: a result the flying
-			// segment still awaits is paired by its harvest, and its name is kept
-			// until the round settles, so this pull meets the same notice again
-			// once the book holds the state the pairing ended in. One already
-			// consumed is the terminal notice of a round the book closed:
-			// receiving it accounts the fact read and releases the round, and
-			// only then may a later round of the same task drive.
 			switch c.TaskState(evt.TaskID) {
 			case TaskAwaited:
 				if terminalTaskNotice(evt) {
@@ -744,11 +702,6 @@ func (c *Consumer) pullDriving() pulledEvents {
 		c.read[evt.Key] = true
 		c.taken[evt.Key] = true
 		if evt.TaskID != "" && terminalTaskNotice(evt) {
-			// A terminal notice read as driving material answers the round it
-			// reports: an orphaned result's notice drives the follow-up that
-			// settles it, and the round's book entry leaves with the material so
-			// the next round of the same task is never read as one this book
-			// already took.
 			c.awaited.Delete(evt.TaskID)
 		}
 		pull.driving = append(pull.driving, evt)
@@ -759,10 +712,6 @@ func (c *Consumer) pullDriving() pulledEvents {
 		if !carries {
 			continue
 		}
-		// A delivery fact that found its result fact on the chain carries no
-		// second copy of the body: the observation a segment drives on is read
-		// from the result fact itself, so the one text of the result reaches
-		// the request exactly as the history presents it, never twice.
 		if evt.Type == event.TypeTaskSettled && observationless(evt.Message) {
 			if result, resultAt, held := resultFactOf(facts, evt.TaskID); held && !presentedFact(result, resultAt, lastOutput, shown, byPrefix) {
 				pull.material = append(pull.material, result)
@@ -1007,6 +956,7 @@ func drivingTrigger(events []event.Event) string {
 //
 // - The decision runs under the lineage the material that opened the segment named, so a body a call of it sends names the line its turn names instead of the send tool's own default.
 // - The receipts alone drive the next round only when no call is running: a decision whose every call was refused owes the model the refusal it reads, so it decides again at once, while a decision with calls in flight parks — each settlement and each input that lands wakes the loop, and the next decision reads the result beside whatever else arrived.
+// - The calls of an approved batch are the one exception to the park: the follow-up decision waits until every call of the batch has settled, so one decision reads the whole batch as the set the approver released instead of one turn per settled result.
 // - The closing round admits none of the calls it issued: the receipts it leaves are the refusals the model reads, and no further round may read them, so the segment closes on the closing round exactly as the direct drive ends on the one it ran.
 // - An explicit drive reads the address the same way a resident segment does:
 // every related fact past the boundary may open or continue the segment, so the
@@ -1026,12 +976,12 @@ func (c *Consumer) driveSegment(ctx context.Context, seg *segment) bool {
 			seg.dirty = true
 		}
 	}
+	if seg.whole > 0 {
+		return false
+	}
 	if !seg.dirty {
 		return false
 	}
-	// The resident loop judges its closing round from the chain snapshot its pull
-	// read; an explicit drive runs the budget its policy declares, exactly as the
-	// direct face did, so no chain position judges it.
 	round := closingRound(seg.policy, seg.rounds, time.Since(seg.started))
 	if !seg.explicit {
 		round = c.closingRoundOf(seg, pull.chain)
@@ -1047,15 +997,15 @@ func (c *Consumer) driveSegment(ctx context.Context, seg *segment) bool {
 	}
 	seg.dirty = false
 	seg.decisions = append(seg.decisions, decision)
-	// A decision that continues the round appends its own assistant message;
-	// the closing answer is appended by closeSegment. The flag names which of
-	// the two the latest decision took.
 	seg.answered = false
 	if flow, flowErr := plugin.NewFlow(decision.Binding.Plugins); flowErr == nil {
 		seg.pipeline = &flow
 	}
 	for _, adm := range running {
 		seg.pending[adm.taskID] = adm
+		if adm.batch {
+			seg.whole++
+		}
 		c.awaited.Store(adm.taskID, TaskAwaited)
 	}
 	if outcome.Kind == model.KindCompleted && outcome.Body != nil && outcome.Body.IsToolCallResponse() {
@@ -1072,8 +1022,6 @@ func (c *Consumer) driveSegment(ctx context.Context, seg *segment) bool {
 		}
 		return true
 	}
-	// Results may arrive while the final model request is in flight. Harvest them
-	// before closing; if any landed, the next decision must actually read them.
 	late := seg.harvest(ctx, c.loop)
 	if len(late) > 0 {
 		seg.transcript = append(seg.transcript, late...)
@@ -1160,9 +1108,6 @@ func (c *Consumer) closeSegment(ctx context.Context, seg *segment, decision Deci
 	}
 	transcript := seg.transcript
 	if seg.explicit && !seg.answered {
-		// The explicit face commits the closing assistant message beside the
-		// transcript it read, exactly as the drive it replaced did: a tool-call
-		// round already appended its own message before it continued.
 		transcript = append(transcript, assistantOf(outcome))
 	}
 	c.loop.commitTranscript(c.addr, transcript)
@@ -1197,11 +1142,6 @@ func (c *Consumer) abandonIfFlying() {
 	if c.flyingSegment() != nil {
 		c.abandonSegment()
 	}
-	// The drainer of the wake tokens is this goroutine: an exit that skips the
-	// normal loop leaves tokens nobody will read, so a rest criterion that
-	// counts them would answer busy beside ended work forever. Drain them, and
-	// the passes they queued with them: no read will enter a pass of a loop that
-	// already returned.
 	c.drainWake()
 }
 
@@ -1244,6 +1184,7 @@ func (c *Consumer) abandonSegment() {
 // waiters and the book, and leaves the delivery face beside it.
 //
 // - A committed answer beside no delivery face leaves the paired results awaited: the pairing a segment takes before it closes never answers consumed by itself.
+// - The capture is sealed before the waiters wake; an explicit drive seals when the face that submitted it returns.
 func (c *Consumer) settleSegment(ctx context.Context, seg *segment, answer SegmentAnswer, committed bool) {
 	if committed && c.deliver != nil {
 		c.deliver(ctx, c.addr, answer)
@@ -1268,11 +1209,6 @@ func (c *Consumer) settleSegment(ctx context.Context, seg *segment, answer Segme
 	notify := c.notify
 	c.notify = make(chan struct{})
 	c.mu.Unlock()
-	// A settled segment is the resident path's turn end: seal the capture its
-	// decisions admitted before the waiters wake, exactly as the direct drive
-	// seals before it returns, so a caller never reads an unsealed capture. An
-	// explicit drive seals when the face that submitted it returns, so the seal
-	// never runs beside the answer the caller has not read yet.
 	if !seg.explicit {
 		c.loop.sealCapture(ctx)
 	}
@@ -1374,6 +1310,9 @@ func (s *segment) harvest(ctx context.Context, l *Loop) []model.Message {
 	in.mu.Unlock()
 	var out []model.Message
 	for _, pair := range paired {
+		if pair.call.batch {
+			s.whole--
+		}
 		out = append(out, observationOf(pair.item.msg, pair.call.callID, pair.call.tool))
 		if pair.item.fact != "" && s.pipeline != nil {
 			l.publish(s.pipeline.After(ctx, pair.item.fact))
@@ -1419,16 +1358,13 @@ var ErrSegmentCancelled = errors.New("agent: the consumption loop ended before i
 // began is found by its own key, so a late entry reads the answer of the
 // segment that consumed it rather than the answer of a segment that closed
 // beside it. A wait the end of the loop meets answers ErrSegmentCancelled.
+//
+// - The answer index and the notify channel are swapped under one lock, so an atomic miss waits on the channel the next settle closes.
 func (c *Consumer) WaitAnswer(ctx context.Context, keys []event.EventID) (SegmentAnswer, error) {
 	if c == nil {
 		return SegmentAnswer{}, ErrSegmentCancelled
 	}
 	for {
-		// The cache check and the notify read share one critical section, so a
-		// segment that settles between them cannot strand this wait on a fresh
-		// channel its answer was indexed past: the answer enters the index under
-		// the same lock that swaps the channel, so an atomic miss means the wait
-		// holds the channel the next settle will close.
 		c.mu.Lock()
 		cached, held := c.cachedAnswerLocked(keys)
 		notify := c.notify
@@ -1456,7 +1392,7 @@ func (c *Consumer) WaitAnswer(ctx context.Context, keys []event.EventID) (Segmen
 // named keys, and whether one stands readable at all: a rebuildable answer past
 // answerTTL names a segment no entry may still be waiting on, and is dropped by the
 // read that finds it rather than answered, while an answer the chain cannot rebuild
-// stays readable. An answer the process no longer indexes is read back from the
+// stays readable. An answer the process does not index is read back from the
 // output fact that closed its segment, so the cache only accelerates a wait the chain
 // can satisfy and the only copy of an answer no fact records never leaves it.
 func (c *Consumer) answerFor(keys []event.EventID) (SegmentAnswer, bool) {
@@ -1500,7 +1436,7 @@ func (c *Consumer) cachedAnswerLocked(keys []event.EventID) (SegmentAnswer, bool
 // keys its segment actually consumed beside the range identity, the body it
 // committed and the stable fields of the turn it closed, so a wait that starts after
 // the process dropped its answer still reads the answer of its own segment instead of
-// waiting on a cache that no longer holds it. The relation is read, never guessed: an
+// waiting on a cache that does not hold it. The relation is read, never guessed: an
 // output whose metadata is missing, empty or unparseable names no input and answers
 // no key, and a turn field the event does not carry stays at its zero value — the
 // terminal unknown and the count zero — rather than defaulting to a completed word or
@@ -1522,8 +1458,8 @@ func (c *Consumer) answerOfChain(keys []event.EventID) (SegmentAnswer, bool) {
 // turnOfOutput rebuilds the stable turn one agent_output fact records: the terminal
 // the closing decision reduced to, the cause a failed turn reported, the closing
 // round it ran and the number of decisions it drove. An entry the fact does not carry
-// leaves its field at the zero value — KindUnknown and 0 — so a legacy output reads
-// as the unknown turn it recorded instead of a completed one it never named.
+// leaves its field at the zero value — KindUnknown and 0 — so an output that carries
+// no such entry reads as the unknown turn it recorded instead of a completed one it never named.
 func turnOfOutput(evt event.Event) Turn {
 	turn := Turn{
 		InvocationID: evt.InvocationID,
@@ -1738,6 +1674,8 @@ func lastOutputOf(facts []event.Event) event.EventID {
 // cursor is the chain position the caller read outside that lock. A quiet mount marks
 // a fresh instance for a delegated batch, whose first read waits for the wake that
 // follows the whole batch (see Consumer.run).
+//
+// - The boot pass is queued before the instance is visible, so a close in that window reads a writer that owes a read.
 func (cs *Consumers) mountLocked(l *Loop, addr event.Address, cursor event.EventID, quiet bool) *Consumer {
 	cs.mu.Lock()
 	defer cs.mu.Unlock()
@@ -1753,10 +1691,6 @@ func (cs *Consumers) mountLocked(l *Loop, addr event.Address, cursor event.Event
 	consumer.turnContext = cs.turnContext
 	consumer.progress = cs.progress
 	consumer.cursor = cursor
-	// The boot pass this mount starts the loop with is queued before the
-	// instance is visible: a close that reads the set in the window before the
-	// goroutine runs reads a writer that owes a read, never an address at rest.
-	// A boot whose read is skipped gives the pass back (see Consumer.run).
 	consumer.queuePass()
 	ctx, cancel := context.WithCancel(cs.base)
 	consumer.cancel = cancel

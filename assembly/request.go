@@ -316,6 +316,8 @@ func (f *fileFixer) projectThroughFacts(ctx context.Context, files []state.Fixed
 // already carries runs on the fact exactly as a later request does; a content
 // the chain does not carry yet is filed as one config_change fact of the file
 // dimension and read back. The answered content is the content the fact carries.
+// The summary the fact carries names the file and the content version in one line,
+// so a reader of the fact names the change without rendering its body.
 func (f *fileFixer) fileFact(ctx context.Context, ref config.FileRef, content string) (string, error) {
 	header := fileFactHeader(ref, content)
 	description := header + "\n" + content
@@ -329,8 +331,6 @@ func (f *fileFixer) fileFact(ctx context.Context, ref config.FileRef, content st
 		return "", fmt.Errorf("read the committed file change fact %s: %w", change.ID, err)
 	}
 	committed := change.Event(time.Now().UTC())
-	// The summary names the file and the content version in one line, so a
-	// reader of the fact names the change without rendering its body.
 	committed.Meta[event.MetaKeyEventSummary] = header
 	if _, err := f.run.commitFactChecked(ctx, committed); err != nil {
 		return "", fmt.Errorf("commit the file change fact %s: %w", change.ID, err)

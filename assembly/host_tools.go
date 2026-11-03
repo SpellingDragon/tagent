@@ -214,12 +214,14 @@ func (p *hostSendReentryPort) Bind(run *Run) {
 // depends on is settled before the first mutation, and the one round that will carry the
 // body is in this call's hand before it answers:
 // - The settled status design D7 admits and the terminal ledger entry the reopen needs are both read first, so a refusal moves nothing at all.
-// - A delegation entry and a continuation this process no longer holds are rebuilt from the task account and the declaration the delegated input fact carries before the round is claimed, so a restart re-enters the round the record names instead of refusing a round process memory lost.
+// - A delegation entry and a continuation this process does not hold are rebuilt from the task account and the declaration the delegated input fact carries before the round is claimed, so a restart re-enters the round the record names instead of refusing a round process memory lost.
 // - The claim is what makes the receipt true. Without it the call could answer "ok" for a body a second re-entry also took, or for a round that never opened, and the body would be lost behind a receipt that said otherwise.
 // - The round is opened last, and the round a later step refuses is read against the one step that still had to race: the round is put back rather than leaving the task in flight with no turn to serve it.
 // - The receipt waits for the round's first commit: a body handed to a round that never landed it is refused here, and the cause is filed with it.
 // - A round that lands the body and then ends without recording its terminal keeps the round it holds and leaves the accepted body owed to the next round. The failure is that round's own: the ok already answered for the committed input stands, and no denial or broken receipt is filed beside it.
 // - Only a task this host serves a round of is re-entered: an identity the table holds no record of, a task whose delegated round this host never served, and every status design D7 refuses are each answered as a named refusal rather than reactivated into a round nobody asked for.
+// - A delegation the ledger holds no entry of is rebuilt from the task the record already carries: the process that admitted it is gone, so the settled terminal and the return site of that delegation live on the task account alone. A task of another family, or one whose admission was not a delegation, stays refused by name.
+// - A continuation this process never minted is rebuilt from the declaration the delegated input fact travels with: the round a restart re-enters is served on the assembly the chain recorded, not on a copy process memory lost.
 func (p *hostSendReentryPort) ReenterTask(ctx context.Context, taskID event.TaskID, content string) (deliveryOutcome, string) {
 	if p.tasks == nil || p.ledger == nil {
 		return deliveryRefused, "the host is not assembled"
@@ -232,11 +234,6 @@ func (p *hostSendReentryPort) ReenterTask(ctx context.Context, taskID event.Task
 		return p.refuseReentry(ctx, taskID, hostDenialTask, err)
 	}
 	if err := p.ledger.CanReopenRound(taskID); err != nil {
-		// A delegation the ledger holds no entry of is rebuilt from the task the
-		// record already carries: the process that admitted it is gone, so the
-		// settled terminal and the return site of that delegation live on the task
-		// account alone. A task of another family, or one whose admission was not a
-		// delegation, stays refused by name.
 		if !errors.Is(err, agent.ErrDelegationUnknown) {
 			return p.refuseReentry(ctx, taskID, hostDenialDelegation, err)
 		}
@@ -255,9 +252,6 @@ func (p *hostSendReentryPort) ReenterTask(ctx context.Context, taskID event.Task
 		}
 	}
 	if p.rebuild != nil && !p.rebuild.Served(taskID) {
-		// A continuation this process never minted is rebuilt from the declaration the
-		// delegated input fact travels with: the round a restart re-enters is served on
-		// the assembly the chain recorded, not on a copy process memory lost.
 		if err := p.rebuildContinuation(ctx, taskID); err != nil {
 			return p.refuseReentry(ctx, taskID, hostDenialClaim, err)
 		}
@@ -319,7 +313,7 @@ func (p *hostSendReentryPort) rebuildContinuation(ctx context.Context, taskID ev
 
 // delegationDeclaration reports the resolved declaration one delegated task's input fact
 // carries. The chain is the durable account when the run has a tier and the live ledger
-// beside none, so a restart reads the declaration back even when the site chain no longer fits
+// beside none, so a restart reads the declaration back even when the site chain does not fit
 // the hot window. The site session locates the chain: its agent is the assembled name the
 // declaration carries, while the session is the caller session beside the native call.
 func (r *Run) delegationDeclaration(spec task.Spec) ([]byte, error) {

@@ -349,15 +349,17 @@ func Assemble(ctx context.Context, decl *config.Declaration, agents map[event.Ag
     acquired. MUST NOT carry a stand-in governance in a formal assembly.
     MUST NOT return a half-assembled run beside a publication failure.
 
-    - The producer of the closing round reads the budget its own agent declares
-    over the same declaration the loop's table was set from, so the judgment
-    the chain carries names the policy the drive runs under. - The consumer of
-    compression judgments is an instance of the material flow like the fold that
-    judges them, so every agent's After pass executes the judgments already
-    filed instead of waiting for a producer to hand them over. - The producer of
-    the closing round is an instance of the same flow: every agent's After pass
-    judges the budget of the segment its commit grew, so the closing round of a
-    spent budget stands on the chain as the fact it is.
+    - The producer of the closing round reads the budget its own agent
+    declares over the same declaration the loop's table was set from,
+    so the judgment the chain carries names the policy the drive runs under.
+    - The consumer of compression judgments is an instance of the material flow
+    like the fold that judges them, so every agent's After pass executes the
+    judgments already filed instead of waiting for a producer to hand them over.
+    - The producer of the closing round is an instance of the same flow: every
+    agent's After pass judges the budget of the segment its commit grew, so
+    the closing round of a spent budget stands on the chain as the fact it is.
+    - The loop builds the writer ledger for itself and the run reads it through
+    the loop, so the close judges the very registrations the productions made.
 
 func Boot(configPath string, opts ...HostOption) (*Host, error)
     Boot reads one host document and returns the assembled host: the declaration
@@ -392,8 +394,11 @@ func Boot(configPath string, opts ...HostOption) (*Host, error)
 
     - TAGENT_GCTRACE=1 asks for the runtime's GC trace, which the runtime reads
     when the process starts: a boot merges GODEBUG=gctrace=1 so the subprocesses
-    this host starts trace, and names in one line that the host process itself
-    traces only when it was launched beside it.
+    this host starts trace, and names in one line that the host process
+    itself traces only when it was launched beside it. - nativeFor is the one
+    construction of an agent's native pieces: Boot builds the first generation
+    through it, and a reload builds an agent its document adds through it over
+    the ports bound in this call.
 
 func DiagnosticSwitchesFromEnv() (DiagnosticSwitches, error)
     DiagnosticSwitchesFromEnv reads the diagnostic switches the host process
@@ -884,12 +889,11 @@ func (h *Host) Invoke(ctx context.Context, req InvokeRequest) (agent.Turn, error
     assistant output through the message sender from the delivery face of
     that instance, once per closed segment, so an entry that only waits on the
     segment never delivers a body a second time. Every other declared agent's
-    address is driven headless: its answer stays on its own chain.
-
-    The entry agent and the declared agent set are read from the generation in
-    effect: a reload that moves the entry speaks for the next turn, while a turn
-    already running keeps the entry it was admitted under, and an address the
-    generation removed answers new input by name.
+    address is driven headless: its answer stays on its own chain. The entry
+    agent and the declared agent set are read from the generation in effect:
+    a reload that moves the entry speaks for the next turn, while a turn already
+    running keeps the entry it was admitted under, and an address the generation
+    removed answers new input by name.
 
 func (h *Host) Quiesce(ctx context.Context, req agent.CloseRequest) (agent.DrainReport, error)
     Quiesce stops injection into this host and runs it to its fixed point:
@@ -909,6 +913,12 @@ func (h *Host) Quiesce(ctx context.Context, req agent.CloseRequest) (agent.Drain
     not stopped. MUST answer a cancelled caller as Cut where the run stands:
     the criterion is read beside a context that does not carry the caller's
     cancellation.
+
+    - The close's own drain path is the one offer a delivery a live path refused
+    receives: its task account still owes the notification, and no retained
+    offer stands beside it. The delivered notice stays unconsumed on the mailbox
+    account until its follow-up turn lands, so the criterion re-read above
+    cannot report the run at rest beside work this released.
 
 func (h *Host) RefuseDelivery(ctx context.Context, id string) error
     RefuseDelivery discards one held body: nothing is delivered, the hold is
@@ -931,13 +941,22 @@ func (h *Host) Reload(ctx context.Context) (hostReloadReport, error)
     Reload reads the configuration source again, publishes the declaration
     it carries, and files the configuration facts the move judged: one config
     change per declaration dimension that moved and one model configuration
-    change per agent whose lease holds a version the document no longer names.
+    change per agent whose lease holds a version the document does not name.
     The publication is the one entry the run already owns; the model change
     is the configuration change family's model dimension, committed after
     the publication settled — including a carried document, so a move whose
     install failed is judged again. The lease mounted on each agent runs its
     own rebuild, publication and installation order and decides whether the new
     version takes effect.
+
+    - The generation declares the agent set: an agent both documents name
+    keeps the contribution already in service, an added agent is constructed
+    through the same native path Boot ran, and its model lease is built beside
+    the publication so the address serves its first turn on the model the
+    declaration names. - The leases are mounted only once the generation that
+    declared the agents published: a refused reload attaches nothing, and the
+    next publication reads the extended table through the same lease path Boot
+    filled.
 
 func (h *Host) Run() *Run
     Run reports the assembled run the host drives.

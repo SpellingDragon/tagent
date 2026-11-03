@@ -354,14 +354,11 @@ func (c *continuations) Abandon(taskID event.TaskID) {
 // the slot when the round ends.
 //
 // The answer is the body's delivery and not its acceptance: Serve returns once the body is in
-// the round that carries it — the round's own input landed at its execution site — so a caller
-// that answers a delivery receipt from this return answers it for a body that arrived.
-//
-// Only a round that never reaches its input returns a cause: nothing of that attempt happened,
-// so the caller puts the task and the ledger back. A round that lands its input and then fails
-// to record its terminal reports the cause to after instead — the failure belongs to the round,
-// the accepted body stays owed to the next round, and never to a denial of the input the
-// receipt already answered.
+// the round that carries it, so a caller answering a delivery receipt answers it for a body
+// that arrived. Only a round that never reaches its input returns a cause — the caller puts
+// the task and the ledger back. A round that lands its input and then fails to record its
+// terminal reports the cause to after instead: the failure belongs to the round, the accepted
+// body stays owed to the next round, and never denies the input the receipt already answered.
 func (c *continuations) Serve(ctx context.Context, taskID event.TaskID, input string, after func(error)) error {
 	if c == nil {
 		return fmt.Errorf("%w: %s", ErrContinuationMissing, taskID)

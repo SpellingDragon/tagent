@@ -369,9 +369,7 @@ func TestMailboxSnapshotInvariants(t *testing.T) {
 	})
 }
 
-// TestMovementCoversTheMailbox pins the sequence the rest criterion is fenced by
-// against the mailbox this store writes: the sequence belongs to the mailbox
-// account and is built beside it, never wired in from outside.
+// TestMovementCoversTheMailbox pins the mailbox account's own sequence beside the store it writes.
 // - an accepted entry, a completed consumption and the refusal a closed target answers each advance it
 // - a judgment reads that account's own sequence instead of a mechanism kept beside it
 // 契约: docs/wiki/reliability/durable-delivery.md#envelope-states
@@ -959,10 +957,10 @@ func TestSettleAttemptRecordInvariants(t *testing.T) {
 	})
 }
 
-// TestRestoredTaskRoundHighWater pins the round a rebuilt task continues from:
-// - a task whose terminal notices the log already consumed re-enters at the round after the one it reached, not at the round its remaining outbox still names
-// - a task whose terminal notice is still owed re-enters at the same round, so an unconsumed notice neither rewinds nor skips the round identity
-// - a reactivation fact whose round never settled still consumes the round it opened, so its rollback names that round and the next re-entry takes the one after it
+// TestRestoredTaskRoundHighWater pins the round a rebuilt task re-enters at.
+// - a terminal the log already consumed re-enters at the round after it reached
+// - a terminal notice still owed re-enters at the same round, never rewound
+// - a reactivation whose round never settled consumes the round it opened
 // 契约: docs/wiki/agent/task-lifecycle.md#status-machine
 func TestRestoredTaskRoundHighWater(t *testing.T) {
 	ctx := context.Background()

@@ -95,16 +95,9 @@ func (s capacityState) assertUnchanged(t *testing.T, projection *ReplayProjectio
 	}
 }
 
-// TestFoldCapacityAndCandidateRules pins the two gates of an age fold: the
-// rendered volume must pass the threshold and the round must mint at least one
-// product. The capacity gate alone is not enough to write a fold.
-//   - inside capacity, both the plan and the fold leave the projection untouched
-//   - past the threshold with no candidate, both answer a no-op and write nothing
-//   - past the threshold with only small process detail, the candidate still folds
-//   - past the threshold with large material, plan-apply answers one direct fold and is idempotent
-//   - a threshold of one does not force a trigger when the round has no candidate
+// TestFoldCapacityAndCandidateRules pins the two gates of an age fold: the rendered volume and a candidate.
 //
-// 契约: docs/FACT-VOCABULARY.md#families
+// 契约: docs/wiki/agent/compression-and-telemetry.md#projection-fold
 func TestFoldCapacityAndCandidateRules(t *testing.T) {
 	ctx := context.Background()
 

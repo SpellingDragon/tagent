@@ -121,7 +121,7 @@ func TestAgeLevelReadsTheSharedRule(t *testing.T) {
 	}
 }
 
-// testSegmentsCloseAtAgentOutput pins the legacy partition of a projection into
+// testSegmentsCloseAtAgentOutput pins the positional partition of a projection into
 // task-turn segments: an output that records no readable input relation closes
 // every entry before it, so the positional boundary stands.
 //   - a segment spans an input beside the process detail up to the output that closes it
@@ -158,15 +158,9 @@ func testSegmentsCloseAtAgentOutput(t *testing.T) {
 	}
 }
 
-// TestSegmentsCloseByConsumptionRelation pins the relation a segment closes on:
-// an agent_output closes the inputs its fact records as consumed, an input it
-// leaves unnamed rolls into the segment the next output closes, and an output
-// beside no readable relation keeps the positional boundary.
-//   - named inputs and the closing output form one segment; an input the output
-//     did not name rolls into the next segment instead of closing with it
-//   - a legacy output without input_events closes every entry before it
-//   - an empty, empty-identity or unparseable input_events is no relation either,
-//     so it closes positionally rather than guessing one
+// TestSegmentsCloseByConsumptionRelation pins the relation a segment closes on.
+//
+// 契约: docs/wiki/memory/memory-architecture.md#event-shape
 func TestSegmentsCloseByConsumptionRelation(t *testing.T) {
 	input := func(key string) ProjectionEntry {
 		return ProjectionEntry{
@@ -215,14 +209,8 @@ func TestSegmentsCloseByConsumptionRelation(t *testing.T) {
 	}
 
 	t.Run("the consumption relation closes the segment", func(t *testing.T) {
-		// The input that landed while the output flew was never named by the
-		// request that closed the turn, so it rolls into the next segment while
-		// the process detail of the closing turn stays with its output.
 		entries := []ProjectionEntry{
 			input("i-1"),
-			// A notice is material of the turn it landed in, not an input: no
-			// relation names it, so it closes with the output beside it instead
-			// of rolling into every later segment.
 			{Key: "i-notice", Type: event.TypeFeedback, Summary: "notice", Content: "进度通知。", Time: ageBase},
 			input("i-2"),
 			{Key: "i-plan", Type: event.TypeThinkingPlan, Summary: "plan", Content: "过程细节。", Time: ageBase},
@@ -239,8 +227,6 @@ func TestSegmentsCloseByConsumptionRelation(t *testing.T) {
 		if !segments[0].Complete || !segments[1].Complete {
 			t.Fatalf("segments = %+v, want both closed by their output", segments)
 		}
-		// An input that lands after the output already stands in the next
-		// segment, so the positional boundary and the relation agree here.
 		entries = []ProjectionEntry{
 			input("i-1"), input("i-2"),
 			output("a", `["i-1","i-2"]`),

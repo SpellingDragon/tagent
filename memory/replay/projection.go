@@ -44,7 +44,7 @@ type ProjectionEntry struct {
 	// entry's public shape remains the five fields of a projection record, and it
 	// stays a string so the entry remains comparable; the segment rule reads it
 	// through WithInputEvents and reads an empty or unreadable value as no
-	// relation, so a legacy output closes at the positional boundary.
+	// relation, so an output without the relation closes at the positional boundary.
 	inputEvents string
 	// messageRole is the role the fact's own message carried: the assembly
 	// renders this role when the fact states one and fills the frozen type's

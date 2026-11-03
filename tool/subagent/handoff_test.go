@@ -219,9 +219,6 @@ func TestTargetDelegationReadsTheRefsContent(t *testing.T) {
 		}
 		waitCompletions(t, delegation, 1)
 
-		// The source materializes as its own message beside the task (the stub
-		// stands in for the resident loop), so presence is read across every
-		// message the round produced.
 		got := requestAllText(provider.recorded()[0])
 		if !strings.Contains(got, content) {
 			t.Fatalf("delegated request carries no refs content %q:\n%s", content, got)
@@ -246,10 +243,6 @@ func TestTargetDelegationReadsTheRefsContent(t *testing.T) {
 		}
 		waitCompletions(t, delegation, 1)
 
-		// A reference the run does not hold is noise a hallucination produced:
-		// it silently does not materialize (Q2 ruling) — the turn still runs, the
-		// bare identity stays in the envelope block, and no missing-marker text
-		// is invented for what nothing backs.
 		got := requestAllText(provider.recorded()[0])
 		if strings.Contains(got, "  (missing)\n") {
 			t.Fatalf("delegated request carries a missing-marker %q for an unbacked reference: %q", "  (missing)\n", got)

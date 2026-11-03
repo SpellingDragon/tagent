@@ -8,15 +8,7 @@ import (
 	"github.com/SpellingDragon/tagent/api/event"
 )
 
-// TestConfigChangeIsAFact pins the configuration change family's identity and
-// the event it commits as:
-//   - a change answers its content-addressed identity as its fact key and the
-//     frozen config_change type
-//   - the identity is derived from the agent, the dimension, the generation and
-//     the description, so a different judgment answers a different key and one
-//     judgment answers one key however often it is re-judged
-//   - the event carries the configuration source stamp, the dimension and the
-//     generation in its metadata, and the filing moment is the one Event stamps
+// TestConfigChangeIsAFact pins the configuration change family's identity and the event it commits as.
 //
 // 契约: docs/wiki/platform/org-hot-reload.md#generations
 func TestConfigChangeIsAFact(t *testing.T) {
@@ -82,11 +74,7 @@ func TestConfigChangeIsAFact(t *testing.T) {
 	})
 }
 
-// TestConfigChangeKeepsItsFiveFieldShape pins the frozen shape of the fact: the
-// five exported fields that state every configuration change and the unexported
-// model payload beside them. The model dimension adds no exported field, so the
-// struct stays inside the concept budget without a debt line; a sixth exported
-// field or a missing model payload fails here as well as at the concept gate.
+// TestConfigChangeKeepsItsFiveFieldShape pins the five exported fields and the unexported model payload of the fact.
 //
 // 契约: docs/FACT-VOCABULARY.md#fact-category
 func TestConfigChangeKeepsItsFiveFieldShape(t *testing.T) {
@@ -113,12 +101,7 @@ func TestConfigChangeKeepsItsFiveFieldShape(t *testing.T) {
 	}
 }
 
-// TestConfigChangeModelCarriesTheMove pins the model dimension payload:
-//   - the model change answers the model dimension and its own content-addressed
-//     identity, and a version or result that differs answers a different key
-//   - the event renders the version move under the model replacement metadata
-//     keys, so a lease observer reads one configuration change fact, not a
-//     second family
+// TestConfigChangeModelCarriesTheMove pins the model dimension payload and the model replacement metadata.
 //
 // 契约: docs/wiki/platform/org-hot-reload.md#generations
 func TestConfigChangeModelCarriesTheMove(t *testing.T) {

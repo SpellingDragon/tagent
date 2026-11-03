@@ -346,6 +346,7 @@ func applyHostGCTrace() {
 // - A fuse declaration on the entry agent wires the loop: a response above the call cap or past the long-context threshold parks its whole batch on that one book before anything executes, and a declaration that names neither knob leaves the limits the process already declared in place.
 //
 // - TAGENT_GCTRACE=1 asks for the runtime's GC trace, which the runtime reads when the process starts: a boot merges GODEBUG=gctrace=1 so the subprocesses this host starts trace, and names in one line that the host process itself traces only when it was launched beside it.
+// - nativeFor is the one construction of an agent's native pieces: Boot builds the first generation through it, and a reload builds an agent its document adds through it over the ports bound in this call.
 func Boot(configPath string, opts ...HostOption) (*Host, error) {
 	applyHostGCTrace()
 	doc, err := loadHostDocument(configPath)
@@ -396,9 +397,6 @@ func Boot(configPath string, opts ...HostOption) (*Host, error) {
 	reentryPort := &hostSendReentryPort{}
 	client := &http.Client{Timeout: doc.requestTimeout()}
 	models := newHostModelBuilder(doc, client)
-	// nativeFor is the one construction of an agent's native pieces: Boot builds
-	// the first generation through it, and a reload builds an agent its document
-	// adds through it over the ports bound below.
 	nativeFor := func(ctx context.Context, doc *hostDocument, id event.AgentID) (NativeAgent, error) {
 		return doc.nativeAgent(ctx, string(id), client, recallPort, meditationPlan, meditationPort, reentryPort)
 	}
@@ -824,7 +822,6 @@ func (h *Host) consumersOf() *agent.Consumers {
 // instance, once per closed segment, so an entry that only waits on the segment
 // never delivers a body a second time. Every other declared agent's address is
 // driven headless: its answer stays on its own chain.
-//
 // The entry agent and the declared agent set are read from the generation in
 // effect: a reload that moves the entry speaks for the next turn, while a turn
 // already running keeps the entry it was admitted under, and an address the
@@ -1064,6 +1061,8 @@ func (h *Host) takeNoticeAccounts(consumed []event.EventID) []settleBarrier {
 // receipt, and the answer of a settled entry never fails the drive that waited
 // on it. A settlement that stops before its receipt hands the marker back, so
 // the other face or the next wake still closes the entry.
+//
+// - A terminal outside the reduction's closed set names no result the account can close on: the attempt is recorded and the entry stays owed for the wake that reads a real terminal.
 func (h *Host) settleTerminal(ctx context.Context, turn agent.Turn) (bool, error) {
 	barrier, held := settleBarrierFrom(ctx)
 	if !held {
@@ -1103,9 +1102,6 @@ func (h *Host) settleTerminal(ctx context.Context, turn agent.Turn) (bool, error
 		h.noteFailureObservation(ctx, barrier, turn)
 	case model.KindCancelled:
 	default:
-		// A terminal outside the reduction's closed set names no result the
-		// account can close on: the attempt is recorded and the entry stays owed
-		// for the wake that reads a real terminal.
 		return false, nil
 	}
 	if err := barrier.consume(ctx); err != nil && !errors.Is(err, state.ErrClaimSettled) {
@@ -1210,6 +1206,7 @@ func failureObservationKey(invocation event.InvocationID) event.EventID {
 // - An entry whose task the flying segment already paired is answered here without a second turn: that segment settles the entry through its own delivery, and the consumed state this reads is the one the segment writes inside that delivery, so a segment that paired the result and has not delivered yet leaves the task awaited and this call waits for the delivery instead of closing the entry on a pairing alone.
 // - A wait the settle window ends answers the state as it stands, so a segment still flying past the window leaves the notice turn driving beside it and the warning names the task.
 // - The segment that consumes the material answers this call only after its own delivery, so the settle account of the entry is registered here, under the key the material lands as and before the commit: the delivery face of the instance closes it beside the segment that consumed that key, and a segment that closed without reading the material leaves the account owed for the wake.
+// - The account still stands owed when the close itself cancelled the turn: that cancellation is the stop, not an outcome the target reached, and the next boot resumes it.
 func (h *Host) fireNoticeTurn(ctx context.Context, addr event.Address, fact event.Event) error {
 	if h == nil || h.run == nil {
 		return ErrHostClosed
@@ -1264,8 +1261,6 @@ func (h *Host) fireNoticeTurn(ctx context.Context, addr event.Address, fact even
 		return err
 	}
 	if !settled {
-		// The account still stands owed: a turn the close itself cancelled is the
-		// stop, not an outcome the target reached, and the next boot resumes it.
 		return fmt.Errorf("%w: %s ended as %s", ErrNoticeTurnIncomplete, answer.Turn.InvocationID, answer.Turn.Terminal)
 	}
 	return nil
@@ -1411,6 +1406,8 @@ func (h *Host) observeExecState(evt tagentexec.StateEvent) {
 // MUST admit the derived turns an accepted obligation owes for the whole quiesce.
 // MUST NOT report a run at rest while a consumer still flies or a writer has not stopped.
 // MUST answer a cancelled caller as Cut where the run stands: the criterion is read beside a context that does not carry the caller's cancellation.
+//
+// - The close's own drain path is the one offer a delivery a live path refused receives: its task account still owes the notification, and no retained offer stands beside it. The delivered notice stays unconsumed on the mailbox account until its follow-up turn lands, so the criterion re-read above cannot report the run at rest beside work this released.
 func (h *Host) Quiesce(ctx context.Context, req agent.CloseRequest) (agent.DrainReport, error) {
 	if h == nil || h.run == nil {
 		return agent.DrainReport{}, ErrHostClosed
@@ -1446,11 +1443,6 @@ func (h *Host) Quiesce(ctx context.Context, req agent.CloseRequest) (agent.Drain
 			}
 			return report, nil
 		}
-		// The close's own drain path is the one offer a delivery a live path
-		// refused receives: its task account still owes the notification, and no
-		// retained offer stands beside it. The delivered notice stays unconsumed
-		// on the mailbox account until its follow-up turn lands, so the criterion
-		// re-read above cannot report the run at rest beside work this released.
 		h.run.offerOwed(judge)
 		if digest := settleDigest(read); digest != woken {
 			woken = digest

@@ -32,20 +32,15 @@ exactly as it stands.
 
 红线: 逻辑状态=纯观测：只标记，不改状态机、不自动处置（不 kill 不中断）——处置走 Governor 策略面。
 
-This file holds the private sequence a run's accounts are judged at:
-every account the rest criterion reads advances its own sequence whenever it is
-written, and the judgment reads the accounts' sequences together.
+This file holds the private sequence a run's accounts are judged at: every
+account advances its own sequence whenever it is written, the judgment reads
+the accounts' sequences together, and the sequence belongs to the account that
+advances it, never to a mechanism wired beside it. The registry and the mailbox
+each build their own; the close only reads them.
 
 The sequence is one counter, never a lock: the accounts it fences are written
-under their own locks and in their own order, so a judgment that held them all
-at once would order two of those locks against each other. A counter moves no
-lock and makes no reader wait for a writer: a read that spans a write sees a
-sequence move and is re-read, and a read that never holds is answered unjudged
-rather than as a snapshot of instants that never stood together.
-
-The sequence belongs to the account that advances it, never to a mechanism wired
-beside it: the task registry and the mailbox each build their own, and the close
-only reads them.
+under their own locks in their own order, so a counter moves no lock and makes
+no reader wait. A read spanning a write sees a sequence move and is re-read;
 
 This file holds the progress read of a task. Progress is a fact a running task
 reports, not a state it is moved to: the report travels as a NoticeProgress in

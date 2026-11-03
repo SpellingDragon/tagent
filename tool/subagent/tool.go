@@ -185,9 +185,6 @@ func NewTool(opts ToolOptions, shared ...continuationTable) (*Tool, continuation
 		bindings:      opts.Bindings,
 		continuations: table,
 	}
-	// The account remembers the run faces beside the table it shares, so a round it
-	// rebuilds after a restart settles through the delegation and borrowing faces of
-	// the run that holds it now instead of a process that ended.
 	table.adopt(faces)
 	return &Tool{
 		parent:  opts.Parent,

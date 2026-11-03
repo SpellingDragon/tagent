@@ -25,9 +25,7 @@ var invariantLoopAddress = event.Address{AgentID: "agent-a", SessionID: "session
 // invariantLoopOtherAddress is the neighbouring session address the invariants' drives never mix with.
 var invariantLoopOtherAddress = event.Address{AgentID: "agent-a", SessionID: "session-b"}
 
-// TestLoopDriveNotExported pins the public face of the loop to the resident
-// consumer: no caller outside this package can start a turn beside the
-// consumption loop, so the drive stays an unexported test seam.
+// TestLoopDriveNotExported pins that no caller outside this package can start a turn beside the consumption loop.
 func TestLoopDriveNotExported(t *testing.T) {
 	if method, ok := reflect.TypeOf((*Loop)(nil)).MethodByName("Drive"); ok {
 		t.Fatalf("Loop.%s is exported, want the drive folded into the unexported consumption face", method.Name)
@@ -1280,9 +1278,8 @@ func TestBackflowWakesSelfRegisteredResidents(t *testing.T) {
 	})
 }
 
-// TestStoppedResidentsRejectDelegatedWork uses the public delegated-entry verdict
-// to prove that stopping residents is terminal for new work: no replacement set or
-// Consumer may appear beside the stopped one.
+// TestStoppedResidentsRejectDelegatedWork proves that stopping residents is terminal for new delegated work.
+// - no replacement set or Consumer may appear beside the stopped one
 func TestStoppedResidentsRejectDelegatedWork(t *testing.T) {
 	for _, test := range []struct {
 		name       string
@@ -1337,9 +1334,8 @@ func (h *gatedHistoryFace) SessionFacts(addr event.Address) []event.Event {
 	return h.HistoryFace.SessionFacts(addr)
 }
 
-// TestConsumerSetDoesNotReplaceMountedAddress proves the assembly-time boundary:
-// once an address mounted through one set, another set cannot silently take it over.
-// Stopping that current set must make public delegated work unavailable.
+// TestConsumerSetDoesNotReplaceMountedAddress proves that a mounted address cannot be silently taken over by another set.
+// - stopping the current set makes public delegated work unavailable
 func TestConsumerSetDoesNotReplaceMountedAddress(t *testing.T) {
 	tool := &backflowNestedCallTool{settle: make(chan struct{}), backflowed: make(chan struct{})}
 	script := newClosingRoundScript(closingRoundStep{answer: backflowNestedAnswer})
@@ -1420,8 +1416,7 @@ func (t *wakeFromConsumerTool) Call(ctx context.Context, _ []byte) (any, error) 
 	return "woke", nil
 }
 
-// TestStopResidentsAllowsWakeFromConsumerTool proves that stop never holds a state
-// lock while joining a Consumer whose tool synchronously re-enters WakeAddress.
+// TestStopResidentsAllowsWakeFromConsumerTool proves that stop holds no state lock while joining a re-entering Consumer.
 func TestStopResidentsAllowsWakeFromConsumerTool(t *testing.T) {
 	tool := &wakeFromConsumerTool{site: backflowNestedSite, entered: make(chan struct{})}
 	script := newClosingRoundScript(closingRoundStep{calls: []model.ToolCall{
@@ -1481,9 +1476,7 @@ func TestStopResidentsAllowsWakeFromConsumerTool(t *testing.T) {
 	}
 }
 
-// TestStoppedSetRejectsSubmitBeforeExistingInstanceJoin keeps an existing Consumer
-// inside its tool after Stop marks the set, then proves a new public Submit neither
-// reuses it nor commits another input before the old Consumer has joined.
+// TestStoppedSetRejectsSubmitBeforeExistingInstanceJoin proves that a stopped set rejects submit before its old Consumer joins.
 func TestStoppedSetRejectsSubmitBeforeExistingInstanceJoin(t *testing.T) {
 	tool := &wakeFromConsumerTool{
 		site:      backflowNestedSite,
@@ -1642,14 +1635,10 @@ func backflowNestedOutputs(history *invariantLoopHistory, addr event.Address) []
 	return out
 }
 
-// TestOutputFactCarriesStableTurnMetadata pins the closing fields of one
-// segment's agent_output fact to the answer the same segment delivered: the
-// output fact states the turn it closed, so the chain rebuilds the closed turn
-// itself instead of deriving it from the process cache afterwards.
-//   - a completed segment records its terminal, the empty failure and closing
-//     round, its trigger lineage and its decision count
-//   - a failed segment records the failed terminal beside the trimmed cause
-//   - the input relation the fact commits stays beside the new entries
+// TestOutputFactCarriesStableTurnMetadata pins the closing fields of one segment's agent_output fact to its delivered answer.
+// - a completed segment records its terminal, the empty failure and closing round, its trigger lineage and its decision count
+// - a failed segment records the failed terminal beside the trimmed cause
+// - the input relation the fact commits stays beside the new entries
 //
 // 契约: docs/wiki/agent/event-flow.md#runner-flow
 func TestOutputFactCarriesStableTurnMetadata(t *testing.T) {

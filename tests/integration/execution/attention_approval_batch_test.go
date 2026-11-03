@@ -49,7 +49,7 @@ func TestFuseBatchParksOnAttention(t *testing.T) {
 
 	decideBatch(t, book, parked.ID, approval.ApprovalApproved)
 	awaitAsync(t, errs)
-	if got := tool.calls(); got != responseStormCalls {
+	if got := awaitToolCalls(t, tool, responseStormCalls); got != responseStormCalls {
 		t.Fatalf("dispatched calls of the approved batch = %d, want every call of it", got)
 	}
 	if pending := book.Pending(); len(pending) != 0 {

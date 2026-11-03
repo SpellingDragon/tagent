@@ -473,9 +473,7 @@ func (s *stubDelegation) Submit(ctx context.Context, in agent.DelegatedInput) (a
 	if in.Binding.Model == nil {
 		return agent.DelegatedAnswer{Status: task.StatusFailed, Failure: ErrResolverMissing.Error()}, nil
 	}
-	// The materials arrive resolved: the tool read every committed source the call
-	// named, and the stand-in renders them beside the instruction and the task the
-	// way the resident consumption would.
+
 	messages := make([]trpcmodel.Message, 0, 2+len(in.Materials))
 	if in.Instruction != "" {
 		messages = append(messages, trpcmodel.NewSystemMessage(in.Instruction))

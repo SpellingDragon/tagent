@@ -49,17 +49,17 @@ func TestLongContextFuse(t *testing.T) {
 		}
 		decideBatch(t, book, req.ID, approval.ApprovalApproved)
 		awaitAsync(t, errs)
-		if got := tool.calls(); got != 3 {
+		if got := awaitToolCalls(t, tool, 3); got != 3 {
 			t.Fatalf("dispatched calls of the approved batch = %d, want every call of the response", got)
 		}
 		if tokens := longContextRequestTokens(t, provider, 0); tokens <= agent.DefaultLongContextTokens {
 			t.Fatalf("approx prompt tokens of the opening request = %d, want the session above the %d threshold the case names", tokens, agent.DefaultLongContextTokens)
 		}
-		receipts, admissions, others := toolReceipts(provider.recorded()[1].Messages)
+		receipts, admissions, others := toolReceipts(awaitRecorded(t, provider, 2)[1].Messages)
 		if receipts != 3 || admissions != 3 {
 			t.Fatalf("tool receipts = %d (admissions %d, others %v), want one admission per call of the approved batch", receipts, admissions, others)
 		}
-		notice := batchNoticeIn(provider.recorded()[1].Messages)
+		notice := batchNoticeIn(awaitRecorded(t, provider, 2)[1].Messages)
 		for _, want := range []string{"3", "approved", req.ID} {
 			if !strings.Contains(notice, want) {
 				t.Fatalf("batch receipt = %q, want the batch size, the approval and the request identity named", notice)
@@ -83,7 +83,7 @@ func TestLongContextFuse(t *testing.T) {
 		if got := tool.calls(); got != 0 {
 			t.Fatalf("dispatched calls of a refused batch = %d, want none", got)
 		}
-		receipts, admissions, others := toolReceipts(provider.recorded()[1].Messages)
+		receipts, admissions, others := toolReceipts(awaitRecorded(t, provider, 2)[1].Messages)
 		if receipts != 3 || admissions != 0 {
 			t.Fatalf("tool receipts = %d (admissions %d), want one refusal per call and no admission", receipts, admissions)
 		}
@@ -106,7 +106,7 @@ func TestLongContextFuse(t *testing.T) {
 		if got := tool.calls(); got != 0 {
 			t.Fatalf("dispatched calls of an expired batch = %d, want none", got)
 		}
-		receipts, admissions, others := toolReceipts(provider.recorded()[1].Messages)
+		receipts, admissions, others := toolReceipts(awaitRecorded(t, provider, 2)[1].Messages)
 		if receipts != 3 || admissions != 0 {
 			t.Fatalf("tool receipts = %d (admissions %d), want one not-executed receipt per call", receipts, admissions)
 		}
@@ -132,7 +132,7 @@ func TestLongContextFuse(t *testing.T) {
 		if tokens := longContextRequestTokens(t, provider, 0); tokens <= agent.DefaultLongContextTokens {
 			t.Fatalf("approx prompt tokens of the opening request = %d, want the same over-threshold session the held case runs", tokens)
 		}
-		receipts, admissions, others := toolReceipts(provider.recorded()[1].Messages)
+		receipts, admissions, others := toolReceipts(awaitRecorded(t, provider, 2)[1].Messages)
 		if receipts != 3 || admissions != 3 {
 			t.Fatalf("receipts = %d (admissions %d, others %v), want every call admitted beside the fuse off", receipts, admissions, others)
 		}
@@ -153,10 +153,10 @@ func TestLongContextFuse(t *testing.T) {
 		if _, err := run.Invoke(ctx, longContextRequest(addr, 2_000)); err != nil {
 			t.Fatalf("invoke the short range under the threshold: %v", err)
 		}
-		if got := tool.calls(); got != 3 {
+		if got := awaitToolCalls(t, tool, 3); got != 3 {
 			t.Fatalf("dispatched calls below the threshold = %d, want every call of the response", got)
 		}
-		receipts, admissions, others := toolReceipts(provider.recorded()[1].Messages)
+		receipts, admissions, others := toolReceipts(awaitRecorded(t, provider, 2)[1].Messages)
 		if receipts != 3 || admissions != 3 {
 			t.Fatalf("receipts = %d (admissions %d, others %v), want every call admitted below the threshold", receipts, admissions, others)
 		}
@@ -234,6 +234,18 @@ func longContextRequestTokens(t *testing.T, provider *convModel, at int) int {
 // dispatch count and then holds the count over a short quiet window. The turn
 // can return while the last dispatch is still in flight, so the count is read
 // at its final value instead of racing the turn's return.
+// awaitRecorded waits, bounded, for the model to record at least want requests
+// and reports the recorded list: the follow-up decision that reads the receipts
+// runs on the settle path, so its request can land after the turn returns.
+func awaitRecorded(t *testing.T, provider *convModel, want int) []model.Request {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for len(provider.recorded()) < want && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	return provider.recorded()
+}
+
 func awaitToolCalls(t *testing.T, tool *convTool, want int) int {
 	t.Helper()
 	deadline := time.Now().Add(10 * time.Second)

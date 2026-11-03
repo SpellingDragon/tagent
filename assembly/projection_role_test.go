@@ -9,11 +9,9 @@ import (
 	"github.com/SpellingDragon/tagent/memory/replay"
 )
 
-// TestProjectionRendersTheStatedMessageRole pins the one rendering rule both
-// assembly paths share: a fact states its own message role and the projection
-// presents it as stated — the frozen type fills the role only beside a message
-// that carries none. A delegated instruction is a system message its producer
-// stated, so it must present as one however the request was assembled.
+// TestProjectionRendersTheStatedMessageRole pins the one message-role rendering rule both assembly paths share.
+//
+// 契约: docs/wiki/memory/memory-architecture.md#event-shape
 func TestProjectionRendersTheStatedMessageRole(t *testing.T) {
 	projection := replay.NewReplayProjection()
 	projection.Append(context.Background(), replay.WithMessageRole(replay.ProjectionEntry{

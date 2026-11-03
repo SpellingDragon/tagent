@@ -479,6 +479,9 @@ func (c *Consumer) WaitAnswer(ctx context.Context, keys []event.EventID) (Segmen
     segment that consumed it rather than the answer of a segment that closed
     beside it. A wait the end of the loop meets answers ErrSegmentCancelled.
 
+    - The answer index and the notify channel are swapped under one lock,
+    so an atomic miss waits on the channel the next settle closes.
+
 func (c *Consumer) Wake()
     Wake signals the loop that events may have arrived: the signal merges,
     so a wake that lands while the loop consumes keeps it turning once more.
@@ -850,13 +853,10 @@ func (d *Delegator) RestoreEntry(taskID event.TaskID, spec task.Spec, status tas
 
     Only a task the delegation face admitted is rebuilt: a task of another
     family carries no delegation this ledger may reopen, and is refused by name.
-    A task the ledger already holds is left exactly as it is, because the live
-    entry is the one authority of its round.
-
-    The rebuilt record carries the return site alone. The execution site of the
-    delegated turn is the address the continuation rebuilds from the declaration
-    the delegated input travels with; a second copy of it here would be a second
-    authority the re-entry could drift from.
+    A task the ledger already holds is left exactly as it is, because the
+    live entry is the one authority of its round. The rebuilt record carries
+    the return site alone: the execution site is the address the continuation
+    rebuilds from the declaration the delegated input travels with.
 
 func (d *Delegator) SetResident(loop *Loop)
     SetResident attaches the loop whose resident instances run the delegated
@@ -1159,18 +1159,17 @@ type HistoryFace interface {
     the invocations of one session share the history the drives that already
     ended on it committed, while each drive aggregates only its own ready
     input beside that history and never batches with a neighbour. A session
-    whose transcript a mapped sequence carries needs no second face here:
-    that sequence is the one history of the session, so an implementation may
-    answer none of its own beside it — and the facts of that chain are what the
-    drive reads its range's input again from at every decision boundary.
-
-    The face may also answer the presentation capability: an implementation
-    whose chain already knows which facts the request prefix of its session
-    presents reports them through SessionPresented(addr event.Address)
-    map[event.EventID]bool, and the resident consumption loop reads that
-    capability from this same face rather than from a second seam. A face that
-    keeps no prefix answers no presentation, and the pull keeps the chain's own
-    boundary.
+    whose transcript a mapped sequence carries needs no second face here: that
+    sequence is the one history of the session, so an implementation may answer
+    none of its own beside it — and the facts of that chain are what the drive
+    reads its range's input again from at every decision boundary. The face
+    may also answer the presentation capability: an implementation whose chain
+    already knows which facts the request prefix of its session presents reports
+    them through SessionPresented(addr event.Address) map[event.EventID]bool,
+    and the resident consumption loop reads that capability from this same
+    face rather than from a second seam. A face that keeps no prefix answers no
+    presentation, and the pull keeps the chain's own boundary. The redline list
+    (4 rules):
 
     The redline list (4 rules): MUST report the history the named session
     accumulated, as a copy the caller owns. MUST report the facts of the named

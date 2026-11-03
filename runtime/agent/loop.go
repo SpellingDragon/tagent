@@ -247,10 +247,8 @@ func NewLoop(borrow state.Borrow, slots *state.Occupancy, instance event.Instanc
 // closed on. The loop keeps no second decision, harvest or seal path: every
 // round, every paired result and every sealed turn belong to the Consumer, so
 // this face is a submission beside a wait and nothing else.
-// - The consumer is assembled for this invocation and never mounted, so no
-// wake opens a second segment beside the one this call flies.
-// - The turn is the closed segment's own immutable result, never a value
-// re-derived from the chain after the segment ended.
+// - The consumer is assembled for this invocation and never mounted, so no wake opens a second segment beside the one this call flies.
+// - The turn is the closed segment's own immutable result, never a value re-derived from the chain after the segment ended.
 func (l *Loop) drive(ctx context.Context, inv Invocation) (Turn, error) {
 	consumer := newConsumer(inv.Address, l, nil)
 	consumer.explicit = true
@@ -310,11 +308,8 @@ func consumerWarn(format string, args ...any) {
 // opens reads the very result the notification delivered instead of a second
 // reading of it.
 //
-// - The wake names the fact only while the task is not awaited by a flying
-// segment and not already consumed: an awaited result is paired by that
-// segment's harvest, and a consumed one drives nothing, so neither is read twice.
-// - A loop that drives no set keeps its backflow parked in the intake; a set
-// that carries no instance for the address wakes nothing and starts none.
+// - The wake names the fact only while the task is not awaited by a flying segment and not already consumed: an awaited result is paired by that segment's harvest, and a consumed one drives nothing, so neither is read twice.
+// - A loop that drives no set keeps its backflow parked in the intake; a set that carries no instance for the address wakes nothing and starts none.
 func (l *Loop) Backflow(invocationID event.InvocationID, notice task.Notice) {
 	switch notice.Kind {
 	case task.NoticeProgress:
@@ -332,13 +327,6 @@ func (l *Loop) Backflow(invocationID event.InvocationID, notice task.Notice) {
 	}
 	in := l.intakeFor(invocationID)
 	addr := in.rangeAddress()
-	// The body of the settled result is already the one text of its result
-	// fact: carrying it again on the delivery fact would present the same
-	// observation twice in the replayed history, once under the result fact and
-	// once under the delivery. The delivery fact carries the observation only
-	// when the chain holds no result fact to read it from — the settled body a
-	// producer lands without a result fact of its own — so a segment drives on
-	// the one text and the history reads each result exactly once.
 	delivery := msg
 	if l.resultFactOnChain(addr, notice.Event) {
 		delivery = model.Message{Role: model.RoleTool}
@@ -438,15 +426,14 @@ func noticeKeyPrefix(invocationID string) string {
 // the fact committed under is remembered by the range, so the fact a boundary
 // meets again — the head input of the drive, or the input that landed in flight
 // and is read at every boundary from then on — is observed exactly once.
+//
+// - The trigger of a range is the first source stamp observed before it takes a decision; a fact that lands in flight never rewrites it.
 func (l *Loop) observeFact(ctx context.Context, inv Invocation, evt event.Event) {
 	if evt.Key == "" {
 		return
 	}
 	in := l.intakeFor(inv.InvocationID)
 	in.mu.Lock()
-	// The material a range opens on names the lineage its answer leaves under, so
-	// the first stamp observed before the range took a decision is the trigger of
-	// the turn; a fact that lands in flight never rewrites it.
 	if in.decisions == 0 && in.trigger == "" {
 		in.trigger = evt.Meta[event.MetaKeyTriggerSource]
 	}
@@ -469,14 +456,10 @@ func (l *Loop) observeFact(ctx context.Context, inv Invocation, evt event.Event)
 // flight never moves that boundary either; the loop keeps its own copy because
 // the boundary read crosses the transcript face alone, and both copies name the
 // same judgement.
+//
+// - The instruction and material facts of a delegated batch start no range; only the task that closes the batch does, so a batch whose task never landed drives nothing.
 func startsRange(evt event.Event) bool {
 	if evt.Type == event.TypeExternalInput {
-		// A delegated input commits as a batch at its execution site: the
-		// instruction and the materials of the batch are carried into the range
-		// its task opens, so they start no range of their own and a batch whose
-		// task never landed drives no segment here or after a restart. The
-		// request boundary keeps the same judgement (assembly admitsRange), so
-		// these facts never move the ended-material boundary either.
 		switch evt.Meta[delegatedPartMeta] {
 		case delegatedPartInstruction, delegatedPartMaterial:
 			return false
@@ -486,15 +469,14 @@ func startsRange(evt event.Event) bool {
 	return evt.Type == event.TypeFeedback && evt.Meta[event.MetaKeyTriggerSource] == "task"
 }
 
-// The delegated input of one round commits as a batch of facts at its execution
-// site: the instruction the round runs under (a system message), one projection
-// per material the call handed over, and the task that closes the batch. The
-// part a fact states is stamped on it, so a reader tells the parts of the batch
-// from every other input of the chain: the instruction and the material
-// projections are the material of the range the task opens, and only the task
-// starts it. The source key of one material rides its fact's meta as lineage —
-// the material is the projection of that committed source event, never the
-// source's identity reused as a key of the site's chain.
+// delegatedPartMeta, delegatedPartInstruction, delegatedPartMaterial,
+// delegatedPartTask and delegatedSourceMeta stamp the parts of one delegated
+// input batch: the instruction the round runs under, one projection per material
+// the call handed over, and the task that closes the batch. The instruction and
+// the material projections are the material of the range the task opens, and
+// only the task starts it. The source key of one material rides its fact's meta
+// as lineage — the material is the projection of that committed source event,
+// never the source's identity reused as a key of the site's chain.
 const (
 	delegatedPartMeta        = "delegated_part"
 	delegatedPartInstruction = "instruction"
@@ -512,11 +494,13 @@ func delegatedSiteStamp(site event.Address) string {
 	return string(site.AgentID) + "@" + string(site.SessionID)
 }
 
-// The entries one agent_output records its closed turn under: the terminal the
-// latest decision reduced to, the raw cause of a failed turn, the reason the
-// closing round ran, the trigger lineage the range opened on, and the number of
-// decisions the turn ran. They stand beside the input relation and never replace
-// it, so a reader rebuilds the whole closed turn from the chain.
+// outputMetaTerminal, outputMetaFailure, outputMetaFinalRound, outputMetaTrigger
+// and outputMetaDecisionCount name the entries one agent_output records its closed
+// turn under: the terminal the latest decision reduced to, the raw cause of a
+// failed turn, the reason the closing round ran, the trigger lineage the range
+// opened on, and the number of decisions the turn ran. They stand beside the input
+// relation and never replace it, so a reader rebuilds the whole closed turn from
+// the chain.
 const (
 	outputMetaTerminal      = "terminal"
 	outputMetaFailure       = "failure"
@@ -664,6 +648,8 @@ func (l *Loop) resultFactOnChain(addr event.Address, key event.EventID) bool {
 // arrived before the range recorded its own address commits no fact: the fact
 // of a delivery names the range it lands in. A refused commit answers no
 // identity beside the named cause.
+//
+// - The delivery fact carries the observation only when the chain holds no result fact to read it from, so the history reads each result once.
 func (l *Loop) commitSettled(ctx context.Context, invocationID event.InvocationID, addr event.Address, notice task.Notice, msg model.Message) (event.EventID, error) {
 	if addr.AgentID == "" || addr.SessionID == "" {
 		return "", nil
@@ -988,8 +974,6 @@ func (l *Loop) SetConsumers(consumers *Consumers) *Consumers {
 	if l.consumers == nil && consumers != nil {
 		l.consumers = consumers
 	}
-	// The actual current set is the answer, including when a late caller tried
-	// to replace or clear it. A stopped current remains the permanent tombstone.
 	return l.consumers
 }
 
@@ -1042,8 +1026,6 @@ func (l *Loop) StopResidents() {
 	l.mu.Lock()
 	resident := l.residentLocked()
 	l.mu.Unlock()
-	// Stop marks the current set before joining it, and no Loop lock is held while
-	// waiting. The current pointer stays as the permanent stopped tombstone.
 	resident.Stop()
 }
 
@@ -1067,8 +1049,6 @@ func (l *Loop) StopResidentsWithin(deadline time.Time) []string {
 	l.mu.Lock()
 	resident := l.residentLocked()
 	l.mu.Unlock()
-	// The mark closes the set's terminal marker and no Loop lock is held while
-	// joining. The current pointer stays as the permanent stopped tombstone.
 	resident.markStopped()
 	return resident.awaitStopped(deadline)
 }
@@ -1259,6 +1239,8 @@ func (l *Loop) SubmitDelegatedBeside(ctx context.Context, in DelegatedInput, sta
 // submitDelegated is the one body of a delegated turn: the caller that reads only the answer
 // and the caller that also has to hear the first commit share it, so a turn reports the same
 // input, the same wake and the same terminal whichever way it was handed over.
+//
+// - The wake names every fact the batch committed beside the task, and the wait reads the task key alone, because the task is the identity of the round.
 func (l *Loop) submitDelegated(ctx context.Context, in DelegatedInput, started func(error)) (DelegatedAnswer, error) {
 	report := delegationStart(started)
 	if !in.Site.IsComplete() {
@@ -1281,12 +1263,6 @@ func (l *Loop) submitDelegated(ctx context.Context, in DelegatedInput, started f
 		return DelegatedAnswer{Status: task.StatusFailed, Failure: err.Error()}, err
 	}
 	report(nil)
-	// The batch is carried by name: the instruction and the material facts start
-	// no range of their own, so the wake of the round names every fact it
-	// committed beside the task and the one pull of the task reads the whole
-	// batch. The wait reads the task key alone: the task is the identity of the
-	// round, while an instruction or material key a previous round already
-	// consumed would answer with that round's body.
 	consumer.Drive(drive...)
 	consumer.Wake()
 	answer, waitErr := consumer.WaitAnswer(ctx, delegationWaitKeys(taskKey))
@@ -1329,15 +1305,13 @@ func delegationStart(started func(error)) func(error) {
 // driving half a round. Each part commits under the key its execution site
 // derives, so a retried round lands no second fact while the next round carries
 // its own input and its own fact.
+//
+// - The instruction commits once per site under a stable identity; a later round of the same site re-commits that identity and lands no second fact.
+// - A material is the projection of one committed source event; its key derives from the source key, so a retried round lands no second projection and the same source is one material.
+// - The task key derives from the execution site and the request, so a retried round of one input lands no second fact.
 func (l *Loop) delegatedInputOf(ctx context.Context, in DelegatedInput) ([]event.EventID, event.EventID, error) {
 	drive := make([]event.EventID, 0, 2+len(in.Materials))
 	if strings.TrimSpace(in.Instruction) != "" {
-		// The instruction is one system message fact of the site: the round it
-		// belongs to runs under it, and a later round of the same site commits the
-		// same fact identity instead of a second system message. Only the stable
-		// fields of the fact travel — the instruction, the part it states and the
-		// delegation lineage — never a stamp of the round, so the re-commit is
-		// judged the fact the chain already holds.
 		key, err := l.commitFactKey(ctx, in.Site.AgentID, l.delegatedFactOf(in.Site,
 			delegatedPartInstruction, "",
 			event.EventID("delegated-"+delegatedSiteStamp(in.Site)+"-instruction"),
@@ -1353,11 +1327,6 @@ func (l *Loop) delegatedInputOf(ctx context.Context, in DelegatedInput) ([]event
 		if material.Key == "" {
 			continue
 		}
-		// The material is the projection of one committed source event: the site's
-		// own fact carries the body the round reads, and the source key rides its
-		// meta as lineage. The key is derived from that source key, so a retried
-		// round of the same call lands no second projection, and the same source
-		// referenced twice is one material.
 		message := material.Message
 		if message.Role == "" {
 			role, err := RoleOf(material.Type)
@@ -1379,10 +1348,6 @@ func (l *Loop) delegatedInputOf(ctx context.Context, in DelegatedInput) ([]event
 	}
 	var key event.EventID
 	if in.Site.SessionID != "" {
-		// The identity is the execution site beside the input it serves: the site
-		// is minted for the delegated turn itself and carries its call identity,
-		// so a retried round of one input lands no second fact, while the next
-		// round of the same task carries its own input and its own fact.
 		digest := sha256.Sum256([]byte(in.Request))
 		key = event.EventID(fmt.Sprintf("delegated-%s-%x", in.Site.SessionID, digest[:8]))
 	}
@@ -1402,6 +1367,8 @@ func (l *Loop) delegatedInputOf(ctx context.Context, in DelegatedInput) ([]event
 // lineage beside the part the fact states, and the instance the round runs on.
 // The parts of a batch are the material of one delegated round and never a
 // host-facing delivery or a freshness fact.
+//
+// - The declaration travels on the task fact alone; the instruction and material facts stay material of the round.
 func (l *Loop) delegatedFactOf(site event.Address, part, source string, key event.EventID, message model.Message, declaration []byte) event.Event {
 	meta := map[string]string{
 		event.MetaKeyTriggerSource: event.LineageDelegation,
@@ -1410,9 +1377,6 @@ func (l *Loop) delegatedFactOf(site event.Address, part, source string, key even
 	if source != "" {
 		meta[delegatedSourceMeta] = source
 	}
-	// The declaration travels on the task fact the batch closes with and nowhere
-	// else: the instruction and material facts are material of the round, while the
-	// task is the identity a re-entry names when it serves the next one.
 	if part == delegatedPartTask && len(declaration) > 0 {
 		meta[event.MetaKeyDelegation] = string(declaration)
 	}
@@ -1699,6 +1663,7 @@ func (l *Loop) decisionHandle(ctx context.Context, inv Invocation, bound *state.
 // - The settled result fact is the stored event the next decision of this range reduces; a call that recorded no fact contributes none.
 // - The After pass reads only a fact whose canonical commit already happened: a failed observation is a visible gap in the returned presentation and never rolls the committed fact back, and a dropped presentation drops the presentation only. The presentation is the read-out the inspection face consumes; the loop keeps the committed fact itself.
 // - The ruling of the response rules the calls before the first admission: a response the fuse holds is parked as one approval batch inside this dispatch, answered call by call when the batch does not run, and admitted whole in the order it was issued when the batch is approved. A call of a held response is never dispatched before the ruling that allows it, so the storm it belongs to leaves no task, no result fact and no degraded message behind.
+// - The calls of an approved batch are read by one follow-up decision: each carries the flag its consumer reads to defer the decision that follows the dispatch until every call of the batch has settled, so the decision reads all their results as the batch the approver released.
 // - The wait of a parked batch holds no model seat (the decision slot is vacated before this dispatch runs) and ends with the ruling, the expiry of the request or the cancellation of the invocation.
 func (l *Loop) dispatch(ctx context.Context, inv Invocation, decision Decision, calls []model.ToolCall, tools map[string]trpctool.CallableTool, ruling callRuling) ([]model.Message, []admittedCall, error) {
 	pipeline, err := plugin.NewFlow(decision.Binding.Plugins)
@@ -1706,6 +1671,7 @@ func (l *Loop) dispatch(ctx context.Context, inv Invocation, decision Decision, 
 		return nil, nil, err
 	}
 	var notice []model.Message
+	whole := false
 	if fuse := ruling.fuseOver(len(calls)); fuse != "" {
 		batch := parkedBatchOf(decision, calls, ruling, fuse)
 		outcome, by := l.awaitBatch(ctx, batch)
@@ -1714,6 +1680,7 @@ func (l *Loop) dispatch(ctx context.Context, inv Invocation, decision Decision, 
 		if outcome != batchApproved {
 			return batchReceipts(calls, batchRefusalText(outcome, batch, len(calls), ruling, by)), nil, nil
 		}
+		whole = true
 		notice = append(notice, batchApprovalNotice(len(calls), batch, by))
 	}
 	receipts := make([]model.Message, 0, len(calls)+len(notice))
@@ -1753,7 +1720,7 @@ func (l *Loop) dispatch(ctx context.Context, inv Invocation, decision Decision, 
 			}
 			consumerDebug("tagent: consumer tool admitted invocation=%s call=%s tool=%s task=%s", inv.InvocationID, call.ID, name, out.TaskID)
 			receipts = append(receipts, paired(call.ID, name, admissionText(out)))
-			running = append(running, admittedCall{callID: call.ID, tool: name, taskID: out.TaskID})
+			running = append(running, admittedCall{callID: call.ID, tool: name, taskID: out.TaskID, batch: whole})
 		case task.HoldReceipt:
 			receipts = append(receipts, paired(call.ID, name, "tagent: the call is parked awaiting approval"))
 		default:
@@ -2252,14 +2219,13 @@ func observationOf(msg model.Message, callID, tool string) model.Message {
 // transcript a mapped sequence carries needs no second face here: that
 // sequence is the one history of the session, so an implementation may answer
 // none of its own beside it — and the facts of that chain are what the drive
-// reads its range's input again from at every decision boundary.
-//
-// The face may also answer the presentation capability: an implementation whose
+// reads its range's input again from at every decision boundary. The face may
+// also answer the presentation capability: an implementation whose
 // chain already knows which facts the request prefix of its session presents
 // reports them through SessionPresented(addr event.Address) map[event.EventID]bool,
 // and the resident consumption loop reads that capability from this same face
 // rather than from a second seam. A face that keeps no prefix answers no
-// presentation, and the pull keeps the chain's own boundary.
+// presentation, and the pull keeps the chain's own boundary. The redline list (4 rules):
 //
 // The redline list (4 rules):
 // MUST report the history the named session accumulated, as a copy the caller owns.

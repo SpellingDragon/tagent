@@ -5,8 +5,7 @@ import (
 	"testing"
 )
 
-// TestRegistryOwnsTheMovementSequence pins that the sequence the rest criterion
-// is fenced by belongs to the task account and is built beside it.
+// TestRegistryOwnsTheMovementSequence pins the task account's own sequence beside the account it fences.
 // - the registry builds its own sequence: no option wires one in from outside
 // - an admission, a status commit and a flush each advance that account's own sequence
 // - a judgment reads the account's sequence instead of a mechanism kept beside it

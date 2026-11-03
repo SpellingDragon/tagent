@@ -353,11 +353,12 @@ func (r *Run) recordMapped(evt event.Event, entry replay.ProjectionEntry) {
 	r.replays[slot] = held
 }
 
-// The part one fact of a delegated input batch states. The delegated tool commits
-// the batch at its execution site — the instruction the round runs under, one
-// projection per material the call handed over, and the task that closes the
-// batch — and stamps each fact with the part it is, so a reader tells the parts
-// apart from every other input of the chain.
+// delegatedPartMeta, delegatedPartInstruction and delegatedPartMaterial name the part
+// one fact of a delegated input batch states. The delegated tool commits the batch at
+// its execution site — the instruction the round runs under, one projection per
+// material the call handed over, and the task that closes the batch — and stamps
+// each fact with the part it is, so a reader tells the parts apart from every other
+// input of the chain.
 const (
 	delegatedPartMeta        = "delegated_part"
 	delegatedPartInstruction = "instruction"

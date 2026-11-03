@@ -191,21 +191,15 @@ func (r *MemoryRegistry) Restore(ctx context.Context, chain []TaskRecord, owners
 // rebuilds its task from the admission material the chain carries and derives
 // its obligations from the facts alone.
 //
-// The fold is where a stored status is read back, so the replay mapping sits
-// here: a link written while progress was still a status stores the reserved
-// ordinal, and replayedStatus reads it as the running phase that fact
-// described. The progress notification the same link carries stays on the
-// chain, so the task still answers progress through ProgressReported.
-//
-// The fold is also where the round the task stands at is rebuilt, because a
-// re-entry opens the round after it and every notification identity names that
-// round. The round is the highest one the chain really opened, never one past
-// it: a terminal notice names its round, a settle or rollback mutation encodes
-// the round it consumed, and a reactivation or resume mutation opens exactly one
-// new round. The notices a restart still owes are stripped from the outbox they
-// travel in when the log already confirmed their consumption, so the round is
-// read from the mutations beside them as well — a round whose terminal is
-// confirmed is consumed, not unopened.
+// The fold is where a stored status and the task's round are rebuilt. A link
+// written while progress was still a status stores the reserved ordinal that
+// replayedStatus reads as the running phase, its progress notification staying
+// on the chain; the round is the highest the chain really opened — a terminal
+// notice names it, a settle or rollback mutation encodes the one it consumed,
+// and a reactivation or resume opens exactly one new round. Notices a restart
+// still owes are stripped from their outbox once the log confirms consumption,
+// so the round reads from the mutations beside them too: a confirmed terminal
+// is consumed, not unopened.
 func (r *MemoryRegistry) foldLocked(record TaskRecord) (bool, error) {
 	fact := record.Fact
 	if fact.MutationID == "" {
@@ -298,7 +292,7 @@ func opensRound(taskID event.TaskID, mutation MutationID) bool {
 // it encodes one: a settle names the round whose terminal it records and a
 // reactivation rollback names the round it puts back, because both stay
 // consumed and the next re-entry opens the following round. An identity that
-// carries no round (a legacy archive settle, a handoff or a stop) reports none.
+// carries no round (an archive settle with none, a handoff or a stop) reports none.
 func roundOfMutation(taskID event.TaskID, mutation MutationID) (int64, bool) {
 	text := string(mutation)
 	for _, prefix := range []string{"settle:", rollbackPrefix} {

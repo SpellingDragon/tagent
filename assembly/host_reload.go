@@ -177,12 +177,15 @@ func (b *hostModelBuilder) rebuild(agentID event.AgentID) func(string) (trpcmode
 // Reload reads the configuration source again, publishes the declaration it
 // carries, and files the configuration facts the move judged: one config change
 // per declaration dimension that moved and one model configuration change per
-// agent whose lease holds a version the document no longer names. The publication is
+// agent whose lease holds a version the document does not name. The publication is
 // the one entry the run already owns; the model change is the configuration
 // change family's model dimension, committed after the publication settled —
 // including a carried document, so a move whose install failed is judged again.
 // The lease mounted on each agent runs its own rebuild, publication and
 // installation order and decides whether the new version takes effect.
+//
+// - The generation declares the agent set: an agent both documents name keeps the contribution already in service, an added agent is constructed through the same native path Boot ran, and its model lease is built beside the publication so the address serves its first turn on the model the declaration names.
+// - The leases are mounted only once the generation that declared the agents published: a refused reload attaches nothing, and the next publication reads the extended table through the same lease path Boot filled.
 func (h *Host) Reload(ctx context.Context) (hostReloadReport, error) {
 	report := hostReloadReport{
 		Reloaded:      false,
@@ -215,11 +218,6 @@ func (h *Host) Reload(ctx context.Context) (hostReloadReport, error) {
 	if err := previous.compatibleWith(doc); err != nil {
 		return report, err
 	}
-	// The generation declares the agent set. An agent both documents name keeps the
-	// contribution already in service; an agent the document adds is constructed
-	// through the same path Boot ran, and its model lease is built beside the
-	// publication so the address serves its first turn on the model the
-	// declaration names.
 	next := make(map[event.AgentID]NativeAgent, len(decl.Agents))
 	added := make([]event.AgentID, 0, len(decl.Agents))
 	for _, spec := range decl.Agents {
@@ -256,9 +254,6 @@ func (h *Host) Reload(ctx context.Context) (hostReloadReport, error) {
 		Generation: outcome.Publication.Generation,
 		Published:  outcome.Result != state.PublishUnchanged,
 	}
-	// The leases are mounted only once the generation that declared the agents
-	// published: a refused reload attaches nothing, and the next publication reads
-	// the extended table through the same lease path Boot filled.
 	h.run.installModelLeases(extensions)
 	h.models.set(doc)
 	h.mu.Lock()
@@ -629,10 +624,11 @@ func (d *hostDocument) compatibleWith(next *hostDocument) error {
 // change refused by name, not a section the new binding would take. A removed
 // agent's sections leave with the generation that dropped it, so it is not
 // compared.
-//
 // Every path is the YAML key an operator searches the configuration source for,
 // and the order is fixed here and then by agent id, so the same edit always
 // answers the same names.
+//
+// - An added agent's exec, memory and meditation consumers were assembled once at Boot over the boot declaration, so a section it carries has no live reader and is compared against the zero value.
 func (d *hostDocument) restartRequiredChanges(next *hostDocument) []string {
 	changed := make([]string, 0, 4)
 	compare := func(path string, before, after any) {
@@ -649,9 +645,6 @@ func (d *hostDocument) restartRequiredChanges(next *hostDocument) []string {
 		before, held := d.Agents[id]
 		after := next.Agents[id]
 		if !held {
-			// The added agent's native pieces are built, but these three
-			// consumers were assembled once at Boot over the boot declaration, so
-			// a section carried by the new agent has no live reader.
 			compare("agents."+id+".exec", config.ExecSpec{}, after.Exec)
 			compare("agents."+id+".memory", config.MemorySpec{}, after.Memory)
 			compare("agents."+id+".meditation", config.MeditationSpec{}, after.Meditation)

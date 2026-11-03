@@ -355,12 +355,9 @@ func NewDelegator(tasks DelegationTasks, holder state.Borrow, instance event.Ins
 // Only a task the delegation face admitted is rebuilt: a task of another family
 // carries no delegation this ledger may reopen, and is refused by name. A task
 // the ledger already holds is left exactly as it is, because the live entry is
-// the one authority of its round.
-//
-// The rebuilt record carries the return site alone. The execution site of the
-// delegated turn is the address the continuation rebuilds from the declaration
-// the delegated input travels with; a second copy of it here would be a second
-// authority the re-entry could drift from.
+// the one authority of its round. The rebuilt record carries the return site
+// alone: the execution site is the address the continuation rebuilds from the
+// declaration the delegated input travels with.
 func (d *Delegator) RestoreEntry(taskID event.TaskID, spec task.Spec, status task.Status) error {
 	if taskID == "" || spec.TriggerSource != event.LineageDelegation {
 		return fmt.Errorf("%w: %s", ErrDelegationUnknown, taskID)

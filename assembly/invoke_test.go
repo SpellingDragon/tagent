@@ -13,14 +13,7 @@ import (
 // criterionAddress is the address the rest criterion cases read and deliver at.
 var criterionAddress = event.Address{AgentID: "agent-a", SessionID: "session-a"}
 
-// TestRunFenceReadsTheRunSequence pins that the fence a close judges under is the
-// sum of the private sequences the accounts of the run advance, each read from
-// the account that owns it.
-//   - one write of the task account moves the fence
-//   - one write of the mailbox account moves the fence too, so neither account's
-//     own sequence is mistaken for the run's
-//   - a run assembled beside no account answers the zero every read of one instant
-//     equals, so its criterion is judged by the account's own snapshot alone
+// TestRunFenceReadsTheRunSequence pins the close fence as the sum of the private sequences of the run's accounts.
 //
 // 契约: docs/wiki/agent/execution-generations.md#lifecycle-convergence
 func TestRunFenceReadsTheRunSequence(t *testing.T) {

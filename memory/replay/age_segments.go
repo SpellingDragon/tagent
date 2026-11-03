@@ -176,8 +176,8 @@ type segmentRun struct {
 // the input_events metadata entry, a JSON array of the input fact identities the
 // output consumed. A missing, empty, identity-less or unparseable value is no
 // relation — the same rule the chain-authority answer rebuild reads one under —
-// so the segment rule treats the output as legacy and closes it positionally
-// instead of guessing inputs it never named.
+// so the segment rule closes the output positionally instead of guessing inputs
+// it never named.
 func WithInputEvents(entry ProjectionEntry, raw string) ProjectionEntry {
 	entry.inputEvents = raw
 	return entry
@@ -214,14 +214,13 @@ func parseInputEvents(raw string) ([]event.EventID, bool) {
 // records the input relation its fact carried closes only the inputs it names
 // beside the process entries and rolls the inputs it leaves unnamed into the
 // run the next segment opens with; an output beside no readable relation keeps
-// the positional boundary and closes the whole run, so a legacy chain is never
-// re-cut. A tail no output closed stays one run in progress.
+// the positional boundary and closes the whole run, so a chain without the
+// relation is never re-cut. A tail no output closed stays one run in progress.
 //
 // Segments group by arrival order by default; an entry that carries a
-// consumption relation folds along that relation instead (r145: production
-// wires the relation through assembly mappedEntryOf, so live outputs fold by
-// what they consumed; facts without the relation keep the positional
-// bracket).
+// consumption relation folds along that relation instead. The relation is
+// wired through assembly mappedEntryOf, so live outputs fold by what they
+// consumed while facts without it keep the positional bracket.
 func splitSegments(entries []ProjectionEntry) []segmentRun {
 	driving := drivingInputsOf(entries)
 	var runs []segmentRun

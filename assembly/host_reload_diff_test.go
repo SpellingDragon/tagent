@@ -15,17 +15,7 @@ import (
 	"github.com/SpellingDragon/tagent/tool/subagent"
 )
 
-// TestConfigChangesOfJudgesTheDeclarationDimensions pins the dimensions one
-// published reload files:
-//   - an entry move is the organization entry dimension, owned by the entry the
-//     declaration now names
-//   - an agent the set gained or lost is the organization agents dimension, owned
-//     by that agent
-//   - a config-declared agent reference move is the organization assembly
-//     dimension, and is never restated as a binding tool move
-//   - a preset reference move, a prompt source move and an organization section
-//     move keep their own dimensions
-//   - a declaration that did not move judges nothing
+// TestConfigChangesOfJudgesTheDeclarationDimensions pins the configuration dimension of each declaration move.
 //
 // 契约: docs/wiki/platform/org-hot-reload.md#generations
 func TestConfigChangesOfJudgesTheDeclarationDimensions(t *testing.T) {

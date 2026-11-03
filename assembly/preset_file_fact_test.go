@@ -18,16 +18,9 @@ import (
 	"github.com/SpellingDragon/tagent/tool/subagent"
 )
 
-// TestDelegatedAssemblyReadsItsInstructionThroughTheFileFact pins the preset read
-// of the delegated assembly:
-//   - assembling a declaration that carries the generic delegation tool files one
-//     file change fact of the declared prompt content, before any request runs, so
-//     the assembly read went through the fact face and not around it
-//   - the delivered instruction is the content that fact carries
-//   - a rewritten prompt is read anew by the next assembly as a second content
-//     version, and the earlier version stays on the chain as the fact it filed
+// TestDelegatedAssemblyReadsItsInstructionThroughTheFileFact pins the preset read of a delegated assembly through the file change fact.
 //
-// 契约: docs/wiki/platform/org-hot-reload.md#generations
+// 契约: docs/wiki/agent/event-flow.md#event-pipeline-atomic
 func TestDelegatedAssemblyReadsItsInstructionThroughTheFileFact(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()

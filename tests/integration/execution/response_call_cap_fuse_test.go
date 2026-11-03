@@ -60,7 +60,7 @@ func TestResponseCallCapFuse(t *testing.T) {
 		assertBatchFile(t, filed)
 		decideBatch(t, book, req.ID, approval.ApprovalApproved)
 		awaitAsync(t, errs)
-		if got := tool.calls(); got != responseStormCalls {
+		if got := awaitToolCalls(t, tool, responseStormCalls); got != responseStormCalls {
 			t.Fatalf("dispatched calls = %d, want the whole approved batch and nothing held back", got)
 		}
 		requests := provider.recorded()
@@ -222,10 +222,10 @@ func TestResponseCallCapFuse(t *testing.T) {
 		}); err != nil {
 			t.Fatalf("invoke the uncapped range: %v", err)
 		}
-		if got := tool.calls(); got != responseStormCalls {
+		if got := awaitToolCalls(t, tool, responseStormCalls); got != responseStormCalls {
 			t.Fatalf("dispatched calls under no cap = %d, want every call of the response admitted", got)
 		}
-		requests := provider.recorded()
+		requests := awaitRecorded(t, provider, 2)
 		if len(requests) < 2 {
 			t.Fatalf("recorded requests = %d, want the storm round beside the round that reads its receipts", len(requests))
 		}

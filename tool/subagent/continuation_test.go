@@ -581,8 +581,7 @@ func continuationIdle(t *testing.T, continuations *continuations, taskID event.T
 	t.Fatalf("the round of %s never gave its slot back", taskID)
 }
 
-// TestContinuationSeedServesTheRecordedDeclaration pins the round a restarted
-// process serves after it seeds the account from the delegated input fact:
+// TestContinuationSeedServesTheRecordedDeclaration pins the round a restarted process seeds from the delegated input fact.
 // - the declaration the fact carries rebuilds the assembly and the execution site the round runs on
 // - the seeded round is served on the builder the run resolves, carrying the recorded instruction and the body the re-entry handed over
 // - a repeated seed leaves the live entry, and its settled round, exactly as they are
