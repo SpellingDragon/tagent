@@ -142,6 +142,7 @@ func TestSkillBodyReachesNextRequest(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("invoke the skill loads: %v", err)
 	}
+	time.Sleep(1500 * time.Millisecond) // TEMP-DIAG observe the late settlement follow-up
 	requests := provider.recorded()
 	if len(requests) < 2 {
 		t.Fatalf("recorded requests = %d, want at least the load decision and the closing decision", len(requests))

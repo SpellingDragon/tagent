@@ -317,6 +317,10 @@ type smokeProvider struct {
 
 	mu       sync.Mutex
 	requests []smokeModelRequest
+
+	// answeredMu guards answered, the business markers a final answer settled.
+	answeredMu sync.Mutex
+	answered   map[string]bool
 }
 
 // newSmokeProvider 起端点并随测试关闭。
@@ -372,6 +376,43 @@ func (p *smokeProvider) serve(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprint(w, p.answerFor(modelName, messages, index))
 }
 
+// claimMarker reports whether this turn is the one that settles the marker and
+// records it; a tool call claims nothing because its final answer is still owed.
+func (p *smokeProvider) claimMarker(marker string) bool {
+	if marker == "" || marker == "SMOKE-R0" {
+		return false
+	}
+	p.answeredMu.Lock()
+	defer p.answeredMu.Unlock()
+	if p.answered == nil {
+		p.answered = map[string]bool{}
+	}
+	if p.answered[marker] {
+		return false
+	}
+	p.answered[marker] = true
+	return true
+}
+
+// noteMarker records that a final answer settled the marker.
+func (p *smokeProvider) noteMarker(marker string) {
+	if marker == "" || marker == "SMOKE-R0" {
+		return
+	}
+	p.answeredMu.Lock()
+	if p.answered == nil {
+		p.answered = map[string]bool{}
+	}
+	p.answered[marker] = true
+	p.answeredMu.Unlock()
+}
+
+// finalAnswer records the marker one final answer settles and returns the body.
+func (p *smokeProvider) finalAnswer(marker, body string) string {
+	p.noteMarker(marker)
+	return body
+}
+
 // answerFor 是本台架的响应脚本：委派子 agent 回结果正文、冥想 agent 投递摘要、
 // 入口 agent 先落工具调用再按回执/观察/结算通知收尾。
 //   - an entry turn that ended with a tool call answers from the receipt or observation alone, never with a second call
@@ -395,43 +436,46 @@ func (p *smokeProvider) answerFor(modelName string, messages []smokeModelMessage
 		end := smokeLastContent(messages)
 		switch {
 		case strings.Contains(end, "parked awaiting approval"):
-			return smokeAnswerBody("hold-ack " + marker)
+			return p.finalAnswer(marker, smokeAnswerBody("hold-ack "+marker))
 		case smokePairedResult(messages, "call-worker-"+marker):
-			return smokeAnswerBody("delegate ack " + marker)
+			return p.finalAnswer(marker, smokeAnswerBody("delegate ack "+marker))
 		case smokePairedResult(messages, "call-retry-"+marker):
-			return smokeAnswerBody("approved-done " + marker)
+			return p.finalAnswer(marker, smokeAnswerBody("approved-done "+marker))
 		case smokeCredentialFrame(end):
-			return smokeAnswerBody("approved-done " + marker)
+			return p.finalAnswer(marker, smokeAnswerBody("approved-done "+marker))
 		case strings.Contains(end, "call-worker"):
-			return smokeAnswerBody("delegate ack " + marker)
+			return p.finalAnswer(marker, smokeAnswerBody("delegate ack "+marker))
 		case strings.Contains(end, "call-hold"):
-			return smokeAnswerBody("hold-ack " + marker)
+			return p.finalAnswer(marker, smokeAnswerBody("hold-ack "+marker))
 		case strings.Contains(end, "call-retry"):
-			return smokeAnswerBody("approved-done " + marker)
+			return p.finalAnswer(marker, smokeAnswerBody("approved-done "+marker))
 		case strings.Contains(end, "[send_"):
-			return smokeAnswerBody("reflection recorded")
+			return p.finalAnswer(marker, smokeAnswerBody("reflection recorded"))
 		}
 	}
 	switch {
 	case strings.Contains(last, smokeReflectionMarker):
+		if p.claimMarker(marker) {
+			return smokeAnswerBody("answer " + marker)
+		}
 		return smokeAnswerBody("reflection received")
 	case strings.Contains(last, "tagent: task") && strings.Contains(last, "settled"):
-		return smokeAnswerBody("settle-ack " + marker)
+		return p.finalAnswer(marker, smokeAnswerBody("settle-ack "+marker))
 	case strings.Contains(last, "smoke retry"):
 		return smokeToolCallBody("call-retry-"+marker, sendToolID, smokeSendArgs(marker))
 	case strings.Contains(last, "smoke approval"):
 		return smokeToolCallBody("call-hold-"+marker, sendToolID, smokeSendArgs(marker))
 	case strings.Contains(last, "smoke review"):
-		return smokeAnswerBody("hold-ack " + marker)
+		return p.finalAnswer(marker, smokeAnswerBody("hold-ack "+marker))
 	case strings.Contains(last, "smoke delegate"):
 		return smokeToolCallBody("call-worker-"+marker, smokeWorkerModel,
 			`{"input":"produce `+marker+`"}`)
 	case strings.Contains(last, "smoke file"):
-		return smokeAnswerBody("here is the report for " + marker + ": " + p.file)
+		return p.finalAnswer(marker, smokeAnswerBody("here is the report for "+marker+": "+p.file))
 	case strings.Contains(last, "smoke long"):
-		return smokeAnswerBody(smokeLongBody(marker))
+		return p.finalAnswer(marker, smokeAnswerBody(smokeLongBody(marker)))
 	}
-	return smokeAnswerBody("answer " + marker)
+	return p.finalAnswer(marker, smokeAnswerBody("answer "+marker))
 }
 
 // count 报告端点已经回答的请求数。
