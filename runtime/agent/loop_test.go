@@ -562,7 +562,7 @@ func (l *consumerLog) mentions(level string, fragments ...string) bool {
 // duration of one check.
 func watchConsumerLog(tb testing.TB, logger trpclog.Logger) {
 	tb.Helper()
-	restore := swapFrameworkLogger(logger)
+	restore := SwapFrameworkLogger(logger)
 	tb.Cleanup(restore)
 }
 

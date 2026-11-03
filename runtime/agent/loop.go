@@ -285,9 +285,14 @@ func frameworkLogger() trpclog.Logger {
 	return trpclog.Default
 }
 
-// swapFrameworkLogger points the framework logger at the observer and answers
+// SwapFrameworkLogger points the framework logger at the observer and answers
 // the restore that puts the default back, both under the swap lock.
-func swapFrameworkLogger(observer trpclog.Logger) func() {
+//
+// The redline list (3 rules):
+// MUST swap under the same lock every framework reader takes, so an observation never races a running consumer.
+// MUST answer a restore that holds the logger the swap found, never a value read beside the lock.
+// MUST NOT read or write the framework logger outside that lock.
+func SwapFrameworkLogger(observer trpclog.Logger) func() {
 	logSwapLock.Lock()
 	defer logSwapLock.Unlock()
 	original := trpclog.Default

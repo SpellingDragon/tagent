@@ -15,6 +15,7 @@ import (
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 
 	"github.com/SpellingDragon/tagent/api/model"
+	"github.com/SpellingDragon/tagent/runtime/agent"
 	trpcagent "trpc.group/trpc-go/trpc-agent-go/agent"
 	"trpc.group/trpc-go/trpc-agent-go/agent/llmagent"
 	trpclog "trpc.group/trpc-go/trpc-agent-go/log"
@@ -47,9 +48,7 @@ func frameworkGenerationRecorder(tb testing.TB) *tracetest.SpanRecorder {
 // sink.
 func watchModelResponseLogger(tb testing.TB, logger trpclog.Logger) {
 	tb.Helper()
-	original := trpclog.Default
-	trpclog.Default = logger
-	tb.Cleanup(func() { trpclog.Default = original })
+	tb.Cleanup(agent.SwapFrameworkLogger(logger))
 }
 
 // driveFrameworkModelStep runs one model step of a framework llm agent over the

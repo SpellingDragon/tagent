@@ -16,8 +16,7 @@ import (
 	"github.com/SpellingDragon/tagent/api/model"
 	"github.com/SpellingDragon/tagent/assembly"
 	"github.com/SpellingDragon/tagent/memory/ledger"
-
-	trpclog "trpc.group/trpc-go/trpc-agent-go/log"
+	"github.com/SpellingDragon/tagent/runtime/agent"
 )
 
 // headlessSettleBody, headlessWorkerBody and headlessEntryBody are the three
@@ -264,9 +263,7 @@ func runSettleDriveLeavesADebugTrail(t *testing.T) {
 		}
 	}
 	capture := &settleCaptureLogf{}
-	original := trpclog.Default
-	trpclog.Default = capture
-	t.Cleanup(func() { trpclog.Default = original })
+	t.Cleanup(agent.SwapFrameworkLogger(capture))
 
 	root := t.TempDir()
 	configPath := writeScriptedHostDocument(t, root, provider.endpoint(), "model-entry")

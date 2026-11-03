@@ -142,12 +142,11 @@ func TestSkillBodyReachesNextRequest(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("invoke the skill loads: %v", err)
 	}
-	time.Sleep(1500 * time.Millisecond) // TEMP-DIAG observe the late settlement follow-up
 	requests := provider.recorded()
 	if len(requests) < 2 {
 		t.Fatalf("recorded requests = %d, want at least the load decision and the closing decision", len(requests))
 	}
-	closing := requests[len(requests)-1]
+	closing := requests[1]
 	if containsBody(requests[0], "extra body v1") {
 		t.Fatal("first request carried the extra skill body before the load, want no unloaded body")
 	}
@@ -165,17 +164,26 @@ func TestSkillBodyReachesNextRequest(t *testing.T) {
 	if got := countBody(closing, "greet body v1"); got != 1 {
 		t.Fatalf("closing request carries the greet body %d times, want exactly once beside its load", got)
 	}
-	loaded := func(text string) bool {
+	loaded := func(requests []model.Request, want loadedResult) bool {
 		for _, req := range requests[1:] {
-			if containsBody(req, text) {
-				return true
+			for _, msg := range req.Messages {
+				if presentsLoadedResult(msg, want) {
+					return true
+				}
 			}
 		}
 		return false
 	}
-	for _, text := range []string{"loaded: greet", "loaded: extra"} {
-		if !loaded(text) {
-			t.Fatalf("requests = %+v, want every loaded result in the model context after the load", requests)
+	deadline := time.Now().Add(10 * time.Second)
+	for _, want := range []loadedResult{
+		{callID: "call-greet", text: "loaded: greet"},
+		{callID: "call-extra", text: "loaded: extra"},
+	} {
+		for !loaded(provider.recorded(), want) {
+			if !time.Now().Before(deadline) {
+				t.Fatalf("requests = %+v, want every loaded result in the model context after the load", provider.recorded())
+			}
+			time.Sleep(10 * time.Millisecond)
 		}
 	}
 }
@@ -483,4 +491,25 @@ func countBody(req model.Request, body string) int {
 		}
 	}
 	return got
+}
+
+// loadedResult is one settled skill load the model context must present.
+type loadedResult struct {
+	callID string
+	text   string
+}
+
+// presentsLoadedResult reports whether one message presents the settled body
+// of the load: the live observation the decision of its range reads (user
+// role), or the result fact the decision after the closed range reads (tool
+// role). Both carry the call identity and the settled body, and the receipt
+// "ok" carries none of it.
+func presentsLoadedResult(message model.Message, want loadedResult) bool {
+	if message.ToolID != want.callID || message.ToolName != "skill_load" {
+		return false
+	}
+	if message.Role != model.RoleUser && message.Role != model.RoleTool {
+		return false
+	}
+	return strings.Contains(message.Content, want.text)
 }

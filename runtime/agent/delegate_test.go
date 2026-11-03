@@ -387,7 +387,7 @@ func (o *delegationObserver) mentions(level string, fragments ...string) bool {
 // its own face and leaves the package logger as it found it.
 func watchDelegationLog(t *testing.T, observer trpclog.Logger) func() {
 	t.Helper()
-	restore := swapFrameworkLogger(observer)
+	restore := SwapFrameworkLogger(observer)
 	t.Cleanup(restore)
 	return restore
 }

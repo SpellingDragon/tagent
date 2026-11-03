@@ -20,8 +20,6 @@ import (
 	"github.com/SpellingDragon/tagent/memory/ledger"
 	"github.com/SpellingDragon/tagent/memory/query"
 	"github.com/SpellingDragon/tagent/runtime/agent"
-
-	trpclog "trpc.group/trpc-go/trpc-agent-go/log"
 )
 
 // fileFactAddress is the one agent session the file fact anchors drive.
@@ -217,9 +215,7 @@ func TestFileFactFilingFailureDoesNotRefuseTheRequest(t *testing.T) {
 		}
 
 		logger := &observationLogger{}
-		original := trpclog.Default
-		trpclog.Default = logger
-		defer func() { trpclog.Default = original }()
+		defer agent.SwapFrameworkLogger(logger)()
 
 		turn, err := second.Invoke(ctx, assembly.InvokeRequest{
 			InvocationID: "inv-file-fact-conflict",

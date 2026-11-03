@@ -228,6 +228,15 @@ func RoleOf(eventType string) (model.Role, error)
     (see observationOf) - the recovery hint, the folded segment and the history
     summary render as user input material, the history a range reads
 
+func SwapFrameworkLogger(observer trpclog.Logger) func()
+    SwapFrameworkLogger points the framework logger at the observer and answers
+    the restore that puts the default back, both under the swap lock.
+
+    The redline list (3 rules): MUST swap under the same lock every framework
+    reader takes, so an observation never races a running consumer. MUST answer
+    a restore that holds the logger the swap found, never a value read beside
+    the lock. MUST NOT read or write the framework logger outside that lock.
+
 TYPES
 
 type Agent interface {
