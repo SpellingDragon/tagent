@@ -260,6 +260,19 @@ func (l *Loop) drive(ctx context.Context, inv Invocation) (Turn, error) {
 // of one invocation, and a line carries identities, counts and the terminal, never
 // transcript content.
 //
+// The redline list (3 rules):
+// MUST stay a bypass: a failing logger is a missing line, never a failed drive.
+// MUST keep the INFO stream bounded by leaving every consumer line at DEBUG.
+// MUST NOT render transcript, message or tool-output content.
+func consumerDebug(format string, args ...any) {
+	logger := frameworkLogger()
+	if logger == nil {
+		return
+	}
+	defer func() { _ = recover() }()
+	logger.Debugf(format, args...)
+}
+
 // logSwapLock guards every access to the framework logger beside a running
 // consumer: the observation tests swap the default while consumer goroutines
 // read it, and an unsynchronized pair is a data race the detector names.
@@ -284,19 +297,6 @@ func swapFrameworkLogger(observer trpclog.Logger) func() {
 		defer logSwapLock.Unlock()
 		trpclog.Default = original
 	}
-}
-
-// The redline list (3 rules):
-// MUST stay a bypass: a failing logger is a missing line, never a failed drive.
-// MUST keep the INFO stream bounded by leaving every consumer line at DEBUG.
-// MUST NOT render transcript, message or tool-output content.
-func consumerDebug(format string, args ...any) {
-	logger := frameworkLogger()
-	if logger == nil {
-		return
-	}
-	defer func() { _ = recover() }()
-	logger.Debugf(format, args...)
 }
 
 // consumerWarn renders one line of the consumer face at WARN beside a fact the
