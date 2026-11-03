@@ -10,8 +10,6 @@ import (
 	"time"
 	"unicode/utf8"
 
-	trpclog "trpc.group/trpc-go/trpc-agent-go/log"
-
 	"github.com/SpellingDragon/tagent/api/event"
 	"github.com/SpellingDragon/tagent/runtime/state"
 	"github.com/SpellingDragon/tagent/runtime/task"
@@ -957,11 +955,12 @@ func delegationStatusName(status task.Status) string {
 // MUST keep one line per admission, per refusal and per withheld settle.
 // MUST NOT render the delegated prompt, the target input or the model output.
 func delegateDebug(format string, args ...any) {
-	if trpclog.Default == nil {
+	logger := frameworkLogger()
+	if logger == nil {
 		return
 	}
 	defer func() { _ = recover() }()
-	trpclog.Default.Debugf(format, args...)
+	logger.Debugf(format, args...)
 }
 
 // delegateInfo renders the one line a delegation writes at INFO when its
@@ -975,11 +974,12 @@ func delegateDebug(format string, args ...any) {
 // MUST stay a bypass: a failing logger is a missing line, never a withheld terminal.
 // MUST NOT render the delegated prompt, the target input or the model output.
 func delegateInfo(format string, args ...any) {
-	if trpclog.Default == nil {
+	logger := frameworkLogger()
+	if logger == nil {
 		return
 	}
 	defer func() { _ = recover() }()
-	trpclog.Default.Infof(format, args...)
+	logger.Infof(format, args...)
 }
 
 // turnBorrow is the borrowing face of one delegated turn: every borrow names

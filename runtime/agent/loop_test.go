@@ -562,9 +562,8 @@ func (l *consumerLog) mentions(level string, fragments ...string) bool {
 // duration of one check.
 func watchConsumerLog(tb testing.TB, logger trpclog.Logger) {
 	tb.Helper()
-	original := trpclog.Default
-	trpclog.Default = logger
-	tb.Cleanup(func() { trpclog.Default = original })
+	restore := swapFrameworkLogger(logger)
+	tb.Cleanup(restore)
 }
 
 // TestConsumerObservation checks the consumer face of the observation bypass.

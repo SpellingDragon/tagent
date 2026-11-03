@@ -260,16 +260,43 @@ func (l *Loop) drive(ctx context.Context, inv Invocation) (Turn, error) {
 // of one invocation, and a line carries identities, counts and the terminal, never
 // transcript content.
 //
+// logSwapLock guards every access to the framework logger beside a running
+// consumer: the observation tests swap the default while consumer goroutines
+// read it, and an unsynchronized pair is a data race the detector names.
+var logSwapLock sync.RWMutex
+
+// frameworkLogger reports the framework logger under the swap lock.
+func frameworkLogger() trpclog.Logger {
+	logSwapLock.RLock()
+	defer logSwapLock.RUnlock()
+	return trpclog.Default
+}
+
+// swapFrameworkLogger points the framework logger at the observer and answers
+// the restore that puts the default back, both under the swap lock.
+func swapFrameworkLogger(observer trpclog.Logger) func() {
+	logSwapLock.Lock()
+	defer logSwapLock.Unlock()
+	original := trpclog.Default
+	trpclog.Default = observer
+	return func() {
+		logSwapLock.Lock()
+		defer logSwapLock.Unlock()
+		trpclog.Default = original
+	}
+}
+
 // The redline list (3 rules):
 // MUST stay a bypass: a failing logger is a missing line, never a failed drive.
 // MUST keep the INFO stream bounded by leaving every consumer line at DEBUG.
 // MUST NOT render transcript, message or tool-output content.
 func consumerDebug(format string, args ...any) {
-	if trpclog.Default == nil {
+	logger := frameworkLogger()
+	if logger == nil {
 		return
 	}
 	defer func() { _ = recover() }()
-	trpclog.Default.Debugf(format, args...)
+	logger.Debugf(format, args...)
 }
 
 // consumerWarn renders one line of the consumer face at WARN beside a fact the
@@ -282,11 +309,12 @@ func consumerDebug(format string, args ...any) {
 // MUST carry the named cause beside the identity of the fact family it belongs to.
 // MUST NOT render transcript, message or tool-output content.
 func consumerWarn(format string, args ...any) {
-	if trpclog.Default == nil {
+	logger := frameworkLogger()
+	if logger == nil {
 		return
 	}
 	defer func() { _ = recover() }()
-	trpclog.Default.Warnf(format, args...)
+	logger.Warnf(format, args...)
 }
 
 // Backflow admits one notification of a call into the range of the invocation
