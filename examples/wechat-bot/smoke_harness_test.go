@@ -432,6 +432,14 @@ func (p *smokeProvider) answerFor(modelName string, messages []smokeModelMessage
 			smokeReflectionSendArgs(messages, index))
 	}
 	marker := smokeMarkerIn(messages)
+	// A delegated settle may ride the same request as the worker result: the
+	// closing body is the constant delivery of the segment, while the mid-flight
+	// narration only answers a request that has not read the notice yet. Reading
+	// the notice by presence keeps the closing body even when the result frame is
+	// the last message, which is the batched shape under a slow, folded window.
+	if smokeSettleNoticeOf(messages, marker) != "" {
+		return p.finalAnswer(marker, smokeAnswerBody("settle-ack "+marker))
+	}
 	if smokeEndedWithTool(messages) {
 		end := smokeLastContent(messages)
 		switch {
@@ -1553,7 +1561,8 @@ func (r *smokeRig) awaitText(chat, want string, timeout time.Duration) (outbound
 			}
 		}
 		if time.Now().After(deadline) {
-			return outboundEvent{}, fmt.Errorf("no text to %s carrying %q after %s (recorded=%d)", chat, want, timeout, len(r.recorded()))
+			return outboundEvent{}, fmt.Errorf("no text to %s carrying %q after %s (recorded=%d)\nrecent outbound:\n%s\nrecent requests:\n%s",
+				chat, want, timeout, len(r.recorded()), r.recentOutbound(8), r.recentRequests(8))
 		}
 		time.Sleep(2 * time.Millisecond)
 	}
@@ -3588,7 +3597,8 @@ func (r *smokeRig) smokeLongAwaitAny(chat string, wants []string, timeout time.D
 			}
 		}
 		if time.Now().After(deadline) {
-			return "", fmt.Errorf("no text to %s carrying any of %v after %s", chat, wants, timeout)
+			return "", fmt.Errorf("no text to %s carrying any of %v after %s\nrecent outbound:\n%s\nrecent requests:\n%s",
+				chat, wants, timeout, r.recentOutbound(8), r.recentRequests(8))
 		}
 		time.Sleep(2 * time.Millisecond)
 	}
@@ -4390,4 +4400,37 @@ func smokeLongReconcile(provider *smokeProvider, plan smokeCalibrationPlan, repo
 		}
 	}
 	return recon
+}
+
+// TestSmokeLongDelegateScriptAnswersBatchedSettle 钉住 03.11 委派输入并合形态的
+// 脚本判据：结果与结算通知同在一次请求里时，模型必须答段闭合的 settle-ack；工具
+// 结果帧即使排在通知之后，也不能把这一次请求读成只答中间叙述的独立形态。
+func TestSmokeLongDelegateScriptAnswersBatchedSettle(t *testing.T) {
+	const marker = "SMOKE-R10996"
+	notice := "tagent: task task-long settled\nresult:\nworker result " + marker
+
+	toolResult := []smokeModelMessage{
+		{Role: "user", Content: "smoke delegate " + marker},
+		{Role: "user", Content: `{"call_id":"call-worker-` + marker + `"}`},
+	}
+	batched := []smokeModelMessage{
+		{Role: "user", Content: "smoke delegate " + marker},
+		{Role: "user", Content: notice},
+		{Role: "user", Content: `{"call_id":"call-worker-` + marker + `"}`},
+	}
+	noticeOnly := []smokeModelMessage{
+		{Role: "user", Content: "smoke delegate " + marker},
+		{Role: "user", Content: notice},
+	}
+
+	provider := &smokeProvider{}
+	if got := provider.answerFor(smokeEntryModel, toolResult, 1); !strings.Contains(got, "delegate ack "+marker) {
+		t.Fatalf("the tool-result-only request answered %q, want the separate-shape delegate ack", got)
+	}
+	if got := provider.answerFor(smokeEntryModel, noticeOnly, 2); !strings.Contains(got, "settle-ack "+marker) {
+		t.Fatalf("the notice-only request answered %q, want the closing settle-ack", got)
+	}
+	if got := provider.answerFor(smokeEntryModel, batched, 3); !strings.Contains(got, "settle-ack "+marker) {
+		t.Fatalf("the batched request answered %q, want the closing settle-ack: the notice rode the same request as the tool result", got)
+	}
 }
