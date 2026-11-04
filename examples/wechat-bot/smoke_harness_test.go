@@ -432,11 +432,6 @@ func (p *smokeProvider) answerFor(modelName string, messages []smokeModelMessage
 			smokeReflectionSendArgs(messages, index))
 	}
 	marker := smokeMarkerIn(messages)
-	// A delegated settle may ride the same request as the worker result: the
-	// closing body is the constant delivery of the segment, while the mid-flight
-	// narration only answers a request that has not read the notice yet. Reading
-	// the notice by presence keeps the closing body even when the result frame is
-	// the last message, which is the batched shape under a slow, folded window.
 	if smokeSettleNoticeOf(messages, marker) != "" {
 		return p.finalAnswer(marker, smokeAnswerBody("settle-ack "+marker))
 	}
@@ -4405,9 +4400,7 @@ func smokeLongReconcile(provider *smokeProvider, plan smokeCalibrationPlan, repo
 	return recon
 }
 
-// TestSmokeLongDelegateScriptAnswersBatchedSettle 钉住 03.11 委派输入并合形态的
-// 脚本判据：结果与结算通知同在一次请求里时，模型必须答段闭合的 settle-ack；工具
-// 结果帧即使排在通知之后，也不能把这一次请求读成只答中间叙述的独立形态。
+// TestSmokeLongDelegateScriptAnswersBatchedSettle 钉住 03.11 委派输入并合形态答 settle-ack。
 func TestSmokeLongDelegateScriptAnswersBatchedSettle(t *testing.T) {
 	const marker = "SMOKE-R10996"
 	notice := "tagent: task task-long settled\nresult:\nworker result " + marker
