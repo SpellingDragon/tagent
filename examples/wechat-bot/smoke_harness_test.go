@@ -4400,7 +4400,7 @@ func smokeLongReconcile(provider *smokeProvider, plan smokeCalibrationPlan, repo
 	return recon
 }
 
-// TestSmokeLongDelegateScriptAnswersBatchedSettle 钉住 03.11 委派输入并合形态答 settle-ack。
+// TestSmokeLongDelegateScriptAnswersBatchedSettle 钉住委派输入并合形态答 settle-ack 常量。
 func TestSmokeLongDelegateScriptAnswersBatchedSettle(t *testing.T) {
 	const marker = "SMOKE-R10996"
 	notice := "tagent: task task-long settled\nresult:\nworker result " + marker
