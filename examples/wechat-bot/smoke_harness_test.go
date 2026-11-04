@@ -4292,8 +4292,13 @@ func smokeLongReconcile(provider *smokeProvider, plan smokeCalibrationPlan, repo
 		}
 		recon.ExpectedNotifications++
 		got := 0
-		for _, last := range lasts {
+		for i, last := range lasts {
 			if strings.HasPrefix(last, "tagent: task ") && strings.Contains(last, "settled") && strings.Contains(last, step.Marker) {
+				got++
+				continue
+			}
+			if smokeSettleNoticeOf(requests[i].Messages, step.Marker) != "" &&
+				strings.Contains(smokeLastContent(requests[i].Messages), "call-worker-"+step.Marker) {
 				got++
 			}
 		}
@@ -4428,5 +4433,34 @@ func TestSmokeLongDelegateScriptAnswersBatchedSettle(t *testing.T) {
 	}
 	if got := provider.answerFor(smokeEntryModel, batched, 3); !strings.Contains(got, "settle-ack "+marker) {
 		t.Fatalf("the batched request answered %q, want the closing settle-ack: the notice rode the same request as the tool result", got)
+	}
+}
+
+// TestSmokeLongReconcileCountsBatchedNotification 钉住委派并合形态的结算通知只记一次。
+func TestSmokeLongReconcileCountsBatchedNotification(t *testing.T) {
+	const marker = "SMOKE-R10996"
+	notice := "tagent: task task-long settled\nresult:\nworker result " + marker
+	requests := []smokeModelRequest{
+		{Messages: []smokeModelMessage{
+			{Role: "user", Content: "smoke delegate " + marker},
+			{Role: "user", Content: notice},
+			{Role: "user", Content: `{"call_id":"call-worker-` + marker + `"}`},
+		}},
+		{Messages: []smokeModelMessage{
+			{Role: "user", Content: "smoke delegate " + marker},
+			{Role: "user", Content: notice},
+			{Role: "user", Content: "smoke input other"},
+		}},
+	}
+	provider := &smokeProvider{requests: requests}
+	plan := smokeCalibrationPlan{Timeline: []smokeCalibrationStep{{
+		Kind: "input", Shape: "delegate", Marker: marker,
+	}}}
+	recon := smokeLongReconcile(provider, plan, &smokeLongReport{})
+	if recon.ExpectedNotifications != 1 || recon.NotificationRequests != 1 {
+		t.Fatalf("batched notification count = %d/%d, want 1/1", recon.NotificationRequests, recon.ExpectedNotifications)
+	}
+	if len(recon.MissingNotifications) != 0 || len(recon.DuplicateNotifications) != 0 {
+		t.Fatalf("batched notification identity = missing %v duplicate %v, want neither", recon.MissingNotifications, recon.DuplicateNotifications)
 	}
 }
