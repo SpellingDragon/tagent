@@ -39,3 +39,16 @@ graph LR
 - [ ] F2 复跑全部项目门禁与 merge 前完整长程证明，记录原始退出码。
 - [ ] F3 逐条核验 DoD 与用户症状锚的回滚红/修复绿证据。
 - [ ] F4 在独立审者显式 frontier 空后执行 OpenSpec archive 并复验主 specs。
+
+## 补记：证据链复核（2026-11-04，post-hoc）
+
+本节不改写上面的勾选状态——上面的 3–6 与 F1–F4 是归档时的过程快照，保持未勾。本节点仅登记每个收尾项的实际证据状态，供新克隆审计：
+
+| 项 | 原勾选 | 实际证据 | 状态 |
+|---|---|---|---|
+| F1 核对契约差异、概念账本净减 | [ ] | evidence/04-concept-net-ledger.md；golden/runtime/architecture.json::concept_ratchet；check_concept_budget.py --json → errors: []、removed=10/renames=0 | 本地可核，仍标注为过程快照 |
+| F2 复跑全部项目门禁与 merge 前完整长程证明 | [ ] | evidence/07-local-gate-sweep.md：openspec/concept/doc/doc-refs/build 均绿；short 全量 37 包 ok、3 包因沙箱禁 tmux fork 失败；long 六片与 smoke 未跑 | **未闭合**：缺长程证明与远端 run 工件 |
+| F3 DoD 与症状锚红转绿双证 | [ ] | 归档 ORCHESTRATION r90/F3 表 + r138/r137；MUT-EVID-04 判据在 e94344a5 后放宽（见冲突分类报告 B6） | 部分可核，锚强度待补 |
+| F4 独立审者 frontier 空后 archive | [ ] | 四簇独立评审合计带出约 40 个开放问题；归档目录由 170ef267 建立，早于被引 CI run；evidence/09 登记远端 run 不可核 | **未闭合**：frontier 非空、归档顺序与主规格冲突 |
+
+依据与 hash 映射见 evidence/08-ledger-reconciliation.md；本地门禁原始退出码见 evidence/07-local-gate-sweep.md；远端 run 状态见 evidence/09-ci-run-attestation.md。

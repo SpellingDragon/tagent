@@ -1,4 +1,4 @@
-> **历史文档（historical-verbatim）**：本篇描述已移除的生产实现；当前架构见 [docs/wiki/README.md](README.md#当前架构速览)。文中文件引用按各篇快照提交锚定。
+> **历史文档（historical-verbatim）**：本篇描述已移除的生产实现；当前架构见 [docs/wiki/README.md](../README.md#当前架构速览)。文中文件引用按各篇快照提交锚定。
 
 # agent 行为矩阵 — 启用全平台子系统后的复杂场景反应
 

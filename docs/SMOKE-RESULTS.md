@@ -68,7 +68,7 @@ This is partial progress inside a failing test. Later trajectory checks were not
 Failure excerpt:
 
 ```text
-smoke_test.go:189: no meditation summary landed in a user session chain within 2m0s (reflect requests=0)
+smoke_test.go:597: no meditation summary landed in a user session chain within 2m0s (reflect requests=0)
 --- FAIL: TestLocalSmoke (124.63s)
 FAIL    wechat-bot    124.643s
 ```

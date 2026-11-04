@@ -18,7 +18,7 @@ host 簇按域分文件：
 | `host_delivery.go` | 交付账本（义务登记、挂起、重发、销账） |
 | `host_tools.go` | send 工具、跨会话投递面与投递账目、反思计划、注入端口 |
 | `host_face.go` | HTTP face：健康探针、任务端点、`/reload` |
-| `host_diagnostics.go` | 诊断面：统一运行读数 + 反思 / 训练 / 观测三面 |
+| `host_diagnostics.go` | 诊断面：统一运行读数 + 反思 / 训练 / 观测三面 + 注意力读面（`host_attention.go` 的 `hostReading`） |
 | `host_model.go` | 采样参数（temperature / thinking / reasoning_effort）的请求包装 |
 | `host_capture.go` | 轨迹采集：一次账户覆盖整次运行 |
 | `host_reload.go` | 热更新三档判据（见[组织级热重载](./org-hot-reload.md)） |
@@ -30,7 +30,7 @@ host 簇按域分文件：
 <a id="config-surface"></a>
 ## 二、配置面（`api/config` · `api/document`）
 
-`Declaration` 是共享的声明词汇：`Entry` + `Agents []AgentSpec` + `Refs []ToolRef` + `Baseline` + `Servers map[string]MCPServerSpec`。`AgentSpec` 以 agent 为中心：自己声明的 `Model`、`Tools`、`Plugins`、`TaskPolicy`、`Files`、`Params`，以及四个域段 `Memory` / `Meditation` / `File` / `Exec`。
+`Declaration` 是共享的声明词汇：`Entry` + `Agents []AgentSpec` + `Refs []ToolRef` + `Baseline` + `Servers map[string]MCPServerSpec`。`AgentSpec` 以 agent 为中心：自己声明的 `Model`、`Tools`、`Plugins`、`TaskPolicy`、`Files`、`Params` 等模型/预算字段，以及四个域段 `Memory` / `Meditation` / `File` / `Exec`。
 
 工具私有参数走 `ToolRef{Name, Params map[string]string, Endpoint}`：共享结构不被工具私有字段污染，远程引用用 `Endpoint` 表达，本地可解析的引用留空。提示词与 skill 是 `FileRef{Path, Kind}`——**正文不在声明里**，只声明"哪个文件是提示词/skill"，正文在请求边界按文件读（所以改正文不需要重新发布，见[热更新三档](./org-hot-reload.md#restart-required-dimensions)）。
 
@@ -101,7 +101,7 @@ host 簇按域分文件：
 
 过门之后正文以**这次调用自己的身份**提交进目标链：事实身份就是投递身份，同一份正文在同一调用身份下重放不落第二条；随后按目标忙闲分流——空闲目标被驱动一轮，忙目标在自己的下一条决策边界上读这条事实。**发起方从不阻塞在目标的回合上**，所以忙目标不会把投递它的那次调用拖成死锁。
 
-**两族投递，一本账**：agent 自己发的正文落成 `external_input`，框架的结算通知落成 `task_settled`——两族的事实类型分立，却盖同一套四键（`delivery.target` / `delivery.identity` / `delivery.receipt` / `delivery.source`，见[事件篇 §二](../event/event-architecture.md#const-list)），因此"一条投递"不按来路分两种读法。`Run.DeliveryLedger()` 是这本账的读面：`Records` 按源事件、目标与身份稳定排序，`BySource` 读一个源事件到达过哪些目标，`ByTarget` 读一个地址收到过什么。一条投递身份只对应一条记录，查询不解析正文——账目是投影，事实才是账。
+**两族投递，一本账**：agent 自己发的正文落成 `external_input`，框架的结算通知落成 `task_settled`——两族的事实类型分立，却盖同一套五键（`delivery.target` / `delivery.identity` / `delivery.receipt` / `delivery.source` / `delivery.denial`，见[事件篇 §二](../event/event-architecture.md#const-list)），因此"一条投递"不按来路分两种读法。`Run.DeliveryLedger()` 是这本账的读面：`Records` 按源事件、目标与身份稳定排序，`BySource` 读一个源事件到达过哪些目标，`ByTarget` 读一个地址收到过什么。一条投递身份只对应一条记录，查询不解析正文——账目是投影，事实才是账。
 
 跨会话的**插件派发**走同一条规则，不另立一套：`SettleDriver.DeclareScope` 声明这份名册属于谁、点了哪些目标，`settleScopeOfDocument` 取的就是宿主文档声明的 agent 名册；驱动旁边没有声明、或声明为空名单时**一切派发被拒**（fail-closed），越界目标具名拒绝且目标零感知。
 

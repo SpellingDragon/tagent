@@ -13,7 +13,7 @@ flowchart TD
   B -->|解码拒| X[文档未生效]
   B --> C[Declaration 折成共享声明]
   C --> D{compatibleWith}
-  D -->|entry 变 / agent 增删| E[ErrHostReloadStructural → 409]
+  D -->|entry 变 / agent 增删| E[随发布会换新代：org.entry / org.agents 事实]
   D -->|只在 Boot 读的字段变| F[ErrHostReloadRestartRequired → 409]
   D -->|通过| G[复用 Boot natives]
   G --> H[Run.Publish]
@@ -21,14 +21,14 @@ flowchart TD
   I -->|是| J[PublishUnchanged<br/>published=false]
   I -->|否| K[新代生效<br/>published=true, generation+1]
   K --> L[bindMCPServers]
-  L --> M[逐 agent 提交 model replacement 事实]
+  L --> M[经 noteModelConfigurationChange 提交 model 维度 config_change]
 ```
 
 | 文件 | 本篇用到的职责 |
 |---|---|
 | `assembly/host_reload.go` | `Reload`、`compatibleWith`、`restartRequiredChanges`、两个哨兵错误、回执结构 |
 | `assembly/host_document.go` | 方言解码（`loadHostDocument`）、`mapDocument`、`Declaration()` 派生 |
-| `assembly/run.go` | `Publish`：指纹 → 声明校验 → 候选 → 发布 → MCP 重绑 → 模型替换事实 |
+| `assembly/run.go` | `Publish`：指纹 → 声明校验 → 候选 → 发布 → MCP 重绑（止于 `bindMCPServers`）；模型变更事实由 `assembly/host_reload.go:278` 的 `Host.Reload` 提交 |
 | `assembly/host_face.go` | `/reload` 端点与 401 / 503 / 409 / 200 映射 |
 | `runtime/state/publish.go` | 唯一发布入口、`PublicationRecord`、`Generation`、上一代单槽 |
 | `runtime/state/retire.go` · `lease.go` · `baseline.go` | 退役台账、候选租约、基线复检 |
@@ -39,7 +39,7 @@ flowchart TD
 <a id="fingerprint"></a>
 ## 二、指纹：只有声明面参与
 
-`config.Fingerprint(d)` 是规范化 JSON 的 SHA-256。canonical 形只含五项：`entry`、`agents`、`refs`、`baseline`、`mcp_servers`。其中每个 agent 收进 `model`、`tools`、`plugins`、`task_policy`、`files`、`params`、回放窗三值（`max_tokens`/`compress_threshold`/`keep_recent_tasks`）、采样三值与 `max_tool_iterations`，外加 `memory`/`meditation`/`file`/`exec` 四个域段。
+`config.Fingerprint(d)` 是规范化 JSON 的 SHA-256。canonical 形只含五项：`entry`、`agents`、`refs`、`baseline`、`mcp_servers`。其中每个 agent 收进 `model`、`tools`、`plugins`、`task_policy`、`files`、`params`、回放窗三值（`max_tokens`/`compress_threshold`/`keep_recent_tasks`）、采样三值与 `max_tool_iterations`，外加 `memory`/`meditation`/`file`/`exec` 四个域段；`id`/`parent_id`/`final_round`/`environment_block` 也在 `canonicalAgentCore` 里，改它们同样换代。
 
 规范化三件事：先 `Clone` 再 `applyDefaults`（省略的集合编成空集合、`nil` 指针省略键、负零归零）；字段顺序由 canonical 结构固定；map 按名排序。**活对象与 `Raw` 源文档永不进指纹**，所以同一份声明在任何 YAML 迭代顺序下算出同一串。
 
@@ -81,9 +81,9 @@ flowchart TD
 <a id="config-clone"></a>
 ## 五、配置快照的私有化
 
-`Declaration.Clone` 是**手写逐字段深拷贝**（`cloneAgents` / `cloneToolRefs` / `cloneServerSpecs` / `cloneRawMap`），不是序列化往返。读面同样只给拷贝：`AgentSpecs()`、`ToolRefs()`、`RawDocument()`。
+`Declaration.Clone` 是**手写逐字段深拷贝**（`cloneAgents` / `cloneAgentSpec` / `cloneToolRefs` / `cloneServerSpecs` / `cloneRawMap` / `cloneFileRefs` / `cloneStrings` 等），不是序列化往返。读面同样只给拷贝：`AgentSpecs()`、`ToolRefs()`、`RawDocument()`。
 
-为什么换成手写：序列化往返的正确性依赖标签对称——进程级路径字段不参与序列化、`omitempty` 的"空但非 nil"集合回来变 `nil`、`Raw` 这类 `map[string]any` 解码会丢具体类型。这些偏离在往返里是隐式的，在手写拷贝里是可见的。代价是新增字段必须同步改四个 clone 函数（编译期不报错），收益是拷贝语义与字段一一对应，且指纹、候选构造与回滚重建共用同一份语义。
+为什么换成手写：序列化往返的正确性依赖标签对称——进程级路径字段不参与序列化、`omitempty` 的"空但非 nil"集合回来变 `nil`、`Raw` 这类 `map[string]any` 解码会丢具体类型。这些偏离在往返里是隐式的，在手写拷贝里是可见的。代价是新增字段必须同步改手写拷贝的每一处（`cloneAgents`/`cloneAgentSpec`/`cloneToolRefs`/`cloneServerSpecs`/`cloneRawMap`/`cloneFileRefs`/`cloneStrings`，编译期不报错），收益是拷贝语义与字段一一对应，且指纹、候选构造与回滚重建共用同一份语义。
 
 <a id="candidate-refusal"></a>
 ## 六、被拒候选必须完全退场
@@ -104,7 +104,7 @@ flowchart TD
 <a id="close-drain"></a>
 ## 八、关闭必须覆盖排空期间落位的义务
 
-关闭分两段：先 `Host.Quiesce` 关 intake 闸门（外部新输入被具名拒绝，关闭期内由已受理义务派生的回合仍受受理）并**静止到不动点**，再由 `Host.Close` 停消费者与设施。不动点由同源判据 `Unsettled()` 求值——关闭、重启、报告读同一处。出口三态：`Quiesced`（自然收束）／`Cut`（预算到点，余量在链上由重启续上，**正常返回**）／`Broken`（不可判，告警）；`Cut`/`Broken` 的 `DrainReport.Unsettled` 逐地址报出未消费通知与未终态工作。
+关闭分两段：先 `Host.Quiesce` 关 intake 闸门（外部新输入被具名拒绝，关闭期内由已受理义务派生的回合仍受受理）并**静止到不动点**，再由 `Host.Close` 停消费者与设施。不动点由同源判据 `Unsettled()` 求值——关闭、重启、报告读同一处。出口四值：零值 `CloseUnreached`（判定未到达）＋ `Quiesced`（自然收束）／`Cut`（预算到点，余量在链上由重启续上，**正常返回**）／`Broken`（不可判，告警）；`Cut`/`Broken` 的 `DrainReport.Unsettled` 逐地址报出未消费通知与未终态工作。
 
 宿主关闭次序（次序即契约）：
 
@@ -153,7 +153,7 @@ flowchart TD
 错误形态与可观察性：
 
 - `ErrHostReloadRestartRequired` 的文案含 `requires a restart`，`Unwrap()` 到 `ErrHostReloadStructural`，所以 `/reload` 的 409 与结构拒绝同一个出口，`errors.Is` 两个都能命中。
-- 结构拒绝独立具名（`ErrHostReloadStructural`）：`entry` 改名、agent 增删——Boot 已把模型租约、反思计划与工具面按这个集合钉死。
+- 结构拒绝只在一处具名（`ErrHostReloadStructural`）：文档缺失（"the reload carries no document"）。入口改名与集合增删随发布会进入新代；新增 agent 若携带只有 Boot 建过的域段（`exec`/`memory`/`meditation`）才按路径拒（`agents.<id>.exec` 等）。
 - 错误点名的是 **YAML 路径**（`storage.type`、`agents.user.file`），顺序固定：先五个顶层，再按 agent id 字典序比七个域段——同一次编辑永远给出同一串名字。
 - 一次混合修改（可热字段 + 须重启字段）**整批拒绝**，序号不推进：半应用是最难复现的形态。
 
@@ -166,7 +166,7 @@ flowchart TD
 | `providers.*` 端点热切换 | 只在"版本身份（provider/model）移动触发租约重建"时被重读；只改端点不动模型名时既不换代也不被拒，现值静默失效。它没进拒表，因为"新增 provider 键 + 换模型"是当前可用的热路径，按字段拒会误伤 | 端点并入版本身份，或"端点热切换"独立提案 |
 | 回滚无生产入口 | `Publisher.Rollback` / `RollbackConfig` 已实现（上一代单槽、指纹必须与来源一致、回滚同样前进序号、结果记 `PublishRolledBack`），但只有测试调用它，`Host` 没有暴露回滚入口 | 接上宿主入口时必须同时给出"何时可回滚"的可观察判据 |
 | 四通道热矩阵（已删除） | `runtime/state/channels.go` 已删除，矩阵不是第二权威、也不再被任何代码读取。每个维度只归一条热通道的唯一判据是 `assembly/host_reload.go` 的三档；每次判档落下的 `config_change` 事实链（`config_change_dimension`）就是通道归属的唯一记录 | 不恢复矩阵；若要只读视图，只从 `config_change` 事实链生成 |
-| 重入判定缺位 | 宿主当前不允许 agent 集合变化，所以"同名成员在排空 / 已开始关闭 / 已退出"三态重入不存在；退役台账只覆盖"代被取代" | 集合热增删若解禁，必须在任何资源建立之前补回三态门 |
+| 重入判定缺位 | 集合热增删已支持（见 `TestReloadAddsAnAgentThatServesItsFirstTurn`），但"同名成员在排空 / 已开始关闭 / 已退出"三态重入仍无判据；退役台账只覆盖"代被取代" | 集合热增删下补回三态门，且须在任何资源建立之前 |
 | `app` 段无常驻消费者 | 原样携带、不声称应用、也不拒绝 | 部署方若缓存该段需自行重读源文件 |
 
 延伸：[存储概念图](../../demos/storage-concept-map.html)（事实链、原文仓、交付账本等术语的统一口径）· [存储时光机](../../demos/storage-time-travel.html)

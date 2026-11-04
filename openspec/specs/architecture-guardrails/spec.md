@@ -1,5 +1,7 @@
 # architecture-guardrails Specification
 
+> **复核注记（2026-11-04 逐模块核对）**：本规范对已退役符号（`TagentAgent` / `EventBus` / `SessionProjection` / `PlainTool` / `SwappableModel` 等，全仓 Go 0 命中）的引用均为 MUST NOT 禁止项、历史实现注记或迁移期条款，**无现行 SHALL/MUST 建立在已退役符号上**；现行契约以 `assembly` 组合根 + 每地址常驻消费循环 + 装配期按声明分派为准。逐条映射见 `openspec/changes/archive/2026-11-03-runtime-architecture-convergence/evidence/10-doc-gap-register.md`。
+
 ## Purpose
 
 以结构而非纪律承载正确性（implementation-hardening 7A 立法）：分层依赖方向可机械断言（root → agent → plugin → memory，event 为纯叶子）；对上游 trpc-agent-go 内部行为的关键假设（投影完备性所依赖的管线同步等待）以真实管线钉测锁定，升级破坏即红；变更局部性（一个意图一个落点）与可选项单点拆除为内聚/演进的准入准绳。

@@ -2,43 +2,17 @@
 
 ## Purpose
 
-goal 工具族能力:goal_declare / goal_list / goal_resolve / denial_query / approval_list 五个 PlainTool 仅 entry agent 可挂载(治理闸包裹与 refine 同级),goal 声明激活治理 goal 门并写 governance 事件,GoalRegistry 启动时经 governance 事件回放重建,重启不丢 goal 上下文。
+> **superseded（2026-11-04 逐模块核对）**：本规范描述的「`goal_declare` / `goal_list` / `goal_resolve` / `denial_query` / `approval_list` 五个 `PlainTool` 仅 entry agent 可挂载」已退役。现 goal 声明激活治理 goal 门并写 governance 事件（`features/evolution/governance/goal.go:53/55` 的 `goal_declared`/`goal_resolved`），`GoalRegistry` 启动时经事件回放重建；本代无 `goal_*` 工具面，`PlainTool` 类型不存在。
+
+本文件此后只作 superseded 记录，不再承载现行规范命令；阅读现行要求时不得以本文件为依据，也不得把已退役的机制形态重新写入现行规范。
 
 ## Requirements
 
-### Requirement: goal 工具族（entry only）
+### Requirement: 历史条款已退役
 
-goal_declare / goal_list / goal_resolve / denial_query / approval_list 五工具 MUST 经 PlainTool 注册，仅 entry agent 可挂载（治理闸包裹与 refine 同级）。
+原 Requirements 中的规范化关键词（SHALLs/MUSTs）及其描述的机制已随实现退役而撤销；有效义务由对应现行能力主规格与公共行为锚承接。本条只登记历史事实，不设现行命令。
 
-#### Scenario: goal 声明激活 goal 门
-- **WHEN** entry agent 调 goal_declare(text)
-- **THEN** GoalRegistry 登记 + 写 governance 事件（subtype=goal_declared）；此后 GoalRequiredFor 关键工具被拒时渗透当前 goal 上下文
+#### Scenario: 查现行要求
 
-### Requirement: goal 持久化重建
-
-GoalRegistry 启动时 MUST 从 governance 事件（goal_declared/goal_resolved）回放重建（构造期单线程，对齐 DenialLedger.BindStore 模式）。
-
-#### Scenario: 重启不丢 goal
-- **WHEN** 声明 goal 后进程重启
-- **THEN** goal 门上下文经事件回放恢复，denial 渗透仍携带 goal
-
-### Requirement: goal 旧状态语义核实后沿用
-
-goal 工具族（`goal_declare`/`goal_list`/`goal_resolve`/`denial_query`/`approval_list`，仅 entry agent 可挂载）SHALL 保持其**当前保留的业务语义与状态词**；重建 MUST NOT 未经核实改动状态词或语义。goal 声明 SHALL 激活治理 `goal` 门并写 governance 事件；GoalRegistry 启动时 SHALL 从 governance 事件回放重建。
-
-#### Scenario: 声明激活 goal 门
-
-- **WHEN** entry agent 调 `goal_declare(text)`
-- **THEN** GoalRegistry 登记并写 governance 事件（subtype=goal_declared）
-- **AND** 此后 `GoalRequiredFor` 关键工具被拒时渗透当前 goal 上下文
-
-#### Scenario: 语义核实前不落地（失败）
-
-- **WHEN** 旧状态词/语义尚未经现场核实
-- **THEN** 相关任务保持 `design-blocked`，MUST NOT 以新命名替换旧状态词
-
-#### Scenario: 重启不丢 goal（重启）
-
-- **WHEN** 声明 goal 后进程重启
-- **THEN** goal 门上下文经 governance 事件回放恢复
-- **AND** denial 渗透仍携带 goal
+- **WHEN** 需要查询该域的现行要求
+- **THEN** 读对应现行能力的主规格及其公共行为锚，而不是本历史文件

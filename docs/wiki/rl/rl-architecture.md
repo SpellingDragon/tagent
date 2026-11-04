@@ -54,7 +54,7 @@
 - **句柄稳定**：`LeaseModel` 是绑定的稳定模型句柄，跨替换不变，所以一次发布就够了；每次调用借用**调用开始时生效的版本**，并按该版本的流租约覆盖整条返回流——替换绝不在活请求底下换模型。
 - **三次尝试才算换**：`Replace` 的顺序是**重建 → 发布 → 才安装**，整体拒绝：重建失败/无模型即拒绝且不触发布；发布拒绝则释放重建出的模型恰好一次、生效版本原封不动；成功才把新版本设为"此后开始的请求所借用"，并把被替换的那个标为退役——退役版本继续服务它在途的流，最后一条流结束时关闭**恰好一次**。
 - **历史是账不是开关**：`ReplacementRecord{From, To, State, Reason, At}` 与 `Replacements()` 记录尝试；`Restore` 拒绝"持久历史最后一版 ≠ 当前持有版本"（`ErrLeaseRestoreMismatch`），重启的租约绝不把一条请求串到上一个进程服务的版本上。
-- **事实落链**：`lease_observer.go` 把 `model.replacement` 事实接进租约，`TestDeclaredModelChangeFilesReplacementFact`／`TestReplacementFactInstallsNewVersion`／`TestFailedReplacementKeepsOldVersion`／`TestModelReplacementLifecycle` 钉住"失败保旧版本"。
+- **事实落链**：`lease_observer.go` 把 `model.replacement` 事实接进租约，`TestReplacementFactInstallsNewVersion`／`TestFailedReplacementKeepsOldVersion`／`TestModelReplacementLifecycle` 钉住"失败保旧版本"。
 
 <a id="http-api"></a>
 ## 五、对外 HTTP 面：只剩宿主那四个路由

@@ -1,5 +1,7 @@
 # conversation-self-heal Specification
 
+> **复核注记（2026-11-04 逐模块核对）**：本规范对已退役符号（`TagentAgent` / `EventBus` / `SessionProjection` / `PlainTool` / `SwappableModel` 等，全仓 Go 0 命中）的引用均为 MUST NOT 禁止项、历史实现注记或迁移期条款，**无现行 SHALL/MUST 建立在已退役符号上**；现行契约以 `assembly` 组合根 + 每地址常驻消费循环 + 装配期按声明分派为准。逐条映射见 `openspec/changes/archive/2026-11-03-runtime-architecture-convergence/evidence/10-doc-gap-register.md`。
+
 ## Purpose
 会话投影自愈：投影按 EventKey 幂等追加、压缩替换与键集一致，重复来源可见且不再撕裂上下文。
 ## Requirements

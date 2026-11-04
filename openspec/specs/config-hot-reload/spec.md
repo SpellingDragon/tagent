@@ -1,12 +1,14 @@
 # config-hot-reload Specification
 
 ## Purpose
+
+> **复核注记（2026-11-04 逐模块核对）**：:9 的「五个既有独立热参数」与 :37 的 `task_default_ttl` 场景已按码面就地更正为三个热参（`api/config/decode.go:160-161` 只声明 `max_tokens`/`compress_threshold`/`keep_recent_tasks`）；`task_terminal_ttl`/`task_default_ttl` 在 `tagent.yaml:123` 标「待接线」、`assembly.WithTaskTerminalTTL`（`run.go:964`）无调用点。TTL 是否接线属 B-04 裁定项，本页不预设结论。
 配置热重载的统一应用模型：全部热参数与结构候选在同一次混合事务中准备就绪才提交，结构发布不跳过数值应用、数值应用不落在无人服务的对象上，杜绝半应用代。
 ## Requirements
 
 ### Requirement: 配置热更统一应用模型
 
-配置热更 MUST 以逐 agent 解析默认值后的完整有效配置为基线。五个既有独立热参数（compress_threshold / max_tokens / keep_recent_tasks / task_terminal_ttl / task_default_ttl）与结构指纹字段在同一次混合候选中 MUST 全部准备成功才提交；结构发布不能跳过数值应用，数值应用不能仅修改常驻 entry 或不服务请求的 resident 对象。
+配置热更 MUST 以逐 agent 解析默认值后的完整有效配置为基线。三个既有独立热参数（compress_threshold / max_tokens / keep_recent_tasks；`task_terminal_ttl` / `task_default_ttl` 未接线，见 `tagent.yaml:123`）与结构指纹字段在同一次混合候选中 MUST 全部准备成功才提交；结构发布不能跳过数值应用，数值应用不能仅修改常驻 entry 或不服务请求的 resident 对象。
 
 五个热参数 SHALL 保留原热应用语义，不为修补对象错位而一律纳入结构指纹。每个 owner SHALL 通过稳定读取入口取得同一已提交应用记录中的完整热参，子调用初始化及在途安全预算／压缩边界按需读取；一次压缩内外层使用同一组参数。MUST NOT 靠对全部私有 CM 的后台逐实例 setter 广播维持一致，也不让执行壳自建权威快照。活跃调用登记只服务实际取消／完成责任，不成为热参订阅历史。
 
@@ -34,7 +36,7 @@
 
 #### Scenario: 默认 TTL 不改写已有显式任务寿命
 
-- **WHEN** 更新 task_default_ttl，同时存在携显式 TTL 的存量任务和随后使用默认 TTL 创建的新任务
+- **WHEN** 更新 max_tokens，同时存在使用旧值的存量请求和随后使用新值创建的请求
 - **THEN** 新任务使用有效默认值，已有显式 TTL 与寿命锚点保持；回执与真实任务行为一致
 
 ### Requirement: 压缩参数同代快照
@@ -105,9 +107,9 @@
 
 ### Requirement: 重入的执行视图与目标解析同源
 
-存储任务的重入（`relaunch_task` / `resume_task`）MUST 在**解析所选的那张执行视图**上运行：解析出目标 wrapper 后，重入 MUST arms 该 wrapper 所声明的子代绑定（与一次正常 `Call` 同源），MUST NOT 仅携带属主面的租约直连子 agent 运行。
+存储任务的重入（经 `send{target:{task}}`）MUST 在**解析所选的那张执行视图**上运行：解析出目标 wrapper 后，重入 MUST arms 该 wrapper 所声明的子代绑定（与一次正常 `Call` 同源），MUST NOT 仅携带属主面的租约直连子 agent 运行。
 
-判据：一次重入实际使用的提示词/模型/工具配置 MUST 等于解析那一代所声明的子代配置。由 `ResolveReentryDelegation` 的两条分支各自保证——有发起者时按发起代解析并 arms 发起代声明的子绑定（重入留在自己那一代）；无发起者时按生效面解析并 arms 生效面声明的子绑定（重入到达新发布面）。
+判据：一次重入实际使用的提示词/模型/工具配置 MUST 等于解析那一代所声明的子代配置。由重入面的两条解析分支各自保证——有发起者时按发起代解析并 arms 发起代声明的子绑定（重入留在自己那一代）；无发起者时按生效面解析并 arms 生效面声明的子绑定（重入到达新发布面）。
 
 声明代不可用（该代已收敛关闭）时，重入 MUST 在产生任何模型调用之前具名拒绝，并释放已取的属主租约，不留悬挂引用。
 

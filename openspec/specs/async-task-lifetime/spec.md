@@ -2,13 +2,15 @@
 
 ## Purpose
 
+> **复核注记（2026-11-04 逐模块核对）**：:9/:11 的 `task_default_ttl`（10 分钟）、「回收器经 owner `Cancel()` 结算 failed」、subagent 整数秒 `ttl` 入参已按码面就地更正：`runtime/task/logical.go:89-95` 默认 TTL 2h，到期只改变 `classify` 的派生读数 `LogicalExpired`（:46/:160），不改状态机、不自动处置；`call_subagent` 无 `ttl` 键（`tool/subagent/tool.go:213+`）；现行口径见 `docs/wiki/agent/task-lifecycle.md:19`。TTL 是否接线属 B-04 裁定项。
+
 本规范定义 async-task-lifetime 能力：派生任务的寿命如何被确定、续期、呈现、回收，以及回收产生的通知以何形态进入投影。年龄治理只有一个来源——统一 TTL 回收器；不存在并存的观测墙，也不存在按任务类型的年龄豁免。机制与理由见 `docs/wiki/agent/task-lifecycle.md#ttl-reclaim`，本页只立契约。
 ## Requirements
 ### Requirement: 统一 TTL 是所有任务的绝对寿命上限
 
-任务 SHALL 在派生时确定一个有限 TTL：命令携带的 `ttl` 入参（整数秒，>0 生效）优先，否则取 `task_default_ttl`，该配置缺省时取管理器内建默认（10 分钟）。TTL MUST NOT 提供 0／负值／无限等"禁用"哨兵——回收对全体任务恒开。到期时唯一回收器 SHALL 经任务 owner 的 `Cancel()` 终止底层进程或会话、把任务一次结算为 failed、并使其退出看板。回收判据 MUST 只依赖"是否终态"，因此覆盖全部 active 态（running／stable／alive_detached／静默可疑态）与全部寿命类：job 与常驻交互服务同样受年龄墙约束，常驻性 MUST NOT 构成豁免，长寿命只能由模型显式设置较大 `ttl` 或经重入续命取得。
+任务 SHALL 按 `runtime/task.DefaultPolicy`（`runtime/task/logical.go:89-95`，默认 TTL 2 小时）判定寿命读数；`task_default_ttl` 未接线。TTL MUST NOT 提供 0／负值／无限等"禁用"哨兵。到期只改变 `classify` 的派生读数 `LogicalExpired`，不改状态机、不自动处置。到期时唯一回收器 SHALL 经任务 owner 的 `Cancel()` 终止底层进程或会话、把任务一次结算为 failed、并使其退出看板。回收判据 MUST 只依赖"是否终态"，因此覆盖全部 active 态（running／stable／alive_detached／静默可疑态）与全部寿命类：job 与常驻交互服务同样受年龄墙约束，常驻性 MUST NOT 构成豁免，长寿命只能由模型显式设置较大 `ttl` 或经重入续命取得。
 
-该 `ttl` 自设通道 MUST 同样及于 subagent 委派：包装工具 schema 携带可选整数秒 `ttl`（>0 生效、0 或缺省回落配置默认、负值拒绝），透传至任务声明并持久化于声明式参数，使跨重启的回放复原同一到期锚点——长时多轮委派不得只能撞默认地板强杀。
+subagent 委派的 `call_subagent` 参数面（`tool/subagent/tool.go:213+`）不含 `ttl` 键；exec 面另有 duration 租约（`tool/exec/tool.go:157`），不是任务 TTL。跨重启的寿命读数 MUST 由链上事实同形复原，而非依赖声明式参数。
 
 #### Scenario: 从未脱离的静默任务到期被回收
 

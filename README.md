@@ -88,7 +88,7 @@ flowchart TB
 
 ## 冒烟与吞吐评估
 
-**2026-11-01 实测，开发快照 [`21ba86a`](https://github.com/SpellingDragon/tagent/tree/21ba86a371d1c932aec4d49ee49ee9dadaf832a7)。** 以下是示例宿主台架上的框架执行路径开销：本地 scripted HTTP 模型与替身出站，Go 1.24.1、linux/amd64、GOMAXPROCS=2；每项 30 次、重复 3 次，取 `ns/op` 中位数。不是实际 LLM、WeChat 网络吞吐或全部宿主的性能保证。
+**2026-11-01 实测，开发快照 [`21ba86a`](https://github.com/SpellingDragon/tagent/tree/21ba86a371d1c932aec4d49ee49ee9dadaf832a7)。** 以下是示例宿主台架上的框架执行路径开销：本地 scripted HTTP 模型与替身出站，Go 1.24.1、linux/amd64、GOMAXPROCS=2；每项 30 次、重复 3 次，取 `ns/op` 中位数。不是实际 LLM、WeChat 网络吞吐或全部宿主的性能保证。该快照的完整长冒烟为 **FAIL**（反思等待 2 分钟未达），真实 provider nightly 的 LLM/embedding 均 **SKIPPED**；失败位置、原始输出与复现命令见 [docs/SMOKE-RESULTS.md](docs/SMOKE-RESULTS.md)。数据来自 `next` 头 `21ba86a`（非 dev 祖先），11-04 运行时收敛后未重测。
 
 | 基准场景 | 中位耗时 | 换算吞吐 |
 |---|---:|---:|
@@ -118,6 +118,12 @@ go test ./tests/integration/... -short -count=1
 ```
 
 项目处于 pre-release，API、配置与存储格式可能变化；当前以单机可信部署为主，本地持久化的原子替换不等于抗掉电保证。依赖 fork 的范围见 `go.mod`。欢迎贡献新的事件源、宿主、恢复场景与诚实的评测结果。
+
+## 边界与机制一页（原 `docs/PROJECT.md` 归并于此）
+
+三个关键机制：**事件链 + 三龄段折叠**（链是唯一真相，投影可丢、重启按原始事实同形重折）、**执行重挂**（外部命令跑在 tmux，宿主重启后重挂续租，终态以退出证据为准）、**投递动作身份 + 回执**（至少一次投递 + 幂等消费，`consume:` 回执先落盘后确认，忙时保留补投）。测试证据见 `golden/runtime/event_integrity_scenarios.json`、每 MR 十轮 short + 六组合长程 + 变异门，口径在 [`docs/OPERATION.md`](docs/OPERATION.md#event-gates)。
+
+主动声明的边界：**tmux 不是 sandbox**（执行面无进程/文件隔离，治理门是策略层而非安全边界，不可信命令不要交给它跑）；**单机**（无分布式协调、无多实例一致性，存储为单机 localfile tier）；**无多租户**（一个进程服务一组会话，租户隔离由部署层解决）；**至少一次 + 幂等消费**，不承诺端到端 exactly-once，有副作用的动作以幂等键约束；**模型依赖外部 provider**，内置只有调用、重试与观测，不含训练与权重；折叠后的历史是投影，原始事实在链上不可变。
 
 ## 参考与致谢
 

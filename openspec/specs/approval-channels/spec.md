@@ -1,5 +1,7 @@
 # approval-channels Specification
 
+> **复核注记（2026-11-04 逐模块核对）**：本规范部分条款仍以已退役符号（`TagentAgent` / `AgentToolWrapper` / `EventBus` / `SessionProjection` / `PlainTool` / `ToolRegistry` / `RegisterBuiltinTools` / `SwappableModel` 等，全仓 Go 0 命中）表述现行 SHALL/MUST；现行实现为 `assembly` 组合根 + 每地址常驻消费循环 + 装配期按声明分派。这些条款属于历史契约残句，**阅读现行要求时不得据此断言现行行为**；正式迁移/退役须走 OpenSpec change delta（B-02 待裁定）。逐条映射见 `openspec/changes/archive/2026-11-03-runtime-architecture-convergence/evidence/10-doc-gap-register.md`。
+
 ## Purpose
 
 审批消息流能力:慢道审批经 ApprovalChannel 接口统一投递,提供 CLI 与微信两个回应入口,审批状态机 requested→responded→consumed 全程幂等,审批请求仍经 ApprovalManager 落盘,通道投递失败不阻塞审批门(闸不是墙)。

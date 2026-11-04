@@ -8,10 +8,10 @@
 
 ### Requirement: 事实类别契约
 
-框架 SHALL 在 event 包声明事实类别接口（`Fact`：身份与类型两问），每个事实族（核心事件、通知、训练记录、声明、引用票据、回放结算、压缩请求）MUST 在其所属包内实现该接口；事实族的归属包 MUST 在词汇表文档中逐族登记（族/身份/类型/归属/锁定机制）。
+框架 SHALL 在 event 包声明事实类别接口（`Fact`：身份与类型两问），每个事实族（核心事件、通知、训练记录、声明、引用票据、压缩请求、压缩产物、收尾判定、注意力；编号 6「回放结算」已退役留空）MUST 在其所属包内实现该接口；事实族的归属包 MUST 在词汇表文档中逐族登记（族/身份/类型/归属/锁定机制）。
 
-#### Scenario: 七族自证为事实
-- **WHEN** 将 Event/Notice/AttemptRecord/Declaration/OriginalRef/ReplaySettle/CompressRequest 赋给 Fact
+#### Scenario: 已登记族自证为事实
+- **WHEN** 将 Event/Notice/AttemptRecord/Declaration/OriginalRef/CompressRequest/CompressProduct/FinalRoundRequest/AttentionFact 赋给 Fact
 - **THEN** 编译通过，且各族的身份与类型两问返回稳定值（同一事实同一身份）
 
 #### Scenario: 词汇表可核

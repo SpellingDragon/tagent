@@ -12,7 +12,7 @@
 
 <a id="detach-suppression"></a>
 ## 二、脱离后的信号抑制：脱离态随执行现场外移，抑制判据留在这层
-判据原样保留：任务一旦脱离前台，此后的稳定/可疑信号被抑制、不外发，**完成与失败永远外发**；抑制的动机可核查——否则一个长期静默的服务会让看板反复摆动、回收日志刷屏。当前承载点已换：`tool/exec/state.go` 的 `StatePhase`（`stable`/`suspect`/`exited`/`released`）是**对资源的观测，不是对工作的裁定**（stable 不是成功、半帧不是完成），`runtime/task/logical.go` 的 `LogicalStatus`（`watch`/`stable`/`suspect`/`expired`/`timed-out`）只标记、不改状态机、不自动处置。于是本层只剩一条抑制判据：**只有终结外发**（`settled`/`failed`/`cancelled`），`accepted`/`progress` 从不点火。
+判据原样保留：任务一旦脱离前台，此后的稳定/可疑信号被抑制、不外发，**完成与失败永远外发**；抑制的动机可核查——否则一个长期静默的服务会让看板反复摆动、回收日志刷屏。当前承载点已换：`tool/exec/state.go` 的 `StatePhase`（`stable`/`suspect`/`exited`/`released`/`retained`）是**对资源的观测，不是对工作的裁定**（stable 不是成功、半帧不是完成），`runtime/task/logical.go` 的 `LogicalStatus`（`watch`/`stable`/`suspect`/`expired`/`timed-out`）只标记、不改状态机、不自动处置。于是本层只剩一条抑制判据：**只有终结外发**（`settled`/`failed`/`cancelled`），`accepted`/`progress` 从不点火。
 
 <a id="ttl-reclaim"></a>
 ## 三、统一 TTL：年龄是派生读数，不是处置动作

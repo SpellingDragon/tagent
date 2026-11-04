@@ -1,5 +1,7 @@
 # swappable-executor Specification
 
+> **复核注记（2026-11-04 逐模块核对）**：本规范对已退役符号（`TagentAgent` / `EventBus` / `SessionProjection` / `PlainTool` / `SwappableModel` 等，全仓 Go 0 命中）的引用均为 MUST NOT 禁止项、历史实现注记或迁移期条款，**无现行 SHALL/MUST 建立在已退役符号上**；现行契约以 `assembly` 组合根 + 每地址常驻消费循环 + 装配期按声明分派为准。逐条映射见 `openspec/changes/archive/2026-11-03-runtime-architecture-convergence/evidence/10-doc-gap-register.md`。
+
 ## Purpose
 
 执行器（fwAgent+runner+tools 装配）=配置可重导出的无状态函数，经 cm 内可换执行器缝（SwapExecutor）非重启原子换入：懒检查先序（memory canonical diff 拒绝→fingerprint 检测）、build-validate-then-swap fail-closed、drain-free turn 级、副作用 ownership 表、代际日志与 ring 2 回滚。org 级基础设施（loop/bus/cm/projection/TaskManager/monitor）常驻不换。

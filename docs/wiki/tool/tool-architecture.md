@@ -96,7 +96,7 @@
 
 四把工具对模型呈现的 `Declaration` 里**没有任何向量或嵌入参数**：两次独立构造的声明**逐字节一致**，与"这份部署有没有开向量"无关；声明文本也不得出现 `embedding`／向量存储／索引结构／融合算法一类实现字样。
 
-**是否做语义检索在运行期判定**：判据是 accessor 暴露的引擎能力位 `MemoryEngine().Capabilities().Vector`，存储侧另有一个 `SupportsVectorSearch()` 探测面而**召回路径不看它**——把"能力探测"错写成召回分支的前提，声明就会随部署漂移，前缀缓存整段失效。
+**是否做语义检索在运行期判定**：判据是 `Reads.Embedder` 是否接线（`tool/recall/query.go` 的 `Call`）；未接线即 `ErrRecallUnwired`，没有第二个能力探测位——把"能力探测"错写成召回分支的前提，声明就会随部署漂移，前缀缓存整段失效。
 
 `tool/recall/skeleton_assert.go` 把这层约定做成**编译期断言**：四把工具都是 `CallableTool`（所以每次调用都先过任务包装）、`New` 的签名与三个具名错误不变、`Table` 与 `ledger.ScopedOriginalStore` 由生产组件（`memory.StoreQuerySource`、`ledger.MemoryOriginalStore`）满足而不是测试替身。
 
