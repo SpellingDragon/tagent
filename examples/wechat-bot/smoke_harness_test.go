@@ -4292,15 +4292,17 @@ func smokeLongReconcile(provider *smokeProvider, plan smokeCalibrationPlan, repo
 		}
 		recon.ExpectedNotifications++
 		got := 0
-		for i, last := range lasts {
-			if strings.HasPrefix(last, "tagent: task ") && strings.Contains(last, "settled") && strings.Contains(last, step.Marker) {
-				got++
+		for i, req := range requests {
+			if smokeSettleNoticeOf(req.Messages, step.Marker) == "" {
 				continue
 			}
-			if smokeSettleNoticeOf(requests[i].Messages, step.Marker) != "" &&
-				strings.Contains(smokeLastContent(requests[i].Messages), "call-worker-"+step.Marker) {
-				got++
+			got++
+			for j := i + 1; j < len(requests); j++ {
+				if strings.HasPrefix(lasts[j], "tagent: task ") && strings.Contains(lasts[j], "settled") && strings.Contains(lasts[j], step.Marker) {
+					got++
+				}
 			}
+			break
 		}
 		recon.NotificationRequests += got
 		switch {
@@ -4444,7 +4446,7 @@ func TestSmokeLongReconcileCountsBatchedNotification(t *testing.T) {
 		{Messages: []smokeModelMessage{
 			{Role: "user", Content: "smoke delegate " + marker},
 			{Role: "user", Content: notice},
-			{Role: "user", Content: `{"call_id":"call-worker-` + marker + `"}`},
+			{Role: "user", Content: "smoke carry frame", ToolCallID: "call-worker-" + marker},
 		}},
 		{Messages: []smokeModelMessage{
 			{Role: "user", Content: "smoke delegate " + marker},
