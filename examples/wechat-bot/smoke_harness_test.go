@@ -1700,6 +1700,9 @@ func (r *smokeRig) recentOutbound(limit int) string {
 // recentRequests 渲染最近若干次模型请求的模型名、最后一条用户消息与尾部消息，
 // 供失败诊断。
 func (r *smokeRig) recentRequests(limit int) string {
+	if r.provider == nil {
+		return "(this process hosts no provider; the requests live in the parent)"
+	}
 	requests := r.provider.recorded()
 	if len(requests) > limit {
 		requests = requests[len(requests)-limit:]
