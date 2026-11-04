@@ -194,7 +194,7 @@ func TestDeliveryAfterRestartKeepsTheTurnAnswer(t *testing.T) {
 
 // TestConfigChangeMapsNoProjectionEntry pins the explicit type skip of a configuration change at the projection boundary.
 //
-// 契约: docs/wiki/agent/compression-and-telemetry.md#projection-fold
+// 契约: docs/wiki/memory/memory-architecture.md#overview
 func TestConfigChangeMapsNoProjectionEntry(t *testing.T) {
 	at := time.Date(2026, time.November, 3, 12, 0, 0, 0, time.UTC)
 	change := event.ConfigChangeFor("user", event.ConfigChangeDimensionPrompt, 3, "agent user prompt source changed: [boot.md] -> [next.md]")

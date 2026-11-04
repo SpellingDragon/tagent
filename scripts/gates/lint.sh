@@ -96,6 +96,10 @@ echo "lint: checker selftests"
 run python3 -m unittest discover -s scripts/gates -p "test_check_runtime_*.py"
 run python3 scripts/gates/test_check_concept_budget.py
 run python3 -m unittest discover -s scripts/gates -p "test_check_doc_budget.py"
+run python3 scripts/gates/test_check_product_surface.py
+run python3 scripts/gates/check_product_surface.py
+run python3 scripts/gates/test_check_doc_links.py
+run python3 scripts/gates/check_doc_links.py
 run python3 scripts/scenarios/test_verify_restart_prefix.py
 run bash scripts/gates/test_race_check.sh
 

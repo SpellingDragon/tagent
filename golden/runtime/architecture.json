@@ -3,7 +3,7 @@
     "removed_min": 10,
     "new_max": 1,
     "exported_interfaces_max": 77,
-    "note": "frozen at the convergence change; tighten new_max to 0 once the baseline commit advances"
+    "note": "frozen at the convergence change; new_max stays 1 for the one bound ConfigChange fact. Advancing concept_bindings.baseline would zero new but also zero removed, breaking removed_min=10 — see openspec/changes/archive/2026-11-03-runtime-architecture-convergence/evidence/11-ratchet-tension.md (B-03 pending adjudication)"
   },
   "schema_version": 1,
   "change": "runtime-rebuild",

@@ -876,13 +876,16 @@ class LintObjectSelectionTest(unittest.TestCase):
                      str(gates / "runtime_checklib.py"))
         write(gates / "check_runtime_plan.py", PLAN_WRAPPER)
         for name in ("check_runtime_evidence.py", "check_runtime_architecture.py",
-                     "check_concept_budget.py", "test_check_concept_budget.py"):
+                     "check_concept_budget.py", "test_check_concept_budget.py",
+                     "check_product_surface.py", "check_doc_links.py"):
             write(gates / name, PY_STUB)
         write(scenarios / "test_verify_restart_prefix.py", PY_STUB)
         for name in ("gen_godoc.sh", "test_race_check.sh", "test_check_package_layout.sh"):
             write(gates / name, SH_STUB)
         write(gates / "test_check_runtime_stub.py", SELFTEST_STUB)
         write(gates / "test_check_doc_budget.py", SELFTEST_STUB)
+        write(gates / "test_check_product_surface.py", SELFTEST_STUB)
+        write(gates / "test_check_doc_links.py", SELFTEST_STUB)
 
         self.bin = self.root / "bin"
         self.bin.mkdir()

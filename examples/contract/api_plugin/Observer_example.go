@@ -37,7 +37,7 @@ var _ plugin.Observer = (*factTally)(nil)
 // and is tallied, and a failure to record it is returned as an observation gap while the
 // fact itself stays committed.
 //
-// 契约: docs/wiki/agent/compression-and-telemetry.md#telemetry-ladder
+// 契约: docs/wiki/plugin/plugin-architecture.md#overview
 func ExampleObserver() {
 	observer := &factTally{}
 	evt := event.Event{Key: event.EventID("fact-1"), Type: event.TypeExternalInput}

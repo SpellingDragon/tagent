@@ -9,7 +9,7 @@ import (
 	"github.com/SpellingDragon/tagent/api/plugin"
 )
 
-// 契约: docs/wiki/agent/compression-and-telemetry.md#telemetry-ladder
+// 契约: docs/wiki/plugin/plugin-architecture.md#overview
 //
 // CommitObserver is the post-commit observation wiring of the After pass: it
 // resolves the committed fact behind one identity and hands it unchanged to

@@ -7,7 +7,7 @@ import (
 	"github.com/SpellingDragon/tagent/api/plugin"
 )
 
-// 契约: docs/wiki/agent/compression-and-telemetry.md#telemetry-ladder
+// 契约: docs/wiki/plugin/plugin-architecture.md#overview
 //
 // This file holds compile-time assertions only: every declared method keeps its
 // exact shape, every declared port stays an interface type, and each concrete

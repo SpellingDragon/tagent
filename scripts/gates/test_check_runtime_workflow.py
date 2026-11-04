@@ -73,8 +73,7 @@ GATE_STEPS = [
     ("Architecture policy",
      ["check_runtime_architecture.py --check-policy", "--json"]),
     ("Scenarios contract",
-     ["check_runtime_evidence.py --check-contract",
-      "--plan-graph openspec/changes/archive/2026-10-18-runtime-rebuild/task-graph.json"]),
+     ["check_runtime_evidence.py --check-contract", "--plan-graph"]),
     ("gofmt (product packages)",
      ["gofmt -l $PRODUCT_PACKAGES", "exit 1"]),
     ("Comment policy (product packages, measurement mode)",
@@ -118,6 +117,31 @@ def _missing_steps(bodies, expected):
             if keyword not in body:
                 missing.append("{} (missing {!r})".format(name, keyword))
     return missing
+
+
+def assert_active_graph_targets_are_dynamic(workflow):
+    """Plan/scenarios contracts must judge the ACTIVE change graph.
+
+    With an active openspec/changes/*/task-graph.json, validating the frozen
+    2026-10-18 archive is object mismatch (lint.sh:105-113). Both steps must glob
+    the active graph and pass that graph/dirname to their checker. This is the
+    assertion G-13 pins; the negative control mutates it back to the archive path.
+    """
+    bodies = [step_body(step)
+              for job in (workflow.get("jobs") or {}).values()
+              for step in (job.get("steps") or [])]
+    plan = next((b for b in bodies if "check_runtime_plan.py" in b), "")
+    scen = next((b for b in bodies if "check_runtime_evidence.py --check-contract" in b), "")
+    if "openspec/changes/*/task-graph.json" not in plan:
+        raise AssertionError("plan contract must glob the active task-graph.json")
+    if '--change-dir "$(dirname "$graph")"' not in plan:
+        raise AssertionError("plan contract must pass the active change dir")
+    if "openspec/changes/*/task-graph.json" not in scen:
+        raise AssertionError("scenarios contract must glob the active task-graph.json")
+    if '--plan-graph "$graph"' not in scen:
+        raise AssertionError("scenarios contract must pass the active graph")
+    if "openspec/changes/archive/" in plan or "openspec/changes/archive/" in scen:
+        raise AssertionError("a frozen archive graph must not be the contract object")
 
 
 def assert_gate_steps_present(workflow):
@@ -280,10 +304,24 @@ class WorkflowTest(unittest.TestCase):
 
     def test_scenario_contract_cross_checks_task_graph(self):
         # The scenario contract must pass --plan-graph so task_ids are
-        # cross-checked against the manifest, not silently accepted.
+        # cross-checked against the manifest, not silently accepted — and the
+        # graph must be the ACTIVE change's, not a frozen archive (G-13).
         step = self.text.split("Scenarios contract", 1)[1].split("- name:", 1)[0]
         self.assertIn("--check-contract", step)
-        self.assertIn("--plan-graph openspec/changes/archive/2026-10-18-runtime-rebuild/task-graph.json", step)
+        self.assertIn("--plan-graph", step)
+        assert_active_graph_targets_are_dynamic(self.workflow)
+
+    def test_negative_control_fixed_archive_graph_turns_the_check_red(self):
+        # A hardcoded archive path is object mismatch; the new assertion must bite.
+        mutated = copy.deepcopy(self.workflow)
+        for step in mutated["jobs"]["contracts"]["steps"]:
+            if step.get("name") == "Scenarios contract":
+                step["run"] = step["run"].replace(
+                    '--plan-graph "$graph"',
+                    '--plan-graph openspec/changes/archive/2026-10-18-runtime-rebuild/task-graph.json')
+        with self.assertRaises(AssertionError,
+                               msg="pinning the frozen archive graph must fail G-13 check"):
+            assert_active_graph_targets_are_dynamic(mutated)
 
 
 CI_WORKFLOW = REPO / ".github" / "workflows" / "ci.yml"
