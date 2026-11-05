@@ -85,12 +85,13 @@ agents:
     # 部署方把 USER.md 放进 prompt_dir 即被加载。
     system_prompt:
       files: [AGENTS.md, SOUL.md, USER.md]
-    # 送达面:send 是冥想反思会话唯一的跨会话写面(教训推送),业务正文仍只经自动投递出口落地(D4)。
+    # 送达面:业务正文只经自动投递出口落地(D4);入口工具面不声明 send——
+    # 冻结症状锚 G-A 要求入口回合不持有跨会话写面,教训入己记忆走事实链,
+    # 反思会话的 send 由插件级工具面提供(见 meditation 节与 autonomy 夹具)。
     # 委派面:knowledge/recall/plan/action 声明为 agent 引用——模型看到名为 knowledge/recall/plan/action
     # 的工具,工具面是被委派 agent 自己的 tools[](file/exec 在 action、recall 在 recall),
     # 冥想整理轮因此天然具备 file 读/exec 受限执行/recall 三种能力,零新机制。
     tools:
-      - { kind: tool, id: send }
       - { kind: agent, agent: knowledge, description_file: knowledge_backend.md }
       - { kind: agent, agent: recall, event_params: [event_keys] }
       - { kind: agent, agent: plan, description_file: plan_tool_desc.md }
