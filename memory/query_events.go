@@ -80,6 +80,28 @@ type QueryOptions struct {
 	// Keyword matches the stored summary or content case-insensitively;
 	// empty narrows nothing.
 	Keyword string
+	// keyPrefix narrows the returned set to the records whose canonical event
+	// key carries this prefix. It is deliberately unexported: the prefix is a
+	// read-face detail of one caller (the delivery settlement family reads its
+	// own records back by "delivery."), not a declarative term of the query
+	// language, so it stays behind Prefix and WithKeyPrefix and never widens
+	// the API contract. The filter narrows the returned set only; the scan
+	// cost stays the scope the partitions already state.
+	keyPrefix string
+}
+
+// WithKeyPrefix returns a copy of these options narrowed to the records whose
+// canonical event key carries the given prefix. An empty prefix clears the
+// narrowing, so the zero value of QueryOptions stays the unfiltered query.
+func (o QueryOptions) WithKeyPrefix(prefix string) QueryOptions {
+	o.keyPrefix = prefix
+	return o
+}
+
+// Prefix reports the key prefix these options narrow their returned set to,
+// and the empty string beside no narrowing.
+func (o QueryOptions) Prefix() string {
+	return o.keyPrefix
 }
 
 // Validate returns the named refusal that rejects this query before it runs,
@@ -252,9 +274,13 @@ func queryEventRecords(byKey map[event.EventID]EventRecord, opts QueryOptions) (
 	partitions := opts.resolvePartitions()
 	keyword := strings.ToLower(opts.Keyword)
 
+	prefix := opts.keyPrefix
 	matched := make([]EventReference, 0, len(byKey))
 	for _, rec := range byKey {
 		if !partitionAdmitted(partitions, rec.PartitionID) {
+			continue
+		}
+		if prefix != "" && !strings.HasPrefix(string(rec.Key), prefix) {
 			continue
 		}
 		if opts.StartTime > 0 && rec.Timestamp < opts.StartTime {

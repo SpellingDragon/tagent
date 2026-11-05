@@ -144,7 +144,7 @@ jobs:
       # no Go package at all is refused — so the declared surface is unchanged and
       # a directory that gains Go files joins it without a second edit.
       - name: Race (every first-party package + all integration suites)
-        run: ./scripts/gates/race_check.sh . ./assembly/... ./cli/... ./api/event/... ./api/config/... ./api/document/... ./api/model/... ./api/view/... ./api/plugin/... ./runtime/agent/... ./runtime/task/... ./runtime/state/... ./memory/... ./features/... ./tool/... ./internal/... ./tests/integration/execution/... ./tests/integration/history/... ./tests/integration/host/... ./tests/integration/capabilities/... ./tests/integration/evolution/... ./tests/integration/learning/...
+        run: ./scripts/gates/race_check.sh . ./assembly/... ./cli/... ./api/event/... ./api/config/... ./api/document/... ./api/model/... ./api/view/... ./api/plugin/... ./runtime/agent/... ./runtime/task/... ./runtime/state/... ./memory/... ./features/... ./tool/... ./bench/... ./internal/... ./tests/integration/execution/... ./tests/integration/history/... ./tests/integration/host/... ./tests/integration/capabilities/... ./tests/integration/evolution/... ./tests/integration/learning/...
       # 05/5.7: the wechat-bot module is an independent module (no go.work), so
       # the root module's ./... never reaches it. It runs the same race flags as
       # the root gate (race, -count=1, package-serial -p 1); its plain tests (the

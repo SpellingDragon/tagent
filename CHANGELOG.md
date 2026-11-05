@@ -5,6 +5,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- preflight 的 wechat-bot smoke 段超时由 30m 放宽到 75m：覆盖 30-60 分钟上界与裕量，只放宽时限、不改门语义。**影响范围**：本地 MR 等价门 `scripts/gates/preflight.sh` 与 CI 的 smoke 入口；**触发条件**：完整 300 轮 smoke 在 30m 内未完成时被误判超时；**自查方法**：`grep -n 'timeout 75m' scripts/gates/preflight.sh` 命中该行。
+
 ### Documentation
 
 - README 将 tagent 定位为可嵌入的 Go Super-agent 框架，补充事件驱动、插件、公开技术阅读参考、使用场景与运行挑战，并提供英文入口。

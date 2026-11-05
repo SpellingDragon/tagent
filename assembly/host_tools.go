@@ -321,13 +321,19 @@ func (r *Run) delegationDeclaration(spec task.Spec) ([]byte, error) {
 	if session == "" {
 		return nil, fmt.Errorf("%w: the task names no complete site", errDelegationDeclarationMissing)
 	}
-	for _, fact := range r.hostDeliveryFacts() {
+	var found []byte
+	r.eachDeliveryFact(func(fact event.Event) bool {
 		if fact.Target.SessionID != session {
-			continue
+			return true
 		}
 		if declaration := fact.Meta[event.MetaKeyDelegation]; declaration != "" {
-			return []byte(declaration), nil
+			found = []byte(declaration)
+			return false
 		}
+		return true
+	})
+	if found != nil {
+		return found, nil
 	}
 	return nil, fmt.Errorf("%w: site %s", errDelegationDeclarationMissing, session)
 }
@@ -768,20 +774,20 @@ func (l *DeliveryLedger) Records() []DeliveryRecord {
 	if l == nil || l.run == nil {
 		return nil
 	}
-	facts := l.run.hostDeliveryFacts()
-	records := make([]DeliveryRecord, 0, len(facts))
-	seen := make(map[string]struct{}, len(facts))
-	for _, fact := range facts {
+	records := make([]DeliveryRecord, 0, 16)
+	seen := map[string]struct{}{}
+	l.run.eachDeliveryFact(func(fact event.Event) bool {
 		record, held := hostDeliveryRecordOf(fact)
 		if !held {
-			continue
+			return true
 		}
 		if _, repeated := seen[record.Identity]; repeated {
-			continue
+			return true
 		}
 		seen[record.Identity] = struct{}{}
 		records = append(records, record)
-	}
+		return true
+	})
 	sort.Slice(records, func(i, j int) bool {
 		if records[i].Source != records[j].Source {
 			return records[i].Source < records[j].Source
@@ -846,19 +852,18 @@ func (l *DeliveryLedger) Refusals() []DeliveryRefusal {
 	if l == nil || l.run == nil {
 		return nil
 	}
-	facts := l.run.hostDeliveryFacts()
-	refusals := make([]DeliveryRefusal, 0, len(facts))
-	seen := make(map[string]struct{}, len(facts))
-	for _, fact := range facts {
+	refusals := make([]DeliveryRefusal, 0, 16)
+	seen := map[string]struct{}{}
+	l.run.eachDeliveryFact(func(fact event.Event) bool {
 		receipt := fact.Meta[event.MetaKeyDeliveryReceipt]
 		if receipt != DeliveryReceiptDenied && receipt != DeliveryReceiptBroken {
-			continue
+			return true
 		}
 		identity := fact.Meta[event.MetaKeyDeliveryIdentity]
 		category := fact.Meta[event.MetaKeyDeliveryDenial]
 		dedup := identity + "\x00" + receipt + "\x00" + category
 		if _, repeated := seen[dedup]; repeated {
-			continue
+			return true
 		}
 		seen[dedup] = struct{}{}
 		refusals = append(refusals, DeliveryRefusal{
@@ -868,7 +873,8 @@ func (l *DeliveryLedger) Refusals() []DeliveryRefusal {
 			Receipt:  receipt,
 			Category: category,
 		})
-	}
+		return true
+	})
 	sort.Slice(refusals, func(i, j int) bool {
 		if refusals[i].Source != refusals[j].Source {
 			return refusals[i].Source < refusals[j].Source
@@ -887,58 +893,67 @@ func (l *DeliveryLedger) Refusals() []DeliveryRefusal {
 	return refusals
 }
 
-// hostDeliveryFacts reports every fact this run accounts for, in the order the storage tier
-// published it.
-//
-// The durable chain is the account: the live ledger is a hot window over it (facts.go,
-// factWindow), so a reader that answered from the window alone would lose the delivery of a
-// long chain — the very fact this account exists to keep. The window is read only beside no
-// storage tier at all, which is the run that keeps its facts in memory alone.
-func (r *Run) hostDeliveryFacts() []event.Event {
+// errDeliveryScanDone ends a delivery enumeration early: the caller read the
+// fact it named and no later record can change the answer.
+var errDeliveryScanDone = errors.New("tagent: delivery scan complete")
+
+// eachDeliveryFact walks every fact the delivery account reads, one at a time.
+// The durable chain is the account; the live ledger is a hot window over it
+// (facts.go, factWindow), so the walk streams the chain instead of
+// materializing every body, and only a run beside no storage tier reads the
+// window alone. The visit answers false to stop the walk after the fact it
+// needed, so a lookup that names one fact never reads the rest of the chain.
+func (r *Run) eachDeliveryFact(visit func(event.Event) bool) {
 	r.mu.Lock()
 	tier := r.tier
 	r.mu.Unlock()
 	if tier != nil && tier.Segments != nil {
-		stored, err := tier.Segments.Events(context.Background())
-		if err == nil {
-			return hostDeliveryEventsOf(stored)
+		err := tier.Segments.EachEvent(context.Background(), func(stored ledger.StoredEvent) error {
+			fact, held := hostDeliveryFactOf(stored)
+			if !held {
+				return nil
+			}
+			if !visit(fact) {
+				return errDeliveryScanDone
+			}
+			return nil
+		})
+		if err == nil || errors.Is(err, errDeliveryScanDone) {
+			return
 		}
 		assemblyWarn("tagent: the delivery account of this run reads its live window beside an unreadable durable chain err=%v", err)
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	out := make([]event.Event, 0, len(r.factOrder))
 	for _, key := range r.factOrder {
 		evt, held := r.facts[key]
 		if !held {
 			continue
 		}
-		out = append(out, evt)
+		if !visit(evt) {
+			return
+		}
 	}
-	return out
 }
 
-// hostDeliveryEventsOf decodes the stored records of the durable chain into the facts the
-// delivery account projects: the type, the target, the metadata and the identity of each
-// committed fact, which is every field a delivery record reads. A body this build cannot decode
-// is skipped: an account that refused to answer beside one unreadable record would hide the
-// deliveries it can still read.
-func hostDeliveryEventsOf(stored []ledger.StoredEvent) []event.Event {
-	out := make([]event.Event, 0, len(stored))
-	for _, record := range stored {
-		body, err := memory.DecodeEventBody(record.Body)
-		if err != nil {
-			assemblyWarn("tagent: the committed record %s is not read as a delivery err=%v", record.Key, err)
-			continue
-		}
-		out = append(out, event.Event{
-			Key:    body.Key,
-			Type:   body.Type,
-			Target: body.Target,
-			Meta:   body.Meta,
-		})
+// hostDeliveryFactOf decodes one stored record into the fact the delivery
+// account projects: the type, the target, the metadata and the identity of each
+// committed fact, which is every field a delivery record reads. A body this
+// build cannot decode is skipped with the record named: an account that refused
+// to answer beside one unreadable record would hide the deliveries it can still
+// read.
+func hostDeliveryFactOf(record ledger.StoredEvent) (event.Event, bool) {
+	body, err := memory.DecodeEventBody(record.Body)
+	if err != nil {
+		assemblyWarn("tagent: the committed record %s is not read as a delivery err=%v", record.Key, err)
+		return event.Event{}, false
 	}
-	return out
+	return event.Event{
+		Key:    body.Key,
+		Type:   body.Type,
+		Target: body.Target,
+		Meta:   body.Meta,
+	}, true
 }
 
 // hostDeliveryRecordOf projects one committed fact into its delivery record and
@@ -1224,7 +1239,7 @@ func resolveHostMeditation(doc document.Document, promptDir, storageRoot string)
 		}
 		plan = &hostMeditationPlan{
 			agent:    id,
-			session:  hostSessionPrefix(doc.Entry) + "meditation",
+			session:  hostReflectionSession(doc.Entry, id),
 			interval: interval,
 			minGap:   entry.MinGap,
 			prompt:   prompt,
@@ -1281,6 +1296,19 @@ func hostMeditationTargets(doc document.Document, id string, declared []string) 
 		return nil, fmt.Errorf("tagent: agent %q enables meditation but names no deliver_to target", id)
 	}
 	return targets, nil
+}
+
+// hostReflectionSession reports the dedicated reflection session of the agent
+// that declared meditation. The host itself reflects in the reserved reflection
+// session of the entry agent; a separate curation agent keeps its own meditation
+// session, so the two forms never collide and existing curation deployments read
+// the session they always read.
+func hostReflectionSession(entry, agent string) string {
+	suffix := "meditation"
+	if agent == entry {
+		suffix = "reflection"
+	}
+	return hostSessionPrefix(entry) + suffix
 }
 
 // hostSessionPrefix reports the session identity prefix of one entry agent: the

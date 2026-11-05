@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/SpellingDragon/tagent/api/event"
 )
 
 // 契约: docs/wiki/agent/agent-architecture.md#meditation-curator
@@ -106,9 +108,24 @@ func (d *ScanDigest) Render(ctx context.Context, since Watermark) (DigestSummary
 			part.Name, part.References, part.External, part.SelfManaged))
 	}
 	listed := 0
+	renderedNegative := make(map[event.EventID]bool, len(scan.negatives))
+	if len(scan.negatives) > 0 {
+		lines = append(lines, "negative feedback (priority material, newest first):")
+	}
+	for _, fact := range scan.negatives {
+		if listed >= d.factLimit {
+			break
+		}
+		lines = append(lines, "- "+describeNegativeFeedback(fact))
+		renderedNegative[fact.Identity.Key] = true
+		listed++
+	}
 	for _, fact := range scan.Facts {
 		if listed >= d.factLimit {
 			break
+		}
+		if fact.negative && renderedNegative[fact.Identity.Key] {
+			continue
 		}
 		lines = append(lines, "- "+describeFact(fact))
 		listed++
@@ -124,6 +141,14 @@ func (d *ScanDigest) Render(ctx context.Context, since Watermark) (DigestSummary
 		lines = append(lines, fmt.Sprintf("omitted: %d fact(s) beyond the listing bound", omitted))
 	}
 	return DigestSummary{Body: strings.Join(lines, "\n"), Omitted: omitted}, nil
+}
+
+// describeNegativeFeedback renders one negative feedback fact first: its event
+// key, partition, type, truncated summary and recording moment. The key is the
+// reference a reflection turn quotes when it turns the feedback into a lesson.
+func describeNegativeFeedback(fact ScannedFact) string {
+	return fmt.Sprintf("[%s] [%s] %s: %s (negative feedback, %s)", fact.Identity.Key, fact.Identity.Partition,
+		fact.Content.Type, truncateSummary(fact.Content.Summary), fact.Content.Timestamp.UTC().Format(time.RFC3339Nano))
 }
 
 // describeFact renders one hydrated fact as a digest line: its partition, type,

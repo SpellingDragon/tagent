@@ -1,0 +1,57 @@
+{
+  "schema_version": 1,
+  "adr": "docs/adr/0006-three-hooks-is-the-core-iteration-principle.md",
+  "user_ruling": "boundary-closure r19",
+  "review_by": "2027-05-05",
+  "reason": "Declarations in the assembly root that already had the resolve<Feature>/validate<Feature>/<feature>Port shape when ADR 0006 R2 landed. Each is a reviewed exception for the current tree, not a precedent: a new dedicated path must argue its own exception and remove the old one when it disappears.",
+  "symbols": [
+    {
+      "file": "assembly/facts.go",
+      "name": "resolveFact",
+      "reason": "Pre-existing generic fact resolver; registered as grandfather debt, not a feature path.",
+      "review_by": "2027-05-05"
+    },
+    {
+      "file": "assembly/host_document.go",
+      "name": "validateMeditationTools",
+      "reason": "Meditation feature-specific validation retained until ADR 0004's plugin mount replaces the dedicated section.",
+      "review_by": "2027-05-05"
+    },
+    {
+      "file": "assembly/host_tools.go",
+      "name": "hostSendReentryPort",
+      "reason": "Pre-existing send re-entry port declaration.",
+      "review_by": "2027-05-05"
+    },
+    {
+      "file": "assembly/host_tools.go",
+      "name": "resolveHostMeditation",
+      "reason": "Meditation feature-specific resolver retained until ADR 0004's plugin mount replaces the dedicated section.",
+      "review_by": "2027-05-05"
+    },
+    {
+      "file": "assembly/host_tools.go",
+      "name": "hostMeditationPort",
+      "reason": "Meditation feature-specific port retained until ADR 0004's plugin mount replaces the dedicated section.",
+      "review_by": "2027-05-05"
+    },
+    {
+      "file": "assembly/run.go",
+      "name": "resolveMemory",
+      "reason": "Pre-existing generic memory resolver; registered as grandfather debt, not a feature path.",
+      "review_by": "2027-05-05"
+    },
+    {
+      "file": "assembly/run.go",
+      "name": "validateEngine",
+      "reason": "Pre-existing generic engine validator; registered as grandfather debt, not a feature path.",
+      "review_by": "2027-05-05"
+    },
+    {
+      "file": "assembly/tools.go",
+      "name": "RecallPort",
+      "reason": "Pre-existing exported recall port declaration.",
+      "review_by": "2027-05-05"
+    }
+  ]
+}

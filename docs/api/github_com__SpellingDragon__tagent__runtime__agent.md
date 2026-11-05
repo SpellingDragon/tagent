@@ -48,6 +48,12 @@ to a limit nobody approved. The redline list (4 rules):
   - MUST NOT change anything when both limits stand at zero, so a loop beside no
     declaration admits exactly as it did before.
 
+The idle-address reclamation checks: a resident consumption instance whose
+address holds no work and no unsettled delivery is reclaimed after the idle TTL,
+an address that still works or still owes a target never is, and the reclamation
+is observable as a named counter beside a log line carrying the address and the
+reason.
+
 CONSTANTS
 
 const (
@@ -60,6 +66,44 @@ const (
 	// degrading on a long conversation.
 	DefaultLongContextTokens = 50_000
 )
+const (
+	// BudgetFaceFixedPrompt is the declared prompt the binding's prompt files
+	// fix into the prefix.
+	BudgetFaceFixedPrompt = "fixed_prompt"
+	// BudgetFaceSkillBodies is the skill bodies the boundary fixes into the
+	// prefix beside the bodies a load publishes into the dynamic section.
+	BudgetFaceSkillBodies = "skill_bodies"
+	// BudgetFaceEnvironment is the environment block a declaration closes every
+	// request with.
+	BudgetFaceEnvironment = "environment"
+	// BudgetFaceHistory is the replayed projection and the transcript.
+	BudgetFaceHistory = "history"
+	// BudgetFaceToolDeclarations is the tools the request admits, their names,
+	// descriptions and schemas, beside the tool calls it replays.
+	BudgetFaceToolDeclarations = "tool_declarations"
+	// BudgetFaceReasoning is the reasoning text and signature one message
+	// carries.
+	BudgetFaceReasoning = "reasoning"
+	// BudgetFaceContentParts is the text content parts of a message.
+	BudgetFaceContentParts = "content_parts"
+	// BudgetFaceTaskBoard is the task board material the request carries.
+	BudgetFaceTaskBoard = "task_board"
+	// BudgetFaceRecoveryHint is the recovery hint the replay projection presents
+	// when a fold cut its material.
+	BudgetFaceRecoveryHint = "recovery_hint"
+)
+    BudgetFaceFixedPrompt and the other BudgetFace constants are the nine input
+    faces the final request accounts for. Every face is a bucket of the one
+    meter; the total is their sum, so a material the meter cannot measure still
+    reports its face instead of folding into another.
+
+const DefaultOutputReserveDivisor = 4
+    DefaultOutputReserveDivisor is the fixed ratio of the provider context
+    window a declaration that names no output reserve leaves for the model's
+    answer. The input budget is the window minus that share; the constant
+    is frozen here because a silent change of the default would move every
+    undeclared budget.
+
 const FinalRoundPlannerName = "final-round-planner"
     FinalRoundPlannerName is the stable name the final round planner answers.
 
@@ -168,6 +212,14 @@ var ErrProjectionTypeUnmapped = errors.New("agent: the projection type maps to n
     types may share one role — so a type outside that table is refused by name
     instead of rendering under a role no declaration gave it.
 
+var ErrRequestBudgetExceeded = errors.New("agent: the request exceeds the declared input budget")
+    ErrRequestBudgetExceeded is the refusal the final assembly returns when
+    the declared input budget cannot carry the request in any admissible form:
+    the environment block, the skill bodies and the projection have all yielded
+    and the system-required material still does not fit. The refusal travels
+    the loop's existing failure path (a failed terminal and the host's existing
+    failure notice), never a new output channel.
+
 var ErrRequestChainSessionRequired = errors.New("agent: projected request assembly needs a named session chain")
     ErrRequestChainSessionRequired reports a request assembly under a chain that
     names no session: assembling one would join every user of the partition into
@@ -182,6 +234,17 @@ var ErrSegmentCancelled = errors.New("agent: the consumption loop ended before i
 
 FUNCTIONS
 
+func AccountRequestBudget(messages []model.Message, sources []string, tools map[string]trpctool.Tool, taskBoard string) (map[string]int, []string, int)
+    AccountRequestBudget measures one final request's input material and
+    answers the tokens each of the nine input faces takes, the media it
+    could not measure and the total. The total is the sum of the nine faces;
+    a media the meter cannot measure (an image, audio, video or file part) is
+    named in unknown and counted nowhere, so the total is a floor the caller
+    must never read as a proven fit. The source slice runs parallel to messages:
+    a message with no source, or a source that names no face, renders under the
+    history face. tools are accounted once each in deterministic name order,
+    and taskBoard accounts the task-board material the request carries.
+
 func NoticeFactKey(invocationID event.InvocationID, notice task.Notice) event.EventID
     NoticeFactKey reports the canonical identity one notification commits under:
     the identity prefix of its range beside the notification's own stable
@@ -193,6 +256,13 @@ func NoticeFactPrefix(invocationID event.InvocationID) event.EventID
     carries: the range marker of the fact family, spelled as hex so the identity
     stays a canonical event key. A read face selects the notifications of that
     range alone through it.
+
+func OutputReserveOf(providerWindow int) int
+    OutputReserveOf reports the default output allowance of one provider context
+    window: the fixed share of the window the declaration leaves for the model's
+    answer. A window of zero declares no budget and both sides report zero;
+    a window that divides below one token still reserves the one token it can,
+    so the input budget never silently swallows the whole window.
 
 func PendingInputs(facts []event.Event) []event.Event
     PendingInputs reports the driving facts one session chain holds with no
@@ -305,6 +375,13 @@ func SetDefaultApprovalBook(book ApprovalBook) ApprovalBook
 type BoundaryView struct {
 	// Messages are the prefix messages of the request, in fixed layout order.
 	Messages []model.Message
+	// Sources names the input face each Messages entry renders, one entry per
+	// message in the same order: fixed_prompt, skill_bodies or history. A view
+	// that names fewer sources than messages reports the unnamed tail as
+	// history. The loop's request budget reads the sources to let one face yield
+	// without touching another, and a request boundary that reports no sources
+	// keeps every prefix message on the history face.
+	Sources []string
 	// DynamicSystem is the dynamic system section the request closes with: the
 	// bodies the skill loads published beside the environment block an agent
 	// declares, rendered as one system message the loop appends as the last
@@ -318,6 +395,8 @@ type BoundaryView struct {
 	// the prefix beside the bodies the binding already loaded. A boundary that
 	// names no skill reports none, and the names carry no version of their own.
 	VisibleSkills []string
+
+	// Has unexported fields.
 }
     BoundaryView is what the request boundary settled on: the prefix messages
     the request carries in front of the transcript, in the fixed layout the
@@ -326,6 +405,20 @@ type BoundaryView struct {
     material makes visible. An empty PromptVersion keeps the version the binding
     already carries: a binding that names no files fixes no content version of
     its own.
+
+func (v BoundaryView) WithBudget(providerWindow, outputReserve int) BoundaryView
+    WithBudget declares the request budget policy of this boundary: the provider
+    context window and the output reserve the input budget must leave. A value
+    zero or below names no window, so the gate stays closed.
+
+func (v BoundaryView) WithDynamicSkills(body string) BoundaryView
+    WithDynamicSkills appends the skill bodies a load published to the dynamic
+    section, recorded as the skill_bodies face the request budget may let yield.
+
+func (v BoundaryView) WithEnvironmentBlock(body string) BoundaryView
+    WithEnvironmentBlock appends the environment block to the dynamic section,
+    recorded as the environment face the request budget yields before any other
+    dynamic face.
 
 type Capture interface {
 	// Snapshot fixes the view one decision's request runs on before the request
@@ -544,10 +637,32 @@ func (cs *Consumers) Ensure(addr event.Address) *Consumer
 func (cs *Consumers) Has(addr event.Address) bool
     Has reports whether one address carries a resident consumption loop.
 
+func (cs *Consumers) RecycleCount() uint64
+    RecycleCount reports how many idle instances this set reclaimed.
+
+func (cs *Consumers) RecycleIdle(now time.Time) int
+    RecycleIdle runs one reclamation sweep at the given clock reading and
+    answers how many instances it reclaimed. An address is reclaimed only when
+    its instance rests, its delivery account holds no unsettled obligation
+    and the full TTL passed since the first sweep that found it resting. The
+    first sweep only records that moment; a loop that starts working or gains
+    an obligation loses its record, so the TTL always counts one uninterrupted
+    rest.
+
 func (cs *Consumers) Resting() bool
     Resting reports whether every loop this set mounted stands between segments,
     so the set writes nothing more at any of its addresses. A set this host
     mounts nothing on reports resting: nothing of it flies.
+
+func (cs *Consumers) SetDeliveryPending(pending func(event.Address) bool)
+    SetDeliveryPending registers the predicate the reaper reads before it
+    reclaims an address: true names a delivery account that still owes a target
+    (a held or owed delivery fact), so the instance stays however long it rests.
+    A nil predicate names no unsettled delivery anywhere.
+
+func (cs *Consumers) SetIdleTTL(ttl time.Duration)
+    SetIdleTTL changes the idle bound of this set. A negative bound keeps every
+    instance for the life of the set; a zero restores defaultIdleAddressTTL.
 
 func (cs *Consumers) SetProgress(pulse func())
     SetProgress attaches the pulse every loop of this set reports its movement
@@ -1334,6 +1449,12 @@ func (l *Loop) SetConsumers(consumers *Consumers) *Consumers
     mounts one on first resident use, while a backflow beside no current set
     only parks its result and never mounts one.
 
+func (l *Loop) SetDeliveryPending(pending func(event.Address) bool)
+    SetDeliveryPending registers the predicate the idle reaper reads before it
+    reclaims an address, and applies it to the set this loop already drives. The
+    assembly registers it: the obligation state lives there, and the consumer
+    registry only asks. A nil predicate clears the registration.
+
 func (l *Loop) SetFactCommit(commit FactCommit)
     SetFactCommit attaches the commit face the loop commits the facts it
     produces through — the ready input of a range, the output of a drive and the
@@ -1560,6 +1681,14 @@ type RequestBoundary struct {
 	// model delivers in after its budget is spent, whose tool calls are admitted
 	// nowhere. It stands false for every ordinary request.
 	FinalRound bool
+	// ProjectionBudget overrides the token budget the projection presents under
+	// when the loop's final request budget must fold the history further than
+	// the replay window would. Zero presents the projection under the window's
+	// own budget (see projectionBudget), so an ordinary request keeps the fold
+	// semantics its window declares; a positive value is the room the final
+	// request budget computed for the projected material after every other face
+	// already yielded.
+	ProjectionBudget int
 }
     RequestBoundary is the material one request boundary assembles its prefix
     from: the agent whose request it is, the causal chain the replay is read

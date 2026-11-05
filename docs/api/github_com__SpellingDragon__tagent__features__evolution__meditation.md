@@ -13,6 +13,12 @@ the execution watermark it advances only on a consumed turn. One file holds the
 one shape pin of the package: a renamed field or a widened signature stops it
 from compiling.
 
+The meditation trigger is a self-sustaining state machine, not a projected
+virtual event: external facts charge it, one activation rule discharges it, and
+the discharge is a real external_input fact whose metadata carries the complete
+cause (rule, accumulation window and source). Activation resets the charge,
+and self-managed traffic never charges it, so a reflection cannot feed itself.
+
 CONSTANTS
 
 const (
@@ -22,6 +28,30 @@ const (
 	// DefaultDigestFactLimit bounds how many hydrated facts one digest lists.
 	DefaultDigestFactLimit = 8
 )
+const (
+	// MetaKeyActivationRule names the rule that discharged the state machine.
+	MetaKeyActivationRule = "activation.rule"
+	// MetaKeyActivationWindowStart names the moment the accumulation window
+	// opened (the execution watermark the pass started from).
+	MetaKeyActivationWindowStart = "activation.window_start"
+	// MetaKeyActivationWindowEnd names the moment the activation was reached.
+	MetaKeyActivationWindowEnd = "activation.window_end"
+	// MetaKeyActivationSource names the identity of the fact that charged the
+	// activation.
+	MetaKeyActivationSource = "activation.source"
+	// MetaKeyActivationSourceLineage names the trigger-source stamp of that fact.
+	MetaKeyActivationSourceLineage = "activation.source_lineage"
+	// MetaKeyActivationCharges names how many external facts the discharged
+	// window accumulated.
+	MetaKeyActivationCharges = "activation.charges"
+	// MetaKeyActivationRequest marks an external input that asks for a
+	// reflection explicitly; such a fact discharges under the request rule.
+	MetaKeyActivationRequest = "activation.request"
+)
+    MetaKeyActivationRule and the other activation meta keys are the cause the
+    existing external_input fact carries: they name mechanism fields, not a new
+    fact family, so the frozen fact vocabulary does not grow.
+
 const LineageReflection = "meditation"
 
     LineageReflection is the trigger-source stamp a reflection input carries:
@@ -134,6 +164,10 @@ func (s *AnchorStore) Load() (Anchors, error)
     execution and carries no error; a record that cannot be read or parsed is
     refused with ErrAnchorUnreadable.
 
+func (s *AnchorStore) LoadEnergy() (energyRecord, error)
+    LoadEnergy reads the persisted charge of the reflection state machine. An
+    absent record or an absent charge section is an empty charge with no error.
+
 func (s *AnchorStore) Path() string
     Path reports the record path this store reads and writes.
 
@@ -141,21 +175,31 @@ func (s *AnchorStore) Save(record Anchors) error
     Save rewrites the anchor record atomically: the new record is written beside
     it and renamed over it, so no reader observes a partial record.
 
+func (s *AnchorStore) SaveEnergy(state energyRecord) error
+    SaveEnergy rewrites the anchor record with the given charge, keeping the
+    watermark and the session anchor exactly as they stand: the state machine
+    owns only its own section of the shared record.
+
 type Anchors struct {
 	// LastTurnEnd is the moment the last turn of the session ended.
 	LastTurnEnd time.Time `json:"last_turn_end"`
 	// LastMeditation is the moment of the last consumed reflection turn.
 	LastMeditation time.Time `json:"last_meditation"`
+	// Energy is the persisted charge of the reflection state machine: the
+	// external facts accumulated since the last activation. It lives in the
+	// same record as the watermark, so the state is audited beside the anchor it
+	// belongs to and never in a second store.
+	Energy *energyRecord `json:"energy,omitempty"`
 }
-    Anchors is the persisted pair of loop anchors: the moment the last
-    reflection turn was consumed and the moment the last turn of the session
-    ended.
+    Anchors is the persisted record of one loop: the moment the last reflection
+    turn was consumed, the moment the last turn of the session ended, and the
+    state machine's open charge.
 
     The reflection watermark heads the freshness window and the rhythm floor,
     so it is the anchor the gate reads and the anchor a consumed reflection
-    advances. The session anchor is carried beside it in the same record,
-    and an entry this structure does not name is ignored when the record is read
-    rather than refused.
+    advances. The session anchor and the charge are carried beside it in the
+    same record, and an entry this structure does not name is ignored when the
+    record is read rather than refused.
 
 type DeliveryPolicy struct{}
     DeliveryPolicy is the meditation domain's delivery policy: one fired
@@ -307,6 +351,8 @@ type ObservationScan struct {
 	Counts ScanCounts
 	// Verdict is what the freshness judgment read from this pass.
 	Verdict ScanVerdict
+
+	// Has unexported fields.
 }
     ObservationScan is the bounded evidence of one pass over the observed face:
     the watermark the window opened at, the per-partition tallies, the hydrated
@@ -372,8 +418,8 @@ type Reflection struct {
 }
     Reflection is the reflection loop of one agent: it reads the authorized
     observation face, decides whether a reflection is due, injects the input
-    event into the agent's own loop session and advances the execution watermark
-    when that turn is consumed.
+    event into the agent's own reflected session and advances the execution
+    watermark when that turn is consumed.
 
     One mechanism covers every observation face: observing the agent's own
     partition is self-maintenance and observing others' partitions is the
@@ -386,9 +432,9 @@ type Reflection struct {
 
 func NewReflection(cfg ReflectionConfig, gate WatermarkGate, facts ObservedFacts, input ReflectionInput) (*Reflection, error)
     NewReflection assembles the reflection loop of one agent over its watermark
-    gate, its observed fact-chain face and the loop-session injection face. A
-    declared observation face outside the authorized scope refuses the assembly
-    by name.
+    gate, its observed fact-chain face and the reflection-session injection
+    face. A declared observation face outside the authorized scope refuses the
+    assembly by name.
 
 func (r *Reflection) CommittedFact(ctx context.Context, id event.EventID) (event.Event, error)
     CommittedFact reads the fact one commit identity names through the observed
@@ -677,6 +723,8 @@ type ScannedFact struct {
 	Content FactContent
 	// Attribution is whose traffic the fact is.
 	Attribution FactAttribution
+
+	// Has unexported fields.
 }
     ScannedFact is one hydrated fact of a pass, kept in the deterministic order
     the pass read it.

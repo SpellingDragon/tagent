@@ -531,12 +531,21 @@ type Candidate struct {
 	Plan StatePlan
 	// Resources is the ledger of the candidate-exclusive resources.
 	Resources *Leases
+
+	// Has unexported fields.
 }
     Candidate is one prepared publication candidate: the state plan it
     carries and the resource ledger of the candidate-exclusive resources its
     construction acquired. The ledger is the candidate's own release face,
     so a candidate that leaves the publication frees exactly what it acquired
     and touches neither the shared faces nor the resources already in service.
+
+func (c Candidate) WithWindow(previous Generation, previousFingerprint string, models, dimensions map[string]string, at time.Time) Candidate
+    WithWindow returns a copy of the candidate carrying the decision window of
+    the attempt: the generation it moves from, the model version of each agent
+    and the outcome of each configuration dimension. The publication record
+    committed for this candidate carries that window, so one generation switch
+    is auditable from its record alone.
 
 type Cause struct {
 	// Source is the source file the failure comes from.
@@ -1251,6 +1260,8 @@ type PublicationRecord struct {
 	// Checks carries every check disposition the publication recorded, each
 	// self-contained.
 	Checks []CheckAnswer
+
+	// Has unexported fields.
 }
     PublicationRecord is the self-contained ledger unit of one publication: the
     generation it assigned, the fingerprint it published, the result it took and
@@ -1258,6 +1269,32 @@ type PublicationRecord struct {
     it recorded so an exemption stays visible with its reason and scope.
     The unit is committed through the publication recorder alone and shares no
     commit with a task finality transition or a pending notification.
+
+func (r PublicationRecord) DimensionOutcomes() map[string]string
+    DimensionOutcomes reports the outcome of each configuration dimension the
+    recorded attempt judged, keyed by "agent|dimension", as a copy the caller
+    owns.
+
+func (r PublicationRecord) ModelVersions() map[string]string
+    ModelVersions reports the model version each agent runs after the recorded
+    attempt, keyed by agent id, as a copy the caller owns.
+
+func (r PublicationRecord) PreviousFingerprint() string
+    PreviousFingerprint reports the fingerprint the recorded attempt moved from.
+
+func (r PublicationRecord) PreviousGeneration() Generation
+    PreviousGeneration reports the generation the recorded attempt moved from,
+    and zero for a record that carries no window.
+
+func (r PublicationRecord) RecordedAt() time.Time
+    RecordedAt reports the time the recorded attempt was recorded, and the zero
+    time for a record that carries no window.
+
+func (r PublicationRecord) WithWindow(previous Generation, previousFingerprint string, models, dimensions map[string]string, at time.Time) PublicationRecord
+    WithWindow returns a copy of the record carrying the decision window of
+    the attempt: the generation it moved from, the model version of each agent
+    and the outcome of each configuration dimension. The maps are copied,
+    so a caller mutating them afterwards changes no recorded window.
 
 type PublicationRecorder interface {
 	// CommitPublication stores one publication record.
@@ -1327,6 +1364,16 @@ func NewPublisher(bindings *Bindings, contract PublishContract, governance Gover
     the publish precondition contract to enforce, the governance to ask and the
     recorder to commit each publication record through. The entry starts with no
     generation published, so no rollback source exists yet.
+
+func (p *Publisher) Adopt(ctx context.Context, cand Candidate, record PublicationRecord) error
+    Adopt restores the publication a restarted process reads from its durable
+    ledger as the binding generation in effect, without publishing anything:
+    the holder is seeded to the recorded number, the candidate plan is held at
+    that very generation and no record is committed, because the publication
+    the record names already happened. It is the restart-reconciliation path of
+    the sole entry, never a second publication path, and it refuses a candidate
+    whose fingerprint the record does not name, a recorded generation of zero
+    and a holder that already published a generation of its own.
 
 func (p *Publisher) Baseline() string
     Baseline returns the version baseline a candidate records at construction.

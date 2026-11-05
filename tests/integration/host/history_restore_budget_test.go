@@ -226,7 +226,10 @@ func runPresentationUnlimitedAtZero(t *testing.T) {
 // still folds the aged turns into synthetic products, and the presentation
 // budget still shapes the probe request, which degrades the oversized turn to a
 // ticket and cuts its tail marker. The budget keeps both identities, so no
-// repair to the restore path may dissolve the budget it decoupled.
+// repair to the restore path may dissolve the budget it decoupled. The provider
+// window is declared twice the replay window, so the request gate admits the
+// oversized turn while the replay window alone stays the fold and presentation
+// budget under check.
 func runBudgetWindowStillFoldsAndShapes(t *testing.T) {
 	const (
 		hugeHead    = "budget-shapes huge head marker"
@@ -257,6 +260,7 @@ func runBudgetWindowStillFoldsAndShapes(t *testing.T) {
 	sender := newRecordingSender()
 	host, _ := bootFidelityHost(t, provider, sender, t.TempDir(),
 		"    max_tokens: 32000\n"+
+			"    provider_context_window: 64000\n"+
 			"    compress_threshold: 0.1\n"+
 			"    keep_recent_tasks: 2\n")
 	keepIntegrityHost(t, script, host)

@@ -4,6 +4,9 @@
     "examples/wechat-bot/wechat_notice.go"
   ],
   "test_only_exported_funcs": [
+    "AccountRequestBudget",
+    "BaselineToolFace",
+    "DSHToolFace",
     "EnvironmentBlockGenerations",
     "LogprobsStateOf",
     "MonitorConfigFrom",
@@ -22,6 +25,7 @@
     "NoticeFactPrefix",
     "ParseEventMeta",
     "ParseLine",
+    "RunComparison",
     "ScenarioOf",
     "SetAttentionClock",
     "SetDefaultApprovalBook",

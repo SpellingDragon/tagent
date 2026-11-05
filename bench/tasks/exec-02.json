@@ -1,0 +1,33 @@
+{
+  "id": "exec-02",
+  "category": "exec",
+  "prompts": [
+    "Run the command `seq 1 5 | sort -r > numbers.txt` in the workspace."
+  ],
+  "tools": [
+    "exec"
+  ],
+  "verifier": {
+    "command": {
+      "argv": [
+        "sh",
+        "-c",
+        "test \"$(wc -l < numbers.txt | tr -d ' ')\" = 5 && test \"$(head -n 1 numbers.txt)\" = 5 && test \"$(tail -n 1 numbers.txt)\" = 1"
+      ],
+      "expect_exit": 0
+    }
+  },
+  "examples": {
+    "positive": {
+      "files": {
+        "numbers.txt": "5\n4\n3\n2\n1\n"
+      }
+    },
+    "negative": {
+      "files": {
+        "numbers.txt": "5\n4\n3\n2\n2\n"
+      },
+      "expect_error_contains": "command"
+    }
+  }
+}

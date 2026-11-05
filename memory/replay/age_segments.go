@@ -404,7 +404,10 @@ func (p *ReplayProjection) FoldByAge(ctx context.Context, plan AgeFoldPlan) (Age
 // detail beside the product they fold into: the thinking plan and the tool
 // commands between the input and the output of the turn collapse into one
 // product, while a segment in progress, a segment carrying no process detail
-// and a segment already folded mint no second product.
+// and a segment already folded mint no second product. Every source line opens
+// with its own provenance anchor and the product content opens with the first
+// one, so a later fold reads the source lines' moments and generations from the
+// head of the product it consumes.
 func foldProcessDetail(entries []ProjectionEntry, complete bool) (int, *ProjectionEntry) {
 	if !complete {
 		return 0, nil
@@ -416,7 +419,7 @@ func foldProcessDetail(entries []ProjectionEntry, complete bool) (int, *Projecti
 			continue
 		}
 		process = append(process, entry)
-		lines = append(lines, entry.Type+": "+entry.Summary)
+		lines = append(lines, foldLineOf(entry))
 	}
 	if len(process) == 0 {
 		return 0, nil
@@ -425,7 +428,7 @@ func foldProcessDetail(entries []ProjectionEntry, complete bool) (int, *Projecti
 		Key:     ageKey(ageSegmentKeyPrefix, process),
 		Type:    ProjectionTypeSegmentFold,
 		Summary: "segment fold",
-		Content: "folded segment process: " + strings.Join(lines, "; "),
+		Content: strings.Join(lines, "; "),
 		Time:    process[0].Time,
 	}
 	return len(process), &product
@@ -463,9 +466,11 @@ func segmentWithProduct(entries []ProjectionEntry, product ProjectionEntry) []Pr
 
 // historySummaryOf folds the middle and oldest bands into the one history
 // summary the age axis reads them as. The content spells the one-line reads of
-// the turns it folded and carries no type label of its own: what kind of
-// product an entry is stays its Type, and a presentation that needs a label
-// renders it from there instead of the fold writing it into the material.
+// the turns it folded — each opening with its own provenance anchor, a folded
+// product among them contributing the anchored lines it recorded — and carries
+// no type label of its own: what kind of product an entry is stays its Type, and
+// a presentation that needs a label renders it from there instead of the fold
+// writing it into the material.
 func historySummaryOf(entries []ProjectionEntry) ProjectionEntry {
 	lines := make([]string, 0, len(entries))
 	for _, entry := range entries {
@@ -481,14 +486,40 @@ func historySummaryOf(entries []ProjectionEntry) ProjectionEntry {
 }
 
 // historySummaryLine renders the one-line read one folded entry contributes to
-// a history summary. A product of an earlier history fold is judged by its Type
-// and never by what its content happens to spell, and contributes the content
-// it recorded, so the original turns survive every later fold.
+// a history summary, opening with the provenance anchor of the entry itself. A
+// product of an earlier fold — a history summary or a segment fold — is judged
+// by its Type and never by what its content happens to spell, and contributes
+// the content it recorded, which already opens with the anchors of the source
+// lines it folded. The original turns therefore survive every later fold with
+// their moment and recorder generation still readable at the head of each line.
 func historySummaryLine(entry ProjectionEntry) string {
-	if entry.Type == ProjectionTypeHistorySummary && entry.Content != "" {
+	if entry.Content != "" && (entry.Type == ProjectionTypeHistorySummary || entry.Type == ProjectionTypeSegmentFold) {
 		return entry.Content
 	}
-	return entry.Type + ": " + entry.Summary
+	return foldLineOf(entry)
+}
+
+// foldLineOf renders the one-line read one folded entry contributes to a fold
+// product: the provenance anchor of the entry followed by its type and summary.
+// The line is one shape shared by the history summary and the segment fold, so
+// a later fold reads a product's source lines exactly as the product wrote them.
+func foldLineOf(entry ProjectionEntry) string {
+	return provenancePrefixOf(entry) + entry.Type + ": " + entry.Summary
+}
+
+// provenancePrefixOf renders the anchor a folded line opens with:
+// [MM-DD HH:MM|gen:<generation>]. The moment is the entry's own recorded time,
+// formatted in the timezone the fact stated and never converted to the fold's
+// clock. The generation is the full runtime instance identity of the fact and is
+// never truncated — recorder identities share prefixes — while an entry whose
+// fact named no generation reads the explicit gen:? placeholder instead of a
+// fabricated identity.
+func provenancePrefixOf(entry ProjectionEntry) string {
+	generation := string(entry.Generation())
+	if generation == "" {
+		generation = "?"
+	}
+	return "[" + entry.Time.Format("01-02 15:04") + "|gen:" + generation + "] "
 }
 
 // ageKey reports the content-addressed synthetic key one product is filed

@@ -10,8 +10,12 @@
 !go.mod
 !go.sum
 !main.go
+!config_watch.go
+!config_watch_test.go
 !wechat.go
 !wechat_test.go
+!main_test.go
+!wechat_notice_test.go
 !smoke_test.go
 !smoke_harness_test.go
 !smoke_wave2_test.go
@@ -27,6 +31,13 @@
 !run.sh
 !tagent.yaml
 !tagent.rl.yaml
+
+# Live-benchmark bridge main (W3 06.1.2a): whitelist mode must name it explicitly.
+!cmd/
+!cmd/bench-bridge/
+!cmd/bench-bridge/main.go
+!cmd/bench-bridge/config.go
+!cmd/bench-bridge/protocol.go
 !exec_tool_desc.md
 !train_tagent.py
 !train_rl_config.yaml

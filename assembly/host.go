@@ -189,6 +189,32 @@ type Host struct {
 	// from the records beside a restart.
 	pendingDeliveries map[string]*heldDelivery
 	heldSeq           uint64
+	// deliveryStates is the host's in-process view of the settlement facts it
+	// wrote or restored: the delivery identity beside the latest settlement
+	// state token. The facts remain the truth — this table only spares a window
+	// read on the per-body path and is rebuilt from the chain on every boot.
+	deliveryStates map[string]string
+	// deliveryPins names the settlement fact kept hot for every obligation that
+	// still owes something, so settling it releases the pin of the fact it
+	// replaces. The facts themselves carry the pins on the run's window.
+	deliveryPins map[string]event.EventID
+	// deliveryClaims names the obligations one live path of this process already
+	// claimed to deliver, so the closed segment, the hand-off and the retry
+	// consumer never send one obligation twice at the same time.
+	deliveryClaims map[string]bool
+	// retries is the DeliveryConsumer: the self-timed redrive of the obligations
+	// the account still owes. It is built on the first obligation that needs it
+	// and stopped by the host close; it never listens to commits, because its
+	// timing is the state machine's own clock.
+	retries *deliveryConsumer
+	// deliveryBackoff is the wait before the k-th retry of one obligation; zero
+	// reads the family constant. It is the one dial a check shortens to run the
+	// exhaustion path without waiting the production sequence out.
+	deliveryBackoff time.Duration
+	// deliveryLog is the fact surface the delivery account reads and writes; nil
+	// reads the storage tier the run opened. It is the seam the settlement
+	// checks install a counting log on.
+	deliveryLog state.FactLog
 
 	// configPath is the source the host was booted from and the file a reload
 	// reads again; doc is the document last published, natives are the tool
@@ -562,6 +588,9 @@ func Boot(configPath string, opts ...HostOption) (*Host, error) {
 	if hostApprovals != nil {
 		options = append(options, WithApprovals(hostApprovals))
 	}
+	options = append(options, withBootConfigReconcile(func(ctx context.Context, run *Run, decl *config.Declaration, natives map[event.AgentID]NativeAgent) error {
+		return reconcileBootConfig(ctx, run, configPath, doc, decl, natives)
+	}))
 	run, err := Assemble(ctx, decl, natives, options...)
 	if err != nil {
 		cancel()
@@ -1090,14 +1119,6 @@ func (h *Host) settleTerminal(ctx context.Context, turn agent.Turn) (bool, error
 	}
 	switch turn.Terminal {
 	case model.KindCompleted:
-		lineage, stamped := deliveryLineageFrom(ctx)
-		if !stamped {
-			lineage = "task"
-		}
-		bodies := generatedBodiesOf(h.run.SessionFacts(barrier.addr), turn.InvocationID)
-		if _, err := h.recordDeliveryOwed(ctx, barrier.addr, lineage, bodies); err != nil {
-			return false, fmt.Errorf("tagent: the delivery obligations of the settled turn %s were not registered: %w", barrier.notice.FactKey(), err)
-		}
 	case model.KindFailed:
 		h.noteFailureObservation(ctx, barrier, turn)
 	case model.KindCancelled:
@@ -1495,6 +1516,7 @@ func (h *Host) CloseReport() agent.DrainReport {
 // - Every facility behind the run is torn down however the close ended: a close that could not judge the run still stops its servers, seals the trajectory, stops telemetry and releases the execution face, and a broken judgment is what a repeated close reports.
 // - The producers stop before the host declares itself halted: only past their join does a closed host refuse a delivery, so what a stopping producer hands in is settled instead of dropped.
 // - The report of the run close is folded in whichever way that close ended, so the two faces of one close never disagree.
+// - The redrive stops before the drain starts: a send that starts after the quiesce would land on a chain the close is already judging, and an attempt already in flight finishes the send it began and records its own state.
 func (h *Host) Close(ctx context.Context) (first error) {
 	if h == nil {
 		return nil
@@ -1526,6 +1548,12 @@ func (h *Host) Close(ctx context.Context) (first error) {
 	}
 	if h.consumers != nil {
 		h.consumers.Stop()
+	}
+	h.mu.Lock()
+	retries := h.retries
+	h.mu.Unlock()
+	if retries != nil {
+		retries.stopAll()
 	}
 	if h.settle != nil {
 		h.settle.Stop()

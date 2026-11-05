@@ -287,6 +287,8 @@ func runFidelityNextTurnAfterToolCall(t *testing.T) {
 // the compaction lands while the tool turn is still in progress — a segment in
 // progress is never folded — and the request after the turn carries the pair
 // beside the fold products the compression minted.
+// - The provenance anchors the fold lines carry lengthen the rendered summary, so the same 375-token window crosses its threshold one turn earlier; the window is widened to 440 because the property under test is the call-result pair, not the exact token count.
+// - The provider window is declared beside the 440-token replay window, so the request gate admits the fill and tool turns while the replay window alone stays the fold and presentation measure under check.
 func runFidelityRequestAfterCompression(t *testing.T) {
 	const (
 		inputOne  = "fidelity compressed turn issues the call"
@@ -317,7 +319,8 @@ func runFidelityRequestAfterCompression(t *testing.T) {
 
 	sender := newRecordingSender()
 	host, _ := bootFidelityHost(t, provider, sender, t.TempDir(),
-		"    max_tokens: 375\n"+
+		"    max_tokens: 440\n"+
+			"    provider_context_window: 2048\n"+
 			"    compress_threshold: 1.0\n"+
 			"    keep_recent_tasks: 1\n")
 	keepIntegrityHost(t, script, host)

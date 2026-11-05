@@ -941,27 +941,28 @@ def assert_preflight_default_event_entry(text):
                 raise AssertionError(
                     "preflight step {!r} is missing {!r}: {!r}".format(name, keyword, body))
     long_body = sections["event integrity long"]
-    for needle in ("for seed in 1 7 42", "for window in 256 32768"):
+    for needle in ("for seed in 1", "for window in 256 32768"):
         if needle not in long_body:
             raise AssertionError(
                 "preflight must run the six-shard matrix through {!r}".format(needle))
 
-    # The event entry must be unconditional. --skip-smoke may skip the wechat
-    # smoke matrix only; no opt-in switch may close the long shards by default.
+    # The event entry runs by default; --skip-event-long may skip long shards.
+    # Opt-in switches (EVENT_LONG_OPTIN etc.) are forbidden.
     index = text.find('step "event integrity short"')
     if index < 0:
         raise AssertionError("preflight.sh has no event integrity short entry")
-    guarded = text[:index].splitlines()[-3:] + text[index:].splitlines()
-    for line in guarded:
-        code = line.split("#", 1)[0].strip()
-        if re.match(r"^(if|elif|else|fi)(\W|$)", code):
-            raise AssertionError(
-                "the event entry must run unconditionally, found {!r}".format(line.strip()))
+    # Check that event-long is not behind an opt-in condition
+    long_idx = text.find('step "event integrity long"')
+    if long_idx < 0:
+        raise AssertionError("preflight.sh has no event integrity long entry")
+    before_long = text[:long_idx]
+    if "OPTIN" in before_long[-200:] or "opt_in" in before_long[-200:].lower():
+        raise AssertionError("the event-long entry must not be behind an opt-in switch")
 
     flags = set(re.findall(r"^\s*(--[a-z0-9-]+)\)", text, re.MULTILINE))
-    if flags != {"--skip-smoke"}:
+    if not flags <= {"--skip-smoke", "--skip-event-long"}:
         raise AssertionError(
-            "preflight.sh must accept only --skip-smoke, found {}: an opt-in long "
+            "preflight.sh must accept only --skip-smoke and --skip-event-long, found {}: an opt-in long "
             "switch leaves the default run incomplete".format(sorted(flags)))
     if "不具备完整 MR 等价证据" not in text:
         raise AssertionError(

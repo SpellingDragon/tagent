@@ -547,15 +547,18 @@ func runWakeConsumedNoReplay(t *testing.T) {
 	if got := deliveredCopies(sender.bodies(), followUpAnswer); got != 1 {
 		t.Fatalf("delivered copies of %q = %d, want the one the consumed notice owns", followUpAnswer, got)
 	}
-	records := owedDeliveryRecords(t, root)
+	records := deliveryFacts(t, root)
 	if len(tierKeys(t, root, settleConsumePrefix)) == 0 {
 		t.Fatalf("no consumption receipt stands beside the delivered notice, want the one the landed generation wrote")
 	}
-	if owed := recordsInState(records, owedState); len(owed) != 0 {
-		t.Fatalf("delivery obligations standing owed after the close = %+v, want none beside a delivered answer", owed)
+	declared := deliveryDeclarations(records, followUpAnswer)
+	if len(declared) != 1 {
+		t.Fatalf("owed declarations of %q after the close = %+v, want the one answer's declaration", followUpAnswer, declared)
 	}
-	if sent := recordsCarrying(records, followUpAnswer); len(sent) != 1 || sent[0].Status != sentState {
-		t.Fatalf("the record of %q after the close = %+v, want the one record settled as sent", followUpAnswer, sent)
+	identity := declared[0].Identity
+	if state, held := deliveryNewestState(records, identity); !held || state != deliveryStateSent {
+		t.Fatalf("the settlement state of %s after the close = %q (held=%t): %+v, want the one record settled as sent",
+			identity, state, held, deliverySettlementFactsOf(records, identity))
 	}
 
 	mu.Lock()

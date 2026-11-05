@@ -13,6 +13,10 @@ import (
 	"github.com/SpellingDragon/tagent/api/config"
 	"github.com/SpellingDragon/tagent/api/event"
 	"github.com/SpellingDragon/tagent/api/model"
+	"github.com/SpellingDragon/tagent/memory"
+	"github.com/SpellingDragon/tagent/memory/ledger"
+	"github.com/SpellingDragon/tagent/memory/replay"
+	"github.com/SpellingDragon/tagent/runtime/agent"
 )
 
 // factWindowAnswer is the assistant body the scripted provider answers every turn
@@ -222,6 +226,91 @@ func TestConfigChangeMapsNoProjectionEntry(t *testing.T) {
 	}
 }
 
+// TestMappedEntryCarriesInstanceID pins the recorder generation the fact→projection mapping copies onto every mapped entry.
+//   - the entry a committed fact maps onto carries the exact InstanceID of that fact's envelope, whole and never truncated
+//   - a restarted process replays the earlier generation's facts beside its own commits
+//   - two recorder generations therefore stand in one mapped sequence and stay distinguishable
+//   - the sequence is read through the run's public replay read, so the check drives the assembly path
+//   - the check never calls the mapping itself
+//   - the mapping is checked fact by fact: every public entry read back through the replay read face names exactly the generation its fact's envelope carried
+//   - both recorder generations are present in the one mapped sequence
+//
+// 契约: docs/wiki/memory/memory-architecture.md#event-shape
+func TestMappedEntryCarriesInstanceID(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+	root := t.TempDir()
+	storage := func() Option {
+		return WithStorage(ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: root})
+	}
+	addr := event.Address{AgentID: "agent-a", SessionID: "session-generation"}
+	invoke := func(run *Run, invocation, body string) {
+		t.Helper()
+		if _, err := run.Invoke(ctx, InvokeRequest{
+			InvocationID:  event.InvocationID(invocation),
+			Address:       addr,
+			TriggerSource: "user",
+			Input:         []model.Message{{Role: model.RoleUser, Content: body}},
+		}); err != nil {
+			t.Fatalf("invoke %q: %v", invocation, err)
+		}
+	}
+	generationOf := func(run *Run, invocation string) event.InstanceID {
+		t.Helper()
+		generation := event.InstanceID("")
+		for _, fact := range run.SessionFacts(addr) {
+			if fact.InvocationID == event.InvocationID(invocation) && fact.InstanceID != "" {
+				generation = fact.InstanceID
+			}
+		}
+		if generation == "" {
+			t.Fatalf("the facts of invocation %q carry no recorder generation", invocation)
+		}
+		return generation
+	}
+
+	first := snapshotTestRun(t, ctx, storage())
+	invoke(first, "inv-generation-before", "the turn before the restart")
+	before := generationOf(first, "inv-generation-before")
+	if _, err := first.Close(ctx, agent.CloseRequest{Timeout: time.Now().Add(20 * time.Second)}); err != nil {
+		t.Fatalf("close the first process: %v", err)
+	}
+
+	restarted := snapshotTestRun(t, ctx, storage())
+	invoke(restarted, "inv-generation-after", "the turn after the restart")
+	after := generationOf(restarted, "inv-generation-after")
+	if before == after {
+		t.Fatalf("the restarted process reused the earlier recorder generation %q, want its own", before)
+	}
+
+	facts := map[event.EventID]event.InstanceID{}
+	for _, fact := range restarted.SessionFacts(addr) {
+		facts[fact.Key] = fact.InstanceID
+	}
+	entries, carried := restarted.ReplayEntries(addr.SessionID)
+	if !carried || len(entries) == 0 {
+		t.Fatalf("the restarted run registered no mapped sequence: carried=%v entries=%d", carried, len(entries))
+	}
+	seen := map[event.InstanceID]bool{}
+	for _, entry := range entries {
+		generation := entry.Generation()
+		if generation == "" {
+			t.Fatalf("mapped entry %q carries no recorder generation, want the generation of the fact it was minted from", entry.Key)
+		}
+		fromFact, held := facts[entry.Key]
+		if !held {
+			t.Fatalf("mapped entry %q names no fact of the chain", entry.Key)
+		}
+		if generation != fromFact {
+			t.Fatalf("mapped entry %q generation = %q, want the fact's exact InstanceID %q", entry.Key, generation, fromFact)
+		}
+		seen[generation] = true
+	}
+	if !seen[before] || !seen[after] {
+		t.Fatalf("mapped generations = %v, want the replayed %q beside the restarted process's own %q", seen, before, after)
+	}
+}
+
 // factWindowTestRun assembles one runtime whose provider answers a turn with one
 // plain assistant body and no tool call, so a drive commits its input fact beside
 // its turn-end fact alone.
@@ -307,4 +396,270 @@ func (c *windowTestChannel) bodies() []string {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return append([]string(nil), c.sent...)
+}
+
+// deliveryFoldDialogue builds the conversational material of one session: four
+// complete turns, each an input closed by an answer.
+func deliveryFoldDialogue(at time.Time) []replay.ProjectionEntry {
+	entries := make([]replay.ProjectionEntry, 0, 8)
+	for turn := 0; turn < 4; turn++ {
+		entries = append(entries,
+			replay.ProjectionEntry{
+				Key:     event.EventID("input-" + string(rune('a'+turn))),
+				Type:    event.TypeExternalInput,
+				Summary: "the turn input",
+				Content: "the input of the turn",
+				Time:    at.Add(time.Duration(turn) * time.Minute),
+			},
+			replay.ProjectionEntry{
+				Key:     event.EventID("answer-" + string(rune('a'+turn))),
+				Type:    event.TypeAgentOutput,
+				Summary: "the turn answer",
+				Content: "the answer of the turn",
+				Time:    at.Add(time.Duration(turn)*time.Minute + time.Second),
+			},
+		)
+	}
+	return entries
+}
+
+// deliveryFoldProjection builds one projection over the given entries.
+func deliveryFoldProjection(ctx context.Context, entries []replay.ProjectionEntry) *replay.ReplayProjection {
+	projection := replay.NewReplayProjection()
+	for _, entry := range entries {
+		projection.Append(ctx, entry)
+	}
+	return projection
+}
+
+// TestPinnedDeliveryFactsDoNotAffectFoldVolume pins the fold's accounting view.
+//
+// - A pinned (held or owed) settlement fact is presented by the session but never enters the volume, the segments or the products of the age fold.
+// - The same dialogue folds at the same moment with and without an unsettled obligation.
+// - The obligation stands after the second turn, where a live held fact lands: in the tail of the material, never as the input that opens a turn.
+func TestPinnedDeliveryFactsDoNotAffectFoldVolume(t *testing.T) {
+	ctx := context.Background()
+	at := time.Date(2026, 11, 5, 16, 0, 0, 0, time.UTC)
+	dialogue := deliveryFoldDialogue(at)
+	held := replay.ProjectionEntry{
+		Key:     event.EventID("delivery.delivery-fresh-8-abc.held.approval"),
+		Type:    deliverySettlementType,
+		Summary: deliverySettlementSummary,
+		Content: "delivery held approval: delivery-fresh-8-abc -> user@session (35 bytes) reason=approval",
+		Time:    at.Add(90 * time.Second),
+	}
+	withDelivery := append(append(append([]replay.ProjectionEntry{}, dialogue[:4]...), held), dialogue[4:]...)
+
+	accounted := deliveryFoldProjection(ctx, dialogue)
+	presented := deliveryFoldProjection(ctx, withDelivery)
+	if got, want := len(presented.Entries()), len(accounted.Entries())+1; got != want {
+		t.Fatalf("the presented projection carries %d entries, want the %d of the dialogue plus the held fact", got, want)
+	}
+
+	plan := replay.AgeFoldPlan{KeepRecent: 1, VolumeThreshold: 300}
+	plain, err := foldProjectionOf(ctx, accounted).PlanByAge(ctx, plan)
+	if err != nil {
+		t.Fatalf("plan the dialogue: %v", err)
+	}
+	guarded, err := foldProjectionOf(ctx, presented).PlanByAge(ctx, plan)
+	if err != nil {
+		t.Fatalf("plan the presented projection: %v", err)
+	}
+
+	if !plain.Triggered || !guarded.Triggered {
+		t.Fatalf("the four-turn dialogue over the 300-byte threshold did not fold: plain=%+v guarded=%+v", plain, guarded)
+	}
+	if guarded.Volume != plain.Volume {
+		t.Fatalf("the pinned settlement fact moved the fold volume: plain=%d guarded=%d", plain.Volume, guarded.Volume)
+	}
+	if len(guarded.Products) != len(plain.Products) {
+		t.Fatalf("the pinned settlement fact moved the fold products: plain=%d guarded=%d", len(plain.Products), len(guarded.Products))
+	}
+	for i := range plain.Products {
+		if plain.Products[i].Entry.Key != guarded.Products[i].Entry.Key ||
+			len(plain.Products[i].Covered) != len(guarded.Products[i].Covered) {
+			t.Fatalf("product %d differs beside the pinned fact: plain=%+v guarded=%+v", i, plain.Products[i], guarded.Products[i])
+		}
+	}
+	if got := len(foldProjectionOf(ctx, presented).Entries()); got != len(accounted.Entries()) {
+		t.Fatalf("the fold view carries %d entries, want the %d of the dialogue alone", got, len(accounted.Entries()))
+	}
+	for _, entry := range presented.Entries() {
+		if entry.Type == deliverySettlementType {
+			return
+		}
+	}
+	t.Fatalf("the presented projection dropped the held settlement fact: %+v", presented.Entries())
+}
+
+// TestDeliverySettlementFactsCarryNoFoldVolume pins the volume half of the same invariant directly.
+//
+// - The rendered volume of the fold view is the rendered volume of the dialogue, byte for byte, however many settlement facts stand beside it.
+func TestDeliverySettlementFactsCarryNoFoldVolume(t *testing.T) {
+	ctx := context.Background()
+	at := time.Date(2026, 11, 5, 16, 0, 0, 0, time.UTC)
+	dialogue := deliveryFoldDialogue(at)
+	withDelivery := append([]replay.ProjectionEntry{}, dialogue...)
+	for i := 0; i < 3; i++ {
+		withDelivery = append(withDelivery, replay.ProjectionEntry{
+			Key:     event.EventID("delivery.delivery-fresh-" + string(rune('a'+i)) + ".sent"),
+			Type:    deliverySettlementType,
+			Summary: deliverySettlementSummary,
+			Content: "delivery sent: delivery-fresh-" + string(rune('a'+i)) + " -> user@session (35 bytes)",
+			Time:    at.Add(time.Duration(i) * time.Second),
+		})
+	}
+	plain := foldProjectionOf(ctx, deliveryFoldProjection(ctx, dialogue))
+	guarded := foldProjectionOf(ctx, deliveryFoldProjection(ctx, withDelivery))
+	report, err := plain.PlanByAge(ctx, replay.AgeFoldPlan{KeepRecent: 1, VolumeThreshold: 1})
+	if err != nil {
+		t.Fatalf("plan the dialogue: %v", err)
+	}
+	other, err := guarded.PlanByAge(ctx, replay.AgeFoldPlan{KeepRecent: 1, VolumeThreshold: 1})
+	if err != nil {
+		t.Fatalf("plan the settlement-beside dialogue: %v", err)
+	}
+	if report.Volume != other.Volume {
+		t.Fatalf("settlement facts carried fold volume: plain=%d guarded=%d", report.Volume, other.Volume)
+	}
+	for i := range plain.Entries() {
+		if plain.Entries()[i].Key != guarded.Entries()[i].Key {
+			t.Fatalf("the fold view entry %d is %s, want %s", i, guarded.Entries()[i].Key, plain.Entries()[i].Key)
+		}
+	}
+}
+
+// TestSettlementRoleMappedBesideTheFoldView keeps the two halves of the contract together.
+//
+// - The settlement type maps onto a model role (the fact is presentable), even though the fold view excludes it from accounting.
+func TestSettlementRoleMappedBesideTheFoldView(t *testing.T) {
+	role, err := agent.RoleOf(deliverySettlementType)
+	if err != nil {
+		t.Fatalf("the settlement type maps onto no role: %v", err)
+	}
+	if role != model.RoleUser {
+		t.Fatalf("the settlement type maps onto %q, want the user role", role)
+	}
+}
+
+// residencyTestRun assembles one run over the in-process storage tier, so the
+// fact window checks read the durable chain without touching a directory.
+func residencyTestRun(t *testing.T, ctx context.Context) *Run {
+	t.Helper()
+	return snapshotTestRun(t, ctx, WithStorage(ledger.StorageConfig{Type: ledger.StorageMemory}))
+}
+
+// commitResidencyChain commits a chain long enough to leave the fact window and
+// closes it with the turn-end fact the trim reads.
+func commitResidencyChain(t *testing.T, ctx context.Context, run *Run, addr event.Address, prefix string, seeded int) {
+	t.Helper()
+	for at := 0; at < seeded; at++ {
+		commitWindowFact(t, ctx, run, addr, windowEvent(addr,
+			fmt.Sprintf("%s-%05d", prefix, at), "inv-residency", "the material of the long chain", event.TypeExternalInput))
+	}
+	commitWindowFact(t, ctx, run, addr, windowEvent(addr,
+		prefix+"-closing", "inv-residency", "the answer that closed the chain", event.TypeAgentOutput))
+}
+
+// TestAssemblyObservedReplayFactsBounded pins the three resident faces to the fact window.
+// - the live fact ledger, the observation read and the replay sequence never exceed it
+//
+// 契约: docs/wiki/agent/event-flow.md#projection-lifecycle
+func TestAssemblyObservedReplayFactsBounded(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+	run := residencyTestRun(t, ctx)
+	addr := event.Address{AgentID: "agent-a", SessionID: "session-residency-bounded"}
+	const seeded = replayResidentWindow + 256
+	commitResidencyChain(t, ctx, run, addr, "bounded", seeded)
+
+	if got := run.CommittedFacts(); got != factWindow {
+		t.Fatalf("the live fact ledger holds %d facts, want the %d-fact window", got, factWindow)
+	}
+	refs, err := run.ObservedEvents(ctx, memory.QueryOptions{})
+	if err != nil {
+		t.Fatalf("observe the window: %v", err)
+	}
+	if len(refs) > factWindow {
+		t.Fatalf("the observation read answered %d facts, want at most the window %d", len(refs), factWindow)
+	}
+	entries, carried := run.ReplayEntries(addr.SessionID)
+	if !carried {
+		t.Fatal("the long chain registered no replay sequence")
+	}
+	if len(entries) > replayResidentWindow {
+		t.Fatalf("the registered sequence holds %d entries, want at most the resident window %d", len(entries), replayResidentWindow)
+	}
+}
+
+// TestAssemblyColdWindowReadback pins the read-back equivalence of a fact that left the window.
+// - the observed read never answers it
+// - the identity read returns the committed fact byte for byte
+//
+// 契约: docs/wiki/memory/memory-architecture.md#read-paths
+func TestAssemblyColdWindowReadback(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+	run := residencyTestRun(t, ctx)
+	addr := event.Address{AgentID: "agent-a", SessionID: "session-residency-cold"}
+	const seeded = factWindow + 32
+	commitResidencyChain(t, ctx, run, addr, "cold", seeded)
+
+	oldKey := event.EventID("cold-00000")
+	if _, held := run.factOf(oldKey); held {
+		t.Fatalf("the fact %s is still in the live ledger, so the cold read proves nothing", oldKey)
+	}
+	refs, err := run.ObservedEvents(ctx, memory.QueryOptions{})
+	if err != nil {
+		t.Fatalf("observe the window: %v", err)
+	}
+	for _, ref := range refs {
+		if ref.Key == oldKey {
+			t.Fatalf("the observation read answered the fact %s outside the window", oldKey)
+		}
+	}
+	restored, err := run.CommittedEvent(ctx, oldKey)
+	if err != nil {
+		t.Fatalf("read the fact %s back from the durable chain: %v", oldKey, err)
+	}
+	if restored.Key != oldKey || restored.Type != event.TypeExternalInput || restored.Message.Content != "the material of the long chain" {
+		t.Fatalf("the cold read restored %+v, want the committed fact %s", restored, oldKey)
+	}
+	hotKey := event.EventID(fmt.Sprintf("cold-%05d", seeded-1))
+	hot, err := run.CommittedEvent(ctx, hotKey)
+	if err != nil || hot.Key != hotKey {
+		t.Fatalf("read the in-window fact %s = (%+v, %v)", hotKey, hot, err)
+	}
+}
+
+// TestDeliveryPendingPredicate pins the predicate the consumer registry reads before reclamation.
+// - a pinned settlement fact of an unsettled obligation names the address its delivery still owes
+// - releasing the pin clears the answer
+//
+// 契约: docs/wiki/reliability/durable-delivery.md#envelope-states
+func TestDeliveryPendingPredicate(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	run := residencyTestRun(t, ctx)
+	addr := event.Address{AgentID: "agent-a", SessionID: "session-residency-pending"}
+	other := event.Address{AgentID: "agent-b", SessionID: "session-residency-pending"}
+	heldKey := event.EventID(deliveryFactPrefix + "obligation-1.held.retrying")
+	held := windowEvent(addr, string(heldKey), "inv-delivery", "the delivery is waiting on a retry", deliverySettlementType)
+	if _, err := run.CommitToSession(ctx, addr, held); err != nil {
+		t.Fatalf("commit the held settlement fact: %v", err)
+	}
+	if run.deliveryPendingFor(addr) {
+		t.Fatal("an unpinned settlement fact reads as an unsettled delivery")
+	}
+	run.pinFact(heldKey)
+	if !run.deliveryPendingFor(addr) {
+		t.Fatal("the pinned held(retrying) obligation reads as settled, want pending")
+	}
+	if run.deliveryPendingFor(other) {
+		t.Fatal("the obligation of one address reads as pending for another")
+	}
+	run.unpinFact(heldKey)
+	if run.deliveryPendingFor(addr) {
+		t.Fatal("the released obligation still reads as pending")
+	}
 }

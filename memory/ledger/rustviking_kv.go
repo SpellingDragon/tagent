@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"os/exec"
+	"strings"
 )
 
 // ErrRustViking reports a rustviking CLI call that did not succeed, carrying the
@@ -94,6 +95,28 @@ func (r *rustvikingKV) kvRead(ctx context.Context, fetch kvFetch) ([]kvPair, err
 			value = decoded
 		}
 		out = append(out, kvPair{key: entry.Key, value: value})
+	}
+	return out, nil
+}
+
+// kvKeys returns the keys the prefix names, in key order. The scan page the read
+// path already asks for carries the keys beside their values; the enumeration
+// keeps the keys and drops the values, so it never materializes what it does not
+// answer.
+func (r *rustvikingKV) kvKeys(ctx context.Context, prefix string) ([]string, error) {
+	data, err := r.call(ctx, "kv", "scan", "-p", prefix, "-l", "1000000")
+	if err != nil {
+		return nil, err
+	}
+	var scan cliScanResult
+	if err := json.Unmarshal(data, &scan); err != nil {
+		return nil, fmt.Errorf("%w: scan response for prefix %q: %w", ErrRustViking, prefix, err)
+	}
+	out := make([]string, 0, len(scan.Entries))
+	for _, entry := range scan.Entries {
+		if strings.HasPrefix(entry.Key, prefix) {
+			out = append(out, entry.Key)
+		}
 	}
 	return out, nil
 }

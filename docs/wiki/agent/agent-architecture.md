@@ -4,7 +4,7 @@
 
 执行核只做三件事：**把一次调用的事件读成一次决策、把这次决策的工具调用按任务受理、把关闭做成真实义务结清**。它自己不持状态——绑定、会话、任务与消费位置都在属主手里，执行核只借、只读、只交还。
 
-三个概念贯穿全篇（与 [storage-concept-map](../../demos/storage-concept-map.html) 同一套词汇）：**链**是身份与因果（轻、可恒重放）；**原文仓**是 blob 字节仓加 ref 引用账目；**账本**记任务迁移、消费回执与交付七态。通知消费账＝席位＋回执＋settle attempt，除此以外的读数一律现算。时间旅行演示见 [storage-time-travel](../../demos/storage-time-travel.html)。
+三个概念贯穿全篇（与 [storage-concept-map](../../demos/storage-concept-map.html) 同一套词汇）：**链**是身份与因果（轻、可恒重放）；**原文仓**是 blob 字节仓加 ref 引用账目；**账本**记任务迁移与消费回执；交付义务与结算则落链（见第四节）。通知消费账＝席位＋回执＋settle attempt，除此以外的读数一律现算。时间旅行演示见 [storage-time-travel](../../demos/storage-time-travel.html)。
 
 <a id="module-position"></a>
 ## 一、模块定位：调度事件、做一次决策、按义务关闭
@@ -79,6 +79,8 @@
 
 **投递账目是读面**：`Run.DeliveryLedger()` 按源事件与目标回读本 run 提交过的投递事实（`Records`/`BySource`/`ByTarget`），逐条给出源事件、目标、投递身份、回执与事实类型；一条投递身份对应一条有效记录，查询不解析正文。两路投递的事实类型**分立**（agent 主动投递是 `external_input`，框架结算投递是 `task_settled`），投递元数据却同构（五键见[事件篇](../event/event-architecture.md#const-list)）。
 
+**交付义务在链上，不在账本里**：一条带正文的输出在**同一笔事实**里声明 owed（目标+血统），交付身份由落链后的 fact key 确定性导出；之后 `delivery.settlement` 族以「身份+状态」为键**追加式**落链（四结算态 held/sent/refused/headless-retired＋迁移专用 owed 态，held 的 reason ∈ {approval, retrying, retry-exhausted, unknown}）。重启只读链对账——已确认 sent 不重发、无结算事实或 held(retrying) 的续跑、超时这类结果未知的不自动重发，旧 KV 六态幂等迁移后只读留存。可见性口径：结算事实按类型→角色映射进模型请求，owed 声明随 `agent_output` 本体呈现、无独立可见面；「发不出去而模型也没说」由既有失败告知与一条按 reason 分层的延迟告知兜住（`retrying`→稍后必补送；`approval`/`unknown`/`retry-exhausted`→已转人工），对用户怎么说由模型自主。
+
 <a id="package-layout"></a>
 ## 五、包与文件结构
 
@@ -105,7 +107,7 @@
 | `cli/` | 宿主壳：命令面与宿主转换面，位于组合根之上 |
 | `internal/bench` | 基准面 |
 
-**组合根与根包的关系**：module 根不再承载 Go 源，公共入口是包 `assembly`（目录名即包名，D16）。host 簇在组合根内**按域分文件**，不聚成一个大 `host.go`：`host_face.go`（回环端点的鉴权先于读体）`host_delivery.go`（交付账本：正文先成为持久义务再离开）`host_document.go`（宿主文档方言与它拼出的装配）`host_tools.go`（宿主贡献的工具与端口）`host_diagnostics.go`（诊断可见面）`host_capture.go`（轨迹捕获）`host_model.go`（采样参数落在已发布绑定与 provider 之间）`host_reload.go`（配置重载经唯一发布入口）。
+**组合根与根包的关系**：module 根不再承载 Go 源，公共入口是包 `assembly`（目录名即包名，D16）。host 簇在组合根内**按域分文件**，不聚成一个大 `host.go`：`host_face.go`（回环端点的鉴权先于读体）`host_delivery.go`（交付结算：owed 声明随输出同笔落链、四结算态追加落链、旧 KV 欠条迁移）`host_document.go`（宿主文档方言与它拼出的装配）`host_tools.go`（宿主贡献的工具与端口）`host_diagnostics.go`（诊断可见面）`host_capture.go`（轨迹捕获）`host_model.go`（采样参数落在已发布绑定与 provider 之间）`host_reload.go`（配置重载经唯一发布入口）。
 
 依赖方向由 `golden/runtime/architecture.json` 登记、由 `scripts/gates/check_runtime_architecture.py` 执法：未登记的包与未允许的边一律失败并等人工批准，不用通配豁免；`cli` 指向组合根的回边不算环，真环在其余包之间检出。
 

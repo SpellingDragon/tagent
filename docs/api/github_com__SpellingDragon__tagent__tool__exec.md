@@ -24,6 +24,13 @@ call, the first-frame observation, and the four Executor methods. The session
 reads live in tmux_session.go, and the command line beside the exit record in
 tmux_command.go.
 
+The generation face of the tmux executor: the token one session generation
+is minted under, the dedicated marker line its wrapper writes into the pane,
+and the reads that verify a captured frame belongs to that generation.
+The session generation is the proof a receipt stands on: a frame that does not
+carry the token of the generation this executor started is the scrollback of an
+earlier generation, never this run's output.
+
 The session face of the tmux executor: the session name one resource key names,
 and the reads of the tmux session list that Start, Probe and Stop base their
 verdicts on.
@@ -235,6 +242,8 @@ type Explanation struct {
 	LastStop *StopEvidence
 	// Obligations are the open obligations kept beside the lease.
 	Obligations []string
+
+	// Has unexported fields.
 }
     Explanation is the retained state of one held resource: the lease, the
     monitor rhythm of its generation, the probe unknowns recorded against it and
@@ -279,11 +288,15 @@ func NewManager(backend Executor, opts ...ManagerOption) *Manager
 func (m *Manager) Acquire(ctx context.Context, decl ExecutionDecl, opts ...AcquireOption) (ResourceKey, error)
     Acquire starts the execution declared by decl and returns the canonical key
     of the resource it now holds, or returns the key of the resource already
-    held under that identity without starting a second one. A held resource
-    whose last stop stayed unconfirmed refuses the acquisition instead, so its
-    key is never handed to a second writer beside an unresolved stop. A resource
-    whose system capability is missing is refused beside the degrade report of
-    that refusal, and the monitor rhythm of the call rides that report.
+    held under that identity without starting a second one. A held resource is
+    probed before it is reused: a live pane is reused, a dead pane is released
+    and the declaration starts in a fresh session under the same key, and a
+    probe that cannot decide refuses the reuse by name rather than answering the
+    old scrollback. A held resource whose last stop stayed unconfirmed refuses
+    the acquisition instead, so its key is never handed to a second writer
+    beside an unresolved stop. A resource whose system capability is missing is
+    refused beside the degrade report of that refusal, and the monitor rhythm of
+    the call rides that report.
 
 func (m *Manager) Acquired() int
     Acquired reports how many resources the manager started.
@@ -591,18 +604,23 @@ func NewRunTool(manager *Manager, opts ...RunToolOption) *RunTool
     and the rhythm its declaration fixes.
 
 func (t *RunTool) Call(ctx context.Context, jsonArgs []byte) (any, error)
-    Call acquires the declared execution resource and reports what its
-    execution recorded. A resource already held under the key is reused rather
-    than started a second time, and a declared kind the system cannot serve
-    answers as the named degrade refusal beside the rhythm of the call. The
-    lease is kept alive at the cadence of the call's own monitor rhythm until
-    the execution behind it returns, and the renewing ends beside the call.
-    The restart decision of a key nothing is held under runs unknown -> query ->
-    take over or report by name: - a resource observed alive is taken over and
-    its frame reported under the key - a probe that could not decide is refused
-    by name beside the unconfirmed evidence - a settled key reports the saved
-    final output instead of rerunning over it - a dead key beside no record
-    opens a new execution exactly as before
+    Call acquires the declared execution resource and reports what its execution
+    recorded. A resource already held under the key is probed before it is
+    reused: a live pane is reused, a dead one is released and the command starts
+    in a new session, and a probe that cannot decide refuses the reuse by name.
+    The lease is kept alive at the cadence of the call's own monitor rhythm
+    until the execution behind it returns, and the renewing ends beside the
+    call. The restart decision of a key nothing is held under runs unknown ->
+    query -> take over or report by name: - a resource observed alive is taken
+    over and its frame reported under the key - a probe that could not decide
+    is refused by name beside the unconfirmed evidence - a settled key reports
+    the saved final output instead of rerunning over it - a dead key beside
+    no record opens a new execution exactly as before Every acquired frame is
+    verified against the generation token of the session the executor started.
+    A frame that proves stale is released and the command retried once in a
+    fresh session; a second stale frame is the named explicit failure, never a
+    success claim. The receipt names the execution proof beside the rebuild and
+    retry facts the query face carries.
 
 func (t *RunTool) Declaration() *trpctool.Declaration
     Declaration returns the fixed declaration of the run tool.
@@ -729,8 +747,13 @@ func NewTmuxExecutor() (*TmuxExecutor, error)
 
 func (e *TmuxExecutor) Capture(ctx context.Context, key ResourceKey) ([]byte, error)
     Capture returns the frame tmux records for key: the pane's history and its
-    visible rows, read as one frame so a later read never replaces the output an
-    earlier read observed.
+    visible rows, read as one frame so a later read never replaces the output
+    an earlier read observed. The frame is verified against the token of the
+    generation this executor started for the key: a frame that does not carry
+    the marker before the generation was ever proven is another generation's
+    scrollback and is refused by name. The generation markers are stripped
+    before the frame is answered, so the marker never reaches user-visible
+    output.
 
 func (e *TmuxExecutor) Probe(ctx context.Context, key ResourceKey) (ProbeResult, error)
     Probe reports the state one probe observed for key: a key absent from the
@@ -752,17 +775,22 @@ func (e *TmuxExecutor) Start(ctx context.Context, decl ExecutionDecl) (ResourceK
     tmux did not keep still answers the status the command ended with. The call
     answers once the new session has produced its first frame, or once the
     bounded observation window passed without one. A key whose session already
-    runs is refused instead of opened a second time.
+    runs is refused instead of opened a second time. Every start mints a random
+    generation token, binds the exit record to it and makes the wrapper write a
+    marker line of that token before and after the command; a captured frame is
+    only answered as this generation's output once that marker was observed.
 
 func (e *TmuxExecutor) Stop(ctx context.Context, key ResourceKey) (StopEvidence, error)
     Stop ends the session behind key and reports what was observed: a pane that
-    already ended answers its recorded exit status, a dead pane whose tmux kept
-    no status answers the status the session's own record kept, a live pane is
-    killed and the stop is confirmed by the session leaving the list, and an
-    exit status neither the pane nor its record carried is reported as -1 rather
-    than as a clean exit. A session list that does not name the key is read
-    again before the ending is confirmed, because a client refused by a busy
-    server reads no sessions at all, and a server that left mid-read took every
-    session with it; the pane state beside its status is read in one message,
-    and the record is removed as it is read, so no status is kept beside a
-    session that left.
+    already ended answers its recorded exit status, a dead pane whose tmux
+    kept no status answers the status the session's own record kept, a live
+    pane is killed and the stop is confirmed by the session leaving the list,
+    and an exit status neither the pane nor its record carried is reported as
+    -1 rather than as a clean exit. A session list that does not name the key
+    is read again before the ending is confirmed, because a client refused by
+    a busy server reads no sessions at all, and a server that left mid-read
+    took every session with it; the pane state beside its status is read in
+    one message, and the record is removed as it is read, so no status is kept
+    beside a session that left. The fallback record is bound to the generation
+    this executor started: a record a different generation wrote is never used
+    as this session's exit status.

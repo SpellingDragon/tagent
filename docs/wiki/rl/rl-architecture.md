@@ -63,6 +63,27 @@
 
 反馈面挂同一道门后（`WithFeedbackEndpoint`，端点自己在自己的位置再核一次凭据），训练侧对外只剩三个计数：`FeedbackAttribution{Bound, Unbound, Ambiguous}`，由 `GET /diagnostics` 的 `Training.Feedback` 读回——`Bound` 归到有据可查的证据，`Unbound` 是没有可定位引用的流量，`Ambiguous` 是证据自相冲突。三者都是现算读数，别指望用它们反推单条反馈的归属。
 
+<a id="live-benchmark"></a>
+## 六、真实任务基准与样本合格门
+
+真实任务基准（`bench/`）是训练侧样本的来源：**任务即数据，验收即证据**。`bench.Task` 的 JSON 夹具声明 prompts、能力集合、setup 与机读 verifier；`bench.Verifier` 只读工作区产物与最终响应，不采信执行者自述。`bench/` 可被 `features/rl/sample` import，runner 与 task 之间不反向依赖。
+
+- **工作区是唯一可触达目录**：任务 setup、文件校验与命令执行都经 `safeRelativePath`／`workspaceReadPath`／`workspaceWritePath`，符号链接也不得把路径带出工作区。
+- **verifier 只有三种证据**：响应文本、工作区文件、命令输出；三种检查按 AND 组合，失败逐项具名。
+- **runner 只是 Task 的执行者**：baseline、tagent 与 DSH 共享同一 `Task` 接口与同一能力映射，runner 不改变任务判定。
+
+<a id="sample-gate"></a>
+### 6.1 样本合格门（`features/rl/sample`）
+
+一次任务执行是一个样本；**三要素缺一不可**：请求回读证明、独立验收结论（pass／fail）、以及该结论写入 rl annex 的记录。`Evaluate` 在 seal 之前写 annex；缺失要素的样本追加一条 append-only 的 `incomplete` 标记，并仍留在齐备率分母里。
+
+- **不采信自述**：验收结论只从任务产物得出，与最终响应中的自我声明无关。
+- **append-only**：已写 verdict 不被后续标记改写；`incomplete` 是追加的第二行，不删除第一行。
+- **分母是全量样本**：齐备率 = complete／total，incomplete 不剔除。
+- **seal 后拒收不变**：gate 只在封账前工作，封账后的 annex 写入仍被 sink 拒绝。
+
+验收锚：`TestBenchTasksAllVerifiable`、`TestIndependentAcceptanceIgnoresSelfReport`、`TestSampleGateRequiresAllThreeElements`、`TestSampleLoopEndToEnd`。
+
 ## 已知缺口与演进方向
 
 | 缺口 | 现状与防线 | 候选方向 |

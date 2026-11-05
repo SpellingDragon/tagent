@@ -164,4 +164,5 @@
 | 三·实施 | O1–O6 六域：提交闸+因果键线性化+partial reason、model_override 引用快照+restart_required 分类、完整请求预算+具名拒发+摘要 5s 时限、分区定向扫描（+76~94%）+编码缓存**撤回**（负结果在案）、opt-in v2 采集（字节/句柄/磁盘三重上界+封账）、授权导出+双流 strict CLI+核账器（20 检查） | 全部门禁绿：short/race(0 豁免)/lint/openspec-strict/bot 模块；真实模型四场景单轮全 PASS（核账器 14 绿、3 项 dataset 具名待 tokenizer 资产）；R17 变体回写（编译闭包波次纪律） |
 
 **授权执行注记（2026-10-09 收口）**：F14 已获批执行——O1–O6 无损提升为六个独立 change 并正常 archive（delta sync 主 specs，orchestration 过程能力未投产品），父过程 change 保审计记录归档；commit/push 已完成并经 PR #10–#14 squash 入 main（六域优化、README 重构、冥想三步：externalize→unify→complete）。仍开放：**真实 tokenizer 资产的 6.7/F11 终链**（核账器具名红留痕，未伪勾）。
+**2026-11-05 boundary-closure 立项（多级：一级编排+七二级域）**：来源=第三方评审（main@3b727199）+远端宿主邮件上报（11-04 exec 假成功/折叠剥时序；10-30 OOM 诊断包）。七域：01 交付闭合（**r1 终裁：机制事件化**，ADR 0002）/02 请求预算（E12：能力回退→MODIFIED delta 恢复）/03 资源有界（门口径裁决=量真占用）/04 exec 完整性（E11 更正：tmux 本机可用）/05 折叠可追溯/06 真实对照（DSH 不分期）/07 训练样本。W0 七症状锚全红亲验；E10 更正：OOM 报告 S1/S2 已在 HEAD 闭合。
 **遗留观察**：factory 分支不下发采集/摘要字段、BudgetLine 不含 fixed、历史媒体计价、_normalise_partition 宽容度待真实流复核。（BenchmarkRequestAssembly 已于 2026-10-08 补测闭合：+12.8µs/请求、38KB 瞬态，接受。）

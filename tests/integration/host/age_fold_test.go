@@ -77,9 +77,10 @@ func TestAgeFoldFiresFromCommits(t *testing.T) {
 	decl := &config.Declaration{
 		Entry: "agent-a",
 		Agents: []config.AgentSpec{{
-			ID:        "agent-a",
-			Model:     "model-a",
-			MaxTokens: 100,
+			ID:                    "agent-a",
+			Model:                 "model-a",
+			MaxTokens:             100,
+			ProviderContextWindow: 300,
 		}},
 	}
 	run, err := assembly.Assemble(ctx, decl, map[event.AgentID]assembly.NativeAgent{

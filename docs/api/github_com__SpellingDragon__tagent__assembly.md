@@ -24,11 +24,17 @@ keeps the loop's per-turn seal from closing the run-wide sink: a turn ends
 without ending the account, and Close seals the real capture once, after the run
 drained.
 
-The delivery ledger of the host: the assistant bodies one drive generates become
-durable delivery obligations before any body leaves, a held body waits for the
-approval face, and a restart resumes every obligation the ledger still names.
-The body, the hold and the refusal each stand as one record under one identity,
-so a delivery settled twice is settled once.
+The delivery account of the host: the assistant bodies one drive generates
+become delivery obligations on the fact chain itself before any body leaves,
+and a restart resumes every obligation the chain still names.
+
+- owed 声明嵌在 agent_output 的 Meta 里，随答案同一笔提交：链上不会出现“答案已落链而义务未立”的形态。 - 结算事实族
+delivery.settlement 追加式落链：键 = delivery.<交付身份>.<终态>，终态 ∈ {held.<reason>, sent,
+refused, headless-retired} ∪ 迁移专用 owed；同（身份,终态）键重放不添第二条，同键异内容按既有事实键冲突拒收；held
+的 reason ∈ {approval, retrying, retry-exhausted, unknown}。 - DeliveryConsumer
+是消费挂点：读链驱动的、自持计时的重试状态机（1s/4s/16s，上限 3 次；明确失败才自动重试，纯超时/不可辨归未知不重发）。 - 恢复只读链：补送范围 =
+无结算事实 ∪ held(retrying)，已确认 sent 不重发（at-least-once：发过未销账的窗口内可能重发一次，收方按交付身份去重）。 -
+旁路 KV 记录保留迁移读：迁移把记录转成事实并保留只读审计；事件化是唯一路径，没有回退账本，也没有开关。
 
 The diagnostic visibility face of the host: the unified runtime reading beside
 the reflection, training and observation faces, each opened by the switch the
@@ -473,7 +479,11 @@ func (p *AgeFoldPlugin) ObserveCommit(ctx context.Context, id event.EventID) err
     session registered no projection, a session whose window names no positive
     token window and a projection still inside its threshold each leave the
     commit as it stands. A failed judgment is reported without rolling the
-    commit back.
+    commit back. - The presented projection is read first as the cheap gate:
+    inside the threshold, the accounting-free view is inside it too, so the
+    common commit pays one read and no rebuilt view. - The fold judges that
+    accounting-free view, because delivery accounting is presented to the model
+    but never counts as the history that trips a fold (foldProjectionOf).
 
 func (p *AgeFoldPlugin) Port() plugin.Port
     Port reports the consumption the plugin serves: one committed fact in,
@@ -505,9 +515,15 @@ func (c *CompressionConsumer) Execute(ctx context.Context, session event.Session
     positive token window, execute nothing — the judgment stays pending as the
     unexecuted judgment it is.
 
-    The pass reads the projection and never judges it: whether material is over
-    its bound is already the request on the chain, and the plan only answers
-    which product that request names.
+    The pass reads the projection and never judges it: whether material is
+    over its bound is already the request on the chain, and the plan only
+    answers which product that request names. - The plan is executed over the
+    accounting-free view the production judged (foldProjectionOf): the products
+    name the conversation material, and delivery settlement lines stay in the
+    projection the model reads. - A history summary covers every settlement
+    fact inside the band it folds: settlement lines never count as fold material
+    (foldProjectionOf), the summary consumes their accounting beside the turns,
+    and the facts stay on the chain readable by identity.
 
 func (c *CompressionConsumer) Name() string
     Name reports the stable name of this plugin instance.
@@ -829,16 +845,16 @@ type Host struct {
 func (h *Host) ApproveDelivery(ctx context.Context, id string) error
     ApproveDelivery re-delivers one held body exactly once: the body is sent to
     the target it named, and the hold is consumed, so a repeated approval names
-    no hold and delivers no second copy. A send the channel refuses restores
-    the hold for a later approval and is reported to the caller. Every hold is
-    recorded beside the review table, so the approval resolves the body across a
-    restart as well.
+    no hold and delivers no second copy. A send the channel refuses restores the
+    hold for a later decision and is reported to the caller; a definite refusal
+    also re-enters the redrive, so an approval that meets a transient outage is
+    carried by the same bounded backoff the live path uses.
 
     The receipt of the approval lands only after the send it confirms returned:
-    a receipt the tier refuses leaves the obligation owed and answers the landed
-    delivery by name, so the caller learns the body reached the channel and the
-    account did not — a restart delivers the body once more, which is the one
-    extra copy an unconfirmed receipt tolerates.
+    a receipt the account refuses leaves the obligation owed and answers the
+    landed delivery by name, so the caller learns the body reached the channel
+    and the account did not — a restart delivers the body once more, which is
+    the one extra copy an unconfirmed receipt tolerates.
 
 func (h *Host) Close(ctx context.Context) (first error)
     Close stops injection into this host, quiesces the run it drives and only
@@ -856,10 +872,13 @@ func (h *Host) Close(ctx context.Context) (first error)
     still stops its servers, seals the trajectory, stops telemetry and releases
     the execution face, and a broken judgment is what a repeated close reports.
     - The producers stop before the host declares itself halted: only past their
-    join does a closed host refuse a delivery, so what a stopping producer hands
-    in is settled instead of dropped. - The report of the run close is folded
-    in whichever way that close ended, so the two faces of one close never
-    disagree.
+    join does a closed host refuse a delivery, so what a stopping producer
+    hands in is settled instead of dropped. - The report of the run close is
+    folded in whichever way that close ended, so the two faces of one close
+    never disagree. - The redrive stops before the drain starts: a send that
+    starts after the quiesce would land on a chain the close is already judging,
+    and an attempt already in flight finishes the send it began and records its
+    own state.
 
 func (h *Host) CloseReport() agent.DrainReport
     CloseReport reports the state the last close of this host ended in, beside
@@ -873,7 +892,9 @@ func (h *Host) HeldDeliveries() []HeldDelivery
     HeldDeliveries reports the bodies the host owes a target before delivery:
     the holds the review plugin parked and the redeliveries a refused send owes,
     oldest first. The result is a copy the caller owns: reading here changes no
-    hold, and only ApproveDelivery or RefuseDelivery resolves one.
+    hold, and only ApproveDelivery or RefuseDelivery resolves one. The table
+    is rebuilt from the settlement facts on every boot, so a hold survives a
+    restart under the identity it was recorded with.
 
 func (h *Host) Invoke(ctx context.Context, req InvokeRequest) (agent.Turn, error)
     Invoke drives one invocation through the resident instance of its address:
@@ -923,11 +944,11 @@ func (h *Host) Quiesce(ctx context.Context, req agent.CloseRequest) (agent.Drain
 func (h *Host) RefuseDelivery(ctx context.Context, id string) error
     RefuseDelivery discards one held body: nothing is delivered, the hold is
     consumed, and an audit feedback fact without a model payload records the
-    refusal at the target address. The refusal consumes the durable record as
+    refusal at the target address. The settlement fact records the refusal as
     well, so no later boot owes the body again.
 
-    Both commits are checked before the refusal publishes: a record or an audit
-    fact the tier refused answers the caller by name and leaves the body in the
+    Both commits are checked before the refusal publishes: a receipt or an audit
+    fact the chain refused answers the caller by name and leaves the body in the
     review table, so a refusal no account accepted is never read as a decision.
 
 func (h *Host) Rejections() []state.Rejection
@@ -938,25 +959,20 @@ func (h *Host) Rejections() []state.Rejection
     account already answered rather than a second criterion of the close.
 
 func (h *Host) Reload(ctx context.Context) (hostReloadReport, error)
-    Reload reads the configuration source again, publishes the declaration
-    it carries, and files the configuration facts the move judged: one config
-    change per declaration dimension that moved and one model configuration
-    change per agent whose lease holds a version the document does not name.
-    The publication is the one entry the run already owns; the model change
-    is the configuration change family's model dimension, committed after
-    the publication settled — including a carried document, so a move whose
-    install failed is judged again. The lease mounted on each agent runs its
-    own rebuild, publication and installation order and decides whether the new
-    version takes effect.
+    Reload reads the configuration source again, commits the declaration
+    the load produced as one fact of the configuration chain, and builds the
+    candidate from the declaration the chain carries: the file is the edit
+    surface, the chain is the ledger one publication consumes. It publishes
+    through the one entry, files the configuration facts the move judged and
+    records the result of the attempt on the chain, so the receipt is the fact
+    the chain holds and never a self-report.
 
-    - The generation declares the agent set: an agent both documents name
-    keeps the contribution already in service, an added agent is constructed
-    through the same native path Boot ran, and its model lease is built beside
-    the publication so the address serves its first turn on the model the
-    declaration names. - The leases are mounted only once the generation that
-    declared the agents published: a refused reload attaches nothing, and the
-    next publication reads the extended table through the same lease path Boot
-    filled.
+    A load or declaration failure, a structural refusal, a restart-required
+    move, a refused publication or an install that did not take effect each
+    files a result fact and leaves the running binding, the document in effect
+    and the generation where they were. An added agent is constructed through
+    the same native path Boot ran, and its lease is mounted only once the
+    generation that declared it published: a refused reload attaches nothing.
 
 func (h *Host) Run() *Run
     Run reports the assembled run the host drives.

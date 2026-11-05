@@ -886,6 +886,16 @@ class LintObjectSelectionTest(unittest.TestCase):
         write(gates / "test_check_doc_budget.py", SELFTEST_STUB)
         write(gates / "test_check_product_surface.py", SELFTEST_STUB)
         write(gates / "test_check_doc_links.py", SELFTEST_STUB)
+        write(gates / "test_check_feature_boundary.py", SELFTEST_STUB)
+        write(gates / "check_feature_boundary.py", PY_STUB)
+        write(gates / "test_check_config_liveness.py", SELFTEST_STUB)
+        write(gates / "check_config_liveness.py", PY_STUB)
+        for name in ("check_schema_allowlist.py", "check_assembly_symbols.py",
+                     "check_durable_truth_registry.py", "check_spec_hygiene.py"):
+            write(gates / name, PY_STUB)
+        for name in ("test_check_schema_allowlist.py", "test_check_assembly_symbols.py",
+                     "test_check_durable_truth_registry.py", "test_check_spec_hygiene.py"):
+            write(gates / name, SELFTEST_STUB)
 
         self.bin = self.root / "bin"
         self.bin.mkdir()

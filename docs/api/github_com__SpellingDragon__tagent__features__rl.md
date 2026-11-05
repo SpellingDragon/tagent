@@ -228,6 +228,11 @@ var (
     ErrWriterSealed and the other named errors of the durable write point: each
     names the way a write or a seal was refused, so a caller routes it by name.
 
+var ErrAnnexIdentityMissing = errors.New("rl: the annex record carries no sample identity")
+    ErrAnnexIdentityMissing reports an annex line carrying no sample identity:
+    an annex joins on the attempt and the bench task together, so a line without
+    either is refused rather than written as an annex no sample aggregates from.
+
 var ErrCaptureRefused = errors.New("rl: the capture refused the record at admission")
     ErrCaptureRefused reports a record the capture refused at admission on the
     recorder face: the refusal is counted in the loss ledger under the bound
@@ -291,8 +296,11 @@ func MarshalLine(line Line) ([]byte, error)
     than written without its version.
 
     - An attempt line is written only in a shape that can be read back:
-    LogprobsUnsupported without its declaration source is refused here, never
-    persisted to be refused at the read side.
+    LogprobsUnsupported without its declaration source is refused here,
+    never persisted to be refused at the read side. - An annex line carries the
+    sample identity it joins on: a line without both the attempt and the bench
+    task identity is refused here rather than written as an annex no sample can
+    be aggregated from.
 
 func MarshalSnapshot(snapshot RequestSnapshot) ([]byte, error)
     MarshalSnapshot encodes one safe snapshot for persistence.
@@ -349,7 +357,10 @@ func ParseLine(data []byte) (Line, error)
 
     - On the read side an attempt line carrying a declaration-free unsupported
     logprobs state is refused as well: the wire is never trusted to hold a shape
-    the write side would have refused.
+    the write side would have refused. - On the read side an annex line without
+    the two sample identities is refused as well: the write side never persists
+    an identity-free annex, and the reader does not accept one as the referenced
+    annex.
 
 func ParseSnapshot(content []byte) (RequestSnapshot, error)
     ParseSnapshot decodes one safe snapshot from its persisted bytes.
@@ -386,6 +397,13 @@ func SnapshotRequest(view ModelViewRef, req model.Request, policy SnapshotPolicy
     never edited: the projection runs over deep copies, so the caller's request
     keeps every original value including its credentials.
 
+func ValidateAnnex(record AnnexRecord) error
+    ValidateAnnex reports whether one annex record may be written and read back.
+    It holds exactly one rule: the sample identity is the attempt and the
+    bench task together, so an annex carrying neither, or only one of them,
+    is refused. The verdict is data: an unrated record is a valid annex that
+    says no verdict exists, and this rule never invents one.
+
 func ValidateAttempt(record AttemptRecord) error
     ValidateAttempt reports whether one attempt record may be written and read
     back. It holds exactly one rule: a LogprobsUnsupported state is valid only
@@ -405,6 +423,34 @@ func WriteSamples(w io.Writer, samples []SFTSample) error
     and a write that fails is reported by name rather than counted as written.
 
 TYPES
+
+type AnnexRecord struct {
+	// AttemptID identifies the attempt whose artifacts were judged.
+	AttemptID event.AttemptID `json:"attempt_id"`
+	// TaskID identifies the bench task the attempt ran; with AttemptID it is
+	// the sample's join key.
+	TaskID string `json:"task_id"`
+	// Verdict is the independent verdict: a pass or fail the verifier reached
+	// from the artifacts, unrated when no verdict exists, or incomplete when the
+	// sample gate found an element missing. It is never derived from the
+	// execution path's self-report.
+	Verdict string `json:"verdict"`
+	// RuleVersion names the version of the derivation rules the verdict was
+	// reached under; an unrated verdict carries none.
+	RuleVersion string `json:"rule_version,omitempty"`
+	// Artifacts lists the artifact references the verdict was reached on.
+	Artifacts []string `json:"artifacts,omitempty"`
+}
+    AnnexRecord is one training sample's acceptance annex: the verdict an
+    independent verifier reached from the task's artifacts, the version of the
+    derivation rules the verdict was reached under, and the artifacts it read.
+
+    The record is bound to a sample by two identities together: the attempt
+    that produced the artifacts and the bench task it ran. Neither alone joins
+    the three elements of one sample, so both are carried here. An annex is
+    append-only data: a later verdict is a new line under the same identity and
+    never an edit of the attempt record or of an earlier annex line, and the
+    record carries no field of the attempt it judges.
 
 type AttemptRecord struct {
 	// Schema is the record schema version the line was written with.
@@ -697,6 +743,16 @@ func (s *CaptureSink) Record(ctx context.Context, attempt AttemptRecord) (Captur
     the in-flight bound, and a closed capture refuses every record under
     BoundClosed. The record line is marshaled through the versioned line,
     which refuses a record shape that cannot be read back.
+
+func (s *CaptureSink) RecordAnnex(ctx context.Context, record AnnexRecord) error
+    RecordAnnex admits the acceptance annex of one training sample through
+    the same bounded capture entry every record kind enters: the annex line
+    is marshaled through the versioned line, judged by the same per-record,
+    in-flight and byte bounds, and counted in the loss ledger and the sealed
+    manifest exactly as an episode, decision or attempt line is. It is
+    append-only: the entry writes one new line under the sample identity and
+    never edits an earlier annex or the attempt record it judges. A refusal is
+    reported by name with the bound that refused it, never a silent bypass.
 
 func (s *CaptureSink) RecordAttempt(ctx context.Context, record AttemptRecord) error
     RecordAttempt admits the attempt record of one observable model attempt
@@ -1051,9 +1107,23 @@ type Line struct {
 	Decision *DecisionRecord `json:"decision,omitempty"`
 	// Attempt is the attempt record of an attempt line.
 	Attempt *AttemptRecord `json:"attempt,omitempty"`
+
+	// Has unexported fields.
 }
     Line is one versioned record line: the schema it was written with, the kind
     it carries and exactly one record payload.
+
+    The annex payload is carried in an unexported field and read through Annex:
+    the versioned line keeps its declared export surface, and a reader still
+    reads the acceptance annex it was written with. NewAnnexLine constructs the
+    line; the codec marshals the payload under the "annex" key exactly as the
+    other kinds are marshaled under theirs.
+
+func NewAnnexLine(record AnnexRecord) Line
+    NewAnnexLine builds the versioned line of one acceptance annex. The annex is
+    append-only: the constructor stamps the versioned envelope and carries the
+    record under the sample identity, and a later verdict is another line rather
+    than an edit of this one.
 
 func NewAttemptLine(record AttemptRecord) Line
     NewAttemptLine builds the versioned line of one attempt record, stamped with
@@ -1066,6 +1136,23 @@ func NewDecisionLine(record DecisionRecord) Line
 func NewEpisodeLine(record EpisodeRecord) Line
     NewEpisodeLine builds the versioned line of one episode record, stamped with
     the schema version this package writes.
+
+func (l Line) Annex() *AnnexRecord
+    Annex reports the acceptance annex of an annex line, or nil for a line of
+    another kind. The returned record is the line's own payload: a reader takes
+    it as the append-only annex that was written and never edits the line in
+    place.
+
+func (l Line) MarshalJSON() ([]byte, error)
+    MarshalJSON writes the line through its wire shape, including the annex
+    payload kept in the unexported field. It is the encoding the versioned line
+    always had for episode, decision and attempt lines, with the annex kind
+    carried beside them.
+
+func (l *Line) UnmarshalJSON(data []byte) error
+    UnmarshalJSON reads a line through its wire shape. The annex payload enters
+    the unexported field; the reader reaches it through Annex, exactly as the
+    write side built it through NewAnnexLine.
 
 type Lineage int
     Lineage states how certain a record's lineage is.
@@ -1246,7 +1333,7 @@ type ModelViewRef struct {
     by name and version together rather than by name alone.
 
 type RecordKind string
-    RecordKind names which of the three record kinds one line carries.
+    RecordKind names which of the record kinds one line carries.
 
     - The versioned record line: one JSONL line carries its schema version
     and exactly one record kind, and a reader selects its parse path from
@@ -1261,6 +1348,10 @@ const (
 	RecordKindDecision RecordKind = "decision"
 	// RecordKindAttempt names a line carrying one AttemptRecord.
 	RecordKindAttempt RecordKind = "attempt"
+	// RecordKindAnnex names a line carrying one AnnexRecord: a sample's
+	// acceptance verdict, appended under the sample's identity and never
+	// rewritten.
+	RecordKindAnnex RecordKind = "annex"
 )
 type Recorder interface {
 	// RecordEpisode writes the episode record of one business process at the

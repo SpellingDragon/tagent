@@ -502,17 +502,18 @@ MUTATIONS: Tuple[Mutation, ...] = (
                 # segment carries the run handle now).
                 old=(
                     "\treturn projectedSegment(ctx, a.run, a.sequence.projection, a.sequence.window, "
-                    "a.sequence.endedPrefix())\n"
+                    "a.sequence.endedPrefix(), a.boundary.ProjectionBudget)\n"
                 ),
                 new=(
                     "\treturn projectedSegment(ctx, a.run, a.sequence.projection, a.sequence.window, "
-                    "a.sequence.ended)\n"
+                    "a.sequence.ended, a.boundary.ProjectionBudget)\n"
                 ),
             ),
             Replacement(
                 file="assembly/facts.go",
                 old=(
                     "\theld.projection.Append(context.Background(), entry)\n"
+                    "\theld.projection = trimReplayProjection(context.Background(), held.projection)\n"
                     "\tif evt.Type == event.TypeAgentOutput {\n"
                     "\t\theld.endedAt = entry.Key\n"
                     "\t\theld.rangeOpen = false\n"
@@ -525,6 +526,7 @@ MUTATIONS: Tuple[Mutation, ...] = (
                 new=(
                     "\tposition := held.projection.Len()\n"
                     "\theld.projection.Append(context.Background(), entry)\n"
+                    "\theld.projection = trimReplayProjection(context.Background(), held.projection)\n"
                     "\tif evt.Type == event.TypeAgentOutput {\n"
                     "\t\theld.ended = position\n"
                     "\t\theld.rangeOpen = false\n"
@@ -747,10 +749,10 @@ MUTATIONS: Tuple[Mutation, ...] = (
         ),
         replacement=Replacement(
             file="tool/exec/tool.go",
-            old='\treturn fmt.Sprintf("executed %s: %s", key, output), nil\n',
+            old='\treceipt := fmt.Sprintf("executed %s: %s", key, output)\n',
             new=(
-                '\treturn fmt.Sprintf("executed %s: completed successfully: %s", '
-                'key, output), nil\n'
+                '\treceipt := fmt.Sprintf("executed %s: completed successfully: %s", '
+                'key, output)\n'
             ),
         ),
         test_package="./tool/exec",

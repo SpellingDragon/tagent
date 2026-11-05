@@ -157,7 +157,8 @@ func agentsField(source string, e *sourceEntry) ([]AgentSpec, error) {
 // fields of AgentSpec.
 var agentKeys = []string{
 	"id", "parent_id", "model", "tools", "plugins", "task_policy", "files", "params",
-	"final_round", "max_tokens", "compress_threshold", "keep_recent_tasks", "environment_block",
+	"final_round", "max_tokens", "compress_threshold", "keep_recent_tasks",
+	"provider_context_window", "output_reserve", "environment_block",
 	"temperature", "thinking_enabled", "reasoning_effort", "max_tool_iterations",
 	"max_calls_per_response", "long_context_tokens", "capture_budget_mb",
 	"memory", "meditation", "file", "exec",
@@ -208,6 +209,12 @@ func decodeAgent(source, path string, n *sourceNode) (*AgentSpec, error) {
 		return nil, err
 	}
 	if a.KeepRecentTasks, err = countField(source, joinField(path, "keep_recent_tasks"), fields["keep_recent_tasks"]); err != nil {
+		return nil, err
+	}
+	if a.ProviderContextWindow, err = countField(source, joinField(path, "provider_context_window"), fields["provider_context_window"]); err != nil {
+		return nil, err
+	}
+	if a.OutputReserve, err = countField(source, joinField(path, "output_reserve"), fields["output_reserve"]); err != nil {
 		return nil, err
 	}
 	if a.EnvironmentBlock, err = boolField(source, joinField(path, "environment_block"), fields["environment_block"]); err != nil {

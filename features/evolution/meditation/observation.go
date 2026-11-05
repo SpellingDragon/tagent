@@ -112,6 +112,14 @@ type ScannedFact struct {
 	Content FactContent
 	// Attribution is whose traffic the fact is.
 	Attribution FactAttribution
+
+	// body is the committed body of the fact, bounded for the material
+	// section of the reflection input; it never enters the digest summary.
+	body string
+	// request reports an explicit reflection request carried by the fact.
+	request bool
+	// negative reports feedback the domain reads as negative.
+	negative bool
 }
 
 // ScanCounts is the accounting of one pass: the reference page it read, how many
@@ -160,6 +168,11 @@ type ObservationScan struct {
 	Counts ScanCounts
 	// Verdict is what the freshness judgment read from this pass.
 	Verdict ScanVerdict
+
+	// negatives holds the negative feedback the pass found, in page order. It
+	// is rendered before the ordinary facts and never counted twice when the
+	// ordinary walk hydrates the same facts.
+	negatives []ScannedFact
 }
 
 // ObservationScanRequest is the window and bounds of one pass over the observed
@@ -249,12 +262,54 @@ func observe(ctx context.Context, scope ReflectionScope, facts ObservedFacts, re
 			}
 		}
 	}
+	hydrated := make(map[event.EventID]event.Event, len(refs))
+	unreadable := make(map[event.EventID]bool)
+	hydrate := func(ref memory.EventReference) (event.Event, bool) {
+		if fact, ok := hydrated[ref.Key]; ok {
+			return fact, true
+		}
+		if unreadable[ref.Key] {
+			return event.Event{}, false
+		}
+		fact, err := facts.CommittedFact(ctx, ref.Key)
+		if err != nil {
+			unreadable[ref.Key] = true
+			return event.Event{}, false
+		}
+		hydrated[ref.Key] = fact
+		return fact, true
+	}
+	for _, ref := range refs {
+		if ref.Type != event.TypeFeedback {
+			continue
+		}
+		fact, ok := hydrate(ref)
+		if !ok {
+			continue
+		}
+		if !negativeFeedback(fact) {
+			continue
+		}
+		partition := partitionOf(fact, ref.PartitionID)
+		at, onFace := partitionIndexOf(scan, partition)
+		if !onFace {
+			continue
+		}
+		scan.negatives = append(scan.negatives, scannedFact(ref, fact, scan.Partitions[at].Name))
+		if len(scan.negatives) >= DefaultDigestFactLimit {
+			break
+		}
+	}
 	for _, ref := range refs {
 		if len(scan.Facts) >= factLimit {
 			break
 		}
-		fact, err := facts.CommittedFact(ctx, ref.Key)
-		if err != nil {
+		fact, ok := hydrate(ref)
+		if !ok {
+			if !unreadable[ref.Key] {
+				continue
+			}
+			delete(unreadable, ref.Key)
 			scan.Counts.Unreadable++
 			continue
 		}
@@ -269,15 +324,7 @@ func observe(ctx context.Context, scope ReflectionScope, facts ObservedFacts, re
 		}
 		stamp := fact.Meta[event.MetaKeyTriggerSource]
 		novel := NoveltyPolicy{}.Novel(fact)
-		entry := ScannedFact{
-			Identity: FactIdentity{Key: ref.Key, Partition: scan.Partitions[at].Name},
-			Content: FactContent{
-				Type:      fact.Type,
-				Summary:   fact.Meta[event.MetaKeyEventSummary],
-				Timestamp: fact.Timestamp,
-			},
-			Attribution: FactAttribution{Lineage: stamp, SelfManaged: SelfManagedLineage(stamp)},
-		}
+		entry := scannedFact(ref, fact, scan.Partitions[at].Name)
 		scan.Counts.HydratedTotal++
 		scan.Facts = append(scan.Facts, entry)
 		if !novel {
@@ -294,6 +341,64 @@ func observe(ctx context.Context, scope ReflectionScope, facts ObservedFacts, re
 		break
 	}
 	return scan, nil
+}
+
+// scannedFact renders one hydrated fact into the pass's bounded evidence.
+func scannedFact(ref memory.EventReference, fact event.Event, partition string) ScannedFact {
+	stamp := fact.Meta[event.MetaKeyTriggerSource]
+	return ScannedFact{
+		Identity: FactIdentity{Key: ref.Key, Partition: partition},
+		Content: FactContent{
+			Type:      fact.Type,
+			Summary:   fact.Meta[event.MetaKeyEventSummary],
+			Timestamp: fact.Timestamp,
+		},
+		Attribution: FactAttribution{Lineage: stamp, SelfManaged: SelfManagedLineage(stamp)},
+		body:        truncateBody(fact.Message.Content),
+		request:     fact.Meta[MetaKeyActivationRequest] != "",
+		negative:    negativeFeedback(fact),
+	}
+}
+
+// materialBodyLimit bounds one committed body in the material section of a
+// reflection input, in runes: the material is real content, but a single fact
+// never grows the input without limit.
+const materialBodyLimit = 2000
+
+// truncateBody shortens one committed body to the material bound on rune
+// boundaries, so a long body shortens the section without corrupting it.
+func truncateBody(body string) string {
+	runes := []rune(body)
+	if len(runes) <= materialBodyLimit {
+		return body
+	}
+	return string(runes[:materialBodyLimit]) + "…"
+}
+
+// negativeFeedback reports whether one committed fact is feedback the domain
+// reads as negative: a failed task, a refused delivery, a failed terminal or an
+// explicit negative verdict. The judgment lives in this domain, so a feedback
+// fact carrying an unnamed stamp is never counted as negative.
+func negativeFeedback(fact event.Event) bool {
+	if fact.Type != event.TypeFeedback {
+		return false
+	}
+	switch fact.Meta[event.MetaKeyTriggerSource] {
+	case "failure", "governance":
+		return true
+	}
+	if fact.Meta[event.MetaKeyDeliveryDenial] != "" {
+		return true
+	}
+	switch fact.Meta[event.MetaPrefix+"terminal"] {
+	case "failed", "failure":
+		return true
+	}
+	switch fact.Meta[event.MetaPrefix+"verdict"] {
+	case "negative", "fail", "failed":
+		return true
+	}
+	return false
 }
 
 // partitionIndexOf locates a tally line by storage partition.

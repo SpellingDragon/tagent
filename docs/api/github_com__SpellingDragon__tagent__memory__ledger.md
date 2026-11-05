@@ -163,6 +163,11 @@ var ErrSegmentBarrier = errors.New("memory: segment commit barrier failed")
     ErrSegmentBarrier reports a commit whose barrier did not complete, so the
     record reaches no reader and no count.
 
+var ErrSegmentBodyMissing = errors.New("memory: committed event body is missing")
+    ErrSegmentBodyMissing reports an event the index names but whose persisted
+    body cannot be read: the read names the failure instead of publishing the
+    event as an absent one.
+
 var ErrSegmentLimit = errors.New("memory: segment request carries a negative byte limit")
     ErrSegmentLimit reports a segment request carrying a negative byte limit,
     so no bounded segment could answer it.
@@ -203,42 +208,60 @@ type FileSegmentStore struct {
     FileSegmentStore commits events into time-window segments over one key-value
     backend. One commit stages the event body, its index entry and the window
     meta the window needs as one batch, and publishes the event to the read
-    cache and the event count only when that commit returns success. A commit
-    that fails names the barrier as its step, carries its cause, unstages what
-    it wrote, and publishes no part of the record. Readers are served from
-    published state only, so a load publishes exactly the records whose body,
-    index and meta all arrived.
+    cache, the resident index and the event count only when that commit returns
+    success. A commit that fails names the barrier as its step, carries its
+    cause, unstages what it wrote, and publishes no part of the record.
+
+    The resident state is bounded: the index keeps one small position per event
+    key (the projection of the persisted index entries), the read cache keeps
+    bodies under a byte budget, and Load reads only the index and window meta
+    at startup. An event body the cache evicted is read back from its persisted
+    {pid}:evt:{window}:{seq} entry, so a bounded process still answers every
+    read.
 
 func (s *FileSegmentStore) Close() error
     Close ends the store with a final barrier over whatever the backend still
     holds staged, and repeats as a no-op.
+
+func (s *FileSegmentStore) EachEvent(ctx context.Context, visit func(StoredEvent) error) error
+    EachEvent streams every published event in index order: partition first,
+    then the window it is grouped under, then the sequence slot it takes inside
+    that window, with the event key as the last tie-break. The body of each
+    event is read on demand and handed to visit alone, so an enumeration never
+    holds the whole store in memory. A visit error ends the enumeration and is
+    returned.
 
 func (s *FileSegmentStore) EventCount() int
     EventCount returns the number of events published by successful commits,
     so the count moves only where durable success was reported.
 
 func (s *FileSegmentStore) Events(ctx context.Context) ([]StoredEvent, error)
-    Events returns every published event in index order: partition first,
-    then the window it is grouped under, then the sequence slot it takes inside
-    that window, with the event key as the last tie-break. Only records whose
-    commits published are listed, so the enumeration never exposes a record a
-    read cannot serve.
+    Events returns every published event in index order. It is the materialized
+    form of EachEvent for callers that need the whole set; the assembly read
+    faces stream instead, one event at a time.
 
 func (s *FileSegmentStore) GetEvent(ctx context.Context, key event.EventID) (StoredEvent, bool, error)
     GetEvent returns the committed event under key together with the index
-    position it was committed at, and reports whether any is published.
+    position it was committed at, and reports whether any is published. A body
+    the cache evicted is read back from its persisted entry; an index entry
+    whose body cannot be read reports ErrSegmentBodyMissing instead of an absent
+    event.
 
 func (s *FileSegmentStore) Load(ctx context.Context) error
-    Load publishes every stored record whose body, index and meta all arrived,
-    so a record one commit left incomplete never reaches a reader or a count.
+    Load rebuilds the resident index and window table from the persisted store
+    without materializing an event body. It enumerates keys once to discover the
+    partitions the store holds, then reads the index prefix and the meta prefix
+    of each partition: both are small entries, and no {pid}:evt:{window}:{seq}
+    body is read. A record whose index and window meta did not both arrive stays
+    out of the published state, and EventCount counts the published records.
 
 func (s *FileSegmentStore) StoreEvent(ctx context.Context, rec SegmentRecord) error
     StoreEvent commits one event behind the segment commit barrier: the event
     body, its index entry and the window meta the window needs are staged as one
-    batch and committed before the event reaches the read cache, the event count
-    or the caller. A repeat of the committed record returns success without a
-    second fact, other bytes under the same event key are refused, and a failed
-    commit leaves nothing published.
+    batch and committed before the event reaches the read cache, the resident
+    index, the event count or the caller. A repeat of the committed record
+    returns success without a second fact, other bytes under the same event key
+    are refused, and a failed commit leaves nothing published.
 
 type Guard interface {
 	// Hold registers one protection hold on the original of ref for holder and
@@ -393,20 +416,30 @@ type LifecycleConfig struct {
 
 func DefaultLifecycleConfig() LifecycleConfig
     DefaultLifecycleConfig returns the default lifecycle policy: the seven-day
-    global window, no per-type overrides, the one-hour scan cadence and no
-    capacity bound. It is the fallback every unset field resolves to — never a
-    value a composition root hardcodes beside its config.
+    global window, the delivery settlement family's negative (exempt) override,
+    the one-hour scan cadence and no capacity bound. It is the fallback every
+    unset field resolves to — never a value a composition root hardcodes beside
+    its config.
 
 func (c LifecycleConfig) Normalized() LifecycleConfig
     Normalized returns the policy with every unset field filled from the default
     and every explicit value kept as given, so the injected policy and the one
     the lifecycle runs under are the same object.
 
+    - The settlement exemption is a property of the family, not a preference
+    the injected map may drop: a config naming per-type windows of its own still
+    carries the family's negative entry, and the map is copied before the entry
+    is added.
+
 func (c LifecycleConfig) Window(eventType string) (time.Duration, bool)
     Window returns the age window one frozen event type ages out under and
     whether that type is exempt from TTL tombstoning entirely: a negative
     override exempts the type, a negative global window exempts every type,
     and an absent override falls back to the global window.
+
+    - The settlement family is exempt by construction: its facts are the read
+    face of obligations that outlive any age window, so no injected override
+    re-introduces a tombstone for it.
 
 type LifecycleStore interface {
 	// EnumerateKeys lists every key the store holds, or fails by name: a

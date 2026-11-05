@@ -160,12 +160,15 @@ func TestAgeBandsReachTheRequest(t *testing.T) {
 	}
 	folded := ""
 	for _, message := range got {
-		if strings.HasPrefix(message.Content, "folded segment process: ") {
+		if strings.HasPrefix(message.Content, "[") && strings.Contains(message.Content, "thinking_plan: plan fourth") {
 			folded = message.Content
 		}
 	}
-	if !strings.Contains(folded, "plan fourth") || !strings.Contains(folded, "call fourth") {
-		t.Fatalf("folded product = %q, want the newest turn's process detail read as one line", folded)
+	if !strings.Contains(folded, "] thinking_plan: plan fourth") || !strings.Contains(folded, "] action_command: call fourth") {
+		t.Fatalf("folded product = %q, want the newest turn's process detail opening with the provenance anchor", folded)
+	}
+	if !strings.Contains(folded, "|gen:?]") {
+		t.Fatalf("folded product = %q, want the explicit generation placeholder of a chain that names none", folded)
 	}
 	for _, message := range got {
 		for _, raw := range []string{
@@ -212,7 +215,7 @@ func TestAgeFoldUnderThresholdLeavesTheRequestAsItStands(t *testing.T) {
 	run, provider := ageBandRun(t, projection)
 	got := ageBandRequest(t, run, provider, "阈值之内的新请求。")
 	joined := strings.Join(contentsOf(got), "\n")
-	if strings.Contains(joined, "history summary: ") || strings.Contains(joined, "folded segment process: ") {
+	if strings.Contains(joined, "history summary: ") || strings.Contains(joined, "|gen:") {
 		t.Fatalf("request = %q, want no fold product presented under the threshold", joined)
 	}
 	if !strings.Contains(joined, strings.Repeat("思考正文 fourth。", 12)) {

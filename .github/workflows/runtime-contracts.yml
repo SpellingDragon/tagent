@@ -78,7 +78,7 @@ jobs:
       # First-party product packages per golden/runtime/architecture.json (its
       # scope excludes scripts/tests/examples/docs/resources). The composition
       # root is the directory assembly/; a bare `.` would recurse the root module.
-      PRODUCT_PACKAGES: "assembly api runtime memory features tool internal cli"
+      PRODUCT_PACKAGES: "assembly api runtime memory features tool internal cli bench"
     steps:
       # Full history: doc-refs citation-level anchors resolve at their introducing commits.
       - uses: actions/checkout@v4

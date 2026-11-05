@@ -123,7 +123,7 @@ race_check_classify() {
 
 pkgs=("$@")
 if [ ${#pkgs[@]} -eq 0 ]; then
-	pkgs=(./assembly/... ./memory/... ./runtime/... ./features/... ./api/... ./tool/...)
+	pkgs=(./assembly/... ./memory/... ./runtime/... ./features/... ./api/... ./tool/... ./bench/...)
 fi
 
 if [ -n "${RACE_CHECK_CLASSIFY_ONLY:-}" ]; then

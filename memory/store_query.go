@@ -69,16 +69,9 @@ func (s *StoreQuerySource) LandEvent(ctx context.Context, stored ledger.StoredEv
 // already landed event keeps its record and only the events not yet landed are
 // decoded and added, so observing twice over unchanged state moves nothing.
 func (s *StoreQuerySource) ObserveStore(ctx context.Context, store *ledger.FileSegmentStore) error {
-	events, err := store.Events(ctx)
-	if err != nil {
-		return err
-	}
-	for _, stored := range events {
-		if err := s.LandEvent(ctx, stored); err != nil {
-			return err
-		}
-	}
-	return nil
+	return store.EachEvent(ctx, func(stored ledger.StoredEvent) error {
+		return s.LandEvent(ctx, stored)
+	})
 }
 
 // Observed reports whether the table holds the event key.

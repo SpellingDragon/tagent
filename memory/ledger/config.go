@@ -193,6 +193,23 @@ func (m *memKV) kvRead(ctx context.Context, fetch kvFetch) ([]kvPair, error) {
 	return out, nil
 }
 
+// kvKeys returns the keys the prefix names, in key order.
+func (m *memKV) kvKeys(ctx context.Context, prefix string) ([]string, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	out := make([]string, 0, len(m.data))
+	for key := range m.data {
+		if strings.HasPrefix(key, prefix) {
+			out = append(out, key)
+		}
+	}
+	sort.Strings(out)
+	return out, nil
+}
+
 // kvCommit applies the batch in place of whatever was held there; the in-process
 // view already holds what a barrier would publish.
 func (m *memKV) kvCommit(ctx context.Context, batch kvBatch) error {

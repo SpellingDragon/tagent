@@ -42,11 +42,13 @@ tagent 组合根的**真实宿主示例**：常驻微信机器人，把 `assembl
 | `agents.*.compress` / `task_*_ttl` | schema 未声明、装配面不读（`memory` 与 `meditation` 已接线，见下节）；`max_tokens`/`compress_threshold`/`temperature`/`thinking_enabled`/`reasoning_effort` 已在 `api/config/decode.go:160-161` 声明并由 `assembly/host_document.go` 解析消费（见 `tagent.yaml:98/132-133`） |
 | `agents.*.tools[]` 除 `{kind: tool, id: send}` 与 `recall_*` | 工具面接了 `send`＋`recall_query/get/recent/trace`（tool/recall），读面由宿主装配后注入（Searcher=`Run.Recall`、Table=观测表、Originals=scoped 原始层、Embedder=`memory.engine` 的真 embedding、Trace=宿主关系账本），有 `memory` 声明即可用，无声明则调用即具名拒绝；`{kind: agent, ...}` 委派已接、`description_file`/`event_params` 已消费；file 由宿主与核心按声明装配、`exec`/`mcp_*`/`skill_*` 由核心装配，`spec` 已接线（七操作闭集，后端为可替换的计划后端），清单外的 id 仍被固定清单挡下 |
 
-## 记忆与定时策展（已接线）
+## 记忆与自察冥想（已接线）
 
 ```yaml
 agents:
   tagent:
+    tools:
+      - { kind: tool, id: send }         # 反思会话的唯一跨会话写面(教训推送)
     memory:
       type: localfile
       path: .wechat-config/data          # 旧世界 KV/事件目录:接回跨重启历史知识
@@ -57,30 +59,30 @@ agents:
         vector_top_k: 20                 # 混合检索双腿上限;零值=历史行为(不截断)
         keyword_top_k: 20
         rrf_k: 60                        # RRF 秩常数;零值=默认 60
-  meditator:
-    meditation:
+    meditation:                          # 缺省自察:主语=tagent 自身,反思会话=tagent-session:tagent:reflection
       enabled: true
-      interval: 30m                      # 宿主 tick 周期(零值=30m)
+      interval: 30m                      # 两次点火的最小间隔(状态机检查方式,不是 tick 周期;零值=30m)
       min_gap: 2h                        # 两次已消费反思的最小间隔
-      prompt_file: meditation.md         # 相对 prompt_dir;每次注入随摘要携带
-      observed_namespaces: [tagent]      # 必须落在读授权内,否则具名拒启动
-      deliver_to: [tagent]               # 回流白名单本轮 assistant 正文发给目标已绑定的会话
+      prompt_file: meditation.md         # 相对 prompt_dir;每次注入随摘要与真实材料携带
+      deliver_to: [tagent]               # send 白名单:同 agent 的活跃业务会话
 ```
 
+独立策展 agent(跨域观察)降格为可选声明:`tagent.yaml` 里保留整块注释,解开它并把 `tagent` 的 `meditation` 注释掉(一个进程至多一条 enabled 循环);它读 `observed_namespaces` 圈定的他人分区,反思会话仍按 `<prefix>:<agent>:meditation` 命名。
+
 - **归并纪律**：全体 `memory` 声明归一成**一个** `ledger.StorageConfig`（`WithStorage`）＋**一个**引擎（`WithEmbedder`，trpc `knowledge/embedder/openai`；替换旧 `HashEmbedder` 占位），不一致/缺 key/引擎无存储均拒启动（`ErrMemoryDeclaration`/`ErrMemoryEngine`/`ErrEmbeddingKey`）；`read_namespaces` 追加到 `recall.New` 的分区授权。
-- **策展纪律**：一个进程至多一个 `enabled`；水位锚在 `<storage root>/meditation/<agent>/anchors.json`（`WithReflectionAnchors`）；tick 调 `evolution/meditation.Reflection.Tick`（观察面=摘要→ novelty → `min_gap` → 注入本 agent 自己的会话），只有 **consumed** 的回合推进水位；结果经 `sendToUser` 投递，血统 `meditation`。`enabled: false`/未声明 = 零行为。
+- **自察纪律**：一个进程至多一个 `enabled` 冥想声明；水位与状态机电荷同锚在 `<storage root>/meditation/<agent>/anchors.json`（`WithReflectionAnchors`）。触发是**自持状态机**：外部事实充电（自管血统不计费）→ 规则激活（novelty / quiet-window / external-request）→ 激活即一条既有 `external_input`（元数据带 `activation.rule/window_start/window_end/source/source_lineage/charges`）→ 注入本 agent 的专属反思会话。没有 ticker，`interval` 只是两次点火之间的下限，`min_gap` 是两次已消费反思的节律地板；只有 **consumed** 的回合推进水位。`enabled: false`/未声明 = 零行为。
 - **为什么只有一个引擎**：同一份向量只能属于一个向量空间；两套 embedding 混写会让相似度失去意义，所以第二个不同的引擎声明直接拒启。
 
-## Agent 声明（六个，`tagent.yaml`）
+## Agent 声明（五个 + 可选策展，`tagent.yaml`）
 
 | Agent | 角色 | 可声明的工具面 |
 |---|---|---|
-| `tagent` | **entry**：接收消息、编排全局、直接回复 | 四个 `{kind: agent}` 委派（knowledge/recall/plan/action）；不声明 `send` |
+| `tagent` | **entry**：接收消息、编排全局、直接回复；**自察冥想**的声明处 | 四个 `{kind: agent}` 委派（knowledge/recall/plan/action）+ `send`（反思会话推送教训；业务正文仍只经自动投递） |
 | `knowledge` | 知识获取与翻译 | `skill_search`/`skill_load`/`read_file`/`mcp_call`/`mcp_discover` |
 | `recall` | 记忆召回执行体 | `recall_query` / `recall_get` / `recall_recent` / `recall_trace`（读面由宿主注入；`read_namespaces` 决定跨分区范围） |
 | `action` | 命令与文件执行 | 七件 file 工具 + `exec` + `mcp_call`/`mcp_discover` |
 | `plan` | 工作计划管理（拆解 / 记账 / 归档审计，**不代工**） | `spec` + 七件 file 工具（写根＝计划后端交出的工作区根） |
-| `meditator` | 旁路冥想线（宿主定时驱动的反思主体） | `send` |
+| `meditator` | *可选*：跨域策展声明（默认整块注释；启用后读他人分区，与自察同一机制、不同观察面） | `send` + 七件 file + `exec` + 四个 `recall_*` |
 
 ## 治理审批（critical 操作人工把关）
 

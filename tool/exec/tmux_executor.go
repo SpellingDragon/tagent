@@ -14,6 +14,7 @@ import (
 	osexec "os/exec"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -25,6 +26,12 @@ type TmuxExecutor struct {
 	startWindow   time.Duration
 	pollInterval  time.Duration
 	commandWindow time.Duration
+	// mu guards gens: the generation one key ran under, consulted by Capture,
+	// Stop and the receipt's execution proof.
+	mu sync.Mutex
+	// gens keeps the generation of every key this executor started, so a captured
+	// frame is verified against the token the current session was minted under.
+	gens map[ResourceKey]tmuxGeneration
 }
 
 const (
@@ -80,6 +87,7 @@ func newTmuxExecutor(probe func() bool) (*TmuxExecutor, error) {
 		startWindow:   tmuxStartWindow,
 		pollInterval:  tmuxPollInterval,
 		commandWindow: tmuxCommandWindow,
+		gens:          map[ResourceKey]tmuxGeneration{},
 	}, nil
 }
 
@@ -97,7 +105,10 @@ func newTmuxExecutor(probe func() bool) (*TmuxExecutor, error) {
 // still answers the status the command ended with. The call answers once the new
 // session has produced its first frame, or once the bounded observation window
 // passed without one. A key whose session already runs is refused instead of
-// opened a second time.
+// opened a second time. Every start mints a random generation token, binds the
+// exit record to it and makes the wrapper write a marker line of that token
+// before and after the command; a captured frame is only answered as this
+// generation's output once that marker was observed.
 func (e *TmuxExecutor) Start(ctx context.Context, decl ExecutionDecl) (ResourceKey, error) {
 	name, err := sessionNameOf(decl.Resource)
 	if err != nil {
@@ -113,7 +124,20 @@ func (e *TmuxExecutor) Start(ctx context.Context, decl ExecutionDecl) (ResourceK
 	if exists {
 		return ResourceKey{}, fmt.Errorf("%w: %s", errSessionExists, name)
 	}
-	record := newExitRecord(name)
+	token, err := mintGenerationToken()
+	if err != nil {
+		return ResourceKey{}, err
+	}
+	record := newExitRecord(name, token)
+	e.setGeneration(decl.Resource, tmuxGeneration{token: token})
+	started := false
+	defer func() {
+		if started {
+			return
+		}
+		e.forgetGeneration(decl.Resource)
+		clearExitRecord(name)
+	}()
 	args := []string{"new-session", "-d", "-s", name}
 	if decl.Dir != "" {
 		args = append(args, "-c", decl.Dir)
@@ -141,12 +165,13 @@ func (e *TmuxExecutor) Start(ctx context.Context, decl ExecutionDecl) (ResourceK
 	if decl.Dir != "" {
 		respawn = append(respawn, "-c", decl.Dir)
 	}
-	respawn = append(respawn, commandLineWithDrain(decl, record))
+	respawn = append(respawn, commandLineWithDrain(decl, record, token))
 	if _, err := e.tmux(ctx, respawn...); err != nil {
 		_, _ = e.tmux(ctx, "kill-session", "-t", name)
 		return ResourceKey{}, err
 	}
 	e.awaitFirstFrame(ctx, decl.Resource)
+	started = true
 	return decl.Resource, nil
 }
 
@@ -177,8 +202,30 @@ func (e *TmuxExecutor) Probe(ctx context.Context, key ResourceKey) (ProbeResult,
 
 // Capture returns the frame tmux records for key: the pane's history and its
 // visible rows, read as one frame so a later read never replaces the output an
-// earlier read observed.
+// earlier read observed. The frame is verified against the token of the
+// generation this executor started for the key: a frame that does not carry the
+// marker before the generation was ever proven is another generation's
+// scrollback and is refused by name. The generation markers are stripped before
+// the frame is answered, so the marker never reaches user-visible output.
 func (e *TmuxExecutor) Capture(ctx context.Context, key ResourceKey) ([]byte, error) {
+	frame, err := e.captureRaw(ctx, key)
+	if err != nil {
+		return nil, err
+	}
+	generation, known := e.generationOf(key)
+	if !known || generation.proven {
+		return stripGenerationMarkers(frame), nil
+	}
+	if !e.noteGenerationProof(key, frame) {
+		return nil, fmt.Errorf("%w: %s", errStaleGeneration, key)
+	}
+	return stripGenerationMarkers(frame), nil
+}
+
+// captureRaw reads the frame tmux records for key without judging the
+// generation it belongs to: the start window and Capture build their verdicts
+// on it.
+func (e *TmuxExecutor) captureRaw(ctx context.Context, key ResourceKey) ([]byte, error) {
 	name, err := sessionNameOf(key)
 	if err != nil {
 		return nil, err
@@ -199,13 +246,16 @@ func (e *TmuxExecutor) Capture(ctx context.Context, key ResourceKey) ([]byte, er
 // ending is confirmed, because a client refused by a busy server reads no
 // sessions at all, and a server that left mid-read took every session with it;
 // the pane state beside its status is read in one message, and the record is
-// removed as it is read, so no status is kept beside a session that left.
+// removed as it is read, so no status is kept beside a session that left. The
+// fallback record is bound to the generation this executor started: a record a
+// different generation wrote is never used as this session's exit status.
 func (e *TmuxExecutor) Stop(ctx context.Context, key ResourceKey) (StopEvidence, error) {
 	name, err := sessionNameOf(key)
 	if err != nil {
 		return StopEvidence{Resource: key}, err
 	}
 	evidence := StopEvidence{Resource: key, ExitCode: -1}
+	generation, hasGeneration := e.generationOf(key)
 	names, err := e.sessionNames(ctx)
 	if err != nil {
 		evidence.Reason = err.Error()
@@ -214,6 +264,7 @@ func (e *TmuxExecutor) Stop(ctx context.Context, key ResourceKey) (StopEvidence,
 	if !containsName(names, name) {
 		if !sleepContext(ctx, tmuxStopRecheckGap) {
 			clearExitRecord(name)
+			e.forgetGeneration(key)
 			evidence.Confirmed = true
 			return evidence, nil
 		}
@@ -224,6 +275,7 @@ func (e *TmuxExecutor) Stop(ctx context.Context, key ResourceKey) (StopEvidence,
 		}
 		if !containsName(again, name) {
 			clearExitRecord(name)
+			e.forgetGeneration(key)
 			evidence.Confirmed = true
 			return evidence, nil
 		}
@@ -232,7 +284,10 @@ func (e *TmuxExecutor) Stop(ctx context.Context, key ResourceKey) (StopEvidence,
 	if deadErr == nil {
 		fields := strings.Fields(paneDeath)
 		if len(fields) > 0 && fields[0] == "1" {
-			recorded := takeRecordedExitStatus(name)
+			recorded := -1
+			if hasGeneration {
+				recorded = takeRecordedExitStatus(name, generation.token)
+			}
 			status := ""
 			if len(fields) > 1 {
 				status = fields[1]
@@ -247,6 +302,8 @@ func (e *TmuxExecutor) Stop(ctx context.Context, key ResourceKey) (StopEvidence,
 	if _, killErr := e.tmux(ctx, "kill-session", "-t", name); killErr != nil {
 		absent, probeErr := e.sessionAbsent(ctx, name)
 		if probeErr == nil && absent {
+			clearExitRecord(name)
+			e.forgetGeneration(key)
 			evidence.Confirmed = true
 			return evidence, nil
 		}
@@ -266,12 +323,17 @@ func (e *TmuxExecutor) Stop(ctx context.Context, key ResourceKey) (StopEvidence,
 		evidence.Reason = "the session survived the stop request"
 		return evidence, nil
 	}
+	clearExitRecord(name)
+	e.forgetGeneration(key)
 	evidence.Confirmed = true
 	return evidence, nil
 }
 
 // awaitFirstFrame observes the new session until its recorded frame carries
-// content or the Start window closes.
+// content or the Start window closes. A frame that carries the generation
+// marker proves the generation there, so the first verified read of the session
+// is already the answer's evidence; a frame without the marker keeps the window
+// open, because the generation is not proven yet.
 func (e *TmuxExecutor) awaitFirstFrame(ctx context.Context, key ResourceKey) {
 	window := e.startWindow
 	if window <= 0 {
@@ -283,8 +345,10 @@ func (e *TmuxExecutor) awaitFirstFrame(ctx context.Context, key ResourceKey) {
 	}
 	deadline := time.Now().Add(window)
 	for {
-		if frame, err := e.Capture(ctx, key); err == nil && len(bytes.TrimSpace(frame)) > 0 {
-			return
+		if frame, err := e.captureRaw(ctx, key); err == nil && len(bytes.TrimSpace(frame)) > 0 {
+			if e.noteGenerationProof(key, frame) {
+				return
+			}
 		}
 		if !time.Now().Before(deadline) || ctx.Err() != nil {
 			return

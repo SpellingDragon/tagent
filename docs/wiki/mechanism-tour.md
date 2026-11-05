@@ -51,7 +51,9 @@ assistant 输出 → 作为事实提交（提交失败=回合失败）
 → 渠道送达；失败自动转为持久补投义务（重启后仍欠）
 ```
 
-同一段路上有**两族投递**：agent 自己发的正文（`send`，落 `external_input`）与框架的结算/终态通知（落 `task_settled`）。两族事实类型分立，却盖同一套四键（`delivery.target`/`delivery.identity`/`delivery.receipt`/`delivery.source`），因此"一个源事件到达了哪些目标、各自什么回执"只有一种读法：`Run.DeliveryLedger()`。（[reliability/durable-delivery.md](reliability/durable-delivery.md#lineage-visibility)）
+同一段路上有**两族投递**：agent 自己发的正文（`send`，落 `external_input`）与框架的结算/终态通知（落 `task_settled`）。两族事实类型分立，却盖同一套五键（`delivery.target`/`delivery.identity`/`delivery.receipt`/`delivery.source`/`delivery.denial`），因此"一个源事件到达了哪些目标、各自什么回执"只有一种读法：`Run.DeliveryLedger()`。（[reliability/durable-delivery.md](reliability/durable-delivery.md#lineage-visibility)）
+
+**还欠什么是链上事实，不是旁路账本**：一条带正文的输出在**同一笔事实**里声明 owed（目标+血统），交付身份由落链后的 fact key 导出；之后**四结算态**（held[带 reason]/sent/refused/headless-retired）＋**迁移专用 owed 态**作为 `delivery.settlement` 族以「身份+状态」为键**追加式**落同一地址的链。重启只读链对账：已确认 sent 不重发，无结算事实或 held(retrying) 的续跑重试，**结果未知（超时）绝不自动重发**。可见性口径：结算事实按类型→角色映射进模型请求，owed 声明随 `agent_output` 本体呈现、无独立可见面；「发不出去且模型也没说」由既有失败告知与一条按 reason 分层的延迟告知兜住，对用户怎么说由模型自主。
 
 ## 6. 异步任务：受理与结算分离，mailbox 是唯一唤醒账
 

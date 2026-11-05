@@ -133,6 +133,8 @@ func (p *AgeFoldPlugin) Port() plugin.Port {
 // session registered no projection, a session whose window names no positive
 // token window and a projection still inside its threshold each leave the commit
 // as it stands. A failed judgment is reported without rolling the commit back.
+// - The presented projection is read first as the cheap gate: inside the threshold, the accounting-free view is inside it too, so the common commit pays one read and no rebuilt view.
+// - The fold judges that accounting-free view, because delivery accounting is presented to the model but never counts as the history that trips a fold (foldProjectionOf).
 func (p *AgeFoldPlugin) ObserveCommit(ctx context.Context, id event.EventID) error {
 	if p == nil || p.sessions == nil {
 		return nil
@@ -152,10 +154,19 @@ func (p *AgeFoldPlugin) ObserveCommit(ctx context.Context, id event.EventID) err
 	if threshold <= 0 {
 		return nil
 	}
-	report, err := projection.PlanByAge(ctx, replay.AgeFoldPlan{
-		KeepRecent:      window.KeepRecentTasks,
-		VolumeThreshold: threshold,
-	})
+	plan := replay.AgeFoldPlan{KeepRecent: window.KeepRecentTasks, VolumeThreshold: threshold}
+	gated, err := projection.PlanByAge(ctx, plan)
+	if err != nil {
+		return err
+	}
+	if !gated.Triggered {
+		return nil
+	}
+	folded := foldProjectionOf(ctx, projection)
+	if folded == nil {
+		return nil
+	}
+	report, err := folded.PlanByAge(ctx, plan)
 	if err != nil {
 		return err
 	}
