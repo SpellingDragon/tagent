@@ -30,7 +30,7 @@
   "exceptions": [
     {
       "key": "meditation",
-      "reason": "The host schema still declares meditation as a dedicated section; ADR 0004 moves it to the generic plugins mount in the meditation-autonomy work. Registered once as grandfather debt at the guard landing, not as a precedent for another feature section.",
+      "reason": "The host schema still declares meditation as a dedicated section. The schema migration to a generic plugins mount was ruled out of scope for boundary-closure (ADR 0004); meditation is instead mounted through the three hooks as a plugin while its configuration section stays. Registered once as grandfather debt at the guard landing, not as a precedent for another feature section.",
       "adr": "docs/adr/0006-three-hooks-is-the-core-iteration-principle.md",
       "user_ruling": "boundary-closure r19",
       "review_by": "2027-05-05"
