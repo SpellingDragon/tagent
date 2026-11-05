@@ -15,7 +15,7 @@
 - **memory/query_events.go（F3/F11 定版）**：`QueryOptions` 新增**未导出字段 `keyPrefix`** + `Prefix()` 读取方法 + `WithKeyPrefix()` 值拷贝设置方法（不新增导出字段）；结算事实以该前缀过滤**返回集**（`delivery.` 前缀）；扫描面是 `r.facts` 事实窗口内，代价 **O(事实窗口内)**，过滤本身不改变扫描量
 - **assembly/run.go（F2/F3/F13 定版）**：`r.replays` 的会话注册枚举（同包读面）——**映射序列仅用于会话枚举**；恢复枚举的 owed 声明读 **`r.facts` 事实窗口内内 agent_output 的 Meta**（`r.facts` 本就是事实窗口内事实表），代价 **O(事实窗口内)**；查询 `PartitionIDs` 由 replays 注册键经 `PartitionIDFromName` 派生（分区来自 replays 而非盲扫）。**该事实窗口内面与 03 的 1.2a 共用；跨域集成测试归 03 的 1.2a（`TestAssemblyObservedReplayFactsBounded`/`TestAssemblyColdWindowReadback`）；本域用 `TestSettlementFactsStayHotWhileUnsettled` 锁定未清交付事实驻留。**
 - assembly/host_delivery.go / host.go：恢复读链、审批落事实、兜底告知
-- **changes/01-delivery-closure/specs/delivery-dispatch-receipts/spec.md**：MODIFIED「发送动作身份与未确认结果」（全文保留既有条款+活进程内限定词+重启补送追加句）；**changes/01-delivery-closure/specs/failure-notice/spec.md**：MODIFIED「成功与静默边界不得被失败话术污染」（全文保留+「成功但无正文保持静默」场景的延迟告知豁免句）；**本域归档时含四个 delta：delivery-closure、delivery-dispatch-receipts、fact-vocabulary、failure-notice**
+- **specs/delivery-dispatch-receipts/spec.md**：MODIFIED「发送动作身份与未确认结果」（全文保留既有条款+活进程内限定词+重启补送追加句）；**specs/failure-notice/spec.md**：MODIFIED「成功与静默边界不得被失败话术污染」（全文保留+「成功但无正文保持静默」场景的延迟告知豁免句）；**本域归档时含四个 delta：delivery-closure、delivery-dispatch-receipts、fact-vocabulary、failure-notice**
 - assembly/boundary_closure_anchor_test.go 等测试：三锚转绿+负锚（锚①另断言收件方收到恰 1 条失败通知，由失败告知（支①）承担）
 - docs/FACT-VOCABULARY.md、docs/wiki/mechanism-tour.md、docs/wiki/agent/agent-architecture.md、docs/GLOSSARY.md：登记与概念同步
 

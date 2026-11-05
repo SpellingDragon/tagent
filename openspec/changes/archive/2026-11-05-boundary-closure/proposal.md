@@ -31,22 +31,22 @@
 
 ## Capabilities（spec 已下沉二级）
 
-- 二级 `changes/01-delivery-closure/specs/delivery-closure/spec.md`：可靠交付闭合契约
-- 二级 `changes/01-delivery-closure/specs/delivery-dispatch-receipts/spec.md`：发送动作身份与未确认结果（MODIFIED 于既有能力；全文保留既有条款+活进程内限定词+重启补送追加句）
-- 二级 `changes/01-delivery-closure/specs/fact-vocabulary/spec.md`：事实族登记（ADDED 第十一族）
-- 二级 `changes/01-delivery-closure/specs/failure-notice/spec.md`：静默边界（MODIFIED；仅增未清 held 义务场景的延迟告知豁免句，非新通道）
-- 二级 `changes/02-request-budget/specs/request-budget-accounting/spec.md`：最终请求预算契约（MODIFIED 于既有能力）
-- 二级 `changes/03-resource-bounds/specs/resource-bounds/spec.md`：运行资源有界契约
-- 二级 `changes/04-exec-integrity/specs/exec-integrity/spec.md`：exec 回执完整性契约
-- 二级 `changes/05-fold-provenance/specs/fold-provenance/spec.md`：折叠可追溯契约
-- 二级 `changes/06-live-benchmark/specs/live-benchmark/spec.md`：对照实验契约
-- 二级 `changes/07-training-sample-loop/specs/training-sample-loop/spec.md`：训练样本闭环契约
-- 二级 `changes/08-config-liveness/specs/config-liveness/spec.md`：链上配置五不变量（ADDED）
-- 二级 `changes/08-config-liveness/specs/config-hot-reload/spec.md`：配置热更维度矩阵链真词化（MODIFIED 于既有能力）
-- 二级 `changes/09-meditation-autonomy/specs/meditation-autonomy/spec.md`：冥想自主面＋状态机不变量（ADDED）
-- 二级 `changes/09-meditation-autonomy/specs/meditation-idle-gating/spec.md`：独立门控能力退役（REMOVED）
-- 二级 `changes/09-meditation-autonomy/specs/meditation-agent-partition/spec.md`：自察主体/专属反思会话（MODIFIED 于既有能力）
-- 二级 `changes/09-meditation-autonomy/specs/self-improvement-meditation/spec.md`：叙事对齐自察宿主（MODIFIED 于既有能力）
+- 二级 `../01-delivery-closure/specs/delivery-closure/spec.md`：可靠交付闭合契约
+- 二级 `../01-delivery-closure/specs/delivery-dispatch-receipts/spec.md`：发送动作身份与未确认结果（MODIFIED 于既有能力；全文保留既有条款+活进程内限定词+重启补送追加句）
+- 二级 `../01-delivery-closure/specs/fact-vocabulary/spec.md`：事实族登记（ADDED 第十一族）
+- 二级 `../01-delivery-closure/specs/failure-notice/spec.md`：静默边界（MODIFIED；仅增未清 held 义务场景的延迟告知豁免句，非新通道）
+- 二级 `../02-request-budget/specs/request-budget-accounting/spec.md`：最终请求预算契约（MODIFIED 于既有能力）
+- 二级 `../03-resource-bounds/specs/resource-bounds/spec.md`：运行资源有界契约
+- 二级 `../04-exec-integrity/specs/exec-integrity/spec.md`：exec 回执完整性契约
+- 二级 `../05-fold-provenance/specs/fold-provenance/spec.md`：折叠可追溯契约
+- 二级 `../06-live-benchmark/specs/live-benchmark/spec.md`：对照实验契约
+- 二级 `../07-training-sample-loop/specs/training-sample-loop/spec.md`：训练样本闭环契约
+- 二级 `../08-config-liveness/specs/config-liveness/spec.md`：链上配置五不变量（ADDED）
+- 二级 `../08-config-liveness/specs/config-hot-reload/spec.md`：配置热更维度矩阵链真词化（MODIFIED 于既有能力）
+- 二级 `../09-meditation-autonomy/specs/meditation-autonomy/spec.md`：冥想自主面＋状态机不变量（ADDED）
+- 二级 `../09-meditation-autonomy/specs/meditation-idle-gating/spec.md`：独立门控能力退役（REMOVED）
+- 二级 `../09-meditation-autonomy/specs/meditation-agent-partition/spec.md`：自察主体/专属反思会话（MODIFIED 于既有能力）
+- 二级 `../09-meditation-autonomy/specs/self-improvement-meditation/spec.md`：叙事对齐自察宿主（MODIFIED 于既有能力）
 - 一级仅留 `specs/orchestration/spec.md`（编排契约：启动门/波次/契约守护/DoD）
 
 ## Impact

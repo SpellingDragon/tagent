@@ -70,7 +70,7 @@
 - `examples/wechat-bot/`（main/wechat.go）：watcher 接线（hash 轮询＋防抖＋只监听 `TAGENT_CONFIG`）。
 - `examples/wechat-bot/deploy/README.md`：重启要求改热更说明；prompt 行为如实。
 - `docs/GLOSSARY.md`：配置变更词条链真词化（文件是编辑界面、链是账、唯一发布入口、回执如实）；`docs/wiki/` 相关页同步。
-- `openspec/changes/boundary-closure/changes/08-config-liveness/specs/config-liveness/spec.md`（ADDED）与 `specs/config-hot-reload/spec.md`（MODIFIED「配置热更维度矩阵」）。
+- `openspec/changes/08-config-liveness/specs/config-liveness/spec.md`（ADDED）与 `specs/config-hot-reload/spec.md`（MODIFIED「配置热更维度矩阵」）。
 
 ## 风险与回退
 

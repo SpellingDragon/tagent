@@ -439,6 +439,22 @@
       "count": 1
     },
     {
+      "file": "openspec/specs/config-liveness/spec.md",
+      "requirement": "声明事实带载荷可审计",
+      "rule": "function-call",
+      "text_sha256": "ddb63253af680dc655b16b33d8fa3258eca2f82708b5d6db790ebd304a260557",
+      "preview": "每次 Boot/Reload 装载成功后 MUST 提交一条带载荷的声明事实：类型 `config.declaration`（单源 `api/config` 既有 `Declaration.FactType()`，assembly 只读引用、不自立常量）、身份=规范指纹（族 4 既有）、Content=规范声明序列化；",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/config-liveness/spec.md",
+      "requirement": "声明事实带载荷可审计",
+      "rule": "numeric-constant",
+      "text_sha256": "ddb63253af680dc655b16b33d8fa3258eca2f82708b5d6db790ebd304a260557",
+      "preview": "每次 Boot/Reload 装载成功后 MUST 提交一条带载荷的声明事实：类型 `config.declaration`（单源 `api/config` 既有 `Declaration.FactType()`，assembly 只读引用、不自立常量）、身份=规范指纹（族 4 既有）、Content=规范声明序列化；",
+      "count": 1
+    },
+    {
       "file": "openspec/specs/config-state-twinship/spec.md",
       "requirement": "config→plan→govern→state 管道",
       "rule": "numeric-constant",
@@ -476,6 +492,46 @@
       "rule": "numeric-constant",
       "text_sha256": "7b15086c41d5b0d9f4358cc42b37b7e8ab0a3a5b5a0992ebdfd832e5f3f3349b",
       "preview": "系统 MUST 提供三项独立可配置行为，仅在 DegradationManager 启用时生效，每项默认关闭（零行为变化）：model 退化→runEventLoop turn 间退避（`degradation_model_backoff`，默认 0 关）；mcp 退化→mcp_call 熔断快失败（返回含自纠材料的 ",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/delivery-closure/spec.md",
+      "requirement": "兜底告知两支：失败告知与延迟告知（r8 F1 定版；r9 F3 收口）",
+      "rule": "numeric-constant",
+      "text_sha256": "07a2e195508a16f2a615541f344d235727a078f3d1f8f47a81ebc626738df960",
+      "preview": "支② MUST NOT 以“成功终态”为前置：body 存在⇒owed 随 agent_output 在链上，send 失败落 held，该前提不可达；延迟告知在模型感知 held 之后、该驱动轮（=当前观察轮，产生该通知判定的那一轮）无面向用户产出时发出，**且不限于 answer 轮终态**（任何驱动该义务的轮结束",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/delivery-closure/spec.md",
+      "requirement": "兜底告知两支：失败告知与延迟告知（r8 F1 定版；r9 F3 收口）",
+      "rule": "numeric-constant",
+      "text_sha256": "aa302b114a9e43c6d6bb13d7a7479feed800a5de26258c858b78e25b2eef36fc",
+      "preview": "| ② | **延迟告知** | **存在未清 held 交付义务 × 该义务的驱动轮（=当前观察轮，产生该通知判定的那一轮）结束无面向用户产出** | 01 新增恰一条最小延迟告知，话术按 held.reason 分层：`retrying`→稍后必补送；`approval`/`unknown`/`retry-exha",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/delivery-closure/spec.md",
+      "requirement": "兜底告知两支：失败告知与延迟告知（r8 F1 定版；r9 F3 收口）",
+      "rule": "numeric-constant",
+      "text_sha256": "d6629b1d92e2845bdd1e13f30fa121ab5b220595647c799efb3de83d915cf9d6",
+      "preview": "| ① | **失败告知** | failed 终态 + 无正文 + 有原因（义务是否未清不影响） | 既有 failure-notice 照发；01 不新增第二条告知通道，只保证该通知必然发生 |",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/delivery-closure/spec.md",
+      "requirement": "恢复只读链与旧 KV 六态迁移",
+      "rule": "function-call",
+      "text_sha256": "55ace1277a7655aeabc2c3d8fcf12aa47f04b087705262d356a6ba8370da2fbe",
+      "preview": "重启恢复的补送范围 MUST 为**无结算事实 ∪ held(reason=retrying)** 的义务：中断在退避途中的义务 MUST 在重启后续跑重试（不因重启搁浅），已确认 sent 的义务 MUST NOT 重发（**at-least-once**：发过未销账窗口内可能重发一次，与 durable-deliv",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/delivery-closure/spec.md",
+      "requirement": "错误分类驱动的重试",
+      "rule": "function-call",
+      "text_sha256": "ddbba233fdfeef4a4b8f04dfb5e063fe046ca634e41e0cc0e7b395d750d8feff",
+      "preview": "发送失败的分类 MUST 互斥：渠道确定性拒绝（连接被拒、鉴证失败、渠道明确否定完成，且非超时形状）为**明确失败**，MUST 有界退避自动重试（退避序列与次数上限为实现常量，见 design）；**首次重试前 MUST 写 held(reason=retrying) 结算事实**（成功后由 sent 覆盖对账），重",
       "count": 1
     },
     {
@@ -783,6 +839,14 @@
       "count": 1
     },
     {
+      "file": "openspec/specs/fact-vocabulary/spec.md",
+      "requirement": "交付结算族（第十一族）",
+      "rule": "numeric-constant",
+      "text_sha256": "9c1eec7f4cf0c8df6b7cdfa9ae3ad033281da162988da43e4e54d6bb6fe0b999",
+      "preview": "事实族登记 SHALL 新增第十一族（既有九族编号 1-5、7-10 不变，6 留空不排）：**交付结算**——归属包 `assembly`、身份 `delivery.<交付身份>.<终态>`（键含状态；同键同内容幂等、同键异内容冲突拒收；按 `delivery.<身份>.` 前缀回读全状态线）、类型 `deliver",
+      "count": 1
+    },
+    {
       "file": "openspec/specs/failure-polarity/spec.md",
       "requirement": "结算信号与通知携带 exit_code",
       "rule": "numeric-constant",
@@ -804,6 +868,14 @@
       "rule": "numeric-constant",
       "text_sha256": "5f328762830ebe43d9f2394b25488c6e6d232a687e7d78155442e51138b8d0e3",
       "preview": "MetricGuardrail canary 窗口 MUST 聚合 `negative_feedback_rate`（经 feedback 因果边 join 到 parent 事件的 bundle_id 归因），阈值独立配置（MaxNegFbRate：0=默认 0.3，负值=显式禁用）。",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/fold-provenance/spec.md",
+      "requirement": "折叠摘要携带时序与世代",
+      "rule": "numeric-constant",
+      "text_sha256": "2d32fe0bc8c1d3fdf8c6fae87faa5807fe5dd7f8b579679251e4039f56292b7d",
+      "preview": "折叠摘要行 MUST 以行首锚点携带事件时刻（至少天级+时:分）与 recorder 世代标识；世代标识 MUST 取信封 instance_id 的**完整值**（MUST NOT 截断，如只取前 8 位）；该值 MUST 可经既有投影条目读取面取得（承载字段与读取方法的实现形态见 design，MUST NOT 新",
       "count": 1
     },
     {
@@ -919,14 +991,6 @@
       "count": 1
     },
     {
-      "file": "openspec/specs/meditation-idle-gating/spec.md",
-      "requirement": "水位执行语义与让位补位",
-      "rule": "numeric-constant",
-      "text_sha256": "04fb7e2763135a103a6f30d449e8e6a76dcc1d48b0d0db675daa9ca3e5630e7e",
-      "preview": "冥想水位 SHALL 在冥想 turn 被消费时推进（注入时刻为水位值），MUST NOT 在注入时推进；混合批让位 SHALL 记为推迟（水位不动、pending 清零、下个 interval 重试）；pending SHALL 防重入，长期未决（超 3×interval）只 SHALL 出 WARN 观察线而 MU",
-      "count": 1
-    },
-    {
       "file": "openspec/specs/memory-curation/spec.md",
       "requirement": "卡片序列（历史表示的唯一对象）",
       "rule": "numeric-constant",
@@ -994,8 +1058,8 @@
       "file": "openspec/specs/orchestration/spec.md",
       "requirement": "共享面由冻结方单写",
       "rule": "numeric-constant",
-      "text_sha256": "53fc4bcd2238bc656b375b2b113b021b8631607697397c3fb3a1fb9cecab3d47",
-      "preview": "`api/event` 的类型与 meta 键 SHALL 由 01 域单写并在其入 next 后冻结；此后任何",
+      "text_sha256": "9b268a751986271f960021ecbcb4de4666f53fd79fa117de4ff3c21c74920839",
+      "preview": "`api/event` 的类型与 meta 键 SHALL 由 01 域单写并在其入 main 后冻结；此后任何",
       "count": 1
     },
     {
@@ -1016,10 +1080,10 @@
     },
     {
       "file": "openspec/specs/orchestration/spec.md",
-      "requirement": "变更级 DoD 以两证与全量门为准",
+      "requirement": "变更级 DoD",
       "rule": "numeric-constant",
-      "text_sha256": "8f4241368fcd0ef6b88c1c91ea9ba65fd77afea034eb7a8a04fb4fd5fffe98d1",
-      "preview": "全量项目门 exit 0、`openspec archive` 完成；缺任一项 SHALL 视为未完成。",
+      "text_sha256": "df481762836200fe735b6f98a71d24de2da4f63f047635ee9a35fb0da1a3bb0a",
+      "preview": "一级变更完成 SHALL 同时满足：七条症状锚全绿、全量门禁与 race 门 exit 0、**08 证据位（声明事实/发布记录/失败回执三链测试＋watcher 三例＋重启对账/跨维窗口）与 09 证据位（自主整理、自察四测试、激活因果、自管产出不计入状态积累）各有 PASS 行**、06 的对照 run（含任务成功",
       "count": 1
     },
     {
@@ -1040,10 +1104,10 @@
     },
     {
       "file": "openspec/specs/orchestration/spec.md",
-      "requirement": "启动门",
+      "requirement": "启动门——症状锚先红",
       "rule": "numeric-constant",
-      "text_sha256": "92abfc3096249785827babf429b55ac980d2233a086a0f158b2acca9d430c2ec",
-      "preview": "批 1 SHALL 以 fidelity-and-recovery 全部完成为前置（G4/3.2/1.2）。",
+      "text_sha256": "fbc84a753a0febdec82c729dfe02cfca5cd929b69b65a82480a3338e38a3114d",
+      "preview": "一级变更 SHALL 在任何实现派发前，把六条症状锚（快）测试落在基线树上并确认全部红着（锚①-④在 assembly、⑥在 tool/exec、⑦在 memory/replay），并以症状锚⑤（慢）（既有 TestLocalSmoke）的评审两次实测红凭据为计划期凭据（自有红证于 W2 首日、W1 合并增量（01+0",
       "count": 1
     },
     {
@@ -1052,6 +1116,22 @@
       "rule": "numeric-constant",
       "text_sha256": "17f285598f67bdf8a12c546eea1c97253a2b0b0aadc20c1f9dc9b49e0735cff7",
       "preview": "启动门的裁定背景：attention 与 PR #33 并行推进、在同一分支汇合后一并合并；实施基线 = 含 PR #33 内容的合并线。",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/orchestration/spec.md",
+      "requirement": "契约守护",
+      "rule": "go-file",
+      "text_sha256": "0bd22e4e2428a3b5601f3db27281af9170c5ae5ac69ca65e66575a7cdc9d9686",
+      "preview": "本变更 SHALL 保持 `api/**` 零改动，唯一例外=`api/config` 新增两个可选字段（02 的 provider 窗口与输出余量声明；**预算门开 ⟺ 显式 provider 窗口声明 ∨ AgentSpec.MaxTokens>0（缺省推导）；MaxTokens=0 且未显式声明 = 预算门不启用",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/orchestration/spec.md",
+      "requirement": "契约守护",
+      "rule": "numeric-constant",
+      "text_sha256": "0bd22e4e2428a3b5601f3db27281af9170c5ae5ac69ca65e66575a7cdc9d9686",
+      "preview": "本变更 SHALL 保持 `api/**` 零改动，唯一例外=`api/config` 新增两个可选字段（02 的 provider 窗口与输出余量声明；**预算门开 ⟺ 显式 provider 窗口声明 ∨ AgentSpec.MaxTokens>0（缺省推导）；MaxTokens=0 且未显式声明 = 预算门不启用",
       "count": 1
     },
     {
@@ -1455,6 +1535,14 @@
       "count": 1
     },
     {
+      "file": "openspec/specs/request-budget-accounting/spec.md",
+      "requirement": "完整预算输入与诚实精度",
+      "rule": "numeric-constant",
+      "text_sha256": "8b72106d580931a6d66076be155882990078cc0f5045bd7c6f5db77f8c813bd3",
+      "preview": "预算 SHALL 包括 system、messages、工具 schema/参数、reasoning、ContentParts、任务板和恢复提示；无法可靠估计的媒体 MUST 标 unknown，不能当零或宣称精确。输入预算与输出 limit 语义保持分离。预算裁决 MUST 位于最终请求拼装处（模型请求离开系统前的最",
+      "count": 1
+    },
+    {
       "file": "openspec/specs/resident-release-evidence/spec.md",
       "requirement": "required 汇总不因取消跳过缺失而放行",
       "rule": "function-call",
@@ -1524,6 +1612,30 @@
       "rule": "numeric-constant",
       "text_sha256": "5cc2e0c26ba98e75d00e681e6ae8195f98505feae907e07ec7f7dfd1bdcaf56e",
       "preview": "会话存活判定 SHALL 三态：**alive**（list-sessions 列出该会话）/ **dead**（命令成功且会话不在列表）/ **unknown**（命令 err）。探测 SHALL 以 `list-sessions` 为准（`has-session` 的 exit 1 不可辨 dead 与 unkno",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/resource-bounds/spec.md",
+      "requirement": "冒烟内存门（口径已裁决：真占用）",
+      "rule": "numeric-constant",
+      "text_sha256": "011ece509e0310a101a208599cf49f75ffcd726c09b81b59c4c4670a9e6be96b",
+      "preview": "完整本地冒烟（300 轮）的真占用堆增长 MUST ≤128 KiB/轮（强制 GC 后稳定常驻采样为判定数）；虚胖分量（已归还系统未收回）MUST 单独记录并设观测上限=**真占用门的 50%（64 KiB/轮）**，超限 MUST 记告警事实，MUST NOT 无限膨胀，但不作过关判据。",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/resource-bounds/spec.md",
+      "requirement": "空闲地址回收",
+      "rule": "function-call",
+      "text_sha256": "478d41b1226d8998a1da3f3313084c5103fb8d23394dce7e8656f96249c9ef25",
+      "preview": "常驻消费地址在无在途段、无未收通知**且无未清交付义务（含 held(reason=retrying) 的重试间隙）**超过空闲 TTL 后 MUST 被回收且可幂等重建；有在途工作或未清义务的地址 MUST NOT 被回收。回收与虚胖告警 MUST 以具名计数与日志可观测。",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/resource-bounds/spec.md",
+      "requirement": "装配侧观察与回放内存有界",
+      "rule": "numeric-constant",
+      "text_sha256": "37acda019b0989ab7ea7b15bed75efa96cf0c22e3906f66fcad594ba25903e57",
+      "preview": "装配根的观察面、回放注册表与已提交事实表 MUST 以事实窗口为界：事实窗口外的材料 MUST 按既有键/前缀从持久段回读，MUST NOT 随进程运行时长无界常驻；事实窗口内 MUST 有显式预算并被测试锁定。**未清交付事实（held/owed 活动集）MUST 驻留事实窗口内，MUST NOT 落到事实窗口外；D",
       "count": 1
     },
     {

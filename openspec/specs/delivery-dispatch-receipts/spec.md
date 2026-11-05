@@ -1,9 +1,9 @@
 # delivery-dispatch-receipts Specification
 
 ## Purpose
-TBD - created by archiving change delivery-intent-and-receipts. Update Purpose after archive.
-## Requirements
+定义外部发送动作的身份、确认状态与未确认结果处置：已确认动作不得因恢复或重入重发；活进程内结果未知时保留原动作身份与错误且不自动重发；重启恢复仅对无结算事实的义务按 at-least-once 边界补送。
 
+## Requirements
 ### Requirement: 预期外静默终态必回执
 
 宿主分发层 SHALL 对以下终态注入回执事件：发送失败（ERROR 级）、未知/未声明血统消化（WARN）、冥想扣留且内容含交付特征（WARN）、error 分支扣留（WARN）、无目标扣留（WARN）。已送达 SHALL 不回执；冥想扣留且无交付特征（纯叙事）SHALL 维持契约内静默、不回执。
@@ -53,7 +53,7 @@ lineage 为 `delivery_receipt` 的最终响应被消化时 SHALL 不再产生回
 
 ### Requirement: 发送动作身份与未确认结果
 
-每一次外部发送 SHALL 以其动作身份记录确认状态，动作身份沿用 `event-metadata-contract`「通知身份、事实引用与消费身份分层」的发送轴，MUST NOT 以正文、时间戳或另一个动作的身份代替。已确认成功的动作 MUST NOT 因恢复、重放、重入或后续 turn 再次执行。结果未知（确认丢失、超时、错误不可辨）MUST 保留动作身份、目标、错误与未确认状态，MUST NOT 自动重发、MUST NOT 伪报成功。显式重试 SHALL 经既有正式入口或人工处置，并保留与原动作的关联。不同动作身份 MUST NOT 合并；同一动作身份但目标或正文不同 MUST 被判为冲突并具名拒绝。
+每一次外部发送 SHALL 以其动作身份记录确认状态，动作身份沿用 `event-metadata-contract`「通知身份、事实引用与消费身份分层」的发送轴，MUST NOT 以正文、时间戳或另一个动作的身份代替。已确认成功的动作 MUST NOT 因恢复、重放、重入或后续 turn 再次执行。结果未知（确认丢失、超时、错误不可辨）**在活进程内** MUST 保留动作身份、目标、错误与未确认状态，MUST NOT 自动重发、MUST NOT 伪报成功；重启恢复按本节 at-least-once 边界句处置（不属活进程内未知结果的自动重发）。显式重试 SHALL 经既有正式入口或人工处置，并保留与原动作的关联。不同动作身份 MUST NOT 合并；同一动作身份但目标或正文不同 MUST 被判为冲突并具名拒绝。重启恢复对**无结算事实**的交付义务按 at-least-once 补送（发过未销账窗口内可能重发一次，收方按交付身份去重）；已确认 sent 的动作绝不重发；本句不改变活进程内未知结果的处置。
 
 #### Scenario: 已确认动作重入不重发
 
@@ -63,9 +63,10 @@ lineage 为 `delivery_receipt` 的最终响应被消化时 SHALL 不再产生回
 
 #### Scenario: 结果未知不自动重发
 
-- **WHEN** 发送动作返回超时或确认不可辨
+- **WHEN** 活进程内发送动作返回超时或确认不可辨
 - **THEN** 该动作 SHALL 保持未确认状态并保留目标与错误
 - **AND** MUST NOT 自动重发或声明已送达
+- **AND** 重启恢复路径按本节 at-least-once 边界句处置（不属本场景）
 
 #### Scenario: 不同动作身份不合并
 
@@ -79,7 +80,6 @@ lineage 为 `delivery_receipt` 的最终响应被消化时 SHALL 不再产生回
 - **THEN** 新动作 SHALL 关联原动作身份与重试原因
 - **AND** MUST NOT 被记作一次无来源的全新发送
 
-
 ### Requirement: 投递前审核四态
 工具结果向模型的投递在发出前 MUST 经审核裁定：Hold SHALL 阻塞至裁定、Send SHALL 携带裁定放行、默认放行 MUST 仅在无审核规则时成立、审核失败 SHALL 以回执可见。
 
@@ -90,3 +90,4 @@ lineage 为 `delivery_receipt` 的最终响应被消化时 SHALL 不再产生回
 #### Scenario: 审核失败以回执可见
 - **WHEN** 审核自身失败
 - **THEN** 产生具名失败回执，投递不静默消失
+

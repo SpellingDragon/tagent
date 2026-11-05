@@ -63,7 +63,7 @@
 - `assembly/host_document.go` / `host_tools.go`：**默认不动**（F25 收窄；既有 `meditation` 节已注册，工具白名单文件不改）。若既有声明路径必须改动，因与 08 同文件，上报编排者合单或串行；不得新增冥想专属运行时分支。
 - `prompts/meditation.md`：工具面边界句更新（素材=摘要＋可回查工具）。
 - `docs/README` 与日志头：措辞修正；**wiki 归 08 归口，09 默认不动**（若必须改=与 08 合单）。
-- `openspec/changes/boundary-closure/changes/09-meditation-autonomy/specs/`：四个 delta（autonomy ADDED、idle-gating REMOVED 四旧条款＋一条退役记录 ADDED（防空 spec）、agent-partition MODIFIED、self-improvement MODIFIED）。
+- `openspec/changes/09-meditation-autonomy/specs/`：四个 delta（autonomy ADDED、idle-gating REMOVED 四旧条款＋一条退役记录 ADDED（防空 spec）、agent-partition MODIFIED、self-improvement MODIFIED）。
 
 ## 风险与回退
 

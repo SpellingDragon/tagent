@@ -5,7 +5,6 @@
 > **复核注记（2026-11-04 逐模块核对）**：:9 的「五个既有独立热参数」与 :37 的 `task_default_ttl` 场景已按码面就地更正为三个热参（`api/config/decode.go:160-161` 只声明 `max_tokens`/`compress_threshold`/`keep_recent_tasks`）；`task_terminal_ttl`/`task_default_ttl` 在 `tagent.yaml:123` 标「待接线」、`assembly.WithTaskTerminalTTL`（`run.go:964`）无调用点。TTL 是否接线属 B-04 裁定项，本页不预设结论。
 配置热重载的统一应用模型：全部热参数与结构候选在同一次混合事务中准备就绪才提交，结构发布不跳过数值应用、数值应用不落在无人服务的对象上，杜绝半应用代。
 ## Requirements
-
 ### Requirement: 配置热更统一应用模型
 
 配置热更 MUST 以逐 agent 解析默认值后的完整有效配置为基线。三个既有独立热参数（compress_threshold / max_tokens / keep_recent_tasks；`task_terminal_ttl` / `task_default_ttl` 未接线，见 `tagent.yaml:123`）与结构指纹字段在同一次混合候选中 MUST 全部准备成功才提交；结构发布不能跳过数值应用，数值应用不能仅修改常驻 entry 或不服务请求的 resident 对象。
@@ -131,7 +130,9 @@
 
 ### Requirement: 配置热更维度矩阵
 
-控制面的三层语义 SHALL 如此分工：配置文件是**声明源**（静态真源，声明哪些维度存在）；`config_change` 事实是**控制流水**（谁在何时把哪个维度从什么改成了什么的唯一记录）；**行为投影**是生效路径（发布换代与请求边界从声明源与控制流水投影实际值）。结构性维度（model/prompt/binding/org.*）的生效经发布换代、事实为其变更流水；FILE 维度的内容以事实为正源（声明只引用路径，正文住在链上）。MUST NOT 存在这三层之外的第四条生效路径。
+控制面的三层语义 SHALL 如此分工：**配置文件是编辑界面**（单向流入：声明哪些维度存在、承载编辑动作，但不是账）；**链上声明事实**（`config.declaration`）是配置真相（身份=规范指纹、Content=规范声明序列化，可回读；大正文按既有内容寻址文件事实模式引用）；**唯一发布入口**是生效路径（发布换代与请求边界从链上声明事实投影实际值；治理裁决、基线复检、发布记录与 Hold 换代 MUST 原样保留）。结构性维度（model/prompt/binding/org.*）的生效经发布换代、事实为其变更流水；FILE 维度的内容以事实为正源（声明只引用路径，正文住在链上）。MUST NOT 存在这三层之外的第四条生效路径——裸文件读、内存直写与旁路 setter 均不构成生效。
+
+每次装载成功后 MUST 提交带载荷的声明事实；每次发布尝试 MUST 落带 result 的链上事实（失败 result 至少区分装载失败、治理拒绝、安装失败）；`/reload` 回执 MUST 读账如实——发布或安装失败 MUST 报失败，MUST NOT 回成功，MUST NOT 以内存状态自证。声明事实与发布记录 MUST 携带代号与前后关系；绑定代与模型版本两个切换点的窗口内决策组合 MUST 账面可查。重启对账 MUST 以文件指纹与链上最新声明指纹判定：一致即静默（零发布、绑定代不前进）；文件较新 MUST 自动走唯一发布入口；链较新时 MUST 以链为准并记录文件滞后，MUST NOT 用陈旧文件覆盖链（不漂移）。
 
 每个子 agent 配置维度 SHALL 归属且仅归属一条热通道：**FP 代际面**（视图变更，下回合生效、在途钉定；入口移动与代理集合增删属此面——随发布换代生效、在途回合保持旧视图、移除代理的地址对新输入具名拒绝）、**SRC 源拉取面**（参数变更，下一次消费即生效）或 **FILE 事实面**（文件是声明来源，其变更落 `config_change` 事实（dimension=file），消费边界从事实投影，如 prompt 正文与 mcp_servers）；或明示的 **RESTART 拒**（目录/端点类不可迁移资源，拒绝即正确行为）。维度归属与消费点 SHALL 以矩阵形式登记，每行 SHALL 携带代码行号或测试名证据；**携带而消费点未读＝假热更**，SHALL 视为缺陷而非"部分支持"。（三通道划分系域 01 执行期情报 C1 回写：初稿"FP/源"二分与既有 FILE 懒读通道冲突，不得为凑二分法拆毁既有机制）
 
@@ -151,6 +152,21 @@ FILE 变化 SHALL 落 `config_change` 事实（dimension=file）并在**请求�
 
 - **WHEN** prompt/skill 文件在两次请求之间被修改
 - **THEN** 该修改 SHALL 落 `config_change` 事实（dimension=file），下一请求边界 SHALL 从事实读取新版本并固化；结构 generation SHALL NOT 变化；在途请求 SHALL 保持其已固化版本
+
+#### Scenario: 安装失败回执读账
+
+- **WHEN** 新代已发布而模型重建或安装失败
+- **THEN** 链上落 `install-failed` 发布事实，/reload 回执返回失败与具名原因，MUST NOT 返回成功
+
+#### Scenario: 跨维窗口可查
+
+- **WHEN** 一次发布同时切换绑定代与模型版本
+- **THEN** 按代号读取发布记录即可还原该窗口的"哪一代绑定 × 哪一版模型 × 各维生效结果"
+
+#### Scenario: 重启一致静默
+
+- **WHEN** 进程重启时文件指纹与链上最新声明指纹一致
+- **THEN** 零发布、绑定代不前进，不产生新的发布记录
 
 ### Requirement: 提交点记录即消费值
 
@@ -214,3 +230,4 @@ org 热更在提交点把某 agent 的热参记为 `applied` 时，该 agent 的
 - **WHEN** 替换成功且 generation 推进后发起新请求
 - **THEN** 实际请求 MUST 绑定新生效版本，并以请求侧可见证据断言
 - **AND** MUST NOT 以替换回执自证代替请求侧证据
+
