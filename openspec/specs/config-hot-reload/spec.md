@@ -2,7 +2,7 @@
 
 ## Purpose
 
-> **复核注记（2026-11-04 逐模块核对）**：:9 的「五个既有独立热参数」与 :37 的 `task_default_ttl` 场景已按码面就地更正为三个热参（`api/config/decode.go:160-161` 只声明 `max_tokens`/`compress_threshold`/`keep_recent_tasks`）；`task_terminal_ttl`/`task_default_ttl` 在 `tagent.yaml:123` 标「待接线」、`assembly.WithTaskTerminalTTL`（`run.go:964`）无调用点。TTL 是否接线属 B-04 裁定项，本页不预设结论。
+> **复核注记（2026-11-04 逐模块核对，行号 2026-11-06 复核）**：:9 的「五个既有独立热参数」与 :37 的 `task_default_ttl` 场景已按码面就地更正为三个热参（`api/config/decode.go:160-161` 只声明 `max_tokens`/`compress_threshold`/`keep_recent_tasks`）。`task_terminal_ttl`/`task_default_ttl` 两个配置键当前未开放部署（在 `tagent.yaml:141` 以「待接线」注释登记）；底层能力 `assembly.WithTaskTerminalTTL`（`assembly/run.go:1022`）真实存在，未声明时由 `task.DefaultTerminalTTL` 兜底。本页只记录当前装配事实，不为配置面开放预设结论。
 配置热重载的统一应用模型：全部热参数与结构候选在同一次混合事务中准备就绪才提交，结构发布不跳过数值应用、数值应用不落在无人服务的对象上，杜绝半应用代。
 ## Requirements
 ### Requirement: 配置热更统一应用模型

@@ -2,7 +2,7 @@
 
 ## Purpose
 
-> **复核注记（2026-11-04 逐模块核对）**：:9/:11 的 `task_default_ttl`（10 分钟）、「回收器经 owner `Cancel()` 结算 failed」、subagent 整数秒 `ttl` 入参已按码面就地更正：`runtime/task/logical.go:89-95` 默认 TTL 2h，到期只改变 `classify` 的派生读数 `LogicalExpired`（:46/:160），不改状态机、不自动处置；`call_subagent` 无 `ttl` 键（`tool/subagent/tool.go:213+`）；现行口径见 `docs/wiki/agent/task-lifecycle.md:19`。TTL 是否接线属 B-04 裁定项。
+> **复核注记（2026-11-04 逐模块核对）**：:9/:11 的 `task_default_ttl`（10 分钟）、「回收器经 owner `Cancel()` 结算 failed」、subagent 整数秒 `ttl` 入参已按码面就地更正：`runtime/task/logical.go:89-95` 默认 TTL 2h，到期只改变 `classify` 的派生读数 `LogicalExpired`（:46/:160），不改状态机、不自动处置；`call_subagent` 无 `ttl` 键（`tool/subagent/tool.go:213+`）；现行口径见 `docs/wiki/agent/task-lifecycle.md:19`。`task_terminal_ttl`/`task_default_ttl` 配置键当前未开放部署，任务记录寿命由 `task.DefaultTerminalTTL` 兜底；本页只记录当前状态机事实，不为配置面开放预设结论。
 
 本规范定义 async-task-lifetime 能力：派生任务的寿命如何被确定、续期、呈现、回收，以及回收产生的通知以何形态进入投影。年龄治理只有一个来源——统一 TTL 回收器；不存在并存的观测墙，也不存在按任务类型的年龄豁免。机制与理由见 `docs/wiki/agent/task-lifecycle.md#ttl-reclaim`，本页只立契约。
 ## Requirements
