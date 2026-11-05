@@ -37,7 +37,7 @@ The system SHALL persist events in the RustViking KV store organized by time-win
 - **WHEN** `Init()` is called on a KV store with no existing data
 - **THEN** the call SHALL succeed without error, leaving partition states at their zero values
 
-> 取代原“seqCounter recovered from active-partition bitmap + cursor”——该条款所依赖的 `global:active_partitions` bitmap 与 `{pid}:cursor` 从未实现（见 change design 的“已知规格债”）。
+> 取代原“seqCounter recovered from active-partition bitmap + cursor”——该旧条款依赖的 `global:active_partitions` bitmap 与 `{pid}:cursor` 不存在于实现，故 seq 由扫描事实链重建。
 
 ### Requirement: seq 槽位与事件身份一一对应
 
