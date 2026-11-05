@@ -295,10 +295,18 @@ const symptomTaskNoticePrefix = "tagent: task "
 // so a request whose range ended before the result landed never answers a call the
 // result fact already answered; only a call whose answer is the bare receipt itself is
 // read positionally, because its replay and its admission carry the same text.
+// symptomReceipt skips the delivery settlement line: a settlement fact is
+// accounting material the request also presents beside the tool result, and a
+// reader that mistakes it for the answer of a call reports a delivered body
+// where the tool never spoke. The admission receipt and task-notice material
+// stay skipped as before.
 func symptomReceipt(requests []intakeRequest, callID string) (string, bool) {
+	isSettlement := func(content string) bool {
+		return strings.HasPrefix(strings.TrimSpace(content), "delivery ")
+	}
 	for at := len(requests) - 1; at >= 0; at-- {
 		for _, message := range requests[at].Messages {
-			if message.ToolCallID != callID {
+			if message.ToolCallID != callID || isSettlement(message.Content) {
 				continue
 			}
 			if strings.TrimSpace(message.Content) != task.AdmissionReceiptText {
@@ -314,7 +322,7 @@ next:
 				continue
 			}
 			for _, later := range request.Messages[index+1:] {
-				if later.Role != string(model.RoleUser) || symptomTaskNotice(later.Content) {
+				if later.Role != string(model.RoleUser) || symptomTaskNotice(later.Content) || isSettlement(later.Content) {
 					continue
 				}
 				return later.Content, true
