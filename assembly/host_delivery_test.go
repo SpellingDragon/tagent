@@ -329,35 +329,6 @@ func TestDeliverySettlementFactFamily(t *testing.T) {
 	}
 }
 
-// TestSettlementTTLEntryRegistered pins the TTL exemption registration of the settlement family.
-//
-// - A negative per-type window in the default policy is kept by a policy that names windows of its own, and Window reports the family as exempt.
-// - debt=当前无生产挂载：仓库里没有组合根挂载 ledger.Lifecycle，所以“恒可回读”眼下由“无 Lifecycle 运行”保证；负 TTL 条目是前瞻豁免，挂载那天才是保证。
-// - 本检查锁住注册形态（条目存在且为负、Window 判豁免），不虚构一个挂载。
-func TestSettlementTTLEntryRegistered(t *testing.T) {
-	cfg := ledger.DefaultLifecycleConfig()
-	days, declared := cfg.TypeTTL[deliverySettlementType]
-	if !declared {
-		t.Fatalf("the default lifecycle policy does not register the settlement family %q: %v", deliverySettlementType, cfg.TypeTTL)
-	}
-	if days >= 0 {
-		t.Fatalf("the registered settlement window = %d days, want a negative (exempt) override", days)
-	}
-	if window, exempt := cfg.Window(deliverySettlementType); !exempt || window != 0 {
-		t.Fatalf("the settlement window = (%v, exempt=%v), want (0, true)", window, exempt)
-	}
-	custom := ledger.LifecycleConfig{TypeTTL: map[string]int{"agent_output": 30}}
-	if window, exempt := custom.Window(deliverySettlementType); !exempt || window != 0 {
-		t.Fatalf("the settlement window of a custom policy = (%v, exempt=%v), want (0, true)", window, exempt)
-	}
-	if _, mutated := custom.TypeTTL[deliverySettlementType]; mutated {
-		t.Fatalf("normalising the policy wrote the settlement entry through the caller's own map: %v", custom.TypeTTL)
-	}
-	if keep, _ := custom.Window("agent_output"); keep != 30*24*time.Hour {
-		t.Fatalf("the explicit agent_output window = %v, want the 30 days the policy stated", keep)
-	}
-}
-
 // TestObligationAtomicWithOutput pins the same-commit atomicity of the owed declaration.
 //
 // - The owed declaration rides on the agent_output fact that carries the body: one fact, one commit.

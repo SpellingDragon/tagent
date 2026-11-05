@@ -1,7 +1,7 @@
 # race-gate-coverage Specification
 
 ## Purpose
-TBD - created by archiving change harden-inbox-writer-uniqueness. Update Purpose after archive.
+race 门覆盖第一方全部包：竞态检测清单与产品包集合一致，新增包必须同步入 race 门，任何第一方包不得游离于竞态检测之外。
 ## Requirements
 ### Requirement: race 门覆盖第一方全包
 

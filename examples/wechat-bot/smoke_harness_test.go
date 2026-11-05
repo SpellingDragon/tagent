@@ -2241,8 +2241,12 @@ const (
 	// smokeCalibrationReviewNote 必须进报告：外推值在 03.11 全量首轮后复核。
 	smokeCalibrationReviewNote = "外推值，03.11 全量首轮后复核"
 
-	smokeCalibrationChildTimeout      = 15 * time.Minute
-	smokeCalibrationReadyTimeout      = 5 * time.Minute
+	smokeCalibrationChildTimeout = 15 * time.Minute
+	// smokeCalibrationReadyTimeout must not kill a live child earlier than the
+	// child's own hard timeout: a generation's boot restores a chain that grows
+	// with each restart, so a shorter fixed ready window would fail a healthy
+	// but slow generation on a loaded runner. The child timeout is the one bound.
+	smokeCalibrationReadyTimeout      = smokeCalibrationChildTimeout
 	smokeCalibrationGenerationTimeout = 10 * time.Minute
 	smokeCalibrationColdBuildTimeout  = 20 * time.Minute
 )

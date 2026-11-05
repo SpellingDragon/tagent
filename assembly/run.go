@@ -72,6 +72,15 @@ type NativeAgent struct {
 	// carries: the one Before pass grades and the After pass presents every call
 	// of that generation over these instances, in the declared order.
 	Plugins []plugin.Instance
+	// reflectionSession names the dedicated session whose request alone may see
+	// the reflection-only tools; empty for an agent without host self-reflection.
+	// These two fields carry the session-scoped tool face from the composition
+	// root into the published binding, so it survives a reload unchanged.
+	reflectionSession event.SessionID
+	// reflectionOnly names the cross-session tools only reflectionSession may
+	// see. Every other session of the agent has them filtered out of its request
+	// face, so the entry tool face stays free of the channel-bypassing send.
+	reflectionOnly []string
 }
 
 // InvokeRequest is one invocation admitted at the assembly entry: the
@@ -653,6 +662,22 @@ func (r *Run) NarrowFace(ctx context.Context, agent event.AgentID, selection sta
 	}
 	resources.SetVisible(selection)
 	return nil
+}
+
+// SessionToolNames reports the tool names one session's request face exposes,
+// in the order the request emits them. It reads the live, session-scoped tool
+// face of the agent's current binding — reflection-only tools appear only for
+// the agent's dedicated reflection session — so a caller observes exactly the
+// face a request at that session would carry, without driving a turn.
+func (r *Run) SessionToolNames(agent event.AgentID, session event.SessionID) ([]string, error) {
+	ctx := context.Background()
+	handle, err := r.bindings.Borrow(ctx, agent)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = handle.Release(ctx) }()
+	_, order := state.ToolFace(handle.Binding, session)
+	return append([]string(nil), order...), nil
 }
 
 // CloseMCPServers releases every MCP server the live registry holds: the close

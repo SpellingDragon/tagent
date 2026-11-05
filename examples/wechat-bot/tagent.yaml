@@ -86,8 +86,10 @@ agents:
     system_prompt:
       files: [AGENTS.md, SOUL.md, USER.md]
     # 送达面:业务正文只经自动投递出口落地(D4);入口工具面不声明 send——
-    # 冻结症状锚 G-A 要求入口回合不持有跨会话写面,教训入己记忆走事实链,
-    # 反思会话的 send 由插件级工具面提供(见 meditation 节与 autonomy 夹具)。
+    # 冻结症状锚 G-A 要求入口回合不持有跨会话写面,教训入己记忆走事实链。
+    # 反思会话(tagent-session:tagent:reflection)的 send 由宿主按 meditation 声明
+    # 授予、由运行时按会话隔离:入口与反思会话共享同一 agent 的工具绑定,
+    # 只有该反思会话的请求面保留 send,其他会话一律过滤。
     # 委派面:knowledge/recall/plan/action 声明为 agent 引用——模型看到名为 knowledge/recall/plan/action
     # 的工具,工具面是被委派 agent 自己的 tools[](file/exec 在 action、recall 在 recall),
     # 冥想整理轮因此天然具备 file 读/exec 受限执行/recall 三种能力,零新机制。
@@ -243,49 +245,6 @@ agents:
       - { kind: tool, id: search_content }
       - { kind: tool, id: replace_content }
     # 待接线:thinking_enabled / max_tool_iterations / max_tokens / compress_threshold / temperature
-
-  # ---- Meditator:可选跨域策展声明(默认退役;缺省冥想=tagent 自察)----
-  # r14b/ADR 0005:缺省自察挂宿主自身。独立策展 agent 降格为显式跨域选项——它读别人的
-  # 分区(摘要+回查),与宿主自察同一机制、不同观察面与反思会话。启用方式:把下面整块
-  # 注释解开、把 tagent 的 meditation 节注释掉(一个进程至多一条 enabled 反思循环),
-  # 并在 meditator 上恢复 meditation 节(observed_namespaces 显式列目标分区)。
-  # meditator:
-  #   system_prompt:
-  #     files: [meditator_agent.md]
-  #   max_tokens: 32000
-  #   # 整理面:file 读/写、exec 受限执行、recall 检索、send 跨会话投递;工具白名单不变。
-  #   file:
-  #     base_dir: .
-  #   exec:
-  #     monitor:
-  #       interval: 3s
-  #       stable_duration: 30s
-  #       fake_dead_duration: 180s
-  #   tools:
-  #     - { kind: tool, id: send }
-  #     - { kind: tool, id: read_file }
-  #     - { kind: tool, id: list_file }
-  #     - { kind: tool, id: search_file }
-  #     - { kind: tool, id: search_content }
-  #     - { kind: tool, id: read_multiple_files }
-  #     - { kind: tool, id: save_file }
-  #     - { kind: tool, id: replace_content }
-  #     - { kind: tool, id: exec }
-  #     - { kind: tool, id: recall_query }
-  #     - { kind: tool, id: recall_get }
-  #     - { kind: tool, id: recall_recent }
-  #     - { kind: tool, id: recall_trace }
-  #   memory:
-  #     type: localfile
-  #     path: .wechat-config/data
-  #     read_namespaces: [tagent]
-  #   # meditation:
-  #   #   enabled: true
-  #   #   interval: 30m
-  #   #   min_gap: 2h
-  #   #   prompt_file: meditation.md
-  #   #   observed_namespaces: [tagent]   # 跨域策展:显式列目标分区,缺失=自身分区
-  #   #   deliver_to: [tagent]
 
 # ===== 应用专属配置(各应用自行反序列化)=====
 app:

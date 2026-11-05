@@ -426,11 +426,6 @@ func (c LifecycleConfig) Normalized() LifecycleConfig
     and every explicit value kept as given, so the injected policy and the one
     the lifecycle runs under are the same object.
 
-    - The settlement exemption is a property of the family, not a preference
-    the injected map may drop: a config naming per-type windows of its own still
-    carries the family's negative entry, and the map is copied before the entry
-    is added.
-
 func (c LifecycleConfig) Window(eventType string) (time.Duration, bool)
     Window returns the age window one frozen event type ages out under and
     whether that type is exempt from TTL tombstoning entirely: a negative
@@ -438,8 +433,8 @@ func (c LifecycleConfig) Window(eventType string) (time.Duration, bool)
     and an absent override falls back to the global window.
 
     - The settlement family is exempt by construction: its facts are the read
-    face of obligations that outlive any age window, so no injected override
-    re-introduces a tombstone for it.
+    face of obligations that outlive any age window, so no tombstone may age
+    them out.
 
 type LifecycleStore interface {
 	// EnumerateKeys lists every key the store holds, or fails by name: a

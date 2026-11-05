@@ -8,7 +8,7 @@
 
 一个训练样本 MUST 同时具备可回读的实际请求（哈希对账通过）、独立验收结论（阅卷员判分，不采信执行路径自述）与**验收结论入 rl annex**（新 Line 记录种类 `RecordKindAnnex`：AttemptID 关联、append-only；判定+规则版本+产物引用；不改 AttemptRecord 字段）；annex MUST 以 `AttemptID`+bench 任务 ID 为 join key；**annex payload MUST 经既有 Line 编解码往返保真（实现形态见 design）**。三要素缺一的样本 MUST 标记 incomplete 且 MUST NOT 进入可发布集。样本资格门 MUST 在 Seal 之前评估并把判定写入 annex（annex 记录先于封存落账；Seal 后 sink 拒收不变）；齐备率 MUST 以**全部样本（含 incomplete）**为分母。
 
-奖励向量派生 MUST 作为显式欠账由后续 feedback 桥接变更承接（届时对 `feedback-binding`/`offline-training-export` 做 MODIFIED）；本域 MUST NOT 写 feedback 事件，也 MUST NOT 从任务终态或 trace 存在派生 reward 向量。
+奖励向量派生不在本变更范围；本域 MUST NOT 写 feedback 事件，也 MUST NOT 从任务终态或 trace 存在派生 reward 向量。
 
 #### Scenario: 缺验收结论
 

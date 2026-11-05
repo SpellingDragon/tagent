@@ -33,6 +33,9 @@ FUNCTIONS
 
 func Aggregate(runner, status, caliber string, attempts [][]byte) ([]byte, error)
     Aggregate folds one runner's attempts into its five-metric block.
+    Latency uses the median across repeats (cold: one sample per attempt; hot:
+    one per recorded hot request) rather than the mean, so a single slow outlier
+    does not skew the reported first-token and complete latency.
 
 func NewAttempt(raw map[string]any) ([]byte, error)
     NewAttempt validates and canonicalizes one attempt record.

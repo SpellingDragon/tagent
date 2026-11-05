@@ -25,7 +25,7 @@
 
 ### Requirement: novelty 判据为跨分区非自管谱系新事件
 
-novelty SHALL 定义为：观察面（缺省自身分区）内存在 `Timestamp > lastMeditation` 且谱系非自管的事件。自管判定 SHALL 调用 event 包 `SelfManagedLineage` 单源派生，MUST NOT 在消费方复刻清单。数据面 SHALL 使用 `memory.QueryEvents` 时间窗查询后逐条 `GetEvent` 水合过滤（`EventReference` 无 Metadata 为已知边界），命中即早停；`trigger_source` 缺失/未知 SHALL NOT 计入（保守：宁可少反思）；查询失败/未接读缝 SHALL NOT 计入且门保持关闭（fail-closed，debug 具名）。
+novelty SHALL 定义为：观察面（缺省自身分区）内存在 `Timestamp > lastMeditation` 且谱系非自管的事件。自管判定 SHALL 由单一来源派生，MUST NOT 在消费方复刻触发源清单。数据面 SHALL 使用 `memory.QueryEvents` 时间窗查询后逐条 `GetEvent` 水合过滤（`EventReference` 无 Metadata 为已知边界），命中即早停；`trigger_source` 缺失/未知 SHALL NOT 计入（保守：宁可少反思）；查询失败/未接读缝 SHALL NOT 计入且门保持关闭（fail-closed，debug 具名）。
 
 #### Scenario: 跨分区用户事件触发
 

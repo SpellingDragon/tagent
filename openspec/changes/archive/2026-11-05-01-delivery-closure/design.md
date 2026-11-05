@@ -10,7 +10,7 @@
 
 - assembly/host_delivery.go：交付结算事实族（**族在所属包 assembly**，身份=交付身份字符串【由 fact key 确定性导出——见下】，类型=`delivery.settlement`；FACT-VOCABULARY 登记行照此写——身份用纯字符串从而不依赖 event 契约，assembly 既有 import 不受影响）+ DeliveryConsumer + 迁移
 - **runtime/agent/request_assembly.go**：`delivery.settlement` 的类型→角色映射（RoleOf；未知类型会被 ErrProjectionTypeUnmapped 拒绝——不注册则 TestHeldSettlementReachesModel 必挂）；**类型字符串常量 `projectionTypeDeliverySettlement` 为 runtime/agent 本地常量（F13）**：冻结于本 design、注释指回 assembly/host_delivery.go 的族定义；不 import assembly（反向依赖禁止）、api/ 零改动
-- **memory/ledger 生命周期注册**：TypeTTL 目前仅有声明、无生产挂载（全仓无生产写入者），注册负 TTL 是**前瞻豁免**——测试断言注册形态；**恒可回读为两段式：当前由 Lifecycle 未挂载保证；挂载后由负 TTL 豁免保证**；`TestSettlementTTLEntryRegistered` 注明“断言注册形态+debt”。
+- **结算族 TTL 豁免**：按结算族构造性豁免 TTL 墓碑化，无前瞻注册、无未挂载债务；恒可回读由该构造性豁免保证（Window() 按结算族类型返回豁免）。
 - runtime/agent/loop.go：commitOutput 的提交载荷携带 owed 声明（Meta 字段）
 - **memory/query_events.go（F3/F11 定版）**：`QueryOptions` 新增**未导出字段 `keyPrefix`** + `Prefix()` 读取方法 + `WithKeyPrefix()` 值拷贝设置方法（不新增导出字段）；结算事实以该前缀过滤**返回集**（`delivery.` 前缀）；扫描面是 `r.facts` 事实窗口内，代价 **O(事实窗口内)**，过滤本身不改变扫描量
 - **assembly/run.go（F2/F3/F13 定版）**：`r.replays` 的会话注册枚举（同包读面）——**映射序列仅用于会话枚举**；恢复枚举的 owed 声明读 **`r.facts` 事实窗口内内 agent_output 的 Meta**（`r.facts` 本就是事实窗口内事实表），代价 **O(事实窗口内)**；查询 `PartitionIDs` 由 replays 注册键经 `PartitionIDFromName` 派生（分区来自 replays 而非盲扫）。**该事实窗口内面与 03 的 1.2a 共用；跨域集成测试归 03 的 1.2a（`TestAssemblyObservedReplayFactsBounded`/`TestAssemblyColdWindowReadback`）；本域用 `TestSettlementFactsStayHotWhileUnsettled` 锁定未清交付事实驻留。**

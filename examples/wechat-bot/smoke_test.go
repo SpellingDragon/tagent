@@ -4208,9 +4208,9 @@ func symptomAssertExecAuditFact(t *testing.T, fact event.Event, resource string,
 	}
 }
 
-// TestLocalSmokeSymptomNoSendTool 是症状直译锚 G-A：入口工具面无 send，正文恰一条。
-// - 正锚 entry_face_has_no_send：整轮模型请求授予的工具名里没有 send；入口 agent 自己也不声明它；正文恰一条。
-// - 正锚 one_communication_tool：部署文档的工具面恰一个通信工具 send（D6 之后它是冥想 agent 唯一的写面）。
+// TestLocalSmokeSymptomNoSendTool 是症状直译锚 G-A：入口工具面无 send、反思工具面有 send。
+// - 正锚 entry_face_has_no_send：部署文档零处声明 send；入口 agent 声明块无 send；组装后的入口会话工具面无 send。
+// - 正锚 reflection_face_has_send：宿主自察的反思会话由插件授予 send，组装后的反思会话工具面确有 send。
 // - 负锚 face_is_readable：同一请求的工具面确实被读到（委派工具在列），防"空列表"式假通过。
 // - 消费者锚 production_drive：走 rig.drive 的真实宿主入站路径，消息由替身通道记录。
 // 契约: docs/wiki/examples/wechat-bot-runtime.md#delivery-receipts
@@ -4220,8 +4220,18 @@ func TestLocalSmokeSymptomNoSendTool(t *testing.T) {
 	if err != nil {
 		t.Fatalf("读取部署入口文档：%v", err)
 	}
-	if got := strings.Count(string(deployment), "id: send"); got != 1 {
-		t.Fatalf("部署文档声明的通信工具 = %d 处 %q，want 恰好一处（冥想 agent 的 send）", got, "id: send")
+	if got := strings.Count(string(deployment), "id: send"); got != 0 {
+		t.Fatalf("部署文档声明的通信工具 = %d 处 %q，want 0（入口不声明、退役 meditator 注释块已删除）", got, "id: send")
+	}
+	if !strings.Contains(string(deployment), "deliver_to: [tagent]") {
+		t.Fatalf("部署入口文档未声明宿主自察 deliver_to，插件无 send 可授予反思会话")
+	}
+	entryFace, reflectionFace := deployedSessionFaces(t)
+	if !smokeToolsContain(reflectionFace, sendToolID) {
+		t.Fatalf("反思工具面无 %q：反思会话工具 = %v，宿主自察应由插件授予 send", sendToolID, reflectionFace)
+	}
+	if smokeToolsContain(entryFace, sendToolID) {
+		t.Fatalf("入口工具面仍授予 %q：入口会话工具 = %v，want 无 send", sendToolID, entryFace)
 	}
 	if block := smokeAgentBlock(string(deployment), "tagent"); strings.Contains(block, "id: send") {
 		t.Fatalf("部署入口 agent tagent 仍声明 send，它的声明块 =\n%s", block)
@@ -4264,9 +4274,75 @@ func TestLocalSmokeSymptomNoSendTool(t *testing.T) {
 		t.Fatalf("乱序注入后定位失败/取错：ok=%v located.model=%q located.text=%q，want 本轮请求 %q",
 			ok, located.Model, located.text(), turnReq.text())
 	}
-	t.Logf("[symptom-ga] 正锚：入口工具面 %v 无 send、部署文档的工具面恰一处 send（入口自己不声明）；普通回合恰一条投递 %q",
-		turnReq.Tools, texts[0])
+	t.Logf("[symptom-ga] 正锚：部署文档零处声明 send；组装入口面 %v 无 send、反思面 %v 有 send；普通回合恰一条投递 %q",
+		entryFace, reflectionFace, texts[0])
 	t.Logf("[symptom-ga] 负锚 locating_survives_out_of_order：向前插队两条干扰请求（他模型带本轮标记、本模型带他轮标记）后，仍按模型身份 %q + 标记 %q（非到达下标）定位到同一条请求", smokeEntryModel, marker)
+}
+
+// deployedAPIKeys 是部署文档装配期读取的 provider/embedding/MCP 键变量。
+var deployedAPIKeys = []string{
+	"ZAI_API_KEY", "DEEPSEEK_API_KEY", "MOONSHOT_API_KEY",
+	"TENCENT_HY_API_KEY", "TENCENT_API_KEY",
+}
+
+// deployedSessionFaces 装配真实部署文档并报告一个入口/业务会话与宿主自察反思
+// 会话的工具面，返回前关闭宿主。文档路径相对进程工作目录，本调用切到仓库根
+// （存储层干净冷启动）后恢复工作目录。装配失败以名字报错。
+func deployedSessionFaces(t *testing.T) (entry, reflection []string) {
+	t.Helper()
+	for _, key := range deployedAPIKeys {
+		t.Setenv(key, "test-key")
+	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("读取工作目录：%v", err)
+	}
+	root := filepath.Clean(filepath.Join(cwd, "..", ".."))
+	if err := os.Chdir(root); err != nil {
+		t.Fatalf("进入仓库根 %s：%v", root, err)
+	}
+	defer func() {
+		if err := os.Chdir(cwd); err != nil {
+			t.Errorf("恢复工作目录：%v", err)
+		}
+	}()
+	host, err := assembly.Boot("examples/wechat-bot/tagent.yaml")
+	if err != nil {
+		t.Fatalf("Boot 部署文档 examples/wechat-bot/tagent.yaml：%v", err)
+	}
+	defer func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := host.Close(ctx); err != nil {
+			t.Errorf("关闭部署宿主：%v", err)
+		}
+	}()
+	label := os.Getenv("TAGENT_SESSION_ID")
+	if label == "" {
+		label = "tagent-session"
+	}
+	var entryErr, reflErr error
+	entry, entryErr = host.Run().SessionToolNames(event.AgentID("tagent"), event.SessionID(label+":tagent:main"))
+	reflection, reflErr = host.Run().SessionToolNames(event.AgentID("tagent"), event.SessionID(label+":tagent:reflection"))
+	if entryErr != nil || reflErr != nil {
+		t.Fatalf("读取部署会话工具面：入口=%v 反思=%v", entryErr, reflErr)
+	}
+	return entry, reflection
+}
+
+// TestLocalSmokeSymptomBootDeployed 是部署文档的 Boot 冒烟锚。
+// - 正锚 boot_succeeds：deployedSessionFaces 到达返回即 assembly.Boot 成功。
+// - 正锚 face_split：反思面有 send、入口面无 send。
+// 契约: docs/wiki/examples/wechat-bot-runtime.md#delivery-receipts
+func TestLocalSmokeSymptomBootDeployed(t *testing.T) {
+	entry, reflection := deployedSessionFaces(t)
+	if !smokeToolsContain(reflection, sendToolID) {
+		t.Fatalf("部署文档反思面无 %q：%v", sendToolID, reflection)
+	}
+	if smokeToolsContain(entry, sendToolID) {
+		t.Fatalf("部署文档入口面仍授予 %q：%v", sendToolID, entry)
+	}
+	t.Logf("[symptom-boot] 部署文档 Boot 成功；入口面=%v 反思面=%v", entry, reflection)
 }
 
 // smokeAgentBlock 取出部署文档里某个 agent 自己的声明块：从它的键行到下一个

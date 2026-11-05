@@ -1366,20 +1366,21 @@ func (r *Run) environmentBlock(ctx context.Context, boundary agent.RequestBounda
 	if modelName := modelNameOf(boundary.Binding); modelName != "" {
 		fmt.Fprintf(&b, "- model: %s\n", modelName)
 	}
-	fmt.Fprintf(&b, "- tools: %s\n", listOrNone(toolNamesOf(boundary.Binding)))
+	fmt.Fprintf(&b, "- tools: %s\n", listOrNone(toolNamesOf(boundary.Binding, boundary.Chain.SessionID)))
 	fmt.Fprintf(&b, "- skills: %s\n", listOrNone(narrowedSkillsOf(boundary.Binding)))
 	fmt.Fprintf(&b, "- mcp: %s\n", listOrNone(visibleMCPOf(spec, boundary.Binding)))
 	fmt.Fprintf(&b, "- prompt_version: %s\n", versionOrNone(promptVersion))
 	return strings.TrimSuffix(b.String(), "\n")
 }
 
-// toolNamesOf reports the tool names one binding's request carries, in the
-// order the request emits them: the published tools in name order first, the
-// tools registered after publication behind them. The list reads the same face
-// the request's Tools come from, so the model never reads a name it cannot
-// call.
-func toolNamesOf(binding state.AgentBinding) []string {
-	_, order := state.ToolFace(binding)
+// toolNamesOf reports the tool names one binding's request carries at one
+// session, in the order the request emits them: the published tools in name
+// order first, the tools registered after publication behind them. It reads the
+// session-scoped face the request's Tools come from, so reflection-only tools
+// are listed only for the dedicated reflection session and the model never
+// reads a name it cannot call at its own session.
+func toolNamesOf(binding state.AgentBinding, session event.SessionID) []string {
+	_, order := state.ToolFace(binding, session)
 	return order
 }
 

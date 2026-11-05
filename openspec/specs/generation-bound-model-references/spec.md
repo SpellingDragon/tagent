@@ -1,7 +1,7 @@
 # generation-bound-model-references Specification
 
 ## Purpose
-TBD - created by archiving change align-runtime-overrides. Update Purpose after archive.
+模型覆盖引用按世代绑定：解析出的模型引用与实际执行使用的模型必须由同一世代标识，缓存键包含完整世代信息，不支持的热更新组合明确拒绝而非静默沿用旧值。
 ## Requirements
 ### Requirement: 覆盖解析与实际执行同面
 配置驱动model_override SHALL 使用已选执行视图内的模型引用，验证与调用使用同一解析结果。引用 MUST NOT 越过原Tools调用边界或泄漏到后续无覆盖调用。

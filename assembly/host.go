@@ -52,11 +52,13 @@ var ErrHostConfigMissing = errors.New("tagent: the host names no configuration p
 // grants the send tool demands no sender, because a send reaches no channel.
 var ErrHostSenderMissing = errors.New("tagent: the host carries no outbound message sender")
 
-// ErrHostMeditationToolMisplaced reports a document that grants the
-// cross-session write tool outside the meditation session, or grants the send
-// tool to the meditation session itself: the summary tool belongs to the
-// reflection turn alone, and the communication face a reflection session never
-// carries stays outside it.
+// ErrHostMeditationToolMisplaced reports a document whose reflection would
+// deliver through a face it does not carry: an independent curation agent that
+// enables meditation with a declared deliver_to white list but declares no
+// send tool could never write its delivery, so the boot refuses it by name.
+// Host self-reflection is not judged here: its dedicated reflection session is
+// granted send by the meditation plugin (session-scoped), while the entry tool
+// face deliberately carries none.
 var ErrHostMeditationToolMisplaced = errors.New("tagent: a meditation tool is granted to the wrong agent")
 
 // ErrHostAddressMissing reports an invocation that names no complete session

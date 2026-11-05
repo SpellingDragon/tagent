@@ -353,7 +353,8 @@ SYMPTOM_PARENTS = ("TestLocalSmokeSymptomAcceptedSilent",
                    "TestLocalSmokeSymptomFailureNotice",
                    "TestLocalSmokeSymptomExecStateSilent",
                    "TestLocalSmokeSymptomNoSendTool",
-                   "TestLocalSmokeSymptomDeliveryHold")
+                   "TestLocalSmokeSymptomDeliveryHold",
+                   "TestLocalSmokeSymptomBootDeployed")
 
 # The race set is mapped from every modified product package and every formal
 # integration suite. host/history alone is the shrunken set the negative control

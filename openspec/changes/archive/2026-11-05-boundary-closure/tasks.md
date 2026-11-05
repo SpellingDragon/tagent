@@ -4,6 +4,8 @@
 启动门：六条症状锚（快）红着 + 症状锚⑤（慢）自有红凭据在 W2 首日补齐（见 0.1；grill r1 F1 裁定：锚数=症状锚（快）六条+症状锚（慢）一条，口号与命令必须一致）。
 波次仅作汇报分组；解锁依据为前置域入 main 并通过全量门核验，不等待整波。
 
+> 归档补勾注记（r49 核验）：0.2 / 0.3 / 1.1–1.3 / 2.1–2.4 / 3.0–3.2 十二行在归档时均已随九域完成（ORCHESTRATION r49「九域任务行全勾」），此处仅为勾选状态如实回补；归档件其余内容保持冻结，勘误另起文件。
+
 ```mermaid
 flowchart LR
   G[W0 症状锚（快）红着核验] --> W1A[01 delivery-closure]
@@ -29,11 +31,11 @@ flowchart LR
 
 ## 0.2 W0 提交基线（原始形态）
 
-- [ ] 0.2 **W0 提交**：锚测试＋计划工件＋文档作为独立提交入库（锚与计划=验收资产，不是回滚对象）；**锚的"注入点/断言迁移"提交分类为实现提交（回滚对象）**——回滚树（`git revert` 实现提交序列后）天然回到 W0 原始锚（在旧码上红=症状在位）；修复树用迁移后锚（绿）；验收资产=W0 锚的初始提交。**本任务是 F3 回滚树的前置（回滚树=`git revert` 实现提交序列后回到本提交），必须在 F3 前完成。** —— 验证：`git status --porcelain` 无本变更未跟踪文件；`git log -1` 含 W0 提交。
+- [x] 0.2 **W0 提交**：锚测试＋计划工件＋文档作为独立提交入库（锚与计划=验收资产，不是回滚对象）；**锚的"注入点/断言迁移"提交分类为实现提交（回滚对象）**——回滚树（`git revert` 实现提交序列后）天然回到 W0 原始锚（在旧码上红=症状在位）；修复树用迁移后锚（绿）；验收资产=W0 锚的初始提交。**本任务是 F3 回滚树的前置（回滚树=`git revert` 实现提交序列后回到本提交），必须在 F3 前完成。** —— 验证：`git status --porcelain` 无本变更未跟踪文件；`git log -1` 含 W0 提交。
 
 ## 0.3 九域提升与全量 strict 校验（r3 F13）
 
-- [ ] 0.3 W1 派发前把九个二级域**提升为顶层 change**（**提升提交属后续，不并入 W0**）（`git mv changes/NN-domain` 至 openspec/changes/ 顶层，修 boundary-closure 内相对链接），逐域 `openspec validate <name> --strict` 输出含 "is valid"（**嵌套域 CLI 不可见、strict 是空转——提升后每波门才真实**）；**提升后同步更新锚测试契约注释中的路径**（锚测试注释引用的二级域路径随提升迁移，断言面不变）—— 验证：九次 validate 输出入台账；F4 ① 相应简化为核验路径与内部链接（无 git mv），归档在 F4 ③。
+- [x] 0.3 W1 派发前把九个二级域**提升为顶层 change**（**提升提交属后续，不并入 W0**）（`git mv changes/NN-domain` 至 openspec/changes/ 顶层，修 boundary-closure 内相对链接），逐域 `openspec validate <name> --strict` 输出含 "is valid"（**嵌套域 CLI 不可见、strict 是空转——提升后每波门才真实**）；**提升后同步更新锚测试契约注释中的路径**（锚测试注释引用的二级域路径随提升迁移，断言面不变）—— 验证：九次 validate 输出入台账；F4 ① 相应简化为核验路径与内部链接（无 git mv），归档在 F4 ③。
 
 ## 0.4 实验开关退役（P6 作废，r22 纯化）
 
@@ -41,22 +43,22 @@ flowchart LR
 
 ## 1. W1
 
-- [ ] 1.1 [01-delivery-closure/](../2026-11-05-01-delivery-closure/) —— 交付闭合（事件化：义务嵌入 agent_output 同笔、结算族、消费驱动、KV 迁移、三层告知）—— 验证：见该域 tasks（锚①②③转绿 + 域门禁）。
-- [ ] 1.2 [04-exec-integrity/](../2026-11-05-04-exec-integrity/) —— exec 回执完整性：held/复用路径死 pane 检测、世代令牌、CI 非空转集成锚 —— 验证：见该域 tasks（锚⑥转绿）。
-- [ ] 1.3 [05-fold-provenance/](../2026-11-05-05-fold-provenance/) —— 折叠可追溯：mappedEntryOf 透传世代、摘要行带时刻+世代 —— 验证：见该域 tasks（锚⑦转绿）；**串行在 1.1 后**（loop.go 提交面稳定，F26）。
+- [x] 1.1 [01-delivery-closure/](../2026-11-05-01-delivery-closure/) —— 交付闭合（事件化：义务嵌入 agent_output 同笔、结算族、消费驱动、KV 迁移、三层告知）—— 验证：见该域 tasks（锚①②③转绿 + 域门禁）。
+- [x] 1.2 [04-exec-integrity/](../2026-11-05-04-exec-integrity/) —— exec 回执完整性：held/复用路径死 pane 检测、世代令牌、CI 非空转集成锚 —— 验证：见该域 tasks（锚⑥转绿）。
+- [x] 1.3 [05-fold-provenance/](../2026-11-05-05-fold-provenance/) —— 折叠可追溯：mappedEntryOf 透传世代、摘要行带时刻+世代 —— 验证：见该域 tasks（锚⑦转绿）；**串行在 1.1 后**（loop.go 提交面稳定，F26）。
 
 ## 2. W2（九域口径；2026-11-05 扩容：＋08＋09）
 
-- [ ] 2.1 [02-request-budget/](../2026-11-05-02-request-budget/) —— 最终请求统一预算（能力恢复；三窗口拆分；拒发归 failed→failure-notice；交换机纳入统一集）—— 验证：见该域 tasks（锚④转绿）。
-- [ ] 2.2 [03-resource-bounds/](../2026-11-05-03-resource-bounds/) —— KV 条目级驻留、kvPort 前缀枚举（prefix-pair scan；localFileKV=内存 shard+冷读合并，memKV/rustvikingKV 同步实现）+事件缓存惰性 Load（**两次前缀枚举只物化 idx/meta 小键值、不物化 evt body**）＋内存轻量映射（`{pid}:idx:{event_key}`→`{window}:{seq}`；不另立第二份读路）、**assembly 侧 Observed/Replay/事实表的事实窗口化（1.2a；未清交付事实不落事实窗口外）**、空闲回收与虚胖告警可观测（F13）、真占用门（改判据+采样器）、preflight smoke 段超时 **30m→75m**、联合归因 —— 验证：见该域 tasks（症状锚⑤（慢）转绿 + 长跑 run-id）。
-- [ ] 2.3 [08-config-liveness/](../2026-11-05-08-config-liveness/) —— **配置活线：链驱动**（声明事实+唯一发布入口+发布记录上链+失败回执如实；watcher/重启对账同一入口）—— **前置=W1 入 main** —— 验证：见该域 tasks（声明/发布/失败回执三链 + watcher 三例 + 重启对账/跨维窗口）。
-- [ ] 2.4 [09-meditation-autonomy/](../2026-11-05-09-meditation-autonomy/) —— 冥想自主面：自持状态机＋工具面 file/exec/recall＋自察主体/专属反思会话＋四 delta（含 idle-gating REMOVED）；refine=已登记债（**前置=01 入 main**）—— 验证：见该域 tasks（整理端到端+自察四测试+激活因果+越权负锚）。
+- [x] 2.1 [02-request-budget/](../2026-11-05-02-request-budget/) —— 最终请求统一预算（能力恢复；三窗口拆分；拒发归 failed→failure-notice；交换机纳入统一集）—— 验证：见该域 tasks（锚④转绿）。
+- [x] 2.2 [03-resource-bounds/](../2026-11-05-03-resource-bounds/) —— KV 条目级驻留、kvPort 前缀枚举（prefix-pair scan；localFileKV=内存 shard+冷读合并，memKV/rustvikingKV 同步实现）+事件缓存惰性 Load（**两次前缀枚举只物化 idx/meta 小键值、不物化 evt body**）＋内存轻量映射（`{pid}:idx:{event_key}`→`{window}:{seq}`；不另立第二份读路）、**assembly 侧 Observed/Replay/事实表的事实窗口化（1.2a；未清交付事实不落事实窗口外）**、空闲回收与虚胖告警可观测（F13）、真占用门（改判据+采样器）、preflight smoke 段超时 **30m→75m**、联合归因 —— 验证：见该域 tasks（症状锚⑤（慢）转绿 + 长跑 run-id）。
+- [x] 2.3 [08-config-liveness/](../2026-11-05-08-config-liveness/) —— **配置活线：链驱动**（声明事实+唯一发布入口+发布记录上链+失败回执如实；watcher/重启对账同一入口）—— **前置=W1 入 main** —— 验证：见该域 tasks（声明/发布/失败回执三链 + watcher 三例 + 重启对账/跨维窗口）。
+- [x] 2.4 [09-meditation-autonomy/](../2026-11-05-09-meditation-autonomy/) —— 冥想自主面：自持状态机＋工具面 file/exec/recall＋自察主体/专属反思会话＋四 delta（含 idle-gating REMOVED）；refine=已登记债（**前置=01 入 main**）—— 验证：见该域 tasks（整理端到端+自察四测试+激活因果+越权负锚）。
 
 ## 3. W3
 
-- [ ] 3.0 [06-live-benchmark/](../2026-11-05-06-live-benchmark/) 任务 1.1（夹具与验收器共享包；**前置=02 入 main 即可，不依赖 03**——r3 F25）先行入 main —— 验证：该域 1.1 验证命令（含 -v）exit 0。
-- [ ] 3.1 [06-live-benchmark/](../2026-11-05-06-live-benchmark/) 其余（三方 runner、DSH 不分期、真实 run）—— 验证：见该域 tasks（run-id+五指标）。
-- [ ] 3.2 [07-training-sample-loop/](../2026-11-05-07-training-sample-loop/) —— 完整训练样本闭环（请求回读+独立验收+验收结论入 rl annex；reward 向量派生延后为显式欠账）—— 验证：见该域 tasks（样本三要素齐备率）；**前置=06.1a 入 main（唯一硬前置；01/03 为真实模式增强，scripted 不依赖）**。
+- [x] 3.0 [06-live-benchmark/](../2026-11-05-06-live-benchmark/) 任务 1.1（夹具与验收器共享包；**前置=02 入 main 即可，不依赖 03**——r3 F25）先行入 main —— 验证：该域 1.1 验证命令（含 -v）exit 0。
+- [x] 3.1 [06-live-benchmark/](../2026-11-05-06-live-benchmark/) 其余（三方 runner、DSH 不分期、真实 run）—— 验证：见该域 tasks（run-id+五指标）。
+- [x] 3.2 [07-training-sample-loop/](../2026-11-05-07-training-sample-loop/) —— 完整训练样本闭环（请求回读+独立验收+验收结论入 rl annex；reward 向量派生延后为显式欠账）—— 验证：见该域 tasks（样本三要素齐备率）；**前置=06.1a 入 main（唯一硬前置；01/03 为真实模式增强，scripted 不依赖）**。
 
 ## 4. F 收尾（一级直管）
 

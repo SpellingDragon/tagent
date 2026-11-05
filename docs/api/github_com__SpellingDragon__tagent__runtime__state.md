@@ -288,15 +288,18 @@ func RollbackArchive(ctx context.Context, root string, tasks ArchiveTaskReader, 
     is reported as residue, and one the new path holds nothing under is named
     absent rather than written back.
 
-func ToolFace(binding AgentBinding) (map[string]trpctool.Tool, []string)
-    ToolFace reports the native tools one binding's request carries beside the
-    order their definitions are emitted in: the tools published with the binding
-    in name order first, then the tools registered on its resources after the
-    binding was published, in registration order. Both the request's tool map
-    and the environment block's tool list read this one face, so a model never
-    reads a tool name it cannot call. Keeping the later-registered tools behind
-    the published ones also keeps the provider-side prefix cache valid for the
-    larger stable part of the request.
+func ToolFace(binding AgentBinding, session ...event.SessionID) (map[string]trpctool.Tool, []string)
+    ToolFace reports the native tools one binding's request carries beside
+    the order their definitions are emitted in: the tools published with the
+    binding in name order first, then the tools registered on its resources
+    after the binding was published, in registration order. Both the request's
+    tool map and the environment block's tool list read this one face, so a
+    model never reads a tool name it cannot call. Keeping the later-registered
+    tools behind the published ones also keeps the provider-side prefix cache
+    valid for the larger stable part of the request. - A named session reads
+    the session-scoped face: reflection-only tools are dropped for every session
+    other than the binding's dedicated reflection session; a call that names no
+    session reads the full published face.
 
 TYPES
 
@@ -317,6 +320,8 @@ type AgentBinding struct {
 	// Set is the tool-set connection of the agent; its Close is governed by a
 	// resource lease rather than by the release of this binding.
 	Set trpctool.ToolSet
+
+	// Has unexported fields.
 }
     AgentBinding is the live binding of one agent: the native model, tools and
     ordered plugin pipeline a request executes with, together with the prompt
@@ -325,6 +330,11 @@ type AgentBinding struct {
     The binding is constructed privately for a candidate. A request takes one
     generation of it and keeps that generation for its whole life; the binding
     is released when its user is done, not when a newer generation is published.
+
+func (b AgentBinding) WithScopedFace(session event.SessionID, only []string) AgentBinding
+    WithScopedFace reports a copy of the binding carrying the dedicated
+    reflection session and the tools only that session may see. The composition
+    root calls it when it contributes a self-reflecting host agent.
 
 type ArchiveTaskReader interface {
 	// TaskIDs returns every task the chain holds facts for.

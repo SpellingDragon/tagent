@@ -59,7 +59,3 @@ ls -d openspec/changes/archive/*/
 | 09 | [09-meditation-autonomy](2026-11-05-09-meditation-autonomy/) · [tasks](2026-11-05-09-meditation-autonomy/tasks.md) | [meditation-autonomy](../../specs/meditation-autonomy/spec.md)「冥想自主整理面」· [meditation-idle-gating](../../specs/meditation-idle-gating/spec.md)「独立门控能力保持退役」· [meditation-agent-partition](../../specs/meditation-agent-partition/spec.md)「反思事件注入本 agent 的专属反思会话」· [self-improvement-meditation](../../specs/self-improvement-meditation/spec.md)「冥想定位叙事(自我改进引擎)」 |
 
 真实对照 run-id（逐字符）：`bench-20261105T150446Z-9a9d7d`。本地证据（git-ignored）：`bench/runs/bench-20261105T150446Z-9a9d7d/{run.json,metrics.json,report.md}`；台账见 [ORCHESTRATION.md r47](2026-11-05-boundary-closure/ORCHESTRATION.md)。
-
-### 规格债（单列，不实现不改条款）
-
-- 主 spec [event-segment-store](../../specs/event-segment-store/spec.md) 的 DeleteEvent/墓碑 eventCount 条款与「从事实链重建/count_known=false」条款在 HEAD 无实现：Go 侧 `DeleteEvent` 与 `count_known` 均 0 命中；条款保留作为后续变更入口。

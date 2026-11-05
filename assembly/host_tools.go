@@ -1179,15 +1179,32 @@ func hostUnknownFields(probe map[string]json.RawMessage, declared ...string) []s
 // the observed and read namespaces, the declared delivery targets and the
 // anchor record the watermark persists through.
 type hostMeditationPlan struct {
-	agent    string
-	session  string
-	interval time.Duration
-	minGap   time.Duration
-	prompt   string
-	observed []string
-	reads    []string
-	targets  []string
-	anchors  string
+	agent   string
+	session string
+	// selfReflection reports a reflection the HOST ITSELF runs: the agent that
+	// enables meditation is the entry agent, so its dedicated reflection
+	// session shares one tool binding with the entry session. In this form the
+	// cross-session send tool is granted to the reflection session alone by
+	// the meditation plugin (session-scoped), and the entry tool face stays
+	// free of it. The retired independent curation agent keeps the older
+	// declarative grant instead.
+	selfReflection bool
+	interval       time.Duration
+	minGap         time.Duration
+	prompt         string
+	observed       []string
+	reads          []string
+	targets        []string
+	anchors        string
+}
+
+// reflectionGrantsSend reports whether this plan makes the meditation plugin
+// grant the cross-session send tool to the dedicated reflection session of the
+// named agent. Only host self-reflection does: the entry and reflection
+// sessions share one binding, so send must be scoped to the reflection session
+// alone. An independent curation agent keeps its own declarative tool face.
+func (p *hostMeditationPlan) reflectionGrantsSend(id string) bool {
+	return p != nil && p.selfReflection && p.agent == id && len(p.targets) > 0
 }
 
 // hostMeditationDefaultInterval is the tick cadence of a declaration that names
@@ -1238,15 +1255,16 @@ func resolveHostMeditation(doc document.Document, promptDir, storageRoot string)
 			return nil, fmt.Errorf("tagent: agent %q enables meditation beside no storage tier, so its anchor record has nowhere to persist", id)
 		}
 		plan = &hostMeditationPlan{
-			agent:    id,
-			session:  hostReflectionSession(doc.Entry, id),
-			interval: interval,
-			minGap:   entry.MinGap,
-			prompt:   prompt,
-			observed: scope.Names,
-			reads:    reads,
-			targets:  targets,
-			anchors:  filepath.Join(storageRoot, "meditation", id, "anchors.json"),
+			agent:          id,
+			session:        hostReflectionSession(doc.Entry, id),
+			selfReflection: id == doc.Entry,
+			interval:       interval,
+			minGap:         entry.MinGap,
+			prompt:         prompt,
+			observed:       scope.Names,
+			reads:          reads,
+			targets:        targets,
+			anchors:        filepath.Join(storageRoot, "meditation", id, "anchors.json"),
 		}
 		declaredBy = id
 	}

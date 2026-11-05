@@ -1,7 +1,7 @@
 # config-state-twinship Specification
 
 ## Purpose
-TBD - created by archiving change config-state-twinship. Update Purpose after archive.
+配置与运行时状态的孪生：生效 system prompt 由 state 持有，config→plan→govern→state 是唯一装配管道，session 身份与授权在这条管道上一致解析。
 ## Requirements
 ### Requirement: 生效 system prompt 由 state 持有
 

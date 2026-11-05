@@ -338,7 +338,10 @@ type NoveltyPolicy struct{}
     this domain, so a stamp the policy does not name is never new material.
 
 func (NoveltyPolicy) Novel(fact event.Event) bool
-    Novel reports whether one observed fact opens the freshness gate.
+    Novel reports whether one observed fact opens the freshness gate. The
+    judgment reads the one self-managed-lineage derivation rather than restating
+    the stamp vocabulary a second time, so a stamp the domain does not name
+    stays outside the gate.
 
 type ObservationScan struct {
 	// Watermark is the execution watermark the window opened after.

@@ -1,7 +1,7 @@
 # offline-training-export Specification
 
 ## Purpose
-TBD - created by archiving change export-offline-sft. Update Purpose after archive.
+授权的只读事实导出：导出面只读取已提交事实并保留精确关联，关联存在不等同自动奖励，工具感知 SFT 样本标注可靠的 loss 边界，导出不反写事实链。
 ## Requirements
 ### Requirement: 授权的只读事实导出
 导出 SHALL 仅扫描显式授权分区并在父键读取前后核验权限；空授权必须拒绝。MUST NOT 改TTL/墓碑、打开第二生产writer或将导出快照用作运行真源。

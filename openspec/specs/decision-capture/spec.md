@@ -1,7 +1,7 @@
 # decision-capture Specification
 
 ## Purpose
-TBD - created by archiving change capture-decision-snapshots. Update Purpose after archive.
+可选的模型决策快照录制：SDK 侧按精确归因记录一次决策的输入视图、世代与调用参数，录制非阻塞且有界，缺席时主流程不受影响，快照与执行路径不互相顶替。
 ## Requirements
 
 ### Requirement: 可选SDK决策快照

@@ -1,33 +1,12 @@
 {
   "baseline": {
-    "files": 228,
-    "lines": 21890
+    "files": 227,
+    "lines": 21723
   },
-  "measured_at": "2026-11-05",
+  "measured_at": "2026-11-06",
   "measured_by": "python3 scripts/gates/check_doc_budget.py --json",
-  "measured_on": "48d8eb93+dirty",
-  "note": "Markdown 体量棘轮基线（只降不升）。实测=基线；减少后用 `python3 scripts/gates/check_doc_budget.py --tighten` 下调，禁止上调（--tighten 会拒绝上升的指标）。",
-  "rebaseline_reason": "F4 archive promotion: seven new main specs (delivery-closure, resource-bounds, exec-integrity, fold-provenance, training-sample-loop, config-liveness, meditation-autonomy) moved from openspec/changes/** (out of the counted surface) into openspec/specs/** (counted). +7 files / +447 lines is a scope-boundary migration of pre-existing text, not prose growth; named so the ratchet stays honest. No content was added to hide an increase.",
+  "measured_on": "73fc5b14+dirty",
+  "note": "Markdown 体量棘轮基线（只降不升）。实测=基线；减少后用 python3 scripts/gates/check_doc_budget.py --tighten 下调，禁止上调（--tighten 会拒绝上升的指标）。基线值是唯一被 checker 读取的真相，不另设散文账。",
   "schema_version": 1,
-  "scope": "git index: tracked + untracked-but-not-ignored *.md/*.markdown, excluding generated docs/api/ (owned by gen_godoc.sh) and change-scoped process records openspec/changes/** (active plans and archive)",
-  "entries": [
-    {
-      "id": "w2-docs",
-      "reason": "W2 domains: config wiki, meditation docs, residency contracts",
-      "files": 0,
-      "lines": 6
-    },
-    {
-      "id": "w3-bench-docs",
-      "reason": "W3 bench/sample comment zeroing: contract indexes + rl-architecture section",
-      "files": 1,
-      "lines": 36
-    },
-    {
-      "id": "f4-archive-scope-migration",
-      "reason": "F4 archive promotion: seven new main specs (delivery-closure, resource-bounds, exec-integrity, fold-provenance, training-sample-loop, config-liveness, meditation-autonomy) moved from openspec/changes/** (out of the counted surface) into openspec/specs/** (counted). +7 files / +447 lines is a scope-boundary migration of pre-existing text, not prose growth; named so the ratchet stays honest. No content was added to hide an increase.",
-      "files": 7,
-      "lines": 447
-    }
-  ]
+  "scope": "git index: tracked + untracked-but-not-ignored *.md/*.markdown, excluding generated docs/api/ (owned by gen_godoc.sh) and change-scoped process records openspec/changes/** (active plans and archive)"
 }

@@ -40,9 +40,12 @@ func hostVisibleStamp(stamp string) bool {
 // this domain, so a stamp the policy does not name is never new material.
 type NoveltyPolicy struct{}
 
-// Novel reports whether one observed fact opens the freshness gate.
+// Novel reports whether one observed fact opens the freshness gate. The
+// judgment reads the one self-managed-lineage derivation rather than restating
+// the stamp vocabulary a second time, so a stamp the domain does not name stays
+// outside the gate.
 func (NoveltyPolicy) Novel(fact event.Event) bool {
-	return hostFacingStamp(fact.Meta[event.MetaKeyTriggerSource])
+	return !SelfManagedLineage(fact.Meta[event.MetaKeyTriggerSource])
 }
 
 // DeliveryPolicy is the meditation domain's delivery policy: one fired

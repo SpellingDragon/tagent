@@ -1714,6 +1714,7 @@ func (l *Loop) decideOn(ctx context.Context, inv Invocation, transcript []model.
 // moment otherwise. A decision on a named binding is captured by that binding's own
 // model beside the turn it serves, so the loop fixes no second view of the same calls
 // and records no second attempt.
+// - The request reads the session-scoped tool face: reflection-only tools stay visible to the dedicated reflection session alone, and no entry turn carries them.
 func (l *Loop) decideWith(ctx context.Context, inv Invocation, transcript []model.Message, round decisionRound, bound *state.AgentBinding) (Decision, model.Outcome, []model.Message, []admittedCall, error) {
 	if round.final {
 		var cancel context.CancelFunc
@@ -1733,14 +1734,14 @@ func (l *Loop) decideWith(ctx context.Context, inv Invocation, transcript []mode
 		return Decision{}, model.Outcome{}, nil, nil, err
 	}
 
-	tools, toolOrder := state.ToolFace(handle.Binding)
+	tools, toolOrder := state.ToolFace(handle.Binding, inv.Address.SessionID)
 	callable := make(map[string]trpctool.CallableTool, len(tools))
 	for name, tool := range tools {
 		if native, ok := tool.(trpctool.CallableTool); ok {
 			callable[name] = native
 		}
 	}
-	view := modelViewOf(handle.Binding)
+	view := modelViewOf(handle.Binding, inv.Address.SessionID)
 	boundary, req, err := l.budgetedRequest(ctx, inv, handle.Binding, round, transcript, tools, toolOrder)
 	if err != nil {
 		_ = l.slots.Vacate(inv.Address, l.instance, inv.InvocationID)
@@ -2336,12 +2337,12 @@ type modelView struct {
 // request boundary view beside this, because the boundary assembly is the one
 // home of the rule naming which skills a request makes visible. The view is
 // never rebuilt from the options of a finished call.
-func modelViewOf(binding state.AgentBinding) modelView {
+func modelViewOf(binding state.AgentBinding, session event.SessionID) modelView {
 	view := modelView{
 		modelName:     binding.Model.Info().Name,
 		promptVersion: binding.PromptSource.Version,
 	}
-	_, order := state.ToolFace(binding)
+	_, order := state.ToolFace(binding, session)
 	view.visibleTools = append(view.visibleTools, order...)
 	return view
 }

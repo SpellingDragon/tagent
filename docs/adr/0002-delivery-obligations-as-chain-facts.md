@@ -11,4 +11,4 @@
 - **前提纪律**：结果未知（超时/中断/不可辨）的发送不自动重发（`delivery-dispatch-receipts` 条款继续有效）；明确失败才有界退避自动重试，耗尽落 held 待人工。
 - **恢复补送注记（r5；P7-P14 F1 扩围）**：重启补送遵循 **at-least-once**，仅针对**无结算事实 ∪ held(reason=retrying)** 的义务（中断在退避途中的义务重启后续跑，不搁浅；发过未销账窗口内可能重发一次）；**已确认 sent 绝不重发**；收方按交付身份去重是通道契约假设（与 `docs/wiki/reliability/durable-delivery.md` 同义）。
 - **实施注记（2026-11-05，01 域落地）**：本裁决实现为 `delivery.settlement` 事实族（键=交付身份+状态，四结算态＋迁移专用 owed 态，held 带 reason∈{approval, retrying, retry-exhausted, unknown}）＋ `DeliveryConsumer` 的自持退避；恢复只读链（结算事实与 owed 声明都取自事实窗口，`delivery.` 前缀过滤**返回集**）、旧 KV 六态幂等迁移为对应事实后只读留存（不可解析具名拒启动）、`TestSettlementRoleMapped` 钉住类型→角色映射。兜底两支分别由失败告知（支①）与延迟告知（支②）承担，锚=`TestNoSilentUndischargedObligation`／`TestDelayedNoticeLayeredByReason`；结果未知不自动重发的负锚=`TestUnknownResultNeverAutoRedriven`。
-- **依据**：`docs/wiki/mechanism-tour.md` §2 三个挂点；压缩消费先例（`openspec/specs` 压缩相关能力）；缺口证据 `openspec/changes/boundary-closure/design.md` D1 E1–E3；用户裁决三轮记录（r1：可靠性优先→两本账追问→三挂点思想确认终裁 B）。
+- **依据**：`docs/wiki/mechanism-tour.md` §2 三个挂点；压缩消费先例（`openspec/specs` 压缩相关能力）；缺口证据 `openspec/changes/archive/2026-11-05-boundary-closure/design.md` D1 E1–E3；用户裁决三轮记录（r1：可靠性优先→两本账追问→三挂点思想确认终裁 B）。

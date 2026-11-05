@@ -137,6 +137,9 @@ func NewAttempt(raw map[string]any) ([]byte, error) {
 }
 
 // Aggregate folds one runner's attempts into its five-metric block.
+// Latency uses the median across repeats (cold: one sample per attempt; hot: one
+// per recorded hot request) rather than the mean, so a single slow outlier does
+// not skew the reported first-token and complete latency.
 func Aggregate(runner, status, caliber string, attempts [][]byte) ([]byte, error) {
 	values := make([]attempt, 0, len(attempts))
 	for _, raw := range attempts {
@@ -153,8 +156,8 @@ func Aggregate(runner, status, caliber string, attempts [][]byte) ([]byte, error
 	block := runnerMetrics{
 		DeliveryRate: deliveryBlock{Eligible: len(values), Caliber: caliber},
 	}
-	var coldFirst, coldComplete, hotFirst, hotComplete float64
-	var hotCount int
+	coldFirst, coldComplete := make([]float64, 0, len(values)), make([]float64, 0, len(values))
+	var hotFirst, hotComplete []float64
 	for _, value := range values {
 		if value.Success {
 			successes++
@@ -166,28 +169,23 @@ func Aggregate(runner, status, caliber string, attempts [][]byte) ([]byte, error
 		block.TokenCost.CompletionTokens += value.CompletionTokens
 		block.Interventions.Breakdown.ApprovalCalls += value.ApprovalCalls
 		block.Interventions.Breakdown.BlockedReports += value.BlockedReports
-		coldFirst += value.Cold.FirstTokenMS
-		coldComplete += value.Cold.CompleteMS
+		coldFirst = append(coldFirst, value.Cold.FirstTokenMS)
+		coldComplete = append(coldComplete, value.Cold.CompleteMS)
 		for _, hot := range value.Hot {
-			hotFirst += hot.FirstTokenMS
-			hotComplete += hot.CompleteMS
-			hotCount++
+			hotFirst = append(hotFirst, hot.FirstTokenMS)
+			hotComplete = append(hotComplete, hot.CompleteMS)
 		}
 	}
 	block.SuccessRate = rateBlock{Attempts: len(values), Successes: successes}
 	if len(values) > 0 {
 		block.SuccessRate.Rate = ratio(successes, len(values))
-		coldFirst /= float64(len(values))
-		coldComplete /= float64(len(values))
 	}
 	block.DeliveryRate.Confirmed = delivered
 	if len(values) > 0 {
 		block.DeliveryRate.Rate = ratio(delivered, len(values))
 	}
-	block.Latency.Cold = latencySample{Samples: len(values), FirstTokenMS: coldFirst, CompleteMS: coldComplete}
-	if hotCount > 0 {
-		block.Latency.Hot = latencySample{Samples: hotCount, FirstTokenMS: hotFirst / float64(hotCount), CompleteMS: hotComplete / float64(hotCount)}
-	}
+	block.Latency.Cold = latencySample{Samples: len(values), FirstTokenMS: median(coldFirst), CompleteMS: median(coldComplete)}
+	block.Latency.Hot = latencySample{Samples: len(hotFirst), FirstTokenMS: median(hotFirst), CompleteMS: median(hotComplete)}
 	block.TokenCost.TotalTokens = block.TokenCost.PromptTokens + block.TokenCost.CompletionTokens
 	block.Interventions.Total = block.Interventions.Breakdown.ApprovalCalls + block.Interventions.Breakdown.BlockedReports
 	apiCalls := 0
@@ -278,4 +276,19 @@ func ratio(part, total int) float64 {
 		return 0
 	}
 	return float64(part) / float64(total)
+}
+
+// median returns the middle value of samples (even count: average of the two
+// middles). An empty slice yields 0. The input slice is not modified.
+func median(samples []float64) float64 {
+	if len(samples) == 0 {
+		return 0
+	}
+	sorted := append([]float64(nil), samples...)
+	sort.Float64s(sorted)
+	mid := len(sorted) / 2
+	if len(sorted)%2 == 1 {
+		return sorted[mid]
+	}
+	return (sorted[mid-1] + sorted[mid]) / 2
 }

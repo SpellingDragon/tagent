@@ -252,11 +252,13 @@ var ErrHostEmptyTask = errors.New("tagent: the task request carries no user mess
     content: a turn reads user input only, so the request is refused by name.
 
 var ErrHostMeditationToolMisplaced = errors.New("tagent: a meditation tool is granted to the wrong agent")
-    ErrHostMeditationToolMisplaced reports a document that grants the
-    cross-session write tool outside the meditation session, or grants the
-    send tool to the meditation session itself: the summary tool belongs to the
-    reflection turn alone, and the communication face a reflection session never
-    carries stays outside it.
+    ErrHostMeditationToolMisplaced reports a document whose reflection would
+    deliver through a face it does not carry: an independent curation agent that
+    enables meditation with a declared deliver_to white list but declares no
+    send tool could never write its delivery, so the boot refuses it by name.
+    Host self-reflection is not judged here: its dedicated reflection session is
+    granted send by the meditation plugin (session-scoped), while the entry tool
+    face deliberately carries none.
 
 var ErrHostNoActiveSession = errors.New("tagent: no user session has been admitted yet")
     ErrHostNoActiveSession reports a task request arriving before any user turn:
@@ -1078,6 +1080,8 @@ type NativeAgent struct {
 	// carries: the one Before pass grades and the After pass presents every call
 	// of that generation over these instances, in the declared order.
 	Plugins []plugin.Instance
+
+	// Has unexported fields.
 }
     NativeAgent is what the embedding process contributes for one declared
     agent: the native model the agent runs against and the native tools visible
@@ -1638,6 +1642,13 @@ func (r *Run) SessionPresented(addr event.Address) map[event.EventID]bool
     judgment of the same material. A session this run registered no sequence
     for answers nothing, because no prefix is assembled for it and no fact is
     presented there.
+
+func (r *Run) SessionToolNames(agent event.AgentID, session event.SessionID) ([]string, error)
+    SessionToolNames reports the tool names one session's request face exposes,
+    in the order the request emits them. It reads the live, session-scoped tool
+    face of the agent's current binding — reflection-only tools appear only for
+    the agent's dedicated reflection session — so a caller observes exactly the
+    face a request at that session would carry, without driving a turn.
 
 func (r *Run) Unsettled(ctx context.Context) task.Unsettled
     Unsettled reports the rest criterion of this run: the work it accepted

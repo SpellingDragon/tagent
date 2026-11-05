@@ -10,7 +10,7 @@
 
 ## What Changes
 
-1. **混合形态（r3 定版）**：新输出的 owed=agent_output.Meta **声明**（同笔原子）；**结算四态（held[带 reason]/sent/refused/headless-retired）＋迁移专用 owed 态**（仅历史输出迁移，非常规结算终态；retry-exhausted 只是 held 的 reason，非独立终态）=独立事实族 `delivery.settlement`（键=交付身份+终态，追加式，TTL 前瞻豁免，一行可读正文）。
+1. **混合形态（r3 定版）**：新输出的 owed=agent_output.Meta **声明**（同笔原子）；**结算四态（held[带 reason]/sent/refused/headless-retired）＋迁移专用 owed 态**（仅历史输出迁移，非常规结算终态；retry-exhausted 只是 held 的 reason，非独立终态）=独立事实族 `delivery.settlement`（键=交付身份+终态，追加式，按结算族构造性豁免 TTL 墓碑化，无前瞻注册、无未挂载债务，一行可读正文）。
 2. **DeliveryConsumer（消费挂点）**：读链驱动发送；明确失败（拒连非超时）自动重试，纯超时归未知不自动重发；**首次重试前即写 held(reason=retrying) 结算事实**（成功后 sent 覆盖对账；retrying 只是 held 的 reason，不是独立终态）；重试耗尽落 held(reason=retry-exhausted)。
 3. **可见性口径**：结算事实进模型消费与投影呈现（类型→角色映射+非空 Content；映射仅限结算类型）；**owed 随 agent_output 本体呈现、无独立可见面**；记账噪音不进投影。
 4. **旁路 KV 欠条退役**：旧 KV 六态幂等迁移为事实（headless→retired 不重发）；恢复只读链——**结算事实与 owed 声明均经 `r.facts` 事实窗口内读取**（`r.facts` 本就是事实窗口内事实表；`r.replays` 的映射序列仅用于会话枚举），代价 **O(事实窗口内)**；**结算事实以 `memory/query_events.go` 的 `QueryOptions` 未导出键前缀（`keyPrefix`+`Prefix()`+`WithKeyPrefix()`）做返回集过滤**（过滤不改变扫描量）；查询 PartitionIDs 由 replays 注册键派生（不盲扫分区）；**补送仅针对无结算事实 ∪ held(reason=retrying) 的义务（中断重试恢复后续跑；at-least-once：发过未销账窗口内可能重发一次；已确认 sent 绝不重发）**；未清交付事实不落事实窗口外（held/owed 活动集驻留，03 的 1.2a 保证）。

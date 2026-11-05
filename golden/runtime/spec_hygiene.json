@@ -688,14 +688,6 @@
     },
     {
       "file": "openspec/specs/event-segment-store/spec.md",
-      "requirement": "eventCount 在进程生命期内反映实际事件数",
-      "rule": "numeric-constant",
-      "text_sha256": "98dab0a69ac7f4a30bcf3202f3df0bb16361961c729ce22c71d87dd91620691b",
-      "preview": "支持分区枚举的存储 SHALL 在启动扫描器前从事实链重建去重、排除墓碑的逻辑存活计数，并在成功提交事件后增量维护。首次墓碑化或直接删除存活事件 SHALL 递减一次；物理清理已墓碑事件与压实搬迁 SHALL NOT 再递减。写失败和重复键拒绝 SHALL NOT 增计数。不能完成枚举/扫描时 SHALL 标记 cou",
-      "count": 1
-    },
-    {
-      "file": "openspec/specs/event-segment-store/spec.md",
       "requirement": "resolvePartitions 默认隔离（无分区参数返回空）",
       "rule": "function-call",
       "text_sha256": "4d58c66d324d57cf2708aeb1679aa2c187aee0af7f7f0bef5aa3765e3ef2046c",
@@ -836,14 +828,6 @@
       "rule": "numeric-constant",
       "text_sha256": "0c06abaf26a8ef0e9acb3788e866f738bfa6ca976a74b8b33b47677bf3c199ef",
       "preview": "框架 SHALL 在 event 包声明事实类别接口（`Fact`：身份与类型两问），每个事实族（核心事件、通知、训练记录、声明、引用票据、压缩请求、压缩产物、收尾判定、注意力；编号 6「回放结算」已退役留空）MUST 在其所属包内实现该接口；事实族的归属包 MUST 在词汇表文档中逐族登记（族/身份/类型/归属/锁定",
-      "count": 1
-    },
-    {
-      "file": "openspec/specs/fact-vocabulary/spec.md",
-      "requirement": "交付结算族（第十一族）",
-      "rule": "numeric-constant",
-      "text_sha256": "9c1eec7f4cf0c8df6b7cdfa9ae3ad033281da162988da43e4e54d6bb6fe0b999",
-      "preview": "事实族登记 SHALL 新增第十一族（既有九族编号 1-5、7-10 不变，6 留空不排）：**交付结算**——归属包 `assembly`、身份 `delivery.<交付身份>.<终态>`（键含状态；同键同内容幂等、同键异内容冲突拒收；按 `delivery.<身份>.` 前缀回读全状态线）、类型 `deliver",
       "count": 1
     },
     {
@@ -1076,14 +1060,6 @@
       "rule": "numeric-constant",
       "text_sha256": "3a63b0a962f58ebab530fde388a0f3d659f9618bf7364fa7dbb06aba15ad3a2e",
       "preview": "`request.go` 触碰的叶（1.0、2.1、4.x）SHALL 串行；`facts.go`/`loop.go` 簇（2.2）与 `host.go` 簇（3.1/3.2）合单。",
-      "count": 1
-    },
-    {
-      "file": "openspec/specs/orchestration/spec.md",
-      "requirement": "变更级 DoD",
-      "rule": "numeric-constant",
-      "text_sha256": "df481762836200fe735b6f98a71d24de2da4f63f047635ee9a35fb0da1a3bb0a",
-      "preview": "一级变更完成 SHALL 同时满足：七条症状锚全绿、全量门禁与 race 门 exit 0、**08 证据位（声明事实/发布记录/失败回执三链测试＋watcher 三例＋重启对账/跨维窗口）与 09 证据位（自主整理、自察四测试、激活因果、自管产出不计入状态积累）各有 PASS 行**、06 的对照 run（含任务成功",
       "count": 1
     },
     {
@@ -1772,14 +1748,6 @@
       "rule": "function-call",
       "text_sha256": "cc6238f5150aa590c64c640d03b93b01cd3961e49e648e587b58f5a47295d7e7",
       "preview": "`RustVikingClient.KVRange()` SHALL invoke `rustviking kv range` with the exact start/end parameters instead of computing a common prefix and filtering on the cl",
-      "count": 1
-    },
-    {
-      "file": "openspec/specs/self-improvement-meditation/spec.md",
-      "requirement": "负反馈回顾(反思素材)",
-      "rule": "numeric-constant",
-      "text_sha256": "066b40828ecb6f946fa00bdc867ee78dc2211e2affde370cee827c97c81ad516",
-      "preview": "冥想回顾清单 MUST 包含 feedback 事件(任务失败 negative/用户不满)——失败教训是最高价值反思素材;§2 分析提示应将 negative 归因到痛点。",
       "count": 1
     },
     {

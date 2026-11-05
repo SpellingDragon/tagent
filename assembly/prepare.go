@@ -39,11 +39,13 @@ import (
 // owns construction and registration alone and never grows a second dispatch
 // channel beside the published pipeline.
 type supplier struct {
-	model   func(context.Context, config.AgentSpec) (model.Model, func(context.Context) error, error)
-	tools   func(context.Context, config.AgentSpec) ([]trpctool.Tool, trpctool.ToolSet, func(context.Context) error, error)
-	prompt  func(context.Context, config.AgentSpec) (state.PromptSource, error)
-	plugins func(context.Context, config.AgentSpec) ([]plugin.Instance, error)
-	wrap    func(trpctool.CallableTool) trpctool.Tool
+	model             func(context.Context, config.AgentSpec) (model.Model, func(context.Context) error, error)
+	tools             func(context.Context, config.AgentSpec) ([]trpctool.Tool, trpctool.ToolSet, func(context.Context) error, error)
+	prompt            func(context.Context, config.AgentSpec) (state.PromptSource, error)
+	plugins           func(context.Context, config.AgentSpec) ([]plugin.Instance, error)
+	wrap              func(trpctool.CallableTool) trpctool.Tool
+	reflectionSession event.SessionID
+	reflectionOnly    []string
 }
 
 // 契约: docs/wiki/platform/platform-subsystems.md#composition-root
@@ -124,7 +126,14 @@ func buildBinding(ctx context.Context, spec config.AgentSpec, s supplier, leases
 		return state.AgentBinding{}, fmt.Errorf("tagent: construct the plugins of agent %q: %w", spec.ID, err)
 	}
 	leases.Register("plugins", spec.ID, nil)
-	return state.AgentBinding{Model: native, Tools: registered, Plugins: registrations, PromptSource: prompt, Set: resources}, nil
+	binding := state.AgentBinding{
+		Model:        native,
+		Tools:        registered,
+		Plugins:      registrations,
+		PromptSource: prompt,
+		Set:          resources,
+	}
+	return binding.WithScopedFace(s.reflectionSession, s.reflectionOnly), nil
 }
 
 // registerNativeTools registers the native tool families of one declared agent

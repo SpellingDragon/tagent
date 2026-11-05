@@ -320,12 +320,23 @@ func (d *hostDocument) modelName(id string) string {
 }
 
 // validateMeditationTools refuses a document whose reflection would deliver through a
-// face it does not carry: an enabled reflection with a declared deliver_to white list
-// needs the one cross-session communication tool, because the delivery is the
-// reflection turn's own decision and no mechanism writes a body in its place. A
-// reflection declared beside no white list delivers nothing and is not judged here.
+// face it does not carry. For the retired independent curation agent, the
+// enabled reflection with a declared deliver_to white list must itself declare
+// the one cross-session communication tool, because the delivery is the
+// reflection turn's own decision and no mechanism writes a body in its place.
+//
+// Host self-reflection is different: the entry and reflection sessions share one
+// binding, so the meditation plugin grants the send tool to the reflection
+// session alone (session-scoped), and the entry tool face stays free of it. A
+// declarative grant is neither required nor permitted here, so there is no
+// misplacement to refuse; an enabled reflection always reaches a send face.
+// A reflection declared beside no white list delivers nothing and is not judged
+// in either form.
 func (d *hostDocument) validateMeditationTools(plan *hostMeditationPlan) error {
 	if plan == nil || len(plan.targets) == 0 {
+		return nil
+	}
+	if plan.selfReflection {
 		return nil
 	}
 	if !d.declaresTool(plan.agent, hostSendToolID) {
@@ -425,7 +436,7 @@ func (d *hostDocument) nativeAgents(ctx context.Context, client *http.Client, re
 // declaration contributes. Boot builds every native of the first generation
 // through it, and a reload builds an agent its document adds through the very
 // same construction, over the ports the boot bound to the run.
-func (d *hostDocument) nativeAgent(ctx context.Context, id string, client *http.Client, recallPort *RecallPort, _ *hostMeditationPlan, meditationPort *hostMeditationPort, reentryPort hostSendReentry) (NativeAgent, error) {
+func (d *hostDocument) nativeAgent(ctx context.Context, id string, client *http.Client, recallPort *RecallPort, plan *hostMeditationPlan, meditationPort *hostMeditationPort, reentryPort hostSendReentry) (NativeAgent, error) {
 	native, err := d.modelFor(id, client)
 	if err != nil {
 		return NativeAgent{}, err
@@ -434,7 +445,21 @@ func (d *hostDocument) nativeAgent(ctx context.Context, id string, client *http.
 	if err != nil {
 		return NativeAgent{}, err
 	}
-	return NativeAgent{Model: native, Tools: tools}, nil
+	// Host self-reflection shares one binding between the entry and its
+	// dedicated reflection session. Mark that session and the cross-session
+	// send tool the plugin granted to it, so the runtime filters send out of
+	// every other (entry/business) session's request face while the reflection
+	// turn keeps the one write face its lesson delivery needs. A declarative
+	// send stays a normal business-face tool: only the plugin-granted one
+	// (the agent declared no send) is reflection-only, or a fixture naming its
+	// own send would lose it from its business turns.
+	var reflectionSession event.SessionID
+	var reflectionOnly []string
+	if plan != nil && plan.reflectionGrantsSend(id) && !d.declaresTool(id, hostSendToolID) {
+		reflectionSession = event.SessionID(plan.session)
+		reflectionOnly = []string{hostSendToolID}
+	}
+	return NativeAgent{Model: native, Tools: tools, reflectionSession: reflectionSession, reflectionOnly: reflectionOnly}, nil
 }
 
 // toolsFor constructs the tool instances the host contributes for one agent;
@@ -445,9 +470,13 @@ func (d *hostDocument) nativeAgent(ctx context.Context, id string, client *http.
 // recall_trace walks the host's parent chain.
 // - One tool answers every task and peer-session destination, and every agent that declares it carries both dispatch faces — the meditation session included, because a reflection turn delivers its summary through this very tool (design D15 DEL-2).
 // - The delivery face itself refuses a sender the document's white list does not authorize, so a grant is never an authorization of its own.
+// - Host self-reflection contributes the cross-session send tool through the meditation plugin, not through the agent-level declaration; the runtime scopes the tool to the dedicated reflection session alone.
+// - A plugin-granted send that no declaration named is appended to the contributed tools after the declared list, and a declared send is never contributed twice.
 func (d *hostDocument) toolsFor(ctx context.Context, id string, recallPort *RecallPort, meditationPort *hostMeditationPort, reentryPort hostSendReentry) ([]trpctool.CallableTool, error) {
 	available := make(map[string]trpctool.CallableTool, len(hostToolIDs))
-	if d.declaresTool(id, hostSendToolID) {
+	grantSend := meditationPort != nil && meditationPort.plan != nil && meditationPort.plan.reflectionGrantsSend(id)
+	declaresSend := d.declaresTool(id, hostSendToolID)
+	if declaresSend || grantSend {
 		available[hostSendToolID] = &hostSendTool{reentry: reentryPort, session: meditationPort}
 	}
 	if d.declaresRecall(id) {
@@ -493,6 +522,9 @@ func (d *hostDocument) toolsFor(ctx context.Context, id string, recallPort *Reca
 		if tool, ok := available[ref.ID]; ok {
 			tools = append(tools, tool)
 		}
+	}
+	if grantSend && !declaresSend {
+		tools = append(tools, available[hostSendToolID])
 	}
 	return tools, nil
 }
