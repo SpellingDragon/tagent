@@ -1,6 +1,6 @@
 # 交付义务走链上事实（机制事件化），不再用旁路 KV 欠条
 
-**Status**: accepted（2026-11-05 用户终裁，boundary-closure r1 三轮追问后定案；实施在 `openspec/changes/boundary-closure/changes/01-delivery-closure/`）
+**Status**: accepted（2026-11-05 用户终裁，boundary-closure r1 三轮追问后定案；实施在 `openspec/changes/archive/2026-11-05-01-delivery-closure/`）
 
 交付义务（"这笔答案欠某个外部渠道一次发送"）此前记在旁路 KV 账本（`tagent/task/v1/delivery:`），与事实链分离。两条路摆在面前：**A** 保持两本账+启动对账（小切口：恢复时扫链补建缺失欠条）；**B** 机制事件化（交付义务成为链上事实族，随 `agent_output` 同笔原子提交，发送/重试/审批由消费挂点驱动）。用户选 **B**。
 
