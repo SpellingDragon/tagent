@@ -1044,9 +1044,16 @@ func TestDanglingTurnAfterDualFailure(t *testing.T) {
 		t.Fatalf("the dangling turn reads as inputs=%d outputs=%d on the chain, want the committed input beside no output: %s",
 			inputs, outputs, boundaryAnchorFactsSummary(facts))
 	}
+	closed := make(chan struct{})
 	go func() {
 		_, _ = run.Close(ctx, agent.CloseRequest{Timeout: time.Now().Add(time.Second)})
+		close(closed)
 	}()
+	select {
+	case <-closed:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the first run did not drain its writers before the restart; a fire-and-forget Close leaves a KV write in flight and TempDir cleanup fails with directory not empty")
+	}
 
 	restarted := snapshotTestRun(t, ctx, WithStorage(ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: root}))
 	restartedSender := newDeliveryTestSender(nil)
