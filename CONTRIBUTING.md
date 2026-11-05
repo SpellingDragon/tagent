@@ -6,7 +6,7 @@
 
 - **三个 Go module**：根 module `github.com/SpellingDragon/tagent`，以及 `examples/wechat-bot`、`examples/cli-host`（各自独立 module，无 `go.work`）。根 `./...` 永远不覆盖这两个示例 module，三者都要构建与测试。
 - **Go 下限** `go 1.24.1`（见 [`go.mod`](go.mod)）。
-- **代码面**：顶层产品包为 `api`、`runtime`、`memory`、`tool`、`internal`（基准面 `internal/bench`）；可选能力 `telemetry`/`evolution`/`rl` 住 `features/` 下；加 `cli` 宿主壳与 `assembly` 组合根（组合根住 `assembly/`，目录名即包名）；包边界登记在 [`golden/runtime/architecture.json`](golden/runtime/architecture.json)。
+- **代码面**：顶层产品包为 `api`、`runtime`、`memory`、`tool`、`internal`（基准面 `internal/bench`）、`bench`（真实任务基准夹具、runner 与指标）；可选能力 `telemetry`/`evolution`/`rl` 住 `features/` 下；加 `cli` 宿主壳与 `assembly` 组合根（组合根住 `assembly/`，目录名即包名）；包边界登记在 [`golden/runtime/architecture.json`](golden/runtime/architecture.json)。
 - **门禁工具**：bash、Go、git；spec 门另需 openspec CLI 1.2.0；校验器自测需 python3。
 
 ## 二、包结构
