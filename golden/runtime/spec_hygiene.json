@@ -871,14 +871,6 @@
       "count": 1
     },
     {
-      "file": "openspec/specs/git-native-refine/spec.md",
-      "requirement": "审批直投通道(宿主装配)",
-      "rule": "function-call",
-      "text_sha256": "6154836096f001fc294750d3153673451f3edb5e29d8f9cc34c8fbda6cb294b5",
-      "preview": "宿主/example MUST 可经 WithApprovalChannel option 注入审批直投通道(Deliver→渠道);直投目标=白名单首个 approver(声明于文档);Deliver MUST 带超时(悬挂不阻塞审批门)。",
-      "count": 1
-    },
-    {
       "file": "openspec/specs/inbound-intent-declaration/spec.md",
       "requirement": "声明受理 fail-closed 三重校验",
       "rule": "numeric-constant",

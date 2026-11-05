@@ -139,6 +139,92 @@ def case_write_baseline():
         report(name, problems, output + check_output)
 
 
+def case_object_baseline():
+    """The shared golden registry is a dict whose 'symbols' are objects with a
+    'name' field; a top-level list of such objects is accepted too. Both must
+    reduce to the same symbol names so the fixture stays green."""
+    golden_dict = {
+        "schema_version": 1,
+        "symbols": [
+            {"file": "assembly/fixture.go", "name": n, "reason": "fixture",
+             "review_by": "2999-12-31"}
+            for n in BASE_SYMBOLS
+        ],
+    }
+    golden_list = [{"name": n} for n in BASE_SYMBOLS]
+    for label, payload in (
+        ("dict with object 'symbols'", golden_dict),
+        ("top-level list of objects", golden_list),
+    ):
+        name = "object-shaped baseline is accepted ({})".format(label)
+        with tempfile.TemporaryDirectory() as root:
+            build_fixture(root)
+            baseline = os.path.join(root, "baseline.json")
+            write(root, "baseline.json", json.dumps(payload, indent=2) + "\n")
+            rc, output = run_checker(root, baseline)
+            problems = []
+            if rc != 0:
+                problems.append("exit {} != 0".format(rc))
+            if "check_feature_boundary: ok" not in output:
+                problems.append("missing ok marker")
+            for sym in BASE_SYMBOLS:
+                if sym in output:
+                    problems.append("unexpected {!r} in output".format(sym))
+            report(name, problems, output)
+
+
+def case_write_baseline_refuses_golden():
+    """--write-baseline must not silently clobber the reviewed object registry."""
+    golden_rel = "golden/runtime/assembly_symbols.json"
+    registry = {
+        "schema_version": 1,
+        "adr": "docs/adr/0006-three-hooks.md",
+        "user_ruling": "fixture ruling",
+        "review_by": "2027-05-05",
+        "reason": "fixture registry",
+        "symbols": [
+            {"file": "assembly/fixture.go", "name": n, "reason": "fixture",
+             "review_by": "2027-05-05"}
+            for n in BASE_SYMBOLS
+        ],
+    }
+    for label, extra in (
+        ("default golden path", []),
+        ("explicit --baseline golden path", ["--baseline", golden_rel]),
+    ):
+        name = "--write-baseline refuses the golden object registry ({})".format(label)
+        with tempfile.TemporaryDirectory() as root:
+            build_fixture(root)
+            write(root, golden_rel, json.dumps(registry, indent=2) + "\n")
+            golden_abs = os.path.join(root, golden_rel)
+            with open(golden_abs, "r", encoding="utf-8") as handle:
+                before = handle.read()
+            command = [sys.executable, CHECKER, "--root", root, "--write-baseline"]
+            if extra:
+                command.extend(extra)
+            proc = subprocess.run(command, stdout=subprocess.PIPE,
+                                  stderr=subprocess.STDOUT, text=True, timeout=120)
+            rc, output = proc.returncode, proc.stdout
+            with open(golden_abs, "r", encoding="utf-8") as handle:
+                after = handle.read()
+            problems = []
+            if rc != 1:
+                problems.append("exit {} != 1".format(rc))
+            if "refuses to overwrite" not in output:
+                problems.append("missing named refusal error")
+            if "check_feature_boundary: ok" in output:
+                problems.append("unexpected ok marker")
+            if after != before:
+                problems.append("the golden registry was modified")
+            try:
+                syms = json.loads(after).get("symbols") or []
+                if not syms or not isinstance(syms[0], dict):
+                    problems.append("registry lost its object shape")
+            except ValueError as exc:
+                problems.append("registry no longer parses: {}".format(exc))
+            report(name, problems, output)
+
+
 def main():
     case("clean fixture passes (generic keys, baseline symbols, comments only)",
          contains=["check_feature_boundary: ok", "r1 host_documents=1",
@@ -197,6 +283,8 @@ func Work() {}
          contains=["check_feature_boundary: ok"])
 
     case_write_baseline()
+    case_object_baseline()
+    case_write_baseline_refuses_golden()
 
     if FAILURES:
         print("test_check_feature_boundary: {} case(s) FAILED".format(len(FAILURES)))

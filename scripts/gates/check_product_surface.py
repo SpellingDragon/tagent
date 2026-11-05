@@ -77,6 +77,68 @@ def sleep_violations(root, allowed):
     return sorted(set(errors))
 
 
+def _go_code_only(text):
+    """Blank Go comments and string/rune/raw literals (newlines preserved).
+
+    A surviving Name( token therefore means a real call or declaration in
+    executable code, not a mention in a doc comment, block comment or string.
+    """
+    out = list(text)
+    i, n = 0, len(text)
+    state = "code"
+    backtick = chr(96)
+    while i < n:
+        ch = text[i]
+        if state == "code":
+            if ch == "/" and i + 1 < n and text[i + 1] == "/":
+                j = i
+                while j < n and text[j] != "\n":
+                    j += 1
+                for k in range(i, j):
+                    out[k] = " "
+                i = j
+                continue
+            if ch == "/" and i + 1 < n and text[i + 1] == "*":
+                j = i + 2
+                while j + 1 < n and not (text[j] == "*" and text[j + 1] == "/"):
+                    j += 1
+                j = min(j + 2, n)
+                for k in range(i, j):
+                    if out[k] != "\n":
+                        out[k] = " "
+                i = j
+                continue
+            if ch == '"':
+                out[i] = " "
+                state = "string"
+            elif ch == "'":
+                out[i] = " "
+                state = "rune"
+            elif ch == backtick:
+                out[i] = " "
+                state = "raw"
+            i += 1
+        elif state in ("string", "rune"):
+            if ch == "\\" and i + 1 < n:
+                out[i] = out[i + 1] = " "
+                i += 2
+                continue
+            if (state == "string" and ch == '"') or (state == "rune" and ch == "'"):
+                out[i] = " "
+                state = "code"
+            elif ch != "\n":
+                out[i] = " "
+            i += 1
+        else:  # raw string
+            if ch == backtick:
+                out[i] = " "
+                state = "code"
+            elif ch != "\n":
+                out[i] = " "
+            i += 1
+    return "".join(out)
+
+
 def exported_func_inventory(root):
     """name -> (definition files, product callers, test callers)."""
     prod = {}
@@ -85,14 +147,29 @@ def exported_func_inventory(root):
             prod.setdefault(m.group(1), set()).add(path)
     callers_prod = {n: set() for n in prod}
     callers_test = {n: set() for n in prod}
+    word_re = {n: re.compile(r"\b" + re.escape(n) + r"\b") for n in prod}
+    call_re = {n: re.compile(r"\b" + re.escape(n) + r"\s*\(") for n in prod}
     for path in all_go_files(root):
         text = read(path)
         is_test = path.endswith("_test.go")
+        code = None
         for n in prod:
-            if re.search(r"\b" + re.escape(n) + r"\b", text):
-                if is_test:
-                    callers_test[n].add(path)
-                elif path not in prod[n]:
+            if not word_re[n].search(text):
+                continue
+            if is_test:
+                callers_test[n].add(path)
+            elif path not in prod[n]:
+                callers_prod[n].add(path)
+            else:
+                # A function DEFINED and CALLED in the same product file used to
+                # be misclassified as test-only: the old "elif path not in
+                # prod[n]" branch dropped the definition file's own calls.
+                # Count the definition file as a product caller when a real
+                # Name( call survives in executable code besides the declaration
+                # itself (comments, strings and doc-comments masked out first).
+                if code is None:
+                    code = _go_code_only(text)
+                if len(call_re[n].findall(code)) > 1:
                     callers_prod[n].add(path)
     return prod, callers_prod, callers_test
 

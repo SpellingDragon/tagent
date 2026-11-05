@@ -5,7 +5,11 @@ R1 schema sections: agent declarations in host YAML may use only the generic
    agent keys. The existing 'meditation' section is grandfathered debt; any
    other agent-section key is a new feature-specific schema section.
 R2 assembly symbols: declarations shaped resolve<Feature>/validate<Feature>/
-   <feature>Port under assembly/ must be listed in the baseline.
+   <feature>Port under assembly/ must be listed in the shared R2 baseline,
+   golden/runtime/assembly_symbols.json (the same registry read by
+   check_assembly_symbols.py). load_baseline() accepts a plain string list,
+   a dict with 'symbols', or a reviewed registry of objects with a 'name'
+   field; all shapes are reduced to symbol names.
 R3 runtime branches: executable code under runtime/ must not name the
    meditation/reflection feature. Comments are ignored.
 
@@ -21,7 +25,7 @@ import os
 import re
 import sys
 
-DEFAULT_BASELINE = "scripts/gates/feature_autonomy_baseline.json"
+DEFAULT_BASELINE = "golden/runtime/assembly_symbols.json"
 DEFAULT_DOCUMENTS = ("examples/wechat-bot/tagent.yaml", "tagent.yaml")
 
 # Generic agent-level keys. 'meditation' is the one grandfathered feature
@@ -494,6 +498,14 @@ def check_runtime(root):
 
 
 def load_baseline(path):
+    """Load R2 symbol names from any supported baseline shape.
+
+    The shared golden registry (golden/runtime/assembly_symbols.json) is a
+    dict whose 'symbols' entries are reviewed objects carrying a 'name' field;
+    the legacy feature-autonomy baseline was a plain list of strings. Both are
+    reduced to the same set of symbol names here, so this guard and
+    check_assembly_symbols.py read one source of truth.
+    """
     try:
         with open(path, "r", encoding="utf-8") as handle:
             data = json.load(handle)
@@ -507,9 +519,20 @@ def load_baseline(path):
             return []
     else:
         symbols = data
-    if not isinstance(symbols, list) or not all(isinstance(item, str) for item in symbols):
-        raise ValueError("baseline {} must contain a string list 'symbols'".format(path))
-    return symbols
+    if not isinstance(symbols, list):
+        raise ValueError("baseline {} must contain a 'symbols' list".format(path))
+    names = []
+    for item in symbols:
+        if isinstance(item, str):
+            names.append(item)
+        elif isinstance(item, dict) and isinstance(item.get("name"), str):
+            names.append(item["name"])
+        else:
+            raise ValueError(
+                "baseline {} 'symbols' entries must be strings or objects with "
+                "a string 'name'".format(path)
+            )
+    return names
 
 
 def write_baseline(path, declarations):
@@ -554,8 +577,8 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("documents", nargs="*", help="host YAML documents (default: discovery list)")
     parser.add_argument("--root", default=".", help="repository root for scans")
-    parser.add_argument("--baseline", default=DEFAULT_BASELINE, help="R2 baseline JSON")
-    parser.add_argument("--write-baseline", action="store_true", help="rewrite the R2 baseline")
+    parser.add_argument("--baseline", default=DEFAULT_BASELINE, help="R2 baseline JSON (default: golden/runtime/assembly_symbols.json; string list, dict with 'symbols', or objects with 'name')")
+    parser.add_argument("--write-baseline", action="store_true", help="rewrite a plain-string R2 baseline (refuses the golden object registry)")
     parser.add_argument("--only", action="append", choices=("r1", "r2", "r3"),
                         help="run only the named rule (repeatable)")
     args = parser.parse_args(argv)
@@ -567,6 +590,42 @@ def main(argv=None):
     selected = set(args.only) if args.only else {"r1", "r2", "r3"}
 
     if args.write_baseline:
+        # The golden registry is a reviewed object allowlist owned by
+        # check_assembly_symbols.py: each symbol carries file/reason/review_by
+        # and the registry carries ADR metadata. write_baseline() emits a plain
+        # string list, so overwriting that registry would silently destroy the
+        # reviewed metadata and break check_assembly_symbols.py. Refuse writing
+        # back to the golden path (default or explicit) and to any existing
+        # object-shaped registry, with a named error.
+        golden_path = os.path.abspath(os.path.join(root, DEFAULT_BASELINE))
+        target_is_golden = os.path.abspath(baseline_path) == golden_path
+        existing_is_object_registry = False
+        if os.path.isfile(baseline_path):
+            try:
+                with open(baseline_path, "r", encoding="utf-8") as handle:
+                    existing = json.load(handle)
+                existing_symbols = (
+                    existing.get("symbols") if isinstance(existing, dict) else existing
+                )
+                existing_is_object_registry = (
+                    isinstance(existing_symbols, list)
+                    and bool(existing_symbols)
+                    and isinstance(existing_symbols[0], dict)
+                )
+            except (OSError, ValueError):
+                existing_is_object_registry = False
+        if target_is_golden or existing_is_object_registry:
+            print(
+                "ERROR: --write-baseline refuses to overwrite the reviewed object "
+                "registry {}: it would clobber the ADR metadata and per-symbol "
+                "file/reason/review_by that check_assembly_symbols.py requires. "
+                "Pass --baseline <a plain-string JSON> to write a legacy baseline, "
+                "or edit the registry by hand with a reviewed exception.".format(
+                    display_path(root, baseline_path)
+                )
+            )
+            print("check_feature_boundary: --write-baseline blocked for the golden registry")
+            return 1
         errors, _, declarations = check_assembly(root)
         if errors:
             for error in errors:

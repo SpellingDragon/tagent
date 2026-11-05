@@ -27,9 +27,9 @@
 - **WHEN** 周期内文件集无变化
 - **THEN** 不产生事件，无额外日志
 
-### Requirement: 认知资产写入需人工审批（脚手架——拆除条件：权限域分离落地）
+### Requirement: 认知资产写入需人工审批
 
-governance 启用时，exec 命令文本匹配认知资产路径写入意图（默认清单与 evolution `protected_paths` 同源：`resources/prompts/**`、`skills/**`，另含主配置 yaml）SHALL 被分类为 **critical**，走既有 ApprovalManager 异步审批：未批挂起（strict 模式拒绝并给出可读理由），人工裁决（文件/微信通道）后放行；审批请求摘要 SHALL 含目标路径与命令片段。refine 流程内的登记修改 MUST NOT 豁免审批。governance 关闭的部署 SHALL 零行为变化。**本需求为过渡脚手架**：文本匹配非密封边界，其终态为权限域分离（物理不可写）；拆除条件触发时本需求随变更删除。
+governance 启用时，exec 命令文本匹配认知资产路径写入意图（默认清单与 evolution `protected_paths` 同源：`resources/prompts/**`、`skills/**`，另含主配置 yaml）SHALL 被分类为 **critical**，走既有 ApprovalManager 异步审批：未批挂起（strict 模式拒绝并给出可读理由），人工裁决（文件/微信通道）后放行；审批请求摘要 SHALL 含目标路径与命令片段。对受控路径的任何写入 MUST NOT 豁免审批。governance 关闭的部署 SHALL 零行为变化。
 
 #### Scenario: 直改工具描述被拦待批
 
@@ -41,9 +41,9 @@ governance 启用时，exec 命令文本匹配认知资产路径写入意图（�
 - **WHEN** 上述审批请求经 Decide 批准
 - **THEN** 同命令重试被放行并记录审计（已批准放行）
 
-#### Scenario: 登记不豁免审批
+#### Scenario: 直接写入不豁免审批
 
-- **WHEN** agent 经 refine register 登记后直改 protected 路径文件
+- **WHEN** agent 直改 protected 路径文件
 - **THEN** 写入命令仍须过 critical 审批（judge 评估是事后层，审批权在人）
 
 #### Scenario: governance 关闭零变化
@@ -51,9 +51,9 @@ governance 启用时，exec 命令文本匹配认知资产路径写入意图（�
 - **WHEN** 部署未启用 governance
 - **THEN** 同类命令按既有语义执行，无挂起、无审批请求
 
-### Requirement: 走私形态入舱引导（脚手架——拆除条件：failure-polarity-passthrough 上线且观察期走私未复发）
+### Requirement: 走私形态入舱引导
 
-exec 工具 SHALL 对命令文本做静态检测：命中后台化模式（`nohup … &`、`& disown` 等）或嵌套 tmux 会话创建（`tmux new-session`、`tmux new -s`）时，工具结果末尾 SHALL 附加引导行，说明该形态不受框架托管（无结算通知、无 TTL 保护）并指向合法形态（`mode:resident` + 大 `ttl`、退出码由框架捕获）。引导 SHALL 为纯提示——MUST NOT 拦截、延迟或拒绝命令执行。**本需求为过渡脚手架**：走私动机根源为失败极性缺失导致的归因真空，failure-polarity-passthrough 接通极性后动机自然消退；观察期走私形态未再现即触发拆除。
+exec 工具 SHALL 对命令文本做静态检测：命中后台化模式（`nohup … &`、`& disown` 等）或嵌套 tmux 会话创建（`tmux new-session`、`tmux new -s`）时，工具结果末尾 SHALL 附加引导行，说明该形态不受框架托管（无结算通知、无 TTL 保护）并指向合法形态（`mode:resident` + 大 `ttl`、退出码由框架捕获）。引导 SHALL 为纯提示——MUST NOT 拦截、延迟或拒绝命令执行。
 
 #### Scenario: nohup 后台化被引导
 
@@ -70,26 +70,21 @@ exec 工具 SHALL 对命令文本做静态检测：命中后台化模式（`nohu
 - **WHEN** 命令不含任何走私模式
 - **THEN** 结果与现状逐字节一致，无附加行
 
-### Requirement: 权限域分离方向（终态锚定，实现属独立运维变更）
+### Requirement: 认知资产写防线
 
-exec 执行域与框架资产域的物理隔离（资产目录对 exec 会话只读）SHALL 作为资产写防线的终态方向被文档确立：使「写入认知资产」从「识别并拦截」问题转变为「物理不可能」问题。本需求不要求现在实现；其落地变更 SHALL 引用本能力并在验证后触发资产写审批脚手架的拆除。
+exec 执行域与框架资产域的物理隔离（资产目录对 exec 会话只读）SHALL 使「写入认知资产」从「识别并拦截」问题转变为「物理不可能」问题；在隔离生效前，资产写审批规则承担拦截职责，对受控路径的任何写入 MUST NOT 豁免审批。
 
-#### Scenario: 方向在文档中可追溯
+#### Scenario: 受控路径写入需审批
 
-- **WHEN** 读者查阅平台子系统文档
-- **THEN** 权限域分离作为 cognitive-asset-guard 的终态方向与审批规则的拆除条件可见
+- **WHEN** 一次写入指向认知资产受控路径
+- **THEN** 写入命令仍须过 critical 审批，物理隔离方向在平台子系统文档中可追溯
 
-### Requirement: 防线默认态与拆除账本
+### Requirement: 防线默认态
 
-入舱引导与漂移审计 SHALL 默认开启（纯附加行为：提示行与事件，无拦截）；资产写审批规则 SHALL 随 DefaultRules 默认存在但仅在 governance enabled 时被评估。三者 MUST NOT 引入新的必填配置项（路径清单与 evolution protected_paths 同源声明）。**拆除账本 SHALL 随变更交付登记**（脚手架项、拆除条件、触发动作），条件触发后脚手架 MUST NOT 滞留。
+入舱引导与漂移审计 SHALL 默认开启（纯附加行为：提示行与事件，无拦截）；资产写审批规则 SHALL 随默认规则集存在但仅在 governance enabled 时被评估。三者 MUST NOT 引入新的必填配置项（路径清单与受保护路径同源声明）。
 
 #### Scenario: 零配置可用
 
 - **WHEN** 部署不做任何新增配置
 - **THEN** 引导与审计生效；审批规则就位但因 governance 关闭不被评估
-
-#### Scenario: 拆除条件触发后脚手架进入拆除队列
-
-- **WHEN** 权限域分离落地验证通过（或 fp 上线且观察期走私未复发）
-- **THEN** 对应脚手架项进入拆除队列，不允许条件已满足而脚手架滞留
 

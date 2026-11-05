@@ -70,6 +70,37 @@ class ProductSurfaceTest(unittest.TestCase):
         r = cps.check_tree(self.root, BASE)
         self.assertFalse(any("PublicOption" in e for e in r["errors"]), r)
 
+    def test_same_file_product_call_is_not_test_only(self):
+        # Foo is DEFINED and CALLED by product code in the SAME file, and also
+        # referenced by a test. The old "elif path not in prod[n]" dropped the
+        # definition file's own call, so Foo looked test-only. After the fix a
+        # definition file with a real Name( call besides the declaration is a
+        # product caller, so Foo must NOT be reported as a hook.
+        write(self.root, "product/same.go",
+              "package product\nfunc Foo(){}\nfunc bar(){ Foo() }\n")
+        write(self.root, "product/same_test.go",
+              "package product\nfunc tSame(){ Foo() }\n")
+        r = cps.check_tree(self.root, BASE)
+        self.assertFalse(any("Foo" in e for e in r["errors"]), r)
+        observed = cps.hook_violations(
+            self.root, BASE["test_only_exported_funcs"])[2]
+        self.assertNotIn("Foo", observed, observed)
+
+    def test_pure_test_only_exported_func_is_still_flagged(self):
+        # Negative control: a function whose name appears several times in its
+        # file ONLY via doc comments (no real in-file call), referenced solely
+        # by a test, must STILL be reported as a new test-only hook. This pins
+        # that comments / strings / doc-comments do NOT count as product calls.
+        write(self.root, "product/solo.go",
+              "package product\n"
+              "// Solo is a test-only hook.\n"
+              "// Solo(...) is never called from product code.\n"
+              "func Solo(){}\n")
+        write(self.root, "product/solo_test.go",
+              "package product\nfunc tSolo(){ Solo() }\n")
+        r = cps.check_tree(self.root, BASE)
+        self.assertTrue(any("Solo" in e and "public API" in e for e in r["errors"]), r)
+
 
 if __name__ == "__main__":
     unittest.main()
