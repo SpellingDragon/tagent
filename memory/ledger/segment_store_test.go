@@ -149,6 +149,39 @@ func TestSegmentGetEventColdMiss(t *testing.T) {
 	}
 }
 
+// TestColdEnumerationScansEachShardOnce pins the cost of a cold enumeration.
+// - after the resident set is dropped, one full pass scans each shard once
+// - every event keeps its body and its index order
+//
+// 契约: docs/wiki/memory/memory-architecture.md#file-segment-store
+func TestColdEnumerationScansEachShardOnce(t *testing.T) {
+	root := t.TempDir()
+	store, kv := openLocalSegmentStore(t, root)
+	const events = 24
+	records := commitSegmentEvents(t, store, kv, events, 1024)
+	dropSegmentCache(store)
+	dropLocalKVResident(kv)
+	kv.coldScans = 0
+	got := make([]event.EventID, 0, events)
+	if err := store.EachEvent(context.Background(), func(stored StoredEvent) error {
+		got = append(got, stored.Key)
+		return nil
+	}); err != nil {
+		t.Fatalf("enumerate the store cold: %v", err)
+	}
+	if len(got) != events {
+		t.Fatalf("enumerated %d events, want %d", len(got), events)
+	}
+	for at, key := range got {
+		if key != records[at].EventKey {
+			t.Fatalf("event %d = %s, want %s", at, key, records[at].EventKey)
+		}
+	}
+	if kv.coldScans > 1 {
+		t.Fatalf("a cold enumeration scanned the shard %d times for %d events, want one scan per shard", kv.coldScans, events)
+	}
+}
+
 // TestSegmentCacheBoundedAndEquivalent pins both halves of the cache contract.
 // - committing far more than the budget leaves every event readable
 // - a read served cold carries exactly the bytes the commit carried

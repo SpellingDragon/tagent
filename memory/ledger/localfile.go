@@ -2,6 +2,7 @@ package ledger
 
 import (
 	"bufio"
+	"bytes"
 	"container/list"
 	"context"
 	"encoding/json"
@@ -175,6 +176,12 @@ func (s *kvResidentSet) removeEntry(key string, element *list.Element) {
 // state.
 //
 // 契约: docs/wiki/memory/memory-architecture.md#local-file-kv
+// kvEntryOffset locates one encoded value inside a shard snapshot.
+type kvEntryOffset struct {
+	start int64
+	end   int64
+}
+
 type localFileKV struct {
 	mu  sync.Mutex
 	dir string
@@ -186,6 +193,13 @@ type localFileKV struct {
 	// dirty names the entries a commit changed per shard: a nil value is a
 	// delete, and a non-nil one is the bytes the commit put.
 	dirty map[string]map[string][]byte
+	// offsets indexes one shard by the byte range of each encoded value, built
+	// on the first cold read of that shard: a cold read then costs one seek
+	// instead of one whole-shard scan.
+	offsets map[string]map[string]kvEntryOffset
+	// coldScans counts the shard scans one cold key read paid, so a check pins
+	// the enumeration cost instead of measuring time.
+	coldScans int
 }
 
 // openLocalFileKV opens the key-value view rooted at root. Snapshot content that
@@ -205,6 +219,7 @@ func openLocalFileKV(root string) (*localFileKV, error) {
 		dir:      dir,
 		shards:   map[string]struct{}{},
 		resident: newKVResidentSet(),
+		offsets:  map[string]map[string]kvEntryOffset{},
 		dirty:    map[string]map[string][]byte{},
 	}
 	for _, entry := range entries {
@@ -247,28 +262,24 @@ func (k *localFileKV) kvRead(ctx context.Context, fetch kvFetch) ([]kvPair, erro
 		if _, known := k.shards[label]; !known {
 			return nil, nil
 		}
-		var found []byte
-		held := false
-		err := scanShardSnapshot(filepath.Join(k.dir, url.PathEscape(label)), func(key string, value []byte) bool {
-			if key != fetch.key {
-				return true
-			}
-			found = append([]byte(nil), value...)
-			held = true
-			return false
-		})
+		offsets, err := k.shardOffsetsLocked(label)
 		if err != nil {
 			return nil, err
 		}
+		at, held := offsets[fetch.key]
 		if !held {
 			return nil, nil
+		}
+		found, err := readShardValue(filepath.Join(k.dir, url.PathEscape(label)), at)
+		if err != nil {
+			return nil, err
 		}
 		k.resident.put(fetch.key, found)
 		return []kvPair{{key: fetch.key, value: append([]byte(nil), found...)}}, nil
 	}
 	pairs := map[string][]byte{}
 	for _, label := range k.scanLabelsLocked(fetch.prefix) {
-		err := scanShardSnapshot(filepath.Join(k.dir, url.PathEscape(label)), func(key string, value []byte) bool {
+		err := scanShardSnapshot(filepath.Join(k.dir, url.PathEscape(label)), func(key string, value []byte, _ kvEntryOffset) bool {
 			if strings.HasPrefix(key, fetch.prefix) {
 				pairs[key] = append([]byte(nil), value...)
 			}
@@ -303,7 +314,7 @@ func (k *localFileKV) kvKeys(ctx context.Context, prefix string) ([]string, erro
 	defer k.mu.Unlock()
 	keys := map[string]struct{}{}
 	for _, label := range k.scanLabelsLocked(prefix) {
-		err := scanShardSnapshot(filepath.Join(k.dir, url.PathEscape(label)), func(key string, _ []byte) bool {
+		err := scanShardSnapshot(filepath.Join(k.dir, url.PathEscape(label)), func(key string, _ []byte, _ kvEntryOffset) bool {
 			if strings.HasPrefix(key, prefix) {
 				keys[key] = struct{}{}
 			}
@@ -381,7 +392,7 @@ func (k *localFileKV) keyHeldLocked(label, key string) bool {
 		return false
 	}
 	held := false
-	_ = scanShardSnapshot(filepath.Join(k.dir, url.PathEscape(label)), func(candidate string, _ []byte) bool {
+	_ = scanShardSnapshot(filepath.Join(k.dir, url.PathEscape(label)), func(candidate string, _ []byte, _ kvEntryOffset) bool {
 		if candidate == key {
 			held = true
 			return false
@@ -451,7 +462,11 @@ func (k *localFileKV) writeShard(label string) error {
 		_ = os.Remove(temp)
 		return writeErr
 	}
-	return os.Rename(temp, filepath.Join(dir, shardFileName))
+	if err := os.Rename(temp, filepath.Join(dir, shardFileName)); err != nil {
+		return err
+	}
+	delete(k.offsets, label)
+	return nil
 }
 
 // writeShardSnapshot renders one merged shard snapshot into file: the old
@@ -487,7 +502,7 @@ func writeShardSnapshot(file *os.File, dir string, changed map[string][]byte) er
 		return err
 	}
 	var entryErr error
-	err := scanShardSnapshot(dir, func(key string, value []byte) bool {
+	err := scanShardSnapshot(dir, func(key string, value []byte, _ kvEntryOffset) bool {
 		if _, replaced := changed[key]; replaced {
 			return true
 		}
@@ -519,12 +534,59 @@ func writeShardSnapshot(file *os.File, dir string, changed map[string][]byte) er
 	return writer.Flush()
 }
 
+// shardOffsetsLocked answers the entry offsets of one shard, scanning its
+// snapshot once on the first cold read. The caller holds the lock.
+func (k *localFileKV) shardOffsetsLocked(label string) (map[string]kvEntryOffset, error) {
+	if offsets, held := k.offsets[label]; held {
+		return offsets, nil
+	}
+	offsets := map[string]kvEntryOffset{}
+	k.coldScans++
+	if err := scanShardSnapshot(filepath.Join(k.dir, url.PathEscape(label)), func(key string, _ []byte, at kvEntryOffset) bool {
+		offsets[key] = at
+		return true
+	}); err != nil {
+		return nil, err
+	}
+	k.offsets[label] = offsets
+	return offsets, nil
+}
+
+// readShardValue reads the one encoded value at the offset its shard index names.
+func readShardValue(dir string, at kvEntryOffset) ([]byte, error) {
+	path := filepath.Join(dir, shardFileName)
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %s: %w", ErrSnapshotCorrupt, path, err)
+	}
+	defer file.Close()
+	span := make([]byte, at.end-at.start)
+	if _, err := file.ReadAt(span, at.start); err != nil {
+		return nil, fmt.Errorf("%w: %s: %w", ErrSnapshotCorrupt, path, err)
+	}
+	buf := bytes.TrimLeft(span, ", \t\r\n")
+	decoder := json.NewDecoder(bytes.NewReader(buf))
+	if _, err := decoder.Token(); err != nil {
+		return nil, fmt.Errorf("%w: %s: %w", ErrSnapshotCorrupt, path, err)
+	}
+	rest := buf[decoder.InputOffset():]
+	colon := bytes.IndexByte(rest, ':')
+	if colon < 0 {
+		return nil, fmt.Errorf("%w: %s: the entry carries no value separator", ErrSnapshotCorrupt, path)
+	}
+	var value []byte
+	if err := json.Unmarshal(rest[colon+1:], &value); err != nil {
+		return nil, fmt.Errorf("%w: %s: %w", ErrSnapshotCorrupt, path, err)
+	}
+	return value, nil
+}
+
 // scanShardSnapshot streams the snapshot of one shard entry by entry. A missing
 // snapshot is an empty shard. Content that does not parse as the recorded
 // key-value state is reported as ErrSnapshotCorrupt, and a visit that answers
 // false ends the scan without reading the rest. The reader holds one decoded
 // value at a time, never the whole shard.
-func scanShardSnapshot(dir string, visit func(key string, value []byte) bool) error {
+func scanShardSnapshot(dir string, visit func(key string, value []byte, at kvEntryOffset) bool) error {
 	path := filepath.Join(dir, shardFileName)
 	file, err := os.Open(path)
 	if errors.Is(err, os.ErrNotExist) {
@@ -574,6 +636,7 @@ func scanShardSnapshot(dir string, visit func(key string, value []byte) bool) er
 				return corrupt(errors.New("snapshot entries is not a JSON object"))
 			}
 			for decoder.More() {
+				start := decoder.InputOffset()
 				keyToken, err := decoder.Token()
 				if err != nil {
 					return corrupt(err)
@@ -586,7 +649,8 @@ func scanShardSnapshot(dir string, visit func(key string, value []byte) bool) er
 				if err := decoder.Decode(&value); err != nil {
 					return corrupt(err)
 				}
-				if visit != nil && !visit(key, value) {
+				at := kvEntryOffset{start: start, end: decoder.InputOffset()}
+				if visit != nil && !visit(key, value, at) {
 					return nil
 				}
 			}
