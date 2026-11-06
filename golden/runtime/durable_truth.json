@@ -190,7 +190,8 @@
       "kind": "kv-store",
       "owner": "runtime/state",
       "files": [
-        "runtime/state/durable.go"
+        "runtime/state/durable.go",
+        "runtime/state/recovery.go"
       ],
       "prefixes": [
         {
@@ -217,9 +218,19 @@
           "file": "runtime/state/durable.go",
           "name": "rejectPrefix",
           "value": "tagent/task/v1/reject:"
+        },
+        {
+          "file": "runtime/state/recovery.go",
+          "name": "ticketPrefix",
+          "value": "tagent/task/v1/ticket:"
+        },
+        {
+          "file": "runtime/state/recovery.go",
+          "name": "snapshotPrefix",
+          "value": "tagent/task/v1/snapshot:"
         }
       ],
-      "reason": "Commit facts, admission specs, consumption receipts, settle attempts and rejections share one durable log.",
+      "reason": "The five durable record kinds plus the recovery ticket and its verified snapshot blob share one KV face; the ticket fact is the truth, the blob is referenced material.",
       "review_by": "2027-05-05"
     },
     {

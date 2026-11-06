@@ -316,7 +316,33 @@ func (r *Run) fileCompressProduct(ctx context.Context, session event.SessionID, 
 		assemblyWarn("tagent: the compression product of session %s was not committed err=%v", session, err)
 		return err
 	}
+	r.fileRecoveryTicketBesideCompression(ctx)
 	return nil
+}
+
+// recoveryTicketWriter names the optional face of a durable commit carrier
+// that files a restart-recovery ticket; the in-memory carrier carries none.
+type recoveryTicketWriter interface {
+	WriteRecoveryTicket(ctx context.Context) error
+}
+
+// fileRecoveryTicketBesideCompression files one recovery ticket when the commit
+// carrier offers the face: a compression is the moment the run's tables make a
+// coherent snapshot worth restoring from, so the ticket lands beside the
+// product fact it was filed with. A carrier without the face, or a write that
+// fails, never blocks the compression itself — the next restart simply falls
+// back to the full replay.
+func (r *Run) fileRecoveryTicketBesideCompression(ctx context.Context) {
+	r.mu.Lock()
+	inner := r.commit.inner
+	r.mu.Unlock()
+	writer, ok := inner.(recoveryTicketWriter)
+	if !ok {
+		return
+	}
+	if err := writer.WriteRecoveryTicket(ctx); err != nil {
+		assemblyWarn("tagent: the recovery ticket beside the compression was not filed err=%v", err)
+	}
 }
 
 // agentOfSessionLocked reports the agent one session's mapped sequence was
