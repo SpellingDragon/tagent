@@ -453,6 +453,13 @@ func TestStrictDecodeRefusesUndeclaredSectionKeys(t *testing.T) {
 			wantLine: 7,
 		},
 		{
+			name:     "retired capture budget",
+			body:     "entry: main\nagents:\n  - id: main\n    capture_budget_mb: 64\n",
+			field:    "agents[0].capture_budget_mb",
+			reason:   "unknown field",
+			wantLine: 4,
+		},
+		{
 			name:     "retired vector leg bound",
 			body:     "entry: main\nagents:\n  - id: main\n    memory:\n      engine:\n        vector_top_k: 20\n",
 			field:    "agents[0].memory.engine.vector_top_k",

@@ -169,12 +169,6 @@ type AgentSpec struct {
 	// approval book as one batch, the same way an over-cap response does. Zero
 	// keeps the guard off.
 	LongContextTokens int
-	// CaptureBudgetMB bounds the resident memory the trajectory capture of this
-	// agent's requests keeps beside its fixed snapshots, in megabytes. The
-	// oldest snapshot beyond the budget is swapped out to the capture storage
-	// and reads back on demand. Zero reads the declaration default of 64; one
-	// is the tightest budget the capture accepts.
-	CaptureBudgetMB int
 
 	// Memory is the memory section this agent declares: the storage tier its
 	// facts persist through, the namespaces it may read across partitions and

@@ -689,7 +689,6 @@ func bindingChangeDescription(before, after config.AgentSpec) string {
 	note("max_tool_iterations", before.MaxToolIterations != after.MaxToolIterations)
 	note("max_calls_per_response", before.MaxCallsPerResponse != after.MaxCallsPerResponse)
 	note("long_context_tokens", before.LongContextTokens != after.LongContextTokens)
-	note("capture_budget_mb", before.CaptureBudgetMB != after.CaptureBudgetMB)
 	note("memory", !reflect.DeepEqual(before.Memory, after.Memory))
 	note("meditation", !reflect.DeepEqual(before.Meditation, after.Meditation))
 	note("file", !reflect.DeepEqual(before.File, after.File))

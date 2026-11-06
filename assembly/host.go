@@ -451,7 +451,7 @@ func Boot(configPath string, opts ...HostOption) (*Host, error) {
 	}
 	var capture *rl.TrajectoryCapture
 	if root := storageRootOf(plan); root != "" {
-		capture, err = openHostCapture(root, specOfLocked(decl, event.AgentID(decl.Entry)).CaptureBudgetMB)
+		capture, err = openHostCapture(root, 0)
 		if err != nil {
 			cancel()
 			return nil, err
