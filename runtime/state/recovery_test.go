@@ -170,7 +170,7 @@ func TestFullReplayEqualsDumpPlusDelta(t *testing.T) {
 }
 
 // TestRecoveryTicketFallbacks pins every refusal falls back to full replay.
-//   - no ticket / digest failure / future schema / early-empty ticket
+//   - no ticket / deleted blob / digest failure / future schema / early-empty ticket
 //
 // 契约: docs/FACT-VOCABULARY.md#families
 func TestRecoveryTicketFallbacks(t *testing.T) {
@@ -215,6 +215,35 @@ func TestRecoveryTicketFallbacks(t *testing.T) {
 		}
 		if restored.UsedTicket() {
 			t.Fatal("a corrupted blob was trusted")
+		}
+		bare, err := newBareCarrier(log)
+		if err != nil {
+			t.Fatalf("bare replay: %v", err)
+		}
+		assertCarrierEqual(t, bare, restored, taskID)
+	})
+
+	t.Run("a deleted blob falls back and loses nothing", func(t *testing.T) {
+		log := newInvariantFactLog()
+		seedCarrier(t, ctx, log, taskID, "gone")
+		writer, err := NewDurableCommit(log, nil)
+		if err != nil {
+			t.Fatalf("open the writer: %v", err)
+		}
+		if err := writer.WriteRecoveryTicket(ctx); err != nil {
+			t.Fatalf("file the ticket: %v", err)
+		}
+		for key := range log.barrier {
+			if strings.HasPrefix(key, snapshotPrefix) {
+				delete(log.barrier, key)
+			}
+		}
+		restored, err := NewDurableCommit(log, nil)
+		if err != nil {
+			t.Fatalf("rebuild beside a ticket whose blob is gone: %v", err)
+		}
+		if restored.UsedTicket() {
+			t.Fatal("a ticket whose blob is gone was trusted")
 		}
 		bare, err := newBareCarrier(log)
 		if err != nil {

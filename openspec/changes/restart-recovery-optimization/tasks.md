@@ -21,7 +21,7 @@ graph TD
 
 - [x] 01-vocabulary — 转世→重启恢复、代码名词规范化、撤销伪词条；验证：与子域 `changes/01-vocabulary/tasks.md` 1.1–1.4 完全一致（叙述层含 `*.sh`/`*.yaml` 的豁免后计数 0、根模块 + `examples/wechat-bot` 独立模块 go test、伪词条不作为术语行/标题、`verify_contracts.py` PASS），MUST NOT 用无豁免的裸 `grep | wc -l`（该命令实测 151，见 r6）
 - [x] 02-timing-evidence — Scan/fold 分段计数写入 CI 可上传产物（**部分**：进程内计数已达产物；带数据重启计数与全零判红移交 5.1a，同变更内承接非缩水）；验证：具名单测 + 冻结命令 10 行计数
-- [ ] 03-compression-cursor — 链上票据 + 外部只读 blob + 失败退回全量；验证：正锚（全量≡dump+增量）/负锚（4 类失败）/消费者锚（真实 Boot）
+- [x] 03-compression-cursor — 链上票据 + 外部只读 blob + 失败退回全量；验证：正锚（全量≡dump+增量）/负锚（5 类失败含 blob 缺失）/消费者锚（真实 Boot）；放行=第 7 轮闭合清单 P1–P5 全 PASS（ORCHESTRATION r25）
 - [ ] 04-partition-cursor — 位图 + 游标点读 + 等价回退；验证：spec scenarios + 负锚（无游标）
 - [ ] 05-ci-orchestration — 分片/超时重冻/具名 liveness；验证：CI 全 6 分片绿 + 证据完整
 - [ ] 06-guards-and-tests — F0 边界规则 + R3 登记 + 测试重写；验证：F0 selftests + 全量门
