@@ -49,13 +49,13 @@
 
 **阶段 3 闭合清单（待裁定 A 生效后即本单判据）**
 
-- P1 全量重放 ≡ 票据快照+增量：`facts/mutations/specs/owed` 四表逐字段相等（`reflect.DeepEqual`；种子覆盖全部 `task.Spec` 导出字段，字段集合由脚本比对，不以手写数字为凭据）。
+- P1 全量重放 ≡ 票据快照+增量：`facts/mutations/specs/owed` 四表逐字段相等（`reflect.DeepEqual`；种子覆盖全部 `task.Spec` 导出字段，由 `TestSeedCarriesEverySpecField` 反射断言——字段空间由类型决定，不以手写字段数为凭据）。
 - P2 `rejected/attempts/consumed` 三表：由日志侧重读断言覆盖（`mergeDelta` 从日志回读，锚在此三表为重言——见第 5 段「不得重开项」）。
 - P3 四类失败退回全量：无票据／blob 缺失或损坏／digest 或长度不符／外族 schema，各退回且义务不丢。
 - P4 完成点唯一：两步之后、服务开放之前写票；快照键恰一份。
 - P5 快照后恢复幂等：恢复后再提交 ≡ 直接提交。
 
-核验命令：`go test -race ./runtime/state -run 'TestFullReplayEqualsDumpPlusDelta|TestRecoveryTicketFallbacks|TestConsumptionAfterSnapshotNotReOwed|TestRecommitAfterTicketRestoreIsIdempotent|TestSnapshotBesideConcurrentCommits' -count=2` 全 PASS ⇒ EMPTY。
+核验命令：`go test -race ./runtime/state -run 'TestFullReplayEqualsDumpPlusDelta|TestRecoveryTicketFallbacks|TestSeedCarriesEverySpecField|TestConsumptionAfterSnapshotNotReOwed|TestRecommitAfterTicketRestoreIsIdempotent|TestSnapshotBesideConcurrentCommits' -count=2` 全 PASS ⇒ EMPTY。
 
 ## ④ 台账
 
@@ -84,3 +84,4 @@
 | r21 | **阶段 3 第 4 轮审者（FRONTIER NOT EMPTY，4 residual）全修**：① blob 级 foreign-schema 假锚——此前只改 blob 未同步票据 digest/length，readSnapshot 先拒绝、restoreTables schema 分支未走到。改为同步重算 digest/length 并回写票据（票据 schema 保持 2），overlay 反证：移除 restoreTables schema 检查→子测试 FAIL，恢复→PASS，锚真正钉住。② 等价锚改 `reflect.DeepEqual` 全字段比较（facts 含 Outbox、mutations 含 Status、rejected 含 Target/Instance/At、specs 全字段），seedCarrier 播种非零 Spec/Rejection/Outbox/Target/Instance/At，消除 0==0 盲区。③ 删「quiet by construction / single-threaded / defensive bound」全部声明——Boot 在完成点前 Wake settle pump，锁是真实必需（r20 措辞过度）；host_delivery 步骤① stale doc 改正；cli-host 无步骤①的事实写进 CompleteRestartRecovery doc。④ stale docs：一级 proposal「压缩即游标」改两步模型、03 design 第二步描述改「只装载不写票 + 完成点由 Boot 在 newHostFace 后调用」、一级 design D7「Sync 才报成功」改 no-op 诚实化、补 D1a 两步总纲。**如实链**：r18/r19/r20 都曾声称已修但审者逐轮证伪，本轮以 overlay 反证落地 | 无 |
 | r22 | **第 5 轮审者（FRONTIER NOT EMPTY，2 blocker）全修**：① 诚实更正——r21 声称的 `reflect.DeepEqual` 全字段比较与全八表非零种子当时**未落地**（heredoc 执行静默失败，DeepEqual 计数为 0）；本轮改用脚本文件 `run_anchor2.py` 落地并验证：DeepEqual 计数 8、reflect/time import 在位、vet 0。seedCarrier 播非零 Spec（9 字段）、Rejection（Target/Instance/At）、Outbox Target/Source；`TestRecommitAfterTicketRestoreIsIdempotent` 改用已存记录避免构造差异。overlay 说明：在 restoreTables 注入 rejection 字段篡改会被 mergeDelta 从日志回读覆盖（产品正确性，非锚盲）；锚的价值由 DeepEqual 全字段比较本身保证。② 03 design:5「单线程、竞争结构性消失」改为「Boot 已 Wake settle pump、锁真实必需」。**如实链**：r18→r19→r20→r21 连续四轮都曾声称已修、均被下一轮证伪；本轮先读实际文件确认、写脚本落地、再用 grep 计数验证后才勾 | 阶段 3 待第 6 轮放行审者 |
 | r23 | **派发交接缺失（用户诊断，成立）**：阶段 3 连 6 轮拷问不空，根因不是产品未修完（产品类缺陷最后出现在 `ce27de9e` 18:24，此后三个提交全为锚/账修正；第 4/5/6 轮零产品类发现），而是**派发单未交接验收判据**——审者拿不到判据只能自行发明，退化为「能指出任何缺陷」的开放性质，且无发现分级、无不得重开项、无 EMPTY 定义、无清单外处置。已立规：②编排四问增「判据交接」；③增派发交接块模板（7 段强制）；阶段 3 闭合清单 P1–P5 已拟（待裁定 A 生效后作为第 7 轮唯一判据） | 裁定 A 生效后按新模板派第 7 轮（只核 P1–P5，清单外一律附注） |
+| r24 | **r22「9 字段」如实更正 + 该数字类的机械守护**：第 6 轮审者指出 r22 声称「seedCarrier 播非零 Spec（9 字段）」实测 8（`Execution` 未播，比较在该字段上仍 0==0），成立。修复：① 抽出 `seededSpec` 供种子与断言共用并补 `Execution`；② 新增 `TestSeedCarriesEverySpecField`——反射遍历 `task.Spec` 全部导出字段断言非零，**字段空间由类型决定，不再有任何手写数字可写错**，后续新增字段会直接判红直到播种；③ overlay 反证：删 `Execution` 播种 → `--- FAIL ... leaves task.Spec.Execution at its zero value`，恢复 → PASS（落库 `e6ecc0dc`）；④ P1–P5 冻结命令纳入该测试，`-race -count=2` 全绿，`go test -race ./runtime/state` 全包绿。本行同时是 r23「判据随单交接」的第一个机械替代物：把「我声称」换成「类型断言」 | P1 条目与核验命令同步更正；阶段 3 第 7 轮按 r23 七段交接块派发（只核 P1–P5） |
