@@ -899,7 +899,7 @@ var errDeliveryScanDone = errors.New("tagent: delivery scan complete")
 
 // eachDeliveryFact walks every fact the delivery account reads, one at a time.
 // The durable chain is the account; the live ledger is a hot window over it
-// (facts.go, factWindow), so the walk streams the chain instead of
+// (facts.go, noWindowResidentFacts), so the walk streams the chain instead of
 // materializing every body, and only a run beside no storage tier reads the
 // window alone. The visit answers false to stop the walk after the fact it
 // needed, so a lookup that names one fact never reads the rest of the chain.

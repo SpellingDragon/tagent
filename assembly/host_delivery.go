@@ -1428,7 +1428,7 @@ func (h *Host) restoreUnconsumedEvents(ctx context.Context, settleDriver interfa
 
 // restorePendingDeliveries rebuilds the delivery account of this host from the
 // fact chain alone:
-// - The settlement facts of the registered chains are read out of the hot fact window (factWindow, filtered by the family prefix), never by a scan of the storage tier.
+// - The settlement facts of the registered chains are read out of the hot fact window (noWindowResidentFacts, filtered by the family prefix), never by a scan of the storage tier.
 // - The owed declarations committed with the agent_output facts of that window name the obligations whose bodies the chain carries.
 // - An obligation no settlement fact states is still owed: it is sent through the review ruling the live path applies, or retired when its target is not the entry.
 // - An obligation held for approval waits again under the identity and moment the chain recorded, a held(retrying) obligation resumes its bounded backoff, and a sent, refused or retired one is left as it stands.

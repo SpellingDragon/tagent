@@ -1673,6 +1673,68 @@ func (r *Run) CommittedEvent(ctx context.Context, id event.EventID) (event.Event
 	return restored, nil
 }
 
+// EachSessionFact streams the durable chain of one session in commit order: the
+// cold-start read of a chain, which names every fact the session committed —
+// beside the window the live ledger still presents — decoded from the tier the
+// way CommittedEvent decodes one identity, ordered by the partition sequence
+// the landing path numbers commits with — the order the run committed in, which
+// a replay refolds at the boundaries the commits recorded, while the segment
+// index orders by event time and a later-judged product names a later moment of
+// than the material it folded. A run beside no storage tier holds
+// no durable chain, so the visit answers the resident window alone in commit
+// order. A visit error ends the stream and is returned.
+func (r *Run) EachSessionFact(ctx context.Context, addr event.Address, visit func(event.Event) error) error {
+	r.mu.Lock()
+	tier := r.tier
+	r.mu.Unlock()
+	if tier == nil {
+		for _, key := range r.factOrder {
+			evt, held := r.facts[key]
+			if !held || sessionOf(evt) != addr.SessionID {
+				continue
+			}
+			if addr.AgentID != "" && agentOf(evt) != addr.AgentID {
+				continue
+			}
+			if err := visit(evt); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	var staged []ledger.StoredEvent
+	if err := tier.Segments.EachEvent(ctx, func(stored ledger.StoredEvent) error {
+		staged = append(staged, stored)
+		return nil
+	}); err != nil {
+		return err
+	}
+	sort.Slice(staged, func(i, j int) bool {
+		if staged[i].PartitionID != staged[j].PartitionID {
+			return staged[i].PartitionID < staged[j].PartitionID
+		}
+		return staged[i].Seq < staged[j].Seq
+	})
+	for _, stored := range staged {
+		body, err := memory.DecodeEventBody(stored.Body)
+		if err != nil {
+			return fmt.Errorf("tagent: replay the committed event %s: %w", stored.Key, err)
+		}
+		evt := body.Event()
+		evt.Key = stored.Key
+		if sessionOf(evt) != addr.SessionID {
+			continue
+		}
+		if addr.AgentID != "" && agentOf(evt) != addr.AgentID {
+			continue
+		}
+		if err := visit(evt); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // seedReplay registers the mapped sequence every session chain already
 // committed, so a restarted run presents the material the tier holds to its
 // next request instead of reading a transcript no process carries any more.

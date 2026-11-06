@@ -1679,7 +1679,7 @@ func newProjectionRun(t *testing.T, maxTokens int, provider model.Model) (*assem
 		Agents: []config.AgentSpec{{ID: "agent-a", Model: "model-a", MaxTokens: maxTokens, ProviderContextWindow: maxTokens * 2}},
 	}, map[event.AgentID]assembly.NativeAgent{
 		"agent-a": {Model: provider},
-	}, assembly.WithGovernance(passPolicy{}))
+	}, assembly.WithGovernance(passPolicy{}), assembly.WithStorage(ledger.StorageConfig{Type: ledger.StorageMemory}))
 	if err != nil {
 		t.Fatalf("assemble the runtime: %v", err)
 	}
@@ -1753,16 +1753,19 @@ func projectionProductsOf(t *testing.T, run *assembly.Run, session event.Session
 // chain holds.
 func projectionFactCountOf(run *assembly.Run, session event.SessionID, factType string) int {
 	count := 0
-	for _, evt := range run.SessionFacts(event.Address{SessionID: session}) {
+	_ = run.EachSessionFact(context.Background(), event.Address{SessionID: session}, func(evt event.Event) error {
 		if evt.Type == factType {
 			count++
 		}
-	}
+		return nil
+	})
 	return count
 }
 
 // rebuildProjectionFromRun replays the mapped facts of one session chain into an
-// empty projection, as the cold start reads them: a compress request carries no
+// empty projection, as the cold start reads them: the live ledger holds the
+// window the projection still presents, so the chain streams from the durable
+// store instead of the resident window alone. A compress request carries no
 // message and maps onto no projection entry, so the rebuild reads back exactly
 // the material the commits mapped. It reports the rebuilt projection, the
 // rebuild report and how many mapped facts the chain carried.
@@ -1771,21 +1774,21 @@ func rebuildProjectionFromRun(t *testing.T, ctx context.Context, run *assembly.R
 	chainKey := replay.ChainKey{PartitionID: 1, SessionID: session}
 	chain := replay.NewMemoryEventChain()
 	mapped := 0
-	for _, evt := range run.SessionFacts(event.Address{SessionID: session}) {
+	if err := run.EachSessionFact(ctx, event.Address{SessionID: session}, func(evt event.Event) error {
 		if evt.Type == event.CompressRequestType || evt.Message.Content == "" {
-			continue
+			return nil
 		}
 		mapped++
-		if err := chain.Commit(ctx, replay.ChainFact{
+		return chain.Commit(ctx, replay.ChainFact{
 			Key:     evt.Key,
 			Chain:   chainKey,
 			Type:    evt.Type,
 			Summary: evt.Meta[event.MetaKeyEventSummary],
 			Content: evt.Message.Content,
-			Time:    evt.Timestamp,
-		}); err != nil {
-			t.Fatalf("commit the chain fact %s: %v", evt.Key, err)
-		}
+			Time:    evt.Timestamp.UTC(),
+		})
+	}); err != nil {
+		t.Fatalf("stream the session chain: %v", err)
 	}
 	rebuilt := replay.NewReplayProjection()
 	report, err := replay.RebuildProjectionFromWAL(ctx, rebuilt, chain, replay.NewMemoryRelations(), chainKey, replay.RebuildOptions{})
@@ -1980,7 +1983,7 @@ func runRebuildRefoldsFromWAL(t *testing.T) {
 	t.Logf("rebuild_refolds_from_wal: online entries=%v products=%v requests=%d", projectionKeysOf(online), projectionProductsOf(t, run, addr.SessionID), filed)
 
 	plan := projectionWindowPlan(projectionWindowTokens)
-	facts := projectionCommitFactsOf(t, run, addr.SessionID)
+	facts := projectionCommitFactsOf(t, ctx, run, addr.SessionID)
 	chainKey := replay.ChainKey{PartitionID: 1, SessionID: addr.SessionID}
 	chain := replay.NewMemoryEventChain()
 	committed := make([]string, 0, len(facts))
@@ -2109,12 +2112,12 @@ func projectionConsumedRawKeysOf(committed []string, entries []replay.Projection
 // projectionCommitFactsOf reports the mapped facts of one session chain in
 // commit order, in the shape a cold start replays the WAL under: a compress
 // request carries no message and maps onto no projection entry.
-func projectionCommitFactsOf(t *testing.T, run *assembly.Run, session event.SessionID) []replay.ChainFact {
+func projectionCommitFactsOf(t *testing.T, ctx context.Context, run *assembly.Run, session event.SessionID) []replay.ChainFact {
 	t.Helper()
 	facts := make([]replay.ChainFact, 0, 16)
-	for _, evt := range run.SessionFacts(event.Address{SessionID: session}) {
+	if err := run.EachSessionFact(ctx, event.Address{SessionID: session}, func(evt event.Event) error {
 		if evt.Type == event.CompressRequestType || evt.Message.Content == "" {
-			continue
+			return nil
 		}
 		facts = append(facts, replay.ChainFact{
 			Key:     evt.Key,
@@ -2122,8 +2125,11 @@ func projectionCommitFactsOf(t *testing.T, run *assembly.Run, session event.Sess
 			Type:    evt.Type,
 			Summary: evt.Meta[event.MetaKeyEventSummary],
 			Content: evt.Message.Content,
-			Time:    evt.Timestamp,
+			Time:    evt.Timestamp.UTC(),
 		})
+		return nil
+	}); err != nil {
+		t.Fatalf("stream the session chain: %v", err)
 	}
 	return facts
 }
@@ -2133,11 +2139,12 @@ func projectionCommitFactsOf(t *testing.T, run *assembly.Run, session event.Sess
 // content-addressed identity.
 func projectionCompressFactsOf(run *assembly.Run, session event.SessionID) map[event.EventID]bool {
 	keys := map[event.EventID]bool{}
-	for _, evt := range run.SessionFacts(event.Address{SessionID: session}) {
+	_ = run.EachSessionFact(context.Background(), event.Address{SessionID: session}, func(evt event.Event) error {
 		if evt.Type == event.CompressRequestType {
 			keys[evt.Key] = true
 		}
-	}
+		return nil
+	})
 	return keys
 }
 
@@ -2300,8 +2307,8 @@ func runRestartRestoresFoldForm(t *testing.T) {
 	if !sameKeys(got, want) {
 		t.Fatalf("the restart restored the fold products %v, want the %v the chain held: the fold form is owed to the rule over the same commit boundaries", got, want)
 	}
-	if after := projectionFactCountOf(restarted, addr.SessionID, event.CompressRequestType); after != 0 {
-		t.Fatalf("the restart filed %d compress request(s), want none: the replay reads the judgments the chain holds and writes no second one", after)
+	if after := projectionFactCountOf(restarted, addr.SessionID, event.CompressRequestType); after != filed {
+		t.Fatalf("the restart holds %d compress request(s), want the %d the chain already held: the replay reads the judgments the chain holds and writes no second one", after, filed)
 	}
 	t.Logf("restart_restores_fold_form: restored %v; the replay filed no judgment", got)
 }

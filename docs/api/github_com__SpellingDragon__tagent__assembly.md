@@ -1445,6 +1445,18 @@ func (r *Run) Diagnostics(ctx context.Context, filter query.ListFilter, switches
     face is closed. A face the assembly carries no wiring for names that state
     in its reason instead of failing the whole read.
 
+func (r *Run) EachSessionFact(ctx context.Context, addr event.Address, visit func(event.Event) error) error
+    EachSessionFact streams the durable chain of one session in commit order:
+    the cold-start read of a chain, which names every fact the session committed
+    — beside the window the live ledger still presents — decoded from the tier
+    the way CommittedEvent decodes one identity, ordered by the partition
+    sequence the landing path numbers commits with — the order the run committed
+    in, which a replay refolds at the boundaries the commits recorded, while the
+    segment index orders by event time and a later-judged product names a later
+    moment of than the material it folded. A run beside no storage tier holds
+    no durable chain, so the visit answers the resident window alone in commit
+    order. A visit error ends the stream and is returned.
+
 func (r *Run) ExecState(key tagentexec.ResourceKey) (tagentexec.Explanation, error)
     ExecState reports the retained state of one execution resource the ledger
     of this run holds: the lease deadline, the renewals observed after the

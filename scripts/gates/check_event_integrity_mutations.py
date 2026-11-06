@@ -513,7 +513,7 @@ MUTATIONS: Tuple[Mutation, ...] = (
                 file="assembly/facts.go",
                 old=(
                     "\theld.projection.Append(context.Background(), entry)\n"
-                    "\theld.projection = trimReplayProjection(context.Background(), held.projection)\n"
+                    "\theld.projection = trimReplayProjection(context.Background(), held.projection, held.window)\n"
                     "\tif evt.Type == event.TypeAgentOutput {\n"
                     "\t\theld.endedAt = entry.Key\n"
                     "\t\theld.rangeOpen = false\n"
@@ -526,7 +526,7 @@ MUTATIONS: Tuple[Mutation, ...] = (
                 new=(
                     "\tposition := held.projection.Len()\n"
                     "\theld.projection.Append(context.Background(), entry)\n"
-                    "\theld.projection = trimReplayProjection(context.Background(), held.projection)\n"
+                    "\theld.projection = trimReplayProjection(context.Background(), held.projection, held.window)\n"
                     "\tif evt.Type == event.TypeAgentOutput {\n"
                     "\t\theld.ended = position\n"
                     "\t\theld.rangeOpen = false\n"

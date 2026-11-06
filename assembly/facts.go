@@ -104,7 +104,11 @@ func (r *Run) commitFactChecked(ctx context.Context, evt event.Event) (event.Eve
 	return evt.Key, nil
 }
 
-// trimFacts holds one session chain to what its projection still presents: a
+// trimFacts holds one session chain to what its projection still presents — and
+// releases only facts that can persist: an ownerless judgment never reaches the
+// durable chain, so releasing it would erase the only copy and it stays resident
+// instead. A run beside no storage tier keeps the destructive window contract it
+// always carried. A
 // chain carrying a positive replay window releases the facts before the oldest
 // original its projection still carries — the fold that replaced covered
 // entries with a product released them already, so the resident set follows the
@@ -137,6 +141,18 @@ func (r *Run) trimFactsLocked(session event.SessionID) {
 	if len(cut) == 0 {
 		return
 	}
+	released := cut[:0]
+	for _, key := range cut {
+		evt, held := r.facts[key]
+		if !held || evt.Owner.AgentID == "" {
+			continue
+		}
+		released = append(released, key)
+	}
+	if len(released) == 0 {
+		return
+	}
+	cut = released
 	for _, key := range cut {
 		delete(r.facts, key)
 	}

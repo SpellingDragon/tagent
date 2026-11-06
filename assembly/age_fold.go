@@ -235,7 +235,13 @@ func (s ageFoldSessions) FileCompressRequest(ctx context.Context, session event.
 // A judgment the commit refused lands in no ledger and reaches no consumer: the
 // refusal — a commit that failed, or an identity already naming another fact —
 // is answered to the caller instead of being handed to memory as a filed
-// judgment, so no product can answer a request the chain never holds.
+// judgment, so no product can answer a request the chain never holds. The fact
+// carries the owning agent of its session, so the judgment persists beside the
+// product that answers it: an ownerless judgment never reaches the durable
+// chain, and the resident window would release it with nothing to read back. The fact
+// carries the owning agent of its session, so the judgment persists beside the
+// product that answers it: an ownerless judgment never reaches the durable
+// chain, and the resident window would release it with nothing to read back.
 func (r *Run) fileCompressRequest(ctx context.Context, session event.SessionID, request event.CompressRequest) error {
 	if session == "" {
 		return errors.New("tagent: the compression judgment names no session chain")
@@ -245,6 +251,7 @@ func (r *Run) fileCompressRequest(ctx context.Context, session event.SessionID, 
 	}
 	r.mu.Lock()
 	held, filed := r.facts[request.ID]
+	agent := r.agentOfSessionLocked(session)
 	consumer := r.compress
 	r.mu.Unlock()
 	if filed && held.Type != request.FactType() {
@@ -260,7 +267,7 @@ func (r *Run) fileCompressRequest(ctx context.Context, session event.SessionID, 
 			Type:      request.FactType(),
 			Timestamp: stamp,
 			Meta:      map[string]string{event.MetaKeyEventSummary: request.Reason},
-			Owner:     event.Address{SessionID: session},
+			Owner:     event.Address{AgentID: agent, SessionID: session},
 		}); err != nil {
 			return fmt.Errorf("tagent: the compression judgment of session %s was not committed: %w", session, err)
 		}
