@@ -300,7 +300,7 @@ func memoryField(source, field string, e *sourceEntry) (MemorySpec, error) {
 // or null engine declares no engine, which is the keyword-only retrieval.
 func engineField(source, field string, e *sourceEntry) (EngineSpec, error) {
 	spec := EngineSpec{}
-	fields, declared, err := sectionFields(source, field, e, "backend", "embedding", "vector_top_k", "keyword_top_k", "rrf_k")
+	fields, declared, err := sectionFields(source, field, e, "backend", "embedding")
 	if err != nil || !declared {
 		return spec, err
 	}
@@ -308,15 +308,6 @@ func engineField(source, field string, e *sourceEntry) (EngineSpec, error) {
 		return EngineSpec{}, err
 	}
 	if spec.Embedding, err = embeddingField(source, joinField(field, "embedding"), fields["embedding"]); err != nil {
-		return EngineSpec{}, err
-	}
-	if spec.VectorTopK, err = countField(source, joinField(field, "vector_top_k"), fields["vector_top_k"]); err != nil {
-		return EngineSpec{}, err
-	}
-	if spec.KeywordTopK, err = countField(source, joinField(field, "keyword_top_k"), fields["keyword_top_k"]); err != nil {
-		return EngineSpec{}, err
-	}
-	if spec.RRFK, err = countField(source, joinField(field, "rrf_k"), fields["rrf_k"]); err != nil {
 		return EngineSpec{}, err
 	}
 	return spec, nil

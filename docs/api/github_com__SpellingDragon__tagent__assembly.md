@@ -1045,11 +1045,6 @@ func (p *MemoryPlan) Engine() *config.EngineSpec
 func (p *MemoryPlan) Storage() *ledger.StorageConfig
     Storage reports the storage tier the plan opens, or nil beside no tier.
 
-func (p *MemoryPlan) Tuning() (int, int, int)
-    Tuning reports the two leg bounds and the rank constant the merged engine
-    declares. A plan beside no engine reports the zero tuning, which keeps the
-    retrieval exactly as it stood.
-
 type MessageSender interface {
 	// Send delivers one body to the target address.
 	Send(ctx context.Context, target event.Address, content string) error

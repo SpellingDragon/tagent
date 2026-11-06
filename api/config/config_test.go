@@ -33,7 +33,7 @@ func TestRegisteredSectionsLoadOneDocument(t *testing.T) {
 	if memory.Type != "localfile" || memory.Path != "/var/lib/tagent/memory" {
 		t.Fatalf("memory tier = (%q, %q), want the declared tier", memory.Type, memory.Path)
 	}
-	if memory.Engine.Backend != "semantic" || memory.Engine.VectorTopK != 5 {
+	if memory.Engine.Backend != "semantic" {
 		t.Fatalf("memory engine = %+v, want the declared semantic engine", memory.Engine)
 	}
 	if memory.Engine.Embedding.Provider != "openai" || memory.Engine.Embedding.Model != "text-embedding-3-small" {
@@ -109,7 +109,6 @@ agents:
         - team
       engine:
         backend: semantic
-        vector_top_k: 5
         embedding:
           provider: openai
           model: text-embedding-3-small
@@ -138,7 +137,7 @@ agents:
 // encode in the canonical agent core, so this hash migrated once when the two
 // optional budget fields entered the declaration surface; that migration is the
 // one config-change fact such a reload publishes, never a silent re-key.
-const sectionsFingerprint = "ea633ba0b286a34727ab7444fcc4abe79cde3052fec3107f538ad748f0dd1d31"
+const sectionsFingerprint = "c8adbfa3fb7121c02814c2ed1b1f742d9a0d11014397dcd90dbef8783fbab0aa"
 
 // TestRequestBudgetFieldsDecodeAndFingerprint pins the two optional budget fields end to end.
 // - both decode from an agent mapping by their declared keys

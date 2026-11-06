@@ -353,9 +353,6 @@ agents:
       read_namespaces: [audit, ops]
       engine:
         backend: memory
-        vector_top_k: 20
-        keyword_top_k: 10
-        rrf_k: 60
         embedding:
           provider: zhipu
           model: embedding-3
@@ -388,8 +385,8 @@ agents:
 		t.Fatalf("memory = %+v, want the declared tier and read face", agent.Memory)
 	}
 	engine := agent.Memory.Engine
-	if engine.Backend != "memory" || engine.VectorTopK != 20 || engine.KeywordTopK != 10 || engine.RRFK != 60 {
-		t.Fatalf("engine = %+v, want the declared backend and retrieval tuning", engine)
+	if engine.Backend != "memory" {
+		t.Fatalf("engine = %+v, want the declared backend", engine)
 	}
 	embedding := engine.Embedding
 	if embedding.Provider != "zhipu" || embedding.Model != "embedding-3" ||
@@ -454,6 +451,27 @@ func TestStrictDecodeRefusesUndeclaredSectionKeys(t *testing.T) {
 			field:    "agents[0].memory.engine.embedding.api_base",
 			reason:   "unknown field",
 			wantLine: 7,
+		},
+		{
+			name:     "retired vector leg bound",
+			body:     "entry: main\nagents:\n  - id: main\n    memory:\n      engine:\n        vector_top_k: 20\n",
+			field:    "agents[0].memory.engine.vector_top_k",
+			reason:   "unknown field",
+			wantLine: 6,
+		},
+		{
+			name:     "retired keyword leg bound",
+			body:     "entry: main\nagents:\n  - id: main\n    memory:\n      engine:\n        keyword_top_k: 20\n",
+			field:    "agents[0].memory.engine.keyword_top_k",
+			reason:   "unknown field",
+			wantLine: 6,
+		},
+		{
+			name:     "retired fuse rank constant",
+			body:     "entry: main\nagents:\n  - id: main\n    memory:\n      engine:\n        rrf_k: 60\n",
+			field:    "agents[0].memory.engine.rrf_k",
+			reason:   "unknown field",
+			wantLine: 6,
 		},
 		{
 			name:     "meditation key",

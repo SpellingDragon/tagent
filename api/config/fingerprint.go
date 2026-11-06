@@ -108,11 +108,8 @@ type canonicalMemory struct {
 
 // canonicalEngine is one semantic engine in canonical field order.
 type canonicalEngine struct {
-	Backend     string              `json:"backend"`
-	Embedding   *canonicalEmbedding `json:"embedding,omitempty"`
-	VectorTopK  int                 `json:"vector_top_k,omitempty"`
-	KeywordTopK int                 `json:"keyword_top_k,omitempty"`
-	RRFK        int                 `json:"rrf_k,omitempty"`
+	Backend   string              `json:"backend"`
+	Embedding *canonicalEmbedding `json:"embedding,omitempty"`
 }
 
 // canonicalEmbedding is one embedding connection in canonical field order.
@@ -258,11 +255,8 @@ func (s EngineSpec) canonical() *canonicalEngine {
 		return nil
 	}
 	return &canonicalEngine{
-		Backend:     s.Backend,
-		Embedding:   s.Embedding.canonical(),
-		VectorTopK:  s.VectorTopK,
-		KeywordTopK: s.KeywordTopK,
-		RRFK:        s.RRFK,
+		Backend:   s.Backend,
+		Embedding: s.Embedding.canonical(),
 	}
 }
 

@@ -60,8 +60,8 @@ mcp_servers:
 #   · read_namespaces:跨分区读授权(recall.New 的授权面);自身命名空间恒在授权内,
 #     这里列出的名字追加到它之后。不声明则不跨区。
 #   · engine:语义引擎,embedding 经 trpc knowledge/embedder/openai 真调用;
-#     vector_top_k/keyword_top_k 是混合检索两腿的上限,rrf_k 是融合秩常数(零值=历史行为)。
-#     api_key_env 指向的变量缺失时具名拒启动(embedding key is not set)。
+#     两腿上限与融合秩常数是机制常量(不在声明面),api_key_env 指向的变量缺失时
+#     具名拒启动(embedding key is not set)。
 
 # ===== 治理闸(装配期恒挂 WithGovernance;此处开启审批面)=====
 # 行为详情见 docs/wiki/platform/agent-behavior-matrix.md 与 platform-subsystems.md(historical-verbatim,
@@ -120,9 +120,6 @@ agents:
           model: embedding-3
           api_key_env: ZAI_API_KEY
           dimensions: 512
-        vector_top_k: 20
-        keyword_top_k: 20
-        rrf_k: 60
     # 冥想(自察缺省,r14/r14b/ADR 0005):主语=本 agent 自身,反思回合跑在专属反思会话
     # (tagent-session:tagent:reflection),经验卡片落本分区与本会话链——用户业务会话零污染,
     # 同一 agent 的全分区真实内容可读,教训由 recall 拉取、send 推送到目标活跃会话。

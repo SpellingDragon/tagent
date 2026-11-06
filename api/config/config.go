@@ -181,22 +181,14 @@ type MemorySpec struct {
 }
 
 // EngineSpec is the semantic engine behind one memory declaration: the
-// retrieval backend, the embedding connection and the two leg bounds and rank
-// constant the hybrid retrieval runs under.
+// retrieval backend and the embedding connection the vector leg embeds through.
+// The leg bounds and the fusion rank constant are mechanism constants, not
+// declaration knobs.
 type EngineSpec struct {
 	// Backend names the retrieval backend.
 	Backend string `yaml:"backend"`
 	// Embedding is the connection the vector leg embeds through.
 	Embedding EmbeddingSpec `yaml:"embedding"`
-	// VectorTopK bounds the vector leg of one retrieval; 0 takes the runtime
-	// default.
-	VectorTopK int `yaml:"vector_top_k"`
-	// KeywordTopK bounds the keyword leg of one retrieval; 0 takes the runtime
-	// default.
-	KeywordTopK int `yaml:"keyword_top_k"`
-	// RRFK is the rank constant the reciprocal-rank fusion runs under; 0 takes
-	// the runtime default.
-	RRFK int `yaml:"rrf_k"`
 }
 
 // EmbeddingSpec is one embedding connection: the protocol provider, the model,

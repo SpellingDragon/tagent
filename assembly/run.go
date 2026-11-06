@@ -38,6 +38,7 @@ import (
 	"github.com/SpellingDragon/tagent/memory/embedder"
 	"github.com/SpellingDragon/tagent/memory/query"
 	"github.com/SpellingDragon/tagent/memory/replay"
+	"github.com/SpellingDragon/tagent/memory/search"
 	"github.com/SpellingDragon/tagent/runtime/agent"
 	"github.com/SpellingDragon/tagent/runtime/state"
 	"github.com/SpellingDragon/tagent/runtime/task"
@@ -531,7 +532,7 @@ func Assemble(ctx context.Context, decl *config.Declaration, agents map[event.Ag
 		if err != nil {
 			return nil, err
 		}
-		if err := supply.searcher.SetRetrievalTuning(cfg.vectorTopK, cfg.keywordTopK, cfg.rrfK); err != nil {
+		if err := supply.searcher.SetRetrievalTuning(search.DefaultLimit, search.DefaultLimit, 0); err != nil {
 			return nil, err
 		}
 		landed, err := seedLandedSeq(ctx, tier)
@@ -1015,13 +1016,6 @@ type assemblyConfig struct {
 	enforcement governance.Enforcement
 	storage     *ledger.StorageConfig
 	embedder    memory.Embedder
-	// vectorTopK and keywordTopK bound the two retrieval legs; rrfK is the
-	// rank constant their fusion scores under. The zero value keeps the legs
-	// unbounded and the canonical constant, so an untuned assembly behaves
-	// exactly as it did before the tuning existed.
-	vectorTopK  int
-	keywordTopK int
-	rrfK        int
 	recorder    rl.Recorder
 	observer    plugin.Observer
 	execManager *tagentexec.Manager
@@ -1959,21 +1953,12 @@ func (p *MemoryPlan) Embedder() (memory.Embedder, error) {
 	return built, nil
 }
 
-// Tuning reports the two leg bounds and the rank constant the merged engine
-// declares. A plan beside no engine reports the zero tuning, which keeps the
-// retrieval exactly as it stood.
-func (p *MemoryPlan) Tuning() (int, int, int) {
-	if p == nil || p.engine == nil {
-		return 0, 0, 0
-	}
-	return p.engine.VectorTopK, p.engine.KeywordTopK, p.engine.RRFK
-}
-
 // resolveMemory folds the declared memory plan into the faces this assembly
 // opens. A face an option states directly keeps it, so a host that wires its
 // own embedder over a declared tier is never overridden. The declaration is the
-// one source of the retrieval tuning: a zero bound keeps that leg unbounded and
-// a zero constant keeps search.RRFRankConstant.
+// one source of the storage and embedding faces. The retrieval leg bounds and
+// the fusion rank constant are mechanism constants: both legs run under the one
+// page bound and the fusion keeps its canonical rank constant.
 func (c *assemblyConfig) resolveMemory() error {
 	if c.memory == nil {
 		return nil
@@ -1988,7 +1973,6 @@ func (c *assemblyConfig) resolveMemory() error {
 		}
 		c.embedder = embedder
 	}
-	c.vectorTopK, c.keywordTopK, c.rrfK = c.memory.Tuning()
 	return nil
 }
 
@@ -1999,8 +1983,7 @@ func declaresEngine(engine config.EngineSpec) bool {
 		strings.TrimSpace(engine.Embedding.Model) != "" ||
 		strings.TrimSpace(engine.Embedding.APIKeyEnv) != "" ||
 		engine.Embedding.Dimensions != 0 ||
-		strings.TrimSpace(engine.Embedding.APIEndpoint) != "" ||
-		engine.VectorTopK != 0 || engine.KeywordTopK != 0 || engine.RRFK != 0
+		strings.TrimSpace(engine.Embedding.APIEndpoint) != ""
 }
 
 // validateEngine validates one merged semantic engine: the backend must be the
@@ -2013,10 +1996,6 @@ func validateEngine(engine config.EngineSpec) error {
 	}
 	if backend != memoryEngineBackend {
 		return fmt.Errorf("%w: backend %q is not a known engine backend", ErrMemoryEngine, backend)
-	}
-	if engine.VectorTopK < 0 || engine.KeywordTopK < 0 || engine.RRFK < 0 {
-		return fmt.Errorf("%w: the engine carries a negative retrieval bound (vector_top_k=%d keyword_top_k=%d rrf_k=%d)",
-			ErrMemoryEngine, engine.VectorTopK, engine.KeywordTopK, engine.RRFK)
 	}
 	if err := embedder.Validate(engine.Embedding); err != nil {
 		return fmt.Errorf("%w: %w", ErrMemoryEngine, err)
