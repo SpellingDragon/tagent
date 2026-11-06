@@ -103,3 +103,48 @@ func TestLandedSeqRidesTheWalk(t *testing.T) {
 		}
 	}
 }
+
+// TestAnchoredRebuildEqualsFullWalk pins the fold anchor theorem.
+//   - the newest product fact of each session carries the post-batch survivor
+//     list, and rebuilding from the anchor answers the full walk entry by entry
+//   - the anchor path decodes fewer bodies than the full walk on a folded chain
+//
+// 契约: docs/wiki/agent/event-flow.md#projection-lifecycle
+func TestAnchoredRebuildEqualsFullWalk(t *testing.T) {
+	ctx := context.Background()
+	run := windowChainRun(t, ctx)
+	addr := event.Address{AgentID: "agent-a", SessionID: "session-anchor"}
+	commitWindowTurns(t, ctx, run, addr, 12)
+
+	full, _, fullReport, err := run.seedFullReplay(ctx, run.tier)
+	if err != nil {
+		t.Fatalf("replay the whole chain: %v", err)
+	}
+	anchored, anchoredReport, err := run.seedAnchoredReplay(ctx, run.tier)
+	if err != nil {
+		t.Fatalf("rebuild from the anchors: %v", err)
+	}
+	if anchoredReport.Anchors == 0 {
+		t.Fatal("the folded chain minted no anchor the rebuild could use")
+	}
+	if anchoredReport.Decoded >= fullReport.Decoded {
+		t.Fatalf("the anchored rebuild decoded %d bodies, want fewer than the full walk %d", anchoredReport.Decoded, fullReport.Decoded)
+	}
+	want, carried := full[addr]
+	if !carried {
+		t.Fatal("the full walk registered no projection for the session")
+	}
+	got, carried := anchored[addr]
+	if !carried {
+		t.Fatal("the anchored rebuild registered no projection for the session")
+	}
+	wantList, gotList := want.projection.Entries(), got.projection.Entries()
+	if len(gotList) != len(wantList) {
+		t.Fatalf("the anchored rebuild holds %d entries, want the full walk %d", len(gotList), len(wantList))
+	}
+	for at := range gotList {
+		if gotList[at].Key != wantList[at].Key || gotList[at].Type != wantList[at].Type || gotList[at].Content != wantList[at].Content {
+			t.Fatalf("entry %d = %s/%s, want %s/%s", at, gotList[at].Key, gotList[at].Type, wantList[at].Key, wantList[at].Type)
+		}
+	}
+}
