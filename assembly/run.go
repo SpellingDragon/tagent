@@ -472,6 +472,10 @@ func Assemble(ctx context.Context, decl *config.Declaration, agents map[event.Ag
 		if err != nil {
 			return nil, err
 		}
+		for _, s := range durable.LoadStats().Scans {
+			assemblyInfo("tagent: durable load scan prefix=%s keys=%d bytes=%d elapsed=%s",
+				s.Prefix, s.Keys, s.Bytes, s.Elapsed.Round(time.Microsecond))
+		}
 		r.commit = &runCommit{inner: durable, held: map[event.TaskID]bool{}}
 	}
 	r.records.attach(tier)
@@ -791,22 +795,25 @@ func finalRoundSpecOf(decl *config.Declaration) config.FinalRoundSpec {
 // one outcome per task the chains cover. A chain carrying no admission
 // material is refused by name in the report and rebuilds nothing.
 //
-// The whole fold is observed as one line at INFO — the chains read, the tasks
-// rebuilt and the chains dropped (a chain the restore refused, or a link the
-// registry already held) beside the elapsed time — so a restart states what it
-// recovered instead of leaving the reader to count report entries. A failed fold
-// is observed at ERROR beside the chain it stopped on.
+// The whole fold is observed as one line at INFO — the chains read, the links
+// they carry, the tasks rebuilt and the chains dropped (a chain the restore
+// refused, or a link the registry already held) beside the elapsed time — so a
+// restart states what it recovered instead of leaving the reader to count
+// report entries. A failed fold is observed at ERROR beside the chain it
+// stopped on.
 func (r *Run) restoreChains(ctx context.Context, durable *state.DurableCommit) (task.RestoreReport, error) {
 	started := time.Now()
 	owners := runOwners{bindings: r.bindings}
 	merged := task.RestoreReport{}
 	chains := durable.TaskIDs()
+	links := 0
 	for _, taskID := range chains {
 		chain, err := durable.Records(ctx, taskID)
 		if err != nil {
 			assemblyError("tagent: restore stopped task=%s err=%v", taskID, err)
 			return merged, err
 		}
+		links += len(chain)
 		report, err := r.registry.Restore(ctx, chain, owners)
 		merged.Tasks = append(merged.Tasks, report.Tasks...)
 		if err != nil {
@@ -820,8 +827,8 @@ func (r *Run) restoreChains(ctx context.Context, durable *state.DurableCommit) (
 		}
 	}
 	recovered, dropped := restoredCounts(merged)
-	assemblyInfo("tagent: restore folded chains=%d recovered=%d dropped=%d elapsed=%s",
-		len(chains), recovered, dropped, time.Since(started).Round(time.Microsecond))
+	assemblyInfo("tagent: restore folded chains=%d links=%d recovered=%d dropped=%d elapsed=%s",
+		len(chains), links, recovered, dropped, time.Since(started).Round(time.Microsecond))
 	return merged, nil
 }
 
@@ -871,13 +878,14 @@ func assemblyDebug(format string, args ...any) {
 }
 
 // assemblyInfo renders one line of the assembly face at INFO: the storage tier
-// the assembly opened and what the fold of the durable chains recovered from it.
-// One assembly writes one line per event, so the INFO stream is bounded by the
-// assemblies a process builds.
+// the assembly opened, the per-prefix read cost of the durable load (five scan
+// lines beside a durable tier) and what the fold of the durable chains
+// recovered from it. One assembly writes a bounded line set, so the INFO stream
+// stays proportional to the assemblies a process builds.
 //
 // The redline list (3 rules):
 // MUST stay a bypass: a failing logger is a missing line, never a failed assembly.
-// MUST write one line per opened tier and one per completed fold.
+// MUST write one line per opened tier, five scan lines per durable load, and one per completed fold.
 // MUST NOT render the stored records, the prompts or the model output.
 func assemblyInfo(format string, args ...any) {
 	if trpclog.Default == nil {

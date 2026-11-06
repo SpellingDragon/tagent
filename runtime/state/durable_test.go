@@ -1102,3 +1102,116 @@ type roundOwners struct{}
 func (roundOwners) OwnerOf(_ context.Context, _ event.AgentID, target event.AgentID) (event.AgentID, error) {
 	return target, nil
 }
+
+// TestLoadScanCounts pins the five per-prefix read measurements of one load.
+// - a load that reaches the end reports exactly five entries in scan order
+// - each entry carries its own key count and byte total from the real writes
+// 契约: docs/wiki/reliability/durable-delivery.md#canonical-fact-resolution
+func TestLoadScanCounts(t *testing.T) {
+	ctx := context.Background()
+	log := newInvariantFactLog()
+	first, err := NewDurableCommit(log, nil)
+	if err != nil {
+		t.Fatalf("open the first carrier: %v", err)
+	}
+	taskID := event.TaskID("task-load-scan")
+	if err := first.Declare(ctx, taskID, task.Spec{}); err != nil {
+		t.Fatalf("declare the admission material: %v", err)
+	}
+	record := invariantRecord(taskID, 0, task.StatusRunning, invariantNotice(taskID, 1))
+	if result, err := first.Commit(ctx, record); err != nil || result != task.CommitCommitted {
+		t.Fatalf("commit one fact = (%v, %v), want committed", result, err)
+	}
+	if err := first.recordConsumption(ctx, record.Outbox[0].Notice); err != nil {
+		t.Fatalf("record the consumption receipt: %v", err)
+	}
+	second, err := NewDurableCommit(log, nil)
+	if err != nil {
+		t.Fatalf("rebuild the carrier from the same log: %v", err)
+	}
+	stats := second.LoadStats()
+	if len(stats.Scans) != 5 {
+		t.Fatalf("scan entries = %d, want the five prefix reads", len(stats.Scans))
+	}
+	order := []string{specPrefix, consumePrefix, attemptPrefix, rejectPrefix, factPrefix}
+	for i, s := range stats.Scans {
+		if s.Prefix != order[i] {
+			t.Errorf("scan %d prefix = %q, want %q", i, s.Prefix, order[i])
+		}
+		wantKeys, wantBytes := barrierTotals(log, s.Prefix)
+		if s.Keys != wantKeys {
+			t.Errorf("scan %q keys = %d, want %d from the completed barrier", s.Prefix, s.Keys, wantKeys)
+		}
+		if s.Bytes != wantBytes {
+			t.Errorf("scan %q bytes = %d, want %d from the completed barrier", s.Prefix, s.Bytes, wantBytes)
+		}
+		if s.Elapsed < 0 {
+			t.Errorf("scan %q elapsed is negative", s.Prefix)
+		}
+	}
+	if got := len(second.Facts(taskID)); got != 1 {
+		t.Fatalf("rebuilt facts = %d, want the measurement to leave the recovery intact", got)
+	}
+}
+
+// barrierTotals counts the completed pairs one prefix holds and their total
+// value length, straight from the log's own barrier — the independent source
+// the scan measurement is checked against.
+func barrierTotals(log *invariantFactLog, prefix string) (keys int, bytes int64) {
+	log.mu.Lock()
+	defer log.mu.Unlock()
+	for key, value := range log.barrier {
+		if strings.HasPrefix(key, prefix) {
+			keys++
+			bytes += int64(len(value))
+		}
+	}
+	return keys, bytes
+}
+
+// selectiveScanLog forwards to an inner log but refuses the scans of one
+// named prefix, so a check can observe the carrier beside a read that fails
+// partway instead of refusing every prefix at once.
+type selectiveScanLog struct {
+	inner     FactLog
+	failEvery map[string]bool
+}
+
+// Put stages one pair on the inner log.
+func (l *selectiveScanLog) Put(ctx context.Context, key string, value []byte) error {
+	return l.inner.Put(ctx, key, value)
+}
+
+// Get reads one pair from the inner log.
+func (l *selectiveScanLog) Get(ctx context.Context, key string) ([]byte, bool, error) {
+	return l.inner.Get(ctx, key)
+}
+
+// Scan refuses the named prefixes and forwards the rest.
+func (l *selectiveScanLog) Scan(ctx context.Context, prefix string) (map[string][]byte, error) {
+	if l.failEvery[prefix] {
+		return nil, errors.New("state: the read was refused")
+	}
+	return l.inner.Scan(ctx, prefix)
+}
+
+// Sync completes the barrier on the inner log.
+func (l *selectiveScanLog) Sync(ctx context.Context) error {
+	return l.inner.Sync(ctx)
+}
+
+// TestLoadScanCountsRefusedScanRecordsNothing pins the refused-scan negative.
+//   - a failed prefix read records no measurement, so only completed reads appear
+func TestLoadScanCountsRefusedScanRecordsNothing(t *testing.T) {
+	d := &DurableCommit{log: &selectiveScanLog{inner: newInvariantFactLog(),
+		failEvery: map[string]bool{consumePrefix: true}}}
+	if _, err := d.scan(context.Background(), specPrefix); err != nil {
+		t.Fatalf("the first prefix read: %v", err)
+	}
+	if _, err := d.scan(context.Background(), consumePrefix); err == nil {
+		t.Fatal("the refused prefix read was reported as a success")
+	}
+	if got := d.LoadStats(); len(got.Scans) != 1 || got.Scans[0].Prefix != specPrefix {
+		t.Fatalf("stats after a refused read = %+v, want only the read that reached its end", got.Scans)
+	}
+}

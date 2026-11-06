@@ -692,6 +692,10 @@ func (d *DurableCommit) Declare(ctx context.Context, taskID event.TaskID, spec t
 func (d *DurableCommit) Facts(taskID event.TaskID) []task.CommitRecord
     Facts returns the records the carrier stored for one task, in commit order.
 
+func (d *DurableCommit) LoadStats() LoadStats
+    LoadStats reports the measured read cost of the load that built this
+    carrier. It is read-only; the caller cannot mutate the carrier through it.
+
 func (d *DurableCommit) Outbox(taskID event.TaskID) []task.OutboxNotice
     Outbox returns the notifications one task still owes delivery, each paired
     with its delivery-layer state, ordered by round, kind and sequence.
@@ -872,6 +876,25 @@ func (l *Leases) ReleaseAll(ctx context.Context) error
     ReleaseAll frees every registered resource in the reverse of the acquisition
     order and exactly once each. A release that fails does not stop the releases
     behind it: its error is joined with the others into the returned error.
+
+type LoadScan struct {
+	Prefix  string
+	Keys    int
+	Bytes   int64
+	Elapsed time.Duration
+}
+    LoadScan is the read cost of one prefix scan made while rebuilding the
+    carrier at startup. Keys is the number of pairs returned, Bytes their total
+    value length, and Elapsed the wall time of the read alone — folding the
+    pairs into the carrier tables happens after the measurement and is covered
+    by the restore observation instead. It is a measurement, not a durable
+    record.
+
+type LoadStats struct {
+	Scans []LoadScan
+}
+    LoadStats is the per-prefix read cost of the last load. The five entries
+    appear in scan order; a load that returned early holds fewer entries.
 
 type MailboxEntry struct {
 	// Notice is the stable identity of the notification this entry accepted.

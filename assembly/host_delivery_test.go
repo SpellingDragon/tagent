@@ -29,6 +29,7 @@ import (
 	"github.com/SpellingDragon/tagent/memory/replay"
 	"github.com/SpellingDragon/tagent/runtime/agent"
 	"github.com/SpellingDragon/tagent/runtime/state"
+	trpclog "trpc.group/trpc-go/trpc-agent-go/log"
 	trpctool "trpc.group/trpc-go/trpc-agent-go/tool"
 )
 
@@ -2244,4 +2245,159 @@ func nonEmptyStrings(values ...string) []string {
 		}
 	}
 	return out
+}
+
+// foldObserver captures the info lines of one assembly face so a check reads
+// the fold observation of its own run.
+type foldObserver struct {
+	mu    sync.Mutex
+	lines []string
+}
+
+// Debug records one debug line.
+func (o *foldObserver) Debug(args ...any) { o.record("debug", fmt.Sprint(args...)) }
+
+// Debugf records one formatted debug line.
+func (o *foldObserver) Debugf(format string, args ...any) {
+	o.record("debug", fmt.Sprintf(format, args...))
+}
+
+// Info records one info line.
+func (o *foldObserver) Info(args ...any) { o.record("info", fmt.Sprint(args...)) }
+
+// Infof records one formatted info line.
+func (o *foldObserver) Infof(format string, args ...any) {
+	o.record("info", fmt.Sprintf(format, args...))
+}
+
+// Warn records one warn line.
+func (o *foldObserver) Warn(args ...any) { o.record("warn", fmt.Sprint(args...)) }
+
+// Warnf records one formatted warn line.
+func (o *foldObserver) Warnf(format string, args ...any) {
+	o.record("warn", fmt.Sprintf(format, args...))
+}
+
+// Error records one error line.
+func (o *foldObserver) Error(args ...any) { o.record("error", fmt.Sprint(args...)) }
+
+// Errorf records one formatted error line.
+func (o *foldObserver) Errorf(format string, args ...any) {
+	o.record("error", fmt.Sprintf(format, args...))
+}
+
+// Fatal records one fatal line without ending the test binary.
+func (o *foldObserver) Fatal(args ...any) { o.record("fatal", fmt.Sprint(args...)) }
+
+// Fatalf records one formatted fatal line without ending the test binary.
+func (o *foldObserver) Fatalf(format string, args ...any) {
+	o.record("fatal", fmt.Sprintf(format, args...))
+}
+
+// record appends one rendered line under the level it was taken at.
+func (o *foldObserver) record(level string, text string) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.lines = append(o.lines, level+": "+text)
+}
+
+// mentions reports whether one info line carries every fragment.
+func (o *foldObserver) mentions(fragments ...string) bool {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	for _, line := range o.lines {
+		if !strings.HasPrefix(line, "info: ") {
+			continue
+		}
+		holds := true
+		for _, fragment := range fragments {
+			if !strings.Contains(line, fragment) {
+				holds = false
+				break
+			}
+		}
+		if holds {
+			return true
+		}
+	}
+	return false
+}
+
+// TestRestoreFoldCounts pins the link count of the restore observation.
+// - the first run commits a full tool turn and closes behind its own barrier
+// - the second boot folds the chain and its info line carries chains=1 links=2
+// 契约: docs/wiki/reliability/durable-delivery.md#canonical-fact-resolution
+func TestRestoreFoldCounts(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	root := t.TempDir()
+	storage := WithStorage(ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: root})
+	round := 0
+	foldModel := &snapshotTestModel{answer: func(*model.Request) *model.Response {
+		round++
+		if round == 1 {
+			return &model.Response{Choices: []model.Choice{{Message: model.Message{Role: model.RoleAssistant, ToolCalls: []model.ToolCall{{
+				ID: "call-probe", Type: "function", Function: model.FunctionDefinitionParam{Name: "probe", Arguments: []byte("{}")},
+			}}}}}, Done: true}
+		}
+		return &model.Response{Choices: []model.Choice{{Message: model.Message{Role: model.RoleAssistant, Content: "done"}}}, Done: true}
+	}}
+	tool := &staticProbeTool{name: "probe"}
+	first, err := Assemble(ctx, &config.Declaration{
+		Entry:  string(deliveryTestAgent),
+		Agents: []config.AgentSpec{{ID: string(deliveryTestAgent), Model: "model-a"}},
+	}, map[event.AgentID]NativeAgent{
+		deliveryTestAgent: {Model: foldModel, Tools: []trpctool.CallableTool{tool}},
+	}, WithGovernance(snapshotTestGovernance{}), storage)
+	if err != nil {
+		t.Fatalf("assemble the first run: %v", err)
+	}
+	hostCtx, stopHost := context.WithCancel(ctx)
+	host := deliveryTestHost(hostCtx, first, newDeliveryTestSender(nil))
+	if _, err := host.Invoke(ctx, InvokeRequest{
+		InvocationID: "inv-fold-counts",
+		Address:      deliveryTestAddress("session-fold-counts"),
+		Input:        []model.Message{{Role: model.RoleUser, Content: "drive one tool turn"}},
+	}); err != nil {
+		t.Fatalf("drive the committing turn: %v", err)
+	}
+	stopHost()
+	if _, err := first.Close(ctx, agent.CloseRequest{Timeout: time.Now().Add(5 * time.Second)}); err != nil {
+		t.Fatalf("drain the first run: %v", err)
+	}
+
+	observer := &foldObserver{}
+	original := trpclog.Default
+	trpclog.Default = observer
+	t.Cleanup(func() { trpclog.Default = original })
+	second, err := Assemble(ctx, &config.Declaration{
+		Entry:  string(deliveryTestAgent),
+		Agents: []config.AgentSpec{{ID: string(deliveryTestAgent), Model: "model-a"}},
+	}, map[event.AgentID]NativeAgent{
+		deliveryTestAgent: {Model: foldModel, Tools: []trpctool.CallableTool{&staticProbeTool{name: "probe"}}},
+	}, WithGovernance(snapshotTestGovernance{}), storage)
+	if err != nil {
+		t.Fatalf("restart beside the committed chain: %v", err)
+	}
+	if report := second.Recovery(); len(report.Tasks) != 1 || !report.Tasks[0].Recovered {
+		t.Fatalf("recovery report = %+v, want the one chain rebuilt", report.Tasks)
+	}
+	if !observer.mentions("restore folded", "chains=1", "links=2") {
+		t.Fatalf("info lines = %v, want the fold beside its chains and links", observer.lines)
+	}
+}
+
+// staticProbeTool answers every call with one fixed body.
+type staticProbeTool struct {
+	name string
+}
+
+// Declaration returns the declaration naming the probe.
+func (t *staticProbeTool) Declaration() *trpctool.Declaration {
+	return &trpctool.Declaration{Name: t.name}
+}
+
+// Call answers the probe with its fixed body.
+func (t *staticProbeTool) Call(context.Context, []byte) (any, error) {
+	return "probed", nil
 }

@@ -181,6 +181,36 @@ type DurableCommit struct {
 	consumed  map[noticeKey]struct{}
 	attempts  map[noticeKey]SettleAttempt
 	rejected  map[noticeKey]Rejection
+	loadStats LoadStats
+}
+
+// LoadScan is the read cost of one prefix scan made while rebuilding the
+// carrier at startup. Keys is the number of pairs returned, Bytes their total
+// value length, and Elapsed the wall time of the read alone — folding the
+// pairs into the carrier tables happens after the measurement and is covered
+// by the restore observation instead. It is a measurement, not a durable
+// record.
+type LoadScan struct {
+	Prefix  string
+	Keys    int
+	Bytes   int64
+	Elapsed time.Duration
+}
+
+// LoadStats is the per-prefix read cost of the last load. The five entries
+// appear in scan order; a load that returned early holds fewer entries.
+type LoadStats struct {
+	Scans []LoadScan
+}
+
+// LoadStats reports the measured read cost of the load that built this
+// carrier. It is read-only; the caller cannot mutate the carrier through it.
+func (d *DurableCommit) LoadStats() LoadStats {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	out := LoadStats{Scans: make([]LoadScan, len(d.loadStats.Scans))}
+	copy(out.Scans, d.loadStats.Scans)
+	return out
 }
 
 // DurableCommit satisfies the task commit port.
@@ -219,7 +249,7 @@ func NewDurableCommit(log FactLog, uncertain task.UncertainProbe) (*DurableCommi
 // unconfirmed delivery is replayed rather than trusted, while a consumption the
 // log confirms is never owed a second time.
 func (d *DurableCommit) load(ctx context.Context) error {
-	specs, err := d.log.Scan(ctx, specPrefix)
+	specs, err := d.scan(ctx, specPrefix)
 	if err != nil {
 		return err
 	}
@@ -230,7 +260,7 @@ func (d *DurableCommit) load(ctx context.Context) error {
 		}
 		d.specs[event.TaskID(key[len(specPrefix):])] = spec
 	}
-	receipts, err := d.log.Scan(ctx, consumePrefix)
+	receipts, err := d.scan(ctx, consumePrefix)
 	if err != nil {
 		return err
 	}
@@ -242,7 +272,7 @@ func (d *DurableCommit) load(ctx context.Context) error {
 		d.consumed[noticeKey{task: receipt.TaskID, round: receipt.Round,
 			kind: receipt.Kind, seq: receipt.Seq}] = struct{}{}
 	}
-	attempts, err := d.log.Scan(ctx, attemptPrefix)
+	attempts, err := d.scan(ctx, attemptPrefix)
 	if err != nil {
 		return err
 	}
@@ -254,7 +284,7 @@ func (d *DurableCommit) load(ctx context.Context) error {
 		d.attempts[noticeKey{task: record.TaskID, round: record.Round,
 			kind: record.Kind, seq: record.Seq}] = record.Attempt
 	}
-	rejections, err := d.log.Scan(ctx, rejectPrefix)
+	rejections, err := d.scan(ctx, rejectPrefix)
 	if err != nil {
 		return err
 	}
@@ -265,7 +295,7 @@ func (d *DurableCommit) load(ctx context.Context) error {
 		}
 		d.rejected[noticeKeyOf(rejection.Notice)] = rejection
 	}
-	facts, err := d.log.Scan(ctx, factPrefix)
+	facts, err := d.scan(ctx, factPrefix)
 	if err != nil {
 		return err
 	}
@@ -303,6 +333,25 @@ func (d *DurableCommit) load(ctx context.Context) error {
 		}
 	}
 	return nil
+}
+
+// scan reads one prefix and records its cost into the load stats. The
+// measurement covers only the read; a failed scan records nothing, so the
+// stats always describe a load that reached the end of that prefix.
+func (d *DurableCommit) scan(ctx context.Context, prefix string) (map[string][]byte, error) {
+	started := time.Now()
+	pairs, err := d.log.Scan(ctx, prefix)
+	if err != nil {
+		return nil, err
+	}
+	var bytes int64
+	for _, body := range pairs {
+		bytes += int64(len(body))
+	}
+	d.loadStats.Scans = append(d.loadStats.Scans, LoadScan{
+		Prefix: prefix, Keys: len(pairs), Bytes: bytes, Elapsed: time.Since(started),
+	})
+	return pairs, nil
 }
 
 // attemptRecord is the durable form of one attempt: the four-part notice
