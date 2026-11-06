@@ -123,6 +123,11 @@ run python3 scripts/gates/check_durable_truth_registry.py
 run python3 scripts/gates/test_check_spec_hygiene.py
 run python3 scripts/gates/check_spec_hygiene.py
 
+# 窗口/预算/策略/常量登记：四类不得串用；新增窗口类可配项即红（4.0c）。
+echo "lint: window and bound registry"
+run python3 scripts/gates/test_check_window_bounds.py
+run python3 scripts/gates/check_window_bounds.py
+
 # 运行时契约（CI 的 format-and-contract job）：计划/场景契约在无 task-graph 时
 # 没有判定对象，如实打印 skip；架构政策、概念预算与实现覆盖对现树恒判定。
 #

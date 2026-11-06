@@ -4,7 +4,7 @@
 
 - [ ] 4.0a 窗口类界收口：`max_tokens` 唯一输入；删 `provider_context_window`/`output_reserve`/`long_context_tokens`/`capture_budget_mb`/`vector_top_k`/`keyword_top_k`/`rrf_k`；provider 窗=回放窗、输出余量=窗/4、`long_context` 由装配剩余量算、捕获与缓存按窗口渲染字节派生、页界一个数、RRF K 常量；schema/decode/reload/示例/文档同批；旧键→具名拒绝 —— 验证：旧键在代码与示例 0 命中；schema 门反例（旧键⇒红）；示例配置启动绿
 - [ ] 4.0b 常驻界派生：删 `factWindow`/`replayResidentWindow`，常驻=窗口渲染集 —— 验证：进程级内存上界断言；窗口放大时线性、不随历史
-- [ ] 4.0c 词表与门禁：GLOSSARY 四类词（回放窗/段窗/上限/策略）；F0 新增「上限类可配即红、界必须登记来源」规则并登记现有界与策略 —— 验证：文档门绿；F0 反例（新增上限类可配项⇒红）
+- [x] 4.0c 词表与门禁：`golden/runtime/window_bounds.json` 四类登记（回放窗/预算面/策略/机制常量，20 条）；`check_window_bounds.py` 四规则 + 7 例正反自测，接入 lint；GLOSSARY「请求预算」行内收四类词（不新增行，预算持平）—— 验证：门 exit 0；反例（未登记窗口类键⇒红、第二个窗⇒红、常量当声明键⇒红、常量漂移⇒红、登记键从声明面消失⇒红）全过
 
 ## B. recall 与窗口解耦
 
