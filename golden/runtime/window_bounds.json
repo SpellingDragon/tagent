@@ -121,20 +121,12 @@
       "reason": "token 与字符的唯一换算常量。"
     },
     {
-      "id": "resident-facts",
+      "id": "fallback-resident-facts",
       "class": "constant",
-      "name": "factWindow",
+      "name": "noWindowResidentFacts",
       "kind": "const",
       "file": "assembly/facts.go",
-      "reason": "常驻事实上限；4.0b 改为由窗口渲染集派生。"
-    },
-    {
-      "id": "resident-projection",
-      "class": "constant",
-      "name": "replayResidentWindow",
-      "kind": "const",
-      "file": "assembly/facts.go",
-      "reason": "常驻投影上限；4.0b 改为由窗口渲染集派生。"
+      "reason": "无回放窗会话链的兜底常驻条数：不折的链没有带界，只能按这个机制常量保留；带窗链的常驻由投影边界决定。"
     },
     {
       "id": "segment-cache-budget",

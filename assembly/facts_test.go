@@ -39,7 +39,7 @@ func TestFactsStayInTheirSessionWindow(t *testing.T) {
 	t.Run("a closed chain keeps the most recent window", func(t *testing.T) {
 		run := factWindowTestRun(t, ctx)
 		addr := factWindowAddr
-		const seeded = factWindow + 32
+		const seeded = noWindowResidentFacts + 32
 		for at := 0; at < seeded; at++ {
 			commitWindowFact(t, ctx, run, addr, windowEvent(addr,
 				fmt.Sprintf("closed-%05d", at), "inv-window-closed", "the material of the closed chain", event.TypeExternalInput))
@@ -48,8 +48,8 @@ func TestFactsStayInTheirSessionWindow(t *testing.T) {
 			"closed-closing", "inv-window-closed", "the answer that closed the chain", event.TypeAgentOutput))
 
 		facts := run.SessionFacts(addr)
-		if len(facts) != factWindow {
-			t.Fatalf("the closed chain = %d facts, want the window %d", len(facts), factWindow)
+		if len(facts) != noWindowResidentFacts {
+			t.Fatalf("the closed chain = %d facts, want the window %d", len(facts), noWindowResidentFacts)
 		}
 		if want := event.EventID("closed-00033"); facts[0].Key != want {
 			t.Fatalf("the oldest kept fact = %s, want %s", facts[0].Key, want)
@@ -57,8 +57,8 @@ func TestFactsStayInTheirSessionWindow(t *testing.T) {
 		if _, held := run.factOf(event.EventID("closed-00032")); held {
 			t.Fatalf("the fact outside the window is still held by the live ledger")
 		}
-		if got := run.CommittedFacts(); got != factWindow {
-			t.Fatalf("the live ledger holds %d facts, want the window %d", got, factWindow)
+		if got := run.CommittedFacts(); got != noWindowResidentFacts {
+			t.Fatalf("the live ledger holds %d facts, want the window %d", got, noWindowResidentFacts)
 		}
 		requireFactOrderMatchesLedger(t, run)
 	})
@@ -68,13 +68,13 @@ func TestFactsStayInTheirSessionWindow(t *testing.T) {
 		addr := factWindowAddr
 		commitWindowFact(t, ctx, run, addr, windowEvent(addr,
 			"flight-opening", "inv-window-flight", "the answer that closed the previous segment", event.TypeAgentOutput))
-		for at := 0; at < 2*factWindow; at++ {
+		for at := 0; at < 2*noWindowResidentFacts; at++ {
 			commitWindowFact(t, ctx, run, addr, windowEvent(addr,
 				fmt.Sprintf("flight-%05d", at), "inv-window-flight", "the material of the segment in flight", event.TypeExternalInput))
 		}
 
 		facts := run.SessionFacts(addr)
-		if want := 2*factWindow + 1; len(facts) != want {
+		if want := 2*noWindowResidentFacts + 1; len(facts) != want {
 			t.Fatalf("the chain in flight = %d facts, want the opening fact beside the whole segment %d", len(facts), want)
 		}
 		if want := event.EventID("flight-opening"); facts[0].Key != want {
@@ -86,13 +86,13 @@ func TestFactsStayInTheirSessionWindow(t *testing.T) {
 	t.Run("a chain beside no turn-end is kept whole", func(t *testing.T) {
 		run := factWindowTestRun(t, ctx)
 		addr := factWindowAddr
-		for at := 0; at < factWindow+64; at++ {
+		for at := 0; at < noWindowResidentFacts+64; at++ {
 			commitWindowFact(t, ctx, run, addr, windowEvent(addr,
 				fmt.Sprintf("open-%05d", at), "inv-window-open", "the material of the only segment", event.TypeExternalInput))
 		}
 
 		facts := run.SessionFacts(addr)
-		if want := factWindow + 64; len(facts) != want {
+		if want := noWindowResidentFacts + 64; len(facts) != want {
 			t.Fatalf("the chain beside no turn-end = %d facts, want the whole segment %d", len(facts), want)
 		}
 		if want := event.EventID("open-00000"); facts[0].Key != want {
@@ -104,15 +104,15 @@ func TestFactsStayInTheirSessionWindow(t *testing.T) {
 	t.Run("a replayed chain converges to the window", func(t *testing.T) {
 		run := factWindowTestRun(t, ctx)
 		addr := factWindowAddr
-		for at := 0; at < factWindow+64; at++ {
+		for at := 0; at < noWindowResidentFacts+64; at++ {
 			run.seedFact(windowEvent(addr, fmt.Sprintf("replay-%05d", at), "inv-window-replay", "the replayed material", event.TypeExternalInput))
 		}
 		run.seedFact(windowEvent(addr, "replay-closing", "inv-window-replay", "the answer the earlier process committed", event.TypeAgentOutput))
 		run.trimSeededFacts()
 
 		facts := run.SessionFacts(addr)
-		if len(facts) != factWindow {
-			t.Fatalf("the replayed chain = %d facts, want the window %d", len(facts), factWindow)
+		if len(facts) != noWindowResidentFacts {
+			t.Fatalf("the replayed chain = %d facts, want the window %d", len(facts), noWindowResidentFacts)
 		}
 		if want := event.EventID("replay-00065"); facts[0].Key != want {
 			t.Fatalf("the oldest kept fact = %s, want %s", facts[0].Key, want)
@@ -124,7 +124,7 @@ func TestFactsStayInTheirSessionWindow(t *testing.T) {
 		run := factWindowTestRun(t, ctx)
 		addr := factWindowAddr
 		other := event.Address{AgentID: "agent-a", SessionID: "session-fact-window-neighbour"}
-		for at := 0; at < factWindow+16; at++ {
+		for at := 0; at < noWindowResidentFacts+16; at++ {
 			commitWindowFact(t, ctx, run, addr, windowEvent(addr,
 				fmt.Sprintf("long-%05d", at), "inv-window-long", "the material of the long chain", event.TypeExternalInput))
 		}
@@ -137,8 +137,8 @@ func TestFactsStayInTheirSessionWindow(t *testing.T) {
 		if got := len(run.SessionFacts(other)); got != 6 {
 			t.Fatalf("the short chain = %d facts, want its six facts kept whole", got)
 		}
-		if got := len(run.SessionFacts(addr)); got != factWindow {
-			t.Fatalf("the long chain = %d facts, want its window %d kept", got, factWindow)
+		if got := len(run.SessionFacts(addr)); got != noWindowResidentFacts {
+			t.Fatalf("the long chain = %d facts, want its window %d kept", got, noWindowResidentFacts)
 		}
 	})
 }
@@ -154,14 +154,14 @@ func TestDeliveryAfterRestartKeepsTheTurnAnswer(t *testing.T) {
 	defer cancel()
 	run := factWindowTestRun(t, ctx)
 	addr := factWindowAddr
-	for at := 0; at < factWindow+64; at++ {
+	for at := 0; at < noWindowResidentFacts+64; at++ {
 		run.seedFact(windowEvent(addr, fmt.Sprintf("restart-%05d", at), "inv-window-earlier", "the material the restart replays", event.TypeExternalInput))
 	}
 	run.seedFact(windowEvent(addr, "restart-closing", "inv-window-earlier",
 		"the answer the earlier process delivered", event.TypeAgentOutput))
 	run.trimSeededFacts()
-	if got := len(run.SessionFacts(addr)); got != factWindow {
-		t.Fatalf("the replayed chain = %d facts, want the window %d", got, factWindow)
+	if got := len(run.SessionFacts(addr)); got != noWindowResidentFacts {
+		t.Fatalf("the replayed chain = %d facts, want the window %d", got, noWindowResidentFacts)
 	}
 
 	channel := &windowTestChannel{}
@@ -190,8 +190,8 @@ func TestDeliveryAfterRestartKeepsTheTurnAnswer(t *testing.T) {
 	if len(bodies) != 1 || bodies[0].content != factWindowAnswer {
 		t.Fatalf("the bodies the turn invocation names = %+v, want the one delivered answer", bodies)
 	}
-	if got := len(run.SessionFacts(addr)); got > factWindow {
-		t.Fatalf("the chain beside the turn = %d facts, want no more than the window %d", got, factWindow)
+	if got := len(run.SessionFacts(addr)); got > noWindowResidentFacts {
+		t.Fatalf("the chain beside the turn = %d facts, want no more than the window %d", got, noWindowResidentFacts)
 	}
 	requireFactOrderMatchesLedger(t, run)
 }
@@ -570,25 +570,25 @@ func TestAssemblyObservedReplayFactsBounded(t *testing.T) {
 	defer cancel()
 	run := residencyTestRun(t, ctx)
 	addr := event.Address{AgentID: "agent-a", SessionID: "session-residency-bounded"}
-	const seeded = replayResidentWindow + 256
+	const seeded = noWindowResidentFacts + 256
 	commitResidencyChain(t, ctx, run, addr, "bounded", seeded)
 
-	if got := run.CommittedFacts(); got != factWindow {
-		t.Fatalf("the live fact ledger holds %d facts, want the %d-fact window", got, factWindow)
+	if got := run.CommittedFacts(); got != noWindowResidentFacts {
+		t.Fatalf("the live fact ledger holds %d facts, want the %d-fact window", got, noWindowResidentFacts)
 	}
 	refs, err := run.ObservedEvents(ctx, memory.QueryOptions{})
 	if err != nil {
 		t.Fatalf("observe the window: %v", err)
 	}
-	if len(refs) > factWindow {
-		t.Fatalf("the observation read answered %d facts, want at most the window %d", len(refs), factWindow)
+	if len(refs) > noWindowResidentFacts {
+		t.Fatalf("the observation read answered %d facts, want at most the window %d", len(refs), noWindowResidentFacts)
 	}
 	entries, carried := run.ReplayEntries(addr.SessionID)
 	if !carried {
 		t.Fatal("the long chain registered no replay sequence")
 	}
-	if len(entries) > replayResidentWindow {
-		t.Fatalf("the registered sequence holds %d entries, want at most the resident window %d", len(entries), replayResidentWindow)
+	if len(entries) > 2*noWindowResidentFacts {
+		t.Fatalf("the registered sequence holds %d entries, want at most twice the fallback count %d", len(entries), 2*noWindowResidentFacts)
 	}
 }
 
@@ -602,7 +602,7 @@ func TestAssemblyColdWindowReadback(t *testing.T) {
 	defer cancel()
 	run := residencyTestRun(t, ctx)
 	addr := event.Address{AgentID: "agent-a", SessionID: "session-residency-cold"}
-	const seeded = factWindow + 32
+	const seeded = noWindowResidentFacts + 32
 	commitResidencyChain(t, ctx, run, addr, "cold", seeded)
 
 	oldKey := event.EventID("cold-00000")
@@ -662,4 +662,72 @@ func TestDeliveryPendingPredicate(t *testing.T) {
 	if run.deliveryPendingFor(addr) {
 		t.Fatal("the released obligation still reads as pending")
 	}
+}
+
+// TestWindowedFactsFollowTheProjection pins the derived residency of one session chain.
+// - every fact before the oldest original the projection still presents is released
+// - the facts from that entry onward stay resident beside the pinned ones
+// - a chain carrying no window keeps the fallback count beside its segment in flight
+//
+// 契约: docs/wiki/agent/event-flow.md#projection-lifecycle
+func TestWindowedFactsFollowTheProjection(t *testing.T) {
+	ctx := context.Background()
+	addr := event.Address{AgentID: "agent-a", SessionID: "session-windowed-residency"}
+	build := func(t *testing.T, facts int) *Run {
+		t.Helper()
+		run := &Run{
+			facts:            map[event.EventID]event.Event{},
+			sessionFactCount: map[event.SessionID]int{},
+			pinnedFacts:      map[event.EventID]struct{}{},
+			replays:          map[event.Address]replayEntry{},
+		}
+		for at := 1; at <= facts; at++ {
+			evt := windowEvent(addr, fmt.Sprintf("resident-%04d", at), "inv-windowed", "material", event.TypeExternalInput)
+			run.facts[evt.Key] = evt
+			run.factOrder = append(run.factOrder, evt.Key)
+			run.sessionFactCount[addr.SessionID]++
+		}
+		return run
+	}
+
+	t.Run("the projection boundary bounds the resident facts", func(t *testing.T) {
+		run := build(t, 8)
+		projection := replay.NewReplayProjection()
+		for _, key := range []string{"resident-0005", "resident-0006"} {
+			projection.Append(ctx, replay.ProjectionEntry{
+				Key: event.EventID(key), Type: event.TypeExternalInput, Content: "presented", Time: time.Now(),
+			})
+		}
+		run.replays[addr] = replayEntry{projection: projection, window: FoldWindow{MaxTokens: 128}}
+		run.pinnedFacts[event.EventID("resident-0003")] = struct{}{}
+
+		run.trimFacts(addr.SessionID)
+
+		for _, key := range []string{"resident-0001", "resident-0002", "resident-0004"} {
+			if _, held := run.facts[event.EventID(key)]; held {
+				t.Fatalf("the fact %s before the presented boundary is still resident", key)
+			}
+		}
+		for _, key := range []string{"resident-0003", "resident-0005", "resident-0006", "resident-0007", "resident-0008"} {
+			if _, held := run.facts[event.EventID(key)]; !held {
+				t.Fatalf("the fact %s at or after the presented boundary is released", key)
+			}
+		}
+		requireFactOrderMatchesLedger(t, run)
+	})
+
+	t.Run("a chain beside no window keeps the fallback count", func(t *testing.T) {
+		run := build(t, noWindowResidentFacts+53)
+		closing := windowEvent(addr, "resident-closing", "inv-windowed", "the answer that closed the chain", event.TypeAgentOutput)
+		run.facts[closing.Key] = closing
+		run.factOrder = append(run.factOrder, closing.Key)
+		run.sessionFactCount[addr.SessionID]++
+
+		run.trimFacts(addr.SessionID)
+
+		if got := len(run.SessionFacts(addr)); got != noWindowResidentFacts {
+			t.Fatalf("the chain beside no window = %d facts, want the fallback count %d", got, noWindowResidentFacts)
+		}
+		requireFactOrderMatchesLedger(t, run)
+	})
 }

@@ -925,7 +925,7 @@ func TestSettlementFactsStayHotWhileUnsettled(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("commit the turn-end fact: %v", err)
 	}
-	for index := 0; index < factWindow+32; index++ {
+	for index := 0; index < noWindowResidentFacts+32; index++ {
 		if _, err := run.commitFactChecked(ctx, event.Event{
 			Type:      event.TypeFeedback,
 			Timestamp: time.Now(),

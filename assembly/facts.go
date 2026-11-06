@@ -28,21 +28,12 @@ import (
 // mapped sequence speaks.
 const mappedSummaryRunes = 120
 
-// factWindow bounds the live facts one session chain of this run keeps: the most
-// recent entries beside the whole segment still in flight — the turn-end fact that
-// closed the previous segment together with every entry committed after it. A
-// drive reads the segment it flies and the transcript it presents, so the window is
-// the bound of what a live read reaches; the durable chain of the storage tier
-// keeps the whole history.
-const factWindow = 2048
-
-// replayResidentWindow bounds the entries one registered projection holds before
-// the live commit path trims it back to factWindow: the window plus one eighth
-// of hysteresis, so the trim runs once per few hundred commits instead of on
-// every one. The entries are a resident copy of the durable facts, never the
-// record; a fact outside the window stays in the chain and is read back by its
-// identity through CommittedEvent.
-const replayResidentWindow = factWindow + factWindow/8
+// noWindowResidentFacts is the mechanism constant a session chain without a
+// replay window keeps: a chain that declares no window folds nothing, so the
+// band rule cannot bound it and the resident set falls back to this many recent
+// entries beside the whole segment still in flight. A chain that declares a
+// window is bounded by its projection instead (see trimFacts).
+const noWindowResidentFacts = 2048
 
 // factCommitFormat and factCommitRetention name the reference registration
 // every committed fact of this run carries: the original format and the
@@ -100,48 +91,94 @@ func (r *Run) commitFactChecked(ctx context.Context, evt event.Event) (event.Eve
 	r.factOrder = append(r.factOrder, evt.Key)
 	if session := sessionOf(evt); session != "" {
 		r.sessionFactCount[session]++
-		if r.sessionFactCount[session] >= factWindow {
-			r.trimFactsLocked(session)
-		}
 	}
 	r.mu.Unlock()
 	r.movement.Advance()
 	if !mapped {
+		r.trimFacts(sessionOf(evt))
 		return evt.Key, nil
 	}
 	r.attachDeclaredReplay(evt)
 	r.recordMapped(evt, entry)
+	r.trimFacts(sessionOf(evt))
 	return evt.Key, nil
 }
 
-// trimFactsLocked holds the chain of one session to its hot window: the entries
-// before the window and before the segment in flight leave the live ledger, and
-// the commit order is trimmed beside the map so neither grows with the history of
-// the chain. The durable chain of the storage tier is untouched, so a fact outside
-// the window is still read back by identity. The read is taken under the run lock
-// the caller holds; the per-session live count the caller guards with keeps a
-// far-below-window chain at O(1) per commit, so the full scan only starts once
-// a chain can actually hold a cut.
-func (r *Run) trimFactsLocked(session event.SessionID) {
+// trimFacts holds one session chain to what its projection still presents: a
+// chain carrying a positive replay window releases the facts before the oldest
+// original its projection still carries — the fold that replaced covered
+// entries with a product released them already, so the resident set follows the
+// window and not the history. A chain carrying no window folds nothing, so it
+// keeps the fallback count beside the whole segment in flight. The durable
+// chain of the storage tier is untouched, so a released fact is still read back
+// by identity; a fact of a run beside no tier exists only here, and the window
+// bound is the contract that run carries.
+func (r *Run) trimFacts(session event.SessionID) {
 	if session == "" {
 		return
 	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.trimFactsLocked(session)
+}
+
+// trimFactsLocked is trimFacts under the run lock the caller holds.
+func (r *Run) trimFactsLocked(session event.SessionID) {
 	keys := make([]event.EventID, 0, len(r.factOrder))
 	for _, key := range r.factOrder {
 		if evt, held := r.facts[key]; held && sessionOf(evt) == session {
 			keys = append(keys, key)
 		}
 	}
-	cut := r.keepPinnedLocked(keys[:r.windowCutLocked(keys)])
+	if len(keys) == 0 {
+		return
+	}
+	cut := r.keepPinnedLocked(keys[:r.liveWindowCutLocked(keys, session)])
+	if len(cut) == 0 {
+		return
+	}
 	for _, key := range cut {
 		delete(r.facts, key)
 	}
-	r.sessionFactCount[session] -= len(cut)
-	dropped := map[event.EventID]struct{}{}
+	r.sessionFactCount[session] = len(keys) - len(cut)
+	dropped := make(map[event.EventID]struct{}, len(cut))
 	for _, key := range cut {
 		dropped[key] = struct{}{}
 	}
 	r.compactFactOrderLocked(dropped)
+}
+
+// liveWindowCutLocked reports how many leading entries of one chain its live
+// window drops: the entries before the oldest original the session's windowed
+// projections still present, or — for a chain carrying no positive window — the
+// fallback count beside the segment in flight.
+func (r *Run) liveWindowCutLocked(keys []event.EventID, session event.SessionID) int {
+	position := make(map[event.EventID]int, len(keys))
+	for at, key := range keys {
+		position[key] = at
+	}
+	boundary := -1
+	for addr, held := range r.replays {
+		if addr.SessionID != session || held.window.MaxTokens <= 0 || held.projection == nil {
+			continue
+		}
+		for _, entry := range held.projection.Entries() {
+			if replay.SyntheticKey(entry.Key) {
+				continue
+			}
+			at, carried := position[entry.Key]
+			if !carried {
+				continue
+			}
+			if boundary < 0 || at < boundary {
+				boundary = at
+			}
+		}
+	}
+	if boundary < 0 {
+		return r.fallbackCutLocked(keys)
+	}
+	return boundary
 }
 
 // trimSeededFacts holds every chain a restart replayed to its hot window: the
@@ -163,7 +200,7 @@ func (r *Run) trimSeededFacts() {
 	}
 	dropped := make(map[event.EventID]struct{}, len(r.factOrder))
 	for session, keys := range chains {
-		cut := r.keepPinnedLocked(keys[:r.windowCutLocked(keys)])
+		cut := r.keepPinnedLocked(keys[:r.liveWindowCutLocked(keys, session)])
 		for _, key := range cut {
 			dropped[key] = struct{}{}
 			delete(r.facts, key)
@@ -173,13 +210,13 @@ func (r *Run) trimSeededFacts() {
 	r.compactFactOrderLocked(dropped)
 }
 
-// windowCutLocked reports how many leading entries of one chain its hot window
-// drops: the window keeps the most recent factWindow entries beside the segment a
-// drive may still read, which is the turn-end fact that closed the previous
-// segment together with every entry committed after it. A chain beside no
-// turn-end fact is one segment in flight from its head, so it is kept whole.
-func (r *Run) windowCutLocked(keys []event.EventID) int {
-	cut := len(keys) - factWindow
+// fallbackCutLocked reports how many leading entries of one chain its fallback
+// window drops: the most recent noWindowResidentFacts entries beside the
+// segment a drive may still read, which is the turn-end fact that closed the
+// previous segment together with every entry committed after it. A chain beside
+// no turn-end fact is one segment in flight from its head, so it is kept whole.
+func (r *Run) fallbackCutLocked(keys []event.EventID) int {
+	cut := len(keys) - noWindowResidentFacts
 	if cut < 0 {
 		cut = 0
 	}
@@ -194,19 +231,20 @@ func (r *Run) windowCutLocked(keys []event.EventID) int {
 	return 0
 }
 
-// trimReplayProjection holds one registered projection to its resident window:
-// when the live commit path grew it past the hysteresis bound, the most recent
-// factWindow entries are rebuilt into a fresh projection and the rest are left
-// to the durable chain. Rebuilding is the one way to drop the per-key material
-// the projection accumulates beside its entries, so the trim leaves no map
-// entry behind.
-func trimReplayProjection(ctx context.Context, projection *replay.ReplayProjection) *replay.ReplayProjection {
-	if projection == nil || projection.Len() <= replayResidentWindow {
+// trimReplayProjection holds one registered projection to its resident window: a
+// chain carrying a positive replay window is bounded by its age fold, so its
+// projection is left as the fold built it; a chain carrying no window folds
+// nothing, so a projection grown past twice the fallback count is rebuilt down
+// to the fallback count and the rest is left to the durable chain. Rebuilding is
+// the one way to drop the per-key material the projection accumulates beside its
+// entries, so the trim leaves no map entry behind.
+func trimReplayProjection(ctx context.Context, projection *replay.ReplayProjection, window FoldWindow) *replay.ReplayProjection {
+	if projection == nil || window.MaxTokens > 0 || projection.Len() <= 2*noWindowResidentFacts {
 		return projection
 	}
 	entries := projection.Entries()
 	trimmed := replay.NewReplayProjection()
-	for _, entry := range entries[len(entries)-factWindow:] {
+	for _, entry := range entries[len(entries)-noWindowResidentFacts:] {
 		trimmed.Append(ctx, entry)
 	}
 	return trimmed
@@ -368,7 +406,7 @@ func (r *Run) recordMapped(evt event.Event, entry replay.ProjectionEntry) {
 		return
 	}
 	held.projection.Append(context.Background(), entry)
-	held.projection = trimReplayProjection(context.Background(), held.projection)
+	held.projection = trimReplayProjection(context.Background(), held.projection, held.window)
 	if evt.Type == event.TypeAgentOutput {
 		held.endedAt = entry.Key
 		held.rangeOpen = false

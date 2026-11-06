@@ -1736,7 +1736,7 @@ func (r *Run) seedReplay(ctx context.Context, tier *ledger.Tier) error {
 			order = append(order, addr)
 		}
 		seed.projection.Append(ctx, entry)
-		seed.projection = trimReplayProjection(ctx, seed.projection)
+		seed.projection = trimReplayProjection(ctx, seed.projection, seed.window)
 		return nil
 	}); err != nil {
 		return err
