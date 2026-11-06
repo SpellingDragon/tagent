@@ -12,7 +12,7 @@
 
 **blob 存储**：复用族 5 `OriginalStore`（memory/ledger/original_store.go）——Put 按 digest 内容寻址、Get 自带 digest+length 校验、截断/替换读失败。链上票据+外部只读 blob 的现成轨道，不新造存储。
 
-**增量语义（与阶段 4 分工）**：blob 恢复八表后 load() 仍执行五前缀 Scan（I/O），但只对晚于 cursor 的记录做 Decode/fold——本阶段省反序列化与 fold CPU；I/O 点读化归阶段 4 分区游标。此分工如实写入 spec scenario，不夸大阶段 3 收益。
+**增量语义（与阶段 4 分工，r16 诚实化）**：blob 恢复八表后 mergeDelta 仍执行五前缀 Scan 并 Decode 全部事实（字典序 cursor 不构成全局时间序，不能安全跳过 Decode）；增量按 per-task ExpectedRevision 过滤 fold。cursor 的实际用途=latestTicket 的确定性选择与观测。本阶段净收益=跳过大部分表的重建与 fold CPU；I/O 点读化归阶段 4。
 
 **确定性序列化**：八表先排序（taskID 升序、facts 按 ExpectedRevision、mutations 按 taskID+mutationID、owed/consumed/attempts/rejected 按 noticeKey 字典序）再 marshal；同状态两次序列化字节相同（3.1 正锚）。
 

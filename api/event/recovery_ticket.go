@@ -5,7 +5,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"time"
 )
 
 // RecoveryTicketType is the frozen type of a recovery ticket fact.
@@ -30,8 +29,6 @@ type RecoveryTicket struct {
 	Length int64
 	// Cursor is the fact key of the last record the snapshot covers.
 	Cursor string
-	// WrittenAt is the filing moment, stamped by the log on first filing.
-	WrittenAt time.Time
 }
 
 // RecoveryTicketFor returns the ticket fact for one snapshot: the identity is

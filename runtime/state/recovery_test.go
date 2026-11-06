@@ -3,6 +3,7 @@ package state
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -58,6 +59,35 @@ func assertCarrierEqual(t *testing.T, want, got *DurableCommit, taskIDs ...event
 			if wantOwed[i].Delivery != gotOwed[i].Delivery {
 				t.Fatalf("outbox %d of %s = %v, want %v", i, taskID, gotOwed[i].Delivery, wantOwed[i].Delivery)
 			}
+			if wantOwed[i].Notice != gotOwed[i].Notice {
+				t.Fatalf("outbox %d of %s names %v, want %v", i, taskID, gotOwed[i].Notice, wantOwed[i].Notice)
+			}
+		}
+		if w, g := len(want.mutations), len(got.mutations); w != g {
+			t.Fatalf("mutations = %d, want %d", g, w)
+		}
+		for key, record := range want.mutations {
+			other, held := got.mutations[key]
+			if !held || other.MutationID != record.MutationID {
+				t.Fatalf("mutation %v = %+v, want held as %v", key, other, record.MutationID)
+			}
+		}
+		if w, g := len(want.consumed), len(got.consumed); w != g {
+			t.Fatalf("consumed = %d, want %d", g, w)
+		}
+		for key := range want.consumed {
+			if _, held := got.consumed[key]; !held {
+				t.Fatalf("a consumed receipt the bare replay holds was lost: %v", key)
+			}
+		}
+		if w, g := len(want.specs), len(got.specs); w != g {
+			t.Fatalf("specs = %d, want %d", g, w)
+		}
+		if w, g := len(want.attempts), len(got.attempts); w != g {
+			t.Fatalf("attempts = %d, want %d", g, w)
+		}
+		if w, g := len(want.rejected), len(got.rejected); w != g {
+			t.Fatalf("rejected = %d, want %d", g, w)
 		}
 	}
 }
@@ -216,4 +246,106 @@ func TestRecoveryTicketFallbacks(t *testing.T) {
 			t.Fatalf("facts after the delta merge = %d, want the two committed records", got)
 		}
 	})
+}
+
+// TestConsumptionAfterSnapshotNotReOwed pins post-snapshot consumption stays discharged.
+// 契约: docs/wiki/reliability/durable-delivery.md#envelope-states
+func TestConsumptionAfterSnapshotNotReOwed(t *testing.T) {
+	ctx := context.Background()
+	log := newInvariantFactLog()
+	taskID := event.TaskID("task-consumed-after")
+	seedCarrier(t, ctx, log, taskID, "seed")
+	writer, err := NewDurableCommit(log, nil)
+	if err != nil {
+		t.Fatalf("open the writer: %v", err)
+	}
+	if err := writer.WriteRecoveryTicket(ctx); err != nil {
+		t.Fatalf("file the ticket: %v", err)
+	}
+	second := invariantNotice(taskID, 2)
+	if err := writer.recordConsumption(ctx, second); err != nil {
+		t.Fatalf("consume after the snapshot: %v", err)
+	}
+	restored, err := NewDurableCommit(log, nil)
+	if err != nil {
+		t.Fatalf("restore: %v", err)
+	}
+	if got := restored.Outbox(taskID); len(got) != 0 {
+		t.Fatalf("outbox after the restore = %v, want the discharged notice not re-owed", got)
+	}
+	bare, err := newBareCarrier(log)
+	if err != nil {
+		t.Fatalf("bare replay: %v", err)
+	}
+	if w := bare.Outbox(taskID); len(w) != 0 {
+		t.Fatalf("bare outbox = %v, want empty beside the same receipts", w)
+	}
+}
+
+// TestRecommitAfterTicketRestoreIsIdempotent pins recommit stays idempotent.
+// 契约: docs/wiki/reliability/durable-delivery.md#canonical-fact-resolution
+func TestRecommitAfterTicketRestoreIsIdempotent(t *testing.T) {
+	ctx := context.Background()
+	log := newInvariantFactLog()
+	taskID := event.TaskID("task-recommit")
+	seedCarrier(t, ctx, log, taskID, "seed")
+	writer, err := NewDurableCommit(log, nil)
+	if err != nil {
+		t.Fatalf("open the writer: %v", err)
+	}
+	if err := writer.WriteRecoveryTicket(ctx); err != nil {
+		t.Fatalf("file the ticket: %v", err)
+	}
+	restored, err := NewDurableCommit(log, nil)
+	if err != nil {
+		t.Fatalf("restore: %v", err)
+	}
+	replay := invariantRecord(taskID, 1, task.StatusSettled, invariantNotice(taskID, 2))
+	if result, err := restored.Commit(ctx, replay); err != nil || result != task.CommitCommitted {
+		t.Fatalf("re-commit beside the restored mutations = (%v, %v), want the stored fact reported again", result, err)
+	}
+}
+
+// TestSnapshotBesideConcurrentCommits pins snapshot under concurrent commits.
+// 契约: docs/wiki/reliability/durable-delivery.md#canonical-fact-resolution
+func TestSnapshotBesideConcurrentCommits(t *testing.T) {
+	ctx := context.Background()
+	log := newInvariantFactLog()
+	writer, err := NewDurableCommit(log, nil)
+	if err != nil {
+		t.Fatalf("open the writer: %v", err)
+	}
+	const rounds = 50
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; i < rounds; i++ {
+			taskID := event.TaskID(fmt.Sprintf("task-race-%d", i))
+			if err := writer.Declare(ctx, taskID, task.Spec{}); err != nil {
+				t.Errorf("declare %s: %v", taskID, err)
+				return
+			}
+			record := invariantRecord(taskID, 0, task.StatusRunning, invariantNotice(taskID, 1))
+			if _, err := writer.Commit(ctx, record); err != nil {
+				t.Errorf("commit %s: %v", taskID, err)
+				return
+			}
+		}
+	}()
+	for i := 0; i < 5; i++ {
+		if err := writer.WriteRecoveryTicket(ctx); err != nil {
+			t.Fatalf("file the ticket beside concurrent commits: %v", err)
+		}
+	}
+	<-done
+	restored, err := NewDurableCommit(log, nil)
+	if err != nil {
+		t.Fatalf("restore beside the concurrent writes: %v", err)
+	}
+	for i := 0; i < rounds; i++ {
+		taskID := event.TaskID(fmt.Sprintf("task-race-%d", i))
+		if got := len(restored.Facts(taskID)); got != 1 {
+			t.Fatalf("facts of %s = %d, want the one committed record", taskID, got)
+		}
+	}
 }

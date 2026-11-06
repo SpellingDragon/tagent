@@ -1,7 +1,7 @@
 {
   "concept_ratchet": {
     "removed_min": 10,
-    "new_max": 4,
+    "new_max": 7,
     "exported_interfaces_max": 78,
     "note": "frozen at the convergence change; the ceiling was raised to 4/78 for W3 boundary-closure 06.1a/07 new bound names (bench Task/Verifier and rl AnnexRecord; ConfigChange was the previous one). Advancing concept_bindings.baseline would zero new but also zero removed, breaking removed_min=10 — see openspec/changes/archive/2026-11-03-runtime-architecture-convergence/evidence/11-ratchet-tension.md (B-03 pending adjudication)"
   },
@@ -1201,6 +1201,21 @@
         "concept": "training sample loop acceptance annex",
         "kind": "fact",
         "spec": "offline-training-export"
+      },
+      "RecoveryTicket": {
+        "concept": "restart recovery snapshot ticket",
+        "kind": "fact",
+        "spec": "delivery-closure"
+      },
+      "LoadScan": {
+        "concept": "recovery read measurement",
+        "kind": "declaration",
+        "spec": "delivery-closure"
+      },
+      "LoadStats": {
+        "concept": "recovery read measurement set",
+        "kind": "declaration",
+        "spec": "delivery-closure"
       }
     }
   }

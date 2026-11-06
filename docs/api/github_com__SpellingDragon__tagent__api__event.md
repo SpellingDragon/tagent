@@ -689,8 +689,6 @@ type RecoveryTicket struct {
 	Length int64
 	// Cursor is the fact key of the last record the snapshot covers.
 	Cursor string
-	// WrittenAt is the filing moment, stamped by the log on first filing.
-	WrittenAt time.Time
 }
     RecoveryTicket is the on-chain envelope of one restart-recovery snapshot:
     it names the digest and byte length of the external read-only blob that

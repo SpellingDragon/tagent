@@ -68,13 +68,17 @@ type recoveryTables struct {
 	Consumed      []string                       `json:"consumed"`
 	Attempts      map[string]SettleAttempt       `json:"attempts"`
 	Rejected      map[string]Rejection           `json:"rejected"`
+	Mutations     map[string]task.CommitRecord   `json:"mutations"`
 	Cursor        string                         `json:"cursor"`
 }
 
 // snapshotBytes renders the deterministic image of the carrier's tables beside
 // the cursor: the fact key of the last committed record the image covers. The
-// caller holds no lock; the carrier must be quiet while the image is taken.
+// image is taken under the carrier lock: a compression may land while other
+// goroutines commit, and an unlocked read of the tables is a fatal map race.
 func (d *DurableCommit) snapshotBytes() ([]byte, string, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
 	image := recoveryTables{
 		SchemaVersion: recoverySchema,
 		Revisions:     map[string]int64{},
@@ -115,6 +119,10 @@ func (d *DurableCommit) snapshotBytes() ([]byte, string, error) {
 	for key, rejection := range d.rejected {
 		image.Rejected[noticeKeyString(key)] = rejection
 	}
+	image.Mutations = map[string]task.CommitRecord{}
+	for key, record := range d.mutations {
+		image.Mutations[string(key.task)+"\x00"+string(key.mutation)] = record
+	}
 	image.Cursor = cursor
 	body, err := json.Marshal(image)
 	if err != nil {
@@ -150,9 +158,10 @@ func (d *DurableCommit) WriteRecoveryTicket(ctx context.Context) error {
 	return d.log.Sync(ctx)
 }
 
-// latestTicket reads the newest recovery ticket the log holds: the one whose
-// cursor sorts last, so a chain with several tickets restores from the fullest
-// coverage. A log holding none answers ok=false.
+// latestTicket reads one recovery ticket the log holds - the one whose
+// cursor sorts last, a lexical pick that does not promise the fullest
+// coverage; if its blob is gone the load falls to the full replay. A log
+// holding none answers ok=false.
 func (d *DurableCommit) latestTicket(ctx context.Context) (ticketCursor string, digest string, length int64, schema int, ok bool, err error) {
 	tickets, err := d.log.Scan(ctx, ticketPrefix)
 	if err != nil {
@@ -233,7 +242,16 @@ func (d *DurableCommit) restoreTables(body []byte) error {
 	for taskText, revision := range image.Revisions {
 		revisions[event.TaskID(taskText)] = revision
 	}
+	mutations := map[mutationKey]task.CommitRecord{}
+	for keyText, record := range image.Mutations {
+		parts := strings.SplitN(keyText, "\x00", 2)
+		if len(parts) != 2 {
+			return ErrRecoveryPayloadRefused
+		}
+		mutations[mutationKey{task: event.TaskID(parts[0]), mutation: task.MutationID(parts[1])}] = record
+	}
 	d.revisions, d.facts, d.specs = revisions, facts, specs
+	d.mutations = mutations
 	d.owed, d.consumed, d.attempts, d.rejected = owed, consumed, attempts, rejected
 	return nil
 }
@@ -324,7 +342,9 @@ func (d *DurableCommit) mergeDelta(ctx context.Context) error {
 		if err := json.Unmarshal(body, &receipt); err != nil {
 			return err
 		}
-		d.consumed[noticeKey{task: receipt.TaskID, round: receipt.Round, kind: receipt.Kind, seq: receipt.Seq}] = struct{}{}
+		key := noticeKey{task: receipt.TaskID, round: receipt.Round, kind: receipt.Kind, seq: receipt.Seq}
+		d.consumed[key] = struct{}{}
+		delete(d.owed, key)
 	}
 	attempts, err := d.scan(ctx, attemptPrefix)
 	if err != nil {
@@ -346,7 +366,9 @@ func (d *DurableCommit) mergeDelta(ctx context.Context) error {
 		if err := json.Unmarshal(body, &rejection); err != nil {
 			return err
 		}
-		d.rejected[noticeKeyOf(rejection.Notice)] = rejection
+		key := noticeKeyOf(rejection.Notice)
+		d.rejected[key] = rejection
+		delete(d.owed, key)
 	}
 	facts, err := d.scan(ctx, factPrefix)
 	if err != nil {
