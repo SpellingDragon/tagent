@@ -8,7 +8,7 @@
 
 票据 recovery.ticket（族 12）字段：schema_version、digest（blob 的 sha256）、length、cursor（覆盖到的最后 fact key）。身份=schema‖cursor‖digest 内容寻址。blob 固定键 tagent/task/v1/snapshot:current，Put 覆盖、只有一份。schema 现为 2（v1 无 mutations 表，按版本拒绝而非猜）。
 
-**两步落点**：① Host.restoreUnconsumedEvents（host_delivery.go）= restorePendingDeliveries + restoreOwed；② Run.restoreInMemoryState（run.go）= restoreChains + fileBootRecoveryTicket。第二步完成点写票，主机尚未 newHostFace，服务未开放。
+**两步落点**：① Host.restoreUnconsumedEvents（host_delivery.go）= restorePendingDeliveries + restoreOwed；② Run.restoreInMemoryState（run.go）= restoreChains（只装载状态，不写票）。完成点 Run.CompleteRestartRecovery（run.go）由 Boot 在两步之后、newHostFace 成功之后、face.start 开放服务之前调用；cli-host 同一完成点。
 
 不变式：全量重放 ≡ 快照 + 增量；失败一律退回全量；八表排序后确定性序列化；快照八表（含 mutations）往返、回执/拒绝在增量合并时清 owed、recommit 幂等。
 
@@ -22,7 +22,7 @@
 
 - cursor 是字典序、只用于选票与观测；mergeDelta 仍 Decode 全部事实、按 per-task ExpectedRevision 过滤 fold，不宣称省 I/O；I/O 点读归阶段 4。
 - 本后端 Put 即 rename、Sync 为 no-op、无 fsync；两段写入只有 rename 序，失败安全（孤立 blob 无人引用 / 票据指向缺失 blob → 退回全量），不宣称 fsync 屏障。
-- 恢复完成点在服务开放前，锁是防御性冗余；TestSnapshotBesideConcurrentCommits 覆盖开放期调用。
+- 恢复完成点在服务开放前，但 Boot 在该点前 Wake 了 settle pump，可能并发 Commit；锁是真实必需，不是防御性冗余（TestSnapshotBesideConcurrentCommits 覆盖并发）。
 
 ## 风险与回退
 

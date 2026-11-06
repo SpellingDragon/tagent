@@ -734,15 +734,15 @@ func (d *DurableCommit) UsedTicket() bool
     the boot line, never an input to any recovery decision.
 
 func (d *DurableCommit) WriteRecoveryTicket(ctx context.Context) error
-    WriteRecoveryTicket files one snapshot of the carrier's tables beside
-    the ticket fact that names it, at the restart completion point (both
-    recovery steps finished, service not yet open), so the carrier is quiet by
-    construction. The blob goes to the fixed current key and the ticket after
-    it; on this local-file tier that is only a rename order — Sync is a no-op
-    and there is no fsync, so a crash between the two leaves either an orphan
-    blob nobody names or a ticket naming a missing blob, both of which fall
-    back to the full replay. The snapshot image itself is taken under d.mu as a
-    defensive bound for any future open-run caller.
+    WriteRecoveryTicket files one snapshot of the carrier's tables beside the
+    ticket fact that names it, at the restart completion point (both recovery
+    steps finished, service not yet open). The blob goes to the fixed current
+    key and the ticket after it; on this local-file tier that is only a rename
+    order — Sync is a no-op and there is no fsync, so a crash between the two
+    leaves either an orphan blob nobody names or a ticket naming a missing blob,
+    both of which fall back to the full replay. The snapshot image is taken
+    under d.mu because the settle pump may commit concurrently at the completion
+    point: the lock is required for a coherent image, not a defensive extra.
 
 type FactLog interface {
 	// Put stages one key and its value.

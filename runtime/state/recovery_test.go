@@ -2,6 +2,8 @@ package state
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -329,8 +331,9 @@ func TestRecoveryTicketFallbacks(t *testing.T) {
 		if err := writer.WriteRecoveryTicket(ctx); err != nil {
 			t.Fatalf("file the ticket: %v", err)
 		}
+		var edited []byte
 		for key, body := range log.barrier {
-			if !strings.HasPrefix(key, "tagent/task/v1/snapshot:") {
+			if !strings.HasPrefix(key, snapshotPrefix) {
 				continue
 			}
 			var image map[string]any
@@ -338,11 +341,32 @@ func TestRecoveryTicketFallbacks(t *testing.T) {
 				t.Fatalf("parse the snapshot image: %v", err)
 			}
 			image["schema_version"] = 99
-			edited, err := json.Marshal(image)
+			edited, err = json.Marshal(image)
 			if err != nil {
 				t.Fatalf("re-render the image: %v", err)
 			}
 			log.barrier[key] = edited
+		}
+		if edited == nil {
+			t.Fatal("the seeded log held no snapshot blob")
+		}
+		sum := sha256.Sum256(edited)
+		digest := "sha256:" + hex.EncodeToString(sum[:])
+		for key, body := range log.barrier {
+			if !strings.HasPrefix(key, ticketPrefix) {
+				continue
+			}
+			var fields map[string]any
+			if err := json.Unmarshal(body, &fields); err != nil {
+				t.Fatalf("parse the filed ticket: %v", err)
+			}
+			fields["digest"] = digest
+			fields["length"] = len(edited)
+			refile, err := json.Marshal(fields)
+			if err != nil {
+				t.Fatalf("re-render the ticket: %v", err)
+			}
+			log.barrier[key] = refile
 		}
 		restored, err := NewDurableCommit(log, nil)
 		if err != nil {

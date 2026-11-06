@@ -1410,9 +1410,10 @@ func (h *Host) recordRetryFailure(ctx context.Context, identity string, entry *d
 // consumption logic: the deliveries and notifications a stopped run left
 // unconsumed are loaded back where their frozen routing names them, so the
 // work waits for the next decision instead of dying with the process. The
-// host is not yet open for service while this runs; the second step — the
-// in-memory state from the snapshot or the replay — has already finished
-// inside the assembly, so its completion point is what this step builds on.
+// host is not yet open for service while this runs. The second step — the
+// in-memory state from the snapshot or the replay — finishes inside the
+// assembly; the completion point (the ticket) is filed only after this step
+// returns, so the two steps and their completion stay in one boot sequence.
 func (h *Host) restoreUnconsumedEvents(ctx context.Context, settleDriver interface{ Wake() }) error {
 	if err := h.restorePendingDeliveries(ctx); err != nil {
 		return err

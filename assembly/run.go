@@ -810,13 +810,16 @@ func (r *Run) restoreInMemoryState(ctx context.Context, durable *state.DurableCo
 }
 
 // CompleteRestartRecovery is the completion point of the restart-recovery
-// consumption logic: both steps — loading the unconsumed events and restoring
-// the in-memory state — have finished, and the run is still closed for
-// service. It files the fresh single-copy snapshot there, so the snapshot is
-// taken on a quiet, single-threaded carrier by construction and no snapshot
-// is written by a start that later aborted. A carrier without the face, or a
-// write that fails, never blocks the start: the next restart falls back to the
-// full replay.
+// consumption logic. Boot calls it after both steps — loading the unconsumed
+// events and restoring the in-memory state — have finished and while the run
+// is still closed for service; the cli-host entry has no unconsumed-event step
+// of its own and calls it after the assembly alone, which is honest: an entry
+// with nothing to load writes no completion ticket for a load it never made.
+// It files the fresh single-copy snapshot there, so no snapshot is written by
+// a start that later aborted; the carrier lock inside WriteRecoveryTicket
+// keeps the image coherent beside the settle pump that Boot wakes. A carrier
+// without the face, or a write that fails, never blocks the start: the next
+// restart falls back to the full replay.
 func (r *Run) CompleteRestartRecovery(ctx context.Context) {
 	r.fileBootRecoveryTicket(ctx)
 }

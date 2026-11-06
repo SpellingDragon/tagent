@@ -82,9 +82,10 @@ type recoveryTables struct {
 
 // snapshotBytes renders the deterministic image of the carrier's tables beside
 // the cursor: the fact key of the last committed record the image covers. The
-// image is taken at the restart-recovery completion point, before the run is
-// open for service; the carrier lock is held as a defensive bound, so a future
-// caller from an open run still renders a coherent image instead of racing.
+// image is taken under the carrier lock: the completion point is not a quiet
+// single-threaded window - Boot wakes the settle pump before the completion
+// point, so a concurrent commit can be in flight. The lock is required, not
+// defensive, and TestSnapshotBesideConcurrentCommits pins it.
 func (d *DurableCommit) snapshotBytes() ([]byte, string, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -142,13 +143,14 @@ func (d *DurableCommit) snapshotBytes() ([]byte, string, error) {
 
 // WriteRecoveryTicket files one snapshot of the carrier's tables beside the
 // ticket fact that names it, at the restart completion point (both recovery
-// steps finished, service not yet open), so the carrier is quiet by
-// construction. The blob goes to the fixed current key and the ticket after
+// steps finished, service not yet open). The blob goes to the fixed current
+// key and the ticket after
 // it; on this local-file tier that is only a rename order — Sync is a no-op
 // and there is no fsync, so a crash between the two leaves either an orphan
 // blob nobody names or a ticket naming a missing blob, both of which fall
-// back to the full replay. The snapshot image itself is taken under d.mu as
-// a defensive bound for any future open-run caller.
+// back to the full replay. The snapshot image is taken under d.mu because the
+// settle pump may commit concurrently at the completion point: the lock is
+// required for a coherent image, not a defensive extra.
 //
 // 契约: docs/FACT-VOCABULARY.md#families
 func (d *DurableCommit) WriteRecoveryTicket(ctx context.Context) error {
