@@ -26,6 +26,7 @@
 | 9 | 收尾判定 | `event` | `FinalRoundRequest.ID`（range‖reason 内容寻址，`api/event/final_round_request.go`） | `final_round.request` | 同一 range 同原因至多一条：判定输入（轮次/耗时）随事实走但不入身份 |
 | 10 | 注意力 | `task` | `AttentionFact.FactKey`（`attention:` 前缀 + 角色与 kind/target/lineage 的散列，`runtime/task/attention.go`） | `event.TypeAttentionQuestion` / `TypeAttentionAnswer` / `TypeAttentionClearance` | 同身份同角色重复提交不落第二条事实（同键拒二落）；answer/clearance 命名不到链上 question 具名拒绝 |
 | 11 | 交付结算 | `assembly` | `delivery.<交付身份>.<状态>` 合成（`assembly/host_delivery.go` 的 `deliverySettlementKey`；交付身份由落链后的 fact key 确定性导出） | `delivery.settlement` | 追加式：同（身份,状态）键重放不添第二条、同键异内容按 `memory.ErrFactKeyConflict` 拒收；状态转移即新键（事实键不可改）；未清事实驻留事实窗口，按族构造性豁免 TTL 墓碑化 |
+| 12 | 恢复票据 |  | （schema‖cursor‖digest 内容寻址，） |  | 同覆盖重落同身份；票据是链上真相、blob 按 digest 内容寻址引用并校验，损坏即退回全量重放 |
 > 编号 6 随「回放结算」（`replay.settle`）退役留空、不重排；本表共 10 族（1–5、7–11），与 [`docs/GLOSSARY.md`](GLOSSARY.md)「事实族登记表」一致。
 
 合成身份的语义（具名裁定）：通知的身份是它自己携带的四元组，`Notice.Event` 指向的已提交事实**永不替换**这个身份，所以四元组才是 `FactKey` 的输入、被指向的事件只是消费线索；声明的身份是规范指纹（`api/config/fact.go` 具名注释）；票据的身份是原文 hex 键，去重域只决定票据能否并存，不改写身份。

@@ -233,6 +233,10 @@ var ErrReadNotAllowed = errors.New("state: read is not allowed for this subject 
     ErrReadNotAllowed reports a read of a target no grant covers for the subject
     that asked. An authority that holds no grants refuses every read.
 
+var ErrRecoveryPayloadRefused = errors.New("state: the recovery payload is not a layout this build restores")
+    ErrRecoveryPayloadRefused names a snapshot payload this build cannot
+    restore.
+
 var ErrSpecConflict = errors.New("state: the task's admission material is already declared with other content")
     ErrSpecConflict reports a declaration that would replace the admission
     material of a task with other content than the material already stored.
@@ -723,6 +727,18 @@ func (d *DurableCommit) Revision(taskID event.TaskID) int64
 
 func (d *DurableCommit) TaskIDs() []event.TaskID
     TaskIDs returns every task the carrier holds facts for, in numeric order.
+
+func (d *DurableCommit) UsedTicket() bool
+    UsedTicket reports whether the carrier this process built restored its
+    tables from a recovery ticket: an observation for the equivalence checks and
+    the boot line, never an input to any recovery decision.
+
+func (d *DurableCommit) WriteRecoveryTicket(ctx context.Context) error
+    WriteRecoveryTicket files one snapshot of the carrier's tables beside the
+    ticket fact that names it: the blob lands first behind its own barrier,
+    the ticket after it behind a second barrier, so a ticket always names bytes
+    the log already holds. The caller must hold no carrier lock and keep the
+    carrier quiet for the duration of the write.
 
 type FactLog interface {
 	// Put stages one key and its value.

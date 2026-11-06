@@ -182,6 +182,8 @@ type DurableCommit struct {
 	attempts  map[noticeKey]SettleAttempt
 	rejected  map[noticeKey]Rejection
 	loadStats LoadStats
+	// usedTicket records whether this carrier restored from a ticket.
+	usedTicket bool
 }
 
 // LoadScan is the read cost of one prefix scan made while rebuilding the
@@ -223,9 +225,20 @@ var _ task.Commit = (*DurableCommit)(nil)
 // it is not nil, marks matching commit attempts as uncertain, so all three
 // commit outcomes stay observable.
 func NewDurableCommit(log FactLog, uncertain task.UncertainProbe) (*DurableCommit, error) {
-	d := &DurableCommit{
+	d := newCarrier(log)
+	d.uncertain = uncertain
+	if err := d.loadWithTicket(context.Background()); err != nil {
+		durableError("tagent: durable commit load failed err=%v", err)
+		return nil, err
+	}
+	return d, nil
+}
+
+// newCarrier answers one empty carrier over the named log, the common start of
+// the ticket split and the bare replay.
+func newCarrier(log FactLog) *DurableCommit {
+	return &DurableCommit{
 		log:       log,
-		uncertain: uncertain,
 		revisions: map[event.TaskID]int64{},
 		facts:     map[event.TaskID][]task.CommitRecord{},
 		specs:     map[event.TaskID]task.Spec{},
@@ -235,11 +248,15 @@ func NewDurableCommit(log FactLog, uncertain task.UncertainProbe) (*DurableCommi
 		attempts:  map[noticeKey]SettleAttempt{},
 		rejected:  map[noticeKey]Rejection{},
 	}
-	if err := d.load(context.Background()); err != nil {
-		durableError("tagent: durable commit load failed err=%v", err)
-		return nil, err
-	}
-	return d, nil
+}
+
+// UsedTicket reports whether the carrier this process built restored its
+// tables from a recovery ticket: an observation for the equivalence checks and
+// the boot line, never an input to any recovery decision.
+func (d *DurableCommit) UsedTicket() bool {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.usedTicket
 }
 
 // load folds every record the log already holds back into the carrier's tables.

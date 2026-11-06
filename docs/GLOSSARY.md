@@ -28,9 +28,7 @@
 | 会话世代（session generation） | 一条命令回执属于终端会话第几任的标识：只有本任的输出与退出码才算数，前任旧屏绝不当成本次结果。 | 客房号不变、每换一任住客就换房卡：旧房卡开不了这次的门。 | `tool/exec`（世代令牌）；`tool/exec/tmux_generation_test.go` |
 | 独立验收（independent acceptance） | 训练样本的合格判定只看任务产物本身（文件在不在、内容对不对），不采信执行者自述"我做完了"。 | 阅卷只看答卷，不听考生自我感觉。 | `openspec/changes/archive/2026-11-05-07-training-sample-loop/`；`openspec/specs/offline-training-export/spec.md`（不自动映射奖励的边界） |
 
-## 二、事实族登记表（已登记十族，编号 6 留空）
-
-框架里"值得登记的事实"共十族（1–5、7–11；编号 6「回放结算」已退役留空、不重排）。族名是登记表里的权威名，下面只给一句话读法；身份、类型与锁定机制以 [FACT-VOCABULARY](FACT-VOCABULARY.md) 第二节为准。
+## 二、事实族登记表（编号 6 退役留空；身份/类型/锁定以 [FACT-VOCABULARY](FACT-VOCABULARY.md) 第二节为准）
 
 | # | 族 | 一句话 | 在哪看 |
 |---|---|---|---|
