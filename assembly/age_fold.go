@@ -238,9 +238,6 @@ func (s ageFoldSessions) FileCompressRequest(ctx context.Context, session event.
 // judgment, so no product can answer a request the chain never holds. The fact
 // carries the owning agent of its session, so the judgment persists beside the
 // product that answers it: an ownerless judgment never reaches the durable
-// chain, and the resident window would release it with nothing to read back. The fact
-// carries the owning agent of its session, so the judgment persists beside the
-// product that answers it: an ownerless judgment never reaches the durable
 // chain, and the resident window would release it with nothing to read back.
 func (r *Run) fileCompressRequest(ctx context.Context, session event.SessionID, request event.CompressRequest) error {
 	if session == "" {
