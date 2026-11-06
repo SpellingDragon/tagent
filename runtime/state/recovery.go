@@ -141,10 +141,14 @@ func (d *DurableCommit) snapshotBytes() ([]byte, string, error) {
 }
 
 // WriteRecoveryTicket files one snapshot of the carrier's tables beside the
-// ticket fact that names it: the blob lands first behind its own barrier, the
-// ticket after it behind a second barrier, so a ticket always names bytes the
-// log already holds. The caller must hold no carrier lock and keep the carrier
-// quiet for the duration of the write.
+// ticket fact that names it, at the restart completion point (both recovery
+// steps finished, service not yet open), so the carrier is quiet by
+// construction. The blob goes to the fixed current key and the ticket after
+// it; on this local-file tier that is only a rename order — Sync is a no-op
+// and there is no fsync, so a crash between the two leaves either an orphan
+// blob nobody names or a ticket naming a missing blob, both of which fall
+// back to the full replay. The snapshot image itself is taken under d.mu as
+// a defensive bound for any future open-run caller.
 //
 // 契约: docs/FACT-VOCABULARY.md#families
 func (d *DurableCommit) WriteRecoveryTicket(ctx context.Context) error {
@@ -266,7 +270,7 @@ func (d *DurableCommit) restoreTables(body []byte) error {
 }
 
 // loadWithTicket is the recovery split: a ticket whose blob verifies restores
-// the tables directly and merges only what the log gained after the cursor;
+// the tables directly and merges what the log gained after the snapshot;
 // anything else — no ticket, a missing or corrupted blob, a schema this build
 // does not restore — falls back to the full replay, so a restart without a
 // usable ticket rebuilds exactly as it always did.
@@ -322,10 +326,10 @@ func (d *DurableCommit) readSnapshot(ctx context.Context, digest string, length 
 	return body, nil
 }
 
-// mergeDelta folds only what the log gained after the snapshot: the four
-// record kinds merge by identity (a key the image already holds changes
-// nothing), and the commit facts merge by revision (a record at or below the
-// revision the image reached for its task replays nothing new).
+// mergeDelta replays the log over the restored tables: it decodes every fact
+// (the cursor is lexical, not a global time order, so it cannot skip the
+// decode), then merges the four record kinds by identity and the commit facts
+// by per-task revision, so a record the image already holds adds nothing.
 func (d *DurableCommit) mergeDelta(ctx context.Context) error {
 	specs, err := d.scan(ctx, specPrefix)
 	if err != nil {

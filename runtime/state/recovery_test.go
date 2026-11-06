@@ -33,6 +33,13 @@ func seedCarrier(t *testing.T, ctx context.Context, log *invariantFactLog, taskI
 	if err := carrier.recordConsumption(ctx, first.Outbox[0].Notice); err != nil {
 		t.Fatalf("record the consumption of %s: %v", tag, err)
 	}
+	if err := carrier.recordAttempt(ctx, second.Outbox[0].Notice, SettleAttempt{Terminal: "completed"}); err != nil {
+		t.Fatalf("record the attempt of %s: %v", tag, err)
+	}
+	refused := invariantNotice(event.TaskID("task-other-"+tag), 9)
+	if err := carrier.recordRejection(ctx, Rejection{Notice: refused, Reason: "refused in the seed"}); err != nil {
+		t.Fatalf("record the rejection of %s: %v", tag, err)
+	}
 }
 
 // assertCarrierEqual compares two rebuilt carriers on every observable face.
@@ -83,11 +90,29 @@ func assertCarrierEqual(t *testing.T, want, got *DurableCommit, taskIDs ...event
 		if w, g := len(want.specs), len(got.specs); w != g {
 			t.Fatalf("specs = %d, want %d", g, w)
 		}
+		for key, spec := range want.specs {
+			other, held := got.specs[key]
+			if !held || other != spec {
+				t.Fatalf("spec of %s = %+v, want the bare-replay value %+v", key, other, spec)
+			}
+		}
 		if w, g := len(want.attempts), len(got.attempts); w != g {
 			t.Fatalf("attempts = %d, want %d", g, w)
 		}
+		for key, attempt := range want.attempts {
+			other, held := got.attempts[key]
+			if !held || other != attempt {
+				t.Fatalf("attempt %v = %+v, want %+v", key, other, attempt)
+			}
+		}
 		if w, g := len(want.rejected), len(got.rejected); w != g {
 			t.Fatalf("rejected = %d, want %d", g, w)
+		}
+		for key, rejection := range want.rejected {
+			other, held := got.rejected[key]
+			if !held || other.Notice != rejection.Notice || other.Reason != rejection.Reason {
+				t.Fatalf("rejection %v = %+v, want %+v", key, other, rejection)
+			}
 		}
 	}
 }
@@ -286,6 +311,45 @@ func TestRecoveryTicketFallbacks(t *testing.T) {
 		}
 		if restored.UsedTicket() {
 			t.Fatal("a schema-one ticket was trusted by a schema-two build")
+		}
+		bare, err := newBareCarrier(log)
+		if err != nil {
+			t.Fatalf("bare replay: %v", err)
+		}
+		assertCarrierEqual(t, bare, restored, taskID)
+	})
+
+	t.Run("a blob carrying a foreign schema falls back and loses nothing", func(t *testing.T) {
+		log := newInvariantFactLog()
+		seedCarrier(t, ctx, log, taskID, "blob-schema")
+		writer, err := NewDurableCommit(log, nil)
+		if err != nil {
+			t.Fatalf("open the writer: %v", err)
+		}
+		if err := writer.WriteRecoveryTicket(ctx); err != nil {
+			t.Fatalf("file the ticket: %v", err)
+		}
+		for key, body := range log.barrier {
+			if !strings.HasPrefix(key, "tagent/task/v1/snapshot:") {
+				continue
+			}
+			var image map[string]any
+			if err := json.Unmarshal(body, &image); err != nil {
+				t.Fatalf("parse the snapshot image: %v", err)
+			}
+			image["schema_version"] = 99
+			edited, err := json.Marshal(image)
+			if err != nil {
+				t.Fatalf("re-render the image: %v", err)
+			}
+			log.barrier[key] = edited
+		}
+		restored, err := NewDurableCommit(log, nil)
+		if err != nil {
+			t.Fatalf("rebuild beside the foreign blob schema: %v", err)
+		}
+		if restored.UsedTicket() {
+			t.Fatal("a blob whose schema this build does not restore was trusted")
 		}
 		bare, err := newBareCarrier(log)
 		if err != nil {

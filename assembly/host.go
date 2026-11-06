@@ -649,6 +649,7 @@ func Boot(configPath string, opts ...HostOption) (*Host, error) {
 		cancel()
 		return nil, host.abortBoot(err)
 	}
+	host.run.CompleteRestartRecovery(ctx)
 	face.start()
 	host.face = face
 	sealed = true

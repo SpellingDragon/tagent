@@ -1421,6 +1421,16 @@ func (r *Run) CommittedFacts() int
     CommittedFacts reports how many facts this run holds: the counter the
     metrics endpoint reports beside the turns and deliveries of the host.
 
+func (r *Run) CompleteRestartRecovery(ctx context.Context)
+    CompleteRestartRecovery is the completion point of the restart-recovery
+    consumption logic: both steps — loading the unconsumed events and restoring
+    the in-memory state — have finished, and the run is still closed for
+    service. It files the fresh single-copy snapshot there, so the snapshot is
+    taken on a quiet, single-threaded carrier by construction and no snapshot
+    is written by a start that later aborted. A carrier without the face,
+    or a write that fails, never blocks the start: the next restart falls back
+    to the full replay.
+
 func (r *Run) DeliveryLedger() *DeliveryLedger
     DeliveryLedger reports the delivery account of this run, or nil beside no
     run.

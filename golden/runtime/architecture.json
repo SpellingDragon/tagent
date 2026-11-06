@@ -1203,17 +1203,17 @@
         "spec": "offline-training-export"
       },
       "RecoveryTicket": {
-        "concept": "restart recovery snapshot ticket",
+        "concept": "restart recovery snapshot ticket (contract: changes/03-compression-cursor/specs/compression-recovery-ticket/spec.md until F4)",
         "kind": "fact",
         "spec": "delivery-closure"
       },
       "LoadScan": {
-        "concept": "recovery read measurement",
+        "concept": "recovery read measurement (contract: changes/03-compression-cursor/specs/compression-recovery-ticket/spec.md until F4)",
         "kind": "declaration",
         "spec": "delivery-closure"
       },
       "LoadStats": {
-        "concept": "recovery read measurement set",
+        "concept": "recovery read measurement set (contract: changes/03-compression-cursor/specs/compression-recovery-ticket/spec.md until F4)",
         "kind": "declaration",
         "spec": "delivery-closure"
       }

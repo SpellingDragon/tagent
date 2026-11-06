@@ -794,10 +794,10 @@ type recoveryTicketWriter interface {
 
 // restoreInMemoryState is the second step of the restart-recovery consumption
 // logic: the in-memory state is restored from the last snapshot or, when no
-// usable snapshot exists, from the full replay of the fact chains. The step
-// ends by filing the fresh single-copy snapshot — the completion point of the
-// restart, taken while the run is still closed for service, so the carrier is
-// quiet by construction. The next restart restores from this snapshot.
+// usable snapshot exists, from the full replay of the fact chains. It only
+// loads state — the completion point (the fresh single-copy snapshot) is
+// CompleteRestartRecovery, called after both steps finish and before service
+// opens, never from inside the assembly.
 func (r *Run) restoreInMemoryState(ctx context.Context, durable *state.DurableCommit) error {
 	report, err := r.restoreChains(ctx, durable)
 	if err != nil {
@@ -806,15 +806,24 @@ func (r *Run) restoreInMemoryState(ctx context.Context, durable *state.DurableCo
 	r.mu.Lock()
 	r.recovery = report
 	r.mu.Unlock()
-	r.fileBootRecoveryTicket(ctx)
 	return nil
 }
 
-// fileBootRecoveryTicket files one recovery ticket at the restart-recovery
-// completion point: the run is not yet open for service, so the snapshot is
-// taken on a quiet, single-threaded carrier by construction. A carrier without
-// the face, or a write that fails, never blocks the start: the next restart
-// falls back to the full replay.
+// CompleteRestartRecovery is the completion point of the restart-recovery
+// consumption logic: both steps — loading the unconsumed events and restoring
+// the in-memory state — have finished, and the run is still closed for
+// service. It files the fresh single-copy snapshot there, so the snapshot is
+// taken on a quiet, single-threaded carrier by construction and no snapshot
+// is written by a start that later aborted. A carrier without the face, or a
+// write that fails, never blocks the start: the next restart falls back to the
+// full replay.
+func (r *Run) CompleteRestartRecovery(ctx context.Context) {
+	r.fileBootRecoveryTicket(ctx)
+}
+
+// fileBootRecoveryTicket files one recovery ticket beside the fixed-current
+// snapshot blob. A carrier without the face, or a write that fails, never
+// blocks the start: the next restart falls back to the full replay.
 func (r *Run) fileBootRecoveryTicket(ctx context.Context) {
 	r.mu.Lock()
 	inner := r.commit.inner

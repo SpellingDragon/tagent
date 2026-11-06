@@ -7,7 +7,7 @@
 | 术语 | 一句话定义 | 领域类比 | 在哪看 |
 |---|---|---|---|
 | 冥想（meditation） | 一个按节奏自己跑的后台回合：读已提交的事实、让模型反思，再产出一条新输入把主循环往前推；同时给上下文卡片定去留、超预算时浓缩。全程不训练模型。 | 值夜班的同事：趁没人找时理清账本，留一张"下一步做什么"的便条在你桌上。 | `features/evolution/meditation/`（自管谱系触发源，不登记事实族；族 7 是压缩请求） |
-| 重启恢复（restart recovery） | 「重启」是一个事件，消费逻辑就两步：①装载未消费的事件（`restoreUnconsumedEvents`）②装载或重放内存状态（`restoreInMemoryState`：上次快照在就装、不在就全量重放）；两步完成才开放服务，完成点写唯一一份新快照（旧的被覆盖，过时状态无意义）。 | 换班：先把没处理完的单子拿回桌上，再按交接册恢复现场；两件事没做完不开门营业，做完撕掉旧册写新册。 | `examples/wechat-bot/wechat_notice.go`（`injectRestartNotice`）；冻结契约拼写见 01-vocabulary 契约表 |
+| 重启恢复（restart recovery） | 「重启」是一个事件，消费逻辑就两步：①装载未消费的事件（`restoreUnconsumedEvents`）②装载或重放内存状态（`restoreInMemoryState`：上次快照在就装、不在就全量重放）；两步完成才开放服务，完成点写唯一一份当前快照（固定键覆盖；旧版按 digest 分片的残留 blob 是读侧不访问的孤儿，由 lifecycle 回收）。 | 换班：先把没处理完的单子拿回桌上，再按交接册恢复现场；两件事没做完不开门营业，做完撕掉旧册写新册。 | `examples/wechat-bot/wechat_notice.go`（`injectRestartNotice`）；冻结契约拼写见 01-vocabulary 契约表 |
 | 结算（settle） | 任务进入终态时在通知义务上盖的回执：一次结算一份回执，重启后凭账本恢复未消费的结算义务。回放呈现不再落账——视图属于那一次装配。 | 值班交接：交完班签一次字，签过的不签第二遍。 | `assembly/settle_turn.go`；`runtime/state` mailbox |
 | 血统（lineage） | 一轮对话的触发来源戳（用户、冥想、http、回执…），按回合盖一次、回合进行中不改；投递侧据此决定这轮产出能不能直接送到用户。 | 快递面单上的寄件人：收件规则看寄件人，不看包裹里装了什么。 | `api/event/meta.go`（`trigger_source`）；`features/evolution/meditation/judgment.go`（`DeliverableLineage` 白名单）；`cli/host_face.go`（`DeliveryReceipt`） |
 | 义务（obligation） | 任务尚未兑现的承诺，按"在等什么"分类（等工具、等投递、已移交），带归属方与推进方；队列空不等于义务已清。 | 欠条：写下才算数，划掉要有回执。 | `runtime/task/registry.go`（`Obligations`）；`memory/query/reading.go`（`TaskReading.Obligations`） |
@@ -42,7 +42,7 @@
 | 9 | 收尾判定 | 一次"该收尾了"的判定：同一 range 同原因至多一条。 | `api/event/final_round_request.go` |
 | 10 | 注意力 | 一条在场问题／回答／清除记录：同键拒二落，answer/clearance 具名拒绝。 | `runtime/task/attention.go` |
 | 11 | 交付结算 | 一条对外发送承诺的状态：随答案同笔声明 owed、按身份+状态追加落链，重启照链对账。 | `assembly/host_delivery.go`（`deliverySettlementKey`） |
-| 12 | 恢复票据 | 重启事件完成点写的快照票据：链上事实追加，指向唯一一份可覆盖的快照 blob；digest 不符退回全量重放。 | `api/event/recovery_ticket.go` |
+| 12 | 恢复票据 | 重启事件完成点写的快照票据：链上事实追加，指向固定键的唯一一份当前快照 blob；digest 不符退回全量重放。 | `api/event/recovery_ticket.go` |
 
 ## 三、读代码前的五个通用词
 

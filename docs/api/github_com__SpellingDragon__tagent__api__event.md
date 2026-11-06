@@ -693,11 +693,12 @@ type RecoveryTicket struct {
     RecoveryTicket is the on-chain envelope of one restart-recovery snapshot:
     it names the digest and byte length of the external read-only blob that
     carries the serialized carrier tables, and the cursor — the fact key of the
-    last record the snapshot covers. The blob itself is addressed and verified
-    by this envelope; the ticket is the chain-side truth, the blob only the
-    referenced bytes. Identity is content-addressed over the schema version,
-    the cursor and the digest, so a re-filed snapshot of the same coverage keeps
-    one identity, and the writing moment stays out of the identity.
+    last record the snapshot covers. The blob lives at one fixed current key,
+    overwritten each boot; the digest verifies its bytes, the ticket is the
+    chain-side truth and the blob only the referenced current bytes. Identity
+    is content-addressed over the schema version, the cursor and the digest,
+    so a re-filed snapshot of the same coverage keeps one identity, and the
+    writing moment stays out of the identity.
 
 func RecoveryTicketFor(schemaVersion int, cursor, digest string, length int64) RecoveryTicket
     RecoveryTicketFor returns the ticket fact for one snapshot: the identity is

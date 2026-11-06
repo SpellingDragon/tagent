@@ -12,67 +12,66 @@ import (
 	"github.com/SpellingDragon/tagent/runtime/agent"
 )
 
-// TestBootFilesRecoveryTicket pins the boot completion point files the ticket.
-//   - a tool turn commits; the boot files the ticket before service opens
-//   - the log holds blob and ticket; the second boot rebuilds the chain
+// TestRestartCompletionPointSequence pins ticket appears only at completion.
+//   - step 2 (state restore in Assemble) and step 1 (events) file no ticket
+//   - the completion point files exactly one snapshot and one ticket
+//   - the next restart restores from that ticket
 //
 // 契约: docs/FACT-VOCABULARY.md#families
-func TestBootFilesRecoveryTicket(t *testing.T) {
+func TestRestartCompletionPointSequence(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 	root := t.TempDir()
 	storage := WithStorage(ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: root})
-	build := func() (*snapshotTestModel, map[event.AgentID]NativeAgent) {
+	build := func() map[event.AgentID]NativeAgent {
 		ticketModel := &snapshotTestModel{answer: func(*model.Request) *model.Response {
 			return &model.Response{Choices: []model.Choice{{Message: model.Message{Role: model.RoleAssistant, Content: "done"}}}, Done: true}
 		}}
-		return ticketModel, map[event.AgentID]NativeAgent{
-			deliveryTestAgent: {Model: ticketModel},
-		}
+		return map[event.AgentID]NativeAgent{deliveryTestAgent: {Model: ticketModel}}
 	}
-	_, agents := build()
-	first, err := Assemble(ctx, &config.Declaration{
+	decl := &config.Declaration{
 		Entry:  string(deliveryTestAgent),
 		Agents: []config.AgentSpec{{ID: string(deliveryTestAgent), Model: "model-a"}},
-	}, agents, WithGovernance(snapshotTestGovernance{}), storage)
+	}
+	first, err := Assemble(ctx, decl, build(), WithGovernance(snapshotTestGovernance{}), storage)
 	if err != nil {
-		t.Fatalf("assemble the first run: %v", err)
+		t.Fatalf("assemble (step 2): %v", err)
 	}
-	hostCtx, stopHost := context.WithCancel(ctx)
-	host := deliveryTestHost(hostCtx, first, newDeliveryTestSender(nil))
-	if _, err := host.Invoke(ctx, InvokeRequest{
-		InvocationID: "inv-boot-ticket",
-		Address:      deliveryTestAddress("session-boot-ticket"),
-		Input:        []model.Message{{Role: model.RoleUser, Content: "drive one turn"}},
-	}); err != nil {
-		t.Fatalf("drive the committing turn: %v", err)
+	if held := probeLogKeys(t, root, "tagent/task/v1/snapshot:", "tagent/task/v1/ticket:"); held[0] || held[1] {
+		t.Fatalf("step 2 wrote blob=%v ticket=%v, want neither before the completion point", held[0], held[1])
 	}
-	stopHost()
+	host := deliveryTestHost(ctx, first, newDeliveryTestSender(nil))
+	if err := host.restoreUnconsumedEvents(ctx, nil); err != nil {
+		t.Fatalf("step 1 (unconsumed events): %v", err)
+	}
+	if held := probeLogKeys(t, root, "tagent/task/v1/snapshot:", "tagent/task/v1/ticket:"); held[0] || held[1] {
+		t.Fatalf("step 1 wrote blob=%v ticket=%v, want neither before the completion point", held[0], held[1])
+	}
+	first.CompleteRestartRecovery(ctx)
+	if held := probeLogKeys(t, root, "tagent/task/v1/snapshot:", "tagent/task/v1/ticket:"); !held[0] || !held[1] {
+		t.Fatalf("the completion point wrote blob=%v ticket=%v, want both", held[0], held[1])
+	}
+	if blobs := probeLogCount(t, root, "tagent/task/v1/snapshot:"); blobs != 1 {
+		t.Fatalf("snapshot keys at the completion point = %d, want exactly one", blobs)
+	}
 	if _, err := first.Close(ctx, agent.CloseRequest{Timeout: time.Now().Add(5 * time.Second)}); err != nil {
 		t.Fatalf("drain the first run: %v", err)
 	}
-	held := probeLogKeys(t, root, "tagent/task/v1/snapshot:", "tagent/task/v1/ticket:")
-	if !held[0] || !held[1] {
-		t.Fatalf("the log holds blob=%v ticket=%v, want both from the boot completion point", held[0], held[1])
-	}
-	_, agents2 := build()
-	second, err := Assemble(ctx, &config.Declaration{
-		Entry:  string(deliveryTestAgent),
-		Agents: []config.AgentSpec{{ID: string(deliveryTestAgent), Model: "model-a"}},
-	}, agents2, WithGovernance(snapshotTestGovernance{}), storage)
+	second, err := Assemble(ctx, decl, build(), WithGovernance(snapshotTestGovernance{}), storage)
 	if err != nil {
-		t.Fatalf("restart beside the boot ticket: %v", err)
+		t.Fatalf("restart beside the completion-point ticket: %v", err)
+	}
+	second.CompleteRestartRecovery(ctx)
+	if blobs := probeLogCount(t, root, "tagent/task/v1/snapshot:"); blobs != 1 {
+		t.Fatalf("snapshot keys after the second completion point = %d, want exactly one (overwritten)", blobs)
 	}
 	if _, err := second.Close(ctx, agent.CloseRequest{Timeout: time.Now().Add(5 * time.Second)}); err != nil {
 		t.Fatalf("drain the second run: %v", err)
 	}
-	if blobs := probeLogCount(t, root, "tagent/task/v1/snapshot:"); blobs != 1 {
-		t.Fatalf("snapshot keys after two boots = %d, want exactly the one current blob", blobs)
-	}
 }
 
 // probeLogCount answers how many keys the storage root holds under one
-// prefix, the single-copy check the boot ticket look counts through.
+// prefix, the single-copy check the completion point counts through.
 func probeLogCount(t *testing.T, root string, prefix string) int {
 	t.Helper()
 	ctx := context.Background()

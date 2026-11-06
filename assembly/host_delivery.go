@@ -1419,7 +1419,7 @@ func (h *Host) restoreUnconsumedEvents(ctx context.Context, settleDriver interfa
 	}
 	if settleDriver != nil {
 		if err := h.run.restoreOwed(ctx); err != nil {
-			assemblyWarn("tagent: the restore of the durable account reported: %v", err)
+			return err
 		}
 	}
 	return nil
