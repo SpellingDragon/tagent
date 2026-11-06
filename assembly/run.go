@@ -535,11 +535,8 @@ func Assemble(ctx context.Context, decl *config.Declaration, agents map[event.Ag
 		if err := supply.searcher.SetRetrievalTuning(search.DefaultLimit, search.DefaultLimit, 0); err != nil {
 			return nil, err
 		}
-		landed, err := seedLandedSeq(ctx, tier)
+		landed, err := r.seedReplay(ctx, tier)
 		if err != nil {
-			return nil, err
-		}
-		if err := r.seedReplay(ctx, tier); err != nil {
 			return nil, err
 		}
 		r.mu.Lock()
@@ -1756,10 +1753,10 @@ type seedReport struct {
 // in commit order than an old product event (an input that rolled into a later
 // segment), so the walk cannot stop at a fold boundary without an index of the
 // surviving positions - a stop rule is an open ruling, not a default.
-func (r *Run) seedReplay(ctx context.Context, tier *ledger.Tier) error {
-	seeds, _, err := r.seedFullReplay(ctx, tier)
+func (r *Run) seedReplay(ctx context.Context, tier *ledger.Tier) (map[int]int64, error) {
+	seeds, landed, _, err := r.seedFullReplay(ctx, tier)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	var order []event.Address
 	for addr := range seeds {
@@ -1774,26 +1771,30 @@ func (r *Run) seedReplay(ctx context.Context, tier *ledger.Tier) error {
 	for _, addr := range order {
 		seed := seeds[addr]
 		if err := r.attachScopedReplay(addr, seed.window, seed.projection); err != nil {
-			return err
+			return nil, err
 		}
 	}
 	r.trimSeededFacts()
 	if len(order) > 0 {
 		r.attachNoticeFeed()
 	}
-	return nil
+	return landed, nil
 }
 
 // seedFullReplay replays every session chain from the beginning, the path a
 // chain that minted no summary answers: each committed fact is seeded, each
 // mapped entry appended in commit order and each product restored on top.
-func (r *Run) seedFullReplay(ctx context.Context, tier *ledger.Tier) (map[event.Address]*sessionSeed, seedReport, error) {
+func (r *Run) seedFullReplay(ctx context.Context, tier *ledger.Tier) (map[event.Address]*sessionSeed, map[int]int64, seedReport, error) {
 	seeds := map[event.Address]*sessionSeed{}
 	products := map[event.Address][]event.CompressProduct{}
 	var order []event.Address
 	report := seedReport{}
+	landed := map[int]int64{}
 	if err := tier.Segments.EachEvent(ctx, func(stored ledger.StoredEvent) error {
 		report.Decoded++
+		if stored.Seq > landed[stored.PartitionID] {
+			landed[stored.PartitionID] = stored.Seq
+		}
 		body, err := memory.DecodeEventBody(stored.Body)
 		if err != nil {
 			return fmt.Errorf("tagent: replay the committed event %s: %w", stored.Key, err)
@@ -1832,13 +1833,13 @@ func (r *Run) seedFullReplay(ctx context.Context, tier *ledger.Tier) (map[event.
 		seed.projection = trimReplayProjection(ctx, seed.projection, seed.window)
 		return nil
 	}); err != nil {
-		return nil, report, err
+		return nil, nil, report, err
 	}
 	for _, addr := range order {
 		seed := seeds[addr]
 		seed.projection.RestoreProducts(products[addr])
 	}
-	return seeds, report, nil
+	return seeds, landed, report, nil
 }
 
 // seedFact holds one fact the storage tier already committed in the live
@@ -1853,22 +1854,6 @@ func (r *Run) seedFact(evt event.Event) {
 	defer r.mu.Unlock()
 	r.facts[evt.Key] = evt
 	r.factOrder = append(r.factOrder, evt.Key)
-}
-
-// seedLandedSeq reports the last sequence slot every partition already
-// committed, so the landing path of a restarted run continues the positions the
-// tier holds instead of claiming one of them again.
-func seedLandedSeq(ctx context.Context, tier *ledger.Tier) (map[int]int64, error) {
-	landed := map[int]int64{}
-	if err := tier.Segments.EachEvent(ctx, func(stored ledger.StoredEvent) error {
-		if stored.Seq > landed[stored.PartitionID] {
-			landed[stored.PartitionID] = stored.Seq
-		}
-		return nil
-	}); err != nil {
-		return nil, err
-	}
-	return landed, nil
 }
 
 // eventRecordOf projects one committed fact onto the query record the
