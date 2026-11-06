@@ -166,6 +166,12 @@ func (s *kvResidentSet) removeEntry(key string, element *list.Element) {
 	s.order.Remove(element)
 }
 
+// kvEntryOffset locates one encoded value inside a shard snapshot.
+type kvEntryOffset struct {
+	start int64
+	end   int64
+}
+
 // localFileKV is the localfile tier key-value view: a commit writes the touched
 // shards through a temporary file and one atomic rename, so every value a
 // successful barrier covered reaches any later process. A shard snapshot is the
@@ -176,12 +182,6 @@ func (s *kvResidentSet) removeEntry(key string, element *list.Element) {
 // state.
 //
 // 契约: docs/wiki/memory/memory-architecture.md#local-file-kv
-// kvEntryOffset locates one encoded value inside a shard snapshot.
-type kvEntryOffset struct {
-	start int64
-	end   int64
-}
-
 type localFileKV struct {
 	mu  sync.Mutex
 	dir string

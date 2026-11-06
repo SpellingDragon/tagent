@@ -74,11 +74,11 @@ func seedCarrier(t *testing.T, ctx context.Context, log *invariantFactLog, taskI
 	}
 }
 
-// TestSeedCarriesEverySpecField pins the seed against the type instead of
-// against a count written by hand: every exported field of task.Spec must hold
-// a non-zero value, so a field the runtime copies under another name cannot
-// hide in a 0 == 0 comparison. A field added to task.Spec later fails this test
-// until it is seeded, which is the point.
+// TestSeedCarriesEverySpecField pins the seed against task.Spec itself.
+// - every exported field holds a non-zero value, so a 0 == 0 comparison cannot hide one
+// - a field added to task.Spec later fails here until it is seeded
+//
+// 契约: docs/wiki/reliability/durable-delivery.md#canonical-fact-resolution
 func TestSeedCarriesEverySpecField(t *testing.T) {
 	spec := seededSpec("every")
 	value := reflect.ValueOf(spec)
