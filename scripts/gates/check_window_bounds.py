@@ -14,7 +14,10 @@ be registered in golden/runtime/window_bounds.json with its class:
 
 Classes are not interchangeable. A declaration key that names a window, budget,
 policy or bound must be registered; a constant must never be a declaration key;
-a registered constant must still be declared in its file. The registry has no
+a registered constant must still be declared in its file; and a file that
+already holds a registered family constant must not grow an unregistered one.
+The last scan is file-scoped: a family constant introduced in a file the registry
+does not name is outside this gate and relies on review. The registry has no
 auto-write mode, so a new knob cannot appear silently.
 
 Exit 0 when every side is registered and consistent, 1 on violations or
@@ -34,7 +37,7 @@ DECLARED_CLASSES = ("window", "budget", "policy")
 
 # A declaration key matching this asks to tune how much context the system
 # carries; it must be registered under one of the declared classes.
-KNOB = re.compile(r"(max_tokens|context_window|compress_threshold|keep_recent|output_reserve|capture_budget|vector_top_k|keyword_top_k|rrf_k)")
+KNOB = re.compile(r"(max_tokens|window|tokens|compress_threshold|keep_recent|reserve|top_k|rrf_k|budget_(?!seconds))", re.I)
 
 DECODE = os.path.join("api", "config", "decode.go")
 HOST_DOCUMENT = os.path.join("assembly", "host_document.go")
@@ -42,7 +45,11 @@ HOST_DOCUMENT = os.path.join("assembly", "host_document.go")
 AGENT_KEYS = re.compile(r"var agentKeys = \[\]string\{(.*?)\n\}", re.S)
 SECTION_KEYS = re.compile(r"sectionFields\([^)]*\)", re.S)
 YAML_TAG = re.compile(r'yaml:"([a-z_]+)"')
-QUOTED = re.compile(r'"([a-z_]+)"')
+QUOTED = re.compile(r'"([A-Za-z_][A-Za-z0-9_]*)"')
+CONST_ONE = re.compile(r'^\s*const\s+([A-Za-z_][A-Za-z0-9_]*)\s+(?:[A-Za-z_][A-Za-z0-9_.\[\]]*\s*)?=\s*[0-9]', re.M)
+CONST_BLOCK = re.compile(r'^\s*const\s*\((.*?)^\s*\)', re.S | re.M)
+CONST_MEMBER = re.compile(r'^\s*([A-Za-z_][A-Za-z0-9_]*)\s+(?:[A-Za-z_][A-Za-z0-9_.\[\]]*\s*)?=\s*[0-9]', re.M)
+FAMILY = re.compile(r"(window|budget|reserve|tokens|threshold|limit|topk|rrf)", re.I)
 
 
 def load_registry(path):
@@ -76,6 +83,43 @@ def file_declares(root, relative, name):
     if not os.path.exists(path):
         return False
     return re.search(r"\b%s\b" % re.escape(name), open(path, encoding="utf-8").read()) is not None
+
+
+def scan_registered_files(root, registry):
+    """Answer every family constant declared in the files the registry owns.
+
+    The reverse direction of the registration rule: a file that already holds a
+    registered window/budget/policy constant must not grow a new one silently.
+    Constants elsewhere in the tree are outside this scan; the docstring says so.
+    """
+    found = {}
+    for bound in registry.get("bounds") or []:
+        relative = bound.get("file") or ""
+        if not relative or relative in found:
+            continue
+        path = os.path.join(root, relative)
+        if not os.path.exists(path):
+            found[relative] = set()
+            continue
+        text = open(path, encoding="utf-8").read()
+        names = set(CONST_ONE.findall(text))
+        for block in CONST_BLOCK.findall(text):
+            names.update(CONST_MEMBER.findall(block))
+        found[relative] = {name for name in names if FAMILY.search(name)}
+    return found
+
+
+def check_registered_files(registry, declarations):
+    """Judge the reverse direction: every family constant beside a registered one is registered."""
+    errors = []
+    registered = {bound.get("name") for bound in registry.get("bounds") or []}
+    for relative, names in sorted(declarations.items()):
+        for name in sorted(names):
+            if name not in registered:
+                errors.append(
+                    "%s: the %s constant lives beside a registered one but is not registered"
+                    % (name, relative))
+    return errors
 
 
 def check(registry, keys, declares):
@@ -142,6 +186,7 @@ def main(argv):
     keys = scan_config_keys(root)
     errors = check(registry, keys,
                    lambda bound: file_declares(root, bound.get("file") or "", bound.get("name") or ""))
+    errors += check_registered_files(registry, scan_registered_files(root, registry))
     for error in errors:
         print("check_window_bounds: %s" % error)
     if errors:

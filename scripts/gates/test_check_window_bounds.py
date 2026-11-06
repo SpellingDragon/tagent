@@ -10,7 +10,9 @@ from __future__ import annotations
 
 import importlib.util
 import os
+import pathlib
 import sys
+import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 CHECKER = os.path.join(HERE, "check_window_bounds.py")
@@ -58,10 +60,35 @@ def run(name, want_error, registry_value, keys, declares):
     print("PASS", name)
 
 
+def scan_case():
+    """A camelCase declaration key is scanned and then refused by the constant rule."""
+    global CASES
+    CASES += 1
+    checker = load_checker()
+    with tempfile.TemporaryDirectory() as tmp:
+        decode = pathlib.Path(tmp) / "api" / "config" / "decode.go"
+        decode.parent.mkdir(parents=True)
+        decode.write_text(
+            'package config' + chr(10) + chr(10) +
+            'var agentKeys = []string{' + chr(10) + chr(9) + '"factWindow",' + chr(10) + '}' + chr(10),
+            encoding="utf-8")
+        keys = checker.scan_config_keys(tmp)
+    if "factWindow" not in keys:
+        FAILURES.append("scan_case: the camelCase declaration key never reached the key set")
+        return
+    errors = checker.check(registry(WINDOW, BUDGET, POLICY, CONSTANT), keys, lambda entry: True)
+    if not any("must not be a declaration key" in error for error in errors):
+        FAILURES.append("scan_case: want the constant rule to refuse factWindow, got %r" % (errors,))
+        return
+    print("PASS a camelCase declaration key is scanned and refused")
+
+
 def main():
     declared_keys = ["max_tokens", "provider_context_window", "compress_threshold"]
     run("a registered four-class registry is green", None,
         registry(WINDOW, BUDGET, POLICY, CONSTANT), declared_keys, True)
+    run("a window-shaped knob by another spelling is red", "replay_window",
+        registry(WINDOW, BUDGET, POLICY, CONSTANT), declared_keys + ["replay_window"], True)
     run("an unregistered knob is red", "new_context_window",
         registry(WINDOW, BUDGET, POLICY, CONSTANT), declared_keys + ["new_context_window"], True)
     run("a second window is red", "want exactly one",
@@ -75,6 +102,7 @@ def main():
         registry(WINDOW, BUDGET, POLICY, CONSTANT), ["max_tokens", "provider_context_window"], True)
     run("an unknown class is red", "is not one of",
         registry(WINDOW, {**POLICY, "class": "knob"}, CONSTANT), declared_keys, True)
+    scan_case()
     if FAILURES:
         for failure in FAILURES:
             print("FAIL", failure)

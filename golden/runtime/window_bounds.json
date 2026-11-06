@@ -176,5 +176,38 @@
       "file": "memory/recall.go",
       "reason": "向量缝队列上限。"
     }
+ ,
+    {
+      "id": "capture-budget-min",
+      "class": "constant",
+      "name": "MinCaptureBudgetBytes",
+      "kind": "const",
+      "file": "features/rl/capture_wiring.go",
+      "reason": "捕获预算的下界（1MB），机制常量。"
+    },
+    {
+      "id": "chars-per-token-alias",
+      "class": "constant",
+      "name": "budgetCharsPerToken",
+      "kind": "const",
+      "file": "memory/replay/replay_budget.go",
+      "reason": "换算常量的非导出源值，BudgetCharsPerToken 的别名。"
+    },
+    {
+      "id": "budget-message-overhead",
+      "class": "constant",
+      "name": "budgetMessageOverheadTokens",
+      "kind": "const",
+      "file": "runtime/agent/request_assembly.go",
+      "reason": "请求预算计量里每条消息的固定开销（token）。"
+    },
+    {
+      "id": "budget-tool-call-overhead",
+      "class": "constant",
+      "name": "budgetToolCallOverheadTokens",
+      "kind": "const",
+      "file": "runtime/agent/request_assembly.go",
+      "reason": "请求预算计量里每次工具调用的固定开销（token）。"
+    }
   ]
 }
