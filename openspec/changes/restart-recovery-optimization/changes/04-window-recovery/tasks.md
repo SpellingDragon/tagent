@@ -1,23 +1,24 @@
 # 04-window-recovery 孙任务
 
-## A. 窗口类界收口
+## A. 折叠锚（裁定 r45 核心）
 
-- [ ] 4.0a 窗口类界收口：`max_tokens` 唯一输入；删 `provider_context_window`/`output_reserve`/`long_context_tokens`/`capture_budget_mb`/`vector_top_k`/`keyword_top_k`/`rrf_k`；provider 窗=回放窗、输出余量=窗/4、`long_context` 由装配剩余量算、捕获与缓存按窗口渲染字节派生、页界一个数、RRF K 常量；schema/decode/reload/示例/文档同批；旧键→具名拒绝 —— 验证：旧键在代码与示例 0 命中；schema 门反例（旧键⇒红）；示例配置启动绿
-- [x] 4.0b 常驻界派生：删 `factWindow`/`replayResidentWindow`；带窗会话链以投影最老原文为界（`liveWindowCutLocked`），无窗链兜底 `noWindowResidentFacts=2048`（登记为机制常量）；投影裁剪只在无窗链生效（有窗链由折叠决定） —— 验证：`TestWindowedFactsFollowTheProjection`（界前释放/界后+pinned 保留/无窗兜底）+ 既有窗口测试全绿
-- [x] 4.0d 折叠规则 golden 与 mutation：`golden/runtime/fold_contract.json`（段龄阶梯/带→动作/产物形状/体积因子）+ `golden/runtime/fold_plan_golden.json` 向量 + `TestFoldPlanGolden`（六段闭环 + 一个进行中段，逐字段比对）；四条 mutation（改阶梯窗、改中带层级、折进行中段、换产物类型）各以该测试为锚，`check_event_integrity_mutations.py` 注册并实测全 killed—— 验证：`go test ./memory/replay -run '^TestFoldPlanGolden$'` PASS；四条 mutation 各 `killed (named_assertion)`
-- [x] 4.0c 词表与门禁：`golden/runtime/window_bounds.json` 四类登记（回放窗/预算面/策略/机制常量，20 条）；`check_window_bounds.py` 四规则 + 7 例正反自测，接入 lint；GLOSSARY「请求预算」行内收四类词（不新增行，预算持平）—— 验证：门 exit 0；反例（未登记窗口类键⇒红、第二个窗⇒红、常量当声明键⇒红、常量漂移⇒红、登记键从声明面消失⇒红）全过
+- [ ] 4.a1 产物载荷扩展：`Execute` 批次应用后按投影序记录幸存者键（含合成键的事实键指向）—— 验证：红锚 `TestAnchoredRebuildEqualsFullWalk`（已立，编译红）
+- [ ] 4.a2 `seedAnchoredReplay`：倒序扫 `cmpout-` 前缀 → 每会话最新产物=锚 → 按序查表重建 + 锚后增量 —— 验证：锚重建≡全量走查逐条一致；解码数<全量；从未折叠会话退全量
+- [ ] 4.a3 golden 重生成（折叠契约向量随载荷扩展）+ 四条 mutation 复验 killed
+- [ ] 4.a4 状态注入钩子（折叠瞬间向会话主权人要不可推导状态快照；注册制；不注册=行为同今天）—— 验证：注入者重启后状态恢复；不注入者不受影响
 
-## B. recall 与窗口解耦
+## B. #19 派生态全量清单审计
 
-- [ ] 4.1 观察表退役为查询缓存：启动零 land；查询按过滤条件读持久层、分页；缓存可丢 —— 验证：同一查询结果与今天逐条一致；启动 land 条数=0；缓存丢弃后结果仍一致
-- [ ] 4.2 语义召回按查询候选现算：内存无 runtime 窗口向量、无全史向量表；启动 Submit=0 —— 验证：同一查询 Top-K 与今天逐条一致（候选集口径写明）；启动 Submit=0
+- [ ] 4.b1 枚举 Run/Host 全部内存态字段，逐项标注持久通道（链事件/自持日志/锚捕获/重装配/刻意冷启动），三无者红 —— 验证：审计表入台账；三个已知嫌疑（relations 父图/endedAt-rangeOpen/pinnedFacts）逐项定性
 
-## C. 窗口内重建
+## C. 读侧退役（boot 只做自己的消费）
 
-- [ ] 4.3 投影窗口内重建：窗口起点=产物覆盖边界+最近未闭合段；只折窗口内的段并挂产物 —— 验证：与「全量折叠后裁窗」逐条 DeepEqual；启动 `EachEvent` 条数=窗口条数；产物/边界不可得⇒退全量
-- [ ] 4.4 固定成本：`landedSeq` 读索引尾；tier 打开懒校验 —— 验证：启动不读正文；坏分片首次读报错并退全量
-- [ ] 4.5 消费者锚：真实 120 重启 —— 验证：boot 在 gen1/20/120 同量级（0.1–0.5s）+ 数据准确性对账绿
+- [ ] 4.c1 `TierQuerySource`：查询直读持久层；观察表+ObserveStore+land 钩子原子删除（含能力测试/示例/骨架）—— 验证：同一查询结果与今天逐条一致；启动 land=0
+- [ ] 4.c2 向量缝整型删除：检索按候选现嵌入 —— 验证：Top-K 与今天逐条一致；启动 Submit=0
+- [ ] 4.c3 tier 打开懒校验 —— 验证：启动不读正文；坏分片首读报错退全量
 
-## verify 三锚（随任务行冻结，R29）
+## D. 载体与收尾
 
-正锚：界登记门 + 窗口内重建 ≡ 全量折叠后裁窗 + 查询结果不变。负锚：产物/边界不可得⇒退全量；坏分片首次读失败⇒退全量。消费者锚：真实 120 重启 boot 与历史长度无关。
+- [ ] 4.d1 载体时间纯度审计（terminalTTL 等）—— 验证：纯→结案；不纯→移出快照面+等价锚扩时钟断言
+- [ ] 4.d2 载体游标方案测量与裁定（seq 元数据 / 单一 WAL）—— 验证：折叠锚后 boot 剖面数据入台账
+- [ ] 4.d3 消费者锚：真实 120 重启 —— 验证：boot 在 gen1/20/120 同量级 + 数据准确性对账绿

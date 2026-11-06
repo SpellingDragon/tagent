@@ -1,43 +1,53 @@
-# 04-window-recovery 设计
+# 04-window-recovery 设计（裁定集 r45 定稿）
 
-## D1 机制界不可配，策略可配
+## D1 机制界不可配，策略可配（4.0 已放行）
 
-- **机制界**（内存、缓存、页界、输出余量、provider 窗）：由回放窗派生或降为不可配常量。
-- **策略**（压缩时机与保留深度）：`compress_threshold` 与 `keep_recent_tasks` 保留可调——它们决定压缩程度，是产品策略，不是界。
+- **机制界**（内存、缓存、页界、捕获预算、检索腿界）：由回放窗派生或降为不可配常量。
+- **策略**（压缩时机与保留深度、预算面、长上下文）：`compress_threshold`/`keep_recent_tasks`/`provider_context_window`/`output_reserve`/`long_context_tokens` 保留可调。
+- 四类登记于 `golden/runtime/window_bounds.json`，`check_window_bounds.py` 机械守护：新增上限类可配项即红、机制常量不得当声明键、声明键必须登记。
 
-## D2 窗口类界收口表
+## D2 常驻界由投影派生（4.0b 已放行）
 
-| 现名 | 处置 |
-|---|---|
-| `max_tokens` | **保留**，唯一窗口输入 |
-| `compress_threshold` / `keep_recent_tasks` | **保留可调**（策略） |
-| `DefaultCompressThreshold` / `DefaultKeepRecentTasks` | **保留**（策略默认值） |
-| `provider_context_window` | 删，provider 窗=回放窗 |
-| `output_reserve` / `DefaultOutputReserveDivisor` | 删键，输出余量=窗/4 机制常量 |
-| `long_context_tokens` / `DefaultLongContextTokens` | 删键，降为策略：值由装配剩余量算出 |
-| `capture_budget_mb` | 删键，派生为窗口渲染字节×固定倍数 |
-| `vector_top_k` / `keyword_top_k` | 删键，收敛为一个页界 |
-| `rrf_k` / `RRFRankConstant` | 删键，RRF K 为算法常量 |
-| `factWindow` / `replayResidentWindow` | 删，常驻=窗口渲染集 |
-| `BudgetCharsPerToken`=4 | 保留，唯一换算常量 |
-| `DefaultAgeVolumeThreshold` / `DefaultAgeKeepRecent` | **保留**（属于压缩策略的兜底） |
+带窗会话链以投影最老原文为界；无窗链兜底 `noWindowResidentFacts=2048`。折叠规则由 `fold_contract.json` + `fold_plan_golden.json` + 四条 mutation 钉死。判断事实带属主落链；`EachSessionFact` 按 (partition, seq) 提交序读。
 
-## D3 压缩策略零改动（明确不动）
+## D3 被证伪的路（如实保留，防止再走）
 
-以段为单位处理；`keep_recent_tasks` 开关决定最新段有多少原样保留；更老的段由分龄推断层级（段产物 / 历史摘要）；阈值决定何时开始压；提交后判卷落 `compress_request`、消费者落 `compress_product`、`ApplyProducts` 替换投影、原文不删。以上代码路径、默认值、spec 条款都不改。
+「窗口内重建」三次翻车（r43）：提交序上**不存在无损早停**——存活原文（新带、滚入输入、折后新事实）可比任何旧产物事件更深；盲走不停、停点漏滚入、跳过漏替换三方向全部失败。结论：`seedReplay` 单遍全量走链；C（外部存活位索引）冗余且属持续维护类，**终局否决**；D（快照装全状态）否决维持。
 
-## D4 recall 与窗口解耦
+## D4 折叠锚定理（核心，先红后绿）
 
-观察表（`memory/store_query.go`）退役为查询缓存：启动零 land；查询把过滤条件翻成持久层的键范围（分区 + 时间），按范围读正文解码、过滤、排序、分页；缓存 LRU 可丢，不是真源。语义召回不持有 runtime 窗口向量，也不建全史向量表：查询时对本次候选集现场算向量并重排。
+折叠瞬间是每会话**同步、一致性安全**的检查点时刻（判卷→落判断→执行→落产物→替换投影，全在当次提交内串行完成）。产物载荷扩展为完整锚：
 
-## D5 窗口内重建
+```
+锚 = 摘要正文（已有） + 死亡名单 Covered（已有） + 幸存者名单（新增）
+     + seq 位点（自带） + 可选状态快照（注册钩子注入）
+```
 
-窗口起点=链上压缩产物的覆盖边界 + 最近未闭合段；只折窗口内的段并挂产物。失败退回：产物或边界不可得、版本不符、坏分片首次读失败→退全量重建（今天的路径原样保留），具名告警，结果与窗口路径逐面一致。
+- **幸存者名单**：批次 `ApplyProducts` 之后按**投影序**记录键列表（含头部 hist 键与段产物的合成键，合成键带 `compress_key` 指向事实键）。重建=按序查表，**不重算放置**——绕开 r43 全部三个死因。
+- **锚发现**：产物事实键前缀 `cmpout-`，索引免解码可辨；每会话最新一条产物即锚；从未折叠的会话退全量（天然短）。
+- **恢复公式**：锚载荷 + 只回放锚之后的事件；锚坏/缺/版本不符 → 全量走链（退路原样保留）。
+- **golden**：折叠契约向量随载荷扩展重生成（钉住有意的变更），四条 mutation 复验 killed。
+- **红锚** `TestAnchoredRebuildEqualsFullWalk`：12 回合折叠链，锚重建 ≡ 全量走查逐条一致、解码数更少、锚数 > 0；编译红中。
 
-## D6 词表与门禁
+## D5 三条状态持久通道（#19 审计的判据）
 
-四类词：**回放窗（max_tokens）/ 段窗（WindowTS）/ 上限（budget，不可配）/ 策略（policy，可配）**。F0 新增一条规则：任何新增「上限类」可配项即红；界必须登记来源与派生关系；策略项必须显式登记为策略。现有界与策略登记为基线。
+链事件（语义真相）｜主人自持日志（AnchorStore 先例，机械重做）｜锚捕获（搭折叠便车）。**没有不可恢复的状态，只有未指定持久通道的状态**；三无者=审计红。审计对象：Run/Host 全部内存态字段，三个已知嫌疑（relations 父图、endedAt/rangeOpen、pinnedFacts）优先；验收=重启后全部状态 ≡ 长运行进程逐字段一致。
 
-## D7 不改的东西
+## D6 boot 只做自己的消费（读侧退役）
 
-事件契约、事实族、插件管线、交付/冥想语义、压缩策略；「分区位图/Init 游标」预案按实测删除。
+boot 事件 = 两步消费（①未消费事件重投 ②锚/快照装载）+ 完成点票据。查询/召回是独立消费者，按需读链：
+
+- 观察表整体退役：`TierQuerySource` 查询直读持久层；`StoreQuerySource`/`ObserveStore`/运行期 land 钩子连同接线足迹**原子删除**（删除原子化裁定）。
+- 向量缝整体退役：检索向量腿改查询时候选现嵌入；`VectorSeam` 整型删除。
+- landedSeq 已并入走链（r44 ✅）；tier 打开改懒校验。
+- boot 从四遍全量解码收敛为自己的消费一遍。
+
+## D7 载体（不变 + 已知缺口）
+
+- 快照保留、面封顶在八表：无折叠、无覆盖结构的无界账，检查点是唯一最省有界化；一致性机器已付清（等价锚+七类退回+票据门禁）。
+- **时间纯度审计**：terminalTTL 等时间参数是否冻进八表；不纯则移出快照面、两路各自按 boot 时刻现算。
+- **游标缺口改口为必须**：mergeDelta 全量重扫 ⇒ 无真游标 boot 不平坦；折叠锚落地后测量剖面，裁定「补 seq 元数据 / 单一 WAL 统一」。
+
+## D8 不改的东西
+
+事件契约、事实族、插件管线、交付/冥想语义、压缩策略（何时折/折什么/保留几段/分龄推断/身份语义）、预算面与策略面保留键；「分区位图/Init 游标」预案删除。
