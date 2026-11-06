@@ -15,6 +15,23 @@ import (
 	"github.com/SpellingDragon/tagent/runtime/task"
 )
 
+// seededSpec builds the admission material each seeded task declares: every
+// exported field of task.Spec holds a non-zero value, so the equivalence
+// comparison sees a difference on any field the restore path could drop.
+func seededSpec(tag string) task.Spec {
+	return task.Spec{
+		CallID:        "call-" + tag,
+		DedupKey:      task.DedupKey("dedup-" + tag),
+		InvocationID:  event.InvocationID("inv-" + tag),
+		InstanceID:    event.InstanceID("inst-" + tag),
+		Description:   "the seeded task " + tag,
+		Source:        event.Address{AgentID: "agent-a", SessionID: event.SessionID("session-" + tag)},
+		Target:        event.Address{AgentID: "agent-b", SessionID: event.SessionID("session-" + tag)},
+		TriggerSource: "user",
+		Execution:     task.Serialization("session-" + tag + "-serialized"),
+	}
+}
+
 // seedCarrier drives one real write set with non-zero content on every table:
 // specs with identities, two commits carrying outboxes, one consumption, one
 // attempt and one refusal with its routing and moment frozen.
@@ -24,16 +41,7 @@ func seedCarrier(t *testing.T, ctx context.Context, log *invariantFactLog, taskI
 	if err != nil {
 		t.Fatalf("open the seeding carrier: %v", err)
 	}
-	spec := task.Spec{
-		CallID:        "call-" + tag,
-		DedupKey:      task.DedupKey("dedup-" + tag),
-		InvocationID:  event.InvocationID("inv-" + tag),
-		InstanceID:    event.InstanceID("inst-" + tag),
-		Description:   "the seeded task " + tag,
-		Source:        event.Address{AgentID: "agent-a", SessionID: event.SessionID("session-" + tag)},
-		Target:        event.Address{AgentID: "agent-b", SessionID: event.SessionID("session-" + tag)},
-		TriggerSource: "user",
-	}
+	spec := seededSpec(tag)
 	if err := carrier.Declare(ctx, taskID, spec); err != nil {
 		t.Fatalf("declare %s: %v", tag, err)
 	}
@@ -63,6 +71,25 @@ func seedCarrier(t *testing.T, ctx context.Context, log *invariantFactLog, taskI
 		At:       time.Unix(1700000000, 0),
 	}); err != nil {
 		t.Fatalf("record the rejection of %s: %v", tag, err)
+	}
+}
+
+// TestSeedCarriesEverySpecField pins the seed against the type instead of
+// against a count written by hand: every exported field of task.Spec must hold
+// a non-zero value, so a field the runtime copies under another name cannot
+// hide in a 0 == 0 comparison. A field added to task.Spec later fails this test
+// until it is seeded, which is the point.
+func TestSeedCarriesEverySpecField(t *testing.T) {
+	spec := seededSpec("every")
+	value := reflect.ValueOf(spec)
+	for i := 0; i < value.NumField(); i++ {
+		field := value.Type().Field(i)
+		if !field.IsExported() {
+			continue
+		}
+		if value.Field(i).IsZero() {
+			t.Fatalf("the seed leaves task.Spec.%s at its zero value, so the equivalence cannot see a difference there", field.Name)
+		}
 	}
 }
 
