@@ -6,29 +6,45 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/SpellingDragon/tagent/api/event"
 	"github.com/SpellingDragon/tagent/runtime/task"
 )
 
-// seedCarrier drives one real write set: declare, two commits, one consumption
-// receipt — the prefixes that carry records beside the facts.
+// seedCarrier drives one real write set with non-zero content on every table:
+// specs with identities, two commits carrying outboxes, one consumption, one
+// attempt and one refusal with its routing and moment frozen.
 func seedCarrier(t *testing.T, ctx context.Context, log *invariantFactLog, taskID event.TaskID, tag string) {
 	t.Helper()
 	carrier, err := NewDurableCommit(log, nil)
 	if err != nil {
 		t.Fatalf("open the seeding carrier: %v", err)
 	}
-	if err := carrier.Declare(ctx, taskID, task.Spec{}); err != nil {
+	spec := task.Spec{
+		CallID:        "call-" + tag,
+		DedupKey:      task.DedupKey("dedup-" + tag),
+		InvocationID:  event.InvocationID("inv-" + tag),
+		InstanceID:    event.InstanceID("inst-" + tag),
+		Description:   "the seeded task " + tag,
+		Source:        event.Address{AgentID: "agent-a", SessionID: event.SessionID("session-" + tag)},
+		Target:        event.Address{AgentID: "agent-b", SessionID: event.SessionID("session-" + tag)},
+		TriggerSource: "user",
+	}
+	if err := carrier.Declare(ctx, taskID, spec); err != nil {
 		t.Fatalf("declare %s: %v", tag, err)
 	}
 	first := invariantRecord(taskID, 0, task.StatusRunning, invariantNotice(taskID, 1))
+	first.Outbox[0].Target = event.Address{AgentID: "agent-b", SessionID: event.SessionID("session-" + tag)}
+	first.Outbox[0].Source = event.Address{AgentID: "agent-a", SessionID: event.SessionID("session-" + tag)}
 	if result, err := carrier.Commit(ctx, first); err != nil || result != task.CommitCommitted {
 		t.Fatalf("commit the first fact of %s = (%v, %v)", tag, result, err)
 	}
 	second := invariantRecord(taskID, 1, task.StatusSettled, invariantNotice(taskID, 2))
+	second.Outbox[0].Target = event.Address{AgentID: "agent-b", SessionID: event.SessionID("session-" + tag)}
 	if result, err := carrier.Commit(ctx, second); err != nil || result != task.CommitCommitted {
 		t.Fatalf("commit the second fact of %s = (%v, %v)", tag, result, err)
 	}
@@ -39,83 +55,47 @@ func seedCarrier(t *testing.T, ctx context.Context, log *invariantFactLog, taskI
 		t.Fatalf("record the attempt of %s: %v", tag, err)
 	}
 	refused := invariantNotice(event.TaskID("task-other-"+tag), 9)
-	if err := carrier.recordRejection(ctx, Rejection{Notice: refused, Reason: "refused in the seed"}); err != nil {
+	if err := carrier.recordRejection(ctx, Rejection{
+		Notice:   refused,
+		Target:   event.Address{AgentID: "agent-c", SessionID: event.SessionID("session-refused-" + tag)},
+		Instance: event.InstanceID("inst-refused-" + tag),
+		Reason:   "refused in the seed " + tag,
+		At:       time.Unix(1700000000, 0),
+	}); err != nil {
 		t.Fatalf("record the rejection of %s: %v", tag, err)
 	}
 }
 
-// assertCarrierEqual compares two rebuilt carriers on every observable face.
+// assertCarrierEqual compares two rebuilt carriers on every observable face
+// with reflect.DeepEqual, so a lost or changed field on any of the eight
+// tables fails the equivalence instead of passing on equal lengths.
 func assertCarrierEqual(t *testing.T, want, got *DurableCommit, taskIDs ...event.TaskID) {
 	t.Helper()
 	for _, taskID := range taskIDs {
-		if w, g := len(want.Facts(taskID)), len(got.Facts(taskID)); w != g {
-			t.Fatalf("facts of %s = %d, want %d", taskID, g, w)
-		}
-		wantFacts, gotFacts := want.Facts(taskID), got.Facts(taskID)
-		for i := range wantFacts {
-			if wantFacts[i].MutationID != gotFacts[i].MutationID || wantFacts[i].Status != gotFacts[i].Status {
-				t.Fatalf("fact %d of %s = %+v, want %+v", i, taskID, gotFacts[i], wantFacts[i])
-			}
+		if !reflect.DeepEqual(want.Facts(taskID), got.Facts(taskID)) {
+			t.Fatalf("facts of %s differ: got %+v, want %+v", taskID, got.Facts(taskID), want.Facts(taskID))
 		}
 		if w, g := want.Revision(taskID), got.Revision(taskID); w != g {
 			t.Fatalf("revision of %s = %d, want %d", taskID, g, w)
 		}
-		wantOwed, gotOwed := want.Outbox(taskID), got.Outbox(taskID)
-		if len(wantOwed) != len(gotOwed) {
-			t.Fatalf("outbox of %s = %d entries, want %d", taskID, len(gotOwed), len(wantOwed))
+		if !reflect.DeepEqual(want.Outbox(taskID), got.Outbox(taskID)) {
+			t.Fatalf("outbox of %s differs: got %+v, want %+v", taskID, got.Outbox(taskID), want.Outbox(taskID))
 		}
-		for i := range wantOwed {
-			if wantOwed[i].Delivery != gotOwed[i].Delivery {
-				t.Fatalf("outbox %d of %s = %v, want %v", i, taskID, gotOwed[i].Delivery, wantOwed[i].Delivery)
-			}
-			if wantOwed[i].Notice != gotOwed[i].Notice {
-				t.Fatalf("outbox %d of %s names %v, want %v", i, taskID, gotOwed[i].Notice, wantOwed[i].Notice)
-			}
-		}
-		if w, g := len(want.mutations), len(got.mutations); w != g {
-			t.Fatalf("mutations = %d, want %d", g, w)
-		}
-		for key, record := range want.mutations {
-			other, held := got.mutations[key]
-			if !held || other.MutationID != record.MutationID {
-				t.Fatalf("mutation %v = %+v, want held as %v", key, other, record.MutationID)
-			}
-		}
-		if w, g := len(want.consumed), len(got.consumed); w != g {
-			t.Fatalf("consumed = %d, want %d", g, w)
-		}
-		for key := range want.consumed {
-			if _, held := got.consumed[key]; !held {
-				t.Fatalf("a consumed receipt the bare replay holds was lost: %v", key)
-			}
-		}
-		if w, g := len(want.specs), len(got.specs); w != g {
-			t.Fatalf("specs = %d, want %d", g, w)
-		}
-		for key, spec := range want.specs {
-			other, held := got.specs[key]
-			if !held || other != spec {
-				t.Fatalf("spec of %s = %+v, want the bare-replay value %+v", key, other, spec)
-			}
-		}
-		if w, g := len(want.attempts), len(got.attempts); w != g {
-			t.Fatalf("attempts = %d, want %d", g, w)
-		}
-		for key, attempt := range want.attempts {
-			other, held := got.attempts[key]
-			if !held || other != attempt {
-				t.Fatalf("attempt %v = %+v, want %+v", key, other, attempt)
-			}
-		}
-		if w, g := len(want.rejected), len(got.rejected); w != g {
-			t.Fatalf("rejected = %d, want %d", g, w)
-		}
-		for key, rejection := range want.rejected {
-			other, held := got.rejected[key]
-			if !held || other.Notice != rejection.Notice || other.Reason != rejection.Reason {
-				t.Fatalf("rejection %v = %+v, want %+v", key, other, rejection)
-			}
-		}
+	}
+	if !reflect.DeepEqual(want.mutations, got.mutations) {
+		t.Fatalf("mutations differ: got %+v, want %+v", got.mutations, want.mutations)
+	}
+	if !reflect.DeepEqual(want.consumed, got.consumed) {
+		t.Fatalf("consumed differ: got %+v, want %+v", got.consumed, want.consumed)
+	}
+	if !reflect.DeepEqual(want.specs, got.specs) {
+		t.Fatalf("specs differ: got %+v, want %+v", got.specs, want.specs)
+	}
+	if !reflect.DeepEqual(want.attempts, got.attempts) {
+		t.Fatalf("attempts differ: got %+v, want %+v", got.attempts, want.attempts)
+	}
+	if !reflect.DeepEqual(want.rejected, got.rejected) {
+		t.Fatalf("rejected differ: got %+v, want %+v", got.rejected, want.rejected)
 	}
 }
 
@@ -454,9 +434,12 @@ func TestRecommitAfterTicketRestoreIsIdempotent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("restore: %v", err)
 	}
-	replay := invariantRecord(taskID, 1, task.StatusSettled, invariantNotice(taskID, 2))
+	stored := restored.Facts(taskID)
+	if len(stored) != 2 {
+		t.Fatalf("facts after the restore = %d, want the two seeded records", len(stored))
+	}
 	mutationsBefore := len(restored.mutations)
-	if result, err := restored.Commit(ctx, replay); err != nil || result != task.CommitCommitted {
+	if result, err := restored.Commit(ctx, stored[1]); err != nil || result != task.CommitCommitted {
 		t.Fatalf("re-commit beside the restored mutations = (%v, %v), want the stored fact reported again", result, err)
 	}
 	if got := len(restored.Facts(taskID)); got != 2 {
