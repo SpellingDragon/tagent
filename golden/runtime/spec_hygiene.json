@@ -538,8 +538,8 @@
       "file": "openspec/specs/delivery-dispatch-receipts/spec.md",
       "requirement": "回执走持久总线且血统内部",
       "rule": "function-call",
-      "text_sha256": "ef28e5a6de65263139defb5217a86f47d6c11816102993c598b255d23ece36cc",
-      "preview": "回执 SHALL 经 `InjectMessageWithSource(\"delivery_receipt\", …)` 注入持久总线（转生/换装后仍在账上）；`delivery_receipt` 血统 SHALL 保持非投递（回执轮自身输出静默、不武装冥想新颖门）；回执与用户消息同批时 user 一票否决，该轮产出正常",
+      "text_sha256": "793a6604d8fe70078e312b52149a745baddb73e65a594a26399d619a0e57a8b0",
+      "preview": "回执 SHALL 经 `InjectMessageWithSource(\"delivery_receipt\", …)` 注入持久总线（重启恢复/换装后仍在账上）；`delivery_receipt` 血统 SHALL 保持非投递（回执轮自身输出静默、不武装冥想新颖门）；回执与用户消息同批时 user 一票否决，该轮产出",
       "count": 1
     },
     {

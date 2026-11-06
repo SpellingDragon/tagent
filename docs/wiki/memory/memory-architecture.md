@@ -86,7 +86,7 @@
 | 首次提交 | 一次 `kvBatch` 同写 ref 与 blob，屏障成功后才发布到内存态 | 账目与字节同批可见，不会只剩半条 |
 | 同 key 同 scope 再来一次 | 幂等成功（`return nil`） | 重放与重试不制造第二个事实 |
 | 同 key 不同字节 | `ErrContentConflict` | 一个身份只站一个事实 |
-| 同 key **第二个 scope** | ref 记录里 join 一条账目，共享同一份 blob | fork / 转世后血缘册共用字节，不复制正文 |
+| 同 key **第二个 scope** | ref 记录里 join 一条账目，共享同一份 blob | fork / 重启恢复后血缘册共用字节，不复制正文 |
 | 读取（`GetScoped`/`ReadSegmentScoped`） | 只认 scope 内的账目；越权读 = `RecallMissing`，并 `verify()` 复算 digest | 零泄漏：连存在性都不给 |
 | 缺失/过期/失败 | `RecallMissing` / `RecallExpired` / `RecallFailed` / `RecallFound` 四态分开 | 把 I/O 故障伪装成"空召回"会静默产生错答案 |
 

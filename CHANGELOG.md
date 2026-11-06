@@ -7,6 +7,8 @@
 
 ### Changed（0 债务清理：非预期设计与实现，2026-11-06）
 
+- **术语更名「转世」→「重启恢复」**：项目术语与生产标识符统一（`maybeInjectReincarnationNotice`→`injectRestartNotice`、`detectReincarnation`→`detectRestartMarker`），历史快照与已发布条目保持原文。冻结契约拼写不随更名：`"reincarnation"`、`[reincarnation]`、`REINCARNATION_NOTICE`、`[转世通报]` 与两个验收测试名，登记见 [GLOSSARY「五、契约拼写」](docs/GLOSSARY.md)。
+
 - **九个 TBD Purpose 补齐**：归档生成的主 spec 骨架 Purpose 是 CLI 占位文本（长度恰好绕过 ≥50 字符门），全部改写为对应能力的真实用途。**影响范围**：九个主 spec 的 Purpose；**触发条件**：读主 spec Purpose；**自查方法**：`grep -rl '^TBD' openspec/specs/*/spec.md` 零命中。
 
 - **幽灵 spec 删除**：`prompt-loader-fallback` 主 spec 描述 2026-10-26 已移除的 prompt 装载回退子系统（6 个符号全仓 0 命中），整个目录删除；`event-segment-store` 里 DeleteEvent/count_known 两族无实现条款与 scenario 删除。**影响范围**：主 spec 集合 149→148；**自查方法**：`bash scripts/gates/check-openspec.sh` exit 0。

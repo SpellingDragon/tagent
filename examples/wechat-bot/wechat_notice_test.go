@@ -212,7 +212,7 @@ func runNoticeCrashWindow(t *testing.T, mode string, wantRead int) {
 	}
 	noticeCrashMarkerState(t, marker, mode == noticeCrashRenamed)
 
-	maybeInjectReincarnationNotice(inbox, noticeOps{address: testAddress("chat-a")}, nil, "tagent", dir, 0)
+	injectRestartNotice(inbox, noticeOps{address: testAddress("chat-a")}, nil, "tagent", dir, 0)
 	if len(inbox.records) != 1 {
 		t.Fatalf("records after the restarted hook = %d, want the one the %q stop left", len(inbox.records), mode)
 	}
@@ -263,7 +263,7 @@ func runNoticeCrashWindow(t *testing.T, mode string, wantRead int) {
 	if msgs, _ := restarted.take(testAddress("chat-a")); len(msgs) != 0 {
 		t.Fatalf("a further restart reads the confirmed notice back: %+v", msgs)
 	}
-	maybeInjectReincarnationNotice(restarted, noticeOps{address: testAddress("chat-a")}, nil, "tagent", dir, 0)
+	injectRestartNotice(restarted, noticeOps{address: testAddress("chat-a")}, nil, "tagent", dir, 0)
 	if len(restarted.records) != 0 {
 		t.Fatalf("a consumed notice was admitted again after %q (%d records)", mode, len(restarted.records))
 	}

@@ -118,7 +118,7 @@ graph LR
 | `main.go` | 宿主启动：读配置 → `newWechatApp`/`assembly.Boot` → 绑定微信回调 → `Drive`；发送通路 `hostRuntime` 实现 `assembly.MessageSender` |
 | `wechat.go` | 宿主运行时 `hostRuntime`：`Admit`/`Drive`/`Wake`/`intake`/`lockAddress` 与 `assembly.MessageSender` |
 | `assembly/host_face.go`（框架侧） | 宿主 HTTP 面：`GET /healthz`/`GET /metrics`/`GET /debug/pprof/*`/`POST /task`/`POST /reload`，统一鉴权 |
-| `wechat_files.go` / `wechat_approval.go` / `wechat_notice.go` | 媒体与长文本落盘 / 审批通道 / 转世与通知 |
+| `wechat_files.go` / `wechat_approval.go` / `wechat_notice.go` | 媒体与长文本落盘 / 审批通道 / 重启恢复与通知 |
 | `tagent.yaml` | 主配置（六 agent + providers + governance + `app.wechat`；未接线键以注释登记） |
 | `tagent.rl.yaml` | RL 参数基线（模型/端点/超时；同严格 schema，可装载） |
 | `wizard.sh` / `run.sh` / `.env.example` | 部署向导 / 运行入口 / 环境变量模板 |

@@ -253,5 +253,5 @@ app:
     token_file: "token.json"
     context_token_dir: ".wechat-context-tokens"
     workspace_dir: ".tagent-workspace"   # 入站附件/长文本落盘(容器内 TAGENT_WECHAT_WORKSPACE_DIR 覆盖)
-    # ops_session: "wxid_owner"          # 启动通知(转世通报/系统告警)的固定目标会话;空=宿主运维会址 <session-prefix>ops
+    # ops_session: "wxid_owner"          # 启动通知(重启恢复通报/系统告警)的固定目标会话;空=宿主运维会址 <session-prefix>ops
     # approvers: ["wxid_owner"]          # critical 操作的消息批准白名单;空=消息批准关闭,只经 CLI 批准

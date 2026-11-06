@@ -30,7 +30,7 @@
 
 ### Requirement: 回执走持久总线且血统内部
 
-回执 SHALL 经 `InjectMessageWithSource("delivery_receipt", …)` 注入持久总线（转生/换装后仍在账上）；`delivery_receipt` 血统 SHALL 保持非投递（回执轮自身输出静默、不武装冥想新颖门）；回执与用户消息同批时 user 一票否决，该轮产出正常投递（agent 可当场补投）。
+回执 SHALL 经 `InjectMessageWithSource("delivery_receipt", …)` 注入持久总线（重启恢复/换装后仍在账上）；`delivery_receipt` 血统 SHALL 保持非投递（回执轮自身输出静默、不武装冥想新颖门）；回执与用户消息同批时 user 一票否决，该轮产出正常投递（agent 可当场补投）。
 
 #### Scenario: 回执轮自身输出不外发
 

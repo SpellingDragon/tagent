@@ -1,13 +1,13 @@
 # 术语表（GLOSSARY）
 
-一句话：本页把仓库里的机制名翻成通用词，每行"一句话定义＋领域类比＋在哪看"，读完一页即可读文档与代码注释。**术语不改名**——它们是包名、常量与契约的一部分；改的只是第一次读到它的门槛。表里每行的位置都可 `ls`/`grep` 到。
+一句话：本页把仓库里的机制名翻成通用词，每行"一句话定义＋领域类比＋在哪看"，读完一页即可读文档与代码注释。术语更名须走显式变更并同步代码标识符；冻结契约拼写（事件元数据、磁盘标记、日志关键字、通报正文、测试名）不随更名，登记在本页「五、契约拼写」并由 verify 命令核对。`读透视图`、`链权威答案` 非项目词汇，已撤除；描述机制一律用代码实名（`FactLog`、`DurableCommit`、`restoreChains`、`compress.product`）。表里每行的位置都可 `ls`/`grep` 到。
 
 ## 一、机制名
 
 | 术语 | 一句话定义 | 领域类比 | 在哪看 |
 |---|---|---|---|
 | 冥想（meditation） | 一个按节奏自己跑的后台回合：读已提交的事实、让模型反思，再产出一条新输入把主循环往前推；同时给上下文卡片定去留、超预算时浓缩。全程不训练模型。 | 值夜班的同事：趁没人找时理清账本，留一张"下一步做什么"的便条在你桌上。 | `features/evolution/meditation/`（自管谱系触发源，不登记事实族；族 7 是压缩请求） |
-| 转世（reincarnation） | 进程被自己换掉（重启／换装）后，新进程启动时把上一进程的现场组织成一条消息注入自己的事件流；整个进程生命周期只投一次，任何一步失败只记日志、不阻断启动。 | 换班交接单：接班的人第一眼看到"上一班做到哪、断在哪"。 | `examples/wechat-bot/wechat_notice.go`（`maybeInjectReincarnationNotice`） |
+| 重启恢复（restart recovery） | 进程被自己换掉（重启／换装）后，新进程启动时把上一进程的现场组织成一条消息注入自己的事件流；整个进程生命周期只投一次，任何一步失败只记日志、不阻断启动。它只交接现场，不负责从链上重建状态（那是 `DurableCommit.load` 与 `restoreChains`）。 | 换班交接单：接班的人第一眼看到"上一班做到哪、断在哪"。 | `examples/wechat-bot/wechat_notice.go`（`injectRestartNotice`／`detectRestartMarker`）；冻结契约拼写见 01-vocabulary 契约表 |
 | 结算（settle） | 任务进入终态时在通知义务上盖的回执：一次结算一份回执，重启后凭账本恢复未消费的结算义务。回放呈现不再落账——视图属于那一次装配。 | 值班交接：交完班签一次字，签过的不签第二遍。 | `assembly/settle_turn.go`；`runtime/state` mailbox |
 | 血统（lineage） | 一轮对话的触发来源戳（用户、冥想、http、回执…），按回合盖一次、回合进行中不改；投递侧据此决定这轮产出能不能直接送到用户。 | 快递面单上的寄件人：收件规则看寄件人，不看包裹里装了什么。 | `api/event/meta.go`（`trigger_source`）；`features/evolution/meditation/judgment.go`（`DeliverableLineage` 白名单）；`cli/host_face.go`（`DeliveryReceipt`） |
 | 义务（obligation） | 任务尚未兑现的承诺，按"在等什么"分类（等工具、等投递、已移交），带归属方与推进方；队列空不等于义务已清。 | 欠条：写下才算数，划掉要有回执。 | `runtime/task/registry.go`（`Obligations`）；`memory/query/reading.go`（`TaskReading.Obligations`） |
@@ -16,7 +16,7 @@
 | 委派（delegation） | 父代理调用委托工具这一个动作：框架原子地投一条任务事件（正文=任务、属性=岗位说明与血统）和一批带着源键血统的材料事实进子代理的库，点名唤醒。失败即委派整体失败；子代理的消费循环零特殊逻辑，材料先到先消费。父子只是两段链视图间的引用关系——代理同构，无子角色。 | 把一件事连同它的背景档案一起移交：交接单一张，背景各自归档，收件人照常开工。 | `runtime/agent/loop.go`（`delegatedInputOf`）；`tool/subagent/tool.go` |
 | 配置变更（config change） | 一次发布对某代理某维度的判定事实（model/prompt/binding/file/org.*），是控制面的唯一变更流水。三层语义：**源文件是编辑界面**（单向流入，只声明哪些维度可被外部控制）；**链上 `config.declaration` 声明事实是配置真相**（身份=规范指纹、正文=规范声明序列化，可回读）；**唯一发布入口**是生效路径。没有第四条路（内存台账、裸文件读、旁路 setter 均不生效），请求边界从事实投影、在途请求保持旧视图；每次发布尝试另落一条带 result 的发布事实（`published`/`unchanged`/`load-failed`/`governance-rejected`/`install-failed`），回执读账如实、安装失败不回成功。 | 合同正本存档案室（链上声明），桌上的草稿只是编辑界面；每次变更走同一台盖章机（唯一入口），回执以档案室登记为准，草稿在客厅改得再像也不作数。 | `api/config/fact.go`；`assembly/commit.go`（配置链与发布事实）；`openspec/specs/config-hot-reload` |
 | 消费循环（consumption loop） | 一个 `(agent, session)` 地址一条常驻 goroutine：拉取已到达的事件、按类型分派、有驱动事件时调一次模型，然后回到拉取，不等派发的工具返回；入口只提交事实并唤醒它。实例按地址装配（`Consumers.Ensure`），入口 agent 之外也挂（委派的会址也有自己的一个），一个地址绝不跑两个驱动者。 | 值班员守着收件箱：来一件处理一件，不站在传送带前等某一台机器。 | `runtime/agent/consumer.go`；`assembly/host.go`（`invokeConsumed`） |
-| 链权威答案（answer on the chain） | 答案的事实形态：`agent_output` 携带 `input_events`（本段消费了哪些输入）与终态元数据（terminal/failure/final_round/trigger/decision_count）。进程内缓存只是链的读透视图——淘汰后按输入键从链重建，不可重建的答案豁免淘汰。 | 账本是正本，白板只是抄写板：抄写擦了就重抄，正本永远在。 | `runtime/agent/loop.go`（`commitOutput`）；`runtime/agent/consumer.go`（`answerOfChain`） |
+| 答案的链上形态（commitOutput／answerOfChain） | 答案的事实形态：`agent_output` 携带 `input_events`（本段消费了哪些输入）与终态元数据（terminal/failure/final_round/trigger/decision_count）。进程内缓存只是读加速副本：淘汰后由 `answerOfChain` 按输入键从链重建；链上没有输出事实可重建的答案豁免淘汰。 | 账本是正本，白板只是抄写板：抄写擦了就重抄，正本永远在。 | `runtime/agent/loop.go`（`commitOutput`）；`runtime/agent/consumer.go`（`answerOfChain`） |
 | 失败观察（failure observation） | 失败终态落成链上事实（正文=原始失败原因，meta=终态/任务/调用身份），并按唤醒法则驱动目标地址的后续消费——失败可见、可续、不无限重驱。 | 坏消息也记在案并递到该看的人手里，而不是塞抽屉里反复重试。 | `assembly/host.go`（`noteFailureObservation`）；`runtime/agent/delegate.go`（`DrainReport.Failed`） |
 | 段（segment） | 消费循环的一次连续处理：从驱动事件开段（范围身份 `<session>#cN`），跨工具结果与新输入续轮，到模型无工具调用的最终回复落 `agent_output` 时闭合；它就是投影折叠与 turn 的单位。 | 一张工单：从受理到结论，中途补材料不换单，结案才归档。 | `runtime/agent/consumer.go`（`openSegment`/`closeSegment`）；`assembly/facts.go`（`recordMapped`） |
 | 投递账目（delivery ledger） | 进程内投递的回读面：按源事件、目标与投递身份列出本 run 提交过的投递事实及回执；两族投递（agent 主动发送 / 框架结算通知）共用一套五键，所以不按来路分两种读法；查询不解析正文。 | 快递底单存根：谁寄的、寄给谁、对方签收没，一查就知道，不用重读包裹。 | `assembly/host_tools.go`（`DeliveryLedger`／`Records`／`BySource`／`ByTarget`）；`api/event/meta.go`（五个 `delivery.*` 键） |
@@ -56,4 +56,16 @@
 | 装配根 | 把组织声明变成活动运行时的唯一入口。 | `assembly/run.go`（`Assemble`） |
 
 ## 四、新增词的判据
+## 五、契约拼写（不随术语更名）
+
+下列冻结值是外部可读契约（部署脚本按字面 grep、通报正文按字面比对、事件元数据进血统白名单、磁盘标记按文件名探测），MUST NOT 随术语更名；`verify_contracts.py` 逐行集合核对。
+
+| 契约拼写 | 形态 | 在哪看 |
+|---|---|---|
+| `"reincarnation"` | 事件元数据/血统白名单键 | `examples/wechat-bot/wechat_notice.go`；`features/evolution/meditation/judgment.go` |
+| `[reincarnation]` | 部署日志关键字 | `examples/wechat-bot/wechat_notice.go` |
+| `REINCARNATION_NOTICE` | 磁盘换装标记文件名 | `examples/wechat-bot/wechat_notice.go`；`examples/wechat-bot/restart-tagent.sh` |
+| `[转世通报]` | 通报正文首行（用户可见，按裁定保留的唯一残留） | `examples/wechat-bot/wechat_notice.go` |
+| `TestScenario05CloseHandoffReincarnation` | 验收测试名（golden 场景引用） | `tests/integration/acceptance/scenario_s05_test.go`；`golden/runtime/scenarios.json` |
+| `TestReincarnationNoticePreserved` | 测试名（归档变更命令引用） | `examples/wechat-bot/wechat_test.go` |
 机制名就是学习成本。判据一句话：**一句话说不清（且不含本页未出现的词）就不加词，把它写成既有能力的字段**——完整判据见 [CONTRIBUTING](../CONTRIBUTING.md)「七、文档要求」。自检形式：把这句定义念给没参与讨论的人，他能复述，才写进文档。

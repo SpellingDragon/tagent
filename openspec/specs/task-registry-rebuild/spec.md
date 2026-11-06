@@ -17,9 +17,9 @@
 - **WHEN** 回收流程读取任务探测器，而 `Resume` 可能并发替换该探测器
 - **THEN** 读取 MUST 在任务锁保护下进行
 
-### Requirement: 转世孤儿任务必须可回收
+### Requirement: 重启恢复孤儿任务必须可回收
 
-跨重启重建后，nil-probe（`Spec.Alive == nil`）且携带 Declarative 的 suspect 任务，若其 Declarative.TaskID 不被任何存活会话跟踪且年龄超过 reincarnationOrphanGrace，SHALL 被裁决为 terminal failed（置 settledAt、触发 onSettle 恰一次），从而进入 pruneTerminal 的正常回收轨道。byKey 占用 MUST 随回收解除，MUST NOT 永久阻塞同 key re-spawn。
+跨重启重建后，nil-probe（`Spec.Alive == nil`）且携带 Declarative 的 suspect 任务，若其 Declarative.TaskID 不被任何存活会话跟踪且年龄超过实现定义的孤儿回收宽限期，SHALL 被裁决为 terminal failed（置 settledAt、触发 onSettle 恰一次），从而进入 pruneTerminal 的正常回收轨道。byKey 占用 MUST 随回收解除，MUST NOT 永久阻塞同 key re-spawn。
 
 #### Scenario: 未被跟踪的孤儿被回收
 
