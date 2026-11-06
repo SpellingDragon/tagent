@@ -231,6 +231,15 @@ func (s *FileSegmentStore) EachEvent(ctx context.Context, visit func(StoredEvent
     holds the whole store in memory. A visit error ends the enumeration and is
     returned.
 
+func (s *FileSegmentStore) EachEventNewestFirst(ctx context.Context, visit func(StoredEvent) error) error
+    EachEventNewestFirst streams every published event in the reverse of the
+    commit order the landing path numbered: partition first, then the sequence
+    slot descending. The order is exact inside one partition; partitions group,
+    because the commit sequence is per partition. The body of each event is read
+    on demand and handed to visit alone, so an enumeration that stops early - a
+    windowed rebuild that reached its boundary - reads no body beyond the stop.
+    A visit error ends the enumeration and is returned.
+
 func (s *FileSegmentStore) EventCount() int
     EventCount returns the number of events published by successful commits,
     so the count moves only where durable success was reported.

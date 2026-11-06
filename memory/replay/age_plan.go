@@ -216,7 +216,7 @@ func (p *ReplayProjection) RestoreProducts(products []event.CompressProduct) {
 // no product, so a fact naming material this package never folded is skipped
 // rather than placed under invented keys.
 func foldProductOf(product event.CompressProduct, entries []ProjectionEntry) (FoldProduct, bool) {
-	kind, ok := foldKindOf(product.Key)
+	kind, ok := FoldKindOf(product.Key)
 	if !ok {
 		return FoldProduct{}, false
 	}
@@ -233,10 +233,12 @@ func foldProductOf(product event.CompressProduct, entries []ProjectionEntry) (Fo
 	}, true
 }
 
-// foldKindOf reports the product kind one synthetic key names: the fold files a
-// segment fold and a history summary under one prefix each, and the prefix is
-// the only thing the fact carries about what it minted.
-func foldKindOf(key event.EventID) (string, bool) {
+// FoldKindOf reports the product kind one synthetic key names: the fold files
+// a segment fold and a history summary under one prefix each, and the prefix
+// is the only thing the fact carries about what it minted. A rebuild reads it
+// to tell the summary that bounds a chain from the segment folds its window
+// still presents.
+func FoldKindOf(key event.EventID) (string, bool) {
 	name := strings.TrimPrefix(string(key), "-")
 	switch {
 	case strings.HasPrefix(name, ageSegmentKeyPrefix+"-"):
