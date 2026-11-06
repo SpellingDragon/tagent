@@ -1742,26 +1742,22 @@ type sessionSeed struct {
 	window     FoldWindow
 }
 
-// seedReport counts what one rebuild pass decoded, beside whether every
-// session chain it met reached its window boundary. A pass that reports every
-// chain bounded has still read the whole store: the stop rule that would leave
-// the tail alone is an open ruling (an idle chain that never folded and lies
-// entirely below the boundary of its partition would rebuild empty), so the
-// pass stays correct and the tail read rides on the index the store keeps.
+// seedReport counts what one rebuild pass decoded. The pass reads the whole
+// store: no earlier stop is safe in commit order, because a surviving original
+// can sit deeper than an old product event.
 type seedReport struct {
 	Decoded int
-	Bounded bool
 }
 
 // seedReplay registers the mapped sequence every session chain already
 // committed, so a restarted run presents the material the tier holds to its
 // next request instead of reading a transcript no process carries any more.
-// The rebuild runs inside the window first - the newest history summary of a
-// chain telescopes everything it folded, so the pass reads the tail alone -
-// and a chain that never folded has no boundary, which the pass answers by
-// replaying the whole chain.
+// The rebuild reads the whole chain once: a surviving original can sit deeper
+// in commit order than an old product event (an input that rolled into a later
+// segment), so the walk cannot stop at a fold boundary without an index of the
+// surviving positions - a stop rule is an open ruling, not a default.
 func (r *Run) seedReplay(ctx context.Context, tier *ledger.Tier) error {
-	seeds, _, err := r.seedWindowedReplay(ctx, tier)
+	seeds, _, err := r.seedFullReplay(ctx, tier)
 	if err != nil {
 		return err
 	}
@@ -1786,101 +1782,6 @@ func (r *Run) seedReplay(ctx context.Context, tier *ledger.Tier) error {
 		r.attachNoticeFeed()
 	}
 	return nil
-}
-
-// seedWindowedReplay rebuilds every session chain from the tail backwards: the
-// pass reads the newest events first and stops collecting a chain at the oldest
-// entry the newest history summary it minted covers - everything the chain
-// committed before that entry is material the summary already read. A pass that
-// reaches the beginning with a chain that minted no summary answers the full
-// replay instead, because the chain folded nothing and no boundary exists. A
-// covered original is still collected up to the boundary: the product that
-// covers it is placed where it stands, so the restore needs it present before
-// it replaces it.
-func (r *Run) seedWindowedReplay(ctx context.Context, tier *ledger.Tier) (map[event.Address]*sessionSeed, seedReport, error) {
-	type chainState struct {
-		seed     *sessionSeed
-		products []event.CompressProduct
-		entries  []replay.ProjectionEntry
-		boundary event.EventID
-		bounded  bool
-	}
-	chains := map[event.Address]*chainState{}
-	report := seedReport{}
-	complete := true
-	err := tier.Segments.EachEventNewestFirst(ctx, func(stored ledger.StoredEvent) error {
-		report.Decoded++
-		body, err := memory.DecodeEventBody(stored.Body)
-		if err != nil {
-			return fmt.Errorf("tagent: replay the committed event %s: %w", stored.Key, err)
-		}
-		evt := body.Event()
-		evt.Key = stored.Key
-		addr := replayAddressOf(evt)
-		if addr.SessionID == "" {
-			return nil
-		}
-		state, held := chains[addr]
-		if !held {
-			r.mu.Lock()
-			window := foldWindowOf(specOfLocked(r.current.Plan.Declaration, agentOf(evt)))
-			r.mu.Unlock()
-			state = &chainState{seed: &sessionSeed{projection: replay.NewReplayProjection(), window: window}}
-			chains[addr] = state
-		}
-		if state.bounded {
-			return nil
-		}
-		if evt.Key == state.boundary {
-			state.bounded = true
-			return nil
-		}
-		if evt.Type == event.CompressProductType {
-			product, stated := compressProductOf(evt)
-			if !stated {
-				assemblyWarn("tagent: the compression product %s states no readable product and is not restored", evt.Key)
-				return nil
-			}
-			state.products = append([]event.CompressProduct{product}, state.products...)
-			r.compress.NoteProduct(product)
-			if kind, ok := replay.FoldKindOf(product.Key); ok && kind == replay.ProjectionTypeHistorySummary && len(product.Covered) > 0 {
-				state.boundary = product.Covered[0]
-			}
-			return nil
-		}
-		entry, ok := mappedEntryOf(evt)
-		if !ok {
-			r.seedFact(evt)
-			return nil
-		}
-		state.entries = append([]replay.ProjectionEntry{entry}, state.entries...)
-		r.seedFact(evt)
-		return nil
-	})
-	if err != nil {
-		return nil, report, err
-	}
-	for _, state := range chains {
-		if !state.bounded {
-			complete = false
-			break
-		}
-	}
-	if !complete {
-		r.resetSeededFacts()
-		return r.seedFullReplay(ctx, tier)
-	}
-	report.Bounded = true
-	seeds := make(map[event.Address]*sessionSeed, len(chains))
-	for addr, state := range chains {
-		for _, entry := range state.entries {
-			state.seed.projection.Append(ctx, entry)
-		}
-		state.seed.projection.RestoreProducts(state.products)
-		state.seed.projection = trimReplayProjection(ctx, state.seed.projection, state.seed.window)
-		seeds[addr] = state.seed
-	}
-	return seeds, report, nil
 }
 
 // seedFullReplay replays every session chain from the beginning, the path a
@@ -1938,16 +1839,6 @@ func (r *Run) seedFullReplay(ctx context.Context, tier *ledger.Tier) (map[event.
 		seed.projection.RestoreProducts(products[addr])
 	}
 	return seeds, report, nil
-}
-
-// resetSeededFacts empties the live ledger a partial pass seeded, so the full
-// replay answers from a clean state.
-func (r *Run) resetSeededFacts() {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.facts = map[event.EventID]event.Event{}
-	r.factOrder = nil
-	r.sessionFactCount = map[event.SessionID]int{}
 }
 
 // seedFact holds one fact the storage tier already committed in the live
