@@ -9,7 +9,7 @@ graph TD
   W0[阶段0 回滚+建档] --> W1[**阶段1 词汇 01**]
   W1 --> W2[**阶段2 计时证据 02**]
   W2 --> W3[**阶段3 压缩即游标 03**]
-  W3 --> W4[阶段4 读侧派生面 04]
+  W3 --> W4[阶段4 窗口收口与恢复 04]
   W4 --> W5[阶段5 CI 编排 05]
   W5 --> W6[阶段6 守护+测试 06]
   W6 --> W7[收尾 全量门+归档]
@@ -22,7 +22,7 @@ graph TD
 - [x] 01-vocabulary — 转世→重启恢复、代码名词规范化、撤销伪词条；验证：与子域 `changes/01-vocabulary/tasks.md` 1.1–1.4 完全一致（叙述层含 `*.sh`/`*.yaml` 的豁免后计数 0、根模块 + `examples/wechat-bot` 独立模块 go test、伪词条不作为术语行/标题、`verify_contracts.py` PASS），MUST NOT 用无豁免的裸 `grep | wc -l`（该命令实测 151，见 r6）
 - [x] 02-timing-evidence — Scan/fold 分段计数写入 CI 可上传产物（**部分**：进程内计数已达产物；带数据重启计数与全零判红移交 5.1a，同变更内承接非缩水）；验证：具名单测 + 冻结命令 10 行计数
 - [x] 03-compression-cursor — 链上票据 + 外部只读 blob + 失败退回全量；验证：正锚（全量≡dump+增量）/负锚（5 类失败含 blob 缺失）/消费者锚（真实 Boot）；放行=第 7 轮闭合清单 P1–P5 全 PASS（ORCHESTRATION r25）
-- [ ] 04-read-side-recovery — 读侧派生面（观测表/回放投影）状态与水位持久化、完成点扩面、增量装载、失败退全量；验证：成本锚（boot 的 visit 条数 = 增量）+ 等价锚（增量 ≡ 全量逐面 DeepEqual）+ 负锚（状态缺失/坏水位退全量）+ 消费者锚（120 重启 boot_ms 与代数无关）
+- [ ] 04-window-recovery — 三块：**A 窗口类界收口**（`max_tokens` 唯一输入；删 7 个配置键与 `factWindow`/`replayResidentWindow`；provider 窗/输出余量/捕获缓存/页界派生或降常量）、**B recall 与窗口解耦**（观察表退役为查询缓存、启动零 land；语义召回按查询候选现算、启动零向量）、**C 窗口内重建**（投影只折窗口并挂产物、`landedSeq` 尾读、tier 懒校验）；**压缩策略零改动**；验证：旧键 0 命中 + 界登记门 + 查询/Top-K 与今天逐条一致 + 窗口重建 ≡ 全量折叠后裁窗（逐条 DeepEqual）+ 启动零 land/零向量 + 消费者锚（120 重启 boot 0.1–0.5s 且与历史无关）
 - [ ] 05-ci-orchestration — 分片/超时重冻/具名 liveness；验证：CI 全 6 分片绿 + 证据完整
 - [ ] 06-guards-and-tests — F0 边界规则 + R3 登记 + 测试重写；验证：F0 selftests + 全量门
 
