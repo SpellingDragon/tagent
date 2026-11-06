@@ -3,7 +3,7 @@
   "adr": "docs/adr/0006-three-hooks-is-the-core-iteration-principle.md",
   "user_ruling": "restart-recovery-optimization r31/r33/r36",
   "reason": "压缩策略不得因本变更改变。这条契约记录段龄规则本身：阶梯、带与动作的映射、产物形状、体积阈值因子；golden 向量 golden/runtime/fold_plan_golden.json 由 memory/replay 的 TestFoldPlanGolden 逐字段比对，四条 mutation 证明改规则会被抓到。",
-  "golden_test": "memory/replay/fold_plan_golden_test.go#TestFoldPlanGolden",
+  "golden_test": "memory/replay/age_plan_test.go#TestFoldPlanGolden",
   "golden_vector": "golden/runtime/fold_plan_golden.json",
   "mutations": [
     "MUT-FOLD-01-segment-age-window",
