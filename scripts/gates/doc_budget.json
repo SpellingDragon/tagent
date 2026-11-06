@@ -1,11 +1,11 @@
 {
   "baseline": {
     "files": 225,
-    "lines": 21590
+    "lines": 21588
   },
   "measured_at": "2026-11-06",
   "measured_by": "python3 scripts/gates/check_doc_budget.py --json",
-  "measured_on": "5477b034+dirty",
+  "measured_on": "7842532e+dirty",
   "note": "Markdown 体量棘轮基线（只降不升）。实测=基线；减少后用 python3 scripts/gates/check_doc_budget.py --tighten 下调，禁止上调（--tighten 会拒绝上升的指标）。基线值是唯一被 checker 读取的真相，不另设散文账。",
   "schema_version": 1,
   "scope": "git index: tracked + untracked-but-not-ignored *.md/*.markdown, excluding generated docs/api/ (owned by gen_godoc.sh) and change-scoped process records openspec/changes/** (active plans and archive)"

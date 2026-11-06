@@ -1406,6 +1406,25 @@ func (h *Host) recordRetryFailure(ctx context.Context, identity string, entry *d
 	assemblyInfo("tagent: the redelivery of %s stopped as %s", identity, reason)
 }
 
+// restoreUnconsumedEvents is the first step of the restart-recovery
+// consumption logic: the deliveries and notifications a stopped run left
+// unconsumed are loaded back where their frozen routing names them, so the
+// work waits for the next decision instead of dying with the process. The
+// host is not yet open for service while this runs; the second step — the
+// in-memory state from the snapshot or the replay — has already finished
+// inside the assembly, so its completion point is what this step builds on.
+func (h *Host) restoreUnconsumedEvents(ctx context.Context, settleDriver interface{ Wake() }) error {
+	if err := h.restorePendingDeliveries(ctx); err != nil {
+		return err
+	}
+	if settleDriver != nil {
+		if err := h.run.restoreOwed(ctx); err != nil {
+			assemblyWarn("tagent: the restore of the durable account reported: %v", err)
+		}
+	}
+	return nil
+}
+
 // restorePendingDeliveries rebuilds the delivery account of this host from the
 // fact chain alone:
 // - The settlement facts of the registered chains are read out of the hot fact window (factWindow, filtered by the family prefix), never by a scan of the storage tier.

@@ -15,20 +15,28 @@ import (
 	"github.com/SpellingDragon/tagent/runtime/task"
 )
 
-// snapshotPrefix locates the recovery snapshot blobs on the same log the facts
-// live in: one blob per digest, the bytes a recovery ticket names. The blob is
-// referenced material, not a second truth — the ticket fact on the chain is the
-// truth, a blob that no ticket names is unreferenced, and a read that fails the
-// ticket's digest falls back to the full replay.
+// snapshotPrefix locates the single recovery snapshot blob on the same log
+// the facts live in, under the fixed current key below: the newest restart
+// always overwrites it, because a stale snapshot restores nothing the replay
+// cannot. The blob is referenced material, not a second truth and not a fact —
+// the ticket fact on the chain carries the digest, and a read that fails it
+// falls back to the full replay.
 const snapshotPrefix = "tagent/task/v1/snapshot:"
+
+// snapshotCurrentKey is the one blob key the run keeps: each boot writes the
+// fresh snapshot over it, so exactly one snapshot survives however many
+// restarts came before.
+const snapshotCurrentKey = snapshotPrefix + "current"
 
 // ticketPrefix locates the recovery ticket facts on the log.
 const ticketPrefix = "tagent/task/v1/ticket:"
 
 // recoverySchema is the payload layout this build writes and reads. A blob
 // carrying any other schema version is not guessed at: the load falls back to
-// the full replay instead.
-const recoverySchema = 1
+// the full replay instead. Version 2 added the mutations table — a version-1
+// blob carries no mutations, and restoring it would leave every recommit
+// misclassified, so version 1 is refused by version rather than patched.
+const recoverySchema = 2
 
 // ErrRecoveryPayloadRefused names a snapshot payload this build cannot restore.
 var ErrRecoveryPayloadRefused = errors.New("state: the recovery payload is not a layout this build restores")
@@ -74,8 +82,9 @@ type recoveryTables struct {
 
 // snapshotBytes renders the deterministic image of the carrier's tables beside
 // the cursor: the fact key of the last committed record the image covers. The
-// image is taken under the carrier lock: a compression may land while other
-// goroutines commit, and an unlocked read of the tables is a fatal map race.
+// image is taken at the restart-recovery completion point, before the run is
+// open for service; the carrier lock is held as a defensive bound, so a future
+// caller from an open run still renders a coherent image instead of racing.
 func (d *DurableCommit) snapshotBytes() ([]byte, string, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -145,7 +154,7 @@ func (d *DurableCommit) WriteRecoveryTicket(ctx context.Context) error {
 	}
 	sum := sha256.Sum256(body)
 	digest := "sha256:" + hex.EncodeToString(sum[:])
-	if err := d.log.Put(ctx, snapshotPrefix+digest, body); err != nil {
+	if err := d.log.Put(ctx, snapshotCurrentKey, body); err != nil {
 		return err
 	}
 	if err := d.log.Sync(ctx); err != nil {
@@ -299,7 +308,7 @@ func (d *DurableCommit) resetTables() {
 // length the ticket names: a truncated or substituted blob is a failed read,
 // never a restored carrier.
 func (d *DurableCommit) readSnapshot(ctx context.Context, digest string, length int64) ([]byte, error) {
-	body, held, err := d.log.Get(ctx, snapshotPrefix+digest)
+	body, held, err := d.log.Get(ctx, snapshotCurrentKey)
 	if err != nil || !held {
 		return nil, fmt.Errorf("state: the recovery blob %s is not held", digest)
 	}

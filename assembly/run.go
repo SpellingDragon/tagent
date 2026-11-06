@@ -522,13 +522,9 @@ func Assemble(ctx context.Context, decl *config.Declaration, agents map[event.Ag
 		return nil, err
 	}
 	if durable != nil {
-		report, err := r.restoreChains(ctx, durable)
-		if err != nil {
+		if err := r.restoreInMemoryState(ctx, durable); err != nil {
 			return nil, err
 		}
-		r.mu.Lock()
-		r.recovery = report
-		r.mu.Unlock()
 	}
 	if tier != nil {
 		supply, err := supplyRetrieval(ctx, tier, cfg.embedder)
@@ -788,6 +784,48 @@ func finalRoundSpecOf(decl *config.Declaration) config.FinalRoundSpec {
 		}
 	}
 	return config.FinalRoundSpec{}
+}
+
+// recoveryTicketWriter names the optional face of a durable commit carrier
+// that files a restart-recovery ticket; the in-memory carrier carries none.
+type recoveryTicketWriter interface {
+	WriteRecoveryTicket(ctx context.Context) error
+}
+
+// restoreInMemoryState is the second step of the restart-recovery consumption
+// logic: the in-memory state is restored from the last snapshot or, when no
+// usable snapshot exists, from the full replay of the fact chains. The step
+// ends by filing the fresh single-copy snapshot — the completion point of the
+// restart, taken while the run is still closed for service, so the carrier is
+// quiet by construction. The next restart restores from this snapshot.
+func (r *Run) restoreInMemoryState(ctx context.Context, durable *state.DurableCommit) error {
+	report, err := r.restoreChains(ctx, durable)
+	if err != nil {
+		return err
+	}
+	r.mu.Lock()
+	r.recovery = report
+	r.mu.Unlock()
+	r.fileBootRecoveryTicket(ctx)
+	return nil
+}
+
+// fileBootRecoveryTicket files one recovery ticket at the restart-recovery
+// completion point: the run is not yet open for service, so the snapshot is
+// taken on a quiet, single-threaded carrier by construction. A carrier without
+// the face, or a write that fails, never blocks the start: the next restart
+// falls back to the full replay.
+func (r *Run) fileBootRecoveryTicket(ctx context.Context) {
+	r.mu.Lock()
+	inner := r.commit.inner
+	r.mu.Unlock()
+	writer, ok := inner.(recoveryTicketWriter)
+	if !ok {
+		return
+	}
+	if err := writer.WriteRecoveryTicket(ctx); err != nil {
+		assemblyWarn("tagent: the boot recovery ticket was not filed err=%v", err)
+	}
 }
 
 // restoreChains folds every durable fact chain the storage already holds back

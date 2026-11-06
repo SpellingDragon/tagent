@@ -636,18 +636,13 @@ func Boot(configPath string, opts ...HostOption) (*Host, error) {
 		userAddresses:     map[event.SessionID]event.Address{},
 		userTurns:         map[event.Address]int{},
 	}
-	if err := host.restorePendingDeliveries(ctx); err != nil {
+	if err := host.restoreUnconsumedEvents(ctx, settleDriver); err != nil {
 		cancel()
 		return nil, host.abortBoot(err)
 	}
 	host.consumers = host.consumersOf()
-	if settleDriver != nil {
-		if err := host.run.restoreOwed(ctx); err != nil {
-			assemblyWarn("tagent: the restore of the durable account reported: %v", err)
-		}
-		if !host.run.Unsettled(ctx).Resting() {
-			settleDriver.Wake()
-		}
+	if settleDriver != nil && !host.run.Unsettled(ctx).Resting() {
+		settleDriver.Wake()
 	}
 	face, err := newHostFace(ctx, host, os.Getenv(hostFaceTokenEnv))
 	if err != nil {

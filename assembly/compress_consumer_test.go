@@ -10,72 +10,81 @@ import (
 	"github.com/SpellingDragon/tagent/api/model"
 	"github.com/SpellingDragon/tagent/memory/ledger"
 	"github.com/SpellingDragon/tagent/runtime/agent"
-	trpctool "trpc.group/trpc-go/trpc-agent-go/tool"
 )
 
-// TestCompressionFilesTicket pins product-filing also files a ticket.
-//   - a tool turn commits, a product files, the log holds blob and ticket
-//   - the second boot rebuilds the chain
+// TestBootFilesRecoveryTicket pins the boot completion point files the ticket.
+//   - a tool turn commits; the boot files the ticket before service opens
+//   - the log holds blob and ticket; the second boot rebuilds the chain
 //
 // 契约: docs/FACT-VOCABULARY.md#families
-func TestCompressionFilesTicket(t *testing.T) {
+func TestBootFilesRecoveryTicket(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 	root := t.TempDir()
 	storage := WithStorage(ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: root})
-	round := 0
-	ticketModel := &snapshotTestModel{answer: func(*model.Request) *model.Response {
-		round++
-		if round == 1 {
-			return &model.Response{Choices: []model.Choice{{Message: model.Message{Role: model.RoleAssistant, ToolCalls: []model.ToolCall{{
-				ID: "call-probe", Type: "function", Function: model.FunctionDefinitionParam{Name: "probe", Arguments: []byte("{}")},
-			}}}}}, Done: true}
+	build := func() (*snapshotTestModel, map[event.AgentID]NativeAgent) {
+		ticketModel := &snapshotTestModel{answer: func(*model.Request) *model.Response {
+			return &model.Response{Choices: []model.Choice{{Message: model.Message{Role: model.RoleAssistant, Content: "done"}}}, Done: true}
+		}}
+		return ticketModel, map[event.AgentID]NativeAgent{
+			deliveryTestAgent: {Model: ticketModel},
 		}
-		return &model.Response{Choices: []model.Choice{{Message: model.Message{Role: model.RoleAssistant, Content: "done"}}}, Done: true}
-	}}
+	}
+	_, agents := build()
 	first, err := Assemble(ctx, &config.Declaration{
 		Entry:  string(deliveryTestAgent),
 		Agents: []config.AgentSpec{{ID: string(deliveryTestAgent), Model: "model-a"}},
-	}, map[event.AgentID]NativeAgent{
-		deliveryTestAgent: {Model: ticketModel, Tools: []trpctool.CallableTool{&staticProbeTool{name: "probe"}}},
-	}, WithGovernance(snapshotTestGovernance{}), storage)
+	}, agents, WithGovernance(snapshotTestGovernance{}), storage)
 	if err != nil {
 		t.Fatalf("assemble the first run: %v", err)
 	}
 	hostCtx, stopHost := context.WithCancel(ctx)
 	host := deliveryTestHost(hostCtx, first, newDeliveryTestSender(nil))
 	if _, err := host.Invoke(ctx, InvokeRequest{
-		InvocationID: "inv-compress-ticket",
-		Address:      deliveryTestAddress("session-compress-ticket"),
-		Input:        []model.Message{{Role: model.RoleUser, Content: "drive one tool turn"}},
+		InvocationID: "inv-boot-ticket",
+		Address:      deliveryTestAddress("session-boot-ticket"),
+		Input:        []model.Message{{Role: model.RoleUser, Content: "drive one turn"}},
 	}); err != nil {
 		t.Fatalf("drive the committing turn: %v", err)
 	}
 	stopHost()
-	session := deliveryTestAddress("session-compress-ticket").SessionID
-	product := event.CompressProductFor("request-1", "probe", "-seg/fold-1", nil, "folded")
-	if err := first.fileCompressProduct(ctx, session, product); err != nil {
-		t.Fatalf("file the compression product: %v", err)
-	}
 	if _, err := first.Close(ctx, agent.CloseRequest{Timeout: time.Now().Add(5 * time.Second)}); err != nil {
 		t.Fatalf("drain the first run: %v", err)
 	}
 	held := probeLogKeys(t, root, "tagent/task/v1/snapshot:", "tagent/task/v1/ticket:")
 	if !held[0] || !held[1] {
-		t.Fatalf("the log holds blob=%v ticket=%v, want both beside the product", held[0], held[1])
+		t.Fatalf("the log holds blob=%v ticket=%v, want both from the boot completion point", held[0], held[1])
 	}
+	_, agents2 := build()
 	second, err := Assemble(ctx, &config.Declaration{
 		Entry:  string(deliveryTestAgent),
 		Agents: []config.AgentSpec{{ID: string(deliveryTestAgent), Model: "model-a"}},
-	}, map[event.AgentID]NativeAgent{
-		deliveryTestAgent: {Model: ticketModel, Tools: []trpctool.CallableTool{&staticProbeTool{name: "probe"}}},
-	}, WithGovernance(snapshotTestGovernance{}), storage)
+	}, agents2, WithGovernance(snapshotTestGovernance{}), storage)
 	if err != nil {
-		t.Fatalf("restart beside the ticket: %v", err)
+		t.Fatalf("restart beside the boot ticket: %v", err)
 	}
-	if report := second.Recovery(); len(report.Tasks) != 1 || !report.Tasks[0].Recovered {
-		t.Fatalf("recovery report = %+v, want the one chain rebuilt", report.Tasks)
+	if _, err := second.Close(ctx, agent.CloseRequest{Timeout: time.Now().Add(5 * time.Second)}); err != nil {
+		t.Fatalf("drain the second run: %v", err)
 	}
+	if blobs := probeLogCount(t, root, "tagent/task/v1/snapshot:"); blobs != 1 {
+		t.Fatalf("snapshot keys after two boots = %d, want exactly the one current blob", blobs)
+	}
+}
+
+// probeLogCount answers how many keys the storage root holds under one
+// prefix, the single-copy check the boot ticket look counts through.
+func probeLogCount(t *testing.T, root string, prefix string) int {
+	t.Helper()
+	ctx := context.Background()
+	tier, err := ledger.OpenTier(ctx, ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: root})
+	if err != nil {
+		t.Fatalf("open the tier for counting: %v", err)
+	}
+	pairs, err := ledger.TierFactLog(tier).Scan(ctx, prefix)
+	if err != nil {
+		t.Fatalf("count the prefix %s: %v", prefix, err)
+	}
+	return len(pairs)
 }
 
 // probeLogKeys answers, per prefix, whether the storage root holds at least

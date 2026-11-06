@@ -228,6 +228,72 @@ func TestRecoveryTicketFallbacks(t *testing.T) {
 		assertCarrierEqual(t, bare, restored, taskID)
 	})
 
+	t.Run("a same-length blob with a wrong digest falls back and loses nothing", func(t *testing.T) {
+		log := newInvariantFactLog()
+		seedCarrier(t, ctx, log, taskID, "digest")
+		writer, err := NewDurableCommit(log, nil)
+		if err != nil {
+			t.Fatalf("open the writer: %v", err)
+		}
+		if err := writer.WriteRecoveryTicket(ctx); err != nil {
+			t.Fatalf("file the ticket: %v", err)
+		}
+		for key, body := range log.barrier {
+			if !strings.HasPrefix(key, snapshotPrefix) || len(body) < 2 {
+				continue
+			}
+			flipped := append([]byte(nil), body...)
+			if flipped[0] == 123 {
+				flipped[0] = 32
+			} else {
+				flipped[0] = 123
+			}
+			log.barrier[key] = flipped
+		}
+		restored, err := NewDurableCommit(log, nil)
+		if err != nil {
+			t.Fatalf("rebuild beside the wrong digest: %v", err)
+		}
+		if restored.UsedTicket() {
+			t.Fatal("a blob that failed its digest was trusted")
+		}
+		bare, err := newBareCarrier(log)
+		if err != nil {
+			t.Fatalf("bare replay: %v", err)
+		}
+		assertCarrierEqual(t, bare, restored, taskID)
+	})
+
+	t.Run("a legacy schema-one ticket is refused by version", func(t *testing.T) {
+		log := newInvariantFactLog()
+		seedCarrier(t, ctx, log, taskID, "legacy")
+		writer, err := NewDurableCommit(log, nil)
+		if err != nil {
+			t.Fatalf("open the writer: %v", err)
+		}
+		if err := writer.WriteRecoveryTicket(ctx); err != nil {
+			t.Fatalf("file the ticket: %v", err)
+		}
+		for key, body := range log.barrier {
+			if !strings.HasPrefix(key, ticketPrefix) {
+				continue
+			}
+			log.barrier[key] = []byte(strings.Replace(string(body), "\"schema_version\":2", "\"schema_version\":1", 1))
+		}
+		restored, err := NewDurableCommit(log, nil)
+		if err != nil {
+			t.Fatalf("rebuild beside the legacy ticket: %v", err)
+		}
+		if restored.UsedTicket() {
+			t.Fatal("a schema-one ticket was trusted by a schema-two build")
+		}
+		bare, err := newBareCarrier(log)
+		if err != nil {
+			t.Fatalf("bare replay: %v", err)
+		}
+		assertCarrierEqual(t, bare, restored, taskID)
+	})
+
 	t.Run("a ticket beside an empty log restores by pure delta", func(t *testing.T) {
 		log := newInvariantFactLog()
 		writer, err := NewDurableCommit(log, nil)
@@ -301,8 +367,15 @@ func TestRecommitAfterTicketRestoreIsIdempotent(t *testing.T) {
 		t.Fatalf("restore: %v", err)
 	}
 	replay := invariantRecord(taskID, 1, task.StatusSettled, invariantNotice(taskID, 2))
+	mutationsBefore := len(restored.mutations)
 	if result, err := restored.Commit(ctx, replay); err != nil || result != task.CommitCommitted {
 		t.Fatalf("re-commit beside the restored mutations = (%v, %v), want the stored fact reported again", result, err)
+	}
+	if got := len(restored.Facts(taskID)); got != 2 {
+		t.Fatalf("facts after the re-commit = %d, want the two stored records without a duplicate append", got)
+	}
+	if got := len(restored.mutations); got != mutationsBefore {
+		t.Fatalf("mutations after the re-commit = %d, want %d unchanged", got, mutationsBefore)
 	}
 }
 
