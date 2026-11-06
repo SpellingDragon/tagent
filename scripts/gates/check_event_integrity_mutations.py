@@ -762,6 +762,90 @@ MUTATIONS: Tuple[Mutation, ...] = (
         expect_assertion="no query face may report success or completion",
         anchor_subtest="partial_output_is_not_completion",
     ),
+    Mutation(
+        id="MUT-FOLD-01-segment-age-window",
+        basis="FOLD-CONTRACT-segment-age-window",
+        evidence_kind="named_assertion",
+        evidence_ref=(
+            "golden/runtime/fold_contract.json segment_age; golden vector golden/runtime/fold_plan_golden.json; anchor TestFoldPlanGolden"
+        ),
+        description=(
+            "Widen the newest age window by one segment, so a segment the rule reads L1 is judged as L0 material and its ladder moves."
+        ),
+        replacement=Replacement(
+            file="memory/replay/age_segments.go",
+            old="\tcase age < keepRecent:\n",
+            new="\tcase age < keepRecent+1:\n",
+        ),
+        test_package="./memory/replay",
+        test_file="memory/replay/age_plan_test.go",
+        test_name="TestFoldPlanGolden",
+        test_selector="^TestFoldPlanGolden$",
+        expect_assertion="the fold plan golden drifted",
+    ),
+    Mutation(
+        id="MUT-FOLD-02-mid-level-window",
+        basis="FOLD-CONTRACT-mid-level-window",
+        evidence_kind="named_assertion",
+        evidence_ref=(
+            "golden/runtime/fold_contract.json segment_age levels L1 and L2; anchor TestFoldPlanGolden"
+        ),
+        description=(
+            "Widen the L1 window by one segment, so a segment the rule reads L2 reads L1 instead."
+        ),
+        replacement=Replacement(
+            file="memory/replay/age_segments.go",
+            old="\tcase age < keepRecent*2:\n",
+            new="\tcase age < keepRecent*2+1:\n",
+        ),
+        test_package="./memory/replay",
+        test_file="memory/replay/age_plan_test.go",
+        test_name="TestFoldPlanGolden",
+        test_selector="^TestFoldPlanGolden$",
+        expect_assertion="the fold plan golden drifted",
+    ),
+    Mutation(
+        id="MUT-FOLD-03-inflight-fold",
+        basis="FOLD-CONTRACT-inflight-never-folded",
+        evidence_kind="named_assertion",
+        evidence_ref=(
+            "golden/runtime/fold_contract.json segment_age in_flight; anchor TestFoldPlanGolden"
+        ),
+        description=(
+            "Fold the segment still in flight: the plan hands foldProcessDetail a complete segment regardless of the run completion, so the never-folded in-flight process detail folds into a product."
+        ),
+        replacement=Replacement(
+            file="memory/replay/age_plan.go",
+            old="\t\tfolded, product := foldProcessDetail(segment.Entries, segment.Complete)\n",
+            new="\t\tfolded, product := foldProcessDetail(segment.Entries, true)\n",
+        ),
+        test_package="./memory/replay",
+        test_file="memory/replay/age_plan_test.go",
+        test_name="TestFoldPlanGolden",
+        test_selector="^TestFoldPlanGolden$",
+        expect_assertion="the fold plan golden drifted",
+    ),
+    Mutation(
+        id="MUT-FOLD-04-product-type",
+        basis="FOLD-CONTRACT-product-type",
+        evidence_kind="named_assertion",
+        evidence_ref=(
+            "golden/runtime/fold_contract.json products segment_fold.type; anchor TestFoldPlanGolden"
+        ),
+        description=(
+            "Mint the new-band product as a history summary entry, so the product the new band folds into carries the wrong type."
+        ),
+        replacement=Replacement(
+            file="memory/replay/age_segments.go",
+            old="\t\tType:    ProjectionTypeSegmentFold,\n",
+            new="\t\tType:    ProjectionTypeHistorySummary,\n",
+        ),
+        test_package="./memory/replay",
+        test_file="memory/replay/age_plan_test.go",
+        test_name="TestFoldPlanGolden",
+        test_selector="^TestFoldPlanGolden$",
+        expect_assertion="the fold plan golden drifted",
+    ),
 )
 
 # 五类候选形态（04 design D5）：每一类都必须由至少一条已启用变异承载；

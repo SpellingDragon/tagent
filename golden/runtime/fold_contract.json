@@ -1,0 +1,56 @@
+{
+  "schema_version": 1,
+  "adr": "docs/adr/0006-three-hooks-is-the-core-iteration-principle.md",
+  "user_ruling": "restart-recovery-optimization r31/r33/r36",
+  "reason": "压缩策略不得因本变更改变。这条契约记录段龄规则本身：阶梯、带与动作的映射、产物形状、体积阈值因子；golden 向量 golden/runtime/fold_plan_golden.json 由 memory/replay 的 TestFoldPlanGolden 逐字段比对，四条 mutation 证明改规则会被抓到。",
+  "golden_test": "memory/replay/fold_plan_golden_test.go#TestFoldPlanGolden",
+  "golden_vector": "golden/runtime/fold_plan_golden.json",
+  "mutations": [
+    "MUT-FOLD-01-segment-age-window",
+    "MUT-FOLD-02-mid-level-window",
+    "MUT-FOLD-03-inflight-fold",
+    "MUT-FOLD-04-product-type"
+  ],
+  "segment_age": {
+    "keep_recent_default": 2,
+    "levels": [
+      {"level": 0, "band": "new", "when": "age < keep_recent"},
+      {"level": 1, "band": "mid", "when": "age < 2 * keep_recent"},
+      {"level": 2, "band": "mid", "when": "age < 3 * keep_recent"},
+      {"level": 3, "band": "old", "when": "otherwise"}
+    ],
+    "in_flight": {"complete": false, "level": 0, "band": "new", "never_folded": true}
+  },
+  "actions": [
+    {
+      "band": "new",
+      "complete": true,
+      "action": "fold_process_detail",
+      "product": "segment_fold",
+      "reason": "the process detail of the new band is over its volume threshold"
+    },
+    {
+      "band": "mid",
+      "action": "fold_to_history_summary",
+      "product": "history_summary",
+      "reason": "the middle band is over its volume threshold"
+    },
+    {
+      "band": "old",
+      "action": "fold_to_history_summary",
+      "product": "history_summary",
+      "reason": "the middle band is over its volume threshold",
+      "note": "mid 与 old 共用同一条历史摘要：三带、两个动作，golden 记录带名，所以带映射改动同样可见"
+    }
+  ],
+  "volume": {
+    "chars_per_token": 4,
+    "default_compress_threshold": 0.8,
+    "default_age_volume_threshold": 4096,
+    "formula": "max_tokens * chars_per_token * compress_threshold"
+  },
+  "products": {
+    "segment_fold": {"type": "segment_fold", "key_prefix": "seg", "summary": "segment fold"},
+    "history_summary": {"type": "history_summary", "key_prefix": "hist", "summary": "history summary"}
+  }
+}
