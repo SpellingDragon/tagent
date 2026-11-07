@@ -34,7 +34,7 @@
 
 ## D. 载体与收尾
 
-- [ ] 4.a5 **boot 接线（硬前置：4.c1 + E 节 5 条 P1 + G9）**：`seedReplay` 改用锚路径 —— 曾试接并实测三套回归全红（投递恢复仍读 `r.facts` 活账本，稀疏锚账本重复结算），已回退并留源码注释与 r48 证据；接线前须补齐：返回 landed 映射、全产物 `NoteProduct`、covered 事实显式 hydrate、幸存者 trim、pins/compress 状态播种（G9 明证锚路径非 boot 等价；relations 已改判为 4.c1 读侧退役，不在锚路径另建父图）；否则保持 test-only
+- [ ] 4.a5 **boot 接线（本变更完成前必须默认开启；硬前置：4.c1 + E 节 5 条 P1 + G9）**：`seedReplay` 改用锚路径 —— 曾试接并实测三套回归全红（投递恢复仍读 `r.facts` 活账本，稀疏锚账本重复结算），已回退并留源码注释与 r48 证据；接线前须补齐：返回 landed 映射、全产物 `NoteProduct`、covered 事实显式 hydrate、幸存者 trim、pins/compress 状态播种（G9 明证锚路径非 boot 等价；relations 已改判为 4.c1 读侧退役，不在锚路径另建父图）；否则保持 test-only
 - [ ] 4.d1 载体时间纯度审计（terminalTTL 等）—— 验证：纯→结案；不纯→移出快照面+等价锚扩时钟断言
 - [ ] 4.d2 载体游标方案测量与裁定（seq 元数据 / 单一 WAL）—— 验证：折叠锚后 boot 剖面数据入台账
 - [ ] 4.d3 消费者锚：真实 120 重启 —— 验证：boot 在 gen1/20/120 同量级 + 数据准确性对账绿
