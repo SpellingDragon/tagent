@@ -584,18 +584,17 @@ func (s MemoryOriginalStore) References(key event.EventID) []OriginalRef
     retention policies still name the original stays observable.
 
 type OriginalRef struct {
-	// Key is the canonical identity of the original blob, in its hex form. Two
-	// references may share it while their content is byte-identical; the
-	// metadata below is what keeps them apart.
+	// Key is the EventID that owns this original. Different keys never share
+	// a body, even when their bytes are identical.
 	Key event.EventID
 	// Owner is the address the reference belongs to. It is part of the
-	// deduplication scope, so two owners never overwrite each other.
+	// reference scope, so two owners never overwrite each other.
 	Owner event.Address
 	// Format is the original format the reference was registered in. It is part
-	// of the deduplication scope.
+	// of the reference scope.
 	Format string
 	// RetentionPolicy is the retention policy the reference is held under. It is
-	// part of the deduplication scope.
+	// part of the reference scope.
 	RetentionPolicy string
 	// Integrity is the completeness information of the stored bytes.
 	Integrity Integrity
@@ -611,11 +610,10 @@ type OriginalRef struct {
     reference.
 
 func (r OriginalRef) FactKey() string
-    FactKey returns the reference's identity as a fact key: the canonical hex
-    key of the original blob it names. The deduplication scope (owner, format
-    and retention policy) keeps references registered side by side and never
-    re-identifies the blob, so two tickets of byte-identical content answer the
-    same key.
+    FactKey returns the EventID owning the original. The reference scope (owner,
+    format and retention policy) keeps references registered side by side; every
+    EventID owns an independent body, even when another event has identical
+    bytes.
 
 func (r OriginalRef) FactType() string
     FactType returns the frozen type a reference ticket is read as.
@@ -627,9 +625,9 @@ func (r OriginalRef) ReadScope() ReadScope
     to any other scope never aggregates it.
 
 type OriginalStore interface {
-	// Put commits the original bytes of ref. Content may be deduplicated by
-	// blob, while owner, format and retention policy scope the reference
-	// metadata, so an accepted reference is never invalidated by a later Put.
+	// Put commits the independent body owned by ref.Key. Owner, format and
+	// retention policy scope the reference metadata, so an accepted reference
+	// is never invalidated by a later Put.
 	Put(ctx context.Context, ref OriginalRef, body []byte) error
 
 	// Get returns the exact recall result for key: the original bytes,

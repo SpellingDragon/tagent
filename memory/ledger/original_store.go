@@ -73,7 +73,7 @@ type referenceRecord struct {
 }
 
 // originalEntry is everything held under one key: the blob its bytes live in and
-// one reference record per deduplication scope that registered it.
+// one reference record per reference scope that registered it.
 type originalEntry struct {
 	blob *originalBlob
 	refs map[refScope]referenceRecord

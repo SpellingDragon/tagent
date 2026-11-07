@@ -61,7 +61,7 @@
 <div class="card">
 <table>
 <tr><th style="width:190px">处置</th><th>概念</th><th>依据</th></tr>
-<tr><td rowspan="2" style="color:var(--violet)">对外收拢为一个名字</td><td><b>blob + ref → 「原文仓」</b></td><td>两个部件一个职责：字节仓（CAS 去重）+ 账目（scope 授权/租约/血缘）。使用者永远只见「原文仓」；blob/ref 是它的内部件名。</td></tr>
+<tr><td rowspan="2" style="color:var(--violet)">对外收拢为一个名字</td><td><b>blob + ref → 「原文仓」</b></td><td>两个部件一个职责：字节仓（按 EventID 独立）+ 账目（scope 授权/租约/血缘）。使用者永远只见「原文仓」；blob/ref 是它的内部件名。</td></tr>
 <tr><td><b>席位 + 消费回执 + settle attempt → 「通知消费账」</b></td><td>三个记录同管一件事：一条通知被谁认领、是否已消费、尝试到哪。合并讲述，不合并实现。</td></tr>
 <tr><td style="color:var(--dim)">降为实现细节</td><td>分片 / snapshot.json / kvBatch</td><td>物理布局（性能设施），不进概念面——只在讲「为什么快」时出现。</td></tr>
 <tr><td rowspan="4" style="color:var(--gold)">真复杂度，不能减</td><td>链不可变 × 原文可过期</td><td class="cf">必须两层：链永在（回放）与原文按策略过期（retention）是两条正交生命周期，塞一层则两者其一不成立。</td></tr>
@@ -93,7 +93,7 @@ const N={ // 节点: [x,y,w,h,fill,stroke,label]
  mut:[16,240,150,44,'','var(--gold)','任务迁移/回执/交付'],
  caus:[16,330,150,44,'','var(--plug)','消费动作'],
  shard:[400,90,220,56,'rgba(88,166,255,.10)','var(--fact)','事实链分片 snapshot.json'],
- blob:[400,200,105,56,'rgba(240,136,62,.10)','var(--plug)','blob:sha256:'],
+ blob:[400,200,105,56,'rgba(240,136,62,.10)','var(--plug)','blob:EventID'],
  ref:[516,200,104,56,'rgba(240,136,62,.10)','var(--plug)','ref:EventID'],
  jour:[400,310,220,56,'rgba(188,140,255,.10)','var(--violet)','父边（链上推导）'],
  repl:[790,60,250,44,'rgba(63,185,80,.08)','var(--cons)','恢复/重放（折叠重建状态）'],
@@ -103,13 +103,13 @@ const N={ // 节点: [x,y,w,h,fill,stroke,label]
 };
 const E=[ // 边: [from,to,label,dash]
  ['body','shard','正文之外的全部元数据\n（身份/血缘/时间）',0],
- ['body','blob','消息正文 →\nsha256 摘要',0],
+ ['body','blob','消息正文 →\nEventID 独立保存',0],
  ['body','ref','登记 scope+digest+policy',0],
  ['caus','jour','谁消费了谁（追加）',0],
  ['mut','shard','账本记录同落 kv 分片',1],
  ['shard','repl','',1],['shard','asm','',1],
  ['ref','recall','按 EventID 寻址',1],
- ['blob','recall','按 digest 取字节',1],
+ ['blob','recall','按 EventID 取字节',1],
  ['ref','reto','policy=keep → 租约',1],
  ['jour','repl','',1]
 ];
@@ -133,8 +133,8 @@ document.getElementById('map').innerHTML=
 /* ── 概念卡片 ── */
 const CARDS=[
  ['事实链（分片 snapshot）','一切状态的唯一来源：事件按 evt:&lt;毫秒&gt;:&lt;序号&gt; 编址，逐条追加、不可改写','迁移不覆盖、正文永在 → 回退与重放都从它来','没有它：状态没有单一来源，回到任意时刻无从谈起'],
- ['blob（原文字节仓）','内容寻址仓：sha256(正文) 即地址，同字节只存一份','被事实的 digest 引用；读回按摘要复验','没有它：正文进事实链——装载/重放被重字节拖垮，且无法去重'],
- ['ref（引用账目）','每条事实的原文账目：scope（谁可用）+ digest（哪段字节）+ retention_policy（保护期）','越权读作不存在零泄漏；fork 后即血缘册','没有它：recall 取不回原文、跨会话互窥、回收器不敢或误收'],
+ ['blob（原文字节仓）','按 EventID 独立保存：不同消息即使同字节也各存一份','被同 EventID 的 ref 引用；digest/length 只复验本条消息','没有它：正文没有独立的持久化归属，重启后无法按事实精确取回'],
+ ['ref（引用账目）','每条事实的原文账目：scope（谁可用）+ digest（本条正文校验）+ retention_policy（保护期）','越权读作不存在零泄漏；fork 后即血缘册','没有它：recall 取不回原文、跨会话互窥、回收器不敢或误收'],
  ['父边（链上推导）','按 (PartitionID, Seq) 读链得到上一事实，索引缺 session 时正文兜底','查询时直接读链，没有第二份父图','另存 journal：启动要多恢复一份关系副本，且可能错序'],
  ['任务迁移账','admit/settle 各存一条（不覆盖），状态=重放纯读数','同键异内容拒绝（幂等）','没有它：只留终态——任务历史无时光机'],
  ['消费回执','一条通知被消费的唯一凭据；「回执落地才阻止再次投递」','与 owed 交付记录构成先登记后销账','没有它：发送后崩溃=重复投递无上限'],
