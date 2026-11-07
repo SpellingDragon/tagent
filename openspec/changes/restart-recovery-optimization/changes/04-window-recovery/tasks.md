@@ -1,41 +1,52 @@
-# 04-window-recovery 孙任务
+# 04-window-recovery 任务表（r82 按最终路径重写）
 
-## A. 折叠锚（裁定 r45 核心）
+> 目标：事件链是唯一真相；完整重放是恢复基准；折叠锚只是可校验的读优化。
+> 硬门：本变更完成前 4.a5 必须让锚启动默认开启，并证明与完整重放逐条一致。
+> 范围纪律：评审只能对照本表验收；新发现先分为本次回归、历史缺陷、后续优化，禁止自动扩大当前任务。
+> 删除纪律：观察表、关系 journal、通用状态注入、VectorSeam、跨消息正文共享一律不得恢复；零消费者接口优先删除而非保留占位。
 
-- [x] 4.a1 产物载荷扩展：`Execute` 批次末用 `replay.FoldedEntries` 纯函数按投影序记录结构化幸存者（不透明 checkpoint 字节，`Checkpoint/WithCheckpoint`）—— 验证：`TestAnchoredRebuildEqualsFullWalk` 绿（full decoded=92 → anchored=5, anchors=1，逐字段含 Time/Summary/Role/Generation 一致）；`61df08d3`
-- [x] 4.a2 `seedAnchoredReplay`：索引按冻结类型 `typ == event.CompressProductType` 发现锚（`EachIndexNewestFirst` 参数回调，零前缀、零正文读）→ 按 `anchorSlot{partition,session}` 隔离重建 + 边界 seq 尾回放 —— 验证：**12 个锚全绿**（等价含 `RenderProjection` 字节相等/空类型拒锚/坏载荷具名退回/文案拒收/向量缝拒收/未折叠退全量/落地序号/tail>0/跨地址隔离/全新 Run 稀疏账本/快照-提交间插入事件不丢/`mappedEntryOf` 守卫拒收带内容机制事实，删守卫即红）。独立全量拷问 `7addd70d` 在 pinned `2e7dd53d` 返回 FRONTIER NOT EMPTY 七条，逐条修复见 r54；`1284461e`
-- [x] 4.a3 golden 复验：折叠契约向量未随载荷扩展变化（压缩策略零改动），`TestFoldPlanGolden` 绿；四条 MUT-FOLD mutation 逐个 `gate: ok`（仍 killed）。无需重生成 —— 验证见 r51 同批门禁输出
-- [x] 4.a4 **通用状态注入钩子按用户裁定撤回并零残留删除**：`WithAnchorState`、`RegisterAnchorState`、`States/WithStates`、`compress_states`、所有者注册表/捕获/恢复器与专属测试全部移除；锚只保留链可重建的幸存者检查点。`TestBatchCheckpointMatchesPostBatchProjection` 独立保留（旧码 47 vs 7、解码 50 vs 8）；不可推导状态以后只能先建模为事件或既有日志。r61 的放行仅证明旧实现自洽，最新裁定取代其公开 API 方向
+## 一、已完成且封存的机制
 
-## E. 4.b1 审计发现的 12 缺口（r57 归类；A 真实缺口 / B 刻意冷启动 / C 次要）
+- [x] 4.a1 折叠产物携带摘要、死亡名单、按投影序幸存者与 seq 边界；检查点只含链可重建信息。证据：`TestAnchoredRebuildEqualsFullWalk`、`TestBatchCheckpointMatchesPostBatchProjection`、`61df08d3`
+- [x] 4.a2 `seedAnchoredReplay` 测试路径：按冻结类型找锚、按 (partition,session) 隔离、幸存者边界后回放；坏锚退全量。12 锚与四条 fold mutation 通过；`1284461e`。默认 boot 未接线，不在本项冒充完成
+- [x] 4.a3 压缩策略零变化：`TestFoldPlanGolden` 与 MUT-FOLD-01..04 全绿
+- [x] 4.a4 通用状态注入、所有者注册表与外部状态载荷全部删除，无 `WithAnchorState/RegisterAnchorState/States/WithStates/compress_states` 残留
+- [x] 4.b1 Run/Host/ReplayProjection 派生态审计完成；12 项缺口分类为 E1–E12，见下文
+- [x] 4.c1 查询直读持久链；观察表、land 钩子、关系 journal、在线父图全部删除；trace/get-parent 按需推导并支持晚绑定。独立审者 `038a30dc` 于 `b6045d72` 返回 FRONTIER EMPTY
+- [x] 4.c2 VectorSeam、VectorSource、DefaultVectorQueue、启动预热、提交时 Submit 与 Close 排空全部删除；仅在查询时嵌入授权候选。独立审者 `d7d0acc0` 于 `8cd47e52` 返回 FRONTIER EMPTY
 
-- [ ] E1 **P1/A** relations 父图（改判为 4.c1 读侧任务）：撤回新增的 `withRelations`、在线 `SetParent`、`relationHeads` 与 full-boot 写图方案并零残留删除；不新增第二套关系状态。召回 trace/get-parent 在 4.c1 按需从持久链推导，既有 `MemoryRelations` journal、Host 打开与 RecallPort 注入随读侧退役；memory tier/空 Root 不落磁盘 journal。G1
-- [ ] E2 **P1/A** pinnedFacts 空窗：`trimSeededFacts` 早于投递恢复 pin —— 修：拆分 seed/trim，把投递恢复+pin 置于其间；或持久化 pin 键并在 trim 前 seed。G2
-- [ ] E3 **P1/A** 投递账发现仅热窗口：unsettled 义务离开窗口即永不发现 —— 修：从持久链/索引发现 owed 身份，或快照投递账。G3
-- [ ] E4 **P1/A** Host.heldSeq 仅旧迁移恢复：eventified delivery-N 未计，复用 delivery-1 会静默不 park 新 held body —— 修：从已恢复结算事实的 max delivery-N 播种，或实例作用域 ID。G4
-- [ ] E5 **P1/A** Host.invocations 归零：`session#1` 复用，旧 final_round.request 可把新 range 拽入收尾回合 —— 修：从链中 max <session>#N 播种计数器，或 minted ID 纳入实例 ID。G5
-- [ ] E6 **P2/C** Run.sites 不重建：`ActiveSessions` 空、`Unanswered` 漏旧 pending —— 修：从链会话重建 sites，或按耐久链解析 send/unanswered。G6
-- [ ] E7 **P2/C** 重试 attempt/backoff 不恢复：每次重启发新预算 —— 修：结算 meta/账快照持久化 attempt+next-backoff 并 seed consumer。G7
-- [ ] E8 **P2/C** compress.judgments 不 seed：pending 请求无产物则永不执行 —— 修：boot 从 request 事实重建 pending judgments 并 Record。G8
-- [ ] E9 **P2/A** 锚路径非 boot 等价（4.a5 硬前置）：无返回 landed、稀疏 r.facts、NoteProduct 只锚、survivor 不 trim、fold/boundary/recovery 未播种 —— 接线前逐项补齐，否则保持 test-only。G9
-- [ ] E10 **P2/B** endedAt/rangeOpen 刻意冷启动：补 boot 锚钉住语义；将来实现 range 续跑时须重新分类。replayEntry.window 由声明重算（G10 同类）：修：持久化注册窗口或声明变更时重挂。
-- [ ] E11 **P2/C** ReplayProjection.fold/boundary/recovery 无生产写入者（RecoveryHint 读但从不写）—— 修：以 canonical rebuild 作 seed 路径或移植字段 + hint/boundary 锚。
-- [ ] E12 **P2/C** 快照 Cursor 写而不读（与 D7 相悖）—— 修：用 cursor 界 delta 或换 per-task 单调游标，否则删除。G12
+## 二、当前波次：删除非预期机制与空壳
 
-## B. #19 派生态全量清单审计
+- [ ] 4.c0 **原文正文按 EventID 独立（用户裁定，本变更内完成）**：删除 digest→blob 共享表；不同 EventID 同内容也各存一份；同 EventID 多 scope 仍指同一事实；digest/length 仅校验本条消息；旧共享格式具名 `ErrSnapshotCorrupt`，空正文可跨重启恢复 —— 验证：`TestOriginalReferenceIsolation`、`TestStorageCapabilities`、`TestOriginalStoreRefusesLegacySharedBodies`；history/acceptance/capabilities/assembly/runtime-state 与全门绿。实现候选 `2a131277`，放行必须等独立 FRONTIER EMPTY
+- [ ] 4.c3 **最小 tier 懒校验，不重写 OriginalStore**：open 只登记分片；段装载只读数值分区 idx/meta；原文仓只把既有整库 load 延后到首次实际原文访问，其他语义不变；坏 snapshot/ticket 走既有全量重放 —— 验证：OpenTier/Assemble 不读 ref/blob 分片、首读具名错误、物理坏 snapshot/ticket 与独立全量结果一致。非目标：逐 key/逐 digest 读穿、Put/References/BlobCount/完整性模型变化、新 CLI 命令
+- [ ] 4.c4 **零消费者面删除**：删除或内联仅测试占用的 `EachEventNewestFirst`、`EachSessionFact`；收窄仅内部使用的 `FoldKindOf`；修正 `candidateTextSource` 与 ReferenceSource 的文档边界 —— 验证：对应调用点编译与测试绿，grep 无旧导出/空壳；不得新增替代抽象
 
-- [x] 4.b1 状态通道审计（只读，ca5e8c99）：枚举 Run/Host/ReplayProjection 内存态字段并逐项定性，结论 AUDIT COMPLETE 12 gaps（P1 5 / P2 7），三个已知嫌疑定性：relations 父图=真实缺口 G1、endedAt/rangeOpen=刻意冷启动、pinnedFacts=真实缺口 G2。审计表与回答见 r57；缺口清单见 E 节 —— 验证：只读审计报告 + r57 归类 + E 节接线
+## 三、恢复正确性缺口（先修真实断链，不做新机制）
 
-## C. 读侧退役（boot 只做自己的消费）
+- [x] E1 父图缺口已由 4.c1 的按需链推导关闭，无独立关系状态
+- [ ] E2 **P1 / 阻断 4.a5**：pin 恢复先于 seeded trim，重启后固定保留内容不丢 —— 验证：带 pin 的 boot 锚与 trim 反证
+- [ ] E3 **P1 / 阻断 4.a5**：从持久链发现所有未结清投递，不限热窗口 —— 验证：窗口外 owed 在重启后仍被发现且只处理一次
+- [ ] E4 **P1 / 阻断 4.a5**：从已恢复事实播种最大 delivery-N，禁止复用旧挂起编号 —— 验证：重启后新 held body 使用新编号并正确 park
+- [ ] E5 **P1 / 阻断 4.a5**：从链恢复每个 session 的最大轮次号，禁止旧 final_round 请求污染新回合 —— 验证：重启后编号不复用、旧请求不误收尾
+- [ ] E6 **P2**：从链重建 ActiveSessions/Unanswered —— 验证：重启后的活跃与待答集合等于重启前
+- [ ] E7 **P2**：恢复 retry attempt 与 next-backoff，不重置预算 —— 验证：重启前后剩余重试次数与等待时间一致
+- [ ] E8 **P2**：从 compress.request 重建待执行 judgments —— 验证：无产物的 pending 请求重启后仍执行且只执行一次
+- [ ] E9 **G9 / 4.a5 硬前置**：锚路径补齐 landed、完整 NoteProduct、covered hydrate、survivor trim、pins/compress/fold/boundary/recovery 播种 —— 验证：锚启动与全量启动在所有可观察面逐项一致；任一缺失即禁止接线
+- [ ] E10 **刻意冷启动**：endedAt/rangeOpen 不续跑；replayEntry.window 只按当前声明重算 —— 验证：boot 锚钉住该语义；不新增持久状态
+- [ ] E11 ReplayProjection.fold/boundary/recovery 只能由 canonical rebuild 播种；无生产写入者的字段直接删除 —— 验证：读写双方都有消费者，或符号零残留
+- [ ] E12 快照 Cursor 必须用于界 delta，否则删除 —— 验证：游标读取证明增量正确，或写而不读字段零残留
 
-- [ ] 4.c0 **原文去重退役（用户明确裁定，4.c3 前置且独立）**：blob 键从 digest 改为 EventID，删除跨消息 `s.blobs` 共享表；每条消息独立正文，digest 仅作完整性校验，同 EventID 多 scope 仍是一条消息；缺独立正文具名 `ErrSnapshotCorrupt`，空正文正常持久化 —— 验证：`TestOriginalReferenceIsolation` 不同 key 同内容=2、同 key 多 scope=1；`TestStorageCapabilities` localfile 重开独立正文与空正文；`TestOriginalStoreRefusesLegacySharedBodies` 拒旧共享格式；history/acceptance/capabilities/assembly/runtime-state 全绿。禁止恢复共享读取、共享回滚或兼容补丁
-- [x] 4.c1 `TierQuerySource`（`038a30dc` 于 pinned `b6045d72` 返回 FRONTIER EMPTY）：查询直读持久层；`StoreQuerySource`+ObserveStore+land 钩子已原子删除（含能力测试/示例/骨架）；召回父边按需从链推导，`MemoryRelations` journal、Host 打开与 RecallPort 注入已退役，晚绑定 Trace 由 RecallPort 转发 —— 验证：直接查询与既有内核逐项一致、构造不读正文、热窗口外仍可读、父边提交序与跨地址隔离、Bind 前构造的工具 Bind 后可读；22 锚与 race 全绿，启动 land=0、无运行期关系写入；空授权/单分区/ precedence 在损坏分区前不读正文，父边回退限目标分区，durable reopen 无 journal；旧 RelationStore 规格仅考古、不作验收依据且未新增/修改其 delta
-- [x] 4.c2 向量缝整型删除（`d7d0acc0` 于 pinned `8cd47e52` 返回 FRONTIER EMPTY）：`VectorSeam`/`VectorSource`/`DefaultVectorQueue` 与提交时 Submit、启动全史预热、Run.Close 排空全部删除；检索只在本次查询授权候选项的链上原文现算嵌入，`NewStoreSearcher(source, embedder)` 两参 —— 验证：启动/提交嵌入调用=0、keyword-only 不嵌入、hybrid 查询才嵌入、机制文案不入嵌入、TopK/融合/无向量候选逐条一致、嵌入失败查询内退化且恢复后同进程下次查询命中（无需重启）；`TestCandidateEmbeddingNeverSeesMechanismWording` 等 22 锚、contract/tuning/real-store/persistence 套件、窗口界 golden 与变异门全绿
-- [ ] 4.c3 **最小 tier 懒校验（r80 重订，禁止扩成原文仓重写）**：`openLocalFileKV` 只登记分片，不提前扫描；段装载用既有分片标签只读数值分区 idx/meta，file 后端无标签枚举时保留原回退；`kvOriginalStore` 只把**原有整库 load** 延后到首次实际原文访问，读取/写入/回滚/完整性语义及公开签名全部不变 —— 验证：OpenTier/Assemble 不读 ref/blob 分片；坏 ref/blob 首读具名 `ErrSnapshotCorrupt`；物理坏 snapshot/ticket 分片进入既有全量重放且结果一致；既有套件不变。非目标：逐 key/逐 digest 读穿、Put/References/BlobCount/完整性模型修改、同 digest 元数据重构、新增 CLI 命令
+## 四、默认锚启动与最终验收
 
-## D. 载体与收尾
+- [ ] 4.a5 **默认锚 boot（完成硬门）**：仅在 4.c1、E2–E5、E9 全绿后把 `seedReplay` 切到锚路径；不提供隐藏配置开关，不允许完成后仍 test-only —— 验证：同一持久根的全量/锚启动逐条一致，锚路径解码数低于全量，所有消费者回归绿
+- [ ] 4.d1 载体时间纯度审计：terminalTTL 等不纯时间不得进入快照语义；必要时移出快照面并补时钟锚
+- [ ] 4.d2 载体游标测量：记录锚启动剖面，决定 seq 元数据或单一 WAL；无测量不得新增载体
+- [ ] 4.d3 真实 120 重启：gen1/20/120 的 boot 同量级，消息身份不重不漏，fault/drain/storage/folds 全绿；证据入 run notes
 
-- [ ] 4.a5 **boot 接线（本变更完成前必须默认开启；硬前置：4.c1 + E 节 5 条 P1 + G9）**：`seedReplay` 改用锚路径 —— 曾试接并实测三套回归全红（投递恢复仍读 `r.facts` 活账本，稀疏锚账本重复结算），已回退并留源码注释与 r48 证据；接线前须补齐：返回 landed 映射、全产物 `NoteProduct`、covered 事实显式 hydrate、幸存者 trim、pins/compress 状态播种（G9 明证锚路径非 boot 等价；relations 已改判为 4.c1 读侧退役，不在锚路径另建父图）；否则保持 test-only
-- [ ] 4.d1 载体时间纯度审计（terminalTTL 等）—— 验证：纯→结案；不纯→移出快照面+等价锚扩时钟断言
-- [ ] 4.d2 载体游标方案测量与裁定（seq 元数据 / 单一 WAL）—— 验证：折叠锚后 boot 剖面数据入台账
-- [ ] 4.d3 消费者锚：真实 120 重启 —— 验证：boot 在 gen1/20/120 同量级 + 数据准确性对账绿
+## 五、完成定义
+
+1. 上述任务全部完成，独立审者逐阶段 FRONTIER EMPTY；4.c0/4.c3/4.c4/4.a5 不得在评审中扩大范围。
+2. 全量重放与默认锚启动逐条一致，且锚路径解码数低于全量。
+3. 查询、Top-K、trace、权限、投递与压缩策略无未声明变化。
+4. 删除机制无生产或测试空壳残留；旧格式拒绝路径具名，无静默丢历史。
+5. 120 重启消费者证据、CI、F0/F1/F2/F3/F4 全部通过后才允许归档。
