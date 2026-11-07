@@ -291,6 +291,7 @@ func (r *Run) compactFactOrderLocked(dropped map[event.EventID]struct{}) {
 // - The segment commit is the durable write: nothing enters the live ledger before it returns success, and a refused commit leaves the previous position untouched.
 // - An event the tier already published is not committed twice: the very fact the identity already names is answered as the commitment it is, and another content under that identity is refused by name, so a retry of one fact keeps one record and a second fact never lands beside it.
 // - Landing the query record and submitting the vector generation are consequences of a commit that already landed; their failure is reported and never rolls the fact back.
+// - The parent journal is another consequence: a refused derived edge is warned by name and repaired by the full boot walk, never a rollback of the chain fact.
 func (r *Run) persistFact(ctx context.Context, evt event.Event) error {
 	r.mu.Lock()
 	tier := r.tier
@@ -335,6 +336,10 @@ func (r *Run) persistFact(ctx context.Context, evt event.Event) error {
 	err = tier.Segments.StoreEvent(ctx, record)
 	if err == nil {
 		r.landedSeq[partition] = seq
+		chain := replay.ChainKey{PartitionID: partition, SessionID: sessionOf(evt)}
+		if linkErr := r.linkRelationLocked(chain, evt.Key); linkErr != nil {
+			assemblyWarn("tagent: the committed fact %s did not commit its parent link err=%v", evt.Key, linkErr)
+		}
 	}
 	r.landing.Unlock()
 	if errors.Is(err, ledger.ErrContentConflict) {

@@ -9,7 +9,7 @@
 
 ## E. 4.b1 审计发现的 12 缺口（r57 归类；A 真实缺口 / B 刻意冷启动 / C 次要）
 
-- [ ] E1 **P1/A** relations 父图：`SetParent` 唯一生产调用者在 `RebuildProjectionFromWAL`（无生产调用者），boot journal 空、recall 无父边 —— 修：Host 的 `MemoryRelations` 传入 Assemble/seedFullReplay 并逐链 `SetParent`，或按链调 `RebuildProjectionFromWAL`。G1
+- [ ] E1 **P1/A** relations 父图（实现候选，待独立拷问）：Host 在装配前注入同一 `MemoryRelations`；在线提交在 landing 序列内按 `ChainKey{PartitionID, SessionID}` 链接，full boot 按链序补建空图，journal 重放幂等；锚路径不裁剪该图 —— 验证：`TestRelationsFollowCommitsAndRestart` 钉住两 agent 共用 session id 仍两条父链、在线/journal/full boot 一致、重复 boot 零新增记录；删在线链接与删 full 补建两份 overlay 分别变红。G1
 - [ ] E2 **P1/A** pinnedFacts 空窗：`trimSeededFacts` 早于投递恢复 pin —— 修：拆分 seed/trim，把投递恢复+pin 置于其间；或持久化 pin 键并在 trim 前 seed。G2
 - [ ] E3 **P1/A** 投递账发现仅热窗口：unsettled 义务离开窗口即永不发现 —— 修：从持久链/索引发现 owed 身份，或快照投递账。G3
 - [ ] E4 **P1/A** Host.heldSeq 仅旧迁移恢复：eventified delivery-N 未计，复用 delivery-1 会静默不 park 新 held body —— 修：从已恢复结算事实的 max delivery-N 播种，或实例作用域 ID。G4
@@ -34,7 +34,7 @@
 
 ## D. 载体与收尾
 
-- [ ] 4.a5 **boot 接线（硬前置：4.c1 + E 节 5 条 P1 + G9）**：`seedReplay` 改用锚路径 —— 曾试接并实测三套回归全红（投递恢复仍读 `r.facts` 活账本，稀疏锚账本重复结算），已回退并留源码注释与 r48 证据；接线前须补齐：返回 landed 映射、全产物 `NoteProduct`、covered 事实显式 hydrate、幸存者 trim、relations/pins/compress 状态播种（G9 明证锚路径非 boot 等价）；否则保持 test-only
+- [ ] 4.a5 **boot 接线（硬前置：4.c1 + E 节 5 条 P1 + G9）**：`seedReplay` 改用锚路径 —— 曾试接并实测三套回归全红（投递恢复仍读 `r.facts` 活账本，稀疏锚账本重复结算），已回退并留源码注释与 r48 证据；接线前须补齐：返回 landed 映射、全产物 `NoteProduct`、covered 事实显式 hydrate、幸存者 trim、relations 图与 relationHeads（从各 ChainKey 最新索引位播种，避免重启后新事实父边为空）/pins/compress 状态播种（G9 明证锚路径非 boot 等价）；否则保持 test-only
 - [ ] 4.d1 载体时间纯度审计（terminalTTL 等）—— 验证：纯→结案；不纯→移出快照面+等价锚扩时钟断言
 - [ ] 4.d2 载体游标方案测量与裁定（seq 元数据 / 单一 WAL）—— 验证：折叠锚后 boot 剖面数据入台账
 - [ ] 4.d3 消费者锚：真实 120 重启 —— 验证：boot 在 gen1/20/120 同量级 + 数据准确性对账绿

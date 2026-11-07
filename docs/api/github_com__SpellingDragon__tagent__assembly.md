@@ -94,6 +94,10 @@ session, and the request shape an inbound channel posts to the task endpoint.
 Each one is a face the host contributes to the assembly, so the host builds it
 here rather than leaving the wiring to every deployment.
 
+The relation attachment is the one parent-graph face of a run. The host opens
+the journal before assembly, live commits append through the same ledger,
+and the full boot walk backfills an empty graph without replacing the journal.
+
 The minimal public assembly entry of the runtime: one Run assembles the shared
 faces once, publishes the candidate bindings of one declaration through the
 sole publication entry, and drives the agent's own persistent event loop per

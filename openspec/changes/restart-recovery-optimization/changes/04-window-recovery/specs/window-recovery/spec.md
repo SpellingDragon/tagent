@@ -68,6 +68,11 @@
 
 每块非事件内存态 SHALL 明确归于三条通道之一：链事件（语义真相）、主人自持日志（机械重做）或锚捕获；MUST NOT 存在三无状态。审计 SHALL 枚举 Run/Host 全部内存态字段并逐项登记通道，重启后的状态 MUST 与长运行进程逐字段一致。
 
+#### Scenario: relations 父图在线与重启一致
+
+- **WHEN** 两个 agent 共用 session id 交错提交，随后重开 journal 并以空关系图执行 full boot
+- **THEN** 在线、journal 重开与 full boot 的父边一致，两条链互不挂接，重复 boot 不追加重复关系记录
+
 #### Scenario: 审计红
 
 - **WHEN** 某块状态既不落事件、不写自持日志、也不入锚

@@ -593,6 +593,7 @@ func Boot(configPath string, opts ...HostOption) (*Host, error) {
 	options = append(options, withBootConfigReconcile(func(ctx context.Context, run *Run, decl *config.Declaration, natives map[event.AgentID]NativeAgent) error {
 		return reconcileBootConfig(ctx, run, configPath, doc, decl, natives)
 	}))
+	options = append(options, withRelations(relations))
 	run, err := Assemble(ctx, decl, natives, options...)
 	if err != nil {
 		cancel()

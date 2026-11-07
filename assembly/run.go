@@ -293,11 +293,15 @@ type Run struct {
 	// landedSeq holds the last sequence slot each partition committed: it is
 	// seeded from the events the tier already published, so a fact committed
 	// after a restart takes the slot after the last committed one.
-	landedSeq   map[int]int64
-	records     publicationRecords
-	approver    task.Approver
-	policy      plugin.Governor
-	enforcement governance.Enforcement
+	landedSeq map[int]int64
+	// relations is the host's journaled parent graph; relationHeads is rebuilt
+	// from chain order and lives under landing, never a second relation truth.
+	relations     *replay.MemoryRelations
+	relationHeads map[replay.ChainKey]event.EventID
+	records       publicationRecords
+	approver      task.Approver
+	policy        plugin.Governor
+	enforcement   governance.Enforcement
 	// execManager is the execution resource ledger the exec face acquires
 	// through and the lease explanation reads; a declaration that grants the
 	// exec face beside no ledger is refused by name at call time.
@@ -421,6 +425,8 @@ func Assemble(ctx context.Context, decl *config.Declaration, agents map[event.Ag
 		fixers:            map[event.AgentID]*fileFixer{},
 		replays:           map[event.Address]replayEntry{},
 		landedSeq:         map[int]int64{},
+		relations:         cfg.relations,
+		relationHeads:     map[replay.ChainKey]event.EventID{},
 		anchorStateOwners: cfg.anchorStateOwners,
 		approver:          cfg.approver,
 		policy:            cfg.policy,
@@ -1019,6 +1025,8 @@ type assemblyConfig struct {
 	approvals   *approval.ApprovalManager
 	enforcement governance.Enforcement
 	storage     *ledger.StorageConfig
+	// relations is opened by the host before assembly and shared with recall.
+	relations *replay.MemoryRelations
 	// anchorStateOwners is the construction-time registration of state owners,
 	// present before the chain is replayed so boot can restore what a fold filed.
 	anchorStateOwners map[string]anchorStateOwner
@@ -1826,6 +1834,10 @@ func (r *Run) seedFullReplay(ctx context.Context, tier *ledger.Tier) (map[event.
 		addr := replayAddressOf(evt)
 		if addr.SessionID == "" {
 			return nil
+		}
+		chain := replay.ChainKey{PartitionID: stored.PartitionID, SessionID: addr.SessionID}
+		if err := r.linkRelation(chain, evt.Key); err != nil {
+			return fmt.Errorf("tagent: restore the parent of %s: %w", evt.Key, err)
 		}
 		if evt.Type == event.CompressProductType {
 			product, stated := compressProductOf(evt)
