@@ -31,6 +31,19 @@ type SegmentRecord struct {
 	EventTime int64
 	// Body is the event payload, committed byte for byte.
 	Body []byte
+	// typ and session ride in the same batch as the body so a restart can find
+	// the facts it needs without reading any body. They are set by WithChain.
+	typ     string
+	session event.SessionID
+}
+
+// WithChain states the frozen event type and session this record carries in the
+// same batch as its body. The index keeps them as a projection of the fact, so
+// a restart can group by type and session without reading event bodies.
+func (r SegmentRecord) WithChain(typ string, session event.SessionID) SegmentRecord {
+	r.typ = typ
+	r.session = session
+	return r
 }
 
 // StoredEvent is one committed event as a read returns it: the bytes that were
@@ -198,6 +211,8 @@ type indexPosition struct {
 	partition int
 	window    int64
 	seq       int64
+	typ       string
+	session   event.SessionID
 }
 
 // FileSegmentStore commits events into time-window segments over one key-value
@@ -280,19 +295,31 @@ func (s *FileSegmentStore) Load(ctx context.Context) error {
 				continue
 			}
 			value := string(pair.value)
-			at := strings.IndexByte(value, ':')
-			if at < 0 {
+			fields := strings.SplitN(value, ":", 3)
+			if len(fields) < 2 {
 				continue
 			}
-			window, err := strconv.ParseInt(value[:at], 10, 64)
+			window, err := strconv.ParseInt(fields[0], 10, 64)
 			if err != nil {
 				continue
 			}
-			seq, err := strconv.ParseInt(value[at+1:], 10, 64)
+			seq, err := strconv.ParseInt(fields[1], 10, 64)
 			if err != nil {
 				continue
 			}
-			positions[event.EventID(eventKey)] = indexPosition{partition: partition, window: window, seq: seq}
+			var typ string
+			var session event.SessionID
+			if len(fields) == 3 {
+				var carried struct {
+					Type    string          `json:"type"`
+					Session event.SessionID `json:"session"`
+				}
+				if json.Unmarshal([]byte(fields[2]), &carried) == nil {
+					typ = carried.Type
+					session = carried.Session
+				}
+			}
+			positions[event.EventID(eventKey)] = indexPosition{partition: partition, window: window, seq: seq, typ: typ, session: session}
 		}
 		metaPairs, err := s.kv.kvRead(ctx, kvFetch{prefix: fmt.Sprintf("%d:meta:", partition)})
 		if err != nil {
@@ -372,7 +399,14 @@ func (s *FileSegmentStore) StoreEvent(ctx context.Context, rec SegmentRecord) er
 	idxKey := fmt.Sprintf("%d:idx:%s", rec.PartitionID, rec.EventKey)
 	metaKey := fmt.Sprintf("%d:meta:%d", rec.PartitionID, rec.WindowTS)
 	evtValue := append([]byte(nil), rec.Body...)
-	idxValue := []byte(fmt.Sprintf("%d:%d", rec.WindowTS, rec.Seq))
+	idxMeta, err := json.Marshal(struct {
+		Type    string          `json:"type"`
+		Session event.SessionID `json:"session"`
+	}{Type: rec.typ, Session: rec.session})
+	if err != nil {
+		return fmt.Errorf("tagent: encode the index type of %s: %w", rec.EventKey, err)
+	}
+	idxValue := []byte(fmt.Sprintf("%d:%d:%s", rec.WindowTS, rec.Seq, idxMeta))
 	metaValue, err := json.Marshal(meta)
 	if err != nil {
 		return err
@@ -394,7 +428,7 @@ func (s *FileSegmentStore) StoreEvent(ctx context.Context, rec SegmentRecord) er
 		Seq:         rec.Seq,
 		Body:        evtValue,
 	}
-	s.index[rec.EventKey] = indexPosition{partition: rec.PartitionID, window: rec.WindowTS, seq: rec.Seq}
+	s.index[rec.EventKey] = indexPosition{partition: rec.PartitionID, window: rec.WindowTS, seq: rec.Seq, typ: rec.typ, session: rec.session}
 	s.cache.put(stored)
 	s.count++
 	s.windows[windowKey(rec.PartitionID, rec.WindowTS)] = meta
@@ -551,6 +585,48 @@ func (s *FileSegmentStore) eventByKey(ctx context.Context, key event.EventID) (S
 	}
 	s.cache.put(stored)
 	return stored, true, nil
+}
+
+// EachIndexNewestFirst streams the resident index in the reverse of the commit
+// order, handing each entry its key, position, frozen event type and session
+// without reading any body. A restart that only needs to find the newest fact
+// of a given type walks the index alone; an entry whose type is empty leaves
+// the caller to read its body.
+func (s *FileSegmentStore) EachIndexNewestFirst(ctx context.Context, visit func(key event.EventID, partition int, seq int64, typ string, session event.SessionID) error) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	type slot struct {
+		key       event.EventID
+		partition int
+		seq       int64
+		typ       string
+		session   event.SessionID
+	}
+	entries := make([]slot, 0, len(s.index))
+	for key, position := range s.index {
+		entries = append(entries, slot{key: key, partition: position.partition, seq: position.seq, typ: position.typ, session: position.session})
+	}
+	s.mu.Unlock()
+	sort.Slice(entries, func(i, j int) bool {
+		if entries[i].partition != entries[j].partition {
+			return entries[i].partition > entries[j].partition
+		}
+		if entries[i].seq != entries[j].seq {
+			return entries[i].seq > entries[j].seq
+		}
+		return entries[i].key > entries[j].key
+	})
+	for _, entry := range entries {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if err := visit(entry.key, entry.partition, entry.seq, entry.typ, entry.session); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // EachEventNewestFirst streams every published event in the reverse of the

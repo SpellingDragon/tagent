@@ -462,6 +462,12 @@ type ProjectionEntry struct {
     of a committed fact, its type and summary, the original text it carries,
     and its time, in the same shape a recall card entry uses.
 
+func FoldedEntries(entries []ProjectionEntry, products []FoldProduct) []ProjectionEntry
+    FoldedEntries answers the entry sequence a batch of fold products would
+    leave on entries, without touching any projection. A producer states the
+    checkpoint one fold leaves through this pure form, so a restart rebuilds the
+    same sequence without judging the fold again.
+
 func WithInputEvents(entry ProjectionEntry, raw string) ProjectionEntry
     WithInputEvents returns the entry beside the input relation its fact
     recorded: the input_events metadata entry, a JSON array of the input

@@ -240,6 +240,13 @@ func (s *FileSegmentStore) EachEventNewestFirst(ctx context.Context, visit func(
     windowed rebuild that reached its boundary - reads no body beyond the stop.
     A visit error ends the enumeration and is returned.
 
+func (s *FileSegmentStore) EachIndexNewestFirst(ctx context.Context, visit func(key event.EventID, partition int, seq int64, typ string, session event.SessionID) error) error
+    EachIndexNewestFirst streams the resident index in the reverse of the commit
+    order, handing each entry its key, position, frozen event type and session
+    without reading any body. A restart that only needs to find the newest fact
+    of a given type walks the index alone; an entry whose type is empty leaves
+    the caller to read its body.
+
 func (s *FileSegmentStore) EventCount() int
     EventCount returns the number of events published by successful commits,
     so the count moves only where durable success was reported.
@@ -959,11 +966,19 @@ type SegmentRecord struct {
 	EventTime int64
 	// Body is the event payload, committed byte for byte.
 	Body []byte
+
+	// Has unexported fields.
 }
     SegmentRecord is one event on its way into a segment: the partition and
     window it belongs to, the sequence slot it takes, its canonical event key,
     the event time the window meta covers, and the event bytes committed
     verbatim.
+
+func (r SegmentRecord) WithChain(typ string, session event.SessionID) SegmentRecord
+    WithChain states the frozen event type and session this record carries in
+    the same batch as its body. The index keeps them as a projection of the
+    fact, so a restart can group by type and session without reading event
+    bodies.
 
 type SegmentRequest struct {
 	// From is the byte position the segment starts at.

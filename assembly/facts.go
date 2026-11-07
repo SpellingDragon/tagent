@@ -324,14 +324,15 @@ func (r *Run) persistFact(ctx context.Context, evt event.Event) error {
 	}
 	r.landing.Lock()
 	seq := r.landedSeq[partition] + 1
-	err = tier.Segments.StoreEvent(ctx, ledger.SegmentRecord{
+	record := ledger.SegmentRecord{
 		PartitionID: partition,
 		WindowTS:    window,
 		Seq:         seq,
 		EventKey:    evt.Key,
 		EventTime:   window,
 		Body:        encoded,
-	})
+	}.WithChain(evt.Type, sessionOf(evt))
+	err = tier.Segments.StoreEvent(ctx, record)
 	if err == nil {
 		r.landedSeq[partition] = seq
 	}

@@ -9,6 +9,7 @@ package assembly
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"strings"
 	"sync"
@@ -27,16 +28,17 @@ const CompressionConsumerName = "compress-consumer"
 const compressionProducer = "assembly.compress-consumer"
 
 // metaKeyCompressRequest, metaKeyCompressProducer, metaKeyCompressKey,
-// metaKeyCompressCovered and metaKeyCompressText are the metadata keys a compress
-// product fact carries: the product states its five fields, and the event metadata
+// metaKeyCompressCovered, metaKeyCompressText and metaKeyCompressSurvivors are
+// the metadata keys a compress product fact carries: the product states its five fields, and the event metadata
 // is the one durable carrier of them, because a product is material of the
 // projection and never a message of the transcript.
 const (
-	metaKeyCompressRequest  = "compress_request"
-	metaKeyCompressProducer = "compress_producer"
-	metaKeyCompressKey      = "compress_key"
-	metaKeyCompressCovered  = "compress_covered"
-	metaKeyCompressText     = "compress_text"
+	metaKeyCompressRequest   = "compress_request"
+	metaKeyCompressProducer  = "compress_producer"
+	metaKeyCompressKey       = "compress_key"
+	metaKeyCompressCovered   = "compress_covered"
+	metaKeyCompressText      = "compress_text"
+	metaKeyCompressSurvivors = "compress_survivors"
 )
 
 // compressCoveredSeparator separates the covered keys one product fact states:
@@ -202,13 +204,22 @@ func (c *CompressionConsumer) Execute(ctx context.Context, session event.Session
 	for _, product := range report.Products {
 		named[product.Request.ID] = product
 	}
-	for _, request := range pending {
+	last := -1
+	for at, request := range pending {
+		if _, stands := named[request.ID]; stands {
+			last = at
+		}
+	}
+	for at, request := range pending {
 		product, stands := named[request.ID]
 		if !stands {
 			continue
 		}
 		product = coverSettlementFacts(product, projection)
 		minted := event.CompressProductFor(request.ID, compressionProducer, product.Entry.Key, product.Covered, product.Entry.Content)
+		if at == last {
+			minted = minted.WithCheckpoint(anchorCheckpointOf(replay.FoldedEntries(projection.Entries(), []replay.FoldProduct{product})))
+		}
 		if err := c.sessions.FileCompressProduct(ctx, session, minted); err != nil {
 			return err
 		}
@@ -216,6 +227,40 @@ func (c *CompressionConsumer) Execute(ctx context.Context, session event.Session
 		projection.ApplyProducts([]replay.FoldProduct{product})
 	}
 	return nil
+}
+
+// anchorEntry is one entry of the projection state a fold checkpoint carries.
+// Its fields name the entry as the chain states it: identity, frozen type,
+// summary, original text and moment. A survivor whose key resolves in the
+// chain is hydrated from the fact itself; only a synthetic entry carries its
+// text in the checkpoint. No field reads a kind off a key's spelling.
+type anchorEntry struct {
+	Key     event.EventID
+	Type    string
+	Summary string
+	Content string
+	Time    time.Time
+}
+
+// anchorCheckpointOf states the projection entries a fold leaves as an opaque
+// recovery payload: identity, frozen type, summary, text and moment, in display
+// order. The bytes are a chain fact's payload, never a wording the model reads.
+func anchorCheckpointOf(entries []replay.ProjectionEntry) []byte {
+	out := make([]anchorEntry, 0, len(entries))
+	for _, entry := range entries {
+		out = append(out, anchorEntry{
+			Key:     entry.Key,
+			Type:    entry.Type,
+			Summary: entry.Summary,
+			Content: entry.Content,
+			Time:    entry.Time.UTC(),
+		})
+	}
+	encoded, err := json.Marshal(out)
+	if err != nil {
+		return nil
+	}
+	return encoded
 }
 
 // coverSettlementFacts extends the coverage of one history summary with the
@@ -352,6 +397,7 @@ func compressProductEvent(session event.SessionID, agent event.AgentID, product 
 	for _, key := range product.Covered {
 		covered = append(covered, string(key))
 	}
+	survivors := product.Checkpoint()
 	return event.Event{
 		Key:       product.ID,
 		Type:      product.FactType(),
@@ -363,6 +409,7 @@ func compressProductEvent(session event.SessionID, agent event.AgentID, product 
 			metaKeyCompressKey:        string(product.Key),
 			metaKeyCompressCovered:    strings.Join(covered, compressCoveredSeparator),
 			metaKeyCompressText:       product.Text,
+			metaKeyCompressSurvivors:  string(survivors),
 		},
 		Owner: event.Address{AgentID: agent, SessionID: session},
 	}
@@ -382,6 +429,13 @@ func compressProductOf(evt event.Event) (event.CompressProduct, bool) {
 	product := event.CompressProductFor(request, evt.Meta[metaKeyCompressProducer], key, compressCoveredOf(evt.Meta[metaKeyCompressCovered]), evt.Meta[metaKeyCompressText])
 	if product.ID != evt.Key {
 		return event.CompressProduct{}, false
+	}
+	if carried := evt.Meta[metaKeyCompressSurvivors]; carried != "" {
+		var checkpoint []anchorEntry
+		if err := json.Unmarshal([]byte(carried), &checkpoint); err != nil {
+			return event.CompressProduct{}, false
+		}
+		product = product.WithCheckpoint([]byte(carried))
 	}
 	return product, true
 }

@@ -35,6 +35,19 @@ type CompressProduct struct {
 	Covered []EventID
 	// Text is the product text the projection presents.
 	Text string
+	// checkpoint is the opaque recovery payload the fold leaves on this fact.
+	// Its structure belongs to the consumer that reads it back: the fact family
+	// carries bytes, never a public shape a query could surface into the view.
+	checkpoint []byte
+}
+
+// Checkpoint reports the opaque recovery payload this product fact carries.
+func (p CompressProduct) Checkpoint() []byte { return p.checkpoint }
+
+// WithCheckpoint states the opaque recovery payload this product fact carries.
+func (p CompressProduct) WithCheckpoint(payload []byte) CompressProduct {
+	p.checkpoint = payload
+	return p
 }
 
 // ProductAnswers names the judgment one product answers beside the mechanism

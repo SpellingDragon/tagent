@@ -329,6 +329,8 @@ type CompressProduct struct {
 	Covered []EventID
 	// Text is the product text the projection presents.
 	Text string
+
+	// Has unexported fields.
 }
     CompressProduct is one compress product fact: the material a consumer folded
     for one judgment. It is immutable once filed, and it is the only source the
@@ -342,12 +344,18 @@ func CompressProductFor(request EventID, producer string, key EventID, covered [
     it carries, so a repeated execution of the same judgment files nothing new.
     The filing moment stays zero for the log to stamp on first filing.
 
+func (p CompressProduct) Checkpoint() []byte
+    Checkpoint reports the opaque recovery payload this product fact carries.
+
 func (p CompressProduct) FactKey() string
     FactKey returns the product's identity as a fact key: the identity one
     execution is quoted by, unchanged by every retry of that execution.
 
 func (p CompressProduct) FactType() string
     FactType returns the frozen type a compress product is read as.
+
+func (p CompressProduct) WithCheckpoint(payload []byte) CompressProduct
+    WithCheckpoint states the opaque recovery payload this product fact carries.
 
 type CompressRequest struct {
 	// ID is the identity of the judgment: the content-addressed key the request

@@ -18,6 +18,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sort"
@@ -1743,7 +1744,10 @@ type sessionSeed struct {
 // store: no earlier stop is safe in commit order, because a surviving original
 // can sit deeper than an old product event.
 type seedReport struct {
-	Decoded int
+	Decoded   int
+	Anchors   int
+	Fallbacks int
+	Landed    map[int]int64
 }
 
 // seedReplay registers the mapped sequence every session chain already
@@ -1753,6 +1757,10 @@ type seedReport struct {
 // in commit order than an old product event (an input that rolled into a later
 // segment), so the walk cannot stop at a fold boundary without an index of the
 // surviving positions - a stop rule is an open ruling, not a default.
+// The anchored rebuild is proven by the boot-replay anchors but stays off this
+// path until delivery recovery reads the durable chain: the live ledger this
+// full walk seeds is what that recovery reads today, and a sparse anchored
+// ledger doubles the settled facts on a second boot.
 func (r *Run) seedReplay(ctx context.Context, tier *ledger.Tier) (map[int]int64, error) {
 	seeds, landed, _, err := r.seedFullReplay(ctx, tier)
 	if err != nil {
@@ -1842,6 +1850,237 @@ func (r *Run) seedFullReplay(ctx context.Context, tier *ledger.Tier) (map[event.
 	return seeds, landed, report, nil
 }
 
+// seedAnchoredReplay rebuilds each session chain from the newest compress
+// product the index names by frozen event type, then replays only the events
+// committed after that checkpoint. The index walk reads no body of the covered
+// history; a product whose anchor payload is unreadable, and a session that
+// never folded, answer the full replay of that session instead. Anchor
+// discovery never inspects a fact key's spelling.
+func (r *Run) seedAnchoredReplay(ctx context.Context, tier *ledger.Tier) (map[event.Address]*sessionSeed, seedReport, error) {
+	return r.seedAnchoredReplayWith(ctx, tier, anchoredSeam{})
+}
+
+// anchoredSeam is the negative-anchor test seam. Production passes an empty
+// seam; the anchors use it to prove discovery keys off the frozen type alone
+// and that an unreadable anchor payload is refused by name.
+type anchoredSeam struct {
+	mutateRefs   func([]anchorRef)
+	mutateAnchor func(event.Event) event.Event
+}
+
+// anchorRef carries one resident index entry a restart rebuild reads: identity,
+// position, frozen event type and session, with no event body attached.
+type anchorRef struct {
+	key       event.EventID
+	partition int
+	seq       int64
+	typ       string
+	session   event.SessionID
+}
+
+// seedAnchoredReplayWith runs the anchored rebuild under a test seam.
+func (r *Run) seedAnchoredReplayWith(ctx context.Context, tier *ledger.Tier, seam anchoredSeam) (map[event.Address]*sessionSeed, seedReport, error) {
+	report := seedReport{}
+	var refs []anchorRef
+	if err := tier.Segments.EachIndexNewestFirst(ctx, func(key event.EventID, partition int, seq int64, typ string, session event.SessionID) error {
+		refs = append(refs, anchorRef{key: key, partition: partition, seq: seq, typ: typ, session: session})
+		return nil
+	}); err != nil {
+		return nil, report, err
+	}
+	if seam.mutateRefs != nil {
+		seam.mutateRefs(refs)
+	}
+	report.Landed = map[int]int64{}
+	for _, entry := range refs {
+		if entry.seq > report.Landed[entry.partition] {
+			report.Landed[entry.partition] = entry.seq
+		}
+	}
+	anchors := map[event.SessionID]int{}
+	seen := map[event.SessionID]struct{}{}
+	var order []event.SessionID
+	for at, ref := range refs {
+		if ref.session == "" {
+			continue
+		}
+		if _, held := seen[ref.session]; !held {
+			seen[ref.session] = struct{}{}
+			order = append(order, ref.session)
+		}
+		if ref.typ == event.CompressProductType {
+			if _, held := anchors[ref.session]; !held {
+				anchors[ref.session] = at
+			}
+		}
+	}
+	sort.Slice(order, func(i, j int) bool { return order[i] < order[j] })
+	seeds := map[event.Address]*sessionSeed{}
+	for _, session := range order {
+		seed := &sessionSeed{projection: replay.NewReplayProjection()}
+		at, hasAnchor := anchors[session]
+		usable := false
+		var tailProducts []event.CompressProduct
+		if hasAnchor {
+			stored, held, err := tier.Segments.GetEvent(ctx, refs[at].key)
+			if err != nil {
+				return nil, report, err
+			}
+			if held {
+				report.Decoded++
+				body, err := memory.DecodeEventBody(stored.Body)
+				if err != nil {
+					return nil, report, fmt.Errorf("tagent: replay the anchor %s: %w", stored.Key, err)
+				}
+				evt := body.Event()
+				evt.Key = stored.Key
+				if seam.mutateAnchor != nil {
+					evt = seam.mutateAnchor(evt)
+				}
+				product, stated := compressProductOf(evt)
+				var survivors []anchorEntry
+				if stated {
+					if err := json.Unmarshal(product.Checkpoint(), &survivors); err != nil {
+						stated = false
+					}
+				}
+				if stated && len(survivors) > 0 {
+					addr := replayAddressOf(evt)
+					if agent := agentOf(evt); agent != "" {
+						seed.window = r.foldWindowOfAgent(agent)
+					}
+					if err := r.restoreSurvivors(ctx, tier, seed, survivors, &report); err != nil {
+						return nil, report, err
+					}
+					r.compress.NoteProduct(product)
+					report.Anchors++
+					seeds[addr] = seed
+					for i := at - 1; i >= 0; i-- {
+						if refs[i].session != session {
+							continue
+						}
+						product, stated, _, err := r.replayRef(ctx, tier, refs[i].key, seed, &report)
+						if err != nil {
+							return nil, report, err
+						}
+						if stated {
+							tailProducts = append(tailProducts, product)
+						}
+					}
+					seed.projection.RestoreProducts(tailProducts)
+					usable = true
+				} else {
+					assemblyWarn("tagent: the anchor %s of session %s states no readable survivor payload, falling back to the full replay", refs[at].key, session)
+				}
+			} else {
+				assemblyWarn("tagent: the anchor %s of session %s is missing from the chain, falling back to the full replay", refs[at].key, session)
+			}
+		}
+		if !usable {
+			report.Fallbacks++
+			var products []event.CompressProduct
+			agent := event.AgentID("")
+			for i := len(refs) - 1; i >= 0; i-- {
+				if refs[i].session != session {
+					continue
+				}
+				product, stated, owner, err := r.replayRef(ctx, tier, refs[i].key, seed, &report)
+				if err != nil {
+					return nil, report, err
+				}
+				if agent == "" {
+					agent = owner
+				}
+				if stated {
+					products = append(products, product)
+				}
+			}
+			seed.projection.RestoreProducts(products)
+			seeds[event.Address{AgentID: agent, SessionID: session}] = seed
+		}
+	}
+	return seeds, report, nil
+}
+
+// foldWindowOfAgent answers the replay window one chain's agent declared.
+func (r *Run) foldWindowOfAgent(agent event.AgentID) FoldWindow {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return foldWindowOf(specOfLocked(r.current.Plan.Declaration, agent))
+}
+
+// restoreSurvivors hydrates one anchor payload in display order: a key the
+// chain still holds is read back through the fact->projection mapping so its
+// private fields are recovered, and a synthetic entry is stated from the
+// payload itself. Nothing here reads a kind off a key's prefix.
+func (r *Run) restoreSurvivors(ctx context.Context, tier *ledger.Tier, seed *sessionSeed, survivors []anchorEntry, report *seedReport) error {
+	for _, survivor := range survivors {
+		stored, held, err := tier.Segments.GetEvent(ctx, survivor.Key)
+		if err != nil {
+			return err
+		}
+		if held {
+			report.Decoded++
+			body, err := memory.DecodeEventBody(stored.Body)
+			if err != nil {
+				return fmt.Errorf("tagent: hydrate the survivor %s: %w", stored.Key, err)
+			}
+			evt := body.Event()
+			evt.Key = stored.Key
+			r.seedFact(evt)
+			if entry, ok := mappedEntryOf(evt); ok {
+				seed.projection.Append(ctx, entry)
+				continue
+			}
+		}
+		seed.projection.Append(ctx, replay.ProjectionEntry{
+			Key:     survivor.Key,
+			Type:    survivor.Type,
+			Summary: survivor.Summary,
+			Content: survivor.Content,
+			Time:    survivor.Time,
+		})
+	}
+	return nil
+}
+
+// replayRef decodes one indexed event and applies it to a rebuilding seed:
+// the live ledger takes every fact, the projection takes every mapped entry,
+// and a product fact is left to the anchor that already stated its result.
+func (r *Run) replayRef(ctx context.Context, tier *ledger.Tier, key event.EventID, seed *sessionSeed, report *seedReport) (event.CompressProduct, bool, event.AgentID, error) {
+	stored, held, err := tier.Segments.GetEvent(ctx, key)
+	if err != nil {
+		return event.CompressProduct{}, false, "", err
+	}
+	if !held {
+		return event.CompressProduct{}, false, "", nil
+	}
+	report.Decoded++
+	body, err := memory.DecodeEventBody(stored.Body)
+	if err != nil {
+		return event.CompressProduct{}, false, "", fmt.Errorf("tagent: replay the committed event %s: %w", stored.Key, err)
+	}
+	evt := body.Event()
+	evt.Key = stored.Key
+	r.seedFact(evt)
+	if evt.Type == event.CompressProductType {
+		product, stated := compressProductOf(evt)
+		return product, stated, agentOf(evt), nil
+	}
+	if seed.window.MaxTokens == 0 {
+		if agent := agentOf(evt); agent != "" {
+			seed.window = r.foldWindowOfAgent(agent)
+		}
+	}
+	entry, ok := mappedEntryOf(evt)
+	if !ok {
+		return event.CompressProduct{}, false, "", nil
+	}
+	seed.projection.Append(ctx, entry)
+	seed.projection = trimReplayProjection(ctx, seed.projection, seed.window)
+	return event.CompressProduct{}, false, "", nil
+}
+
 // seedFact holds one fact the storage tier already committed in the live
 // ledger of this run: the same map every commit of this process lands in, in
 // the commit order the tier recorded. A restarted run then reads its facts
@@ -1860,9 +2099,15 @@ func (r *Run) seedFact(evt event.Event) {
 // observation table reads it under: the partition its owning agent resolves to,
 // its frozen type, its summary and content, and its event time on the
 // millisecond axis. A fact naming no owning agent belongs to no partition and
-// is not observed rather than filed under an invented one.
+// is not observed rather than filed under an invented one. A compression
+// mechanism fact carries an internal summary and an anchor payload: both are
+// recovery metadata read by the rebuild, so the read face refuses the fact by
+// its frozen type and never surfaces that wording into the model's context.
 func eventRecordOf(evt event.Event) (memory.EventRecord, bool) {
 	if evt.Key == "" {
+		return memory.EventRecord{}, false
+	}
+	if evt.Type == event.CompressProductType || evt.Type == event.CompressRequestType {
 		return memory.EventRecord{}, false
 	}
 	agent := agentOf(evt)

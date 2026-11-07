@@ -138,6 +138,14 @@ func (p *ReplayProjection) ApplyProducts(products []FoldProduct) {
 	p.forgetDroppedLocked()
 }
 
+// FoldedEntries answers the entry sequence a batch of fold products would leave
+// on entries, without touching any projection. A producer states the checkpoint
+// one fold leaves through this pure form, so a restart rebuilds the same
+// sequence without judging the fold again.
+func FoldedEntries(entries []ProjectionEntry, products []FoldProduct) []ProjectionEntry {
+	return applyFoldProducts(entries, products)
+}
+
 // applyFoldProducts places one batch of products onto a fixed entry sequence.
 func applyFoldProducts(entries []ProjectionEntry, products []FoldProduct) []ProjectionEntry {
 	held := make(map[event.EventID]struct{}, len(entries))
