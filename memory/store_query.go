@@ -41,7 +41,10 @@ func NewStoreQuerySource() *StoreQuerySource {
 // the table: the record a query reads and the reference the recall path reads
 // the original under. A body whose canonical key disagrees with the stored key
 // is refused by name. A repeat of one event key keeps the record of the higher
-// window, and a repeat at the same window is an idempotent no-op.
+// window, and a repeat at the same window is an idempotent no-op. A compression
+// mechanism fact is refused by its frozen type: its internal summary and anchor
+// payload are recovery metadata, never material a query may surface into the
+// model's context.
 func (s *StoreQuerySource) LandEvent(ctx context.Context, stored ledger.StoredEvent) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -52,6 +55,9 @@ func (s *StoreQuerySource) LandEvent(ctx context.Context, stored ledger.StoredEv
 	}
 	if body.Key != stored.Key {
 		return ErrBodyKeyMismatch
+	}
+	if body.Type == event.CompressProductType || body.Type == event.CompressRequestType {
+		return nil
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()

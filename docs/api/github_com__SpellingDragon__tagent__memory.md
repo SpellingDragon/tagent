@@ -525,11 +525,14 @@ func (s *StoreQuerySource) Event(key event.EventID) (EventReference, bool)
     key alone.
 
 func (s *StoreQuerySource) LandEvent(ctx context.Context, stored ledger.StoredEvent) error
-    LandEvent decodes one committed event under the body schema and lands it in
-    the table: the record a query reads and the reference the recall path reads
-    the original under. A body whose canonical key disagrees with the stored key
-    is refused by name. A repeat of one event key keeps the record of the higher
-    window, and a repeat at the same window is an idempotent no-op.
+    LandEvent decodes one committed event under the body schema and lands it
+    in the table: the record a query reads and the reference the recall path
+    reads the original under. A body whose canonical key disagrees with the
+    stored key is refused by name. A repeat of one event key keeps the record of
+    the higher window, and a repeat at the same window is an idempotent no-op.
+    A compression mechanism fact is refused by its frozen type: its internal
+    summary and anchor payload are recovery metadata, never material a query may
+    surface into the model's context.
 
 func (s *StoreQuerySource) ObserveStore(ctx context.Context, store *ledger.FileSegmentStore) error
     ObserveStore lands every event the store has published into the table. An
