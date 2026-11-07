@@ -2,9 +2,9 @@
 
 ## A. 折叠锚（裁定 r45 核心）
 
-- [ ] 4.a1 产物载荷扩展：`Execute` 批次应用后按投影序记录幸存者键（含合成键的事实键指向）—— 验证：红锚 `TestAnchoredRebuildEqualsFullWalk`（已立，编译红）
-- [ ] 4.a2 `seedAnchoredReplay`：倒序走链按 `evt.Type == event.CompressProductType` 判别 → 每会话最新携带锚载荷的产物=锚 → 按序查表重建 + 锚后增量 —— 验证：锚重建≡全量走查逐条一致；解码数<全量；从未折叠会话退全量；判别不依赖任何键前缀文案
-- [ ] 4.a3 golden 重生成（折叠契约向量随载荷扩展）+ 四条 mutation 复验 killed
+- [x] 4.a1 产物载荷扩展：`Execute` 批次末用 `replay.FoldedEntries` 纯函数按投影序记录结构化幸存者（不透明 checkpoint 字节，`Checkpoint/WithCheckpoint`）—— 验证：`TestAnchoredRebuildEqualsFullWalk` 绿（full decoded=92 → anchored=5, anchors=1，逐字段含 Time/Summary/Role/Generation 一致）；`61df08d3`
+- [x] 4.a2 `seedAnchoredReplay`：索引按冻结类型 `typ == event.CompressProductType` 发现锚（`EachIndexNewestFirst` 参数回调，零前缀、零正文读）→ 每会话最新锚按序查表重建 + 锚后增量 —— 验证：七个锚全绿（等价/空类型拒锚/坏载荷具名退回/文案拒收/向量缝拒收/未折叠退全量/落地序号）；判别不依赖任何键前缀文案；`61df08d3`+`d6547df3`+`dd10dd2d`+`4f15254a`
+- [x] 4.a3 golden 复验：折叠契约向量未随载荷扩展变化（压缩策略零改动），`TestFoldPlanGolden` 绿；四条 MUT-FOLD mutation 逐个 `gate: ok`（仍 killed）。无需重生成 —— 验证见 r51 同批门禁输出
 - [ ] 4.a4 状态注入钩子（折叠瞬间向会话主权人要不可推导状态快照；注册制；不注册=行为同今天）—— 验证：注入者重启后状态恢复；不注入者不受影响
 
 ## B. #19 派生态全量清单审计
@@ -19,6 +19,7 @@
 
 ## D. 载体与收尾
 
+- [ ] 4.a5 **boot 接线（依赖 4.c1）**：`seedReplay` 改用锚路径 —— 曾试接并实测三套回归全红（投递恢复仍读 `r.facts` 活账本，稀疏锚账本重复结算），已回退并留源码注释与 r48 证据；须先完成 4.c1 查询直读持久层再接
 - [ ] 4.d1 载体时间纯度审计（terminalTTL 等）—— 验证：纯→结案；不纯→移出快照面+等价锚扩时钟断言
 - [ ] 4.d2 载体游标方案测量与裁定（seq 元数据 / 单一 WAL）—— 验证：折叠锚后 boot 剖面数据入台账
 - [ ] 4.d3 消费者锚：真实 120 重启 —— 验证：boot 在 gen1/20/120 同量级 + 数据准确性对账绿
