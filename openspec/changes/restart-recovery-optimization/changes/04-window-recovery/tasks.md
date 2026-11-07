@@ -30,7 +30,7 @@
 
 - [x] 4.c1 `TierQuerySource`（`038a30dc` 于 pinned `b6045d72` 返回 FRONTIER EMPTY）：查询直读持久层；`StoreQuerySource`+ObserveStore+land 钩子已原子删除（含能力测试/示例/骨架）；召回父边按需从链推导，`MemoryRelations` journal、Host 打开与 RecallPort 注入已退役，晚绑定 Trace 由 RecallPort 转发 —— 验证：直接查询与既有内核逐项一致、构造不读正文、热窗口外仍可读、父边提交序与跨地址隔离、Bind 前构造的工具 Bind 后可读；22 锚与 race 全绿，启动 land=0、无运行期关系写入；空授权/单分区/ precedence 在损坏分区前不读正文，父边回退限目标分区，durable reopen 无 journal；旧 RelationStore 规格仅考古、不作验收依据且未新增/修改其 delta
 - [x] 4.c2 向量缝整型删除（`d7d0acc0` 于 pinned `8cd47e52` 返回 FRONTIER EMPTY）：`VectorSeam`/`VectorSource`/`DefaultVectorQueue` 与提交时 Submit、启动全史预热、Run.Close 排空全部删除；检索只在本次查询授权候选项的链上原文现算嵌入，`NewStoreSearcher(source, embedder)` 两参 —— 验证：启动/提交嵌入调用=0、keyword-only 不嵌入、hybrid 查询才嵌入、机制文案不入嵌入、TopK/融合/无向量候选逐条一致、嵌入失败查询内退化且恢复后同进程下次查询命中（无需重启）；`TestCandidateEmbeddingNeverSeesMechanismWording` 等 22 锚、contract/tuning/real-store/persistence 套件、窗口界 golden 与变异门全绿
-- [ ] 4.c3 tier 打开懒校验 —— 验证：启动不读正文；坏分片首读报错退全量
+- [ ] 4.c3 **最小 tier 懒校验（r80 重订，禁止扩成原文仓重写）**：`openLocalFileKV` 只登记分片，不提前扫描；段装载用既有分片标签只读数值分区 idx/meta，file 后端无标签枚举时保留原回退；`kvOriginalStore` 只把**原有整库 load** 延后到首次实际原文访问，读取/写入/回滚/完整性语义及公开签名全部不变 —— 验证：OpenTier/Assemble 不读 ref/blob 分片；坏 ref/blob 首读具名 `ErrSnapshotCorrupt`；物理坏 snapshot/ticket 分片进入既有全量重放且结果一致；既有套件不变。非目标：逐 key/逐 digest 读穿、Put/References/BlobCount/完整性模型修改、同 digest 元数据重构、新增 CLI 命令
 
 ## D. 载体与收尾
 
