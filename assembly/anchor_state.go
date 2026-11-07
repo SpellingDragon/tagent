@@ -29,8 +29,11 @@ type anchorStateSnapshot struct {
 
 // WithAnchorState registers one named owner before assembly opens recovery,
 // so a restart restores through the same registration that a live fold captures
-// through. A nil callback leaves that half unregistered; registering the same
-// name again replaces the pair, so one owner holds one slot.
+// through. Capture runs after the survivor checkpoint is computed and before
+// any product of that batch is filed. It runs outside Run locks, so an owner
+// whose state changes with commits must synchronize its own reads and writes.
+// A nil callback leaves that half unregistered; registering the same name again
+// replaces the pair, so one owner holds one slot.
 func WithAnchorState(name string, capture func(context.Context, event.SessionID) ([]byte, error), restore func(context.Context, event.SessionID, []byte) error) Option {
 	return func(c *assemblyConfig) {
 		if name == "" {
@@ -44,9 +47,11 @@ func WithAnchorState(name string, capture func(context.Context, event.SessionID)
 }
 
 // RegisterAnchorState registers one named owner of state the chain cannot
-// derive on a running assembly. The fold moment calls capture for the session
-// being folded; recovery calls restore with the very bytes capture returned.
-// Use WithAnchorState when the owner must already exist during boot recovery.
+// derive on a running assembly. Capture follows the survivor checkpoint and
+// precedes every product commit of that batch; recovery calls restore with the
+// very bytes capture returned. Callbacks run outside Run locks, so the owner
+// synchronizes its own state. Use WithAnchorState when the owner must already
+// exist during boot recovery.
 func (r *Run) RegisterAnchorState(name string, capture func(context.Context, event.SessionID) ([]byte, error), restore func(context.Context, event.SessionID, []byte) error) {
 	if name == "" {
 		return
@@ -117,6 +122,19 @@ func (r *Run) restoreAnchorStates(ctx context.Context, session event.SessionID, 
 		if err := owner.restore(ctx, session, snapshot.Data); err != nil {
 			return fmt.Errorf("tagent: the state owner %s did not restore session %s: %w", snapshot.Name, session, err)
 		}
+	}
+	return nil
+}
+
+// restoreLatestAnchorState restores the state of the newest checkpoint-bearing
+// product in commit order. A checkpoint-less newest product therefore selects
+// the same prior anchor on the full walk and on the anchored fallback.
+func (r *Run) restoreLatestAnchorState(ctx context.Context, session event.SessionID, products []event.CompressProduct) error {
+	for i := len(products) - 1; i >= 0; i-- {
+		if len(products[i].Checkpoint()) == 0 {
+			continue
+		}
+		return r.restoreAnchorStates(ctx, session, products[i].States())
 	}
 	return nil
 }

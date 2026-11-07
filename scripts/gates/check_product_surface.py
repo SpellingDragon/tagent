@@ -15,7 +15,10 @@ Two rules, both from real incidents this week:
      invisible. This rule freezes the set of exported functions with no product
      caller but with test references; a new one turns the gate red.
 
-Static only: no type checking, no semantic proof. It guarantees no silent growth.
+Static only: no type checking, no semantic proof. It guarantees no silent growth
+of test-only top-level function hooks. Exported methods are deliberately outside
+this inventory: a method addition needs a named ORCHESTRATION rationale, and a
+green result does not claim that the public API stayed unchanged.
 """
 from __future__ import annotations
 

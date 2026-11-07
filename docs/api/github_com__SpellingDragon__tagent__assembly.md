@@ -530,7 +530,9 @@ func (c *CompressionConsumer) Execute(ctx context.Context, session event.Session
     projection the model reads. - A history summary covers every settlement
     fact inside the band it folds: settlement lines never count as fold material
     (foldProjectionOf), the summary consumes their accounting beside the turns,
-    and the facts stay on the chain readable by identity.
+    and the facts stay on the chain readable by identity. - The checkpoint and
+    registered states are prepared before any product of the batch is filed,
+    so a capture refusal files no partial batch and answers no judgment.
 
 func (c *CompressionConsumer) Name() string
     Name reports the stable name of this plugin instance.
@@ -1103,8 +1105,11 @@ type Option = HostOption
 func WithAnchorState(name string, capture func(context.Context, event.SessionID) ([]byte, error), restore func(context.Context, event.SessionID, []byte) error) Option
     WithAnchorState registers one named owner before assembly opens recovery, so
     a restart restores through the same registration that a live fold captures
-    through. A nil callback leaves that half unregistered; registering the same
-    name again replaces the pair, so one owner holds one slot.
+    through. Capture runs after the survivor checkpoint is computed and before
+    any product of that batch is filed. It runs outside Run locks, so an owner
+    whose state changes with commits must synchronize its own reads and writes.
+    A nil callback leaves that half unregistered; registering the same name
+    again replaces the pair, so one owner holds one slot.
 
 func WithApprovals(approvals *approval.ApprovalManager) Option
     WithApprovals attaches the approval book a host document's risk table grades
@@ -1610,9 +1615,11 @@ func (r *Run) ReflectionInput() meditation.ReflectionInput
 
 func (r *Run) RegisterAnchorState(name string, capture func(context.Context, event.SessionID) ([]byte, error), restore func(context.Context, event.SessionID, []byte) error)
     RegisterAnchorState registers one named owner of state the chain cannot
-    derive on a running assembly. The fold moment calls capture for the session
-    being folded; recovery calls restore with the very bytes capture returned.
-    Use WithAnchorState when the owner must already exist during boot recovery.
+    derive on a running assembly. Capture follows the survivor checkpoint and
+    precedes every product commit of that batch; recovery calls restore with the
+    very bytes capture returned. Callbacks run outside Run locks, so the owner
+    synchronizes its own state. Use WithAnchorState when the owner must already
+    exist during boot recovery.
 
 func (r *Run) Rejections() []state.Rejection
     Rejections reports the feedback fact of every notification a target refused,

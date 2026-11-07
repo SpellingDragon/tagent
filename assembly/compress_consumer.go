@@ -58,7 +58,10 @@ const compressCoveredSeparator = "\n"
 // MUST NOT execute a judgment whose material does not stand: it stays pending rather than answering a product of other material.
 type CompressionConsumer struct {
 	sessions compressSessions
-	mu       sync.Mutex
+	// captureStates is wired at assembly, before any commit can execute a fold.
+	// It reads the current registrations on every batch, including later ones.
+	captureStates func(context.Context, event.SessionID) ([]byte, error)
+	mu            sync.Mutex
 	// judgments holds the requests one session filed, in filing order, keyed by
 	// the session whose material they name.
 	judgments map[event.SessionID][]event.CompressRequest
@@ -105,6 +108,14 @@ func NewCompressionConsumer(sessions compressSessions) *CompressionConsumer {
 		sessions:  sessions,
 		judgments: map[event.SessionID][]event.CompressRequest{},
 		answered:  map[event.EventID]struct{}{},
+	}
+}
+
+// setAnchorStateCapture attaches the registration reader used by one fold
+// batch. Construction is the only caller, so the face is set before commits.
+func (c *CompressionConsumer) setAnchorStateCapture(capture func(context.Context, event.SessionID) ([]byte, error)) {
+	if c != nil {
+		c.captureStates = capture
 	}
 }
 
@@ -172,6 +183,7 @@ func (c *CompressionConsumer) NoteProduct(product event.CompressProduct) {
 // product that request names.
 // - The plan is executed over the accounting-free view the production judged (foldProjectionOf): the products name the conversation material, and delivery settlement lines stay in the projection the model reads.
 // - A history summary covers every settlement fact inside the band it folds: settlement lines never count as fold material (foldProjectionOf), the summary consumes their accounting beside the turns, and the facts stay on the chain readable by identity.
+// - The checkpoint and registered states are prepared before any product of the batch is filed, so a capture refusal files no partial batch and answers no judgment.
 func (c *CompressionConsumer) Execute(ctx context.Context, session event.SessionID) error {
 	if c == nil || c.sessions == nil || session == "" {
 		return nil
@@ -212,6 +224,19 @@ func (c *CompressionConsumer) Execute(ctx context.Context, session event.Session
 			last = at
 		}
 	}
+	var checkpoint []byte
+	var states []byte
+	if last >= 0 {
+		product := coverSettlementFacts(named[pending[last].ID], projection)
+		checkpoint = anchorCheckpointOf(replay.FoldedEntries(projection.Entries(), []replay.FoldProduct{product}))
+		if c.captureStates != nil {
+			var err error
+			states, err = c.captureStates(ctx, session)
+			if err != nil {
+				return err
+			}
+		}
+	}
 	for at, request := range pending {
 		product, stands := named[request.ID]
 		if !stands {
@@ -220,7 +245,7 @@ func (c *CompressionConsumer) Execute(ctx context.Context, session event.Session
 		product = coverSettlementFacts(product, projection)
 		minted := event.CompressProductFor(request.ID, compressionProducer, product.Entry.Key, product.Covered, product.Entry.Content)
 		if at == last {
-			minted = minted.WithCheckpoint(anchorCheckpointOf(replay.FoldedEntries(projection.Entries(), []replay.FoldProduct{product})))
+			minted = minted.WithCheckpoint(checkpoint).WithStates(states)
 		}
 		if err := c.sessions.FileCompressProduct(ctx, session, minted); err != nil {
 			return err
@@ -344,8 +369,8 @@ func (s ageFoldSessions) FileCompressProduct(ctx context.Context, session event.
 // fileCompressProduct lands one execution result in the live ledger of this run
 // under the product's content-addressed identity: a product already on record is
 // left as it stands, so one judgment answers one product however often the
-// execution runs. The product carrying the checkpoint is the fold moment, so the
-// registered state owners are captured onto that same fact and onto no other.
+// execution runs. Checkpoint and state payloads are attached before the batch
+// reaches this filing face.
 func (r *Run) fileCompressProduct(ctx context.Context, session event.SessionID, product event.CompressProduct) error {
 	if session == "" {
 		return errors.New("tagent: the compression product names no session chain")
@@ -359,13 +384,6 @@ func (r *Run) fileCompressProduct(ctx context.Context, session event.SessionID, 
 	r.mu.Unlock()
 	if filed {
 		return nil
-	}
-	if len(product.Checkpoint()) > 0 {
-		states, err := r.captureAnchorStates(ctx, session)
-		if err != nil {
-			return err
-		}
-		product = product.WithStates(states)
 	}
 	if _, err := r.commitFactChecked(ctx, compressProductEvent(session, agent, product, time.Now())); err != nil {
 		assemblyWarn("tagent: the compression product of session %s was not committed err=%v", session, err)
@@ -452,10 +470,6 @@ func compressProductOf(evt event.Event) (event.CompressProduct, bool) {
 		product = product.WithCheckpoint([]byte(carried))
 	}
 	if carried := evt.Meta[metaKeyCompressStates]; carried != "" {
-		var snapshots []anchorStateSnapshot
-		if err := json.Unmarshal([]byte(carried), &snapshots); err != nil {
-			return event.CompressProduct{}, false
-		}
 		product = product.WithStates([]byte(carried))
 	}
 	return product, true

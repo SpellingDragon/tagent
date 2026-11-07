@@ -437,6 +437,7 @@ func Assemble(ctx context.Context, decl *config.Declaration, agents map[event.Ag
 		r.leases[id] = &lease
 	}
 	r.compress = NewCompressionConsumer(ageFoldSessions{run: r})
+	r.compress.setAnchorStateCapture(r.captureAnchorStates)
 	r.ageFold = NewAgeFoldPlugin(ageFoldSessions{run: r})
 	r.ageFold.setExecutor(r.compress)
 	r.finalRound = agent.NewFinalRoundPlanner(finalRoundChain{run: r}, r.finalRoundPolicyOf)
@@ -1863,15 +1864,8 @@ func (r *Run) seedFullReplay(ctx context.Context, tier *ledger.Tier) (map[event.
 		seed.projection.RestoreProducts(products[addr])
 	}
 	for _, addr := range productOrder {
-		filed := products[addr]
-		for i := len(filed) - 1; i >= 0; i-- {
-			if len(filed[i].Checkpoint()) == 0 {
-				continue
-			}
-			if err := r.restoreAnchorStates(ctx, addr.SessionID, filed[i].States()); err != nil {
-				return nil, nil, report, err
-			}
-			break
+		if err := r.restoreLatestAnchorState(ctx, addr.SessionID, products[addr]); err != nil {
+			return nil, nil, report, err
 		}
 	}
 	return seeds, landed, report, nil
@@ -1995,7 +1989,7 @@ func (r *Run) seedAnchoredReplayWith(ctx context.Context, tier *ledger.Tier, sea
 					if err != nil {
 						return nil, report, err
 					}
-					if err := r.restoreAnchorStates(ctx, slot.session, product.States()); err != nil {
+					if err := r.restoreLatestAnchorState(ctx, slot.session, []event.CompressProduct{product}); err != nil {
 						return nil, report, err
 					}
 					r.compress.NoteProduct(product)
@@ -2054,6 +2048,9 @@ func (r *Run) seedAnchoredReplayWith(ctx context.Context, tier *ledger.Tier, sea
 				}
 			}
 			seed.projection.RestoreProducts(products)
+			if err := r.restoreLatestAnchorState(ctx, session, products); err != nil {
+				return nil, report, err
+			}
 			seeds[event.Address{AgentID: agent, SessionID: session}] = seed
 		}
 	}
