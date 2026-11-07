@@ -357,7 +357,7 @@ func (r *Run) persistFact(ctx context.Context, evt event.Event) error {
 	if err := supply.source.LandEvent(ctx, landed); err != nil {
 		assemblyWarn("tagent: the committed fact %s is not landed in the query table err=%v", evt.Key, err)
 	}
-	if supply.seam != nil {
+	if supply.seam != nil && !event.CompressionMechanism(evt.Type) {
 		text := body.Message.Content
 		if text == "" {
 			text = body.Meta[event.MetaKeyEventSummary]

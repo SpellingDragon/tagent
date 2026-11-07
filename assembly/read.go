@@ -98,6 +98,9 @@ func supplyRetrieval(ctx context.Context, tier *ledger.Tier, embedder memory.Emb
 		if err != nil {
 			return err
 		}
+		if event.CompressionMechanism(body.Type) {
+			return nil
+		}
 		text := body.Message.Content
 		if text == "" {
 			text = body.Meta[event.MetaKeyEventSummary]

@@ -56,7 +56,7 @@ func (s *StoreQuerySource) LandEvent(ctx context.Context, stored ledger.StoredEv
 	if body.Key != stored.Key {
 		return ErrBodyKeyMismatch
 	}
-	if body.Type == event.CompressProductType || body.Type == event.CompressRequestType {
+	if event.CompressionMechanism(body.Type) {
 		return nil
 	}
 	s.mu.Lock()

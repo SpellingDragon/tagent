@@ -2107,7 +2107,7 @@ func eventRecordOf(evt event.Event) (memory.EventRecord, bool) {
 	if evt.Key == "" {
 		return memory.EventRecord{}, false
 	}
-	if evt.Type == event.CompressProductType || evt.Type == event.CompressRequestType {
+	if event.CompressionMechanism(evt.Type) {
 		return memory.EventRecord{}, false
 	}
 	agent := agentOf(evt)
