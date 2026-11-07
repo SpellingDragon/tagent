@@ -5034,7 +5034,7 @@ func recoverRestoreProcess(t *testing.T, root, out, seedPath string) {
 		EventTypes:   []string{event.TypeActionCommand},
 	})
 	if err != nil {
-		t.Fatalf("the restart read the observation table: %v", err)
+		t.Fatalf("the restart read the durable query: %v", err)
 	}
 	for _, ref := range observed {
 		report.Observed = append(report.Observed, string(ref.Key))

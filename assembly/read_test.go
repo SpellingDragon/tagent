@@ -2,6 +2,9 @@ package assembly
 
 import (
 	"context"
+	"errors"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"sync"
@@ -11,6 +14,7 @@ import (
 	"github.com/SpellingDragon/tagent/api/event"
 	"github.com/SpellingDragon/tagent/memory"
 	"github.com/SpellingDragon/tagent/memory/ledger"
+	"github.com/SpellingDragon/tagent/runtime/agent"
 
 	"trpc.group/trpc-go/trpc-agent-go/model"
 )
@@ -270,6 +274,9 @@ func TestTierParentFollowsCommitOrder(t *testing.T) {
 			t.Fatalf("commit %s: %v", key, err)
 		}
 	}
+	if memory.PartitionIDFromName(string(addrA.AgentID)) == memory.PartitionIDFromName(string(addrB.AgentID)) {
+		t.Fatal("the two parent-chain agents share one partition")
+	}
 	commit(addrA, "parent-a1", at.Add(2*time.Hour))
 	commit(addrB, "parent-b1", at.Add(time.Hour))
 	commit(addrA, "parent-a2", at)
@@ -324,5 +331,98 @@ func TestRecallPortLateBindsParentReader(t *testing.T) {
 	parent, err := reads.Trace.GetParent("late-a2")
 	if err != nil || parent != "late-a1" {
 		t.Fatalf("the late-bound trace answered %q/%v, want late-a1", parent, err)
+	}
+}
+
+// TestTierQueryHonorsScopeBeforeDecoding pins authorization ahead of body reads.
+//
+// 契约: docs/wiki/memory/memory-architecture.md#read-paths
+func TestTierQueryHonorsScopeBeforeDecoding(t *testing.T) {
+	ctx := context.Background()
+	tier, err := ledger.OpenTier(ctx, ledger.StorageConfig{Type: ledger.StorageMemory})
+	if err != nil {
+		t.Fatalf("open the tier: %v", err)
+	}
+	defer tier.Segments.Close()
+	at := time.Date(2026, 11, 6, 12, 0, 0, 0, time.UTC)
+	good := event.Event{Key: "good-scoped", Type: event.TypeExternalInput, Timestamp: at, Meta: map[string]string{event.MetaKeyEventSummary: "ask"}, Message: model.Message{Role: model.RoleUser, Content: "scoped"}, Owner: event.Address{AgentID: "agent-a", SessionID: "session-scoped"}}
+	body, err := memory.BodyFromEvent(good, "test", "test")
+	if err != nil {
+		t.Fatalf("encode the scoped fact: %v", err)
+	}
+	encoded, err := body.Encode()
+	if err != nil {
+		t.Fatalf("marshal the scoped fact: %v", err)
+	}
+	if err := tier.Segments.StoreEvent(ctx, ledger.SegmentRecord{PartitionID: 11, WindowTS: at.UnixMilli(), Seq: 1, EventKey: good.Key, EventTime: at.UnixMilli(), Body: encoded}.WithChain(good.Type, good.Owner.SessionID)); err != nil {
+		t.Fatalf("store the scoped fact: %v", err)
+	}
+	if err := tier.Segments.StoreEvent(ctx, ledger.SegmentRecord{PartitionID: 12, WindowTS: at.UnixMilli(), Seq: 1, EventKey: "corrupt-outside", EventTime: at.UnixMilli(), Body: []byte("not-an-event")}.WithChain(event.TypeExternalInput, "session-outside")); err != nil {
+		t.Fatalf("store the corrupt outside fact: %v", err)
+	}
+	direct := NewTierQuerySource(tier.Segments)
+	for _, opts := range []memory.QueryOptions{{}, {PartitionIDs: []int{11}}, {PartitionID: 11}, {PartitionIDs: []int{11}, PartitionID: 12}} {
+		refs, err := direct.QueryEvents(ctx, opts)
+		if err != nil {
+			t.Fatalf("scoped query %+v read an unauthorized body: %v", opts, err)
+		}
+		want := 1
+		if opts.PartitionID == 0 && len(opts.PartitionIDs) == 0 {
+			want = 0
+		}
+		if len(refs) != want {
+			t.Fatalf("scoped query %+v returned %d refs, want %d", opts, len(refs), want)
+		}
+	}
+	for _, check := range []struct {
+		opts memory.QueryOptions
+		want error
+	}{
+		{opts: memory.QueryOptions{OrderBy: "invalid"}, want: memory.ErrQueryOrder},
+		{opts: memory.QueryOptions{Offset: -1}, want: memory.ErrQueryPaging},
+	} {
+		if _, err := direct.QueryEvents(ctx, check.opts); !errors.Is(err, check.want) {
+			t.Fatalf("invalid query %+v returned %v, want %v before any read", check.opts, err, check.want)
+		}
+	}
+}
+
+// TestTierParentSurvivesDurableReopen pins parent derivation across a real restart.
+//
+// 契约: docs/wiki/memory/memory-architecture.md#read-paths
+func TestTierParentSurvivesDurableReopen(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	storage := WithStorage(ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: root})
+	first := windowChainRun(t, ctx, storage)
+	addr := event.Address{AgentID: "agent-a", SessionID: "session-durable-parent"}
+	at := time.Date(2026, 11, 6, 12, 0, 0, 0, time.UTC)
+	for _, item := range []struct {
+		key event.EventID
+		at  time.Time
+	}{
+		{key: "durable-a1", at: at.Add(2 * time.Hour)},
+		{key: "durable-a2", at: at},
+	} {
+		evt := event.Event{Key: item.key, Type: event.TypeExternalInput, Timestamp: item.at, Meta: map[string]string{event.MetaKeyEventSummary: "ask"}, Message: model.Message{Role: model.RoleUser, Content: "parent"}, Owner: addr}
+		if _, err := first.CommitToSession(ctx, addr, evt); err != nil {
+			t.Fatalf("commit %s: %v", item.key, err)
+		}
+	}
+	if _, err := first.Close(ctx, agent.CloseRequest{Timeout: time.Now().Add(5 * time.Second)}); err != nil {
+		t.Fatalf("drain the first run: %v", err)
+	}
+	second := windowChainRun(t, ctx, storage)
+	defer func() {
+		if _, err := second.Close(ctx, agent.CloseRequest{Timeout: time.Now().Add(5 * time.Second)}); err != nil {
+			t.Fatalf("drain the restarted run: %v", err)
+		}
+	}()
+	parent, err := NewTierQuerySource(second.tier.Segments).GetParent("durable-a2")
+	if err != nil || parent != "durable-a1" {
+		t.Fatalf("the durable restart parent = %q/%v, want durable-a1", parent, err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "relations")); !os.IsNotExist(err) {
+		t.Fatalf("the durable restart created a relation journal directory: %v", err)
 	}
 }

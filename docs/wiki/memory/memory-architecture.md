@@ -197,9 +197,9 @@
 
 **声明式语义**：结果 ≡ 过滤（分区 → 类型 → 时间窗 → 关键词）→ 全序 `(Timestamp, Key)` sort（desc 时两者同时反向）→ offset/limit。关键词匹配是"任一词命中即算命中"的大小写不敏感子串匹配，作用在摘要或正文上；空关键词视为全部匹配。这类"可观察结果只由这几步决定"的性质，是分片布局能被替换的唯一前提。
 
-**观察表**（`memory/store_query.go`）：检索与按键回捞都读同一张表，表里装的只是**已 land 的事实**——`ObserveStore` 全量装入，`LandEvent` 增量装入并拒绝 `body.Key` 与存储键不一致。判据是"一条事件在被观察之前不能被查询消费"，所以查询面永远不含正在提交中的半条。
+**持久链直读**（`assembly/read.go` 的 `tierQuerySource`）：检索与按键回捞都直接读链，没有观察表或 land 步骤。查询先 `Validate` 并解析授权分区，再只读取准入分区的正文；空授权不读任何分区，未授权分区的损坏也不会泄漏进结果。`recordOfTierEvent` 拒绝 `body.Key` 与存储键不一致及压缩机制事实。
 
-**装配面**（`assembly/read.go:84` `supplyRetrieval`）：观察表 → （可选）向量缝 → `NewStoreSearcher`。没有嵌入器时不建缝、不调嵌入，检索只走关键词腿——这是契约写明的**零变化行为**。原文回捞的 scope 由装配期 `NewScopedReader` 绑定一次（`assembly/tools.go` `RecallPort.GetScoped`），绑定后无法在调用点放宽。
+**装配面**（`assembly/read.go` `supplyRetrieval`）：持久链直读 → （可选）向量缝 → `NewStoreSearcher`。没有嵌入器时不建缝、不调嵌入，检索只走关键词腿——这是契约写明的**零变化行为**。原文回捞的 scope 由装配期 `NewScopedReader` 绑定一次（`assembly/tools.go` `RecallPort.GetScoped`），绑定后无法在调用点放宽。
 
 <a id="inmemory-retrieval"></a>
 ## 九、检索与融合

@@ -50,14 +50,3 @@ func (r *MemoryRelations) GetParent(child event.EventID) (event.EventID, error) 
 	defer r.mu.Unlock()
 	return r.parents[child], nil
 }
-
-// Links returns a copy of the parent links the map holds.
-func (r *MemoryRelations) Links() map[event.EventID]event.EventID {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	links := make(map[event.EventID]event.EventID, len(r.parents))
-	for child, parent := range r.parents {
-		links[child] = parent
-	}
-	return links
-}

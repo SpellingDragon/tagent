@@ -149,25 +149,32 @@ func (t *getTool) Call(ctx context.Context, jsonArgs []byte) (any, error) {
 	answer.Next = segment.Next.Offset
 	answer.EOF = segment.EOF
 	if args.IncludeParent {
-		answer.Parent = t.parentOf(key)
+		parent, reason := t.parentOf(key)
+		if reason != "" {
+			answer.Reason = reason
+			return encode(GetToolName, answer)
+		}
+		answer.Parent = parent
 	}
 	return encode(GetToolName, answer)
 }
 
-// parentOf renders the summary of the parent event of one key, or nothing when
-// the chain has no parent there or the parent lies outside the granted
-// partitions.
-func (t *getTool) parentOf(key event.EventID) *eventItem {
+// parentOf renders the summary of the parent event of one key and names a
+// parent-read failure instead of presenting it as no parent.
+func (t *getTool) parentOf(key event.EventID) (*eventItem, string) {
 	parent, err := t.reads.Trace.GetParent(key)
-	if err != nil || parent == "" {
-		return nil
+	if err != nil {
+		return nil, reasonRelationError
+	}
+	if parent == "" {
+		return nil, ""
 	}
 	landed, held := t.reads.Table.Event(parent)
 	if !held || !t.admits(landed.PartitionID) {
-		return nil
+		return nil, ""
 	}
 	item := itemOf(landed)
-	return &item
+	return &item, ""
 }
 
 // readReason names the reason a scoped read served no text, or the empty string

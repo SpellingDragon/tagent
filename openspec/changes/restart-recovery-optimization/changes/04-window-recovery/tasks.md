@@ -28,7 +28,7 @@
 
 ## C. 读侧退役（boot 只做自己的消费）
 
-- [ ] 4.c1 `TierQuerySource`（实现候选，待独立拷问）：查询直读持久层；`StoreQuerySource`+ObserveStore+land 钩子已原子删除（含能力测试/示例/骨架）；召回父边按需从链推导，`MemoryRelations` journal、Host 打开与 RecallPort 注入已退役，晚绑定 Trace 由 RecallPort 转发 —— 验证：直接查询与既有内核逐项一致、构造不读正文、热窗口外仍可读、父边提交序与跨地址隔离、Bind 前构造的工具 Bind 后可读；19 锚与 race 全绿，启动 land=0、无运行期关系写入
+- [ ] 4.c1 `TierQuerySource`（实现候选，待独立拷问）：查询直读持久层；`StoreQuerySource`+ObserveStore+land 钩子已原子删除（含能力测试/示例/骨架）；召回父边按需从链推导，`MemoryRelations` journal、Host 打开与 RecallPort 注入已退役，晚绑定 Trace 由 RecallPort 转发 —— 验证：直接查询与既有内核逐项一致、构造不读正文、热窗口外仍可读、父边提交序与跨地址隔离、Bind 前构造的工具 Bind 后可读；21 锚与 race 全绿，启动 land=0、无运行期关系写入；空授权/单分区/ precedence 在损坏分区前不读正文，父边回退限目标分区，durable reopen 无 journal；REMOVED/MODIFIED 规格 delta 覆盖旧 RelationStore
 - [ ] 4.c2 向量缝整型删除：检索按候选现嵌入 —— 验证：Top-K 与今天逐条一致；启动 Submit=0
 - [ ] 4.c3 tier 打开懒校验 —— 验证：启动不读正文；坏分片首读报错退全量
 

@@ -67,7 +67,7 @@
 <tr><td rowspan="4" style="color:var(--gold)">真复杂度，不能减</td><td>链不可变 × 原文可过期</td><td class="cf">必须两层：链永在（回放）与原文按策略过期（retention）是两条正交生命周期，塞一层则两者其一不成立。</td></tr>
 <tr><td>ref 的 scope 隔离</td><td class="cf">多会话真需求：越权读作不存在、零泄漏——删掉则跨会话原文互窥。</td></tr>
 <tr><td>先登记 owed、后消费回执</td><td class="cf">跨批无事务下的崩溃不漏送；删掉则发送途中崩溃=永久丢结果。</td></tr>
-<tr><td>relations.journal 因果日志</td><td class="cf">「谁消费了谁」的独立可重放面；塞进事实链则因果与正文耦合，重放装不上轻链。</td></tr>
+<tr><td>父边（查询时从链推导）</td><td class="cf">按 (PartitionID, Seq) 读链即得父子关系；另存 journal 只会增加恢复与对账副本。</td></tr>
 </table>
 <div class="merge"><div class="t">一句话总纲</div>链管<b>身份与因果</b>（轻、恒重放）· 原文仓管<b>字节</b>（重、按需取、可过期）· 账本管<b>责任</b>（受理/消费/交付）· 其余一切现算。</div>
 </div>
@@ -80,7 +80,7 @@
 const AUD=[
  {k:'L1 使用者（接 bot 的开发者）',n:5,items:['<b>Boot(config)</b>：一条路装配','<b>Invoke(request)</b>：驱动一轮','<b>NativeAgent.Tools</b>：注册工具（适配器只需执行/取消/恢复证据）','<b>Sender</b>：往渠道发消息','<b>Approver</b>：审批回调'],say:'存储内部对这一层<b>完全不可见</b>。12 个概念一个都不需要知道。'},
  {k:'L2 扩展者（写插件）',n:7,items:['以上 5 个','<b>事实链</b>：一切状态的唯一来源（插件观察/呈现它）','<b>六端口</b>：call→call / call→ruling / request→environment / fact→observation / fact→view / fact→compression'],say:'需要理解「链 + 端口」两个概念——正好是 EXTENSIONS.md 的全部。'},
- {k:'L3 维护者（改存储/runtime）',n:12,items:['以上 7 个','原文仓（blob+ref）','relations.journal','通知消费账（席位/回执/attempt）','交付账本（owed→sent 七态）','分片与快照（性能设施）'],say:'全部 12 个——但按下方一张图 + 反事实卡片各就各位，约 20 分钟建立全局。'}
+ {k:'L3 维护者（改存储/runtime）',n:12,items:['以上 7 个','原文仓（blob+ref）','父边（链上推导）','通知消费账（席位/回执/attempt）','交付账本（owed→sent 七态）','分片与快照（性能设施）'],say:'全部 12 个——但按下方一张图 + 反事实卡片各就各位，约 20 分钟建立全局。'}
 ];
 const audEl=document.getElementById('aud'),audBody=document.getElementById('audBody');
 AUD.forEach((a,i)=>{const b=document.createElement('button');b.textContent=a.k+' · '+a.n+' 概念';b.onclick=()=>{[...audEl.children].forEach((x,j)=>x.classList.toggle('on',j===i));audBody.innerHTML='<div style="margin:8px 0">'+a.items.map(x=>'· '+x).join('&nbsp;&nbsp;')+'</div><div class="note">'+a.say+'</div>'};audEl.appendChild(b)});
@@ -95,7 +95,7 @@ const N={ // 节点: [x,y,w,h,fill,stroke,label]
  shard:[400,90,220,56,'rgba(88,166,255,.10)','var(--fact)','事实链分片 snapshot.json'],
  blob:[400,200,105,56,'rgba(240,136,62,.10)','var(--plug)','blob:sha256:'],
  ref:[516,200,104,56,'rgba(240,136,62,.10)','var(--plug)','ref:EventID'],
- jour:[400,310,220,56,'rgba(188,140,255,.10)','var(--violet)','relations.journal'],
+ jour:[400,310,220,56,'rgba(188,140,255,.10)','var(--violet)','父边（链上推导）'],
  repl:[790,60,250,44,'rgba(63,185,80,.08)','var(--cons)','恢复/重放（折叠重建状态）'],
  asm:[790,150,250,44,'rgba(63,185,80,.08)','var(--cons)','装配（按预算重算上下文）'],
  recall:[790,240,250,44,'rgba(63,185,80,.08)','var(--cons)','recall（scope 内回捞原文）'],
@@ -135,7 +135,7 @@ const CARDS=[
  ['事实链（分片 snapshot）','一切状态的唯一来源：事件按 evt:&lt;毫秒&gt;:&lt;序号&gt; 编址，逐条追加、不可改写','迁移不覆盖、正文永在 → 回退与重放都从它来','没有它：状态没有单一来源，回到任意时刻无从谈起'],
  ['blob（原文字节仓）','内容寻址仓：sha256(正文) 即地址，同字节只存一份','被事实的 digest 引用；读回按摘要复验','没有它：正文进事实链——装载/重放被重字节拖垮，且无法去重'],
  ['ref（引用账目）','每条事实的原文账目：scope（谁可用）+ digest（哪段字节）+ retention_policy（保护期）','越权读作不存在零泄漏；fork 后即血缘册','没有它：recall 取不回原文、跨会话互窥、回收器不敢或误收'],
- ['relations.journal（因果日志）','追加式日志：谁消费了谁——通知驱动的因果独立重放','重放重建因果；损坏拒开不断链','没有它：因果塞进事实链——正文与关系耦合，轻链变重'],
+ ['父边（链上推导）','按 (PartitionID, Seq) 读链得到上一事实，索引缺 session 时正文兜底','查询时直接读链，没有第二份父图','另存 journal：启动要多恢复一份关系副本，且可能错序'],
  ['任务迁移账','admit/settle 各存一条（不覆盖），状态=重放纯读数','同键异内容拒绝（幂等）','没有它：只留终态——任务历史无时光机'],
  ['消费回执','一条通知被消费的唯一凭据；「回执落地才阻止再次投递」','与 owed 交付记录构成先登记后销账','没有它：发送后崩溃=重复投递无上限'],
  ['settle attempt','follow-up 尝试的终态记录：落地即销判据','重启后读到 landed attempt → 补交接','没有它：杀在窗口内=已生成结果永久漏送'],

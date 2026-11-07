@@ -561,11 +561,11 @@ func commitResidencyChain(t *testing.T, ctx context.Context, run *Run, addr even
 		prefix+"-closing", "inv-residency", "the answer that closed the chain", event.TypeAgentOutput))
 }
 
-// TestAssemblyObservedReplayFactsBounded pins the three resident faces to the fact window.
-// - the live fact ledger, the observation read and the replay sequence never exceed it
+// TestAssemblyReplayFactsBounded pins live bounds beside complete durable reads.
+// - the live fact ledger and replay sequence stay bounded while the durable query returns every committed fact
 //
 // 契约: docs/wiki/agent/event-flow.md#projection-lifecycle
-func TestAssemblyObservedReplayFactsBounded(t *testing.T) {
+func TestAssemblyReplayFactsBounded(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
 	run := residencyTestRun(t, ctx)
@@ -576,12 +576,12 @@ func TestAssemblyObservedReplayFactsBounded(t *testing.T) {
 	if got := run.CommittedFacts(); got != noWindowResidentFacts {
 		t.Fatalf("the live fact ledger holds %d facts, want the %d-fact window", got, noWindowResidentFacts)
 	}
-	refs, err := run.ObservedEvents(ctx, memory.QueryOptions{})
+	refs, err := run.ObservedEvents(ctx, memory.QueryOptions{PartitionIDs: []int{memory.PartitionIDFromName(string(addr.AgentID))}})
 	if err != nil {
-		t.Fatalf("observe the window: %v", err)
+		t.Fatalf("read the durable history: %v", err)
 	}
-	if len(refs) > noWindowResidentFacts {
-		t.Fatalf("the observation read answered %d facts, want at most the window %d", len(refs), noWindowResidentFacts)
+	if len(refs) != seeded+1 {
+		t.Fatalf("the durable read answered %d facts, want all %d committed facts plus the closing output", len(refs), seeded+1)
 	}
 	entries, carried := run.ReplayEntries(addr.SessionID)
 	if !carried {
@@ -593,7 +593,7 @@ func TestAssemblyObservedReplayFactsBounded(t *testing.T) {
 }
 
 // TestAssemblyColdWindowReadback pins the read-back equivalence of a fact that left the window.
-// - the observed read never answers it
+// - the durable query still answers it
 // - the identity read returns the committed fact byte for byte
 //
 // 契约: docs/wiki/memory/memory-architecture.md#read-paths
@@ -609,14 +609,18 @@ func TestAssemblyColdWindowReadback(t *testing.T) {
 	if _, held := run.factOf(oldKey); held {
 		t.Fatalf("the fact %s is still in the live ledger, so the cold read proves nothing", oldKey)
 	}
-	refs, err := run.ObservedEvents(ctx, memory.QueryOptions{})
+	refs, err := run.ObservedEvents(ctx, memory.QueryOptions{PartitionIDs: []int{memory.PartitionIDFromName(string(addr.AgentID))}})
 	if err != nil {
-		t.Fatalf("observe the window: %v", err)
+		t.Fatalf("read the durable history: %v", err)
 	}
+	found := false
 	for _, ref := range refs {
 		if ref.Key == oldKey {
-			t.Fatalf("the observation read answered the fact %s outside the window", oldKey)
+			found = true
 		}
+	}
+	if !found {
+		t.Fatalf("the durable read lost the cold fact %s", oldKey)
 	}
 	restored, err := run.CommittedEvent(ctx, oldKey)
 	if err != nil {

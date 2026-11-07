@@ -2,6 +2,7 @@ package assembly
 
 import (
 	"context"
+	"fmt"
 	"sort"
 
 	"github.com/SpellingDragon/tagent/api/event"
@@ -77,6 +78,8 @@ type tierQuerySource struct {
 }
 
 // NewTierQuerySource attaches the durable read face without landing anything.
+// The returned face answers QueryEvents, Event, Reference and GetParent on
+// demand and retains no event or parent map between calls.
 func NewTierQuerySource(segments *ledger.FileSegmentStore) *tierQuerySource {
 	return &tierQuerySource{segments: segments}
 }
@@ -101,13 +104,30 @@ func (s *tierQuerySource) QueryEvents(ctx context.Context, opts memory.QueryOpti
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
+	if err := opts.Validate(); err != nil {
+		return nil, err
+	}
+	partitions := queryPartitionsOf(opts)
+	if len(partitions) == 0 {
+		return []memory.EventReference{}, nil
+	}
 	query := memory.NewMemoryEventQuery()
-	if err := s.segments.EachEvent(ctx, func(stored ledger.StoredEvent) error {
-		record, _, held, err := recordOfTierEvent(stored)
+	if err := s.segments.EachIndexNewestFirst(ctx, func(key event.EventID, partition int, _ int64, _ string, _ event.SessionID) error {
+		if !partitions[partition] {
+			return nil
+		}
+		stored, held, err := s.segments.GetEvent(ctx, key)
 		if err != nil {
 			return err
 		}
 		if !held {
+			return fmt.Errorf("%w: %s", ledger.ErrSegmentBodyMissing, key)
+		}
+		record, _, admitted, err := recordOfTierEvent(stored)
+		if err != nil {
+			return err
+		}
+		if !admitted {
 			return nil
 		}
 		return query.Store(ctx, record)
@@ -115,6 +135,21 @@ func (s *tierQuerySource) QueryEvents(ctx context.Context, opts memory.QueryOpti
 		return nil, err
 	}
 	return query.QueryEvents(ctx, opts)
+}
+
+// queryPartitionsOf resolves the authorized partition set before any body read.
+func queryPartitionsOf(opts memory.QueryOptions) map[int]bool {
+	partitions := map[int]bool{}
+	if len(opts.PartitionIDs) > 0 {
+		for _, partition := range opts.PartitionIDs {
+			partitions[partition] = true
+		}
+		return partitions
+	}
+	if opts.PartitionID != 0 {
+		partitions[opts.PartitionID] = true
+	}
+	return partitions
 }
 
 // Event returns one event reference directly from the chain.
@@ -183,33 +218,49 @@ func (s *tierQuerySource) GetParent(key event.EventID) (event.EventID, error) {
 		return "", err
 	}
 	if fallback {
-		return s.parentFromBodies(key)
+		return s.parentFromBodies(key, partition)
 	}
 	return parent, nil
 }
 
-// parentFromBodies resolves chains whose index carries no session.
-func (s *tierQuerySource) parentFromBodies(key event.EventID) (event.EventID, error) {
+// parentFromBodies resolves chains whose index carries no session. Only the
+// key's partition is decoded; an empty session remains its own chain.
+func (s *tierQuerySource) parentFromBodies(key event.EventID, partition int) (event.EventID, error) {
+	var refs []anchorRef
+	if err := s.segments.EachIndexNewestFirst(context.Background(), func(candidate event.EventID, part int, seq int64, typ string, session event.SessionID) error {
+		if part == partition {
+			refs = append(refs, anchorRef{key: candidate, partition: part, seq: seq, typ: typ, session: session})
+		}
+		return nil
+	}); err != nil {
+		return "", err
+	}
 	previous := map[replay.ChainKey]event.EventID{}
 	parent := event.EventID("")
-	err := eachCommittedEvent(context.Background(), &ledger.Tier{Segments: s.segments}, func(stored ledger.StoredEvent) error {
+	for i := len(refs) - 1; i >= 0; i-- {
+		stored, held, err := s.segments.GetEvent(context.Background(), refs[i].key)
+		if err != nil {
+			return "", err
+		}
+		if !held {
+			return "", fmt.Errorf("%w: %s", ledger.ErrSegmentBodyMissing, refs[i].key)
+		}
 		body, err := memory.DecodeEventBody(stored.Body)
 		if err != nil {
-			return err
+			return "", err
 		}
 		evt := body.Event()
 		evt.Key = stored.Key
 		if replay.SyntheticKey(evt.Key) {
-			return nil
+			continue
 		}
 		chain := replay.ChainKey{PartitionID: stored.PartitionID, SessionID: sessionOf(evt)}
 		if evt.Key == key {
 			parent = previous[chain]
 		}
 		previous[chain] = evt.Key
-		return nil
-	})
-	return parent, err
+	}
+	return parent, nil
 }
 
 // supplyRetrieval wires the retrieval face over one opened storage tier: the

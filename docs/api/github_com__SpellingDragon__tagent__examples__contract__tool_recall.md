@@ -11,8 +11,7 @@ it.
 FUNCTIONS
 
 func ExampleTable()
-    ExampleTable answers one page, one landed event and one original reference
-    from the same table: a key the table holds no event for reads as not held
-    instead of as an empty page, and the page never carries an event outside the
-    partitions the query names.
+    ExampleTable demonstrates the durable read face's partition scope, total
+    order and exact original reference, with no observation table or landing
+    pass.
 

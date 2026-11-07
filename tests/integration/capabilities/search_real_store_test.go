@@ -38,7 +38,7 @@ type realStoreEvent struct {
 }
 
 // realStoreChain is the real store retrieval chain one case drives: the file
-// tier its events are committed into, the observation table its query face
+// tier its events are committed into, the durable query face
 // reads, and the searcher and scoped reader standing on them.
 type realStoreChain struct {
 	tier     *ledger.Tier

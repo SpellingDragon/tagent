@@ -2123,7 +2123,7 @@ func (r *Run) seedFact(evt event.Event) {
 }
 
 // eventRecordOf projects one committed fact onto the query record the
-// observation table reads it under: the partition its owning agent resolves to,
+// durable query reads it under: the partition its owning agent resolves to,
 // its frozen type, its summary and content, and its event time on the
 // millisecond axis. A fact naming no owning agent belongs to no partition and
 // is not observed rather than filed under an invented one. A compression

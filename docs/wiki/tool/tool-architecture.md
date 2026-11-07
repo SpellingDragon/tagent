@@ -98,7 +98,7 @@
 
 **是否做语义检索在运行期判定**：判据是 `Reads.Embedder` 是否接线（`tool/recall/query.go` 的 `Call`）；未接线即 `ErrRecallUnwired`，没有第二个能力探测位——把"能力探测"错写成召回分支的前提，声明就会随部署漂移，前缀缓存整段失效。
 
-`tool/recall/skeleton_assert.go` 把这层约定做成**编译期断言**：四把工具都是 `CallableTool`（所以每次调用都先过任务包装）、`New` 的签名与三个具名错误不变、`Table` 与 `ledger.ScopedOriginalStore` 由生产组件（`memory.StoreQuerySource`、`ledger.MemoryOriginalStore`）满足而不是测试替身。
+`tool/recall/skeleton_assert.go` 把工具约定做成**编译期断言**：四把工具都是 `CallableTool`（所以每次调用都先过任务包装）、`New` 的签名与三个具名错误不变、`ledger.ScopedOriginalStore` 由 `ledger.MemoryOriginalStore` 满足；`assembly/skeleton_assert.go` 另以真实 `tierQuerySource` 钉住 `Table` 与父边读取，均不使用测试替身。
 
 ## 七、其余工具面速记
 

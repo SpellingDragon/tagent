@@ -1,7 +1,7 @@
 // 契约: docs/wiki/memory/memory-architecture.md#read-paths
 //
 // The retrieval over a real store: both legs of one query read through the
-// QueryEvents face of the observation table, the keyword leg matches the query
+// durable QueryEvents face, the keyword leg matches the query
 // text and the vector leg recalls the text an embedding places near it, and the
 // fusion port merges them into the one ordered reference set the page is cut
 // from. A hit stays a reference and the text behind it stays in the original
@@ -32,9 +32,9 @@ import (
 var ErrCursorUnbound = errors.New("search: continuation cursor does not bind to this query")
 
 // ReferenceSource is the query face a retrieval reads through: the event
-// references a QueryOptions matches, and the recall reference of any event key
-// the observation table holds. Both legs of a query read through it, so the
-// consumption order of the read face holds for the vector leg as well.
+// references a QueryOptions matches, and the original reference of any readable
+// event key. Both legs of a query read through it, so the consumption order of
+// the read face holds for the vector leg as well.
 //
 // The redline list (3 rules):
 // MUST return the matching set filtered, totally ordered by (Timestamp, Key), deduplicated by event key and paged by Offset and Limit.
@@ -235,7 +235,7 @@ func (s *StoreSearcher) vectorLeg(ctx context.Context, q Query, partitions []int
 }
 
 // referencesOf resolves the recall reference of each event reference, dropping
-// the hits the observation table holds no reference for.
+// the hits the durable read holds no reference for.
 func (s *StoreSearcher) referencesOf(refs []memory.EventReference) []ledger.OriginalRef {
 	out := make([]ledger.OriginalRef, 0, len(refs))
 	for _, ref := range refs {

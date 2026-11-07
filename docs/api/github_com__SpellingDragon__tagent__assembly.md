@@ -445,6 +445,8 @@ func SetAttentionClock(now func() time.Time) (restore func())
 
 func NewTierQuerySource(segments *ledger.FileSegmentStore) *tierQuerySource
     NewTierQuerySource attaches the durable read face without landing anything.
+    The returned face answers QueryEvents, Event, Reference and GetParent on
+    demand and retains no event or parent map between calls.
 
 TYPES
 
@@ -1274,9 +1276,9 @@ func (p *RecallPort) ReadSegmentScoped(ctx context.Context, key event.EventID, s
 func (p *RecallPort) Reads() recall.Reads
     Reads reports the read face this port wires for the recall tools:
     the retrieval port, the embedding binding and the table and original store
-    of the bound run, beside the relation ledger the host holds. A face the
-    deployment wires nothing for stays absent, so the tool that needs it refuses
-    by name instead of answering an empty result.
+    of the bound run, beside its parent reader. A face the deployment wires
+    nothing for stays absent, so the tool that needs it refuses by name instead
+    of answering an empty result.
 
 func (p *RecallPort) Reference(key event.EventID) (ledger.OriginalRef, bool)
     Reference answers the original reference one event carries through the bound

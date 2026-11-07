@@ -82,8 +82,8 @@ var (
 	// under it would join one user's facts to a shared partition chain.
 	ErrChainKeyRequired = errors.New("memory: chain key names no session")
 	// ErrRebuildUnwired reports a rebuild without the target projection, the fact
-	// chain or the relation ledger it maintains the causal chain through.
-	ErrRebuildUnwired = errors.New("memory: rebuild needs a target projection, a fact chain and a relation ledger")
+	// chain or the parent map it maintains the causal chain through.
+	ErrRebuildUnwired = errors.New("memory: rebuild needs a target projection, a fact chain and a parent map")
 	// ErrChainPageLimit reports a chain page request that asks for no fact at all.
 	ErrChainPageLimit = errors.New("memory: chain page must read at least one fact")
 	// ErrChainScan reports a fact chain read that failed, so an empty result is

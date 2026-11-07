@@ -253,7 +253,7 @@ func TestFileFactFilingFailureDoesNotRefuseTheRequest(t *testing.T) {
 
 // fileFactRun assembles one runtime over the declared prompt file and a durable
 // storage root of its own, so the file fact the boundary files is readable from
-// the observation table of the same run.
+// the durable query of the same run.
 func fileFactRun(t *testing.T, ctx context.Context, provider *entryModel, promptPath string) *assembly.Run {
 	t.Helper()
 	decl := &config.Declaration{
@@ -285,7 +285,7 @@ func fileFactClose(t *testing.T, run *assembly.Run) {
 }
 
 // fileFactsOf reports the configuration change facts of the file dimension the
-// run's chain holds, read through the observation table of its storage tier.
+// run's chain holds, read through the durable query of its storage tier.
 func fileFactsOf(t *testing.T, ctx context.Context, run *assembly.Run) []event.Event {
 	t.Helper()
 	refs, err := run.ObservedEvents(ctx, memory.QueryOptions{

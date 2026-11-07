@@ -2,87 +2,52 @@ package recallexample
 
 import (
 	"context"
-	"sort"
+	"time"
 
 	"github.com/SpellingDragon/tagent/api/event"
+	"github.com/SpellingDragon/tagent/api/model"
+	"github.com/SpellingDragon/tagent/assembly"
 	"github.com/SpellingDragon/tagent/memory"
 	"github.com/SpellingDragon/tagent/memory/ledger"
-	"github.com/SpellingDragon/tagent/tool/recall"
 )
 
-// landedTable is the canonical observation table: it answers the references one
-// declarative query matches, the reference of one landed event, and the original
-// reference that event was landed with, all from the same set of landed events.
-type landedTable struct {
-	events []memory.EventReference
-	refs   map[event.EventID]ledger.OriginalRef
+// storeContractEvent files one event used by the durable Table example.
+func storeContractEvent(tier *ledger.Tier, key event.EventID, partition int, at time.Time, summary string) error {
+	evt := event.Event{Key: key, Type: event.TypeExternalInput, Timestamp: at, Meta: map[string]string{event.MetaKeyEventSummary: summary}, Message: model.Message{Role: model.RoleUser, Content: summary}, Owner: event.Address{AgentID: "agent-example", SessionID: "session-example"}}
+	body, err := memory.BodyFromEvent(evt, "text", "default")
+	if err != nil {
+		return err
+	}
+	encoded, err := body.Encode()
+	if err != nil {
+		return err
+	}
+	return tier.Segments.StoreEvent(context.Background(), ledger.SegmentRecord{PartitionID: partition, WindowTS: at.UnixMilli(), Seq: 1, EventKey: key, EventTime: at.UnixMilli(), Body: encoded}.WithChain(evt.Type, evt.Owner.SessionID))
 }
 
-// QueryEvents returns the references matching opts, ordered newest first and cut to the
-// page the query names.
-func (t landedTable) QueryEvents(_ context.Context, opts memory.QueryOptions) ([]memory.EventReference, error) {
-	if err := opts.Validate(); err != nil {
-		return nil, err
-	}
-	scoped := make(map[int]bool, len(opts.PartitionIDs))
-	for _, partition := range opts.PartitionIDs {
-		scoped[partition] = true
-	}
-	matched := make([]memory.EventReference, 0, len(t.events))
-	for _, ref := range t.events {
-		if !scoped[ref.PartitionID] {
-			continue
-		}
-		if opts.StartTime > 0 && ref.Timestamp < opts.StartTime {
-			continue
-		}
-		if opts.EndTime > 0 && ref.Timestamp > opts.EndTime {
-			continue
-		}
-		matched = append(matched, ref)
-	}
-	sort.Slice(matched, func(i, j int) bool { return matched[i].Key > matched[j].Key })
-	if opts.Limit > 0 && opts.Limit < len(matched) {
-		matched = matched[:opts.Limit]
-	}
-	return matched, nil
-}
-
-// Event returns the reference of the landed event under key.
-func (t landedTable) Event(key event.EventID) (memory.EventReference, bool) {
-	for _, ref := range t.events {
-		if ref.Key == key {
-			return ref, true
-		}
-	}
-	return memory.EventReference{}, false
-}
-
-// Reference returns the original reference key was landed with.
-func (t landedTable) Reference(key event.EventID) (ledger.OriginalRef, bool) {
-	ref, held := t.refs[key]
-	return ref, held
-}
-
-var _ recall.Table = landedTable{}
-
-// ExampleTable answers one page, one landed event and one original reference from the same
-// table: a key the table holds no event for reads as not held instead of as an empty page,
-// and the page never carries an event outside the partitions the query names.
+// ExampleTable demonstrates the durable read face's partition scope, total
+// order and exact original reference, with no observation table or landing pass.
 //
 // 契约: docs/wiki/tool/tool-architecture.md#recall-contract
 func ExampleTable() {
 	ctx := context.Background()
-	table := landedTable{
-		events: []memory.EventReference{
-			{Key: "2-b", PartitionID: 7, Type: "agent_output", Summary: "second", Timestamp: 2000},
-			{Key: "1-a", PartitionID: 7, Type: "external_input", Summary: "first", Timestamp: 1000},
-		},
-		refs: map[event.EventID]ledger.OriginalRef{
-			"1-a": {Key: "1-a", Format: "text", RetentionPolicy: "default"},
-		},
+	tier, err := ledger.OpenTier(ctx, ledger.StorageConfig{Type: ledger.StorageMemory})
+	if err != nil {
+		return
 	}
-	page, err := table.QueryEvents(ctx, memory.QueryOptions{PartitionIDs: []int{7}, Limit: 1})
+	defer tier.Segments.Close()
+	at := time.Date(2026, 11, 6, 12, 0, 0, 0, time.UTC)
+	if err := storeContractEvent(tier, "1-a", 7, at, "first"); err != nil {
+		return
+	}
+	if err := storeContractEvent(tier, "2-b", 7, at.Add(time.Hour), "second"); err != nil {
+		return
+	}
+	if err := storeContractEvent(tier, "3-z", 8, at, "outside"); err != nil {
+		return
+	}
+	table := assembly.NewTierQuerySource(tier.Segments)
+	page, err := table.QueryEvents(ctx, memory.QueryOptions{PartitionIDs: []int{7}, Limit: 1, OrderBy: memory.QueryOrderByDesc})
 	if err != nil || len(page) != 1 || page[0].Key != "2-b" {
 		return
 	}
