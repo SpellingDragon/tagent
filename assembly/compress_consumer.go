@@ -218,17 +218,17 @@ func (c *CompressionConsumer) Execute(ctx context.Context, session event.Session
 	for _, product := range report.Products {
 		named[product.Request.ID] = product
 	}
-	last := -1
-	for at, request := range pending {
-		if _, stands := named[request.ID]; stands {
-			last = at
+	batch := make([]replay.FoldProduct, 0, len(pending))
+	for _, request := range pending {
+		product, stands := named[request.ID]
+		if stands {
+			batch = append(batch, coverSettlementFacts(product, projection))
 		}
 	}
 	var checkpoint []byte
 	var states []byte
-	if last >= 0 {
-		product := coverSettlementFacts(named[pending[last].ID], projection)
-		checkpoint = anchorCheckpointOf(replay.FoldedEntries(projection.Entries(), []replay.FoldProduct{product}))
+	if len(batch) > 0 {
+		checkpoint = anchorCheckpointOf(replay.FoldedEntries(projection.Entries(), batch))
 		if c.captureStates != nil {
 			var err error
 			states, err = c.captureStates(ctx, session)
@@ -237,20 +237,15 @@ func (c *CompressionConsumer) Execute(ctx context.Context, session event.Session
 			}
 		}
 	}
-	for at, request := range pending {
-		product, stands := named[request.ID]
-		if !stands {
-			continue
-		}
-		product = coverSettlementFacts(product, projection)
-		minted := event.CompressProductFor(request.ID, compressionProducer, product.Entry.Key, product.Covered, product.Entry.Content)
-		if at == last {
+	for at, product := range batch {
+		minted := event.CompressProductFor(product.Request.ID, compressionProducer, product.Entry.Key, product.Covered, product.Entry.Content)
+		if at == len(batch)-1 {
 			minted = minted.WithCheckpoint(checkpoint).WithStates(states)
 		}
 		if err := c.sessions.FileCompressProduct(ctx, session, minted); err != nil {
 			return err
 		}
-		c.noteAnswered(request.ID)
+		c.noteAnswered(product.Request.ID)
 		projection.ApplyProducts([]replay.FoldProduct{product})
 	}
 	return nil

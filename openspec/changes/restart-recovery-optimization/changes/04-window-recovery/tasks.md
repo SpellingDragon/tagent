@@ -5,7 +5,7 @@
 - [x] 4.a1 产物载荷扩展：`Execute` 批次末用 `replay.FoldedEntries` 纯函数按投影序记录结构化幸存者（不透明 checkpoint 字节，`Checkpoint/WithCheckpoint`）—— 验证：`TestAnchoredRebuildEqualsFullWalk` 绿（full decoded=92 → anchored=5, anchors=1，逐字段含 Time/Summary/Role/Generation 一致）；`61df08d3`
 - [x] 4.a2 `seedAnchoredReplay`：索引按冻结类型 `typ == event.CompressProductType` 发现锚（`EachIndexNewestFirst` 参数回调，零前缀、零正文读）→ 按 `anchorSlot{partition,session}` 隔离重建 + 边界 seq 尾回放 —— 验证：**12 个锚全绿**（等价含 `RenderProjection` 字节相等/空类型拒锚/坏载荷具名退回/文案拒收/向量缝拒收/未折叠退全量/落地序号/tail>0/跨地址隔离/全新 Run 稀疏账本/快照-提交间插入事件不丢/`mappedEntryOf` 守卫拒收带内容机制事实，删守卫即红）。独立全量拷问 `7addd70d` 在 pinned `2e7dd53d` 返回 FRONTIER NOT EMPTY 七条，逐条修复见 r54；`1284461e`
 - [x] 4.a3 golden 复验：折叠契约向量未随载荷扩展变化（压缩策略零改动），`TestFoldPlanGolden` 绿；四条 MUT-FOLD mutation 逐个 `gate: ok`（仍 killed）。无需重生成 —— 验证见 r51 同批门禁输出
-- [ ] 4.a4 状态注入钩子（第二轮实现候选，待复核）：`WithAnchorState` 构造期注册 + `RegisterAnchorState` 运行期注册；检查点计算后、同批任何产物提交前捕获，失败整批不提交/不应答；全量、锚正常与锚回退共用最新检查点状态恢复器，坏状态两边具名失败；未注册不写 `compress_states` 键 —— 验证：真实重启锚 + `TestAnchorStateCaptureFailureCommitsNoProducts`（旧码红：2 个部分产物；重启仍零）+ `TestAnchorStateRecoveryParity`（旧码红：full=OLD/anchored空、坏状态双 nil）；五份新版 overlay 分别判红；15 锚与 race 全绿。E1/E2/G9 不塞入本钩子
+- [ ] 4.a4 状态注入钩子（第二轮实现候选，待复核）：`WithAnchorState` 构造期注册 + `RegisterAnchorState` 运行期注册；检查点计算后、同批任何产物提交前捕获，失败整批不提交/不应答；全量、锚正常与锚回退共用最新检查点状态恢复器，坏状态两边具名失败；未注册不写 `compress_states` 键 —— 验证：真实重启锚 + `TestAnchorStateCaptureFailureCommitsNoProducts`（旧码红：2 个部分产物；重启仍零）+ `TestAnchorStateRecoveryParity`（旧码红：full=OLD/anchored空、坏状态双 nil）；五份新版 overlay 分别判红；`TestBatchCheckpointMatchesPostBatchProjection` 钉住整批纯预演（旧码 47 vs 7、解码 50 vs 8）；16 锚与 race 全绿。E1/E2/G9 不塞入本钩子
 
 ## E. 4.b1 审计发现的 12 缺口（r57 归类；A 真实缺口 / B 刻意冷启动 / C 次要）
 
