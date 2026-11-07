@@ -23,6 +23,7 @@
     "SetDefaultApprovalBook",
     "SetDefaultFuseLimits",
     "SwapFrameworkLogger",
+    "WithAnchorState",
     "WithApprovalClock",
     "WithApprovalRescanInterval",
     "WithAvailability",

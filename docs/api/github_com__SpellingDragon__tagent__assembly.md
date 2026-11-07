@@ -1,5 +1,10 @@
 package assembly // import "github.com/SpellingDragon/tagent/assembly"
 
+The anchor state hook is the registration seam for state the chain cannot
+derive: a session's owner registers a named capture and restore, and the fold
+moment carries the captured bytes on the same fact as the survivor checkpoint.
+A run with no registered owners mints the same fold as before.
+
 The compression consumer: the execution half of compression. A producer judges
 material over its bound and files a compress request; the consumer reads the
 material that request names, folds it through the projection and files the
@@ -1095,6 +1100,12 @@ type Option = HostOption
     name of the host option: one config struct, so the manual and the host entry
     accept the same constructors.
 
+func WithAnchorState(name string, capture func(context.Context, event.SessionID) ([]byte, error), restore func(context.Context, event.SessionID, []byte) error) Option
+    WithAnchorState registers one named owner before assembly opens recovery, so
+    a restart restores through the same registration that a live fold captures
+    through. A nil callback leaves that half unregistered; registering the same
+    name again replaces the pair, so one owner holds one slot.
+
 func WithApprovals(approvals *approval.ApprovalManager) Option
     WithApprovals attaches the approval book a host document's risk table grades
     through: a document that declares risk_rules is opened as a policy over this
@@ -1596,6 +1607,12 @@ func (r *Run) ReflectionInput() meditation.ReflectionInput
     run drives its own loop session through: it commits the reflection input
     as a fact of the observing agent's own partition, drives that agent's loop
     session with it and reports what became of the turn.
+
+func (r *Run) RegisterAnchorState(name string, capture func(context.Context, event.SessionID) ([]byte, error), restore func(context.Context, event.SessionID, []byte) error)
+    RegisterAnchorState registers one named owner of state the chain cannot
+    derive on a running assembly. The fold moment calls capture for the session
+    being folded; recovery calls restore with the very bytes capture returned.
+    Use WithAnchorState when the owner must already exist during boot recovery.
 
 func (r *Run) Rejections() []state.Rejection
     Rejections reports the feedback fact of every notification a target refused,

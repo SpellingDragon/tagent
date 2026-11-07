@@ -28,10 +28,11 @@ const CompressionConsumerName = "compress-consumer"
 const compressionProducer = "assembly.compress-consumer"
 
 // metaKeyCompressRequest, metaKeyCompressProducer, metaKeyCompressKey,
-// metaKeyCompressCovered, metaKeyCompressText and metaKeyCompressSurvivors are
-// the metadata keys a compress product fact carries: the product states its five fields, and the event metadata
-// is the one durable carrier of them, because a product is material of the
-// projection and never a message of the transcript.
+// metaKeyCompressCovered, metaKeyCompressText, metaKeyCompressSurvivors and
+// metaKeyCompressStates are the metadata keys a compress product fact carries:
+// the product states its fields, and the event metadata is the one durable
+// carrier of them, because a product is material of the projection and never a
+// message of the transcript.
 const (
 	metaKeyCompressRequest   = "compress_request"
 	metaKeyCompressProducer  = "compress_producer"
@@ -39,6 +40,7 @@ const (
 	metaKeyCompressCovered   = "compress_covered"
 	metaKeyCompressText      = "compress_text"
 	metaKeyCompressSurvivors = "compress_survivors"
+	metaKeyCompressStates    = "compress_states"
 )
 
 // compressCoveredSeparator separates the covered keys one product fact states:
@@ -342,7 +344,8 @@ func (s ageFoldSessions) FileCompressProduct(ctx context.Context, session event.
 // fileCompressProduct lands one execution result in the live ledger of this run
 // under the product's content-addressed identity: a product already on record is
 // left as it stands, so one judgment answers one product however often the
-// execution runs.
+// execution runs. The product carrying the checkpoint is the fold moment, so the
+// registered state owners are captured onto that same fact and onto no other.
 func (r *Run) fileCompressProduct(ctx context.Context, session event.SessionID, product event.CompressProduct) error {
 	if session == "" {
 		return errors.New("tagent: the compression product names no session chain")
@@ -356,6 +359,13 @@ func (r *Run) fileCompressProduct(ctx context.Context, session event.SessionID, 
 	r.mu.Unlock()
 	if filed {
 		return nil
+	}
+	if len(product.Checkpoint()) > 0 {
+		states, err := r.captureAnchorStates(ctx, session)
+		if err != nil {
+			return err
+		}
+		product = product.WithStates(states)
 	}
 	if _, err := r.commitFactChecked(ctx, compressProductEvent(session, agent, product, time.Now())); err != nil {
 		assemblyWarn("tagent: the compression product of session %s was not committed err=%v", session, err)
@@ -398,20 +408,24 @@ func compressProductEvent(session event.SessionID, agent event.AgentID, product 
 		covered = append(covered, string(key))
 	}
 	survivors := product.Checkpoint()
+	meta := map[string]string{
+		event.MetaKeyEventSummary: "compress product " + string(product.Key),
+		metaKeyCompressRequest:    string(product.Answers.Request),
+		metaKeyCompressProducer:   product.Answers.Producer,
+		metaKeyCompressKey:        string(product.Key),
+		metaKeyCompressCovered:    strings.Join(covered, compressCoveredSeparator),
+		metaKeyCompressText:       product.Text,
+		metaKeyCompressSurvivors:  string(survivors),
+	}
+	if states := product.States(); len(states) > 0 {
+		meta[metaKeyCompressStates] = string(states)
+	}
 	return event.Event{
 		Key:       product.ID,
 		Type:      product.FactType(),
 		Timestamp: at,
-		Meta: map[string]string{
-			event.MetaKeyEventSummary: "compress product " + string(product.Key),
-			metaKeyCompressRequest:    string(product.Answers.Request),
-			metaKeyCompressProducer:   product.Answers.Producer,
-			metaKeyCompressKey:        string(product.Key),
-			metaKeyCompressCovered:    strings.Join(covered, compressCoveredSeparator),
-			metaKeyCompressText:       product.Text,
-			metaKeyCompressSurvivors:  string(survivors),
-		},
-		Owner: event.Address{AgentID: agent, SessionID: session},
+		Meta:      meta,
+		Owner:     event.Address{AgentID: agent, SessionID: session},
 	}
 }
 
@@ -436,6 +450,13 @@ func compressProductOf(evt event.Event) (event.CompressProduct, bool) {
 			return event.CompressProduct{}, false
 		}
 		product = product.WithCheckpoint([]byte(carried))
+	}
+	if carried := evt.Meta[metaKeyCompressStates]; carried != "" {
+		var snapshots []anchorStateSnapshot
+		if err := json.Unmarshal([]byte(carried), &snapshots); err != nil {
+			return event.CompressProduct{}, false
+		}
+		product = product.WithStates([]byte(carried))
 	}
 	return product, true
 }

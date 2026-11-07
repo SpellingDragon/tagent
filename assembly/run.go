@@ -268,6 +268,10 @@ type Run struct {
 	// delivery layer (host_delivery.go) and never by a commit, so a fact no
 	// obligation names ages out on the ordinary trim.
 	pinnedFacts map[event.EventID]struct{}
+	// anchorStateOwners holds the registered sources of state the chain cannot
+	// derive, by name. Registration is optional: none registered means the fold
+	// carries no state payload and the rebuild restores none.
+	anchorStateOwners map[string]anchorStateOwner
 	// plugins holds the run-level instances every agent generation carries.
 	plugins []plugin.Instance
 	factSeq uint64
@@ -405,27 +409,28 @@ func Assemble(ctx context.Context, decl *config.Declaration, agents map[event.Ag
 		}
 	}
 	r := &Run{
-		instance:         newInstanceID(),
-		bindings:         state.NewBindings(),
-		occupancy:        state.NewOccupancy(),
-		inspector:        inspectorSubject,
-		admission:        task.NewMemoryAdmission(),
-		progress:         make(chan struct{}, 1),
-		sites:            map[event.Address]bool{},
-		facts:            map[event.EventID]event.Event{},
-		sessionFactCount: map[event.SessionID]int{},
-		fixers:           map[event.AgentID]*fileFixer{},
-		replays:          map[event.Address]replayEntry{},
-		landedSeq:        map[int]int64{},
-		approver:         cfg.approver,
-		policy:           cfg.policy,
-		enforcement:      cfg.enforcement,
-		recorder:         cfg.recorder,
-		observer:         cfg.observer,
-		execManager:      cfg.execManager,
-		capture:          cfg.capture,
-		leases:           map[event.AgentID]*leaseState{},
-		leaseObservers:   map[event.AgentID]*rl.LeaseObserver{},
+		instance:          newInstanceID(),
+		bindings:          state.NewBindings(),
+		occupancy:         state.NewOccupancy(),
+		inspector:         inspectorSubject,
+		admission:         task.NewMemoryAdmission(),
+		progress:          make(chan struct{}, 1),
+		sites:             map[event.Address]bool{},
+		facts:             map[event.EventID]event.Event{},
+		sessionFactCount:  map[event.SessionID]int{},
+		fixers:            map[event.AgentID]*fileFixer{},
+		replays:           map[event.Address]replayEntry{},
+		landedSeq:         map[int]int64{},
+		anchorStateOwners: cfg.anchorStateOwners,
+		approver:          cfg.approver,
+		policy:            cfg.policy,
+		enforcement:       cfg.enforcement,
+		recorder:          cfg.recorder,
+		observer:          cfg.observer,
+		execManager:       cfg.execManager,
+		capture:           cfg.capture,
+		leases:            map[event.AgentID]*leaseState{},
+		leaseObservers:    map[event.AgentID]*rl.LeaseObserver{},
 	}
 	for id, held := range cfg.leases {
 		lease := held
@@ -1013,10 +1018,13 @@ type assemblyConfig struct {
 	approvals   *approval.ApprovalManager
 	enforcement governance.Enforcement
 	storage     *ledger.StorageConfig
-	embedder    memory.Embedder
-	recorder    rl.Recorder
-	observer    plugin.Observer
-	execManager *tagentexec.Manager
+	// anchorStateOwners is the construction-time registration of state owners,
+	// present before the chain is replayed so boot can restore what a fold filed.
+	anchorStateOwners map[string]anchorStateOwner
+	embedder          memory.Embedder
+	recorder          rl.Recorder
+	observer          plugin.Observer
+	execManager       *tagentexec.Manager
 	// reflectionAnchors is the anchor record path whose watermark the
 	// reflection face reports.
 	reflectionAnchors string
@@ -1793,10 +1801,12 @@ func (r *Run) seedReplay(ctx context.Context, tier *ledger.Tier) (map[int]int64,
 
 // seedFullReplay replays every session chain from the beginning, the path a
 // chain that minted no summary answers: each committed fact is seeded, each
-// mapped entry appended in commit order and each product restored on top.
+// mapped entry appended in commit order and each product restored on top. The
+// newest checkpoint on each chain hands its registered state snapshots back.
 func (r *Run) seedFullReplay(ctx context.Context, tier *ledger.Tier) (map[event.Address]*sessionSeed, map[int]int64, seedReport, error) {
 	seeds := map[event.Address]*sessionSeed{}
 	products := map[event.Address][]event.CompressProduct{}
+	var productOrder []event.Address
 	var order []event.Address
 	report := seedReport{}
 	landed := map[int]int64{}
@@ -1821,6 +1831,9 @@ func (r *Run) seedFullReplay(ctx context.Context, tier *ledger.Tier) (map[event.
 			if !stated {
 				assemblyWarn("tagent: the compression product %s states no readable product and is not restored", evt.Key)
 				return nil
+			}
+			if _, held := products[addr]; !held {
+				productOrder = append(productOrder, addr)
 			}
 			products[addr] = append(products[addr], product)
 			r.compress.NoteProduct(product)
@@ -1848,6 +1861,18 @@ func (r *Run) seedFullReplay(ctx context.Context, tier *ledger.Tier) (map[event.
 	for _, addr := range order {
 		seed := seeds[addr]
 		seed.projection.RestoreProducts(products[addr])
+	}
+	for _, addr := range productOrder {
+		filed := products[addr]
+		for i := len(filed) - 1; i >= 0; i-- {
+			if len(filed[i].Checkpoint()) == 0 {
+				continue
+			}
+			if err := r.restoreAnchorStates(ctx, addr.SessionID, filed[i].States()); err != nil {
+				return nil, nil, report, err
+			}
+			break
+		}
 	}
 	return seeds, landed, report, nil
 }
@@ -1968,6 +1993,9 @@ func (r *Run) seedAnchoredReplayWith(ctx context.Context, tier *ledger.Tier, sea
 					}
 					boundary, err := r.restoreSurvivors(ctx, tier, seed, survivors, &report)
 					if err != nil {
+						return nil, report, err
+					}
+					if err := r.restoreAnchorStates(ctx, slot.session, product.States()); err != nil {
 						return nil, report, err
 					}
 					r.compress.NoteProduct(product)

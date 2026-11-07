@@ -47,6 +47,10 @@ type CompressProduct struct {
 	// Its structure belongs to the consumer that reads it back: the fact family
 	// carries bytes, never a public shape a query could surface into the view.
 	checkpoint []byte
+	// states is the opaque state snapshot registered owners contributed at the
+	// fold moment. It rides the same fact as the checkpoint, and its structure
+	// belongs to the owners that read it back.
+	states []byte
 }
 
 // Checkpoint reports the opaque recovery payload this product fact carries.
@@ -55,6 +59,15 @@ func (p CompressProduct) Checkpoint() []byte { return p.checkpoint }
 // WithCheckpoint states the opaque recovery payload this product fact carries.
 func (p CompressProduct) WithCheckpoint(payload []byte) CompressProduct {
 	p.checkpoint = payload
+	return p
+}
+
+// States reports the opaque state snapshot this product fact carries.
+func (p CompressProduct) States() []byte { return p.states }
+
+// WithStates states the opaque state snapshot this product fact carries.
+func (p CompressProduct) WithStates(payload []byte) CompressProduct {
+	p.states = payload
 	return p
 }
 

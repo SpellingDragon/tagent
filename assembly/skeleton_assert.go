@@ -137,11 +137,12 @@ var (
 	_ func(compressSessions) *CompressionConsumer = NewCompressionConsumer
 	_ func(*AgeFoldPlugin, compressExecutor)      = (*AgeFoldPlugin).setExecutor
 
-	_ func(*CompressionConsumer, context.Context, event.SessionID) error = (*CompressionConsumer).Execute
-	_ func(*CompressionConsumer, event.SessionID, event.CompressRequest) = (*CompressionConsumer).Record
-	_ func(*CompressionConsumer, event.CompressProduct)                  = (*CompressionConsumer).NoteProduct
-	_ func(*CompressionConsumer) string                                  = (*CompressionConsumer).Name
-	_ func(*CompressionConsumer) plugin.Port                             = (*CompressionConsumer).Port
+	_ func(*CompressionConsumer, context.Context, event.SessionID) error                                                               = (*CompressionConsumer).Execute
+	_ func(*CompressionConsumer, event.SessionID, event.CompressRequest)                                                               = (*CompressionConsumer).Record
+	_ func(*CompressionConsumer, event.CompressProduct)                                                                                = (*CompressionConsumer).NoteProduct
+	_ func(*Run, string, func(context.Context, event.SessionID) ([]byte, error), func(context.Context, event.SessionID, []byte) error) = (*Run).RegisterAnchorState
+	_ func(*CompressionConsumer) string                                                                                                = (*CompressionConsumer).Name
+	_ func(*CompressionConsumer) plugin.Port                                                                                           = (*CompressionConsumer).Port
 
 	_ string = CompressionConsumerName
 )
