@@ -373,6 +373,12 @@ func TestTierQueryHonorsScopeBeforeDecoding(t *testing.T) {
 		if len(refs) != want {
 			t.Fatalf("scoped query %+v returned %d refs, want %d", opts, len(refs), want)
 		}
+		if want == 1 && refs[0].Key != "good-scoped" {
+			t.Fatalf("scoped query %+v returned %s, want good-scoped", opts, refs[0].Key)
+		}
+	}
+	if _, err := direct.QueryEvents(ctx, memory.QueryOptions{PartitionIDs: []int{12}}); err == nil {
+		t.Fatal("the admitted corrupt partition did not surface its decode error")
 	}
 	for _, check := range []struct {
 		opts memory.QueryOptions

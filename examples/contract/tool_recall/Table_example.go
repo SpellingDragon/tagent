@@ -2,6 +2,7 @@ package recallexample
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	"github.com/SpellingDragon/tagent/api/event"
@@ -33,7 +34,7 @@ func ExampleTable() {
 	ctx := context.Background()
 	tier, err := ledger.OpenTier(ctx, ledger.StorageConfig{Type: ledger.StorageMemory})
 	if err != nil {
-		return
+		panic(err)
 	}
 	defer tier.Segments.Close()
 	at := time.Date(2026, 11, 6, 12, 0, 0, 0, time.UTC)
@@ -49,12 +50,13 @@ func ExampleTable() {
 	table := assembly.NewTierQuerySource(tier.Segments)
 	page, err := table.QueryEvents(ctx, memory.QueryOptions{PartitionIDs: []int{7}, Limit: 1, OrderBy: memory.QueryOrderByDesc})
 	if err != nil || len(page) != 1 || page[0].Key != "2-b" {
-		return
+		panic("unexpected scoped page")
 	}
 	if _, held := table.Event("9-z"); held {
-		return
+		panic("missing key was held")
 	}
 	if _, held := table.Reference("1-a"); !held {
-		return
+		panic("reference was not held")
 	}
+	fmt.Println("ok")
 }

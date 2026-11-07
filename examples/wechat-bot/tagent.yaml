@@ -173,9 +173,9 @@ agents:
       max_rounds: 5
       timeout_seconds: 120      # 本目录自带(工具名按本部署的声明书写:recall_query/recall_get/recall_recent/recall_trace)
     # 记忆读面:声明即授权(不声明的 agent 看不见该工具);四工具经 tool/recall 装配,
-    # 读面由宿主注入(hostRecallSeam):Searcher 走装配后的 Run.Recall,Table 走已提交
-    # 存储的观察表,Originals 走 storage 的 scoped 原始层,Embedder 由宿主绑定,而 Trace
-    # 走宿主自持的 relation 账本(运行时本身不维护 relations)。不声明 storage 时读面为空,
+    # 读面由宿主注入(hostRecallSeam):Searcher 走装配后的 Run.Recall,Table 直读
+    # 持久事件链,Originals 走 storage 的 scoped 原始层,Embedder 由宿主绑定,而 Trace
+    # 沿同一条链按需推导父边(不维护独立 relation 账本)。不声明 storage 时读面为空,
     # 调用即具名拒绝(recall: the deployment wires no read face)。
     tools:
       - { kind: tool, id: recall_query }

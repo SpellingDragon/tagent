@@ -96,7 +96,7 @@
 | `runtime/state` | 生效绑定、发布与退役、会话与邮箱、席位、授权：`binding.go` `publish.go` `retire.go` `lease.go` `session.go` `mailbox.go` `durable.go` `occupancy.go` `authority.go` |
 | `runtime/task` | 任务转移与通知义务：`spec.go` `lifecycle.go` `admission.go` `registry.go` `manager.go` `handoff.go` `logical.go` `progress.go` `restore.go` `wrapper.go` `cancel.go` `hold.go`、`approval/` |
 | `memory/replay` | 链的重放与投影滚界，`BudgetCharsPerToken` 的唯一单源 |
-| `memory/ledger` | 原文仓的字节落盘与会话关系账本 |
+| `memory/ledger` | 原文仓（blob+ref）、段存储、kv 分层、账本事实面、租约与生命周期 |
 | `memory/query` | 只读投影读缝（`Reading`/`Inventory`/`Projection`） |
 | `memory/{search,embedder}` | 语义检索与向量面（旁路能力） |
 | `tool/{exec,file,knowledge,mcp,recall,spec,subagent}` | 执行适配器、文件与知识面、MCP、召回、工具声明、子 Agent |

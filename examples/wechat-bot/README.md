@@ -40,7 +40,7 @@ tagent 组合根的**真实宿主示例**：常驻微信机器人，把 `assembl
 | `log_level` / `trajectory_*` / `working_dir` | 无读取点；环境变量侧同样没读点，故 `wizard.sh`/`run.sh`/`.env.example` 已不再采集（配置即业务：不读就不采） |
 | `evolution` / `reliability` / `governance.budget_*`、`max_*_risk`、`goal_required_for` | 平台面只装配治理闸：预算与 goal 未接，只消费 `enabled`/`enforcement`/`dir`/`approval_ttl_minutes` |
 | `agents.*.compress` / `task_*_ttl` | schema 未声明、装配面不读（`memory` 与 `meditation` 已接线，见下节）；`max_tokens`/`compress_threshold`/`temperature`/`thinking_enabled`/`reasoning_effort` 已在 `api/config/decode.go:160-161` 声明并由 `assembly/host_document.go` 解析消费（见 `tagent.yaml:98/132-133`） |
-| `agents.*.tools[]` 除 `{kind: tool, id: send}` 与 `recall_*` | 工具面接了 `send`＋`recall_query/get/recent/trace`（tool/recall），读面由宿主装配后注入（Searcher=`Run.Recall`、Table=观测表、Originals=scoped 原始层、Embedder=`memory.engine` 的真 embedding、Trace=宿主关系账本），有 `memory` 声明即可用，无声明则调用即具名拒绝；`{kind: agent, ...}` 委派已接、`description_file`/`event_params` 已消费；file 由宿主与核心按声明装配、`exec`/`mcp_*`/`skill_*` 由核心装配，`spec` 已接线（七操作闭集，后端为可替换的计划后端），清单外的 id 仍被固定清单挡下 |
+| `agents.*.tools[]` 除 `{kind: tool, id: send}` 与 `recall_*` | 工具面接了 `send`＋`recall_query/get/recent/trace`（tool/recall），读面由宿主装配后注入（Searcher=`Run.Recall`、Table=持久链直读、Originals=scoped 原始层、Embedder=`memory.engine` 的真 embedding、Trace=同一条链按需推导父边），有 `memory` 声明即可用，无声明则调用即具名拒绝；`{kind: agent, ...}` 委派已接、`description_file`/`event_params` 已消费；file 由宿主与核心按声明装配、`exec`/`mcp_*`/`skill_*` 由核心装配，`spec` 已接线（七操作闭集，后端为可替换的计划后端），清单外的 id 仍被固定清单挡下 |
 
 ## 记忆与自察冥想（已接线）
 
