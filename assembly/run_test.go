@@ -94,13 +94,13 @@ func TestLandedSeqRidesTheWalk(t *testing.T) {
 		t.Fatalf("replay the chains: %v", err)
 	}
 	want := map[int]int64{}
-	if err := run.tier.Segments.EachEventNewestFirst(ctx, func(stored ledger.StoredEvent) error {
-		if stored.Seq > want[stored.PartitionID] {
-			want[stored.PartitionID] = stored.Seq
+	if err := run.tier.Segments.EachIndexNewestFirst(ctx, func(_ event.EventID, partition int, seq int64, _ string, _ event.SessionID) error {
+		if seq > want[partition] {
+			want[partition] = seq
 		}
 		return nil
 	}); err != nil {
-		t.Fatalf("read the store newest first: %v", err)
+		t.Fatalf("read the store index newest first: %v", err)
 	}
 	if len(landed) != len(want) {
 		t.Fatalf("the walk answered %d partitions, want the %d the store holds", len(landed), len(want))

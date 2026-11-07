@@ -650,48 +650,6 @@ func (s *FileSegmentStore) EachIndexNewestFirst(ctx context.Context, visit func(
 	return nil
 }
 
-// EachEventNewestFirst streams every published event in the reverse of the
-// commit order the landing path numbered: partition first, then the sequence
-// slot descending. The order is exact inside one partition; partitions group,
-// because the commit sequence is per partition. The body of each event is read
-// on demand and handed to visit alone, so an enumeration that stops early - a
-// windowed rebuild that reached its boundary - reads no body beyond the stop.
-// A visit error ends the enumeration and is returned.
-func (s *FileSegmentStore) EachEventNewestFirst(ctx context.Context, visit func(StoredEvent) error) error {
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	s.mu.Lock()
-	order := make([]event.EventID, 0, len(s.index))
-	for key := range s.index {
-		order = append(order, key)
-	}
-	sort.Slice(order, func(i, j int) bool {
-		a, b := s.index[order[i]], s.index[order[j]]
-		if a.partition != b.partition {
-			return a.partition > b.partition
-		}
-		return a.seq > b.seq
-	})
-	s.mu.Unlock()
-	for _, key := range order {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		stored, held, err := s.eventByKey(ctx, key)
-		if err != nil {
-			return err
-		}
-		if !held {
-			return fmt.Errorf("%w: %s", ErrSegmentBodyMissing, key)
-		}
-		if err := visit(stored); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
 // Events returns every published event in index order. It is the materialized
 // form of EachEvent for callers that need the whole set; the assembly read faces
 // stream instead, one event at a time.

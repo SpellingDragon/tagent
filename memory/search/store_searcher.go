@@ -39,7 +39,7 @@ var ErrCursorUnbound = errors.New("search: continuation cursor does not bind to 
 // The redline list (3 rules):
 // MUST return the matching set filtered, totally ordered by (Timestamp, Key), deduplicated by event key and paged by Offset and Limit.
 // MUST return identical sequences for two identical queries over identical state.
-// MUST NOT read anything of the query implementation beyond these two reads.
+// MUST NOT expose query internals or add a public body-read method; query-time candidate text stays on the internal candidateTextSource seam.
 type ReferenceSource interface {
 	// QueryEvents returns the references matching opts: the matching set
 	// filtered, totally ordered by (Timestamp, Key) under the named direction,

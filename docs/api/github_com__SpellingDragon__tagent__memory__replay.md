@@ -151,13 +151,6 @@ var ErrFoldEmpty = errors.New("memory: fold needs at least one projection entry"
 
 FUNCTIONS
 
-func FoldKindOf(key event.EventID) (string, bool)
-    FoldKindOf reports the product kind one synthetic key names: the fold files
-    a segment fold and a history summary under one prefix each, and the prefix
-    is the only thing the fact carries about what it minted. A rebuild reads it
-    to tell the summary that bounds a chain from the segment folds its window
-    still presents.
-
 func LevelOfAge(age, keepRecent int) int
     LevelOfAge reports the compress level the age of one closed segment reads
     under the deterministic rule the age axis is shared with: the recent window
