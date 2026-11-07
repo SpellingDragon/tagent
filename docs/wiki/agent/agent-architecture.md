@@ -186,7 +186,7 @@ sequenceDiagram
 
 三处取证面各守一段：`examples/contract/` 是按包分组的**可执行契约**（`runtime_agent`、`runtime_task`、`memory_query`、`api_plugin`、`tool_subagent` 各有一组 `Example`），注释说明它钉的是哪个契约、由谁的真实调用者驱动；`tests/integration/` 按域分组（`acceptance`/`capabilities`/`config`/`evolution`/`execution`/`history`/`host`/`inspection`/`journey`/`learning`/`state`）跑跨包真链路；真实框架行为的判据一律**不猜**——`OnEvent` 与模型流的时序这类问题由一次性真机探针取证，结论落进测试注释。
 
-单元测试的存储根必须**显式挪出仓库工作树**并按用例隔离：`memory/ledger` 在分派之前就无条件 `os.MkdirAll` 并落关系账本（`localfile.go`、`relations_journal.go`），「用内存类型配一个逻辑路径」并不等于不落盘。根由 `t.TempDir()` 按用例唯一，不得跨用例共享——热更多代「存储段字节不变」与重启模拟所依赖的身份前提由此成立。
+单元测试的存储根必须**显式挪出仓库工作树**并按用例隔离：`memory/ledger` 的本地文件档会创建自己的存储目录（`localfile.go`），「用内存类型配一个逻辑路径」并不等于选择纯内存档；memory tier 与空 Root 不创建关系 journal。根由 `t.TempDir()` 按用例唯一，不得跨用例共享——热更多代「存储段字节不变」与重启模拟所依赖的身份前提由此成立。
 
 ## 已知缺口与演进方向
 

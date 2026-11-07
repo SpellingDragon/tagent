@@ -71,7 +71,7 @@ func ageBandProjection(t *testing.T, facts []replay.ChainFact) *replay.ReplayPro
 		}
 	}
 	projection := replay.NewReplayProjection()
-	if _, err := replay.RebuildProjectionFromWAL(ctx, projection, chain, replay.NewMemoryRelations(), ageChainKey, replay.RebuildOptions{}); err != nil {
+	if _, err := replay.RebuildProjectionFromWAL(ctx, projection, chain, &replay.MemoryRelations{}, ageChainKey, replay.RebuildOptions{}); err != nil {
 		t.Fatalf("RebuildProjectionFromWAL: %v", err)
 	}
 	return projection

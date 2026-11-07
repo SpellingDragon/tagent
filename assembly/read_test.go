@@ -2,6 +2,7 @@ package assembly
 
 import (
 	"context"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -112,5 +113,216 @@ func TestVectorSeamNeverSeesMechanismWording(t *testing.T) {
 	}
 	if !found {
 		t.Fatal("the business fact was never embedded")
+	}
+}
+
+// TestTierQueryMatchesObservedRead pins durable queries to the existing semantics.
+//
+// 契约: docs/wiki/memory/memory-architecture.md#read-paths
+func TestTierQueryMatchesObservedRead(t *testing.T) {
+	ctx := context.Background()
+	run := windowChainRun(t, ctx)
+	addrA := event.Address{AgentID: "agent-a", SessionID: "session-query-a"}
+	addrB := event.Address{AgentID: "agent-b", SessionID: "session-query-b"}
+	commitWindowTurns(t, ctx, run, addrA, 2)
+	commitWindowTurns(t, ctx, run, addrB, 1)
+	baseline := memory.NewMemoryEventQuery()
+	if err := run.tier.Segments.EachEvent(ctx, func(stored ledger.StoredEvent) error {
+		body, err := memory.DecodeEventBody(stored.Body)
+		if err != nil {
+			return err
+		}
+		if event.CompressionMechanism(body.Type) {
+			return nil
+		}
+		return baseline.Store(ctx, body.Record(stored.PartitionID, stored.WindowTS))
+	}); err != nil {
+		t.Fatalf("build the query baseline: %v", err)
+	}
+	direct := NewTierQuerySource(run.tier.Segments)
+	var mechanismKey event.EventID
+	if err := run.tier.Segments.EachIndexNewestFirst(ctx, func(key event.EventID, _ int, _ int64, typ string, _ event.SessionID) error {
+		if mechanismKey == "" && event.CompressionMechanism(typ) {
+			mechanismKey = key
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("find a mechanism fact for the refusal check: %v", err)
+	}
+	if mechanismKey == "" {
+		t.Fatal("the query fixture filed no compression mechanism fact")
+	}
+	if _, held := direct.Event(mechanismKey); held {
+		t.Fatal("the durable query served a compression mechanism event")
+	}
+	if _, held := direct.Reference(mechanismKey); held {
+		t.Fatal("the durable query served a compression mechanism reference")
+	}
+	partitions := []int{memory.PartitionIDFromName(string(addrA.AgentID)), memory.PartitionIDFromName(string(addrB.AgentID))}
+	queries := []memory.QueryOptions{
+		{PartitionIDs: partitions},
+		{PartitionIDs: partitions, EventTypes: []string{event.TypeExternalInput}, Keyword: "material", OrderBy: memory.QueryOrderByDesc},
+		{PartitionIDs: partitions, StartTime: 1, EndTime: time.Date(2026, 11, 7, 0, 0, 0, 0, time.UTC).UnixMilli(), Limit: 2, Offset: 1},
+	}
+	for i, opts := range queries {
+		want, err := baseline.QueryEvents(ctx, opts)
+		if err != nil {
+			t.Fatalf("baseline query %d: %v", i, err)
+		}
+		got, err := direct.QueryEvents(ctx, opts)
+		if err != nil {
+			t.Fatalf("direct query %d: %v", i, err)
+		}
+		if !reflect.DeepEqual(got, want) {
+			t.Fatalf("direct query %d = %#v, want %#v", i, got, want)
+		}
+	}
+	all, err := baseline.QueryEvents(ctx, memory.QueryOptions{PartitionIDs: partitions})
+	if err != nil {
+		t.Fatalf("list the baseline: %v", err)
+	}
+	for _, ref := range all {
+		gotEvent, gotHeld := direct.Event(ref.Key)
+		if !gotHeld || gotEvent != ref {
+			t.Fatalf("Event(%s) = %#v/%v, want %#v/true", ref.Key, gotEvent, gotHeld, ref)
+		}
+		stored, held, err := run.tier.Segments.GetEvent(ctx, ref.Key)
+		if err != nil || !held {
+			t.Fatalf("read the expected reference of %s: %v/%v", ref.Key, held, err)
+		}
+		body, err := memory.DecodeEventBody(stored.Body)
+		if err != nil {
+			t.Fatalf("decode the expected reference of %s: %v", ref.Key, err)
+		}
+		gotRef, gotHeld := direct.Reference(ref.Key)
+		if !gotHeld || gotRef != body.Ref() {
+			t.Fatalf("Reference(%s) = %#v/%v, want %#v/true", ref.Key, gotRef, gotHeld, body.Ref())
+		}
+	}
+}
+
+// TestRetrievalConstructionReadsNoEventBodies pins lazy query consumption.
+//
+// 契约: docs/wiki/memory/memory-architecture.md#read-paths
+func TestRetrievalConstructionReadsNoEventBodies(t *testing.T) {
+	ctx := context.Background()
+	tier, err := ledger.OpenTier(ctx, ledger.StorageConfig{Type: ledger.StorageMemory})
+	if err != nil {
+		t.Fatalf("open the tier: %v", err)
+	}
+	defer tier.Segments.Close()
+	if err := tier.Segments.StoreEvent(ctx, ledger.SegmentRecord{PartitionID: 1, WindowTS: 1, Seq: 1, EventKey: "undecodable", EventTime: 1, Body: []byte("not-an-event")}.WithChain(event.TypeExternalInput, "session-lazy")); err != nil {
+		t.Fatalf("store the undecodable body: %v", err)
+	}
+	supply, err := supplyRetrieval(ctx, tier, nil)
+	if err != nil {
+		t.Fatalf("constructing the read face decoded a body: %v", err)
+	}
+	defer supply.close()
+	if _, err := supply.source.QueryEvents(ctx, memory.QueryOptions{PartitionIDs: []int{1}}); err == nil {
+		t.Fatal("the first real query did not surface the unreadable body")
+	}
+}
+
+// TestObservedEventsReadsBeyondHotWindow pins durable history over runtime state.
+//
+// 契约: docs/wiki/memory/memory-architecture.md#read-paths
+func TestObservedEventsReadsBeyondHotWindow(t *testing.T) {
+	ctx := context.Background()
+	run := windowChainRun(t, ctx)
+	addr := event.Address{AgentID: "agent-a", SessionID: "session-durable-query"}
+	commitWindowTurns(t, ctx, run, addr, 12)
+	first := event.EventID(timeStampKey(time.Date(2026, 11, 6, 12, 0, 0, 0, time.UTC), addr, 0, 0))
+	run.mu.Lock()
+	_, held := run.facts[first]
+	run.mu.Unlock()
+	if held {
+		t.Fatal("the fixture kept the first fact in the hot window")
+	}
+	refs, err := run.ObservedEvents(ctx, memory.QueryOptions{PartitionIDs: []int{memory.PartitionIDFromName(string(addr.AgentID))}})
+	if err != nil {
+		t.Fatalf("query the durable history: %v", err)
+	}
+	found := false
+	for _, ref := range refs {
+		if ref.Key == first {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("the durable query lost %s after it left the hot window", first)
+	}
+}
+
+// TestTierParentFollowsCommitOrder pins parent derivation without a relation journal.
+//
+// 契约: docs/wiki/memory/memory-architecture.md#read-paths
+func TestTierParentFollowsCommitOrder(t *testing.T) {
+	ctx := context.Background()
+	run := windowChainRun(t, ctx)
+	addrA := event.Address{AgentID: "agent-a", SessionID: "session-parent-shared"}
+	addrB := event.Address{AgentID: "agent-b", SessionID: "session-parent-shared"}
+	at := time.Date(2026, 11, 6, 12, 0, 0, 0, time.UTC)
+	commit := func(addr event.Address, key event.EventID, stamp time.Time) {
+		t.Helper()
+		evt := event.Event{Key: key, Type: event.TypeExternalInput, Timestamp: stamp, Meta: map[string]string{event.MetaKeyEventSummary: "ask"}, Message: model.Message{Role: model.RoleUser, Content: "parent"}, Owner: addr}
+		if _, err := run.CommitToSession(ctx, addr, evt); err != nil {
+			t.Fatalf("commit %s: %v", key, err)
+		}
+	}
+	commit(addrA, "parent-a1", at.Add(2*time.Hour))
+	commit(addrB, "parent-b1", at.Add(time.Hour))
+	commit(addrA, "parent-a2", at)
+	direct := NewTierQuerySource(run.tier.Segments)
+	for _, check := range []struct {
+		key    event.EventID
+		parent event.EventID
+	}{
+		{key: "parent-a2", parent: "parent-a1"},
+		{key: "parent-a1", parent: ""},
+		{key: "parent-b1", parent: ""},
+		{key: "parent-missing", parent: ""},
+	} {
+		parent, err := direct.GetParent(check.key)
+		if err != nil {
+			t.Fatalf("GetParent(%s): %v", check.key, err)
+		}
+		if parent != check.parent {
+			t.Fatalf("GetParent(%s)=%q, want %q", check.key, parent, check.parent)
+		}
+	}
+	reads := run.RecallReads()
+	if reads.Trace == nil {
+		t.Fatal("the recall read face has no durable parent reader")
+	}
+	parent, err := reads.Trace.GetParent("parent-a2")
+	if err != nil || parent != "parent-a1" {
+		t.Fatalf("the recall parent reader answered %q/%v, want parent-a1", parent, err)
+	}
+}
+
+// TestRecallPortLateBindsParentReader pins construction before Run binding.
+//
+// 契约: docs/wiki/memory/memory-architecture.md#read-paths
+func TestRecallPortLateBindsParentReader(t *testing.T) {
+	ctx := context.Background()
+	port := NewRecallPort(nil)
+	reads := port.Reads()
+	if reads.Trace == nil {
+		t.Fatal("the pre-bind recall port exposes no trace wrapper")
+	}
+	run := windowChainRun(t, ctx)
+	addr := event.Address{AgentID: "agent-a", SessionID: "session-late-parent"}
+	at := time.Date(2026, 11, 6, 12, 0, 0, 0, time.UTC)
+	for _, key := range []event.EventID{"late-a1", "late-a2"} {
+		evt := event.Event{Key: key, Type: event.TypeExternalInput, Timestamp: at, Meta: map[string]string{event.MetaKeyEventSummary: "ask"}, Message: model.Message{Role: model.RoleUser, Content: "parent"}, Owner: addr}
+		if _, err := run.CommitToSession(ctx, addr, evt); err != nil {
+			t.Fatalf("commit %s: %v", key, err)
+		}
+	}
+	port.Bind(run)
+	parent, err := reads.Trace.GetParent("late-a2")
+	if err != nil || parent != "late-a1" {
+		t.Fatalf("the late-bound trace answered %q/%v, want late-a1", parent, err)
 	}
 }

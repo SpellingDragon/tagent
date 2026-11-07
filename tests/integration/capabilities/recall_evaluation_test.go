@@ -193,7 +193,7 @@ func evalAssemble(t *testing.T, storeRoot string, embedder memory.Embedder) *ass
 // evalRecallPort binds the recall port of one assembled run, so the test drives
 // the same recall face the production tools read through.
 func evalRecallPort(run *assembly.Run) *assembly.RecallPort {
-	port := assembly.NewRecallPort(nil, nil)
+	port := assembly.NewRecallPort(nil)
 	port.Bind(run)
 	return port
 }
@@ -387,7 +387,7 @@ func writeEvalReport(t *testing.T, report evalReport) string {
 }
 
 // TestRecallEvaluation drives the recall quality and cost evaluation over the production retrieval path of the formal assembly.
-//   - 检索路径生产接线: the formal entry consumes StoreQuerySource/StoreSearcher and answers the vector leg, the narrowed query face and paged continuations
+//   - 检索路径生产接线: the formal entry consumes TierQuerySource/StoreSearcher and answers the vector leg, the narrowed query face and paged continuations
 //   - 负锚: a run beside no storage refuses recall by name and an assembly beside no embedding answers through the keyword leg alone with zero embedding calls
 //   - 评测语义保留零增益与失败: the report keeps its zero-gain and failed conclusion rows as they were earned, never upgraded or dropped
 //   - 真实检索资源与启用门: the real embedding endpoint is resource-gated — absent is skipped, half-configured is refused, provisioned carries the same evaluation
@@ -396,7 +396,7 @@ func writeEvalReport(t *testing.T, report evalReport) string {
 func TestRecallEvaluation(t *testing.T) {
 	ctx := context.Background()
 
-	t.Run("检索路径生产接线: 正式入口消费 StoreQuerySource/StoreSearcher", func(t *testing.T) {
+	t.Run("检索路径生产接线: 正式入口消费 TierQuerySource/StoreSearcher", func(t *testing.T) {
 		storeRoot := t.TempDir()
 		tier := seedEvalCorpus(t, storeRoot)
 		run := evalAssemble(t, storeRoot, memoryembedder.NewHashEmbedder(0))

@@ -1791,7 +1791,7 @@ func rebuildProjectionFromRun(t *testing.T, ctx context.Context, run *assembly.R
 		t.Fatalf("stream the session chain: %v", err)
 	}
 	rebuilt := replay.NewReplayProjection()
-	report, err := replay.RebuildProjectionFromWAL(ctx, rebuilt, chain, replay.NewMemoryRelations(), chainKey, replay.RebuildOptions{})
+	report, err := replay.RebuildProjectionFromWAL(ctx, rebuilt, chain, &replay.MemoryRelations{}, chainKey, replay.RebuildOptions{})
 	if err != nil {
 		t.Fatalf("rebuild the projection from the chain: %v", err)
 	}
@@ -1994,7 +1994,7 @@ func runRebuildRefoldsFromWAL(t *testing.T) {
 		}
 	}
 	rebuilt := replay.NewReplayProjection()
-	report, err := replay.RebuildProjectionFromWAL(ctx, rebuilt, chain, replay.NewMemoryRelations(), chainKey, replay.RebuildOptions{})
+	report, err := replay.RebuildProjectionFromWAL(ctx, rebuilt, chain, &replay.MemoryRelations{}, chainKey, replay.RebuildOptions{})
 	if err != nil {
 		t.Fatalf("rebuild the projection from the WAL: %v", err)
 	}

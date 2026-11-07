@@ -55,13 +55,6 @@ in memory/ledger, the projection shapes in memory/replay and the meditation
 shapes in features/evolution/meditation; this file pins what this package itself
 declares, so a renamed field or a widened signature stops it from compiling.
 
-The observation table between the segment store and the query face: a committed
-event reaches the query face by being decoded and landed here first, and only
-the events landed are visible to QueryEvents and to the retrieval built over it.
-The table keeps the consumption order of the read path honest — a query consumes
-an event after the table observes it, and never at the moment its bytes happen
-to be committed.
-
 CONSTANTS
 
 const (
@@ -506,54 +499,6 @@ type ReplayReport struct {
 }
     ReplayReport is the report one replay returns, one outcome per delivery,
     in the order the pending obligations were handed in.
-
-type StoreQuerySource struct {
-	// Has unexported fields.
-}
-    StoreQuerySource is the query source over the observation table: it answers
-    QueryEvents on exactly the query semantics of the memory read face, over the
-    events landed from the committed store rather than over records a caller
-    assembled by hand.
-
-func NewStoreQuerySource() *StoreQuerySource
-    NewStoreQuerySource returns an empty observation table.
-
-func (s *StoreQuerySource) Event(key event.EventID) (EventReference, bool)
-    Event returns the reference of the landed event under the key, and reports
-    whether the table holds it. A reader that already holds a key re-checks the
-    attribution the key claims against this one record instead of trusting the
-    key alone.
-
-func (s *StoreQuerySource) LandEvent(ctx context.Context, stored ledger.StoredEvent) error
-    LandEvent decodes one committed event under the body schema and lands it
-    in the table: the record a query reads and the reference the recall path
-    reads the original under. A body whose canonical key disagrees with the
-    stored key is refused by name. A repeat of one event key keeps the record of
-    the higher window, and a repeat at the same window is an idempotent no-op.
-    A compression mechanism fact is refused by its frozen type: its internal
-    summary and anchor payload are recovery metadata, never material a query may
-    surface into the model's context.
-
-func (s *StoreQuerySource) ObserveStore(ctx context.Context, store *ledger.FileSegmentStore) error
-    ObserveStore lands every event the store has published into the table. An
-    already landed event keeps its record and only the events not yet landed are
-    decoded and added, so observing twice over unchanged state moves nothing.
-
-func (s *StoreQuerySource) Observed(key event.EventID) bool
-    Observed reports whether the table holds the event key.
-
-func (s *StoreQuerySource) ObservedCount() int
-    ObservedCount returns how many event keys the table holds.
-
-func (s *StoreQuerySource) QueryEvents(ctx context.Context, opts QueryOptions) ([]EventReference, error)
-    QueryEvents returns the references matching opts over the landed events,
-    on exactly the declarative terms of QueryOptions. An event the table has
-    not landed takes no part in the answer, whatever the store behind the table
-    holds.
-
-func (s *StoreQuerySource) Reference(key event.EventID) (ledger.OriginalRef, bool)
-    Reference returns the recall reference the event key was landed with,
-    and reports whether the table holds one.
 
 type VectorSeam struct {
 	// Has unexported fields.

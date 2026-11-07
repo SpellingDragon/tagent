@@ -30,8 +30,6 @@ import (
 	"github.com/SpellingDragon/tagent/features/evolution/meditation"
 	"github.com/SpellingDragon/tagent/features/rl"
 	"github.com/SpellingDragon/tagent/features/telemetry"
-	"github.com/SpellingDragon/tagent/memory/ledger"
-	"github.com/SpellingDragon/tagent/memory/replay"
 	"github.com/SpellingDragon/tagent/runtime/agent"
 	"github.com/SpellingDragon/tagent/runtime/state"
 	"github.com/SpellingDragon/tagent/runtime/task"
@@ -412,15 +410,11 @@ func Boot(configPath string, opts ...HostOption) (*Host, error) {
 		deliveryMeter = &hostDeliveryMeter{sender: cfg.hostSender}
 		cfg.hostSender = deliveryMeter
 	}
-	relations, err := openHostRelations(plan)
-	if err != nil {
-		return nil, err
-	}
 	embedder, err := plan.Embedder()
 	if err != nil {
 		return nil, err
 	}
-	recallPort := NewRecallPort(embedder, relations)
+	recallPort := NewRecallPort(embedder)
 	ctx, cancel := context.WithCancel(context.Background())
 	meditationPort := &hostMeditationPort{plan: meditationPlan}
 	reentryPort := &hostSendReentryPort{}
@@ -745,28 +739,6 @@ func storageRootOf(plan *MemoryPlan) string {
 		return ""
 	}
 	return plan.Storage().Root
-}
-
-// openHostRelations reports the relation ledger the recall trace walks: a
-// journal beside an explicit durable root, and an anonymous in-memory graph
-// beside a non-durable or empty one.
-func openHostRelations(plan *MemoryPlan) (*replay.MemoryRelations, error) {
-	if plan == nil {
-		return replay.NewMemoryRelations(), nil
-	}
-	cfg := plan.Storage()
-	if cfg == nil || cfg.Type == ledger.StorageMemory || cfg.Root == "" {
-		return replay.NewMemoryRelations(), nil
-	}
-	root := filepath.Join(cfg.Root, "relations")
-	if err := os.MkdirAll(root, 0o755); err != nil {
-		return nil, fmt.Errorf("tagent: create the relation journal %s: %w", root, err)
-	}
-	relations, err := replay.OpenMemoryRelations(root)
-	if err != nil {
-		return nil, fmt.Errorf("tagent: open the relation journal %s: %w", root, err)
-	}
-	return relations, nil
 }
 
 // abortBoot drains the run of a Boot call that failed after the assembly and

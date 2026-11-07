@@ -19,7 +19,6 @@ import (
 	"github.com/SpellingDragon/tagent/api/event"
 	"github.com/SpellingDragon/tagent/memory"
 	"github.com/SpellingDragon/tagent/memory/ledger"
-	"github.com/SpellingDragon/tagent/memory/replay"
 	"github.com/SpellingDragon/tagent/memory/search"
 	trpctool "trpc.group/trpc-go/trpc-agent-go/tool"
 )
@@ -81,8 +80,8 @@ const (
 )
 
 // Reads is the read face the four tools consume: the retrieval port, the
-// embedding capability of this deployment, the observation table, the scoped
-// original store and the causal relation ledger.
+// embedding capability of this deployment, the durable query table, the
+// scoped original store and the parent reader.
 //
 // A field left nil is a deployment that wires nothing there, and the tool that
 // needs it refuses by name with ErrRecallUnwired.
@@ -93,12 +92,14 @@ type Reads struct {
 	// semantic retrieval at all, and the retrieval tool refuses by name.
 	Embedder memory.Embedder
 	// Table answers the event references a query matches and the reference of
-	// one landed event.
+	// one event read from the chain.
 	Table Table
 	// Originals serves the text behind one landed event inside its read scope.
 	Originals ledger.ScopedOriginalStore
-	// Trace answers the parent link of one event.
-	Trace *replay.MemoryRelations
+	// Trace answers the parent link of one event, derived by the bound reader.
+	Trace interface {
+		GetParent(event.EventID) (event.EventID, error)
+	}
 }
 
 // base is what the four tools share: the read face and the partitions the

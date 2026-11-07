@@ -124,17 +124,6 @@
       "review_by": "2027-05-05"
     },
     {
-      "id": "memory.ledger.relations-journal",
-      "kind": "filesystem-store",
-      "owner": "memory/ledger",
-      "files": [
-        "memory/ledger/relations_journal.go"
-      ],
-      "prefixes": [],
-      "reason": "The append-only relation journal and its snapshot are durable relation truth.",
-      "review_by": "2027-05-05"
-    },
-    {
       "id": "memory.ledger.rustviking-kv",
       "kind": "external-kv",
       "owner": "memory/ledger",

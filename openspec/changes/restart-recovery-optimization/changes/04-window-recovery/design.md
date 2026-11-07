@@ -42,7 +42,7 @@ boot 事件 = 两步消费（①未消费事件重投 ②锚/快照装载）+ �
 - 观察表整体退役：`TierQuerySource` 查询直读持久层；`StoreQuerySource`/`ObserveStore`/运行期 land 钩子连同接线足迹**原子删除**（删除原子化裁定）。
 - 向量缝整体退役：检索向量腿改查询时候选现嵌入；`VectorSeam` 整型删除。
 - landedSeq 已并入走链（r44 ✅）；tier 打开改懒校验。
-- 召回父边按需从持久链推导，不新增在线关系写入或第二份父图状态。
+- 召回父边按需从持久链推导，不新增在线关系写入或第二份父图状态；`MemoryRelations` journal 与 `New/OpenMemoryRelations` 已删除，RecallPort 以晚绑定包装 Trace，工具构造顺序不再依赖 Host 预先开图。
 - boot 从四遍全量解码收敛为自己的消费一遍。
 
 ## D7 载体（不变 + 已知缺口）

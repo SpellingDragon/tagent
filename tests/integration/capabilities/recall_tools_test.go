@@ -32,8 +32,7 @@ type recallSurface struct {
 func newRecallSurface(t *testing.T, wired memory.Embedder) *recallSurface {
 	t.Helper()
 	chain := newRealStoreChain(t, memoryembedder.NewHashEmbedder(0))
-	chain.landStore(t)
-	relations := replay.NewMemoryRelations()
+	relations := &replay.MemoryRelations{}
 	if err := relations.SetParent("0a02", "0a01"); err != nil {
 		t.Fatalf("SetParent(0a02 -> 0a01): %v", err)
 	}

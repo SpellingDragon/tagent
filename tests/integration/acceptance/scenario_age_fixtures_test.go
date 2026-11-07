@@ -118,7 +118,7 @@ func scenarioProjection(t *testing.T, facts []replay.ChainFact) *replay.ReplayPr
 		}
 	}
 	projection := replay.NewReplayProjection()
-	if _, err := replay.RebuildProjectionFromWAL(ctx, projection, chain, replay.NewMemoryRelations(), scenarioChainKey, replay.RebuildOptions{}); err != nil {
+	if _, err := replay.RebuildProjectionFromWAL(ctx, projection, chain, &replay.MemoryRelations{}, scenarioChainKey, replay.RebuildOptions{}); err != nil {
 		t.Fatalf("rebuild the projection from the chain: %v", err)
 	}
 	return projection

@@ -64,7 +64,7 @@ func TestNoticeFactsSurviveTheChainRebuild(t *testing.T) {
 			}
 		}
 		projection := replay.NewReplayProjection()
-		report, err := replay.RebuildProjectionFromWAL(ctx, projection, chain, replay.NewMemoryRelations(), noticeChainKey, replay.RebuildOptions{})
+		report, err := replay.RebuildProjectionFromWAL(ctx, projection, chain, &replay.MemoryRelations{}, noticeChainKey, replay.RebuildOptions{})
 		if err != nil || !report.Scanned || report.Entries != len(facts) || report.Dropped != 0 {
 			t.Fatalf("rebuild = (%+v, %v), want the three chain facts replayed whole", report, err)
 		}
@@ -124,7 +124,7 @@ func TestNoticeFactsSurviveTheChainRebuild(t *testing.T) {
 			t.Fatalf("commit another content under the notice identity = %v, want the conflict refused by name", err)
 		}
 		projection := replay.NewReplayProjection()
-		if _, err := replay.RebuildProjectionFromWAL(ctx, projection, chain, replay.NewMemoryRelations(), noticeChainKey, replay.RebuildOptions{}); err != nil {
+		if _, err := replay.RebuildProjectionFromWAL(ctx, projection, chain, &replay.MemoryRelations{}, noticeChainKey, replay.RebuildOptions{}); err != nil {
 			t.Fatalf("rebuild the retried notice: %v", err)
 		}
 		if projection.Len() != 1 || projection.Entries()[0].Key != fact.Key {
@@ -139,10 +139,10 @@ func TestNoticeFactsSurviveTheChainRebuild(t *testing.T) {
 			t.Fatalf("commit the notice fact: %v", err)
 		}
 		projection := replay.NewReplayProjection()
-		if _, err := replay.RebuildProjectionFromWAL(ctx, projection, chain, replay.NewMemoryRelations(), noticeChainKey, replay.RebuildOptions{}); err != nil {
+		if _, err := replay.RebuildProjectionFromWAL(ctx, projection, chain, &replay.MemoryRelations{}, noticeChainKey, replay.RebuildOptions{}); err != nil {
 			t.Fatalf("rebuild the notice: %v", err)
 		}
-		again, err := replay.RebuildProjectionFromWAL(ctx, projection, chain, replay.NewMemoryRelations(), noticeChainKey, replay.RebuildOptions{})
+		again, err := replay.RebuildProjectionFromWAL(ctx, projection, chain, &replay.MemoryRelations{}, noticeChainKey, replay.RebuildOptions{})
 		if err != nil || again.Skipped != replay.RebuildSkipNotEmpty {
 			t.Fatalf("second rebuild = (%+v, %v), want the non-empty projection skipped by name", again, err)
 		}

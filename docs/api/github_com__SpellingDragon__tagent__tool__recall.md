@@ -25,17 +25,17 @@ partitions, on the same declarative query semantics the memory read face states,
 newest first and cut to one page.
 
 Compile-time assertions of the recall surface: the four tools stay native
-callable tools, the declared names stay the vocabulary the prompt spells,
-the table port stays satisfied by the observation table, and the scoped original
+callable tools, the declared names stay the vocabulary the prompt spells, the
+table port stays satisfied by the production read face, and the scoped original
 store stays satisfied by the in-process original store.
 
-The observation-table port of the recall surface: the references a time, type
-and keyword query matches, the reference of one landed event and the original
-reference that event was landed with.
+The durable query port of the recall surface: the references a time, type and
+keyword query matches, the reference of one event and the original reference the
+chain states for it.
 
 The causal chain tool of the recall surface: one key is walked back along the
-parent links of the relation ledger, and the part that can be read is answered
-beside the named reason the walk stopped there.
+parent links read from the durable chain, and the part that can be read is
+answered beside the named reason the walk stopped there.
 
 CONSTANTS
 
@@ -88,16 +88,18 @@ type Reads struct {
 	// semantic retrieval at all, and the retrieval tool refuses by name.
 	Embedder memory.Embedder
 	// Table answers the event references a query matches and the reference of
-	// one landed event.
+	// one event read from the chain.
 	Table Table
 	// Originals serves the text behind one landed event inside its read scope.
 	Originals ledger.ScopedOriginalStore
-	// Trace answers the parent link of one event.
-	Trace *replay.MemoryRelations
+	// Trace answers the parent link of one event, derived by the bound reader.
+	Trace interface {
+		GetParent(event.EventID) (event.EventID, error)
+	}
 }
-    Reads is the read face the four tools consume: the retrieval port, the
-    embedding capability of this deployment, the observation table, the scoped
-    original store and the causal relation ledger.
+    Reads is the read face the four tools consume: the retrieval port,
+    the embedding capability of this deployment, the durable query table,
+    the scoped original store and the parent reader.
 
     A field left nil is a deployment that wires nothing there, and the tool that
     needs it refuses by name with ErrRecallUnwired.
@@ -117,7 +119,7 @@ type Table interface {
     references one declarative query matches, the reference of one event the
     table has landed, and the original reference that event was landed with.
 
-    The redline list (3 rules): MUST answer over the events the table has
-    already landed and never over a store behind it. MUST answer a key the table
-    holds no event for as not held. MUST NOT widen the granted partition set:
-    an event outside it takes no part in an answer.
+    The redline list (3 rules): MUST answer by reading the durable chain on
+    demand, not a pre-landed copy. MUST answer a key the chain holds no readable
+    event for as not held. MUST NOT widen the granted partition set: an event
+    outside it takes no part in an answer.

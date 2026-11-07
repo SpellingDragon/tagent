@@ -464,10 +464,10 @@ func (d *hostDocument) nativeAgent(ctx context.Context, id string, client *http.
 
 // toolsFor constructs the tool instances the host contributes for one agent;
 // the core owns the execution, MCP and delegation families of the declaration.
-// The recall set is built before the run is assembled, so its observation table
+// The recall set is built before the run is assembled, so its durable query
 // and original store are wired to the port itself (it forwards to the faces Bind
-// attaches) and the relation ledger comes from the port's read face, so
-// recall_trace walks the host's parent chain.
+// attaches) and the parent reader comes from the port's read face, so
+// recall_trace walks the parent chain already on the event chain.
 // - One tool answers every task and peer-session destination, and every agent that declares it carries both dispatch faces — the meditation session included, because a reflection turn delivers its summary through this very tool (design D15 DEL-2).
 // - The delivery face itself refuses a sender the document's white list does not authorize, so a grant is never an authorization of its own.
 // - Host self-reflection contributes the cross-session send tool through the meditation plugin, not through the agent-level declaration; the runtime scopes the tool to the dedicated reflection session alone.

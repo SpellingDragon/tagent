@@ -1,7 +1,7 @@
 // 契约: docs/wiki/tool/tool-architecture.md#recall-subtools
 //
 // The causal chain tool of the recall surface: one key is walked back along the
-// parent links of the relation ledger, and the part that can be read is
+// parent links read from the durable chain, and the part that can be read is
 // answered beside the named reason the walk stopped there.
 package recall
 

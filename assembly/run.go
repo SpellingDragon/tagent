@@ -987,8 +987,8 @@ var publishContract = state.PublishContract{Required: []state.CheckName{"eval", 
 var ErrGovernanceMissing = errors.New("tagent: the formal assembly carries no governance")
 
 // ErrRetrievalUnwired reports a recall against a run assembled beside no
-// storage tier: the retrieval face reads through the observation table over
-// the committed store, and a run whose facts live only in memory carries no
+// storage tier: the retrieval face reads the durable chain on demand, and a
+// run whose facts live only in memory carries no
 // such store, so the recall is refused by name instead of answered as an empty
 // reference set that would read as "nothing was found".
 var ErrRetrievalUnwired = errors.New("tagent: the run carries no retrieval face (assembled beside no storage)")
@@ -1461,34 +1461,17 @@ func (r *Run) ReflectionGate() meditation.WatermarkGate {
 	return r.watermark
 }
 
-// ObservedEvents answers one query over the fact chain this run can observe:
-// the events its storage tier already committed, merged with every fact this
-// process committed, landed idempotently under the identity each fact carries.
+// ObservedEvents answers one query over the durable fact chain, independent
+// of the runtime window and of any landing pass.
 // A run assembled beside no storage tier refuses the read by name.
 func (r *Run) ObservedEvents(ctx context.Context, opts memory.QueryOptions) ([]memory.EventReference, error) {
 	r.mu.Lock()
 	tier := r.tier
-	facts := make([]event.Event, 0, len(r.factOrder))
-	for _, key := range r.factOrder {
-		if evt, held := r.facts[key]; held {
-			facts = append(facts, evt)
-		}
-	}
 	r.mu.Unlock()
 	if tier == nil {
 		return nil, ErrObservationUnwired
 	}
-	observed := memory.NewMemoryEventQuery()
-	for _, evt := range facts {
-		record, held := eventRecordOf(evt)
-		if !held {
-			continue
-		}
-		if err := observed.Store(ctx, record); err != nil {
-			return nil, err
-		}
-	}
-	return observed.QueryEvents(ctx, opts)
+	return NewTierQuerySource(tier.Segments).QueryEvents(ctx, opts)
 }
 
 // factWindowQuery answers one query over the facts this run holds in its hot

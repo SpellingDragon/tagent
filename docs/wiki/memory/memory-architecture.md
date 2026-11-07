@@ -5,13 +5,13 @@
 <a id="overview"></a>
 ## 一、模块定位与分层
 
-`tagent/memory` 是 tagent 的**事件存储层**：把一条已提交的事实按分区与时间窗落成 KV 键（链），把事实的**消息正文**放进按内容寻址的**原文仓**，把"谁消费了谁"落成追加式**因果日志**。边界只有一条：**本层不认识 agent 语义**——身份到分区的映射由调用方经 `PartitionIDFromName` 完成，本层只按分区号归档。
+`tagent/memory` 是 tagent 的**事件存储层**：把一条已提交的事实按分区与时间窗落成 KV 键（链），把事实的**消息正文**放进按内容寻址的**原文仓**，并在查询时从链推导父边。边界只有一条：**本层不认识 agent 语义**——身份到分区的映射由调用方经 `PartitionIDFromName` 完成，本层只按分区号归档。
 
 | 形态 | 落点 | 生命周期 | 立得住的反事实 |
 |---|---|---|---|
 | **链**（事实本体） | `<pid>:evt:<窗>:<seq>`、`<pid>:idx:<EventID>`、`<pid>:meta:<窗>`（[§五](#file-segment-store)） | 不可变、恒重放 | 没有它：状态无单一来源，回退到任意时刻无从谈起 |
 | **原文仓** = blob + ref | `blob:sha256:…` + `ref:<EventID>`（[§三](#event-shape)） | 字节可过期、账目随链 | 没有它：正文进链，装载与重放被重字节拖垮，且无法去重 |
-| **因果日志** | `relations/relations.journal`（`memory/ledger/relations_journal.go` 的 `RelationsJournalName`，[§四](#causal-chain)） | 追加、启动重放 | 没有它：因果塞进链，轻链变重 |
+| **父边** | 查询时从持久链推导（[§四](#causal-chain)） | 按需读取、不另存 | 另存父图：链之外多一个需要恢复与对账的副本 |
 | **账本**（任务/回执/交付） | `tagent/task/v1/…`（`runtime/state/durable.go`、`assembly/host_delivery.go`） | 逐条追加、不覆盖 | 没有它：只留终态，任务历史没有时光机 |
 | **其余现算**（投影/装配/检索页） | 不持久 | 每次重算 | 没有它：presentation 落盘成第二真源 |
 
@@ -22,12 +22,12 @@
 | `memory/event_body.go` | 事实本体形态 `EventBody`：编码/解码、`Record`、`Ref`、`Event`、`SameFact` |
 | `memory/partition.go` | 分区派生 `PartitionIDFromName` 与授权命名空间展开 `PartitionsOf` |
 | `memory/query_events.go` | 声明式查询面 `QueryOptions` / `QueryEvents` |
-| `memory/store_query.go` | 观察表：把已 land 的事实装成可查询、可回捞引用的面 |
+| `assembly/read.go` | 持久链直读：查询、原文引用与父边按需派生，不保留观察表 |
 | `memory/recall.go` | 向量缝 `VectorSeam` 与 `Embedder` 契约 |
 | `memory/replay/` | 投影、段龄轴、折叠、因果链、回放预算（全部现算） |
 | `memory/search/` | 检索端口 `Searcher`、融合 `Fusion`、真实 store 上的检索实现 |
 | `memory/embedder/` | 嵌入器装配期校验与向量生成 |
-| `memory/ledger/` | 原文仓（blob+ref）、段存储、kv 分层、因果日志、账本事实面、租约与生命周期 |
+| `memory/ledger/` | 原文仓（blob+ref）、段存储、kv 分层、账本事实面、租约与生命周期 |
 | `memory/query/` | 只读诊断投影（装配面诊断读，非存储面） |
 
 <a id="hard-contracts"></a>
@@ -36,13 +36,13 @@
 | # | 契约 | 含义 | 保障机制（可查证处） |
 |---|---|---|---|
 | 1 | **事件不可变** | 一个 key 只命名一个事实；写入后的字节永不原地改写 | 同 key 异字节具名拒绝：`ErrFactKeyConflict`（`event_body.go`）、`ErrContentConflict`（`localfile.go` `Put` / `segment_store.go` `StoreEvent`） |
-| 2 | **槽位与身份一一对应** | `<pid>:evt:<窗>:<seq>` 里装的就是 `EventID` 指向它的那条事件 | `StoreEvent` 一次 `kvBatch` 同写 evt/idx/meta 三键；`LandEvent` 拒绝 `body.Key != stored.Key`（`ErrBodyKeyMismatch`） |
+| 2 | **槽位与身份一一对应** | `<pid>:evt:<窗>:<seq>` 里装的就是 `EventID` 指向它的那条事件 | `StoreEvent` 一次 `kvBatch` 同写 evt/idx/meta 三键；`recordOfTierEvent` 拒绝 `body.Key != stored.Key`（`ErrBodyKeyMismatch`） |
 | 3 | **链上没有正文** | 链只存身份、时间、元数据与原生负载；消息正文只走原文仓 | 写入点 `assembly/facts.go:237`：`tier.Originals.Put(ctx, body.Ref(), []byte(body.Message.Content))` |
 | 4 | **声明式查询语义** | 结果 ≡ 全集过滤 → 全序排序 → offset/limit；剪枝与早停只是优化 | 全序键 `(Timestamp, Key)`（`query_events.go` `queryEventRecords`） |
 | 5 | **授权 default-nothing** | 空分区集合＝什么都不授权，绝不回落全库 | `QueryOptions.resolvePartitions` 两字段皆空返回空列表；`search.Searcher` 四条红线含同一条 |
 | 6 | **越权读作不存在** | scope 外的引用一律读作 miss，连"该 key 存在"都不泄漏 | `ScopedOriginalStore` 三条红线 + `kvOriginalStore.GetScoped` 只在 scope 内匹配（`reference.go`） |
 | 7 | **旧格式具名拒绝，不迁移** | 上一版 body 字节按名字拒绝，冷启动重建而非就地猜格式 | `DecodeEventBody` 判据是**顶层是否有 `message` 键**，无则 `ErrEventBody` |
-| 8 | **跨批无事务，靠顺序不变量补偿** | `kvBatch` 是原子单位，批次之间没有事务；正确性由"先写什么后写什么"保证 | 段三键同批、`relations.journal` 先落盘后改内存、交付先登记后发送 |
+| 8 | **跨批无事务，靠顺序不变量补偿** | `kvBatch` 是原子单位，批次之间没有事务；正确性由"先写什么后写什么"保证 | 段三键同批、交付先登记后发送 |
 | 9 | **能力诚实** | 非持久档必须自报不持久，不得假装恢复面存在 | `StoreCapabilities.Durable=false`（`memory` 档）+ 装配告警 `storage tier keeps no record across process exit` |
 | 10 | **枚举要么全量要么具名失败** | 部分列表不得被当作完整视图来对账 | `LifecycleStore` 红线：`MUST enumerate every key it holds, or fail by name` |
 
@@ -101,26 +101,23 @@
 | 1 | `Segments.GetEvent(key)` 预检 | 已提交且 `SameFact` → 幂等成功；已提交但内容不同 → `ErrFactKeyConflict` |
 | 2 | `Originals.Put(ctx, body.Ref(), []byte(body.Message.Content))`（`assembly/facts.go:237`） | **正文先落进原文仓**：段里出现的 `EventID` 一定有可读原文可指 |
 | 3 | `Segments.StoreEvent(...)`，`partition = PartitionIDFromName(Owner.AgentID)`、`window = Timestamp.UnixMilli()`（负值具名拒）、`seq = landedSeq[partition]+1` | **段提交才是持久写**：它不成功，事实就不算落地，`landedSeq` 不前进 |
-| 4 | `source.LandEvent` + `seam.Submit` | 提交成功之后的**后果**：失败只告警，绝不回滚已落地的提交 |
+| 4 | `seam.Submit` | 提交成功之后的**后果**：失败只告警，绝不回滚已落地的提交；查询按需读链，没有 land 步骤 |
 
 两条由此可查证的结论：①无存储档（`tier == nil`）或事实没有 `Owner.AgentID` 时，事实只留在内存，不假称持久；②第 2 步成功而第 3 步失败会留下一条无人引用的 ref/blob——重放同一条事实会复用同一 digest，因此不会堆积第二份字节，但清理面不在本层（见[§十二](#gaps)）。
 
 <a id="causal-chain"></a>
-## 四、因果：`relations.journal`
+## 四、因果：查询时从链推导父边
 
-因果边不写在事实里（事件不可变，父子边可变），也不写在段里，而是根目录下**一份追加日志**：
+父边不写在事实里，也不另存一份关系日志。`assembly/read.go` 的 `tierQuerySource.GetParent` 在 newest-first 索引上找到当前键后，取同一 `(PartitionID, SessionID)` 链的下一个非合成键；没有 body 的索引项先提供顺序，缺 session 时才回退正文判定。
 
 | 规则 | 行为 | 判据 |
 |---|---|---|
-| 回放形态 | `relations.journal` 每行一条 `{child, parent}` JSON；同一 child 后出现的记录覆盖先前的，空 parent 删去该边 | `OpenMemoryRelations` 逐行回放 |
-| 持久判据 | `Append` 写一行并 `file.Sync()` 成功才返回；失败按写入前长度截断回滚 | **返回即持久**——journal 没落盘就不动内存边 |
-| 写序 | `SetParent` 在同一把锁里**先追加日志、后移动内存邻接表** | 日志写失败时链保持改动前状态，调用方可原样重试 |
-| 打开 | `OpenRelationsJournal` 先裁掉最后一个换行之后的尾行（那次追加从未返回成功） | 尾部撕裂不等于损坏 |
-| 损坏 | 不可解析的行 → `ErrRelationsJournalCorrupt`，**拒绝打开** | 宁可不启动，也不带着半条链服务 |
-| 自证 | `VerifyReplay` 把回放结果与持有的链逐项比对，不等即 `ErrRelationsReplayMismatch` | 回放不是"尽力而为" |
-| 隔离 | 链的身份是 `(PartitionID, SessionID)`；空 session 具名拒绝 | 同分区不同用户不并成一条链 |
+| 提交序 | 父边只按 `(PartitionID, Seq)` 推导，不按事件时间戳重排 | 后提交的早时间戳事实仍是后一条 |
+| 隔离 | 只连接同一 `(PartitionID, SessionID)` 的事实 | 两 agent 共用 session id 也不会跨链 |
+| 无副本 | 不保留常驻父图或观察表，每次调用直接读链 | 链删除或新增后不需要第二次对账 |
+| 内部节点 | 查询面拒收压缩机制事实，trace 遇到不可读祖先时按既有语义停止 | 内部文案与检查点不进入模型上下文 |
 
-隔离（`ChainKey`）是承重的：同一 agent 名的两个用户共用分区但**永远不共用 session**，因果回溯不会被跨用户缝合。投影、段龄轴、折叠都按这条链身份重建，重启后与运行期增量逐字节一致。
+隔离（`ChainKey`）仍是承重的：同一 agent 名的两个用户共用分区但**永远不共用 session**，因果回溯不会被跨用户缝合。投影、段龄轴、折叠都按这条链身份重建，重启后与运行期增量逐字节一致。
 
 <a id="partitionidfromname"></a>
 ### 4.1 分区派生

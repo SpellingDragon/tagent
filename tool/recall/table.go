@@ -1,8 +1,8 @@
 // 契约: docs/wiki/tool/tool-architecture.md#recall-contract
 //
-// The observation-table port of the recall surface: the references a time,
-// type and keyword query matches, the reference of one landed event and the
-// original reference that event was landed with.
+// The durable query port of the recall surface: the references a time, type
+// and keyword query matches, the reference of one event and the original
+// reference the chain states for it.
 package recall
 
 import (
@@ -18,8 +18,8 @@ import (
 // table has landed, and the original reference that event was landed with.
 //
 // The redline list (3 rules):
-// MUST answer over the events the table has already landed and never over a store behind it.
-// MUST answer a key the table holds no event for as not held.
+// MUST answer by reading the durable chain on demand, not a pre-landed copy.
+// MUST answer a key the chain holds no readable event for as not held.
 // MUST NOT widen the granted partition set: an event outside it takes no part in an answer.
 type Table interface {
 	// QueryEvents returns the references matching opts, totally ordered and

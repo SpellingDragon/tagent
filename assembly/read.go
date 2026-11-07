@@ -8,6 +8,7 @@ import (
 	"github.com/SpellingDragon/tagent/memory"
 	"github.com/SpellingDragon/tagent/memory/ledger"
 	"github.com/SpellingDragon/tagent/memory/query"
+	"github.com/SpellingDragon/tagent/memory/replay"
 	"github.com/SpellingDragon/tagent/memory/search"
 	"github.com/SpellingDragon/tagent/runtime/state"
 )
@@ -45,10 +46,10 @@ func (r *Run) ModelInFlight(addr event.Address, instance event.InstanceID) (even
 }
 
 // recall runs one retrieval over the recall face of this run and answers the
-// reference set the query hit. The retrieval reads through the observation table
-// over the committed store and the searcher fusing its two legs, so a hit is
-// answered as the recall reference its event was landed with and never as a
-// copy of the text behind it: the original stays behind the scoped read path.
+// reference set the query hit. The retrieval reads the durable chain on demand
+// and the searcher fuses its two legs, so a hit is answered as the original
+// reference the chain states and never as a copy of the text behind it: the
+// original stays behind the scoped read path.
 // The query carries its own authorized partition set — the recall grants no
 // authorization of its own — and a run assembled beside no storage tier is
 // refused by name with ErrRetrievalUnwired instead of answered as an empty set.
@@ -60,32 +61,168 @@ func (r *Run) recall(ctx context.Context, q search.Query) (search.Result, error)
 }
 
 // retrievalSupply is the retrieval face one run consumes recall through: the
-// observation table over the events its storage tier committed, the vector
-// seam the embedding leg borrows its vectors from, and the searcher reading
-// both legs through that table. It is wired once at the composition root over
-// the production components the retrieval domain ships — a query consumes an
-// event after the table observes it, and never at the moment its bytes happen
-// to be committed — and it holds no second copy of any event.
+// stateless durable query source, the vector seam the embedding leg borrows its
+// vectors from, and the searcher reading both legs through that source. It is
+// wired once at the composition root and holds no second copy of any event.
 type retrievalSupply struct {
-	source   *memory.StoreQuerySource
+	source   *tierQuerySource
 	seam     *memory.VectorSeam
 	searcher *search.StoreSearcher
 }
 
+// tierQuerySource is the stateless durable read face: every query decodes the
+// chain on demand, while no event or parent map is retained between calls.
+type tierQuerySource struct {
+	segments *ledger.FileSegmentStore
+}
+
+// NewTierQuerySource attaches the durable read face without landing anything.
+func NewTierQuerySource(segments *ledger.FileSegmentStore) *tierQuerySource {
+	return &tierQuerySource{segments: segments}
+}
+
+// recordOfTierEvent decodes one stored event into the existing query kernel.
+func recordOfTierEvent(stored ledger.StoredEvent) (memory.EventRecord, ledger.OriginalRef, bool, error) {
+	body, err := memory.DecodeEventBody(stored.Body)
+	if err != nil {
+		return memory.EventRecord{}, ledger.OriginalRef{}, false, err
+	}
+	if body.Key != stored.Key {
+		return memory.EventRecord{}, ledger.OriginalRef{}, false, memory.ErrBodyKeyMismatch
+	}
+	if event.CompressionMechanism(body.Type) {
+		return memory.EventRecord{}, ledger.OriginalRef{}, false, nil
+	}
+	return body.Record(stored.PartitionID, stored.WindowTS), body.Ref(), true, nil
+}
+
+// QueryEvents answers through the existing query kernel over a temporary read.
+func (s *tierQuerySource) QueryEvents(ctx context.Context, opts memory.QueryOptions) ([]memory.EventReference, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	query := memory.NewMemoryEventQuery()
+	if err := s.segments.EachEvent(ctx, func(stored ledger.StoredEvent) error {
+		record, _, held, err := recordOfTierEvent(stored)
+		if err != nil {
+			return err
+		}
+		if !held {
+			return nil
+		}
+		return query.Store(ctx, record)
+	}); err != nil {
+		return nil, err
+	}
+	return query.QueryEvents(ctx, opts)
+}
+
+// Event returns one event reference directly from the chain.
+func (s *tierQuerySource) Event(key event.EventID) (memory.EventReference, bool) {
+	stored, held, err := s.segments.GetEvent(context.Background(), key)
+	if err != nil || !held {
+		return memory.EventReference{}, false
+	}
+	record, _, held, err := recordOfTierEvent(stored)
+	if err != nil || !held {
+		return memory.EventReference{}, false
+	}
+	return record.Reference(), true
+}
+
+// Reference returns one original reference directly from the chain.
+func (s *tierQuerySource) Reference(key event.EventID) (ledger.OriginalRef, bool) {
+	stored, held, err := s.segments.GetEvent(context.Background(), key)
+	if err != nil || !held {
+		return ledger.OriginalRef{}, false
+	}
+	_, ref, held, err := recordOfTierEvent(stored)
+	if err != nil || !held {
+		return ledger.OriginalRef{}, false
+	}
+	return ref, true
+}
+
+// GetParent answers the preceding non-synthetic fact on the same chain. The
+// index normally proves the edge without bodies; an index entry with no session
+// falls back to the body walk so two sessions can never be joined accidentally.
+func (s *tierQuerySource) GetParent(key event.EventID) (event.EventID, error) {
+	if key == "" {
+		return "", nil
+	}
+	found := false
+	fallback := false
+	partition := 0
+	session := event.SessionID("")
+	parent := event.EventID("")
+	if err := s.segments.EachIndexNewestFirst(context.Background(), func(candidate event.EventID, part int, _ int64, _ string, sess event.SessionID) error {
+		if !found {
+			if candidate == key {
+				found = true
+				partition = part
+				session = sess
+				if session == "" {
+					fallback = true
+				}
+			}
+			return nil
+		}
+		if parent != "" || part != partition {
+			return nil
+		}
+		if sess == "" {
+			fallback = true
+			return nil
+		}
+		if sess != session || replay.SyntheticKey(candidate) {
+			return nil
+		}
+		parent = candidate
+		return nil
+	}); err != nil {
+		return "", err
+	}
+	if fallback {
+		return s.parentFromBodies(key)
+	}
+	return parent, nil
+}
+
+// parentFromBodies resolves chains whose index carries no session.
+func (s *tierQuerySource) parentFromBodies(key event.EventID) (event.EventID, error) {
+	previous := map[replay.ChainKey]event.EventID{}
+	parent := event.EventID("")
+	err := eachCommittedEvent(context.Background(), &ledger.Tier{Segments: s.segments}, func(stored ledger.StoredEvent) error {
+		body, err := memory.DecodeEventBody(stored.Body)
+		if err != nil {
+			return err
+		}
+		evt := body.Event()
+		evt.Key = stored.Key
+		if replay.SyntheticKey(evt.Key) {
+			return nil
+		}
+		chain := replay.ChainKey{PartitionID: stored.PartitionID, SessionID: sessionOf(evt)}
+		if evt.Key == key {
+			parent = previous[chain]
+		}
+		previous[chain] = evt.Key
+		return nil
+	})
+	return parent, err
+}
+
 // supplyRetrieval wires the retrieval face over one opened storage tier: the
-// observation table lands every event the tier has published, each landed
-// event submits its vector generation without waiting for it, and the searcher
-// fuses the two legs of every query back into the one ordered reference set.
+// durable query source reads only when asked, each business event submits its
+// vector generation without waiting for it, and the searcher fuses the two legs
+// of every query back into the one ordered reference set.
 // A nil embedder names no vector generation at all: no seam is built, no
 // embedding is ever called, and the searcher answers through the keyword leg
 // alone — the zero-change behaviour the embedding contract states. The
 // embedding text of one event is its stored content, falling back to its
 // stored summary when the content is empty.
 func supplyRetrieval(ctx context.Context, tier *ledger.Tier, embedder memory.Embedder) (*retrievalSupply, error) {
-	source := memory.NewStoreQuerySource()
-	if err := source.ObserveStore(ctx, tier.Segments); err != nil {
-		return nil, err
-	}
+	source := NewTierQuerySource(tier.Segments)
 	supply := &retrievalSupply{source: source}
 	if embedder == nil {
 		supply.searcher = search.NewStoreSearcher(source, nil, nil)

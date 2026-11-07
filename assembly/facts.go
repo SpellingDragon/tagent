@@ -285,12 +285,12 @@ func (r *Run) compactFactOrderLocked(dropped map[event.EventID]struct{}) {
 // persistFact writes one fact of this run to the storage tier it declares: the
 // body commits byte for byte as the original the recall face reads back, the
 // record commits behind the segment barrier under the next sequence slot of the
-// fact's partition, and the observation table and the vector pipeline learn the
-// event so the same process recalls what it just committed.
+// fact's partition, and the vector pipeline learns the event so the same
+// process recalls what it just committed.
 // - A run beside no storage tier, and a fact naming no owning agent, keep the fact in memory alone: no tier means no durable carrier to write.
 // - The segment commit is the durable write: nothing enters the live ledger before it returns success, and a refused commit leaves the previous position untouched.
 // - An event the tier already published is not committed twice: the very fact the identity already names is answered as the commitment it is, and another content under that identity is refused by name, so a retry of one fact keeps one record and a second fact never lands beside it.
-// - Landing the query record and submitting the vector generation are consequences of a commit that already landed; their failure is reported and never rolls the fact back.
+// - Submitting the vector generation is a consequence of a commit that already landed; its failure is reported and never rolls the fact back.
 func (r *Run) persistFact(ctx context.Context, evt event.Event) error {
 	r.mu.Lock()
 	tier := r.tier
@@ -352,10 +352,6 @@ func (r *Run) persistFact(ctx context.Context, evt event.Event) error {
 	}
 	if supply == nil {
 		return nil
-	}
-	landed := ledger.StoredEvent{Key: evt.Key, PartitionID: partition, WindowTS: window, Seq: seq, Body: encoded}
-	if err := supply.source.LandEvent(ctx, landed); err != nil {
-		assemblyWarn("tagent: the committed fact %s is not landed in the query table err=%v", evt.Key, err)
 	}
 	if supply.seam != nil && !event.CompressionMechanism(evt.Type) {
 		text := body.Message.Content

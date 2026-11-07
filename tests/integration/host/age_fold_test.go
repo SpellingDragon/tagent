@@ -234,7 +234,7 @@ func TestRebuildRefoldsIdempotent(t *testing.T) {
 		}
 	}
 	rebuilt := replay.NewReplayProjection()
-	if _, err := replay.RebuildProjectionFromWAL(ctx, rebuilt, chain, replay.NewMemoryRelations(), chainKey, replay.RebuildOptions{}); err != nil {
+	if _, err := replay.RebuildProjectionFromWAL(ctx, rebuilt, chain, &replay.MemoryRelations{}, chainKey, replay.RebuildOptions{}); err != nil {
 		t.Fatalf("rebuild the projection from the chain: %v", err)
 	}
 	report, err := rebuilt.FoldByAge(ctx, replay.AgeFoldPlan{

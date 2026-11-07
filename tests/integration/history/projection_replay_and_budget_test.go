@@ -191,7 +191,7 @@ func TestProjectionReplayAndBudget(t *testing.T) {
 		}
 		reopenedChain := durableChain{log: ledger.TierFactLog(reopened)}
 		projB := replay.NewReplayProjection()
-		relations := replay.NewMemoryRelations()
+		relations := &replay.MemoryRelations{}
 		report, err := replay.RebuildProjectionFromWAL(ctx, projB, reopenedChain, relations, session, replay.RebuildOptions{PageSize: 1})
 		if err != nil {
 			t.Fatalf("RebuildProjectionFromWAL: %v", err)
@@ -230,7 +230,7 @@ func TestProjectionReplayAndBudget(t *testing.T) {
 			}
 		}
 		proj := replay.NewReplayProjection()
-		report, err := replay.RebuildProjectionFromWAL(ctx, proj, chain, replay.NewMemoryRelations(), session, replay.RebuildOptions{FallbackBound: 3})
+		report, err := replay.RebuildProjectionFromWAL(ctx, proj, chain, &replay.MemoryRelations{}, session, replay.RebuildOptions{FallbackBound: 3})
 		if err != nil {
 			t.Fatalf("RebuildProjectionFromWAL: %v", err)
 		}
@@ -291,7 +291,7 @@ func TestProjectionReplayAndBudget(t *testing.T) {
 			t.Fatalf("Commit: %v", err)
 		}
 		proj := replay.NewReplayProjection()
-		report, err := replay.RebuildProjectionFromWAL(ctx, proj, chain, replay.NewMemoryRelations(), session, replay.RebuildOptions{})
+		report, err := replay.RebuildProjectionFromWAL(ctx, proj, chain, &replay.MemoryRelations{}, session, replay.RebuildOptions{})
 		if err != nil {
 			t.Fatalf("RebuildProjectionFromWAL: %v", err)
 		}
@@ -328,7 +328,7 @@ func TestProjectionReplayAndBudget(t *testing.T) {
 				t.Fatalf("Commit %s: %v", fact.Key, err)
 			}
 		}
-		relations := replay.NewMemoryRelations()
+		relations := &replay.MemoryRelations{}
 		proj := replay.NewReplayProjection()
 		report, err := replay.RebuildProjectionFromWAL(ctx, proj, chain, relations, session, replay.RebuildOptions{})
 		if err != nil {
@@ -367,7 +367,7 @@ func TestProjectionReplayAndBudget(t *testing.T) {
 			}
 		}
 		proj := replay.NewReplayProjection()
-		if _, err := replay.RebuildProjectionFromWAL(ctx, proj, chain, replay.NewMemoryRelations(), session, replay.RebuildOptions{}); err != nil {
+		if _, err := replay.RebuildProjectionFromWAL(ctx, proj, chain, &replay.MemoryRelations{}, session, replay.RebuildOptions{}); err != nil {
 			t.Fatalf("RebuildProjectionFromWAL: %v", err)
 		}
 		presented, err := proj.AssembleBudget(ctx, 100)

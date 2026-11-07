@@ -240,7 +240,7 @@ func TestCrossSessionContentIsRefused(t *testing.T) {
 		t.Fatalf("commit the alpha fact: %v", err)
 	}
 	projection := replay.NewReplayProjection()
-	if _, err := replay.RebuildProjectionFromWAL(ctx, projection, chain, replay.NewMemoryRelations(), alpha, replay.RebuildOptions{}); err != nil {
+	if _, err := replay.RebuildProjectionFromWAL(ctx, projection, chain, &replay.MemoryRelations{}, alpha, replay.RebuildOptions{}); err != nil {
 		t.Fatalf("rebuild the alpha chain: %v", err)
 	}
 

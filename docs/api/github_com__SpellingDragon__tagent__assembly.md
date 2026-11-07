@@ -319,10 +319,10 @@ var ErrObservationUnwired = errors.New("tagent: the run is assembled beside no o
 
 var ErrRetrievalUnwired = errors.New("tagent: the run carries no retrieval face (assembled beside no storage)")
     ErrRetrievalUnwired reports a recall against a run assembled beside no
-    storage tier: the retrieval face reads through the observation table over
-    the committed store, and a run whose facts live only in memory carries no
-    such store, so the recall is refused by name instead of answered as an empty
-    reference set that would read as "nothing was found".
+    storage tier: the retrieval face reads the durable chain on demand, and a
+    run whose facts live only in memory carries no such store, so the recall is
+    refused by name instead of answered as an empty reference set that would
+    read as "nothing was found".
 
 var ErrSettleDriverUnwired = errors.New("tagent: the settle driver is not wired")
     ErrSettleDriverUnwired reports an observation on a driver whose fact lookup,
@@ -442,6 +442,9 @@ func SetAttentionClock(now func() time.Time) (restore func())
     notification's validity with and returns the restore of the clock in effect.
     A nil clock restores the wall clock, so a caller that names none reads one
     time axis with every other read of this package.
+
+func NewTierQuerySource(segments *ledger.FileSegmentStore) *tierQuerySource
+    NewTierQuerySource attaches the durable read face without landing anything.
 
 TYPES
 
@@ -1237,31 +1240,32 @@ type RecallPort struct {
     binding answers the named refusal of the recall surface instead of an empty
     page that would read as "nothing was found".
 
-    The port carries the read faces the tools consume and forwards each to
-    the face the run wires: the retrieval port, the observation table over
-    the committed store and the scoped original store of the storage tier.
-    The relation ledger is the host's own, because a run assembled beside no
-    relation face wires none, so it is held here from the first call and never
-    rebound.
+    The port carries the read faces the tools consume and forwards each to the
+    face the run wires: the retrieval port, the durable query source and the
+    scoped original store of the storage tier. The parent reader is bound with
+    the other faces after assembly, never held as a second relation graph.
 
-func NewRecallPort(embedder memory.Embedder, trace *replay.MemoryRelations) *RecallPort
+func NewRecallPort(embedder memory.Embedder) *RecallPort
     NewRecallPort opens the port over the embedding binding the recall tools are
-    built with and the relation ledger the host holds. The binding is fixed at
-    construction because the tools read it once when they are built; every other
-    face is attached by Bind.
+    built with. Every other face, including the parent reader, is attached by
+    Bind.
 
 func (p *RecallPort) Bind(r *Run)
     Bind attaches the read faces of the assembled run.
 
 func (p *RecallPort) Event(key event.EventID) (memory.EventReference, bool)
-    Event answers the reference of one landed event through the bound table.
+    Event answers the reference of one event through the bound table.
+
+func (p *RecallPort) GetParent(key event.EventID) (event.EventID, error)
+    GetParent forwards one parent read to the durable reader bound after
+    assembly.
 
 func (p *RecallPort) GetScoped(ctx context.Context, key event.EventID, scope ledger.ReadScope) ledger.RecallResult
     GetScoped answers one original read through the bound scoped original store.
 
 func (p *RecallPort) QueryEvents(ctx context.Context, opts memory.QueryOptions) ([]memory.EventReference, error)
     QueryEvents answers the event references one query matches through the bound
-    observation table.
+    durable query source.
 
 func (p *RecallPort) ReadSegmentScoped(ctx context.Context, key event.EventID, scope ledger.ReadScope, req ledger.SegmentRequest) (ledger.SegmentResult, error)
     ReadSegmentScoped answers one segment read through the bound scoped original
@@ -1275,8 +1279,8 @@ func (p *RecallPort) Reads() recall.Reads
     by name instead of answering an empty result.
 
 func (p *RecallPort) Reference(key event.EventID) (ledger.OriginalRef, bool)
-    Reference answers the original reference one landed event carries through
-    the bound table.
+    Reference answers the original reference one event carries through the bound
+    table.
 
 func (p *RecallPort) Search(ctx context.Context, query search.Query) (search.Result, error)
     Search answers one retrieval through the bound face.
@@ -1528,10 +1532,9 @@ func (r *Run) ObservationFacts() meditation.ObservedFacts
     carrying the lineage each fact was committed under.
 
 func (r *Run) ObservedEvents(ctx context.Context, opts memory.QueryOptions) ([]memory.EventReference, error)
-    ObservedEvents answers one query over the fact chain this run can observe:
-    the events its storage tier already committed, merged with every fact this
-    process committed, landed idempotently under the identity each fact carries.
-    A run assembled beside no storage tier refuses the read by name.
+    ObservedEvents answers one query over the durable fact chain, independent
+    of the runtime window and of any landing pass. A run assembled beside no
+    storage tier refuses the read by name.
 
 func (r *Run) Presentations() []view.Presentation
     Presentations reports the After pass presentations this run handed to
@@ -1569,12 +1572,12 @@ func (r *Run) Query(ctx context.Context, filter query.ListFilter) (query.Snapsho
 
 func (r *Run) RecallReads() recall.Reads
     RecallReads returns the recall read faces this run wires beside the
-    retrieval face Run.Recall serves: the observation table over the events
-    the storage tier committed, the scoped original store of that tier and the
-    embedding binding of this assembly. A run assembled beside no storage tier
-    wires no table and no original store, and a run beside no embedder wires no
-    embedding, so a caller binds exactly the faces that answer and leaves the
-    rest as the named refusal the recall surface already states.
+    retrieval face Run.Recall serves: the durable query and parent reader,
+    the scoped original store of that tier and the embedding binding of this
+    assembly. A run assembled beside no storage tier wires no table and no
+    original store, and a run beside no embedder wires no embedding, so a caller
+    binds exactly the faces that answer and leaves the rest as the named refusal
+    the recall surface already states.
 
 func (r *Run) RecordingLosses() []agent.RecordingLoss
     RecordingLosses reports the training records the production points of this

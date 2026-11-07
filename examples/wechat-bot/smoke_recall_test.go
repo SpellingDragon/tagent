@@ -304,10 +304,7 @@ func smokeRecallSeed(t *testing.T, root string) {
 			t.Fatalf("store the original %s: %v", seed.key, err)
 		}
 	}
-	relations, err := replay.OpenMemoryRelations(filepath.Join(root, "relations"))
-	if err != nil {
-		t.Fatalf("open the seed relations: %v", err)
-	}
+	relations := &replay.MemoryRelations{}
 	if err := relations.SetParent(smokeRecallChildKey, smokeRecallParentKey); err != nil {
 		t.Fatalf("link %s under %s: %v", smokeRecallChildKey, smokeRecallParentKey, err)
 	}

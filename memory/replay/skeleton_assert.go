@@ -97,8 +97,6 @@ var (
 	_ func(*MemoryRelations, event.EventID, event.EventID) error   = (*MemoryRelations).SetParent
 	_ func(*MemoryRelations, event.EventID) (event.EventID, error) = (*MemoryRelations).GetParent
 	_ func(*MemoryRelations) map[event.EventID]event.EventID       = (*MemoryRelations).Links
-	_ func(*MemoryRelations, context.Context) error                = (*MemoryRelations).VerifyReplay
-	_ func(string) (*MemoryRelations, error)                       = OpenMemoryRelations
 
 	_ func() *ReplayProjection                                                                                                = NewReplayProjection
 	_ func(context.Context, *ReplayProjection, EventChain, *MemoryRelations, ChainKey, RebuildOptions) (RebuildReport, error) = RebuildProjectionFromWAL
@@ -113,8 +111,6 @@ var (
 	_ error = ErrRebuildPartial
 	_ error = ErrFoldEmpty
 	_ error = ErrBudgetInvalid
-	_ error = ErrRelationsJournalUnwired
-	_ error = ErrRelationsReplayMismatch
 
 	_ = ProjectionTypeRecoveryHint
 )

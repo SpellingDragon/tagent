@@ -2,12 +2,11 @@
 //
 // Compile-time assertions of the recall surface: the four tools stay native
 // callable tools, the declared names stay the vocabulary the prompt spells, the
-// table port stays satisfied by the observation table, and the scoped original
-// store stays satisfied by the in-process original store.
+// table port stays satisfied by the production read face, and the scoped
+// original store stays satisfied by the in-process original store.
 package recall
 
 import (
-	"github.com/SpellingDragon/tagent/memory"
 	"github.com/SpellingDragon/tagent/memory/ledger"
 	trpctool "trpc.group/trpc-go/trpc-agent-go/tool"
 )
@@ -21,13 +20,9 @@ var (
 	_ trpctool.CallableTool = (*traceTool)(nil)
 )
 
-// The observation table and the in-process original store satisfy the faces the
-// tools consume, so the runtime wires production components rather than test
-// doubles.
-var (
-	_ Table                      = (*memory.StoreQuerySource)(nil)
-	_ ledger.ScopedOriginalStore = (*ledger.MemoryOriginalStore)(nil)
-)
+// The in-process original store satisfies the face the tools consume, so the
+// runtime wires a production component rather than a test double.
+var _ ledger.ScopedOriginalStore = (*ledger.MemoryOriginalStore)(nil)
 
 // The construction entry and the declared refusals keep their shape.
 var (
