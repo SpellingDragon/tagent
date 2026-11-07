@@ -2401,3 +2401,44 @@ func (t *staticProbeTool) Declaration() *trpctool.Declaration {
 func (t *staticProbeTool) Call(context.Context, []byte) (any, error) {
 	return "probed", nil
 }
+
+// TestRestartRecoveryPinsBeforeTrim pins the Host boot ordering around pins.
+//
+// 契约: docs/wiki/reliability/durable-delivery.md#envelope-states
+func TestRestartRecoveryPinsBeforeTrim(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+	root := t.TempDir()
+	storage := WithStorage(ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: root})
+	first := snapshotTestRun(t, ctx, storage)
+	addr := deliveryTestAddress("session-restart-pin-order")
+	host := deliveryTestHost(ctx, first, newDeliveryTestSender(nil))
+	identity := "delivery-restart-pin-order"
+	delivery := plugin.Delivery{Content: "held across restart", Lineage: "user", Target: addr}
+	if err := host.writeDeliverySettlement(ctx, addr, identity, heldStateOf(deliveryReasonApproval), delivery, time.Now(), nil); err != nil {
+		t.Fatalf("write the unsettled settlement fact: %v", err)
+	}
+	key := deliverySettlementKey(identity, heldStateOf(deliveryReasonApproval))
+	if _, err := first.commitFactChecked(ctx, event.Event{Type: event.TypeAgentOutput, Timestamp: time.Now(), Message: model.Message{Role: model.RoleAssistant, Content: "close the seeded segment"}, Owner: addr, Source: addr, Target: addr}); err != nil {
+		t.Fatalf("close the seeded segment: %v", err)
+	}
+	for index := 0; index < noWindowResidentFacts+32; index++ {
+		if _, err := first.commitFactChecked(ctx, event.Event{Type: event.TypeFeedback, Timestamp: time.Now(), Owner: addr, Source: addr, Target: addr, Meta: map[string]string{event.MetaKeyEventSummary: fmt.Sprintf("filler %d", index)}}); err != nil {
+			t.Fatalf("commit filler %d: %v", index, err)
+		}
+	}
+	negative := snapshotTestRunWithTrim(t, ctx, false, storage)
+	negative.trimSeededFacts()
+	if _, held := negative.factOf(key); held {
+		t.Fatal("the early-trim control kept the fact, so it did not exercise the defect")
+	}
+	restarted := snapshotTestRunWithTrim(t, ctx, false, storage)
+	recoveredHost := deliveryTestHost(ctx, restarted, newDeliveryTestSender(nil))
+	if err := recoveredHost.restoreUnconsumedEvents(ctx, nil); err != nil {
+		t.Fatalf("restore the unsettled delivery: %v", err)
+	}
+	restarted.trimSeededFacts()
+	if _, held := restarted.factOf(key); !held {
+		t.Fatal("the unsettled settlement fact was trimmed before its recovery pin could protect it")
+	}
+}

@@ -588,7 +588,7 @@ func Boot(configPath string, opts ...HostOption) (*Host, error) {
 	options = append(options, withBootConfigReconcile(func(ctx context.Context, run *Run, decl *config.Declaration, natives map[event.AgentID]NativeAgent) error {
 		return reconcileBootConfig(ctx, run, configPath, doc, decl, natives)
 	}))
-	run, err := Assemble(ctx, decl, natives, options...)
+	run, err := assemble(ctx, decl, natives, false, options...)
 	if err != nil {
 		cancel()
 		return nil, err
@@ -635,6 +635,7 @@ func Boot(configPath string, opts ...HostOption) (*Host, error) {
 		cancel()
 		return nil, host.abortBoot(err)
 	}
+	run.trimSeededFacts()
 	host.consumers = host.consumersOf()
 	if settleDriver != nil && !host.run.Unsettled(ctx).Resting() {
 		settleDriver.Wake()

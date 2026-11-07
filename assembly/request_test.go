@@ -291,6 +291,11 @@ func snapshotTestCapture(t *testing.T) *rl.TrajectoryCapture {
 // options the caller attaches: the extra option is how a test attaches the
 // capture whose account the read face answers from, or leaves it beside none.
 func snapshotTestRun(t *testing.T, ctx context.Context, opts ...Option) *Run {
+	return snapshotTestRunWithTrim(t, ctx, true, opts...)
+}
+
+// snapshotTestRunWithTrim assembles the run and controls its post-seed trim.
+func snapshotTestRunWithTrim(t *testing.T, ctx context.Context, trim bool, opts ...Option) *Run {
 	t.Helper()
 	round := 0
 	var mu sync.Mutex
@@ -327,7 +332,7 @@ func snapshotTestRun(t *testing.T, ctx context.Context, opts ...Option) *Run {
 		"agent-a": {Model: provider, Tools: []trpctool.CallableTool{&snapshotTestTool{name: "echo-a", output: "out-a"}}},
 	}
 	options := append([]Option{WithGovernance(snapshotTestGovernance{})}, opts...)
-	run, err := Assemble(ctx, decl, natives, options...)
+	run, err := assemble(ctx, decl, natives, trim, options...)
 	if err != nil {
 		t.Fatalf("assemble the runtime: %v", err)
 	}

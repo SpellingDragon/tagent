@@ -383,6 +383,11 @@ type Run struct {
 // - The producer of the closing round is an instance of the same flow: every agent's After pass judges the budget of the segment its commit grew, so the closing round of a spent budget stands on the chain as the fact it is.
 // - The loop builds the writer ledger for itself and the run reads it through the loop, so the close judges the very registrations the productions made.
 func Assemble(ctx context.Context, decl *config.Declaration, agents map[event.AgentID]NativeAgent, opts ...Option) (*Run, error) {
+	return assemble(ctx, decl, agents, true, opts...)
+}
+
+// assemble builds a run and optionally trims before the host's delivery recovery.
+func assemble(ctx context.Context, decl *config.Declaration, agents map[event.AgentID]NativeAgent, trimAfterSeed bool, opts ...Option) (*Run, error) {
 	if decl == nil {
 		return nil, errors.New("tagent: the assembly carries no declaration")
 	}
@@ -545,6 +550,9 @@ func Assemble(ctx context.Context, decl *config.Declaration, agents map[event.Ag
 		r.tier = tier
 		r.landedSeq = landed
 		r.mu.Unlock()
+		if trimAfterSeed {
+			r.trimSeededFacts()
+		}
 	}
 	r.mu.Lock()
 	r.embedder = cfg.embedder
@@ -1777,7 +1785,6 @@ func (r *Run) seedReplay(ctx context.Context, tier *ledger.Tier) (map[int]int64,
 			return nil, err
 		}
 	}
-	r.trimSeededFacts()
 	if len(order) > 0 {
 		r.attachNoticeFeed()
 	}
