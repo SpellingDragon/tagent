@@ -3,7 +3,7 @@
 ## A. 折叠锚（裁定 r45 核心）
 
 - [x] 4.a1 产物载荷扩展：`Execute` 批次末用 `replay.FoldedEntries` 纯函数按投影序记录结构化幸存者（不透明 checkpoint 字节，`Checkpoint/WithCheckpoint`）—— 验证：`TestAnchoredRebuildEqualsFullWalk` 绿（full decoded=92 → anchored=5, anchors=1，逐字段含 Time/Summary/Role/Generation 一致）；`61df08d3`
-- [x] 4.a2 `seedAnchoredReplay`：索引按冻结类型 `typ == event.CompressProductType` 发现锚（`EachIndexNewestFirst` 参数回调，零前缀、零正文读）→ 每会话最新锚按序查表重建 + 锚后增量 —— 验证：七个锚全绿（等价/空类型拒锚/坏载荷具名退回/文案拒收/向量缝拒收/未折叠退全量/落地序号）；判别不依赖任何键前缀文案；`61df08d3`+`d6547df3`+`dd10dd2d`+`4f15254a`
+- [x] 4.a2 `seedAnchoredReplay`：索引按冻结类型 `typ == event.CompressProductType` 发现锚（`EachIndexNewestFirst` 参数回调，零前缀、零正文读）→ 按 `anchorSlot{partition,session}` 隔离重建 + 边界 seq 尾回放 —— 验证：**11 个锚全绿**（等价含 `RenderProjection` 字节相等/空类型拒锚/坏载荷具名退回/文案拒收/向量缝拒收/未折叠退全量/落地序号/tail>0/跨地址隔离/全新 Run 稀疏账本/快照-提交间插入事件不丢）。独立全量拷问 `7addd70d` 在 pinned `2e7dd53d` 返回 FRONTIER NOT EMPTY 七条，逐条修复见 r54；`1284461e`
 - [x] 4.a3 golden 复验：折叠契约向量未随载荷扩展变化（压缩策略零改动），`TestFoldPlanGolden` 绿；四条 MUT-FOLD mutation 逐个 `gate: ok`（仍 killed）。无需重生成 —— 验证见 r51 同批门禁输出
 - [ ] 4.a4 状态注入钩子（折叠瞬间向会话主权人要不可推导状态快照；注册制；不注册=行为同今天）—— 验证：注入者重启后状态恢复；不注入者不受影响
 
