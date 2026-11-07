@@ -1,6 +1,7 @@
 package assembly
 
 import (
+	"bytes"
 	"time"
 
 	"context"
@@ -9,7 +10,9 @@ import (
 	"testing"
 
 	"github.com/SpellingDragon/tagent/api/event"
+	"github.com/SpellingDragon/tagent/memory"
 	"github.com/SpellingDragon/tagent/memory/ledger"
+	"github.com/SpellingDragon/tagent/memory/replay"
 )
 
 // windowChainRun assembles one run over the in-process tier with a small replay
@@ -157,6 +160,9 @@ func TestAnchoredRebuildEqualsFullWalk(t *testing.T) {
 		if got.Key != want.Key || got.Type != want.Type || got.Content != want.Content || got.Summary != want.Summary || !got.Time.Equal(want.Time) || got.StatedRole() != want.StatedRole() || got.Generation() != want.Generation() {
 			t.Fatalf("entry %d = %s/%s/%q/%s, want %s/%s/%q/%s", at, got.Key, got.Type, got.Summary, got.Time, want.Key, want.Type, want.Summary, want.Time)
 		}
+	}
+	if gotRendered, wantRendered := replay.RenderProjection(gotList), replay.RenderProjection(wantList); !bytes.Equal(gotRendered, wantRendered) {
+		t.Fatalf("the anchored rebuild renders %d bytes, want the full walk %d", len(gotRendered), len(wantRendered))
 	}
 }
 
@@ -347,5 +353,277 @@ func TestNeverFoldedSessionFallsBack(t *testing.T) {
 		if gotList[at].Key != wantList[at].Key || gotList[at].Type != wantList[at].Type || gotList[at].Content != wantList[at].Content {
 			t.Fatalf("entry %d = %s/%s, want %s/%s", at, gotList[at].Key, gotList[at].Type, wantList[at].Key, wantList[at].Type)
 		}
+	}
+}
+
+// TestAnchoredRebuildReplaysTheTail pins the post-anchor replay rule.
+// - facts committed after the newest anchor are replayed in commit order
+// - the anchored projection still equals the full walk field by field
+// - facts land through commitOnly, which skips the fold observer
+//
+// 契约: docs/wiki/agent/event-flow.md#projection-lifecycle
+func TestAnchoredRebuildReplaysTheTail(t *testing.T) {
+	ctx := context.Background()
+	run := windowChainRun(t, ctx)
+	addr := event.Address{AgentID: "agent-a", SessionID: "session-tail"}
+	commitWindowTurns(t, ctx, run, addr, 12)
+
+	base := time.Date(2026, 11, 6, 14, 0, 0, 0, time.UTC)
+	for at := 0; at < 3; at++ {
+		evt := event.Event{
+			Key:       event.EventID("tail-" + string(rune('a'+at))),
+			Type:      event.TypeExternalInput,
+			Timestamp: base.Add(time.Duration(at) * time.Minute),
+			Meta:      map[string]string{event.MetaKeyEventSummary: "tail ask"},
+			Message:   model.Message{Role: model.RoleUser, Content: "a fact committed after the fold"},
+			Owner:     addr,
+		}
+		if _, err := run.commitOnly(ctx, addr, evt); err != nil {
+			t.Fatalf("commit the tail fact %s: %v", evt.Key, err)
+		}
+	}
+
+	full, _, fullReport, err := run.seedFullReplay(ctx, run.tier)
+	if err != nil {
+		t.Fatalf("replay the whole chain: %v", err)
+	}
+	anchored, anchoredReport, err := run.seedAnchoredReplay(ctx, run.tier)
+	if err != nil {
+		t.Fatalf("rebuild from the anchor: %v", err)
+	}
+	if anchoredReport.Anchors != 1 {
+		t.Fatalf("the rebuild found %d anchor(s), want one", anchoredReport.Anchors)
+	}
+	if anchoredReport.Decoded >= fullReport.Decoded {
+		t.Fatalf("the anchored rebuild decoded %d bodies, want fewer than the full walk %d", anchoredReport.Decoded, fullReport.Decoded)
+	}
+	want, carried := full[addr]
+	if !carried {
+		t.Fatal("the full walk registered no projection for the session")
+	}
+	got, carried := anchored[addr]
+	if !carried {
+		t.Fatal("the rebuild registered no projection for the session")
+	}
+	wantList, gotList := want.projection.Entries(), got.projection.Entries()
+	if len(gotList) != len(wantList) {
+		t.Fatalf("the rebuild holds %d entries, want the full walk %d", len(gotList), len(wantList))
+	}
+	for at := range gotList {
+		got, want := gotList[at], wantList[at]
+		if got.Key != want.Key || got.Type != want.Type || got.Content != want.Content || got.Summary != want.Summary || !got.Time.Equal(want.Time) {
+			t.Fatalf("entry %d = %s/%s, want %s/%s", at, got.Key, got.Type, want.Key, want.Type)
+		}
+	}
+	if gotRendered, wantRendered := replay.RenderProjection(gotList), replay.RenderProjection(wantList); !bytes.Equal(gotRendered, wantRendered) {
+		t.Fatalf("the rebuild renders %d bytes, want the full walk %d", len(gotRendered), len(wantRendered))
+	}
+}
+
+// TestAnchoredRebuildKeepsAgentChainsApart pins the ChainKey isolation rule.
+// - two agents that share one session id are rebuilt as two chains
+// - the anchored seeds match the full walk key for key
+//
+// 契约: docs/wiki/agent/event-flow.md#projection-lifecycle
+func TestAnchoredRebuildKeepsAgentChainsApart(t *testing.T) {
+	ctx := context.Background()
+	run := windowChainRun(t, ctx)
+	shared := event.SessionID("session-shared")
+	a := event.Address{AgentID: "agent-a", SessionID: shared}
+	b := event.Address{AgentID: "agent-b", SessionID: shared}
+	commitWindowTurns(t, ctx, run, a, 12)
+	commitWindowTurns(t, ctx, run, b, 3)
+
+	full, _, _, err := run.seedFullReplay(ctx, run.tier)
+	if err != nil {
+		t.Fatalf("replay the whole chain: %v", err)
+	}
+	anchored, _, err := run.seedAnchoredReplay(ctx, run.tier)
+	if err != nil {
+		t.Fatalf("rebuild from the anchors: %v", err)
+	}
+	if len(full) != 2 {
+		t.Fatalf("the full walk registered %d chains, want the two agent chains", len(full))
+	}
+	if len(anchored) != len(full) {
+		t.Fatalf("the rebuild registered %d chains, want the %d the full walk holds", len(anchored), len(full))
+	}
+	for addr, want := range full {
+		got, carried := anchored[addr]
+		if !carried {
+			t.Fatalf("the rebuild dropped the chain %v", addr)
+		}
+		wantList, gotList := want.projection.Entries(), got.projection.Entries()
+		if len(gotList) != len(wantList) {
+			t.Fatalf("chain %v rebuild holds %d entries, want the full walk %d", addr, len(gotList), len(wantList))
+		}
+		for at := range gotList {
+			if gotList[at].Key != wantList[at].Key || gotList[at].Type != wantList[at].Type || gotList[at].Content != wantList[at].Content {
+				t.Fatalf("chain %v entry %d = %s/%s, want %s/%s", addr, at, gotList[at].Key, gotList[at].Type, wantList[at].Key, wantList[at].Type)
+			}
+		}
+	}
+}
+
+// TestAnchoredRebuildOnAFreshRun pins the cold-boot shape.
+// - a fresh run seeded from the same tier answers the same projection
+// - the anchored ledger holds only the survivors and the tail, not the full chain
+// - two fresh runs share one in-process tier: one full walk, one anchored
+//
+// 契约: docs/wiki/agent/event-flow.md#projection-lifecycle
+func TestAnchoredRebuildOnAFreshRun(t *testing.T) {
+	ctx := context.Background()
+	provider := &snapshotTestModel{answer: func(*model.Request) *model.Response {
+		return &model.Response{Choices: []model.Choice{{Message: model.Message{Role: model.RoleAssistant, Content: factWindowAnswer}}}, Done: true}
+	}}
+	newRun := func() *Run {
+		t.Helper()
+		run, err := Assemble(ctx, &config.Declaration{
+			Entry:  "agent-a",
+			Agents: []config.AgentSpec{{ID: "agent-a", Model: "model-a", MaxTokens: 60}},
+		}, map[event.AgentID]NativeAgent{"agent-a": {Model: provider}},
+			WithGovernance(snapshotTestGovernance{}),
+			WithStorage(ledger.StorageConfig{Type: ledger.StorageMemory}))
+		if err != nil {
+			t.Fatalf("assemble the run: %v", err)
+		}
+		return run
+	}
+	first := newRun()
+	addr := event.Address{AgentID: "agent-a", SessionID: "session-fresh"}
+	commitWindowTurns(t, ctx, first, addr, 12)
+
+	fullRun := newRun()
+	fullRun.tier = first.tier
+	anchoredRun := newRun()
+	anchoredRun.tier = first.tier
+
+	full, _, fullReport, err := fullRun.seedFullReplay(ctx, first.tier)
+	if err != nil {
+		t.Fatalf("replay the whole chain: %v", err)
+	}
+	anchored, anchoredReport, err := anchoredRun.seedAnchoredReplay(ctx, first.tier)
+	if err != nil {
+		t.Fatalf("rebuild from the anchor: %v", err)
+	}
+	if anchoredReport.Anchors != 1 {
+		t.Fatalf("the fresh rebuild found %d anchor(s), want one", anchoredReport.Anchors)
+	}
+	if anchoredReport.Decoded >= fullReport.Decoded {
+		t.Fatalf("the fresh rebuild decoded %d bodies, want fewer than the full walk %d", anchoredReport.Decoded, fullReport.Decoded)
+	}
+	want, carried := full[addr]
+	if !carried {
+		t.Fatal("the full walk registered no projection for the session")
+	}
+	got, carried := anchored[addr]
+	if !carried {
+		t.Fatal("the fresh rebuild registered no projection for the session")
+	}
+	if gotRendered, wantRendered := replay.RenderProjection(got.projection.Entries()), replay.RenderProjection(want.projection.Entries()); !bytes.Equal(gotRendered, wantRendered) {
+		t.Fatalf("the fresh rebuild renders %d bytes, want the full walk %d", len(gotRendered), len(wantRendered))
+	}
+	anchoredRun.mu.Lock()
+	seeded := len(anchoredRun.factOrder)
+	anchoredRun.mu.Unlock()
+	if seeded >= fullReport.Decoded {
+		t.Fatalf("the anchored ledger seeded %d facts, want a sparse subset of the %d the full walk decoded", seeded, fullReport.Decoded)
+	}
+	if seeded == 0 {
+		t.Fatal("the anchored ledger seeded no facts at all")
+	}
+}
+
+// TestAnchoredRebuildKeepsTheInterleavedFact pins the snapshot rule.
+// - an interleaved event lands between the snapshot and the product commit
+// - the rebuild replays it instead of silently losing it
+//
+// 契约: docs/wiki/agent/event-flow.md#projection-lifecycle
+func TestAnchoredRebuildKeepsTheInterleavedFact(t *testing.T) {
+	ctx := context.Background()
+	run := windowChainRun(t, ctx)
+	tier := run.tier
+	at := time.Date(2026, 11, 6, 12, 0, 0, 0, time.UTC)
+	addr := event.Address{AgentID: "agent-a", SessionID: "session-interleaved"}
+
+	store := func(key event.EventID, typ string, content string, seq int64, body []byte) {
+		t.Helper()
+		if err := tier.Segments.StoreEvent(ctx, ledger.SegmentRecord{
+			PartitionID: 1,
+			WindowTS:    at.UnixMilli(),
+			Seq:         seq,
+			EventKey:    key,
+			EventTime:   at.UnixMilli(),
+			Body:        body,
+		}.WithChain(typ, addr.SessionID)); err != nil {
+			t.Fatalf("store %s: %v", key, err)
+		}
+	}
+	encode := func(evt event.Event) []byte {
+		t.Helper()
+		body, err := memory.BodyFromEvent(evt, "test", "test")
+		if err != nil {
+			t.Fatalf("encode %s: %v", evt.Key, err)
+		}
+		encoded, err := body.Encode()
+		if err != nil {
+			t.Fatalf("marshal %s: %v", evt.Key, err)
+		}
+		return encoded
+	}
+	mapped := func(key string, seq int64) event.Event {
+		return event.Event{
+			Key:       event.EventID(key),
+			Type:      event.TypeExternalInput,
+			Timestamp: at.Add(time.Duration(seq) * time.Minute),
+			Meta:      map[string]string{event.MetaKeyEventSummary: "ask"},
+			Message:   model.Message{Role: model.RoleUser, Content: "material of " + key},
+			Owner:     addr,
+		}
+	}
+
+	// Four facts are in the checkpoint snapshot (seq 1..4). An interleaved
+	// fact lands at seq 5, and the product commits at seq 6.
+	var survivors []replay.ProjectionEntry
+	for seq := int64(1); seq <= 4; seq++ {
+		key := event.EventID("survivor-" + string(rune('a'+seq-1)))
+		evt := mapped(string(key), seq)
+		store(key, evt.Type, evt.Message.Content, seq, encode(evt))
+		entry, ok := mappedEntryOf(evt)
+		if !ok {
+			t.Fatalf("the survivor %s does not map", key)
+		}
+		survivors = append(survivors, entry)
+	}
+	interleaved := mapped("interleaved", 5)
+	store(interleaved.Key, interleaved.Type, interleaved.Message.Content, 5, encode(interleaved))
+
+	product := event.CompressProductFor("cmp-request", compressionProducer, "-hist-checkpoint", nil, "history summary").
+		WithCheckpoint(anchorCheckpointOf(survivors))
+	productEvent := compressProductEvent(addr.SessionID, addr.AgentID, product, at.Add(6*time.Minute))
+	store(productEvent.Key, productEvent.Type, "", 6, encode(productEvent))
+
+	seeds, report, err := run.seedAnchoredReplay(ctx, tier)
+	if err != nil {
+		t.Fatalf("rebuild from the anchor: %v", err)
+	}
+	if report.Anchors != 1 {
+		t.Fatalf("the rebuild found %d anchor(s), want one", report.Anchors)
+	}
+	seed, carried := seeds[addr]
+	if !carried {
+		t.Fatalf("the rebuild registered no projection for %v", addr)
+	}
+	found := false
+	for _, entry := range seed.projection.Entries() {
+		if entry.Key == interleaved.Key {
+			found = true
+			if entry.Content != interleaved.Message.Content {
+				t.Fatalf("the interleaved fact carries %q, want %q", entry.Content, interleaved.Message.Content)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("the rebuild silently lost the fact committed between the snapshot and the product commit")
 	}
 }

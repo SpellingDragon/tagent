@@ -239,7 +239,7 @@ type anchorEntry struct {
 	Type    string
 	Summary string
 	Content string
-	Time    time.Time
+	Time    int64
 }
 
 // anchorCheckpointOf states the projection entries a fold leaves as an opaque
@@ -253,7 +253,7 @@ func anchorCheckpointOf(entries []replay.ProjectionEntry) []byte {
 			Type:    entry.Type,
 			Summary: entry.Summary,
 			Content: entry.Content,
-			Time:    entry.Time.UTC(),
+			Time:    entry.Time.UnixMilli(),
 		})
 	}
 	encoded, err := json.Marshal(out)

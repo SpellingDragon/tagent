@@ -1760,7 +1760,9 @@ type seedReport struct {
 // The anchored rebuild is proven by the boot-replay anchors but stays off this
 // path until delivery recovery reads the durable chain: the live ledger this
 // full walk seeds is what that recovery reads today, and a sparse anchored
-// ledger doubles the settled facts on a second boot.
+// ledger doubles the settled facts on a second boot, as the reverted wiring
+// showed in TestKVDeliveryMigratedToFacts (12 settled facts versus 6),
+// TestEventIntegrityRestoreUse and the host suite. See ORCHESTRATION r48.
 func (r *Run) seedReplay(ctx context.Context, tier *ledger.Tier) (map[int]int64, error) {
 	seeds, landed, _, err := r.seedFullReplay(ctx, tier)
 	if err != nil {
@@ -1878,6 +1880,14 @@ type anchorRef struct {
 	session   event.SessionID
 }
 
+// anchorSlot is the isolation key one chain is rebuilt under: the partition
+// the facts were filed into beside the session they belong to. Two agents that
+// happen to share a session id remain two chains, as ChainKey requires.
+type anchorSlot struct {
+	partition int
+	session   event.SessionID
+}
+
 // seedAnchoredReplayWith runs the anchored rebuild under a test seam.
 func (r *Run) seedAnchoredReplayWith(ctx context.Context, tier *ledger.Tier, seam anchoredSeam) (map[event.Address]*sessionSeed, seedReport, error) {
 	report := seedReport{}
@@ -1897,28 +1907,35 @@ func (r *Run) seedAnchoredReplayWith(ctx context.Context, tier *ledger.Tier, sea
 			report.Landed[entry.partition] = entry.seq
 		}
 	}
-	anchors := map[event.SessionID]int{}
-	seen := map[event.SessionID]struct{}{}
-	var order []event.SessionID
+	anchors := map[anchorSlot]int{}
+	seen := map[anchorSlot]struct{}{}
+	var order []anchorSlot
 	for at, ref := range refs {
 		if ref.session == "" {
 			continue
 		}
-		if _, held := seen[ref.session]; !held {
-			seen[ref.session] = struct{}{}
-			order = append(order, ref.session)
+		slot := anchorSlot{partition: ref.partition, session: ref.session}
+		if _, held := seen[slot]; !held {
+			seen[slot] = struct{}{}
+			order = append(order, slot)
 		}
 		if ref.typ == event.CompressProductType {
-			if _, held := anchors[ref.session]; !held {
-				anchors[ref.session] = at
+			if _, held := anchors[slot]; !held {
+				anchors[slot] = at
 			}
 		}
 	}
-	sort.Slice(order, func(i, j int) bool { return order[i] < order[j] })
+	sort.Slice(order, func(i, j int) bool {
+		if order[i].session != order[j].session {
+			return order[i].session < order[j].session
+		}
+		return order[i].partition < order[j].partition
+	})
 	seeds := map[event.Address]*sessionSeed{}
-	for _, session := range order {
+	for _, slot := range order {
+		session := slot.session
 		seed := &sessionSeed{projection: replay.NewReplayProjection()}
-		at, hasAnchor := anchors[session]
+		at, hasAnchor := anchors[slot]
 		usable := false
 		var tailProducts []event.CompressProduct
 		if hasAnchor {
@@ -1949,17 +1966,30 @@ func (r *Run) seedAnchoredReplayWith(ctx context.Context, tier *ledger.Tier, sea
 					if agent := agentOf(evt); agent != "" {
 						seed.window = r.foldWindowOfAgent(agent)
 					}
-					if err := r.restoreSurvivors(ctx, tier, seed, survivors, &report); err != nil {
+					boundary, err := r.restoreSurvivors(ctx, tier, seed, survivors, &report)
+					if err != nil {
 						return nil, report, err
 					}
 					r.compress.NoteProduct(product)
 					report.Anchors++
 					seeds[addr] = seed
-					for i := at - 1; i >= 0; i-- {
-						if refs[i].session != session {
+					// Replay every event of this chain committed after the
+					// snapshot, not only those newer than the anchor product.
+					// An event can land between the snapshot and the product
+					// commit; its seq is then below the anchor's but above the
+					// newest survivor the checkpoint already holds. Replaying
+					// by that boundary keeps it instead of silently losing it.
+					var tail []anchorRef
+					for i := range refs {
+						ref := refs[i]
+						if ref.session != slot.session || ref.partition != slot.partition || ref.seq <= boundary || ref.key == refs[at].key {
 							continue
 						}
-						product, stated, _, err := r.replayRef(ctx, tier, refs[i].key, seed, &report)
+						tail = append(tail, ref)
+					}
+					sort.Slice(tail, func(i, j int) bool { return tail[i].seq < tail[j].seq })
+					for _, ref := range tail {
+						product, stated, _, err := r.replayRef(ctx, tier, ref.key, seed, &report)
 						if err != nil {
 							return nil, report, err
 						}
@@ -1981,7 +2011,7 @@ func (r *Run) seedAnchoredReplayWith(ctx context.Context, tier *ledger.Tier, sea
 			var products []event.CompressProduct
 			agent := event.AgentID("")
 			for i := len(refs) - 1; i >= 0; i-- {
-				if refs[i].session != session {
+				if refs[i].session != slot.session || refs[i].partition != slot.partition {
 					continue
 				}
 				product, stated, owner, err := r.replayRef(ctx, tier, refs[i].key, seed, &report)
@@ -2013,17 +2043,21 @@ func (r *Run) foldWindowOfAgent(agent event.AgentID) FoldWindow {
 // chain still holds is read back through the fact->projection mapping so its
 // private fields are recovered, and a synthetic entry is stated from the
 // payload itself. Nothing here reads a kind off a key's prefix.
-func (r *Run) restoreSurvivors(ctx context.Context, tier *ledger.Tier, seed *sessionSeed, survivors []anchorEntry, report *seedReport) error {
+func (r *Run) restoreSurvivors(ctx context.Context, tier *ledger.Tier, seed *sessionSeed, survivors []anchorEntry, report *seedReport) (int64, error) {
+	boundary := int64(0)
 	for _, survivor := range survivors {
 		stored, held, err := tier.Segments.GetEvent(ctx, survivor.Key)
 		if err != nil {
-			return err
+			return 0, err
 		}
 		if held {
+			if stored.Seq > boundary {
+				boundary = stored.Seq
+			}
 			report.Decoded++
 			body, err := memory.DecodeEventBody(stored.Body)
 			if err != nil {
-				return fmt.Errorf("tagent: hydrate the survivor %s: %w", stored.Key, err)
+				return 0, fmt.Errorf("tagent: hydrate the survivor %s: %w", stored.Key, err)
 			}
 			evt := body.Event()
 			evt.Key = stored.Key
@@ -2038,10 +2072,10 @@ func (r *Run) restoreSurvivors(ctx context.Context, tier *ledger.Tier, seed *ses
 			Type:    survivor.Type,
 			Summary: survivor.Summary,
 			Content: survivor.Content,
-			Time:    survivor.Time,
+			Time:    time.UnixMilli(survivor.Time),
 		})
 	}
-	return nil
+	return boundary, nil
 }
 
 // replayRef decodes one indexed event and applies it to a rebuilding seed:

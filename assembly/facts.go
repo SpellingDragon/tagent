@@ -691,11 +691,13 @@ func agentOf(evt event.Event) event.AgentID {
 // fact names what moved and is read by its identity and metadata, so it maps
 // onto no entry even though it carries a message body. The skip is explicit by
 // type — a producer that stamps a session on the fact still cannot leak the
-// change into a model request.
+// change into a model request. A compression mechanism fact is refused here by
+// its frozen type as well, so an internal summary or checkpoint can never be
+// mapped into a model request even if a caller gives the fact a message body.
 //
 // 契约: docs/wiki/agent/event-flow.md#projection-lifecycle
 func mappedEntryOf(evt event.Event) (replay.ProjectionEntry, bool) {
-	if evt.Type == event.TypeConfigChange {
+	if evt.Type == event.TypeConfigChange || event.CompressionMechanism(evt.Type) {
 		return replay.ProjectionEntry{}, false
 	}
 	content := mappedContentOf(evt.Message)
