@@ -627,13 +627,17 @@ MUTATIONS: Tuple[Mutation, ...] = (
                 "\tif err != nil {\n"
                 "\t\treturn err\n"
                 "\t}\n"
-                "\tif supply == nil {\n"
+                "\treturn nil\n"
+                "}\n\n"
+                "// sameFactOf"
             ),
             new=(
                 "\tif err != nil {\n"
                 "\t\treturn nil\n"
                 "\t}\n"
-                "\tif supply == nil {\n"
+                "\treturn nil\n"
+                "}\n\n"
+                "// sameFactOf"
             ),
         ),
         companion=(

@@ -111,9 +111,6 @@ func (r *Run) Close(ctx context.Context, req agent.CloseRequest) (agent.DrainRep
 	if flying := r.loop.StopResidentsWithin(timeout); len(flying) > 0 {
 		assemblyWarn("tagent: the close budget ended beside %d resident loop(s) still inside a model production: %s", len(flying), strings.Join(flying, ", "))
 	}
-	if r.retrieval != nil {
-		defer r.retrieval.close()
-	}
 	judge := context.WithoutCancel(ctx)
 	read := r.quiesce(ctx, timeout)
 	cut := r.cutApprovalWaits(judge, read)

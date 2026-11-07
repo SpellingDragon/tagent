@@ -19,7 +19,7 @@ const CompressProductType = "compress.product"
 // CompressionMechanism reports whether one frozen event type names a fact of
 // the compression mechanism itself: a judgment or the product that answers it.
 // Such a fact carries an internal summary and recovery metadata, never material
-// the query face, the vector seam or the model's context may surface.
+// the query face, candidate embedding or the model's context may surface.
 func CompressionMechanism(typ string) bool {
 	return typ == CompressRequestType || typ == CompressProductType
 }

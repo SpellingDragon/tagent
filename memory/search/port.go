@@ -130,7 +130,7 @@ func (q Query) PageLimit() int {
 // the memory read face, never a second one beside it.
 //
 // - The mapping is thin on purpose: the time axis is carried across as Unix milliseconds (Since and Until become the inclusive window, a zero bound staying open) and Types as the event-type restriction unchanged.
-// - Text, the retrieval content of the query, is carried as the keyword leg, which is what a free-text query is served by; the retrieval layer may grow a vector leg behind the same mapping later.
+// - Text, the retrieval content of the query, is carried as the keyword leg, which is what a free-text query is served by; the vector leg embeds candidates through the same mapped options.
 // - The page is carried as the Limit of the query window, and the order is fixed to newest-first because recall serves the time arrow the compaction keeps: the newer event is recalled before the older one.
 // - The partition scope is deliberately not carried: an authorized read receives its partition set injected into the mapped options by the read seam, so this method never widens a query to partitions its caller is not authorized for.
 func (q Query) QueryOptions() memory.QueryOptions {

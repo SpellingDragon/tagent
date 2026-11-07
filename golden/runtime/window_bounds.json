@@ -161,15 +161,6 @@
       "reason": "RRF 秩常数，算法常量。"
     },
     {
-      "id": "vector-queue",
-      "class": "constant",
-      "name": "DefaultVectorQueue",
-      "kind": "const",
-      "file": "memory/recall.go",
-      "reason": "向量缝队列上限。"
-    }
- ,
-    {
       "id": "capture-budget-min",
       "class": "constant",
       "name": "MinCaptureBudgetBytes",

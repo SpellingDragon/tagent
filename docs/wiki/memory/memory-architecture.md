@@ -23,7 +23,7 @@
 | `memory/partition.go` | 分区派生 `PartitionIDFromName` 与授权命名空间展开 `PartitionsOf` |
 | `memory/query_events.go` | 声明式查询面 `QueryOptions` / `QueryEvents` |
 | `assembly/read.go` | 持久链直读：查询、原文引用与父边按需派生，不保留观察表 |
-| `memory/recall.go` | 向量缝 `VectorSeam` 与 `Embedder` 契约 |
+| `memory/recall.go` | 查询时候选嵌入的 `Embedder` 契约，不保留运行期向量表 |
 | `memory/replay/` | 投影、段龄轴、折叠、因果链、回放预算（全部现算） |
 | `memory/search/` | 检索端口 `Searcher`、融合 `Fusion`、真实 store 上的检索实现 |
 | `memory/embedder/` | 嵌入器装配期校验与向量生成 |
@@ -101,7 +101,7 @@
 | 1 | `Segments.GetEvent(key)` 预检 | 已提交且 `SameFact` → 幂等成功；已提交但内容不同 → `ErrFactKeyConflict` |
 | 2 | `Originals.Put(ctx, body.Ref(), []byte(body.Message.Content))`（`assembly/facts.go:237`） | **正文先落进原文仓**：段里出现的 `EventID` 一定有可读原文可指 |
 | 3 | `Segments.StoreEvent(...)`，`partition = PartitionIDFromName(Owner.AgentID)`、`window = Timestamp.UnixMilli()`（负值具名拒）、`seq = landedSeq[partition]+1` | **段提交才是持久写**：它不成功，事实就不算落地，`landedSeq` 不前进 |
-| 4 | `seam.Submit` | 提交成功之后的**后果**：失败只告警，绝不回滚已落地的提交；查询按需读链，没有 land 步骤 |
+| 4 | 无提交后向量步骤 | 查询按需读链，在候选上现算嵌入；没有 land 步骤，也没有需要回滚的派生索引 |
 
 两条由此可查证的结论：①无存储档（`tier == nil`）或事实没有 `Owner.AgentID` 时，事实只留在内存，不假称持久；②第 2 步成功而第 3 步失败会留下一条无人引用的 ref/blob——重放同一条事实会复用同一 digest，因此不会堆积第二份字节，但清理面不在本层（见[§十二](#gaps)）。
 
@@ -199,7 +199,7 @@
 
 **持久链直读**（`assembly/read.go` 的 `tierQuerySource`）：检索与按键回捞都直接读链，没有观察表或 land 步骤。查询先 `Validate` 并解析授权分区，再只读取准入分区的正文；空授权不读任何分区，未授权分区的损坏也不会泄漏进结果。`recordOfTierEvent` 拒绝 `body.Key` 与存储键不一致及压缩机制事实。
 
-**装配面**（`assembly/read.go` `supplyRetrieval`）：持久链直读 → （可选）向量缝 → `NewStoreSearcher`。没有嵌入器时不建缝、不调嵌入，检索只走关键词腿——这是契约写明的**零变化行为**。原文回捞的 scope 由装配期 `NewScopedReader` 绑定一次（`assembly/tools.go` `RecallPort.GetScoped`），绑定后无法在调用点放宽。
+**装配面**（`assembly/read.go` `supplyRetrieval`）：持久链直读 → 查询时候选嵌入 → `NewStoreSearcher`。没有嵌入器时不调用嵌入，检索只走关键词腿——这是契约写明的**零变化行为**。原文回捞的 scope 由装配期 `NewScopedReader` 绑定一次（`assembly/tools.go` `RecallPort.GetScoped`），绑定后无法在调用点放宽。
 
 <a id="inmemory-retrieval"></a>
 ## 九、检索与融合
@@ -232,7 +232,7 @@
 | 生成 | 尊重 ctx；空文本拒、空向量拒、宽度不符拒 | `ErrEmptyText` / 具名错误 |
 | 未接线 | 没有绑定嵌入器时 `Embed` 返回 `ErrEmbeddingUnwired`，调用方按"功能关闭"降级为关键词 | `ErrEmbeddingUnwired` |
 
-`VectorSeam`（`memory/recall.go`）是**非阻塞**的向量缝：`Submit` 只入队，丢弃计数、失败计数，从不阻塞写入主链路；未绑定 seam 接受任何提交但不产出向量。`Close` 排空在途任务。因此"嵌入器慢/挂"不会推迟一次事实提交，只会让检索暂时只有关键词腿。
+候选嵌入只在**查询时**进行：`StoreSearcher.vectorLeg` 先读取授权候选，再逐条调用 `Embedder.Embed`，没有嵌入器时只走关键词腿。启动和提交事件不生成、不缓存向量，因此不存在慢嵌入阻塞事实提交或启动预热的问题。
 
 <a id="rv-cli"></a>
 ## 十一、rustviking CLI 后端
@@ -253,7 +253,7 @@
 | **分片快照不是追加日志** | 每次提交重写整片 JSON，无 fsync，崩溃后的持久性只到"进程重启"级别 | `openspec/changes/runtime-simplicity-upgrade`：整片快照 → 追加日志（**未实施**，旧目录不自动迁移，新格式具名拒开） |
 | **原文过期没有执行面** | 租约与生命周期在册未接线，`retention_policy` 取值为 `keep`，原文随链永存 | 接线 `NewLifecycle` + `Retention`；接线前不得声称"按策略过期" |
 | **`file` 档批次无原子性** | 一次 CLI 调用一个键；中途失败留半批 | 依赖顺序不变量与重试幂等；或在 CLI 侧提供批量原子命令 |
-| **检索只有一条腿在线** | 装配面传 `nil` 嵌入器即纯关键词；`vector_only` 无消费者 | 真正的向量持久索引（当前向量只在进程内 seam 里） |
+| **检索向量腿按需计算** | 装配面传 `nil` 嵌入器即纯关键词；有嵌入器时查询候选项现算；`vector_only` 无消费者 | 不保留运行期向量表或持久索引 |
 | **`EventRecord.WindowTS` 注释仍提"压实层"** | 码面已无压实；该注释是上一个形态的残留 | 随 `runtime-simplicity-upgrade` 一并校正（本页已按实际语义写：窗段编号） |
 | **旧格式字节只能拒不能读** | `DecodeEventBody` 具名拒绝上一版 body | 冷启动重建；不做就地迁移 |
 | **段提交失败可能留下孤儿原文** | 原文仓先于段提交落地；失败后 ref/blob 无人引用（同 digest 重放会复用，不堆第二份字节） | 需要一个以链为真源的孤儿清扫器（当前无），或把提交改成“先段后原文”的可回滚组合 |

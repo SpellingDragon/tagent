@@ -5,8 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"reflect"
-	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -20,9 +18,7 @@ import (
 // - normal: the time, type and keyword legs filter on the millisecond axis and results keep the total order
 // - normal: the retrieval query maps onto QueryEvents, hybrid fuses both legs and an unscoped query scans nothing
 // - failure: hybrid without a vector leg answers byte-identical to keyword_only and the vector-only strategy is refused by name
-// - failure: an unconfigured embedder changes nothing, a full queue drops the vector and stores the event
 // - failure: one event key keeps its higher-window version
-// - concurrency: async vector generation never blocks the event path
 // - restart: the read face replays an identical sequence on a fresh instance over the same records
 // 契约: docs/wiki/memory/memory-architecture.md#read-paths
 func TestRecallConsumer(t *testing.T) {
@@ -235,66 +231,6 @@ func TestRecallConsumer(t *testing.T) {
 			}
 		})
 
-		t.Run("an unconfigured embedder changes nothing", func(t *testing.T) {
-			source := memory.NewMemoryEventQuery()
-			seam := memory.NewVectorSeam(0)
-			defer seam.Close()
-			if err := source.Store(ctx, memory.EventRecord{Key: "u1", PartitionID: 1, Type: event.TypeExternalInput, Summary: "数据库", Timestamp: 1000, WindowTS: 100}); err != nil {
-				t.Fatalf("Store(u1): %v", err)
-			}
-			if seam.Submit("u1", "数据库") {
-				t.Fatalf("Submit on an unconfigured seam = accepted, want refused: no binding means no vector job at all")
-			}
-			if seam.Dropped() != 0 {
-				t.Fatalf("Dropped() = %d, want 0: an unconfigured seam moves no counter — the zero behaviour change", seam.Dropped())
-			}
-			if _, ready := seam.Vector("u1"); ready {
-				t.Fatalf("Vector(u1) ready without any embedder, want absent")
-			}
-			refs, err := source.QueryEvents(ctx, memory.QueryOptions{PartitionIDs: []int{1}})
-			if err != nil {
-				t.Fatalf("QueryEvents: %v", err)
-			}
-			if got := keysOf(refs); !reflect.DeepEqual(got, []event.EventID{"u1"}) {
-				t.Fatalf("stored keys = %v, want [u1]: the event path behaves exactly as before the seam", got)
-			}
-		})
-
-		t.Run("a full queue drops the vector, moves the counter and stores the event", func(t *testing.T) {
-			source := memory.NewMemoryEventQuery()
-			embedder := newGatedEmbedder()
-			seam := memory.NewVectorSeam(1)
-			defer seam.Close()
-			seam.Bind(embedder)
-
-			if !seam.Submit("q1", "第一段文本") {
-				t.Fatalf("Submit(q1) = refused, want accepted")
-			}
-			embedder.awaitStarted(t)
-
-			if !seam.Submit("q2", "第二段文本") {
-				t.Fatalf("Submit(q2) = refused, want accepted into the free queue slot")
-			}
-			if seam.Submit("q3", "第三段文本") {
-				t.Fatalf("Submit(q3) = accepted, want dropped: the queue is full and submission never blocks")
-			}
-			if seam.Dropped() != 1 {
-				t.Fatalf("Dropped() = %d, want 1: the dropped vector is counted, not hidden", seam.Dropped())
-			}
-
-			if err := source.Store(ctx, memory.EventRecord{Key: "q3", PartitionID: 1, Type: event.TypeExternalInput, Summary: "第三段文本", Timestamp: 3000, WindowTS: 100}); err != nil {
-				t.Fatalf("Store(q3): %v", err)
-			}
-			refs, err := source.QueryEvents(ctx, memory.QueryOptions{PartitionIDs: []int{1}})
-			if err != nil {
-				t.Fatalf("QueryEvents: %v", err)
-			}
-			if got := keysOf(refs); !reflect.DeepEqual(got, []event.EventID{"q3"}) {
-				t.Fatalf("stored keys = %v, want [q3]: the event is stored regardless of its dropped vector", got)
-			}
-			embedder.release()
-		})
-
 		t.Run("one event key keeps its higher-window version", func(t *testing.T) {
 			source := memory.NewMemoryEventQuery()
 			for _, rec := range []memory.EventRecord{
@@ -316,51 +252,6 @@ func TestRecallConsumer(t *testing.T) {
 			}
 			if refs[0].Summary != "目标层版本" {
 				t.Fatalf("kept version summary = %q, want %q: the higher window is the canonical compaction layer", refs[0].Summary, "目标层版本")
-			}
-		})
-	})
-
-	t.Run("concurrency", func(t *testing.T) {
-		t.Run("async vector generation never blocks the event path", func(t *testing.T) {
-			source := memory.NewMemoryEventQuery()
-			embedder := newGatedEmbedder()
-			seam := memory.NewVectorSeam(0)
-			defer seam.Close()
-			seam.Bind(embedder)
-
-			if !seam.Submit("g1", "向量生成文本") {
-				t.Fatalf("Submit(g1) = refused, want accepted")
-			}
-			embedder.awaitStarted(t)
-
-			if err := source.Store(ctx, memory.EventRecord{Key: "g1", PartitionID: 1, Type: event.TypeExternalInput, Summary: "向量生成文本", Timestamp: 1000, WindowTS: 100}); err != nil {
-				t.Fatalf("Store(g1) with the embedder stuck: %v", err)
-			}
-			var wg sync.WaitGroup
-			for worker := 0; worker < 4; worker++ {
-				wg.Add(1)
-				go func(worker int) {
-					defer wg.Done()
-					key := event.EventID("c" + string(rune('a'+worker)))
-					_ = source.Store(ctx, memory.EventRecord{Key: key, PartitionID: 1, Type: event.TypeActionCommand, Summary: "并发写入", Timestamp: int64(2000 + worker), WindowTS: 100})
-					seam.Submit(key, "并发文本")
-					_, _ = source.QueryEvents(ctx, memory.QueryOptions{PartitionIDs: []int{1}, OrderBy: memory.QueryOrderByDesc})
-				}(worker)
-			}
-			wg.Wait()
-			refs, err := source.QueryEvents(ctx, memory.QueryOptions{PartitionIDs: []int{1}, OrderBy: memory.QueryOrderByAsc})
-			if err != nil {
-				t.Fatalf("QueryEvents under concurrency: %v", err)
-			}
-			if len(refs) != 5 {
-				t.Fatalf("stored events under concurrency = %d, want 5", len(refs))
-			}
-
-			embedder.release()
-			awaitVector(t, seam, "g1")
-			vector, ready := seam.Vector("g1")
-			if !ready || len(vector) == 0 {
-				t.Fatalf("Vector(g1) = ready %v vector %v, want the vector ready after its generation completed", ready, vector)
 			}
 		})
 	})
@@ -413,61 +304,4 @@ func keysOf(refs []memory.EventReference) []event.EventID {
 		keys = append(keys, ref.Key)
 	}
 	return keys
-}
-
-// gatedEmbedder is an embedder whose generation stays stuck until it is
-// released, so a test can hold the async pipeline mid-generation.
-type gatedEmbedder struct {
-	started   chan struct{}
-	startOnce sync.Once
-	releaseCh chan struct{}
-	calls     atomic.Int64
-}
-
-func newGatedEmbedder() *gatedEmbedder {
-	return &gatedEmbedder{
-		started:   make(chan struct{}),
-		releaseCh: make(chan struct{}),
-	}
-}
-
-func (e *gatedEmbedder) Embed(ctx context.Context, text string) ([]float32, error) {
-	e.calls.Add(1)
-	e.startOnce.Do(func() { close(e.started) })
-	<-e.releaseCh
-	return []float32{1.0, 0.0}, nil
-}
-
-// awaitStarted blocks until a generation is running inside the embedder.
-func (e *gatedEmbedder) awaitStarted(t *testing.T) {
-	t.Helper()
-	select {
-	case <-e.started:
-	case <-time.After(5 * time.Second):
-		t.Fatalf("embedder never started a generation: the async pipeline did not pick the job up")
-	}
-}
-
-// release lets every stuck generation return.
-func (e *gatedEmbedder) release() {
-	e.startOnce.Do(func() { close(e.started) })
-	select {
-	case <-e.releaseCh:
-	default:
-		close(e.releaseCh)
-	}
-}
-
-// awaitVector waits until the vector of key is ready, failing on a bounded
-// wait so a broken pipeline fails the case instead of hanging the run.
-func awaitVector(t *testing.T, seam *memory.VectorSeam, key event.EventID) {
-	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		if _, ready := seam.Vector(key); ready {
-			return
-		}
-		time.Sleep(time.Millisecond)
-	}
-	t.Fatalf("vector of %s never became ready after its generation was released", key)
 }

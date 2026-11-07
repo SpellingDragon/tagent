@@ -38,12 +38,8 @@ states. A query is declarative: its result is the whole matching set filtered,
 totally ordered and then paged, so no optimisation behind the read face may
 change what the query answers.
 
-The offline binding seam of vector generation for recall: an embedder is bound
-per generation and borrowed by the async pipeline that runs after the event is
-already stored, so the event path never waits for a vector and a runtime without
-an embedder configured behaves exactly as it did before the seam existed.
-An embedder that is never bound leaves the seam idle: the fact is stored and no
-vector is produced, so recall runs on keywords alone.
+Embedder generates the embedding of one query or one candidate's original text
+on demand. No runtime vector table is retained between calls.
 
 The unconfirmed-delivery replay engine: the obligations a committed record still
 owes, re-delivered at the owner the current orchestration binding resolves. The
@@ -66,11 +62,6 @@ const (
     default — matching the read port, where the default walk is old to new —
     and any other value is refused by name with ErrQueryOrder instead of being
     silently coerced into one of the two.
-
-const DefaultVectorQueue = 64
-    DefaultVectorQueue is the queue bound a vector seam runs under when its
-    caller names none: every seam is bounded, so a slow embedder can never grow
-    the queue without limit.
 
 const PartitionBits = 10
     PartitionBits is the width of the partition range one name is folded into:
@@ -155,16 +146,11 @@ type Embedder interface {
 	// Embed returns the embedding vector of text, or a named failure.
 	Embed(ctx context.Context, text string) ([]float32, error)
 }
-    Embedder generates the embedding vector of one text under the binding of
-    the generation that borrowed it. A seam never owns the endpoint: it holds
-    the binding and calls through it, and a generation's jobs run against the
-    binding that was current when the job was submitted, never against one
-    swapped in later.
+    Embedder generates one text vector under the deployment's binding.
 
-    The redline list (3 rules): MUST generate the vector under the binding of
-    the generation that borrowed it. MUST report a named failure rather than a
-    zero vector. MUST NOT own an endpoint or run a job against a binding swapped
-    in after the job was submitted.
+    The redline list (2 rules): MUST return a named failure rather than pretend
+    an empty vector is an embedding. MUST NOT retain a runtime vector table or
+    precompute on startup or commit.
 
 type EventBody struct {
 	// Key is the canonical identity of the event, in its hex form.
@@ -499,52 +485,3 @@ type ReplayReport struct {
 }
     ReplayReport is the report one replay returns, one outcome per delivery,
     in the order the pending obligations were handed in.
-
-type VectorSeam struct {
-	// Has unexported fields.
-}
-    VectorSeam is the async vector generation pipeline beside the event store:
-    submitting an event never waits for its vector, the vector becomes ready
-    later under the binding that generation borrowed, and an unconfigured seam
-    is a no-op rather than a degraded behaviour.
-
-    The seam holds vectors only. It never touches event originals, tool
-    declarations or any governing counter, so vector generation cannot erode
-    what it runs beside.
-
-func NewVectorSeam(queueSize int) *VectorSeam
-    NewVectorSeam returns a seam with the given queue bound (a non-positive
-    bound runs under DefaultVectorQueue) and no embedder bound: an unconfigured
-    seam accepts nothing and changes nothing.
-
-func (s *VectorSeam) Bind(embedder Embedder)
-    Bind installs the embedder binding of the current generation, or clears it
-    when nil: jobs already submitted keep the binding they borrowed, so a later
-    generation can never rewrite the terms an earlier one runs under.
-
-func (s *VectorSeam) Close()
-    Close ends the pipeline: no further submission is accepted and the worker
-    returns. It repeats as a no-op.
-
-func (s *VectorSeam) Dropped() int64
-    Dropped returns how many event vectors were dropped so far: refused by a
-    full queue or lost to a failed generation. A negative result is recorded,
-    not hidden.
-
-func (s *VectorSeam) Submit(key event.EventID, text string) bool
-    Submit offers one event for async vector generation and returns whether the
-    job was accepted.
-
-    - An unconfigured seam (no embedder bound) accepts nothing and moves
-    nothing: no job is queued, no embedder is called and the drop counter
-    stays where it is, so a runtime without embeddings behaves exactly as it
-    does without the seam. - A full queue drops the job by name and moves the
-    drop counter, and the event itself is stored regardless: submission is
-    non-blocking by contract, never a back-pressure wait on the store path.
-    - A job whose generation later fails is dropped the same observable way,
-    so a lost vector is always counted and never silently absent.
-
-func (s *VectorSeam) Vector(key event.EventID) ([]float32, bool)
-    Vector returns the embedding vector generated for key and whether it is
-    ready. A vector is never served before its generation completed, and its
-    absence is reported as absence rather than as an error.

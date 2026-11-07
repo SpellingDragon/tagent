@@ -1139,11 +1139,11 @@ func WithStorage(cfg ledger.StorageConfig) Option {
 	return func(c *assemblyConfig) { c.storage = &cfg }
 }
 
-// WithEmbedder attaches the embedding binding the retrieval face of this
-// assembly generates its event vectors under. An assembly beside no embedder
-// builds no vector generation at all: recall answers through the keyword leg
-// alone and behaves exactly as it did before the embedding existed. The seam
-// borrows the binding per vector generation and never owns the endpoint.
+// WithEmbedder attaches the binding the retrieval face calls only while a
+// query scores its candidates. An assembly beside no embedder calls no
+// embedding at all: recall answers through the keyword leg alone and behaves
+// exactly as it did before the embedding existed. The binding is used on
+// demand and never owns a runtime vector table.
 func WithEmbedder(embedder memory.Embedder) Option {
 	return func(c *assemblyConfig) { c.embedder = embedder }
 }
@@ -2195,8 +2195,8 @@ type MemoryPlan struct {
 // assembly opens, beside the storage section the document states at its top
 // level. Every declaring agent must name the same tier and the same engine: a
 // shared store read under two different engines would answer one query two
-// ways. An engine beside no tier is refused by name, because an embedding with
-// nowhere to persist its vectors is no engine at all. A document that declares
+// ways. An engine beside no tier is refused by name: without a durable chain
+// query-time embedding has no candidates. A document that declares
 // neither reports a nil plan, which wires no storage face and no embedder.
 func MemoryPlanOf(decl *config.Declaration, storageType, storageRoot string) (*MemoryPlan, error) {
 	if decl == nil {
@@ -2277,7 +2277,7 @@ func (p *MemoryPlan) Engine() *config.EngineSpec {
 	return p.engine
 }
 
-// Embedder reports the embedding binding the plan generates its vectors under:
+// Embedder reports the binding candidate queries call on demand:
 // the core default implementation over the declared engine, built on the first
 // call and cached so one run runs over one binding. A plan beside no engine
 // reports no embedder, which is the keyword-only retrieval.

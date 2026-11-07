@@ -9,7 +9,7 @@ it through its real caller.
 FUNCTIONS
 
 func ExampleEmbedder()
-    ExampleEmbedder embeds one text under the binding that borrowed the seam and
+    ExampleEmbedder embeds one candidate text under the bound embedder and
     reports that empty text is refused by name instead of answered with a zero
     vector.
 

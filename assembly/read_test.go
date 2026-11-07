@@ -14,12 +14,13 @@ import (
 	"github.com/SpellingDragon/tagent/api/event"
 	"github.com/SpellingDragon/tagent/memory"
 	"github.com/SpellingDragon/tagent/memory/ledger"
+	"github.com/SpellingDragon/tagent/memory/search"
 	"github.com/SpellingDragon/tagent/runtime/agent"
 
 	"trpc.group/trpc-go/trpc-agent-go/model"
 )
 
-// recordingEmbedder records every text the vector seam is asked to embed.
+// recordingEmbedder records every text the query-time embedder is asked to embed.
 type recordingEmbedder struct {
 	mu    sync.Mutex
 	texts []string
@@ -40,12 +41,12 @@ func (e *recordingEmbedder) recorded() []string {
 	return append([]string(nil), e.texts...)
 }
 
-// TestVectorSeamNeverSeesMechanismWording pins the seam rule.
-// - the retrieval supply embeds business facts only
-// - a compression mechanism fact never submits its internal summary
+// TestCandidateEmbeddingNeverSeesMechanismWording pins query-time embedding.
+// - supply construction performs no embedding; only a real query embeds candidates
+// - candidate text comes from the original body and never from mechanism wording
 //
 // 契约: docs/wiki/memory/memory-architecture.md#embedder-contract
-func TestVectorSeamNeverSeesMechanismWording(t *testing.T) {
+func TestCandidateEmbeddingNeverSeesMechanismWording(t *testing.T) {
 	ctx := context.Background()
 	tier, err := ledger.OpenTier(ctx, ledger.StorageConfig{Type: ledger.StorageMemory})
 	if err != nil {
@@ -73,7 +74,7 @@ func TestVectorSeamNeverSeesMechanismWording(t *testing.T) {
 			t.Fatalf("marshal %s: %v", key, err)
 		}
 		if err := tier.Segments.StoreEvent(ctx, ledger.SegmentRecord{
-			PartitionID: 1,
+			PartitionID: memory.PartitionIDFromName("agent-a"),
 			WindowTS:    at.UnixMilli(),
 			Seq:         seq,
 			EventKey:    key,
@@ -92,21 +93,19 @@ func TestVectorSeamNeverSeesMechanismWording(t *testing.T) {
 	if err != nil {
 		t.Fatalf("wire the retrieval supply: %v", err)
 	}
-	defer supply.seam.Close()
-
-	deadline := time.Now().Add(2 * time.Second)
-	for {
-		if _, ready := supply.seam.Vector("business-134000"); ready {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("the business fact never produced its vector")
-		}
-		time.Sleep(5 * time.Millisecond)
+	deadline := time.Now().Add(50 * time.Millisecond)
+	for len(embedder.recorded()) == 0 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if got := len(embedder.recorded()); got != 0 {
+		t.Fatalf("supply construction embedded %d text(s), want query-time only", got)
+	}
+	if _, err := supply.searcher.Search(ctx, search.Query{Text: "material", Strategy: search.StrategyHybrid, Partitions: []string{"agent-a"}, Limit: 3}); err != nil {
+		t.Fatalf("search through the query-time candidates: %v", err)
 	}
 	for _, text := range embedder.recorded() {
 		if strings.Contains(text, "compress product") || strings.Contains(text, "compress request") {
-			t.Fatalf("the vector seam embedded internal mechanism wording %q", text)
+			t.Fatalf("candidate embedding included internal mechanism wording %q", text)
 		}
 	}
 	found := false
@@ -222,7 +221,6 @@ func TestRetrievalConstructionReadsNoEventBodies(t *testing.T) {
 	if err != nil {
 		t.Fatalf("constructing the read face decoded a body: %v", err)
 	}
-	defer supply.close()
 	if _, err := supply.source.QueryEvents(ctx, memory.QueryOptions{PartitionIDs: []int{1}}); err == nil {
 		t.Fatal("the first real query did not surface the unreadable body")
 	}

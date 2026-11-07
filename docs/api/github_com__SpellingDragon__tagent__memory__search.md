@@ -157,16 +157,15 @@ func (q Query) QueryOptions() memory.QueryOptions
 
     - The mapping is thin on purpose: the time axis is carried across as Unix
     milliseconds (Since and Until become the inclusive window, a zero bound
-    staying open) and Types as the event-type restriction unchanged. - Text,
-    the retrieval content of the query, is carried as the keyword leg, which is
-    what a free-text query is served by; the retrieval layer may grow a vector
-    leg behind the same mapping later. - The page is carried as the Limit of the
-    query window, and the order is fixed to newest-first because recall serves
-    the time arrow the compaction keeps: the newer event is recalled before the
-    older one. - The partition scope is deliberately not carried: an authorized
-    read receives its partition set injected into the mapped options by the read
-    seam, so this method never widens a query to partitions its caller is not
-    authorized for.
+    staying open) and Types as the event-type restriction unchanged. - Text, the
+    retrieval content of the query, is carried as the keyword leg, which is what
+    a free-text query is served by; the vector leg embeds candidates through the
+    same mapped options. - The page is carried as the Limit of the query window,
+    and the order is fixed to newest-first because recall serves the time arrow
+    the compaction keeps: the newer event is recalled before the older one. -
+    The partition scope is deliberately not carried: an authorized read receives
+    its partition set injected into the mapped options by the read seam, so this
+    method never widens a query to partitions its caller is not authorized for.
 
 func (q Query) Validate() error
     Validate returns the named refusal that rejects this query before it runs,
@@ -185,13 +184,11 @@ type RRFFusion struct {
     rest by name.
 
     - The hybrid fallback is byte-identical by contract: an empty vector leg
-    (unconfigured embedder, dropped generation or no hit) runs the very same
-    code path keyword-only runs, so a caller cannot tell the two apart and a
-    vector pipeline coming up later never changes what a keyword-only answer
-    looked like. - The fusion grants nothing: both legs arrive already read
-    under the caller's authorized scope and the fused result stays inside it.
-    - A fused hit stays a reference, so a fused set is never a second copy of
-    the text behind it.
+    (no embedder, failed embedding or no hit) runs the very same code path
+    keyword-only runs, so a caller cannot tell the two apart. - The fusion
+    grants nothing: both legs arrive already read under the caller's authorized
+    scope and the fused result stays inside it. - A fused hit stays a reference,
+    so a fused set is never a second copy of the text behind it.
 
 func (f RRFFusion) Fuse(ctx context.Context, strategy Strategy, vector, keyword []ledger.OriginalRef) (Result, error)
     Fuse merges the two legs under strategy and returns the ordered reference
@@ -258,16 +255,15 @@ type Searcher interface {
 type StoreSearcher struct {
 	// Has unexported fields.
 }
-    StoreSearcher is the Searcher over a real store: the query source both legs
-    read through, the vector seam the embedding leg borrows, and the embedder
-    bound for the retrieval text. A searcher constructed without a vector seam
-    or without an embedder answers through the keyword leg alone, which is the
-    byte-identical fallback the hybrid contract states.
+    StoreSearcher is the Searcher over a real store: the durable query source
+    both legs read through and the embedder called only for the current query's
+    candidates. A searcher beside no embedder answers through the keyword leg
+    alone, which is the byte-identical fallback the hybrid contract states.
 
-func NewStoreSearcher(source ReferenceSource, vectors VectorSource, embedder memory.Embedder) *StoreSearcher
-    NewStoreSearcher returns a searcher over source. vectors and embedder may
-    name nothing, and then the vector leg is empty for every query; the fusion
-    behind the searcher is the reciprocal rank fusion of this package.
+func NewStoreSearcher(source ReferenceSource, embedder memory.Embedder) *StoreSearcher
+    NewStoreSearcher returns a searcher over source. embedder may name nothing,
+    and then the vector leg is empty for every query; the fusion behind the
+    searcher is the reciprocal rank fusion of this package.
 
 func (s *StoreSearcher) Search(ctx context.Context, q Query) (Result, error)
     Search returns the reference set of q, ranked by the retrieval rule the
@@ -296,14 +292,3 @@ const (
 	// StrategyVectorOnly keeps the vector ranking alone.
 	StrategyVectorOnly Strategy = "vector_only"
 )
-type VectorSource interface {
-	// Vector returns the embedding vector of the event key and whether it is
-	// ready.
-	Vector(key event.EventID) ([]float32, bool)
-}
-    VectorSource is the embedding seam a retrieval borrows its vectors from:
-    the vector of one event key and whether its generation completed.
-
-    The redline list (2 rules): MUST return the vector of the event key and
-    whether its generation completed. MUST NOT infer a ready vector from a
-    generation that has not completed.

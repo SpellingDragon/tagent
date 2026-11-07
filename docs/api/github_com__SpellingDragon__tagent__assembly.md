@@ -423,9 +423,9 @@ func MemoryPlanOf(decl *config.Declaration, storageType, storageRoot string) (*M
     assembly opens, beside the storage section the document states at its top
     level. Every declaring agent must name the same tier and the same engine:
     a shared store read under two different engines would answer one query two
-    ways. An engine beside no tier is refused by name, because an embedding with
-    nowhere to persist its vectors is no engine at all. A document that declares
-    neither reports a nil plan, which wires no storage face and no embedder.
+    ways. An engine beside no tier is refused by name: without a durable chain
+    query-time embedding has no candidates. A document that declares neither
+    reports a nil plan, which wires no storage face and no embedder.
 
 func NewSkillLoadSink(agent event.AgentID) knowledge.LoadSink
     NewSkillLoadSink mounts a fresh loaded-skill ledger on one agent and answers
@@ -445,8 +445,8 @@ func SetAttentionClock(now func() time.Time) (restore func())
 
 func NewTierQuerySource(segments *ledger.FileSegmentStore) *tierQuerySource
     NewTierQuerySource attaches the durable read face without landing anything.
-    The returned face answers QueryEvents, Event, Reference and GetParent on
-    demand and retains no event or parent map between calls.
+    The returned face answers QueryEvents, Event, Reference, Text and GetParent
+    on demand and retains no event, parent or vector map between calls.
 
 TYPES
 
@@ -1041,10 +1041,10 @@ type MemoryPlan struct {
     retrieval face of one run run over the one embedder.
 
 func (p *MemoryPlan) Embedder() (memory.Embedder, error)
-    Embedder reports the embedding binding the plan generates its vectors under:
-    the core default implementation over the declared engine, built on the first
-    call and cached so one run runs over one binding. A plan beside no engine
-    reports no embedder, which is the keyword-only retrieval.
+    Embedder reports the binding candidate queries call on demand: the core
+    default implementation over the declared engine, built on the first call and
+    cached so one run runs over one binding. A plan beside no engine reports no
+    embedder, which is the keyword-only retrieval.
 
 func (p *MemoryPlan) Engine() *config.EngineSpec
     Engine reports the merged semantic engine, or nil beside no engine.
@@ -1124,11 +1124,11 @@ func WithCapture(capture rl.Capture) Option
     view; a capture beside no scope is refused by name at assembly.
 
 func WithEmbedder(embedder memory.Embedder) Option
-    WithEmbedder attaches the embedding binding the retrieval face of this
-    assembly generates its event vectors under. An assembly beside no embedder
-    builds no vector generation at all: recall answers through the keyword leg
-    alone and behaves exactly as it did before the embedding existed. The seam
-    borrows the binding per vector generation and never owns the endpoint.
+    WithEmbedder attaches the binding the retrieval face calls only while
+    a query scores its candidates. An assembly beside no embedder calls no
+    embedding at all: recall answers through the keyword leg alone and behaves
+    exactly as it did before the embedding existed. The binding is used on
+    demand and never owns a runtime vector table.
 
 func WithEnforcement(grade governance.Enforcement) Option
     WithEnforcement names the enforcement grade this assembly admits calls

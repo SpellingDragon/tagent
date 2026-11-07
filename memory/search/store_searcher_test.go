@@ -19,6 +19,7 @@ type tuningSource struct {
 	refs     []memory.EventReference
 	keyword  *int
 	partless *int
+	texts    map[event.EventID]string
 }
 
 func (s *tuningSource) QueryEvents(ctx context.Context, opts memory.QueryOptions) ([]memory.EventReference, error) {
@@ -46,18 +47,41 @@ func (s *tuningSource) Reference(key event.EventID) (ledger.OriginalRef, bool) {
 	return ledger.OriginalRef{}, false
 }
 
-// tuningVectors answers one ready vector for every key it names.
-type tuningVectors map[event.EventID][]float32
-
-func (v tuningVectors) Vector(key event.EventID) ([]float32, bool) {
-	vec, held := v[key]
-	return vec, held
+// Text returns the original text of one candidate.
+func (s *tuningSource) Text(key event.EventID) (string, bool) {
+	text, held := s.texts[key]
+	return text, held
 }
 
-// tuningEmbedder answers one fixed query vector.
-type tuningEmbedder struct{ vec []float32 }
+// tuningEmbedder answers the query vector and each candidate's distinct vector.
+type tuningEmbedder struct {
+	vec    []float32
+	byText map[string][]float32
+}
 
-func (e tuningEmbedder) Embed(context.Context, string) ([]float32, error) { return e.vec, nil }
+// Embed returns the candidate-specific vector when one is registered.
+func (e tuningEmbedder) Embed(_ context.Context, text string) ([]float32, error) {
+	if e.byText != nil {
+		if vector, held := e.byText[text]; held {
+			return vector, nil
+		}
+		return nil, nil
+	}
+	return e.vec, nil
+}
+
+// tuningEmbedderFor builds the candidate vectors from the original text.
+func tuningEmbedderFor(source *tuningSource) tuningEmbedder {
+	embedder := tuningEmbedder{vec: []float32{1, 0}, byText: map[string][]float32{}}
+	source.texts = map[event.EventID]string{}
+	for i, ref := range source.refs {
+		text := fmt.Sprintf("text-%d", i)
+		source.texts[ref.Key] = text
+		embedder.byText[text] = []float32{1, float32(i) * 0.1}
+	}
+	embedder.byText["x"] = embedder.vec
+	return embedder
+}
 
 func tuningRefs(n int) []memory.EventReference {
 	refs := make([]memory.EventReference, 0, n)
@@ -77,11 +101,7 @@ func TestStoreSearcherHonoursRetrievalTuning(t *testing.T) {
 	ctx := context.Background()
 	var keywordLimit, vectorLimit int
 	source := &tuningSource{refs: tuningRefs(6), keyword: &keywordLimit, partless: &vectorLimit}
-	vectors := tuningVectors{}
-	for i, ref := range source.refs {
-		vectors[ref.Key] = []float32{1, float32(i) * 0.1}
-	}
-	searcher := NewStoreSearcher(source, vectors, tuningEmbedder{vec: []float32{1, 0}})
+	searcher := NewStoreSearcher(source, tuningEmbedderFor(source))
 	query := Query{Text: "x", Partitions: []string{"p"}, Limit: 10}
 
 	if _, err := searcher.Search(ctx, query); err != nil {
@@ -174,6 +194,12 @@ func (s *completenessSource) Reference(key event.EventID) (ledger.OriginalRef, b
 	return ledger.OriginalRef{}, false
 }
 
+// Text returns the original text of one candidate.
+func (s *completenessSource) Text(key event.EventID) (string, bool) {
+	text, held := s.texts[key]
+	return text, held
+}
+
 // TestVectorCandidateCompleteness pins whole-candidate scoring: the declared bound cuts the best hits after the scoring.
 //   - an unbounded vector leg recalls the old relevant record a synonym query shares no word with
 //   - a bound of one still recalls that record, which the newest candidates carry no vector for
@@ -194,14 +220,15 @@ func TestVectorCandidateCompleteness(t *testing.T) {
 			"old-relevant":  "部署失败回滚",
 		},
 	}
-	vectors := tuningVectors{
-		"old-relevant":  {1, 0},
-		"new-unrelated": {0, 1},
-	}
+	vectors := tuningEmbedder{vec: []float32{1, 0}, byText: map[string][]float32{
+		"上线出问题撤回了": {1, 0},
+		"部署失败回滚":   {1, 0},
+		"不相关的新记录":  {0, 1},
+	}}
 	query := Query{Text: "上线出问题撤回了", Partitions: []string{"p"}, Limit: 10}
 
 	t.Run("unbounded candidates recall the old relevant record", func(t *testing.T) {
-		searcher := NewStoreSearcher(source, vectors, tuningEmbedder{vec: []float32{1, 0}})
+		searcher := NewStoreSearcher(source, vectors)
 		result, err := searcher.Search(ctx, query)
 		if err != nil {
 			t.Fatalf("search: %v", err)
@@ -212,7 +239,7 @@ func TestVectorCandidateCompleteness(t *testing.T) {
 	})
 
 	t.Run("bound one still recalls the old relevant record", func(t *testing.T) {
-		searcher := NewStoreSearcher(source, vectors, tuningEmbedder{vec: []float32{1, 0}})
+		searcher := NewStoreSearcher(source, vectors)
 		if err := searcher.SetRetrievalTuning(1, 0, 0); err != nil {
 			t.Fatalf("apply the retrieval tuning: %v", err)
 		}
@@ -229,7 +256,7 @@ func TestVectorCandidateCompleteness(t *testing.T) {
 	})
 
 	t.Run("the named refusals and the zero bound stand", func(t *testing.T) {
-		searcher := NewStoreSearcher(source, vectors, tuningEmbedder{vec: []float32{1, 0}})
+		searcher := NewStoreSearcher(source, vectors)
 		if _, err := searcher.Search(ctx, Query{Partitions: []string{"p"}}); !errors.Is(err, ErrQueryTextMissing) {
 			t.Fatalf("query without text answered %v, want the named refusal %v", err, ErrQueryTextMissing)
 		}

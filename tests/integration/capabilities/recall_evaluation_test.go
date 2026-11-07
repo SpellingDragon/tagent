@@ -199,12 +199,12 @@ func evalRecallPort(run *assembly.Run) *assembly.RecallPort {
 }
 
 // awaitEvalRecall waits until the production recall of q answers every wanted
-// key, failing on a bounded wait so a vector generation that never becomes
-// ready fails the case instead of hanging the run.
+// key, failing on a bounded wait so a query that never answers those keys
+// fails the case instead of hanging the run.
 func awaitEvalRecall(t *testing.T, run *assembly.Run, q search.Query, want []event.EventID) search.Result {
 	t.Helper()
 	ctx := context.Background()
-	deadline := time.Now().Add(realAwaitLimit)
+	deadline := time.Now().Add(5 * time.Second)
 	var last []event.EventID
 	for {
 		result, err := evalRecallPort(run).Search(ctx, q)
@@ -223,29 +223,6 @@ func awaitEvalRecall(t *testing.T, run *assembly.Run, q search.Query, want []eve
 		}
 		if time.Now().After(deadline) {
 			t.Fatalf("recall of %q never reached %v (last %v): the retrieval never answered the expected keys", q.Text, want, last)
-		}
-		time.Sleep(time.Millisecond)
-	}
-}
-
-// awaitEvalVectorCount waits until the counted embedding has generated exactly
-// want event vectors — the seam generates asynchronously, so the count is
-// awaited on a bounded wait instead of sampled at assembly return — failing the
-// case when the generation never runs to completion or runs past the corpus it
-// was fed.
-func awaitEvalVectorCount(t *testing.T, counter *evalCountingEmbedder, want int) int {
-	t.Helper()
-	deadline := time.Now().Add(realAwaitLimit)
-	for {
-		got := counter.count()
-		if got == want {
-			return got
-		}
-		if got > want {
-			t.Fatalf("the assembly generated %d event vectors, want %d: one event embedded more than once", got, want)
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("the assembly generated %d event vectors in the wait, want %d: the vector generation never ran to completion", got, want)
 		}
 		time.Sleep(time.Millisecond)
 	}
@@ -496,18 +473,20 @@ func TestRecallEvaluation(t *testing.T) {
 
 		counter := &evalCountingEmbedder{inner: memoryembedder.NewHashEmbedder(0)}
 		counted := evalAssemble(t, storeRoot, counter)
-		generated := awaitEvalVectorCount(t, counter, len(realCorpusOf()))
+		if got := counter.count(); got != 0 {
+			t.Fatalf("assembly embedded %d text(s), want query-time only", got)
+		}
 		if _, err := evalRecallPort(counted).Search(ctx, search.Query{Text: evalFilterText, Strategy: search.StrategyKeywordOnly, Partitions: []string{realAlphaPartition}}); err != nil {
 			t.Fatalf("Recall(keyword-only): %v", err)
 		}
-		if got := counter.count(); got != generated {
-			t.Fatalf("keyword-only recall made %d embedding calls, want %d: the keyword leg never reaches the embedding", got-generated, 0)
+		if got := counter.count(); got != 0 {
+			t.Fatalf("keyword-only recall made %d embedding calls, want 0", got)
 		}
 		if _, err := evalRecallPort(counted).Search(ctx, search.Query{Text: realRecallText, Strategy: search.StrategyHybrid, Partitions: []string{realAlphaPartition}, Limit: 20}); err != nil {
 			t.Fatalf("Recall(hybrid): %v", err)
 		}
-		if got := counter.count(); got <= generated {
-			t.Fatalf("hybrid recall made %d embedding calls, want at least one: the vector leg embeds the retrieval text", got-generated)
+		if got := counter.count(); got == 0 {
+			t.Fatal("hybrid recall made no embedding calls, want the query and candidate text embedded on demand")
 		}
 	})
 

@@ -3675,7 +3675,7 @@ func runRangeHeadSurvivesFoldRewrite(t *testing.T) {
 // TestEventIntegrityPersistence drives the formal host over a real localfile tier and scripted chat and embedding endpoints:
 // - the facts a turn commits are read back through the declared recall tools in the same process
 // - a storage failure is reported by name instead of answered as success
-// - one failed vector generation leaves a recoverable debt
+// - a refused candidate embedding degrades one query to the keyword-only answer, and a later query embeds the candidate fresh
 // - a new fact never makes an older reachable record unreachable
 // 契约: docs/wiki/memory/memory-architecture.md#event-shape
 func TestEventIntegrityPersistence(t *testing.T) {
@@ -3686,7 +3686,7 @@ func TestEventIntegrityPersistence(t *testing.T) {
 	t.Run("original_text_matches_committed_bytes", runPersistenceOriginalText)
 	t.Run("formal_recall_tool_returns_new_fact", runPersistenceFormalTool)
 	t.Run("storage_failure_not_reported_as_success", runPersistenceStorageFailure)
-	t.Run("index_failure_leaves_recoverable_debt", runPersistenceIndexDebt)
+	t.Run("index_failure_leaves_recoverable_debt", runPersistenceQueryTimeRecovery)
 	t.Run("new_fact_keeps_old_reachable", runPersistenceOldReachable)
 }
 
@@ -3699,8 +3699,8 @@ const (
 	persistenceDimensions = 8
 	persistenceAgentID    = event.AgentID("agent-persistence")
 	persistenceSessionID  = event.SessionID("session-persistence")
-	// persistenceMaxRounds bounds the retrieval the scripted model is willing
-	// to repeat while a vector generation has not landed yet.
+	// persistenceMaxRounds bounds the retrieval rounds the scripted model is
+	// willing to repeat while the query has not answered the wanted key.
 	persistenceMaxRounds = 8
 )
 
@@ -3913,8 +3913,8 @@ func persistenceToolCallAnswer(name, callID, arguments string) string {
 // persistenceEmbeddings is the scripted embedding endpoint: every text is
 // recorded, the vector is derived from the words the text carries, so the
 // cosine of two texts is decided by meaning rather than by chance, and a
-// switch fails every document carrying the lantern watchword so one check can
-// break the index without breaking the store.
+// switch refuses every text carrying the lantern watchword, so one check can
+// make a candidate unembeddable during a query without breaking the store.
 type persistenceEmbeddings struct {
 	server      *httptest.Server
 	mu          sync.Mutex
@@ -3934,8 +3934,8 @@ func newPersistenceEmbeddings(t *testing.T) *persistenceEmbeddings {
 	return edge
 }
 
-// serve answers one embedding request, or refuses the documents the check
-// broke the index for by name.
+// serve answers one embedding request, or refuses the texts the check holds
+// behind the lantern switch.
 func (e *persistenceEmbeddings) serve(w http.ResponseWriter, r *http.Request) {
 	if !strings.HasSuffix(r.URL.Path, "/embeddings") {
 		http.Error(w, "not found", http.StatusNotFound)
@@ -3956,7 +3956,7 @@ func (e *persistenceEmbeddings) serve(w http.ResponseWriter, r *http.Request) {
 	}
 	e.mu.Unlock()
 	if fail {
-		http.Error(w, `{"error":{"message":"the embedding index refused the document","type":"server_error"}}`, http.StatusServiceUnavailable)
+		http.Error(w, `{"error":{"message":"the embedding request was refused","type":"server_error"}}`, http.StatusServiceUnavailable)
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
@@ -3999,21 +3999,22 @@ func persistenceVectorOf(text string) string {
 // endpoint reports the base URL the engine declaration names.
 func (e *persistenceEmbeddings) endpoint() string { return e.server.URL + "/v1/" }
 
-// setFailLantern breaks or restores the generation of every lantern document.
+// setFailLantern refuses or allows the embedding of every text carrying the
+// lantern watchword.
 func (e *persistenceEmbeddings) setFailLantern(fail bool) {
 	e.mu.Lock()
 	e.failLantern = fail
 	e.mu.Unlock()
 }
 
-// successCount reports how many generations of the exact text succeeded.
+// successCount reports how many embeddings of the exact text succeeded.
 func (e *persistenceEmbeddings) successCount(text string) int {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	return e.success[text]
 }
 
-// failureCount reports how many generations of the exact text were refused.
+// failureCount reports how many embeddings of the exact text were refused.
 func (e *persistenceEmbeddings) failureCount(text string) int {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -4190,8 +4191,8 @@ func (r *persistenceRig) scriptTerminal(text string) {
 }
 
 // scriptPollingQuery issues one retrieval per round until the retrieval answers
-// the wanted key, so a vector generation that lands asynchronously is waited
-// for by the retrieval itself and never by a sleep.
+// the wanted key, so a check that needs the key waits through the retrieval
+// itself and never by a sleep.
 func (r *persistenceRig) scriptPollingQuery(query string, want event.EventID, terminal, gaveUp string) {
 	seen := -1
 	rounds := 0
@@ -4279,18 +4280,15 @@ func persistenceFactOf(t *testing.T, run *assembly.Run, what string, match func(
 	return matched[0]
 }
 
-// persistenceWaitForEmbedding waits until the endpoint answered the exact text
-// once, so the check reads a generation that really ran.
-func persistenceWaitForEmbedding(t *testing.T, edge *persistenceEmbeddings, text string) {
+// persistenceAssertEmbedded proves a recall query embedded the exact text as
+// one of its candidates: embedding runs inside the query and never at commit
+// time, so the check reads the generation from the endpoint after the query
+// returned.
+func persistenceAssertEmbedded(t *testing.T, edge *persistenceEmbeddings, text string) {
 	t.Helper()
-	deadline := time.Now().Add(20 * time.Second)
-	for time.Now().Before(deadline) {
-		if edge.successCount(text) > 0 {
-			return
-		}
-		time.Sleep(10 * time.Millisecond)
+	if edge.successCount(text) == 0 {
+		t.Fatalf("the recall query never embedded the candidate %q; texts=%v", text, edge.recordedTexts())
 	}
-	t.Fatalf("the embedding endpoint never answered %q; texts=%v", text, edge.recordedTexts())
 }
 
 // persistenceShardPath reports the shard file the agent's events are committed
@@ -4326,21 +4324,6 @@ func persistenceHoldShard(t *testing.T, root string) func() {
 			t.Fatalf("release the shard snapshot %s: %v", shard, err)
 		}
 	}
-}
-
-// persistenceWaitForEmbeddingFailure waits until the endpoint refused the exact
-// text once, so the check reads a generation that really ran and really failed
-// rather than a submission the seam never picked up.
-func persistenceWaitForEmbeddingFailure(t *testing.T, edge *persistenceEmbeddings, text string) {
-	t.Helper()
-	deadline := time.Now().Add(20 * time.Second)
-	for time.Now().Before(deadline) {
-		if edge.failureCount(text) > 0 {
-			return
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	t.Fatalf("the embedding endpoint never refused %q; texts=%v", text, edge.recordedTexts())
 }
 
 // runPersistenceNewFact drives one formal turn that retrieves before it answers,
@@ -4382,9 +4365,9 @@ func runPersistenceNewFact(t *testing.T) {
 	if !persistenceAnswerHas(recalled, inputFact.Key) {
 		t.Fatalf("the retrieval answer does not carry the committed input %s: %v", inputFact.Key, recalled)
 	}
-	t.Logf("the turn committed input=%s output=%s tool=%s; the query answered %v item(s)",
+	persistenceAssertEmbedded(t, rig.embeddings, input)
+	t.Logf("the turn committed input=%s output=%s tool=%s; the query embedded the input candidate and answered %v item(s)",
 		inputFact.Key, outputFact.Key, toolFact.Key, recalled["count"])
-	persistenceWaitForEmbedding(t, rig.embeddings, input)
 }
 
 // runPersistenceOriginalText reads one committed conversation fact back through
@@ -4435,8 +4418,6 @@ func runPersistenceFormalTool(t *testing.T) {
 		return evt.Type == event.TypeActionCommand && evt.Message.ToolName == recall.QueryToolName
 	})
 	outputFact := persistenceFactByContent(t, run, answer)
-	persistenceWaitForEmbedding(t, rig.embeddings, input)
-	persistenceWaitForEmbedding(t, rig.embeddings, toolFact.Message.Content)
 
 	rig.scriptToolTurn(recall.GetToolName, "call-formal-read", fmt.Sprintf(`{"key":%q}`, toolFact.Key), "the tool result was read")
 	rig.mustInvoke(context.Background(), "inv-formal-read", "read the tool result")
@@ -4455,6 +4436,8 @@ func runPersistenceFormalTool(t *testing.T) {
 	if !persistenceAnswerHas(recalled, outputFact.Key) {
 		t.Fatalf("the retrieval answer does not carry the committed output %s: %v", outputFact.Key, recalled)
 	}
+	persistenceAssertEmbedded(t, rig.embeddings, input)
+	persistenceAssertEmbedded(t, rig.embeddings, toolFact.Message.Content)
 }
 
 // runPersistenceStorageFailure holds the agent's shard at the atomic-rename
@@ -4508,56 +4491,63 @@ func runPersistenceStorageFailure(t *testing.T) {
 	t.Logf("the refused commit failed beside %v; the retry landed as %s and was recalled", err, retried.Key)
 }
 
-// runPersistenceIndexDebt breaks the vector generation of one document: the
-// store keeps it, the semantic query cannot answer it yet, and a restart over
-// the same root re-submits every committed fact so the debt is paid and the
-// document is reachable by meaning.
-func runPersistenceIndexDebt(t *testing.T) {
+// runPersistenceQueryTimeRecovery proves a refused candidate embedding is a
+// query-time degradation, never a lost record: the fact stays durably stored
+// and exact-readable, the semantic query over the refused text answers through
+// the keyword leg alone rather than by meaning, and once the refusal stops a
+// later query embeds every candidate fresh and answers the fact by meaning.
+// No restart is involved: candidates are embedded during each query, and no
+// vector is generated at commit time or retained between queries.
+//
+// The subtest keeps the name it is registered under in
+// golden/runtime/event_integrity_scenarios.json, because the event contract
+// cross-checks that name against this source.
+func runPersistenceQueryTimeRecovery(t *testing.T) {
 	rig := newPersistenceRig(t)
 	defer rig.shutdown()
 
 	rig.embeddings.setFailLantern(true)
-	const debt = "the lantern waits on the shelf"
-	rig.scriptTerminal("the store kept the debt")
-	rig.mustInvoke(context.Background(), "inv-index-debt", debt)
-	persistenceWaitForEmbeddingFailure(t, rig.embeddings, debt)
+	const refusedText = "the lantern waits on the shelf"
+	rig.scriptTerminal("the store kept the refused text")
+	rig.mustInvoke(context.Background(), "inv-query-time-write", refusedText)
 
 	run := rig.host.Run()
-	fact := persistenceFactByContent(t, run, debt)
+	fact := persistenceFactByContent(t, run, refusedText)
 	if fact.Key == "" {
-		t.Fatalf("the store kept no identity for the refused document")
+		t.Fatalf("the store kept no identity for the refused text")
 	}
-	rig.scriptToolTurn(recall.GetToolName, "call-debt-read", fmt.Sprintf(`{"key":%q}`, fact.Key), "the debt is stored")
-	rig.mustInvoke(context.Background(), "inv-index-debt-read", "read the debt")
+	rig.scriptToolTurn(recall.GetToolName, "call-query-time-read", fmt.Sprintf(`{"key":%q}`, fact.Key), "the text is stored")
+	rig.mustInvoke(context.Background(), "inv-query-time-read", "read the text")
 	read := persistenceLastAnswer(t, rig.provider, recall.GetToolName)
 	if found, _ := read["found"].(bool); !found {
-		t.Fatalf("the refused document %s is not stored: %v", fact.Key, read)
+		t.Fatalf("the refused text %s is not stored: %v", fact.Key, read)
 	}
 
-	rig.scriptToolTurn(recall.QueryToolName, "call-debt-miss", `{"text":"illumination"}`, "the debt is a miss")
-	rig.mustInvoke(context.Background(), "inv-index-debt-miss", "recall the illumination")
+	rig.scriptToolTurn(recall.QueryToolName, "call-query-time-miss", `{"text":"illumination"}`, "the text is a miss")
+	rig.mustInvoke(context.Background(), "inv-query-time-miss", "recall the illumination")
 	missed := persistenceLastAnswer(t, rig.provider, recall.QueryToolName)
 	if persistenceAnswerHas(missed, fact.Key) {
-		t.Fatalf("the unindexed document was answered by meaning: %v", missed)
+		t.Fatalf("the document whose embedding was refused was answered by meaning: %v", missed)
+	}
+	if refused := rig.embeddings.failureCount(refusedText); refused == 0 {
+		t.Fatalf("the semantic query never tried to embed the refused candidate %q; texts=%v", refusedText, rig.embeddings.recordedTexts())
 	}
 
-	rig.shutdown()
 	rig.embeddings.setFailLantern(false)
-	rig.boot()
-	persistenceWaitForEmbedding(t, rig.embeddings, debt)
-	rig.scriptPollingQuery("illumination", fact.Key, "the debt was paid", "the debt was never paid")
-	rig.mustInvoke(context.Background(), "inv-index-debt-restart", "recall the illumination")
+	rig.scriptPollingQuery("illumination", fact.Key, "the text is reachable", "the text never came back")
+	rig.mustInvoke(context.Background(), "inv-query-time-recover", "recall the illumination again")
 	if recalled := persistenceLastAnswer(t, rig.provider, recall.QueryToolName); !persistenceAnswerHas(recalled, fact.Key) {
-		t.Fatalf("the restarted retrieval does not answer the paid debt %s: %v", fact.Key, recalled)
+		t.Fatalf("the later retrieval does not answer the stored text %s: %v", fact.Key, recalled)
 	}
-	t.Logf("the index refused the document %d time(s); the restart submitted it and the query answered %s",
-		rig.embeddings.failureCount(debt), fact.Key)
+	persistenceAssertEmbedded(t, rig.embeddings, refusedText)
+	t.Logf("the query refused the candidate %d time(s); without a restart a later query embedded it fresh and answered %s",
+		rig.embeddings.failureCount(refusedText), fact.Key)
 }
 
 // runPersistenceOldReachable reaches one record by meaning, commits an unrelated
-// record into the same index, and reaches the first record again: a new fact
-// never makes an older reachable record unreachable, and the new record answers
-// a query of the old meaning with nothing.
+// record beside it, and reaches the first record again: a new fact never makes
+// an older reachable record unreachable, and the new record answers a query of
+// the old meaning with nothing.
 func runPersistenceOldReachable(t *testing.T) {
 	rig := newPersistenceRig(t)
 	defer rig.shutdown()
@@ -4566,7 +4556,6 @@ func runPersistenceOldReachable(t *testing.T) {
 	const fresh = "a lantern appears on the new shelf"
 	rig.scriptTerminal("the old record was kept")
 	rig.mustInvoke(context.Background(), "inv-old", old)
-	persistenceWaitForEmbedding(t, rig.embeddings, old)
 
 	run := rig.host.Run()
 	oldFact := persistenceFactByContent(t, run, old)
@@ -4575,10 +4564,10 @@ func runPersistenceOldReachable(t *testing.T) {
 	if before := persistenceLastAnswer(t, rig.provider, recall.QueryToolName); !persistenceAnswerHas(before, oldFact.Key) {
 		t.Fatalf("the old record %s is not reachable before the new one: %v", oldFact.Key, before)
 	}
+	persistenceAssertEmbedded(t, rig.embeddings, old)
 
 	rig.scriptTerminal("the new record was kept")
 	rig.mustInvoke(context.Background(), "inv-new", fresh)
-	persistenceWaitForEmbedding(t, rig.embeddings, fresh)
 	newFact := persistenceFactByContent(t, run, fresh)
 
 	rig.scriptPollingQuery("harbor", oldFact.Key, "the old record is still reachable", "the new record made the old one unreachable")
@@ -4590,7 +4579,8 @@ func runPersistenceOldReachable(t *testing.T) {
 	if persistenceAnswerHas(after, newFact.Key) {
 		t.Fatalf("the new record %s answered the old meaning: %v", newFact.Key, after)
 	}
-	t.Logf("the old record %s stayed reachable beside the new %s; the query answered %v item(s)",
+	persistenceAssertEmbedded(t, rig.embeddings, fresh)
+	t.Logf("the old record %s stayed reachable beside the new %s; the query embedded the new candidate and answered %v item(s)",
 		oldFact.Key, newFact.Key, after["count"])
 }
 

@@ -45,7 +45,6 @@ type realStoreChain struct {
 	scoped   ledger.ScopedOriginalStore
 	store    *ledger.FileSegmentStore
 	source   recall.Table
-	seam     *memory.VectorSeam
 	searcher *search.StoreSearcher
 	events   []realStoreEvent
 }
@@ -57,7 +56,6 @@ const (
 	realEventRetention = "keep"
 	realRecallText     = "迁移阶段回填索引顺序"
 	realFusionText     = "回填演练"
-	realAwaitLimit     = 5 * time.Second
 )
 
 // realOwnerOf is the address every corpus reference is registered under.
@@ -135,39 +133,15 @@ func newRealStoreChain(t *testing.T, embedder memory.Embedder) *realStoreChain {
 			t.Fatalf("Put(original %s): %v", ev.key, err)
 		}
 	}
-	seam := memory.NewVectorSeam(0)
-	t.Cleanup(seam.Close)
-	seam.Bind(embedder)
-	for _, ev := range events {
-		if !seam.Submit(ev.key, ev.content) {
-			t.Fatalf("Submit(%s) refused: the seam is bound and the queue is empty", ev.key)
-		}
-		awaitStoreVector(t, seam, ev.key)
-	}
 	source := assembly.NewTierQuerySource(tier.Segments)
 	return &realStoreChain{
 		tier:     tier,
 		scoped:   scoped,
 		store:    tier.Segments,
 		source:   source,
-		seam:     seam,
-		searcher: search.NewStoreSearcher(source, seam, embedder),
+		searcher: search.NewStoreSearcher(source, embedder),
 		events:   events,
 	}
-}
-
-// awaitStoreVector waits until the vector of key is ready, failing on a bounded
-// wait so a stalled generation fails the case instead of hanging the run.
-func awaitStoreVector(t *testing.T, seam *memory.VectorSeam, key event.EventID) {
-	t.Helper()
-	deadline := time.Now().Add(realAwaitLimit)
-	for time.Now().Before(deadline) {
-		if _, ready := seam.Vector(key); ready {
-			return
-		}
-		time.Sleep(time.Millisecond)
-	}
-	t.Fatalf("vector of %s never became ready", key)
 }
 
 // recall runs one retrieval over the landed table inside the named partition

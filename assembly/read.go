@@ -62,12 +62,10 @@ func (r *Run) recall(ctx context.Context, q search.Query) (search.Result, error)
 }
 
 // retrievalSupply is the retrieval face one run consumes recall through: the
-// stateless durable query source, the vector seam the embedding leg borrows its
-// vectors from, and the searcher reading both legs through that source. It is
-// wired once at the composition root and holds no second copy of any event.
+// stateless durable query source and the searcher that embeds candidates only
+// during a query. It holds no event or vector copy between queries.
 type retrievalSupply struct {
 	source   *tierQuerySource
-	seam     *memory.VectorSeam
 	searcher *search.StoreSearcher
 }
 
@@ -78,8 +76,8 @@ type tierQuerySource struct {
 }
 
 // NewTierQuerySource attaches the durable read face without landing anything.
-// The returned face answers QueryEvents, Event, Reference and GetParent on
-// demand and retains no event or parent map between calls.
+// The returned face answers QueryEvents, Event, Reference, Text and GetParent
+// on demand and retains no event, parent or vector map between calls.
 func NewTierQuerySource(segments *ledger.FileSegmentStore) *tierQuerySource {
 	return &tierQuerySource{segments: segments}
 }
@@ -163,6 +161,24 @@ func (s *tierQuerySource) Event(key event.EventID) (memory.EventReference, bool)
 		return memory.EventReference{}, false
 	}
 	return record.Reference(), true
+}
+
+// Text returns the original content of one event for query-time embedding,
+// falling back to its summary when the content is empty.
+func (s *tierQuerySource) Text(key event.EventID) (string, bool) {
+	stored, held, err := s.segments.GetEvent(context.Background(), key)
+	if err != nil || !held {
+		return "", false
+	}
+	body, err := memory.DecodeEventBody(stored.Body)
+	if err != nil || body.Key != key || event.CompressionMechanism(body.Type) {
+		return "", false
+	}
+	text := body.Message.Content
+	if text == "" {
+		text = body.Meta[event.MetaKeyEventSummary]
+	}
+	return text, true
 }
 
 // Reference returns one original reference directly from the chain.
@@ -264,52 +280,11 @@ func (s *tierQuerySource) parentFromBodies(key event.EventID, partition int) (ev
 }
 
 // supplyRetrieval wires the retrieval face over one opened storage tier: the
-// durable query source reads only when asked, each business event submits its
-// vector generation without waiting for it, and the searcher fuses the two legs
-// of every query back into the one ordered reference set.
-// A nil embedder names no vector generation at all: no seam is built, no
-// embedding is ever called, and the searcher answers through the keyword leg
-// alone — the zero-change behaviour the embedding contract states. The
-// embedding text of one event is its stored content, falling back to its
-// stored summary when the content is empty.
-func supplyRetrieval(ctx context.Context, tier *ledger.Tier, embedder memory.Embedder) (*retrievalSupply, error) {
+// durable query source reads only when asked and the searcher embeds only the
+// current query's candidates. A nil embedder leaves retrieval keyword-only.
+func supplyRetrieval(_ context.Context, tier *ledger.Tier, embedder memory.Embedder) (*retrievalSupply, error) {
 	source := NewTierQuerySource(tier.Segments)
-	supply := &retrievalSupply{source: source}
-	if embedder == nil {
-		supply.searcher = search.NewStoreSearcher(source, nil, nil)
-		return supply, nil
-	}
-	seam := memory.NewVectorSeam(0)
-	seam.Bind(embedder)
-	if err := tier.Segments.EachEvent(ctx, func(stored ledger.StoredEvent) error {
-		body, err := memory.DecodeEventBody(stored.Body)
-		if err != nil {
-			return err
-		}
-		if event.CompressionMechanism(body.Type) {
-			return nil
-		}
-		text := body.Message.Content
-		if text == "" {
-			text = body.Meta[event.MetaKeyEventSummary]
-		}
-		seam.Submit(stored.Key, text)
-		return nil
-	}); err != nil {
-		seam.Close()
-		return nil, err
-	}
-	supply.seam = seam
-	supply.searcher = search.NewStoreSearcher(source, seam, embedder)
-	return supply, nil
-}
-
-// close releases the vector generation pipeline of the supply. A repeat close
-// is a no-op, and the keyword-only supply beside no seam closes nothing.
-func (s *retrievalSupply) close() {
-	if s.seam != nil {
-		s.seam.Close()
-	}
+	return &retrievalSupply{source: source, searcher: search.NewStoreSearcher(source, embedder)}, nil
 }
 
 // runReading is the read port of the diagnostic read: the binding generation the

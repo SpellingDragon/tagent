@@ -388,7 +388,7 @@ type MemorySpec struct {
     embeddings with.
 
     The tier is a type and a root, both required together; an engine beside no
-    tier names no place for its vectors to persist.
+    tier names no durable chain for query-time candidates to read.
 
 type MonitorSpec struct {
 	// Interval is the observation cadence.

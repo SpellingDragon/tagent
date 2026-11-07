@@ -285,16 +285,14 @@ func (r *Run) compactFactOrderLocked(dropped map[event.EventID]struct{}) {
 // persistFact writes one fact of this run to the storage tier it declares: the
 // body commits byte for byte as the original the recall face reads back, the
 // record commits behind the segment barrier under the next sequence slot of the
-// fact's partition, and the vector pipeline learns the event so the same
-// process recalls what it just committed.
+// fact's partition; a query reads the chain directly, so the same process
+// recalls what it just committed without a landing step.
 // - A run beside no storage tier, and a fact naming no owning agent, keep the fact in memory alone: no tier means no durable carrier to write.
 // - The segment commit is the durable write: nothing enters the live ledger before it returns success, and a refused commit leaves the previous position untouched.
 // - An event the tier already published is not committed twice: the very fact the identity already names is answered as the commitment it is, and another content under that identity is refused by name, so a retry of one fact keeps one record and a second fact never lands beside it.
-// - Submitting the vector generation is a consequence of a commit that already landed; its failure is reported and never rolls the fact back.
 func (r *Run) persistFact(ctx context.Context, evt event.Event) error {
 	r.mu.Lock()
 	tier := r.tier
-	supply := r.retrieval
 	r.mu.Unlock()
 	if tier == nil || evt.Owner.AgentID == "" {
 		return nil
@@ -349,16 +347,6 @@ func (r *Run) persistFact(ctx context.Context, evt event.Event) error {
 	}
 	if err != nil {
 		return err
-	}
-	if supply == nil {
-		return nil
-	}
-	if supply.seam != nil && !event.CompressionMechanism(evt.Type) {
-		text := body.Message.Content
-		if text == "" {
-			text = body.Meta[event.MetaKeyEventSummary]
-		}
-		supply.seam.Submit(evt.Key, text)
 	}
 	return nil
 }
