@@ -294,3 +294,58 @@ func TestMechanismFactsStayOutOfTheQueryFace(t *testing.T) {
 		t.Fatalf("the business record = %q/%s, want the fact's own text and type", record.Content, record.Type)
 	}
 }
+
+// TestNeverFoldedSessionFallsBack pins the no-anchor rule.
+// - a chain whose window never folds mints no product and finds no anchor
+// - the rebuild replays every committed fact and equals the full walk
+//
+// 契约: docs/wiki/agent/event-flow.md#projection-lifecycle
+func TestNeverFoldedSessionFallsBack(t *testing.T) {
+	ctx := context.Background()
+	provider := &snapshotTestModel{answer: func(*model.Request) *model.Response {
+		return &model.Response{Choices: []model.Choice{{Message: model.Message{Role: model.RoleAssistant, Content: factWindowAnswer}}}, Done: true}
+	}}
+	run, err := Assemble(ctx, &config.Declaration{
+		Entry:  "agent-a",
+		Agents: []config.AgentSpec{{ID: "agent-a", Model: "model-a", MaxTokens: 100000}},
+	}, map[event.AgentID]NativeAgent{"agent-a": {Model: provider}},
+		WithGovernance(snapshotTestGovernance{}),
+		WithStorage(ledger.StorageConfig{Type: ledger.StorageMemory}))
+	if err != nil {
+		t.Fatalf("assemble the wide-window run: %v", err)
+	}
+	addr := event.Address{AgentID: "agent-a", SessionID: "session-never-folded"}
+	commitWindowTurns(t, ctx, run, addr, 3)
+
+	full, _, _, err := run.seedFullReplay(ctx, run.tier)
+	if err != nil {
+		t.Fatalf("replay the whole chain: %v", err)
+	}
+	seeds, report, err := run.seedAnchoredReplay(ctx, run.tier)
+	if err != nil {
+		t.Fatalf("rebuild the never-folded chain: %v", err)
+	}
+	if report.Anchors != 0 {
+		t.Fatalf("the rebuild found %d anchor(s) on a chain that never folded", report.Anchors)
+	}
+	if report.Fallbacks != 1 {
+		t.Fatalf("the rebuild reported %d fallback(s), want one per never-folded chain", report.Fallbacks)
+	}
+	want, carried := full[addr]
+	if !carried {
+		t.Fatal("the full walk registered no projection for the session")
+	}
+	got, carried := seeds[addr]
+	if !carried {
+		t.Fatal("the rebuild registered no projection for the session")
+	}
+	wantList, gotList := want.projection.Entries(), got.projection.Entries()
+	if len(gotList) != len(wantList) {
+		t.Fatalf("the rebuild holds %d entries, want the full walk %d", len(gotList), len(wantList))
+	}
+	for at := range gotList {
+		if gotList[at].Key != wantList[at].Key || gotList[at].Type != wantList[at].Type || gotList[at].Content != wantList[at].Content {
+			t.Fatalf("entry %d = %s/%s, want %s/%s", at, gotList[at].Key, gotList[at].Type, wantList[at].Key, wantList[at].Type)
+		}
+	}
+}

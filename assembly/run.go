@@ -2074,11 +2074,11 @@ func (r *Run) replayRef(ctx context.Context, tier *ledger.Tier, key event.EventI
 	}
 	entry, ok := mappedEntryOf(evt)
 	if !ok {
-		return event.CompressProduct{}, false, "", nil
+		return event.CompressProduct{}, false, agentOf(evt), nil
 	}
 	seed.projection.Append(ctx, entry)
 	seed.projection = trimReplayProjection(ctx, seed.projection, seed.window)
-	return event.CompressProduct{}, false, "", nil
+	return event.CompressProduct{}, false, agentOf(evt), nil
 }
 
 // seedFact holds one fact the storage tier already committed in the live
