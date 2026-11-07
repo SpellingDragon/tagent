@@ -18,7 +18,7 @@
 ## 二、当前波次：删除非预期机制与空壳
 
 - [x] 4.c0 **原文正文按 EventID 独立（用户裁定，本变更内完成）**：删除 digest→blob 共享表；不同 EventID 同内容也各存一份；同 EventID 多 scope 仍指同一事实；digest/length 仅校验本条消息；旧共享格式具名 `ErrSnapshotCorrupt`，空正文可跨重启恢复 —— 验证：`TestOriginalReferenceIsolation`、`TestStorageCapabilities`、`TestOriginalStoreRefusesLegacySharedBodies`；history/acceptance/capabilities/assembly/runtime-state 与全门绿。最终 `fc788e8b`；独立审者 `fc7b2557` 返回 FRONTIER EMPTY
-- [ ] 4.c3 **最小 tier 懒校验，不重写 OriginalStore**：open 只登记分片；段装载只读数值分区 idx/meta；原文仓只把既有整库 load 延后到首次实际原文访问，其他语义不变；坏 snapshot/ticket 走既有全量重放 —— 验证：OpenTier/Assemble 不读 ref/blob 分片、首读具名错误、物理坏 snapshot/ticket 与独立全量结果一致。非目标：逐 key/逐 digest 读穿、Put/References/BlobCount/完整性模型变化、新 CLI 命令
+- [x] 4.c3 **最小 tier 懒校验，不重写 OriginalStore**：open 只登记分片；段装载只读数值分区 idx/meta；原文仓只把既有整库 load 延后到首次实际原文访问，其他语义不变；坏 snapshot/ticket 走既有全量重放 —— 验证：OpenTier/Assemble 不读 ref/blob 分片、首读具名错误、物理坏 snapshot/ticket 与独立全量结果一致。非目标：逐 key/逐 digest 读穿、Put/References/BlobCount/完整性模型变化、新 CLI 命令。最终 `cc61a46c`；独立审者 `4c6e6844` 返回 FRONTIER EMPTY
 - [ ] 4.c4 **零消费者面删除**：删除或内联仅测试占用的 `EachEventNewestFirst`、`EachSessionFact`；收窄仅内部使用的 `FoldKindOf`；修正 `candidateTextSource` 与 ReferenceSource 的文档边界 —— 验证：对应调用点编译与测试绿，grep 无旧导出/空壳；不得新增替代抽象
 
 ## 三、恢复正确性缺口（先修真实断链，不做新机制）
