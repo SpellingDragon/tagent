@@ -19,10 +19,9 @@ import (
 // it was registered in, the retention policy it is held under, and the
 // completeness information of its bytes.
 //
-// The bytes of a blob may be deduplicated by content, while the reference
-// metadata stays separate: references that differ in owner, format or retention
-// policy MUST NOT overwrite one another, and a later commit MUST NOT invalidate
-// an earlier effective reference.
+// Every event key owns an independent body. Reference metadata stays separate:
+// references that differ in owner, format or retention policy MUST NOT overwrite
+// one another, and a later commit MUST NOT invalidate an earlier reference.
 type OriginalRef struct {
 	// Key is the canonical identity of the original blob, in its hex form. Two
 	// references may share it while their content is byte-identical; the

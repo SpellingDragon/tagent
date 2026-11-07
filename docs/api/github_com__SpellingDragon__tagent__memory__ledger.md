@@ -534,8 +534,8 @@ type MemoryOriginalStore struct {
 	// Has unexported fields.
 }
 
-    MemoryOriginalStore is the in-memory OriginalStore: the reference and blob
-    model of the original text — bytes committed once per distinct content,
+    MemoryOriginalStore is the in-memory OriginalStore: the reference and
+    blob model of the original text — each event key commits its own bytes,
     every reference registered under its own owner, format and retention policy,
     exact recall served byte for byte and segmented reading handing out whole
     lines.
@@ -551,8 +551,7 @@ func NewMemoryOriginalStore(options ...MemoryOption) *MemoryOriginalStore
     the given options.
 
 func (s MemoryOriginalStore) BlobCount() int
-    BlobCount returns the number of distinct contents held, so content
-    deduplication stays observable.
+    BlobCount returns the number of event keys holding an original body.
 
 func (s MemoryOriginalStore) Get(ctx context.Context, key event.EventID) RecallResult
     Get returns the exact recall result for key, classified exactly as the
@@ -565,10 +564,10 @@ func (s MemoryOriginalStore) GetScoped(ctx context.Context, key event.EventID, s
     as the in-memory tier serves it.
 
 func (s MemoryOriginalStore) Put(ctx context.Context, ref OriginalRef, body []byte) error
-    Put commits the original bytes of ref and publishes the reference once
-    its barrier returns success. Identical bytes are stored once and shared,
-    a reference already accepted is kept, a second scope on the same key joins
-    the first, and other bytes under a held key are refused.
+    Put commits the original bytes of ref and publishes the reference once its
+    barrier returns success. Different event keys always own independent bodies;
+    a second scope on the same key joins its references, and other bytes under a
+    held key are refused.
 
 func (s MemoryOriginalStore) ReadSegment(ctx context.Context, key event.EventID, startLine, numLines int) ([]byte, error)
     ReadSegment returns at most numLines whole lines of the original stored
@@ -606,10 +605,10 @@ type OriginalRef struct {
     the format it was registered in, the retention policy it is held under,
     and the completeness information of its bytes.
 
-    The bytes of a blob may be deduplicated by content, while the reference
-    metadata stays separate: references that differ in owner, format or
-    retention policy MUST NOT overwrite one another, and a later commit MUST NOT
-    invalidate an earlier effective reference.
+    Every event key owns an independent body. Reference metadata stays separate:
+    references that differ in owner, format or retention policy MUST NOT
+    overwrite one another, and a later commit MUST NOT invalidate an earlier
+    reference.
 
 func (r OriginalRef) FactKey() string
     FactKey returns the reference's identity as a fact key: the canonical hex

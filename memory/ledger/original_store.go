@@ -47,9 +47,8 @@ func WithRetentionWindow(policy string, window time.Duration) MemoryOption {
 	}
 }
 
-// originalBlob is one stored content, shared by every reference that carries the
-// same bytes, together with the completeness information those bytes were
-// committed with.
+// originalBlob is the independent content of one event key, together with its
+// integrity metadata.
 type originalBlob struct {
 	digest string
 	length int64
@@ -83,7 +82,7 @@ type originalEntry struct {
 // 契约: docs/wiki/memory/memory-architecture.md#event-shape
 //
 // MemoryOriginalStore is the in-memory OriginalStore: the reference and blob
-// model of the original text — bytes committed once per distinct content, every
+// model of the original text — each event key commits its own bytes, every
 // reference registered under its own owner, format and retention policy, exact
 // recall served byte for byte and segmented reading handing out whole lines.
 //

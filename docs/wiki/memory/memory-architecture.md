@@ -10,7 +10,7 @@
 | 形态 | 落点 | 生命周期 | 立得住的反事实 |
 |---|---|---|---|
 | **链**（事实本体） | `<pid>:evt:<窗>:<seq>`、`<pid>:idx:<EventID>`、`<pid>:meta:<窗>`（[§五](#file-segment-store)） | 不可变、恒重放 | 没有它：状态无单一来源，回退到任意时刻无从谈起 |
-| **原文仓** = blob + ref | `blob:sha256:…` + `ref:<EventID>`（[§三](#event-shape)） | 字节可过期、账目随链 | 没有它：正文进链，装载与重放被重字节拖垮，且无法去重 |
+| **原文仓** = blob + ref | `blob:<EventID>` + `ref:<EventID>`（[§三](#event-shape)） | 每条消息独立正文、独立账目，digest 只校验完整性 | 取消跨消息共享，避免共享元数据与回滚的架构代价 |
 | **父边** | 查询时从持久链推导（[§四](#causal-chain)） | 按需读取、不另存 | 另存父图：链之外多一个需要恢复与对账的副本 |
 | **账本**（任务/回执/交付） | `tagent/task/v1/…`（`runtime/state/durable.go`、`assembly/host_delivery.go`） | 逐条追加、不覆盖 | 没有它：只留终态，任务历史没有时光机 |
 | **其余现算**（投影/装配/检索页） | 不持久 | 每次重算 | 没有它：presentation 落盘成第二真源 |
@@ -78,7 +78,7 @@
 
 | 部件 | 键 | 内容 | 判据 |
 |---|---|---|---|
-| **blob**（内容寻址字节仓） | `blob:sha256:<hex>` | 正文原始字节 | sha256 即地址，同字节只存一份（天然去重） |
+| **blob**（按事件隔离的正文） | `blob:<EventID>` | 本条消息的原始字节 | 不同 EventID 即使同内容也各存一份；digest 只用于 verify |
 | **ref**（引用账目） | `ref:<EventID>` | `{owner, format, retention_policy} → {digest, length, stored_at}` | 一条 ref 一份授权；读取只能经它进入 blob |
 
 | 写入/读取规则 | 行为 | 理由 |
@@ -86,7 +86,7 @@
 | 首次提交 | 一次 `kvBatch` 同写 ref 与 blob，屏障成功后才发布到内存态 | 账目与字节同批可见，不会只剩半条 |
 | 同 key 同 scope 再来一次 | 幂等成功（`return nil`） | 重放与重试不制造第二个事实 |
 | 同 key 不同字节 | `ErrContentConflict` | 一个身份只站一个事实 |
-| 同 key **第二个 scope** | ref 记录里 join 一条账目，共享同一份 blob | fork / 重启恢复后血缘册共用字节，不复制正文 |
+| 同 key **第二个 scope** | ref 记录里 join 一条账目，引用同一条消息自己的正文 | 同一事实的多个授权不复制；跨 EventID 不共享正文 |
 | 读取（`GetScoped`/`ReadSegmentScoped`） | 只认 scope 内的账目；越权读 = `RecallMissing`，并 `verify()` 复算 digest | 零泄漏：连存在性都不给 |
 | 缺失/过期/失败 | `RecallMissing` / `RecallExpired` / `RecallFailed` / `RecallFound` 四态分开 | 把 I/O 故障伪装成"空召回"会静默产生错答案 |
 
@@ -103,7 +103,7 @@
 | 3 | `Segments.StoreEvent(...)`，`partition = PartitionIDFromName(Owner.AgentID)`、`window = Timestamp.UnixMilli()`（负值具名拒）、`seq = landedSeq[partition]+1` | **段提交才是持久写**：它不成功，事实就不算落地，`landedSeq` 不前进 |
 | 4 | 无提交后向量步骤 | 查询按需读链，在候选上现算嵌入；没有 land 步骤，也没有需要回滚的派生索引 |
 
-两条由此可查证的结论：①无存储档（`tier == nil`）或事实没有 `Owner.AgentID` 时，事实只留在内存，不假称持久；②第 2 步成功而第 3 步失败会留下一条无人引用的 ref/blob——重放同一条事实会复用同一 digest，因此不会堆积第二份字节，但清理面不在本层（见[§十二](#gaps)）。
+两条由此可查证的结论：①无存储档（`tier == nil`）或事实没有 `Owner.AgentID` 时，事实只留在内存，不假称持久；②第 2 步成功而第 3 步失败会留下一条无人引用的 ref/blob——重放同一 EventID 会复用该消息自己的正文，因此不会堆积第二份字节，但清理面不在本层（见[§十二](#gaps)）。
 
 <a id="causal-chain"></a>
 ## 四、因果：查询时从链推导父边
@@ -256,4 +256,4 @@
 | **检索向量腿按需计算** | 装配面传 `nil` 嵌入器即纯关键词；有嵌入器时查询候选项现算；`vector_only` 无消费者 | 不保留运行期向量表或持久索引 |
 | **`EventRecord.WindowTS` 注释仍提"压实层"** | 码面已无压实；该注释是上一个形态的残留 | 随 `runtime-simplicity-upgrade` 一并校正（本页已按实际语义写：窗段编号） |
 | **旧格式字节只能拒不能读** | `DecodeEventBody` 具名拒绝上一版 body | 冷启动重建；不做就地迁移 |
-| **段提交失败可能留下孤儿原文** | 原文仓先于段提交落地；失败后 ref/blob 无人引用（同 digest 重放会复用，不堆第二份字节） | 需要一个以链为真源的孤儿清扫器（当前无），或把提交改成“先段后原文”的可回滚组合 |
+| **段提交失败可能留下孤儿原文** | 原文仓先于段提交落地；失败后 ref/blob 无人引用（同 EventID 重放会复用该消息正文，不堆第二份字节） | 需要一个以链为真源的孤儿清扫器（当前无），或把提交改成“先段后原文”的可回滚组合 |

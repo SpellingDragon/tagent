@@ -20,7 +20,7 @@
 | 2 | 通知 | `task` | `TaskID:Round:Kind:Seq` 合成（`runtime/task/fact.go`） | `string(Kind)` | 幂等派发：同一身份重复投递不记第二条事实，重试保留原身份 |
 | 3 | 训练记录 | `rl` | `AttemptRecord.ID` | `rl.attempt` | 决策边界下的一次隐藏重试不算第二次 attempt，记录只追加 |
 | 4 | 声明 | `config` | `Fingerprint(d)` 的规范指纹 hex（`api/config/fact.go`） | `config.declaration` | 指纹只取声明面：同内容重载同一身份；源文档 `Raw` 与运行期绑定不入指纹；config 不 import event，结构性满足 `Fact` |
-| 5 | 引用票据 | `memory/ledger` | `OriginalRef.Key`（原文 blob 的规范 hex 键，`reference.go`） | `memory.original` | 去重域（owner/format/retention）只分开票据、不重标识 blob：同内容多票据共键，`Put` 不失效既有票据 |
+| 5 | 引用票据 | `memory/ledger` | `OriginalRef.Key`（原文 blob 的规范 hex 键，`reference.go`） | `memory.original` | 引用域（owner/format/retention）只分开票据；正文始终按 EventID 独立，同内容也不跨消息共享，`Put` 不失效既有票据 |
 | 7 | 压缩请求 | `event` | `CompressRequest.ID`（producer‖subject‖reason 内容寻址，`api/event/compress_request.go`；日志随事实入链） | `compress.request` | 同判定同身份：重复/重试判定不分叉第二条请求，`At` 只作首落盘戳；消费后单次 retire |
 | 8 | 压缩产物 | `event` | `CompressProduct.ID`（request‖producer‖key 内容寻址，`api/event/compress_product.go`） | `compress.product` | 一条 request 至多一条产物：重试执行同身份；键与正文是投影恢复的唯一来源 |
 | 9 | 收尾判定 | `event` | `FinalRoundRequest.ID`（range‖reason 内容寻址，`api/event/final_round_request.go`） | `final_round.request` | 同一 range 同原因至多一条：判定输入（轮次/耗时）随事实走但不入身份 |
@@ -28,7 +28,7 @@
 | 11 | 交付结算 | `assembly` | `delivery.<交付身份>.<状态>` 合成（`assembly/host_delivery.go` 的 `deliverySettlementKey`；交付身份由落链后的 fact key 确定性导出） | `delivery.settlement` | 追加式：同（身份,状态）键重放不添第二条、同键异内容按 `memory.ErrFactKeyConflict` 拒收；状态转移即新键（事实键不可改）；未清事实驻留事实窗口，按族构造性豁免 TTL 墓碑化 |
 | 12 | 恢复票据 | `event` | `RecoveryTicket.ID`（schema‖cursor‖digest 内容寻址，`api/event/recovery_ticket.go`） | `recovery.ticket` | 同覆盖重落同身份；票据是链上事实（追加），快照 blob 是固定键下唯一一份当前恢复缓存（新覆盖旧；旧版 per-digest 残留由 lifecycle 回收），digest 不符即退回全量重放 |
 
-合成身份的语义（具名裁定）：通知的身份是它自己携带的四元组，`Notice.Event` 指向的已提交事实**永不替换**这个身份，所以四元组才是 `FactKey` 的输入、被指向的事件只是消费线索；声明的身份是规范指纹（`api/config/fact.go` 具名注释）；票据的身份是原文 hex 键，去重域只决定票据能否并存，不改写身份。
+合成身份的语义（具名裁定）：通知的身份是它自己携带的四元组，`Notice.Event` 指向的已提交事实**永不替换**这个身份，所以四元组才是 `FactKey` 的输入、被指向的事件只是消费线索；声明的身份是规范指纹（`api/config/fact.go` 具名注释）；票据的身份是原文 EventID，引用域只决定票据能否并存，正文不跨消息共享。
 
 **触发源戳的归属**：`event.MetaKeyTriggerSource` 写入的戳名由产出它的机制包持有；宿主经 `InvokeRequest.TriggerSource` 自带的戳由 `assembly/run.go` 原样写入。戳只标记来源、不构成身份，因此不在上表新增族。
 

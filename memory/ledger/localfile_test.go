@@ -9,10 +9,13 @@ package ledger
 import (
 	"bytes"
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 )
 
 // heapInUse reports the live heap after two forced collections, so the reading
@@ -224,5 +227,25 @@ func BenchmarkLocalKVGet(b *testing.B) {
 		if err != nil || len(pairs) != 1 {
 			b.Fatalf("read %q = (%d, %v)", key, len(pairs), err)
 		}
+	}
+}
+
+// TestOriginalStoreRefusesLegacySharedBodies pins a clean format boundary.
+//
+// 契约: docs/wiki/memory/memory-architecture.md#event-shape
+func TestOriginalStoreRefusesLegacySharedBodies(t *testing.T) {
+	ctx := context.Background()
+	backing := newMemKV()
+	body := []byte("shared in the old format")
+	digest := digestOf(body)
+	stored, err := json.Marshal([]storedRef{{Format: "text", StoredAt: time.Now(), Digest: digest, Length: int64(len(body))}})
+	if err != nil {
+		t.Fatalf("encode the legacy reference: %v", err)
+	}
+	if err := backing.kvCommit(ctx, kvBatch{puts: []kvPair{{key: refKVKey("legacy-event"), value: stored}, {key: "blob:" + digest, value: body}}}); err != nil {
+		t.Fatalf("seed the legacy shared body: %v", err)
+	}
+	if _, err := newKVOriginalStore(backing, nil); !errors.Is(err, ErrSnapshotCorrupt) {
+		t.Fatalf("opening the legacy shared-body format returned %v, want a named refusal", err)
 	}
 }

@@ -178,6 +178,56 @@ func TestStorageCapabilities(t *testing.T) {
 		}
 	})
 
+	t.Run("localfile keeps identical content independent per event key", func(t *testing.T) {
+		root := t.TempDir()
+		cfg := ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: root}
+		tier, err := ledger.OpenTier(ctx, cfg)
+		if err != nil {
+			t.Fatalf("OpenTier(localfile): %v", err)
+		}
+		first := ledger.OriginalRef{Key: "same-content-a", Owner: refA.Owner, Format: "text", RetentionPolicy: "keep"}
+		second := ledger.OriginalRef{Key: "same-content-b", Owner: refA.Owner, Format: "text", RetentionPolicy: "keep"}
+		for _, ref := range []ledger.OriginalRef{first, second} {
+			if err := tier.Originals.Put(ctx, ref, original); err != nil {
+				t.Fatalf("Put(%s): %v", ref.Key, err)
+			}
+		}
+		reopened, err := ledger.OpenTier(ctx, cfg)
+		if err != nil {
+			t.Fatalf("reopen the independent originals: %v", err)
+		}
+		counter := reopened.Originals.(interface{ BlobCount() int })
+		if got := counter.BlobCount(); got != 2 {
+			t.Fatalf("BlobCount() after reopen = %d, want 2 independent bodies", got)
+		}
+		for _, ref := range []ledger.OriginalRef{first, second} {
+			if got := reopened.Originals.Get(ctx, ref.Key); got.Outcome != ledger.RecallFound || !bytes.Equal(got.Body, original) {
+				t.Fatalf("Get(%s) after reopen = %+v, want the committed bytes", ref.Key, got)
+			}
+		}
+	})
+
+	t.Run("localfile reopens an empty original body", func(t *testing.T) {
+		root := t.TempDir()
+		cfg := ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: root}
+		tier, err := ledger.OpenTier(ctx, cfg)
+		if err != nil {
+			t.Fatalf("OpenTier(localfile): %v", err)
+		}
+		ref := ledger.OriginalRef{Key: "empty-original", Owner: refA.Owner, Format: "text", RetentionPolicy: "keep"}
+		if err := tier.Originals.Put(ctx, ref, []byte{}); err != nil {
+			t.Fatalf("commit the empty original: %v", err)
+		}
+		reopened, err := ledger.OpenTier(ctx, cfg)
+		if err != nil {
+			t.Fatalf("reopen the empty original: %v", err)
+		}
+		got := reopened.Originals.Get(ctx, ref.Key)
+		if got.Outcome != ledger.RecallFound || got.Err != nil || len(got.Body) != 0 {
+			t.Fatalf("the empty original after reopen = %+v, want found with zero bytes", got)
+		}
+	})
+
 	t.Run("localfile open refuses a damaged snapshot", func(t *testing.T) {
 		root := t.TempDir()
 		cfg := ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: root}

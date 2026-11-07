@@ -40,6 +40,21 @@
 - **WHEN** recall 工具在 Run.Bind 前构造，且链上后提交事实携带更早时间戳
 - **THEN** Bind 后的 trace/get-parent 仍按 `(PartitionID, Seq)` 返回父边，不创建或读取关系 journal，结果与直接读链一致
 
+
+### Requirement: 原文正文按消息隔离
+
+不同 EventID 的原文正文 SHALL 各自独立存储，即使字节完全相同也 MUST NOT 共用内容寻址 blob；digest 只用于该消息自身的完整性校验。同一 EventID 的多个 scope 仍指向这一条消息的正文。旧 digest 共享格式 MUST 具名拒绝，MUST NOT 被当成缺失正文。
+
+#### Scenario: 相同内容也是两条独立事实
+
+- **WHEN** 两个不同 EventID 提交完全相同的正文并重新打开存储
+- **THEN** 两条消息各自持有独立正文且逐字节读回，原文数量为 2；任一引用的元数据不改变另一条
+
+#### Scenario: 旧共享格式具名拒绝
+
+- **WHEN** 持久层只有旧的 digest 共享正文而没有该 EventID 的独立正文
+- **THEN** 打开返回 `ErrSnapshotCorrupt`，不静默丢弃该引用
+
 ### Requirement: 折叠锚恢复
 
 压缩产物 SHALL 在该会话最新一条折叠的同步时刻携带完整检查点载荷：摘要正文、死亡名单（`Covered`）、按投影序的幸存者名单（含合成键到事实键的指向）与恢复使用的 seq 边界。检查点 MUST 只是可由链重建信息的紧凑表示，MUST NOT 提供任意外部状态注册载荷。重启恢复 SHALL 以该会话最新产物为锚，由锚载荷加本链中 seq 大于幸存者边界的全部事件重放重建状态；产物缺失、损坏或版本不符时 SHALL 退回全量重放并具名告警，结果 MUST 与锚路径逐条一致，且一次恢复解码的事件数 MUST NOT 与历史事件总数成正比。

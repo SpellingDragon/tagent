@@ -408,7 +408,7 @@ func (k *localFileKV) stagePutLocked(label, key string, value []byte) {
 	if k.dirty[label] == nil {
 		k.dirty[label] = map[string][]byte{}
 	}
-	k.dirty[label][key] = append([]byte(nil), value...)
+	k.dirty[label][key] = append([]byte{}, value...)
 }
 
 // stageDeleteLocked records one delete in the dirty set of its shard and drops
@@ -709,14 +709,13 @@ type storedRef struct {
 
 // kvOriginalStore is the OriginalStore the persistent tiers hold: the reference
 // and blob model of the in-memory tier, kept in a key-value view so a barrier
-// that succeeds carries the commit to any later process. Blobs are stored once
-// per distinct content under their digest, references are stored per key, and a
-// commit is published to readers only after its barrier returns success.
+// that succeeds carries the commit to any later process. Each event key owns
+// an independent body and its references; a commit is published to readers only
+// after its barrier returns success.
 type kvOriginalStore struct {
 	mu      sync.Mutex
 	kv      kvPort
 	windows map[string]time.Duration
-	blobs   map[string]*originalBlob
 	byKey   map[event.EventID]*originalEntry
 }
 
@@ -737,7 +736,6 @@ func newEmptyKVOriginalStore(kv kvPort, windows map[string]time.Duration) *kvOri
 	store := &kvOriginalStore{
 		kv:      kv,
 		windows: map[string]time.Duration{},
-		blobs:   map[string]*originalBlob{},
 		byKey:   map[event.EventID]*originalEntry{},
 	}
 	for policy, window := range windows {
@@ -748,18 +746,18 @@ func newEmptyKVOriginalStore(kv kvPort, windows map[string]time.Duration) *kvOri
 
 var _ OriginalStore = (*kvOriginalStore)(nil)
 
-// load publishes every stored reference whose blob is stored with it, so a
-// commit whose parts disagree is left out of the readable state.
+// load publishes references only with the independent body of the same event
+// key; a reference without that body fails by name instead of disappearing.
 func (s *kvOriginalStore) load() error {
 	pairs, err := s.kv.kvRead(context.Background(), kvFetch{})
 	if err != nil {
 		return err
 	}
-	blobs := map[string][]byte{}
+	blobs := map[event.EventID][]byte{}
 	refs := map[event.EventID][]storedRef{}
 	for _, pair := range pairs {
-		if digest, ok := strings.CutPrefix(pair.key, "blob:"); ok {
-			blobs[digest] = pair.value
+		if name, ok := strings.CutPrefix(pair.key, "blob:"); ok {
+			blobs[event.EventID(name)] = pair.value
 			continue
 		}
 		name, ok := strings.CutPrefix(pair.key, "ref:")
@@ -775,15 +773,11 @@ func (s *kvOriginalStore) load() error {
 	for key, stored := range refs {
 		entry := &originalEntry{refs: map[refScope]referenceRecord{}}
 		for _, record := range stored {
-			bytes, held := blobs[record.Digest]
+			bytes, held := blobs[key]
 			if !held {
-				continue
+				return fmt.Errorf("%w: original %q has a reference but no independent body", ErrSnapshotCorrupt, key)
 			}
-			blob := s.blobs[record.Digest]
-			if blob == nil {
-				blob = &originalBlob{digest: record.Digest, length: record.Length, bytes: bytes}
-				s.blobs[record.Digest] = blob
-			}
+			blob := &originalBlob{digest: record.Digest, length: record.Length, bytes: bytes}
 			ref := OriginalRef{
 				Key:             key,
 				Owner:           event.Address{AgentID: event.AgentID(record.OwnerAgent), SessionID: event.SessionID(record.OwnerSession)},
@@ -802,9 +796,9 @@ func (s *kvOriginalStore) load() error {
 }
 
 // Put commits the original bytes of ref and publishes the reference once its
-// barrier returns success. Identical bytes are stored once and shared, a
-// reference already accepted is kept, a second scope on the same key joins the
-// first, and other bytes under a held key are refused.
+// barrier returns success. Different event keys always own independent bodies;
+// a second scope on the same key joins its references, and other bytes under a
+// held key are refused.
 func (s *kvOriginalStore) Put(ctx context.Context, ref OriginalRef, body []byte) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -851,25 +845,25 @@ func (s *kvOriginalStore) Put(ctx context.Context, ref OriginalRef, body []byte)
 		return err
 	}
 	refKey := refKVKey(ref.Key)
-	blobKey := blobKVKey(digest)
-	blobStaged := s.blobs[digest] == nil
+	blobKey := blobKVKey(ref.Key)
+	blobStaged := !held || entry.blob == nil
 	staged := []kvStaged{{key: refKey, value: previousValue, present: held}}
-	batch := kvBatch{puts: []kvPair{{key: refKey, value: value}}}
+	batch := kvBatch{}
 	if blobStaged {
 		staged = append(staged, kvStaged{key: blobKey})
 		batch.puts = append(batch.puts, kvPair{key: blobKey, value: body})
 	}
+	batch.puts = append(batch.puts, kvPair{key: refKey, value: value})
 	if err := s.kv.kvCommit(ctx, batch); err != nil {
 		return s.abort(ctx, fmt.Errorf("%w: %w", ErrCommitBarrier, err), staged)
-	}
-	if blobStaged {
-		s.blobs[digest] = &originalBlob{digest: digest, length: length, bytes: append([]byte(nil), body...)}
 	}
 	if !held {
 		entry = &originalEntry{refs: map[refScope]referenceRecord{}}
 		s.byKey[ref.Key] = entry
 	}
-	entry.blob = s.blobs[digest]
+	if blobStaged {
+		entry.blob = &originalBlob{digest: digest, length: length, bytes: append([]byte(nil), body...)}
+	}
 	entry.refs[scope] = referenceRecord{ref: ref, storedAt: time.Now()}
 	return nil
 }
@@ -943,12 +937,11 @@ func (s *kvOriginalStore) ReadSegment(ctx context.Context, key event.EventID, st
 	return out, nil
 }
 
-// BlobCount returns the number of distinct contents held, so content
-// deduplication stays observable.
+// BlobCount returns the number of event keys holding an original body.
 func (s *kvOriginalStore) BlobCount() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return len(s.blobs)
+	return len(s.byKey)
 }
 
 // References returns every reference registered under key, one per deduplication
@@ -1067,7 +1060,7 @@ func refKVKey(key event.EventID) string {
 	return "ref:" + string(key)
 }
 
-// blobKVKey returns the key the bytes of one content digest are stored under.
-func blobKVKey(digest string) string {
-	return "blob:" + digest
+// blobKVKey returns the independent body key of one event.
+func blobKVKey(key event.EventID) string {
+	return "blob:" + string(key)
 }
