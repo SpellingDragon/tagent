@@ -2,7 +2,7 @@
 //
 // The retrieval tool of the recall surface: one query runs through the
 // retrieval port inside the granted partitions, and every hit is answered as
-// the reference of the event it landed as, never as a copy of its text.
+// the reference the chain states for that event, never as a copy of its text.
 package recall
 
 import (

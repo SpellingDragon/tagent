@@ -48,8 +48,8 @@ type ReferenceSource interface {
 	// whatever the order the events were recorded in.
 	QueryEvents(ctx context.Context, opts memory.QueryOptions) ([]memory.EventReference, error)
 
-	// Reference returns the recall reference the event key was landed with,
-	// and reports whether the table holds one.
+	// Reference returns the original reference of key, and reports whether the
+	// durable source holds a readable one.
 	Reference(key event.EventID) (ledger.OriginalRef, bool)
 }
 

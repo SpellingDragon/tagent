@@ -39,18 +39,28 @@ func ExampleTable() {
 	defer tier.Segments.Close()
 	at := time.Date(2026, 11, 6, 12, 0, 0, 0, time.UTC)
 	if err := storeContractEvent(tier, "1-a", 7, at, "first"); err != nil {
-		return
+		panic(err)
 	}
 	if err := storeContractEvent(tier, "2-b", 7, at.Add(time.Hour), "second"); err != nil {
-		return
+		panic(err)
 	}
 	if err := storeContractEvent(tier, "3-z", 8, at, "outside"); err != nil {
-		return
+		panic(err)
 	}
 	table := assembly.NewTierQuerySource(tier.Segments)
-	page, err := table.QueryEvents(ctx, memory.QueryOptions{PartitionIDs: []int{7}, Limit: 1, OrderBy: memory.QueryOrderByDesc})
-	if err != nil || len(page) != 1 || page[0].Key != "2-b" {
-		panic("unexpected scoped page")
+	page, err := table.QueryEvents(ctx, memory.QueryOptions{PartitionIDs: []int{7}, OrderBy: memory.QueryOrderByDesc})
+	if err != nil {
+		panic(err)
+	}
+	if len(page) != 2 || page[0].Key != "2-b" || page[1].Key != "1-a" {
+		panic("partition 7 was not returned in timestamp order without partition 8")
+	}
+	outside, err := table.QueryEvents(ctx, memory.QueryOptions{PartitionIDs: []int{8}})
+	if err != nil {
+		panic(err)
+	}
+	if len(outside) != 1 || outside[0].Key != "3-z" {
+		panic("partition 8 did not return exactly its own event")
 	}
 	if _, held := table.Event("9-z"); held {
 		panic("missing key was held")

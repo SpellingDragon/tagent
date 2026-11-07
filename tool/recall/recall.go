@@ -94,7 +94,7 @@ type Reads struct {
 	// Table answers the event references a query matches and the reference of
 	// one event read from the chain.
 	Table Table
-	// Originals serves the text behind one landed event inside its read scope.
+	// Originals serves the text behind one event inside its read scope.
 	Originals ledger.ScopedOriginalStore
 	// Trace answers the parent link of one event, derived by the bound reader.
 	Trace interface {

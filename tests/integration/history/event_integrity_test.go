@@ -1085,7 +1085,7 @@ func restoreAssertOriginalText(t *testing.T, outcome func(*testing.T, string) re
 			}
 		}
 		if want := string(o.Seed.ResultFact); !restoreCarriesString(o.Recover.Observed, want) {
-			t.Fatalf("the %s restart's observation table does not carry the tool result %s; observed=%v", mode, want, o.Recover.Observed)
+			t.Fatalf("the %s restart's durable query does not carry the tool result %s; observed=%v", mode, want, o.Recover.Observed)
 		}
 	}
 }

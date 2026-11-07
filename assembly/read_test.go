@@ -432,3 +432,56 @@ func TestTierParentSurvivesDurableReopen(t *testing.T) {
 		t.Fatalf("the durable restart created a relation journal directory: %v", err)
 	}
 }
+
+// TestTierParentFallsBackToBodiesForMissingSession pins the index-empty fallback.
+//
+// 契约: docs/wiki/memory/memory-architecture.md#read-paths
+func TestTierParentFallsBackToBodiesForMissingSession(t *testing.T) {
+	ctx := context.Background()
+	tier, err := ledger.OpenTier(ctx, ledger.StorageConfig{Type: ledger.StorageMemory})
+	if err != nil {
+		t.Fatalf("open the tier: %v", err)
+	}
+	defer tier.Segments.Close()
+	at := time.Date(2026, 11, 6, 12, 0, 0, 0, time.UTC)
+	store := func(addr event.Address, key event.EventID, seq int64, stamp time.Time) {
+		t.Helper()
+		evt := event.Event{Key: key, Type: event.TypeExternalInput, Timestamp: stamp, Meta: map[string]string{event.MetaKeyEventSummary: "ask"}, Message: model.Message{Role: model.RoleUser, Content: "parent"}, Owner: addr}
+		body, err := memory.BodyFromEvent(evt, "test", "test")
+		if err != nil {
+			t.Fatalf("encode %s: %v", key, err)
+		}
+		encoded, err := body.Encode()
+		if err != nil {
+			t.Fatalf("marshal %s: %v", key, err)
+		}
+		if err := tier.Segments.StoreEvent(ctx, ledger.SegmentRecord{PartitionID: 11, WindowTS: stamp.UnixMilli(), Seq: seq, EventKey: key, EventTime: stamp.UnixMilli(), Body: encoded}); err != nil {
+			t.Fatalf("store %s: %v", key, err)
+		}
+	}
+	addrA := event.Address{AgentID: "agent-a", SessionID: "session-index-empty-a"}
+	addrB := event.Address{AgentID: "agent-b", SessionID: "session-index-empty-b"}
+	store(addrA, "empty-index-a1", 1, at.Add(2*time.Hour))
+	store(addrB, "empty-index-b1", 2, at.Add(time.Hour))
+	store(addrA, "empty-index-a2", 3, at)
+	if err := tier.Segments.StoreEvent(ctx, ledger.SegmentRecord{PartitionID: 12, WindowTS: at.UnixMilli(), Seq: 1, EventKey: "empty-index-corrupt", EventTime: at.UnixMilli(), Body: []byte("not-an-event")}); err != nil {
+		t.Fatalf("store the out-of-partition corrupt body: %v", err)
+	}
+	direct := NewTierQuerySource(tier.Segments)
+	for _, check := range []struct {
+		key    event.EventID
+		parent event.EventID
+	}{
+		{key: "empty-index-a2", parent: "empty-index-a1"},
+		{key: "empty-index-a1", parent: ""},
+		{key: "empty-index-b1", parent: ""},
+	} {
+		parent, err := direct.GetParent(check.key)
+		if err != nil {
+			t.Fatalf("GetParent(%s) decoded an out-of-partition body: %v", check.key, err)
+		}
+		if parent != check.parent {
+			t.Fatalf("GetParent(%s)=%q, want %q", check.key, parent, check.parent)
+		}
+	}
+}

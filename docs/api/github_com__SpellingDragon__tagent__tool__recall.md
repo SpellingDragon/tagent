@@ -8,7 +8,7 @@ key all resolve to the same canonical identity.
 
 The retrieval tool of the recall surface: one query runs through the retrieval
 port inside the granted partitions, and every hit is answered as the reference
-of the event it landed as, never as a copy of its text.
+the chain states for that event, never as a copy of its text.
 
 Package recall is the model-facing recall surface of the memory axis: the four
 tools a recall agent calls — a retrieval query, an exact read of one event,
@@ -90,7 +90,7 @@ type Reads struct {
 	// Table answers the event references a query matches and the reference of
 	// one event read from the chain.
 	Table Table
-	// Originals serves the text behind one landed event inside its read scope.
+	// Originals serves the text behind one event inside its read scope.
 	Originals ledger.ScopedOriginalStore
 	// Trace answers the parent link of one event, derived by the bound reader.
 	Trace interface {
