@@ -16,8 +16,8 @@ n-grams scores a higher cosine. That is the mechanism guarantee a retrieval test
 stands on, and no claim of semantic recall quality.
 
 Skeleton compile-time assertions for the provider-backed embedder: the assembly
-entry, the declaration check, the memory seam method and the named refusals keep
-exactly these shapes.
+entry, the declaration check, the memory.Embedder method and the named refusals
+keep exactly these shapes.
 
 CONSTANTS
 
@@ -59,16 +59,15 @@ TYPES
 type Embedder struct {
 	// Has unexported fields.
 }
-    Embedder adapts a provider embedder to the memory seam: it resolves the key
-    variable once at assembly, converts the provider's float64 vector into the
-    float32 the seam stores, and refuses an empty vector or one whose width is
-    not the declared width by name rather than storing it into a vector space it
-    does not belong to.
+    Embedder adapts a provider embedder to the memory.Embedder port: it resolves
+    the key variable once at assembly, converts the provider's float64 vector
+    into the float32 the query-time cosine compares, and refuses an empty vector
+    or one whose width is not the declared width by name.
 
 func New(spec config.EmbeddingSpec) (*Embedder, error)
-    New assembles the embedding seam of one declared connection. The key is read
-    at assembly and travels in the client, so a missing variable refuses the
-    assembly by name before any request is prepared.
+    New assembles the query-time embedding binding of one declared connection.
+    The key is read at assembly and travels in the client, so a missing variable
+    refuses the assembly by name before any request is prepared.
 
 func (e *Embedder) Connection() config.EmbeddingSpec
     Connection reports the declared connection this embedder was assembled from,

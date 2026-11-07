@@ -214,7 +214,7 @@
 | 关键词腿 | 映射成 `QueryOptions`：`Text → Keyword`、`Since/Until → Unix 毫秒`、固定最新优先；分区集合由读缝注入，方法本身**不带**分区 |
 | 向量腿 | 只读授权范围内的候选、整批打分再按 `vectorTopK` 切；嵌入失败或空向量 = 空腿，不报错 |
 | 融合 | RRF：`score = Σ 1/(K + rank)`，`K = 60`，rank 自 0 起；同分取**更大 Key**，再按 `(Owner.AgentID, Owner.SessionID, Format, RetentionPolicy)` 升序 |
-| 退化 | 空向量腿与 `keyword_only` 走**同一段代码**（`keywordOnly`），两者逐字节相同——向量管线后上线不会改变今天的答案 |
+| 退化 | 空向量腿与 `keyword_only` 走**同一段代码**（`keywordOnly`），两者逐字节相同 |
 | 未接线策略 | `vector_only` 具名拒绝 `ErrStrategyUnwired`（没有消费者）；未知策略 `ErrStrategyUnknown` |
 | 调参 | `SetRetrievalTuning` 负值 → `ErrRetrievalTuning`，不静默夹取 |
 

@@ -98,9 +98,9 @@ func realBodyOf(t *testing.T, ev realStoreEvent) []byte {
 	return encoded
 }
 
-// newRealStoreChain commits the corpus into a real file tier, registers every
-// original under the reference its body carries, and generates every event
-// vector through the given embedder binding.
+// newRealStoreChain commits the corpus into a real file tier and registers
+// every original under the reference its body carries; the searcher embeds
+// candidate text only when a query asks.
 func newRealStoreChain(t *testing.T, embedder memory.Embedder) *realStoreChain {
 	t.Helper()
 	ctx := context.Background()

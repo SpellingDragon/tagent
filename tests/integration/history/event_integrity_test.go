@@ -3686,7 +3686,7 @@ func TestEventIntegrityPersistence(t *testing.T) {
 	t.Run("original_text_matches_committed_bytes", runPersistenceOriginalText)
 	t.Run("formal_recall_tool_returns_new_fact", runPersistenceFormalTool)
 	t.Run("storage_failure_not_reported_as_success", runPersistenceStorageFailure)
-	t.Run("index_failure_leaves_recoverable_debt", runPersistenceQueryTimeRecovery)
+	t.Run("query_time_embedding_recovers_in_process", runPersistenceQueryTimeRecovery)
 	t.Run("new_fact_keeps_old_reachable", runPersistenceOldReachable)
 }
 

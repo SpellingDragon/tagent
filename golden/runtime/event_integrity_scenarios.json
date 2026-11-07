@@ -684,7 +684,7 @@
           "mandatory": true
         },
         {
-          "name": "index_failure_leaves_recoverable_debt",
+          "name": "query_time_embedding_recovers_in_process",
           "roles": [
             "negative"
           ],
