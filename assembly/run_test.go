@@ -627,3 +627,34 @@ func TestAnchoredRebuildKeepsTheInterleavedFact(t *testing.T) {
 		t.Fatal("the rebuild silently lost the fact committed between the snapshot and the product commit")
 	}
 }
+
+// TestMechanismFactNeverMapsToARequest pins the projection seam rule.
+// - a compress.product fact carrying message content is refused by frozen type
+// - a business fact carrying the same content still maps
+//
+// 契约: docs/wiki/agent/event-flow.md#projection-lifecycle
+func TestMechanismFactNeverMapsToARequest(t *testing.T) {
+	for _, typ := range []string{event.CompressProductType, event.CompressRequestType} {
+		evt := event.Event{
+			Key:     event.EventID("cmpout-" + typ),
+			Type:    typ,
+			Meta:    map[string]string{event.MetaKeyEventSummary: "compress product -hist-internal"},
+			Message: model.Message{Role: model.RoleUser, Content: "internal wording"},
+			Owner:   event.Address{AgentID: "agent-a", SessionID: "session-map"},
+		}
+		if _, ok := mappedEntryOf(evt); ok {
+			t.Fatalf("the %s fact mapped into a request despite its non-empty message", typ)
+		}
+	}
+	business := event.Event{
+		Key:     "134000",
+		Type:    event.TypeExternalInput,
+		Meta:    map[string]string{event.MetaKeyEventSummary: "ask"},
+		Message: model.Message{Role: model.RoleUser, Content: "internal wording"},
+		Owner:   event.Address{AgentID: "agent-a", SessionID: "session-map"},
+	}
+	entry, ok := mappedEntryOf(business)
+	if !ok || entry.Content != "internal wording" {
+		t.Fatal("a business fact was refused by the projection seam")
+	}
+}
