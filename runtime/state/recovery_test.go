@@ -6,12 +6,16 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"net/url"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/SpellingDragon/tagent/api/event"
+	"github.com/SpellingDragon/tagent/memory/ledger"
 	"github.com/SpellingDragon/tagent/runtime/task"
 )
 
@@ -35,7 +39,7 @@ func seededSpec(tag string) task.Spec {
 // seedCarrier drives one real write set with non-zero content on every table:
 // specs with identities, two commits carrying outboxes, one consumption, one
 // attempt and one refusal with its routing and moment frozen.
-func seedCarrier(t *testing.T, ctx context.Context, log *invariantFactLog, taskID event.TaskID, tag string) {
+func seedCarrier(t *testing.T, ctx context.Context, log FactLog, taskID event.TaskID, tag string) {
 	t.Helper()
 	carrier, err := NewDurableCommit(log, nil)
 	if err != nil {
@@ -547,5 +551,51 @@ func TestSnapshotBesideConcurrentCommits(t *testing.T) {
 		if got := len(restored.Facts(taskID)); got != 1 {
 			t.Fatalf("facts of %s = %d, want the one committed record", taskID, got)
 		}
+	}
+}
+
+// TestRecoveryFallsBackOnCorruptShard pins physical lazy-shard recovery.
+//
+// 契约: docs/wiki/reliability/durable-delivery.md#canonical-fact-resolution
+func TestRecoveryFallsBackOnCorruptShard(t *testing.T) {
+	ctx := context.Background()
+	for _, label := range []string{"tagent/task/v1/snapshot", "tagent/task/v1/ticket"} {
+		t.Run(label, func(t *testing.T) {
+			root := t.TempDir()
+			tier, err := ledger.OpenTier(ctx, ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: root})
+			if err != nil {
+				t.Fatalf("open the seed tier: %v", err)
+			}
+			log := ledger.TierFactLog(tier)
+			taskID := event.TaskID("task-corrupt-shard")
+			seedCarrier(t, ctx, log, taskID, "shard")
+			writer, err := NewDurableCommit(log, nil)
+			if err != nil {
+				t.Fatalf("open the recovery writer: %v", err)
+			}
+			if err := writer.WriteRecoveryTicket(ctx); err != nil {
+				t.Fatalf("file the recovery ticket: %v", err)
+			}
+			path := filepath.Join(root, "kv", url.PathEscape(label), "snapshot.json")
+			if err := os.WriteFile(path, []byte("not-json"), 0o600); err != nil {
+				t.Fatalf("corrupt the %s shard: %v", label, err)
+			}
+			reopened, err := ledger.OpenTier(ctx, ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: root})
+			if err != nil {
+				t.Fatalf("tier opening still scans the corrupt recovery shard: %v", err)
+			}
+			restored, err := NewDurableCommit(ledger.TierFactLog(reopened), nil)
+			if err != nil {
+				t.Fatalf("the corrupt %s shard did not fall back to full replay: %v", label, err)
+			}
+			if restored.UsedTicket() {
+				t.Fatalf("the corrupt %s shard claimed a ticket restore", label)
+			}
+			bare, err := newBareCarrier(ledger.TierFactLog(reopened))
+			if err != nil {
+				t.Fatalf("full replay beside the corrupt shard: %v", err)
+			}
+			assertCarrierEqual(t, bare, restored, taskID)
+		})
 	}
 }

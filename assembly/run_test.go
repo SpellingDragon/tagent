@@ -2,6 +2,9 @@ package assembly
 
 import (
 	"bytes"
+	"errors"
+	"os"
+	"path/filepath"
 	"time"
 
 	"context"
@@ -689,5 +692,27 @@ func TestMechanismFactNeverMapsToARequest(t *testing.T) {
 	entry, ok := mappedEntryOf(business)
 	if !ok || entry.Content != "internal wording" {
 		t.Fatal("a business fact was refused by the projection seam")
+	}
+}
+
+// TestBootDoesNotReadOriginalShards pins boot isolation from original bodies.
+//
+// 契约: docs/wiki/memory/memory-architecture.md#read-paths
+func TestBootDoesNotReadOriginalShards(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	run := windowChainRun(t, ctx, WithStorage(ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: root}))
+	addr := event.Address{AgentID: "agent-a", SessionID: "session-original-lazy"}
+	commitWindowTurns(t, ctx, run, addr, 1)
+	key := event.EventID(timeStampKey(time.Date(2026, 11, 6, 12, 0, 0, 0, time.UTC), addr, 0, 0))
+	if got := run.tier.Originals.Get(ctx, key); got.Outcome != ledger.RecallFound {
+		t.Fatalf("the seed original was not committed: %+v", got)
+	}
+	if err := os.WriteFile(filepath.Join(root, "kv", "blob", "snapshot.json"), []byte("not-json"), 0o600); err != nil {
+		t.Fatalf("corrupt the original blob shard: %v", err)
+	}
+	reopened := windowChainRun(t, ctx, WithStorage(ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: root}))
+	if got := reopened.tier.Originals.Get(ctx, key); got.Outcome != ledger.RecallFailed || !errors.Is(got.Err, ledger.ErrSnapshotCorrupt) {
+		t.Fatalf("the first original read after boot = %+v, want the named corrupt-snapshot failure", got)
 	}
 }

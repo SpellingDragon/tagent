@@ -12,6 +12,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
@@ -245,7 +247,116 @@ func TestOriginalStoreRefusesLegacySharedBodies(t *testing.T) {
 	if err := backing.kvCommit(ctx, kvBatch{puts: []kvPair{{key: refKVKey("legacy-event"), value: stored}, {key: "blob:" + digest, value: body}}}); err != nil {
 		t.Fatalf("seed the legacy shared body: %v", err)
 	}
-	if _, err := newKVOriginalStore(backing, nil); !errors.Is(err, ErrSnapshotCorrupt) {
-		t.Fatalf("opening the legacy shared-body format returned %v, want a named refusal", err)
+	reopened, err := newKVOriginalStore(backing, nil)
+	if err != nil {
+		t.Fatalf("open the legacy format lazily: %v", err)
+	}
+	if got := reopened.Get(ctx, "legacy-event"); got.Outcome != RecallFailed || !errors.Is(got.Err, ErrSnapshotCorrupt) {
+		t.Fatalf("the first legacy shared-body read = %+v, want a named refusal", got)
+	}
+}
+
+// TestLocalKVDefersSnapshotValidationToFirstRead pins lazy shard validation.
+//
+// 契约: docs/wiki/memory/memory-architecture.md#local-file-kv
+func TestLocalKVDefersSnapshotValidationToFirstRead(t *testing.T) {
+	root := t.TempDir()
+	kv, err := openLocalFileKV(root)
+	if err != nil {
+		t.Fatalf("open the local key-value view: %v", err)
+	}
+	commitKVEntries(t, kv, "0:evt", 0, 1, 64)
+	shard := filepath.Join(root, shardDirName, "0", shardFileName)
+	if err := os.WriteFile(shard, []byte("not-json"), 0o600); err != nil {
+		t.Fatalf("corrupt the shard: %v", err)
+	}
+	reopened, err := openLocalFileKV(root)
+	if err != nil {
+		t.Fatalf("open still validates the shard eagerly: %v", err)
+	}
+	if _, err := reopened.kvRead(context.Background(), kvFetch{key: "0:evt:00000"}); !errors.Is(err, ErrSnapshotCorrupt) {
+		t.Fatalf("the first point read returned %v, want the named corrupt-snapshot failure", err)
+	}
+}
+
+// countingKV counts original-store reads without changing storage semantics.
+type countingKV struct {
+	inner kvPort
+	reads int
+}
+
+func (k *countingKV) kvRead(ctx context.Context, fetch kvFetch) ([]kvPair, error) {
+	k.reads++
+	return k.inner.kvRead(ctx, fetch)
+}
+func (k *countingKV) kvKeys(ctx context.Context, prefix string) ([]string, error) {
+	return k.inner.kvKeys(ctx, prefix)
+}
+func (k *countingKV) kvCommit(ctx context.Context, batch kvBatch) error {
+	return k.inner.kvCommit(ctx, batch)
+}
+
+// TestKVOriginalStoreDefersLoadUntilFirstRead pins zero original reads at open.
+//
+// 契约: docs/wiki/memory/memory-architecture.md#store-instance-sharing
+func TestKVOriginalStoreDefersLoadUntilFirstRead(t *testing.T) {
+	ctx := context.Background()
+	backing := newMemKV()
+	first, err := newKVOriginalStore(backing, nil)
+	if err != nil {
+		t.Fatalf("open the seed original store: %v", err)
+	}
+	ref := OriginalRef{Key: "lazy-original", Format: "text"}
+	body := []byte("the original text")
+	if err := first.Put(ctx, ref, body); err != nil {
+		t.Fatalf("commit the original: %v", err)
+	}
+	counted := &countingKV{inner: backing}
+	reopened, err := newKVOriginalStore(counted, nil)
+	if err != nil {
+		t.Fatalf("open the lazy original store: %v", err)
+	}
+	if counted.reads != 0 {
+		t.Fatalf("opening the original store performed %d reads, want zero", counted.reads)
+	}
+	if got := reopened.Get(ctx, ref.Key); got.Outcome != RecallFound || !bytes.Equal(got.Body, body) || got.Err != nil {
+		t.Fatalf("the first lazy read = %+v, want the committed original", got)
+	}
+	if counted.reads == 0 {
+		t.Fatal("the first read did not load the original state")
+	}
+}
+
+// TestKVOriginalStoreLazyLoadRetriesAfterRepair pins retryable first-read failure.
+//
+// 契约: docs/wiki/memory/memory-architecture.md#store-instance-sharing
+func TestKVOriginalStoreLazyLoadRetriesAfterRepair(t *testing.T) {
+	ctx := context.Background()
+	backing := newMemKV()
+	first, _ := newKVOriginalStore(backing, nil)
+	ref := OriginalRef{Key: "retry-original", Format: "text"}
+	if err := first.Put(ctx, ref, []byte("repaired")); err != nil {
+		t.Fatalf("commit the original: %v", err)
+	}
+	pairs, err := backing.kvRead(ctx, kvFetch{key: refKVKey(ref.Key)})
+	if err != nil || len(pairs) != 1 {
+		t.Fatalf("read the valid reference fixture: %v", err)
+	}
+	valid := append([]byte(nil), pairs[0].value...)
+	if err := backing.kvCommit(ctx, kvBatch{puts: []kvPair{{key: refKVKey(ref.Key), value: []byte("not-json")}}}); err != nil {
+		t.Fatalf("corrupt the reference: %v", err)
+	}
+	reopened, err := newKVOriginalStore(backing, nil)
+	if err != nil {
+		t.Fatalf("open still loads eagerly: %v", err)
+	}
+	if got := reopened.Get(ctx, ref.Key); got.Outcome != RecallFailed || !errors.Is(got.Err, ErrSnapshotCorrupt) {
+		t.Fatalf("the first corrupt read = %+v, want the named failure", got)
+	}
+	if err := backing.kvCommit(ctx, kvBatch{puts: []kvPair{{key: refKVKey(ref.Key), value: valid}}}); err != nil {
+		t.Fatalf("repair the reference: %v", err)
+	}
+	if got := reopened.Get(ctx, ref.Key); got.Outcome != RecallFound || string(got.Body) != "repaired" || got.Err != nil {
+		t.Fatalf("the read after repair = %+v, want a retry that finds the original", got)
 	}
 }

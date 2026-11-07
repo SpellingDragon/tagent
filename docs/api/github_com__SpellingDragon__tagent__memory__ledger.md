@@ -247,12 +247,14 @@ func (s *FileSegmentStore) GetEvent(ctx context.Context, key event.EventID) (Sto
     event.
 
 func (s *FileSegmentStore) Load(ctx context.Context) error
-    Load rebuilds the resident index and window table from the persisted store
-    without materializing an event body. It enumerates keys once to discover the
-    partitions the store holds, then reads the index prefix and the meta prefix
-    of each partition: both are small entries, and no {pid}:evt:{window}:{seq}
-    body is read. A record whose index and window meta did not both arrive stays
-    out of the published state, and EventCount counts the published records.
+    Load rebuilds the resident index and window table from the persisted
+    store without returning an event body. It enumerates shard labels
+    to discover the partitions, then reads the index and meta prefixes;
+    localfile's shard-granular scan still validates every encoded value in
+    those numeric shards. each partition: both are small entries, and no
+    {pid}:evt:{window}:{seq} body is read. A record whose index and window meta
+    did not both arrive stays out of the published state, and EventCount counts
+    the published records.
 
 func (s *FileSegmentStore) StoreEvent(ctx context.Context, rec SegmentRecord) error
     StoreEvent commits one event behind the segment commit barrier: the event

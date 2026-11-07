@@ -210,6 +210,27 @@ func (m *memKV) kvKeys(ctx context.Context, prefix string) ([]string, error) {
 	return out, nil
 }
 
+// kvLabels returns the labels of the in-process keys without reading values.
+func (m *memKV) kvLabels(ctx context.Context) ([]string, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	labels := map[string]struct{}{}
+	for key := range m.data {
+		labels[shardLabelOf(key)] = struct{}{}
+	}
+	out := make([]string, 0, len(labels))
+	for label := range labels {
+		out = append(out, label)
+	}
+	sort.Strings(out)
+	return out, nil
+}
+
+var _ kvLabeler = (*memKV)(nil)
+
 // kvCommit applies the batch in place of whatever was held there; the in-process
 // view already holds what a barrier would publish.
 func (m *memKV) kvCommit(ctx context.Context, batch kvBatch) error {

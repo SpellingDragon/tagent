@@ -255,23 +255,20 @@ func newFileSegmentStore(kv kvPort) (*FileSegmentStore, error) {
 }
 
 // Load rebuilds the resident index and window table from the persisted store
-// without materializing an event body. It enumerates keys once to discover the
-// partitions the store holds, then reads the index prefix and the meta prefix of
+// without returning an event body. It enumerates shard labels to discover the
+// partitions, then reads the index and meta prefixes; localfile's shard-granular
+// scan still validates every encoded value in those numeric shards.
 // each partition: both are small entries, and no {pid}:evt:{window}:{seq} body
 // is read. A record whose index and window meta did not both arrive stays out of
 // the published state, and EventCount counts the published records.
 func (s *FileSegmentStore) Load(ctx context.Context) error {
-	keys, err := s.kv.kvKeys(ctx, "")
+	labels, err := s.partitionLabels(ctx)
 	if err != nil {
 		return err
 	}
 	partitions := map[int]struct{}{}
-	for _, key := range keys {
-		parts := strings.SplitN(key, ":", 2)
-		if len(parts) != 2 {
-			continue
-		}
-		partition, err := strconv.Atoi(parts[0])
+	for _, label := range labels {
+		partition, err := strconv.Atoi(label)
 		if err != nil {
 			continue
 		}
@@ -358,6 +355,30 @@ func (s *FileSegmentStore) Load(ctx context.Context) error {
 		s.windows[windowKey(slot.partition, slot.window)] = &carried
 	}
 	return nil
+}
+
+// partitionLabels discovers shard labels without reading non-segment bodies.
+// Backends without label enumeration retain the existing key-discovery fallback.
+func (s *FileSegmentStore) partitionLabels(ctx context.Context) ([]string, error) {
+	if labels, ok := s.kv.(kvLabeler); ok {
+		return labels.kvLabels(ctx)
+	}
+	keys, err := s.kv.kvKeys(ctx, "")
+	if err != nil {
+		return nil, err
+	}
+	labels := make([]string, 0, len(keys))
+	seen := map[string]struct{}{}
+	for _, key := range keys {
+		label := shardLabelOf(key)
+		if _, held := seen[label]; held {
+			continue
+		}
+		seen[label] = struct{}{}
+		labels = append(labels, label)
+	}
+	sort.Strings(labels)
+	return labels, nil
 }
 
 // StoreEvent commits one event behind the segment commit barrier: the event

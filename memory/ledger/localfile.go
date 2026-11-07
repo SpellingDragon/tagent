@@ -43,8 +43,8 @@ type kvBatch struct {
 }
 
 // kvPort is the key-value seam the durable stores share across tiers: one read
-// unit (a key or a prefix), one key enumeration (so a loader can discover the
-// partitions it must read without materializing bodies), and one commit unit (a
+// unit (a key or a prefix), optional label-only enumeration for body-free
+// partition discovery, and one commit unit (a
 // batch applied behind the barrier). Writes reach the backing store only when a
 // commit returns success, so a caller that reports success to its own consumer
 // commits first and reports what that commit returned.
@@ -52,6 +52,11 @@ type kvPort interface {
 	kvRead(ctx context.Context, fetch kvFetch) ([]kvPair, error)
 	kvKeys(ctx context.Context, prefix string) ([]string, error)
 	kvCommit(ctx context.Context, batch kvBatch) error
+}
+
+// kvLabeler enumerates known shard labels without reading snapshot contents.
+type kvLabeler interface {
+	kvLabels(ctx context.Context) ([]string, error)
 }
 
 // ErrCommitBarrier reports a commit whose barrier did not complete, so nothing
@@ -202,10 +207,10 @@ type localFileKV struct {
 	coldScans int
 }
 
-// openLocalFileKV opens the key-value view rooted at root. Snapshot content that
-// cannot be read back as the recorded key-value state fails the open; the
-// entries themselves stay on disk until a read makes one resident, so the open
-// holds no more than one entry's bytes at a time.
+// openLocalFileKV opens the key-value view rooted at root by registering its
+// shard directories only. Snapshot validation is deferred to the first point or
+// prefix read of that shard, so opening holds no entry bytes and never rejects
+// a shard before a consumer actually reads it.
 func openLocalFileKV(root string) (*localFileKV, error) {
 	dir := filepath.Join(root, shardDirName)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -232,15 +237,28 @@ func openLocalFileKV(root string) (*localFileKV, error) {
 		}
 		shardDir := filepath.Join(dir, entry.Name())
 		_ = os.Remove(filepath.Join(shardDir, shardSnapshotTempName))
-		if err := scanShardSnapshot(shardDir, nil); err != nil {
-			return nil, err
-		}
 		kv.shards[label] = struct{}{}
 	}
 	return kv, nil
 }
 
 var _ kvPort = (*localFileKV)(nil)
+var _ kvLabeler = (*localFileKV)(nil)
+
+// kvLabels returns the shard names already discovered by open, without reads.
+func (k *localFileKV) kvLabels(ctx context.Context) ([]string, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	labels := make([]string, 0, len(k.shards))
+	for label := range k.shards {
+		labels = append(labels, label)
+	}
+	sort.Strings(labels)
+	return labels, nil
+}
 
 // kvRead returns the pairs the fetch names: the one value held under the key it
 // names, or every held pair whose key carries the named prefix, ordered by key.
@@ -717,16 +735,13 @@ type kvOriginalStore struct {
 	kv      kvPort
 	windows map[string]time.Duration
 	byKey   map[event.EventID]*originalEntry
+	loaded  bool
 }
 
-// newKVOriginalStore opens the original store held in kv, measuring every
-// retention policy against the window given for it.
+// newKVOriginalStore opens the original store without reading it. The existing
+// whole-store load runs on the first actual access, with unchanged semantics.
 func newKVOriginalStore(kv kvPort, windows map[string]time.Duration) (*kvOriginalStore, error) {
-	store := newEmptyKVOriginalStore(kv, windows)
-	if err := store.load(); err != nil {
-		return nil, err
-	}
-	return store, nil
+	return newEmptyKVOriginalStore(kv, windows), nil
 }
 
 // newEmptyKVOriginalStore returns the original store over kv with no stored
@@ -746,6 +761,21 @@ func newEmptyKVOriginalStore(kv kvPort, windows map[string]time.Duration) *kvOri
 
 var _ OriginalStore = (*kvOriginalStore)(nil)
 
+// ensureLoaded runs the existing whole-store load on first access. Failures are
+// returned without being cached, so a repaired backend can be retried.
+func (s *kvOriginalStore) ensureLoaded() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.loaded {
+		return nil
+	}
+	if err := s.load(); err != nil {
+		return err
+	}
+	s.loaded = true
+	return nil
+}
+
 // load publishes references only with the independent body of the same event
 // key; a reference without that body fails by name instead of disappearing.
 func (s *kvOriginalStore) load() error {
@@ -755,6 +785,7 @@ func (s *kvOriginalStore) load() error {
 	}
 	blobs := map[event.EventID][]byte{}
 	refs := map[event.EventID][]storedRef{}
+	byKey := map[event.EventID]*originalEntry{}
 	for _, pair := range pairs {
 		if name, ok := strings.CutPrefix(pair.key, "blob:"); ok {
 			blobs[event.EventID(name)] = pair.value
@@ -789,9 +820,10 @@ func (s *kvOriginalStore) load() error {
 			entry.refs[ref.scope()] = referenceRecord{ref: ref, storedAt: record.StoredAt}
 		}
 		if entry.blob != nil {
-			s.byKey[key] = entry
+			byKey[key] = entry
 		}
 	}
+	s.byKey = byKey
 	return nil
 }
 
@@ -813,6 +845,9 @@ func (s *kvOriginalStore) Put(ctx context.Context, ref OriginalRef, body []byte)
 	}
 	if ref.Integrity.Length != 0 && ref.Integrity.Length != length {
 		return ErrIntegrityMismatch
+	}
+	if err := s.ensureLoaded(); err != nil {
+		return err
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -879,6 +914,11 @@ func (s *kvOriginalStore) Get(ctx context.Context, key event.EventID) RecallResu
 		result.Err = err
 		return result
 	}
+	if err := s.ensureLoaded(); err != nil {
+		result.Outcome = RecallFailed
+		result.Err = err
+		return result
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	entry, held := s.byKey[key]
@@ -910,6 +950,9 @@ func (s *kvOriginalStore) ReadSegment(ctx context.Context, key event.EventID, st
 	if startLine < 1 || numLines < 1 {
 		return nil, ErrSegmentRange
 	}
+	if err := s.ensureLoaded(); err != nil {
+		return nil, err
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	entry, held := s.byKey[key]
@@ -939,6 +982,9 @@ func (s *kvOriginalStore) ReadSegment(ctx context.Context, key event.EventID, st
 
 // BlobCount returns the number of event keys holding an original body.
 func (s *kvOriginalStore) BlobCount() int {
+	if err := s.ensureLoaded(); err != nil {
+		return 0
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return len(s.byKey)
@@ -948,6 +994,9 @@ func (s *kvOriginalStore) BlobCount() int {
 // scope in a stable order, so which owners, formats and retention policies still
 // name the original stays observable.
 func (s *kvOriginalStore) References(key event.EventID) []OriginalRef {
+	if err := s.ensureLoaded(); err != nil {
+		return nil
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	entry, held := s.byKey[key]

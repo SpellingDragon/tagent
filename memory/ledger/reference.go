@@ -248,6 +248,9 @@ func (s *kvOriginalStore) GetScoped(ctx context.Context, key event.EventID, scop
 	if err := ctx.Err(); err != nil {
 		return RecallResult{Key: key, Outcome: RecallFailed, Err: err}
 	}
+	if err := s.ensureLoaded(); err != nil {
+		return RecallResult{Key: key, Outcome: RecallFailed, Err: err}
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return scopedRecall(s.byKey, s.windows, key, scope)
@@ -257,6 +260,9 @@ func (s *kvOriginalStore) GetScoped(ctx context.Context, key event.EventID, scop
 // under key as visible inside scope, exactly as the in-memory tier serves it.
 func (s *kvOriginalStore) ReadSegmentScoped(ctx context.Context, key event.EventID, scope ReadScope, req SegmentRequest) (SegmentResult, error) {
 	if err := ctx.Err(); err != nil {
+		return SegmentResult{}, err
+	}
+	if err := s.ensureLoaded(); err != nil {
 		return SegmentResult{}, err
 	}
 	s.mu.Lock()

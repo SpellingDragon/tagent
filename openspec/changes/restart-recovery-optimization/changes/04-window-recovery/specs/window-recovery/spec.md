@@ -53,7 +53,22 @@
 #### Scenario: 旧共享格式具名拒绝
 
 - **WHEN** 持久层只有旧的 digest 共享正文而没有该 EventID 的独立正文
-- **THEN** 打开返回 `ErrSnapshotCorrupt`，不静默丢弃该引用
+- **THEN** 首次实际读取返回 `ErrSnapshotCorrupt`，不静默丢弃该引用
+
+
+### Requirement: tier 分片懒校验
+
+localfile 打开 SHALL 只登记分片标签，MUST NOT 提前扫描 ref/blob/snapshot/ticket 内容；数值段分片只在 idx/meta 装载时校验。首次实际读取发现损坏 SHALL 具名 `ErrSnapshotCorrupt`，且失败不得永久缓存。恢复 ticket/snapshot 读取失败 SHALL 沿用既有全量重放。
+
+#### Scenario: 首读校验与修复后重试
+
+- **WHEN** 原文分片在打开后损坏，或首次读取失败后修复
+- **THEN** 打开本身不读该片，首次实际读取具名失败；修复后的下一次读取可重试，无需新增恢复协议
+
+#### Scenario: 物理恢复分片退回全量
+
+- **WHEN** 真实 localfile 的 snapshot 或 ticket 分片不可解析
+- **THEN** tier 仍能打开，恢复使用全量重放且结果与无票据路径逐项一致
 
 ### Requirement: 折叠锚恢复
 
