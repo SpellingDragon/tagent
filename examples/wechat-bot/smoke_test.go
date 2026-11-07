@@ -2326,7 +2326,7 @@ func smokeIntegrityRebuildProjection(t *testing.T, rig *smokeRig, chat string) *
 		}
 	}
 	rebuilt := replay.NewReplayProjection()
-	if _, err := replay.RebuildProjectionFromWAL(context.Background(), rebuilt, chain, replay.NewMemoryRelations(), chainKey, replay.RebuildOptions{}); err != nil {
+	if _, err := replay.RebuildProjectionFromWAL(context.Background(), rebuilt, chain, &replay.MemoryRelations{}, chainKey, replay.RebuildOptions{}); err != nil {
 		t.Fatalf("rebuild the projection from the session chain: %v", err)
 	}
 	return rebuilt
