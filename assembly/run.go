@@ -268,10 +268,6 @@ type Run struct {
 	// delivery layer (host_delivery.go) and never by a commit, so a fact no
 	// obligation names ages out on the ordinary trim.
 	pinnedFacts map[event.EventID]struct{}
-	// anchorStateOwners holds the registered sources of state the chain cannot
-	// derive, by name. Registration is optional: none registered means the fold
-	// carries no state payload and the rebuild restores none.
-	anchorStateOwners map[string]anchorStateOwner
 	// plugins holds the run-level instances every agent generation carries.
 	plugins []plugin.Instance
 	factSeq uint64
@@ -293,15 +289,11 @@ type Run struct {
 	// landedSeq holds the last sequence slot each partition committed: it is
 	// seeded from the events the tier already published, so a fact committed
 	// after a restart takes the slot after the last committed one.
-	landedSeq map[int]int64
-	// relations is the host's journaled parent graph; relationHeads is rebuilt
-	// from chain order and lives under landing, never a second relation truth.
-	relations     *replay.MemoryRelations
-	relationHeads map[replay.ChainKey]event.EventID
-	records       publicationRecords
-	approver      task.Approver
-	policy        plugin.Governor
-	enforcement   governance.Enforcement
+	landedSeq   map[int]int64
+	records     publicationRecords
+	approver    task.Approver
+	policy      plugin.Governor
+	enforcement governance.Enforcement
 	// execManager is the execution resource ledger the exec face acquires
 	// through and the lease explanation reads; a declaration that grants the
 	// exec face beside no ledger is refused by name at call time.
@@ -413,37 +405,33 @@ func Assemble(ctx context.Context, decl *config.Declaration, agents map[event.Ag
 		}
 	}
 	r := &Run{
-		instance:          newInstanceID(),
-		bindings:          state.NewBindings(),
-		occupancy:         state.NewOccupancy(),
-		inspector:         inspectorSubject,
-		admission:         task.NewMemoryAdmission(),
-		progress:          make(chan struct{}, 1),
-		sites:             map[event.Address]bool{},
-		facts:             map[event.EventID]event.Event{},
-		sessionFactCount:  map[event.SessionID]int{},
-		fixers:            map[event.AgentID]*fileFixer{},
-		replays:           map[event.Address]replayEntry{},
-		landedSeq:         map[int]int64{},
-		relations:         cfg.relations,
-		relationHeads:     map[replay.ChainKey]event.EventID{},
-		anchorStateOwners: cfg.anchorStateOwners,
-		approver:          cfg.approver,
-		policy:            cfg.policy,
-		enforcement:       cfg.enforcement,
-		recorder:          cfg.recorder,
-		observer:          cfg.observer,
-		execManager:       cfg.execManager,
-		capture:           cfg.capture,
-		leases:            map[event.AgentID]*leaseState{},
-		leaseObservers:    map[event.AgentID]*rl.LeaseObserver{},
+		instance:         newInstanceID(),
+		bindings:         state.NewBindings(),
+		occupancy:        state.NewOccupancy(),
+		inspector:        inspectorSubject,
+		admission:        task.NewMemoryAdmission(),
+		progress:         make(chan struct{}, 1),
+		sites:            map[event.Address]bool{},
+		facts:            map[event.EventID]event.Event{},
+		sessionFactCount: map[event.SessionID]int{},
+		fixers:           map[event.AgentID]*fileFixer{},
+		replays:          map[event.Address]replayEntry{},
+		landedSeq:        map[int]int64{},
+		approver:         cfg.approver,
+		policy:           cfg.policy,
+		enforcement:      cfg.enforcement,
+		recorder:         cfg.recorder,
+		observer:         cfg.observer,
+		execManager:      cfg.execManager,
+		capture:          cfg.capture,
+		leases:           map[event.AgentID]*leaseState{},
+		leaseObservers:   map[event.AgentID]*rl.LeaseObserver{},
 	}
 	for id, held := range cfg.leases {
 		lease := held
 		r.leases[id] = &lease
 	}
 	r.compress = NewCompressionConsumer(ageFoldSessions{run: r})
-	r.compress.setAnchorStateCapture(r.captureAnchorStates)
 	r.ageFold = NewAgeFoldPlugin(ageFoldSessions{run: r})
 	r.ageFold.setExecutor(r.compress)
 	r.finalRound = agent.NewFinalRoundPlanner(finalRoundChain{run: r}, r.finalRoundPolicyOf)
@@ -1025,15 +1013,10 @@ type assemblyConfig struct {
 	approvals   *approval.ApprovalManager
 	enforcement governance.Enforcement
 	storage     *ledger.StorageConfig
-	// relations is opened by the host before assembly and shared with recall.
-	relations *replay.MemoryRelations
-	// anchorStateOwners is the construction-time registration of state owners,
-	// present before the chain is replayed so boot can restore what a fold filed.
-	anchorStateOwners map[string]anchorStateOwner
-	embedder          memory.Embedder
-	recorder          rl.Recorder
-	observer          plugin.Observer
-	execManager       *tagentexec.Manager
+	embedder    memory.Embedder
+	recorder    rl.Recorder
+	observer    plugin.Observer
+	execManager *tagentexec.Manager
 	// reflectionAnchors is the anchor record path whose watermark the
 	// reflection face reports.
 	reflectionAnchors string
@@ -1688,6 +1671,32 @@ func (r *Run) CommittedEvent(ctx context.Context, id event.EventID) (event.Event
 	return restored, nil
 }
 
+// eachCommittedEvent reads every stored event in (PartitionID, Seq) commit
+// order. The index walk carries no bodies; reversing its newest-first references
+// gives one commit-order read seam to the full replay and the session reader.
+func eachCommittedEvent(ctx context.Context, tier *ledger.Tier, visit func(ledger.StoredEvent) error) error {
+	var refs []anchorRef
+	if err := tier.Segments.EachIndexNewestFirst(ctx, func(key event.EventID, partition int, seq int64, typ string, session event.SessionID) error {
+		refs = append(refs, anchorRef{key: key, partition: partition, seq: seq, typ: typ, session: session})
+		return nil
+	}); err != nil {
+		return err
+	}
+	for i := len(refs) - 1; i >= 0; i-- {
+		stored, held, err := tier.Segments.GetEvent(ctx, refs[i].key)
+		if err != nil {
+			return err
+		}
+		if !held {
+			return fmt.Errorf("%w: %s", ledger.ErrSegmentBodyMissing, refs[i].key)
+		}
+		if err := visit(stored); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // EachSessionFact streams the durable chain of one session in commit order: the
 // cold-start read of a chain, which names every fact the session committed —
 // beside the window the live ledger still presents — decoded from the tier the
@@ -1717,20 +1726,7 @@ func (r *Run) EachSessionFact(ctx context.Context, addr event.Address, visit fun
 		}
 		return nil
 	}
-	var staged []ledger.StoredEvent
-	if err := tier.Segments.EachEvent(ctx, func(stored ledger.StoredEvent) error {
-		staged = append(staged, stored)
-		return nil
-	}); err != nil {
-		return err
-	}
-	sort.Slice(staged, func(i, j int) bool {
-		if staged[i].PartitionID != staged[j].PartitionID {
-			return staged[i].PartitionID < staged[j].PartitionID
-		}
-		return staged[i].Seq < staged[j].Seq
-	})
-	for _, stored := range staged {
+	return eachCommittedEvent(ctx, tier, func(stored ledger.StoredEvent) error {
 		body, err := memory.DecodeEventBody(stored.Body)
 		if err != nil {
 			return fmt.Errorf("tagent: replay the committed event %s: %w", stored.Key, err)
@@ -1738,16 +1734,13 @@ func (r *Run) EachSessionFact(ctx context.Context, addr event.Address, visit fun
 		evt := body.Event()
 		evt.Key = stored.Key
 		if sessionOf(evt) != addr.SessionID {
-			continue
+			return nil
 		}
 		if addr.AgentID != "" && agentOf(evt) != addr.AgentID {
-			continue
+			return nil
 		}
-		if err := visit(evt); err != nil {
-			return err
-		}
-	}
-	return nil
+		return visit(evt)
+	})
 }
 
 // sessionSeed is one session chain a restart rebuild collects: the projection
@@ -1810,16 +1803,14 @@ func (r *Run) seedReplay(ctx context.Context, tier *ledger.Tier) (map[int]int64,
 
 // seedFullReplay replays every session chain from the beginning, the path a
 // chain that minted no summary answers: each committed fact is seeded, each
-// mapped entry appended in commit order and each product restored on top. The
-// newest checkpoint on each chain hands its registered state snapshots back.
+// mapped entry appended in commit order and each product restored on top.
 func (r *Run) seedFullReplay(ctx context.Context, tier *ledger.Tier) (map[event.Address]*sessionSeed, map[int]int64, seedReport, error) {
 	seeds := map[event.Address]*sessionSeed{}
 	products := map[event.Address][]event.CompressProduct{}
-	var productOrder []event.Address
 	var order []event.Address
 	report := seedReport{}
 	landed := map[int]int64{}
-	if err := tier.Segments.EachEvent(ctx, func(stored ledger.StoredEvent) error {
+	if err := eachCommittedEvent(ctx, tier, func(stored ledger.StoredEvent) error {
 		report.Decoded++
 		if stored.Seq > landed[stored.PartitionID] {
 			landed[stored.PartitionID] = stored.Seq
@@ -1835,18 +1826,11 @@ func (r *Run) seedFullReplay(ctx context.Context, tier *ledger.Tier) (map[event.
 		if addr.SessionID == "" {
 			return nil
 		}
-		chain := replay.ChainKey{PartitionID: stored.PartitionID, SessionID: addr.SessionID}
-		if err := r.linkRelation(chain, evt.Key); err != nil {
-			return fmt.Errorf("tagent: restore the parent of %s: %w", evt.Key, err)
-		}
 		if evt.Type == event.CompressProductType {
 			product, stated := compressProductOf(evt)
 			if !stated {
 				assemblyWarn("tagent: the compression product %s states no readable product and is not restored", evt.Key)
 				return nil
-			}
-			if _, held := products[addr]; !held {
-				productOrder = append(productOrder, addr)
 			}
 			products[addr] = append(products[addr], product)
 			r.compress.NoteProduct(product)
@@ -1874,11 +1858,6 @@ func (r *Run) seedFullReplay(ctx context.Context, tier *ledger.Tier) (map[event.
 	for _, addr := range order {
 		seed := seeds[addr]
 		seed.projection.RestoreProducts(products[addr])
-	}
-	for _, addr := range productOrder {
-		if err := r.restoreLatestAnchorState(ctx, addr.SessionID, products[addr]); err != nil {
-			return nil, nil, report, err
-		}
 	}
 	return seeds, landed, report, nil
 }
@@ -2001,9 +1980,6 @@ func (r *Run) seedAnchoredReplayWith(ctx context.Context, tier *ledger.Tier, sea
 					if err != nil {
 						return nil, report, err
 					}
-					if err := r.restoreLatestAnchorState(ctx, slot.session, []event.CompressProduct{product}); err != nil {
-						return nil, report, err
-					}
 					r.compress.NoteProduct(product)
 					report.Anchors++
 					seeds[addr] = seed
@@ -2060,9 +2036,6 @@ func (r *Run) seedAnchoredReplayWith(ctx context.Context, tier *ledger.Tier, sea
 				}
 			}
 			seed.projection.RestoreProducts(products)
-			if err := r.restoreLatestAnchorState(ctx, session, products); err != nil {
-				return nil, report, err
-			}
 			seeds[event.Address{AgentID: agent, SessionID: session}] = seed
 		}
 	}

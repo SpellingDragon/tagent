@@ -30,6 +30,7 @@ import (
 	"github.com/SpellingDragon/tagent/features/evolution/meditation"
 	"github.com/SpellingDragon/tagent/features/rl"
 	"github.com/SpellingDragon/tagent/features/telemetry"
+	"github.com/SpellingDragon/tagent/memory/ledger"
 	"github.com/SpellingDragon/tagent/memory/replay"
 	"github.com/SpellingDragon/tagent/runtime/agent"
 	"github.com/SpellingDragon/tagent/runtime/state"
@@ -593,7 +594,6 @@ func Boot(configPath string, opts ...HostOption) (*Host, error) {
 	options = append(options, withBootConfigReconcile(func(ctx context.Context, run *Run, decl *config.Declaration, natives map[event.AgentID]NativeAgent) error {
 		return reconcileBootConfig(ctx, run, configPath, doc, decl, natives)
 	}))
-	options = append(options, withRelations(relations))
 	run, err := Assemble(ctx, decl, natives, options...)
 	if err != nil {
 		cancel()
@@ -747,12 +747,15 @@ func storageRootOf(plan *MemoryPlan) string {
 	return plan.Storage().Root
 }
 
-// openHostRelations reports the relation ledger the recall trace walks: the
-// journal beside the storage tier the plan opens, and an empty ledger beside no
-// tier.
+// openHostRelations reports the relation ledger the recall trace walks: a
+// journal beside an explicit durable root, and an anonymous in-memory graph
+// beside a non-durable or empty one.
 func openHostRelations(plan *MemoryPlan) (*replay.MemoryRelations, error) {
+	if plan == nil {
+		return replay.NewMemoryRelations(), nil
+	}
 	cfg := plan.Storage()
-	if cfg == nil {
+	if cfg == nil || cfg.Type == ledger.StorageMemory || cfg.Root == "" {
 		return replay.NewMemoryRelations(), nil
 	}
 	root := filepath.Join(cfg.Root, "relations")

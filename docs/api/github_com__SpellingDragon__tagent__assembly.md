@@ -1,10 +1,5 @@
 package assembly // import "github.com/SpellingDragon/tagent/assembly"
 
-The anchor state hook is the registration seam for state the chain cannot
-derive: a session's owner registers a named capture and restore, and the fold
-moment carries the captured bytes on the same fact as the survivor checkpoint.
-A run with no registered owners mints the same fold as before.
-
 The compression consumer: the execution half of compression. A producer judges
 material over its bound and files a compress request; the consumer reads the
 material that request names, folds it through the projection and files the
@@ -93,10 +88,6 @@ sessions, the scheduled reflection plan and the port that commits its body to a
 session, and the request shape an inbound channel posts to the task endpoint.
 Each one is a face the host contributes to the assembly, so the host builds it
 here rather than leaving the wiring to every deployment.
-
-The relation attachment is the one parent-graph face of a run. The host opens
-the journal before assembly, live commits append through the same ledger,
-and the full boot walk backfills an empty graph without replacing the journal.
 
 The minimal public assembly entry of the runtime: one Run assembles the shared
 faces once, publishes the candidate bindings of one declaration through the
@@ -534,9 +525,9 @@ func (c *CompressionConsumer) Execute(ctx context.Context, session event.Session
     projection the model reads. - A history summary covers every settlement
     fact inside the band it folds: settlement lines never count as fold material
     (foldProjectionOf), the summary consumes their accounting beside the turns,
-    and the facts stay on the chain readable by identity. - The checkpoint and
-    registered states are prepared before any product of the batch is filed,
-    so a capture refusal files no partial batch and answers no judgment.
+    and the facts stay on the chain readable by identity. - The checkpoint is
+    a pure whole-batch preflight, so its survivors equal the entries left by
+    applying that same batch.
 
 func (c *CompressionConsumer) Name() string
     Name reports the stable name of this plugin instance.
@@ -1106,15 +1097,6 @@ type Option = HostOption
     name of the host option: one config struct, so the manual and the host entry
     accept the same constructors.
 
-func WithAnchorState(name string, capture func(context.Context, event.SessionID) ([]byte, error), restore func(context.Context, event.SessionID, []byte) error) Option
-    WithAnchorState registers one named owner before assembly opens recovery, so
-    a restart restores through the same registration that a live fold captures
-    through. Capture runs after the survivor checkpoint is computed and before
-    any product of that batch is filed. It runs outside Run locks, so an owner
-    whose state changes with commits must synchronize its own reads and writes.
-    A nil callback leaves that half unregistered; registering the same name
-    again replaces the pair, so one owner holds one slot.
-
 func WithApprovals(approvals *approval.ApprovalManager) Option
     WithApprovals attaches the approval book a host document's risk table grades
     through: a document that declares risk_rules is opened as a policy over this
@@ -1616,14 +1598,6 @@ func (r *Run) ReflectionInput() meditation.ReflectionInput
     run drives its own loop session through: it commits the reflection input
     as a fact of the observing agent's own partition, drives that agent's loop
     session with it and reports what became of the turn.
-
-func (r *Run) RegisterAnchorState(name string, capture func(context.Context, event.SessionID) ([]byte, error), restore func(context.Context, event.SessionID, []byte) error)
-    RegisterAnchorState registers one named owner of state the chain cannot
-    derive on a running assembly. Capture follows the survivor checkpoint and
-    precedes every product commit of that batch; recovery calls restore with the
-    very bytes capture returned. Callbacks run outside Run locks, so the owner
-    synchronizes its own state. Use WithAnchorState when the owner must already
-    exist during boot recovery.
 
 func (r *Run) Rejections() []state.Rejection
     Rejections reports the feedback fact of every notification a target refused,

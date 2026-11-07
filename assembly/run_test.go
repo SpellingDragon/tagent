@@ -13,7 +13,6 @@ import (
 	"github.com/SpellingDragon/tagent/memory"
 	"github.com/SpellingDragon/tagent/memory/ledger"
 	"github.com/SpellingDragon/tagent/memory/replay"
-	"github.com/SpellingDragon/tagent/runtime/agent"
 )
 
 // windowChainRun assembles one run with a small replay window, so the fold
@@ -537,6 +536,37 @@ func TestAnchoredRebuildOnAFreshRun(t *testing.T) {
 	}
 }
 
+// TestFullReplayUsesCommitOrder pins partition sequence over event timestamps.
+//
+// 契约: docs/wiki/agent/event-flow.md#projection-lifecycle
+func TestFullReplayUsesCommitOrder(t *testing.T) {
+	ctx := context.Background()
+	run := windowChainRun(t, ctx)
+	addr := event.Address{AgentID: "agent-a", SessionID: "session-commit-order"}
+	at := time.Date(2026, 11, 6, 12, 0, 0, 0, time.UTC)
+	for _, item := range []struct {
+		key event.EventID
+		at  time.Time
+	}{
+		{key: "later-commit", at: at.Add(2 * time.Hour)},
+		{key: "earlier-commit", at: at.Add(time.Hour)},
+	} {
+		evt := event.Event{Key: item.key, Type: event.TypeExternalInput, Timestamp: item.at, Meta: map[string]string{event.MetaKeyEventSummary: "ask"}, Message: model.Message{Role: model.RoleUser, Content: "ordered"}, Owner: addr}
+		if _, err := run.CommitToSession(ctx, addr, evt); err != nil {
+			t.Fatalf("commit %s: %v", item.key, err)
+		}
+	}
+	fresh := windowChainRun(t, ctx)
+	seeds, _, _, err := fresh.seedFullReplay(ctx, run.tier)
+	if err != nil {
+		t.Fatalf("replay the out-of-order timestamps: %v", err)
+	}
+	entries := seeds[addr].projection.Entries()
+	if len(entries) != 2 || entries[0].Key != "later-commit" || entries[1].Key != "earlier-commit" {
+		t.Fatalf("the full replay ordered %v by event time instead of commit sequence", entries)
+	}
+}
+
 // TestAnchoredRebuildKeepsTheInterleavedFact pins the snapshot rule.
 // - an interleaved event lands between the snapshot and the product commit
 // - the rebuild replays it instead of silently losing it
@@ -659,83 +689,5 @@ func TestMechanismFactNeverMapsToARequest(t *testing.T) {
 	entry, ok := mappedEntryOf(business)
 	if !ok || entry.Content != "internal wording" {
 		t.Fatal("a business fact was refused by the projection seam")
-	}
-}
-
-// TestAnchorStateHookRestoresOnRestart pins the registration rule.
-// - a registered state owner contributes an opaque blob at the fold moment
-// - a real restart and an anchored rebuild both restore that blob
-// - a chain with no registered owners writes no state payload at all
-//
-// 契约: docs/wiki/agent/event-flow.md#projection-lifecycle
-func TestAnchorStateHookRestoresOnRestart(t *testing.T) {
-	ctx := context.Background()
-	const owner = "test.state.owner"
-	payload := []byte("non-derivable-state")
-	storage := WithStorage(ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: t.TempDir()})
-	capture := func(_ context.Context, _ event.SessionID) ([]byte, error) {
-		return payload, nil
-	}
-	var restored []byte
-	restore := func(_ context.Context, _ event.SessionID, data []byte) error {
-		restored = append([]byte(nil), data...)
-		return nil
-	}
-	first := windowChainRun(t, ctx, storage)
-	first.RegisterAnchorState(owner, capture, nil)
-	addr := event.Address{AgentID: "agent-a", SessionID: "session-state-hook"}
-	commitWindowTurns(t, ctx, first, addr, 12)
-	if _, err := first.Close(ctx, agent.CloseRequest{Timeout: time.Now().Add(5 * time.Second)}); err != nil {
-		t.Fatalf("drain the first run: %v", err)
-	}
-
-	second := windowChainRun(t, ctx, storage, WithAnchorState(owner, nil, restore))
-	if string(restored) != string(payload) {
-		t.Fatalf("the real restart restored %q, want %q", restored, payload)
-	}
-	restored = nil
-	_, report, err := second.seedAnchoredReplay(ctx, second.tier)
-	if err != nil {
-		t.Fatalf("rebuild from the anchor: %v", err)
-	}
-	if report.Anchors != 1 {
-		t.Fatalf("the rebuild found %d anchor(s), want one", report.Anchors)
-	}
-	if string(restored) != string(payload) {
-		t.Fatalf("the anchored rebuild restored %q, want %q", restored, payload)
-	}
-	if _, err := second.Close(ctx, agent.CloseRequest{Timeout: time.Now().Add(5 * time.Second)}); err != nil {
-		t.Fatalf("drain the restarted run: %v", err)
-	}
-
-	plain := windowChainRun(t, ctx)
-	plainAddr := event.Address{AgentID: "agent-a", SessionID: "session-no-hook"}
-	commitWindowTurns(t, ctx, plain, plainAddr, 12)
-	var product event.CompressProduct
-	seen := false
-	_ = plain.tier.Segments.EachIndexNewestFirst(ctx, func(key event.EventID, partition int, seq int64, typ string, session event.SessionID) error {
-		if typ == event.CompressProductType && !seen {
-			stored, held, err := plain.tier.Segments.GetEvent(ctx, key)
-			if err != nil || !held {
-				return err
-			}
-			body, err := memory.DecodeEventBody(stored.Body)
-			if err != nil {
-				return err
-			}
-			evt := body.Event()
-			evt.Key = stored.Key
-			if _, held := evt.Meta[metaKeyCompressStates]; held {
-				t.Fatal("a fold with no registered owner wrote the state metadata key")
-			}
-			product, seen = compressProductOf(evt)
-		}
-		return nil
-	})
-	if !seen {
-		t.Fatal("a fold with no registered owner filed no product")
-	}
-	if len(product.States()) != 0 {
-		t.Fatalf("a fold with no registered owner wrote %d state bytes, want none", len(product.States()))
 	}
 }

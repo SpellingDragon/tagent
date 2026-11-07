@@ -362,14 +362,8 @@ func (p CompressProduct) FactKey() string
 func (p CompressProduct) FactType() string
     FactType returns the frozen type a compress product is read as.
 
-func (p CompressProduct) States() []byte
-    States reports the opaque state snapshot this product fact carries.
-
 func (p CompressProduct) WithCheckpoint(payload []byte) CompressProduct
     WithCheckpoint states the opaque recovery payload this product fact carries.
-
-func (p CompressProduct) WithStates(payload []byte) CompressProduct
-    WithStates states the opaque state snapshot this product fact carries.
 
 type CompressRequest struct {
 	// ID is the identity of the judgment: the content-addressed key the request

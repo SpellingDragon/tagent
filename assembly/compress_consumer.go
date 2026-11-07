@@ -28,11 +28,10 @@ const CompressionConsumerName = "compress-consumer"
 const compressionProducer = "assembly.compress-consumer"
 
 // metaKeyCompressRequest, metaKeyCompressProducer, metaKeyCompressKey,
-// metaKeyCompressCovered, metaKeyCompressText, metaKeyCompressSurvivors and
-// metaKeyCompressStates are the metadata keys a compress product fact carries:
-// the product states its fields, and the event metadata is the one durable
-// carrier of them, because a product is material of the projection and never a
-// message of the transcript.
+// metaKeyCompressCovered, metaKeyCompressText and metaKeyCompressSurvivors are
+// the metadata keys a compress product fact carries: the product states its five fields, and the event metadata
+// is the one durable carrier of them, because a product is material of the
+// projection and never a message of the transcript.
 const (
 	metaKeyCompressRequest   = "compress_request"
 	metaKeyCompressProducer  = "compress_producer"
@@ -40,7 +39,6 @@ const (
 	metaKeyCompressCovered   = "compress_covered"
 	metaKeyCompressText      = "compress_text"
 	metaKeyCompressSurvivors = "compress_survivors"
-	metaKeyCompressStates    = "compress_states"
 )
 
 // compressCoveredSeparator separates the covered keys one product fact states:
@@ -58,10 +56,7 @@ const compressCoveredSeparator = "\n"
 // MUST NOT execute a judgment whose material does not stand: it stays pending rather than answering a product of other material.
 type CompressionConsumer struct {
 	sessions compressSessions
-	// captureStates is wired at assembly, before any commit can execute a fold.
-	// It reads the current registrations on every batch, including later ones.
-	captureStates func(context.Context, event.SessionID) ([]byte, error)
-	mu            sync.Mutex
+	mu       sync.Mutex
 	// judgments holds the requests one session filed, in filing order, keyed by
 	// the session whose material they name.
 	judgments map[event.SessionID][]event.CompressRequest
@@ -108,14 +103,6 @@ func NewCompressionConsumer(sessions compressSessions) *CompressionConsumer {
 		sessions:  sessions,
 		judgments: map[event.SessionID][]event.CompressRequest{},
 		answered:  map[event.EventID]struct{}{},
-	}
-}
-
-// setAnchorStateCapture attaches the registration reader used by one fold
-// batch. Construction is the only caller, so the face is set before commits.
-func (c *CompressionConsumer) setAnchorStateCapture(capture func(context.Context, event.SessionID) ([]byte, error)) {
-	if c != nil {
-		c.captureStates = capture
 	}
 }
 
@@ -183,7 +170,7 @@ func (c *CompressionConsumer) NoteProduct(product event.CompressProduct) {
 // product that request names.
 // - The plan is executed over the accounting-free view the production judged (foldProjectionOf): the products name the conversation material, and delivery settlement lines stay in the projection the model reads.
 // - A history summary covers every settlement fact inside the band it folds: settlement lines never count as fold material (foldProjectionOf), the summary consumes their accounting beside the turns, and the facts stay on the chain readable by identity.
-// - The checkpoint and registered states are prepared before any product of the batch is filed, so a capture refusal files no partial batch and answers no judgment.
+// - The checkpoint is a pure whole-batch preflight, so its survivors equal the entries left by applying that same batch.
 func (c *CompressionConsumer) Execute(ctx context.Context, session event.SessionID) error {
 	if c == nil || c.sessions == nil || session == "" {
 		return nil
@@ -226,21 +213,13 @@ func (c *CompressionConsumer) Execute(ctx context.Context, session event.Session
 		}
 	}
 	var checkpoint []byte
-	var states []byte
 	if len(batch) > 0 {
 		checkpoint = anchorCheckpointOf(replay.FoldedEntries(projection.Entries(), batch))
-		if c.captureStates != nil {
-			var err error
-			states, err = c.captureStates(ctx, session)
-			if err != nil {
-				return err
-			}
-		}
 	}
 	for at, product := range batch {
 		minted := event.CompressProductFor(product.Request.ID, compressionProducer, product.Entry.Key, product.Covered, product.Entry.Content)
 		if at == len(batch)-1 {
-			minted = minted.WithCheckpoint(checkpoint).WithStates(states)
+			minted = minted.WithCheckpoint(checkpoint)
 		}
 		if err := c.sessions.FileCompressProduct(ctx, session, minted); err != nil {
 			return err
@@ -364,8 +343,7 @@ func (s ageFoldSessions) FileCompressProduct(ctx context.Context, session event.
 // fileCompressProduct lands one execution result in the live ledger of this run
 // under the product's content-addressed identity: a product already on record is
 // left as it stands, so one judgment answers one product however often the
-// execution runs. Checkpoint and state payloads are attached before the batch
-// reaches this filing face.
+// execution runs.
 func (r *Run) fileCompressProduct(ctx context.Context, session event.SessionID, product event.CompressProduct) error {
 	if session == "" {
 		return errors.New("tagent: the compression product names no session chain")
@@ -421,24 +399,20 @@ func compressProductEvent(session event.SessionID, agent event.AgentID, product 
 		covered = append(covered, string(key))
 	}
 	survivors := product.Checkpoint()
-	meta := map[string]string{
-		event.MetaKeyEventSummary: "compress product " + string(product.Key),
-		metaKeyCompressRequest:    string(product.Answers.Request),
-		metaKeyCompressProducer:   product.Answers.Producer,
-		metaKeyCompressKey:        string(product.Key),
-		metaKeyCompressCovered:    strings.Join(covered, compressCoveredSeparator),
-		metaKeyCompressText:       product.Text,
-		metaKeyCompressSurvivors:  string(survivors),
-	}
-	if states := product.States(); len(states) > 0 {
-		meta[metaKeyCompressStates] = string(states)
-	}
 	return event.Event{
 		Key:       product.ID,
 		Type:      product.FactType(),
 		Timestamp: at,
-		Meta:      meta,
-		Owner:     event.Address{AgentID: agent, SessionID: session},
+		Meta: map[string]string{
+			event.MetaKeyEventSummary: "compress product " + string(product.Key),
+			metaKeyCompressRequest:    string(product.Answers.Request),
+			metaKeyCompressProducer:   product.Answers.Producer,
+			metaKeyCompressKey:        string(product.Key),
+			metaKeyCompressCovered:    strings.Join(covered, compressCoveredSeparator),
+			metaKeyCompressText:       product.Text,
+			metaKeyCompressSurvivors:  string(survivors),
+		},
+		Owner: event.Address{AgentID: agent, SessionID: session},
 	}
 }
 
@@ -463,9 +437,6 @@ func compressProductOf(evt event.Event) (event.CompressProduct, bool) {
 			return event.CompressProduct{}, false
 		}
 		product = product.WithCheckpoint([]byte(carried))
-	}
-	if carried := evt.Meta[metaKeyCompressStates]; carried != "" {
-		product = product.WithStates([]byte(carried))
 	}
 	return product, true
 }
