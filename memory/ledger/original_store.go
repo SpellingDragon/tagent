@@ -88,8 +88,7 @@ type originalEntry struct {
 //
 // The model is implemented once over the key-value seam, and this tier is that
 // implementation held in a view that never leaves the process: a durable tier
-// runs the same code over its own view, so nothing about recall, retention or
-// deduplication is restated per tier. The tier holds only what the process
+// runs the same code over its own view, so nothing about recall, retention is restated per tier. The tier holds only what the process
 // holds: it survives no restart, and no result it returns claims otherwise.
 type MemoryOriginalStore struct {
 	*kvOriginalStore

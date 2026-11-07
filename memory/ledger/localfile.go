@@ -944,7 +944,7 @@ func (s *kvOriginalStore) BlobCount() int {
 	return len(s.byKey)
 }
 
-// References returns every reference registered under key, one per deduplication
+// References returns every reference registered under key, one per reference
 // scope in a stable order, so which owners, formats and retention policies still
 // name the original stays observable.
 func (s *kvOriginalStore) References(key event.EventID) []OriginalRef {

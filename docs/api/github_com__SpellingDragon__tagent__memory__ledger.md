@@ -540,11 +540,11 @@ type MemoryOriginalStore struct {
     exact recall served byte for byte and segmented reading handing out whole
     lines.
 
-    The model is implemented once over the key-value seam, and this tier is that
-    implementation held in a view that never leaves the process: a durable tier
-    runs the same code over its own view, so nothing about recall, retention
-    or deduplication is restated per tier. The tier holds only what the process
-    holds: it survives no restart, and no result it returns claims otherwise.
+    The model is implemented once over the key-value seam, and this tier
+    is that implementation held in a view that never leaves the process: a
+    durable tier runs the same code over its own view, so nothing about recall,
+    retention is restated per tier. The tier holds only what the process holds:
+    it survives no restart, and no result it returns claims otherwise.
 
 func NewMemoryOriginalStore(options ...MemoryOption) *MemoryOriginalStore
     NewMemoryOriginalStore returns an empty in-memory original store, shaped by
@@ -579,9 +579,9 @@ func (s MemoryOriginalStore) ReadSegmentScoped(ctx context.Context, key event.Ev
     under key as visible inside scope, exactly as the in-memory tier serves it.
 
 func (s MemoryOriginalStore) References(key event.EventID) []OriginalRef
-    References returns every reference registered under key, one per
-    deduplication scope in a stable order, so which owners, formats and
-    retention policies still name the original stays observable.
+    References returns every reference registered under key, one per reference
+    scope in a stable order, so which owners, formats and retention policies
+    still name the original stays observable.
 
 type OriginalRef struct {
 	// Key is the EventID that owns this original. Different keys never share
