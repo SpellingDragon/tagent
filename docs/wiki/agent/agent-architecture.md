@@ -96,7 +96,7 @@
 | `runtime/state` | 生效绑定、发布与退役、会话与邮箱、席位、授权：`binding.go` `publish.go` `retire.go` `lease.go` `session.go` `mailbox.go` `durable.go` `occupancy.go` `authority.go` |
 | `runtime/task` | 任务转移与通知义务：`spec.go` `lifecycle.go` `admission.go` `registry.go` `manager.go` `handoff.go` `logical.go` `progress.go` `restore.go` `wrapper.go` `cancel.go` `hold.go`、`approval/` |
 | `memory/replay` | 链的重放与投影滚界，`BudgetCharsPerToken` 的唯一单源 |
-| `memory/ledger` | 原文仓（blob+ref）、段存储、kv 分层、账本事实面、租约与生命周期；查询与父边按需从链推导（见 memory-architecture §四/§八） |
+| `memory/ledger` | 原文仓（blob+ref）、段存储、kv 追加日志与 `AtomicStore` 缝、账本事实面、租约与生命周期；查询与父边按需从链推导（见 memory-architecture §四/§八） |
 | `memory/query` | 只读投影读缝（`Reading`/`Inventory`/`Projection`） |
 | `memory/{search,embedder}` | 语义检索与向量面（旁路能力） |
 | `tool/{exec,file,knowledge,mcp,recall,spec,subagent}` | 执行适配器、文件与知识面、MCP、召回、工具声明、子 Agent |
@@ -186,7 +186,7 @@ sequenceDiagram
 
 三处取证面各守一段：`examples/contract/` 是按包分组的**可执行契约**（`runtime_agent`、`runtime_task`、`memory_query`、`api_plugin`、`tool_subagent` 各有一组 `Example`），注释说明它钉的是哪个契约、由谁的真实调用者驱动；`tests/integration/` 按域分组（`acceptance`/`capabilities`/`config`/`evolution`/`execution`/`history`/`host`/`inspection`/`journey`/`learning`/`state`）跑跨包真链路；真实框架行为的判据一律**不猜**——`OnEvent` 与模型流的时序这类问题由一次性真机探针取证，结论落进测试注释。
 
-单元测试的存储根必须**显式挪出仓库工作树**并按用例隔离：`memory/ledger` 的本地文件档会创建自己的存储目录（`localfile.go`），「用内存类型配一个逻辑路径」并不等于选择纯内存档；memory tier 与空 Root 不创建关系 journal。根由 `t.TempDir()` 按用例唯一，不得跨用例共享——热更多代「存储段字节不变」与重启模拟所依赖的身份前提由此成立。
+单元测试的存储根必须**显式挪出仓库工作树**并按用例隔离：`memory/ledger` 的本地文件档会创建自己的存储目录（`config.go` 在 `<Root>/kv` 下建目录并开 `journal.log`），「用内存类型配一个逻辑路径」并不等于选择纯内存档；memory tier 与空 Root 不创建关系 journal。根由 `t.TempDir()` 按用例唯一，不得跨用例共享——热更多代「存储段字节不变」与重启模拟所依赖的身份前提由此成立。
 
 ## 已知缺口与演进方向
 

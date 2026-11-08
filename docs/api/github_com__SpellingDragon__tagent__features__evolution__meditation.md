@@ -52,6 +52,12 @@ const (
     existing external_input fact carries: they name mechanism fields, not a new
     fact family, so the frozen fact vocabulary does not grow.
 
+const AnchorRecordName = "anchors.json"
+    AnchorRecordName is the file name one anchor record persists under: the one
+    a plan names inside its agent directory, and the one the host wires for a
+    document that enables no meditation yet. A restart resumes from the record
+    the plan names, so the fallback record has to sit under the same name.
+
 const DefaultInterval = 30 * time.Minute
     DefaultInterval is the tick cadence of a declaration that names none.
 

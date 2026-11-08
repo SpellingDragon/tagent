@@ -1238,11 +1238,13 @@ var (
 func (p *hostMeditationPort) Bind(run *Run) { p.run = run }
 
 // meditationReflection is the reflection loop one generation serves: the plan
-// the document declares beside the driver that fires its passes. A document
-// that enables no meditation serves a nil plan beside no driver.
+// the document declares beside the driver that fires its passes and the
+// watermark gate that loop installed. A document that enables no meditation
+// serves a nil plan beside no driver and no gate.
 type meditationReflection struct {
 	plan   *meditation.Plan
 	driver *meditation.Driver
+	gate   meditation.WatermarkGate
 }
 
 // bindFaces attaches the run faces every reflection driver of this port is
@@ -1267,12 +1269,42 @@ func (p *hostMeditationPort) mountReflection(plan *meditation.Plan) (*meditation
 	if !held {
 		return nil, fmt.Errorf("tagent: the reflection loop of agent %q was built before the run bound its faces", plan.Agent)
 	}
+	gate, err := p.anchorGate(plan)
+	if err != nil {
+		return nil, err
+	}
+	faces.Gate = gate
 	driver, err := plan.Instances(faces, observe)
 	if err != nil {
 		return nil, err
 	}
-	p.installReflection(meditationReflection{plan: plan, driver: driver})
+	p.installWatermark(gate)
+	p.installReflection(meditationReflection{plan: plan, driver: driver, gate: gate})
 	return driver, nil
+}
+
+// anchorGate returns the watermark gate of one generation: the anchor store over
+// the record its plan names, which is the record a loop rebuilt after a
+// generation switch or a restart continues from. The store the loop in effect
+// already reads is reused when it names the same record, so one file keeps one
+// in-process writer while the superseded loop is still winding down.
+func (p *hostMeditationPort) anchorGate(plan *meditation.Plan) (meditation.WatermarkGate, error) {
+	if held, ok := p.reflectionInEffect().gate.(*meditation.AnchorStore); ok && held.Path() == plan.Anchors {
+		return held, nil
+	}
+	return meditation.NewAnchorStore(plan.Anchors)
+}
+
+// installWatermark points the run's anchor store at the record this loop reads,
+// so the watermark the diagnostics report is the watermark the driver advances. A
+// loop that installed no store of its own — a document that enables no
+// meditation, or a mount that runs before the port is bound to its run — leaves
+// the store the run holds as it stands.
+func (p *hostMeditationPort) installWatermark(gate meditation.WatermarkGate) {
+	if p.run == nil || gate == nil {
+		return
+	}
+	p.run.installWatermark(gate)
 }
 
 // installReflection installs one reflection loop as the loop in effect and
@@ -1285,11 +1317,14 @@ func (p *hostMeditationPort) installReflection(next meditationReflection) (medit
 	return previous, held
 }
 
-// restoreReflection puts one reflection loop back as the loop in effect.
+// restoreReflection puts one reflection loop back as the loop in effect, together
+// with the anchor store it read, so a refused candidate leaves the watermark of
+// the loop in service in place.
 func (p *hostMeditationPort) restoreReflection(previous meditationReflection) {
 	p.reflection.Lock()
 	p.face = previous
 	p.reflection.Unlock()
+	p.installWatermark(previous.gate)
 }
 
 // reflectionInEffect reports the reflection loop of the generation in effect.

@@ -117,7 +117,7 @@ func Resolve(doc document.Document, promptDir, storageRoot string) (*Plan, error
 			Observed:       scope.Names,
 			Reads:          reads,
 			Targets:        targets,
-			Anchors:        filepath.Join(storageRoot, "meditation", id, "anchors.json"),
+			Anchors:        filepath.Join(storageRoot, "meditation", id, AnchorRecordName),
 		}
 		declaredBy = id
 	}

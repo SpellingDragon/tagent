@@ -27,7 +27,7 @@
 | `memory/replay/` | 投影、段龄轴、折叠、因果链、回放预算（全部现算） |
 | `memory/search/` | 检索端口 `Searcher`、融合 `Fusion`、真实 store 上的检索实现 |
 | `memory/embedder/` | 嵌入器装配期校验与向量生成 |
-| `memory/ledger/` | 原文仓（blob+ref）、段存储、kv 分层、账本事实面、租约与生命周期 |
+| `memory/ledger/` | 原文仓（blob+ref）、段存储、kv 追加日志与 `AtomicStore` 缝、账本事实面、租约与生命周期 |
 | `memory/query/` | 只读诊断投影（装配面诊断读，非存储面） |
 
 <a id="hard-contracts"></a>
@@ -35,7 +35,7 @@
 
 | # | 契约 | 含义 | 保障机制（可查证处） |
 |---|---|---|---|
-| 1 | **事件不可变** | 一个 key 只命名一个事实；写入后的字节永不原地改写 | 同 key 异字节具名拒绝：`ErrFactKeyConflict`（`event_body.go`）、`ErrContentConflict`（`localfile.go` `Put` / `segment_store.go` `StoreEvent`） |
+| 1 | **事件不可变** | 一个 key 只命名一个事实；写入后的字节永不原地改写 | 同 key 异字节具名拒绝：`ErrFactKeyConflict`（`event_body.go`）、`ErrContentConflict`（`kv_original_store.go` / `segment_store.go` `StoreEvent`） |
 | 2 | **槽位与身份一一对应** | `<pid>:evt:<窗>:<seq>` 里装的就是 `EventID` 指向它的那条事件 | `StoreEvent` 一次 `kvBatch` 同写 evt/idx/meta 三键；`recordOfTierEvent` 拒绝 `body.Key != stored.Key`（`ErrBodyKeyMismatch`） |
 | 3 | **链上没有正文** | 链只存身份、时间、元数据与原生负载；消息正文只走原文仓 | 写入点 `assembly/facts.go:237`：`tier.Originals.Put(ctx, body.Ref(), []byte(body.Message.Content))` |
 | 4 | **声明式查询语义** | 结果 ≡ 全集过滤 → 全序排序 → offset/limit；剪枝与早停只是优化 | 全序键 `(Timestamp, Key)`（`query_events.go` `queryEventRecords`） |
@@ -137,52 +137,51 @@
 | `<pid>:idx:<EventID>` | `window:seq` | `StoreEvent` | 按键取槽位（`GetEvent`） |
 | `<pid>:meta:<WindowTS>` | `{PartitionID, WindowTS, EventCount, MinTime, MaxTime}` | `StoreEvent`（`nextWindowMeta` 只加宽、只自增） | 段发现、时间包络、`EventCount` |
 
-`StoreEvent`（`memory/ledger/segment_store.go:210`）的一次提交就是这三键的**同一个 `kvBatch`**：
+`StoreEvent`（`memory/ledger/segment_store.go:365`）的一次提交就是这三键的**同一个 `Batch`**，经 `AtomicStore.Commit` 落成日志里的一帧：
 
 1. 窗口 `WindowTS` 为负 → 具名拒绝；`seq` 由调用方按分区单调分配。
 2. 已提交过同一记录 → `return nil`（重复提交是幂等成功）；同一槽位换一份字节 → `ErrContentConflict`。
-3. 提交后**跨过屏障**才写进内存 `cache`/`count`：屏障失败时回滚暂存（`kvUnstage`），内存态不出现"读得到但没落盘"的事件。
+3. `Commit` 返回成功**之后**才写进内存索引、读缓存与 `count`：失败包成 `ErrSegmentBarrier`，本批任何一个键都不发布，内存态不出现"读得到但没落盘"的事件。
 
 `Events()` 的顺序是 `(PartitionID, WindowTS, Seq, Key)`；`Load()` 只在 body、idx、meta **三件齐备**时发布该记录，缺任何一件就当作没提交过。`SegmentRequest` 按字节切读（`DefaultSegmentMaxBytes = 64 KiB`），越界与 EOF 分开报。
 
-**线上没有分层压实、没有墓碑执行、没有 TTL 扫描**：分层压实/TTL/回收这一整套仍在 `lifecycle.go` 里在册（其代码注释自述"过期只标墓碑、物理销毁在压实发生"），但装配面未接线，所以链在线上天然只有一层——这也是"链恒重放"能成立的前提。演进方向见 `openspec/changes/runtime-simplicity-upgrade`（把整片快照换成追加日志，未实施）。
+**线上没有分层压实、没有墓碑执行、没有 TTL 扫描**：分层压实/TTL/回收这一整套仍在 `lifecycle.go` 里在册（其代码注释自述"过期只标墓碑、物理销毁在压实发生"），但装配面未接线，所以链在线上天然只有一层——这也是"链恒重放"能成立的前提。追加日志本身也没有压实阶段（[§六](#local-file-kv)），两处缺口互不相干。
 
 <a id="local-file-kv"></a>
-## 六、kv 分层：分片快照
+## 六、kv 层：追加日志与原子存储缝
 
-`localfile` 档的 KV 是**按 key 首前缀分片的快照**，不是单库、也不是 WAL：
+`localfile`（现名 `journal`）档的 KV 是**一份追加日志**（`journal.go`）：只追加、不改写，不是分片快照，也不是每片一文件。
 
 | 语义 | 规则 | 判据 |
 |---|---|---|
-| 分片判据 | `shardLabelOf`＝第一个冒号前的部分；没有冒号归 `global` | `ref:`/`blob:`/`<pid>:` 天然各成一片 |
-| 分片载体 | `<root>/kv/<label>/snapshot.json`，`{version, entries}` | 打开时清掉上次被杀在 rename 中途的 `.tmp` |
-| 写入 | `kvCommit` 先应用 deletes 再应用 puts 到内存 map，然后**只把脏片**写盘 | 触碰哪片重写哪片，写放大不扩散 |
-| 原子性 | 临时文件 + `os.Rename` 换入 ⇒ 进程被 KILL 不会留下撕裂快照 | 重开必见该片最后一次成功提交的状态 |
-| 可见性 | 提交返回即对**进程内**可见；对**新进程**可见即跨过 rename | 打开只登记分片标签；首次点读/前缀读才校验该片并进入有界缓存 |
-| 无 fsync | 故意**不**做 fsync：能挺过进程重启，**挺不过操作系统掉电** | 与"仅 flush"的诚实声明一致 |
-| 事务边界 | `kvBatch` 是原子单位；**跨批没有事务** | 正确性靠顺序不变量（[§二](#hard-contracts) 第 8 条） |
-| 损坏 | 数值段分片在 idx/meta 装载时校验；ref/blob/snapshot/ticket 等分片首次实际读取才校验，均具名 `ErrSnapshotCorrupt` | 不猜格式、不静默丢片；失败不永久缓存，修复后可重试 |
+| 持久单元 | `<root>/kv/journal.log`：一帧 = 4 字节 payload 长度 + 4 字节 CRC32C + payload | 帧头 8 字节；单帧上限 32 MiB，长度域损坏也不会让读方无界分配 |
+| 提交单位 | 一次提交一帧（`journalRecord`：`version` + `puts`/`deletes`），全有或全无 | 格式版本 `journalFormatVersion = 1`，其他版本 `ErrJournalFormat` 拒开 |
+| 写入 | `journalLog.append` 一次写出整帧，写成功后才更新键索引；索引只存位置，值留在帧里 | 写失败的记录不进索引，视图只答得出文件里真有的记录 |
+| 屏障 | 屏障是日志自身的 `fsync`（`journalLog.sync`），空批只走屏障不写帧；驻留集是带字节预算的 LRU，冷值按索引位置回读该帧 | 屏障失败 `ErrJournalBarrier`；成败不可判定 `ErrCommitUncertain` 交调用方重读；预算 1 MiB + 每项 96 字节，驱逐只掉内存 |
+| 撕裂尾 | 半写帧在 `open` 时截断到最后一个完整帧；完整帧校验不过即 `ErrJournalCorrupt` 拒开 | 静默接受一帧损坏＝静默丢一条事实，所以不把损坏帧之前的记录当整份日志 |
+| 已退役布局 | 目录里有子目录或 `shard_*.json` → `ErrJournalLegacyLayout` 具名拒开 | 不迁移、不清理、不覆盖；搬迁由操作方显式跑 `MigrateShardedRoot` |
+| 引擎无关 | `AtomicStore`（`Read`/`Keys`/`Namespaces`/`Commit`）是唯一引擎面 | 提交全有全无、恰好一次屏障；失败注入包在这条缝上，不命名任何文件布局 |
 
-读口只有两种形状：单 key 取（`kv get`）与前缀扫描（按 key 排序）。**没有 range 原语**，也没有"第二个真源"——内存态是分片的投影，不是独立账本。
+读口只有两种形状：单 key 取与前缀列举（按 key 排序），**没有区间原语**，也没有"第二个真源"——内存态是日志索引的投影，真源只有 `journal.log`。
 
 <a id="store-instance-sharing"></a>
 ## 七、打开与实例共享
 
-`OpenTier(ctx, StorageConfig)`（`memory/ledger/config.go:86`）是唯一的打开入口，返回**同一后端的原文仓与段存储**：
+`OpenTier(ctx, StorageConfig)`（`memory/ledger/config.go:178`）是唯一的打开入口，返回**同一后端的原文仓与段存储**：
 
 | 档 | 后端 | 得到的两个 store | 能力声明 |
 |---|---|---|---|
-| `memory` | 进程内 `memKV` | `newFileSegmentStore(newMemKV())` + `NewMemoryOriginalStore()` | `Durable=false`（装配期告警明确说"不跨进程"） |
-| `localfile` | `openLocalFileKV(Root)` | `newKVOriginalStore(kv, nil)` + `newFileSegmentStore(kv)` | `Durable=true` |
+| `memory` | 进程内 `memKV`（同样是 `AtomicStore`） | `newFileSegmentStore(newMemKV())` + `NewMemoryOriginalStore()` | `Durable=false`（装配期告警明确说"不跨进程"） |
+| `localfile`／`journal` | `openJournalKV(<Root>/kv)` | `newKVOriginalStore(store, nil)` + `newFileSegmentStore(store)` | `Durable=true` |
 | `file` | rustviking CLI（默认 `rustviking`，配置默认 `<Root>/config.toml`） | `newRustVikingKV` 之上的同一对 store | `Durable=true` |
 
 **共享语义（与旧页相反，按当前码面）**：`OpenTier` **没有单例注册表**——每次调用各开一套 store 落在同一个后端上。这不是缺陷而是判据：共享的是**后端里的那份事实**，不是 Go 对象。因此
 
-- 两次 `OpenTier(localfile, 同一 root)` 共享同一后端；第二次打开只装载数值分区的 idx/meta，原文仓在首次实际原文访问时才执行原有整库加载；
+- 两次 `OpenTier` 指向同一 root 共享同一后端；第二次打开重放日志索引（只存位置，不读值），冷值在真正读到时才从帧里取回；
 - 不需要"为避免两套生命周期而共享实例"，因为**生命周期组件没有被装配**（[§三](#event-shape) 末段）；
-- 真正的单写者约束由上层给：`file` 档的每次提交是 CLI 调用，`localfile` 档的写入必须串行在一份 `localFileKV` 上——同一进程内不要开两份写同一 root。
+- 真正的单写者约束由上层给：`file` 档的每次提交是 CLI 调用，`journal` 档每次提交追加一帧，所以同一进程内不要开两份写同一 root。
 
-热路径的两个 store 只是**同一份内存分片上的两个视图**，因此"原文仓"与"段存储"永不打架：它们共享 `kvPort`，谁提交谁就带上自己的屏障。
+热路径的两个 store 只是**同一个 `AtomicStore` 上的两个视图**，因此"原文仓"与"段存储"永不打架：谁提交谁就带上自己那一次屏障。
 
 <a id="read-paths"></a>
 ## 八、读路径
@@ -250,10 +249,11 @@
 
 | 缺口 | 现状与防线 | 候选方向 |
 |---|---|---|
-| **分片快照不是追加日志** | 每次提交重写整片 JSON，无 fsync，崩溃后的持久性只到"进程重启"级别 | `openspec/changes/runtime-simplicity-upgrade`：整片快照 → 追加日志（**未实施**，旧目录不自动迁移，新格式具名拒开） |
+| **追加日志只追加，没有压实** | 每帧都留在 `journal.log` 里，删除只写墓碑；打开时重放整份日志建索引 | 加一段压实：把仍持有的键重写成新日志再原子换入（当前无） |
 | **原文过期没有执行面** | 租约与生命周期在册未接线，`retention_policy` 取值为 `keep`，原文随链永存 | 接线 `NewLifecycle` + `Retention`；接线前不得声称"按策略过期" |
 | **`file` 档批次无原子性** | 一次 CLI 调用一个键；中途失败留半批 | 依赖顺序不变量与重试幂等；或在 CLI 侧提供批量原子命令 |
 | **检索向量腿按需计算** | 装配面传 `nil` 嵌入器即纯关键词；有嵌入器时查询候选项现算；`vector_only` 无消费者 | 不保留运行期向量表或持久索引 |
-| **`EventRecord.WindowTS` 注释仍提"压实层"** | 码面已无压实；该注释是上一个形态的残留 | 随 `runtime-simplicity-upgrade` 一并校正（本页已按实际语义写：窗段编号） |
+| **`EventRecord.WindowTS` 注释仍提"压实层"** | 码面已无压实；该注释是上一个形态的残留 | 校正该注释（本页已按实际语义写：窗段编号） |
 | **旧格式字节只能拒不能读** | `DecodeEventBody` 具名拒绝上一版 body | 冷启动重建；不做就地迁移 |
+| **退役分片布局不自动迁移** | 目录里带分片布局时 `ErrJournalLegacyLayout` 拒开，不读也不改写 | 操作方显式跑 `MigrateShardedRoot`：只读源、逐键复制、回读校验 |
 | **段提交失败可能留下孤儿原文** | 原文仓先于段提交落地；失败后 ref/blob 无人引用（同 EventID 重放会复用该消息正文，不堆第二份字节） | 需要一个以链为真源的孤儿清扫器（当前无），或把提交改成“先段后原文”的可回滚组合 |

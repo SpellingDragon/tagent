@@ -452,7 +452,7 @@ func applyHostGCTrace() {
 // - The generation-scoped consumers mount unconditionally: the execution consumer and the host's own native face consumer are wired by this call, so a declaration that grants neither still builds over them and a reload that adds an agent carrying either takes effect without a restart. The execution consumer resolves the tmux capability on the first call of its face, so a host that never runs an execution pays nothing for the mount.
 // - The reflection instance is mounted unconditionally and forwards every commit to the driver of the generation in effect, so a reload that moves or adds a meditation section replaces the driver behind an instance this run already holds.
 // - The host's own native face consumer mounts last, after the meditation consumer whose reflection plan the tool, skill and file face it composes builds over: the order these options are applied in is the order the registry builds.
-// - The reflection anchor store is wired whether or not the boot document enables meditation, so a generation that enables it later mounts its reflection loop over a gate this assembly already holds.
+// - The reflection anchor store is wired whether or not the boot document enables meditation: each generation mounts its loop over the store of the record its own plan names, so a generation that enables, moves or drops meditation reads the anchor record it declares and a rebuilt loop continues from the watermark the previous one consumed.
 func Boot(configPath string, opts ...HostOption) (*Host, error) {
 	applyHostGCTrace()
 	doc, err := loadHostDocument(configPath)
@@ -646,7 +646,7 @@ func Boot(configPath string, opts ...HostOption) (*Host, error) {
 	if meditationPlan != nil {
 		anchorsPath = meditationPlan.Anchors
 	} else if root := storageRootOf(plan); root != "" {
-		anchorsPath = filepath.Join(root, reflectionAnchorsDir)
+		anchorsPath = filepath.Join(root, reflectionAnchorsDir, meditation.AnchorRecordName)
 	}
 	if anchorsPath != "" {
 		options = append(options, WithReflectionAnchors(anchorsPath))

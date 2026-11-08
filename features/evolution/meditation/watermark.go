@@ -62,6 +62,12 @@ var ErrAnchorStoreUnusable = errors.New("evolution: the anchor store requires a 
 // no default and no fallback criterion is substituted for it.
 var ErrAnchorUnreadable = errors.New("evolution: the anchor record cannot be read")
 
+// AnchorRecordName is the file name one anchor record persists under: the one a
+// plan names inside its agent directory, and the one the host wires for a
+// document that enables no meditation yet. A restart resumes from the record the
+// plan names, so the fallback record has to sit under the same name.
+const AnchorRecordName = "anchors.json"
+
 // Anchors is the persisted record of one loop: the moment the last reflection
 // turn was consumed, the moment the last turn of the session ended, and the
 // state machine's open charge.

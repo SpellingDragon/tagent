@@ -1872,8 +1872,10 @@ func (r *Run) countControlFactsLocked() {
 }
 
 // ReflectionGate reports the watermark gate of the generation in effect: the
-// anchor store the reflection loop reads its consumed watermark from, and nil
-// beside a generation that enables no meditation.
+// anchor store the reflection loop it mounted reads its consumed watermark from,
+// and the store the assembly holds beside a generation that enables no
+// meditation. It answers nil only beside an assembly wired with no anchor record
+// at all.
 func (r *Run) ReflectionGate() meditation.WatermarkGate {
 	r.mu.Lock()
 	defer r.mu.Unlock()

@@ -19,6 +19,7 @@ import (
 
 	"github.com/SpellingDragon/tagent/api/event"
 	"github.com/SpellingDragon/tagent/api/plugin"
+	"github.com/SpellingDragon/tagent/features/evolution/meditation"
 	"github.com/SpellingDragon/tagent/features/telemetry"
 	"github.com/SpellingDragon/tagent/runtime/state"
 	tagentfile "github.com/SpellingDragon/tagent/tool/file"
@@ -423,6 +424,63 @@ func TestHotReloadMeditationNoRestart(t *testing.T) {
 	}
 	if plan := host.meditation.port.planInEffect(); plan == nil || plan.Agent != "user" {
 		t.Fatalf("meditation plan in effect after the refused candidate = %+v, want the plan of the generation in service", plan)
+	}
+}
+
+// TestHotReloadMeditationAnchorSurvivesRestart pins the anchor record a reopened host resumes from.
+//   - the reload that enables meditation points the run's watermark at the record its plan names instead of the store the boot wired beside no meditation
+//   - the watermark that loop consumed is written to that record
+//   - a restart over the same document and root reads that watermark back, so the reflection already consumed is not replayed
+//
+// 契约: docs/wiki/agent/agent-architecture.md#meditation-curator
+func TestHotReloadMeditationAnchorSurvivesRestart(t *testing.T) {
+	provider := newGenerationTestProvider(t)
+	root := t.TempDir()
+	configPath := filepath.Join(root, "tagent.yaml")
+	if err := os.WriteFile(filepath.Join(root, "reflect.md"), []byte("reflect on the turn"), 0o644); err != nil {
+		t.Fatalf("write the reflection prompt: %v", err)
+	}
+	booted := bootGenerationHost(t, configPath, generationDocument(root, provider.URL+"/v1", ""))
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	enabled := "    meditation:\n      enabled: true\n      deliver_to: [user]\n      prompt_file: reflect.md\n"
+	rewriteGenerationDocument(t, configPath, generationDocument(root, provider.URL+"/v1", enabled))
+	if _, err := booted.Reload(ctx); err != nil {
+		t.Fatalf("reload of the enabled meditation answered %v, want the loop mounted without a restart", err)
+	}
+	plan := booted.meditation.port.planInEffect()
+	if plan == nil {
+		t.Fatal("meditation plan in effect = none, want the plan the published generation declares")
+	}
+	gate := booted.Run().ReflectionGate()
+	store, ok := gate.(*meditation.AnchorStore)
+	if !ok {
+		t.Fatalf("reflection gate in effect = %T, want the anchor store the generation mounted", gate)
+	}
+	if store.Path() != plan.Anchors {
+		t.Fatalf("anchor record the loaded generation reads = %s, want the record its plan names %s", store.Path(), plan.Anchors)
+	}
+	consumed := time.Now().Add(-time.Minute).UTC().Truncate(time.Second)
+	if err := gate.Advance(ctx, consumed); err != nil {
+		t.Fatalf("advance the watermark of a consumed reflection: %v", err)
+	}
+	if err := booted.Close(ctx); err != nil {
+		t.Fatalf("close the host before the restart: %v", err)
+	}
+
+	restarted := bootGenerationHost(t, configPath, generationDocument(root, provider.URL+"/v1", enabled))
+	restartedGate := restarted.Run().ReflectionGate()
+	restartedStore, ok := restartedGate.(*meditation.AnchorStore)
+	if !ok || restartedStore.Path() != plan.Anchors {
+		t.Fatalf("anchor record the restarted host reads = %v, want the record the plan names %s", restartedGate, plan.Anchors)
+	}
+	resumed, err := restartedGate.Current(ctx)
+	if err != nil {
+		t.Fatalf("read the watermark after the restart: %v", err)
+	}
+	if !resumed.Moment.Equal(consumed) {
+		t.Fatalf("watermark after the restart = %v, want the %v the consumed reflection left, else the restart replays that reflection", resumed.Moment, consumed)
 	}
 }
 

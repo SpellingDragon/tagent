@@ -42,12 +42,13 @@ import (
 var ErrHostReloadStructural = errors.New("tagent: the reload cannot apply its change without a restart")
 
 // ErrHostReloadRestartRequired reports a reload that moves a field whose only
-// consumer Boot built: the storage tier, the request timeout, the observation
-// face, the governance rules, and per agent the tool, skill, read, file,
-// memory and meditation sections. No path in a running host rebuilds
-// those consumers, so the reload refuses the change by name rather than
-// answering success for a value nothing reads; a host that needs it is restarted
-// with the document.
+// consumer the process itself built: the storage tier and its root, which every
+// chain of the run is opened over. No generation rebuilds those consumers, so
+// the reload refuses the change by name rather than answering success for a
+// value nothing reads; a host that needs it is restarted with the document.
+// Every other section a document declares is rebuilt by a generation-scoped
+// consumer and moves with the generation (restartRequiredChanges names the
+// fields that stay).
 var ErrHostReloadRestartRequired error = errHostReloadRestartRequired{}
 
 // errHostReloadRestartRequired is the named refusal of a restart-only change.

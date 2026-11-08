@@ -270,13 +270,14 @@ var ErrHostNoActiveSession = errors.New("tagent: no user session has been admitt
     session the host admitted last.
 
 var ErrHostReloadRestartRequired error = errHostReloadRestartRequired{}
-    ErrHostReloadRestartRequired reports a reload that moves a field whose only
-    consumer Boot built: the storage tier, the request timeout, the observation
-    face, the governance rules, and per agent the tool, skill, read, file,
-    memory and meditation sections. No path in a running host rebuilds those
-    consumers, so the reload refuses the change by name rather than answering
-    success for a value nothing reads; a host that needs it is restarted with
-    the document.
+    ErrHostReloadRestartRequired reports a reload that moves a field whose
+    only consumer the process itself built: the storage tier and its root,
+    which every chain of the run is opened over. No generation rebuilds
+    those consumers, so the reload refuses the change by name rather than
+    answering success for a value nothing reads; a host that needs it is
+    restarted with the document. Every other section a document declares is
+    rebuilt by a generation-scoped consumer and moves with the generation
+    (restartRequiredChanges names the fields that stay).
 
 var ErrHostReloadStructural = errors.New("tagent: the reload cannot apply its change without a restart")
     ErrHostReloadStructural is the family of reload refusals the running host
@@ -419,14 +420,16 @@ func Boot(configPath string, opts ...HostOption) (*Host, error)
     The execution consumer resolves the tmux capability on the first call of its
     face, so a host that never runs an execution pays nothing for the mount.
     - The reflection instance is mounted unconditionally and forwards every
-    commit to the driver of the generation in effect, so a reload that moves
-    or adds a meditation section replaces the driver behind an instance this
-    run already holds. - The host's own native face consumer mounts last,
-    after the meditation consumer whose reflection plan the tool, skill and file
-    face it composes builds over: the order these options are applied in is the
-    order the registry builds. - The reflection anchor store is wired whether
-    or not the boot document enables meditation, so a generation that enables it
-    later mounts its reflection loop over a gate this assembly already holds.
+    commit to the driver of the generation in effect, so a reload that moves or
+    adds a meditation section replaces the driver behind an instance this run
+    already holds. - The host's own native face consumer mounts last, after the
+    meditation consumer whose reflection plan the tool, skill and file face it
+    composes builds over: the order these options are applied in is the order
+    the registry builds. - The reflection anchor store is wired whether or not
+    the boot document enables meditation: each generation mounts its loop over
+    the store of the record its own plan names, so a generation that enables,
+    moves or drops meditation reads the anchor record it declares and a rebuilt
+    loop continues from the watermark the previous one consumed.
 
 func DiagnosticSwitchesFromEnv() (DiagnosticSwitches, error)
     DiagnosticSwitchesFromEnv reads the diagnostic switches the host process
@@ -1721,8 +1724,10 @@ func (r *Run) Recovery() task.RestoreReport
 
 func (r *Run) ReflectionGate() meditation.WatermarkGate
     ReflectionGate reports the watermark gate of the generation in effect:
-    the anchor store the reflection loop reads its consumed watermark from,
-    and nil beside a generation that enables no meditation.
+    the anchor store the reflection loop it mounted reads its consumed watermark
+    from, and the store the assembly holds beside a generation that enables
+    no meditation. It answers nil only beside an assembly wired with no anchor
+    record at all.
 
 func (r *Run) ReflectionInput() meditation.ReflectionInput
     ReflectionInput returns the injection face the scheduled reflection of this
