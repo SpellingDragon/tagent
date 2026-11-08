@@ -8,7 +8,7 @@ API base path: `openapi/wiki/v1` — 完整数据结构和接口参数详见 `re
 | --------------------------------------------- | ---------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------- |
 | 上传文件到知识库                              | `check_repeated_names` → `create_media` → COS Upload → `add_knowledge` | `media_type`（按扩展名），`knowledge_base_id`，`file_name`，`file_size`                            |
 | 上传文件到知识库的某个文件夹                  | 先定位文件夹 → 同上（`folder_id` 传入目标文件夹 ID）                   | 见「文件夹操作」章节                                                                               |
-| 添加网页/微信文章到知识库                     | `import_urls`                                                          | `urls`（1-10 个），`knowledge_base_id`，可选 `folder_id`（省略则根目录）                           |
+| 添加网页/微信文章到知识库                     | `import_urls`                                                          | `urls`（1-10 个），`knowledge_base_id`，`folder_id`（根目录传 `knowledge_base_id`）               |
 | 添加笔记到知识库                              | `add_knowledge`                                                        | `media_type=11`，`note_info.content_id=<note_id>`，`knowledge_base_id`                             |
 | 添加 URL（文件型）到知识库                    | `check_repeated_names` → 下载文件 → 走"上传文件"流程                   | URL 指向 PDF/Word/PPT 等文件时，按文件方式处理                                                     |
 | 检查文件名是否重复                            | `check_repeated_names`                                                 | `params[].name`，`params[].media_type`，`knowledge_base_id`，`folder_id`                           |
@@ -36,41 +36,29 @@ API base path: `openapi/wiki/v1` — 完整数据结构和接口参数详见 `re
 
 ## 写入类工作流
 
-### ⛔ 文件上传安全门（仅适用于文件上传 → `add_knowledge` 流程）
+### ⛔ 文件上传安全门（仅适用于文件上传 → `add_knowledge`）
 
-以下 4 条规则**仅**在上传文件到知识库时适用。搜索、浏览、获取信息等读取操作不受影响。
+文件上传必须按以下顺序执行；读取、搜索和浏览操作不受此门影响：
 
-```
-GATE 1 [TYPE CHECK]
-  Run preflight-check.cjs FIRST. pass=false → reject immediately.
-  NEVER ask "do you still want to try?" for unsupported types.
-  Video files, Bilibili/YouTube URLs, file:// URLs → tell user to use IMA desktop client.
+1. **原始文件预检：** 先运行 `scripts/preflight-check.cjs`。`pass=false` 立即拒绝，不询问是否继续；不支持的视频、`file://` URL、超限文件或类型/签名不匹配的图片不得进入后续步骤。
+2. **文件名与重名检查：** `title` 必须原样等于 `file_name`（含扩展名），不得改名；调用 `check_repeated_names` 后，重名时只允许用户选择保留副本（追加时间戳）或取消，不支持覆盖。
+3. **媒体创建与上传：** `create_media` 成功后使用返回的临时 COS 凭证上传原始文件；上传命令非零退出立即停止，不得调用 `add_knowledge`。
+4. **完成写入：** 仅在 COS 上传成功后调用 `add_knowledge`，并再次检查业务响应 `code=0`；任一步失败向用户报告 `msg` 并停止。
 
-GATE 2 [NAMING]
-  add_knowledge title MUST equal file_name (with extension).
-  NEVER rename, shorten, translate, or modify the original filename.
-  Example: file is "音频.mp3" → title="音频.mp3", file_name="音频.mp3"
-
-GATE 3 [DUPLICATES]
-  Call check_repeated_names BEFORE create_media for ALL file uploads.
-  is_repeated=true → ask user: keep both (append timestamp) or cancel.
-  "Replace" is NOT supported.
-  Timestamp format: {name}_YYYYMMDDHHmmss.{ext}
-
-GATE 4 [UPLOAD EXIT]
-  cos-upload.cjs non-zero exit → STOP immediately.
-  Do NOT call add_knowledge. Report error to user.
-```
+`preflight-check.cjs` 只负责上传前原始文件校验，不转码、不压缩、不重编码；`cos-upload.cjs` 只负责二进制上传，不能替代预检。
 
 ### 上传文件到知识库
 
-完整流程：前置检查 → 重名检查 → 创建媒体 → COS 上传 → COS 验证 → 添加知识。
+完整流程：原始文件预检 → 重名检查 → 创建媒体 → COS 上传成功门 → 添加知识。
 
 ```bash
-# ── Step 1: preflight-check.cjs ← ⛔ GATE 1 ──
+# ── Step 1: preflight-check.cjs（原始文件预检） ──
 # 有扩展名时自动推断；无扩展名时需传 --content-type
-PREFLIGHT=$(node .claude/skills/ima-skill/knowledge-base/scripts/preflight-check.cjs \
-  --file "/path/to/report.pdf")
+if ! PREFLIGHT=$(node "$SKILL_DIR/knowledge-base/scripts/preflight-check.cjs" \
+  --file "/path/to/report.pdf"); then
+  echo "$PREFLIGHT" >&2
+  exit 1
+fi
 echo "$PREFLIGHT"
 # pass=false → 终止，将 reason 展示给用户。NEVER ask "want to try?"
 
@@ -81,29 +69,26 @@ FILE_SIZE=$(echo "$PREFLIGHT" | node -e "const d=JSON.parse(require('fs').readFi
 MEDIA_TYPE=$(echo "$PREFLIGHT" | node -e "const d=JSON.parse(require('fs').readFileSync(0,'utf8'));process.stdout.write(String(d.media_type))")
 CONTENT_TYPE=$(echo "$PREFLIGHT" | node -e "const d=JSON.parse(require('fs').readFileSync(0,'utf8'));process.stdout.write(d.content_type)")
 
-# ── Step 3: check_repeated_names ← ⛔ GATE 3 ──
+# ── Step 3: check_repeated_names（重名检查） ──
 # MANDATORY for ALL file uploads (media_type 1/3/4/5/7/9/13/14/15/20/21).
 # is_repeated=true → ask user: keep both (append _YYYYMMDDHHmmss) or cancel.
-ima_api "openapi/wiki/v1/check_repeated_names" "{
-  \"params\": [{\"name\": \"$FILE_NAME\", \"media_type\": $MEDIA_TYPE}],
-  \"knowledge_base_id\": \"<kb_id>\"
-}"
+CHECK_BODY=$(jq -n --arg name "$FILE_NAME" --argjson media_type "$MEDIA_TYPE" --arg kb_id "<kb_id>" \
+  '{params: [{name: $name, media_type: $media_type}], knowledge_base_id: $kb_id}')
+ima_api "openapi/wiki/v1/check_repeated_names" "$CHECK_BODY"
 # folder_id is optional — omit for root, include for subfolder
 
 # ── Step 4: create_media ──
-CREATE_MEDIA_RESP=$(ima_api "openapi/wiki/v1/create_media" "{
-  \"file_name\": \"$FILE_NAME\",
-  \"file_size\": $FILE_SIZE,
-  \"content_type\": \"$CONTENT_TYPE\",
-  \"knowledge_base_id\": \"<kb_id>\",
-  \"file_ext\": \"$FILE_EXT\"
-}")
-# Extract media_id, url, and cos_credential fields. code≠0 → terminate.
-# COS_URL is the file's accessible URL — used for verification in Step 6.
+CREATE_BODY=$(jq -n --arg file_name "$FILE_NAME" --argjson file_size "$FILE_SIZE" \
+  --arg content_type "$CONTENT_TYPE" --arg kb_id "<kb_id>" --arg file_ext "$FILE_EXT" \
+  '{file_name: $file_name, file_size: $file_size, content_type: $content_type,
+    knowledge_base_id: $kb_id, file_ext: $file_ext}')
+CREATE_MEDIA_RESP=$(ima_api "openapi/wiki/v1/create_media" "$CREATE_BODY")
+# Extract media_id and cos_credential fields. code≠0 → terminate.
+# Keep the returned cos_key and credentials only for this upload workflow.
 
-# ── Step 5: cos-upload.cjs ← ⛔ GATE 5 (non-zero = STOP) ──
+# ── Step 5: cos-upload.cjs（非零退出即停止） ──
 # ⚠️ Large files may exceed default 120s timeout — set --timeout explicitly.
-node .claude/skills/ima-skill/knowledge-base/scripts/cos-upload.cjs \
+node "$SKILL_DIR/knowledge-base/scripts/cos-upload.cjs" \
   --file "/path/to/report.pdf" \
   --secret-id "<cos_credential.secret_id>" \
   --secret-key "<cos_credential.secret_key>" \
@@ -115,22 +100,18 @@ node .claude/skills/ima-skill/knowledge-base/scripts/cos-upload.cjs \
   --start-time "<cos_credential.start_time>" \
   --expired-time "<cos_credential.expired_time>" \
   --timeout 300000
-# ⛔ Non-zero exit → STOP HERE. Do NOT proceed to step 7.
+# ⛔ 非零退出 → 立即停止，不得调用 add_knowledge。
 
-# ── Step 6: add_knowledge ← ⛔ GATE 2 (title = file_name) ──
+# ── Step 6: add_knowledge（title = file_name） ──
 # ONLY execute if Step 5 succeeded (exit code 0).
 # add_knowledge will verify the file was uploaded — no separate verify step needed.
-ima_api "openapi/wiki/v1/add_knowledge" "{
-  \"media_type\": $MEDIA_TYPE,
-  \"media_id\": \"<media_id>\",
-  \"title\": \"$FILE_NAME\",
-  \"knowledge_base_id\": \"<kb_id>\",
-  \"file_info\": {
-    \"cos_key\": \"<cos_credential.cos_key>\",
-    \"file_size\": $FILE_SIZE,
-    \"file_name\": \"$FILE_NAME\"
-  }
-}"
+ADD_BODY=$(jq -n --argjson media_type "$MEDIA_TYPE" --arg media_id "<media_id>" \
+  --arg title "$FILE_NAME" --arg kb_id "<kb_id>" --arg cos_key "<cos_credential.cos_key>" \
+  --argjson file_size "$FILE_SIZE" \
+  '{media_type: $media_type, media_id: $media_id, title: $title,
+    knowledge_base_id: $kb_id,
+    file_info: {cos_key: $cos_key, file_size: $file_size, file_name: $title}}')
+ima_api "openapi/wiki/v1/add_knowledge" "$ADD_BODY"
 ```
 
 #### 批量上传时的重复处理
@@ -138,7 +119,7 @@ ima_api "openapi/wiki/v1/add_knowledge" "{
 可一次性检查所有文件名（最多 2000 个）：
 
 ```bash
-# ⛔ GATE 3 — batch check
+# 批量重名检查
 ima_api "openapi/wiki/v1/check_repeated_names" '{
   "params": [
     {"name": "report.pdf", "media_type": 1},
@@ -156,10 +137,11 @@ ima_api "openapi/wiki/v1/check_repeated_names" '{
 ### 添加网页/微信文章到知识库
 
 ```bash
-# 无需 GATE 3-5（非文件上传）
-# 添加到根目录（不传 folder_id）
+# 非文件上传不执行文件重名、媒体创建和 COS 上传步骤
+# import_urls 的 folder_id 必填；根目录传 knowledge_base_id
 ima_api "openapi/wiki/v1/import_urls" '{
   "knowledge_base_id": "<kb_id>",
+  "folder_id": "<kb_id>",
   "urls": [
     "https://example.com/article",
     "https://mp.weixin.qq.com/s/xxxxx"
@@ -200,12 +182,15 @@ CONTENT_TYPE=$(curl -sI -L "<url>" | grep -i "^content-type:" | tail -1 | awk '{
 TEMP_DIR=$(mktemp -d)
 curl -sL -o "$TEMP_DIR/paper.pdf" "<url>"
 
-# 3. preflight-check.cjs ← ⛔ GATE 1
-PREFLIGHT=$(node .claude/skills/ima-skill/knowledge-base/scripts/preflight-check.cjs \
-  --file "$TEMP_DIR/paper.pdf" --content-type "$CONTENT_TYPE")
+# 3. preflight-check.cjs（原始文件预检）
+if ! PREFLIGHT=$(node "$SKILL_DIR/knowledge-base/scripts/preflight-check.cjs" \
+  --file "$TEMP_DIR/paper.pdf" --content-type "$CONTENT_TYPE"); then
+  echo "$PREFLIGHT" >&2
+  exit 1
+fi
 # pass=false → terminate
 
-# 4. Follow "上传文件到知识库" workflow (Steps 3-7 with all gates)
+# 4. Follow "上传文件到知识库" workflow from the重名检查 step
 
 # 5. Clean up
 rm -rf "$TEMP_DIR"
@@ -219,13 +204,13 @@ rm -rf "$TEMP_DIR"
 
 ## 文件夹操作
 
-知识库内容以文件夹层级组织。`folder_id` 始终以 `folder_` 前缀开头。
+知识库内容以文件夹层级组织。文件夹 ID 以接口返回的 `media_id` 为准，不要凭空构造前缀。
 
 **核心规则**：
 
-- 操作根目录时 **省略 `folder_id` 字段**，不要传该参数
-- **不要将 `knowledge_base_id` 作为 `folder_id` 传入**
-- `get_knowledge_list` 返回的 `current_path`（`FolderInfo[]`）= 面包屑
+- `add_knowledge`、`check_repeated_names`、`get_knowledge_list` 的 `folder_id` 可选；操作根目录时省略。
+- `import_urls` 的 `folder_id` 必填；操作根目录时传 `knowledge_base_id`，指定子文件夹时传该文件夹 ID。
+- `get_knowledge_list` 返回的 `current_path`（`FolderInfo[]`）= 面包屑。
 
 ### 定位文件夹（用户只给了名称）
 

@@ -162,5 +162,24 @@ node <skill-name>.js --help
 - SSoT = ima 云端知识库（54+ 条），操作入口 = `skills/ima/SKILL.md`
 - 旧的本地目录 SOP（抓取→归档→关联→评估）已废弃；原 knowledge-base-manager/ 目录不存在
 
+### 8. X 操作（x）
+X 平台检索与写操作技能：只读面（search / trends / user 用户名解析 / whoami 体检 / grok 总结 /
+digest 趋势简报）统一入口 `scripts/x_api.py`（直连超时→127.0.0.1:12345 代理回退，成功调用记账
+~/x-digest/x_quota.log）；关注/取关写操作唯一通道 `scripts/x_follow.py`（--confirm 硬门 +
+用户当轮批准双门，follows 写限频 50/15min）。详见 `x/SKILL.md`。
+
+### 9. X 凭据排障（x-auth-triage）
+X API 401/403/215/503 凭据排障手册 + 自动分诊脚本（形态学零网络零回显，--live 每线 1 次读探针），
+含 PKCE/refresh_token 续期知识与历史诊断探针档案（references/probes-archive/）。
+详见 `x-auth-triage/SKILL.md`。
+
+### 10. Gemini API（gemini）
+Google Gemini API 调用技能：**models（列模型，免费）/ chat（文本 generateContent）/
+vision（图片 inline_data 多模态）** 统一入口 `scripts/gemini_api.py`（纯 stdlib 零 venv，
+直连超时→127.0.0.1:12345 代理回退，成功调用记账 `~/.config/google/quota.log`）。
+凭据唯一权威存储 `~/.config/google/.env`（0600，GOOGLE_API_KEY；api_key 文件为只读回退镜像），
+仅经 x-goog-api-key 头发往 generativelanguage.googleapis.com，key 零回显零落日志。
+详见 `gemini/SKILL.md`。
+
 ---
 

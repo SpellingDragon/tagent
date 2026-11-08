@@ -33,6 +33,7 @@ providers:
   moonshot:   { provider: openai, api_endpoint: "https://api.moonshot.cn/v1",                  api_key_env: "MOONSHOT_API_KEY" }
   tencent_hy: { provider: openai, api_endpoint: "https://api.lkeap.cloud.tencent.com/plan/v3", api_key_env: "TENCENT_HY_API_KEY" }
   tencent:    { provider: openai, api_endpoint: "https://tokenhub.tencentmaas.com/v1",         api_key_env: "TENCENT_API_KEY" }
+  gemini_oc:  { provider: openai, api_endpoint: "https://generativelanguage.googleapis.com/v1beta/openai", api_key_env: "GOOGLE_API_KEY" }
   # 私有协议按需启用:
   # anthropic: { provider: anthropic, api_endpoint: "https://api.anthropic.com", api_key_env: "ANTHROPIC_API_KEY" }
   # gemini:    { provider: gemini, api_key_env: "GOOGLE_API_KEY" }
@@ -105,8 +106,8 @@ agents:
     # 第 24 个工具轮或跑满 3300 秒后,下一决策转为收尾轮——请求尾部追加收尾指令,
     # 该轮走 120 秒短超时,发起的工具调用一律不受理并配好回执,回答本轮已产出的东西。
     final_round:
-      max_rounds: 24
-      budget_seconds: 3300
+      max_rounds: 2400
+      budget_seconds: 33000
       timeout_seconds: 120
     # 记忆面:本 agent 是共享 tier 的声明处(见文件头的记忆面说明),也是语义引擎的唯一声明处。
     memory:
@@ -159,7 +160,6 @@ agents:
       - { kind: tool, id: skill_search }
       - { kind: tool, id: skill_load }
       - { kind: tool, id: read_file }
-      - { kind: tool, id: mcp_call }
       - { kind: tool, id: mcp_discover }
     # 待接线:memory / max_tokens / compress_threshold / memory_query
 
@@ -216,7 +216,6 @@ agents:
       - { kind: tool, id: replace_content }
       - { kind: tool, id: exec }
       - { kind: tool, id: mcp_call }
-      - { kind: tool, id: mcp_discover }
     # 待接线:memory / max_tool_iterations / max_tokens / compress_threshold /
     #         temperature / thinking_enabled / reasoning_effort
 
