@@ -1,11 +1,11 @@
 # Notes (笔记)
 
 > ⛔ Before ANY write (`import_doc`/`append_doc`): validate ALL string fields (`content`, `title`) are legal UTF-8.
-> Non-UTF-8 content causes irreversible garbled text in IMA. See root SKILL.md § MANDATORY RULES for platform-specific validation methods.
+> Non-UTF-8 content causes irreversible garbled text in IMA. See root SKILL.md § Detailed UTF-8 Encoding Rules for platform-specific validation methods.
 
 API base path: `openapi/note/v1`
 
-通过 IMA OpenAPI 管理用户个人笔记，支持读取（搜索、列表、获取内容）和写入（新建、追加）。
+通过 IMA OpenAPI 管理用户个人笔记，支持读取（搜索、列表、获取内容）和写入（新建、追加、插入图片）。
 
 完整的数据结构和接口参数详见 `references/api.md`。
 
@@ -68,16 +68,24 @@ API base path: `openapi/note/v1`
 
 > **原则**：不确定时，先问。宁可多问一句，也不要误改用户的已有笔记或自作主张创建新笔记。
 
-### 🖼️ 本地图片不支持
+## 图片写入
 
-`import_doc` 和 `append_doc` 的 `content` 字段仅支持Markdown，**不支持本地图片**。
+图片写入只由 notes 模块负责，不得改走 knowledge-base。混合 Markdown 按原顺序分批：连续文本合并，每张图片单独一批。原始文件必须严格小于 3 MiB（3,145,728 bytes），支持 PNG/JPEG/WebP；限制针对原始二进制，不得通过压缩、转码或重编码规避。
 
-写入笔记内容前，必须检查并处理图片引用：
+### 图片预检与写入流程
 
-1. **过滤本地图片** — 如果用户提供的内容中包含本地图片路径（如 `![](file:///...)`, `![](/Users/...)`, `![](C:\...)` 等），**移除这些图片引用**，不要将其写入笔记。
-2. **告知用户** — 移除后主动提醒用户：
-   > "笔记接口暂不支持上传本地图片，以下图片已被过滤：`xxx.png`、`yyy.jpg`。您可以先将图片上传到网络，再用网络链接插入笔记。"
-3. **保留网络图片** — 以 `http://` 或 `https://` 开头的图片链接可以正常保留。
+1. **获取原始内容：** 本地路径和 `file://` 本地 URI 直接读取；`http/https` 图片跟随重定向下载且不携带用户凭证；data URL 先解码。
+2. **原始预检：** 校验大小、允许的 MIME、真实文件签名及 MIME/签名一致性。下载失败、登录页/HTML、非图片响应、超限或签名不匹配时立即拒绝。
+3. **预处理后写入：** 预检全部通过后，将每张图片规范化为单图 data URL；全部图片预处理成功后才按原顺序调用 `append_doc`。任一批次失败立即停止，已成功批次不回滚。
+
+```bash
+node "$SKILL_DIR/notes/scripts/note-images.cjs" \
+  --note-id "笔记ID" --file "/path/to/content.md" --dry-run
+node "$SKILL_DIR/notes/scripts/note-images.cjs" \
+  --note-id "笔记ID" --file "/path/to/content.md"
+```
+
+短内容可用 `--content`；不要把 Base64 直接拼进 shell。`--url <图片路径>` 仅用于本地图片获取临时 `download_url`，不接受远程 URL；该模式同样执行原始预检和大小限制。所有图片处理均不调用 knowledge-base。
 
 ## 常用工作流
 
@@ -134,6 +142,10 @@ ima_api "openapi/note/v1/import_doc" '{"content_format": 1, "content": "# 标题
 ima_api "openapi/note/v1/append_doc" '{"note_id": "笔记ID", "content_format": 1, "content": "\n## 补充内容\n\n追加的文本"}'
 ```
 
+### 批量追加文本和图片
+
+按「图片预检与写入流程」执行；需要预览批次时使用图片章节中的 `--dry-run`，不要在此重复图片校验规则。
+
 ### 按正文搜索
 
 ```bash
@@ -169,7 +181,6 @@ ima_api "openapi/note/v1/search_note" '{"search_type": 1, "query_info": {"conten
 
 - `folder_id` 不可为 `"0"`，根目录 ID 格式为 `user_list_{userid}`（从 `folder_type=1` 的笔记本条目获取）
 - 笔记内容有大小上限，超过时返回 `100009`，可拆分为多次 `append_doc` 写入
-- 写入内容不支持本地图片，写入前必须过滤本地图片路径并告知用户（详见"🖼️ 本地图片不支持"规则）
 - 展示笔记列表时只展示标题、摘要和修改时间，不要主动展示正文
 - 时间字段是 Unix 毫秒时间戳，展示时转为可读格式
 - 返回数据为嵌套结构：搜索结果取 `SearchNoteInfo[].note_book_info.note_id`，笔记本列表取 `NoteFolderInfo[].folder_id`，笔记列表取 `NoteBookInfo[].note_id`，注意按层级解析
