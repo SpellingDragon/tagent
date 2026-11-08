@@ -30,10 +30,20 @@ import run_runtime_scenarios as runner  # noqa: E402
 DATA_PREFIXES = ("tagent/task/v1/spec:", "tagent/task/v1/consume:", "tagent/task/v1/fact:")
 ZERO_PREFIXES = ("tagent/task/v1/attempt:", "tagent/task/v1/reject:")
 
+# The heartbeat a host generation writes every 30s while it is alive. It is
+# liveness evidence for the log-stall verdict, not a durable scan read, so it
+# must never enter the five-prefix counts.
+HEARTBEAT_PREFIX = "tagent: calibration heartbeat "
+
 
 def scan_line(prefix, keys, size=1024):
     return "tagent: durable load scan prefix={} keys={} bytes={} elapsed=12us".format(
         prefix, keys, size)
+
+
+def heartbeat_line(gen=0, phase="rebind", steps=1):
+    return "{}generation={} phase={} processed={} elapsed=5m0s".format(
+        HEARTBEAT_PREFIX, gen, phase, steps)
 
 
 def full_scan_log(data_keys=4, attempt_keys=0, reject_keys=0):
@@ -74,6 +84,24 @@ class DurableScanTest(unittest.TestCase):
         # attempt and no rejection is healthy, not empty.
         self.write_log("gen00.log", full_scan_log(attempt_keys=0, reject_keys=0))
         self.assertEqual(runner.durable_scan_attestation(self.dir)["state"], "attested")
+
+    def test_heartbeat_lines_change_no_scan_count(self):
+        # The two verdicts read different evidence: the stall verdict reads log
+        # growth, the scan verdict reads the five prefix lines. Once a healthy
+        # generation writes a heartbeat every 30s, the generation logs grow while
+        # it is alive - so the scan counts and the per-prefix read tally must come
+        # out identical to a log with no heartbeat at all.
+        self.write_log("gen00.log", full_scan_log())
+        before = runner.durable_scan_attestation(self.dir)
+        self.write_log("gen00.log",
+                       heartbeat_line(0, "boot", 0) + "\n"
+                       + full_scan_log()
+                       + heartbeat_line(0, "inputs", 7) + "\n")
+        self.write_log("gen01.log", heartbeat_line(1, "rebind", 4) + "\n")
+        after = runner.durable_scan_attestation(self.dir)
+        self.assertEqual(after["state"], "attested", after["reason"])
+        self.assertEqual(set(after["prefixes"]), set(runner.DURABLE_SCAN_PREFIXES))
+        self.assertEqual(after["prefixes"], before["prefixes"])
 
     def test_missing_prefix_line_is_red_and_named(self):
         text = "\n".join(scan_line(prefix, 3) for prefix in DATA_PREFIXES

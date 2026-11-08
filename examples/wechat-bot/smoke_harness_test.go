@@ -2728,6 +2728,92 @@ const (
 	smokeCalibrationLivenessBound   = "child-bound"
 )
 
+// smokeCalibrationHeartbeatInterval 是宿主子进程写日志心跳的间隔。
+//
+// 父进程的 log-stall 判据只看代日志是否还在增长（见 smokeCalibrationAwaitLiveness），
+// 而产品日志只在有事件时写：引导恢复、四个会话的重绑、一次慢回合之间都能静默数
+// 分钟。CI runner 被同机任务挤占时，健康的一代因此在五分钟里没有一行新日志而被
+// 判死（03.11 第 29 代的代日志：引导本身占去两分半，此后的重绑还没有产品日志）。
+// 心跳让「日志停写」只由真死进程产生；判定阈值仍是五分钟，检测紧度不因心跳放宽。
+const smokeCalibrationHeartbeatInterval = 30 * time.Second
+
+// smokeCalibrationHeartbeat 是一代宿主子进程的心跳写手：产品日志经日志分发器的
+// 第二出口、心跳直接写 stderr，两者都落进父进程重定向的 logs/genNN.log。心跳不
+// 进产品日志记录器——durable load scan 的取证对象与故障核对的日志计数都是产品
+// 日志，心跳只是存活证据。
+type smokeCalibrationHeartbeat struct {
+	gen   int
+	start time.Time
+	stop  chan struct{}
+	done  chan struct{}
+
+	mu    sync.Mutex
+	phase string
+	steps int
+}
+
+// startSmokeCalibrationHeartbeat 起一代心跳，先写一行报到再按间隔续；stopBeat 由
+// 调用方 defer 收掉：t.Fatalf 走 Goexit 时 defer 仍执行，心跳不会留到下一代。
+func startSmokeCalibrationHeartbeat(gen int) *smokeCalibrationHeartbeat {
+	beat := &smokeCalibrationHeartbeat{gen: gen, start: time.Now(),
+		stop: make(chan struct{}), done: make(chan struct{})}
+	beat.beat()
+	go func() {
+		defer close(beat.done)
+		ticker := time.NewTicker(smokeCalibrationHeartbeatInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-beat.stop:
+				return
+			case <-ticker.C:
+				beat.beat()
+			}
+		}
+	}()
+	return beat
+}
+
+// mark 记录本代走到哪一步、已完成几步；两次心跳之间父进程只看得到这一行。
+func (h *smokeCalibrationHeartbeat) mark(phase string, steps int) {
+	h.mu.Lock()
+	h.phase, h.steps = phase, steps
+	h.mu.Unlock()
+}
+
+// beat 写一行心跳，带上代次、阶段与已处理计数。
+func (h *smokeCalibrationHeartbeat) beat() {
+	h.mu.Lock()
+	phase, steps := h.phase, h.steps
+	h.mu.Unlock()
+	if phase == "" {
+		phase = "spawn"
+	}
+	_, _ = fmt.Fprintf(os.Stderr,
+		"tagent: calibration heartbeat generation=%d phase=%s processed=%d elapsed=%s\n",
+		h.gen, phase, steps, time.Since(h.start).Round(time.Second))
+}
+
+// stopBeat 停住心跳并等它收尾，避免它在代日志关闭后再写。
+func (h *smokeCalibrationHeartbeat) stopBeat() {
+	close(h.stop)
+	<-h.done
+}
+
+// smokeCalibrationLivenessWindow 是等一代宿主报到 ready 的两条观察窗：日志停写
+// 多久算卡死，以及子进程自己的 -test.timeout 到期。生产只用一个值
+// （smokeCalibrationLiveness）；另一组窗口只给判据本身的正反锚用。
+type smokeCalibrationLivenessWindow struct {
+	Stall time.Duration
+	Bound time.Duration
+}
+
+// smokeCalibrationLiveness 是生产口径。
+var smokeCalibrationLiveness = smokeCalibrationLivenessWindow{
+	Stall: smokeCalibrationLivenessStall,
+	Bound: smokeCalibrationChildTimeout,
+}
+
 // smokeCalibrationAwaitLiveness 等一代宿主报到 ready，失败时给出具名 liveness。
 //
 // 这里没有固定的就绪窗：一段比宿主生命周期短的墙钟会把健康但慢的一代判死（每一代
@@ -2735,6 +2821,12 @@ const (
 // 只看三件可观测的事——ready 文件出现、子进程退出、日志心跳是否还在前进——唯一的
 // 硬上限是子进程自己声明的 -test.timeout。
 func smokeCalibrationAwaitLiveness(child *smokeCalibrationChild, readyPath string) (time.Time, error) {
+	return smokeCalibrationAwaitLivenessWithin(child, readyPath, smokeCalibrationLiveness)
+}
+
+// smokeCalibrationAwaitLivenessWithin 是判据本体，窗口由调用方给出：生产传
+// smokeCalibrationLiveness，正反锚各传一组短窗口。
+func smokeCalibrationAwaitLivenessWithin(child *smokeCalibrationChild, readyPath string, window smokeCalibrationLivenessWindow) (time.Time, error) {
 	lastSize, lastGrowth := int64(-1), time.Now()
 	for {
 		if _, err := os.Stat(readyPath); err == nil {
@@ -2751,17 +2843,17 @@ func smokeCalibrationAwaitLiveness(child *smokeCalibrationChild, readyPath strin
 				smokeCalibrationLivenessExit, err, smokeCalibrationLogTail(child.LogFile.Name(), 40))
 		default:
 		}
-		if stalled := time.Since(lastGrowth); stalled > smokeCalibrationLivenessStall {
+		if stalled := time.Since(lastGrowth); stalled > window.Stall {
 			return time.Time{}, fmt.Errorf(
 				"smoke calibration: liveness=%s: the generation log has not grown for %s\n%s",
 				smokeCalibrationLivenessStalled, stalled.Round(time.Second),
 				smokeCalibrationLogTail(child.LogFile.Name(), 40))
 		}
-		if elapsed := time.Since(child.Spawned); elapsed > smokeCalibrationChildTimeout {
+		if elapsed := time.Since(child.Spawned); elapsed > window.Bound {
 			return time.Time{}, fmt.Errorf(
 				"smoke calibration: liveness=%s: the child's own -test.timeout %s expired after %s, "+
 					"and its log is still the only evidence of how far it got\n%s",
-				smokeCalibrationLivenessBound, smokeCalibrationChildTimeout,
+				smokeCalibrationLivenessBound, window.Bound,
 				elapsed.Round(time.Second), smokeCalibrationLogTail(child.LogFile.Name(), 40))
 		}
 		time.Sleep(5 * time.Millisecond)
@@ -2784,6 +2876,58 @@ func smokeCalibrationAwaitFile(path string, timeout time.Duration) (time.Time, e
 
 // smokeCalibrationMS 把时长换成毫秒浮点。
 func smokeCalibrationMS(d time.Duration) float64 { return float64(d) / float64(time.Millisecond) }
+
+// TestSmokeCalibrationLivenessStall 是 log-stall 判据的正反两锚，判据本体不改。
+// - silent_log_is_stalled：日志真的停写时仍按停写时长判死，心跳不得把死进程洗成健康
+// - growing_log_is_not_stalled：日志只要还在增长就不判死，这是贫弱 runner 上健康长代需要的宽容
+func TestSmokeCalibrationLivenessStall(t *testing.T) {
+	window := smokeCalibrationLivenessWindow{Stall: 60 * time.Millisecond, Bound: 3 * time.Second}
+	standIn := func(t *testing.T) *smokeCalibrationChild {
+		t.Helper()
+		logFile, err := os.Create(filepath.Join(t.TempDir(), "gen00.log"))
+		if err != nil {
+			t.Fatalf("create the stand-in generation log: %v", err)
+		}
+		t.Cleanup(func() { _ = logFile.Close() })
+		return &smokeCalibrationChild{LogFile: logFile, Spawned: time.Now(), exited: make(chan error, 1)}
+	}
+
+	t.Run("silent_log_is_stalled", func(t *testing.T) {
+		child := standIn(t)
+		_, err := smokeCalibrationAwaitLivenessWithin(child, filepath.Join(t.TempDir(), "gen00.ready"), window)
+		if err == nil {
+			t.Fatalf("a generation whose log stopped growing was not judged dead")
+		}
+		if !strings.Contains(err.Error(), "liveness="+smokeCalibrationLivenessStalled) {
+			t.Fatalf("the verdict = %v, want liveness=%s", err, smokeCalibrationLivenessStalled)
+		}
+	})
+
+	t.Run("growing_log_is_not_stalled", func(t *testing.T) {
+		child := standIn(t)
+		readyPath := filepath.Join(t.TempDir(), "gen00.ready")
+		stop := make(chan struct{})
+		defer close(stop)
+		go func() {
+			for {
+				select {
+				case <-stop:
+					return
+				case <-time.After(10 * time.Millisecond):
+					_, _ = fmt.Fprintf(child.LogFile,
+						"tagent: calibration heartbeat generation=0 phase=rebind processed=1\n")
+				}
+			}
+		}()
+		go func() {
+			time.Sleep(6 * window.Stall)
+			_ = os.WriteFile(readyPath, []byte("{}"), 0o644)
+		}()
+		if _, err := smokeCalibrationAwaitLivenessWithin(child, readyPath, window); err != nil {
+			t.Fatalf("a generation whose log keeps growing was judged dead: %v", err)
+		}
+	})
+}
 
 // smokeCalibrationEnv 返回一份去掉了重复键的环境：追加项覆盖旧值，保证子进程
 // 看到的 GOCACHE 等变量只有一个。
@@ -3107,6 +3251,9 @@ func smokeCalibrationHostChild(t *testing.T) {
 	}
 
 	started := time.Now()
+	beat := startSmokeCalibrationHeartbeat(gen)
+	defer beat.stopBeat()
+	beat.mark("boot", 0)
 	rig := bootSmokeRig(t, cfg, nil)
 	report := &smokeCalibrationGenerationReport{
 		Leaf: smokeCalibrationLeaf, Generation: gen, Window: plan.Window,
@@ -3124,6 +3271,7 @@ func smokeCalibrationHostChild(t *testing.T) {
 			Generation: gen, Session: chat, Marker: marker,
 			MS: smokeCalibrationMS(time.Since(start)),
 		})
+		beat.mark("rebind", len(report.Rebinds))
 	}
 	report.Self = smokeCalibrationReadSelfUsage()
 	report.WrittenAt = time.Now().UTC().Format(time.RFC3339Nano)
@@ -3146,11 +3294,13 @@ func smokeCalibrationHostChild(t *testing.T) {
 			Generation: gen, Session: step.Session, Index: step.Index,
 			Marker: step.Marker, MS: smokeCalibrationMS(time.Since(start)),
 		})
+		beat.mark("inputs", len(report.Inputs))
 	}
 
 	report.Self = smokeCalibrationReadSelfUsage()
 	report.WrittenAt = time.Now().UTC().Format(time.RFC3339Nano)
 	if report.TriggerSession != "" {
+		beat.mark("restart_point", len(report.Inputs))
 		report.Phase = "restart_point"
 		if err := smokeCalibrationWriteJSON(reportPath, report); err != nil {
 			t.Fatalf("write the restart point %s: %v", reportPath, err)
@@ -3852,6 +4002,9 @@ func smokeLongHostChild(t *testing.T) {
 	recorder := installSmokeLog(t)
 	channel := newSmokeLongChannel(plan)
 	started := time.Now()
+	beat := startSmokeCalibrationHeartbeat(gen)
+	defer beat.stopBeat()
+	beat.mark("boot", 0)
 	rig := bootSmokeRigWithPort(t, cfg, nil, nil, channel.fakeChannel, channel)
 	report := &smokeCalibrationGenerationReport{
 		Leaf: smokeLongLeaf, Generation: gen, Window: plan.Window,
@@ -3882,9 +4035,11 @@ func smokeLongHostChild(t *testing.T) {
 			Generation: gen, Session: chat, Marker: marker,
 			MS: smokeCalibrationMS(time.Since(start)),
 		})
+		beat.mark("rebind", len(report.Rebinds))
 	}
 
 	if reload, ok := smokeLongFindReload(plan, gen); ok {
+		beat.mark("reload", len(report.Rebinds))
 		result := rig.smokeIntegrityReload(reload.Model)
 		outcome := smokeLongReloadOutcome{Generation: gen, Model: reload.Model}
 		if result.err != nil {
@@ -3904,6 +4059,7 @@ func smokeLongHostChild(t *testing.T) {
 	if err := smokeCalibrationWriteJSON(reportPath+".ready", report); err != nil {
 		t.Fatalf("write the long-run ready report %s: %v", reportPath, err)
 	}
+	beat.mark("inputs", 0)
 
 	inputs, trigger := smokeLongGenerationSteps(plan, gen)
 	consumerTurn := smokeLongConsumerMarker(plan, gen, inputs)
@@ -3935,6 +4091,7 @@ func smokeLongHostChild(t *testing.T) {
 					Generation: gen, Session: item.Session, Index: item.Index, Marker: item.Marker,
 				})
 			}
+			beat.mark("inputs", len(report.Inputs))
 			i = end
 			continue
 		}
@@ -3957,6 +4114,7 @@ func smokeLongHostChild(t *testing.T) {
 			Generation: gen, Session: step.Session, Index: step.Index, Marker: step.Marker,
 			MS: smokeCalibrationMS(time.Since(start)),
 		})
+		beat.mark("inputs", len(report.Inputs))
 		i++
 	}
 
@@ -3983,6 +4141,7 @@ func smokeLongHostChild(t *testing.T) {
 	report.WrittenAt = time.Now().UTC().Format(time.RFC3339Nano)
 
 	if trigger != "" {
+		beat.mark("restart_point", len(report.Inputs))
 		report.TriggerSession = trigger
 		report.Phase = "restart_point"
 		if err := smokeCalibrationWriteJSON(reportPath, report); err != nil {
@@ -3992,6 +4151,7 @@ func smokeLongHostChild(t *testing.T) {
 		return
 	}
 
+	beat.mark("drain", len(report.Inputs))
 	report.Phase = "done"
 	if err := rig.close(); err != nil {
 		report.CloseErr = err.Error()
