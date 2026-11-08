@@ -26,7 +26,7 @@
 - [x] E1 父图缺口已由 4.c1 的按需链推导关闭，无独立关系状态
 - [x] E2 **P1 / 阻断 4.a5（`de32c775` 于 `6288a0ac` 返回 FRONTIER EMPTY）**：pin 恢复先于 seeded trim，重启后固定保留内容不丢 —— 验证：带 pin 的 boot 锚与 trim 反证
 - [x] E3 **P1 / 阻断 4.a5（`d2558e4e` 于 `e5cb2663` 返回 FRONTIER EMPTY）**：从持久链发现所有未结清投递，不限热窗口 —— 验证：窗口外 owed 在重启后仍被发现且只处理一次
-- [ ] E4 **P1 / 阻断 4.a5**：从已恢复事实播种最大 delivery-N，禁止复用旧挂起编号 —— 验证：重启后新 held body 使用新编号并正确 park
+- [x] E4 **P1 / 阻断 4.a5（`6f57a9ec` 于 `5c1cba7e` 返回 FRONTIER EMPTY）**：从已恢复事实播种最大 delivery-N，禁止复用旧挂起编号 —— 验证：重启后新 held body 使用新编号并正确 park
 - [ ] E5 **P1 / 阻断 4.a5**：从链恢复每个 session 的最大轮次号，禁止旧 final_round 请求污染新回合 —— 验证：重启后编号不复用、旧请求不误收尾
 - [ ] E6 **P2**：从链重建 ActiveSessions/Unanswered —— 验证：重启后的活跃与待答集合等于重启前
 - [ ] E7 **P2**：恢复 retry attempt 与 next-backoff，不重置预算 —— 验证：重启前后剩余重试次数与等待时间一致
