@@ -1,0 +1,33 @@
+{
+  "id": "qa-03",
+  "category": "qa",
+  "prompts": [
+    "Read data/regions.csv. Reply with the names of every region whose revenue is above 100, comma-separated in file order. Reply with only the names."
+  ],
+  "tools": [
+    "file.read"
+  ],
+  "setup": {
+    "data/regions.csv": "region,revenue\nNorth,120\nSouth,80\nWest,150\n"
+  },
+  "verifier": {
+    "response": {
+      "must_contain": [
+        "North",
+        "West"
+      ],
+      "must_not_contain": [
+        "South"
+      ]
+    }
+  },
+  "examples": {
+    "positive": {
+      "output": "North, West"
+    },
+    "negative": {
+      "output": "North, South",
+      "expect_error_contains": "response"
+    }
+  }
+}

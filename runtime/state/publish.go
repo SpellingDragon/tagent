@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"sort"
 	"sync"
+	"time"
 )
 
 // 契约: docs/wiki/platform/org-hot-reload.md#generations
@@ -148,6 +149,74 @@ type PublicationRecord struct {
 	// Checks carries every check disposition the publication recorded, each
 	// self-contained.
 	Checks []CheckAnswer
+	// window is the publication window the attempt carried: the generation it
+	// moved from, the model version each declared agent runs after the attempt
+	// and the outcome of every configuration dimension it judged. The fields
+	// stay unexported so the record keeps its five-field surface, and a reader
+	// reaches them through the named accessors below.
+	window publicationWindow
+}
+
+// publicationWindow is the decision window of one publication attempt: the
+// generation and fingerprint it moved from, the model version each agent runs
+// after it, the outcome of each configuration dimension it judged, and the time
+// the attempt was recorded.
+type publicationWindow struct {
+	previous            Generation
+	previousFingerprint string
+	models              map[string]string
+	dimensions          map[string]string
+	at                  time.Time
+}
+
+// WithWindow returns a copy of the record carrying the decision window of the
+// attempt: the generation it moved from, the model version of each agent and
+// the outcome of each configuration dimension. The maps are copied, so a caller
+// mutating them afterwards changes no recorded window.
+func (r PublicationRecord) WithWindow(previous Generation, previousFingerprint string, models, dimensions map[string]string, at time.Time) PublicationRecord {
+	r.window = publicationWindow{
+		previous:            previous,
+		previousFingerprint: previousFingerprint,
+		models:              copyWindowMap(models),
+		dimensions:          copyWindowMap(dimensions),
+		at:                  at,
+	}
+	return r
+}
+
+// PreviousGeneration reports the generation the recorded attempt moved from,
+// and zero for a record that carries no window.
+func (r PublicationRecord) PreviousGeneration() Generation { return r.window.previous }
+
+// PreviousFingerprint reports the fingerprint the recorded attempt moved from.
+func (r PublicationRecord) PreviousFingerprint() string { return r.window.previousFingerprint }
+
+// ModelVersions reports the model version each agent runs after the recorded
+// attempt, keyed by agent id, as a copy the caller owns.
+func (r PublicationRecord) ModelVersions() map[string]string { return copyWindowMap(r.window.models) }
+
+// DimensionOutcomes reports the outcome of each configuration dimension the
+// recorded attempt judged, keyed by "agent|dimension", as a copy the caller
+// owns.
+func (r PublicationRecord) DimensionOutcomes() map[string]string {
+	return copyWindowMap(r.window.dimensions)
+}
+
+// RecordedAt reports the time the recorded attempt was recorded, and the zero
+// time for a record that carries no window.
+func (r PublicationRecord) RecordedAt() time.Time { return r.window.at }
+
+// copyWindowMap copies one window map so a reader or a writer never mutates
+// the window a record holds.
+func copyWindowMap(in map[string]string) map[string]string {
+	if in == nil {
+		return nil
+	}
+	out := make(map[string]string, len(in))
+	for key, value := range in {
+		out[key] = value
+	}
+	return out
 }
 
 // PublicationRecorder is the port one publication record is committed through:
@@ -173,6 +242,27 @@ type Candidate struct {
 	Plan StatePlan
 	// Resources is the ledger of the candidate-exclusive resources.
 	Resources *Leases
+	// window is the decision window this attempt carries into its publication
+	// record: the generation it moves from, the model version of each agent and
+	// the outcome of each configuration dimension. The zero window records an
+	// attempt that judged no dimension.
+	window publicationWindow
+}
+
+// WithWindow returns a copy of the candidate carrying the decision window of
+// the attempt: the generation it moves from, the model version of each agent
+// and the outcome of each configuration dimension. The publication record
+// committed for this candidate carries that window, so one generation switch is
+// auditable from its record alone.
+func (c Candidate) WithWindow(previous Generation, previousFingerprint string, models, dimensions map[string]string, at time.Time) Candidate {
+	c.window = publicationWindow{
+		previous:            previous,
+		previousFingerprint: previousFingerprint,
+		models:              copyWindowMap(models),
+		dimensions:          copyWindowMap(dimensions),
+		at:                  at,
+	}
+	return c
 }
 
 // PublishOutcome is what one publication attempt reports: the publication in
@@ -262,6 +352,48 @@ func (p *Publisher) Publish(ctx context.Context, cand Candidate) (PublishOutcome
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return p.publishLocked(ctx, cand, 0)
+}
+
+// Adopt restores the publication a restarted process reads from its durable
+// ledger as the binding generation in effect, without publishing anything: the
+// holder is seeded to the recorded number, the candidate plan is held at that
+// very generation and no record is committed, because the publication the
+// record names already happened. It is the restart-reconciliation path of the
+// sole entry, never a second publication path, and it refuses a candidate whose
+// fingerprint the record does not name, a recorded generation of zero and a
+// holder that already published a generation of its own.
+func (p *Publisher) Adopt(ctx context.Context, cand Candidate, record PublicationRecord) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.bindings == nil {
+		return refuse(ctx, cand, ErrBindingHolderMissing)
+	}
+	if record.Generation == 0 {
+		return refuse(ctx, cand, fmt.Errorf("state: adopt a publication record that assigns no generation"))
+	}
+	if cand.Plan.Plan.Fingerprint != record.Fingerprint {
+		return refuse(ctx, cand, fmt.Errorf("state: adopt a publication record of fingerprint %q with a candidate of %q", record.Fingerprint, cand.Plan.Plan.Fingerprint))
+	}
+	p.bindings.mu.Lock()
+	generation := p.bindings.generation
+	p.bindings.mu.Unlock()
+	if generation != 0 {
+		return refuse(ctx, cand, fmt.Errorf("state: adopt generation %d over a holder that already assigned %d", record.Generation, generation))
+	}
+	p.bindings.mu.Lock()
+	p.bindings.generation = uint64(record.Generation) - 1
+	p.bindings.mu.Unlock()
+	if err := p.bindings.Hold(cand.Plan); err != nil {
+		return refuse(ctx, cand, fmt.Errorf("state: hold the adopted plan: %w", err))
+	}
+	p.current = cand.Plan.Plan
+	p.effective = Publication{
+		Generation:  uint64(record.Generation),
+		Fingerprint: record.Fingerprint,
+		Baseline:    baselineOf(uint64(record.Generation), record.Fingerprint),
+	}
+	p.retire.track(record.Generation, cand.Resources)
+	return p.retire.sweep(ctx)
 }
 
 // Rollback re-publishes the previous full configuration through the same entry
@@ -394,6 +526,17 @@ func (p *Publisher) commitRecord(ctx context.Context, cand Candidate, source Gen
 		RollbackSource: source,
 		Checks:         append([]CheckAnswer(nil), answers...),
 	}
+	window := cand.window
+	if window.previous == 0 {
+		window.previous = Generation(p.effective.Generation)
+	}
+	if window.previousFingerprint == "" {
+		window.previousFingerprint = p.effective.Fingerprint
+	}
+	if window.at.IsZero() {
+		window.at = time.Now().UTC()
+	}
+	record = record.WithWindow(window.previous, window.previousFingerprint, window.models, window.dimensions, window.at)
 	if err := p.records.CommitPublication(ctx, record); err != nil {
 		return PublicationRecord{}, fmt.Errorf("state: commit the publication record: %w", err)
 	}

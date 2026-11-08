@@ -1,0 +1,33 @@
+{
+  "id": "exec-01",
+  "category": "exec",
+  "prompts": [
+    "Run the command `printf 'bench-ok' > result.txt` in the workspace. Do not create the file with the file tools."
+  ],
+  "tools": [
+    "exec"
+  ],
+  "verifier": {
+    "command": {
+      "argv": [
+        "sh",
+        "-c",
+        "test \"$(cat result.txt)\" = \"bench-ok\""
+      ],
+      "expect_exit": 0
+    }
+  },
+  "examples": {
+    "positive": {
+      "files": {
+        "result.txt": "bench-ok"
+      }
+    },
+    "negative": {
+      "files": {
+        "result.txt": "bench-no"
+      },
+      "expect_error_contains": "command"
+    }
+  }
+}

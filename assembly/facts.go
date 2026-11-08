@@ -36,6 +36,14 @@ const mappedSummaryRunes = 120
 // keeps the whole history.
 const factWindow = 2048
 
+// replayResidentWindow bounds the entries one registered projection holds before
+// the live commit path trims it back to factWindow: the window plus one eighth
+// of hysteresis, so the trim runs once per few hundred commits instead of on
+// every one. The entries are a resident copy of the durable facts, never the
+// record; a fact outside the window stays in the chain and is read back by its
+// identity through CommittedEvent.
+const replayResidentWindow = factWindow + factWindow/8
+
 // factCommitFormat and factCommitRetention name the reference registration
 // every committed fact of this run carries: the original format and the
 // retention policy the recall reference is registered under.
@@ -124,7 +132,7 @@ func (r *Run) trimFactsLocked(session event.SessionID) {
 			keys = append(keys, key)
 		}
 	}
-	cut := keys[:r.windowCutLocked(keys)]
+	cut := r.keepPinnedLocked(keys[:r.windowCutLocked(keys)])
 	for _, key := range cut {
 		delete(r.facts, key)
 	}
@@ -155,7 +163,7 @@ func (r *Run) trimSeededFacts() {
 	}
 	dropped := make(map[event.EventID]struct{}, len(r.factOrder))
 	for session, keys := range chains {
-		cut := keys[:r.windowCutLocked(keys)]
+		cut := r.keepPinnedLocked(keys[:r.windowCutLocked(keys)])
 		for _, key := range cut {
 			dropped[key] = struct{}{}
 			delete(r.facts, key)
@@ -184,6 +192,24 @@ func (r *Run) windowCutLocked(keys []event.EventID) int {
 		}
 	}
 	return 0
+}
+
+// trimReplayProjection holds one registered projection to its resident window:
+// when the live commit path grew it past the hysteresis bound, the most recent
+// factWindow entries are rebuilt into a fresh projection and the rest are left
+// to the durable chain. Rebuilding is the one way to drop the per-key material
+// the projection accumulates beside its entries, so the trim leaves no map
+// entry behind.
+func trimReplayProjection(ctx context.Context, projection *replay.ReplayProjection) *replay.ReplayProjection {
+	if projection == nil || projection.Len() <= replayResidentWindow {
+		return projection
+	}
+	entries := projection.Entries()
+	trimmed := replay.NewReplayProjection()
+	for _, entry := range entries[len(entries)-factWindow:] {
+		trimmed.Append(ctx, entry)
+	}
+	return trimmed
 }
 
 // compactFactOrderLocked removes the named identities from the commit order of
@@ -342,6 +368,7 @@ func (r *Run) recordMapped(evt event.Event, entry replay.ProjectionEntry) {
 		return
 	}
 	held.projection.Append(context.Background(), entry)
+	held.projection = trimReplayProjection(context.Background(), held.projection)
 	if evt.Type == event.TypeAgentOutput {
 		held.endedAt = entry.Key
 		held.rangeOpen = false
@@ -599,9 +626,11 @@ func agentOf(evt event.Event) event.AgentID {
 
 // mappedEntryOf projects one committed fact onto the projection entry its
 // consumption carries: the canonical identity of the fact, its frozen type, the
-// one-line read stored beside it and the text the model view speaks for it. A
-// fact that carries no model payload maps onto no entry, so the mapped sequence
-// never carries an empty message the model would read.
+// one-line read stored beside it, the text the model view speaks for it and the
+// recorder generation the envelope names. The generation is copied verbatim and
+// never truncated, so a folded line can tell which runtime instance wrote the
+// fact it reads; a fact that carries no model payload maps onto no entry, so the
+// mapped sequence never carries an empty message the model would read.
 //
 // A configuration change is control-plane material, never a transcript line: the
 // fact names what moved and is read by its identity and metadata, so it maps
@@ -618,13 +647,42 @@ func mappedEntryOf(evt event.Event) (replay.ProjectionEntry, bool) {
 	if content == "" {
 		return replay.ProjectionEntry{}, false
 	}
-	return replay.WithInputEvents(replay.ProjectionEntry{
+	return replay.WithInstanceID(replay.WithInputEvents(replay.ProjectionEntry{
 		Key:     evt.Key,
 		Type:    evt.Type,
 		Summary: oneLineOf(evt.Meta[event.MetaKeyEventSummary], content),
 		Content: content,
 		Time:    evt.Timestamp,
-	}, evt.Meta[event.MetaKeyInputEvents]), true
+	}, evt.Meta[event.MetaKeyInputEvents]), evt.InstanceID), true
+}
+
+// foldProjectionOf renders the projection the age fold judges from the one the
+// session presents: the same mapped sequence without the delivery settlement
+// facts. Delivery accounting is not dialogue. A settlement fact is presented to
+// the model (the spec requires it), but it must not move the fold threshold, the
+// band ages or the segment boundaries a request reads — the tokens of an owed
+// receipt are not the tokens of a turn, and a held obligation pinned in the hot
+// window must not make the history fold sooner. The fold therefore judges and
+// mints products on this accounting-free view, while the consumer applies the
+// products to the full projection the model reads, so the settlement lines stay
+// visible where they belong and nowhere count as conversation.
+//
+// The view is derived on every judgment, never kept as a second mutable
+// sequence: a fold rewrites the full projection, and the derived view follows
+// that rewrite by construction instead of drifting from it.
+func foldProjectionOf(ctx context.Context, projection *replay.ReplayProjection) *replay.ReplayProjection {
+	if projection == nil {
+		return nil
+	}
+	entries := projection.Entries()
+	folded := replay.NewReplayProjection()
+	for _, entry := range entries {
+		if entry.Type == deliverySettlementType {
+			continue
+		}
+		folded.Append(ctx, entry)
+	}
+	return folded
 }
 
 // mappedContentOf reports the text one committed message speaks for on the

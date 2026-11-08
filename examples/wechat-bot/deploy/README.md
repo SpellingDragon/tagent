@@ -141,9 +141,9 @@ sudo -u tagent CGO_ENABLED=0 ./run.sh build
 sudo systemctl restart tagent-wechat
 ```
 
-**更新配置**:`tagent.yaml` 每个键都在启动时经严格解码读一次,任何改动(含 `agents`/`governance`)
-都需 `systemctl restart` 生效——本宿主不做配置热同步。提示词文件(`resources/prompts/*.md`)同理,
-随进程重启加载。
+**更新配置(热更)**:`tagent.yaml` 是编辑界面,进程按内容哈希轮询(500ms+1s 防抖)自动走宿主唯一的 `/reload` 发布入口,通常 2 秒内生效、无需 `restart`;内容不变的 `touch` 不触发。坏 YAML/治理拒绝/安装被拒时日志见 `config reload refused`、**运行中配置保持原代继续服务**,修好后再自动触发;storage/请求超时/观测面/治理规则/各 agent 的 host 工具·技能根·读根·文件面·执行面·记忆段·冥想段等只在 Boot 构造一次的消费者仍须 `systemctl restart`。热更只监视 `TAGENT_CONFIG` 指向的那一个文件,其引用正文(如 `read_root` 下文档)不在监视范围。
+
+链是账:装载成功先提交 `config.declaration` 声明事实,发布尝试再落带 `result` 的发布事实(`published|unchanged|load-failed|governance-rejected|install-failed`),`/reload` 回执读账、安装失败不回成功。重启一致→**静默零发布**;文件较新→自动发布一次;链较新(文件被回滚)→以链为准并把"文件滞后"记入账,**不用陈旧文件覆盖链**(备份须含存储层,否则对账失去账本)。提示词正文仍由既有 FILE 事实面在请求边界投影,不受结构换代影响。
 
 ---
 

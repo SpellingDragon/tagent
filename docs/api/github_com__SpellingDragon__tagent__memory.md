@@ -411,6 +411,8 @@ type QueryOptions struct {
 	// Keyword matches the stored summary or content case-insensitively;
 	// empty narrows nothing.
 	Keyword string
+
+	// Has unexported fields.
 }
     QueryOptions is the filter one event query runs under: the partitions it may
     scan, the time window in Unix milliseconds, the event types and the keyword
@@ -429,10 +431,19 @@ type QueryOptions struct {
     Limit is the page bound where zero means unbounded, and Offset skips that
     many events of the ordered result.
 
+func (o QueryOptions) Prefix() string
+    Prefix reports the key prefix these options narrow their returned set to,
+    and the empty string beside no narrowing.
+
 func (o QueryOptions) Validate() error
     Validate returns the named refusal that rejects this query before it runs,
     or nil when the query may run: an order that is neither declared ordering,
     or a negative offset or limit.
+
+func (o QueryOptions) WithKeyPrefix(prefix string) QueryOptions
+    WithKeyPrefix returns a copy of these options narrowed to the records whose
+    canonical event key carries the given prefix. An empty prefix clears the
+    narrowing, so the zero value of QueryOptions stays the unfiltered query.
 
 type Replay struct {
 	// Has unexported fields.

@@ -166,6 +166,8 @@ func (c *CompressionConsumer) NoteProduct(product event.CompressProduct) {
 // The pass reads the projection and never judges it: whether material is over
 // its bound is already the request on the chain, and the plan only answers which
 // product that request names.
+// - The plan is executed over the accounting-free view the production judged (foldProjectionOf): the products name the conversation material, and delivery settlement lines stay in the projection the model reads.
+// - A history summary covers every settlement fact inside the band it folds: settlement lines never count as fold material (foldProjectionOf), the summary consumes their accounting beside the turns, and the facts stay on the chain readable by identity.
 func (c *CompressionConsumer) Execute(ctx context.Context, session event.SessionID) error {
 	if c == nil || c.sessions == nil || session == "" {
 		return nil
@@ -185,7 +187,11 @@ func (c *CompressionConsumer) Execute(ctx context.Context, session event.Session
 	if threshold <= 0 {
 		return nil
 	}
-	report, err := projection.PlanByAge(ctx, replay.AgeFoldPlan{
+	folded := foldProjectionOf(ctx, projection)
+	if folded == nil {
+		return nil
+	}
+	report, err := folded.PlanByAge(ctx, replay.AgeFoldPlan{
 		KeepRecent:      window.KeepRecentTasks,
 		VolumeThreshold: threshold,
 	})
@@ -201,6 +207,7 @@ func (c *CompressionConsumer) Execute(ctx context.Context, session event.Session
 		if !stands {
 			continue
 		}
+		product = coverSettlementFacts(product, projection)
 		minted := event.CompressProductFor(request.ID, compressionProducer, product.Entry.Key, product.Covered, product.Entry.Content)
 		if err := c.sessions.FileCompressProduct(ctx, session, minted); err != nil {
 			return err
@@ -209,6 +216,50 @@ func (c *CompressionConsumer) Execute(ctx context.Context, session event.Session
 		projection.ApplyProducts([]replay.FoldProduct{product})
 	}
 	return nil
+}
+
+// coverSettlementFacts extends the coverage of one history summary with the
+// delivery settlement facts that stand between the oldest and the newest entry
+// it folds. A segment product is left as it stands: it folds process detail of
+// the new band, which the settlement facts never join. The function is a no-op
+// for a summary that covers no entry of the projection it is applied to.
+func coverSettlementFacts(product replay.FoldProduct, projection *replay.ReplayProjection) replay.FoldProduct {
+	if projection == nil || product.Entry.Type != replay.ProjectionTypeHistorySummary {
+		return product
+	}
+	entries := projection.Entries()
+	position := make(map[event.EventID]int, len(entries))
+	for at, entry := range entries {
+		position[entry.Key] = at
+	}
+	low, high := len(entries), -1
+	for _, key := range product.Covered {
+		at, held := position[key]
+		if !held {
+			continue
+		}
+		if at < low {
+			low = at
+		}
+		if at > high {
+			high = at
+		}
+	}
+	if high < low {
+		return product
+	}
+	extra := make([]event.EventID, 0, 2)
+	for at := low; at <= high; at++ {
+		if entries[at].Type != deliverySettlementType {
+			continue
+		}
+		extra = append(extra, entries[at].Key)
+	}
+	if len(extra) == 0 {
+		return product
+	}
+	product.Covered = append(append([]event.EventID{}, product.Covered...), extra...)
+	return product
 }
 
 // pending reports the judgments one session filed that no product answers yet,

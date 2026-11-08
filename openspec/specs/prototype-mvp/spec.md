@@ -1,7 +1,7 @@
 # prototype-mvp Specification
 
 ## Purpose
-TBD - created by archiving change make-prototype-runnable-mvp. Update Purpose after archive.
+可运行的最小原型：事件循环与协作式退出可实际启动，工具任务、错误与调用归属可辨，state 是唯一运行时权威，其余面不另立第二份真相。
 ## Requirements
 ### Requirement: 可运行的事件循环与协作式退出
 

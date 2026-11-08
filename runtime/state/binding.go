@@ -148,6 +148,27 @@ type AgentBinding struct {
 	// Set is the tool-set connection of the agent; its Close is governed by a
 	// resource lease rather than by the release of this binding.
 	Set trpctool.ToolSet
+	// scoped carries the session-scoped tool face of a self-reflecting host.
+	// It stays unexported so the binding keeps its closed exported field set;
+	// WithScopedFace sets it and ToolFace reads it.
+	scoped scopedFace
+}
+
+// scopedFace names the dedicated reflection session of a self-reflecting
+// host and the tools only that session may see. It is one unexported field on
+// the binding, so a request scopes the tool face without widening the exported
+// surface of the binding.
+type scopedFace struct {
+	session event.SessionID
+	only    []string
+}
+
+// WithScopedFace reports a copy of the binding carrying the dedicated
+// reflection session and the tools only that session may see. The composition
+// root calls it when it contributes a self-reflecting host agent.
+func (b AgentBinding) WithScopedFace(session event.SessionID, only []string) AgentBinding {
+	b.scoped = scopedFace{session: session, only: append([]string(nil), only...)}
+	return b
 }
 
 // PromptSource is the prompt source of one agent: the structural binding that
@@ -470,7 +491,8 @@ func (h *BindingHandle) Release(ctx context.Context) error {
 // a tool name it cannot call. Keeping the later-registered tools behind the
 // published ones also keeps the provider-side prefix cache valid for the larger
 // stable part of the request.
-func ToolFace(binding AgentBinding) (map[string]trpctool.Tool, []string) {
+// - A named session reads the session-scoped face: reflection-only tools are dropped for every session other than the binding's dedicated reflection session; a call that names no session reads the full published face.
+func ToolFace(binding AgentBinding, session ...event.SessionID) (map[string]trpctool.Tool, []string) {
 	var visible []string
 	var narrowed bool
 	if resources, ok := binding.Set.(*ToolResources); ok {
@@ -499,22 +521,47 @@ func ToolFace(binding AgentBinding) (map[string]trpctool.Tool, []string) {
 	sort.Strings(stable)
 	order := append([]string(nil), stable...)
 	resources, ok := binding.Set.(*ToolResources)
-	if !ok {
+	if ok {
+		for _, t := range resources.Tools(context.Background()) {
+			if t == nil || t.Declaration() == nil {
+				continue
+			}
+			name := t.Declaration().Name
+			if narrowed && !slices.Contains(visible, name) {
+				continue
+			}
+			if _, held := tools[name]; held {
+				continue
+			}
+			tools[name] = t
+			order = append(order, name)
+		}
+	}
+	return scopedToolFace(binding, tools, order, session)
+}
+
+// scopedToolFace applies the session-scoped reflection filter to one assembled
+// face: reflection-only tools stay visible only to the binding's dedicated
+// reflection session and are dropped for every other named session.
+func scopedToolFace(binding AgentBinding, tools map[string]trpctool.Tool, order []string, session []event.SessionID) (map[string]trpctool.Tool, []string) {
+	if len(session) == 0 || binding.scoped.session == "" || len(binding.scoped.only) == 0 || session[0] == binding.scoped.session {
 		return tools, order
 	}
-	for _, t := range resources.Tools(context.Background()) {
-		if t == nil || t.Declaration() == nil {
-			continue
-		}
-		name := t.Declaration().Name
-		if narrowed && !slices.Contains(visible, name) {
-			continue
-		}
-		if _, held := tools[name]; held {
-			continue
-		}
-		tools[name] = t
-		order = append(order, name)
+	hidden := make(map[string]bool, len(binding.scoped.only))
+	for _, name := range binding.scoped.only {
+		hidden[name] = true
 	}
-	return tools, order
+	filtered := make(map[string]trpctool.Tool, len(tools))
+	for name, tool := range tools {
+		if !hidden[name] {
+			filtered[name] = tool
+		}
+	}
+	kept := make([]string, 0, len(order))
+	for _, name := range order {
+		if !hidden[name] {
+			kept = append(kept, name)
+		}
+	}
+	return filtered, kept
 }

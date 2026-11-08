@@ -524,6 +524,7 @@ const testExitCode = 7
 type scriptedExecutor struct {
 	mu        sync.Mutex
 	starts    int
+	probes    int
 	decls     []ExecutionDecl
 	probeFn   func() (ProbeResult, error)
 	stopFn    func(context.Context) (StopEvidence, error)
@@ -540,6 +541,9 @@ func (e *scriptedExecutor) Start(_ context.Context, decl ExecutionDecl) (Resourc
 }
 
 func (e *scriptedExecutor) Probe(_ context.Context, _ ResourceKey) (ProbeResult, error) {
+	e.mu.Lock()
+	e.probes++
+	e.mu.Unlock()
 	if e.probeFn != nil {
 		return e.probeFn()
 	}
@@ -573,6 +577,13 @@ func (e *scriptedExecutor) stopCount() int {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	return e.stops
+}
+
+// probeCount reports how many liveness probes the double observed.
+func (e *scriptedExecutor) probeCount() int {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.probes
 }
 
 func (e *scriptedExecutor) declarationAt(t *testing.T, i int) ExecutionDecl {

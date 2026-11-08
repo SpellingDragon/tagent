@@ -273,6 +273,18 @@ func (s *CaptureSink) RecordAttempt(ctx context.Context, record AttemptRecord) e
 	return s.recordLine(ctx, RecordKindAttempt, NewAttemptLine(record))
 }
 
+// RecordAnnex admits the acceptance annex of one training sample through the
+// same bounded capture entry every record kind enters: the annex line is
+// marshaled through the versioned line, judged by the same per-record,
+// in-flight and byte bounds, and counted in the loss ledger and the sealed
+// manifest exactly as an episode, decision or attempt line is. It is
+// append-only: the entry writes one new line under the sample identity and
+// never edits an earlier annex or the attempt record it judges. A refusal is
+// reported by name with the bound that refused it, never a silent bypass.
+func (s *CaptureSink) RecordAnnex(ctx context.Context, record AnnexRecord) error {
+	return s.recordLine(ctx, RecordKindAnnex, NewAnnexLine(record))
+}
+
 // recordLine is the unified capture entry of the recorder face: one versioned
 // record line is marshaled and admitted through the same queue and the same
 // bounds every other entry stands in, and a marshal failure or an admission

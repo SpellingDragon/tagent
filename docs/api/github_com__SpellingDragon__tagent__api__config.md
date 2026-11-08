@@ -125,6 +125,18 @@ type AgentSpec struct {
 	// whole while it folds the older ones. Zero reads the declaration default
 	// of 2.
 	KeepRecentTasks int
+	// ProviderContextWindow is the provider context window this agent's final
+	// requests are budgeted against, in tokens. Zero declares no window of its
+	// own, so the request budget derives the provider window from MaxTokens; a
+	// declaration naming neither opens no budget gate, and every request runs
+	// whole. This field never changes the replay window MaxTokens names.
+	ProviderContextWindow int
+	// OutputReserve is the token allowance the input budget leaves for the
+	// model's output. Zero reads the declaration default share of the provider
+	// window (runtime/agent.DefaultOutputReserveDivisor); a positive value
+	// declares the allowance itself. The input budget is the provider window
+	// minus this allowance.
+	OutputReserve int
 	// EnvironmentBlock states whether every request of this agent closes with
 	// the dynamic environment block: the tool, skill and MCP faces the request
 	// carries beside the open asynchronous task state. False keeps a request

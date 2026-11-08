@@ -4,7 +4,7 @@
 
 执行核只做三件事：**把一次调用的事件读成一次决策、把这次决策的工具调用按任务受理、把关闭做成真实义务结清**。它自己不持状态——绑定、会话、任务与消费位置都在属主手里，执行核只借、只读、只交还。
 
-三个概念贯穿全篇（与 [storage-concept-map](../../demos/storage-concept-map.html) 同一套词汇）：**链**是身份与因果（轻、可恒重放）；**原文仓**是 blob 字节仓加 ref 引用账目；**账本**记任务迁移、消费回执与交付七态。通知消费账＝席位＋回执＋settle attempt，除此以外的读数一律现算。时间旅行演示见 [storage-time-travel](../../demos/storage-time-travel.html)。
+三个概念贯穿全篇（与 [storage-concept-map](../../demos/storage-concept-map.html) 同一套词汇）：**链**是身份与因果（轻、可恒重放）；**原文仓**是 blob 字节仓加 ref 引用账目；**账本**记任务迁移与消费回执；交付义务与结算则落链（见第四节）。通知消费账＝席位＋回执＋settle attempt，除此以外的读数一律现算。时间旅行演示见 [storage-time-travel](../../demos/storage-time-travel.html)。
 
 <a id="module-position"></a>
 ## 一、模块定位：调度事件、做一次决策、按义务关闭
@@ -37,14 +37,14 @@
 | 任务层 | `runtime/task/` | 责任四问的账：受理、状态、通知、交付义务、恢复 |
 | 原文与投影 | `memory/replay/` `memory/ledger/` `memory/query/` | 链的重放与滚界、字节仓落盘、只读投影读缝 |
 | 组合根 | `assembly/` | 唯一装配与发布点，host 簇按域分文件 |
-| 扩展端口 | `api/plugin/` | 两相位、六端口 |
+| 扩展端口 | `api/plugin/` | 按材料流一趟派发、六端口 |
 | 旁路 | `features/{evolution,telemetry,rl}` | 治理、冥想、观测、训练数据 |
 
-**2.1 一次驱动的骨架**：借执行开始那一刻的绑定代；聚合**本 invocation 自己**的 ready 输入（同会话两次 invocation 永不并批——各自只聚合自己的输入，各自的决策独立于对方的终结）；装配一次原生请求；经唯一归约入口读出终结；每次工具调用经任务包装受理；settled 通知回流到发起调用的那次 invocation，驱动它的下一次决策，而那一次借的是**它自己开始时**生效的代。`Turn{InvocationID,Decisions,Terminal,Failure,FinalRound}` 是驱动交回的结局：终态只读 `model.Kind`；`Failure` 是失败时宿主可投递的原文，归约没观察到原因就留空，不编一个。
+**2.1 一次驱动的骨架**：借执行开始那一刻的绑定代；聚合**本 invocation 自己**的 ready 输入（同会话两次 invocation 永不并批——各自只聚合自己的输入，各自的决策独立于对方的终结）；装配一次原生请求；经唯一归约入口读出终结；每次工具调用经任务包装受理；settled 通知回流到发起调用的那次 invocation，驱动它的下一次决策，而那一次借的是**它自己开始时**生效的代。`Turn{InvocationID,DecisionCount,Terminal,Failure,FinalRound}` 是驱动交回的结局：终态只读 `model.Kind`；`Failure` 是失败时宿主可投递的原文，归约没观察到原因就留空，不编一个。
 
-**2.2 三个读写缝**：`Capture` 三方法——`Snapshot` 在请求开始前固定这次决策跑在什么视图上（模型名、提示词版本、可见工具、可见技能，连同当时的请求；**请求被观察，不被改写**）、`Record` 把一次被观察的尝试与产生它的响应一起入账（结局已归约，记录侧共用那一个终结）、`Seal` 关账并报告真实写入者确认过的清单（发现仍在飞的记录是**具名失败**，不是完成的捕获）。`NoticeFeed`（`NoticeBoundary`/`NoticesFrom`）把通知当链上事实的投影增量读，游标永不跨折叠重写保留；`HistoryFace`（`SessionHistory`/`CommitHistory`）分开读会话历史与已提交历史。
+**2.2 三个读写缝**：`Capture` 三方法——`Snapshot` 在请求开始前固定这次决策跑在什么视图上（模型名、提示词版本、可见工具、可见技能，连同当时的请求；**请求被观察，不被改写**）、`Record` 把一次被观察的尝试与产生它的响应一起入账（结局已归约，记录侧共用那一个终结）、`Seal` 关账并报告真实写入者确认过的清单（发现仍在飞的记录是**具名失败**，不是完成的捕获）。`NoticeFeed`（`NoticeBoundary`/`NoticesFrom`）把通知当链上事实的投影增量读，游标永不跨折叠重写保留；`HistoryFace`（`SessionHistory`/`CommitHistory`/`SessionFacts`）分开读会话历史与已提交历史。
 
-**2.3 只读投影读缝**（`memory/query`）：`Reading` 三方法 `Published`/`Sites`/`Tasks` 是**三种语义单位**，不是一个属主一个方法。`Published` 的 agent 清单与租约清单取自同一代，绝不跨两代配对；`Sites` 把站点快照与此刻持有该席位的调用放进同一次读。`Inventory` 从这一个口现读六个维度（agents/sessions/invocations/tasks/notices/leases），视图与计数出自同一次收集；`ReadingSource.Freeze` 产出一份冻结读数与同次收集的逐源水位，`DetailSource` 的 `Order`/`DetailOf` 逐身份作答，`Projection` 的 `Snapshot`/`List`/`Detail`/`Subscribe` **只读冻结读数、绝不回读属主**。四条红线：每次调用都从持有事实的属主现读、逐项如实返回或具名失败；源不可读的维度以具名拒绝回答，绝不以空明细冒充可读；读口不记录、不缓存、不合成（不是第二个真源）；越权对象被排除而非被改写。
+**2.3 只读投影读缝**（`memory/query`）：`Reading` 三方法 `Published`/`Sites`/`Tasks` 是**三种语义单位**，不是一个属主一个方法。`Published` 的 agent 清单与租约清单取自同一代，绝不跨两代配对；`Sites` 把站点快照与此刻持有该席位的调用放进同一次读。`Inventory` 从这一个口现读七个维度（agents/sessions/invocations/tasks/notices/leases/attention；计数仍只给前六个，注意力是 `InventoryView.Attention()` 明细），视图与计数出自同一次收集；`ReadingSource.Freeze` 产出一份冻结读数与同次收集的逐源水位，`DetailSource` 的 `Order`/`DetailOf` 逐身份作答，`Projection` 的 `Snapshot`/`List`/`Detail`/`Follow` **只读冻结读数、绝不回读属主**。四条红线：每次调用都从持有事实的属主现读、逐项如实返回或具名失败；源不可读的维度以具名拒绝回答，绝不以空明细冒充可读；读口不记录、不缓存、不合成（不是第二个真源）；越权对象被排除而非被改写。
 
 <a id="meditation-curator"></a>
 ## 三、反思与旁路冥想：一个机制，两种观察面
@@ -77,7 +77,9 @@
 
 **派发范围门**：随动回合要走跨会话投递时，`SettleDriver.DeclareScope` 先声明它按哪份名册判定——名册就是宿主文档声明的 agent 名册（`settleScopeOfDocument`），成员测试与 `send` 那侧白名单是**同一条规则**，两族派发不各判一套。驱动旁边没有声明、或声明为空名单，则**一切派发被拒**（fail-closed）；越界目标具名拒绝且目标零感知，被拒的条目留在邮箱账上，派发义务不因失败消失。
 
-**投递账目是读面**：`Run.DeliveryLedger()` 按源事件与目标回读本 run 提交过的投递事实（`Records`/`BySource`/`ByTarget`），逐条给出源事件、目标、投递身份、回执与事实类型；一条投递身份对应一条有效记录，查询不解析正文。两路投递的事实类型**分立**（agent 主动投递是 `external_input`，框架结算投递是 `task_settled`），投递元数据却同构（四键见[事件篇](../event/event-architecture.md#const-list)）。
+**投递账目是读面**：`Run.DeliveryLedger()` 按源事件与目标回读本 run 提交过的投递事实（`Records`/`BySource`/`ByTarget`），逐条给出源事件、目标、投递身份、回执与事实类型；一条投递身份对应一条有效记录，查询不解析正文。两路投递的事实类型**分立**（agent 主动投递是 `external_input`，框架结算投递是 `task_settled`），投递元数据却同构（五键见[事件篇](../event/event-architecture.md#const-list)）。
+
+**交付义务在链上，不在账本里**：一条带正文的输出在**同一笔事实**里声明 owed（目标+血统），交付身份由落链后的 fact key 确定性导出；之后 `delivery.settlement` 族以「身份+状态」为键**追加式**落链（四结算态 held/sent/refused/headless-retired＋迁移专用 owed 态，held 的 reason ∈ {approval, retrying, retry-exhausted, unknown}）。重启只读链对账——已确认 sent 不重发、无结算事实或 held(retrying) 的续跑、超时这类结果未知的不自动重发，旧 KV 六态幂等迁移后只读留存。可见性口径：结算事实按类型→角色映射进模型请求，owed 声明随 `agent_output` 本体呈现、无独立可见面；「发不出去而模型也没说」由既有失败告知与一条按 reason 分层的延迟告知兜住（`retrying`→稍后必补送；`approval`/`unknown`/`retry-exhausted`→已转人工），对用户怎么说由模型自主。
 
 <a id="package-layout"></a>
 ## 五、包与文件结构
@@ -88,9 +90,9 @@
 | `api/config` | 纯组织声明：解析、规范化、指纹，不依赖运行时包 |
 | `api/document` | 宿主文档方言的共用适配面 |
 | `api/model` | 锁定 tRPC 模型协议的薄别名层，唯一自有行为是请求作用域终结归约 |
-| `api/plugin` | 两相位六端口的窄口扩展点（`call->call`/`call->ruling`/`request->environment`/`fact->observation`/`fact->view`/`fact->compression`） |
+| `api/plugin` | 六端口窄口扩展点（`call->call`/`call->ruling`/`request->environment`/`fact->observation`/`fact->view`/`fact->compression`） |
 | `api/view` | 呈现面的共用类型 |
-| `runtime/agent` | 事件调度与单次决策：`agent.go`（三方法与四条红线）`loop.go`（驱动、捕获、通知与历史读缝）`invocation.go` `request_assembly.go` `delegate.go` `handoff.go` `final_round.go` `shutdown.go` `skeleton_assert.go` |
+| `runtime/agent` | 事件调度与单次决策：`agent.go`（三方法与四条红线）`loop.go`（驱动、捕获、通知与历史读缝）`invocation.go` `request_assembly.go` `delegate.go` `handoff.go` `final_round.go` `consumer.go` `fuse.go` `final_round_planner.go` `skeleton_assert.go` |
 | `runtime/state` | 生效绑定、发布与退役、会话与邮箱、席位、授权：`binding.go` `publish.go` `retire.go` `lease.go` `session.go` `mailbox.go` `durable.go` `occupancy.go` `authority.go` |
 | `runtime/task` | 任务转移与通知义务：`spec.go` `lifecycle.go` `admission.go` `registry.go` `manager.go` `handoff.go` `logical.go` `progress.go` `restore.go` `wrapper.go` `cancel.go` `hold.go`、`approval/` |
 | `memory/replay` | 链的重放与投影滚界，`BudgetCharsPerToken` 的唯一单源 |
@@ -99,13 +101,13 @@
 | `memory/{search,embedder}` | 语义检索与向量面（旁路能力） |
 | `tool/{exec,file,knowledge,mcp,recall,spec,subagent}` | 执行适配器、文件与知识面、MCP、召回、工具声明、子 Agent |
 | `features/evolution` | 演进域：`governance/`（治理）、`meditation/`（冥想）、网关与后验面 |
-| `features/telemetry` | 观测旁路：提交观察者与遥测阶梯 |
+| `features/telemetry` | 观测旁路：CommitObserver / LogObserver / SDKObserver 三观察者 |
 | `features/rl` | 训练数据面：模型租约与替换事实 |
-| `assembly/` | **唯一组合根**：`tagent.go`（`Assemble` 是唯一装配入口）`run.go` `prepare.go` `request.go` `facts.go` `invoke.go` `read.go` `commit.go` `tools.go` `age_fold.go` `settle_turn.go` `skeleton_assert.go` |
+| `assembly/` | **唯一组合根**：`run.go`（`Assemble`：`assembly/run.go:368`）`tagent.go`（仅包文档） `prepare.go` `request.go` `facts.go` `invoke.go` `read.go` `commit.go` `tools.go` `age_fold.go` `settle_turn.go` `skeleton_assert.go` |
 | `cli/` | 宿主壳：命令面与宿主转换面，位于组合根之上 |
 | `internal/bench` | 基准面 |
 
-**组合根与根包的关系**：module 根不再承载 Go 源，公共入口是包 `assembly`（目录名即包名，D16）。host 簇在组合根内**按域分文件**，不聚成一个大 `host.go`：`host_face.go`（回环端点的鉴权先于读体）`host_delivery.go`（交付账本：正文先成为持久义务再离开）`host_document.go`（宿主文档方言与它拼出的装配）`host_tools.go`（宿主贡献的工具与端口）`host_diagnostics.go`（诊断可见面）`host_capture.go`（轨迹捕获）`host_model.go`（采样参数落在已发布绑定与 provider 之间）`host_reload.go`（配置重载经唯一发布入口）。
+**组合根与根包的关系**：module 根不再承载 Go 源，公共入口是包 `assembly`（目录名即包名，D16）。host 簇在组合根内**按域分文件**，不聚成一个大 `host.go`：`host_face.go`（回环端点的鉴权先于读体）`host_delivery.go`（交付结算：owed 声明随输出同笔落链、四结算态追加落链、旧 KV 欠条迁移）`host_document.go`（宿主文档方言与它拼出的装配）`host_tools.go`（宿主贡献的工具与端口）`host_diagnostics.go`（诊断可见面）`host_capture.go`（轨迹捕获）`host_model.go`（采样参数落在已发布绑定与 provider 之间）`host_reload.go`（配置重载经唯一发布入口）。
 
 依赖方向由 `golden/runtime/architecture.json` 登记、由 `scripts/gates/check_runtime_architecture.py` 执法：未登记的包与未允许的边一律失败并等人工批准，不用通配豁免；`cli` 指向组合根的回边不算环，真环在其余包之间检出。
 
@@ -160,7 +162,7 @@ sequenceDiagram
 <a id="context-management"></a>
 ## 九、上下文管理：段龄折叠、配对校验、呈现边界
 
-三龄段折叠是唯一压缩管线（`memory/replay` + `assembly/age_fold.go`）：`LevelOfAge` 把段龄折成 `L0`–`L3`，`BandOfLevel` 再折成 `BandNew`/`BandMid`/`BandOld`；`DefaultAgeKeepRecent=2` 段内全留，越过 `DefaultAgeVolumeThreshold=4096` 才动折叠；产物是内容寻址的负键（`-seg-<hex>`/`-hist-<hex>`），因此折叠是纯函数、可重放、不占正序号。每次判定落一条 `compress.request` 事实（`AgeProducerSegmentAge`），执行者是 `assembly/age_fold.go` 的 `AgeFoldPlugin`（`fact->observation`）——判定与执行分离，观察者不改事实。
+三龄段折叠是唯一压缩管线（`memory/replay` + `assembly/age_fold.go`）：`LevelOfAge` 把段龄折成 `L0`–`L3`，`BandOfLevel` 再折成 `BandNew`/`BandMid`/`BandOld`；`DefaultAgeKeepRecent=2` 段内全留，越过 `DefaultAgeVolumeThreshold=4096` 才动折叠；产物是内容寻址的负键（`-seg-<hex>`/`-hist-<hex>`），因此折叠是纯函数、可重放、不占正序号。每次判定落一条 `compress.request` 事实（`AgeProducerSegmentAge`），执行者是 `assembly/compress_consumer.go` 的 `CompressionConsumer`（`fact->observation`）；`AgeFoldPlugin` 只判定并提交 `compress.request`——判定与执行分离。
 
 呈现边界三条：**system 恒单条恒首位**，任何机制产物不得追加进去；压缩摘要渲染为 user 级〔历史归档〕注记并标注「非用户发言勿模仿」；**assistant 恒等于模型真实产出**——系统永不代 assistant 说话，也永不在 assistant 历史里生成文本化调用语法，防模型模仿出伪调用。`restoreCallPairing` 做双向配对校验：悬空的 `tool_calls` 被剥离或降级为 user 侧注记，绝不留下一个永不回应的调用。
 
@@ -190,7 +192,7 @@ sequenceDiagram
 
 | 缺口 | 现状与防线 | 候选方向 |
 |---|---|---|
-| 读缝是拉取式 | `Reading` 三个方法每次从属主现读，六个维度的读在一次收集里一致；调用方自己决定多久拉一次 | 一个「自上次读数以来的增量」口，让观测面不必全量重读 |
+| 读缝是拉取式 | `Reading` 三个方法每次从属主现读，七个维度的读在一次收集里一致；调用方自己决定多久拉一次 | 一个「自上次读数以来的增量」口，让观测面不必全量重读 |
 | 随动回合与用户回合共用地址闸 | 同址绝不并行，靠 `ErrSlotHeld` 与席位；没有「随动回合被用户回合让位了多少次」的读数 | 把让位计数落成可读事实，盯住高频地址上的随动饥饿 |
 | 冥想的「值不值得反思」没有判据 | 新鲜度门只回答「有没有新东西」；一句闲聊与一条低价值任务事件同样开门 | 未消化事件量与卡片密度作为内容价值第三判据 |
 | 折叠加配对校验的开销无直接读数 | `compress.request` 只落段龄判定，折叠耗时要靠装配侧计时反推 | 把每次折叠的入出规模与配对修复次数计入同一条事实 |

@@ -52,6 +52,14 @@ type ProjectionEntry struct {
 	// consumption path. The field stays private so the entry's public shape
 	// remains the five fields of a projection record.
 	messageRole string
+	// instanceID is the recorder generation the fact behind the entry was
+	// written under: the runtime instance identity of the event envelope. It
+	// stays private so the entry's public shape remains the five fields of a
+	// projection record; the fact→projection mapping fills it through
+	// WithInstanceID and the fold reads it through Generation, so a folded line
+	// names the generation it came from without the envelope being copied beside
+	// the entry or the identity being truncated to a shorter form.
+	instanceID event.InstanceID
 	// Time is the time the fact was recorded.
 	Time time.Time
 }
@@ -509,5 +517,20 @@ func (e ProjectionEntry) StatedRole() string { return e.messageRole }
 // public shape stays closed.
 func WithMessageRole(entry ProjectionEntry, role string) ProjectionEntry {
 	entry.messageRole = role
+	return entry
+}
+
+// Generation reports the recorder generation the fact behind the entry was
+// written under: the envelope's runtime instance identity, verbatim and never
+// truncated. An entry whose fact named no generation answers empty, which the
+// fold renders as its explicit gen:? placeholder rather than inventing one.
+func (e ProjectionEntry) Generation() event.InstanceID { return e.instanceID }
+
+// WithInstanceID returns the entry beside the recorder generation its fact was
+// written under: the one setter for the field the fact→projection mapping fills,
+// so the entry's public shape stays closed and the generation is read back only
+// through Generation.
+func WithInstanceID(entry ProjectionEntry, generation event.InstanceID) ProjectionEntry {
+	entry.instanceID = generation
 	return entry
 }

@@ -37,7 +37,7 @@ The system SHALL persist events in the RustViking KV store organized by time-win
 - **WHEN** `Init()` is called on a KV store with no existing data
 - **THEN** the call SHALL succeed without error, leaving partition states at their zero values
 
-> 取代原“seqCounter recovered from active-partition bitmap + cursor”——该条款所依赖的 `global:active_partitions` bitmap 与 `{pid}:cursor` 从未实现（见 change design 的“已知规格债”）。
+> 取代原“seqCounter recovered from active-partition bitmap + cursor”——该旧条款依赖的 `global:active_partitions` bitmap 与 `{pid}:cursor` 不存在于实现，故 seq 由扫描事实链重建。
 
 ### Requirement: seq 槽位与事件身份一一对应
 
@@ -72,11 +72,7 @@ The system SHALL persist events in the RustViking KV store organized by time-win
 
 ### Requirement: eventCount 在进程生命期内反映实际事件数
 
-支持分区枚举的存储 SHALL 在启动扫描器前从事实链重建去重、排除墓碑的逻辑存活计数，并在成功提交事件后增量维护。首次墓碑化或直接删除存活事件 SHALL 递减一次；物理清理已墓碑事件与压实搬迁 SHALL NOT 再递减。写失败和重复键拒绝 SHALL NOT 增计数。不能完成枚举/扫描时 SHALL 标记 count_known=false 并暂停基于未知计数的容量淘汰，SHALL NOT 报告为精确的 0。
-
-#### Scenario: eventCount decremented on DeleteEvent
-- **WHEN** DeleteEvent 成功删除一个逻辑存活事件
-- **THEN** live count 减一，重复删除不再递减
+支持分区枚举的存储 SHALL 在启动扫描器前从事实链重建去重、排除墓碑的逻辑存活计数，并在成功提交事件后增量维护。物理清理已墓碑事件与压实搬迁 SHALL NOT 再递减。写失败和重复键拒绝 SHALL NOT 增计数。
 
 #### Scenario: eventCount decremented on compaction cleanup
 - **WHEN** 压实清理已墓碑事件或搬迁相同 EventKey 到新段
@@ -85,10 +81,6 @@ The system SHALL persist events in the RustViking KV store organized by time-win
 #### Scenario: 重启后计数可恢复
 - **WHEN** 新进程打开含 600 个去重存活事件和 40 个墓碑的存储
 - **THEN** 扫描器启动前 live count 为 600，容量淘汰包括存量
-
-#### Scenario: 枚举失败不能冒充空库
-- **WHEN** 后端不支持枚举或某分区扫描失败
-- **THEN** count_known=false 且可观测，不基于 0 进行容量判断
 
 ### Requirement: QueryEvents 召回正确性（最新优先不丢失）
 

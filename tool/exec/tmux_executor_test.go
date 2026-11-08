@@ -122,6 +122,7 @@ func TestTmuxExecutorKeepsImmediateExitStatus(t *testing.T) {
 	if !strings.Contains(string(frame), "smoke-now-marker") {
 		t.Fatalf("captured frame = %q, want the marker of a command that ended at once", frame)
 	}
+	record := generationRecordPath(t, executor, key)
 	evidence, err := executor.Stop(ctx, key)
 	if err != nil {
 		t.Fatalf("stop = %v", err)
@@ -131,10 +132,6 @@ func TestTmuxExecutorKeepsImmediateExitStatus(t *testing.T) {
 	}
 	if evidence.ExitCode != 7 {
 		t.Fatalf("stop exit code = %d, want the recorded 7", evidence.ExitCode)
-	}
-	record, err := exitRecordPath(key.Key)
-	if err != nil {
-		t.Fatalf("name the exit record = %v", err)
 	}
 	if _, err := os.Stat(record); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("the record after a stop that read the kept status = %v, want it removed", err)
@@ -162,10 +159,7 @@ func TestTmuxStopReadsTheStatusTheRecordKept(t *testing.T) {
 	}
 	t.Cleanup(func() { _, _ = executor.Stop(context.Background(), key) })
 	waitForPaneDead(t, executor, key)
-	record, err := exitRecordPath(key.Key)
-	if err != nil {
-		t.Fatalf("name the exit record = %v", err)
-	}
+	record := generationRecordPath(t, executor, key)
 	if _, err := os.Stat(record); err != nil {
 		t.Fatalf("the record beside the session = %v, want the status the wrapper wrote", err)
 	}
@@ -206,10 +200,7 @@ func TestTmuxStopKeepsTheUnobservedStatusBesideNoRecord(t *testing.T) {
 	}
 	t.Cleanup(func() { _, _ = executor.Stop(context.Background(), key) })
 	waitForPaneDead(t, executor, key)
-	record, err := exitRecordPath(key.Key)
-	if err != nil {
-		t.Fatalf("name the exit record = %v", err)
-	}
+	record := generationRecordPath(t, executor, key)
 	if _, err := os.Stat(record); err != nil {
 		t.Fatalf("the record beside the session = %v, want the status the wrapper wrote", err)
 	}
@@ -493,6 +484,21 @@ func hideStatusBesideThePane(t *testing.T) {
 	}
 	t.Setenv("PATH", dir)
 	t.Setenv("TMUX_REAL_BINARY", real)
+}
+
+// generationRecordPath names the exit record the executor bound to the current
+// generation of one key: the record's file name carries the generation token.
+func generationRecordPath(t *testing.T, executor *TmuxExecutor, key ResourceKey) string {
+	t.Helper()
+	generation, ok := executor.generationOf(key)
+	if !ok {
+		t.Fatalf("the executor keeps no generation for %s", key)
+	}
+	path, err := exitRecordPath(key.Key, generation.token)
+	if err != nil {
+		t.Fatalf("name the exit record = %v", err)
+	}
+	return path
 }
 
 // tmuxTestKey returns a tmux resource key whose session name belongs to this

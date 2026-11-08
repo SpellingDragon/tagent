@@ -881,8 +881,8 @@ type Reading interface {
         DetailOf answer one identity at a time
       - NewProjection(inventory, window) and NewBoundedProjection(source,
         window, budget) are the Projection over that source
-      - Projection.Snapshot, List, Detail and Subscribe read only frozen
-        readings and never re-read the owners
+      - Projection.Snapshot, List, Detail and Follow read only frozen readings
+        and never re-read the owners
       - a frozen reading is never re-read or rewritten: later owner changes
         never reach it
 

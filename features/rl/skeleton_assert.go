@@ -67,6 +67,14 @@ var (
 		Timestamp:      time.Time{},
 	}
 
+	_ = AnnexRecord{
+		AttemptID:   "",
+		TaskID:      "",
+		Verdict:     "",
+		RuleVersion: "",
+		Artifacts:   []string{},
+	}
+
 	_ = ModelViewRef{
 		Model:            "",
 		ModelVersion:     "",
@@ -202,6 +210,7 @@ const (
 	_ = RecordKindEpisode
 	_ = RecordKindDecision
 	_ = RecordKindAttempt
+	_ = RecordKindAnnex
 )
 
 // The named line errors stay errors, so a reader can route a refused line by
@@ -247,7 +256,12 @@ var (
 	_ func(SnapshotRef, []byte) error                                            = VerifySnapshot
 
 	_ func(AttemptRecord) error                                                             = ValidateAttempt
+	_ func(AnnexRecord) error                                                               = ValidateAnnex
 	_ func(event.AttemptID, event.DecisionID, event.EpisodeID, model.Outcome) AttemptRecord = AttemptOf
+
+	_ func(AnnexRecord) Line     = NewAnnexLine
+	_ func(Line) *AnnexRecord    = Line.Annex
+	_ func(Line) ([]byte, error) = MarshalLine
 
 	_ func(*TrajectoryCapture) []DecisionSnapshot                    = (*TrajectoryCapture).Snapshots
 	_ func(*TrajectoryCapture) []SnapshotRef                         = (*TrajectoryCapture).SnapshotRefs
@@ -266,6 +280,7 @@ var (
 	_ error = ErrSnapshotUnreadable
 	_ error = ErrSnapshotMismatch
 	_ error = ErrLogprobsSourceMissing
+	_ error = ErrAnnexIdentityMissing
 )
 
 // The bounded capture queue and its durable write point keep their declared

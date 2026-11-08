@@ -47,10 +47,11 @@ func TestProjectionAssemblyServesTheThreeUses(t *testing.T) {
 		decl := &config.Declaration{
 			Entry: "agent-a",
 			Agents: []config.AgentSpec{{
-				ID:               "agent-a",
-				Model:            "model-a",
-				MaxTokens:        assemblyBudget,
-				EnvironmentBlock: true,
+				ID:                    "agent-a",
+				Model:                 "model-a",
+				MaxTokens:             assemblyBudget,
+				ProviderContextWindow: assemblyBudget * 2,
+				EnvironmentBlock:      true,
 			}},
 		}
 		run, err := assembly.Assemble(context.Background(), decl, map[event.AgentID]assembly.NativeAgent{
@@ -176,9 +177,10 @@ func TestUndeclaredEnvironmentBlockKeepsTheAssemblyUnchanged(t *testing.T) {
 	decl := &config.Declaration{
 		Entry: "agent-a",
 		Agents: []config.AgentSpec{{
-			ID:        "agent-a",
-			Model:     "model-a",
-			MaxTokens: assemblyBudget,
+			ID:                    "agent-a",
+			Model:                 "model-a",
+			MaxTokens:             assemblyBudget,
+			ProviderContextWindow: assemblyBudget * 2,
 		}},
 	}
 	run, err := assembly.Assemble(context.Background(), decl, map[event.AgentID]assembly.NativeAgent{
@@ -219,10 +221,11 @@ func assembleWithBudget(t *testing.T, session string, budget int) []model.Messag
 	decl := &config.Declaration{
 		Entry: "agent-a",
 		Agents: []config.AgentSpec{{
-			ID:               "agent-a",
-			Model:            "model-a",
-			MaxTokens:        budget,
-			EnvironmentBlock: true,
+			ID:                    "agent-a",
+			Model:                 "model-a",
+			MaxTokens:             budget,
+			ProviderContextWindow: 4096,
+			EnvironmentBlock:      true,
 		}},
 	}
 	run, err := assembly.Assemble(context.Background(), decl, map[event.AgentID]assembly.NativeAgent{

@@ -4,7 +4,7 @@
 # v1 (restart-tagent.sh) 的缺陷（2026-09-08 事故复盘）:
 #   - `flock -n <lock> bash v1.sh` 的锁 fd 被 cron 派生链继承，重启后的 bot
 #     进程携带锁 fd 常驻 → 此后 cron 每分钟 flock -n 静默失败(rc=1 无输出)，
-#     转世保险彻底失效且无任何痕迹。
+#     重启恢复保险彻底失效且无任何痕迹。
 #   - /tmp/tagent_restart.done 哨兵在 /tmp（机器重启即清，清理策略波及）→
 #     幂等门可能提前失效，与锁失效叠加形成盲区。
 #   - 目标 PID 硬编码在 crontab，重启后即过期。
@@ -136,8 +136,8 @@ fi
 log "=== insurance session start (old_pid=${OLD_PID:-none}, shell $$) ==="
 
 # ---- 2. 构建新二进制（服务还活着时构建失败零代价） ----
-# env 快照双地点回退：/tmp 优先（本次转世刚写的），$BASE/run/env.snapshot 兜底
-# （上次成功转世归档的——/tmp 在机器重启后被清时仍然有据可依）。
+# env 快照双地点回退：/tmp 优先（本次重启恢复刚写的），$BASE/run/env.snapshot 兜底
+# （上次成功重启恢复归档的——/tmp 在机器重启后被清时仍然有据可依）。
 cd "$BASE" || { log "FATAL: cd $BASE failed"; exit 1; }
 if [ ! -f "$SNAP" ] && [ -f "$BASE/run/env.snapshot" ]; then
     SNAP="$BASE/run/env.snapshot"
@@ -179,7 +179,7 @@ if [ -n "$OLD_PID" ] && kill -0 "$OLD_PID" 2>/dev/null; then
     log "old process down"
 fi
 
-# ---- 4b. 转世档案（spawn 前落盘：新进程醒来即见，无竞速；D1/D5 执行期修订） ----
+# ---- 4b. 重启恢复档案（spawn 前落盘：新进程醒来即见，无竞速；D1/D5 执行期修订） ----
 if cat > "$DONEDIR/REINCARNATION_NOTICE" <<EOF
 reincarnated_at: $(date +%F\ %T)
 old_pid: ${OLD_PID:-unknown}
@@ -232,7 +232,7 @@ for i in $(seq 1 90); do
         echo "${NEW_PID:-$SPAWN_PID}" > "$DONEDIR/restart.done"
         log "RESTART OK: healthz=$PROBE_CODE new_pid=${NEW_PID:-?} after ~$((i*2))s"
 # reincarnation notice: metadata archive for the next process (task 2.1, D3)
-        # 归档 env 快照后再清 /tmp：下次转世时若 /tmp 被清理（重启即清），
+        # 归档 env 快照后再清 /tmp：下次重启恢复时若 /tmp 被清理（重启即清），
         # $BASE/run/env.snapshot 作为兜底环境来源（含 API keys 等启动必需变量）。
         # 注意：回退场景下 $SNAP 可能已是归档件本身——cp 到自身无害，但 rm 只许
         # 清 /tmp 原件，绝不碰归档件。

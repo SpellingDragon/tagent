@@ -233,6 +233,10 @@ var ErrReadNotAllowed = errors.New("state: read is not allowed for this subject 
     ErrReadNotAllowed reports a read of a target no grant covers for the subject
     that asked. An authority that holds no grants refuses every read.
 
+var ErrRecoveryPayloadRefused = errors.New("state: the recovery payload is not a layout this build restores")
+    ErrRecoveryPayloadRefused names a snapshot payload this build cannot
+    restore.
+
 var ErrSpecConflict = errors.New("state: the task's admission material is already declared with other content")
     ErrSpecConflict reports a declaration that would replace the admission
     material of a task with other content than the material already stored.
@@ -288,15 +292,18 @@ func RollbackArchive(ctx context.Context, root string, tasks ArchiveTaskReader, 
     is reported as residue, and one the new path holds nothing under is named
     absent rather than written back.
 
-func ToolFace(binding AgentBinding) (map[string]trpctool.Tool, []string)
-    ToolFace reports the native tools one binding's request carries beside the
-    order their definitions are emitted in: the tools published with the binding
-    in name order first, then the tools registered on its resources after the
-    binding was published, in registration order. Both the request's tool map
-    and the environment block's tool list read this one face, so a model never
-    reads a tool name it cannot call. Keeping the later-registered tools behind
-    the published ones also keeps the provider-side prefix cache valid for the
-    larger stable part of the request.
+func ToolFace(binding AgentBinding, session ...event.SessionID) (map[string]trpctool.Tool, []string)
+    ToolFace reports the native tools one binding's request carries beside
+    the order their definitions are emitted in: the tools published with the
+    binding in name order first, then the tools registered on its resources
+    after the binding was published, in registration order. Both the request's
+    tool map and the environment block's tool list read this one face, so a
+    model never reads a tool name it cannot call. Keeping the later-registered
+    tools behind the published ones also keeps the provider-side prefix cache
+    valid for the larger stable part of the request. - A named session reads
+    the session-scoped face: reflection-only tools are dropped for every session
+    other than the binding's dedicated reflection session; a call that names no
+    session reads the full published face.
 
 TYPES
 
@@ -317,6 +324,8 @@ type AgentBinding struct {
 	// Set is the tool-set connection of the agent; its Close is governed by a
 	// resource lease rather than by the release of this binding.
 	Set trpctool.ToolSet
+
+	// Has unexported fields.
 }
     AgentBinding is the live binding of one agent: the native model, tools and
     ordered plugin pipeline a request executes with, together with the prompt
@@ -325,6 +334,11 @@ type AgentBinding struct {
     The binding is constructed privately for a candidate. A request takes one
     generation of it and keeps that generation for its whole life; the binding
     is released when its user is done, not when a newer generation is published.
+
+func (b AgentBinding) WithScopedFace(session event.SessionID, only []string) AgentBinding
+    WithScopedFace reports a copy of the binding carrying the dedicated
+    reflection session and the tools only that session may see. The composition
+    root calls it when it contributes a self-reflecting host agent.
 
 type ArchiveTaskReader interface {
 	// TaskIDs returns every task the chain holds facts for.
@@ -531,12 +545,21 @@ type Candidate struct {
 	Plan StatePlan
 	// Resources is the ledger of the candidate-exclusive resources.
 	Resources *Leases
+
+	// Has unexported fields.
 }
     Candidate is one prepared publication candidate: the state plan it
     carries and the resource ledger of the candidate-exclusive resources its
     construction acquired. The ledger is the candidate's own release face,
     so a candidate that leaves the publication frees exactly what it acquired
     and touches neither the shared faces nor the resources already in service.
+
+func (c Candidate) WithWindow(previous Generation, previousFingerprint string, models, dimensions map[string]string, at time.Time) Candidate
+    WithWindow returns a copy of the candidate carrying the decision window of
+    the attempt: the generation it moves from, the model version of each agent
+    and the outcome of each configuration dimension. The publication record
+    committed for this candidate carries that window, so one generation switch
+    is auditable from its record alone.
 
 type Cause struct {
 	// Source is the source file the failure comes from.
@@ -673,6 +696,10 @@ func (d *DurableCommit) Declare(ctx context.Context, taskID event.TaskID, spec t
 func (d *DurableCommit) Facts(taskID event.TaskID) []task.CommitRecord
     Facts returns the records the carrier stored for one task, in commit order.
 
+func (d *DurableCommit) LoadStats() LoadStats
+    LoadStats reports the measured read cost of the load that built this
+    carrier. It is read-only; the caller cannot mutate the carrier through it.
+
 func (d *DurableCommit) Outbox(taskID event.TaskID) []task.OutboxNotice
     Outbox returns the notifications one task still owes delivery, each paired
     with its delivery-layer state, ordered by round, kind and sequence.
@@ -700,6 +727,22 @@ func (d *DurableCommit) Revision(taskID event.TaskID) int64
 
 func (d *DurableCommit) TaskIDs() []event.TaskID
     TaskIDs returns every task the carrier holds facts for, in numeric order.
+
+func (d *DurableCommit) UsedTicket() bool
+    UsedTicket reports whether the carrier this process built restored its
+    tables from a recovery ticket: an observation for the equivalence checks and
+    the boot line, never an input to any recovery decision.
+
+func (d *DurableCommit) WriteRecoveryTicket(ctx context.Context) error
+    WriteRecoveryTicket files one snapshot of the carrier's tables beside the
+    ticket fact that names it, at the restart completion point (both recovery
+    steps finished, service not yet open). The blob goes to the fixed current
+    key and the ticket after it; on this local-file tier that is only a rename
+    order — Sync is a no-op and there is no fsync, so a crash between the two
+    leaves either an orphan blob nobody names or a ticket naming a missing blob,
+    both of which fall back to the full replay. The snapshot image is taken
+    under d.mu because the settle pump may commit concurrently at the completion
+    point: the lock is required for a coherent image, not a defensive extra.
 
 type FactLog interface {
 	// Put stages one key and its value.
@@ -853,6 +896,25 @@ func (l *Leases) ReleaseAll(ctx context.Context) error
     ReleaseAll frees every registered resource in the reverse of the acquisition
     order and exactly once each. A release that fails does not stop the releases
     behind it: its error is joined with the others into the returned error.
+
+type LoadScan struct {
+	Prefix  string
+	Keys    int
+	Bytes   int64
+	Elapsed time.Duration
+}
+    LoadScan is the read cost of one prefix scan made while rebuilding the
+    carrier at startup. Keys is the number of pairs returned, Bytes their total
+    value length, and Elapsed the wall time of the read alone — folding the
+    pairs into the carrier tables happens after the measurement and is covered
+    by the restore observation instead. It is a measurement, not a durable
+    record.
+
+type LoadStats struct {
+	Scans []LoadScan
+}
+    LoadStats is the per-prefix read cost of the last load. The five entries
+    appear in scan order; a load that returned early holds fewer entries.
 
 type MailboxEntry struct {
 	// Notice is the stable identity of the notification this entry accepted.
@@ -1251,6 +1313,8 @@ type PublicationRecord struct {
 	// Checks carries every check disposition the publication recorded, each
 	// self-contained.
 	Checks []CheckAnswer
+
+	// Has unexported fields.
 }
     PublicationRecord is the self-contained ledger unit of one publication: the
     generation it assigned, the fingerprint it published, the result it took and
@@ -1258,6 +1322,32 @@ type PublicationRecord struct {
     it recorded so an exemption stays visible with its reason and scope.
     The unit is committed through the publication recorder alone and shares no
     commit with a task finality transition or a pending notification.
+
+func (r PublicationRecord) DimensionOutcomes() map[string]string
+    DimensionOutcomes reports the outcome of each configuration dimension the
+    recorded attempt judged, keyed by "agent|dimension", as a copy the caller
+    owns.
+
+func (r PublicationRecord) ModelVersions() map[string]string
+    ModelVersions reports the model version each agent runs after the recorded
+    attempt, keyed by agent id, as a copy the caller owns.
+
+func (r PublicationRecord) PreviousFingerprint() string
+    PreviousFingerprint reports the fingerprint the recorded attempt moved from.
+
+func (r PublicationRecord) PreviousGeneration() Generation
+    PreviousGeneration reports the generation the recorded attempt moved from,
+    and zero for a record that carries no window.
+
+func (r PublicationRecord) RecordedAt() time.Time
+    RecordedAt reports the time the recorded attempt was recorded, and the zero
+    time for a record that carries no window.
+
+func (r PublicationRecord) WithWindow(previous Generation, previousFingerprint string, models, dimensions map[string]string, at time.Time) PublicationRecord
+    WithWindow returns a copy of the record carrying the decision window of
+    the attempt: the generation it moved from, the model version of each agent
+    and the outcome of each configuration dimension. The maps are copied,
+    so a caller mutating them afterwards changes no recorded window.
 
 type PublicationRecorder interface {
 	// CommitPublication stores one publication record.
@@ -1327,6 +1417,16 @@ func NewPublisher(bindings *Bindings, contract PublishContract, governance Gover
     the publish precondition contract to enforce, the governance to ask and the
     recorder to commit each publication record through. The entry starts with no
     generation published, so no rollback source exists yet.
+
+func (p *Publisher) Adopt(ctx context.Context, cand Candidate, record PublicationRecord) error
+    Adopt restores the publication a restarted process reads from its durable
+    ledger as the binding generation in effect, without publishing anything:
+    the holder is seeded to the recorded number, the candidate plan is held at
+    that very generation and no record is committed, because the publication
+    the record names already happened. It is the restart-reconciliation path of
+    the sole entry, never a second publication path, and it refuses a candidate
+    whose fingerprint the record does not name, a recorded generation of zero
+    and a holder that already published a generation of its own.
 
 func (p *Publisher) Baseline() string
     Baseline returns the version baseline a candidate records at construction.

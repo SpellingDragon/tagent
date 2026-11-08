@@ -47,10 +47,6 @@ const scenarioPartTranscript = "transcript"
 // rendered with.
 const scenarioHistorySummaryPrefix = "history summary: "
 
-// scenarioSegmentFoldPrefix is the content prefix a folded segment is rendered
-// with.
-const scenarioSegmentFoldPrefix = "folded segment process: "
-
 // scenarioEnvironmentPrefix is the content prefix the dynamic environment block
 // is rendered with: the named section the system channel carries, the same way
 // the fixed prompt carries its own material.

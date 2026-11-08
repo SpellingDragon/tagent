@@ -9,7 +9,7 @@
 ## 一、结论层：接手第一天只需三件事
 
 1. **仓库是三个 module**：根 module、`examples/wechat-bot`、`examples/cli-host`（各自独立 module，无 `go.work`）。根 `./...` 永远到不了这两个示例 module，构建/测试/vet 都必须各跑一遍。
-2. **五个门禁入口**：`bash scripts/lint.sh`（格式+构建+vet+注释棘轮+九个文档/脚本门）、`go mod verify`、`bash scripts/gates/check-openspec.sh`、`./scripts/gates/race_check.sh`、`bash scripts/gates/gen_godoc.sh --check`。CI 与本地跑的是同一批脚本，所以"本地绿"与"CI 绿"不会是两个意思。
+2. **五个门禁入口**：`bash scripts/lint.sh`（格式+构建+vet+注释棘轮+文档/脚本门）、`go mod verify`、`bash scripts/gates/check-openspec.sh`、`./scripts/gates/race_check.sh`、`bash scripts/gates/gen_godoc.sh --check`。CI 与本地跑的是同一批脚本，所以"本地绿"与"CI 绿"不会是两个意思。
 3. **三条风险面**：配置严格解码（未知键**拒启动**）、pre-release 无迁移承诺、依赖 pin 与白盒测试欠账（§七·D）。
 
 ---
@@ -50,7 +50,7 @@ go test ./... -short -count=1                                  # 常规单元面
 (cd examples/wechat-bot && go test ./... -short -count=1)      # 示例 module
 (cd examples/cli-host && go test ./... -short -count=1)        # 示例 module
 GOMAXPROCS=1 go test ./tests/integration/execution/ -short -count=1   # 调度下限：归因见证不被"先到的轮"满足
-./scripts/gates/race_check.sh . ./memory/... ./runtime/agent/... ./evolution/ ./api/event/ ./tool/... ./api/plugin/ ./rl/
+./scripts/gates/race_check.sh . ./assembly/... ./cli/... ./api/event/... ./api/config/... ./api/document/... ./api/model/... ./api/view/... ./api/plugin/... ./runtime/agent/... ./runtime/task/... ./runtime/state/... ./memory/... ./features/... ./tool/... ./internal/... ./tests/integration/execution/... ./tests/integration/history/... ./tests/integration/host/... ./tests/integration/capabilities/... ./tests/integration/evolution/... ./tests/integration/learning/...
 ```
 
 实测（2026-10-21）：根 module `-short` 全量 exit 0（38 个包 `ok`、29 个包 `[no test files]`）。race 门的退出码是唯一判定——`race_check.sh` 只在上游已知竞态签名**逐个**匹配且**无**普通失败时才放行豁免，日志看着绿而命令失败不可能被报成通过。
@@ -58,10 +58,10 @@ GOMAXPROCS=1 go test ./tests/integration/execution/ -short -count=1   # 调度�
 长跑（CI 仅 `workflow_dispatch` 手动触发）：
 
 ```bash
-go test ./tests/ -tags soak -run TestSoak_Continuity -count=1 -v -timeout 45m -args -rounds=30 -events-per-round=30
+go -C . test ./tests/integration/host -run '^TestSoakContinuity$' -count=1 -v -timeout 45m -args -rounds=30 -events-per-round=30
 ```
 
-`tests/` 下的真实模型用例在无凭据时**自跳过**，永不阻塞 CI；需要真跑时提供 `ZAI_API_KEY`（glm 家族）或 `TENCENT_HY_API_KEY`（混元家族），两者相互独立、都可选。
+`tests/` 下的真实模型用例在无凭据时**自跳过**，永不阻塞 CI；需要真跑时按族提供三件套：`TAGENT_REAL_JUDGE_{BASE_URL,API_KEY,MODEL}`（LLM 裁决）与 `TAGENT_REAL_EMBEDDING_{BASE_URL,API_KEY,MODEL}`（嵌入），0/3 跳过、1-2/3 具名拒绝、3/3 才跑（见 `real-smoke.yml`）。`ZAI_API_KEY` 只作为 embedder 配置的 `api_key_env` 出现在单元测里，不是真跑门。
 
 ---
 
@@ -74,9 +74,9 @@ CI 与本地的命令逐字相同。分阶段：
 | 阶段 | 内容 | 失败意味着 |
 |---|---|---|
 | `fmt` | `gofmt -l` 覆盖 `POLICY_DIRS`（根 + 两个示例 module） | 有文件未格式化 |
-| `build` / `vet` | 根 + `examples/wechat-bot` 各一遍；`examples/cli-host` 由 `ci.yml` 的 Build/Vet/Test (cli-host module) 覆盖 | 编译或静态检查失败 |
+| `build` / `vet` | 根 + `examples/wechat-bot` + `examples/cli-host` 三遍（`lint.sh` 内均含） | 编译或静态检查失败 |
 | `policy` | 注释策略**棘轮**（只许降不许升，按规则计数） | 新增了规则外注释 |
-| `doc budget` | markdown 总量**棘轮**（`scripts/gates/doc_budget.json`，只降不升） | 文档总量超基线 |
+| `doc budget` | markdown 总量**零差额棘轮**（`scripts/gates/doc_budget.json`：实测必须等于基线，减少须同提交 `--tighten` 锁步，增加须具名 rebaseline） | 文档体量与基线不等（两向都红） |
 | `event-ownership` | 冻结归属表（`golden/runtime/architecture.json`）按 `go/types` 核对 owner 的直接调用点；方法值/反射等解析不到的记 uncovered、不折算 | 事件归属结论出现未登记漂移 |
 | `name-check` | 测试标识不得承载迭代编号 | 标识里带了批次/轮次号 |
 | `doc-refs` | markdown 引用的文件必须存在（历史树按快照锚定） | 文档引用了已删除/改名的文件 |
@@ -92,12 +92,12 @@ CI 与本地的命令逐字相同。分阶段：
 
 ```bash
 bash scripts/lint.sh                 # 全量（CI 口径）
-bash scripts/lint.sh --only fmt      # 只跑 fmt；build/vet/policy 跳过，九个文档/脚本门照跑
+bash scripts/lint.sh --only fmt      # 只跑 fmt；build/vet/policy 跳过，文档/脚本门照跑
 bash scripts/lint.sh --strict        # 要求零发现（收敛终态）
 bash scripts/lint.sh --update-baseline   # 批量降低注释计数后重写基线
 ```
 
-`--only <阶段>` 指定 fmt/build/vet/policy 中**只跑哪一个**；它管不到九个文档/脚本门——那些始终会跑。这就是"只想验文档改动"时最有用的形态。
+`--only <阶段>` 指定 fmt/build/vet/policy/contracts 中**只跑哪一个**（contracts 跳过 Go 四段，仍跑自测/运行时契约/尾部门）；它管不到文档/脚本门——那些始终会跑。§五.1 表之外 lint.sh 还跑 checker 自测、runtime plan/architecture/concept/implementation、scenarios contract、product comment policy、openspec strict 与 event-body 前缀检查。
 
 ### 5.2 其余门与常用工具
 
@@ -118,28 +118,28 @@ bash scripts/gates/test_race_check.sh                       # race 门分类器�
 
 接手后第一次跑 `lint.sh` 若见红，先对照这两条再动手：
 
-**(a) `docs/wiki` 有未提交编辑时，`doc-refs` 会集体报 dangling。** 该门对历史文档按其**快照提交**锚定引用，但前提是文档相对该提交无本地改动（`git diff --quiet <sha> -- <doc>` 失败即放弃锚定，退回按今天的树判定）。所以一批未提交的 wiki 编辑会把原本全部锚定的历史引用当场变成 dangling。
+**(a) `docs/wiki` 有未提交编辑时，`doc-refs` 会集体报 dangling。** 该门按**引入该引用的提交**锚定（`git log -1 -G<token> -- <doc>`），但前提是文档相对 HEAD 无本地改动（`git diff --quiet HEAD -- <doc>` 失败即放弃锚定，退回按今天的树判定）。所以一批未提交的 wiki 编辑会把原本全部锚定的历史引用当场变成 dangling。
 
-> 实测（2026-10-18）：同一天，干净 HEAD 克隆里 `doc-refs` 是绿的（`doc-refs: 43 citation(s) resolve at their document's snapshot commit (41 inside historical roots, 2 outside)`）；而带 27 篇未提交 wiki/操作文档编辑的工作树里，同样是那 43 条引用全部报 `DANGLING-DOC-REF`——引用本身没坏，是锚定基准暂时失效。单文件因果验证（同一克隆）：给 `docs/wiki/tool/tool-architecture.md` 追加一个空行，该篇的 7 条引用立刻转为 dangling（锚定计数 43 → 36，门 exit 1），`git checkout` 还原即恢复绿；改动内容无关，**"相对快照提交有本地改动"本身就足以取消锚定**。
-> 处置：文档批次**先落盘再跑该门**；需要当场判真伪时按文件单独跑——`go run ./scripts/codetools doc-refs <单个文件>` 只判该文件的引用。`lint.sh --only <阶段>` 跳不过这道门（九个文档/脚本门始终会跑），不要为了绿去改引用路径——那会把历史快照改成对今天码面的断言，等于销毁分区语义（见 §八）。
+> 实测（2026-10-18）：同一天，干净 HEAD 克隆里 `doc-refs` 是绿的（`doc-refs: N citation(s) resolve at the commit that introduced them (M inside historical roots, K outside)`）；而带 27 篇未提交 wiki/操作文档编辑的工作树里，同样是那 43 条引用全部报 `DANGLING-DOC-REF`——引用本身没坏，是锚定基准暂时失效。单文件因果验证（同一克隆）：给 `docs/wiki/tool/tool-architecture.md` 追加一个空行，该篇的 7 条引用立刻转为 dangling（锚定计数 43 → 36，门 exit 1），`git checkout` 还原即恢复绿；改动内容无关，**"相对快照提交有本地改动"本身就足以取消锚定**。
+> 处置：文档批次**先落盘再跑该门**；需要当场判真伪时按文件单独跑——`go run ./scripts/codetools doc-refs <单个文件>` 只判该文件的引用。`lint.sh --only <阶段>` 跳不过这道门（文档/脚本门始终会跑），不要为了绿去改引用路径——那会把历史快照改成对今天码面的断言，等于销毁分区语义（见 §八）。
 
-**(b) 示例 module 的红与根 module 无关。** 根 `./...` 不含 `examples/wechat-bot` 与 `examples/cli-host`。wechat-bot 的 `build`/`vet`/`test` 在 `lint.sh` 内各有一遍；两者在 CI 的 test job 里都单列三步。任何"根全绿"的结论都不覆盖它们。
+**(b) 示例 module 的红与根 module 无关。** 根 `./...` 不含 `examples/wechat-bot` 与 `examples/cli-host`。三个 module 的 `build`/`vet` 在 `lint.sh` 内各有一遍，`test` 由 `preflight.sh` 与 CI 的 test job 承担；任何"根全绿"的结论都不覆盖它们。
 
 <a id="event-gates"></a>
 ### 5.4 事件门：每 MR 三档 + required 汇总（已落地，远端 required 待 F4）
-**四个 job 与 artifact 同名**：`event-integrity-short` 跑 `python3 scripts/scenarios/run_runtime_scenarios.py --contract golden/runtime/event_integrity_scenarios.json --scope event-short --repeat 10`——十次独立 runner 进程、十份日志、逐轮 UUID run-id（`repeat_index=1..10`），不用 `-count` 放大、不跑 `--test-id` 子集；`event-integrity-long` 用 matrix `seed [1,7,42] × window [256,32768]`、`fail-fast: false`，每片 `--scope event-long --seed <s> --window <w> --repeat 1`，**单片 1200 输入/120 重启、六片合计 7200/720（单片不得写成 7200/720）**；`event-integrity-mutations` 跑 `python3 scripts/gates/check_event_integrity_mutations.py --all --json`，只启用已证实的冻结变异；`event-integrity-required` 用 `if: always()` + `needs` 三个生产 job，经 `env` 传上游结果并逐个 `test "$X_RESULT" = "success"`（`cancelled`/`failure`/`skipped` 一律失败），再以 `python3 scripts/gates/check_runtime_evidence.py --bundle <目录> --contract golden/runtime/event_integrity_scenarios.json --json` 汇总。required 只是新增事件三档的汇总检查，不替代 `test`/`race`/`validators`/`openspec`/`soak`，旧检查名继续保留。事件合同是 `golden/runtime/event_integrity_scenarios.json`（profile `event-integrity`）；旧 deterministic 图与旧合同不被当作已支持事件语义。**状态：已落地（L1）**——`ci.yml` 与 `scripts/preflight.sh` 已由 `CiWorkflowTest` 结构验收，并以真实 17 份证据（6 long + 10 short + 1 mutation）跑通 bundle 门；远端 required 生效属 L2/F4，未授权，保持待验。
+**五个 event job（含 event-semantics-symptoms）**：`event-integrity-short` 用 matrix `repeat-index: [1..10]` 跑 `python3 scripts/scenarios/run_runtime_scenarios.py --contract golden/runtime/event_integrity_scenarios.json --scope event-short --repeat-index "$REPEAT_INDEX" --out "$RUNNER_TEMP/event-short"`（本地 `preflight.sh` 仍用 `--repeat 10`，两个入口不可混写）——十片各一次独立 runner 进程、artifact `event-integrity-short-1..10`、逐片 UUID run-id，不用 `-count` 放大、不跑 `--test-id` 子集；`event-integrity-long` 用 matrix `seed [1,7,42] × window [256,32768]`、`fail-fast: false`，每片 `--scope event-long --seed <s> --window <w> --repeat 1`，**单片 1200 输入/120 重启、六片合计 7200/720（单片不得写成 7200/720）**；`event-integrity-mutations` 跑 `python3 scripts/gates/check_event_integrity_mutations.py --all --json --out "$RUNNER_TEMP/event-integrity-mutations"`（`--out` 产证据目录，bundle 门据此取证），只启用已证实的冻结变异；`event-integrity-required` 用 `if: always()` + `needs` 三个生产 job，经 `env` 传上游结果并逐个 `test "$X_RESULT" = "success"`（`cancelled`/`failure`/`skipped` 一律失败），再以 `python3 scripts/gates/check_runtime_evidence.py --bundle <目录> --contract golden/runtime/event_integrity_scenarios.json --json` 汇总。required 只是新增事件三档的汇总检查，不替代 `test`/`race`/`validators`/`openspec`/`soak`，旧检查名继续保留。事件合同是 `golden/runtime/event_integrity_scenarios.json`（profile `event-integrity`）；旧 deterministic 图与旧合同不被当作已支持事件语义。**状态：已落地（L1）**——`ci.yml` 与 `scripts/gates/preflight.sh` 已由 `CiWorkflowTest` 结构验收，并以真实 17 份证据（6 long + 10 short + 1 mutation）跑通 bundle 门；远端 required 生效属 L2/F4，未授权，保持待验。
 
-**判据与证据边界**：killed = 控制树先绿、变异进程非零退出，且失败输出命中该变异登记的具名业务断言（`expect_assertion`）；uncovered = 没有具名断言命中（编译失败、超时、零测试命中、无该断言的 panic、测试照绿都算），进入 uncovered 并让门失败；新增缺陷必须登记进冻结清单，不得用 `--mutation` 子集绕过。L1 本地 = `bash scripts/preflight.sh` 默认跑 short 十轮、long 六组合与 mutations；`--skip-smoke` 只跳微信 smoke，事件三段照跑并打印"不具备完整 MR 等价证据"，退出码不变；`--test-id` 或单 scope 子集不是 MR 等价。L2 远端 = required 经分支保护生效（未授权，保持待验）；L3 = 72h 长跑与真实服务面（未授权，保持待验）。失败处置：按 artifact 名取证据（`event-integrity-short`、`event-integrity-long-seed-<s>-window-<w>`、`event-integrity-mutations`、`event-integrity-required`），用 run-id 区分独立轮次与分片，不重跑覆盖先前的 fail；required 红先看是哪个上游 job 红。
+**判据与证据边界**：killed = 控制树先绿、变异进程非零退出，且失败输出命中该变异登记的具名业务断言（`expect_assertion`）；not_killed = 没有具名断言命中（编译失败、超时、零测试命中、无该断言的 panic、测试照绿都算），判为 not_killed 并让门失败；新增缺陷必须登记进冻结清单，不得用 `--mutation` 子集绕过。L1 本地 = `bash scripts/preflight.sh` 默认跑 short 十轮（`--repeat 10`）、long 六组合与 mutations；CI 的 short 十片各用 `--repeat-index`，两个入口不可混写；`--skip-smoke` 只跳微信 smoke，事件三段照跑并打印"不具备完整 MR 等价证据"，退出码不变；`--test-id` 或单 scope 子集不是 MR 等价。L2 远端 = required 经分支保护生效（未授权，保持待验）；L3 = 72h 长跑与真实服务面（未授权，保持待验）。失败处置：按 artifact 名取证据（`event-integrity-short-1..10`、`event-integrity-long-seed-<s>-window-<w>`、`event-integrity-mutations`、`event-gate-required-report`），用 run-id 区分独立轮次与分片，不重跑覆盖先前的 fail；required 红先看是哪个上游 job 红。
 
 ---
 
 ## 六、发布流程
 
-**仓库内没有自动发布流水线**：`.github/workflows` 有 `ci.yml`、`runtime-contracts.yml`、`provider-contract.yml`、`real-smoke.yml`，四者都不含 publish/release 步骤。版本由 git tag 记录（现存 `v0.1.0`、`v0.2.0`、`v0.3.0`），变更由 `CHANGELOG.md` 记录，格式为 Keep a Changelog + SemVer，`[Unreleased]` 常驻（当前内容为"无未发布变更"）。
+**仓库内没有自动发布流水线**：`.github/workflows` 有 `ci.yml`、`runtime-contracts.yml`、`provider-contract.yml`、`real-smoke.yml`，四者都不含 publish/release 步骤。版本由 git tag 记录（现存 `v0.1.0`–`v0.5.0`），变更由 `CHANGELOG.md` 记录，格式为 Keep a Changelog + SemVer，`[Unreleased]` 常驻（当前记有 Documentation 与 Breaking Changes 条目；`v0.5.0` 的 CHANGELOG 节待补）。
 
 发一个版本的实际动作序列（全部人工，无脚本代劳）：
 
-1. **门禁全绿**：CI 的 test / race / validators / openspec 四条 job 皆绿（`ci.yml` 对 `main`、`dev` 的 push 与所有 PR 触发）。
+1. **门禁全绿**：CI 的 test / race / validators / openspec 四条 job 皆绿，且 `event-integrity-required` 汇总、`runtime-contracts` 的 `format-and-contract`、`event-semantics-symptoms` 均无红（`ci.yml` 对 `main`、`dev` 的 push 与所有 PR 触发）；分支保护的 required 清单属外部设置，仓库只钉稳定 job 名。
 2. **写变更记录**：把 `[Unreleased]` 的内容定版为 `## [vX.Y.Z] - YYYY-MM-DD`，Breaking Changes 段必须写明"用户会感知到什么"（现有条目即此口径）。
 3. **打 tag**：在待发布提交上 `git tag vX.Y.Z` 并推送；仓库无制品产出、无签名约定，tag 即唯一发布记录。
 4. **合并线**：`dev` 接受直推且由 CI 全量验证，`main` 是发布线；跨线合并前按 CHANGELOG 的口径做一次评审。
@@ -158,15 +158,15 @@ bash scripts/gates/test_race_check.sh                       # race 门分类器�
 
 ### B. pre-release：不承诺迁移
 
-`v0.3.0` 起 CHANGELOG 明示"pre-release 姿态，无迁移承诺"。已发生的先例：旧单文件快照 `kv.json` 不迁移——存在即忽略、报一次、冷启动重建。**结论：升级前读 Breaking Changes，不要假设数据/配置/API 兼容。**
+README 与 CONTRIBUTING 明示"pre-release 姿态，无迁移承诺"（无版本上限；`v0.4.0`/`v0.5.0` 的 tag 同样不附带迁移承诺）。已发生的先例：旧单文件快照 `kv.json` 不迁移——存在即忽略、报一次、冷启动重建。**结论：升级前读 Breaking Changes，不要假设数据/配置/API 兼容。**
 
 ### C. 资源门清单（哪些测试要真东西）
 
 | 门 | 需要的资源 | 无资源时 |
 |---|---|---|
 | tmux 动作面 / 异步任务层 | tmux 可执行 | `t.Skip`（CI 装 tmux 以保住信号） |
-| 真实模型契约层 | `ZAI_API_KEY` 或 `TENCENT_HY_API_KEY` | 自跳过，不阻塞 |
-| 微信真实发送面 | `TAGENT_WECHAT_TOKEN`、`TAGENT_WECHAT_REAL_TARGET`、`TAGENT_WECHAT_SEND_AUTHORIZED` 三者同时 | 三者全空 → `t.Skip`（"未验证"）；**只给一部分 → `t.Fatalf`**（半配比无门更诚实） |
+| 真实模型契约层 | `TAGENT_REAL_JUDGE_*` / `TAGENT_REAL_EMBEDDING_*` 三件套（各 3 个） | 0/3 跳过；1-2/3 具名拒绝；3/3 才跑 |
+| 微信真实发送面 | 当前无 `TAGENT_WECHAT_TOKEN` / `TAGENT_WECHAT_REAL_TARGET` / `TAGENT_WECHAT_SEND_AUTHORIZED` 资源门（Go 代码 0 读取）；唯一 `TAGENT_WECHAT_*` 是 `TAGENT_WECHAT_WORKSPACE_DIR` | 该 Skip/Fatalf 三态不存在，勿按旧稿配置 |
 | soak 连续性 | 45 分钟窗口 + `workflow_dispatch` | 不跑（手动门） |
 | spec 卫生 | node + openspec 1.2.0 | `exit 2`，不静默跳过 |
 
@@ -174,7 +174,7 @@ bash scripts/gates/test_race_check.sh                       # race 门分类器�
 
 ### D. 技术债清单（登记在册，均有回正条件）
 
-**D1 依赖 pin（`go.mod` 的 `replace`）。** `trpc.group/trpc-go/trpc-agent-go` 当前指向 fork tag `v1.11.2-tagent.1`（= 上游 v1.11.2 + 4 个 stream-close-contract 提交，即"生产者完成后才关闭事件流"）。tag 已发布，故仓库不依赖任何机器上的本地检出。
+**D1 依赖 pin（`go.mod` 的 `replace`）。** `trpc.group/trpc-go/trpc-agent-go` 当前指向 fork tag `v1.11.2-tagent.3`（= 上游 v1.11.2 + fork 的 stream-close / ordered-tools / 降级载荷等提交，即"生产者完成后才关闭事件流"）。tag 已发布，故仓库不依赖任何机器上的本地检出。
 
 - **回正条件（四条，按序）**：① 上游 PR `#2637` 合并且官方 tag 携带同一组提交；② 该 tag 与 fork tag 提交集一致（无待复评的行为差）；③ 全门禁在官方 tag 上绿（short / race / lint / openspec / bot module）；④ 移除动作与 CHANGELOG 记录在同一提交。
 - **移除步骤**：`go mod edit -dropreplace=…` → `go get …@<官方 tag>` → `go mod tidy && go mod verify` → 复跑 ③ 的门禁 → 删注释块并在 CHANGELOG `Unreleased` 记录。
@@ -190,11 +190,11 @@ go list -f '{{.ImportPath}} {{if or .TestGoFiles .XTestGoFiles}}HAS-WHITEBOX{{el
 
 口径与现状：生产包 = `examples/contract/*`（生成面契约样例，按设计无测试）以外的一切。
 
-> 实测快照（2026-10-21）：该命令列出 **6 个**生产包仍无白盒测试：根包（无测试文件）、`api/document`、`cli`、`memory/ledger`、`runtime/task/approval`、`tool/recall`。本文登记的是判定方法与当前欠账，计数随补齐批次变化——**以复跑输出为准**。
+> 实测快照（2026-11-04）：该命令列出 **5 个**生产包仍无白盒测试：根包（无测试文件）、`api/document`、`cli`、`memory/ledger`、`tool/recall`；`runtime/task/approval` 已补 `approval_store_test.go` / `attention_store_test.go`。本文登记的是判定方法与当前欠账，计数随补齐批次变化——**以复跑输出为准**。
 
-**D3 多 module 覆盖缺口。** 根 `./...` 不含 `examples/wechat-bot` 与 `examples/cli-host`（各自独立 module、无 `go.work`），任何"根绿"都不覆盖它们；`ci.yml` 已为两者各单列 build/vet/test 三步。`scripts/lint.sh` 的 build/vet 只覆盖根与 wechat-bot，cli-host 的编译只在 CI 跑——**以 `ci.yml` 的实际步骤为准**。
+**D3 多 module 覆盖缺口。** 根 `./...` 不含 `examples/wechat-bot` 与 `examples/cli-host`（各自独立 module、无 `go.work`），任何"根绿"都不覆盖它们；`ci.yml` 已为两者各单列 build/vet/test 三步。`scripts/lint.sh` 的 build/vet 覆盖三个 module（`scripts/gates/lint.sh:66-76`，含 `(cd examples/cli-host && go build ./...)` 与 `go vet`）；`ci.yml` 另为 cli-host 单列 test。
 
-**D4 文档面规模。** 全仓 markdown 实测 1915 篇：`openspec` 1125 篇（变更过程工件）、`examples` 588 篇（示例 module 自带）、`docs` 180 篇、`resources` 10 篇、`.agents` 8 篇，另根 3 篇与 `internal` 1 篇。**`docs` 面只有 180 篇**——评审口径若说"全仓 markdown"，不是 `docs`。分区对象因此只有 `docs` 这 180 篇，见 §八。
+**D4 文档面规模。** 全仓 markdown 实测（2026-11-04，排除 .git/.quiesce/临时工作树等本地物料）2286 篇：`openspec` 1489 篇（变更过程工件）、`examples` 592 篇（示例 module 自带）、`docs` 182 篇、`resources` 10 篇、`.agents` 8 篇，另根 4 篇与 `internal` 1 篇。**`docs` 面只有 182 篇**——评审口径若说"全仓 markdown"，不是 `docs`。分区对象因此只有 `docs` 这 182 篇，见 §八。
 
 **D5 bus factor = 1。** 缓释手段就是本文档本身：任何"只在一个人的会话记忆里"的约定（门禁口径、踩坑形态、回正条件）必须回写到本文或 wiki，否则它不构成可继承的资产。§五·3 的两条已知形态即此类回写。**观测面见 §七·E**：四类识别点都直接写 trpc 框架面（`trpc-agent-go/log` 与 `trpc-agent-go/telemetry/trace`），仓库不在其上叠第二套抽象。
 
@@ -206,7 +206,7 @@ go list -f '{{.ImportPath}} {{if or .TestGoFiles .XTestGoFiles}}HAS-WHITEBOX{{el
 |---|---|---|---|---|
 | 插件端口派发 | `plugin.Pipeline` 的 Before/InjectEnvironment/After 派发处：`api/plugin/phases.go`、`api/plugin/present.go` | DEBUG 日志 | phase、face、plugin、port、result、elapsed、call 或 fact 身份（After 每个 presenter 各一行，同 fact） | `tagent: plugin phase` |
 | 事件流（事实生产提交） | 主提交之后的 After 趟：`telemetry.LogObserver`（经 `commit-observer` 元素派发） | DEBUG 逐事实 / INFO 回合边界 | 事实类型、tool、task、call、invocation | `tagent: tool call`、`tagent: turn start`、`tagent: turn end` |
-| 事件消费 | `runtime/agent`：常驻消费循环的起止与每个 decision | DEBUG 日志 | agent、session、invocation、ready 数、decisions、terminal、calls、elapsed | `tagent: consumer drive start`、`tagent: consumer drive end`、`tagent: consumer decision` |
+| 事件消费 | `runtime/agent`：常驻消费循环的段开/闭与每个 decision | DEBUG 日志 | agent、session、invocation、ready 数、decisions、terminal、calls、elapsed | `tagent: consumer segment open`、`tagent: consumer segment close`、`tagent: consumer decision` |
 | 模型响应 | `model.ReduceChannel`、`model.ReduceSeq`（唯一终端归约入口） | INFO 日志 | model、terminal、prompt/completion/total token、responses、latency_ms | `tagent: model response` |
 
 - **开 DEBUG**：默认 zap 级别是 Info，端口派发与消费面需 `log.SetLevel("debug")` 才出；模型响应是 INFO 级，开箱即见、每请求一行。
@@ -247,34 +247,34 @@ defer clean(ctx)
 
 ## 八、文档分区方案（只做方案，不动本体）
 
-本节只登记方案与边界，**不迁移任何文件**。触发原因：`docs` 面 180 篇里混着生成面、历史快照、长期事实、工作笔记四类，读者无法从路径判断"这篇何时过期、能不能改"。
+本节只登记方案与边界，**不迁移任何文件**。触发原因：`docs` 面 182 篇里混着生成面、历史快照、长期事实、工作笔记四类，读者无法从路径判断"这篇何时过期、能不能改"。
 
-### 8.1 现状统计（命令 + 实测值，2026-10-21）
+### 8.1 现状统计（命令 + 实测值，2026-11-04）
 
 ```bash
-find docs -name "*.md" | wc -l            # 180
+find docs -name "*.md" | wc -l            # 182
 find docs -maxdepth 1 -name "*.md" | wc -l # 8（docs 根，含本文）
-git ls-files docs | wc -l                 # 104（入库部分）
+git ls-files docs | wc -l                 # 107（入库部分，含 2 份非 markdown）
 find . -name "*.md" -not -path "./.git/*" | sed 's|^\./||' | awk -F/ '{print $1}' | sort | uniq -c | sort -rn
 ```
 
 | 分区 | 篇数 | 入库 | 真源（谁能改） | 现状定性 |
 |---|---|---|---|---|
-| `docs/wiki` | 25 | 是 | 活契约页随代码；其余各篇的快照提交（历史快照） | 已分区：16 篇活契约（重写式修订，锚由代码引用钉住）+其余 historical-verbatim |
+| `docs/wiki` | 25 | 是 | 活契约页随代码；其余各篇的快照提交（历史快照） | 已分区：16 篇活契约（重写式修订，锚由代码引用钉住）+ 7 篇 historical-verbatim + 1 篇导览页（mechanism-tour，不承载契约）+ 1 篇索引（README.md） |
 | `docs/api` | 69 | 是 | 源码注释（`scripts/gates/gen_godoc.sh` 生成） | 已分区：生成面（live），禁止手改 |
 | `docs` 根 | 8 | 是 | 今天的树 | 长期事实/操作面（含本文） |
 | `docs/notes` | 2 | 是 | 当时的会话 | 工作笔记 |
 | `docs/archive` | 1 | 是 | 当时的会话 | 历史归档 |
-| `docs/.dev` | 76 | 否（`.gitignore` 的 `.*/` 规则排除） | 当时的会话 | 本地历史纪要 |
+| `docs/.dev` | 77 | 否（`.gitignore` 的 `.*/` 规则排除） | 当时的会话 | 本地历史纪要 |
 
-`180 = 24 + 69 + 8 + 2 + 1 + 76`；`104 = 24 + 69 + 8 + 2 + 1` 为入库部分。
+`182 = 25 + 69 + 8 + 2 + 1 + 77`；`105 = 25 + 69 + 8 + 2 + 1` 为入库的 markdown 部分（`git ls-files docs` 另含 2 份非 markdown）。
 
 ### 8.2 分区原则（一条判据）
 
 **每篇文档必须能回答"它的真源是谁、它何时过期、谁在改它"。** 四类各自成立：
 
 1. **生成面（live）**：真源是代码注释，作者是生成器。任何手改都会在 `gen_godoc --check` 变红。
-2. **历史快照（historical-verbatim）**：真源是它自己的快照提交。它的断言对**已移除的实现**成立，因此不许"对齐今天"式改写；引用由 `doc-refs` 按快照锚定来保护（§五·3(a) 是其工作机制）。（`docs/wiki` 中被代码 `// 契约:` 引用的 16 篇是**活契约页**，归第 1 类维护——随代码重写式修订，锚 slug 不变。）
+2. **历史快照（historical-verbatim）**：真源是它自己的快照提交。它的断言对**已移除的实现**成立，因此不许"对齐今天"式改写；引用由 `doc-refs` 按快照锚定来保护（§五·3(a) 是其工作机制）。（`docs/wiki` 中被代码 `// 契约:` 引用的 16 篇是**活契约页**，归第 1 类维护——随代码重写式修订，锚 slug 不变。`docs/wiki/agent/compression-and-telemetry.md` 自带 historical-verbatim 横幅、其 §3/§7 描述已移除实现，仍被 6 处历史 `// 契约:` 注释引用，属待重指的遗留索引；`mechanism-tour.md` 为导览页，均不计入 16。）
 3. **长期事实/操作面**：真源是今天的树。每条引用必须能 `ls` 到，否则 `doc-refs` 变红。
 4. **工作笔记/过程面**：真源是当时的会话，默认不入库；一旦入库就要按"长期事实"标准补齐引用。
 

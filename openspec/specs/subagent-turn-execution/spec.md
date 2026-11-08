@@ -1,5 +1,7 @@
 # subagent-turn-execution Specification
 
+> **复核注记（2026-11-04 逐模块核对）**：本规范对已退役符号（`TagentAgent` / `EventBus` / `SessionProjection` / `PlainTool` / `SwappableModel` 等，全仓 Go 0 命中）的引用均为 MUST NOT 禁止项、历史实现注记或迁移期条款，**无现行 SHALL/MUST 建立在已退役符号上**；现行契约以 `assembly` 组合根 + 每地址常驻消费循环 + 装配期按声明分派为准。逐条映射见 `openspec/changes/archive/2026-11-03-runtime-architecture-convergence/evidence/10-doc-gap-register.md`。
+
 ## Purpose
 
 定义 sub-agent 工具调用的执行语义:一次调用 = 一次 `RunFlow` = 一个完整 turn。turn 边界由 `RunFlow` 的自然返回定义,而非对输出事件流的内容探测。sub-agent 与顶层持久循环共享同一个 turn 原语 `RunFlow`,仅循环包裹方式不同(顶层 `for { Pull; RunFlow }` 反应式守护;sub-agent 直调一次)。

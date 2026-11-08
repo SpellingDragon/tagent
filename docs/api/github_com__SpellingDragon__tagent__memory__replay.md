@@ -463,10 +463,22 @@ func WithInputEvents(entry ProjectionEntry, raw string) ProjectionEntry
     rebuild reads one under — so the segment rule closes the output positionally
     instead of guessing inputs it never named.
 
+func WithInstanceID(entry ProjectionEntry, generation event.InstanceID) ProjectionEntry
+    WithInstanceID returns the entry beside the recorder generation its fact
+    was written under: the one setter for the field the fact→projection mapping
+    fills, so the entry's public shape stays closed and the generation is read
+    back only through Generation.
+
 func WithMessageRole(entry ProjectionEntry, role string) ProjectionEntry
     WithMessageRole returns the entry beside the role its own message carried:
     the one setter for a field a cross-package assembly fills, so the entry's
     public shape stays closed.
+
+func (e ProjectionEntry) Generation() event.InstanceID
+    Generation reports the recorder generation the fact behind the entry was
+    written under: the envelope's runtime instance identity, verbatim and never
+    truncated. An entry whose fact named no generation answers empty, which the
+    fold renders as its explicit gen:? placeholder rather than inventing one.
 
 func (e ProjectionEntry) StatedRole() string
     StatedRole reports the role the fact's own message carried, empty beside a

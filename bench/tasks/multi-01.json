@@ -1,0 +1,28 @@
+{
+  "id": "multi-01",
+  "category": "multi",
+  "prompts": [
+    "Remember the codeword ORBIT for the next turn.",
+    "What is the codeword? Reply with only the codeword."
+  ],
+  "tools": [],
+  "verifier": {
+    "response": {
+      "must_contain": [
+        "ORBIT"
+      ],
+      "must_not_contain": [
+        "NEBULA"
+      ]
+    }
+  },
+  "examples": {
+    "positive": {
+      "output": "ORBIT"
+    },
+    "negative": {
+      "output": "NEBULA",
+      "expect_error_contains": "response"
+    }
+  }
+}

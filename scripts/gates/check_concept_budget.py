@@ -120,6 +120,15 @@ BASELINE = (
     ("iface-methods", "features/rl/capture.go:Capture", 3),
     ("iface-methods", "features/rl/capture_wiring.go:CaptureScope", 4),
     ("iface-methods", "runtime/agent/loop.go:Capture", 3),
+    # memory/ledger kvPort 3m（2026-11-05 03 资源有界）：条目级驻留要求按前缀枚举
+    # 键值对（prefix-pair scan；localFileKV/memKV/rustvikingKV 同步实现），读、枚举
+    # 与提交是同一 KV 面在同一 shard 视图上的三种动作；拆成两个接口会让前缀枚举
+    # 绕开内存脏合并另立一条读路，与本域“不立第二读路”的裁决冲突。
+    ("iface-methods", "memory/ledger/localfile.go:kvPort", 3),
+    # features/evolution/governance GovernanceEventLog 3m（2026-11-05 03 收口）：治理账的
+    # 持久面＝写入、前缀回放与同步屏障三种动作，同一本账；拆窄口会让前缀回放绕开
+    # Sync 屏障另立一条读路，与本域“一条链一本账”的裁决冲突。
+    ("iface-methods", "features/evolution/governance/denial.go:GovernanceEventLog", 3),
     ("struct-fields", "runtime/agent/delegate.go:Delegation", 9),
     ("struct-fields", "runtime/task/spec.go:Spec", 9),
     ("struct-fields", "tool/subagent/builder.go:Builder", 8),
@@ -144,8 +153,8 @@ BASELINE = (
     ("struct-fields", "tool/subagent/subagent.go:Definition", 10),
     # Declaration 6f（声明面本体）：组织声明=入口/代理/引用/基线/MCP 服务器代际/原始文档，MCP 面随 mcp_servers 声明下沉各成一格，拆开会让声明面出现影子结构。
     ("struct-fields", "api/config/config.go:Declaration", 6),
-    # AgentSpec 24f（声明面本体）：单个 agent 的声明格＝核心（身份/模型/引用/参数/回合预算/回放窗口）＋熔断两镜（max_calls_per_response/long_context_tokens，单响应调用量与长上下文阈值，人审挂起式）＋捕获预算（capture_budget_mb，轨迹常驻上限）＋ memory/meditation/file/exec 四个域段平铺在同一格；窗口三字段（max_tokens/compress_threshold/keep_recent_tasks）替代 replay_budget；三个熔断/预算键与 max_tool_iterations 同模式，是声明字段不是影子结构（oom-bounded-capture-and-storm-fuse）。
-    ("struct-fields", "api/config/config.go:AgentSpec", 24),
+    # AgentSpec 26f（声明面本体）：单个 agent 的声明格＝核心（身份/模型/引用/参数/回合预算/回放窗口）＋熔断两镜（max_calls_per_response/long_context_tokens，单响应调用量与长上下文阈值，人审挂起式）＋捕获预算（capture_budget_mb，轨迹常驻上限）＋请求预算两字段（provider_context_window/output_reserve，provider 窗口与输出余量的可选声明；导出是 YAML 解码前提，MUST NOT 退回未导出访问）＋ memory/meditation/file/exec 四个域段平铺在同一格；窗口三字段（max_tokens/compress_threshold/keep_recent_tasks）替代 replay_budget；三个熔断/预算键与 max_tool_iterations 同模式，是声明字段不是影子结构（oom-bounded-capture-and-storm-fuse）。
+    ("struct-fields", "api/config/config.go:AgentSpec", 26),
     # MeditationSpec 6f：冥想运行声明本体，六个格分别是启用、节奏两格、提示、观察面与回流白名单，字段即声明形状。
     ("struct-fields", "api/config/config.go:MeditationSpec", 6),
     # event.ParsedMeta 9f（00.25 具名登记）：ParseEventMeta 的解析结果本体＝数据面，
@@ -211,7 +220,6 @@ BASELINE = (
     # S3 ctx-bare — accessor 落点具名登记（调用点裸读=0；实现体单次 ctx.Value=合法）
     ("ctx-bare", "api/plugin/phases.go:*", 1),   # CallPassFrom：派发→受理 pass 传输（锁定工具端口无第二通道）
     ("ctx-bare", "runtime/task/wrapper.go:*", 1),    # CallFrameFrom：per-call 身份经端口唯一通道
-    ("ctx-bare", "assembly/host_delivery.go:*", 1),    # deliveryLineageFrom：回合血统经类型化 accessor 落到 send 投递
     ("ctx-bare", "assembly/settle_turn.go:*", 1),    # settleBarrierFrom：回合终态屏障经类型化 accessor 落到驱动与投递之间
     # S4 contract-surface 已出清（叶 00.24）：全部导出接口的 canonical 范例与 Godoc
     # 红线均已落地，本表不再登记 S4 债务。以下一条为再次登记：ResultDelegation 是

@@ -1,0 +1,39 @@
+{
+  "id": "file-02",
+  "category": "file",
+  "prompts": [
+    "Edit config.yaml: change port 8080 to 9090. Keep the service name and the file's shape."
+  ],
+  "tools": [
+    "file.read",
+    "file.write"
+  ],
+  "setup": {
+    "config.yaml": "service: api\nport: 8080\n"
+  },
+  "verifier": {
+    "file": {
+      "path": "config.yaml",
+      "must_contain": [
+        "port: 9090",
+        "service: api"
+      ],
+      "must_not_contain": [
+        "8080"
+      ]
+    }
+  },
+  "examples": {
+    "positive": {
+      "files": {
+        "config.yaml": "service: api\nport: 9090\n"
+      }
+    },
+    "negative": {
+      "files": {
+        "config.yaml": "service: api\nport: 8080\n"
+      },
+      "expect_error_contains": "file"
+    }
+  }
+}

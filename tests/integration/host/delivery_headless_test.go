@@ -68,6 +68,7 @@ func TestOwedDeliveryStaysHeadlessForNonEntryAddresses(t *testing.T) {
 // that is not the entry: the worker settles, the notification routes back to the
 // headless agent, and its follow-up turn answers. That body is delivered nowhere,
 // so the restart over the same storage has nothing to push to the channel.
+// - The answer committed at the headless address declares an obligation retired instead of sent: the chain carries the headless-retired state that closes every such body without a send, and no sent state beside it.
 func runHeadlessSettleTakesNoObligation(t *testing.T) {
 	wakeEnv(t)
 	provider := newScriptedProvider(t)
@@ -137,14 +138,28 @@ func runHeadlessSettleTakesNoObligation(t *testing.T) {
 	if err := second.Close(ctx); err != nil {
 		t.Fatalf("close the restarted host: %v", err)
 	}
-	if carried := recordsCarrying(owedDeliveryRecords(t, root), headlessSettleBody); len(carried) != 0 {
-		t.Fatalf("delivery records carrying the headless body = %+v, want no obligation at a headless address", carried)
+	facts := deliveryFacts(t, root)
+	declared := deliveryDeclarations(facts, headlessSettleBody)
+	if len(declared) == 0 {
+		t.Fatalf("owed declarations of the headless body = %+v, want the turn's declaration", declared)
+	}
+	for _, declaration := range declared {
+		if state, held := deliveryNewestState(facts, declaration.Identity); !held || state != deliveryStateRetiredHead {
+			t.Fatalf("the settlement state of %s = %q (held=%t): %+v, want the headless retirement of every declaration",
+				declaration.Identity, state, held, deliverySettlementFactsOf(facts, declaration.Identity))
+		}
+	}
+	for _, fact := range facts {
+		if fact.State == deliveryStateSent {
+			t.Fatalf("the headless address sent a body: %+v", fact)
+		}
 	}
 }
 
 // runHeadlessOwedRetiredOnBoot plants the obligation a process of another
 // generation left at a headless address and boots over it: the record is retired
 // under its own state and nothing reaches the channel.
+// - The settlement account retires the migrated record as a fact: the read-only record keeps its owed bytes, and the chain carries the one headless-retired state that closes the obligation.
 func runHeadlessOwedRetiredOnBoot(t *testing.T) {
 	wakeEnv(t)
 	provider := newScriptedProvider(t)
@@ -177,9 +192,14 @@ func runHeadlessOwedRetiredOnBoot(t *testing.T) {
 	if bodies := sender.bodies(); len(bodies) != 0 {
 		t.Fatalf("bodies the boot delivered = %q, want the headless obligation left off the channel", bodies)
 	}
-	retired := recordsCarrying(owedDeliveryRecords(t, root), headlessLegacyBody)
-	if len(retired) != 1 || retired[0].Status != headlessState {
-		t.Fatalf("records carrying the headless body = %+v, want the one obligation retired as %q", retired, headlessState)
+	facts := deliveryFacts(t, root)
+	state, held := deliveryNewestState(facts, legacyID)
+	if !held || state != deliveryStateRetiredHead {
+		t.Fatalf("settlement facts of %s = %+v, want the one obligation retired as %q",
+			legacyID, deliverySettlementFactsOf(facts, legacyID), deliveryStateRetiredHead)
+	}
+	if carrying := settlementFactsCarrying(facts, headlessLegacyBody); len(carrying) == 0 {
+		t.Fatalf("no settlement fact keeps the headless body %q for the audit trail: %+v", headlessLegacyBody, facts)
 	}
 }
 

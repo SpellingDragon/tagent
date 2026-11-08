@@ -10,7 +10,7 @@
 
 <a id="runner-flow"></a>
 ## 二、一个回合在核内的流转
-回合不再由入口启动，而由一个常驻消费循环推进：每个 `(agent, session)` 地址一条 goroutine（`runtime/agent/consumer.go` 的 `Consumer.run`），等 `Wake` → `pullDriving` 拉取已到达的事件 → 按事件类型分派 → 有驱动事件时开一段并调用一次模型 → 回到拉取，不等派发的工具返回。`agent.Agent.Decide` 拿到的是一次装配好的请求，模型只提供词汇。一段（segment）的顺序是：`openSegment`（铸范围身份 `<session>#cN`，把新材料按 `aggregateReady` 合进 transcript）→ 循环 `decide`（`model.Model.GenerateContent` 出流，`model.ReduceChannel` 做**唯一一次**终结归约）→ 决策与工具调用事实落链、派发即返回 → 结果以事件回流，`harvest` 非阻塞配成观察续下一轮 → 无工具调用的最终回复即 `closeSegment`（`commitTranscript` + `commitOutput` 落 `agent_output`）。全部入口收敛常驻消费循环：`Host.Invoke`、`Run.Invoke`、`Run.InjectEvent`（冥想注入）、一次投递落到空闲目标的那一轮与模型可见 send 都只提交事实并唤醒目标地址，同步调用方等待其输入所属闭合段的不可变结果，不存在直驱例外。三处边界写死：归约只发生一次（不二次解释流机制）；工具调用只经适配器的 call 面；本回合的 `Turn{Decisions,Terminal,Failure,FinalRound}` 是唯一结果记录，不另立第二份。
+回合不再由入口启动，而由一个常驻消费循环推进：每个 `(agent, session)` 地址一条 goroutine（`runtime/agent/consumer.go` 的 `Consumer.run`），等 `Wake` → `pullDriving` 拉取已到达的事件 → 按事件类型分派 → 有驱动事件时开一段并调用一次模型 → 回到拉取，不等派发的工具返回。`agent.Agent.Decide` 拿到的是一次装配好的请求，模型只提供词汇。一段（segment）的顺序是：`openSegment`（铸范围身份 `<session>#cN`，把新材料按 `aggregateReady` 合进 transcript）→ 循环 `decide`（`model.Model.GenerateContent` 出流，`model.ReduceChannel` 做**唯一一次**终结归约）→ 决策与工具调用事实落链、派发即返回 → 结果以事件回流，`harvest` 非阻塞配成观察续下一轮 → 无工具调用的最终回复即 `closeSegment`（`commitTranscript` + `commitOutput` 落 `agent_output`）。全部入口收敛常驻消费循环：`Host.Invoke`、`Run.Invoke`、`Run.InjectEvent`（冥想注入）、一次投递落到空闲目标的那一轮与模型可见 send 都只提交事实并唤醒目标地址，同步调用方等待其输入所属闭合段的不可变结果，不存在直驱例外。三处边界写死：归约只发生一次（不二次解释流机制）；工具调用只经适配器的 call 面；本回合的 `Turn{DecisionCount,Terminal,Failure,FinalRound}` 是唯一结果记录，不另立第二份。
 
 **实例面是每个地址一个**：`Consumers.Ensure` 按材料自己声明的完整地址装配并启动实例（`runtime/agent/consumer.go`），入口 agent 之外也挂——委派会址 `<调用方会话>#sub:<原生调用号>` 就靠它得到自己的驱动者。三条硬性质：同一地址重复 Ensure 回已挂的实例，一个地址绝不跑两个驱动者；生命周期就是 run 的，集合已停则一次调用答“无实例”而不是另起驱动者；实例的读游标从链上最后一条 `agent_output` 之后接着读，重启后未答复的输入仍然待办。宿主入口因此只有一条路径：`Host.Invoke` → 提交输入事实 → `Ensure` → `Wake` → `WaitAnswer`（`assembly/host.go` 的 `invokeConsumed`），“调用方阻塞等目标回合跑完”的同步直驱不再是常规驱动路径。
 
@@ -20,7 +20,7 @@
 
 <a id="projection-lifecycle"></a>
 ## 四、投影生命周期：边界按身份记，预算是每次现算
-投影是 `ReplayProjection`（entries/seen/originals/consumed/fold/boundary/recovery），`Append` 按事件键幂等。滚动边界记的是**身份**（`replayEntry.endedAt`），不是位置——折叠会重写序列，位置边界会在重写后指错对象。边界**只在两种时刻移动**：段闭合时移向那条 `agent_output`（`endedPrefix` 解读时含自己），无飞行段时移向新开范围的输入（不含自己，它归该段携带）——段飞行中落链的输入不动边界。做法在 `assembly/facts.go` 的 `recordMapped`（`rangeOpen`），解析在 `assembly/request.go` 的 `endedPrefix`：于是已闭合的段整段呈现为前缀、正在飞的段由 transcript 携带，同一条事实不会被读成两条。边界内的判定 `admitsRange`：`TypeExternalInput`，或 `TypeFeedback` 且触发源为 `task`；换言之能被拿来回放的只有外部输入与本 agent 自己的随动反馈。呈现预算是**每次装配现算**（`AssembleBudget`/`AssembleBudgetPrefix`），绝不读回上一次的形态：每一条目按所剩 room 取第一个装得下的形态，`Full → Ticket → Summary → notice card`；notice 类（feedback 族）**可缩不可丢**，4 字符/令牌是唯一换算常数。
+投影是 `ReplayProjection`（entries/seen/originals/consumed/fold/boundary/recovery），`Append` 按事件键幂等。滚动边界记的是**身份**（`replayEntry.endedAt`），不是位置——折叠会重写序列，位置边界会在重写后指错对象。边界**只在两种时刻移动**：段闭合时移向那条 `agent_output`（`endedPrefix` 解读时含自己），无飞行段时移向新开范围的输入（不含自己，它归该段携带）——段飞行中落链的输入不动边界。做法在 `assembly/facts.go` 的 `recordMapped`（`rangeOpen`），解析在 `assembly/request.go` 的 `endedPrefix`：于是已闭合的段整段呈现为前缀、正在飞的段由 transcript 携带，同一条事实不会被读成两条。边界内的判定 `admitsRange`：`TypeExternalInput`，或 `TypeFeedback` 且触发源为 `task`（`TypeExternalInput` 中带 `delegated_part=instruction|material` 的两类不算：委派批次随它自己的 task 进段，不另开范围）；换言之能被拿来回放的只有外部输入与本 agent 自己的随动反馈。呈现预算是**每次装配现算**（`AssembleBudget`/`AssembleBudgetPrefix`），绝不读回上一次的形态：每一条目按所剩 room 取第一个装得下的形态，`Full → Ticket → Summary → notice card`；notice 类（feedback 族）**可缩不可丢**，4 字符/令牌是唯一换算常数。
 
 <a id="unified-compression"></a>
 ## 五、三龄段折叠：折叠的是呈现，不是链
@@ -40,7 +40,7 @@
 
 <a id="watchdog-final-round"></a>
 ## 九、看门狗收尾轮：预算到期的下一次决策就是收尾轮
-`FinalRoundPolicy{MaxRounds,Budget,Prompt,Timeout}` 装在 `Loop.SetFinalRound` 上，四条红线：两个预算都为 0 时 drive 恒无界；预算只在**回合边界**读，绝不切断已在途的决策；**至多跑一轮**收尾轮，它返回即结束 drive；收尾轮发出的工具调用**一律不受理**——每个调用以配对回执如实拒绝（`finalRoundRefusal`），因为"交付"不该开新义务。收尾轮有三处标记：请求边界 `RequestBoundary.FinalRound`、尾部携带收尾指令（动态段在其后，仍是最后一条）、按自己的短超时（缺省 30s）运行；收尾轮读链得到的在途输入不进本回合（直驱路径），留作下一回合的历史；`Turn.FinalRound` 报出原因是 `rounds` 还是 `budget`（自终则空）。收尾之后照旧走 `Host.Quiesce`／`Run.Close` 的真实终结判定（`CloseOutcome` 三态，`Cut` 是正常返回）——上限生效与优雅收尾两全。判定本身是链上事实：`runtime/agent/final_round_planner.go` 的 `FinalRoundPlanner`（PostCommit 观察者）按 policy 把「本 range 的预算已耗尽」提交成 `final_round.request`（`FinalRoundDue` 与消费循环同源判定、内容寻址，一 range 至多一条）；消费循环在每次决策前按本段 range 读这条事实（`runtime/agent/consumer.go` 的 `closingRoundOf`），读到即本次为收尾轮，读不到才回落本地判定兜底——兜底不补事实，判定与执行各归一处。
+`FinalRoundPolicy{MaxRounds,Budget,Prompt,Timeout}` 装在 `Loop.SetFinalRound` 上，四条红线：两个预算都为 0 时 drive 恒无界；预算只在**回合边界**读，绝不切断已在途的决策；**至多跑一轮**收尾轮，它返回即结束 drive；收尾轮发出的工具调用**一律不受理**——每个调用以配对回执如实拒绝（`finalRoundRefusal`），因为"交付"不该开新义务。收尾轮有三处标记：请求边界 `RequestBoundary.FinalRound`、尾部携带收尾指令（动态段在其后，仍是最后一条）、按自己的短超时（缺省 30s）运行；收尾轮读链得到的在途输入不进本回合（直驱路径），留作下一回合的历史；`Turn.FinalRound` 报出原因是 `rounds` 还是 `budget`（自终则空）。收尾之后照旧走 `Host.Quiesce`／`Run.Close` 的真实终结判定（`CloseOutcome` 四值：零值 `CloseUnreached` ＋ `Quiesced`/`Cut`/`Broken`，`Cut` 是正常返回）——上限生效与优雅收尾两全。判定本身是链上事实：`runtime/agent/final_round_planner.go` 的 `FinalRoundPlanner`（PostCommit 观察者）按 policy 把「本 range 的预算已耗尽」提交成 `final_round.request`（`FinalRoundDue` 与消费循环同源判定、内容寻址，一 range 至多一条）；消费循环在每次决策前按本段 range 读这条事实（`runtime/agent/consumer.go` 的 `closingRoundOf`），读到即本次为收尾轮，读不到才回落本地判定兜底——兜底不补事实，判定与执行各归一处。
 
 ## 已知缺口与演进方向
 | 缺口 | 现状与防线 | 候选方向 |

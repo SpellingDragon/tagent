@@ -78,7 +78,7 @@ jobs:
       # First-party product packages per golden/runtime/architecture.json (its
       # scope excludes scripts/tests/examples/docs/resources). The composition
       # root is the directory assembly/; a bare `.` would recurse the root module.
-      PRODUCT_PACKAGES: "assembly api runtime memory features tool internal cli"
+      PRODUCT_PACKAGES: "assembly api runtime memory features tool internal cli bench"
     steps:
       # Full history: doc-refs citation-level anchors resolve at their introducing commits.
       - uses: actions/checkout@v4
@@ -113,7 +113,19 @@ jobs:
 
       # Fails honestly while the domain artifacts are still being written; no bypass.
       - name: Plan contract
-        run: "if compgen -G 'openspec/changes/*/task-graph.json' > /dev/null; then python scripts/gates/check_runtime_plan.py --change-dir openspec/changes/archive/2026-10-18-runtime-rebuild --json; else echo 'no active change; the plan contract gate has no object (archive-only), skipped'; fi"
+        run: |
+          # Judge the ACTIVE change, not a frozen archive: lint.sh:105-113 calls a
+          # hardcoded archive path "object mismatch" and validates the active graph.
+          shopt -s nullglob
+          active_graphs=(openspec/changes/*/task-graph.json)
+          shopt -u nullglob
+          if [ "${#active_graphs[@]}" -eq 0 ]; then
+            echo 'no active change; the plan contract gate has no object (archive-only), skipped'
+          else
+            for graph in "${active_graphs[@]}"; do
+              python scripts/gates/check_runtime_plan.py --change-dir "$(dirname "$graph")" --json
+            done
+          fi
 
       - name: Architecture policy
         run: "python scripts/gates/check_runtime_architecture.py --check-policy --json"
@@ -129,7 +141,19 @@ jobs:
         run: "python scripts/gates/check_runtime_architecture.py --implementation --json"
 
       - name: Scenarios contract
-        run: "if compgen -G 'openspec/changes/*/task-graph.json' > /dev/null; then python scripts/gates/check_runtime_evidence.py --check-contract --plan-graph openspec/changes/archive/2026-10-18-runtime-rebuild/task-graph.json --json; else echo 'no active change; the scenarios contract gate has no object (archive-only), skipped'; fi"
+        run: |
+          # --plan-graph must name the ACTIVE task-graph.json so task_ids are
+          # cross-checked against the manifest of the change under review.
+          shopt -s nullglob
+          active_graphs=(openspec/changes/*/task-graph.json)
+          shopt -u nullglob
+          if [ "${#active_graphs[@]}" -eq 0 ]; then
+            echo 'no active change; the scenarios contract gate has no object (archive-only), skipped'
+          else
+            for graph in "${active_graphs[@]}"; do
+              python scripts/gates/check_runtime_evidence.py --check-contract --plan-graph "$graph" --json
+            done
+          fi
 
       - name: gofmt (product packages)
         run: |

@@ -179,16 +179,22 @@ func (t *ReleaseTool) Declaration() *trpctool.Declaration {
 }
 
 // Call acquires the declared execution resource and reports what its execution
-// recorded. A resource already held under the key is reused rather than started
-// a second time, and a declared kind the system cannot serve answers as the
-// named degrade refusal beside the rhythm of the call. The lease is kept alive
-// at the cadence of the call's own monitor rhythm until the execution behind it
-// returns, and the renewing ends beside the call. The restart decision of a key
-// nothing is held under runs unknown -> query -> take over or report by name:
+// recorded. A resource already held under the key is probed before it is reused:
+// a live pane is reused, a dead one is released and the command starts in a new
+// session, and a probe that cannot decide refuses the reuse by name. The lease is
+// kept alive at the cadence of the call's own monitor rhythm until the execution
+// behind it returns, and the renewing ends beside the call. The restart decision
+// of a key nothing is held under runs unknown -> query -> take over or report by
+// name:
 // - a resource observed alive is taken over and its frame reported under the key
 // - a probe that could not decide is refused by name beside the unconfirmed evidence
 // - a settled key reports the saved final output instead of rerunning over it
 // - a dead key beside no record opens a new execution exactly as before
+// Every acquired frame is verified against the generation token of the session
+// the executor started. A frame that proves stale is released and the command
+// retried once in a fresh session; a second stale frame is the named explicit
+// failure, never a success claim. The receipt names the execution proof beside
+// the rebuild and retry facts the query face carries.
 func (t *RunTool) Call(ctx context.Context, jsonArgs []byte) (any, error) {
 	if t.manager == nil {
 		return nil, ErrUnwired
@@ -225,44 +231,114 @@ func (t *RunTool) Call(ctx context.Context, jsonArgs []byte) (any, error) {
 		lease = parsed
 		options = append(options, WithTTL(lease))
 	}
-	if !t.manager.held(decl.Resource) && t.manager.available(decl.Resource) {
-		observed, err := t.manager.Query(ctx, decl.Resource)
+	var observed *ProbeResult
+	if t.manager.available(decl.Resource) {
+		probed, err := t.manager.Query(ctx, decl.Resource)
 		if err != nil {
 			return nil, err
 		}
-		switch observed.State {
+		observed = &probed
+		held := t.manager.held(decl.Resource)
+		switch probed.State {
 		case ProbeAlive:
-			if err := t.manager.Adopt(ctx, decl.Resource, options...); err != nil {
-				return nil, err
+			if !held {
+				if err := t.manager.Adopt(ctx, decl.Resource, options...); err != nil {
+					return nil, err
+				}
+				stopRenewing := t.renewForCall(decl.Resource, lease, rhythm)
+				defer stopRenewing()
+				output, err := t.manager.Capture(ctx, decl.Resource)
+				if err != nil {
+					return nil, err
+				}
+				t.manager.watch(decl.Resource)
+				return fmt.Sprintf("reattached %s: %s", decl.Resource, output), nil
 			}
-			stopRenewing := t.renewForCall(decl.Resource, lease, rhythm)
-			defer stopRenewing()
-			output, err := t.manager.Capture(ctx, decl.Resource)
-			if err != nil {
-				return nil, err
-			}
-			t.manager.watch(decl.Resource)
-			return fmt.Sprintf("reattached %s: %s", decl.Resource, output), nil
 		case ProbeUnknown:
-			return nil, fmt.Errorf("%w: %s: %s", ErrAdoptUnconfirmed, decl.Resource, observed.Detail)
+			if held {
+				return nil, fmt.Errorf("%w: %s: %s", errReuseUnconfirmed, decl.Resource, probed.Detail)
+			}
+			return nil, fmt.Errorf("%w: %s: %s", ErrAdoptUnconfirmed, decl.Resource, probed.Detail)
 		case ProbeDead:
-			if settled, err := t.manager.FinalOutput(decl.Resource); err == nil {
-				return fmt.Sprintf("settled %s: exit=%d\nfinal output: %s", settled.Resource, settled.ExitCode, settled.Output), nil
+			if !held {
+				if settled, err := t.manager.FinalOutput(decl.Resource); err == nil {
+					return fmt.Sprintf("settled %s: exit=%d\nfinal output: %s", settled.Resource, settled.ExitCode, settled.Output), nil
+				}
 			}
 		}
+	}
+	if observed != nil {
+		options = append(options, withReuseProbe(*observed))
 	}
 	key, err := t.manager.Acquire(ctx, decl, options...)
 	if err != nil {
 		return nil, err
 	}
 	stopRenewing := t.renewForCall(key, lease, rhythm)
-	defer stopRenewing()
-	output, err := t.manager.Capture(ctx, key)
+	defer func() { stopRenewing() }()
+	output, finalKey, err := t.captureVerified(ctx, key, decl, options)
 	if err != nil {
 		return nil, err
 	}
-	t.manager.watch(key)
-	return fmt.Sprintf("executed %s: %s", key, output), nil
+	if finalKey != key {
+		stopRenewing()
+		stopRenewing = t.renewForCall(finalKey, lease, rhythm)
+	}
+	t.manager.watch(finalKey)
+	explanation, _ := t.manager.Explain(finalKey)
+	return t.executedAnswer(finalKey, output, explanation), nil
+}
+
+// captureVerified returns the frame of the acquired generation and, beside a
+// stale generation, releases it and executes the same declaration once in a
+// fresh session. A second stale frame is the named explicit failure: the call
+// answers no success claim rather than the scrollback of an earlier generation.
+func (t *RunTool) captureVerified(ctx context.Context, key ResourceKey, decl ExecutionDecl, options []AcquireOption) ([]byte, ResourceKey, error) {
+	output, err := t.manager.Capture(ctx, key)
+	if !errors.Is(err, errStaleGeneration) {
+		return output, key, err
+	}
+	before, _ := t.manager.Explain(key)
+	evidence, releaseErr := t.manager.Release(ctx, key)
+	if releaseErr != nil || !evidence.Released {
+		reason := evidence.Reason
+		if reason == "" && releaseErr != nil {
+			reason = releaseErr.Error()
+		}
+		if reason == "" {
+			reason = "the stale generation could not be confirmed stopped"
+		}
+		return nil, key, fmt.Errorf("%w: %s: %s", errRebuildUnconfirmed, key, reason)
+	}
+	fresh, acquireErr := t.manager.Acquire(ctx, decl, options...)
+	if acquireErr != nil {
+		return nil, key, acquireErr
+	}
+	t.manager.noteStaleRetry(fresh)
+	t.manager.carryRebuilds(fresh, before.rebuilds)
+	output, err = t.manager.Capture(ctx, fresh)
+	if errors.Is(err, errStaleGeneration) {
+		return nil, fresh, fmt.Errorf("%w: %s: the rebuilt generation answered a stale frame too", errStaleGeneration, fresh)
+	}
+	return output, fresh, err
+}
+
+// executedAnswer assembles the receipt of one execution: the observed frame
+// beside the execution proof of this generation and the rebuild and retry facts
+// the query face carries. The generation marker itself never reaches the
+// receipt, because Capture strips it from the frame.
+func (t *RunTool) executedAnswer(key ResourceKey, output []byte, explanation Explanation) string {
+	receipt := fmt.Sprintf("executed %s: %s", key, output)
+	if proof, ok := t.manager.proofOf(key); ok {
+		receipt += "\nexecution proof: " + proof
+	}
+	if explanation.rebuilds > 0 {
+		receipt += "\nrebuild: the dead session was released and the command ran in a new session"
+	}
+	if explanation.staleRetries > 0 {
+		receipt += "\nretry: the stale generation was released and the command re-executed once"
+	}
+	return receipt
 }
 
 // renewForCall keeps the lease of one in-flight execution alive for as long as

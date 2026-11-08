@@ -9,10 +9,10 @@
 
 | 文件 | 职责 | 立得住的反事实 |
 |---|---|---|
-| `types.go` | `Event`、`Address`、类型化标识（`AgentID`/`SessionID`/`EventID`/`InvocationID`/`TaskID`/`InstanceID`/`EpisodeID`/`DecisionID`/`AttemptID`/`CallID`/`ApprovalID`） | 没有它：身份退化成 `string` 满仓飞舞，谁都能把 `EventID` 塞进 `TaskID` |
+| `types.go` | `Event`、`Address`、类型化标识（`AgentID`/`SessionID`/`EventID`/`InvocationID`/`TaskID`/`InstanceID`/`EpisodeID`/`DecisionID`/`AttemptID`）；`CallID`/`ApprovalID` 是纯 `string`（原生调用号不全局唯一，审批号由 `task.NewApprovalID` 铸造） | 没有它：身份退化成 `string` 满仓飞舞，谁都能把 `EventID` 塞进 `TaskID` |
 | `meta.go` | 冻结类型常量、冻结元数据键、透传前缀、`ParseEventMeta` | 没有它：键名靠字面量复制，跨包静默漂移 |
 | `fact.go` | 事实类别契约 `Fact`（`FactKey`/`FactType`） | 没有它：一个事实家族无法在不 import 本包的地方自述身份 |
-| `model_replacement.go` | 模型替换请求的事实构造（带 `trigger_source`、`event_summary`） | — |
+| `model_replacement.go` | model 维度 `config_change` 的元数据键（`model_from_version`/`model_to_version`/`model_replacement_result`）与结果戳 `"requested"`；独立族已退役 | — |
 | `compress_request.go` | 压缩请求的事实构造 | — |
 
 `Event` 的四个块（字段全在 `types.go`）：
@@ -41,6 +41,9 @@
 | `TypeTaskSettled` | `task_settled` | 任务结算通知，已升为一等事件类型（带自己的名字，不再靠文本前缀识别） |
 | `TypeFeedback` | `feedback` | 反馈/评分/任务成败，经因果边绑定到具体产出事件 |
 | `TypeGovernance` | `governance` | 治理记录（`subtype` 区分 `denial`/`goal`/`approval`/`degraded`/`audit`） |
+| `TypeAttentionQuestion` | `attention.question` | 注意力提问（在场记录） |
+| `TypeAttentionAnswer` | `attention.answer` | 注意力回答（裁决） |
+| `TypeAttentionClearance` | `attention.clearance` | 注意力清除（退出在场） |
 
 **触发源印花（`trigger_source` 的取值）**：本包只声明一个值——`LineageDelegation = "delegation"`，即一次被委派的调用是 Agent 自己管理的流量，不开宿主面、不计新鲜度。其余取值（`user`、`task`、`reincarnation`、`system_alert`、`meditation`）**不在本包声明，也不在本包判定**：判定住在消费域自己的策略里（见[谱系可见性](../reliability/durable-delivery.md#lineage-visibility)），本包只保证印花这一格元数据原样过链。
 
@@ -51,7 +54,7 @@
 | `event_key` | `MetaKeyEventKey` | 写入方在落链时盖章 | 审计、离线导出 |
 | `partition_id` | `MetaKeyPartitionID` | 同上 | 审计、诊断 |
 | `event_type` | `MetaKeyEventType` | 同上 | 审计、诊断 |
-| `event_summary` | `MetaKeyEventSummary` | **各写入方自己盖章**（宿/任务/模型替换/失败通知各写各的） | 查询记录、投影条目、检索文本兜底 |
+| `event_summary` | `MetaKeyEventSummary` | **各写入方自己盖章**（宿/任务/配置变更/失败通知各写各的） | 查询记录、投影条目、检索文本兜底 |
 | `trigger_source` | `MetaKeyTriggerSource` | 每回合由运行流程设在转发事件上，入库时抄进事实 | 新鲜度判据、投递策略、交付账本的血统字段 |
 | `settle_trigger_source` | `MetaKeySettleTriggerSource` | 结算面 | 结算归因 |
 | `bundle_id` | `MetaKeyBundleID` | 装配面 | 版本可回溯 |
@@ -62,6 +65,10 @@
 | `delivery.identity` | `MetaKeyDeliveryIdentity` | 同上：发起方自己那份是发送方的调用身份，框架那份是通知身份 | 去重：同一身份重放不落第二条记录 |
 | `delivery.receipt` | `MetaKeyDeliveryReceipt` | 同上 | 回执：正文已进目标链（`sent`）；一条没带这个条目的事实按 `sent` 读 |
 | `delivery.source` | `MetaKeyDeliverySource` | 同上：发起这次投递的那个调用 | 把一个源事件的全部投递当一本账回读 |
+| `delivery.denial` | `MetaKeyDeliveryDenial` | 只拒收/挂起路径带 | 读"为什么没送出去"而不猜 |
+| `input_events` | `MetaKeyInputEvents` | `agent_output` 携带本段消费的输入事实身份 | 投影按消费关系归段 |
+| `delegation` | `MetaKeyDelegation` | 委派调用在受理记录上携带的来源戳 | 自管流量判定 |
+| `attention.kind` / `attention.target` / `attention.lineage` / `attention.expires_ms` / `attention.clearance` | `MetaKeyAttention*` | 注意力在场/回答/清除事实 | 读时推导在场，同键拒二落 |
 
 **透传前缀** `MetaPrefix = "meta_"`：任何带该前缀的键原样转发，且**永不被读作业务字段**——业务键与受控控制面因此不共用命名空间。
 

@@ -14,7 +14,7 @@
 
 <a id="lifecycle-convergence"></a>
 ## 三、关闭：静止收束，且诚实优先于干净
-关闭是消费循环的终止相位，不是另起一套排空动作：先关 intake 闸门（外部新输入被具名拒绝，关闭期内由已有义务派生的回合仍受受理），再**静止到不动点**，最后才停消费者与设施。落终结仍守 `Reconciler` 三条红线——只有该调用的义务清空才落它的终结、仍持有的预约必须报出、不得早于也不得晚于它等的义务。不动点由三集合共同判定——工作收敛（链上无已受理未终态 task）∧ 消费收敛（权威未消费账清空：mailbox 未消费 + 持久欠通知）∧ 写入者停止（写入存储/外部系统的执行体未确认停止即不退出，数据安全屏障）。三集合经**同源函数 `Unsettled()`** 求值：关闭、重启、报告读同一处，进程内影子账本（不可从链上算回的字段）不作判据；求值以提交序号栅栏取快照并复核 seq 未变（原子），按权威账增量维护而不扫全链。**等待挂事件不挂时钟**：新事实提交与执行体收尾信号驱动重判，禁定时轮询、也禁拿零 deadline 空等。出口三态——`Quiesced`（自然收束）／`Cut`（预算到点，余量在链上由重启续上，**正常返回**）／`Broken`（不可判，告警）；`Cut`/`Broken` 逐地址报告未消费通知、未终态工作与未停写入者，全权威读。**「报错＋仍然持有」是诚实结果，「干净返回」是假象。**
+关闭是消费循环的终止相位，不是另起一套排空动作：先关 intake 闸门（外部新输入被具名拒绝，关闭期内由已有义务派生的回合仍受受理），再**静止到不动点**，最后才停消费者与设施。落终结仍守 `Reconciler` 三条红线——只有该调用的义务清空才落它的终结、仍持有的预约必须报出、不得早于也不得晚于它等的义务。不动点由三集合共同判定——工作收敛（链上无已受理未终态 task）∧ 消费收敛（权威未消费账清空：mailbox 未消费 + 持久欠通知）∧ 写入者停止（写入存储/外部系统的执行体未确认停止即不退出，数据安全屏障）。三集合经**同源函数 `Unsettled()`** 求值：关闭、重启、报告读同一处，进程内影子账本（不可从链上算回的字段）不作判据；求值以提交序号栅栏取快照并复核 seq 未变（原子），按权威账增量维护而不扫全链。**等待挂事件不挂时钟**：新事实提交与执行体收尾信号驱动重判，禁定时轮询、也禁拿零 deadline 空等。出口四值（`CloseOutcome` 零值 `CloseUnreached` 表示判定未到达）＋三个已判定出口——`Quiesced`（自然收束）／`Cut`（预算到点，余量在链上由重启续上，**正常返回**）／`Broken`（不可判，告警）；`Cut`/`Broken` 逐地址报告未消费通知、未终态工作与未停写入者，全权威读。**「报错＋仍然持有」是诚实结果，「干净返回」是假象。**
 
 <a id="turn-local-execution-face"></a>
 ## 四、回合本地状态与执行面的边界
@@ -38,7 +38,7 @@
 
 <a id="generation-wiring-window"></a>
 ## 九、一次发布内的接线窗口：先判能不能装，再一次性换
-宿主换配置的窗口被钉死成三段，顺序不可换。**先判**：`hostDocument.compatibleWith` 在任何复用与交换之前跑——换入口 agent、增删 agent 集合即 `ErrHostReloadStructural`；动只有 `Boot` 建过的消费者即 `ErrHostReloadRestartRequired`（`restartRequiredChanges` 列出的正是那些 YAML 路径：`storage.type`/`storage.root`/`request_timeout_seconds`/`governance`/`telemetry`，以及每个 agent 的 `tools`/`skill_dirs`/`read_root`/`file`/`exec`/`memory`/`meditation`），被拒绝的 reload **两侧原样不动**。**再一次换**：通过的文档经**一次** `Publish` 进一个代（同内容则 `PublishUnchanged`，不进代），随后同一把锁内换掉在效文档与原生工具面。**最后逐 agent 记模型迁移**：从租约自身读在效版本、与新文档比对（`modelChanges`），再各自 `NoteModelChange` 产一条 replacement 事实——读的是租约而不是上次的变更表，因此一次失败的安装会被下一次 reload 重新判出来，而不是被当成已应用。
+宿主换配置的窗口被钉死成三段，顺序不可换。**先判**：`hostDocument.compatibleWith` 在任何复用与交换之前跑——`ErrHostReloadStructural` 只在文档缺失时出现；换入口 agent 或增删 agent 集合属 FP 代际面，随发布会换新生效（落 `org.entry`/`org.agents` 维度事实，移除的 agent 对新输入具名拒绝）；动只有 `Boot` 建过的消费者即 `ErrHostReloadRestartRequired`（`restartRequiredChanges` 列出的正是那些 YAML 路径：`storage.type`/`storage.root`/`request_timeout_seconds`/`governance`/`telemetry`，以及每个 agent 的 `tools`/`skill_dirs`/`read_root`/`file`/`exec`/`memory`/`meditation`），被拒绝的 reload **两侧原样不动**。**再一次换**：通过的文档经**一次** `Publish` 进一个代（同内容则 `PublishUnchanged`，不进代），随后同一把锁内换掉在效文档与原生工具面。**最后逐 agent 记模型迁移**：从租约自身读在效版本、与新文档比对（`modelChanges`），再各自 `Run.noteModelConfigurationChange`（`assembly/run.go:2061`）产一条 model 维度 `config_change` 事实——读的是租约而不是上次的变更表，因此一次失败的安装会被下一次 reload 重新判出来，而不是被当成已应用。
 
 <a id="reentry-resolution"></a>
 ## 十、存量任务重投递：解析用哪张面
@@ -46,7 +46,7 @@
 
 <a id="model-reference-pinning"></a>
 ## 十一、模型引用解析在「被选中的那一代」，不在「此刻的注册表」
-`model_override` 让一次委派换掉服务的模型，但它填的是**引用名**，不是实例。`LeaseModel` 是这一条的落点：它是**跨替换稳定**的句柄，每次调用借用**该调用开始时**生效的那一版，于是替换只影响此后开始的请求——在途请求整条流都留在它开始的那一版上，替换永不在活请求底下换模型，也不必为换模型重新发布一代。`ModelIdentity{Model,Version}` 把「同一模型名的两代」记成两个身份（`Name()` 用 `@` 连接，无版本即无分隔符），因此替换前写下的记录永不被读成替换后那一版的记录。配置侧的迁移经 `NoteModelChange` 落成 replacement 事实（`ModelReplacementSourceConfig`），报告里逐 agent 给出 `from`/`to` 与事实键。
+`model_override` 让一次委派换掉服务的模型，但它填的是**引用名**，不是实例。`LeaseModel` 是这一条的落点：它是**跨替换稳定**的句柄，每次调用借用**该调用开始时**生效的那一版，于是替换只影响此后开始的请求——在途请求整条流都留在它开始的那一版上，替换永不在活请求底下换模型，也不必为换模型重新发布一代。`ModelIdentity{Model,Version}` 把「同一模型名的两代」记成两个身份（`Name()` 用 `@` 连接，无版本即无分隔符），因此替换前写下的记录永不被读成替换后那一版的记录。配置侧的迁移经 `noteModelConfigurationChange` 落成一条 `config_change`（dimension=model）事实（来源戳 `event.ConfigChangeSourceConfig`），报告里逐 agent 给出 `from`/`to` 与事实键。
 
 ## 已知缺口与演进方向
 | 缺口 | 现状与防线 | 候选方向 |

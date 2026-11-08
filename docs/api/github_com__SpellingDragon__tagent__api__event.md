@@ -285,6 +285,9 @@ const ModelReplacementResultRequested = "requested"
     and the lease records whether the replacement actually took effect in its
     own history.
 
+const RecoveryTicketType = "recovery.ticket"
+    RecoveryTicketType is the frozen type of a recovery ticket fact.
+
 const TypeConfigChange = "config_change"
     TypeConfigChange is the frozen type of a configuration change fact.
 
@@ -674,6 +677,45 @@ type ProductAnswers struct {
 }
     ProductAnswers names the judgment one product answers beside the mechanism
     that executed it.
+
+type RecoveryTicket struct {
+	// ID is the content-addressed identity of the ticket.
+	ID EventID
+	// SchemaVersion names the payload layout the blob was serialized under.
+	SchemaVersion int
+	// Digest is the hex sha256 over the blob bytes.
+	Digest string
+	// Length is the exact byte length the blob must have.
+	Length int64
+	// Cursor is the fact key of the last record the snapshot covers.
+	Cursor string
+}
+    RecoveryTicket is the on-chain envelope of one restart-recovery snapshot:
+    it names the digest and byte length of the external read-only blob that
+    carries the serialized carrier tables, and the cursor — the fact key of the
+    last record the snapshot covers. The blob lives at one fixed current key,
+    overwritten each boot; the digest verifies its bytes, the ticket is the
+    chain-side truth and the blob only the referenced current bytes. Identity
+    is content-addressed over the schema version, the cursor and the digest,
+    so a re-filed snapshot of the same coverage keeps one identity, and the
+    writing moment stays out of the identity.
+
+func RecoveryTicketFor(schemaVersion int, cursor, digest string, length int64) RecoveryTicket
+    RecoveryTicketFor returns the ticket fact for one snapshot: the identity is
+    content-addressed over the schema version, the cursor and the digest, so the
+    same coverage names one identity however often the snapshot is re-filed.
+
+func (t RecoveryTicket) FactKey() string
+    FactKey returns the ticket's identity as a fact key: the identity one filing
+    is quoted by, unchanged by every re-file of the same coverage.
+
+func (t RecoveryTicket) FactType() string
+    FactType returns the frozen type a recovery ticket is read as.
+
+func (t RecoveryTicket) Payload() []byte
+    Payload renders the canonical ticket bytes: struct-field order under
+    encoding/json is fixed, and the envelope carries no map, so the same ticket
+    marshals to identical bytes every time.
 
 type SessionID string
     SessionID identifies one conversation session of an agent.

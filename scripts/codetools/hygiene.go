@@ -22,7 +22,7 @@ var runtimeArtifactExts = []string{".lock", ".journal", ".tmp", ".spill", ".prof
 // outside this rule (tool and runtime space); loose root files are too, but the
 // module root holds no Go source: the composition root is the assembly/ package.
 var registeredTopDirs = map[string]bool{
-	".github": true, "api": true, "assembly": true, "cli": true, "docs": true,
+	".github": true, "api": true, "assembly": true, "bench": true, "cli": true, "docs": true,
 	"examples": true, "features": true, "golden": true, "internal": true,
 	"memory": true, "openspec": true, "resources": true,
 	"runtime": true, "scripts": true, "tests": true, "tool": true,

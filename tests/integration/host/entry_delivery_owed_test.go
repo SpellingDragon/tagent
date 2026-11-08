@@ -48,14 +48,15 @@ func TestReloadMovedEntryDeliveryLandsOwedAcrossRestart(t *testing.T) {
 	child.waitLedgerEvent(t, entryOwedSending)
 	child.kill(t)
 
-	records := owedDeliveryRecords(t, root)
-	held := recordsInState(records, owedState)
-	if len(held) != 1 {
-		t.Fatalf("owed delivery obligations beside the killed process = %+v, want the one the moved entry registered", records)
+	records := deliveryFacts(t, root)
+	declared := deliveryDeclarations(records, entryOwedBody)
+	if len(declared) != 1 {
+		t.Fatalf("owed declarations beside the killed process = %+v, want the one the moved entry registered", declared)
 	}
-	if held[0].Content != entryOwedBody || held[0].Target.AgentID != entryOwedNewEntry {
-		t.Fatalf("owed delivery = %+v, want %q addressed to the entry the generation declares", held[0], entryOwedBody)
+	if declared[0].Content != entryOwedBody || declared[0].Target.AgentID != entryOwedNewEntry {
+		t.Fatalf("owed declaration = %+v, want %q addressed to the entry the generation declares", declared[0], entryOwedBody)
 	}
+	identity := declared[0].Identity
 
 	viewAnchorEnv(t)
 	sender := &deliveryRecorder{}
@@ -77,12 +78,10 @@ func TestReloadMovedEntryDeliveryLandsOwedAcrossRestart(t *testing.T) {
 	if err := restored.Close(ctx); err != nil {
 		t.Fatalf("close the restarted host: %v", err)
 	}
-	settled := owedDeliveryRecords(t, root)
-	if owed := recordsInState(settled, owedState); len(owed) != 0 {
-		t.Fatalf("delivery obligations standing owed after the restart = %+v, want none", owed)
-	}
-	if sent := recordsCarrying(settled, entryOwedBody); len(sent) != 1 || sent[0].Status != sentState {
-		t.Fatalf("the record of %q after the restart = %+v, want the one record settled as sent", entryOwedBody, sent)
+	settled := deliveryFacts(t, root)
+	if state, held := deliveryNewestState(settled, identity); !held || state != deliveryStateSent {
+		t.Fatalf("the settlement state of %s after the restart = %q (held=%t): %+v, want the one record settled as sent",
+			identity, state, held, deliverySettlementFactsOf(settled, identity))
 	}
 }
 

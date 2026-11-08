@@ -1458,7 +1458,7 @@ func (a *wechatApp) bindWechat(ctx context.Context, host *assembly.Host) error {
 	a.typing = bindChannel(a.host, a.bot, a.cfg.App.Wechat)
 	registerHandlers(a.host, a.bot, a.gateway, a.cfg.App.Wechat, a.typing)
 	ops, scene := a.noticeWiring(host)
-	go maybeInjectReincarnationNotice(a.host.inbox, ops, scene, a.cfg.Entry, "run", noticeWaitMax)
+	go injectRestartNotice(a.host.inbox, ops, scene, a.cfg.Entry, "run", noticeWaitMax)
 	go maybeConsumeSystemAlert(a.host.inbox, ops, "run", 5*time.Second)
 	return nil
 }

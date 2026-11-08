@@ -13,7 +13,7 @@
 | `wechat.go` | 通道主体：`hostRuntime`（`Admit`／`Drive`）、`internalInbox`、`hostSender`（唯一出网通路）、`receiptLineage` 回执、`SeenStore`／`DedupKey`、`SessionRouter`、`registerHandlers` |
 | `wechat_files.go` | 文件收发：`ClassifyInbound` 四分类、`sanitizeName`／`buildSavePath`、`IntakeMedia`、`classifyFilePaths` 六规则、`selectSendFn`、`fileDelivery` 报告 |
 | `wechat_approval.go` | 审批网关：`Deliver` 投给审批人、`Resolve` 按 digest 前缀解析、`runApprovalCLI` |
-| `wechat_notice.go` | 一次性启动钩子：`maybeInjectReincarnationNotice`（换装通报）与 `maybeConsumeSystemAlert`（重启失败告警） |
+| `wechat_notice.go` | 一次性启动钩子：`injectRestartNotice`（换装通报）与 `maybeConsumeSystemAlert`（重启失败告警） |
 | `smoke*_test.go` | `//go:build smoke` 的本地长程冒烟与六个症状锚（见第五节） |
 
 <a id="startup-and-routing"></a>
@@ -23,7 +23,7 @@
 
 `SessionRouter` 把显式 chat 身份映射到会话 `event.Address`，拼写**单射**：一个 chat 恰一个会话，两个 chat 绝不共享（`ErrTargetRebind` 拒绝把已绑定的会址改绑另一个 chat）；`Target(addr)` 是唯一解析方向，**没有任何"最近活跃会话"回退**，解析不到就是具名拒绝（`errNoSendTarget`）。`NextInvocation(addr)` 为每次驱动取新 invocation，`lockAddress` 让同一会话的驱动串行。
 
-**启动钩子是锦上添花**：`maybeConsumeSystemAlert` 等事件循环静默后注入重启失败、`maybeInjectReincarnationNotice` 等待 notice 出现后注入换装通报，每一步只记日志，任何一步都不许把 bot 打崩。
+**启动钩子是锦上添花**：`maybeConsumeSystemAlert` 等事件循环静默后注入重启失败、`injectRestartNotice` 等待 notice 出现后注入换装通报，每一步只记日志，任何一步都不许把 bot 打崩。
 
 **审批通道是门不是墙**：`approvalGateway.Deliver` 把请求投到每个配置的审批人会话，`Resolve` 按 **digest 前缀**（最短 4 位）解析批准/拒绝——前缀命中多条即 `ErrApprovalAmbiguous`，发送者不在白名单即 `ErrApprovalNotApprover`（空白名单拒绝所有）；未配置 governance 时网关直接 `Enabled()==false`，不挂 `assembly.WithApprover`。投递失败只记可见 gap，请求仍可经 `runApprovalCLI` 或请求文件本身作答——没有审批人接话不等于拒绝。
 

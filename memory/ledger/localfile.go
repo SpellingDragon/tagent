@@ -1,10 +1,13 @@
 package ledger
 
 import (
+	"bufio"
+	"container/list"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -39,12 +42,14 @@ type kvBatch struct {
 }
 
 // kvPort is the key-value seam the durable stores share across tiers: one read
-// unit (a key or a prefix) and one commit unit (a batch applied behind the
-// barrier). Writes reach the backing store only when a commit returns success,
-// so a caller that reports success to its own consumer commits first and
-// reports what that commit returned.
+// unit (a key or a prefix), one key enumeration (so a loader can discover the
+// partitions it must read without materializing bodies), and one commit unit (a
+// batch applied behind the barrier). Writes reach the backing store only when a
+// commit returns success, so a caller that reports success to its own consumer
+// commits first and reports what that commit returned.
 type kvPort interface {
 	kvRead(ctx context.Context, fetch kvFetch) ([]kvPair, error)
+	kvKeys(ctx context.Context, prefix string) ([]string, error)
 	kvCommit(ctx context.Context, batch kvBatch) error
 }
 
@@ -72,26 +77,121 @@ const (
 	shardFileName         = "snapshot.json"
 	shardSnapshotVersion  = 1
 	shardSnapshotTempName = shardFileName + ".tmp"
+	// localKVResidentBudgetBytes is the byte budget of the resident entry set:
+	// the keys and values resident entries carry plus a fixed per-entry cost. It
+	// bounds what the process holds, never what the shard persists. The 1 MiB
+	// budget saturates before the smoke gate's stable window, so the measured
+	// slope stays at steady state; the shard remains the record for cold entries.
+	localKVResidentBudgetBytes int64 = 1 << 20
+	// localKVEntryOverheadBytes is the accounting cost of one resident entry
+	// beside its key and value bytes.
+	localKVEntryOverheadBytes int64 = 96
 )
 
-// localFileKV is the localfile tier key-value view: writes land in memory at
-// once and a commit serializes every shard touched since the last barrier into
-// its own snapshot file, written to a temporary file and swapped in by one
-// atomic rename. A shard is the key namespace up to its first colon, so one
-// partition of the segment store commits through exactly one snapshot file and a
-// barrier costs the shards it touches. A new process reads back every value a
-// successful barrier wrote, and snapshot content it cannot parse fails the open.
+// kvResidentEntry is one key-value pair kept in the resident set: the bytes
+// themselves beside their accounting size.
+type kvResidentEntry struct {
+	key   string
+	value []byte
+	size  int64
+}
+
+// kvResidentSet is the entry-level resident set of one local key-value view: an
+// LRU over key-value pairs with a byte budget. The shard snapshot stays the
+// persistent unit, so evicting an entry removes memory only; the next read of
+// the key reads it back from the shard snapshot.
+type kvResidentSet struct {
+	order   *list.List
+	entries map[string]*list.Element
+	bytes   int64
+}
+
+// newKVResidentSet returns an empty resident set.
+func newKVResidentSet() *kvResidentSet {
+	return &kvResidentSet{order: list.New(), entries: map[string]*list.Element{}}
+}
+
+// get answers the value resident under key and moves it to the front of the
+// recency order. The caller copies what it hands out, so the resident entry
+// stays the one copy the process holds.
+func (s *kvResidentSet) get(key string) ([]byte, bool) {
+	element, held := s.entries[key]
+	if !held {
+		return nil, false
+	}
+	s.order.MoveToFront(element)
+	return element.Value.(*kvResidentEntry).value, true
+}
+
+// put makes one entry resident, replacing an earlier value under the same key
+// and evicting the least recently used entries until the byte budget holds. An
+// entry larger than the whole budget is evicted immediately, so the resident
+// bytes never exceed the budget however large one value is.
+func (s *kvResidentSet) put(key string, value []byte) {
+	size := int64(len(key)+len(value)) + localKVEntryOverheadBytes
+	if element, held := s.entries[key]; held {
+		entry := element.Value.(*kvResidentEntry)
+		s.bytes += size - entry.size
+		entry.value = value
+		entry.size = size
+		s.order.MoveToFront(element)
+	} else {
+		entry := &kvResidentEntry{key: key, value: value, size: size}
+		s.entries[key] = s.order.PushFront(entry)
+		s.bytes += size
+	}
+	for s.bytes > localKVResidentBudgetBytes {
+		last := s.order.Back()
+		if last == nil {
+			break
+		}
+		s.removeEntry(last.Value.(*kvResidentEntry).key, last)
+	}
+}
+
+// remove drops one key from the resident set, if it holds one.
+func (s *kvResidentSet) remove(key string) {
+	element, held := s.entries[key]
+	if !held {
+		return
+	}
+	s.removeEntry(key, element)
+}
+
+// removeEntry drops one accounted element.
+func (s *kvResidentSet) removeEntry(key string, element *list.Element) {
+	s.bytes -= element.Value.(*kvResidentEntry).size
+	delete(s.entries, key)
+	s.order.Remove(element)
+}
+
+// localFileKV is the localfile tier key-value view: a commit writes the touched
+// shards through a temporary file and one atomic rename, so every value a
+// successful barrier covered reaches any later process. A shard snapshot is the
+// persistent unit; memory residency is entry-level with a byte budget, so a cold
+// entry is evicted from memory and read back from its shard snapshot on the next
+// read. The write path reads the old snapshot, merges the dirty entries and
+// swaps the result in, so an evicted entry never disappears from the persisted
+// state.
 //
 // 契约: docs/wiki/memory/memory-architecture.md#local-file-kv
 type localFileKV struct {
-	mu     sync.Mutex
-	dir    string
-	shards map[string]map[string][]byte
-	dirty  map[string]struct{}
+	mu  sync.Mutex
+	dir string
+	// shards names every shard the directory holds, whether or not any of its
+	// entries is resident.
+	shards map[string]struct{}
+	// resident is the entry-level LRU: the keys and values the process holds.
+	resident *kvResidentSet
+	// dirty names the entries a commit changed per shard: a nil value is a
+	// delete, and a non-nil one is the bytes the commit put.
+	dirty map[string]map[string][]byte
 }
 
-// openLocalFileKV opens the key-value view rooted at root, reading back every
-// shard snapshot written under it.
+// openLocalFileKV opens the key-value view rooted at root. Snapshot content that
+// cannot be read back as the recorded key-value state fails the open; the
+// entries themselves stay on disk until a read makes one resident, so the open
+// holds no more than one entry's bytes at a time.
 func openLocalFileKV(root string) (*localFileKV, error) {
 	dir := filepath.Join(root, shardDirName)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -102,9 +202,10 @@ func openLocalFileKV(root string) (*localFileKV, error) {
 		return nil, err
 	}
 	kv := &localFileKV{
-		dir:    dir,
-		shards: map[string]map[string][]byte{},
-		dirty:  map[string]struct{}{},
+		dir:      dir,
+		shards:   map[string]struct{}{},
+		resident: newKVResidentSet(),
+		dirty:    map[string]map[string][]byte{},
 	}
 	for _, entry := range entries {
 		if !entry.IsDir() {
@@ -114,11 +215,12 @@ func openLocalFileKV(root string) (*localFileKV, error) {
 		if err != nil {
 			return nil, fmt.Errorf("%w: shard directory %q", ErrSnapshotCorrupt, entry.Name())
 		}
-		shard, err := readShardSnapshot(filepath.Join(dir, entry.Name()))
-		if err != nil {
+		shardDir := filepath.Join(dir, entry.Name())
+		_ = os.Remove(filepath.Join(shardDir, shardSnapshotTempName))
+		if err := scanShardSnapshot(shardDir, nil); err != nil {
 			return nil, err
 		}
-		kv.shards[label] = shard
+		kv.shards[label] = struct{}{}
 	}
 	return kv, nil
 }
@@ -127,6 +229,10 @@ var _ kvPort = (*localFileKV)(nil)
 
 // kvRead returns the pairs the fetch names: the one value held under the key it
 // names, or every held pair whose key carries the named prefix, ordered by key.
+// A key the resident set evicted is read back from its shard snapshot; a prefix
+// read merges the snapshots of the shards it covers with the resident entries,
+// so an evicted pair is still part of the answer while the resident bytes stay
+// bounded.
 func (k *localFileKV) kvRead(ctx context.Context, fetch kvFetch) ([]kvPair, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -134,22 +240,109 @@ func (k *localFileKV) kvRead(ctx context.Context, fetch kvFetch) ([]kvPair, erro
 	k.mu.Lock()
 	defer k.mu.Unlock()
 	if fetch.key != "" {
-		value, held := k.shards[shardLabelOf(fetch.key)][fetch.key]
+		if value, held := k.resident.get(fetch.key); held {
+			return []kvPair{{key: fetch.key, value: append([]byte(nil), value...)}}, nil
+		}
+		label := shardLabelOf(fetch.key)
+		if _, known := k.shards[label]; !known {
+			return nil, nil
+		}
+		var found []byte
+		held := false
+		err := scanShardSnapshot(filepath.Join(k.dir, url.PathEscape(label)), func(key string, value []byte) bool {
+			if key != fetch.key {
+				return true
+			}
+			found = append([]byte(nil), value...)
+			held = true
+			return false
+		})
+		if err != nil {
+			return nil, err
+		}
 		if !held {
 			return nil, nil
 		}
-		return []kvPair{{key: fetch.key, value: append([]byte(nil), value...)}}, nil
+		k.resident.put(fetch.key, found)
+		return []kvPair{{key: fetch.key, value: append([]byte(nil), found...)}}, nil
 	}
-	var out []kvPair
-	for _, shard := range k.shards {
-		for key, value := range shard {
+	pairs := map[string][]byte{}
+	for _, label := range k.scanLabelsLocked(fetch.prefix) {
+		err := scanShardSnapshot(filepath.Join(k.dir, url.PathEscape(label)), func(key string, value []byte) bool {
 			if strings.HasPrefix(key, fetch.prefix) {
-				out = append(out, kvPair{key: key, value: append([]byte(nil), value...)})
+				pairs[key] = append([]byte(nil), value...)
 			}
+			return true
+		})
+		if err != nil {
+			return nil, err
 		}
+	}
+	for element := k.resident.order.Front(); element != nil; element = element.Next() {
+		entry := element.Value.(*kvResidentEntry)
+		if strings.HasPrefix(entry.key, fetch.prefix) {
+			pairs[entry.key] = append([]byte(nil), entry.value...)
+		}
+	}
+	out := make([]kvPair, 0, len(pairs))
+	for key, value := range pairs {
+		out = append(out, kvPair{key: key, value: value})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].key < out[j].key })
 	return out, nil
+}
+
+// kvKeys returns the keys the prefix names, in key order. The enumeration reads
+// the shard snapshots a loader needs to discover the partitions it must read:
+// values are decoded one at a time and dropped, so no body is materialized.
+func (k *localFileKV) kvKeys(ctx context.Context, prefix string) ([]string, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	keys := map[string]struct{}{}
+	for _, label := range k.scanLabelsLocked(prefix) {
+		err := scanShardSnapshot(filepath.Join(k.dir, url.PathEscape(label)), func(key string, _ []byte) bool {
+			if strings.HasPrefix(key, prefix) {
+				keys[key] = struct{}{}
+			}
+			return true
+		})
+		if err != nil {
+			return nil, err
+		}
+	}
+	for element := k.resident.order.Front(); element != nil; element = element.Next() {
+		key := element.Value.(*kvResidentEntry).key
+		if strings.HasPrefix(key, prefix) {
+			keys[key] = struct{}{}
+		}
+	}
+	out := make([]string, 0, len(keys))
+	for key := range keys {
+		out = append(out, key)
+	}
+	sort.Strings(out)
+	return out, nil
+}
+
+// scanLabelsLocked names the shards a prefix read has to scan: the one shard
+// the prefix names through the label before its first colon, or every shard for
+// a prefix that names none. The caller holds the lock.
+func (k *localFileKV) scanLabelsLocked(prefix string) []string {
+	labels := make([]string, 0, len(k.shards))
+	if label := shardLabelOf(prefix); prefix != "" && strings.ContainsRune(prefix, ':') {
+		if _, known := k.shards[label]; known {
+			return []string{label}
+		}
+		return nil
+	}
+	for label := range k.shards {
+		labels = append(labels, label)
+	}
+	sort.Strings(labels)
+	return labels
 }
 
 // kvCommit applies the batch and then runs the barrier: it serializes every
@@ -165,24 +358,56 @@ func (k *localFileKV) kvCommit(ctx context.Context, batch kvBatch) error {
 	defer k.mu.Unlock()
 	for _, key := range batch.deletes {
 		label := shardLabelOf(key)
-		if shard, held := k.shards[label]; held {
-			if _, existed := shard[key]; existed {
-				delete(shard, key)
-				k.dirty[label] = struct{}{}
-			}
+		if k.keyHeldLocked(label, key) {
+			k.stageDeleteLocked(label, key)
 		}
 	}
 	for _, put := range batch.puts {
 		label := shardLabelOf(put.key)
-		shard, held := k.shards[label]
-		if !held {
-			shard = map[string][]byte{}
-			k.shards[label] = shard
-		}
-		shard[put.key] = append([]byte(nil), put.value...)
-		k.dirty[label] = struct{}{}
+		k.shards[label] = struct{}{}
+		k.stagePutLocked(label, put.key, put.value)
+		k.resident.put(put.key, append([]byte(nil), put.value...))
 	}
 	return k.flushLocked()
+}
+
+// keyHeldLocked reports whether one key is part of the view, resident or on
+// disk. The caller holds the lock.
+func (k *localFileKV) keyHeldLocked(label, key string) bool {
+	if _, held := k.resident.get(key); held {
+		return true
+	}
+	if _, known := k.shards[label]; !known {
+		return false
+	}
+	held := false
+	_ = scanShardSnapshot(filepath.Join(k.dir, url.PathEscape(label)), func(candidate string, _ []byte) bool {
+		if candidate == key {
+			held = true
+			return false
+		}
+		return true
+	})
+	return held
+}
+
+// stagePutLocked records one put in the dirty set of its shard. The caller holds
+// the lock.
+func (k *localFileKV) stagePutLocked(label, key string, value []byte) {
+	if k.dirty[label] == nil {
+		k.dirty[label] = map[string][]byte{}
+	}
+	k.dirty[label][key] = append([]byte(nil), value...)
+}
+
+// stageDeleteLocked records one delete in the dirty set of its shard and drops
+// the resident entry. The caller holds the lock.
+func (k *localFileKV) stageDeleteLocked(label, key string) {
+	if k.dirty[label] == nil {
+		k.dirty[label] = map[string][]byte{}
+	}
+	k.dirty[label][key] = nil
+	k.resident.remove(key)
 }
 
 // flushLocked runs the barrier over every shard touched since the last one. The
@@ -203,47 +428,196 @@ func (k *localFileKV) flushLocked() error {
 }
 
 // writeShard replaces the snapshot file of one shard with its whole current
-// state, through a temporary file and one atomic rename.
+// state, through a temporary file and one atomic rename: the old snapshot is
+// streamed, the dirty entries of the shard replace their old values, and every
+// entry the commit did not touch is copied through. The merge is streamed so the
+// shard is never held whole in memory.
 func (k *localFileKV) writeShard(label string) error {
+	changed := k.dirty[label]
 	dir := filepath.Join(k.dir, url.PathEscape(label))
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
-	data, err := json.Marshal(shardSnapshot{Version: shardSnapshotVersion, Entries: k.shards[label]})
+	temp := filepath.Join(dir, shardSnapshotTempName)
+	file, err := os.Create(temp)
 	if err != nil {
 		return err
 	}
-	temp := filepath.Join(dir, shardSnapshotTempName)
-	if err := os.WriteFile(temp, data, 0o644); err != nil {
-		return err
+	writeErr := writeShardSnapshot(file, dir, changed)
+	if closeErr := file.Close(); writeErr == nil {
+		writeErr = closeErr
+	}
+	if writeErr != nil {
+		_ = os.Remove(temp)
+		return writeErr
 	}
 	return os.Rename(temp, filepath.Join(dir, shardFileName))
 }
 
-// readShardSnapshot reads back the snapshot file of one shard, dropping the
-// temporary file an interrupted barrier may have left there. Snapshot content
-// that does not parse as the recorded key-value state fails the open.
-func readShardSnapshot(dir string) (map[string][]byte, error) {
-	snapshot := filepath.Join(dir, shardFileName)
-	_ = os.Remove(filepath.Join(dir, shardSnapshotTempName))
-	data, err := os.ReadFile(snapshot)
+// writeShardSnapshot renders one merged shard snapshot into file: the old
+// snapshot streamed entry by entry, then the dirty entries in key order.
+func writeShardSnapshot(file *os.File, dir string, changed map[string][]byte) error {
+	writer := bufio.NewWriterSize(file, 64<<10)
+	if _, err := writer.WriteString(`{"version":` + fmt.Sprint(shardSnapshotVersion) + `,"entries":{`); err != nil {
+		return err
+	}
+	first := true
+	writeEntry := func(key string, value []byte) error {
+		keyJSON, err := json.Marshal(key)
+		if err != nil {
+			return err
+		}
+		valueJSON, err := json.Marshal(value)
+		if err != nil {
+			return err
+		}
+		if !first {
+			if err := writer.WriteByte(','); err != nil {
+				return err
+			}
+		}
+		first = false
+		if _, err := writer.Write(keyJSON); err != nil {
+			return err
+		}
+		if err := writer.WriteByte(':'); err != nil {
+			return err
+		}
+		_, err = writer.Write(valueJSON)
+		return err
+	}
+	var entryErr error
+	err := scanShardSnapshot(dir, func(key string, value []byte) bool {
+		if _, replaced := changed[key]; replaced {
+			return true
+		}
+		entryErr = writeEntry(key, value)
+		return entryErr == nil
+	})
+	if err != nil {
+		return err
+	}
+	if entryErr != nil {
+		return entryErr
+	}
+	keys := make([]string, 0, len(changed))
+	for key := range changed {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		if changed[key] == nil {
+			continue
+		}
+		if err := writeEntry(key, changed[key]); err != nil {
+			return err
+		}
+	}
+	if _, err := writer.WriteString("}}"); err != nil {
+		return err
+	}
+	return writer.Flush()
+}
+
+// scanShardSnapshot streams the snapshot of one shard entry by entry. A missing
+// snapshot is an empty shard. Content that does not parse as the recorded
+// key-value state is reported as ErrSnapshotCorrupt, and a visit that answers
+// false ends the scan without reading the rest. The reader holds one decoded
+// value at a time, never the whole shard.
+func scanShardSnapshot(dir string, visit func(key string, value []byte) bool) error {
+	path := filepath.Join(dir, shardFileName)
+	file, err := os.Open(path)
 	if errors.Is(err, os.ErrNotExist) {
-		return map[string][]byte{}, nil
+		return nil
 	}
 	if err != nil {
-		return nil, err
+		return err
 	}
-	var snap shardSnapshot
-	if err := json.Unmarshal(data, &snap); err != nil {
-		return nil, fmt.Errorf("%w: %s: %w", ErrSnapshotCorrupt, snapshot, err)
+	defer file.Close()
+	corrupt := func(cause error) error {
+		return fmt.Errorf("%w: %s: %w", ErrSnapshotCorrupt, path, cause)
 	}
-	if snap.Version != shardSnapshotVersion {
-		return nil, fmt.Errorf("%w: %s carries snapshot version %d", ErrSnapshotCorrupt, snapshot, snap.Version)
+	decoder := json.NewDecoder(bufio.NewReaderSize(file, 64<<10))
+	token, err := decoder.Token()
+	if err != nil {
+		return corrupt(err)
 	}
-	if snap.Entries == nil {
-		snap.Entries = map[string][]byte{}
+	if delimiter, ok := token.(json.Delim); !ok || delimiter != '{' {
+		return corrupt(errors.New("snapshot is not a JSON object"))
 	}
-	return snap.Entries, nil
+	versionSeen := false
+	for decoder.More() {
+		nameToken, err := decoder.Token()
+		if err != nil {
+			return corrupt(err)
+		}
+		name, ok := nameToken.(string)
+		if !ok {
+			return corrupt(errors.New("snapshot field name is not a string"))
+		}
+		switch name {
+		case "version":
+			var version int
+			if err := decoder.Decode(&version); err != nil {
+				return corrupt(err)
+			}
+			if version != shardSnapshotVersion {
+				return corrupt(fmt.Errorf("snapshot version %d", version))
+			}
+			versionSeen = true
+		case "entries":
+			entriesToken, err := decoder.Token()
+			if err != nil {
+				return corrupt(err)
+			}
+			if delimiter, ok := entriesToken.(json.Delim); !ok || delimiter != '{' {
+				return corrupt(errors.New("snapshot entries is not a JSON object"))
+			}
+			for decoder.More() {
+				keyToken, err := decoder.Token()
+				if err != nil {
+					return corrupt(err)
+				}
+				key, ok := keyToken.(string)
+				if !ok {
+					return corrupt(errors.New("snapshot entry key is not a string"))
+				}
+				var value []byte
+				if err := decoder.Decode(&value); err != nil {
+					return corrupt(err)
+				}
+				if visit != nil && !visit(key, value) {
+					return nil
+				}
+			}
+			ending, err := decoder.Token()
+			if err != nil {
+				return corrupt(err)
+			}
+			if delimiter, ok := ending.(json.Delim); !ok || delimiter != '}' {
+				return corrupt(errors.New("snapshot entries does not end"))
+			}
+		default:
+			var raw json.RawMessage
+			if err := decoder.Decode(&raw); err != nil {
+				return corrupt(err)
+			}
+		}
+	}
+	ending, err := decoder.Token()
+	if err != nil {
+		return corrupt(err)
+	}
+	if delimiter, ok := ending.(json.Delim); !ok || delimiter != '}' {
+		return corrupt(errors.New("snapshot does not end"))
+	}
+	if !versionSeen {
+		return corrupt(errors.New("snapshot carries no version"))
+	}
+	if _, err := decoder.Token(); !errors.Is(err, io.EOF) {
+		return corrupt(errors.New("snapshot carries trailing content"))
+	}
+	return nil
 }
 
 // shardLabelOf returns the shard a key belongs to: the key namespace up to its

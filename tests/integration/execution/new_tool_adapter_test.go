@@ -17,6 +17,7 @@ import (
 	"github.com/SpellingDragon/tagent/assembly"
 	"github.com/SpellingDragon/tagent/memory/ledger"
 	"github.com/SpellingDragon/tagent/memory/query"
+	"github.com/SpellingDragon/tagent/runtime/agent"
 	"github.com/SpellingDragon/tagent/runtime/state"
 	"github.com/SpellingDragon/tagent/runtime/task"
 
@@ -116,6 +117,9 @@ func TestNewToolAdapterNeedsNoHostCompensation(t *testing.T) {
 		}
 		if got := adapter.calls(); got != 1 {
 			t.Fatalf("adapter executions = %d, want the admitted call executed exactly once", got)
+		}
+		if _, err := run.Close(ctx, agent.CloseRequest{Timeout: time.Now().Add(5 * time.Second)}); err != nil {
+			t.Fatalf("drain the first run's settlement writers before rebuilding from the same store (a slow runner otherwise leaves the notice owed): %v", err)
 		}
 
 		restarted := &minimalAdapter{name: "probe", output: "adapter-out"}

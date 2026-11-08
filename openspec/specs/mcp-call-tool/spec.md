@@ -2,16 +2,18 @@
 
 ## Purpose
 
+> **复核注记（2026-11-04 逐模块核对）**：`mcp_call` 本身存在（`tool/mcp/adapter.go:26` 的 `ToolNameMCPCall`）；「注册于 `RegisterBuiltinTools`」与 :14 的 `ValidateToolAccess`（均 0 命中）已按码面就地更正为「装配期按声明逐名解析 / tool ref 解析成功」（`assembly/host_reload.go:446-463`）。B-02 不再涉及本页 SHALL。
+
 本规范定义 mcp-call-tool 能力:通用 MCP 执行网关工具 `mcp_call`。其声明(server/tool/args 三参)SHALL 恒定不变,与注册表内容完全解耦——持有它的 agent 保持字节稳定的 tools 前缀,而可达的 MCP 工具面在注册表层自由变化。失败以结果(nil error)形式返回自纠材料,供模型修正后重试(渗透式发现-执行闭环的执行端)。
 
 ## Requirements
 
 ### Requirement: 恒定声明的通用执行网关
-系统 SHALL 提供内置 plain tool `mcp_call`,注册于 `RegisterBuiltinTools`,其 InputSchema 固定为三参:`server`(string, required)、`tool`(string, required)、`args`(object, 自由形态)。该声明 MUST NOT 随注册表内容变化。挂载遵循 tagent 配置规范:由各 agent 的 YAML `tools:` 声明决定持有者,框架不硬编码归属。
+系统 SHALL 提供内置工具 `mcp_call`（`tool/mcp.ToolNameMCPCall`），由装配期按声明逐名分派（无 `RegisterBuiltinTools` 全局注册表），其 InputSchema 固定为三参:`server`(string, required)、`tool`(string, required)、`args`(object, 自由形态)。该声明 MUST NOT 随注册表内容变化。挂载遵循 tagent 配置规范:由各 agent 的 YAML `tools:` 声明决定持有者,框架不硬编码归属。
 
 #### Scenario: 内置注册可被 YAML 引用
 - **WHEN** agent 的 YAML tools 声明 `kind: tool, id: mcp_call`
-- **THEN** `ValidateToolAccess` 通过且 agent 构建成功
+- **THEN** 该 tool ref 在装配期解析成功且 agent 构建成功
 
 #### Scenario: 声明与注册表内容解耦
 - **WHEN** 注册表中 server 集合发生增删

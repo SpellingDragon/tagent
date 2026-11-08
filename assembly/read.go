@@ -91,23 +91,22 @@ func supplyRetrieval(ctx context.Context, tier *ledger.Tier, embedder memory.Emb
 		supply.searcher = search.NewStoreSearcher(source, nil, nil)
 		return supply, nil
 	}
-	events, err := tier.Segments.Events(ctx)
-	if err != nil {
-		return nil, err
-	}
 	seam := memory.NewVectorSeam(0)
 	seam.Bind(embedder)
-	for _, stored := range events {
+	if err := tier.Segments.EachEvent(ctx, func(stored ledger.StoredEvent) error {
 		body, err := memory.DecodeEventBody(stored.Body)
 		if err != nil {
-			seam.Close()
-			return nil, err
+			return err
 		}
 		text := body.Message.Content
 		if text == "" {
 			text = body.Meta[event.MetaKeyEventSummary]
 		}
 		seam.Submit(stored.Key, text)
+		return nil
+	}); err != nil {
+		seam.Close()
+		return nil, err
 	}
 	supply.seam = seam
 	supply.searcher = search.NewStoreSearcher(source, seam, embedder)

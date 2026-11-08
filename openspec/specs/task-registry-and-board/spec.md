@@ -2,6 +2,8 @@
 
 ## Purpose
 
+> **复核注记（2026-11-04 逐模块核对）**：:144/:148 的 `list_tasks`/`cancel`/`cancel_task`/`relaunch`/`get_task_result`（均 0 命中）已按码面就地更正为「任务操作经 `send{target:{task}}`（`assembly/host_tools.go:44-53`）与看板事实呈现、取消为 `RequestCancel`/`CancelReceipt`」。B-02 不再涉及本页 SHALL。
+
 Provide a deterministic (non-LLM) TaskManager registry that tracks every Task,
 projects a live task board into context each turn (decoupled from compaction),
 emits self-contained `task_settled` events, and exposes LLM task-operation tools
@@ -141,11 +143,11 @@ spawn SHALL 幂等:当一个语义等价的任务已在运行时,再次 spawn SH
 
 ### Requirement: LLM 任务操作工具
 
-系统 SHALL 向 agent 暴露任务操作工具:`list_tasks`(列出活跃/近期任务)、`cancel(id)`、`relaunch(id)`。这些工具 SHALL 是即时返回的同步工具(不进入 dense 窗口)。`get_task_result` SHALL NOT 作为框架注册工具提供——结算结果已随 task_settled 事件本体全量持久化，全量召回由 recall 协议凭票据（事件 key）承接，与任务层 TTL 解耦。框架注入的文案（截断提示、看板、去重提示）SHALL NOT 引用任何任务工具名，工具的装配与否属于 agent 配置层决策。
+任务操作 SHALL 经 `send{target:{task}}`（`assembly/host_tools.go:44-53`）与看板事实呈现；取消为 `runtime/task` 的 `RequestCancel`/`CancelReceipt`。`list_tasks`/`cancel_task`/`relaunch`/`get_task_result` 已移除，MUST NOT 复活。`get_task_result` SHALL NOT 作为框架注册工具提供——结算结果已随 task_settled 事件本体全量持久化，全量召回由 recall 协议凭票据（事件 key）承接，与任务层 TTL 解耦。框架注入的文案（截断提示、看板、去重提示）SHALL NOT 引用任何任务工具名，工具的装配与否属于 agent 配置层决策。
 
 #### Scenario: LLM 列出与取消任务
 
-- **WHEN** agent 装配了 `list_tasks`/`cancel_task` 并调用
+- **WHEN** agent 经 `send{target:{task}}` 发起任务重入或取消
 - **THEN** 工具 SHALL 即时返回任务清单/取消结果（不进入 dense 窗口）
 
 #### Scenario: 结果消费不走专用工具

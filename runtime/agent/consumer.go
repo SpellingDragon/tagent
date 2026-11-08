@@ -1591,6 +1591,22 @@ type Consumers struct {
 	// progress is the pulse every loop of this set reports its movement
 	// through; nil reports nothing.
 	progress func()
+	// idleTTL is how long a resting address with no unsettled delivery keeps its
+	// instance before the idle reaper reclaims it; zero uses DefaultIdleAddressTTL
+	// and a negative value keeps every instance for the life of the set.
+	idleTTL time.Duration
+	// idleSince records, per address, the first sweep that found the instance
+	// resting: the TTL is counted from there, so a single sweep never reclaims a
+	// loop that only paused.
+	idleSince map[event.Address]time.Time
+	// deliveryPending reports an address whose delivery account still owes a
+	// target. The assembly registers the predicate; a nil predicate names no
+	// unsettled delivery anywhere. The reaper reads it outside the set lock, so a
+	// predicate that reads the run's ledger never nests under this one.
+	deliveryPending func(event.Address) bool
+	// recycled counts the idle instances this set reclaimed, so a reader can
+	// verify the reclamation without scanning the log.
+	recycled uint64
 }
 
 // SetProgress attaches the pulse every loop of this set reports its movement
@@ -1630,13 +1646,17 @@ func (cs *Consumers) SetTurnContext(decorate func(ctx context.Context, trigger s
 // face receives the fresh answer of every closed segment and may be nil, in
 // which case the answers stay on the chain.
 func NewConsumers(loop *Loop, base context.Context, deliver SegmentDelivery) *Consumers {
-	return &Consumers{
-		loop:     loop,
-		base:     base,
-		deliver:  deliver,
-		live:     map[event.Address]*Consumer{},
-		stopping: make(chan struct{}),
+	cs := &Consumers{
+		loop:      loop,
+		base:      base,
+		deliver:   deliver,
+		live:      map[event.Address]*Consumer{},
+		idleSince: map[event.Address]time.Time{},
+		idleTTL:   defaultIdleAddressTTL,
+		stopping:  make(chan struct{}),
 	}
+	go cs.reapIdle()
+	return cs
 }
 
 // Ensure answers the resident instance of one address, assembling and starting

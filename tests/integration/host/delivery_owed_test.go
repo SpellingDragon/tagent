@@ -6,11 +6,9 @@ package host
 
 import (
 	"context"
-	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"sort"
 	"testing"
 	"time"
 
@@ -197,9 +195,14 @@ func runOwedDeliveryAcrossKill(t *testing.T) {
 	if got := settleDriveEventsNamed(child.ledger, "delivered"); got != 0 {
 		t.Fatalf("confirmed deliveries in the killed process = %d, want none: the send never returned", got)
 	}
-	before := owedDeliveryRecords(t, root)
-	if owed := recordsInState(before, owedState); len(owed) != 1 || owed[0].Content != settleDriveFollowUpBody {
-		t.Fatalf("delivery obligations beside the killed process = %+v, want the one owed record of %q", before, settleDriveFollowUpBody)
+	before := deliveryFacts(t, root)
+	declared := deliveryDeclarations(before, settleDriveFollowUpBody)
+	if len(declared) != 1 {
+		t.Fatalf("owed declarations beside the killed process = %+v, want the one declaration of %q", declared, settleDriveFollowUpBody)
+	}
+	identity := declared[0].Identity
+	if settled := deliverySettlementFactsOf(before, identity); len(settled) != 0 {
+		t.Fatalf("settlement facts beside the killed process = %+v, want none: the send was never confirmed", settled)
 	}
 	consumed := tierKeys(t, root, settleConsumePrefix)
 	if len(consumed) == 0 {
@@ -226,61 +229,15 @@ func runOwedDeliveryAcrossKill(t *testing.T) {
 	if err := restored.Close(context.Background()); err != nil {
 		t.Fatalf("close the restored host: %v", err)
 	}
-	settled := owedDeliveryRecords(t, root)
-	if owed := recordsInState(settled, owedState); len(owed) != 0 {
-		t.Fatalf("delivery obligations standing owed after the restart = %+v, want none: the restart delivered what the kill left", owed)
-	}
-	if sent := recordsCarrying(settled, settleDriveFollowUpBody); len(sent) != 1 || sent[0].Status != sentState {
-		t.Fatalf("the record of %q after the restart = %+v, want the one record settled as sent", settleDriveFollowUpBody, sent)
+	settled := deliveryFacts(t, root)
+	if state, held := deliveryNewestState(settled, identity); !held || state != deliveryStateSent {
+		t.Fatalf("the settlement state of %s after the restart = %q (held=%t): %+v, want the one record settled as sent",
+			identity, state, held, deliverySettlementFactsOf(settled, identity))
 	}
 	if after := tierKeys(t, root, settleConsumePrefix); len(after) != len(consumed) {
 		t.Fatalf("consumption receipts after the restart = %d, want the %d the killed process left: one generation obligation is consumed once", len(after), len(consumed))
 	}
-	t.Logf("owed-delivery kill evidence: pid=%d owed_before_restart=1 delivered_after_restart=%d owed_after_restart=0 follow_ups=1", child.pid, len(sender.bodies()))
-}
-
-// recordsInState reports the obligations one read holds in one state.
-func recordsInState(records []owedDeliveryRecord, status string) []owedDeliveryRecord {
-	held := make([]owedDeliveryRecord, 0, len(records))
-	for _, record := range records {
-		if record.Status == status {
-			held = append(held, record)
-		}
-	}
-	return held
-}
-
-// recordsCarrying reports the obligations one read holds for one body, whatever
-// state each stands in.
-func recordsCarrying(records []owedDeliveryRecord, content string) []owedDeliveryRecord {
-	held := make([]owedDeliveryRecord, 0, len(records))
-	for _, record := range records {
-		if record.Content == content {
-			held = append(held, record)
-		}
-	}
-	return held
-}
-
-// owedDeliveryRecords reads the delivery obligations one storage root holds back
-// from its durable tier, ordered by identity.
-func owedDeliveryRecords(t *testing.T, root string) []owedDeliveryRecord {
-	t.Helper()
-	found := tierKeys(t, root, owedDeliveryPrefix)
-	ids := make([]string, 0, len(found))
-	for key := range found {
-		ids = append(ids, key)
-	}
-	sort.Strings(ids)
-	records := make([]owedDeliveryRecord, 0, len(ids))
-	for _, key := range ids {
-		var record owedDeliveryRecord
-		if err := json.Unmarshal(found[key], &record); err != nil {
-			t.Fatalf("decode the delivery obligation %s: %v", key, err)
-		}
-		records = append(records, record)
-	}
-	return records
+	t.Logf("owed-delivery kill evidence: pid=%d declared_before_restart=1 delivered_after_restart=%d settled_after_restart=sent follow_ups=1", child.pid, len(sender.bodies()))
 }
 
 // tierKeys reads every key one storage root holds under a prefix.

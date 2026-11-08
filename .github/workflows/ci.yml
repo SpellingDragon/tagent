@@ -144,7 +144,7 @@ jobs:
       # no Go package at all is refused — so the declared surface is unchanged and
       # a directory that gains Go files joins it without a second edit.
       - name: Race (every first-party package + all integration suites)
-        run: ./scripts/gates/race_check.sh . ./assembly/... ./cli/... ./api/event/... ./api/config/... ./api/document/... ./api/model/... ./api/view/... ./api/plugin/... ./runtime/agent/... ./runtime/task/... ./runtime/state/... ./memory/... ./features/... ./tool/... ./internal/... ./tests/integration/execution/... ./tests/integration/history/... ./tests/integration/host/... ./tests/integration/capabilities/... ./tests/integration/evolution/... ./tests/integration/learning/...
+        run: ./scripts/gates/race_check.sh . ./assembly/... ./cli/... ./api/event/... ./api/config/... ./api/document/... ./api/model/... ./api/view/... ./api/plugin/... ./runtime/agent/... ./runtime/task/... ./runtime/state/... ./memory/... ./features/... ./tool/... ./bench/... ./internal/... ./tests/integration/execution/... ./tests/integration/history/... ./tests/integration/host/... ./tests/integration/capabilities/... ./tests/integration/evolution/... ./tests/integration/learning/...
       # 05/5.7: the wechat-bot module is an independent module (no go.work), so
       # the root module's ./... never reaches it. It runs the same race flags as
       # the root gate (race, -count=1, package-serial -p 1); its plain tests (the
@@ -403,9 +403,10 @@ jobs:
           path: ${{ runner.temp }}/bundle
           if-no-files-found: warn
 
-  # Event-semantics symptom anchors (event-semantics-boundary 04.3). The four
+  # Event-semantics symptom anchors (event-semantics-boundary 04.3). The six
   # user-voice smoke tests (accepted stays silent, settled reports once, failed
-  # turn delivers the raw cause, exec states stay silent) live in the wechat-bot
+  # turn delivers the raw cause, exec states stay silent, no send tool,
+  # delivery hold) live in the wechat-bot
   # module behind the smoke build tag. They are absent from the archived task
   # graph's test registry, and registering them in the v2 contract would break
   # the contract's bidirectional cross-check with that graph. So they get a job

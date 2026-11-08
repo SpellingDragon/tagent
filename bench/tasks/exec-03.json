@@ -1,0 +1,36 @@
+{
+  "id": "exec-03",
+  "category": "exec",
+  "prompts": [
+    "Run the command `wc -l < data/events.log > count.txt` in the workspace."
+  ],
+  "tools": [
+    "exec"
+  ],
+  "setup": {
+    "data/events.log": "open\nclosed\nopen\n"
+  },
+  "verifier": {
+    "command": {
+      "argv": [
+        "sh",
+        "-c",
+        "test \"$(tr -d '[:space:]' < count.txt)\" = 3"
+      ],
+      "expect_exit": 0
+    }
+  },
+  "examples": {
+    "positive": {
+      "files": {
+        "count.txt": "3\n"
+      }
+    },
+    "negative": {
+      "files": {
+        "count.txt": "2\n"
+      },
+      "expect_error_contains": "command"
+    }
+  }
+}

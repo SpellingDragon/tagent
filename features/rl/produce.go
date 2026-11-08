@@ -3,6 +3,7 @@ package rl
 import (
 	"context"
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/SpellingDragon/tagent/api/event"
@@ -59,6 +60,11 @@ func LogprobsStateOf(resp *model.Response) (LogprobsState, string) {
 // declaration and is never written or read without naming it.
 var ErrLogprobsSourceMissing = errors.New("rl: the logprobs unsupported state carries no declaration source")
 
+// ErrAnnexIdentityMissing reports an annex line carrying no sample identity: an
+// annex joins on the attempt and the bench task together, so a line without
+// either is refused rather than written as an annex no sample aggregates from.
+var ErrAnnexIdentityMissing = errors.New("rl: the annex record carries no sample identity")
+
 // ValidateAttempt reports whether one attempt record may be written and read
 // back. It holds exactly one rule: a LogprobsUnsupported state is valid only
 // beside the declaration it rests on. A present state rests on the values the
@@ -67,6 +73,18 @@ var ErrLogprobsSourceMissing = errors.New("rl: the logprobs unsupported state ca
 func ValidateAttempt(record AttemptRecord) error {
 	if record.Logprobs == LogprobsUnsupported && record.LogprobsSource == "" {
 		return ErrLogprobsSourceMissing
+	}
+	return nil
+}
+
+// ValidateAnnex reports whether one annex record may be written and read back.
+// It holds exactly one rule: the sample identity is the attempt and the bench
+// task together, so an annex carrying neither, or only one of them, is refused.
+// The verdict is data: an unrated record is a valid annex that says no verdict
+// exists, and this rule never invents one.
+func ValidateAnnex(record AnnexRecord) error {
+	if record.AttemptID == "" || record.TaskID == "" {
+		return fmt.Errorf("%w: attempt %q, bench task %q", ErrAnnexIdentityMissing, record.AttemptID, record.TaskID)
 	}
 	return nil
 }

@@ -134,4 +134,47 @@ agents:
 `
 
 // sectionsFingerprint is the canonical fingerprint of sectionsCanonical.
-const sectionsFingerprint = "7e735f1f19d6e17e83b237da784233ad4475b20aa7a8cc60f86cc1d93e09eafd"
+// The request-budget fields (provider_context_window/output_reserve) always
+// encode in the canonical agent core, so this hash migrated once when the two
+// optional budget fields entered the declaration surface; that migration is the
+// one config-change fact such a reload publishes, never a silent re-key.
+const sectionsFingerprint = "ea633ba0b286a34727ab7444fcc4abe79cde3052fec3107f538ad748f0dd1d31"
+
+// TestRequestBudgetFieldsDecodeAndFingerprint pins the two optional budget fields end to end.
+// - both decode from an agent mapping by their declared keys
+// - a declaration naming them fingerprints differently from one that does not
+// - a negative value is refused by its full field path
+// 契约: docs/wiki/agent/agent-architecture.md#request-budget
+func TestRequestBudgetFieldsDecodeAndFingerprint(t *testing.T) {
+	declaration := loadSections(t, "request-budget.yaml", "entry: main\n"+
+		"agents:\n"+
+		"  - id: main\n"+
+		"    model: m1\n"+
+		"    provider_context_window: 128000\n"+
+		"    output_reserve: 4096\n")
+	agent := declaration.Agents[0]
+	if agent.ProviderContextWindow != 128000 {
+		t.Fatalf("provider context window = %d, want 128000", agent.ProviderContextWindow)
+	}
+	if agent.OutputReserve != 4096 {
+		t.Fatalf("output reserve = %d, want 4096", agent.OutputReserve)
+	}
+
+	bare := loadSections(t, "bare-budget.yaml", "entry: main\nagents:\n  - id: main\n    model: m1\n")
+	if fingerprintOf(t, *declaration) == fingerprintOf(t, *bare) {
+		t.Fatal("a declaration naming the request budget fingerprints like one that names none, want the budget in the canonical core")
+	}
+
+	for _, body := range []string{
+		"entry: main\nagents:\n  - id: main\n    model: m1\n    provider_context_window: -1\n",
+		"entry: main\nagents:\n  - id: main\n    model: m1\n    output_reserve: -1\n",
+	} {
+		_, err := decodeConfigFile(context.Background(), writeConfigSource(t, "negative-budget.yaml", body))
+		if err == nil {
+			t.Fatalf("decode %q = nil error, want the negative budget refused", body)
+		}
+		if !strings.Contains(err.Error(), "expected a non-negative whole number") {
+			t.Fatalf("negative budget refusal = %q, want the non-negative whole-number reason", err)
+		}
+	}
+}

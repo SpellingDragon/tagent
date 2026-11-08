@@ -37,7 +37,7 @@
 |---|---|---|---|
 | 1 | **事件不可变** | 一个 key 只命名一个事实；写入后的字节永不原地改写 | 同 key 异字节具名拒绝：`ErrFactKeyConflict`（`event_body.go`）、`ErrContentConflict`（`localfile.go` `Put` / `segment_store.go` `StoreEvent`） |
 | 2 | **槽位与身份一一对应** | `<pid>:evt:<窗>:<seq>` 里装的就是 `EventID` 指向它的那条事件 | `StoreEvent` 一次 `kvBatch` 同写 evt/idx/meta 三键；`LandEvent` 拒绝 `body.Key != stored.Key`（`ErrBodyKeyMismatch`） |
-| 3 | **链上没有正文** | 链只存身份、时间、元数据与原生负载；消息正文只走原文仓 | 写入点 `assembly/facts.go:125`：`tier.Originals.Put(ctx, body.Ref(), []byte(body.Message.Content))` |
+| 3 | **链上没有正文** | 链只存身份、时间、元数据与原生负载；消息正文只走原文仓 | 写入点 `assembly/facts.go:237`：`tier.Originals.Put(ctx, body.Ref(), []byte(body.Message.Content))` |
 | 4 | **声明式查询语义** | 结果 ≡ 全集过滤 → 全序排序 → offset/limit；剪枝与早停只是优化 | 全序键 `(Timestamp, Key)`（`query_events.go` `queryEventRecords`） |
 | 5 | **授权 default-nothing** | 空分区集合＝什么都不授权，绝不回落全库 | `QueryOptions.resolvePartitions` 两字段皆空返回空列表；`search.Searcher` 四条红线含同一条 |
 | 6 | **越权读作不存在** | scope 外的引用一律读作 miss，连"该 key 存在"都不泄漏 | `ScopedOriginalStore` 三条红线 + `kvOriginalStore.GetScoped` 只在 scope 内匹配（`reference.go`） |
@@ -86,7 +86,7 @@
 | 首次提交 | 一次 `kvBatch` 同写 ref 与 blob，屏障成功后才发布到内存态 | 账目与字节同批可见，不会只剩半条 |
 | 同 key 同 scope 再来一次 | 幂等成功（`return nil`） | 重放与重试不制造第二个事实 |
 | 同 key 不同字节 | `ErrContentConflict` | 一个身份只站一个事实 |
-| 同 key **第二个 scope** | ref 记录里 join 一条账目，共享同一份 blob | fork / 转世后血缘册共用字节，不复制正文 |
+| 同 key **第二个 scope** | ref 记录里 join 一条账目，共享同一份 blob | fork / 重启恢复后血缘册共用字节，不复制正文 |
 | 读取（`GetScoped`/`ReadSegmentScoped`） | 只认 scope 内的账目；越权读 = `RecallMissing`，并 `verify()` 复算 digest | 零泄漏：连存在性都不给 |
 | 缺失/过期/失败 | `RecallMissing` / `RecallExpired` / `RecallFailed` / `RecallFound` 四态分开 | 把 I/O 故障伪装成"空召回"会静默产生错答案 |
 
@@ -99,7 +99,7 @@
 | 步 | 动作 | 判据 |
 |---|---|---|
 | 1 | `Segments.GetEvent(key)` 预检 | 已提交且 `SameFact` → 幂等成功；已提交但内容不同 → `ErrFactKeyConflict` |
-| 2 | `Originals.Put(ctx, body.Ref(), []byte(body.Message.Content))`（`assembly/facts.go:125`） | **正文先落进原文仓**：段里出现的 `EventID` 一定有可读原文可指 |
+| 2 | `Originals.Put(ctx, body.Ref(), []byte(body.Message.Content))`（`assembly/facts.go:237`） | **正文先落进原文仓**：段里出现的 `EventID` 一定有可读原文可指 |
 | 3 | `Segments.StoreEvent(...)`，`partition = PartitionIDFromName(Owner.AgentID)`、`window = Timestamp.UnixMilli()`（负值具名拒）、`seq = landedSeq[partition]+1` | **段提交才是持久写**：它不成功，事实就不算落地，`landedSeq` 不前进 |
 | 4 | `source.LandEvent` + `seam.Submit` | 提交成功之后的**后果**：失败只告警，绝不回滚已落地的提交 |
 
@@ -202,7 +202,7 @@
 
 **观察表**（`memory/store_query.go`）：检索与按键回捞都读同一张表，表里装的只是**已 land 的事实**——`ObserveStore` 全量装入，`LandEvent` 增量装入并拒绝 `body.Key` 与存储键不一致。判据是"一条事件在被观察之前不能被查询消费"，所以查询面永远不含正在提交中的半条。
 
-**装配面**（`assembly/read.go:67` `supplyRetrieval`）：观察表 → （可选）向量缝 → `NewStoreSearcher`。没有嵌入器时不建缝、不调嵌入，检索只走关键词腿——这是契约写明的**零变化行为**。原文回捞的 scope 由装配期 `NewScopedReader` 绑定一次（`assembly/tools.go` `RecallPort.GetScoped`），绑定后无法在调用点放宽。
+**装配面**（`assembly/read.go:84` `supplyRetrieval`）：观察表 → （可选）向量缝 → `NewStoreSearcher`。没有嵌入器时不建缝、不调嵌入，检索只走关键词腿——这是契约写明的**零变化行为**。原文回捞的 scope 由装配期 `NewScopedReader` 绑定一次（`assembly/tools.go` `RecallPort.GetScoped`），绑定后无法在调用点放宽。
 
 <a id="inmemory-retrieval"></a>
 ## 九、检索与融合

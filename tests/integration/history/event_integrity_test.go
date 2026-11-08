@@ -1676,7 +1676,7 @@ func newProjectionRun(t *testing.T, maxTokens int, provider model.Model) (*assem
 	t.Helper()
 	run, err := assembly.Assemble(context.Background(), &config.Declaration{
 		Entry:  "agent-a",
-		Agents: []config.AgentSpec{{ID: "agent-a", Model: "model-a", MaxTokens: maxTokens}},
+		Agents: []config.AgentSpec{{ID: "agent-a", Model: "model-a", MaxTokens: maxTokens, ProviderContextWindow: maxTokens * 2}},
 	}, map[event.AgentID]assembly.NativeAgent{
 		"agent-a": {Model: provider},
 	}, assembly.WithGovernance(passPolicy{}))
@@ -2027,8 +2027,8 @@ func runRebuildRefoldsFromWAL(t *testing.T) {
 	for _, key := range projectionProductKeysOfType(online, replay.ProjectionTypeSegmentFold) {
 		want, _ := projectionEntryOfKey(online, event.EventID(key))
 		got, held := projectionEntryOfKey(rebuilt.Entries(), event.EventID(key))
-		if !held || got.Content != want.Content || got.Type != want.Type || !got.Time.Equal(want.Time) {
-			t.Fatalf("the rebuilt segment product %s = %+v (found=%v), want the online fold's own %+v", key, got, held, want)
+		if !held || stripFoldGenerations(got.Content) != stripFoldGenerations(want.Content) || got.Type != want.Type || !got.Time.Equal(want.Time) {
+			t.Fatalf("the rebuilt segment product %s = %+v (found=%v), want the online fold's own %+v apart from the recorder generation the raw facts cannot name", key, got, held, want)
 		}
 	}
 	onePassSummary := projectionProductKeysOfType(rebuilt.Entries(), replay.ProjectionTypeHistorySummary)
@@ -2047,8 +2047,15 @@ func runRebuildRefoldsFromWAL(t *testing.T) {
 		}
 		rejudged = append(rejudged, fold.Requests...)
 	}
-	if got, want := replay.RenderProjection(refolded.Entries()), replay.RenderProjection(online); !bytes.Equal(got, want) {
-		t.Fatalf("the WAL re-fold restored %d bytes = %v, want the online fold's own %d bytes = %v", len(got), projectionKeysOf(refolded.Entries()), len(want), projectionKeysOf(online))
+	if got, want := stripFoldGenerations(string(replay.RenderProjection(refolded.Entries()))), stripFoldGenerations(string(replay.RenderProjection(online))); got != want {
+		t.Fatalf("the WAL re-fold restored %d bytes = %v, want the online fold's own %d bytes = %v apart from the recorder generation the raw facts cannot name", len(got), projectionKeysOf(refolded.Entries()), len(want), projectionKeysOf(online))
+	}
+	for _, entry := range projectionProductsEntriesOf(t, refolded.Entries()) {
+		for _, line := range strings.Split(entry.Content, "; ") {
+			if !strings.HasPrefix(line, "[") || !strings.Contains(line, "|gen:?]") {
+				t.Fatalf("the WAL re-fold writes %q, want every line to open with the explicit gen:? placeholder of a chain that names no generation", line)
+			}
+		}
 	}
 
 	if len(rejudged) == 0 {
@@ -2078,7 +2085,7 @@ func runRebuildRefoldsFromWAL(t *testing.T) {
 			t.Fatalf("the folded original %s = %q, want the chain's %q", key, original.Message.Content, projectionBodyOfKey(key))
 		}
 	}
-	t.Logf("rebuild_refolds_from_wal: restored=%d raw facts; re-folded %d entries=%d bytes identical to the online %d entries=%d bytes; products=%v judgments=%d",
+	t.Logf("rebuild_refolds_from_wal: restored=%d raw facts; re-folded %d entries=%d bytes matching the online %d entries=%d bytes apart from the recorder generation; products=%v judgments=%d",
 		len(facts), refolded.Len(), len(replay.RenderProjection(refolded.Entries())), len(online), len(replay.RenderProjection(online)),
 		projectionProductsEntriesOf(t, refolded.Entries()), len(rejudged))
 }
@@ -2257,7 +2264,7 @@ func runRestartRestoresFoldForm(t *testing.T) {
 	storage := ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: t.TempDir()}
 	declaration := &config.Declaration{
 		Entry:  "agent-a",
-		Agents: []config.AgentSpec{{ID: "agent-a", Model: "model-a", MaxTokens: projectionWindowTokens}},
+		Agents: []config.AgentSpec{{ID: "agent-a", Model: "model-a", MaxTokens: projectionWindowTokens, ProviderContextWindow: projectionWindowTokens * 32}},
 	}
 	agents := map[event.AgentID]assembly.NativeAgent{
 		"agent-a": {Model: &replayModel{name: "model-a"}},
@@ -2437,14 +2444,19 @@ func runActualRequestAssembly(t *testing.T) {
 	if !strings.HasPrefix(messages[0].Content, "history summary: ") {
 		t.Fatalf("the first message = %q, want the history summary the fold minted", messages[0].Content)
 	}
-	for _, want := range []string{"external_input: ask 00", "segment_fold: segment fold", "agent_output: answer 02"} {
+	for _, want := range []string{"external_input: ask 00", "thinking_plan: plan 00", "action_command: call 00", "agent_output: answer 02"} {
 		if !strings.Contains(messages[0].Content, want) {
 			t.Fatalf("the history summary %q carries no %q", messages[0].Content, want)
 		}
 	}
+	for _, line := range strings.Split(strings.TrimPrefix(messages[0].Content, "history summary: "), "; ") {
+		if !strings.HasPrefix(line, "[") || !strings.Contains(line, "|gen:") {
+			t.Fatalf("the history summary line %q opens with no provenance anchor", line)
+		}
+	}
 	product := false
 	for _, message := range messages {
-		if strings.Contains(message.Content, "folded segment process:") {
+		if strings.HasPrefix(message.Content, "[") && strings.Contains(message.Content, "thinking_plan: plan 03") {
 			product = true
 		}
 	}
@@ -3499,11 +3511,12 @@ func newFoldWindowRun(t *testing.T, ctx context.Context, provider model.Model) (
 	run, err := assembly.Assemble(ctx, &config.Declaration{
 		Entry: "agent-a",
 		Agents: []config.AgentSpec{{
-			ID:                "agent-a",
-			Model:             "model-a",
-			MaxTokens:         projectionWindowTokens,
-			CompressThreshold: 0.3,
-			KeepRecentTasks:   1,
+			ID:                    "agent-a",
+			Model:                 "model-a",
+			MaxTokens:             projectionWindowTokens,
+			ProviderContextWindow: projectionWindowTokens * 32,
+			CompressThreshold:     0.3,
+			KeepRecentTasks:       1,
 		}},
 	}, map[event.AgentID]assembly.NativeAgent{
 		"agent-a": {Model: provider},
@@ -5145,4 +5158,31 @@ func restoreChainViews(t *testing.T, ctx context.Context, root string) []restore
 		views = append(views, view)
 	}
 	return views
+}
+
+// stripFoldGenerations rewrites the recorder generation of every provenance
+// anchor in a rendered projection to the explicit gen:? placeholder. The WAL
+// facts a replay reads name no recorder generation (replay.ChainFact carries the
+// fact's read, not the recorder's identity), so a fold re-derived from them
+// writes the placeholder where the online fold writes the live run's generation;
+// the two forms must agree in everything but that token.
+func stripFoldGenerations(rendered string) string {
+	const marker = "|gen:"
+	var out strings.Builder
+	rest := rendered
+	for {
+		at := strings.Index(rest, marker)
+		if at < 0 {
+			out.WriteString(rest)
+			return out.String()
+		}
+		rel := strings.IndexByte(rest[at:], ']')
+		if rel < 0 {
+			out.WriteString(rest)
+			return out.String()
+		}
+		out.WriteString(rest[:at])
+		out.WriteString(marker + "?]")
+		rest = rest[at+rel+1:]
+	}
 }

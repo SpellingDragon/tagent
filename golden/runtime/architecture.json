@@ -1,11 +1,52 @@
 {
   "concept_ratchet": {
     "removed_min": 10,
-    "new_max": 1,
-    "exported_interfaces_max": 77,
-    "note": "frozen at the convergence change; tighten new_max to 0 once the baseline commit advances"
+    "new_max": 7,
+    "exported_interfaces_max": 78,
+    "note": "new_max 1->4 (boundary-closure), 4->7 (restart-recovery: RecoveryTicket/LoadScan/LoadStats)."
   },
   "schema_version": 1,
+  "config_facts": {
+    "schema_version": 1,
+    "statement": "文件是编辑界面，链是账：配置真相由声明事实承载，一切变更（手工 /reload、watcher、重启对账）经唯一发布入口生效；回执读链上最新结果事实。",
+    "declaration": {
+      "type": "config.declaration",
+      "type_source": "api/config.Declaration.FactType",
+      "identity": "api/config.Declaration.FactKey",
+      "committed_by": [
+        "assembly.reconcileBootConfig",
+        "assembly.Host.Reload"
+      ]
+    },
+    "publication": {
+      "type": "config.publication",
+      "committed_by": "assembly.publicationRecords",
+      "results": [
+        "published",
+        "unchanged",
+        "load-failed",
+        "governance-rejected",
+        "install-failed"
+      ]
+    },
+    "entry": {
+      "publisher": "state.Publisher.Publish",
+      "adoption": "state.Publisher.Adopt",
+      "restart_reconcile": "assembly.reconcileBootConfig",
+      "watcher": "examples/wechat-bot.watchConfig"
+    },
+    "packages": [
+      "assembly",
+      "runtime/state",
+      "api/config",
+      "examples/wechat-bot"
+    ],
+    "edges": [
+      "assembly->runtime/state",
+      "assembly->api/config",
+      "examples/wechat-bot->assembly"
+    ]
+  },
   "change": "runtime-rebuild",
   "module_path": "github.com/SpellingDragon/tagent",
   "root_package": "assembly",
@@ -69,7 +110,8 @@
       "pattern": "runtime/agent",
       "role": "execution",
       "required": true,
-      "reason": "事件调度与单次模型决策；借 state 的绑定执行。"
+      "reason": "事件调度与单次模型决策；借 state 的绑定执行。",
+      "allow": []
     },
     {
       "pattern": "runtime/task",
@@ -130,6 +172,12 @@
       "role": "training-data",
       "required": true,
       "reason": "因果训练记录、导出与 SFT 消费（本次为数据闭环＋SFT 范围）。"
+    },
+    {
+      "pattern": "features/rl/sample",
+      "role": "training-sample",
+      "required": true,
+      "reason": "训练样本闭环（boundary-closure 07）：请求回读证明、独立验收器与 Seal 前样本资格门；复用 06.1a 的 bench 根包判定任务产物，不依赖执行器/runner，根包 features/rl 保持 data-and-ports。"
     },
     {
       "pattern": "features/evolution",
@@ -195,7 +243,7 @@
       "pattern": "features/evolution/meditation",
       "role": "self-improve",
       "required": true,
-      "reason": "冥想＝自进化引擎的凝缩机制：卡片词汇、绑定判定策略与消费接线（package-restructure 01.1）。消费 memory 的保留/压缩请求事实与 replay 的 folding 载荷；反思回路与旁路冥想的观察、摘要与水位同住此包（package-zero-debt Z1）。"
+      "reason": "冥想＝自进化引擎的凝缩机制：卡片词汇、绑定判定策略与消费接线（package-restructure 01.1）。消费 memory 的保留/压缩请求事实与 replay 的 folding 载荷；反思回路与旁路冥想的观察、摘要与水位同住此包（package-zero-debt Z1）。状态机以真实 external_input 携带激活因果（规则/窗/来源）、自管产出不充电、状态经 AnchorStore 扩展持久，反思注入宿主专属 reflection 会话（boundary-closure 09）。"
     },
     {
       "pattern": "internal/bench",
@@ -203,6 +251,24 @@
       "edges": [],
       "required": true,
       "reason": "公开基准面（吞吐/恢复时延/内存基线）：只测公共入口，不进运行时依赖闭合；位于 internal/ 下，外部 module 不得 import。"
+    },
+    {
+      "pattern": "bench",
+      "role": "benchmark",
+      "required": true,
+      "reason": "真实任务对照的共享根包（boundary-closure 06.1a）：任务声明 Task、机读验收器 Verifier、12 任务夹具装载与 setup/verify API，供 07 训练样本直接复用；不依赖任何 runner 或运行时包。"
+    },
+    {
+      "pattern": "bench/tasks",
+      "role": "benchmark-fixtures",
+      "required": true,
+      "reason": "12 个真实任务夹具的嵌入资产包（boundary-closure 06.1a）：只持有 JSON 与只读 FS，不 import 任何一方包。"
+    },
+    {
+      "pattern": "bench/runners",
+      "role": "benchmark-runners",
+      "required": true,
+      "reason": "三方对照 runner 的落点（boundary-closure 06.1a 登记，1.3/1.4 落地）：只 import bench 根包的任务接口，不反向被 bench 依赖。"
     },
     {
       "pattern": "tool/subagent",
@@ -227,6 +293,18 @@
       "role": "adapter",
       "required": true,
       "reason": "计划工具面：七操作闭集（init/new/status/validate/archive/instructions/list）只把 typed Request 映射成 openspec CLI 的固定 argv，模型控制参数值而控制不了命令结构；后端可替换，工具面与提示词不随之改变。"
+    },
+    {
+      "pattern": "bench/metrics",
+      "role": "benchmark-metrics",
+      "required": true,
+      "reason": "三方对照的五指标聚合与运行文档校验（boundary-closure 06.1.2）：只吃 runner 产出的 attempt 记录，不 import 任何 runner，保持可单测的纯数据面。"
+    },
+    {
+      "pattern": "bench/report",
+      "role": "benchmark-report",
+      "required": true,
+      "reason": "运行目录里的 Markdown 对照报告渲染（boundary-closure 06.1.2）：只读 metrics 文档，不 import 任何 runner。"
     }
   ],
   "edges": [
@@ -243,6 +321,7 @@
         "api/plugin",
         "api/model",
         "features/rl",
+        "features/rl/sample",
         "features/evolution",
         "memory/query",
         "tool/exec",
@@ -256,6 +335,9 @@
         "memory/replay",
         "features/evolution/meditation",
         "internal/bench",
+        "bench",
+        "bench/tasks",
+        "bench/runners",
         "tool/subagent",
         "tool/recall",
         "tool/knowledge",
@@ -264,7 +346,9 @@
         "features/evolution/governance",
         "features/telemetry",
         "runtime/task/approval",
-        "cli"
+        "cli",
+        "bench/metrics",
+        "bench/report"
       ],
       "forbidden": [],
       "reason": "组合根是唯一装配与发布点，必须显式列出全部自有包（禁止用通配；event 亦显式，以便有新增时强制复核；view 自 fact-loop-convergence 03.3 起显式登记；memory/ledger、memory/replay、evolution/meditation 随 package-restructure 01.1/02.1/02.2 显式登记；governance/telemetry/task/approval 随 package-zero-debt 终审反转显式登记；cli 随终审第五弹显式登记）。"
@@ -394,7 +478,8 @@
         "features/evolution/governance",
         "runtime/state",
         "runtime/task",
-        "runtime/task/approval"
+        "runtime/task/approval",
+        "memory/replay"
       ],
       "forbidden": [
         "features/rl",
@@ -619,6 +704,16 @@
       "reason": "采集与导出消费者：可从 model/memory 取真实产出与原文，但禁止依赖 agent、根组合根（plan 明确禁止 rl→agent/root）。; LeaseObserver implements plugin.Instance to consume config_change facts of the model dimension through the pipeline - the same PostCommitObserver pattern as the meditation driver and the age fold"
     },
     {
+      "from": "features/rl/sample",
+      "allow": [
+        "features/rl",
+        "bench",
+        "api/event",
+        "api/model"
+      ],
+      "reason": "样本子包消费父包 rl 的记录/快照/封账面，复用 bench 根包的任务与验收器导出（features/rl/sample→bench，非 features/rl→bench）；只读任务产物，不依赖 runner 或执行器。"
+    },
+    {
       "from": "features/evolution",
       "allow": [
         "runtime/state",
@@ -700,6 +795,27 @@
       "reason": "基准只经公共入口（根组合面）驱动，不直连内部包。"
     },
     {
+      "from": "bench",
+      "allow": [
+        "bench/tasks"
+      ],
+      "reason": "bench 根包只从 bench/tasks 读嵌入夹具；runner 只向下依赖任务接口，根包不反向依赖 runner（防环）。"
+    },
+    {
+      "from": "bench/tasks",
+      "allow": [],
+      "reason": "夹具资产包是纯叶子：只持有 embed.FS，不 import 任何一方包。"
+    },
+    {
+      "from": "bench/runners",
+      "allow": [
+        "bench",
+        "bench/metrics",
+        "bench/report"
+      ],
+      "reason": "runner 只消费 bench 根包的任务/验收器接口，把 attempt 交给 bench/metrics 聚合、把运行文档交给 bench/report 渲染；不反向被 bench 依赖。"
+    },
+    {
       "from": "tool/subagent",
       "allow": [
         "runtime/agent",
@@ -736,6 +852,16 @@
       "from": "tool/spec",
       "allow": [],
       "reason": "计划工具面只做 typed 操作到 openspec CLI 固定参数的映射，不依赖任何一方包，也不向核心包反向依赖。"
+    },
+    {
+      "from": "bench/metrics",
+      "allow": [],
+      "reason": "五指标聚合与运行文档校验是纯数据面：只读 attempt JSON，不 import 任何 runner 或运行时包。"
+    },
+    {
+      "from": "bench/report",
+      "allow": [],
+      "reason": "Markdown 对照报告只读 metrics 文档，不 import 任何 runner 或运行时包。"
     }
   ],
   "external": {
@@ -1060,6 +1186,36 @@
         "concept": "configuration change",
         "kind": "fact",
         "spec": "config-hot-reload"
+      },
+      "Task": {
+        "concept": "live benchmark task",
+        "kind": "declaration",
+        "spec": "live-benchmark"
+      },
+      "Verifier": {
+        "concept": "live benchmark acceptance",
+        "kind": "port",
+        "spec": "live-benchmark"
+      },
+      "AnnexRecord": {
+        "concept": "training sample loop acceptance annex",
+        "kind": "fact",
+        "spec": "offline-training-export"
+      },
+      "RecoveryTicket": {
+        "concept": "restart recovery snapshot ticket (contract: changes/03-compression-cursor/specs/compression-recovery-ticket/spec.md until F4)",
+        "kind": "fact",
+        "spec": "delivery-closure"
+      },
+      "LoadScan": {
+        "concept": "recovery read measurement (contract: changes/03-compression-cursor/specs/compression-recovery-ticket/spec.md until F4)",
+        "kind": "declaration",
+        "spec": "delivery-closure"
+      },
+      "LoadStats": {
+        "concept": "recovery read measurement set (contract: changes/03-compression-cursor/specs/compression-recovery-ticket/spec.md until F4)",
+        "kind": "declaration",
+        "spec": "delivery-closure"
       }
     }
   }

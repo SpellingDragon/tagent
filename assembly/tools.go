@@ -260,7 +260,9 @@ func (r *Run) suppliers(decl *config.Declaration, agents map[event.AgentID]Nativ
 				}
 				return elements, nil
 			},
-			wrap: r.wrap,
+			wrap:              r.wrap,
+			reflectionSession: contributed.reflectionSession,
+			reflectionOnly:    append([]string(nil), contributed.reflectionOnly...),
 		}
 	}
 	return out

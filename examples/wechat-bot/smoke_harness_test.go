@@ -30,6 +30,7 @@ import (
 	"syscall"
 	"testing"
 	"time"
+	"unsafe"
 
 	"github.com/SpellingDragon/tagent/api/event"
 	tagentmodel "github.com/SpellingDragon/tagent/api/model"
@@ -185,6 +186,10 @@ func (c *smokeConfig) write(t *testing.T) {
 // 入口不声明 send：正文只经自动投递出口落地，工具面无 send（D4）。
 // 冥想 agent 的工具面恰一个通信工具 send（D6）：跨会话投递是它的唯一写面，
 // 目标由反思输入的 delivery targets 段给出。
+//
+// 入口显式声明 provider_context_window = 2×回放窗口：max_tokens 是回放窗口
+// （折叠节奏），请求预算门量的是 provider 窗口；不声明时 02 门按 max_tokens
+// 本值计量，固定提示词与工具面会先撞 3/4 输入预算（r32 的 1519/1500）。
 func (c *smokeConfig) document() string {
 	if c.Doc != nil {
 		return c.Doc(c)
@@ -202,6 +207,7 @@ agents:
     tools:
       - { kind: agent, agent: smoke-worker }
     max_tokens: %d
+    provider_context_window: %d
     compress_threshold: 0.3
     keep_recent_tasks: 1
     max_tool_iterations: 3
@@ -235,7 +241,7 @@ app:
     approvers: [%s]
 `,
 		smokeSessionTag, c.Model, c.PromptDir, c.Endpoint,
-		smokeSessionTag, c.Model, c.maxTokens(),
+		smokeSessionTag, c.Model, c.maxTokens(), c.maxTokens()*4,
 		smokeSessionTag, c.meditationInterval(), c.meditationMinGap(),
 		smokeSessionTag, smokeSessionTag,
 		c.StorageRoot, c.ApprovalDir,
@@ -1748,19 +1754,38 @@ func (r *smokeRig) sessionFacts(chat string) []event.Event {
 	return r.host.Run().SessionFacts(r.addressOf(chat))
 }
 
-// smokeSample 是一次资源采样。
+// smokeSample 是一次资源采样：判定用的真占用（强制 GC 后仍驻留的堆）、
+// 单独记录的虚胖分量（进程 RSS 减去堆），以及 goroutine 数。
 type smokeSample struct {
 	Round      int
 	Goroutines int
 	HeapInuse  uint64
+	// RSSBytes 是采样时刻进程的当前常驻内存；平台读不到时为零。
+	RSSBytes int64
+	// RSSReadable 报告 RSSBytes 是否真的读到了。
+	RSSReadable bool
 }
 
-// sampleResources 采一次样，用于 goroutine 与堆的稳定性断言。
+// sampleResources 采一次样，用于 goroutine 与内存的稳定性断言：先强制 GC
+// 把可回收的分配归还，再读堆；真占用判定只读这次 GC 之后的 HeapInuse。
+// RSS 的当前值在 GC 之后读，虚胖分量=RSS−HeapInuse，单独记录、不参与判定；
+// 平台读不到 RSS 时这一路具名跳过，不把零当成一次读数。
 func (r *smokeRig) sampleResources(round int) smokeSample {
+	runtime.GC()
 	runtime.GC()
 	var stats runtime.MemStats
 	runtime.ReadMemStats(&stats)
-	return smokeSample{Round: round, Goroutines: runtime.NumGoroutine(), HeapInuse: stats.HeapInuse}
+	rss, readable := smokeCurrentRSSBytes()
+	sample := smokeSample{
+		Round:       round,
+		Goroutines:  runtime.NumGoroutine(),
+		HeapInuse:   stats.HeapInuse,
+		RSSReadable: readable,
+	}
+	if readable {
+		sample.RSSBytes = rss
+	}
+	return sample
 }
 
 // smokeLogRecorder 是替换 log.Default 的记录器：只记录，不转发，保持测试输出干净。
@@ -2216,8 +2241,12 @@ const (
 	// smokeCalibrationReviewNote 必须进报告：外推值在 03.11 全量首轮后复核。
 	smokeCalibrationReviewNote = "外推值，03.11 全量首轮后复核"
 
-	smokeCalibrationChildTimeout      = 15 * time.Minute
-	smokeCalibrationReadyTimeout      = 5 * time.Minute
+	smokeCalibrationChildTimeout = 15 * time.Minute
+	// smokeCalibrationReadyTimeout must not kill a live child earlier than the
+	// child's own hard timeout: a generation's boot restores a chain that grows
+	// with each restart, so a shorter fixed ready window would fail a healthy
+	// but slow generation on a loaded runner. The child timeout is the one bound.
+	smokeCalibrationReadyTimeout      = smokeCalibrationChildTimeout
 	smokeCalibrationGenerationTimeout = 10 * time.Minute
 	smokeCalibrationColdBuildTimeout  = 20 * time.Minute
 )
@@ -4465,4 +4494,85 @@ func TestSmokeLongReconcileCountsBatchedNotification(t *testing.T) {
 	if len(recon.MissingNotifications) != 0 || len(recon.DuplicateNotifications) != 0 {
 		t.Fatalf("batched notification identity = missing %v duplicate %v, want neither", recon.MissingNotifications, recon.DuplicateNotifications)
 	}
+}
+
+// procTaskInfo is the kernel's proc_taskinfo record for one process. The
+// resident size is pti_resident_size, the bytes the process currently holds in
+// physical memory.
+type procTaskInfo struct {
+	VirtualSize   uint64
+	ResidentSize  uint64
+	TotalUser     uint64
+	TotalSystem   uint64
+	ThreadsUser   uint64
+	ThreadsSystem uint64
+	Policy        int32
+	Faults        int32
+	Pageins       int32
+	CowFaults     int32
+	MessagesSent  int32
+	MessagesRecv  int32
+	SyscallsMach  int32
+	SyscallsUnix  int32
+	Csw           int32
+	Threadnum     int32
+	Numrunning    int32
+	Priority      int32
+}
+
+// procInfoCallPIDInfo and procPIDTaskInfo are the proc_info syscall arguments as
+// (call number, pid, flavor, argument, buffer, size): PROC_INFO_CALL_PIDINFO asks
+// about a process and PROC_PIDTASKINFO asks for its task info.
+const (
+	procInfoCallPIDInfo = 2
+	procPIDTaskInfo     = 4
+	// procInfoDarwinSyscall is the darwin SYS_PROC_INFO trap number, named here
+	// because the platform branch is selected at run time.
+	procInfoDarwinSyscall = 336
+)
+
+// smokeCurrentRSSBytes reports the current resident size of this process, or
+// false when the platform read is unavailable: the task info the darwin kernel
+// keeps for the process, the resident field of /proc/self/statm on linux, and no
+// reading on any other platform.
+func smokeCurrentRSSBytes() (int64, bool) {
+	switch runtime.GOOS {
+	case "darwin":
+		return smokeDarwinRSSBytes()
+	case "linux":
+		return smokeLinuxRSSBytes()
+	default:
+		return 0, false
+	}
+}
+
+// smokeDarwinRSSBytes reads the resident size through proc_pidinfo: a read the
+// kernel refuses reports no reading instead of a number the sampler invented.
+func smokeDarwinRSSBytes() (int64, bool) {
+	var info procTaskInfo
+	read, _, errno := syscall.Syscall6(procInfoDarwinSyscall, procInfoCallPIDInfo, uintptr(os.Getpid()),
+		procPIDTaskInfo, 0, uintptr(unsafe.Pointer(&info)), unsafe.Sizeof(info))
+	if errno != 0 || read < unsafe.Sizeof(info) || info.ResidentSize == 0 {
+		return 0, false
+	}
+	return int64(info.ResidentSize), true
+}
+
+// smokeLinuxRSSBytes reads the resident field of /proc/self/statm, scaled by
+// the page size, and reports no reading when the kernel refuses to describe the
+// process.
+func smokeLinuxRSSBytes() (int64, bool) {
+	data, err := os.ReadFile("/proc/self/statm")
+	if err != nil {
+		return 0, false
+	}
+	fields := strings.Fields(string(data))
+	if len(fields) < 2 {
+		return 0, false
+	}
+	pages, err := strconv.ParseInt(fields[1], 10, 64)
+	if err != nil || pages <= 0 {
+		return 0, false
+	}
+	return pages * int64(os.Getpagesize()), true
 }

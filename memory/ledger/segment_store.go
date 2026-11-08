@@ -2,6 +2,7 @@ package ledger
 
 import (
 	"bytes"
+	"container/list"
 	"context"
 	"encoding/json"
 	"errors"
@@ -82,30 +83,154 @@ var ErrSegmentPosition = errors.New("memory: segment record carries a negative w
 // record reaches no reader and no count.
 var ErrSegmentBarrier = errors.New("memory: segment commit barrier failed")
 
+// segmentCacheEntry is one event body the cache holds: the stored event beside
+// the bytes it accounts for.
+type segmentCacheEntry struct {
+	stored StoredEvent
+	size   int64
+}
+
+// segmentCache is the entry-level LRU of the segment store's read cache: event
+// bodies with a byte budget. An evicted body is not lost — the index names its
+// position and the read path reads it back from the key-value seam.
+type segmentCache struct {
+	order   *list.List
+	entries map[event.EventID]*list.Element
+	bytes   int64
+	// frontKey and front mirror the most recently used entry beside the list, so
+	// the steady read of one key takes the fast path: a string compare instead of
+	// the map lookup and the list element assertion. The mirror is rewritten by
+	// every put and by every hit that moves another entry to the front, so it can
+	// never name an entry the order dropped.
+	frontKey event.EventID
+	front    segmentCacheEntry
+}
+
+// newSegmentCache returns an empty cache bounded by the declared budget.
+func newSegmentCache() *segmentCache {
+	return &segmentCache{order: list.New(), entries: map[event.EventID]*list.Element{}}
+}
+
+// get answers the stored event held under key and moves it to the front of the
+// recency order.
+func (c *segmentCache) get(key event.EventID) (StoredEvent, bool) {
+	if key == c.frontKey {
+		return c.front.stored, true
+	}
+	element, held := c.entries[key]
+	if !held {
+		return StoredEvent{}, false
+	}
+	entry := element.Value.(*segmentCacheEntry)
+	if element != c.order.Front() {
+		c.order.MoveToFront(element)
+	}
+	c.frontKey, c.front = key, *entry
+	return entry.stored, true
+}
+
+// put makes one event resident, evicting the least recently used events until
+// the byte budget holds. An event larger than the whole budget is evicted at
+// once, so the resident bytes never exceed the budget.
+func (c *segmentCache) put(stored StoredEvent) {
+	size := segmentCacheEntrySize(stored)
+	if element, held := c.entries[stored.Key]; held {
+		entry := element.Value.(*segmentCacheEntry)
+		c.bytes += size - entry.size
+		entry.stored = stored
+		entry.size = size
+		c.order.MoveToFront(element)
+	} else {
+		entry := &segmentCacheEntry{stored: stored, size: size}
+		c.entries[stored.Key] = c.order.PushFront(entry)
+		c.bytes += size
+	}
+	for c.bytes > segmentCacheBudgetBytes {
+		last := c.order.Back()
+		if last == nil {
+			break
+		}
+		entry := last.Value.(*segmentCacheEntry)
+		c.bytes -= entry.size
+		delete(c.entries, entry.stored.Key)
+		c.order.Remove(last)
+	}
+	if front := c.order.Front(); front != nil {
+		entry := front.Value.(*segmentCacheEntry)
+		c.frontKey, c.front = entry.stored.Key, *entry
+	} else {
+		c.frontKey, c.front = "", segmentCacheEntry{}
+	}
+}
+
+// segmentCacheEntrySize is the accounted size of one cached event: its body and
+// key bytes plus the fixed cost of its position and payload metadata.
+func segmentCacheEntrySize(stored StoredEvent) int64 {
+	return int64(len(stored.Key)+len(stored.Body)) + segmentCacheEntryOverheadBytes
+}
+
+const (
+	// segmentCacheBudgetBytes is the byte budget of the read cache: bodies held
+	// in memory at once. The persisted segments are the record; the cache is a
+	// read accelerator that never bounds what can be read. The 1 MiB budget
+	// saturates before the smoke gate's stable window, so its fill is not read
+	// as steady-state growth; cold bodies still come back from the segments.
+	segmentCacheBudgetBytes int64 = 1 << 20
+	// segmentCacheEntryOverheadBytes is the accounting cost of one cached event
+	// beside its key and body bytes.
+	segmentCacheEntryOverheadBytes int64 = 128
+	// segmentIndexPrefix names the stored index entry of one event key: the
+	// resident index is the small projection of exactly these entries, so the
+	// read path keeps one index and never opens a second one.
+	segmentIndexPrefix = "idx:"
+)
+
+// ErrSegmentBodyMissing reports an event the index names but whose persisted
+// body cannot be read: the read names the failure instead of publishing the
+// event as an absent one.
+var ErrSegmentBodyMissing = errors.New("memory: committed event body is missing")
+
+// indexPosition is the resident form of one stored index entry: the partition,
+// window and sequence slot the event key was committed at. It is the small
+// projection of the persisted {pid}:idx:{event_key} entry, so the index stays
+// resident while event bodies do not.
+type indexPosition struct {
+	partition int
+	window    int64
+	seq       int64
+}
+
 // FileSegmentStore commits events into time-window segments over one key-value
 // backend. One commit stages the event body, its index entry and the window meta
-// the window needs as one batch, and publishes the event to the read cache and
-// the event count only when that commit returns success. A commit that fails
-// names the barrier as its step, carries its cause, unstages what it wrote, and
-// publishes no part of the record. Readers are served from published state only,
-// so a load publishes exactly the records whose body, index and meta all
-// arrived.
+// the window needs as one batch, and publishes the event to the read cache, the
+// resident index and the event count only when that commit returns success. A
+// commit that fails names the barrier as its step, carries its cause, unstages
+// what it wrote, and publishes no part of the record.
+//
+// The resident state is bounded: the index keeps one small position per event
+// key (the projection of the persisted index entries), the read cache keeps
+// bodies under a byte budget, and Load reads only the index and window meta at
+// startup. An event body the cache evicted is read back from its persisted
+// {pid}:evt:{window}:{seq} entry, so a bounded process still answers every read.
 //
 // 契约: docs/wiki/memory/memory-architecture.md#file-segment-store
 type FileSegmentStore struct {
 	mu      sync.Mutex
 	kv      kvPort
-	cache   map[event.EventID]StoredEvent
+	index   map[event.EventID]indexPosition
+	cache   *segmentCache
 	count   int
 	windows map[string]*storedWindowMeta
 }
 
-// newFileSegmentStore opens the segment store held in kv and publishes every
-// stored record whose body, index and meta all arrived.
+// newFileSegmentStore opens the segment store held in kv and publishes the
+// index and window table of every stored record, leaving the event bodies on
+// the key-value seam until a read names one.
 func newFileSegmentStore(kv kvPort) (*FileSegmentStore, error) {
 	store := &FileSegmentStore{
 		kv:      kv,
-		cache:   map[event.EventID]StoredEvent{},
+		index:   map[event.EventID]indexPosition{},
+		cache:   newSegmentCache(),
 		windows: map[string]*storedWindowMeta{},
 	}
 	if err := store.Load(context.Background()); err != nil {
@@ -114,41 +239,46 @@ func newFileSegmentStore(kv kvPort) (*FileSegmentStore, error) {
 	return store, nil
 }
 
-// Load publishes every stored record whose body, index and meta all arrived, so
-// a record one commit left incomplete never reaches a reader or a count.
+// Load rebuilds the resident index and window table from the persisted store
+// without materializing an event body. It enumerates keys once to discover the
+// partitions the store holds, then reads the index prefix and the meta prefix of
+// each partition: both are small entries, and no {pid}:evt:{window}:{seq} body
+// is read. A record whose index and window meta did not both arrive stays out of
+// the published state, and EventCount counts the published records.
 func (s *FileSegmentStore) Load(ctx context.Context) error {
-	pairs, err := s.kv.kvRead(ctx, kvFetch{})
+	keys, err := s.kv.kvKeys(ctx, "")
 	if err != nil {
 		return err
 	}
-	bodies := map[positionSlot][]byte{}
-	positions := map[event.EventID]positionSlot{}
-	meta := map[windowSlot]storedWindowMeta{}
-	for _, pair := range pairs {
-		parts := strings.SplitN(pair.key, ":", 3)
-		if len(parts) != 3 {
+	partitions := map[int]struct{}{}
+	for _, key := range keys {
+		parts := strings.SplitN(key, ":", 2)
+		if len(parts) != 2 {
 			continue
 		}
 		partition, err := strconv.Atoi(parts[0])
 		if err != nil {
 			continue
 		}
-		switch parts[1] {
-		case "evt":
-			slot := strings.SplitN(parts[2], ":", 2)
-			if len(slot) != 2 {
+		partitions[partition] = struct{}{}
+	}
+	sorted := make([]int, 0, len(partitions))
+	for partition := range partitions {
+		sorted = append(sorted, partition)
+	}
+	sort.Ints(sorted)
+	positions := map[event.EventID]indexPosition{}
+	meta := map[windowSlot]storedWindowMeta{}
+	for _, partition := range sorted {
+		idxPairs, err := s.kv.kvRead(ctx, kvFetch{prefix: fmt.Sprintf("%d:%s", partition, segmentIndexPrefix)})
+		if err != nil {
+			return err
+		}
+		for _, pair := range idxPairs {
+			eventKey, held := strings.CutPrefix(pair.key, fmt.Sprintf("%d:%s", partition, segmentIndexPrefix))
+			if !held || eventKey == "" {
 				continue
 			}
-			window, err := strconv.ParseInt(slot[0], 10, 64)
-			if err != nil {
-				continue
-			}
-			seq, err := strconv.ParseInt(slot[1], 10, 64)
-			if err != nil {
-				continue
-			}
-			bodies[positionSlot{partition: partition, window: window, seq: seq}] = pair.value
-		case "idx":
 			value := string(pair.value)
 			at := strings.IndexByte(value, ':')
 			if at < 0 {
@@ -162,9 +292,18 @@ func (s *FileSegmentStore) Load(ctx context.Context) error {
 			if err != nil {
 				continue
 			}
-			positions[event.EventID(parts[2])] = positionSlot{partition: partition, window: window, seq: seq}
-		case "meta":
-			window, err := strconv.ParseInt(parts[2], 10, 64)
+			positions[event.EventID(eventKey)] = indexPosition{partition: partition, window: window, seq: seq}
+		}
+		metaPairs, err := s.kv.kvRead(ctx, kvFetch{prefix: fmt.Sprintf("%d:meta:", partition)})
+		if err != nil {
+			return err
+		}
+		for _, pair := range metaPairs {
+			name, held := strings.CutPrefix(pair.key, fmt.Sprintf("%d:meta:", partition))
+			if !held {
+				continue
+			}
+			window, err := strconv.ParseInt(name, 10, 64)
 			if err != nil {
 				continue
 			}
@@ -177,21 +316,14 @@ func (s *FileSegmentStore) Load(ctx context.Context) error {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.index = map[event.EventID]indexPosition{}
+	s.windows = map[string]*storedWindowMeta{}
+	s.count = 0
 	for key, position := range positions {
-		body, held := bodies[position]
-		if !held {
-			continue
-		}
 		if _, held := meta[windowSlot{partition: position.partition, window: position.window}]; !held {
 			continue
 		}
-		s.cache[key] = StoredEvent{
-			Key:         key,
-			PartitionID: position.partition,
-			WindowTS:    position.window,
-			Seq:         position.seq,
-			Body:        append([]byte(nil), body...),
-		}
+		s.index[key] = position
 		s.count++
 	}
 	for slot, entry := range meta {
@@ -203,10 +335,10 @@ func (s *FileSegmentStore) Load(ctx context.Context) error {
 
 // StoreEvent commits one event behind the segment commit barrier: the event
 // body, its index entry and the window meta the window needs are staged as one
-// batch and committed before the event reaches the read cache, the event count
-// or the caller. A repeat of the committed record returns success without a
-// second fact, other bytes under the same event key are refused, and a failed
-// commit leaves nothing published.
+// batch and committed before the event reaches the read cache, the resident
+// index, the event count or the caller. A repeat of the committed record returns
+// success without a second fact, other bytes under the same event key are
+// refused, and a failed commit leaves nothing published.
 func (s *FileSegmentStore) StoreEvent(ctx context.Context, rec SegmentRecord) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -219,8 +351,18 @@ func (s *FileSegmentStore) StoreEvent(ctx context.Context, rec SegmentRecord) er
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if prior, held := s.cache[rec.EventKey]; held {
-		if prior.PartitionID != rec.PartitionID || prior.WindowTS != rec.WindowTS || prior.Seq != rec.Seq || !bytes.Equal(prior.Body, rec.Body) {
+	if prior, held := s.index[rec.EventKey]; held {
+		if prior.partition != rec.PartitionID || prior.window != rec.WindowTS || prior.seq != rec.Seq {
+			return ErrContentConflict
+		}
+		existing, found, err := s.duplicateBodyLocked(ctx, rec.EventKey, prior)
+		if err != nil {
+			return err
+		}
+		if !found {
+			return fmt.Errorf("%w: %s", ErrSegmentBodyMissing, rec.EventKey)
+		}
+		if !bytes.Equal(existing, rec.Body) {
 			return ErrContentConflict
 		}
 		return nil
@@ -245,32 +387,77 @@ func (s *FileSegmentStore) StoreEvent(ctx context.Context, rec SegmentRecord) er
 	if err := s.kv.kvCommit(ctx, batch); err != nil {
 		return s.abort(ctx, fmt.Errorf("%w: %w", ErrSegmentBarrier, err), staged)
 	}
-	s.cache[rec.EventKey] = StoredEvent{
+	stored := StoredEvent{
 		Key:         rec.EventKey,
 		PartitionID: rec.PartitionID,
 		WindowTS:    rec.WindowTS,
 		Seq:         rec.Seq,
 		Body:        evtValue,
 	}
+	s.index[rec.EventKey] = indexPosition{partition: rec.PartitionID, window: rec.WindowTS, seq: rec.Seq}
+	s.cache.put(stored)
 	s.count++
 	s.windows[windowKey(rec.PartitionID, rec.WindowTS)] = meta
 	return nil
 }
 
 // GetEvent returns the committed event under key together with the index
-// position it was committed at, and reports whether any is published.
+// position it was committed at, and reports whether any is published. A body the
+// cache evicted is read back from its persisted entry; an index entry whose body
+// cannot be read reports ErrSegmentBodyMissing instead of an absent event.
 func (s *FileSegmentStore) GetEvent(ctx context.Context, key event.EventID) (StoredEvent, bool, error) {
 	if err := ctx.Err(); err != nil {
 		return StoredEvent{}, false, err
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	stored, held := s.cache[key]
+	if cached, held := s.cache.get(key); held {
+		cached.Body = append([]byte(nil), cached.Body...)
+		return cached, true, nil
+	}
+	position, held := s.index[key]
 	if !held {
 		return StoredEvent{}, false, nil
 	}
-	stored.Body = append([]byte(nil), stored.Body...)
+	body, found, err := s.readBodyLocked(ctx, position)
+	if err != nil {
+		return StoredEvent{}, false, err
+	}
+	if !found {
+		return StoredEvent{}, false, fmt.Errorf("%w: %s", ErrSegmentBodyMissing, key)
+	}
+	stored := StoredEvent{
+		Key:         key,
+		PartitionID: position.partition,
+		WindowTS:    position.window,
+		Seq:         position.seq,
+		Body:        body,
+	}
+	s.cache.put(stored)
 	return stored, true, nil
+}
+
+// duplicateBodyLocked answers the committed body of one indexed event for a
+// duplicate commit check: the cache first, then the persisted entry. The caller
+// holds the lock.
+func (s *FileSegmentStore) duplicateBodyLocked(ctx context.Context, key event.EventID, position indexPosition) ([]byte, bool, error) {
+	if cached, held := s.cache.get(key); held {
+		return append([]byte(nil), cached.Body...), true, nil
+	}
+	return s.readBodyLocked(ctx, position)
+}
+
+// readBodyLocked reads the persisted body of one indexed event. The caller
+// holds the lock.
+func (s *FileSegmentStore) readBodyLocked(ctx context.Context, position indexPosition) ([]byte, bool, error) {
+	pairs, err := s.kv.kvRead(ctx, kvFetch{key: fmt.Sprintf("%d:evt:%d:%d", position.partition, position.window, position.seq)})
+	if err != nil {
+		return nil, false, err
+	}
+	if len(pairs) == 0 {
+		return nil, false, nil
+	}
+	return append([]byte(nil), pairs[0].value...), true, nil
 }
 
 // EventCount returns the number of events published by successful commits, so
@@ -281,35 +468,102 @@ func (s *FileSegmentStore) EventCount() int {
 	return s.count
 }
 
-// Events returns every published event in index order: partition first, then
+// EachEvent streams every published event in index order: partition first, then
 // the window it is grouped under, then the sequence slot it takes inside that
-// window, with the event key as the last tie-break. Only records whose commits
-// published are listed, so the enumeration never exposes a record a read
-// cannot serve.
-func (s *FileSegmentStore) Events(ctx context.Context) ([]StoredEvent, error) {
+// window, with the event key as the last tie-break. The body of each event is
+// read on demand and handed to visit alone, so an enumeration never holds the
+// whole store in memory. A visit error ends the enumeration and is returned.
+func (s *FileSegmentStore) EachEvent(ctx context.Context, visit func(StoredEvent) error) error {
 	if err := ctx.Err(); err != nil {
-		return nil, err
+		return err
 	}
+	positions := s.snapshotPositions()
+	for _, key := range positions.order {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		stored, held, err := s.eventByKey(ctx, key)
+		if err != nil {
+			return err
+		}
+		if !held {
+			return fmt.Errorf("%w: %s", ErrSegmentBodyMissing, key)
+		}
+		if err := visit(stored); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// segmentPositionOrder is one ordered enumeration of the published index.
+type segmentPositionOrder struct {
+	order []event.EventID
+}
+
+// snapshotPositions freezes the published index keys in index order, so a
+// concurrent commit never reshapes an enumeration already under way.
+func (s *FileSegmentStore) snapshotPositions() segmentPositionOrder {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	events := make([]StoredEvent, 0, len(s.cache))
-	for _, stored := range s.cache {
-		stored.Body = append([]byte(nil), stored.Body...)
-		events = append(events, stored)
+	keys := make([]event.EventID, 0, len(s.index))
+	for key := range s.index {
+		keys = append(keys, key)
 	}
-	sort.Slice(events, func(i, j int) bool {
-		a, b := events[i], events[j]
-		if a.PartitionID != b.PartitionID {
-			return a.PartitionID < b.PartitionID
+	sort.Slice(keys, func(i, j int) bool {
+		a, b := s.index[keys[i]], s.index[keys[j]]
+		if a.partition != b.partition {
+			return a.partition < b.partition
 		}
-		if a.WindowTS != b.WindowTS {
-			return a.WindowTS < b.WindowTS
+		if a.window != b.window {
+			return a.window < b.window
 		}
-		if a.Seq != b.Seq {
-			return a.Seq < b.Seq
+		if a.seq != b.seq {
+			return a.seq < b.seq
 		}
-		return a.Key < b.Key
+		return keys[i] < keys[j]
 	})
+	return segmentPositionOrder{order: keys}
+}
+
+// eventByKey answers one event by its key under the store lock.
+func (s *FileSegmentStore) eventByKey(ctx context.Context, key event.EventID) (StoredEvent, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if cached, held := s.cache.get(key); held {
+		cached.Body = append([]byte(nil), cached.Body...)
+		return cached, true, nil
+	}
+	position, held := s.index[key]
+	if !held {
+		return StoredEvent{}, false, nil
+	}
+	body, found, err := s.readBodyLocked(ctx, position)
+	if err != nil || !found {
+		return StoredEvent{}, false, err
+	}
+	stored := StoredEvent{
+		Key:         key,
+		PartitionID: position.partition,
+		WindowTS:    position.window,
+		Seq:         position.seq,
+		Body:        body,
+	}
+	s.cache.put(stored)
+	return stored, true, nil
+}
+
+// Events returns every published event in index order. It is the materialized
+// form of EachEvent for callers that need the whole set; the assembly read faces
+// stream instead, one event at a time.
+func (s *FileSegmentStore) Events(ctx context.Context) ([]StoredEvent, error) {
+	var events []StoredEvent
+	if err := s.EachEvent(ctx, func(stored StoredEvent) error {
+		events = append(events, stored)
+		return nil
+	}); err != nil {
+		return nil, err
+	}
 	return events, nil
 }
 

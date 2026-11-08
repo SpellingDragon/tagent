@@ -151,7 +151,7 @@ func (s capacityState) assertUnchanged(t *testing.T, projection *ReplayProjectio
 
 // TestFoldCapacityAndCandidateRules pins the two gates of an age fold: the rendered volume and a candidate.
 //
-// 契约: docs/wiki/agent/compression-and-telemetry.md#projection-fold
+// 契约: docs/wiki/memory/memory-architecture.md#overview
 func TestFoldCapacityAndCandidateRules(t *testing.T) {
 	ctx := context.Background()
 

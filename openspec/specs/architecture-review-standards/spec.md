@@ -1,5 +1,7 @@
 # architecture-review-standards Specification
 
+> **复核注记（2026-11-04 逐模块核对）**：本规范部分条款仍以已退役符号（`TagentAgent` / `AgentToolWrapper` / `EventBus` / `SessionProjection` / `PlainTool` / `ToolRegistry` / `RegisterBuiltinTools` / `SwappableModel` 等，全仓 Go 0 命中）表述现行 SHALL/MUST；现行实现为 `assembly` 组合根 + 每地址常驻消费循环 + 装配期按声明分派。这些条款属于历史契约残句，**阅读现行要求时不得据此断言现行行为**；正式迁移/退役须走 OpenSpec change delta（B-02 待裁定）。逐条映射见 `openspec/changes/archive/2026-11-03-runtime-architecture-convergence/evidence/10-doc-gap-register.md`。
+
 ## Purpose
 
 本规范定义 architecture-review-standards 能力。审查者 SHALL 检查每个模块的事件处理逻辑是否符合事件驱动设计目标。检查项包括：事件类型分类（ExtractEventType）与消息 Role 映射是否正确；特殊事件（external_input/agent_output/thinking_plan）是否使用原文全文不被截断；

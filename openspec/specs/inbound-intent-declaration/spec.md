@@ -1,7 +1,7 @@
 # inbound-intent-declaration Specification
 
 ## Purpose
-TBD - created by archiving change delivery-intent-and-receipts. Update Purpose after archive.
+入站任务的意图声明：/task 注入可选声明血统，声明受理执行 fail-closed 三重校验，声明能力与白名单语义隔离——声明只描述意图，不扩大任何授权面。
 ## Requirements
 ### Requirement: /task 注入可选声明意图血统
 

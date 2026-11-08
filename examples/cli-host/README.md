@@ -36,10 +36,10 @@ flags / env
 parseFlags ──► newNativeModel（mock 或真实模型）
    │
    ▼
-config.Declaration + tagent.NativeAgent
+config.Declaration + assembly.NativeAgent
    │
    ▼
-tagent.Assemble(WithGovernance, [WithStorage])   ← 唯一公共装配入口
+assembly.Assemble(WithGovernance, [WithStorage]) ← 唯一公共装配入口
    │
    ▼
 Run.Invoke(InvokeRequest{显式 Address, Input})
@@ -48,12 +48,12 @@ Run.Invoke(InvokeRequest{显式 Address, Input})
 Run.SessionHistory(addr) ──► stdout
    │
    ▼
-Run.Close(addr)                                  ← 排空已接受义务
+Run.Close(ctx, agent.CloseRequest{...})            ← 排空已接受义务
 ```
 
 - 一个进程只装配一个 `Run`；每次输入是一次独立 invocation，地址是显式的
   `{AgentID, SessionID}`，从不回退到"最近会话"。
-- `-data` 打开 `memory.StorageLocalFile` 事实层；不传时事实只存在于内存。
+- `-data` 打开 `ledger.StorageConfig{Type: ledger.StorageLocalFile}` 事实层（见 `main.go:156-157`）；不传时事实只存在于内存。
 - 不依赖微信、HTTP 或任何外部传输；stdin/stdout 就是传输层。
 
 ## 与 wechat-bot 宿主的差异

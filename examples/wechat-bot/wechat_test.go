@@ -1174,14 +1174,14 @@ func TestReincarnationNoticePreserved(t *testing.T) {
 	ops := opsNoticeAddress(t)
 	dir := t.TempDir()
 	notice := writeNoticeMarker(t, dir, "REINCARNATION_NOTICE", "pid: 42\ngen: 2\n")
-	if !detectReincarnation(notice, time.Now()) {
+	if !detectRestartMarker(notice, time.Now()) {
 		t.Fatal("a fresh notice was not detected")
 	}
 	old := time.Now().Add(-2 * restartDoneFreshWindow)
 	if err := os.Chtimes(notice, old, old); err != nil {
 		t.Fatal(err)
 	}
-	if detectReincarnation(notice, time.Now()) {
+	if detectRestartMarker(notice, time.Now()) {
 		t.Fatal("a stale notice was detected as a reincarnation")
 	}
 	if err := os.Chtimes(notice, time.Now(), time.Now()); err != nil {
@@ -1190,7 +1190,7 @@ func TestReincarnationNoticePreserved(t *testing.T) {
 
 	logs := captureNoticeLogs(t)
 	inbox := memoryInbox(t)
-	maybeInjectReincarnationNotice(inbox, noticeOps{address: ops}, nil, "tagent", dir, 0)
+	injectRestartNotice(inbox, noticeOps{address: ops}, nil, "tagent", dir, 0)
 	msgs, ids := inbox.take(ops)
 	if len(msgs) != 1 {
 		t.Fatalf("reincarnation notices the ops session reads = %d, want one", len(msgs))
@@ -1210,7 +1210,7 @@ func TestReincarnationNoticePreserved(t *testing.T) {
 	if _, err := os.Stat(notice + noticeConsumedSuffix); err != nil {
 		t.Fatalf("the consumed marker was not written by the confirmation: %v", err)
 	}
-	maybeInjectReincarnationNotice(inbox, noticeOps{address: ops}, nil, "tagent", dir, 0)
+	injectRestartNotice(inbox, noticeOps{address: ops}, nil, "tagent", dir, 0)
 	if got := len(inbox.Drain(ops)); got != 0 {
 		t.Fatalf("a consumed notice was injected again (%d messages)", got)
 	}
@@ -1314,7 +1314,7 @@ func TestNoticeOpsFixedTarget(t *testing.T) {
 	app.host = &hostRuntime{}
 	target, scene := app.noticeWiring(nil)
 
-	maybeInjectReincarnationNotice(inbox, target, scene, "tagent", dir, 0)
+	injectRestartNotice(inbox, target, scene, "tagent", dir, 0)
 	maybeConsumeSystemAlert(inbox, target, dir, 0)
 
 	if got := len(inbox.Drain(event.Address{})); got != 0 {
@@ -1388,7 +1388,7 @@ func TestNoticeSymptomOpsWakeupFixedTarget(t *testing.T) {
 		marker := writeNoticeMarker(t, dir, "REINCARNATION_NOTICE", "pid: 42\ngen: 2\n")
 		rig := newRoutingRig(t)
 
-		maybeInjectReincarnationNotice(rig.host.inbox, noticeOps{address: ops, wake: rig.host}, nil, "tagent", dir, 0)
+		injectRestartNotice(rig.host.inbox, noticeOps{address: ops, wake: rig.host}, nil, "tagent", dir, 0)
 
 		waitFor(t, "the ops session turn", func() bool { return rig.callCount() == 1 })
 		req := rig.recorded()[0]
@@ -1422,7 +1422,7 @@ func TestNoticeSymptomOpsWakeupFixedTarget(t *testing.T) {
 				}
 			}
 
-			maybeInjectReincarnationNotice(rig.host.inbox, noticeOps{address: ops, wake: rig.host}, nil, "tagent", dir, 0)
+			injectRestartNotice(rig.host.inbox, noticeOps{address: ops, wake: rig.host}, nil, "tagent", dir, 0)
 			waitFor(t, "the ops session turn beside two active sessions", func() bool { return rig.callCount() == 3 })
 
 			for _, req := range rig.recorded() {
@@ -1486,7 +1486,7 @@ func TestNoticeSymptomSceneRealOrDegraded(t *testing.T) {
 		}
 
 		inbox := memoryInbox(t)
-		maybeInjectReincarnationNotice(inbox, noticeOps{address: ops}, sceneFace{read: store.QueryEvents}, "tagent", dir, 0)
+		injectRestartNotice(inbox, noticeOps{address: ops}, sceneFace{read: store.QueryEvents}, "tagent", dir, 0)
 		msgs, _ := inbox.take(ops)
 		if len(msgs) != 1 {
 			t.Fatalf("the ops session reads %d notices, want the one reincarnation notice", len(msgs))
@@ -1511,7 +1511,7 @@ func TestNoticeSymptomSceneRealOrDegraded(t *testing.T) {
 			return nil, errors.New("wal down")
 		}}
 		inbox := memoryInbox(t)
-		maybeInjectReincarnationNotice(inbox, noticeOps{address: ops}, down, "tagent", dir, 0)
+		injectRestartNotice(inbox, noticeOps{address: ops}, down, "tagent", dir, 0)
 		msgs, _ := inbox.take(ops)
 		if len(msgs) != 1 {
 			t.Fatalf("the degraded notice = %d messages, want the one the ops session reads", len(msgs))
@@ -1818,7 +1818,7 @@ func TestNoticeDurableAdmission(t *testing.T) {
 		dir := t.TempDir()
 		marker := writeNoticeMarker(t, dir, "REINCARNATION_NOTICE", "pid: 42\ngen: 2\n")
 		inbox := durableInbox(t, filepath.Join(dir, testNoticeInboxDir))
-		maybeInjectReincarnationNotice(inbox, noticeOps{address: ops}, nil, "tagent", dir, 0)
+		injectRestartNotice(inbox, noticeOps{address: ops}, nil, "tagent", dir, 0)
 
 		if _, err := os.Stat(marker + noticeConsumedSuffix); err == nil {
 			t.Fatal("the consumed marker was written beside the admission, want the confirmation to write it")
@@ -1923,7 +1923,7 @@ func TestNoticeRedeliveryIdempotent(t *testing.T) {
 		if len(third.records) != 0 {
 			t.Fatalf("records read back after the confirmation = %d, want none", len(third.records))
 		}
-		maybeInjectReincarnationNotice(third, noticeOps{address: opsNoticeAddress(t)}, nil, "tagent", dir, 0)
+		injectRestartNotice(third, noticeOps{address: opsNoticeAddress(t)}, nil, "tagent", dir, 0)
 		if len(third.records) != 0 {
 			t.Fatalf("a consumed notice was admitted again (%d records)", len(third.records))
 		}

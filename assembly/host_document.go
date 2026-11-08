@@ -24,6 +24,7 @@ import (
 	"github.com/SpellingDragon/tagent/api/plugin"
 	"github.com/SpellingDragon/tagent/features/evolution/governance"
 	"github.com/SpellingDragon/tagent/memory"
+	"github.com/SpellingDragon/tagent/runtime/state"
 	tagentexec "github.com/SpellingDragon/tagent/tool/exec"
 	tagentfile "github.com/SpellingDragon/tagent/tool/file"
 	"github.com/SpellingDragon/tagent/tool/knowledge"
@@ -92,13 +93,15 @@ type hostAgent struct {
 	File         config.FileSpec       `yaml:"file"`
 	Exec         config.ExecSpec       `yaml:"exec"`
 
-	Temperature       *float64 `yaml:"temperature"`
-	ThinkingEnabled   *bool    `yaml:"thinking_enabled"`
-	ReasoningEffort   string   `yaml:"reasoning_effort"`
-	MaxToolIterations int      `yaml:"max_tool_iterations"`
-	MaxTokens         int      `yaml:"max_tokens"`
-	CompressThreshold float64  `yaml:"compress_threshold"`
-	KeepRecentTasks   int      `yaml:"keep_recent_tasks"`
+	Temperature           *float64 `yaml:"temperature"`
+	ThinkingEnabled       *bool    `yaml:"thinking_enabled"`
+	ReasoningEffort       string   `yaml:"reasoning_effort"`
+	MaxToolIterations     int      `yaml:"max_tool_iterations"`
+	MaxTokens             int      `yaml:"max_tokens"`
+	ProviderContextWindow *int     `yaml:"provider_context_window"`
+	OutputReserve         *int     `yaml:"output_reserve"`
+	CompressThreshold     float64  `yaml:"compress_threshold"`
+	KeepRecentTasks       int      `yaml:"keep_recent_tasks"`
 }
 
 // hostPrompt is the prompt section of one agent: the declared files resolved
@@ -177,20 +180,22 @@ func (d *hostDocument) mapDocument() (document.Document, error) {
 			finalRound.MaxRounds = entry.MaxToolIterations
 		}
 		spec := config.AgentSpec{
-			ID:                id,
-			Model:             d.modelName(id),
-			FinalRound:        finalRound,
-			Temperature:       entry.Temperature,
-			ThinkingEnabled:   entry.ThinkingEnabled,
-			ReasoningEffort:   entry.ReasoningEffort,
-			MaxToolIterations: entry.MaxToolIterations,
-			MaxTokens:         entry.MaxTokens,
-			CompressThreshold: entry.CompressThreshold,
-			KeepRecentTasks:   entry.KeepRecentTasks,
-			Memory:            entry.Memory,
-			Meditation:        entry.Meditation,
-			File:              entry.File,
-			Exec:              entry.Exec,
+			ID:                    id,
+			Model:                 d.modelName(id),
+			FinalRound:            finalRound,
+			Temperature:           entry.Temperature,
+			ThinkingEnabled:       entry.ThinkingEnabled,
+			ReasoningEffort:       entry.ReasoningEffort,
+			MaxToolIterations:     entry.MaxToolIterations,
+			MaxTokens:             entry.MaxTokens,
+			ProviderContextWindow: derefInt(entry.ProviderContextWindow),
+			OutputReserve:         derefInt(entry.OutputReserve),
+			CompressThreshold:     entry.CompressThreshold,
+			KeepRecentTasks:       entry.KeepRecentTasks,
+			Memory:                entry.Memory,
+			Meditation:            entry.Meditation,
+			File:                  entry.File,
+			Exec:                  entry.Exec,
 		}
 		files, err := d.promptFiles(id)
 		if err != nil {
@@ -315,12 +320,23 @@ func (d *hostDocument) modelName(id string) string {
 }
 
 // validateMeditationTools refuses a document whose reflection would deliver through a
-// face it does not carry: an enabled reflection with a declared deliver_to white list
-// needs the one cross-session communication tool, because the delivery is the
-// reflection turn's own decision and no mechanism writes a body in its place. A
-// reflection declared beside no white list delivers nothing and is not judged here.
+// face it does not carry. For the retired independent curation agent, the
+// enabled reflection with a declared deliver_to white list must itself declare
+// the one cross-session communication tool, because the delivery is the
+// reflection turn's own decision and no mechanism writes a body in its place.
+//
+// Host self-reflection is different: the entry and reflection sessions share one
+// binding, so the meditation plugin grants the send tool to the reflection
+// session alone (session-scoped), and the entry tool face stays free of it. A
+// declarative grant is neither required nor permitted here, so there is no
+// misplacement to refuse; an enabled reflection always reaches a send face.
+// A reflection declared beside no white list delivers nothing and is not judged
+// in either form.
 func (d *hostDocument) validateMeditationTools(plan *hostMeditationPlan) error {
 	if plan == nil || len(plan.targets) == 0 {
+		return nil
+	}
+	if plan.selfReflection {
 		return nil
 	}
 	if !d.declaresTool(plan.agent, hostSendToolID) {
@@ -420,7 +436,7 @@ func (d *hostDocument) nativeAgents(ctx context.Context, client *http.Client, re
 // declaration contributes. Boot builds every native of the first generation
 // through it, and a reload builds an agent its document adds through the very
 // same construction, over the ports the boot bound to the run.
-func (d *hostDocument) nativeAgent(ctx context.Context, id string, client *http.Client, recallPort *RecallPort, _ *hostMeditationPlan, meditationPort *hostMeditationPort, reentryPort hostSendReentry) (NativeAgent, error) {
+func (d *hostDocument) nativeAgent(ctx context.Context, id string, client *http.Client, recallPort *RecallPort, plan *hostMeditationPlan, meditationPort *hostMeditationPort, reentryPort hostSendReentry) (NativeAgent, error) {
 	native, err := d.modelFor(id, client)
 	if err != nil {
 		return NativeAgent{}, err
@@ -429,7 +445,21 @@ func (d *hostDocument) nativeAgent(ctx context.Context, id string, client *http.
 	if err != nil {
 		return NativeAgent{}, err
 	}
-	return NativeAgent{Model: native, Tools: tools}, nil
+	// Host self-reflection shares one binding between the entry and its
+	// dedicated reflection session. Mark that session and the cross-session
+	// send tool the plugin granted to it, so the runtime filters send out of
+	// every other (entry/business) session's request face while the reflection
+	// turn keeps the one write face its lesson delivery needs. A declarative
+	// send stays a normal business-face tool: only the plugin-granted one
+	// (the agent declared no send) is reflection-only, or a fixture naming its
+	// own send would lose it from its business turns.
+	var reflectionSession event.SessionID
+	var reflectionOnly []string
+	if plan != nil && plan.reflectionGrantsSend(id) && !d.declaresTool(id, hostSendToolID) {
+		reflectionSession = event.SessionID(plan.session)
+		reflectionOnly = []string{hostSendToolID}
+	}
+	return NativeAgent{Model: native, Tools: tools, reflectionSession: reflectionSession, reflectionOnly: reflectionOnly}, nil
 }
 
 // toolsFor constructs the tool instances the host contributes for one agent;
@@ -440,9 +470,13 @@ func (d *hostDocument) nativeAgent(ctx context.Context, id string, client *http.
 // recall_trace walks the host's parent chain.
 // - One tool answers every task and peer-session destination, and every agent that declares it carries both dispatch faces — the meditation session included, because a reflection turn delivers its summary through this very tool (design D15 DEL-2).
 // - The delivery face itself refuses a sender the document's white list does not authorize, so a grant is never an authorization of its own.
+// - Host self-reflection contributes the cross-session send tool through the meditation plugin, not through the agent-level declaration; the runtime scopes the tool to the dedicated reflection session alone.
+// - A plugin-granted send that no declaration named is appended to the contributed tools after the declared list, and a declared send is never contributed twice.
 func (d *hostDocument) toolsFor(ctx context.Context, id string, recallPort *RecallPort, meditationPort *hostMeditationPort, reentryPort hostSendReentry) ([]trpctool.CallableTool, error) {
 	available := make(map[string]trpctool.CallableTool, len(hostToolIDs))
-	if d.declaresTool(id, hostSendToolID) {
+	grantSend := meditationPort != nil && meditationPort.plan != nil && meditationPort.plan.reflectionGrantsSend(id)
+	declaresSend := d.declaresTool(id, hostSendToolID)
+	if declaresSend || grantSend {
 		available[hostSendToolID] = &hostSendTool{reentry: reentryPort, session: meditationPort}
 	}
 	if d.declaresRecall(id) {
@@ -488,6 +522,9 @@ func (d *hostDocument) toolsFor(ctx context.Context, id string, recallPort *Reca
 		if tool, ok := available[ref.ID]; ok {
 			tools = append(tools, tool)
 		}
+	}
+	if grantSend && !declaresSend {
+		tools = append(tools, available[hostSendToolID])
 	}
 	return tools, nil
 }
@@ -704,3 +741,169 @@ func (d *hostDocument) buildModel(id, providerName, modelName string, client *ht
 // hostAPIEndpointEnv names the environment variable that overrides the endpoint
 // of the entry agent's provider.
 const hostAPIEndpointEnv = "TAGENT_API_ENDPOINT"
+
+// reconcileBootConfig is the startup reconciliation of one host: it reads the
+// configuration chain the storage tier already holds and decides which
+// declaration this process serves before the first publication runs.
+//
+// - no declaration fact: the source file is published through the sole entry as the first generation;
+// - the file names the newest declaration: it is adopted at the recorded generation, so a consistent restart publishes nothing;
+// - the file is newer than the newest declaration: it is published through the same entry after the recorded generation;
+// - the chain is newer than the file: the chain declaration is adopted and the lagging file is recorded by name.
+//
+// The reconciliation never writes a second publication path: every generation it takes into service is either the ledger's own record or the outcome of the one publication entry.
+//
+// 契约: docs/wiki/platform/org-hot-reload.md#apply-record
+func reconcileBootConfig(ctx context.Context, run *Run, configPath string, doc *hostDocument, decl *config.Declaration, agents map[event.AgentID]NativeAgent) error {
+	if run == nil || decl == nil {
+		return fmt.Errorf("tagent: the startup reconciliation carries no run or declaration")
+	}
+	fingerprint := decl.FactKey()
+	if fingerprint == "" {
+		return fmt.Errorf("tagent: the source declaration answers no canonical fingerprint")
+	}
+	declFact, chainDecl, declared, err := run.latestDeclaration(ctx)
+	if err != nil {
+		return err
+	}
+	record, published, err := run.latestPublishedRecord(ctx)
+	if err != nil {
+		return err
+	}
+	if !declared {
+		return publishBootDeclaration(ctx, run, configPath, doc, decl, agents, 0, "")
+	}
+	if fingerprint == declFact.Fingerprint {
+		if published && record.Fingerprint == declFact.Fingerprint {
+			return run.adoptConfigPublication(ctx, chainDecl, agents, record)
+		}
+		return publishBootDeclaration(ctx, run, configPath, doc, chainDecl, agents, uint64(record.Generation), record.Fingerprint)
+	}
+	newer, err := fileNewerThan(configPath, declFact.At)
+	if err != nil {
+		return err
+	}
+	if newer {
+		if published && record.Fingerprint == declFact.Fingerprint {
+			if err := run.adoptConfigPublication(ctx, chainDecl, agents, record); err != nil {
+				return err
+			}
+		}
+		return publishBootDeclaration(ctx, run, configPath, doc, decl, agents, uint64(record.Generation), record.Fingerprint)
+	}
+	if published && record.Fingerprint == declFact.Fingerprint {
+		if err := run.adoptConfigPublication(ctx, chainDecl, agents, record); err != nil {
+			return err
+		}
+	} else {
+		if err := publishBootDeclaration(ctx, run, configPath, doc, chainDecl, agents, uint64(record.Generation), record.Fingerprint); err != nil {
+			return err
+		}
+	}
+	_, err = run.recordPublicationAttempt(ctx, publicationAttempt{
+		Result:              publicationResultUnchanged,
+		Fingerprint:         declFact.Fingerprint,
+		Generation:          uint64(run.publisher.Current().Generation),
+		PreviousGeneration:  uint64(record.Generation),
+		PreviousFingerprint: record.Fingerprint,
+		Reason:              fmt.Sprintf("tagent: the source file %s is older than the chain declaration; the chain stays the truth", configPath),
+		Models:              modelVersionsOf(doc, chainDecl),
+		Dimensions:          skippedDimensions(chainDecl),
+	})
+	return err
+}
+
+// publishBootDeclaration commits the declaration fact of the declaration this
+// boot publishes and runs the one publication entry over it. The generation the
+// chain's last record assigned is the generation the candidate is meant to
+// follow; the window records every model version the new declaration puts in
+// effect.
+func publishBootDeclaration(ctx context.Context, run *Run, configPath string, doc *hostDocument, decl *config.Declaration, agents map[event.AgentID]NativeAgent, previousGeneration uint64, previousFingerprint string) error {
+	generation := previousGeneration + 1
+	if _, err := run.recordDeclarationFact(ctx, decl, generation); err != nil {
+		return err
+	}
+	_, chainDecl, held, err := run.latestDeclaration(ctx)
+	if err != nil {
+		return err
+	}
+	if !held {
+		return fmt.Errorf("tagent: the declaration fact of %s is not readable after its commit", configPath)
+	}
+	window := publicationWindow{
+		previous:            state.Generation(previousGeneration),
+		previousFingerprint: previousFingerprint,
+		models:              modelVersionsOf(doc, chainDecl),
+		dimensions:          appliedModelDimensions(chainDecl),
+		at:                  time.Now().UTC(),
+	}
+	outcome, err := run.publishDeclared(ctx, chainDecl, agents, window)
+	if err != nil {
+		_, recordErr := run.recordPublicationAttempt(ctx, publicationAttempt{
+			Result:              publicationResultGovernanceRejected,
+			Fingerprint:         chainDecl.FactKey(),
+			Generation:          previousGeneration,
+			PreviousGeneration:  previousGeneration,
+			PreviousFingerprint: previousFingerprint,
+			Reason:              err.Error(),
+			Models:              window.models,
+			Dimensions:          window.dimensions,
+		})
+		return errors.Join(err, recordErr)
+	}
+	result := publicationResultPublished
+	if outcome.Result == state.PublishUnchanged {
+		result = publicationResultUnchanged
+	}
+	_, err = run.recordPublicationAttempt(ctx, publicationAttempt{
+		Result:              result,
+		Fingerprint:         chainDecl.FactKey(),
+		Generation:          outcome.Publication.Generation,
+		PreviousGeneration:  previousGeneration,
+		PreviousFingerprint: previousFingerprint,
+		Models:              window.models,
+		Dimensions:          window.dimensions,
+	})
+	return err
+}
+
+// fileNewerThan reports whether the source file was modified after the named
+// chain moment. The comparison is the file's own modification time against the
+// declaration fact's recorded time: a restart whose file is not newer keeps the
+// chain instead of overwriting it with a rolled-back edit surface.
+func fileNewerThan(configPath string, chainAt time.Time) (bool, error) {
+	info, err := os.Stat(configPath)
+	if err != nil {
+		return false, fmt.Errorf("tagent: stat the configuration source %s: %w", configPath, err)
+	}
+	return info.ModTime().After(chainAt), nil
+}
+
+// appliedModelDimensions names the model dimension of every agent as applied:
+// the generation a publication takes into service installs the model version
+// the declaration names beside it.
+func appliedModelDimensions(decl *config.Declaration) map[string]string {
+	out := make(map[string]string, len(decl.Agents))
+	for _, spec := range decl.Agents {
+		out[spec.ID+"|"+event.ConfigChangeDimensionModel] = "applied"
+	}
+	return out
+}
+
+// skippedDimensions names the model dimension of every agent as skipped: the
+// declaration did not move it in the window this record describes.
+func skippedDimensions(decl *config.Declaration) map[string]string {
+	out := make(map[string]string, len(decl.Agents))
+	for _, spec := range decl.Agents {
+		out[spec.ID+"|"+event.ConfigChangeDimensionModel] = "skipped"
+	}
+	return out
+}
+
+// derefInt reads an optional YAML integer: an absent key keeps the zero value.
+func derefInt(p *int) int {
+	if p == nil {
+		return 0
+	}
+	return *p
+}

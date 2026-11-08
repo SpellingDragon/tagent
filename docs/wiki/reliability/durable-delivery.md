@@ -86,7 +86,7 @@
 
 三条由此固定的判据：①`delegation` 印花（`api/event/meta.go` `LineageDelegation`）是自管流量，不开宿主面、不计新鲜度；②未知/空印花既不投递也不构成新鲜材料——"不认识"永远不等于"可以发"；③headless 销账**保留正文与目标**，所以"给了谁、为什么没发"事后可问，而不是删痕了事。
 
-**进程内投递的账目是同一套身份的读面**：`Run.DeliveryLedger()` 把本 run 提交过的投递事实按源事件、目标与投递身份回读（`Records`／`BySource`／`ByTarget`）。两族投递——agent 主动发出的正文落 `external_input`，框架的结算通知落 `task_settled`——盖同一套四键，所以"一个源事件到达了哪些目标、各自站在什么回执"不按来路分两种读法。账目不解析正文，也不松上面两道判据：它是回读面，不是第三条门。
+**进程内投递的账目是同一套身份的读面**：`Run.DeliveryLedger()` 把本 run 提交过的投递事实按源事件、目标与投递身份回读（`Records`／`BySource`／`ByTarget`）。两族投递——agent 主动发出的正文落 `external_input`，框架的结算通知落 `task_settled`——盖同一套五键（含 `delivery.denial`），所以"一个源事件到达了哪些目标、各自站在什么回执"不按来路分两种读法。账目不解析正文，也不松上面两道判据：它是回读面，不是第三条门。
 
 <a id="gaps"></a>
 ## 四、已知缺口与演进方向

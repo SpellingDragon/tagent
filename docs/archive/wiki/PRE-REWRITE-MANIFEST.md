@@ -6,7 +6,7 @@
 ## 一、为什么是"指针归档"而不是 `git mv` 出来的副本
 
 - 仓库的 `doc_budget` 棘轮按 **git 索引内全部 `*.md` 行数**计量，副本归档会让总量等于「原版 + 压缩版」（净增约 1600 行），
-  直接判红，与"总量只降不升"的门冲突；而 `scripts/check_doc_budget.py` 不在本次变更的写入白名单内，不能扩排除面。
+  直接判红，与"总量只降不升"的门冲突；而 `scripts/gates/check_doc_budget.py` 不在本次变更的写入白名单内，不能扩排除面。
 - `docs/wiki` 本就是 `historical-verbatim` 树，`doc-refs` 对"目标文件在今日树中不存在"的引用按**引入行所在提交**解析
   （`scripts/codetools/check.go` 的 `citationBasis`），因此原版只需在 git 历史中可定位，不需要在工作树里再存一份。
 
@@ -70,7 +70,7 @@ grep -rn "docs/wiki/memory\|docs/wiki/event\|docs/wiki/evolution" --include="*.g
 
 ## 五、W1 压缩结果对照（agent · platform · prompt · reliability · rl，终态）
 
-17 篇合计 **3352 → 1667 行（压掉 1685 行，50.3%）**，`<a id>` 锚点 **131 → 131（一个未删）**。逐篇：
+17 篇合计 **3352 → 1667 行（压掉 1685 行，50.3%）**，`<a id>` 锚点 **131 → 131（写于 2026-10-19）**。注：此「一个未删」为写时结论；`1ac7cf88` 重写后现行 16 篇 W1 锚点为 106/131、W3 为 18/48，现行 16 篇共 1405 行。逐篇（写时数）：
 
 | 篇 | 原行数 | 现行数 | 压缩率 |
 |---|---|---|---|
@@ -79,7 +79,7 @@ grep -rn "docs/wiki/memory\|docs/wiki/event\|docs/wiki/evolution" --include="*.g
 | agent/execution-generations.md | 139 | 106 | 23.7% |
 | agent/task-lifecycle.md | 94 | 60 | 36.2% |
 | agent/governance-enforcement.md | 56 | 39 | 30.4% |
-| agent/prototype-skeleton.md | 45 | 33 | 26.7% |
+| agent/prototype-skeleton.md（已删） | 45 | — | — |
 | agent/compression-and-telemetry.md | 85 | 76 | 10.6% |
 | platform/org-hot-reload.md | 302 | 169 | 44.0% |
 | platform/agent-behavior-matrix.md | 290 | 171 | 41.0% |
@@ -103,7 +103,7 @@ go run ./scripts/codetools doc-refs docs/wiki docs/*.md
 
 # 归档清单：W3（plugin / tool / examples）压缩重写前的保全面
 
-本清单在改写**之前**写成，钉住被保全的对象；原版由 `git mv` 归档到本目录同名路径，
+本清单在改写**之前**写成，钉住被保全的对象；原版只在基线提交 `e4e884a48c6b…` 用 `git show` 取回、本目录不存副本（指针归档，见 §一），
 `docs/wiki/` 下的同名文件是压缩重写版（保锚点、保具名语义句、保判据与缺口），
 两版都可逐字比对。基线提交：`e4e884a48c6b9a5a70fcd13265e28d3aa55a67c8`。
 

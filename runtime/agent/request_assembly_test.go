@@ -87,3 +87,26 @@ func TestRoleTableIsClosedAndSingleValued(t *testing.T) {
 		}
 	})
 }
+
+// TestSettlementRoleMapped pins the one projection registration the settlement family needs.
+//
+// - The frozen type is spelled here exactly as the family is, and it maps to the user role the settlement line is read under.
+// - A type outside the table is refused by name.
+// - The same check runs from the assembly side, where the family const is defined, so a drift in either spelling fails there.
+//
+// 契约: docs/wiki/agent/event-flow.md#projection-lifecycle
+func TestSettlementRoleMapped(t *testing.T) {
+	if projectionTypeDeliverySettlement != "delivery.settlement" {
+		t.Fatalf("the local settlement type reads %q, want the frozen family word delivery.settlement", projectionTypeDeliverySettlement)
+	}
+	role, err := RoleOf(projectionTypeDeliverySettlement)
+	if err != nil {
+		t.Fatalf("the settlement type maps to no role: %v", err)
+	}
+	if role != model.RoleUser {
+		t.Fatalf("the settlement type maps to role %q, want the user role its one-line state is read under", role)
+	}
+	if _, err := RoleOf(projectionTypeDeliverySettlement + ".unregistered"); !errors.Is(err, ErrProjectionTypeUnmapped) {
+		t.Fatalf("an unregistered type answered %v, want ErrProjectionTypeUnmapped", err)
+	}
+}

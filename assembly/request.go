@@ -475,7 +475,7 @@ func (r *Run) SessionPresented(addr event.Address) map[event.EventID]bool {
 		return nil
 	}
 	views, err := held.projection.AssembleBudgetPrefix(context.Background(),
-		projectionBudget(held.projection, held.window, prefix), prefix)
+		projectionBudget(held.projection, held.window, prefix, 0), prefix)
 	if err != nil {
 		return nil
 	}
@@ -656,7 +656,7 @@ func (r *Run) requestBoundary(ctx context.Context, boundary agent.RequestBoundar
 
 // requestSegment produces one segment of a request assembly: the messages the
 // segment contributes to the prefix, in the order the assembly lays them out.
-type requestSegment func(ctx context.Context) ([]model.Message, error)
+type requestSegment func(ctx context.Context) ([]model.Message, []string, error)
 
 // projectionAssembler is the one assembler the request boundary builds the
 // prefix of a request through: every segment of the prefix is a product of this
@@ -675,16 +675,18 @@ func (a *projectionAssembler) segment(produce requestSegment) {
 // assemble runs every declared segment in order and answers the prefix they
 // produce together. A refused segment refuses the assembly at that segment, so
 // no request is built over material that failed to render.
-func (a *projectionAssembler) assemble(ctx context.Context) ([]model.Message, error) {
+func (a *projectionAssembler) assemble(ctx context.Context) ([]model.Message, []string, error) {
 	var out []model.Message
+	var sources []string
 	for _, produce := range a.segments {
-		messages, err := produce(ctx)
+		messages, faces, err := produce(ctx)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		out = append(out, messages...)
+		sources = append(sources, faces...)
 	}
-	return out, nil
+	return out, sources, nil
 }
 
 // requestAssembly is one request boundary's assembly: the assembler that lays
@@ -719,24 +721,56 @@ func (a *requestAssembly) assemble(ctx context.Context) (agent.BoundaryView, err
 	if a.registered {
 		a.assembler.segment(a.projectedMainContext)
 	}
-	messages, err := a.assembler.assemble(ctx)
+	messages, sources, err := a.assembler.assemble(ctx)
 	if err != nil {
 		return agent.BoundaryView{}, err
 	}
-	return agent.BoundaryView{
+	view := agent.BoundaryView{
 		Messages:      messages,
+		Sources:       sources,
 		PromptVersion: a.promptVersion,
 		VisibleSkills: a.narrowSkillNames(mergeSkillNames(visibleSkillsOf(a.boundary.Binding), a.loadedSkillNames())),
-		DynamicSystem: a.dynamicSystem(ctx),
-	}, nil
+	}
+	window := a.budgetWindow()
+	view = view.WithBudget(window, a.budgetReserve(window))
+	if skills := a.dynamicSkillBodies(); skills != "" {
+		view = view.WithDynamicSkills(skills)
+	}
+	if environment := a.dynamicEnvironment(ctx); environment != "" {
+		view = view.WithEnvironmentBlock(environment)
+	}
+	return view, nil
 }
 
-// dynamicSystem renders the dynamic system section the request closes with: the
-// bodies the skill loads published, in skill-name order, beside the environment
-// block an agent declares last. The section travels the system channel as the
-// request's final message, so each family adapter frames it as system material
-// while the stable prefix ahead of it keeps its cache.
-func (a *requestAssembly) dynamicSystem(ctx context.Context) string {
+// budgetWindow reports the provider context window the final request budget is
+// measured against: the window the declaration names explicitly, or — when it
+// names none — the replay window MaxTokens as the declaration's one window
+// word. A declaration naming neither opens no gate.
+func (a *requestAssembly) budgetWindow() int {
+	spec := a.run.agentSpecOf(a.boundary.Agent)
+	if spec.ProviderContextWindow > 0 {
+		return spec.ProviderContextWindow
+	}
+	return spec.MaxTokens
+}
+
+// budgetReserve reports the output allowance the input budget leaves: the
+// allowance the declaration names, or the fixed share of the provider window
+// when it names none. The reserve is derived from the window the gate uses, so
+// a window derived from MaxTokens carries the same default share.
+func (a *requestAssembly) budgetReserve(window int) int {
+	if reserve := a.run.agentSpecOf(a.boundary.Agent).OutputReserve; reserve > 0 {
+		return reserve
+	}
+	return agent.OutputReserveOf(window)
+}
+
+// dynamicSkillBodies renders the bodies the skill loads published, in
+// skill-name order, as the skill_bodies face of the dynamic section. The section
+// travels the system channel as the request's final message, so each family
+// adapter frames it as system material while the stable prefix ahead of it keeps
+// its cache.
+func (a *requestAssembly) dynamicSkillBodies() string {
 	var b strings.Builder
 	for _, name := range a.loadedSkillNames() {
 		body := a.loadedSkillBodies[name]
@@ -745,29 +779,29 @@ func (a *requestAssembly) dynamicSystem(ctx context.Context) string {
 		}
 		fmt.Fprintf(&b, "## Skill: %s\n%s\n\n", name, body)
 	}
-	if a.run.agentSpecOf(a.boundary.Agent).EnvironmentBlock {
-		b.WriteString(a.run.environmentBlock(ctx, a.boundary, a.promptVersion))
-	}
-	return strings.TrimSuffix(b.String(), "\n")
+	return b.String()
 }
 
-// environmentBlock contributes the closing system section of the request: the
-// faces the request carries beside the open asynchronous work at this boundary,
-// rendered as the named Markdown section the fixed prompt's own material uses.
-// The material travels the system channel, so each family adapter turns it into
-// its own system framing instead of the request posing as conversation.
-func (a *requestAssembly) environmentBlock(ctx context.Context) ([]model.Message, error) {
-	return []model.Message{{Role: model.RoleSystem, Content: a.run.environmentBlock(ctx, a.boundary, a.promptVersion)}}, nil
+// dynamicEnvironment renders the environment block an agent declares as the
+// environment face of the dynamic section. The material travels the system
+// channel, so each family adapter turns it into its own system framing instead
+// of the request posing as conversation.
+func (a *requestAssembly) dynamicEnvironment(ctx context.Context) string {
+	if !a.run.agentSpecOf(a.boundary.Agent).EnvironmentBlock {
+		return ""
+	}
+	return a.run.environmentBlock(ctx, a.boundary, a.promptVersion)
 }
 
 // fixedSystem reads the declared prompt and skill bodies afresh at this boundary
 // and contributes them as the leading system messages, in the structural order
-// the binding carries. The skill names it read are kept beside the messages, so
-// the loaded-skill segment never repeats a body the fixed files already carry.
-func (a *requestAssembly) fixedSystem(ctx context.Context) ([]model.Message, error) {
+// the binding carries, each beside the input face it renders. The skill names it
+// read are kept beside the messages, so the loaded-skill segment never repeats a
+// body the fixed files already carry.
+func (a *requestAssembly) fixedSystem(ctx context.Context) ([]model.Message, []string, error) {
 	snapshot, err := a.fixer.fixate(ctx, a.boundary.Binding.PromptSource)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	var prompts, skillBodies []string
 	visibleSkills := a.visibleSkillSet()
@@ -787,13 +821,16 @@ func (a *requestAssembly) fixedSystem(ctx context.Context) ([]model.Message, err
 		a.promptVersion = snapshot.Version
 	}
 	messages := make([]model.Message, 0, 2)
+	sources := make([]string, 0, 2)
 	if len(prompts) > 0 {
 		messages = append(messages, model.Message{Role: model.RoleSystem, Content: strings.Join(prompts, "\n\n")})
+		sources = append(sources, agent.BudgetFaceFixedPrompt)
 	}
 	if len(skillBodies) > 0 {
 		messages = append(messages, model.Message{Role: model.RoleSystem, Content: strings.Join(skillBodies, "\n\n")})
+		sources = append(sources, agent.BudgetFaceSkillBodies)
 	}
-	return messages, nil
+	return messages, sources, nil
 }
 
 // publishSkillBodies records the skill bodies a load already fixed for the
@@ -1052,8 +1089,8 @@ func skillLoadsOf(agent event.AgentID) []knowledge.LoadedSkill {
 // projectedMainContext contributes the replayed projection of the session chain
 // as the main context of the request: the window assembly of the registration
 // the chain fixed, bounded to the entries that already ended.
-func (a *requestAssembly) projectedMainContext(ctx context.Context) ([]model.Message, error) {
-	return projectedSegment(ctx, a.run, a.sequence.projection, a.sequence.window, a.sequence.endedPrefix())
+func (a *requestAssembly) projectedMainContext(ctx context.Context) ([]model.Message, []string, error) {
+	return projectedSegment(ctx, a.run, a.sequence.projection, a.sequence.window, a.sequence.endedPrefix(), a.boundary.ProjectionBudget)
 }
 
 // projectedSegment renders projected material under the window assembly: the
@@ -1072,22 +1109,23 @@ func (a *requestAssembly) projectedMainContext(ctx context.Context) ([]model.Mes
 // segment restores the pairing the wire requires before the request leaves:
 // every tool entry gains the tool_call_id its fact answers under beside the
 // assistant tool_calls message that issued the call (see restoreCallPairing).
-func projectedSegment(ctx context.Context, run *Run, projection *replay.ReplayProjection, window FoldWindow, prefix int) ([]model.Message, error) {
+func projectedSegment(ctx context.Context, run *Run, projection *replay.ReplayProjection, window FoldWindow, prefix, override int) ([]model.Message, []string, error) {
 	if projection == nil {
-		return nil, nil
+		return nil, nil, nil
 	}
-	entries, err := projection.AssembleBudgetPrefix(ctx, projectionBudget(projection, window, prefix), prefix)
+	entries, err := projection.AssembleBudgetPrefix(ctx, projectionBudget(projection, window, prefix, override), prefix)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	messages := make([]model.Message, 0, len(entries))
+	sources := make([]string, 0, len(entries))
 	paired := make(map[string]bool, len(entries))
 	for _, entry := range entries {
 		role := model.Role(entry.StatedRole())
 		if role == "" {
 			filled, err := agent.RoleOf(entry.Type)
 			if err != nil {
-				return nil, err
+				return nil, nil, err
 			}
 			role = filled
 		}
@@ -1096,8 +1134,19 @@ func projectedSegment(ctx context.Context, run *Run, projection *replay.ReplayPr
 			run.restoreCallPairing(ctx, &messages, &message, entry, paired)
 		}
 		messages = append(messages, message)
+		sources = append(sources, projectionSourceOf(entry.Type))
 	}
-	return messages, nil
+	return messages, sources, nil
+}
+
+// projectionSourceOf names the input face one presented projection entry
+// renders: the recovery hint has a face of its own, and every other projected
+// entry is history the request carries.
+func projectionSourceOf(entryType string) string {
+	if entryType == replay.ProjectionTypeRecoveryHint {
+		return agent.BudgetFaceRecoveryHint
+	}
+	return agent.BudgetFaceHistory
 }
 
 // projectionBudget reports the token budget one request presents its projected
@@ -1110,7 +1159,10 @@ func projectedSegment(ctx context.Context, run *Run, projection *replay.ReplayPr
 // full and no entry degrades to a ticket the declaration never asked for. The
 // measure reads the original the projection keeps, never the view an assembly
 // shaped, because the view belongs to that assembly alone.
-func projectionBudget(projection *replay.ReplayProjection, window FoldWindow, prefix int) int {
+func projectionBudget(projection *replay.ReplayProjection, window FoldWindow, prefix, override int) int {
+	if override > 0 {
+		return override
+	}
 	if window.MaxTokens > 0 {
 		return window.MaxTokens
 	}
@@ -1314,20 +1366,21 @@ func (r *Run) environmentBlock(ctx context.Context, boundary agent.RequestBounda
 	if modelName := modelNameOf(boundary.Binding); modelName != "" {
 		fmt.Fprintf(&b, "- model: %s\n", modelName)
 	}
-	fmt.Fprintf(&b, "- tools: %s\n", listOrNone(toolNamesOf(boundary.Binding)))
+	fmt.Fprintf(&b, "- tools: %s\n", listOrNone(toolNamesOf(boundary.Binding, boundary.Chain.SessionID)))
 	fmt.Fprintf(&b, "- skills: %s\n", listOrNone(narrowedSkillsOf(boundary.Binding)))
 	fmt.Fprintf(&b, "- mcp: %s\n", listOrNone(visibleMCPOf(spec, boundary.Binding)))
 	fmt.Fprintf(&b, "- prompt_version: %s\n", versionOrNone(promptVersion))
 	return strings.TrimSuffix(b.String(), "\n")
 }
 
-// toolNamesOf reports the tool names one binding's request carries, in the
-// order the request emits them: the published tools in name order first, the
-// tools registered after publication behind them. The list reads the same face
-// the request's Tools come from, so the model never reads a name it cannot
-// call.
-func toolNamesOf(binding state.AgentBinding) []string {
-	_, order := state.ToolFace(binding)
+// toolNamesOf reports the tool names one binding's request carries at one
+// session, in the order the request emits them: the published tools in name
+// order first, the tools registered after publication behind them. It reads the
+// session-scoped face the request's Tools come from, so reflection-only tools
+// are listed only for the dedicated reflection session and the model never
+// reads a name it cannot call at its own session.
+func toolNamesOf(binding state.AgentBinding, session event.SessionID) []string {
+	_, order := state.ToolFace(binding, session)
 	return order
 }
 

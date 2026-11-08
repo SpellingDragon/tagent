@@ -1,0 +1,22 @@
+{
+  "id": "qa-01",
+  "category": "qa",
+  "prompts": [
+    "Compute 17 * 23. Reply with only the number."
+  ],
+  "tools": [],
+  "verifier": {
+    "response": {
+      "equals": "391"
+    }
+  },
+  "examples": {
+    "positive": {
+      "output": "391"
+    },
+    "negative": {
+      "output": "390",
+      "expect_error_contains": "response"
+    }
+  }
+}

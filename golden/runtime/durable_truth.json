@@ -1,0 +1,379 @@
+{
+  "schema_version": 1,
+  "adr": "docs/adr/0006-three-hooks-is-the-core-iteration-principle.md",
+  "user_ruling": "boundary-closure r19",
+  "review_by": "2027-05-05",
+  "reason": "Every persistent truth surface and durable key namespace in production code, registered once at the guard landing. A new persistent write or *Prefix constant must add a reviewed entry before it can pass; the checker has no auto-write mode.",
+  "surfaces": [
+    {
+      "id": "assembly.config-chain",
+      "kind": "fact-key",
+      "owner": "assembly",
+      "files": [
+        "assembly/commit.go"
+      ],
+      "prefixes": [
+        {
+          "file": "assembly/commit.go",
+          "name": "configChainPrefix",
+          "value": "tagent/config/v1/fact:"
+        }
+      ],
+      "reason": "The configuration chain is the single truth for declaration and publication facts.",
+      "review_by": "2027-05-05"
+    },
+    {
+      "id": "assembly.delivery-migration",
+      "kind": "fact-key",
+      "owner": "assembly",
+      "files": [
+        "assembly/host_delivery.go"
+      ],
+      "prefixes": [
+        {
+          "file": "assembly/host_delivery.go",
+          "name": "deliveryFactPrefix",
+          "value": "delivery."
+        },
+        {
+          "file": "assembly/host_delivery.go",
+          "name": "hostDeliveryPrefix",
+          "value": "tagent/task/v1/delivery:"
+        }
+      ],
+      "reason": "Settlement facts are the live truth; the legacy delivery record is the read-only migration input.",
+      "review_by": "2027-05-05"
+    },
+    {
+      "id": "assembly.host-storage",
+      "kind": "filesystem-store",
+      "owner": "assembly",
+      "files": [
+        "assembly/host.go"
+      ],
+      "prefixes": [],
+      "reason": "Host-owned approvals and runtime directories under the configured workspace.",
+      "review_by": "2027-05-05"
+    },
+    {
+      "id": "assembly.trajectory-capture",
+      "kind": "filesystem-store",
+      "owner": "assembly",
+      "files": [
+        "assembly/host_capture.go"
+      ],
+      "prefixes": [],
+      "reason": "Per-run trajectory capture root and its bounded swap directory.",
+      "review_by": "2027-05-05"
+    },
+    {
+      "id": "features.evolution.governance-ledger",
+      "kind": "ledger",
+      "owner": "features/evolution/governance",
+      "files": [
+        "features/evolution/governance/budget.go",
+        "features/evolution/governance/denial.go"
+      ],
+      "prefixes": [
+        {
+          "file": "features/evolution/governance/denial.go",
+          "name": "denialEventPrefix",
+          "value": "tagent/governance/v1/denial:"
+        },
+        {
+          "file": "features/evolution/governance/denial.go",
+          "name": "goalEventPrefix",
+          "value": "tagent/governance/v1/goal:"
+        }
+      ],
+      "reason": "Denial and goal event identities are ordered on the durable ledger; the budget window is its persisted snapshot.",
+      "review_by": "2027-05-05"
+    },
+    {
+      "id": "features.evolution.meditation-anchors",
+      "kind": "filesystem-store",
+      "owner": "features/evolution/meditation",
+      "files": [
+        "features/evolution/meditation/watermark.go"
+      ],
+      "prefixes": [],
+      "reason": "The reflection anchor record carries the state machine's durable position.",
+      "review_by": "2027-05-05"
+    },
+    {
+      "id": "features.rl.trajectory-capture",
+      "kind": "filesystem-store",
+      "owner": "features/rl",
+      "files": [
+        "features/rl/writer.go",
+        "features/rl/capture_wiring.go"
+      ],
+      "prefixes": [],
+      "reason": "Training-capture record files, seal marker and swapped request snapshots.",
+      "review_by": "2027-05-05"
+    },
+    {
+      "id": "memory.ledger.local-file-kv",
+      "kind": "kv-store",
+      "owner": "memory/ledger",
+      "files": [
+        "memory/ledger/localfile.go"
+      ],
+      "prefixes": [],
+      "reason": "Local-file KV shard snapshots are the durable backing of the memory tier.",
+      "review_by": "2027-05-05"
+    },
+    {
+      "id": "memory.ledger.relations-journal",
+      "kind": "filesystem-store",
+      "owner": "memory/ledger",
+      "files": [
+        "memory/ledger/relations_journal.go"
+      ],
+      "prefixes": [],
+      "reason": "The append-only relation journal and its snapshot are durable relation truth.",
+      "review_by": "2027-05-05"
+    },
+    {
+      "id": "memory.ledger.rustviking-kv",
+      "kind": "external-kv",
+      "owner": "memory/ledger",
+      "files": [
+        "memory/ledger/rustviking_kv.go"
+      ],
+      "prefixes": [],
+      "reason": "The rustviking adapter delegates truth to the external KV tier.",
+      "review_by": "2027-05-05"
+    },
+    {
+      "id": "memory.ledger.segment-store",
+      "kind": "kv-store",
+      "owner": "memory/ledger",
+      "files": [
+        "memory/ledger/segment_store.go",
+        "memory/ledger/tier_facts.go"
+      ],
+      "prefixes": [
+        {
+          "file": "memory/ledger/segment_store.go",
+          "name": "segmentIndexPrefix",
+          "value": "idx:"
+        }
+      ],
+      "reason": "Event segment, index and metadata keys are one durable KV layout; tier_facts is its fact-surface adapter.",
+      "review_by": "2027-05-05"
+    },
+    {
+      "id": "memory.replay.age-fold",
+      "kind": "fact-key",
+      "owner": "memory/replay",
+      "files": [
+        "memory/replay/age_segments.go"
+      ],
+      "prefixes": [
+        {
+          "file": "memory/replay/age_segments.go",
+          "name": "ageSegmentKeyPrefix",
+          "value": "seg"
+        },
+        {
+          "file": "memory/replay/age_segments.go",
+          "name": "ageHistoryKeyPrefix",
+          "value": "hist"
+        }
+      ],
+      "reason": "Age-fold product facts are addressed by these durable key prefixes.",
+      "review_by": "2027-05-05"
+    },
+    {
+      "id": "runtime.state.durable-facts",
+      "kind": "kv-store",
+      "owner": "runtime/state",
+      "files": [
+        "runtime/state/durable.go",
+        "runtime/state/recovery.go"
+      ],
+      "prefixes": [
+        {
+          "file": "runtime/state/durable.go",
+          "name": "factPrefix",
+          "value": "tagent/task/v1/fact:"
+        },
+        {
+          "file": "runtime/state/durable.go",
+          "name": "specPrefix",
+          "value": "tagent/task/v1/spec:"
+        },
+        {
+          "file": "runtime/state/durable.go",
+          "name": "consumePrefix",
+          "value": "tagent/task/v1/consume:"
+        },
+        {
+          "file": "runtime/state/durable.go",
+          "name": "attemptPrefix",
+          "value": "tagent/task/v1/attempt:"
+        },
+        {
+          "file": "runtime/state/durable.go",
+          "name": "rejectPrefix",
+          "value": "tagent/task/v1/reject:"
+        },
+        {
+          "file": "runtime/state/recovery.go",
+          "name": "ticketPrefix",
+          "value": "tagent/task/v1/ticket:"
+        },
+        {
+          "file": "runtime/state/recovery.go",
+          "name": "snapshotPrefix",
+          "value": "tagent/task/v1/snapshot:"
+        }
+      ],
+      "reason": "The five durable record kinds plus the recovery ticket and its verified snapshot blob share one KV face; the ticket fact is the truth, the blob is referenced material.",
+      "review_by": "2027-05-05"
+    },
+    {
+      "id": "runtime.state.migration",
+      "kind": "fact-key",
+      "owner": "runtime/state",
+      "files": [
+        "runtime/state/migrate.go"
+      ],
+      "prefixes": [
+        {
+          "file": "runtime/state/migrate.go",
+          "name": "ArchiveSourcePrefix",
+          "value": "archive:"
+        }
+      ],
+      "reason": "Migrated legacy records carry this durable archive identity namespace.",
+      "review_by": "2027-05-05"
+    },
+    {
+      "id": "runtime.task.mutation-identities",
+      "kind": "fact-key",
+      "owner": "runtime/task",
+      "files": [
+        "runtime/task/attention.go",
+        "runtime/task/handoff.go",
+        "runtime/task/reactivate.go"
+      ],
+      "prefixes": [
+        {
+          "file": "runtime/task/attention.go",
+          "name": "attentionKeyPrefix",
+          "value": "attention:"
+        },
+        {
+          "file": "runtime/task/handoff.go",
+          "name": "handoffPrefix",
+          "value": "handoff:"
+        },
+        {
+          "file": "runtime/task/reactivate.go",
+          "name": "reactivatePrefix",
+          "value": "reactivate:"
+        },
+        {
+          "file": "runtime/task/reactivate.go",
+          "name": "rollbackPrefix",
+          "value": "reactivate-rollback:"
+        }
+      ],
+      "reason": "Attention, handoff and reactivation identities are durable fact-chain identities, not a second store.",
+      "review_by": "2027-05-05"
+    },
+    {
+      "id": "runtime.task.approval-store",
+      "kind": "filesystem-store",
+      "owner": "runtime/task/approval",
+      "files": [
+        "runtime/task/approval/approval_store.go"
+      ],
+      "prefixes": [],
+      "reason": "Approval request files and the evidence mirror are durable across restarts.",
+      "review_by": "2027-05-05"
+    }
+  ],
+  "non_truth_files": [
+    {
+      "file": "assembly/host_document.go",
+      "reason": "MkdirAll prepares an ephemeral plan workspace root; it is not a durable truth surface."
+    },
+    {
+      "file": "bench/path.go",
+      "reason": "Benchmark workspace path preparation; verifier scratch data, not product truth."
+    },
+    {
+      "file": "bench/task.go",
+      "reason": "Benchmark task setup writes fixture files into the ephemeral run workspace."
+    },
+    {
+      "file": "memory/ledger/config.go",
+      "reason": "The in-memory memKV backend holds no disk truth and is rebuilt from the durable tier."
+    },
+    {
+      "file": "tool/exec/tmux_command.go",
+      "reason": "The generation-bound exit-status record is a user-cache hint, read and removed per stop; the pane/tmux is the authority."
+    },
+    {
+      "file": "bench/harness.go",
+      "reason": "Benchmark run artifacts (temp workspaces, task outputs, run directories under gitignored bench/runs/): ephemeral evidence, not a durable truth surface read back as system state."
+    },
+    {
+      "file": "bench/runners/baseline.go",
+      "reason": "Benchmark run artifacts (temp workspaces, task outputs, run directories under gitignored bench/runs/): ephemeral evidence, not a durable truth surface read back as system state."
+    },
+    {
+      "file": "bench/runners/dsh.go",
+      "reason": "Benchmark run artifacts (temp workspaces, task outputs, run directories under gitignored bench/runs/): ephemeral evidence, not a durable truth surface read back as system state."
+    },
+    {
+      "file": "bench/runners/run.go",
+      "reason": "Benchmark run artifacts (temp workspaces, task outputs, run directories under gitignored bench/runs/): ephemeral evidence, not a durable truth surface read back as system state."
+    },
+    {
+      "file": "bench/runners/tagent.go",
+      "reason": "Benchmark run artifacts (temp workspaces, task outputs, run directories under gitignored bench/runs/): ephemeral evidence, not a durable truth surface read back as system state."
+    }
+  ],
+  "non_truth_prefixes": [
+    {
+      "file": "assembly/host_delivery.go",
+      "name": "hostDeliveryFreshPrefix",
+      "value": "delivery-fresh-",
+      "reason": "Names an obligation identity; the fact key, not this prefix, is the durable record."
+    },
+    {
+      "file": "assembly/host_tools.go",
+      "name": "hostSendDeniedPrefix",
+      "value": "[send_denied] ",
+      "reason": "User-visible denial message prefix, not a store."
+    },
+    {
+      "file": "api/event/meta.go",
+      "name": "MetaPrefix",
+      "value": "meta_",
+      "reason": "Marks pass-through event metadata keys; it names no persistent store."
+    },
+    {
+      "file": "runtime/agent/fuse.go",
+      "name": "batchApprovalIDPrefix",
+      "value": "approval-batch-",
+      "reason": "In-memory approval batch identity, not a durable prefix."
+    },
+    {
+      "file": "tool/recall/key.go",
+      "name": "keyTicketPrefix",
+      "value": "evt_",
+      "reason": "Recall ticket spelling presented to callers; the event key is the durable identity."
+    },
+    {
+      "file": "tool/exec/tmux_generation.go",
+      "name": "generationMarkerPrefix",
+      "value": "<<<exec-generation:",
+      "reason": "Pane output marker used to bind a captured frame to a generation, not persisted truth."
+    }
+  ]
+}

@@ -20,6 +20,7 @@ import (
 // - the fourth turn folds the default window and mints a history summary under a synthetic key
 // - that fold reads the standing summary again, and the early turn still reads in the new one
 // - the fourth turn's request presents the summary, so the early context stays readable
+// - the provider window is wider than the 64-token replay window, so the gate admits every turn
 //
 // 契约: docs/wiki/memory/memory-architecture.md#event-shape
 func TestJourneyFoldKeepsContextReadable(t *testing.T) {
@@ -35,7 +36,8 @@ func TestJourneyFoldKeepsContextReadable(t *testing.T) {
 		"the fourth answer of the long session",
 	)
 	host := bootJourney(t, provider, journeySpec{
-		MaxTokens: 64,
+		MaxTokens:             64,
+		ProviderContextWindow: 256,
 		EntryExtra: []string{
 			"    compress_threshold: 0.2",
 		},

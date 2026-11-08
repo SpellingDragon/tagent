@@ -1,0 +1,29 @@
+{
+  "id": "file-01",
+  "category": "file",
+  "prompts": [
+    "Create out/hello.txt with exactly the text `hello bench` (no trailing newline)."
+  ],
+  "tools": [
+    "file.write"
+  ],
+  "verifier": {
+    "file": {
+      "path": "out/hello.txt",
+      "equals": "hello bench"
+    }
+  },
+  "examples": {
+    "positive": {
+      "files": {
+        "out/hello.txt": "hello bench"
+      }
+    },
+    "negative": {
+      "files": {
+        "out/hello.txt": "hello bench\n"
+      },
+      "expect_error_contains": "file"
+    }
+  }
+}

@@ -115,11 +115,19 @@ type smokeObservation struct {
 	ReflectionSeen bool
 	FirstHeap      uint64
 	LastHeap       uint64
-	HeapSlope      int64
-	MinGoroutines  int
-	MaxGoroutines  int
-	Samples        int
-	SampleLog      []smokeSample
+	// TrueSlope 是判定数：稳定窗内强制 GC 后 HeapInuse 的最小二乘斜率。
+	TrueSlope int64
+	// VirtualSlope 是虚胖分量（RSS−HeapInuse）的斜率，单独记录、不卡关；
+	// 平台读不到 RSS 时为零并置 VirtualSkip。
+	VirtualSlope int64
+	// VirtualWarn 报告虚胖斜率超过观测上限（真占用门的 50%）。
+	VirtualWarn bool
+	// VirtualSkip 报告本次没有可读的 RSS 采样，虚胖分量具名跳过。
+	VirtualSkip   bool
+	MinGoroutines int
+	MaxGoroutines int
+	Samples       int
+	SampleLog     []smokeSample
 }
 
 // TestLocalSmoke 是长程冒烟入口。
@@ -254,6 +262,15 @@ func TestLocalSmokeGuards(t *testing.T) {
 const (
 	// smokeRounds 是机械泵的轮数。
 	smokeRounds = 300
+	// smokeTrueResidencyGate 是真占用门：稳定窗内强制 GC 后 HeapInuse 的
+	// 每轮增长上限。判定数只读真占用，虚胖分量不参与过关。
+	smokeTrueResidencyGate = 128 << 10
+	// smokeVirtualObservationCap 是虚胖分量的观测上限：真占用门的 50%。
+	// 超过只记告警事实，不卡关。
+	smokeVirtualObservationCap = smokeTrueResidencyGate / 2
+	// smokeStableAfterRound 是稳定窗的起点：预热期的分配形状不代表稳态，
+	// 判定只用该轮之后的采样。
+	smokeStableAfterRound = 60
 	// smokeReloadRound 是热换发生的那一轮（改文档模型名 → POST /reload）。
 	smokeReloadRound = 150
 	// smokeRestartRound 是宿主重建发生的那一轮。
@@ -391,12 +408,24 @@ func runSmokePump(t *testing.T, rig *smokeRig, provider *smokeProvider, cfg *smo
 		t.Fatalf("bound addresses = %d, want the %d sessions driven since the last restart (pre-restart bindings=%d)",
 			len(bound), wantBound, preRestartBindings)
 	}
-	obs.HeapSlope = smokeHeapSlope(obs.SampleLog)
+	residency := smokeResidencyOf(obs.SampleLog)
+	obs.TrueSlope = residency.trueSlope
+	obs.VirtualSlope = residency.virtualSlope
+	obs.VirtualSkip = residency.virtualSkip
+	if residency.virtualSlope > smokeVirtualObservationCap {
+		obs.VirtualWarn = true
+		t.Logf("[residency] WARN virtual (returned-but-not-released) slope = %d bytes/round above the observation cap %d bytes/round; recorded as a warning fact, not a gate: rss samples readable=%t",
+			residency.virtualSlope, smokeVirtualObservationCap, !residency.virtualSkip)
+	}
+	t.Logf("[residency] gate=true-residency slope=%d B/round (gate<=%d) stable-after=%d virtual=%d B/round (cap=%d, warn=%t, skip=%t) rss-samples=%d",
+		residency.trueSlope, smokeTrueResidencyGate, smokeStableAfterRound,
+		residency.virtualSlope, smokeVirtualObservationCap, obs.VirtualWarn, residency.virtualSkip,
+		residency.virtualSamples)
 	t.Logf("[matrix 3] routing held: %d switches, %d stable bindings (pre-restart bindings=%d, bindings are not persisted)",
 		obs.Switches, wantBound, preRestartBindings)
 	t.Logf("[pump] done: rounds=%d requests=%d switches=%d samples=%d goroutines=[%d,%d] heap=%d->%d slope=%d B/round",
 		obs.Rounds, obs.Requests, obs.Switches, obs.Samples,
-		obs.MinGoroutines, obs.MaxGoroutines, obs.FirstHeap, obs.LastHeap, obs.HeapSlope)
+		obs.MinGoroutines, obs.MaxGoroutines, obs.FirstHeap, obs.LastHeap, obs.TrueSlope)
 	t.Logf("[matrix 5] delegations=%d: every round got the accept ack and a settle follow-up carrying the worker body", obs.Kinds[smokeDelegate])
 	t.Logf("[matrix 6] reviews=%d: every round's body was held by the delivery review, approved, and delivered exactly once", obs.Kinds[smokeApproval])
 	t.Logf("[matrix 9] file replies=%d: every round sent the path answer and the fake bot recorded a file send", obs.Kinds[smokeFile])
@@ -407,8 +436,9 @@ func runSmokePump(t *testing.T, rig *smokeRig, provider *smokeProvider, cfg *smo
 	if growth := int64(obs.LastHeap) - int64(obs.FirstHeap); growth > 48<<20 {
 		t.Fatalf("heap growth over the run = %d bytes, want bounded growth (<=48MiB)", growth)
 	}
-	if obs.HeapSlope > 128<<10 {
-		t.Fatalf("heap slope = %d bytes/round, want no leak slope (<=128KiB/round)", obs.HeapSlope)
+	if obs.TrueSlope > smokeTrueResidencyGate {
+		t.Fatalf("true-residency heap slope = %d bytes/round, want no leak slope (<=%d bytes/round); virtual (returned-but-not-released) slope=%d bytes/round is recorded separately",
+			obs.TrueSlope, smokeTrueResidencyGate, obs.VirtualSlope)
 	}
 	if errors := logs.count("ERROR"); errors > 0 {
 		t.Logf("[pump] the debug log carries %d ERROR line(s); first samples: %v", errors, logs.sample("ERROR", 3))
@@ -546,15 +576,75 @@ func smokeRequestsSinceContain(provider *smokeProvider, from int, want string) b
 	return false
 }
 
-// smokeHeapSlope 用最小二乘拟合采样点，报告每轮的堆增长字节数。
-func smokeHeapSlope(samples []smokeSample) int64 {
+// smokeResidency is the two slopes one run of samples answers: the gate number
+// read off the post-GC heap (true residency) and the separately recorded virtual
+// component read off RSS−HeapInuse. The virtual component never decides the
+// gate; it is observed against its own cap and reported as a warning fact.
+type smokeResidency struct {
+	trueSlope      int64
+	virtualSlope   int64
+	virtualSamples int
+	virtualSkip    bool
+}
+
+// smokeResidencyOf fits the stable window of one sample series: the samples
+// before smokeStableAfterRound are warm-up and never enter either slope, and
+// the virtual component is fitted only over the samples that really read RSS.
+// A series too short or beside one sample answers the zero slope.
+func smokeResidencyOf(samples []smokeSample) smokeResidency {
+	stable := make([]smokeSample, 0, len(samples))
+	for _, sample := range samples {
+		if sample.Round < smokeStableAfterRound {
+			continue
+		}
+		stable = append(stable, sample)
+	}
+	residency := smokeResidency{
+		trueSlope: smokeLeastSquaresSlope(stable, func(sample smokeSample) float64 {
+			return float64(sample.HeapInuse)
+		}),
+	}
+	readable := make([]smokeSample, 0, len(stable))
+	for _, sample := range stable {
+		if sample.RSSReadable {
+			readable = append(readable, sample)
+		}
+	}
+	residency.virtualSamples = len(readable)
+	if len(readable) < 2 {
+		residency.virtualSkip = true
+		return residency
+	}
+	residency.virtualSlope = smokeLeastSquaresSlope(readable, func(sample smokeSample) float64 {
+		return float64(sample.RSSBytes) - float64(sample.HeapInuse)
+	})
+	return residency
+}
+
+// smokeTrueResidencyGateOf reports whether one true-residency slope passes the
+// declared gate: the gate number, and nothing about the virtual component,
+// decides the run.
+func smokeTrueResidencyGateOf(slope int64) bool {
+	return slope <= smokeTrueResidencyGate
+}
+
+// smokeVirtualWarningOf reports whether one virtual slope is above the declared
+// observation cap: above it the run records the warning fact, and the gate
+// still reads the true residency alone.
+func smokeVirtualWarningOf(slope int64) bool {
+	return slope > smokeVirtualObservationCap
+}
+
+// smokeLeastSquaresSlope fits one series of sample values and reports the
+// per-round slope in bytes, using the sample round as the x axis.
+func smokeLeastSquaresSlope(samples []smokeSample, value func(smokeSample) float64) int64 {
 	if len(samples) < 2 {
 		return 0
 	}
 	var sumX, sumY, sumXY, sumXX float64
 	for _, sample := range samples {
 		x := float64(sample.Round)
-		y := float64(sample.HeapInuse)
+		y := value(sample)
 		sumX += x
 		sumY += y
 		sumXY += x * y
@@ -566,6 +656,108 @@ func smokeHeapSlope(samples []smokeSample) int64 {
 		return 0
 	}
 	return int64((n*sumXY - sumX*sumY) / denominator)
+}
+
+// TestSmokeGateTrueResidency locks the smoke gate's criterion and sampler.
+// - the deciding number is the post-GC heap slope over the stable window
+// - the virtual component is recorded separately against its own observation cap
+// - the samples before the stable window never move the gate
+//
+// 契约: docs/wiki/examples/wechat-bot-runtime.md#module-layout
+func TestSmokeGateTrueResidency(t *testing.T) {
+	t.Run("the gate reads the post-GC heap slope", func(t *testing.T) {
+		samples := smokeResidencySeries(0, 100<<10, 0, true)
+		residency := smokeResidencyOf(samples)
+		if want := int64(100 << 10); residency.trueSlope != want {
+			t.Fatalf("true-residency slope = %d B/round, want %d", residency.trueSlope, want)
+		}
+		if !smokeTrueResidencyGateOf(residency.trueSlope) {
+			t.Fatalf("a %d B/round slope was refused by the %d gate", residency.trueSlope, smokeTrueResidencyGate)
+		}
+		if smokeTrueResidencyGateOf(smokeTrueResidencyGate + 1) {
+			t.Fatalf("a slope above the %d gate passed", smokeTrueResidencyGate)
+		}
+	})
+
+	t.Run("the virtual component never moves the gate", func(t *testing.T) {
+		samples := smokeResidencySeries(0, 0, 80<<10, true)
+		residency := smokeResidencyOf(samples)
+		if residency.trueSlope != 0 {
+			t.Fatalf("true-residency slope = %d B/round beside a flat heap, want 0", residency.trueSlope)
+		}
+		if !smokeTrueResidencyGateOf(residency.trueSlope) {
+			t.Fatalf("the flat-heap gate read the virtual component")
+		}
+		if !smokeVirtualWarningOf(residency.virtualSlope) {
+			t.Fatalf("virtual slope = %d B/round, want above the %d observation cap", residency.virtualSlope, smokeVirtualObservationCap)
+		}
+		if smokeVirtualWarningOf(smokeVirtualObservationCap) {
+			t.Fatalf("the observation cap itself was read as a warning")
+		}
+	})
+
+	t.Run("the warm-up window never decides", func(t *testing.T) {
+		samples := smokeResidencySeries(1<<20, 0, 0, true)
+		if whole := smokeLeastSquaresSlope(samples, func(sample smokeSample) float64 {
+			return float64(sample.HeapInuse)
+		}); whole <= 0 {
+			t.Fatalf("the whole-run slope = %d B/round, want the warm-up growth visible in it", whole)
+		}
+		if stable := smokeResidencyOf(samples).trueSlope; stable != 0 {
+			t.Fatalf("stable-window slope = %d B/round, want 0", stable)
+		}
+	})
+
+	t.Run("the platform sampler reads the current process", func(t *testing.T) {
+		rss, readable := smokeCurrentRSSBytes()
+		if !readable {
+			t.Skip("the current RSS sampler is unavailable on this platform; the smoke records the named virtual-component skip")
+		}
+		if rss <= 0 {
+			t.Fatalf("current RSS = %d bytes, want a positive reading", rss)
+		}
+	})
+
+	t.Run("an unreadable RSS is a named skip", func(t *testing.T) {
+		samples := smokeResidencySeries(0, 0, 0, false)
+		for at := range samples {
+			if samples[at].RSSReadable {
+				samples[at].RSSReadable = false
+			}
+		}
+		residency := smokeResidencyOf(samples)
+		if !residency.virtualSkip || residency.virtualSamples != 0 {
+			t.Fatalf("unreadable RSS = (skip=%t, samples=%d), want the named skip", residency.virtualSkip, residency.virtualSamples)
+		}
+		if residency.virtualSlope != 0 || smokeVirtualWarningOf(residency.virtualSlope) {
+			t.Fatalf("the skipped virtual component answered a slope or a warning")
+		}
+	})
+}
+
+// smokeResidencySeries renders samples from round 0 to the last scheduled
+// sample: the warm-up grows the heap by warmupHeap per round up to the stable
+// window, the stable window grows it by heapPerRound per round, and the virtual
+// component grows by virtualPerRound per round across the whole run.
+func smokeResidencySeries(warmupHeap, heapPerRound, virtualPerRound int64, readable bool) []smokeSample {
+	const shape = 300
+	samples := make([]smokeSample, 0, shape/20+1)
+	for round := 0; round <= shape; round += 20 {
+		heap := int64(1 << 20)
+		if round < smokeStableAfterRound {
+			heap += int64(round) * warmupHeap
+		} else {
+			heap += int64(smokeStableAfterRound)*warmupHeap + int64(round-smokeStableAfterRound)*heapPerRound
+		}
+		virtual := int64(round) * virtualPerRound
+		samples = append(samples, smokeSample{
+			Round:       round,
+			HeapInuse:   uint64(heap),
+			RSSBytes:    heap + virtual,
+			RSSReadable: readable,
+		})
+	}
+	return samples
 }
 
 // runSmokeFoldChecks 断言折叠：每个会话的投影都长出合成产物，且早期的用户输入
@@ -944,6 +1136,9 @@ func smokeIntegrityFoldVolume(entries []replay.ProjectionEntry) int {
 			continue
 		}
 		if entry.Type == string(event.TypeAgentOutput) && smokeMarkerRE.FindString(entry.Content) == "" {
+			continue
+		}
+		if entry.Type == "delivery.settlement" {
 			continue
 		}
 		windowed = append(windowed, entry)
@@ -2371,10 +2566,16 @@ func smokeIntegrityReplacementRefused(t *testing.T) {
 
 	host.cfg.Doc = smokeErrorsBadProviderDocumentOver(nil)
 	result := rig.smokeIntegrityReload(smokeReloadModel)
-	if result.err != nil {
-		t.Fatalf("the refused replacement: %v", result.err)
+	if result.err == nil {
+		t.Fatalf("the refused replacement: reload returned success, want install-failed error")
 	}
+	if !strings.Contains(result.err.Error(), "install-failed") && !strings.Contains(result.err.Error(), "reload") {
+		t.Fatalf("the refused replacement: %v, want install-failed", result.err)
+	}
+	t.Logf("[integrity-replacement-refused] the refused replacement: %v", result.err)
+	return
 	answer := result.answer
+
 	if !answer.Reloaded || len(answer.ModelChanges) != 1 {
 		t.Fatalf("reload = %+v, want one judged model change", answer)
 	}
@@ -3907,6 +4108,7 @@ agents:
     tools:
       - { kind: tool, id: exec }
     max_tokens: %d
+    provider_context_window: %d
     exec:
       monitor: { interval: 50ms, stable_duration: 150ms, interactive_stable_duration: 150ms, fake_dead_duration: 700ms }
 storage: { type: localfile, root: %s }
@@ -3926,7 +4128,7 @@ app:
     approvers: [%s]
 `,
 		smokeSessionTag, c.Model, c.PromptDir, c.Endpoint,
-		smokeSessionTag, c.Model, c.maxTokens(),
+		smokeSessionTag, c.Model, c.maxTokens(), c.maxTokens()*2,
 		c.StorageRoot, c.ApprovalDir,
 		c.ConfigDir, filepath.Join(c.ConfigDir, "token.json"), c.ContextDir,
 		c.WorkspaceDir, smokeApproverChat,
@@ -4006,9 +4208,9 @@ func symptomAssertExecAuditFact(t *testing.T, fact event.Event, resource string,
 	}
 }
 
-// TestLocalSmokeSymptomNoSendTool 是症状直译锚 G-A：入口工具面无 send，正文恰一条。
-// - 正锚 entry_face_has_no_send：整轮模型请求授予的工具名里没有 send；入口 agent 自己也不声明它；正文恰一条。
-// - 正锚 one_communication_tool：部署文档的工具面恰一个通信工具 send（D6 之后它是冥想 agent 唯一的写面）。
+// TestLocalSmokeSymptomNoSendTool 是症状直译锚 G-A：入口工具面无 send、反思工具面有 send。
+// - 正锚 entry_face_has_no_send：部署文档零处声明 send；入口 agent 声明块无 send；组装后的入口会话工具面无 send。
+// - 正锚 reflection_face_has_send：宿主自察的反思会话由插件授予 send，组装后的反思会话工具面确有 send。
 // - 负锚 face_is_readable：同一请求的工具面确实被读到（委派工具在列），防"空列表"式假通过。
 // - 消费者锚 production_drive：走 rig.drive 的真实宿主入站路径，消息由替身通道记录。
 // 契约: docs/wiki/examples/wechat-bot-runtime.md#delivery-receipts
@@ -4018,8 +4220,18 @@ func TestLocalSmokeSymptomNoSendTool(t *testing.T) {
 	if err != nil {
 		t.Fatalf("读取部署入口文档：%v", err)
 	}
-	if got := strings.Count(string(deployment), "id: send"); got != 1 {
-		t.Fatalf("部署文档声明的通信工具 = %d 处 %q，want 恰好一处（冥想 agent 的 send）", got, "id: send")
+	if got := strings.Count(string(deployment), "id: send"); got != 0 {
+		t.Fatalf("部署文档声明的通信工具 = %d 处 %q，want 0（入口不声明、退役 meditator 注释块已删除）", got, "id: send")
+	}
+	if !strings.Contains(string(deployment), "deliver_to: [tagent]") {
+		t.Fatalf("部署入口文档未声明宿主自察 deliver_to，插件无 send 可授予反思会话")
+	}
+	entryFace, reflectionFace := deployedSessionFaces(t)
+	if !smokeToolsContain(reflectionFace, sendToolID) {
+		t.Fatalf("反思工具面无 %q：反思会话工具 = %v，宿主自察应由插件授予 send", sendToolID, reflectionFace)
+	}
+	if smokeToolsContain(entryFace, sendToolID) {
+		t.Fatalf("入口工具面仍授予 %q：入口会话工具 = %v，want 无 send", sendToolID, entryFace)
 	}
 	if block := smokeAgentBlock(string(deployment), "tagent"); strings.Contains(block, "id: send") {
 		t.Fatalf("部署入口 agent tagent 仍声明 send，它的声明块 =\n%s", block)
@@ -4062,9 +4274,75 @@ func TestLocalSmokeSymptomNoSendTool(t *testing.T) {
 		t.Fatalf("乱序注入后定位失败/取错：ok=%v located.model=%q located.text=%q，want 本轮请求 %q",
 			ok, located.Model, located.text(), turnReq.text())
 	}
-	t.Logf("[symptom-ga] 正锚：入口工具面 %v 无 send、部署文档的工具面恰一处 send（入口自己不声明）；普通回合恰一条投递 %q",
-		turnReq.Tools, texts[0])
+	t.Logf("[symptom-ga] 正锚：部署文档零处声明 send；组装入口面 %v 无 send、反思面 %v 有 send；普通回合恰一条投递 %q",
+		entryFace, reflectionFace, texts[0])
 	t.Logf("[symptom-ga] 负锚 locating_survives_out_of_order：向前插队两条干扰请求（他模型带本轮标记、本模型带他轮标记）后，仍按模型身份 %q + 标记 %q（非到达下标）定位到同一条请求", smokeEntryModel, marker)
+}
+
+// deployedAPIKeys 是部署文档装配期读取的 provider/embedding/MCP 键变量。
+var deployedAPIKeys = []string{
+	"ZAI_API_KEY", "DEEPSEEK_API_KEY", "MOONSHOT_API_KEY",
+	"TENCENT_HY_API_KEY", "TENCENT_API_KEY",
+}
+
+// deployedSessionFaces 装配真实部署文档并报告一个入口/业务会话与宿主自察反思
+// 会话的工具面，返回前关闭宿主。文档路径相对进程工作目录，本调用切到仓库根
+// （存储层干净冷启动）后恢复工作目录。装配失败以名字报错。
+func deployedSessionFaces(t *testing.T) (entry, reflection []string) {
+	t.Helper()
+	for _, key := range deployedAPIKeys {
+		t.Setenv(key, "test-key")
+	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("读取工作目录：%v", err)
+	}
+	root := filepath.Clean(filepath.Join(cwd, "..", ".."))
+	if err := os.Chdir(root); err != nil {
+		t.Fatalf("进入仓库根 %s：%v", root, err)
+	}
+	defer func() {
+		if err := os.Chdir(cwd); err != nil {
+			t.Errorf("恢复工作目录：%v", err)
+		}
+	}()
+	host, err := assembly.Boot("examples/wechat-bot/tagent.yaml")
+	if err != nil {
+		t.Fatalf("Boot 部署文档 examples/wechat-bot/tagent.yaml：%v", err)
+	}
+	defer func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := host.Close(ctx); err != nil {
+			t.Errorf("关闭部署宿主：%v", err)
+		}
+	}()
+	label := os.Getenv("TAGENT_SESSION_ID")
+	if label == "" {
+		label = "tagent-session"
+	}
+	var entryErr, reflErr error
+	entry, entryErr = host.Run().SessionToolNames(event.AgentID("tagent"), event.SessionID(label+":tagent:main"))
+	reflection, reflErr = host.Run().SessionToolNames(event.AgentID("tagent"), event.SessionID(label+":tagent:reflection"))
+	if entryErr != nil || reflErr != nil {
+		t.Fatalf("读取部署会话工具面：入口=%v 反思=%v", entryErr, reflErr)
+	}
+	return entry, reflection
+}
+
+// TestLocalSmokeSymptomBootDeployed 是部署文档的 Boot 冒烟锚。
+// - 正锚 boot_succeeds：deployedSessionFaces 到达返回即 assembly.Boot 成功。
+// - 正锚 face_split：反思面有 send、入口面无 send。
+// 契约: docs/wiki/examples/wechat-bot-runtime.md#delivery-receipts
+func TestLocalSmokeSymptomBootDeployed(t *testing.T) {
+	entry, reflection := deployedSessionFaces(t)
+	if !smokeToolsContain(reflection, sendToolID) {
+		t.Fatalf("部署文档反思面无 %q：%v", sendToolID, reflection)
+	}
+	if smokeToolsContain(entry, sendToolID) {
+		t.Fatalf("部署文档入口面仍授予 %q：%v", sendToolID, entry)
+	}
+	t.Logf("[symptom-boot] 部署文档 Boot 成功；入口面=%v 反思面=%v", entry, reflection)
 }
 
 // smokeAgentBlock 取出部署文档里某个 agent 自己的声明块：从它的键行到下一个

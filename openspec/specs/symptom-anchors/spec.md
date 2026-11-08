@@ -2,6 +2,8 @@
 
 ## Purpose
 
+> **复核注记（2026-11-04 逐模块核对）**：下列条款已按码面就地更正：迁移期表述改读为「send 锚已于 2026-11 迁移完成；`deliver_summary`/`resume_task` 已删除、MUST NOT 复活」。依据：CHANGELOG「Breaking Changes」五条、两个工具名全仓 0 命中、现行六个 `TestLocalSmokeSymptom*`。B-02 不再涉及本页 SHALL。
+
 症状直译锚（golden 现状契约）：三条用户原话测试——受理静默、完成恰一条、失败必告知——的存在性、取数面、红证形态与不得缩水。本能力不新增产品行为，它只保证“用户原话”始终有一个红得起来、绿得可证的测试盯着，避免“工程全绿、现象复现”。产品行为条款在 quiet-receipts 与 failure-notice，本能力只管测试本身。
 
 ## Requirements
@@ -75,7 +77,7 @@
 
 ### Requirement: 锚迁移不缩水
 
-既有 send/deliver_summary/resume_task 相关症状锚 SHALL 迁移到新语义（工具名/调用形态更新），其用户视角断言 MUST NOT 被弱化或删除；新增九则直译锚 SHALL 第一天红着并随域完成转绿。
+既有 send 相关症状锚已于 2026-11 迁移完成；deliver_summary / resume_task 已删除，MUST NOT 复活。其用户视角断言 MUST NOT 被弱化或删除；新增九则直译锚 SHALL 第一天红着并随域完成转绿。
 
 #### Scenario: 迁移后仍钉场景
 
