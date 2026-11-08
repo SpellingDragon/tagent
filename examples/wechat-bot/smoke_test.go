@@ -2155,7 +2155,7 @@ func smokeIntegrityFoldNegative(t *testing.T) {
 	rig, provider := host.rig, host.provider
 	chat := smokeChats[1]
 
-	smokeIntegrityAssertFold(t, rig, provider, chat)
+	original := smokeIntegrityAssertFold(t, rig, provider, chat)
 	compress := smokeIntegrityCompressFacts(t, rig, chat)
 	if len(compress) == 0 {
 		t.Fatalf("the fold filed no compress request on %s", chat)
@@ -2211,17 +2211,6 @@ func smokeIntegrityFoldNegative(t *testing.T) {
 		t.Fatalf("the second fold rewrote the projection:\nbefore:\n%s\nafter:\n%s", recovered, got)
 	}
 
-	original := event.Event{}
-	for _, evt := range rig.sessionFacts(chat) {
-		if evt.Type == event.TypeExternalInput &&
-			strings.Contains(evt.Message.Content, smokeIntegrityFoldEarlyTurn) {
-			original = evt
-			break
-		}
-	}
-	if original.Key == "" {
-		t.Fatalf("no external_input fact carries %s before the restart", smokeIntegrityFoldEarlyTurn)
-	}
 	committed, err := rig.host.Run().CommittedEvent(context.Background(), original.Key)
 	if err != nil {
 		t.Fatalf("read the committed original %s beside the fold: %v", original.Key, err)
@@ -2229,6 +2218,7 @@ func smokeIntegrityFoldNegative(t *testing.T) {
 	if !strings.Contains(committed.Message.Content, smokeIntegrityFoldTail) {
 		t.Fatalf("the committed original lost its tail beside the fold (fact %s)", original.Key)
 	}
+	beforeRequests := smokeIntegrityCommittedKeys(t, rig, chat, event.CompressRequestType)
 	synthetics = smokeIntegrityFoldBoundary(t, rig, chat)
 	boundaryKeys := make([]string, 0, len(synthetics))
 	for _, entry := range synthetics {
@@ -2252,9 +2242,14 @@ func smokeIntegrityFoldNegative(t *testing.T) {
 		t.Fatalf("the restart restored no fold product, want the %d product(s) the chain held %v", len(beforeKeys), beforeKeys)
 	}
 
-	if filed := smokeIntegrityCompressFacts(t, rig, chat); len(filed) != 0 {
-		t.Fatalf("the restore filed %d compress request(s), want none: the fold form is projection-derived and writes no judgment of its own", len(filed))
+	restoredRequests := smokeIntegrityCommittedKeys(t, rig, chat, event.CompressRequestType)
+	for key := range restoredRequests {
+		if !beforeRequests[key] {
+			t.Fatalf("the restore filed the compress request %s, want none: the fold form is projection-derived and writes no judgment of its own", key)
+		}
 	}
+	t.Logf("[integrity-fold-restore] the restore read %d compress request(s) and filed none (before the restart %d)",
+		len(restoredRequests), len(beforeRequests))
 	restoredOriginal, err := rig.host.Run().CommittedEvent(context.Background(), original.Key)
 	if err != nil {
 		t.Fatalf("read the committed original %s after the restart: %v", original.Key, err)
@@ -2304,15 +2299,17 @@ func smokeIntegrityFoldBoundary(t *testing.T, rig *smokeRig, chat string) []repl
 }
 
 // smokeIntegrityRebuildProjection 从宿主真实写下的会话事实链重建投影：压缩请求
-// 是判断而非材料，重建跳过它，与产品冷启动的映射一致。
+// 是判断而非材料，重建跳过它，与产品冷启动的映射一致。材料读自已提交的事实链
+// （EachSessionFact，冷启动的读面），不读热窗：折叠把被覆盖的原文移出热窗之后，
+// 重建仍应看到整条链写下的材料。
 func smokeIntegrityRebuildProjection(t *testing.T, rig *smokeRig, chat string) *replay.ReplayProjection {
 	t.Helper()
 	session := rig.addressOf(chat).SessionID
 	chainKey := replay.ChainKey{PartitionID: 1, SessionID: session}
 	chain := replay.NewMemoryEventChain()
-	for _, evt := range rig.host.Run().SessionFacts(event.Address{SessionID: session}) {
+	err := rig.host.Run().EachSessionFact(context.Background(), event.Address{SessionID: session}, func(evt event.Event) error {
 		if evt.Type == event.CompressRequestType || evt.Message.Content == "" {
-			continue
+			return nil
 		}
 		if err := chain.Commit(context.Background(), replay.ChainFact{
 			Key:     evt.Key,
@@ -2324,6 +2321,10 @@ func smokeIntegrityRebuildProjection(t *testing.T, rig *smokeRig, chat string) *
 		}); err != nil {
 			t.Fatalf("commit the chain fact %s: %v", evt.Key, err)
 		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("read the committed chain of %s: %v", chat, err)
 	}
 	rebuilt := replay.NewReplayProjection()
 	if _, err := replay.RebuildProjectionFromWAL(context.Background(), rebuilt, chain, &replay.MemoryRelations{}, chainKey, replay.RebuildOptions{}); err != nil {
@@ -2697,12 +2698,23 @@ func smokeIntegrityCapturePositive(t *testing.T) {
 	if total == 0 {
 		t.Fatal("the capture host drove no model request")
 	}
-	if trajectory.Records != total {
-		t.Fatalf("attempts.jsonl = %d lines against %d model calls\nattempt heads:\n%s\nrequests:\n%s",
-			trajectory.Records, total, strings.Join(trajectory.Heads, "\n"), smokeRequestHeads(provider))
+	lines, err := smokeIntegrityAttemptLines(host.cfg.StorageRoot)
+	if err != nil {
+		t.Fatalf("read the record lines under %s: %v", host.cfg.StorageRoot, err)
 	}
-	if int(seal.Records) != total {
-		t.Fatalf("seal records = %d against %d model calls", seal.Records, total)
+	attempts, requests := smokeIntegrityRecordKinds(t, lines)
+	if attempts != total {
+		t.Fatalf("attempt lines = %d against %d model calls\nattempt heads:\n%s\nrequests:\n%s",
+			attempts, total, strings.Join(trajectory.Heads, "\n"), smokeRequestHeads(provider))
+	}
+	if requests == 0 {
+		t.Fatalf("attempts.jsonl carries no request evidence line beside the %d attempt line(s)", attempts)
+	}
+	if len(lines) != trajectory.Records {
+		t.Fatalf("the read-back counts %d record(s) and the file holds %d line(s)", trajectory.Records, len(lines))
+	}
+	if int(seal.Records) != len(lines) {
+		t.Fatalf("seal records = %d against the %d record line(s) the file holds", seal.Records, len(lines))
 	}
 	if got := len(trajectory.Heads); got != trajectory.Records {
 		t.Fatalf("the trajectory reported %d records but %d heads", trajectory.Records, got)
@@ -2713,15 +2725,15 @@ func smokeIntegrityCapturePositive(t *testing.T) {
 			continue
 		}
 		recordsEntry = true
-		if file.Records != int64(total) {
-			t.Fatalf("seal entry %s = %d record(s), want %d", file.Name, file.Records, total)
+		if file.Records != int64(len(lines)) {
+			t.Fatalf("seal entry %s = %d record(s), want the %d record line(s) the file holds", file.Name, file.Records, len(lines))
 		}
 	}
 	if !recordsEntry {
 		t.Fatalf("the seal names no %s entry: files=%+v", rl.SinkRecordsFile, seal.Files)
 	}
-	t.Logf("[integrity-capture-positive] attempts=%d model-calls=%d seal-records=%d dropped=%d in-flight=%d",
-		trajectory.Records, total, seal.Records, seal.Dropped, seal.InFlight)
+	t.Logf("[integrity-capture-positive] attempts=%d request-evidence=%d records=%d model-calls=%d seal-records=%d dropped=%d in-flight=%d",
+		attempts, requests, trajectory.Records, total, seal.Records, seal.Dropped, seal.InFlight)
 }
 
 // smokeIntegrityCaptureNegative 判定两条负向语义：未发生请求不产生记录也不入
@@ -2812,9 +2824,10 @@ func smokeIntegrityCaptureFailedAttempt(t *testing.T) {
 	if len(lines) == 0 {
 		t.Fatal("the failing turn left no attempt record")
 	}
-	if len(lines) > provider.count() {
-		t.Fatalf("attempts.jsonl = %d line(s) against %d model call(s): the capture cannot record more attempts than calls",
-			len(lines), provider.count())
+	recordAttempts, _ := smokeIntegrityRecordKinds(t, lines)
+	if recordAttempts > provider.count() {
+		t.Fatalf("attempt lines = %d against %d model call(s): the capture cannot record more attempts than calls",
+			recordAttempts, provider.count())
 	}
 	failedAttempts, failedForChat := 0, 0
 	for _, line := range lines {
@@ -2870,8 +2883,20 @@ func smokeIntegrityCaptureConsumer(t *testing.T) {
 	if trajectory.Seal == nil {
 		t.Fatal("the trajectory carries no seal manifest")
 	}
-	if got := trajectory.Records; got != provider.count() {
-		t.Fatalf("attempts.jsonl = %d line(s) against %d model call(s)", got, provider.count())
+	lines, err := smokeIntegrityAttemptLines(host.cfg.StorageRoot)
+	if err != nil {
+		t.Fatalf("read the versioned lines: %v", err)
+	}
+	attempts, requests := smokeIntegrityRecordKinds(t, lines)
+	if attempts != provider.count() {
+		t.Fatalf("attempt lines = %d against %d model call(s)\nattempt heads:\n%s",
+			attempts, provider.count(), strings.Join(trajectory.Heads, "\n"))
+	}
+	if requests == 0 {
+		t.Fatalf("attempts.jsonl carries no request evidence line beside the %d attempt line(s)", attempts)
+	}
+	if len(lines) != trajectory.Records {
+		t.Fatalf("the read-back counts %d record(s) and the file holds %d line(s)", trajectory.Records, len(lines))
 	}
 	var records *rl.CaptureFileDigest
 	for i := range trajectory.Seal.Files {
@@ -2904,20 +2929,11 @@ func smokeIntegrityCaptureConsumer(t *testing.T) {
 	if sha256.Sum256(again) != sum {
 		t.Fatalf("a second read of %s differs: the consumer must not rewrite the capture", path)
 	}
-	lines, err := smokeIntegrityAttemptLines(host.cfg.StorageRoot)
-	if err != nil {
-		t.Fatalf("read the versioned lines: %v", err)
-	}
-	for _, line := range lines {
-		if line.Kind != rl.RecordKindAttempt || line.Attempt == nil {
-			t.Fatalf("attempts.jsonl carries a non-attempt line %q", line.Kind)
-		}
-	}
 	if heads := strings.Join(trajectory.Heads, "\n"); !strings.Contains(heads, "answer "+smokeIntegrityCaptureTurn) {
 		t.Fatalf("the read-back heads carry no answer for %s:\n%s", smokeIntegrityCaptureTurn, heads)
 	}
-	t.Logf("[integrity-capture-consumer] read back %d attempt line(s); seal digest %s matches the %d byte(s) on disk",
-		trajectory.Records, records.SHA256, len(raw))
+	t.Logf("[integrity-capture-consumer] read back %d attempt line(s) and %d request evidence line(s); seal digest %s matches the %d byte(s) on disk",
+		attempts, requests, records.SHA256, len(raw))
 }
 
 // smokeIntegritySeal 读回一次采集的 seal.json。
@@ -2955,6 +2971,31 @@ func smokeIntegrityAttemptLines(root string) ([]rl.Line, error) {
 		lines = append(lines, line)
 	}
 	return lines, nil
+}
+
+// smokeIntegrityRecordKinds 按 kind 分开 attempts.jsonl 的版本化行。一次采集把
+// 每个记录种类写进同一个记录文件，一行恰一种 kind：attempt 与 request evidence
+// 各有自己的 kind，所以“每发一次模型请求记一条 attempt”按 kind 计数，文件总行数
+// 再与 seal 的 records 对账。
+func smokeIntegrityRecordKinds(t *testing.T, lines []rl.Line) (attempts, requests int) {
+	t.Helper()
+	for _, line := range lines {
+		switch line.Kind {
+		case rl.RecordKindAttempt:
+			if line.Attempt == nil {
+				t.Fatalf("the attempt line carries no attempt record")
+			}
+			attempts++
+		case rl.RecordKindRequest:
+			if line.RequestEvidence() == nil {
+				t.Fatalf("the request line carries no request evidence record")
+			}
+			requests++
+		default:
+			t.Fatalf("attempts.jsonl carries a %q line, want an attempt or a request evidence line", line.Kind)
+		}
+	}
+	return attempts, requests
 }
 
 // smokeIntegrityBulk 渲染一条折叠用的单行大正文：标记在首位（摘要取前 120 字符），
@@ -3110,7 +3151,11 @@ func smokeIntegrityCompressFacts(t *testing.T, rig *smokeRig, chat string) []eve
 // smokeIntegrityAssertFold 驱动小窗口折叠并断言三件事：投影长出带早期输入的历史
 // 摘要、触发轮之后的请求真的读到了综述、原文在事实链上逐字节仍在而投影已用
 // 综述取代它。体积断言取文档声明的窗口（max_tokens 2000 × 4 × 0.3）。
-func smokeIntegrityAssertFold(t *testing.T, rig *smokeRig, provider *smokeProvider, chat string) {
+//
+// 原文按身份从已提交的事实链上读回，而不是从热窗上找：折叠按契约把被覆盖的原文
+// 移出热窗（热窗只保留投影仍呈现的原文），事实链本身不随之减少。返回的 original
+// 就是这条已提交事实，供跨重启的对照使用。
+func smokeIntegrityAssertFold(t *testing.T, rig *smokeRig, provider *smokeProvider, chat string) event.Event {
 	t.Helper()
 	rig.route(chat, smokeIntegrityFoldSwitchTurn)
 	rig.waitText(chat, "answer "+smokeIntegrityFoldSwitchTurn, 120*time.Second)
@@ -3154,16 +3199,9 @@ func smokeIntegrityAssertFold(t *testing.T, rig *smokeRig, provider *smokeProvid
 			volume, threshold, smokeEntryDigest(entries))
 	}
 
-	original := event.Event{}
-	for _, evt := range rig.sessionFacts(chat) {
-		if evt.Type == event.TypeExternalInput &&
-			strings.Contains(evt.Message.Content, smokeIntegrityFoldEarlyTurn) {
-			original = evt
-			break
-		}
-	}
+	original := smokeIntegrityCommittedOriginal(t, rig, chat, smokeIntegrityFoldEarlyTurn)
 	if original.Key == "" {
-		t.Fatalf("no external_input fact carries %s", smokeIntegrityFoldEarlyTurn)
+		t.Fatalf("no external_input fact carries %s on the committed chain of %s", smokeIntegrityFoldEarlyTurn, chat)
 	}
 	committed, err := rig.host.Run().CommittedEvent(context.Background(), original.Key)
 	if err != nil {
@@ -3180,6 +3218,45 @@ func smokeIntegrityAssertFold(t *testing.T, rig *smokeRig, provider *smokeProvid
 	t.Logf("[integrity-fold] %s: entries=%d synthetic=%d rendered=%d bytes (window=%d); the next request read a history summary carrying %q and the original fact %s stays reachable",
 		chat, len(entries), len(synthetic), len(replay.RenderProjection(entries)), threshold,
 		wantRendered, original.Key)
+	return original
+}
+
+// smokeIntegrityCommittedOriginal 报告某会话已提交的事实链上正文携带 marker 的
+// 外部输入事实。折叠按契约把被覆盖的原文移出热窗（热窗只保留投影仍呈现的原文），
+// 事实链本身按身份仍在，EachSessionFact 是这条链的冷启动读面。
+func smokeIntegrityCommittedOriginal(t *testing.T, rig *smokeRig, chat, marker string) event.Event {
+	t.Helper()
+	var found event.Event
+	err := rig.host.Run().EachSessionFact(context.Background(), rig.addressOf(chat), func(evt event.Event) error {
+		if found.Key != "" || evt.Type != event.TypeExternalInput {
+			return nil
+		}
+		if strings.Contains(evt.Message.Content, marker) {
+			found = evt
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("read the committed chain of %s: %v", chat, err)
+	}
+	return found
+}
+
+// smokeIntegrityCommittedKeys 报告某会话已提交链上某一类事实的键集：判断是链上
+// 的事实，热窗只保留其中的一部分，重启前后的对照因此按整条已提交链读。
+func smokeIntegrityCommittedKeys(t *testing.T, rig *smokeRig, chat, typ string) map[string]bool {
+	t.Helper()
+	keys := make(map[string]bool, 4)
+	err := rig.host.Run().EachSessionFact(context.Background(), event.Address{SessionID: rig.addressOf(chat).SessionID}, func(evt event.Event) error {
+		if evt.Type == typ {
+			keys[string(evt.Key)] = true
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("read the committed chain of %s: %v", chat, err)
+	}
+	return keys
 }
 
 // smokeIntegrityWaitReflectCount 等到冥想的模型请求数达到 want。
