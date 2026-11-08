@@ -2,8 +2,13 @@
 """check_feature_boundary.py - ADR 0006 R1/R2/R3 machine guard.
 
 R1 schema sections: agent declarations in host YAML may use only the generic
-   agent keys. The existing 'meditation' section is grandfathered debt; any
-   other agent-section key is a new feature-specific schema section.
+   agent keys. The generic set is not restated here: it is read out of
+   api/config/decode.go's agentKeys, the one place the decoder declares which
+   keys an agent mapping may carry, so a key the decoder accepts is never read
+   as a feature-specific section and this gate can never hold a second copy of
+   that vocabulary. A key that still names a feature section (meditation) is
+   refused here unless the reviewed exception registry of
+   check_schema_allowlist.py allows it.
 R2 assembly symbols: declarations shaped resolve<Feature>/validate<Feature>/
    <feature>Port under assembly/ must be listed in the shared R2 baseline,
    golden/runtime/assembly_symbols.json (the same registry read by
@@ -14,8 +19,9 @@ R3 runtime branches: executable code under runtime/ must not name the
    meditation/reflection feature. Comments are ignored.
 
 The scan is static and indentation-based by design: no YAML dependency and no
-Go type checking. Exit 0 when every selected rule passes, 1 on violations or
-unusable input.
+Go type checking. It reads both shapes an `agents:` block is written in: a
+mapping keyed by agent id and a sequence of `- id: ...` items. Exit 0 when every
+selected rule passes, 1 on violations or unusable input.
 """
 from __future__ import annotations
 
@@ -28,16 +34,16 @@ import sys
 DEFAULT_BASELINE = "golden/runtime/assembly_symbols.json"
 DEFAULT_DOCUMENTS = ("examples/wechat-bot/tagent.yaml", "tagent.yaml")
 
-# Generic agent-level keys. 'meditation' is the one grandfathered feature
-# section from the boundary-closure landing (baseline debt, not a precedent).
-GENERIC_AGENT_KEYS = frozenset({
-    "provider", "model", "system_prompt", "tools", "skill_dirs", "read_root",
-    "final_round", "memory", "file", "exec", "temperature",
-    "thinking_enabled", "reasoning_effort", "max_tool_iterations",
-    "max_tokens", "compress_threshold", "keep_recent_tasks",
-})
-GRANDFATHERED_AGENT_KEYS = frozenset({"meditation"})
-ALLOWED_AGENT_KEYS = GENERIC_AGENT_KEYS | GRANDFATHERED_AGENT_KEYS
+# The two declaration surfaces an agent section is decoded by: the config chain
+# (decode.go's agentKeys) and the host document dialect (hostAgent's yaml tags).
+# The gate reads them instead of holding a copy, because a copy is what let a
+# legal key (output_reserve) read as a feature section while the surface moved.
+AGENT_KEYS_FILE = os.path.join("api", "config", "decode.go")
+AGENT_KEYS_BLOCK = re.compile(r"var agentKeys = \[\]string\{(.*?)\n\}", re.S)
+HOST_DOCUMENT_FILE = os.path.join("assembly", "host_document.go")
+HOST_AGENT_BLOCK = re.compile(r"^type hostAgent struct \{(.*?)^\}", re.S | re.M)
+YAML_TAG = re.compile(r'yaml:"([a-z_]+)"')
+QUOTED_KEY = re.compile(r'"([A-Za-z_][A-Za-z0-9_]*)"')
 
 # Methods are scanned too: feature-specific assembly paths have appeared as
 # declarations like validateMeditationTools, not only as package-level funcs.
@@ -56,6 +62,48 @@ FEATURE_SUBSTR_RE = re.compile(r"(?i)(meditation|reflection)")
 def read_text(path):
     with open(path, "r", encoding="utf-8") as handle:
         return handle.read()
+
+
+def generic_agent_keys(root):
+    """The generic agent keys, read out of the two surfaces that decode them.
+
+    Reading the declarations is what makes R1 one registration rather than two:
+    a key either decoder accepts for an agent section is generic by definition,
+    and no hand-written copy of that vocabulary can fall behind the source it
+    copies. The config chain (api/config/decode.go agentKeys) is required; the
+    host document dialect (assembly/host_document.go's hostAgent tags) joins the
+    set while that file exists, which is the only window in which a host document
+    may carry those keys at all. An unreadable required file or a missing
+    declaration is a named error, never an empty allowlist — that would refuse
+    every key and read as a thousand violations of one cause.
+    """
+    path = os.path.join(root, AGENT_KEYS_FILE)
+    try:
+        text = read_text(path)
+    except (OSError, UnicodeError) as exc:
+        raise ValueError("the agent key declaration {} is unreadable: {}".format(AGENT_KEYS_FILE, exc))
+    blocks = AGENT_KEYS_BLOCK.findall(text)
+    if not blocks:
+        raise ValueError("the agent key declaration {} carries no agentKeys block".format(AGENT_KEYS_FILE))
+    keys = set()
+    for block in blocks:
+        keys.update(QUOTED_KEY.findall(block))
+    if not keys:
+        raise ValueError("the agent key declaration {} names no agent key".format(AGENT_KEYS_FILE))
+
+    host_path = os.path.join(root, HOST_DOCUMENT_FILE)
+    if os.path.exists(host_path):
+        try:
+            host_text = read_text(host_path)
+        except (OSError, UnicodeError) as exc:
+            raise ValueError("the host document dialect {} is unreadable: {}".format(HOST_DOCUMENT_FILE, exc))
+        host_blocks = HOST_AGENT_BLOCK.findall(host_text)
+        if not host_blocks:
+            raise ValueError(
+                "the host document dialect {} carries no hostAgent struct".format(HOST_DOCUMENT_FILE))
+        for block in host_blocks:
+            keys.update(YAML_TAG.findall(block))
+    return frozenset(keys)
 
 
 def rel_path(root, path):
@@ -324,9 +372,9 @@ def _flow_balanced(text):
             continue
         if ch in "\"'":
             quote = ch
-        elif ch == "{":
+        elif ch in "{[":
             depth += 1
-        elif ch == "}":
+        elif ch in "}]":
             depth -= 1
         i += 1
     return depth <= 0
@@ -349,19 +397,98 @@ def _block_end(lines, start):
     return len(lines)
 
 
-def _agent_section_violations(rel, lines, start, block_end, rest):
+def _keys_of_item(rel, lines, start, end, key_indent, agent, allowed, violations):
+    """Judge every key one agent block carries at its own key indent."""
+    for k in range(start, end):
+        if _blank_or_comment(lines[k]) or _indent(lines[k]) != key_indent:
+            continue
+        parsed = _parse_mapping_line(lines[k])
+        if parsed is None:
+            continue
+        key = parsed[0]
+        if key not in allowed:
+            violations.append((rel, k + 1, key, agent))
+
+
+def _sequence_item_label(lines, start, end, key_indent):
+    """Name the agent one `- id: ...` item declares, or the item's line."""
+    for k in range(start, end):
+        if _blank_or_comment(lines[k]) or _indent(lines[k]) != key_indent:
+            continue
+        parsed = _parse_mapping_line(lines[k])
+        if parsed is not None and parsed[0] == "id":
+            label = _unquote(_strip_yaml_comment(parsed[1]).strip())
+            if label:
+                return label
+    return "line {}".format(start + 1)
+
+
+def _agent_sequence_violations(rel, lines, children, block_end, item_indent, allowed, violations):
+    """Judge an `agents:` block written as a sequence of `- id: ...` items.
+
+    The sequence marker is replaced with two spaces, so one item reads as the
+    mapping it carries and the same key-indent rule applies to both shapes. An
+    item whose marker sits alone on its line keeps its keys on the following
+    lines, which the normalized block already places at that same indent.
+    """
+    starts = [j for j in children if _indent(lines[j]) == item_indent and lines[j].strip().startswith("-")]
+    if not starts:
+        return
+    normalized = list(lines)
+    for index, start in enumerate(starts):
+        end = starts[index + 1] if index + 1 < len(starts) else block_end
+        line = lines[start]
+        marker_at = item_indent
+        rest = line[marker_at + 1:]
+        rest = rest[1:] if rest.startswith(" ") else rest
+        normalized[start] = line[:marker_at] + "  " + rest
+        candidates = [
+            k for k in range(start, end)
+            if not _blank_or_comment(normalized[k]) and _parse_mapping_line(normalized[k]) is not None
+        ]
+        if not candidates:
+            continue
+        key_indent = min(_indent(normalized[k]) for k in candidates)
+        agent = _sequence_item_label(normalized, start, end, key_indent)
+        _keys_of_item(rel, normalized, start, end, key_indent, agent, allowed, violations)
+
+
+def _flow_sequence_violations(rel, lines, start, text, allowed, violations):
+    """Judge an `agents: [ {...}, {...} ]` flow sequence."""
+    body = text.strip()
+    body = body[1:-1] if body.startswith("[") and body.endswith("]") else body[1:]
+    for part in _split_top_level(body):
+        if not part.strip().startswith("{"):
+            continue
+        entries = _flow_entries(part)
+        agent = ""
+        for key, value in entries:
+            if key == "id":
+                agent = _unquote(value.strip())
+        for key, _ in entries:
+            if key not in allowed:
+                violations.append((rel, start + 1, key, agent))
+
+
+def _agent_section_violations(rel, lines, start, block_end, rest, allowed):
     violations = []
     if rest.startswith("{"):
         for agent, value in _flow_entries(_gather_flow(lines, start, rest)):
             for key, _ in _flow_entries(value):
-                if key not in ALLOWED_AGENT_KEYS:
+                if key not in allowed:
                     violations.append((rel, start + 1, key, agent))
+        return violations
+    if rest.startswith("["):
+        _flow_sequence_violations(rel, lines, start, _gather_flow(lines, start, rest), allowed, violations)
         return violations
 
     children = [j for j in range(start + 1, block_end) if not _blank_or_comment(lines[j])]
     if not children:
         return violations
     agent_indent = min(_indent(lines[j]) for j in children)
+    if lines[children[0]].strip().startswith("-"):
+        _agent_sequence_violations(rel, lines, children, block_end, agent_indent, allowed, violations)
+        return violations
     j = start + 1
     while j < block_end:
         line = lines[j]
@@ -387,7 +514,7 @@ def _agent_section_violations(rel, lines, start, block_end, rest):
             end += 1
         if value.startswith("{"):
             for key, _ in _flow_entries(_gather_flow(lines, j, value)):
-                if key not in ALLOWED_AGENT_KEYS:
+                if key not in allowed:
                     violations.append((rel, j + 1, key, agent))
         else:
             key_lines = []
@@ -399,14 +526,12 @@ def _agent_section_violations(rel, lines, start, block_end, rest):
                     key_lines.append((k, parsed_key[0]))
             if key_lines:
                 key_indent = min(_indent(lines[k]) for k, _ in key_lines)
-                for k, key in key_lines:
-                    if _indent(lines[k]) == key_indent and key not in ALLOWED_AGENT_KEYS:
-                        violations.append((rel, k + 1, key, agent))
+                _keys_of_item(rel, lines, j + 1, end, key_indent, agent, allowed, violations)
         j = end
     return violations
 
 
-def check_host_document(root, path):
+def check_host_document(root, path, allowed):
     rel = rel_path(root, path)
     try:
         text = read_text(path)
@@ -422,7 +547,7 @@ def check_host_document(root, path):
             continue
         rest = _strip_yaml_comment(match.group(1)).strip()
         block_end = _block_end(lines, idx)
-        violations.extend(_agent_section_violations(rel, lines, idx, block_end, rest))
+        violations.extend(_agent_section_violations(rel, lines, idx, block_end, rest, allowed))
     errors = []
     for rel_name, lineno, key, agent in violations:
         errors.append(
@@ -648,11 +773,17 @@ def main(argv=None):
         documents, doc_errors = resolve_documents(root, args.documents)
         r1_docs = len(documents)
         r1_errors = list(doc_errors)
+        try:
+            allowed = generic_agent_keys(root)
+        except ValueError as exc:
+            print("ERROR: " + str(exc))
+            print("check_feature_boundary: cannot read the generic agent keys")
+            return 1
         for path in documents:
-            r1_errors.extend(check_host_document(root, path))
+            r1_errors.extend(check_host_document(root, path, allowed))
         errors.extend(r1_errors)
-        summaries.append("check_feature_boundary: r1 host_documents={} errors={}".format(
-            r1_docs, len(r1_errors)))
+        summaries.append("check_feature_boundary: r1 host_documents={} generic_keys={} errors={}".format(
+            r1_docs, len(allowed), len(r1_errors)))
 
     if "r2" in selected:
         try:

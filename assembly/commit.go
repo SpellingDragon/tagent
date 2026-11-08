@@ -20,17 +20,16 @@ import (
 
 // 契约: docs/wiki/platform/platform-subsystems.md#composition-root
 //
-// publicationRecords is the publication recorder of one assembled run: it keeps
-// the live copies a reader of this process consults and commits every record as
-// one fact of the configuration chain, so a restart reads the publications the
-// previous process made instead of starting beside an empty ledger. The chain is
-// the durable fact surface of the configured storage tier, or an in-process log
-// when the run is assembled beside no tier; either way the sole publication
-// entry commits through this one recorder.
+// publicationRecords is the publication recorder of one assembled run: it
+// commits every record as one fact of the configuration chain, so a restart
+// reads the publications the previous process made instead of starting beside an
+// empty ledger. The chain is the durable fact surface of the configured storage
+// tier, or an in-process log when the run is assembled beside no tier; either
+// way the sole publication entry commits through this one recorder, which keeps
+// no copy of a record: the chain fact is the one copy a reader consults.
 type publicationRecords struct {
-	mu      sync.Mutex
-	records []state.PublicationRecord
-	chain   configChain
+	mu    sync.Mutex
+	chain configChain
 }
 
 // attach points the recorder at the fact surface of one opened storage tier. A
@@ -46,30 +45,22 @@ func (m *publicationRecords) attach(tier *ledger.Tier) {
 	m.chain.attach(ledger.TierFactLog(tier))
 }
 
-// CommitPublication stores one publication record: the live copy this process
-// reads beside the durable fact the configuration chain keeps, committed before
-// the switch it precedes so a record that cannot land refuses the publication.
+// CommitPublication commits one publication record as one fact of the
+// configuration chain: the record travels whole in the publication wire,
+// committed before the switch it precedes so a record that cannot land refuses
+// the publication.
 func (m *publicationRecords) CommitPublication(ctx context.Context, record state.PublicationRecord) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.records = append(m.records, record)
 	if m.chain.log == nil {
 		return nil
 	}
 	wire := configPublicationWireOf(record)
-	fact := configFact{
-		Kind:                configPublicationRecordKind,
-		Type:                configPublicationFactType,
-		Fingerprint:         record.Fingerprint,
-		Generation:          uint64(record.Generation),
-		PreviousGeneration:  uint64(record.PreviousGeneration()),
-		PreviousFingerprint: record.PreviousFingerprint(),
-		Result:              publicationRecordResultName(record.Result),
-		Models:              record.ModelVersions(),
-		Dimensions:          record.DimensionOutcomes(),
-		Publication:         &wire,
-	}
-	_, err := m.chain.append(ctx, fact)
+	_, err := m.chain.append(ctx, configFact{
+		Kind:        configPublicationRecordKind,
+		Type:        configPublicationFactType,
+		Publication: &wire,
+	})
 	return err
 }
 
@@ -102,20 +93,30 @@ const configChainPrefix = "tagent/config/v1/fact:"
 // publicationWindow is the decision window one publication attempt carries into
 // its record: the generation and fingerprint it moves from, the model version
 // each agent runs after it, the outcome of each configuration dimension it
-// judged, and the time the attempt was recorded.
+// judged, the host dialect the candidate moves the fingerprint by, and the time
+// the attempt was recorded.
 type publicationWindow struct {
 	previous            state.Generation
 	previousFingerprint string
 	models              map[string]string
 	dimensions          map[string]string
-	at                  time.Time
+	// dialectKey is the digest of the host dialect the candidate publishes —
+	// the sections the shared declaration does not carry. The publication
+	// fingerprint of the candidate covers it, so a document that moves only
+	// those sections publishes a generation instead of reading as unchanged.
+	dialectKey string
+	at         time.Time
 }
 
 // configFact is one fact of the configuration chain: the declaration payload a
 // published declaration carries, the publication record committed before its
-// switch, or the result of one publication attempt. The facts are append-only:
-// a later attempt is a new sequence number and never a rewrite of an earlier
-// fact.
+// switch, or the result of one publication attempt. A record fact carries the
+// record whole in Publication and leaves the fact-level record fields empty, so
+// one record is encoded once and the fields above spell the declaration and the
+// attempt results alone. The facts are append-only: a later attempt is a new
+// sequence number and never a rewrite of an earlier fact. A fact written before
+// the record wire carried the whole record still decodes: its duplicated
+// fact-level fields are read past in favor of the record itself.
 type configFact struct {
 	Seq                 uint64                 `json:"seq"`
 	Kind                string                 `json:"kind"`
@@ -178,17 +179,6 @@ func (w configPublicationWire) record() state.PublicationRecord {
 		state.Generation(w.Previous), w.PreviousFP,
 		w.Models, w.Dimensions, w.At,
 	)
-}
-
-// publicationRecordResultName spells the result of one publication record.
-func publicationRecordResultName(result state.PublishResult) string {
-	switch result {
-	case state.PublishApplied:
-		return publicationResultPublished
-	case state.PublishRolledBack:
-		return "rolled-back"
-	}
-	return publicationResultUnchanged
 }
 
 // configChain is the ordered fact surface of the configuration chain: the facts
@@ -566,7 +556,8 @@ func (r *Run) latestDeclarationFact(ctx context.Context) (configFact, bool, erro
 }
 
 // latestPublishedRecord reports the newest publication record the configuration
-// chain carries, and whether one is held at all.
+// chain carries, and whether one is held at all. The record answers from the
+// publication wire alone, which is the one encoding a record fact carries.
 func (r *Run) latestPublishedRecord(ctx context.Context) (state.PublicationRecord, bool, error) {
 	fact, held, err := r.records.chain.latest(ctx, configPublicationRecordKind)
 	if err != nil || !held {
@@ -575,11 +566,7 @@ func (r *Run) latestPublishedRecord(ctx context.Context) (state.PublicationRecor
 	if fact.Publication == nil {
 		return state.PublicationRecord{}, false, fmt.Errorf("tagent: the publication record fact %d carries no record", fact.Seq)
 	}
-	record := fact.Publication.record()
-	if record.Fingerprint != fact.Fingerprint {
-		return state.PublicationRecord{}, false, fmt.Errorf("tagent: the publication record fact %d names fingerprint %q beside %q", fact.Seq, fact.Fingerprint, record.Fingerprint)
-	}
-	return record, true, nil
+	return fact.Publication.record(), true, nil
 }
 
 // publicationAttempt is the result of one publication attempt as the chain
@@ -653,7 +640,7 @@ func (r *Run) latestDeclaration(ctx context.Context) (configFact, *config.Declar
 // the publisher adopts it without committing a second record. Nothing is
 // published here, so a restart that agrees with its chain adds no ghost
 // publication.
-func (r *Run) adoptConfigPublication(ctx context.Context, decl *config.Declaration, agents map[event.AgentID]NativeAgent, record state.PublicationRecord) error {
+func (r *Run) adoptConfigPublication(ctx context.Context, decl *config.Declaration, agents map[event.AgentID]NativeAgent, record state.PublicationRecord, dialectKey string) error {
 	if decl == nil {
 		return fmt.Errorf("tagent: the adopted publication carries no declaration")
 	}
@@ -661,6 +648,7 @@ func (r *Run) adoptConfigPublication(ctx context.Context, decl *config.Declarati
 	if err != nil {
 		return err
 	}
+	fingerprint = publicationFingerprint(fingerprint, dialectKey)
 	if fingerprint != record.Fingerprint {
 		return fmt.Errorf("tagent: the declaration %q does not answer the adopted publication %q", fingerprint, record.Fingerprint)
 	}

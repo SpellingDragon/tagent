@@ -82,13 +82,20 @@ const PresetName = "exec"
 
 // NewPreset returns the tools one declared execution face grants, in the order
 // the request carries them: the run tool under the monitor rhythm the
-// declaration fixes beside the explicit release tool. A preset built beside no
-// manager still builds; each call answers ErrUnwired. The options configure the
-// run tool of the preset, so an assembly that resolves the responsibility range
-// of a call passes its resolver here.
+// declaration fixes beside the explicit release tool. The tools bind the
+// generation instance the manager serves at construction — the installed
+// candidate generation, or the manager itself beside none — so a request
+// already under way keeps the instance its own generation's tools bound. A
+// preset built beside no manager still builds; each call answers ErrUnwired.
+// The options configure the run tool of the preset, so an assembly that
+// resolves the responsibility range of a call passes its resolver here.
 func NewPreset(manager *Manager, rhythm MonitorConfig, opts ...RunToolOption) []trpctool.Tool {
-	run := NewRunTool(manager, append([]RunToolOption{WithRunMonitor(rhythm)}, opts...)...)
-	return []trpctool.Tool{run, NewReleaseTool(manager)}
+	var face *Manager
+	if manager != nil {
+		face = manager.presetFace()
+	}
+	run := NewRunTool(face, append([]RunToolOption{WithRunMonitor(rhythm)}, opts...)...)
+	return []trpctool.Tool{run, NewReleaseTool(face)}
 }
 
 // runArgs is the argument set of one execution run. A key outside this set —

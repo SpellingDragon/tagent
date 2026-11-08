@@ -81,6 +81,18 @@ func New(reads Reads, partitions []string) []trpctool.CallableTool
 
 TYPES
 
+type ChainFailureNamer interface {
+	// ChainFailure names the failure that stopped the chain from answering key,
+	// or answers the empty nil when the chain holds no event for it.
+	ChainFailure(key event.EventID) error
+}
+    ChainFailureNamer is the durable read face that names why it answers no
+    readable event for one key. A Table that does not carry it loses nothing it
+    promised: a key it does not hold is answered as missing, exactly as Table
+    states. A table that does carry it separates a key the chain really does not
+    hold from a body it holds and cannot read, so corruption is refused by name
+    instead of being answered as an absent event.
+
 type Reads struct {
 	// Searcher answers one retrieval query inside the granted partitions.
 	Searcher search.Searcher

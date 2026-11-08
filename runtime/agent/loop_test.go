@@ -465,13 +465,13 @@ func (c *invariantLoopCapture) admissions() []invariantLoopAdmission {
 }
 
 // invariantLoop returns one loop over one held generation and one empty occupancy ledger.
-func invariantLoop(t *testing.T, behaviour *invariantLoopModel) (*Loop, *state.Bindings, *state.Occupancy) {
+func invariantLoop(t *testing.T, serving model.Model) (*Loop, *state.Bindings, *state.Occupancy) {
 	t.Helper()
 	declaration := &config.Declaration{Entry: "agent-a", Agents: []config.AgentSpec{{ID: "agent-a"}}}
 	plan, err := state.NewStatePlan(
 		state.OrgPlan{Declaration: declaration, Fingerprint: "fp-a"},
 		map[event.AgentID]state.AgentBinding{
-			"agent-a": {Model: behaviour, PromptSource: state.PromptSource{Version: "v1"}},
+			"agent-a": {Model: serving, PromptSource: state.PromptSource{Version: "v1"}},
 		},
 		nil,
 	)

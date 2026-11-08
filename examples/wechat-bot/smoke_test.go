@@ -3606,6 +3606,25 @@ func TestEventIntegrityLongRun(t *testing.T) {
 		}
 		t.Logf("[consumer] /task turns=%d answered=%d via %s", recon.ConsumerTurns, recon.ConsumerAnswered, reportPath)
 	})
+
+	t.Run("restart-evidence", func(t *testing.T) {
+		counts, missing, err := smokeLongScanEvidence(report.ChildLogs)
+		if err != nil {
+			t.Fatalf("read the host logs: %v", err)
+		}
+		if len(missing) > 0 {
+			t.Fatalf("the host logs under %s carry no durable load scan line for %v over %d generations: "+
+				"the restart evidence has no producer, so the shard can never attest",
+				report.RunDir, missing, len(report.ChildLogs))
+		}
+		for _, prefix := range smokeLongScanDataPrefixes {
+			if counts[prefix] <= 0 {
+				t.Fatalf("every durable load read %d keys under %s: the restarts proved nothing about that chain",
+					counts[prefix], prefix)
+			}
+		}
+		t.Logf("[restart-evidence] generations=%d scans=%v", len(report.ChildLogs), counts)
+	})
 }
 
 // TestLocalSmokeInjectedSession 验证可选 session 字段的注入驱动独立会话。

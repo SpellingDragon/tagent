@@ -109,7 +109,7 @@ func parseFlags(args []string, stderr io.Writer) (cliConfig, error) {
 	fs := flag.NewFlagSet("cli-host", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	fs.StringVar(&cfg.input, "c", "", "one-shot input; when empty, lines are read from stdin")
-	fs.StringVar(&cfg.dataDir, "data", "", "optional durable data directory (localfile storage tier)")
+	fs.StringVar(&cfg.dataDir, "data", "", "optional durable data directory (journal storage tier)")
 	fs.StringVar(&cfg.modelName, "model", envOr("TAGENT_MODEL", mockModelName), "model name; \"mock\" needs no credentials")
 	fs.StringVar(&cfg.baseURL, "base-url", envOr("TAGENT_BASE_URL", ""), "OpenAI-compatible endpoint of a real model")
 	fs.StringVar(&cfg.keyEnv, "api-key-env", envOr("TAGENT_API_KEY_ENV", "OPENAI_API_KEY"), "environment variable holding the real model key")
@@ -155,7 +155,7 @@ func assemble(ctx context.Context, cfg cliConfig) (*assembly.Run, error) {
 	}
 	if cfg.dataDir != "" {
 		opts = append(opts, assembly.WithStorage(ledger.StorageConfig{
-			Type: ledger.StorageLocalFile,
+			Type: ledger.StorageJournal,
 			Root: cfg.dataDir,
 		}))
 	}

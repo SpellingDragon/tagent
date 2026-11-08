@@ -7,6 +7,7 @@ import (
 
 	"github.com/SpellingDragon/tagent/api/event"
 	"github.com/SpellingDragon/tagent/api/model"
+	"github.com/SpellingDragon/tagent/memory/replay"
 )
 
 // TestRoleTableIsClosedAndSingleValued pins the role table the replay path renders under.
@@ -109,4 +110,49 @@ func TestSettlementRoleMapped(t *testing.T) {
 	if _, err := RoleOf(projectionTypeDeliverySettlement + ".unregistered"); !errors.Is(err, ErrProjectionTypeUnmapped) {
 		t.Fatalf("an unregistered type answered %v, want ErrProjectionTypeUnmapped", err)
 	}
+}
+
+// TestConstantsSingleSource pins the two meters onto one registration each.
+//   - The per-message framing is spelled once: the approximate measure reads it at the replay budget's registered packing ratio
+//   - a message with no content of its own therefore costs the same framing token count on both meters
+//   - The packing ratio is the replay budget's registered constant, read by the fuse rather than restated
+//   - one ratio byte length therefore measures the same tokens on both meters
+//   - The per-call framing has one home too, and the two meters diverge exactly where the budget meter is documented to be the conservative one
+//   - a call with no identifier, name or arguments charges the budget framing and nothing on the approximate side
+//   - The two registrations are budget-message-overhead and chars-per-token in golden/runtime/window_bounds.json
+func TestConstantsSingleSource(t *testing.T) {
+	if messageOverheadBytes != budgetMessageOverheadTokens*replay.BudgetCharsPerToken {
+		t.Fatalf("the byte framing reads %d, want the registered token framing %d at the registered ratio %d",
+			messageOverheadBytes, budgetMessageOverheadTokens, replay.BudgetCharsPerToken)
+	}
+	t.Run("one message framing on both meters", func(t *testing.T) {
+		message := model.Message{Role: model.RoleUser}
+		if got := approxPromptTokens([]model.Message{message}); got != budgetMessageOverheadTokens {
+			t.Fatalf("the approximate measure reads %d tokens for the bare framing, want the registered %d", got, budgetMessageOverheadTokens)
+		}
+		_, _, total := AccountRequestBudget([]model.Message{message}, nil, nil, "")
+		if total != budgetMessageOverheadTokens {
+			t.Fatalf("the budget meter reads %d tokens for the bare framing, want the registered %d", total, budgetMessageOverheadTokens)
+		}
+	})
+	t.Run("one packing ratio on both meters", func(t *testing.T) {
+		message := model.Message{Role: model.RoleUser, Content: strings.Repeat("x", replay.BudgetCharsPerToken)}
+		if got, want := approxPromptTokens([]model.Message{message}), budgetMessageOverheadTokens+1; got != want {
+			t.Fatalf("the approximate measure reads %d tokens for one ratio of content, want %d", got, want)
+		}
+		_, _, total := AccountRequestBudget([]model.Message{message}, nil, nil, "")
+		if want := budgetMessageOverheadTokens + 1; total != want {
+			t.Fatalf("the budget meter reads %d tokens for one ratio of content, want %d", total, want)
+		}
+	})
+	t.Run("per-call framing belongs to the budget meter alone", func(t *testing.T) {
+		message := model.Message{Role: model.RoleAssistant, ToolCalls: []model.ToolCall{{}}}
+		if got, want := approxPromptTokens([]model.Message{message}), budgetMessageOverheadTokens; got != want {
+			t.Fatalf("the approximate measure reads %d tokens for a bare call, want %d: it charges no per-call framing", got, want)
+		}
+		_, _, total := AccountRequestBudget([]model.Message{message}, nil, nil, "")
+		if want := budgetMessageOverheadTokens + budgetToolCallOverheadTokens; total != want {
+			t.Fatalf("the budget meter reads %d tokens for a bare call, want %d", total, want)
+		}
+	})
 }

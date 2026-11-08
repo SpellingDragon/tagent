@@ -9,20 +9,28 @@ package assembly
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
+	"reflect"
+	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/SpellingDragon/tagent/api/config"
 	"github.com/SpellingDragon/tagent/api/document"
 	"github.com/SpellingDragon/tagent/api/event"
+	"github.com/SpellingDragon/tagent/api/model"
 	"github.com/SpellingDragon/tagent/api/plugin"
 	"github.com/SpellingDragon/tagent/features/evolution/governance"
+	"github.com/SpellingDragon/tagent/features/evolution/meditation"
 	"github.com/SpellingDragon/tagent/memory"
 	"github.com/SpellingDragon/tagent/runtime/state"
 	tagentexec "github.com/SpellingDragon/tagent/tool/exec"
@@ -319,33 +327,6 @@ func (d *hostDocument) modelName(id string) string {
 	return strings.TrimSpace(d.Model)
 }
 
-// validateMeditationTools refuses a document whose reflection would deliver through a
-// face it does not carry. For the retired independent curation agent, the
-// enabled reflection with a declared deliver_to white list must itself declare
-// the one cross-session communication tool, because the delivery is the
-// reflection turn's own decision and no mechanism writes a body in its place.
-//
-// Host self-reflection is different: the entry and reflection sessions share one
-// binding, so the meditation plugin grants the send tool to the reflection
-// session alone (session-scoped), and the entry tool face stays free of it. A
-// declarative grant is neither required nor permitted here, so there is no
-// misplacement to refuse; an enabled reflection always reaches a send face.
-// A reflection declared beside no white list delivers nothing and is not judged
-// in either form.
-func (d *hostDocument) validateMeditationTools(plan *hostMeditationPlan) error {
-	if plan == nil || len(plan.targets) == 0 {
-		return nil
-	}
-	if plan.selfReflection {
-		return nil
-	}
-	if !d.declaresTool(plan.agent, hostSendToolID) {
-		return fmt.Errorf("%w: the meditation session %q delivers to %d declared target(s) beside no %q tool, so no reflection turn could ever write one",
-			ErrHostMeditationToolMisplaced, plan.agent, len(plan.targets), hostSendToolID)
-	}
-	return nil
-}
-
 // riskRules reads the declared risk table of the governance section: the
 // ordered entries the boot opens its policy over. A section beside no table
 // declares no rule, so a document that never named one keeps the behavior it
@@ -413,16 +394,19 @@ func (d *hostDocument) declaresTool(id, name string) bool {
 	return false
 }
 
-// nativeAgents constructs the live pieces every declared agent is assembled
-// with.
-func (d *hostDocument) nativeAgents(ctx context.Context, client *http.Client, recallPort *RecallPort, meditationPlan *hostMeditationPlan, meditationPort *hostMeditationPort, reentryPort hostSendReentry) (map[event.AgentID]NativeAgent, error) {
+// nativeModels constructs the shared native model of every declared agent: the
+// one piece of an agent's native material that survives every generation switch.
+// Boot builds it for the first generation, and a reload builds the model of an
+// agent its document adds; a model the document moves afterwards moves through
+// the agent's lease, never through a second construction here.
+func (d *hostDocument) nativeModels(client *http.Client) (map[event.AgentID]model.Model, error) {
 	decl, err := d.Declaration()
 	if err != nil {
 		return nil, err
 	}
-	out := make(map[event.AgentID]NativeAgent, len(decl.Agents))
+	out := make(map[event.AgentID]model.Model, len(decl.Agents))
 	for _, spec := range decl.Agents {
-		native, err := d.nativeAgent(ctx, spec.ID, client, recallPort, meditationPlan, meditationPort, reentryPort)
+		native, err := d.modelFor(spec.ID, client)
 		if err != nil {
 			return nil, err
 		}
@@ -431,16 +415,17 @@ func (d *hostDocument) nativeAgents(ctx context.Context, client *http.Client, re
 	return out, nil
 }
 
-// nativeAgent constructs the live pieces one declared agent is assembled with:
-// the model the provider registry of this document names beside the tools the
-// declaration contributes. Boot builds every native of the first generation
-// through it, and a reload builds an agent its document adds through the very
-// same construction, over the ports the boot bound to the run.
-func (d *hostDocument) nativeAgent(ctx context.Context, id string, client *http.Client, recallPort *RecallPort, plan *hostMeditationPlan, meditationPort *hostMeditationPort, reentryPort hostSendReentry) (NativeAgent, error) {
-	native, err := d.modelFor(id, client)
-	if err != nil {
-		return NativeAgent{}, err
-	}
+// face constructs the per-generation native face one declared agent is
+// assembled with: the tools the host contributes for the agent this document
+// declares beside the session-scoped reflection face its meditation section
+// declares. The model is not part of the face — it is the shared native the
+// generation samples through.
+//
+// Boot builds the face of the first generation through it, and a reload builds
+// the face of every declared agent through the very same construction over the
+// ports the boot bound to the run, so one document answers one face whichever
+// generation reads it.
+func (d *hostDocument) face(ctx context.Context, id string, recallPort *RecallPort, plan *meditation.Plan, meditationPort *hostMeditationPort, reentryPort hostSendReentry) (NativeAgent, error) {
 	tools, err := d.toolsFor(ctx, id, recallPort, meditationPort, reentryPort)
 	if err != nil {
 		return NativeAgent{}, err
@@ -455,11 +440,311 @@ func (d *hostDocument) nativeAgent(ctx context.Context, id string, client *http.
 	// own send would lose it from its business turns.
 	var reflectionSession event.SessionID
 	var reflectionOnly []string
-	if plan != nil && plan.reflectionGrantsSend(id) && !d.declaresTool(id, hostSendToolID) {
-		reflectionSession = event.SessionID(plan.session)
+	if plan.GrantsSend(id) && !d.declaresTool(id, hostSendToolID) {
+		reflectionSession = event.SessionID(plan.Session)
 		reflectionOnly = []string{hostSendToolID}
 	}
-	return NativeAgent{Model: native, Tools: tools, reflectionSession: reflectionSession, reflectionOnly: reflectionOnly}, nil
+	return NativeAgent{Tools: tools, reflectionSession: reflectionSession, reflectionOnly: reflectionOnly}, nil
+}
+
+// GenHostSpec is the host document dialect one candidate generation is
+// published under: the values a host document states beside the shared
+// declaration the core reads. The generation-scoped consumers of the host read
+// the spec of the generation they build here, so one builder never answers for
+// another document.
+//
+// 契约: docs/adr/0007-generation-scoped-runtime-plugin-lifecycle.md
+type GenHostSpec struct {
+	// Document is the host document the generation was read from: the tool
+	// declarations, skill roots, read roots and file faces the generation's
+	// native face is built from.
+	Document *hostDocument
+	// Timeout is the request timeout the models of the generation run under.
+	Timeout time.Duration
+	// RiskRules is the ordered risk table the governance face of the generation
+	// opens over.
+	RiskRules []governance.ToolRiskRule
+	// Telemetry is the observation section the generation declares.
+	Telemetry config.TelemetrySpec
+}
+
+// specOfDocument reports the host dialect one loaded document states.
+func specOfDocument(doc *hostDocument) (GenHostSpec, error) {
+	if doc == nil {
+		return GenHostSpec{}, fmt.Errorf("tagent: the host dialect is read from no document")
+	}
+	rules, err := doc.riskRules()
+	if err != nil {
+		return GenHostSpec{}, err
+	}
+	return GenHostSpec{Document: doc, Timeout: doc.requestTimeout(), RiskRules: rules, Telemetry: doc.Telemetry}, nil
+}
+
+// hostDialect is the content one host dialect digest covers: the sections a
+// generation rebuilds that the shared declaration does not carry.
+type hostDialect struct {
+	RiskRules []governance.ToolRiskRule   `json:"risk_rules"`
+	Telemetry config.TelemetrySpec        `json:"telemetry"`
+	Agents    map[string]hostDialectAgent `json:"agents"`
+}
+
+// hostDialectAgent is the per-agent part of a host dialect digest: the skill
+// roots and the read root. The tool list and the file surface are left out
+// because the shared declaration carries both and its own fingerprint answers
+// them.
+type hostDialectAgent struct {
+	SkillDirs []string `json:"skill_dirs"`
+	ReadRoot  string   `json:"read_root"`
+}
+
+// hostDialectDigest reports the stable digest of the host dialect one loaded
+// document states: the risk table, the observation section and the skill and
+// read face of every declared agent. The shared declaration does not carry those
+// sections, so its fingerprint answers the same value for a document that moved
+// only them; the digest is what tells that move from a publication of the same
+// configuration again. A document that declares none of them answers the empty
+// digest, so its publication fingerprint stays the declaration fingerprint.
+//
+// The request timeout and the storage tier are not covered: both are read from
+// the dialect in effect at the moment they are used, so a reload takes a moved
+// value into service without publishing a generation for it.
+func hostDialectDigest(spec GenHostSpec) (string, error) {
+	if spec.Document == nil {
+		return "", fmt.Errorf("tagent: the host dialect is read from no document")
+	}
+	agents := make(map[string]hostDialectAgent, len(spec.Document.Agents))
+	declared := len(spec.RiskRules) > 0 || spec.Telemetry != (config.TelemetrySpec{})
+	for id, agent := range spec.Document.Agents {
+		if len(agent.SkillDirs) > 0 || agent.ReadRoot != "" {
+			declared = true
+		}
+		agents[id] = hostDialectAgent{SkillDirs: agent.SkillDirs, ReadRoot: agent.ReadRoot}
+	}
+	if !declared {
+		return "", nil
+	}
+	body, err := json.Marshal(hostDialect{
+		RiskRules: spec.RiskRules,
+		Telemetry: spec.Telemetry,
+		Agents:    agents,
+	})
+	if err != nil {
+		return "", fmt.Errorf("tagent: render the host dialect digest: %w", err)
+	}
+	sum := sha256.Sum256(body)
+	return hex.EncodeToString(sum[:]), nil
+}
+
+// genHostSpecs holds the host dialect of the candidate declarations in flight
+// beside the dialect of the generation in effect. A candidate is claimed under
+// the fingerprint of its own declaration, so a builder that is handed one
+// declaration reads the document that declaration was loaded from and never the
+// document another attempt carries.
+type genHostSpecs struct {
+	mu       sync.RWMutex
+	inFlight map[string]GenHostSpec
+	current  GenHostSpec
+}
+
+// newGenHostSpecs returns the empty claim table of one host.
+func newGenHostSpecs() *genHostSpecs {
+	return &genHostSpecs{inFlight: map[string]GenHostSpec{}}
+}
+
+// claim records the host dialect of one candidate declaration.
+func (s *genHostSpecs) claim(decl *config.Declaration, spec GenHostSpec) {
+	if s == nil || decl == nil {
+		return
+	}
+	s.mu.Lock()
+	s.inFlight[decl.FactKey()] = spec
+	s.mu.Unlock()
+}
+
+// specOf reports the host dialect claimed for one candidate declaration.
+func (s *genHostSpecs) specOf(decl *config.Declaration) (GenHostSpec, bool) {
+	if s == nil || decl == nil {
+		return GenHostSpec{}, false
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	spec, ok := s.inFlight[decl.FactKey()]
+	return spec, ok
+}
+
+// drop ends the claim of one candidate: the generation it carried took effect
+// (and became the dialect in effect) or never will.
+func (s *genHostSpecs) drop(decl *config.Declaration) {
+	if s == nil || decl == nil {
+		return
+	}
+	s.mu.Lock()
+	delete(s.inFlight, decl.FactKey())
+	s.mu.Unlock()
+}
+
+// install records the host dialect that took effect.
+func (s *genHostSpecs) install(spec GenHostSpec) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	s.current = spec
+	s.mu.Unlock()
+}
+
+// timeout reports the request timeout in effect, and zero beside no document in
+// effect at all.
+func (s *genHostSpecs) timeout() time.Duration {
+	if s == nil {
+		return 0
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.current.Timeout
+}
+
+// hostModels holds the shared native model of every declared agent: the one
+// native piece a generation switch leaves standing. Boot installs the models of
+// the first generation, a reload installs the model of an agent its document
+// adds, and a model the document moves afterwards moves through the agent's
+// lease instead.
+type hostModels struct {
+	mu     sync.RWMutex
+	models map[event.AgentID]model.Model
+}
+
+// newHostModels returns the empty shared-model table of one host.
+func newHostModels() *hostModels {
+	return &hostModels{models: map[event.AgentID]model.Model{}}
+}
+
+// install records the shared model of one agent.
+func (m *hostModels) install(id event.AgentID, native model.Model) {
+	if m == nil {
+		return
+	}
+	m.mu.Lock()
+	m.models[id] = native
+	m.mu.Unlock()
+}
+
+// modelOf reports the shared model of one agent.
+func (m *hostModels) modelOf(id event.AgentID) (model.Model, bool) {
+	if m == nil {
+		return nil, false
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	native, ok := m.models[id]
+	return native, ok
+}
+
+// hostFaceConsumerName is the registration name the host's native face consumer
+// takes on the generation-scoped registry.
+const hostFaceConsumerName = "host-face"
+
+// hostFaces is the generation-scoped consumer of the host's own native face: the
+// tools, the skill repository, the read root, the file surface and the
+// session-scoped reflection face every declared agent carries in one generation.
+// It rebuilds that face from the document the candidate generation was loaded
+// from, composes it over the shared models, and answers the composed natives of
+// the generation to the publication path.
+//
+// 契约: docs/adr/0007-generation-scoped-runtime-plugin-lifecycle.md
+type hostFaces struct {
+	specs      *genHostSpecs
+	models     *hostModels
+	recallPort *RecallPort
+	meditation *hostMeditationPort
+	reentry    hostSendReentry
+
+	mu    sync.RWMutex
+	faces map[state.Generation]map[event.AgentID]NativeAgent
+}
+
+// newHostFaces returns the face consumer of one host over the ports its boot
+// bound to the run.
+func newHostFaces(specs *genHostSpecs, models *hostModels, recallPort *RecallPort, meditation *hostMeditationPort, reentry hostSendReentry) *hostFaces {
+	return &hostFaces{
+		specs:      specs,
+		models:     models,
+		recallPort: recallPort,
+		meditation: meditation,
+		reentry:    reentry,
+		faces:      map[state.Generation]map[event.AgentID]NativeAgent{},
+	}
+}
+
+// registration reports the mount of the face consumer on the generation-scoped
+// registry: the name its registration is keyed by beside the builder that
+// reconstructs one generation's face.
+func (f *hostFaces) registration() state.GenRegistration {
+	return state.GenRegistration{Name: hostFaceConsumerName, BuildGen: f.build}
+}
+
+// build constructs the native face of one candidate generation and installs it
+// as the face that generation's binding construction reads. The face holds no
+// exclusive resource: every tool of it is a process-local instance over the
+// document's own roots, so a generation retiring releases nothing here and only
+// the installation itself is put back when the candidate leaves.
+func (f *hostFaces) build(ctx context.Context, decl *config.Declaration, gen state.Generation) (state.GenResources, error) {
+	if _, err := f.compose(ctx, decl, gen); err != nil {
+		return state.GenResources{}, err
+	}
+	return state.GenResources{Restore: func() { f.drop(gen) }}, nil
+}
+
+// compose builds the composed natives of one declaration and installs them under
+// the generation it publishes.
+func (f *hostFaces) compose(ctx context.Context, decl *config.Declaration, gen state.Generation) (map[event.AgentID]NativeAgent, error) {
+	spec, ok := f.specs.specOf(decl)
+	if !ok {
+		return nil, fmt.Errorf("tagent: no host document was claimed for the declaration %q", decl.FactKey())
+	}
+	out := make(map[event.AgentID]NativeAgent, len(decl.Agents))
+	for _, spec2 := range decl.Agents {
+		id := event.AgentID(spec2.ID)
+		native, held := f.models.modelOf(id)
+		if !held {
+			return nil, fmt.Errorf("tagent: agent %q carries no shared model for generation %d", spec2.ID, gen)
+		}
+		face, err := spec.Document.face(ctx, spec2.ID, f.recallPort, f.meditation.planInEffect(), f.meditation, f.reentry)
+		if err != nil {
+			return nil, err
+		}
+		face.Model = native
+		out[id] = face
+	}
+	f.install(gen, out)
+	return out, nil
+}
+
+// install records the composed natives of one generation.
+func (f *hostFaces) install(gen state.Generation, faces map[event.AgentID]NativeAgent) {
+	f.mu.Lock()
+	f.faces[gen] = faces
+	f.mu.Unlock()
+}
+
+// drop removes the installation of one generation: the candidate it belonged to
+// never took effect.
+func (f *hostFaces) drop(gen state.Generation) {
+	f.mu.Lock()
+	delete(f.faces, gen)
+	f.mu.Unlock()
+}
+
+// Face reports the composed natives of one generation, and false beside a
+// generation whose face was never built.
+func (f *hostFaces) Face(gen state.Generation) (map[event.AgentID]NativeAgent, bool) {
+	if f == nil {
+		return nil, false
+	}
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	faces, ok := f.faces[gen]
+	return faces, ok
 }
 
 // toolsFor constructs the tool instances the host contributes for one agent;
@@ -474,7 +759,8 @@ func (d *hostDocument) nativeAgent(ctx context.Context, id string, client *http.
 // - A plugin-granted send that no declaration named is appended to the contributed tools after the declared list, and a declared send is never contributed twice.
 func (d *hostDocument) toolsFor(ctx context.Context, id string, recallPort *RecallPort, meditationPort *hostMeditationPort, reentryPort hostSendReentry) ([]trpctool.CallableTool, error) {
 	available := make(map[string]trpctool.CallableTool, len(hostToolIDs))
-	grantSend := meditationPort != nil && meditationPort.plan != nil && meditationPort.plan.reflectionGrantsSend(id)
+	plan := meditationPort.planInEffect()
+	grantSend := plan.GrantsSend(id)
 	declaresSend := d.declaresTool(id, hostSendToolID)
 	if declaresSend || grantSend {
 		available[hostSendToolID] = &hostSendTool{reentry: reentryPort, session: meditationPort}
@@ -753,8 +1039,11 @@ const hostAPIEndpointEnv = "TAGENT_API_ENDPOINT"
 //
 // The reconciliation never writes a second publication path: every generation it takes into service is either the ledger's own record or the outcome of the one publication entry.
 //
+// - The host dialect of this process is the one its source file states: the sections the shared declaration does not carry — the skill roots, the read root, the tool declarations, the request timeout, the risk table and the observation face — are read from the file beside whichever declaration the chain takes into service, so a restart that adopts the chain still serves the deployment's own dialect.
+// - An adopted generation rebuilds every generation-scoped consumer of its declaration: the adoption drives the same registry the publication path drives, so a restart beside an agreeing chain serves the consumers the document names — the tool face, the execution instance, the memory read namespaces, the reflection loop, the governance rules and the observation face — instead of the models alone, and the exclusive resources those consumers acquired retire with that generation.
+//
 // 契约: docs/wiki/platform/org-hot-reload.md#apply-record
-func reconcileBootConfig(ctx context.Context, run *Run, configPath string, doc *hostDocument, decl *config.Declaration, agents map[event.AgentID]NativeAgent) error {
+func reconcileBootConfig(ctx context.Context, run *Run, configPath string, doc *hostDocument, decl *config.Declaration, agents map[event.AgentID]NativeAgent, specs *genHostSpecs, faces *hostFaces) error {
 	if run == nil || decl == nil {
 		return fmt.Errorf("tagent: the startup reconciliation carries no run or declaration")
 	}
@@ -770,33 +1059,58 @@ func reconcileBootConfig(ctx context.Context, run *Run, configPath string, doc *
 	if err != nil {
 		return err
 	}
+	dialect, err := specOfDocument(doc)
+	if err != nil {
+		return err
+	}
+	dialectKey, err := hostDialectDigest(dialect)
+	if err != nil {
+		return err
+	}
+	claim := func(target *config.Declaration) {
+		if target != nil {
+			specs.claim(target, dialect)
+		}
+	}
+	defer func() {
+		specs.drop(decl)
+		specs.drop(chainDecl)
+	}()
+	adopt := func(target *config.Declaration, record state.PublicationRecord) error {
+		claim(target)
+		return adoptBootGeneration(ctx, run, target, agents, faces, record, dialectKey)
+	}
 	if !declared {
-		return publishBootDeclaration(ctx, run, configPath, doc, decl, agents, 0, "")
+		claim(decl)
+		return publishBootDeclaration(ctx, run, configPath, doc, decl, agents, 0, "", dialectKey)
 	}
 	if fingerprint == declFact.Fingerprint {
-		if published && record.Fingerprint == declFact.Fingerprint {
-			return run.adoptConfigPublication(ctx, chainDecl, agents, record)
+		if published && record.Fingerprint == publicationFingerprint(declFact.Fingerprint, dialectKey) {
+			return adopt(chainDecl, record)
 		}
-		return publishBootDeclaration(ctx, run, configPath, doc, chainDecl, agents, uint64(record.Generation), record.Fingerprint)
+		claim(chainDecl)
+		return publishBootDeclaration(ctx, run, configPath, doc, chainDecl, agents, uint64(record.Generation), record.Fingerprint, dialectKey)
 	}
 	newer, err := fileNewerThan(configPath, declFact.At)
 	if err != nil {
 		return err
 	}
 	if newer {
-		if published && record.Fingerprint == declFact.Fingerprint {
-			if err := run.adoptConfigPublication(ctx, chainDecl, agents, record); err != nil {
+		if published && record.Fingerprint == publicationFingerprint(declFact.Fingerprint, dialectKey) {
+			if err := adopt(chainDecl, record); err != nil {
 				return err
 			}
 		}
-		return publishBootDeclaration(ctx, run, configPath, doc, decl, agents, uint64(record.Generation), record.Fingerprint)
+		claim(decl)
+		return publishBootDeclaration(ctx, run, configPath, doc, decl, agents, uint64(record.Generation), record.Fingerprint, dialectKey)
 	}
-	if published && record.Fingerprint == declFact.Fingerprint {
-		if err := run.adoptConfigPublication(ctx, chainDecl, agents, record); err != nil {
+	if published && record.Fingerprint == publicationFingerprint(declFact.Fingerprint, dialectKey) {
+		if err := adopt(chainDecl, record); err != nil {
 			return err
 		}
 	} else {
-		if err := publishBootDeclaration(ctx, run, configPath, doc, chainDecl, agents, uint64(record.Generation), record.Fingerprint); err != nil {
+		claim(chainDecl)
+		if err := publishBootDeclaration(ctx, run, configPath, doc, chainDecl, agents, uint64(record.Generation), record.Fingerprint, dialectKey); err != nil {
 			return err
 		}
 	}
@@ -813,12 +1127,46 @@ func reconcileBootConfig(ctx context.Context, run *Run, configPath string, doc *
 	return err
 }
 
+// adoptBootGeneration takes one recorded generation into service at startup: the
+// generation-scoped consumers rebuild their instances for the generation the
+// record names, the composed native face of that generation is what the adopted
+// binding construction reads, and the exclusive resources those consumers
+// acquired are handed to the retirement ledger of the adopted generation, so the
+// publication that supersedes it later frees them through the same drain.
+//
+// A consumer that refuses the declaration, a generation without a composed face
+// and a refused adoption each leave the boot failed instead of serving a
+// generation whose consumers were only partly built; the instances built so far
+// put their faces back and release what they acquired.
+//
+// 契约: docs/wiki/platform/org-hot-reload.md#apply-record
+func adoptBootGeneration(ctx context.Context, run *Run, decl *config.Declaration, agents map[event.AgentID]NativeAgent, faces *hostFaces, record state.PublicationRecord, dialectKey string) error {
+	gen := state.Generation(record.Generation)
+	built, err := run.genRegistry.Build(ctx, decl, gen)
+	if err != nil {
+		return err
+	}
+	composed, ok := faces.Face(gen)
+	if !ok {
+		built.Restore()
+		return errors.Join(
+			fmt.Errorf("tagent: the consumer side built no native face for the adopted generation %d", gen),
+			built.Release(ctx),
+		)
+	}
+	if err := run.adoptConfigPublication(ctx, decl, composed, record, dialectKey); err != nil {
+		built.Restore()
+		return errors.Join(err, built.Release(ctx))
+	}
+	return run.trackGenerationConsumers(ctx, gen, built)
+}
+
 // publishBootDeclaration commits the declaration fact of the declaration this
 // boot publishes and runs the one publication entry over it. The generation the
 // chain's last record assigned is the generation the candidate is meant to
 // follow; the window records every model version the new declaration puts in
 // effect.
-func publishBootDeclaration(ctx context.Context, run *Run, configPath string, doc *hostDocument, decl *config.Declaration, agents map[event.AgentID]NativeAgent, previousGeneration uint64, previousFingerprint string) error {
+func publishBootDeclaration(ctx context.Context, run *Run, configPath string, doc *hostDocument, decl *config.Declaration, agents map[event.AgentID]NativeAgent, previousGeneration uint64, previousFingerprint, dialectKey string) error {
 	generation := previousGeneration + 1
 	if _, err := run.recordDeclarationFact(ctx, decl, generation); err != nil {
 		return err
@@ -835,6 +1183,7 @@ func publishBootDeclaration(ctx context.Context, run *Run, configPath string, do
 		previousFingerprint: previousFingerprint,
 		models:              modelVersionsOf(doc, chainDecl),
 		dimensions:          appliedModelDimensions(chainDecl),
+		dialectKey:          dialectKey,
 		at:                  time.Now().UTC(),
 	}
 	outcome, err := run.publishDeclared(ctx, chainDecl, agents, window)
@@ -906,4 +1255,472 @@ func derefInt(p *int) int {
 		return 0
 	}
 	return *p
+}
+
+// telemetryFaceConsumerName and its siblings are the registration names the host's own consumers take on the generation-scoped registry: the observation face, the governance rules, the merged memory declaration and the reflection loop.
+// - Each answers the builder of its per-generation instance and mounts through the one registry the assembly drives, so a reload that moves one of them takes effect as a new generation instead of waiting for a restart.
+// 契约: docs/adr/0007-generation-scoped-runtime-plugin-lifecycle.md
+const (
+	telemetryFaceConsumerName  = "telemetry"
+	governanceFaceConsumerName = "governance"
+	memoryFaceConsumerName     = "memory"
+	meditationFaceConsumerName = "meditation"
+)
+
+// generationReplacement answers the resources one candidate generation acquired
+// by replacing a face of the generation in effect: its registration frees the
+// face it replaced, and the restore that runs when the candidate never takes
+// effect puts the face in effect back and closes what the candidate built.
+//
+// - The replaced face is closed when the generation that replaced it retires, so a superseded face never serves a generation it was not built for.
+// - A refused candidate closes only what it built: the face in effect is put back untouched, and the release of that same candidate finds the replacement already settled.
+func generationReplacement(ctx context.Context, consumer string, gen state.Generation, previous, built func(context.Context) error, restore func()) state.GenResources {
+	var mu sync.Mutex
+	settled := false
+	take := func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		if settled {
+			return false
+		}
+		settled = true
+		return true
+	}
+	stopCtx := context.WithoutCancel(ctx)
+	var resources *state.Leases
+	if previous != nil {
+		resources = state.NewLeases()
+		resources.Register(consumer, fmt.Sprintf("gen:%d", gen), func(context.Context) error {
+			if !take() {
+				return nil
+			}
+			return previous(stopCtx)
+		})
+	}
+	return state.GenResources{Resources: resources, Restore: func() {
+		if !take() {
+			return
+		}
+		if restore != nil {
+			restore()
+		}
+		if built != nil {
+			_ = built(stopCtx)
+		}
+	}}
+}
+
+// telemetryFace is the observation face of one generation: the section it was
+// built from beside the observer and the stop that ends the pipelines it
+// started.
+type telemetryFace struct {
+	section  config.TelemetrySpec
+	observer plugin.Observer
+	stop     func(context.Context) error
+}
+
+// hostTelemetryFaces is the generation-scoped consumer of the host's observation
+// face: the log observer a document declares, or the layered SDK observer its
+// OTel switch starts. It rebuilds that face for every candidate generation from
+// the observation section that generation is published under.
+//
+// 契约: docs/adr/0007-generation-scoped-runtime-plugin-lifecycle.md
+//
+//   - The observer beside the pipelines it started is process-private and dies with the generation: the face a candidate installed is closed when the generation that superseded it retires, and a refused candidate closes the face it built and puts the one in effect back.
+//   - The section is compared before anything is built, so a generation that moves nothing reuses the observer in effect instead of opening a second pipeline beside it.
+type hostTelemetryFaces struct {
+	specs *genHostSpecs
+	build func(ctx context.Context, section config.TelemetrySpec) (plugin.Observer, func(context.Context) error, error)
+	run   *Run
+
+	mu   sync.Mutex
+	face telemetryFace
+	held bool
+}
+
+// newHostTelemetryFaces returns the observation consumer of one host over the
+// construction its document declares.
+func newHostTelemetryFaces(specs *genHostSpecs, build func(ctx context.Context, section config.TelemetrySpec) (plugin.Observer, func(context.Context) error, error)) *hostTelemetryFaces {
+	return &hostTelemetryFaces{specs: specs, build: build}
+}
+
+// bind attaches the run whose observation face every generation installs into.
+func (f *hostTelemetryFaces) bind(run *Run) { f.run = run }
+
+// boot installs the observation face the boot document declares and answers the
+// observer of that face.
+func (f *hostTelemetryFaces) boot(ctx context.Context, section config.TelemetrySpec) (plugin.Observer, error) {
+	observer, stop, err := f.build(ctx, section)
+	if err != nil {
+		return nil, err
+	}
+	f.install(telemetryFace{section: section, observer: observer, stop: stop})
+	return observer, nil
+}
+
+// install records one observation face as the face in effect and puts it on the
+// run, answering the face it replaced beside whether a face was in effect.
+func (f *hostTelemetryFaces) install(face telemetryFace) (telemetryFace, bool) {
+	f.mu.Lock()
+	previous, held := f.face, f.held
+	f.face, f.held = face, true
+	run := f.run
+	f.mu.Unlock()
+	if run != nil {
+		run.installObserver(face.observer)
+	}
+	return previous, held
+}
+
+// restore puts one observation face back as the face in effect.
+func (f *hostTelemetryFaces) restore(face telemetryFace) {
+	f.mu.Lock()
+	f.face = face
+	run := f.run
+	f.mu.Unlock()
+	if run != nil {
+		run.installObserver(face.observer)
+	}
+}
+
+// close stops the observation pipeline of the face in effect, once.
+func (f *hostTelemetryFaces) close(ctx context.Context) error {
+	if f == nil {
+		return nil
+	}
+	f.mu.Lock()
+	face, held := f.face, f.held
+	f.face, f.held = telemetryFace{}, false
+	f.mu.Unlock()
+	if !held || face.stop == nil {
+		return nil
+	}
+	return face.stop(ctx)
+}
+
+// registration reports the mount of the observation consumer on the
+// generation-scoped registry.
+func (f *hostTelemetryFaces) registration() state.GenRegistration {
+	return state.GenRegistration{Name: telemetryFaceConsumerName, BuildGen: f.buildGeneration}
+}
+
+// buildGeneration rebuilds the observation face of one candidate generation: a
+// section that did not move keeps the observer in effect, and a moved one starts
+// its own pipelines beside the generation that declared it.
+func (f *hostTelemetryFaces) buildGeneration(ctx context.Context, decl *config.Declaration, gen state.Generation) (state.GenResources, error) {
+	spec, ok := f.specs.specOf(decl)
+	if !ok {
+		return state.GenResources{}, fmt.Errorf("tagent: no host document was claimed for the declaration %q", decl.FactKey())
+	}
+	f.mu.Lock()
+	previous, held := f.face, f.held
+	f.mu.Unlock()
+	if held && reflect.DeepEqual(previous.section, spec.Telemetry) {
+		return state.GenResources{Restore: func() {}}, nil
+	}
+	observer, stop, err := f.build(ctx, spec.Telemetry)
+	if err != nil {
+		return state.GenResources{}, err
+	}
+	replaced, _ := f.install(telemetryFace{section: spec.Telemetry, observer: observer, stop: stop})
+	var previousStop func(context.Context) error
+	if replaced.stop != nil {
+		previousStop = func(ctx context.Context) error { return replaced.stop(ctx) }
+	}
+	var builtStop func(context.Context) error
+	if stop != nil {
+		builtStop = func(ctx context.Context) error { return stop(ctx) }
+	}
+	return generationReplacement(ctx, telemetryFaceConsumerName, gen, previousStop, builtStop,
+		func() { f.restore(replaced) }), nil
+}
+
+// governanceFace is the governance rules of one generation: the risk table they
+// were opened from beside the policy that rules under them. The approval book a
+// critical call is parked on is the host's own and survives every generation, so
+// the face owns no process resource beside it.
+type governanceFace struct {
+	rules  []governance.ToolRiskRule
+	policy plugin.Governor
+}
+
+// hostGovernanceFaces is the generation-scoped consumer of the host's governance
+// rules: the risk table a document declares, opened over the approval book of
+// this host. It reopens that table for every candidate generation, so a reload
+// that moves the rules takes effect without a restart.
+//
+// 契约: docs/adr/0007-generation-scoped-runtime-plugin-lifecycle.md
+//
+// - The risk table is compared before anything is opened, so a generation that moves nothing keeps the policy in effect instead of opening a second one beside it.
+// - A candidate that moves the table opens the policy of its own generation before its bindings are prepared, so every call of the new generation is ruled by the rules that generation declared.
+type hostGovernanceFaces struct {
+	specs *genHostSpecs
+	open  func(rules []governance.ToolRiskRule) plugin.Governor
+	run   *Run
+
+	mu   sync.Mutex
+	face governanceFace
+	held bool
+}
+
+// newHostGovernanceFaces returns the governance consumer of one host over the
+// policy construction its boot bound, and beside a nil construction a host whose
+// caller mounted its own policy: that policy is the caller's face for every
+// generation, so the consumer opens none.
+func newHostGovernanceFaces(specs *genHostSpecs, open func(rules []governance.ToolRiskRule) plugin.Governor) *hostGovernanceFaces {
+	return &hostGovernanceFaces{specs: specs, open: open}
+}
+
+// bind attaches the run whose governance face every generation installs into.
+func (f *hostGovernanceFaces) bind(run *Run) { f.run = run }
+
+// boot installs the governance rules the boot document declares.
+func (f *hostGovernanceFaces) boot(rules []governance.ToolRiskRule) {
+	if f.open == nil {
+		return
+	}
+	f.install(governanceFace{rules: rules, policy: f.open(rules)})
+}
+
+// install records one governance face as the face in effect and puts it on the
+// run.
+func (f *hostGovernanceFaces) install(face governanceFace) governanceFace {
+	f.mu.Lock()
+	previous := f.face
+	f.face, f.held = face, true
+	run := f.run
+	f.mu.Unlock()
+	if run != nil {
+		run.installGovernor(face.policy)
+	}
+	return previous
+}
+
+// restore puts one governance face back as the face in effect.
+func (f *hostGovernanceFaces) restore(face governanceFace) {
+	f.mu.Lock()
+	f.face = face
+	run := f.run
+	f.mu.Unlock()
+	if run != nil {
+		run.installGovernor(face.policy)
+	}
+}
+
+// policyInEffect reports the governance policy of the face in effect.
+func (f *hostGovernanceFaces) policyInEffect() plugin.Governor {
+	if f == nil {
+		return nil
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.face.policy
+}
+
+// registration reports the mount of the governance consumer on the
+// generation-scoped registry.
+func (f *hostGovernanceFaces) registration() state.GenRegistration {
+	return state.GenRegistration{Name: governanceFaceConsumerName, BuildGen: f.buildGeneration}
+}
+
+// buildGeneration reopens the governance rules of one candidate generation.
+func (f *hostGovernanceFaces) buildGeneration(_ context.Context, decl *config.Declaration, _ state.Generation) (state.GenResources, error) {
+	spec, ok := f.specs.specOf(decl)
+	if !ok {
+		return state.GenResources{}, fmt.Errorf("tagent: no host document was claimed for the declaration %q", decl.FactKey())
+	}
+	if f.open == nil {
+		return state.GenResources{Restore: func() {}}, nil
+	}
+	f.mu.Lock()
+	previous, held := f.face, f.held
+	f.mu.Unlock()
+	if held && reflect.DeepEqual(previous.rules, spec.RiskRules) {
+		return state.GenResources{Restore: func() {}}, nil
+	}
+	replaced := f.install(governanceFace{rules: spec.RiskRules, policy: f.open(spec.RiskRules)})
+	return state.GenResources{Restore: func() { f.restore(replaced) }}, nil
+}
+
+// hostMemoryFaces is the generation-scoped consumer of the merged memory
+// declaration: the storage tier every declaring agent shares and the semantic
+// engine its recall vocabulary embeds under. It resolves that declaration again
+// for every candidate generation, so the memory section a generation declares is
+// judged against the declarations beside it instead of the ones the process
+// booted at.
+//
+// 契约: docs/adr/0007-generation-scoped-runtime-plugin-lifecycle.md
+//
+//   - The store itself is the durable chain this process opened: a candidate naming another tier is refused by the field an operator searches for, because no generation reopens a chain under a second root (design Q3). The generations a boot takes into service are judged the same way, so a restart that adopts the recorded generation serves the store it opened.
+//   - The engine binding is opened from the source document of this process and no generation rebuilds it, so a candidate offered once the process serves is refused by the field an operator searches for when it names another engine. The generations the boot itself takes into service run over that binding instead of being judged by it: the recorded generation a restart adopts carries the ledger's own declaration, and the source declaration published beside it is the one the binding was opened from.
+//   - The read namespaces are the half a generation reads through its recall face, and they move with the generation that declares them; the merged declaration is resolved per generation so an inconsistent one is refused before anything is published.
+type hostMemoryFaces struct {
+	specs  *genHostSpecs
+	opened *MemoryPlan
+	// serving states that this process has taken a generation into service: the
+	// memory candidates offered from then on are judged against the engine binding
+	// the boot opened, while the generations the boot itself built were not.
+	serving atomic.Bool
+}
+
+// newHostMemoryFaces returns the memory consumer of one host over the store its
+// boot opened.
+func newHostMemoryFaces(specs *genHostSpecs, opened *MemoryPlan) *hostMemoryFaces {
+	return &hostMemoryFaces{specs: specs, opened: opened}
+}
+
+// arm marks the generations this process built as served: every candidate
+// offered afterwards is judged against the engine binding the boot opened.
+func (f *hostMemoryFaces) arm() {
+	if f == nil {
+		return
+	}
+	f.serving.Store(true)
+}
+
+// registration reports the mount of the memory consumer on the
+// generation-scoped registry.
+func (f *hostMemoryFaces) registration() state.GenRegistration {
+	return state.GenRegistration{Name: memoryFaceConsumerName, BuildGen: f.buildGeneration}
+}
+
+// buildGeneration resolves the merged memory declaration of one candidate
+// generation and refuses by name what this process cannot serve.
+func (f *hostMemoryFaces) buildGeneration(_ context.Context, decl *config.Declaration, _ state.Generation) (state.GenResources, error) {
+	spec, ok := f.specs.specOf(decl)
+	if !ok {
+		return state.GenResources{}, fmt.Errorf("tagent: no host document was claimed for the declaration %q", decl.FactKey())
+	}
+	plan, err := MemoryPlanOf(decl, spec.Document.Storage.Type, spec.Document.Storage.Root)
+	if err != nil {
+		return state.GenResources{}, memoryRefusalOf(decl, err)
+	}
+	if !sameMemoryTier(f.opened, plan, f.serving.Load()) {
+		return state.GenResources{}, memoryRefusalOf(decl,
+			fmt.Errorf("the generation names a memory tier beside the one this process opened"))
+	}
+	return state.GenResources{Restore: func() {}}, nil
+}
+
+// memoryRefusalOf attaches one memory refusal to the restart-required family: a
+// memory tier this process cannot serve is a restart by name, and the field path
+// it names is the one an operator searches the configuration source for.
+func memoryRefusalOf(decl *config.Declaration, cause error) error {
+	return fmt.Errorf("%w: %s: %w", ErrHostReloadRestartRequired, memoryFieldPathOf(decl), cause)
+}
+
+// memoryFieldPathOf reports the field path of the memory declaration a document
+// states, in agent name order.
+func memoryFieldPathOf(decl *config.Declaration) string {
+	if decl == nil {
+		return "storage.root"
+	}
+	ids := make([]string, 0, len(decl.Agents))
+	for _, spec := range decl.Agents {
+		entry := spec.Memory
+		if strings.TrimSpace(entry.Type) != "" || strings.TrimSpace(entry.Path) != "" || declaresEngine(entry.Engine) {
+			ids = append(ids, spec.ID)
+		}
+	}
+	sort.Strings(ids)
+	if len(ids) == 0 {
+		return "storage.root"
+	}
+	return "agents." + ids[0] + ".memory"
+}
+
+// sameMemoryTier reports whether one generation's merged declaration names the
+// store this process opened, and — once the process serves — the embedding
+// binding it opened with.
+func sameMemoryTier(opened, next *MemoryPlan, judgeEngine bool) bool {
+	left, right := opened.Storage(), next.Storage()
+	if left == nil || right == nil {
+		if left != nil || right != nil {
+			return false
+		}
+		return !judgeEngine || reflect.DeepEqual(opened.Engine(), next.Engine())
+	}
+	if *left != *right {
+		return false
+	}
+	return !judgeEngine || reflect.DeepEqual(opened.Engine(), next.Engine())
+}
+
+// hostMeditationFaces is the generation-scoped consumer of the host's reflection
+// loop: it resolves the meditation section of every candidate generation and
+// mounts the reflection beside its driver over the run faces the port bound.
+//
+// 契约: docs/adr/0007-generation-scoped-runtime-plugin-lifecycle.md
+//
+//   - The loop is process-private and dies with the generation: the driver a candidate installed is stopped when the generation that superseded it retires, and a refused candidate puts the loop in effect back and stops the driver it built.
+//   - The rhythm is a floor and the watermark the loop consumed stands in the anchor record under the storage root, so a rebuilt loop starts from the watermark the chain holds and a generation switch never re-fires a reflection already consumed.
+type hostMeditationFaces struct {
+	specs       *genHostSpecs
+	port        *hostMeditationPort
+	storageRoot string
+}
+
+// newHostMeditationFaces returns the reflection consumer of one host over the
+// port its boot bound.
+func newHostMeditationFaces(specs *genHostSpecs, port *hostMeditationPort, storageRoot string) *hostMeditationFaces {
+	return &hostMeditationFaces{specs: specs, port: port, storageRoot: storageRoot}
+}
+
+// registration reports the mount of the reflection consumer on the
+// generation-scoped registry.
+func (f *hostMeditationFaces) registration() state.GenRegistration {
+	return state.GenRegistration{Name: meditationFaceConsumerName, BuildGen: f.buildGeneration}
+}
+
+// buildGeneration mounts the reflection loop of one candidate generation: a
+// section that did not move keeps the loop in effect, and a moved one is
+// resolved, judged and mounted before the face of its generation is composed.
+func (f *hostMeditationFaces) buildGeneration(ctx context.Context, decl *config.Declaration, gen state.Generation) (state.GenResources, error) {
+	spec, ok := f.specs.specOf(decl)
+	if !ok {
+		return state.GenResources{}, fmt.Errorf("tagent: no host document was claimed for the declaration %q", decl.FactKey())
+	}
+	mapped, err := spec.Document.document()
+	if err != nil {
+		return state.GenResources{}, err
+	}
+	plan, err := meditation.Resolve(mapped, spec.Document.PromptDir, f.storageRoot)
+	if err != nil {
+		return state.GenResources{}, err
+	}
+	if err := plan.ValidateDelivery(spec.Document.declaresTool, hostSendToolID); err != nil {
+		return state.GenResources{}, err
+	}
+	previous := f.port.reflectionInEffect()
+	if f.port.reflectionInstalled() && sameMeditationPlan(previous.plan, plan) {
+		return state.GenResources{Restore: func() {}}, nil
+	}
+	driver, err := f.port.mountReflection(plan)
+	if err != nil {
+		return state.GenResources{}, err
+	}
+	var replaced, built func(context.Context) error
+	if previous.driver != nil {
+		replaced = func(context.Context) error {
+			previous.driver.Stop()
+			return nil
+		}
+	}
+	if driver != nil {
+		built = func(context.Context) error {
+			driver.Stop()
+			return nil
+		}
+	}
+	return generationReplacement(ctx, meditationFaceConsumerName, gen, replaced, built,
+		func() { f.port.restoreReflection(previous) }), nil
+}
+
+// sameMeditationPlan reports whether one generation declares the reflection loop
+// the generation in effect already serves.
+func sameMeditationPlan(inEffect, next *meditation.Plan) bool {
+	if inEffect == nil || next == nil {
+		return inEffect == nil && next == nil
+	}
+	return reflect.DeepEqual(*inEffect, *next)
 }

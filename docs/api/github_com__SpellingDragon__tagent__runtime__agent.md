@@ -49,10 +49,11 @@ to a limit nobody approved. The redline list (4 rules):
     declaration admits exactly as it did before.
 
 The idle-address reclamation checks: a resident consumption instance whose
-address holds no work and no unsettled delivery is reclaimed after the idle TTL,
-an address that still works or still owes a target never is, and the reclamation
-is observable as a named counter beside a log line carrying the address and the
-reason.
+address holds no work and no unsettled delivery is reclaimed once it rested a
+full idle window, an address that still works or still owes a target never is,
+and the reclamation is observable as a log line carrying the address and the
+reason. The sweep runs at the input boundary of the set (see Consumers.Ensure),
+so no ticker of its own decides when an address is read as idle.
 
 CONSTANTS
 
@@ -631,14 +632,14 @@ func (cs *Consumers) Ensure(addr event.Address) *Consumer
     starting a driver beside the drain. - The loop resumes behind the last
     agent_output the chain carries — the inputs past it are the material a
     restart still owes — and a chain beside no agent_output at all resumes from
-    its head, so an unanswered input stays owed instead of vanishing behind a
-    restart.
+    its head, so an unanswered input stays owed instead of vanishing behind
+    a restart. - The call is the input boundary of the set: it sweeps the
+    addresses it already drives first, so an address that rested a full idle
+    window ends here and the mount this call answers reads the chain from its
+    own head instead of a parked driver.
 
 func (cs *Consumers) Has(addr event.Address) bool
     Has reports whether one address carries a resident consumption loop.
-
-func (cs *Consumers) RecycleCount() uint64
-    RecycleCount reports how many idle instances this set reclaimed.
 
 func (cs *Consumers) RecycleIdle(now time.Time) int
     RecycleIdle runs one reclamation sweep at the given clock reading and
@@ -655,7 +656,7 @@ func (cs *Consumers) Resting() bool
     mounts nothing on reports resting: nothing of it flies.
 
 func (cs *Consumers) SetDeliveryPending(pending func(event.Address) bool)
-    SetDeliveryPending registers the predicate the reaper reads before it
+    SetDeliveryPending registers the predicate the sweep reads before it
     reclaims an address: true names a delivery account that still owes a target
     (a held or owed delivery fact), so the instance stays however long it rests.
     A nil predicate names no unsettled delivery anywhere.

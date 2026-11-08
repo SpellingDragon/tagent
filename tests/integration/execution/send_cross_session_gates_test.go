@@ -160,7 +160,7 @@ func TestSendCrossSessionSenderFace(t *testing.T) {
 		}
 		scene.refuteDelivered(t)
 		t.Run("the_refusal_is_filed_in_the_account", func(t *testing.T) {
-			refusals := scene.host.Run().DeliveryLedger().Refusals()
+			refusals := deliveryRefusals(t, scene.host.Run().DeliveryLedger())
 			for _, refusal := range refusals {
 				if refusal.Receipt == assembly.DeliveryReceiptDenied && refusal.Target == scene.entry {
 					return

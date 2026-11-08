@@ -12,6 +12,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -30,6 +31,7 @@ import (
 	"github.com/SpellingDragon/tagent/features/evolution/meditation"
 	"github.com/SpellingDragon/tagent/features/rl"
 	"github.com/SpellingDragon/tagent/features/telemetry"
+	"github.com/SpellingDragon/tagent/memory/ledger"
 	"github.com/SpellingDragon/tagent/runtime/agent"
 	"github.com/SpellingDragon/tagent/runtime/state"
 	"github.com/SpellingDragon/tagent/runtime/task"
@@ -58,7 +60,11 @@ var ErrHostSenderMissing = errors.New("tagent: the host carries no outbound mess
 // Host self-reflection is not judged here: its dedicated reflection session is
 // granted send by the meditation plugin (session-scoped), while the entry tool
 // face deliberately carries none.
-var ErrHostMeditationToolMisplaced = errors.New("tagent: a meditation tool is granted to the wrong agent")
+//
+// The refusal is the plugin's own: the mount judges the declaration it depends
+// on, and the host exports that verdict beside its other boot refusals so a
+// caller reads one error identity whichever layer answers.
+var ErrHostMeditationToolMisplaced = meditation.ErrToolMisplaced
 
 // ErrHostAddressMissing reports an invocation that names no complete session
 // address: the runtime is driven at an explicit address and never at a
@@ -225,13 +231,25 @@ type Host struct {
 	// trajectory.
 	configPath string
 	doc        *hostDocument
-	natives    map[event.AgentID]NativeAgent
-	nativeFor  hostNativeBuilder
-	models     *hostModelBuilder
-	capture    *rl.TrajectoryCapture
+	// natives is the native material every declared agent was last published
+	// with. Boot fills it with the shared models of the first generation; the
+	// per-generation tool face is not part of it, because a face belongs to one
+	// generation and is rebuilt by the generation-scoped consumer.
+	natives   map[event.AgentID]NativeAgent
+	nativeFor hostNativeBuilder
+	models    *hostModelBuilder
+	capture   *rl.TrajectoryCapture
+	// specs holds the host document dialect of the generation in effect beside
+	// the candidates in flight, and models_ holds the shared native of every
+	// declared agent; faces is the generation-scoped consumer that rebuilds the
+	// tools, skill roots, read root, file face and reflection scope of each
+	// generation from the document that generation was loaded from.
+	specs  *genHostSpecs
+	shared *hostModels
+	faces  *hostFaces
 
 	face       *hostFace
-	meditation *meditation.Driver
+	meditation *generationReflection
 	settle     *SettleDriver
 	// consumers owns the resident instances of the run: one per agent address
 	// its material names, each the only driver of the model decisions of its
@@ -303,12 +321,69 @@ var (
 // approval book lives in when the host attaches none of its own.
 const hostApprovalsDir = "approvals"
 
+// reflectionAnchorsDir is the directory under the storage root the anchor record
+// of a reflection a later generation enables persists in, beside the boot
+// document that declares none.
+const reflectionAnchorsDir = "reflection-anchors"
+
 // hostGCTraceEnv names the environment variable that asks for the runtime's GC
 // trace, and hostGCTraceSetting is the GODEBUG entry it asks for.
 const (
 	hostGCTraceEnv     = "TAGENT_GCTRACE"
 	hostGCTraceSetting = "gctrace=1"
 )
+
+// newHostClient returns the HTTP client every model of the host runs under. The
+// request timeout is read from the host dialect in effect when each request
+// begins instead of being fixed at construction, so a reload that moves
+// request_timeout_seconds takes effect on the next request of a model this host
+// already built. The dialect answers the document default beside a section that
+// names none, so the timeout is never absent.
+func newHostClient(specs *genHostSpecs) *http.Client {
+	return &http.Client{Transport: &hostTimeoutTransport{base: http.DefaultTransport, timeout: specs.timeout}}
+}
+
+// hostTimeoutTransport applies the request timeout in effect to every request
+// it carries. The deadline ends the request and the body it reads, so a stream
+// that outlives it is cancelled exactly as a client carrying one fixed timeout
+// would cancel it.
+type hostTimeoutTransport struct {
+	base    http.RoundTripper
+	timeout func() time.Duration
+}
+
+// RoundTrip runs one request under the timeout in effect when it begins.
+func (t *hostTimeoutTransport) RoundTrip(request *http.Request) (*http.Response, error) {
+	var timeout time.Duration
+	if t.timeout != nil {
+		timeout = t.timeout()
+	}
+	if timeout <= 0 {
+		return t.base.RoundTrip(request)
+	}
+	ctx, cancel := context.WithTimeout(request.Context(), timeout)
+	response, err := t.base.RoundTrip(request.WithContext(ctx))
+	if err != nil {
+		cancel()
+		return nil, err
+	}
+	response.Body = &hostTimeoutBody{ReadCloser: response.Body, cancel: cancel}
+	return response, nil
+}
+
+// hostTimeoutBody releases the deadline of one request when the reader closes
+// the body it carried.
+type hostTimeoutBody struct {
+	io.ReadCloser
+	cancel context.CancelFunc
+}
+
+// Close releases the deadline beside closing the body.
+func (b *hostTimeoutBody) Close() error {
+	err := b.ReadCloser.Close()
+	b.cancel()
+	return err
+}
 
 // hostSwitchOn reports whether the environment value names a switch left on.
 func hostSwitchOn(value string) bool {
@@ -373,7 +448,11 @@ func applyHostGCTrace() {
 // - A fuse declaration on the entry agent wires the loop: a response above the call cap or past the long-context threshold parks its whole batch on that one book before anything executes, and a declaration that names neither knob leaves the limits the process already declared in place.
 //
 // - TAGENT_GCTRACE=1 asks for the runtime's GC trace, which the runtime reads when the process starts: a boot merges GODEBUG=gctrace=1 so the subprocesses this host starts trace, and names in one line that the host process itself traces only when it was launched beside it.
-// - nativeFor is the one construction of an agent's native pieces: Boot builds the first generation through it, and a reload builds an agent its document adds through it over the ports bound in this call.
+// - nativeFor is the one construction of an added agent's shared model: Boot builds the first generation through it, and a reload builds an agent its document adds through it over the ports bound in this call. The tools of that agent are not part of it, because they belong to the face its generation rebuilds.
+// - The generation-scoped consumers mount unconditionally: the execution consumer and the host's own native face consumer are wired by this call, so a declaration that grants neither still builds over them and a reload that adds an agent carrying either takes effect without a restart. The execution consumer resolves the tmux capability on the first call of its face, so a host that never runs an execution pays nothing for the mount.
+// - The reflection instance is mounted unconditionally and forwards every commit to the driver of the generation in effect, so a reload that moves or adds a meditation section replaces the driver behind an instance this run already holds.
+// - The host's own native face consumer mounts last, after the meditation consumer whose reflection plan the tool, skill and file face it composes builds over: the order these options are applied in is the order the registry builds.
+// - The reflection anchor store is wired whether or not the boot document enables meditation, so a generation that enables it later mounts its reflection loop over a gate this assembly already holds.
 func Boot(configPath string, opts ...HostOption) (*Host, error) {
 	applyHostGCTrace()
 	doc, err := loadHostDocument(configPath)
@@ -396,11 +475,11 @@ func Boot(configPath string, opts ...HostOption) (*Host, error) {
 	if err != nil {
 		return nil, err
 	}
-	meditationPlan, err := resolveHostMeditation(mapped, doc.PromptDir, storageRootOf(plan))
+	meditationPlan, err := meditation.Resolve(mapped, doc.PromptDir, storageRootOf(plan))
 	if err != nil {
 		return nil, err
 	}
-	if err := doc.validateMeditationTools(meditationPlan); err != nil {
+	if err := meditationPlan.ValidateDelivery(doc.declaresTool, hostSendToolID); err != nil {
 		return nil, err
 	}
 	// The one outbound face of the document is wrapped before the tools are
@@ -418,20 +497,41 @@ func Boot(configPath string, opts ...HostOption) (*Host, error) {
 	ctx, cancel := context.WithCancel(context.Background())
 	meditationPort := &hostMeditationPort{plan: meditationPlan}
 	reentryPort := &hostSendReentryPort{}
-	client := &http.Client{Timeout: doc.requestTimeout()}
+	specs := newGenHostSpecs()
+	if spec, err := specOfDocument(doc); err == nil {
+		specs.install(spec)
+	}
+	telemetryFaces := newHostTelemetryFaces(specs, func(_ context.Context, section config.TelemetrySpec) (plugin.Observer, func(context.Context) error, error) {
+		return hostTelemetryObserver(ctx, section)
+	})
+	memoryFaces := newHostMemoryFaces(specs, plan)
+	meditationFaces := newHostMeditationFaces(specs, meditationPort, storageRootOf(plan))
+	client := newHostClient(specs)
 	models := newHostModelBuilder(doc, client)
+	shared, err := doc.nativeModels(client)
+	if err != nil {
+		cancel()
+		return nil, err
+	}
+	modelTable := newHostModels()
+	natives := make(map[event.AgentID]NativeAgent, len(shared))
+	for id, native := range shared {
+		modelTable.install(id, native)
+		natives[id] = NativeAgent{Model: native}
+	}
+	faces := newHostFaces(specs, modelTable, recallPort, meditationPort, reentryPort)
 	nativeFor := func(ctx context.Context, doc *hostDocument, id event.AgentID) (NativeAgent, error) {
-		return doc.nativeAgent(ctx, string(id), client, recallPort, meditationPlan, meditationPort, reentryPort)
+		native, err := doc.modelFor(string(id), client)
+		if err != nil {
+			return NativeAgent{}, err
+		}
+		modelTable.install(id, native)
+		return NativeAgent{Model: native}, nil
 	}
 	// host is assigned once the assembly returns; every face assembled before it
 	// reads the variable at call time instead of capturing a nil instance, because
 	// a call can only ever run beside a published host.
 	var host *Host
-	natives, err := doc.nativeAgents(ctx, client, recallPort, meditationPlan, meditationPort, reentryPort)
-	if err != nil {
-		cancel()
-		return nil, err
-	}
 	hostApprovals := cfg.approvals
 	if hostApprovals == nil {
 		if root := storageRootOf(plan); root != "" {
@@ -446,7 +546,7 @@ func Boot(configPath string, opts ...HostOption) (*Host, error) {
 	}
 	var capture *rl.TrajectoryCapture
 	if root := storageRootOf(plan); root != "" {
-		capture, err = openHostCapture(root, 0)
+		capture, err = openHostCapture(root)
 		if err != nil {
 			cancel()
 			return nil, err
@@ -465,7 +565,7 @@ func Boot(configPath string, opts ...HostOption) (*Host, error) {
 			_ = stopTelemetry(context.Background())
 		}
 	}()
-	var driver *meditation.Driver
+	var driver *generationReflection
 	var settleDriver *SettleDriver
 	// The settle face captures the host variable, because the three faces it needs
 	// are the host's own memory and drive and are only called after Boot published
@@ -473,43 +573,59 @@ func Boot(configPath string, opts ...HostOption) (*Host, error) {
 	// through the same variable, because a resource can only be acquired once the
 	// host drives a call.
 	var execManager *tagentexec.Manager
-	observer, telemetryStop, err := hostTelemetryObserver(ctx, doc.Telemetry)
+	observer, err := telemetryFaces.boot(ctx, doc.Telemetry)
 	if err != nil {
 		cancel()
 		return nil, err
 	}
-	stopTelemetry = telemetryStop
+	stopTelemetry = func(ctx context.Context) error { return telemetryFaces.close(ctx) }
+	var governanceFaces *hostGovernanceFaces
+	if cfg.policy == nil {
+		governanceFaces = newHostGovernanceFaces(specs, func(rules []governance.ToolRiskRule) plugin.Governor {
+			if len(rules) == 0 {
+				return nil
+			}
+			return governance.Open(
+				governance.WithRiskRules(rules...),
+				governance.WithApprovals(hostApprovals),
+			)
+		})
+	} else {
+		governanceFaces = newHostGovernanceFaces(specs, nil)
+	}
 	options := []Option{
 		WithGovernance(governanceOf(cfg.governance)),
 		WithTelemetry(observer),
+		withHostGenerationPorts(telemetryFaces, governanceFaces),
+		WithGenerationConsumer(telemetryFaces.registration()),
+		WithGenerationConsumer(governanceFaces.registration()),
+		WithGenerationConsumer(memoryFaces.registration()),
+		WithGenerationConsumer(meditationFaces.registration()),
 	}
-	if declaresExecFace(decl) {
-		executor, err := tagentexec.NewTmuxExecutor()
-		if err != nil {
-			cancel()
-			return nil, fmt.Errorf("tagent: an agent declares the %q face: %w", tagentexec.PresetName, err)
+	execManager = tagentexec.NewManager(tagentexec.NewDeferredTmuxExecutor(), tagentexec.WithStateObserver(func(evt tagentexec.StateEvent) {
+		if host != nil {
+			host.observeExecState(evt)
 		}
-		execManager = tagentexec.NewManager(executor, tagentexec.WithStateObserver(func(evt tagentexec.StateEvent) {
-			if host != nil {
-				host.observeExecState(evt)
-			}
-		}))
-		options = append(options, WithExecManager(execManager))
+	}))
+	options = append(options, WithExecManager(execManager))
+	options = append(options, WithGenerationConsumer(faces.registration()), WithGenerationFaces(faces))
+	if cfg.storage != nil {
+		options = append(options, WithStorage(*cfg.storage))
+	} else if doc.Storage.Type != "" {
+		options = append(options, WithStorage(ledger.StorageConfig{Type: ledger.StorageType(doc.Storage.Type), Root: doc.Storage.Root}))
 	}
 	riskRules, err := doc.riskRules()
 	if err != nil {
 		cancel()
 		return nil, err
 	}
-	if len(riskRules) > 0 {
-		if cfg.policy != nil {
-			cancel()
-			return nil, fmt.Errorf("tagent: the document declares governance risk rules beside a policy attached through WithPolicy")
-		}
-		options = append(options, WithPolicy(governance.Open(
-			governance.WithRiskRules(riskRules...),
-			governance.WithApprovals(hostApprovals),
-		)))
+	if len(riskRules) > 0 && cfg.policy != nil {
+		cancel()
+		return nil, fmt.Errorf("tagent: the document declares governance risk rules beside a policy attached through WithPolicy")
+	}
+	governanceFaces.boot(riskRules)
+	if policy := governanceFaces.policyInEffect(); policy != nil {
+		options = append(options, WithPolicy(policy))
 	}
 	if capture != nil {
 		options = append(options, WithCapture(&hostRunCapture{trajectory: capture}))
@@ -526,32 +642,36 @@ func Boot(configPath string, opts ...HostOption) (*Host, error) {
 	if plan != nil {
 		options = append(options, WithMemoryPlan(plan))
 	}
+	anchorsPath := ""
 	if meditationPlan != nil {
-		options = append(options, WithReflectionAnchors(meditationPlan.anchors))
+		anchorsPath = meditationPlan.Anchors
+	} else if root := storageRootOf(plan); root != "" {
+		anchorsPath = filepath.Join(root, reflectionAnchorsDir)
+	}
+	if anchorsPath != "" {
+		options = append(options, WithReflectionAnchors(anchorsPath))
 	}
 	options = append(options, WithPlugins(func(run *Run) ([]plugin.Instance, error) {
 		instances := make([]plugin.Instance, 0, 2)
-		if meditationPlan != nil {
-			gate := run.ReflectionGate()
-			if gate == nil {
-				return nil, fmt.Errorf("tagent: agent %q enables meditation beside no reflection anchor store", meditationPlan.agent)
+		meditationPort.bindFaces(meditation.Faces{
+			Gate:          run.ReflectionGate(),
+			Observed:      run.ObservationFacts(),
+			Input:         run.ReflectionInput(),
+			ModelInFlight: run.ModelInFlight,
+			Instance:      run.instance,
+			Sessions:      meditationPort,
+		}, func(outcome meditation.TickOutcome) {
+			plan := meditationPort.planInEffect()
+			if plan == nil {
+				return
 			}
-			reflection, err := meditation.NewReflection(meditation.ReflectionConfig{
-				Loop:     meditation.ReflectionLoop{Agent: meditationPlan.agent, Session: meditationPlan.session},
-				Face:     meditation.ReflectionFace{ObservedNamespaces: meditationPlan.observed, ReadNamespaces: meditationPlan.reads},
-				Cadence:  meditation.ReflectionCadence{Interval: meditationPlan.interval, MinGap: meditationPlan.minGap},
-				Prompt:   meditationPlan.prompt,
-				Delivery: meditation.ReflectionDelivery{Targets: meditationPlan.targets, Sessions: meditationPort},
-			}, gate, run.ObservationFacts(), run.ReflectionInput())
-			if err != nil {
-				return nil, err
-			}
-			driver = meditation.NewDriver(reflection, meditationPlan.interval, meditationPlan.minGap, run.ModelInFlight, run.instance)
-			driver.SetObserver(func(outcome meditation.TickOutcome) {
-				assemblyInfo("tagent: meditation driver of %s: %s (%s)", meditationPlan.agent, outcome.Decision.Disposition, outcome.Decision.Reason)
-			})
-			instances = append(instances, driver)
+			assemblyInfo("tagent: meditation driver of %s: %s (%s)", plan.Agent, outcome.Decision.Disposition, outcome.Decision.Reason)
+		})
+		if _, err := meditationPort.mountReflection(meditationPlan); err != nil {
+			return nil, err
 		}
+		driver = newGenerationReflection(meditationPort)
+		instances = append(instances, driver)
 		settleDriver = NewSettleDriver(
 			run.CommittedEvent,
 			func() SettleWake {
@@ -586,13 +706,14 @@ func Boot(configPath string, opts ...HostOption) (*Host, error) {
 		options = append(options, WithApprovals(hostApprovals))
 	}
 	options = append(options, withBootConfigReconcile(func(ctx context.Context, run *Run, decl *config.Declaration, natives map[event.AgentID]NativeAgent) error {
-		return reconcileBootConfig(ctx, run, configPath, doc, decl, natives)
+		return reconcileBootConfig(ctx, run, configPath, doc, decl, natives, specs, faces)
 	}))
 	run, err := assemble(ctx, decl, natives, false, options...)
 	if err != nil {
 		cancel()
 		return nil, err
 	}
+	memoryFaces.arm()
 	if entrySpec := specOfLocked(decl, event.AgentID(decl.Entry)); entrySpec.MaxCallsPerResponse > 0 || entrySpec.LongContextTokens > 0 {
 		run.loop.SetFuseLimits(agent.FuseLimits{
 			CallCap:           entrySpec.MaxCallsPerResponse,
@@ -626,8 +747,11 @@ func Boot(configPath string, opts ...HostOption) (*Host, error) {
 		natives:           natives,
 		nativeFor:         nativeFor,
 		models:            models,
+		specs:             specs,
+		shared:            modelTable,
+		faces:             faces,
 		capture:           capture,
-		telemetryStop:     telemetryStop,
+		telemetryStop:     stopTelemetry,
 		userAddresses:     map[event.SessionID]event.Address{},
 		userTurns:         map[event.Address]int{},
 	}
@@ -703,7 +827,8 @@ func hostTelemetryObserver(ctx context.Context, spec config.TelemetrySpec) (plug
 		stops = append(stops, provider.Shutdown)
 		options = append(options, telemetry.WithMeter(provider.Meter(hostTelemetryMeter)))
 	}
-	observer, err := telemetry.NewSDKObserver(nil, options...)
+	observer, err := telemetry.NewSDKObserver(nil,
+		append(options, telemetry.WithTracer(ftrace.Tracer))...)
 	if err != nil {
 		for _, stop := range stops {
 			_ = stop(context.Background())
@@ -718,19 +843,6 @@ func hostTelemetryObserver(ctx context.Context, spec config.TelemetrySpec) (plug
 		return errors.Join(failures...)
 	}
 	return observer, stop, nil
-}
-
-// declaresExecFace reports whether any agent section of the declaration grants
-// the execution face.
-func declaresExecFace(decl *config.Declaration) bool {
-	for _, spec := range decl.Agents {
-		for _, ref := range spec.Tools {
-			if ref.Name == tagentexec.PresetName {
-				return true
-			}
-		}
-	}
-	return false
 }
 
 // storageRootOf reports the root of the storage tier the plan opens, and an

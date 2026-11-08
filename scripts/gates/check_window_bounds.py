@@ -49,7 +49,12 @@ QUOTED = re.compile(r'"([A-Za-z_][A-Za-z0-9_]*)"')
 CONST_ONE = re.compile(r'^\s*const\s+([A-Za-z_][A-Za-z0-9_]*)\s+(?:[A-Za-z_][A-Za-z0-9_.\[\]]*\s*)?=\s*[0-9]', re.M)
 CONST_BLOCK = re.compile(r'^\s*const\s*\((.*?)^\s*\)', re.S | re.M)
 CONST_MEMBER = re.compile(r'^\s*([A-Za-z_][A-Za-z0-9_]*)\s+(?:[A-Za-z_][A-Za-z0-9_.\[\]]*\s*)?=\s*[0-9]', re.M)
-FAMILY = re.compile(r"(window|budget|reserve|tokens|threshold|limit|topk|rrf)", re.I)
+# The roots a conversion, page or framing constant is named under. Both numbers
+# and both spellings of the counted unit belong here: a second copy of the
+# packing ratio is typically called <unit>PerToken or tokensPer<Unit>, so a root
+# list holding only the plural would pass the singular restatement it exists to
+# catch (runtime/agent/fuse.go carried exactly that copy).
+FAMILY = re.compile(r"(window|budget|reserve|tokens|token|threshold|limit|topk|rrf)", re.I)
 
 
 def load_registry(path):

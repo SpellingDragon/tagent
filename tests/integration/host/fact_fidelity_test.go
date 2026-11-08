@@ -10,10 +10,9 @@ package host
 import (
 	"context"
 	"errors"
-	"net/url"
-	"os"
-	"path/filepath"
+	"fmt"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -53,14 +52,24 @@ func TestFactFidelity(t *testing.T) {
 // factFidelityAssemble assembles one runtime over the durable root beside the
 // scripted model, exactly as a deployment assembles its run.
 func factFidelityAssemble(t *testing.T, root string, provider *entryModel) *assembly.Run {
+	return factFidelityAssembleOver(t, root, provider, nil)
+}
+
+// factFidelityAssembleOver assembles the runtime over root through the storage
+// engine the check decorates, so a check can refuse a commit at the store seam.
+func factFidelityAssembleOver(t *testing.T, root string, provider *entryModel, fault *partFaultStore) *assembly.Run {
 	t.Helper()
+	cfg := ledger.StorageConfig{Type: ledger.StorageJournal, Root: root}
+	if fault != nil {
+		cfg.Engine = fault
+	}
 	run, err := assembly.Assemble(context.Background(),
 		&config.Declaration{Entry: "agent-a", Agents: []config.AgentSpec{{ID: "agent-a", Model: provider.name}}},
 		map[event.AgentID]assembly.NativeAgent{
 			"agent-a": {Model: provider, Tools: []trpctool.CallableTool{&entryTool{name: "echo", output: "out-fidelity"}}},
 		},
 		assembly.WithGovernance(passPolicy{}),
-		assembly.WithStorage(ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: root}))
+		assembly.WithStorage(cfg))
 	if err != nil {
 		t.Fatalf("assemble the fact fidelity runtime over %s: %v", root, err)
 	}
@@ -416,7 +425,15 @@ func factFidelityCommitFailureFailsTurn(t *testing.T) {
 	root := t.TempDir()
 	var mu sync.Mutex
 	calls := 0
+	fault, partition := factFidelityFault(t, root)
 	var release func()
+	hold := func() {
+		mu.Lock()
+		defer mu.Unlock()
+		if release == nil {
+			release = fault.holdCommits(partition)
+		}
+	}
 	defer func() {
 		mu.Lock()
 		held := release
@@ -430,13 +447,13 @@ func factFidelityCommitFailureFailsTurn(t *testing.T) {
 		mu.Lock()
 		calls++
 		round := calls
-		if round == 2 && release == nil {
-			release = factFidelityHoldShard(t, root)
-		}
 		mu.Unlock()
+		if round == 2 {
+			hold()
+		}
 		return entryFinalTurn("answer-of-round-" + strconv.Itoa(round))
 	}}
-	run := factFidelityAssemble(t, root, provider)
+	run := factFidelityAssembleOver(t, root, provider, fault)
 	defer factFidelityClose(t, run)
 
 	warmup, err := run.Invoke(ctx, assembly.InvokeRequest{
@@ -580,37 +597,68 @@ func factFidelitySameMessage(want, got model.Message) bool {
 	return true
 }
 
-// factFidelityShardPath reports the shard file the agent's events are committed
-// into: the partition its identity resolves to.
-func factFidelityShardPath(root string) string {
-	partition := memory.PartitionIDFromName(string(factFidelityAddress.AgentID))
-	return filepath.Join(root, "kv", url.PathEscape(strconv.Itoa(partition)), "snapshot.json")
+// partFaultStore is the port decorator this check injects through: it wraps an
+// opened atomic store and refuses the commits of one key namespace, so the
+// failure sits at the store seam instead of in a file layout.
+type partFaultStore struct {
+	inner ledger.AtomicStore
+	mu    sync.Mutex
+	// namespace is the key namespace whose commits the decorator refuses; empty
+	// lets every commit through.
+	namespace string
 }
 
-// factFidelityHoldShard makes every commit into the agent's shard fail at the
-// atomic-rename barrier: the snapshot path becomes a directory, so the rename
-// cannot land whatever user the process runs as, and the failure is the storage
-// barrier the commit path must report instead of answering success.
-func factFidelityHoldShard(t *testing.T, root string) func() {
-	t.Helper()
-	shard := factFidelityShardPath(root)
-	held := shard + ".held"
-	if _, err := os.Stat(shard); err != nil {
-		t.Fatalf("the durable shard %s is missing: the earlier turn committed nothing into the storage tier: %v", shard, err)
+// Read passes the read to the wrapped engine.
+func (s *partFaultStore) Read(ctx context.Context, fetch ledger.Fetch) ([]ledger.Pair, error) {
+	return s.inner.Read(ctx, fetch)
+}
+
+// Keys enumerates the wrapped engine's keys.
+func (s *partFaultStore) Keys(ctx context.Context, prefix string) ([]string, error) {
+	return s.inner.Keys(ctx, prefix)
+}
+
+// Namespaces enumerates the wrapped engine's namespaces.
+func (s *partFaultStore) Namespaces(ctx context.Context) ([]string, error) {
+	return s.inner.Namespaces(ctx)
+}
+
+// Commit refuses a batch that writes the armed namespace and passes the rest
+// through to the wrapped engine.
+func (s *partFaultStore) Commit(ctx context.Context, batch ledger.Batch) error {
+	s.mu.Lock()
+	namespace := s.namespace
+	s.mu.Unlock()
+	if namespace != "" {
+		for _, put := range batch.Puts {
+			if strings.HasPrefix(put.Key, namespace+":") {
+				return fmt.Errorf("%w: injected on the %s commit", ledger.ErrCommitUncertain, namespace)
+			}
+		}
 	}
-	if err := os.Rename(shard, held); err != nil {
-		t.Fatalf("hold the shard snapshot %s: %v", shard, err)
-	}
-	if err := os.MkdirAll(shard, 0o755); err != nil {
-		t.Fatalf("hold the shard snapshot %s: %v", shard, err)
-	}
+	return s.inner.Commit(ctx, batch)
+}
+
+// holdCommits refuses every commit into the named key namespace until the
+// returned release runs.
+func (s *partFaultStore) holdCommits(namespace string) func() {
+	s.mu.Lock()
+	s.namespace = namespace
+	s.mu.Unlock()
 	return func() {
-		t.Helper()
-		if err := os.RemoveAll(shard); err != nil {
-			t.Fatalf("release the shard snapshot %s: %v", shard, err)
-		}
-		if err := os.Rename(held, shard); err != nil {
-			t.Fatalf("release the shard snapshot %s: %v", shard, err)
-		}
+		s.mu.Lock()
+		s.namespace = ""
+		s.mu.Unlock()
 	}
+}
+
+// factFidelityFault opens the engine the check decorates and the namespace the
+// agent's events commit under.
+func factFidelityFault(t *testing.T, root string) (*partFaultStore, string) {
+	t.Helper()
+	inner, err := ledger.OpenAtomicStore(context.Background(), ledger.StorageConfig{Type: ledger.StorageJournal, Root: root})
+	if err != nil {
+		t.Fatalf("open the storage engine over %s: %v", root, err)
+	}
+	return &partFaultStore{inner: inner}, strconv.Itoa(memory.PartitionIDFromName(string(factFidelityAddress.AgentID)))
 }

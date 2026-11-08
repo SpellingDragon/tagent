@@ -123,7 +123,7 @@ const (
 	deliveryMetaHeldAt        = event.MetaPrefix + "delivery_held_at"
 	deliveryMetaLineage       = event.MetaPrefix + "delivery_lineage"
 	deliveryMetaBody          = event.MetaPrefix + "delivery_body"
-	deliveryMetaLegacy        = event.MetaPrefix + "delivery_legacy_record"
+	deliveryMetaMigrated      = event.MetaPrefix + "delivery_migrated_record"
 	deliveryMetaAction        = event.MetaPrefix + "delivery_action"
 )
 
@@ -215,6 +215,36 @@ func deliverySettlementKey(identity, state string) event.EventID {
 	return event.EventID(deliveryFactPrefix + identity + "." + state)
 }
 
+// deliveryRetryPrefix heads the state token of one retry attempt fact. The
+// attempt facts share the settlement family (the same frozen type, the same TTL
+// exemption) but are not settlement states: they record how many redrives the
+// chain already scheduled so a restart continues the count instead of resetting
+// it to zero. The key carries the attempt number, so one attempt is one
+// immutable fact and a replayed schedule lands no second copy.
+const deliveryRetryPrefix = "retry."
+
+// deliveryRetryState renders the state token of one retry attempt fact.
+func deliveryRetryState(attempt int) string {
+	return deliveryRetryPrefix + strconv.Itoa(attempt)
+}
+
+// deliveryRetryAttemptOf reads one retry attempt fact back into its identity and
+// attempt number, and reports whether the fact is one at all.
+func deliveryRetryAttemptOf(evt event.Event) (string, int, bool) {
+	if evt.Type != deliverySettlementType {
+		return "", 0, false
+	}
+	identity, state, ok := deliveryIdentityOfSettlementKey(evt.Key)
+	if !ok || !strings.HasPrefix(state, deliveryRetryPrefix) {
+		return "", 0, false
+	}
+	attempt, err := strconv.Atoi(strings.TrimPrefix(state, deliveryRetryPrefix))
+	if err != nil || attempt < 0 {
+		return "", 0, false
+	}
+	return identity, attempt, true
+}
+
 // deliveryIdentityOfSettlementKey splits one settlement fact key back into the
 // delivery identity and the state token. The identity never carries a dot (it
 // is a prefix beside one canonical event key or a host-local sequence word), so
@@ -264,7 +294,6 @@ type deliverySettlement struct {
 	fact     event.Event
 	delivery plugin.Delivery
 	heldAt   time.Time
-	legacy   string
 }
 
 // settlementOf reconstructs one settlement fact, or reports that the fact is
@@ -275,6 +304,9 @@ func settlementOf(evt event.Event) (deliverySettlement, bool) {
 	}
 	identity, state, ok := deliveryIdentityOfSettlementKey(evt.Key)
 	if !ok {
+		return deliverySettlement{}, false
+	}
+	if strings.HasPrefix(state, deliveryRetryPrefix) {
 		return deliverySettlement{}, false
 	}
 	target := event.Address{
@@ -295,7 +327,6 @@ func settlementOf(evt event.Event) (deliverySettlement, bool) {
 			Target:  target,
 		},
 		heldAt: heldAt,
-		legacy: evt.Meta[deliveryMetaLegacy],
 	}, true
 }
 
@@ -412,7 +443,7 @@ func (h *Host) ApproveDelivery(ctx context.Context, id string) error {
 		refused := fmt.Errorf("tagent: the approved delivery of %s was refused: %w", id, err)
 		state, definite := deliveryFailureState(err)
 		if definite {
-			h.scheduleRedrive(id, held.delivery)
+			h.scheduleRedrive(ctx, id, held.delivery)
 		}
 		return errors.Join(refused, h.restoreHeldDelivery(ctx, held, state))
 	}
@@ -482,21 +513,29 @@ func (h *Host) deliveryDurable() state.FactLog {
 // keeps otherwise. A fact the hot window trimmed is still settled — the newest
 // state of an obligation is never read as "no settlement" just because the
 // window moved — so the probe is a point read on the chain, never a scan.
-func (h *Host) settlementFactOf(ctx context.Context, key event.EventID) (event.Event, bool) {
+//
+// A key the chain genuinely does not hold answers held=false with no error; a
+// read that failed (corruption, IO) answers a named error instead, so a caller
+// never mistakes an unreadable settlement for an absent one and resends a body
+// the account already closed.
+func (h *Host) settlementFactOf(ctx context.Context, key event.EventID) (event.Event, bool, error) {
 	if h == nil || h.run == nil || key == "" {
-		return event.Event{}, false
+		return event.Event{}, false, nil
 	}
 	if evt, held := h.run.factOf(key); held {
-		return evt, true
+		return evt, true, nil
 	}
 	if h.run.tier == nil {
-		return event.Event{}, false
+		return event.Event{}, false, nil
 	}
 	restored, err := h.run.CommittedEvent(ctx, key)
 	if err != nil {
-		return event.Event{}, false
+		if errors.Is(err, ErrCommittedFactMissing) {
+			return event.Event{}, false, nil
+		}
+		return event.Event{}, false, fmt.Errorf("tagent: the settlement fact %s could not be read: %w", key, err)
 	}
-	return restored, true
+	return restored, true, nil
 }
 
 // settlementStateOf reports the newest settlement state of one obligation, from
@@ -504,14 +543,17 @@ func (h *Host) settlementFactOf(ctx context.Context, key event.EventID) (event.E
 // the eight state keys of the family — a point read each — so an obligation
 // whose facts left the hot window is still read as it stands instead of being
 // mistaken for an unregistered one.
-func (h *Host) settlementStateOf(ctx context.Context, identity string) (deliverySettlement, bool) {
+func (h *Host) settlementStateOf(ctx context.Context, identity string) (deliverySettlement, bool, error) {
 	if h == nil || identity == "" {
-		return deliverySettlement{}, false
+		return deliverySettlement{}, false, nil
 	}
 	var newest deliverySettlement
 	found := false
 	for _, state := range deliverySettlementStates() {
-		evt, held := h.settlementFactOf(ctx, deliverySettlementKey(identity, state))
+		evt, held, err := h.settlementFactOf(ctx, deliverySettlementKey(identity, state))
+		if err != nil {
+			return deliverySettlement{}, false, err
+		}
 		if !held {
 			continue
 		}
@@ -524,7 +566,7 @@ func (h *Host) settlementStateOf(ctx context.Context, identity string) (delivery
 			found = true
 		}
 	}
-	return newest, found
+	return newest, found, nil
 }
 
 // deliveryStateOf reports the latest settlement state this host already knows
@@ -593,7 +635,9 @@ func (h *Host) writeDeliverySettlement(ctx context.Context, target event.Address
 		return errors.New("tagent: the delivery settlement names no identity")
 	}
 	key := deliverySettlementKey(identity, state)
-	if _, held := h.settlementFactOf(ctx, key); held {
+	if _, held, err := h.settlementFactOf(ctx, key); err != nil {
+		return err
+	} else if held {
 		h.noteDeliveryState(identity, state)
 		return nil
 	}
@@ -646,11 +690,11 @@ func (h *Host) writeDeliveryState(ctx context.Context, identity string, delivery
 	return h.writeDeliverySettlement(ctx, delivery.Target, identity, state, delivery, heldAt, nil)
 }
 
-// settlementStateOfLegacy maps one retired record state onto the settlement
+// settlementStateOfRetiredRecord maps one retired record state onto the settlement
 // state the migration writes: owed and headless survive as themselves, the
 // hold and retry records become held states, and the two receipts keep their
 // names.
-func settlementStateOfLegacy(status string) (string, bool) {
+func settlementStateOfRetiredRecord(status string) (string, bool) {
 	switch status {
 	case hostDeliveryOwed:
 		return deliveryStateOwed, true
@@ -846,7 +890,7 @@ func (h *Host) deliverObligation(ctx context.Context, obligation string, sender 
 		id, holdErr := h.holdDelivery(ctx, obligation, delivery, cause, state)
 		scheduled := definite && holdErr == nil
 		if scheduled {
-			h.scheduleRedrive(id, delivery)
+			h.scheduleRedrive(ctx, id, delivery)
 		}
 		return deliveryRefused, err.Error() + retryNote(scheduled) + holdRecordNote(holdErr)
 	}
@@ -924,7 +968,12 @@ func (h *Host) deliverFresh(ctx context.Context, addr event.Address, sender Mess
 		if !ok {
 			continue
 		}
-		if h.deliveryKnown(ctx, identity) {
+		known, err := h.deliveryKnown(ctx, identity)
+		if err != nil {
+			assemblyWarn("tagent: the delivery of %s stands unread and is not resent: %v", identity, err)
+			continue
+		}
+		if known {
 			continue
 		}
 		if !h.claimDelivery(identity) {
@@ -941,13 +990,14 @@ func (h *Host) deliverFresh(ctx context.Context, addr event.Address, sender Mess
 // deliveryKnown reports whether the account already states one obligation: a
 // body whose identity carries any settlement fact — held, sent, refused or
 // retired — is the account's, and the live path neither sends it again nor
-// holds it a second time.
-func (h *Host) deliveryKnown(ctx context.Context, identity string) bool {
+// holds it a second time. A settlement read that failed answers a named error
+// so the caller leaves the body unread instead of resending it as absent.
+func (h *Host) deliveryKnown(ctx context.Context, identity string) (bool, error) {
 	if _, known := h.deliveryStateOf(identity); known {
-		return true
+		return true, nil
 	}
-	_, known := h.settlementStateOf(ctx, identity)
-	return known
+	_, known, err := h.settlementStateOf(ctx, identity)
+	return known, err
 }
 
 // retireHeadlessBodies retires the obligation of every body generated at an
@@ -960,7 +1010,12 @@ func (h *Host) retireHeadlessBodies(ctx context.Context, addr event.Address, lin
 		if !ok {
 			continue
 		}
-		if h.deliveryKnown(ctx, identity) {
+		known, err := h.deliveryKnown(ctx, identity)
+		if err != nil {
+			assemblyWarn("tagent: the headless delivery of %s stands unread and is not retired: %v", identity, err)
+			continue
+		}
+		if known {
 			continue
 		}
 		h.retireHeadlessDelivery(ctx, addr, identity, plugin.Delivery{Content: body.content, Lineage: lineage, Target: addr})
@@ -1342,12 +1397,90 @@ func (h *Host) retryConsumer() *deliveryConsumer {
 	return consumer
 }
 
-// scheduleRedrive queues one obligation for the next automatic attempt.
-func (h *Host) scheduleRedrive(identity string, delivery plugin.Delivery) {
+// scheduleRedrive queues one obligation for the next automatic attempt. The
+// attempt continues from the highest retry fact the chain holds, so an approval
+// that meets a transient outage after a restart resumes the recorded count
+// instead of resetting it; the attempt fact lands before the schedule, so a
+// crash between the two leaves a count the next boot reads. A read error or a
+// commit error leaves the obligation parked and unscheduled rather than retried
+// blind, and a count already at the bound is refused by name.
+func (h *Host) scheduleRedrive(ctx context.Context, identity string, delivery plugin.Delivery) {
 	if h == nil || identity == "" {
 		return
 	}
-	h.retryConsumer().schedule(identity, delivery, 0)
+	attempt, err := h.recordedRetryAttempt(ctx, identity)
+	if err != nil {
+		assemblyWarn("tagent: the redelivery of %s reads no attempt count and is not scheduled: %v", identity, err)
+		return
+	}
+	if attempt >= deliveryRetryLimit {
+		assemblyInfo("tagent: the redelivery of %s refused: the chain records %d attempts at the bound", identity, attempt)
+		return
+	}
+	if err := h.writeDeliveryRetryAttempt(ctx, delivery.Target, identity, attempt, delivery); err != nil {
+		assemblyWarn("tagent: the retry attempt of %s did not commit and is not scheduled: %v", identity, err)
+		return
+	}
+	h.retryConsumer().schedule(identity, delivery, attempt)
+}
+
+// recordedRetryAttempt reports the highest retry attempt fact the chain holds
+// for one identity: the count a restart or a later approval resumes from. A read
+// error is surfaced so the caller never schedules a blind retry beside an
+// unreadable account.
+func (h *Host) recordedRetryAttempt(ctx context.Context, identity string) (int, error) {
+	highest := 0
+	for attempt := 0; attempt < deliveryRetryLimit; attempt++ {
+		_, held, err := h.settlementFactOf(ctx, deliverySettlementKey(identity, deliveryRetryState(attempt)))
+		if err != nil {
+			return 0, err
+		}
+		if held {
+			highest = attempt
+		}
+	}
+	return highest, nil
+}
+
+// writeDeliveryRetryAttempt lands one retry attempt fact under its immutable
+// (identity, attempt) key, idempotently: a fact the chain already holds answers
+// without a second commit. The fact records the count only — the body stays with
+// the held(retrying) settlement fact the recovery resends from — and it never
+// touches the state table or the hot-window pin, which the settlement states own.
+func (h *Host) writeDeliveryRetryAttempt(ctx context.Context, target event.Address, identity string, attempt int, delivery plugin.Delivery) error {
+	if h == nil || h.run == nil {
+		return nil
+	}
+	key := deliverySettlementKey(identity, deliveryRetryState(attempt))
+	if _, held, err := h.settlementFactOf(ctx, key); err != nil {
+		return err
+	} else if held {
+		return nil
+	}
+	evt := event.Event{
+		Key:       key,
+		Type:      deliverySettlementType,
+		Timestamp: time.Now(),
+		Message: model.Message{
+			Role:    model.RoleUser,
+			Content: fmt.Sprintf("delivery retry %d: %s (%d bytes)", attempt, identity, len(delivery.Content)),
+		},
+		Meta: map[string]string{
+			event.MetaKeyEventSummary:  deliverySettlementSummary,
+			event.MetaKeyTriggerSource: "host",
+			deliveryMetaIdentity:       identity,
+			deliveryMetaState:          deliveryRetryState(attempt),
+			deliveryMetaTargetAgent:    string(delivery.Target.AgentID),
+			deliveryMetaTargetSession:  string(delivery.Target.SessionID),
+		},
+		Owner:  target,
+		Source: target,
+		Target: target,
+	}
+	if _, err := h.run.CommitToSession(ctx, target, evt); err != nil {
+		return fmt.Errorf("tagent: the delivery retry attempt %d of %s did not commit: %w", attempt, identity, err)
+	}
+	return nil
 }
 
 // cancelRedrive withdraws one obligation from the redrive.
@@ -1388,11 +1521,16 @@ func (h *Host) deliveryBackoffWait(attempt int) time.Duration {
 func (h *Host) recordRetryFailure(ctx context.Context, identity string, entry *deliveryRetry, err error) {
 	_, definite := deliveryFailureState(err)
 	if definite && entry.attempt+1 < deliveryRetryLimit {
+		next := entry.attempt + 1
 		if writeErr := h.writeDeliveryState(ctx, identity, entry.delivery, heldStateOf(deliveryReasonRetrying), time.Time{}); writeErr != nil {
 			assemblyWarn("tagent: the retry state of %s did not commit: %v", identity, writeErr)
 		}
 		h.parkHeld(identity, entry.delivery, time.Time{})
-		h.retryConsumer().schedule(identity, entry.delivery, entry.attempt+1)
+		if writeErr := h.writeDeliveryRetryAttempt(ctx, entry.delivery.Target, identity, next, entry.delivery); writeErr != nil {
+			assemblyWarn("tagent: the retry attempt of %s did not commit and is not scheduled: %v", identity, writeErr)
+			return
+		}
+		h.retryConsumer().schedule(identity, entry.delivery, next)
 		return
 	}
 	reason := deliveryReasonUnknown
@@ -1439,27 +1577,29 @@ func (h *Host) restorePendingDeliveries(ctx context.Context) error {
 	if h == nil || h.run == nil {
 		return nil
 	}
-	if err := h.migrateLegacyDeliveries(ctx); err != nil {
+	if err := h.migrateRetiredDeliveries(ctx); err != nil {
 		return err
 	}
 	return h.restoreEventifiedDeliveries(ctx)
 }
 
 // deliveryRecoveryFacts reads the registered durable chains once and returns the
-// latest settlement per obligation beside every owed declaration. An in-memory
-// run has no durable history and keeps its existing process-local window.
-func (h *Host) deliveryRecoveryFacts(ctx context.Context) (map[string]deliverySettlement, []deliverySettlement, error) {
+// latest settlement per obligation beside every owed declaration and the highest
+// retry attempt fact recorded per obligation. An in-memory run has no durable
+// history and keeps its existing process-local window.
+func (h *Host) deliveryRecoveryFacts(ctx context.Context) (map[string]deliverySettlement, []deliverySettlement, map[string]int, error) {
 	states := map[string]deliverySettlement{}
 	declared := make([]deliverySettlement, 0, 8)
+	attempts := map[string]int{}
 	r := h.run
 	r.mu.Lock()
 	tier := r.tier
 	r.mu.Unlock()
 	if tier == nil {
 		for _, evt := range r.factWindowEvents() {
-			collectDeliveryRecoveryFact(evt, states, &declared)
+			collectDeliveryRecoveryFact(evt, states, &declared, attempts)
 		}
-		return states, declared, nil
+		return states, declared, attempts, nil
 	}
 	allowed := map[int]bool{}
 	for _, partition := range r.registeredPartitions() {
@@ -1475,17 +1615,22 @@ func (h *Host) deliveryRecoveryFacts(ctx context.Context) (map[string]deliverySe
 		}
 		evt := body.Event()
 		evt.Key = stored.Key
-		collectDeliveryRecoveryFact(evt, states, &declared)
+		collectDeliveryRecoveryFact(evt, states, &declared, attempts)
 		return nil
 	})
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
-	return states, declared, nil
+	return states, declared, attempts, nil
 }
 
 // collectDeliveryRecoveryFact folds one committed fact into the recovery set.
-func collectDeliveryRecoveryFact(evt event.Event, states map[string]deliverySettlement, declared *[]deliverySettlement) {
+func collectDeliveryRecoveryFact(evt event.Event, states map[string]deliverySettlement, declared *[]deliverySettlement, attempts map[string]int) {
+	if identity, attempt, ok := deliveryRetryAttemptOf(evt); ok {
+		if attempt > attempts[identity] {
+			attempts[identity] = attempt
+		}
+	}
 	if settlement, ok := settlementOf(evt); ok {
 		states[settlement.identity] = settlement
 	}
@@ -1519,7 +1664,7 @@ func collectDeliveryRecoveryFact(evt event.Event, states map[string]deliverySett
 // newest settlement fact of its identity, and every settlement fact no
 // declaration of the window explains is restored as the obligation it states.
 func (h *Host) restoreEventifiedDeliveries(ctx context.Context) error {
-	window, declared, err := h.deliveryRecoveryFacts(ctx)
+	window, declared, attempts, err := h.deliveryRecoveryFacts(ctx)
 	if err != nil {
 		return err
 	}
@@ -1536,7 +1681,11 @@ func (h *Host) restoreEventifiedDeliveries(ctx context.Context) error {
 		seen[declaration.identity] = true
 		settlement, known := window[declaration.identity]
 		if !known {
-			settlement, known = h.settlementStateOf(ctx, declaration.identity)
+			var err error
+			settlement, known, err = h.settlementStateOf(ctx, declaration.identity)
+			if err != nil {
+				return err
+			}
 		}
 		if !known {
 			settlement = declaration
@@ -1577,7 +1726,15 @@ func (h *Host) restoreEventifiedDeliveries(ctx context.Context) error {
 		if !parked {
 			continue
 		}
-		h.retryConsumer().schedule(identity, held.delivery, 0)
+		attempt := attempts[identity]
+		if attempt >= deliveryRetryLimit {
+			if writeErr := h.writeDeliveryState(ctx, identity, held.delivery, heldStateOf(deliveryReasonRetryExhausted), time.Time{}); writeErr != nil {
+				assemblyWarn("tagent: the exhausted retry state of %s did not commit beside the restart: %v", identity, writeErr)
+			}
+			assemblyInfo("tagent: the redelivery of %s refused beside the restart: the chain records %d attempts at the bound", identity, attempt)
+			continue
+		}
+		h.retryConsumer().schedule(identity, held.delivery, attempt)
 	}
 	return nil
 }
@@ -1666,21 +1823,21 @@ func (h *Host) releaseDelivery(identity string) {
 	h.mu.Unlock()
 }
 
-// migrateLegacyDeliveries moves the read-only records of the storage tier onto
+// migrateRetiredDeliveries moves the read-only records of the storage tier onto
 // the settlement facts, once, before the account is read:
 // - Every record is read (a record that does not unmarshal refuses the boot by name), and its six-state status maps onto a settlement state under the same delivery identity, idempotently: a fact the chain already holds is answered without a second commit, so a second boot migrates nothing twice.
 // - A record naming no identity also refuses the boot: an obligation no identity can name is one no approval, refusal or receipt can resolve.
 // - The records themselves are left in place as the read-only audit of the migration (this path never writes them again).
 //
 // The migration is the one read of the read-only account: no live path writes it, and no settlement path reads it back.
-func (h *Host) migrateLegacyDeliveries(ctx context.Context) error {
+func (h *Host) migrateRetiredDeliveries(ctx context.Context) error {
 	log := h.deliveryDurable()
 	if log == nil {
 		return nil
 	}
 	records, err := log.Scan(ctx, hostDeliveryPrefix)
 	if err != nil {
-		return fmt.Errorf("tagent: read the legacy delivery records: %w", err)
+		return fmt.Errorf("tagent: read the retired delivery records: %w", err)
 	}
 	keys := make([]string, 0, len(records))
 	for key := range records {
@@ -1692,7 +1849,7 @@ func (h *Host) migrateLegacyDeliveries(ctx context.Context) error {
 		if err := json.Unmarshal(records[key], &record); err != nil {
 			return fmt.Errorf("tagent: the delivery record %s does not unmarshal: %w", key, err)
 		}
-		state, known := settlementStateOfLegacy(record.Status)
+		state, known := settlementStateOfRetiredRecord(record.Status)
 		if !known {
 			continue
 		}
@@ -1703,11 +1860,11 @@ func (h *Host) migrateLegacyDeliveries(ctx context.Context) error {
 			h.heldSeq = seq
 		}
 		delivery := plugin.Delivery{Content: record.Content, Lineage: record.Lineage, Target: record.Target}
-		extra := map[string]string{deliveryMetaLegacy: key}
+		extra := map[string]string{deliveryMetaMigrated: key}
 		if err := h.writeDeliverySettlement(ctx, record.Target, record.ID, state, delivery, record.HeldAt, extra); err != nil {
 			return fmt.Errorf("tagent: the delivery record %s did not migrate: %w", key, err)
 		}
-		assemblyInfo("tagent: the legacy delivery record %s migrated as %s", record.ID, state)
+		assemblyInfo("tagent: the retired delivery record %s migrated as %s", record.ID, state)
 	}
 	return nil
 }

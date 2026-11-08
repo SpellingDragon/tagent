@@ -215,8 +215,8 @@ type indexPosition struct {
 	session   event.SessionID
 }
 
-// FileSegmentStore commits events into time-window segments over one key-value
-// backend. One commit stages the event body, its index entry and the window meta
+// FileSegmentStore commits events into time-window segments over one atomic
+// store engine; it names no engine and no file layout, so any engine backs it. One commit stages the event body, its index entry and the window meta
 // the window needs as one batch, and publishes the event to the read cache, the
 // resident index and the event count only when that commit returns success. A
 // commit that fails names the barrier as its step, carries its cause, unstages
@@ -231,7 +231,7 @@ type indexPosition struct {
 // 契约: docs/wiki/memory/memory-architecture.md#file-segment-store
 type FileSegmentStore struct {
 	mu      sync.Mutex
-	kv      kvPort
+	kv      AtomicStore
 	index   map[event.EventID]indexPosition
 	cache   *segmentCache
 	count   int
@@ -241,7 +241,7 @@ type FileSegmentStore struct {
 // newFileSegmentStore opens the segment store held in kv and publishes the
 // index and window table of every stored record, leaving the event bodies on
 // the key-value seam until a read names one.
-func newFileSegmentStore(kv kvPort) (*FileSegmentStore, error) {
+func newFileSegmentStore(kv AtomicStore) (*FileSegmentStore, error) {
 	store := &FileSegmentStore{
 		kv:      kv,
 		index:   map[event.EventID]indexPosition{},
@@ -255,20 +255,19 @@ func newFileSegmentStore(kv kvPort) (*FileSegmentStore, error) {
 }
 
 // Load rebuilds the resident index and window table from the persisted store
-// without returning an event body. It enumerates shard labels to discover the
-// partitions, then reads the index and meta prefixes; localfile's shard-granular
-// scan still validates every encoded value in those numeric shards.
-// each partition: both are small entries, and no {pid}:evt:{window}:{seq} body
-// is read. A record whose index and window meta did not both arrive stays out of
+// without returning an event body. It enumerates the engine's key namespaces to
+// discover the partitions, then reads the index and meta prefixes of each
+// partition: both are small entries, and no {pid}:evt:{window}:{seq} body is
+// read. A record whose index and window meta did not both arrive stays out of
 // the published state, and EventCount counts the published records.
 func (s *FileSegmentStore) Load(ctx context.Context) error {
-	labels, err := s.partitionLabels(ctx)
+	namespaces, err := s.kv.Namespaces(ctx)
 	if err != nil {
 		return err
 	}
 	partitions := map[int]struct{}{}
-	for _, label := range labels {
-		partition, err := strconv.Atoi(label)
+	for _, namespace := range namespaces {
+		partition, err := strconv.Atoi(namespace)
 		if err != nil {
 			continue
 		}
@@ -282,16 +281,16 @@ func (s *FileSegmentStore) Load(ctx context.Context) error {
 	positions := map[event.EventID]indexPosition{}
 	meta := map[windowSlot]storedWindowMeta{}
 	for _, partition := range sorted {
-		idxPairs, err := s.kv.kvRead(ctx, kvFetch{prefix: fmt.Sprintf("%d:%s", partition, segmentIndexPrefix)})
+		idxPairs, err := s.kv.Read(ctx, Fetch{Prefix: fmt.Sprintf("%d:%s", partition, segmentIndexPrefix)})
 		if err != nil {
 			return err
 		}
 		for _, pair := range idxPairs {
-			eventKey, held := strings.CutPrefix(pair.key, fmt.Sprintf("%d:%s", partition, segmentIndexPrefix))
+			eventKey, held := strings.CutPrefix(pair.Key, fmt.Sprintf("%d:%s", partition, segmentIndexPrefix))
 			if !held || eventKey == "" {
 				continue
 			}
-			value := string(pair.value)
+			value := string(pair.Value)
 			fields := strings.SplitN(value, ":", 3)
 			if len(fields) < 2 {
 				continue
@@ -318,12 +317,12 @@ func (s *FileSegmentStore) Load(ctx context.Context) error {
 			}
 			positions[event.EventID(eventKey)] = indexPosition{partition: partition, window: window, seq: seq, typ: typ, session: session}
 		}
-		metaPairs, err := s.kv.kvRead(ctx, kvFetch{prefix: fmt.Sprintf("%d:meta:", partition)})
+		metaPairs, err := s.kv.Read(ctx, Fetch{Prefix: fmt.Sprintf("%d:meta:", partition)})
 		if err != nil {
 			return err
 		}
 		for _, pair := range metaPairs {
-			name, held := strings.CutPrefix(pair.key, fmt.Sprintf("%d:meta:", partition))
+			name, held := strings.CutPrefix(pair.Key, fmt.Sprintf("%d:meta:", partition))
 			if !held {
 				continue
 			}
@@ -332,8 +331,8 @@ func (s *FileSegmentStore) Load(ctx context.Context) error {
 				continue
 			}
 			var entry storedWindowMeta
-			if err := json.Unmarshal(pair.value, &entry); err != nil {
-				return fmt.Errorf("%w: window meta %q: %w", ErrSnapshotCorrupt, pair.key, err)
+			if err := json.Unmarshal(pair.Value, &entry); err != nil {
+				return fmt.Errorf("%w: window meta %q: %w", ErrSnapshotCorrupt, pair.Key, err)
 			}
 			meta[windowSlot{partition: partition, window: window}] = entry
 		}
@@ -357,36 +356,12 @@ func (s *FileSegmentStore) Load(ctx context.Context) error {
 	return nil
 }
 
-// partitionLabels discovers shard labels without reading non-segment bodies.
-// Backends without label enumeration retain the existing key-discovery fallback.
-func (s *FileSegmentStore) partitionLabels(ctx context.Context) ([]string, error) {
-	if labels, ok := s.kv.(kvLabeler); ok {
-		return labels.kvLabels(ctx)
-	}
-	keys, err := s.kv.kvKeys(ctx, "")
-	if err != nil {
-		return nil, err
-	}
-	labels := make([]string, 0, len(keys))
-	seen := map[string]struct{}{}
-	for _, key := range keys {
-		label := shardLabelOf(key)
-		if _, held := seen[label]; held {
-			continue
-		}
-		seen[label] = struct{}{}
-		labels = append(labels, label)
-	}
-	sort.Strings(labels)
-	return labels, nil
-}
-
 // StoreEvent commits one event behind the segment commit barrier: the event
-// body, its index entry and the window meta the window needs are staged as one
-// batch and committed before the event reaches the read cache, the resident
-// index, the event count or the caller. A repeat of the committed record returns
-// success without a second fact, other bytes under the same event key are
-// refused, and a failed commit leaves nothing published.
+// body, its index entry and the window meta the window needs are one batch
+// committed before the event reaches the read cache, the resident index, the
+// event count or the caller. A repeat of the committed record returns success
+// without a second fact, other bytes under the same event key are refused, and a
+// failed commit leaves nothing published.
 func (s *FileSegmentStore) StoreEvent(ctx context.Context, rec SegmentRecord) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -432,15 +407,13 @@ func (s *FileSegmentStore) StoreEvent(ctx context.Context, rec SegmentRecord) er
 	if err != nil {
 		return err
 	}
-	previousMeta, hadMeta := s.windowMetaValue(rec.PartitionID, rec.WindowTS)
-	staged := []kvStaged{{key: evtKey}, {key: idxKey}, {key: metaKey, value: previousMeta, present: hadMeta}}
-	batch := kvBatch{puts: []kvPair{
-		{key: evtKey, value: evtValue},
-		{key: idxKey, value: idxValue},
-		{key: metaKey, value: metaValue},
+	batch := Batch{Puts: []Pair{
+		{Key: evtKey, Value: evtValue},
+		{Key: idxKey, Value: idxValue},
+		{Key: metaKey, Value: metaValue},
 	}}
-	if err := s.kv.kvCommit(ctx, batch); err != nil {
-		return s.abort(ctx, fmt.Errorf("%w: %w", ErrSegmentBarrier, err), staged)
+	if err := s.kv.Commit(ctx, batch); err != nil {
+		return fmt.Errorf("%w: %w", ErrSegmentBarrier, err)
 	}
 	stored := StoredEvent{
 		Key:         rec.EventKey,
@@ -505,14 +478,14 @@ func (s *FileSegmentStore) duplicateBodyLocked(ctx context.Context, key event.Ev
 // readBodyLocked reads the persisted body of one indexed event. The caller
 // holds the lock.
 func (s *FileSegmentStore) readBodyLocked(ctx context.Context, position indexPosition) ([]byte, bool, error) {
-	pairs, err := s.kv.kvRead(ctx, kvFetch{key: fmt.Sprintf("%d:evt:%d:%d", position.partition, position.window, position.seq)})
+	pairs, err := s.kv.Read(ctx, Fetch{Key: fmt.Sprintf("%d:evt:%d:%d", position.partition, position.window, position.seq)})
 	if err != nil {
 		return nil, false, err
 	}
 	if len(pairs) == 0 {
 		return nil, false, nil
 	}
-	return append([]byte(nil), pairs[0].value...), true, nil
+	return append([]byte(nil), pairs[0].Value...), true, nil
 }
 
 // EventCount returns the number of events published by successful commits, so
@@ -667,7 +640,7 @@ func (s *FileSegmentStore) Events(ctx context.Context) ([]StoredEvent, error) {
 // Close ends the store with a final barrier over whatever the backend still
 // holds staged, and repeats as a no-op.
 func (s *FileSegmentStore) Close() error {
-	return s.kv.kvCommit(context.Background(), kvBatch{})
+	return s.kv.Commit(context.Background(), Batch{})
 }
 
 // nextWindowMeta returns the window meta the record leaves behind: one more
@@ -690,32 +663,9 @@ func (s *FileSegmentStore) nextWindowMeta(rec SegmentRecord) *storedWindowMeta {
 	return meta
 }
 
-// windowMetaValue returns the stored window meta of one partition window in its
-// persisted form, when the store already holds one.
-func (s *FileSegmentStore) windowMetaValue(partition int, window int64) ([]byte, bool) {
-	previous, held := s.windows[windowKey(partition, window)]
-	if !held {
-		return nil, false
-	}
-	value, err := json.Marshal(previous)
-	if err != nil {
-		return nil, false
-	}
-	return value, true
-}
-
 // windowKey names one partition window in the store's window meta table.
 func windowKey(partition int, window int64) string {
 	return fmt.Sprintf("%d:%d", partition, window)
-}
-
-// abort rolls the staged writes of a failed commit back and returns the failure
-// that caused it, joined with whatever the rollback itself reports.
-func (s *FileSegmentStore) abort(ctx context.Context, cause error, staged []kvStaged) error {
-	if err := kvUnstage(ctx, s.kv, staged); err != nil {
-		return errors.Join(cause, fmt.Errorf("%w: %w", ErrUnstage, err))
-	}
-	return cause
 }
 
 // SegmentPosition names one byte position inside a stored original, so one

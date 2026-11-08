@@ -1,8 +1,9 @@
 // The idle-address reclamation checks: a resident consumption instance whose
-// address holds no work and no unsettled delivery is reclaimed after the idle
-// TTL, an address that still works or still owes a target never is, and the
-// reclamation is observable as a named counter beside a log line carrying the
-// address and the reason.
+// address holds no work and no unsettled delivery is reclaimed once it rested a
+// full idle window, an address that still works or still owes a target never is,
+// and the reclamation is observable as a log line carrying the address and the
+// reason. The sweep runs at the input boundary of the set (see Consumers.Ensure),
+// so no ticker of its own decides when an address is read as idle.
 //
 // 契约: docs/wiki/agent/event-flow.md#runner-flow
 package agent
@@ -17,11 +18,6 @@ import (
 // delivery keeps its instance: a resident loop that served nothing for this long
 // is rebuilt from the chain on the next input, exactly as a fresh mount is.
 const defaultIdleAddressTTL = 10 * time.Minute
-
-// idleReapInterval is how often the set sweeps its resting addresses. A full
-// TTL is measured from the first sweep that found an address resting, so the
-// interval only decides the resolution of the reclamation, never its bound.
-const idleReapInterval = 30 * time.Second
 
 // SetIdleTTL changes the idle bound of this set. A negative bound keeps every
 // instance for the life of the set; a zero restores defaultIdleAddressTTL.
@@ -41,10 +37,10 @@ func (cs *Consumers) SetIdleTTL(ttl time.Duration) {
 	cs.mu.Unlock()
 }
 
-// SetDeliveryPending registers the predicate the reaper reads before it
-// reclaims an address: true names a delivery account that still owes a target
-// (a held or owed delivery fact), so the instance stays however long it rests.
-// A nil predicate names no unsettled delivery anywhere.
+// SetDeliveryPending registers the predicate the sweep reads before it reclaims
+// an address: true names a delivery account that still owes a target (a held or
+// owed delivery fact), so the instance stays however long it rests. A nil
+// predicate names no unsettled delivery anywhere.
 func (cs *Consumers) SetDeliveryPending(pending func(event.Address) bool) {
 	if cs == nil {
 		return
@@ -52,16 +48,6 @@ func (cs *Consumers) SetDeliveryPending(pending func(event.Address) bool) {
 	cs.mu.Lock()
 	cs.deliveryPending = pending
 	cs.mu.Unlock()
-}
-
-// RecycleCount reports how many idle instances this set reclaimed.
-func (cs *Consumers) RecycleCount() uint64 {
-	if cs == nil {
-		return 0
-	}
-	cs.mu.Lock()
-	defer cs.mu.Unlock()
-	return cs.recycled
 }
 
 // RecycleIdle runs one reclamation sweep at the given clock reading and answers
@@ -142,10 +128,9 @@ func (cs *Consumers) clearIdle(addr event.Address, instance *Consumer) {
 }
 
 // reclaim ends one resting instance: the loop registry and the set forget it
-// together, the instance's context is cancelled, the named counter advances and
-// the reclamation is rendered with the address and the reason. A caller that
-// races another reclamation of the same address reclaims nothing, so one
-// instance is counted once.
+// together, the instance's context is cancelled and the reclamation is rendered
+// with the address and the reason. A caller that races another reclamation of
+// the same address reclaims nothing, so one instance ends once.
 func (cs *Consumers) reclaim(consumer *Consumer) bool {
 	if consumer == nil || cs.loop == nil {
 		return false
@@ -165,29 +150,11 @@ func (cs *Consumers) reclaim(consumer *Consumer) bool {
 		delete(cs.live, consumer.addr)
 	}
 	delete(cs.idleSince, consumer.addr)
-	cs.recycled++
-	count := cs.recycled
 	cs.mu.Unlock()
 	if consumer.cancel != nil {
 		consumer.cancel()
 	}
-	consumerWarn("tagent: recycled idle consumption address agent=%s session=%s reason=idle-ttl count=%d",
-		consumer.addr.AgentID, consumer.addr.SessionID, count)
+	consumerWarn("tagent: recycled idle consumption address agent=%s session=%s reason=idle-ttl",
+		consumer.addr.AgentID, consumer.addr.SessionID)
 	return true
-}
-
-// reapIdle sweeps the resting addresses on the reaper interval until the set is
-// marked stopped. The sweep never starts work and never cancels a loop that is
-// not resting, so a set beside live traffic only records what it observes.
-func (cs *Consumers) reapIdle() {
-	ticker := time.NewTicker(idleReapInterval)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-cs.stopping:
-			return
-		case now := <-ticker.C:
-			cs.RecycleIdle(now)
-		}
-	}
 }

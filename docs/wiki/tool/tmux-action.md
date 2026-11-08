@@ -46,7 +46,8 @@
 
 - 同名会话已存在 ⇒ `errSessionExists` 直接拒绝：两个开发服务器抢同一端口是典型故障，"看起来成功"的第二个进程比报错更难查。
 - 先 `new-session -d` 建壳，再 `set-option remain-on-exit on`，**回读校验**该值确实为 `on`（失败即杀会话报错，不带着"退出就消失"的窗口干活），最后 `respawn-pane -k` 起真实命令。
-- 命令包成子 shell：`( cmd ); code=$?; <写退出码记录>; sleep 0.1; exit $code`。那 100ms 的 drain 让**瞬时结束的命令**其输出也来得及落在 pane 屏上，`Capture` 才有东西可读。
+- 命令包成子 shell，且**夹在两道世代标记之间**：`printf <<<exec-generation:TOKEN>>>` → `( cmd )` → 同一标记 → 写退出码记录 → `sleep 0.1` → `exit $code`。标记同时写在命令前后，所以"标记出现过"不等于"本次命令跑完了"；判定用的是帧**是否携带本世代标记**（判据与重试见 [tool-architecture.md](tool-architecture.md#action-tool)，那边是本机制的家）。那 100ms 的 drain 让**瞬时结束的命令**其输出也来得及落在 pane 屏上，`Capture` 才有东西可读。
+- 退出码记录**按世代取名**：一个会话名可以被后来的世代复用，记录名带本世代令牌，读它的人问的是"我起的这一代写了什么"，而不是在同名会话的历次世代之间猜；准备记录时先清掉旧世代的残留，记录建不出来就只靠 tmux 自己的 `pane_dead_status`。
 - `Capture` 读的是运行期观测到的帧；中途的部分读取不覆盖它。
 
 ## 六、`exec-state` 只进审计，不进模型

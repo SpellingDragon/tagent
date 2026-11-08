@@ -50,6 +50,32 @@ func Work() {}
 
 BASE_SYMBOLS = ["RecallPort", "resolveKept", "validateKept"]
 
+# The two declaration surfaces the generic agent keys are read from. The fixture
+# spells both, so every case below proves the gate judged the fixture's own
+# declarations rather than a copy baked into the checker.
+FIXTURE_AGENT_KEYS = """package config
+
+var agentKeys = []string{
+	"id", "model", "tools", "plugins", "memory", "meditation",
+	"max_tokens", "provider_context_window", "output_reserve",
+}
+"""
+
+FIXTURE_HOST_DOCUMENT = """package assembly
+
+type hostAgent struct {
+	Provider     string `yaml:"provider"`
+	Model        string `yaml:"model"`
+	SystemPrompt hostPrompt `yaml:"system_prompt"`
+	Tools        []hostToolRef `yaml:"tools"`
+	SkillDirs    []string `yaml:"skill_dirs"`
+	ReadRoot     string `yaml:"read_root"`
+	Memory       config.MemorySpec `yaml:"memory"`
+	Meditation   config.MeditationSpec `yaml:"meditation"`
+	OutputReserve *int `yaml:"output_reserve"`
+}
+"""
+
 
 def write(root, rel, text):
     path = os.path.join(root, rel)
@@ -70,6 +96,8 @@ def write_baseline(root, symbols):
 def build_fixture(root, host=None, assembly=None, runtime=None, symbols=None):
     write(root, "examples/wechat-bot/tagent.yaml", CLEAN_HOST if host is None else host)
     write(root, "assembly/fixture.go", CLEAN_ASSEMBLY if assembly is None else assembly)
+    write(root, "assembly/host_document.go", FIXTURE_HOST_DOCUMENT)
+    write(root, "api/config/decode.go", FIXTURE_AGENT_KEYS)
     write(root, "runtime/fixture.go", CLEAN_RUNTIME if runtime is None else runtime)
     return write_baseline(root, BASE_SYMBOLS if symbols is None else symbols)
 
@@ -228,7 +256,7 @@ def case_write_baseline_refuses_golden():
 def main():
     case("clean fixture passes (generic keys, baseline symbols, comments only)",
          contains=["check_feature_boundary: ok", "r1 host_documents=1",
-                   "r2 go_files=1 symbols=3"])
+                   "r2 go_files=2 symbols=3"])
 
     bad_host = CLEAN_HOST.replace("    meditation:", "    fancy_feature: {}\n    meditation:")
     case("new feature-specific schema section is rejected",
@@ -238,6 +266,34 @@ def main():
     flow_host = "agents: {a: {fancy_feature: {}}}\n"
     case("flow-style feature-specific schema section is rejected",
          host=flow_host, expected_rc=1, contains=["fancy_feature", "R1"])
+
+    # The two holes the gate was repaired for, each with its own direction: a key
+    # the declarations carry is never read as a feature section (positive), and a
+    # sequence-shaped agents block reaches the same verdict as a mapping (negative).
+    case("a declared key the copy had fallen behind on is not a feature section",
+         host="agents:\n  alpha:\n    model: fixture\n    output_reserve: 2048\n",
+         expected_rc=0, contains=["check_feature_boundary: ok"])
+
+    case("list-style agents are scanned and a feature section is rejected",
+         host="agents:\n  - id: alpha\n    model: fixture\n    fancy_feature:\n      enabled: true\n",
+         expected_rc=1,
+         contains=["fancy_feature", "R1", "under agents.alpha"])
+
+    case("list-style agents with declared keys only pass",
+         host="agents:\n  - id: alpha\n    model: fixture\n    output_reserve: 2048\n",
+         expected_rc=0, contains=["check_feature_boundary: ok"])
+
+    case("list-style item with its marker alone on the line is scanned",
+         host="agents:\n  -\n    id: alpha\n    fancy_feature: {}\n",
+         expected_rc=1, contains=["fancy_feature", "R1"])
+
+    case("flow-sequence agents are scanned and a feature section is rejected",
+         host="agents: [{id: alpha, model: fixture, fancy_feature: {}}]\n",
+         expected_rc=1, contains=["fancy_feature", "R1", "under agents.alpha"])
+
+    case("a list-style key named by neither declaration is rejected",
+         host="agents:\n  - id: alpha\n    model: fixture\n    undeclared_key: 1\n",
+         expected_rc=1, contains=["undeclared_key", "R1"])
 
     case("new resolve symbol outside the baseline is rejected",
          assembly=CLEAN_ASSEMBLY + "\nfunc resolveFancy() {}\n",

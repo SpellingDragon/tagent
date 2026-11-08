@@ -182,7 +182,7 @@
       "name": "budgetMessageOverheadTokens",
       "kind": "const",
       "file": "runtime/agent/request_assembly.go",
-      "reason": "请求预算计量里每条消息的固定开销（token）。"
+      "reason": "请求预算计量里每条消息的固定开销（token）。长上下文熔断的近似计量不另立字节数：它按 chars-per-token 登记的换算比反向导出字节framing（runtime/agent/fuse.go 的 messageOverheadBytes 是派生常量），两处计量因此只有这一份登记。"
     },
     {
       "id": "budget-tool-call-overhead",

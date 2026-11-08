@@ -2,8 +2,10 @@ package rl
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"reflect"
 	"runtime"
 	"strings"
 	"sync"
@@ -276,6 +278,160 @@ func mentions(reasons []string, text string) bool {
 	return false
 }
 
+// requestEvidenceOf builds one request evidence record beside the reference its
+// snapshot content is read back under.
+func requestEvidenceOf(t *testing.T, decision event.DecisionID, content []byte) RequestEvidenceRecord {
+	t.Helper()
+	return RequestEvidenceRecord{
+		DecisionID: decision,
+		EpisodeID:  "ep-evidence",
+		Snapshot:   snapshotRef(content, "snapshot-"+string(decision), "capture/cap-evidence/"+string(decision)),
+	}
+}
+
+// TestRecordKinds pins the closed record kind set and the bounded landing of request evidence.
+//   - the request evidence line round-trips through the versioned line beside the four record kinds it joins
+//   - unknown_kind_rejected: a kind this package does not declare, and a kind whose payload disagrees with it, are both refused
+//   - request evidence naming no decision or carrying no readable reference is refused where it is written
+//   - full_queue_counted: request evidence refused under the in-flight bound is counted in the loss ledger and reported by name
+//   - the landed evidence is what the writer received, and the seal accounts it
+//
+// 契约: docs/wiki/rl/rl-architecture.md#trajectory-capture
+func TestRecordKinds(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("the request evidence line round-trips", func(t *testing.T) {
+		record := requestEvidenceOf(t, "dec-evidence", []byte("the runtime request snapshot"))
+		line, err := MarshalLine(NewRequestEvidenceLine(record))
+		if err != nil {
+			t.Fatalf("marshal the request evidence line: %v", err)
+		}
+		parsed, err := ParseLine(line)
+		if err != nil {
+			t.Fatalf("parse the request evidence line: %v", err)
+		}
+		if parsed.Kind != RecordKindRequest {
+			t.Fatalf("parsed kind = %q, want %q", parsed.Kind, RecordKindRequest)
+		}
+		evidence := parsed.RequestEvidence()
+		if evidence == nil || !reflect.DeepEqual(*evidence, record) {
+			t.Fatalf("parsed evidence = %+v, want %+v", evidence, record)
+		}
+		for _, kind := range []RecordKind{RecordKindEpisode, RecordKindDecision, RecordKindAttempt, RecordKindAnnex, RecordKindRequest} {
+			if kind == "" {
+				t.Fatalf("the kind set carries an unnamed kind")
+			}
+		}
+	})
+
+	t.Run("unknown_kind_rejected", func(t *testing.T) {
+		record := requestEvidenceOf(t, "dec-refused", []byte("body"))
+		line, err := MarshalLine(NewRequestEvidenceLine(record))
+		if err != nil {
+			t.Fatalf("marshal the request evidence line: %v", err)
+		}
+		var head map[string]any
+		if err := json.Unmarshal(line, &head); err != nil {
+			t.Fatalf("decode the marshaled line: %v", err)
+		}
+		head["kind"] = "request_evidence_v2"
+		unknown, err := json.Marshal(head)
+		if err != nil {
+			t.Fatalf("encode the unknown kind line: %v", err)
+		}
+		if _, err := ParseLine(unknown); !errors.Is(err, ErrLineShape) {
+			t.Fatalf("parse an undeclared kind = %v, want ErrLineShape", err)
+		}
+		if _, err := MarshalLine(Line{Schema: SchemaCurrent, Kind: RecordKindRequest, Episode: &EpisodeRecord{}}); !errors.Is(err, ErrLineShape) {
+			t.Fatalf("marshal a request line carrying an episode payload = %v, want ErrLineShape", err)
+		}
+		if _, err := MarshalLine(Line{Schema: SchemaCurrent, Kind: "request_evidence_v2", request: &record}); !errors.Is(err, ErrLineShape) {
+			t.Fatalf("marshal an undeclared kind = %v, want ErrLineShape", err)
+		}
+	})
+
+	t.Run("evidence no request joins and evidence no content reads back are refused", func(t *testing.T) {
+		unidentified := requestEvidenceOf(t, "", []byte("body"))
+		if err := ValidateRequestEvidence(unidentified); !errors.Is(err, ErrRequestEvidenceMissing) {
+			t.Fatalf("evidence without a decision = %v, want ErrRequestEvidenceMissing", err)
+		}
+		if _, err := MarshalLine(NewRequestEvidenceLine(unidentified)); !errors.Is(err, ErrRequestEvidenceMissing) {
+			t.Fatalf("marshal evidence without a decision = %v, want ErrRequestEvidenceMissing", err)
+		}
+		unreadable := RequestEvidenceRecord{DecisionID: "dec-unreadable"}
+		if err := ValidateRequestEvidence(unreadable); !errors.Is(err, ErrSnapshotUnreadable) {
+			t.Fatalf("evidence without a reference = %v, want ErrSnapshotUnreadable", err)
+		}
+		if err := ValidateRequestEvidence(requestEvidenceOf(t, "dec-exact", []byte("body"))); err != nil {
+			t.Fatalf("validate readable evidence: %v", err)
+		}
+	})
+
+	t.Run("full_queue_counted", func(t *testing.T) {
+		writer := &recordingWriter{synced: true, block: true, release: make(chan struct{})}
+		sink, err := NewCaptureSink("cap:evidence-flight", SinkConfig{MaxInFlight: 1}, writer)
+		if err != nil {
+			t.Fatalf("open the sink: %v", err)
+		}
+		if err := sink.RecordRequestEvidence(ctx, requestEvidenceOf(t, "dec-first", []byte("first body"))); err != nil {
+			t.Fatalf("record the first evidence line: %v", err)
+		}
+		err = sink.RecordRequestEvidence(ctx, requestEvidenceOf(t, "dec-second", []byte("second body")))
+		if !errors.Is(err, ErrCaptureRefused) || !strings.Contains(err.Error(), string(BoundInFlight)) {
+			t.Fatalf("record past the in-flight bound = %v, want ErrCaptureRefused under BoundInFlight", err)
+		}
+		if ledger := sink.Ledger(); ledger.DroppedInFlight != 1 || ledger.Admitted != 1 || ledger.InFlight != 1 {
+			t.Fatalf("ledger = %+v, want one admitted record, one in-flight loss and one record still in flight", ledger)
+		}
+		close(writer.release)
+		manifest, err := sink.Seal(ctx)
+		if err != nil {
+			t.Fatalf("seal the sink: %v", err)
+		}
+		if manifest.Records != 1 || manifest.Dropped != 1 || !manifest.Partial {
+			t.Fatalf("manifest = %+v, want the landed evidence beside the counted loss", manifest)
+		}
+		if !mentions(manifest.Reasons, "1 records were refused under an admission bound") {
+			t.Fatalf("reasons = %v, want the refusal named", manifest.Reasons)
+		}
+	})
+
+	t.Run("the landed evidence is what the writer received", func(t *testing.T) {
+		writer := &recordingWriter{synced: true}
+		sink, err := NewCaptureSink("cap:evidence", SinkConfig{}, writer)
+		if err != nil {
+			t.Fatalf("open the sink: %v", err)
+		}
+		record := requestEvidenceOf(t, "dec-landed", []byte("landed body"))
+		if err := sink.RecordRequestEvidence(ctx, record); err != nil {
+			t.Fatalf("record the evidence line: %v", err)
+		}
+		if _, err := sink.Seal(ctx); err != nil {
+			t.Fatalf("seal the sink: %v", err)
+		}
+		writer.mu.Lock()
+		landed := append([][]byte(nil), writer.payloads...)
+		writer.mu.Unlock()
+		if len(landed) != 1 {
+			t.Fatalf("landed lines = %d, want the one evidence line", len(landed))
+		}
+		parsed, err := ParseLine(landed[0])
+		if err != nil {
+			t.Fatalf("parse the landed line: %v", err)
+		}
+		evidence := parsed.RequestEvidence()
+		if evidence == nil || !reflect.DeepEqual(*evidence, record) {
+			t.Fatalf("landed evidence = %+v, want %+v", evidence, record)
+		}
+		if err := VerifySnapshot(evidence.Snapshot, []byte("landed body")); err != nil {
+			t.Fatalf("read the landed evidence back through its reference: %v", err)
+		}
+		if err := VerifySnapshot(evidence.Snapshot, []byte("another body")); !errors.Is(err, ErrSnapshotMismatch) {
+			t.Fatalf("read another body through the reference = %v, want ErrSnapshotMismatch", err)
+		}
+	})
+}
+
 // exportAt is the fixed record time the capture invariants stamp their records and
 // writer sync evidence with.
 var exportAt = time.Date(2026, 10, 18, 12, 0, 0, 0, time.UTC)
@@ -304,6 +460,7 @@ type recordingWriter struct {
 	sealed    bool
 	commits   int
 	commitErr error
+	payloads  [][]byte
 }
 
 func (w *recordingWriter) Append(name string, line []byte) error {
@@ -316,6 +473,7 @@ func (w *recordingWriter) Append(name string, line []byte) error {
 		return ErrWriterSealed
 	}
 	w.lines++
+	w.payloads = append(w.payloads, append([]byte(nil), line...))
 	return nil
 }
 

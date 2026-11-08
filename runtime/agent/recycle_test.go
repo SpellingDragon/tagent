@@ -1,7 +1,7 @@
 // The idle-address reclamation checks: a resident instance is reclaimed only
-// when it rests, owes no delivery and passed the idle TTL, and the reclamation
-// is observable as a named counter beside the log line carrying the address and
-// the reason.
+// when it rests, owes no delivery and passed the idle TTL, the sweep runs at the
+// input boundary of the set, and the reclamation is observable as the log line
+// carrying the address and the reason.
 //
 // 契约: docs/wiki/agent/event-flow.md#runner-flow
 package agent
@@ -88,9 +88,6 @@ func TestIdleAddressReclaimed(t *testing.T) {
 	if got := rig.consumers.RecycleIdle(now.Add(31 * time.Second)); got != 1 {
 		t.Fatalf("the sweep past the TTL reclaimed %d instances, want the one resting address", got)
 	}
-	if got := rig.consumers.RecycleCount(); got != 1 {
-		t.Fatalf("the recycle counter = %d, want 1", got)
-	}
 	select {
 	case <-consumer.Done():
 	case <-time.After(5 * time.Second):
@@ -135,9 +132,6 @@ func TestActiveAddressNotReclaimed(t *testing.T) {
 			t.Fatalf("the sweep %d reclaimed %d instances beside a flying segment", at, got)
 		}
 	}
-	if got := flying.consumers.RecycleCount(); got != 0 {
-		t.Fatalf("the recycle counter = %d beside a flying segment", got)
-	}
 	behaviour.release()
 
 	rig := newResidentInstanceRig(t)
@@ -165,8 +159,8 @@ func TestActiveAddressNotReclaimed(t *testing.T) {
 }
 
 // TestRecycleObservable pins the observation face of one reclamation.
-// - one reclamation increments the named counter and renders one WARN line with the address
-// - a second sweep never counts the same instance twice
+// - one reclamation renders one WARN line with the address and the reason
+// - a second sweep never reclaims the same instance twice
 //
 // 契约: docs/wiki/agent/event-flow.md#runner-flow
 func TestRecycleObservable(t *testing.T) {
@@ -185,16 +179,42 @@ func TestRecycleObservable(t *testing.T) {
 	if got := rig.consumers.RecycleIdle(now.Add(31 * time.Second)); got != 1 {
 		t.Fatalf("the sweep reclaimed %d instances, want 1", got)
 	}
-	if got := rig.consumers.RecycleCount(); got != 1 {
-		t.Fatalf("the recycle counter = %d, want 1", got)
-	}
 	if !logger.warned("recycled idle consumption", "agent="+string(addr.AgentID), "session="+string(addr.SessionID), "reason=idle-ttl") {
 		t.Fatalf("warn lines = %v, want one reclamation line carrying the address and the reason", logger.warns)
 	}
 	if got := rig.consumers.RecycleIdle(now.Add(90 * time.Second)); got != 0 {
-		t.Fatalf("a second sweep reclaimed %d instances, want the already reclaimed address counted once", got)
+		t.Fatalf("a second sweep reclaimed %d instances, want the already reclaimed address reclaimed once", got)
 	}
-	if got := rig.consumers.RecycleCount(); got != 1 {
-		t.Fatalf("the recycle counter = %d after a second sweep, want 1", got)
+}
+
+// TestIdleReclaimRunsOnTheInputBoundary pins the boundary the sweep runs at.
+//   - the set keeps no ticker of its own, so the address that rested a full idle window is reclaimed by the next Ensure
+//   - that call answers a fresh mount
+//
+// 契约: docs/wiki/agent/event-flow.md#runner-flow
+func TestIdleReclaimRunsOnTheInputBoundary(t *testing.T) {
+	rig := newResidentInstanceRig(t)
+	addr := rig.otherAddress()
+	consumer := rig.consumers.Ensure(addr)
+	if consumer == nil {
+		t.Fatal("the address mounted no instance")
+	}
+	awaitResting(t, consumer)
+	rig.consumers.SetIdleTTL(20 * time.Millisecond)
+	if got := rig.consumers.Ensure(addr); got != consumer {
+		t.Fatal("an input beside the resting instance mounted a second driver of the address")
+	}
+	time.Sleep(50 * time.Millisecond)
+	rebuilt := rig.consumers.Ensure(addr)
+	if rebuilt == nil || rebuilt == consumer {
+		t.Fatalf("the input boundary answered rebuilt=%v old=%v, want a fresh instance", rebuilt, consumer)
+	}
+	select {
+	case <-consumer.Done():
+	case <-time.After(5 * time.Second):
+		t.Fatal("the reclaimed instance did not end")
+	}
+	if got := rig.instances(); got != 1 {
+		t.Fatalf("the loop drives %d instances after the rebuild, want 1", got)
 	}
 }

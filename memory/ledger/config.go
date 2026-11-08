@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"sort"
@@ -18,13 +19,26 @@ const (
 	// StorageMemory is the in-process tier: it holds only what the process holds
 	// and declares no recovery across process exit.
 	StorageMemory StorageType = "memory"
-	// StorageLocalFile is the tier whose key values are sharded snapshots under a
-	// root directory.
+	// StorageLocalFile is the retired name of the durable local tier. The build
+	// opens it as the journal, the one durable local engine, and refuses a root
+	// that still holds the retired sharded-snapshot layout by name: a deployment
+	// moves such a root with MigrateShardedRoot and a caller that names no layout
+	// selects StorageJournal. The name is kept because deployments and checks
+	// still carry it; renaming it is a separate cleanup, not a second engine.
 	StorageLocalFile StorageType = "localfile"
+	// StorageJournal is the durable local tier: key values are the records of one
+	// append-only journal under a root directory. A commit is one frame, and the
+	// log's sync is its only barrier.
+	StorageJournal StorageType = "journal"
 	// StorageFile is the tier whose key values live in a rustviking store reached
 	// through the rustviking CLI.
 	StorageFile StorageType = "file"
 )
+
+// kvDirName is the directory under a root that holds the key-value store: the
+// journal of the tier this build opens, and the shard directories of the retired
+// layout it refuses.
+const kvDirName = "kv"
 
 // StorageConfig locates one storage tier: the tier name, the root directory the
 // persistent tiers persist under, and the rustviking executable and config the
@@ -40,6 +54,12 @@ type StorageConfig struct {
 	// RustVikingConfig is the config file passed to the rustviking CLI; empty
 	// means the config.toml under Root.
 	RustVikingConfig string
+	// Engine, when set, is the engine the tier opens over instead of the one Type
+	// names. It is the seam a caller wraps to observe, delay or fail commits: the
+	// wrapper implements the same AtomicStore, so the injection works over any
+	// engine and never names a file layout. A tier beside no wrapper opens the
+	// engine Type names.
+	Engine AtomicStore
 }
 
 // StoreCapabilities names what one opened tier guarantees, so a tier that holds
@@ -53,12 +73,17 @@ type StoreCapabilities struct {
 }
 
 // Tier is one opened storage tier: the original store and the segment store of
-// the same backend, together with the capabilities that backend guarantees.
+// the same backend, together with the capabilities that backend guarantees and
+// the engine both stores commit through.
 type Tier struct {
 	// Originals commits and recalls original bytes.
 	Originals OriginalStore
 	// Segments commits events behind the segment commit barrier.
 	Segments *FileSegmentStore
+	// Store is the engine this tier holds, as the interface every engine
+	// implements: the stores above read and commit through it, and a caller never
+	// names the engine behind it.
+	Store AtomicStore
 	// Capabilities names what the backend guarantees.
 	Capabilities StoreCapabilities
 }
@@ -70,55 +95,56 @@ var ErrUnknownTier = errors.New("memory: unknown storage tier")
 // persists under.
 var ErrRootRequired = errors.New("memory: persistent tiers require a root directory")
 
+// ErrJournalLegacyLayout reports a data directory that holds the retired
+// sharded-snapshot layout instead of a journal, so the caller is told to open a
+// new directory rather than being handed a half-read store.
+var ErrJournalLegacyLayout = errors.New("memory: data directory holds the retired shard layout, open a new directory")
+
+// rejectLegacyShardLayout refuses a journal directory that still holds the
+// retired sharded-snapshot layout: a shard directory, or a shard_*.json file.
+// The refused directory is left exactly as it was — nothing is migrated, cleaned
+// or overwritten, so the build that wrote that layout still reads it.
+//
+// 契约: docs/wiki/memory/memory-architecture.md#local-file-kv
+func rejectLegacyShardLayout(dir string) error {
+	entries, err := os.ReadDir(dir)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		if entry.IsDir() {
+			return fmt.Errorf("%w: %s", ErrJournalLegacyLayout, filepath.Join(dir, entry.Name()))
+		}
+		if name := entry.Name(); strings.HasPrefix(name, "shard_") && strings.HasSuffix(name, ".json") {
+			return fmt.Errorf("%w: %s", ErrJournalLegacyLayout, filepath.Join(dir, name))
+		}
+	}
+	return nil
+}
+
 // ErrRustVikingMissing reports a file tier whose rustviking CLI is not executable
 // on this machine.
 var ErrRustVikingMissing = errors.New("memory: rustviking CLI is not executable")
 
-// OpenTier opens one storage tier over its backend.
-//
-// The memory tier holds only what the process holds; the localfile tier persists
-// sharded snapshots under Root; the file tier drives the rustviking CLI and
-// reports ErrRustVikingMissing when no such executable is found. Each call opens
-// its own store over the same backend, so a caller reads exactly what an earlier
-// process committed.
-//
-// 契约: docs/wiki/memory/memory-architecture.md#store-instance-sharing
-func OpenTier(ctx context.Context, cfg StorageConfig) (*Tier, error) {
+// OpenAtomicStore opens the engine the config names, without opening a tier over
+// it. A caller that wants to observe or fail commits opens the engine here,
+// wraps it, and hands the wrapper back through StorageConfig.Engine: the wrapper
+// is the same interface, so every engine takes the same injection.
+func OpenAtomicStore(ctx context.Context, cfg StorageConfig) (AtomicStore, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 	switch cfg.Type {
 	case StorageMemory:
-		segments, err := newFileSegmentStore(newMemKV())
-		if err != nil {
-			return nil, err
-		}
-		return &Tier{
-			Originals:    NewMemoryOriginalStore(),
-			Segments:     segments,
-			Capabilities: StoreCapabilities{Tier: StorageMemory, Durable: false},
-		}, nil
-	case StorageLocalFile:
+		return newMemKV(), nil
+	case StorageJournal, StorageLocalFile:
 		if cfg.Root == "" {
 			return nil, ErrRootRequired
 		}
-		kv, err := openLocalFileKV(cfg.Root)
-		if err != nil {
-			return nil, err
-		}
-		originals, err := newKVOriginalStore(kv, nil)
-		if err != nil {
-			return nil, err
-		}
-		segments, err := newFileSegmentStore(kv)
-		if err != nil {
-			return nil, err
-		}
-		return &Tier{
-			Originals:    originals,
-			Segments:     segments,
-			Capabilities: StoreCapabilities{Tier: StorageLocalFile, Durable: true},
-		}, nil
+		return openJournalKV(filepath.Join(cfg.Root, kvDirName))
 	case StorageFile:
 		if cfg.Root == "" {
 			return nil, ErrRootRequired
@@ -135,22 +161,55 @@ func OpenTier(ctx context.Context, cfg StorageConfig) (*Tier, error) {
 		if config == "" {
 			config = filepath.Join(cfg.Root, "config.toml")
 		}
-		kv := newRustVikingKV(path, config)
-		originals, err := newKVOriginalStore(kv, nil)
+		return newRustVikingKV(path, config), nil
+	}
+	return nil, fmt.Errorf("%w: %q", ErrUnknownTier, cfg.Type)
+}
+
+// OpenTier opens one storage tier over its backend.
+//   - The memory tier holds only what the process holds; the durable local tier appends to the journal under Root; the file tier drives the rustviking CLI and reports ErrRustVikingMissing when no such executable is found
+//   - Each call opens its own store over the same backend, so a caller reads exactly what an earlier process committed
+//   - A config that carries an engine opens the tier over that engine instead, so a caller wraps the engine at the seam and the tier takes the wrapper unchanged
+//   - The journal tier's write path is one append-only file with one writer handle per opened view, and each commit is appended as one whole frame, so two views of the same directory cannot interleave half frames
+//   - A second runtime instance over one directory is refused by the production open path that owns that root, not by an exclusive lock here: in-process checks of the same root appear in the test suite of this repository
+//   - Durability holds without that lock, because a frame is appended whole and the barrier is the log's own sync
+//
+// 契约: docs/wiki/memory/memory-architecture.md#store-instance-sharing
+func OpenTier(ctx context.Context, cfg StorageConfig) (*Tier, error) {
+	store := cfg.Engine
+	if store == nil {
+		opened, err := OpenAtomicStore(ctx, cfg)
 		if err != nil {
 			return nil, err
 		}
-		segments, err := newFileSegmentStore(kv)
+		store = opened
+	}
+	if cfg.Type == StorageMemory && cfg.Engine == nil {
+		segments, err := newFileSegmentStore(store)
 		if err != nil {
 			return nil, err
 		}
 		return &Tier{
-			Originals:    originals,
+			Originals:    NewMemoryOriginalStore(),
 			Segments:     segments,
-			Capabilities: StoreCapabilities{Tier: StorageFile, Durable: true},
+			Store:        store,
+			Capabilities: StoreCapabilities{Tier: StorageMemory, Durable: false},
 		}, nil
 	}
-	return nil, fmt.Errorf("%w: %q", ErrUnknownTier, cfg.Type)
+	originals, err := newKVOriginalStore(store, nil)
+	if err != nil {
+		return nil, err
+	}
+	segments, err := newFileSegmentStore(store)
+	if err != nil {
+		return nil, err
+	}
+	return &Tier{
+		Originals:    originals,
+		Segments:     segments,
+		Store:        store,
+		Capabilities: StoreCapabilities{Tier: cfg.Type, Durable: cfg.Type != StorageMemory},
+	}, nil
 }
 
 // memKV is the memory tier key-value view: it holds every value for the life of
@@ -166,35 +225,35 @@ func newMemKV() *memKV {
 	return &memKV{data: map[string][]byte{}}
 }
 
-var _ kvPort = (*memKV)(nil)
+var _ AtomicStore = (*memKV)(nil)
 
-// kvRead returns the pairs the fetch names: the one value held under the key it
+// Read returns the pairs the fetch names: the one value held under the key it
 // names, or every held pair whose key carries the named prefix, ordered by key.
-func (m *memKV) kvRead(ctx context.Context, fetch kvFetch) ([]kvPair, error) {
+func (m *memKV) Read(ctx context.Context, fetch Fetch) ([]Pair, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	if fetch.key != "" {
-		value, held := m.data[fetch.key]
+	if fetch.Key != "" {
+		value, held := m.data[fetch.Key]
 		if !held {
 			return nil, nil
 		}
-		return []kvPair{{key: fetch.key, value: append([]byte(nil), value...)}}, nil
+		return []Pair{{Key: fetch.Key, Value: append([]byte(nil), value...)}}, nil
 	}
-	var out []kvPair
+	var out []Pair
 	for key, value := range m.data {
-		if strings.HasPrefix(key, fetch.prefix) {
-			out = append(out, kvPair{key: key, value: append([]byte(nil), value...)})
+		if strings.HasPrefix(key, fetch.Prefix) {
+			out = append(out, Pair{Key: key, Value: append([]byte(nil), value...)})
 		}
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].key < out[j].key })
+	sort.Slice(out, func(i, j int) bool { return out[i].Key < out[j].Key })
 	return out, nil
 }
 
-// kvKeys returns the keys the prefix names, in key order.
-func (m *memKV) kvKeys(ctx context.Context, prefix string) ([]string, error) {
+// Keys returns the keys the prefix names, in key order.
+func (m *memKV) Keys(ctx context.Context, prefix string) ([]string, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -210,40 +269,39 @@ func (m *memKV) kvKeys(ctx context.Context, prefix string) ([]string, error) {
 	return out, nil
 }
 
-// kvLabels returns the labels of the in-process keys without reading values.
-func (m *memKV) kvLabels(ctx context.Context) ([]string, error) {
+// Namespaces returns the key namespaces of the in-process keys without reading
+// values.
+func (m *memKV) Namespaces(ctx context.Context) ([]string, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	labels := map[string]struct{}{}
+	namespaces := map[string]struct{}{}
 	for key := range m.data {
-		labels[shardLabelOf(key)] = struct{}{}
+		namespaces[keyNamespaceOf(key)] = struct{}{}
 	}
-	out := make([]string, 0, len(labels))
-	for label := range labels {
-		out = append(out, label)
+	out := make([]string, 0, len(namespaces))
+	for namespace := range namespaces {
+		out = append(out, namespace)
 	}
 	sort.Strings(out)
 	return out, nil
 }
 
-var _ kvLabeler = (*memKV)(nil)
-
-// kvCommit applies the batch in place of whatever was held there; the in-process
+// Commit applies the batch in place of whatever was held there; the in-process
 // view already holds what a barrier would publish.
-func (m *memKV) kvCommit(ctx context.Context, batch kvBatch) error {
+func (m *memKV) Commit(ctx context.Context, batch Batch) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	for _, key := range batch.deletes {
+	for _, key := range batch.Deletes {
 		delete(m.data, key)
 	}
-	for _, put := range batch.puts {
-		m.data[put.key] = append([]byte(nil), put.value...)
+	for _, put := range batch.Puts {
+		m.data[put.Key] = append([]byte(nil), put.Value...)
 	}
 	return ctx.Err()
 }

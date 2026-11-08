@@ -12,7 +12,6 @@ import (
 	"github.com/SpellingDragon/tagent/api/event"
 	"github.com/SpellingDragon/tagent/api/model"
 	"github.com/SpellingDragon/tagent/api/plugin"
-	"github.com/SpellingDragon/tagent/features/evolution/governance"
 	"github.com/SpellingDragon/tagent/features/evolution/meditation"
 	"github.com/SpellingDragon/tagent/features/rl"
 	"github.com/SpellingDragon/tagent/features/telemetry"
@@ -253,9 +252,9 @@ func (r *Run) suppliers(decl *config.Declaration, agents map[event.AgentID]Nativ
 				if spec.MaxTokens > 0 && r.ageFold != nil {
 					elements = append(elements, r.ageFold)
 				}
-				if r.observer != nil {
+				if r.observationWired() {
 					elements = append(elements,
-						observePlugin{observer: telemetry.NewCommitObserver(runFacts{run: r}, r.observer)})
+						observePlugin{observer: telemetry.NewCommitObserver(runFacts{run: r}, generationObserver{run: r})})
 				}
 				return elements, nil
 			},
@@ -702,13 +701,7 @@ func (r *Run) presetPrompt(ctx context.Context, id event.AgentID, spec config.Ag
 // so the close of this run waits for its real stop instead of counting the
 // detached execution's cancellation as one.
 func (r *Run) wrap(tool trpctool.CallableTool) trpctool.Tool {
-	approve := r.approver
-	if r.policy != nil {
-		approve = policyRuling(r.policy)
-	} else if approve == nil && r.enforcement == governance.EnforcementStrict {
-		approve = denyWithoutApprover
-	}
-	return &admissionGate{run: r, inner: r.wrappedTool(tool, approve)}
+	return &admissionGate{run: r, inner: r.wrappedTool(tool, r.admissionRuling())}
 }
 
 // wrappedTool builds the registration wrapper of one native callable tool and

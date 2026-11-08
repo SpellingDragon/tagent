@@ -251,7 +251,7 @@ var ErrHostEmptyTask = errors.New("tagent: the task request carries no user mess
     ErrHostEmptyTask reports a task request whose messages carry no user
     content: a turn reads user input only, so the request is refused by name.
 
-var ErrHostMeditationToolMisplaced = errors.New("tagent: a meditation tool is granted to the wrong agent")
+var ErrHostMeditationToolMisplaced = meditation.ErrToolMisplaced
     ErrHostMeditationToolMisplaced reports a document whose reflection would
     deliver through a face it does not carry: an independent curation agent that
     enables meditation with a declared deliver_to white list but declares no
@@ -259,6 +259,10 @@ var ErrHostMeditationToolMisplaced = errors.New("tagent: a meditation tool is gr
     Host self-reflection is not judged here: its dedicated reflection session is
     granted send by the meditation plugin (session-scoped), while the entry tool
     face deliberately carries none.
+
+    The refusal is the plugin's own: the mount judges the declaration it depends
+    on, and the host exports that verdict beside its other boot refusals so a
+    caller reads one error identity whichever layer answers.
 
 var ErrHostNoActiveSession = errors.New("tagent: no user session has been admitted yet")
     ErrHostNoActiveSession reports a task request arriving before any user turn:
@@ -269,10 +273,10 @@ var ErrHostReloadRestartRequired error = errHostReloadRestartRequired{}
     ErrHostReloadRestartRequired reports a reload that moves a field whose only
     consumer Boot built: the storage tier, the request timeout, the observation
     face, the governance rules, and per agent the tool, skill, read, file,
-    execution, memory and meditation sections. No path in a running host
-    rebuilds those consumers, so the reload refuses the change by name rather
-    than answering success for a value nothing reads; a host that needs it is
-    restarted with the document.
+    memory and meditation sections. No path in a running host rebuilds those
+    consumers, so the reload refuses the change by name rather than answering
+    success for a value nothing reads; a host that needs it is restarted with
+    the document.
 
 var ErrHostReloadStructural = errors.New("tagent: the reload cannot apply its change without a restart")
     ErrHostReloadStructural is the family of reload refusals the running host
@@ -400,13 +404,29 @@ func Boot(configPath string, opts ...HostOption) (*Host, error)
     one book before anything executes, and a declaration that names neither knob
     leaves the limits the process already declared in place.
 
-    - TAGENT_GCTRACE=1 asks for the runtime's GC trace, which the runtime reads
-    when the process starts: a boot merges GODEBUG=gctrace=1 so the subprocesses
-    this host starts trace, and names in one line that the host process
-    itself traces only when it was launched beside it. - nativeFor is the one
-    construction of an agent's native pieces: Boot builds the first generation
-    through it, and a reload builds an agent its document adds through it over
-    the ports bound in this call.
+    - TAGENT_GCTRACE=1 asks for the runtime's GC trace, which the runtime
+    reads when the process starts: a boot merges GODEBUG=gctrace=1 so the
+    subprocesses this host starts trace, and names in one line that the host
+    process itself traces only when it was launched beside it. - nativeFor is
+    the one construction of an added agent's shared model: Boot builds the
+    first generation through it, and a reload builds an agent its document adds
+    through it over the ports bound in this call. The tools of that agent are
+    not part of it, because they belong to the face its generation rebuilds.
+    - The generation-scoped consumers mount unconditionally: the execution
+    consumer and the host's own native face consumer are wired by this call,
+    so a declaration that grants neither still builds over them and a reload
+    that adds an agent carrying either takes effect without a restart.
+    The execution consumer resolves the tmux capability on the first call of its
+    face, so a host that never runs an execution pays nothing for the mount.
+    - The reflection instance is mounted unconditionally and forwards every
+    commit to the driver of the generation in effect, so a reload that moves
+    or adds a meditation section replaces the driver behind an instance this
+    run already holds. - The host's own native face consumer mounts last,
+    after the meditation consumer whose reflection plan the tool, skill and file
+    face it composes builds over: the order these options are applied in is the
+    order the registry builds. - The reflection anchor store is wired whether
+    or not the boot document enables meditation, so a generation that enables it
+    later mounts its reflection loop over a gate this assembly already holds.
 
 func DiagnosticSwitchesFromEnv() (DiagnosticSwitches, error)
     DiagnosticSwitchesFromEnv reads the diagnostic switches the host process
@@ -566,22 +586,23 @@ type DeliveryLedger struct {
     parses a body: the four entries, the identity and the type of the fact are
     all it reads.
 
-func (l *DeliveryLedger) BySource(source event.EventID) []DeliveryRecord
+func (l *DeliveryLedger) BySource(source event.EventID) ([]DeliveryRecord, error)
     BySource reports the deliveries one source event is accounted for: every
     target the event reached, each beside its own identity and receipt.
 
-func (l *DeliveryLedger) ByTarget(addr event.Address) []DeliveryRecord
+func (l *DeliveryLedger) ByTarget(addr event.Address) ([]DeliveryRecord, error)
     ByTarget reports the deliveries one address received, whichever family
     carried them.
 
-func (l *DeliveryLedger) Records() []DeliveryRecord
+func (l *DeliveryLedger) Records() ([]DeliveryRecord, error)
     Records reports every delivery the run accounts for, ordered by source
     event, then by target and identity, so two reads of one chain answer the
     same order. One identity answers one record: a repeated delivery of the
     identity the chain already holds lands no second fact and therefore no
-    second record.
+    second record. A durable chain that could not be read answers a named error
+    instead of a partial view.
 
-func (l *DeliveryLedger) Refusals() []DeliveryRefusal
+func (l *DeliveryLedger) Refusals() ([]DeliveryRefusal, error)
     Refusals reports every attempt the run turned away, ordered by source event,
     then target, then identity and category, so two reads of one chain answer
     the same order. The attempts are read from the same account as the landings,
@@ -827,6 +848,55 @@ func (w FoldWindow) VolumeThresholdBytes() int
     start degrading the projection rather than after it already had. A window
     naming no tokens reports no threshold, and a fold read under it never fires.
 
+type GenHostSpec struct {
+	// Document is the host document the generation was read from: the tool
+	// declarations, skill roots, read roots and file faces the generation's
+	// native face is built from.
+	Document *hostDocument
+	// Timeout is the request timeout the models of the generation run under.
+	Timeout time.Duration
+	// RiskRules is the ordered risk table the governance face of the generation
+	// opens over.
+	RiskRules []governance.ToolRiskRule
+	// Telemetry is the observation section the generation declares.
+	Telemetry config.TelemetrySpec
+}
+    GenHostSpec is the host document dialect one candidate generation is
+    published under: the values a host document states beside the shared
+    declaration the core reads. The generation-scoped consumers of the host read
+    the spec of the generation they build here, so one builder never answers for
+    another document.
+
+type GenerationConsumer struct {
+	// Name is the consumer's registered name.
+	Name string
+	// Exclusive is the frozen key of its exclusive registration in one
+	// generation, in the form "gen:<id>:<consumer>".
+	Exclusive string
+	// Registered reports whether the generation the run serves carries that
+	// exclusive registration: a consumer that acquired nothing exclusive
+	// registers none, and a consumer a generation never built carries none
+	// either.
+	Registered bool
+}
+    GenerationConsumer is one consumer of the generation-scoped registry as the
+    run reports it: the name its registration is keyed by, the frozen key its
+    exclusive registration takes in one generation, and whether the generation
+    the run serves carries that registration.
+
+type GenerationFaces interface {
+	// Face reports the composed natives of one generation, and false beside a
+	// generation the source never built.
+	Face(gen state.Generation) (map[event.AgentID]NativeAgent, bool)
+}
+    GenerationFaces reports the per-generation native face of every declared
+    agent of one generation. A generation-scoped consumer builds the face of a
+    candidate generation from the declaration that generation publishes, and
+    the publication path reads it here when it composes the candidate binding:
+    the model of an agent is the shared native that survives every switch,
+    while the tools, skill roots, read root, file surface and reflection scope
+    are the face of exactly one generation.
+
 type HeldDelivery struct {
 	// ID names this hold and is the identity ApproveDelivery and
 	// RefuseDelivery resolve.
@@ -978,10 +1048,20 @@ func (h *Host) Reload(ctx context.Context) (hostReloadReport, error)
 
     A load or declaration failure, a structural refusal, a restart-required
     move, a refused publication or an install that did not take effect each
-    files a result fact and leaves the running binding, the document in effect
-    and the generation where they were. An added agent is constructed through
-    the same native path Boot ran, and its lease is mounted only once the
-    generation that declared it published: a refused reload attaches nothing.
+    files a result fact and leaves the running binding, the document in
+    effect and the generation where they were. One attempt files one outcome:
+    the result fact states what the attempt took into service, and a failure
+    that follows a generation this attempt published reaches the caller beside
+    that result instead of being filed as a contradicting refusal of the same
+    attempt. An added agent is constructed through the same native path Boot
+    ran, and its lease is mounted only once the generation that declared it
+    published: a refused reload attaches nothing.
+
+    - A candidate is published under the host dialect of its own document: the
+    skill roots, the read root, the tool declarations, the request timeout, the
+    risk table and the observation face are the sections the shared declaration
+    does not carry, so the attempt claims them beside the declaration the chain
+    is about to publish and the generation-scoped consumers read that claim.
 
 func (h *Host) Run() *Run
     Run reports the assembled run the host drives.
@@ -1138,14 +1218,41 @@ func WithEnforcement(grade governance.Enforcement) Option
 
 func WithExecManager(manager *tagentexec.Manager) Option
     WithExecManager attaches the execution resource ledger this assembly
-    acquires through and explains its registered leases by: a declaration that
-    grants the exec face acquires through this ledger under the monitor rhythm
-    its own declaration fixes, and the blocker explanation read of the run
-    reports each registration beside the retention facts the ledger records
-    under its key. An assembly beside no ledger still explains its task and
-    notification blockers, refuses to explain a registered lease by name,
-    and refuses a call of the granted exec face by name instead of starting
-    anything.
+    acquires through and explains its registered leases by: a declaration
+    that grants the exec face acquires through this ledger under the monitor
+    rhythm its own declaration fixes, and the blocker explanation read of
+    the run reports each registration beside the retention facts the ledger
+    records under its key. The ledger also mounts the execution consumer on the
+    generation-scoped registry, so every published generation rebuilds its exec
+    instance over this ledger's executor and options. An assembly beside no
+    ledger still explains its task and notification blockers, refuses to explain
+    a registered lease by name, and refuses a call of the granted exec face by
+    name instead of starting anything.
+
+func WithGenerationConsumer(reg state.GenRegistration) Option
+    WithGenerationConsumer mounts one consumer on the generation-scoped registry
+    of this assembly: the consumer answers the builder of its per-generation
+    instance, the publication path rebuilds it for every candidate generation
+    without naming the consumer, and the order the options are applied in is the
+    order the registry builds.
+
+      - The builder owns the whole life of its instance: it constructs the
+        instance, installs it as the face the candidate's binding construction
+        reads, and answers the exclusive resources it acquired beside the
+        restore that puts the previous face back; a builder that acquires
+        nothing exclusive answers a nil resource ledger and is registered
+        nowhere.
+      - Only the process-private resources of one generation enter that ledger:
+        an external durable resource survives the switch and is re-probed
+        by the next generation, and a shared native is reused as it stands,
+        so a retirement releases neither.
+
+func WithGenerationFaces(source GenerationFaces) Option
+    WithGenerationFaces wires the source of the per-generation native face.
+    A run assembled beside none composes every candidate over the natives its
+    caller handed over, which is the shape a caller that owns its own agent
+    materials reads; a host wires the consumer that rebuilds the face from its
+    document.
 
 func WithGovernance(governance state.Governance) Option
     WithGovernance attaches the governance every publication of this assembly
@@ -1254,6 +1361,12 @@ func NewRecallPort(embedder memory.Embedder) *RecallPort
 
 func (p *RecallPort) Bind(r *Run)
     Bind attaches the read faces of the assembled run.
+
+func (p *RecallPort) ChainFailure(key event.EventID) error
+    ChainFailure names why the bound table answers no readable event for one
+    key, so a corruption reaches the exact read instead of being answered as an
+    absent event. The port forwards the face its bound table carries and answers
+    the empty nil when that table names no failures.
 
 func (p *RecallPort) Event(key event.EventID) (memory.EventReference, bool)
     Event answers the reference of one event through the bound table.
@@ -1424,6 +1537,12 @@ func (r *Run) CommittedFacts() int
     CommittedFacts reports how many facts this run holds: the counter the
     metrics endpoint reports beside the turns and deliveries of the host.
 
+    The control-plane records of the configuration chain are not part of it:
+    a generation retirement is filed under the configuration change type with
+    the frozen generation key and names no session chain, so it is held and
+    readable by identity while it never stands for a fact of the material this
+    run carries.
+
 func (r *Run) CompleteRestartRecovery(ctx context.Context)
     CompleteRestartRecovery is the completion point of the restart-recovery
     consumption logic. Boot calls it after both steps — loading the unconsumed
@@ -1472,6 +1591,14 @@ func (r *Run) ExecState(key tagentexec.ResourceKey) (tagentexec.Explanation, err
     The read is the diagnostic face of the same ledger the exec face acquires
     through, so it moves nothing; a run assembled beside no ledger refuses the
     read by name instead of answering an empty state.
+
+func (r *Run) GenerationConsumers(gen state.Generation) []GenerationConsumer
+    GenerationConsumers reports the consumers the generation-scoped registry
+    rebuilds, in build order: the name each registration is keyed by beside
+    the exclusive registration the served generation carries for it.
+    The read is the diagnostic face of the registry the publication path drives,
+    so it moves nothing; it names a generation other than the served one as the
+    registrations that generation would take rather than the ones in service.
 
 func (r *Run) InjectEvent(ctx context.Context, evt event.Event, invocationID event.InvocationID) (agent.Turn, event.EventID, error)
     InjectEvent commits one explicit input event and wakes its address Consumer,
@@ -1593,10 +1720,9 @@ func (r *Run) Recovery() task.RestoreReport
     is empty for an assembly beside no storage.
 
 func (r *Run) ReflectionGate() meditation.WatermarkGate
-    ReflectionGate reports the watermark gate the reflection face of this run
-    reads, or nil when the assembly was configured beside none. The gate is the
-    one anchor store the assembly built, so a reflection never opens a second
-    store over the same record.
+    ReflectionGate reports the watermark gate of the generation in effect:
+    the anchor store the reflection loop reads its consumed watermark from,
+    and nil beside a generation that enables no meditation.
 
 func (r *Run) ReflectionInput() meditation.ReflectionInput
     ReflectionInput returns the injection face the scheduled reflection of this

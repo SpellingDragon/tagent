@@ -12,6 +12,7 @@ import (
 	"context"
 	"time"
 
+	"github.com/SpellingDragon/tagent/api/document"
 	"github.com/SpellingDragon/tagent/api/event"
 	"github.com/SpellingDragon/tagent/api/plugin"
 	"github.com/SpellingDragon/tagent/memory"
@@ -172,4 +173,26 @@ var (
 	_ func(SessionQuery, event.AgentID) []event.Address = SessionQuery.ActiveSessions
 
 	_ = ReflectionDelivery{Targets: []string{}, Sessions: nil}
+)
+
+// The mount keeps its declared surface: one plan a document resolves to, the
+// verdicts and instances it answers, and the run faces it is assembled over.
+var (
+	_ func(document.Document, string, string) (*Plan, error) = Resolve
+
+	_ func(*Plan, func(string, string) bool, string) error   = (*Plan).ValidateDelivery
+	_ func(*Plan, string) bool                               = (*Plan).GrantsSend
+	_ func(*Plan, Faces, func(TickOutcome)) (*Driver, error) = (*Plan).Instances
+
+	_ = Plan{
+		Agent: "", Session: "", SelfReflection: false, Interval: time.Duration(0), MinGap: time.Duration(0),
+		Prompt: "", Observed: []string{}, Reads: []string{}, Targets: []string{}, Anchors: "",
+	}
+
+	_ = Faces{
+		Gate: nil, Observed: nil, Input: nil, ModelInFlight: nil, Instance: event.InstanceID(""), Sessions: nil,
+	}
+
+	_ time.Duration = DefaultInterval
+	_ error         = ErrToolMisplaced
 )

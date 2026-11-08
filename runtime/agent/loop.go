@@ -906,6 +906,30 @@ func (l *Loop) SetRequestFace(face RequestFace) {
 	l.boundary = face
 }
 
+// effectiveConfigModel is the optional model capability that reports the
+// generation configuration its provider will actually receive for one request:
+// a model that declares host-side sampling fills the parameters the request
+// itself leaves unset. A model beside no such declaration is asked nothing and
+// the request keeps the configuration it was built with.
+type effectiveConfigModel interface {
+	// EffectiveGenerationConfig reports the configuration the provider receives.
+	EffectiveGenerationConfig(request *model.Request) model.GenerationConfig
+}
+
+// withEffectiveConfig returns the request as the provider will receive it: a
+// model that reports an effective configuration replaces the one the request was
+// built with, so the request evidence fixed before the call states the values
+// the provider really runs under. The request a model does not report one for is
+// returned as it stands.
+func withEffectiveConfig(request model.Request, serving model.Model) model.Request {
+	reporting, ok := serving.(effectiveConfigModel)
+	if !ok {
+		return request
+	}
+	request.GenerationConfig = reporting.EffectiveGenerationConfig(&request)
+	return request
+}
+
 // fixCapture fixes the request view of one decision through the attached
 // capture before that request starts, or fixes nothing while no capture is
 // attached. A fix the capture refused is counted as an explicit recording loss
@@ -1753,6 +1777,7 @@ func (l *Loop) decideWith(ctx context.Context, inv Invocation, transcript []mode
 	}
 	view.visibleSkills = boundary.VisibleSkills
 	messages := req.Messages
+	req = withEffectiveConfig(req, handle.Binding.Model)
 	if bound == nil {
 		l.fixCapture(ctx, decisionID, view, req)
 	}

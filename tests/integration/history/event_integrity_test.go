@@ -1,6 +1,6 @@
 // TestEventIntegrityConsumptionRecovery drives the consumption bookkeeping of
 // the mailbox beside the durable material a task chain carries, over the real
-// localfile tier and one real process boundary:
+// journal tier and one real process boundary:
 // - claim_then_commit_retry_recovers: a claim survives an uncertain commit, and the retry leaves the obligation owed and restorable
 // - consume_only_after_durable_commit: no acceptance and no consumption precede the committed outbox fact
 // - handover_before_confirmation: a stop inside the handover leaves the settled notification owed and its result recoverable
@@ -21,7 +21,6 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -94,7 +93,7 @@ func TestEventIntegrityConsumptionRecovery(t *testing.T) {
 func runClaimThenCommitRetry(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
-	cfg := ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: t.TempDir()}
+	cfg := ledger.StorageConfig{Type: ledger.StorageJournal, Root: t.TempDir()}
 	spec := consumptionSpec("task-retry")
 	notice := task.Notice{TaskID: "", Round: 1, Kind: task.NoticeSettled, Seq: 0, Event: "evt-settle-retry"}
 	uncertain := true
@@ -221,7 +220,7 @@ func runClaimThenCommitRetry(t *testing.T) {
 func runConsumeOnlyAfterDurableCommit(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
-	cfg := ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: t.TempDir()}
+	cfg := ledger.StorageConfig{Type: ledger.StorageJournal, Root: t.TempDir()}
 	tier, err := ledger.OpenTier(ctx, cfg)
 	if err != nil {
 		t.Fatalf("open the durable tier: %v", err)
@@ -915,7 +914,7 @@ func assembleHandoverRun(t *testing.T, ctx context.Context, root string, probe *
 			}},
 			Tools: []trpctool.CallableTool{&chainTool{name: "probe", output: "out-handover"}},
 		},
-	}, assembly.WithGovernance(passPolicy{}), assembly.WithStorage(ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: root}),
+	}, assembly.WithGovernance(passPolicy{}), assembly.WithStorage(ledger.StorageConfig{Type: ledger.StorageJournal, Root: root}),
 		assembly.WithPlugins(func(assembled *assembly.Run) ([]plugin.Instance, error) {
 			probe.run = assembled
 			return []plugin.Instance{probe}, nil
@@ -930,7 +929,7 @@ func assembleHandoverRun(t *testing.T, ctx context.Context, root string, probe *
 // the notification the seed claims but never consumes.
 func consumptionSeedClaimedTask(t *testing.T, ctx context.Context, root string) (task.Spec, task.Notice) {
 	t.Helper()
-	cfg := ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: root}
+	cfg := ledger.StorageConfig{Type: ledger.StorageJournal, Root: root}
 	tier, err := ledger.OpenTier(ctx, cfg)
 	if err != nil {
 		t.Fatalf("open the seed tier: %v", err)
@@ -981,7 +980,7 @@ func recoverConsumptionRun(t *testing.T, ctx context.Context, root string) *asse
 // consumptionHostDocument renders the bare host document the restart boots:
 // the one entry agent and the durable root, no tool and no sender.
 func consumptionHostDocument(root string) string {
-	return fmt.Sprintf("entry: agent-a\nprovider: local\nmodel: model-a\nproviders:\n  local: { provider: openai, api_endpoint: \"http://127.0.0.1:1/v1\", api_key_env: TAGENT_TEST_API_KEY }\nagents:\n  agent-a: {}\nstorage: { type: localfile, root: %q }\n", root)
+	return fmt.Sprintf("entry: agent-a\nprovider: local\nmodel: model-a\nproviders:\n  local: { provider: openai, api_endpoint: \"http://127.0.0.1:1/v1\", api_key_env: TAGENT_TEST_API_KEY }\nagents:\n  agent-a: {}\nstorage: { type: journal, root: %q }\n", root)
 }
 
 // assembleConsumptionRun assembles the runtime the restart anchors drive over
@@ -999,7 +998,7 @@ func assembleConsumptionRun(t *testing.T, ctx context.Context, root string) *ass
 			}},
 			Tools: []trpctool.CallableTool{&chainTool{name: "probe", output: "out-a"}},
 		},
-	}, assembly.WithGovernance(passPolicy{}), assembly.WithStorage(ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: root}))
+	}, assembly.WithGovernance(passPolicy{}), assembly.WithStorage(ledger.StorageConfig{Type: ledger.StorageJournal, Root: root}))
 	if err != nil {
 		t.Fatalf("assemble the consumption runtime: %v", err)
 	}
@@ -2235,8 +2234,8 @@ func runRebuildDoesNotRefold(t *testing.T) {
 	if !report.Fallback || report.Entries != mapped || report.Dropped != 0 || !report.Scanned {
 		t.Fatalf("rebuild report = %+v, want the bounded fallback replaying %d mapped facts whole", report, mapped)
 	}
-	if rebuilt.Compaction() != nil || rebuilt.FullBoundary() != "" {
-		t.Fatalf("the rebuild restored compaction=%+v boundary=%q from a chain that carries none", rebuilt.Compaction(), rebuilt.FullBoundary())
+	if rebuilt.Compaction() != nil {
+		t.Fatalf("the rebuild restored compaction=%+v from a chain that carries none", rebuilt.Compaction())
 	}
 	expected := make([]string, 0, 16)
 	for turn := 0; turn < 4; turn++ {
@@ -2268,7 +2267,7 @@ func runRestartRestoresFoldForm(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
 
-	storage := ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: t.TempDir()}
+	storage := ledger.StorageConfig{Type: ledger.StorageJournal, Root: t.TempDir()}
 	declaration := &config.Declaration{
 		Entry:  "agent-a",
 		Agents: []config.AgentSpec{{ID: "agent-a", Model: "model-a", MaxTokens: projectionWindowTokens, ProviderContextWindow: projectionWindowTokens * 32}},
@@ -2800,7 +2799,7 @@ func (g *restartGate) matches(key string, value []byte) bool {
 	return g.marker == "" || strings.Contains(string(value), g.marker)
 }
 
-// Put withholds the write of the watched record: the localfile tier publishes a
+// Put withholds the write of the watched record: the journal tier publishes a
 // key at the write itself, so the record must never reach the underlying log.
 // The gate signals that the writer stands at the withheld write and never
 // returns, so the process is killed before anything of that record lands.
@@ -2850,7 +2849,7 @@ func seedRestartProcess(t *testing.T, root, out string, phase restartPhase) {
 	defer cancel()
 	report := restartChildReport{Mode: restartModeSeed, Phase: string(phase), PID: os.Getpid()}
 
-	tier, err := ledger.OpenTier(ctx, ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: root})
+	tier, err := ledger.OpenTier(ctx, ledger.StorageConfig{Type: ledger.StorageJournal, Root: root})
 	if err != nil {
 		t.Fatalf("open the seed tier: %v", err)
 	}
@@ -3071,7 +3070,7 @@ func (s *restartSender) bodies() []string {
 // document is the one the formal Boot entry reads, so the restart opens through
 // the same assembly the product opens through.
 func restartHostDocument(root, endpoint string) string {
-	return fmt.Sprintf("entry: agent-a\nprovider: local\nmodel: model-a\nproviders:\n  local: { provider: openai, api_endpoint: %q, api_key_env: TAGENT_TEST_API_KEY }\nagents:\n  agent-a: {}\nstorage: { type: localfile, root: %q }\n", endpoint, root)
+	return fmt.Sprintf("entry: agent-a\nprovider: local\nmodel: model-a\nproviders:\n  local: { provider: openai, api_endpoint: %q, api_key_env: TAGENT_TEST_API_KEY }\nagents:\n  agent-a: {}\nstorage: { type: journal, root: %q }\n", endpoint, root)
 }
 
 // restartBoundary reads the durable root after the restarted host closed, so the
@@ -3081,7 +3080,7 @@ func restartBoundary(t *testing.T, root string, report restartChildReport) resta
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	tier, err := ledger.OpenTier(ctx, ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: root})
+	tier, err := ledger.OpenTier(ctx, ledger.StorageConfig{Type: ledger.StorageJournal, Root: root})
 	if err != nil {
 		t.Fatalf("open the durable root after the restart closed: %v", err)
 	}
@@ -3672,7 +3671,7 @@ func runRangeHeadSurvivesFoldRewrite(t *testing.T) {
 	}
 }
 
-// TestEventIntegrityPersistence drives the formal host over a real localfile tier and scripted chat and embedding endpoints:
+// TestEventIntegrityPersistence drives the formal host over a real journal tier and scripted chat and embedding endpoints:
 // - the facts a turn commits are read back through the declared recall tools in the same process
 // - a storage failure is reported by name instead of answered as success
 // - a refused candidate embedding degrades one query to the keyword-only answer, and a later query embeds the candidate fresh
@@ -3690,7 +3689,7 @@ func TestEventIntegrityPersistence(t *testing.T) {
 	t.Run("new_fact_keeps_old_reachable", runPersistenceOldReachable)
 }
 
-// persistenceModel, persistenceEmbedding, persistenceDimensions, persistenceAgentID, persistenceSessionID and persistenceMaxRounds are the persistence fixture: one entry agent declaring the retrieval and exact-read tools beside a localfile memory tier.
+// persistenceModel, persistenceEmbedding, persistenceDimensions, persistenceAgentID, persistenceSessionID and persistenceMaxRounds are the persistence fixture: one entry agent declaring the retrieval and exact-read tools beside a journal memory tier.
 //
 // The chat endpoint is scripted per turn, so every model request is a step a check wrote and every tool answer the next request carries is the material the check reads back.
 const (
@@ -4044,7 +4043,7 @@ func (s *persistenceSender) Send(_ context.Context, _ event.Address, content str
 }
 
 // persistenceHostDocument renders the host document of the persistence rig:
-// the entry agent beside the retrieval and exact-read tools and the localfile
+// the entry agent beside the retrieval and exact-read tools and the journal
 // memory tier whose engine talks to the scripted embedding endpoint.
 func persistenceHostDocument(root, chatEndpoint, embeddingEndpoint string) string {
 	return fmt.Sprintf("entry: %s\n"+
@@ -4061,7 +4060,7 @@ func persistenceHostDocument(root, chatEndpoint, embeddingEndpoint string) strin
 		"      - { kind: tool, id: %s }\n"+
 		"      - { kind: tool, id: %s }\n"+
 		"    memory:\n"+
-		"      type: localfile\n"+
+		"      type: journal\n"+
 		"      path: %q\n"+
 		"      engine:\n"+
 		"        backend: memory\n"+
@@ -4071,7 +4070,7 @@ func persistenceHostDocument(root, chatEndpoint, embeddingEndpoint string) strin
 		"          api_key_env: TAGENT_TEST_API_KEY\n"+
 		"          dimensions: %d\n"+
 		"          api_endpoint: %q\n"+
-		"storage: { type: localfile, root: %q }\n",
+		"storage: { type: journal, root: %q }\n",
 		persistenceAgentID, persistenceModel, chatEndpoint,
 		persistenceAgentID, persistenceModel,
 		recall.QueryToolName, recall.GetToolName,
@@ -4087,10 +4086,93 @@ type persistenceRig struct {
 	embeddings *persistenceEmbeddings
 	sender     *persistenceSender
 	host       *assembly.Host
+	// fault decorates the storage engine the host opens, so a check can refuse a
+	// commit at the store seam instead of inside a file layout. It passes every
+	// commit through until a check arms it.
+	fault *persistenceFaultStore
+}
+
+// persistenceFaultStore is the port decorator the storage-failure check injects
+// through: it wraps an opened atomic store and refuses the commits a key
+// namespace, so the injection runs over any engine.
+type persistenceFaultStore struct {
+	inner ledger.AtomicStore
+	mu    sync.Mutex
+	// namespace is the key namespace whose commits the decorator refuses; empty
+	// lets every commit through.
+	namespace string
+	// commits counts the commits this decorator saw, whether it refused them or
+	// passed them on, so a check can tell an armed seam from one the host never
+	// routed a commit through.
+	commits int
+}
+
+// Read passes the read to the wrapped engine.
+func (s *persistenceFaultStore) Read(ctx context.Context, fetch ledger.Fetch) ([]ledger.Pair, error) {
+	return s.inner.Read(ctx, fetch)
+}
+
+// Keys enumerates the wrapped engine's keys.
+func (s *persistenceFaultStore) Keys(ctx context.Context, prefix string) ([]string, error) {
+	return s.inner.Keys(ctx, prefix)
+}
+
+// Namespaces enumerates the wrapped engine's namespaces.
+func (s *persistenceFaultStore) Namespaces(ctx context.Context) ([]string, error) {
+	return s.inner.Namespaces(ctx)
+}
+
+// Commit refuses a batch that writes the armed namespace and passes the rest
+// through to the wrapped engine.
+func (s *persistenceFaultStore) Commit(ctx context.Context, batch ledger.Batch) error {
+	s.mu.Lock()
+	namespace := s.namespace
+	s.commits++
+	s.mu.Unlock()
+	if namespace != "" {
+		for _, put := range batch.Puts {
+			if strings.HasPrefix(put.Key, namespace+":") {
+				return fmt.Errorf("%w: injected on the %s commit", ledger.ErrCommitUncertain, namespace)
+			}
+		}
+	}
+	return s.inner.Commit(ctx, batch)
+}
+
+// commitCount reports how many commits the decorator saw.
+func (s *persistenceFaultStore) commitCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.commits
+}
+
+// holdCommits refuses every commit into the named key namespace until the
+// returned release runs.
+func (s *persistenceFaultStore) holdCommits(namespace string) func() {
+	s.mu.Lock()
+	s.namespace = namespace
+	s.mu.Unlock()
+	return func() {
+		s.mu.Lock()
+		s.namespace = ""
+		s.mu.Unlock()
+	}
 }
 
 // newPersistenceRig boots one host over a fresh durable root.
 func newPersistenceRig(t *testing.T) *persistenceRig {
+	return newPersistenceRigOver(t, false)
+}
+
+// newPersistenceRigWithFault boots one host whose storage engine is decorated,
+// so a check can refuse a commit at the store seam.
+func newPersistenceRigWithFault(t *testing.T) *persistenceRig {
+	return newPersistenceRigOver(t, true)
+}
+
+// newPersistenceRigOver boots one host over a fresh durable root, optionally
+// through the decorator the caller arms later.
+func newPersistenceRigOver(t *testing.T, decorate bool) *persistenceRig {
 	t.Helper()
 	rig := &persistenceRig{
 		t:          t,
@@ -4098,6 +4180,13 @@ func newPersistenceRig(t *testing.T) *persistenceRig {
 		provider:   newPersistenceChat(t),
 		embeddings: newPersistenceEmbeddings(t),
 		sender:     &persistenceSender{},
+	}
+	if decorate {
+		inner, err := ledger.OpenAtomicStore(context.Background(), ledger.StorageConfig{Type: ledger.StorageJournal, Root: rig.root})
+		if err != nil {
+			t.Fatalf("open the storage engine over %s: %v", rig.root, err)
+		}
+		rig.fault = &persistenceFaultStore{inner: inner}
 	}
 	t.Cleanup(func() {
 		if rig.host == nil {
@@ -4121,7 +4210,11 @@ func (r *persistenceRig) boot() {
 	if err := os.WriteFile(configPath, []byte(document), 0o644); err != nil {
 		r.t.Fatalf("write the persistence host document: %v", err)
 	}
-	host, err := assembly.Boot(configPath, assembly.WithSender(r.sender))
+	options := []assembly.HostOption{assembly.WithSender(r.sender)}
+	if r.fault != nil {
+		options = append(options, assembly.WithStorage(ledger.StorageConfig{Type: ledger.StorageJournal, Root: r.root, Engine: r.fault}))
+	}
+	host, err := assembly.Boot(configPath, options...)
 	if err != nil {
 		r.t.Fatalf("boot the persistence host: %v", err)
 	}
@@ -4291,41 +4384,6 @@ func persistenceAssertEmbedded(t *testing.T, edge *persistenceEmbeddings, text s
 	}
 }
 
-// persistenceShardPath reports the shard file the agent's events are committed
-// into: the partition its identity resolves to.
-func persistenceShardPath(root string) string {
-	partition := memory.PartitionIDFromName(string(persistenceAgentID))
-	return filepath.Join(root, "kv", url.PathEscape(strconv.Itoa(partition)), "snapshot.json")
-}
-
-// persistenceHoldShard makes every commit into the agent's shard fail at the
-// atomic-rename barrier: the snapshot path becomes a directory, so the rename
-// cannot land whatever user the process runs as, and the failure is the storage
-// barrier the commit path must report instead of answering success.
-func persistenceHoldShard(t *testing.T, root string) func() {
-	t.Helper()
-	shard := persistenceShardPath(root)
-	held := shard + ".held"
-	if _, err := os.Stat(shard); err != nil {
-		t.Fatalf("the durable shard %s is missing: the earlier turn committed nothing into the storage tier: %v", shard, err)
-	}
-	if err := os.Rename(shard, held); err != nil {
-		t.Fatalf("hold the shard snapshot %s: %v", shard, err)
-	}
-	if err := os.MkdirAll(shard, 0o755); err != nil {
-		t.Fatalf("hold the shard snapshot %s: %v", shard, err)
-	}
-	return func() {
-		t.Helper()
-		if err := os.RemoveAll(shard); err != nil {
-			t.Fatalf("release the shard snapshot %s: %v", shard, err)
-		}
-		if err := os.Rename(held, shard); err != nil {
-			t.Fatalf("release the shard snapshot %s: %v", shard, err)
-		}
-	}
-}
-
 // runPersistenceNewFact drives one formal turn that retrieves before it answers,
 // and reads the conversation facts of that turn back through the formal recall
 // tools of the same process: the input is answered by meaning and the tool
@@ -4445,16 +4503,19 @@ func runPersistenceFormalTool(t *testing.T) {
 // failure by name, no model step runs on a fact that never landed, no live fact
 // carries the refused input, and the retry after the release is recalled.
 func runPersistenceStorageFailure(t *testing.T) {
-	rig := newPersistenceRig(t)
+	rig := newPersistenceRigWithFault(t)
 	defer rig.shutdown()
 
 	const warmup = "the harbor keeps a warm shard"
 	const refused = "the lantern must not be answered as success"
 	rig.scriptTerminal("the first turn landed")
 	rig.mustInvoke(context.Background(), "inv-storage-warmup", warmup)
+	if rig.fault.commitCount() == 0 {
+		t.Fatalf("the armed store seam saw no commit: assembly.Boot opens its tier from the document and never forwards WithStorage to the run, so a booted host cannot inject an engine (the seam is missing in assembly/host.go)")
+	}
 
 	requests := rig.provider.count()
-	release := persistenceHoldShard(t, rig.root)
+	release := rig.fault.holdCommits(strconv.Itoa(memory.PartitionIDFromName(string(persistenceAddress.AgentID))))
 	_, err := rig.invoke(context.Background(), "inv-storage-failure", refused)
 	if err == nil {
 		release()
@@ -5122,7 +5183,7 @@ func restoreTaskViews(t *testing.T, ctx context.Context, run *assembly.Run, addr
 // to the call.
 func restoreChainViews(t *testing.T, ctx context.Context, root string) []restoreChainView {
 	t.Helper()
-	tier, err := ledger.OpenTier(ctx, ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: root})
+	tier, err := ledger.OpenTier(ctx, ledger.StorageConfig{Type: ledger.StorageJournal, Root: root})
 	if err != nil {
 		t.Fatalf("open the durable tier of the restart: %v", err)
 	}

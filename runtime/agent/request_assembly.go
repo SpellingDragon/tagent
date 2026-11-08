@@ -381,13 +381,16 @@ const DefaultOutputReserveDivisor = 4
 
 // budgetMessageOverheadTokens is the per-message framing the provider charges
 // beyond the material itself: the role markers and separators around a message.
-// It is four tokens, the same 16-byte framing the approximate prompt measure
-// already uses (see approxPromptTokens), so the two meters agree.
+// It is the one home of that framing: the approximate prompt measure reads it at
+// the replay budget's packing ratio (see messageOverheadBytes), so the two
+// meters cannot hold separate copies of the figure.
 const budgetMessageOverheadTokens = 4
 
 // budgetToolCallOverheadTokens is the per-call framing a replayed assistant
-// tool call carries beyond its identifier and arguments: five tokens, the same
-// 20-byte framing the approximate prompt measure already uses.
+// tool call carries beyond its identifier and arguments. The approximate prompt
+// measure charges no per-call framing: it counts the call's own bytes alone, so
+// on a request that carries tool calls this meter reads above that one and the
+// budget side is the conservative of the two.
 const budgetToolCallOverheadTokens = 5
 
 // ErrRequestBudgetExceeded is the refusal the final assembly returns when the

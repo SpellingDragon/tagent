@@ -264,14 +264,18 @@ func TestObservationDoesNotOwnState(t *testing.T) {
 		if len(exported) != 1 || exported[0].Name != "tagent.commit" {
 			t.Fatalf("内存 exporter 收到 %d 个 span，want 1 个 tagent.commit: %+v", len(exported), exported)
 		}
-		var keyed bool
+		var typed bool
 		for _, attr := range exported[0].Attributes {
-			if string(attr.Key) == "tagent.event.key" && attr.Value.AsString() == string(evt.Key) {
-				keyed = true
+			if string(attr.Key) == "tagent.event.key" {
+				t.Fatalf("span 带高基数标签 %s=%q，want 只记冻结的事件类型",
+					attr.Key, attr.Value.AsString())
+			}
+			if string(attr.Key) == "tagent.event.type" && attr.Value.AsString() == evt.Type {
+				typed = true
 			}
 		}
-		if !keyed {
-			t.Fatalf("span 未记事实身份: %+v", exported[0].Attributes)
+		if !typed {
+			t.Fatalf("span 未记冻结的事件类型: %+v", exported[0].Attributes)
 		}
 		if got := collectCounter(t, ctx, reader); got != 1 {
 			t.Fatalf("metric 层计数 = %d, want 1", got)

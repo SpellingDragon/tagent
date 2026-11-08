@@ -82,22 +82,17 @@ def agent_keys(root, path):
         return [], ["{}: R1 host document is unreadable: {}".format(rel, exc)]
     lines = text.splitlines()
     found = []
-    saved = boundary.ALLOWED_AGENT_KEYS
-    boundary.ALLOWED_AGENT_KEYS = frozenset()
-    try:
-        for idx, line in enumerate(lines):
-            if boundary._blank_or_comment(line) or boundary._indent(line) != 0:
-                continue
-            match = AGENTS_LINE_RE.match(line)
-            if not match:
-                continue
-            rest = boundary._strip_yaml_comment(line.split(":", 1)[1]).strip()
-            block_end = boundary._block_end(lines, idx)
-            found.extend(
-                boundary._agent_section_violations(rel, lines, idx, block_end, rest)
-            )
-    finally:
-        boundary.ALLOWED_AGENT_KEYS = saved
+    for idx, line in enumerate(lines):
+        if boundary._blank_or_comment(line) or boundary._indent(line) != 0:
+            continue
+        match = AGENTS_LINE_RE.match(line)
+        if not match:
+            continue
+        rest = boundary._strip_yaml_comment(line.split(":", 1)[1]).strip()
+        block_end = boundary._block_end(lines, idx)
+        found.extend(
+            boundary._agent_section_violations(rel, lines, idx, block_end, rest, frozenset())
+        )
     return found, []
 
 

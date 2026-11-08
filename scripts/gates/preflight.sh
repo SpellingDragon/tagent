@@ -88,16 +88,31 @@ run python3 scripts/scenarios/run_runtime_scenarios.py \
 step "event integrity long"
 if [ -n "$skip_event_long" ]; then
   echo "preflight: --skip-event-long given; the long shards were not run"
+  echo "preflight: 长跑分片未运行，本次 preflight 不具备完整 MR 等价证据"
 else
 # One bound for both sides: the 256-window shard folds on every turn and rewrites
 # the ledger shard on every commit, so it is the slowest of the six and projects
 # to ~7400s on a runner (run 41406032474) and ~2800s locally. The 1200s this
 # replaces was calibrated when all six shards measured 533-878s.
-for seed in 1; do
+#
+# The budget follows 03.10's recalibration (one shard 4180s, six serial shards
+# 424min) with this file's 1.5 margin, exactly as ci.yml does: a local chain that
+# used a different bound could not stand in for the shard CI judges.
+#
+# The generation logs are pinned under the shard's own out directory so the same
+# files the runner judges are the files that stay behind after a failure; a
+# default TMPDIR path would let a local rerun overwrite the record it reports on.
+#
+# All three seeds run here, because the six (seed, window) combinations are the
+# surface CI judges and a local chain that runs one seed is not the same claim.
+# The parity is mechanical: the workflow's matrix carries the same seed list.
+for seed in 1 7 42; do
   for window in 256 32768; do
-    run python3 scripts/scenarios/run_runtime_scenarios.py \
+    run env TAGENT_CALIBRATION_RUN_DIR="$event_out/event-long/seed-$seed-window-$window/generations" \
+      python3 scripts/scenarios/run_runtime_scenarios.py \
       --contract golden/runtime/event_integrity_scenarios.json \
-      --scope event-long --seed "$seed" --window "$window" --repeat 1 --timeout 10800 \
+      --scope event-long --seed "$seed" --window "$window" --repeat 1 --timeout 6270 \
+      --generation-logs "$event_out/event-long/seed-$seed-window-$window/generations" \
       --out "$event_out/event-long/seed-$seed-window-$window"
   done
 done

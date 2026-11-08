@@ -735,3 +735,174 @@ func TestWindowedFactsFollowTheProjection(t *testing.T) {
 		requireFactOrderMatchesLedger(t, run)
 	})
 }
+
+// TestRestartSameSegmentAfterReplay pins the segment division a restart rebuilds from the chain alone.
+//   - the live sequence cuts at the input relation its outputs recorded
+//   - the input an output did not name rolls into the next segment
+//   - a process restarted over the same durable root rebuilds the same division, segment by segment
+//   - the rebuilt division spans every entry of the chain, so the restart neither loses nor mints a segment
+//
+// 契约: docs/wiki/agent/event-flow.md#projection-lifecycle
+func TestRestartSameSegmentAfterReplay(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+	root := t.TempDir()
+	storage := func() Option {
+		return WithStorage(ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: root})
+	}
+	addr := event.Address{AgentID: "agent-a", SessionID: "session-restart-segment"}
+	base := time.Date(2026, 11, 7, 9, 0, 0, 0, time.UTC)
+	commit := func(run *Run, at int, key, typ string, role model.Role, content string, meta map[string]string) {
+		t.Helper()
+		commitWindowFact(t, ctx, run, addr, event.Event{
+			Key:       event.EventID(key),
+			Type:      typ,
+			Timestamp: base.Add(time.Duration(at) * time.Minute),
+			Meta:      meta,
+			Message:   model.Message{Role: role, Content: content},
+		})
+	}
+	seedChain := func(run *Run) {
+		t.Helper()
+		commit(run, 1, "1-in", event.TypeExternalInput, model.RoleUser, "the first input", nil)
+		commit(run, 2, "2-in", event.TypeExternalInput, model.RoleUser, "the input the next turn consumes", nil)
+		commit(run, 3, "3-out", event.TypeAgentOutput, model.RoleAssistant, "the answer to the first input alone", map[string]string{
+			event.MetaKeyInputEvents: `["1-in"]`,
+		})
+		commit(run, 4, "4-in", event.TypeExternalInput, model.RoleUser, "the third input", nil)
+		commit(run, 5, "5-out", event.TypeAgentOutput, model.RoleAssistant, "the answer to both late inputs", map[string]string{
+			event.MetaKeyInputEvents: `["2-in","4-in"]`,
+		})
+	}
+	segmentsOf := func(run *Run) []replay.Segment {
+		t.Helper()
+		entries, carried := run.ReplayEntries(addr.SessionID)
+		if !carried {
+			t.Fatalf("session %q registered no mapped sequence", addr.SessionID)
+		}
+		segments := replay.SegmentsOf(entries, replay.DefaultAgeKeepRecent)
+		spanned := 0
+		for _, segment := range segments {
+			spanned += len(segment.Entries)
+		}
+		if spanned != len(entries) {
+			t.Fatalf("the segments span %d entries beside the %d the sequence carries", spanned, len(entries))
+		}
+		return segments
+	}
+	divisionOf := func(segments []replay.Segment) [][]event.EventID {
+		division := make([][]event.EventID, 0, len(segments))
+		for _, segment := range segments {
+			keys := make([]event.EventID, 0, len(segment.Entries))
+			for _, entry := range segment.Entries {
+				keys = append(keys, entry.Key)
+			}
+			division = append(division, keys)
+		}
+		return division
+	}
+	requireDivision := func(what string, got, want [][]event.EventID) {
+		t.Helper()
+		if len(got) != len(want) {
+			t.Fatalf("%s cuts %v, want %v", what, got, want)
+		}
+		for at := range want {
+			if len(got[at]) != len(want[at]) {
+				t.Fatalf("%s cuts %v, want %v", what, got, want)
+			}
+			for entry := range want[at] {
+				if got[at][entry] != want[at][entry] {
+					t.Fatalf("%s cuts %v, want %v", what, got, want)
+				}
+			}
+		}
+	}
+	requireRelationCut := func(what string, segments []replay.Segment) {
+		t.Helper()
+		for at, segment := range segments {
+			if !segment.Complete {
+				t.Fatalf("%s segment %d = %+v, want an output closing it", what, at, segment)
+			}
+			if segment.Legacy() {
+				t.Fatalf("%s segment %d = %+v, want the relation the closing output recorded, not the positional cut", what, at, segment)
+			}
+		}
+	}
+	want := [][]event.EventID{
+		{"1-in", "3-out"},
+		{"2-in", "4-in", "5-out"},
+	}
+
+	first := snapshotTestRun(t, ctx, storage())
+	seedChain(first)
+	live := segmentsOf(first)
+	requireDivision("the live sequence", divisionOf(live), want)
+	requireRelationCut("the live sequence", live)
+	if _, err := first.Close(ctx, agent.CloseRequest{Timeout: time.Now().Add(20 * time.Second)}); err != nil {
+		t.Fatalf("close the first process: %v", err)
+	}
+
+	restarted := snapshotTestRun(t, ctx, storage())
+	rebuilt := segmentsOf(restarted)
+	requireDivision("the restarted sequence", divisionOf(rebuilt), want)
+	requireRelationCut("the restarted sequence", rebuilt)
+}
+
+// TestRestartColdStartRecomputesTheWindow pins the deliberate cold start.
+// - the registered window follows the declaration this boot published, not the one the chain was written under
+// - a chain the previous process left beside an unclosed input presents that input as ended material
+// - the restart resumes no range, so nothing carries an ended boundary across processes
+//
+// 契约: docs/wiki/agent/event-flow.md#projection-lifecycle
+func TestRestartColdStartRecomputesTheWindow(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+	root := t.TempDir()
+	addr := event.Address{AgentID: "agent-a", SessionID: "session-cold-start"}
+	boot := func(t *testing.T, maxTokens int) *Run {
+		t.Helper()
+		provider := &snapshotTestModel{answer: func(*model.Request) *model.Response {
+			return &model.Response{Choices: []model.Choice{{Message: model.Message{Role: model.RoleAssistant, Content: factWindowAnswer}}}, Done: true}
+		}}
+		run, err := assemble(ctx, &config.Declaration{
+			Entry:  "agent-a",
+			Agents: []config.AgentSpec{{ID: "agent-a", Model: "model-a", MaxTokens: maxTokens}},
+		}, map[event.AgentID]NativeAgent{"agent-a": {Model: provider}}, true,
+			WithGovernance(snapshotTestGovernance{}),
+			WithStorage(ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: root}))
+		if err != nil {
+			t.Fatalf("assemble the run: %v", err)
+		}
+		return run
+	}
+
+	first := boot(t, 60)
+	commitWindowFact(t, ctx, first, addr, windowEvent(addr, "1-in", "inv-cold", "the first input", event.TypeExternalInput))
+	commitWindowFact(t, ctx, first, addr, windowEvent(addr, "2-out", "inv-cold", "the answer that closed the range", event.TypeAgentOutput))
+	commitWindowFact(t, ctx, first, addr, windowEvent(addr, "3-in", "inv-cold", "the input the restart finds unclosed", event.TypeExternalInput))
+	if _, err := first.Close(ctx, agent.CloseRequest{Timeout: time.Now().Add(20 * time.Second)}); err != nil {
+		t.Fatalf("close the first process: %v", err)
+	}
+
+	restarted := boot(t, 4096)
+	entry, carried := restarted.replays[addr]
+	if !carried {
+		t.Fatalf("the restarted run registered no sequence for %v", addr)
+	}
+	want := foldWindowOf(config.AgentSpec{ID: "agent-a", Model: "model-a", MaxTokens: 4096})
+	if entry.window != want {
+		t.Fatalf("the restarted window = %+v, want the %+v this declaration publishes", entry.window, want)
+	}
+	if carried := foldWindowOf(config.AgentSpec{ID: "agent-a", Model: "model-a", MaxTokens: 60}); entry.window == carried {
+		t.Fatalf("the restarted window = %+v, want the window this declaration publishes rather than the one the chain was written under", entry.window)
+	}
+	if entry.projection.Len() == 0 {
+		t.Fatal("the restarted run replayed no entry, so the cold-start boundary proves nothing")
+	}
+	if entry.endedAt != "" || entry.rangeOpen {
+		t.Fatalf("the restarted registration resumed a range: endedAt=%q rangeOpen=%v, want the deliberate cold start", entry.endedAt, entry.rangeOpen)
+	}
+	if got, held := entry.endedPrefix(), entry.projection.Len(); got != held {
+		t.Fatalf("the restarted prefix ends at %d of %d entries, want every entry presented as ended material", got, held)
+	}
+}

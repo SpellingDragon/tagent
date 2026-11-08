@@ -77,7 +77,7 @@
 
 `Reads{Searcher, Embedder, Table, Originals, Trace}` 是四把工具消费的**读面**，本包不持存储、不留事件副本。任一字段为 nil 就是"这次部署没接这面"，需要它的工具**具名拒绝**（`ErrRecallUnwired`），绝不拿空结果冒充。
 
-授权是**构造期固定的分区集合**：`New(reads, partitions)` 收下调用方授予的分区名，`admits(partitionID)` 逐条比对，**空集不放行任何事件**——任何一次调用的参数都无法把可读范围撑大。响应里读不到正文只有三个具名原因：`missing`（读面没有这个事件）／`expired`（原文已出保留窗）／`out_of_scope`（事件不在授予的分区内）。**"没有匹配"与"读不了"必须可区分**——这是本节唯一的交易。
+授权是**构造期固定的分区集合**：`New(reads, partitions)` 收下调用方授予的分区名，`admits(partitionID)` 逐条比对，**空集不放行任何事件**——任何一次调用的参数都无法把可读范围撑大。响应里读不到正文时，`reason` 是四个具名原因之一：`missing`（读面没有这个事件）／`expired`（原文已出保留窗）／`out_of_scope`（事件不在授予的分区内）／`relation_error`（父边读取出错，与"这条事件没有父"区分：没有父时 `found` 为真而 `reason` 为空）。走父链的 `recall_trace` 用 `missing_ancestor` 指出链上第一处读不到的位置，而不是把整条走读成空。**"没有匹配"与"读不了"必须可区分**——这是本节唯一的交易。
 
 <a id="recall-subtools"></a>
 ## 五、召回面（下）：四把工具各自的有界读

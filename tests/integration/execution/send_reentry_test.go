@@ -159,7 +159,7 @@ const reentryRefusalStage = "task"
 // is a record the run keeps and a reader queries afterwards.
 func reentryAssertRefusalFiled(t *testing.T, host *assembly.Host, taskID event.TaskID, addr event.Address) {
 	t.Helper()
-	refusals := host.Run().DeliveryLedger().Refusals()
+	refusals := deliveryRefusals(t, host.Run().DeliveryLedger())
 	for _, refusal := range refusals {
 		if refusal.Receipt != assembly.DeliveryReceiptDenied {
 			continue

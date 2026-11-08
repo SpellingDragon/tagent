@@ -1,11 +1,11 @@
-# 组织级热重载（三档判据 · 单一发布入口 · 代际退役）
+# 组织级热重载（三档判据 · 声明链 · 代际装配 · 代际退役）
 
-一次配置改动在本仓只有三种合法读数：**一档新代发布**、**二档具名拒绝（须重启）**、**三档同指纹不开新代**。第四种读数——回执成功而实际没生效（静默 applied）——只有两类成因：字段不进声明指纹，或字段进了指纹但它的消费者只在 `Boot` 构造一次。判据是**消费点在哪一刻被读**，不是字段的敏感程度。
+一次配置改动在本仓只有三种合法读数：**一档新代发布**、**二档具名拒绝（须重启）**、**三档同指纹不开新代**。第四种读数——回执成功而实际没生效（静默 applied）——只有两类成因：字段不进声明指纹，或字段进了指纹但它的消费者只在 `Boot` 构造一次且没有按代重建通路。判据是**消费点在哪一刻被读**，不是字段的敏感程度。
 
 <a id="overview"></a>
 ## 一、机制定位
 
-`assembly.Host.Reload` 是热更的唯一入口：重读配置源 → 用 Boot 同一个严格解码器解同一份方言 → 判档 → 经 `state.Publisher` 这一条发布入口生效 → 给回执。文档解不动就什么都没发生（不换 `h.doc`、不换 `h.models`）。
+`assembly.Host.Reload` 是热更的唯一入口：重读配置源 → 用 Boot 同一个严格解码器解同一份方言 → 判档 → 声明事实落链 → 经 `state.Publisher` 这一条发布入口生效 → 给回执。文档解不动就什么都没发生（不换 `h.doc`、不换 `h.models`）。
 
 ```mermaid
 flowchart TD
@@ -13,28 +13,31 @@ flowchart TD
   B -->|解码拒| X[文档未生效]
   B --> C[Declaration 折成共享声明]
   C --> D{compatibleWith}
-  D -->|entry 变 / agent 增删| E[随发布会换新代：org.entry / org.agents 事实]
-  D -->|只在 Boot 读的字段变| F[ErrHostReloadRestartRequired → 409]
-  D -->|通过| G[复用 Boot natives]
-  G --> H[Run.Publish]
-  H --> I{指纹 == 在用}
-  I -->|是| J[PublishUnchanged<br/>published=false]
-  I -->|否| K[新代生效<br/>published=true, generation+1]
-  K --> L[bindMCPServers]
-  L --> M[经 noteModelConfigurationChange 提交 model 维度 config_change]
+  D -->|storage.type / storage.root 变| F[ErrHostReloadRestartRequired → 409]
+  D -->|通过| G[recordDeclarationFact：声明事实落链]
+  G --> H[genRegistry.Build：按代重建消费者]
+  H --> I[prepare：整代绑定]
+  I --> J{Publisher.Publish}
+  J -->|指纹 == 在用| K[PublishUnchanged<br/>published=false]
+  J -->|否| L[新代生效<br/>published=true, generation+1]
+  L --> M[借还 drain → 退役 sweep → gen-retire 记录]
+  M --> N[recordPublicationAttempt：published]
+  N --> O[bindMCPServers]
 ```
 
 | 文件 | 本篇用到的职责 |
 |---|---|
 | `assembly/host_reload.go` | `Reload`、`compatibleWith`、`restartRequiredChanges`、两个哨兵错误、回执结构 |
-| `assembly/host_document.go` | 方言解码（`loadHostDocument`）、`mapDocument`、`Declaration()` 派生 |
-| `assembly/run.go` | `Publish`：指纹 → 声明校验 → 候选 → 发布 → MCP 重绑（止于 `bindMCPServers`）；模型变更事实由 `assembly/host_reload.go:278` 的 `Host.Reload` 提交 |
+| `assembly/host_document.go` | 方言解码（`loadHostDocument`）、`mapDocument`、`Declaration()` 派生、启动对账 `reconcileBootConfig`、各宿主方言消费者的 `registration()` |
+| `assembly/run.go` | `publishDeclared`：声明 → 构整代消费者 → 候选 → 发布 → 尝试结果；`GenRegistry` 驱动、`gen-retire` 记录 |
+| `assembly/commit.go` | 配置链事实的落链与去重（`declaration` / `record` / `result` 三类，`commitFactChecked` 按键幂等） |
 | `assembly/host_face.go` | `/reload` 端点与 401 / 503 / 409 / 200 映射 |
-| `runtime/state/publish.go` | 唯一发布入口、`PublicationRecord`、`Generation`、上一代单槽 |
-| `runtime/state/retire.go` · `lease.go` · `baseline.go` | 退役台账、候选租约、基线复检 |
+| `runtime/state/publish.go` · `genregistry.go` · `retire.go` · `lease.go` · `baseline.go` | 唯一发布入口、代际作用域消费者注册表、退役台账、候选租约、基线复检 |
 | `api/config/fingerprint.go` · `clone.go` | 指纹规范化、深拷贝 |
 
 **为什么整代而不是逐个换**：一次改动可能同时动多个字段，逐个替换会让读者在中途看到半新半旧的组织；整代发布保证任何时刻读到的都是一个完整一致的代。
+
+整代里的消费者由代际作用域注册表按代重建（ADR 0007），发布路径只认注册表，不认特性名。
 
 <a id="fingerprint"></a>
 ## 二、指纹：只有声明面参与
@@ -65,14 +68,16 @@ flowchart TD
 档三在这里落地：同指纹时 `publishLocked` 释放候选并返回 `PublishUnchanged` 与**当前** `Publication`——不建记录、不换绑定、序号不动。回执因此带 `publication{generation, published}`，"没换代"是可读的事实，不必从空的 `model_changes` 反推。
 
 <a id="apply-record"></a>
-## 四、应用记录：先提交记录，再切换生效面
+## 四、应用记录：声明链先行，再切换生效面
 
-一次真正发布按固定次序穿过唯一入口：基线复检 → 治理前置检查 → **提交 `PublicationRecord`** → 持有新 plan → 切换生效面（绑定、序号、上一代）→ 退役台账 `track` + `sweep`。
+一次真正发布按固定次序穿过唯一入口：基线复检 → 治理前置检查 → **提交 `PublicationRecord`** → 持有新 plan → 切换生效面（绑定、序号、上一代）→ 退役台账 `track` + `sweep`。配置链（`tagent/config/v1/fact:`，只追加）上同一次改动依次留下三种事实：`declaration`（声明载荷与指纹）、`record`（`PublicationRecord` 整条）与 `result`（一次尝试的结果）；代的退役另记 `gen-retire:<id>`（见第七节）。
 
-两条红线：
+- **记录在切换之前提交**：记录提交失败即拒发布，生效面原地不动，候选资源逆序释放。`PublicationRecord{Generation, Fingerprint, Result, RollbackSource, Checks}` 经 `PublicationRecorder` 单独提交，绝不与任务终态提交或待发通知共用一个事务。
+- **一次尝试只有一条结果**：`result` 取 `published` / `unchanged` / `load-failed` / `governance-rejected` / `install-failed` 之一，由发布结果判档（`candidateInService`：`Publication.Generation≠0` 且 `Result∈{Applied,Unchanged}`）。先乐观记 `published`、再补一条 held 的矛盾双事实不再存在。
+- **决策窗口随记录落链**：`publicationWindow{previous, previousFingerprint, models, dimensions, at}` 记下这次尝试从哪一代/哪一指纹移动、每个 agent 之后运行的模型版本、每个配置维度的判定与记录时刻。
 
-- **记录在切换之前提交**：记录提交失败即拒发布，生效面原地不动，候选资源逆序释放。
-- **记录自足**：`PublicationRecord{Generation, Fingerprint, Result, RollbackSource, Checks}` 经 `PublicationRecorder` 单独提交，绝不与任务终态提交或待发通知共用一个事务。`Result` 三值 `PublishUnchanged` / `PublishApplied` / `PublishRolledBack`，`RollbackSource` 只有回滚才非零。
+**逐维度的 applied/held**：`configDimensionOutcomes` 把每个移动的维度记成 `applied` 或 `held`，随尝试结果落链并回执到 `config_changes`，所以"哪一项没生效"与"整次尝试的结果"是两笔可分别核对的账。
+- **重启只采纳，不重发布**：`reconcileBootConfig` 读链上最新 `declaration` 与 `record` 判四种情形——无声明则首代发布；文件即最新声明则按记录代**采纳**；文件更新则接在记录代之后发布；链比文件新则采纳链声明并按名记下滞后的文件。采纳走 `adoptBootGeneration`：驱动同一个消费者注册表重建该代的工具面、执行实例、记忆读命名空间、反思循环、治理规则与观测面，独占资源登进该代退役台账。
 
 治理前置检查（`PublishContract`）：契约无必需检查、必需检查缺席、检查判拒、豁免未带理由或作用域，各自具名拒发布——沉默是缺证据，不是通过。
 
@@ -97,7 +102,9 @@ flowchart TD
 <a id="owner-retirement"></a>
 ## 七、属主退役：代被取代且无人持有才释放
 
-退役台账按代登记"候选独占资源 + 释放函数"。一次发布**不提前退役任何东西**：仍被请求持有的代保留资源，最后一个持有释放时排空自行推进，不需要额外业务回合；共享面与在用代的资源不进任何一次释放。
+退役台账按代登记"候选独占资源 + 释放函数"，登记键是 `gen:<id>:<consumer>`（`state.GenLeaseKey`）。一次发布**不提前退役任何东西**：仍被请求持有的代保留资源，最后一个持有释放时排空自行推进，不需要额外业务回合；共享面与在用代的资源不进任何一次释放。
+
+释放之后才写 `gen-retire:<id>`：该键只由代号决定，经 `commitFactChecked` 按键去重，所以退役记录恰好一次；它只是链上的记录与重放锚，绝不反过来触发释放。崩溃落在"换指针"与"退役记录"之间时，重启的 `convergeGenerationRetirements` 对每一代已落链、已被取代且无后续借用的代号补发记录——不重复释放，那些资源是进程私有的，已随进程结束。
 
 三个事实必须分开陈述：**停止接受新路由**（新代的可达集）、**义务收敛**（在途请求与任务）、**资源释放**（独占资源与存储租约）。把三者折成一句"已退役"，会让一次有界返回被读成"资源已交还"。
 
@@ -122,42 +129,35 @@ flowchart TD
 关闭一旦发起，`Reload` 在读文档之前就返回 `ErrHostClosed`（face 映射 503）：向正在拆除的宿主发布一代，会把一次有界返回的关闭变成无人收敛的状态。
 
 <a id="restart-required-dimensions"></a>
-## 九、二档：具名拒绝须重启
+## 九、二档：只剩根状态须重启
 
 | 档 | 判据（消费点在哪一刻被读） | 回执形态 |
 |---|---|---|
-| 一档 新代发布 | 候选构造期或请求边界现读 | `publication.published=true`，`generation` 前进 |
-| 二档 具名拒绝 | 只在 `Boot` 构造一次，运行期没有重绑通路 | `ErrHostReloadRestartRequired` → HTTP **409**，`publication` 不前进 |
+| 一档 新代发布 | 候选构造期按代重建的消费者，或请求边界现读 | `publication.published=true`，`generation` 前进 |
+| 二档 具名拒绝 | 只在 `Boot` 打开一次、无按代重建通路的根状态 | `ErrHostReloadRestartRequired` → HTTP **409**，`publication` 不前进 |
 | 三档 不开新代 | 文档内容与在用指纹相同 | `published=false`，`generation` 不变 |
 
-二档字段共 12 组，路径就是运维在配置文件里搜的名字：
+二档只剩根状态两组：`storage.type`、`storage.root`。它们是 Boot 打开一次的事实链与原文仓，每条链都开在它之上，任何一代都不重建它，所以移动即具名拒绝（`restartRequiredChanges` 只比这两项）。其余非根字段——工具声明、`skill_dirs`、`read_root`、`file`、`exec`、`memory`、`meditation`、`request_timeout_seconds`、`governance`、`telemetry`——全是一档，因为各自的消费者已挂上代际作用域注册表，按代重建：
 
-| 层 | 字段 | 唯一消费点 |
+| 消费者（登记名） | 每代重建什么 | 资源归属 |
 |---|---|---|
-| 顶层 | `storage.type`、`storage.root` | Boot 的记忆计划 |
-| 顶层 | `request_timeout_seconds` | Boot 构造的 HTTP client |
-| 顶层 | `governance` | Boot 的 `WithPolicy`（`call->ruling` 实例） |
-| 顶层 | `telemetry` | Boot 的观测观察者 |
-| 每 agent | `tools` | Boot 的 native 工具面（send / recall / knowledge / spec / file） |
-| 每 agent | `skill_dirs`、`read_root` | Boot 的 knowledge 工具 |
-| 每 agent | `file` | Boot 的 file 工具（`base_dir`） |
-| 每 agent | `exec` | Boot 的 exec manager |
-| 每 agent | `memory` | Boot 的存储计划与召回分区 |
-| 每 agent | `meditation` | Boot 的反思计划与 reflection 插件 |
+| `exec` | 执行账本与 tracker 实例 | 进程私有，退役 `Detach` 释放一次；tmux 会话跨代重探接管 |
+| `host-face` | 工具面、skill 仓、read root、file 面、反思会话面 | 无独占资源，退代只丢安装 |
+| `memory` | 记忆声明与召回分区 | 复用 Boot 打开的存储 |
+| `meditation` | 反思计划与驱动 | 计划与触发态链派生 |
+| `governance` | 风险规则与准入包装 | 待审批态落账本 |
+| `telemetry` | 观测面 | 复用进程观察者 |
 
-**两类静默 applied**，正是二档存在的理由：
-
-- **甲类：不进指纹。** `storage.*`、`request_timeout_seconds`、`governance`、`telemetry` 不在 canonical 形里——不拒就会得到 `reloaded:true` + `published:false`，新值永不被任何代码再读。
-- **乙类：进了指纹，但实例是 Boot 的。** `Reload` 把 `h.natives` 原样交给发布，而工具、知识工具、file 工具、exec manager、记忆计划、反思计划都只在 Boot 跑一次——不拒就会换代重建绑定，面看起来换了、能力还是旧的。插件同理：实例由 `WithPlugins` 在装配期构造一次，每代绑定携带同一批实例，热更没有重建通路。
+冥想一侧已按这个范式归位：解析、交付校验与实例构造从装配根移进 `features/evolution/meditation/mount.go`（`Resolve` / `ValidateDelivery` / `Instances`），装配根只经注册表驱动，不再出现特性名。每个消费者经自己的选项挂上注册表（`WithGenerationConsumer`），装配根不认特性名；注册表按挂载顺序构整代，`GenerationConsumers` 是这次装配的只读诊断面。注册集合与登记键由 `TestConsumersSelfRegister` 钉住，重启采纳重建该代的消费者由 `TestBootAdoptNewConsumers` 钉住。
 
 错误形态与可观察性：
 
 - `ErrHostReloadRestartRequired` 的文案含 `requires a restart`，`Unwrap()` 到 `ErrHostReloadStructural`，所以 `/reload` 的 409 与结构拒绝同一个出口，`errors.Is` 两个都能命中。
-- 结构拒绝只在一处具名（`ErrHostReloadStructural`）：文档缺失（"the reload carries no document"）。入口改名与集合增删随发布会进入新代；新增 agent 若携带只有 Boot 建过的域段（`exec`/`memory`/`meditation`）才按路径拒（`agents.<id>.exec` 等）。
-- 错误点名的是 **YAML 路径**（`storage.type`、`agents.user.file`），顺序固定：先五个顶层，再按 agent id 字典序比七个域段——同一次编辑永远给出同一串名字。
+- 结构拒绝只在一处具名（`ErrHostReloadStructural`）：文档缺失（"the reload carries no document"）。
+- 错误点名的是 **YAML 路径**（`storage.type`、`storage.root`），顺序固定，同一次编辑永远给出同一串名字。
 - 一次混合修改（可热字段 + 须重启字段）**整批拒绝**，序号不推进：半应用是最难复现的形态。
 
-钉住这三档的是 `tests/integration/host/reload_tiers_test.go`：`TestReloadPublishesTheHotFieldsAsOneGeneration`（模型与提示词文件一起换代；下一请求由新模型服务、携带新正文、旧正文不再出现）、`TestReloadRefusesTheFieldsOnlyBootReads`（12 个子用例逐条断言哨兵、字段路径、409、无租约发布、下一轮仍是启动模型）、`TestReloadCarriesNoGenerationForAnUnchangedDocument`（两次未改都不换代，改模型后恰好 +1）。逐字段的 28 行分档表在 `openspec/changes/success-semantics/reload-tiers.md`。
+钉住这三档的是 `tests/integration/host/reload_tiers_test.go`（换代、`storage.*` 两组的哨兵/路径/409/无租约发布、未改不换代），全清单热更的混沌锚是 `tests/integration/hotupdate/full_list_test.go`：在途回合握着旧代时换代照常，排空后旧代资源释放一次、退役记录恰好一条。
 
 ## 已知缺口与演进方向
 

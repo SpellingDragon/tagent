@@ -40,6 +40,12 @@ schema v2（`event-integrity` 合同）额外能力，v1 行为不变：
   * `--test-id <leaf>/<TestName>`（可重复）：按合同 id 精确选择子集，未登记即用法错误；
   * 零匹配即失败：进程退出 0 但日志里没有该测试的 run 终局时判 unattested，
     不把退出码单独当凭据；
+  * `--generation-logs DIR`：给出时读 `DIR/logs/genNN.log` 里的
+    `tagent: durable load scan prefix=... keys=N` 计数，五行缺段或 spec/consume/fact
+    任一为零即判红（attempt/reject 合法为零），判定写进每轮 evidence 的
+    `durable_scan`；
+  * 超时不再抛异常：兜底时限触发时仍写 test-log 与 evidence，并在 `liveness`
+    里具名 `go-test-bound`/`expired`，避免分片被 kill 后 CI 无产物可上传；
   * 指纹覆盖受影响第一方源码、未跟踪测试、fixture、合同与各模块 go.mod/go.sum，
     不只记 HEAD。
 """
@@ -50,6 +56,7 @@ import hashlib
 import json
 import os
 import platform
+import re
 import subprocess
 import sys
 import tempfile
@@ -95,6 +102,35 @@ EXIT_OK = 0
 EXIT_UNATTESTED = 1
 EXIT_USAGE = 2
 EXIT_DRIFT = 3
+
+# The one named liveness a shard can fail at. A bound that fires is reported as a
+# deadline on the go test process, never as a generic "no evidence" answer: the
+# partial log is still written, so the record says how far the shard got.
+LIVENESS_GO_TEST_BOUND = "go-test-bound"
+TIMEOUT_EXIT_CODE = 124
+
+# The five prefix reads one durable load performs, in scan order. The scan order
+# and the prefix values are owned by runtime/state/durable.go; this list only
+# mirrors them so a shard can be judged on what its restart actually loaded.
+DURABLE_SCAN_MARKER = "tagent: durable load scan prefix="
+DURABLE_SCAN_PREFIXES = (
+    "tagent/task/v1/spec:",
+    "tagent/task/v1/consume:",
+    "tagent/task/v1/attempt:",
+    "tagent/task/v1/reject:",
+    "tagent/task/v1/fact:",
+)
+# Only these three carry data in every completed scenario: a restart that loaded
+# no spec, no consumption receipt and no fact has lost the chain it is restarting.
+# attempt and reject are legitimately zero (no failed attempt, no rejection), so
+# requiring them to be non-zero would red a healthy shard.
+DURABLE_SCAN_DATA_PREFIXES = frozenset({
+    "tagent/task/v1/spec:",
+    "tagent/task/v1/consume:",
+    "tagent/task/v1/fact:",
+})
+DURABLE_SCAN_LINE_RE = re.compile(
+    r"tagent: durable load scan prefix=(\S+) keys=(\d+) bytes=(\d+)")
 
 
 class RunnerError(Exception):
@@ -434,15 +470,35 @@ def git_revision(root: str) -> str:
 
 
 def run_go_test(command: list, root: str, timeout: float):
-    """Run the single go test invocation and return (exit code, raw log text)."""
+    """Run one go test invocation, reporting a fired bound as a named liveness.
+
+    Returns (exit code, stdout, stderr, liveness). A timeout is not raised: the
+    caller still has to write test-log and evidence, because a shard whose bound
+    fires uploads nothing when the exception escapes to the CLI, and CI's
+    `if-no-files-found: error` then fails on a missing record instead of naming
+    the deadline that actually fired.
+    """
+    liveness = {"name": LIVENESS_GO_TEST_BOUND, "state": "completed",
+                "bound_seconds": timeout}
     try:
         result = subprocess.run(command, cwd=root, check=False, capture_output=True,
                                 text=True, timeout=timeout)
-    except subprocess.TimeoutExpired:
-        raise RunnerError("go test timed out after {}s".format(timeout))
+    except subprocess.TimeoutExpired as exc:
+        liveness["state"] = "expired"
+        return (TIMEOUT_EXIT_CODE, partial_text(exc.stdout), partial_text(exc.stderr),
+                liveness)
     except OSError as exc:
         raise RunnerError("go test is not runnable: {}".format(exc))
-    return result.returncode, result.stdout, result.stderr
+    return result.returncode, result.stdout, result.stderr, liveness
+
+
+def partial_text(value) -> str:
+    """Return whatever a killed child managed to write, decoded, never invented."""
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        return value.decode("utf-8", "replace")
+    return value
 
 
 def build_evidence(scope: str, command: list, exit_code: int, fingerprint: dict,
@@ -829,6 +885,82 @@ def attest_event_test(test: dict, actions: dict) -> dict:
     return state
 
 
+def read_durable_scan_counts(log_path: str) -> dict:
+    """Read one generation log's per-prefix load counts, keeping the largest."""
+    counts = {}
+    with open(log_path, "r", encoding="utf-8", errors="replace") as handle:
+        for line in handle:
+            match = DURABLE_SCAN_LINE_RE.search(line)
+            if match is None:
+                continue
+            prefix, keys, size = match.group(1), int(match.group(2)), int(match.group(3))
+            seen = counts.setdefault(prefix, {"keys": 0, "bytes": 0, "reads": 0})
+            # A generation that started from an empty shard reads zeros; the shard
+            # is judged on the deepest read any generation made, so a later
+            # restart's counts are never masked by an earlier one's.
+            seen["keys"] = max(seen["keys"], keys)
+            seen["bytes"] = max(seen["bytes"], size)
+            seen["reads"] += 1
+    return counts
+
+
+def durable_scan_attestation(directory: str) -> dict:
+    """Attest that a shard's restarts really reloaded the durable chain.
+
+    The host writes one `durable load scan` line per prefix and generation. A
+    shard is red when a prefix was never scanned at all (the five-line record is
+    truncated) or when a data-carrying prefix loaded zero keys (the restart ran
+    over an empty chain, so the 120 restarts proved nothing). `attempt` and
+    `reject` may legitimately be zero.
+    """
+    logs_dir = os.path.join(directory, "logs")
+    attestation = {"directory": directory, "prefixes": {}, "log_files": [],
+                   "state": "unattested", "reason": None}
+    if not os.path.isdir(logs_dir):
+        attestation["reason"] = "generation log directory {} holds no logs/ subdirectory".format(
+            directory)
+        return attestation
+    log_files = sorted(name for name in os.listdir(logs_dir) if name.endswith(".log"))
+    if not log_files:
+        attestation["reason"] = "generation log directory {} holds no .log file".format(logs_dir)
+        return attestation
+    attestation["log_files"] = log_files
+    counts = {}
+    for name in log_files:
+        for prefix, seen in read_durable_scan_counts(os.path.join(logs_dir, name)).items():
+            merged = counts.setdefault(prefix, {"keys": 0, "bytes": 0, "reads": 0})
+            merged["keys"] = max(merged["keys"], seen["keys"])
+            merged["bytes"] = max(merged["bytes"], seen["bytes"])
+            merged["reads"] += seen["reads"]
+    attestation["prefixes"] = {prefix: counts[prefix] for prefix in DURABLE_SCAN_PREFIXES
+                               if prefix in counts}
+    missing = [prefix for prefix in DURABLE_SCAN_PREFIXES if prefix not in counts]
+    if missing:
+        attestation["reason"] = "durable load scan is missing the prefix line(s) {}".format(missing)
+        return attestation
+    empty = [prefix for prefix in DURABLE_SCAN_PREFIXES
+             if prefix in DURABLE_SCAN_DATA_PREFIXES and counts[prefix]["keys"] == 0]
+    if empty:
+        attestation["reason"] = "durable load scan loaded zero keys for {}".format(empty)
+        return attestation
+    attestation["state"] = "attested"
+    return attestation
+
+
+def attach_durable_scan(repeat: dict, attestation: dict) -> None:
+    """Record the shard-level scan verdict in the evidence already on disk."""
+    evidence_path = repeat["evidence"]
+    with open(evidence_path, "r", encoding="utf-8") as handle:
+        evidence = json.load(handle)
+    evidence["durable_scan"] = attestation
+    with open(evidence_path, "w", encoding="utf-8") as handle:
+        json.dump(evidence, handle, ensure_ascii=False, indent=1, sort_keys=True)
+        handle.write("\n")
+    repeat["durable_scan"] = attestation
+    if attestation["state"] != "attested":
+        repeat["verdict"] = "unattested"
+
+
 def run_event_repeat(args, root: str, index: dict, groups: list, selected: list,
                      seed, window, repeat_index: int, repeat_total: int,
                      out_dir: str, contract_digest: str, fingerprints: list) -> dict:
@@ -840,9 +972,13 @@ def run_event_repeat(args, root: str, index: dict, groups: list, selected: list,
     stderr_chunks = []
     invocations = []
     exit_code = 0
+    liveness = {"name": LIVENESS_GO_TEST_BOUND, "state": "completed",
+                "bound_seconds": args.timeout}
     for group in groups:
         command = event_command(group, index, seed, window, args.timeout)
-        group_exit, stdout, stderr = run_go_test(command, root, args.timeout)
+        group_exit, stdout, stderr, group_liveness = run_go_test(command, root, args.timeout)
+        if group_liveness["state"] != "completed":
+            liveness = group_liveness
         chunks.append(stdout)
         if stderr.strip():
             stderr_chunks.append("# {}\n{}".format(" ".join(command), stderr))
@@ -893,6 +1029,7 @@ def run_event_repeat(args, root: str, index: dict, groups: list, selected: list,
             "invocations": invocations,
         },
         "go_test_exit_code": exit_code,
+        "liveness": liveness,
         "test_log": os.path.relpath(log_path, repeat_dir),
         "test_log_sha256": log_digest,
         "subtests": subtests,
@@ -951,6 +1088,11 @@ def execute_event(args, root: str, contract: dict, contract_path: str) -> dict:
         repeats.append(run_event_repeat(args, root, index, groups, selected, seed, window,
                                         repeat_index, repeat_total, out_dir,
                                         contract_digest, fingerprints))
+    durable_scan = None
+    if args.generation_logs:
+        durable_scan = durable_scan_attestation(args.generation_logs)
+        for repeat in repeats:
+            attach_durable_scan(repeat, durable_scan)
     exit_codes = [repeat["go_test_exit_code"] for repeat in repeats]
     verdict = "match" if all(repeat["verdict"] == "match" for repeat in repeats) else "unattested"
     return {
@@ -962,6 +1104,7 @@ def execute_event(args, root: str, contract: dict, contract_path: str) -> dict:
         "seed": seed,
         "window": window,
         "contract_digest": contract_digest,
+        "durable_scan": durable_scan,
         "out": out_dir,
         "verdict": verdict,
         "go_test_exit_code": next((code for code in exit_codes if code != 0), 0),
@@ -995,6 +1138,11 @@ def format_event_report(report: dict) -> str:
                 lines.append("  {:<42} unattested  {}".format(state["test_id"], state["reason"]))
     lines.append("repeats: passed={}/{}".format(report["counts"]["repeats_passed"],
                                                 report["counts"]["repeat_total"]))
+    durable_scan = report.get("durable_scan")
+    if durable_scan is not None:
+        lines.append("durable_scan: {} logs={} {}".format(
+            durable_scan["state"], len(durable_scan["log_files"]),
+            durable_scan["reason"] or "-"))
     return "\n".join(lines)
 
 
@@ -1060,6 +1208,10 @@ def parse_args(argv):
     parser.add_argument("--test-id", action="append", default=[], dest="test_id",
                         metavar="LEAF/TestName",
                         help="v2：按合同 id 精确选择（可重复）；未登记或子场景名即用法错误")
+    parser.add_argument("--generation-logs", default=None, dest="generation_logs",
+                        metavar="DIR",
+                        help="v2：长跑子进程生成日志目录（其 logs/genNN.log 持有 durable load "
+                             "scan 计数）；给出即按「五行缺段或数据前缀全零」判红")
     parser.add_argument("--json", action="store_true", help="把报告以 JSON 打到 stdout")
     return parser.parse_args(argv)
 
@@ -1071,9 +1223,10 @@ def execute(args) -> dict:
     if contract.get("schema_version") == EVENT_SCHEMA_VERSION:
         return execute_event(args, root, contract, contract_path)
     if (args.repeat is not None or args.repeat_index is not None or args.seed is not None
-            or args.window is not None or args.test_id):
-        raise RunnerError("--repeat/--repeat-index/--seed/--window/--test-id require a schema v2 "
-                          "event contract; the v1 contract keeps its single fixed command")
+            or args.window is not None or args.test_id or args.generation_logs):
+        raise RunnerError("--repeat/--repeat-index/--seed/--window/--test-id/--generation-logs "
+                          "require a schema v2 event contract; the v1 contract keeps its single "
+                          "fixed command")
     contract = load_contract(contract_path)
     index = index_scenarios(contract)
     validate_axes(index)
@@ -1089,7 +1242,7 @@ def execute(args) -> dict:
     packages = sorted({package for _, package, _ in chosen})
     names = [name for _, _, name in chosen]
     command = go_test_command(packages, names)
-    exit_code, stdout, stderr = run_go_test(command, root, args.timeout)
+    exit_code, stdout, stderr, _liveness = run_go_test(command, root, args.timeout)
 
     log_path = os.path.join(out_dir, "test-log.jsonl")
     with open(log_path, "w", encoding="utf-8") as handle:

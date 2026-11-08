@@ -200,6 +200,22 @@ def main():
         contains=["plugins", "no reviewed exception"],
     )
 
+    case(
+        "list-style agents reach the same verdict for a registered exception",
+        host="agents:\n  - id: alpha\n    model: fixture\n    meditation:\n      enabled: true\n",
+        data=registry(exceptions=[exception()], generic=["provider", "model", "plugins", "id"]),
+        contains=["check_schema_allowlist: ok"],
+    )
+
+    case(
+        "list-style agents name an unregistered feature section",
+        host="agents:\n  - id: alpha\n    model: fixture\n    fancy_feature:\n      enabled: true\n",
+        data=registry(exceptions=[exception()], generic=["provider", "model", "plugins", "id"]),
+        expected_rc=1,
+        contains=["fancy_feature", "R1", "under agents.alpha"],
+        excludes=["'id'"],
+    )
+
     if FAILURES:
         print("test_check_schema_allowlist: {} case(s) FAILED".format(len(FAILURES)))
         return 1

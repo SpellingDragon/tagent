@@ -83,7 +83,6 @@ type ReplayProjection struct {
 	originals map[event.EventID]string
 	consumed  map[event.EventID]struct{}
 	fold      *CompactionFact
-	boundary  event.EventID
 	recovery  *ProjectionEntry
 	// volume is the rendered volume of the entries, kept as they change so a
 	// judgment inside its threshold answers without reading the material.
@@ -407,13 +406,6 @@ func (p *ReplayProjection) Compaction() *CompactionFact {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return p.fold
-}
-
-// FullBoundary returns the event-key boundary the compaction payload carried.
-func (p *ReplayProjection) FullBoundary() event.EventID {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	return p.boundary
 }
 
 // ConsumedKeys returns the reseeded consumed keys in order.

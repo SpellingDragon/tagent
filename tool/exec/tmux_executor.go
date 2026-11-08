@@ -78,6 +78,77 @@ func NewTmuxExecutor() (*TmuxExecutor, error) {
 	return newTmuxExecutor(IsTmuxAvailable)
 }
 
+// NewDeferredTmuxExecutor returns the executor port over the tmux sessions of
+// this system, resolved on the first call instead of at construction. A process
+// that mounts the execution consumer before any declaration grants the exec face
+// builds nothing here until a call of that face needs the sessions, and the
+// construction verdict of the first call is the one NewTmuxExecutor answers: a
+// system without tmux is refused by name at that call, never read as a working
+// executor that fails later.
+func NewDeferredTmuxExecutor() Executor {
+	return &deferredExecutor{}
+}
+
+// deferredExecutor defers the tmux executor construction to the first call. The
+// manager in front of it refuses a call whose system capability is missing
+// before any method here runs, so a deferred resolution never turns a capability
+// refusal into a construction error.
+type deferredExecutor struct {
+	mu      sync.Mutex
+	backend Executor
+}
+
+// resolve reports the tmux executor, building it on the first call.
+func (e *deferredExecutor) resolve() (Executor, error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.backend != nil {
+		return e.backend, nil
+	}
+	built, err := newTmuxExecutor(IsTmuxAvailable)
+	if err != nil {
+		return nil, err
+	}
+	e.backend = built
+	return built, nil
+}
+
+// Start begins one external execution through the resolved executor.
+func (e *deferredExecutor) Start(ctx context.Context, decl ExecutionDecl) (ResourceKey, error) {
+	backend, err := e.resolve()
+	if err != nil {
+		return ResourceKey{}, err
+	}
+	return backend.Start(ctx, decl)
+}
+
+// Probe reports the state one probe observed through the resolved executor.
+func (e *deferredExecutor) Probe(ctx context.Context, key ResourceKey) (ProbeResult, error) {
+	backend, err := e.resolve()
+	if err != nil {
+		return ProbeResult{}, err
+	}
+	return backend.Probe(ctx, key)
+}
+
+// Capture reports the output recorded through the resolved executor.
+func (e *deferredExecutor) Capture(ctx context.Context, key ResourceKey) ([]byte, error) {
+	backend, err := e.resolve()
+	if err != nil {
+		return nil, err
+	}
+	return backend.Capture(ctx, key)
+}
+
+// Stop asks the resolved executor to terminate one execution.
+func (e *deferredExecutor) Stop(ctx context.Context, key ResourceKey) (StopEvidence, error) {
+	backend, err := e.resolve()
+	if err != nil {
+		return StopEvidence{}, err
+	}
+	return backend.Stop(ctx, key)
+}
+
 // newTmuxExecutor returns the executor beside the given availability probe.
 func newTmuxExecutor(probe func() bool) (*TmuxExecutor, error) {
 	if probe == nil || !probe() {

@@ -46,10 +46,11 @@ func chainOutput(invocation event.InvocationID, episode event.EpisodeID, content
 	}
 }
 
-// TestChainExporterPairsTurns pins the chain export: rows are paired by chain order inside one episode.
+// TestChainExporterPairsTurns pins the chain export of a chain recording no consumption relation.
 // - one episode spanning two sessions stays one episode with its turns numbered in order
-// - inputs that land before an answer arrive batch into the turn that answer closes, and a turn that produced no assistant output is skipped, not filled
-// - q4 lands, the late input batches beside it, and the output that follows answers both in one turn
+// - the inputs that land before a relationless answer batch into the turn that answer closes
+// - a turn that produced no assistant output is skipped, not filled
+// - the output that follows the late input answers both, each input kept beside its source
 // - a repeated session is read once, and the limit bounds the rows emitted
 // 契约: docs/wiki/rl/rl-architecture.md#training-export
 func TestChainExporterPairsTurns(t *testing.T) {
@@ -91,7 +92,10 @@ func TestChainExporterPairsTurns(t *testing.T) {
 		{SessionID: "session-1", Turn: 1, Input: "q1", Label: "a1", EpisodeID: string(episodeA)},
 		{SessionID: "session-1", Turn: 2, Input: "q2", Label: "a2", EpisodeID: string(episodeA)},
 		{SessionID: "session-1", Turn: 1, Input: "q3", Label: "a3", EpisodeID: string(episodeB)},
-		{SessionID: "session-1", Turn: 2, Input: "q4\nunpaired", Label: "unpaired", EpisodeID: string(episodeB)},
+		{
+			SessionID: "session-1", Turn: 2, Input: "q4\nunpaired", Label: "unpaired", EpisodeID: string(episodeB),
+			Inputs: []SFTInput{{Text: "q4"}, {Text: "unpaired"}},
+		},
 		{SessionID: "session-2", Turn: 3, Input: "q5", Label: "a5", EpisodeID: string(episodeA)},
 	}
 	if !reflect.DeepEqual(samples, expected) {
@@ -164,5 +168,122 @@ func TestWriteSamplesWritesJSONL(t *testing.T) {
 	}
 	if err := WriteSamples(nil, samples); !errors.Is(err, ErrSampleWriterMissing) {
 		t.Fatalf("write beside no writer = %v, want ErrSampleWriterMissing", err)
+	}
+}
+
+// consumedChainInput is one input fact the consumption checks commit: the
+// identity an output names it by, the invocation and source it came from, the
+// episode it belongs to and the text it presents.
+func consumedChainInput(key event.EventID, invocation event.InvocationID, source event.Address, episode event.EpisodeID, content string) event.Event {
+	return event.Event{
+		Key:          key,
+		Type:         event.TypeExternalInput,
+		InvocationID: invocation,
+		Source:       source,
+		EpisodeID:    episode,
+		Message:      model.Message{Role: model.RoleUser, Content: content},
+	}
+}
+
+// consumedChainOutput is one agent output fact the consumption checks commit,
+// beside the input identities it consumed: an empty relation is stored as no
+// relation at all, which is the chain a recorder without the relation writes.
+func consumedChainOutput(key event.EventID, invocation event.InvocationID, episode event.EpisodeID, content string, consumed ...event.EventID) event.Event {
+	fact := event.Event{
+		Key:          key,
+		Type:         event.TypeAgentOutput,
+		InvocationID: invocation,
+		EpisodeID:    episode,
+		Message:      model.Message{Role: model.RoleAssistant, Content: content},
+	}
+	if len(consumed) == 0 {
+		return fact
+	}
+	encoded, err := json.Marshal(consumed)
+	if err != nil {
+		panic(err)
+	}
+	fact.Meta = map[string]string{event.MetaKeyInputEvents: string(encoded)}
+	return fact
+}
+
+// TestExportPairsByConsumptionKeys pins the pairing judgement of one export.
+//   - an output pairs with the inputs its own consumption relation names
+//   - two inputs of different sources and invocations enter one row, each keeping its source
+//   - the row follows the relation's order, not the commit order of the inputs
+//   - the answering output of a third invocation shows the row crossing invocations
+//
+// 契约: docs/wiki/rl/rl-architecture.md#training-export
+func TestExportPairsByConsumptionKeys(t *testing.T) {
+	ctx := context.Background()
+	const episode = event.EpisodeID("episode-consumption")
+	hostInput := consumedChainInput("in-host", "inv-host",
+		event.Address{AgentID: "agent-host", SessionID: "session-host"}, episode, "question from the host")
+	noticeInput := consumedChainInput("in-notice", "inv-notice",
+		event.Address{AgentID: "agent-notice", SessionID: "session-notice"}, episode, "notice from the task")
+	answer := consumedChainOutput("out-answer", "inv-answer", episode, "one answer to both", "in-notice", "in-host")
+	facts := &chainFacts{sessions: map[event.SessionID][]event.Event{
+		"session-batch": {hostInput, noticeInput, answer},
+	}}
+	samples, err := NewChainExporter(facts).Export(ctx, ExportOptions{
+		SessionIDs: []event.SessionID{"session-batch"},
+	})
+	if err != nil {
+		t.Fatalf("export the batched chain: %v", err)
+	}
+	want := []SFTSample{{
+		SessionID: "session-batch",
+		Turn:      1,
+		Input:     "notice from the task\nquestion from the host",
+		Label:     "one answer to both",
+		EpisodeID: string(episode),
+		Inputs: []SFTInput{
+			{Agent: "agent-notice", Session: "session-notice", Text: "notice from the task"},
+			{Agent: "agent-host", Session: "session-host", Text: "question from the host"},
+		},
+	}}
+	if !reflect.DeepEqual(samples, want) {
+		t.Fatalf("samples = %+v, want the two inputs paired by the output's consumption keys %+v", samples, want)
+	}
+}
+
+// TestExportUnconsumedInputNoSample pins the other half of that judgement.
+//   - the answer names only the input it consumed, so the row holds that input alone
+//   - the input that follows is carried by no relation, so no row is invented for it
+//   - an answer naming no pending input produces no row either
+//
+// 契约: docs/wiki/rl/rl-architecture.md#training-export
+func TestExportUnconsumedInputNoSample(t *testing.T) {
+	ctx := context.Background()
+	const episode = event.EpisodeID("episode-unconsumed")
+	consumed := consumedChainInput("in-consumed", "inv-consumed",
+		event.Address{AgentID: "agent-host", SessionID: "session-host"}, episode, "carried question")
+	unconsumed := consumedChainInput("in-unconsumed", "inv-unconsumed",
+		event.Address{AgentID: "agent-host", SessionID: "session-host"}, episode, "uncarried notice")
+	first := consumedChainOutput("out-first", "inv-first", episode, "answer to the carried question", "in-consumed")
+	second := consumedChainOutput("out-second", "inv-second", episode, "answer to nothing new", "in-consumed")
+	facts := &chainFacts{sessions: map[event.SessionID][]event.Event{
+		"session-unconsumed": {consumed, first, unconsumed, second},
+	}}
+	samples, err := NewChainExporter(facts).Export(ctx, ExportOptions{
+		SessionIDs: []event.SessionID{"session-unconsumed"},
+	})
+	if err != nil {
+		t.Fatalf("export the chain: %v", err)
+	}
+	want := []SFTSample{{
+		SessionID: "session-unconsumed",
+		Turn:      1,
+		Input:     "carried question",
+		Label:     "answer to the carried question",
+		EpisodeID: string(episode),
+	}}
+	if !reflect.DeepEqual(samples, want) {
+		t.Fatalf("samples = %+v, want only the row whose input an output carried %+v", samples, want)
+	}
+	for _, sample := range samples {
+		if sample.Input == "uncarried notice" || sample.Label == "answer to nothing new" {
+			t.Fatalf("sample %+v carries the unconsumed input or the empty answer, want neither", sample)
+		}
 	}
 }

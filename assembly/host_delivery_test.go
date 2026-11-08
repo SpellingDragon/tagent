@@ -361,7 +361,7 @@ func TestObligationAtomicWithOutput(t *testing.T) {
 		t.Fatalf("the output fact declares no lineage: meta=%v", output.Meta)
 	}
 	identity := hostDeliveryFreshPrefix + string(output.Key)
-	settled, ok := host.settlementStateOf(ctx, identity)
+	settled, ok := deliveryTestSettlement(t, ctx, host, identity)
 	if !ok || settled.state != deliveryStateSent {
 		t.Fatalf("the obligation the output declared settled as %+v (ok=%v), want the sent state of %q", settled, ok, identity)
 	}
@@ -385,7 +385,7 @@ func TestObligationAtomicWithOutput(t *testing.T) {
 func TestDeliveryCommitFailureBlocksSend(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
-	run := snapshotTestRun(t, ctx, WithStorage(ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: t.TempDir()}))
+	run := snapshotTestRun(t, ctx, WithStorage(ledger.StorageConfig{Type: ledger.StorageJournal, Root: t.TempDir()}))
 	addr := deliveryTestAddress("session-commit-failure")
 	sender := newDeliveryTestSender(nil)
 	host := deliveryTestHost(ctx, run, sender)
@@ -479,7 +479,7 @@ func TestUnknownResultNeverAutoRedriven(t *testing.T) {
 	if count := sender.deliveredCount("settled"); count != 0 {
 		t.Fatalf("the timed-out body reached the channel %d time(s) on its own, want 0", count)
 	}
-	settled, ok := host.settlementStateOf(ctx, identity)
+	settled, ok := deliveryTestSettlement(t, ctx, host, identity)
 	if !ok || settled.state != heldStateOf(deliveryReasonUnknown) {
 		t.Fatalf("the held obligation reads as %+v (ok=%v), want held(%s)", settled, ok, deliveryReasonUnknown)
 	}
@@ -518,7 +518,7 @@ func TestRetryExhaustionFallsToHeld(t *testing.T) {
 	if attempts := sender.attemptCount("settled"); attempts != 1+deliveryRetryLimit {
 		t.Fatalf("the channel was asked %d time(s), want the first attempt beside %d retries", attempts, deliveryRetryLimit)
 	}
-	settled, ok := host.settlementStateOf(ctx, identity)
+	settled, ok := deliveryTestSettlement(t, ctx, host, identity)
 	if !ok || settled.state != heldStateOf(deliveryReasonRetryExhausted) {
 		t.Fatalf("the exhausted obligation reads as %+v (ok=%v), want held(%s)", settled, ok, deliveryReasonRetryExhausted)
 	}
@@ -574,17 +574,17 @@ func TestRetryGapWritesHeldRetrying(t *testing.T) {
 		t.Fatalf("the gap fact reads as %+v (ok=%v), want held(%s)", settlement, ok, deliveryReasonRetrying)
 	}
 	if !deliveryTestWaitFor(5*time.Second, func() bool {
-		settled, ok := host.settlementStateOf(ctx, identity)
+		settled, ok := deliveryTestSettlement(t, ctx, host, identity)
 		return ok && settled.state == deliveryStateSent
 	}) {
-		settled, ok := host.settlementStateOf(ctx, identity)
+		settled, ok := deliveryTestSettlement(t, ctx, host, identity)
 		t.Fatalf("the reconciled obligation reads as %+v (ok=%v), want sent", settled, ok)
 	}
 	if !deliveryTestWaitFor(5*time.Second, func() bool {
-		settled, ok := host.settlementStateOf(ctx, identity)
+		settled, ok := deliveryTestSettlement(t, ctx, host, identity)
 		return ok && settled.state == deliveryStateSent
 	}) {
-		settled, ok := host.settlementStateOf(ctx, identity)
+		settled, ok := deliveryTestSettlement(t, ctx, host, identity)
 		t.Fatalf("the reconciled obligation reads as %+v (ok=%v), want sent", settled, ok)
 	}
 	allowed := map[string]bool{
@@ -642,10 +642,10 @@ func TestRetryAttemptsCarryActionIdentity(t *testing.T) {
 	output := deliveryTestOutputOf(t, run, addr, turn.InvocationID)
 	identity := hostDeliveryFreshPrefix + string(output.Key)
 	if !deliveryTestWaitFor(5*time.Second, func() bool {
-		settled, ok := host.settlementStateOf(ctx, identity)
+		settled, ok := deliveryTestSettlement(t, ctx, host, identity)
 		return ok && settled.state == deliveryStateSent
 	}) {
-		settled, ok := host.settlementStateOf(ctx, identity)
+		settled, ok := deliveryTestSettlement(t, ctx, host, identity)
 		t.Fatalf("the retried obligation of the declared identity reads as %+v (ok=%v), want sent", settled, ok)
 	}
 	time.Sleep(150 * time.Millisecond)
@@ -697,6 +697,18 @@ func deliveryTestStates(host *Host) map[string]string {
 	return states
 }
 
+// deliveryTestSettlement reads one settlement state for a check and refuses the
+// check by name when the read failed: a healthy chain answers no error, so a
+// surfaced error is a defect the check reports rather than reads as absence.
+func deliveryTestSettlement(t *testing.T, ctx context.Context, host *Host, identity string) (deliverySettlement, bool) {
+	t.Helper()
+	settlement, known, err := host.settlementStateOf(ctx, identity)
+	if err != nil {
+		t.Fatalf("the settlement state of %s could not be read: %v", identity, err)
+	}
+	return settlement, known
+}
+
 // deliveryTestTwoAgentRun assembles a run declaring the entry agent beside one
 // headless agent, so a check can name an address the host never delivers to.
 func deliveryTestTwoAgentRun(t *testing.T, ctx context.Context, opts ...Option) *Run {
@@ -730,7 +742,7 @@ func TestRebuildSkipsSettledBodies(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
 	root := t.TempDir()
-	storage := WithStorage(ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: root})
+	storage := WithStorage(ledger.StorageConfig{Type: ledger.StorageJournal, Root: root})
 	first := snapshotTestRun(t, ctx, storage)
 	addr := deliveryTestAddress("session-rebuild-settled")
 	firstSender := newDeliveryTestSender(nil)
@@ -743,7 +755,7 @@ func TestRebuildSkipsSettledBodies(t *testing.T) {
 		t.Fatalf("close the first process: %v", err)
 	}
 
-	restarted := snapshotTestRun(t, ctx, WithStorage(ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: root}))
+	restarted := snapshotTestRun(t, ctx, WithStorage(ledger.StorageConfig{Type: ledger.StorageJournal, Root: root}))
 	sender := newDeliveryTestSender(nil)
 	host := deliveryTestHost(ctx, restarted, sender)
 	if err := host.restorePendingDeliveries(ctx); err != nil {
@@ -766,7 +778,7 @@ func TestRecoveryResumesInterruptedRetry(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
 	root := t.TempDir()
-	storage := WithStorage(ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: root})
+	storage := WithStorage(ledger.StorageConfig{Type: ledger.StorageJournal, Root: root})
 	first := snapshotTestRun(t, ctx, storage)
 	addr := deliveryTestAddress("session-resume-retry")
 	firstSender := newDeliveryTestSender(func(int, event.Address, string) error { return deliveryTestDefiniteError{} })
@@ -791,7 +803,7 @@ func TestRecoveryResumesInterruptedRetry(t *testing.T) {
 		t.Fatalf("close the process that stopped inside the backoff: %v", err)
 	}
 
-	restarted := snapshotTestRun(t, ctx, WithStorage(ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: root}))
+	restarted := snapshotTestRun(t, ctx, WithStorage(ledger.StorageConfig{Type: ledger.StorageJournal, Root: root}))
 	sender := newDeliveryTestSender(nil)
 	host := deliveryTestHost(ctx, restarted, sender)
 	host.deliveryBackoff = 20 * time.Millisecond
@@ -817,7 +829,7 @@ func TestMultiSessionRecoveryBounded(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
 	root := t.TempDir()
-	storage := WithStorage(ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: root})
+	storage := WithStorage(ledger.StorageConfig{Type: ledger.StorageJournal, Root: root})
 	first := snapshotTestRun(t, ctx, storage)
 	sessionA := deliveryTestAddress("session-bounded-a")
 	sessionB := deliveryTestAddress("session-bounded-b")
@@ -855,7 +867,7 @@ func TestMultiSessionRecoveryBounded(t *testing.T) {
 		t.Fatalf("close the bounded process: %v", err)
 	}
 
-	restarted := snapshotTestRun(t, ctx, WithStorage(ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: root}))
+	restarted := snapshotTestRun(t, ctx, WithStorage(ledger.StorageConfig{Type: ledger.StorageJournal, Root: root}))
 	if partitions := restarted.registeredPartitions(); len(partitions) == 0 {
 		t.Fatalf("the restarted run registered no chain partition, so no settlement fact could be read")
 	}
@@ -865,13 +877,18 @@ func TestMultiSessionRecoveryBounded(t *testing.T) {
 	if err != nil {
 		t.Fatalf("query the settlement window: %v", err)
 	}
-	if len(refs) != 2 {
-		t.Fatalf("the settlement window returned %d matching entr(ies), want the 2 held facts of the two sessions: %+v", len(refs), refs)
-	}
+	states := 0
 	for _, ref := range refs {
 		if !strings.HasPrefix(string(ref.Key), deliveryFactPrefix) {
 			t.Fatalf("the narrowed query returned a fact outside the family: %q", ref.Key)
 		}
+		if _, state, ok := deliveryIdentityOfSettlementKey(ref.Key); ok && strings.HasPrefix(state, deliveryRetryPrefix) {
+			continue
+		}
+		states++
+	}
+	if states != 2 {
+		t.Fatalf("the settlement window returned %d state entr(ies), want the 2 held facts of the two sessions: %+v", states, refs)
 	}
 	restartedHost := deliveryTestHost(ctx, restarted, newDeliveryTestSender(nil))
 	restartedHost.deliveryBackoff = time.Hour
@@ -967,7 +984,7 @@ func TestDanglingTurnAfterDualFailure(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
 	root := t.TempDir()
-	storage := WithStorage(ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: root})
+	storage := WithStorage(ledger.StorageConfig{Type: ledger.StorageJournal, Root: root})
 	begun := make(chan struct{})
 	release := make(chan struct{})
 	tool := &deliveryTestBlockingTool{name: "hold", begun: begun, release: release}
@@ -1056,7 +1073,7 @@ func TestDanglingTurnAfterDualFailure(t *testing.T) {
 		t.Fatal("the first run did not drain its writers before the restart; a fire-and-forget Close leaves a KV write in flight and TempDir cleanup fails with directory not empty")
 	}
 
-	restarted := snapshotTestRun(t, ctx, WithStorage(ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: root}))
+	restarted := snapshotTestRun(t, ctx, WithStorage(ledger.StorageConfig{Type: ledger.StorageJournal, Root: root}))
 	restartedSender := newDeliveryTestSender(nil)
 	restartedHost := deliveryTestHost(ctx, restarted, restartedSender)
 	restartedHost.deliveryBackoff = time.Hour
@@ -1216,7 +1233,7 @@ func TestKVDeliveryMigratedToFacts(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
 	root := t.TempDir()
-	storage := WithStorage(ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: root})
+	storage := WithStorage(ledger.StorageConfig{Type: ledger.StorageJournal, Root: root})
 	first := deliveryTestTwoAgentRun(t, ctx, storage)
 	addr := deliveryTestAddress("session-migration")
 	headless := event.Address{AgentID: "agent-b", SessionID: event.SessionID("session-migration")}
@@ -1231,7 +1248,7 @@ func TestKVDeliveryMigratedToFacts(t *testing.T) {
 	})
 
 	sender := newDeliveryTestSender(nil)
-	second := deliveryTestTwoAgentRun(t, ctx, WithStorage(ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: root}))
+	second := deliveryTestTwoAgentRun(t, ctx, WithStorage(ledger.StorageConfig{Type: ledger.StorageJournal, Root: root}))
 	host := deliveryTestHost(ctx, second, sender)
 	host.deliveryBackoff = time.Hour
 	if err := host.restorePendingDeliveries(ctx); err != nil {
@@ -1253,12 +1270,12 @@ func TestKVDeliveryMigratedToFacts(t *testing.T) {
 		"delivery-000006": deliveryStateHeadlessRetired,
 	}
 	for identity, want := range states {
-		settled, known := host.settlementStateOf(ctx, identity)
+		settled, known := deliveryTestSettlement(t, ctx, host, identity)
 		if !known || settled.state != want {
 			t.Fatalf("the migrated record %s reads as %+v (known=%v), want %q", identity, settled, known, want)
 		}
 	}
-	retired, known := host.settlementStateOf(ctx, "delivery-000006")
+	retired, known := deliveryTestSettlement(t, ctx, host, "delivery-000006")
 	if !known || retired.delivery.Content != "the headless legacy body" {
 		t.Fatalf("the retired headless record kept %+v (known=%v), want the body archived on the fact", retired, known)
 	}
@@ -1278,7 +1295,7 @@ func TestKVDeliveryMigratedToFacts(t *testing.T) {
 		t.Fatalf("close the migrating process: %v", err)
 	}
 
-	third := deliveryTestTwoAgentRun(t, ctx, WithStorage(ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: root}))
+	third := deliveryTestTwoAgentRun(t, ctx, WithStorage(ledger.StorageConfig{Type: ledger.StorageJournal, Root: root}))
 	thirdSender := newDeliveryTestSender(nil)
 	thirdHost := deliveryTestHost(ctx, third, thirdSender)
 	thirdHost.deliveryBackoff = time.Hour
@@ -1289,7 +1306,7 @@ func TestKVDeliveryMigratedToFacts(t *testing.T) {
 		t.Fatalf("the second boot delivered %q, want nothing new", delivered)
 	}
 	for identity, want := range states {
-		settled, known := thirdHost.settlementStateOf(ctx, identity)
+		settled, known := deliveryTestSettlement(t, ctx, thirdHost, identity)
 		if !known || settled.state != want {
 			t.Fatalf("the second boot reads %s as %+v (known=%v), want %q", identity, settled, known, want)
 		}
@@ -1297,7 +1314,7 @@ func TestKVDeliveryMigratedToFacts(t *testing.T) {
 	if count := boundaryAnchorSettlementFacts(third.SessionFacts(addr)); count != 6 {
 		t.Fatalf("the second boot left %d settlement fact(s) at %s, want the 6 the migration and its one resend wrote", count, addr.SessionID)
 	}
-	if settled, known := thirdHost.settlementStateOf(ctx, "delivery-000001"); !known || settled.state != deliveryStateSent {
+	if settled, known := deliveryTestSettlement(t, ctx, thirdHost, "delivery-000001"); !known || settled.state != deliveryStateSent {
 		t.Fatalf("the migrated owed record reads as %+v (known=%v), want its historical owed fact behind the sent state", settled, known)
 	}
 	deliveryTestStopRetries(thirdHost)
@@ -1309,7 +1326,7 @@ func TestKVDeliveryMigratedToFacts(t *testing.T) {
 func TestKVRecordUnparseableRefusesBoot(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
-	run := snapshotTestRun(t, ctx, WithStorage(ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: t.TempDir()}))
+	run := snapshotTestRun(t, ctx, WithStorage(ledger.StorageConfig{Type: ledger.StorageJournal, Root: t.TempDir()}))
 	host := deliveryTestHost(ctx, run, newDeliveryTestSender(nil))
 	log := host.deliveryDurable()
 	if log == nil {
@@ -1334,7 +1351,7 @@ func TestKVRecordUnparseableRefusesBoot(t *testing.T) {
 func TestRecoveryNoLongerScansKVPrefix(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
-	run := snapshotTestRun(t, ctx, WithStorage(ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: t.TempDir()}))
+	run := snapshotTestRun(t, ctx, WithStorage(ledger.StorageConfig{Type: ledger.StorageJournal, Root: t.TempDir()}))
 	addr := deliveryTestAddress("session-no-kv-scan")
 	host := deliveryTestHost(ctx, run, newDeliveryTestSender(nil))
 	const identity = "delivery-fresh-2-no-kv-scan"
@@ -1478,7 +1495,7 @@ func TestHeldReasonsDistinguishable(t *testing.T) {
 		}
 		host.parkHeld(identity, delivery, time.Now())
 		keys[deliverySettlementKey(identity, state)] = true
-		settled, known := host.settlementStateOf(ctx, identity)
+		settled, known := deliveryTestSettlement(t, ctx, host, identity)
 		if !known || settled.state != state {
 			t.Fatalf("the held(%s) obligation reads as %+v (known=%v)", reason, settled, known)
 		}
@@ -1626,7 +1643,7 @@ func TestApproveRefuseOnFacts(t *testing.T) {
 	if delivered := sender.deliveredCount("settled"); delivered != 1 {
 		t.Fatalf("the approval delivered the body %d time(s), want 1", delivered)
 	}
-	approved, known := host.settlementStateOf(ctx, held[0].ID)
+	approved, known := deliveryTestSettlement(t, ctx, host, held[0].ID)
 	if !known || approved.state != deliveryStateSent {
 		t.Fatalf("the approved obligation reads as %+v (known=%v), want sent", approved, known)
 	}
@@ -1648,7 +1665,7 @@ func TestApproveRefuseOnFacts(t *testing.T) {
 	if delivered := sender.deliveredCount("settled"); delivered != 1 {
 		t.Fatalf("the refusal delivered the body %d time(s), want the one approved copy", delivered)
 	}
-	refused, known := host.settlementStateOf(ctx, held[0].ID)
+	refused, known := deliveryTestSettlement(t, ctx, host, held[0].ID)
 	if !known || refused.state != deliveryStateRefused {
 		t.Fatalf("the refused obligation reads as %+v (known=%v), want refused", refused, known)
 	}
@@ -1701,7 +1718,7 @@ func TestDeliveryConsumerPathEvidence(t *testing.T) {
 		t.Fatalf("the consumer path left the obligation parked after its redrive landed: %+v", host.HeldDeliveries())
 	}
 	for identity, obliged := range deliveryTestStates(host) {
-		settled, known := host.settlementStateOf(ctx, identity)
+		settled, known := deliveryTestSettlement(t, ctx, host, identity)
 		if !known || settled.state != obliged {
 			t.Fatalf("the account of %s reads %+v (known=%v), want the %q it states", identity, settled, known, obliged)
 		}
@@ -1728,7 +1745,7 @@ func TestDeliveryEventificationIsUnconditional(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 	root := t.TempDir()
-	storage := WithStorage(ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: root})
+	storage := WithStorage(ledger.StorageConfig{Type: ledger.StorageJournal, Root: root})
 	run := snapshotTestRun(t, ctx, storage)
 	addr := deliveryTestAddress("session-unconditional")
 	sender := newDeliveryTestSender(nil)
@@ -1772,7 +1789,7 @@ func TestSymptomAnchorDeliveryRegistrationStopsSend(t *testing.T) {
 	defer cancel()
 
 	root := t.TempDir()
-	storage := WithStorage(ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: root})
+	storage := WithStorage(ledger.StorageConfig{Type: ledger.StorageJournal, Root: root})
 	run, _ := boundaryAnchorAssemble(t, ctx, boundaryAnchorSpec(),
 		boundaryAnchorAnswer(boundaryAnchorBody), storage)
 	addr := boundaryAnchorAddress("session-anchor-registration")
@@ -1829,7 +1846,7 @@ func TestSymptomAnchorDeliveryWindowSurvivesRestart(t *testing.T) {
 	defer cancel()
 
 	root := t.TempDir()
-	storage := WithStorage(ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: root})
+	storage := WithStorage(ledger.StorageConfig{Type: ledger.StorageJournal, Root: root})
 	first, _ := boundaryAnchorAssemble(t, ctx, boundaryAnchorSpec(),
 		boundaryAnchorAnswer(boundaryAnchorBody), storage)
 	addr := boundaryAnchorAddress("session-anchor-restart")
@@ -2331,7 +2348,7 @@ func TestRestoreFoldCounts(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 	root := t.TempDir()
-	storage := WithStorage(ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: root})
+	storage := WithStorage(ledger.StorageConfig{Type: ledger.StorageJournal, Root: root})
 	round := 0
 	foldModel := &snapshotTestModel{answer: func(*model.Request) *model.Response {
 		round++
@@ -2409,7 +2426,7 @@ func TestRestartRecoveryPinsBeforeTrim(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
 	root := t.TempDir()
-	storage := WithStorage(ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: root})
+	storage := WithStorage(ledger.StorageConfig{Type: ledger.StorageJournal, Root: root})
 	first := snapshotTestRun(t, ctx, storage)
 	addr := deliveryTestAddress("session-restart-pin-order")
 	host := deliveryTestHost(ctx, first, newDeliveryTestSender(nil))
@@ -2450,7 +2467,7 @@ func TestSymptomAnchorDeliveryOutsideWindowSurvivesRestart(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
 	root := t.TempDir()
-	storage := WithStorage(ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: root})
+	storage := WithStorage(ledger.StorageConfig{Type: ledger.StorageJournal, Root: root})
 	first, _ := boundaryAnchorAssemble(t, ctx, boundaryAnchorSpec(), boundaryAnchorAnswer(boundaryAnchorBody), storage)
 	addr := boundaryAnchorAddress("session-anchor-cold-restart")
 	invocation := event.InvocationID("inv-anchor-cold-restart")
@@ -2497,7 +2514,7 @@ func TestSymptomAnchorDeliveryOutsideWindowSurvivesRestart(t *testing.T) {
 func TestRestartRestoresHeldSequence(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
-	storage := WithStorage(ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: root})
+	storage := WithStorage(ledger.StorageConfig{Type: ledger.StorageJournal, Root: root})
 	first := snapshotTestRun(t, ctx, storage)
 	addr := deliveryTestAddress("session-held-seq")
 	host := deliveryTestHost(ctx, first, newDeliveryTestSender(nil))
@@ -2515,5 +2532,282 @@ func TestRestartRestoresHeldSequence(t *testing.T) {
 	}
 	if state, known := recovered.deliveryStateOf("delivery-7"); !known || state != heldStateOf(deliveryReasonApproval) {
 		t.Fatalf("the original held body was lost or overwritten: state=%q known=%v", state, known)
+	}
+}
+
+// TestDeliveryOwedTrimNegative pins the owed residency the chain read already owes: a trimmed obligation is still discovered.
+// - The owed declaration leaves the hot window once filler pushes past it.
+// - The recovery still declares the obligation from the durable chain.
+func TestDeliveryOwedTrimNegative(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+	root := t.TempDir()
+	storage := WithStorage(ledger.StorageConfig{Type: ledger.StorageJournal, Root: root})
+	first := snapshotTestRun(t, ctx, storage)
+	addr := deliveryTestAddress("session-owed-trim-negative")
+	owedKey := event.EventID("owed-trim-negative-output")
+	if _, err := first.commitFactChecked(ctx, event.Event{
+		Key:       owedKey,
+		Type:      event.TypeAgentOutput,
+		Timestamp: time.Now(),
+		Message:   model.Message{Role: model.RoleAssistant, Content: "the owed body beyond the window"},
+		Owner:     addr, Source: addr, Target: addr,
+		Meta: map[string]string{
+			deliveryOwedMeta:          "1",
+			deliveryTargetAgentMeta:   string(addr.AgentID),
+			deliveryTargetSessionMeta: string(addr.SessionID),
+			deliveryLineageMeta:       "user",
+		},
+	}); err != nil {
+		t.Fatalf("commit the owed declaration: %v", err)
+	}
+	for index := 0; index < noWindowResidentFacts+32; index++ {
+		if _, err := first.commitFactChecked(ctx, event.Event{
+			Type: event.TypeFeedback, Timestamp: time.Now(), Owner: addr, Source: addr, Target: addr,
+			Meta: map[string]string{event.MetaKeyEventSummary: fmt.Sprintf("trim filler %d", index)},
+		}); err != nil {
+			t.Fatalf("commit trim filler %d: %v", index, err)
+		}
+	}
+	if _, err := first.commitFactChecked(ctx, event.Event{
+		Type: event.TypeAgentOutput, Timestamp: time.Now(),
+		Message: model.Message{Role: model.RoleAssistant, Content: "close a later segment without a new obligation"},
+		Owner:   addr, Source: addr, Target: addr,
+	}); err != nil {
+		t.Fatalf("close the later segment: %v", err)
+	}
+	if _, err := first.Close(ctx, agent.CloseRequest{Timeout: time.Now().Add(20 * time.Second)}); err != nil {
+		t.Fatalf("close the seeding process: %v", err)
+	}
+
+	restarted := snapshotTestRun(t, ctx, storage)
+	if _, held := restarted.factOf(owedKey); held {
+		t.Fatal("the owed declaration stayed in the hot window, so the trim control never exercised the defect boundary")
+	}
+	host := deliveryTestHost(ctx, restarted, newDeliveryTestSender(nil))
+	_, declared, _, err := host.deliveryRecoveryFacts(ctx)
+	if err != nil {
+		t.Fatalf("read the recovery facts: %v", err)
+	}
+	identity := hostDeliveryFreshPrefix + string(owedKey)
+	found := false
+	for _, declaration := range declared {
+		if declaration.identity == identity {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("the trimmed owed declaration %s was lost to the recovery, want it discovered from the durable chain", identity)
+	}
+	deliveryTestStopRetries(host)
+}
+
+// deliveryTestSeedRetry writes one held(retrying) obligation beside the retry
+// attempt facts a process left before it stopped, so a restart check resumes from
+// a recorded count instead of a live backoff it cannot time deterministically.
+func deliveryTestSeedRetry(t *testing.T, ctx context.Context, host *Host, addr event.Address, identity, body string, attempts int) {
+	t.Helper()
+	delivery := plugin.Delivery{Content: body, Lineage: "user", Target: addr}
+	if err := host.writeDeliveryState(ctx, identity, delivery, heldStateOf(deliveryReasonRetrying), time.Now()); err != nil {
+		t.Fatalf("seed the held(retrying) fact of %s: %v", identity, err)
+	}
+	for attempt := 0; attempt < attempts; attempt++ {
+		if err := host.writeDeliveryRetryAttempt(ctx, addr, identity, attempt, delivery); err != nil {
+			t.Fatalf("seed the retry attempt %d of %s: %v", attempt, identity, err)
+		}
+	}
+}
+
+// TestDeliveryRetryBoundedAcrossRestart pins the resumed retry count.
+//   - The retry continues from the highest fact the chain holds, not from zero: a process that recorded attempts 0 and 1 resumes at attempt 1.
+//   - The resumed entry is the one the consumer queues, read before any fire.
+func TestDeliveryRetryBoundedAcrossRestart(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+	root := t.TempDir()
+	storage := WithStorage(ledger.StorageConfig{Type: ledger.StorageJournal, Root: root})
+	addr := deliveryTestAddress("session-resume-count")
+	identity := "delivery-resume-count"
+	first := snapshotTestRun(t, ctx, storage)
+	firstHost := deliveryTestHost(ctx, first, newDeliveryTestSender(nil))
+	deliveryTestSeedRetry(t, ctx, firstHost, addr, identity, "resume body", 2)
+	deliveryTestStopRetries(firstHost)
+	if _, err := first.Close(ctx, agent.CloseRequest{Timeout: time.Now().Add(20 * time.Second)}); err != nil {
+		t.Fatalf("close the process that stopped inside the backoff: %v", err)
+	}
+
+	restarted := snapshotTestRun(t, ctx, storage)
+	host := deliveryTestHost(ctx, restarted, newDeliveryTestSender(nil))
+	host.deliveryBackoff = time.Hour
+	if err := host.restorePendingDeliveries(ctx); err != nil {
+		t.Fatalf("restore the interrupted retry: %v", err)
+	}
+	defer deliveryTestStopRetries(host)
+	host.retries.mu.Lock()
+	entry := host.retries.queue[identity]
+	host.retries.mu.Unlock()
+	if entry == nil {
+		t.Fatalf("the restart queued no resumed retry of %s: states=%v", identity, deliveryTestStates(host))
+	}
+	if entry.attempt != 1 {
+		t.Fatalf("the resumed retry continues at attempt %d, want 1 from the chain (not reset to 0)", entry.attempt)
+	}
+}
+
+// TestDeliveryRetryExhaustRefuses pins the retry bound across a restart.
+//   - A chain that already recorded attempts 0, 1 and 2 resumes at the last one: the restart fires attempt 2 once and stops at retry-exhausted.
+//   - Resetting the count to zero would fire three more sends; the bound refuses them and lands no attempt fact beyond the limit.
+func TestDeliveryRetryExhaustRefuses(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+	root := t.TempDir()
+	storage := WithStorage(ledger.StorageConfig{Type: ledger.StorageJournal, Root: root})
+	addr := deliveryTestAddress("session-resume-exhaust")
+	identity := "delivery-resume-exhaust"
+	first := snapshotTestRun(t, ctx, storage)
+	firstHost := deliveryTestHost(ctx, first, newDeliveryTestSender(nil))
+	deliveryTestSeedRetry(t, ctx, firstHost, addr, identity, "exhaust body", deliveryRetryLimit)
+	deliveryTestStopRetries(firstHost)
+	if _, err := first.Close(ctx, agent.CloseRequest{Timeout: time.Now().Add(20 * time.Second)}); err != nil {
+		t.Fatalf("close the seeded process: %v", err)
+	}
+
+	restarted := snapshotTestRun(t, ctx, storage)
+	sender := newDeliveryTestSender(func(int, event.Address, string) error { return deliveryTestDefiniteError{} })
+	host := deliveryTestHost(ctx, restarted, sender)
+	host.deliveryBackoff = 5 * time.Millisecond
+	if err := host.restorePendingDeliveries(ctx); err != nil {
+		t.Fatalf("restore the nearly exhausted retry: %v", err)
+	}
+	defer deliveryTestStopRetries(host)
+	if !deliveryTestWaitFor(5*time.Second, func() bool {
+		state, known := host.deliveryStateOf(identity)
+		return known && state == heldStateOf(deliveryReasonRetryExhausted)
+	}) {
+		t.Fatalf("the resumed retry never reached the bound: states=%v attempts=%d", deliveryTestStates(host), sender.attemptCount("exhaust body"))
+	}
+	if attempts := sender.attemptCount("exhaust body"); attempts != 1 {
+		t.Fatalf("the restart fired %d sends, want the single last attempt the bound allows (a reset count fires %d)", attempts, deliveryRetryLimit)
+	}
+	if _, held, err := host.settlementFactOf(ctx, deliverySettlementKey(identity, deliveryRetryState(deliveryRetryLimit))); err != nil || held {
+		t.Fatalf("the chain holds an attempt fact beyond the limit (held=%v err=%v), want none", held, err)
+	}
+}
+
+// TestDeliveryRetryAccountingNotProjected pins the noise rule of the settlement family beside the attempt facts.
+// - pipeline accounting must never reach the model as a line of dialogue
+//   - the held(retrying) settlement state of the obligation is presented, so the read is not empty and the negative leg has a positive control
+//   - no retry attempt fact of that obligation reaches the projection, and no projected line speaks the retry count
+func TestDeliveryRetryAccountingNotProjected(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+	root := t.TempDir()
+	storage := WithStorage(ledger.StorageConfig{Type: ledger.StorageJournal, Root: root})
+	addr := deliveryTestAddress("session-retry-accounting")
+	identity := "delivery-retry-accounting"
+	run := snapshotTestRun(t, ctx, storage)
+	host := deliveryTestHost(ctx, run, newDeliveryTestSender(nil))
+	deliveryTestSeedRetry(t, ctx, host, addr, identity, "accounting body", deliveryRetryLimit)
+	deliveryTestStopRetries(host)
+
+	entries, carried := run.ReplayEntries(addr.SessionID)
+	if !carried {
+		t.Fatal("the session registered no mapped sequence, so the noise rule was never read")
+	}
+	presented := false
+	for _, entry := range entries {
+		if strings.Contains(entry.Content, identity) {
+			presented = true
+		}
+		if strings.Contains(entry.Content, "delivery retry ") {
+			t.Fatalf("the projection presents the retry accounting line %q, want the attempt facts kept out of the model face", entry.Content)
+		}
+		for attempt := 0; attempt < deliveryRetryLimit; attempt++ {
+			if entry.Key == deliverySettlementKey(identity, deliveryRetryState(attempt)) {
+				t.Fatalf("the projection presents the retry attempt fact %s, want it read by the account alone", entry.Key)
+			}
+		}
+	}
+	if !presented {
+		t.Fatalf("the projection holds no line naming %s, so the settlement state itself was not presented", identity)
+	}
+}
+
+// TestDeliverySettlementReadErrorNotResend pins the named settlement read.
+//   - A settlement fact whose durable body cannot be decoded answers a named read error, not the absence that would let the live path resend a closed body.
+func TestDeliverySettlementReadErrorNotResend(t *testing.T) {
+	ctx := context.Background()
+	tier, err := ledger.OpenTier(ctx, ledger.StorageConfig{Type: ledger.StorageMemory})
+	if err != nil {
+		t.Fatalf("open the tier: %v", err)
+	}
+	defer tier.Segments.Close()
+	addr := deliveryTestAddress("session-settlement-read-error")
+	identity := hostDeliveryFreshPrefix + "settled-read-error"
+	key := deliverySettlementKey(identity, deliveryStateSent)
+	at := time.Now()
+	if err := tier.Segments.StoreEvent(ctx, ledger.SegmentRecord{
+		PartitionID: 1, WindowTS: at.UnixMilli(), Seq: 1, EventKey: key, EventTime: at.UnixMilli(),
+		Body: []byte("not-an-event"),
+	}.WithChain(deliverySettlementType, addr.SessionID)); err != nil {
+		t.Fatalf("store the corrupt settlement fact: %v", err)
+	}
+	run := &Run{tier: tier}
+	host := &Host{run: run}
+	if _, _, err := host.settlementStateOf(ctx, identity); err == nil {
+		t.Fatal("the corrupt settlement fact read as absence, want a named read error")
+	}
+	known, err := host.deliveryKnown(ctx, identity)
+	if err == nil || known {
+		t.Fatalf("the corrupt settlement answered known=%v err=%v, want a named error that blocks the resend decision", known, err)
+	}
+}
+
+// TestDeliveryDurableReadErrorSurfaced pins the named durable walk.
+//   - A durable chain whose bodies are gone answers a named error from the delivery walk and from the account read face
+//   - neither read degrades to the live window or presents a partial view as the whole account
+func TestDeliveryDurableReadErrorSurfaced(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	faulty, cfg := engineOverRoot(t, root)
+	faulty.dropPut = func(key string) bool { return strings.Contains(key, ":evt:") }
+	first, err := ledger.OpenTier(ctx, cfg)
+	if err != nil {
+		t.Fatalf("open the seeding tier: %v", err)
+	}
+	at := time.Now()
+	evt := event.Event{Key: "durable-delivery-fact", Type: event.TypeExternalInput, Timestamp: at,
+		Message: model.Message{Role: model.RoleUser, Content: "a committed body"},
+		Owner:   deliveryTestAddress("session-durable-read-error"),
+		Meta:    map[string]string{event.MetaKeyDeliveryIdentity: "durable-delivery-fact", event.MetaKeyDeliveryReceipt: DeliveryReceiptSent},
+	}
+	body, err := memory.BodyFromEvent(evt, "test", "test")
+	if err != nil {
+		t.Fatalf("encode the fact: %v", err)
+	}
+	encoded, err := body.Encode()
+	if err != nil {
+		t.Fatalf("marshal the fact: %v", err)
+	}
+	if err := first.Segments.StoreEvent(ctx, ledger.SegmentRecord{
+		PartitionID: 1, WindowTS: at.UnixMilli(), Seq: 1, EventKey: evt.Key, EventTime: at.UnixMilli(), Body: encoded,
+	}.WithChain(evt.Type, evt.Owner.SessionID)); err != nil {
+		t.Fatalf("store the durable fact: %v", err)
+	}
+	if err := first.Segments.Close(); err != nil {
+		t.Fatalf("close the seeding tier: %v", err)
+	}
+
+	reopened, err := ledger.OpenTier(ctx, cfg)
+	if err != nil {
+		t.Fatalf("reopen the tier beside the missing bodies: %v", err)
+	}
+	defer reopened.Segments.Close()
+	run := &Run{tier: reopened}
+	if err := run.eachDeliveryFact(func(event.Event) bool { return true }); !errors.Is(err, ledger.ErrSegmentBodyMissing) {
+		t.Fatalf("the delivery walk beside an unreadable chain = %v, want the named %v", err, ledger.ErrSegmentBodyMissing)
+	}
+	if _, err := run.DeliveryLedger().Records(); !errors.Is(err, ledger.ErrSegmentBodyMissing) {
+		t.Fatalf("the account read face swallowed the durable error = %v, want %v", err, ledger.ErrSegmentBodyMissing)
 	}
 }

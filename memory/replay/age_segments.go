@@ -144,6 +144,26 @@ type Segment struct {
 	Entries []ProjectionEntry
 }
 
+// Legacy reports whether the segment was closed by an agent output whose fact
+// recorded no readable input relation, so the entries before it were cut at the
+// positional boundary a chain predating the relation is interpreted under. The
+// answer is read from the closing output the segment spans, so it never drifts
+// from the entries: a segment still in progress answers false because no output
+// closed it, and a segment closed by an output that named its inputs answers
+// false whatever those inputs were. The mark is diagnostic only — the segment
+// rule, the bands and the folds read the same segments either way.
+func (s Segment) Legacy() bool {
+	if !s.Complete || len(s.Entries) == 0 {
+		return false
+	}
+	closing := s.Entries[len(s.Entries)-1]
+	if closing.Type != event.TypeAgentOutput {
+		return false
+	}
+	_, held := parseInputEvents(closing.inputEvents)
+	return !held
+}
+
 // SegmentsOf partitions the entries of one projection into its task-turn
 // segments, oldest first: an agent output closes the segment of the inputs its
 // fact records as consumed, an input it leaves unnamed rolls into the segment

@@ -39,9 +39,14 @@
           "file": "assembly/host_delivery.go",
           "name": "hostDeliveryPrefix",
           "value": "tagent/task/v1/delivery:"
+        },
+        {
+          "file": "assembly/host_delivery.go",
+          "name": "deliveryRetryPrefix",
+          "value": "retry."
         }
       ],
-      "reason": "Settlement facts are the live truth; the legacy delivery record is the read-only migration input.",
+      "reason": "Settlement facts are the live truth; the legacy delivery record is the read-only migration input, and the retry-attempt facts share the settlement family so a restart continues the redrive count instead of resetting it.",
       "review_by": "2027-05-05"
     },
     {
@@ -117,21 +122,10 @@
       "kind": "kv-store",
       "owner": "memory/ledger",
       "files": [
-        "memory/ledger/localfile.go"
+        "memory/ledger/journal.go"
       ],
       "prefixes": [],
-      "reason": "Local-file KV shard snapshots are the durable backing of the memory tier.",
-      "review_by": "2027-05-05"
-    },
-    {
-      "id": "memory.ledger.rustviking-kv",
-      "kind": "external-kv",
-      "owner": "memory/ledger",
-      "files": [
-        "memory/ledger/rustviking_kv.go"
-      ],
-      "prefixes": [],
-      "reason": "The rustviking adapter delegates truth to the external KV tier.",
+      "reason": "The local-file KV tier keeps one durable unit: an append-only journal of checksummed frames, which journal.go opens and appends to, and which the tier's key-value view reads as its key order. A torn tail is cut at open and a mismatched frame refuses the open, so no snapshot or shard becomes a second truth.",
       "review_by": "2027-05-05"
     },
     {
@@ -139,8 +133,7 @@
       "kind": "kv-store",
       "owner": "memory/ledger",
       "files": [
-        "memory/ledger/segment_store.go",
-        "memory/ledger/tier_facts.go"
+        "memory/ledger/segment_store.go"
       ],
       "prefixes": [
         {
@@ -149,7 +142,7 @@
           "value": "idx:"
         }
       ],
-      "reason": "Event segment, index and metadata keys are one durable KV layout; tier_facts is its fact-surface adapter.",
+      "reason": "Event segment, index and metadata keys are one durable KV layout. The tier's fact surface and its external-KV adapter reach the store only through the AtomicStore port, so they write no key layout of their own and are covered by review, not by this static scan.",
       "review_by": "2027-05-05"
     },
     {
@@ -283,6 +276,23 @@
       "prefixes": [],
       "reason": "Approval request files and the evidence mirror are durable across restarts.",
       "review_by": "2027-05-05"
+    },
+    {
+      "id": "assembly.generation-retirement",
+      "kind": "fact-key",
+      "owner": "assembly",
+      "files": [
+        "assembly/run.go"
+      ],
+      "prefixes": [
+        {
+          "file": "assembly/run.go",
+          "name": "generationRetirePrefix",
+          "value": "gen-retire:"
+        }
+      ],
+      "reason": "Retirement of a superseded generation is a chain record keyed gen-retire:<id>; release itself stays with the retirement ledger drain (ADR 0007 / Q2).",
+      "review_by": "2027-05-05"
     }
   ],
   "non_truth_files": [
@@ -297,10 +307,6 @@
     {
       "file": "bench/task.go",
       "reason": "Benchmark task setup writes fixture files into the ephemeral run workspace."
-    },
-    {
-      "file": "memory/ledger/config.go",
-      "reason": "The in-memory memKV backend holds no disk truth and is rebuilt from the durable tier."
     },
     {
       "file": "tool/exec/tmux_command.go",
@@ -363,6 +369,42 @@
       "name": "generationMarkerPrefix",
       "value": "<<<exec-generation:",
       "reason": "Pane output marker used to bind a captured frame to a generation, not persisted truth."
+    }
+  ],
+  "content_addressed_artifacts": [
+    {
+      "id": "runtime.state.recovery-snapshot-blob",
+      "surface": "runtime.state.durable-facts",
+      "files": [
+        "runtime/state/recovery.go"
+      ],
+      "ticket_fact": "tagent/task/v1/ticket:",
+      "content_address": "sha256",
+      "reason": "The recovery ticket fact carries sha256:<digest> plus the blob length, and readSnapshot rechecks the blob against both, so the blob is referenced material and the ticket is the truth.",
+      "review_by": "2027-05-05"
+    },
+    {
+      "id": "runtime.state.migration-archive",
+      "surface": "runtime.state.migration",
+      "files": [
+        "runtime/state/migrate.go"
+      ],
+      "ticket_fact": "archive:",
+      "content_address": "sha256",
+      "reason": "ArchiveDigest is the tree digest of the source the import read, and each migrated original records that digest beside its key and length; the archived material is never its own truth.",
+      "review_by": "2027-05-05"
+    }
+  ],
+  "content_address_exempt": [
+    {
+      "file": "memory/replay/age_segments.go",
+      "reason": "ageKey hashes the fold inputs to mint the product's identity: the digest is the key itself, and no stored material is read back against it.",
+      "review_by": "2027-05-05"
+    },
+    {
+      "file": "runtime/task/attention.go",
+      "reason": "FactKey hashes the fact type and identity to mint a key; nothing is verified against the digest.",
+      "review_by": "2027-05-05"
     }
   ]
 }

@@ -51,6 +51,28 @@ META = """package event
 const MetaPrefix = "meta_"
 """
 
+# A durable key namespace that also computes content digests: it carries
+# references to material it does not hold, which is the shape F0 must see.
+DIGEST_STORE = """package ledger
+
+import (
+	"crypto/sha256"
+	"encoding/hex"
+	"os"
+)
+
+const keptPrefix = "tagent/kept/v1:"
+
+func Keep(path string) error {
+	return os.WriteFile(path, nil, 0o644)
+}
+
+func Digest(body []byte) string {
+	sum := sha256.Sum256(body)
+	return hex.EncodeToString(sum[:])
+}
+"""
+
 
 def write(root, rel, text):
     path = os.path.join(root, rel)
@@ -302,6 +324,88 @@ def main():
         data=duplicated,
         expected_rc=1,
         contains=["already registered"],
+    )
+
+    def add_digest_store(root):
+        write(root, "memory/ledger/store.go", DIGEST_STORE)
+
+    def artifact(**overrides):
+        entry = {
+            "id": "memory.ledger.kept-blob",
+            "surface": "memory.ledger.store",
+            "files": ["memory/ledger/store.go"],
+            "ticket_fact": "tagent/kept/v1:",
+            "content_address": "sha256",
+            "reason": "fixture: the kept namespace carries the digest of the blob it names",
+            "review_by": FUTURE,
+        }
+        entry.update(overrides)
+        return entry
+
+    with_artifact = registry(content_addressed_artifacts=[artifact()])
+    case(
+        "a content-addressed artifact behind a registered ticket fact is accepted",
+        data=with_artifact,
+        setup=add_digest_store,
+        contains=["check_durable_truth_registry: ok"],
+    )
+
+    case(
+        "a prefix file that computes a digest without an artifact entry is rejected",
+        setup=add_digest_store,
+        expected_rc=1,
+        contains=["F0 memory/ledger/store.go", "content_addressed_artifacts"],
+    )
+
+    case(
+        "an artifact whose ticket fact is not registered is rejected",
+        data=registry(content_addressed_artifacts=[
+            artifact(ticket_fact="tagent/ghost/v1:")]),
+        setup=add_digest_store,
+        expected_rc=1,
+        contains=["ticket fact", "not a registered prefix value"],
+    )
+
+    case(
+        "an artifact declared under a digest other than sha256 is rejected",
+        data=registry(content_addressed_artifacts=[artifact(content_address="md5")]),
+        setup=add_digest_store,
+        expected_rc=1,
+        contains=["content_address", "must be 'sha256'"],
+    )
+
+    case(
+        "an artifact declared content-addressed without a digest in code is rejected",
+        data=with_artifact,
+        expected_rc=1,
+        contains=["computes no sha256 digest"],
+    )
+
+    case(
+        "an artifact naming a file the surface does not own is rejected",
+        data=registry(content_addressed_artifacts=[
+            artifact(files=["runtime/task/identity.go"])]),
+        setup=add_digest_store,
+        expected_rc=1,
+        contains=["is not one of surface"],
+    )
+
+    case(
+        "an exemption for a file that computes no digest is rejected",
+        data=registry(content_address_exempt=[
+            {"file": "memory/ledger/store.go", "reason": "fixture", "review_by": FUTURE}]),
+        expected_rc=1,
+        contains=["computes no digest", "remove the stale exemption"],
+    )
+
+    case(
+        "a key-derivation digest may be exempted by name",
+        data=registry(content_address_exempt=[
+            {"file": "memory/ledger/store.go",
+             "reason": "fixture: the digest mints a key and verifies no stored material",
+             "review_by": FUTURE}]),
+        setup=add_digest_store,
+        contains=["check_durable_truth_registry: ok"],
     )
 
     if FAILURES:

@@ -31,6 +31,7 @@ import (
 
 	"github.com/SpellingDragon/tagent/api/model"
 	"github.com/SpellingDragon/tagent/api/plugin"
+	"github.com/SpellingDragon/tagent/memory/replay"
 	"github.com/SpellingDragon/tagent/runtime/task/approval"
 )
 
@@ -61,14 +62,12 @@ const (
 	fuseRuleResponseCap = "response-call-cap"
 	// fuseRuleLongContext names the long-context threshold in that same block.
 	fuseRuleLongContext = "long-context"
-	// bytesPerToken is the approximation the long-context fuse judges a prompt
-	// by: the assembled request carries no usage before the request runs, so its
-	// message bytes standing for a quarter of that in tokens is the reading the
-	// fuse decides on.
-	bytesPerToken = 4
 	// messageOverheadBytes is what one message costs beside its content: the
-	// role, the separators and the framing a provider renders around it.
-	messageOverheadBytes = 16
+	// role, the separators and the framing a provider renders around it. The
+	// figure is derived, never spelled twice: it is the request budget's
+	// registered per-message framing at the replay budget's registered packing
+	// ratio, so the two meters that charge it cannot drift apart.
+	messageOverheadBytes = budgetMessageOverheadTokens * replay.BudgetCharsPerToken
 )
 
 // FuseLimits is the execution-side fuse declaration of one loop: a member at
@@ -447,12 +446,13 @@ func byClause(by string) string {
 }
 
 // approxPromptTokens approximates the prompt size of one assembled request as
-// its message bytes over four: the usage of a response lands after the dispatch
-// the long-context fuse has to rule, so the fuse judges the request it is about
-// to send — the content, the reasoning, the tool identities and the arguments
-// the model issued, each beside the fixed overhead a provider frames a message
-// with. It is an approximation by construction and never a token count a record
-// carries.
+// its message bytes over the packing ratio the replay budget registers for the
+// whole process (replay.BudgetCharsPerToken): the usage of a response lands
+// after the dispatch the long-context fuse has to rule, so the fuse judges the
+// request it is about to send — the content, the reasoning, the tool identities
+// and the arguments the model issued, each beside the fixed overhead a provider
+// frames a message with. It is an approximation by construction and never a
+// token count a record carries.
 func approxPromptTokens(messages []model.Message) int {
 	bytes := 0
 	for _, msg := range messages {
@@ -466,5 +466,5 @@ func approxPromptTokens(messages []model.Message) int {
 			bytes += len(call.ID) + len(call.Function.Name) + len(call.Function.Arguments)
 		}
 	}
-	return bytes / bytesPerToken
+	return bytes / replay.BudgetCharsPerToken
 }

@@ -1,9 +1,9 @@
 {
   "concept_ratchet": {
     "removed_min": 10,
-    "new_max": 7,
-    "exported_interfaces_max": 78,
-    "note": "new_max 1->4 (boundary-closure), 4->7 (restart-recovery: RecoveryTicket/LoadScan/LoadStats)."
+    "new_max": 38,
+    "exported_interfaces_max": 82,
+    "note": "new_max 1->4 (boundary-closure), 4->7 (restart-recovery: RecoveryTicket/LoadScan/LoadStats), 7->38 (hot-update-and-purity-closure: generation-scoped registry GenRegistry/GenBuilder/GenBuilt/GenInstances/GenRegistration/GenResources/GenerationFaces/GenerationConsumer/GenHostSpec, storage engine AtomicStore/Batch/Fetch/Pair/MigrateReport, training export SFTInput/SFTSample/SFTDataset/SFTRow/PreferenceDataset/PreferenceRow/DatasetRefusal/RefusalName/EvidenceOptions/EvidenceExporter/EvidenceLines/FileEvidenceLines/SnapshotReadBack/RequestEvidenceRecord, meditation mount Plan/Faces, ChainFailureNamer, GenerationConfig); exported_interfaces_max 78->82 (AtomicStore, ChainFailureNamer, GenerationFaces, EvidenceLines, SnapshotReadBack). 两个数都是本波实测值，非收敛目标：后续波次每新增一个导出名，棘轮按名判红而不是抬升到新常态。"
   },
   "schema_version": 1,
   "config_facts": {
@@ -747,14 +747,14 @@
       "from": "tool/exec",
       "allow": [
         "api/config",
-        "api/event"
+        "api/event",
+        "runtime/state"
       ],
       "forbidden": [
         "runtime/agent",
-        "runtime/state",
         "memory"
       ],
-      "reason": "执行适配持有资源租约并记事件，不拥有会话状态。"
+      "reason": "执行适配持有资源租约并记事件，不拥有会话状态；代际作用域注册表（runtime/state.GenRegistration）自 ADR 0007 起是消费者自注册的挂点，故只借该注册契约，不读会话状态。"
     },
     {
       "from": "tool/file",
@@ -1216,6 +1216,161 @@
         "concept": "recovery read measurement set (contract: changes/03-compression-cursor/specs/compression-recovery-ticket/spec.md until F4)",
         "kind": "declaration",
         "spec": "delivery-closure"
+      },
+      "GenerationConfig": {
+        "concept": "model generation parameters one request carries (原生采样字段随请求进同一执行代)",
+        "kind": "declaration",
+        "spec": "generation-bound-model-references"
+      },
+      "GenHostSpec": {
+        "concept": "host document dialect one candidate generation is published under (contract: docs/adr/0007-generation-scoped-runtime-plugin-lifecycle.md)",
+        "kind": "declaration",
+        "spec": "config-hot-reload"
+      },
+      "GenerationConsumer": {
+        "concept": "generation-scoped consumer registration as the run reports it",
+        "kind": "declaration",
+        "spec": "config-hot-reload"
+      },
+      "GenerationFaces": {
+        "concept": "per-generation native face of every declared agent",
+        "kind": "port",
+        "spec": "config-hot-reload"
+      },
+      "GenRegistry": {
+        "concept": "generation-scoped consumer registry of one assembly",
+        "kind": "port",
+        "spec": "config-hot-reload"
+      },
+      "GenBuilder": {
+        "concept": "construction of one registered consumer's per-generation instance",
+        "kind": "port",
+        "spec": "config-hot-reload"
+      },
+      "GenBuilt": {
+        "concept": "one constructed consumer of one candidate generation",
+        "kind": "declaration",
+        "spec": "config-hot-reload"
+      },
+      "GenInstances": {
+        "concept": "constructed consumer set of one candidate generation",
+        "kind": "declaration",
+        "spec": "config-hot-reload"
+      },
+      "GenRegistration": {
+        "concept": "one consumer's mount on the generation-scoped registry",
+        "kind": "declaration",
+        "spec": "config-hot-reload"
+      },
+      "GenResources": {
+        "concept": "what one per-generation consumer construction answers (独占资源账 + 复原面)",
+        "kind": "declaration",
+        "spec": "config-hot-reload"
+      },
+      "Plan": {
+        "concept": "one reflection section a document enables, resolved at its mount",
+        "kind": "declaration",
+        "spec": "meditation-agent-partition"
+      },
+      "Faces": {
+        "concept": "run faces one mounted reflection is assembled over",
+        "kind": "port",
+        "spec": "meditation-autonomy"
+      },
+      "SFTInput": {
+        "concept": "one input a batched turn presented, beside the source it came from",
+        "kind": "declaration",
+        "spec": "offline-training-export"
+      },
+      "RequestEvidenceRecord": {
+        "concept": "durable request evidence of one model decision",
+        "kind": "fact",
+        "spec": "offline-training-export"
+      },
+      "AtomicStore": {
+        "concept": "the atomic storage engine every tier opens: one commit behind one barrier and one read face",
+        "kind": "port",
+        "spec": "partition-local-storage-access"
+      },
+      "Batch": {
+        "concept": "one write set committed as a unit",
+        "kind": "declaration",
+        "spec": "partition-local-storage-access"
+      },
+      "Fetch": {
+        "concept": "one read: a named key, or every key under a named prefix",
+        "kind": "read",
+        "spec": "partition-local-storage-access"
+      },
+      "Pair": {
+        "concept": "one key-value entry a read returns or a commit writes",
+        "kind": "declaration",
+        "spec": "partition-local-storage-access"
+      },
+      "MigrateReport": {
+        "concept": "what one retired-root migration copied",
+        "kind": "declaration",
+        "spec": "event-segment-store"
+      },
+      "ChainFailureNamer": {
+        "concept": "durable read face naming why it answers no readable event for one key",
+        "kind": "port",
+        "spec": "recall-protocol"
+      },
+      "EvidenceExporter": {
+        "concept": "assembly of training rows from the request evidence one capture landed",
+        "kind": "port",
+        "spec": "offline-training-export"
+      },
+      "EvidenceLines": {
+        "concept": "read-only face of the record lines one capture landed",
+        "kind": "port",
+        "spec": "offline-training-export"
+      },
+      "FileEvidenceLines": {
+        "concept": "record lines one capture directory holds",
+        "kind": "read",
+        "spec": "offline-training-export"
+      },
+      "SnapshotReadBack": {
+        "concept": "read-back of the runtime request snapshot one reference names",
+        "kind": "port",
+        "spec": "offline-training-export"
+      },
+      "EvidenceOptions": {
+        "concept": "bounds of the rows one evidence export emits",
+        "kind": "declaration",
+        "spec": "offline-training-export"
+      },
+      "SFTDataset": {
+        "concept": "SFT export of one evidence chain: assembled rows beside refused rows",
+        "kind": "read",
+        "spec": "offline-training-export"
+      },
+      "SFTRow": {
+        "concept": "one supervised fine-tuning row assembled from landed evidence",
+        "kind": "declaration",
+        "spec": "offline-training-export"
+      },
+      "PreferenceDataset": {
+        "concept": "preference export of one evidence chain: assembled pairs beside refused rows",
+        "kind": "read",
+        "spec": "offline-training-export"
+      },
+      "PreferenceRow": {
+        "concept": "one preference pair assembled from landed evidence",
+        "kind": "declaration",
+        "spec": "offline-training-export"
+      },
+      "DatasetRefusal": {
+        "concept": "one row an export refused, named so an operator routes it",
+        "kind": "declaration",
+        "spec": "offline-training-export"
+      },
+      "RefusalName": {
+        "concept": "name of the way one export row was refused",
+        "kind": "declaration",
+        "spec": "offline-training-export"
       }
     }
   }

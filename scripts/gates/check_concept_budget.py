@@ -120,11 +120,11 @@ BASELINE = (
     ("iface-methods", "features/rl/capture.go:Capture", 3),
     ("iface-methods", "features/rl/capture_wiring.go:CaptureScope", 4),
     ("iface-methods", "runtime/agent/loop.go:Capture", 3),
-    # memory/ledger kvPort 3m（2026-11-05 03 资源有界）：条目级驻留要求按前缀枚举
-    # 键值对（prefix-pair scan；localFileKV/memKV/rustvikingKV 同步实现），读、枚举
-    # 与提交是同一 KV 面在同一 shard 视图上的三种动作；拆成两个接口会让前缀枚举
-    # 绕开内存脏合并另立一条读路，与本域“不立第二读路”的裁决冲突。
-    ("iface-methods", "memory/ledger/localfile.go:kvPort", 3),
+    # memory/ledger AtomicStore 4m（2026-11-05 03 资源有界；hot-update-and-purity-closure
+    # 09 改写后由 kvPort 3m 正名为原子存储引擎 4m）：同一 KV 面上的三种读动作（单键/前缀
+    # 枚举、前缀键序、命名空间清单）与一次带屏障提交，拆成两个接口会让前缀枚举或命名
+    # 空间清单绕开内存脏合并另立一条读路，与本域“不立第二读路”的裁决冲突。
+    ("iface-methods", "memory/ledger/atomic_store.go:AtomicStore", 4),
     # features/evolution/governance GovernanceEventLog 3m（2026-11-05 03 收口）：治理账的
     # 持久面＝写入、前缀回放与同步屏障三种动作，同一本账；拆窄口会让前缀回放绕开
     # Sync 屏障另立一条读路，与本域“一条链一本账”的裁决冲突。
@@ -217,6 +217,20 @@ BASELINE = (
     # 数据面，资源键/相位/退出码/确认/释放/细节/归属/时刻八格是一次生命周期快照的语义
     # 本体，收窄字段等于拆数据面，消费方须把同一观察二次归并。
     ("struct-fields", "tool/exec/state.go:StateEvent", 8),
+    # hot-update-and-purity-closure 11/09 引入叶（S2 类别豁免，同 event.Event 16f 先例）：
+    # meditation.Plan 是文档启用的一段反思声明本体（观察 agent/会话/节奏与下限/静态提示/
+    # 观察与读取命名空间/回流目标/水位锚），Faces 是一次挂载装配所读写的运行面集合
+    # （锚存储、观察与注入面、模型在飞读、实例、会话查询）——两者都是解析后的声明/装配
+    # 结果本体，不是可选配置开关，收窄字段等于让 root 重新读冥想要参数（ADR 0004）。
+    ("struct-fields", "features/evolution/meditation/mount.go:Plan", 10),
+    ("struct-fields", "features/evolution/meditation/mount.go:Faces", 6),
+    # rl SFTSample（export_chain 11 引入叶）：一行 SFT 样本＝该回合呈现的输入、助手给出的
+    # 标签、所属 episode 与回合号、会话，以及批回合逐条输入归属；六格是导出行本体，
+    # 收窄会让归属二次归并成匿名文本块。
+    ("struct-fields", "features/rl/export_chain.go:SFTSample", 6),
+    # rl PreferenceRow（偏好导出行）：两两对齐的一次尝试对＝提示、工具声明、胜出补全、
+    # 被弃补全、偏好来源与推导版本；七格是偏好行本体，收窄即丢掉一次偏好判定的归属依据。
+    ("struct-fields", "features/rl/export_chain.go:PreferenceRow", 7),
     # S3 ctx-bare — accessor 落点具名登记（调用点裸读=0；实现体单次 ctx.Value=合法）
     ("ctx-bare", "api/plugin/phases.go:*", 1),   # CallPassFrom：派发→受理 pass 传输（锁定工具端口无第二通道）
     ("ctx-bare", "runtime/task/wrapper.go:*", 1),    # CallFrameFrom：per-call 身份经端口唯一通道
@@ -226,6 +240,17 @@ BASELINE = (
     # 结算携带结果正文引入的可选拓展面，范例与红线随后续批次补齐；在此之前显式
     # 计入债务，新增接口不因“尚未补范例”而免检。
     ("contract-surface", "tool/subagent/tool.go:ResultDelegation", None),
+    # hot-update-and-purity-closure 引入叶的三条 S4 债务（同 ResultDelegation 先例：范例与
+    # Godoc 红线随后续批次补齐，在此之前显式计入，新增接口不因“尚未补范例”而免检）：
+    # GenerationFaces＝每代 native 面的报告口，AtomicStore＝每层打开的原子存储引擎口，
+    # ChainFailureNamer＝durable 读面具名说出“无正文”的原因。
+    ("contract-surface", "assembly/run.go:GenerationFaces", None),
+    ("contract-surface", "memory/ledger/atomic_store.go:AtomicStore", None),
+    ("contract-surface", "tool/recall/get.go:ChainFailureNamer", None),
+    # 同批 rl 证据导出的两个读面口（EvidenceLines 只读行记录面、SnapshotReadBack 快照
+    # 回读面）：范例与红线随证据导出叶补齐前显式计入债务。
+    ("contract-surface", "features/rl/export_chain.go:EvidenceLines", None),
+    ("contract-surface", "features/rl/export_chain.go:SnapshotReadBack", None),
 )
 # ---- Go 源码静态扫描（纯 stdlib；不做类型检查，见模块 docstring 的局限）----
 IFACE_DECL_RE = re.compile(r"^type\s+(?P<name>[A-Za-z_]\w*)\s+interface\s*\{", re.M)

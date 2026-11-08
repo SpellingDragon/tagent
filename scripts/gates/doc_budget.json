@@ -1,12 +1,12 @@
 {
   "baseline": {
-    "files": 225,
-    "lines": 21585
+    "files": 230,
+    "lines": 21879
   },
-  "measured_at": "2026-11-07",
+  "measured_at": "2026-11-08",
   "measured_by": "python3 scripts/gates/check_doc_budget.py --json",
-  "measured_on": "0fdf7206+dirty",
-  "note": "Markdown 体量棘轮基线（只降不升）。实测=基线；减少后用 python3 scripts/gates/check_doc_budget.py --tighten 下调，禁止上调（--tighten 会拒绝上升的指标）。基线值是唯一被 checker 读取的真相，不另设散文账。",
+  "measured_on": "b438c9fb+dirty",
+  "note": "Markdown 体量棘轮基线（只降不升）。实测=基线；减少后用 python3 scripts/gates/check_doc_budget.py --tighten 下调，禁止上调（--tighten 会拒绝上升的指标）。基线值是唯一被 checker 读取的真相，不另设散文账。本轮（hot-update-and-purity-closure M4）为一次具名上调 +5 篇 / +294 行，构成逐项列清、不含顺手散文：(1) openspec/specs/orchestration/spec.md +198 行＝本变更的编排契约要求转正，权威规格；(2) openspec/specs/{compression-recovery-ticket,recovery-timing-evidence,restart-recovery-vocabulary}/spec.md +54 行＝restart-recovery-optimization 归档把 delta 转正为主 spec，该口径下归档件在预算外、转正件在预算内，总量必然上升；(3) docs/adr/0007-generation-scoped-runtime-plugin-lifecycle.md +8 行＝ADR 0006/0004 决策面要求落档；(4) GLOSSARY.md +33 行＝术语单一来源；(5) 其余为 docs/wiki 三篇的就地修订 +3/-2 行。四条权威文档不得靠删散文对冲，故按派发单『调预算 manifest 注明』路径上调并在此具名。此后仍只降不升。",
   "schema_version": 1,
   "scope": "git index: tracked + untracked-but-not-ignored *.md/*.markdown, excluding generated docs/api/ (owned by gen_godoc.sh) and change-scoped process records openspec/changes/** (active plans and archive)"
 }

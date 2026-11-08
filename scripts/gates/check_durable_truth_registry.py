@@ -57,6 +57,16 @@ PREFIX_DECL_RE = re.compile(
     re.M,
 )
 
+# F0 (ADR 0006, 08.1): a durable key namespace must not become the truth for
+# material it does not hold. When a file mints a prefix AND computes a content
+# digest, the namespace carries digests of blobs stored elsewhere, so the
+# registry must name the ticket fact that references them and the digest that
+# verifies them. This is the shape runtime/state/recovery.go already has: the
+# ticket fact carries sha256:<digest> + length and readSnapshot rechecks the blob
+# against it, so the blob never stands as its own truth.
+CONTENT_ADDRESS_ALGORITHM = "sha256"
+DIGEST_USE_RE = re.compile(r"\bsha256\.(?:Sum256|New)\s*\(")
+
 
 def is_product_go_file(root, value):
     if not isinstance(value, str) or not value.strip():
@@ -121,6 +131,7 @@ def load_registry(root, path):
     registered_files = {}
     registered_prefixes = {}
     surface_ids = set()
+    surfaces_files = {}
 
     def add_prefix(label, file_value, name, value, owner):
         if not isinstance(file_value, str) or not file_value.strip():
@@ -208,6 +219,9 @@ def load_registry(root, path):
                 "reason": entry.get("reason"),
             }
 
+        if surface_id is not None:
+            surfaces_files[surface_id] = surface_files
+
         prefixes = entry.get("prefixes", [])
         if not isinstance(prefixes, list):
             errors.append("{}: 'prefixes' must be a list".format(label))
@@ -277,11 +291,132 @@ def load_registry(root, path):
         if file_value is not None and name is not None and value is not None:
             add_prefix(label, file_value, name, value, "non-truth")
 
+    prefix_values = {entry["value"] for entry in registered_prefixes.values()}
+    artifacts = load_content_artifacts(root, data, surfaces_files, prefix_values, errors)
+    exempt = load_content_exempt(root, data, registered_files, errors)
     return {
         "surfaces": surfaces,
         "files": registered_files,
         "prefixes": registered_prefixes,
+        "artifacts": artifacts,
+        "exempt": exempt,
     }, errors
+
+
+def load_content_artifacts(root, data, surface_files, registered_prefix_values, errors):
+    """F0: parse and validate the chain-external artifacts referenced by facts.
+
+    An artifact is material written outside the fact log that a registered ticket
+    fact points at by content address. Every entry states which surface owns it,
+    which registered prefix values carry the reference, and that the digest is
+    sha256; the files must actually compute that digest, so the claim is checked
+    against code and not only against the registry's own prose.
+    """
+    entries = data.get("content_addressed_artifacts", [])
+    if not isinstance(entries, list):
+        errors.append("{}: 'content_addressed_artifacts' must be a list".format(REGISTRY_LABEL))
+        return []
+    artifacts = []
+    seen = set()
+    for index, entry in enumerate(entries):
+        label = "{} content_addressed_artifacts[{}]".format(REGISTRY_LABEL, index)
+        if not isinstance(entry, dict):
+            errors.append("{}: must be an object".format(label))
+            continue
+        artifact_id = lib.require_field(entry, "id", label, errors, str)
+        if artifact_id is not None:
+            if artifact_id in seen:
+                errors.append(
+                    "{}: duplicate artifact id {!r}".format(REGISTRY_LABEL, artifact_id))
+            seen.add(artifact_id)
+        surface_id = lib.require_field(entry, "surface", label, errors, str)
+        if surface_id is not None and surface_id not in surface_files:
+            errors.append(
+                "{}: surface {!r} is not a registered surface".format(label, surface_id))
+        files = entry.get("files")
+        if not isinstance(files, list) or not files:
+            errors.append("{}: 'files' must be a non-empty list".format(label))
+            files = []
+        owned = surface_files.get(surface_id, set())
+        for file_value in files:
+            clean = str(file_value).replace(os.sep, "/")
+            if clean not in owned:
+                errors.append(
+                    "{}: file {!r} is not one of surface {!r}'s registered files".format(
+                        label, file_value, surface_id))
+        ticket = lib.require_field(entry, "ticket_fact", label, errors, str)
+        if ticket is not None and ticket not in registered_prefix_values:
+            errors.append(
+                "{}: ticket fact {!r} is not a registered prefix value; an unregistered "
+                "ticket is a second truth".format(label, ticket))
+        algorithm = lib.require_field(entry, "content_address", label, errors, str)
+        if algorithm is not None and algorithm != CONTENT_ADDRESS_ALGORITHM:
+            errors.append(
+                "{}: content_address {!r} must be {!r}; an artifact referenced without a "
+                "verified digest is referenced by trust".format(
+                    label, algorithm, CONTENT_ADDRESS_ALGORITHM))
+        lib.require_field(entry, "reason", label, errors, str)
+        lib.check_review_by(entry.get("review_by"), label, errors)
+        for file_value in files:
+            clean = str(file_value).replace(os.sep, "/")
+            source_path = os.path.join(root, clean)
+            if not os.path.isfile(source_path):
+                continue
+            code = lib.strip_go_comments(lib.read_text(source_path))
+            if not DIGEST_USE_RE.search(lib.scan_go_strings(code)):
+                errors.append(
+                    "{}: {} computes no {} digest; the artifact is declared content-addressed "
+                    "but nothing verifies it".format(
+                        label, clean, CONTENT_ADDRESS_ALGORITHM))
+        artifacts.append({"id": artifact_id, "surface": surface_id,
+                          "files": [str(value).replace(os.sep, "/") for value in files]})
+    return artifacts
+
+
+def load_content_exempt(root, data, registered_files, errors):
+    """Files whose digest derives a key instead of verifying stored material.
+
+    `sha256` over an identity to mint a key is not a reference to an artifact the
+    namespace does not hold: the digest IS the key, nothing is read back against
+    it. Exempting one names that difference, so the trigger above stays exact
+    instead of being relaxed for every file that reads a hash.
+    """
+    entries = data.get("content_address_exempt", [])
+    if not isinstance(entries, list):
+        errors.append("{}: 'content_address_exempt' must be a list".format(REGISTRY_LABEL))
+        return set()
+    exempt = set()
+    for index, entry in enumerate(entries):
+        label = "{} content_address_exempt[{}]".format(REGISTRY_LABEL, index)
+        if not isinstance(entry, dict):
+            errors.append("{}: must be an object".format(label))
+            continue
+        file_value = lib.require_field(entry, "file", label, errors, str)
+        lib.require_field(entry, "reason", label, errors, str)
+        if entry.get("review_by") is not None:
+            lib.check_review_by(entry.get("review_by"), label, errors)
+        if file_value is None:
+            continue
+        clean = file_value.replace(os.sep, "/")
+        if clean in exempt:
+            errors.append("{}: file {!r} is exempted twice".format(label, clean))
+            continue
+        if clean not in registered_files:
+            errors.append(
+                "{}: file {!r} is not a registered durable truth file".format(label, clean))
+            continue
+        exempt.add(clean)
+    return exempt
+
+
+def content_digest_files(root, files):
+    """Report the product files that compute a content digest at all."""
+    out = set()
+    for path in files:
+        code = lib.strip_go_comments(lib.read_text(path))
+        if DIGEST_USE_RE.search(lib.scan_go_strings(code)):
+            out.add(lib.rel_path(root, path))
+    return out
 
 
 def main(argv=None):
@@ -347,6 +482,27 @@ def main(argv=None):
             "R3 registered {} file {!r} carries neither a persistence call nor a "
             "registered prefix".format(entry["kind"], rel)
         )
+
+    # F0 trigger: the registry cannot be the only witness. A file that mints a
+    # durable key namespace and also computes a content digest carries references
+    # to material it does not hold, so it must appear in the artifact list. An
+    # added digest next to a prefix therefore cannot ship unregistered.
+    declared_files = {rel for artifact in registry["artifacts"] for rel in artifact["files"]}
+    digest_files = content_digest_files(root, go_files)
+    for rel in sorted(registry["exempt"]):
+        if rel not in digest_files:
+            errors.append(
+                "F0 exemption {}: computes no digest; remove the stale exemption".format(rel))
+        if rel in declared_files:
+            errors.append(
+                "F0 exemption {}: is also declared as a content-addressed artifact".format(rel))
+    for rel in sorted(digest_files & prefix_files):
+        if rel not in declared_files and rel not in registry["exempt"]:
+            errors.append(
+                "F0 {}: mints a durable key namespace and computes a {} digest, but no "
+                "content_addressed_artifacts entry names the ticket fact that references "
+                "the material or the digest that verifies it".format(
+                    rel, CONTENT_ADDRESS_ALGORITHM))
 
     for error in errors:
         print("ERROR: " + error)

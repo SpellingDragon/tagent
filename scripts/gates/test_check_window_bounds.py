@@ -83,6 +83,40 @@ def scan_case():
     print("PASS a camelCase declaration key is scanned and refused")
 
 
+def reverse_scan_case():
+    """A second copy of a registered constant's value is red beside it.
+
+    Two directions: the file that already holds a registered constant and a
+    singular-root sibling is refused by name, and the same file with the sibling
+    gone is green. The singular root is the point: a packing ratio restated as
+    <unit>PerToken is exactly the copy the reverse scan exists to catch.
+    """
+    global CASES
+    CASES += 1
+    checker = load_checker()
+    cases = (
+        ("const factWindow = 4096" + chr(10) + "const bytesPerToken = 4" + chr(10), "bytesPerToken"),
+        ("const factWindow = 4096" + chr(10), None),
+    )
+    for body, want in cases:
+        with tempfile.TemporaryDirectory() as tmp:
+            source = pathlib.Path(tmp) / "x.go"
+            source.write_text("package x" + chr(10) + chr(10) + body, encoding="utf-8")
+            errors = checker.check_registered_files(
+                registry(WINDOW, BUDGET, POLICY, CONSTANT),
+                checker.scan_registered_files(tmp, registry(WINDOW, BUDGET, POLICY, CONSTANT)),
+            )
+        if want is None:
+            if errors:
+                FAILURES.append("reverse_scan_case: want no error without the second copy, got %r" % (errors,))
+                return
+            continue
+        if not any(want in error for error in errors):
+            FAILURES.append("reverse_scan_case: want an error naming %r, got %r" % (want, errors))
+            return
+    print("PASS a restated singular-root constant beside a registered one is red")
+
+
 def main():
     declared_keys = ["max_tokens", "provider_context_window", "compress_threshold"]
     run("a registered four-class registry is green", None,
@@ -103,6 +137,7 @@ def main():
     run("an unknown class is red", "is not one of",
         registry(WINDOW, {**POLICY, "class": "knob"}, CONSTANT), declared_keys, True)
     scan_case()
+    reverse_scan_case()
     if FAILURES:
         for failure in FAILURES:
             print("FAIL", failure)

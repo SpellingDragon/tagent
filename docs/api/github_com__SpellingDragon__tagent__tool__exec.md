@@ -8,6 +8,15 @@ The tmux mechanism itself stays outside this package. How a session is started,
 watched, re-attached and killed belongs to the executor behind the Executor port
 declared in stop.go.
 
+The generation-scoped lifecycle of the execution consumer: the boot manager
+serves as the template every generation's instance is built from and as the
+stable face the host closes, while each generation's tools bind the instance of
+their own generation. The resources split three ways: the manager bookkeeping
+and its trackers are process-private and die with the generation (Detach),
+the external tmux sessions survive the generation switch and are re-probed by
+the next generation's calls instead of rebuilt, and the executor beside its
+session generation tokens is shared across generations.
+
 The state face of the execution resource manager: the responsibility range a
 resource is tracked for, the lifecycle events the manager observes after a call
 returned, and the optional observer that hands those events to the runtime.
@@ -110,6 +119,14 @@ var ErrUnwired = errors.New("exec: the deployment wires no execution resource ma
 
 FUNCTIONS
 
+func GenRegistration(template *Manager) state.GenRegistration
+    GenRegistration returns the generation-scoped registration of the
+    execution consumer over one boot manager: the manager is the template
+    each generation's instance is built from — the same executor, observer
+    and options — and the stable face the host's close runs. The assembly root
+    mounts this registration through the registry it drives; the rebuild logic
+    lives here, never in a feature path of the root.
+
 func IsTmuxAvailable() bool
     IsTmuxAvailable reports whether a tmux binary is reachable on PATH. The
     verdict comes from a real PATH lookup at every call, so a deployment without
@@ -118,10 +135,13 @@ func IsTmuxAvailable() bool
 func NewPreset(manager *Manager, rhythm MonitorConfig, opts ...RunToolOption) []trpctool.Tool
     NewPreset returns the tools one declared execution face grants, in the
     order the request carries them: the run tool under the monitor rhythm the
-    declaration fixes beside the explicit release tool. A preset built beside no
-    manager still builds; each call answers ErrUnwired. The options configure
-    the run tool of the preset, so an assembly that resolves the responsibility
-    range of a call passes its resolver here.
+    declaration fixes beside the explicit release tool. The tools bind the
+    generation instance the manager serves at construction — the installed
+    candidate generation, or the manager itself beside none — so a request
+    already under way keeps the instance its own generation's tools bound.
+    A preset built beside no manager still builds; each call answers ErrUnwired.
+    The options configure the run tool of the preset, so an assembly that
+    resolves the responsibility range of a call passes its resolver here.
 
 TYPES
 
@@ -220,6 +240,15 @@ type Executor interface {
     MUST NOT release a resource whose stop it could not confirm. MUST NOT report
     an unconfirmed exit as a clean one.
 
+func NewDeferredTmuxExecutor() Executor
+    NewDeferredTmuxExecutor returns the executor port over the tmux sessions
+    of this system, resolved on the first call instead of at construction. A
+    process that mounts the execution consumer before any declaration grants the
+    exec face builds nothing here until a call of that face needs the sessions,
+    and the construction verdict of the first call is the one NewTmuxExecutor
+    answers: a system without tmux is refused by name at that call, never read
+    as a working executor that fails later.
+
 type Explanation struct {
 	// Key is the resource the explanation reports on.
 	Key ResourceKey
@@ -317,17 +346,30 @@ func (m *Manager) Close(ctx context.Context) []SweepReport
     Close ends the life of one manager: every post-return tracker of it stops
     and is joined, the expired leases are settled through the sweep of this
     manager, and every resource still held is released through the executor.
-    A resource whose stop stays unconfirmed stays held and is reported by name,
-    so the close never announces an ending it did not observe. A repeated close
-    reports nil and releases nothing a second time; the manager is final once it
-    closed.
+    A manager that installed generation instances closes each of them beside
+    itself, so the close of the template frees the resources the process still
+    serves. A resource whose stop stays unconfirmed stays held and is reported
+    by name, so the close never announces an ending it did not observe.
+    A repeated close reports nil and releases nothing a second time; the manager
+    is final once it closed.
+
+func (m *Manager) Detach(_ context.Context) error
+    Detach ends the process-private life of one manager generation without
+    stopping the external executions it holds: every tracker stops and is joined
+    and the bookkeeping of the held resources is dropped, while the durable
+    sessions stay running for the generation in effect to re-probe. It is the
+    release the retirement of a superseded generation runs on this instance;
+    a repeated detach reports nothing left to detach.
 
 func (m *Manager) Escalated() int
     Escalated reports how many diagnosis escalations undecidable probes raised.
 
 func (m *Manager) Explain(key ResourceKey) (Explanation, error)
-    Explain reports the retained state of one held resource beside the facts it
-    is held on. A key nothing is held under answers as not held.
+    Explain reports the retained state of one held resource beside the facts
+    it is held on. A key nothing is held under answers as not held. A manager
+    that installed generation instances answers from the instance that holds the
+    lease — the current generation first — so the diagnostic reads the ledger
+    the resource actually lives in while an older generation drains.
 
 func (m *Manager) FinalOutput(key ResourceKey) (FinalOutput, error)
     FinalOutput reports the output one released execution recorded beside its

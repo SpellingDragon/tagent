@@ -47,6 +47,17 @@ type Manager struct {
 	// manager close began, so no tracker starts behind it.
 	observer StateObserver
 	closing  bool
+	// genMu guards the generation faces of this manager as a template: the
+	// instances built from it and the one the candidate construction reads.
+	genMu sync.Mutex
+	// genInstances holds every generation instance this template installed, in
+	// installation order; genCurrent is the instance the candidate construction
+	// binds, nil beside no installed generation.
+	genInstances []*Manager
+	genCurrent   *Manager
+	// detached reports that this instance's process-private life ended through
+	// Detach, so a repeated retirement release joins nothing a second time.
+	detached bool
 }
 
 // DefaultLeaseTTL is the floor lease of an execution resource whose caller
@@ -572,10 +583,13 @@ func (m *Manager) noteStop(key ResourceKey, stop StopEvidence) {
 
 // Close ends the life of one manager: every post-return tracker of it stops and
 // is joined, the expired leases are settled through the sweep of this manager,
-// and every resource still held is released through the executor. A resource
-// whose stop stays unconfirmed stays held and is reported by name, so the close
-// never announces an ending it did not observe. A repeated close reports nil and
-// releases nothing a second time; the manager is final once it closed.
+// and every resource still held is released through the executor. A manager
+// that installed generation instances closes each of them beside itself, so
+// the close of the template frees the resources the process still serves. A
+// resource whose stop stays unconfirmed stays held and is reported by name, so
+// the close never announces an ending it did not observe. A repeated close
+// reports nil and releases nothing a second time; the manager is final once it
+// closed.
 func (m *Manager) Close(ctx context.Context) []SweepReport {
 	m.mu.Lock()
 	if m.closing {
@@ -595,7 +609,11 @@ func (m *Manager) Close(ctx context.Context) []SweepReport {
 	for _, done := range waits {
 		<-done
 	}
-	reports := m.Sweep(ctx)
+	var reports []SweepReport
+	for _, instance := range m.generationInstances() {
+		reports = append(reports, instance.Close(ctx)...)
+	}
+	reports = append(reports, m.Sweep(ctx)...)
 	attempted := make(map[ResourceKey]bool, len(reports))
 	for _, report := range reports {
 		attempted[report.Key] = true
@@ -692,8 +710,20 @@ type Explanation struct {
 }
 
 // Explain reports the retained state of one held resource beside the facts it
-// is held on. A key nothing is held under answers as not held.
+// is held on. A key nothing is held under answers as not held. A manager that
+// installed generation instances answers from the instance that holds the
+// lease — the current generation first — so the diagnostic reads the ledger
+// the resource actually lives in while an older generation drains.
 func (m *Manager) Explain(key ResourceKey) (Explanation, error) {
+	if holder := m.generationHolder(key); holder != nil {
+		return holder.explainHeld(key)
+	}
+	return m.explainHeld(key)
+}
+
+// explainHeld reports the retained state of one resource held by this manager
+// itself, beside the facts it is held on.
+func (m *Manager) explainHeld(key ResourceKey) (Explanation, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	res, ok := m.resources[key]

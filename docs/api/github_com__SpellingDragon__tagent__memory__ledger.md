@@ -1,5 +1,10 @@
 package ledger // import "github.com/SpellingDragon/tagent/memory/ledger"
 
+The one atomic storage seam a tier opens: engines implement it, the segment and
+original stores read and commit through it, and a caller injects failures by
+wrapping it. No caller names an engine's file layout, so switching engines needs
+no adaptation and the same contract test runs over every engine.
+
 Package ledger is the runtime's durable original-text layer: it names one stored
 original and the reference metadata that scopes it, commits those bytes and
 returns them byte for byte, and carries the retention guard, the lifecycle and
@@ -11,6 +16,30 @@ side. Its files sit under the ledger unit by the mechanism-subpackage rule of
 CONTRIBUTING.md: the fact vocabulary (OriginalRef, Integrity), the consumer
 wiring (Retention, Lifecycle, the stores) and the per-tier strategies
 (localfile, rustviking).
+
+The journal is the localfile tier's persistent unit: one append-only file of
+frames, each carrying the length of its payload and a CRC32C of that payload.
+A frame that is fully present and matches its checksum is a committed record.
+A frame the writer left half-written is a torn tail, and only that tail is cut
+off at open. A complete frame whose checksum does not match is corruption, and
+it refuses the open: the records before it are never served as the whole log,
+because a silently accepted damaged frame is a fact that disappears.
+
+journalKV is the key-value seam of the localfile tier over its append-only
+journal. A commit appends one record and publishes its values to the resident
+set only after that append returned success, so a commit whose write failed
+leaves the view answering exactly the records the file holds. Appending is not
+the barrier: the barrier is the log's own sync, which a commit takes when it
+carries nothing to append, so the tier that reports durable success pays for one
+barrier per commit instead of one per stage and one per confirmation.
+
+The original store every durable engine keeps: the reference and independent
+body model of the in-memory tier, committed through the atomic store seam so it
+runs over any engine. Nothing here names a file layout.
+
+The resident entry set every durable engine keeps beside its persisted record:
+an LRU over key-value pairs with a byte budget, so what the process holds is
+bounded whatever the store persists.
 
 Storage lifecycle: retention, tombstones, recovery inventory and reclamation
 coordination.
@@ -29,6 +58,11 @@ configuration: the age window, the per-type overrides, the scan cadence and
 the per-partition capacity bound. An unset field falls back to the default and
 an explicit value wins, so no composition root hardcodes a second copy of the
 default beside the config it was handed.
+
+The one place that reads the retired sharded-snapshot layout: an operator
+migrating a deployment root reads that layout as the read-only source and writes
+the journal the build opens now. Every other caller reaches storage through the
+atomic store seam and names no layout at all.
 
 Original references and the read scope that authorizes them: one reference names
 one stored original together with the metadata that scopes it, and the scoped
@@ -51,8 +85,8 @@ stay a compile-time constant. A rename or a widened signature stops this file
 from compiling, so the storage face cannot drift silently.
 
 TierFacts is the durable fact surface of one opened tier: put, get, prefix scan
-and the sync barrier a commit reports its success behind. It commits through
-the same key-value backend the tier's segment store uses, so the replay and the
+and the sync barrier a commit reports its success behind. It commits through the
+same atomic store engine the tier's segment store uses, so the replay and the
 durable task commit share one database with the events already stored there.
 Its signatures carry built-in types only, so it matches the state layer's
 fact-log port structurally and no package edge is required in either direction
@@ -91,6 +125,12 @@ var ErrCommitBarrier = errors.New("memory: commit barrier failed")
     ErrCommitBarrier reports a commit whose barrier did not complete, so nothing
     of it is published.
 
+var ErrCommitUncertain = errors.New("memory: commit outcome uncertain")
+    ErrCommitUncertain reports a commit whose durable outcome the engine cannot
+    name: the write or its barrier did not return success and the engine
+    could not confirm what the store holds, so the caller re-reads instead of
+    reporting either outcome.
+
 var ErrContentConflict = errors.New("memory: key already names other bytes")
     ErrContentConflict reports a commit whose key already names other bytes:
     one key names one original, so the second content is refused.
@@ -108,6 +148,23 @@ var ErrIntegrityMismatch = errors.New("memory: bytes do not match the recorded i
     completeness information recorded for them, so the read is refused instead
     of served.
 
+var ErrJournalBarrier = errors.New("memory: journal barrier failed")
+    ErrJournalBarrier reports a barrier that did not complete, so nothing staged
+    in front of it is confirmed.
+
+var ErrJournalCorrupt = errors.New("memory: journal frame is corrupt")
+    ErrJournalCorrupt reports a frame that is fully present in the log and does
+    not match the checksum written beside it.
+
+var ErrJournalFormat = errors.New("memory: journal format version is not supported")
+    ErrJournalFormat reports a log written under a format version this build
+    does not read.
+
+var ErrJournalLegacyLayout = errors.New("memory: data directory holds the retired shard layout, open a new directory")
+    ErrJournalLegacyLayout reports a data directory that holds the retired
+    sharded-snapshot layout instead of a journal, so the caller is told to open
+    a new directory rather than being handed a half-read store.
+
 var ErrKeyRequired = errors.New("memory: original reference carries no key")
     ErrKeyRequired reports a commit that carries no key, so no read could ever
     name the original again.
@@ -116,6 +173,22 @@ var ErrLeaseMismatch = errors.New("memory: release carries a lease that is not t
     ErrLeaseMismatch reports a release whose lease is not the current lease of
     the hold it names: a superseded token from before a re-hold, or a token that
     belongs to another hold. The named hold stays held.
+
+var ErrMigrateMismatch = errors.New("memory: migrated root does not read back the source")
+    ErrMigrateMismatch reports a copied root that does not read back exactly
+    what the source held. The copy does not report success for a root it could
+    not verify.
+
+var ErrMigrateSourceUnchanged = errors.New("memory: migration source changed under the copy")
+    ErrMigrateSourceUnchanged reports a source that does not read the same way
+    twice: the verifying pass over the retired layout names a different key set
+    than the copy landed, so the result is refused instead of reporting a copy
+    of a root that moved under it.
+
+var ErrMigrateTargetNotEmpty = errors.New("memory: migration target already holds data")
+    ErrMigrateTargetNotEmpty reports a migration target that already holds keys:
+    the copy rewrites nothing, so an operator points it at the new, still empty
+    directory instead of a live one.
 
 var ErrOriginalExpired = errors.New("memory: every reference is outside its retention window")
     ErrOriginalExpired reports a segmented read of a key whose references are
@@ -171,29 +244,81 @@ var ErrSegmentRange = errors.New("memory: segment must start at line 1 or later 
     ErrSegmentRange reports a segment request that starts before the first line
     or asks for no lines at all.
 
-var ErrSnapshotCorrupt = errors.New("memory: stored snapshot is corrupt")
-    ErrSnapshotCorrupt reports stored snapshot content that cannot be read back
-    as the key-value state it claims to hold.
+var ErrSnapshotCorrupt = errors.New("memory: stored record is corrupt")
+    ErrSnapshotCorrupt reports stored content that cannot be read back as the
+    key-value state it claims to hold.
 
 var ErrUnknownTier = errors.New("memory: unknown storage tier")
     ErrUnknownTier reports a storage config whose tier name matches no known
     tier.
 
-var ErrUnstage = errors.New("memory: staged writes could not be unstaged")
-    ErrUnstage reports staged writes that could not be rolled back after a
-    failed barrier, kept as the evidence of the failure alongside its cause.
-
 TYPES
+
+type AtomicStore interface {
+	// Read returns the pairs the fetch names.
+	Read(ctx context.Context, fetch Fetch) ([]Pair, error)
+	// Keys returns the keys the prefix names, in key order, without reading
+	// their values.
+	Keys(ctx context.Context, prefix string) ([]string, error)
+	// Namespaces returns the key namespaces the store holds, in name order,
+	// without reading any value.
+	Namespaces(ctx context.Context) ([]string, error)
+	// Commit applies one batch behind one barrier.
+	Commit(ctx context.Context, batch Batch) error
+}
+    AtomicStore is the storage engine every tier opens: one atomic commit unit
+    and one read face that answers only bytes a completed commit landed.
+      - Commit is all or nothing: a commit that returns an error publishes no
+        part of its batch, and no later commit carries its bytes into a read
+      - A commit takes exactly one barrier: a successful return means every
+        value of the batch is durable and readable by a later process the engine
+        persists across
+      - An empty batch writes nothing and only completes that barrier
+      - Read answers landed bytes only: an engine never serves a value whose
+        commit did not return success
+      - A commit whose durable outcome the engine cannot name returns
+        ErrCommitUncertain, and the caller re-reads to decide instead of
+        reporting success or failure
+      - Failure injection belongs at this seam: a caller wraps an AtomicStore
+        and fails, delays or drops a commit or a read, so the same injection
+        runs over any engine and never names a file layout
+
+func OpenAtomicStore(ctx context.Context, cfg StorageConfig) (AtomicStore, error)
+    OpenAtomicStore opens the engine the config names, without opening a tier
+    over it. A caller that wants to observe or fail commits opens the engine
+    here, wraps it, and hands the wrapper back through StorageConfig.Engine:
+    the wrapper is the same interface, so every engine takes the same injection.
+
+type Batch struct {
+	// Puts are the entries the commit writes.
+	Puts []Pair
+	// Deletes are the keys the commit removes.
+	Deletes []string
+}
+    Batch is one write set committed as a unit: the keys it puts and the keys it
+    deletes. A key stands on one side or the other, so the order the two sides
+    are applied in names no different state.
+
+type Fetch struct {
+	// Key names the one entry to read.
+	Key string
+	// Prefix names the entries to read when Key is empty.
+	Prefix string
+}
+    Fetch names one read: the single key it names, or every key carrying the
+    prefix it names when no key is named. An empty fetch reads the whole store,
+    ordered by key.
 
 type FileSegmentStore struct {
 	// Has unexported fields.
 }
-    FileSegmentStore commits events into time-window segments over one key-value
-    backend. One commit stages the event body, its index entry and the window
-    meta the window needs as one batch, and publishes the event to the read
-    cache, the resident index and the event count only when that commit returns
-    success. A commit that fails names the barrier as its step, carries its
-    cause, unstages what it wrote, and publishes no part of the record.
+    FileSegmentStore commits events into time-window segments over one atomic
+    store engine; it names no engine and no file layout, so any engine backs it.
+    One commit stages the event body, its index entry and the window meta the
+    window needs as one batch, and publishes the event to the read cache, the
+    resident index and the event count only when that commit returns success.
+    A commit that fails names the barrier as its step, carries its cause,
+    unstages what it wrote, and publishes no part of the record.
 
     The resident state is bounded: the index keeps one small position per event
     key (the projection of the persisted index entries), the read cache keeps
@@ -238,22 +363,20 @@ func (s *FileSegmentStore) GetEvent(ctx context.Context, key event.EventID) (Sto
     event.
 
 func (s *FileSegmentStore) Load(ctx context.Context) error
-    Load rebuilds the resident index and window table from the persisted
-    store without returning an event body. It enumerates shard labels
-    to discover the partitions, then reads the index and meta prefixes;
-    localfile's shard-granular scan still validates every encoded value in
-    those numeric shards. each partition: both are small entries, and no
-    {pid}:evt:{window}:{seq} body is read. A record whose index and window meta
-    did not both arrive stays out of the published state, and EventCount counts
-    the published records.
+    Load rebuilds the resident index and window table from the persisted store
+    without returning an event body. It enumerates the engine's key namespaces
+    to discover the partitions, then reads the index and meta prefixes of each
+    partition: both are small entries, and no {pid}:evt:{window}:{seq} body is
+    read. A record whose index and window meta did not both arrive stays out of
+    the published state, and EventCount counts the published records.
 
 func (s *FileSegmentStore) StoreEvent(ctx context.Context, rec SegmentRecord) error
     StoreEvent commits one event behind the segment commit barrier: the event
-    body, its index entry and the window meta the window needs are staged as one
-    batch and committed before the event reaches the read cache, the resident
-    index, the event count or the caller. A repeat of the committed record
-    returns success without a second fact, other bytes under the same event key
-    are refused, and a failed commit leaves nothing published.
+    body, its index entry and the window meta the window needs are one batch
+    committed before the event reaches the read cache, the resident index, the
+    event count or the caller. A repeat of the committed record returns success
+    without a second fact, other bytes under the same event key are refused,
+    and a failed commit leaves nothing published.
 
 type Guard interface {
 	// Hold registers one protection hold on the original of ref for holder and
@@ -546,6 +669,12 @@ func NewMemoryOriginalStore(options ...MemoryOption) *MemoryOriginalStore
 func (s MemoryOriginalStore) BlobCount() int
     BlobCount returns the number of event keys holding an original body.
 
+func (s MemoryOriginalStore) CollectOrphanBodies(ctx context.Context) (int, error)
+    CollectOrphanBodies deletes every stored body no reference record names: the
+    body of a commit whose reference commit failed is durable and unreachable,
+    so it is collected here instead of being kept forever. It returns the number
+    of bodies removed, and removes nothing a readable reference still names.
+
 func (s MemoryOriginalStore) Get(ctx context.Context, key event.EventID) RecallResult
     Get returns the exact recall result for key, classified exactly as the
     in-memory tier classifies it: the committed bytes while a reference of the
@@ -558,9 +687,14 @@ func (s MemoryOriginalStore) GetScoped(ctx context.Context, key event.EventID, s
 
 func (s MemoryOriginalStore) Put(ctx context.Context, ref OriginalRef, body []byte) error
     Put commits the original bytes of ref and publishes the reference once its
-    barrier returns success. Different event keys always own independent bodies;
-    a second scope on the same key joins its references, and other bytes under a
-    held key are refused.
+    barrier returns success.
+      - Different event keys always own independent bodies; a second scope on
+        the same key joins its references, and other bytes under a held key are
+        refused
+      - The body is written ahead of the reference that names it, so a reader
+        never sees a reference whose body is not already durable
+      - A body whose reference commit failed is an orphan no reader can reach,
+        and CollectOrphanBodies removes it
 
 func (s MemoryOriginalStore) ReadSegment(ctx context.Context, key event.EventID, startLine, numLines int) ([]byte, error)
     ReadSegment returns at most numLines whole lines of the original stored
@@ -575,6 +709,28 @@ func (s MemoryOriginalStore) References(key event.EventID) []OriginalRef
     References returns every reference registered under key, one per reference
     scope in a stable order, so which owners, formats and retention policies
     still name the original stays observable.
+
+type MigrateReport struct {
+	// Keys is the number of keys the target now holds.
+	Keys int
+	// Bytes is the payload the copy committed, summed over its keys.
+	Bytes int64
+	// Batches is the number of commits the copy took to land them.
+	Batches int
+}
+    MigrateReport counts what one migration copied.
+
+func MigrateShardedRoot(ctx context.Context, sourceRoot, targetRoot string) (MigrateReport, error)
+    MigrateShardedRoot copies every key of a retired sharded-snapshot root into
+    a journal root under targetRoot, in bounded batches, and reads the copy back
+    through a freshly opened view before it reports success.
+
+    The source is read-only: this function only enumerates and reads it,
+    so the build that wrote that layout still reads it after the copy,
+    and a migration interrupted anywhere leaves the source exactly as it was.
+    The target is refused when it already holds keys, so no copy overwrites
+    a root in use. A root whose copy does not read back byte for byte returns
+    ErrMigrateMismatch naming the key that differs.
 
 type OriginalRef struct {
 	// Key is the EventID that owns this original. Different keys never share
@@ -654,6 +810,14 @@ type OriginalStore interface {
     for byte, whole or as segments. MUST NOT answer a read with a model view in
     place of the original. MUST NOT invalidate an accepted reference by a later
     Put.
+
+type Pair struct {
+	// Key is the entry's key.
+	Key string
+	// Value is the entry's bytes.
+	Value []byte
+}
+    Pair is one key-value entry a read returns or a commit writes.
 
 type ProtectionLease string
     ProtectionLease is the opaque token one accepted hold returns and its
@@ -961,6 +1125,12 @@ type StorageConfig struct {
 	// RustVikingConfig is the config file passed to the rustviking CLI; empty
 	// means the config.toml under Root.
 	RustVikingConfig string
+	// Engine, when set, is the engine the tier opens over instead of the one Type
+	// names. It is the seam a caller wraps to observe, delay or fail commits: the
+	// wrapper implements the same AtomicStore, so the injection works over any
+	// engine and never names a file layout. A tier beside no wrapper opens the
+	// engine Type names.
+	Engine AtomicStore
 }
     StorageConfig locates one storage tier: the tier name, the root directory
     the persistent tiers persist under, and the rustviking executable and config
@@ -973,9 +1143,17 @@ const (
 	// StorageMemory is the in-process tier: it holds only what the process holds
 	// and declares no recovery across process exit.
 	StorageMemory StorageType = "memory"
-	// StorageLocalFile is the tier whose key values are sharded snapshots under a
-	// root directory.
+	// StorageLocalFile is the retired name of the durable local tier. The build
+	// opens it as the journal, the one durable local engine, and refuses a root
+	// that still holds the retired sharded-snapshot layout by name: a deployment
+	// moves such a root with MigrateShardedRoot and a caller that names no layout
+	// selects StorageJournal. The name is kept because deployments and checks
+	// still carry it; renaming it is a separate cleanup, not a second engine.
 	StorageLocalFile StorageType = "localfile"
+	// StorageJournal is the durable local tier: key values are the records of one
+	// append-only journal under a root directory. A commit is one frame, and the
+	// log's sync is its only barrier.
+	StorageJournal StorageType = "journal"
 	// StorageFile is the tier whose key values live in a rustviking store reached
 	// through the rustviking CLI.
 	StorageFile StorageType = "file"
@@ -1024,20 +1202,37 @@ type Tier struct {
 	Originals OriginalStore
 	// Segments commits events behind the segment commit barrier.
 	Segments *FileSegmentStore
+	// Store is the engine this tier holds, as the interface every engine
+	// implements: the stores above read and commit through it, and a caller never
+	// names the engine behind it.
+	Store AtomicStore
 	// Capabilities names what the backend guarantees.
 	Capabilities StoreCapabilities
 }
     Tier is one opened storage tier: the original store and the segment store of
-    the same backend, together with the capabilities that backend guarantees.
+    the same backend, together with the capabilities that backend guarantees and
+    the engine both stores commit through.
 
 func OpenTier(ctx context.Context, cfg StorageConfig) (*Tier, error)
     OpenTier opens one storage tier over its backend.
-
-    The memory tier holds only what the process holds; the localfile tier
-    persists sharded snapshots under Root; the file tier drives the rustviking
-    CLI and reports ErrRustVikingMissing when no such executable is found.
-    Each call opens its own store over the same backend, so a caller reads
-    exactly what an earlier process committed.
+      - The memory tier holds only what the process holds; the durable local
+        tier appends to the journal under Root; the file tier drives the
+        rustviking CLI and reports ErrRustVikingMissing when no such executable
+        is found
+      - Each call opens its own store over the same backend, so a caller reads
+        exactly what an earlier process committed
+      - A config that carries an engine opens the tier over that engine instead,
+        so a caller wraps the engine at the seam and the tier takes the wrapper
+        unchanged
+      - The journal tier's write path is one append-only file with one writer
+        handle per opened view, and each commit is appended as one whole frame,
+        so two views of the same directory cannot interleave half frames
+      - A second runtime instance over one directory is refused by the
+        production open path that owns that root, not by an exclusive lock here:
+        in-process checks of the same root appear in the test suite of this
+        repository
+      - Durability holds without that lock, because a frame is appended whole
+        and the barrier is the log's own sync
 
 type TierFacts struct {
 	// Has unexported fields.
@@ -1046,7 +1241,7 @@ type TierFacts struct {
 
 func TierFactLog(tier *Tier) *TierFacts
     TierFactLog returns the durable fact surface of one opened tier, so a
-    durable commit and a replay run on the same backend the tier's events are
+    durable commit and a replay run on the same engine the tier's events are
     committed through — no second database is introduced for either.
 
 func (l TierFacts) Get(ctx context.Context, key string) ([]byte, bool, error)

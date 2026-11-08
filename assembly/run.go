@@ -39,7 +39,6 @@ import (
 	"github.com/SpellingDragon/tagent/memory/embedder"
 	"github.com/SpellingDragon/tagent/memory/query"
 	"github.com/SpellingDragon/tagent/memory/replay"
-	"github.com/SpellingDragon/tagent/memory/search"
 	"github.com/SpellingDragon/tagent/runtime/agent"
 	"github.com/SpellingDragon/tagent/runtime/state"
 	"github.com/SpellingDragon/tagent/runtime/task"
@@ -220,14 +219,17 @@ type Run struct {
 	recovery  task.RestoreReport
 	bindings  *state.Bindings
 	publisher *state.Publisher
-	occupancy *state.Occupancy
-	authority *state.Authority
-	store     *state.MemoryStore
-	inspector state.Subject
-	admission *task.MemoryAdmission
-	commit    *runCommit
-	registry  *task.MemoryRegistry
-	manager   *task.MemoryManager
+	// observationEnabled records that the composition root wired the commit
+	// observation face; guarded by mu like the faces it gates.
+	observationEnabled bool
+	occupancy          *state.Occupancy
+	authority          *state.Authority
+	store              *state.MemoryStore
+	inspector          state.Subject
+	admission          *task.MemoryAdmission
+	commit             *runCommit
+	registry           *task.MemoryRegistry
+	manager            *task.MemoryManager
 	// writers is the ledger of the productions this run started — the drives, the
 	// model streams of their decisions and the tool productions of their calls —
 	// and the close reads it as the writer-stopped criterion of the run. The loop
@@ -258,6 +260,12 @@ type Run struct {
 	// factOrder keeps the commit order of the live facts, so a read of one
 	// session's chain answers in the order that chain was written.
 	factOrder []event.EventID
+	// controlFacts counts the live facts that are control-plane records of the
+	// configuration chain instead of facts of a session chain, and controlScanned
+	// is the point of factOrder that count has been brought up to. No trim
+	// releases a control-plane record, so the count only ever grows.
+	controlFacts   int
+	controlScanned int
 	// sessionFactCount counts the live facts each session chain holds, so the
 	// per-commit window trim stays O(1) until a chain can actually hold a cut.
 	sessionFactCount map[event.SessionID]int
@@ -298,6 +306,29 @@ type Run struct {
 	// through and the lease explanation reads; a declaration that grants the
 	// exec face beside no ledger is refused by name at call time.
 	execManager *tagentexec.Manager
+	// genRegistry is the generation-scoped consumer registry of this run: the
+	// consumers mount themselves through the options that wire them, and the
+	// publication path drives the registry without naming any consumer.
+	genRegistry *state.GenRegistry
+	// genFaces reports the per-generation native face of every declared agent as
+	// the consumer that owns it built it for one generation: the publication
+	// path reads the face of the candidate generation here instead of carrying
+	// the tools of one generation in the natives the caller handed over. It is
+	// wired by the composition root that owns the document those faces are read
+	// from; a run assembled beside none keeps the natives it was handed.
+	genFaces GenerationFaces
+	// genConsumers is the ordered account of the consumers mounted on
+	// genRegistry: the name each registration is keyed by, in the order the
+	// wiring mounted them. The publication path builds a candidate generation in
+	// exactly this order and unwinds it in the reverse, so a consumer that reads
+	// a face another consumer installed is mounted after it. The order is read
+	// from the wiring alone and never from map iteration, so the same wiring
+	// always builds the same order.
+	genConsumers []string
+	// publishMu serializes one publication attempt end to end: the consumer
+	// faces a candidate installs are read by its own binding construction, so
+	// two attempts never interleave the faces they install and restore.
+	publishMu sync.Mutex
 	// mcpServers is the live registry the MCP gateways read, mcpGateways the
 	// fixed gateway tools over it and mcpBinder the binding of the declared
 	// server generation onto it.
@@ -428,13 +459,27 @@ func assemble(ctx context.Context, decl *config.Declaration, agents map[event.Ag
 		recorder:         cfg.recorder,
 		observer:         cfg.observer,
 		execManager:      cfg.execManager,
+		genRegistry:      state.NewGenRegistry(),
+		genFaces:         cfg.genFaces,
 		capture:          cfg.capture,
 		leases:           map[event.AgentID]*leaseState{},
 		leaseObservers:   map[event.AgentID]*rl.LeaseObserver{},
 	}
+	if cfg.observer != nil {
+		r.enableGenerationObservation()
+	}
 	for id, held := range cfg.leases {
 		lease := held
 		r.leases[id] = &lease
+	}
+	for _, reg := range cfg.genRegistrations {
+		if err := r.genRegistry.Register(reg); err != nil {
+			return nil, err
+		}
+		r.genConsumers = append(r.genConsumers, reg.Name)
+	}
+	for _, port := range cfg.genPorts {
+		port.bind(r)
 	}
 	r.compress = NewCompressionConsumer(ageFoldSessions{run: r})
 	r.ageFold = NewAgeFoldPlugin(ageFoldSessions{run: r})
@@ -499,6 +544,7 @@ func assemble(ctx context.Context, decl *config.Declaration, agents map[event.Ag
 	r.manager = task.NewMemoryManager(r.registry, nil, task.WithEnvelopeDeliverer(r.deliver))
 	r.delegations = agent.NewDelegator(closeGate{run: r, face: closeFace{manager: r.manager, registry: r.registry}}, r.bindings, r.instance)
 	r.publisher = state.NewPublisher(r.bindings, publishContract, cfg.governance, &r.records)
+	r.publisher.ObserveRetirements(r.recordGenerationRetirement)
 	r.loop = agent.NewLoop(r.publisher, r.occupancy, r.instance, r.resolveFact)
 	r.writers = r.loop
 	r.delegations.SetResident(r.loop)
@@ -538,9 +584,6 @@ func assemble(ctx context.Context, decl *config.Declaration, agents map[event.Ag
 		if err != nil {
 			return nil, err
 		}
-		if err := supply.searcher.SetRetrievalTuning(search.DefaultLimit, search.DefaultLimit, 0); err != nil {
-			return nil, err
-		}
 		landed, err := r.seedReplay(ctx, tier)
 		if err != nil {
 			return nil, err
@@ -557,6 +600,9 @@ func assemble(ctx context.Context, decl *config.Declaration, agents map[event.Ag
 	r.mu.Lock()
 	r.embedder = cfg.embedder
 	r.mu.Unlock()
+	if err := r.convergeGenerationRetirements(ctx); err != nil {
+		return nil, err
+	}
 	return r, nil
 }
 
@@ -574,19 +620,38 @@ func (r *Run) Publish(ctx context.Context, decl *config.Declaration, agents map[
 	return r.publishDeclared(ctx, decl, agents, publicationWindow{})
 }
 
+// generationLeaseKind is the resource kind a generation-scoped consumer's
+// exclusive registration takes in the candidate ledger, so the diagnostic read
+// of the run names the same kind the publication path registered.
+const generationLeaseKind = "gen"
+
 // publishDeclared is the one preparation of a publication candidate: the
 // declaration fingerprint, the declared MCP servers, the prepared live binding
 // of every declared agent and the one publication entry, with the decision
 // window the record of this attempt carries. It is the same path Publish runs,
 // so every caller that judges a window still enters through the sole entry.
+//
+// The generation-scoped consumers build their instances for the candidate
+// generation before the binding construction reads their faces, and their
+// exclusive resources enter the candidate ledger beside the binding's own, so
+// the retirement of a superseded generation releases them through the existing
+// drain. A candidate whose own plan does not take effect — a failed
+// preparation, a refused publication, unchanged content or a publication that
+// rolled back to other content — puts the faces it installed back and frees only
+// what it acquired; a candidate that published keeps them installed.
+//
+// - The host dialect a publication of a host document carries is part of the fingerprint: the shared declaration does not hold the risk table, the observation section or the skill and read face of an agent, so a document that moved only those sections would otherwise publish nothing.
 func (r *Run) publishDeclared(ctx context.Context, decl *config.Declaration, agents map[event.AgentID]NativeAgent, window publicationWindow) (state.PublishOutcome, error) {
 	if decl == nil {
 		return state.PublishOutcome{}, errors.New("tagent: the candidate carries no declaration")
 	}
+	r.publishMu.Lock()
+	defer r.publishMu.Unlock()
 	fingerprint, err := config.Fingerprint(*decl)
 	if err != nil {
 		return state.PublishOutcome{}, err
 	}
+	fingerprint = publicationFingerprint(fingerprint, window.dialectKey)
 	servers := declaredServersOf(decl)
 	if err := mcpgw.ValidateDeclared(servers); err != nil {
 		return state.PublishOutcome{}, err
@@ -596,12 +661,39 @@ func (r *Run) publishDeclared(ctx context.Context, decl *config.Declaration, age
 		Baseline:    r.publisher.Baseline(),
 		Fingerprint: fingerprint,
 	}
-	cand, err := prepare(ctx, plan, r.suppliers(decl, agents))
+	gen := state.Generation(r.publisher.Current().Generation + 1)
+	built, err := r.genRegistry.Build(ctx, decl, gen)
 	if err != nil {
 		return state.PublishOutcome{}, err
 	}
+	if r.genFaces != nil {
+		faces, ok := r.genFaces.Face(gen)
+		if !ok {
+			built.Restore()
+			return state.PublishOutcome{}, errors.Join(
+				fmt.Errorf("tagent: the consumer side built no native face for generation %d", gen),
+				built.Release(ctx),
+			)
+		}
+		agents = faces
+	}
+	cand, err := prepare(ctx, plan, r.suppliers(decl, agents))
+	if err != nil {
+		built.Restore()
+		return state.PublishOutcome{}, errors.Join(err, built.Release(ctx))
+	}
+	for _, consumer := range built {
+		if consumer.Resources.Resources == nil {
+			continue
+		}
+		ref := cand.Resources.Register(generationLeaseKind, state.GenLeaseKey(gen, consumer.Name), consumer.Resources.Resources.ReleaseAll)
+		cand.Plan.Leases = append(cand.Plan.Leases, ref)
+	}
 	cand = cand.WithWindow(window.previous, window.previousFingerprint, window.models, window.dimensions, window.at)
 	outcome, err := r.publisher.Publish(ctx, cand)
+	if outcome.Result != state.PublishApplied {
+		built.Restore()
+	}
 	if err == nil {
 		r.loop.SetFinalRound(finalRoundPolicy(decl))
 		r.loop.SetAgentFinalRounds(agentFinalRoundPolicies(decl))
@@ -614,6 +706,19 @@ func (r *Run) publishDeclared(ctx context.Context, decl *config.Declaration, age
 		}
 	}
 	return outcome, err
+}
+
+// publicationFingerprint reports the publication fingerprint of one declaration
+// under one host dialect: the declaration fingerprint beside the digest of the
+// sections the shared declaration does not carry. A document that declares no
+// dialect section answers the digest of nothing, so its fingerprint stays the
+// declaration fingerprint and a publication of the same configuration again
+// reads as unchanged.
+func publicationFingerprint(fingerprint, dialectKey string) string {
+	if dialectKey == "" {
+		return fingerprint
+	}
+	return fingerprint + "|host:" + dialectKey
 }
 
 // declaredServersOf maps the server section of one declaration onto the named
@@ -1025,6 +1130,18 @@ type assemblyConfig struct {
 	recorder    rl.Recorder
 	observer    plugin.Observer
 	execManager *tagentexec.Manager
+	// genRegistrations carries the generation-scoped consumer mounts the
+	// wiring options contribute: each consumer registers its own builder, and
+	// the assembly drives the registry without naming any consumer.
+	genRegistrations []state.GenRegistration
+	// genFaces reports the per-generation native face the host consumer built
+	// for one generation, so the publication path composes the candidate binding
+	// over the face of its own generation.
+	genFaces GenerationFaces
+	// genPorts are the consumers of the host's own dialect this assembly hands
+	// the run it builds, so the builder of every candidate generation installs
+	// its face on the run before that generation's binding is prepared.
+	genPorts []hostGenerationPort
 	// reflectionAnchors is the anchor record path whose watermark the
 	// reflection face reports.
 	reflectionAnchors string
@@ -1208,16 +1325,292 @@ func WithPlugins(build func(*Run) ([]plugin.Instance, error)) Option {
 	return func(c *assemblyConfig) { c.plugins = build }
 }
 
+// WithGenerationConsumer mounts one consumer on the generation-scoped registry
+// of this assembly: the consumer answers the builder of its per-generation
+// instance, the publication path rebuilds it for every candidate generation
+// without naming the consumer, and the order the options are applied in is the
+// order the registry builds.
+//
+// 契约: docs/adr/0007-generation-scoped-runtime-plugin-lifecycle.md
+//
+//   - The builder owns the whole life of its instance: it constructs the instance, installs it as the face the candidate's binding construction reads, and answers the exclusive resources it acquired beside the restore that puts the previous face back; a builder that acquires nothing exclusive answers a nil resource ledger and is registered nowhere.
+//   - Only the process-private resources of one generation enter that ledger: an external durable resource survives the switch and is re-probed by the next generation, and a shared native is reused as it stands, so a retirement releases neither.
+func WithGenerationConsumer(reg state.GenRegistration) Option {
+	return func(c *assemblyConfig) { c.genRegistrations = append(c.genRegistrations, reg) }
+}
+
+// GenerationFaces reports the per-generation native face of every declared agent
+// of one generation. A generation-scoped consumer builds the face of a candidate
+// generation from the declaration that generation publishes, and the publication
+// path reads it here when it composes the candidate binding: the model of an
+// agent is the shared native that survives every switch, while the tools, skill
+// roots, read root, file surface and reflection scope are the face of exactly
+// one generation.
+type GenerationFaces interface {
+	// Face reports the composed natives of one generation, and false beside a
+	// generation the source never built.
+	Face(gen state.Generation) (map[event.AgentID]NativeAgent, bool)
+}
+
+// WithGenerationFaces wires the source of the per-generation native face. A run
+// assembled beside none composes every candidate over the natives its caller
+// handed over, which is the shape a caller that owns its own agent materials
+// reads; a host wires the consumer that rebuilds the face from its document.
+func WithGenerationFaces(source GenerationFaces) Option {
+	return func(c *assemblyConfig) { c.genFaces = source }
+}
+
+// hostGenerationPort is one consumer of the host's own dialect that keeps its
+// face on the run: the assembly hands it the run it built before the first
+// generation is published, so the builder of every candidate generation installs
+// its face where the binding construction of that generation reads it.
+type hostGenerationPort interface {
+	// bind attaches the assembled run the consumer installs its face on.
+	bind(run *Run)
+}
+
+// withHostGenerationPorts hands the host dialect consumers of this assembly the
+// run it builds, before the first generation is published.
+func withHostGenerationPorts(ports ...hostGenerationPort) Option {
+	return func(c *assemblyConfig) { c.genPorts = append(c.genPorts, ports...) }
+}
+
 // WithExecManager attaches the execution resource ledger this assembly acquires
 // through and explains its registered leases by: a declaration that grants the
 // exec face acquires through this ledger under the monitor rhythm its own
 // declaration fixes, and the blocker explanation read of the run reports each
-// registration beside the retention facts the ledger records under its key. An
-// assembly beside no ledger still explains its task and notification blockers,
-// refuses to explain a registered lease by name, and refuses a call of the
-// granted exec face by name instead of starting anything.
+// registration beside the retention facts the ledger records under its key. The
+// ledger also mounts the execution consumer on the generation-scoped registry,
+// so every published generation rebuilds its exec instance over this ledger's
+// executor and options. An assembly beside no ledger still explains its task
+// and notification blockers, refuses to explain a registered lease by name, and
+// refuses a call of the granted exec face by name instead of starting anything.
 func WithExecManager(manager *tagentexec.Manager) Option {
-	return func(c *assemblyConfig) { c.execManager = manager }
+	mount := WithGenerationConsumer(tagentexec.GenRegistration(manager))
+	return func(c *assemblyConfig) {
+		c.execManager = manager
+		if manager != nil {
+			mount(c)
+		}
+	}
+}
+
+// GenerationConsumer is one consumer of the generation-scoped registry as the
+// run reports it: the name its registration is keyed by, the frozen key its
+// exclusive registration takes in one generation, and whether the generation
+// the run serves carries that registration.
+type GenerationConsumer struct {
+	// Name is the consumer's registered name.
+	Name string
+	// Exclusive is the frozen key of its exclusive registration in one
+	// generation, in the form "gen:<id>:<consumer>".
+	Exclusive string
+	// Registered reports whether the generation the run serves carries that
+	// exclusive registration: a consumer that acquired nothing exclusive
+	// registers none, and a consumer a generation never built carries none
+	// either.
+	Registered bool
+}
+
+// GenerationConsumers reports the consumers the generation-scoped registry
+// rebuilds, in build order: the name each registration is keyed by beside the
+// exclusive registration the served generation carries for it. The read is the
+// diagnostic face of the registry the publication path drives, so it moves
+// nothing; it names a generation other than the served one as the registrations
+// that generation would take rather than the ones in service.
+func (r *Run) GenerationConsumers(gen state.Generation) []GenerationConsumer {
+	if r == nil {
+		return nil
+	}
+	r.mu.Lock()
+	names := append([]string(nil), r.genConsumers...)
+	registered := make(map[string]bool, len(r.current.Leases))
+	for _, ref := range r.current.Leases {
+		if ref.Kind == generationLeaseKind {
+			registered[ref.Key] = true
+		}
+	}
+	r.mu.Unlock()
+	out := make([]GenerationConsumer, 0, len(names))
+	for _, name := range names {
+		key := state.GenLeaseKey(gen, name)
+		out = append(out, GenerationConsumer{Name: name, Exclusive: key, Registered: registered[key]})
+	}
+	return out
+}
+
+// generationRetireDimension is the configuration dimension the retirement of one
+// generation is filed under, beside the frozen generation stamp: the
+// configuration chain's control-plane records reuse the one configuration change
+// fact type under their own dimension, so the retirement is a fact of that chain
+// instead of a second fact type no reader of this build maps.
+const generationRetireDimension = "generation-retire"
+
+// generationRetirePrefix is the frozen key prefix one retirement is quoted by:
+// the key derives from the generation alone, so a boot replay that derives the
+// same retirement again is answered as the fact the chain already holds.
+const generationRetirePrefix = "gen-retire:"
+
+// generationRetireKey names the record of one retired generation: the frozen key
+// "gen-retire:<id>" a retirement is quoted by. The key is derived from the
+// generation alone, so a boot replay that derives the same retirement again is
+// answered as the fact the chain already holds instead of adding a second one.
+func generationRetireKey(gen state.Generation) event.EventID {
+	return event.EventID(generationRetirePrefix + strconv.FormatUint(uint64(gen), 10))
+}
+
+// generationRetirementRecord reports whether one committed fact is the
+// retirement of a generation: a control-plane record of the configuration chain
+// rather than a fact of a session chain.
+func generationRetirementRecord(evt event.Event) bool {
+	return strings.HasPrefix(string(evt.Key), generationRetirePrefix)
+}
+
+// recordGenerationRetirement files the retirement of one generation on the
+// chain: the drain freed the exclusive resources of a generation no publication
+// serves any more, and the record states that retirement beside the generation
+// number. The record is written after the release and never triggers one, and the
+// boot convergence reads it as the anchor of a retirement the restart does not
+// have to derive again.
+//
+// 契约: docs/wiki/platform/org-hot-reload.md#apply-record
+func (r *Run) recordGenerationRetirement(ctx context.Context, gen state.Generation) error {
+	if r == nil || gen == 0 {
+		return nil
+	}
+	number := strconv.FormatUint(uint64(gen), 10)
+	summary := "generation " + number + " retired"
+	evt := event.Event{
+		Key:       generationRetireKey(gen),
+		Type:      event.TypeConfigChange,
+		Timestamp: time.Now().UTC(),
+		Message:   model.Message{Role: model.RoleSystem, Content: summary},
+		Meta: map[string]string{
+			event.MetaKeyEventSummary:           summary,
+			event.MetaKeyTriggerSource:          generationRetireDimension,
+			event.MetaKeyConfigChangeDimension:  generationRetireDimension,
+			event.MetaKeyConfigChangeGeneration: number,
+		},
+		Owner: r.generationOwner(),
+	}
+	if _, err := r.commitFactChecked(ctx, evt); err != nil {
+		return fmt.Errorf("tagent: record the retirement of generation %d: %w", gen, err)
+	}
+	return nil
+}
+
+// generationOwner reports the address the generation records of this run are
+// owned by: the entry agent of the declaration in effect, the agent the chain
+// files the organization-level judgments of the configuration under. A run
+// beside no declaration in effect answers no owner, and its records stay the
+// in-process facts they are.
+func (r *Run) generationOwner() event.Address {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.current.Plan.Declaration == nil {
+		return event.Address{}
+	}
+	entry := strings.TrimSpace(r.current.Plan.Declaration.Entry)
+	if entry == "" {
+		return event.Address{}
+	}
+	return event.Address{AgentID: event.AgentID(entry)}
+}
+
+// convergeGenerationRetirements records the retirement of every generation the
+// chain this process booted over already left behind: a generation older than the
+// one in effect was superseded before this process started and holds no request,
+// so a boot that finds no record of its retirement files one. It closes the
+// window a crash opens between the generation switch and the drain that retires
+// the generation it replaced.
+//
+// The convergence records only: the exclusive resources of those generations were
+// process-private and went with the process that ended, so the record says what
+// happened instead of releasing anything again.
+func (r *Run) convergeGenerationRetirements(ctx context.Context) error {
+	current := state.Generation(r.publisher.Current().Generation)
+	for gen := state.Generation(1); gen < current; gen++ {
+		_, err := r.CommittedEvent(ctx, generationRetireKey(gen))
+		if err == nil {
+			continue
+		}
+		if !errors.Is(err, ErrCommittedFactMissing) {
+			return fmt.Errorf("tagent: read the retirement record of generation %d: %w", gen, err)
+		}
+		if err := r.recordGenerationRetirement(ctx, gen); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// trackGenerationConsumers records the exclusive resources the consumers of one
+// adopted generation acquired on the generation the publication adopted: each
+// enters the retirement ledger under the frozen generation key it was registered
+// by, so a later publication that supersedes this generation drains them through
+// the same release a published candidate's resources go through, and the plan in
+// effect names those registrations beside the resources of the adoption itself.
+func (r *Run) trackGenerationConsumers(ctx context.Context, gen state.Generation, built state.GenInstances) error {
+	resources := state.NewLeases()
+	refs := make([]state.LeaseRef, 0, len(built))
+	for _, consumer := range built {
+		if consumer.Resources.Resources == nil {
+			continue
+		}
+		refs = append(refs, resources.Register(generationLeaseKind, state.GenLeaseKey(gen, consumer.Name), consumer.Resources.Resources.ReleaseAll))
+	}
+	if len(refs) == 0 {
+		return nil
+	}
+	r.mu.Lock()
+	r.current.Leases = append(r.current.Leases, refs...)
+	r.mu.Unlock()
+	return r.publisher.TrackGeneration(ctx, gen, resources)
+}
+
+// installObserver installs the observation face one candidate generation
+// declares: the commit observer its bindings are built with reads it here, so a
+// generation that moved its telemetry section observes every fact through the
+// observer it declared.
+func (r *Run) installObserver(observer plugin.Observer) {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	r.observer = observer
+	r.mu.Unlock()
+}
+
+// observerInEffect reports the observation face of the generation in effect.
+func (r *Run) observerInEffect() plugin.Observer {
+	if r == nil {
+		return nil
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.observer
+}
+
+// installGovernor installs the governance face one candidate generation
+// declares: the admission wrap a generation's tools are registered under rules
+// each call over it.
+func (r *Run) installGovernor(policy plugin.Governor) {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	r.policy = policy
+	r.mu.Unlock()
+}
+
+// governorInEffect reports the governance face of the generation in effect.
+func (r *Run) governorInEffect() plugin.Governor {
+	if r == nil {
+		return nil
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.policy
 }
 
 // ExecState reports the retained state of one execution resource the ledger of
@@ -1453,20 +1846,114 @@ func (r *Run) SessionFacts(addr event.Address) []event.Event {
 
 // CommittedFacts reports how many facts this run holds: the counter the metrics
 // endpoint reports beside the turns and deliveries of the host.
+//
+// The control-plane records of the configuration chain are not part of it: a
+// generation retirement is filed under the configuration change type with the
+// frozen generation key and names no session chain, so it is held and readable
+// by identity while it never stands for a fact of the material this run carries.
 func (r *Run) CommittedFacts() int {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return len(r.facts)
+	r.countControlFactsLocked()
+	return len(r.facts) - r.controlFacts
 }
 
-// ReflectionGate reports the watermark gate the reflection face of this run
-// reads, or nil when the assembly was configured beside none. The gate is the
-// one anchor store the assembly built, so a reflection never opens a second
-// store over the same record.
+// countControlFactsLocked brings the control-plane count up to the commit order
+// the run holds: every fact of that order is judged once, and no trim releases a
+// control-plane record, so the count never has to be revised downwards. The
+// caller holds the run lock.
+func (r *Run) countControlFactsLocked() {
+	for _, key := range r.factOrder[r.controlScanned:] {
+		if evt, held := r.facts[key]; held && generationRetirementRecord(evt) {
+			r.controlFacts++
+		}
+	}
+	r.controlScanned = len(r.factOrder)
+}
+
+// ReflectionGate reports the watermark gate of the generation in effect: the
+// anchor store the reflection loop reads its consumed watermark from, and nil
+// beside a generation that enables no meditation.
 func (r *Run) ReflectionGate() meditation.WatermarkGate {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.watermark
+}
+
+// installWatermark installs the anchor store of one generation's reflection loop
+// as the gate the run reports and the diagnostics read.
+func (r *Run) installWatermark(gate meditation.WatermarkGate) {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	r.watermark = gate
+	r.mu.Unlock()
+}
+
+// generationObserver is the observation face one binding is built with: it
+// forwards every committed fact to the observer of the generation in effect, so
+// a dialect install that replaces the observation face reaches the binding
+// already in service instead of the one it was built under.
+type generationObserver struct {
+	run *Run
+}
+
+var _ plugin.Observer = generationObserver{}
+
+// Observe reports one committed fact to the observation face in effect. A run
+// beside no observer observes nothing and reports no failure.
+func (o generationObserver) Observe(ctx context.Context, evt event.Event) error {
+	face := o.run.observerInEffect()
+	if face == nil {
+		return nil
+	}
+	return face.Observe(ctx, evt)
+}
+
+// enableGenerationObservation wires the commit observer of every binding this
+// run builds: its observation face is read when a fact commits, so a host whose
+// observation consumer is mounted observes through the face of the generation in
+// effect, including a face a later install replaced. A run assembled beside no
+// face wires none: its bindings carry no commit observer.
+func (r *Run) enableGenerationObservation() {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	r.observationEnabled = true
+	r.mu.Unlock()
+}
+
+// observationWired reports whether the bindings of this run observe committed
+// facts through the face in effect.
+func (r *Run) observationWired() bool {
+	if r == nil {
+		return false
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.observationEnabled
+}
+
+// admissionRuling resolves the ruling of one call when the call is admitted: the
+// governance policy of the generation in effect rules it, and beside no policy
+// the approver this assembly was configured with rules it, or the strict grade
+// refuses it. The ruling is resolved per call, so a governance table a reload
+// installed rules the bindings already in service.
+func (r *Run) admissionRuling() task.Approver {
+	return func(ctx context.Context, name string, jsonArgs []byte) (task.Ruling, error) {
+		if policy := r.governorInEffect(); policy != nil {
+			return policyRuling(policy)(ctx, name, jsonArgs)
+		}
+		if r.approver != nil {
+			return r.approver(ctx, name, jsonArgs)
+		}
+		if r.enforcement == governance.EnforcementStrict {
+			return denyWithoutApprover(ctx, name, jsonArgs)
+		}
+		return task.Ruling{Kind: task.RulingRun}, nil
+	}
 }
 
 // ObservedEvents answers one query over the durable fact chain, independent
@@ -1754,18 +2241,19 @@ type seedReport struct {
 // seedReplay registers the mapped sequence every session chain already
 // committed, so a restarted run presents the material the tier holds to its
 // next request instead of reading a transcript no process carries any more.
-// The rebuild reads the whole chain once: a surviving original can sit deeper
-// in commit order than an old product event (an input that rolled into a later
-// segment), so the walk cannot stop at a fold boundary without an index of the
-// surviving positions - a stop rule is an open ruling, not a default.
-// The anchored rebuild is proven by the boot-replay anchors but stays off this
-// path until delivery recovery reads the durable chain: the live ledger this
-// full walk seeds is what that recovery reads today, and a sparse anchored
-// ledger doubles the settled facts on a second boot, as the reverted wiring
-// showed in TestKVDeliveryMigratedToFacts (12 settled facts versus 6),
-// TestEventIntegrityRestoreUse and the host suite. See ORCHESTRATION r48.
+// The rebuild starts from the newest fold anchor of each chain and replays only
+// the material committed past the checkpoint, so the decoded bodies of a boot do
+// not grow with the history the folds already summarised: a chain that never
+// folded, an anchor whose payload cannot be read and a store whose index carries
+// no frozen type each answer the full walk of that chain instead, and the
+// rebuilt state is the state the full walk answers. The delivery recovery reads
+// the durable chain rather than this ledger, so the material an anchor folded
+// away is still read by the obligation it settled.
+// Every chain the walk registered is established as a site of this instance, so
+// the active set and the unanswered rounds survive the restart instead of
+// resetting with the process.
 func (r *Run) seedReplay(ctx context.Context, tier *ledger.Tier) (map[int]int64, error) {
-	seeds, landed, _, err := r.seedFullReplay(ctx, tier)
+	seeds, report, err := r.seedAnchoredReplay(ctx, tier)
 	if err != nil {
 		return nil, err
 	}
@@ -1785,10 +2273,31 @@ func (r *Run) seedReplay(ctx context.Context, tier *ledger.Tier) (map[int]int64,
 			return nil, err
 		}
 	}
+	if err := r.seedSites(ctx, order); err != nil {
+		return nil, err
+	}
 	if len(order) > 0 {
 		r.attachNoticeFeed()
 	}
-	return landed, nil
+	return report.Landed, nil
+}
+
+// seedSites makes every session chain a restart rebuilt a site of this
+// instance, so the active set a cross-session delivery resolves against is the
+// set the chain holds rather than the set this process happened to open. The
+// establishment is the one door every address passes, whatever admitted it, so
+// a restarted run answers the same active addresses and the same unanswered
+// rounds the process before it answered.
+func (r *Run) seedSites(ctx context.Context, order []event.Address) error {
+	for _, addr := range order {
+		if !addr.IsComplete() {
+			continue
+		}
+		if err := r.establish(ctx, addr); err != nil {
+			return fmt.Errorf("tagent: establish the session site %v the chain holds: %w", addr, err)
+		}
+	}
+	return nil
 }
 
 // seedFullReplay replays every session chain from the beginning, the path a
@@ -1889,6 +2398,8 @@ type anchorSlot struct {
 }
 
 // seedAnchoredReplayWith runs the anchored rebuild under a test seam.
+//
+// - The survivors a checkpoint states are held to the same resident bound the full walk applies as it appends: a chain that declared no window keeps the recent material rather than every survivor the payload names.
 func (r *Run) seedAnchoredReplayWith(ctx context.Context, tier *ledger.Tier, seam anchoredSeam) (map[event.Address]*sessionSeed, seedReport, error) {
 	report := seedReport{}
 	var refs []anchorRef
@@ -1931,6 +2442,9 @@ func (r *Run) seedAnchoredReplayWith(ctx context.Context, tier *ledger.Tier, sea
 		}
 		return order[i].partition < order[j].partition
 	})
+	if err := r.seedConfigurationFacts(ctx, tier, refs, &report); err != nil {
+		return nil, report, err
+	}
 	seeds := map[event.Address]*sessionSeed{}
 	for _, slot := range order {
 		session := slot.session
@@ -1970,6 +2484,7 @@ func (r *Run) seedAnchoredReplayWith(ctx context.Context, tier *ledger.Tier, sea
 					if err != nil {
 						return nil, report, err
 					}
+					seed.projection = trimReplayProjection(ctx, seed.projection, seed.window)
 					r.compress.NoteProduct(product)
 					report.Anchors++
 					seeds[addr] = seed
@@ -2032,6 +2547,37 @@ func (r *Run) seedAnchoredReplayWith(ctx context.Context, tier *ledger.Tier, sea
 	return seeds, report, nil
 }
 
+// seedConfigurationFacts seeds the indexed facts that belong to no session
+// chain: the configuration chain records of the tier. The full walk seeds them
+// beside the session material, so a boot that rebuilds from anchors holds them
+// too — a configuration change a restart reads back by identity is one of them,
+// and its retention is the ledger a restarted run states about the configuration
+// it serves. The facts are seeded in commit order, and none of them may be
+// answered by the anchor of a session it never belonged to.
+func (r *Run) seedConfigurationFacts(ctx context.Context, tier *ledger.Tier, refs []anchorRef, report *seedReport) error {
+	for i := len(refs) - 1; i >= 0; i-- {
+		if refs[i].session != "" {
+			continue
+		}
+		stored, held, err := tier.Segments.GetEvent(ctx, refs[i].key)
+		if err != nil {
+			return err
+		}
+		if !held {
+			continue
+		}
+		report.Decoded++
+		body, err := memory.DecodeEventBody(stored.Body)
+		if err != nil {
+			return fmt.Errorf("tagent: replay the committed event %s: %w", stored.Key, err)
+		}
+		evt := body.Event()
+		evt.Key = stored.Key
+		r.seedFact(evt)
+	}
+	return nil
+}
+
 // foldWindowOfAgent answers the replay window one chain's agent declared.
 func (r *Run) foldWindowOfAgent(agent event.AgentID) FoldWindow {
 	r.mu.Lock()
@@ -2081,6 +2627,11 @@ func (r *Run) restoreSurvivors(ctx context.Context, tier *ledger.Tier, seed *ses
 // replayRef decodes one indexed event and applies it to a rebuilding seed:
 // the live ledger takes every fact, the projection takes every mapped entry,
 // and a product fact is left to the anchor that already stated its result.
+// replayRef replays one committed event of a chain into the seed the walk
+// carries and answers the compression product the event states beside the agent
+// that committed it.
+//
+// - A product reaches the compression ledger whichever side of the anchor it stands on, so a restarted run never executes a judgment a second time.
 func (r *Run) replayRef(ctx context.Context, tier *ledger.Tier, key event.EventID, seed *sessionSeed, report *seedReport) (event.CompressProduct, bool, event.AgentID, error) {
 	stored, held, err := tier.Segments.GetEvent(ctx, key)
 	if err != nil {
@@ -2099,6 +2650,9 @@ func (r *Run) replayRef(ctx context.Context, tier *ledger.Tier, key event.EventI
 	r.seedFact(evt)
 	if evt.Type == event.CompressProductType {
 		product, stated := compressProductOf(evt)
+		if stated {
+			r.compress.NoteProduct(product)
+		}
 		return product, stated, agentOf(evt), nil
 	}
 	if seed.window.MaxTokens == 0 {
@@ -2122,7 +2676,14 @@ func (r *Run) replayRef(ctx context.Context, tier *ledger.Tier, key event.EventI
 // resolves again, so the call-result pairing a request replays is recovered
 // from the facts alone — and a re-commit of an identity the tier already holds
 // is judged against the very fact it names instead of writing a second one.
+// A compression judgment the chain carries is handed to the consumer that
+// executes judgments, so the material a judgment names folds in this process
+// too; the products of the chain answer their judgments beside it, so a
+// judgment already executed is never executed twice.
 func (r *Run) seedFact(evt event.Event) {
+	if evt.Type == event.CompressRequestType {
+		r.compress.noteSeededJudgment(evt)
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.facts[evt.Key] = evt

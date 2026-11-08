@@ -65,6 +65,10 @@ type cursorToken struct {
 // both legs read through and the embedder called only for the current query's
 // candidates. A searcher beside no embedder answers through the keyword leg
 // alone, which is the byte-identical fallback the hybrid contract states.
+//
+// Both leg bounds are the one page bound of this package and the fusion runs
+// under its canonical rank constant: the retrieval rules are the mechanism's
+// own, so no deployment tunes them through a searcher.
 type StoreSearcher struct {
 	source      ReferenceSource
 	embedder    memory.Embedder
@@ -74,35 +78,20 @@ type StoreSearcher struct {
 }
 
 // NewStoreSearcher returns a searcher over source. embedder may name nothing,
-// and then the vector leg is empty for every query; the fusion behind the
-// searcher is the reciprocal rank fusion of this package.
+// and then the vector leg is empty for every query; both leg bounds are
+// DefaultLimit and the fusion behind the searcher is the reciprocal rank fusion
+// of this package under RRFRankConstant.
 func NewStoreSearcher(source ReferenceSource, embedder memory.Embedder) *StoreSearcher {
-	return &StoreSearcher{source: source, embedder: embedder, fusion: NewRRFFusion()}
+	return &StoreSearcher{
+		source:      source,
+		embedder:    embedder,
+		fusion:      NewRRFFusion(),
+		vectorTopK:  DefaultLimit,
+		keywordTopK: DefaultLimit,
+	}
 }
 
 var _ Searcher = (*StoreSearcher)(nil)
-
-// ErrRetrievalTuning reports retrieval tuning a deployment named outside the
-// range this searcher can honour: a negative leg bound or a negative rank
-// constant is refused by name instead of being coerced into a default.
-var ErrRetrievalTuning = errors.New("search: retrieval tuning carries a negative bound")
-
-// SetRetrievalTuning applies the leg bounds and the rank constant one
-// deployment declares. A zero bound keeps that leg unbounded, and a zero rank
-// constant keeps the canonical RRFRankConstant, so the zero value of the
-// tuning is exactly the searcher's historical behaviour. The call configures
-// the searcher before it serves queries and is not a per-query setting.
-func (s *StoreSearcher) SetRetrievalTuning(vectorTopK, keywordTopK, rrfK int) error {
-	if vectorTopK < 0 || keywordTopK < 0 || rrfK < 0 {
-		return ErrRetrievalTuning
-	}
-	s.vectorTopK = vectorTopK
-	s.keywordTopK = keywordTopK
-	if rrfK > 0 {
-		s.fusion = RRFFusion{K: rrfK}
-	}
-	return nil
-}
 
 // Search returns the reference set of q, ranked by the retrieval rule the
 // query runs under and cut to the page the query asks for.

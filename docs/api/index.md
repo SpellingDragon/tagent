@@ -60,6 +60,7 @@
 | `github.com/SpellingDragon/tagent/runtime/task/approval` | [github_com__SpellingDragon__tagent__runtime__task__approval.md](github_com__SpellingDragon__tagent__runtime__task__approval.md) |
 | `github.com/SpellingDragon/tagent/scripts/codetools` | [github_com__SpellingDragon__tagent__scripts__codetools.md](github_com__SpellingDragon__tagent__scripts__codetools.md) |
 | `github.com/SpellingDragon/tagent/scripts/comment_policy` | [github_com__SpellingDragon__tagent__scripts__comment_policy.md](github_com__SpellingDragon__tagent__scripts__comment_policy.md) |
+| `github.com/SpellingDragon/tagent/tests/integration` | [github_com__SpellingDragon__tagent__tests__integration.md](github_com__SpellingDragon__tagent__tests__integration.md) |
 | `github.com/SpellingDragon/tagent/tests/integration/acceptance` | [github_com__SpellingDragon__tagent__tests__integration__acceptance.md](github_com__SpellingDragon__tagent__tests__integration__acceptance.md) |
 | `github.com/SpellingDragon/tagent/tests/integration/capabilities` | [github_com__SpellingDragon__tagent__tests__integration__capabilities.md](github_com__SpellingDragon__tagent__tests__integration__capabilities.md) |
 | `github.com/SpellingDragon/tagent/tests/integration/config` | [github_com__SpellingDragon__tagent__tests__integration__config.md](github_com__SpellingDragon__tagent__tests__integration__config.md) |
@@ -67,6 +68,7 @@
 | `github.com/SpellingDragon/tagent/tests/integration/execution` | [github_com__SpellingDragon__tagent__tests__integration__execution.md](github_com__SpellingDragon__tagent__tests__integration__execution.md) |
 | `github.com/SpellingDragon/tagent/tests/integration/history` | [github_com__SpellingDragon__tagent__tests__integration__history.md](github_com__SpellingDragon__tagent__tests__integration__history.md) |
 | `github.com/SpellingDragon/tagent/tests/integration/host` | [github_com__SpellingDragon__tagent__tests__integration__host.md](github_com__SpellingDragon__tagent__tests__integration__host.md) |
+| `github.com/SpellingDragon/tagent/tests/integration/hotupdate` | [github_com__SpellingDragon__tagent__tests__integration__hotupdate.md](github_com__SpellingDragon__tagent__tests__integration__hotupdate.md) |
 | `github.com/SpellingDragon/tagent/tests/integration/inspection` | [github_com__SpellingDragon__tagent__tests__integration__inspection.md](github_com__SpellingDragon__tagent__tests__integration__inspection.md) |
 | `github.com/SpellingDragon/tagent/tests/integration/journey` | [github_com__SpellingDragon__tagent__tests__integration__journey.md](github_com__SpellingDragon__tagent__tests__integration__journey.md) |
 | `github.com/SpellingDragon/tagent/tests/integration/learning` | [github_com__SpellingDragon__tagent__tests__integration__learning.md](github_com__SpellingDragon__tagent__tests__integration__learning.md) |
@@ -81,4 +83,4 @@
 | `wechat-bot` | [wechat-bot.md](wechat-bot.md) |
 | `wechat-bot/cmd/bench-bridge` | [wechat-bot__cmd__bench-bridge.md](wechat-bot__cmd__bench-bridge.md) |
 
-包总数：76。文档覆盖由 scripts/comment_policy 单点判定。
+包总数：78。文档覆盖由 scripts/comment_policy 单点判定。

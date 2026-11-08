@@ -40,13 +40,13 @@ func segmentRecord(partition int, window, seq int64, key string, size int) Segme
 	}
 }
 
-// openLocalSegmentStore opens a segment store over a fresh local key-value view
-// rooted at root and answers both sides.
-func openLocalSegmentStore(t *testing.T, root string) (*FileSegmentStore, *localFileKV) {
+// openJournalSegmentStore opens a segment store over a fresh journal view rooted
+// at root and answers both sides.
+func openJournalSegmentStore(t *testing.T, root string) (*FileSegmentStore, *journalKV) {
 	t.Helper()
-	kv, err := openLocalFileKV(root)
+	kv, err := openJournalKV(root)
 	if err != nil {
-		t.Fatalf("open the local key-value view: %v", err)
+		t.Fatalf("open the journal view: %v", err)
 	}
 	store, err := newFileSegmentStore(kv)
 	if err != nil {
@@ -58,7 +58,7 @@ func openLocalSegmentStore(t *testing.T, root string) (*FileSegmentStore, *local
 // commitSegmentEvents commits count events of the given body size into one
 // partition window sequence, dropping the key-value resident set after each
 // commit so the check measures the segment cache rather than both layers.
-func commitSegmentEvents(t *testing.T, store *FileSegmentStore, kv *localFileKV, count int, bodySize int) []SegmentRecord {
+func commitSegmentEvents(t *testing.T, store *FileSegmentStore, kv *journalKV, count int, bodySize int) []SegmentRecord {
 	t.Helper()
 	ctx := context.Background()
 	records := make([]SegmentRecord, 0, count)
@@ -74,7 +74,7 @@ func commitSegmentEvents(t *testing.T, store *FileSegmentStore, kv *localFileKV,
 			EventKey:    rec.EventKey,
 			EventTime:   rec.EventTime,
 		})
-		dropLocalKVResident(kv)
+		dropJournalResident(kv)
 	}
 	return records
 }
@@ -99,7 +99,7 @@ func segmentRecordWithBody(rec SegmentRecord, size int) SegmentRecord {
 // 契约: docs/wiki/memory/memory-architecture.md#file-segment-store
 func TestSegmentCacheRespectsByteBudget(t *testing.T) {
 	root := t.TempDir()
-	store, kv := openLocalSegmentStore(t, root)
+	store, kv := openJournalSegmentStore(t, root)
 	before := heapInUse()
 	const events = 16
 	const bodySize = 1 << 20
@@ -130,7 +130,7 @@ func TestSegmentCacheRespectsByteBudget(t *testing.T) {
 // 契约: docs/wiki/memory/memory-architecture.md#file-segment-store
 func TestSegmentGetEventColdMiss(t *testing.T) {
 	root := t.TempDir()
-	store, kv := openLocalSegmentStore(t, root)
+	store, kv := openJournalSegmentStore(t, root)
 	records := commitSegmentEvents(t, store, kv, 6, 256<<10)
 	dropSegmentCache(store)
 	for at := range records {
@@ -149,19 +149,27 @@ func TestSegmentGetEventColdMiss(t *testing.T) {
 	}
 }
 
-// TestColdEnumerationScansEachShardOnce pins the cost of a cold enumeration.
-// - after the resident set is dropped, one full pass scans each shard once
+// TestColdEnumerationReadsEachEventOnce pins the cost of a cold enumeration.
+// - after the read cache and the resident set are dropped, one full pass reads each event body once
 // - every event keeps its body and its index order
 //
 // 契约: docs/wiki/memory/memory-architecture.md#file-segment-store
-func TestColdEnumerationScansEachShardOnce(t *testing.T) {
+func TestColdEnumerationReadsEachEventOnce(t *testing.T) {
 	root := t.TempDir()
-	store, kv := openLocalSegmentStore(t, root)
+	kv, err := openJournalKV(root)
+	if err != nil {
+		t.Fatalf("open the journal view: %v", err)
+	}
+	counted := &countingKV{inner: kv}
+	store, err := newFileSegmentStore(counted)
+	if err != nil {
+		t.Fatalf("open the segment store: %v", err)
+	}
 	const events = 24
 	records := commitSegmentEvents(t, store, kv, events, 1024)
 	dropSegmentCache(store)
-	dropLocalKVResident(kv)
-	kv.coldScans = 0
+	dropJournalResident(kv)
+	counted.reads = 0
 	got := make([]event.EventID, 0, events)
 	if err := store.EachEvent(context.Background(), func(stored StoredEvent) error {
 		got = append(got, stored.Key)
@@ -177,8 +185,8 @@ func TestColdEnumerationScansEachShardOnce(t *testing.T) {
 			t.Fatalf("event %d = %s, want %s", at, key, records[at].EventKey)
 		}
 	}
-	if kv.coldScans > 1 {
-		t.Fatalf("a cold enumeration scanned the shard %d times for %d events, want one scan per shard", kv.coldScans, events)
+	if counted.reads != events {
+		t.Fatalf("a cold enumeration read the store %d times for %d events, want one read per event", counted.reads, events)
 	}
 }
 
@@ -189,12 +197,12 @@ func TestColdEnumerationScansEachShardOnce(t *testing.T) {
 // 契约: docs/wiki/memory/memory-architecture.md#file-segment-store
 func TestSegmentCacheBoundedAndEquivalent(t *testing.T) {
 	root := t.TempDir()
-	store, kv := openLocalSegmentStore(t, root)
+	store, kv := openJournalSegmentStore(t, root)
 	const events = 12
 	const bodySize = 1 << 20
 	records := commitSegmentEvents(t, store, kv, events, bodySize)
 	dropSegmentCache(store)
-	dropLocalKVResident(kv)
+	dropJournalResident(kv)
 	for at := range records {
 		stored, held, err := store.GetEvent(context.Background(), records[at].EventKey)
 		if err != nil || !held {
@@ -213,14 +221,14 @@ func TestSegmentCacheBoundedAndEquivalent(t *testing.T) {
 // 契约: docs/wiki/memory/memory-architecture.md#file-segment-store
 func TestSegmentLoadLazyPeak(t *testing.T) {
 	root := t.TempDir()
-	store, kv := openLocalSegmentStore(t, root)
+	store, kv := openJournalSegmentStore(t, root)
 	records := commitSegmentEvents(t, store, kv, 12, 1<<20)
 	if err := store.Close(); err != nil {
 		t.Fatalf("close the store: %v", err)
 	}
 	store, kv = nil, nil
 	before := heapInUse()
-	reopened, reopenedKV := openLocalSegmentStore(t, root)
+	reopened, reopenedKV := openJournalSegmentStore(t, root)
 	after := heapInUse()
 	if growth := int64(after) - int64(before); growth > 4<<20 {
 		t.Fatalf("lazy startup heap growth = %d bytes over %d MiB of stored bodies, want the index/meta bound plus slack",
@@ -232,7 +240,7 @@ func TestSegmentLoadLazyPeak(t *testing.T) {
 	if _, held, err := reopened.GetEvent(context.Background(), records[0].EventKey); err != nil || !held {
 		t.Fatalf("first cold read after reopen = (held=%t, %v)", held, err)
 	}
-	dropLocalKVResident(reopenedKV)
+	dropJournalResident(reopenedKV)
 }
 
 // TestColdReadAfterRestart pins the exact read after a restart.
@@ -242,13 +250,13 @@ func TestSegmentLoadLazyPeak(t *testing.T) {
 // 契约: docs/wiki/memory/memory-architecture.md#file-segment-store
 func TestColdReadAfterRestart(t *testing.T) {
 	root := t.TempDir()
-	store, kv := openLocalSegmentStore(t, root)
+	store, kv := openJournalSegmentStore(t, root)
 	records := commitSegmentEvents(t, store, kv, 6, 128<<10)
 	if err := store.Close(); err != nil {
 		t.Fatalf("close the store: %v", err)
 	}
 	store, kv = nil, nil
-	reopened, _ := openLocalSegmentStore(t, root)
+	reopened, _ := openJournalSegmentStore(t, root)
 	for _, rec := range records {
 		stored, held, err := reopened.GetEvent(context.Background(), rec.EventKey)
 		if err != nil || !held {
@@ -267,12 +275,12 @@ func TestColdReadAfterRestart(t *testing.T) {
 // 契约: docs/wiki/memory/memory-architecture.md#file-segment-store
 func TestSegmentLazyLoadPreservesEventCount(t *testing.T) {
 	root := t.TempDir()
-	store, kv := openLocalSegmentStore(t, root)
+	store, kv := openJournalSegmentStore(t, root)
 	records := commitSegmentEvents(t, store, kv, 6, 64<<10)
 	if err := store.Close(); err != nil {
 		t.Fatalf("close the store: %v", err)
 	}
-	reopened, reopenedKV := openLocalSegmentStore(t, root)
+	reopened, reopenedKV := openJournalSegmentStore(t, root)
 	if got := reopened.EventCount(); got != len(records) {
 		t.Fatalf("reopened EventCount = %d, want %d", got, len(records))
 	}
@@ -282,7 +290,7 @@ func TestSegmentLazyLoadPreservesEventCount(t *testing.T) {
 	if got := reopened.EventCount(); got != len(records) {
 		t.Fatalf("count after a repeat commit = %d, want %d", got, len(records))
 	}
-	dropLocalKVResident(reopenedKV)
+	dropJournalResident(reopenedKV)
 }
 
 // TestSegmentDedupViaIndex pins the deduplication the resident index answers after the body left the cache.
@@ -292,10 +300,10 @@ func TestSegmentLazyLoadPreservesEventCount(t *testing.T) {
 // 契约: docs/wiki/memory/memory-architecture.md#file-segment-store
 func TestSegmentDedupViaIndex(t *testing.T) {
 	root := t.TempDir()
-	store, kv := openLocalSegmentStore(t, root)
+	store, kv := openJournalSegmentStore(t, root)
 	records := commitSegmentEvents(t, store, kv, 4, 256<<10)
 	dropSegmentCache(store)
-	dropLocalKVResident(kv)
+	dropJournalResident(kv)
 	if err := store.StoreEvent(context.Background(), segmentRecordWithBody(records[0], 256<<10)); err != nil {
 		t.Fatalf("repeat commit after eviction: %v", err)
 	}
@@ -308,14 +316,14 @@ func TestSegmentDedupViaIndex(t *testing.T) {
 	if err := store.StoreEvent(context.Background(), other); !errors.Is(err, ErrContentConflict) {
 		t.Fatalf("different bytes under one key = %v, want %v", err, ErrContentConflict)
 	}
-	reopened, reopenedKV := openLocalSegmentStore(t, root)
+	reopened, reopenedKV := openJournalSegmentStore(t, root)
 	if err := reopened.StoreEvent(context.Background(), segmentRecordWithBody(records[0], 256<<10)); err != nil {
 		t.Fatalf("repeat commit after restart: %v", err)
 	}
 	if got := reopened.EventCount(); got != len(records) {
 		t.Fatalf("count after a repeat commit on the reopened store = %d, want %d", got, len(records))
 	}
-	dropLocalKVResident(reopenedKV)
+	dropJournalResident(reopenedKV)
 }
 
 // TestSegmentColdReadFailureSurfaces pins the failure shape of a read whose body is gone.
@@ -325,12 +333,12 @@ func TestSegmentDedupViaIndex(t *testing.T) {
 // 契约: docs/wiki/memory/memory-architecture.md#file-segment-store
 func TestSegmentColdReadFailureSurfaces(t *testing.T) {
 	root := t.TempDir()
-	store, kv := openLocalSegmentStore(t, root)
+	store, kv := openJournalSegmentStore(t, root)
 	records := commitSegmentEvents(t, store, kv, 3, 256<<10)
 	dropSegmentCache(store)
-	dropLocalKVResident(kv)
+	dropJournalResident(kv)
 	evtKey := fmt.Sprintf("%d:evt:%d:%d", records[0].PartitionID, records[0].WindowTS, records[0].Seq)
-	if err := kv.kvCommit(context.Background(), kvBatch{deletes: []string{evtKey}}); err != nil {
+	if err := kv.Commit(context.Background(), Batch{Deletes: []string{evtKey}}); err != nil {
 		t.Fatalf("delete the persisted body: %v", err)
 	}
 	_, held, err := store.GetEvent(context.Background(), records[0].EventKey)
@@ -348,7 +356,7 @@ func TestSegmentColdReadFailureSurfaces(t *testing.T) {
 // 契约: docs/wiki/memory/memory-architecture.md#file-segment-store
 func TestSegmentLazyLoadPreservesConsumerContract(t *testing.T) {
 	root := t.TempDir()
-	store, kv := openLocalSegmentStore(t, root)
+	store, kv := openJournalSegmentStore(t, root)
 	records := commitSegmentEvents(t, store, kv, 5, 64<<10)
 	before, err := store.Events(context.Background())
 	if err != nil {
@@ -357,7 +365,7 @@ func TestSegmentLazyLoadPreservesConsumerContract(t *testing.T) {
 	if err := store.Close(); err != nil {
 		t.Fatalf("close the store: %v", err)
 	}
-	reopened, reopenedKV := openLocalSegmentStore(t, root)
+	reopened, reopenedKV := openJournalSegmentStore(t, root)
 	after, err := reopened.Events(context.Background())
 	if err != nil {
 		t.Fatalf("events after lazy load: %v", err)
@@ -385,7 +393,7 @@ func TestSegmentLazyLoadPreservesConsumerContract(t *testing.T) {
 	if len(streamed) != len(records) {
 		t.Fatalf("streamed events = %d, want %d", len(streamed), len(records))
 	}
-	dropLocalKVResident(reopenedKV)
+	dropJournalResident(reopenedKV)
 }
 
 // BenchmarkSegmentWindowRead measures one event read off a populated segment

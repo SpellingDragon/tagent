@@ -362,6 +362,8 @@ func (p *Publisher) Publish(ctx context.Context, cand Candidate) (PublishOutcome
 // sole entry, never a second publication path, and it refuses a candidate whose
 // fingerprint the record does not name, a recorded generation of zero and a
 // holder that already published a generation of its own.
+//
+// 契约: docs/wiki/platform/org-hot-reload.md#apply-record
 func (p *Publisher) Adopt(ctx context.Context, cand Candidate, record PublicationRecord) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -394,6 +396,30 @@ func (p *Publisher) Adopt(ctx context.Context, cand Candidate, record Publicatio
 	}
 	p.retire.track(record.Generation, cand.Resources)
 	return p.retire.sweep(ctx)
+}
+
+// TrackGeneration records the exclusive resources of one generation the restart
+// reconciliation rebuilt: they are freed once that generation retires, through
+// the same drain a published candidate's resources go through, and a generation
+// still in service keeps them. Nothing is published here — the adoption already
+// records the generation on the chain — and the drain runs at once so a
+// generation that never entered service releases what it acquired.
+//
+// 契约: docs/wiki/platform/org-hot-reload.md#apply-record
+func (p *Publisher) TrackGeneration(ctx context.Context, gen Generation, resources *Leases) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.retire.track(gen, resources)
+	return p.retire.sweep(ctx)
+}
+
+// ObserveRetirements attaches the record this entry writes once a generation's
+// exclusive resources are freed: the generation the drain retired, stated after
+// the release that freed it. The record never triggers a release.
+func (p *Publisher) ObserveRetirements(record func(context.Context, Generation) error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.retire.setRecord(record)
 }
 
 // Rollback re-publishes the previous full configuration through the same entry
@@ -536,7 +562,7 @@ func (p *Publisher) commitRecord(ctx context.Context, cand Candidate, source Gen
 	if window.at.IsZero() {
 		window.at = time.Now().UTC()
 	}
-	record = record.WithWindow(window.previous, window.previousFingerprint, window.models, window.dimensions, window.at)
+	record.window = window
 	if err := p.records.CommitPublication(ctx, record); err != nil {
 		return PublicationRecord{}, fmt.Errorf("state: commit the publication record: %w", err)
 	}

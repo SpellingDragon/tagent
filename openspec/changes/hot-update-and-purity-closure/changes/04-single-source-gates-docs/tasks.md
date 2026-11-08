@@ -1,0 +1,6 @@
+# Tasks: 04-single-source-gates-docs
+
+- [x] 4.1 常量单源机械连接（fuse/request_assembly 引用登记常量，反扫词根补全） —— 验证：`python3 scripts/gates/check_window_bounds.py` exit0 + `go test ./runtime/agent/ -run TestConstantsSingleSource -count=1`
+- [x] 4.2 gate 修洞：output_reserve 误判 + 列表式 agent 漏检（单一登记+解析器补分支） —— 验证：合成正样例 exit0 + 合成负样例 exit1（正反自测，命令入 run notes）
+- [x] 4.3 preflight 覆盖恢复或显式裁决 —— 验证：`bash scripts/preflight.sh` exit0 或裁决记录入 design（不静默收窄）；本单取第二条：design 决策 D4.3-1 + 种子覆盖恢复为 `for seed in 1 7 42`（`python3 -m unittest discover -s scripts/gates -p 'test_check_runtime_workflow*.py'` 61 tests OK，含"preflight 必须跑六分片"锚）
+- [x] 4.4 文档脱节清偿（wechat README/tool-architecture/event-flow/tmux-action/bounded-trajectory spec/host_capture 注释） —— 验证：doc-sync gate exit0 + `grep -rE "vector_top_k|rrf_k|capture_budget_mb" examples/wechat-bot/README.md docs/wiki/tool/ openspec/specs/bounded-trajectory-capture/` 零残留；实测：`go run ./scripts/codetools doc-refs docs/wiki docs/*.md` exit0、`python3 scripts/gates/check_doc_links.py` 0 error、`bash scripts/gates/check-openspec.sh` 主 spec 全绿、上述 grep 无命中（exit 1）。`check_doc_budget` 与 `gen_godoc --check` 仍红，实测属兄弟单在途（本单文档净增 1 行；assembly 生成页差分行全为 host_reload/host_delivery），已随战报②上报编排者

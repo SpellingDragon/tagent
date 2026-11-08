@@ -3,8 +3,8 @@ package assembly
 import (
 	"bytes"
 	"errors"
-	"os"
-	"path/filepath"
+	"fmt"
+	"strings"
 	"time"
 
 	"context"
@@ -695,24 +695,154 @@ func TestMechanismFactNeverMapsToARequest(t *testing.T) {
 	}
 }
 
+// faultyEngine is the port decorator these checks inject failures through: it
+// wraps an opened atomic store and refuses a read, refuses a commit or drops the
+// puts the check names, so the injection sits at the store seam instead of in a
+// file layout and runs unchanged over any engine.
+type faultyEngine struct {
+	inner ledger.AtomicStore
+	// failRead answers the failure of one read, or nil to let it through.
+	failRead func(fetch ledger.Fetch) error
+	// failCommit answers the failure of one commit, or nil to let it through.
+	failCommit func(batch ledger.Batch) error
+	// dropPut reports whether one put is dropped from the batch before the
+	// wrapped engine sees it.
+	dropPut func(key string) bool
+}
+
+// Read passes the read through the injected fault to the wrapped engine.
+func (s *faultyEngine) Read(ctx context.Context, fetch ledger.Fetch) ([]ledger.Pair, error) {
+	if s.failRead != nil {
+		if err := s.failRead(fetch); err != nil {
+			return nil, err
+		}
+	}
+	return s.inner.Read(ctx, fetch)
+}
+
+// Keys enumerates the wrapped engine's keys.
+func (s *faultyEngine) Keys(ctx context.Context, prefix string) ([]string, error) {
+	return s.inner.Keys(ctx, prefix)
+}
+
+// Namespaces enumerates the wrapped engine's namespaces.
+func (s *faultyEngine) Namespaces(ctx context.Context) ([]string, error) {
+	return s.inner.Namespaces(ctx)
+}
+
+// Commit passes the batch through the injected faults to the wrapped engine,
+// dropping the puts the check names.
+func (s *faultyEngine) Commit(ctx context.Context, batch ledger.Batch) error {
+	if s.failCommit != nil {
+		if err := s.failCommit(batch); err != nil {
+			return err
+		}
+	}
+	if s.dropPut == nil {
+		return s.inner.Commit(ctx, batch)
+	}
+	kept := ledger.Batch{Deletes: batch.Deletes}
+	for _, put := range batch.Puts {
+		if s.dropPut(put.Key) {
+			continue
+		}
+		kept.Puts = append(kept.Puts, put)
+	}
+	return s.inner.Commit(ctx, kept)
+}
+
+// engineOverRoot opens the journal engine over root and hands back the
+// decorator a check injects through, beside the config that opens a tier over
+// it.
+func engineOverRoot(t *testing.T, root string) (*faultyEngine, ledger.StorageConfig) {
+	t.Helper()
+	cfg := ledger.StorageConfig{Type: ledger.StorageJournal, Root: root}
+	inner, err := ledger.OpenAtomicStore(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("open the storage engine over %s: %v", root, err)
+	}
+	faulty := &faultyEngine{inner: inner}
+	cfg.Engine = faulty
+	return faulty, cfg
+}
+
 // TestBootDoesNotReadOriginalShards pins boot isolation from original bodies.
 //
 // 契约: docs/wiki/memory/memory-architecture.md#read-paths
 func TestBootDoesNotReadOriginalShards(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
-	run := windowChainRun(t, ctx, WithStorage(ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: root}))
+	faulty, cfg := engineOverRoot(t, root)
+	run := windowChainRun(t, ctx, WithStorage(cfg))
 	addr := event.Address{AgentID: "agent-a", SessionID: "session-original-lazy"}
 	commitWindowTurns(t, ctx, run, addr, 1)
 	key := event.EventID(timeStampKey(time.Date(2026, 11, 6, 12, 0, 0, 0, time.UTC), addr, 0, 0))
 	if got := run.tier.Originals.Get(ctx, key); got.Outcome != ledger.RecallFound {
 		t.Fatalf("the seed original was not committed: %+v", got)
 	}
-	if err := os.WriteFile(filepath.Join(root, "kv", "blob", "snapshot.json"), []byte("not-json"), 0o600); err != nil {
-		t.Fatalf("corrupt the original blob shard: %v", err)
+	faulty.failRead = func(fetch ledger.Fetch) error {
+		if strings.HasPrefix(fetch.Key, "blob:") || strings.HasPrefix(fetch.Prefix, "blob:") || fetch.Key == "" && fetch.Prefix == "" {
+			return fmt.Errorf("%w: injected on the original body read", ledger.ErrSnapshotCorrupt)
+		}
+		return nil
 	}
-	reopened := windowChainRun(t, ctx, WithStorage(ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: root}))
+	reopened := windowChainRun(t, ctx, WithStorage(cfg))
 	if got := reopened.tier.Originals.Get(ctx, key); got.Outcome != ledger.RecallFailed || !errors.Is(got.Err, ledger.ErrSnapshotCorrupt) {
 		t.Fatalf("the first original read after boot = %+v, want the named corrupt-snapshot failure", got)
+	}
+}
+
+// TestBootOverJournalTier pins the journal tier at the production boot entry.
+//   - A run assembled over the journal tier commits its session chain, its original bodies and its durable task facts
+//   - a second assembly over the same root reads the chain back
+//   - The projection the reopened run serves is the projection a full walk of the same chain rebuilds, entry for entry
+//   - nothing the fold summarised is dropped by the replay the boot runs
+//
+// 契约: docs/wiki/memory/memory-architecture.md#store-instance-sharing
+func TestBootOverJournalTier(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	storage := func() Option {
+		return WithStorage(ledger.StorageConfig{Type: ledger.StorageJournal, Root: root})
+	}
+	addr := event.Address{AgentID: "agent-a", SessionID: "session-journal-tier"}
+	first := windowChainRun(t, ctx, storage())
+	commitWindowTurns(t, ctx, first, addr, 1)
+	key := event.EventID(timeStampKey(time.Date(2026, 11, 6, 12, 0, 0, 0, time.UTC), addr, 0, 0))
+	if got := first.tier.Originals.Get(ctx, key); got.Outcome != ledger.RecallFound {
+		t.Fatalf("the journal tier did not commit the seed original: %+v", got)
+	}
+	committed := len(first.SessionFacts(addr))
+	if committed == 0 {
+		t.Fatal("the journal tier committed no session fact")
+	}
+
+	restarted := windowChainRun(t, ctx, storage())
+	if got := restarted.tier.Originals.Get(ctx, key); got.Outcome != ledger.RecallFound {
+		t.Fatalf("the reopened journal tier answered the seed original as %+v, want the committed body", got)
+	}
+	if len(restarted.facts) == 0 {
+		t.Fatal("the reopened journal tier restored no session fact")
+	}
+	served, carried := restarted.replays[addr]
+	if !carried {
+		t.Fatalf("the reopened run registered no sequence for %v", addr)
+	}
+	full := windowChainRun(t, ctx, storage())
+	fullSeeds, _, _, err := full.seedFullReplay(ctx, full.tier)
+	if err != nil {
+		t.Fatalf("replay the whole chain: %v", err)
+	}
+	want, carried := fullSeeds[addr]
+	if !carried {
+		t.Fatalf("the full walk registered no projection for %v", addr)
+	}
+	gotRendered := replay.RenderProjection(served.projection.Entries())
+	wantRendered := replay.RenderProjection(want.projection.Entries())
+	if !bytes.Equal(gotRendered, wantRendered) {
+		t.Fatalf("the reopened run renders %q, want the full walk of the same chain %q", gotRendered, wantRendered)
+	}
+	if len(served.projection.Entries()) == 0 {
+		t.Fatal("the reopened run served an empty projection beside a committed chain")
 	}
 }

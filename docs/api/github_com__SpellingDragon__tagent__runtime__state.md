@@ -25,6 +25,13 @@ a newer file. - Skill content is read through the framework skill repository
 behind it); this face is only the request-boundary glue around it, with no skill
 scanner and no parsing copied here.
 
+The generation-scoped consumer registry of one assembly: a Boot-once consumer
+registers the builder of its per-generation instance here, and the publication
+path drives the registry without naming any consumer. The registry owns
+construction order and the fail-closed release of a candidate that stops part
+way; the whole-generation switch, the borrow drain and the retirement release
+stay with the publication entry and its ledger.
+
 Package state is the runtime's state owner: it establishes the agent and session
 sites an explicit address names, admits a prepared plan as the next effective
 binding generation, closes a session's own side, and accepts the notifications a
@@ -248,6 +255,11 @@ func ArchiveDigest(root string) (string, error)
     one canonical digest text over each file's relative path, byte length and
     content digest, so any added, removed or altered byte changes the digest and
     a read-only pass over the tree can prove the source held still.
+
+func GenLeaseKey(gen Generation, consumer string) string
+    GenLeaseKey names the candidate-exclusive registration of one
+    generation-scoped consumer: the generation the candidate publishes beside
+    the consumer's registered name, in the frozen form "gen:<id>:<consumer>".
 
 func MigrateArchive(ctx context.Context, root string, tasks ArchiveTaskWriter, originals OriginalMigrator) (MigrationReport, error)
     MigrateArchive imports one old archive into the new path under read-only
@@ -830,6 +842,88 @@ const (
 	// rather than settled by guess.
 	GapUnrecoverableTask GapKind = "unrecoverable-task"
 )
+type GenBuilder func(ctx context.Context, decl *config.Declaration, gen Generation) (GenResources, error)
+    GenBuilder constructs the per-generation instance of one registered consumer
+    from the declaration the candidate generation publishes. The builder
+    installs the instance as the face the candidate's binding construction
+    reads, and answers the exclusive resources the construction acquired.
+    A builder that fails leaves the face it serves as it was.
+
+type GenBuilt struct {
+	// Name is the consumer's registered name.
+	Name string
+	// Resources is what the consumer's builder answered.
+	Resources GenResources
+}
+    GenBuilt is one constructed consumer of one candidate generation: its
+    registered name beside the resources its construction answered.
+
+type GenInstances []GenBuilt
+    GenInstances is the constructed consumer set of one candidate generation,
+    in registration order.
+
+func (g GenInstances) Release(ctx context.Context) error
+    Release frees the exclusive resources of one built candidate generation in
+    reverse registration order and once each, joining the failures it finds.
+    It is the release a preparation that stopped after the consumers were built
+    runs; a candidate that reached the publication entry is released by the
+    entry's own candidate ledger instead.
+
+func (g GenInstances) Restore()
+    Restore puts the face each built consumer installed back, in reverse
+    registration order. The publication path calls it when the candidate
+    left without taking effect; the resources themselves are released by the
+    candidate ledger or by Release.
+
+type GenRegistration struct {
+	// Name names the consumer. The candidate-exclusive registration of its
+	// instance is keyed by GenLeaseKey under this name.
+	Name string
+	// BuildGen constructs the instance of one candidate generation.
+	BuildGen GenBuilder
+}
+    GenRegistration is one consumer's mount on the generation-scoped registry:
+    the name its exclusive registration is keyed by beside the builder that
+    constructs its per-generation instance.
+
+type GenRegistry struct {
+	// Has unexported fields.
+}
+    GenRegistry is the generation-scoped consumer registry of one assembly.
+    A consumer mounts itself through the option that wires it; the publication
+    path drives the registry and never names a consumer.
+
+func NewGenRegistry() *GenRegistry
+    NewGenRegistry returns an empty generation-scoped consumer registry.
+
+func (g *GenRegistry) Build(ctx context.Context, decl *config.Declaration, gen Generation) (GenInstances, error)
+    Build constructs the per-generation instances of every registered consumer
+    in registration order. A builder that fails refuses the whole candidate
+    generation: the instances built before it are released and their faces
+    restored, and the failure is the returned cause. The faces of a returned set
+    stay installed until the publication path restores them.
+
+func (g *GenRegistry) Register(reg GenRegistration) error
+    Register mounts one consumer's builder. An empty name, a missing builder or
+    a name already mounted refuses the registration by name, so a wiring mistake
+    stops the assembly instead of silently dropping a consumer.
+
+type GenResources struct {
+	// Resources carries the exclusive resources the construction acquired. Its
+	// ReleaseAll frees them once each when the candidate is refused or the
+	// generation retires, and never touches the shared faces or the resources
+	// already in service. A consumer that acquires nothing exclusive carries
+	// nil and is registered nowhere.
+	Resources *Leases
+	// Restore puts the face the previous generation served back. The
+	// publication path calls it when the candidate did not take effect; a
+	// candidate that published keeps its face installed.
+	Restore func()
+}
+    GenResources is what one per-generation consumer construction answers:
+    the ledger of the exclusive resources it acquired beside the restore that
+    puts the previous face back when the candidate leaves without taking effect.
+
 type Generation uint64
 
     Generation is the publication identity of one effective binding generation:
@@ -1450,6 +1544,11 @@ func (p *Publisher) Current() Publication
     it published and the baseline it was admitted against. The zero publication
     stands while nothing has been published.
 
+func (p *Publisher) ObserveRetirements(record func(context.Context, Generation) error)
+    ObserveRetirements attaches the record this entry writes once a generation's
+    exclusive resources are freed: the generation the drain retired, stated
+    after the release that freed it. The record never triggers a release.
+
 func (p *Publisher) Publish(ctx context.Context, cand Candidate) (PublishOutcome, error)
     Publish runs one prepared candidate through the sole publication entry
     and reports how the attempt took effect. The candidate records the
@@ -1476,6 +1575,14 @@ func (p *Publisher) RollbackConfig() (OrgPlan, bool)
     and whether one exists. The caller rebuilds it beside freshly constructed
     live objects and submits that candidate through Rollback; the source stays
     the same across consecutive rollbacks.
+
+func (p *Publisher) TrackGeneration(ctx context.Context, gen Generation, resources *Leases) error
+    TrackGeneration records the exclusive resources of one generation the
+    restart reconciliation rebuilt: they are freed once that generation retires,
+    through the same drain a published candidate's resources go through, and
+    a generation still in service keeps them. Nothing is published here — the
+    adoption already records the generation on the chain — and the drain runs at
+    once so a generation that never entered service releases what it acquired.
 
 type Rejection struct {
 	Notice   task.Notice      `json:"notice"`

@@ -334,6 +334,34 @@ func (c *CompressionConsumer) noteAnswered(request event.EventID) {
 	c.answered[request] = struct{}{}
 }
 
+// noteSeededJudgment notes one compression judgment the chain already carries,
+// so a restarted run executes the judgment the process before it filed instead
+// of waiting for the material to be judged a second time: the judgment is a fact
+// of the chain, and the execution is owed by the judgment whichever process
+// reads it. A judgment a product already answers executes nothing, because the
+// rebuild notes every product of the chain beside its requests.
+//
+// The fact states the identity and the reason the judgment is quoted by; the
+// producer and the subject were folded into the content-addressed identity when
+// the judgment was filed, and the execution matches on that identity alone, so
+// the reconstruction carries what the chain holds and invents none of what it
+// does not. A fact of another frozen type, and a judgment naming no session
+// chain, are not judgments of this consumer.
+func (c *CompressionConsumer) noteSeededJudgment(evt event.Event) {
+	if c == nil || evt.Type != event.CompressRequestType || evt.Key == "" {
+		return
+	}
+	session := sessionOf(evt)
+	if session == "" {
+		return
+	}
+	c.Record(session, event.CompressRequest{
+		ID:     evt.Key,
+		Reason: evt.Meta[event.MetaKeyEventSummary],
+		At:     evt.Timestamp,
+	})
+}
+
 // FileCompressProduct files one execution result on the chain of the session
 // whose material was folded.
 func (s ageFoldSessions) FileCompressProduct(ctx context.Context, session event.SessionID, product event.CompressProduct) error {

@@ -12,6 +12,7 @@ import (
 	"github.com/SpellingDragon/tagent/memory/replay"
 	"github.com/SpellingDragon/tagent/memory/search"
 	"github.com/SpellingDragon/tagent/runtime/state"
+	"github.com/SpellingDragon/tagent/tool/recall"
 )
 
 // 契约: docs/wiki/platform/platform-subsystems.md#composition-root
@@ -150,48 +151,118 @@ func queryPartitionsOf(opts memory.QueryOptions) map[int]bool {
 	return partitions
 }
 
-// Event returns one event reference directly from the chain.
+// ChainFailure names why the chain answers no readable event for one key: the
+// failure its durable read returned, or the empty nil when it holds a readable
+// event. A key the chain holds no event for answers nil, because absence is a
+// legitimate answer here — a body that cannot be read or decoded is corruption
+// and never stands in for it.
+func (s *tierQuerySource) ChainFailure(key event.EventID) error {
+	_, _, err := s.eventReference(key)
+	return err
+}
+
+// Event returns one event reference directly from the chain. The declared face
+// answers held-or-not; the failure behind a not-held answer is named by
+// ChainFailure instead of being folded into that answer.
 func (s *tierQuerySource) Event(key event.EventID) (memory.EventReference, bool) {
+	reference, held, _ := s.eventReference(key)
+	return reference, held
+}
+
+// eventReference reads one event reference beside the failure that refused it.
+func (s *tierQuerySource) eventReference(key event.EventID) (memory.EventReference, bool, error) {
 	stored, held, err := s.segments.GetEvent(context.Background(), key)
-	if err != nil || !held {
-		return memory.EventReference{}, false
+	if err != nil {
+		return memory.EventReference{}, false, err
 	}
-	record, _, held, err := recordOfTierEvent(stored)
-	if err != nil || !held {
-		return memory.EventReference{}, false
+	if !held {
+		return memory.EventReference{}, false, nil
 	}
-	return record.Reference(), true
+	record, _, admitted, err := recordOfTierEvent(stored)
+	if err != nil {
+		return memory.EventReference{}, false, err
+	}
+	if !admitted {
+		return memory.EventReference{}, false, nil
+	}
+	return record.Reference(), true, nil
 }
 
 // Text returns the original content of one event for query-time embedding,
-// falling back to its summary when the content is empty.
+// falling back to its summary when the content is empty. The declared face
+// answers held-or-not on the same terms as Event.
 func (s *tierQuerySource) Text(key event.EventID) (string, bool) {
+	text, held, _ := s.originalText(key)
+	return text, held
+}
+
+// originalText reads the original content of one event beside the failure that
+// refused it.
+func (s *tierQuerySource) originalText(key event.EventID) (string, bool, error) {
 	stored, held, err := s.segments.GetEvent(context.Background(), key)
-	if err != nil || !held {
-		return "", false
+	if err != nil {
+		return "", false, err
+	}
+	if !held {
+		return "", false, nil
 	}
 	body, err := memory.DecodeEventBody(stored.Body)
-	if err != nil || body.Key != key || event.CompressionMechanism(body.Type) {
-		return "", false
+	if err != nil {
+		return "", false, err
+	}
+	if body.Key != key {
+		return "", false, memory.ErrBodyKeyMismatch
+	}
+	if event.CompressionMechanism(body.Type) {
+		return "", false, nil
 	}
 	text := body.Message.Content
 	if text == "" {
 		text = body.Meta[event.MetaKeyEventSummary]
 	}
-	return text, true
+	return text, true, nil
 }
 
-// Reference returns one original reference directly from the chain.
+// Reference returns one original reference directly from the chain. The
+// declared face answers held-or-not on the same terms as Event.
 func (s *tierQuerySource) Reference(key event.EventID) (ledger.OriginalRef, bool) {
+	reference, held, _ := s.originalReference(key)
+	return reference, held
+}
+
+// originalReference reads one original reference beside the failure that
+// refused it.
+func (s *tierQuerySource) originalReference(key event.EventID) (ledger.OriginalRef, bool, error) {
 	stored, held, err := s.segments.GetEvent(context.Background(), key)
-	if err != nil || !held {
-		return ledger.OriginalRef{}, false
+	if err != nil {
+		return ledger.OriginalRef{}, false, err
 	}
-	_, ref, held, err := recordOfTierEvent(stored)
-	if err != nil || !held {
-		return ledger.OriginalRef{}, false
+	if !held {
+		return ledger.OriginalRef{}, false, nil
 	}
-	return ref, true
+	_, reference, admitted, err := recordOfTierEvent(stored)
+	if err != nil {
+		return ledger.OriginalRef{}, false, err
+	}
+	if !admitted {
+		return ledger.OriginalRef{}, false, nil
+	}
+	return reference, true, nil
+}
+
+// ChainFailure names why the bound table answers no readable event for one key,
+// so a corruption reaches the exact read instead of being answered as an absent
+// event. The port forwards the face its bound table carries and answers the
+// empty nil when that table names no failures.
+func (p *RecallPort) ChainFailure(key event.EventID) error {
+	p.mu.RLock()
+	table := p.reads.Table
+	p.mu.RUnlock()
+	namer, ok := table.(recall.ChainFailureNamer)
+	if !ok {
+		return nil
+	}
+	return namer.ChainFailure(key)
 }
 
 // GetParent answers the preceding non-synthetic fact on the same chain. The

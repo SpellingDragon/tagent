@@ -206,8 +206,8 @@ func TestProjectionReplayAndBudget(t *testing.T) {
 		if projB.Len() != projA.Len() {
 			t.Fatalf("rebuilt entries = %d, want %d (snapshot refs and the whole tail)", projB.Len(), projA.Len())
 		}
-		if projB.FullBoundary() != event.EventID("k-0004") || report.FullBoundary != event.EventID("k-0004") {
-			t.Fatalf("full boundary = %q/%q, want the payload value k-0004", projB.FullBoundary(), report.FullBoundary)
+		if report.FullBoundary != event.EventID("k-0004") {
+			t.Fatalf("full boundary = %q, want the payload value k-0004", report.FullBoundary)
 		}
 		meditation := map[event.EventID]bool{}
 		for _, key := range projB.ConsumedKeys() {

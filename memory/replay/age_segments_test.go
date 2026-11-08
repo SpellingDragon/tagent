@@ -3,6 +3,7 @@ package replay
 import (
 	"context"
 	"fmt"
+	"reflect"
 	"regexp"
 	"slices"
 	"strings"
@@ -957,4 +958,138 @@ func TestFoldProvenanceConsumerPath(t *testing.T) {
 	if !generations[string(before)] || !generations[string(after)] {
 		t.Fatalf("assembled generations = %v, want the replayed %q beside the latest %q", generations, before, after)
 	}
+}
+
+// TestSegmentLegacyMarker pins the diagnostic mark a segment carries when the output that closed it recorded no readable input relation.
+//   - a segment closed by an output that names its inputs carries no mark
+//   - an output without the relation marks its segment and keeps the chain-order cut, so the historical chain still reads positionally
+//   - an unreadable relation is no relation and marks the same way
+//   - a segment still in progress is never marked, because no output closed it
+func TestSegmentLegacyMarker(t *testing.T) {
+	legacyInput := func(key string) ProjectionEntry {
+		return ProjectionEntry{Key: event.EventID(key), Type: event.TypeExternalInput, Summary: "input " + key, Content: "用户输入 " + key + "。", Time: ageBase}
+	}
+	legacyOutput := func(key, relation string) ProjectionEntry {
+		entry := ProjectionEntry{Key: event.EventID(key), Type: event.TypeAgentOutput, Summary: "output " + key, Content: "回答 " + key + "。", Time: ageBase}
+		if relation == "" {
+			return entry
+		}
+		return WithInputEvents(entry, relation)
+	}
+	marksOf := func(segments []Segment) []bool {
+		marks := make([]bool, 0, len(segments))
+		for _, segment := range segments {
+			marks = append(marks, segment.Legacy())
+		}
+		return marks
+	}
+
+	t.Run("the relation clears the mark", func(t *testing.T) {
+		entries := []ProjectionEntry{
+			legacyInput("i-1"), legacyInput("i-2"), legacyOutput("a", `["i-1","i-2"]`),
+		}
+		segments := SegmentsOf(entries, DefaultAgeKeepRecent)
+		if len(segments) != 1 {
+			t.Fatalf("segments = %d, want the one the output closed", len(segments))
+		}
+		if segments[0].Legacy() {
+			t.Fatalf("segment = %+v answered legacy, want the mark cleared by the relation the output recorded", segments[0])
+		}
+	})
+
+	t.Run("an output without the relation marks its segment", func(t *testing.T) {
+		entries := []ProjectionEntry{
+			legacyInput("i-1"), legacyOutput("a", ""),
+			legacyInput("i-2"), legacyOutput("b", ""),
+		}
+		segments := SegmentsOf(entries, DefaultAgeKeepRecent)
+		if got := marksOf(segments); !slices.Equal(got, []bool{true, true}) {
+			t.Fatalf("marks = %v, want both segments marked legacy", got)
+		}
+		if len(segments) != 2 {
+			t.Fatalf("segments = %d, want the chain-order cut of the two turns", len(segments))
+		}
+		for at, segment := range segments {
+			if !segment.Complete {
+				t.Fatalf("segment %d = %+v, want the output to close it", at, segment)
+			}
+		}
+	})
+
+	t.Run("an unreadable relation marks the same way", func(t *testing.T) {
+		for name, relation := range map[string]string{
+			"empty array":      "[]",
+			"empty identities": `["",""]`,
+			"null":             "null",
+			"not a list":       `"i-1"`,
+			"unparseable":      `{"input_events":`,
+		} {
+			t.Run(name, func(t *testing.T) {
+				entries := []ProjectionEntry{legacyInput("i-1"), legacyOutput("a", relation)}
+				segments := SegmentsOf(entries, DefaultAgeKeepRecent)
+				if len(segments) != 1 || !segments[0].Legacy() {
+					t.Fatalf("segments = %+v, want the one closed segment marked legacy by %q", segments, relation)
+				}
+			})
+		}
+	})
+
+	t.Run("a segment in progress is never marked", func(t *testing.T) {
+		entries := []ProjectionEntry{
+			legacyInput("i-1"), legacyOutput("a", ""),
+			legacyInput("i-2"),
+		}
+		segments := SegmentsOf(entries, DefaultAgeKeepRecent)
+		if len(segments) != 2 {
+			t.Fatalf("segments = %d, want the closed turn beside the tail in progress", len(segments))
+		}
+		if !segments[0].Legacy() {
+			t.Fatalf("closed segment = %+v, want the mark of its output", segments[0])
+		}
+		if segments[1].Complete || segments[1].Legacy() {
+			t.Fatalf("tail segment = %+v, want a segment in progress carrying no mark", segments[1])
+		}
+	})
+}
+
+// TestProjectionEntryFaceUnchanged pins the public face of one projection entry.
+//   - the diagnostic mark is read from the segment, never from the entry, so the entry a consumer reads stays the five fields of a projection record
+//   - the entry exports exactly the five fields of a projection record, in order
+//   - the entry exposes no method for that mark, so a consumer cannot read it off the entry
+//   - the field check rejects a widened record, so the pin is not satisfied by any type it is handed
+func TestProjectionEntryFaceUnchanged(t *testing.T) {
+	exportedNames := func(typ reflect.Type) []string {
+		names := make([]string, 0, typ.NumField())
+		for at := 0; at < typ.NumField(); at++ {
+			if field := typ.Field(at); field.PkgPath == "" {
+				names = append(names, field.Name)
+			}
+		}
+		return names
+	}
+	want := []string{"Key", "Type", "Summary", "Content", "Time"}
+	typ := reflect.TypeOf(ProjectionEntry{})
+	if exported := exportedNames(typ); !slices.Equal(exported, want) {
+		t.Fatalf("ProjectionEntry exports %v, want the five fields of a projection record %v", exported, want)
+	}
+	for at := 0; at < typ.NumMethod(); at++ {
+		if name := typ.Method(at).Name; name == "Legacy" {
+			t.Fatalf("ProjectionEntry exposes %q, want the legacy mark read from the segment alone", name)
+		}
+	}
+	if widened := exportedNames(reflect.TypeOf(widenedProbe{})); slices.Equal(widened, want) {
+		t.Fatalf("a record exporting six fields answered %v, want the face check to reject it", widened)
+	}
+}
+
+// widenedProbe is a projection-record stand-in carrying the sixth exported field
+// the face check must reject, so the check never passes by reading no field at
+// all.
+type widenedProbe struct {
+	Key     string
+	Type    string
+	Summary string
+	Content string
+	Time    time.Time
+	Legacy  bool
 }

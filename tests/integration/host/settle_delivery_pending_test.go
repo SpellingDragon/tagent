@@ -12,9 +12,6 @@ package host
 import (
 	"context"
 	"fmt"
-	"os"
-	"path/filepath"
-	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -23,7 +20,7 @@ import (
 	"github.com/SpellingDragon/tagent/api/event"
 	"github.com/SpellingDragon/tagent/api/model"
 	"github.com/SpellingDragon/tagent/assembly"
-	"github.com/SpellingDragon/tagent/memory"
+	"github.com/SpellingDragon/tagent/memory/ledger"
 	"github.com/SpellingDragon/tagent/runtime/task"
 )
 
@@ -56,7 +53,7 @@ const settlePendingQuiet = time.Second
 //   - negative (recovery): once the refusal is lifted, the offer the close makes re-writes the settle fact exactly once
 //   - the follow-up turn the notification owes answers exactly once
 //   - consumer: the settle rides the formal host assembly: the delegated round of an ended admission and the unattended settle delivery
-//   - the refusal is injected through the storage tier the run commits its facts under, never by calling the delivery internals
+//   - the refusal is injected through the storage engine the run commits its facts into, never by calling the delivery internals
 //
 // 契约: docs/wiki/reliability/durable-delivery.md#envelope-states
 func TestSettleDeliveryCommitFailureStaysPending(t *testing.T) {
@@ -70,6 +67,11 @@ func TestSettleDeliveryCommitFailureStaysPending(t *testing.T) {
 	)
 
 	root := t.TempDir()
+	engine, err := ledger.OpenAtomicStore(context.Background(), ledger.StorageConfig{Type: ledger.StorageJournal, Root: root})
+	if err != nil {
+		t.Fatalf("open the storage engine the settle-pending host commits into: %v", err)
+	}
+	fault := &settlePendingFault{inner: engine}
 	provider := newScriptedProvider(t)
 	reviewerSeen := make(chan struct{})
 	releaseReviewer := make(chan struct{})
@@ -80,9 +82,7 @@ func TestSettleDeliveryCommitFailureStaysPending(t *testing.T) {
 		if request.Model == "model-reviewer" {
 			reviewerOnce.Do(func() { close(reviewerSeen) })
 			<-releaseReviewer
-			if err := settlePendingBlockShard(root); err != nil {
-				return "", fmt.Errorf("block the entry partition snapshot: %w", err)
-			}
+			fault.arm()
 			return scriptedAnswerOf(reviewerBody), nil
 		}
 		mu.Lock()
@@ -102,7 +102,8 @@ func TestSettleDeliveryCommitFailureStaysPending(t *testing.T) {
 	configPath := writeScriptedHostDocument(t, root, provider.endpoint(), "model-entry")
 	writeHostDocumentFile(t, configPath, scriptedHostDocumentWithAgentSections(root, provider.endpoint(), "model-entry", settlePendingAgentSections))
 	sender := &deliveryRecorder{}
-	host, err := assembly.Boot(configPath, assembly.WithSender(sender))
+	host, err := assembly.Boot(configPath, assembly.WithSender(sender),
+		assembly.WithStorage(ledger.StorageConfig{Type: ledger.StorageJournal, Root: root, Engine: fault}))
 	if err != nil {
 		t.Fatalf("boot the settle-pending host: %v", err)
 	}
@@ -155,9 +156,7 @@ func TestSettleDeliveryCommitFailureStaysPending(t *testing.T) {
 		t.Fatalf("follow-up turns in the failed window = %d, want none beside a settle fact no storage holds", fired)
 	}
 
-	if err := settlePendingUnblockShard(root); err != nil {
-		t.Fatalf("lift the refusal off the entry partition snapshot: %v", err)
-	}
+	fault.lift()
 	if err := host.Close(ctx); err != nil {
 		t.Logf("the recovered close answered: %v", err)
 	}
@@ -218,41 +217,64 @@ func settlePendingFacts(host *assembly.Host, addr event.Address, taskID event.Ta
 	return count
 }
 
-// settlePendingShardDir names the snapshot directory of the partition the entry
-// agent commits its facts under. The settle fact of a notification delivered to
-// the entry address lands in that one shard, so a snapshot write the directory
-// refuses refuses exactly that family of commits and nothing else the flow
-// commits — the delegated round's facts live in the reviewer's own partition
-// and the task account in its own namespaces.
-func settlePendingShardDir(root string) string {
-	return filepath.Join(root, "kv", strconv.Itoa(memory.PartitionIDFromName("user")))
+// settlePendingSettleFactIndex names the segment index entry one settle delivery
+// fact commits under. The decorator refuses a batch that writes it, so exactly
+// the settle facts are refused and nothing else the flow commits — the delegated
+// round's own facts and the task account stay writable.
+const settlePendingSettleFactIndex = ":idx:settle-"
+
+// settlePendingFault is the storage engine decorator this check injects through:
+// it refuses the commits of the settle delivery facts while armed. The engine is
+// the seam the tier documents for failure injection, so the refusal needs no
+// knowledge of the file layout the engine writes and no call reaches the
+// delivery internals.
+type settlePendingFault struct {
+	inner ledger.AtomicStore
+	mu    sync.Mutex
+	armed bool
 }
 
-// settlePendingBlockShard replaces the entry partition's snapshot directory
-// with one plain file, so the barrier of the next commit into that partition
-// fails to take its directory back and the commit is refused with the cause the
-// storage path reports. Nothing outside that partition notices the block.
-func settlePendingBlockShard(root string) error {
-	dir := settlePendingShardDir(root)
-	if err := os.RemoveAll(dir); err != nil {
-		return fmt.Errorf("remove %s: %w", dir, err)
-	}
-	if err := os.WriteFile(dir, []byte("blocked by the settle-pending check"), 0o644); err != nil {
-		return fmt.Errorf("block %s: %w", dir, err)
-	}
-	return nil
+// Read passes the read to the wrapped engine.
+func (f *settlePendingFault) Read(ctx context.Context, fetch ledger.Fetch) ([]ledger.Pair, error) {
+	return f.inner.Read(ctx, fetch)
 }
 
-// settlePendingUnblockShard puts the entry partition's snapshot directory back,
-// so the next commit into the partition writes its snapshot again and the
-// refusal the block injected is lifted for the recovery to observe.
-func settlePendingUnblockShard(root string) error {
-	dir := settlePendingShardDir(root)
-	if err := os.Remove(dir); err != nil {
-		return fmt.Errorf("unblock %s: %w", dir, err)
+// Keys enumerates the wrapped engine's keys.
+func (f *settlePendingFault) Keys(ctx context.Context, prefix string) ([]string, error) {
+	return f.inner.Keys(ctx, prefix)
+}
+
+// Namespaces enumerates the wrapped engine's namespaces.
+func (f *settlePendingFault) Namespaces(ctx context.Context) ([]string, error) {
+	return f.inner.Namespaces(ctx)
+}
+
+// Commit refuses a batch that writes the index entry of a settle delivery fact
+// while armed, and passes every other batch to the wrapped engine.
+func (f *settlePendingFault) Commit(ctx context.Context, batch ledger.Batch) error {
+	f.mu.Lock()
+	armed := f.armed
+	f.mu.Unlock()
+	if armed {
+		for _, put := range batch.Puts {
+			if strings.Contains(put.Key, settlePendingSettleFactIndex) {
+				return fmt.Errorf("%w: the settle fact commit of the check was refused", ledger.ErrCommitUncertain)
+			}
+		}
 	}
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return fmt.Errorf("restore %s: %w", dir, err)
-	}
-	return nil
+	return f.inner.Commit(ctx, batch)
+}
+
+// arm refuses the settle delivery fact commits.
+func (f *settlePendingFault) arm() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.armed = true
+}
+
+// lift lets the settle delivery fact commits land again.
+func (f *settlePendingFault) lift() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.armed = false
 }

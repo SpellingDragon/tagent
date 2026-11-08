@@ -12,16 +12,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
-	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
 	"time"
 
-	"github.com/SpellingDragon/tagent/api/document"
 	"github.com/SpellingDragon/tagent/api/event"
 	"github.com/SpellingDragon/tagent/api/model"
+	"github.com/SpellingDragon/tagent/api/plugin"
 	"github.com/SpellingDragon/tagent/features/evolution/meditation"
 	"github.com/SpellingDragon/tagent/memory"
 	"github.com/SpellingDragon/tagent/memory/ledger"
@@ -322,7 +320,7 @@ func (r *Run) delegationDeclaration(spec task.Spec) ([]byte, error) {
 		return nil, fmt.Errorf("%w: the task names no complete site", errDelegationDeclarationMissing)
 	}
 	var found []byte
-	r.eachDeliveryFact(func(fact event.Event) bool {
+	if err := r.eachDeliveryFact(func(fact event.Event) bool {
 		if fact.Target.SessionID != session {
 			return true
 		}
@@ -331,7 +329,9 @@ func (r *Run) delegationDeclaration(spec task.Spec) ([]byte, error) {
 			return false
 		}
 		return true
-	})
+	}); err != nil {
+		return nil, err
+	}
 	if found != nil {
 		return found, nil
 	}
@@ -502,17 +502,17 @@ func (p *hostMeditationPort) gate(ctx context.Context, frame task.CallFrame, add
 	if p.plan == nil {
 		return deliveryRefused, "this host declares no deliver_to white list, and a session destination is refused closed beside none"
 	}
-	if string(frame.Address.AgentID) != p.plan.agent {
+	if string(frame.Address.AgentID) != p.plan.Agent {
 		return deliveryRefused, fmt.Sprintf("agent %q carries no cross-session delivery face: the white list this host declares belongs to %q",
-			frame.Address.AgentID, p.plan.agent)
+			frame.Address.AgentID, p.plan.Agent)
 	}
-	if !hostSendNames(p.plan.targets, string(addr.AgentID)) {
+	if !hostSendNames(p.plan.Targets, string(addr.AgentID)) {
 		return deliveryRefused, fmt.Sprintf("the deliver_to white list of %q names no %q, and a body delivered outside it would reach a session the reflection never declared",
-			p.plan.agent, addr.AgentID)
+			p.plan.Agent, addr.AgentID)
 	}
-	if !hostSendNames(p.plan.observed, string(addr.AgentID)) {
+	if !hostSendNames(p.plan.Observed, string(addr.AgentID)) {
 		return deliveryRefused, fmt.Sprintf("the observed face of %q does not reach %q, so a body delivered there would be blind",
-			p.plan.agent, addr.AgentID)
+			p.plan.Agent, addr.AgentID)
 	}
 	if !addr.IsComplete() {
 		return deliveryRefused, "the target names an incomplete session address"
@@ -769,14 +769,15 @@ func (r *Run) DeliveryLedger() *DeliveryLedger {
 // Records reports every delivery the run accounts for, ordered by source event,
 // then by target and identity, so two reads of one chain answer the same order.
 // One identity answers one record: a repeated delivery of the identity the chain
-// already holds lands no second fact and therefore no second record.
-func (l *DeliveryLedger) Records() []DeliveryRecord {
+// already holds lands no second fact and therefore no second record. A durable
+// chain that could not be read answers a named error instead of a partial view.
+func (l *DeliveryLedger) Records() ([]DeliveryRecord, error) {
 	if l == nil || l.run == nil {
-		return nil
+		return nil, nil
 	}
 	records := make([]DeliveryRecord, 0, 16)
 	seen := map[string]struct{}{}
-	l.run.eachDeliveryFact(func(fact event.Event) bool {
+	if err := l.run.eachDeliveryFact(func(fact event.Event) bool {
 		record, held := hostDeliveryRecordOf(fact)
 		if !held {
 			return true
@@ -787,7 +788,9 @@ func (l *DeliveryLedger) Records() []DeliveryRecord {
 		seen[record.Identity] = struct{}{}
 		records = append(records, record)
 		return true
-	})
+	}); err != nil {
+		return nil, err
+	}
 	sort.Slice(records, func(i, j int) bool {
 		if records[i].Source != records[j].Source {
 			return records[i].Source < records[j].Source
@@ -800,31 +803,39 @@ func (l *DeliveryLedger) Records() []DeliveryRecord {
 		}
 		return records[i].Identity < records[j].Identity
 	})
-	return records
+	return records, nil
 }
 
 // BySource reports the deliveries one source event is accounted for: every target
 // the event reached, each beside its own identity and receipt.
-func (l *DeliveryLedger) BySource(source event.EventID) []DeliveryRecord {
+func (l *DeliveryLedger) BySource(source event.EventID) ([]DeliveryRecord, error) {
+	records, err := l.Records()
+	if err != nil {
+		return nil, err
+	}
 	var out []DeliveryRecord
-	for _, record := range l.Records() {
+	for _, record := range records {
 		if record.Source == source {
 			out = append(out, record)
 		}
 	}
-	return out
+	return out, nil
 }
 
 // ByTarget reports the deliveries one address received, whichever family carried
 // them.
-func (l *DeliveryLedger) ByTarget(addr event.Address) []DeliveryRecord {
+func (l *DeliveryLedger) ByTarget(addr event.Address) ([]DeliveryRecord, error) {
+	records, err := l.Records()
+	if err != nil {
+		return nil, err
+	}
 	var out []DeliveryRecord
-	for _, record := range l.Records() {
+	for _, record := range records {
 		if record.Target == addr {
 			out = append(out, record)
 		}
 	}
-	return out
+	return out, nil
 }
 
 // DeliveryRefusal is one attempt the delivery face turned away: the source event it is filed
@@ -848,13 +859,13 @@ type DeliveryRefusal struct {
 // then identity and category, so two reads of one chain answer the same order. The attempts
 // are read from the same account as the landings, so a refusal is queryable after the fact
 // rather than only from the sentence the caller was answered with.
-func (l *DeliveryLedger) Refusals() []DeliveryRefusal {
+func (l *DeliveryLedger) Refusals() ([]DeliveryRefusal, error) {
 	if l == nil || l.run == nil {
-		return nil
+		return nil, nil
 	}
 	refusals := make([]DeliveryRefusal, 0, 16)
 	seen := map[string]struct{}{}
-	l.run.eachDeliveryFact(func(fact event.Event) bool {
+	if err := l.run.eachDeliveryFact(func(fact event.Event) bool {
 		receipt := fact.Meta[event.MetaKeyDeliveryReceipt]
 		if receipt != DeliveryReceiptDenied && receipt != DeliveryReceiptBroken {
 			return true
@@ -874,7 +885,9 @@ func (l *DeliveryLedger) Refusals() []DeliveryRefusal {
 			Category: category,
 		})
 		return true
-	})
+	}); err != nil {
+		return nil, err
+	}
 	sort.Slice(refusals, func(i, j int) bool {
 		if refusals[i].Source != refusals[j].Source {
 			return refusals[i].Source < refusals[j].Source
@@ -890,7 +903,7 @@ func (l *DeliveryLedger) Refusals() []DeliveryRefusal {
 		}
 		return refusals[i].Category < refusals[j].Category
 	})
-	return refusals
+	return refusals, nil
 }
 
 // errDeliveryScanDone ends a delivery enumeration early: the caller read the
@@ -903,7 +916,13 @@ var errDeliveryScanDone = errors.New("tagent: delivery scan complete")
 // materializing every body, and only a run beside no storage tier reads the
 // window alone. The visit answers false to stop the walk after the fact it
 // needed, so a lookup that names one fact never reads the rest of the chain.
-func (r *Run) eachDeliveryFact(visit func(event.Event) bool) {
+//
+// A durable walk that failed answers a named error instead of degrading to the
+// live window: a partial window read beside an unreadable chain would present
+// the deliveries it still holds as the whole account, hiding the ones the chain
+// could not serve. The caller surfaces the error rather than answering a silent
+// partial view.
+func (r *Run) eachDeliveryFact(visit func(event.Event) bool) error {
 	r.mu.Lock()
 	tier := r.tier
 	r.mu.Unlock()
@@ -918,10 +937,13 @@ func (r *Run) eachDeliveryFact(visit func(event.Event) bool) {
 			}
 			return nil
 		})
-		if err == nil || errors.Is(err, errDeliveryScanDone) {
-			return
+		if errors.Is(err, errDeliveryScanDone) {
+			return nil
 		}
-		assemblyWarn("tagent: the delivery account of this run reads its live window beside an unreadable durable chain err=%v", err)
+		if err != nil {
+			return fmt.Errorf("tagent: the delivery account of this run could not read its durable chain: %w", err)
+		}
+		return nil
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -931,9 +953,10 @@ func (r *Run) eachDeliveryFact(visit func(event.Event) bool) {
 			continue
 		}
 		if !visit(evt) {
-			return
+			return nil
 		}
 	}
+	return nil
 }
 
 // hostDeliveryFactOf decodes one stored record into the fact the delivery
@@ -1174,171 +1197,6 @@ func hostUnknownFields(probe map[string]json.RawMessage, declared ...string) []s
 	return out
 }
 
-// hostMeditationPlan is the one reflection section a document enables: the
-// observing agent, the loop session, the cadence and floor, the static prompt,
-// the observed and read namespaces, the declared delivery targets and the
-// anchor record the watermark persists through.
-type hostMeditationPlan struct {
-	agent   string
-	session string
-	// selfReflection reports a reflection the HOST ITSELF runs: the agent that
-	// enables meditation is the entry agent, so its dedicated reflection
-	// session shares one tool binding with the entry session. In this form the
-	// cross-session send tool is granted to the reflection session alone by
-	// the meditation plugin (session-scoped), and the entry tool face stays
-	// free of it. The retired independent curation agent keeps the older
-	// declarative grant instead.
-	selfReflection bool
-	interval       time.Duration
-	minGap         time.Duration
-	prompt         string
-	observed       []string
-	reads          []string
-	targets        []string
-	anchors        string
-}
-
-// reflectionGrantsSend reports whether this plan makes the meditation plugin
-// grant the cross-session send tool to the dedicated reflection session of the
-// named agent. Only host self-reflection does: the entry and reflection
-// sessions share one binding, so send must be scoped to the reflection session
-// alone. An independent curation agent keeps its own declarative tool face.
-func (p *hostMeditationPlan) reflectionGrantsSend(id string) bool {
-	return p != nil && p.selfReflection && p.agent == id && len(p.targets) > 0
-}
-
-// hostMeditationDefaultInterval is the tick cadence of a declaration that names
-// none.
-const hostMeditationDefaultInterval = 30 * time.Minute
-
-// resolveHostMeditation resolves the one meditation section a document enables:
-// the entry agent first and the remaining agents in declaration order, so one
-// document resolves to one plan across restarts. A document enabling none
-// reports a nil plan, and every inconsistent section is refused by name.
-func resolveHostMeditation(doc document.Document, promptDir, storageRoot string) (*hostMeditationPlan, error) {
-	var plan *hostMeditationPlan
-	declaredBy := ""
-	for _, id := range doc.Order() {
-		spec, ok := doc.Agents[id]
-		if !ok || !spec.Meditation.Enabled {
-			continue
-		}
-		if plan != nil {
-			return nil, fmt.Errorf("tagent: agents %q and %q both enable meditation, and one host drives one reflection loop",
-				declaredBy, id)
-		}
-		entry := spec.Meditation
-		interval := entry.Interval
-		if interval < 0 {
-			return nil, fmt.Errorf("tagent: agent %q declares a negative meditation interval %s", id, interval)
-		}
-		if interval == 0 {
-			interval = hostMeditationDefaultInterval
-		}
-		if entry.MinGap < 0 {
-			return nil, fmt.Errorf("tagent: agent %q declares a negative meditation min_gap %s", id, entry.MinGap)
-		}
-		prompt, err := hostMeditationPrompt(promptDir, id, entry.PromptFile)
-		if err != nil {
-			return nil, err
-		}
-		reads := memory.PartitionsOf(id, spec.Memory.ReadNamespaces)
-		scope, err := meditation.ResolveObservationScope(id, entry.ObservedNamespaces, reads)
-		if err != nil {
-			return nil, fmt.Errorf("tagent: %w", err)
-		}
-		targets, err := hostMeditationTargets(doc, id, entry.DeliverTo)
-		if err != nil {
-			return nil, err
-		}
-		if strings.TrimSpace(storageRoot) == "" {
-			return nil, fmt.Errorf("tagent: agent %q enables meditation beside no storage tier, so its anchor record has nowhere to persist", id)
-		}
-		plan = &hostMeditationPlan{
-			agent:          id,
-			session:        hostReflectionSession(doc.Entry, id),
-			selfReflection: id == doc.Entry,
-			interval:       interval,
-			minGap:         entry.MinGap,
-			prompt:         prompt,
-			observed:       scope.Names,
-			reads:          reads,
-			targets:        targets,
-			anchors:        filepath.Join(storageRoot, "meditation", id, "anchors.json"),
-		}
-		declaredBy = id
-	}
-	return plan, nil
-}
-
-// hostMeditationPrompt reads the static prompt one enabled meditation carries.
-// A relative path resolves beside the declared prompt directory, and a file the
-// checkout does not carry refuses the assembly.
-func hostMeditationPrompt(promptDir, id, name string) (string, error) {
-	declared := strings.TrimSpace(name)
-	if declared == "" {
-		return "", fmt.Errorf("tagent: agent %q enables meditation but names no prompt_file", id)
-	}
-	path := declared
-	if !filepath.IsAbs(path) {
-		path = filepath.Join(promptDir, path)
-	}
-	body, err := os.ReadFile(path)
-	if err != nil {
-		return "", fmt.Errorf("tagent: agent %q cannot read the meditation prompt %s: %w", id, path, err)
-	}
-	if strings.TrimSpace(string(body)) == "" {
-		return "", fmt.Errorf("tagent: agent %q declares an empty meditation prompt %s", id, path)
-	}
-	return string(body), nil
-}
-
-// hostMeditationTargets resolves the delivery white list of one enabled
-// meditation: every name must be a declared agent, deduplicated in declaration
-// order, and a section that names no target is refused by name.
-func hostMeditationTargets(doc document.Document, id string, declared []string) ([]string, error) {
-	targets := make([]string, 0, len(declared))
-	seen := make(map[string]bool, len(declared))
-	for _, name := range declared {
-		trimmed := strings.TrimSpace(name)
-		if trimmed == "" || seen[trimmed] {
-			continue
-		}
-		if _, ok := doc.Agents[trimmed]; !ok {
-			return nil, fmt.Errorf("tagent: agent %q delivers its meditation to the undeclared agent %q", id, trimmed)
-		}
-		seen[trimmed] = true
-		targets = append(targets, trimmed)
-	}
-	if len(targets) == 0 {
-		return nil, fmt.Errorf("tagent: agent %q enables meditation but names no deliver_to target", id)
-	}
-	return targets, nil
-}
-
-// hostReflectionSession reports the dedicated reflection session of the agent
-// that declared meditation. The host itself reflects in the reserved reflection
-// session of the entry agent; a separate curation agent keeps its own meditation
-// session, so the two forms never collide and existing curation deployments read
-// the session they always read.
-func hostReflectionSession(entry, agent string) string {
-	suffix := "meditation"
-	if agent == entry {
-		suffix = "reflection"
-	}
-	return hostSessionPrefix(entry) + suffix
-}
-
-// hostSessionPrefix reports the session identity prefix of one entry agent: the
-// label the deployment names, and the host default beside none.
-func hostSessionPrefix(entry string) string {
-	label := strings.TrimSpace(os.Getenv("TAGENT_SESSION_ID"))
-	if label == "" {
-		label = "tagent-session"
-	}
-	return label + ":" + strings.TrimSpace(entry) + ":"
-}
-
 // hostMeditationPort is the host's binding of the two faces a reflection reads and
 // writes its delivery through: the live-session query it resolves its declared
 // deliver_to targets against, and the cross-session delivery face the one
@@ -1349,7 +1207,7 @@ func hostSessionPrefix(entry string) string {
 // copy made at construction. The meditation loop session is never a delivery target:
 // it is the observing session itself, not a binding of the agent.
 type hostMeditationPort struct {
-	plan *hostMeditationPlan
+	plan *meditation.Plan
 	run  *Run
 
 	// mu brackets one delivery: its four gates, the fact it commits and the drive it
@@ -1358,6 +1216,17 @@ type hostMeditationPort struct {
 	// receipts, the outcome one call identity already answered.
 	mu       sync.Mutex
 	receipts map[string]hostSendSessionReceipt
+
+	// reflection brackets the reflection loop of the generation in effect: the
+	// plan its face is built from beside the driver the commits of this run are
+	// dispatched to. The faces one driver is assembled over are bound once, when
+	// the run is assembled, because they are the run's own reads and writes.
+	reflection sync.RWMutex
+	face       meditationReflection
+	installed  bool
+	faces      meditation.Faces
+	facesHeld  bool
+	observe    func(meditation.TickOutcome)
 }
 
 var (
@@ -1368,6 +1237,159 @@ var (
 // Bind attaches the assembled run the port reads and delivers through.
 func (p *hostMeditationPort) Bind(run *Run) { p.run = run }
 
+// meditationReflection is the reflection loop one generation serves: the plan
+// the document declares beside the driver that fires its passes. A document
+// that enables no meditation serves a nil plan beside no driver.
+type meditationReflection struct {
+	plan   *meditation.Plan
+	driver *meditation.Driver
+}
+
+// bindFaces attaches the run faces every reflection driver of this port is
+// assembled over, and the reading of each pass a driver runs.
+func (p *hostMeditationPort) bindFaces(faces meditation.Faces, observe func(meditation.TickOutcome)) {
+	p.reflection.Lock()
+	defer p.reflection.Unlock()
+	p.faces, p.facesHeld, p.observe = faces, true, observe
+}
+
+// mountReflection assembles the reflection loop of one plan over the run faces
+// this port bound and installs it as the loop in effect. A nil plan installs the
+// loop of a document that enables no meditation, and answers nil.
+func (p *hostMeditationPort) mountReflection(plan *meditation.Plan) (*meditation.Driver, error) {
+	p.reflection.Lock()
+	faces, held, observe := p.faces, p.facesHeld, p.observe
+	p.reflection.Unlock()
+	if plan == nil {
+		p.installReflection(meditationReflection{})
+		return nil, nil
+	}
+	if !held {
+		return nil, fmt.Errorf("tagent: the reflection loop of agent %q was built before the run bound its faces", plan.Agent)
+	}
+	driver, err := plan.Instances(faces, observe)
+	if err != nil {
+		return nil, err
+	}
+	p.installReflection(meditationReflection{plan: plan, driver: driver})
+	return driver, nil
+}
+
+// installReflection installs one reflection loop as the loop in effect and
+// answers the loop it replaced beside whether a loop was in effect at all.
+func (p *hostMeditationPort) installReflection(next meditationReflection) (meditationReflection, bool) {
+	p.reflection.Lock()
+	defer p.reflection.Unlock()
+	previous, held := p.face, p.installed
+	p.face, p.installed = next, true
+	return previous, held
+}
+
+// restoreReflection puts one reflection loop back as the loop in effect.
+func (p *hostMeditationPort) restoreReflection(previous meditationReflection) {
+	p.reflection.Lock()
+	p.face = previous
+	p.reflection.Unlock()
+}
+
+// reflectionInEffect reports the reflection loop of the generation in effect.
+func (p *hostMeditationPort) reflectionInEffect() meditationReflection {
+	if p == nil {
+		return meditationReflection{}
+	}
+	p.reflection.RLock()
+	defer p.reflection.RUnlock()
+	return p.face
+}
+
+// reflectionInstalled reports whether a generation installed a reflection loop
+// on this port at all.
+func (p *hostMeditationPort) reflectionInstalled() bool {
+	if p == nil {
+		return false
+	}
+	p.reflection.RLock()
+	defer p.reflection.RUnlock()
+	return p.installed
+}
+
+// driverInEffect reports the driver the commits of this run are dispatched to.
+// A port whose document enables no meditation answers nil, and a commit is then
+// observed by no reflection.
+func (p *hostMeditationPort) driverInEffect() *meditation.Driver {
+	return p.reflectionInEffect().driver
+}
+
+// planInEffect reports the meditation plan the generation in effect declares:
+// the plan the native face of one generation is built from beside the delivery
+// face of the port. A port built beside no enabled meditation answers nil.
+func (p *hostMeditationPort) planInEffect() *meditation.Plan {
+	if p == nil {
+		return nil
+	}
+	p.reflection.RLock()
+	defer p.reflection.RUnlock()
+	return p.face.plan
+}
+
+// stopReflection ends the reflection loop in effect, once: the driver stops
+// observing commits, a pass already in flight is cancelled and joined, and a
+// second stop finds nothing to stop.
+func (p *hostMeditationPort) stopReflection() {
+	if p == nil {
+		return
+	}
+	if driver := p.reflectionInEffect().driver; driver != nil {
+		driver.Stop()
+	}
+}
+
+// generationReflection is the plugin instance this run observes commits through:
+// it forwards every commit to the reflection driver of the generation in effect,
+// so a reload that moves the meditation section replaces the driver behind an
+// instance the run already holds. It is the instance a host stops on close.
+type generationReflection struct {
+	port *hostMeditationPort
+}
+
+var (
+	_ plugin.Instance           = (*generationReflection)(nil)
+	_ plugin.PostCommitObserver = (*generationReflection)(nil)
+)
+
+// newGenerationReflection returns the stable reflection instance of one port.
+func newGenerationReflection(port *hostMeditationPort) *generationReflection {
+	return &generationReflection{port: port}
+}
+
+// Name reports the stable name of the reflection instance: the name every
+// reflection driver answers, because the instance serves the driver's port.
+func (g *generationReflection) Name() string { return "meditation-driver" }
+
+// Port reports the consumption the reflection serves: one committed fact in,
+// one observation out.
+func (g *generationReflection) Port() plugin.Port { return plugin.PortFactObservation }
+
+// ObserveCommit forwards one commit to the driver of the generation in effect.
+func (g *generationReflection) ObserveCommit(ctx context.Context, id event.EventID) error {
+	if g == nil || g.port == nil {
+		return nil
+	}
+	driver := g.port.driverInEffect()
+	if driver == nil {
+		return nil
+	}
+	return driver.ObserveCommit(ctx, id)
+}
+
+// Stop ends the reflection loop in effect.
+func (g *generationReflection) Stop() {
+	if g == nil || g.port == nil {
+		return
+	}
+	g.port.stopReflection()
+}
+
 // ActiveSessions reports the run's live bindings of one agent, without the
 // observing session of the reflection itself.
 func (p *hostMeditationPort) ActiveSessions(agentID event.AgentID) []event.Address {
@@ -1377,7 +1399,7 @@ func (p *hostMeditationPort) ActiveSessions(agentID event.AgentID) []event.Addre
 	sessions := p.run.ActiveSessions(agentID)
 	out := make([]event.Address, 0, len(sessions))
 	for _, addr := range sessions {
-		if p.plan != nil && addr.AgentID == event.AgentID(p.plan.agent) && addr.SessionID == event.SessionID(p.plan.session) {
+		if p.plan != nil && addr.AgentID == event.AgentID(p.plan.Agent) && addr.SessionID == event.SessionID(p.plan.Session) {
 			continue
 		}
 		out = append(out, addr)

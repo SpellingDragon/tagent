@@ -52,6 +52,9 @@ const (
     existing external_input fact carries: they name mechanism fields, not a new
     fact family, so the frozen fact vocabulary does not grow.
 
+const DefaultInterval = 30 * time.Minute
+    DefaultInterval is the tick cadence of a declaration that names none.
+
 const LineageReflection = "meditation"
 
     LineageReflection is the trigger-source stamp a reflection input carries:
@@ -109,6 +112,12 @@ var ErrReflectionKeyMismatch = errors.New("evolution: the outcome names a reflec
 var ErrReflectionNotPending = errors.New("evolution: no reflection input awaits an outcome")
     ErrReflectionNotPending reports an outcome for a reflection input that is
     not awaiting one: a repeated or stale report never moves the watermark.
+
+var ErrToolMisplaced = errors.New("tagent: a meditation tool is granted to the wrong agent")
+    ErrToolMisplaced reports a meditation declaration whose reflection
+    would deliver through a host tool the observing agent does not carry:
+    the reflection turn writes its delivery through that tool, so an enabled
+    reflection with declared targets beside no such tool could never deliver.
 
 var ErrWatermarkSourceUnwired = errors.New("evolution: the execution watermark source is not wired")
     ErrWatermarkSourceUnwired reports a tick attempted while the execution
@@ -302,6 +311,27 @@ func (d *Driver) Stop()
     Stop ends the driver: no further commit fires a pass, a pass in flight is
     cancelled, and Stop waits for it to return. A repeated stop is a no-op.
 
+type Faces struct {
+	// Gate is the anchor store this host wired as the watermark gate.
+	Gate WatermarkGate
+	// Observed is the fact-chain face the reflection scans.
+	Observed ObservedFacts
+	// Input is the injection face the reflection pass enters the loop through.
+	Input ReflectionInput
+	// ModelInFlight reports the model request one site of the observed session
+	// is executing.
+	ModelInFlight func(addr event.Address, instance event.InstanceID) (event.InvocationID, event.DecisionID, bool)
+	// Instance is the runtime instance identity the passes are stamped with.
+	Instance event.InstanceID
+	// Sessions is the live-binding face a delivery target resolves against.
+	Sessions SessionQuery
+}
+    Faces are the run faces one mounted reflection is assembled over: the anchor
+    store it advances only on a consumed turn, the observation and injection
+    faces it reads and writes through, the read of whether a model request of
+    the observed session is executing, the instance that request runs in and the
+    session query its delivery resolves against.
+
 type FactAttribution struct {
 	// Lineage is the trigger-source stamp the fact carries; empty means the fact
 	// carries none.
@@ -415,6 +445,82 @@ type PartitionActivity struct {
     PartitionActivity is one observed partition's tally in a pass: how much
     of the reference page belongs to it and how the hydrated sample splits by
     lineage.
+
+type Plan struct {
+	// Agent is the declared agent that runs the reflection loop.
+	Agent string
+	// Session is the dedicated reflection session that agent reflects in.
+	Session string
+	// SelfReflection reports a reflection the HOST ITSELF runs: the agent that
+	// enables meditation is the entry agent, so its dedicated reflection
+	// session shares one tool binding with the entry session. In this form the
+	// cross-session send tool is granted to the reflection session alone by
+	// this plugin (session-scoped), and the entry tool face stays free of it.
+	// The retired independent curation agent keeps the older declarative grant
+	// instead.
+	SelfReflection bool
+	// Interval is the tick cadence the loop fires at.
+	Interval time.Duration
+	// MinGap is the floor between two consumed reflections.
+	MinGap time.Duration
+	// Prompt is the static prompt one reflection pass carries.
+	Prompt string
+	// Observed are the namespaces the reflection observes.
+	Observed []string
+	// Reads are the namespaces the observing agent is authorized to read.
+	Reads []string
+	// Targets are the declared agents the reflection result flows back to.
+	Targets []string
+	// Anchors is the file the watermark anchor record persists through.
+	Anchors string
+}
+
+    Plan is the one reflection section a document enables: the observing agent,
+    the loop session, the cadence and floor, the static prompt, the observed
+    and read namespaces, the declared delivery targets and the anchor record the
+    watermark persists through.
+
+    The section is resolved, judged and assembled here rather than in the
+    composition root, so that root performs the generic steps of a mount and
+    reads no meditation parameter itself.
+
+func Resolve(doc document.Document, promptDir, storageRoot string) (*Plan, error)
+    Resolve resolves the one meditation section a document enables: the entry
+    agent first and the remaining agents in declaration order, so one document
+    resolves to one plan across restarts. A document enabling none reports a nil
+    plan, and every inconsistent section is refused by name.
+
+    A relative prompt_file resolves beside promptDir, and anchors is written
+    under storageRoot.
+
+func (p *Plan) GrantsSend(agent string) bool
+    GrantsSend reports whether this plan makes the plugin grant the
+    cross-session send tool to the dedicated reflection session of the named
+    agent. Only host self-reflection does: the entry and reflection sessions
+    share one binding, so send must be scoped to the reflection session alone.
+    An independent curation agent keeps its own declarative tool face.
+
+func (p *Plan) Instances(faces Faces, observe func(TickOutcome)) (*Driver, error)
+    Instances builds the reflection and its driver over one plan: the one plugin
+    instance a mounted meditation serves its generation with. A plan built
+    beside no anchor store refuses by name, because a watermark the assembly
+    forgot to wire would leave the loop firing on facts it already consumed.
+
+    observe reads every pass the driver runs; a nil observer drops the readings.
+
+func (p *Plan) ValidateDelivery(declares func(id, tool string) bool, tool string) error
+    ValidateDelivery refuses a plan whose reflection would deliver through a
+    face the observing agent does not carry: the retired independent curation
+    agent with a declared deliver_to white list must itself declare the
+    cross-session communication tool, because the delivery is the reflection
+    turn's own decision and no mechanism writes a body in its place. A
+    reflection declared beside no white list delivers nothing and is not judged.
+
+    Host self-reflection is not judged: the entry and reflection sessions share
+    one binding, so this plugin grants the send tool to the reflection session
+    alone, and the entry tool face keeps it out. declares answers whether one
+    declared agent carries one host tool, and tool names the tool a delivery
+    passes through.
 
 type Reflection struct {
 	// Has unexported fields.

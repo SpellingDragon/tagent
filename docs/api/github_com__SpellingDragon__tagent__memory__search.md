@@ -53,11 +53,6 @@ var ErrQueryTextMissing = errors.New("search: the query carries no retrieval tex
     admit. Listing is not a degraded retrieval form; a caller that wants a
     listing names it on a path made for listing.
 
-var ErrRetrievalTuning = errors.New("search: retrieval tuning carries a negative bound")
-    ErrRetrievalTuning reports retrieval tuning a deployment named outside the
-    range this searcher can honour: a negative leg bound or a negative rank
-    constant is refused by name instead of being coerced into a default.
-
 var ErrStrategyUnknown = errors.New("search: the query names an unknown strategy")
     ErrStrategyUnknown reports a query naming a strategy outside the declared
     vocabulary, so no rule could decide how its legs combine.
@@ -261,21 +256,19 @@ type StoreSearcher struct {
     candidates. A searcher beside no embedder answers through the keyword leg
     alone, which is the byte-identical fallback the hybrid contract states.
 
+    Both leg bounds are the one page bound of this package and the fusion runs
+    under its canonical rank constant: the retrieval rules are the mechanism's
+    own, so no deployment tunes them through a searcher.
+
 func NewStoreSearcher(source ReferenceSource, embedder memory.Embedder) *StoreSearcher
     NewStoreSearcher returns a searcher over source. embedder may name nothing,
-    and then the vector leg is empty for every query; the fusion behind the
-    searcher is the reciprocal rank fusion of this package.
+    and then the vector leg is empty for every query; both leg bounds are
+    DefaultLimit and the fusion behind the searcher is the reciprocal rank
+    fusion of this package under RRFRankConstant.
 
 func (s *StoreSearcher) Search(ctx context.Context, q Query) (Result, error)
     Search returns the reference set of q, ranked by the retrieval rule the
     query runs under and cut to the page the query asks for.
-
-func (s *StoreSearcher) SetRetrievalTuning(vectorTopK, keywordTopK, rrfK int) error
-    SetRetrievalTuning applies the leg bounds and the rank constant one
-    deployment declares. A zero bound keeps that leg unbounded, and a zero
-    rank constant keeps the canonical RRFRankConstant, so the zero value of the
-    tuning is exactly the searcher's historical behaviour. The call configures
-    the searcher before it serves queries and is not a per-query setting.
 
 type Strategy string
     Strategy parameterizes how the retrieval legs of a query are combined.

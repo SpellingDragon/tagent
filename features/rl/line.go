@@ -24,6 +24,10 @@ const (
 	// acceptance verdict, appended under the sample's identity and never
 	// rewritten.
 	RecordKindAnnex RecordKind = "annex"
+	// RecordKindRequest names a line carrying one RequestEvidenceRecord: the
+	// request evidence of one decision, landed before the request starts and
+	// readable back through the reference it carries.
+	RecordKindRequest RecordKind = "request"
 )
 
 // legacyMarkerFields are the top level fields that belong to a legacy capture
@@ -82,18 +86,23 @@ type Line struct {
 	// annex is the acceptance annex of an annex line. It is unexported so the
 	// line gains no exported field; Annex reads it.
 	annex *AnnexRecord
+	// request is the request evidence of a request line. It is unexported for the
+	// same reason the annex is: the versioned line keeps its declared export
+	// surface, and RequestEvidence reads the evidence the line carries.
+	request *RequestEvidenceRecord
 }
 
 // lineWire is the encoded shape of one line: the exported envelope fields of
 // Line plus the annex payload the line keeps unexported. Encoding and decoding
 // through it keeps the annex on the wire without adding an exported Line field.
 type lineWire struct {
-	Schema   SchemaVersion   `json:"schema"`
-	Kind     RecordKind      `json:"kind"`
-	Episode  *EpisodeRecord  `json:"episode,omitempty"`
-	Decision *DecisionRecord `json:"decision,omitempty"`
-	Attempt  *AttemptRecord  `json:"attempt,omitempty"`
-	Annex    *AnnexRecord    `json:"annex,omitempty"`
+	Schema   SchemaVersion          `json:"schema"`
+	Kind     RecordKind             `json:"kind"`
+	Episode  *EpisodeRecord         `json:"episode,omitempty"`
+	Decision *DecisionRecord        `json:"decision,omitempty"`
+	Attempt  *AttemptRecord         `json:"attempt,omitempty"`
+	Annex    *AnnexRecord           `json:"annex,omitempty"`
+	Request  *RequestEvidenceRecord `json:"request,omitempty"`
 }
 
 // MarshalJSON writes the line through its wire shape, including the annex
@@ -108,6 +117,7 @@ func (l Line) MarshalJSON() ([]byte, error) {
 		Decision: l.Decision,
 		Attempt:  l.Attempt,
 		Annex:    l.annex,
+		Request:  l.request,
 	})
 }
 
@@ -126,6 +136,7 @@ func (l *Line) UnmarshalJSON(data []byte) error {
 		Decision: wire.Decision,
 		Attempt:  wire.Attempt,
 		annex:    wire.Annex,
+		request:  wire.Request,
 	}
 	return nil
 }
@@ -136,6 +147,20 @@ func (l *Line) UnmarshalJSON(data []byte) error {
 // place.
 func (l Line) Annex() *AnnexRecord {
 	return l.annex
+}
+
+// RequestEvidence reports the request evidence of a request line, or nil for a
+// line of another kind. The returned record is the line's own payload: it names
+// the reference the request content is read back through and holds no second
+// copy of that content.
+func (l Line) RequestEvidence() *RequestEvidenceRecord {
+	return l.request
+}
+
+// NewRequestEvidenceLine builds the versioned line of one request evidence
+// record, stamped with the schema version this package writes.
+func NewRequestEvidenceLine(record RequestEvidenceRecord) Line {
+	return Line{Schema: SchemaCurrent, Kind: RecordKindRequest, request: &record}
 }
 
 // NewEpisodeLine builds the versioned line of one episode record, stamped with
@@ -188,7 +213,8 @@ func MarshalLine(line Line) ([]byte, error) {
 	case line.Kind == RecordKindEpisode && line.Episode != nil,
 		line.Kind == RecordKindDecision && line.Decision != nil,
 		line.Kind == RecordKindAttempt && line.Attempt != nil,
-		line.Kind == RecordKindAnnex && line.annex != nil:
+		line.Kind == RecordKindAnnex && line.annex != nil,
+		line.Kind == RecordKindRequest && line.request != nil:
 	default:
 		return nil, fmt.Errorf("%w: kind %q", ErrLineShape, line.Kind)
 	}
@@ -199,6 +225,11 @@ func MarshalLine(line Line) ([]byte, error) {
 	}
 	if line.annex != nil {
 		if err := ValidateAnnex(*line.annex); err != nil {
+			return nil, err
+		}
+	}
+	if line.request != nil {
+		if err := ValidateRequestEvidence(*line.request); err != nil {
 			return nil, err
 		}
 	}
@@ -262,17 +293,22 @@ func ParseLine(data []byte) (Line, error) {
 			return Line{}, err
 		}
 		return line, nil
+	case line.Kind == RecordKindRequest && line.request != nil:
+		if err := ValidateRequestEvidence(*line.request); err != nil {
+			return Line{}, err
+		}
+		return line, nil
 	default:
 		return Line{}, fmt.Errorf("%w: kind %q", ErrLineShape, line.Kind)
 	}
 }
 
 // linePayloads counts the record payloads one line carries: exactly one kind is
-// written on a line, and the annex payload is counted beside the three record
-// kinds even though it lives in an unexported field.
+// written on a line, and the annex and request evidence payloads are counted
+// beside the three record kinds even though they live in unexported fields.
 func linePayloads(line Line) int {
 	payloads := 0
-	for _, present := range []bool{line.Episode != nil, line.Decision != nil, line.Attempt != nil, line.annex != nil} {
+	for _, present := range []bool{line.Episode != nil, line.Decision != nil, line.Attempt != nil, line.annex != nil, line.request != nil} {
 		if present {
 			payloads++
 		}

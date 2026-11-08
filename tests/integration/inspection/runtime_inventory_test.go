@@ -205,7 +205,7 @@ func newRuntimeFixture(t *testing.T) *runtimeFixture {
 	addrA := event.Address{AgentID: event.AgentID("agent-a"), SessionID: event.SessionID("s1")}
 	addrB := event.Address{AgentID: event.AgentID("agent-b"), SessionID: event.SessionID("s1")}
 	addrC := event.Address{AgentID: event.AgentID("agent-c"), SessionID: event.SessionID("s1")}
-	tier, err := ledger.OpenTier(ctx, ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: t.TempDir()})
+	tier, err := ledger.OpenTier(ctx, ledger.StorageConfig{Type: ledger.StorageJournal, Root: t.TempDir()})
 	if err != nil {
 		t.Fatalf("OpenTier: %v", err)
 	}

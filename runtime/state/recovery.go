@@ -66,7 +66,9 @@ func noticeKeyOfString(text string) (noticeKey, bool) {
 
 // recoveryTables is the serializable image of the carrier's eight tables. The
 // maps marshal under encoding/json's sorted-key order, so the same carrier
-// state renders the same bytes every time.
+// state renders the same bytes every time. The coverage cursor lives on the
+// ticket alone: nothing restores from a cursor the image carried, and a
+// duplicated cursor would be a second, unread spelling of the ticket's.
 type recoveryTables struct {
 	SchemaVersion int                            `json:"schema_version"`
 	Revisions     map[string]int64               `json:"revisions"`
@@ -77,12 +79,12 @@ type recoveryTables struct {
 	Attempts      map[string]SettleAttempt       `json:"attempts"`
 	Rejected      map[string]Rejection           `json:"rejected"`
 	Mutations     map[string]task.CommitRecord   `json:"mutations"`
-	Cursor        string                         `json:"cursor"`
 }
 
-// snapshotBytes renders the deterministic image of the carrier's tables beside
-// the cursor: the fact key of the last committed record the image covers. The
-// image is taken under the carrier lock: the completion point is not a quiet
+// snapshotBytes renders the deterministic image of the carrier's tables and
+// answers the cursor that image covers: the fact key of the last committed
+// record, which the ticket names and the image does not repeat. The image is
+// taken under the carrier lock: the completion point is not a quiet
 // single-threaded window - Boot wakes the settle pump before the completion
 // point, so a concurrent commit can be in flight. The lock is required, not
 // defensive, and TestSnapshotBesideConcurrentCommits pins it.
@@ -133,7 +135,6 @@ func (d *DurableCommit) snapshotBytes() ([]byte, string, error) {
 	for key, record := range d.mutations {
 		image.Mutations[string(key.task)+"\x00"+string(key.mutation)] = record
 	}
-	image.Cursor = cursor
 	body, err := json.Marshal(image)
 	if err != nil {
 		return nil, "", err

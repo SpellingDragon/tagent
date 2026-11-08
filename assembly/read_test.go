@@ -483,3 +483,57 @@ func TestTierParentFallsBackToBodiesForMissingSession(t *testing.T) {
 		}
 	}
 }
+
+// TestReadCorruptionNamedError pins the durable read face naming corruption rather than folding it into absence.
+//   - a body that cannot be decoded is named by ChainFailure, while a readable or absent key names no failure at all
+//   - the declared Event face keeps answering held-or-not, so no consumer of it changes behavior
+//   - the recall port forwards the naming to the tools it binds
+//
+// 契约: docs/wiki/memory/memory-architecture.md#read-paths
+func TestReadCorruptionNamedError(t *testing.T) {
+	ctx := context.Background()
+	run := windowChainRun(t, ctx)
+	at := time.Date(2026, 11, 6, 12, 0, 0, 0, time.UTC)
+	addr := event.Address{AgentID: "agent-a", SessionID: "session-corrupt-named"}
+	readable := event.Event{
+		Key:       "readable-named",
+		Type:      event.TypeExternalInput,
+		Timestamp: at,
+		Meta:      map[string]string{event.MetaKeyEventSummary: "ask"},
+		Message:   model.Message{Role: model.RoleUser, Content: "the readable fact"},
+		Owner:     addr,
+	}
+	if _, err := run.CommitToSession(ctx, addr, readable); err != nil {
+		t.Fatalf("commit the readable fact: %v", err)
+	}
+	if err := run.tier.Segments.StoreEvent(ctx, ledger.SegmentRecord{
+		PartitionID: memory.PartitionIDFromName("agent-a"),
+		WindowTS:    at.UnixMilli(),
+		Seq:         7,
+		EventKey:    "corrupt-named",
+		EventTime:   at.UnixMilli(),
+		Body:        []byte("not-an-event"),
+	}.WithChain(event.TypeExternalInput, addr.SessionID)); err != nil {
+		t.Fatalf("store the corrupt body: %v", err)
+	}
+	direct := NewTierQuerySource(run.tier.Segments)
+	if err := direct.ChainFailure("corrupt-named"); !errors.Is(err, memory.ErrEventBody) {
+		t.Fatalf("ChainFailure over the corrupt body = %v, want the decode cause", err)
+	}
+	if _, held := direct.Event("corrupt-named"); held {
+		t.Fatal("the declared face answered a corrupt body as a held event")
+	}
+	for _, key := range []event.EventID{"readable-named", "absent-named"} {
+		if err := direct.ChainFailure(key); err != nil {
+			t.Fatalf("ChainFailure(%s) = %v, want no failure beside a readable or absent key", key, err)
+		}
+	}
+	port := NewRecallPort(nil)
+	port.Bind(run)
+	if err := port.ChainFailure("corrupt-named"); !errors.Is(err, memory.ErrEventBody) {
+		t.Fatalf("the recall port answered %v over the corrupt body, want the decode cause forwarded", err)
+	}
+	if err := port.ChainFailure("absent-named"); err != nil {
+		t.Fatalf("the recall port answered %v over an absent key, want no failure", err)
+	}
+}

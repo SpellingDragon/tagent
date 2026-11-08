@@ -13,10 +13,9 @@ at DEBUG, and the committed fact stays readable exactly as before.
 
 The OTel/audit face of the observation bypass: the layered SDK observation
 attempted for one committed fact, beside the audit record that layering leaves
-behind. The observer is a thin wrapper over the tracer and meter handles the
-locked framework exposes, so the framework's own OTel SDK is reused rather
-than re-hosted, and every layer is attempted after the fact committed and never
-before it.
+behind. The tracer and meter handles are injected by the assembly that owns the
+export pipeline, so this package reads no process-level default and rewrites
+none; every layer is attempted after the fact committed and never before it.
 
 Nothing here owns runtime state. The observation is switched off by
 configuration and never by data: with OTel closed the trace and metric layers
@@ -40,11 +39,10 @@ FUNCTIONS
 
 func NewSDKObserver(audit plugin.AuditSink, opts ...Option) (*SDKObserver, error)
     NewSDKObserver assembles one post-commit observer: the audit sink the
-    layered records land in, beside the options that redirect or close the OTel
-    layers. The default handles are the framework's own, so an unconfigured
-    runtime observes through the framework's noop SDK at zero cost and a
-    configured one exports through the framework's OTel pipeline without this
-    package re-hosting an SDK.
+    layered records land in, beside the handles and switches the assembly
+    injects. Without an injected handle the layers record into the OpenTelemetry
+    noop SDK, so an unconfigured runtime pays nothing for observation without
+    this package reading a process-level default or installing one.
 
 TYPES
 
@@ -112,8 +110,8 @@ type Option func(*SDKObserver)
     Option configures one SDKObserver at assembly time.
 
 func WithMeter(meter metric.Meter) Option
-    WithMeter replaces the default framework meter handle, so a caller that
-    hosts its own meter provider can point the metric layer at it.
+    WithMeter injects the meter handle the metric layer records through, so the
+    assembly that owns the export pipeline decides where the counter goes.
 
 func WithOTelDisabled() Option
     WithOTelDisabled switches the OTel layers off by configuration: the trace
@@ -122,8 +120,8 @@ func WithOTelDisabled() Option
     never a reason to withhold any committed fact from any reader.
 
 func WithTracer(tracer trace.Tracer) Option
-    WithTracer replaces the default framework tracer handle, so a caller that
-    hosts its own tracer provider can point the trace layer at it.
+    WithTracer injects the tracer handle the trace layer records through,
+    so the assembly that owns the export pipeline decides where the span goes.
 
 type SDKObserver struct {
 	// Has unexported fields.

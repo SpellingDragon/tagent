@@ -406,7 +406,6 @@ func RebuildProjectionFromWAL(ctx context.Context, target *ReplayProjection, cha
 		}
 		report.FullBoundary = payload.FullBoundary
 		target.fold = &payload
-		target.boundary = payload.FullBoundary
 		target.Append(ctx, entryOfRef(payload.Summary))
 		report.Entries++
 		report.Consumed = append(report.Consumed, payload.ConsumedKeys...)

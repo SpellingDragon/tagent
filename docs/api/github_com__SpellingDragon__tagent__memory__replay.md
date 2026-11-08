@@ -625,9 +625,6 @@ func (p *ReplayProjection) FoldByAge(ctx context.Context, plan AgeFoldPlan) (Age
     enter the projection under content-addressed synthetic keys, so folding the
     same sequence twice mints the same keys and appends no second product.
 
-func (p *ReplayProjection) FullBoundary() event.EventID
-    FullBoundary returns the event-key boundary the compaction payload carried.
-
 func (p *ReplayProjection) Len() int
     Len returns how many entries the projection holds.
 
@@ -678,3 +675,13 @@ func SegmentsOf(entries []ProjectionEntry, keepRecent int) []Segment
     the closing output. An output beside no readable relation closes every entry
     before it at the positional boundary. A tail no agent output closed stays
     its own segment in progress.
+
+func (s Segment) Legacy() bool
+    Legacy reports whether the segment was closed by an agent output whose fact
+    recorded no readable input relation, so the entries before it were cut at
+    the positional boundary a chain predating the relation is interpreted under.
+    The answer is read from the closing output the segment spans, so it never
+    drifts from the entries: a segment still in progress answers false because
+    no output closed it, and a segment closed by an output that named its inputs
+    answers false whatever those inputs were. The mark is diagnostic only — the
+    segment rule, the bands and the folds read the same segments either way.

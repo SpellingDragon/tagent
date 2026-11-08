@@ -3,6 +3,7 @@ package host
 import (
 	"context"
 	"encoding/json"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -126,6 +127,7 @@ func runConfigChangeLands(t *testing.T) {
 // runConfigChangeRefused rewrites a field only Boot reads and reloads:
 //   - the reload is refused by name as requiring a restart
 //   - no config_change fact lands on the chain
+//   - the document names a durable root other than the process's own, the change requiring a restart
 func runConfigChangeRefused(t *testing.T) {
 	viewAnchorEnv(t)
 	provider := newScriptedProvider(t)
@@ -139,7 +141,7 @@ func runConfigChangeRefused(t *testing.T) {
 
 	before := host.Run().CommittedFacts()
 
-	writeHostDocumentFile(t, configPath, reloadTierDocument(root, provider.endpoint(), "model-a", root, reloadPromptBlock("boot.md"), "request_timeout_seconds: 42\n"))
+	writeHostDocumentFile(t, configPath, reloadTierDocument(filepath.Join(root, "moved"), provider.endpoint(), "model-a", root, reloadPromptBlock("boot.md")))
 	status, body := postReloadAttempt(t, host.FaceAddr())
 	if status != 409 {
 		t.Fatalf("refused reload status = %d, want 409: %s", status, body)

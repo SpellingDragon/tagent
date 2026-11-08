@@ -21,6 +21,7 @@ import (
 	"github.com/SpellingDragon/tagent/api/event"
 	"github.com/SpellingDragon/tagent/api/model"
 	"github.com/SpellingDragon/tagent/assembly"
+	"github.com/SpellingDragon/tagent/memory"
 	"github.com/SpellingDragon/tagent/memory/ledger"
 	"github.com/SpellingDragon/tagent/memory/replay"
 )
@@ -146,6 +147,80 @@ func compressRequestIDsOf(run *assembly.Run, session event.SessionID) map[event.
 	return ids
 }
 
+// compressChainFactsOf reads the compress facts one storage root holds for one
+// session chain, in commit order: the judgments and the products the chain
+// recorded, read from the durable chain itself rather than from the resident
+// window.
+func compressChainFactsOf(t *testing.T, root string, session event.SessionID) []event.Event {
+	t.Helper()
+	tier, err := ledger.OpenTier(context.Background(), ledger.StorageConfig{
+		Type: ledger.StorageLocalFile,
+		Root: root,
+	})
+	if err != nil {
+		t.Fatalf("open the storage tier of %s: %v", root, err)
+	}
+	stored, err := tier.Segments.Events(context.Background())
+	if err != nil {
+		t.Fatalf("read the event chain of %s: %v", root, err)
+	}
+	out := make([]event.Event, 0, len(stored))
+	for _, one := range stored {
+		body, err := memory.DecodeEventBody(one.Body)
+		if err != nil {
+			t.Fatalf("decode the committed event %s of %s: %v", one.Key, root, err)
+		}
+		evt := body.Event()
+		evt.Key = one.Key
+		if evt.Type != event.CompressRequestType && evt.Type != event.CompressProductType {
+			continue
+		}
+		if sessionOfEvent(evt) != session {
+			continue
+		}
+		out = append(out, evt)
+	}
+	return out
+}
+
+// compressChainIdentities renders the compress facts of one chain for a
+// comparison: the frozen type beside the fact key, sorted, so two reads of the
+// same chain compare entry for entry.
+func compressChainIdentities(facts []event.Event) []string {
+	out := make([]string, 0, len(facts))
+	for _, fact := range facts {
+		out = append(out, fact.Type+" "+string(fact.Key))
+	}
+	sort.Strings(out)
+	return out
+}
+
+// compressProductKeysOf reports the product entry keys the compress product
+// facts name, which is the key the projection presents the product under.
+func compressProductKeysOf(facts []event.Event) map[event.EventID]bool {
+	out := map[event.EventID]bool{}
+	for _, fact := range facts {
+		if fact.Type != event.CompressProductType {
+			continue
+		}
+		if key := event.EventID(fact.Meta[productFactKey]); key != "" {
+			out[key] = true
+		}
+	}
+	return out
+}
+
+// sessionOfEvent reports the session chain one event states, read from the
+// addresses the event carries in the order the chain records them.
+func sessionOfEvent(evt event.Event) event.SessionID {
+	for _, addr := range []event.Address{evt.Owner, evt.Target, evt.Source} {
+		if addr.SessionID != "" {
+			return addr.SessionID
+		}
+	}
+	return ""
+}
+
 // compressDigestOf reports a stable digest of one projection's entries, so an
 // anchor reads whether a judgment rewrote the material at all.
 func compressDigestOf(entries []replay.ProjectionEntry) string {
@@ -235,6 +310,7 @@ func TestCompressRequestIsFiledWithoutExecution(t *testing.T) {
 //   - the consumer executes each judgment and files the compress product beside it
 //   - every synthetic entry of the projection is answered by a product fact, so no stage mints a product of its own
 //   - one request answers exactly one product, and a later commit files no second one
+//   - the window after the later commits is what this anchor judges: a fold that re-summarizes earlier products releases the facts behind it
 //
 // 契约: docs/wiki/agent/event-flow.md#projection-lifecycle
 func TestCompressPipelineJudgesThenExecutes(t *testing.T) {
@@ -304,17 +380,31 @@ func TestCompressPipelineJudgesThenExecutes(t *testing.T) {
 		commitCompressTurn(t, ctx, run, addr, turn)
 	}
 	afterProducts, afterAnswers := compressProductsOf(t, run, addr.SessionID)
-	if len(afterProducts) < filedProducts {
-		t.Fatalf("the later commits dropped the products from %d to %d, want the chain to keep them", filedProducts, len(afterProducts))
+	if len(afterProducts) == 0 {
+		t.Fatalf("the later commits left the resident window holding no product at all, so the fold form stopped presenting")
+	}
+	seen := map[event.EventID]bool{}
+	for _, product := range afterProducts {
+		if seen[product.Key] {
+			t.Fatalf("the later commits filed the product %s twice, want one line per product", product.Key)
+		}
+		seen[product.Key] = true
 	}
 	for request, answered := range afterAnswers {
 		if answered != 1 {
 			t.Fatalf("the judgment %s answers %d product(s) after further commits, want at most one", request, answered)
 		}
 	}
+	before := map[event.EventID]bool{}
 	for _, product := range products {
-		if afterAnswers[product.Request] != 1 {
-			t.Fatalf("the re-observed judgment %s changed its answer count, want the one product it already had", product.Request)
+		before[product.Key] = true
+	}
+	for _, product := range afterProducts {
+		if before[product.Key] {
+			continue
+		}
+		if _, reobserved := answers[product.Request]; reobserved {
+			t.Fatalf("the later commits re-answered the judgment %s with the product %s, want the one product it already had", product.Request, product.Key)
 		}
 	}
 	t.Logf("[compress 2] chain: %d request(s) -> %d product(s) -> %d synthetic entr(ies); later commits filed no second product for any existing judgment",
@@ -325,6 +415,7 @@ func TestCompressPipelineJudgesThenExecutes(t *testing.T) {
 //   - the commits under a budgeted window fold the projection and file the products they executed
 //   - a second assembly over the same storage restores the same product keys, key for key
 //   - the restart files no judgment and no product: the fold form is read, never re-derived
+//   - both claims are read from the chain, not the window: the resident ledger holds only the band the projection presents
 //   - the next real request carries the restored product text and none of the raw detail the product consumed
 //
 // 契约: docs/wiki/agent/event-flow.md#projection-lifecycle
@@ -372,6 +463,7 @@ func TestCompressProductRestoresAfterRestart(t *testing.T) {
 	probe := &entryModel{name: "model-a", answer: func(*model.Request) *model.Response {
 		return entryFinalTurn("the restarted answer")
 	}}
+	chainBefore := compressChainFactsOf(t, storage.Root, addr.SessionID)
 	restarted, err := assembly.Assemble(ctx, decl, newAgents(probe), assembly.WithGovernance(passPolicy{}), assembly.WithStorage(storage))
 	if err != nil {
 		t.Fatalf("restart over the same storage: %v", err)
@@ -380,11 +472,15 @@ func TestCompressProductRestoresAfterRestart(t *testing.T) {
 	if strings.Join(keysOfEventIDs(restored), "|") != strings.Join(keysOfEventIDs(online), "|") {
 		t.Fatalf("the restart restored the products %v, want the %v the chain holds: the fold form is read from the facts, never re-folded", restored, online)
 	}
-	if filed := len(compressFactsOf(restarted, addr.SessionID, event.CompressRequestType)); filed != 0 {
-		t.Fatalf("the restart filed %d compress request(s), want none: a restore re-derives no judgment", filed)
+	chainAfter := compressChainFactsOf(t, storage.Root, addr.SessionID)
+	backedOnChain := compressProductKeysOf(chainAfter)
+	for _, key := range restored {
+		if !backedOnChain[key] {
+			t.Fatalf("the restarted projection presents %s, which no compress product fact of the chain answers: the fold form was minted by the restore", key)
+		}
 	}
-	if filed := len(compressFactsOf(restarted, addr.SessionID, event.CompressProductType)); filed != len(products) {
-		t.Fatalf("the restart holds %d product fact(s), want the %d the chain recorded: a restore mints no second product", filed, len(products))
+	if got, want := compressChainIdentities(chainAfter), compressChainIdentities(chainBefore); strings.Join(got, "|") != strings.Join(want, "|") {
+		t.Fatalf("the restart recorded the compress facts %v, want the %v the process before it filed: a restore re-derives no judgment and mints no second product", got, want)
 	}
 
 	if _, err := restarted.Invoke(ctx, assembly.InvokeRequest{

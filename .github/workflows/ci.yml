@@ -271,17 +271,24 @@ jobs:
     # 7) and 5251.0s (seed 42) before failing on the delegation assertion fixed in
     # bc506fbb; seed 1 was killed at the 5400s bound and wrote no evidence at all.
     # Per-generation cost grows with the chain, so the 13 generations left project
-    # to ~7400s end to end. --timeout 10800 bounds one shard at ~1.46x that
-    # projection, and timeout-minutes 240 (14400s) leaves 3600s for checkout,
-    # toolchain setup, tmux install and the upload. The 5400s this replaces was
-    # calibrated on a 3086s local -race run x 1.75, which assumed a runner costs
-    # what the measuring workstation costs; a shard the bound kills uploads no
-    # evidence, so the bound has to leave the shard room to write its record.
-    timeout-minutes: 240
+    # to ~7400s end to end. The budget is no longer read off that single sample:
+    # 03.10's recalibration measured one shard at 4180s, and the six-shard serial
+    # total is 424min (4180s x 6 ~= 418min plus ~5min setup). --timeout 6270 is
+    # that measurement x the 1.5 margin this file uses elsewhere, and
+    # timeout-minutes 110 is the same bound plus checkout/toolchain/tmux/upload,
+    # because each matrix entry is its own job and cannot borrow the serial total.
+    timeout-minutes: 110
     strategy:
       # A red shard must not cancel the other five: every combination keeps
       # its own evidence.
       fail-fast: false
+      # Concurrency is bound to the runner's core count, not to the matrix size.
+      # A shard is one `go test` process plus the host child it spawns, so two
+      # shards already occupy all four vCPUs of ubuntu-latest; running six at
+      # once was measured to multiply recovery cost on the shared slow disk
+      # (every commit rewrites the ledger shard snapshot). max-parallel keeps the
+      # same six combinations and only changes how many run at a time.
+      max-parallel: 2
       matrix:
         seed: [1, 7, 42]
         window: [256, 32768]
@@ -300,15 +307,22 @@ jobs:
       # One shard is 1200 distinct inputs / 120 real process restarts; the six
       # shards add up to 7200 inputs / 720 restarts, and a single shard is never
       # written as 7200/720. --repeat 1 keeps one independent process per
-      # combination. --timeout bounds ONE go test process, cold build included:
-      # the 256-window shard projects to ~7400s from the 108-generation sample on
-      # run 41406032474, so 10800s (~1.46x) replaces the 5400s calibrated on a
-      # 3086s local run x 1.75.
+      # combination. --timeout bounds ONE go test process, cold build included.
+      #
+      # The generation logs live inside the uploaded tree, not in the default
+      # $TMPDIR/event-consumption-integrity/... path: the durable load scan counts
+      # (`tagent: durable load scan prefix=... keys=N`) are written by the host
+      # CHILD processes into <run dir>/logs/genNN.log, so a shard's restart history
+      # is only provable if those files travel with the evidence. --generation-logs
+      # names the same directory the child writes to; the runner judges the counts
+      # red when a prefix line is missing or a data-carrying prefix loaded zero
+      # keys, so an artifact that lost its logs can never read as a clean shard.
       - name: Event integrity long (one 1200-input/120-restart shard)
         env:
           SEED: ${{ matrix.seed }}
           WINDOW: ${{ matrix.window }}
-        run: python3 scripts/scenarios/run_runtime_scenarios.py --contract golden/runtime/event_integrity_scenarios.json --scope event-long --seed "$SEED" --window "$WINDOW" --repeat 1 --timeout 10800 --out "$RUNNER_TEMP/event-long/seed-$SEED-window-$WINDOW"
+          TAGENT_CALIBRATION_RUN_DIR: ${{ runner.temp }}/event-long/seed-${{ matrix.seed }}-window-${{ matrix.window }}/generations
+        run: python3 scripts/scenarios/run_runtime_scenarios.py --contract golden/runtime/event_integrity_scenarios.json --scope event-long --seed "$SEED" --window "$WINDOW" --repeat 1 --timeout 6270 --generation-logs "$RUNNER_TEMP/event-long/seed-$SEED-window-$WINDOW/generations" --out "$RUNNER_TEMP/event-long/seed-$SEED-window-$WINDOW"
       - name: Upload event-long shard evidence
         if: always()
         uses: actions/upload-artifact@v4

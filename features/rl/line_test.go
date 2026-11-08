@@ -122,17 +122,17 @@ func TestSampleLoopEndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatalf("seal the run: %v", err)
 	}
-	if !manifest.Sealed || manifest.Partial || manifest.Records != 10 || manifest.Dropped != 0 {
-		t.Fatalf("manifest = %+v, want five attempt lines and five annex lines sealed with no loss", manifest)
+	if !manifest.Sealed || manifest.Partial || manifest.Records != 15 || manifest.Dropped != 0 {
+		t.Fatalf("manifest = %+v, want five request evidence lines, five attempt lines and five annex lines sealed with no loss", manifest)
 	}
 	for _, ref := range refs {
 		if err := readbackProof(capture, ref); err != nil {
 			t.Fatalf("request read-back failed after the seal: %v", err)
 		}
 	}
-	attempts, statuses := storedLineCounts(t, filepath.Join(recordDir, rl.SinkRecordsFile))
-	if attempts != 5 || statuses["pass"] != 5 {
-		t.Fatalf("stored lines = attempts %d, verdicts %v, want five attempts and five pass verdicts", attempts, statuses)
+	attempts, statuses, evidence := storedLineCounts(t, filepath.Join(recordDir, rl.SinkRecordsFile))
+	if attempts != 5 || statuses["pass"] != 5 || evidence != 5 {
+		t.Fatalf("stored lines = attempts %d, verdicts %v, evidence %d, want five attempts, five pass verdicts and the five request evidence lines", attempts, statuses, evidence)
 	}
 
 	rate := float64(complete) / float64(total)
@@ -258,8 +258,8 @@ func scriptedTools(task bench.Task) []rl.VersionedName {
 }
 
 // storedLineCounts reads the sealed record file back and reports the attempt
-// lines and the annex verdicts it holds.
-func storedLineCounts(t *testing.T, path string) (int, map[string]int) {
+// lines, the annex verdicts and the request evidence lines it holds.
+func storedLineCounts(t *testing.T, path string) (int, map[string]int, int) {
 	t.Helper()
 	content, err := os.ReadFile(path)
 	if err != nil {
@@ -267,6 +267,7 @@ func storedLineCounts(t *testing.T, path string) (int, map[string]int) {
 	}
 	attempts := 0
 	verdicts := map[string]int{}
+	evidence := 0
 	for _, raw := range splitLines(string(content)) {
 		if raw == "" {
 			continue
@@ -282,11 +283,13 @@ func storedLineCounts(t *testing.T, path string) (int, map[string]int) {
 			if annex := line.Annex(); annex != nil {
 				verdicts[annex.Verdict]++
 			}
+		case rl.RecordKindRequest:
+			evidence++
 		default:
 			t.Fatalf("sealed line kind = %q, want a recorded sample line", line.Kind)
 		}
 	}
-	return attempts, verdicts
+	return attempts, verdicts, evidence
 }
 
 // readbackProof reads one fixed request snapshot back through its reference

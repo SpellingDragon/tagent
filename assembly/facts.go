@@ -678,10 +678,17 @@ func agentOf(evt event.Event) event.AgentID {
 // change into a model request. A compression mechanism fact is refused here by
 // its frozen type as well, so an internal summary or checkpoint can never be
 // mapped into a model request even if a caller gives the fact a message body.
+// A delivery retry attempt rides the settlement family but is pipeline
+// accounting, not a settlement state: the fact records how many redrives the
+// chain already scheduled, so it maps onto no entry and never reaches the model
+// as a line of dialogue.
 //
 // 契约: docs/wiki/agent/event-flow.md#projection-lifecycle
 func mappedEntryOf(evt event.Event) (replay.ProjectionEntry, bool) {
 	if evt.Type == event.TypeConfigChange || event.CompressionMechanism(evt.Type) {
+		return replay.ProjectionEntry{}, false
+	}
+	if _, _, isRetryAttempt := deliveryRetryAttemptOf(evt); isRetryAttempt {
 		return replay.ProjectionEntry{}, false
 	}
 	content := mappedContentOf(evt.Message)

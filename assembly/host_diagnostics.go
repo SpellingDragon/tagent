@@ -321,9 +321,10 @@ func (r *Run) trainingFace(open bool) DiagnosticTraining {
 // they carry.
 func (r *Run) telemetryFace(open bool) DiagnosticTelemetry {
 	presented := r.Presentations()
+	observer := r.observerInEffect()
 	reading := DiagnosticTelemetry{
-		Face:          diagnosticFace(SubsystemTelemetry, open, r.observer != nil, reasonNoObserver),
-		Observer:      r.observer != nil,
+		Face:          diagnosticFace(SubsystemTelemetry, open, observer != nil, reasonNoObserver),
+		Observer:      observer != nil,
 		Presentations: len(presented),
 	}
 	for _, presentation := range presented {

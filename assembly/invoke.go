@@ -427,13 +427,22 @@ func (s runUnsettled) Unconsumed(ctx context.Context) ([]task.UnsettledNotice, e
 // input this process accepted and never drove is owed a drive rather than lost
 // beside a cursor kept in memory — and a restart over the same chain reads the
 // very same rounds, because the boundary is the one fact the chain records.
+//
+// The session facts are read from the durable chain when the run holds one, so
+// the owed rounds do not depend on how deep the restart rebuilt each projection:
+// a chain whose material was folded away still answers the round its last answer
+// closed. A run beside no storage tier reads the resident window instead.
 func (s runUnsettled) Unanswered(ctx context.Context) ([]task.UnsettledInput, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 	var unanswered []task.UnsettledInput
 	for _, addr := range s.run.ActiveSessions("") {
-		pending := agent.PendingInputs(s.run.SessionFacts(addr))
+		facts, err := s.run.unsettledSessionFacts(ctx, addr)
+		if err != nil {
+			return nil, err
+		}
+		pending := agent.PendingInputs(facts)
 		if len(pending) == 0 {
 			continue
 		}
@@ -452,6 +461,31 @@ func (s runUnsettled) Unanswered(ctx context.Context) ([]task.UnsettledInput, er
 		}
 	}
 	return unanswered, nil
+}
+
+// unsettledSessionFacts reports the facts of one session chain the owed-round
+// read stands past: the durable chain in commit order when the run holds one,
+// the resident window beside no tier. A failed a chain read is returned by name
+// rather than answered as an empty chain, so a session is never read as settled
+// because its chain could not be read.
+func (r *Run) unsettledSessionFacts(ctx context.Context, addr event.Address) ([]event.Event, error) {
+	if r == nil {
+		return nil, nil
+	}
+	r.mu.Lock()
+	tier := r.tier
+	r.mu.Unlock()
+	if tier == nil {
+		return r.SessionFacts(addr), nil
+	}
+	var facts []event.Event
+	if err := r.EachSessionFact(ctx, addr, func(evt event.Event) error {
+		facts = append(facts, evt)
+		return nil
+	}); err != nil {
+		return nil, fmt.Errorf("tagent: read the chain of session %s for its unanswered rounds: %w", addr.SessionID, err)
+	}
+	return facts, nil
 }
 
 // reasonInputUnanswered names the wait an input round stands in while the chain

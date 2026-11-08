@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -1202,5 +1203,247 @@ func TestBudgetConsumerPathEvidence(t *testing.T) {
 		if strings.Contains(message.Content, "## Environment") {
 			t.Fatal("snapshot still carries the environment block the budget yielded, want the decision readable from the snapshot")
 		}
+	}
+}
+
+// snapshotTestAgent is the agent the generation-snapshot checks assemble.
+const snapshotTestAgent = event.AgentID("agent-snapshot")
+
+// snapshotTestGeneration assembles one published generation of the snapshot
+// checks and answers the run beside the boundary a request of that generation
+// is assembled over. The two generations differ in exactly the two faces the
+// assembly reads from the declaration: the environment block and the window the
+// request budget is measured against.
+type snapshotTestGeneration struct {
+	run      *Run
+	boundary agent.RequestBoundary
+	natives  map[event.AgentID]NativeAgent
+	files    []config.FileRef
+}
+
+// snapshotTestGenerations assembles the run on its first generation: an agent
+// declaring the environment block under a narrow window, at one session.
+func snapshotTestGenerations(t *testing.T, ctx context.Context) snapshotTestGeneration {
+	t.Helper()
+	first := config.AgentSpec{
+		ID:                    string(snapshotTestAgent),
+		Model:                 "model-snapshot",
+		EnvironmentBlock:      true,
+		ProviderContextWindow: 4096,
+		OutputReserve:         1,
+		Files:                 []config.FileRef{budgetTestFileRef(t, "system.md", "snapshot generation one prompt", config.FileKindPrompt)},
+	}
+	natives := map[event.AgentID]NativeAgent{snapshotTestAgent: {Model: &snapshotTestModel{answer: boundaryAnchorAnswer("the snapshot answer")}}}
+	run, err := Assemble(ctx, &config.Declaration{Entry: string(snapshotTestAgent), Agents: []config.AgentSpec{first}}, natives,
+		WithGovernance(snapshotTestGovernance{}))
+	if err != nil {
+		t.Fatalf("assemble the snapshot runtime: %v", err)
+	}
+	run.mu.Lock()
+	binding, published := run.current.Agents[snapshotTestAgent]
+	run.mu.Unlock()
+	if !published {
+		t.Fatalf("no published binding of agent %s, want the assembled generation's binding", snapshotTestAgent)
+	}
+	return snapshotTestGeneration{
+		run: run,
+		boundary: agent.RequestBoundary{
+			Agent:   snapshotTestAgent,
+			Chain:   agent.RequestChain{SessionID: "session-snapshot-generation"},
+			Binding: binding,
+		},
+		natives: natives,
+		files:   first.Files,
+	}
+}
+
+// next publishes the second generation of the same agent: it declares no
+// environment block and a window of a different size, so every face the
+// assembly reads from the declaration changes under it.
+func (g snapshotTestGeneration) next(t *testing.T, ctx context.Context) {
+	t.Helper()
+	second := config.AgentSpec{
+		ID:                    string(snapshotTestAgent),
+		Model:                 "model-snapshot",
+		EnvironmentBlock:      false,
+		ProviderContextWindow: 65536,
+		OutputReserve:         1,
+		Files:                 g.files,
+	}
+	if _, err := g.run.Publish(ctx, &config.Declaration{Entry: string(snapshotTestAgent), Agents: []config.AgentSpec{second}}, g.natives); err != nil {
+		t.Fatalf("publish the next generation: %v", err)
+	}
+	if spec := g.run.agentSpecOf(snapshotTestAgent); spec.EnvironmentBlock || spec.ProviderContextWindow != 65536 {
+		t.Fatalf("spec in effect = %+v, want the later generation published", spec)
+	}
+}
+
+// TestRequestSingleGenerationSnapshot pins one generation binding per request assembly.
+//   - the assembly began on a generation that declares the environment block
+//   - the generation published while it assembled declares none
+//   - the block the request carries is still the one the assembly began on
+//
+// 契约: docs/wiki/platform/platform-subsystems.md#composition-root
+func TestRequestSingleGenerationSnapshot(t *testing.T) {
+	ctx := context.Background()
+	generation := snapshotTestGenerations(t, ctx)
+	assembly := generation.run.beginRequestAssembly(generation.boundary)
+
+	generation.next(t, ctx)
+
+	view, err := assembly.assemble(ctx)
+	if err != nil {
+		t.Fatalf("assemble the request that began before the publication: %v", err)
+	}
+	if !strings.Contains(view.DynamicSystem, "## Environment") {
+		t.Fatalf("dynamic section = %q, want the environment block of the generation the assembly began on", view.DynamicSystem)
+	}
+	if !strings.Contains(view.DynamicSystem, "- agent: "+string(snapshotTestAgent)) {
+		t.Fatalf("dynamic section = %q, want the block naming the agent the assembly began on", view.DynamicSystem)
+	}
+}
+
+// TestRequestToolAndSkillFacesStayOnTheStartingGeneration pins the tool face and the skill face of one assembly to the generation the assembly began on.
+//   - the two faces are exactly those a publication could otherwise mix into one request
+//   - the assembly began on a generation declaring the skill "alpha" beside the tool "tool-a"
+//   - the generation published while it assembled declares "beta" beside "tool-b"
+//   - the block the request carries still names alpha and tool-a, and the visible skill face it answers is the starting generation's alone
+//   - the capture of a driven generation reports the tool face the block names, so a captured request reads the generation that served it
+//
+// 契约: docs/wiki/platform/platform-subsystems.md#composition-root
+func TestRequestToolAndSkillFacesStayOnTheStartingGeneration(t *testing.T) {
+	facesAgent := event.AgentID("agent-snapshot-faces")
+	prompt := budgetTestFileRef(t, "system.md", "snapshot face prompt", config.FileKindPrompt)
+	alpha := budgetTestSkillFile(t, "alpha", "alpha body")
+	beta := budgetTestSkillFile(t, "beta", "beta body")
+	nativeOf := func(tool string) map[event.AgentID]NativeAgent {
+		return map[event.AgentID]NativeAgent{facesAgent: {
+			Model: &snapshotTestModel{answer: func(*model.Request) *model.Response {
+				return &model.Response{
+					Choices: []model.Choice{{Message: model.Message{Role: model.RoleAssistant, Content: "settled"}}},
+					Done:    true,
+				}
+			}},
+			Tools: []trpctool.CallableTool{&snapshotTestTool{name: tool, output: tool + "-out"}},
+		}}
+	}
+	declarationOf := func(skill config.FileRef) *config.Declaration {
+		return &config.Declaration{Entry: string(facesAgent), Agents: []config.AgentSpec{{
+			ID:                    string(facesAgent),
+			Model:                 "model-snapshot",
+			EnvironmentBlock:      true,
+			ProviderContextWindow: 4096,
+			OutputReserve:         1,
+			Files:                 []config.FileRef{prompt, skill},
+		}}}
+	}
+
+	t.Run("the block and the visible skill face of one assembly stay on its generation", func(t *testing.T) {
+		ctx := context.Background()
+		run, err := Assemble(ctx, declarationOf(alpha), nativeOf("tool-a"), WithGovernance(snapshotTestGovernance{}))
+		if err != nil {
+			t.Fatalf("assemble the snapshot runtime: %v", err)
+		}
+		run.mu.Lock()
+		binding, published := run.current.Agents[facesAgent]
+		run.mu.Unlock()
+		if !published {
+			t.Fatalf("no published binding of agent %s, want the assembled generation's binding", facesAgent)
+		}
+		assembly := run.beginRequestAssembly(agent.RequestBoundary{
+			Agent:   facesAgent,
+			Chain:   agent.RequestChain{SessionID: "session-snapshot-faces"},
+			Binding: binding,
+		})
+
+		if _, err := run.Publish(ctx, declarationOf(beta), nativeOf("tool-b")); err != nil {
+			t.Fatalf("publish the next generation: %v", err)
+		}
+
+		view, err := assembly.assemble(ctx)
+		if err != nil {
+			t.Fatalf("assemble the request that began before the publication: %v", err)
+		}
+		if !strings.Contains(view.DynamicSystem, "- tools: skill_load, tool-a") {
+			t.Fatalf("dynamic section = %q, want the tool face of the generation the assembly began on", view.DynamicSystem)
+		}
+		if strings.Contains(view.DynamicSystem, "tool-b") {
+			t.Fatalf("dynamic section = %q, want no tool of the generation published while it assembled", view.DynamicSystem)
+		}
+		if !strings.Contains(view.DynamicSystem, "- skills: alpha") {
+			t.Fatalf("dynamic section = %q, want the skill face of the generation the assembly began on", view.DynamicSystem)
+		}
+		if strings.Contains(view.DynamicSystem, "beta") {
+			t.Fatalf("dynamic section = %q, want no skill of the generation published while it assembled", view.DynamicSystem)
+		}
+		if len(view.VisibleSkills) != 1 || view.VisibleSkills[0] != "alpha" {
+			t.Fatalf("visible skills = %v, want the starting generation's own alpha alone", view.VisibleSkills)
+		}
+	})
+
+	t.Run("the capture of a driven generation reports the tool face it served", func(t *testing.T) {
+		ctx := context.Background()
+		run, err := Assemble(ctx, declarationOf(alpha), nativeOf("tool-a"),
+			WithGovernance(snapshotTestGovernance{}), WithCapture(snapshotTestCapture(t)))
+		if err != nil {
+			t.Fatalf("assemble the snapshot runtime: %v", err)
+		}
+		if _, err := run.Invoke(ctx, InvokeRequest{
+			InvocationID: "inv-snapshot-faces",
+			Episode:      "ep-snapshot-faces",
+			Address:      event.Address{AgentID: facesAgent, SessionID: "session-snapshot-faces"},
+			Input:        []model.Message{{Role: model.RoleUser, Content: "settle without a call"}},
+		}); err != nil {
+			t.Fatalf("invoke the assembled run: %v", err)
+		}
+		if _, err := run.Publish(ctx, declarationOf(beta), nativeOf("tool-b")); err != nil {
+			t.Fatalf("publish the next generation: %v", err)
+		}
+		records := run.RequestSnapshots()
+		if len(records) == 0 {
+			t.Fatal("capture holds no request snapshot, want the snapshot of the served decision")
+		}
+		for i, record := range records {
+			tools := make([]string, 0, len(record.Snapshot.VisibleTools))
+			for _, tool := range record.Snapshot.VisibleTools {
+				tools = append(tools, tool.Name)
+			}
+			if !slices.Contains(tools, "tool-a") {
+				t.Fatalf("snapshot %d visible tools = %v, want the tool face of the generation that served it", i, tools)
+			}
+			if slices.Contains(tools, "tool-b") {
+				t.Fatalf("snapshot %d visible tools = %v, want no tool of the generation published after it served", i, tools)
+			}
+			if len(record.Snapshot.VisibleSkills) != 1 || record.Snapshot.VisibleSkills[0].Name != "alpha" {
+				t.Fatalf("snapshot %d visible skills = %v, want the skill face of the generation that served it", i, record.Snapshot.VisibleSkills)
+			}
+		}
+	})
+}
+
+// TestRequestSnapshotNotCachedAcrossRequests pins the snapshot as per-assembly only.
+//   - the first request carries the environment block its generation declares
+//   - after a publication the same boundary assembles a second request
+//   - the second carries no block, because the new generation declares none
+//
+// 契约: docs/wiki/platform/platform-subsystems.md#composition-root
+func TestRequestSnapshotNotCachedAcrossRequests(t *testing.T) {
+	ctx := context.Background()
+	generation := snapshotTestGenerations(t, ctx)
+	first, err := generation.run.requestBoundary(ctx, generation.boundary)
+	if err != nil {
+		t.Fatalf("assemble the first request: %v", err)
+	}
+	if !strings.Contains(first.DynamicSystem, "## Environment") {
+		t.Fatalf("first dynamic section = %q, want the environment block the generation declares", first.DynamicSystem)
+	}
+	generation.next(t, ctx)
+
+	second, err := generation.run.requestBoundary(ctx, generation.boundary)
+	if err != nil {
+		t.Fatalf("assemble the request that begins after the publication: %v", err)
+	}
+	if strings.Contains(second.DynamicSystem, "## Environment") {
+		t.Fatalf("second dynamic section = %q, want no environment block: the later generation declares none", second.DynamicSystem)
 	}
 }
