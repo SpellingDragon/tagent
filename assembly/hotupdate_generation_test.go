@@ -425,8 +425,40 @@ func TestHotReloadMeditationNoRestart(t *testing.T) {
 	if plan := host.meditation.port.planInEffect(); plan == nil || plan.Agent != "user" {
 		t.Fatalf("meditation plan in effect after the refused candidate = %+v, want the plan of the generation in service", plan)
 	}
-	if gate := host.Run().ReflectionGate(); gate != nil {
-		t.Fatalf("reflection gate after a refused candidate over a boot without meditation = %v, want the watermark cleared back to none", gate)
+}
+
+// TestRefusedMeditationOverNoMeditationBootClearsWatermark pins the refused-candidate watermark restore (R35-1).
+//   - a boot without meditation still holds the fallback anchor store
+//   - a refused candidate that mounted its own store leaves the boot store in effect, not its own
+func TestRefusedMeditationOverNoMeditationBootClearsWatermark(t *testing.T) {
+	provider := newGenerationTestProvider(t)
+	root := t.TempDir()
+	configPath := filepath.Join(root, "tagent.yaml")
+	if err := os.WriteFile(filepath.Join(root, "reflect.md"), []byte("reflect on the turn"), 0o644); err != nil {
+		t.Fatalf("write the reflection prompt: %v", err)
+	}
+	host := bootGenerationHost(t, configPath, generationDocument(root, provider.URL+"/v1", ""))
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	bootGate := host.Run().ReflectionGate()
+	if bootGate == nil {
+		t.Fatal("boot holds no fallback watermark store, want the unconditional anchor store")
+	}
+	bootPath := bootGate.(*meditation.AnchorStore).Path()
+	broken := "    meditation:\n      enabled: true\n      deliver_to: [ghost]\n      prompt_file: reflect.md\n"
+	rewriteGenerationDocument(t, configPath, generationDocument(root, provider.URL+"/v1", broken))
+	if _, err := host.Reload(ctx); err == nil {
+		t.Fatal("reload of a meditation section naming an undeclared target answered success, want the fail-closed refusal")
+	}
+	gate := host.Run().ReflectionGate()
+	if gate == nil {
+		t.Fatal("reflection gate after the refused candidate = none, want the boot store restored")
+	}
+	if got := gate.(*meditation.AnchorStore).Path(); got != bootPath {
+		t.Fatalf("reflection gate after the refused candidate reads %q, want the boot store %q (the rejected candidate's store must not stand)", got, bootPath)
+	}
+	if err := host.Close(ctx); err != nil {
+		t.Fatalf("close the host: %v", err)
 	}
 }
 

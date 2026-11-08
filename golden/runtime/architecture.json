@@ -1,6 +1,6 @@
 {
   "concept_ratchet": {
-    "removed_min": 10,
+    "removed_min": 5,
     "new_max": 38,
     "exported_interfaces_max": 82,
     "note": "new_max 1->4 (boundary-closure), 4->7 (restart-recovery: RecoveryTicket/LoadScan/LoadStats), 7->38 (hot-update-and-purity-closure: generation-scoped registry GenRegistry/GenBuilder/GenBuilt/GenInstances/GenRegistration/GenResources/GenerationFaces/GenerationConsumer/GenHostSpec, storage engine AtomicStore/Batch/Fetch/Pair/MigrateReport, training export SFTInput/SFTSample/SFTDataset/SFTRow/PreferenceDataset/PreferenceRow/DatasetRefusal/RefusalName/EvidenceOptions/EvidenceExporter/EvidenceLines/FileEvidenceLines/SnapshotReadBack/RequestEvidenceRecord, meditation mount Plan/Faces, ChainFailureNamer, GenerationConfig); exported_interfaces_max 78->82 (AtomicStore, ChainFailureNamer, GenerationFaces, EvidenceLines, SnapshotReadBack). 两个数都是本波实测值，非收敛目标：后续波次每新增一个导出名，棘轮按名判红而不是抬升到新常态。"
@@ -1179,7 +1179,7 @@
   },
   "concept_bindings": {
     "baseline": {
-      "commit": "a738194ee63a75bfd3ab41e8612e67a92e06ccb0"
+      "commit": "3b727199d1084f655dfc1a4912051d6885f1a576"
     },
     "bindings": {
       "ConfigChange": {

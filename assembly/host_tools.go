@@ -1319,14 +1319,13 @@ func (p *hostMeditationPort) installReflection(next meditationReflection) (medit
 
 // restoreReflection puts one reflection loop back as the loop in effect, together
 // with the anchor store it read, so a refused candidate leaves the watermark of
-// the loop in service in place.
+// the loop in service in place. A previous loop that held no gate (a boot without
+// meditation) clears the watermark the refused candidate installed: install
+// directly so a nil gate resets rather than early-returning.
 func (p *hostMeditationPort) restoreReflection(previous meditationReflection) {
 	p.reflection.Lock()
 	p.face = previous
 	p.reflection.Unlock()
-	// A previous loop that held no gate (a boot without meditation) must clear the
-	// watermark the refused candidate installed, not leave it standing; install
-	// directly so a nil gate resets rather than early-returning.
 	if p.run != nil {
 		p.run.installWatermark(previous.gate)
 	}
