@@ -1523,6 +1523,13 @@ func (h *Host) restoreEventifiedDeliveries(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	h.mu.Lock()
+	for identity := range window {
+		if seq := deliveryHeldSeq(identity); seq > h.heldSeq {
+			h.heldSeq = seq
+		}
+	}
+	h.mu.Unlock()
 	seen := make(map[string]bool, len(declared))
 	resumed := make(map[string]bool, len(window))
 	for _, declaration := range declared {

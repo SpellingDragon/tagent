@@ -2490,3 +2490,30 @@ func TestSymptomAnchorDeliveryOutsideWindowSurvivesRestart(t *testing.T) {
 		t.Fatalf("the committed body left the hot window and restart delivered it %d times, want exactly once", got)
 	}
 }
+
+// TestRestartRestoresHeldSequence pins delivery identity recovery.
+//
+// 契约: docs/wiki/reliability/durable-delivery.md#envelope-states
+func TestRestartRestoresHeldSequence(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	storage := WithStorage(ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: root})
+	first := snapshotTestRun(t, ctx, storage)
+	addr := deliveryTestAddress("session-held-seq")
+	host := deliveryTestHost(ctx, first, newDeliveryTestSender(nil))
+	delivery := plugin.Delivery{Content: "the original held body", Lineage: "user", Target: addr}
+	if err := host.writeDeliverySettlement(ctx, addr, "delivery-7", heldStateOf(deliveryReasonApproval), delivery, time.Now(), nil); err != nil {
+		t.Fatalf("write delivery-7: %v", err)
+	}
+	restarted := snapshotTestRun(t, ctx, storage)
+	recovered := deliveryTestHost(ctx, restarted, newDeliveryTestSender(nil))
+	if err := recovered.restoreUnconsumedEvents(ctx, nil); err != nil {
+		t.Fatalf("restore the held delivery: %v", err)
+	}
+	if got := recovered.mintHeldIdentity(); got != "delivery-8" {
+		t.Fatalf("the restarted host minted %q, want delivery-8 after the existing delivery-7", got)
+	}
+	if state, known := recovered.deliveryStateOf("delivery-7"); !known || state != heldStateOf(deliveryReasonApproval) {
+		t.Fatalf("the original held body was lost or overwritten: state=%q known=%v", state, known)
+	}
+}
