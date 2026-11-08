@@ -96,7 +96,7 @@ func TestSendReentersAgentTask(t *testing.T) {
 		t.Fatalf("turn terminal = %v, want the completed turn of the delegating invocation", turn.Terminal)
 	}
 
-	receipt, found := reentryAwaitReceipt(provider, reentryCallSendSettle, reentryWindow)
+	receipt, found := reentryAwaitReceipt(host, addr, provider, reentryCallSendSettle, reentryWindow)
 	if !found {
 		t.Fatalf("the turn that reads the settled review never issued the send call:\n%s", symptomDescribe(provider.requests()))
 	}
@@ -115,7 +115,7 @@ func TestSendReentersAgentTask(t *testing.T) {
 	}
 
 	t.Run("denies_failed_task", func(t *testing.T) {
-		refused, found := reentryAwaitReceipt(provider, reentryCallSendFailed, reentryWindow)
+		refused, found := reentryAwaitReceipt(host, addr, provider, reentryCallSendFailed, reentryWindow)
 		if !found {
 			t.Fatalf("the entry turn never sent to the failed task:\n%s", symptomDescribe(provider.requests()))
 		}
@@ -136,7 +136,7 @@ func TestSendReentersAgentTask(t *testing.T) {
 	})
 
 	t.Run("denies_unknown_task", func(t *testing.T) {
-		refused, found := reentryAwaitReceipt(provider, reentryCallSendNowhere, reentryWindow)
+		refused, found := reentryAwaitReceipt(host, addr, provider, reentryCallSendNowhere, reentryWindow)
 		if !found {
 			t.Fatalf("the entry turn never sent to an unknown task:\n%s", symptomDescribe(provider.requests()))
 		}
@@ -344,12 +344,20 @@ func reentryTerminalCount(facts []event.Event, taskID event.TaskID) int {
 	return count
 }
 
-// reentryAwaitReceipt waits for the result the model read beside one call and reports
-// it, or reports that no decision issued the call at all.
-func reentryAwaitReceipt(provider *reentryProvider, callID string, window time.Duration) (string, bool) {
+// reentryAwaitReceipt waits for the result one call really settled into and reports it,
+// or reports that no decision issued the call at all.
+//
+// The receipt is read from the result fact the run committed under the call identity, not
+// from the position of a message in the transcript: a wrapped call answers with its
+// admission receipt and the outcome of the tool lands later as input material of the
+// range, so a positional read beside a call whose answer is still running takes the
+// admission receipt, or the settled body of a neighbouring call that landed first, and
+// reports it as this call's answer. The fact pairs the body with the call the run recorded
+// it for, and the transcript carries the same body once the range reads it.
+func reentryAwaitReceipt(host *assembly.Host, addr event.Address, provider *reentryProvider, callID string, window time.Duration) (string, bool) {
 	deadline := time.Now().Add(window)
 	for {
-		if receipt, ok := symptomReceipt(provider.requests(), callID); ok {
+		if receipt, ok := reentryResultFact(host.Run().SessionFacts(addr), callID); ok && reentryServed(provider.requests(), receipt) {
 			return receipt, true
 		}
 		if !time.Now().Before(deadline) {
@@ -357,6 +365,30 @@ func reentryAwaitReceipt(provider *reentryProvider, callID string, window time.D
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
+}
+
+// reentryResultFact reports the body the run recorded as the result of one call: the
+// native tool result the wrapped call committed under the call identity it answers.
+func reentryResultFact(facts []event.Event, callID string) (string, bool) {
+	for at := len(facts) - 1; at >= 0; at-- {
+		fact := facts[at]
+		if fact.Type != event.TypeActionCommand || fact.CallID != callID {
+			continue
+		}
+		return fact.Message.Content, true
+	}
+	return "", false
+}
+
+// reentryServed reports whether one request the endpoint served carries the material, which
+// is how a body recorded as a result of a call reaches the model beside it.
+func reentryServed(requests []intakeRequest, material string) bool {
+	for _, request := range requests {
+		if symptomCarries(request, material) {
+			return true
+		}
+	}
+	return false
 }
 
 // reentryAwaitReviewerRound waits for a reviewing request that carries the re-entry body
