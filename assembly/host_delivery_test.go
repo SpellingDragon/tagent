@@ -2442,3 +2442,51 @@ func TestRestartRecoveryPinsBeforeTrim(t *testing.T) {
 		t.Fatal("the unsettled settlement fact was trimmed before its recovery pin could protect it")
 	}
 }
+
+// TestSymptomAnchorDeliveryOutsideWindowSurvivesRestart pins durable discovery.
+//
+// 契约: docs/wiki/reliability/durable-delivery.md#envelope-states
+func TestSymptomAnchorDeliveryOutsideWindowSurvivesRestart(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+	root := t.TempDir()
+	storage := WithStorage(ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: root})
+	first, _ := boundaryAnchorAssemble(t, ctx, boundaryAnchorSpec(), boundaryAnchorAnswer(boundaryAnchorBody), storage)
+	addr := boundaryAnchorAddress("session-anchor-cold-restart")
+	invocation := event.InvocationID("inv-anchor-cold-restart")
+	turn := boundaryAnchorDrive(t, ctx, first, addr, invocation, "drive the cold restart anchor")
+	if turn.Terminal != model.KindCompleted {
+		t.Fatalf("the scene never formed: the turn ended as %v", turn.Terminal)
+	}
+	bodies := generatedBodiesOf(first.SessionFacts(addr), invocation)
+	if len(bodies) != 1 {
+		t.Fatalf("the scene generated %d bodies, want one", len(bodies))
+	}
+	for index := 0; index < noWindowResidentFacts+32; index++ {
+		if _, err := first.commitFactChecked(ctx, event.Event{Type: event.TypeFeedback, Timestamp: time.Now(), Owner: addr, Source: addr, Target: addr, Meta: map[string]string{event.MetaKeyEventSummary: fmt.Sprintf("cold filler %d", index)}}); err != nil {
+			t.Fatalf("commit cold filler %d: %v", index, err)
+		}
+	}
+	if _, err := first.commitFactChecked(ctx, event.Event{Type: event.TypeAgentOutput, Timestamp: time.Now(), Message: model.Message{Role: model.RoleAssistant, Content: "close a later segment without a new obligation"}, Owner: addr, Source: addr, Target: addr}); err != nil {
+		t.Fatalf("close the later segment: %v", err)
+	}
+	if _, err := first.Close(ctx, agent.CloseRequest{Timeout: time.Now().Add(20 * time.Second)}); err != nil {
+		t.Fatalf("close the seed process: %v", err)
+	}
+	restarted, _ := boundaryAnchorAssemble(t, ctx, boundaryAnchorSpec(), boundaryAnchorAnswer(boundaryAnchorFollowUpBody), storage)
+	if _, held := restarted.factOf(bodies[0].fact); held {
+		t.Fatal("the owed declaration stayed in the hot window, so the test never left the defect boundary")
+	}
+	sender := newBoundaryAnchorSender()
+	host := boundaryAnchorHost(ctx, restarted, sender)
+	if err := host.restorePendingDeliveries(ctx); err != nil {
+		t.Fatalf("restore the cold delivery: %v", err)
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	for sender.deliveredCount(boundaryAnchorBody) == 0 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if got := sender.deliveredCount(boundaryAnchorBody); got != 1 {
+		t.Fatalf("the committed body left the hot window and restart delivered it %d times, want exactly once", got)
+	}
+}

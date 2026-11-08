@@ -1428,8 +1428,8 @@ func (h *Host) restoreUnconsumedEvents(ctx context.Context, settleDriver interfa
 
 // restorePendingDeliveries rebuilds the delivery account of this host from the
 // fact chain alone:
-// - The settlement facts of the registered chains are read out of the hot fact window (noWindowResidentFacts, filtered by the family prefix), never by a scan of the storage tier.
-// - The owed declarations committed with the agent_output facts of that window name the obligations whose bodies the chain carries.
+// - Settlement facts and owed declarations are read once from the registered durable chains, never limited to the hot fact window.
+// - The latest committed settlement of each identity decides its restored state; exact reads still resolve settled identities by key.
 // - An obligation no settlement fact states is still owed: it is sent through the review ruling the live path applies, or retired when its target is not the entry.
 // - An obligation held for approval waits again under the identity and moment the chain recorded, a held(retrying) obligation resumes its bounded backoff, and a sent, refused or retired one is left as it stands.
 // - A settlement fact outside the window is still read by its exact key, so a settled obligation is never mistaken for an unregistered one and never resent.
@@ -1445,67 +1445,73 @@ func (h *Host) restorePendingDeliveries(ctx context.Context) error {
 	return h.restoreEventifiedDeliveries(ctx)
 }
 
-// settlementWindow returns the settlement facts of the registered chains out of
-// the hot fact window, keyed by delivery identity: the newest state each chain
-// window holds, and the deliveries and hold moments those facts recorded.
-func (h *Host) settlementWindow(ctx context.Context) (map[string]deliverySettlement, error) {
-	refs, err := h.run.factWindowQuery(ctx, memory.QueryOptions{
-		PartitionIDs: h.run.registeredPartitions(),
-	}.WithKeyPrefix(deliveryFactPrefix))
+// deliveryRecoveryFacts reads the registered durable chains once and returns the
+// latest settlement per obligation beside every owed declaration. An in-memory
+// run has no durable history and keeps its existing process-local window.
+func (h *Host) deliveryRecoveryFacts(ctx context.Context) (map[string]deliverySettlement, []deliverySettlement, error) {
+	states := map[string]deliverySettlement{}
+	declared := make([]deliverySettlement, 0, 8)
+	r := h.run
+	r.mu.Lock()
+	tier := r.tier
+	r.mu.Unlock()
+	if tier == nil {
+		for _, evt := range r.factWindowEvents() {
+			collectDeliveryRecoveryFact(evt, states, &declared)
+		}
+		return states, declared, nil
+	}
+	allowed := map[int]bool{}
+	for _, partition := range r.registeredPartitions() {
+		allowed[partition] = true
+	}
+	err := eachCommittedEvent(ctx, tier, func(stored ledger.StoredEvent) error {
+		if !allowed[stored.PartitionID] {
+			return nil
+		}
+		body, err := memory.DecodeEventBody(stored.Body)
+		if err != nil {
+			return fmt.Errorf("tagent: replay the committed delivery fact %s: %w", stored.Key, err)
+		}
+		evt := body.Event()
+		evt.Key = stored.Key
+		collectDeliveryRecoveryFact(evt, states, &declared)
+		return nil
+	})
 	if err != nil {
-		return nil, fmt.Errorf("tagent: read the delivery settlement facts: %w", err)
+		return nil, nil, err
 	}
-	states := make(map[string]deliverySettlement, len(refs))
-	for _, ref := range refs {
-		evt, held := h.run.factOf(ref.Key)
-		if !held {
-			continue
-		}
-		settlement, ok := settlementOf(evt)
-		if !ok {
-			continue
-		}
-		prior, seen := states[settlement.identity]
-		if !seen || settlement.fact.Timestamp.After(prior.fact.Timestamp) {
-			states[settlement.identity] = settlement
-		}
-	}
-	return states, nil
+	return states, declared, nil
 }
 
-// owedDeclarations reports the obligations the owed declarations of the hot fact
-// window name: the agent_output facts that committed with a body and stated the
-// target address and lineage the body is owed to. The declaration is the
-// registration — the fact that carries the body is the fact that states the
-// debt — so a restart reads the same set the live path delivered.
-func (h *Host) owedDeclarations() []deliverySettlement {
-	declared := make([]deliverySettlement, 0, 8)
-	for _, evt := range h.run.factWindowEvents() {
-		if evt.Type != event.TypeAgentOutput || evt.Meta[deliveryOwedMeta] != "1" {
-			continue
-		}
-		identity, ok := freshObligationOf(freshBody{fact: evt.Key})
-		if !ok {
-			continue
-		}
-		target := event.Address{
-			AgentID:   event.AgentID(evt.Meta[deliveryTargetAgentMeta]),
-			SessionID: event.SessionID(evt.Meta[deliveryTargetSessionMeta]),
-		}
-		if target.IsZero() {
-			target = evt.Owner
-		}
-		body, _ := assistantBodyOf(evt)
-		declared = append(declared, deliverySettlement{
-			identity: identity,
-			delivery: plugin.Delivery{
-				Content: body.content,
-				Lineage: evt.Meta[deliveryLineageMeta],
-				Target:  target,
-			},
-		})
+// collectDeliveryRecoveryFact folds one committed fact into the recovery set.
+func collectDeliveryRecoveryFact(evt event.Event, states map[string]deliverySettlement, declared *[]deliverySettlement) {
+	if settlement, ok := settlementOf(evt); ok {
+		states[settlement.identity] = settlement
 	}
-	return declared
+	if evt.Type != event.TypeAgentOutput || evt.Meta[deliveryOwedMeta] != "1" {
+		return
+	}
+	identity, ok := freshObligationOf(freshBody{fact: evt.Key})
+	if !ok {
+		return
+	}
+	target := event.Address{
+		AgentID:   event.AgentID(evt.Meta[deliveryTargetAgentMeta]),
+		SessionID: event.SessionID(evt.Meta[deliveryTargetSessionMeta]),
+	}
+	if target.IsZero() {
+		target = evt.Owner
+	}
+	body, _ := assistantBodyOf(evt)
+	*declared = append(*declared, deliverySettlement{
+		identity: identity,
+		delivery: plugin.Delivery{
+			Content: body.content,
+			Lineage: evt.Meta[deliveryLineageMeta],
+			Target:  target,
+		},
+	})
 }
 
 // restoreEventifiedDeliveries restores the account from the chain the run
@@ -1513,11 +1519,10 @@ func (h *Host) owedDeclarations() []deliverySettlement {
 // newest settlement fact of its identity, and every settlement fact no
 // declaration of the window explains is restored as the obligation it states.
 func (h *Host) restoreEventifiedDeliveries(ctx context.Context) error {
-	window, err := h.settlementWindow(ctx)
+	window, declared, err := h.deliveryRecoveryFacts(ctx)
 	if err != nil {
 		return err
 	}
-	declared := h.owedDeclarations()
 	seen := make(map[string]bool, len(declared))
 	resumed := make(map[string]bool, len(window))
 	for _, declaration := range declared {
