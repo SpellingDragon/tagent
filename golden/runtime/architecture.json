@@ -1179,7 +1179,7 @@
   },
   "concept_bindings": {
     "baseline": {
-      "commit": "dfdfa72e70d2cdd91ce8b1db408d5543481dc499"
+      "commit": "a738194ee63a75bfd3ab41e8612e67a92e06ccb0"
     },
     "bindings": {
       "ConfigChange": {

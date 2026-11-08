@@ -425,6 +425,9 @@ func TestHotReloadMeditationNoRestart(t *testing.T) {
 	if plan := host.meditation.port.planInEffect(); plan == nil || plan.Agent != "user" {
 		t.Fatalf("meditation plan in effect after the refused candidate = %+v, want the plan of the generation in service", plan)
 	}
+	if gate := host.Run().ReflectionGate(); gate != nil {
+		t.Fatalf("reflection gate after a refused candidate over a boot without meditation = %v, want the watermark cleared back to none", gate)
+	}
 }
 
 // TestHotReloadMeditationAnchorSurvivesRestart pins the anchor record a reopened host resumes from.
