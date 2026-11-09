@@ -1728,14 +1728,18 @@ func (r *StateRegistry) RestoreState(ctx context.Context, slices []event.Checkpo
 
 func (r *StateRegistry) SnapshotState(ctx context.Context) ([]event.CheckpointSlice, error)
     SnapshotState aggregates the state of every mounted holder in registration
-    order. A holder that fails to state its state refuses the whole snapshot by
-    name: a checkpoint missing one slice would restore that consumer beside an
-    empty state, which is worse than filing no checkpoint at all.
+    order. A holder that fails to state its state refuses the whole snapshot
+    by name: a checkpoint missing one slice would restore that consumer
+    beside an empty state, which is worse than filing no checkpoint at all.
+    The reads happen with no framework lock held and take only the holder's own,
+    so a holder that is committing beside the cut answers it instead of waiting
+    on it.
 
 type Stateful interface {
 	// StateName is the name the slice is keyed by in a checkpoint.
 	StateName() string
-	// SnapshotState states the recoverable state as JSON.
+	// SnapshotState states the recoverable state as JSON. The read is pure: the
+	// state the holder already derived, with no flush, commit or blocking wait.
 	SnapshotState(ctx context.Context) ([]byte, error)
 	// RestoreState puts one snapshot back. A payload the holder does not recognize is
 	// refused by name rather than restored as an empty state.
@@ -1745,6 +1749,16 @@ type Stateful interface {
     the name the slice is keyed by, the state it states, and the restore that
     puts that state back. The payload is the holder's own business — it is JSON,
     and no other holder and no reader of the checkpoint interprets it.
+
+    The snapshot is a pure read: it states the state the holder already derived
+    and never flushes, commits, asks another party for work, or waits for a
+    lock a commit of its own holds. The framework reads every slice at the quiet
+    point of the fact pipeline with no lock of the run held, so a holder that
+    commits under its own lock (the task registry's durable commit, the host's
+    settlement write) can never wait on the cut that is asking it for its state.
+    A holder whose state follows a fact it committed applies that fact inside
+    the commit's flight, never after it, so the state read at the quiet point
+    states every fact the cut covers.
 
 func NewMailboxState(store *MemoryStore) Stateful
     NewMailboxState returns the mailbox's recoverable state as the framework

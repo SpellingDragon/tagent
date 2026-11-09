@@ -4,6 +4,8 @@
 
 抵达 DoD 的唯一路径：W0 先立两锚红+exec 探针证明事件指引整代装配可行并冻结共享契约 → W1 并发清交付/读面/门禁文档 → W2 hygiene → W3 全清单消费者每代装配 → W4 混沌+收尾；当前最大风险＝storage 根变更的在途安全（5.7），探针失败则具名保留 restart 档并回写 proposal，不阻主线。
 
+**甲案阶段（r47/r48 后，用户裁决「一口气做干净」）**：Wave1 夹带清零（S/C/D 三轨并行）→ Wave2 会话级协调者下沉＋`Stateful` 收编 g(x) → Wave3 有界投影 → 收口合并。当前最大风险＝Wave3 若再以「删已提交事实」或「跳过压缩判决集」换有界，会原样重演 12.12/12.13 的整段回退（证据见 12/tasks.md 五节判决理由）；故 Wave3 重开的前置是 answered 切片，不是压缩手段本身。
+
 ## 二、编排四问
 
 ### 2.1 次序（就绪孙任务表；派发原子=孙任务）
@@ -45,12 +47,26 @@
 
 **W5（合并阻断增补）domain 12-checkpoint-state**：LongRun boot 二次扫描挂死（Unsettled 逐站点全史读，O(站点×事件)）阻断 PR#37。用户裁决统一 checkpoint 事实族（Flink 框架状态管理），取代 06 D3「快照装全状态否决」一条、继承 D4 折叠锚一致性切面。契约冻结于 12/design.md D1-D7。派发：12.2-12.6 耦合簇（api/event+assembly/run+host_delivery+runtime/state 共享）合单派一个 openspec-apply 顺序实施；12.7 测试契约冻结后可并行；编排者终跑门为唯一终态判据。触碰集白名单＝12/tasks.md 所列；禁动他域。合并门＝LongRun 六分片全绿 + 每代 boot 成本平坦。
 
+**W6（甲案三波）domain 12 终态收口**：Wave1 夹带清零 → Wave2 会话级＋g(x) → Wave3 有界投影 → 收口合并；派发原子仍为孙任务，准入＝触碰集不相交。
+
+| 波 | 就绪孙任务/对象 | 前置 | 触碰集 | 派发单 | 验收锚（缺一不放行） |
+|---|---|---|---|---|---|
+| Wave1-S 语义夹带清零 | 12.3b/12.10 静点与结算语义的残留核对；r48-1（reload「有效声明」应为随代指针事实，既有缺陷）单列 | 12.3b/12.10 已绿 | assembly/checkpoint.go、host_delivery.go、host_reload.go | W6-1 | 正锚：`TestCheckpointWaitsForTheQuietPointOfThePipeline`；负锚：删 `r.flight.await` 必红；消费者锚：LongRun 真实宿主过 gen60 |
+| Wave1-C cadence 收口 | 12.14 已记（保留 markFlightHeld 旁路、回退 close/fold 接线）；12.15 触发器②③另行接线 | 12.14 绿 | assembly/checkpoint.go、compress_consumer | W6-2 | `go test ./assembly/ -count=1` 全绿；`TestCheckpointEmittedAtCadenceAndFold`/`TestRestoreFoldCounts` 不因新增载体改判 |
+| Wave1-D 文档台账 | 本单：wiki 四页收编＋GLOSSARY＋本文件三波计划＋新变更骨架 | 无 | docs/wiki/、docs/GLOSSARY.md、openspec/ | W6-3 | 改后 grep 实证；`openspec validate hot-update-and-purity-closure --strict` 绿 |
+| Wave2 会话级＋g(x) | `session-checkpoint-material-unification`：协调者会话级下沉、`Stateful` 收编消费者读态（reducer=g(x) 纯派生面、emitter=observation 驱动者）、六端口收敛 Material 契约 | Wave1 全绿入 dev | 新变更自述白名单 | W6-4 | 新变更 proposal/tasks 三锚冻结后派发；症状直译锚第一天红 |
+| Wave3 有界投影 | 12.12 B3 载体有界（不得删已提交事实）、12.13 B4 投影 past-cut（先补 `compress.answered` 为 `Stateful` 切片） | Wave2 的 answered 切片落地 | memory/ledger、assembly/run.go 投影种子 | W6-5 | 三方 parity（锚定/回退/全量）判决集相等；`TestTierQueryMatchesObservedRead`/`TestObservedEventsReadsBeyondHotWindow` 绿 |
+| 收口合并 | 12.8 编排者终跑门、12.9 8.1 卡 superseded 标记、F1-F4 | Wave1/Wave2/Wave3 全绿 | 门命令与台账 | W6-6 | 12.8 逐条 exit 0；F1 diff 空；`openspec validate --strict` 绿 |
+
+释放在 Wave1 三轨：S/C 同改 `assembly/checkpoint.go`，触碰集相交 ⇒ 合单串行或 S 先落再派 C；D 与二者不相交可并行。Wave2 开工前 Wave1-S/C 的 `assembly/` 写锁必须释放（等待表：12.8 之外不得留未落盘编辑）。Wave3 的 12.12/12.13 已按「回退＋立卡」记于 12/tasks.md，重开时先读其判决理由与后续纯化判据，不得以新测试期望替代回退事实。
+
 ## 四、台账
 
 | 轮 | 五查结论 | 集成验证 | 跨域裁决 | 勾选凭据 | 下轮情报 | 锁释放 |
 |---|---|---|---|---|---|---|
 | 规划 | 自审见下 | — | — | — | 基线 dev 036c3500；两锚基线红证据=host_reload.go:790(409)/host_delivery.go:547+1481(trim) | — |
+| 终审轮 | R35 两轮：首轮三阻断(doc-budget/meditation 水位代际/文档脱节)由 R4 修；复审余 R35-1(拒绝候选水位滞留)已修+TestRefusedMeditationOverNoMeditationBootClearsWatermark 钉；concept 基线重指可达 main(3b727199)、removed_min 校准 5；CI 待绿后 squash | 见 /tmp/hupc-R4、C5、R35 报告 | 登记例外 anchors/approvals/RL 为受治理债(review_by 2027-05-05) | 6.3/6.4 勾 | CI watch bd0rgbyxs | — |
+| W5 域12 进度 | 12.1-12.7a/12.7c/12.7d、12.10/12.11/12.14 已勾（事件类型+载荷、Stateful 接缝+安静点协调者、五切片接线、恢复重写删三全史读者、RecoveryTicket 退役、B1 水位、B2 NewestOfType、C3 收口） | 12.8 编排者终跑门未跑；12.7b LongRun 卡在 r48-1（reload 回退点既有缺陷）；合并门＝LongRun 六分片全绿+每代 boot 成本平坦 | 8.1 由 12.4/12.4b 开账嵌入 checkpoint 构造消解，8.1b 待 12.8 的 `TestEventIntegrityTaskContinuation` 复跑；12.12/12.13 已回退立卡，重开前置见 W6 Wave3；06 D3 一条已由 r46 勘误取代 | 12.3b `TestCheckpointWaitsForTheQuietPointOfThePipeline` 绿 ×3 -race；12.10/12.11 各自 `-run` 绿；12.14 `go test ./assembly/ -count=1` 全绿 | 12.8 终跑门；12.9 收尾回写；W6 三波 | —（12/tasks.md 写锁仍归 domain12 实施代理） |
+| W6-D 文档台账 | 文档收编完成：wiki 四页＋GLOSSARY 收敛到当前实现（B1 水位／B2 `NewestOfType`／安静点无锁／`seedFact` 隔离），目标态（会话级下沉＋`Stateful` 收编 g(x)）标于平台篇 §六；三波计划与 12.12/12.13 回退立卡核一致；新变更骨架已建 | 未跑代码门（本单禁碰代码，assembly/runtime 另代理在改） | 无 | ORCHESTRATION W6 表＋台账；12/tasks.md 小节编号修正；`docs/wiki/{platform/platform-subsystems,memory/memory-architecture,agent/agent-architecture,mechanism-tour}.md`；`docs/GLOSSARY.md`；新变更 proposal/tasks/spec | 两变更 `validate --strict` 均绿；执行期文档随 W6 各波回写 | — |
 
 （执行期逐轮回填；本档为派发唯一依据，派发前重读二节。）
-| 终审轮 | R35 两轮：首轮三阻断(doc-budget/meditation 水位代际/文档脱节)由 R4 修；复审余 R35-1(拒绝候选水位滞留)已修+TestRefusedMeditationOverNoMeditationBootClearsWatermark 钉；concept 基线重指可达 main(3b727199)、removed_min 校准 5；CI 待绿后 squash | 见 /tmp/hupc-R4、C5、R35 报告 | 登记例外 anchors/approvals/RL 为受治理债(review_by 2027-05-05) | 6.3/6.4 勾 | CI watch bd0rgbyxs | — |
-| W5 域12 进度 | 12.2-12.6 已勾：事件类型+载荷（12.2）／Stateful 接缝+协调者（12.3）／四切片接线（12.4）／恢复重写删三全史读者（12.5）／RecoveryTicket 退役（12.6）；12.4b 任务终态切片（restoreChains 降兜底）与 12.7a-c 测试收尾中 | 12.8 编排者终跑门未跑；合并门＝LongRun 六分片全绿+每代 boot 成本平坦 | 8.1 由 12.4 开账嵌入 checkpoint 构造消解，runtime-simplicity-features 8.1b 待 12.7a 绿后关闭；06 D3 一条已由 r46 勘误取代 | changes/12-checkpoint-state/tasks.md 12.1-12.6 [x]（本轮读取时点，该表由实施代理续写） | 12.7a 绿后关 8.1b；12.8 终跑门；12.9 收尾回写 | —（12/tasks.md 写锁仍归 domain12 实施代理） |

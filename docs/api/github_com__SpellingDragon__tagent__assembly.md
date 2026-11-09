@@ -5,15 +5,23 @@ Consumers that hold recoverable state register a slice on the state seam; the
 coordinator aggregates those slices at one partition-sequence cut and files the
 aggregated state as one checkpoint fact. Recovery is the mirror of it — read the
 newest checkpoint, hand every slice back to its holder, then replay the facts
-that landed past the cut through the ordinary commit pipeline — so no consumer
-owns a recovery read path of its own and the boot cost is the state size plus
-the increment past the cut, never the history.
+that landed past the cut through seedFact's isolated rebuild (memory ledger
+only, no After pass, no side effects) — so no consumer owns a recovery read path
+of its own and the boot cost is the state size plus the increment past the cut,
+never the history.
 
-The cut is consistent by construction: the coordinator takes it under the
-commit lock, so no fact lands between the watermark it reads and the state it
-snapshots. A settlement that commits after the cut is one the replay covers
-again, and its settlement is idempotent, so the restored account is at worst
-caught up twice and never short.
+The cut is consistent by construction, and the construction is an ordering of
+the single-writer pipeline rather than a lock over it: the coordinator reads the
+watermark, drains the pipeline to a quiet point, reads every slice there with no
+lock of the run held, and files the carrier through one ordinary append.
+  - The quiet point is a drain and not a fence: a commit holds the flight from
+    its landing to the state it leaves its holder in, so a pipeline holding no
+    flight has applied every fact it landed.
+  - A settlement that lands past the cut is replayed again, and its settlement
+    is idempotent, so the restored account is at worst caught up twice and never
+    short.
+  - Nothing is held across the holders' reads, so a holder that commits under
+    its own lock never waits on the cut that is asking it for its state.
 
 The owed-input state slice: the input rounds the chains of this run hold with
 no answer, as the framework checkpoint carries them. The projection slice states
@@ -60,13 +68,19 @@ refused, headless-retired} ∪ 迁移专用 owed；同（身份,终态）键重�
 旁路 KV 记录保留迁移读：迁移把记录转成事实并保留只读审计；事件化是唯一路径，没有回退账本，也没有开关。
 
 The delivery state slice: the host's whole deliverable account as the framework
-checkpoint carries it. The account is the settlement state of every obligation
-the host knows, the obligations still owed with the body, target, lineage,
-hold moment and retry attempt they stand under, and the ordering sequence the
-holds are parked by. A slice of this size is the size of the work in flight,
-never the size of the history the process committed — that is the whole point of
-the checkpoint: a restarted host restores an account that does not grow with the
-chains it already settled.
+checkpoint carries it. The account is the obligations still owed with the body,
+target, lineage, hold moment and retry attempt they stand under, the hold
+ordering sequence, and the pins kept hot for them. A slice of this size is the
+size of the work in flight, never the size of the history the process committed
+— that is the whole point of the checkpoint: a restarted host restores an
+account that does not grow with the chains it already settled.
+
+The settled set is stated by the cut instead of by a token per obligation:
+a settlement fact whose landing sits at or before the checkpoint's offset is
+covered, so every obligation outside the owed list that landed before the cut
+is settled by construction. A state token per settled identity would make the
+carrier grow with the history it exists to bound, and the chain behind it still
+answers any one obligation by its exact key.
 
 The diagnostic visibility face of the host: the unified runtime reading beside
 the reflection, training and observation faces, each opened by the switch the
@@ -211,8 +225,11 @@ const CheckpointCommitInterval = 64
 
 const CheckpointPeriod = 30 * time.Second
     CheckpointPeriod is the wall-clock bound between two framework checkpoints:
-    a quiet chain still gets a carrier, because a chain that commits little is a
-    chain whose last commit may be far behind the boot that reads it.
+    a chain that commits little is a chain whose last commit may be far behind
+    the boot that reads it, so the period asks for a carrier at the next commit
+    even when the interval has not elapsed. The due is judged where the commits
+    are, so a chain that commits nothing at all files its carrier at its close
+    instead.
 
 const CompressionConsumerName = "compress-consumer"
     CompressionConsumerName is the stable name the compression consumer answers.
@@ -1506,16 +1523,23 @@ func (r *Run) AttachReplay(chain agent.RequestChain, window FoldWindow, projecti
 
 func (r *Run) Checkpoint(ctx context.Context) (event.EventID, bool, error)
     Checkpoint takes one checkpoint of this run now and files the fact it
-    states. The cut is taken under the commit lock, so the state it snapshots
-    is the state the facts up to the watermark produced and nothing committed
-    between the two. A run beside no storage tier files nothing: a checkpoint is
-    a durable carrier, and a run with no durable history has no history to cut.
+    states. The cut names the last fact each partition had committed when
+    the cut began, and the state is read at the quiet point that follows it,
+    with no lock of this run held: the coordinator drains the pipeline — no
+    commit and no state application in flight — and asks every holder for its
+    account there. A fact that lands while the cut waits for the drain is at
+    worst caught up twice by the restore — its slice entry and its replay both
+    apply — and never one the restore skips, because every replay path applies a
+    fact by its identity.
 
-    The redline list (3 rules): MUST take the watermark and the state slices
-    under the commit lock, so no fact lands between them. MUST refuse the whole
-    checkpoint when one slice refuses to state itself, rather than restore that
-    consumer beside an empty state. MUST NOT file a checkpoint the run cannot
-    name an owner for: a fact naming no owner never reaches the storage tier.
+    The redline list (3 rules): MUST read the watermark before the state,
+    so the cut never states a position past the state it carries. MUST read
+    the holders' state with no lock of this run held, so a holder that commits
+    under its own lock never waits on the cut asking it for that state.
+    MUST refuse the whole checkpoint when one slice refuses to state itself,
+    rather than restore that consumer beside an empty state. MUST NOT file a
+    checkpoint the run cannot name an owner for: a fact naming no owner never
+    reaches the storage tier.
 
 func (r *Run) CheckpointAfterFold(ctx context.Context)
     CheckpointAfterFold files a checkpoint after a fold produced a product:

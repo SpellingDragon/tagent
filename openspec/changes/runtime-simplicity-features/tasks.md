@@ -50,7 +50,14 @@
 - 已做的相邻修复（在 hot-update-and-purity-closure 内）：settle 材料读法接受 backflow 形态（`reproductionWaitForSettleFact` 回退 notice 事实）；history 观察测试走带锁的 `SwapFrameworkLogger`。
 - [x] 8.1a 定案（2026-11-09）：案 B' 定谳，证据见根源行与 /tmp/hupc-81a-run2.log（提交成功→trim/fold 收走→读取落空）
 - [x] 8.1a2 修复案选定（2026-11-09，用户裁决）：由 hot-update-and-purity-closure domain 12-checkpoint-state 统一收编——开账义务（含 body/目标/lineage/attempt/hold）随框架 checkpoint 存续，折叠不再能收走未履行的承诺，重启经 checkpoint 恢复后补发。原三案（SegmentAnswer.Body／折叠保留 owed 输出／owed-only 补发）均被此统一机制取代。
-- [ ] 8.1b ~~实施所选方案~~ **superseded by domain 12.4b/12.7a**（开账嵌入 checkpoint + 一致性测试钉死「折叠未清义务含 body 进 checkpoint、重启只处理一次」）；待 domain 12 12.7a 绿后本卡关闭，8.1 场景由构造消解
+- [ ] 8.1b ~~实施所选方案~~ **superseded by domain 12.4b/12.7a**（开账嵌入 checkpoint + 一致性测试钉死「折叠未清义务含 body 进 checkpoint、重启只处理一次」）。核一致：12.4b/12.7a 均已绿（12.7a `-race -count=10` exit 0）；本卡关闭还缺 8.1 症状直译测试 `TestEventIntegrityTaskContinuation/notice_visible_under_small_window` 的转绿复跑证据，由 12.8 全门记录后勾选
+
+### 8.2 TestPresetToolsAssemble 既有 flake（runtime/agent late-harvest 竞态）
+
+- 场景：tests/integration/config TestPresetToolsAssemble 偶发 turn=(completed,3 decisions) 期望 2 decisions。
+- 根源：基线 worktree（domain 12 之前 HEAD）同样失败，-count=8 必红、单次基线 1/6 本树 2/6；agent loop 的 late-harvest 让同一 segment 读到迟到的第二个工具结果。属 runtime/agent（domain 12 未触碰），非本变更回归。
+- 影响范围：CI config 集成岗偶发红；修它需改 loop 关闭语义＝设计级。
+- [ ] 8.2a grilling 定 loop late-harvest 关闭语义修复案（设计级，独立变更）；CI 红时同 scope 复跑判 flaky 不阻塞无关合并
 
 ## 依赖与派发提示
 

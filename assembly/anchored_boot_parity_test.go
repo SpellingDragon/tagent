@@ -133,7 +133,7 @@ func TestAnchoredBootMatchesFullBoot(t *testing.T) {
 	}
 	fallback := windowChainRun(t, ctx, storage)
 	resetCompression(fallback)
-	fallbackSeeds, fallbackReport, err := fallback.seedAnchoredReplayBlankTypes(ctx, fallback.tier)
+	fallbackSeeds, fallbackReport, err := fallback.seedAnchoredReplay(ctx, blankTypedTier(t, ctx, fallback.tier))
 	if err != nil {
 		t.Fatalf("rebuild with no typed index: %v", err)
 	}

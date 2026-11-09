@@ -150,8 +150,7 @@ func (s *kvOriginalStore) load() error {
 
 // Put commits the original bytes of ref and publishes the reference once its barrier returns success.
 //   - Different event keys always own independent bodies; a second scope on the same key joins its references, and other bytes under a held key are refused
-//   - The body is written ahead of the reference that names it, so a reader never sees a reference whose body is not already durable
-//   - A body whose reference commit failed is an orphan no reader can reach, and CollectOrphanBodies removes it
+//   - The body and the reference that names it travel in one batch, so a reader never sees a reference whose body is missing and a failed commit leaves neither behind
 func (s *kvOriginalStore) Put(ctx context.Context, ref OriginalRef, body []byte) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -198,12 +197,12 @@ func (s *kvOriginalStore) Put(ctx context.Context, ref OriginalRef, body []byte)
 	refKey := refKVKey(ref.Key)
 	blobKey := blobKVKey(ref.Key)
 	blobStaged := !held || entry.blob == nil
+	puts := make([]Pair, 0, 2)
 	if blobStaged {
-		if err := s.kv.Commit(ctx, Batch{Puts: []Pair{{Key: blobKey, Value: body}}}); err != nil {
-			return fmt.Errorf("%w: %w", ErrCommitBarrier, err)
-		}
+		puts = append(puts, Pair{Key: blobKey, Value: body})
 	}
-	if err := s.kv.Commit(ctx, Batch{Puts: []Pair{{Key: refKey, Value: value}}}); err != nil {
+	puts = append(puts, Pair{Key: refKey, Value: value})
+	if err := s.kv.Commit(ctx, Batch{Puts: puts}); err != nil {
 		return fmt.Errorf("%w: %w", ErrCommitBarrier, err)
 	}
 	if !held {
@@ -215,46 +214,6 @@ func (s *kvOriginalStore) Put(ctx context.Context, ref OriginalRef, body []byte)
 	}
 	entry.refs[scope] = referenceRecord{ref: ref, storedAt: time.Now()}
 	return nil
-}
-
-// CollectOrphanBodies deletes every stored body no reference record names: the
-// body of a commit whose reference commit failed is durable and unreachable, so
-// it is collected here instead of being kept forever. It returns the number of
-// bodies removed, and removes nothing a readable reference still names.
-func (s *kvOriginalStore) CollectOrphanBodies(ctx context.Context) (int, error) {
-	if err := ctx.Err(); err != nil {
-		return 0, err
-	}
-	if err := s.ensureLoaded(); err != nil {
-		return 0, err
-	}
-	s.mu.Lock()
-	named := make(map[event.EventID]struct{}, len(s.byKey))
-	for key := range s.byKey {
-		named[key] = struct{}{}
-	}
-	s.mu.Unlock()
-	pairs, err := s.kv.Read(ctx, Fetch{Prefix: "blob:"})
-	if err != nil {
-		return 0, err
-	}
-	var orphans []string
-	for _, pair := range pairs {
-		key, held := strings.CutPrefix(pair.Key, "blob:")
-		if !held {
-			continue
-		}
-		if _, live := named[event.EventID(key)]; !live {
-			orphans = append(orphans, pair.Key)
-		}
-	}
-	if len(orphans) == 0 {
-		return 0, nil
-	}
-	if err := s.kv.Commit(ctx, Batch{Deletes: orphans}); err != nil {
-		return 0, fmt.Errorf("%w: %w", ErrCommitBarrier, err)
-	}
-	return len(orphans), nil
 }
 
 // Get returns the exact recall result for key, classified exactly as the

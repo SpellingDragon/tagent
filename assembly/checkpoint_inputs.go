@@ -20,11 +20,12 @@ import (
 )
 
 // restoredInput is one owed input round a checkpoint stated: the chain it
-// belongs to, the instance that accepted it and the fact the drive answers.
+// belongs to, the instance that accepted it and the identity of the fact the
+// drive answers.
 type restoredInput struct {
 	address  event.Address
 	instance event.InstanceID
-	fact     event.Event
+	key      event.EventID
 }
 
 // inputsStateSlice is the owed input rounds of the run as the framework sees it.
@@ -39,19 +40,12 @@ type inputsSliceWire struct {
 }
 
 // inputsSliceSession is the owed rounds of one chain: the address they belong
-// to, the instance that accepted them and the rounds themselves.
+// to, the instance that accepted them and the identity of each round.
 type inputsSliceSession struct {
-	Agent    string             `json:"agent"`
-	Session  string             `json:"session"`
-	Instance string             `json:"instance,omitempty"`
-	Inputs   []inputsSliceEntry `json:"inputs,omitempty"`
-}
-
-// inputsSliceEntry is one owed input round: the fact identity the drive answers
-// and the source the round declared.
-type inputsSliceEntry struct {
-	Key    string        `json:"key"`
-	Source event.Address `json:"source,omitempty"`
+	Agent    string          `json:"agent"`
+	Session  string          `json:"session"`
+	Instance string          `json:"instance,omitempty"`
+	Inputs   []event.EventID `json:"inputs,omitempty"`
 }
 
 // StateName reports the name the owed-input slice is keyed by.
@@ -87,7 +81,10 @@ func (r *Run) pendingInputsSlice(ctx context.Context) ([]byte, error) {
 			session.Instance = string(r.store.InstanceOf(addr))
 		}
 		for _, evt := range pending {
-			session.Inputs = append(session.Inputs, inputsSliceEntry{Key: string(evt.Key), Source: evt.Source})
+			if evt.Key == "" {
+				continue
+			}
+			session.Inputs = append(session.Inputs, evt.Key)
 		}
 		wire.Sessions = append(wire.Sessions, session)
 	}
@@ -107,14 +104,14 @@ func (r *Run) restoreInputsSlice(payload []byte) error {
 		if !addr.IsComplete() {
 			return fmt.Errorf("assembly: the owed-input slice names the incomplete address %v", addr)
 		}
-		for _, entry := range session.Inputs {
-			if entry.Key == "" {
+		for _, key := range session.Inputs {
+			if key == "" {
 				return fmt.Errorf("assembly: the owed-input slice of %v names a round with no identity", addr)
 			}
 			restored = append(restored, restoredInput{
 				address:  addr,
 				instance: event.InstanceID(session.Instance),
-				fact:     event.Event{Key: event.EventID(entry.Key), Source: entry.Source},
+				key:      key,
 			})
 		}
 	}
@@ -127,15 +124,31 @@ func (r *Run) restoreInputsSlice(payload []byte) error {
 // restoredInputFacts reports the owed rounds a checkpoint restored, as the facts
 // the rest criterion judges: each stands before every fact that landed past the
 // cut, so an answer committed after the cut still closes the round it answers.
-func (r *Run) restoredInputFacts(addr event.Address) []event.Event {
+//
+// The carrier states the identity of each round and the boot reads that fact
+// back from the chain, so the round reaches the criterion as the driving fact it
+// is — its frozen type and the metadata that decides whether it opens a range —
+// instead of as a placeholder no criterion recognises. The cost is the rounds
+// still owed, never the history: a round the cut covered and nothing answered is
+// one read by identity.
+func (r *Run) restoredInputFacts(ctx context.Context, addr event.Address) []event.Event {
 	r.mu.Lock()
-	defer r.mu.Unlock()
-	var facts []event.Event
+	keys := make([]event.EventID, 0, len(r.restoredInputs))
 	for _, input := range r.restoredInputs {
-		if input.address != addr {
+		if input.address != addr || input.key == "" {
 			continue
 		}
-		facts = append(facts, input.fact)
+		keys = append(keys, input.key)
+	}
+	r.mu.Unlock()
+	facts := make([]event.Event, 0, len(keys))
+	for _, key := range keys {
+		evt, err := r.CommittedEvent(ctx, key)
+		if err != nil {
+			assemblyWarn("tagent: the owed round %s the checkpoint stated could not be read back: %v", key, err)
+			continue
+		}
+		facts = append(facts, evt)
 	}
 	return facts
 }

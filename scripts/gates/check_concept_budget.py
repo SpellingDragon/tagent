@@ -245,6 +245,7 @@ BASELINE = (
     ("ctx-bare", "api/plugin/phases.go:*", 1),   # CallPassFrom：派发→受理 pass 传输（锁定工具端口无第二通道）
     ("ctx-bare", "runtime/task/wrapper.go:*", 1),    # CallFrameFrom：per-call 身份经端口唯一通道
     ("ctx-bare", "assembly/settle_turn.go:*", 1),    # settleBarrierFrom：回合终态屏障经类型化 accessor 落到驱动与投递之间
+    ("ctx-bare", "assembly/checkpoint.go:*", 1),     # flightHeldBy：切面排水判 caller 是否持 fence 单元，经类型化 accessor 单通道
     # S4 contract-surface 已出清（叶 00.24）：全部导出接口的 canonical 范例与 Godoc
     # 红线均已落地，本表不再登记 S4 债务。以下一条为再次登记：ResultDelegation 是
     # 结算携带结果正文引入的可选拓展面，范例与红线随后续批次补齐；在此之前显式

@@ -190,7 +190,7 @@ func TestJournalFraming(t *testing.T) {
 
 // TestJournalKVCommit pins the key-value seam over the journal.
 // - a committed batch reads back, survives a reopen, and a delete stops answering
-// - a barrier that did not complete reports the named failure
+// - a barrier that did not complete reports the named failure, over a writer that accepts the record and refuses the sync
 // - a later commit appends beside the earlier records instead of rewriting them
 //
 // 契约: docs/wiki/memory/memory-architecture.md#local-file-kv
@@ -235,14 +235,21 @@ func TestJournalKVCommit(t *testing.T) {
 			t.Fatalf("open the journal view: %v", err)
 		}
 		ctx := context.Background()
-		if err := kv.Commit(ctx, Batch{Puts: []Pair{{Key: "0:evt:00001", Value: []byte("first")}}}); err != nil {
-			t.Fatalf("commit the batch: %v", err)
+		reader, writer, err := os.Pipe()
+		if err != nil {
+			t.Fatalf("open the failing barrier: %v", err)
 		}
-		if err := kv.log.file.Close(); err != nil {
-			t.Fatalf("close the writer: %v", err)
-		}
-		if err := kv.Commit(ctx, Batch{}); !errors.Is(err, ErrJournalBarrier) {
-			t.Fatalf("barrier with no writer = %v, want the named barrier failure", err)
+		kv.log.mu.Lock()
+		previous := kv.log.file
+		kv.log.file = writer
+		kv.log.mu.Unlock()
+		t.Cleanup(func() {
+			reader.Close()
+			writer.Close()
+			previous.Close()
+		})
+		if err := kv.Commit(ctx, Batch{Puts: []Pair{{Key: "0:evt:00001", Value: []byte("first")}}}); !errors.Is(err, ErrJournalBarrier) {
+			t.Fatalf("commit beside a writer that accepts the record and refuses the barrier = %v, want the named barrier failure", err)
 		}
 	})
 

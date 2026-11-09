@@ -187,7 +187,7 @@ func TestAnchorRefusesBlankType(t *testing.T) {
 	if err != nil {
 		t.Fatalf("replay the whole chain: %v", err)
 	}
-	seeds, report, err := run.seedAnchoredReplayBlankTypes(ctx, run.tier)
+	seeds, report, err := run.seedAnchoredReplay(ctx, blankTypedTier(t, ctx, run.tier))
 	if err != nil {
 		t.Fatalf("rebuild with no typed index: %v", err)
 	}
@@ -220,7 +220,10 @@ func TestAnchorUnreadablePayloadFallsBack(t *testing.T) {
 	if err != nil {
 		t.Fatalf("replay the whole chain: %v", err)
 	}
-	seeds, report, err := run.seedAnchoredReplayCorrupt(ctx, run.tier)
+	if _, err := run.commitFactChecked(ctx, corruptAnchorEvent(addr)); err != nil {
+		t.Fatalf("commit the corrupt anchor: %v", err)
+	}
+	seeds, report, err := run.seedAnchoredReplay(ctx, run.tier)
 	if err != nil {
 		t.Fatalf("rebuild with a corrupt anchor: %v", err)
 	}
@@ -252,24 +255,61 @@ func TestAnchorUnreadablePayloadFallsBack(t *testing.T) {
 	}
 }
 
-// seedAnchoredReplayBlankTypes runs the anchored rebuild over an index whose
-// frozen event types are all blank, so no product can be found by spelling.
-func (r *Run) seedAnchoredReplayBlankTypes(ctx context.Context, tier *ledger.Tier) (map[event.Address]*sessionSeed, seedReport, error) {
-	return r.seedAnchoredReplayWith(ctx, tier, anchoredSeam{mutateRefs: func(refs []anchorRef) {
-		for i := range refs {
-			refs[i].typ = ""
+// blankTypedTier answers the events of one tier under an index that carries no
+// frozen event type, the index state the type-based discovery rule is judged
+// against: every body is re-committed byte for byte at the position it holds, so
+// nothing but its type could name an anchor.
+func blankTypedTier(t *testing.T, ctx context.Context, source *ledger.Tier) *ledger.Tier {
+	t.Helper()
+	opened, err := ledger.OpenTier(ctx, ledger.StorageConfig{Type: ledger.StorageMemory})
+	if err != nil {
+		t.Fatalf("open the tier whose index carries no frozen type: %v", err)
+	}
+	type position struct {
+		key       event.EventID
+		partition int
+		seq       int64
+		session   event.SessionID
+	}
+	var positions []position
+	if err := source.Segments.EachIndexNewestFirst(ctx, func(key event.EventID, partition int, seq int64, _ string, session event.SessionID) error {
+		positions = append(positions, position{key: key, partition: partition, seq: seq, session: session})
+		return nil
+	}); err != nil {
+		t.Fatalf("walk the source index: %v", err)
+	}
+	for _, at := range positions {
+		stored, held, err := source.Segments.GetEvent(ctx, at.key)
+		if err != nil {
+			t.Fatalf("read the stored event %s: %v", at.key, err)
 		}
-	}})
+		if !held {
+			t.Fatalf("the index names %s but the tier holds no body for it", at.key)
+		}
+		record := ledger.SegmentRecord{
+			PartitionID: stored.PartitionID,
+			WindowTS:    stored.WindowTS,
+			Seq:         stored.Seq,
+			EventKey:    stored.Key,
+			EventTime:   stored.WindowTS,
+			Body:        stored.Body,
+		}.WithChain("", at.session)
+		if err := opened.Segments.StoreEvent(ctx, record); err != nil {
+			t.Fatalf("re-commit the event %s under no frozen type: %v", at.key, err)
+		}
+	}
+	return opened
 }
 
-// seedAnchoredReplayCorrupt runs the anchored rebuild over a chain whose newest
-// product carries an unreadable survivor payload: the anchor is refused by name
-// and the chain falls back to its full replay, with every fact still in place.
-func (r *Run) seedAnchoredReplayCorrupt(ctx context.Context, tier *ledger.Tier) (map[event.Address]*sessionSeed, seedReport, error) {
-	return r.seedAnchoredReplayWith(ctx, tier, anchoredSeam{mutateAnchor: func(evt event.Event) event.Event {
-		evt.Meta[metaKeyCompressSurvivors] = "{not-a-payload"
-		return evt
-	}})
+// corruptAnchorEvent renders the product one chain files with a survivor payload
+// no reader can decode: the fact keeps every field of its product and answers no
+// anchor, so the chain falls back to its full replay.
+func corruptAnchorEvent(addr event.Address) event.Event {
+	request := event.CompressRequestFor("assembly.test", "the corrupt anchor", "the fixture states a survivor payload no reader decodes")
+	product := event.CompressProductFor(request.ID, compressionProducer, event.EventID("-corrupt-anchor"), nil, "the corrupt summary")
+	evt := compressProductEvent(addr.SessionID, addr.AgentID, product, time.Now().UTC())
+	evt.Meta[metaKeyCompressSurvivors] = "{not-a-payload"
+	return evt
 }
 
 // TestMechanismFactsStayOutOfTheQueryFace pins the wording rule.

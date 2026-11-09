@@ -5,15 +5,19 @@
 // state seam; the coordinator aggregates those slices at one partition-sequence
 // cut and files the aggregated state as one checkpoint fact. Recovery is the
 // mirror of it — read the newest checkpoint, hand every slice back to its
-// holder, then replay the facts that landed past the cut through the ordinary
-// commit pipeline — so no consumer owns a recovery read path of its own and the
+// holder, then replay the facts that landed past the cut through seedFact's
+// isolated rebuild (memory ledger only, no After pass, no side effects) — so no
+// consumer owns a recovery read path of its own and the
 // boot cost is the state size plus the increment past the cut, never the history.
 //
-// The cut is consistent by construction: the coordinator takes it under the
-// commit lock, so no fact lands between the watermark it reads and the state it
-// snapshots. A settlement that commits after the cut is one the replay covers
-// again, and its settlement is idempotent, so the restored account is at worst
-// caught up twice and never short.
+// The cut is consistent by construction, and the construction is an ordering of
+// the single-writer pipeline rather than a lock over it: the coordinator reads
+// the watermark, drains the pipeline to a quiet point, reads every slice there
+// with no lock of the run held, and files the carrier through one ordinary
+// append.
+//   - The quiet point is a drain and not a fence: a commit holds the flight from its landing to the state it leaves its holder in, so a pipeline holding no flight has applied every fact it landed.
+//   - A settlement that lands past the cut is replayed again, and its settlement is idempotent, so the restored account is at worst caught up twice and never short.
+//   - Nothing is held across the holders' reads, so a holder that commits under its own lock never waits on the cut that is asking it for its state.
 package assembly
 
 import (
@@ -22,6 +26,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"sync"
 	"time"
 
 	"github.com/SpellingDragon/tagent/api/event"
@@ -37,8 +42,10 @@ import (
 const CheckpointCommitInterval = 64
 
 // CheckpointPeriod is the wall-clock bound between two framework checkpoints: a
-// quiet chain still gets a carrier, because a chain that commits little is a
-// chain whose last commit may be far behind the boot that reads it.
+// chain that commits little is a chain whose last commit may be far behind the
+// boot that reads it, so the period asks for a carrier at the next commit even
+// when the interval has not elapsed. The due is judged where the commits are, so
+// a chain that commits nothing at all files its carrier at its close instead.
 const CheckpointPeriod = 30 * time.Second
 
 // checkpointSliceProjection, checkpointSliceDelivery, checkpointSliceMailbox,
@@ -69,9 +76,89 @@ const (
 // restored from it.
 var ErrCheckpointUnreadable = errors.New("assembly: the checkpoint fact states no readable checkpoint")
 
+// commitFence is the quiet point of the fact pipeline: one unit of work holds it
+// from the landing of a fact to the state that fact leaves its holder in, and the
+// coordinator drains the fence before it reads any state, so a cut is taken where
+// the pipeline holds nothing half applied.
+//
+// The fence never excludes a commit: it is a count the coordinator waits on, not
+// a lock the writer takes, so a commit that starts beside a cut lands past the
+// cut's watermark and is replayed by the boot. Excluding it would be the lock over
+// the commit stream this fence replaces — the one a holder's own commit waits on
+// from inside the state reading that asked for it.
+type commitFence struct {
+	mu sync.Mutex
+	// inFlight is the number of units of work the pipeline holds.
+	inFlight int
+	// idle is the channel a drain parks on: nil while no unit is in flight, and
+	// a fresh channel closed by the unit that takes the last one off.
+	idle chan struct{}
+}
+
+// flightHeldKey marks the context of a caller that carries a unit of work on the
+// fence: a cut asked from inside such a caller is a cut that would drain the work
+// asking for it, so the cadence files it aside instead of inline.
+type flightHeldKey struct{}
+
+// markFlightHeld marks one context as carried by a caller holding a fence unit.
+func markFlightHeld(ctx context.Context) context.Context {
+	return context.WithValue(ctx, flightHeldKey{}, true)
+}
+
+// flightHeldBy reports whether the caller of this context holds a fence unit.
+func flightHeldBy(ctx context.Context) bool {
+	held, _ := ctx.Value(flightHeldKey{}).(bool)
+	return held
+}
+
+// enter counts one unit of work onto the fence.
+func (f *commitFence) enter() {
+	f.mu.Lock()
+	if f.inFlight == 0 {
+		f.idle = make(chan struct{})
+	}
+	f.inFlight++
+	f.mu.Unlock()
+}
+
+// leave counts one unit of work off the fence and answers every drain parked on
+// it once the pipeline holds none.
+func (f *commitFence) leave() {
+	f.mu.Lock()
+	f.inFlight--
+	if f.inFlight <= 0 && f.idle != nil {
+		close(f.idle)
+		f.idle = nil
+	}
+	f.mu.Unlock()
+}
+
+// await answers once the pipeline holds no unit of work: the quiet point a cut
+// reads its state at. A unit that enters beside the returned answer lands past
+// the cut the caller has already read, so the drain never waits for work the cut
+// must also cover.
+func (f *commitFence) await(ctx context.Context) error {
+	for {
+		f.mu.Lock()
+		idle := f.idle
+		f.mu.Unlock()
+		if idle == nil {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-idle:
+		}
+	}
+}
+
 // checkpointDefaults fills the cadence dials of one run: a run that names none
 // keeps the family constants, and a check that wants a checkpoint on the next
-// commit shortens the interval.
+// commit shortens the interval. The period counts from the moment the cadence
+// opens, so a run that has just assembled files its first carrier after a period
+// or an interval of commits rather than an empty one beside its first fact: the
+// chains of such a run are young, and the boot folds them bounded instead.
 func (r *Run) checkpointDefaults() {
 	if r.states == nil {
 		r.states = state.NewStateRegistry()
@@ -109,15 +196,16 @@ func (r *Run) RegisterStateSlice(holder state.Stateful) (func(), error) {
 // slot each partition has committed. The cut is the partition sequence the
 // landing path numbers commits with, never the process-local identity counter,
 // because that counter is neither monotonic across restarts nor comparable
-// between partitions.
+// between partitions. The read takes the landing lock the slot map is guarded by,
+// so a cut never reads the slots beside a commit claiming one.
 func (r *Run) checkpointWatermark() event.CheckpointOffset {
-	r.mu.Lock()
-	defer r.mu.Unlock()
+	r.landing.Lock()
+	defer r.landing.Unlock()
 	return r.checkpointWatermarkLocked()
 }
 
-// checkpointWatermarkLocked is checkpointWatermark under the run lock the caller
-// holds.
+// checkpointWatermarkLocked is checkpointWatermark under the landing lock the
+// caller holds.
 func (r *Run) checkpointWatermarkLocked() event.CheckpointOffset {
 	offset := make(event.CheckpointOffset, len(r.landedSeq))
 	for partition, seq := range r.landedSeq {
@@ -127,27 +215,33 @@ func (r *Run) checkpointWatermarkLocked() event.CheckpointOffset {
 }
 
 // Checkpoint takes one checkpoint of this run now and files the fact it states.
-// The cut is taken under the commit lock, so the state it snapshots is the state
-// the facts up to the watermark produced and nothing committed between the two.
-// A run beside no storage tier files nothing: a checkpoint is a durable carrier,
-// and a run with no durable history has no history to cut.
+// The cut names the last fact each partition had committed when the cut began,
+// and the state is read at the quiet point that follows it, with no lock of this
+// run held: the coordinator drains the pipeline — no commit and no state
+// application in flight — and asks every holder for its account there. A fact
+// that lands while the cut waits for the drain is at worst caught up twice by the
+// restore — its slice entry and its replay both apply — and never one the restore
+// skips, because every replay path applies a fact by its identity.
 //
 // The redline list (3 rules):
-// MUST take the watermark and the state slices under the commit lock, so no fact lands between them.
+// MUST read the watermark before the state, so the cut never states a position past the state it carries.
+// MUST read the holders' state with no lock of this run held, so a holder that commits under its own lock never waits on the cut asking it for that state.
 // MUST refuse the whole checkpoint when one slice refuses to state itself, rather than restore that consumer beside an empty state.
 // MUST NOT file a checkpoint the run cannot name an owner for: a fact naming no owner never reaches the storage tier.
 func (r *Run) Checkpoint(ctx context.Context) (event.EventID, bool, error) {
 	if r == nil {
 		return "", false, nil
 	}
-	r.cutMu.Lock()
-	defer r.cutMu.Unlock()
+	r.checkpointMu.Lock()
+	defer r.checkpointMu.Unlock()
 	return r.checkpointLocked(ctx)
 }
 
-// checkpointLocked is Checkpoint under the commit lock the caller holds.
+// checkpointLocked is Checkpoint under the cut lock the caller holds. The lock
+// serializes the cuts of one run with each other — one cut states one account — and
+// it is taken by no commit, so it never stands between a fact and its landing.
 //
-//   - a cut whose partition filed no fact since the newest checkpoint answers that checkpoint's key and files nothing: no fact of the covered partition landed since it, so a second cut would state the state the filed one states.
+//   - every cut of one run states a key no earlier cut stated: the key is the sequence the owner partition stands at, and the carrier's own landing takes the slot after the cut it states, so the next cut beside no new fact names the next slot instead of repeating the filed one.
 func (r *Run) checkpointLocked(ctx context.Context) (event.EventID, bool, error) {
 	if err := ctx.Err(); err != nil {
 		return "", false, err
@@ -161,8 +255,8 @@ func (r *Run) checkpointLocked(ctx context.Context) (event.EventID, bool, error)
 	}
 	offset := r.checkpointWatermark()
 	key := event.EventID(event.CheckpointKey(offset[memory.PartitionIDFromName(string(owner.AgentID))]))
-	if key == r.checkpointFiled {
-		return key, false, nil
+	if err := r.flight.await(ctx); err != nil {
+		return "", false, err
 	}
 	slices, err := r.states.SnapshotState(ctx)
 	if err != nil {
@@ -174,15 +268,15 @@ func (r *Run) checkpointLocked(ctx context.Context) (event.EventID, bool, error)
 	}
 	checkpoint.Key = string(key)
 	evt := checkpointEventOf(checkpoint, owner)
-	if _, err := r.commitFactCheckedLocked(ctx, evt); err != nil {
+	if _, err := r.commitFactNoCadence(ctx, evt); err != nil {
 		return "", false, fmt.Errorf("tagent: file the framework checkpoint %s: %w", key, err)
 	}
 	r.mu.Lock()
 	r.checkpointFiled = key
 	r.checkpointOffset = offset
 	r.checkpointCommits = 0
-	r.mu.Unlock()
 	r.checkpointAt = time.Now()
+	r.mu.Unlock()
 	return key, true, nil
 }
 
@@ -230,8 +324,10 @@ func (r *Run) checkpointOwnerLocked() event.Address {
 
 // noteCheckpointCommit advances the commit cadence and files a checkpoint once
 // the interval or the period has elapsed. The call is made after one fact has
-// landed and never inside the commit lock, so the checkpoint it files takes a
-// cut of its own.
+// landed and never inside the commit lock, so the checkpoint it files takes a cut
+// of its own.
+//
+//   - a commit that reached the due while holding a quiet-point unit (the delivery settlement write is the one such caller) files nothing here: the cut drains the pipeline, so it would wait on the work asking for it. The due stands (the commit count is not reset), and the next commit outside a unit files the carrier the cadence owes.
 func (r *Run) noteCheckpointCommit(ctx context.Context) {
 	if r == nil {
 		return
@@ -240,7 +336,7 @@ func (r *Run) noteCheckpointCommit(ctx context.Context) {
 	r.checkpointCommits++
 	due := r.checkpointCommits >= r.checkpointEvery || time.Since(r.checkpointAt) >= r.checkpointPeriod
 	r.mu.Unlock()
-	if !due {
+	if !due || flightHeldBy(ctx) {
 		return
 	}
 	if _, _, err := r.Checkpoint(ctx); err != nil {
@@ -273,24 +369,21 @@ func (r *Run) CheckpointFiled() (event.EventID, event.CheckpointOffset) {
 }
 
 // newestCheckpointRef reports the newest checkpoint fact of one storage tier by
-// the frozen type alone, walking the resident index and reading no body of the
-// history the checkpoint covers. The index is ordered newest first, so the first
-// entry of the type is the newest one.
+// the frozen type alone, reading no body of the history the checkpoint covers and
+// copying no index: the store answers the entry its newest commit filed, so the
+// lookup costs one comparison per indexed entry, allocates nothing, and reads the
+// one body the answered identity names instead of the history behind it.
+//
+// The order is the commit order across partitions, never the highest partition:
+// a run whose owner moved between processes filed its newest carrier in the
+// partition of its newest process, and reading the highest partition instead
+// would restore the state of a process that stopped earlier.
 func newestCheckpointRef(ctx context.Context, tier *ledger.Tier) (anchorRef, bool, error) {
-	var found anchorRef
-	held := false
-	err := tier.Segments.EachIndexNewestFirst(ctx, func(key event.EventID, partition int, seq int64, typ string, session event.SessionID) error {
-		if held || typ != event.TypeCheckpoint {
-			return nil
-		}
-		found = anchorRef{key: key, partition: partition, seq: seq, typ: typ, session: session}
-		held = true
-		return nil
-	})
-	if err != nil {
+	key, held, err := tier.Segments.NewestOfType(ctx, event.TypeCheckpoint)
+	if err != nil || !held {
 		return anchorRef{}, false, err
 	}
-	return found, held, nil
+	return anchorRef{key: key, typ: event.TypeCheckpoint}, true, nil
 }
 
 // restoreCheckpoint reads one checkpoint fact back and hands every slice to the

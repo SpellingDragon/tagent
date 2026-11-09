@@ -1,12 +1,10 @@
 // 契约: docs/wiki/memory/memory-architecture.md#local-file-kv
 //
 // journalKV is the key-value seam of the localfile tier over its append-only
-// journal. A commit appends one record and publishes its values to the resident
-// set only after that append returned success, so a commit whose write failed
-// leaves the view answering exactly the records the file holds. Appending is not
-// the barrier: the barrier is the log's own sync, which a commit takes when it
-// carries nothing to append, so the tier that reports durable success pays for
-// one barrier per commit instead of one per stage and one per confirmation.
+// journal. A commit appends one record, completes the log's barrier over it and
+// only then publishes its values to the resident set, so a successful return
+// means the record is durable and a commit whose write or barrier failed leaves
+// the view answering exactly the records the file holds.
 package ledger
 
 import (
@@ -93,31 +91,30 @@ func (k *journalKV) Namespaces(ctx context.Context) ([]string, error) {
 	return k.log.namespaces(), nil
 }
 
-// Commit appends one record of the batch and publishes its values once that
-// append returned success. An empty batch carries nothing to append and only
-// completes the barrier, which is how a commit after earlier ones confirms what
-// they already wrote. The caller holds no staged state across a failed append:
-// the record is one frame, so it is all of the batch or none of it. A failed
-// append or sync leaves the log's own state that the process cannot name, so the
-// failure is reported as ErrCommitUncertain and the caller re-reads.
+// Commit appends one record of the batch, completes the barrier over it and
+// publishes its values once that barrier returned success. An empty batch
+// carries nothing to append and only completes the barrier, which confirms what
+// earlier commits appended. The caller holds no staged state across a failed
+// append: the record is one frame, so it is all of the batch or none of it. A
+// failed append or sync leaves the log's own state that the process cannot name,
+// so the failure is reported as ErrCommitUncertain and the caller re-reads.
 func (k *journalKV) Commit(ctx context.Context, batch Batch) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
 	k.mu.Lock()
 	defer k.mu.Unlock()
-	if len(batch.Puts) == 0 && len(batch.Deletes) == 0 {
-		if err := k.log.sync(); err != nil {
+	if len(batch.Puts) > 0 || len(batch.Deletes) > 0 {
+		record := journalRecord{Version: journalFormatVersion}
+		for _, put := range batch.Puts {
+			record.Puts = append(record.Puts, journalPut{Key: put.Key, Value: append([]byte{}, put.Value...)})
+		}
+		record.Deletes = append(record.Deletes, batch.Deletes...)
+		if err := k.log.append(record); err != nil {
 			return fmt.Errorf("%w: %w", ErrCommitUncertain, err)
 		}
-		return nil
 	}
-	record := journalRecord{Version: journalFormatVersion}
-	for _, put := range batch.Puts {
-		record.Puts = append(record.Puts, journalPut{Key: put.Key, Value: append([]byte{}, put.Value...)})
-	}
-	record.Deletes = append(record.Deletes, batch.Deletes...)
-	if err := k.log.append(record); err != nil {
+	if err := k.log.sync(); err != nil {
 		return fmt.Errorf("%w: %w", ErrCommitUncertain, err)
 	}
 	for _, put := range batch.Puts {

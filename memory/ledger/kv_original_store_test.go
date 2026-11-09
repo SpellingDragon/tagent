@@ -11,8 +11,11 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"sync"
 	"testing"
 	"time"
+
+	"github.com/SpellingDragon/tagent/api/event"
 )
 
 // TestOriginalStoreRefusesLegacySharedBodies pins a clean format boundary.
@@ -188,5 +191,133 @@ func TestKVOriginalStoreLoadReadsItsOwnEntries(t *testing.T) {
 	sort.Strings(prefixes)
 	if got, want := strings.Join(prefixes, ","), "blob:,ref:"; got != want {
 		t.Fatalf("the load read under %q, want %q", got, want)
+	}
+}
+
+// orderedStore records the commits a store makes, in order, so a check can name
+// the one commit that carried both the body and the reference of an original.
+type orderedStore struct {
+	inner AtomicStore
+	mu    sync.Mutex
+	// carried lists the keys of each commit, in commit order.
+	carried [][]string
+}
+
+// Read passes the read to the wrapped engine.
+func (s *orderedStore) Read(ctx context.Context, fetch Fetch) ([]Pair, error) {
+	return s.inner.Read(ctx, fetch)
+}
+
+// Keys enumerates the wrapped engine's keys.
+func (s *orderedStore) Keys(ctx context.Context, prefix string) ([]string, error) {
+	return s.inner.Keys(ctx, prefix)
+}
+
+// Namespaces enumerates the wrapped engine's namespaces.
+func (s *orderedStore) Namespaces(ctx context.Context) ([]string, error) {
+	return s.inner.Namespaces(ctx)
+}
+
+// Commit records the keys of the batch and then commits it.
+func (s *orderedStore) Commit(ctx context.Context, batch Batch) error {
+	keys := make([]string, 0, len(batch.Puts)+len(batch.Deletes))
+	for _, put := range batch.Puts {
+		keys = append(keys, put.Key)
+	}
+	keys = append(keys, batch.Deletes...)
+	s.mu.Lock()
+	s.carried = append(s.carried, keys)
+	s.mu.Unlock()
+	return s.inner.Commit(ctx, batch)
+}
+
+// carriesOne reports whether one commit wrote a key carrying the prefix.
+func carriesOne(keys []string, prefix string) bool {
+	for _, key := range keys {
+		if strings.HasPrefix(key, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+// TestOriginalStoreCommitsBodyAndReferenceInOneBatch pins the commit unit of one original.
+//
+//   - one Put commits the body and the reference that names it in the same batch, so no reader ever reaches a reference whose body is not stored beside it
+//   - a commit that fails leaves neither behind: no body no reference names, and no reference naming a missing body
+//   - the original reads back after the process reopens the store
+//
+// 契约: docs/wiki/memory/memory-architecture.md#event-shape
+func TestOriginalStoreCommitsBodyAndReferenceInOneBatch(t *testing.T) {
+	ctx := context.Background()
+	for _, engine := range contractEngines() {
+		t.Run(engine.name, func(t *testing.T) {
+			t.Run("one_commit_carries_body_and_reference", func(t *testing.T) {
+				root := t.TempDir()
+				ordered := &orderedStore{inner: engine.openAt(t, root)}
+				store, err := newKVOriginalStore(ordered, nil)
+				if err != nil {
+					t.Fatalf("open the original store: %v", err)
+				}
+				ref := OriginalRef{Key: "single-batch", Owner: event.Address{AgentID: "agent-a", SessionID: "session-a"}, Format: "text"}
+				body := []byte("the original text")
+				if err := store.Put(ctx, ref, body); err != nil {
+					t.Fatalf("commit the original: %v", err)
+				}
+				if carried := len(ordered.carried); carried != 1 {
+					t.Fatalf("the Put made %d commit(s), want the one batch carrying the body and its reference", carried)
+				}
+				if keys := ordered.carried[0]; !carriesOne(keys, "blob:") || !carriesOne(keys, "ref:") {
+					t.Fatalf("the one commit carried %v, want the body beside the reference that names it", keys)
+				}
+				stored, held := readOne(t, ordered, blobKVKey(ref.Key))
+				if !held || !bytes.Equal(stored, body) {
+					t.Fatalf("the stored body = (%q, %v), want the committed bytes", stored, held)
+				}
+				reopened, err := newKVOriginalStore(engine.openAt(t, root), nil)
+				if err != nil {
+					t.Fatalf("reopen the original store: %v", err)
+				}
+				if got := reopened.Get(ctx, ref.Key); got.Outcome != RecallFound || !bytes.Equal(got.Body, body) {
+					t.Fatalf("the reopened read = %+v, want the committed original", got)
+				}
+			})
+
+			t.Run("failed_commit_leaves_neither_body_nor_reference", func(t *testing.T) {
+				root := t.TempDir()
+				faults := &faultStore{inner: engine.openAt(t, root)}
+				store, err := newKVOriginalStore(faults, nil)
+				if err != nil {
+					t.Fatalf("open the original store: %v", err)
+				}
+				ref := OriginalRef{Key: "single-batch-failed", Format: "text"}
+				body := []byte("the body whose reference never landed")
+				faults.setCommitFault(func(batch Batch) error {
+					for _, put := range batch.Puts {
+						if strings.HasPrefix(put.Key, "ref:") {
+							return fmt.Errorf("%w: injected on the commit that carries the reference", ErrCommitUncertain)
+						}
+					}
+					return nil
+				})
+				if err := store.Put(ctx, ref, body); !errors.Is(err, ErrCommitBarrier) {
+					t.Fatalf("the original whose commit failed returned %v, want the named commit barrier", err)
+				}
+				if stored, held := readOne(t, faults, blobKVKey(ref.Key)); held {
+					t.Fatalf("the body of the failed commit is stored as %q, want nothing beside a reference that never landed", stored)
+				}
+				if got := store.Get(ctx, ref.Key); got.Outcome != RecallMissing {
+					t.Fatalf("the original beside no reference reads %+v, want it unreadable", got)
+				}
+				faults.setCommitFault(nil)
+				reopened, err := newKVOriginalStore(engine.openAt(t, root), nil)
+				if err != nil {
+					t.Fatalf("reopen the original store: %v", err)
+				}
+				if got := reopened.Get(ctx, ref.Key); got.Outcome != RecallMissing {
+					t.Fatalf("a reopened process reads the failed commit as %+v, want it unreadable", got)
+				}
+			})
+		})
 	}
 }

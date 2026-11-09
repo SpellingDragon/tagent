@@ -295,11 +295,16 @@ type Run struct {
 	// landing serializes the sequence slot of one partition beside the segment
 	// commit that takes it, so two facts committed at once never claim one slot.
 	landing sync.Mutex
-	// cutMu serializes the framework checkpoint cut with the commit of every
-	// fact: a fact lands and enters the live ledger under it, so a checkpoint
-	// never states a partition watermark past the state it snapshotted and never
-	// misses a fact below the watermark it states.
-	cutMu sync.Mutex
+	// checkpointMu serializes the framework checkpoint cuts of this run with each
+	// other, so one account is stated by one cut: two cuts over one slot would
+	// file two payloads under one identity. No commit takes it.
+	checkpointMu sync.Mutex
+	// flight is the quiet point of the fact pipeline: a commit holds it while it
+	// lands and until the state it leaves its holder in, and the coordinator
+	// drains it before it reads any state. The drain is what makes a cut state a
+	// state without a lock over the commit stream — a lock that a holder's own
+	// commit waits on from inside the state reading that asked for it.
+	flight commitFence
 	// states is the state seam of this run: the registry every consumer's
 	// recoverable state slice is mounted on, aggregated into one checkpoint.
 	states *state.StateRegistry
@@ -332,7 +337,9 @@ type Run struct {
 	restoredInputs []restoredInput
 	// landedSeq holds the last sequence slot each partition committed: it is
 	// seeded from the events the tier already published, so a fact committed
-	// after a restart takes the slot after the last committed one.
+	// after a restart takes the slot after the last committed one. The landing
+	// lock guards the map, so the commit that claims a slot and the cut that reads
+	// them never read a partition beside a write of it.
 	landedSeq   map[int]int64
 	records     publicationRecords
 	approver    task.Approver
@@ -655,8 +662,10 @@ func assemble(ctx context.Context, decl *config.Declaration, agents map[event.Ag
 		r.mu.Lock()
 		r.retrieval = supply
 		r.tier = tier
-		r.landedSeq = landed
 		r.mu.Unlock()
+		r.landing.Lock()
+		r.landedSeq = landed
+		r.landing.Unlock()
 		if trimAfterSeed {
 			r.trimSeededFacts()
 		}
@@ -985,9 +994,9 @@ func (r *Run) restoreInMemoryState(ctx context.Context, durable *state.DurableCo
 // mailbox and input slices state the work the process still owed. A tier holding
 // no checkpoint restores nothing and the boot reads the chains in full.
 //
-// The restore is idempotent and a holder mounted after it reads the slice from
-// the pending set, so the boot restores the carrier once more when it reads the
-// chains and every holder applies the same state twice at worst.
+// The carrier is read once per boot: a holder mounted after this call states its
+// slice from the pending set, and the chain rebuild that follows takes the state
+// this call restored instead of restoring it again.
 func (r *Run) restoreCheckpointState(ctx context.Context, tier *ledger.Tier) error {
 	if tier == nil {
 		return nil
@@ -2456,24 +2465,6 @@ func (r *Run) seedFullReplay(ctx context.Context, tier *ledger.Tier) (map[event.
 	return seeds, landed, report, nil
 }
 
-// seedAnchoredReplay rebuilds each session chain from the newest compress
-// product the index names by frozen event type, then replays only the events
-// committed after that checkpoint. The index walk reads no body of the covered
-// history; a product whose anchor payload is unreadable, and a session that
-// never folded, answer the full replay of that session instead. Anchor
-// discovery never inspects a fact key's spelling.
-func (r *Run) seedAnchoredReplay(ctx context.Context, tier *ledger.Tier) (map[event.Address]*sessionSeed, seedReport, error) {
-	return r.seedAnchoredReplayWith(ctx, tier, anchoredSeam{})
-}
-
-// anchoredSeam is the negative-anchor test seam. Production passes an empty
-// seam; the anchors use it to prove discovery keys off the frozen type alone
-// and that an unreadable anchor payload is refused by name.
-type anchoredSeam struct {
-	mutateRefs   func([]anchorRef)
-	mutateAnchor func(event.Event) event.Event
-}
-
 // anchorRef carries one resident index entry a restart rebuild reads: identity,
 // position, frozen event type and session, with no event body attached.
 type anchorRef struct {
@@ -2492,13 +2483,18 @@ type anchorSlot struct {
 	session   event.SessionID
 }
 
-// seedAnchoredReplayWith runs the anchored rebuild under a test seam.
+// seedAnchoredReplay rebuilds each session chain from the newest compress
+// product the index names by frozen event type, then replays only the events
+// committed after that checkpoint. The index walk reads no body of the covered
+// history; a product whose anchor payload is unreadable, and a session that
+// never folded, answer the full replay of that session instead. Anchor
+// discovery never inspects a fact key's spelling.
 //
 // - The survivors a checkpoint states are held to the same resident bound the full walk applies as it appends: a chain that declared no window keeps the recent material rather than every survivor the payload names.
-// - The newest checkpoint, when the store holds one, states the state every slice of the runtime had reached at its cut: the rebuild reads those slices back and then only the facts past the cut, with the covered index entries dropped before any body is read, so the boot costs the increment and not the history. Configuration records belong to no session chain and stay, being the declaration ledger the restarted run states that no slice carries.
+// - The checkpoint slices this boot restored are the state every slice of the runtime had reached at the cut: the rebuild takes those slices and reads only the facts past the cut, with the covered index entries dropped before any body is read, so the boot costs the increment and not the history. Configuration records belong to no session chain and stay, being the declaration ledger the restarted run states that no slice carries.
 // - A chain the checkpoint stated is a chain of this run even beside no fact past its cut, so its slot joins the rebuild and the tail of its chain is replayed onto the state the checkpoint states.
 // - A chain the checkpoint states beside no fold product is hydrated from its own survivors and then gets only the material past the cut replayed onto it, and it keeps the chain even beside no tail.
-func (r *Run) seedAnchoredReplayWith(ctx context.Context, tier *ledger.Tier, seam anchoredSeam) (map[event.Address]*sessionSeed, seedReport, error) {
+func (r *Run) seedAnchoredReplay(ctx context.Context, tier *ledger.Tier) (map[event.Address]*sessionSeed, seedReport, error) {
 	report := seedReport{}
 	var refs []anchorRef
 	if err := tier.Segments.EachIndexNewestFirst(ctx, func(key event.EventID, partition int, seq int64, typ string, session event.SessionID) error {
@@ -2507,17 +2503,11 @@ func (r *Run) seedAnchoredReplayWith(ctx context.Context, tier *ledger.Tier, sea
 	}); err != nil {
 		return nil, report, err
 	}
-	if seam.mutateRefs != nil {
-		seam.mutateRefs(refs)
-	}
 	report.Landed = map[int]int64{}
 	for _, entry := range refs {
 		if entry.seq > report.Landed[entry.partition] {
 			report.Landed[entry.partition] = entry.seq
 		}
-	}
-	if _, _, err := r.restoreNewestCheckpoint(ctx, tier); err != nil {
-		return nil, report, err
 	}
 	seedsRestored := r.takeRestoredProjection()
 	anchors := map[anchorSlot]int{}
@@ -2605,9 +2595,6 @@ func (r *Run) seedAnchoredReplayWith(ctx context.Context, tier *ledger.Tier, sea
 				}
 				evt := body.Event()
 				evt.Key = stored.Key
-				if seam.mutateAnchor != nil {
-					evt = seam.mutateAnchor(evt)
-				}
 				product, stated := compressProductOf(evt)
 				var survivors []anchorEntry
 				if stated {

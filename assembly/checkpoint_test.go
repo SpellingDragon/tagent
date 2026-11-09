@@ -23,6 +23,7 @@ import (
 //   - the offset the fact states is the partition sequence the run had committed
 //   - the fact carries every state slice mounted on the seam, so the projection survivors are restored, not re-folded
 //   - the cut is taken before the checkpoint fact lands, so its own partition stands one slot past the watermark it states
+//   - a cut asked for beside a chain at rest files a carrier of its own, the watermark read before that carrier lands
 //
 // 契约: docs/wiki/platform/platform-subsystems.md#framework-checkpoint
 func TestCheckpointEmittedAtCadenceAndFold(t *testing.T) {
@@ -32,7 +33,7 @@ func TestCheckpointEmittedAtCadenceAndFold(t *testing.T) {
 	addr := event.Address{AgentID: "agent-a", SessionID: "session-checkpoint-cadence"}
 	commitWindowTurns(t, ctx, run, addr, 1)
 
-	id, filedOffset := run.CheckpointFiled()
+	id, filedOffset := awaitCadenceCheckpoint(t, run, "")
 	if id == "" {
 		t.Fatal("the commit cadence filed no checkpoint fact")
 	}
@@ -82,12 +83,40 @@ func TestCheckpointEmittedAtCadenceAndFold(t *testing.T) {
 	if projection.Sessions[0].Entries[0].Key != event.EventID(timeStampKey(checkpointBase(), addr, 0, 0)) {
 		t.Fatalf("the projection slice starts at %s, want the first mapped leg of the chain", projection.Sessions[0].Entries[0].Key)
 	}
+	if _, filed, err := run.Checkpoint(ctx); err != nil || !filed {
+		t.Fatalf("file the cut of the rested chain = (%t, %v), want a filed fact", filed, err)
+	}
+	restedID, restedOffset := run.CheckpointFiled()
+	restedPartition, restedSeq := seqOfFact(t, run, restedID)
+	if got := restedOffset[restedPartition]; got != restedSeq-1 {
+		t.Fatalf("the rested cut landed at seq %d of partition %d beside a cut of %d, want the cut one slot behind it",
+			restedSeq, restedPartition, got)
+	}
+}
+
+// awaitCadenceCheckpoint waits for the cadence to file a checkpoint past the key
+// it is given and answers that key beside the cut the coordinator recorded. The
+// filing stands off the committing goroutine, so a test reads the carrier the
+// cadence owes instead of one a commit returned beside.
+func awaitCadenceCheckpoint(t *testing.T, run *Run, past event.EventID) (event.EventID, event.CheckpointOffset) {
+	t.Helper()
+	deadline := time.Now().Add(20 * time.Second)
+	for {
+		id, offset := run.CheckpointFiled()
+		if id != "" && id != past {
+			return id, offset
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the cadence filed no checkpoint past %q after 20s", past)
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
 }
 
 // TestCheckpointOffsetNotFactSeq pins the offset semantics against the identity counter.
 //   - the cut is the partition sequence, so a second partition's commits never move the first partition's offset although they move the identity counter
 //   - a restart over the same store continues the partition sequence, so its checkpoint covers more than the first although identities restart at zero
-//   - a second cadence files a checkpoint of its own whose cut stands one slot behind its own fact, the watermark following the landing slots
+//   - a second cadence files a checkpoint of its own whose cut stands behind its own fact, the watermark following the landing slots
 //
 // 契约: docs/wiki/platform/platform-subsystems.md#framework-checkpoint
 func TestCheckpointOffsetNotFactSeq(t *testing.T) {
@@ -101,7 +130,7 @@ func TestCheckpointOffsetNotFactSeq(t *testing.T) {
 	mine := event.Address{AgentID: "agent-a", SessionID: "session-offset-mine"}
 	other := event.Address{AgentID: "agent-b", SessionID: "session-offset-other"}
 	commitWindowTurns(t, ctx, first, mine, 1)
-	firstID, _ := first.CheckpointFiled()
+	firstID, _ := awaitCadenceCheckpoint(t, first, "")
 	if firstID == "" {
 		t.Fatal("the first cadence filed no checkpoint fact")
 	}
@@ -121,7 +150,7 @@ func TestCheckpointOffsetNotFactSeq(t *testing.T) {
 			cutSeq, cutPartition, ownPartitionSeq, partition)
 	}
 	commitWindowTurns(t, ctx, first, other, 2)
-	secondID, secondOffset := first.CheckpointFiled()
+	secondID, secondOffset := awaitCadenceCheckpoint(t, first, firstID)
 	if secondID == "" || secondID == firstID {
 		t.Fatalf("the second cadence filed %q, want a checkpoint of its own", secondID)
 	}
@@ -139,7 +168,7 @@ func TestCheckpointOffsetNotFactSeq(t *testing.T) {
 	startSeq := restarted.factSeq
 	restarted.mu.Unlock()
 	commitWindowTurns(t, ctx, restarted, other, 1)
-	thirdID, thirdOffset := restarted.CheckpointFiled()
+	thirdID, thirdOffset := awaitCadenceCheckpoint(t, restarted, "")
 	if thirdID == "" {
 		t.Fatal("the restarted run filed no checkpoint fact")
 	}
@@ -299,4 +328,146 @@ func checkpointSliceOf(t *testing.T, checkpoint event.Checkpoint, name string) (
 		return wire, true
 	}
 	return projectionSliceWire{}, false
+}
+
+// TestCheckpointWaitsForTheQuietPointOfThePipeline pins the point a cut is taken at.
+//   - a cut requested beside work in flight answers nothing until that work leaves, so the state it reads is never one caught mid landing
+//   - the cut answers the moment the pipeline is quiet, filing the carrier the run owes
+func TestCheckpointWaitsForTheQuietPointOfThePipeline(t *testing.T) {
+	ctx := context.Background()
+	run := windowChainRun(t, ctx)
+	addr := event.Address{AgentID: "agent-a", SessionID: "session-checkpoint-quiet"}
+	commitWindowTurns(t, ctx, run, addr, 1)
+	run.flight.enter()
+	answered := make(chan struct{})
+	var filed bool
+	var err error
+	go func() {
+		defer close(answered)
+		_, filed, err = run.Checkpoint(ctx)
+	}()
+	select {
+	case <-answered:
+		t.Fatal("the cut answered beside a unit of work in flight: the state it stated was read before the work it drains left the pipeline")
+	case <-time.After(250 * time.Millisecond):
+	}
+	run.flight.leave()
+	select {
+	case <-answered:
+	case <-time.After(20 * time.Second):
+		t.Fatal("the cut never answered beside a quiet pipeline")
+	}
+	if err != nil {
+		t.Fatalf("file the cut of the quiet pipeline: %v", err)
+	}
+	if !filed {
+		t.Fatal("the cut of the quiet pipeline filed no checkpoint")
+	}
+}
+
+// TestRestoredOwedRoundIsTheFactTheChainKeeps pins the owed-input slice.
+//   - the carrier names the identity of each round nobody drove
+//   - the boot reads that fact back, so the rest criterion judges the driving fact it is instead of a placeholder no criterion recognises
+//
+// 契约: docs/wiki/platform/platform-subsystems.md#framework-checkpoint
+func TestRestoredOwedRoundIsTheFactTheChainKeeps(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	run := windowChainRun(t, ctx)
+	addr := event.Address{AgentID: "agent-a", SessionID: "session-restored-input"}
+	evt := event.Event{
+		Key:       "the-undriven-round",
+		Type:      event.TypeExternalInput,
+		Timestamp: checkpointBase(),
+		Meta:      map[string]string{event.MetaKeyEventSummary: "ask"},
+		Message:   model.Message{Role: model.RoleUser, Content: "the round nobody drove"},
+		Owner:     addr,
+	}
+	if _, err := run.commitOnly(ctx, addr, evt); err != nil {
+		t.Fatalf("commit the undriven round: %v", err)
+	}
+	payload, err := json.Marshal(inputsSliceWire{Sessions: []inputsSliceSession{{
+		Agent:   string(addr.AgentID),
+		Session: string(addr.SessionID),
+		Inputs:  []event.EventID{evt.Key},
+	}}})
+	if err != nil {
+		t.Fatalf("encode the owed-input slice: %v", err)
+	}
+	if err := run.restoreInputsSlice(payload); err != nil {
+		t.Fatalf("restore the owed-input slice: %v", err)
+	}
+	restored := run.restoredInputFacts(ctx, addr)
+	if len(restored) != 1 {
+		t.Fatalf("the restore answered %d owed round(s), want the one the carrier named", len(restored))
+	}
+	if restored[0].Key != evt.Key || restored[0].Type != event.TypeExternalInput {
+		t.Fatalf("the restored round reads as %s/%q, want the driving fact %s of the input type", restored[0].Key, restored[0].Type, evt.Key)
+	}
+	pending := agent.PendingInputs(restored)
+	if len(pending) != 1 || pending[0].Key != evt.Key {
+		t.Fatalf("the rest criterion reads %d owed round(s) from the restore, want the one round nobody drove", len(pending))
+	}
+}
+
+// restoreCounter is the state slice a boot counts its own restores with: the
+// carrier states it, so a boot over that carrier reports how many times the cut
+// reached its holder.
+type restoreCounter struct {
+	restores *int
+}
+
+// StateName reports the name the counted slice is keyed by.
+func (s restoreCounter) StateName() string { return "assembly.restore-counter" }
+
+// SnapshotState states the slice the carrier holds.
+func (s restoreCounter) SnapshotState(context.Context) ([]byte, error) { return []byte("{}"), nil }
+
+// RestoreState counts one application of the carrier.
+func (s restoreCounter) RestoreState(context.Context, []byte) error {
+	*s.restores++
+	return nil
+}
+
+// countingBoot mounts the counted slice the moment the run opens, so the restore
+// the same boot performs reaches it.
+func countingBoot(restores *int) Option {
+	return withBootConfigReconcile(func(ctx context.Context, run *Run, decl *config.Declaration, agents map[event.AgentID]NativeAgent) error {
+		if _, err := run.RegisterStateSlice(restoreCounter{restores: restores}); err != nil {
+			return err
+		}
+		_, err := run.Publish(ctx, decl, agents)
+		return err
+	})
+}
+
+// TestBootRestoresTheCarrierOnce pins the single restore of one boot.
+//   - a boot over a store holding a checkpoint hands the cut to each holder once
+//   - the count is not the empty pass of a store holding no carrier
+//   - the run that files the carrier restores nothing, and the run that reads it restores the very slice the carrier states
+//
+// 契约: docs/wiki/platform/platform-subsystems.md#framework-checkpoint
+func TestBootRestoresTheCarrierOnce(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	storage := WithStorage(ledger.StorageConfig{Type: ledger.StorageJournal, Root: root})
+	sourceRestores := 0
+	source := windowChainRun(t, ctx, storage, countingBoot(&sourceRestores))
+	addr := event.Address{AgentID: "agent-a", SessionID: "session-restore-once"}
+	commitWindowTurns(t, ctx, source, addr, 1)
+	if _, filed, err := source.Checkpoint(ctx); err != nil || !filed {
+		t.Fatalf("file the carrier of the chain = (%t, %v), want a filed fact", filed, err)
+	}
+	if sourceRestores != 0 {
+		t.Fatalf("the boot of a store holding no carrier applied %d cut(s), want none", sourceRestores)
+	}
+
+	restores := 0
+	restarted := windowChainRun(t, ctx, storage, countingBoot(&restores))
+	if filed, _ := restarted.CheckpointFiled(); filed == "" {
+		t.Fatal("the restart states no checkpoint, so the count proves nothing")
+	}
+	if restores != 1 {
+		t.Fatalf("the restart applied the cut %d time(s), want once", restores)
+	}
 }

@@ -581,11 +581,60 @@ func (s *FileSegmentStore) eventByKey(ctx context.Context, key event.EventID) (S
 	return stored, true, nil
 }
 
-// EachIndexNewestFirst streams the resident index in the reverse of the commit
-// order, handing each entry its key, position, frozen event type and session
-// without reading any body. A restart that only needs to find the newest fact
-// of a given type walks the index alone; an entry whose type is empty leaves
-// the caller to read its body.
+// NewestOfType answers the identity of the newest resident index entry of one
+// frozen event type, copying and sorting nothing: the walk reads the resident
+// index in place and keeps one candidate, so the lookup costs one comparison per
+// indexed entry and allocates nothing whatever the history behind it. The order
+// it keeps is the window the commit was grouped under (its event time), then the
+// sequence slot, then the identity — an order that spans partitions, so a run
+// whose owner moved between processes reads the carrier its newest process filed
+// instead of the one of the highest partition. It reads no event body: the caller
+// reads the one body the answered identity names.
+//
+// A type the store holds no entry of answers found=false and no error.
+func (s *FileSegmentStore) NewestOfType(ctx context.Context, typ string) (event.EventID, bool, error) {
+	if err := ctx.Err(); err != nil {
+		return "", false, err
+	}
+	s.mu.Lock()
+	newest := event.EventID("")
+	window, seq := int64(0), int64(0)
+	held := false
+	for key, position := range s.index {
+		if position.typ != typ {
+			continue
+		}
+		if held && !newerSlot(position.window, position.seq, key, window, seq, newest) {
+			continue
+		}
+		newest, window, seq, held = key, position.window, position.seq, true
+	}
+	s.mu.Unlock()
+	return newest, held, nil
+}
+
+// newerSlot reports whether one index position stands newer than the candidate a
+// lookup holds: the window first, then the sequence slot, then the identity, so
+// the answer never depends on the order the resident index happened to be walked
+// in.
+func newerSlot(window int64, seq int64, key event.EventID, bestWindow int64, bestSeq int64, best event.EventID) bool {
+	if window != bestWindow {
+		return window > bestWindow
+	}
+	if seq != bestSeq {
+		return seq > bestSeq
+	}
+	return key > best
+}
+
+// EachIndexNewestFirst streams the resident index grouped from the highest
+// partition and, inside one partition, from the highest sequence slot to the
+// lowest, handing each entry its key, position, frozen event type and session
+// without reading any body. The order is partition-major: it ranks the slots of
+// one partition against each other and says nothing about which partition
+// committed later, so a caller that needs the newest fact of a type across
+// partitions reads NewestOfType. An entry whose type is empty leaves the caller
+// to read its body.
 func (s *FileSegmentStore) EachIndexNewestFirst(ctx context.Context, visit func(key event.EventID, partition int, seq int64, typ string, session event.SessionID) error) error {
 	if err := ctx.Err(); err != nil {
 		return err

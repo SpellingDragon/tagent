@@ -418,17 +418,18 @@ func (s runUnsettled) Unconsumed(ctx context.Context) ([]task.UnsettledNotice, e
 // beside a cursor kept in memory — and a restart over the same chain reads the
 // very same rounds, because the boundary is the one fact the chain records.
 //
-// The session facts are read from the durable chain when the run holds one, so
-// the owed rounds do not depend on how deep the restart rebuilt each projection:
-// a chain whose material was folded away still answers the round its last answer
-// closed. A run beside no storage tier reads the resident window instead.
+// The rounds split by the cut of the newest checkpoint: the rounds it covered
+// come back from the carrier by identity and are read out of the durable chain
+// the run holds, and the rounds that landed past it are the resident window of
+// each chain. A run beside no storage tier restores no cut and reads the window
+// alone.
 func (s runUnsettled) Unanswered(ctx context.Context) ([]task.UnsettledInput, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 	var unanswered []task.UnsettledInput
 	for _, addr := range s.run.ActiveSessions("") {
-		facts := s.run.restoredInputFacts(addr)
+		facts := s.run.restoredInputFacts(ctx, addr)
 		facts = append(facts, s.run.SessionFacts(addr)...)
 		pending := agent.PendingInputs(facts)
 		if len(pending) == 0 {

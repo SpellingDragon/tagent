@@ -582,6 +582,20 @@ func (h *Host) deliveryStateOf(identity string) (string, bool) {
 	return state, held
 }
 
+// restoredAccount reports whether this host's account was restored from a
+// checkpoint carrier, so the state table stands for the open account alone: the
+// settled history of such an account is its cut, and one identity the table does
+// not hold is answered by the settlement facts the chain keeps. An account this
+// process stated itself names every identity it wrote, so it needs no probe.
+func (h *Host) restoredAccount() bool {
+	if h == nil {
+		return false
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.restoredDelivery
+}
+
 // noteDeliveryState records the latest settlement state this host wrote or
 // restored for one obligation, beside the fact key that states it, and moves
 // the hot-window pin of the obligation onto the newest unsettled fact: the
@@ -627,6 +641,9 @@ func (h *Host) noteDeliveryState(identity, state string) {
 // the same chain, the same replay sequence and the same projection as any other
 // fact of the target's session: the model reads a state change of its own
 // delivery, and the projection maps it under the family's frozen type.
+//
+//   - The settlement fact and the state token noted for it are one unit of work: the account applies the state after the fact lands, so the whole write holds the run's quiet-point fence and a cut never reads the account beside a settlement the chain already carries.
+//   - The commit below reaches the cadence from inside that unit, so the cut it asks for is filed aside rather than waited for here: a cut drains the pipeline this write is part of.
 func (h *Host) writeDeliverySettlement(ctx context.Context, target event.Address, identity, state string, delivery plugin.Delivery, heldAt time.Time, extra map[string]string) error {
 	if h == nil || h.run == nil {
 		return nil
@@ -634,6 +651,9 @@ func (h *Host) writeDeliverySettlement(ctx context.Context, target event.Address
 	if identity == "" {
 		return errors.New("tagent: the delivery settlement names no identity")
 	}
+	h.run.flight.enter()
+	defer h.run.flight.leave()
+	ctx = markFlightHeld(ctx)
 	key := deliverySettlementKey(identity, state)
 	if _, held, err := h.settlementFactOf(ctx, key); err != nil {
 		return err
@@ -987,6 +1007,34 @@ func (h *Host) deliverFresh(ctx context.Context, addr event.Address, sender Mess
 	}
 }
 
+// deliverySettledOnChain reports whether the chain states one of the three
+// terminal settlements of one obligation — sent, refused or headless-retired —
+// and answers which. The three keys are read by exact identity, so the answer
+// never depends on the order two settlements of one obligation happen to carry:
+// a terminal settlement closes the obligation, and no later state reopens it.
+// It is the read a restored account makes for an identity its own table does not
+// hold, because such an account states its open work and leaves the settled set
+// to the cut.
+func (h *Host) deliverySettledOnChain(ctx context.Context, identity string) (string, bool, error) {
+	if h == nil || identity == "" {
+		return "", false, nil
+	}
+	for _, state := range []string{deliveryStateSent, deliveryStateRefused, deliveryStateHeadlessRetired} {
+		evt, held, err := h.settlementFactOf(ctx, deliverySettlementKey(identity, state))
+		if err != nil {
+			return "", false, err
+		}
+		if !held {
+			continue
+		}
+		if _, stated := settlementOf(evt); !stated {
+			continue
+		}
+		return state, true, nil
+	}
+	return "", false, nil
+}
+
 // deliveryKnown reports whether the account already states one obligation: a
 // body whose identity carries any settlement fact — held, sent, refused or
 // retired — is the account's, and the live path neither sends it again nor
@@ -1106,6 +1154,8 @@ func (h *Host) heldReasonAt(addr event.Address) (string, bool) {
 // write the same receipt, and the record it leaves is what stops a third. An
 // obligation the account refuses is reported to the driver, which keeps the entry
 // owed instead of closing it.
+//
+//   - The settled history a checkpoint restores is its cut, not a token per identity, so one identity the restored table does not hold is answered by the terminal settlements the chain keeps. The probe stays bounded by the bodies of this turn.
 func (h *Host) handoffSettledBodies(ctx context.Context, addr event.Address, notice task.Notice) error {
 	if h == nil || h.run == nil {
 		return nil
@@ -1122,6 +1172,16 @@ func (h *Host) handoffSettledBodies(ctx context.Context, addr event.Address, not
 			continue
 		}
 		state, known := h.deliveryStateOf(identity)
+		if !known && h.restoredAccount() {
+			_, settled, err := h.deliverySettledOnChain(ctx, identity)
+			if err != nil {
+				assemblyWarn("tagent: the delivery of %s stands unread and is not sent again: %v", identity, err)
+				continue
+			}
+			if settled {
+				continue
+			}
+		}
 		if known && deliveryStateSettled(state) {
 			continue
 		}

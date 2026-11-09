@@ -430,3 +430,59 @@ func BenchmarkSegmentWindowRead(b *testing.B) {
 		}
 	}
 }
+
+// TestNewestOfTypeSpansPartitionsAndCopiesNoIndex pins the newest-of-type read.
+//   - the answer is the newest commit whatever partition filed it, so a reader whose writer moved between processes never reads the carrier of an earlier one
+//   - the lookup allocates the same amount beside a long history as beside a short one, so it copies and sorts no index
+//
+// 契约: docs/wiki/memory/memory-architecture.md#file-segment-store
+func TestNewestOfTypeSpansPartitionsAndCopiesNoIndex(t *testing.T) {
+	ctx := context.Background()
+	store, _ := openJournalSegmentStore(t, t.TempDir())
+	earlier := segmentRecord(7, 1000, 4, "carrier-old", 32).WithChain(event.TypeCheckpoint, "")
+	if err := store.StoreEvent(ctx, earlier); err != nil {
+		t.Fatalf("commit the earlier carrier: %v", err)
+	}
+	later := segmentRecord(2, 2000, 1, "carrier-new", 32).WithChain(event.TypeCheckpoint, "")
+	if err := store.StoreEvent(ctx, later); err != nil {
+		t.Fatalf("commit the later carrier: %v", err)
+	}
+	newest, held, err := store.NewestOfType(ctx, event.TypeCheckpoint)
+	if err != nil || !held {
+		t.Fatalf("read the newest carrier = (%t, %v), want the committed one", held, err)
+	}
+	if newest != later.EventKey {
+		t.Fatalf("the newest carrier reads as %s, want the one partition %d committed later than partition %d", newest, later.PartitionID, earlier.PartitionID)
+	}
+	if _, held, err := store.NewestOfType(ctx, "no-such-type"); err != nil || held {
+		t.Fatalf("a type the store holds no entry of reads as (%t, %v), want no entry and no error", held, err)
+	}
+
+	brief := newestOfTypeAllocBytes(store)
+	for at := 0; at < 2000; at++ {
+		rec := segmentRecord(0, 3000+int64(at/8), int64(at%8), fmt.Sprintf("history-%05d", at), 16)
+		if err := store.StoreEvent(ctx, rec); err != nil {
+			t.Fatalf("commit history event %d: %v", at, err)
+		}
+	}
+	long := newestOfTypeAllocBytes(store)
+	if long > brief {
+		t.Fatalf("the lookup allocates %d byte(s) per read beside 2002 indexed entries and %d beside 2, want no whole-index copy", long, brief)
+	}
+}
+
+// newestOfTypeAllocBytes reports the bytes one newest-of-type read allocates
+// beside the history the store holds, so a check measures the copy a whole-index
+// walk would make.
+func newestOfTypeAllocBytes(store *FileSegmentStore) int64 {
+	ctx := context.Background()
+	measured := testing.Benchmark(func(b *testing.B) {
+		b.ReportAllocs()
+		for at := 0; at < b.N; at++ {
+			if _, _, err := store.NewestOfType(ctx, event.TypeCheckpoint); err != nil {
+				b.Fatalf("read the newest carrier: %v", err)
+			}
+		}
+	})
+	return measured.AllocedBytesPerOp()
+}

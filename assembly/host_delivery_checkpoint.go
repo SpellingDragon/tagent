@@ -1,13 +1,20 @@
 // 契约: docs/wiki/platform/platform-subsystems.md#framework-checkpoint
 //
 // The delivery state slice: the host's whole deliverable account as the
-// framework checkpoint carries it. The account is the settlement state of every
-// obligation the host knows, the obligations still owed with the body, target,
-// lineage, hold moment and retry attempt they stand under, and the ordering
-// sequence the holds are parked by. A slice of this size is the size of the work
-// in flight, never the size of the history the process committed — that is the
-// whole point of the checkpoint: a restarted host restores an account that does
-// not grow with the chains it already settled.
+// framework checkpoint carries it. The account is the obligations still owed
+// with the body, target, lineage, hold moment and retry attempt they stand
+// under, the hold ordering sequence, and the pins kept hot for them. A slice of
+// this size is the size of the work in flight, never the size of the history the
+// process committed — that is the whole point of the checkpoint: a restarted
+// host restores an account that does not grow with the chains it already
+// settled.
+//
+// The settled set is stated by the cut instead of by a token per obligation: a
+// settlement fact whose landing sits at or before the checkpoint's offset is
+// covered, so every obligation outside the owed list that landed before the cut
+// is settled by construction. A state token per settled identity would make the
+// carrier grow with the history it exists to bound, and the chain behind it
+// still answers any one obligation by its exact key.
 package assembly
 
 import (
@@ -20,18 +27,14 @@ import (
 	"github.com/SpellingDragon/tagent/api/plugin"
 )
 
-// deliverySliceWire is the payload of the delivery state slice: the compact
-// settled set (one state token per obligation identity) beside the obligations
-// still owed and the sequence their holds are ordered by. The settled set is
-// compacted by the checkpoint offset: an identity whose settlement fact lands at
-// or before the cut is covered by its state token, and one whose settlement
-// lands past the cut is replayed by the boot.
+// deliverySliceWire is the payload of the delivery state slice: the obligations
+// still owed with the state they stand in, the redrive each of them is waiting
+// on, the pins kept hot for them and the sequence their holds are ordered by.
+// The settled history is not stated here: it is the cut (see the package
+// comment), so the payload is the size of the open account.
 type deliverySliceWire struct {
 	// HeldSeq is the sequence the parked holds are ordered by.
 	HeldSeq uint64 `json:"held_seq"`
-	// States is the latest settlement state token of every obligation identity
-	// the account knows.
-	States map[string]string `json:"states,omitempty"`
 	// Attempts is the redrive still pending for the obligations the account
 	// retried, so a restarted host resumes the bounded backoff where the process
 	// before it stopped instead of starting it over or forgetting the redrive.
@@ -143,10 +146,11 @@ func (h *Host) registerDeliverySlice() error {
 	return err
 }
 
-// deliverySlice states the whole deliverable account of the host: the settlement
-// state of every identity, the obligations still owed with the delivery they
-// carry and the retry attempt they stand at, and the sequence the holds are
-// ordered by.
+// deliverySlice states the whole open account of the host: the obligations still
+// owed with the delivery they carry and the state they stand in, the retry
+// attempt they stand at, the pins kept hot for them and the sequence the holds
+// are ordered by. The settled history is stated by the cut the checkpoint
+// carries, so the payload is the open account alone.
 func (h *Host) deliverySlice() ([]byte, error) {
 	if h == nil {
 		return []byte("null"), nil
@@ -154,7 +158,6 @@ func (h *Host) deliverySlice() ([]byte, error) {
 	h.mu.Lock()
 	wire := deliverySliceWire{
 		HeldSeq:  h.heldSeq,
-		States:   make(map[string]string, len(h.deliveryStates)),
 		Attempts: []deliverySliceRetry{},
 		Pins:     make(map[string]event.EventID, len(h.deliveryPins)),
 		Owed:     make([]deliverySliceOwed, 0, len(h.pendingDeliveries)),
@@ -180,9 +183,6 @@ func (h *Host) deliverySlice() ([]byte, error) {
 			State:    h.deliveryStates[identity],
 		})
 	}
-	for identity, state := range h.deliveryStates {
-		wire.States[identity] = state
-	}
 	for identity, pin := range h.deliveryPins {
 		wire.Pins[identity] = pin
 	}
@@ -193,13 +193,15 @@ func (h *Host) deliverySlice() ([]byte, error) {
 	return json.Marshal(wire)
 }
 
-// restoreDeliverySlice puts the account back: every settlement state token, every
-// owed obligation under the identity, delivery and hold moment the checkpoint
-// recorded, and the sequence the holds are ordered by. The obligations already
-// settled are remembered without a second send, so a restarted host never
-// delivers a body the process before it delivered.
+// restoreDeliverySlice puts the open account back: every owed obligation under
+// the identity, delivery, hold moment and state the checkpoint recorded, and the
+// sequence the holds are ordered by. The obligations already settled are not
+// stated by the carrier at all — they are the cut — so the restart never
+// delivers a body the process before it delivered, and a state the table no
+// longer holds is answered by the settlement facts the chain keeps.
 //
 //   - the state an owed entry carries decides what the account owes: a cut taken between a settlement and the release of its hold states both, and the settled token is the one that stands, so the restart never parks an obligation its own account already discharged.
+//   - a pin the carrier states is an obligation the hot window must keep, so the run's own pin registry is seeded from it: the boot trim releases facts by the pins the run holds, and a pin that reached the host table alone would let the trim drop the very fact the account still owes.
 func (h *Host) restoreDeliverySlice(payload []byte) error {
 	if h == nil {
 		return nil
@@ -211,9 +213,6 @@ func (h *Host) restoreDeliverySlice(payload []byte) error {
 	h.mu.Lock()
 	if h.deliveryStates == nil {
 		h.deliveryStates = map[string]string{}
-	}
-	for identity, state := range wire.States {
-		h.deliveryStates[identity] = state
 	}
 	if wire.HeldSeq > h.heldSeq {
 		h.heldSeq = wire.HeldSeq
@@ -255,6 +254,13 @@ func (h *Host) restoreDeliverySlice(payload []byte) error {
 	}
 	h.restoredDelivery = true
 	h.mu.Unlock()
+	if h.run != nil {
+		for _, pin := range wire.Pins {
+			if pin != "" {
+				h.run.pinFact(pin)
+			}
+		}
+	}
 	for _, retry := range wire.Attempts {
 		if retry.Identity == "" {
 			continue

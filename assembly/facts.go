@@ -66,9 +66,7 @@ const (
 // storage tier answers under, so the live ledger and the durable record never
 // disagree about what one identity names.
 func (r *Run) commitFactChecked(ctx context.Context, evt event.Event) (event.EventID, error) {
-	r.cutMu.Lock()
-	id, err := r.commitFactCheckedLocked(ctx, evt)
-	r.cutMu.Unlock()
+	id, err := r.commitFactNoCadence(ctx, evt)
 	if err != nil {
 		return id, err
 	}
@@ -78,13 +76,15 @@ func (r *Run) commitFactChecked(ctx context.Context, evt event.Event) (event.Eve
 	return id, nil
 }
 
-// commitFactCheckedLocked is the commit entry under the checkpoint cut lock the
-// caller holds: the fact lands and enters the live ledger without any cut being
-// taken between its durable write and its in-memory effect, so a checkpoint
-// never states a watermark past the state it snapshotted.
+// commitFactNoCadence is the commit entry that files no checkpoint and advances
+// no cadence: the coordinator files its own carrier through it, so the fact that
+// states the account never triggers the cadence that files another.
 //
 //   - a checkpoint fact stays on the store the boot reads it from and enters no session chain: it is a framework state carrier, not material of any chain, so the live ledger keeps the window of the chains it serves and never one fact per cut.
-func (r *Run) commitFactCheckedLocked(ctx context.Context, evt event.Event) (event.EventID, error) {
+//   - the whole commit holds the quiet-point fence, so a cut that drained the pipeline reads every state this fact left behind instead of one caught between the landing and its application.
+func (r *Run) commitFactNoCadence(ctx context.Context, evt event.Event) (event.EventID, error) {
+	r.flight.enter()
+	defer r.flight.leave()
 	if evt.Key == "" {
 		evt.Key = r.mintEventID()
 	}

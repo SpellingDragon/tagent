@@ -42,7 +42,7 @@
 | 9 | 收尾判定 | 一次"该收尾了"的判定：同一 range 同原因至多一条。 | `api/event/final_round_request.go` |
 | 10 | 注意力 | 一条在场问题／回答／清除记录：同键拒二落，answer/clearance 具名拒绝。 | `runtime/task/attention.go` |
 | 11 | 交付结算 | 一条对外发送承诺的状态：随答案同笔声明 owed、按身份+状态追加落链，重启照链对账。 | `assembly/host_delivery.go`（`deliverySettlementKey`） |
-| 12 | 框架检查点 | 框架在提交锁下取一致性切面、按分区 Seq 水位落链的状态载体：承载投影幸存者、送达账、邮箱欠账与未应答输入，恢复只经它加偏移后回放。 | `api/event/checkpoint.go`、`assembly/checkpoint.go` |
+| 12 | 框架检查点 | 框架在安静点（先读水位、排水到无在飞提交与状态应用）不持锁纯读各切片、按分区 Seq 水位落链的状态载体：承载投影幸存者、送达账、邮箱欠账与未应答输入，恢复只经它加偏移后隔离回放。 | `api/event/checkpoint.go`、`assembly/checkpoint.go` |
 
 ## 三、读代码前的五个通用词
 

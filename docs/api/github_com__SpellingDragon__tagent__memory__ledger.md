@@ -26,12 +26,10 @@ it refuses the open: the records before it are never served as the whole log,
 because a silently accepted damaged frame is a fact that disappears.
 
 journalKV is the key-value seam of the localfile tier over its append-only
-journal. A commit appends one record and publishes its values to the resident
-set only after that append returned success, so a commit whose write failed
-leaves the view answering exactly the records the file holds. Appending is not
-the barrier: the barrier is the log's own sync, which a commit takes when it
-carries nothing to append, so the tier that reports durable success pays for one
-barrier per commit instead of one per stage and one per confirmation.
+journal. A commit appends one record, completes the log's barrier over it and
+only then publishes its values to the resident set, so a successful return means
+the record is durable and a commit whose write or barrier failed leaves the view
+answering exactly the records the file holds.
 
 The original store every durable engine keeps: the reference and independent
 body model of the in-memory tier, committed through the atomic store seam so it
@@ -340,11 +338,14 @@ func (s *FileSegmentStore) EachEvent(ctx context.Context, visit func(StoredEvent
     returned.
 
 func (s *FileSegmentStore) EachIndexNewestFirst(ctx context.Context, visit func(key event.EventID, partition int, seq int64, typ string, session event.SessionID) error) error
-    EachIndexNewestFirst streams the resident index in the reverse of the commit
-    order, handing each entry its key, position, frozen event type and session
-    without reading any body. A restart that only needs to find the newest fact
-    of a given type walks the index alone; an entry whose type is empty leaves
-    the caller to read its body.
+    EachIndexNewestFirst streams the resident index grouped from the highest
+    partition and, inside one partition, from the highest sequence slot to the
+    lowest, handing each entry its key, position, frozen event type and session
+    without reading any body. The order is partition-major: it ranks the slots
+    of one partition against each other and says nothing about which partition
+    committed later, so a caller that needs the newest fact of a type across
+    partitions reads NewestOfType. An entry whose type is empty leaves the
+    caller to read its body.
 
 func (s *FileSegmentStore) EventCount() int
     EventCount returns the number of events published by successful commits,
@@ -369,6 +370,19 @@ func (s *FileSegmentStore) Load(ctx context.Context) error
     partition: both are small entries, and no {pid}:evt:{window}:{seq} body is
     read. A record whose index and window meta did not both arrive stays out of
     the published state, and EventCount counts the published records.
+
+func (s *FileSegmentStore) NewestOfType(ctx context.Context, typ string) (event.EventID, bool, error)
+    NewestOfType answers the identity of the newest resident index entry of one
+    frozen event type, copying and sorting nothing: the walk reads the resident
+    index in place and keeps one candidate, so the lookup costs one comparison
+    per indexed entry and allocates nothing whatever the history behind it. The
+    order it keeps is the window the commit was grouped under (its event time),
+    then the sequence slot, then the identity — an order that spans partitions,
+    so a run whose owner moved between processes reads the carrier its newest
+    process filed instead of the one of the highest partition. It reads no event
+    body: the caller reads the one body the answered identity names.
+
+    A type the store holds no entry of answers found=false and no error.
 
 func (s *FileSegmentStore) StoreEvent(ctx context.Context, rec SegmentRecord) error
     StoreEvent commits one event behind the segment commit barrier: the event
@@ -669,12 +683,6 @@ func NewMemoryOriginalStore(options ...MemoryOption) *MemoryOriginalStore
 func (s MemoryOriginalStore) BlobCount() int
     BlobCount returns the number of event keys holding an original body.
 
-func (s MemoryOriginalStore) CollectOrphanBodies(ctx context.Context) (int, error)
-    CollectOrphanBodies deletes every stored body no reference record names: the
-    body of a commit whose reference commit failed is durable and unreachable,
-    so it is collected here instead of being kept forever. It returns the number
-    of bodies removed, and removes nothing a readable reference still names.
-
 func (s MemoryOriginalStore) Get(ctx context.Context, key event.EventID) RecallResult
     Get returns the exact recall result for key, classified exactly as the
     in-memory tier classifies it: the committed bytes while a reference of the
@@ -691,10 +699,9 @@ func (s MemoryOriginalStore) Put(ctx context.Context, ref OriginalRef, body []by
       - Different event keys always own independent bodies; a second scope on
         the same key joins its references, and other bytes under a held key are
         refused
-      - The body is written ahead of the reference that names it, so a reader
-        never sees a reference whose body is not already durable
-      - A body whose reference commit failed is an orphan no reader can reach,
-        and CollectOrphanBodies removes it
+      - The body and the reference that names it travel in one batch, so a
+        reader never sees a reference whose body is missing and a failed commit
+        leaves neither behind
 
 func (s MemoryOriginalStore) ReadSegment(ctx context.Context, key event.EventID, startLine, numLines int) ([]byte, error)
     ReadSegment returns at most numLines whole lines of the original stored

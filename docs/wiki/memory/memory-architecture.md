@@ -12,7 +12,7 @@
 | **链**（事实本体） | `<pid>:evt:<窗>:<seq>`、`<pid>:idx:<EventID>`、`<pid>:meta:<窗>`（[§五](#file-segment-store)） | 不可变、恒重放 | 没有它：状态无单一来源，回退到任意时刻无从谈起 |
 | **原文仓** = blob + ref | `blob:<EventID>` + `ref:<EventID>`（[§三](#event-shape)） | 每条消息独立正文、独立账目，digest 只校验完整性 | 取消跨消息共享，避免共享元数据与回滚的架构代价 |
 | **父边** | 查询时从持久链推导（[§四](#causal-chain)） | 按需读取、不另存 | 另存父图：链之外多一个需要恢复与对账的副本 |
-| **框架 checkpoint** | `checkpoint:<partitionSeq>` 事实（[平台篇 §六](../platform/platform-subsystems.md#framework-checkpoint)） | 提交锁下一致性切面，一身份一不可变事实；恢复按索引 newest-first 取首条，不读覆盖区正文 | 没有它：每个状态持有者自养全史读者，boot 成本随历史增长 |
+| **框架 checkpoint** | `checkpoint:<partitionSeq>` 事实（[平台篇 §六](../platform/platform-subsystems.md#framework-checkpoint)） | 先读水位、排水到安静点（无在飞提交/状态应用）后无锁纯读各切片的一致性切面，一身份一不可变事实；恢复经 `NewestOfType` 单遍取最新身份（不拷贝不排序）并以 `seedFact` 隔离重建偏移后事实，不读覆盖区正文 | 没有它：每个状态持有者自养全史读者，boot 成本随历史增长 |
 | **账本**（任务/回执/交付） | `tagent/task/v1/…`（`runtime/state/durable.go`、`assembly/host_delivery.go`） | 逐条追加、不覆盖 | 没有它：只留终态，任务历史没有时光机 |
 | **其余现算**（投影/装配/检索页） | 不持久 | 每次重算 | 没有它：presentation 落盘成第二真源 |
 

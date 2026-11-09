@@ -2,9 +2,11 @@
 package assembly
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -129,9 +131,12 @@ func TestDeliverySettlementAndCheckpointConcurrent(t *testing.T) {
 	}
 	defer deliveryTestStopRetries(recovered)
 	for _, identity := range settled {
-		state, known := recovered.deliveryStateOf(identity)
-		if !known || state != deliveryStateSent {
-			t.Fatalf("the restart states the settled %s = (%q, %v), want it settled once", identity, state, known)
+		terminal, settled, err := recovered.deliverySettledOnChain(ctx, identity)
+		if err != nil {
+			t.Fatalf("read the settlement of %s back: %v", identity, err)
+		}
+		if !settled || terminal != deliveryStateSent {
+			t.Fatalf("the restart reads the settled %s = (%q, %v), want the sent receipt the chain keeps once", identity, terminal, settled)
 		}
 		if _, parked := recovered.parkedDelivery(identity); parked {
 			t.Fatalf("the restart parked the settled %s again, want a settled obligation never owed a second time", identity)
@@ -267,8 +272,8 @@ func TestCheckpointCarriesOpenObligationAcrossFold(t *testing.T) {
 	if _, _, _, err := again.deliveryRecoveryFacts(ctx); err != nil {
 		t.Fatalf("read the recovery facts of the third process: %v", err)
 	}
-	if state, known := again.deliveryStateOf(identity); !known || state != deliveryStateSent {
-		t.Fatalf("the third process states %s = (%q, %v), want the settled receipt", identity, state, known)
+	if terminal, settled, err := again.deliverySettledOnChain(ctx, identity); err != nil || !settled || terminal != deliveryStateSent {
+		t.Fatalf("the third process reads %s = (%q, %v, %v), want the settled receipt", identity, terminal, settled, err)
 	}
 	if _, parked := again.parkedDelivery(identity); parked {
 		t.Fatal("the third process owes the obligation a delivery again, want it processed exactly once")
@@ -289,4 +294,86 @@ func parkedCount(h *Host) int {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	return len(h.pendingDeliveries)
+}
+
+// checkpointDeliveryPayload files one checkpoint of the run and answers the
+// payload of its delivery slice, so a check reads the bytes the carrier states.
+func checkpointDeliveryPayload(t *testing.T, ctx context.Context, run *Run) []byte {
+	t.Helper()
+	key, _, err := run.Checkpoint(ctx)
+	if err != nil {
+		t.Fatalf("file the framework checkpoint: %v", err)
+	}
+	if key == "" {
+		t.Fatal("the cut filed no checkpoint fact")
+	}
+	stored, err := run.CommittedEvent(ctx, key)
+	if err != nil {
+		t.Fatalf("read the checkpoint %s back: %v", key, err)
+	}
+	checkpoint, stated := event.CheckpointOf(stored)
+	if !stated {
+		t.Fatalf("the fact %s states no readable checkpoint", key)
+	}
+	for _, slice := range checkpoint.Slices {
+		if slice.Name == checkpointSliceDelivery {
+			return slice.Payload
+		}
+	}
+	t.Fatal("the checkpoint states no delivery slice")
+	return nil
+}
+
+// TestCheckpointBodyBoundedByTheOpenAccount pins the settled set as the cut.
+//   - the delivery slice a checkpoint states is the open account alone: a settled obligation the cut covers states no token
+//   - the payload is therefore the same bytes beside one settled obligation and beside hundreds of them, so the carrier bounds the open work and never the history
+//   - an obligation still owed is still carried with its body, so the bound is the open account and never an emptied account
+//
+// 契约: docs/wiki/platform/platform-subsystems.md#framework-checkpoint
+func TestCheckpointBodyBoundedByTheOpenAccount(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+	run := windowChainRun(t, ctx)
+	host := deliveryTestHost(ctx, run, newDeliveryTestSender(nil))
+	if err := host.registerDeliverySlice(); err != nil {
+		t.Fatalf("mount the delivery account on the state seam: %v", err)
+	}
+	defer deliveryTestStopRetries(host)
+	addr := deliveryTestAddress("session-bounded-carrier")
+	bodyOf := func(identity string) string { return "the body of " + identity }
+	settle := func(identity string) {
+		t.Helper()
+		delivery := plugin.Delivery{Content: bodyOf(identity), Lineage: "user", Target: addr}
+		if err := host.writeDeliveryState(ctx, identity, delivery, deliveryStateSent, time.Time{}); err != nil {
+			t.Fatalf("settle %s: %v", identity, err)
+		}
+	}
+	settle("delivery-bounded-0000")
+	brief := checkpointDeliveryPayload(t, ctx, run)
+	for index := 1; index < 300; index++ {
+		identity := fmt.Sprintf("delivery-bounded-%04d", index)
+		host.noteDeliveryState(identity, deliveryStateSent)
+	}
+	settle("delivery-bounded-0300")
+	long := checkpointDeliveryPayload(t, ctx, run)
+	if !bytes.Equal(brief, long) {
+		t.Fatalf("the carrier states %d bytes beside 300 settled obligations and %d bytes beside one, want the open account alone (a carrier that grows with the settled history bounds nothing)", len(long), len(brief))
+	}
+	if len(long) == 0 {
+		t.Fatal("the carrier states no delivery slice at all")
+	}
+	open := "delivery-bounded-open"
+	host.noteDeliveryState(open, heldStateOf(deliveryReasonApproval))
+	host.parkHeld(open, plugin.Delivery{Content: bodyOf(open), Lineage: "user", Target: addr}, time.Now())
+	settle("delivery-bounded-open-marker")
+	heldPayload := checkpointDeliveryPayload(t, ctx, run)
+	if !strings.Contains(string(heldPayload), open) {
+		t.Fatalf("the carrier states %s, want the obligation the account still owes", heldPayload)
+	}
+	if strings.Contains(string(heldPayload), "delivery-bounded-0100") {
+		t.Fatal("the carrier states a settled obligation, want the settled set stated by the cut alone")
+	}
+	if len(heldPayload) <= len(long) {
+		t.Fatalf("the carrier states %d bytes beside one open obligation and %d beside none, want the open account carried", len(heldPayload), len(long))
+	}
 }
