@@ -40,6 +40,17 @@
 - [ ] F3 DoD 核验：0.1 红锚红→绿两次证据、四个 capability 的 scenarios 均映射到具名测试、拒收统计与真实消费者证据入 notes；不声称权重训练或效果提升
 - [ ] F4 归档（需明示授权）：按受影响主规格正常 `openspec archive`，归档前后分别跑 `scripts/gates/check-openspec.sh`
 
+## 8. 新发现的问题修复（新增）
+
+### 8.1 关闭段的应答事实偶发不落链而 turn 报 Completed
+
+- 场景：`TestEventIntegrityTaskContinuation/notice_visible_under_small_window` 以约 0.1%（本地 2300 次中 3 次）失败——`delegation settled` 与后续 turn 之间缺少 accept 应答的 turn-end/agent_output 事实观测行，`deliverFresh` 读不到 body，应答永不送达；`TestEventIntegrityFormalAssembly` 的 CI 一次「delivered bodies = []」疑似同族。
+- 根源：待查。`closeSegment` 里 `commitOutput` 失败会把 turn 置 Failed，而失败迭代 turn 是 Completed——矛头指向 `commitTranscript`（无错误返回）或段结算与事实提交之间的竞态窗口。
+- 影响范围：小概率静默丢失一条用户应答（无 owed 事实则重启也不补发）。
+- 已做的相邻修复（在 hot-update-and-purity-closure 内）：settle 材料读法接受 backflow 形态（`reproductionWaitForSettleFact` 回退 notice 事实）；history 观察测试走带锁的 `SwapFrameworkLogger`。
+- [ ] 8.1a 复现固化：给 closeSegment 的 transcript/output 提交路径加可观测诊断，本地循环跑到红，取完整事实清单
+- [ ] 8.1b 定位并修复：commitTranscript 静默失败或竞态窗口收口；修复后 8.1 场景 5000 连跑零红
+
 ## 依赖与派发提示
 
 - 顺序：0.1 → 2.2 → 2.4 →（4.2/4.3 与 5.4 可并行）→ 6.2/6.3 → F。

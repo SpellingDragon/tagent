@@ -321,7 +321,10 @@ func reproductionFactsSummary(facts []event.Event) string {
 }
 
 // reproductionWaitForSettleFact waits until the chain carries exactly one
-// settled delivery fact for the named worker body and answers it.
+// settled delivery fact for the named worker body and answers it. A settle a
+// live invocation consumed inside its flying segment commits no transport
+// record — its notice fact is the carrier that path is built to leave — so the
+// wait takes that fact as well and answers whichever form landed.
 func reproductionWaitForSettleFact(t *testing.T, host *assembly.Host, addr event.Address, body string, timeout time.Duration) event.Event {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
@@ -330,6 +333,14 @@ func reproductionWaitForSettleFact(t *testing.T, host *assembly.Host, addr event
 		last = host.Run().SessionFacts(addr)
 		if settles := reproductionSettleFacts(last, body); len(settles) == 1 {
 			return settles[0]
+		}
+		for _, fact := range last {
+			if fact.Type != event.TypeFeedback || fact.Meta[event.MetaKeyNoticeKind] == "" {
+				continue
+			}
+			if strings.Contains(fact.Message.Content, body) {
+				return fact
+			}
 		}
 		if time.Now().After(deadline) {
 			t.Fatalf("no single settled delivery fact carried %q within %s; the chain held %s",
