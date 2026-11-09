@@ -643,7 +643,7 @@ func (h *Host) noteDeliveryState(identity, state string) {
 // delivery, and the projection maps it under the family's frozen type.
 //
 //   - The settlement fact and the state token noted for it are one unit of work: the account applies the state after the fact lands, so the whole write holds the run's quiet-point fence and a cut never reads the account beside a settlement the chain already carries.
-//   - The commit below reaches the cadence from inside that unit, so the cut it asks for is filed aside rather than waited for here: a cut drains the pipeline this write is part of.
+//   - The commit below reaches the cadence from inside that unit, and the cadence only wakes the filer, so the cut is never asked for from inside this write.
 func (h *Host) writeDeliverySettlement(ctx context.Context, target event.Address, identity, state string, delivery plugin.Delivery, heldAt time.Time, extra map[string]string) error {
 	if h == nil || h.run == nil {
 		return nil
@@ -653,7 +653,6 @@ func (h *Host) writeDeliverySettlement(ctx context.Context, target event.Address
 	}
 	h.run.flight.enter()
 	defer h.run.flight.leave()
-	ctx = markFlightHeld(ctx)
 	key := deliverySettlementKey(identity, state)
 	if _, held, err := h.settlementFactOf(ctx, key); err != nil {
 		return err

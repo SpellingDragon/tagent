@@ -7,6 +7,7 @@ import (
 	"reflect"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -22,7 +23,7 @@ import (
 //   - a run that commits past its interval files a checkpoint fact of the frozen type
 //   - the offset the fact states is the partition sequence the run had committed
 //   - the fact carries every state slice mounted on the seam, so the projection survivors are restored, not re-folded
-//   - the cut is taken before the checkpoint fact lands, so its own partition stands one slot past the watermark it states
+//   - the cut is taken before the checkpoint fact lands, so its own partition stands past the watermark it states
 //   - a cut asked for beside a chain at rest files a carrier of its own, the watermark read before that carrier lands
 //
 // 契约: docs/wiki/platform/platform-subsystems.md#framework-checkpoint
@@ -53,8 +54,8 @@ func TestCheckpointEmittedAtCadenceAndFold(t *testing.T) {
 		t.Fatalf("the fact states the cut %v, want the cut the coordinator recorded %v", checkpoint.Offset, filedOffset)
 	}
 	ownPartition, ownSeq := seqOfFact(t, run, id)
-	if got := checkpoint.Offset[ownPartition]; got != ownSeq-1 {
-		t.Fatalf("the checkpoint fact landed at seq %d of partition %d beside a cut of %d, want the cut one slot behind it",
+	if got := checkpoint.Offset[ownPartition]; got >= ownSeq {
+		t.Fatalf("the checkpoint fact landed at seq %d of partition %d beside a cut of %d, want a cut behind the carrier it states",
 			ownSeq, ownPartition, got)
 	}
 	if _, covered := checkpoint.Offset[partition]; !covered {
@@ -145,8 +146,8 @@ func TestCheckpointOffsetNotFactSeq(t *testing.T) {
 	partition := memory.PartitionIDFromName(string(mine.AgentID))
 	ownPartitionSeq := firstCheckpoint.Offset[partition]
 	cutPartition, cutSeq := seqOfFact(t, first, firstID)
-	if cutPartition != partition || ownPartitionSeq != cutSeq-1 {
-		t.Fatalf("the checkpoint landed at seq %d of partition %d beside a cut of %d on partition %d, want the cut one slot behind its own fact",
+	if cutPartition != partition || ownPartitionSeq >= cutSeq {
+		t.Fatalf("the checkpoint landed at seq %d of partition %d beside a cut of %d on partition %d, want a cut behind its own fact",
 			cutSeq, cutPartition, ownPartitionSeq, partition)
 	}
 	commitWindowTurns(t, ctx, first, other, 2)
@@ -155,8 +156,8 @@ func TestCheckpointOffsetNotFactSeq(t *testing.T) {
 		t.Fatalf("the second cadence filed %q, want a checkpoint of its own", secondID)
 	}
 	_, secondSeq := seqOfFact(t, first, secondID)
-	if got := secondOffset[cutPartition]; got != secondSeq-1 {
-		t.Fatalf("the second checkpoint landed at seq %d beside a cut of %d, want the cut one slot behind it", secondSeq, got)
+	if got := secondOffset[cutPartition]; got >= secondSeq {
+		t.Fatalf("the second checkpoint landed at seq %d beside a cut of %d, want a cut behind it", secondSeq, got)
 	}
 	if secondOffset[partition] < ownPartitionSeq {
 		t.Fatalf("the second cut went back to seq %d from %d, want the landing sequence to advance", secondOffset[partition], ownPartitionSeq)
@@ -362,6 +363,73 @@ func TestCheckpointWaitsForTheQuietPointOfThePipeline(t *testing.T) {
 	}
 	if !filed {
 		t.Fatal("the cut of the quiet pipeline filed no checkpoint")
+	}
+}
+
+// holderLockSlice is a consumer state slice whose snapshot takes the lock its own
+// commits carry, so a cut asked from inside such a commit stands on the very lock
+// that commit holds. The task registry is the shipped holder of that shape: the
+// delivery flush commits its settlement under the registry lock.
+type holderLockSlice struct {
+	mu sync.Mutex
+}
+
+// StateName reports the name the slice is keyed by.
+func (s *holderLockSlice) StateName() string { return "assembly.holder-lock" }
+
+// SnapshotState states the slice under the lock a commit of it carries.
+func (s *holderLockSlice) SnapshotState(context.Context) ([]byte, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return []byte("{}"), nil
+}
+
+// RestoreState puts the stated slice back.
+func (s *holderLockSlice) RestoreState(context.Context, []byte) error { return nil }
+
+// TestCheckpointCadenceNeverTakesAHoldersLock pins where the due is filed.
+//   - a commit that reaches the cadence under a holder's own lock answers instead of filing the cut inside that lock
+//   - the carrier the due owes lands after the holder released the lock, so the due is filed and not dropped
+//
+// 契约: docs/wiki/platform/platform-subsystems.md#framework-checkpoint
+func TestCheckpointCadenceNeverTakesAHoldersLock(t *testing.T) {
+	ctx := context.Background()
+	run := windowChainRun(t, ctx)
+	holder := &holderLockSlice{}
+	if _, err := run.RegisterStateSlice(holder); err != nil {
+		t.Fatalf("register the holder's state slice: %v", err)
+	}
+	addr := event.Address{AgentID: "agent-a", SessionID: "session-checkpoint-holder-lock"}
+	run.checkpointEvery = 1
+	commitWindowTurns(t, ctx, run, addr, 1)
+	filed, _ := awaitCadenceCheckpoint(t, run, "")
+
+	holder.mu.Lock()
+	committed := make(chan error, 1)
+	go func() {
+		_, err := run.CommitToSession(ctx, addr, event.Event{
+			Key:       "the-fact-committed-under-the-holder-lock",
+			Type:      event.TypeExternalInput,
+			Timestamp: time.Now().UTC(),
+			Meta:      map[string]string{event.MetaKeyEventSummary: "held"},
+			Message:   model.Message{Role: model.RoleUser, Content: "the material committed under the holder lock"},
+			Owner:     addr,
+		})
+		committed <- err
+	}()
+	select {
+	case err := <-committed:
+		if err != nil {
+			holder.mu.Unlock()
+			t.Fatalf("commit the fact under the holder lock: %v", err)
+		}
+	case <-time.After(20 * time.Second):
+		holder.mu.Unlock()
+		t.Fatal("the commit under the holder lock never answered: the cadence filed its cut inside the commit and waited on the lock that commit holds")
+	}
+	holder.mu.Unlock()
+	if id, _ := awaitCadenceCheckpoint(t, run, filed); id == "" {
+		t.Fatal("the cadence filed no carrier for the due the commit reached under the holder lock")
 	}
 }
 

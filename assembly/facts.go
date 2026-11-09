@@ -71,7 +71,7 @@ func (r *Run) commitFactChecked(ctx context.Context, evt event.Event) (event.Eve
 		return id, err
 	}
 	if evt.Type != event.TypeCheckpoint {
-		r.noteCheckpointCommit(ctx)
+		r.noteCheckpointCommit()
 	}
 	return id, nil
 }

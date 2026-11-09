@@ -95,22 +95,6 @@ type commitFence struct {
 	idle chan struct{}
 }
 
-// flightHeldKey marks the context of a caller that carries a unit of work on the
-// fence: a cut asked from inside such a caller is a cut that would drain the work
-// asking for it, so the cadence files it aside instead of inline.
-type flightHeldKey struct{}
-
-// markFlightHeld marks one context as carried by a caller holding a fence unit.
-func markFlightHeld(ctx context.Context) context.Context {
-	return context.WithValue(ctx, flightHeldKey{}, true)
-}
-
-// flightHeldBy reports whether the caller of this context holds a fence unit.
-func flightHeldBy(ctx context.Context) bool {
-	held, _ := ctx.Value(flightHeldKey{}).(bool)
-	return held
-}
-
 // enter counts one unit of work onto the fence.
 func (f *commitFence) enter() {
 	f.mu.Lock()
@@ -241,7 +225,7 @@ func (r *Run) Checkpoint(ctx context.Context) (event.EventID, bool, error) {
 // serializes the cuts of one run with each other — one cut states one account — and
 // it is taken by no commit, so it never stands between a fact and its landing.
 //
-//   - every cut of one run states a key no earlier cut stated: the key is the sequence the owner partition stands at, and the carrier's own landing takes the slot after the cut it states, so the next cut beside no new fact names the next slot instead of repeating the filed one.
+//   - every cut of one run states a key no earlier cut stated: the key is the sequence the owner partition stands at, and the carrier's own landing takes a slot past the cut it states, so the next cut beside no new fact names a later slot instead of repeating the filed one.
 func (r *Run) checkpointLocked(ctx context.Context) (event.EventID, bool, error) {
 	if err := ctx.Err(); err != nil {
 		return "", false, err
@@ -322,26 +306,84 @@ func (r *Run) checkpointOwnerLocked() event.Address {
 	return event.Address{AgentID: agents[0]}
 }
 
-// noteCheckpointCommit advances the commit cadence and files a checkpoint once
-// the interval or the period has elapsed. The call is made after one fact has
-// landed and never inside the commit lock, so the checkpoint it files takes a cut
-// of its own.
+// noteCheckpointCommit advances the commit cadence and wakes the filer once the
+// interval or the period has elapsed. The call is made after one fact has landed
+// and takes the run lock alone: no commit takes the cut lock and no commit waits
+// for a cut, so a holder that commits under its own lock never stands between its
+// fact and the carrier the cadence owes.
 //
-//   - a commit that reached the due while holding a quiet-point unit (the delivery settlement write is the one such caller) files nothing here: the cut drains the pipeline, so it would wait on the work asking for it. The due stands (the commit count is not reset), and the next commit outside a unit files the carrier the cadence owes.
-func (r *Run) noteCheckpointCommit(ctx context.Context) {
+//   - the due stands until the filer takes it: a wake that a cut already answered files nothing, and a due reached beside a cut in progress is filed by the next wake.
+func (r *Run) noteCheckpointCommit() {
 	if r == nil {
 		return
 	}
 	r.mu.Lock()
 	r.checkpointCommits++
 	due := r.checkpointCommits >= r.checkpointEvery || time.Since(r.checkpointAt) >= r.checkpointPeriod
+	if due {
+		r.checkpointDuePending = true
+	}
 	r.mu.Unlock()
-	if !due || flightHeldBy(ctx) {
+	if !due {
 		return
 	}
-	if _, _, err := r.Checkpoint(ctx); err != nil {
-		assemblyWarn("tagent: the framework checkpoint was not filed: %v", err)
+	select {
+	case r.checkpointDue <- struct{}{}:
+	default:
 	}
+}
+
+// fileCheckpoints files the carrier the commit cadence owes, from a goroutine
+// that holds no lock of this run and no lock of a state holder.
+//
+// The cut asks every holder for its state, and a commit of that holder may stand
+// under the holder's own lock (the delivery flush commits its settlement under the
+// task registry lock). A commit that took the cut itself would therefore wait on
+// the holder whose commit is waiting on the cut, and no timeout breaks that
+// cycle: one side of it is a held lock. The commit signals this wait instead.
+func (r *Run) fileCheckpoints(ctx context.Context) {
+	for {
+		select {
+		case <-r.checkpointStop:
+			return
+		case <-r.checkpointDue:
+		}
+		if !r.takeCheckpointDue() {
+			continue
+		}
+		if _, _, err := r.Checkpoint(ctx); err != nil {
+			assemblyWarn("tagent: the framework checkpoint was not filed: %v", err)
+		}
+	}
+}
+
+// takeCheckpointDue reports whether the cadence owes a carrier at this wake and
+// clears the due the wake stands for.
+func (r *Run) takeCheckpointDue() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	due := r.checkpointDuePending
+	r.checkpointDuePending = false
+	return due
+}
+
+// startCheckpointFiler starts the goroutine that files the carrier the cadence
+// owes. The context keeps the values of the boot and none of its cancellation, so
+// a cut is never refused by a caller that already returned.
+func (r *Run) startCheckpointFiler(ctx context.Context) {
+	if r == nil || r.checkpointDue == nil || r.checkpointStop == nil {
+		return
+	}
+	go r.fileCheckpoints(context.WithoutCancel(ctx))
+}
+
+// stopCheckpointFiler ends the filer at its next wake, so no cut is taken under
+// the drain a close judges the run by. A repeated close stops nothing twice.
+func (r *Run) stopCheckpointFiler() {
+	if r == nil || r.checkpointStop == nil {
+		return
+	}
+	r.checkpointStopOnce.Do(func() { close(r.checkpointStop) })
 }
 
 // CheckpointAfterFold files a checkpoint after a fold produced a product: a fold

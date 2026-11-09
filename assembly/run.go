@@ -314,9 +314,21 @@ type Run struct {
 	checkpointEvery  int
 	checkpointPeriod time.Duration
 	// checkpointCommits counts the commits since the last checkpoint, and
-	// checkpointAt is the moment it was filed.
+	// checkpointAt is the moment it was filed: it opens at the assembly, so the
+	// period measures a chain that has been committing rather than the wall clock
+	// since the epoch.
 	checkpointCommits int
 	checkpointAt      time.Time
+	// checkpointDue wakes the goroutine that files the carrier the cadence owes:
+	// a commit that reaches the due signals it and takes no cut itself.
+	checkpointDue chan struct{}
+	// checkpointDuePending records the due a wake stands for, so a wake a cut
+	// already answered files nothing.
+	checkpointDuePending bool
+	// checkpointStop ends the filer once the close of this run began, and the once
+	// makes a repeated close stop it once.
+	checkpointStop     chan struct{}
+	checkpointStopOnce sync.Once
 	// checkpointFiled is the fact key of the newest checkpoint this run filed or
 	// restored, so a cadence that reaches the same cut files nothing twice.
 	checkpointFiled event.EventID
@@ -499,6 +511,9 @@ func assemble(ctx context.Context, decl *config.Declaration, agents map[event.Ag
 		states:           state.NewStateRegistry(),
 		checkpointEvery:  CheckpointCommitInterval,
 		checkpointPeriod: CheckpointPeriod,
+		checkpointAt:     time.Now(),
+		checkpointDue:    make(chan struct{}, 1),
+		checkpointStop:   make(chan struct{}),
 		approver:         cfg.approver,
 		policy:           cfg.policy,
 		enforcement:      cfg.enforcement,
@@ -677,6 +692,7 @@ func assemble(ctx context.Context, decl *config.Declaration, agents map[event.Ag
 		return nil, err
 	}
 	booTTrace("converge")
+	r.startCheckpointFiler(ctx)
 	return r, nil
 }
 

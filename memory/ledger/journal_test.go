@@ -8,6 +8,7 @@ package ledger
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"os"
@@ -511,4 +512,42 @@ func jsonTokenOf(t *testing.T, value []byte) []byte {
 		t.Fatalf("marshal the value: %v", err)
 	}
 	return token
+}
+
+// TestJournalCarriesTheFrameworkCarrierFrame pins the frame ceiling against the carrier a checkpoint states.
+//   - a record whose payload stands over the ceiling a smaller frame allowed commits and replays byte for byte
+//   - a frame declaring a payload past the ceiling is refused by name, so the bound still bounds the reader
+//
+// 契约: docs/wiki/memory/memory-architecture.md#local-file-kv
+func TestJournalCarriesTheFrameworkCarrierFrame(t *testing.T) {
+	t.Run("carrier_frame_round_trips", func(t *testing.T) {
+		dir := t.TempDir()
+		log, err := openJournalLog(dir)
+		if err != nil {
+			t.Fatalf("open the journal: %v", err)
+		}
+		carrier := bytes.Repeat([]byte("c"), 26<<20)
+		journalTestAppend(t, log, journalPut{Key: "262:evt:00001:000001", Value: carrier})
+		if err := log.sync(); err != nil {
+			t.Fatalf("sync the journal: %v", err)
+		}
+		if err := log.close(); err != nil {
+			t.Fatalf("close the journal: %v", err)
+		}
+		value, held := journalTestRead(t, dir, "262:evt:00001:000001")
+		if !held {
+			t.Fatal("the reopened journal holds no carrier record")
+		}
+		if !bytes.Equal(value, carrier) {
+			t.Fatalf("the reopened journal answered %d byte(s) of the carrier, want the %d it committed", len(value), len(carrier))
+		}
+	})
+
+	t.Run("refuses_a_frame_past_the_ceiling", func(t *testing.T) {
+		frame := make([]byte, journalFrameHeaderBytes)
+		binary.BigEndian.PutUint32(frame[0:4], uint32(journalMaxFrameBytes+1))
+		if _, err := journalPayloadOf(frame); !errors.Is(err, ErrJournalCorrupt) {
+			t.Fatalf("a frame declaring %d payload bytes = %v, want the named corruption", journalMaxFrameBytes+1, err)
+		}
+	})
 }
