@@ -6,7 +6,7 @@
 
 系统只有一份权威记录——**事实链**。每个事实（用户消息、模型输出、工具结果、通知、压缩请求、冥想注入）经**单一入口** `commitFactChecked`（`assembly/facts.go`）提交：存储层先落盘、活账本后登记；拒收即报错（绝不"成功但没存住"）；同键同内容幂等、同键异内容具名冲突。
 
-一次提交，链即唯一真相：查询与召回按需读链，语义检索在查询候选项上现算嵌入，映射序列（该会话的投影）供下轮请求回放。**其余一切读面（缓存、投影、折叠、呈现）都是从这条链派生的，崩溃后从链精确重建。**
+一次提交，链即唯一真相：查询与召回按需读链，语义检索在查询候选项上现算嵌入，映射序列（该会话的投影）供下轮请求回放。**其余一切读面（缓存、投影、折叠、呈现）都是从这条链派生的；崩溃后由框架 checkpoint 事实族恢复——读最新 checkpoint 载入状态切片、只回放偏移后事实（[平台篇 §六](platform/platform-subsystems.md#framework-checkpoint)），链仍是语义真相与回放源。**
 
 ## 2. 三个挂点
 
@@ -53,7 +53,7 @@ assistant 输出 → 作为事实提交（提交失败=回合失败）
 
 同一段路上有**两族投递**：agent 自己发的正文（`send`，落 `external_input`）与框架的结算/终态通知（落 `task_settled`）。两族事实类型分立，却盖同一套五键（`delivery.target`/`delivery.identity`/`delivery.receipt`/`delivery.source`/`delivery.denial`），因此"一个源事件到达了哪些目标、各自什么回执"只有一种读法：`Run.DeliveryLedger()`。（[reliability/durable-delivery.md](reliability/durable-delivery.md#lineage-visibility)）
 
-**还欠什么是链上事实，不是旁路账本**：一条带正文的输出在**同一笔事实**里声明 owed（目标+血统），交付身份由落链后的 fact key 导出；之后**四结算态**（held[带 reason]/sent/refused/headless-retired）＋**迁移专用 owed 态**作为 `delivery.settlement` 族以「身份+状态」为键**追加式**落同一地址的链。重启只读链对账：已确认 sent 不重发，无结算事实或 held(retrying) 的续跑重试，**结果未知（超时）绝不自动重发**。可见性口径：结算事实按类型→角色映射进模型请求，owed 声明随 `agent_output` 本体呈现、无独立可见面；「发不出去且模型也没说」由既有失败告知与一条按 reason 分层的延迟告知兜住，对用户怎么说由模型自主。
+**还欠什么是链上事实，不是旁路账本**：一条带正文的输出在**同一笔事实**里声明 owed（目标+血统），交付身份由落链后的 fact key 导出；之后**四结算态**（held[带 reason]/sent/refused/headless-retired）＋**迁移专用 owed 态**作为 `delivery.settlement` 族以「身份+状态」为键**追加式**落同一地址的链。重启经框架 checkpoint 的 delivery 切片恢复整本账、只回放偏移后事实：已确认 sent 不重发，无结算事实或 held(retrying) 的续跑重试，**结果未知（超时）绝不自动重发**。可见性口径：结算事实按类型→角色映射进模型请求，owed 声明随 `agent_output` 本体呈现、无独立可见面；「发不出去且模型也没说」由既有失败告知与一条按 reason 分层的延迟告知兜住，对用户怎么说由模型自主。
 
 ## 6. 异步任务：受理与结算分离，mailbox 是唯一唤醒账
 

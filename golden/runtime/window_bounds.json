@@ -191,6 +191,24 @@
       "kind": "const",
       "file": "runtime/agent/request_assembly.go",
       "reason": "请求预算计量里每次工具调用的固定开销（token）。"
+    },
+    {
+      "id": "checkpoint-cadence",
+      "class": "constant",
+      "name": "CheckpointCommitInterval",
+      "kind": "const",
+      "file": "assembly/checkpoint.go",
+      "source": "mechanism: the framework checkpoint cadence",
+      "reason": "checkpoint 节奏常量：每 N 条提交落一条 checkpoint。与回放窗口刻意解耦——窗口决定请求带多少材料，节奏只决定恢复载体的新鲜度；数量级取 64 使 boot 回放增量远小于窗口。"
+    },
+    {
+      "id": "checkpoint-period",
+      "class": "constant",
+      "name": "CheckpointPeriod",
+      "kind": "const",
+      "file": "assembly/checkpoint.go",
+      "source": "mechanism: the framework checkpoint period",
+      "reason": "checkpoint 周期常量：安静链仍按墙钟补一条载体，避免最后一条提交远落后于读它的 boot。"
     }
   ]
 }

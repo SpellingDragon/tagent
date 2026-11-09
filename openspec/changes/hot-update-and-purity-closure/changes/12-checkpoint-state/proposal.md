@@ -1,17 +1,23 @@
-# Proposal: 12-checkpoint-state
-
-父变更：hot-update-and-purity-closure（合并阻断项；CI 长分片 TestEventIntegrityLongRun 挂死）
+# 12-checkpoint-state 提案
 
 ## Why
 
-重启恢复成本必须如设计所言由窗口/增量界定，而非随历史超线性增长。实测：boot 尾段 `Unsettled` 对每个 ActiveSession 全量读 durable 链（assembly/invoke.go:435 → run.go:2203 eachCommittedEvent 逐 key 读全部事件体），站点随委派永久累积、事件线性增 → O(站点×事件) 二次扫描，静默分钟级，gen49+ 撞爆 15m 子超时；送达账恢复 deliveryRecoveryFacts 同样全史扫（host_delivery.go:1608，注释明写 "never limited to the hot fact window"）。链/投影恢复本已有 checkpoint（压缩产物，毫秒级），但账本/任务/邮箱层没有等价物，每次重启从头重放。
+LongRun 校准（121 代进程重启）在 boot 挂死，阻断 PR#37 合并：每代 boot 停滞超线性增长（gen45≈30s→gen48≈3m→gen49+>15m 撞子超时）。代码审读钉死病灶＝boot 尾段 `Unsettled` 对每个 ActiveSession 全量读 durable 链（invoke.go:435/471 → run.go:2170 eachCommittedEvent），站点随委派永久累积、事件线性增 → O(站点×事件) 二次扫描；送达账恢复 `deliveryRecoveryFacts` 同样全史读、`RestoreOwed` 全量重投。投影/折叠恢复本身毫秒级（窗口有界），病在「义务账本无 checkpoint、每次重启从头重放」。
 
-裁决（用户）：不做独立账本 checkpoint，也不往压缩事实临时塞状态——引入**框架级统一 checkpoint 事实族**，类比 Flink：框架（assembly/run）做 checkpoint 协调者与状态后端，插件/消费者如算子注册状态切片、把状态管理委托框架；压缩事实回归纯投影职责，只作 checkpoint 触发源之一。恢复=最近 checkpoint + 回放偏移后事实经现有 observe/commit 管线。
+用户裁决（Flink 类比）：不做独立账本 checkpoint，由框架统一管理状态——插件/消费者如算子，把可恢复状态委托框架；checkpoint 载体统一为一种框架级 checkpoint 事实族，压缩事实回归纯投影、只作触发源之一。
 
-## 边界与依赖
+## What Changes
 
-- 依赖：05 代际注册表缝（GenRegistry 模式可借鉴）、06 窗口恢复（投影幸存者锚）、01 送达账事实族。
-- 接口面：api/event（新 TypeCheckpoint + Meta + 载荷类型）、assembly（协调者/恢复重写/run.go 装配缝归编排者单写）、runtime/state（状态接缝）、memory/replay（压缩触发源）。
-- 退役面：RecoveryTicket 独立快照路线（assembly/recovery.go WriteRecoveryTicket、run.go:948 fileBootRecoveryTicket、recoveryTicketWriter、blob+ticket KV、golden durable_truth 钉条目）。
-- 禁止事项：不改 01-11 已绿语义；checkpoint 偏移用分区 Seq（landedSeq, run.go:324），禁用进程局部 factSeq（facts.go:1045，随机后缀不全局单调）；义务无限期语义不变（开账随 checkpoint 存活，折叠不得吃掉未清承诺）。
-- 连带：runtime-simplicity-features 8.1（应答被折叠收走致永不送达）由本域构造消解——开账嵌入 checkpoint 后折叠不再丢债，该卡标记 superseded。
+- 新增框架级 `checkpoint` 事实族，承载全部可恢复状态切片（投影幸存者、宿主全局送达/结算账含开账、邮箱欠账、任务终态）；offset=分区 Seq 水位 + 开账清单。
+- 框架 checkpoint 协调者：有界节奏（提交计数 + 折叠触发 + close/quiesce），提交锁下一致性切面聚合注册切片并落 checkpoint 事实。
+- 状态接缝：消费者注册 snapshot/restore，框架聚合；恢复=读最近 checkpoint + 回放偏移后事实经现有 observe/commit 管线。
+- 删除三条全史读者（deliveryRecoveryFacts 全扫、Unsettled 逐站点 durable 扫、RestoreOwed 全量重投）；Unsettled 改读恢复后内存态。
+- 退役 RecoveryTicket 独立快照路线。
+- 取代 domain 06 D3「快照装全状态否决」一条（用户显式裁决）；继承 D4 折叠锚一致性切面定理。
+
+## Impact
+
+- 能力：checkpoint-state（新增）；window-recovery（恢复读路径收口）；delivery-correctness（8.1 由构造消解）。
+- 代码：api/event（TypeCheckpoint+载荷）、assembly/run（协调者+恢复重写+状态接缝）、assembly/host_delivery（删全史读）、runtime/state（邮箱快照）、退役 recovery.go 票据路线。
+- 门：durable_truth / event_integrity_scenarios / fold_contract / FACT-VOCABULARY / gen_godoc / anchored_boot_parity / window_bounds。
+- 合并门：LongRun 六分片全绿 + 每代 boot 成本平坦。

@@ -174,6 +174,7 @@ func TestAnchoredRebuildEqualsFullWalk(t *testing.T) {
 // TestAnchorRefusesBlankType pins the type-based discovery rule.
 // - an index reporting no frozen event type finds no anchor by key spelling
 // - the rebuild falls back to the full walk of every chain
+// - a chain the framework checkpoint states is rebuilt from it, so the recovered chains sit beside the ones the checkpoint covered
 //
 // 契约: docs/wiki/agent/event-flow.md#projection-lifecycle
 func TestAnchorRefusesBlankType(t *testing.T) {
@@ -196,8 +197,8 @@ func TestAnchorRefusesBlankType(t *testing.T) {
 	if report.Decoded < fullReport.Decoded {
 		t.Fatalf("the rebuild decoded %d bodies, want the full-walk fallback %d", report.Decoded, fullReport.Decoded)
 	}
-	if report.Fallbacks == 0 {
-		t.Fatal("the rebuild reported no full-walk fallback")
+	if report.Fallbacks+report.Checkpoints == 0 {
+		t.Fatal("the rebuild reported no carrier for a chain whose anchor was refused")
 	}
 	if len(seeds) != len(full) {
 		t.Fatalf("the fallback registered %d chains, want the %d the full walk holds", len(seeds), len(full))
@@ -339,8 +340,8 @@ func TestNeverFoldedSessionFallsBack(t *testing.T) {
 	if report.Anchors != 0 {
 		t.Fatalf("the rebuild found %d anchor(s) on a chain that never folded", report.Anchors)
 	}
-	if report.Fallbacks != 1 {
-		t.Fatalf("the rebuild reported %d fallback(s), want one per never-folded chain", report.Fallbacks)
+	if report.Fallbacks+report.Checkpoints != 1 {
+		t.Fatalf("the rebuild reported %d fallback(s) beside %d checkpoint(s), want one carrier for the never-folded chain", report.Fallbacks, report.Checkpoints)
 	}
 	want, carried := full[addr]
 	if !carried {

@@ -416,21 +416,30 @@ func (m *MemoryStore) RecordAttempt(ctx context.Context, notice task.Notice, att
 }
 
 // RestoreOwed folds the notifications the durable account behind this mailbox
-// still owes back into the mailbox: the target site each notification's frozen
-// routing names is opened beside the instance that froze it, so the work a
-// stopped run left unconsumed waits for the next decision instead of being lost
-// with the process. The restore is idempotent — a notification already sitting
-// in its mailbox is accepted once and never appended twice — and the site it
-// opens beside a frozen instance never takes the address over from the
-// instance currently serving it. A mailbox beside no durable account restores
-// nothing, because nothing outside the process owes it work.
+// still owes back into it: the target site each notification's frozen routing
+// names is opened beside the instance that froze it, so the work a stopped run
+// left unconsumed waits for the next decision instead of being lost with the
+// process. It is the fallback of a boot that restored no mailbox checkpoint
+// slice — a mailbox beside no durable account owes nothing outside the process,
+// and one a checkpoint restored already holds every entry, so the fold accepts
+// those once and appends none of them twice.
 func (m *MemoryStore) RestoreOwed(ctx context.Context) error {
-	if m.consumptions == nil {
+	if m == nil || m.consumptions == nil {
 		return nil
 	}
-	owed := m.consumptions.OwedNotices()
-	for _, owed := range owed {
-		envelope := owed.Notice
+	return m.foldOwed(ctx, m.consumptions.OwedNotices())
+}
+
+// foldOwed folds the notifications one carrier states back into the mailbox:
+// the target site each notification's frozen routing names is opened beside the
+// instance that froze it, so the work a stopped run left unconsumed waits for
+// the next decision instead of being lost with the process. The fold is
+// idempotent — a notification already sitting in its mailbox is accepted once
+// and never appended twice — and the site it opens beside a frozen instance
+// never takes the address over from the instance currently serving it.
+func (m *MemoryStore) foldOwed(ctx context.Context, owed []task.OutboxNotice) error {
+	for _, notice := range owed {
+		envelope := notice.Notice
 		if err := m.TrackDelivery(ctx, envelope.Notice.TaskID, task.HandoffTarget{
 			Target:         envelope.Target,
 			TargetInstance: envelope.TargetInstance,

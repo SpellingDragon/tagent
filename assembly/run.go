@@ -295,6 +295,41 @@ type Run struct {
 	// landing serializes the sequence slot of one partition beside the segment
 	// commit that takes it, so two facts committed at once never claim one slot.
 	landing sync.Mutex
+	// cutMu serializes the framework checkpoint cut with the commit of every
+	// fact: a fact lands and enters the live ledger under it, so a checkpoint
+	// never states a partition watermark past the state it snapshotted and never
+	// misses a fact below the watermark it states.
+	cutMu sync.Mutex
+	// states is the state seam of this run: the registry every consumer's
+	// recoverable state slice is mounted on, aggregated into one checkpoint.
+	states *state.StateRegistry
+	// checkpointEvery and checkpointPeriod are the two cadence dials of the
+	// framework checkpoint: a busy chain files one after this many commits and a
+	// quiet chain still files one after this long.
+	checkpointEvery  int
+	checkpointPeriod time.Duration
+	// checkpointCommits counts the commits since the last checkpoint, and
+	// checkpointAt is the moment it was filed.
+	checkpointCommits int
+	checkpointAt      time.Time
+	// checkpointFiled is the fact key of the newest checkpoint this run filed or
+	// restored, so a cadence that reaches the same cut files nothing twice.
+	checkpointFiled event.EventID
+	// checkpointOffset is the cut the newest checkpoint of this run states: the
+	// partition-sequence watermark the restored state corresponds to.
+	checkpointOffset event.CheckpointOffset
+	// restoredProjection is the session survivors the newest checkpoint stated:
+	// the boot rebuilds each chain from them instead of folding the covered
+	// history, and it is emptied as the boot takes them.
+	restoredProjection map[event.Address]*restoredChain
+	// checkpointSlices names the state slices the newest checkpoint carried, so a
+	// reader reads only past the cut of a checkpoint that actually states its
+	// state and reads the whole chain beside one that does not.
+	checkpointSlices map[string]bool
+	// restoredInputs is the input rounds the newest checkpoint stated with no
+	// answer: they stand before every fact that landed past the cut, so the rest
+	// criterion judges the owed drives of a restart beside the tail it replays.
+	restoredInputs []restoredInput
 	// landedSeq holds the last sequence slot each partition committed: it is
 	// seeded from the events the tier already published, so a fact committed
 	// after a restart takes the slot after the last committed one.
@@ -454,6 +489,9 @@ func assemble(ctx context.Context, decl *config.Declaration, agents map[event.Ag
 		fixers:           map[event.AgentID]*fileFixer{},
 		replays:          map[event.Address]replayEntry{},
 		landedSeq:        map[int]int64{},
+		states:           state.NewStateRegistry(),
+		checkpointEvery:  CheckpointCommitInterval,
+		checkpointPeriod: CheckpointPeriod,
 		approver:         cfg.approver,
 		policy:           cfg.policy,
 		enforcement:      cfg.enforcement,
@@ -468,6 +506,11 @@ func assemble(ctx context.Context, decl *config.Declaration, agents map[event.Ag
 	}
 	if cfg.observer != nil {
 		r.enableGenerationObservation()
+	}
+	for _, slice := range []state.Stateful{projectionStateSlice{run: r}, inputsStateSlice{run: r}} {
+		if _, err := r.states.Register(slice); err != nil {
+			return nil, err
+		}
 	}
 	for id, held := range cfg.leases {
 		lease := held
@@ -549,6 +592,12 @@ func assemble(ctx context.Context, decl *config.Declaration, agents map[event.Ag
 		r.store = state.NewMemoryStore(r.authority)
 	}
 	r.registry = task.NewMemoryRegistry(r.commit, r.admission, task.WithActivity(r.noteProgress), task.WithTerminalTTL(cfg.terminalTTL()))
+	if _, err := r.states.Register(state.NewMailboxState(r.store)); err != nil {
+		return nil, err
+	}
+	if _, err := r.states.Register(tasksStateSlice{registry: r.registry}); err != nil {
+		return nil, err
+	}
 	r.movement = runMovement{registry: r.registry, store: r.store}
 	r.manager = task.NewMemoryManager(r.registry, nil, task.WithEnvelopeDeliverer(r.deliver))
 	r.delegations = agent.NewDelegator(closeGate{run: r, face: closeFace{manager: r.manager, registry: r.registry}}, r.bindings, r.instance)
@@ -584,6 +633,9 @@ func assemble(ctx context.Context, decl *config.Declaration, agents map[event.Ag
 		return nil, err
 	}
 	if durable != nil {
+		if err := r.restoreCheckpointState(ctx, tier); err != nil {
+			return nil, err
+		}
 		if err := r.restoreInMemoryState(ctx, durable); err != nil {
 			return nil, err
 		}
@@ -911,18 +963,10 @@ func finalRoundSpecOf(decl *config.Declaration) config.FinalRoundSpec {
 	return config.FinalRoundSpec{}
 }
 
-// recoveryTicketWriter names the optional face of a durable commit carrier
-// that files a restart-recovery ticket; the in-memory carrier carries none.
-type recoveryTicketWriter interface {
-	WriteRecoveryTicket(ctx context.Context) error
-}
-
 // restoreInMemoryState is the second step of the restart-recovery consumption
-// logic: the in-memory state is restored from the last snapshot or, when no
-// usable snapshot exists, from the full replay of the fact chains. It only
-// loads state — the completion point (the fresh single-copy snapshot) is
-// CompleteRestartRecovery, called after both steps finish and before service
-// opens, never from inside the assembly.
+// logic: the in-memory state is restored from the checkpoint the last process
+// filed, or from the full replay of the fact chains beside a store that holds
+// none.
 func (r *Run) restoreInMemoryState(ctx context.Context, durable *state.DurableCommit) error {
 	report, err := r.restoreChains(ctx, durable)
 	if err != nil {
@@ -934,63 +978,61 @@ func (r *Run) restoreInMemoryState(ctx context.Context, durable *state.DurableCo
 	return nil
 }
 
-// CompleteRestartRecovery is the completion point of the restart-recovery
-// consumption logic. Boot calls it after both steps — loading the unconsumed
-// events and restoring the in-memory state — have finished and while the run
-// is still closed for service; the cli-host entry has no unconsumed-event step
-// of its own and calls it after the assembly alone, which is honest: an entry
-// with nothing to load writes no completion ticket for a load it never made.
-// It files the fresh single-copy snapshot there, so no snapshot is written by
-// a start that later aborted; the carrier lock inside WriteRecoveryTicket
-// keeps the image coherent beside the settle pump that Boot wakes. A carrier
-// without the face, or a write that fails, never blocks the start: the next
-// restart falls back to the full replay.
-func (r *Run) CompleteRestartRecovery(ctx context.Context) {
-	r.fileBootRecoveryTicket(ctx)
-}
-
-// fileBootRecoveryTicket files one recovery ticket beside the fixed-current
-// snapshot blob. A carrier without the face, or a write that fails, never
-// blocks the start: the next restart falls back to the full replay.
-func (r *Run) fileBootRecoveryTicket(ctx context.Context) {
-	r.mu.Lock()
-	inner := r.commit.inner
-	r.mu.Unlock()
-	writer, ok := inner.(recoveryTicketWriter)
-	if !ok {
-		return
-	}
-	if err := writer.WriteRecoveryTicket(ctx); err != nil {
-		assemblyWarn("tagent: the boot recovery ticket was not filed err=%v", err)
-	}
-}
-
-// restoreChains folds every durable fact chain the storage already holds back
-// into the registry of this assembly under the current orchestration binding,
-// one outcome per task the chains cover. A chain carrying no admission
-// material is refused by name in the report and rebuilds nothing.
+// restoreCheckpointState reads the newest framework checkpoint the storage holds
+// and hands every state slice back to its holder, so the fold that follows
+// completes an account instead of rebuilding one: the task slice states every
+// task of the cut beside the chain revision it stands at, and the delivery,
+// mailbox and input slices state the work the process still owed. A tier holding
+// no checkpoint restores nothing and the boot reads the chains in full.
 //
-// The whole fold is observed as one line at INFO — the chains read, the links
-// they carry, the tasks rebuilt and the chains dropped (a chain the restore
-// refused, or a link the registry already held) beside the elapsed time — so a
-// restart states what it recovered instead of leaving the reader to count
-// report entries. A failed fold is observed at ERROR beside the chain it
-// stopped on.
+// The restore is idempotent and a holder mounted after it reads the slice from
+// the pending set, so the boot restores the carrier once more when it reads the
+// chains and every holder applies the same state twice at worst.
+func (r *Run) restoreCheckpointState(ctx context.Context, tier *ledger.Tier) error {
+	if tier == nil {
+		return nil
+	}
+	if _, _, err := r.restoreNewestCheckpoint(ctx, tier); err != nil {
+		return err
+	}
+	return nil
+}
+
+// restoreChains folds the durable fact chains the storage already holds back
+// into the registry of this assembly under the current orchestration binding,
+// one outcome per task the chains cover. A chain carrying no admission material
+// is refused by name in the report and rebuilds nothing.
+//
+//   - a chain the newest framework checkpoint states is folded from the link that landed past the stated revision, and one the checkpoint states with no such link is not read at all: a restart costs the account it keeps plus the increment past the cut, never the chains it already settled.
+//   - a chain the checkpoint did not state — one younger than the cut — is folded whole, which is the fallback that keeps the two paths agreeing.
+//   - a chain the checkpoint states with no record past its cut costs no read: it joins the covered set the checkpoint-state call restores.
+//   - the report names the tasks in chain order whichever path restored them, so a restart answers the same account whether it read a chain or the checkpoint.
+//   - the whole fold is observed as one line at INFO — the chains read, the links they carry, the chains the checkpoint covered, the tasks rebuilt and the chains dropped beside the elapsed time — and a failed fold at ERROR beside the chain it stopped on.
 func (r *Run) restoreChains(ctx context.Context, durable *state.DurableCommit) (task.RestoreReport, error) {
 	started := time.Now()
 	owners := runOwners{bindings: r.bindings}
 	merged := task.RestoreReport{}
+	coverage := r.registry.CheckpointCoverage()
 	chains := durable.TaskIDs()
+	folded := task.RestoreReport{}
+	var covered []event.TaskID
 	links := 0
 	for _, taskID := range chains {
+		if revision, stated := coverage[taskID]; stated && durable.Revision(taskID) <= revision {
+			covered = append(covered, taskID)
+			continue
+		}
 		chain, err := durable.Records(ctx, taskID)
 		if err != nil {
 			assemblyError("tagent: restore stopped task=%s err=%v", taskID, err)
 			return merged, err
 		}
+		if revision, stated := coverage[taskID]; stated {
+			chain = chainPast(chain, revision)
+		}
 		links += len(chain)
 		report, err := r.registry.Restore(ctx, chain, owners)
-		merged.Tasks = append(merged.Tasks, report.Tasks...)
+		folded.Tasks = append(folded.Tasks, report.Tasks...)
 		if err != nil {
 			assemblyError("tagent: restore stopped task=%s err=%v", taskID, err)
 			return merged, err
@@ -1001,10 +1043,45 @@ func (r *Run) restoreChains(ctx context.Context, durable *state.DurableCommit) (
 			}
 		}
 	}
-	recovered, dropped := restoredCounts(merged)
-	assemblyInfo("tagent: restore folded chains=%d links=%d recovered=%d dropped=%d elapsed=%s",
-		len(chains), links, recovered, dropped, time.Since(started).Round(time.Microsecond))
+	restored, err := r.registry.CheckpointRestored(ctx, covered, owners)
+	if err != nil {
+		assemblyError("tagent: restore stopped at the tasks the checkpoint states err=%v", err)
+		return merged, err
+	}
+	byTask := make(map[event.TaskID]task.RestoreReport, len(chains))
+	for _, outcome := range folded.Tasks {
+		held := byTask[outcome.TaskID]
+		held.Tasks = append(held.Tasks, outcome)
+		byTask[outcome.TaskID] = held
+	}
+	for _, outcome := range restored.Tasks {
+		held := byTask[outcome.TaskID]
+		held.Tasks = append(held.Tasks, outcome)
+		byTask[outcome.TaskID] = held
+		r.commit.remember(outcome.TaskID)
+	}
+	merged.Tasks = make([]task.RestoreOutcome, 0, len(chains))
+	for _, taskID := range chains {
+		merged.Tasks = append(merged.Tasks, byTask[taskID].Tasks...)
+	}
+	recovered, dropped := restoredCounts(folded)
+	assemblyInfo("tagent: restore folded chains=%d links=%d covered=%d recovered=%d dropped=%d elapsed=%s",
+		len(chains)-len(covered), links, len(covered), recovered, dropped, time.Since(started).Round(time.Microsecond))
 	return merged, nil
+}
+
+// chainPast reports the links of one chain that landed past the state a
+// checkpoint already states: the links a fold completes the restored account
+// with, and no link the account already covers.
+func chainPast(chain []task.TaskRecord, revision int64) []task.TaskRecord {
+	past := make([]task.TaskRecord, 0, len(chain))
+	for _, link := range chain {
+		if link.Fact.ExpectedRevision < revision {
+			continue
+		}
+		past = append(past, link)
+	}
+	return past
 }
 
 // restoredCounts reports how many tasks the fold rebuilt and how many outcomes
@@ -1201,13 +1278,13 @@ func withBootConfigReconcile(reconcile func(context.Context, *Run, *config.Decla
 // accept the same constructors.
 type Option = HostOption
 
-// WithTaskTerminalTTL sets how long a task record outlives the terminal outcome it holds: the
+// withTaskTerminalTTL sets how long a task record outlives the terminal outcome it holds: the
 // record of a settled, failed or cancelled task older than this is dropped beside the next
 // admission, so this run's account of tasks is bounded by it. A call naming a pruned task is
 // refused by name, and every fact of that task stays on the chain — the bound is the live
 // account, never the history. The zero value keeps task.DefaultTerminalTTL, and a negative
 // one keeps every record for the life of the run.
-func WithTaskTerminalTTL(ttl time.Duration) Option {
+func withTaskTerminalTTL(ttl time.Duration) Option {
 	return func(c *assemblyConfig) { c.taskTerminalTTL = ttl }
 }
 
@@ -2250,7 +2327,10 @@ type seedReport struct {
 	Decoded   int
 	Anchors   int
 	Fallbacks int
-	Landed    map[int]int64
+	// Checkpoints counts the chains a framework checkpoint restored: their
+	// material below the cut is read from the checkpoint, never re-decoded.
+	Checkpoints int
+	Landed      map[int]int64
 }
 
 // seedReplay registers the mapped sequence every session chain already
@@ -2415,6 +2495,9 @@ type anchorSlot struct {
 // seedAnchoredReplayWith runs the anchored rebuild under a test seam.
 //
 // - The survivors a checkpoint states are held to the same resident bound the full walk applies as it appends: a chain that declared no window keeps the recent material rather than every survivor the payload names.
+// - The newest checkpoint, when the store holds one, states the state every slice of the runtime had reached at its cut: the rebuild reads those slices back and then only the facts past the cut, with the covered index entries dropped before any body is read, so the boot costs the increment and not the history. Configuration records belong to no session chain and stay, being the declaration ledger the restarted run states that no slice carries.
+// - A chain the checkpoint stated is a chain of this run even beside no fact past its cut, so its slot joins the rebuild and the tail of its chain is replayed onto the state the checkpoint states.
+// - A chain the checkpoint states beside no fold product is hydrated from its own survivors and then gets only the material past the cut replayed onto it, and it keeps the chain even beside no tail.
 func (r *Run) seedAnchoredReplayWith(ctx context.Context, tier *ledger.Tier, seam anchoredSeam) (map[event.Address]*sessionSeed, seedReport, error) {
 	report := seedReport{}
 	var refs []anchorRef
@@ -2433,6 +2516,10 @@ func (r *Run) seedAnchoredReplayWith(ctx context.Context, tier *ledger.Tier, sea
 			report.Landed[entry.partition] = entry.seq
 		}
 	}
+	if _, _, err := r.restoreNewestCheckpoint(ctx, tier); err != nil {
+		return nil, report, err
+	}
+	seedsRestored := r.takeRestoredProjection()
 	anchors := map[anchorSlot]int{}
 	seen := map[anchorSlot]struct{}{}
 	var order []anchorSlot
@@ -2451,6 +2538,15 @@ func (r *Run) seedAnchoredReplayWith(ctx context.Context, tier *ledger.Tier, sea
 			}
 		}
 	}
+	restoredSlots := map[anchorSlot]struct{}{}
+	for addr := range seedsRestored {
+		slot := anchorSlot{partition: memory.PartitionIDFromName(string(addr.AgentID)), session: addr.SessionID}
+		restoredSlots[slot] = struct{}{}
+		if _, held := seen[slot]; !held {
+			seen[slot] = struct{}{}
+			order = append(order, slot)
+		}
+	}
 	sort.Slice(order, func(i, j int) bool {
 		if order[i].session != order[j].session {
 			return order[i].session < order[j].session
@@ -2467,6 +2563,35 @@ func (r *Run) seedAnchoredReplayWith(ctx context.Context, tier *ledger.Tier, sea
 		at, hasAnchor := anchors[slot]
 		usable := false
 		var tailProducts []event.CompressProduct
+		if base, addr, held := restoredSeedOf(seedsRestored, slot); held && !hasAnchor {
+			seed.window = r.foldWindowOfAgent(addr.AgentID)
+			if _, err := r.restoreSurvivors(ctx, tier, seed, base.survivors, &report); err != nil {
+				return nil, report, err
+			}
+			seed.projection = trimReplayProjection(ctx, seed.projection, seed.window)
+			var tail []anchorRef
+			for _, ref := range refs {
+				if ref.session != slot.session || ref.partition != slot.partition {
+					continue
+				}
+				tail = append(tail, ref)
+			}
+			sort.Slice(tail, func(i, j int) bool { return tail[i].seq < tail[j].seq })
+			for _, ref := range tail {
+				product, stated, _, err := r.replayRef(ctx, tier, ref.key, seed, &report)
+				if err != nil {
+					return nil, report, err
+				}
+				if stated {
+					tailProducts = append(tailProducts, product)
+				}
+			}
+			seed.projection.RestoreProducts(tailProducts)
+			seeds[addr] = seed
+			report.Checkpoints++
+			usable = true
+			hasAnchor = false
+		}
 		if hasAnchor {
 			stored, held, err := tier.Segments.GetEvent(ctx, refs[at].key)
 			if err != nil {
@@ -2571,7 +2696,7 @@ func (r *Run) seedAnchoredReplayWith(ctx context.Context, tier *ledger.Tier, sea
 // answered by the anchor of a session it never belonged to.
 func (r *Run) seedConfigurationFacts(ctx context.Context, tier *ledger.Tier, refs []anchorRef, report *seedReport) error {
 	for i := len(refs) - 1; i >= 0; i-- {
-		if refs[i].session != "" {
+		if refs[i].session != "" || refs[i].typ == event.TypeCheckpoint {
 			continue
 		}
 		stored, held, err := tier.Segments.GetEvent(ctx, refs[i].key)
@@ -2695,12 +2820,21 @@ func (r *Run) replayRef(ctx context.Context, tier *ledger.Tier, key event.EventI
 // executes judgments, so the material a judgment names folds in this process
 // too; the products of the chain answer their judgments beside it, so a
 // judgment already executed is never executed twice.
+//
+// The rebuild reaches one fact by more than one read path — the survivors a
+// checkpoint states are hydrated by key and the tail of their chain is replayed
+// whole over them — so the seed answers the fact the ledger already holds
+// instead of filing its key twice: one identity names one immutable fact, and a
+// commit order naming it twice would read one fact as two.
 func (r *Run) seedFact(evt event.Event) {
 	if evt.Type == event.CompressRequestType {
 		r.compress.noteSeededJudgment(evt)
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if _, held := r.facts[evt.Key]; held {
+		return
+	}
 	r.facts[evt.Key] = evt
 	r.factOrder = append(r.factOrder, evt.Key)
 }

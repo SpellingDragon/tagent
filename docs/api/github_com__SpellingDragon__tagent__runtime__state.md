@@ -1,5 +1,13 @@
 package state // import "github.com/SpellingDragon/tagent/runtime/state"
 
+The state seam of a runtime: a consumer that holds recoverable state delegates
+the state to the framework here, and the framework aggregates every registered
+slice into one checkpoint cut and restores them from one. The consumer never
+owns a recovery read path of its own, because a bespoke reader grows with the
+history it reads while a checkpoint slice stays the size of the state it states.
+Registration is an effect: the returned disposer is the only way a slice leaves
+the registry.
+
 The failure cause chain of the two reload paths: a structural change that is
 refused or fails keeps the chain of the causes it rests on — the source file,
 the normalized line within it and the named reason beside it — so the failure is
@@ -32,6 +40,12 @@ construction order and the fail-closed release of a candidate that stops part
 way; the whole-generation switch, the borrow drain and the retirement release
 stay with the publication entry and its ledger.
 
+The mailbox state slice: the notifications the mailbox still owes a delivery
+for, as the framework checkpoint carries them. The slice is the size of the work
+still owed, never of the work the process already delivered, so a boot restores
+the obligations a stopped run left open instead of replaying the history that
+produced them.
+
 Package state is the runtime's state owner: it establishes the agent and session
 sites an explicit address names, admits a prepared plan as the next effective
 binding generation, closes a session's own side, and accepts the notifications a
@@ -57,6 +71,8 @@ const (
 	// under.
 	ArchiveOriginalFormat = "archive-import-v1"
 )
+const StateSliceMailbox = "mailbox"
+    StateSliceMailbox is the name the mailbox slice is keyed by in a checkpoint.
 
 VARIABLES
 
@@ -239,10 +255,6 @@ var ErrNoticeNotOwed = errors.New("state: the notification carries no delivery o
 var ErrReadNotAllowed = errors.New("state: read is not allowed for this subject and target")
     ErrReadNotAllowed reports a read of a target no grant covers for the subject
     that asked. An authority that holds no grants refuses every read.
-
-var ErrRecoveryPayloadRefused = errors.New("state: the recovery payload is not a layout this build restores")
-    ErrRecoveryPayloadRefused names a snapshot payload this build cannot
-    restore.
 
 var ErrSpecConflict = errors.New("state: the task's admission material is already declared with other content")
     ErrSpecConflict reports a declaration that would replace the admission
@@ -740,22 +752,6 @@ func (d *DurableCommit) Revision(taskID event.TaskID) int64
 func (d *DurableCommit) TaskIDs() []event.TaskID
     TaskIDs returns every task the carrier holds facts for, in numeric order.
 
-func (d *DurableCommit) UsedTicket() bool
-    UsedTicket reports whether the carrier this process built restored its
-    tables from a recovery ticket: an observation for the equivalence checks and
-    the boot line, never an input to any recovery decision.
-
-func (d *DurableCommit) WriteRecoveryTicket(ctx context.Context) error
-    WriteRecoveryTicket files one snapshot of the carrier's tables beside the
-    ticket fact that names it, at the restart completion point (both recovery
-    steps finished, service not yet open). The blob goes to the fixed current
-    key and the ticket after it; on this local-file tier that is only a rename
-    order — Sync is a no-op and there is no fsync, so a crash between the two
-    leaves either an orphan blob nobody names or a ticket naming a missing blob,
-    both of which fall back to the full replay. The snapshot image is taken
-    under d.mu because the settle pump may commit concurrently at the completion
-    point: the lock is required for a coherent image, not a defensive extra.
-
 type FactLog interface {
 	// Put stages one key and its value.
 	Put(ctx context.Context, key string, value []byte) error
@@ -1166,14 +1162,13 @@ func (m *MemoryStore) Release(ctx context.Context, addr event.Address, instance 
 
 func (m *MemoryStore) RestoreOwed(ctx context.Context) error
     RestoreOwed folds the notifications the durable account behind this mailbox
-    still owes back into the mailbox: the target site each notification's frozen
-    routing names is opened beside the instance that froze it, so the work a
-    stopped run left unconsumed waits for the next decision instead of being
-    lost with the process. The restore is idempotent — a notification already
-    sitting in its mailbox is accepted once and never appended twice — and the
-    site it opens beside a frozen instance never takes the address over from the
-    instance currently serving it. A mailbox beside no durable account restores
-    nothing, because nothing outside the process owes it work.
+    still owes back into it: the target site each notification's frozen routing
+    names is opened beside the instance that froze it, so the work a stopped
+    run left unconsumed waits for the next decision instead of being lost
+    with the process. It is the fallback of a boot that restored no mailbox
+    checkpoint slice — a mailbox beside no durable account owes nothing outside
+    the process, and one a checkpoint restored already holds every entry,
+    so the fold accepts those once and appends none of them twice.
 
 func (m *MemoryStore) Site(ctx context.Context, subject Subject, addr event.Address, instance event.InstanceID) (*Session, error)
     Site returns a copy of the bookkeeping one established site holds, for the
@@ -1699,6 +1694,61 @@ type StatePlan struct {
     The plan is admitted as a whole. A candidate that is refused or fails part
     way through construction releases only its own resources, so the shared face
     and the live bindings already in effect are never touched.
+
+type StateRegistry struct {
+	// Has unexported fields.
+}
+    StateRegistry is the ordered account of the state holders mounted on
+    one runtime. The order is the registration order, never map iteration,
+    so the same wiring aggregates the same slice order and a checkpoint renders
+    the same bytes for the same state.
+
+func NewStateRegistry() *StateRegistry
+    NewStateRegistry returns an empty state registry.
+
+func (r *StateRegistry) Names() []string
+    Names reports the mounted state slice names in registration order.
+
+func (r *StateRegistry) PendingRestore() []string
+    PendingRestore reports the state slices a restore named that no mounted
+    holder states yet, in name order. A wiring that answers no name once it is
+    complete has restored every slice the checkpoint carries.
+
+func (r *StateRegistry) Register(holder Stateful) (func(), error)
+    Register mounts one holder and answers the disposer that unmounts it. A
+    holder naming no state and a name already mounted refuse the registration by
+    name, so a wiring mistake stops the assembly instead of silently overwriting
+    a slice another consumer owns.
+
+func (r *StateRegistry) RestoreState(ctx context.Context, slices []event.CheckpointSlice) error
+    RestoreState hands every stated slice to the holder that owns it, in the
+    order the checkpoint states. A slice no mounted holder owns is reported by
+    name instead of dropped: a checkpoint whose state cannot be restored is not
+    a checkpoint this runtime can start from.
+
+func (r *StateRegistry) SnapshotState(ctx context.Context) ([]event.CheckpointSlice, error)
+    SnapshotState aggregates the state of every mounted holder in registration
+    order. A holder that fails to state its state refuses the whole snapshot by
+    name: a checkpoint missing one slice would restore that consumer beside an
+    empty state, which is worse than filing no checkpoint at all.
+
+type Stateful interface {
+	// StateName is the name the slice is keyed by in a checkpoint.
+	StateName() string
+	// SnapshotState states the recoverable state as JSON.
+	SnapshotState(ctx context.Context) ([]byte, error)
+	// RestoreState puts one snapshot back. A payload the holder does not recognize is
+	// refused by name rather than restored as an empty state.
+	RestoreState(ctx context.Context, payload []byte) error
+}
+    Stateful is one consumer's recoverable state as the framework sees it:
+    the name the slice is keyed by, the state it states, and the restore that
+    puts that state back. The payload is the holder's own business — it is JSON,
+    and no other holder and no reader of the checkpoint interprets it.
+
+func NewMailboxState(store *MemoryStore) Stateful
+    NewMailboxState returns the mailbox's recoverable state as the framework
+    sees it: the slice one mailbox store states and restores.
 
 type Store interface {
 	// Establish creates the session site for one explicit (agent, session)

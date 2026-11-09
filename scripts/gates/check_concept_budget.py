@@ -141,6 +141,11 @@ BASELINE = (
     ("iface-methods", "runtime/agent/delegate.go:DelegationTasks", 4),
     ("iface-methods", "runtime/state/durable.go:FactLog", 4),
     ("iface-methods", "runtime/state/store.go:Store", 4),
+    # hot-update-and-purity-closure 12 引入叶：Stateful 是一份可恢复状态切片在接缝上的
+    # 三问（键名/说出状态/放回状态），5 个实现者（投影、送达账、邮箱、任务账、输入轮）。
+    # 拆窄口会让恢复路径绕过快照面另立一条写回通道（说出状态者与放回状态者分离），
+    # 与「一份切片一个持有者」的接缝裁决冲突；收窄留作后续，ratchet 警示保持可见。
+    ("iface-methods", "runtime/state/checkpoint.go:Stateful", 3),
     ("iface-methods", "runtime/task/registry.go:Manager", 4),
     ("iface-methods", "runtime/task/registry.go:Registry", 4),
     ("iface-methods", "tool/exec/stop.go:Executor", 4),
@@ -210,6 +215,11 @@ BASELINE = (
     ("struct-fields", "runtime/state/resources.go:SkillLoad", 6),
     ("struct-fields", "runtime/state/session.go:MailboxEntry", 6),
     ("struct-fields", "runtime/task/wrapper.go:Result", 6),
+    # hot-update-and-purity-closure 12 引入叶（S2 类别豁免，同 event.Event 16f 先例）：
+    # TaskCheckpoint 是框架 checkpoint 状态的任务账本体＝数据保真面——一格对应「重启后
+    # 与链折叠逐格相等」所需的一条数据（声明/状态/链修订/轮次/四个移动戳/改道两格/
+    # 幂等变更账/未结义务），收窄字段即让恢复面在链折叠侧二次归并或丢掉一格保真。
+    ("struct-fields", "runtime/task/checkpoint.go:TaskCheckpoint", 13),
     # 04.2 执行资源解释（引入叶）：租约/续期/停滞/义务的只读投影，字段即
     # Manager.Explain 的回复本体，拆块即解释面需要二次装配。
     ("struct-fields", "tool/exec/exec.go:Explanation", 10),
@@ -251,6 +261,10 @@ BASELINE = (
     # 回读面）：范例与红线随证据导出叶补齐前显式计入债务。
     ("contract-surface", "features/rl/export_chain.go:EvidenceLines", None),
     ("contract-surface", "features/rl/export_chain.go:SnapshotReadBack", None),
+    # 同波 domain 12 的第四条 S4 债务（同 ResultDelegation 先例）：Stateful 是状态接缝的
+    # 委托面，范例与 Godoc 红线随后续批次补齐；在此之前显式计入，新增接口不因“尚未补
+    # 范例”而免检。
+    ("contract-surface", "runtime/state/checkpoint.go:Stateful", None),
 )
 # ---- Go 源码静态扫描（纯 stdlib；不做类型检查，见模块 docstring 的局限）----
 IFACE_DECL_RE = re.compile(r"^type\s+(?P<name>[A-Za-z_]\w*)\s+interface\s*\{", re.M)

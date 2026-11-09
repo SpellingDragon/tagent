@@ -121,6 +121,16 @@ const (
 	// MetaKeyAttentionClearance names the word a clearance carries: answer,
 	// expiry or work-end.
 	MetaKeyAttentionClearance = "attention.clearance"
+
+	// MetaKeyCheckpointOffset names the partition-sequence watermark one
+	// framework checkpoint covers, rendered as the sorted partition:seq pairs.
+	// It is read to decide coverage without decoding the state slices, and it
+	// states the same cut the payload states.
+	MetaKeyCheckpointOffset = "checkpoint.offset"
+	// MetaKeyCheckpointSlices names the state slices one framework checkpoint
+	// carries, rendered as the sorted consumer names, so what a checkpoint
+	// covers is queryable without decoding the state of every consumer.
+	MetaKeyCheckpointSlices = "checkpoint.slices"
 )
 
 // MetaPrefix marks a pass-through business metadata key: any key carrying this

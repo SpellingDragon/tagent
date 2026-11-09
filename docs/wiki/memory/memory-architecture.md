@@ -12,6 +12,7 @@
 | **链**（事实本体） | `<pid>:evt:<窗>:<seq>`、`<pid>:idx:<EventID>`、`<pid>:meta:<窗>`（[§五](#file-segment-store)） | 不可变、恒重放 | 没有它：状态无单一来源，回退到任意时刻无从谈起 |
 | **原文仓** = blob + ref | `blob:<EventID>` + `ref:<EventID>`（[§三](#event-shape)） | 每条消息独立正文、独立账目，digest 只校验完整性 | 取消跨消息共享，避免共享元数据与回滚的架构代价 |
 | **父边** | 查询时从持久链推导（[§四](#causal-chain)） | 按需读取、不另存 | 另存父图：链之外多一个需要恢复与对账的副本 |
+| **框架 checkpoint** | `checkpoint:<partitionSeq>` 事实（[平台篇 §六](../platform/platform-subsystems.md#framework-checkpoint)） | 提交锁下一致性切面，一身份一不可变事实；恢复按索引 newest-first 取首条，不读覆盖区正文 | 没有它：每个状态持有者自养全史读者，boot 成本随历史增长 |
 | **账本**（任务/回执/交付） | `tagent/task/v1/…`（`runtime/state/durable.go`、`assembly/host_delivery.go`） | 逐条追加、不覆盖 | 没有它：只留终态，任务历史没有时光机 |
 | **其余现算**（投影/装配/检索页） | 不持久 | 每次重算 | 没有它：presentation 落盘成第二真源 |
 
@@ -115,7 +116,7 @@
 | 提交序 | 父边只按 `(PartitionID, Seq)` 推导，不按事件时间戳重排 | 后提交的早时间戳事实仍是后一条 |
 | 隔离 | 只连接同一 `(PartitionID, SessionID)` 的事实 | 两 agent 共用 session id 也不会跨链 |
 | 无副本 | 不保留常驻父图或观察表，每次调用直接读链 | 链删除或新增后不需要第二次对账 |
-| 内部节点 | 查询面拒收压缩机制事实，trace 遇到不可读祖先时按既有语义停止 | 内部文案与检查点不进入模型上下文 |
+| 内部节点 | 查询面拒收压缩机制事实，trace 遇到不可读祖先时按既有语义停止 | 内部文案不进入模型上下文；checkpoint 事实无会话归属，投影与因果读面按链身份自然跳过 |
 
 隔离（`ChainKey`）仍是承重的：同一 agent 名的两个用户共用分区但**永远不共用 session**，因果回溯不会被跨用户缝合。投影、段龄轴、折叠都按这条链身份重建，重启后与运行期增量逐字节一致。
 

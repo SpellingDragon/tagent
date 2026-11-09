@@ -44,15 +44,13 @@
 
 ### 8.1 关闭段的应答事实偶发不落链而 turn 报 Completed
 
-> 状态更新（2026-11-09）：本卡由 hot-update-and-purity-closure 的 **12-checkpoint-state** 构造消解——开账嵌入框架 checkpoint 后折叠不再吃未清承诺，且 boot 改读 checkpoint+回放增量。domain 12 实施完成并验证后回来勾销本卡（8.1a2/8.1b 不再独立实施）。下列根因证据保留作审计轨迹。
-
 - 场景：`TestEventIntegrityTaskContinuation/notice_visible_under_small_window` 以约 0.1%（本地 2300 次中 3 次）失败——`delegation settled` 与后续 turn 之间缺少 accept 应答的 turn-end/agent_output 事实观测行，`deliverFresh` 读不到 body，应答永不送达；`TestEventIntegrityFormalAssembly` 的 CI 一次「delivered bodies = []」疑似同族。
 - 根源（8.1a 已定谳，证据见 /tmp/hupc-81a-run2.log）：`15-… agent_output #c4`（accepted 应答）**提交成功**（提交流打印为证），但同一提交调用内的 `trimFacts` 与紧随的 age fold 在 `deliverFresh` 读投影之前就把 #c4 整段从 SessionFacts 可见面收走（256 token 小窗必超限；观测行缺失同因）。案 A（静默去重）被 `mintEventID` 随机后缀排除；案 C（未提交）被提交流排除。本质：带 `outputMetaDeliveryOwed` 的欠账事实可在履行（送达）之前被窗口合法收走，活路径读投影读不到欠账、也无 owed-only 补发——设计缺口，非实现笔误。先于本 PR 存在（74c13ffa CI 同款断言）。
 - 影响范围：小概率静默丢失一条用户应答，直到重启才补发（无 owed 落链时重启也不补）。
 - 已做的相邻修复（在 hot-update-and-purity-closure 内）：settle 材料读法接受 backflow 形态（`reproductionWaitForSettleFact` 回退 notice 事实）；history 观察测试走带锁的 `SwapFrameworkLogger`。
 - [x] 8.1a 定案（2026-11-09）：案 B' 定谳，证据见根源行与 /tmp/hupc-81a-run2.log（提交成功→trim/fold 收走→读取落空）
-- [ ] 8.1a2 grilling 选定修复案：送达读体改用 `SegmentAnswer.Body`（最小面，但放弃「从链读」单一事实源）／折叠与 trim 保留带 `outputMetaDeliveryOwed` 的输出直到结算落链（保链源语义，代价是欠账未清时窗口不合拢）／活路径驱动 owed-only 补发（语义最重，有补发风暴面）
-- [ ] 8.1b 实施所选方案；修复后 8.1 场景 5000 连跑零红
+- [x] 8.1a2 修复案选定（2026-11-09，用户裁决）：由 hot-update-and-purity-closure domain 12-checkpoint-state 统一收编——开账义务（含 body/目标/lineage/attempt/hold）随框架 checkpoint 存续，折叠不再能收走未履行的承诺，重启经 checkpoint 恢复后补发。原三案（SegmentAnswer.Body／折叠保留 owed 输出／owed-only 补发）均被此统一机制取代。
+- [ ] 8.1b ~~实施所选方案~~ **superseded by domain 12.4b/12.7a**（开账嵌入 checkpoint + 一致性测试钉死「折叠未清义务含 body 进 checkpoint、重启只处理一次」）；待 domain 12 12.7a 绿后本卡关闭，8.1 场景由构造消解
 
 ## 依赖与派发提示
 

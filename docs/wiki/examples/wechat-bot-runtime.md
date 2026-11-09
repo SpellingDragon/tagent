@@ -68,7 +68,7 @@
 
 **受理回执只有一个字**：`task.AdmissionReceiptText = "ok"`，并经 `AdmissionReceipt` 的 `Text()`／`String()`／`MarshalJSON()` 三个渲染口输出同一份最小正文——**task id、状态词、结算承诺永不进模型**。task 身份是 `task-<32 hex>`（`mintTaskID` 随机铸造、不可枚举），上游看到的 `ok` 与它无关。因此"受理静默"是可断言的：模型世界里收到的 tool result 恰为 `ok`。
 
-**owed 账**（`assembly/host_delivery.go`）保证**崩溃不漏送**：正文在任何出海之前先落成一条 durable 交付义务（key 前缀 `tagent/task/v1/delivery:`，状态 `owed`）；发送被审核插件挂起即 `held`、被通道拒绝即 `retry`、被接受即 `sent`、被人工拒绝即 `refused`，非入口会址的欠账以 `headless` 退役（保留正文供查）。重启时 `restorePendingDeliveries` 扫回全部记录：`owed` 的入口会址**重新投递**，`held`／`retry` 重新挂回待裁决——同一身份只结算一次。
+**owed 账**（`assembly/host_delivery.go`）保证**崩溃不漏送**：正文在任何出海之前先随输出事实在链上声明 owed 义务（义务 ID `delivery-fresh-<factKey>`）；发送被审核插件挂起即 `held`（带 reason）、被通道拒绝即 `held(retrying)` 续跑有界重投、被接受即 `sent`、被人工拒绝即 `refused`，非入口会址的欠账以 `headless-retired` 退役（保留正文供查），状态迁移一律作为 `delivery.settlement` 事实追加落链。重启时框架 checkpoint 的 `delivery` 切片先恢复整本账，`restorePendingDeliveries` 只回放偏移后事实：仍欠的入口会址**重新投递**，held 重新挂回待裁决——同一身份只结算一次（机制见[平台篇 §六](../platform/platform-subsystems.md#framework-checkpoint)）。
 
 **两种"投递"不是一个东西**：本节说的是示例侧把回合正文送回 IM；框架另有**进程内通信**，模型面唯一入口是 `send`（职责=跨 task、会话通信，正文永不出网）：`target` 写 `{"task": …}` 时重入本进程服务的 task（已 settle 的 task 被重新激活、以新 Round 续行，failed/cancelled 具名拒绝），写 `{"agent": …, "session": …}` 时经宿主投递面的**四道门**向同级会话投递——`deliver_to` 白名单、反思观察面够得到目标、目标会话已在本 run 绑定、宿主未停机且存储能为该地址建立席位，每道门各按自己的名字拒绝；过门后正文以这次调用的身份入链，目标空闲被驱动一轮、忙则在自己的下一条决策边界上读到它（`assembly/host_tools.go` 的 `DeliverToSession`），两者方向不同，判据见[持久投递·谱系可见性](../reliability/durable-delivery.md#lineage-visibility)。本示例的冥想采用默认形态：回看业务链、把卡片经 `send` 回流入口 agent，循环跑在保留会话上，内部叙述不进微信对话。
 

@@ -43,6 +43,8 @@
 
 派发单-孙任务矩阵见 2.1；合单判据：同域同文件簇合单（01 的 host_delivery 簇含 1.2/1.3/1.4/1.7）；单均<2 不拆。预算：W1 三单并发、W3 消费者按包并发上限=不相交包数；混沌 5.13 为长跑单后台跑不占并发槽（R32）。档位与真实路径欠账：storage 远端 daemon 真实路径若缺凭据按 R24 三态（无门 Skip/有门缺凭据 Fatal/门开非空转）。
 
+**W5（合并阻断增补）domain 12-checkpoint-state**：LongRun boot 二次扫描挂死（Unsettled 逐站点全史读，O(站点×事件)）阻断 PR#37。用户裁决统一 checkpoint 事实族（Flink 框架状态管理），取代 06 D3「快照装全状态否决」一条、继承 D4 折叠锚一致性切面。契约冻结于 12/design.md D1-D7。派发：12.2-12.6 耦合簇（api/event+assembly/run+host_delivery+runtime/state 共享）合单派一个 openspec-apply 顺序实施；12.7 测试契约冻结后可并行；编排者终跑门为唯一终态判据。触碰集白名单＝12/tasks.md 所列；禁动他域。合并门＝LongRun 六分片全绿 + 每代 boot 成本平坦。
+
 ## 四、台账
 
 | 轮 | 五查结论 | 集成验证 | 跨域裁决 | 勾选凭据 | 下轮情报 | 锁释放 |
@@ -51,4 +53,4 @@
 
 （执行期逐轮回填；本档为派发唯一依据，派发前重读二节。）
 | 终审轮 | R35 两轮：首轮三阻断(doc-budget/meditation 水位代际/文档脱节)由 R4 修；复审余 R35-1(拒绝候选水位滞留)已修+TestRefusedMeditationOverNoMeditationBootClearsWatermark 钉；concept 基线重指可达 main(3b727199)、removed_min 校准 5；CI 待绿后 squash | 见 /tmp/hupc-R4、C5、R35 报告 | 登记例外 anchors/approvals/RL 为受治理债(review_by 2027-05-05) | 6.3/6.4 勾 | CI watch bd0rgbyxs | — |
-| W5 checkpoint | CI 长分片 LongRun 挂死定性=boot 尾段 Unsettled 逐站点全史扫 O(站点×事件) 二次（invoke.go:435→run.go:2170）+送达账全史扫；用户裁决统一 checkpoint 事实族（Flink 算子类比，状态委托框架）；立 domain 12，openspec-apply 单派发实施核心耦合簇 | 本地复现 gen52/53 同款；子代理代码审读钉死二次扫描 | 偏移用分区 Seq 非 factSeq；退役 RecoveryTicket；8.1 由构造消解 | 12.1-12.5 待勾 | 子代理后台实施，完成通知后续验+CI | run.go/api/event 单写锁归 domain12 实施代理 |
+| W5 域12 进度 | 12.2-12.6 已勾：事件类型+载荷（12.2）／Stateful 接缝+协调者（12.3）／四切片接线（12.4）／恢复重写删三全史读者（12.5）／RecoveryTicket 退役（12.6）；12.4b 任务终态切片（restoreChains 降兜底）与 12.7a-c 测试收尾中 | 12.8 编排者终跑门未跑；合并门＝LongRun 六分片全绿+每代 boot 成本平坦 | 8.1 由 12.4 开账嵌入 checkpoint 构造消解，runtime-simplicity-features 8.1b 待 12.7a 绿后关闭；06 D3 一条已由 r46 勘误取代 | changes/12-checkpoint-state/tasks.md 12.1-12.6 [x]（本轮读取时点，该表由实施代理续写） | 12.7a 绿后关 8.1b；12.8 终跑门；12.9 收尾回写 | —（12/tasks.md 写锁仍归 domain12 实施代理） |

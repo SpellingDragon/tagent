@@ -172,8 +172,7 @@
       "kind": "kv-store",
       "owner": "runtime/state",
       "files": [
-        "runtime/state/durable.go",
-        "runtime/state/recovery.go"
+        "runtime/state/durable.go"
       ],
       "prefixes": [
         {
@@ -200,19 +199,9 @@
           "file": "runtime/state/durable.go",
           "name": "rejectPrefix",
           "value": "tagent/task/v1/reject:"
-        },
-        {
-          "file": "runtime/state/recovery.go",
-          "name": "ticketPrefix",
-          "value": "tagent/task/v1/ticket:"
-        },
-        {
-          "file": "runtime/state/recovery.go",
-          "name": "snapshotPrefix",
-          "value": "tagent/task/v1/snapshot:"
         }
       ],
-      "reason": "The five durable record kinds plus the recovery ticket and its verified snapshot blob share one KV face; the ticket fact is the truth, the blob is referenced material.",
+      "reason": "The five durable record kinds share one KV face; the carrier tables they rebuild are the one truth of the tasks a process serves.",
       "review_by": "2027-05-05"
     },
     {
@@ -292,6 +281,23 @@
         }
       ],
       "reason": "Retirement of a superseded generation is a chain record keyed gen-retire:<id>; release itself stays with the retirement ledger drain (ADR 0007 / Q2).",
+      "review_by": "2027-05-05"
+    },
+    {
+      "id": "assembly.checkpoint-facts",
+      "kind": "fact-key",
+      "owner": "assembly",
+      "files": [
+        "api/event/checkpoint.go"
+      ],
+      "prefixes": [
+        {
+          "file": "api/event/checkpoint.go",
+          "name": "checkpointKeyPrefix",
+          "value": "checkpoint:"
+        }
+      ],
+      "reason": "A framework checkpoint is filed under checkpoint:<partitionSeq> and read back by the frozen event type: the key is the partition sequence the cut advanced to and the payload carries the state slices, so the fact itself is the only truth of the state it states.",
       "review_by": "2027-05-05"
     }
   ],
@@ -373,17 +379,6 @@
   ],
   "content_addressed_artifacts": [
     {
-      "id": "runtime.state.recovery-snapshot-blob",
-      "surface": "runtime.state.durable-facts",
-      "files": [
-        "runtime/state/recovery.go"
-      ],
-      "ticket_fact": "tagent/task/v1/ticket:",
-      "content_address": "sha256",
-      "reason": "The recovery ticket fact carries sha256:<digest> plus the blob length, and readSnapshot rechecks the blob against both, so the blob is referenced material and the ticket is the truth.",
-      "review_by": "2027-05-05"
-    },
-    {
       "id": "runtime.state.migration-archive",
       "surface": "runtime.state.migration",
       "files": [
@@ -404,6 +399,11 @@
     {
       "file": "runtime/task/attention.go",
       "reason": "FactKey hashes the fact type and identity to mint a key; nothing is verified against the digest.",
+      "review_by": "2027-05-05"
+    },
+    {
+      "file": "api/event/checkpoint.go",
+      "reason": "CheckpointFor hashes the payload to mint the checkpoint's own identity: the digest is the identity the payload states, the reader recomputes it over the payload it read, and no stored material is referenced or verified against it.",
       "review_by": "2027-05-05"
     }
   ]

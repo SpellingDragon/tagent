@@ -1,9 +1,9 @@
 {
   "concept_ratchet": {
     "removed_min": 5,
-    "new_max": 38,
-    "exported_interfaces_max": 82,
-    "note": "new_max 1->4 (boundary-closure), 4->7 (restart-recovery: RecoveryTicket/LoadScan/LoadStats), 7->38 (hot-update-and-purity-closure: generation-scoped registry GenRegistry/GenBuilder/GenBuilt/GenInstances/GenRegistration/GenResources/GenerationFaces/GenerationConsumer/GenHostSpec, storage engine AtomicStore/Batch/Fetch/Pair/MigrateReport, training export SFTInput/SFTSample/SFTDataset/SFTRow/PreferenceDataset/PreferenceRow/DatasetRefusal/RefusalName/EvidenceOptions/EvidenceExporter/EvidenceLines/FileEvidenceLines/SnapshotReadBack/RequestEvidenceRecord, meditation mount Plan/Faces, ChainFailureNamer, GenerationConfig); exported_interfaces_max 78->82 (AtomicStore, ChainFailureNamer, GenerationFaces, EvidenceLines, SnapshotReadBack). 两个数都是本波实测值，非收敛目标：后续波次每新增一个导出名，棘轮按名判红而不是抬升到新常态。"
+    "new_max": 44,
+    "exported_interfaces_max": 83,
+    "note": "new_max 1->4 (boundary-closure), 4->7 (restart-recovery: RecoveryTicket/LoadScan/LoadStats), 7->38 (hot-update-and-purity-closure: generation-scoped registry GenRegistry/GenBuilder/GenBuilt/GenInstances/GenRegistration/GenResources/GenerationFaces/GenerationConsumer/GenHostSpec, storage engine AtomicStore/Batch/Fetch/Pair/MigrateReport, training export SFTInput/SFTSample/SFTDataset/SFTRow/PreferenceDataset/PreferenceRow/DatasetRefusal/RefusalName/EvidenceOptions/EvidenceExporter/EvidenceLines/FileEvidenceLines/SnapshotReadBack/RequestEvidenceRecord, meditation mount Plan/Faces, ChainFailureNamer, GenerationConfig), 38->44 (hot-update-and-purity-closure 12 checkpoint state: Checkpoint/CheckpointOffset/CheckpointSlice/CheckpointPayload 事实族、Stateful/StateRegistry 状态接缝、RegistryCheckpoint/TaskCheckpoint 任务账; 同波 CheckpointMeta/MailboxState/CheckpointObligation 内化不出公共面); exported_interfaces_max 78->82 (AtomicStore, ChainFailureNamer, GenerationFaces, EvidenceLines, SnapshotReadBack), 82->83 (Stateful). 两个数都是本波实测值，非收敛目标：后续波次每新增一个导出名，棘轮按名判红而不是抬升到新常态。"
   },
   "schema_version": 1,
   "config_facts": {
@@ -1202,18 +1202,13 @@
         "kind": "fact",
         "spec": "offline-training-export"
       },
-      "RecoveryTicket": {
-        "concept": "restart recovery snapshot ticket (contract: changes/03-compression-cursor/specs/compression-recovery-ticket/spec.md until F4)",
-        "kind": "fact",
-        "spec": "delivery-closure"
-      },
       "LoadScan": {
-        "concept": "recovery read measurement (contract: changes/03-compression-cursor/specs/compression-recovery-ticket/spec.md until F4)",
+        "concept": "read cost measurement of one prefix scanned while the carrier rebuilds from the durable record kinds",
         "kind": "declaration",
         "spec": "delivery-closure"
       },
       "LoadStats": {
-        "concept": "recovery read measurement set (contract: changes/03-compression-cursor/specs/compression-recovery-ticket/spec.md until F4)",
+        "concept": "read cost measurement set of the carrier rebuild",
         "kind": "declaration",
         "spec": "delivery-closure"
       },
@@ -1371,6 +1366,46 @@
         "concept": "name of the way one export row was refused",
         "kind": "declaration",
         "spec": "offline-training-export"
+      },
+      "Checkpoint": {
+        "concept": "framework checkpoint fact: one cut carrying every recoverable state slice the consumers delegated to the framework",
+        "kind": "fact",
+        "spec": "fact-vocabulary"
+      },
+      "CheckpointOffset": {
+        "concept": "partition-sequence watermark one checkpoint covers: the committed sequence slot of every partition at the cut",
+        "kind": "declaration",
+        "spec": "fact-vocabulary"
+      },
+      "CheckpointSlice": {
+        "concept": "one state slice a checkpoint carries: the consumer name it is keyed by beside that consumer's own payload",
+        "kind": "declaration",
+        "spec": "fact-vocabulary"
+      },
+      "CheckpointPayload": {
+        "concept": "payload layout of one checkpoint fact: the layout version, the identity it content-addresses to, the cut and the state slices",
+        "kind": "declaration",
+        "spec": "fact-vocabulary"
+      },
+      "Stateful": {
+        "concept": "one consumer's recoverable state as the framework sees it: the name it is keyed by, the state it states and the restore that puts it back",
+        "kind": "port",
+        "spec": "compression-recovery-ticket"
+      },
+      "StateRegistry": {
+        "concept": "ordered account of the state holders mounted on one runtime, aggregated at one cut and restored from one",
+        "kind": "port",
+        "spec": "compression-recovery-ticket"
+      },
+      "RegistryCheckpoint": {
+        "concept": "task account a checkpoint states: one entry per task record the registry holds at the cut",
+        "kind": "declaration",
+        "spec": "task-registry-rebuild"
+      },
+      "TaskCheckpoint": {
+        "concept": "one task record as a checkpoint states it: the admission declaration, the held state and the chain revision that state corresponds to",
+        "kind": "declaration",
+        "spec": "task-registry-rebuild"
       }
     }
   }

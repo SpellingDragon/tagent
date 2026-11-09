@@ -14,6 +14,7 @@
 | `fact.go` | 事实类别契约 `Fact`（`FactKey`/`FactType`） | 没有它：一个事实家族无法在不 import 本包的地方自述身份 |
 | `model_replacement.go` | model 维度 `config_change` 的元数据键（`model_from_version`/`model_to_version`/`model_replacement_result`）与结果戳 `"requested"`；独立族已退役 | — |
 | `compress_request.go` | 压缩请求的事实构造 | — |
+| `checkpoint.go` | 框架 checkpoint 事实：`TypeCheckpoint`、`CheckpointKey`/`CheckpointPayload`/`CheckpointFor`/`CheckpointOf`（内容寻址校验） | 没有它：可恢复状态退回各持有者自养的全史读者 |
 
 `Event` 的四个块（字段全在 `types.go`）：
 
@@ -44,6 +45,7 @@
 | `TypeAttentionQuestion` | `attention.question` | 注意力提问（在场记录） |
 | `TypeAttentionAnswer` | `attention.answer` | 注意力回答（裁决） |
 | `TypeAttentionClearance` | `attention.clearance` | 注意力清除（退出在场） |
+| `TypeCheckpoint` | `checkpoint` | 框架检查点（常量在 `checkpoint.go`）：键 `checkpoint:<partitionSeq>` 按分区 Seq 单调，载荷携带切面水位与状态切片，读回重算内容寻址 ID 不符即拒恢复；机制见[平台篇 §六](../platform/platform-subsystems.md#framework-checkpoint)。同族机制事实另有 `compress.request`/`compress.product`/`final_round.request`/`config_change`，登记于 [FACT-VOCABULARY](../../FACT-VOCABULARY.md#families) |
 
 **触发源印花（`trigger_source` 的取值）**：本包只声明一个值——`LineageDelegation = "delegation"`，即一次被委派的调用是 Agent 自己管理的流量，不开宿主面、不计新鲜度。其余取值（`user`、`task`、`reincarnation`、`system_alert`、`meditation`）**不在本包声明，也不在本包判定**：判定住在消费域自己的策略里（见[谱系可见性](../reliability/durable-delivery.md#lineage-visibility)），本包只保证印花这一格元数据原样过链。
 
@@ -69,6 +71,7 @@
 | `input_events` | `MetaKeyInputEvents` | `agent_output` 携带本段消费的输入事实身份 | 投影按消费关系归段 |
 | `delegation` | `MetaKeyDelegation` | 委派调用在受理记录上携带的来源戳 | 自管流量判定 |
 | `attention.kind` / `attention.target` / `attention.lineage` / `attention.expires_ms` / `attention.clearance` | `MetaKeyAttention*` | 注意力在场/回答/清除事实 | 读时推导在场，同键拒二落 |
+| `checkpoint.offset` / `checkpoint.slices` | `MetaKeyCheckpointOffset` / `MetaKeyCheckpointSlices` | checkpoint 事实（`MetaEntries`） | 读切面水位（排序的 `partition:seq` 对）与切片名列表，不解码各消费者状态 |
 
 **透传前缀** `MetaPrefix = "meta_"`：任何带该前缀的键原样转发，且**永不被读作业务字段**——业务键与受控控制面因此不共用命名空间。
 

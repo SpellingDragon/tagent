@@ -66,6 +66,25 @@ const (
 // storage tier answers under, so the live ledger and the durable record never
 // disagree about what one identity names.
 func (r *Run) commitFactChecked(ctx context.Context, evt event.Event) (event.EventID, error) {
+	r.cutMu.Lock()
+	id, err := r.commitFactCheckedLocked(ctx, evt)
+	r.cutMu.Unlock()
+	if err != nil {
+		return id, err
+	}
+	if evt.Type != event.TypeCheckpoint {
+		r.noteCheckpointCommit(ctx)
+	}
+	return id, nil
+}
+
+// commitFactCheckedLocked is the commit entry under the checkpoint cut lock the
+// caller holds: the fact lands and enters the live ledger without any cut being
+// taken between its durable write and its in-memory effect, so a checkpoint
+// never states a watermark past the state it snapshotted.
+//
+//   - a checkpoint fact stays on the store the boot reads it from and enters no session chain: it is a framework state carrier, not material of any chain, so the live ledger keeps the window of the chains it serves and never one fact per cut.
+func (r *Run) commitFactCheckedLocked(ctx context.Context, evt event.Event) (event.EventID, error) {
 	if evt.Key == "" {
 		evt.Key = r.mintEventID()
 	}
@@ -84,6 +103,9 @@ func (r *Run) commitFactChecked(ctx context.Context, evt event.Event) (event.Eve
 	}
 	if err := r.persistFact(ctx, evt); err != nil {
 		return "", err
+	}
+	if evt.Type == event.TypeCheckpoint {
+		return evt.Key, nil
 	}
 	entry, mapped := mappedEntryOf(evt)
 	r.mu.Lock()

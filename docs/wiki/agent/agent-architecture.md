@@ -71,7 +71,7 @@
 - 被点火的回合不提交任何带血缘的结算事实，因此它**永不可能点着自己**。
 - 邮箱是唯一回答「还有没有活等着」的账：一条通知在邮箱里等到一次回合认领、驱动，并在**同一账**上消费，所以无论被观察多少次，一条通知只起一个回合。
 
-`SettleWake` 五方法就是这本账的全文：`RestoreOwed` 把持久账仍欠的未消费工作折回邮箱（停掉的运行留下的通知等下个决策，而不是随进程死掉）、`Unconsumed` 按账自己的次序报出未完成的条目、`Claim` 只给本执行器取走一条待办（一条通知只起一个回合）、`Release` 把已认领条目交还未认领池（停在认领旁的执行器保留欠账而不是占着）、`Consume` 在同一账上记下完成消费。驱动**自己不持队列**，所以它持有的东西不会因停止或重启而丢；`SettleAttempt` 是重启读的第二道栅栏——已落地终结的回合用消费回执关闭，不再驱动一次，于是「终结事实」与「回执」之间的一次停止不会重放第二个回合。落地判定写成同一道栅栏（`settleBarrier` 带地址、通知、终结写入与消费回执），在驱动返回与答案投递之前完成。随动回合与用户回合**共用同一地址闸，绝不同址并行**；`Close` 先停随动驱动并等在飞回合返回。
+`SettleWake` 四方法就是这本账的全文：`Unconsumed` 按账自己的次序报出未完成的条目、`Claim` 只给本执行器取走一条待办（一条通知只起一个回合）、`Release` 把已认领条目交还未认领池（停在认领旁的执行器保留欠账而不是占着）、`Consume` 在同一账上记下完成消费。重启时欠账不再全量重投：邮箱欠账作为框架 checkpoint 的 `mailbox` 切片按冻结路由逐条回到邮箱（`runtime/state/mailbox_checkpoint.go`），停掉的运行留下的通知等下个决策，而不是随进程死掉。驱动**自己不持队列**，所以它持有的东西不会因停止或重启而丢；`SettleAttempt` 是重启读的第二道栅栏——已落地终结的回合用消费回执关闭，不再驱动一次，于是「终结事实」与「回执」之间的一次停止不会重放第二个回合。落地判定写成同一道栅栏（`settleBarrier` 带地址、通知、终结写入与消费回执），在驱动返回与答案投递之前完成。随动回合与用户回合**共用同一地址闸，绝不同址并行**；`Close` 先停随动驱动并等在飞回合返回。
 
 委派结果正文随通知同行：`tool/subagent` 把 builder 的回合正文交给结算面，通知的 `Text` 携带正文（超限截断并标记），结算事实与随动回合读到的是同一份正文——正文不属于通知身份（`FactKey` 仍读 task/round/kind/seq），重试保持同一幂等键。
 
@@ -79,7 +79,7 @@
 
 **投递账目是读面**：`Run.DeliveryLedger()` 按源事件与目标回读本 run 提交过的投递事实（`Records`/`BySource`/`ByTarget`），逐条给出源事件、目标、投递身份、回执与事实类型；一条投递身份对应一条有效记录，查询不解析正文。两路投递的事实类型**分立**（agent 主动投递是 `external_input`，框架结算投递是 `task_settled`），投递元数据却同构（五键见[事件篇](../event/event-architecture.md#const-list)）。
 
-**交付义务在链上，不在账本里**：一条带正文的输出在**同一笔事实**里声明 owed（目标+血统），交付身份由落链后的 fact key 确定性导出；之后 `delivery.settlement` 族以「身份+状态」为键**追加式**落链（四结算态 held/sent/refused/headless-retired＋迁移专用 owed 态，held 的 reason ∈ {approval, retrying, retry-exhausted, unknown}）。重启只读链对账——已确认 sent 不重发、无结算事实或 held(retrying) 的续跑、超时这类结果未知的不自动重发，旧 KV 六态幂等迁移后只读留存。可见性口径：结算事实按类型→角色映射进模型请求，owed 声明随 `agent_output` 本体呈现、无独立可见面；「发不出去而模型也没说」由既有失败告知与一条按 reason 分层的延迟告知兜住（`retrying`→稍后必补送；`approval`/`unknown`/`retry-exhausted`→已转人工），对用户怎么说由模型自主。
+**交付义务在链上，不在账本里**：一条带正文的输出在**同一笔事实**里声明 owed（目标+血统），交付身份由落链后的 fact key 确定性导出；之后 `delivery.settlement` 族以「身份+状态」为键**追加式**落链（四结算态 held/sent/refused/headless-retired＋迁移专用 owed 态，held 的 reason ∈ {approval, retrying, retry-exhausted, unknown}）。重启经框架 checkpoint 的 `delivery` 切片恢复整本账、只回放偏移后事实（见[平台篇 §六](../platform/platform-subsystems.md#framework-checkpoint)）——已确认 sent 不重发、无结算事实或 held(retrying) 的续跑、超时这类结果未知的不自动重发，旧 KV 六态幂等迁移后只读留存。可见性口径：结算事实按类型→角色映射进模型请求，owed 声明随 `agent_output` 本体呈现、无独立可见面；「发不出去而模型也没说」由既有失败告知与一条按 reason 分层的延迟告知兜住（`retrying`→稍后必补送；`approval`/`unknown`/`retry-exhausted`→已转人工），对用户怎么说由模型自主。
 
 <a id="package-layout"></a>
 ## 五、包与文件结构

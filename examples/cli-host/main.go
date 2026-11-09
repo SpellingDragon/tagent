@@ -74,7 +74,6 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "cli-host: assemble: %v\n", err)
 		return 1
 	}
-	rt.CompleteRestartRecovery(ctx)
 	session := &cliSession{
 		addr: event.Address{
 			AgentID:   event.AgentID(cfg.agentID),

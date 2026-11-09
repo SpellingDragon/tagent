@@ -4,13 +4,16 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	trpclog "trpc.group/trpc-go/trpc-agent-go/log"
 
 	"github.com/SpellingDragon/tagent/api/event"
+	"github.com/SpellingDragon/tagent/memory/ledger"
 	"github.com/SpellingDragon/tagent/runtime/task"
 )
 
@@ -1214,4 +1217,151 @@ func TestLoadScanCountsRefusedScanRecordsNothing(t *testing.T) {
 	if got := d.LoadStats(); len(got.Scans) != 1 || got.Scans[0].Prefix != specPrefix {
 		t.Fatalf("stats after a refused read = %+v, want only the read that reached its end", got.Scans)
 	}
+}
+
+// seededSpec builds the admission material each seeded task declares: every
+// exported field of task.Spec holds a non-zero value, so a comparison of two
+// carriers sees a difference on any field the load path could drop.
+func seededSpec(tag string) task.Spec {
+	return task.Spec{
+		CallID:        "call-" + tag,
+		DedupKey:      task.DedupKey("dedup-" + tag),
+		InvocationID:  event.InvocationID("inv-" + tag),
+		InstanceID:    event.InstanceID("inst-" + tag),
+		Description:   "the seeded task " + tag,
+		Source:        event.Address{AgentID: "agent-a", SessionID: event.SessionID("session-" + tag)},
+		Target:        event.Address{AgentID: "agent-b", SessionID: event.SessionID("session-" + tag)},
+		TriggerSource: "user",
+		Execution:     task.Serialization("session-" + tag + "-serialized"),
+	}
+}
+
+// seedCarrier drives one real write set with non-zero content on every table:
+// specs with identities, two commits carrying outboxes, one consumption, one
+// attempt and one refusal with its routing and moment frozen.
+func seedCarrier(t *testing.T, ctx context.Context, log FactLog, taskID event.TaskID, tag string) {
+	t.Helper()
+	carrier, err := NewDurableCommit(log, nil)
+	if err != nil {
+		t.Fatalf("open the seeding carrier: %v", err)
+	}
+	spec := seededSpec(tag)
+	if err := carrier.Declare(ctx, taskID, spec); err != nil {
+		t.Fatalf("declare %s: %v", tag, err)
+	}
+	first := invariantRecord(taskID, 0, task.StatusRunning, invariantNotice(taskID, 1))
+	first.Outbox[0].Target = event.Address{AgentID: "agent-b", SessionID: event.SessionID("session-" + tag)}
+	first.Outbox[0].Source = event.Address{AgentID: "agent-a", SessionID: event.SessionID("session-" + tag)}
+	if result, err := carrier.Commit(ctx, first); err != nil || result != task.CommitCommitted {
+		t.Fatalf("commit the first fact of %s = (%v, %v)", tag, result, err)
+	}
+	second := invariantRecord(taskID, 1, task.StatusSettled, invariantNotice(taskID, 2))
+	second.Outbox[0].Target = event.Address{AgentID: "agent-b", SessionID: event.SessionID("session-" + tag)}
+	if result, err := carrier.Commit(ctx, second); err != nil || result != task.CommitCommitted {
+		t.Fatalf("commit the second fact of %s = (%v, %v)", tag, result, err)
+	}
+	if err := carrier.recordConsumption(ctx, first.Outbox[0].Notice); err != nil {
+		t.Fatalf("record the consumption of %s: %v", tag, err)
+	}
+	if err := carrier.recordAttempt(ctx, second.Outbox[0].Notice, SettleAttempt{Terminal: "completed"}); err != nil {
+		t.Fatalf("record the attempt of %s: %v", tag, err)
+	}
+	refused := invariantNotice(event.TaskID("task-other-"+tag), 9)
+	if err := carrier.recordRejection(ctx, Rejection{
+		Notice:   refused,
+		Target:   event.Address{AgentID: "agent-c", SessionID: event.SessionID("session-refused-" + tag)},
+		Instance: event.InstanceID("inst-refused-" + tag),
+		Reason:   "refused in the seed " + tag,
+		At:       time.Unix(1700000000, 0),
+	}); err != nil {
+		t.Fatalf("record the rejection of %s: %v", tag, err)
+	}
+}
+
+// TestSeedCarriesEverySpecField pins the seed against task.Spec itself.
+// - every exported field holds a non-zero value, so a 0 == 0 comparison cannot hide one
+// - a field added to task.Spec later fails here until it is seeded
+//
+// 契约: docs/wiki/reliability/durable-delivery.md#canonical-fact-resolution
+func TestSeedCarriesEverySpecField(t *testing.T) {
+	spec := seededSpec("every")
+	value := reflect.ValueOf(spec)
+	for i := 0; i < value.NumField(); i++ {
+		field := value.Type().Field(i)
+		if !field.IsExported() {
+			continue
+		}
+		if value.Field(i).IsZero() {
+			t.Fatalf("the seed leaves task.Spec.%s at its zero value, so the comparison cannot see a difference there", field.Name)
+		}
+	}
+}
+
+// barrierFailureLog is one fact log whose completed barrier is replaced by a
+// failure, so a check can pin what a commit reports when the barrier it reports
+// success behind did not complete. The store itself is the real journal tier:
+// only the barrier is injected.
+type barrierFailureLog struct {
+	FactLog
+}
+
+// Sync reports a barrier that did not complete without touching the store.
+func (barrierFailureLog) Sync(context.Context) error { return ErrBarrierRefused }
+
+// ErrBarrierRefused is the injected barrier failure of the checks below.
+var ErrBarrierRefused = errors.New("state: the injected barrier did not complete")
+
+// TestDurableCommitBarrier pins the commit barrier on the journal tier.
+// - a commit behind a completed barrier survives a reopen of the same tier: the task fact, its spec and its owed notification all read back
+// - a barrier that did not complete reports CommitUncertain and stores nothing the next carrier reads
+//
+// 契约: docs/wiki/reliability/durable-delivery.md#canonical-fact-resolution
+func TestDurableCommitBarrier(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("committed_record_survives_reopen", func(t *testing.T) {
+		root := t.TempDir()
+		cfg := ledger.StorageConfig{Type: ledger.StorageJournal, Root: root}
+		tier, err := ledger.OpenTier(ctx, cfg)
+		if err != nil {
+			t.Fatalf("open the journal tier: %v", err)
+		}
+		taskID := event.TaskID("task-barrier")
+		seedCarrier(t, ctx, ledger.TierFactLog(tier), taskID, "barrier")
+		reopened, err := ledger.OpenTier(ctx, cfg)
+		if err != nil {
+			t.Fatalf("reopen the journal tier: %v", err)
+		}
+		restored, err := NewDurableCommit(ledger.TierFactLog(reopened), nil)
+		if err != nil {
+			t.Fatalf("restore the carrier beside the committed facts: %v", err)
+		}
+		if len(restored.Facts(taskID)) != 2 {
+			t.Fatalf("restored facts of %s = %d, want the 2 committed", taskID, len(restored.Facts(taskID)))
+		}
+		if restored.specs[taskID] != seededSpec("barrier") {
+			t.Fatalf("restored spec of %s = %+v, want the declared one", taskID, restored.specs[taskID])
+		}
+	})
+
+	t.Run("barrier_failure_returns_uncertain", func(t *testing.T) {
+		root := t.TempDir()
+		tier, err := ledger.OpenTier(ctx, ledger.StorageConfig{Type: ledger.StorageJournal, Root: root})
+		if err != nil {
+			t.Fatalf("open the journal tier: %v", err)
+		}
+		log := barrierFailureLog{FactLog: ledger.TierFactLog(tier)}
+		carrier, err := NewDurableCommit(log, nil)
+		if err != nil {
+			t.Fatalf("open the carrier behind the failing barrier: %v", err)
+		}
+		taskID := event.TaskID("task-uncertain")
+		if err := carrier.Declare(ctx, taskID, seededSpec("uncertain")); err == nil || !errors.Is(err, ErrBarrierRefused) {
+			t.Fatalf("declare behind the failing barrier = %v, want the named barrier failure", err)
+		}
+		result, err := carrier.Commit(ctx, invariantRecord(taskID, 0, task.StatusRunning))
+		if result != task.CommitUncertain || err == nil || !errors.Is(err, ErrBarrierRefused) {
+			t.Fatalf("commit behind the failing barrier = (%v, %v), want the uncertain outcome beside the named failure", result, err)
+		}
+	})
 }

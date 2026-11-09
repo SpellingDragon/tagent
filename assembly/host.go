@@ -196,6 +196,10 @@ type Host struct {
 	// from the records beside a restart.
 	pendingDeliveries map[string]*heldDelivery
 	heldSeq           uint64
+	// restoredDelivery reports that the delivery account was restored from a
+	// framework checkpoint, so the boot reads only the facts that landed past
+	// that checkpoint's cut instead of the whole chain of settlements.
+	restoredDelivery bool
 	// deliveryStates is the host's in-process view of the settlement facts it
 	// wrote or restored: the delivery identity beside the latest settlement
 	// state token. The facts remain the truth — this table only spares a window
@@ -770,6 +774,14 @@ func Boot(configPath string, opts ...HostOption) (*Host, error) {
 		userTurns:         map[event.Address]int{},
 	}
 	trace("host built")
+	if err := host.registerDeliverySlice(); err != nil {
+		cancel()
+		return nil, host.abortBoot(err)
+	}
+	if pending := run.StateRegistry().PendingRestore(); len(pending) > 0 {
+		cancel()
+		return nil, host.abortBoot(fmt.Errorf("tagent: the framework checkpoint states the state slices %v no holder mounts", pending))
+	}
 	if err := host.restoreUnconsumedEvents(ctx, settleDriver); err != nil {
 		cancel()
 		return nil, host.abortBoot(err)
@@ -786,8 +798,6 @@ func Boot(configPath string, opts ...HostOption) (*Host, error) {
 		return nil, host.abortBoot(err)
 	}
 	trace("face built")
-	host.run.CompleteRestartRecovery(ctx)
-	trace("CompleteRestartRecovery")
 	face.start()
 	trace("face started")
 	host.face = face

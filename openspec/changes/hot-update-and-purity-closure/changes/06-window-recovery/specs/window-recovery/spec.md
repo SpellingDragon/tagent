@@ -58,17 +58,17 @@
 
 ### Requirement: tier 分片懒校验
 
-localfile 打开 SHALL 只登记分片标签，MUST NOT 提前扫描 ref/blob/snapshot/ticket 内容；数值段分片只在 idx/meta 装载时校验。首次实际读取发现损坏 SHALL 具名 `ErrSnapshotCorrupt`，且失败不得永久缓存。恢复 ticket/snapshot 读取失败 SHALL 沿用既有全量重放。
+localfile 打开 SHALL 只登记分片标签，MUST NOT 提前扫描 ref/blob 内容；数值段分片只在 idx/meta 装载时校验。首次实际读取发现损坏 SHALL 具名 `ErrSnapshotCorrupt`，且失败不得永久缓存。恢复 SHALL 经统一 checkpoint 事实族（domain 12-checkpoint-state）；RecoveryTicket 独立票据/snapshot 全量重放路线 SHALL 退役。
 
 #### Scenario: 首读校验与修复后重试
 
 - **WHEN** 原文分片在打开后损坏，或首次读取失败后修复
 - **THEN** 打开本身不读该片，首次实际读取具名失败；修复后的下一次读取可重试，无需新增恢复协议
 
-#### Scenario: 物理恢复分片退回全量
+#### Scenario: 恢复经统一 checkpoint
 
-- **WHEN** 真实 localfile 的 snapshot 或 ticket 分片不可解析
-- **THEN** tier 仍能打开，恢复使用全量重放且结果与无票据路径逐项一致
+- **WHEN** boot 在累积历史的存储上恢复
+- **THEN** SHALL 读最近 checkpoint 事实并回放分区 Seq 大于 Offset 的事实，SHALL NOT 经已退役的 RecoveryTicket 票据/snapshot 全量重放路线；坏 checkpoint SHALL 具名拒 boot
 
 ### Requirement: 折叠锚恢复
 

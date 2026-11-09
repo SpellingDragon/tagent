@@ -1,4 +1,4 @@
-# 平台子系统（组合根 · 配置面 · 治理闸 · 严格解码 · 投递账本）
+# 平台子系统（组合根 · 配置面 · 治理闸 · 严格解码 · 投递账本 · 框架检查点）
 
 `assembly` 是组合根：一份纯声明在这里变成活的运行时，进程内没有第二个装配入口。本篇的几个子系统不是并列的功能模块，而是**同一条装配链上的不同关卡**：配置面决定能声明什么，严格解码决定声明写错时怎么失败，治理闸决定一次调用放不放行，投递账本决定结果出去没有，观测/记忆/MCP 是链末的旁路与后端。共同纪律：能力缺席时按名拒绝或具名 gap，绝不给出"零读数"冒充空闲。
 
@@ -22,6 +22,7 @@ host 簇按域分文件：
 | `host_model.go` | 采样参数（temperature / thinking / reasoning_effort）的请求包装 |
 | `host_capture.go` | 轨迹采集：一次账户覆盖整次运行 |
 | `host_reload.go` | 热更新三档判据（见[组织级热重载](./org-hot-reload.md)） |
+| `checkpoint.go` · `checkpoint_inputs.go` · `task_checkpoint.go` · `host_delivery_checkpoint.go` | 框架 checkpoint 协调者与五个状态切片（见[第六节](#framework-checkpoint)） |
 
 装配链本体在其余文件：`run.go`（唯一公开装配入口与发布）、`prepare.go`（候选部件构造与资源登记）、`request.go`（请求装配与回放窗）、`invoke.go`（回合与关闭）、`tools.go`（工具受理闸与裁决适配）、`facts.go` / `commit.go` / `read.go`（事实与投影）、`settle_turn.go`（事件驱动的结算回合）。
 
@@ -79,16 +80,7 @@ host 簇按域分文件：
 
 ## 五、投递与交付账本
 
-一次模型产出的正文，在离开宿主之前先成为**持久的交付义务**（`assembly/host_delivery.go`）：
-
-| 记账态 | 含义 |
-|---|---|
-| `owed` | 已生成、尚未交出；先登记后发送，崩溃窗口才不漏送 |
-| `held` | 审查挂起：渠道什么都没有，批准后只交一次 |
-| `retry` | 发送被渠道拒：义务仍在，可重发 |
-| `sent` | 真交出 |
-| `refused` | 审查拒绝并销账 |
-| `headless` | 没有入口地址（调用方驱动）：具名销账，不假装投递成功 |
+一次模型产出的正文，在离开宿主之前先成为**链上的交付义务**（`assembly/host_delivery.go`）：owed 声明随输出事实同笔落链（先登记后发送，崩溃窗口才不漏送），状态迁移以 `delivery.settlement` 事实按「身份＋状态」键追加——四结算态 `held`（reason ∈ approval/retrying/retry-exhausted/unknown，批准后只交一次）/`sent`/`refused`/`headless-retired`（非入口地址具名销账，不假装投递成功）＋迁移专用 `owed`；重启恢复经[框架 checkpoint](#framework-checkpoint) 的 delivery 切片，详见[持久投递篇](../reliability/durable-delivery.md#envelope-states)。
 
 进程内通信走另一条缝，模型面唯一入口是 `send`（职责=跨 task、会话通信，正文永不出网）：`target` 写 `{"task": …}` 时重入本进程服务的 task；写 `{"agent": …, "session": …}` 时走宿主自己的投递面 `hostMeditationPort.DeliverToSession`（`assembly/host_tools.go`），先过四道门，每道都按名拒绝：
 
@@ -107,7 +99,14 @@ host 簇按域分文件：
 
 两类记录的分工是"谁把话送出去"与"这条话有没有被交出去"，术语口径见[存储概念图](../../demos/storage-concept-map.html)的交付账本与席位两卡。
 
-## 六、观测、反思、记忆、MCP（旁路与后端）
+<a id="framework-checkpoint"></a>
+## 六、框架 checkpoint：恢复的唯一载体
+
+重启恢复统一经框架级 **checkpoint 事实族**（Flink 式框架状态管理）：`event.TypeCheckpoint = "checkpoint"`（`api/event/checkpoint.go`），键 `checkpoint:<partitionSeq>` 按分区 Seq 单调，载荷 `CheckpointPayload` 携带一致性切面水位 `Offset`（各分区 `landedSeq`）与注册式命名切片，一身份一不可变事实、读回按载荷重算内容寻址 ID。消费者经状态接缝 `Stateful{StateName/SnapshotState/RestoreState}`（`runtime/state/checkpoint.go`）以 `Run.RegisterStateSlice` 注册，注册序即切片序、重名/无名具名拒；框架协调者 `Run.Checkpoint`（`assembly/checkpoint.go`）在提交锁 `cutMu` 下取水位与状态同一读点的一致性切面、聚合经 `commitFactChecked` 落链，任一切片快照失败整条拒落、覆盖分区无新事实不二落。节奏由框架所有：每 `CheckpointCommitInterval = 64` 条提交或距上次 `CheckpointPeriod = 30s`（`noteCheckpointCommit`，两常量登记 `golden/runtime/window_bounds.json`，与回放窗口解耦）；`CheckpointAfterFold` 供折叠产物落链后刷新载体。五个切片：`projection`（run：每会话投影幸存者，恢复以折叠锚为主路径、幸存者按身份从链水合，全局 Offset 不裁剪投影链）、`delivery`（Host：结算态＋开账清单含 body/目标/lineage/heldAt/重试 attempt，已结集合水位压缩 O(开账数)）、`mailbox`（`MemoryStore`：欠账通知按冻结路由逐条回邮箱）、`inputs`（run：未应答输入轮，覆盖区内的欠驱动不丢）、`tasks`（`MemoryRegistry`：任务账户＋链修订，boot 不再全史重读任务链）。
+
+boot（`assembly/run.go`）：索引 newest-first 过滤 type=checkpoint 取首条（O(1) 摊销）→ `RestoreState` 交还切片（切片先于持有者到达则暂存、挂载即恢复；装配收尾 `PendingRestore` 非空具名拒 boot）→ `eachFactPastCut` 只回放 `landingSeq > Offset` 的已提交事实，不读覆盖区正文；任务链按 `CheckpointCoverage` 只折修订之后的链接，`restoreChains` 全史读降为无 checkpoint 年轻链兜底；未结判定（`Unsettled`/`Unanswered`）读恢复后内存态。恢复成本由 checkpoint 加偏移后增量决定，不随历史超线性增长；无 checkpoint 的年轻会话退化为本链全量回放（链小，有界）；**坏 checkpoint 具名拒 boot**（`ErrCheckpointUnreadable`），不退全量。一致性三条件由测试钉死：晚于 Offset 的结算靠回放覆盖、早于 Offset 的必在快照，不重不漏；折叠时刻未清义务（含 body）原样进 checkpoint；已结集合用分区 Seq 高水位＋开账清单表达。RecoveryTicket 独立票据快照路线已退役，送达账全史扫、邮箱全量重投（`RestoreOwed`）与逐站点 durable 扫均已删除。
+
+## 七、观测、反思、记忆、MCP（旁路与后端）
 
 - **观测**（`features/telemetry`）：commit observer / log observer / OTEL 三面，全部在事实提交之后读，是只读旁路。
 - **反思与演进**（`features/evolution`）：激活判据、评估门（gate / judge / posterior）、冥想调度、治理策略面；只在开关打开时装配，默认关＝零行为变化。

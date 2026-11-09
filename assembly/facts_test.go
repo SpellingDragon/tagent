@@ -580,8 +580,15 @@ func TestAssemblyReplayFactsBounded(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read the durable history: %v", err)
 	}
-	if len(refs) != seeded+1 {
-		t.Fatalf("the durable read answered %d facts, want all %d committed facts plus the closing output", len(refs), seeded+1)
+	chainFacts := 0
+	for _, ref := range refs {
+		if ref.Type != event.TypeCheckpoint {
+			chainFacts++
+		}
+	}
+	if chainFacts != seeded+1 {
+		t.Fatalf("the durable read answered %d chain facts beside the %d checkpoints, want all %d committed facts plus the closing output",
+			chainFacts, len(refs)-chainFacts, seeded+1)
 	}
 	entries, carried := run.ReplayEntries(addr.SessionID)
 	if !carried {

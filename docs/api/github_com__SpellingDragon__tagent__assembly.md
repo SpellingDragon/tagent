@@ -1,5 +1,28 @@
 package assembly // import "github.com/SpellingDragon/tagent/assembly"
 
+The checkpoint coordinator of one run: the framework's half of state management.
+Consumers that hold recoverable state register a slice on the state seam; the
+coordinator aggregates those slices at one partition-sequence cut and files the
+aggregated state as one checkpoint fact. Recovery is the mirror of it — read the
+newest checkpoint, hand every slice back to its holder, then replay the facts
+that landed past the cut through the ordinary commit pipeline — so no consumer
+owns a recovery read path of its own and the boot cost is the state size plus
+the increment past the cut, never the history.
+
+The cut is consistent by construction: the coordinator takes it under the
+commit lock, so no fact lands between the watermark it reads and the state it
+snapshots. A settlement that commits after the cut is one the replay covers
+again, and its settlement is idempotent, so the restored account is at worst
+caught up twice and never short.
+
+The owed-input state slice: the input rounds the chains of this run hold with
+no answer, as the framework checkpoint carries them. The projection slice states
+the material a restart presents, not the rounds nobody drove, so a cut that
+covered an unanswered input would otherwise lose the drive it owes. The slice
+states each owed round beside the address it belongs to and the instance that
+accepted it, and a boot reads it as the rounds committed before the cut so an
+answer that landed past the cut still settles the round it answers.
+
 The compression consumer: the execution half of compression. A producer judges
 material over its bound and files a compress request; the consumer reads the
 material that request names, folds it through the projection and files the
@@ -35,6 +58,15 @@ refused, headless-retired} ∪ 迁移专用 owed；同（身份,终态）键重�
 是消费挂点：读链驱动的、自持计时的重试状态机（1s/4s/16s，上限 3 次；明确失败才自动重试，纯超时/不可辨归未知不重发）。 - 恢复只读链：补送范围 =
 无结算事实 ∪ held(retrying)，已确认 sent 不重发（at-least-once：发过未销账的窗口内可能重发一次，收方按交付身份去重）。 -
 旁路 KV 记录保留迁移读：迁移把记录转成事实并保留只读审计；事件化是唯一路径，没有回退账本，也没有开关。
+
+The delivery state slice: the host's whole deliverable account as the framework
+checkpoint carries it. The account is the settlement state of every obligation
+the host knows, the obligations still owed with the body, target, lineage,
+hold moment and retry attempt they stand under, and the ordering sequence the
+holds are parked by. A slice of this size is the size of the work in flight,
+never the size of the history the process committed — that is the whole point of
+the checkpoint: a restarted host restores an account that does not grow with the
+chains it already settled.
 
 The diagnostic visibility face of the host: the unified runtime reading beside
 the reflection, training and observation faces, each opened by the switch the
@@ -142,6 +174,14 @@ the serializable scene is its facts beside its configuration, never a snapshot
 of the conversation body, so a later process recovers the body by replaying the
 durable fact chain instead of restoring a body snapshot kept beside the facts.
 
+The task state slice: the account of the task registry as the framework
+checkpoint carries it. Every other slice states work the process holds in
+flight; this one states the tasks it settled beside the ones it is still
+driving, so a restarted run knows its tasks before it reads a single chain.
+The chain stays the truth of a task and the source of the links that landed past
+the cut: the slice only spares the covered part of it, which is what stops the
+recovery cost from growing with the tasks the storage already settled.
+
 CONSTANTS
 
 const (
@@ -163,6 +203,16 @@ const (
 
 const AgeFoldPluginName = "age-fold"
     AgeFoldPluginName is the stable name the age fold plugin instance answers.
+
+const CheckpointCommitInterval = 64
+    CheckpointCommitInterval is the number of commits after which the framework
+    files a checkpoint whatever its period: a busy chain keeps its recovery cost
+    bounded even when the period has not elapsed.
+
+const CheckpointPeriod = 30 * time.Second
+    CheckpointPeriod is the wall-clock bound between two framework checkpoints:
+    a quiet chain still gets a carrier, because a chain that commits little is a
+    chain whose last commit may be far behind the boot that reads it.
 
 const CompressionConsumerName = "compress-consumer"
     CompressionConsumerName is the stable name the compression consumer answers.
@@ -206,6 +256,11 @@ var (
     ErrModelLeaseMissing and the lease wiring errors beside it name the way the
     model lease wiring was refused, so a host routes each by name instead of
     matching on message text.
+
+var ErrCheckpointUnreadable = errors.New("assembly: the checkpoint fact states no readable checkpoint")
+    ErrCheckpointUnreadable reports a checkpoint fact whose payload does not
+    state the cut and slices its identity was content-addressed over, so no
+    state is restored from it.
 
 var ErrCommittedFactMissing = errors.New("tagent: the committed fact is not held by this run")
     ErrCommittedFactMissing reports a fact identity this run holds neither in
@@ -1327,15 +1382,6 @@ func WithStorage(cfg ledger.StorageConfig) Option
     An assembly beside no storage keeps its facts in memory and restores
     nothing.
 
-func WithTaskTerminalTTL(ttl time.Duration) Option
-    WithTaskTerminalTTL sets how long a task record outlives the terminal
-    outcome it holds: the record of a settled, failed or cancelled task older
-    than this is dropped beside the next admission, so this run's account of
-    tasks is bounded by it. A call naming a pruned task is refused by name,
-    and every fact of that task stays on the chain — the bound is the live
-    account, never the history. The zero value keeps task.DefaultTerminalTTL,
-    and a negative one keeps every record for the life of the run.
-
 func WithTelemetry(observer plugin.Observer) Option
     WithTelemetry attaches the post-commit observation face this assembly
     observes every committed fact through: the fact is read back from the
@@ -1458,6 +1504,30 @@ func (r *Run) AttachReplay(chain agent.RequestChain, window FoldWindow, projecti
     register under the full address of the agent that owns them through
     attachScopedReplay, so they never cross agents that share a session id.
 
+func (r *Run) Checkpoint(ctx context.Context) (event.EventID, bool, error)
+    Checkpoint takes one checkpoint of this run now and files the fact it
+    states. The cut is taken under the commit lock, so the state it snapshots
+    is the state the facts up to the watermark produced and nothing committed
+    between the two. A run beside no storage tier files nothing: a checkpoint is
+    a durable carrier, and a run with no durable history has no history to cut.
+
+    The redline list (3 rules): MUST take the watermark and the state slices
+    under the commit lock, so no fact lands between them. MUST refuse the whole
+    checkpoint when one slice refuses to state itself, rather than restore that
+    consumer beside an empty state. MUST NOT file a checkpoint the run cannot
+    name an owner for: a fact naming no owner never reaches the storage tier.
+
+func (r *Run) CheckpointAfterFold(ctx context.Context)
+    CheckpointAfterFold files a checkpoint after a fold produced a product:
+    a fold is the moment the projection drops material, so it is the moment the
+    recovery carrier is worth refreshing whatever the cadence says. The call is
+    made from the commit that filed the product and takes a cut of its own.
+
+func (r *Run) CheckpointFiled() (event.EventID, event.CheckpointOffset)
+    CheckpointFiled reports the identity of the newest checkpoint this run filed
+    and the cut it states, so a caller reads the coverage of the carrier it
+    holds.
+
 func (r *Run) Close(ctx context.Context, req agent.CloseRequest) (agent.DrainReport, error)
     Close closes the runtime's own side for the named session address: the
     request is judged first, new input is refused next, the run quiesces to its
@@ -1545,19 +1615,6 @@ func (r *Run) CommittedFacts() int
     the frozen generation key and names no session chain, so it is held and
     readable by identity while it never stands for a fact of the material this
     run carries.
-
-func (r *Run) CompleteRestartRecovery(ctx context.Context)
-    CompleteRestartRecovery is the completion point of the restart-recovery
-    consumption logic. Boot calls it after both steps — loading the unconsumed
-    events and restoring the in-memory state — have finished and while the run
-    is still closed for service; the cli-host entry has no unconsumed-event step
-    of its own and calls it after the assembly alone, which is honest: an entry
-    with nothing to load writes no completion ticket for a load it never made.
-    It files the fresh single-copy snapshot there, so no snapshot is written
-    by a start that later aborted; the carrier lock inside WriteRecoveryTicket
-    keeps the image coherent beside the settle pump that Boot wakes. A carrier
-    without the face, or a write that fails, never blocks the start: the next
-    restart falls back to the full replay.
 
 func (r *Run) DeliveryLedger() *DeliveryLedger
     DeliveryLedger reports the delivery account of this run, or nil beside no
@@ -1735,6 +1792,10 @@ func (r *Run) ReflectionInput() meditation.ReflectionInput
     as a fact of the observing agent's own partition, drives that agent's loop
     session with it and reports what became of the turn.
 
+func (r *Run) RegisterStateSlice(holder state.Stateful) (func(), error)
+    RegisterStateSlice mounts one consumer's recoverable state on the state seam
+    and answers the disposer that unmounts it.
+
 func (r *Run) Rejections() []state.Rejection
     Rejections reports the feedback fact of every notification a target refused,
     as the state account of this run holds it: the notification each refusal
@@ -1807,6 +1868,10 @@ func (r *Run) SessionToolNames(agent event.AgentID, session event.SessionID) ([]
     face of the agent's current binding — reflection-only tools appear only for
     the agent's dedicated reflection session — so a caller observes exactly the
     face a request at that session would carry, without driving a turn.
+
+func (r *Run) StateRegistry() *state.StateRegistry
+    StateRegistry reports the state seam of this run: the registry a consumer
+    mounts its recoverable state on.
 
 func (r *Run) Unsettled(ctx context.Context) task.Unsettled
     Unsettled reports the rest criterion of this run: the work it accepted
@@ -1900,9 +1965,11 @@ func (d *SettleDriver) Wake()
     work the account already carries: a wake starts no turn of its own.
 
 type SettleWake interface {
-	// RestoreOwed folds the unconsumed work a durable account still owes back
+	// RestoreOwed folds the unconsumed work the durable account still owes back
 	// into the mailbox, so a stopped run's notices wait for the next decision
-	// instead of dying with the process that accepted them.
+	// instead of dying with the process that accepted them. The pump reads it
+	// once per driver: a boot that restored the mailbox from a checkpoint has
+	// the entries already, and a repeated fold of them accepts nothing twice.
 	RestoreOwed(ctx context.Context) error
 	// Unconsumed reports every mailbox entry whose consumption has not
 	// completed, in the one order the account answers in.

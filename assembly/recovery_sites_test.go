@@ -153,14 +153,4 @@ func TestUnansweredRoundsStayInsideTheirChain(t *testing.T) {
 	if len(read.Inputs) != 1 {
 		t.Fatalf("the restart owes %d rounds, want the one input no answer closed", len(read.Inputs))
 	}
-	for _, addr := range []event.Address{closed, open} {
-		fromChain, err := restarted.unsettledSessionFacts(ctx, addr)
-		if err != nil {
-			t.Fatalf("read the chain of %v: %v", addr, err)
-		}
-		fromWindow := restarted.SessionFacts(addr)
-		if len(fromChain) != len(fromWindow) {
-			t.Fatalf("the chain of %v answers %d facts beside the %d the resident window holds, want one read of one chain", addr, len(fromChain), len(fromWindow))
-		}
-	}
 }
