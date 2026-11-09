@@ -454,8 +454,16 @@ func applyHostGCTrace() {
 // - The host's own native face consumer mounts last, after the meditation consumer whose reflection plan the tool, skill and file face it composes builds over: the order these options are applied in is the order the registry builds.
 // - The reflection anchor store is wired whether or not the boot document enables meditation: each generation mounts its loop over the store of the record its own plan names, so a generation that enables, moves or drops meditation reads the anchor record it declares and a rebuilt loop continues from the watermark the previous one consumed.
 func Boot(configPath string, opts ...HostOption) (*Host, error) {
+	traceStart := time.Now()
+	trace := func(name string) {
+		if os.Getenv("TAGENT_BOOT_TRACE") == "1" {
+			assemblyInfo("tagent: host trace phase=%s elapsed=%s", name, time.Since(traceStart).Round(time.Microsecond))
+		}
+	}
 	applyHostGCTrace()
+	trace("gctrace")
 	doc, err := loadHostDocument(configPath)
+	trace("loadHostDocument")
 	if err != nil {
 		return nil, err
 	}
@@ -489,10 +497,12 @@ func Boot(configPath string, opts ...HostOption) (*Host, error) {
 		deliveryMeter = &hostDeliveryMeter{sender: cfg.hostSender}
 		cfg.hostSender = deliveryMeter
 	}
+	trace("meditationPlan")
 	embedder, err := plan.Embedder()
 	if err != nil {
 		return nil, err
 	}
+	trace("embedder")
 	recallPort := NewRecallPort(embedder)
 	ctx, cancel := context.WithCancel(context.Background())
 	meditationPort := &hostMeditationPort{plan: meditationPlan}
@@ -513,6 +523,7 @@ func Boot(configPath string, opts ...HostOption) (*Host, error) {
 		cancel()
 		return nil, err
 	}
+	trace("nativeModels")
 	modelTable := newHostModels()
 	natives := make(map[event.AgentID]NativeAgent, len(shared))
 	for id, native := range shared {
@@ -578,6 +589,7 @@ func Boot(configPath string, opts ...HostOption) (*Host, error) {
 		cancel()
 		return nil, err
 	}
+	trace("telemetry boot")
 	stopTelemetry = func(ctx context.Context) error { return telemetryFaces.close(ctx) }
 	var governanceFaces *hostGovernanceFaces
 	if cfg.policy == nil {
@@ -708,11 +720,13 @@ func Boot(configPath string, opts ...HostOption) (*Host, error) {
 	options = append(options, withBootConfigReconcile(func(ctx context.Context, run *Run, decl *config.Declaration, natives map[event.AgentID]NativeAgent) error {
 		return reconcileBootConfig(ctx, run, configPath, doc, decl, natives, specs, faces)
 	}))
+	trace("options built")
 	run, err := assemble(ctx, decl, natives, false, options...)
 	if err != nil {
 		cancel()
 		return nil, err
 	}
+	trace("assemble returned")
 	memoryFaces.arm()
 	if entrySpec := specOfLocked(decl, event.AgentID(decl.Entry)); entrySpec.MaxCallsPerResponse > 0 || entrySpec.LongContextTokens > 0 {
 		run.loop.SetFuseLimits(agent.FuseLimits{
@@ -755,10 +769,12 @@ func Boot(configPath string, opts ...HostOption) (*Host, error) {
 		userAddresses:     map[event.SessionID]event.Address{},
 		userTurns:         map[event.Address]int{},
 	}
+	trace("host built")
 	if err := host.restoreUnconsumedEvents(ctx, settleDriver); err != nil {
 		cancel()
 		return nil, host.abortBoot(err)
 	}
+	trace("restoreUnconsumedEvents")
 	run.trimSeededFacts()
 	host.consumers = host.consumersOf()
 	if settleDriver != nil && !host.run.Unsettled(ctx).Resting() {
@@ -769,8 +785,11 @@ func Boot(configPath string, opts ...HostOption) (*Host, error) {
 		cancel()
 		return nil, host.abortBoot(err)
 	}
+	trace("face built")
 	host.run.CompleteRestartRecovery(ctx)
+	trace("CompleteRestartRecovery")
 	face.start()
+	trace("face started")
 	host.face = face
 	sealed = true
 	return host, nil

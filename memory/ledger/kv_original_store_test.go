@@ -8,6 +8,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"sort"
+	"strings"
 	"testing"
 	"time"
 )
@@ -118,5 +121,72 @@ func TestKVOriginalStoreLazyLoadRetriesAfterRepair(t *testing.T) {
 	}
 	if got := reopened.Get(ctx, ref.Key); got.Outcome != RecallFound || string(got.Body) != "repaired" || got.Err != nil {
 		t.Fatalf("the read after repair = %+v, want a retry that finds the original", got)
+	}
+}
+
+// filteredKV records the fetches one original-store load makes, so a load that
+// reads the whole store is observable as the unfiltered read it is.
+type filteredKV struct {
+	inner      AtomicStore
+	filtered   []Fetch
+	unfiltered int
+}
+
+func (k *filteredKV) Read(ctx context.Context, fetch Fetch) ([]Pair, error) {
+	if fetch.Key == "" && fetch.Prefix == "" {
+		k.unfiltered++
+	} else {
+		k.filtered = append(k.filtered, fetch)
+	}
+	return k.inner.Read(ctx, fetch)
+}
+func (k *filteredKV) Keys(ctx context.Context, prefix string) ([]string, error) {
+	return k.inner.Keys(ctx, prefix)
+}
+func (k *filteredKV) Namespaces(ctx context.Context) ([]string, error) {
+	return k.inner.Namespaces(ctx)
+}
+func (k *filteredKV) Commit(ctx context.Context, batch Batch) error {
+	return k.inner.Commit(ctx, batch)
+}
+
+// TestKVOriginalStoreLoadReadsItsOwnEntries pins the read scope of one load.
+//
+// - The load reads the body and reference entries it files, never the whole store
+//   - the durable tier shares its keyspace with the segment store, whose event bodies the load never reads
+func TestKVOriginalStoreLoadReadsItsOwnEntries(t *testing.T) {
+	ctx := context.Background()
+	backing := newMemKV()
+	first, _ := newKVOriginalStore(backing, nil)
+	ref := OriginalRef{Key: "scoped-original", Format: "text"}
+	body := []byte("the original text")
+	if err := first.Put(ctx, ref, body); err != nil {
+		t.Fatalf("commit the original: %v", err)
+	}
+	events := make([]Pair, 0, 64)
+	for at := 0; at < 64; at++ {
+		events = append(events, Pair{Key: fmt.Sprintf("0:evt:17000000%02d:%d", at, at), Value: []byte(fmt.Sprintf("body %d", at))})
+	}
+	if err := backing.Commit(ctx, Batch{Puts: events}); err != nil {
+		t.Fatalf("seed the segment events: %v", err)
+	}
+	filtered := &filteredKV{inner: backing}
+	reopened, err := newKVOriginalStore(filtered, nil)
+	if err != nil {
+		t.Fatalf("open the original store: %v", err)
+	}
+	if got := reopened.Get(ctx, ref.Key); got.Outcome != RecallFound || !bytes.Equal(got.Body, body) {
+		t.Fatalf("the lazy read = %+v, want the committed original", got)
+	}
+	if filtered.unfiltered != 0 {
+		t.Fatalf("the load read the whole store %d time(s), want the two entries it files", filtered.unfiltered)
+	}
+	prefixes := make([]string, 0, len(filtered.filtered))
+	for _, fetch := range filtered.filtered {
+		prefixes = append(prefixes, fetch.Prefix)
+	}
+	sort.Strings(prefixes)
+	if got, want := strings.Join(prefixes, ","), "blob:,ref:"; got != want {
+		t.Fatalf("the load read under %q, want %q", got, want)
 	}
 }

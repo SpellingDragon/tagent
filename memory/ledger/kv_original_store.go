@@ -92,19 +92,25 @@ func (s *kvOriginalStore) ensureLoaded() error {
 
 // load publishes references only with the independent body of the same event
 // key; a reference without that body fails by name instead of disappearing.
+//
+// - The load reads the two entries it files, the body and the reference, by prefix: a whole-store read of a durable tier walks every event body the segment store owns, so the load would pay for the record it never reads.
 func (s *kvOriginalStore) load() error {
-	pairs, err := s.kv.Read(context.Background(), Fetch{})
+	blobPairs, err := s.kv.Read(context.Background(), Fetch{Prefix: "blob:"})
 	if err != nil {
 		return err
 	}
-	blobs := map[event.EventID][]byte{}
-	refs := map[event.EventID][]storedRef{}
-	byKey := map[event.EventID]*originalEntry{}
-	for _, pair := range pairs {
+	refPairs, err := s.kv.Read(context.Background(), Fetch{Prefix: "ref:"})
+	if err != nil {
+		return err
+	}
+	blobs := make(map[event.EventID][]byte, len(blobPairs))
+	for _, pair := range blobPairs {
 		if name, ok := strings.CutPrefix(pair.Key, "blob:"); ok {
 			blobs[event.EventID(name)] = pair.Value
-			continue
 		}
+	}
+	refs := make(map[event.EventID][]storedRef, len(refPairs))
+	for _, pair := range refPairs {
 		name, ok := strings.CutPrefix(pair.Key, "ref:")
 		if !ok {
 			continue
@@ -115,6 +121,7 @@ func (s *kvOriginalStore) load() error {
 		}
 		refs[event.EventID(name)] = stored
 	}
+	byKey := map[event.EventID]*originalEntry{}
 	for key, stored := range refs {
 		entry := &originalEntry{refs: map[refScope]referenceRecord{}}
 		for _, record := range stored {

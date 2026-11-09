@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"sort"
 	"strconv"
 	"strings"
@@ -481,6 +482,13 @@ func assemble(ctx context.Context, decl *config.Declaration, agents map[event.Ag
 	for _, port := range cfg.genPorts {
 		port.bind(r)
 	}
+	traceStart := time.Now()
+	booTTrace := func(name string) {
+		if os.Getenv("TAGENT_BOOT_TRACE") == "1" {
+			assemblyInfo("tagent: boot trace phase=%s elapsed=%s", name, time.Since(traceStart).Round(time.Microsecond))
+		}
+	}
+	booTTrace("built")
 	r.compress = NewCompressionConsumer(ageFoldSessions{run: r})
 	r.ageFold = NewAgeFoldPlugin(ageFoldSessions{run: r})
 	r.ageFold.setExecutor(r.compress)
@@ -529,6 +537,7 @@ func assemble(ctx context.Context, decl *config.Declaration, agents map[event.Ag
 				s.Prefix, s.Keys, s.Bytes, s.Elapsed.Round(time.Microsecond))
 		}
 		r.commit = &runCommit{inner: durable, held: map[event.TaskID]bool{}}
+		booTTrace("storage")
 	}
 	r.records.attach(tier)
 	if durable == nil {
@@ -578,16 +587,19 @@ func assemble(ctx context.Context, decl *config.Declaration, agents map[event.Ag
 		if err := r.restoreInMemoryState(ctx, durable); err != nil {
 			return nil, err
 		}
+		booTTrace("restoreChains")
 	}
 	if tier != nil {
 		supply, err := supplyRetrieval(ctx, tier, cfg.embedder)
 		if err != nil {
 			return nil, err
 		}
+		booTTrace("supplyRetrieval")
 		landed, err := r.seedReplay(ctx, tier)
 		if err != nil {
 			return nil, err
 		}
+		booTTrace("seedReplay")
 		r.mu.Lock()
 		r.retrieval = supply
 		r.tier = tier
@@ -603,6 +615,7 @@ func assemble(ctx context.Context, decl *config.Declaration, agents map[event.Ag
 	if err := r.convergeGenerationRetirements(ctx); err != nil {
 		return nil, err
 	}
+	booTTrace("converge")
 	return r, nil
 }
 

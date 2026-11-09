@@ -404,3 +404,104 @@ func mustOpen(t *testing.T, path string) *os.File {
 	t.Cleanup(func() { file.Close() })
 	return file
 }
+
+// TestJournalValueSpans pins the index a commit publishes beside its frame.
+//
+// - A key's index entry states the byte span of its own value token, so a read takes that value alone instead of the frame that carries its neighbours
+// - The span of every write answers the bytes the commit carried, whatever the frame neighbours hold
+//   - covers an empty value, a large value, an escaped-character key and a null value
+//
+// - A delete supersedes every span under its key, so the read answers not-held
+func TestJournalValueSpans(t *testing.T) {
+	t.Run("reads_one_value_without_its_frame", func(t *testing.T) {
+		dir := t.TempDir()
+		log, err := openJournalLog(dir)
+		if err != nil {
+			t.Fatalf("open the journal: %v", err)
+		}
+		large := bytes.Repeat([]byte("a large neighbour "), 4096)
+		journalTestAppend(t, log,
+			journalPut{Key: "0:evt:large", Value: large},
+			journalPut{Key: "0:idx:small", Value: []byte("small")})
+		if err := log.close(); err != nil {
+			t.Fatalf("close the journal: %v", err)
+		}
+		reopened, err := openJournalLog(dir)
+		if err != nil {
+			t.Fatalf("reopen the journal: %v", err)
+		}
+		defer reopened.close()
+		span, held := reopened.index["0:idx:small"]
+		if !held || span.deleted {
+			t.Fatalf("the small key holds no span after the replay: %+v", span)
+		}
+		if want := len(jsonTokenOf(t, []byte("small"))); span.valueLength != want {
+			t.Fatalf("the small value occupies %d byte(s), want the %d of its own token", span.valueLength, want)
+		}
+		if size := int64(span.valueLength); size >= int64(len(large)) {
+			t.Fatalf("the read of the small value spans %d byte(s) of a frame whose neighbour carries %d", size, len(large))
+		}
+		for key, want := range map[string][]byte{"0:evt:large": large, "0:idx:small": []byte("small")} {
+			got, held, err := reopened.read(key)
+			if err != nil || !held {
+				t.Fatalf("read %q: %v (held=%v)", key, err, held)
+			}
+			if !bytes.Equal(got, want) {
+				t.Fatalf("read %q = %d byte(s), want the %d committed", key, len(got), len(want))
+			}
+		}
+	})
+
+	t.Run("answers_the_bytes_of_every_value_kind", func(t *testing.T) {
+		dir := t.TempDir()
+		log, err := openJournalLog(dir)
+		if err != nil {
+			t.Fatalf("open the journal: %v", err)
+		}
+		puts := []journalPut{
+			{Key: "plain", Value: []byte("first")},
+			{Key: "empty", Value: []byte{}},
+			{Key: "null", Value: nil},
+			{Key: `escaped "key" \ tail`, Value: []byte("third")},
+			{Key: "unicode-键", Value: []byte("fourth")},
+		}
+		journalTestAppend(t, log, puts...)
+		if err := log.append(journalRecord{Version: journalFormatVersion, Puts: []journalPut{puts[0]}, Deletes: []string{"empty"}}); err != nil {
+			t.Fatalf("append the delete: %v", err)
+		}
+		if err := log.close(); err != nil {
+			t.Fatalf("close the journal: %v", err)
+		}
+		reopened, err := openJournalLog(dir)
+		if err != nil {
+			t.Fatalf("reopen the journal: %v", err)
+		}
+		defer reopened.close()
+		for _, put := range puts[1:] {
+			if put.Key == "empty" {
+				continue
+			}
+			got, held, err := reopened.read(put.Key)
+			if err != nil || !held {
+				t.Fatalf("read %q: %v (held=%v)", put.Key, err, held)
+			}
+			if !bytes.Equal(got, put.Value) {
+				t.Fatalf("read %q = %q, want %q", put.Key, got, put.Value)
+			}
+		}
+		if _, held, err := reopened.read("empty"); err != nil || held {
+			t.Fatalf("the deleted key answers held=%v err=%v, want a tombstone", held, err)
+		}
+	})
+}
+
+// jsonTokenOf answers the JSON token one value marshals to, which is the span a
+// commit files beside the key.
+func jsonTokenOf(t *testing.T, value []byte) []byte {
+	t.Helper()
+	token, err := json.Marshal(value)
+	if err != nil {
+		t.Fatalf("marshal the value: %v", err)
+	}
+	return token
+}

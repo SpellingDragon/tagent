@@ -10,6 +10,7 @@
 package ledger
 
 import (
+	"bufio"
 	"encoding/binary"
 	"encoding/json"
 	"errors"
@@ -48,6 +49,9 @@ const (
 	// journalMaxFrameBytes bounds one payload, so a damaged length field cannot
 	// make the reader allocate an unbounded span.
 	journalMaxFrameBytes = 32 << 20
+	// journalReplayBufferBytes is the read size the replay takes the log in: one
+	// sequential read per buffer instead of one read per frame part.
+	journalReplayBufferBytes = 1 << 20
 )
 
 // journalCRCTable is the checksum table of the frame format: Castagnoli, the
@@ -69,13 +73,19 @@ type journalRecord struct {
 	Deletes []string     `json:"deletes,omitempty"`
 }
 
-// journalValue locates one key's latest record: the byte range of the payload
-// that carried it, or the tombstone that deleted it. The payload of a record is
-// the batch that carried the key, so a cold read decodes that batch and takes
-// the key's own value out of it.
+// journalValue locates one key's latest value: the byte span of the JSON token
+// that carries it inside the frame of the commit that wrote it, or the tombstone
+// that deleted it. One commit carries one batch, so a record-level position
+// charges every read of a small key for the bytes of the frame beside it; the
+// value span makes a read cost exactly the value it answers.
 type journalValue struct {
-	offset  int64
-	length  int
+	// valueOffset is the byte offset of the value's own JSON token in the log.
+	valueOffset int64
+	// valueLength is the byte length of that token, its quotes included.
+	valueLength int
+	// valueNull reports a value the commit wrote as JSON null.
+	valueNull bool
+	// deleted reports a tombstone: the key is held by no record.
 	deleted bool
 }
 
@@ -99,6 +109,271 @@ type journalLog struct {
 	index map[string]journalValue
 	// unsynced counts the bytes appended since the last completed barrier.
 	unsynced int64
+}
+
+// journalSpans is the index material one record states: the format version it was
+// written under beside the value span of every write and the keys it deletes.
+type journalSpans struct {
+	version int
+	puts    []journalPutSpan
+	deletes []string
+}
+
+// journalPutSpan is one write of a record as the index files it: the key it
+// names and the position of its own value token in the log.
+type journalPutSpan struct {
+	key   string
+	value journalValue
+}
+
+// journalSpansAt reads the index material of one record payload, whose first
+// byte sits at the given offset of the log. The value bytes are located, never
+// copied: a replay of a log of any size walks its keys alone, so the cost of
+// opening follows the record count instead of the bytes its values carry.
+func journalSpansAt(payload []byte, at int64) (journalSpans, error) {
+	var out journalSpans
+	next := journalScanSpace(payload, 0)
+	if next >= len(payload) || payload[next] != '{' {
+		return out, errors.New("record carries no object")
+	}
+	for at2 := next + 1; ; {
+		at2 = journalScanSpace(payload, at2)
+		if at2 >= len(payload) {
+			return out, errors.New("record object is unterminated")
+		}
+		if payload[at2] == '}' {
+			return out, nil
+		}
+		if payload[at2] == ',' {
+			at2++
+			continue
+		}
+		name, after, err := journalScanString(payload, at2)
+		if err != nil {
+			return out, err
+		}
+		if at2, err = journalScanColon(payload, after); err != nil {
+			return out, err
+		}
+		switch name {
+		case "version":
+			end, err := journalSkipValue(payload, at2)
+			if err != nil {
+				return out, err
+			}
+			if err := json.Unmarshal(payload[at2:end], &out.version); err != nil {
+				return out, fmt.Errorf("read the record version: %w", err)
+			}
+			at2 = end
+		case "puts":
+			if at2, err = journalScanPuts(payload, at2, at, &out.puts); err != nil {
+				return out, err
+			}
+		case "deletes":
+			if at2, err = journalScanDeletes(payload, at2, &out.deletes); err != nil {
+				return out, err
+			}
+		default:
+			if at2, err = journalSkipValue(payload, at2); err != nil {
+				return out, err
+			}
+		}
+	}
+}
+
+// journalScanPuts reads the writes of one record from the array that opens at
+// the given offset, answering the offset just past it.
+func journalScanPuts(payload []byte, at2 int, at int64, out *[]journalPutSpan) (int, error) {
+	if at2 >= len(payload) || payload[at2] != '[' {
+		return 0, errors.New("puts carries no array")
+	}
+	for at2++; ; {
+		at2 = journalScanSpace(payload, at2)
+		if at2 >= len(payload) {
+			return 0, errors.New("puts array is unterminated")
+		}
+		if payload[at2] == ']' {
+			return at2 + 1, nil
+		}
+		if payload[at2] == ',' {
+			at2++
+			continue
+		}
+		if payload[at2] != '{' {
+			return 0, errors.New("a put carries no object")
+		}
+		span := journalPutSpan{value: journalValue{valueNull: true}}
+		for at2++; ; {
+			var err error
+			at2 = journalScanSpace(payload, at2)
+			if at2 >= len(payload) {
+				return 0, errors.New("a put object is unterminated")
+			}
+			if payload[at2] == '}' {
+				at2++
+				break
+			}
+			if payload[at2] == ',' {
+				at2++
+				continue
+			}
+			name, after, err := journalScanString(payload, at2)
+			if err != nil {
+				return 0, err
+			}
+			if at2, err = journalScanColon(payload, after); err != nil {
+				return 0, err
+			}
+			switch name {
+			case "key":
+				span.key, at2, err = journalScanString(payload, at2)
+				if err != nil {
+					return 0, err
+				}
+			case "value":
+				if at2 < len(payload) && payload[at2] == '"' {
+					end, err := journalSkipValue(payload, at2)
+					if err != nil {
+						return 0, err
+					}
+					span.value = journalValue{valueOffset: at + int64(at2), valueLength: end - at2}
+					at2 = end
+					continue
+				}
+				end, err := journalSkipValue(payload, at2)
+				if err != nil {
+					return 0, err
+				}
+				span.value = journalValue{valueNull: true}
+				at2 = end
+			default:
+				if at2, err = journalSkipValue(payload, at2); err != nil {
+					return 0, err
+				}
+			}
+		}
+		*out = append(*out, span)
+	}
+}
+
+// journalScanDeletes reads the keys one record deletes from the array that opens
+// at the given offset, answering the offset just past it.
+func journalScanDeletes(payload []byte, at2 int, out *[]string) (int, error) {
+	if at2 >= len(payload) || payload[at2] != '[' {
+		return 0, errors.New("deletes carries no array")
+	}
+	for at2++; ; {
+		at2 = journalScanSpace(payload, at2)
+		if at2 >= len(payload) {
+			return 0, errors.New("deletes array is unterminated")
+		}
+		if payload[at2] == ']' {
+			return at2 + 1, nil
+		}
+		if payload[at2] == ',' {
+			at2++
+			continue
+		}
+		key, after, err := journalScanString(payload, at2)
+		if err != nil {
+			return 0, err
+		}
+		*out = append(*out, key)
+		at2 = after
+	}
+}
+
+// journalScanString reads the JSON string token at the given offset, answering
+// its decoded text and the offset just past the closing quote.
+func journalScanString(payload []byte, at int) (string, int, error) {
+	end, err := journalSkipValue(payload, at)
+	if err != nil {
+		return "", 0, err
+	}
+	if at >= len(payload) || payload[at] != '"' {
+		return "", 0, errors.New("a field name or key is not a string")
+	}
+	var text string
+	if err := json.Unmarshal(payload[at:end], &text); err != nil {
+		return "", 0, fmt.Errorf("read a record string: %w", err)
+	}
+	return text, end, nil
+}
+
+// journalScanColon skips the whitespace and the colon between a field name and
+// the value after it, answering the offset of the first byte of that value.
+func journalScanColon(payload []byte, at int) (int, error) {
+	at = journalScanSpace(payload, at)
+	if at >= len(payload) || payload[at] != ':' {
+		return 0, errors.New("a record field carries no value")
+	}
+	return journalScanSpace(payload, at+1), nil
+}
+
+// journalScanSpace answers the offset of the first byte at or after at that is
+// not JSON whitespace.
+func journalScanSpace(payload []byte, at int) int {
+	for at < len(payload) {
+		switch payload[at] {
+		case ' ', '\t', '\n', '\r':
+			at++
+		default:
+			return at
+		}
+	}
+	return at
+}
+
+// journalSkipValue answers the offset just past the JSON value that starts at
+// at. It walks the token structure alone, so a value the caller does not need is
+// skipped rather than decoded into the bytes it stands for.
+func journalSkipValue(payload []byte, at int) (int, error) {
+	at = journalScanSpace(payload, at)
+	if at >= len(payload) {
+		return 0, io.ErrUnexpectedEOF
+	}
+	switch payload[at] {
+	case '"':
+		for next := at + 1; next < len(payload); next++ {
+			switch payload[next] {
+			case '\\':
+				next++
+			case '"':
+				return next + 1, nil
+			}
+		}
+		return 0, errors.New("a record string is unterminated")
+	case '{', '[':
+		depth := 0
+		for next := at; next < len(payload); next++ {
+			switch payload[next] {
+			case '"':
+				end, err := journalSkipValue(payload, next)
+				if err != nil {
+					return 0, err
+				}
+				next = end - 1
+			case '{', '[':
+				depth++
+			case '}', ']':
+				depth--
+				if depth == 0 {
+					return next + 1, nil
+				}
+			}
+		}
+		return 0, errors.New("a record container is unterminated")
+	default:
+		next := at
+		for next < len(payload) {
+			switch payload[next] {
+			case ',', '}', ']', ' ', '\t', '\n', '\r':
+				return next, nil
+			}
+			next++
+		}
+		return next, nil
+	}
 }
 
 // journalFrameOf returns the framed bytes of one payload: its length, the
@@ -140,22 +415,30 @@ func journalPayloadOf(frame []byte) ([]byte, error) {
 // they start. A frame that is fully present and fails its checksum is not a torn
 // tail, so the replay stops with the named corruption instead of dropping the
 // records behind it.
+//
+// - The frames are read through one sequential buffered reader and one payload buffer, so a log of any size costs one read per buffer instead of two reads and one allocation per frame.
+//   - The payload handed to visit is valid for that visit alone: the buffer it points into is reused by the next frame.
 func journalReplay(file *os.File, size int64, visit func(payload []byte, at int64) error) (int64, error) {
+	reader := bufio.NewReaderSize(io.NewSectionReader(file, 0, size), journalReplayBufferBytes)
 	offset := int64(0)
 	header := make([]byte, journalFrameHeaderBytes)
+	var payload []byte
 	for offset < size {
 		if size-offset < journalFrameHeaderBytes {
 			return offset, nil
 		}
-		if _, err := file.ReadAt(header, offset); err != nil {
+		if _, err := io.ReadFull(reader, header); err != nil {
 			return 0, fmt.Errorf("%w: %s: %w", ErrJournalCorrupt, file.Name(), err)
 		}
-		length := int64(binary.BigEndian.Uint32(header[0:4]))
-		if length > journalMaxFrameBytes || size-offset-journalFrameHeaderBytes < length {
+		length := int(binary.BigEndian.Uint32(header[0:4]))
+		if length > journalMaxFrameBytes || size-offset-journalFrameHeaderBytes < int64(length) {
 			return offset, nil
 		}
-		payload := make([]byte, length)
-		if _, err := file.ReadAt(payload, offset+journalFrameHeaderBytes); err != nil {
+		if cap(payload) < length {
+			payload = make([]byte, length)
+		}
+		payload = payload[:length]
+		if _, err := io.ReadFull(reader, payload); err != nil {
 			return 0, fmt.Errorf("%w: %s: %w", ErrJournalCorrupt, file.Name(), err)
 		}
 		if want := binary.BigEndian.Uint32(header[4:8]); crc32.Checksum(payload, journalCRCTable) != want {
@@ -164,7 +447,7 @@ func journalReplay(file *os.File, size int64, visit func(payload []byte, at int6
 		if err := visit(payload, offset+journalFrameHeaderBytes); err != nil {
 			return 0, err
 		}
-		offset += journalFrameHeaderBytes + length
+		offset += journalFrameHeaderBytes + int64(length)
 	}
 	return offset, nil
 }
@@ -207,31 +490,29 @@ func openJournalLog(dir string) (*journalLog, error) {
 	return log, nil
 }
 
-// publish folds one replayed payload into the index: the record it decodes, at
-// the payload range it occupies. The log's size is set once the replay reports
-// where the last complete frame ended.
+// publish folds one replayed payload into the index: the record it reads, at the
+// value spans it occupies. The log's size is set once the replay reports where
+// the last complete frame ended.
 func (l *journalLog) publish(payload []byte, at int64) error {
-	var record journalRecord
-	if err := json.Unmarshal(payload, &record); err != nil {
+	record, err := journalSpansAt(payload, at)
+	if err != nil {
 		return fmt.Errorf("%w: %s: %w", ErrJournalCorrupt, l.path, err)
 	}
-	if record.Version != journalFormatVersion {
-		return fmt.Errorf("%w: record version %d", ErrJournalFormat, record.Version)
+	if record.version != journalFormatVersion {
+		return fmt.Errorf("%w: record version %d", ErrJournalFormat, record.version)
 	}
-	l.indexRecord(record, journalValue{offset: at, length: len(payload)})
+	l.indexRecord(record)
 	return nil
 }
 
-// indexRecord folds one committed record into the index at the payload range it
-// occupies.
-func (l *journalLog) indexRecord(record journalRecord, value journalValue) {
-	for _, put := range record.Puts {
-		l.index[put.Key] = value
+// indexRecord folds one committed record into the index at the value span each
+// write occupies, and a delete into the tombstone that supersedes every span.
+func (l *journalLog) indexRecord(record journalSpans) {
+	for _, put := range record.puts {
+		l.index[put.key] = put.value
 	}
-	for _, key := range record.Deletes {
-		tombstone := value
-		tombstone.deleted = true
-		l.index[key] = tombstone
+	for _, key := range record.deletes {
+		l.index[key] = journalValue{deleted: true}
 	}
 }
 
@@ -258,8 +539,11 @@ func (l *journalLog) append(record journalRecord) error {
 	if written != len(frame) {
 		return fmt.Errorf("%w: %d of %d frame bytes written", io.ErrShortWrite, written, len(frame))
 	}
-	value := journalValue{offset: l.size + journalFrameHeaderBytes, length: len(payload)}
-	l.indexRecord(record, value)
+	spans, err := journalSpansAt(payload, l.size+journalFrameHeaderBytes)
+	if err != nil {
+		return fmt.Errorf("tagent: index the record just written: %w", err)
+	}
+	l.indexRecord(spans)
 	l.size += int64(len(frame))
 	l.unsynced += int64(len(frame))
 	return nil
@@ -279,27 +563,27 @@ func (l *journalLog) sync() error {
 	return nil
 }
 
-// read answers the value one key's latest record carries, and whether the key is
-// held at all. A tombstoned key is not held. The caller holds the lock.
+// read answers the value one key's latest commit carries, and whether the key is
+// held at all. A tombstoned key is not held. The read takes the value's own byte
+// span, so a small value committed beside a large one costs its own bytes rather
+// than the frame that carries both. The caller holds the lock.
 func (l *journalLog) read(key string) ([]byte, bool, error) {
 	value, held := l.index[key]
 	if !held || value.deleted {
 		return nil, false, nil
 	}
-	payload := make([]byte, value.length)
-	if _, err := l.file.ReadAt(payload, value.offset); err != nil {
+	if value.valueNull {
+		return nil, true, nil
+	}
+	token := make([]byte, value.valueLength)
+	if _, err := l.file.ReadAt(token, value.valueOffset); err != nil {
 		return nil, false, fmt.Errorf("%w: %s: %w", ErrJournalCorrupt, l.path, err)
 	}
-	var record journalRecord
-	if err := json.Unmarshal(payload, &record); err != nil {
+	var body []byte
+	if err := json.Unmarshal(token, &body); err != nil {
 		return nil, false, fmt.Errorf("%w: %s: %w", ErrJournalCorrupt, l.path, err)
 	}
-	for _, put := range record.Puts {
-		if put.Key == key {
-			return put.Value, true, nil
-		}
-	}
-	return nil, false, nil
+	return body, true, nil
 }
 
 // keys answers the held keys carrying prefix, in key order. The caller holds the
