@@ -34,6 +34,7 @@ flowchart TB
 - [ ] 09 runtime-simplicity —— `changes/09-runtime-simplicity/`（转移自 runtime-simplicity-upgrade 全量；journal 帧/kvPort/单屏障/证据/流式/观测/导出）—— **本轮只含纯核心**：已勾的 1.1–1.6（含 1.5b/1.5c/1.5d）与 4.1，另有已勾的 2.1/2.3/5.1/5.2/5.3/6.1；特性叶已拆出（见下"本轮范围裁定"），09 本轮开放叶剩余 = 0
 - [ ] 10 turn-segment —— `changes/10-turn-segment/`（转移自 event-driven-consumption 03；消费关系闭段取代 agent_output）
 - [ ] 11 derived-faces —— `changes/11-derived-faces/`（转移自 event-driven-consumption 04）
+- [ ] 12 checkpoint-state —— `changes/12-checkpoint-state/`（合并阻断项：CI 长分片 LongRun 挂死；框架统一 checkpoint 事实族 + 状态接缝 + 恢复重写 + 退役 RecoveryTicket；前置：无，核心耦合簇单派发）
 
 ## 本轮范围裁定（2026-11-08 用户裁定）
 

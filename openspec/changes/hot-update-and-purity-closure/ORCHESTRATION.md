@@ -51,3 +51,4 @@
 
 （执行期逐轮回填；本档为派发唯一依据，派发前重读二节。）
 | 终审轮 | R35 两轮：首轮三阻断(doc-budget/meditation 水位代际/文档脱节)由 R4 修；复审余 R35-1(拒绝候选水位滞留)已修+TestRefusedMeditationOverNoMeditationBootClearsWatermark 钉；concept 基线重指可达 main(3b727199)、removed_min 校准 5；CI 待绿后 squash | 见 /tmp/hupc-R4、C5、R35 报告 | 登记例外 anchors/approvals/RL 为受治理债(review_by 2027-05-05) | 6.3/6.4 勾 | CI watch bd0rgbyxs | — |
+| W5 checkpoint | CI 长分片 LongRun 挂死定性=boot 尾段 Unsettled 逐站点全史扫 O(站点×事件) 二次（invoke.go:435→run.go:2170）+送达账全史扫；用户裁决统一 checkpoint 事实族（Flink 算子类比，状态委托框架）；立 domain 12，openspec-apply 单派发实施核心耦合簇 | 本地复现 gen52/53 同款；子代理代码审读钉死二次扫描 | 偏移用分区 Seq 非 factSeq；退役 RecoveryTicket；8.1 由构造消解 | 12.1-12.5 待勾 | 子代理后台实施，完成通知后续验+CI | run.go/api/event 单写锁归 domain12 实施代理 |
