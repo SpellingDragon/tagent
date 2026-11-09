@@ -252,6 +252,120 @@ func TestPublishConsumesDeclarationFact(t *testing.T) {
 	}
 }
 
+// TestRevertedReloadAnswersTheChainDeclaration pins the effective-declaration order of a reverted reload.
+// - the newest declaration fact answers the declaration the load produced
+// - a reversion files its own entry naming the declaration it moves from
+//
+// 契约: docs/wiki/platform/org-hot-reload.md#apply-record
+func TestRevertedReloadAnswersTheChainDeclaration(t *testing.T) {
+	doc := newLivenessDoc(t)
+	path := doc.write(t)
+	host := bootLiveness(t, path)
+	run := host.Run()
+	ctx := context.Background()
+	_, bootDecl, held, err := run.latestDeclaration(ctx)
+	if err != nil || !held {
+		t.Fatalf("read the boot declaration: held=%v err=%v", held, err)
+	}
+	previous := bootDecl.FactKey()
+	for i, maxTokens := range []int{512, 256, 512, 256} {
+		doc.UserMaxTokens = maxTokens
+		if err := os.WriteFile(path, []byte(doc.yaml()), 0o644); err != nil {
+			t.Fatalf("rewrite the configuration source: %v", err)
+		}
+		loaded, err := loadHostDocument(path)
+		if err != nil {
+			t.Fatalf("load the rewritten document: %v", err)
+		}
+		loadDecl, err := loaded.Declaration()
+		if err != nil {
+			t.Fatalf("declare the rewritten document: %v", err)
+		}
+		report, err := host.Reload(ctx)
+		if err != nil {
+			t.Fatalf("reload attempt %d of the reverted document: %v", i+1, err)
+		}
+		if !report.Reloaded || !report.Publication.Published {
+			t.Fatalf("reverted reload %d publication = %+v, want a published generation", i+1, report.Publication)
+		}
+		fact, decl, held, err := run.latestDeclaration(ctx)
+		if err != nil || !held {
+			t.Fatalf("read the declaration of reload %d: held=%v err=%v", i+1, held, err)
+		}
+		if got := decl.FactKey(); got != loadDecl.FactKey() {
+			t.Fatalf("declaration of reload %d on the chain = %q, want the loaded declaration %q", i+1, got, loadDecl.FactKey())
+		}
+		if fact.Generation != report.Publication.Generation {
+			t.Fatalf("declaration fact generation of reload %d = %d, want %d", i+1, fact.Generation, report.Publication.Generation)
+		}
+		if fact.PreviousFingerprint != previous {
+			t.Fatalf("declaration fact of reload %d moves from %q, want %q", i+1, fact.PreviousFingerprint, previous)
+		}
+		previous = fact.Fingerprint
+	}
+	if got := countFacts(chainFacts(t, run), configDeclarationKind); got != 5 {
+		t.Fatalf("declaration facts after one boot and four loads = %d, want 5", got)
+	}
+}
+
+// TestRevertedDeclarationSurvivesRestart pins the restart beside a reverted declaration.
+// - the restarted run serves the declaration the revert published, at its recorded generation
+// - the restart files no second declaration and no second publication
+//
+// 契约: docs/wiki/platform/org-hot-reload.md#apply-record
+func TestRevertedDeclarationSurvivesRestart(t *testing.T) {
+	doc := newLivenessDoc(t)
+	path := doc.write(t)
+	ctx := context.Background()
+	t.Setenv("TAGENT_TEST_API_KEY", "test-key")
+	t.Setenv("TAGENT_HTTP_PORT", "0")
+	host, err := Boot(path)
+	if err != nil {
+		t.Fatalf("boot the host: %v", err)
+	}
+	_, bootDecl, held, err := host.Run().latestDeclaration(ctx)
+	if err != nil || !held {
+		t.Fatalf("read the boot declaration: held=%v err=%v", held, err)
+	}
+	doc.UserMaxTokens = 512
+	if err := os.WriteFile(path, []byte(doc.yaml()), 0o644); err != nil {
+		t.Fatalf("rewrite the configuration source: %v", err)
+	}
+	if report, err := host.Reload(ctx); err != nil || !report.Publication.Published {
+		t.Fatalf("reload the moved document: publication=%+v err=%v", report.Publication, err)
+	}
+	doc.UserMaxTokens = 256
+	if err := os.WriteFile(path, []byte(doc.yaml()), 0o644); err != nil {
+		t.Fatalf("revert the configuration source: %v", err)
+	}
+	reverted, err := host.Reload(ctx)
+	if err != nil || !reverted.Publication.Published {
+		t.Fatalf("reload the reverted document: publication=%+v err=%v", reverted.Publication, err)
+	}
+	if err := host.Close(ctx); err != nil {
+		t.Fatalf("close the host before the restart: %v", err)
+	}
+	restarted := bootLiveness(t, path)
+	run := restarted.Run()
+	_, decl, held, err := run.latestDeclaration(ctx)
+	if err != nil || !held {
+		t.Fatalf("read the declaration after the restart: held=%v err=%v", held, err)
+	}
+	if got := decl.FactKey(); got != bootDecl.FactKey() {
+		t.Fatalf("declaration after the restart = %q, want the reverted declaration %q", got, bootDecl.FactKey())
+	}
+	if got := uint64(run.publisher.Current().Generation); got != reverted.Publication.Generation {
+		t.Fatalf("generation in effect after the restart = %d, want the reverted generation %d", got, reverted.Publication.Generation)
+	}
+	facts := chainFacts(t, run)
+	if got := countFacts(facts, configDeclarationKind); got != 3 {
+		t.Fatalf("declaration facts after the restart = %d, want the 3 the three loads filed", got)
+	}
+	if got := countFacts(facts, configPublicationRecordKind); got != 3 {
+		t.Fatalf("publication records after the restart = %d, want the 3 the three loads filed", got)
+	}
+}
+
 // TestFailedInstallReceiptIsHonest pins the install-failed receipt of a refused model rebuild.
 // - the generation published while the version in effect did not move
 // - the chain fact and the receipt name the refusal instead of claiming the switch

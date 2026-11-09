@@ -507,10 +507,16 @@ func declarationFromPayload(payload []byte) (*config.Declaration, error) {
 	return &decl, nil
 }
 
-// recordDeclarationFact commits the declaration one load produced, idempotently
-// by its canonical fingerprint: a declaration the chain already carries answers
-// the existing fact and writes no second one, so reloading equivalent content
-// never doubles the ledger. The fact names the generation the declaration is
+// recordDeclarationFact commits the declaration one load produced as the
+// declaration now in effect. The declaration family is the ordered ledger of the
+// declarations that took effect: a load the newest declaration fact already
+// answers writes no second one, so reloading equivalent content never doubles
+// the ledger, while a load that moves files its own entry naming the declaration
+// it moves from — including a load that reverts the source to a declaration an
+// earlier generation already carried, which the ledger could not state by
+// identity alone. The newest declaration fact is therefore always the
+// declaration the load produced, which is the reading the reload and the boot
+// reconciliation both consume. The fact names the generation the declaration is
 // meant for beside the declaration it follows, so the chain keeps the relation
 // between two declarations it must be read with.
 func (r *Run) recordDeclarationFact(ctx context.Context, decl *config.Declaration, generation uint64) (configFact, error) {
@@ -521,23 +527,20 @@ func (r *Run) recordDeclarationFact(ctx context.Context, decl *config.Declaratio
 	if fingerprint == "" {
 		return configFact{}, fmt.Errorf("tagent: the declaration answers no canonical fingerprint")
 	}
+	newest, held, err := r.records.chain.latest(ctx, configDeclarationKind)
+	if err != nil {
+		return configFact{}, err
+	}
+	if held && newest.Fingerprint == fingerprint {
+		return newest, nil
+	}
 	content, err := canonicalDeclarationPayload(decl)
 	if err != nil {
 		return configFact{}, err
 	}
-	facts, err := r.records.chain.snapshot(ctx)
-	if err != nil {
-		return configFact{}, err
-	}
 	previous := ""
-	for _, fact := range facts {
-		if fact.Kind != configDeclarationKind {
-			continue
-		}
-		if fact.Fingerprint == fingerprint {
-			return fact, nil
-		}
-		previous = fact.Fingerprint
+	if held {
+		previous = newest.Fingerprint
 	}
 	return r.records.chain.append(ctx, configFact{
 		Kind:                configDeclarationKind,

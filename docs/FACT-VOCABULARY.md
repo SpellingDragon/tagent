@@ -19,7 +19,7 @@
 | 1 | 核心事件 | `event` | `Event.Key`（规范 hex 存储键） | `Event.Type`（`TypeAgentOutput` 等冻结类型） | 存储键即身份：同一 Key 只存一条事实，Type 随事实冻结 |
 | 2 | 通知 | `task` | `TaskID:Round:Kind:Seq` 合成（`runtime/task/fact.go`） | `string(Kind)` | 幂等派发：同一身份重复投递不记第二条事实，重试保留原身份 |
 | 3 | 训练记录 | `rl` | `AttemptRecord.ID` | `rl.attempt` | 决策边界下的一次隐藏重试不算第二次 attempt，记录只追加 |
-| 4 | 声明 | `config` | `Fingerprint(d)` 的规范指纹 hex（`api/config/fact.go`） | `config.declaration` | 指纹只取声明面：同内容重载同一身份；源文档 `Raw` 与运行期绑定不入指纹；config 不 import event，结构性满足 `Fact` |
+| 4 | 声明 | `config` | `Fingerprint(d)` 的规范指纹 hex（`api/config/fact.go`） | `config.declaration` | 指纹只取声明面：同内容重载同一身份；源文档 `Raw` 与运行期绑定不入指纹；config 不 import event，结构性满足 `Fact`。身份不等于唯一：配置链按生效次序追加，同一身份可在链上多次出现（回退加载各记一条生效事实） |
 | 5 | 引用票据 | `memory/ledger` | `OriginalRef.Key`（拥有该正文的 EventID，`reference.go`） | `memory.original` | 引用域（owner/format/retention）只分开票据；正文始终按 EventID 独立，同内容也不跨消息共享，`Put` 不失效既有票据 |
 | 7 | 压缩请求 | `event` | `CompressRequest.ID`（producer‖subject‖reason 内容寻址，`api/event/compress_request.go`；日志随事实入链） | `compress.request` | 同判定同身份：重复/重试判定不分叉第二条请求，`At` 只作首落盘戳；消费后单次 retire |
 | 8 | 压缩产物 | `event` | `CompressProduct.ID`（request‖producer‖key 内容寻址，`api/event/compress_product.go`） | `compress.product` | 一条 request 至多一条产物：重试执行同身份；键与正文是投影恢复的唯一来源 |

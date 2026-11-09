@@ -70,7 +70,7 @@ flowchart TD
 <a id="apply-record"></a>
 ## 四、应用记录：声明链先行，再切换生效面
 
-一次真正发布按固定次序穿过唯一入口：基线复检 → 治理前置检查 → **提交 `PublicationRecord`** → 持有新 plan → 切换生效面（绑定、序号、上一代）→ 退役台账 `track` + `sweep`。配置链（`tagent/config/v1/fact:`，只追加）上同一次改动依次留下三种事实：`declaration`（声明载荷与指纹）、`record`（`PublicationRecord` 整条）与 `result`（一次尝试的结果）；代的退役另记 `gen-retire:<id>`（见第七节）。
+一次真正发布按固定次序穿过唯一入口：基线复检 → 治理前置检查 → **提交 `PublicationRecord`** → 持有新 plan → 切换生效面（绑定、序号、上一代）→ 退役台账 `track` + `sweep`。配置链（`tagent/config/v1/fact:`，只追加）上同一次改动依次留下三种事实：`declaration`（声明载荷与指纹）、`record`（`PublicationRecord` 整条）与 `result`（一次尝试的结果）；代的退役另记 `gen-retire:<id>`（见第七节）。其中 `declaration` 按生效次序追加：与最新一条同指纹则不追加，不同则追加一条并记下它从哪条声明移动来（`previous_fingerprint`），所以回退到更早用过的声明同样追加一条——最新一条 `declaration` 永远是本次加载产出的声明，reload 的"链上声明必须回答加载声明"与重启对账读的都是它。
 
 - **记录在切换之前提交**：记录提交失败即拒发布，生效面原地不动，候选资源逆序释放。`PublicationRecord{Generation, Fingerprint, Result, RollbackSource, Checks}` 经 `PublicationRecorder` 单独提交，绝不与任务终态提交或待发通知共用一个事务。
 - **一次尝试只有一条结果**：`result` 取 `published` / `unchanged` / `load-failed` / `governance-rejected` / `install-failed` 之一，由发布结果判档（`candidateInService`：`Publication.Generation≠0` 且 `Result∈{Applied,Unchanged}`）。先乐观记 `published`、再补一条 held 的矛盾双事实不再存在。
