@@ -30,15 +30,28 @@ type FoldWindow struct {
 	CompressThreshold float64
 	// KeepRecentTasks is the number of recent task turns the age fold keeps whole.
 	KeepRecentTasks int
+	// SettlementBytes is the rendered volume the delivery settlement receipts
+	// inside the projection this window is reported beside already spend of it, in
+	// bytes. A receipt is presented to the model, so it spends the same window the
+	// conversation does and the fold criterion counts it: the conversation's room
+	// is the window less this measure (VolumeThresholdBytes), which is the same
+	// bound read on the projection the model reads (ModelViewBudgetBytes). A
+	// window reported beside no projection spends none.
+	SettlementBytes int
 }
 
-// VolumeThresholdBytes reports the rendered volume a projection of this window
+// ModelViewBudgetBytes reports the rendered volume the projection the model reads
 // may carry before an age fold is due, in bytes: the share of the window the
 // declaration allows, converted at the one character-to-token ratio the budget
 // assembly packs requests under, so the fold fires where the assembly would
-// start degrading the projection rather than after it already had. A window
-// naming no tokens reports no threshold, and a fold read under it never fires.
-func (w FoldWindow) VolumeThresholdBytes() int {
+// start degrading the projection rather than after it already had.
+//
+// This is the bound itself. The projection the model reads is the conversation
+// material beside the delivery settlement receipts, so the fold judges that
+// material against the room these receipts leave (VolumeThresholdBytes) and the
+// two readings are one bound. A window naming no tokens reports no budget, and a
+// fold read under it never fires.
+func (w FoldWindow) ModelViewBudgetBytes() int {
 	if w.MaxTokens <= 0 {
 		return 0
 	}
@@ -47,6 +60,44 @@ func (w FoldWindow) VolumeThresholdBytes() int {
 		ratio = config.DefaultCompressThreshold
 	}
 	return int(float64(w.MaxTokens*replay.BudgetCharsPerToken) * ratio)
+}
+
+// VolumeThresholdBytes reports the rendered volume the conversation material of
+// one projection may carry before an age fold is due, in bytes: the window's
+// model-visible budget less the delivery settlement receipts the projection
+// beside it already spends of it. The fold mints its products on the
+// conversation material alone, so this is the room that material is judged
+// against, and conversation at this bound renders the window's whole budget
+// beside its receipts and no more — the bound is the volume the model reads
+// however long the history is.
+//
+// A window naming no tokens reports no threshold, and a fold read under it never
+// fires. A window whose receipts already spend the budget leaves the one byte
+// that keeps the material beside them due for a fold, so receipts alone never
+// read as room for the conversation.
+func (w FoldWindow) VolumeThresholdBytes() int {
+	budget := w.ModelViewBudgetBytes()
+	if budget <= 0 {
+		return 0
+	}
+	room := budget - w.SettlementBytes
+	if room < 1 {
+		room = 1
+	}
+	return room
+}
+
+// withSettlementAccounting returns the window beside the room the delivery
+// settlement receipts inside one projection spend of it, so the criterion the
+// fold judges under is the volume the model reads: the projection is the one the
+// fold observes, and its receipts are measured by the same per-entry render the
+// projection keeps its own volume under.
+func (w FoldWindow) withSettlementAccounting(projection *replay.ReplayProjection) FoldWindow {
+	if projection == nil {
+		return w
+	}
+	w.SettlementBytes = settlementBytesOf(projection.Entries())
+	return w
 }
 
 // SessionFolds is the session face the age fold plugin observes one commit
@@ -58,13 +109,14 @@ func (w FoldWindow) VolumeThresholdBytes() int {
 //
 // The redline list (3 rules):
 // MUST answer a fact no session chain owns as unowned.
-// MUST answer the projection and the window the session registered, never one the plugin invents.
+// MUST answer the projection and the window the session registered, the window carrying the room the receipts inside that projection spend and never room the plugin invents.
 // MUST NOT fold a session whose registered window names no positive token window.
 type SessionFolds interface {
 	// SessionOf reports the session chain one committed fact belongs to.
 	SessionOf(ctx context.Context, id event.EventID) (event.SessionID, bool)
 	// ProjectionOf reports the projection one session registered for replay
-	// beside the window it was registered under.
+	// beside the window it was registered under, whose room the delivery
+	// settlement receipts inside that projection spend.
 	ProjectionOf(ctx context.Context, session event.SessionID) (*replay.ReplayProjection, FoldWindow, bool)
 	// FileCompressRequest files one compression judgment the fold answered on the
 	// chain of the session whose material was judged.
@@ -131,10 +183,10 @@ func (p *AgeFoldPlugin) Port() plugin.Port {
 //
 // The duty is read-only over the fact and over the projection: a fact whose
 // session registered no projection, a session whose window names no positive
-// token window and a projection still inside its threshold each leave the commit
-// as it stands. A failed judgment is reported without rolling the commit back.
-// - The presented projection is read first as the cheap gate: inside the threshold, the accounting-free view is inside it too, so the common commit pays one read and no rebuilt view.
-// - The fold judges that accounting-free view, because delivery accounting is presented to the model but never counts as the history that trips a fold (foldProjectionOf).
+// token window and a projection still inside its bound each leave the commit as
+// it stands. A failed judgment is reported without rolling the commit back.
+// - The projection the model reads is read first as the cheap gate: it is judged against the window's whole budget, and the judgment on the conversation material is that same bound with the receipts the model reads beside it taken out, so a projection inside the budget pays one read and no rebuilt view.
+// - The products are minted on the conversation material alone (foldProjectionOf), so the receipts the model reads are spend of the bound and never material the products name.
 func (p *AgeFoldPlugin) ObserveCommit(ctx context.Context, id event.EventID) error {
 	if p == nil || p.sessions == nil {
 		return nil
@@ -150,12 +202,14 @@ func (p *AgeFoldPlugin) ObserveCommit(ctx context.Context, id event.EventID) err
 	if !carried || projection == nil {
 		return nil
 	}
-	threshold := window.VolumeThresholdBytes()
-	if threshold <= 0 {
+	budget := window.ModelViewBudgetBytes()
+	if budget <= 0 {
 		return nil
 	}
-	plan := replay.AgeFoldPlan{KeepRecent: window.KeepRecentTasks, VolumeThreshold: threshold}
-	gated, err := projection.PlanByAge(ctx, plan)
+	gated, err := projection.PlanByAge(ctx, replay.AgeFoldPlan{
+		KeepRecent:      window.KeepRecentTasks,
+		VolumeThreshold: budget,
+	})
 	if err != nil {
 		return err
 	}
@@ -166,7 +220,10 @@ func (p *AgeFoldPlugin) ObserveCommit(ctx context.Context, id event.EventID) err
 	if folded == nil {
 		return nil
 	}
-	report, err := folded.PlanByAge(ctx, plan)
+	report, err := folded.PlanByAge(ctx, replay.AgeFoldPlan{
+		KeepRecent:      window.KeepRecentTasks,
+		VolumeThreshold: window.VolumeThresholdBytes(),
+	})
 	if err != nil {
 		return err
 	}
@@ -206,9 +263,10 @@ func (s ageFoldSessions) SessionOf(_ context.Context, id event.EventID) (event.S
 }
 
 // ProjectionOf reports the projection one session registered for replay beside
-// the window it was registered under; a session whose chains several agents
-// share resolves to the chain replayOfSessionLocked names for a reader beside
-// no agent identity.
+// the window it was registered under, whose room the delivery settlement
+// receipts inside that projection already spend; a session whose chains several
+// agents share resolves to the chain replayOfSessionLocked names for a reader
+// beside no agent identity.
 func (s ageFoldSessions) ProjectionOf(_ context.Context, session event.SessionID) (*replay.ReplayProjection, FoldWindow, bool) {
 	s.run.mu.Lock()
 	held, carried := s.run.replayOfSessionLocked(session)
@@ -216,7 +274,7 @@ func (s ageFoldSessions) ProjectionOf(_ context.Context, session event.SessionID
 	if !carried {
 		return nil, FoldWindow{}, false
 	}
-	return held.projection, held.window, true
+	return held.projection, held.window.withSettlementAccounting(held.projection), true
 }
 
 // FileCompressRequest files one compression judgment on the chain of the session

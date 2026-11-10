@@ -8,16 +8,30 @@
 
 **W8 干净终点（2026-11-10 用户终裁「不起新变更，一笔做完，这就是这趟旅途的目的」——session-checkpoint-material-unification scope 并入本篇，不延后）**：三真因已修并 push（4280d208：WAL 逆扫去 sort／compactFactOrderLocked panic／smoke harness 缝）＋D 类真话纠正。剩余按触碰集不相交并发：
 
-| 轨 | 孙任务 | 前置 | 触碰集 | 并发 |
+| 轨 | 孙任务 | 前置 | 触碰集 | 并发/状态 |
 |---|---|---|---|---|
-| CORE | answered 切片→B4 past-cut→cadence②③→carrier 有界化 | answered 切片先行（解 7/22 parity） | assembly/compress_consumer.go·checkpoint.go·run.go·invoke.go | 簇内串行（同文件簇） |
-| RO | RestoreOwed 退役（邮箱全走切片） | 无 | runtime/state/memory.go·mailbox.go·mailbox_checkpoint.go·assembly/settle_turn.go | ∥CORE（触碰集互斥） |
-| BS | BandSummaryInstruction 测试钩子退回纯粹缝 | 无 | assembly/summary_gist.go＋四 harness _test.go | ∥CORE/RO（互斥） |
-| FR | 帧上限 64→32MiB | CORE carrier 有界化 | memory/ledger/journal.go·journal_test.go | blocked（待 CORE） |
-| ECH | eachCommittedEvent/EachSessionFact 全扫面清理 | CORE（run.go 重叠） | assembly/run.go·read.go | blocked（待 CORE） |
-| UNIFY | 会话级协调者下沉＋Stateful 收编 g(x)＋六端口→Material | CORE/RO/BS/ECH | 全插件管线面 | 末轨 |
+| CORE | answered 切片→B4 past-cut→cadence②③→carrier 有界化 | answered 切片先行 | assembly/compress_consumer.go·checkpoint.go·run.go·invoke.go | ✅ 已落地（36d328a4/7de9f08f） |
+| RO | RestoreOwed 退役（邮箱全走切片，无载体 boot 空切面恢复） | 无 | runtime/state·assembly/settle_turn.go·run.go | ✅ 已落地（96290ef8） |
+| BS | BandSummaryInstruction 测试钩子退回纯粹缝 | 无 | assembly/summary_gist.go＋四 harness | ✅ 已落地 |
+| FR | 帧上限 64→32MiB | carrier 有界化 | memory/ledger/journal.go | ✅ 已落地 |
+| ECH | eachCommittedEvent/EachSessionFact | — | — | 裁保留（06/4.c4 合法机制读面，删＝weakening） |
+| P1 | 开账存活：未清义务必随 cut 存活（at-least-once，非 at-most-once） | 用户既有裁决「开账随 checkpoint 存活」 | assembly/host_delivery*.go·checkpoint.go·facts.go·run.go | 在跑（独立裁，非上报） |
+| P2 | 回执计入折叠判据：模型可见 raw≤预算（D1） | P1（facts.go 重叠） | assembly/age_fold.go·facts.go·smoke_test.go | 待 P1 |
+| VOCAB | 词汇统一（详见下节审计） | 功能 work 落地后 | 全 checkpoint/compression 注释＋标识符＋concept_bindings＋GLOSSARY | 末段，与 UNIFY 协调 |
+| UNIFY | 会话级协调者下沉＋Stateful 收编 g(x)＋六端口→Material | CORE/RO/P1/P2 | 全插件管线面 | 末轨 |
 
-并发准入＝触碰集不相交：CORE∥RO∥BS 三轨互斥已核（CORE=assembly checkpoint 簇／RO=runtime/state+settle_turn／BS=summary_gist+harness）。FR/ECH 待 CORE 释放 run.go/journal 锁后当场补派；UNIFY 末轨。最大风险＝CORE 的 answered 切片若再跳判决集换有界即重演 12.13 回退（验收锚＝live≡锚定≡全量三方判决集相等，负锚＝删切片恢复即缺判决红）。
+并发准入＝触碰集不相交。P1/P2 同触 facts.go 故串行；VOCAB 改名须等功能 work 落地避免互踩。最大风险＝answered 切片若跳判决集换有界即重演 12.13 回退（验收锚＝live≡锚定≡全量三方判决集相等）。
+
+### W8-VOCAB 词汇统一审计（2026-11-10 用户「新词非常多，违背维护规范，统一相似概念」；先记录待一起派单）
+
+规范依据：GLOSSARY §四「一句话说不清、且不含本页未出现的词，就不加词而写成既有能力的字段」；§五契约拼写冻结不随更名；concept_bindings（golden/runtime/architecture.json，45 概念）每新名须绑 canonical concept＋kind。checkpoint 一域新增约 10 概念。
+
+三层问题与统一映射：
+- **层1 新概念过量**：CheckpointSlice/CheckpointOffset/CheckpointPayload 本是 Checkpoint 组成部分（按 §四 可降为字段而非独立概念）；**TaskCheckpoint 与 RegistryCheckpoint 同义**（皆「checkpoint 所载任务态」）→ 合一。真新概念 Checkpoint/Stateful/band 按 §四 论证保留并登记 GLOSSARY。
+- **层2 同义词**：carrier↔checkpoint（LoadScan/LoadStats 描述用 "the carrier rebuild"，主概念 Checkpoint）→ carrier 并入 checkpoint；cut↔boundary↔accountCut（cut 是登记规范词，boundary 留指锚幸存者边界、accountCut→compress cut）；account↔ledger（StateRegistry "ordered account" vs 投递 ledger canonical）→ 按「派生态持有 vs 读回面」澄清或统一。
+- **层3 撞车/复用**：anchorRef/anchorEntry/anchorSlot 本属压缩折叠锚（domain06），被 checkpoint 复用（newestCheckpointRef 返回 anchorRef）→ 解耦：checkpoint 引用用 checkpointRef，或明确 anchor 升格通用「链上定位引用」并登记；band 晋升用 "generational/fold generation" 与 recorder/session/config generation 撞 → 改 band promotion，退出 generation 词。
+
+执行约束：同步 concept_bindings 登记＋代码标识符＋GLOSSARY；§五冻结拼写（事件元数据 compress_covered/checkpoint:<seq>、日志关键字、测试名、磁盘标记）MUST NOT 改；改名走显式变更。验收：concept_budget 门绿＋GLOSSARY 无未登记新词＋grep 同义词残留零。
 
 ## 二、编排四问
 

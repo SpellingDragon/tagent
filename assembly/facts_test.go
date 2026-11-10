@@ -432,12 +432,12 @@ func deliveryFoldProjection(ctx context.Context, entries []replay.ProjectionEntr
 	return projection
 }
 
-// TestPinnedDeliveryFactsDoNotAffectFoldVolume pins the fold's accounting view.
+// TestPinnedDeliveryFactsSpendTheWindowNotTheFoldProducts pins what a presented receipt spends.
 //
-// - A pinned (held or owed) settlement fact is presented by the session but never enters the volume, the segments or the products of the age fold.
-// - The same dialogue folds at the same moment with and without an unsettled obligation.
+// - A pinned (held or owed) settlement fact is presented by the session but never enters the segments or the products.
+// - The same dialogue mints the same products with and without an unsettled obligation.
 // - The obligation stands after the second turn, where a live held fact lands: in the tail of the material, never as the input that opens a turn.
-func TestPinnedDeliveryFactsDoNotAffectFoldVolume(t *testing.T) {
+func TestPinnedDeliveryFactsSpendTheWindowNotTheFoldProducts(t *testing.T) {
 	ctx := context.Background()
 	at := time.Date(2026, 11, 5, 16, 0, 0, 0, time.UTC)
 	dialogue := deliveryFoldDialogue(at)
@@ -470,7 +470,7 @@ func TestPinnedDeliveryFactsDoNotAffectFoldVolume(t *testing.T) {
 		t.Fatalf("the four-turn dialogue over the 300-byte threshold did not fold: plain=%+v guarded=%+v", plain, guarded)
 	}
 	if guarded.Volume != plain.Volume {
-		t.Fatalf("the pinned settlement fact moved the fold volume: plain=%d guarded=%d", plain.Volume, guarded.Volume)
+		t.Fatalf("the pinned settlement fact entered the fold view: plain=%d guarded=%d", plain.Volume, guarded.Volume)
 	}
 	if len(guarded.Products) != len(plain.Products) {
 		t.Fatalf("the pinned settlement fact moved the fold products: plain=%d guarded=%d", len(plain.Products), len(guarded.Products))
@@ -492,10 +492,46 @@ func TestPinnedDeliveryFactsDoNotAffectFoldVolume(t *testing.T) {
 	t.Fatalf("the presented projection dropped the held settlement fact: %+v", presented.Entries())
 }
 
-// TestDeliverySettlementFactsCarryNoFoldVolume pins the volume half of the same invariant directly.
+// TestPinnedDeliveryFactsSpendTheWindow pins the room one receipt leaves the conversation.
+//
+// - The window reported beside a projection spends exactly the rendered volume of the settlement facts inside it.
+// - The room left for the conversation is the window's budget less that spend.
+// - The criterion the fold judges under is therefore the volume the projection the model reads carries.
+func TestPinnedDeliveryFactsSpendTheWindow(t *testing.T) {
+	ctx := context.Background()
+	at := time.Date(2026, 11, 5, 16, 0, 0, 0, time.UTC)
+	dialogue := deliveryFoldDialogue(at)
+	held := replay.ProjectionEntry{
+		Key:     event.EventID("delivery.delivery-fresh-8-abc.held.approval"),
+		Type:    deliverySettlementType,
+		Summary: deliverySettlementSummary,
+		Content: "delivery held approval: delivery-fresh-8-abc -> user@session (35 bytes) reason=approval",
+		Time:    at.Add(90 * time.Second),
+	}
+	window := FoldWindow{MaxTokens: 1000}
+	budget := window.ModelViewBudgetBytes()
+	accounted := window.withSettlementAccounting(deliveryFoldProjection(ctx, dialogue))
+	presented := window.withSettlementAccounting(deliveryFoldProjection(ctx, append(append([]replay.ProjectionEntry{}, dialogue...), held)))
+
+	if accounted.SettlementBytes != 0 {
+		t.Fatalf("the dialogue alone spends %d byte(s) of the window, want none", accounted.SettlementBytes)
+	}
+	if got, want := presented.SettlementBytes, len(replay.RenderProjection([]replay.ProjectionEntry{held})); got != want {
+		t.Fatalf("the window spends %d byte(s) on the held fact, want the %d it renders", got, want)
+	}
+	if got, want := presented.VolumeThresholdBytes(), budget-presented.SettlementBytes; got != want {
+		t.Fatalf("the room left for the conversation = %d bytes, want the %d-byte budget less the %d of receipts", got, want, presented.SettlementBytes)
+	}
+	if accounted.VolumeThresholdBytes() != budget {
+		t.Fatalf("a window beside no receipt leaves %d bytes, want the whole %d-byte budget", accounted.VolumeThresholdBytes(), budget)
+	}
+}
+
+// TestDeliverySettlementFactsSpendTheModelVisibleVolume pins both halves of the accounting directly.
 //
 // - The rendered volume of the fold view is the rendered volume of the dialogue, byte for byte, however many settlement facts stand beside it.
-func TestDeliverySettlementFactsCarryNoFoldVolume(t *testing.T) {
+// - The rendered projection the model reads is that volume plus every receipt, and the window reported beside it spends exactly the difference.
+func TestDeliverySettlementFactsSpendTheModelVisibleVolume(t *testing.T) {
 	ctx := context.Background()
 	at := time.Date(2026, 11, 5, 16, 0, 0, 0, time.UTC)
 	dialogue := deliveryFoldDialogue(at)
@@ -509,8 +545,9 @@ func TestDeliverySettlementFactsCarryNoFoldVolume(t *testing.T) {
 			Time:    at.Add(time.Duration(i) * time.Second),
 		})
 	}
+	presented := deliveryFoldProjection(ctx, withDelivery)
 	plain := foldProjectionOf(ctx, deliveryFoldProjection(ctx, dialogue))
-	guarded := foldProjectionOf(ctx, deliveryFoldProjection(ctx, withDelivery))
+	guarded := foldProjectionOf(ctx, presented)
 	report, err := plain.PlanByAge(ctx, replay.AgeFoldPlan{KeepRecent: 1, VolumeThreshold: 1})
 	if err != nil {
 		t.Fatalf("plan the dialogue: %v", err)
@@ -520,18 +557,26 @@ func TestDeliverySettlementFactsCarryNoFoldVolume(t *testing.T) {
 		t.Fatalf("plan the settlement-beside dialogue: %v", err)
 	}
 	if report.Volume != other.Volume {
-		t.Fatalf("settlement facts carried fold volume: plain=%d guarded=%d", report.Volume, other.Volume)
+		t.Fatalf("the fold view carried the settlement facts: plain=%d guarded=%d", report.Volume, other.Volume)
 	}
 	for i := range plain.Entries() {
 		if plain.Entries()[i].Key != guarded.Entries()[i].Key {
 			t.Fatalf("the fold view entry %d is %s, want %s", i, guarded.Entries()[i].Key, plain.Entries()[i].Key)
 		}
 	}
+	rendered := len(replay.RenderProjection(presented.Entries()))
+	spent := FoldWindow{MaxTokens: 1000}.withSettlementAccounting(presented).SettlementBytes
+	if rendered != other.Volume+spent {
+		t.Fatalf("the projection the model reads renders %d bytes, want the %d of the dialogue plus the %d of its receipts", rendered, other.Volume, spent)
+	}
+	if spent == 0 {
+		t.Fatalf("the three settlement facts spent none of the window: %+v", presented.Entries())
+	}
 }
 
 // TestSettlementRoleMappedBesideTheFoldView keeps the two halves of the contract together.
 //
-// - The settlement type maps onto a model role (the fact is presentable), even though the fold view excludes it from accounting.
+// - The settlement type maps onto a model role (the fact is presented), even though the fold mints its products on a view that excludes it.
 func TestSettlementRoleMappedBesideTheFoldView(t *testing.T) {
 	role, err := agent.RoleOf(deliverySettlementType)
 	if err != nil {
@@ -540,6 +585,251 @@ func TestSettlementRoleMappedBesideTheFoldView(t *testing.T) {
 	if role != model.RoleUser {
 		t.Fatalf("the settlement type maps onto %q, want the user role", role)
 	}
+}
+
+// foldJudgeFace is the session face one age fold plugin judges through here: the
+// projection and window it answers, and the judgments it recorded. It reports the
+// window the way the run's own face does, through the same accounting call, so
+// the criterion under check is the criterion the plugin runs in production.
+type foldJudgeFace struct {
+	projection *replay.ReplayProjection
+	window     FoldWindow
+	filed      []event.CompressRequest
+}
+
+// SessionOf answers the one chain this face holds.
+func (f *foldJudgeFace) SessionOf(context.Context, event.EventID) (event.SessionID, bool) {
+	return "session-fold-judge", true
+}
+
+// ProjectionOf answers the projection beside the room its receipts spend.
+func (f *foldJudgeFace) ProjectionOf(context.Context, event.SessionID) (*replay.ReplayProjection, FoldWindow, bool) {
+	return f.projection, f.window.withSettlementAccounting(f.projection), true
+}
+
+// FileCompressRequest records the judgment the plugin filed.
+func (f *foldJudgeFace) FileCompressRequest(_ context.Context, _ event.SessionID, request event.CompressRequest) error {
+	f.filed = append(f.filed, request)
+	return nil
+}
+
+// TestFoldCriterionJudgesTheReceiptsTheModelReads pins the bound and the state without it.
+//
+// - A projection whose conversation is inside the window's whole budget is due once the receipts beside it spend the rest: the plugin files the judgment.
+// - Judged against the whole budget the same conversation files nothing, while the projection the model reads stays over it.
+// - That is the state a criterion ignoring the receipts leaves.
+func TestFoldCriterionJudgesTheReceiptsTheModelReads(t *testing.T) {
+	ctx := context.Background()
+	at := time.Date(2026, 11, 5, 16, 0, 0, 0, time.UTC)
+	receipt := replay.ProjectionEntry{
+		Key:     event.EventID("delivery.delivery-fresh-8-abc.held.approval"),
+		Type:    deliverySettlementType,
+		Summary: deliverySettlementSummary,
+		Content: "delivery held approval: delivery-fresh-8-abc -> user@session (35 bytes) reason=approval",
+		Time:    at.Add(90 * time.Second),
+	}
+	presented := deliveryFoldProjection(ctx, append(deliveryFoldDialogue(at), receipt))
+	conversation := replay.RenderProjection(foldProjectionOf(ctx, presented).Entries())
+	rendered := replay.RenderProjection(presented.Entries())
+	spent := len(rendered) - len(conversation)
+	budgetPerToken := float64(replay.BudgetCharsPerToken) * config.DefaultCompressThreshold
+	window := FoldWindow{MaxTokens: int(float64(len(conversation)+spent/2)/budgetPerToken) + 1}
+	budget := window.ModelViewBudgetBytes()
+	if !(len(conversation) <= budget && budget < len(rendered)) {
+		t.Fatalf("the fixture renders conversation=%d beside receipts=%d under a %d-byte budget, want the conversation inside it and the projection over it",
+			len(conversation), spent, budget)
+	}
+
+	face := &foldJudgeFace{projection: presented, window: window}
+	if err := NewAgeFoldPlugin(face).ObserveCommit(ctx, event.EventID("delivery.delivery-fresh-8-abc.held.approval")); err != nil {
+		t.Fatalf("judge the presented projection: %v", err)
+	}
+	if len(face.filed) == 0 {
+		t.Fatalf("the projection the model reads renders %d bytes over the %d-byte budget (%d of them receipts) and was judged due by nothing", len(rendered), budget, spent)
+	}
+	ignoring, err := foldProjectionOf(ctx, presented).PlanByAge(ctx, replay.AgeFoldPlan{
+		KeepRecent:      window.KeepRecentTasks,
+		VolumeThreshold: budget,
+	})
+	if err != nil {
+		t.Fatalf("judge the conversation view against the whole budget: %v", err)
+	}
+	if ignoring.Triggered {
+		t.Fatalf("the conversation view of %d bytes was judged due under the whole %d-byte budget, want it inside it", ignoring.Volume, budget)
+	}
+	if len(rendered) <= budget {
+		t.Fatalf("the projection the model reads renders %d bytes, want more than the %d-byte budget", len(rendered), budget)
+	}
+	if got := window.withSettlementAccounting(presented).VolumeThresholdBytes(); got != budget-spent {
+		t.Fatalf("the room left for the conversation = %d bytes, want the %d-byte budget less the %d of receipts", got, budget, spent)
+	}
+}
+
+// TestFoldCriterionBoundsTheModelVisibleVolumeAsTheChainGrows pins the bound over a live chain.
+//
+// - The projection the model reads never renders more than the window's budget: the fold of the commit that would cross it runs inside that commit.
+// - The ceiling does not move with the history: a 48-turn chain is held at the same budget as a 12-turn one.
+// - The material a long chain carries is the folded form, not the whole chain.
+// - The fold converges: once the bands stop promoting, the projection stands inside the budget.
+// - The receipts the projection still carries stay the set the fold has not overtaken rather than one per turn of the history.
+func TestFoldCriterionBoundsTheModelVisibleVolumeAsTheChainGrows(t *testing.T) {
+	ctx := context.Background()
+	window := FoldWindow{MaxTokens: 4000}
+	budget := window.ModelViewBudgetBytes()
+	short := commitDeliveryGrowthChain(t, ctx, window, 12)
+	long := commitDeliveryGrowthChain(t, ctx, window, 48)
+	t.Logf("[fold-bound] budget=%d bytes, one turn renders %d: 12 turns peak=%d settled=%d receipts=%d; 48 turns peak=%d settled=%d receipts=%d",
+		budget, short.perTurn, short.peak, short.settled, short.spent, long.peak, long.settled, long.spent)
+	if 48*long.perTurn <= budget {
+		t.Fatalf("the 48-turn chain renders %d bytes unfolded, want a chain that crosses the %d-byte budget", 48*long.perTurn, budget)
+	}
+	if short.peak > budget || long.peak > budget {
+		t.Fatalf("the projection the model reads peaked at %d (12 turns) and %d (48 turns) bytes, want both inside the %d-byte budget",
+			short.peak, long.peak, budget)
+	}
+	if short.settled > budget || long.settled > budget {
+		t.Fatalf("the projection the model reads settled at %d (12 turns) and %d (48 turns) bytes, want both inside the %d-byte budget", short.settled, long.settled, budget)
+	}
+	if long.spent > short.spent+2*deliveryGrowthReceiptBytes {
+		t.Fatalf("the receipts the projection carries grew with the chain: %d bytes at 12 turns, %d at 48", short.spent, long.spent)
+	}
+}
+
+// deliveryGrowthReceiptBytes bounds the rendered volume one growth receipt adds;
+// the chain asserts that the receipts a long projection carries stay the handful
+// the fold has not overtaken rather than one per turn of the history.
+const deliveryGrowthReceiptBytes = 400
+
+// deliveryGrowthVolume is what one growth chain reads: the ceiling the projection
+// reached over the whole chain, its volume once the fold converged, the volume
+// its receipts still spend, and the volume one turn of the chain renders.
+type deliveryGrowthVolume struct {
+	peak    int
+	settled int
+	spent   int
+	perTurn int
+}
+
+// commitDeliveryGrowthChain commits closed turns of the growth chain beside one
+// delivery settlement receipt per turn, and reports what the projection the model
+// reads carried beside it.
+func commitDeliveryGrowthChain(t *testing.T, ctx context.Context, window FoldWindow, turns int) deliveryGrowthVolume {
+	t.Helper()
+	run := windowChainRun(t, ctx)
+	addr := event.Address{AgentID: "agent-a", SessionID: event.SessionID(fmt.Sprintf("session-fold-bound-%d", turns))}
+	if err := run.AttachReplay(agent.RequestChain{SessionID: addr.SessionID}, window, replay.NewReplayProjection()); err != nil {
+		t.Fatalf("register the window of the growth chain: %v", err)
+	}
+	base := time.Date(2026, 11, 6, 12, 0, 0, 0, time.UTC)
+	var volume deliveryGrowthVolume
+	for turn := 0; turn < turns; turn++ {
+		for position, leg := range deliveryGrowthLegs {
+			commitWindowFact(t, ctx, run, addr, deliveryGrowthTurnFact(addr, base, turn, position, leg.typ, leg.summary))
+		}
+		commitWindowFact(t, ctx, run, addr, deliveryGrowthReceipt(addr, base, turn))
+		projection, _, carried := ageFoldSessions{run}.ProjectionOf(ctx, addr.SessionID)
+		if !carried {
+			t.Fatalf("turn %d: the growth chain registered no projection", turn)
+		}
+		if rendered := len(replay.RenderProjection(projection.Entries())); rendered > volume.peak {
+			volume.peak = rendered
+		}
+	}
+	projection, windowed, carried := ageFoldSessions{run}.ProjectionOf(ctx, addr.SessionID)
+	if !carried {
+		t.Fatalf("the growth chain registered no projection")
+	}
+	volume.spent = windowed.SettlementBytes
+	volume.settled = settleDeliveryGrowth(ctx, t, projection, windowed)
+	volume.perTurn = len(replay.RenderProjection(deliveryGrowthTurnEntries(addr, base, 0)))
+	return volume
+}
+
+// deliveryGrowthLegs names the four legs one closed growth turn commits, in the
+// order the turn commits them.
+var deliveryGrowthLegs = []struct {
+	typ     string
+	summary string
+}{
+	{event.TypeExternalInput, "growth ask"},
+	{event.TypeThinkingPlan, "growth plan"},
+	{event.TypeActionCommand, "growth call"},
+	{event.TypeAgentOutput, "growth answer"},
+}
+
+// deliveryGrowthTurnEntries reports the projection entries one growth turn adds:
+// its four legs beside the receipt it is answered with, so the ceiling the chain
+// asserts is read from the material the chain itself commits.
+func deliveryGrowthTurnEntries(addr event.Address, base time.Time, turn int) []replay.ProjectionEntry {
+	entries := make([]replay.ProjectionEntry, 0, len(deliveryGrowthLegs)+1)
+	for position, leg := range deliveryGrowthLegs {
+		if entry, held := mappedEntryOf(deliveryGrowthTurnFact(addr, base, turn, position, leg.typ, leg.summary)); held {
+			entries = append(entries, entry)
+		}
+	}
+	if entry, held := mappedEntryOf(deliveryGrowthReceipt(addr, base, turn)); held {
+		entries = append(entries, entry)
+	}
+	return entries
+}
+
+// deliveryGrowthTurnFact names one leg of one growth turn.
+func deliveryGrowthTurnFact(addr event.Address, base time.Time, turn, position int, typ, summary string) event.Event {
+	return event.Event{
+		Key:       event.EventID(fmt.Sprintf("growth-%03d-%d", turn, position)),
+		Type:      typ,
+		Timestamp: base.Add(time.Duration(turn*10+position) * time.Minute),
+		Meta:      map[string]string{event.MetaKeyEventSummary: summary},
+		Message:   model.Message{Role: model.RoleUser, Content: "the material of growth turn ................"},
+		Owner:     addr,
+		Source:    addr,
+		Target:    addr,
+	}
+}
+
+// deliveryGrowthReceipt names the settlement receipt one growth turn is answered
+// with: the obligation the model reads beside the turn.
+func deliveryGrowthReceipt(addr event.Address, base time.Time, turn int) event.Event {
+	return event.Event{
+		Key:       event.EventID(fmt.Sprintf("delivery.delivery-growth-%03d.held.approval", turn)),
+		Type:      deliverySettlementType,
+		Timestamp: base.Add(time.Duration(turn*10+4) * time.Minute),
+		Meta:      map[string]string{event.MetaKeyEventSummary: deliverySettlementSummary},
+		Message: model.Message{Role: model.RoleUser,
+			Content: fmt.Sprintf("delivery held approval: delivery-growth-%03d -> agent-a@session (32 bytes) reason=approval", turn)},
+		Owner:  addr,
+		Source: addr,
+		Target: addr,
+	}
+}
+
+// settleDeliveryGrowth drives the fold of one projection to its fixed point: the
+// plan is judged exactly as the consumer judges it, on the conversation material
+// against the room the receipts leave, and each product it mints is applied with
+// the settlement facts of its band covered, so a round that mints nothing is the
+// round the fold has converged. It reports the rendered volume at that point.
+func settleDeliveryGrowth(ctx context.Context, t *testing.T, projection *replay.ReplayProjection, window FoldWindow) int {
+	t.Helper()
+	settled := replay.NewReplayProjection()
+	for _, entry := range projection.Entries() {
+		settled.Append(ctx, entry)
+	}
+	for round := 0; round < 8; round++ {
+		report, err := foldProjectionOf(ctx, settled).PlanByAge(ctx, replay.AgeFoldPlan{
+			KeepRecent:      window.KeepRecentTasks,
+			VolumeThreshold: window.VolumeThresholdBytes(),
+		})
+		if err != nil {
+			t.Fatalf("judge the growth projection: %v", err)
+		}
+		if len(report.Products) == 0 {
+			break
+		}
+		for _, product := range report.Products {
+			settled.ApplyProducts([]replay.FoldProduct{coverSettlementFacts(product, settled)})
+		}
+	}
+	return len(replay.RenderProjection(settled.Entries()))
 }
 
 // residencyTestRun assembles one run over the in-process storage tier, so the

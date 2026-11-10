@@ -766,20 +766,21 @@ func mappedEntryOf(evt event.Event) (replay.ProjectionEntry, bool) {
 	}, evt.Meta[event.MetaKeyInputEvents]), evt.InstanceID), true
 }
 
-// foldProjectionOf renders the projection the age fold judges from the one the
-// session presents: the same mapped sequence without the delivery settlement
-// facts. Delivery accounting is not dialogue. A settlement fact is presented to
-// the model (the spec requires it), but it must not move the fold threshold, the
-// band ages or the segment boundaries a request reads — the tokens of an owed
-// receipt are not the tokens of a turn, and a held obligation pinned in the hot
-// window must not make the history fold sooner. The fold therefore judges and
-// mints products on this accounting-free view, while the consumer applies the
-// products to the full projection the model reads, so the settlement lines stay
-// visible where they belong and nowhere count as conversation.
+// foldProjectionOf renders the material the age fold mints its products on from
+// the projection the session presents: the same mapped sequence without the
+// delivery settlement facts, derived on every judgment so a fold that rewrites
+// the projection leaves the view following it by construction. Delivery
+// accounting is not dialogue, so a receipt never joins a segment, a band age or
+// the process detail a product names, and the tokens of an owed receipt are never
+// read as the tokens of a turn.
 //
-// The view is derived on every judgment, never kept as a second mutable
-// sequence: a fold rewrites the full projection, and the derived view follows
-// that rewrite by construction instead of drifting from it.
+// The receipts are still spend of the window the fold bounds: they are presented
+// to the model, so the criterion measures the projection the model reads and
+// judges this view against the room they leave rather than the whole window
+// (FoldWindow.VolumeThresholdBytes, settlementBytesOf). The consumer applies the
+// products to the full projection and covers the settlement facts inside the band
+// each summary folds, so the receipts stay visible where they belong and are
+// consumed by the fold that overtakes them.
 func foldProjectionOf(ctx context.Context, projection *replay.ReplayProjection) *replay.ReplayProjection {
 	if projection == nil {
 		return nil
@@ -793,6 +794,26 @@ func foldProjectionOf(ctx context.Context, projection *replay.ReplayProjection) 
 		folded.Append(ctx, entry)
 	}
 	return folded
+}
+
+// settlementBytesOf reports the rendered volume the delivery settlement facts of
+// one entry sequence add to the projection the model reads, in bytes: the
+// receipts are presented, so the fold criterion counts them and the bound it
+// keeps is the volume the model reads rather than the conversation alone.
+//
+// One receipt is measured by the same per-entry render the projection keeps its
+// own rendered volume under, so the accounting and the projection never disagree
+// about what a receipt costs, and the measure stays the sum over the receipts the
+// projection carries: a fold that consumes them lowers it with them.
+func settlementBytesOf(entries []replay.ProjectionEntry) int {
+	volume := 0
+	for _, entry := range entries {
+		if entry.Type != deliverySettlementType {
+			continue
+		}
+		volume += len(replay.RenderProjection([]replay.ProjectionEntry{entry}))
+	}
+	return volume
 }
 
 // mappedContentOf reports the text one committed message speaks for on the
