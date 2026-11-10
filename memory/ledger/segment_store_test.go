@@ -431,19 +431,21 @@ func BenchmarkSegmentWindowRead(b *testing.B) {
 	}
 }
 
-// TestNewestOfTypeSpansPartitionsAndCopiesNoIndex pins the newest-of-type read.
-//   - the answer is the newest commit whatever partition filed it, so a reader whose writer moved between processes never reads the carrier of an earlier one
-//   - the lookup allocates the same amount beside a long history as beside a short one, so it copies and sorts no index
+// TestNewestOfTypeReadsTheCommitOrderAndCopiesNoIndex pins the newest-of-type read.
+//   - the answer is the newest commit, whatever window and slot that commit took
+//   - the lookup reads the commits filed since the carrier, not the history behind it
+//   - the lookup allocates the same beside a long history as beside none
 //
 // 契约: docs/wiki/memory/memory-architecture.md#file-segment-store
-func TestNewestOfTypeSpansPartitionsAndCopiesNoIndex(t *testing.T) {
+func TestNewestOfTypeReadsTheCommitOrderAndCopiesNoIndex(t *testing.T) {
 	ctx := context.Background()
-	store, _ := openJournalSegmentStore(t, t.TempDir())
-	earlier := segmentRecord(7, 1000, 4, "carrier-old", 32).WithChain(event.TypeCheckpoint, "")
+	root := t.TempDir()
+	store, _ := openJournalSegmentStore(t, root)
+	earlier := segmentRecord(7, 2000, 4, "carrier-old", 32).WithChain(event.TypeCheckpoint, "")
 	if err := store.StoreEvent(ctx, earlier); err != nil {
 		t.Fatalf("commit the earlier carrier: %v", err)
 	}
-	later := segmentRecord(2, 2000, 1, "carrier-new", 32).WithChain(event.TypeCheckpoint, "")
+	later := segmentRecord(2, 1000, 1, "carrier-new", 32).WithChain(event.TypeCheckpoint, "")
 	if err := store.StoreEvent(ctx, later); err != nil {
 		t.Fatalf("commit the later carrier: %v", err)
 	}
@@ -452,22 +454,133 @@ func TestNewestOfTypeSpansPartitionsAndCopiesNoIndex(t *testing.T) {
 		t.Fatalf("read the newest carrier = (%t, %v), want the committed one", held, err)
 	}
 	if newest != later.EventKey {
-		t.Fatalf("the newest carrier reads as %s, want the one partition %d committed later than partition %d", newest, later.PartitionID, earlier.PartitionID)
+		t.Fatalf("the newest carrier reads as %s, want %s, the identity the later commit filed beside the higher window and slot of %s", newest, later.EventKey, earlier.EventKey)
 	}
-	if _, held, err := store.NewestOfType(ctx, "no-such-type"); err != nil || held {
+	reopened, _ := openJournalSegmentStore(t, root)
+	if boot, held, err := reopened.NewestOfType(ctx, event.TypeCheckpoint); err != nil || !held || boot != later.EventKey {
+		t.Fatalf("the boot over the same log reads the newest carrier as (%s, %t, %v), want %s", boot, held, err, later.EventKey)
+	}
+	if _, held, err := reopened.NewestOfType(ctx, "no-such-type"); err != nil || held {
 		t.Fatalf("a type the store holds no entry of reads as (%t, %v), want no entry and no error", held, err)
 	}
 
-	brief := newestOfTypeAllocBytes(store)
-	for at := 0; at < 2000; at++ {
+	brief := newestOfTypeCostOf(t, 0)
+	long := newestOfTypeCostOf(t, 2000)
+	if long.bytes > brief.bytes {
+		t.Fatalf("the lookup allocates %d byte(s) per read beside 2000 commits behind the carrier and %d beside none, want no whole-index copy", long.bytes, brief.bytes)
+	}
+	if long.nanos > 8*brief.nanos+2_000 {
+		t.Fatalf("the lookup costs %d ns beside 2000 commits behind the carrier and %d beside none, want the commits since the carrier and not the history behind it", long.nanos, brief.nanos)
+	}
+}
+
+// newestOfTypeCostOf opens a store carrying the given number of commits behind
+// one carrier, files the carrier and the cadence of commits that follow it, and
+// reports what one newest-of-type read beside them allocates and takes.
+func newestOfTypeCostOf(t *testing.T, behind int) struct{ bytes, nanos int64 } {
+	t.Helper()
+	ctx := context.Background()
+	store, _ := openJournalSegmentStore(t, t.TempDir())
+	for at := 0; at < behind; at++ {
 		rec := segmentRecord(0, 3000+int64(at/8), int64(at%8), fmt.Sprintf("history-%05d", at), 16)
 		if err := store.StoreEvent(ctx, rec); err != nil {
 			t.Fatalf("commit history event %d: %v", at, err)
 		}
 	}
-	long := newestOfTypeAllocBytes(store)
-	if long > brief {
-		t.Fatalf("the lookup allocates %d byte(s) per read beside 2002 indexed entries and %d beside 2, want no whole-index copy", long, brief)
+	carrier := segmentRecord(2, 1000, 1, "carrier", 32).WithChain(event.TypeCheckpoint, "")
+	if err := store.StoreEvent(ctx, carrier); err != nil {
+		t.Fatalf("commit the carrier: %v", err)
+	}
+	for at := 0; at < 4; at++ {
+		rec := segmentRecord(0, 4000+int64(at), 1, fmt.Sprintf("tail-%02d", at), 16)
+		if err := store.StoreEvent(ctx, rec); err != nil {
+			t.Fatalf("commit tail event %d: %v", at, err)
+		}
+	}
+	return struct{ bytes, nanos int64 }{bytes: newestOfTypeAllocBytes(store), nanos: newestOfTypeNanoseconds(store)}
+}
+
+// TestEachIndexNewestFirstStreamsTheCommitOrder pins the order the index enumeration states.
+//   - the first entry is the newest commit across partitions, so the walk is commit order
+//   - a walk that stops early never ranks the entries it did not reach
+//
+// 契约: docs/wiki/memory/memory-architecture.md#file-segment-store
+func TestEachIndexNewestFirstStreamsTheCommitOrder(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	store, _ := openJournalSegmentStore(t, root)
+	for _, rec := range []SegmentRecord{
+		segmentRecord(9, 5000, 1, "first", 8),
+		segmentRecord(1, 1000, 2, "second", 8),
+		segmentRecord(9, 4000, 3, "third", 8),
+	} {
+		if err := store.StoreEvent(ctx, rec); err != nil {
+			t.Fatalf("commit %s: %v", rec.EventKey, err)
+		}
+	}
+	reopened, _ := openJournalSegmentStore(t, root)
+	var walked []event.EventID
+	if err := reopened.EachIndexNewestFirst(ctx, func(key event.EventID, _ int, _ int64, _ string, _ event.SessionID) error {
+		walked = append(walked, key)
+		return nil
+	}); err != nil {
+		t.Fatalf("walk the index: %v", err)
+	}
+	want := []event.EventID{"third", "second", "first"}
+	if len(walked) != len(want) {
+		t.Fatalf("the walk names %v, want %v", walked, want)
+	}
+	for at := range want {
+		if walked[at] != want[at] {
+			t.Fatalf("the walk names %v, want %v", walked, want)
+		}
+	}
+	firsts := 0
+	if err := reopened.EachIndexNewestFirst(ctx, func(key event.EventID, _ int, _ int64, _ string, _ event.SessionID) error {
+		firsts++
+		if firsts == 1 && key != "third" {
+			t.Fatalf("the first entry of the walk is %s, want the newest commit", key)
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("walk the index: %v", err)
+	}
+	if firsts != 3 {
+		t.Fatalf("the walk visited %d entries, want every published one", firsts)
+	}
+}
+
+// silentOrderKV is a view over one journal that states no commit order at all,
+// so a check can prove the store refuses an order that misses the records it
+// published instead of publishing an enumeration short of them.
+type silentOrderKV struct {
+	*journalKV
+}
+
+// eachCommittedNewestFirst names no key: the incomplete order the check reads.
+func (k silentOrderKV) eachCommittedNewestFirst(context.Context, func(string) (bool, error)) error {
+	return nil
+}
+
+// TestLoadRefusesAnOrderThatMissesPublishedEntries pins the order a boot reads.
+//   - an engine whose stated order names fewer records than the store published refuses the load
+//
+// 契约: docs/wiki/memory/memory-architecture.md#file-segment-store
+func TestLoadRefusesAnOrderThatMissesPublishedEntries(t *testing.T) {
+	ctx := context.Background()
+	kv, err := openJournalKV(t.TempDir())
+	if err != nil {
+		t.Fatalf("open the journal view: %v", err)
+	}
+	store, err := newFileSegmentStore(kv)
+	if err != nil {
+		t.Fatalf("open the segment store: %v", err)
+	}
+	if err := store.StoreEvent(ctx, segmentRecord(1, 1000, 1, "held", 8)); err != nil {
+		t.Fatalf("commit the event: %v", err)
+	}
+	if _, err := newFileSegmentStore(silentOrderKV{journalKV: kv}); err == nil {
+		t.Fatalf("the store published an index the engine states no commit order for, want the load refused")
 	}
 }
 
@@ -485,4 +598,19 @@ func newestOfTypeAllocBytes(store *FileSegmentStore) int64 {
 		}
 	})
 	return measured.AllocedBytesPerOp()
+}
+
+// newestOfTypeNanoseconds reports the time one newest-of-type read takes beside
+// the history the store holds, so a check measures the entries a whole-index walk
+// would visit.
+func newestOfTypeNanoseconds(store *FileSegmentStore) int64 {
+	ctx := context.Background()
+	measured := testing.Benchmark(func(b *testing.B) {
+		for at := 0; at < b.N; at++ {
+			if _, _, err := store.NewestOfType(ctx, event.TypeCheckpoint); err != nil {
+				b.Fatalf("read the newest carrier: %v", err)
+			}
+		}
+	})
+	return measured.NsPerOp()
 }

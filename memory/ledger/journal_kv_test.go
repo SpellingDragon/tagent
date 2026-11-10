@@ -62,3 +62,54 @@ func TestJournalCommitCarriesItsOwnBarrier(t *testing.T) {
 		}
 	})
 }
+
+// TestJournalStatesItsCommitOrderNewestFirst pins the order the log states.
+//   - the walk names every committed record from the newest commit to the oldest
+//   - a visit that answers false ends the walk, so a lookup reads the commits filed after it
+//   - a key a later commit deleted is not held and is skipped
+//
+// 契约: docs/wiki/memory/memory-architecture.md#local-file-kv
+func TestJournalStatesItsCommitOrderNewestFirst(t *testing.T) {
+	ctx := context.Background()
+	kv, err := openJournalKV(t.TempDir())
+	if err != nil {
+		t.Fatalf("open the journal view: %v", err)
+	}
+	t.Cleanup(func() { kv.log.close() })
+	for _, batch := range []Batch{
+		{Puts: []Pair{{Key: "1:idx:older", Value: []byte("old")}}},
+		{Puts: []Pair{{Key: "1:evt:1:1", Value: []byte("body")}, {Key: "1:idx:newer", Value: []byte("new")}}},
+		{Puts: []Pair{{Key: "1:idx:deleted", Value: []byte("gone")}}},
+		{Deletes: []string{"1:idx:deleted"}},
+	} {
+		if err := kv.Commit(ctx, batch); err != nil {
+			t.Fatalf("commit %v: %v", batch, err)
+		}
+	}
+	var walked []string
+	if err := kv.eachCommittedNewestFirst(ctx, func(key string) (bool, error) {
+		walked = append(walked, key)
+		return true, nil
+	}); err != nil {
+		t.Fatalf("walk the commit order: %v", err)
+	}
+	want := []string{"1:idx:newer", "1:evt:1:1", "1:idx:older"}
+	if len(walked) != len(want) {
+		t.Fatalf("the walk names %v, want %v: the newest commit first and no key the log deleted", walked, want)
+	}
+	for at := range want {
+		if walked[at] != want[at] {
+			t.Fatalf("the walk names %v, want %v: the newest commit first and no key the log deleted", walked, want)
+		}
+	}
+	stops := 0
+	if err := kv.eachCommittedNewestFirst(ctx, func(string) (bool, error) {
+		stops++
+		return false, nil
+	}); err != nil {
+		t.Fatalf("walk the commit order: %v", err)
+	}
+	if stops != 1 {
+		t.Fatalf("the walk visited %d records after a visit answered false, want the one it stopped at", stops)
+	}
+}

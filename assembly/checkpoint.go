@@ -7,8 +7,13 @@
 // mirror of it — read the newest checkpoint, hand every slice back to its
 // holder, then replay the facts that landed past the cut through seedFact's
 // isolated rebuild (memory ledger only, no After pass, no side effects) — so no
-// consumer owns a recovery read path of its own and the
-// boot cost is the state size plus the increment past the cut, never the history.
+// consumer owns a recovery read path of its own. The newest carrier comes from a
+// backwards walk of the commit order that stops at the first entry of the
+// checkpoint type, so the commits since that carrier bound the walk; anchor
+// discovery is one pass of the resident commit order that copies nothing and
+// reads no body; and the bodies read are the ones committed past each chain's
+// cut, except a chain the restored slices carry beside no fold product, which
+// replays its whole chain.
 //
 // The cut is consistent by construction, and the construction is an ordering of
 // the single-writer pipeline rather than a lock over it: the coordinator reads
@@ -44,8 +49,10 @@ const CheckpointCommitInterval = 64
 // CheckpointPeriod is the wall-clock bound between two framework checkpoints: a
 // chain that commits little is a chain whose last commit may be far behind the
 // boot that reads it, so the period asks for a carrier at the next commit even
-// when the interval has not elapsed. The due is judged where the commits are, so
-// a chain that commits nothing at all files its carrier at its close instead.
+// when the interval has not elapsed. The due is judged at a commit, so a chain
+// that commits nothing files no carrier of its own: the close stops the filer
+// and takes no cut, and the boot reads the carrier the last commit that reached
+// a due filed.
 const CheckpointPeriod = 30 * time.Second
 
 // checkpointSliceProjection, checkpointSliceDelivery, checkpointSliceMailbox,

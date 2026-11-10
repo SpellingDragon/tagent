@@ -49,9 +49,10 @@ const (
 	// journalMaxFrameBytes bounds one payload, so a damaged length field cannot
 	// make the reader allocate an unbounded span. The ceiling is the frame a
 	// framework carrier reaches: a checkpoint record states every state slice of
-	// the run in one commit, and the measured carrier of a long chain stands at
-	// fifty megabytes, so the bound leaves that frame its headroom and stays a
-	// fixed ceiling.
+	// the run in one commit, the carrier a long production chain recorded stands
+	// at 36,350,700 bytes, and the round-trip test pins a 26 MiB frame against
+	// that same bound, so 64 MiB leaves both their headroom and stays a fixed
+	// ceiling.
 	journalMaxFrameBytes = 64 << 20
 	// journalReplayBufferBytes is the read size the replay takes the log in: one
 	// sequential read per buffer instead of one read per frame part.
@@ -111,6 +112,13 @@ type journalLog struct {
 	size int64
 	// index locates the latest record of each key.
 	index map[string]journalValue
+	// order is the log's own commit order: the keys each committed record
+	// touched, appended frame by frame in the order the frames sit in the log and,
+	// inside one frame, in the order the record writes them. A key a later record
+	// rewrites or deletes is named at every one of its records, newest last, so a
+	// reader that walks it backwards meets the newest record of a key before any
+	// older one.
+	order []string
 	// unsynced counts the bytes appended since the last completed barrier.
 	unsynced int64
 }
@@ -506,6 +514,7 @@ func (l *journalLog) publish(payload []byte, at int64) error {
 		return fmt.Errorf("%w: record version %d", ErrJournalFormat, record.version)
 	}
 	l.indexRecord(record)
+	l.noteOrder(record)
 	return nil
 }
 
@@ -518,6 +527,33 @@ func (l *journalLog) indexRecord(record journalSpans) {
 	for _, key := range record.deletes {
 		l.index[key] = journalValue{deleted: true}
 	}
+}
+
+// noteOrder files the keys one committed record touched into the log's commit
+// order: its writes first, then the keys it deleted.
+func (l *journalLog) noteOrder(record journalSpans) {
+	for _, put := range record.puts {
+		l.order = append(l.order, put.key)
+	}
+	l.order = append(l.order, record.deletes...)
+}
+
+// eachKeyNewestFirst answers the keys the committed records touched, from the
+// newest record to the oldest, and stops when visit answers false. The walk reads
+// the order the frames were appended in, so it needs no sort and no byte of the
+// log: a reader that wants the newest record of one kind walks the records filed
+// after it instead of the whole log.
+func (l *journalLog) eachKeyNewestFirst(visit func(key string) (bool, error)) error {
+	for at := len(l.order) - 1; at >= 0; at-- {
+		more, err := visit(l.order[at])
+		if err != nil {
+			return err
+		}
+		if !more {
+			return nil
+		}
+	}
+	return nil
 }
 
 // append commits one record: it writes the frame in one call and updates the key
@@ -548,6 +584,7 @@ func (l *journalLog) append(record journalRecord) error {
 		return fmt.Errorf("tagent: index the record just written: %w", err)
 	}
 	l.indexRecord(spans)
+	l.noteOrder(spans)
 	l.size += int64(len(frame))
 	l.unsynced += int64(len(frame))
 	return nil

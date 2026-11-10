@@ -289,19 +289,31 @@ func trimReplayProjection(ctx context.Context, projection *replay.ReplayProjecti
 }
 
 // compactFactOrderLocked removes the named identities from the commit order of
-// this run, so the order reads the facts the live ledger still holds.
+// this run, so the order reads the facts the live ledger still holds. A trim
+// shrinks the order, so the control-plane scan cursor and count are recomputed
+// over the kept prefix: controlScanned stays a valid index into the shorter
+// order and controlFacts still counts the control records before it.
 func (r *Run) compactFactOrderLocked(dropped map[event.EventID]struct{}) {
 	if len(dropped) == 0 {
 		return
 	}
 	kept := r.factOrder[:0]
-	for _, key := range r.factOrder {
+	scanned, control := 0, 0
+	for i, key := range r.factOrder {
 		if _, gone := dropped[key]; gone {
 			continue
+		}
+		if i < r.controlScanned {
+			scanned++
+			if evt, held := r.facts[key]; held && generationRetirementRecord(evt) {
+				control++
+			}
 		}
 		kept = append(kept, key)
 	}
 	r.factOrder = kept
+	r.controlScanned = scanned
+	r.controlFacts = control
 }
 
 // persistFact writes one fact of this run to the storage tier it declares: the

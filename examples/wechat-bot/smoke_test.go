@@ -2351,37 +2351,69 @@ func smokeIntegrityChainSummary(summary, content string) string {
 }
 
 // smokeIntegrityFoldConsumer 判定正式请求装配持续消费折叠产物：折叠之后的下一
-// 个 /task 回合仍从投影读到综述，且被折掉的原文标记随综述进入请求。
+// 个 /task 回合仍从投影读到那条综述本身，综述按产物键引用它压过的材料而不重抄全文，
+// 而被折掉的原文在事实链上仍逐字节可达。
 func smokeIntegrityFoldConsumer(t *testing.T) {
 	host := bootSmokeIntegrityHost(t, "1h", "")
 	defer host.close(t)
 	rig, provider := host.rig, host.provider
 	chat := smokeChats[0]
 
-	smokeIntegrityAssertFold(t, rig, provider, chat)
+	original := smokeIntegrityAssertFold(t, rig, provider, chat)
 	rig.postTask(smokeIntegrityFoldFollowTurn + " plain question")
 	rig.waitText(chat, "answer "+smokeIntegrityFoldFollowTurn, 120*time.Second)
 	follow := smokeIntegrityRequestsForLastUser(provider, smokeEntryModel, smokeIntegrityFoldFollowTurn)
 	if len(follow) != 1 {
 		t.Fatalf("the follow-up turn drove %d entry request(s), want one", len(follow))
 	}
-	if !strings.Contains(follow[0].text(), "history summary:") {
-		t.Fatalf("the follow-up request read no history summary\nrequests carrying a history summary:\n%s",
-			smokeRequestsContaining(provider, "history summary"))
-	}
-	if !strings.Contains(follow[0].text(), "external_input: "+smokeIntegrityFoldEarlyTurn) {
-		t.Fatalf("the follow-up request read no summary carrying the folded %s", smokeIntegrityFoldEarlyTurn)
-	}
 	entries, carried := rig.host.Run().ReplayEntries(rig.addressOf(chat).SessionID)
 	if !carried {
 		t.Fatalf("session %s registered no projection", chat)
+	}
+	summary := smokeIntegrityStandingSummary(t, entries, chat)
+	if !strings.Contains(follow[0].text(), summary.Summary+": "+summary.Content) {
+		t.Fatalf("the follow-up request read no history summary standing in the projection\nsummary:\n%s\nrequests carrying a history summary:\n%s",
+			summary.Content, smokeRequestsContaining(provider, "history summary"))
+	}
+	if !strings.Contains(summary.Content, "history summary (") {
+		t.Fatalf("the summary the follow-up read states %q, want the bounded reference to the product it compressed", summary.Content)
+	}
+	if body := smokeIntegrityBulk(smokeIntegrityFoldEarlyTurn); strings.Contains(follow[0].text(), body) {
+		t.Fatalf("the follow-up request re-carried the folded %s body, want the bounded summary standing for it", smokeIntegrityFoldEarlyTurn)
+	}
+	committed, err := rig.host.Run().CommittedEvent(context.Background(), original.Key)
+	if err != nil {
+		t.Fatalf("read the committed original %s beside the follow-up: %v", original.Key, err)
+	}
+	if !strings.Contains(committed.Message.Content, smokeIntegrityFoldTail) {
+		t.Fatalf("the committed original lost its tail beside the follow-up (fact %s)", original.Key)
 	}
 	threshold := assembly.FoldWindow{MaxTokens: 2000, CompressThreshold: 0.3}.VolumeThresholdBytes()
 	if volume := len(replay.RenderProjection(entries)); volume > threshold {
 		t.Fatalf("the projection grew to %d bytes after the follow-up, want <= the %d-byte window", volume, threshold)
 	}
-	t.Logf("[integrity-fold-consumer] the formal follow-up request on %s consumed the history summary carrying %s",
-		chat, smokeIntegrityFoldEarlyTurn)
+	t.Logf("[integrity-fold-consumer] the formal follow-up request on %s read the history summary %s standing for the folded material by key; the original %s stayed reachable",
+		chat, summary.Key, original.Key)
+}
+
+// smokeIntegrityStandingSummary 报告投影里站着的那条历史摘要：折叠把老带压进一条综述，
+// 它就是要被请求读到的折叠产物；投影同时站着两条即为折叠形态破裂。
+func smokeIntegrityStandingSummary(t *testing.T, entries []replay.ProjectionEntry, chat string) replay.ProjectionEntry {
+	t.Helper()
+	var found replay.ProjectionEntry
+	for _, entry := range entries {
+		if entry.Type != replay.ProjectionTypeHistorySummary {
+			continue
+		}
+		if found.Key != "" {
+			t.Fatalf("the projection of %s stands as two history summaries (%s and %s), want the one summary the fold keeps", chat, found.Key, entry.Key)
+		}
+		found = entry
+	}
+	if found.Key == "" {
+		t.Fatalf("the projection of %s carries no history summary, want the fold product it presents", chat)
+	}
+	return found
 }
 
 // smokeIntegrityInflightVersion 把一轮入口请求挂在模型端点上，在它借出开始版本时

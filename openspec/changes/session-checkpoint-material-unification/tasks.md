@@ -13,7 +13,7 @@
 
 - [ ] 2.1 协调者下沉：checkpoint 由每会话按其上下文（压缩/输入轮变化/会话关闭）请求，切面只读取并写入本会话的派生切片 —— 验证（三锚待冻结）：正锚＝两会话交错时切面只含触发会话切片；负锚＝跨会话读取残留必红
 - [ ] 2.2 恢复路径：读最近 checkpoint 后只对本会话尾部重跑 g(x)，回放期关闭 observation 副作用 —— 验证（三锚待冻结）：正锚＝重启后无重复投递/无重复驱动；负锚＝回放期触发一次 settle 必红
-- [ ] 2.3 最新载体读取：仍经 journal 逆扫 `NewestOfType` 取全局最新，只答身份、不拷贝不排序 —— 验证（三锚待冻结）：沿用 `TestNewestOfTypeSpansPartitionsAndCopiesNoIndex`；负锚＝改回整索引拷贝排序时分配上界测试必红
+- [ ] 2.3 最新载体读取：仍经 journal 逆扫 `NewestOfType` 取全局最新，只答身份、不拷贝不排序 —— 验证（三锚待冻结）：沿用 `TestNewestOfTypeReadsTheCommitOrderAndCopiesNoIndex`（原记录名 `TestNewestOfTypeSpansPartitionsAndCopiesNoIndex`，测试改名后按新名回写：memory/ledger/segment_store_test.go:440）；负锚＝改回整索引拷贝排序时分配上界测试必红
 
 ## 三、`Stateful` 收编消费者读态
 

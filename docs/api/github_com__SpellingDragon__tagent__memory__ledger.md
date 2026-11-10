@@ -319,11 +319,12 @@ type FileSegmentStore struct {
     unstages what it wrote, and publishes no part of the record.
 
     The resident state is bounded: the index keeps one small position per event
-    key (the projection of the persisted index entries), the read cache keeps
-    bodies under a byte budget, and Load reads only the index and window meta
-    at startup. An event body the cache evicted is read back from its persisted
-    {pid}:evt:{window}:{seq} entry, so a bounded process still answers every
-    read.
+    key (the projection of the persisted index entries), the order keeps those
+    keys in the order their commits landed, the read cache keeps bodies under a
+    byte budget, and Load reads only the index, the window meta and the engine's
+    commit order at startup. An event body the cache evicted is read back from
+    its persisted {pid}:evt:{window}:{seq} entry, so a bounded process still
+    answers every read.
 
 func (s *FileSegmentStore) Close() error
     Close ends the store with a final barrier over whatever the backend still
@@ -338,14 +339,15 @@ func (s *FileSegmentStore) EachEvent(ctx context.Context, visit func(StoredEvent
     returned.
 
 func (s *FileSegmentStore) EachIndexNewestFirst(ctx context.Context, visit func(key event.EventID, partition int, seq int64, typ string, session event.SessionID) error) error
-    EachIndexNewestFirst streams the resident index grouped from the highest
-    partition and, inside one partition, from the highest sequence slot to the
-    lowest, handing each entry its key, position, frozen event type and session
-    without reading any body. The order is partition-major: it ranks the slots
-    of one partition against each other and says nothing about which partition
-    committed later, so a caller that needs the newest fact of a type across
-    partitions reads NewestOfType. An entry whose type is empty leaves the
-    caller to read its body.
+    EachIndexNewestFirst streams the published index in commit order, newest
+    commit first, handing each entry its key, position, frozen event type and
+    session without reading any body. The order is the one the engine's records
+    sit in, so it ranks every entry against every other — a commit of one
+    partition that landed after a commit of another comes first — and a caller
+    that wants commit order walks it backwards. Nothing is copied or sorted:
+    the walk reads the order in place, one entry at a time, so a visit may read
+    the store again. An entry whose type is empty leaves the caller to read its
+    body.
 
 func (s *FileSegmentStore) EventCount() int
     EventCount returns the number of events published by successful commits,
@@ -369,18 +371,20 @@ func (s *FileSegmentStore) Load(ctx context.Context) error
     to discover the partitions, then reads the index and meta prefixes of each
     partition: both are small entries, and no {pid}:evt:{window}:{seq} body is
     read. A record whose index and window meta did not both arrive stays out of
-    the published state, and EventCount counts the published records.
+    the published state, EventCount counts the published records, and the commit
+    order is the one the engine states for the records it published.
 
 func (s *FileSegmentStore) NewestOfType(ctx context.Context, typ string) (event.EventID, bool, error)
-    NewestOfType answers the identity of the newest resident index entry of one
-    frozen event type, copying and sorting nothing: the walk reads the resident
-    index in place and keeps one candidate, so the lookup costs one comparison
-    per indexed entry and allocates nothing whatever the history behind it. The
-    order it keeps is the window the commit was grouped under (its event time),
-    then the sequence slot, then the identity — an order that spans partitions,
-    so a run whose owner moved between processes reads the carrier its newest
-    process filed instead of the one of the highest partition. It reads no event
-    body: the caller reads the one body the answered identity names.
+    NewestOfType answers the identity of the newest published index entry of
+    one frozen event type: the walk reads the resident commit order from the
+    newest commit backwards and stops at the first entry of the type, so a
+    lookup beside a carrier filed every cadence commits reads a bounded prefix
+    of the order whatever the history behind it, copies and sorts nothing,
+    and reads no event body. The answer spans partitions: an identity is newer
+    than another because its commit landed later, never because its window,
+    its sequence slot or its partition is higher, so a run whose owner moved
+    between processes reads the carrier its newest process filed instead of the
+    one of the highest partition.
 
     A type the store holds no entry of answers found=false and no error.
 

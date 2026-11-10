@@ -277,9 +277,10 @@ func (c *CompressionConsumer) summarizeProduct(ctx context.Context, session even
 
 // anchorEntry is one entry of the projection state a fold checkpoint carries.
 // Its fields name the entry as the chain states it: identity, frozen type,
-// summary, original text and moment. A survivor whose key resolves in the
-// chain is hydrated from the fact itself; only a synthetic entry carries its
-// text in the checkpoint. No field reads a kind off a key's spelling.
+// summary, text and moment. The payload states the text of every entry it
+// carries, while a restore reads that text only for an entry the chain does not
+// resolve: a key the chain still holds is hydrated from its fact, whose private
+// fields the payload never carries. No field reads a kind off a key's spelling.
 type anchorEntry struct {
 	Key     event.EventID
 	Type    string

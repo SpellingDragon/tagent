@@ -913,3 +913,45 @@ func TestRestartColdStartRecomputesTheWindow(t *testing.T) {
 		t.Fatalf("the restarted prefix ends at %d of %d entries, want every entry presented as ended material", got, held)
 	}
 }
+
+// TestTrimKeepsTheControlCountConsistent pins the control-plane scan cursor across a trim.
+// - dropping facts shrinks the commit order; the cursor and count are recomputed over the kept prefix so a later count reads a valid slice
+// - revert the cursor recompute in compactFactOrderLocked and the second count panics on factOrder[controlScanned:] past the shorter order
+//
+// 契约: docs/wiki/agent/event-flow.md#projection-lifecycle
+func TestTrimKeepsTheControlCountConsistent(t *testing.T) {
+	run := &Run{facts: map[event.EventID]event.Event{}}
+	for i := 0; i < 10; i++ {
+		key := event.EventID(fmt.Sprintf("s-%02d", i))
+		run.facts[key] = event.Event{Key: key}
+		run.factOrder = append(run.factOrder, key)
+	}
+	for i := 0; i < 2; i++ {
+		key := event.EventID(fmt.Sprintf("gen-retire:%02d", i))
+		run.facts[key] = event.Event{Key: key}
+		run.factOrder = append(run.factOrder, key)
+	}
+	run.countControlFactsLocked()
+	if run.controlFacts != 2 || run.controlScanned != 12 {
+		t.Fatalf("before trim control=%d scanned=%d, want the two retirement records over twelve facts", run.controlFacts, run.controlScanned)
+	}
+	dropped := map[event.EventID]struct{}{}
+	for i := 0; i < 10; i++ {
+		key := event.EventID(fmt.Sprintf("s-%02d", i))
+		dropped[key] = struct{}{}
+		delete(run.facts, key)
+	}
+	dropped["gen-retire:00"] = struct{}{}
+	delete(run.facts, "gen-retire:00")
+	run.compactFactOrderLocked(dropped)
+	if run.controlScanned > len(run.factOrder) {
+		t.Fatalf("the trim left controlScanned=%d past the order length %d", run.controlScanned, len(run.factOrder))
+	}
+	run.countControlFactsLocked()
+	if run.controlFacts != 1 {
+		t.Fatalf("after trim control=%d, want the one surviving retirement record", run.controlFacts)
+	}
+	if got := run.CommittedFacts(); got != 0 {
+		t.Fatalf("committed material facts = %d, want no session fact beside the control record", got)
+	}
+}

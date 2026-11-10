@@ -263,8 +263,9 @@ type Run struct {
 	factOrder []event.EventID
 	// controlFacts counts the live facts that are control-plane records of the
 	// configuration chain instead of facts of a session chain, and controlScanned
-	// is the point of factOrder that count has been brought up to. No trim
-	// releases a control-plane record, so the count only ever grows.
+	// is the point of factOrder that count has been brought up to. A trim shrinks
+	// factOrder and recomputes both over the kept prefix (compactFactOrderLocked),
+	// so the cursor stays a valid index and the count tracks the surviving records.
 	controlFacts   int
 	controlScanned int
 	// sessionFactCount counts the live facts each session chain holds, so the
@@ -1981,9 +1982,10 @@ func (r *Run) CommittedFacts() int {
 }
 
 // countControlFactsLocked brings the control-plane count up to the commit order
-// the run holds: every fact of that order is judged once, and no trim releases a
-// control-plane record, so the count never has to be revised downwards. The
-// caller holds the run lock.
+// the run holds: it judges the suffix past controlScanned once. A trim resets the
+// cursor and count over the kept prefix (compactFactOrderLocked), so the suffix
+// this reads is always a valid slice of the current order. The caller holds the
+// run lock.
 func (r *Run) countControlFactsLocked() {
 	for _, key := range r.factOrder[r.controlScanned:] {
 		if evt, held := r.facts[key]; held && generationRetirementRecord(evt) {
@@ -2273,9 +2275,11 @@ func (r *Run) CommittedEvent(ctx context.Context, id event.EventID) (event.Event
 	return restored, nil
 }
 
-// eachCommittedEvent reads every stored event in (PartitionID, Seq) commit
-// order. The index walk carries no bodies; reversing its newest-first references
-// gives one commit-order read seam to the full replay and the session reader.
+// eachCommittedEvent reads every stored event in the order its commits landed
+// in, ranked across partitions rather than by partition and sequence: the index
+// walk answers commit order newest first, so reversing its references gives the
+// commit order itself. The index walk carries no bodies; one commit-order read
+// seam serves the full replay and the session reader.
 func eachCommittedEvent(ctx context.Context, tier *ledger.Tier, visit func(ledger.StoredEvent) error) error {
 	var refs []anchorRef
 	if err := tier.Segments.EachIndexNewestFirst(ctx, func(key event.EventID, partition int, seq int64, typ string, session event.SessionID) error {
@@ -2507,16 +2511,16 @@ type anchorSlot struct {
 }
 
 // seedAnchoredReplay rebuilds each session chain from the newest compress
-// product the index names by frozen event type, then replays only the events
-// committed after that checkpoint. The index walk reads no body of the covered
-// history; a product whose anchor payload is unreadable, and a session that
-// never folded, answer the full replay of that session instead. Anchor
-// discovery never inspects a fact key's spelling.
+// product the index names by frozen event type, then replays the events of that
+// chain committed past the newest survivor the product states. The index walk
+// reads no event body; a product whose anchor payload is unreadable, and a
+// session that never folded, answer the full replay of that session instead.
+// Anchor discovery never inspects a fact key's spelling.
 //
 // - The survivors a checkpoint states are held to the same resident bound the full walk applies as it appends: a chain that declared no window keeps the recent material rather than every survivor the payload names.
-// - The checkpoint slices this boot restored are the state every slice of the runtime had reached at the cut: the rebuild takes those slices and reads only the facts past the cut, with the covered index entries dropped before any body is read, so the boot costs the increment and not the history. Configuration records belong to no session chain and stay, being the declaration ledger the restarted run states that no slice carries.
+// - The checkpoint slices this boot restored are the state every slice of the runtime had reached at the cut. A chain beside a fold product reads only the bodies of the facts committed past that product's newest survivor, so the entries the product covers never reach a body read and the chain's boot costs the increment. A chain the restored slices carry beside no fold product replays its whole chain, so that boot reads the covered history of the chain as well. Configuration records belong to no session chain and stay, being the declaration ledger the restarted run states that no slice carries.
 // - A chain the checkpoint stated is a chain of this run even beside no fact past its cut, so its slot joins the rebuild and the tail of its chain is replayed onto the state the checkpoint states.
-// - A chain the checkpoint states beside no fold product is hydrated from its own survivors and then gets only the material past the cut replayed onto it, and it keeps the chain even beside no tail.
+// - A chain the checkpoint states beside no fold product is hydrated from its own survivors and then replays its whole chain over them: the survivors seat the covered entries, and the seed answers the fact it already holds, so the replay adds the material past the cut without filing a covered fact twice.
 func (r *Run) seedAnchoredReplay(ctx context.Context, tier *ledger.Tier) (map[event.Address]*sessionSeed, seedReport, error) {
 	report := seedReport{}
 	var refs []anchorRef

@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -215,6 +216,15 @@ type indexPosition struct {
 	session   event.SessionID
 }
 
+// commitOrder is the engine capability of stating the order of its commits: the
+// keys it holds, named from the newest committed record to the oldest, stopping
+// when visit answers false. An append-log engine keeps that order on disk, so
+// naming it costs the records walked; a key-ordered key-value engine keeps no
+// such order and does not answer this capability at all.
+type commitOrder interface {
+	eachCommittedNewestFirst(ctx context.Context, visit func(key string) (bool, error)) error
+}
+
 // FileSegmentStore commits events into time-window segments over one atomic
 // store engine; it names no engine and no file layout, so any engine backs it. One commit stages the event body, its index entry and the window meta
 // the window needs as one batch, and publishes the event to the read cache, the
@@ -223,16 +233,23 @@ type indexPosition struct {
 // what it wrote, and publishes no part of the record.
 //
 // The resident state is bounded: the index keeps one small position per event
-// key (the projection of the persisted index entries), the read cache keeps
-// bodies under a byte budget, and Load reads only the index and window meta at
-// startup. An event body the cache evicted is read back from its persisted
-// {pid}:evt:{window}:{seq} entry, so a bounded process still answers every read.
+// key (the projection of the persisted index entries), the order keeps those keys
+// in the order their commits landed, the read cache keeps bodies under a byte
+// budget, and Load reads only the index, the window meta and the engine's commit
+// order at startup. An event body the cache evicted is read back from its
+// persisted {pid}:evt:{window}:{seq} entry, so a bounded process still answers
+// every read.
 //
 // 契约: docs/wiki/memory/memory-architecture.md#file-segment-store
 type FileSegmentStore struct {
-	mu      sync.Mutex
-	kv      AtomicStore
-	index   map[event.EventID]indexPosition
+	mu    sync.Mutex
+	kv    AtomicStore
+	index map[event.EventID]indexPosition
+	// order is the published index in commit order, oldest commit first: the
+	// order the records sit in the engine, so a walk from its end answers
+	// newest-first and stops where a caller stops instead of ranking the entries
+	// against each other. It is append-only, like the commits it projects.
+	order   []event.EventID
 	cache   *segmentCache
 	count   int
 	windows map[string]*storedWindowMeta
@@ -259,7 +276,8 @@ func newFileSegmentStore(kv AtomicStore) (*FileSegmentStore, error) {
 // discover the partitions, then reads the index and meta prefixes of each
 // partition: both are small entries, and no {pid}:evt:{window}:{seq} body is
 // read. A record whose index and window meta did not both arrive stays out of
-// the published state, and EventCount counts the published records.
+// the published state, EventCount counts the published records, and the commit
+// order is the one the engine states for the records it published.
 func (s *FileSegmentStore) Load(ctx context.Context) error {
 	namespaces, err := s.kv.Namespaces(ctx)
 	if err != nil {
@@ -337,23 +355,95 @@ func (s *FileSegmentStore) Load(ctx context.Context) error {
 			meta[windowSlot{partition: partition, window: window}] = entry
 		}
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.index = map[event.EventID]indexPosition{}
-	s.windows = map[string]*storedWindowMeta{}
-	s.count = 0
+	published := map[event.EventID]indexPosition{}
 	for key, position := range positions {
 		if _, held := meta[windowSlot{partition: position.partition, window: position.window}]; !held {
 			continue
 		}
-		s.index[key] = position
-		s.count++
+		published[key] = position
 	}
+	order, err := s.commitOrderOf(ctx, published)
+	if err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.index = published
+	s.windows = map[string]*storedWindowMeta{}
+	s.count = len(published)
+	s.order = order
 	for slot, entry := range meta {
 		carried := entry
 		s.windows[windowKey(slot.partition, slot.window)] = &carried
 	}
 	return nil
+}
+
+// commitOrderOf answers the published index entries in the order their commits
+// landed, oldest first. The engine states that order itself when it keeps one, so
+// the answer costs one walk of the records filed and no sort; an engine that keeps
+// no commit order — a key-ordered key-value engine, or a wrapper that does not
+// forward this capability — answers the slot order its index entries state
+// instead, which costs one sort of the entries and cannot tell that a commit of
+// one partition landed after a commit of another.
+func (s *FileSegmentStore) commitOrderOf(ctx context.Context, published map[event.EventID]indexPosition) ([]event.EventID, error) {
+	order := make([]event.EventID, 0, len(published))
+	if ordered, ok := s.kv.(commitOrder); ok {
+		seen := make(map[event.EventID]struct{}, len(published))
+		if err := ordered.eachCommittedNewestFirst(ctx, func(key string) (bool, error) {
+			partition, id, named := segmentIndexEntry(key)
+			position, held := published[id]
+			if !named || !held || position.partition != partition {
+				return true, nil
+			}
+			if _, placed := seen[id]; placed {
+				return true, nil
+			}
+			seen[id] = struct{}{}
+			order = append(order, id)
+			return len(order) < len(published), nil
+		}); err != nil {
+			return nil, err
+		}
+		if len(order) != len(published) {
+			return nil, fmt.Errorf("tagent: the engine states the commits of %d of the %d index entries it published", len(order), len(published))
+		}
+		slices.Reverse(order)
+		return order, nil
+	}
+	for key := range published {
+		order = append(order, key)
+	}
+	sort.Slice(order, func(i, j int) bool {
+		a, b := published[order[i]], published[order[j]]
+		if a.partition != b.partition {
+			return a.partition < b.partition
+		}
+		if a.seq != b.seq {
+			return a.seq < b.seq
+		}
+		return order[i] < order[j]
+	})
+	return order, nil
+}
+
+// segmentIndexEntry splits one stored index key into the partition it was filed
+// under and the event key it names, and answers false for a key of another
+// family.
+func segmentIndexEntry(key string) (int, event.EventID, bool) {
+	name, rest, held := strings.Cut(key, ":")
+	if !held {
+		return 0, "", false
+	}
+	id, held := strings.CutPrefix(rest, segmentIndexPrefix)
+	if !held || id == "" {
+		return 0, "", false
+	}
+	partition, err := strconv.Atoi(name)
+	if err != nil {
+		return 0, "", false
+	}
+	return partition, event.EventID(id), true
 }
 
 // StoreEvent commits one event behind the segment commit barrier: the event
@@ -423,6 +513,7 @@ func (s *FileSegmentStore) StoreEvent(ctx context.Context, rec SegmentRecord) er
 		Body:        evtValue,
 	}
 	s.index[rec.EventKey] = indexPosition{partition: rec.PartitionID, window: rec.WindowTS, seq: rec.Seq, typ: rec.typ, session: rec.session}
+	s.order = append(s.order, rec.EventKey)
 	s.cache.put(stored)
 	s.count++
 	s.windows[windowKey(rec.PartitionID, rec.WindowTS)] = meta
@@ -581,15 +672,15 @@ func (s *FileSegmentStore) eventByKey(ctx context.Context, key event.EventID) (S
 	return stored, true, nil
 }
 
-// NewestOfType answers the identity of the newest resident index entry of one
-// frozen event type, copying and sorting nothing: the walk reads the resident
-// index in place and keeps one candidate, so the lookup costs one comparison per
-// indexed entry and allocates nothing whatever the history behind it. The order
-// it keeps is the window the commit was grouped under (its event time), then the
-// sequence slot, then the identity — an order that spans partitions, so a run
-// whose owner moved between processes reads the carrier its newest process filed
-// instead of the one of the highest partition. It reads no event body: the caller
-// reads the one body the answered identity names.
+// NewestOfType answers the identity of the newest published index entry of one
+// frozen event type: the walk reads the resident commit order from the newest
+// commit backwards and stops at the first entry of the type, so a lookup beside a
+// carrier filed every cadence commits reads a bounded prefix of the order whatever
+// the history behind it, copies and sorts nothing, and reads no event body. The
+// answer spans partitions: an identity is newer than another because its commit
+// landed later, never because its window, its sequence slot or its partition is
+// higher, so a run whose owner moved between processes reads the carrier its
+// newest process filed instead of the one of the highest partition.
 //
 // A type the store holds no entry of answers found=false and no error.
 func (s *FileSegmentStore) NewestOfType(ctx context.Context, typ string) (event.EventID, bool, error) {
@@ -597,79 +688,60 @@ func (s *FileSegmentStore) NewestOfType(ctx context.Context, typ string) (event.
 		return "", false, err
 	}
 	s.mu.Lock()
-	newest := event.EventID("")
-	window, seq := int64(0), int64(0)
-	held := false
-	for key, position := range s.index {
-		if position.typ != typ {
-			continue
+	defer s.mu.Unlock()
+	for at := len(s.order) - 1; at >= 0; at-- {
+		key := s.order[at]
+		if position, held := s.index[key]; held && position.typ == typ {
+			return key, true, nil
 		}
-		if held && !newerSlot(position.window, position.seq, key, window, seq, newest) {
-			continue
-		}
-		newest, window, seq, held = key, position.window, position.seq, true
 	}
-	s.mu.Unlock()
-	return newest, held, nil
+	return "", false, nil
 }
 
-// newerSlot reports whether one index position stands newer than the candidate a
-// lookup holds: the window first, then the sequence slot, then the identity, so
-// the answer never depends on the order the resident index happened to be walked
-// in.
-func newerSlot(window int64, seq int64, key event.EventID, bestWindow int64, bestSeq int64, best event.EventID) bool {
-	if window != bestWindow {
-		return window > bestWindow
-	}
-	if seq != bestSeq {
-		return seq > bestSeq
-	}
-	return key > best
-}
-
-// EachIndexNewestFirst streams the resident index grouped from the highest
-// partition and, inside one partition, from the highest sequence slot to the
-// lowest, handing each entry its key, position, frozen event type and session
-// without reading any body. The order is partition-major: it ranks the slots of
-// one partition against each other and says nothing about which partition
-// committed later, so a caller that needs the newest fact of a type across
-// partitions reads NewestOfType. An entry whose type is empty leaves the caller
-// to read its body.
+// EachIndexNewestFirst streams the published index in commit order, newest commit
+// first, handing each entry its key, position, frozen event type and session
+// without reading any body. The order is the one the engine's records sit in, so
+// it ranks every entry against every other — a commit of one partition that
+// landed after a commit of another comes first — and a caller that wants commit
+// order walks it backwards. Nothing is copied or sorted: the walk reads the order
+// in place, one entry at a time, so a visit may read the store again. An entry
+// whose type is empty leaves the caller to read its body.
 func (s *FileSegmentStore) EachIndexNewestFirst(ctx context.Context, visit func(key event.EventID, partition int, seq int64, typ string, session event.SessionID) error) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
 	s.mu.Lock()
-	type slot struct {
-		key       event.EventID
-		partition int
-		seq       int64
-		typ       string
-		session   event.SessionID
-	}
-	entries := make([]slot, 0, len(s.index))
-	for key, position := range s.index {
-		entries = append(entries, slot{key: key, partition: position.partition, seq: position.seq, typ: position.typ, session: position.session})
-	}
+	total := len(s.order)
 	s.mu.Unlock()
-	sort.Slice(entries, func(i, j int) bool {
-		if entries[i].partition != entries[j].partition {
-			return entries[i].partition > entries[j].partition
-		}
-		if entries[i].seq != entries[j].seq {
-			return entries[i].seq > entries[j].seq
-		}
-		return entries[i].key > entries[j].key
-	})
-	for _, entry := range entries {
+	for at := total - 1; at >= 0; at-- {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		if err := visit(entry.key, entry.partition, entry.seq, entry.typ, entry.session); err != nil {
+		key, position, held := s.orderEntry(at)
+		if !held {
+			continue
+		}
+		if err := visit(key, position.partition, position.seq, position.typ, position.session); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// orderEntry answers one entry of the resident commit order by its position, and
+// answers false when the order holds no such position. The order names exactly the
+// published index keys, and it only grows at its end while Load stays inside the
+// constructor, so a walk reads the same entry at every position it took from the
+// order while a visit reads the store again — nothing is copied to stay
+// consistent.
+func (s *FileSegmentStore) orderEntry(at int) (event.EventID, indexPosition, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if at >= len(s.order) {
+		return "", indexPosition{}, false
+	}
+	key := s.order[at]
+	return key, s.index[key], true
 }
 
 // Events returns every published event in index order. It is the materialized

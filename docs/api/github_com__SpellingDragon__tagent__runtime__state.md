@@ -1163,12 +1163,13 @@ func (m *MemoryStore) Release(ctx context.Context, addr event.Address, instance 
 func (m *MemoryStore) RestoreOwed(ctx context.Context) error
     RestoreOwed folds the notifications the durable account behind this mailbox
     still owes back into it: the target site each notification's frozen routing
-    names is opened beside the instance that froze it, so the work a stopped
-    run left unconsumed waits for the next decision instead of being lost
-    with the process. It is the fallback of a boot that restored no mailbox
-    checkpoint slice — a mailbox beside no durable account owes nothing outside
-    the process, and one a checkpoint restored already holds every entry,
-    so the fold accepts those once and appends none of them twice.
+    names is opened beside the instance that froze it, so the work a stopped run
+    left unconsumed waits for the next decision instead of being lost with the
+    process. The settle driver asks once on its first drain, beside whatever
+    a checkpoint restored, because acceptance answers each notification by its
+    stable identity: the entries a restored mailbox already holds are accepted
+    once and appended none twice, and a mailbox beside no durable account owes
+    nothing outside the process.
 
 func (m *MemoryStore) Site(ctx context.Context, subject Subject, addr event.Address, instance event.InstanceID) (*Session, error)
     Site returns a copy of the bookkeeping one established site holds, for the

@@ -144,7 +144,7 @@
 2. 已提交过同一记录 → `return nil`（重复提交是幂等成功）；同一槽位换一份字节 → `ErrContentConflict`。
 3. `Commit` 返回成功**之后**才写进内存索引、读缓存与 `count`：失败包成 `ErrSegmentBarrier`，本批任何一个键都不发布，内存态不出现"读得到但没落盘"的事件。
 
-`Events()` 的顺序是 `(PartitionID, WindowTS, Seq, Key)`；`Load()` 只在 body、idx、meta **三件齐备**时发布该记录，缺任何一件就当作没提交过。`SegmentRequest` 按字节切读（`DefaultSegmentMaxBytes = 64 KiB`），越界与 EOF 分开报。
+`Events()` 的顺序是 `(PartitionID, WindowTS, Seq, Key)`；`Load()` 只在 body、idx、meta **三件齐备**时发布该记录，缺任何一件就当作没提交过。`SegmentRequest` 按字节切读（`DefaultSegmentMaxBytes = 64 KiB`），越界与 EOF 分开报。发布面的次序是**提交次序**：`FileSegmentStore.order` 记下已发布身份在引擎里的落盘次序，`EachIndexNewestFirst` 逆着它逐条读取（不拷贝、不排序），`NewestOfType` 逆着它走并在第一条命中类型处停下——载体每 cadence 条提交一枚，所以读最新载体只花它到链尾的那几条，与历史长度无关。引擎不声明次序时（key 序 KV，或未转发 `commitOrder` 的包装）退化为 `(分区, seq, 身份)` 的槽位次序，代价是装配时一次排序，且答不出跨分区的新旧。
 
 **线上没有分层压实、没有墓碑执行、没有 TTL 扫描**：分层压实/TTL/回收这一整套仍在 `lifecycle.go` 里在册（其代码注释自述"过期只标墓碑、物理销毁在压实发生"），但装配面未接线，所以链在线上天然只有一层——这也是"链恒重放"能成立的前提。追加日志本身也没有压实阶段（[§六](#local-file-kv)），两处缺口互不相干。
 
@@ -157,13 +157,13 @@
 |---|---|---|
 | 持久单元 | `<root>/kv/journal.log`：一帧 = 4 字节 payload 长度 + 4 字节 CRC32C + payload | 帧头 8 字节；单帧上限 32 MiB，长度域损坏也不会让读方无界分配 |
 | 提交单位 | 一次提交一帧（`journalRecord`：`version` + `puts`/`deletes`），全有或全无 | 格式版本 `journalFormatVersion = 1`，其他版本 `ErrJournalFormat` 拒开 |
-| 写入 | `journalLog.append` 一次写出整帧，写成功后才更新键索引；索引只存位置，值留在帧里 | 写失败的记录不进索引，视图只答得出文件里真有的记录 |
+| 写入 | `journalLog.append` 一次写出整帧，写成功后才更新键索引；索引只存位置，值留在帧里；`journalLog.order` 按落盘次序记下每帧碰过的键（同 key 各记一次，新的在后） | 写失败的记录不进索引，视图只答得出文件里真有的记录；逆着 `order` 走即「最新提交优先」，读最新某一类记录的成本由它到链尾的距离定 |
 | 屏障 | 屏障是日志自身的 `fsync`（`journalLog.sync`），空批只走屏障不写帧；驻留集是带字节预算的 LRU，冷值按索引位置回读该帧 | 屏障失败 `ErrJournalBarrier`；成败不可判定 `ErrCommitUncertain` 交调用方重读；预算 1 MiB + 每项 96 字节，驱逐只掉内存 |
 | 撕裂尾 | 半写帧在 `open` 时截断到最后一个完整帧；完整帧校验不过即 `ErrJournalCorrupt` 拒开 | 静默接受一帧损坏＝静默丢一条事实，所以不把损坏帧之前的记录当整份日志 |
 | 已退役布局 | 目录里有子目录或 `shard_*.json` → `ErrJournalLegacyLayout` 具名拒开 | 不迁移、不清理、不覆盖；搬迁由操作方显式跑 `MigrateShardedRoot` |
 | 引擎无关 | `AtomicStore`（`Read`/`Keys`/`Namespaces`/`Commit`）是唯一引擎面 | 提交全有全无、恰好一次屏障；失败注入包在这条缝上，不命名任何文件布局 |
 
-读口只有两种形状：单 key 取与前缀列举（按 key 排序），**没有区间原语**，也没有"第二个真源"——内存态是日志索引的投影，真源只有 `journal.log`。
+读口只有两种形状：单 key 取与前缀列举（按 key 排序），**没有区间原语**，也没有"第二个真源"——内存态是日志索引的投影，真源只有 `journal.log`。提交次序是引擎自己声明的一条附加能力（`commitOrder`，由 `journalKV` 实现）：它答的是「最新提交优先的键序」，不答值，所以段存储拿它当索引的排序来源，而不是在内存里给无序 map 排一次序。
 
 <a id="store-instance-sharing"></a>
 ## 七、打开与实例共享

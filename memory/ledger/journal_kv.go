@@ -141,3 +141,22 @@ func (k *journalKV) valueLocked(key string) ([]byte, bool, error) {
 	k.resident.put(key, value)
 	return append([]byte{}, value...), true, nil
 }
+
+// eachCommittedNewestFirst names the held keys from the newest commit to the
+// oldest and stops when visit answers false. It walks the order the log appended
+// its frames in, so the answer costs the records walked and never a sort of the
+// index; a key the view deleted is not held and is skipped, and a key a later
+// record rewrote is named at each of its records, newest first.
+func (k *journalKV) eachCommittedNewestFirst(ctx context.Context, visit func(key string) (bool, error)) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	return k.log.eachKeyNewestFirst(func(key string) (bool, error) {
+		if value, held := k.log.index[key]; !held || value.deleted {
+			return true, nil
+		}
+		return visit(key)
+	})
+}
