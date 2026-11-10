@@ -88,6 +88,23 @@ func wakeAccountLog(t *testing.T, root string) *state.DurableCommit {
 	return durable
 }
 
+// wakeAccountMailbox opens the mailbox over the named durable account as the
+// boot does: the framework restores the mailbox state slice, and the slice seats
+// the notifications the account still owes, so the pump drives the work a
+// stopped process left open instead of reading an empty mailbox.
+func wakeAccountMailbox(t *testing.T, durable *state.DurableCommit) *state.MemoryStore {
+	t.Helper()
+	store := state.NewMemoryStore(state.NewAuthority(), durable)
+	states := state.NewStateRegistry()
+	if _, err := states.Register(state.NewMailboxState(store)); err != nil {
+		t.Fatalf("mount the mailbox state slice: %v", err)
+	}
+	if err := states.RestoreEmptyState(context.Background()); err != nil {
+		t.Fatalf("restore the mailbox slice of the account beside no carrier: %v", err)
+	}
+	return store
+}
+
 // wakeAccountLookup answers every fact read the driver makes with the one
 // terminal settle fact, beside an assertion that the read names a settle
 // delivery identity rather than any other fact in the chain.
@@ -191,7 +208,7 @@ func wakeAccountDriver(
 func TestSettleWakeAccount(t *testing.T) {
 	t.Run("one notification starts one turn however often the pump is woken", func(t *testing.T) {
 		durable := wakeAccountLog(t, t.TempDir())
-		store := state.NewMemoryStore(state.NewAuthority(), durable)
+		store := wakeAccountMailbox(t, durable)
 		hold := make(chan struct{})
 		fire := newWakeFire(hold)
 		defer fire.releaseFire()
@@ -222,7 +239,7 @@ func TestSettleWakeAccount(t *testing.T) {
 	t.Run("a stop keeps the unconsumed notice and the next process resumes it", func(t *testing.T) {
 		root := t.TempDir()
 		durable := wakeAccountLog(t, root)
-		store := state.NewMemoryStore(state.NewAuthority(), durable)
+		store := wakeAccountMailbox(t, durable)
 		hold := make(chan struct{})
 		fire := newWakeFire(hold)
 		defer fire.releaseFire()
@@ -237,7 +254,7 @@ func TestSettleWakeAccount(t *testing.T) {
 		}
 
 		restored := wakeAccountLog(t, root)
-		resumed := state.NewMemoryStore(state.NewAuthority(), restored)
+		resumed := wakeAccountMailbox(t, restored)
 		resumedFire := newWakeFire(nil)
 		next := wakeAccountDriver(wakeAccountLookup(t), resumed, resumedFire.fire)
 		defer next.Stop()
@@ -256,7 +273,7 @@ func TestSettleWakeAccount(t *testing.T) {
 	t.Run("a consumed notice never replays and the repeated consumption is refused by name", func(t *testing.T) {
 		ctx := context.Background()
 		durable := wakeAccountLog(t, t.TempDir())
-		store := state.NewMemoryStore(state.NewAuthority(), durable)
+		store := wakeAccountMailbox(t, durable)
 		hold := make(chan struct{})
 		fire := newWakeFire(hold)
 		defer fire.releaseFire()

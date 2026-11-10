@@ -2027,12 +2027,6 @@ func (d *SettleDriver) Wake()
     work the account already carries: a wake starts no turn of its own.
 
 type SettleWake interface {
-	// RestoreOwed folds the unconsumed work the durable account still owes back
-	// into the mailbox, so a stopped run's notices wait for the next decision
-	// instead of dying with the process that accepted them. The pump reads it
-	// once per driver: a boot that restored the mailbox from a checkpoint has
-	// the entries already, and a repeated fold of them accepts nothing twice.
-	RestoreOwed(ctx context.Context) error
 	// Unconsumed reports every mailbox entry whose consumption has not
 	// completed, in the one order the account answers in.
 	Unconsumed() []state.WorkSeat

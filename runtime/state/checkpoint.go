@@ -44,6 +44,11 @@ type Stateful interface {
 	RestoreState(ctx context.Context, payload []byte) error
 }
 
+// emptyStateJSON is the state a cut that states nothing about a holder carries:
+// the payload a snapshot states for a holder that states nothing, so the two
+// readings of "no state" are one JSON.
+const emptyStateJSON = "null"
+
 // StateRegistry is the ordered account of the state holders mounted on one
 // runtime. The order is the registration order, never map iteration, so the same
 // wiring aggregates the same slice order and a checkpoint renders the same bytes
@@ -135,6 +140,18 @@ func (r *StateRegistry) Names() []string {
 	return append([]string(nil), r.names...)
 }
 
+// mounted reports the mounted holders in registration order, so every walk of
+// them states and restores the same slices in the same order.
+func (r *StateRegistry) mounted() []Stateful {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	ordered := make([]Stateful, 0, len(r.names))
+	for _, name := range r.names {
+		ordered = append(ordered, r.holders[name])
+	}
+	return ordered
+}
+
 // SnapshotState aggregates the state of every mounted holder in registration order. A
 // holder that fails to state its state refuses the whole snapshot by name: a
 // checkpoint missing one slice would restore that consumer beside an empty state,
@@ -145,12 +162,7 @@ func (r *StateRegistry) SnapshotState(ctx context.Context) ([]event.CheckpointSl
 	if r == nil {
 		return nil, nil
 	}
-	r.mu.Lock()
-	ordered := make([]Stateful, 0, len(r.names))
-	for _, name := range r.names {
-		ordered = append(ordered, r.holders[name])
-	}
-	r.mu.Unlock()
+	ordered := r.mounted()
 	slices := make([]event.CheckpointSlice, 0, len(ordered))
 	for _, holder := range ordered {
 		payload, err := holder.SnapshotState(ctx)
@@ -158,7 +170,7 @@ func (r *StateRegistry) SnapshotState(ctx context.Context) ([]event.CheckpointSl
 			return nil, fmt.Errorf("state: snapshot the %q state slice: %w", holder.StateName(), err)
 		}
 		if payload == nil {
-			payload = []byte("null")
+			payload = []byte(emptyStateJSON)
 		}
 		if !json.Valid(payload) {
 			return nil, fmt.Errorf("state: the %q state slice states no JSON", holder.StateName())
@@ -195,6 +207,29 @@ func (r *StateRegistry) RestoreState(ctx context.Context, slices []event.Checkpo
 		}
 		if err := holder.RestoreState(ctx, []byte(slice.Payload)); err != nil {
 			return fmt.Errorf("state: restore the %q state slice: %w", slice.Name, err)
+		}
+	}
+	return nil
+}
+
+// RestoreEmptyState restores every mounted holder from the state a cut that
+// states no slice carries: the empty state. A boot whose tier holds no carrier
+// states that cut, so it restores the holders the way a filed cut restores them
+// instead of skipping them, and the replay past the cut rebuilds each one — past
+// the zero cut that replay is the whole chain. The restore is the framework's, so
+// a holder that can state itself from what it serves states that work here
+// instead of through a reader of its own: the mailbox seats the obligations its
+// durable account still owes beside the ones a cut states, by the notification
+// identity acceptance answers to. A holder that refuses the empty state refuses
+// the boot by name, because a runtime that starts beside a holder it could not
+// restore reads work it does not hold.
+func (r *StateRegistry) RestoreEmptyState(ctx context.Context) error {
+	if r == nil {
+		return nil
+	}
+	for _, holder := range r.mounted() {
+		if err := holder.RestoreState(ctx, []byte(emptyStateJSON)); err != nil {
+			return fmt.Errorf("state: restore the %q state slice: %w", holder.StateName(), err)
 		}
 	}
 	return nil

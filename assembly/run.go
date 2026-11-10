@@ -1009,7 +1009,12 @@ func (r *Run) restoreInMemoryState(ctx context.Context, durable *state.DurableCo
 // completes an account instead of rebuilding one: the task slice states every
 // task of the cut beside the chain revision it stands at, and the delivery,
 // mailbox and input slices state the work the process still owed. A tier holding
-// no checkpoint restores nothing and the boot reads the chains in full.
+// no checkpoint states the empty cut, and the holders are restored from that the
+// same way: each starts from the empty state and the replay past the cut rebuilds
+// it, which past the zero cut is the whole chain. The mailbox states the
+// obligations its durable account still owes on either cut, so the work a stopped
+// process left open is seated by this restore and no consumer keeps a restore
+// path of its own.
 //
 // The carrier is read once per boot: a holder mounted after this call states its
 // slice from the pending set, and the chain rebuild that follows takes the state
@@ -1018,10 +1023,12 @@ func (r *Run) restoreCheckpointState(ctx context.Context, tier *ledger.Tier) err
 	if tier == nil {
 		return nil
 	}
-	if _, _, err := r.restoreNewestCheckpoint(ctx, tier); err != nil {
+	if _, restored, err := r.restoreNewestCheckpoint(ctx, tier); err != nil {
 		return err
+	} else if restored {
+		return nil
 	}
-	return nil
+	return r.states.RestoreEmptyState(ctx)
 }
 
 // restoreChains folds the durable fact chains the storage already holds back

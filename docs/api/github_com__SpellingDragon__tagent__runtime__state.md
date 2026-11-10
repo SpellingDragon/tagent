@@ -1160,17 +1160,6 @@ func (m *MemoryStore) Release(ctx context.Context, addr event.Address, instance 
     and an entry whose consumption completed is refused by name: a settled entry
     never returns to work.
 
-func (m *MemoryStore) RestoreOwed(ctx context.Context) error
-    RestoreOwed folds the notifications the durable account behind this mailbox
-    still owes back into it: the target site each notification's frozen routing
-    names is opened beside the instance that froze it, so the work a stopped run
-    left unconsumed waits for the next decision instead of being lost with the
-    process. The settle driver asks once on its first drain, beside whatever
-    a checkpoint restored, because acceptance answers each notification by its
-    stable identity: the entries a restored mailbox already holds are accepted
-    once and appended none twice, and a mailbox beside no durable account owes
-    nothing outside the process.
-
 func (m *MemoryStore) Site(ctx context.Context, subject Subject, addr event.Address, instance event.InstanceID) (*Session, error)
     Site returns a copy of the bookkeeping one established site holds, for the
     subject and instance named. A read is answered only beside a recorded grant,
@@ -1720,6 +1709,19 @@ func (r *StateRegistry) Register(holder Stateful) (func(), error)
     holder naming no state and a name already mounted refuse the registration by
     name, so a wiring mistake stops the assembly instead of silently overwriting
     a slice another consumer owns.
+
+func (r *StateRegistry) RestoreEmptyState(ctx context.Context) error
+    RestoreEmptyState restores every mounted holder from the state a cut that
+    states no slice carries: the empty state. A boot whose tier holds no carrier
+    states that cut, so it restores the holders the way a filed cut restores
+    them instead of skipping them, and the replay past the cut rebuilds each
+    one — past the zero cut that replay is the whole chain. The restore is the
+    framework's, so a holder that can state itself from what it serves states
+    that work here instead of through a reader of its own: the mailbox seats the
+    obligations its durable account still owes beside the ones a cut states,
+    by the notification identity acceptance answers to. A holder that refuses
+    the empty state refuses the boot by name, because a runtime that starts
+    beside a holder it could not restore reads work it does not hold.
 
 func (r *StateRegistry) RestoreState(ctx context.Context, slices []event.CheckpointSlice) error
     RestoreState hands every stated slice to the holder that owns it, in the

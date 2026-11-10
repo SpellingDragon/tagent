@@ -17,8 +17,6 @@ type demoWake struct {
 	entries []state.WorkSeat
 }
 
-func (w *demoWake) RestoreOwed(_ context.Context) error { return nil }
-
 func (w *demoWake) Unconsumed() []state.WorkSeat { return w.entries }
 
 func (w *demoWake) Claim(_ context.Context, _ event.Address, _ event.InstanceID, _ state.AcceptSeq) error {

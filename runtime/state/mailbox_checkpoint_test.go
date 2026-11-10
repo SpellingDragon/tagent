@@ -90,6 +90,45 @@ func TestMailboxSliceRestoreSeatsThePayloadBesideNoAccount(t *testing.T) {
 	}
 }
 
+// TestMailboxSliceRestoresTheOwedSetBesideACutThatStatesNothing pins the restore of a boot whose tier holds no carrier.
+//   - positive: the framework restore of the empty cut seats every obligation the account owes
+//   - parity: the seated set is the account's owed set, neither short nor doubled
+//   - negative: the mailbox a boot mounts owes nothing until the framework restores it, so skipping the restore leaves the work unseated
+//
+// 契约: docs/wiki/platform/platform-subsystems.md#framework-checkpoint
+func TestMailboxSliceRestoresTheOwedSetBesideACutThatStatesNothing(t *testing.T) {
+	ctx := context.Background()
+	taskID := eventTaskID()
+	account, err := NewDurableCommit(newInvariantFactLog(), nil)
+	if err != nil {
+		t.Fatalf("open the durable account: %v", err)
+	}
+	if _, err := account.Commit(ctx, invariantRecord(taskID, 0, task.StatusRunning, invariantNotice(taskID, 1))); err != nil {
+		t.Fatalf("commit the owed obligation: %v", err)
+	}
+
+	booted := NewMemoryStore(NewAuthority(), account)
+	states := NewStateRegistry()
+	if _, err := states.Register(NewMailboxState(booted)); err != nil {
+		t.Fatalf("mount the mailbox state slice: %v", err)
+	}
+	if seats := booted.Unconsumed(); len(seats) != 0 {
+		t.Fatalf("the mailbox holds %+v before the framework restored it, want the owed set to arrive through the restore", seats)
+	}
+	if err := states.RestoreEmptyState(ctx); err != nil {
+		t.Fatalf("restore the state slices beside a cut that states nothing: %v", err)
+	}
+
+	seats := booted.Unconsumed()
+	owed := account.OwedNotices()
+	if len(seats) != len(owed) || len(seats) != 1 {
+		t.Fatalf("restored seats = %+v beside the %d the account owes, want the framework restore to seat the owed set: skipping it leaves the work unseated", seats, len(owed))
+	}
+	if seats[0].Notice != owed[0].Notice.Notice {
+		t.Fatalf("restored seat = %+v, want the accounted obligation %+v", seats[0].Notice, owed[0].Notice.Notice)
+	}
+}
+
 // noticeSeqOf reports whether the restored seats carry the notification of one
 // sequence number.
 func noticeSeqOf(seats []WorkSeat, seq int64) bool {

@@ -16,6 +16,8 @@ import (
 	"github.com/SpellingDragon/tagent/memory"
 	"github.com/SpellingDragon/tagent/memory/ledger"
 	"github.com/SpellingDragon/tagent/memory/replay"
+	"github.com/SpellingDragon/tagent/runtime/state"
+	"github.com/SpellingDragon/tagent/runtime/task"
 )
 
 // windowChainRun assembles one run with a small replay window, so the fold
@@ -888,5 +890,58 @@ func TestBootOverJournalTier(t *testing.T) {
 	}
 	if len(served.projection.Entries()) == 0 {
 		t.Fatal("the reopened run served an empty projection beside a committed chain")
+	}
+}
+
+// TestYoungLogBootRestoresTheOwedMailboxThroughTheSlice pins the boot restore of a log no cadence has covered with a carrier yet.
+// - positive: the notification a stopped process left owed in the durable account is seated in the mailbox of the assembled run
+// - the boot read no carrier, so the restore is the empty cut rather than a filed one
+// - negative: skipping the framework restore of the empty cut leaves the owed obligation unseated
+//
+// 契约: docs/wiki/platform/platform-subsystems.md#framework-checkpoint
+func TestYoungLogBootRestoresTheOwedMailboxThroughTheSlice(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	owedAddr := event.Address{AgentID: "agent-a", SessionID: "session-young-owed"}
+	owedTask := event.TaskID("task-young-owed")
+	tier, err := ledger.OpenTier(ctx, ledger.StorageConfig{Type: ledger.StorageJournal, Root: root})
+	if err != nil {
+		t.Fatalf("open the storage tier: %v", err)
+	}
+	account, err := state.NewDurableCommit(ledger.TierFactLog(tier), nil)
+	if err != nil {
+		t.Fatalf("open the durable account: %v", err)
+	}
+	if _, err := account.Commit(ctx, task.CommitRecord{
+		MutationID: "young-owed:0",
+		TaskID:     owedTask,
+		Status:     task.StatusRunning,
+		Outbox: []task.Envelope{{
+			Notice: task.Notice{
+				TaskID: owedTask,
+				Round:  1,
+				Kind:   task.NoticeProgress,
+				Seq:    1,
+				Event:  "fact-young-owed",
+				Text:   "the worker reports progress the stopped process never delivered",
+			},
+			Target:         owedAddr,
+			Source:         owedAddr,
+			TargetInstance: "instance-young",
+		}},
+	}); err != nil {
+		t.Fatalf("commit the owed notification: %v", err)
+	}
+
+	reopened := windowChainRun(t, ctx, WithStorage(ledger.StorageConfig{Type: ledger.StorageJournal, Root: root}))
+	if key, _ := reopened.CheckpointFiled(); key != "" {
+		t.Fatalf("the young log carries the checkpoint %s, want a boot whose tier states no carrier", key)
+	}
+	seats := reopened.store.Unconsumed()
+	if len(seats) != 1 || seats[0].Notice.TaskID != owedTask {
+		t.Fatalf("the booted mailbox seats %+v, want the owed notification the account still owes: skipping the framework restore of the empty cut leaves it unseated", seats)
+	}
+	if got := seats[0].Address; got != owedAddr {
+		t.Fatalf("the restored seat routes to %v, want the frozen routing %v", got, owedAddr)
 	}
 }

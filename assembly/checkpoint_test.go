@@ -520,8 +520,8 @@ func countingBoot(restores *int) Option {
 
 // TestBootRestoresTheCarrierOnce pins the single restore of one boot.
 //   - a boot over a store holding a checkpoint hands the cut to each holder once
-//   - the count is not the empty pass of a store holding no carrier
-//   - the run that files the carrier restores nothing, and the run that reads it restores the very slice the carrier states
+//   - a boot over a store holding no carrier states the empty cut and hands that to each holder once as well
+//   - the run that files the carrier restores the empty cut it booted beside, and the run that reads it restores the very slice the carrier states
 //
 // 契约: docs/wiki/platform/platform-subsystems.md#framework-checkpoint
 func TestBootRestoresTheCarrierOnce(t *testing.T) {
@@ -535,8 +535,8 @@ func TestBootRestoresTheCarrierOnce(t *testing.T) {
 	if _, filed, err := source.Checkpoint(ctx); err != nil || !filed {
 		t.Fatalf("file the carrier of the chain = (%t, %v), want a filed fact", filed, err)
 	}
-	if sourceRestores != 0 {
-		t.Fatalf("the boot of a store holding no carrier applied %d cut(s), want none", sourceRestores)
+	if sourceRestores != 1 {
+		t.Fatalf("the boot of a store holding no carrier applied the empty cut %d time(s), want the one restore every boot hands its holders: a boot that skips them leaves the work they state unseated", sourceRestores)
 	}
 
 	restores := 0

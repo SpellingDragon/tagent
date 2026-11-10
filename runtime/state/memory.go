@@ -415,22 +415,6 @@ func (m *MemoryStore) RecordAttempt(ctx context.Context, notice task.Notice, att
 	return nil
 }
 
-// RestoreOwed folds the notifications the durable account behind this mailbox
-// still owes back into it: the target site each notification's frozen routing
-// names is opened beside the instance that froze it, so the work a stopped run
-// left unconsumed waits for the next decision instead of being lost with the
-// process. The settle driver asks once on its first drain, beside whatever a
-// checkpoint restored, because acceptance answers each notification by its
-// stable identity: the entries a restored mailbox already holds are accepted
-// once and appended none twice, and a mailbox beside no durable account owes
-// nothing outside the process.
-func (m *MemoryStore) RestoreOwed(ctx context.Context) error {
-	if m == nil || m.consumptions == nil {
-		return nil
-	}
-	return m.foldOwed(ctx, m.consumptions.OwedNotices())
-}
-
 // foldOwed folds the notifications one carrier states back into the mailbox:
 // the target site each notification's frozen routing names is opened beside the
 // instance that froze it, so the work a stopped run left unconsumed waits for

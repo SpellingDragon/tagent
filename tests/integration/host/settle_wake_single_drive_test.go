@@ -519,9 +519,6 @@ func newSettleDriveWake(attempt state.SettleAttempt) *settleDriveWake {
 	}
 }
 
-// RestoreOwed reports nothing to restore: the account already carries its seat.
-func (w *settleDriveWake) RestoreOwed(context.Context) error { return nil }
-
 // Unconsumed reports the one seat the account owes until it is consumed.
 func (w *settleDriveWake) Unconsumed() []state.WorkSeat {
 	w.mu.Lock()

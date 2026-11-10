@@ -202,12 +202,6 @@ var ErrNoticeTurnIncomplete = errors.New("tagent: the follow-up turn did not com
 // MUST NOT replay an entry whose consumption receipt is already recorded.
 // MUST NOT hold a claimed entry beside a turn that stopped before its delivery.
 type SettleWake interface {
-	// RestoreOwed folds the unconsumed work the durable account still owes back
-	// into the mailbox, so a stopped run's notices wait for the next decision
-	// instead of dying with the process that accepted them. The pump reads it
-	// once per driver: a boot that restored the mailbox from a checkpoint has
-	// the entries already, and a repeated fold of them accepts nothing twice.
-	RestoreOwed(ctx context.Context) error
 	// Unconsumed reports every mailbox entry whose consumption has not
 	// completed, in the one order the account answers in.
 	Unconsumed() []state.WorkSeat
@@ -256,10 +250,6 @@ type SettleDriver struct {
 
 	mu      sync.Mutex
 	stopped bool
-	// owedRestored reports that this driver already folded the work the durable
-	// account owed into the mailbox, so no later drain accepts the entries
-	// already seated a second time.
-	owedRestored bool
 	// wakeCh carries the wake signals the observations leave behind; one slot
 	// is enough, because a wake only asks the pump to read the account again
 	// and the account itself never lies about the work it holds.
@@ -473,9 +463,6 @@ func (d *SettleDriver) drain() {
 		if wake == nil {
 			return
 		}
-		if err := d.restoreOwed(ctx, wake); err != nil {
-			assemblyWarn("tagent: the settle restore of the mailbox reported: %v", err)
-		}
 		seats := wake.Unconsumed()
 		worked := false
 		for _, seat := range seats {
@@ -500,31 +487,6 @@ func (d *SettleDriver) drain() {
 			return
 		}
 	}
-}
-
-// restoreOwed folds the work the durable account still owes into the mailbox
-// once per driver: the first drain of this process seats what the account a
-// stopped process left still owes, and every later drain reads the mailbox that
-// fold left, so a wake never accepts the same entries a second time. A fold the
-// account refused is not remembered as done, so the next wake asks again instead
-// of leaving the work unseated for the life of the driver.
-func (d *SettleDriver) restoreOwed(ctx context.Context, wake SettleWake) error {
-	if d == nil || wake == nil {
-		return nil
-	}
-	d.mu.Lock()
-	restored := d.owedRestored
-	d.mu.Unlock()
-	if restored {
-		return nil
-	}
-	if err := wake.RestoreOwed(ctx); err != nil {
-		return err
-	}
-	d.mu.Lock()
-	d.owedRestored = true
-	d.mu.Unlock()
-	return nil
 }
 
 // driveSeat drives the one follow-up turn one mailbox seat owes and settles the
