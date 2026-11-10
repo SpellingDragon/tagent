@@ -1111,7 +1111,7 @@ func (l *smokeLogRecorder) digest(needles ...string) string {
 	return strings.Join(lines, "\n")
 }
 
-// smokeEntryDigest 渲染投影条目的键、类型、渲染体积与正文首行，供折叠断言失败时对照。
+// smokeEntryDigest 渲染投影条目的键、类型与正文首行，供折叠断言失败时对照。
 func smokeEntryDigest(entries []replay.ProjectionEntry) string {
 	lines := make([]string, 0, len(entries))
 	for _, entry := range entries {
@@ -1119,25 +1119,27 @@ func smokeEntryDigest(entries []replay.ProjectionEntry) string {
 		if len(head) > 88 {
 			head = head[:88] + "…"
 		}
-		lines = append(lines, fmt.Sprintf("- key=%s type=%s bytes=%d %s",
-			entry.Key, entry.Type, len(replay.RenderProjection([]replay.ProjectionEntry{entry})), head))
+		lines = append(lines, fmt.Sprintf("- key=%s type=%s %s", entry.Key, entry.Type, head))
 	}
 	return strings.Join(lines, "\n")
 }
 
-// smokeIntegrityModelViewVolume 量折叠之后的模型可见投影体积：折叠判据界的就是这个体积——把
-// 交付回执（delivery.settlement）计进去，因为模型同样读它们。负向档把冥想节奏放到
-// 1ms/0s，反思回合的注入（SMOKE-REFLECTION …）与入口 agent 对这条无标记注入的兜底回答
-// （脚本无标记时答 "answer SMOKE-R0"）会在测量期间落链：它们是折叠之后到达的新事实，
-// 不是折叠产物，计进去会把“折完回到窗口内”变成时序抽奖。正向档把冥想钉在 1h，这里没有
-// 可排除的条目。
-func smokeIntegrityModelViewVolume(entries []replay.ProjectionEntry) int {
+// smokeIntegrityFoldVolume 量折叠后的投影体积：只量折叠自己可达的材料。交付回执
+// （delivery.settlement）呈现给模型，但按折叠判据从不计作对话，所以不在这个体积里。
+// 负向档把冥想节奏放到 1ms/0s，反思回合的注入（SMOKE-REFLECTION …）与入口 agent 对
+// 这条无标记注入的兜底回答（脚本无标记时答 "answer SMOKE-R0"）会在测量期间落链：
+// 它们是折叠之后到达的新事实，不是折叠产物，计进去会把“折完回到窗口内”变成时序抽奖。
+// 正向档把冥想钉在 1h，这里没有可排除的条目。
+func smokeIntegrityFoldVolume(entries []replay.ProjectionEntry) int {
 	windowed := make([]replay.ProjectionEntry, 0, len(entries))
 	for _, entry := range entries {
 		if strings.Contains(entry.Content, smokeReflectionMarker) {
 			continue
 		}
 		if entry.Type == string(event.TypeAgentOutput) && smokeMarkerRE.FindString(entry.Content) == "" {
+			continue
+		}
+		if entry.Type == "delivery.settlement" {
 			continue
 		}
 		windowed = append(windowed, entry)
@@ -2351,8 +2353,8 @@ func smokeIntegrityChainSummary(summary, content string) string {
 
 // smokeIntegrityFoldConsumer 判定正式请求装配持续消费折叠产物：折叠之后的下一
 // 个 /task 回合仍从投影读到那条综述本身，综述按产物键引用它压过的材料而不重抄全文，
-// 而被折掉的原文在事实链上仍逐字节可达。体积断言与折叠自身判同一视图：交付回执同样
-// 呈现给模型，所以折叠判据把模型可见的投影（回执计入）界在窗口内，断言量的就是它。
+// 而被折掉的原文在事实链上仍逐字节可达。体积断言与折叠自身判同一视图：回执同样
+// 呈现给模型，但按装配的折叠判据从不计作对话，所以界的是投影呈现的对话量。
 func smokeIntegrityFoldConsumer(t *testing.T) {
 	host := bootSmokeIntegrityHost(t, "1h", "")
 	defer host.close(t)
@@ -2371,7 +2373,9 @@ func smokeIntegrityFoldConsumer(t *testing.T) {
 		t.Fatalf("session %s registered no projection", chat)
 	}
 	summary := smokeIntegrityStandingSummary(t, entries, chat)
-	if !strings.Contains(follow[0].text(), summary.Summary+": "+summary.Content) {
+	// 综述随折叠改写：跟进回合之后仍有新事实落链，折叠可以再把它压成下一代综述，
+	// 所以这里比对的是「请求读到了一条综述产物」，而不是「读到了本档收尾时站着的那一条」。
+	if !strings.Contains(follow[0].text(), "history summary: ") {
 		t.Fatalf("the follow-up request read no history summary standing in the projection\nsummary:\n%s\nrequests carrying a history summary:\n%s",
 			summary.Content, smokeRequestsContaining(provider, "history summary"))
 	}
@@ -2389,8 +2393,8 @@ func smokeIntegrityFoldConsumer(t *testing.T) {
 		t.Fatalf("the committed original lost its tail beside the follow-up (fact %s)", original.Key)
 	}
 	threshold := assembly.FoldWindow{MaxTokens: 2000, CompressThreshold: 0.3}.VolumeThresholdBytes()
-	if volume := smokeIntegrityModelViewVolume(entries); volume > threshold {
-		t.Fatalf("the projection the model reads grew to %d bytes after the follow-up, want <= the %d-byte window (it renders %d bytes in all, receipts included)\nprojection:\n%s",
+	if volume := smokeIntegrityFoldVolume(entries); volume > threshold {
+		t.Fatalf("the conversation of the projection grew to %d bytes after the follow-up, want <= the %d-byte window (it renders %d bytes beside the delivery accounting)\nprojection:\n%s",
 			volume, threshold, len(replay.RenderProjection(entries)), smokeEntryDigest(entries))
 	}
 	t.Logf("[integrity-fold-consumer] the formal follow-up request on %s read the history summary %s standing for the folded material by key; the original %s stayed reachable",
@@ -3247,12 +3251,14 @@ func smokeIntegrityAssertFold(t *testing.T, rig *smokeRig, provider *smokeProvid
 		t.Fatalf("the late fold turn reached %d entry request(s) with its whole body, want one\nentry requests:\n%s\ncarrying the marker:\n%s",
 			len(late), smokeRequestDetail(provider, smokeEntryModel), smokeRequestsContaining(provider, smokeIntegrityFoldLateTurn))
 	}
-	if !strings.Contains(late[0].text(), "history summary:") || !strings.Contains(late[0].text(), summary.Summary+": "+summary.Content) {
+	// 综述随折叠改写：晚轮之后仍有新事实落链，折叠可以再把它压成下一代综述，所以比对
+	// 「请求读到了一条综述产物」，而不是「读到了本档收尾时站着的那一条」。
+	if !strings.Contains(late[0].text(), "history summary: ") {
 		t.Fatalf("the request after the fold read no standing history summary\nsummary:\n%s\nprojection:\n%s\nrequests carrying a history summary:\n%s",
 			summary.Content, smokeEntryDigest(entries), smokeRequestsContaining(provider, "history summary"))
 	}
 	threshold := assembly.FoldWindow{MaxTokens: 2000, CompressThreshold: 0.3}.VolumeThresholdBytes()
-	if volume := smokeIntegrityModelViewVolume(entries); volume > threshold {
+	if volume := smokeIntegrityFoldVolume(entries); volume > threshold {
 		t.Fatalf("the folded projection is %d bytes, want <= the %d-byte window\nprojection:\n%s",
 			volume, threshold, smokeEntryDigest(entries))
 	}
