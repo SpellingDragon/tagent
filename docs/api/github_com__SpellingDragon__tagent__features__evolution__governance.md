@@ -346,6 +346,11 @@ func (p *Policy) Judge(pass plugin.CallPass) (plugin.Decision, error)
     for the record. A held call is a wait and keeps Denial nil; a refused call
     carries its Denial and does not run.
 
+func (p *Policy) Material() plugin.Material
+    Material declares what this policy reads, when it reads it and what a failed
+    ruling leaves behind: one tool call read before its side effect, where a
+    failed ruling refuses the pass so the call neither runs nor is recorded.
+
 func (p *Policy) Mode() Enforcement
     Mode reports the effective enforcement grade of the gate: an enabled gate
     that chose no grade runs under warn, the default. A gate that is not on

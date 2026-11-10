@@ -286,6 +286,13 @@ func NewDriver(reflection *Reflection, interval, minGap time.Duration,
     A nil consumption-state read or an empty instance leaves the pass its rhythm
     alone.
 
+func (d *Driver) Material() plugin.Material
+    Material declares what this driver reads, when it reads it and what a
+    failed reading leaves behind: one committed fact read after its commit,
+    where a failed reflection is a named gap and the fact keeps standing.
+    The reflection a later commit fires is the driver's own schedule, not work
+    this reading owes.
+
 func (d *Driver) Name() string
     Name reports the stable name of this plugin instance.
 

@@ -176,6 +176,17 @@ func (p *AgeFoldPlugin) Port() plugin.Port {
 	return plugin.PortFactObservation
 }
 
+// Material declares what this plugin reads, when it reads it and what a failed
+// reading leaves behind: one committed fact read after its commit, where a failed
+// fold is a named gap and the fact keeps standing.
+func (p *AgeFoldPlugin) Material() plugin.Material {
+	return plugin.Material{
+		Reads:   plugin.PortFactObservation,
+		Timing:  plugin.TimingPostCommit,
+		Failure: plugin.RecordGap,
+	}
+}
+
 // ObserveCommit judges the projection of the session the committed fact belongs
 // to once that projection's rendered volume passes the window threshold, and
 // files the judgment of every product the fold would mint. The material itself is

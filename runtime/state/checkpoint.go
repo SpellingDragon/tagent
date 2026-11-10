@@ -49,6 +49,22 @@ type Stateful interface {
 // readings of "no state" are one JSON.
 const emptyStateJSON = "null"
 
+// sessionSnapshotter is the session face of a holder whose state is spelled per
+// session chain. A cut taken for one session reads that face instead of the whole
+// account, so a carrier states the material of the session that asked for it and
+// pays nothing for the chains beside it. A holder that keeps no state of a
+// session — the task registry's account is one registry-wide fold, the mailbox's
+// owed notices are routed by site — implements no such face: the session cut
+// states nothing about it and the framework's own cut keeps stating it.
+//
+// The read is the same pure read SnapshotState is: the state the holder already
+// derived, with no flush, commit or blocking wait. A holder that states nothing
+// about the session answers nil, so a cut of a session holding no state files no
+// slice of that holder.
+type sessionSnapshotter interface {
+	SnapshotSessionState(ctx context.Context, session event.SessionID) ([]byte, error)
+}
+
 // StateRegistry is the ordered account of the state holders mounted on one
 // runtime. The order is the registration order, never map iteration, so the same
 // wiring aggregates the same slice order and a checkpoint renders the same bytes
@@ -61,13 +77,16 @@ type StateRegistry struct {
 	// them was mounted: a checkpoint restored during the assembly names the
 	// slices of consumers the assembly mounts afterwards, so the payload waits
 	// here and lands the moment its holder is mounted. A name still pending once
-	// the wiring is complete is refused by the caller that can tell.
-	pending map[string][]byte
+	// the wiring is complete is refused by the caller that can tell. One name
+	// accumulates every payload a restore named for it: per-session carriers each
+	// state a slice of the same name, and the holder restores them in order rather
+	// than the last carrier overwriting the sessions beside it.
+	pending map[string][][]byte
 }
 
 // NewStateRegistry returns an empty state registry.
 func NewStateRegistry() *StateRegistry {
-	return &StateRegistry{holders: map[string]Stateful{}, pending: map[string][]byte{}}
+	return &StateRegistry{holders: map[string]Stateful{}, pending: map[string][][]byte{}}
 }
 
 // Register mounts one holder and answers the disposer that unmounts it. A holder
@@ -95,22 +114,24 @@ func (r *StateRegistry) Register(holder Stateful) (func(), error) {
 	}
 	r.holders[name] = holder
 	r.names = append(r.names, name)
-	payload, stated := r.pending[name]
+	payloads, stated := r.pending[name]
 	delete(r.pending, name)
 	r.mu.Unlock()
 	if stated {
-		if err := holder.RestoreState(context.Background(), payload); err != nil {
-			r.mu.Lock()
-			delete(r.holders, name)
-			kept := r.names[:0]
-			for _, held := range r.names {
-				if held != name {
-					kept = append(kept, held)
+		for _, payload := range payloads {
+			if err := holder.RestoreState(context.Background(), payload); err != nil {
+				r.mu.Lock()
+				delete(r.holders, name)
+				kept := r.names[:0]
+				for _, held := range r.names {
+					if held != name {
+						kept = append(kept, held)
+					}
 				}
+				r.names = kept
+				r.mu.Unlock()
+				return nil, fmt.Errorf("state: restore the %q state slice: %w", name, err)
 			}
-			r.names = kept
-			r.mu.Unlock()
-			return nil, fmt.Errorf("state: restore the %q state slice: %w", name, err)
 		}
 	}
 	return func() {
@@ -180,6 +201,38 @@ func (r *StateRegistry) SnapshotState(ctx context.Context) ([]event.CheckpointSl
 	return slices, nil
 }
 
+// SnapshotSessionState aggregates the state the mounted holders state about one
+// session chain, in registration order. A holder that keeps no state of a session
+// is asked nothing and states no slice, so the carrier of one session is the size
+// of that session's state and never of the account the run holds beside it. The
+// same read rules hold as for the whole account: no framework lock is held across
+// the holders' reads, and a holder that refuses to state itself refuses the whole
+// cut by name rather than filing a carrier missing its slice.
+func (r *StateRegistry) SnapshotSessionState(ctx context.Context, session event.SessionID) ([]event.CheckpointSlice, error) {
+	if r == nil || session == "" {
+		return nil, nil
+	}
+	var slices []event.CheckpointSlice
+	for _, holder := range r.mounted() {
+		scoped, statesSession := holder.(sessionSnapshotter)
+		if !statesSession {
+			continue
+		}
+		payload, err := scoped.SnapshotSessionState(ctx, session)
+		if err != nil {
+			return nil, fmt.Errorf("state: snapshot the %q state slice of session %s: %w", holder.StateName(), session, err)
+		}
+		if payload == nil {
+			continue
+		}
+		if !json.Valid(payload) {
+			return nil, fmt.Errorf("state: the %q state slice of session %s states no JSON", holder.StateName(), session)
+		}
+		slices = append(slices, event.CheckpointSlice{Name: holder.StateName(), Payload: json.RawMessage(payload)})
+	}
+	return slices, nil
+}
+
 // RestoreState hands every stated slice to the holder that owns it, in the order the
 // checkpoint states. A slice no mounted holder owns is reported by name instead
 // of dropped: a checkpoint whose state cannot be restored is not a checkpoint
@@ -199,9 +252,9 @@ func (r *StateRegistry) RestoreState(ctx context.Context, slices []event.Checkpo
 		if !mounted {
 			r.mu.Lock()
 			if r.pending == nil {
-				r.pending = map[string][]byte{}
+				r.pending = map[string][][]byte{}
 			}
-			r.pending[slice.Name] = []byte(slice.Payload)
+			r.pending[slice.Name] = append(r.pending[slice.Name], []byte(slice.Payload))
 			r.mu.Unlock()
 			continue
 		}

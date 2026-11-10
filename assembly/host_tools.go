@@ -1409,6 +1409,17 @@ func (g *generationReflection) Name() string { return "meditation-driver" }
 // one observation out.
 func (g *generationReflection) Port() plugin.Port { return plugin.PortFactObservation }
 
+// Material declares what this reflection reads, when it reads it and what a failed
+// reading leaves behind: one committed fact read after its commit, where a failed
+// reflection is a named gap and the fact keeps standing.
+func (g *generationReflection) Material() plugin.Material {
+	return plugin.Material{
+		Reads:   plugin.PortFactObservation,
+		Timing:  plugin.TimingPostCommit,
+		Failure: plugin.RecordGap,
+	}
+}
+
 // ObserveCommit forwards one commit to the driver of the generation in effect.
 func (g *generationReflection) ObserveCommit(ctx context.Context, id event.EventID) error {
 	if g == nil || g.port == nil {

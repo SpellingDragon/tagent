@@ -4,7 +4,10 @@
 // error a retained obligation is reported beside. An observer-only face reads the
 // committed fact; a driver face is asked by the fact to start work somebody owes —
 // a follow-up turn, a delivery — and the After pass answers the two failures
-// differently, because only one of them leaves work owed.
+// differently, because only one of them leaves work owed. The two duties are the
+// two failure semantics the observation port admits: a face declaring its Material
+// states which one it lands, and a face declaring only its port is read from the
+// marker below.
 package plugin
 
 import (
@@ -27,8 +30,10 @@ var ErrObservationObligationRetained = errors.New("plugin: the observation faile
 // failed observation leaves that work owed instead of merely missing. A face
 // declaring no duty is observer-only — telemetry, logging and audit read the fact
 // and owe nothing of it — and its failure is a gap beside the committed fact. The
-// duty is read from the face itself at assembly, so a registration declares it once
-// and the pass never infers one from a name.
+// duty is the compatibility read of the failure semantics such a face declares:
+// a face declaring Material() states the failure it lands, and a face declaring
+// only its port answers the duty from itself at assembly, so a registration
+// declares it once and the pass never infers one from a name.
 //
 // The redline list (3 rules):
 // MUST be declared only by a face whose failed observation leaves work owed in a durable account of its own.
@@ -41,12 +46,12 @@ type driverObservation interface {
 	DrivesObligation()
 }
 
-// observedFace is one registered fact->observation face beside the duty its
-// registration declared, so one face set dispatches both duties and each failure
-// is answered by the duty that failed.
+// observedFace is one registered fact->observation face beside the material it
+// declared, so one face set dispatches both duties and each failure is answered by
+// the strategy that face stated.
 type observedFace struct {
 	served[PostCommitObserver]
-	drives bool
+	material Material
 }
 
 // dutyOfObserved reads the duty one registered element declared: an element
@@ -58,11 +63,13 @@ func dutyOfObserved(impl any) bool {
 }
 
 // gap reports the one failed observation of this face beside the committed fact it
-// failed on. An observer-only failure is the named gap of a reading that did not
-// land; a driver failure is the same gap carrying the obligation it keeps, so a
-// reader tells owed work apart from a missing line.
+// failed on, answering the failure semantics the face declared: a reading gap is
+// the named gap of a reading that did not land, and a retained obligation is the
+// same gap carrying the work the face still owes, so a reader tells owed work
+// apart from a missing line. The two semantics are read from the declaration and
+// never from the port the face serves.
 func (f observedFace) gap(fact event.EventID, err error) view.ObservationGap {
-	if f.drives {
+	if f.material.Failure == PreserveObligation {
 		err = fmt.Errorf("%w: %w", ErrObservationObligationRetained, err)
 	}
 	return view.ObservationGap{Plugin: f.name, Fact: fact, Err: err}

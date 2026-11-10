@@ -1211,6 +1211,11 @@ type LeaseObserver struct {
     another type, another dimension, another owner or another stated result is
     not the observation this instance serves and is passed over.
 
+func (o *LeaseObserver) Material() plugin.Material
+    Material declares what this observer reads, when it reads it and what a
+    failed reading leaves behind: one committed fact read after its commit,
+    where a failed observation is a named gap and the fact keeps standing.
+
 func (o *LeaseObserver) Name() string
     Name reports the stable name of this plugin instance.
 

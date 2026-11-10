@@ -1107,6 +1107,11 @@ func NewFinalRoundPlanner(chain FinalRoundChain, policy func(event.AgentID) Fina
     a nil table files nothing, so an assembly mounted beside neither judges no
     budget instead of failing on the first commit.
 
+func (p *FinalRoundPlanner) Material() plugin.Material
+    Material declares what this planner reads, when it reads it and what a
+    failed reading leaves behind: one committed fact read after its commit,
+    where a failed judgment is a named gap and the fact keeps standing.
+
 func (p *FinalRoundPlanner) Name() string
     Name reports the stable name of this planner instance.
 

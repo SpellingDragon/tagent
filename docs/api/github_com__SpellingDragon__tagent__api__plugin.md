@@ -4,7 +4,10 @@ This file names the two duties one fact->observation face may carry and the one
 error a retained obligation is reported beside. An observer-only face reads the
 committed fact; a driver face is asked by the fact to start work somebody owes
 — a follow-up turn, a delivery — and the After pass answers the two failures
-differently, because only one of them leaves work owed.
+differently, because only one of them leaves work owed. The two duties are the
+two failure semantics the observation port admits: a face declaring its Material
+states which one it lands, and a face declaring only its port is read from the
+marker below.
 
 Package plugin declares the material flow through which tagent injects its
 differentiated capabilities into the framework event flow: the six ports the
@@ -309,6 +312,30 @@ type FactLookup interface {
     an identity with no committed fact as an error. MUST NOT fabricate a fact or
     answer a reconstruction.
 
+type Failure string
+    Failure names what one failed face leaves behind. It is the second strategy
+    field of the declaration: a face of one timing may answer a failure in more
+    than one way, and the declaration states which one it answers.
+
+const (
+	// FailClosed refuses the pass: the work the face guards neither runs nor is
+	// owed, and no later face of that pass runs.
+	FailClosed Failure = "fail-closed"
+
+	// RecordGap records the failure as a named gap beside what already stands and
+	// carries on with the later faces: the committed fact keeps standing.
+	RecordGap Failure = "record-gap"
+
+	// PreserveObligation keeps the work owed in the account of the face that owes
+	// it, reported beside ErrObservationObligationRetained instead of as a missing
+	// reading, and neither retried nor cleared by the pass.
+	PreserveObligation Failure = "preserve-obligation"
+
+	// ReportLoss reports the product as dropped: the fact it was rendered from
+	// keeps standing, the drop is reported instead of leaving an empty view, and
+	// nothing is retried.
+	ReportLoss Failure = "report-loss"
+)
 type FinalPresenter interface {
 	Present(ctx context.Context, id event.EventID) (string, bool)
 }
@@ -343,19 +370,21 @@ type Instance interface {
 	// Name returns the stable name of this instance.
 	Name() string
 
-	// Port reports the port this instance serves.
+	// Port reports the port this instance serves: the compatibility read of the
+	// material the face declares, kept until every face declares one.
 	Port() Port
 }
     Instance is one instance of the material flow. The drive that runs one
-    decision, the tick that runs one reflection and the assembler that builds
-    one request are built-in instances; a plugin is an instance the composition
-    root mounts. What an instance is differs only in who mounts it: the flow
-    dispatches every instance by the port it declares.
+    decision, the tick that runs one reflection and the assembler that
+    builds one request are built-in instances; a plugin is an instance the
+    composition root mounts. What an instance is differs only in who mounts it:
+    the flow dispatches every instance by the material it declares, read
+    from the instance itself at assembly, and the port a face answers is the
+    compatibility read beside that declaration while the named ports migrate.
 
     The redline list (3 rules): MUST declare the one port it serves and
-    implement that port's narrow interface. MUST NOT declare a port it does
-    not implement. MUST NOT serve two ports: one instance is one port, and the
-    ruling port may carry both of its faces.
+    implement that port's narrow interface. MUST NOT declare a port it does not
+    implement. MUST NOT declare a material its port's pass cannot run or land.
 
 type Layer string
     Layer names one layer of the layered SDK observation attempted for one
@@ -372,6 +401,23 @@ const (
 	// committed fact.
 	LayerMetric Layer = "metric"
 )
+type Material struct {
+	// Reads is the material this face consumes, spelled as the routing the port
+	// constants stand for: the material read beside the product answered.
+	Reads Port
+
+	// Timing is when this face consumes the material it reads.
+	Timing Timing
+
+	// Failure is what a failure of this face leaves behind.
+	Failure Failure
+}
+    Material is the one declaration a face makes: the material it reads, when
+    it reads it, and what a failure of that face leaves behind. The port name
+    carries the routing alone; the timing and the failure are strategy fields,
+    so a face states its own semantics and the flow dispatches it by that
+    statement.
+
 type ObservationSink interface {
 	// Observe reports one committed fact to the observation side. The fact is
 	// passed unchanged and is never rewritten here. A returned error records a
@@ -473,11 +519,13 @@ type Pipeline struct {
 
 func NewFlow(instances []Instance) (Pipeline, error)
     NewFlow assembles the material flow out of its instances, in the declared
-    order. A nil instance, a port the closed table does not declare, an instance
-    that implements no narrow interface of its port, and a name declared
-    twice each refuse the flow by name instead of being trimmed in silence.
-    The name refusal keeps provenance: a product's name must trace back to the
-    one element that wrote it.
+    order. A nil instance, a material the closed table of ports does not
+    declare, a material its port's pass cannot run or land, a port contradicting
+    the material the instance declares, an instance that implements no narrow
+    interface of the port it declares, and a name declared twice each refuse
+    the flow by name instead of being trimmed in silence. The name refusal keeps
+    provenance: a product's name must trace back to the one element that wrote
+    it.
 
 func (p Pipeline) After(ctx context.Context, fact event.EventID) view.Presentation
     After runs the one consuming pass over one fact whose canonical commit
@@ -647,6 +695,28 @@ func (r RiskLevel) Rank() int
     ruling reads when it compares a grade against a rule threshold, so the two
     readings share this single ordering instead of each spelling its own.
 
+type Timing string
+    Timing names when a face consumes the material it reads. It is a strategy
+    field of the declaration, orthogonal to the failure semantics: the same
+    material may be read before a side effect, beside a commit, or while one
+    request is assembled, and each timing answers a failure its own way.
+
+const (
+	// TimingPreSideEffect is the timing of a face that runs before the side effect
+	// it guards: its answer is part of the pass that decides whether that side
+	// effect runs, so nothing it guards has run and nothing of it is owed.
+	TimingPreSideEffect Timing = "pre-side-effect"
+
+	// TimingPostCommit is the timing of a face that runs beside a fact whose
+	// canonical commit already happened: the pass it runs in answers no error of
+	// its own and never holds the commit back.
+	TimingPostCommit Timing = "post-commit"
+
+	// TimingRead is the timing of a face that runs while one request assembly is
+	// built: an idempotent derivation with no durable effect, recomputable from
+	// the material it reads.
+	TimingRead Timing = "read"
+)
 type TransformCall interface {
 	// TransformCall transforms one call before its side effect runs. It runs once
 	// per call and before admission, and the transformed call is re-checked by the

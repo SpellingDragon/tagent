@@ -598,6 +598,11 @@ func NewAgeFoldPlugin(sessions SessionFolds) *AgeFoldPlugin
     A nil face answers no session, so an assembly mounted beside none folds
     nothing instead of failing on the first commit.
 
+func (p *AgeFoldPlugin) Material() plugin.Material
+    Material declares what this plugin reads, when it reads it and what a
+    failed reading leaves behind: one committed fact read after its commit,
+    where a failed fold is a named gap and the fact keeps standing.
+
 func (p *AgeFoldPlugin) Name() string
     Name reports the stable name of this plugin instance.
 
@@ -666,6 +671,12 @@ func (c *CompressionConsumer) Execute(ctx context.Context, session event.Session
     is filed through the session face, which answers the judgment it names:
     the batch shrinks as it is filed, so the account the consumer holds is never
     one the chain disagrees with.
+
+func (c *CompressionConsumer) Material() plugin.Material
+    Material declares what this consumer reads, when it reads it and what a
+    failed reading leaves behind: one committed fact read after its commit,
+    where a failed execution is a named gap and the judgments on the chain keep
+    standing for the next reading.
 
 func (c *CompressionConsumer) Name() string
     Name reports the stable name of this plugin instance.
@@ -1111,10 +1122,11 @@ func (h *Host) FaceAddr() string
 func (h *Host) HeldDeliveries() []HeldDelivery
     HeldDeliveries reports the bodies the host owes a target before delivery:
     the holds the review plugin parked and the redeliveries a refused send owes,
-    oldest first. The result is a copy the caller owns: reading here changes no
-    hold, and only ApproveDelivery or RefuseDelivery resolves one. The table
-    is rebuilt from the settlement facts on every boot, so a hold survives a
-    restart under the identity it was recorded with.
+    oldest first, across every chain the host owes. The result is a copy the
+    caller owns: reading here changes no hold, and only ApproveDelivery or
+    RefuseDelivery resolves one. The table is rebuilt from the settlement
+    facts on every boot, so a hold survives a restart under the identity it was
+    recorded with.
 
 func (h *Host) Invoke(ctx context.Context, req InvokeRequest) (agent.Turn, error)
     Invoke drives one invocation through the resident instance of its address:
@@ -1620,6 +1632,29 @@ func (r *Run) CheckpointFiled() (event.EventID, event.CheckpointOffset)
     and the cut it states, so a caller reads the coverage of the carrier it
     holds.
 
+func (r *Run) CheckpointSession(ctx context.Context, addr event.Address) (event.EventID, bool, error)
+    CheckpointSession takes one cut of the named session chain and files the
+    fact it states. The cut names the last fact each partition had committed
+    when the cut began — the same watermark the framework's own cut names,
+    so a session carrier and a framework carrier are read back on one axis —
+    while the state is the state of that chain alone: the cut drains the commits
+    of the chain, asks every holder what it states about the session, and files
+    a carrier whose slices are that session's.
+
+      - The carrier is filed under the run's checkpoint owner beside the session
+        it states, so the index answers which chain a carrier belongs to
+        without reading its body and without the carrier entering that chain's
+        projection.
+      - A commit of another chain that lands beside the cut is past its
+        watermark and is replayed by the boot, so the cut pays nothing for it
+        and never waits on it.
+
+    The redline list (3 rules): MUST read the watermark before the state, so
+    the cut never states a position past the state it carries. MUST drain only
+    the named chain, so a cut of one session waits for no commit of another.
+    MUST state nothing about a holder that keeps no state of a session, rather
+    than copy another chain's account into this carrier.
+
 func (r *Run) Close(ctx context.Context, req agent.CloseRequest) (agent.DrainReport, error)
     Close closes the runtime's own side for the named session address: the
     request is judged first, new input is refused next, the run quiesces to its
@@ -1735,6 +1770,15 @@ func (r *Run) EachSessionFact(ctx context.Context, addr event.Address, visit fun
     moment of than the material it folded. A run beside no storage tier holds
     no durable chain, so the visit answers the resident window alone in commit
     order. A visit error ends the stream and is returned.
+
+    A framework checkpoint carrier names the chain it states without entering
+    it, so the stream leaves it out under either branch: the index answers which
+    chain a carrier belongs to, while the state it carries is the boundary a
+    boot starts from rather than material the chain committed. The commit path
+    already holds that line by keeping a carrier out of the resident ledger,
+    so a stream that read the stored carrier back would hand a reader — a
+    projection rebuild above all — the state slices as transcript lines the run
+    never committed.
 
 func (r *Run) ExecState(key tagentexec.ResourceKey) (tagentexec.Explanation, error)
     ExecState reports the retained state of one execution resource the ledger
@@ -2029,6 +2073,11 @@ func (d *SettleDriver) DrivesObligation()
     and the work it woke is owed on the mailbox account, so a failed observation
     leaves the follow-up turn owed and the account hands it to the next
     decision.
+
+func (d *SettleDriver) Material() plugin.Material
+    Material declares what this driver reads, when it reads it and what a failed
+    reading leaves behind: one committed fact read after its commit, where a
+    failed observation keeps the follow-up turn owed on the mailbox account.
 
 func (d *SettleDriver) Name() string
     Name reports the stable name of this plugin instance.

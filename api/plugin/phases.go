@@ -184,16 +184,21 @@ type Pipeline struct {
 	triggers   []served[CompressTrigger]
 }
 
-// declaration is one registered element beside the port its registration
-// declared, so both registration faces are assembled by one path.
+// declaration is one registered element beside the port it declares and the
+// material it reads, so both registration faces are assembled by one path.
 type declaration struct {
-	name string
-	port Port
-	impl any
+	name     string
+	port     Port
+	material Material
+	impl     any
 }
 
-// assemble groups the declarations into their port's face set, in the declared
-// order, refusing a port the closed table does not declare.
+// assemble groups the declarations into the face set of the material each one
+// reads, in the declared order, refusing a port the closed table does not declare
+// and a port contradicting the material its instance declares. Every observation
+// face keeps the material it declared beside its name, so the pass answering a
+// failure reads the strategy the face stated instead of inferring one from the
+// face set it landed in.
 func assemble(declarations []declaration) (Pipeline, error) {
 	var out Pipeline
 	names := make(map[string]struct{}, len(declarations))
@@ -209,44 +214,47 @@ func assemble(declarations []declaration) (Pipeline, error) {
 		switch element.port {
 		case PortCallTransform:
 			if impl, ok := element.impl.(TransformCall); ok {
-				out.transforms = append(out.transforms, served[TransformCall]{element.name, impl})
+				out.transforms = append(out.transforms, served[TransformCall]{name: element.name, impl: impl})
 				servedAny = true
 			}
 		case PortCallRuling:
 			if impl, ok := element.impl.(RiskAssessor); ok {
-				out.risks = append(out.risks, served[RiskAssessor]{element.name, impl})
+				out.risks = append(out.risks, served[RiskAssessor]{name: element.name, impl: impl})
 				servedAny = true
 			}
 			if impl, ok := element.impl.(Governor); ok {
-				out.governors = append(out.governors, served[Governor]{element.name, impl})
+				out.governors = append(out.governors, served[Governor]{name: element.name, impl: impl})
 				servedAny = true
 			}
 		case PortRequestEnvironment:
 			if impl, ok := element.impl.(EnvironmentInject); ok {
-				out.injects = append(out.injects, served[EnvironmentInject]{element.name, impl})
+				out.injects = append(out.injects, served[EnvironmentInject]{name: element.name, impl: impl})
 				servedAny = true
 			}
 		case PortFactObservation:
 			if impl, ok := element.impl.(PostCommitObserver); ok {
 				out.observers = append(out.observers, observedFace{
-					served: served[PostCommitObserver]{element.name, impl},
-					drives: dutyOfObserved(element.impl),
+					served:   served[PostCommitObserver]{name: element.name, impl: impl},
+					material: element.material,
 				})
 				servedAny = true
 			}
 		case PortFactView:
 			if impl, ok := element.impl.(FinalPresenter); ok {
-				out.presenters = append(out.presenters, served[FinalPresenter]{element.name, impl})
+				out.presenters = append(out.presenters, served[FinalPresenter]{name: element.name, impl: impl})
 				servedAny = true
 			}
 		case PortFactCompression:
 			if impl, ok := element.impl.(CompressTrigger); ok {
-				out.triggers = append(out.triggers, served[CompressTrigger]{element.name, impl})
+				out.triggers = append(out.triggers, served[CompressTrigger]{name: element.name, impl: impl})
 				servedAny = true
 			}
 		}
 		if !servedAny {
 			return Pipeline{}, fmt.Errorf("plugin: %q declares the port %s but implements no narrow interface of that port", element.name, element.port)
+		}
+		if element.port != element.material.Reads {
+			return Pipeline{}, fmt.Errorf("plugin: %q declares the port %s but its material reads %s", element.name, element.port, element.material.Reads)
 		}
 	}
 	return out, nil

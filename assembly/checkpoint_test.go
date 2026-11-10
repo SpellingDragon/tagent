@@ -18,6 +18,7 @@ import (
 	"github.com/SpellingDragon/tagent/api/config"
 	"github.com/SpellingDragon/tagent/api/event"
 	"github.com/SpellingDragon/tagent/api/model"
+	"github.com/SpellingDragon/tagent/api/plugin"
 	"github.com/SpellingDragon/tagent/memory"
 	"github.com/SpellingDragon/tagent/memory/ledger"
 	"github.com/SpellingDragon/tagent/memory/replay"
@@ -950,5 +951,560 @@ func requireCoveredByTheCut(t *testing.T, run *Run, slice string, key event.Even
 	if seq > cut[partition] {
 		t.Fatalf("the fact %s stands at seq %d of partition %d past the %s cut %d, so %s",
 			key, seq, partition, slice, cut[partition], consequence)
+	}
+}
+
+// commitSessionTurns commits closed turns of four legs into one session chain,
+// under keys the tag keeps apart from every other generation's: a restart over one
+// durable root commits the same shape again, so the identity may not repeat.
+func commitSessionTurns(t *testing.T, ctx context.Context, run *Run, addr event.Address, tag string, turns int) {
+	t.Helper()
+	base := time.Date(2026, 11, 6, 12, 0, 0, 0, time.UTC)
+	for turn := 0; turn < turns; turn++ {
+		for position, leg := range []struct {
+			typ     string
+			summary string
+		}{
+			{event.TypeExternalInput, "ask"},
+			{event.TypeThinkingPlan, "plan"},
+			{event.TypeActionCommand, "call"},
+			{event.TypeAgentOutput, "answer"},
+		} {
+			evt := event.Event{
+				Key:       event.EventID(fmt.Sprintf("%s-%d-%d", tag, turn, position)),
+				Type:      leg.typ,
+				Timestamp: base.Add(time.Duration(turn*10+position) * time.Minute),
+				Meta:      map[string]string{event.MetaKeyEventSummary: leg.summary},
+				Message:   model.Message{Role: model.RoleUser, Content: "the material of the generation walk"},
+				Owner:     addr, Source: addr, Target: addr,
+			}
+			if _, err := run.CommitToSession(ctx, addr, evt); err != nil {
+				t.Fatalf("commit %s: %v", evt.Key, err)
+			}
+		}
+	}
+}
+
+// carrierPayloadOf renders every slice one carrier states, so a check reads what
+// the carrier carries rather than what a slice claims to be named.
+func carrierPayloadOf(t *testing.T, carrier event.Checkpoint) string {
+	t.Helper()
+	var rendered strings.Builder
+	for _, slice := range carrier.Slices {
+		rendered.WriteString(slice.Name)
+		rendered.WriteString("=")
+		rendered.WriteString(string(slice.Payload))
+		rendered.WriteString("\n")
+	}
+	return rendered.String()
+}
+
+// carrierOfIdentity reads one filed carrier back as the checkpoint it states.
+func carrierOfIdentity(t *testing.T, ctx context.Context, run *Run, key event.EventID) event.Checkpoint {
+	t.Helper()
+	stored, err := run.CommittedEvent(ctx, key)
+	if err != nil {
+		t.Fatalf("read the carrier %s back: %v", key, err)
+	}
+	carrier, stated := event.CheckpointOf(stored)
+	if !stated {
+		t.Fatalf("the carrier %s states no readable checkpoint", key)
+	}
+	return carrier
+}
+
+// TestSymptomAnchorSessionBootCostFlatAcrossGenerations pins that one session's recovery cost stays flat while its chain grows.
+//   - fixture: one session runs over one durable root, each generation restarts the process and commits its own turns
+//   - every boot states what it had to read: the carrier that session filed plus the tail past its boundary
+//   - positive: the bodies a boot reads stop growing after the first carrier exists, so the generations add material without adding recovery cost
+//   - negative: the boot reads a small fraction of the indexed chain, which a recovery that fell back to a per-site full-history scan could not
+//   - contrast: the full walk of the same chain is the measured denominator the boot is held against
+//   - consumer: the real boot entry (restoreCheckpointState → seedAnchoredReplay), never a hand-driven rebuild
+//
+// 契约: docs/wiki/platform/platform-subsystems.md#framework-checkpoint
+func TestSymptomAnchorSessionBootCostFlatAcrossGenerations(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+	storage := WithStorage(ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: t.TempDir()})
+	addr := event.Address{AgentID: "agent-a", SessionID: "session-boot-cost"}
+	const generations = 5
+	costs := make([]int, 0, generations)
+	indexed := make([]int, 0, generations)
+	for generation := 0; generation < generations; generation++ {
+		boot := noTrimChainRun(t, ctx, storage)
+		boot.stopCheckpointFiler()
+		costs = append(costs, boot.CommittedFacts())
+		indexed = append(indexed, chainIndexSize(t, ctx, boot))
+		commitSessionTurns(t, ctx, boot, addr, fmt.Sprintf("gen-%d", generation), 6)
+		if _, _, err := boot.CheckpointSession(ctx, addr); err != nil {
+			t.Fatalf("file the session carrier of generation %d: %v", generation, err)
+		}
+		if _, _, err := boot.Checkpoint(ctx); err != nil {
+			t.Fatalf("file the framework carrier of generation %d: %v", generation, err)
+		}
+		if _, err := boot.Close(ctx, agent.CloseRequest{Timeout: time.Now().Add(2 * time.Second)}); err != nil {
+			t.Fatalf("close the process of generation %d: %v", generation, err)
+		}
+	}
+	t.Logf("the boots read %v bodies over the indexed %v", costs, indexed)
+	if indexed[generations-1] <= indexed[1] {
+		t.Fatalf("the chain indexed %d facts at the last generation and %d at the second, want a chain that grew so the flat cost is a claim about recovery rather than about a chain that stood still: the index is the denominator the recovery is measured against",
+			indexed[generations-1], indexed[1])
+	}
+	flat := costs[generations-1]
+	for generation := 2; generation < generations; generation++ {
+		if costs[generation] != flat {
+			t.Fatalf("the boot of generation %d read %d bodies beside the %d of the last generation, want the recovery cost to stay flat across the generations (%v)",
+				generation, costs[generation], flat, costs)
+		}
+	}
+	if flat*2 >= indexed[generations-1] {
+		t.Fatalf("the boot read %d of the %d indexed facts, want a recovery that reads its carrier and tail rather than the history the chain already settled",
+			flat, indexed[generations-1])
+	}
+	fullWalk := noTrimNoWindowRun(t, ctx, storage)
+	fullWalk.stopCheckpointFiler()
+	if _, _, fullReport, err := fullWalk.seedFullReplay(ctx, fullWalk.tier); err != nil {
+		t.Fatalf("replay the whole chain for the contrast: %v", err)
+	} else if fullReport.Decoded <= flat*2 {
+		t.Fatalf("the full walk decoded %d bodies beside the %d a boot reads, want a walk far larger than the recovery, because the same chain walked in full is the cost a recovery pays per site when it falls back to the history",
+			fullReport.Decoded, flat)
+	}
+}
+
+// TestSymptomAnchorCompressionJudgmentParityAfterRestart pins that a restart answers the live process's compression judgments, entry by entry.
+//   - parity: the live account, the booted account and the full walk of the chain are compared through requireSameAccount
+//   - positive: the booted account equals the live account, and the full walk of the same chain equals both
+//   - negative: the boot answers judgments no judgment fact of its ledger holds, which is the carrier's account rather than a replayed one
+//   - negative: a boot whose carrier stated no compression account answers the batch past the cut alone and never the whole one
+//   - consumer: the real boot entry over the durable root, beside TestCompressionJudgmentsSurviveTheBootCut's carrier-reading check of the same parity
+//
+// 契约: docs/wiki/agent/event-flow.md#projection-lifecycle
+func TestSymptomAnchorCompressionJudgmentParityAfterRestart(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+	storage := WithStorage(ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: t.TempDir()})
+	addr := event.Address{AgentID: "agent-a", SessionID: "session-parity-anchor"}
+	source := windowChainRun(t, ctx, storage)
+	source.stopCheckpointFiler()
+	commitSessionTurns(t, ctx, source, addr, "parity", 12)
+	live := compressAccountOf(t, source.compress)
+	if live.judgedCount() == 0 {
+		t.Fatal("the fixture judged nothing, so the parity proves nothing")
+	}
+	if _, _, err := source.CheckpointSession(ctx, addr); err != nil {
+		t.Fatalf("file the session carrier of the chain: %v", err)
+	}
+	if _, err := source.Close(ctx, agent.CloseRequest{Timeout: time.Now().Add(2 * time.Second)}); err != nil {
+		t.Fatalf("close the source process: %v", err)
+	}
+
+	booted := windowChainRun(t, ctx, storage)
+	requireSameAccount(t, "booted", compressAccountOf(t, booted.compress), live)
+	covered := 0
+	for request := range live.Answered {
+		booted.mu.Lock()
+		_, read := booted.facts[request]
+		booted.mu.Unlock()
+		if !read {
+			covered++
+		}
+	}
+	if covered == 0 {
+		t.Fatal("the boot read every judgment it answers, so the carrier carried none of them")
+	}
+
+	full := windowChainRun(t, ctx, storage)
+	resetCompression(full)
+	if _, _, _, err := full.seedFullReplay(ctx, full.tier); err != nil {
+		t.Fatalf("replay the whole chain: %v", err)
+	}
+	requireSameAccount(t, "full walk", compressAccountOf(t, full.compress), live)
+	t.Logf("the boot answers %d judgment(s), %d of them beside no judgment fact in its ledger", len(live.Answered), covered)
+}
+
+// TestSessionCutStatesOnlyTheTriggeringSession pins that a session carrier states its own chain and pays nothing for the chains beside it.
+//   - positive: the carrier of session A states A's projection, owed inputs, compression account and delivery obligations, and names A
+//   - negative: no slice of A's carrier names session B or any fact of B's chain, so a cut of one session reads no state of another
+//   - consumer: Run.CheckpointSession, the entry a session context requests a cut through
+//
+// 契约: docs/wiki/platform/platform-subsystems.md#framework-checkpoint
+func TestSessionCutStatesOnlyTheTriggeringSession(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+	run := windowChainRun(t, ctx, WithStorage(ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: t.TempDir()}))
+	run.stopCheckpointFiler()
+	triggering := event.Address{AgentID: "agent-a", SessionID: "session-cut-triggering"}
+	beside := event.Address{AgentID: "agent-b", SessionID: "session-cut-beside"}
+	commitSessionTurns(t, ctx, run, triggering, "cut-triggering", 6)
+	commitSessionTurns(t, ctx, run, beside, "cut-beside", 6)
+
+	key, filed, err := run.CheckpointSession(ctx, triggering)
+	if err != nil || !filed {
+		t.Fatalf("file the session carrier = (%t, %v), want a filed fact", filed, err)
+	}
+	carrier := carrierOfIdentity(t, ctx, run, key)
+	names := carrier.CheckpointSliceNames()
+	if len(names) == 0 {
+		t.Fatal("the session carrier states no slice, so it carries no state of the chain that asked for it")
+	}
+	for _, unsessioned := range []string{checkpointSliceTasks, checkpointSliceMailbox} {
+		if slices.Contains(names, unsessioned) {
+			t.Fatalf("the session carrier states the %q slice beside %v, want the slices a session chain owns", unsessioned, names)
+		}
+	}
+	payload := carrierPayloadOf(t, carrier)
+	if !strings.Contains(payload, string(triggering.SessionID)) {
+		t.Fatalf("the carrier states %q, want the chain that asked for the cut", payload)
+	}
+	if strings.Contains(payload, string(beside.SessionID)) || strings.Contains(payload, "cut-beside-") {
+		t.Fatalf("the carrier states the chain beside the one that asked for it: %q", payload)
+	}
+}
+
+// TestSessionCarrierNamesTheChainWithoutEnteringIt pins the read face of a chain beside the carrier it filed.
+//   - negative: EachSessionFact streams the committed material and leaves the carrier out, so a rebuild reads no state slice as a line
+//   - positive: the index still answers the newest carrier of that chain, so the exclusion hides no state from the boot that recovers it
+//   - consumer: Run.EachSessionFact, the cold-start read face a rebuild replays, over a run whose session cut filed a carrier
+//
+// 契约: docs/wiki/platform/platform-subsystems.md#framework-checkpoint
+func TestSessionCarrierNamesTheChainWithoutEnteringIt(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+	run := windowChainRun(t, ctx, WithStorage(ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: t.TempDir()}))
+	run.stopCheckpointFiler()
+	addr := event.Address{AgentID: "agent-a", SessionID: "session-carrier-stream"}
+	commitSessionTurns(t, ctx, run, addr, "carrier-stream", 4)
+
+	key, filed, err := run.CheckpointSession(ctx, addr)
+	if err != nil || !filed {
+		t.Fatalf("file the session carrier = (%t, %v), want a filed fact", filed, err)
+	}
+	streamed := map[event.EventID]bool{}
+	if err := run.EachSessionFact(ctx, addr, func(evt event.Event) error {
+		if evt.Type == event.TypeCheckpoint {
+			t.Fatalf("the chain stream carries the carrier %s, want the material the chain committed alone", evt.Key)
+		}
+		streamed[evt.Key] = true
+		return nil
+	}); err != nil {
+		t.Fatalf("stream the session chain: %v", err)
+	}
+	for turn := 0; turn < 4; turn++ {
+		key := event.EventID(fmt.Sprintf("carrier-stream-%d-0", turn))
+		if !streamed[key] {
+			t.Fatalf("the chain stream left out the committed fact %s beside the carrier the cut filed", key)
+		}
+	}
+	carrier, held, err := newestSessionCheckpointRef(ctx, run.tier, addr.SessionID)
+	if err != nil || !held {
+		t.Fatalf("the index answered the chain's carrier = (%t, %v), want the cut the chain filed", held, err)
+	}
+	if carrier.key != key {
+		t.Fatalf("the index answers the carrier %s, want the newest cut %s the chain filed", carrier.key, key)
+	}
+}
+
+// TestSessionCutReadsNoOtherSessionResidue pins that a chain's cut states one carrier whatever the chains beside it grew to.
+//   - positive: the carrier of a quiet chain states the same bytes whether a chain beside it is young or long
+//   - negative: the long chain's material reaches no slice of the quiet chain's carrier, which a cut that read the whole account could not say
+//   - consumer: Run.CheckpointSession over a run holding two chains, one of them folded many times
+//
+// 契约: docs/wiki/platform/platform-subsystems.md#framework-checkpoint
+func TestSessionCutReadsNoOtherSessionResidue(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+	run := windowChainRun(t, ctx, WithStorage(ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: t.TempDir()}))
+	run.stopCheckpointFiler()
+	quiet := event.Address{AgentID: "agent-a", SessionID: "session-cut-quiet"}
+	long := event.Address{AgentID: "agent-b", SessionID: "session-cut-long"}
+	commitSessionTurns(t, ctx, run, quiet, "residue-quiet", 2)
+	commitSessionTurns(t, ctx, run, long, "residue-long", 4)
+	early, filed, err := run.CheckpointSession(ctx, quiet)
+	if err != nil || !filed {
+		t.Fatalf("file the quiet chain's first carrier = (%t, %v), want a filed fact", err == nil && filed, err)
+	}
+	earlyBytes := len(carrierPayloadOf(t, carrierOfIdentity(t, ctx, run, early)))
+
+	commitSessionTurns(t, ctx, run, long, "residue-long-more", 12)
+	late, filed, err := run.CheckpointSession(ctx, quiet)
+	if err != nil || !filed {
+		t.Fatalf("file the quiet chain's second carrier = (%t, %v), want a filed fact", err == nil && filed, err)
+	}
+	carrier := carrierOfIdentity(t, ctx, run, late)
+	payload := carrierPayloadOf(t, carrier)
+	if strings.Contains(payload, string(long.SessionID)) || strings.Contains(payload, "residue-long") {
+		t.Fatalf("the quiet chain's carrier states the long chain's material: %q", payload)
+	}
+	lateBytes := len(payload)
+	if lateBytes != earlyBytes {
+		t.Fatalf("the quiet chain's carrier states %d bytes beside %d before the long chain grew, want a cut whose cost does not follow another chain's history",
+			lateBytes, earlyBytes)
+	}
+}
+
+// declareObligationTargeting commits the output fact of one chain that declares a
+// delivery against another chain, through the commit entry the loop lands its
+// output on, and answers the identity the declaration seats.
+func declareObligationTargeting(t *testing.T, ctx context.Context, run *Run, owner, target event.Address, key event.EventID, body string) string {
+	t.Helper()
+	evt := event.Event{
+		Key:       key,
+		Type:      event.TypeAgentOutput,
+		Timestamp: time.Now(),
+		Message:   model.Message{Role: model.RoleAssistant, Content: body},
+		Owner:     owner, Source: owner, Target: target,
+		Meta: map[string]string{
+			deliveryOwedMeta:          "1",
+			deliveryTargetAgentMeta:   string(target.AgentID),
+			deliveryTargetSessionMeta: string(target.SessionID),
+			deliveryLineageMeta:       "user",
+		},
+	}
+	declaration, declared := declaredObligationOf(evt)
+	if !declared {
+		t.Fatalf("the fact %s declares no obligation", key)
+	}
+	if _, err := run.CommitToSession(ctx, owner, evt); err != nil {
+		t.Fatalf("commit the declaration %s: %v", key, err)
+	}
+	return declaration.identity
+}
+
+// TestCrossSessionDeliveryObligationSurvivesTheTargetSessionCut pins that an obligation declared against a chain is the target's to recover.
+//   - positive: the carrier a target session files states the obligation declared against it, with the delivery it owes
+//   - negative: the source chain's carrier states no obligation of the target chain, because the account of a chain is what that chain is owed
+//   - consumer: declareObligation seats it at its landing and a boot over the carrier hands it back through the delivery slice restore
+//
+// 契约: docs/wiki/reliability/durable-delivery.md#envelope-states
+func TestCrossSessionDeliveryObligationSurvivesTheTargetSessionCut(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+	storage := WithStorage(ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: t.TempDir()})
+	source := event.Address{AgentID: deliveryTestAgent, SessionID: "session-delivery-source"}
+	target := event.Address{AgentID: deliveryTestAgent, SessionID: "session-delivery-target"}
+	run := windowChainRun(t, ctx, storage)
+	run.stopCheckpointFiler()
+	host := deliveryTestHost(ctx, run, newDeliveryTestSender(nil))
+	if err := host.registerDeliverySlice(); err != nil {
+		t.Fatalf("mount the delivery account: %v", err)
+	}
+	identity := declareObligationTargeting(t, ctx, run, source, target, "delivery-target-declaration", "the body owed to the target chain")
+	commitSessionTurns(t, ctx, run, target, "delivery-target", 2)
+
+	key, filed, err := run.CheckpointSession(ctx, target)
+	if err != nil || !filed {
+		t.Fatalf("file the target chain's carrier = (%t, %v), want a filed fact", filed, err)
+	}
+	wire, stated := checkpointDeliveryOf(t, ctx, run, key)
+	if !stated {
+		t.Fatal("the target chain's carrier states no delivery slice, want the obligation declared against it")
+	}
+	owed, carried := owedOfIdentity(wire, identity)
+	if !carried {
+		t.Fatalf("the target chain's carrier owes %d obligation(s) and none is %s", len(wire.Owed), identity)
+	}
+	if owed.Session != string(target.SessionID) {
+		t.Fatalf("the carrier states the obligation against %q, want the target chain %q", owed.Session, target.SessionID)
+	}
+
+	booted := windowChainRun(t, ctx, storage)
+	booted.stopCheckpointFiler()
+	sender := newDeliveryTestSender(nil)
+	bootedHost := deliveryTestHost(ctx, booted, sender)
+	if err := bootedHost.registerDeliverySlice(); err != nil {
+		t.Fatalf("mount the delivery account of the boot: %v", err)
+	}
+	if err := bootedHost.restoreEventifiedDeliveries(ctx); err != nil {
+		t.Fatalf("restore the account the carrier states: %v", err)
+	}
+	bootedHost.mu.Lock()
+	account := bootedHost.deliveryAccountLocked(target.SessionID, false)
+	declared, parked, state := false, false, ""
+	if account != nil {
+		_, declared = account.declared[identity]
+		_, parked = account.held[identity]
+		state = account.states[identity]
+	}
+	bootedHost.mu.Unlock()
+	sender.mu.Lock()
+	sent := append([]deliveryTestAttempt(nil), sender.attempts...)
+	sender.mu.Unlock()
+	if !declared && !parked && len(sent) == 0 && state == "" {
+		t.Fatalf("the boot owes no delivery for %s and sent none, want the obligation the target chain's carrier states", identity)
+	}
+	if len(sent) > 0 && (sent[0].Target != target || sent[0].Content != "the body owed to the target chain") {
+		t.Fatalf("the boot delivered %q to %v, want the body the carrier states to %v", sent[0].Content, sent[0].Target, target)
+	}
+}
+
+// TestSourceSessionCutMissesNoTargetingObligation pins that a cut of the declaring chain states nothing of the target and loses nothing.
+//   - positive: the source chain's carrier states no obligation of the target chain, so the source cut pays nothing for it
+//   - negative: the obligation still stands owed after the source cut, so the quiet point of the chain that declared it neither states nor drops it
+//   - consumer: the account applyObligation seats at the landing, read after Run.CheckpointSession
+//
+// 契约: docs/wiki/reliability/durable-delivery.md#envelope-states
+func TestSourceSessionCutMissesNoTargetingObligation(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+	run := windowChainRun(t, ctx, WithStorage(ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: t.TempDir()}))
+	run.stopCheckpointFiler()
+	source := event.Address{AgentID: deliveryTestAgent, SessionID: "session-declaring-source"}
+	target := event.Address{AgentID: deliveryTestAgent, SessionID: "session-declared-target"}
+	host := deliveryTestHost(ctx, run, newDeliveryTestSender(nil))
+	if err := host.registerDeliverySlice(); err != nil {
+		t.Fatalf("mount the delivery account: %v", err)
+	}
+	identity := declareObligationTargeting(t, ctx, run, source, target, "delivery-source-declaration", "the body the source chain declared")
+	commitSessionTurns(t, ctx, run, source, "declaring-source", 2)
+
+	key, filed, err := run.CheckpointSession(ctx, source)
+	if err != nil || !filed {
+		t.Fatalf("file the source chain's carrier = (%t, %v), want a filed fact", filed, err)
+	}
+	if wire, stated := checkpointDeliveryOf(t, ctx, run, key); stated {
+		if _, carried := owedOfIdentity(wire, identity); carried {
+			t.Fatalf("the source chain's carrier states the obligation %s its target owes, want the account of a chain to be what that chain is owed", identity)
+		}
+	}
+	host.mu.Lock()
+	stillOwed := false
+	if account := host.deliveryAccountLocked(target.SessionID, false); account != nil {
+		_, stillOwed = account.declared[identity]
+	}
+	host.mu.Unlock()
+	if !stillOwed {
+		t.Fatalf("the account lost the obligation %s at the cut of the declaring chain, want it standing for the chain it targets", identity)
+	}
+}
+
+// sessionRecoveryFixture runs one durable root through two session chains that
+// both filed their own carrier, and answers the process that left it.
+func sessionRecoveryFixture(t *testing.T, ctx context.Context) (storage Option, kept, other event.Address) {
+	t.Helper()
+	storage = WithStorage(ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: t.TempDir()})
+	kept = event.Address{AgentID: deliveryTestAgent, SessionID: "session-recovery-kept"}
+	other = event.Address{AgentID: deliveryTestAgent, SessionID: "session-recovery-other"}
+	source := windowChainRun(t, ctx, storage)
+	source.stopCheckpointFiler()
+	host := deliveryTestHost(ctx, source, newDeliveryTestSender(nil))
+	if err := host.registerDeliverySlice(); err != nil {
+		t.Fatalf("mount the delivery account of the source: %v", err)
+	}
+	if err := host.writeDeliveryState(ctx, "delivery-recovery-held",
+		plugin.Delivery{Content: "the body held across the restart", Lineage: "user", Target: kept},
+		heldStateOf(deliveryReasonApproval), time.Now()); err != nil {
+		t.Fatalf("write the held settlement of the kept chain: %v", err)
+	}
+	for index := 0; index < 3; index++ {
+		key := fmt.Sprintf("kept-in-%d", index)
+		commitWindowFact(t, ctx, source, kept, windowEvent(kept, key, "inv-kept-"+key, "the round of the kept chain", event.TypeExternalInput))
+		commitWindowFact(t, ctx, source, kept, windowEvent(kept, "kept-out-"+key, "inv-kept-"+key, "the answer of the kept chain", event.TypeAgentOutput))
+	}
+	for index := 0; index < 9; index++ {
+		key := fmt.Sprintf("other-in-%d", index)
+		commitWindowFact(t, ctx, source, other, windowEvent(other, key, "inv-other-"+key, "the round of the chain beside", event.TypeExternalInput))
+	}
+	if _, _, err := source.CheckpointSession(ctx, kept); err != nil {
+		t.Fatalf("file the kept chain's carrier: %v", err)
+	}
+	if _, _, err := source.CheckpointSession(ctx, other); err != nil {
+		t.Fatalf("file the chain beside: %v", err)
+	}
+	return storage, kept, other
+}
+
+// TestSessionRecoveryReplaysOnlyItsTail pins that a restart rebuilds the chain its carrier states, past the boundary it names.
+//   - positive: a boot over the carriers answers the projection the live process held for the kept chain, entry for entry
+//   - negative: the boot reads far fewer bodies than the chain holds, so the rebuild completes the state the carrier states instead of folding the history again
+//   - consumer: the real boot entry (restoreCheckpointState → seedAnchoredReplay) over the durable root
+//
+// 契约: docs/wiki/platform/platform-subsystems.md#framework-checkpoint
+func TestSessionRecoveryReplaysOnlyItsTail(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+	storage, kept, _ := sessionRecoveryFixture(t, ctx)
+
+	booted := noTrimChainRun(t, ctx, storage)
+	booted.stopCheckpointFiler()
+	rebuilt, carried := booted.replays[kept]
+	if !carried {
+		t.Fatalf("the boot registered no projection for %v", kept)
+	}
+	if len(rebuilt.projection.Entries()) == 0 {
+		t.Fatal("the boot rebuilt no entry of the chain its carrier states")
+	}
+	full := noTrimNoWindowRun(t, ctx, storage)
+	full.stopCheckpointFiler()
+	seeds, _, fullReport, err := full.seedFullReplay(ctx, full.tier)
+	if err != nil {
+		t.Fatalf("replay the whole chain: %v", err)
+	}
+	if decoded := booted.CommittedFacts(); decoded >= fullReport.Decoded {
+		t.Fatalf("the boot read %d bodies beside the %d of a full walk, want the tail past the boundary the carriers name",
+			decoded, fullReport.Decoded)
+	}
+	if seed, held := seeds[kept]; held {
+		got, want := rebuilt.projection.Entries(), seed.projection.Entries()
+		if len(got) != len(want) {
+			t.Fatalf("the boot holds %d entries of the kept chain, want the %d the rebuild answers", len(got), len(want))
+		}
+		for at := range got {
+			if got[at].Key != want[at].Key {
+				t.Fatalf("entry %d of the boot is %s, want %s", at, got[at].Key, want[at].Key)
+			}
+		}
+	}
+}
+
+// TestReplayFiresNoSettleDuringRebuild pins that the replay folds state and drives no observation.
+//   - positive: the boot commits no settlement fact and sends no delivery
+//   - negative: the count of settlement facts in the store is the one the process before it left, so a rebuild that fired one settle is red
+//   - consumer: the boot entry over the durable root, beside the delivery face the account is restored through
+//
+// 契约: docs/wiki/reliability/durable-delivery.md#envelope-states
+func TestReplayFiresNoSettleDuringRebuild(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+	storage, _, _ := sessionRecoveryFixture(t, ctx)
+	before := 0
+	count := func(run *Run) int {
+		t.Helper()
+		settled := 0
+		if err := run.tier.Segments.EachIndexNewestFirst(ctx, func(_ event.EventID, _ int, _ int64, typ string, _ event.SessionID) error {
+			if typ == deliverySettlementType {
+				settled++
+			}
+			return nil
+		}); err != nil {
+			t.Fatalf("count the settlement facts: %v", err)
+		}
+		return settled
+	}
+	probe := noTrimChainRun(t, ctx, storage)
+	probe.stopCheckpointFiler()
+	before = count(probe)
+	if before == 0 {
+		t.Fatal("the fixture committed no settlement fact, so the count proves nothing about a rebuild that would add one")
+	}
+
+	booted := noTrimChainRun(t, ctx, storage)
+	booted.stopCheckpointFiler()
+	sender := newDeliveryTestSender(nil)
+	host := deliveryTestHost(ctx, booted, sender)
+	if err := host.registerDeliverySlice(); err != nil {
+		t.Fatalf("mount the delivery account of the boot: %v", err)
+	}
+	if err := host.restoreEventifiedDeliveries(ctx); err != nil {
+		t.Fatalf("restore the account the boot reads: %v", err)
+	}
+	if after := count(booted); after != before {
+		t.Fatalf("the boot left %d settlement fact(s) beside the %d the process before it left, want a replay that settles nothing", after, before)
+	}
+	sender.mu.Lock()
+	attempts := len(sender.attempts)
+	sender.mu.Unlock()
+	if attempts != 0 {
+		t.Fatalf("the boot sent %d delivery attempt(s), want a rebuild that drives no observation", attempts)
 	}
 }

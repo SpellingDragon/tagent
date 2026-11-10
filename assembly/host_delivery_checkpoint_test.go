@@ -43,6 +43,28 @@ func checkpointDeliveryOf(t *testing.T, ctx context.Context, run *Run, key event
 	return deliverySliceWire{}, false
 }
 
+// deliverySlicePayloadOf answers the raw payload one checkpoint fact states for
+// the delivery slice, so a check hands the carrier's bytes to the restore entry
+// the boot calls.
+func deliverySlicePayloadOf(t *testing.T, ctx context.Context, run *Run, key event.EventID) []byte {
+	t.Helper()
+	stored, err := run.CommittedEvent(ctx, key)
+	if err != nil {
+		t.Fatalf("read the checkpoint %s back: %v", key, err)
+	}
+	checkpoint, stated := event.CheckpointOf(stored)
+	if !stated {
+		t.Fatalf("the fact %s states no readable checkpoint", key)
+	}
+	for _, slice := range checkpoint.Slices {
+		if slice.Name == checkpointSliceDelivery {
+			return []byte(slice.Payload)
+		}
+	}
+	t.Fatalf("the checkpoint %s states no delivery slice", key)
+	return nil
+}
+
 // declaredIdentities counts how often one identity appears in the delivered
 // declarations of one recovery, so a check reads "discovered once" as a number.
 func declaredIdentities(declared []deliverySettlement) map[string]int {
@@ -95,7 +117,7 @@ func TestDeliverySettlementAndCheckpointConcurrent(t *testing.T) {
 			if err := host.writeDeliveryState(ctx, identity, delivery, deliveryStateSent, time.Time{}); err != nil {
 				t.Errorf("settle %s: %v", identity, err)
 			}
-			host.dropHeld(identity)
+			host.dropHeld(addr.SessionID, identity)
 		}
 	}()
 	go func() {
@@ -108,13 +130,13 @@ func TestDeliverySettlementAndCheckpointConcurrent(t *testing.T) {
 	}()
 	wg.Wait()
 	for _, identity := range settled {
-		if state, known := host.deliveryStateOf(identity); !known || state != deliveryStateSent {
+		if state, known := host.deliveryStateOf(addr.SessionID, identity); !known || state != deliveryStateSent {
 			t.Fatalf("the source account states %s = (%q, %v), want the settled state it wrote", identity, state, known)
 		}
 	}
 	owed := append([]string(nil), identities[settleCount:]...)
 	for _, identity := range owed {
-		if state, known := host.deliveryStateOf(identity); !known || state != heldStateOf(deliveryReasonApproval) {
+		if state, known := host.deliveryStateOf(addr.SessionID, identity); !known || state != heldStateOf(deliveryReasonApproval) {
 			t.Fatalf("the source account states %s = (%q, %v), want the hold it stands in", identity, state, known)
 		}
 	}
@@ -246,7 +268,7 @@ func TestCheckpointCarriesOpenObligationAcrossFold(t *testing.T) {
 	if got := parkedCount(recovered); got != 1 {
 		t.Fatalf("the restart holds %d obligation(s), want the one the fold left open", got)
 	}
-	if got, known := recovered.deliveryStateOf(identity); !known || got != heldStateOf(deliveryReasonRetrying) {
+	if got, known := recovered.deliveryStateOf(addr.SessionID, identity); !known || got != heldStateOf(deliveryReasonRetrying) {
 		t.Fatalf("the restart states %s = (%q, %v), want the hold the checkpoint stated", identity, got, known)
 	}
 	if attempts[identity] != 1 {
@@ -294,7 +316,11 @@ func parkedCount(h *Host) int {
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	return len(h.pendingDeliveries)
+	owed := 0
+	for _, account := range h.deliveryAccounts {
+		owed += len(account.held)
+	}
+	return owed
 }
 
 // checkpointDeliveryPayload files one checkpoint of the run and answers the
@@ -353,7 +379,7 @@ func TestCheckpointBodyBoundedByTheOpenAccount(t *testing.T) {
 	brief := checkpointDeliveryPayload(t, ctx, run)
 	for index := 1; index < 300; index++ {
 		identity := fmt.Sprintf("delivery-bounded-%04d", index)
-		host.noteDeliveryState(identity, deliveryStateSent)
+		host.noteDeliveryState(addr.SessionID, identity, deliveryStateSent)
 	}
 	settle("delivery-bounded-0300")
 	long := checkpointDeliveryPayload(t, ctx, run)
@@ -364,7 +390,7 @@ func TestCheckpointBodyBoundedByTheOpenAccount(t *testing.T) {
 		t.Fatal("the carrier states no delivery slice at all")
 	}
 	open := "delivery-bounded-open"
-	host.noteDeliveryState(open, heldStateOf(deliveryReasonApproval))
+	host.noteDeliveryState(addr.SessionID, open, heldStateOf(deliveryReasonApproval))
 	host.parkHeld(open, plugin.Delivery{Content: bodyOf(open), Lineage: "user", Target: addr}, time.Now())
 	settle("delivery-bounded-open-marker")
 	heldPayload := checkpointDeliveryPayload(t, ctx, run)
@@ -444,7 +470,7 @@ func TestCheckpointKeepsDeclaredObligationAcrossCut(t *testing.T) {
 	if err := host.writeDeliveryState(ctx, settledIdentity, settledDelivery, deliveryStateSent, time.Time{}); err != nil {
 		t.Fatalf("settle the delivered declaration: %v", err)
 	}
-	host.dropHeld(settledIdentity)
+	host.dropHeld(addr.SessionID, settledIdentity)
 	key, filed, err := first.Checkpoint(ctx)
 	if err != nil || !filed {
 		t.Fatalf("file the checkpoint across the declarations = (%t, %v)", filed, err)
@@ -486,7 +512,7 @@ func TestCheckpointKeepsDeclaredObligationAcrossCut(t *testing.T) {
 	if got := sender.attemptCount(settledBody); got != 0 {
 		t.Fatalf("the restart asked the channel to take the settled body %d time(s), want none beside the receipt the chain keeps", got)
 	}
-	if state, known := recovered.deliveryStateOf(openIdentity); !known || state != deliveryStateSent {
+	if state, known := recovered.deliveryStateOf(addr.SessionID, openIdentity); !known || state != deliveryStateSent {
 		t.Fatalf("the restart states %s = (%q, %v), want the receipt of the send it made", openIdentity, state, known)
 	}
 	if _, stated := recovered.parkedDelivery(openIdentity); stated {
@@ -599,4 +625,119 @@ func mustCheckpoint(t *testing.T, ctx context.Context, run *Run) event.EventID {
 		t.Fatalf("file the checkpoint = (%t, %v), want a filed fact", filed, err)
 	}
 	return key
+}
+
+// TestCrossSessionObligationsStayInTheirTargetSlice pins the target-session shard of the delivery account.
+//
+//   - positive: the carrier of the chain an obligation targets states it, and restoring those payloads redrives it exactly once
+//   - negative: a chain's carrier states nothing of the chain beside it, and no slice files another chain's state
+//   - the same check reds on a global account, which states both obligations in each chain's carrier
+//   - the whole account states both obligations, so the exclusion above is the shard and never an emptied account
+//   - the two chains interleave their rounds, so a carrier reading the whole account states work a chain beside it was writing at the same time
+//   - consumer: Run.CheckpointSession files the carrier, and StateRegistry.RestoreState hands each payload to Host.restoreDeliverySlice on the boot path
+//
+// 契约: docs/wiki/reliability/durable-delivery.md#envelope-states
+func TestCrossSessionObligationsStayInTheirTargetSlice(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
+	defer cancel()
+	storage := WithStorage(ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: t.TempDir()})
+	source := event.Address{AgentID: deliveryTestAgent, SessionID: "session-shard-source"}
+	kept := event.Address{AgentID: deliveryTestAgent, SessionID: "session-shard-kept"}
+	other := event.Address{AgentID: deliveryTestAgent, SessionID: "session-shard-other"}
+	run := windowChainRun(t, ctx, storage)
+	run.stopCheckpointFiler()
+	host := deliveryTestHost(ctx, run, newDeliveryTestSender(nil))
+	if err := host.registerDeliverySlice(); err != nil {
+		t.Fatalf("mount the delivery account on the state seam: %v", err)
+	}
+	keptBody := "the body owed to the kept chain"
+	otherBody := "the body owed to the chain beside"
+	keptIdentity := declareObligationTargeting(t, ctx, run, source, kept, "shard-kept-declaration", keptBody)
+	otherIdentity := declareObligationTargeting(t, ctx, run, source, other, "shard-other-declaration", otherBody)
+	commitSessionTurns(t, ctx, run, kept, "shard-kept", 2)
+	commitSessionTurns(t, ctx, run, other, "shard-other", 3)
+
+	carrierOf := func(addr event.Address, foreign, own, body string) event.EventID {
+		t.Helper()
+		key, filed, err := run.CheckpointSession(ctx, addr)
+		if err != nil || !filed {
+			t.Fatalf("file the carrier of %s = (%t, %v), want a filed fact", addr.SessionID, filed, err)
+		}
+		wire, carried := checkpointDeliveryOf(t, ctx, run, key)
+		if !carried {
+			t.Fatalf("the carrier of %s states no delivery slice, want the obligation that chain is owed", addr.SessionID)
+		}
+		owed, stated := owedOfIdentity(wire, own)
+		if !stated {
+			t.Fatalf("the carrier of %s owes %d obligation(s) and none is %s", addr.SessionID, len(wire.Owed), own)
+		}
+		if owed.Session != string(addr.SessionID) || owed.Content != body {
+			t.Fatalf("the carrier of %s states %+v, want the body declared against that chain", addr.SessionID, owed)
+		}
+		if _, bleeding := owedOfIdentity(wire, foreign); bleeding {
+			t.Fatalf("the carrier of %s states %s, the obligation of the chain beside it: the account of a chain is what that chain is owed", addr.SessionID, foreign)
+		}
+		return key
+	}
+	keptKey := carrierOf(kept, otherIdentity, keptIdentity, keptBody)
+	otherKey := carrierOf(other, keptIdentity, otherIdentity, otherBody)
+
+	wholePayload, err := host.deliverySlice()
+	if err != nil {
+		t.Fatalf("state the whole open account: %v", err)
+	}
+	var whole deliverySliceWire
+	if err := json.Unmarshal(wholePayload, &whole); err != nil {
+		t.Fatalf("read the whole open account: %v", err)
+	}
+	for _, identity := range []string{keptIdentity, otherIdentity} {
+		if _, stated := owedOfIdentity(whole, identity); !stated {
+			t.Fatalf("the whole account owes no entry for %s, want the obligation a chain carrier is expected to state", identity)
+		}
+	}
+
+	restarted := windowChainRun(t, ctx, storage)
+	restarted.stopCheckpointFiler()
+	recovered := deliveryTestHost(ctx, restarted, newDeliveryTestSender(nil))
+	if err := recovered.registerDeliverySlice(); err != nil {
+		t.Fatalf("mount the restored delivery account: %v", err)
+	}
+	sender := recovered.sender.(*deliveryTestSender)
+	if err := restarted.states.RestoreState(ctx, []event.CheckpointSlice{
+		{Name: checkpointSliceDelivery, Payload: deliverySlicePayloadOf(t, ctx, run, keptKey)},
+		{Name: checkpointSliceDelivery, Payload: deliverySlicePayloadOf(t, ctx, run, otherKey)},
+	}); err != nil {
+		t.Fatalf("restore the delivery carriers of the two chains: %v", err)
+	}
+	if err := recovered.restoreEventifiedDeliveries(ctx); err != nil {
+		t.Fatalf("restore the account the carriers state: %v", err)
+	}
+	defer deliveryTestStopRetries(recovered)
+	for _, want := range []struct {
+		identity string
+		session  event.SessionID
+		body     string
+	}{
+		{keptIdentity, kept.SessionID, keptBody},
+		{otherIdentity, other.SessionID, otherBody},
+	} {
+		if got := sender.attemptCount(want.body); got != 1 {
+			t.Fatalf("the boot sent %q %d time(s), want exactly once", want.body, got)
+		}
+		if state, known := recovered.deliveryStateOf(want.session, want.identity); !known || state != deliveryStateSent {
+			t.Fatalf("the boot states %s on chain %s = (%q, %v), want the receipt of the send it made", want.identity, want.session, state, known)
+		}
+		if _, parked := recovered.parkedDelivery(want.identity); parked {
+			t.Fatalf("the boot parked %s for a decision, want the delivered obligation closed", want.identity)
+		}
+	}
+	if _, misfiled := recovered.deliveryStateOf(kept.SessionID, otherIdentity); misfiled {
+		t.Fatalf("the slice of chain %s states %s, the obligation of the chain beside it: a state is filed under the chain it is owed to", kept.SessionID, otherIdentity)
+	}
+	if _, misfiled := recovered.deliveryStateOf(other.SessionID, keptIdentity); misfiled {
+		t.Fatalf("the slice of chain %s states %s, the obligation of the chain beside it: a state is filed under the chain it is owed to", other.SessionID, keptIdentity)
+	}
+	if got := parkedCount(recovered); got != 0 {
+		t.Fatalf("the boot holds %d obligation(s), want none beside two delivered obligations", got)
+	}
 }

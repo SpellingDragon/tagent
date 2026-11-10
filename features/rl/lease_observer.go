@@ -77,6 +77,17 @@ func (o *LeaseObserver) Port() plugin.Port {
 	return plugin.PortFactObservation
 }
 
+// Material declares what this observer reads, when it reads it and what a failed
+// reading leaves behind: one committed fact read after its commit, where a failed
+// observation is a named gap and the fact keeps standing.
+func (o *LeaseObserver) Material() plugin.Material {
+	return plugin.Material{
+		Reads:   plugin.PortFactObservation,
+		Timing:  plugin.TimingPostCommit,
+		Failure: plugin.RecordGap,
+	}
+}
+
 // ObserveCommit reads the fact one commit wrote and applies the model dimension
 // of a configuration change owned by this observer's agent to the lease: the
 // version move is carried under the model replacement metadata keys, and only a

@@ -55,6 +55,14 @@ func (s compressStateSlice) SnapshotState(context.Context) ([]byte, error) {
 	return s.run.compressSlice()
 }
 
+// SnapshotSessionState states the judgments one session chain filed beside the
+// identities a product answers among them. A chain that filed no judgment answers
+// nil: the account of a chain is the batch it owes a fold for, and a chain that
+// owes none states nothing.
+func (s compressStateSlice) SnapshotSessionState(_ context.Context, session event.SessionID) ([]byte, error) {
+	return s.run.compressSliceOf(session)
+}
+
 // RestoreState puts the stated judgments and answers back into the consumer of
 // this run.
 func (s compressStateSlice) RestoreState(_ context.Context, payload []byte) error {
@@ -96,6 +104,10 @@ func (r *Run) compressSlice() ([]byte, error) {
 // this account and never beside it: a request recorded twice is one judgment, a
 // product noted twice is one answer, and a judgment the carrier leaves unanswered
 // is the execution the chain still owes.
+//
+// The restore merges: a carrier states the account of the chains it covers, and a
+// boot reads the framework's carrier beside the carrier of every chain, so each
+// restore states the chain it carries and leaves the chains beside it standing.
 func (r *Run) restoreCompressSlice(payload []byte) error {
 	var wire compressSliceWire
 	if err := json.Unmarshal(payload, &wire); err != nil {
@@ -124,7 +136,50 @@ func (r *Run) restoreCompressSlice(payload []byte) error {
 	r.mu.Unlock()
 	consumer.mu.Lock()
 	defer consumer.mu.Unlock()
-	consumer.judgments = judgments
-	consumer.answered = answered
+	if consumer.judgments == nil {
+		consumer.judgments = map[event.SessionID][]event.CompressRequest{}
+	}
+	if consumer.answered == nil {
+		consumer.answered = map[event.EventID]struct{}{}
+	}
+	for session, filed := range judgments {
+		consumer.judgments[session] = filed
+	}
+	for request := range answered {
+		consumer.answered[request] = struct{}{}
+	}
 	return nil
+}
+
+// compressSliceOf states the account one session chain owes: the judgments it
+// filed in filing order and the identities a product answers among them, in
+// identity order, so the same account renders the same bytes. A chain that filed
+// no judgment states nothing, because the carrier of that chain has no account to
+// carry.
+func (r *Run) compressSliceOf(session event.SessionID) ([]byte, error) {
+	if session == "" {
+		return nil, nil
+	}
+	r.mu.Lock()
+	consumer := r.compress
+	r.mu.Unlock()
+	consumer.mu.Lock()
+	defer consumer.mu.Unlock()
+	filed, held := consumer.judgments[session]
+	if !held || len(filed) == 0 {
+		return nil, nil
+	}
+	judgments := make([]compressSliceJudgment, 0, len(filed))
+	answered := make([]event.EventID, 0, len(filed))
+	for _, request := range filed {
+		judgments = append(judgments, compressSliceJudgment{ID: request.ID, Reason: request.Reason, At: request.At.UnixMilli()})
+		if _, answeredByAProduct := consumer.answered[request.ID]; answeredByAProduct {
+			answered = append(answered, request.ID)
+		}
+	}
+	sort.Slice(answered, func(i, j int) bool { return answered[i] < answered[j] })
+	return json.Marshal(compressSliceWire{
+		Sessions: []compressSliceSession{{Session: string(session), Judgments: judgments}},
+		Answered: answered,
+	})
 }

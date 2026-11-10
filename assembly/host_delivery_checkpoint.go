@@ -124,6 +124,15 @@ func (s deliveryStateSlice) SnapshotState(ctx context.Context) ([]byte, error) {
 	return s.host.deliverySlice()
 }
 
+// SnapshotSessionState states the part of the account one session chain owns: the
+// obligations whose target is that chain, with the redrive, the hold moment and
+// the state they stand under. The account of a chain is what the chain is owed,
+// so the carrier of one session states nothing about the obligations another
+// chain is owed.
+func (s deliveryStateSlice) SnapshotSessionState(ctx context.Context, session event.SessionID) ([]byte, error) {
+	return s.host.deliverySliceOf(session)
+}
+
 // RestoreState puts the account back: every settlement state, every owed obligation
 // with the delivery it carries, the retry attempts and the hold sequence.
 func (s deliveryStateSlice) RestoreState(ctx context.Context, payload []byte) error {
@@ -143,7 +152,7 @@ func (h *Host) registerDeliverySlice() error {
 	if _, err := h.run.RegisterStateSlice(deliveryStateSlice{host: h}); err != nil {
 		return err
 	}
-	h.run.mountObligationAccount(h.declareObligation)
+	h.run.mountObligationAccount(h.applyDeclaredObligation)
 	return nil
 }
 
@@ -159,62 +168,120 @@ func (h *Host) registerDeliverySlice() error {
 // owed a send, and a carrier that omitted it would leave the cut claiming a
 // settlement that never happened.
 func (h *Host) deliverySlice() ([]byte, error) {
+	return h.deliverySliceWhere("")
+}
+
+// deliverySliceOf states the open account one session chain owns: the obligations
+// whose target is that chain, the redrive still pending for them and the pins kept
+// hot for them. A chain the account owes nothing answers nil, so the carrier of a
+// settled chain carries no delivery slice.
+func (h *Host) deliverySliceOf(session event.SessionID) ([]byte, error) {
+	if h == nil || session == "" {
+		return nil, nil
+	}
+	payload, err := h.deliverySliceWhere(session)
+	if err != nil {
+		return nil, err
+	}
+	var wire deliverySliceWire
+	if err := json.Unmarshal(payload, &wire); err != nil {
+		return nil, err
+	}
+	if len(wire.Owed) == 0 {
+		return nil, nil
+	}
+	return payload, nil
+}
+
+// deliverySliceWhere states the open account of the chains the named session
+// selects, or the whole account beside no session. A session's payload is read
+// from that chain's slice alone, so the carrier of one chain costs what that
+// chain owes and never what another chain owes beside it. A pin is named by the
+// obligation it keeps hot, so a chain's carrier states the pins of the
+// obligations that chain owes and never keeps another chain's fact hot.
+func (h *Host) deliverySliceWhere(session event.SessionID) ([]byte, error) {
 	if h == nil {
 		return []byte("null"), nil
 	}
+	slices := make([]*deliveryAccount, 0, len(h.deliveryAccounts))
 	h.mu.Lock()
 	wire := deliverySliceWire{
 		HeldSeq:  h.heldSeq,
 		Attempts: []deliverySliceRetry{},
 		Pins:     make(map[string]event.EventID, len(h.deliveryPins)),
-		Owed:     make([]deliverySliceOwed, 0, len(h.pendingDeliveries)+len(h.declaredOpen)),
+		Owed:     make([]deliverySliceOwed, 0),
 	}
 	retries := h.retries
-	identities := make([]string, 0, len(h.pendingDeliveries)+len(h.declaredOpen))
-	for identity := range h.pendingDeliveries {
-		identities = append(identities, identity)
-	}
-	for identity := range h.declaredOpen {
-		if _, parked := h.pendingDeliveries[identity]; parked {
-			continue
+	if session == "" {
+		names := make([]event.SessionID, 0, len(h.deliveryAccounts))
+		for name := range h.deliveryAccounts {
+			names = append(names, name)
 		}
-		identities = append(identities, identity)
-	}
-	sort.Strings(identities)
-	for _, identity := range identities {
-		held := h.pendingDeliveries[identity]
-		if held == nil {
-			held = h.declaredOpen[identity]
+		sort.Slice(names, func(i, j int) bool { return names[i] < names[j] })
+		for _, name := range names {
+			slices = append(slices, h.deliveryAccounts[name])
 		}
-		if held == nil {
-			continue
-		}
-		wire.Owed = append(wire.Owed, deliverySliceOwed{
-			Identity: identity,
-			Content:  held.delivery.Content,
-			Lineage:  held.delivery.Lineage,
-			Agent:    string(held.delivery.Target.AgentID),
-			Session:  string(held.delivery.Target.SessionID),
-			HeldAt:   held.heldAt,
-			State:    h.deliveryStates[identity],
-		})
+	} else if account := h.deliveryAccountLocked(session, false); account != nil {
+		slices = append(slices, account)
 	}
-	for identity, pin := range h.deliveryPins {
-		wire.Pins[identity] = pin
+	for _, slice := range slices {
+		identities := make([]string, 0, len(slice.held)+len(slice.declared))
+		for identity := range slice.held {
+			identities = append(identities, identity)
+		}
+		for identity := range slice.declared {
+			if _, parked := slice.held[identity]; parked {
+				continue
+			}
+			identities = append(identities, identity)
+		}
+		sort.Strings(identities)
+		for _, identity := range identities {
+			held := slice.held[identity]
+			if held == nil {
+				held = slice.declared[identity]
+			}
+			if held == nil {
+				continue
+			}
+			wire.Owed = append(wire.Owed, deliverySliceOwed{
+				Identity: identity,
+				Content:  held.delivery.Content,
+				Lineage:  held.delivery.Lineage,
+				Agent:    string(held.delivery.Target.AgentID),
+				Session:  string(held.delivery.Target.SessionID),
+				HeldAt:   held.heldAt,
+				State:    slice.states[identity],
+			})
+			if pin, pinned := h.deliveryPins[identity]; pinned {
+				wire.Pins[identity] = pin
+			}
+		}
+	}
+	if session == "" {
+		for identity, pin := range h.deliveryPins {
+			wire.Pins[identity] = pin
+		}
 	}
 	h.mu.Unlock()
 	if retries != nil {
-		wire.Attempts = retries.pendingRedrives()
+		for _, retry := range retries.pendingRedrives() {
+			if session != "" && retry.Session != string(session) {
+				continue
+			}
+			wire.Attempts = append(wire.Attempts, retry)
+		}
 	}
 	return json.Marshal(wire)
 }
 
 // restoreDeliverySlice puts the open account back: every owed obligation under
-// the identity, delivery, hold moment and state the checkpoint recorded, and the
-// sequence the holds are ordered by. The obligations already settled are not
-// stated by the carrier at all — they are the cut — so the restart never
-// delivers a body the process before it delivered, and a state the table no
-// longer holds is answered by the settlement facts the chain keeps.
+// the identity, delivery, hold moment and state the checkpoint recorded, in the
+// slice of the chain the carrier states it against, and the sequence the holds
+// are ordered by. The obligations already settled are not stated by the carrier
+// at all — they are the cut — so the restart never delivers a body the process
+// before it delivered, and a state the table does not hold is answered by the
+// settlement facts the chain keeps.
 //
 //   - the state an owed entry carries decides what the account owes: a cut taken between a settlement and the release of its hold states both, and the settled token is the one that stands, so the restart never parks an obligation its own account already discharged.
 //   - a pin the carrier states is an obligation the hot window must keep, so the run's own pin registry is seeded from it: the boot trim releases facts by the pins the run holds, and a pin that reached the host table alone would let the trim drop the very fact the account still owes.
@@ -227,9 +294,6 @@ func (h *Host) restoreDeliverySlice(payload []byte) error {
 		return err
 	}
 	h.mu.Lock()
-	if h.deliveryStates == nil {
-		h.deliveryStates = map[string]string{}
-	}
 	if wire.HeldSeq > h.heldSeq {
 		h.heldSeq = wire.HeldSeq
 	}
@@ -239,18 +303,16 @@ func (h *Host) restoreDeliverySlice(payload []byte) error {
 	for identity, pin := range wire.Pins {
 		h.deliveryPins[identity] = pin
 	}
-	if h.pendingDeliveries == nil {
-		h.pendingDeliveries = map[string]*heldDelivery{}
-	}
-	if h.declaredOpen == nil {
-		h.declaredOpen = map[string]*heldDelivery{}
-	}
 	for _, owed := range wire.Owed {
 		if owed.Identity == "" {
 			continue
 		}
+		account := h.deliveryAccountLocked(event.SessionID(owed.Session), true)
 		if owed.State != "" {
-			h.deliveryStates[owed.Identity] = owed.State
+			if account.states == nil {
+				account.states = map[string]string{}
+			}
+			account.states[owed.Identity] = owed.State
 		}
 		if deliveryStateSettled(owed.State) {
 			continue
@@ -268,15 +330,21 @@ func (h *Host) restoreDeliverySlice(payload []byte) error {
 			heldAt: owed.HeldAt,
 		}
 		if owed.State == "" {
-			if _, stated := h.declaredOpen[owed.Identity]; !stated {
-				h.declaredOpen[owed.Identity] = restored
+			if _, stated := account.declared[owed.Identity]; !stated {
+				if account.declared == nil {
+					account.declared = map[string]*heldDelivery{}
+				}
+				account.declared[owed.Identity] = restored
 			}
 			continue
 		}
-		if _, parked := h.pendingDeliveries[owed.Identity]; parked {
+		if _, parked := account.held[owed.Identity]; parked {
 			continue
 		}
-		h.pendingDeliveries[owed.Identity] = restored
+		if account.held == nil {
+			account.held = map[string]*heldDelivery{}
+		}
+		account.held[owed.Identity] = restored
 	}
 	h.restoredDelivery = true
 	h.mu.Unlock()

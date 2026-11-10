@@ -132,6 +132,18 @@ func (c *CompressionConsumer) withSummaryGist(gists summaryGists) *CompressionCo
 // execution of the judgments already on the chain.
 func (c *CompressionConsumer) Port() plugin.Port { return plugin.PortFactObservation }
 
+// Material declares what this consumer reads, when it reads it and what a failed
+// reading leaves behind: one committed fact read after its commit, where a failed
+// execution is a named gap and the judgments on the chain keep standing for the
+// next reading.
+func (c *CompressionConsumer) Material() plugin.Material {
+	return plugin.Material{
+		Reads:   plugin.PortFactObservation,
+		Timing:  plugin.TimingPostCommit,
+		Failure: plugin.RecordGap,
+	}
+}
+
 // ObserveCommit executes the judgments one session filed that no product answers
 // yet: the fact that triggered it names the session, and every judgment of that
 // session stands where the producer left it.

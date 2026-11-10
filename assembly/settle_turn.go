@@ -298,6 +298,17 @@ func (d *SettleDriver) Port() plugin.Port {
 	return plugin.PortFactObservation
 }
 
+// Material declares what this driver reads, when it reads it and what a failed
+// reading leaves behind: one committed fact read after its commit, where a failed
+// observation keeps the follow-up turn owed on the mailbox account.
+func (d *SettleDriver) Material() plugin.Material {
+	return plugin.Material{
+		Reads:   plugin.PortFactObservation,
+		Timing:  plugin.TimingPostCommit,
+		Failure: plugin.PreserveObligation,
+	}
+}
+
 // DrivesObligation marks this face's duty: the observation wakes the pump, and the
 // work it woke is owed on the mailbox account, so a failed observation leaves the
 // follow-up turn owed and the account hands it to the next decision.

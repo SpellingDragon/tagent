@@ -1729,6 +1729,16 @@ func (r *StateRegistry) RestoreState(ctx context.Context, slices []event.Checkpo
     name instead of dropped: a checkpoint whose state cannot be restored is not
     a checkpoint this runtime can start from.
 
+func (r *StateRegistry) SnapshotSessionState(ctx context.Context, session event.SessionID) ([]event.CheckpointSlice, error)
+    SnapshotSessionState aggregates the state the mounted holders state about
+    one session chain, in registration order. A holder that keeps no state of a
+    session is asked nothing and states no slice, so the carrier of one session
+    is the size of that session's state and never of the account the run holds
+    beside it. The same read rules hold as for the whole account: no framework
+    lock is held across the holders' reads, and a holder that refuses to state
+    itself refuses the whole cut by name rather than filing a carrier missing
+    its slice.
+
 func (r *StateRegistry) SnapshotState(ctx context.Context) ([]event.CheckpointSlice, error)
     SnapshotState aggregates the state of every mounted holder in registration
     order. A holder that fails to state its state refuses the whole snapshot

@@ -56,6 +56,13 @@ func (s inputsStateSlice) SnapshotState(ctx context.Context) ([]byte, error) {
 	return s.run.pendingInputsSlice(ctx)
 }
 
+// SnapshotSessionState states the rounds one session chain holds with no answer.
+// A chain that owes no drive answers nil, so the carrier of a settled chain
+// carries no input slice.
+func (s inputsStateSlice) SnapshotSessionState(ctx context.Context, session event.SessionID) ([]byte, error) {
+	return s.run.pendingInputsSliceOf(ctx, session)
+}
+
 // RestoreState puts the owed rounds back as rounds committed before the cut, so
 // the boot judges them beside the material that landed past it.
 func (s inputsStateSlice) RestoreState(ctx context.Context, payload []byte) error {
@@ -65,12 +72,41 @@ func (s inputsStateSlice) RestoreState(ctx context.Context, payload []byte) erro
 // pendingInputsSlice states the input rounds every resident chain holds with no
 // answer, in address order.
 func (r *Run) pendingInputsSlice(ctx context.Context) ([]byte, error) {
+	return r.pendingInputsSliceWhere(ctx, nil)
+}
+
+// pendingInputsSliceOf states the rounds one session chain holds with no answer,
+// or nothing beside a chain that owes no drive.
+func (r *Run) pendingInputsSliceOf(ctx context.Context, session event.SessionID) ([]byte, error) {
+	if session == "" {
+		return nil, nil
+	}
+	payload, err := r.pendingInputsSliceWhere(ctx, func(addr event.Address) bool { return addr.SessionID == session })
+	if err != nil {
+		return nil, err
+	}
+	var wire inputsSliceWire
+	if err := json.Unmarshal(payload, &wire); err != nil {
+		return nil, err
+	}
+	if len(wire.Sessions) == 0 {
+		return nil, nil
+	}
+	return payload, nil
+}
+
+// pendingInputsSliceWhere states the rounds the chains the keep admits hold with
+// no answer, or the rounds of every chain beside no keep.
+func (r *Run) pendingInputsSliceWhere(ctx context.Context, keep func(event.Address) bool) ([]byte, error) {
 	addresses := r.ActiveSessions("")
 	sortAddresses(addresses)
 	wire := inputsSliceWire{Sessions: make([]inputsSliceSession, 0, len(addresses))}
 	for _, addr := range addresses {
 		if err := ctx.Err(); err != nil {
 			return nil, err
+		}
+		if keep != nil && !keep(addr) {
+			continue
 		}
 		pending := agent.PendingInputs(r.SessionFacts(addr))
 		if len(pending) == 0 {
@@ -93,6 +129,8 @@ func (r *Run) pendingInputsSlice(ctx context.Context) ([]byte, error) {
 
 // restoreInputsSlice puts the owed rounds of one checkpoint back as the rounds
 // committed before the cut they state.
+//
+//   - The carriers a boot reads state one set of rounds each, so the restore adds the rounds it states to the ones already standing; the criterion reads each round by its identity and a round two carriers state is one round.
 func (r *Run) restoreInputsSlice(payload []byte) error {
 	var wire inputsSliceWire
 	if err := json.Unmarshal(payload, &wire); err != nil {
@@ -116,7 +154,17 @@ func (r *Run) restoreInputsSlice(payload []byte) error {
 		}
 	}
 	r.mu.Lock()
-	r.restoredInputs = restored
+	seen := make(map[restoredInput]bool, len(r.restoredInputs)+len(restored))
+	for _, input := range r.restoredInputs {
+		seen[input] = true
+	}
+	for _, input := range restored {
+		if seen[input] {
+			continue
+		}
+		seen[input] = true
+		r.restoredInputs = append(r.restoredInputs, input)
+	}
 	r.mu.Unlock()
 	return nil
 }

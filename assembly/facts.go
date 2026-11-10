@@ -82,12 +82,14 @@ func (r *Run) commitFactChecked(ctx context.Context, evt event.Event) (event.Eve
 //
 //   - a checkpoint fact stays on the store the boot reads it from and enters no session chain: it is a framework state carrier, not material of any chain, so the live ledger keeps the window of the chains it serves and never one fact per cut.
 //   - the whole commit holds the quiet-point fence, so a cut that drained the pipeline reads every state this fact left behind instead of one caught between the landing and its application. The obligation account a mounted host keeps is applied inside that unit for the same reason: the declaration a fact carries and the account that owes it are one step, never a landing the account beside it has not read yet.
+//   - a product is the moment the projection drops material, so the chain's carrier is worth refreshing whatever the cadence clock says. The request is a signal: the filer takes the cut on its own goroutine, where this commit's unit of work is not held.
 func (r *Run) commitFactNoCadence(ctx context.Context, evt event.Event) (event.EventID, error) {
-	r.flight.enter()
-	defer r.flight.leave()
 	if evt.Key == "" {
 		evt.Key = r.mintEventID()
 	}
+	session := sessionOf(evt)
+	r.flight.enterSession(session)
+	defer r.flight.leaveSession(session)
 	r.mu.Lock()
 	held, seen := r.facts[evt.Key]
 	r.mu.Unlock()
@@ -117,6 +119,9 @@ func (r *Run) commitFactNoCadence(ctx context.Context, evt event.Event) (event.E
 	r.mu.Unlock()
 	r.movement.Advance()
 	r.applyObligation(evt)
+	if evt.Type == event.CompressProductType && session != "" {
+		r.requestSessionCheckpoint(event.Address{AgentID: agentOf(evt), SessionID: session})
+	}
 	if !mapped {
 		r.trimFacts(sessionOf(evt))
 		return evt.Key, nil
@@ -738,8 +743,11 @@ func agentOf(evt event.Event) event.AgentID {
 // onto no entry even though it carries a message body. The skip is explicit by
 // type — a producer that stamps a session on the fact still cannot leak the
 // change into a model request. A compression mechanism fact is refused here by
-// its frozen type as well, so an internal summary or checkpoint can never be
-// mapped into a model request even if a caller gives the fact a message body.
+// its frozen type as well, so an internal summary can never be mapped into a
+// model request even if a caller gives the fact a message body, and a checkpoint
+// carrier is refused the same way: the carrier a session files is tagged with that
+// session in the index, so a rebuild that walks the chain would otherwise read the
+// carrier's payload as one line of the transcript.
 // A delivery retry attempt rides the settlement family but is pipeline
 // accounting, not a settlement state: the fact records how many redrives the
 // chain already scheduled, so it maps onto no entry and never reaches the model
@@ -747,7 +755,7 @@ func agentOf(evt event.Event) event.AgentID {
 //
 // 契约: docs/wiki/agent/event-flow.md#projection-lifecycle
 func mappedEntryOf(evt event.Event) (replay.ProjectionEntry, bool) {
-	if evt.Type == event.TypeConfigChange || event.CompressionMechanism(evt.Type) {
+	if evt.Type == event.TypeConfigChange || evt.Type == event.TypeCheckpoint || event.CompressionMechanism(evt.Type) {
 		return replay.ProjectionEntry{}, false
 	}
 	if _, _, isRetryAttempt := deliveryRetryAttemptOf(evt); isRetryAttempt {
@@ -1078,6 +1086,17 @@ func (p observePlugin) Name() string { return "commit-observer" }
 // Port reports the fact->observation port this instance serves.
 func (p observePlugin) Port() plugin.Port {
 	return plugin.PortFactObservation
+}
+
+// Material declares what this observer reads, when it reads it and what a failed
+// reading leaves behind: one committed fact read after its commit, where a failed
+// observation is a named gap and the fact keeps standing.
+func (p observePlugin) Material() plugin.Material {
+	return plugin.Material{
+		Reads:   plugin.PortFactObservation,
+		Timing:  plugin.TimingPostCommit,
+		Failure: plugin.RecordGap,
+	}
 }
 
 // ObserveCommit delegates one committed fact to the wired commit observer.

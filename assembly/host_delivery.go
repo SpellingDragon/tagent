@@ -386,20 +386,83 @@ type heldDelivery struct {
 	heldAt   time.Time
 }
 
+// deliveryAccount is one target chain's slice of the deliverable account: the
+// obligations that chain is owed, the declarations no settlement has answered
+// yet and the settlement state token each obligation stands at. The slice of a
+// chain states nothing about the obligations another chain is owed, so a cut of
+// that chain reads its own work alone.
+type deliveryAccount struct {
+	// held is the review table of this chain: the bodies the host owes that
+	// target before the sender ran or was refused, keyed by the identity an
+	// approval or refusal names. Every obligation is recorded under the storage
+	// tier beside the entry, so the table is rebuilt from the records beside a
+	// restart.
+	held map[string]*heldDelivery
+	// declared holds the obligations the chain declared against this target and
+	// no settlement has closed: the body, target, lineage and declaration moment
+	// of every answer whose delivery the live path has not settled yet. It stands
+	// beside the review table instead of inside it because that table is the
+	// review surface a person approves or refuses, and a body no review has ruled
+	// on is no entry anybody decides. The fact that declares the obligation
+	// applies it here inside its own landing unit (run.mountObligationAccount),
+	// so a cut states the declaration the chain already carries.
+	declared map[string]*heldDelivery
+	// states is the host's in-process view of the settlement facts it wrote or
+	// restored for this chain: the delivery identity beside the latest settlement
+	// state token. The facts remain the truth — this table only spares a window
+	// read on the per-body path and is rebuilt from the chain on every boot.
+	states map[string]string
+}
+
+// deliveryAccountLocked reports the account slice of one target chain, creating
+// it beside create. The caller holds h.mu; a chain that owes nothing answers a
+// nil slice, so a reader of a quiet chain reads no table at all.
+func (h *Host) deliveryAccountLocked(session event.SessionID, create bool) *deliveryAccount {
+	if h == nil {
+		return nil
+	}
+	account := h.deliveryAccounts[session]
+	if account == nil && create {
+		if h.deliveryAccounts == nil {
+			h.deliveryAccounts = map[event.SessionID]*deliveryAccount{}
+		}
+		account = &deliveryAccount{}
+		h.deliveryAccounts[session] = account
+	}
+	return account
+}
+
+// takeHeldLocked removes one obligation from the review table of whichever chain
+// states it and answers the entry. The caller holds h.mu. An approval and a
+// refusal name one identity and no chain, and an identity names one obligation
+// of the host, so the removal follows the identity into the slice that holds it.
+func (h *Host) takeHeldLocked(identity string) (*heldDelivery, bool) {
+	for _, account := range h.deliveryAccounts {
+		if held, stated := account.held[identity]; stated {
+			delete(account.held, identity)
+			return held, true
+		}
+	}
+	return nil, false
+}
+
 // HeldDeliveries reports the bodies the host owes a target before delivery:
 // the holds the review plugin parked and the redeliveries a refused send owes,
-// oldest first. The result is a copy the caller owns: reading here changes no
-// hold, and only ApproveDelivery or RefuseDelivery resolves one. The table is
-// rebuilt from the settlement facts on every boot, so a hold survives a restart
-// under the identity it was recorded with.
+// oldest first, across every chain the host owes. The result is a copy the
+// caller owns: reading here changes no hold, and only ApproveDelivery or
+// RefuseDelivery resolves one. The table is rebuilt from the settlement facts on
+// every boot, so a hold survives a restart under the identity it was recorded
+// with.
 func (h *Host) HeldDeliveries() []HeldDelivery {
 	if h == nil {
 		return nil
 	}
 	h.mu.Lock()
-	held := make([]HeldDelivery, 0, len(h.pendingDeliveries))
-	for _, entry := range h.pendingDeliveries {
-		held = append(held, HeldDelivery{ID: entry.id, Delivery: entry.delivery, HeldAt: entry.heldAt})
+	held := make([]HeldDelivery, 0)
+	for _, account := range h.deliveryAccounts {
+		for _, entry := range account.held {
+			held = append(held, HeldDelivery{ID: entry.id, Delivery: entry.delivery, HeldAt: entry.heldAt})
+		}
 	}
 	h.mu.Unlock()
 	sort.Slice(held, func(i, j int) bool { return held[i].ID < held[j].ID })
@@ -427,13 +490,12 @@ func (h *Host) ApproveDelivery(ctx context.Context, id string) error {
 		h.mu.Unlock()
 		return ErrHostClosed
 	}
-	held, ok := h.pendingDeliveries[id]
+	held, ok := h.takeHeldLocked(id)
 	if !ok {
 		h.mu.Unlock()
 		return fmt.Errorf("%w: %s", ErrDeliveryNotFound, id)
 	}
 	sender := h.sender
-	delete(h.pendingDeliveries, id)
 	h.mu.Unlock()
 	if sender == nil {
 		missing := fmt.Errorf("%w: the held delivery of %s", ErrHostSenderMissing, id)
@@ -472,12 +534,11 @@ func (h *Host) RefuseDelivery(ctx context.Context, id string) error {
 		h.mu.Unlock()
 		return ErrHostClosed
 	}
-	held, ok := h.pendingDeliveries[id]
+	held, ok := h.takeHeldLocked(id)
 	if !ok {
 		h.mu.Unlock()
 		return fmt.Errorf("%w: %s", ErrDeliveryNotFound, id)
 	}
-	delete(h.pendingDeliveries, id)
 	h.mu.Unlock()
 	if err := h.writeDeliveryState(ctx, id, held.delivery, deliveryStateRefused, held.heldAt); err != nil {
 		unrecorded := fmt.Errorf("tagent: the refusal of the held delivery %s was not recorded: %w", id, err)
@@ -570,15 +631,20 @@ func (h *Host) settlementStateOf(ctx context.Context, identity string) (delivery
 }
 
 // deliveryStateOf reports the latest settlement state this host already knows
-// for one obligation and whether it knows one at all. The table only spares the
-// chain read: a state it does not hold is probed from the chain by the caller.
-func (h *Host) deliveryStateOf(identity string) (string, bool) {
+// for one obligation of one chain and whether it knows one at all. The table
+// only spares the chain read: a state it does not hold is probed from the chain
+// by the caller.
+func (h *Host) deliveryStateOf(session event.SessionID, identity string) (string, bool) {
 	if h == nil || identity == "" {
 		return "", false
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	state, held := h.deliveryStates[identity]
+	account := h.deliveryAccountLocked(session, false)
+	if account == nil {
+		return "", false
+	}
+	state, held := account.states[identity]
 	return state, held
 }
 
@@ -602,17 +668,18 @@ func (h *Host) restoredAccount() bool {
 // state an obligation stands in is exactly the fact the window must keep. It
 // also answers the declaration the account left open, because a hold or a
 // refusal parks the obligation in the review table and a receipt closes it.
-func (h *Host) noteDeliveryState(identity, state string) {
+func (h *Host) noteDeliveryState(session event.SessionID, identity, state string) {
 	if h == nil || identity == "" {
 		return
 	}
 	key := deliverySettlementKey(identity, state)
 	h.mu.Lock()
-	if h.deliveryStates == nil {
-		h.deliveryStates = map[string]string{}
+	account := h.deliveryAccountLocked(session, true)
+	if account.states == nil {
+		account.states = map[string]string{}
 	}
-	h.deliveryStates[identity] = state
-	delete(h.declaredOpen, identity)
+	account.states[identity] = state
+	delete(account.declared, identity)
 	previous := h.deliveryPins[identity]
 	if deliveryStateUnsettled(state) {
 		if h.deliveryPins == nil {
@@ -645,7 +712,7 @@ func (h *Host) noteDeliveryState(identity, state string) {
 // fact of the target's session: the model reads a state change of its own
 // delivery, and the projection maps it under the family's frozen type.
 //
-//   - The settlement fact and the state token noted for it are one unit of work: the account applies the state after the fact lands, so the whole write holds the run's quiet-point fence and a cut never reads the account beside a settlement the chain already carries.
+//   - The settlement fact and the state token noted for it are one unit of work: the account applies the state after the fact lands, so the whole write holds the target chain's quiet point and a cut of that chain never reads the account beside a settlement the chain already carries. A cut of another chain never waits for it: the settlement is the target chain's material alone.
 //   - The commit below reaches the cadence from inside that unit, and the cadence only wakes the filer, so the cut is never asked for from inside this write.
 func (h *Host) writeDeliverySettlement(ctx context.Context, target event.Address, identity, state string, delivery plugin.Delivery, heldAt time.Time, extra map[string]string) error {
 	if h == nil || h.run == nil {
@@ -654,13 +721,13 @@ func (h *Host) writeDeliverySettlement(ctx context.Context, target event.Address
 	if identity == "" {
 		return errors.New("tagent: the delivery settlement names no identity")
 	}
-	h.run.flight.enter()
-	defer h.run.flight.leave()
+	h.run.flight.enterSession(target.SessionID)
+	defer h.run.flight.leaveSession(target.SessionID)
 	key := deliverySettlementKey(identity, state)
 	if _, held, err := h.settlementFactOf(ctx, key); err != nil {
 		return err
 	} else if held {
-		h.noteDeliveryState(identity, state)
+		h.noteDeliveryState(target.SessionID, identity, state)
 		return nil
 	}
 	meta := map[string]string{
@@ -700,7 +767,7 @@ func (h *Host) writeDeliverySettlement(ctx context.Context, target event.Address
 	if _, err := h.run.CommitToSession(ctx, target, evt); err != nil {
 		return fmt.Errorf("tagent: the delivery settlement of %s (%s) did not commit: %w", identity, state, err)
 	}
-	h.noteDeliveryState(identity, state)
+	h.noteDeliveryState(target.SessionID, identity, state)
 	return nil
 }
 
@@ -735,7 +802,7 @@ func settlementStateOfRetiredRecord(status string) (string, bool) {
 	}
 }
 
-// parkHeld registers one obligation in the review table under its identity,
+// parkHeld registers one obligation in the review table of the chain it targets,
 // keeping the moment and the delivery the account recorded. An entry already
 // parked keeps its recorded moment: the table states when the hold was taken,
 // not when it was last read.
@@ -745,25 +812,28 @@ func (h *Host) parkHeld(identity string, delivery plugin.Delivery, heldAt time.T
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	if h.pendingDeliveries == nil {
-		h.pendingDeliveries = map[string]*heldDelivery{}
+	account := h.deliveryAccountLocked(delivery.Target.SessionID, true)
+	if account.held == nil {
+		account.held = map[string]*heldDelivery{}
 	}
-	if _, held := h.pendingDeliveries[identity]; held {
+	if _, held := account.held[identity]; held {
 		return
 	}
 	if heldAt.IsZero() {
 		heldAt = time.Now()
 	}
-	h.pendingDeliveries[identity] = &heldDelivery{id: identity, delivery: delivery, heldAt: heldAt}
+	account.held[identity] = &heldDelivery{id: identity, delivery: delivery, heldAt: heldAt}
 }
 
-// dropHeld removes one obligation from the review table.
-func (h *Host) dropHeld(identity string) {
+// dropHeld removes one obligation from the review table of one chain.
+func (h *Host) dropHeld(session event.SessionID, identity string) {
 	if h == nil || identity == "" {
 		return
 	}
 	h.mu.Lock()
-	delete(h.pendingDeliveries, identity)
+	if account := h.deliveryAccountLocked(session, false); account != nil {
+		delete(account.held, identity)
+	}
 	h.mu.Unlock()
 }
 
@@ -811,7 +881,7 @@ func (h *Host) settleDelivery(ctx context.Context, identity string, delivery plu
 	if err := h.writeDeliveryState(ctx, identity, delivery, deliveryStateSent, time.Time{}); err != nil {
 		return err
 	}
-	h.dropHeld(identity)
+	h.dropHeld(delivery.Target.SessionID, identity)
 	h.cancelRedrive(identity)
 	return nil
 }
@@ -990,7 +1060,7 @@ func (h *Host) deliverFresh(ctx context.Context, addr event.Address, sender Mess
 		if !ok {
 			continue
 		}
-		known, err := h.deliveryKnown(ctx, identity)
+		known, err := h.deliveryKnown(ctx, addr.SessionID, identity)
 		if err != nil {
 			assemblyWarn("tagent: the delivery of %s stands unread and is not resent: %v", identity, err)
 			continue
@@ -1037,13 +1107,13 @@ func (h *Host) deliverySettledOnChain(ctx context.Context, identity string) (str
 	return "", false, nil
 }
 
-// deliveryKnown reports whether the account already states one obligation: a
-// body whose identity carries any settlement fact — held, sent, refused or
-// retired — is the account's, and the live path neither sends it again nor
-// holds it a second time. A settlement read that failed answers a named error
+// deliveryKnown reports whether the account of one chain already states one
+// obligation: a body whose identity carries any settlement fact — held, sent,
+// refused or retired — is the account's, and the live path neither sends it again
+// nor holds it a second time. A settlement read that failed answers a named error
 // so the caller leaves the body unread instead of resending it as absent.
-func (h *Host) deliveryKnown(ctx context.Context, identity string) (bool, error) {
-	if _, known := h.deliveryStateOf(identity); known {
+func (h *Host) deliveryKnown(ctx context.Context, session event.SessionID, identity string) (bool, error) {
+	if _, known := h.deliveryStateOf(session, identity); known {
 		return true, nil
 	}
 	_, known, err := h.settlementStateOf(ctx, identity)
@@ -1060,7 +1130,7 @@ func (h *Host) retireHeadlessBodies(ctx context.Context, addr event.Address, lin
 		if !ok {
 			continue
 		}
-		known, err := h.deliveryKnown(ctx, identity)
+		known, err := h.deliveryKnown(ctx, addr.SessionID, identity)
 		if err != nil {
 			assemblyWarn("tagent: the headless delivery of %s stands unread and is not retired: %v", identity, err)
 			continue
@@ -1112,13 +1182,17 @@ func (h *Host) deliverDelayedNotice(ctx context.Context, addr event.Address, sen
 func (h *Host) heldReasonAt(addr event.Address) (string, bool) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	account := h.deliveryAccountLocked(addr.SessionID, false)
+	if account == nil {
+		return "", false
+	}
 	manual := ""
 	retrying := ""
-	for id, held := range h.pendingDeliveries {
+	for id, held := range account.held {
 		if held.delivery.Target != addr {
 			continue
 		}
-		reason, isHeld := heldReasonOf(h.deliveryStates[id])
+		reason, isHeld := heldReasonOf(account.states[id])
 		if !isHeld {
 			continue
 		}
@@ -1173,7 +1247,7 @@ func (h *Host) handoffSettledBodies(ctx context.Context, addr event.Address, not
 		if !ok {
 			continue
 		}
-		state, known := h.deliveryStateOf(identity)
+		state, known := h.deliveryStateOf(addr.SessionID, identity)
 		if !known && h.restoredAccount() {
 			_, settled, err := h.deliverySettledOnChain(ctx, identity)
 			if err != nil {
@@ -1428,7 +1502,7 @@ func (c *deliveryConsumer) fire(identity string, entry *deliveryRetry) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	if state, held := host.deliveryStateOf(identity); held && deliveryStateSettled(state) {
+	if state, held := host.deliveryStateOf(entry.delivery.Target.SessionID, identity); held && deliveryStateSettled(state) {
 		return
 	}
 	if err := sender.Send(ctx, entry.delivery.Target, entry.delivery.Content); err != nil {
@@ -1697,36 +1771,37 @@ func (h *Host) deliveryRecoveryFacts(ctx context.Context) (map[string]deliverySe
 // belongs to.
 func (h *Host) collectRestoredAccount(states map[string]deliverySettlement, declared *[]deliverySettlement, attempts map[string]int) {
 	h.mu.Lock()
-	identities := make([]string, 0, len(h.deliveryStates))
-	for identity, state := range h.deliveryStates {
-		identities = append(identities, identity)
-		states[identity] = deliverySettlement{identity: identity, state: state}
+	for _, account := range h.deliveryAccounts {
+		for identity, state := range account.states {
+			states[identity] = deliverySettlement{identity: identity, state: state}
+		}
 	}
-	sort.Strings(identities)
-	for identity, held := range h.pendingDeliveries {
-		if held == nil {
-			continue
+	for _, account := range h.deliveryAccounts {
+		for identity, held := range account.held {
+			if held == nil {
+				continue
+			}
+			*declared = append(*declared, deliverySettlement{
+				identity: identity,
+				state:    account.states[identity],
+				delivery: held.delivery,
+				heldAt:   held.heldAt,
+			})
 		}
-		*declared = append(*declared, deliverySettlement{
-			identity: identity,
-			state:    h.deliveryStates[identity],
-			delivery: held.delivery,
-			heldAt:   held.heldAt,
-		})
-	}
-	for identity, held := range h.declaredOpen {
-		if held == nil {
-			continue
+		for identity, held := range account.declared {
+			if held == nil {
+				continue
+			}
+			if _, parked := account.held[identity]; parked {
+				continue
+			}
+			*declared = append(*declared, deliverySettlement{
+				identity: identity,
+				state:    account.states[identity],
+				delivery: held.delivery,
+				heldAt:   held.heldAt,
+			})
 		}
-		if _, parked := h.pendingDeliveries[identity]; parked {
-			continue
-		}
-		*declared = append(*declared, deliverySettlement{
-			identity: identity,
-			state:    h.deliveryStates[identity],
-			delivery: held.delivery,
-			heldAt:   held.heldAt,
-		})
 	}
 	h.mu.Unlock()
 	for _, retry := range h.retryConsumer().pendingRedrives() {
@@ -1793,6 +1868,11 @@ func declaredObligationOf(evt event.Event) (deliverySettlement, bool) {
 // of an account that has not read it yet.
 //
 //   - the entry stands in declaredOpen, not the review table: no review ruled on it and nobody approves it, while an obligation the account states is what a restart owes a send.
+//
+// declareObligation seats one landed declaration in the account: the delivery a
+// fact declared waits in declaredOpen under the identity an approval or refusal
+// names, so a cut taken after the landing states the obligation the chain already
+// carries. A declaration the chain already seated is one obligation.
 func (h *Host) declareObligation(evt event.Event) {
 	if h == nil {
 		return
@@ -1807,17 +1887,44 @@ func (h *Host) declareObligation(evt event.Event) {
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	if h.declaredOpen == nil {
-		h.declaredOpen = map[string]*heldDelivery{}
+	account := h.deliveryAccountLocked(declaration.delivery.Target.SessionID, true)
+	if account.declared == nil {
+		account.declared = map[string]*heldDelivery{}
 	}
-	if _, stated := h.declaredOpen[declaration.identity]; stated {
+	if _, stated := account.declared[declaration.identity]; stated {
 		return
 	}
-	h.declaredOpen[declaration.identity] = &heldDelivery{
+	account.declared[declaration.identity] = &heldDelivery{
 		id:       declaration.identity,
 		delivery: declaration.delivery,
 		heldAt:   heldAt,
 	}
+}
+
+// applyDeclaredObligation applies one landed fact to the account inside the flight
+// of the chain the obligation targets beside the flight of the chain that declared
+// it. The declaration lands on the chain that committed it, so the commit already
+// holds that chain's quiet point; the application also seats an obligation against
+// the target chain, so it holds that chain's quiet point too. A cut of the target
+// session therefore waits for a declaration that opens an obligation against it,
+// while a cut of any other chain never waits for either.
+func (h *Host) applyDeclaredObligation(evt event.Event) {
+	if h == nil || h.run == nil {
+		h.declareObligation(evt)
+		return
+	}
+	declaration, declared := declaredObligationOf(evt)
+	target := event.SessionID("")
+	if declared {
+		target = declaration.delivery.Target.SessionID
+	}
+	if target == "" {
+		h.declareObligation(evt)
+		return
+	}
+	h.run.flight.enterSession(target)
+	defer h.run.flight.leaveSession(target)
+	h.declareObligation(evt)
 }
 
 // restoreEventifiedDeliveries restores the account from the chain the run
@@ -1840,7 +1947,7 @@ func (h *Host) restoreEventifiedDeliveries(ctx context.Context) error {
 	}
 	h.mu.Unlock()
 	seen := make(map[string]bool, len(declared))
-	resumed := make(map[string]bool, len(window))
+	resumed := make(map[string]event.SessionID, len(window))
 	for _, declaration := range declared {
 		seen[declaration.identity] = true
 		settlement, known := window[declaration.identity]
@@ -1866,7 +1973,7 @@ func (h *Host) restoreEventifiedDeliveries(ctx context.Context) error {
 			return err
 		}
 		if settlement.state == heldStateOf(deliveryReasonRetrying) {
-			resumed[settlement.identity] = true
+			resumed[settlement.identity] = settlement.delivery.Target.SessionID
 		}
 	}
 	identities := make([]string, 0, len(window))
@@ -1892,11 +1999,11 @@ func (h *Host) restoreEventifiedDeliveries(ctx context.Context) error {
 			return err
 		}
 		if settlement.state == heldStateOf(deliveryReasonRetrying) {
-			resumed[identity] = true
+			resumed[identity] = settlement.delivery.Target.SessionID
 		}
 	}
-	for identity := range resumed {
-		if state, known := h.deliveryStateOf(identity); !known || state != heldStateOf(deliveryReasonRetrying) {
+	for identity, session := range resumed {
+		if state, known := h.deliveryStateOf(session, identity); !known || state != heldStateOf(deliveryReasonRetrying) {
 			continue
 		}
 		held, parked := h.parkedDelivery(identity)
@@ -1925,9 +2032,10 @@ func (h *Host) restoreEventifiedDeliveries(ctx context.Context) error {
 //   - a settled obligation owes nothing whatever the declaration the account restored says: its settlement landed past the cut the declaration was stated at, so the hold is dropped instead of waiting for a send a restart would make a second time.
 func (h *Host) restoreObligation(ctx context.Context, settlement deliverySettlement) error {
 	state := settlement.state
+	session := settlement.delivery.Target.SessionID
 	if deliveryStateSettled(state) {
-		h.dropHeld(settlement.identity)
-		h.noteDeliveryState(settlement.identity, state)
+		h.dropHeld(session, settlement.identity)
+		h.noteDeliveryState(session, settlement.identity, state)
 		return nil
 	}
 	if state != "" && state != deliveryStateOwed {
@@ -1936,7 +2044,7 @@ func (h *Host) restoreObligation(ctx context.Context, settlement deliverySettlem
 			heldAt = settlement.fact.Timestamp
 		}
 		h.parkHeld(settlement.identity, settlement.delivery, heldAt)
-		h.noteDeliveryState(settlement.identity, state)
+		h.noteDeliveryState(session, settlement.identity, state)
 		assemblyInfo("tagent: the delivery %s stands %s beside the restart", settlement.identity, state)
 		return nil
 	}
@@ -1964,12 +2072,18 @@ func (h *Host) restoreObligation(ctx context.Context, settlement deliverySettlem
 	return nil
 }
 
-// parkedDelivery reports the review-table entry of one identity.
+// parkedDelivery reports the review-table entry of one identity, in whichever
+// chain slice states it: a caller names the obligation, and the account answers
+// the one slice that holds it.
 func (h *Host) parkedDelivery(identity string) (*heldDelivery, bool) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	held, parked := h.pendingDeliveries[identity]
-	return held, parked
+	for _, account := range h.deliveryAccounts {
+		if held, parked := account.held[identity]; parked {
+			return held, true
+		}
+	}
+	return nil, false
 }
 
 // claimDelivery claims one obligation for one live path of this process: the

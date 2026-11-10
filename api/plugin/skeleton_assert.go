@@ -58,6 +58,12 @@ var (
 
 	_ func(Port) string = Port.String
 
+	_ func(Instance) Material = materialOf
+
+	_ func(materialDeclarer) Material = materialDeclarer.Material
+
+	_ func(Material) error = validateMaterial
+
 	_ func([]Instance) (Pipeline, error) = NewFlow
 )
 
@@ -116,6 +122,15 @@ const (
 	_ RiskLevel = RiskHigh
 	_ RiskLevel = RiskCritical
 
+	_ Timing = TimingPreSideEffect
+	_ Timing = TimingPostCommit
+	_ Timing = TimingRead
+
+	_ Failure = FailClosed
+	_ Failure = RecordGap
+	_ Failure = PreserveObligation
+	_ Failure = ReportLoss
+
 	_ Layer = LayerTrace
 	_ Layer = LayerMetric
 )
@@ -156,6 +171,12 @@ var (
 	}
 
 	_ = EnvironmentRequest{Agent: ""}
+
+	_ = Material{
+		Reads:   PortCallTransform,
+		Timing:  TimingPreSideEffect,
+		Failure: FailClosed,
+	}
 
 	_ = view.Presentation{
 		Fact:  "",

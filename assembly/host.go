@@ -189,38 +189,33 @@ type Host struct {
 	// deliveryRuler rules every turn body before the sender is called; a nil
 	// ruler keeps every delivery allowed.
 	deliveryRuler plugin.DeliveryRuler
-	// pendingDeliveries holds the bodies the host owes a target before the
-	// sender ran or was refused, keyed by the identity an approval or refusal
-	// names, and heldSeq orders the identities. Every obligation is recorded
-	// under the storage tier beside the table entry, so the table is rebuilt
-	// from the records beside a restart.
-	pendingDeliveries map[string]*heldDelivery
-	heldSeq           uint64
-	// declaredOpen holds the obligations the chain declared and no settlement has
-	// closed: the body, target, lineage and declaration moment of every answer
-	// whose delivery the live path has not settled yet. It stands beside
-	// pendingDeliveries instead of inside it because that table is the review
-	// surface a person approves or refuses, and a body no review has ruled on is
-	// no entry anybody decides. The fact that declares the obligation applies it
-	// here inside its own landing unit (run.mountObligationAccount), so a cut
-	// states the declaration the chain already carries.
-	declaredOpen map[string]*heldDelivery
+	// deliveryAccounts holds the deliverable account of this host sharded by the
+	// session chain each obligation targets: the slice of one chain is exactly the
+	// obligations whose target is that chain, so a cut of that chain reads its own
+	// work alone and pays nothing for the obligations another chain is owed. A
+	// slice states the review table, the declarations no settlement has answered
+	// yet and the settlement state token of each obligation of that chain.
+	deliveryAccounts map[event.SessionID]*deliveryAccount
+	// heldSeq orders the identities this host mints. It is one counter across the
+	// slices: an identity names one obligation of the host and not one of a
+	// chain, so the sequence behind it is never restarted per slice.
+	heldSeq uint64
 	// restoredDelivery reports that the delivery account was restored from a
 	// framework checkpoint, so the boot reads only the facts that landed past
 	// that checkpoint's cut instead of the whole chain of settlements.
 	restoredDelivery bool
-	// deliveryStates is the host's in-process view of the settlement facts it
-	// wrote or restored: the delivery identity beside the latest settlement
-	// state token. The facts remain the truth — this table only spares a window
-	// read on the per-body path and is rebuilt from the chain on every boot.
-	deliveryStates map[string]string
 	// deliveryPins names the settlement fact kept hot for every obligation that
 	// still owes something, so settling it releases the pin of the fact it
-	// replaces. The facts themselves carry the pins on the run's window.
+	// replaces. The facts themselves carry the pins on the run's window. It is
+	// one table and not a slice of each chain: a pin is named by the obligation
+	// it belongs to, and the account of a chain reaches the pins of its own
+	// obligations through them, so no cut scans the pins of another chain.
 	deliveryPins map[string]event.EventID
 	// deliveryClaims names the obligations one live path of this process already
 	// claimed to deliver, so the closed segment, the hand-off and the retry
-	// consumer never send one obligation twice at the same time.
+	// consumer never send one obligation twice at the same time. It is the
+	// mutual exclusion of one attempt and not account state: no cut reads it and
+	// no carrier restates it.
 	deliveryClaims map[string]bool
 	// retries is the DeliveryConsumer: the self-timed redrive of the obligations
 	// the account still owes. It is built on the first obligation that needs it
@@ -758,30 +753,28 @@ func Boot(configPath string, opts ...HostOption) (*Host, error) {
 	meditationPort.Bind(run)
 	reentryPort.Bind(run)
 	host = &Host{
-		ctx:               ctx,
-		cancel:            cancel,
-		run:               run,
-		entry:             event.AgentID(decl.Entry),
-		sender:            cfg.hostSender,
-		deliveries:        deliveryMeter,
-		deliveryRuler:     cfg.deliveryRuler,
-		pendingDeliveries: map[string]*heldDelivery{},
-		declaredOpen:      map[string]*heldDelivery{},
-		meditation:        driver,
-		settle:            settleDriver,
-		execManager:       execManager,
-		configPath:        configPath,
-		doc:               doc,
-		natives:           natives,
-		nativeFor:         nativeFor,
-		models:            models,
-		specs:             specs,
-		shared:            modelTable,
-		faces:             faces,
-		capture:           capture,
-		telemetryStop:     stopTelemetry,
-		userAddresses:     map[event.SessionID]event.Address{},
-		userTurns:         map[event.Address]int{},
+		ctx:           ctx,
+		cancel:        cancel,
+		run:           run,
+		entry:         event.AgentID(decl.Entry),
+		sender:        cfg.hostSender,
+		deliveries:    deliveryMeter,
+		deliveryRuler: cfg.deliveryRuler,
+		meditation:    driver,
+		settle:        settleDriver,
+		execManager:   execManager,
+		configPath:    configPath,
+		doc:           doc,
+		natives:       natives,
+		nativeFor:     nativeFor,
+		models:        models,
+		specs:         specs,
+		shared:        modelTable,
+		faces:         faces,
+		capture:       capture,
+		telemetryStop: stopTelemetry,
+		userAddresses: map[event.SessionID]event.Address{},
+		userTurns:     map[event.Address]int{},
 	}
 	trace("host built")
 	if err := host.registerDeliverySlice(); err != nil {

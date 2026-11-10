@@ -49,13 +49,12 @@ func deliveryTestHost(ctx context.Context, run *Run, sender MessageSender) *Host
 		entry = published
 	}
 	return &Host{
-		ctx:               ctx,
-		run:               run,
-		entry:             entry,
-		sender:            sender,
-		pendingDeliveries: map[string]*heldDelivery{},
-		userAddresses:     map[event.SessionID]event.Address{},
-		userTurns:         map[event.Address]int{},
+		ctx:           ctx,
+		run:           run,
+		entry:         entry,
+		sender:        sender,
+		userAddresses: map[event.SessionID]event.Address{},
+		userTurns:     map[event.Address]int{},
 	}
 }
 
@@ -690,11 +689,30 @@ func deliveryTestStates(host *Host) map[string]string {
 	}
 	host.mu.Lock()
 	defer host.mu.Unlock()
-	states := make(map[string]string, len(host.deliveryStates))
-	for identity, state := range host.deliveryStates {
-		states[identity] = state
+	states := map[string]string{}
+	for _, account := range host.deliveryAccounts {
+		for identity, state := range account.states {
+			states[identity] = state
+		}
 	}
 	return states
+}
+
+// deliveryTestObligationSessions names the chain each obligation of one account
+// is owed to, so a check reads a state by the slice that states it.
+func deliveryTestObligationSessions(h *Host) map[string]event.SessionID {
+	if h == nil {
+		return nil
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	out := map[string]event.SessionID{}
+	for session, account := range h.deliveryAccounts {
+		for identity := range account.states {
+			out[identity] = session
+		}
+	}
+	return out
 }
 
 // deliveryTestSettlement reads one settlement state for a check and refuses the
@@ -895,8 +913,9 @@ func TestMultiSessionRecoveryBounded(t *testing.T) {
 	if err := restartedHost.restorePendingDeliveries(ctx); err != nil {
 		t.Fatalf("restore the bounded sessions: %v", err)
 	}
+	sessions := deliveryTestObligationSessions(restartedHost)
 	for _, identity := range identities {
-		obliged, known := restartedHost.deliveryStateOf(identity)
+		obliged, known := restartedHost.deliveryStateOf(sessions[identity], identity)
 		if !known || !deliveryStateUnsettled(obliged) {
 			t.Fatalf("the restart lost the unsettled obligation %s (state=%q known=%v)", identity, obliged, known)
 		}
@@ -1370,7 +1389,9 @@ func TestRecoveryNoLongerScansKVPrefix(t *testing.T) {
 
 	counter.reset()
 	host.mu.Lock()
-	host.deliveryStates = nil
+	for _, account := range host.deliveryAccounts {
+		account.states = nil
+	}
 	host.deliveryPins = nil
 	host.mu.Unlock()
 	if err := host.restoreEventifiedDeliveries(ctx); err != nil {
@@ -1379,7 +1400,7 @@ func TestRecoveryNoLongerScansKVPrefix(t *testing.T) {
 	if scans := counter.scanCount(); scans != 0 {
 		t.Fatalf("the recovery scanned the retired prefix %d time(s), want 0", scans)
 	}
-	if obliged, known := host.deliveryStateOf(identity); !known || obliged != heldStateOf(deliveryReasonApproval) {
+	if obliged, known := host.deliveryStateOf(addr.SessionID, identity); !known || obliged != heldStateOf(deliveryReasonApproval) {
 		t.Fatalf("the recovery restored %q (known=%v) for %s, want the held state the chain states", obliged, known, identity)
 	}
 	deliveryTestStopRetries(host)
@@ -2059,13 +2080,12 @@ func boundaryAnchorHost(ctx context.Context, run *Run, sender MessageSender) *Ho
 		entry = published
 	}
 	return &Host{
-		ctx:               ctx,
-		run:               run,
-		entry:             entry,
-		sender:            sender,
-		pendingDeliveries: map[string]*heldDelivery{},
-		userAddresses:     map[event.SessionID]event.Address{},
-		userTurns:         map[event.Address]int{},
+		ctx:           ctx,
+		run:           run,
+		entry:         entry,
+		sender:        sender,
+		userAddresses: map[event.SessionID]event.Address{},
+		userTurns:     map[event.Address]int{},
 	}
 }
 
@@ -2532,7 +2552,7 @@ func TestRestartRestoresHeldSequence(t *testing.T) {
 	if got := recovered.mintHeldIdentity(); got != "delivery-8" {
 		t.Fatalf("the restarted host minted %q, want delivery-8 after the existing delivery-7", got)
 	}
-	if state, known := recovered.deliveryStateOf("delivery-7"); !known || state != heldStateOf(deliveryReasonApproval) {
+	if state, known := recovered.deliveryStateOf(addr.SessionID, "delivery-7"); !known || state != heldStateOf(deliveryReasonApproval) {
 		t.Fatalf("the original held body was lost or overwritten: state=%q known=%v", state, known)
 	}
 }
@@ -2685,7 +2705,7 @@ func TestDeliveryRetryExhaustRefuses(t *testing.T) {
 	}
 	defer deliveryTestStopRetries(host)
 	if !deliveryTestWaitFor(5*time.Second, func() bool {
-		state, known := host.deliveryStateOf(identity)
+		state, known := host.deliveryStateOf(addr.SessionID, identity)
 		return known && state == heldStateOf(deliveryReasonRetryExhausted)
 	}) {
 		t.Fatalf("the resumed retry never reached the bound: states=%v attempts=%d", deliveryTestStates(host), sender.attemptCount("exhaust body"))
@@ -2761,7 +2781,7 @@ func TestDeliverySettlementReadErrorNotResend(t *testing.T) {
 	if _, _, err := host.settlementStateOf(ctx, identity); err == nil {
 		t.Fatal("the corrupt settlement fact read as absence, want a named read error")
 	}
-	known, err := host.deliveryKnown(ctx, identity)
+	known, err := host.deliveryKnown(ctx, addr.SessionID, identity)
 	if err == nil || known {
 		t.Fatalf("the corrupt settlement answered known=%v err=%v, want a named error that blocks the resend decision", known, err)
 	}
@@ -2813,5 +2833,47 @@ func TestDeliveryDurableReadErrorSurfaced(t *testing.T) {
 	}
 	if _, err := run.DeliveryLedger().Records(); !errors.Is(err, ledger.ErrSegmentBodyMissing) {
 		t.Fatalf("the account read face swallowed the durable error = %v, want %v", err, ledger.ErrSegmentBodyMissing)
+	}
+}
+
+// TestSessionCutDrainsTheSettlementOfItsChain pins the fence bucket a settlement lands under.
+//
+//   - positive: a cut of the chain a settlement is landing on parks until that unit leaves, so the cut never reads the account beside a settlement the chain carries
+//   - negative: a cut of the chain beside answers at once, so one chain's delivery work never widens another chain's quiet point
+//   - consumer: writeDeliverySettlement enters the target session's bucket and Run.CheckpointSession drains it
+//
+// 契约: docs/wiki/agent/event-flow.md#event-pipeline-atomic
+func TestSessionCutDrainsTheSettlementOfItsChain(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	run := windowChainRun(t, ctx)
+	kept := event.SessionID("session-fence-kept")
+	other := event.SessionID("session-fence-other")
+	run.flight.enterSession(kept)
+	beside := make(chan error, 1)
+	go func() { beside <- run.flight.awaitSession(ctx, other) }()
+	select {
+	case err := <-beside:
+		if err != nil {
+			t.Fatalf("the cut of the chain beside answered an error: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("a cut of the chain beside waited for the settlement of another chain, want one chain's delivery work never to widen another chain's quiet point")
+	}
+	own := make(chan error, 1)
+	go func() { own <- run.flight.awaitSession(ctx, kept) }()
+	select {
+	case err := <-own:
+		t.Fatalf("a cut of the chain a settlement is landing on answered beside it (err=%v), want it parked until the unit leaves", err)
+	case <-time.After(150 * time.Millisecond):
+	}
+	run.flight.leaveSession(kept)
+	select {
+	case err := <-own:
+		if err != nil {
+			t.Fatalf("the cut of the settled chain answered an error: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the cut of the chain whose settlement landed never answered")
 	}
 }

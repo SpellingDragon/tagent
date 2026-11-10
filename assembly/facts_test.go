@@ -166,11 +166,10 @@ func TestDeliveryAfterRestartKeepsTheTurnAnswer(t *testing.T) {
 
 	channel := &windowTestChannel{}
 	host := &Host{
-		run:               run,
-		entry:             "agent-a",
-		sender:            channel,
-		userAddresses:     map[event.SessionID]event.Address{},
-		pendingDeliveries: map[string]*heldDelivery{},
+		run:           run,
+		entry:         "agent-a",
+		sender:        channel,
+		userAddresses: map[event.SessionID]event.Address{},
 	}
 	turn, err := host.Invoke(ctx, InvokeRequest{
 		Address:       addr,

@@ -47,7 +47,7 @@ func TestHandoffRedrivesStalledOwedRecords(t *testing.T) {
 	if !ok {
 		t.Fatalf("the generated body names no delivery obligation: %+v", bodies[0])
 	}
-	host := &Host{run: run, entry: "agent-a", pendingDeliveries: map[string]*heldDelivery{}}
+	host := &Host{run: run, entry: "agent-a"}
 	if err := host.handoffSettledBodies(ctx, addr, notice); err != nil {
 		t.Fatalf("hand the settled bodies off beside no sender: %v", err)
 	}
@@ -87,7 +87,7 @@ func TestDeliveredBodyNamesAnUnconfirmedReceipt(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 	run := snapshotTestRun(t, ctx, WithStorage(ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: t.TempDir()}))
-	host := &Host{run: run, entry: "agent-a", pendingDeliveries: map[string]*heldDelivery{}}
+	host := &Host{run: run, entry: "agent-a"}
 	addr := event.Address{AgentID: "agent-a", SessionID: "session-unconfirmed-receipt"}
 	unconfirmed := &hostTestChannel{}
 	unconfirmedCtx, unconfirmedCancel := context.WithCancel(ctx)
