@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/SpellingDragon/tagent/api/event"
+	"github.com/SpellingDragon/tagent/api/model"
 	"github.com/SpellingDragon/tagent/api/plugin"
 	"github.com/SpellingDragon/tagent/memory/ledger"
 	"github.com/SpellingDragon/tagent/runtime/agent"
@@ -376,4 +377,226 @@ func TestCheckpointBodyBoundedByTheOpenAccount(t *testing.T) {
 	if len(heldPayload) <= len(long) {
 		t.Fatalf("the carrier states %d bytes beside one open obligation and %d beside none, want the open account carried", len(heldPayload), len(long))
 	}
+}
+
+// declaredTestObligation commits the fact an ended turn answers with: the
+// assistant body beside the delivery declaration it carries, through the very
+// commit entry the loop lands its output on.
+func declaredTestObligation(t *testing.T, ctx context.Context, run *Run, addr event.Address, key event.EventID, body string) {
+	t.Helper()
+	if _, err := run.commitFactChecked(ctx, event.Event{
+		Key:       key,
+		Type:      event.TypeAgentOutput,
+		Timestamp: time.Now(),
+		Message:   model.Message{Role: model.RoleAssistant, Content: body},
+		Owner:     addr, Source: addr, Target: addr,
+		Meta: map[string]string{
+			deliveryOwedMeta:          "1",
+			deliveryTargetAgentMeta:   string(addr.AgentID),
+			deliveryTargetSessionMeta: string(addr.SessionID),
+			deliveryLineageMeta:       "user",
+		},
+	}); err != nil {
+		t.Fatalf("commit the owed declaration of %s: %v", key, err)
+	}
+}
+
+// owedOfIdentity reports the owed entry one carrier states for one identity.
+func owedOfIdentity(wire deliverySliceWire, identity string) (deliverySliceOwed, bool) {
+	for _, owed := range wire.Owed {
+		if owed.Identity == identity {
+			return owed, true
+		}
+	}
+	return deliverySliceOwed{}, false
+}
+
+// TestCheckpointKeepsDeclaredObligationAcrossCut pins a declaration no send has settled yet.
+//   - positive: a declared body no send settled when the cut was filed is stated by the carrier and delivered exactly once by the restart
+//   - negative: a declaration the account settled before the cut is stated nowhere, so the carrier never re-owes a body the chain already delivered
+//   - consumer: the obligation reaches the sender through restorePendingDeliveries and restoreObligation, the boot path the host runs
+//
+// 契约: docs/wiki/platform/platform-subsystems.md#framework-checkpoint
+func TestCheckpointKeepsDeclaredObligationAcrossCut(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
+	defer cancel()
+	root := t.TempDir()
+	storage := WithStorage(ledger.StorageConfig{Type: ledger.StorageJournal, Root: root})
+	addr := deliveryTestAddress("session-declared-across-cut")
+	openKey := event.EventID("declared-across-cut-open")
+	settledKey := event.EventID("declared-across-cut-settled")
+	openBody := "the body declared before its send"
+	settledBody := "the body declared and delivered before the cut"
+	openIdentity := hostDeliveryFreshPrefix + string(openKey)
+	settledIdentity := hostDeliveryFreshPrefix + string(settledKey)
+
+	first := snapshotTestRun(t, ctx, storage)
+	host := deliveryTestHost(ctx, first, newDeliveryTestSender(nil))
+	if err := host.registerDeliverySlice(); err != nil {
+		t.Fatalf("mount the delivery account on the state seam: %v", err)
+	}
+	declaredTestObligation(t, ctx, first, addr, openKey, openBody)
+	declaredTestObligation(t, ctx, first, addr, settledKey, settledBody)
+	settledDelivery := plugin.Delivery{
+		Content: settledBody, Lineage: "user",
+		Target: event.Address{AgentID: addr.AgentID, SessionID: addr.SessionID},
+	}
+	if err := host.writeDeliveryState(ctx, settledIdentity, settledDelivery, deliveryStateSent, time.Time{}); err != nil {
+		t.Fatalf("settle the delivered declaration: %v", err)
+	}
+	host.dropHeld(settledIdentity)
+	key, filed, err := first.Checkpoint(ctx)
+	if err != nil || !filed {
+		t.Fatalf("file the checkpoint across the declarations = (%t, %v)", filed, err)
+	}
+	wire, carried := checkpointDeliveryOf(t, ctx, first, key)
+	if !carried {
+		t.Fatal("the checkpoint states no delivery slice at all")
+	}
+	owed, stated := owedOfIdentity(wire, openIdentity)
+	if !stated {
+		t.Fatalf("the carrier states %+v, want the declaration of %s the cut covers and no send settled", wire.Owed, openIdentity)
+	}
+	if owed.Content != openBody || owed.Lineage != "user" || owed.Agent != string(addr.AgentID) || owed.Session != string(addr.SessionID) {
+		t.Fatalf("the carrier states %+v for %s, want the body, target and lineage the declaration carries", owed, openIdentity)
+	}
+	if owed.State != "" {
+		t.Fatalf("the carrier states %s = %q, want no settlement state beside a declaration no send answered", openIdentity, owed.State)
+	}
+	if _, settledStated := owedOfIdentity(wire, settledIdentity); settledStated {
+		t.Fatalf("the carrier states the settled %s, want the cut alone to cover a delivered body", settledIdentity)
+	}
+	if _, err := first.Close(ctx, agent.CloseRequest{Timeout: time.Now().Add(20 * time.Second)}); err != nil {
+		t.Fatalf("close the process that stopped beside the open declaration: %v", err)
+	}
+
+	restarted := snapshotTestRun(t, ctx, storage)
+	sender := newDeliveryTestSender(nil)
+	recovered := deliveryTestHost(ctx, restarted, sender)
+	if err := recovered.registerDeliverySlice(); err != nil {
+		t.Fatalf("mount the restored delivery account: %v", err)
+	}
+	if err := recovered.restorePendingDeliveries(ctx); err != nil {
+		t.Fatalf("restore the account the cut stated: %v", err)
+	}
+	defer deliveryTestStopRetries(recovered)
+	if got := sender.attemptCount(openBody); got != 1 {
+		t.Fatalf("the restart asked the channel to take the declared body %d time(s), want the one send the declaration owes", got)
+	}
+	if got := sender.attemptCount(settledBody); got != 0 {
+		t.Fatalf("the restart asked the channel to take the settled body %d time(s), want none beside the receipt the chain keeps", got)
+	}
+	if state, known := recovered.deliveryStateOf(openIdentity); !known || state != deliveryStateSent {
+		t.Fatalf("the restart states %s = (%q, %v), want the receipt of the send it made", openIdentity, state, known)
+	}
+	if _, stated := recovered.parkedDelivery(openIdentity); stated {
+		t.Fatalf("the restart parked %s for a decision, want a declaration delivered and never an entry nobody approves", openIdentity)
+	}
+	if got := parkedCount(recovered); got != 0 {
+		t.Fatalf("the restart holds %d obligation(s), want none beside the declaration it delivered", got)
+	}
+	if _, err := restarted.Close(ctx, agent.CloseRequest{Timeout: time.Now().Add(20 * time.Second)}); err != nil {
+		t.Fatalf("close the restart that delivered the declaration: %v", err)
+	}
+
+	third := snapshotTestRun(t, ctx, storage)
+	again := newDeliveryTestSender(nil)
+	whole := deliveryTestHost(ctx, third, again)
+	if err := whole.registerDeliverySlice(); err != nil {
+		t.Fatalf("mount the account of the third process: %v", err)
+	}
+	if err := whole.restorePendingDeliveries(ctx); err != nil {
+		t.Fatalf("restore the settled account: %v", err)
+	}
+	defer deliveryTestStopRetries(whole)
+	if got := again.attemptCount(openBody); got != 0 {
+		t.Fatalf("the third process asked the channel to take the delivered body %d time(s), want none: the receipt the second process wrote is the settlement", got)
+	}
+	if _, err := third.Close(ctx, agent.CloseRequest{Timeout: time.Now().Add(20 * time.Second)}); err != nil {
+		t.Fatalf("close the third process: %v", err)
+	}
+}
+
+// TestDeliveryAccountStatesTheLiveSend pins the declaration account against the live path that settles it.
+//   - the body a segment delivers enters the account inside the commit that declared it, and the send that settles it leaves no entry behind
+//   - a cut beside a delivered turn states nothing, so a restart never sends a body the chain already delivered
+//
+// 契约: docs/wiki/platform/platform-subsystems.md#framework-checkpoint
+func TestDeliveryAccountStatesTheLiveSend(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+	root := t.TempDir()
+	storage := WithStorage(ledger.StorageConfig{Type: ledger.StorageJournal, Root: root})
+	addr := deliveryTestAddress("session-live-send-account")
+	run := snapshotTestRun(t, ctx, storage)
+	sender := newDeliveryTestSender(nil)
+	host := deliveryTestHost(ctx, run, sender)
+	if err := host.registerDeliverySlice(); err != nil {
+		t.Fatalf("mount the delivery account on the state seam: %v", err)
+	}
+	invocation := event.InvocationID("invocation-live-send-account")
+	body := "the body the live path delivers"
+	if _, err := run.commitFactChecked(ctx, event.Event{
+		Key:          "input-live-send-account",
+		Type:         event.TypeExternalInput,
+		Timestamp:    time.Now(),
+		InvocationID: invocation,
+		Message:      model.Message{Role: model.RoleUser, Content: "hello"},
+		Owner:        addr, Source: addr, Target: addr,
+	}); err != nil {
+		t.Fatalf("commit the input the turn consumed: %v", err)
+	}
+	outputKey := event.EventID("output-live-send-account")
+	if _, err := run.commitFactChecked(ctx, event.Event{
+		Key:          outputKey,
+		Type:         event.TypeAgentOutput,
+		Timestamp:    time.Now(),
+		InvocationID: invocation,
+		Message:      model.Message{Role: model.RoleAssistant, Content: body},
+		Owner:        addr, Source: addr, Target: addr,
+		Meta: map[string]string{
+			deliveryOwedMeta:          "1",
+			deliveryTargetAgentMeta:   string(addr.AgentID),
+			deliveryTargetSessionMeta: string(addr.SessionID),
+			deliveryLineageMeta:       "user",
+			event.MetaKeyInputEvents:  `["input-live-send-account"]`,
+		},
+	}); err != nil {
+		t.Fatalf("commit the turn output: %v", err)
+	}
+	identity := hostDeliveryFreshPrefix + string(outputKey)
+	carrier := func() deliverySliceWire {
+		wire, carried := checkpointDeliveryOf(t, ctx, run, mustCheckpoint(t, ctx, run))
+		if !carried {
+			t.Fatal("the checkpoint states no delivery slice at all")
+		}
+		return wire
+	}
+	declared, stated := owedOfIdentity(carrier(), identity)
+	if !stated {
+		t.Fatalf("the carrier of the process states no obligation of %s, want the one the output fact declared inside its own landing unit", identity)
+	}
+	if declared.Content != body || declared.State != "" {
+		t.Fatalf("the carrier states %+v for %s, want the body and no settlement state beside a declaration no send answered", declared, identity)
+	}
+	host.deliverFresh(ctx, addr, sender, "user", agent.Turn{InvocationID: invocation, Terminal: model.KindCompleted})
+	if got := sender.attemptCount(body); got != 1 {
+		t.Fatalf("the live path asked the channel to take the body %d time(s), want the one send of a segment closing", got)
+	}
+	if _, stated := owedOfIdentity(carrier(), identity); stated {
+		t.Fatalf("the carrier still states the delivered %s, want the settlement to answer the declaration", identity)
+	}
+	if _, err := run.Close(ctx, agent.CloseRequest{Timeout: time.Now().Add(20 * time.Second)}); err != nil {
+		t.Fatalf("close the process: %v", err)
+	}
+}
+
+// mustCheckpoint files one checkpoint of the run and answers its fact key.
+func mustCheckpoint(t *testing.T, ctx context.Context, run *Run) event.EventID {
+	t.Helper()
+	key, filed, err := run.Checkpoint(ctx)
+	if err != nil || !filed {
+		t.Fatalf("file the checkpoint = (%t, %v), want a filed fact", filed, err)
+	}
+	return key
 }

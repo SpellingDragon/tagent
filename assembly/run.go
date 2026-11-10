@@ -309,6 +309,10 @@ type Run struct {
 	// states is the state seam of this run: the registry every consumer's
 	// recoverable state slice is mounted on, aggregated into one checkpoint.
 	states *state.StateRegistry
+	// obligations is the account every landed fact is applied to (see
+	// mountObligationAccount): the delivery account of the host mounted on this
+	// run. A run beside no mounted account lands its facts without one.
+	obligations func(event.Event)
 	// checkpointEvery and checkpointPeriod are the two cadence dials of the
 	// framework checkpoint: a busy chain files one after this many commits and a
 	// quiet chain still files one after this long.

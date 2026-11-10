@@ -132,13 +132,19 @@ func (s deliveryStateSlice) RestoreState(ctx context.Context, payload []byte) er
 
 // registerDeliverySlice mounts the delivery account on the run's state seam, so
 // every checkpoint the framework files carries it and a boot restores it instead
-// of scanning the committed history for settlements.
+// of scanning the committed history for settlements. The same call mounts the
+// account a landed declaration is applied to, so the obligation a fact declares
+// enters the account inside that fact's landing unit and no cut falls between the
+// declaration and the account that owes it.
 func (h *Host) registerDeliverySlice() error {
 	if h == nil || h.run == nil {
 		return nil
 	}
-	_, err := h.run.RegisterStateSlice(deliveryStateSlice{host: h})
-	return err
+	if _, err := h.run.RegisterStateSlice(deliveryStateSlice{host: h}); err != nil {
+		return err
+	}
+	h.run.mountObligationAccount(h.declareObligation)
+	return nil
 }
 
 // deliverySlice states the whole open account of the host: the obligations still
@@ -146,6 +152,12 @@ func (h *Host) registerDeliverySlice() error {
 // attempt they stand at, the pins kept hot for them and the sequence the holds
 // are ordered by. The settled history is stated by the cut the checkpoint
 // carries, so the payload is the open account alone.
+//
+// An obligation is open whether the account holds it in the review table or in
+// the declarations no settlement has answered, so both sets are stated: a body
+// the chain declared and the live path had not settled when the cut was taken is
+// owed a send, and a carrier that omitted it would leave the cut claiming a
+// settlement that never happened.
 func (h *Host) deliverySlice() ([]byte, error) {
 	if h == nil {
 		return []byte("null"), nil
@@ -155,16 +167,25 @@ func (h *Host) deliverySlice() ([]byte, error) {
 		HeldSeq:  h.heldSeq,
 		Attempts: []deliverySliceRetry{},
 		Pins:     make(map[string]event.EventID, len(h.deliveryPins)),
-		Owed:     make([]deliverySliceOwed, 0, len(h.pendingDeliveries)),
+		Owed:     make([]deliverySliceOwed, 0, len(h.pendingDeliveries)+len(h.declaredOpen)),
 	}
 	retries := h.retries
-	identities := make([]string, 0, len(h.pendingDeliveries))
+	identities := make([]string, 0, len(h.pendingDeliveries)+len(h.declaredOpen))
 	for identity := range h.pendingDeliveries {
+		identities = append(identities, identity)
+	}
+	for identity := range h.declaredOpen {
+		if _, parked := h.pendingDeliveries[identity]; parked {
+			continue
+		}
 		identities = append(identities, identity)
 	}
 	sort.Strings(identities)
 	for _, identity := range identities {
 		held := h.pendingDeliveries[identity]
+		if held == nil {
+			held = h.declaredOpen[identity]
+		}
 		if held == nil {
 			continue
 		}
@@ -221,6 +242,9 @@ func (h *Host) restoreDeliverySlice(payload []byte) error {
 	if h.pendingDeliveries == nil {
 		h.pendingDeliveries = map[string]*heldDelivery{}
 	}
+	if h.declaredOpen == nil {
+		h.declaredOpen = map[string]*heldDelivery{}
+	}
 	for _, owed := range wire.Owed {
 		if owed.Identity == "" {
 			continue
@@ -231,10 +255,7 @@ func (h *Host) restoreDeliverySlice(payload []byte) error {
 		if deliveryStateSettled(owed.State) {
 			continue
 		}
-		if _, parked := h.pendingDeliveries[owed.Identity]; parked {
-			continue
-		}
-		h.pendingDeliveries[owed.Identity] = &heldDelivery{
+		restored := &heldDelivery{
 			id: owed.Identity,
 			delivery: plugin.Delivery{
 				Content: owed.Content,
@@ -246,6 +267,16 @@ func (h *Host) restoreDeliverySlice(payload []byte) error {
 			},
 			heldAt: owed.HeldAt,
 		}
+		if owed.State == "" {
+			if _, stated := h.declaredOpen[owed.Identity]; !stated {
+				h.declaredOpen[owed.Identity] = restored
+			}
+			continue
+		}
+		if _, parked := h.pendingDeliveries[owed.Identity]; parked {
+			continue
+		}
+		h.pendingDeliveries[owed.Identity] = restored
 	}
 	h.restoredDelivery = true
 	h.mu.Unlock()

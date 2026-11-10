@@ -599,7 +599,9 @@ func (h *Host) restoredAccount() bool {
 // noteDeliveryState records the latest settlement state this host wrote or
 // restored for one obligation, beside the fact key that states it, and moves
 // the hot-window pin of the obligation onto the newest unsettled fact: the
-// state an obligation stands in is exactly the fact the window must keep.
+// state an obligation stands in is exactly the fact the window must keep. It
+// also answers the declaration the account left open, because a hold or a
+// refusal parks the obligation in the review table and a receipt closes it.
 func (h *Host) noteDeliveryState(identity, state string) {
 	if h == nil || identity == "" {
 		return
@@ -610,6 +612,7 @@ func (h *Host) noteDeliveryState(identity, state string) {
 		h.deliveryStates = map[string]string{}
 	}
 	h.deliveryStates[identity] = state
+	delete(h.declaredOpen, identity)
 	previous := h.deliveryPins[identity]
 	if deliveryStateUnsettled(state) {
 		if h.deliveryPins == nil {
@@ -1688,7 +1691,10 @@ func (h *Host) deliveryRecoveryFacts(ctx context.Context) (map[string]deliverySe
 // recovery set: every settlement state the account remembers beside the
 // obligations it still owes with the delivery and hold moment they carry, and
 // the redrive each of them stands at, so a restart resumes the bounded backoff
-// where the process before it stopped instead of starting it over.
+// where the process before it stopped instead of starting it over. The
+// declarations the carrier stated are folded beside the review table: both stand
+// owed a send, and the state each carries tells the recovery which table it
+// belongs to.
 func (h *Host) collectRestoredAccount(states map[string]deliverySettlement, declared *[]deliverySettlement, attempts map[string]int) {
 	h.mu.Lock()
 	identities := make([]string, 0, len(h.deliveryStates))
@@ -1699,6 +1705,20 @@ func (h *Host) collectRestoredAccount(states map[string]deliverySettlement, decl
 	sort.Strings(identities)
 	for identity, held := range h.pendingDeliveries {
 		if held == nil {
+			continue
+		}
+		*declared = append(*declared, deliverySettlement{
+			identity: identity,
+			state:    h.deliveryStates[identity],
+			delivery: held.delivery,
+			heldAt:   held.heldAt,
+		})
+	}
+	for identity, held := range h.declaredOpen {
+		if held == nil {
+			continue
+		}
+		if _, parked := h.pendingDeliveries[identity]; parked {
 			continue
 		}
 		*declared = append(*declared, deliverySettlement{
@@ -1728,12 +1748,24 @@ func collectDeliveryRecoveryFact(evt event.Event, states map[string]deliverySett
 	if settlement, ok := settlementOf(evt); ok {
 		states[settlement.identity] = settlement
 	}
+	if declaration, ok := declaredObligationOf(evt); ok {
+		*declared = append(*declared, declaration)
+	}
+}
+
+// declaredObligationOf reports the delivery obligation one committed fact
+// declares: the identity derived from the fact key beside the body, target and
+// lineage the fact stated. It is the one derivation of a declaration — the boot
+// recovery reads it from the chain, the live account applies it from the landing
+// unit, and the carrier states it — so the three never disagree about what one
+// fact owes.
+func declaredObligationOf(evt event.Event) (deliverySettlement, bool) {
 	if evt.Type != event.TypeAgentOutput || evt.Meta[deliveryOwedMeta] != "1" {
-		return
+		return deliverySettlement{}, false
 	}
 	identity, ok := freshObligationOf(freshBody{fact: evt.Key})
 	if !ok {
-		return
+		return deliverySettlement{}, false
 	}
 	target := event.Address{
 		AgentID:   event.AgentID(evt.Meta[deliveryTargetAgentMeta]),
@@ -1743,14 +1775,49 @@ func collectDeliveryRecoveryFact(evt event.Event, states map[string]deliverySett
 		target = evt.Owner
 	}
 	body, _ := assistantBodyOf(evt)
-	*declared = append(*declared, deliverySettlement{
+	return deliverySettlement{
 		identity: identity,
 		delivery: plugin.Delivery{
 			Content: body.content,
 			Lineage: evt.Meta[deliveryLineageMeta],
 			Target:  target,
 		},
-	})
+	}, true
+}
+
+// declareObligation applies one landed fact to the open account: a fact that
+// declares a delivery obligation enters the account under the identity, body,
+// target, lineage and moment it stated, unless the account already states that
+// identity. The run calls it inside the landing unit of the fact, so the carrier
+// a following cut files states a declaration the chain already carries instead
+// of an account that has not read it yet.
+//
+//   - the entry stands in declaredOpen, not the review table: no review ruled on it and nobody approves it, while an obligation the account states is what a restart owes a send.
+func (h *Host) declareObligation(evt event.Event) {
+	if h == nil {
+		return
+	}
+	declaration, ok := declaredObligationOf(evt)
+	if !ok {
+		return
+	}
+	heldAt := evt.Timestamp
+	if heldAt.IsZero() {
+		heldAt = time.Now()
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.declaredOpen == nil {
+		h.declaredOpen = map[string]*heldDelivery{}
+	}
+	if _, stated := h.declaredOpen[declaration.identity]; stated {
+		return
+	}
+	h.declaredOpen[declaration.identity] = &heldDelivery{
+		id:       declaration.identity,
+		delivery: declaration.delivery,
+		heldAt:   heldAt,
+	}
 }
 
 // restoreEventifiedDeliveries restores the account from the chain the run

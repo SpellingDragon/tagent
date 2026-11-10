@@ -81,7 +81,7 @@ func (r *Run) commitFactChecked(ctx context.Context, evt event.Event) (event.Eve
 // states the account never triggers the cadence that files another.
 //
 //   - a checkpoint fact stays on the store the boot reads it from and enters no session chain: it is a framework state carrier, not material of any chain, so the live ledger keeps the window of the chains it serves and never one fact per cut.
-//   - the whole commit holds the quiet-point fence, so a cut that drained the pipeline reads every state this fact left behind instead of one caught between the landing and its application.
+//   - the whole commit holds the quiet-point fence, so a cut that drained the pipeline reads every state this fact left behind instead of one caught between the landing and its application. The obligation account a mounted host keeps is applied inside that unit for the same reason: the declaration a fact carries and the account that owes it are one step, never a landing the account beside it has not read yet.
 func (r *Run) commitFactNoCadence(ctx context.Context, evt event.Event) (event.EventID, error) {
 	r.flight.enter()
 	defer r.flight.leave()
@@ -116,6 +116,7 @@ func (r *Run) commitFactNoCadence(ctx context.Context, evt event.Event) (event.E
 	}
 	r.mu.Unlock()
 	r.movement.Advance()
+	r.applyObligation(evt)
 	if !mapped {
 		r.trimFacts(sessionOf(evt))
 		return evt.Key, nil
@@ -124,6 +125,33 @@ func (r *Run) commitFactNoCadence(ctx context.Context, evt event.Event) (event.E
 	r.recordMapped(evt, entry)
 	r.trimFacts(sessionOf(evt))
 	return evt.Key, nil
+}
+
+// mountObligationAccount mounts the account every landed fact is applied to, so
+// the account a declaration leaves behind is derived by the commit that landed
+// it rather than by a reader of the chain that follows. One account is mounted
+// per run: the delivery account of the host, which states the obligations the
+// chain declared and no settlement has closed.
+func (r *Run) mountObligationAccount(apply func(event.Event)) {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	r.obligations = apply
+	r.mu.Unlock()
+}
+
+// applyObligation hands one landed fact to the mounted account. The call is made
+// inside the landing unit of the fact — the same unit the quiet-point fence
+// counts — so a cut taken after that unit reads the declaration from the account,
+// and a cut taken before it lands past the cut's watermark and is replayed.
+func (r *Run) applyObligation(evt event.Event) {
+	r.mu.Lock()
+	apply := r.obligations
+	r.mu.Unlock()
+	if apply != nil {
+		apply(evt)
+	}
 }
 
 // trimFacts holds one session chain to what its projection still presents — and

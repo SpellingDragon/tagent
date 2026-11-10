@@ -196,6 +196,15 @@ type Host struct {
 	// from the records beside a restart.
 	pendingDeliveries map[string]*heldDelivery
 	heldSeq           uint64
+	// declaredOpen holds the obligations the chain declared and no settlement has
+	// closed: the body, target, lineage and declaration moment of every answer
+	// whose delivery the live path has not settled yet. It stands beside
+	// pendingDeliveries instead of inside it because that table is the review
+	// surface a person approves or refuses, and a body no review has ruled on is
+	// no entry anybody decides. The fact that declares the obligation applies it
+	// here inside its own landing unit (run.mountObligationAccount), so a cut
+	// states the declaration the chain already carries.
+	declaredOpen map[string]*heldDelivery
 	// restoredDelivery reports that the delivery account was restored from a
 	// framework checkpoint, so the boot reads only the facts that landed past
 	// that checkpoint's cut instead of the whole chain of settlements.
@@ -757,6 +766,7 @@ func Boot(configPath string, opts ...HostOption) (*Host, error) {
 		deliveries:        deliveryMeter,
 		deliveryRuler:     cfg.deliveryRuler,
 		pendingDeliveries: map[string]*heldDelivery{},
+		declaredOpen:      map[string]*heldDelivery{},
 		meditation:        driver,
 		settle:            settleDriver,
 		execManager:       execManager,
