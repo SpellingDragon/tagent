@@ -2373,10 +2373,8 @@ func smokeIntegrityFoldConsumer(t *testing.T) {
 		t.Fatalf("session %s registered no projection", chat)
 	}
 	summary := smokeIntegrityStandingSummary(t, entries, chat)
-	// 综述随折叠改写：跟进回合之后仍有新事实落链，折叠可以再把它压成下一代综述，
-	// 所以这里比对的是「请求读到了一条综述产物」，而不是「读到了本档收尾时站着的那一条」。
 	if !strings.Contains(follow[0].text(), "history summary: ") {
-		t.Fatalf("the follow-up request read no history summary standing in the projection\nsummary:\n%s\nrequests carrying a history summary:\n%s",
+		t.Fatalf("the follow-up request read no history summary product (the fold may rewrite the standing summary into a later generation as new facts land, so this checks a summary product was read, not the exact one standing at turn end)\nsummary:\n%s\nrequests carrying a history summary:\n%s",
 			summary.Content, smokeRequestsContaining(provider, "history summary"))
 	}
 	if !strings.Contains(summary.Content, "history summary (") {
@@ -3251,10 +3249,8 @@ func smokeIntegrityAssertFold(t *testing.T, rig *smokeRig, provider *smokeProvid
 		t.Fatalf("the late fold turn reached %d entry request(s) with its whole body, want one\nentry requests:\n%s\ncarrying the marker:\n%s",
 			len(late), smokeRequestDetail(provider, smokeEntryModel), smokeRequestsContaining(provider, smokeIntegrityFoldLateTurn))
 	}
-	// 综述随折叠改写：晚轮之后仍有新事实落链，折叠可以再把它压成下一代综述，所以比对
-	// 「请求读到了一条综述产物」，而不是「读到了本档收尾时站着的那一条」。
 	if !strings.Contains(late[0].text(), "history summary: ") {
-		t.Fatalf("the request after the fold read no standing history summary\nsummary:\n%s\nprojection:\n%s\nrequests carrying a history summary:\n%s",
+		t.Fatalf("the request after the fold read no history summary product (the fold may rewrite the standing summary into a later generation as new facts land, so this checks a summary product was read, not the exact one standing at turn end)\nsummary:\n%s\nprojection:\n%s\nrequests carrying a history summary:\n%s",
 			summary.Content, smokeEntryDigest(entries), smokeRequestsContaining(provider, "history summary"))
 	}
 	threshold := assembly.FoldWindow{MaxTokens: 2000, CompressThreshold: 0.3}.VolumeThresholdBytes()

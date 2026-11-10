@@ -200,8 +200,8 @@ func (h *Host) deliverySliceWhere(session event.SessionID) ([]byte, error) {
 	if h == nil {
 		return []byte("null"), nil
 	}
-	slices := make([]*deliveryAccount, 0, len(h.deliveryAccounts))
 	h.mu.Lock()
+	slices := make([]*deliveryAccount, 0, len(h.deliveryAccounts))
 	wire := deliverySliceWire{
 		HeldSeq:  h.heldSeq,
 		Attempts: []deliverySliceRetry{},

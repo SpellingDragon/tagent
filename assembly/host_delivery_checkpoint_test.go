@@ -179,6 +179,57 @@ func TestDeliverySettlementAndCheckpointConcurrent(t *testing.T) {
 	}
 }
 
+// TestDeliverySliceStatesTheAccountUnderTheDeclarationLock pins the lock a cut and a declaration share.
+//   - a chain the account has never seen enters it while the whole account is stated, and under -race an unlocked read of the count is reported
+//
+// 契约: docs/wiki/platform/platform-subsystems.md#framework-checkpoint
+func TestDeliverySliceStatesTheAccountUnderTheDeclarationLock(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	storage := WithStorage(ledger.StorageConfig{Type: ledger.StorageJournal, Root: t.TempDir()})
+	run := windowChainRun(t, ctx, storage)
+	host := deliveryTestHost(ctx, run, newDeliveryTestSender(nil))
+	const rounds = 64
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		<-start
+		for round := 0; round < rounds; round++ {
+			if _, err := host.deliverySlice(); err != nil {
+				t.Errorf("state the whole open account: %v", err)
+				return
+			}
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		<-start
+		for round := 0; round < rounds; round++ {
+			target := deliveryTestAddress(fmt.Sprintf("session-declared-beside-the-cut-%02d", round))
+			identity := fmt.Sprintf("delivery-beside-cut-%02d", round)
+			host.declareObligation(event.Event{
+				Key:       event.EventID(identity),
+				Type:      event.TypeAgentOutput,
+				Timestamp: time.Now(),
+				Message:   model.Message{Role: model.RoleAssistant, Content: identity},
+				Owner:     target,
+				Source:    target,
+				Target:    target,
+				Meta: map[string]string{
+					deliveryOwedMeta:          "1",
+					deliveryTargetAgentMeta:   string(target.AgentID),
+					deliveryTargetSessionMeta: string(target.SessionID),
+					deliveryLineageMeta:       "user",
+				},
+			})
+		}
+	}()
+	close(start)
+	wg.Wait()
+}
+
 // TestCheckpointCarriesOpenObligationAcrossFold pins the embedded obligation.
 //   - the obligation still open when the chain folds is stated in the checkpoint with its body, target, lineage, hold and attempt
 //   - a restart discovers it and processes it exactly once, and a second restart finds it settled instead of owing it again
