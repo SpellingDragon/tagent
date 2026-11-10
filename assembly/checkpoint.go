@@ -7,9 +7,9 @@
 // mirror of it — read the newest checkpoint, hand every slice back to its
 // holder, then replay the facts that landed past the cut through seedFact's
 // isolated rebuild (memory ledger only, no After pass, no side effects) — so no
-// consumer owns a recovery read path of its own. The newest carrier comes from a
+// consumer owns a recovery read path of its own. The newest checkpoint comes from a
 // backwards walk of the commit order that stops at the first entry of the
-// checkpoint type, so the commits since that carrier bound the walk; anchor
+// checkpoint type, so the commits since that checkpoint bound the walk; anchor
 // discovery is one pass of the resident commit order that copies nothing and
 // reads no body; and the bodies read are the ones committed past each chain's
 // cut, except a chain the restored slices carry beside no fold product, which
@@ -18,7 +18,7 @@
 // The cut is consistent by construction, and the construction is an ordering of
 // the single-writer pipeline rather than a lock over it: the coordinator reads
 // the watermark, drains the pipeline to a quiet point, reads every slice there
-// with no lock of the run held, and files the carrier through one ordinary
+// with no lock of the run held, and files the checkpoint through one ordinary
 // append.
 //   - The quiet point is a drain and not a fence: a commit holds the flight from its landing to the state it leaves its holder in, so a pipeline holding no flight has applied every fact it landed.
 //   - A settlement that lands past the cut is replayed again, and its settlement is idempotent, so the restored account is at worst caught up twice and never short.
@@ -48,10 +48,10 @@ const CheckpointCommitInterval = 64
 
 // CheckpointPeriod is the wall-clock bound between two framework checkpoints: a
 // chain that commits little is a chain whose last commit may be far behind the
-// boot that reads it, so the period asks for a carrier at the next commit even
+// boot that reads it, so the period asks for a checkpoint at the next commit even
 // when the interval has not elapsed. The due is judged at a commit, so a chain
-// that commits nothing files no carrier of its own: the close stops the filer
-// and takes no cut, and the boot reads the carrier the last commit that reached
+// that commits nothing files no checkpoint of its own: the close stops the filer
+// and takes no cut, and the boot reads the checkpoint the last commit that reached
 // a due filed.
 const CheckpointPeriod = 30 * time.Second
 
@@ -78,7 +78,7 @@ const (
 	checkpointSliceInputs = "inputs"
 	// checkpointSliceCompress carries the compression consumer's account: the
 	// judgments a producer filed and the identities a product answers, so a boot
-	// that reads the carrier answers every judgment the cut covered instead of
+	// that reads the checkpoint answers every judgment the cut covered instead of
 	// executing the ones it skipped.
 	checkpointSliceCompress = "compress"
 )
@@ -89,9 +89,9 @@ const (
 var ErrCheckpointUnreadable = errors.New("assembly: the checkpoint fact states no readable checkpoint")
 
 // ErrCheckpointSurvivorUnstated reports a checkpoint naming a survivor the chain
-// states no entry for. The carrier names every survivor by identity, type,
+// states no entry for. The checkpoint names every survivor by identity, type,
 // summary and moment and leaves the text to the chain, so a key the chain does
-// not state is a carrier no boot can rebuild: restoring the entry beside no text
+// not state is a checkpoint no boot can rebuild: restoring the entry beside no text
 // would present the model material the process never wrote.
 var ErrCheckpointSurvivorUnstated = errors.New("assembly: the checkpoint names a survivor the chain states no entry for")
 
@@ -172,7 +172,7 @@ func (f *commitFence) await(ctx context.Context) error {
 
 // enterSession counts one unit of work of a session chain onto the fence and onto
 // that chain's own count. A fact that names no session chain — a configuration
-// record, a checkpoint carrier filed for no session — counts on the whole fence
+// record, a checkpoint filed for no session — counts on the whole fence
 // alone, so a session drain never waits for it and the framework's own cut always
 // covers it.
 func (f *commitFence) enterSession(session event.SessionID) {
@@ -226,7 +226,7 @@ func (f *commitFence) leaveSession(session event.SessionID) {
 // quiet point a session cut reads its state at. The drain waits for the commits
 // of that chain alone: a commit of another chain lands past the cut's watermark
 // and is replayed by the boot, so it neither widens the wait nor widens the
-// carrier.
+// checkpoint.
 func (f *commitFence) awaitSession(ctx context.Context, session event.SessionID) error {
 	if session == "" {
 		return f.await(ctx)
@@ -253,7 +253,7 @@ func (f *commitFence) awaitSession(ctx context.Context, session event.SessionID)
 // checkpointDefaults fills the cadence dials of one run: a run that names none
 // keeps the family constants, and a check that wants a checkpoint on the next
 // commit shortens the interval. The period counts from the moment the cadence
-// opens, so a run that has just assembled files its first carrier after a period
+// opens, so a run that has just assembled files its first checkpoint after a period
 // or an interval of commits rather than an empty one beside its first fact: the
 // chains of such a run are young, and the boot folds them bounded instead.
 func (r *Run) checkpointDefaults() {
@@ -338,7 +338,7 @@ func (r *Run) Checkpoint(ctx context.Context) (event.EventID, bool, error) {
 // serializes the cuts of one run with each other — one cut states one account — and
 // it is taken by no commit, so it never stands between a fact and its landing.
 //
-//   - every cut of one run states a key no earlier cut stated: the key is the sequence the owner partition stands at, and the carrier's own landing takes a slot past the cut it states, so the next cut beside no new fact names a later slot instead of repeating the filed one.
+//   - every cut of one run states a key no earlier cut stated: the key is the sequence the owner partition stands at, and the checkpoint's own landing takes a slot past the cut it states, so the next cut beside no new fact names a later slot instead of repeating the filed one.
 func (r *Run) checkpointLocked(ctx context.Context) (event.EventID, bool, error) {
 	if err := ctx.Err(); err != nil {
 		return "", false, err
@@ -380,18 +380,18 @@ func (r *Run) checkpointLocked(ctx context.Context) (event.EventID, bool, error)
 // CheckpointSession takes one cut of the named session chain and files the fact
 // it states. The cut names the last fact each partition had committed when the
 // cut began — the same watermark the framework's own cut names, so a session
-// carrier and a framework carrier are read back on one axis — while the state is
+// checkpoint and a framework checkpoint are read back on one axis — while the state is
 // the state of that chain alone: the cut drains the commits of the chain, asks
-// every holder what it states about the session, and files a carrier whose slices
+// every holder what it states about the session, and files a checkpoint whose slices
 // are that session's.
 //
-//   - The carrier is filed under the run's checkpoint owner beside the session it states, so the index answers which chain a carrier belongs to without reading its body and without the carrier entering that chain's projection.
+//   - The checkpoint is filed under the run's checkpoint owner beside the session it states, so the index answers which chain a checkpoint belongs to without reading its body and without the checkpoint entering that chain's projection.
 //   - A commit of another chain that lands beside the cut is past its watermark and is replayed by the boot, so the cut pays nothing for it and never waits on it.
 //
 // The redline list (3 rules):
 // MUST read the watermark before the state, so the cut never states a position past the state it carries.
 // MUST drain only the named chain, so a cut of one session waits for no commit of another.
-// MUST state nothing about a holder that keeps no state of a session, rather than copy another chain's account into this carrier.
+// MUST state nothing about a holder that keeps no state of a session, rather than copy another chain's account into this checkpoint.
 func (r *Run) CheckpointSession(ctx context.Context, addr event.Address) (event.EventID, bool, error) {
 	if r == nil || !addr.IsComplete() {
 		return "", false, nil
@@ -404,7 +404,7 @@ func (r *Run) CheckpointSession(ctx context.Context, addr event.Address) (event.
 // checkpointSessionLocked is CheckpointSession under the cut lock the caller
 // holds: one cut states one account, and the lock is taken by no commit.
 //
-//   - A chain that states no slice files no carrier: a carrier of no slice would name a cut no holder answers, so no carrier is owed.
+//   - A chain that states no slice files no checkpoint: a checkpoint of no slice would name a cut no holder answers, so no checkpoint is owed.
 func (r *Run) checkpointSessionLocked(ctx context.Context, addr event.Address) (event.EventID, bool, error) {
 	if err := ctx.Err(); err != nil {
 		return "", false, err
@@ -449,11 +449,11 @@ func (r *Run) checkpointSessionLocked(ctx context.Context, addr event.Address) (
 	return key, true, nil
 }
 
-// sessionCut reports the cut the newest carrier of one session states for one
+// sessionCut reports the cut the newest checkpoint of one session states for one
 // state slice: the boundary the boot replays that chain past. A session the
-// restored carriers did not state, and a carrier that states no such slice,
+// restored checkpoints did not state, and a checkpoint that states no such slice,
 // answer the framework's own cut instead, which is what bounds a boot that read
-// no carrier of that chain.
+// no checkpoint of that chain.
 func (r *Run) sessionCut(session event.SessionID, slice string) event.CheckpointOffset {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -476,11 +476,11 @@ func (r *Run) sessionCut(session event.SessionID, slice string) event.Checkpoint
 
 // checkpointEventOf renders one checkpoint as the fact it commits as: the
 // partition-sequence key, the payload as the message body and the two cut
-// entries in the metadata. The carrier is filed under the run's checkpoint owner
-// beside the session it states, so the index answers which chain a carrier
-// belongs to without reading its body. A session carrier names a chain in its
+// entries in the metadata. The checkpoint is filed under the run's checkpoint owner
+// beside the session it states, so the index answers which chain a checkpoint
+// belongs to without reading its body. A session checkpoint names a chain in its
 // owner and still enters no projection: the mapping refuses a checkpoint by its
-// frozen type, so the carrier never reaches a model request.
+// frozen type, so the checkpoint never reaches a model request.
 func checkpointEventOf(checkpoint event.Checkpoint, owner event.Address) event.Event {
 	payload, err := event.CheckpointPayloadOf(checkpoint)
 	if err != nil {
@@ -523,7 +523,7 @@ func (r *Run) checkpointOwnerLocked() event.Address {
 // interval or the period has elapsed. The call is made after one fact has landed
 // and takes the run lock alone: no commit takes the cut lock and no commit waits
 // for a cut, so a holder that commits under its own lock never stands between its
-// fact and the carrier the cadence owes.
+// fact and the checkpoint the cadence owes.
 //
 //   - the due stands until the filer takes it: a wake that a cut already answered files nothing, and a due reached beside a cut in progress is filed by the next wake.
 func (r *Run) noteCheckpointCommit() {
@@ -540,7 +540,7 @@ func (r *Run) noteCheckpointCommit() {
 	r.requestCheckpoint()
 }
 
-// requestCheckpoint wakes the filer for a carrier whatever the cadence clock
+// requestCheckpoint wakes the filer for a checkpoint whatever the cadence clock
 // says: the caller knows a cut is worth taking now. The request is a signal and
 // never a cut of its own, because the caller stands inside the unit of work the
 // cut would wait out — the commit that filed the material, held on the
@@ -550,7 +550,7 @@ func (r *Run) noteCheckpointCommit() {
 // held.
 //
 // A request that arrives beside a due already pending is the one due: the
-// carrier states the whole account at the cut it takes, so a later request adds
+// checkpoint states the whole account at the cut it takes, so a later request adds
 // no state an earlier one would have missed.
 func (r *Run) requestCheckpoint() {
 	if r == nil || r.checkpointDue == nil {
@@ -565,14 +565,14 @@ func (r *Run) requestCheckpoint() {
 	}
 }
 
-// fileCheckpoints files the carrier whatever cadence asked for it, from a
+// fileCheckpoints files the checkpoint whatever cadence asked for it, from a
 // goroutine that holds no lock of this run and no lock of a state holder.
 //
 //   - The cut asks every holder for its state, and a commit of that holder may stand under the holder's own lock (the delivery flush commits its settlement under the task registry lock). A commit that took the cut itself would therefore wait on the holder whose commit is waiting on the cut, and no timeout breaks that cycle: one side of it is a held lock. The commit signals this wait instead.
 //
 // A cut that cannot be taken is reported at ERROR: the cadence is the bound on the
-// material a restart reads, and a carrier this filer never filed widens that bound
-// silently behind a chain that keeps committing. The close files the carrier it
+// material a restart reads, and a checkpoint this filer never filed widens that bound
+// silently behind a chain that keeps committing. The close files the checkpoint it
 // owes itself and answers the failure to its caller, so a filing that stays broken
 // reaches the process that stops the run instead of a log line alone.
 func (r *Run) fileCheckpoints(ctx context.Context) {
@@ -595,7 +595,7 @@ func (r *Run) fileCheckpoints(ctx context.Context) {
 	}
 }
 
-// takeCheckpointDue reports whether the cadence owes a carrier at this wake and
+// takeCheckpointDue reports whether the cadence owes a checkpoint at this wake and
 // clears the due the wake stands for.
 func (r *Run) takeCheckpointDue() bool {
 	r.mu.Lock()
@@ -605,7 +605,7 @@ func (r *Run) takeCheckpointDue() bool {
 	return due
 }
 
-// requestSessionCheckpoint wakes the filer for a carrier of one session chain
+// requestSessionCheckpoint wakes the filer for a checkpoint of one session chain
 // whatever the cadence clock says: the caller reached a moment the chain's state
 // is worth stating — a compression product landed, the session closed. The
 // request is a signal and never a cut of its own, because the caller stands
@@ -615,7 +615,7 @@ func (r *Run) takeCheckpointDue() bool {
 // asks for it. The filer takes the cut on its own goroutine, where no commit of
 // any holder is held.
 //
-// A chain already due is the one due: the carrier states the whole state of the
+// A chain already due is the one due: the checkpoint states the whole state of the
 // chain at the cut it takes, so a later request adds no state an earlier one
 // would have missed.
 func (r *Run) requestSessionCheckpoint(addr event.Address) {
@@ -652,7 +652,7 @@ func (r *Run) takeSessionDue() []event.Address {
 	return pending
 }
 
-// startCheckpointFiler starts the goroutine that files the carrier the cadence
+// startCheckpointFiler starts the goroutine that files the checkpoint the cadence
 // owes. The context keeps the values of the boot and none of its cancellation, so
 // a cut is never refused by a caller that already returned.
 func (r *Run) startCheckpointFiler(ctx context.Context) {
@@ -671,17 +671,17 @@ func (r *Run) stopCheckpointFiler() {
 	r.checkpointStopOnce.Do(func() { close(r.checkpointStop) })
 }
 
-// fileClosingCheckpoint files the carrier a close owes the restart that reads
+// fileClosingCheckpoint files the checkpoint a close owes the restart that reads
 // this chain: the state the run reached at the fixed point of its close, so a
-// process that stops well after its last cadence still leaves a carrier stating
+// process that stops well after its last cadence still leaves a checkpoint stating
 // what it settled. The filer is stopped before the close takes it, so the cut is
 // the last one the process files and no wake races the drain the close judges.
 //
 // The cut waits for the quiet point, so it is taken under the budget the close
 // was given: a run that never reached that point inside the budget answers the
-// carrier of the position it stands at, and the drain report names the work that
+// checkpoint of the position it stands at, and the drain report names the work that
 // kept it there. A cut that fails for any other reason is answered to the close's
-// caller, because the bound on the next boot is that carrier and a failure to
+// caller, because the bound on the next boot is that checkpoint and a failure to
 // state it is not a fact the run may keep to itself.
 func (r *Run) fileClosingCheckpoint(ctx context.Context, budget time.Time) error {
 	if r == nil {
@@ -703,7 +703,7 @@ func (r *Run) fileClosingCheckpoint(ctx context.Context, budget time.Time) error
 	return nil
 }
 
-// CheckpointAfterFold asks for a carrier because a fold produced a product: a
+// CheckpointAfterFold asks for a checkpoint because a fold produced a product: a
 // fold is the moment the projection drops material, so the state a restart reads
 // is worth refreshing whatever the cadence clock says. The product lands inside
 // the quiet-point fence of the commit that filed it, so this is a request and not
@@ -714,7 +714,7 @@ func (r *Run) CheckpointAfterFold() {
 }
 
 // CheckpointFiled reports the identity of the newest checkpoint this run filed
-// and the cut it states, so a caller reads the coverage of the carrier it holds.
+// and the cut it states, so a caller reads the coverage of the checkpoint it holds.
 func (r *Run) CheckpointFiled() (event.EventID, event.CheckpointOffset) {
 	if r == nil {
 		return "", nil
@@ -731,7 +731,7 @@ func (r *Run) CheckpointFiled() (event.EventID, event.CheckpointOffset) {
 // one body the answered identity names instead of the history behind it.
 //
 // The order is the commit order across partitions, never the highest partition:
-// a run whose owner moved between processes filed its newest carrier in the
+// a run whose owner moved between processes filed its newest checkpoint in the
 // partition of its newest process, and reading the highest partition instead
 // would restore the state of a process that stopped earlier.
 func newestCheckpointRef(ctx context.Context, tier *ledger.Tier) (anchorRef, bool, error) {
@@ -784,12 +784,12 @@ func (r *Run) restoreCheckpoint(ctx context.Context, tier *ledger.Tier, ref anch
 // the caller asked for and nothing behind it can answer better.
 var errStopIndexWalk = errors.New("assembly: the index walk answered")
 
-// newestSessionCheckpointRef answers the newest carrier one session chain filed,
+// newestSessionCheckpointRef answers the newest checkpoint one session chain filed,
 // by the frozen type and the session the index records beside it. The walk reads
 // the resident commit order newest first and stops at the first entry that
 // answers — one comparison per indexed entry and no body read, the same mechanism
-// the framework carrier's lookup uses — so the lookup costs the commits since the
-// carrier rather than the history behind it, and it copies and sorts nothing.
+// the framework checkpoint's lookup uses — so the lookup costs the commits since the
+// checkpoint rather than the history behind it, and it copies and sorts nothing.
 func newestSessionCheckpointRef(ctx context.Context, tier *ledger.Tier, session event.SessionID) (anchorRef, bool, error) {
 	if tier == nil || session == "" {
 		return anchorRef{}, false, nil
@@ -811,20 +811,20 @@ func newestSessionCheckpointRef(ctx context.Context, tier *ledger.Tier, session 
 	return anchorRef{}, false, nil
 }
 
-// restoreSessionCheckpoints reads the newest carrier of every session chain the
+// restoreSessionCheckpoints reads the newest checkpoint of every session chain the
 // storage holds and hands each one's slices to their holders, so a boot starts
 // each chain from the state that chain last stated rather than from the account
-// the framework's own carrier happens to cover. One walk of the index answers
-// every chain's newest carrier — the walk is newest commit first, so the first
-// entry of a chain is that chain's newest — and only the carriers that answer are
+// the framework's own checkpoint happens to cover. One walk of the index answers
+// every chain's newest checkpoint — the walk is newest commit first, so the first
+// entry of a chain is that chain's newest — and only the checkpoints that answer are
 // read, so a boot pays the open state of every chain and never the history
 // behind the cuts.
 //
-// A carrier that a later one of the same chain supersedes is not read: the slices
-// of a chain are superseded whole, so the newest carrier of a chain states every
-// slice its predecessors state. A session carrier the framework carrier supersedes
+// A checkpoint that a later one of the same chain supersedes is not read: the slices
+// of a chain are superseded whole, so the newest checkpoint of a chain states every
+// slice its predecessors state. A session checkpoint the framework checkpoint supersedes
 // is not read either: the framework cut states the whole account at a later
-// position, so a carrier filed before it states no chain past that account.
+// position, so a checkpoint filed before it states no chain past that account.
 func (r *Run) restoreSessionCheckpoints(ctx context.Context, tier *ledger.Tier) error {
 	if tier == nil {
 		return nil
@@ -860,10 +860,10 @@ func (r *Run) restoreSessionCheckpoints(ctx context.Context, tier *ledger.Tier) 
 	return nil
 }
 
-// restoreSessionCheckpoint reads one session carrier back and hands its slices to
+// restoreSessionCheckpoint reads one session checkpoint back and hands its slices to
 // the holders that state them, recording the cut that chain's state corresponds
-// to. The restore merges into the state the boot already holds: a carrier states
-// the slices of its own chain, and the framework's carrier beside it states the
+// to. The restore merges into the state the boot already holds: a checkpoint states
+// the slices of its own chain, and the framework's checkpoint beside it states the
 // whole account, so the two restores name one state per holder without one
 // erasing the other.
 func (r *Run) restoreSessionCheckpoint(ctx context.Context, tier *ledger.Tier, ref anchorRef) error {
@@ -1022,7 +1022,7 @@ func (s projectionStateSlice) SnapshotState(ctx context.Context) ([]byte, error)
 }
 
 // SnapshotSessionState states the survivors of one session chain. A chain the run
-// presents no projection of answers nil, so the carrier of a session that landed
+// presents no projection of answers nil, so the checkpoint of a session that landed
 // no material carries no projection slice.
 func (s projectionStateSlice) SnapshotSessionState(_ context.Context, session event.SessionID) ([]byte, error) {
 	return s.run.projectionSliceOf(session)
@@ -1114,7 +1114,7 @@ func (r *Run) projectionSliceWhere(keep func(event.Address) bool) ([]byte, error
 // stated under the window it declared, so the material committed past the cut
 // appends to the state the checkpoint states instead of folding the history again.
 //
-//   - The carriers a boot reads state one state per chain: the framework's carrier states every chain and a session carrier states one, so each restore adds the chains it states and leaves the rest standing.
+//   - The checkpoints a boot reads state one state per chain: the framework's checkpoint states every chain and a session checkpoint states one, so each restore adds the chains it states and leaves the rest standing.
 func (r *Run) restoreProjectionSlice(payload []byte) error {
 	var wire projectionSliceWire
 	if err := json.Unmarshal(payload, &wire); err != nil {
@@ -1169,7 +1169,7 @@ func restoredSeedOf(seeds map[event.Address]*restoredChain, slot anchorSlot) (*r
 // anchorEntriesOf states the projection entries one fold or one checkpoint
 // carries: the fields that name the entry as the chain states it, beside the text
 // a fold product minted. The text of a mapped entry stays on the chain, so the
-// carrier of a projection is the size of its entries and never the size of the
+// checkpoint of a projection is the size of its entries and never the size of the
 // bodies behind them.
 func anchorEntriesOf(entries []replay.ProjectionEntry) []anchorEntry {
 	out := make([]anchorEntry, 0, len(entries))

@@ -216,10 +216,10 @@ BASELINE = (
     ("struct-fields", "runtime/state/session.go:MailboxEntry", 6),
     ("struct-fields", "runtime/task/wrapper.go:Result", 6),
     # hot-update-and-purity-closure 12 引入叶（S2 类别豁免，同 event.Event 16f 先例）：
-    # TaskCheckpoint 是框架 checkpoint 状态的任务账本体＝数据保真面——一格对应「重启后
+    # StatedTask 是框架 checkpoint 状态的任务账本体＝数据保真面——一格对应「重启后
     # 与链折叠逐格相等」所需的一条数据（声明/状态/链修订/轮次/四个移动戳/改道两格/
     # 幂等变更账/未结义务），收窄字段即让恢复面在链折叠侧二次归并或丢掉一格保真。
-    ("struct-fields", "runtime/task/checkpoint.go:TaskCheckpoint", 13),
+    ("struct-fields", "runtime/task/checkpoint.go:StatedTask", 13),
     # 04.2 执行资源解释（引入叶）：租约/续期/停滞/义务的只读投影，字段即
     # Manager.Explain 的回复本体，拆块即解释面需要二次装配。
     ("struct-fields", "tool/exec/exec.go:Explanation", 10),

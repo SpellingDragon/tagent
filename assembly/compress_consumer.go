@@ -295,7 +295,7 @@ func (c *CompressionConsumer) summarizeProduct(ctx context.Context, session even
 // line of summary, the text of a fold product and the moment. No field reads a
 // kind off a key's spelling.
 //
-//   - A mapped entry carries no text: the fact the entry names states its message, so a restore reads that text back by key and the carrier stays the size of the entries it names instead of the size of the bodies behind them.
+//   - A mapped entry carries no text: the fact the entry names states its message, so a restore reads that text back by key and the checkpoint stays the size of the entries it names instead of the size of the bodies behind them.
 //   - A fold product carries the text it minted, because the product fact files that text under an identity of its own: the entry names the material the fold covered, and the fact's key is content-addressed over the material and the text together, so no read of the entry's key reaches it. That text is the bounded summary the age bound already holds, never the material it covered.
 type anchorEntry struct {
 	Key     event.EventID
@@ -305,7 +305,7 @@ type anchorEntry struct {
 	Time    int64
 }
 
-// carriedTextOf reports the text one projection entry states in a carrier: the
+// carriedTextOf reports the text one projection entry states in a checkpoint: the
 // text a fold minted, and nothing for an entry the chain states itself.
 func carriedTextOf(entry replay.ProjectionEntry) string {
 	switch entry.Type {

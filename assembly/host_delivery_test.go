@@ -2360,9 +2360,9 @@ func (o *foldObserver) mentions(fragments ...string) bool {
 	return false
 }
 
-// TestRestoreFoldCounts pins the restore observation of a chain a carrier covers.
-// - the first run commits a full tool turn and closes behind its own barrier, filing the carrier of its final state
-// - the second boot costs no chain read at all: the carrier states the tasks the chains settled, and its info line carries chains=0 links=0 covered=1
+// TestRestoreFoldCounts pins the restore observation of a chain a checkpoint covers.
+// - the first run commits a full tool turn and closes behind its own barrier, filing the checkpoint of its final state
+// - the second boot costs no chain read at all: the checkpoint states the tasks the chains settled, and its info line carries chains=0 links=0 covered=1
 // 契约: docs/wiki/reliability/durable-delivery.md#canonical-fact-resolution
 func TestRestoreFoldCounts(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
@@ -2420,7 +2420,7 @@ func TestRestoreFoldCounts(t *testing.T) {
 		t.Fatalf("recovery report = %+v, want the one chain rebuilt", report.Tasks)
 	}
 	if !observer.mentions("restore folded", "chains=0", "links=0", "covered=1") {
-		t.Fatalf("info lines = %v, want the fold beside the chains the carrier covered", observer.lines)
+		t.Fatalf("info lines = %v, want the fold beside the chains the checkpoint covered", observer.lines)
 	}
 }
 
@@ -2481,7 +2481,7 @@ func TestRestartRecoveryPinsBeforeTrim(t *testing.T) {
 }
 
 // TestSymptomAnchorDeliveryOutsideWindowSurvivesRestart pins durable discovery.
-//   - the filler is material the projection presents, so the carrier names it and the boot trims the declaration out of the window
+//   - the filler is material the projection presents, so the checkpoint names it and the boot trims the declaration out of the window
 //   - the restarted host delivers the committed body exactly once beside a fact its own window does not hold
 //
 // 契约: docs/wiki/reliability/durable-delivery.md#envelope-states
@@ -2559,7 +2559,7 @@ func TestRestartRestoresHeldSequence(t *testing.T) {
 
 // TestDeliveryOwedTrimNegative pins the owed residency the chain read already owes: a trimmed obligation is still discovered.
 // - The owed declaration leaves the hot window once filler the projection presents pushes past it.
-// - The carrier names that filler, so the rebuild trims the restart to the same band and the obligation owes its discovery to the chain.
+// - The checkpoint names that filler, so the rebuild trims the restart to the same band and the obligation owes its discovery to the chain.
 // - The recovery still declares the obligation from the durable chain.
 func TestDeliveryOwedTrimNegative(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)

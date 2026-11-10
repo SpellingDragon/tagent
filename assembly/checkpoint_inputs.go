@@ -57,7 +57,7 @@ func (s inputsStateSlice) SnapshotState(ctx context.Context) ([]byte, error) {
 }
 
 // SnapshotSessionState states the rounds one session chain holds with no answer.
-// A chain that owes no drive answers nil, so the carrier of a settled chain
+// A chain that owes no drive answers nil, so the checkpoint of a settled chain
 // carries no input slice.
 func (s inputsStateSlice) SnapshotSessionState(ctx context.Context, session event.SessionID) ([]byte, error) {
 	return s.run.pendingInputsSliceOf(ctx, session)
@@ -130,7 +130,7 @@ func (r *Run) pendingInputsSliceWhere(ctx context.Context, keep func(event.Addre
 // restoreInputsSlice puts the owed rounds of one checkpoint back as the rounds
 // committed before the cut they state.
 //
-//   - The carriers a boot reads state one set of rounds each, so the restore adds the rounds it states to the ones already standing; the criterion reads each round by its identity and a round two carriers state is one round.
+//   - The checkpoints a boot reads state one set of rounds each, so the restore adds the rounds it states to the ones already standing; the criterion reads each round by its identity and a round two checkpoints state is one round.
 func (r *Run) restoreInputsSlice(payload []byte) error {
 	var wire inputsSliceWire
 	if err := json.Unmarshal(payload, &wire); err != nil {
@@ -173,7 +173,7 @@ func (r *Run) restoreInputsSlice(payload []byte) error {
 // the rest criterion judges: each stands before every fact that landed past the
 // cut, so an answer committed after the cut still closes the round it answers.
 //
-// The carrier states the identity of each round and the boot reads that fact
+// The checkpoint states the identity of each round and the boot reads that fact
 // back from the chain, so the round reaches the criterion as the driving fact it
 // is — its frozen type and the metadata that decides whether it opens a range —
 // instead of as a placeholder no criterion recognises. The cost is the rounds

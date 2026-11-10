@@ -17,7 +17,7 @@
 | ECH | eachCommittedEvent/EachSessionFact | — | — | 裁保留（06/4.c4 合法机制读面，删＝weakening） |
 | P1 | 开账存活：未清义务必随 cut 存活（at-least-once，非 at-most-once） | 用户既有裁决「开账随 checkpoint 存活」 | assembly/host_delivery*.go·checkpoint.go·facts.go·run.go | 在跑（独立裁，非上报） |
 | P2 | 回执计入折叠判据：模型可见 raw≤预算（D1） | P1（facts.go 重叠） | assembly/age_fold.go·facts.go·smoke_test.go | 待 P1 |
-| VOCAB | 词汇统一（详见下节审计） | 功能 work 落地后 | 全 checkpoint/compression 注释＋标识符＋concept_bindings＋GLOSSARY | 末段，与 UNIFY 协调 |
+| VOCAB | 词汇统一（详见下节审计） | 功能 work 落地后 | 全 checkpoint/compression 注释＋标识符＋concept_bindings＋GLOSSARY | ✅ 已落地（执行记录见本节末） |
 | UNIFY | 会话级协调者下沉＋Stateful 收编 g(x)＋六端口→Material | CORE/RO/P1/P2 | 全插件管线面 | 末轨 |
 
 并发准入＝触碰集不相交。P1/P2 同触 facts.go 故串行；VOCAB 改名须等功能 work 落地避免互踩。最大风险＝answered 切片若跳判决集换有界即重演 12.13 回退（验收锚＝live≡锚定≡全量三方判决集相等）。
@@ -32,6 +32,17 @@
 - **层3 撞车/复用**：anchorRef/anchorEntry/anchorSlot 本属压缩折叠锚（domain06），被 checkpoint 复用（newestCheckpointRef 返回 anchorRef）→ 解耦：checkpoint 引用用 checkpointRef，或明确 anchor 升格通用「链上定位引用」并登记；band 晋升用 "generational/fold generation" 与 recorder/session/config generation 撞 → 改 band promotion，退出 generation 词。
 
 执行约束：同步 concept_bindings 登记＋代码标识符＋GLOSSARY；§五冻结拼写（事件元数据 compress_covered/checkpoint:<seq>、日志关键字、测试名、磁盘标记）MUST NOT 改；改名走显式变更。验收：concept_budget 门绿＋GLOSSARY 无未登记新词＋grep 同义词残留零。
+
+**执行记录（W8-VOCAB 落地，2026-11-11）**：按上映射逐条执行，先注释后标识符。
+- 层2 carrier→checkpoint：仅改「checkpoint 事实」义（assembly/checkpoint*.go、host_delivery_checkpoint.go、runtime/state/checkpoint.go 及其测试、run.go/facts.go/compress_consumer.go/host.go 的 checkpoint 段）；**commit／store carrier 义（`commitCarrier`/`DurableCommit`/`MemoryCommit`、runtime/state/durable.go·memory.go、runtime/task/*）保留不动**——那是「提交承载面」另一个概念，改成 checkpoint 即把两个概念焊死。
+- 层1 合一：`TaskCheckpoint`→`StatedTask`（`RegistryCheckpoint` 立为唯一任务账术语，逐条只叫「一条被声明的任务」）；concept_bindings 键同名改，concept_budget S2 基线行改名，new=47/removed=5 未动棘轮。
+- 层2 cut：`accountCut`→`compressCut`（标识符＋注释），boundary 只留「锚幸存者边界」。
+- 层2 account↔ledger：account＝派生态持有者（送达账/压缩账），ledger＝读回面；`DeliveryLedger` 注释与 GLOSSARY 第 12 行就地写死这条分工。
+- 层3 anchor：取低风险支——`anchorRef` 注释立为「链上定位引用」（折叠锚与 checkpoint 引用共用），不新建 `checkpointRef` 类型、不动折叠锚机制。
+- 层3 band 晋升：`generational`/`fold generation` 全退（memory/replay 注释、两处 integration 失败文案、三篇 wiki 的「世代递推」），`generation` 只留记录世代/会话世代两义（GLOSSARY 合为一行写死）。
+- GLOSSARY：新增 `Stateful`（并入第 12 行定义）、`band 晋升`（并入压缩产物行）、`Material`（新行）；两行世代合一行，总行数零差额（doc-budget 棘轮未动）。
+- 测试名：改名的都是自面 test/helper 名（`TestBootRestoresTheCheckpointOnce` 等），§五冻结的四条测试名/事件元数据/磁盘标记/日志关键字零改动（diff 无 `compress_covered`/`compress_key`/`checkpoint:<seq>`/`reincarnation` 变更）。
+
 
 ## 二、编排四问
 
@@ -98,5 +109,6 @@
 | W5 域12 进度 | 12.1-12.7a/12.7c/12.7d、12.10/12.11/12.14 已勾（事件类型+载荷、Stateful 接缝+安静点协调者、五切片接线、恢复重写删三全史读者、RecoveryTicket 退役、B1 水位、B2 NewestOfType、C3 收口） | 12.8 编排者终跑门未跑；12.7b LongRun 卡在 r48-1（reload 回退点既有缺陷）；合并门＝LongRun 六分片全绿+每代 boot 成本平坦 | 8.1 由 12.4/12.4b 开账嵌入 checkpoint 构造消解，8.1b 待 12.8 的 `TestEventIntegrityTaskContinuation` 复跑；12.12/12.13 已回退立卡，重开前置见 W6 Wave3；06 D3 一条已由 r46 勘误取代 | 12.3b `TestCheckpointWaitsForTheQuietPointOfThePipeline` 绿 ×3 -race；12.10/12.11 各自 `-run` 绿；12.14 `go test ./assembly/ -count=1` 全绿 | 12.8 终跑门；12.9 收尾回写；W6 三波 | —（12/tasks.md 写锁仍归 domain12 实施代理） |
 | W6-D 文档台账 | 文档收编完成：wiki 四页＋GLOSSARY 收敛到当前实现（B1 水位／B2 `NewestOfType`／安静点无锁／`seedFact` 隔离），目标态（会话级下沉＋`Stateful` 收编 g(x)）标于平台篇 §六；三波计划与 12.12/12.13 回退立卡核一致；新变更骨架已建 | 未跑代码门（本单禁碰代码，assembly/runtime 另代理在改） | 无 | ORCHESTRATION W6 表＋台账；12/tasks.md 小节编号修正；`docs/wiki/{platform/platform-subsystems,memory/memory-architecture,agent/agent-architecture,mechanism-tour}.md`；`docs/GLOSSARY.md`；新变更 proposal/tasks/spec | 两变更 `validate --strict` 均绿；执行期文档随 W6 各波回写 | — |
 | W7 域13 整合+裁定 | 477b3229 后 CI 广泛回归经 history∥host 两路 openspec-apply 整合绿（主线程先诊断每处根因再派，81/116 turn 收绿）；多数＝测试钉旧行为改期望钉世代不变量；LLM 摘要增模型调用按用户「可以直接 mock」在 provider 缝答材料 gist 不计正式请求；comment_policy 9→0 | 全量 `go test ./... -short -count=1` 48 包绿；host/history/journey/assembly 包 `-count=1` 绿 | **band 跳级甲案裁定**（用户「不考虑开发成本甲更纯粹」）：band 读材料自带压缩标记（carriesFoldProduct）非另立世代台账，D2 勘误；跳级边界＝全局 summary 滚入邻 turn 段（splitSegments 只切 output），立 D8＋13.11 令折叠产物自成语义单元修之 | 13.11 派 openspec-apply（症状直译锚 TestGlobalSummaryStandsApartFromTheRecentTurn 红→绿＋负锚幂等＋消费者锚五包绿）；domain12 soak 真回归（checkpoint 陈述+尾链任务漏记 Recovered 致报告 false+query 丢任务）主线程一处统一修绿 | 13.11 绿后：gen_godoc 重生（BandSummaryInstruction 导出）→13.9 全门→提交（排除外来未跟踪）→push→CI 六长分片→squash→归档 | 13/tasks.md 写锁归 13.11 实施代理；外来 test_check_runtime_symptoms.py 暂移 /tmp 跑 lint、提交前恢复 |
+| W8-VOCAB 词汇统一 | 三层逐条落地：carrier→checkpoint（仅 checkpoint 义，commit/store 义保留）、`TaskCheckpoint`→`StatedTask`（任务账合一）、`accountCut`→`compressCut`、account/ledger 分工写死、anchorRef 立为链上定位引用、generational→band 晋升、GLOSSARY 补 `Stateful`/`band`/`Material`（行数零差额） | `go build ./...` 0；`go test ./assembly/ ./runtime/state/ ./memory/replay/ ./api/plugin/ ./runtime/task/ ./tests/integration/history/ -count=1` 全绿；`go run ./scripts/comment_policy -no-baseline assembly runtime api memory` 0 finding；`gofmt -l` 空；`go vet ./...` 0 | 遗留口径：commit←→store carrier 义与 checkpoint 义分立，未强行合并（合并即焊死两个概念）；`TestAgeFoldPromotesTheGenerationsAcrossFolds` 等测试名保留，避免改写已记录的验证命令 | concept_budget 绿（new=47/removed=5 未动、绑定键随名改、ratchet note 附勘误）；doc_budget 零差额；`gen_godoc.sh --check` 绿 | 同批发现：`scripts/gates/test_check_runtime_symptoms.py` 红（`TestLocalSmokeSymptomBootDeployed` 不在外来未跟踪 checker 的冻结注册表），与本单触碰集无交，归外来回填 | — |
 
 （执行期逐轮回填；本档为派发唯一依据，派发前重读二节。）

@@ -1495,7 +1495,7 @@ type Registry interface {
 
 type RegistryCheckpoint struct {
 	// Tasks is the account of the registry at the cut.
-	Tasks []TaskCheckpoint `json:"tasks,omitempty"`
+	Tasks []StatedTask `json:"tasks,omitempty"`
 }
     RegistryCheckpoint is the state one task registry states to the framework:
     one entry per task record the registry holds, in task identity order.
@@ -1653,6 +1653,52 @@ type Spec struct {
     the task answers, the identity a duplicate admission is resolved against,
     the addresses the task belongs to, and the execution shape the task runs in.
 
+type StatedTask struct {
+	// TaskID is the task this entry states.
+	TaskID event.TaskID `json:"task_id"`
+	// Spec is the admission material of the task: the declaration its
+	// notifications route by and its duplicate admissions resolve against.
+	Spec Spec `json:"spec"`
+	// Status is the state the task holds at the cut.
+	Status Status `json:"status"`
+	// Revision is the chain revision the state corresponds to: the record that
+	// lands next expects this revision, so a boot folds only the links at or
+	// past it and reads no link the entry already covers.
+	Revision int64 `json:"revision"`
+	// Round is the execution round the task stands in.
+	Round int64 `json:"round,omitempty"`
+	// AdmittedAt, ChangedAt, RunSince and TTLAnchor are the movement stamps the
+	// record is classified by. ChangedAt is the stamp the terminal sweep reads, so
+	// a restored task kept the deadline it always had instead of one counted from
+	// the restart; a link the tail of a chain folds past the cut carries no
+	// instant, so the stamp such a transition leaves is unknown and the sweep
+	// keeps the record, exactly as it does for a task rebuilt from its chain alone.
+	AdmittedAt time.Time `json:"admitted_at,omitempty"`
+	ChangedAt  time.Time `json:"changed_at,omitempty"`
+	RunSince   time.Time `json:"run_since,omitempty"`
+	TTLAnchor  time.Time `json:"ttl_anchor,omitempty"`
+	// Handoff is the routing an explicit handoff moved the future notifications
+	// to, and HandoffRecord is the link that move recorded. A task no handoff
+	// moved carries neither.
+	Handoff       *HandoffTarget `json:"handoff,omitempty"`
+	HandoffRecord HandoffRecord  `json:"handoff_record,omitempty"`
+	// Mutations is every mutation the task committed, so a repeated mutation
+	// after a restart is recognized as the one already stored instead of being
+	// applied a second time.
+	Mutations []CommitRecord `json:"mutations,omitempty"`
+	// Obligations is every obligation the registry still holds for the task.
+	Obligations []checkpointObligation `json:"obligations,omitempty"`
+}
+    StatedTask is one task record as a checkpoint states it: the declaration the
+    task was admitted under, the state it holds, the chain revision that state
+    corresponds to, and the obligations the registry still owes.
+
+    The fields a chain fold cannot compute back stay out of it — the blocked
+    reasons, the exit reason, the cancellation request, the stop evidence and
+    the reported verdict — because no committed fact carries them and a rebuilt
+    task reads them empty rather than inferred. The checkpoint restores exactly
+    what the fold restores, so the two recovery paths answer the same account.
+
 type Status int
     Status is the state a task moves through from admission to settlement.
     The zero value is StatusUnknown, so a task whose status was never set is
@@ -1698,52 +1744,6 @@ type StopEvidence struct {
 }
     StopEvidence is the executor's report about actually stopping one task.
     The manager records the report and infers no stop of its own.
-
-type TaskCheckpoint struct {
-	// TaskID is the task this entry states.
-	TaskID event.TaskID `json:"task_id"`
-	// Spec is the admission material of the task: the declaration its
-	// notifications route by and its duplicate admissions resolve against.
-	Spec Spec `json:"spec"`
-	// Status is the state the task holds at the cut.
-	Status Status `json:"status"`
-	// Revision is the chain revision the state corresponds to: the record that
-	// lands next expects this revision, so a boot folds only the links at or
-	// past it and reads no link the entry already covers.
-	Revision int64 `json:"revision"`
-	// Round is the execution round the task stands in.
-	Round int64 `json:"round,omitempty"`
-	// AdmittedAt, ChangedAt, RunSince and TTLAnchor are the movement stamps the
-	// record is classified by. ChangedAt is the stamp the terminal sweep reads, so
-	// a restored task kept the deadline it always had instead of one counted from
-	// the restart; a link the tail of a chain folds past the cut carries no
-	// instant, so the stamp such a transition leaves is unknown and the sweep
-	// keeps the record, exactly as it does for a task rebuilt from its chain alone.
-	AdmittedAt time.Time `json:"admitted_at,omitempty"`
-	ChangedAt  time.Time `json:"changed_at,omitempty"`
-	RunSince   time.Time `json:"run_since,omitempty"`
-	TTLAnchor  time.Time `json:"ttl_anchor,omitempty"`
-	// Handoff is the routing an explicit handoff moved the future notifications
-	// to, and HandoffRecord is the link that move recorded. A task no handoff
-	// moved carries neither.
-	Handoff       *HandoffTarget `json:"handoff,omitempty"`
-	HandoffRecord HandoffRecord  `json:"handoff_record,omitempty"`
-	// Mutations is every mutation the task committed, so a repeated mutation
-	// after a restart is recognized as the one already stored instead of being
-	// applied a second time.
-	Mutations []CommitRecord `json:"mutations,omitempty"`
-	// Obligations is every obligation the registry still holds for the task.
-	Obligations []checkpointObligation `json:"obligations,omitempty"`
-}
-    TaskCheckpoint is one task record as a checkpoint states it: the declaration
-    the task was admitted under, the state it holds, the chain revision that
-    state corresponds to, and the obligations the registry still owes.
-
-    The fields a chain fold cannot compute back stay out of it — the blocked
-    reasons, the exit reason, the cancellation request, the stop evidence and
-    the reported verdict — because no committed fact carries them and a rebuilt
-    task reads them empty rather than inferred. The checkpoint restores exactly
-    what the fold restores, so the two recovery paths answer the same account.
 
 type TaskRecord struct {
 	// Spec is the admission material of the task (the task_spawned record). It

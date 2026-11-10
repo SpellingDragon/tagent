@@ -44,7 +44,7 @@ func checkpointDeliveryOf(t *testing.T, ctx context.Context, run *Run, key event
 }
 
 // deliverySlicePayloadOf answers the raw payload one checkpoint fact states for
-// the delivery slice, so a check hands the carrier's bytes to the restore entry
+// the delivery slice, so a check hands the checkpoint's bytes to the restore entry
 // the boot calls.
 func deliverySlicePayloadOf(t *testing.T, ctx context.Context, run *Run, key event.EventID) []byte {
 	t.Helper()
@@ -325,7 +325,7 @@ func parkedCount(h *Host) int {
 }
 
 // checkpointDeliveryPayload files one checkpoint of the run and answers the
-// payload of its delivery slice, so a check reads the bytes the carrier states.
+// payload of its delivery slice, so a check reads the bytes the checkpoint states.
 func checkpointDeliveryPayload(t *testing.T, ctx context.Context, run *Run) []byte {
 	t.Helper()
 	key, _, err := run.Checkpoint(ctx)
@@ -354,7 +354,7 @@ func checkpointDeliveryPayload(t *testing.T, ctx context.Context, run *Run) []by
 
 // TestCheckpointBodyBoundedByTheOpenAccount pins the settled set as the cut.
 //   - the delivery slice a checkpoint states is the open account alone: a settled obligation the cut covers states no token
-//   - the payload is therefore the same bytes beside one settled obligation and beside hundreds of them, so the carrier bounds the open work and never the history
+//   - the payload is the same bytes beside one settled obligation and beside hundreds of them: the checkpoint bounds open work, never history
 //   - an obligation still owed is still carried with its body, so the bound is the open account and never an emptied account
 //
 // 契约: docs/wiki/platform/platform-subsystems.md#framework-checkpoint
@@ -367,7 +367,7 @@ func TestCheckpointBodyBoundedByTheOpenAccount(t *testing.T) {
 		t.Fatalf("mount the delivery account on the state seam: %v", err)
 	}
 	defer deliveryTestStopRetries(host)
-	addr := deliveryTestAddress("session-bounded-carrier")
+	addr := deliveryTestAddress("session-bounded-checkpoint")
 	bodyOf := func(identity string) string { return "the body of " + identity }
 	settle := func(identity string) {
 		t.Helper()
@@ -385,10 +385,10 @@ func TestCheckpointBodyBoundedByTheOpenAccount(t *testing.T) {
 	settle("delivery-bounded-0300")
 	long := checkpointDeliveryPayload(t, ctx, run)
 	if !bytes.Equal(brief, long) {
-		t.Fatalf("the carrier states %d bytes beside 300 settled obligations and %d bytes beside one, want the open account alone (a carrier that grows with the settled history bounds nothing)", len(long), len(brief))
+		t.Fatalf("the checkpoint states %d bytes beside 300 settled obligations and %d bytes beside one, want the open account alone (a checkpoint that grows with the settled history bounds nothing)", len(long), len(brief))
 	}
 	if len(long) == 0 {
-		t.Fatal("the carrier states no delivery slice at all")
+		t.Fatal("the checkpoint states no delivery slice at all")
 	}
 	open := "delivery-bounded-open"
 	host.noteDeliveryState(addr.SessionID, open, heldStateOf(deliveryReasonApproval))
@@ -396,13 +396,13 @@ func TestCheckpointBodyBoundedByTheOpenAccount(t *testing.T) {
 	settle("delivery-bounded-open-marker")
 	heldPayload := checkpointDeliveryPayload(t, ctx, run)
 	if !strings.Contains(string(heldPayload), open) {
-		t.Fatalf("the carrier states %s, want the obligation the account still owes", heldPayload)
+		t.Fatalf("the checkpoint states %s, want the obligation the account still owes", heldPayload)
 	}
 	if strings.Contains(string(heldPayload), "delivery-bounded-0100") {
-		t.Fatal("the carrier states a settled obligation, want the settled set stated by the cut alone")
+		t.Fatal("the checkpoint states a settled obligation, want the settled set stated by the cut alone")
 	}
 	if len(heldPayload) <= len(long) {
-		t.Fatalf("the carrier states %d bytes beside one open obligation and %d beside none, want the open account carried", len(heldPayload), len(long))
+		t.Fatalf("the checkpoint states %d bytes beside one open obligation and %d beside none, want the open account carried", len(heldPayload), len(long))
 	}
 }
 
@@ -428,7 +428,7 @@ func declaredTestObligation(t *testing.T, ctx context.Context, run *Run, addr ev
 	}
 }
 
-// owedOfIdentity reports the owed entry one carrier states for one identity.
+// owedOfIdentity reports the owed entry one checkpoint states for one identity.
 func owedOfIdentity(wire deliverySliceWire, identity string) (deliverySliceOwed, bool) {
 	for _, owed := range wire.Owed {
 		if owed.Identity == identity {
@@ -439,8 +439,8 @@ func owedOfIdentity(wire deliverySliceWire, identity string) (deliverySliceOwed,
 }
 
 // TestCheckpointKeepsDeclaredObligationAcrossCut pins a declaration no send has settled yet.
-//   - positive: a declared body no send settled when the cut was filed is stated by the carrier and delivered exactly once by the restart
-//   - negative: a declaration the account settled before the cut is stated nowhere, so the carrier never re-owes a body the chain already delivered
+//   - positive: a declared body no send settled when the cut was filed is stated by the checkpoint and delivered exactly once by the restart
+//   - negative: a declaration the account settled before the cut is stated nowhere, so the checkpoint never re-owes a body the chain already delivered
 //   - consumer: the obligation reaches the sender through restorePendingDeliveries and restoreObligation, the boot path the host runs
 //
 // 契约: docs/wiki/platform/platform-subsystems.md#framework-checkpoint
@@ -482,16 +482,16 @@ func TestCheckpointKeepsDeclaredObligationAcrossCut(t *testing.T) {
 	}
 	owed, stated := owedOfIdentity(wire, openIdentity)
 	if !stated {
-		t.Fatalf("the carrier states %+v, want the declaration of %s the cut covers and no send settled", wire.Owed, openIdentity)
+		t.Fatalf("the checkpoint states %+v, want the declaration of %s the cut covers and no send settled", wire.Owed, openIdentity)
 	}
 	if owed.Content != openBody || owed.Lineage != "user" || owed.Agent != string(addr.AgentID) || owed.Session != string(addr.SessionID) {
-		t.Fatalf("the carrier states %+v for %s, want the body, target and lineage the declaration carries", owed, openIdentity)
+		t.Fatalf("the checkpoint states %+v for %s, want the body, target and lineage the declaration carries", owed, openIdentity)
 	}
 	if owed.State != "" {
-		t.Fatalf("the carrier states %s = %q, want no settlement state beside a declaration no send answered", openIdentity, owed.State)
+		t.Fatalf("the checkpoint states %s = %q, want no settlement state beside a declaration no send answered", openIdentity, owed.State)
 	}
 	if _, settledStated := owedOfIdentity(wire, settledIdentity); settledStated {
-		t.Fatalf("the carrier states the settled %s, want the cut alone to cover a delivered body", settledIdentity)
+		t.Fatalf("the checkpoint states the settled %s, want the cut alone to cover a delivered body", settledIdentity)
 	}
 	if _, err := first.Close(ctx, agent.CloseRequest{Timeout: time.Now().Add(20 * time.Second)}); err != nil {
 		t.Fatalf("close the process that stopped beside the open declaration: %v", err)
@@ -592,26 +592,26 @@ func TestDeliveryAccountStatesTheLiveSend(t *testing.T) {
 		t.Fatalf("commit the turn output: %v", err)
 	}
 	identity := hostDeliveryFreshPrefix + string(outputKey)
-	carrier := func() deliverySliceWire {
+	checkpoint := func() deliverySliceWire {
 		wire, carried := checkpointDeliveryOf(t, ctx, run, mustCheckpoint(t, ctx, run))
 		if !carried {
 			t.Fatal("the checkpoint states no delivery slice at all")
 		}
 		return wire
 	}
-	declared, stated := owedOfIdentity(carrier(), identity)
+	declared, stated := owedOfIdentity(checkpoint(), identity)
 	if !stated {
-		t.Fatalf("the carrier of the process states no obligation of %s, want the one the output fact declared inside its own landing unit", identity)
+		t.Fatalf("the checkpoint of the process states no obligation of %s, want the one the output fact declared inside its own landing unit", identity)
 	}
 	if declared.Content != body || declared.State != "" {
-		t.Fatalf("the carrier states %+v for %s, want the body and no settlement state beside a declaration no send answered", declared, identity)
+		t.Fatalf("the checkpoint states %+v for %s, want the body and no settlement state beside a declaration no send answered", declared, identity)
 	}
 	host.deliverFresh(ctx, addr, sender, "user", agent.Turn{InvocationID: invocation, Terminal: model.KindCompleted})
 	if got := sender.attemptCount(body); got != 1 {
 		t.Fatalf("the live path asked the channel to take the body %d time(s), want the one send of a segment closing", got)
 	}
-	if _, stated := owedOfIdentity(carrier(), identity); stated {
-		t.Fatalf("the carrier still states the delivered %s, want the settlement to answer the declaration", identity)
+	if _, stated := owedOfIdentity(checkpoint(), identity); stated {
+		t.Fatalf("the checkpoint still states the delivered %s, want the settlement to answer the declaration", identity)
 	}
 	if _, err := run.Close(ctx, agent.CloseRequest{Timeout: time.Now().Add(20 * time.Second)}); err != nil {
 		t.Fatalf("close the process: %v", err)
@@ -630,12 +630,12 @@ func mustCheckpoint(t *testing.T, ctx context.Context, run *Run) event.EventID {
 
 // TestCrossSessionObligationsStayInTheirTargetSlice pins the target-session shard of the delivery account.
 //
-//   - positive: the carrier of the chain an obligation targets states it, and restoring those payloads redrives it exactly once
-//   - negative: a chain's carrier states nothing of the chain beside it, and no slice files another chain's state
-//   - the same check reds on a global account, which states both obligations in each chain's carrier
+//   - positive: the checkpoint of the chain an obligation targets states it, and restoring those payloads redrives it exactly once
+//   - negative: a chain's checkpoint states nothing of the chain beside it, and no slice files another chain's state
+//   - the same check reds on a global account, which states both obligations in each chain's checkpoint
 //   - the whole account states both obligations, so the exclusion above is the shard and never an emptied account
-//   - the two chains interleave their rounds, so a carrier reading the whole account states work a chain beside it was writing at the same time
-//   - consumer: Run.CheckpointSession files the carrier, and StateRegistry.RestoreState hands each payload to Host.restoreDeliverySlice on the boot path
+//   - the two chains interleave their rounds, so a checkpoint reading the whole account states work a chain beside it was writing at the same time
+//   - consumer: Run.CheckpointSession files the checkpoint, and StateRegistry.RestoreState hands each payload to Host.restoreDeliverySlice on the boot path
 //
 // 契约: docs/wiki/reliability/durable-delivery.md#envelope-states
 func TestCrossSessionObligationsStayInTheirTargetSlice(t *testing.T) {
@@ -658,30 +658,30 @@ func TestCrossSessionObligationsStayInTheirTargetSlice(t *testing.T) {
 	commitSessionTurns(t, ctx, run, kept, "shard-kept", 2)
 	commitSessionTurns(t, ctx, run, other, "shard-other", 3)
 
-	carrierOf := func(addr event.Address, foreign, own, body string) event.EventID {
+	checkpointOf := func(addr event.Address, foreign, own, body string) event.EventID {
 		t.Helper()
 		key, filed, err := run.CheckpointSession(ctx, addr)
 		if err != nil || !filed {
-			t.Fatalf("file the carrier of %s = (%t, %v), want a filed fact", addr.SessionID, filed, err)
+			t.Fatalf("file the checkpoint of %s = (%t, %v), want a filed fact", addr.SessionID, filed, err)
 		}
 		wire, carried := checkpointDeliveryOf(t, ctx, run, key)
 		if !carried {
-			t.Fatalf("the carrier of %s states no delivery slice, want the obligation that chain is owed", addr.SessionID)
+			t.Fatalf("the checkpoint of %s states no delivery slice, want the obligation that chain is owed", addr.SessionID)
 		}
 		owed, stated := owedOfIdentity(wire, own)
 		if !stated {
-			t.Fatalf("the carrier of %s owes %d obligation(s) and none is %s", addr.SessionID, len(wire.Owed), own)
+			t.Fatalf("the checkpoint of %s owes %d obligation(s) and none is %s", addr.SessionID, len(wire.Owed), own)
 		}
 		if owed.Session != string(addr.SessionID) || owed.Content != body {
-			t.Fatalf("the carrier of %s states %+v, want the body declared against that chain", addr.SessionID, owed)
+			t.Fatalf("the checkpoint of %s states %+v, want the body declared against that chain", addr.SessionID, owed)
 		}
 		if _, bleeding := owedOfIdentity(wire, foreign); bleeding {
-			t.Fatalf("the carrier of %s states %s, the obligation of the chain beside it: the account of a chain is what that chain is owed", addr.SessionID, foreign)
+			t.Fatalf("the checkpoint of %s states %s, the obligation of the chain beside it: the account of a chain is what that chain is owed", addr.SessionID, foreign)
 		}
 		return key
 	}
-	keptKey := carrierOf(kept, otherIdentity, keptIdentity, keptBody)
-	otherKey := carrierOf(other, keptIdentity, otherIdentity, otherBody)
+	keptKey := checkpointOf(kept, otherIdentity, keptIdentity, keptBody)
+	otherKey := checkpointOf(other, keptIdentity, otherIdentity, otherBody)
 
 	wholePayload, err := host.deliverySlice()
 	if err != nil {
@@ -693,7 +693,7 @@ func TestCrossSessionObligationsStayInTheirTargetSlice(t *testing.T) {
 	}
 	for _, identity := range []string{keptIdentity, otherIdentity} {
 		if _, stated := owedOfIdentity(whole, identity); !stated {
-			t.Fatalf("the whole account owes no entry for %s, want the obligation a chain carrier is expected to state", identity)
+			t.Fatalf("the whole account owes no entry for %s, want the obligation a chain checkpoint is expected to state", identity)
 		}
 	}
 
@@ -708,10 +708,10 @@ func TestCrossSessionObligationsStayInTheirTargetSlice(t *testing.T) {
 		{Name: checkpointSliceDelivery, Payload: deliverySlicePayloadOf(t, ctx, run, keptKey)},
 		{Name: checkpointSliceDelivery, Payload: deliverySlicePayloadOf(t, ctx, run, otherKey)},
 	}); err != nil {
-		t.Fatalf("restore the delivery carriers of the two chains: %v", err)
+		t.Fatalf("restore the delivery checkpoints of the two chains: %v", err)
 	}
 	if err := recovered.restoreEventifiedDeliveries(ctx); err != nil {
-		t.Fatalf("restore the account the carriers state: %v", err)
+		t.Fatalf("restore the account the checkpoints state: %v", err)
 	}
 	defer deliveryTestStopRetries(recovered)
 	for _, want := range []struct {

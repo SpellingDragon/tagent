@@ -649,7 +649,7 @@ func (h *Host) deliveryStateOf(session event.SessionID, identity string) (string
 }
 
 // restoredAccount reports whether this host's account was restored from a
-// checkpoint carrier, so the state table stands for the open account alone: the
+// checkpoint, so the state table stands for the open account alone: the
 // settled history of such an account is its cut, and one identity the table does
 // not hold is answered by the settlement facts the chain keeps. An account this
 // process stated itself names every identity it wrote, so it needs no probe.
@@ -1795,8 +1795,8 @@ func (h *Host) noteHeldSeq(identity string) {
 // chain alone: every settlement and declaration fact committed past the cut the
 // newest delivery slice states is folded through the same reducer the live commit
 // drives, and the redrive each obligation stands at is read beside it.
-// - The account the newest carrier restored is the state the facts below its cut produced, so only the facts past the cut are folded: the obligations of a long-lived store cost what is still in flight, never the whole chain the account already settled.
-// - A store holding no carrier cut folds the facts the chain holds, which is the whole chain in commit order and the same bound the account has always paid beside no carrier.
+// - The account the newest checkpoint restored is the state the facts below its cut produced, so only the facts past the cut are folded: the obligations of a long-lived store cost what is still in flight, never the whole chain the account already settled.
+// - A store holding no checkpoint cut folds the facts the chain holds, which is the whole chain in commit order and the same bound the account has always paid beside no checkpoint.
 // - The retry attempt facts are not account state: they are the clock of the duty that sends the obligation, so they are collected here for the drive instead of seated in the account.
 //
 // A settlement fact that cannot be decoded refuses the boot by name: the host
@@ -1944,7 +1944,7 @@ func (h *Host) driveRestoredDeliveries(ctx context.Context, attempts map[string]
 // declares: the identity derived from the fact key beside the body, target and
 // lineage the fact stated. It is the one derivation of a declaration — the boot
 // recovery reads it from the chain, the live account applies it from the landing
-// unit, and the carrier states it — so the three never disagree about what one
+// unit, and the checkpoint states it — so the three never disagree about what one
 // fact owes.
 func declaredObligationOf(evt event.Event) (deliverySettlement, bool) {
 	if evt.Type != event.TypeAgentOutput || evt.Meta[deliveryOwedMeta] != "1" {
@@ -1975,7 +1975,7 @@ func declaredObligationOf(evt event.Event) (deliverySettlement, bool) {
 // declareObligation applies one landed fact to the open account: a fact that
 // declares a delivery obligation enters the account under the identity, body,
 // target, lineage and moment it stated, unless the account already states that
-// identity. The run calls it inside the landing unit of the fact, so the carrier
+// identity. The run calls it inside the landing unit of the fact, so the checkpoint
 // a following cut files states a declaration the chain already carries instead
 // of an account that has not read it yet.
 //
@@ -2047,7 +2047,7 @@ func (h *Host) applyDeclaredObligation(evt event.Event) {
 // are the obligations the facts state, derived once.
 //
 //   - a restored account states the settlement it held at the cut and can trail the settlement fact that landed with it, so the drive probes the exact key of an obligation the account states no state for: a restored owed entry whose settlement already landed is never sent a second time.
-//   - the same read decides the state of every obligation the account states as open with no owed declaration beside it, because a carrier filed by the commit that settled the obligation states the state that commit had not yet applied: the open identities are the work in flight, so the probe stays bounded by them and never by the settled history.
+//   - the same read decides the state of every obligation the account states as open with no owed declaration beside it, because a checkpoint filed by the commit that settled the obligation states the state that commit had not yet applied: the open identities are the work in flight, so the probe stays bounded by them and never by the settled history.
 func (h *Host) restoreEventifiedDeliveries(ctx context.Context) error {
 	attempts, err := h.replayDeliveryFacts(ctx)
 	if err != nil {

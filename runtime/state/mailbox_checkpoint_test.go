@@ -90,7 +90,7 @@ func TestMailboxSliceRestoreSeatsThePayloadBesideNoAccount(t *testing.T) {
 	}
 }
 
-// TestMailboxSliceRestoresTheOwedSetBesideACutThatStatesNothing pins the restore of a boot whose tier holds no carrier.
+// TestMailboxSliceRestoresTheOwedSetBesideACutThatStatesNothing pins the restore of a boot whose tier holds no checkpoint.
 //   - positive: the framework restore of the empty cut seats every obligation the account owes
 //   - parity: the seated set is the account's owed set, neither short nor doubled
 //   - negative: the mailbox a boot mounts owes nothing until the framework restores it, so skipping the restore leaves the work unseated

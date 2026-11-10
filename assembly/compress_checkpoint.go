@@ -37,7 +37,7 @@ type compressSliceSession struct {
 	Judgments []compressSliceJudgment `json:"judgments"`
 }
 
-// compressSliceJudgment is one judgment as the carrier states it: the identity
+// compressSliceJudgment is one judgment as the checkpoint states it: the identity
 // the judgment is quoted by, the reason the request fact carries and the moment
 // it was filed on the millisecond axis.
 type compressSliceJudgment struct {
@@ -99,14 +99,14 @@ func (r *Run) compressSlice() ([]byte, error) {
 	return json.Marshal(wire)
 }
 
-// restoreCompressSlice puts the judgments and answers the carrier states back
+// restoreCompressSlice puts the judgments and answers the checkpoint states back
 // into the consumer of this run. The facts the boot replays afterwards land on
 // this account and never beside it: a request recorded twice is one judgment, a
-// product noted twice is one answer, and a judgment the carrier leaves unanswered
+// product noted twice is one answer, and a judgment the checkpoint leaves unanswered
 // is the execution the chain still owes.
 //
-// The restore merges: a carrier states the account of the chains it covers, and a
-// boot reads the framework's carrier beside the carrier of every chain, so each
+// The restore merges: a checkpoint states the account of the chains it covers, and a
+// boot reads the framework's checkpoint beside the checkpoint of every chain, so each
 // restore states the chain it carries and leaves the chains beside it standing.
 func (r *Run) restoreCompressSlice(payload []byte) error {
 	var wire compressSliceWire
@@ -154,7 +154,7 @@ func (r *Run) restoreCompressSlice(payload []byte) error {
 // compressSliceOf states the account one session chain owes: the judgments it
 // filed in filing order and the identities a product answers among them, in
 // identity order, so the same account renders the same bytes. A chain that filed
-// no judgment states nothing, because the carrier of that chain has no account to
+// no judgment states nothing, because the checkpoint of that chain has no account to
 // carry.
 func (r *Run) compressSliceOf(session event.SessionID) ([]byte, error) {
 	if session == "" {

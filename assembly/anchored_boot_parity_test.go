@@ -137,7 +137,7 @@ func counterlessProductOf(product event.CompressProduct) event.Event {
 //   - the anchored rebuild notes only the products it decodes, so the judgment it records is never one a chain product already answers
 //   - the fallback rebuild answers the same judgments as the full walk
 //   - neither rebuild states a compaction payload or a recovery hint
-//   - either carrier serves the rebuild (the newest checkpoint when the store holds one, else the newest per-chain anchor), covered material staying unread
+//   - either checkpoint serves the rebuild (the newest checkpoint when the store holds one, else the newest per-chain anchor), covered material staying unread
 //
 // 契约: docs/wiki/reliability/durable-delivery.md#canonical-fact-resolution
 func TestAnchoredBootMatchesFullBoot(t *testing.T) {
@@ -180,7 +180,7 @@ func TestAnchoredBootMatchesFullBoot(t *testing.T) {
 		t.Fatal("the fallback rebuild registered no projection for the chain")
 	}
 	if anchoredReport.Anchors == 0 && anchoredReport.Checkpoints == 0 {
-		t.Fatal("the folded chain minted no carrier the rebuild could use")
+		t.Fatal("the folded chain minted no checkpoint the rebuild could use")
 	}
 	if anchoredReport.Decoded >= fullReport.Decoded {
 		t.Fatalf("the anchored rebuild decoded %d bodies, want fewer than the full walk %d", anchoredReport.Decoded, fullReport.Decoded)
@@ -353,7 +353,7 @@ func TestDefaultBootRebuildsFromTheAnchor(t *testing.T) {
 	}
 }
 
-// TestTheRestoredProjectionReadsOnlyPastItsSurvivors pins the read of a boot the projection slice of a carrier rebuilds beside no fold product.
+// TestTheRestoredProjectionReadsOnlyPastItsSurvivors pins the read of a boot the projection slice of a checkpoint rebuilds beside no fold product.
 //   - the boot reads the survivor bodies and the facts committed past the newest of them, never the chain the survivors cover
 //   - the covered history grows without growing one read of the boot
 //   - the covered filler states no content, so the projection the run presents never holds it and the restart has no reason to read it
@@ -380,10 +380,10 @@ func TestTheRestoredProjectionReadsOnlyPastItsSurvivors(t *testing.T) {
 		}
 		commitWindowTurns(t, ctx, source, addr, 2)
 		if count := countFoldProducts(t, ctx, source); count != 0 {
-			t.Fatalf("the fixture filed %d product(s), want the carrier of a chain that never folded", count)
+			t.Fatalf("the fixture filed %d product(s), want the checkpoint of a chain that never folded", count)
 		}
 		if _, filed, err := source.Checkpoint(ctx); err != nil || !filed {
-			t.Fatalf("file the carrier of the chain = (%t, %v), want a filed fact", filed, err)
+			t.Fatalf("file the checkpoint of the chain = (%t, %v), want a filed fact", filed, err)
 		}
 		indexed[filler] = chainIndexSize(t, ctx, source)
 		if indexed[filler] <= filler {
@@ -395,7 +395,7 @@ func TestTheRestoredProjectionReadsOnlyPastItsSurvivors(t *testing.T) {
 
 		booted := noTrimNoWindowRun(t, ctx, storage)
 		if filed, _ := booted.CheckpointFiled(); filed == "" {
-			t.Fatal("the boot restored no carrier, so the bound proves nothing")
+			t.Fatal("the boot restored no checkpoint, so the bound proves nothing")
 		}
 		reads[filler] = booted.CommittedFacts()
 
@@ -416,7 +416,7 @@ func TestTheRestoredProjectionReadsOnlyPastItsSurvivors(t *testing.T) {
 			t.Fatalf("the boot beside %d covered fact(s) renders %d bytes, want the full walk %d", filler, len(got), len(want))
 		}
 		if reads[filler] >= indexed[filler] {
-			t.Fatalf("the boot beside %d covered fact(s) read %d of the %d the chain indexes, want the carrier to leave the covered material unread",
+			t.Fatalf("the boot beside %d covered fact(s) read %d of the %d the chain indexes, want the checkpoint to leave the covered material unread",
 				filler, reads[filler], indexed[filler])
 		}
 	}

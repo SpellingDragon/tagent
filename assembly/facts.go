@@ -77,12 +77,12 @@ func (r *Run) commitFactChecked(ctx context.Context, evt event.Event) (event.Eve
 }
 
 // commitFactNoCadence is the commit entry that files no checkpoint and advances
-// no cadence: the coordinator files its own carrier through it, so the fact that
+// no cadence: the coordinator files its own checkpoint through it, so the fact that
 // states the account never triggers the cadence that files another.
 //
-//   - a checkpoint fact stays on the store the boot reads it from and enters no session chain: it is a framework state carrier, not material of any chain, so the live ledger keeps the window of the chains it serves and never one fact per cut.
+//   - a checkpoint fact stays on the store the boot reads it from and enters no session chain: it is a framework state checkpoint, not material of any chain, so the live ledger keeps the window of the chains it serves and never one fact per cut.
 //   - the whole commit holds the quiet-point fence, so a cut that drained the pipeline reads every state this fact left behind instead of one caught between the landing and its application. The derived state of every consumer mounted on the state seam is folded inside that unit for the same reason: the fact and the state it leaves behind are one step, never a landing a consumer beside it has not read yet.
-//   - a product is the moment the projection drops material, so the chain's carrier is worth refreshing whatever the cadence clock says. The request is a signal: the filer takes the cut on its own goroutine, where this commit's unit of work is not held.
+//   - a product is the moment the projection drops material, so the chain's checkpoint is worth refreshing whatever the cadence clock says. The request is a signal: the filer takes the cut on its own goroutine, where this commit's unit of work is not held.
 func (r *Run) commitFactNoCadence(ctx context.Context, evt event.Event) (event.EventID, error) {
 	if evt.Key == "" {
 		evt.Key = r.mintEventID()
@@ -752,9 +752,9 @@ func agentOf(evt event.Event) event.AgentID {
 // change into a model request. A compression mechanism fact is refused here by
 // its frozen type as well, so an internal summary can never be mapped into a
 // model request even if a caller gives the fact a message body, and a checkpoint
-// carrier is refused the same way: the carrier a session files is tagged with that
+// checkpoint is refused the same way: the checkpoint a session files is tagged with that
 // session in the index, so a rebuild that walks the chain would otherwise read the
-// carrier's payload as one line of the transcript.
+// checkpoint's payload as one line of the transcript.
 // A delivery retry attempt rides the settlement family but is pipeline
 // accounting, not a settlement state: the fact records how many redrives the
 // chain already scheduled, so it maps onto no entry and never reaches the model

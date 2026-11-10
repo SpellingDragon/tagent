@@ -25,17 +25,17 @@ func (h *recordingHolder) RestoreState(_ context.Context, payload []byte) error 
 	return nil
 }
 
-// TestPendingRestoreAccumulatesEveryCarrierOfAName pins the per-session carrier restore.
-// - two carriers state a slice of the same name before the holder mounts; the holder restores both in order, not only the last
+// TestPendingRestoreAccumulatesEveryCheckpointOfAName pins the per-session checkpoint restore.
+// - two checkpoints state a slice of the same name before the holder mounts; the holder restores both in order, not only the last
 // - revert pending to one payload per name and the first session's slice is lost (the kept payload never restored)
 //
 // 契约: docs/wiki/platform/platform-subsystems.md#framework-checkpoint
-func TestPendingRestoreAccumulatesEveryCarrierOfAName(t *testing.T) {
+func TestPendingRestoreAccumulatesEveryCheckpointOfAName(t *testing.T) {
 	ctx := context.Background()
 	registry := NewStateRegistry()
 	for _, payload := range []string{`{"session":"kept"}`, `{"session":"other"}`} {
 		if err := registry.RestoreState(ctx, []event.CheckpointSlice{{Name: "delivery", Payload: []byte(payload)}}); err != nil {
-			t.Fatalf("restore a carrier slice: %v", err)
+			t.Fatalf("restore a checkpoint slice: %v", err)
 		}
 	}
 	if pending := registry.PendingRestore(); len(pending) != 1 || pending[0] != "delivery" {
@@ -48,7 +48,7 @@ func TestPendingRestoreAccumulatesEveryCarrierOfAName(t *testing.T) {
 	}
 	defer dispose()
 	if len(holder.restored) != 2 || holder.restored[0] != `{"session":"kept"}` || holder.restored[1] != `{"session":"other"}` {
-		t.Fatalf("the holder restored %v, want both carrier slices in order (kept then other)", holder.restored)
+		t.Fatalf("the holder restored %v, want both checkpoint slices in order (kept then other)", holder.restored)
 	}
 	if pending := registry.PendingRestore(); len(pending) != 0 {
 		t.Fatalf("pending = %v after the holder mounted, want every slice restored", pending)

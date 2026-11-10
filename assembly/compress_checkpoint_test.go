@@ -98,10 +98,10 @@ func requireSameAccount(t *testing.T, name string, got, want compressAccount) {
 	}
 }
 
-// statedCompressAccount reads the compression account one carrier states back.
-func statedCompressAccount(t *testing.T, carrier event.Checkpoint) compressAccount {
+// statedCompressAccount reads the compression account one checkpoint states back.
+func statedCompressAccount(t *testing.T, checkpoint event.Checkpoint) compressAccount {
 	t.Helper()
-	for _, slice := range carrier.Slices {
+	for _, slice := range checkpoint.Slices {
 		if slice.Name != checkpointSliceCompress {
 			continue
 		}
@@ -137,15 +137,15 @@ func statedCompressAccount(t *testing.T, carrier event.Checkpoint) compressAccou
 		}
 		return account
 	}
-	t.Fatal("the carrier states no compression slice")
+	t.Fatal("the checkpoint states no compression slice")
 	return compressAccount{}
 }
 
 // TestCompressionJudgmentsSurviveTheBootCut pins the compression state slice.
-//   - the carrier states the judgments the live consumer holds and the identities its products answer
+//   - the checkpoint states the judgments the live consumer holds and the identities its products answer
 //   - the boot answers those judgments without reading the covered facts back, so the account survives the cut
 //   - the booted, the anchored and the full walk answer one account
-//   - a boot beside a carrier stating no compression account answers the batch past the cut alone (negative: the parity is the carrier's, not a replay's)
+//   - a boot beside a checkpoint stating no compression account answers the batch past the cut alone (negative: the parity is the checkpoint's, not a replay's)
 //
 // 契约: docs/wiki/agent/event-flow.md#projection-lifecycle
 func TestCompressionJudgmentsSurviveTheBootCut(t *testing.T) {
@@ -164,22 +164,22 @@ func TestCompressionJudgmentsSurviveTheBootCut(t *testing.T) {
 			live.judgedCount(), len(live.Answered), products)
 	}
 
-	carrierID, filed, err := source.Checkpoint(ctx)
+	checkpointID, filed, err := source.Checkpoint(ctx)
 	if err != nil || !filed {
-		t.Fatalf("file the carrier of the chain = (%t, %v), want a filed fact", filed, err)
+		t.Fatalf("file the checkpoint of the chain = (%t, %v), want a filed fact", filed, err)
 	}
-	stored, err := source.CommittedEvent(ctx, carrierID)
+	stored, err := source.CommittedEvent(ctx, checkpointID)
 	if err != nil {
-		t.Fatalf("read the carrier back: %v", err)
+		t.Fatalf("read the checkpoint back: %v", err)
 	}
-	carrier, stated := event.CheckpointOf(stored)
+	checkpoint, stated := event.CheckpointOf(stored)
 	if !stated {
-		t.Fatalf("the carrier %s states no readable checkpoint", carrierID)
+		t.Fatalf("the checkpoint %s states no readable checkpoint", checkpointID)
 	}
-	if names := carrier.CheckpointSliceNames(); !slices.Contains(names, checkpointSliceCompress) {
-		t.Fatalf("the carrier states the slices %v, want the compression account beside them", names)
+	if names := checkpoint.CheckpointSliceNames(); !slices.Contains(names, checkpointSliceCompress) {
+		t.Fatalf("the checkpoint states the slices %v, want the compression account beside them", names)
 	}
-	requireSameAccount(t, "carrier", statedCompressAccount(t, carrier), live)
+	requireSameAccount(t, "checkpoint", statedCompressAccount(t, checkpoint), live)
 	if _, err := source.Close(ctx, agent.CloseRequest{Timeout: time.Now().Add(2 * time.Second)}); err != nil {
 		t.Fatalf("close the source process: %v", err)
 	}
@@ -196,7 +196,7 @@ func TestCompressionJudgmentsSurviveTheBootCut(t *testing.T) {
 		}
 	}
 	if covered == 0 {
-		t.Fatal("the boot read every judgment it answers, so the carrier carried none of them")
+		t.Fatal("the boot read every judgment it answers, so the checkpoint carried none of them")
 	}
 	t.Logf("the boot answers %d judgment(s), %d of them beside no judgment fact in its ledger", len(live.Answered), covered)
 
@@ -207,39 +207,39 @@ func TestCompressionJudgmentsSurviveTheBootCut(t *testing.T) {
 	}
 	requireSameAccount(t, "full walk", compressAccountOf(t, full.compress), live)
 
-	stripped := commitCarrierWithoutTheCompressionSlice(t, ctx, booted, carrier)
+	stripped := commitCheckpointWithoutTheCompressionSlice(t, ctx, booted, checkpoint)
 	bare := windowChainRun(t, ctx, storage)
 	if restored, _ := bare.CheckpointFiled(); restored != stripped {
-		t.Fatalf("the boot restored the carrier %s, want the stripped carrier %s", restored, stripped)
+		t.Fatalf("the boot restored the checkpoint %s, want the stripped checkpoint %s", restored, stripped)
 	}
 	bareAccount := compressAccountOf(t, bare.compress)
 	if want := len(live.Answered) - covered; len(bareAccount.Answered) != want {
-		t.Fatalf("the boot beside a carrier stating no compression account answers %d judgment(s), want the %d past the cut beside the %d the live process answers",
+		t.Fatalf("the boot beside a checkpoint stating no compression account answers %d judgment(s), want the %d past the cut beside the %d the live process answers",
 			len(bareAccount.Answered), want, len(live.Answered))
 	}
 }
 
-// commitCarrierWithoutTheCompressionSlice files the carrier the given one states
+// commitCheckpointWithoutTheCompressionSlice files the checkpoint the given one states
 // beside the projection alone: the state of every other slice is the one the
-// carrier states, and the compression account is the one it never wrote.
-func commitCarrierWithoutTheCompressionSlice(t *testing.T, ctx context.Context, run *Run, carrier event.Checkpoint) event.EventID {
+// checkpoint states, and the compression account is the one it never wrote.
+func commitCheckpointWithoutTheCompressionSlice(t *testing.T, ctx context.Context, run *Run, checkpoint event.Checkpoint) event.EventID {
 	t.Helper()
-	kept := make([]event.CheckpointSlice, 0, len(carrier.Slices))
-	for _, slice := range carrier.Slices {
+	kept := make([]event.CheckpointSlice, 0, len(checkpoint.Slices))
+	for _, slice := range checkpoint.Slices {
 		if slice.Name != checkpointSliceCompress {
 			kept = append(kept, slice)
 		}
 	}
-	if len(kept) == len(carrier.Slices) {
-		t.Fatal("the carrier states no compression slice, so filing it stripped proves nothing")
+	if len(kept) == len(checkpoint.Slices) {
+		t.Fatal("the checkpoint states no compression slice, so filing it stripped proves nothing")
 	}
-	stripped, err := event.CheckpointFor(carrier.Offset, kept)
+	stripped, err := event.CheckpointFor(checkpoint.Offset, kept)
 	if err != nil {
-		t.Fatalf("state the stripped carrier: %v", err)
+		t.Fatalf("state the stripped checkpoint: %v", err)
 	}
 	payload, err := event.CheckpointPayloadOf(stripped)
 	if err != nil {
-		t.Fatalf("render the stripped carrier: %v", err)
+		t.Fatalf("render the stripped checkpoint: %v", err)
 	}
 	run.mu.Lock()
 	owner := run.checkpointOwnerLocked()
@@ -256,7 +256,7 @@ func commitCarrierWithoutTheCompressionSlice(t *testing.T, ctx context.Context, 
 		Meta:      stripped.MetaEntries(),
 		Message:   model.Message{Content: string(payload)},
 	}); err != nil {
-		t.Fatalf("file the stripped carrier %s: %v", key, err)
+		t.Fatalf("file the stripped checkpoint %s: %v", key, err)
 	}
 	return key
 }

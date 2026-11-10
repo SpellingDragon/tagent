@@ -721,7 +721,7 @@ func (d *DurableCommit) Facts(taskID event.TaskID) []task.CommitRecord
     Facts returns the records the carrier stored for one task, in commit order.
 
 func (d *DurableCommit) LoadStats() LoadStats
-    LoadStats reports the measured read cost of the load that built this
+    LoadStats reports the measured read cost of the load that built this commit
     carrier. It is read-only; the caller cannot mutate the carrier through it.
 
 func (d *DurableCommit) Outbox(taskID event.TaskID) []task.OutboxNotice
@@ -993,12 +993,13 @@ type LoadScan struct {
 	Bytes   int64
 	Elapsed time.Duration
 }
-    LoadScan is the read cost of one prefix scan made while rebuilding the
-    carrier at startup. Keys is the number of pairs returned, Bytes their total
-    value length, and Elapsed the wall time of the read alone — folding the
-    pairs into the carrier tables happens after the measurement and is covered
-    by the restore observation instead. It is a measurement, not a durable
-    record.
+    LoadScan is the read cost of one prefix scan made while rebuilding
+    the commit carrier at startup — the store this port writes through,
+    never the framework checkpoint. Keys is the number of pairs returned,
+    Bytes their total value length, and Elapsed the wall time of the read alone
+    — folding the pairs into the carrier tables happens after the measurement
+    and is covered by the restore observation instead. It is a measurement,
+    not a durable record.
 
 type LoadStats struct {
 	Scans []LoadScan
@@ -1741,17 +1742,18 @@ func (r *StateRegistry) Register(holder Stateful) (func(), error)
     a slice another consumer owns.
 
 func (r *StateRegistry) RestoreEmptyState(ctx context.Context) error
-    RestoreEmptyState restores every mounted holder from the state a cut that
-    states no slice carries: the empty state. A boot whose tier holds no carrier
-    states that cut, so it restores the holders the way a filed cut restores
-    them instead of skipping them, and the replay past the cut rebuilds each
-    one — past the zero cut that replay is the whole chain. The restore is the
-    framework's, so a holder that can state itself from what it serves states
-    that work here instead of through a reader of its own: the mailbox seats the
-    obligations its durable account still owes beside the ones a cut states,
-    by the notification identity acceptance answers to. A holder that refuses
-    the empty state refuses the boot by name, because a runtime that starts
-    beside a holder it could not restore reads work it does not hold.
+    RestoreEmptyState restores every mounted holder from the state a cut
+    that states no slice carries: the empty state. A boot whose tier holds no
+    checkpoint states that cut, so it restores the holders the way a filed
+    cut restores them instead of skipping them, and the replay past the cut
+    rebuilds each one — past the zero cut that replay is the whole chain.
+    The restore is the framework's, so a holder that can state itself from what
+    it serves states that work here instead of through a reader of its own:
+    the mailbox seats the obligations its durable account still owes beside
+    the ones a cut states, by the notification identity acceptance answers to.
+    A holder that refuses the empty state refuses the boot by name, because a
+    runtime that starts beside a holder it could not restore reads work it does
+    not hold.
 
 func (r *StateRegistry) RestoreState(ctx context.Context, slices []event.CheckpointSlice) error
     RestoreState hands every stated slice to the holder that owns it, in the
@@ -1761,13 +1763,13 @@ func (r *StateRegistry) RestoreState(ctx context.Context, slices []event.Checkpo
 
 func (r *StateRegistry) SnapshotSessionState(ctx context.Context, session event.SessionID) ([]event.CheckpointSlice, error)
     SnapshotSessionState aggregates the state the mounted holders state about
-    one session chain, in registration order. A holder that keeps no state of a
-    session is asked nothing and states no slice, so the carrier of one session
-    is the size of that session's state and never of the account the run holds
-    beside it. The same read rules hold as for the whole account: no framework
-    lock is held across the holders' reads, and a holder that refuses to state
-    itself refuses the whole cut by name rather than filing a carrier missing
-    its slice.
+    one session chain, in registration order. A holder that keeps no state of
+    a session is asked nothing and states no slice, so the checkpoint of one
+    session is the size of that session's state and never of the account the
+    run holds beside it. The same read rules hold as for the whole account:
+    no framework lock is held across the holders' reads, and a holder that
+    refuses to state itself refuses the whole cut by name rather than filing a
+    checkpoint missing its slice.
 
 func (r *StateRegistry) SnapshotState(ctx context.Context) ([]event.CheckpointSlice, error)
     SnapshotState aggregates the state of every mounted holder in registration

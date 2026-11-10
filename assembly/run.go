@@ -324,20 +324,20 @@ type Run struct {
 	// since the epoch.
 	checkpointCommits int
 	checkpointAt      time.Time
-	// checkpointDue wakes the goroutine that files the carrier the cadence owes:
+	// checkpointDue wakes the goroutine that files the checkpoint the cadence owes:
 	// a commit that reaches the due signals it and takes no cut itself.
 	checkpointDue chan struct{}
 	// checkpointDuePending records the due a wake stands for, so a wake a cut
 	// already answered files nothing.
 	checkpointDuePending bool
 	// checkpointSessionPending names the session chains a session cut is owed
-	// for: a chain asks for its own carrier when its context reached a moment
+	// for: a chain asks for its own checkpoint when its context reached a moment
 	// worth stating, and the filer takes those cuts on its own goroutine.
 	checkpointSessionPending map[event.Address]struct{}
 	// sessionFiled, sessionCuts and sessionSlices are the session face of the
-	// checkpoint account: the carrier each chain last filed or restored, the cut
-	// that state corresponds to, and the slices that carrier stated. A chain the
-	// run filed no carrier of reads the framework's own cut instead.
+	// checkpoint account: the checkpoint each chain last filed or restored, the cut
+	// that state corresponds to, and the slices that checkpoint stated. A chain the
+	// run filed no checkpoint of reads the framework's own cut instead.
 	sessionFiled  map[event.SessionID]event.EventID
 	sessionCuts   map[event.SessionID]event.CheckpointOffset
 	sessionSlices map[event.SessionID]map[string]bool
@@ -1038,8 +1038,8 @@ func (r *Run) restoreInMemoryState(ctx context.Context, durable *state.DurableCo
 //
 //   - A tier holding no checkpoint states the empty cut, and the holders are restored from that the same way: each starts from the empty state and the replay past the cut rebuilds it, which past the zero cut is the whole chain.
 //   - The mailbox states the obligations its durable account still owes on either cut, so the work a stopped process left open is seated by this restore and no consumer keeps a restore path of its own.
-//   - The carrier is read once per boot: a holder mounted after this call states its slice from the pending set, and the chain rebuild that follows takes the state this call restored instead of restoring it again.
-//   - The framework's carrier states the whole account and each session carrier states one chain, so both are restored: the framework one first, which covers the holders that keep no state of a chain, then the newest carrier of every chain the storage holds, which states the chains past the framework cut. The restores merge, so a chain named by both stands once at the newer state.
+//   - The checkpoint is read once per boot: a holder mounted after this call states its slice from the pending set, and the chain rebuild that follows takes the state this call restored instead of restoring it again.
+//   - The framework's checkpoint states the whole account and each session checkpoint states one chain, so both are restored: the framework one first, which covers the holders that keep no state of a chain, then the newest checkpoint of every chain the storage holds, which states the chains past the framework cut. The restores merge, so a chain named by both stands once at the newer state.
 func (r *Run) restoreCheckpointState(ctx context.Context, tier *ledger.Tier) error {
 	if tier == nil {
 		return nil
@@ -1062,7 +1062,7 @@ func (r *Run) restoreCheckpointState(ctx context.Context, tier *ledger.Tier) err
 //   - a chain the newest framework checkpoint states is folded from the link that landed past the stated revision, and one the checkpoint states with no such link is not read at all: a restart costs the account it keeps plus the increment past the cut, never the chains it already settled.
 //   - a chain the checkpoint did not state — one younger than the cut — is folded whole, which is the fallback that keeps the two paths agreeing.
 //   - a chain the checkpoint states with no record past its cut costs no read: it joins the covered set the checkpoint-state call restores.
-//   - a checkpoint-stated task the carrier rebuilt at the cut, whose tail links the fold completes, is held by the registry already and the fold reports no rebuild of its own: its recovery is the checkpoint's account, credited here as Recovered=true beside the covered tasks so the read projection serves it.
+//   - a checkpoint-stated task the checkpoint rebuilt at the cut, whose tail links the fold completes, is held by the registry already and the fold reports no rebuild of its own: its recovery is the checkpoint's account, credited here as Recovered=true beside the covered tasks so the read projection serves it.
 //   - the report names the tasks in chain order whichever path restored them, so a restart answers the same account whether it read a chain or the checkpoint.
 //   - the whole fold is observed as one line at INFO — the chains read, the links they carry, the chains the checkpoint covered, the tasks rebuilt and the chains dropped beside the elapsed time — and a failed fold at ERROR beside the chain it stopped on.
 func (r *Run) restoreChains(ctx context.Context, durable *state.DurableCommit) (task.RestoreReport, error) {
@@ -2328,12 +2328,12 @@ func eachCommittedEvent(ctx context.Context, tier *ledger.Tier, visit func(ledge
 // no durable chain, so the visit answers the resident window alone in commit
 // order. A visit error ends the stream and is returned.
 //
-// A framework checkpoint carrier names the chain it states without entering it,
+// A framework checkpoint names the chain it states without entering it,
 // so the stream leaves it out under either branch: the index answers which chain
-// a carrier belongs to, while the state it carries is the boundary a boot starts
+// a checkpoint belongs to, while the state it carries is the boundary a boot starts
 // from rather than material the chain committed. The commit path already holds
-// that line by keeping a carrier out of the resident ledger, so a stream that
-// read the stored carrier back would hand a reader — a projection rebuild above
+// that line by keeping a checkpoint out of the resident ledger, so a stream that
+// read the stored checkpoint back would hand a reader — a projection rebuild above
 // all — the state slices as transcript lines the run never committed.
 func (r *Run) EachSessionFact(ctx context.Context, addr event.Address, visit func(event.Event) error) error {
 	r.mu.Lock()
@@ -2521,8 +2521,11 @@ func (r *Run) seedFullReplay(ctx context.Context, tier *ledger.Tier) (map[event.
 	return seeds, landed, report, nil
 }
 
-// anchorRef carries one resident index entry a restart rebuild reads: identity,
-// position, frozen event type and session, with no event body attached.
+// anchorRef is the chain locator one resident index entry gives a restart
+// rebuild: identity, position, frozen event type and session, with no event body
+// attached. Every index-driven read names its target this way — a compression
+// fold's anchor and a checkpoint reference alike — so no second locator type
+// stands beside it.
 type anchorRef struct {
 	key       event.EventID
 	partition int
@@ -2549,7 +2552,7 @@ type anchorSlot struct {
 // - The survivors a checkpoint states are held to the same resident bound the full walk applies as it appends: a chain that declared no window keeps the recent material rather than every survivor the payload names.
 // - The checkpoint slices this boot restored are the state every slice of the runtime had reached at the cut. A chain beside a fold product reads only the bodies of the facts committed past that product's newest survivor, so the entries the product covers never reach a body read and the chain's boot costs the increment. A chain the restored slices carry beside no fold product reads the bodies of its survivors and of the facts committed past the newest of them, so that boot costs the survivor count plus the increment instead of the history the survivors already state. Configuration records belong to no session chain and stay, being the declaration ledger the restarted run states that no slice carries.
 // - A chain the checkpoint stated is a chain of this run even beside no fact past its cut, so its slot joins the rebuild and the tail of its chain is replayed onto the state the checkpoint states.
-// - The boundary both carriers are read past is the newest survivor the payload names, which is the material the projection states rather than the cut the carrier states: a cut read before the holders were asked may state a position the survivors behind it already present, and a fact between the two is one the projection already holds.
+// - The boundary both checkpoints are read past is the newest survivor the payload names, which is the material the projection states rather than the cut the checkpoint states: a cut read before the holders were asked may state a position the survivors behind it already present, and a fact between the two is one the projection already holds.
 // - A compression fact the cut did not cover but the boundary did is handed to the compression account alone, because the projection states the material it folded and the account does not state the judgment or the answer it carries.
 func (r *Run) seedAnchoredReplay(ctx context.Context, tier *ledger.Tier) (map[event.Address]*sessionSeed, seedReport, error) {
 	report := seedReport{}
@@ -2567,7 +2570,7 @@ func (r *Run) seedAnchoredReplay(ctx context.Context, tier *ledger.Tier) (map[ev
 		}
 	}
 	seedsRestored := r.takeRestoredProjection()
-	accountCut := r.checkpointCut(checkpointSliceCompress)
+	compressCut := r.checkpointCut(checkpointSliceCompress)
 	anchors := map[anchorSlot]int{}
 	seen := map[anchorSlot]struct{}{}
 	var order []anchorSlot
@@ -2618,7 +2621,7 @@ func (r *Run) seedAnchoredReplay(ctx context.Context, tier *ledger.Tier) (map[ev
 				return nil, report, err
 			}
 			seed.projection = trimReplayProjection(ctx, seed.projection, seed.window)
-			tailProducts, err = r.replayChainPastCut(ctx, tier, refs, slot, seed, boundary, accountCut, "", &report)
+			tailProducts, err = r.replayChainPastCut(ctx, tier, refs, slot, seed, boundary, compressCut, "", &report)
 			if err != nil {
 				return nil, report, err
 			}
@@ -2661,7 +2664,7 @@ func (r *Run) seedAnchoredReplay(ctx context.Context, tier *ledger.Tier) (map[ev
 					r.compress.NoteProduct(product)
 					report.Anchors++
 					seeds[addr] = seed
-					tailProducts, err = r.replayChainPastCut(ctx, tier, refs, slot, seed, boundary, accountCut, refs[at].key, &report)
+					tailProducts, err = r.replayChainPastCut(ctx, tier, refs, slot, seed, boundary, compressCut, refs[at].key, &report)
 					if err != nil {
 						return nil, report, err
 					}
@@ -2787,20 +2790,20 @@ func (r *Run) restoreSurvivors(ctx context.Context, tier *ledger.Tier, seed *ses
 	return boundary, nil
 }
 
-// replayChainPastCut replays one chain onto the state its carrier states and
+// replayChainPastCut replays one chain onto the state its checkpoint states and
 // answers the products a restart applies on top of that state: a fact committed
-// past the boundary is replayed whole, a compression fact the carrier's cut did
+// past the boundary is replayed whole, a compression fact the checkpoint's cut did
 // not cover but the boundary did is handed to the compression account alone, and
-// the material the boundary covers is read by neither path because the carrier
+// the material the boundary covers is read by neither path because the checkpoint
 // already states it.
 //
-//   - The boundary is the newest survivor the carrier names, never the cut it states: the state read at the quiet point carries every commit that landed before the holders were asked, so the survivors may stand past the watermark. A fact between the two landed after the cut and before the boundary, so the carrier holds the material it folded and the replay must not seat it twice.
-//   - A carrier names the chain it states without entering it: the state it carries is the boundary this replay starts from, never material the chain replays.
+//   - The boundary is the newest survivor the checkpoint names, never the cut it states: the state read at the quiet point carries every commit that landed before the holders were asked, so the survivors may stand past the watermark. A fact between the two landed after the cut and before the boundary, so the checkpoint holds the material it folded and the replay must not seat it twice.
+//   - A checkpoint names the chain it states without entering it: the state it carries is the boundary this replay starts from, never material the chain replays.
 //
 // The covered range costs one index walk and no body read. The exception is a
-// compression fact of that range, which the carrier's account states only up to
-// the cut: a carrier stating no account at all leaves the range unread.
-func (r *Run) replayChainPastCut(ctx context.Context, tier *ledger.Tier, refs []anchorRef, slot anchorSlot, seed *sessionSeed, boundary int64, accountCut event.CheckpointOffset, skip event.EventID, report *seedReport) ([]event.CompressProduct, error) {
+// compression fact of that range, which the checkpoint's account states only up to
+// the cut: a checkpoint stating no account at all leaves the range unread.
+func (r *Run) replayChainPastCut(ctx context.Context, tier *ledger.Tier, refs []anchorRef, slot anchorSlot, seed *sessionSeed, boundary int64, compressCut event.CheckpointOffset, skip event.EventID, report *seedReport) ([]event.CompressProduct, error) {
 	var tail, behind []anchorRef
 	for _, ref := range refs {
 		if ref.session != slot.session || ref.partition != slot.partition || ref.key == skip {
@@ -2813,7 +2816,7 @@ func (r *Run) replayChainPastCut(ctx context.Context, tier *ledger.Tier, refs []
 			tail = append(tail, ref)
 			continue
 		}
-		if accountCut != nil && event.CompressionMechanism(ref.typ) && pastCut(accountCut, ref) {
+		if compressCut != nil && event.CompressionMechanism(ref.typ) && pastCut(compressCut, ref) {
 			behind = append(behind, ref)
 		}
 	}
@@ -2840,7 +2843,7 @@ func (r *Run) replayChainPastCut(ctx context.Context, tier *ledger.Tier, refs []
 // seedAccountFact seeds one compression fact into the compression account of a
 // rebuilding run without appending it to the projection: the fact stands behind
 // the boundary the anchor states, so the projection already holds the material it
-// folded, while the account the carrier states was taken at a cut of its own and
+// folded, while the account the checkpoint states was taken at a cut of its own and
 // owes the judgment or the answer this fact carries.
 func (r *Run) seedAccountFact(ctx context.Context, tier *ledger.Tier, key event.EventID, report *seedReport) error {
 	stored, held, err := tier.Segments.GetEvent(ctx, key)

@@ -119,8 +119,8 @@ func ageSummaryDropMarker(dropped int) string {
 // whole, the next window dropping tool commands, the window after that keeping
 // the skeleton only, and everything older archived. The ladder is recorded on
 // the segment as the diagnostic read of its distance from the newest segment;
-// which band a segment folds in is decided by the fold generations and never by
-// this distance.
+// which band a segment folds in is decided by band promotion and never by this
+// distance.
 func LevelOfAge(age, keepRecent int) int {
 	if keepRecent < 1 {
 		keepRecent = DefaultAgeKeepRecent
@@ -140,8 +140,8 @@ func LevelOfAge(age, keepRecent int) int {
 // BandOfLevel reports the band one compress level belongs to under the age
 // ladder: L0 the newest band, L1 and L2 the middle band, L3 the oldest band. The
 // answer states where the ladder places material of a given distance; a fold
-// bands its segments by their fold generation instead, so this reading is the
-// ladder's own and never the fold's decision.
+// bands its segments by band promotion instead, so this reading is the ladder's
+// own and never the fold's decision.
 func BandOfLevel(level int) Band {
 	switch {
 	case level <= 0:
@@ -161,7 +161,7 @@ func BandOfAge(age, keepRecent int) Band {
 
 // Segment is one task-turn segment of a projection: the entries it spans, the
 // age and ladder level it reads, whether an agent output closed it, and the band
-// its fold generation places it in. A segment no agent output closed is still in
+// band promotion places it in. A segment no agent output closed is still in
 // progress, reads L0 and is never folded.
 type Segment struct {
 	// Index is the position of the segment in the projection, oldest first.
@@ -170,7 +170,7 @@ type Segment struct {
 	Age int
 	// Level is the ladder level the age reads, zero for a segment in progress.
 	Level int
-	// Band is the band the fold generation places the segment in.
+	// Band is the band band promotion places the segment in.
 	Band Band
 	// Complete reports whether an agent output closed the segment.
 	Complete bool
@@ -206,7 +206,7 @@ func (s Segment) Legacy() bool {
 // the positional boundary. A history summary stands as one complete segment of
 // its own. A tail no agent output closed stays its own segment in progress.
 //
-// Each segment is banded by its fold generation: the newest keepRecent segments
+// Each segment is banded by band promotion: the newest keepRecent segments
 // are the new band, a segment already carrying a product of an earlier fold is
 // the oldest band, and the rest left the window without being folded and are the
 // middle band. A segment still in progress is the newest one and is never folded.
@@ -227,7 +227,7 @@ func SegmentsOf(entries []ProjectionEntry, keepRecent int) []Segment {
 	return out
 }
 
-// bandOfSegment reports the band one segment folds in under the fold generations:
+// bandOfSegment reports the band one segment folds in under band promotion:
 // a segment inside the recent window and a segment still in progress are the new
 // band, a segment already carrying a fold product has been through one fold and
 // is the oldest band, and the rest left the window without being folded and are
@@ -432,8 +432,8 @@ type AgeFoldReport struct {
 	// NewFolded is how many process-detail entries the middle-band fold consumed:
 	// the material that left the recent window this round and folded its process
 	// detail into a segment product. The field keeps the name the report was
-	// first placed under; the band it counts is the middle band of the
-	// generational rule.
+	// first placed under; the band it counts is the middle band of the band
+	// promotion rule.
 	NewFolded int
 	// MidFolded is how many entries the oldest band contributed to the history
 	// summary: the material an earlier fold already consumed, which this fold

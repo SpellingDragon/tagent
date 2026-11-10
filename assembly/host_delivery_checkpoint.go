@@ -13,7 +13,7 @@
 // settlement fact whose landing sits at or before the checkpoint's offset is
 // covered, so every obligation outside the owed list that landed before the cut
 // is settled by construction. A state token per settled identity would make the
-// carrier grow with the history it exists to bound, and the chain behind it
+// checkpoint grow with the history it exists to bound, and the chain behind it
 // still answers any one obligation by its exact key.
 package assembly
 
@@ -58,8 +58,8 @@ type deliverySliceOwed struct {
 	Agent   string `json:"agent,omitempty"`
 	Session string `json:"session,omitempty"`
 	// HeldAt is the moment the obligation was parked, stated at the fidelity the
-	// settlement fact states it: the account's carrier and its chain spell one
-	// moment one way, so a restart that reads the carrier holds the moment the
+	// settlement fact states it: the account's checkpoint and its chain spell one
+	// moment one way, so a restart that reads the checkpoint holds the moment the
 	// process recorded rather than the millisecond it fell in.
 	HeldAt time.Time `json:"held_at"`
 	// State is the settlement state token the obligation stands at.
@@ -127,7 +127,7 @@ func (s deliveryStateSlice) SnapshotState(ctx context.Context) ([]byte, error) {
 // SnapshotSessionState states the part of the account one session chain owns: the
 // obligations whose target is that chain, with the redrive, the hold moment and
 // the state they stand under. The account of a chain is what the chain is owed,
-// so the carrier of one session states nothing about the obligations another
+// so the checkpoint of one session states nothing about the obligations another
 // chain is owed.
 func (s deliveryStateSlice) SnapshotSessionState(ctx context.Context, session event.SessionID) ([]byte, error) {
 	return s.host.deliverySliceOf(session)
@@ -162,7 +162,7 @@ func (h *Host) registerDeliverySlice() error {
 // An obligation is open whether the account holds it in the review table or in
 // the declarations no settlement has answered, so both sets are stated: a body
 // the chain declared and the live path had not settled when the cut was taken is
-// owed a send, and a carrier that omitted it would leave the cut claiming a
+// owed a send, and a checkpoint that omitted it would leave the cut claiming a
 // settlement that never happened.
 func (h *Host) deliverySlice() ([]byte, error) {
 	return h.deliverySliceWhere("")
@@ -170,7 +170,7 @@ func (h *Host) deliverySlice() ([]byte, error) {
 
 // deliverySliceOf states the open account one session chain owns: the obligations
 // whose target is that chain, the redrive still pending for them and the pins kept
-// hot for them. A chain the account owes nothing answers nil, so the carrier of a
+// hot for them. A chain the account owes nothing answers nil, so the checkpoint of a
 // settled chain carries no delivery slice.
 func (h *Host) deliverySliceOf(session event.SessionID) ([]byte, error) {
 	if h == nil || session == "" {
@@ -192,9 +192,9 @@ func (h *Host) deliverySliceOf(session event.SessionID) ([]byte, error) {
 
 // deliverySliceWhere states the open account of the chains the named session
 // selects, or the whole account beside no session. A session's payload is read
-// from that chain's slice alone, so the carrier of one chain costs what that
+// from that chain's slice alone, so the checkpoint of one chain costs what that
 // chain owes and never what another chain owes beside it. A pin is named by the
-// obligation it keeps hot, so a chain's carrier states the pins of the
+// obligation it keeps hot, so a chain's checkpoint states the pins of the
 // obligations that chain owes and never keeps another chain's fact hot.
 func (h *Host) deliverySliceWhere(session event.SessionID) ([]byte, error) {
 	if h == nil {
@@ -274,14 +274,14 @@ func (h *Host) deliverySliceWhere(session event.SessionID) ([]byte, error) {
 
 // restoreDeliverySlice puts the open account back: every owed obligation under
 // the identity, delivery, hold moment and state the checkpoint recorded, in the
-// slice of the chain the carrier states it against, and the sequence the holds
-// are ordered by. The obligations already settled are not stated by the carrier
+// slice of the chain the checkpoint states it against, and the sequence the holds
+// are ordered by. The obligations already settled are not stated by the checkpoint
 // at all — they are the cut — so the restart never delivers a body the process
 // before it delivered, and a state the table does not hold is answered by the
 // settlement facts the chain keeps.
 //
 //   - the state an owed entry carries decides what the account owes: a cut taken between a settlement and the release of its hold states both, and the settled token is the one that stands, so the restart never parks an obligation its own account already discharged.
-//   - a pin the carrier states is an obligation the hot window must keep, so the run's own pin registry is seeded from it: the boot trim releases facts by the pins the run holds, and a pin that reached the host table alone would let the trim drop the very fact the account still owes.
+//   - a pin the checkpoint states is an obligation the hot window must keep, so the run's own pin registry is seeded from it: the boot trim releases facts by the pins the run holds, and a pin that reached the host table alone would let the trim drop the very fact the account still owes.
 func (h *Host) restoreDeliverySlice(payload []byte) error {
 	if h == nil {
 		return nil

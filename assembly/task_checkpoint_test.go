@@ -72,7 +72,7 @@ func recoveredTasksByID(report task.RestoreReport) map[event.TaskID]task.Restore
 
 // statedTaskOf reports the account one run states for a task, with the movement
 // stamps read in UTC so the comparison names the instant and not the reading.
-func statedTaskOf(t *testing.T, ctx context.Context, run *Run, taskID event.TaskID) task.TaskCheckpoint {
+func statedTaskOf(t *testing.T, ctx context.Context, run *Run, taskID event.TaskID) task.StatedTask {
 	t.Helper()
 	payload, err := run.registry.SnapshotCheckpoint(ctx)
 	if err != nil {
@@ -93,7 +93,7 @@ func statedTaskOf(t *testing.T, ctx context.Context, run *Run, taskID event.Task
 		return stated
 	}
 	t.Fatalf("the account states no task %s", taskID)
-	return task.TaskCheckpoint{}
+	return task.StatedTask{}
 }
 
 // TestTaskRestoreBoundedByCheckpoint pins the recovery cost of the task account.
@@ -123,7 +123,7 @@ func TestTaskRestoreBoundedByCheckpoint(t *testing.T) {
 		t.Fatal("the source run filed no checkpoint to cut the account at")
 	}
 	young := settleTasks(t, ctx, source, taskCheckpointCalls("young", youngCount))
-	want := map[event.TaskID]task.TaskCheckpoint{}
+	want := map[event.TaskID]task.StatedTask{}
 	for _, taskID := range append(append([]event.TaskID{}, covered...), young...) {
 		want[taskID] = statedTaskOf(t, ctx, source, taskID)
 	}
@@ -268,7 +268,7 @@ func TestTaskRestoreWithoutCheckpointFoldsEveryChain(t *testing.T) {
 	}
 	source := snapshotTestRun(t, ctx, storage())
 	tasks := settleTasks(t, ctx, source, taskCheckpointCalls("young", taskCount))
-	want := map[event.TaskID]task.TaskCheckpoint{}
+	want := map[event.TaskID]task.StatedTask{}
 	for _, taskID := range tasks {
 		want[taskID] = statedTaskOf(t, ctx, source, taskID)
 	}
@@ -353,15 +353,15 @@ func TestTaskTailFoldLeavesNoSweepStamp(t *testing.T) {
 
 // sameStatedTask reports whether two states of one task agree on every field the
 // checkpoint carries.
-func sameStatedTask(got, want task.TaskCheckpoint) bool {
+func sameStatedTask(got, want task.StatedTask) bool {
 	return statedStateOf(got) == statedStateOf(want)
 }
 
 // sameChainState reports whether two states of one task agree on every field a
 // chain fold can answer: the movement stamps a link carries no record of stand
 // outside the comparison, because no fold computes them back.
-func sameChainState(got, want task.TaskCheckpoint) bool {
-	strip := func(stated task.TaskCheckpoint) string {
+func sameChainState(got, want task.StatedTask) bool {
+	strip := func(stated task.StatedTask) string {
 		stated.AdmittedAt = time.Time{}
 		stated.ChangedAt = time.Time{}
 		stated.RunSince = time.Time{}
@@ -372,7 +372,7 @@ func sameChainState(got, want task.TaskCheckpoint) bool {
 }
 
 // statedStateOf renders one state of a task as the bytes a checkpoint states.
-func statedStateOf(stated task.TaskCheckpoint) string {
+func statedStateOf(stated task.StatedTask) string {
 	payload, err := json.Marshal(stated)
 	if err != nil {
 		return ""

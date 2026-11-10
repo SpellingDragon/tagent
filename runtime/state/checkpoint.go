@@ -86,7 +86,7 @@ type emitter interface {
 
 // sessionSnapshotter is the session face of a holder whose state is spelled per
 // session chain. A cut taken for one session reads that face instead of the whole
-// account, so a carrier states the material of the session that asked for it and
+// account, so a checkpoint states the material of the session that asked for it and
 // pays nothing for the chains beside it. A holder that keeps no state of a
 // session — the task registry's account is one registry-wide fold, the mailbox's
 // owed notices are routed by site — implements no such face: the session cut
@@ -113,9 +113,9 @@ type StateRegistry struct {
 	// slices of consumers the assembly mounts afterwards, so the payload waits
 	// here and lands the moment its holder is mounted. A name still pending once
 	// the wiring is complete is refused by the caller that can tell. One name
-	// accumulates every payload a restore named for it: per-session carriers each
+	// accumulates every payload a restore named for it: per-session checkpoints each
 	// state a slice of the same name, and the holder restores them in order rather
-	// than the last carrier overwriting the sessions beside it.
+	// than the last checkpoint overwriting the sessions beside it.
 	pending map[string][][]byte
 }
 
@@ -314,11 +314,11 @@ func (r *StateRegistry) SnapshotState(ctx context.Context) ([]event.CheckpointSl
 
 // SnapshotSessionState aggregates the state the mounted holders state about one
 // session chain, in registration order. A holder that keeps no state of a session
-// is asked nothing and states no slice, so the carrier of one session is the size
+// is asked nothing and states no slice, so the checkpoint of one session is the size
 // of that session's state and never of the account the run holds beside it. The
 // same read rules hold as for the whole account: no framework lock is held across
 // the holders' reads, and a holder that refuses to state itself refuses the whole
-// cut by name rather than filing a carrier missing its slice.
+// cut by name rather than filing a checkpoint missing its slice.
 func (r *StateRegistry) SnapshotSessionState(ctx context.Context, session event.SessionID) ([]event.CheckpointSlice, error) {
 	if r == nil || session == "" {
 		return nil, nil
@@ -377,7 +377,7 @@ func (r *StateRegistry) RestoreState(ctx context.Context, slices []event.Checkpo
 }
 
 // RestoreEmptyState restores every mounted holder from the state a cut that
-// states no slice carries: the empty state. A boot whose tier holds no carrier
+// states no slice carries: the empty state. A boot whose tier holds no checkpoint
 // states that cut, so it restores the holders the way a filed cut restores them
 // instead of skipping them, and the replay past the cut rebuilds each one — past
 // the zero cut that replay is the whole chain. The restore is the framework's, so

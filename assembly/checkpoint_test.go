@@ -30,7 +30,7 @@ import (
 //   - the offset the fact states is the partition sequence the run had committed
 //   - the fact carries every state slice mounted on the seam, so the projection survivors are restored, not re-folded
 //   - the cut is taken before the checkpoint fact lands, so its own partition stands past the watermark it states
-//   - a cut asked for beside a chain at rest files a carrier of its own, the watermark read before that carrier lands
+//   - a cut asked for beside a chain at rest files a checkpoint of its own, the watermark read before that checkpoint lands
 //
 // 契约: docs/wiki/platform/platform-subsystems.md#framework-checkpoint
 func TestCheckpointEmittedAtCadenceAndFold(t *testing.T) {
@@ -61,7 +61,7 @@ func TestCheckpointEmittedAtCadenceAndFold(t *testing.T) {
 	}
 	ownPartition, ownSeq := seqOfFact(t, run, id)
 	if got := checkpoint.Offset[ownPartition]; got >= ownSeq {
-		t.Fatalf("the checkpoint fact landed at seq %d of partition %d beside a cut of %d, want a cut behind the carrier it states",
+		t.Fatalf("the checkpoint fact landed at seq %d of partition %d beside a cut of %d, want a cut behind the checkpoint it states",
 			ownSeq, ownPartition, got)
 	}
 	if _, covered := checkpoint.Offset[partition]; !covered {
@@ -103,7 +103,7 @@ func TestCheckpointEmittedAtCadenceAndFold(t *testing.T) {
 
 // awaitCadenceCheckpoint waits for the cadence to file a checkpoint past the key
 // it is given and answers that key beside the cut the coordinator recorded. The
-// filing stands off the committing goroutine, so a test reads the carrier the
+// filing stands off the committing goroutine, so a test reads the checkpoint the
 // cadence owes instead of one a commit returned beside.
 func awaitCadenceCheckpoint(t *testing.T, run *Run, past event.EventID) (event.EventID, event.CheckpointOffset) {
 	t.Helper()
@@ -219,8 +219,8 @@ func checkpointBase() time.Time {
 // TestBootRefusesAnUnreadableCheckpoint pins the negative anchor of the anchored boot.
 //   - an unreadable payload, one of another layout version and one stating a foreign identity each refuse the boot
 //   - the refusal is the named one and names the checkpoint fact it refused
-//   - the unreadable carrier is the newest fact of the store: the close files a carrier of its own before it, so the fixture appends the corrupted one last
-//   - the boot answers no run beside the refusal (negative: a reader that skipped the unreadable carrier would start onto an empty state)
+//   - the unreadable checkpoint is the newest fact of the store: the close files a checkpoint of its own before it, so the fixture appends the corrupted one last
+//   - the boot answers no run beside the refusal (negative: a reader that skipped the unreadable checkpoint would start onto an empty state)
 //
 // 契约: docs/wiki/platform/platform-subsystems.md#framework-checkpoint
 func TestBootRefusesAnUnreadableCheckpoint(t *testing.T) {
@@ -343,7 +343,7 @@ func checkpointSliceOf(t *testing.T, checkpoint event.Checkpoint, name string) (
 
 // TestCheckpointWaitsForTheQuietPointOfThePipeline pins the point a cut is taken at.
 //   - a cut requested beside work in flight answers nothing until that work leaves, so the state it reads is never one caught mid landing
-//   - the cut answers the moment the pipeline is quiet, filing the carrier the run owes
+//   - the cut answers the moment the pipeline is quiet, filing the checkpoint the run owes
 func TestCheckpointWaitsForTheQuietPointOfThePipeline(t *testing.T) {
 	ctx := context.Background()
 	run := windowChainRun(t, ctx)
@@ -399,7 +399,7 @@ func (s *holderLockSlice) RestoreState(context.Context, []byte) error { return n
 
 // TestCheckpointCadenceNeverTakesAHoldersLock pins where the due is filed.
 //   - a commit that reaches the cadence under a holder's own lock answers instead of filing the cut inside that lock
-//   - the carrier the due owes lands after the holder released the lock, so the due is filed and not dropped
+//   - the checkpoint the due owes lands after the holder released the lock, so the due is filed and not dropped
 //
 // 契约: docs/wiki/platform/platform-subsystems.md#framework-checkpoint
 func TestCheckpointCadenceNeverTakesAHoldersLock(t *testing.T) {
@@ -439,12 +439,12 @@ func TestCheckpointCadenceNeverTakesAHoldersLock(t *testing.T) {
 	}
 	holder.mu.Unlock()
 	if id, _ := awaitCadenceCheckpoint(t, run, filed); id == "" {
-		t.Fatal("the cadence filed no carrier for the due the commit reached under the holder lock")
+		t.Fatal("the cadence filed no checkpoint for the due the commit reached under the holder lock")
 	}
 }
 
 // TestRestoredOwedRoundIsTheFactTheChainKeeps pins the owed-input slice.
-//   - the carrier names the identity of each round nobody drove
+//   - the checkpoint names the identity of each round nobody drove
 //   - the boot reads that fact back, so the rest criterion judges the driving fact it is instead of a placeholder no criterion recognises
 //
 // 契约: docs/wiki/platform/platform-subsystems.md#framework-checkpoint
@@ -477,7 +477,7 @@ func TestRestoredOwedRoundIsTheFactTheChainKeeps(t *testing.T) {
 	}
 	restored := run.restoredInputFacts(ctx, addr)
 	if len(restored) != 1 {
-		t.Fatalf("the restore answered %d owed round(s), want the one the carrier named", len(restored))
+		t.Fatalf("the restore answered %d owed round(s), want the one the checkpoint named", len(restored))
 	}
 	if restored[0].Key != evt.Key || restored[0].Type != event.TypeExternalInput {
 		t.Fatalf("the restored round reads as %s/%q, want the driving fact %s of the input type", restored[0].Key, restored[0].Type, evt.Key)
@@ -489,7 +489,7 @@ func TestRestoredOwedRoundIsTheFactTheChainKeeps(t *testing.T) {
 }
 
 // restoreCounter is the state slice a boot counts its own restores with: the
-// carrier states it, so a boot over that carrier reports how many times the cut
+// checkpoint states it, so a boot over that checkpoint reports how many times the cut
 // reached its holder.
 type restoreCounter struct {
 	restores *int
@@ -498,10 +498,10 @@ type restoreCounter struct {
 // StateName reports the name the counted slice is keyed by.
 func (s restoreCounter) StateName() string { return "assembly.restore-counter" }
 
-// SnapshotState states the slice the carrier holds.
+// SnapshotState states the slice the checkpoint holds.
 func (s restoreCounter) SnapshotState(context.Context) ([]byte, error) { return []byte("{}"), nil }
 
-// RestoreState counts one application of the carrier.
+// RestoreState counts one application of the checkpoint.
 func (s restoreCounter) RestoreState(context.Context, []byte) error {
 	*s.restores++
 	return nil
@@ -519,13 +519,13 @@ func countingBoot(restores *int) Option {
 	})
 }
 
-// TestBootRestoresTheCarrierOnce pins the single restore of one boot.
+// TestBootRestoresTheCheckpointOnce pins the single restore of one boot.
 //   - a boot over a store holding a checkpoint hands the cut to each holder once
-//   - a boot over a store holding no carrier states the empty cut and hands that to each holder once as well
-//   - the run that files the carrier restores the empty cut it booted beside, and the run that reads it restores the very slice the carrier states
+//   - a boot over a store holding no checkpoint states the empty cut and hands that to each holder once as well
+//   - the run that files the checkpoint restores the empty cut it booted beside, and the run that reads it restores the very slice the checkpoint states
 //
 // 契约: docs/wiki/platform/platform-subsystems.md#framework-checkpoint
-func TestBootRestoresTheCarrierOnce(t *testing.T) {
+func TestBootRestoresTheCheckpointOnce(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
 	storage := WithStorage(ledger.StorageConfig{Type: ledger.StorageJournal, Root: root})
@@ -534,10 +534,10 @@ func TestBootRestoresTheCarrierOnce(t *testing.T) {
 	addr := event.Address{AgentID: "agent-a", SessionID: "session-restore-once"}
 	commitWindowTurns(t, ctx, source, addr, 1)
 	if _, filed, err := source.Checkpoint(ctx); err != nil || !filed {
-		t.Fatalf("file the carrier of the chain = (%t, %v), want a filed fact", filed, err)
+		t.Fatalf("file the checkpoint of the chain = (%t, %v), want a filed fact", filed, err)
 	}
 	if sourceRestores != 1 {
-		t.Fatalf("the boot of a store holding no carrier applied the empty cut %d time(s), want the one restore every boot hands its holders: a boot that skips them leaves the work they state unseated", sourceRestores)
+		t.Fatalf("the boot of a store holding no checkpoint applied the empty cut %d time(s), want the one restore every boot hands its holders: a boot that skips them leaves the work they state unseated", sourceRestores)
 	}
 
 	restores := 0
@@ -551,7 +551,7 @@ func TestBootRestoresTheCarrierOnce(t *testing.T) {
 }
 
 // checkpointLog records the lines the assembly face writes at ERROR, so a check
-// reads the failure a carrier path reports instead of assuming it reported one.
+// reads the failure a checkpoint path reports instead of assuming it reported one.
 type checkpointLog struct {
 	mu     sync.Mutex
 	errors []string
@@ -567,7 +567,7 @@ func (l *checkpointLog) Errorf(format string, args ...any) {
 	l.errors = append(l.errors, fmt.Sprintf(format, args...))
 }
 
-// Debug drops one debug line: the carrier failures are the only ones a check reads.
+// Debug drops one debug line: the checkpoint failures are the only ones a check reads.
 func (l *checkpointLog) Debug(...any) {}
 
 // Debugf drops one formatted debug line.
@@ -656,7 +656,7 @@ func commitWindowTurn(t *testing.T, ctx context.Context, run *Run, addr event.Ad
 }
 
 // newestFoldProductKey reports the identity of the newest compression product one
-// chain filed, so a check reads the cut a carrier states against the fact that
+// chain filed, so a check reads the cut a checkpoint states against the fact that
 // asked for it.
 func newestFoldProductKey(t *testing.T, ctx context.Context, run *Run) event.EventID {
 	t.Helper()
@@ -673,9 +673,9 @@ func newestFoldProductKey(t *testing.T, ctx context.Context, run *Run) event.Eve
 }
 
 // TestCheckpointFollowsTheFoldThatDropsMaterial pins the fold trigger of the cadence.
-//   - a chain whose interval and period never fall due files no carrier while it only appends
-//   - the commit that lands a fold product asks for a carrier, and the cut it states covers that product
-//   - a fold can mint several products in one pass, and the carrier answering the last of them states a cut the newest product landed behind
+//   - a chain whose interval and period never fall due files no checkpoint while it only appends
+//   - the commit that lands a fold product asks for a checkpoint, and the cut it states covers that product
+//   - a fold can mint several products in one pass, and the checkpoint answering the last of them states a cut the newest product landed behind
 //
 // 契约: docs/wiki/platform/platform-subsystems.md#framework-checkpoint
 func TestCheckpointFollowsTheFoldThatDropsMaterial(t *testing.T) {
@@ -693,7 +693,7 @@ func TestCheckpointFollowsTheFoldThatDropsMaterial(t *testing.T) {
 			t.Fatal("the fixture folded nothing, so the fold trigger proves nothing")
 		}
 		if filed, _ := run.CheckpointFiled(); filed != "" {
-			t.Fatalf("the chain filed the carrier %s beside no fold product, want the cadence clock to owe none before the fold", filed)
+			t.Fatalf("the chain filed the checkpoint %s beside no fold product, want the cadence clock to owe none before the fold", filed)
 		}
 		turn++
 		commitWindowTurn(t, ctx, run, addr, turn)
@@ -710,20 +710,20 @@ func TestCheckpointFollowsTheFoldThatDropsMaterial(t *testing.T) {
 		}
 		if time.Now().After(deadline) {
 			_, offset := run.CheckpointFiled()
-			t.Fatalf("the fold filed no carrier past the product %s at seq %d of partition %d after 20s, the newest cut states %d",
+			t.Fatalf("the fold filed no checkpoint past the product %s at seq %d of partition %d after 20s, the newest cut states %d",
 				product, productSeq, partition, offset[partition])
 		}
 		time.Sleep(2 * time.Millisecond)
 	}
 }
 
-// TestCloseFilesTheCarrierTheNextBootReads pins the close trigger of the cadence.
-//   - a run whose interval and period never fell due files no carrier while it commits
+// TestCloseFilesTheCheckpointTheNextBootReads pins the close trigger of the cadence.
+//   - a run whose interval and period never fell due files no checkpoint while it commits
 //   - the close files one behind the facts it settled
-//   - the carrier the close filed is the one the next boot restores
+//   - the checkpoint the close filed is the one the next boot restores
 //
 // 契约: docs/wiki/platform/platform-subsystems.md#framework-checkpoint
-func TestCloseFilesTheCarrierTheNextBootReads(t *testing.T) {
+func TestCloseFilesTheCheckpointTheNextBootReads(t *testing.T) {
 	ctx := context.Background()
 	storage := WithStorage(ledger.StorageConfig{Type: ledger.StorageJournal, Root: t.TempDir()})
 	run := windowChainRun(t, ctx, storage)
@@ -732,22 +732,22 @@ func TestCloseFilesTheCarrierTheNextBootReads(t *testing.T) {
 	addr := event.Address{AgentID: "agent-a", SessionID: "session-checkpoint-close"}
 	commitWindowTurns(t, ctx, run, addr, 1)
 	if filed, _ := run.CheckpointFiled(); filed != "" {
-		t.Fatalf("the chain filed the carrier %s beside no due, want the cadence to owe none before the close", filed)
+		t.Fatalf("the chain filed the checkpoint %s beside no due, want the cadence to owe none before the close", filed)
 	}
 	if _, err := run.Close(ctx, agent.CloseRequest{Timeout: time.Now().Add(30 * time.Second)}); err != nil {
 		t.Fatalf("close the run: %v", err)
 	}
 	id, offset := run.CheckpointFiled()
 	if id == "" {
-		t.Fatal("the close filed no carrier, want the account the run reached at its fixed point")
+		t.Fatal("the close filed no checkpoint, want the account the run reached at its fixed point")
 	}
 	partition := memory.PartitionIDFromName(string(addr.AgentID))
 	if offset[partition] <= 0 {
-		t.Fatalf("the carrier the close filed states the cut %d of partition %d, want the facts the run settled", offset[partition], partition)
+		t.Fatalf("the checkpoint the close filed states the cut %d of partition %d, want the facts the run settled", offset[partition], partition)
 	}
 	booted := windowChainRun(t, ctx, storage)
 	if restored, _ := booted.CheckpointFiled(); restored != id {
-		t.Fatalf("the boot restored the carrier %q, want the %q the close filed", restored, id)
+		t.Fatalf("the boot restored the checkpoint %q, want the %q the close filed", restored, id)
 	}
 }
 
@@ -764,9 +764,9 @@ func (s refusingSlice) SnapshotState(context.Context) ([]byte, error) { return n
 // RestoreState puts nothing back: the slice never states an account.
 func (s refusingSlice) RestoreState(context.Context, []byte) error { return nil }
 
-// TestAFailedCheckpointSurfaces pins the failure path of the carrier.
+// TestAFailedCheckpointSurfaces pins the failure path of the checkpoint.
 //   - a holder that refuses to state itself fails every cut it is part of, and the filer reports that at ERROR
-//   - the close answers the failure to its caller instead of reporting a close beside a carrier no process can read
+//   - the close answers the failure to its caller instead of reporting a close beside a checkpoint no process can read
 //   - a run whose holders state themselves closes beside no such failure (negative: the failure is the refused account, not the close)
 //
 // 契约: docs/wiki/platform/platform-subsystems.md#framework-checkpoint
@@ -787,7 +787,7 @@ func TestAFailedCheckpointSurfaces(t *testing.T) {
 	commitWindowTurns(t, ctx, run, addr, 1)
 	awaitCheckpointLog(t, observer, "the framework checkpoint was not filed", refused.Error())
 	if _, err := run.Close(ctx, agent.CloseRequest{Timeout: time.Now().Add(30 * time.Second)}); err == nil {
-		t.Fatal("the close answered no failure beside a carrier nothing can read, want the refused account it could not state")
+		t.Fatal("the close answered no failure beside a checkpoint nothing can read, want the refused account it could not state")
 	} else if !strings.Contains(err.Error(), refused.Error()) {
 		t.Fatalf("the close answered %q, want the refused account it could not state", err)
 	}
@@ -801,22 +801,22 @@ func TestAFailedCheckpointSurfaces(t *testing.T) {
 	}
 }
 
-// carrierSizes reports the bytes the newest carrier of one run states: the
+// checkpointSizes reports the bytes the newest checkpoint of one run states: the
 // projection slice of the framework checkpoint and the survivor payload of the
-// newest fold product, the two carriers a restart of the run reads.
-func carrierSizes(t *testing.T, ctx context.Context, run *Run) (framework, product int) {
+// newest fold product, the two checkpoints a restart of the run reads.
+func checkpointSizes(t *testing.T, ctx context.Context, run *Run) (framework, product int) {
 	t.Helper()
 	id, filed, err := run.Checkpoint(ctx)
 	if err != nil || !filed {
-		t.Fatalf("file the carrier of the chain = (%t, %v), want a filed fact", filed, err)
+		t.Fatalf("file the checkpoint of the chain = (%t, %v), want a filed fact", filed, err)
 	}
 	stored, err := run.CommittedEvent(ctx, id)
 	if err != nil {
-		t.Fatalf("read the carrier %s back: %v", id, err)
+		t.Fatalf("read the checkpoint %s back: %v", id, err)
 	}
 	checkpoint, stated := event.CheckpointOf(stored)
 	if !stated {
-		t.Fatalf("the carrier %s states no readable checkpoint", id)
+		t.Fatalf("the checkpoint %s states no readable checkpoint", id)
 	}
 	for _, slice := range checkpoint.Slices {
 		if slice.Name == checkpointSliceProjection {
@@ -845,19 +845,19 @@ func carrierSizes(t *testing.T, ctx context.Context, run *Run) (framework, produ
 		t.Fatalf("walk the store index: %v", err)
 	}
 	if framework == 0 {
-		t.Fatal("the carrier states no projection slice, so the size proves nothing")
+		t.Fatal("the checkpoint states no projection slice, so the size proves nothing")
 	}
 	return framework, product
 }
 
-// TestTheCheckpointCarrierStaysBoundedByItsEntries pins what a carrier states.
-//   - the carrier names every survivor and leaves the text of a mapped entry on the chain, so the bodies a turn was written with never enter it
-//   - a chain of the same turns written with larger bodies states the same carrier
-//   - a longer history states a carrier of the same size, so the carrier follows the entries a fold leaves and never the history behind them
+// TestTheCheckpointStaysBoundedByItsEntries pins what a checkpoint states.
+//   - the checkpoint names every survivor and leaves the text of a mapped entry on the chain, so the bodies a turn was written with never enter it
+//   - a chain of the same turns written with larger bodies states the same checkpoint
+//   - a longer history states a checkpoint of the same size, so the checkpoint follows the entries a fold leaves and never the history behind them
 //   - the boot still serves the projection the full walk rebuilds, so the text left on the chain is read back
 //
 // 契约: docs/wiki/platform/platform-subsystems.md#framework-checkpoint
-func TestTheCheckpointCarrierStaysBoundedByItsEntries(t *testing.T) {
+func TestTheCheckpointStaysBoundedByItsEntries(t *testing.T) {
 	staged := map[string]struct {
 		framework int
 		product   int
@@ -874,7 +874,7 @@ func TestTheCheckpointCarrierStaysBoundedByItsEntries(t *testing.T) {
 		t.Run(scene.name, func(t *testing.T) {
 			ctx := context.Background()
 			storage := WithStorage(ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: t.TempDir()})
-			addr := event.Address{AgentID: "agent-a", SessionID: "session-carrier-bound"}
+			addr := event.Address{AgentID: "agent-a", SessionID: "session-checkpoint-bound"}
 			source := noTrimChainRun(t, ctx, storage)
 			body := strings.Repeat("b", scene.body)
 			for turn := 1; turn <= scene.turns; turn++ {
@@ -885,20 +885,20 @@ func TestTheCheckpointCarrierStaysBoundedByItsEntries(t *testing.T) {
 				}
 			}
 			if count := countFoldProducts(t, ctx, source); count == 0 {
-				t.Fatal("the fixture folded nothing, so the carrier proves nothing")
+				t.Fatal("the fixture folded nothing, so the checkpoint proves nothing")
 			}
-			framework, product := carrierSizes(t, ctx, source)
+			framework, product := checkpointSizes(t, ctx, source)
 			if product == 0 {
-				t.Fatal("the chain filed no checkpoint-bearing product, so the carrier proves nothing")
+				t.Fatal("the chain filed no checkpoint-bearing product, so the checkpoint proves nothing")
 			}
-			t.Logf("the carrier states %d byte(s) of projection and %d byte(s) of product beside %d turn(s) of %d-byte bodies",
+			t.Logf("the checkpoint states %d byte(s) of projection and %d byte(s) of product beside %d turn(s) of %d-byte bodies",
 				framework, product, scene.turns, scene.body)
 			staged[scene.name] = struct {
 				framework int
 				product   int
 			}{framework: framework, product: product}
 			if bound := 16 << 10; framework > bound || product > bound {
-				t.Fatalf("the carrier states %d byte(s) of projection and %d byte(s) of product, want both under the %d-byte bound its entries fit in",
+				t.Fatalf("the checkpoint states %d byte(s) of projection and %d byte(s) of product, want both under the %d-byte bound its entries fit in",
 					framework, product, bound)
 			}
 			if _, err := source.Close(ctx, agent.CloseRequest{Timeout: time.Now().Add(5 * time.Second)}); err != nil {
@@ -926,19 +926,19 @@ func TestTheCheckpointCarrierStaysBoundedByItsEntries(t *testing.T) {
 	small := staged["the small bodies of a short chain"]
 	large := staged["the large bodies of a short chain"]
 	if small.framework != large.framework || small.product != large.product {
-		t.Fatalf("the carrier states %d/%d byte(s) beside 256-byte bodies and %d/%d beside 64KiB bodies, want the bodies to stay on the chain",
+		t.Fatalf("the checkpoint states %d/%d byte(s) beside 256-byte bodies and %d/%d beside 64KiB bodies, want the bodies to stay on the chain",
 			small.framework, small.product, large.framework, large.product)
 	}
 	long := staged["the large bodies of a long chain"]
 	if long.framework > small.framework || long.product > small.product {
-		t.Fatalf("the carrier states %d/%d byte(s) beside 36 turns and %d/%d beside 12, want a carrier that follows the entries a fold leaves rather than the history",
+		t.Fatalf("the checkpoint states %d/%d byte(s) beside 36 turns and %d/%d beside 12, want a checkpoint that follows the entries a fold leaves rather than the history",
 			long.framework, long.product, small.framework, small.product)
 	}
 }
 
 // requireCoveredByTheCut requires one committed fact of a restarted run to stand
-// at or below the cut its carrier states for one state slice, so the check that
-// reads the fact reads the account the carrier restores rather than the chain walk
+// at or below the cut its checkpoint states for one state slice, so the check that
+// reads the fact reads the account the checkpoint restores rather than the chain walk
 // past the cut. The consequence names what a fact past the cut would leave the
 // check proving nothing about.
 func requireCoveredByTheCut(t *testing.T, run *Run, slice string, key event.EventID, consequence string) {
@@ -985,12 +985,12 @@ func commitSessionTurns(t *testing.T, ctx context.Context, run *Run, addr event.
 	}
 }
 
-// carrierPayloadOf renders every slice one carrier states, so a check reads what
-// the carrier carries rather than what a slice claims to be named.
-func carrierPayloadOf(t *testing.T, carrier event.Checkpoint) string {
+// checkpointPayloadOf renders every slice one checkpoint states, so a check reads what
+// the checkpoint carries rather than what a slice claims to be named.
+func checkpointPayloadOf(t *testing.T, checkpoint event.Checkpoint) string {
 	t.Helper()
 	var rendered strings.Builder
-	for _, slice := range carrier.Slices {
+	for _, slice := range checkpoint.Slices {
 		rendered.WriteString(slice.Name)
 		rendered.WriteString("=")
 		rendered.WriteString(string(slice.Payload))
@@ -999,24 +999,24 @@ func carrierPayloadOf(t *testing.T, carrier event.Checkpoint) string {
 	return rendered.String()
 }
 
-// carrierOfIdentity reads one filed carrier back as the checkpoint it states.
-func carrierOfIdentity(t *testing.T, ctx context.Context, run *Run, key event.EventID) event.Checkpoint {
+// checkpointOfIdentity reads one filed checkpoint back as the checkpoint it states.
+func checkpointOfIdentity(t *testing.T, ctx context.Context, run *Run, key event.EventID) event.Checkpoint {
 	t.Helper()
 	stored, err := run.CommittedEvent(ctx, key)
 	if err != nil {
-		t.Fatalf("read the carrier %s back: %v", key, err)
+		t.Fatalf("read the checkpoint %s back: %v", key, err)
 	}
-	carrier, stated := event.CheckpointOf(stored)
+	checkpoint, stated := event.CheckpointOf(stored)
 	if !stated {
-		t.Fatalf("the carrier %s states no readable checkpoint", key)
+		t.Fatalf("the checkpoint %s states no readable checkpoint", key)
 	}
-	return carrier
+	return checkpoint
 }
 
 // TestSymptomAnchorSessionBootCostFlatAcrossGenerations pins that one session's recovery cost stays flat while its chain grows.
 //   - fixture: one session runs over one durable root, each generation restarts the process and commits its own turns
-//   - every boot states what it had to read: the carrier that session filed plus the tail past its boundary
-//   - positive: the bodies a boot reads stop growing after the first carrier exists, so the generations add material without adding recovery cost
+//   - every boot states what it had to read: the checkpoint that session filed plus the tail past its boundary
+//   - positive: the bodies a boot reads stop growing after the first checkpoint exists, so the generations add material without adding recovery cost
 //   - negative: the boot reads a small fraction of the indexed chain, which a recovery that fell back to a per-site full-history scan could not
 //   - contrast: the full walk of the same chain is the measured denominator the boot is held against
 //   - consumer: the real boot entry (restoreCheckpointState → seedAnchoredReplay), never a hand-driven rebuild
@@ -1037,10 +1037,10 @@ func TestSymptomAnchorSessionBootCostFlatAcrossGenerations(t *testing.T) {
 		indexed = append(indexed, chainIndexSize(t, ctx, boot))
 		commitSessionTurns(t, ctx, boot, addr, fmt.Sprintf("gen-%d", generation), 6)
 		if _, _, err := boot.CheckpointSession(ctx, addr); err != nil {
-			t.Fatalf("file the session carrier of generation %d: %v", generation, err)
+			t.Fatalf("file the session checkpoint of generation %d: %v", generation, err)
 		}
 		if _, _, err := boot.Checkpoint(ctx); err != nil {
-			t.Fatalf("file the framework carrier of generation %d: %v", generation, err)
+			t.Fatalf("file the framework checkpoint of generation %d: %v", generation, err)
 		}
 		if _, err := boot.Close(ctx, agent.CloseRequest{Timeout: time.Now().Add(2 * time.Second)}); err != nil {
 			t.Fatalf("close the process of generation %d: %v", generation, err)
@@ -1059,7 +1059,7 @@ func TestSymptomAnchorSessionBootCostFlatAcrossGenerations(t *testing.T) {
 		}
 	}
 	if flat*2 >= indexed[generations-1] {
-		t.Fatalf("the boot read %d of the %d indexed facts, want a recovery that reads its carrier and tail rather than the history the chain already settled",
+		t.Fatalf("the boot read %d of the %d indexed facts, want a recovery that reads its checkpoint and tail rather than the history the chain already settled",
 			flat, indexed[generations-1])
 	}
 	fullWalk := noTrimNoWindowRun(t, ctx, storage)
@@ -1075,9 +1075,9 @@ func TestSymptomAnchorSessionBootCostFlatAcrossGenerations(t *testing.T) {
 // TestSymptomAnchorCompressionJudgmentParityAfterRestart pins that a restart answers the live process's compression judgments, entry by entry.
 //   - parity: the live account, the booted account and the full walk of the chain are compared through requireSameAccount
 //   - positive: the booted account equals the live account, and the full walk of the same chain equals both
-//   - negative: the boot answers judgments no judgment fact of its ledger holds, which is the carrier's account rather than a replayed one
-//   - negative: a boot whose carrier stated no compression account answers the batch past the cut alone and never the whole one
-//   - consumer: the real boot entry over the durable root, beside TestCompressionJudgmentsSurviveTheBootCut's carrier-reading check of the same parity
+//   - negative: the boot answers judgments no judgment fact of its ledger holds, which is the checkpoint's account rather than a replayed one
+//   - negative: a boot whose checkpoint stated no compression account answers the batch past the cut alone and never the whole one
+//   - consumer: the real boot entry over the durable root, beside TestCompressionJudgmentsSurviveTheBootCut's checkpoint-reading check of the same parity
 //
 // 契约: docs/wiki/agent/event-flow.md#projection-lifecycle
 func TestSymptomAnchorCompressionJudgmentParityAfterRestart(t *testing.T) {
@@ -1093,7 +1093,7 @@ func TestSymptomAnchorCompressionJudgmentParityAfterRestart(t *testing.T) {
 		t.Fatal("the fixture judged nothing, so the parity proves nothing")
 	}
 	if _, _, err := source.CheckpointSession(ctx, addr); err != nil {
-		t.Fatalf("file the session carrier of the chain: %v", err)
+		t.Fatalf("file the session checkpoint of the chain: %v", err)
 	}
 	if _, err := source.Close(ctx, agent.CloseRequest{Timeout: time.Now().Add(2 * time.Second)}); err != nil {
 		t.Fatalf("close the source process: %v", err)
@@ -1111,7 +1111,7 @@ func TestSymptomAnchorCompressionJudgmentParityAfterRestart(t *testing.T) {
 		}
 	}
 	if covered == 0 {
-		t.Fatal("the boot read every judgment it answers, so the carrier carried none of them")
+		t.Fatal("the boot read every judgment it answers, so the checkpoint carried none of them")
 	}
 
 	full := windowChainRun(t, ctx, storage)
@@ -1123,9 +1123,9 @@ func TestSymptomAnchorCompressionJudgmentParityAfterRestart(t *testing.T) {
 	t.Logf("the boot answers %d judgment(s), %d of them beside no judgment fact in its ledger", len(live.Answered), covered)
 }
 
-// TestSessionCutStatesOnlyTheTriggeringSession pins that a session carrier states its own chain and pays nothing for the chains beside it.
-//   - positive: the carrier of session A states A's projection, owed inputs, compression account and delivery obligations, and names A
-//   - negative: no slice of A's carrier names session B or any fact of B's chain, so a cut of one session reads no state of another
+// TestSessionCutStatesOnlyTheTriggeringSession pins that a session checkpoint states its own chain and pays nothing for the chains beside it.
+//   - positive: the checkpoint of session A states A's projection, owed inputs, compression account and delivery obligations, and names A
+//   - negative: no slice of A's checkpoint names session B or any fact of B's chain, so a cut of one session reads no state of another
 //   - consumer: Run.CheckpointSession, the entry a session context requests a cut through
 //
 // 契约: docs/wiki/platform/platform-subsystems.md#framework-checkpoint
@@ -1141,49 +1141,49 @@ func TestSessionCutStatesOnlyTheTriggeringSession(t *testing.T) {
 
 	key, filed, err := run.CheckpointSession(ctx, triggering)
 	if err != nil || !filed {
-		t.Fatalf("file the session carrier = (%t, %v), want a filed fact", filed, err)
+		t.Fatalf("file the session checkpoint = (%t, %v), want a filed fact", filed, err)
 	}
-	carrier := carrierOfIdentity(t, ctx, run, key)
-	names := carrier.CheckpointSliceNames()
+	checkpoint := checkpointOfIdentity(t, ctx, run, key)
+	names := checkpoint.CheckpointSliceNames()
 	if len(names) == 0 {
-		t.Fatal("the session carrier states no slice, so it carries no state of the chain that asked for it")
+		t.Fatal("the session checkpoint states no slice, so it carries no state of the chain that asked for it")
 	}
 	for _, unsessioned := range []string{checkpointSliceTasks, checkpointSliceMailbox} {
 		if slices.Contains(names, unsessioned) {
-			t.Fatalf("the session carrier states the %q slice beside %v, want the slices a session chain owns", unsessioned, names)
+			t.Fatalf("the session checkpoint states the %q slice beside %v, want the slices a session chain owns", unsessioned, names)
 		}
 	}
-	payload := carrierPayloadOf(t, carrier)
+	payload := checkpointPayloadOf(t, checkpoint)
 	if !strings.Contains(payload, string(triggering.SessionID)) {
-		t.Fatalf("the carrier states %q, want the chain that asked for the cut", payload)
+		t.Fatalf("the checkpoint states %q, want the chain that asked for the cut", payload)
 	}
 	if strings.Contains(payload, string(beside.SessionID)) || strings.Contains(payload, "cut-beside-") {
-		t.Fatalf("the carrier states the chain beside the one that asked for it: %q", payload)
+		t.Fatalf("the checkpoint states the chain beside the one that asked for it: %q", payload)
 	}
 }
 
-// TestSessionCarrierNamesTheChainWithoutEnteringIt pins the read face of a chain beside the carrier it filed.
-//   - negative: EachSessionFact streams the committed material and leaves the carrier out, so a rebuild reads no state slice as a line
-//   - positive: the index still answers the newest carrier of that chain, so the exclusion hides no state from the boot that recovers it
-//   - consumer: Run.EachSessionFact, the cold-start read face a rebuild replays, over a run whose session cut filed a carrier
+// TestSessionCheckpointNamesTheChainWithoutEnteringIt pins the read face of a chain beside the checkpoint it filed.
+//   - negative: EachSessionFact streams the committed material and leaves the checkpoint out, so a rebuild reads no state slice as a line
+//   - positive: the index still answers the newest checkpoint of that chain, so the exclusion hides no state from the boot that recovers it
+//   - consumer: Run.EachSessionFact, the cold-start read face a rebuild replays, over a run whose session cut filed a checkpoint
 //
 // 契约: docs/wiki/platform/platform-subsystems.md#framework-checkpoint
-func TestSessionCarrierNamesTheChainWithoutEnteringIt(t *testing.T) {
+func TestSessionCheckpointNamesTheChainWithoutEnteringIt(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
 	run := windowChainRun(t, ctx, WithStorage(ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: t.TempDir()}))
 	run.stopCheckpointFiler()
-	addr := event.Address{AgentID: "agent-a", SessionID: "session-carrier-stream"}
-	commitSessionTurns(t, ctx, run, addr, "carrier-stream", 4)
+	addr := event.Address{AgentID: "agent-a", SessionID: "session-checkpoint-stream"}
+	commitSessionTurns(t, ctx, run, addr, "checkpoint-stream", 4)
 
 	key, filed, err := run.CheckpointSession(ctx, addr)
 	if err != nil || !filed {
-		t.Fatalf("file the session carrier = (%t, %v), want a filed fact", filed, err)
+		t.Fatalf("file the session checkpoint = (%t, %v), want a filed fact", filed, err)
 	}
 	streamed := map[event.EventID]bool{}
 	if err := run.EachSessionFact(ctx, addr, func(evt event.Event) error {
 		if evt.Type == event.TypeCheckpoint {
-			t.Fatalf("the chain stream carries the carrier %s, want the material the chain committed alone", evt.Key)
+			t.Fatalf("the chain stream carries the checkpoint %s, want the material the chain committed alone", evt.Key)
 		}
 		streamed[evt.Key] = true
 		return nil
@@ -1191,23 +1191,23 @@ func TestSessionCarrierNamesTheChainWithoutEnteringIt(t *testing.T) {
 		t.Fatalf("stream the session chain: %v", err)
 	}
 	for turn := 0; turn < 4; turn++ {
-		key := event.EventID(fmt.Sprintf("carrier-stream-%d-0", turn))
+		key := event.EventID(fmt.Sprintf("checkpoint-stream-%d-0", turn))
 		if !streamed[key] {
-			t.Fatalf("the chain stream left out the committed fact %s beside the carrier the cut filed", key)
+			t.Fatalf("the chain stream left out the committed fact %s beside the checkpoint the cut filed", key)
 		}
 	}
-	carrier, held, err := newestSessionCheckpointRef(ctx, run.tier, addr.SessionID)
+	checkpoint, held, err := newestSessionCheckpointRef(ctx, run.tier, addr.SessionID)
 	if err != nil || !held {
-		t.Fatalf("the index answered the chain's carrier = (%t, %v), want the cut the chain filed", held, err)
+		t.Fatalf("the index answered the chain's checkpoint = (%t, %v), want the cut the chain filed", held, err)
 	}
-	if carrier.key != key {
-		t.Fatalf("the index answers the carrier %s, want the newest cut %s the chain filed", carrier.key, key)
+	if checkpoint.key != key {
+		t.Fatalf("the index answers the checkpoint %s, want the newest cut %s the chain filed", checkpoint.key, key)
 	}
 }
 
-// TestSessionCutReadsNoOtherSessionResidue pins that a chain's cut states one carrier whatever the chains beside it grew to.
-//   - positive: the carrier of a quiet chain states the same bytes whether a chain beside it is young or long
-//   - negative: the long chain's material reaches no slice of the quiet chain's carrier, which a cut that read the whole account could not say
+// TestSessionCutReadsNoOtherSessionResidue pins that a chain's cut states one checkpoint whatever the chains beside it grew to.
+//   - positive: the checkpoint of a quiet chain states the same bytes whether a chain beside it is young or long
+//   - negative: the long chain's material reaches no slice of the quiet chain's checkpoint, which a cut that read the whole account could not say
 //   - consumer: Run.CheckpointSession over a run holding two chains, one of them folded many times
 //
 // 契约: docs/wiki/platform/platform-subsystems.md#framework-checkpoint
@@ -1222,23 +1222,23 @@ func TestSessionCutReadsNoOtherSessionResidue(t *testing.T) {
 	commitSessionTurns(t, ctx, run, long, "residue-long", 4)
 	early, filed, err := run.CheckpointSession(ctx, quiet)
 	if err != nil || !filed {
-		t.Fatalf("file the quiet chain's first carrier = (%t, %v), want a filed fact", err == nil && filed, err)
+		t.Fatalf("file the quiet chain's first checkpoint = (%t, %v), want a filed fact", err == nil && filed, err)
 	}
-	earlyBytes := len(carrierPayloadOf(t, carrierOfIdentity(t, ctx, run, early)))
+	earlyBytes := len(checkpointPayloadOf(t, checkpointOfIdentity(t, ctx, run, early)))
 
 	commitSessionTurns(t, ctx, run, long, "residue-long-more", 12)
 	late, filed, err := run.CheckpointSession(ctx, quiet)
 	if err != nil || !filed {
-		t.Fatalf("file the quiet chain's second carrier = (%t, %v), want a filed fact", err == nil && filed, err)
+		t.Fatalf("file the quiet chain's second checkpoint = (%t, %v), want a filed fact", err == nil && filed, err)
 	}
-	carrier := carrierOfIdentity(t, ctx, run, late)
-	payload := carrierPayloadOf(t, carrier)
+	checkpoint := checkpointOfIdentity(t, ctx, run, late)
+	payload := checkpointPayloadOf(t, checkpoint)
 	if strings.Contains(payload, string(long.SessionID)) || strings.Contains(payload, "residue-long") {
-		t.Fatalf("the quiet chain's carrier states the long chain's material: %q", payload)
+		t.Fatalf("the quiet chain's checkpoint states the long chain's material: %q", payload)
 	}
 	lateBytes := len(payload)
 	if lateBytes != earlyBytes {
-		t.Fatalf("the quiet chain's carrier states %d bytes beside %d before the long chain grew, want a cut whose cost does not follow another chain's history",
+		t.Fatalf("the quiet chain's checkpoint states %d bytes beside %d before the long chain grew, want a cut whose cost does not follow another chain's history",
 			lateBytes, earlyBytes)
 	}
 }
@@ -1272,9 +1272,9 @@ func declareObligationTargeting(t *testing.T, ctx context.Context, run *Run, own
 }
 
 // TestCrossSessionDeliveryObligationSurvivesTheTargetSessionCut pins that an obligation declared against a chain is the target's to recover.
-//   - positive: the carrier a target session files states the obligation declared against it, with the delivery it owes
-//   - negative: the source chain's carrier states no obligation of the target chain, because the account of a chain is what that chain is owed
-//   - consumer: declareObligation seats it at its landing and a boot over the carrier hands it back through the delivery slice restore
+//   - positive: the checkpoint a target session files states the obligation declared against it, with the delivery it owes
+//   - negative: the source chain's checkpoint states no obligation of the target chain, because the account of a chain is what that chain is owed
+//   - consumer: declareObligation seats it at its landing and a boot over the checkpoint hands it back through the delivery slice restore
 //
 // 契约: docs/wiki/reliability/durable-delivery.md#envelope-states
 func TestCrossSessionDeliveryObligationSurvivesTheTargetSessionCut(t *testing.T) {
@@ -1294,18 +1294,18 @@ func TestCrossSessionDeliveryObligationSurvivesTheTargetSessionCut(t *testing.T)
 
 	key, filed, err := run.CheckpointSession(ctx, target)
 	if err != nil || !filed {
-		t.Fatalf("file the target chain's carrier = (%t, %v), want a filed fact", filed, err)
+		t.Fatalf("file the target chain's checkpoint = (%t, %v), want a filed fact", filed, err)
 	}
 	wire, stated := checkpointDeliveryOf(t, ctx, run, key)
 	if !stated {
-		t.Fatal("the target chain's carrier states no delivery slice, want the obligation declared against it")
+		t.Fatal("the target chain's checkpoint states no delivery slice, want the obligation declared against it")
 	}
 	owed, carried := owedOfIdentity(wire, identity)
 	if !carried {
-		t.Fatalf("the target chain's carrier owes %d obligation(s) and none is %s", len(wire.Owed), identity)
+		t.Fatalf("the target chain's checkpoint owes %d obligation(s) and none is %s", len(wire.Owed), identity)
 	}
 	if owed.Session != string(target.SessionID) {
-		t.Fatalf("the carrier states the obligation against %q, want the target chain %q", owed.Session, target.SessionID)
+		t.Fatalf("the checkpoint states the obligation against %q, want the target chain %q", owed.Session, target.SessionID)
 	}
 
 	booted := windowChainRun(t, ctx, storage)
@@ -1316,7 +1316,7 @@ func TestCrossSessionDeliveryObligationSurvivesTheTargetSessionCut(t *testing.T)
 		t.Fatalf("mount the delivery account of the boot: %v", err)
 	}
 	if err := bootedHost.restoreEventifiedDeliveries(ctx); err != nil {
-		t.Fatalf("restore the account the carrier states: %v", err)
+		t.Fatalf("restore the account the checkpoint states: %v", err)
 	}
 	bootedHost.mu.Lock()
 	account := bootedHost.deliveryAccountLocked(target.SessionID, false)
@@ -1331,15 +1331,15 @@ func TestCrossSessionDeliveryObligationSurvivesTheTargetSessionCut(t *testing.T)
 	sent := append([]deliveryTestAttempt(nil), sender.attempts...)
 	sender.mu.Unlock()
 	if !declared && !parked && len(sent) == 0 && state == "" {
-		t.Fatalf("the boot owes no delivery for %s and sent none, want the obligation the target chain's carrier states", identity)
+		t.Fatalf("the boot owes no delivery for %s and sent none, want the obligation the target chain's checkpoint states", identity)
 	}
 	if len(sent) > 0 && (sent[0].Target != target || sent[0].Content != "the body owed to the target chain") {
-		t.Fatalf("the boot delivered %q to %v, want the body the carrier states to %v", sent[0].Content, sent[0].Target, target)
+		t.Fatalf("the boot delivered %q to %v, want the body the checkpoint states to %v", sent[0].Content, sent[0].Target, target)
 	}
 }
 
 // TestSourceSessionCutMissesNoTargetingObligation pins that a cut of the declaring chain states nothing of the target and loses nothing.
-//   - positive: the source chain's carrier states no obligation of the target chain, so the source cut pays nothing for it
+//   - positive: the source chain's checkpoint states no obligation of the target chain, so the source cut pays nothing for it
 //   - negative: the obligation still stands owed after the source cut, so the quiet point of the chain that declared it neither states nor drops it
 //   - consumer: the account applyObligation seats at the landing, read after Run.CheckpointSession
 //
@@ -1360,11 +1360,11 @@ func TestSourceSessionCutMissesNoTargetingObligation(t *testing.T) {
 
 	key, filed, err := run.CheckpointSession(ctx, source)
 	if err != nil || !filed {
-		t.Fatalf("file the source chain's carrier = (%t, %v), want a filed fact", filed, err)
+		t.Fatalf("file the source chain's checkpoint = (%t, %v), want a filed fact", filed, err)
 	}
 	if wire, stated := checkpointDeliveryOf(t, ctx, run, key); stated {
 		if _, carried := owedOfIdentity(wire, identity); carried {
-			t.Fatalf("the source chain's carrier states the obligation %s its target owes, want the account of a chain to be what that chain is owed", identity)
+			t.Fatalf("the source chain's checkpoint states the obligation %s its target owes, want the account of a chain to be what that chain is owed", identity)
 		}
 	}
 	host.mu.Lock()
@@ -1379,7 +1379,7 @@ func TestSourceSessionCutMissesNoTargetingObligation(t *testing.T) {
 }
 
 // sessionRecoveryFixture runs one durable root through two session chains that
-// both filed their own carrier, and answers the process that left it.
+// both filed their own checkpoint, and answers the process that left it.
 func sessionRecoveryFixture(t *testing.T, ctx context.Context) (storage Option, kept, other event.Address) {
 	t.Helper()
 	storage = WithStorage(ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: t.TempDir()})
@@ -1406,7 +1406,7 @@ func sessionRecoveryFixture(t *testing.T, ctx context.Context) (storage Option, 
 		commitWindowFact(t, ctx, source, other, windowEvent(other, key, "inv-other-"+key, "the round of the chain beside", event.TypeExternalInput))
 	}
 	if _, _, err := source.CheckpointSession(ctx, kept); err != nil {
-		t.Fatalf("file the kept chain's carrier: %v", err)
+		t.Fatalf("file the kept chain's checkpoint: %v", err)
 	}
 	if _, _, err := source.CheckpointSession(ctx, other); err != nil {
 		t.Fatalf("file the chain beside: %v", err)
@@ -1414,9 +1414,9 @@ func sessionRecoveryFixture(t *testing.T, ctx context.Context) (storage Option, 
 	return storage, kept, other
 }
 
-// TestSessionRecoveryReplaysOnlyItsTail pins that a restart rebuilds the chain its carrier states, past the boundary it names.
-//   - positive: a boot over the carriers answers the projection the live process held for the kept chain, entry for entry
-//   - negative: the boot reads far fewer bodies than the chain holds, so the rebuild completes the state the carrier states instead of folding the history again
+// TestSessionRecoveryReplaysOnlyItsTail pins that a restart rebuilds the chain its checkpoint states, past the boundary it names.
+//   - positive: a boot over the checkpoints answers the projection the live process held for the kept chain, entry for entry
+//   - negative: the boot reads far fewer bodies than the chain holds, so the rebuild completes the state the checkpoint states instead of folding the history again
 //   - consumer: the real boot entry (restoreCheckpointState → seedAnchoredReplay) over the durable root
 //
 // 契约: docs/wiki/platform/platform-subsystems.md#framework-checkpoint
@@ -1432,7 +1432,7 @@ func TestSessionRecoveryReplaysOnlyItsTail(t *testing.T) {
 		t.Fatalf("the boot registered no projection for %v", kept)
 	}
 	if len(rebuilt.projection.Entries()) == 0 {
-		t.Fatal("the boot rebuilt no entry of the chain its carrier states")
+		t.Fatal("the boot rebuilt no entry of the chain its checkpoint states")
 	}
 	full := noTrimNoWindowRun(t, ctx, storage)
 	full.stopCheckpointFiler()
@@ -1441,7 +1441,7 @@ func TestSessionRecoveryReplaysOnlyItsTail(t *testing.T) {
 		t.Fatalf("replay the whole chain: %v", err)
 	}
 	if decoded := booted.CommittedFacts(); decoded >= fullReport.Decoded {
-		t.Fatalf("the boot read %d bodies beside the %d of a full walk, want the tail past the boundary the carriers name",
+		t.Fatalf("the boot read %d bodies beside the %d of a full walk, want the tail past the boundary the checkpoints name",
 			decoded, fullReport.Decoded)
 	}
 	if seed, held := seeds[kept]; held {
@@ -1525,7 +1525,7 @@ type foldRecorder struct {
 // StateName reports the name the recorded slice is keyed by.
 func (s *foldRecorder) StateName() string { return s.name }
 
-// SnapshotState states what the folds derived, in the identity order the carrier
+// SnapshotState states what the folds derived, in the identity order the checkpoint
 // renders the same bytes for the same facts.
 func (s *foldRecorder) SnapshotState(context.Context) ([]byte, error) {
 	s.mu.Lock()
@@ -1667,7 +1667,7 @@ func TestReducerDerivesEqualAtRuntimeAndRecovery(t *testing.T) {
 			len(liveProjection), liveCompress.judgedCount(), len(liveObligations))
 	}
 	if _, _, err := source.CheckpointSession(ctx, addr); err != nil {
-		t.Fatalf("file the carrier of the chain: %v", err)
+		t.Fatalf("file the checkpoint of the chain: %v", err)
 	}
 	declareObligationTargeting(t, ctx, source, sourceAddr, addr, "reducer-parity-after-cut", "the body the chain owes past the cut")
 	liveObligations = obligationLinesOf(sourceHost.deliveryObligations())
@@ -1698,7 +1698,7 @@ func TestReducerDerivesEqualAtRuntimeAndRecovery(t *testing.T) {
 
 // TestSnapshotFlushesNothing pins the pure read of a cut.
 //   - positive: the cut answers beside a holder that proves no lock of the run is held while its state is read
-//   - positive: the cut leaves the ledger as it found it, so the carrier it files is the only write
+//   - positive: the cut leaves the ledger as it found it, so the checkpoint it files is the only write
 //   - negative: a cut that read its holders under a lock of the run fails the holder's proof, and one that flushed state grows the ledger
 //   - consumer: Run.Checkpoint, the cut the cadence and the close file through
 //
@@ -1718,17 +1718,17 @@ func TestSnapshotFlushesNothing(t *testing.T) {
 	before := run.CommittedFacts()
 	key, filed, err := run.Checkpoint(ctx)
 	if err != nil || !filed {
-		t.Fatalf("file the cut = (%t, %v), want a filed carrier", filed, err)
+		t.Fatalf("file the cut = (%t, %v), want a filed checkpoint", filed, err)
 	}
 	if holder.lockedHeld {
 		t.Fatal("the cut read the holders beside a lock of the run held, want a read taken with no lock of the run")
 	}
 	if after := run.CommittedFacts(); after != before {
-		t.Fatalf("the cut left %d committed fact(s) beside the %d before it, want the carrier on the store alone and nothing a holder flushed into the ledger",
+		t.Fatalf("the cut left %d committed fact(s) beside the %d before it, want the checkpoint on the store alone and nothing a holder flushed into the ledger",
 			after, before)
 	}
-	if stated := carrierOfIdentity(t, ctx, run, key); !slices.Contains(stated.CheckpointSliceNames(), holder.StateName()) {
-		t.Fatalf("the carrier names the slices %v, want the pure-read holder's", stated.CheckpointSliceNames())
+	if stated := checkpointOfIdentity(t, ctx, run, key); !slices.Contains(stated.CheckpointSliceNames(), holder.StateName()) {
+		t.Fatalf("the checkpoint names the slices %v, want the pure-read holder's", stated.CheckpointSliceNames())
 	}
 }
 
@@ -1774,7 +1774,7 @@ func TestSeedFactReusesTheReducer(t *testing.T) {
 		t.Fatal("the live commit folded nothing, so the reuse proves nothing")
 	}
 	if _, _, err := source.CheckpointSession(ctx, addr); err != nil {
-		t.Fatalf("file the carrier of the chain: %v", err)
+		t.Fatalf("file the checkpoint of the chain: %v", err)
 	}
 	if _, err := source.Close(ctx, agent.CloseRequest{Timeout: time.Now().Add(2 * time.Second)}); err != nil {
 		t.Fatalf("close the live process: %v", err)
@@ -1821,7 +1821,7 @@ func TestRecoveryDerivesNoSecondTime(t *testing.T) {
 	commitSessionTurns(t, ctx, source, addr, "single-derivation", 8)
 	declareObligationTargeting(t, ctx, source, addr, addr, "single-derivation-owed", "the body the chain owes")
 	if _, _, err := source.CheckpointSession(ctx, addr); err != nil {
-		t.Fatalf("file the carrier of the chain: %v", err)
+		t.Fatalf("file the checkpoint of the chain: %v", err)
 	}
 	deliveryTestStopRetries(sourceHost)
 	if _, err := source.Close(ctx, agent.CloseRequest{Timeout: time.Now().Add(2 * time.Second)}); err != nil {
@@ -1860,9 +1860,9 @@ func TestRecoveryDerivesNoSecondTime(t *testing.T) {
 
 // TestNewConsumerRegistersSliceOnly pins that a slice is all a consumer mounts.
 //   - positive: a consumer registered through Run.RegisterStateSlice alone is stated by the cut and handed back by the boot
-//   - positive: the state it reads after the boot is the state the carrier and the tail derive
+//   - positive: the state it reads after the boot is the state the checkpoint and the tail derive
 //   - negative: a consumer the framework named a hook for would need wiring beside the registration, which this consumer has none of
-//   - consumer: Run.RegisterStateSlice at boot, then the real boot entry that restores the carrier and replays the tail into it
+//   - consumer: Run.RegisterStateSlice at boot, then the real boot entry that restores the checkpoint and replays the tail into it
 //
 // 契约: docs/wiki/platform/platform-subsystems.md#framework-checkpoint
 func TestNewConsumerRegistersSliceOnly(t *testing.T) {
@@ -1882,10 +1882,10 @@ func TestNewConsumerRegistersSliceOnly(t *testing.T) {
 	}
 	key, filed, err := source.Checkpoint(ctx)
 	if err != nil || !filed {
-		t.Fatalf("file the carrier of the run = (%t, %v), want a filed fact", filed, err)
+		t.Fatalf("file the checkpoint of the run = (%t, %v), want a filed fact", filed, err)
 	}
-	if !slices.Contains(carrierOfIdentity(t, ctx, source, key).CheckpointSliceNames(), live.StateName()) {
-		t.Fatalf("the carrier names the slices %v, want the registered consumer's", carrierOfIdentity(t, ctx, source, key).CheckpointSliceNames())
+	if !slices.Contains(checkpointOfIdentity(t, ctx, source, key).CheckpointSliceNames(), live.StateName()) {
+		t.Fatalf("the checkpoint names the slices %v, want the registered consumer's", checkpointOfIdentity(t, ctx, source, key).CheckpointSliceNames())
 	}
 	if _, err := source.Close(ctx, agent.CloseRequest{Timeout: time.Now().Add(2 * time.Second)}); err != nil {
 		t.Fatalf("close the live process: %v", err)
@@ -1895,14 +1895,14 @@ func TestNewConsumerRegistersSliceOnly(t *testing.T) {
 	rebuilt := windowChainRun(t, ctx, storage, recordingBoot(booted))
 	rebuilt.stopCheckpointFiler()
 	if len(booted.folds()) == 0 {
-		t.Fatal("the boot restored and folded nothing into the registered slice, want the carrier and the tail it states")
+		t.Fatal("the boot restored and folded nothing into the registered slice, want the checkpoint and the tail it states")
 	}
 	bootedState, err := booted.SnapshotState(ctx)
 	if err != nil {
 		t.Fatalf("state the restored slice: %v", err)
 	}
 	if len(string(bootedState)) <= len("null") {
-		t.Fatalf("the restored slice states %q, want the entries the carrier and the tail derive", bootedState)
+		t.Fatalf("the restored slice states %q, want the entries the checkpoint and the tail derive", bootedState)
 	}
 }
 

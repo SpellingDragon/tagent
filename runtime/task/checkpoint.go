@@ -25,10 +25,10 @@ import (
 // entry per task record the registry holds, in task identity order.
 type RegistryCheckpoint struct {
 	// Tasks is the account of the registry at the cut.
-	Tasks []TaskCheckpoint `json:"tasks,omitempty"`
+	Tasks []StatedTask `json:"tasks,omitempty"`
 }
 
-// TaskCheckpoint is one task record as a checkpoint states it: the declaration
+// StatedTask is one task record as a checkpoint states it: the declaration
 // the task was admitted under, the state it holds, the chain revision that state
 // corresponds to, and the obligations the registry still owes.
 //
@@ -37,7 +37,7 @@ type RegistryCheckpoint struct {
 // reported verdict — because no committed fact carries them and a rebuilt task
 // reads them empty rather than inferred. The checkpoint restores exactly what
 // the fold restores, so the two recovery paths answer the same account.
-type TaskCheckpoint struct {
+type StatedTask struct {
 	// TaskID is the task this entry states.
 	TaskID event.TaskID `json:"task_id"`
 	// Spec is the admission material of the task: the declaration its
@@ -95,7 +95,7 @@ func (r *MemoryRegistry) SnapshotCheckpoint(ctx context.Context) ([]byte, error)
 		return []byte("null"), nil
 	}
 	r.mu.Lock()
-	wire := RegistryCheckpoint{Tasks: make([]TaskCheckpoint, 0, len(r.tasks))}
+	wire := RegistryCheckpoint{Tasks: make([]StatedTask, 0, len(r.tasks))}
 	for taskID, entry := range r.tasks {
 		if err := ctx.Err(); err != nil {
 			r.mu.Unlock()
@@ -181,8 +181,8 @@ func (r *MemoryRegistry) CheckpointCoverage() map[event.TaskID]int64 {
 }
 
 // checkpointOf states one task record as a checkpoint names it.
-func (t *memoryTask) checkpointOf(taskID event.TaskID) TaskCheckpoint {
-	stated := TaskCheckpoint{
+func (t *memoryTask) checkpointOf(taskID event.TaskID) StatedTask {
+	stated := StatedTask{
 		TaskID:        taskID,
 		Spec:          t.spec,
 		Status:        t.status,
@@ -219,7 +219,7 @@ func (t *memoryTask) checkpointOf(taskID event.TaskID) TaskCheckpoint {
 }
 
 // record answers the task record one checkpoint entry states.
-func (stated TaskCheckpoint) record() (*memoryTask, error) {
+func (stated StatedTask) record() (*memoryTask, error) {
 	entry := &memoryTask{
 		spec:          stated.Spec,
 		status:        stated.Status,

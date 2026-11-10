@@ -203,7 +203,7 @@ func TestAnchorRefusesBlankType(t *testing.T) {
 		t.Fatalf("the rebuild decoded %d bodies, want the full-walk fallback %d", report.Decoded, fullReport.Decoded)
 	}
 	if report.Fallbacks+report.Checkpoints == 0 {
-		t.Fatal("the rebuild reported no carrier for a chain whose anchor was refused")
+		t.Fatal("the rebuild reported no checkpoint for a chain whose anchor was refused")
 	}
 	if len(seeds) != len(full) {
 		t.Fatalf("the fallback registered %d chains, want the %d the full walk holds", len(seeds), len(full))
@@ -386,7 +386,7 @@ func TestNeverFoldedSessionFallsBack(t *testing.T) {
 		t.Fatalf("the rebuild found %d anchor(s) on a chain that never folded", report.Anchors)
 	}
 	if report.Fallbacks+report.Checkpoints != 1 {
-		t.Fatalf("the rebuild reported %d fallback(s) beside %d checkpoint(s), want one carrier for the never-folded chain", report.Fallbacks, report.Checkpoints)
+		t.Fatalf("the rebuild reported %d fallback(s) beside %d checkpoint(s), want one checkpoint for the never-folded chain", report.Fallbacks, report.Checkpoints)
 	}
 	want, carried := full[addr]
 	if !carried {
@@ -893,9 +893,9 @@ func TestBootOverJournalTier(t *testing.T) {
 	}
 }
 
-// TestYoungLogBootRestoresTheOwedMailboxThroughTheSlice pins the boot restore of a log no cadence has covered with a carrier yet.
+// TestYoungLogBootRestoresTheOwedMailboxThroughTheSlice pins the boot restore of a log no cadence has covered with a checkpoint yet.
 // - positive: the notification a stopped process left owed in the durable account is seated in the mailbox of the assembled run
-// - the boot read no carrier, so the restore is the empty cut rather than a filed one
+// - the boot read no checkpoint, so the restore is the empty cut rather than a filed one
 // - negative: skipping the framework restore of the empty cut leaves the owed obligation unseated
 //
 // 契约: docs/wiki/platform/platform-subsystems.md#framework-checkpoint
@@ -935,7 +935,7 @@ func TestYoungLogBootRestoresTheOwedMailboxThroughTheSlice(t *testing.T) {
 
 	reopened := windowChainRun(t, ctx, WithStorage(ledger.StorageConfig{Type: ledger.StorageJournal, Root: root}))
 	if key, _ := reopened.CheckpointFiled(); key != "" {
-		t.Fatalf("the young log carries the checkpoint %s, want a boot whose tier states no carrier", key)
+		t.Fatalf("the young log carries the checkpoint %s, want a boot whose tier states no checkpoint", key)
 	}
 	seats := reopened.store.Unconsumed()
 	if len(seats) != 1 || seats[0].Notice.TaskID != owedTask {

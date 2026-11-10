@@ -3,7 +3,7 @@
     "removed_min": 5,
     "new_max": 47,
     "exported_interfaces_max": 83,
-    "note": "new_max 1->4 (boundary-closure), 4->7 (restart-recovery: RecoveryTicket/LoadScan/LoadStats), 7->38 (hot-update-and-purity-closure: generation-scoped registry GenRegistry/GenBuilder/GenBuilt/GenInstances/GenRegistration/GenResources/GenerationFaces/GenerationConsumer/GenHostSpec, storage engine AtomicStore/Batch/Fetch/Pair/MigrateReport, training export SFTInput/SFTSample/SFTDataset/SFTRow/PreferenceDataset/PreferenceRow/DatasetRefusal/RefusalName/EvidenceOptions/EvidenceExporter/EvidenceLines/FileEvidenceLines/SnapshotReadBack/RequestEvidenceRecord, meditation mount Plan/Faces, ChainFailureNamer, GenerationConfig), 38->44 (hot-update-and-purity-closure 12 checkpoint state: Checkpoint/CheckpointOffset/CheckpointSlice/CheckpointPayload 事实族、Stateful/StateRegistry 状态接缝、RegistryCheckpoint/TaskCheckpoint 任务账; 同波 CheckpointMeta/MailboxState/CheckpointObligation 内化不出公共面); 44->47 (session-checkpoint-material-unification U3 material contract: Material 声明面 + Timing/Failure 两个策略枚举，六端口保留为兼容读法、不新增端口，reducer/emitter 内化，exported_interfaces 不抬)；exported_interfaces_max 78->82 (AtomicStore, ChainFailureNamer, GenerationFaces, EvidenceLines, SnapshotReadBack), 82->83 (Stateful). 两个数都是本波实测值，非收敛目标：后续波次每新增一个导出名，棘轮按名判红而不是抬升到新常态。"
+    "note": "new_max 1->4 (boundary-closure), 4->7 (restart-recovery: RecoveryTicket/LoadScan/LoadStats), 7->38 (hot-update-and-purity-closure: generation-scoped registry GenRegistry/GenBuilder/GenBuilt/GenInstances/GenRegistration/GenResources/GenerationFaces/GenerationConsumer/GenHostSpec, storage engine AtomicStore/Batch/Fetch/Pair/MigrateReport, training export SFTInput/SFTSample/SFTDataset/SFTRow/PreferenceDataset/PreferenceRow/DatasetRefusal/RefusalName/EvidenceOptions/EvidenceExporter/EvidenceLines/FileEvidenceLines/SnapshotReadBack/RequestEvidenceRecord, meditation mount Plan/Faces, ChainFailureNamer, GenerationConfig), 38->44 (hot-update-and-purity-closure 12 checkpoint state: Checkpoint/CheckpointOffset/CheckpointSlice/CheckpointPayload 事实族、Stateful/StateRegistry 状态接缝、RegistryCheckpoint/TaskCheckpoint 任务账; 同波 CheckpointMeta/MailboxState/CheckpointObligation 内化不出公共面); 44->47 (session-checkpoint-material-unification U3 material contract: Material 声明面 + Timing/Failure 两个策略枚举，六端口保留为兼容读法、不新增端口，reducer/emitter 内化，exported_interfaces 不抬)；exported_interfaces_max 78->82 (AtomicStore, ChainFailureNamer, GenerationFaces, EvidenceLines, SnapshotReadBack), 82->83 (Stateful). 两个数都是本波实测值，非收敛目标：后续波次每新增一个导出名，棘轮按名判红而不是抬升到新常态。 勘误（W8-VOCAB）：`TaskCheckpoint` 已更名 `StatedTask`（任务账只有一个 checkpoint 术语，`RegistryCheckpoint` 为容器），绑定键与 S2 基线行同名改，new_max/removed_min 两个数未动。"
   },
   "schema_version": 1,
   "config_facts": {
@@ -1402,8 +1402,8 @@
         "kind": "declaration",
         "spec": "task-registry-rebuild"
       },
-      "TaskCheckpoint": {
-        "concept": "one task record as a checkpoint states it: the admission declaration, the held state and the chain revision that state corresponds to",
+      "StatedTask": {
+        "concept": "one entry of the task account a checkpoint states: the admission declaration, the held state and the chain revision that state corresponds to",
         "kind": "declaration",
         "spec": "task-registry-rebuild"
       },

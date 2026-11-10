@@ -155,7 +155,7 @@ func TestRegistryCheckpointRoundTrip(t *testing.T) {
 // movement stamps read in UTC: a stamp carries a monotonic reading and a zone a
 // JSON round trip does not carry, and the state a checkpoint states is the
 // instant, never the reading it was taken with.
-func (r *MemoryRegistry) checkpointOf(t *testing.T, taskID event.TaskID) TaskCheckpoint {
+func (r *MemoryRegistry) checkpointOf(t *testing.T, taskID event.TaskID) StatedTask {
 	t.Helper()
 	entry, held := r.tasks[taskID]
 	if !held {

@@ -749,16 +749,17 @@ func (r DeliveryRecord) Meta() map[string]string {
 	}
 }
 
-// DeliveryLedger is the delivery account of one assembled run (design D9): the
-// projections of the delivery facts the run committed, read back by source event
-// and by target. It holds no state of its own — the facts are the account, and the
-// tier the run keeps makes them durable — so a query never parses a body: the four
-// entries, the identity and the type of the fact are all it reads.
+// DeliveryLedger is the delivery ledger of one assembled run (design D9): the
+// read-back face of the delivery account, projecting by source event and by
+// target the delivery facts the run committed. The account is the derived state
+// the checkpoint states; the ledger reads it back and holds no state of its own,
+// and the tier the run keeps makes the facts durable — so a query never parses a
+// body: the four entries, the identity and the type of the fact are all it reads.
 type DeliveryLedger struct {
 	run *Run
 }
 
-// DeliveryLedger reports the delivery account of this run, or nil beside no run.
+// DeliveryLedger reports the delivery ledger of this run, or nil beside no run.
 func (r *Run) DeliveryLedger() *DeliveryLedger {
 	if r == nil {
 		return nil

@@ -162,7 +162,7 @@ sequenceDiagram
 <a id="context-management"></a>
 ## 九、上下文管理：段龄折叠、配对校验、呈现边界
 
-三龄段折叠是唯一压缩管线（`memory/replay` + `assembly/age_fold.go`）：段的归属由**世代递推**定档（`bandOfSegment`：窗口内＝新、离开窗口且无产物＝中、已持折叠产物＝老，`LevelOfAge`/`BandOfLevel` 只作年龄阶梯的诊断读）；`DefaultAgeKeepRecent=2` 段内全留，越过 `DefaultAgeVolumeThreshold=4096` 才动折叠；产物是内容寻址的负键（`-seg-<hex>`/`-hist-<hex>`），因此折叠是纯函数、可重放、不占正序号。每次判定落一条 `compress.request` 事实（`AgeProducerSegmentAge`），执行者是 `assembly/compress_consumer.go` 的 `CompressionConsumer`（`fact->observation`）；`AgeFoldPlugin` 只判定并提交 `compress.request`——判定与执行分离。老档摘要的正文由模型生成、降级机械有界，详见[事件流篇 §五](event-flow.md#unified-compression)。
+三龄段折叠是唯一压缩管线（`memory/replay` + `assembly/age_fold.go`）：段的归属由**band 晋升**定档（`bandOfSegment`：窗口内＝新、离开窗口且无产物＝中、已持折叠产物＝老，`LevelOfAge`/`BandOfLevel` 只作年龄阶梯的诊断读）；`DefaultAgeKeepRecent=2` 段内全留，越过 `DefaultAgeVolumeThreshold=4096` 才动折叠；产物是内容寻址的负键（`-seg-<hex>`/`-hist-<hex>`），因此折叠是纯函数、可重放、不占正序号。每次判定落一条 `compress.request` 事实（`AgeProducerSegmentAge`），执行者是 `assembly/compress_consumer.go` 的 `CompressionConsumer`（`fact->observation`）；`AgeFoldPlugin` 只判定并提交 `compress.request`——判定与执行分离。老档摘要的正文由模型生成、降级机械有界，详见[事件流篇 §五](event-flow.md#unified-compression)。
 
 呈现边界三条：**system 恒单条恒首位**，任何机制产物不得追加进去；压缩摘要渲染为 user 级〔历史归档〕注记并标注「非用户发言勿模仿」；**assistant 恒等于模型真实产出**——系统永不代 assistant 说话，也永不在 assistant 历史里生成文本化调用语法，防模型模仿出伪调用。`restoreCallPairing` 做双向配对校验：悬空的 `tool_calls` 被剥离或降级为 user 侧注记，绝不留下一个永不回应的调用。
 

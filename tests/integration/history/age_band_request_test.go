@@ -162,7 +162,7 @@ func TestAgeBandsReachTheRequest(t *testing.T) {
 		promoting = report
 	}
 	if !settled {
-		t.Fatal("the fold minted a product in every round up to the fourth, want the generational fold to settle")
+		t.Fatal("the fold minted a product in every round up to the fourth, want the band promotion fold to settle")
 	}
 	if promoting.NewFolded != 0 || promoting.MidFolded != 9 || len(promoting.Products) != 1 || promoting.Products[0].Type != replay.ProjectionTypeHistorySummary {
 		t.Fatalf("promoting fold report = %+v, want the nine entries the earlier fold left read as one history summary and no process detail folded twice", promoting)

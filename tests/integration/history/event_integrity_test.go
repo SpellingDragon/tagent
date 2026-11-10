@@ -2443,7 +2443,7 @@ func runFoldProductNoSelfTrigger(t *testing.T) {
 		}
 	}
 	if !settled {
-		t.Fatal("the fold kept minting products, want the generational fold to settle")
+		t.Fatal("the fold kept minting products, want the band promotion fold to settle")
 	}
 	if !sameKeys(projectionKeysOf(rebuilt.Entries()), keys) {
 		t.Fatalf("the settled fold changed the folded keys %v into %v", keys, projectionKeysOf(rebuilt.Entries()))

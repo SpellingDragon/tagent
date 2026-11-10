@@ -185,7 +185,8 @@ type DurableCommit struct {
 }
 
 // LoadScan is the read cost of one prefix scan made while rebuilding the
-// carrier at startup. Keys is the number of pairs returned, Bytes their total
+// commit carrier at startup — the store this port writes through, never the
+// framework checkpoint. Keys is the number of pairs returned, Bytes their total
 // value length, and Elapsed the wall time of the read alone — folding the
 // pairs into the carrier tables happens after the measurement and is covered
 // by the restore observation instead. It is a measurement, not a durable
@@ -203,7 +204,7 @@ type LoadStats struct {
 	Scans []LoadScan
 }
 
-// LoadStats reports the measured read cost of the load that built this
+// LoadStats reports the measured read cost of the load that built this commit
 // carrier. It is read-only; the caller cannot mutate the carrier through it.
 func (d *DurableCommit) LoadStats() LoadStats {
 	d.mu.Lock()
@@ -247,7 +248,8 @@ func newCarrier(log FactLog) *DurableCommit {
 	}
 }
 
-// load folds every record the log already holds back into the carrier's tables.
+// load folds every record the log already holds back into the commit carrier's
+// tables.
 // A committed notification is loaded owed and pending again unless the log holds
 // the receipt of its logical consumption: the storage layer records no
 // acceptance, so only the target's explicit acceptance moves one and an

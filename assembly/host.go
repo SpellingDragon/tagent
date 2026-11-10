@@ -215,7 +215,7 @@ type Host struct {
 	// claimed to deliver, so the closed segment, the hand-off and the retry
 	// consumer never send one obligation twice at the same time. It is the
 	// mutual exclusion of one attempt and not account state: no cut reads it and
-	// no carrier restates it.
+	// no checkpoint restates it.
 	deliveryClaims map[string]bool
 	// retries is the DeliveryConsumer: the self-timed redrive of the obligations
 	// the account still owes. It is built on the first obligation that needs it

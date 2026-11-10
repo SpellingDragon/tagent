@@ -7,17 +7,17 @@ aggregated state as one checkpoint fact. Recovery is the mirror of it — read t
 newest checkpoint, hand every slice back to its holder, then replay the facts
 that landed past the cut through seedFact's isolated rebuild (memory ledger
 only, no After pass, no side effects) — so no consumer owns a recovery read path
-of its own. The newest carrier comes from a backwards walk of the commit order
-that stops at the first entry of the checkpoint type, so the commits since that
-carrier bound the walk; anchor discovery is one pass of the resident commit
-order that copies nothing and reads no body; and the bodies read are the ones
-committed past each chain's cut, except a chain the restored slices carry beside
-no fold product, which replays its whole chain.
+of its own. The newest checkpoint comes from a backwards walk of the commit
+order that stops at the first entry of the checkpoint type, so the commits since
+that checkpoint bound the walk; anchor discovery is one pass of the resident
+commit order that copies nothing and reads no body; and the bodies read are the
+ones committed past each chain's cut, except a chain the restored slices carry
+beside no fold product, which replays its whole chain.
 
 The cut is consistent by construction, and the construction is an ordering of
 the single-writer pipeline rather than a lock over it: the coordinator reads the
 watermark, drains the pipeline to a quiet point, reads every slice there with no
-lock of the run held, and files the carrier through one ordinary append.
+lock of the run held, and files the checkpoint through one ordinary append.
   - The quiet point is a drain and not a fence: a commit holds the flight from
     its landing to the state it leaves its holder in, so a pipeline holding no
     flight has applied every fact it landed.
@@ -89,8 +89,8 @@ The settled set is stated by the cut instead of by a token per obligation:
 a settlement fact whose landing sits at or before the checkpoint's offset is
 covered, so every obligation outside the owed list that landed before the cut
 is settled by construction. A state token per settled identity would make the
-carrier grow with the history it exists to bound, and the chain behind it still
-answers any one obligation by its exact key.
+checkpoint grow with the history it exists to bound, and the chain behind it
+still answers any one obligation by its exact key.
 
 The diagnostic visibility face of the host: the unified runtime reading beside
 the reflection, training and observation faces, each opened by the switch the
@@ -244,11 +244,11 @@ const CheckpointCommitInterval = 64
 const CheckpointPeriod = 30 * time.Second
     CheckpointPeriod is the wall-clock bound between two framework checkpoints:
     a chain that commits little is a chain whose last commit may be far behind
-    the boot that reads it, so the period asks for a carrier at the next commit
-    even when the interval has not elapsed. The due is judged at a commit,
-    so a chain that commits nothing files no carrier of its own: the close stops
-    the filer and takes no cut, and the boot reads the carrier the last commit
-    that reached a due filed.
+    the boot that reads it, so the period asks for a checkpoint at the next
+    commit even when the interval has not elapsed. The due is judged at a
+    commit, so a chain that commits nothing files no checkpoint of its own: the
+    close stops the filer and takes no cut, and the boot reads the checkpoint
+    the last commit that reached a due filed.
 
 const CompressionConsumerName = "compress-consumer"
     CompressionConsumerName is the stable name the compression consumer answers.
@@ -295,10 +295,11 @@ var (
 
 var ErrCheckpointSurvivorUnstated = errors.New("assembly: the checkpoint names a survivor the chain states no entry for")
     ErrCheckpointSurvivorUnstated reports a checkpoint naming a survivor the
-    chain states no entry for. The carrier names every survivor by identity,
+    chain states no entry for. The checkpoint names every survivor by identity,
     type, summary and moment and leaves the text to the chain, so a key the
-    chain does not state is a carrier no boot can rebuild: restoring the entry
-    beside no text would present the model material the process never wrote.
+    chain does not state is a checkpoint no boot can rebuild: restoring the
+    entry beside no text would present the model material the process never
+    wrote.
 
 var ErrCheckpointUnreadable = errors.New("assembly: the checkpoint fact states no readable checkpoint")
     ErrCheckpointUnreadable reports a checkpoint fact whose payload does not
@@ -715,12 +716,13 @@ func (c *CompressionConsumer) Reduce(ctx context.Context, evt event.Event) error
 type DeliveryLedger struct {
 	// Has unexported fields.
 }
-    DeliveryLedger is the delivery account of one assembled run (design D9):
-    the projections of the delivery facts the run committed, read back by
-    source event and by target. It holds no state of its own — the facts are the
-    account, and the tier the run keeps makes them durable — so a query never
-    parses a body: the four entries, the identity and the type of the fact are
-    all it reads.
+    DeliveryLedger is the delivery ledger of one assembled run (design D9):
+    the read-back face of the delivery account, projecting by source event and
+    by target the delivery facts the run committed. The account is the derived
+    state the checkpoint states; the ledger reads it back and holds no state
+    of its own, and the tier the run keeps makes the facts durable — so a query
+    never parses a body: the four entries, the identity and the type of the fact
+    are all it reads.
 
 func (l *DeliveryLedger) BySource(source event.EventID) ([]DeliveryRecord, error)
     BySource reports the deliveries one source event is accounted for: every
@@ -1632,7 +1634,7 @@ func (r *Run) Checkpoint(ctx context.Context) (event.EventID, bool, error)
     reaches the storage tier.
 
 func (r *Run) CheckpointAfterFold()
-    CheckpointAfterFold asks for a carrier because a fold produced a product:
+    CheckpointAfterFold asks for a checkpoint because a fold produced a product:
     a fold is the moment the projection drops material, so the state a restart
     reads is worth refreshing whatever the cadence clock says. The product
     lands inside the quiet-point fence of the commit that filed it, so this is
@@ -1641,22 +1643,22 @@ func (r *Run) CheckpointAfterFold()
 
 func (r *Run) CheckpointFiled() (event.EventID, event.CheckpointOffset)
     CheckpointFiled reports the identity of the newest checkpoint this run filed
-    and the cut it states, so a caller reads the coverage of the carrier it
+    and the cut it states, so a caller reads the coverage of the checkpoint it
     holds.
 
 func (r *Run) CheckpointSession(ctx context.Context, addr event.Address) (event.EventID, bool, error)
     CheckpointSession takes one cut of the named session chain and files the
     fact it states. The cut names the last fact each partition had committed
     when the cut began — the same watermark the framework's own cut names,
-    so a session carrier and a framework carrier are read back on one axis —
-    while the state is the state of that chain alone: the cut drains the commits
-    of the chain, asks every holder what it states about the session, and files
-    a carrier whose slices are that session's.
+    so a session checkpoint and a framework checkpoint are read back on one
+    axis — while the state is the state of that chain alone: the cut drains the
+    commits of the chain, asks every holder what it states about the session,
+    and files a checkpoint whose slices are that session's.
 
-      - The carrier is filed under the run's checkpoint owner beside the session
-        it states, so the index answers which chain a carrier belongs to
-        without reading its body and without the carrier entering that chain's
-        projection.
+      - The checkpoint is filed under the run's checkpoint owner beside the
+        session it states, so the index answers which chain a checkpoint belongs
+        to without reading its body and without the checkpoint entering that
+        chain's projection.
       - A commit of another chain that lands beside the cut is past its
         watermark and is replayed by the boot, so the cut pays nothing for it
         and never waits on it.
@@ -1665,7 +1667,7 @@ func (r *Run) CheckpointSession(ctx context.Context, addr event.Address) (event.
     the cut never states a position past the state it carries. MUST drain only
     the named chain, so a cut of one session waits for no commit of another.
     MUST state nothing about a holder that keeps no state of a session, rather
-    than copy another chain's account into this carrier.
+    than copy another chain's account into this checkpoint.
 
 func (r *Run) Close(ctx context.Context, req agent.CloseRequest) (agent.DrainReport, error)
     Close closes the runtime's own side for the named session address: the
@@ -1756,7 +1758,7 @@ func (r *Run) CommittedFacts() int
     run carries.
 
 func (r *Run) DeliveryLedger() *DeliveryLedger
-    DeliveryLedger reports the delivery account of this run, or nil beside no
+    DeliveryLedger reports the delivery ledger of this run, or nil beside no
     run.
 
 func (r *Run) Diagnostics(ctx context.Context, filter query.ListFilter, switches DiagnosticSwitches) (DiagnosticReport, error)
@@ -1783,12 +1785,12 @@ func (r *Run) EachSessionFact(ctx context.Context, addr event.Address, visit fun
     no durable chain, so the visit answers the resident window alone in commit
     order. A visit error ends the stream and is returned.
 
-    A framework checkpoint carrier names the chain it states without entering
-    it, so the stream leaves it out under either branch: the index answers which
-    chain a carrier belongs to, while the state it carries is the boundary a
+    A framework checkpoint names the chain it states without entering it,
+    so the stream leaves it out under either branch: the index answers which
+    chain a checkpoint belongs to, while the state it carries is the boundary a
     boot starts from rather than material the chain committed. The commit path
-    already holds that line by keeping a carrier out of the resident ledger,
-    so a stream that read the stored carrier back would hand a reader — a
+    already holds that line by keeping a checkpoint out of the resident ledger,
+    so a stream that read the stored checkpoint back would hand a reader — a
     projection rebuild above all — the state slices as transcript lines the run
     never committed.
 

@@ -443,7 +443,7 @@ func TestAgeFoldFoldsTheOlderBandsIntoOneHistorySummary(t *testing.T) {
 	}
 }
 
-// TestAgeFoldPromotesTheGenerationsAcrossFolds pins the generational recursion of the three bands.
+// TestAgeFoldPromotesTheGenerationsAcrossFolds pins the band promotion of the three bands.
 //   - the turn the window drops reads the middle band, and its process detail folds into one product
 //   - the next fold reads the same turn in the oldest band, and the summary covers it
 //   - a band is decided by the fold that consumed the material, never by the distance the turn sits from the newest one
@@ -1353,7 +1353,7 @@ func TestGlobalSummaryStandsApartFromTheRecentTurn(t *testing.T) {
 		return BandNew, false
 	}
 	if band, held := bandOf("t1-in"); !held || band != BandMid {
-		t.Fatalf("the turn beside the standing summary reads the %v band (held %v), want the middle band its own fold generation names", band, held)
+		t.Fatalf("the turn beside the standing summary reads the %v band (held %v), want the middle band its own band promotion names", band, held)
 	}
 
 	report, err := projection.FoldByAge(ctx, plan)
