@@ -22,7 +22,7 @@ type FoldProduct struct {
 	// Entry is the synthetic entry the projection carries under Entry.Key.
 	Entry ProjectionEntry
 	// Covered lists the entry keys the product consumes, in their original
-	// order: the process detail of one closed segment, or the middle bands.
+	// order: the process detail of one middle-band segment, or the oldest band.
 	Covered []event.EventID
 	// Request is the judgment this product answers.
 	Request event.CompressRequest
@@ -48,7 +48,7 @@ type AgeFoldPlanReport struct {
 type FoldedCounts struct {
 	// Segment counts the process-detail entries a segment product consumes.
 	Segment int
-	// Middle counts the entries a history summary consumes.
+	// Middle counts the entries a history summary consumes: the oldest band.
 	Middle int
 }
 
@@ -91,31 +91,35 @@ func planFold(entries []ProjectionEntry, plan AgeFoldPlan, volume int) AgeFoldPl
 	if len(entries) == 0 || volume <= threshold {
 		return report
 	}
-	var middle []ProjectionEntry
+	var oldest []ProjectionEntry
 	for _, segment := range SegmentsOf(entries, keepRecent) {
-		if segment.Band != BandNew {
-			middle = append(middle, segment.Entries...)
-			continue
+		switch segment.Band {
+		case BandOld:
+			oldest = append(oldest, segment.Entries...)
+		case BandMid:
+			folded, product := foldProcessDetail(segment.Entries, segment.Complete)
+			report.Counts.Segment += folded
+			if product == nil {
+				oldest = append(oldest, segment.Entries...)
+				continue
+			}
+			report.Products = append(report.Products, FoldProduct{
+				Entry:   *product,
+				Covered: processDetailKeys(segment.Entries),
+				Request: ageRequest(AgeReasonSegmentFold, *product),
+			})
 		}
-		folded, product := foldProcessDetail(segment.Entries, segment.Complete)
-		report.Counts.Segment += folded
-		if product == nil {
-			continue
-		}
-		report.Products = append(report.Products, FoldProduct{
-			Entry:   *product,
-			Covered: processDetailKeys(segment.Entries),
-			Request: ageRequest(AgeReasonSegmentFold, *product),
-		})
 	}
-	report.Counts.Middle = len(middle)
-	if len(middle) > 0 {
-		summary := historySummaryOf(middle)
-		report.Products = append(report.Products, FoldProduct{
-			Entry:   summary,
-			Covered: entryKeysOf(middle),
-			Request: ageRequest(AgeReasonHistorySummary, summary),
-		})
+	report.Counts.Middle = len(oldest)
+	if len(oldest) > 0 {
+		summary := historySummaryOf(oldest)
+		if _, stands := heldKeysOf(entries)[summary.Key]; !stands {
+			report.Products = append(report.Products, FoldProduct{
+				Entry:   summary,
+				Covered: entryKeysOf(oldest),
+				Request: ageRequest(AgeReasonHistorySummary, summary),
+			})
+		}
 	}
 	report.Triggered = len(report.Products) > 0
 	return report

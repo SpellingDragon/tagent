@@ -117,11 +117,13 @@ func TestLandedSeqRidesTheWalk(t *testing.T) {
 // - rebuilding from the anchor answers the full walk entry by entry
 // - the anchor path decodes fewer bodies than the full walk
 // - the index answers the same landed slots as the full walk
+// - the checkpoint filer ends before the walk that arms it, so the chain the two reads compare stands still
 //
 // 契约: docs/wiki/agent/event-flow.md#projection-lifecycle
 func TestAnchoredRebuildEqualsFullWalk(t *testing.T) {
 	ctx := context.Background()
 	run := windowChainRun(t, ctx)
+	run.stopCheckpointFiler()
 	addr := event.Address{AgentID: "agent-a", SessionID: "session-anchor"}
 	commitWindowTurns(t, ctx, run, addr, 12)
 

@@ -120,6 +120,8 @@ func TestCandidateEmbeddingNeverSeesMechanismWording(t *testing.T) {
 }
 
 // TestTierQueryMatchesObservedRead pins durable queries to the existing semantics.
+// - four closed turns put a band older than the recent window beside the newest one, which the fold mints a product for
+// - a shorter walk leaves every band new, so the fold judges nothing and the fixture files no mechanism fact
 //
 // 契约: docs/wiki/memory/memory-architecture.md#read-paths
 func TestTierQueryMatchesObservedRead(t *testing.T) {
@@ -127,7 +129,7 @@ func TestTierQueryMatchesObservedRead(t *testing.T) {
 	run := windowChainRun(t, ctx)
 	addrA := event.Address{AgentID: "agent-a", SessionID: "session-query-a"}
 	addrB := event.Address{AgentID: "agent-b", SessionID: "session-query-b"}
-	commitWindowTurns(t, ctx, run, addrA, 2)
+	commitWindowTurns(t, ctx, run, addrA, 4)
 	commitWindowTurns(t, ctx, run, addrB, 1)
 	baseline := memory.NewMemoryEventQuery()
 	if err := run.tier.Segments.EachEvent(ctx, func(stored ledger.StoredEvent) error {

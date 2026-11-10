@@ -170,6 +170,14 @@ blacklist:
     again, so a stop between the terminal fact and the receipt replays no second
     turn.
 
+The semantic summary of one oldest band: the model face behind the history
+summary a fold files. The bounded mechanical reads of the band are handed to the
+model of the session's agent, and the answer becomes the summary fact's text,
+so what the model reads for the oldest material is a gist of it rather than one
+line per consumed entry. The answer is bounded by the same limit the mechanical
+form obeys, and a session whose agent holds no model answers no gist at all:
+the consumer keeps the mechanical form instead of inventing one.
+
 Package assembly is the composition root of the runtime: the single point
 where a pure organization declaration becomes a live runtime, and the only
 dependency-injection site of the process. Assemble is the sole assembly entry
@@ -381,6 +389,11 @@ var ErrMemoryEngine = errors.New("tagent: the memory engine declaration is inval
     ErrMemoryEngine reports a semantic engine declaration the core cannot
     assemble: an unknown backend, a negative retrieval bound, or an embedding
     connection that does not name what its provider needs.
+
+var ErrNoSummaryModel = errors.New("assembly: the session names no model for a band summary")
+    ErrNoSummaryModel reports a band summary asked of a session whose agent
+    holds no model: the consumer reads it as the degradation the mechanical form
+    stands for, never as a failed fold.
 
 var ErrNoticeTurnIncomplete = errors.New("tagent: the follow-up turn did not complete its delivery")
     ErrNoticeTurnIncomplete reports a follow-up turn that ended without the
@@ -625,9 +638,11 @@ func (c *CompressionConsumer) Execute(ctx context.Context, session event.Session
     projection the model reads. - A history summary covers every settlement
     fact inside the band it folds: settlement lines never count as fold material
     (foldProjectionOf), the summary consumes their accounting beside the turns,
-    and the facts stay on the chain readable by identity. - The checkpoint is
-    a pure whole-batch preflight, so its survivors equal the entries left by
-    applying that same batch.
+    and the facts stay on the chain readable by identity. - The checkpoint
+    is a pure whole-batch preflight, so its survivors equal the entries left
+    by applying that same batch. - The oldest-band gist is read before the
+    checkpoint, so the survivors a restart rebuilds state the text the chain
+    records rather than the mechanical form the fold minted.
 
 func (c *CompressionConsumer) Name() string
     Name reports the stable name of this plugin instance.

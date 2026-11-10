@@ -3,14 +3,14 @@
   "triggered": true,
   "volume": 2983,
   "threshold": 1,
-  "segment": 2,
-  "middle": 20,
+  "segment": 10,
+  "middle": 0,
   "segments": [
     {
       "index": 0,
       "age": 6,
       "level": 3,
-      "band": "old",
+      "band": "mid",
       "complete": true,
       "entries": 4
     },
@@ -66,47 +66,68 @@
   "products": [
     {
       "type": "segment_fold",
-      "key": "-seg-450e29614249826c",
+      "key": "-seg-43689e98ee8be1fa",
       "summary": "segment fold",
-      "content": "[11-06 12:22|gen:?] thinking_plan: plan s6; [11-06 12:23|gen:?] action_command: call s6",
-      "time_ms": 1793967720000,
+      "content": "[11-06 12:02|gen:?] thinking_plan: plan s1; [11-06 12:03|gen:?] action_command: call s1",
+      "time_ms": 1793966520000,
       "covered": [
-        "plan-s6",
-        "cmd-s6"
+        "plan-s1",
+        "cmd-s1"
       ],
-      "request_id": "cmp-9fffca23b67f1966",
-      "reason": "the process detail of the new band is over its volume threshold"
+      "request_id": "cmp-519c6e621309e490",
+      "reason": "the process detail of the middle band is over its volume threshold"
     },
     {
-      "type": "history_summary",
-      "key": "-hist-b2c1f65b184ada56",
-      "summary": "history summary",
-      "content": "[11-06 12:01|gen:?] external_input: question s1; [11-06 12:02|gen:?] thinking_plan: plan s1; [11-06 12:03|gen:?] action_command: call s1; [11-06 12:04|gen:?] agent_output: reply s1; [11-06 12:05|gen:?] external_input: question s2; [11-06 12:06|gen:?] thinking_plan: plan s2; [11-06 12:07|gen:?] action_command: call s2; [11-06 12:08|gen:?] agent_output: reply s2; [11-06 12:09|gen:?] external_input: question s3; [11-06 12:10|gen:?] thinking_plan: plan s3; [11-06 12:11|gen:?] action_command: call s3; [11-06 12:12|gen:?] agent_output: reply s3; [11-06 12:13|gen:?] external_input: question s4; [11-06 12:14|gen:?] thinking_plan: plan s4; [11-06 12:15|gen:?] action_command: call s4; [11-06 12:16|gen:?] agent_output: reply s4; [11-06 12:17|gen:?] external_input: question s5; [11-06 12:18|gen:?] thinking_plan: plan s5; [11-06 12:19|gen:?] action_command: call s5; [11-06 12:20|gen:?] agent_output: reply s5",
-      "time_ms": 1793966460000,
+      "type": "segment_fold",
+      "key": "-seg-75c269bd18eb9cf4",
+      "summary": "segment fold",
+      "content": "[11-06 12:06|gen:?] thinking_plan: plan s2; [11-06 12:07|gen:?] action_command: call s2",
+      "time_ms": 1793966760000,
       "covered": [
-        "in-s1",
-        "plan-s1",
-        "cmd-s1",
-        "out-s1",
-        "in-s2",
         "plan-s2",
-        "cmd-s2",
-        "out-s2",
-        "in-s3",
-        "plan-s3",
-        "cmd-s3",
-        "out-s3",
-        "in-s4",
-        "plan-s4",
-        "cmd-s4",
-        "out-s4",
-        "in-s5",
-        "plan-s5",
-        "cmd-s5",
-        "out-s5"
+        "cmd-s2"
       ],
-      "request_id": "cmp-000e728aa236a888",
-      "reason": "the middle band is over its volume threshold"
+      "request_id": "cmp-c5727698a443fb13",
+      "reason": "the process detail of the middle band is over its volume threshold"
+    },
+    {
+      "type": "segment_fold",
+      "key": "-seg-111ad9c57c1a083e",
+      "summary": "segment fold",
+      "content": "[11-06 12:10|gen:?] thinking_plan: plan s3; [11-06 12:11|gen:?] action_command: call s3",
+      "time_ms": 1793967000000,
+      "covered": [
+        "plan-s3",
+        "cmd-s3"
+      ],
+      "request_id": "cmp-fc3d0e6d77733eb1",
+      "reason": "the process detail of the middle band is over its volume threshold"
+    },
+    {
+      "type": "segment_fold",
+      "key": "-seg-0f343093bc5c4129",
+      "summary": "segment fold",
+      "content": "[11-06 12:14|gen:?] thinking_plan: plan s4; [11-06 12:15|gen:?] action_command: call s4",
+      "time_ms": 1793967240000,
+      "covered": [
+        "plan-s4",
+        "cmd-s4"
+      ],
+      "request_id": "cmp-191479245b166998",
+      "reason": "the process detail of the middle band is over its volume threshold"
+    },
+    {
+      "type": "segment_fold",
+      "key": "-seg-b9968ce58c56c4f7",
+      "summary": "segment fold",
+      "content": "[11-06 12:18|gen:?] thinking_plan: plan s5; [11-06 12:19|gen:?] action_command: call s5",
+      "time_ms": 1793967480000,
+      "covered": [
+        "plan-s5",
+        "cmd-s5"
+      ],
+      "request_id": "cmp-77990da82cded524",
+      "reason": "the process detail of the middle band is over its volume threshold"
     }
   ]
 }

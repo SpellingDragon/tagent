@@ -554,7 +554,7 @@ func assemble(ctx context.Context, decl *config.Declaration, agents map[event.Ag
 		}
 	}
 	booTTrace("built")
-	r.compress = NewCompressionConsumer(ageFoldSessions{run: r})
+	r.compress = NewCompressionConsumer(ageFoldSessions{run: r}).withSummaryGist(bandSummaries{run: r})
 	r.ageFold = NewAgeFoldPlugin(ageFoldSessions{run: r})
 	r.ageFold.setExecutor(r.compress)
 	r.finalRound = agent.NewFinalRoundPlanner(finalRoundChain{run: r}, r.finalRoundPolicyOf)

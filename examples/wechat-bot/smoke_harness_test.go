@@ -3142,7 +3142,8 @@ var (
 
 // smokeLongScanEvidence 汇总整套代日志的 durable load 计数：每个前缀跨代读到的最深
 // 键数，以及一行都没出现的五个前缀。取跨代最大是因为一代从空链开始读零，早代的零
-// 不该掩盖后续重启真正读到的数据；缺行说明宿主的日志出口断了，取证面当场为空。
+// 不该掩盖后续重启真正读到的数据；首次出现即登记，故每代都读零键的前缀仍算行已出现，
+// 零键与缺行分开判；缺行说明宿主的日志出口断了，取证面当场为空。
 func smokeLongScanEvidence(paths []string) (map[string]int, []string, error) {
 	counts := map[string]int{}
 	for _, path := range paths {
@@ -3164,7 +3165,7 @@ func smokeLongScanEvidence(paths []string) (map[string]int, []string, error) {
 			if err != nil {
 				continue
 			}
-			if keys > counts[prefix] {
+			if held, seen := counts[prefix]; !seen || keys > held {
 				counts[prefix] = keys
 			}
 		}
@@ -3178,7 +3179,11 @@ func smokeLongScanEvidence(paths []string) (map[string]int, []string, error) {
 	return counts, missing, nil
 }
 
-// TestLongScanEvidenceNamesMissingPrefix 是重启证据判定里「缺行」一面的负锚：五行齐备且数据前缀读到键时判定通过，少写一行（这里少的是 reject）则缺行清单点名它。数据前缀读零的那一面由 restart-evidence 子测试在真实代日志上判。
+// TestLongScanEvidenceNamesMissingPrefix 是重启证据判定里「缺行」一面的负锚。
+//
+// - 五行齐备且数据前缀读到键时判定通过；少写一行（这里少的是 reject）则缺行清单点名它。
+// - reject 那一行写成 keys=0 时仍算行已出现、缺行清单不点名它：行在不在与键读没读到是两件事。
+// - 数据前缀读零的那一面由 restart-evidence 子测试在真实代日志上判。
 func TestLongScanEvidenceNamesMissingPrefix(t *testing.T) {
 	dir := t.TempDir()
 	write := func(name, text string) string {
@@ -3200,6 +3205,9 @@ func TestLongScanEvidenceNamesMissingPrefix(t *testing.T) {
 	truncated := write("gen01.log",
 		strings.Replace(whole.String(), line("tagent/task/v1/reject:", 2), "", 1))
 
+	zeroReject := write("gen02.log",
+		strings.Replace(whole.String(), line("tagent/task/v1/reject:", 2), line("tagent/task/v1/reject:", 0), 1))
+
 	counts, missing, err := smokeLongScanEvidence([]string{full})
 	if err != nil {
 		t.Fatalf("read the fixture logs: %v", err)
@@ -3209,6 +3217,12 @@ func TestLongScanEvidenceNamesMissingPrefix(t *testing.T) {
 	}
 	if counts["tagent/task/v1/fact:"] != 2 {
 		t.Fatalf("fact scan keys = %d, want the 2 the fixture wrote", counts["tagent/task/v1/fact:"])
+	}
+
+	if _, missing, err := smokeLongScanEvidence([]string{zeroReject}); err != nil {
+		t.Fatalf("read the fixture logs: %v", err)
+	} else if len(missing) > 0 {
+		t.Fatalf("a rejected-notification row written as keys=0 reported missing prefixes %v: the row is in the log, only its key count is zero", missing)
 	}
 
 	_, missing, err = smokeLongScanEvidence([]string{truncated})

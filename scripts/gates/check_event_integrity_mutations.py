@@ -743,7 +743,7 @@ MUTATIONS: Tuple[Mutation, ...] = (
             "golden/runtime/fold_contract.json segment_age; golden vector golden/runtime/fold_plan_golden.json; anchor TestFoldPlanGolden"
         ),
         description=(
-            "Widen the newest age window by one segment, so a segment the rule reads L1 is judged as L0 material and its ladder moves."
+            "Widen the newest age window by one segment, so a segment the ladder reads L1 is recorded as L0 material and its level moves."
         ),
         replacement=Replacement(
             file="memory/replay/age_segments.go",
@@ -764,7 +764,7 @@ MUTATIONS: Tuple[Mutation, ...] = (
             "golden/runtime/fold_contract.json segment_age levels L1 and L2; anchor TestFoldPlanGolden"
         ),
         description=(
-            "Widen the L1 window by one segment, so a segment the rule reads L2 reads L1 instead."
+            "Widen the L1 window by one segment, so a segment the ladder reads L2 reads L1 instead."
         ),
         replacement=Replacement(
             file="memory/replay/age_segments.go",
@@ -782,21 +782,21 @@ MUTATIONS: Tuple[Mutation, ...] = (
         basis="FOLD-CONTRACT-inflight-never-folded",
         evidence_kind="named_assertion",
         evidence_ref=(
-            "golden/runtime/fold_contract.json segment_age in_flight; anchor TestFoldPlanGolden"
+            "golden/runtime/fold_contract.json segment_age in_flight; anchor TestAgeFoldKeepsTheSegmentInProgressWhole"
         ),
         description=(
-            "Fold the segment still in flight: the plan hands foldProcessDetail a complete segment regardless of the run completion, so the never-folded in-flight process detail folds into a product."
+            "Fold the segment still in flight: drop the completion guard from the band rule, so the tail run no agent output closed reads as middle-band material and its process detail folds into a product."
         ),
         replacement=Replacement(
-            file="memory/replay/age_plan.go",
-            old="\t\tfolded, product := foldProcessDetail(segment.Entries, segment.Complete)\n",
-            new="\t\tfolded, product := foldProcessDetail(segment.Entries, true)\n",
+            file="memory/replay/age_segments.go",
+            old="\tif !segment.Complete || segment.Index >= total-keepRecent {\n",
+            new="\tif segment.Complete && segment.Index >= total-keepRecent {\n",
         ),
         test_package="./memory/replay",
-        test_file="memory/replay/age_plan_test.go",
-        test_name="TestFoldPlanGolden",
-        test_selector="^TestFoldPlanGolden$",
-        expect_assertion="the fold plan golden drifted",
+        test_file="memory/replay/age_segments_test.go",
+        test_name="TestAgeFoldKeepsTheSegmentInProgressWhole",
+        test_selector="^TestAgeFoldKeepsTheSegmentInProgressWhole$",
+        expect_assertion="want the segment in progress beside the whole new band",
     ),
     Mutation(
         id="MUT-FOLD-04-product-type",
@@ -806,7 +806,7 @@ MUTATIONS: Tuple[Mutation, ...] = (
             "golden/runtime/fold_contract.json products segment_fold.type; anchor TestFoldPlanGolden"
         ),
         description=(
-            "Mint the new-band product as a history summary entry, so the product the new band folds into carries the wrong type."
+            "Mint the middle-band product as a history summary entry, so the product the middle band folds into carries the wrong type."
         ),
         replacement=Replacement(
             file="memory/replay/age_segments.go",

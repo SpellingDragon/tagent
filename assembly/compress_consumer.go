@@ -56,7 +56,11 @@ const compressCoveredSeparator = "\n"
 // MUST NOT execute a judgment whose material does not stand: it stays pending rather than answering a product of other material.
 type CompressionConsumer struct {
 	sessions compressSessions
-	mu       sync.Mutex
+	// gists is the model face the consumer asks for the semantic summary of the
+	// oldest band. A consumer beside none records the mechanical form, which is
+	// the bounded text the fold itself minted.
+	gists summaryGists
+	mu    sync.Mutex
 	// judgments holds the requests one session filed, in filing order, keyed by
 	// the session whose material they name.
 	judgments map[event.SessionID][]event.CompressRequest
@@ -108,6 +112,18 @@ func NewCompressionConsumer(sessions compressSessions) *CompressionConsumer {
 
 // Name reports the stable name of this plugin instance.
 func (c *CompressionConsumer) Name() string { return CompressionConsumerName }
+
+// withSummaryGist attaches the model face the consumer asks for the semantic
+// summary of the oldest band. The face is what turns a summary fact into a gist
+// of the material it covers; a consumer beside none records the bounded
+// mechanical form the fold minted.
+func (c *CompressionConsumer) withSummaryGist(gists summaryGists) *CompressionConsumer {
+	if c == nil {
+		return c
+	}
+	c.gists = gists
+	return c
+}
 
 // Port reports the consumption the consumer serves: one committed fact in, one
 // execution of the judgments already on the chain.
@@ -171,6 +187,7 @@ func (c *CompressionConsumer) NoteProduct(product event.CompressProduct) {
 // - The plan is executed over the accounting-free view the production judged (foldProjectionOf): the products name the conversation material, and delivery settlement lines stay in the projection the model reads.
 // - A history summary covers every settlement fact inside the band it folds: settlement lines never count as fold material (foldProjectionOf), the summary consumes their accounting beside the turns, and the facts stay on the chain readable by identity.
 // - The checkpoint is a pure whole-batch preflight, so its survivors equal the entries left by applying that same batch.
+// - The oldest-band gist is read before the checkpoint, so the survivors a restart rebuilds state the text the chain records rather than the mechanical form the fold minted.
 func (c *CompressionConsumer) Execute(ctx context.Context, session event.SessionID) error {
 	if c == nil || c.sessions == nil || session == "" {
 		return nil
@@ -212,6 +229,9 @@ func (c *CompressionConsumer) Execute(ctx context.Context, session event.Session
 			batch = append(batch, coverSettlementFacts(product, projection))
 		}
 	}
+	for at := range batch {
+		batch[at] = c.summarizeProduct(ctx, session, batch[at])
+	}
 	var checkpoint []byte
 	if len(batch) > 0 {
 		checkpoint = anchorCheckpointOf(replay.FoldedEntries(projection.Entries(), batch))
@@ -228,6 +248,31 @@ func (c *CompressionConsumer) Execute(ctx context.Context, session event.Session
 		projection.ApplyProducts([]replay.FoldProduct{product})
 	}
 	return nil
+}
+
+// summarizeProduct answers the text one history summary records: the semantic
+// gist the session's model answers for the material the fold consumed, cut to the
+// bound the mechanical form obeys. A consumer beside no gist face, a session
+// whose agent holds no model, a failed request and an empty answer all keep the
+// mechanical text the fold minted, so a summary is never empty, never blocks the
+// fold and never grows past the bound: the degradation is the form the fold
+// already states, and the reason it was taken is reported.
+func (c *CompressionConsumer) summarizeProduct(ctx context.Context, session event.SessionID, product replay.FoldProduct) replay.FoldProduct {
+	if c == nil || c.gists == nil || product.Entry.Type != replay.ProjectionTypeHistorySummary {
+		return product
+	}
+	gist, err := c.gists.SummaryGist(ctx, session, product.Entry.Content)
+	if err != nil {
+		assemblyWarn("tagent: the semantic summary of session %s stayed mechanical err=%v", session, err)
+		return product
+	}
+	bounded := boundedSummaryGist(gist)
+	if bounded == "" {
+		assemblyWarn("tagent: the semantic summary of session %s answered no text, kept mechanical", session)
+		return product
+	}
+	product.Entry.Content = bounded
+	return product
 }
 
 // anchorEntry is one entry of the projection state a fold checkpoint carries.

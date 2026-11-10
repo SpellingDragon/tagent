@@ -113,6 +113,22 @@
       "reason": "折叠计划读不到体积阈值时的兜底。"
     },
     {
+      "id": "age-summary-text-limit",
+      "class": "constant",
+      "name": "DefaultAgeSummaryTextLimit",
+      "kind": "const",
+      "file": "memory/replay/age_segments.go",
+      "reason": "机制常量：一份 history summary 正文的字节上界。超界的最老行退化为按 key 引用，摘要体积不随它所压缩的历史增长。"
+    },
+    {
+      "id": "age-summary-drop-reserve",
+      "class": "constant",
+      "name": "ageSummaryDropReserve",
+      "kind": "const",
+      "file": "memory/replay/age_segments.go",
+      "reason": "机制常量：摘要正文里 covered-by-key 标记占用的字节预留，保证正文不超上界。"
+    },
+    {
       "id": "chars-per-token",
       "class": "constant",
       "name": "BudgetCharsPerToken",

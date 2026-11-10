@@ -104,7 +104,7 @@
 | 3 | `Segments.StoreEvent(...)`，`partition = PartitionIDFromName(Owner.AgentID)`、`window = Timestamp.UnixMilli()`（负值具名拒）、`seq = landedSeq[partition]+1` | **段提交才是持久写**：它不成功，事实就不算落地，`landedSeq` 不前进 |
 | 4 | 无提交后向量步骤 | 查询按需读链，在候选上现算嵌入；没有 land 步骤，也没有需要回滚的派生索引 |
 
-两条由此可查证的结论：①无存储档（`tier == nil`）或事实没有 `Owner.AgentID` 时，事实只留在内存，不假称持久；②第 2 步成功而第 3 步失败会留下一条无人引用的 ref/blob——重放同一 EventID 会复用该消息自己的正文，因此不会堆积第二份字节，但清理面不在本层（见[§十二](#gaps)）。
+三条由此可查证的结论：①无存储档（`tier == nil`）或事实没有 `Owner.AgentID` 时，事实只留在内存，不假称持久；②第 2 步成功而第 3 步失败会留下一条无人引用的 ref/blob——重放同一 EventID 会复用该消息自己的正文，因此不会堆积第二份字节，但清理面不在本层（见[§十二](#gaps)）；③**折叠产物同样是这条路径的事实**：`compress.product`（`api/event/compress_product.go`）把五个字段写进事件元数据——`compress_key` 内容寻址的合成负键（`-seg-<hex>`/`-hist-<hex>`）、`compress_request` 回指它答的那条判定、`compress_covered` 换行分隔列出被它吃掉的条目键、`compress_text` 产物正文、`compress_survivors` 幸存者快照（checkpoint 载荷），`Message` 恒空，因为产物是被投影重建的材料而非会话里的一句话。恢复面因此只有一条判据：`RestoreProducts` 读 `compress_text` 重建合成条目，**不重新生成摘要**——摘要的确定性来自「事实即答案」而非重算（重问一次模型就换一套措辞，锚定重建与全量走查的 parity 也就没了），模型访问也只留在 assembly 一侧，本层回放保持纯读。段的世代递推定档、按档分职与老档模型摘要的三条降级，见[会话篇 §五](../agent/event-flow.md#unified-compression)。
 
 <a id="causal-chain"></a>
 ## 四、因果：查询时从链推导父边

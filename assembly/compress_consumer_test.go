@@ -12,7 +12,7 @@ import (
 // TestBatchCheckpointMatchesPostBatchProjection pins whole-batch survivor semantics.
 // - several judgments execute in one batch after earlier products were applied
 // - checkpoint survivors equal the final projection and bound anchored decoding
-// - the post-batch bound is the anchor's tail, and a checkpointed chain hydrates its survivors by key so the bound admits them
+// - a checkpointed chain hydrates its survivors by key and replays only the tail past them, so the anchored boot decodes fewer bodies than the full walk
 //
 // 契约: docs/wiki/agent/event-flow.md#projection-lifecycle
 func TestBatchCheckpointMatchesPostBatchProjection(t *testing.T) {
@@ -55,11 +55,16 @@ func TestBatchCheckpointMatchesPostBatchProjection(t *testing.T) {
 	if err != nil {
 		t.Fatalf("rebuild the accumulated batch: %v", err)
 	}
-	if report.Anchors != 1 {
-		t.Fatalf("the rebuild used %d anchor(s), want one", report.Anchors)
+	if report.Anchors != 1 || report.Fallbacks != 0 {
+		t.Fatalf("the rebuild used %d anchor(s) beside %d fallback(s), want the one checkpoint of the batch", report.Anchors, report.Fallbacks)
 	}
-	if report.Decoded > 8 && report.Checkpoints == 0 {
-		t.Fatalf("the anchored rebuild decoded %d event(s) beside no checkpoint, want the post-batch bound of 8", report.Decoded)
+	whole := windowChainRun(t, ctx)
+	_, _, full, err := whole.seedFullReplay(ctx, run.tier)
+	if err != nil {
+		t.Fatalf("walk the chain in full: %v", err)
+	}
+	if report.Decoded >= full.Decoded {
+		t.Fatalf("the anchored rebuild decoded %d event(s), want fewer than the %d of the full walk", report.Decoded, full.Decoded)
 	}
 }
 

@@ -157,6 +157,8 @@ func (s capacityState) assertUnchanged(t *testing.T, projection *ReplayProjectio
 
 // TestFoldCapacityAndCandidateRules pins the two gates of an age fold: the rendered volume and a candidate.
 //
+// - 不动点：折叠每轮把窗口外的材料晋一级，故窗口丢弃的回合摘要完之后投影到达不动点，此后一次判定产出零产品、投影逐字不变。
+//
 // 契约: docs/wiki/memory/memory-architecture.md#overview
 func TestFoldCapacityAndCandidateRules(t *testing.T) {
 	ctx := context.Background()
@@ -231,8 +233,8 @@ func TestFoldCapacityAndCandidateRules(t *testing.T) {
 	})
 
 	t.Run("past the threshold still folds a small candidate", func(t *testing.T) {
-		entries := capacityTurn("small-candidate", 2048, 1)
-		plan := AgeFoldPlan{KeepRecent: 2, VolumeThreshold: len(RenderProjection(entries)) / 2}
+		entries := append(capacityTurn("small-candidate", 2048, 1), capacityTurn("skeleton", 2048, 0)...)
+		plan := AgeFoldPlan{KeepRecent: 1, VolumeThreshold: len(RenderProjection(entries)) / 2}
 		projection := capacityProjection(t, entries)
 
 		report, err := projection.PlanByAge(ctx, plan)
@@ -257,7 +259,7 @@ func TestFoldCapacityAndCandidateRules(t *testing.T) {
 		}
 	})
 
-	t.Run("large material plan-apply equals a direct fold and is idempotent", func(t *testing.T) {
+	t.Run("large material plan-apply equals a direct fold and converges", func(t *testing.T) {
 		var entries []ProjectionEntry
 		for _, seed := range []string{"large-1", "large-2", "large-3", "large-4"} {
 			entries = append(entries, capacityTurn(seed, 512, 2)...)
@@ -296,14 +298,30 @@ func TestFoldCapacityAndCandidateRules(t *testing.T) {
 		planned.ApplyProducts(report.Products)
 		folded.assertUnchanged(t, planned, "applying the plan twice")
 
+		fixed := false
+		for round := 0; round < 4; round++ {
+			again, err := planned.FoldByAge(ctx, plan)
+			if err != nil {
+				t.Fatalf("FoldByAge after the plan: %v", err)
+			}
+			if again.Triggered || len(again.Products) != 0 || len(again.Requests) != 0 {
+				continue
+			}
+			fixed = true
+			break
+		}
+		if !fixed {
+			t.Fatalf("projection = %+v, want the folds to reach a fixed point", planned.Entries())
+		}
+		settled := capacityStateOf(planned)
 		again, err := planned.FoldByAge(ctx, plan)
 		if err != nil {
-			t.Fatalf("FoldByAge after the plan: %v", err)
+			t.Fatalf("FoldByAge at the fixed point: %v", err)
 		}
 		if again.Triggered || len(again.Products) != 0 || len(again.Requests) != 0 {
-			t.Fatalf("fold after the plan = %+v, want no candidate left to fold", again)
+			t.Fatalf("fold at the fixed point = %+v, want no candidate left to fold", again)
 		}
-		folded.assertUnchanged(t, planned, "folding after the plan")
+		settled.assertUnchanged(t, planned, "folding at the fixed point")
 	})
 
 	t.Run("a threshold of one does not force a trigger", func(t *testing.T) {

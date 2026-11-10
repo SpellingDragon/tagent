@@ -302,16 +302,18 @@ func TestAgeFoldWaitsForTheVolumeThreshold(t *testing.T) {
 	}
 }
 
-// TestAgeFoldFoldsTheNewBandIntoOneProduct pins the new→middle production of an age fold.
-//   - the process detail of every closed new-band turn collapses into one product entry
+// TestAgeFoldFoldsTheMiddleBandIntoOneProduct pins the new→middle production of an age fold.
+//   - the process detail of every middle-band turn collapses into one product entry
 //   - the product stands where the folded detail stood, between the input and the output
 //   - the fold files one compress request per product, content-addressed over the material
-func TestAgeFoldFoldsTheNewBandIntoOneProduct(t *testing.T) {
+//   - the new band stays whole: the newest turn keeps its raw process detail
+func TestAgeFoldFoldsTheMiddleBandIntoOneProduct(t *testing.T) {
 	ctx := context.Background()
 	entries := append(ageTurn("t1", 0, 2), ageTurn("t2", 1, 2)...)
+	entries = append(entries, ageTurn("t3", 2, 2)...)
 	projection := ageProjection(t, entries)
 
-	report, err := projection.FoldByAge(ctx, AgeFoldPlan{KeepRecent: DefaultAgeKeepRecent, VolumeThreshold: 600})
+	report, err := projection.FoldByAge(ctx, AgeFoldPlan{KeepRecent: 1, VolumeThreshold: 600})
 	if err != nil {
 		t.Fatalf("FoldByAge: %v", err)
 	}
@@ -319,7 +321,7 @@ func TestAgeFoldFoldsTheNewBandIntoOneProduct(t *testing.T) {
 		t.Fatalf("report = %+v, want the fold to trigger past the threshold", report)
 	}
 	if report.NewFolded != 8 {
-		t.Fatalf("new-band folded entries = %d, want the eight process entries of the two turns", report.NewFolded)
+		t.Fatalf("middle-band folded entries = %d, want the eight process entries of the two turns that left the window", report.NewFolded)
 	}
 	if report.MidFolded != 0 || len(report.Products) != 2 {
 		t.Fatalf("report = %+v, want one product per folded turn and no history summary yet", report)
@@ -336,25 +338,31 @@ func TestAgeFoldFoldsTheNewBandIntoOneProduct(t *testing.T) {
 			t.Fatalf("request %d = %+v, want the content-addressed judgment %q", i, report.Requests, want.ID)
 		}
 	}
-	if got := processDetail(projection.Entries()); got != 0 {
-		t.Fatalf("projection still carries %d raw process entries, want the new band folded", got)
+	if got := processDetail(projection.Entries()); got != 4 {
+		t.Fatalf("projection still carries %d raw process entries, want the four of the newest turn kept whole", got)
 	}
 	got := projection.Entries()
-	if len(got) != 6 {
-		t.Fatalf("projection holds %d entries, want the two turns as input, product and output: %v", len(got), got)
+	if len(got) != 12 {
+		t.Fatalf("projection holds %d entries, want the two folded turns as input, product and output beside the whole new band: %v", len(got), got)
 	}
 	for i, want := range []struct {
-		typ  string
-		key  event.EventID
-		time time.Time
+		typ string
+		key event.EventID
 	}{
-		{event.TypeExternalInput, "t1-in", ageBase},
-		{ProjectionTypeSegmentFold, report.Products[0].Key, ageBase.Add(time.Minute)},
-		{event.TypeAgentOutput, "t1-out", ageBase.Add(9 * time.Minute)},
+		{event.TypeExternalInput, "t1-in"},
+		{ProjectionTypeSegmentFold, report.Products[0].Key},
+		{event.TypeAgentOutput, "t1-out"},
+		{event.TypeExternalInput, "t2-in"},
+		{ProjectionTypeSegmentFold, report.Products[1].Key},
+		{event.TypeAgentOutput, "t2-out"},
+		{event.TypeExternalInput, "t3-in"},
 	} {
 		if got[i].Type != want.typ || got[i].Key != want.key {
-			t.Fatalf("entry %d = (%q, %q), want the folded turn laid out as %q then %q", i, got[i].Key, got[i].Type, want.key, want.typ)
+			t.Fatalf("entry %d = (%q, %q), want the folded turns laid out as the new band begins at %q", i, got[i].Key, got[i].Type, want.key)
 		}
+	}
+	if got[6].Time != ageBase.Add(20*time.Minute) {
+		t.Fatalf("new band opens at %v, want the newest turn untouched at its own moment", got[6].Time)
 	}
 	assembled, err := projection.AssembleBudget(ctx, 1000)
 	if err != nil {
@@ -372,9 +380,9 @@ func TestAgeFoldFoldsTheNewBandIntoOneProduct(t *testing.T) {
 }
 
 // TestAgeFoldFoldsTheOlderBandsIntoOneHistorySummary pins the middle→old production.
-//   - the middle and oldest bands leave the timeline and read as one history summary
+//   - the turns an earlier fold consumed leave the timeline and read as one history summary
 //   - the summary leads the projection, so the skeleton of the new band follows it
-//   - the new band is folded the same way while the summary speaks for the older turns
+//   - the earlier fold minted one segment product per turn, and the summary carries them by key
 func TestAgeFoldFoldsTheOlderBandsIntoOneHistorySummary(t *testing.T) {
 	ctx := context.Background()
 	var entries []ProjectionEntry
@@ -382,41 +390,112 @@ func TestAgeFoldFoldsTheOlderBandsIntoOneHistorySummary(t *testing.T) {
 		entries = append(entries, ageTurn(seed, step, 1)...)
 	}
 	projection := ageProjection(t, entries)
+	plan := AgeFoldPlan{KeepRecent: 1, VolumeThreshold: 600}
 
-	report, err := projection.FoldByAge(ctx, AgeFoldPlan{KeepRecent: 1, VolumeThreshold: 600})
+	first, err := projection.FoldByAge(ctx, plan)
 	if err != nil {
-		t.Fatalf("FoldByAge: %v", err)
+		t.Fatalf("first FoldByAge: %v", err)
 	}
-	if !report.Triggered || report.MidFolded != 12 {
-		t.Fatalf("report = %+v, want the three older turns (four entries each) folded into the summary", report)
+	if !first.Triggered || first.MidFolded != 0 || len(first.Products) != 3 {
+		t.Fatalf("first fold = %+v, want one segment product per turn that left the window and no summary yet", first)
 	}
-	if len(report.Products) != 2 {
-		t.Fatalf("products = %d, want the new band product and the history summary", len(report.Products))
+
+	report, err := projection.FoldByAge(ctx, plan)
+	if err != nil {
+		t.Fatalf("second FoldByAge: %v", err)
 	}
-	summary := report.Products[len(report.Products)-1]
+	if !report.Triggered || report.MidFolded != 9 {
+		t.Fatalf("report = %+v, want the three folded turns (three entries each) folded into the summary", report)
+	}
+	if len(report.Products) != 1 {
+		t.Fatalf("products = %d, want the one history summary the oldest band folds into", len(report.Products))
+	}
+	summary := report.Products[0]
 	if summary.Type != ProjectionTypeHistorySummary || !SyntheticKey(summary.Key) {
 		t.Fatalf("history summary = %+v, want a synthetic summary entry", summary)
 	}
 	if !strings.Contains(summary.Content, "external_input: input t1") || !strings.Contains(summary.Content, "agent_output: output t3") {
 		t.Fatalf("history summary content = %q, want the one-line reads of the older turns", summary.Content)
 	}
+	for _, product := range first.Products {
+		if !strings.Contains(summary.Content, string(product.Key)) {
+			t.Fatalf("history summary content = %q, want the segment product %q referenced by key", summary.Content, product.Key)
+		}
+	}
 	want := event.CompressRequestFor(AgeProducerSegmentAge, strings.TrimPrefix(string(summary.Key), "-"), AgeReasonHistorySummary)
 	if last := report.Requests[len(report.Requests)-1]; last.ID != want.ID {
 		t.Fatalf("last request = %+v, want the content-addressed history judgment %q", last, want.ID)
 	}
 	got := projection.Entries()
-	if len(got) != 4 {
-		t.Fatalf("projection holds %d entries, want the summary beside the folded new band: %v", len(got), got)
+	if len(got) != 5 {
+		t.Fatalf("projection holds %d entries, want the summary beside the whole new band: %v", len(got), got)
 	}
 	if got[0].Type != ProjectionTypeHistorySummary || got[0].Key != summary.Key {
 		t.Fatalf("first entry = %+v, want the history summary leading the projection", got[0])
 	}
-	if got[1].Key != "t4-in" || got[2].Type != ProjectionTypeSegmentFold || got[3].Key != "t4-out" {
-		t.Fatalf("new band = %v, want the newest turn kept as input, product and output", got[1:])
+	if got[1].Key != "t4-in" || got[2].Key != "t4-plan-a" || got[3].Key != "t4-cmd-a" || got[4].Key != "t4-out" {
+		t.Fatalf("new band = %v, want the newest turn kept whole beside the summary", got[1:])
 	}
 	for _, entry := range got {
 		if strings.HasPrefix(string(entry.Key), "t1-") || strings.HasPrefix(string(entry.Key), "t2-") || strings.HasPrefix(string(entry.Key), "t3-") {
 			t.Fatalf("entry %+v still stands in the timeline, want the older bands replaced by the summary", entry)
+		}
+	}
+}
+
+// TestAgeFoldPromotesTheGenerationsAcrossFolds pins the generational recursion of the three bands.
+//   - the turn the window drops reads the middle band, and its process detail folds into one product
+//   - the next fold reads the same turn in the oldest band, and the summary covers it
+//   - a band is decided by the fold that consumed the material, never by the distance the turn sits from the newest one
+func TestAgeFoldPromotesTheGenerationsAcrossFolds(t *testing.T) {
+	ctx := context.Background()
+	var entries []ProjectionEntry
+	for step, seed := range []string{"t1", "t2", "t3"} {
+		entries = append(entries, ageTurn(seed, step, 1)...)
+	}
+	projection := ageProjection(t, entries)
+	plan := AgeFoldPlan{KeepRecent: 1, VolumeThreshold: 600}
+	bandOfTurn := func(seed string) (Band, bool) {
+		for _, segment := range SegmentsOf(projection.Entries(), 1) {
+			for _, entry := range segment.Entries {
+				if string(entry.Key) == seed+"-in" {
+					return segment.Band, true
+				}
+			}
+		}
+		return BandNew, false
+	}
+
+	if band, held := bandOfTurn("t1"); !held || band != BandMid {
+		t.Fatalf("t1 reads the %v band (held %v) before the first fold, want the middle band it enters when the window drops it", band, held)
+	}
+	first, err := projection.FoldByAge(ctx, plan)
+	if err != nil {
+		t.Fatalf("first FoldByAge: %v", err)
+	}
+	if len(first.Products) != 2 {
+		t.Fatalf("first fold = %+v, want the two middle-band turns folded into one product each", first)
+	}
+	if band, held := bandOfTurn("t1"); !held || band != BandOld {
+		t.Fatalf("t1 reads the %v band (held %v) after its fold, want the oldest band the product it now carries names", band, held)
+	}
+	if band, _ := bandOfTurn("t3"); band != BandNew {
+		t.Fatalf("t3 reads the %v band, want the newest turn still in the new band", band)
+	}
+
+	second, err := projection.FoldByAge(ctx, plan)
+	if err != nil {
+		t.Fatalf("second FoldByAge: %v", err)
+	}
+	if len(second.Products) != 1 || second.Products[0].Type != ProjectionTypeHistorySummary {
+		t.Fatalf("second fold = %+v, want the oldest band folded into the one history summary", second)
+	}
+	if _, held := bandOfTurn("t1"); held {
+		t.Fatalf("t1 still stands in the timeline, want the history summary to cover the turn after its second generation")
+	}
+	for _, wantRead := range []string{"external_input: input t1", "agent_output: output t1"} {
+		if !strings.Contains(second.Products[0].Content, wantRead) {
+			t.Fatalf("summary = %q, want the one-line read %q of the turn it summarized", second.Products[0].Content, wantRead)
 		}
 	}
 }
@@ -467,39 +546,42 @@ func TestAgeFoldMintsTheSameProductsForTheSameMaterial(t *testing.T) {
 
 // TestAgeFoldKeepsTheSegmentInProgressWhole pins the pending turn against the fold.
 //   - the process detail of the segment in progress is never folded
-//   - the closed turn beside it is folded, so the tail keeps its whole detail
+//   - the closed turns the window dropped are folded, so the tail keeps its whole detail
+//   - the newest closed turn keeps its detail as well: the new band is never folded either
 func TestAgeFoldKeepsTheSegmentInProgressWhole(t *testing.T) {
 	ctx := context.Background()
-	entries := ageTurn("t1", 0, 2)
+	entries := append(ageTurn("t1", 0, 2), ageTurn("t2", 1, 2)...)
 	entries = append(entries,
-		ProjectionEntry{Key: "t2-in", Type: event.TypeExternalInput, Summary: "input t2", Content: strings.Repeat("进行中的输入。", 20), Time: ageBase.Add(time.Hour)},
-		ProjectionEntry{Key: "t2-plan", Type: event.TypeThinkingPlan, Summary: "plan t2", Content: strings.Repeat("进行中的过程。", 20), Time: ageBase.Add(time.Hour + time.Minute)},
-		ProjectionEntry{Key: "t2-cmd", Type: event.TypeActionCommand, Summary: "call t2", Content: strings.Repeat("进行中的工具。", 20), Time: ageBase.Add(time.Hour + 2*time.Minute)},
+		ProjectionEntry{Key: "t3-in", Type: event.TypeExternalInput, Summary: "input t3", Content: strings.Repeat("进行中的输入。", 20), Time: ageBase.Add(time.Hour)},
+		ProjectionEntry{Key: "t3-plan", Type: event.TypeThinkingPlan, Summary: "plan t3", Content: strings.Repeat("进行中的过程。", 20), Time: ageBase.Add(time.Hour + time.Minute)},
+		ProjectionEntry{Key: "t3-cmd", Type: event.TypeActionCommand, Summary: "call t3", Content: strings.Repeat("进行中的工具。", 20), Time: ageBase.Add(time.Hour + 2*time.Minute)},
 	)
 	projection := ageProjection(t, entries)
 
-	report, err := projection.FoldByAge(ctx, AgeFoldPlan{KeepRecent: DefaultAgeKeepRecent, VolumeThreshold: 600})
+	report, err := projection.FoldByAge(ctx, AgeFoldPlan{KeepRecent: 2, VolumeThreshold: 600})
 	if err != nil {
 		t.Fatalf("FoldByAge: %v", err)
 	}
 	if report.NewFolded != 4 {
-		t.Fatalf("new-band folded entries = %d, want only the four process entries of the closed turn", report.NewFolded)
+		t.Fatalf("middle-band folded entries = %d, want only the four process entries of the turn the window dropped", report.NewFolded)
 	}
-	for _, key := range []event.EventID{"t2-in", "t2-plan", "t2-cmd"} {
+	whole := append(ageTurn("t2", 1, 2), ProjectionEntry{Key: "t3-in"}, ProjectionEntry{Key: "t3-plan"}, ProjectionEntry{Key: "t3-cmd"})
+	for _, kept := range whole {
 		found := false
 		for _, entry := range projection.Entries() {
-			if entry.Key == key {
+			if entry.Key == kept.Key {
 				found = true
 			}
 		}
 		if !found {
-			t.Fatalf("projection lost %q, want the segment in progress kept whole", key)
+			t.Fatalf("projection lost %q, want the segment in progress beside the whole new band", kept.Key)
 		}
 	}
 }
 
 // TestRefoldReadsTypeNotPrefix pins the judgment a later history fold reads a standing product by: its Type, never its text.
-//   - a standing history summary whose content carries no type label is still judged a product, and the turns it recorded survive
+//   - a standing history summary is judged a product by its Type and contributes a bounded reference to its own key
+//   - the text it stands for is never copied into the next summary, so folding a summary does not re-carry the material it compressed
 //   - the summary a fold mints spells no type label of its own, so what kind of product it is stays its Type
 func TestRefoldReadsTypeNotPrefix(t *testing.T) {
 	ctx := context.Background()
@@ -528,10 +610,13 @@ func TestRefoldReadsTypeNotPrefix(t *testing.T) {
 	if summary.Type != ProjectionTypeHistorySummary {
 		t.Fatalf("product = %+v, want the history summary of the older bands", summary)
 	}
-	if !strings.HasPrefix(summary.Content, "external_input: "+early) {
-		t.Fatalf("history summary content = %q, want the standing product's content read verbatim ahead of the folded lines", summary.Content)
+	if strings.Contains(summary.Content, early) {
+		t.Fatalf("history summary content = %q, want the standing product referenced by key instead of copied", summary.Content)
 	}
-	if strings.Contains(summary.Content, "history summary") || strings.Contains(summary.Content, ProjectionTypeHistorySummary+": ") {
+	if !strings.Contains(summary.Content, string(standing.Key)) {
+		t.Fatalf("history summary content = %q, want the bounded reference to the standing product's key %q", summary.Content, standing.Key)
+	}
+	if strings.Contains(summary.Content, ProjectionTypeHistorySummary+": ") {
 		t.Fatalf("history summary content = %q, want no type label written into the material", summary.Content)
 	}
 	if !strings.Contains(summary.Content, "input t2") {
@@ -572,6 +657,7 @@ func (f foldAnchorFact) projectionEntry() ProjectionEntry {
 // - 世代承载：事件信封（event.Event.InstanceID）携带 recorder 世代，经 Generation() 读取、WithInstanceID 设置，映射到投影入口（assembly/facts.go mappedEntryOf）时逐字透传。
 // - 有世代信息时必须给出完整 InstanceID 并与该行事实逐字相等；没有时以 gen:? 显式标注、不得伪造。
 // - 取数面：折叠后投影里的 history summary 条目正文本身（模型可见面），不用内部行函数或日志。
+// - 覆盖来源：第二折把第一折消化掉的材料当作最老带，故它产出的摘要覆盖的键就是那一折之前的投影条目，每行的世代从那批条目逐字读回。
 // - 场景：两个 recorder 世代（重启前三个回合、重启后最新回合），时刻全部是显式 RFC3339、跨日且逐条不同。
 func TestSymptomAnchorFoldSummaryProvenance(t *testing.T) {
 	ctx := context.Background()
@@ -629,12 +715,18 @@ func TestSymptomAnchorFoldSummaryProvenance(t *testing.T) {
 	}
 	projection := ageProjection(t, entries)
 
-	report, err := projection.FoldByAge(ctx, AgeFoldPlan{KeepRecent: 1, VolumeThreshold: 600})
+	plan := AgeFoldPlan{KeepRecent: 1, VolumeThreshold: 600}
+	first, err := projection.FoldByAge(ctx, plan)
 	if err != nil {
-		t.Fatalf("FoldByAge: %v", err)
+		t.Fatalf("first FoldByAge: %v", err)
 	}
-	if !report.Triggered || report.MidFolded != 3*perTurn {
-		t.Fatalf("report = %+v, want the three older turns (%d entries) folded into the history summary", report, 3*perTurn)
+	if !first.Triggered || len(first.Products) != 3 {
+		t.Fatalf("first fold = %+v, want the three turns the window dropped folded into one product each", first)
+	}
+	covering := projection.Entries()
+	second := foldOnce(t, projection, plan)
+	if len(second) != 1 || second[0].Entry.Type != ProjectionTypeHistorySummary {
+		t.Fatalf("second fold products = %+v, want the one history summary the oldest band folds into", second)
 	}
 
 	kept := projection.Entries()
@@ -643,42 +735,59 @@ func TestSymptomAnchorFoldSummaryProvenance(t *testing.T) {
 	}
 	summary := kept[0]
 	lines := strings.Split(summary.Content, "; ")
-	folded := chain[:3*perTurn]
+	covered := second[0].Covered
+	sourceOf := func(key event.EventID) (ProjectionEntry, bool) {
+		for _, entry := range covering {
+			if entry.Key == key {
+				return entry, true
+			}
+		}
+		return ProjectionEntry{}, false
+	}
 	dump := func() string {
 		var out strings.Builder
 		for i, line := range lines {
 			generation := ""
-			if i < len(folded) {
-				generation = string(folded[i].Envelope.InstanceID)
+			if i < len(covered) {
+				if entry, held := sourceOf(covered[i]); held {
+					generation = string(entry.Generation())
+				}
 			}
 			fmt.Fprintf(&out, "\n  line %d: %q (recorder generation %q)", i, line, generation)
 		}
 		return out.String()
 	}
 	prefix := foldAnchorLine
-	if len(lines) != len(folded) {
-		t.Fatalf("history summary has %d lines, want %d (one per folded entry); folded lines:%s",
-			len(lines), len(folded), dump())
+	if len(lines) != len(covered) {
+		t.Fatalf("history summary has %d lines, want %d (one per covered entry); folded lines:%s",
+			len(lines), len(covered), dump())
 	}
 	for i, line := range lines {
-		wantGeneration := string(folded[i].Envelope.InstanceID)
+		source, held := sourceOf(covered[i])
+		if !held {
+			t.Fatalf("the summary covers %q, which the projection before the fold does not carry; folded lines:%s", covered[i], dump())
+		}
+		wantGeneration := string(source.Generation())
 		if wantGeneration == "" {
 			wantGeneration = "?"
 		}
 		match := prefix.FindStringSubmatch(line)
 		if match == nil {
-			t.Fatalf("history summary line %d = %q, want a [MM-DD HH:MM|gen:%s] prefix (gen MUST equal the exact recorder generation %q of the folded fact; only gen:? may stand in for a missing generation); folded lines:%s",
+			t.Fatalf("history summary line %d = %q, want a [MM-DD HH:MM|gen:%s] prefix (gen MUST equal the exact recorder generation %q of the folded fact; only gen:? may stand in for a generation no fact names); folded lines:%s",
 				i, line, wantGeneration, wantGeneration, dump())
 		}
-		if want := folded[i].Envelope.Timestamp.Format("01-02 15:04"); match[1] != want {
+		if want := source.Time.Format("01-02 15:04"); match[1] != want {
 			t.Fatalf("history summary line %d timestamp = %q, want %q from the folded entry; folded lines:%s",
 				i, match[1], want, dump())
 		}
 		if match[2] != wantGeneration {
-			t.Fatalf("history summary line %d generation = %q, want the exact recorder generation %q of the folded fact (only gen:? may stand in for a missing generation); folded lines:%s",
+			t.Fatalf("history summary line %d generation = %q, want the exact recorder generation %q of the folded fact (only gen:? may stand in for a generation no fact names); folded lines:%s",
 				i, match[2], wantGeneration, dump())
 		}
-		wantRead := folded[i].Envelope.Type + ": " + folded[i].Summary
+		wantRead := source.Type + ": " + source.Summary
+		if source.Type == ProjectionTypeSegmentFold || source.Type == ProjectionTypeHistorySummary {
+			wantRead = source.Summary + " (" + string(source.Key) + ")"
+		}
 		if !strings.Contains(line, wantRead) {
 			t.Fatalf("history summary line %d = %q, want the folded read %q after the provenance prefix; folded lines:%s",
 				i, line, wantRead, dump())
@@ -698,12 +807,18 @@ func TestFoldLineWithoutProvenanceDegrades(t *testing.T) {
 		entries = append(entries, ageTurn(seed, step, 1)...)
 	}
 	projection := ageProjection(t, entries)
-	report, err := projection.FoldByAge(ctx, AgeFoldPlan{KeepRecent: 1, VolumeThreshold: 600})
+	plan := AgeFoldPlan{KeepRecent: 1, VolumeThreshold: 600}
+	first, err := projection.FoldByAge(ctx, plan)
 	if err != nil {
-		t.Fatalf("FoldByAge: %v", err)
+		t.Fatalf("first FoldByAge: %v", err)
 	}
-	if !report.Triggered || len(report.Products) == 0 {
-		t.Fatalf("report = %+v, want the four turns past the threshold", report)
+	if !first.Triggered || len(first.Products) != 3 {
+		t.Fatalf("first fold = %+v, want the three turns the window dropped folded into one product each", first)
+	}
+	covering := projection.Entries()
+	second := foldOnce(t, projection, plan)
+	if len(second) == 0 {
+		t.Fatalf("second fold = %+v, want the oldest band folded into the history summary", second)
 	}
 	requireDegraded := func(name, content string, folded []ProjectionEntry) {
 		t.Helper()
@@ -723,25 +838,34 @@ func TestFoldLineWithoutProvenanceDegrades(t *testing.T) {
 				t.Fatalf("%s line %d timestamp = %q, want %q from the folded entry", name, i, match[1], want)
 			}
 			if want := folded[i].Type + ": " + folded[i].Summary; !strings.Contains(line, want) {
-				t.Fatalf("%s line %d = %q, want the folded read %q after the placeholder anchor", name, i, line, want)
+				reference := folded[i].Summary + " (" + string(folded[i].Key) + ")"
+				if folded[i].Type != ProjectionTypeSegmentFold && folded[i].Type != ProjectionTypeHistorySummary || !strings.Contains(line, reference) {
+					t.Fatalf("%s line %d = %q, want the folded read %q after the placeholder anchor (a product contributes the bounded reference %q)", name, i, line, want, reference)
+				}
 			}
 		}
 	}
-	summary := report.Products[len(report.Products)-1]
-	if summary.Type != ProjectionTypeHistorySummary {
-		t.Fatalf("last product = %+v, want the history summary of the older turns", summary)
+	summary := second[len(second)-1]
+	if summary.Entry.Type != ProjectionTypeHistorySummary {
+		t.Fatalf("last product = %+v, want the history summary of the oldest band", summary)
 	}
-	requireDegraded("history summary", summary.Content, entries[:12])
-	var segment *ProjectionEntry
-	for i := range report.Products {
-		if report.Products[i].Type == ProjectionTypeSegmentFold {
-			segment = &report.Products[i]
+	covered := make([]ProjectionEntry, 0, len(summary.Covered))
+	for _, key := range summary.Covered {
+		for _, entry := range covering {
+			if entry.Key == key {
+				covered = append(covered, entry)
+			}
 		}
 	}
-	if segment == nil {
-		t.Fatalf("products = %+v, want the newest turn folded into a segment product", report.Products)
+	if len(covered) != len(summary.Covered) {
+		t.Fatalf("the summary covers %v, want every key of the projection before the fold", summary.Covered)
 	}
-	requireDegraded("segment fold", segment.Content, entries[13:15])
+	requireDegraded("history summary", summary.Entry.Content, covered)
+	segment := first.Products[0]
+	if segment.Type != ProjectionTypeSegmentFold {
+		t.Fatalf("first fold products = %+v, want the turns the window dropped folded into segment products", first.Products)
+	}
+	requireDegraded("segment fold", segment.Content, entries[1:3])
 }
 
 // TestSegmentFoldCarriesProvenance pins the third formula at the segment fold.
@@ -756,6 +880,7 @@ func TestSegmentFoldCarriesProvenance(t *testing.T) {
 		after  = event.InstanceID("recorder-9f8e7d6c5b")
 	)
 	entries := append(ageTurn("t1", 0, 1), ageTurn("t2", 1, 1)...)
+	entries = append(entries, ageTurn("t3", 2, 1)...)
 	for i := range entries {
 		generation := before
 		if strings.HasPrefix(string(entries[i].Key), "t2") {
@@ -764,12 +889,12 @@ func TestSegmentFoldCarriesProvenance(t *testing.T) {
 		entries[i] = WithInstanceID(entries[i], generation)
 	}
 	projection := ageProjection(t, entries)
-	report, err := projection.FoldByAge(ctx, AgeFoldPlan{KeepRecent: DefaultAgeKeepRecent, VolumeThreshold: 600})
+	report, err := projection.FoldByAge(ctx, AgeFoldPlan{KeepRecent: 1, VolumeThreshold: 600})
 	if err != nil {
 		t.Fatalf("FoldByAge: %v", err)
 	}
 	if !report.Triggered || len(report.Products) != 2 {
-		t.Fatalf("report = %+v, want one segment product per closed turn", report)
+		t.Fatalf("report = %+v, want one segment product per turn the window dropped", report)
 	}
 	folded := []ProjectionEntry{entries[1], entries[2], entries[5], entries[6]}
 	at := 0
@@ -875,20 +1000,20 @@ func TestSecondFoldKeepsProvenance(t *testing.T) {
 		t.Fatalf("history summary content = %q, want the old label gone from the head", summary.Content)
 	}
 	lines := strings.Split(summary.Content, "; ")
-	if len(lines) != 4 {
-		t.Fatalf("history summary has %d lines, want the two segment-product lines beside the two closing turn lines: %q", len(lines), summary.Content)
+	if len(lines) != 3 {
+		t.Fatalf("history summary has %d lines, want the segment product's bounded reference beside the two closing turn lines: %q", len(lines), summary.Content)
 	}
 	for i, line := range lines {
 		match := foldAnchorLine.FindStringSubmatch(line)
 		if match == nil {
 			t.Fatalf("history summary line %d = %q, want a [MM-DD HH:MM|gen:…] prefix at the head", i, line)
 		}
-		if match[2] == "?" {
-			t.Fatalf("history summary line %d = %q, want the recorded generation of the source line", i, line)
-		}
 	}
-	if !strings.Contains(summary.Content, "|gen:"+string(after)+"] thinking_plan: plan t2a") {
-		t.Fatalf("history summary content = %q, want the segment product's source line beside its own generation", summary.Content)
+	if !strings.Contains(lines[0], string(segment.Key)) {
+		t.Fatalf("history summary line 0 = %q, want the bounded reference to the segment product %q", lines[0], segment.Key)
+	}
+	if strings.Contains(summary.Content, "plan t2a") {
+		t.Fatalf("history summary content = %q, want the segment product referenced by key instead of its source lines copied", summary.Content)
 	}
 	if !strings.Contains(summary.Content, "|gen:"+string(before)+"] external_input: input t3") {
 		t.Fatalf("history summary content = %q, want the closing turn's line beside its own generation", summary.Content)
@@ -897,8 +1022,9 @@ func TestSecondFoldKeepsProvenance(t *testing.T) {
 
 // TestFoldProvenanceConsumerPath pins that provenance reaches the consumer the request is assembled for.
 //
-// - The history summary entry the budget assembly presents still opens with the anchored lines, and the segment products it presents do the same.
+// - The history summary entry the budget assembly presents still opens with the anchored lines, and any segment product it presents does the same.
 // - The presented lines name the full generations of the facts they came from, so two recorder generations stay distinguishable on the consumer's side.
+// - The material the summary stands for reaches the model through a fold that promotes it twice: the middle band folds, then the oldest band summarizes.
 func TestFoldProvenanceConsumerPath(t *testing.T) {
 	ctx := context.Background()
 	const (
@@ -908,7 +1034,7 @@ func TestFoldProvenanceConsumerPath(t *testing.T) {
 	var entries []ProjectionEntry
 	for step, seed := range []string{"t1", "t2", "t3", "t4"} {
 		generation := before
-		if seed == "t4" {
+		if seed == "t3" || seed == "t4" {
 			generation = after
 		}
 		for _, entry := range ageTurn(seed, step, 1) {
@@ -916,8 +1042,12 @@ func TestFoldProvenanceConsumerPath(t *testing.T) {
 		}
 	}
 	projection := ageProjection(t, entries)
-	if _, err := projection.FoldByAge(ctx, AgeFoldPlan{KeepRecent: 1, VolumeThreshold: 600}); err != nil {
-		t.Fatalf("FoldByAge: %v", err)
+	plan := AgeFoldPlan{KeepRecent: 1, VolumeThreshold: 600}
+	if _, err := projection.FoldByAge(ctx, plan); err != nil {
+		t.Fatalf("first FoldByAge: %v", err)
+	}
+	if _, err := projection.FoldByAge(ctx, plan); err != nil {
+		t.Fatalf("second FoldByAge: %v", err)
 	}
 	assembled, err := projection.AssembleBudget(ctx, 1<<20)
 	if err != nil {
@@ -1092,4 +1222,140 @@ type widenedProbe struct {
 	Content string
 	Time    time.Time
 	Legacy  bool
+}
+
+// foldOnce judges and executes one age fold the way the production pair does:
+// the producer judges through PlanByAge and the consumer executes through
+// ApplyProducts, so the invariants below read the path the model-visible
+// projection is actually built on rather than a test-only shortcut.
+func foldOnce(t *testing.T, projection *ReplayProjection, plan AgeFoldPlan) []FoldProduct {
+	t.Helper()
+	report, err := projection.PlanByAge(context.Background(), plan)
+	if err != nil {
+		t.Fatalf("PlanByAge: %v", err)
+	}
+	projection.ApplyProducts(report.Products)
+	return report.Products
+}
+
+// TestSymptomAnchorCompressionStaysBounded pins the bound the compressed projection carries.
+//
+// - 轨迹症状：长程会话里每次折叠都把上一份 history summary 的正文整段抄进下一份，压缩产物随回合数线性膨胀（88MB，超日志帧上限）。
+// - 钉住底线：任意回合数之后，投影渲染体积 ≤ 预算、history summary 正文 ≤ 界，二者都不随历史增长。
+// - 覆盖完整：被摘要吃掉的原条目身份全部出现在产品的 Covered 里，原文按 key 仍可从链上读回。
+// - 取数面：PlanByAge（生产判据）＋ ApplyProducts（生产执行）之后的投影本身。
+//
+// 契约: docs/wiki/memory/memory-architecture.md#event-shape
+func TestSymptomAnchorCompressionStaysBounded(t *testing.T) {
+	const budget = DefaultAgeSummaryTextLimit + 8*1024
+	plan := AgeFoldPlan{KeepRecent: DefaultAgeKeepRecent, VolumeThreshold: 600}
+	projection := NewReplayProjection()
+	ctx := context.Background()
+	appended := make([]event.EventID, 0, 4*300)
+	covered := map[event.EventID]bool{}
+	for step := 0; step < 300; step++ {
+		for _, entry := range ageTurn(fmt.Sprintf("t%d", step), step, 2) {
+			appended = append(appended, entry.Key)
+			projection.Append(ctx, entry)
+		}
+		for _, product := range foldOnce(t, projection, plan) {
+			for _, key := range product.Covered {
+				covered[key] = true
+			}
+		}
+		rendered := RenderProjection(projection.Entries())
+		if len(rendered) > budget {
+			t.Fatalf("after %d turns the projection renders %d bytes, want at most %d: the compressed view must not grow with the history it compresses", step+1, len(rendered), budget)
+		}
+		for _, entry := range projection.Entries() {
+			if entry.Type == ProjectionTypeHistorySummary && len(entry.Content) > DefaultAgeSummaryTextLimit {
+				t.Fatalf("after %d turns the history summary carries %d bytes, want at most %d", step+1, len(entry.Content), DefaultAgeSummaryTextLimit)
+			}
+		}
+	}
+	if bound := 1 + DefaultAgeKeepRecent*6 + 3; len(projection.Entries()) > bound {
+		t.Fatalf("projection holds %d entries after 300 turns, want the summary beside the recent window and the segment that folded this round: at most %d", len(projection.Entries()), bound)
+	}
+	standing := map[event.EventID]bool{}
+	for _, entry := range projection.Entries() {
+		standing[entry.Key] = true
+	}
+	for _, key := range appended {
+		if !standing[key] && !covered[key] {
+			t.Fatalf("entry %q is neither in the projection nor covered by any product, want every original reachable by key", key)
+		}
+	}
+}
+
+// TestSymptomAnchorCompressionConverges pins the fold as a convergent compression.
+//
+// - 轨迹症状：折叠上一层 history summary 时把它的正文整段抄进下一份，摘要每折一次就重抄一遍，产物随折叠次数膨胀。
+// - 钉住底线：站在投影里的摘要被再折一次只贡献有界引用，产出的摘要正文 ≤ 界、不含它上一层的正文。
+// - 收敛（r49 裁定）：世代递推下第一次折叠把材料晋一级、第二次再晋一级，故 fold² 不必等于 fold¹；不变量是迭代终有稳定不动点——某轮起产出零产品、投影逐字不变，且体积全程不超界。
+// - 取数面：PlanByAge ＋ ApplyProducts 之后的投影本身。
+//
+// 契约: docs/wiki/memory/memory-architecture.md#event-shape
+func TestSymptomAnchorCompressionConverges(t *testing.T) {
+	const standingText = "旧回合的一行摘要。"
+	const budget = DefaultAgeSummaryTextLimit + 8*1024
+	plan := AgeFoldPlan{KeepRecent: 1, VolumeThreshold: 600}
+	standing := ProjectionEntry{
+		Key:     "-hist-standing",
+		Type:    ProjectionTypeHistorySummary,
+		Summary: "history summary",
+		Content: strings.Repeat(standingText, 200),
+		Time:    ageBase,
+	}
+	entries := []ProjectionEntry{standing}
+	for step, seed := range []string{"t2", "t3", "t4"} {
+		entries = append(entries, ageTurn(seed, step, 1)...)
+	}
+	projection := ageProjection(t, entries)
+
+	var summary *ProjectionEntry
+	for _, product := range foldOnce(t, projection, plan) {
+		if product.Entry.Type == ProjectionTypeHistorySummary {
+			entry := product.Entry
+			summary = &entry
+		}
+	}
+	if summary == nil {
+		t.Fatalf("projection = %+v, want the material a fold consumed read as one history summary", projection.Entries())
+	}
+	if len(summary.Content) > DefaultAgeSummaryTextLimit {
+		t.Fatalf("history summary carries %d bytes, want at most %d: a summary must not copy the text it stands for", len(summary.Content), DefaultAgeSummaryTextLimit)
+	}
+	if strings.Contains(summary.Content, standingText) {
+		t.Fatalf("history summary = %q, want the standing summary referenced by key instead of re-carried", summary.Content)
+	}
+	if !strings.Contains(summary.Content, string(standing.Key)) {
+		t.Fatalf("history summary = %q, want the bounded reference to the standing summary %q", summary.Content, standing.Key)
+	}
+
+	fixed := false
+	for round := 0; round < 6; round++ {
+		before := RenderProjection(projection.Entries())
+		products := foldOnce(t, projection, plan)
+		if len(products) == 0 {
+			if string(RenderProjection(projection.Entries())) != string(before) {
+				t.Fatal("projection moved on a fold that found nothing left to fold")
+			}
+			fixed = true
+			break
+		}
+		if rendered := RenderProjection(projection.Entries()); len(rendered) > budget {
+			t.Fatalf("round %d renders %d bytes, want at most %d: the compressed view must not grow with the folds it absorbs", round+2, len(rendered), budget)
+		}
+		for _, entry := range projection.Entries() {
+			if entry.Type == ProjectionTypeHistorySummary && len(entry.Content) > DefaultAgeSummaryTextLimit {
+				t.Fatalf("round %d summary carries %d bytes, want at most %d", round+2, len(entry.Content), DefaultAgeSummaryTextLimit)
+			}
+		}
+	}
+	if !fixed {
+		t.Fatalf("projection = %+v, want the folds to reach a stable fixed point", projection.Entries())
+	}
+	if products := foldOnce(t, projection, plan); len(products) != 0 {
+		t.Fatalf("the fixed point minted %d further products: %+v", len(products), products)
+	}
 }
