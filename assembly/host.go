@@ -1064,7 +1064,8 @@ func (h *Host) invokeConsumed(ctx context.Context, req InvokeRequest, user bool)
 // send runs. A stop inside the send is then answered by a restart that closes
 // the landed attempt instead of driving the notice a second time.
 //
-// - Only a segment of the user port delivers: the outbound face belongs to the user session of the entry the generation in effect declares, so the answer another declared agent's segment lands stays on that agent's own chain.
+// - Only a segment of the user port delivers: the outbound face belongs to the user session of the entry the generation in effect declares, so the answer another declared agent's segment lands never reaches a channel.
+// - Every segment closes the account of the bodies it generated: an address the gate turns away delivers nothing and yet has its obligations retired as headless at this close. The declaration the answer committed is an obligation of the chain, and a cut taken afterwards covers it, so the restart reads only the facts past that cut: a retirement deferred to a restart is one nothing reads again, while the declaration keeps standing owed.
 // - A user turn already running keeps the entry it was admitted under: a publication that moves the entry while the turn flies never turns away the answer the user port still owes it.
 func (h *Host) deliverClosedSegment(ctx context.Context, addr event.Address, answer agent.SegmentAnswer) {
 	h.mu.Lock()
@@ -1073,9 +1074,6 @@ func (h *Host) deliverClosedSegment(ctx context.Context, addr event.Address, ans
 	h.mu.Unlock()
 	h.settleConsumedNotices(ctx, answer)
 	if halted {
-		return
-	}
-	if !h.deliversAt(addr) {
 		return
 	}
 	h.deliverFresh(ctx, addr, sender, deliveryLineageOf(answer.Trigger), answer.Turn)

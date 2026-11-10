@@ -279,22 +279,38 @@ func (c *CompressionConsumer) summarizeProduct(ctx context.Context, session even
 }
 
 // anchorEntry is one entry of the projection state a fold checkpoint carries.
-// Its fields name the entry as the chain states it: identity, frozen type,
-// summary, text and moment. The payload states the text of every entry it
-// carries, while a restore reads that text only for an entry the chain does not
-// resolve: a key the chain still holds is hydrated from its fact, whose private
-// fields the payload never carries. No field reads a kind off a key's spelling.
+// Its fields name the entry as the chain states it: identity, frozen type, one
+// line of summary, the text of a fold product and the moment. No field reads a
+// kind off a key's spelling.
+//
+//   - A mapped entry carries no text: the fact the entry names states its message, so a restore reads that text back by key and the carrier stays the size of the entries it names instead of the size of the bodies behind them.
+//   - A fold product carries the text it minted, because the product fact files that text under an identity of its own: the entry names the material the fold covered, and the fact's key is content-addressed over the material and the text together, so no read of the entry's key reaches it. That text is the bounded summary the age bound already holds, never the material it covered.
 type anchorEntry struct {
 	Key     event.EventID
 	Type    string
 	Summary string
-	Content string
+	Content string `json:",omitempty"`
 	Time    int64
 }
 
+// carriedTextOf reports the text one projection entry states in a carrier: the
+// text a fold minted, and nothing for an entry the chain states itself.
+func carriedTextOf(entry replay.ProjectionEntry) string {
+	switch entry.Type {
+	case replay.ProjectionTypeSegmentFold, replay.ProjectionTypeHistorySummary:
+		return entry.Content
+	default:
+		return ""
+	}
+}
+
 // anchorCheckpointOf states the projection entries a fold leaves as an opaque
-// recovery payload: identity, frozen type, summary, text and moment, in display
-// order. The bytes are a chain fact's payload, never a wording the model reads.
+// recovery payload: identity, frozen type, summary, the minted text of a fold
+// product and moment, in display order. The bytes are a chain fact's payload,
+// never a wording the model reads, and they grow with the entries a fold leaves
+// rather than with the material those entries were folded from: the text every
+// mapped entry renders stands on the chain under the key the payload names, and
+// the text a fold product minted is bounded by the age bound.
 func anchorCheckpointOf(entries []replay.ProjectionEntry) []byte {
 	out := make([]anchorEntry, 0, len(entries))
 	for _, entry := range entries {
@@ -302,7 +318,7 @@ func anchorCheckpointOf(entries []replay.ProjectionEntry) []byte {
 			Key:     entry.Key,
 			Type:    entry.Type,
 			Summary: entry.Summary,
-			Content: entry.Content,
+			Content: carriedTextOf(entry),
 			Time:    entry.Time.UnixMilli(),
 		})
 	}
@@ -445,6 +461,7 @@ func (r *Run) fileCompressProduct(ctx context.Context, session event.SessionID, 
 		return err
 	}
 	consumer.noteAnswered(product.Answers.Request)
+	r.CheckpointAfterFold()
 	return nil
 }
 

@@ -2518,9 +2518,10 @@ type anchorSlot struct {
 // Anchor discovery never inspects a fact key's spelling.
 //
 // - The survivors a checkpoint states are held to the same resident bound the full walk applies as it appends: a chain that declared no window keeps the recent material rather than every survivor the payload names.
-// - The checkpoint slices this boot restored are the state every slice of the runtime had reached at the cut. A chain beside a fold product reads only the bodies of the facts committed past that product's newest survivor, so the entries the product covers never reach a body read and the chain's boot costs the increment. A chain the restored slices carry beside no fold product replays its whole chain, so that boot reads the covered history of the chain as well. Configuration records belong to no session chain and stay, being the declaration ledger the restarted run states that no slice carries.
+// - The checkpoint slices this boot restored are the state every slice of the runtime had reached at the cut. A chain beside a fold product reads only the bodies of the facts committed past that product's newest survivor, so the entries the product covers never reach a body read and the chain's boot costs the increment. A chain the restored slices carry beside no fold product reads the bodies of its survivors and of the facts committed past the newest of them, so that boot costs the survivor count plus the increment instead of the history the survivors already state. Configuration records belong to no session chain and stay, being the declaration ledger the restarted run states that no slice carries.
 // - A chain the checkpoint stated is a chain of this run even beside no fact past its cut, so its slot joins the rebuild and the tail of its chain is replayed onto the state the checkpoint states.
-// - A chain the checkpoint states beside no fold product is hydrated from its own survivors and then replays its whole chain over them: the survivors seat the covered entries, and the seed answers the fact it already holds, so the replay adds the material past the cut without filing a covered fact twice.
+// - The boundary both carriers are read past is the newest survivor the payload names, which is the material the projection states rather than the cut the carrier states: a cut read before the holders were asked may state a position the survivors behind it already present, and a fact between the two is one the projection already holds.
+// - A compression fact the cut did not cover but the boundary did is handed to the compression account alone, because the projection states the material it folded and the account does not state the judgment or the answer it carries.
 func (r *Run) seedAnchoredReplay(ctx context.Context, tier *ledger.Tier) (map[event.Address]*sessionSeed, seedReport, error) {
 	report := seedReport{}
 	var refs []anchorRef
@@ -2583,26 +2584,14 @@ func (r *Run) seedAnchoredReplay(ctx context.Context, tier *ledger.Tier) (map[ev
 		var tailProducts []event.CompressProduct
 		if base, addr, held := restoredSeedOf(seedsRestored, slot); held && !hasAnchor {
 			seed.window = r.foldWindowOfAgent(addr.AgentID)
-			if _, err := r.restoreSurvivors(ctx, tier, seed, base.survivors, &report); err != nil {
+			boundary, err := r.restoreSurvivors(ctx, tier, seed, base.survivors, &report)
+			if err != nil {
 				return nil, report, err
 			}
 			seed.projection = trimReplayProjection(ctx, seed.projection, seed.window)
-			var tail []anchorRef
-			for _, ref := range refs {
-				if ref.session != slot.session || ref.partition != slot.partition {
-					continue
-				}
-				tail = append(tail, ref)
-			}
-			sort.Slice(tail, func(i, j int) bool { return tail[i].seq < tail[j].seq })
-			for _, ref := range tail {
-				product, stated, _, err := r.replayRef(ctx, tier, ref.key, seed, &report)
-				if err != nil {
-					return nil, report, err
-				}
-				if stated {
-					tailProducts = append(tailProducts, product)
-				}
+			tailProducts, err = r.replayChainPastCut(ctx, tier, refs, slot, seed, boundary, accountCut, "", &report)
+			if err != nil {
+				return nil, report, err
 			}
 			seed.projection.RestoreProducts(tailProducts)
 			seeds[addr] = seed
@@ -2643,49 +2632,9 @@ func (r *Run) seedAnchoredReplay(ctx context.Context, tier *ledger.Tier) (map[ev
 					r.compress.NoteProduct(product)
 					report.Anchors++
 					seeds[addr] = seed
-					// Replay every event of this chain committed after the
-					// snapshot, not only those newer than the anchor product.
-					// An event can land between the snapshot and the product
-					// commit; its seq is then below the anchor's but above the
-					// newest survivor the checkpoint already holds. Replaying
-					// by that boundary keeps it instead of silently losing it.
-					//
-					// The anchor states the projection at its own boundary, which
-					// is not the cut the restored compression account was stated
-					// at: a compression fact of this chain between the two cuts is
-					// past the cut the account covers and behind the boundary the
-					// anchor covers, so neither the carrier nor the tail states
-					// it. It joins the account alone — the survivors already hold
-					// the projection it folded.
-					var tail, behind []anchorRef
-					for i := range refs {
-						ref := refs[i]
-						if ref.session != slot.session || ref.partition != slot.partition || ref.key == refs[at].key {
-							continue
-						}
-						if ref.seq > boundary {
-							tail = append(tail, ref)
-							continue
-						}
-						if accountCut != nil && event.CompressionMechanism(ref.typ) && pastCut(accountCut, ref) {
-							behind = append(behind, ref)
-						}
-					}
-					sort.Slice(behind, func(i, j int) bool { return behind[i].seq < behind[j].seq })
-					for _, ref := range behind {
-						if err := r.seedAccountFact(ctx, tier, ref.key, &report); err != nil {
-							return nil, report, err
-						}
-					}
-					sort.Slice(tail, func(i, j int) bool { return tail[i].seq < tail[j].seq })
-					for _, ref := range tail {
-						product, stated, _, err := r.replayRef(ctx, tier, ref.key, seed, &report)
-						if err != nil {
-							return nil, report, err
-						}
-						if stated {
-							tailProducts = append(tailProducts, product)
-						}
+					tailProducts, err = r.replayChainPastCut(ctx, tier, refs, slot, seed, boundary, accountCut, refs[at].key, &report)
+					if err != nil {
+						return nil, report, err
 					}
 					seed.projection.RestoreProducts(tailProducts)
 					usable = true
@@ -2762,8 +2711,11 @@ func (r *Run) foldWindowOfAgent(agent event.AgentID) FoldWindow {
 
 // restoreSurvivors hydrates one anchor payload in display order: a key the
 // chain still holds is read back through the fact->projection mapping so its
-// private fields are recovered, and a synthetic entry is stated from the
-// payload itself. Nothing here reads a kind off a key's prefix.
+// private fields are recovered and its text is the chain's, and a fold product —
+// whose text the product fact files under an identity of its own — is stated from
+// the text the payload carries. Nothing here reads a kind off a key's prefix, and
+// a survivor with neither a mapped fact nor a carried text refuses the boot by
+// name instead of presenting an entry with no text.
 func (r *Run) restoreSurvivors(ctx context.Context, tier *ledger.Tier, seed *sessionSeed, survivors []anchorEntry, report *seedReport) (int64, error) {
 	boundary := int64(0)
 	for _, survivor := range survivors {
@@ -2788,6 +2740,9 @@ func (r *Run) restoreSurvivors(ctx context.Context, tier *ledger.Tier, seed *ses
 				continue
 			}
 		}
+		if survivor.Content == "" {
+			return 0, fmt.Errorf("%w: %s", ErrCheckpointSurvivorUnstated, survivor.Key)
+		}
 		seed.projection.Append(ctx, replay.ProjectionEntry{
 			Key:     survivor.Key,
 			Type:    survivor.Type,
@@ -2797,6 +2752,52 @@ func (r *Run) restoreSurvivors(ctx context.Context, tier *ledger.Tier, seed *ses
 		})
 	}
 	return boundary, nil
+}
+
+// replayChainPastCut replays one chain onto the state its carrier states and
+// answers the products a restart applies on top of that state: a fact committed
+// past the boundary is replayed whole, a compression fact the carrier's cut did
+// not cover but the boundary did is handed to the compression account alone, and
+// the material the boundary covers is read by neither path because the carrier
+// already states it.
+//
+//   - The boundary is the newest survivor the carrier names, never the cut it states: the state read at the quiet point carries every commit that landed before the holders were asked, so the survivors may stand past the watermark. A fact between the two landed after the cut and before the boundary, so the carrier holds the material it folded and the replay must not seat it twice.
+//
+// The covered range costs one index walk and no body read. The exception is a
+// compression fact of that range, which the carrier's account states only up to
+// the cut: a carrier stating no account at all leaves the range unread.
+func (r *Run) replayChainPastCut(ctx context.Context, tier *ledger.Tier, refs []anchorRef, slot anchorSlot, seed *sessionSeed, boundary int64, accountCut event.CheckpointOffset, skip event.EventID, report *seedReport) ([]event.CompressProduct, error) {
+	var tail, behind []anchorRef
+	for _, ref := range refs {
+		if ref.session != slot.session || ref.partition != slot.partition || ref.key == skip {
+			continue
+		}
+		if ref.seq > boundary {
+			tail = append(tail, ref)
+			continue
+		}
+		if accountCut != nil && event.CompressionMechanism(ref.typ) && pastCut(accountCut, ref) {
+			behind = append(behind, ref)
+		}
+	}
+	sort.Slice(behind, func(i, j int) bool { return behind[i].seq < behind[j].seq })
+	for _, ref := range behind {
+		if err := r.seedAccountFact(ctx, tier, ref.key, report); err != nil {
+			return nil, err
+		}
+	}
+	sort.Slice(tail, func(i, j int) bool { return tail[i].seq < tail[j].seq })
+	products := make([]event.CompressProduct, 0, len(tail))
+	for _, ref := range tail {
+		product, stated, _, err := r.replayRef(ctx, tier, ref.key, seed, report)
+		if err != nil {
+			return nil, err
+		}
+		if stated {
+			products = append(products, product)
+		}
+	}
+	return products, nil
 }
 
 // seedAccountFact seeds one compression fact into the compression account of a

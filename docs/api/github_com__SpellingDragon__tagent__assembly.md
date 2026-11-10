@@ -293,6 +293,13 @@ var (
     model lease wiring was refused, so a host routes each by name instead of
     matching on message text.
 
+var ErrCheckpointSurvivorUnstated = errors.New("assembly: the checkpoint names a survivor the chain states no entry for")
+    ErrCheckpointSurvivorUnstated reports a checkpoint naming a survivor the
+    chain states no entry for. The carrier names every survivor by identity,
+    type, summary and moment and leaves the text to the chain, so a key the
+    chain does not state is a carrier no boot can rebuild: restoring the entry
+    beside no text would present the model material the process never wrote.
+
 var ErrCheckpointUnreadable = errors.New("assembly: the checkpoint fact states no readable checkpoint")
     ErrCheckpointUnreadable reports a checkpoint fact whose payload does not
     state the cut and slices its identity was content-addressed over, so no
@@ -1570,11 +1577,13 @@ func (r *Run) Checkpoint(ctx context.Context) (event.EventID, bool, error)
     checkpoint the run cannot name an owner for: a fact naming no owner never
     reaches the storage tier.
 
-func (r *Run) CheckpointAfterFold(ctx context.Context)
-    CheckpointAfterFold files a checkpoint after a fold produced a product:
-    a fold is the moment the projection drops material, so it is the moment the
-    recovery carrier is worth refreshing whatever the cadence says. The call is
-    made from the commit that filed the product and takes a cut of its own.
+func (r *Run) CheckpointAfterFold()
+    CheckpointAfterFold asks for a carrier because a fold produced a product:
+    a fold is the moment the projection drops material, so the state a restart
+    reads is worth refreshing whatever the cadence clock says. The product
+    lands inside the quiet-point fence of the commit that filed it, so this is
+    a request and not a cut — the filer takes the cut and the commit that asked
+    for it never waits on itself.
 
 func (r *Run) CheckpointFiled() (event.EventID, event.CheckpointOffset)
     CheckpointFiled reports the identity of the newest checkpoint this run filed

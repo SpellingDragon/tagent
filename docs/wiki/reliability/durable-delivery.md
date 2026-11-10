@@ -32,9 +32,9 @@
 | `held.<reason>` | 等待：审批挂起或重投退避 | 裁决挂起（approval）／通道拒收（retrying）／重试耗尽（retry-exhausted）／结果未知（unknown） | `ApproveDelivery`→`sent`；`RefuseDelivery`→`refused`；retrying 续跑重投 |
 | `sent` | 已送达的回执 | 发送成功后落结算事实 | 终止态（**回执落链是唯一阻止重投的凭据**） |
 | `refused` | 已放弃并留审计 | 显式拒绝 | 终止态 |
-| `headless-retired` | 具名销账，未发送 | 恢复时发现义务目标是**非入口地址** | 终止态，**记录保留正文与目标供审计** |
+| `headless-retired` | 具名销账，未发送 | 义务目标是**非入口地址**：生成它的段关闭时即销账，恢复读面遇到遗留的非入口 owed 义务同样销账 | 终止态，**记录保留正文与目标供审计** |
 
-入口门禁是硬判据：`recordDeliveryOwed` 在 `addr.AgentID != entry` 时**什么都不登记**；恢复读面遇到非入口的 owed 义务时调 `retireHeadlessDelivery` 具名销账而不是投递——非入口地址的答复归驱动它的调用方，永不进消息渠道。
+入口门禁是硬判据：owed 声明随每一笔带正文的输出**同笔落链**（不看地址），能出宿主的只有入口地址——段关闭时非入口地址的正文由 `retireHeadlessBodies` 具名销账，恢复读面遇到遗留的非入口 owed 义务由 `retireHeadlessDelivery` 销账而不是投递。非入口地址的答复归驱动它的调用方，永不进消息渠道；销账必须发生在生成它的那次段关闭，因为框架 checkpoint 的切片只覆盖到自己的切点，把销账推迟到重启就可能被切点吞掉。
 
 ### 1.3 顺序：先交接，后销账
 
@@ -79,7 +79,7 @@
 
 | 判据 | 位置 | 规则 |
 |---|---|---|
-| **入口地址门禁**（渠道可见性的执行面） | `assembly/host_delivery.go` | 只有 entry 地址的正文登记义务；其余地址 headless，恢复时具名销账 |
+| **入口地址门禁**（渠道可见性的执行面） | `assembly/host_delivery.go` | 只有 entry 地址的正文出宿主；其余地址 headless，生成时销账，遗留的由恢复面销账 |
 | **域内可见性策略**（该产出的性质） | `features/evolution/meditation/judgment.go` | 宿主面印花集合 `{user, task, reincarnation, system_alert}`；`meditation` 是反思回合自己的印花，可外发；**未声明的印花一律按自管处理**（fail-closed，不投递、不计新鲜度） |
 
 三条由此固定的判据：①`delegation` 印花（`api/event/meta.go` `LineageDelegation`）是自管流量，不开宿主面、不计新鲜度；②未知/空印花既不投递也不构成新鲜材料——"不认识"永远不等于"可以发"；③headless 销账**保留正文与目标**，所以"给了谁、为什么没发"事后可问，而不是删痕了事。

@@ -2340,9 +2340,9 @@ func (o *foldObserver) mentions(fragments ...string) bool {
 	return false
 }
 
-// TestRestoreFoldCounts pins the link count of the restore observation.
-// - the first run commits a full tool turn and closes behind its own barrier
-// - the second boot folds the chain and its info line carries chains=1 links=2
+// TestRestoreFoldCounts pins the restore observation of a chain a carrier covers.
+// - the first run commits a full tool turn and closes behind its own barrier, filing the carrier of its final state
+// - the second boot costs no chain read at all: the carrier states the tasks the chains settled, and its info line carries chains=0 links=0 covered=1
 // 契约: docs/wiki/reliability/durable-delivery.md#canonical-fact-resolution
 func TestRestoreFoldCounts(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
@@ -2399,8 +2399,8 @@ func TestRestoreFoldCounts(t *testing.T) {
 	if report := second.Recovery(); len(report.Tasks) != 1 || !report.Tasks[0].Recovered {
 		t.Fatalf("recovery report = %+v, want the one chain rebuilt", report.Tasks)
 	}
-	if !observer.mentions("restore folded", "chains=1", "links=2") {
-		t.Fatalf("info lines = %v, want the fold beside its chains and links", observer.lines)
+	if !observer.mentions("restore folded", "chains=0", "links=0", "covered=1") {
+		t.Fatalf("info lines = %v, want the fold beside the chains the carrier covered", observer.lines)
 	}
 }
 
@@ -2461,6 +2461,8 @@ func TestRestartRecoveryPinsBeforeTrim(t *testing.T) {
 }
 
 // TestSymptomAnchorDeliveryOutsideWindowSurvivesRestart pins durable discovery.
+//   - the filler is material the projection presents, so the carrier names it and the boot trims the declaration out of the window
+//   - the restarted host delivers the committed body exactly once beside a fact its own window does not hold
 //
 // 契约: docs/wiki/reliability/durable-delivery.md#envelope-states
 func TestSymptomAnchorDeliveryOutsideWindowSurvivesRestart(t *testing.T) {
@@ -2480,7 +2482,7 @@ func TestSymptomAnchorDeliveryOutsideWindowSurvivesRestart(t *testing.T) {
 		t.Fatalf("the scene generated %d bodies, want one", len(bodies))
 	}
 	for index := 0; index < noWindowResidentFacts+32; index++ {
-		if _, err := first.commitFactChecked(ctx, event.Event{Type: event.TypeFeedback, Timestamp: time.Now(), Owner: addr, Source: addr, Target: addr, Meta: map[string]string{event.MetaKeyEventSummary: fmt.Sprintf("cold filler %d", index)}}); err != nil {
+		if _, err := first.commitFactChecked(ctx, event.Event{Type: event.TypeThinkingPlan, Timestamp: time.Now(), Owner: addr, Source: addr, Target: addr, Message: model.Message{Role: model.RoleAssistant, Content: fmt.Sprintf("cold filler %d", index)}, Meta: map[string]string{event.MetaKeyEventSummary: fmt.Sprintf("cold filler %d", index)}}); err != nil {
 			t.Fatalf("commit cold filler %d: %v", index, err)
 		}
 	}
@@ -2536,7 +2538,8 @@ func TestRestartRestoresHeldSequence(t *testing.T) {
 }
 
 // TestDeliveryOwedTrimNegative pins the owed residency the chain read already owes: a trimmed obligation is still discovered.
-// - The owed declaration leaves the hot window once filler pushes past it.
+// - The owed declaration leaves the hot window once filler the projection presents pushes past it.
+// - The carrier names that filler, so the rebuild trims the restart to the same band and the obligation owes its discovery to the chain.
 // - The recovery still declares the obligation from the durable chain.
 func TestDeliveryOwedTrimNegative(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
@@ -2563,8 +2566,9 @@ func TestDeliveryOwedTrimNegative(t *testing.T) {
 	}
 	for index := 0; index < noWindowResidentFacts+32; index++ {
 		if _, err := first.commitFactChecked(ctx, event.Event{
-			Type: event.TypeFeedback, Timestamp: time.Now(), Owner: addr, Source: addr, Target: addr,
-			Meta: map[string]string{event.MetaKeyEventSummary: fmt.Sprintf("trim filler %d", index)},
+			Type: event.TypeThinkingPlan, Timestamp: time.Now(), Owner: addr, Source: addr, Target: addr,
+			Message: model.Message{Role: model.RoleAssistant, Content: fmt.Sprintf("trim filler %d", index)},
+			Meta:    map[string]string{event.MetaKeyEventSummary: fmt.Sprintf("trim filler %d", index)},
 		}); err != nil {
 			t.Fatalf("commit trim filler %d: %v", index, err)
 		}

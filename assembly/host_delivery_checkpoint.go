@@ -57,8 +57,11 @@ type deliverySliceOwed struct {
 	Lineage string `json:"lineage,omitempty"`
 	Agent   string `json:"agent,omitempty"`
 	Session string `json:"session,omitempty"`
-	// HeldAt is the moment the obligation was parked, in Unix milliseconds.
-	HeldAt int64 `json:"held_at,omitempty"`
+	// HeldAt is the moment the obligation was parked, stated at the fidelity the
+	// settlement fact states it: the account's carrier and its chain spell one
+	// moment one way, so a restart that reads the carrier holds the moment the
+	// process recorded rather than the millisecond it fell in.
+	HeldAt time.Time `json:"held_at"`
 	// State is the settlement state token the obligation stands at.
 	State string `json:"state,omitempty"`
 }
@@ -106,14 +109,6 @@ func (c *deliveryConsumer) pendingRedrives() []deliverySliceRetry {
 		})
 	}
 	return out
-}
-
-// timeFromMillis reads one millisecond stamp back; a zero reads as no moment.
-func timeFromMillis(at int64) time.Time {
-	if at == 0 {
-		return time.Time{}
-	}
-	return time.UnixMilli(at)
 }
 
 // deliveryStateSlice is the Host's recoverable state as the framework sees it.
@@ -179,7 +174,7 @@ func (h *Host) deliverySlice() ([]byte, error) {
 			Lineage:  held.delivery.Lineage,
 			Agent:    string(held.delivery.Target.AgentID),
 			Session:  string(held.delivery.Target.SessionID),
-			HeldAt:   held.heldAt.UnixMilli(),
+			HeldAt:   held.heldAt,
 			State:    h.deliveryStates[identity],
 		})
 	}
@@ -249,7 +244,7 @@ func (h *Host) restoreDeliverySlice(payload []byte) error {
 					SessionID: event.SessionID(owed.Session),
 				},
 			},
-			heldAt: timeFromMillis(owed.HeldAt),
+			heldAt: owed.HeldAt,
 		}
 	}
 	h.restoredDelivery = true

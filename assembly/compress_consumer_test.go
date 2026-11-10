@@ -45,7 +45,7 @@ func TestBatchCheckpointMatchesPostBatchProjection(t *testing.T) {
 	} else {
 		for i, survivor := range survivors {
 			entry := entries[i]
-			if survivor.Key != entry.Key || survivor.Type != entry.Type || survivor.Summary != entry.Summary || survivor.Content != entry.Content || survivor.Time != entry.Time.UnixMilli() {
+			if survivor.Key != entry.Key || survivor.Type != entry.Type || survivor.Summary != entry.Summary || survivor.Time != entry.Time.UnixMilli() {
 				t.Errorf("survivor %d differs from the post-batch projection: %+v versus %+v", i, survivor, entry)
 			}
 		}

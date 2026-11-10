@@ -47,13 +47,13 @@ const (
 	// payload: the payload length and the payload checksum.
 	journalFrameHeaderBytes = 8
 	// journalMaxFrameBytes bounds one payload, so a damaged length field cannot
-	// make the reader allocate an unbounded span. The ceiling is the frame a
-	// framework carrier reaches: a checkpoint record states every state slice of
-	// the run in one commit, the carrier a long production chain recorded stands
-	// at 36,350,700 bytes, and the round-trip test pins a 26 MiB frame against
-	// that same bound, so 64 MiB leaves both their headroom and stays a fixed
-	// ceiling.
-	journalMaxFrameBytes = 64 << 20
+	// make the reader allocate an unbounded span. The ceiling is headroom over
+	// every payload a commit writes, never a payload size: the largest record a
+	// commit files is a framework carrier, and a carrier states the projection
+	// entries a fold leaves instead of the text behind them, which stands at
+	// about 2 KiB beside 36 turns of 64 KiB bodies. The round-trip test pins a
+	// frame near the ceiling, so a payload past it is refused rather than read.
+	journalMaxFrameBytes = 32 << 20
 	// journalReplayBufferBytes is the read size the replay takes the log in: one
 	// sequential read per buffer instead of one read per frame part.
 	journalReplayBufferBytes = 1 << 20

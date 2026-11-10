@@ -19,15 +19,37 @@ import (
 
 // noWindowBootRun assembles one run whose agent declares no model window, so the
 // resident bound of a rebuilt chain is the no-window bound.
-func noWindowBootRun(t *testing.T, ctx context.Context, addr event.Address) *Run {
+func noWindowBootRun(t *testing.T, ctx context.Context, opts ...Option) *Run {
 	t.Helper()
 	run, err := Assemble(ctx, &config.Declaration{
 		Entry:  "agent-a",
 		Agents: []config.AgentSpec{{ID: "agent-a", Model: "model-a"}},
 	}, map[event.AgentID]NativeAgent{"agent-a": {Model: &snapshotTestModel{answer: func(*model.Request) *model.Response {
 		return &model.Response{Choices: []model.Choice{{Message: model.Message{Role: model.RoleAssistant, Content: factWindowAnswer}}}, Done: true}
-	}}}}, WithGovernance(snapshotTestGovernance{}),
-		WithStorage(ledger.StorageConfig{Type: ledger.StorageMemory}))
+	}}}}, append([]Option{WithGovernance(snapshotTestGovernance{}),
+		WithStorage(ledger.StorageConfig{Type: ledger.StorageMemory})}, opts...)...)
+	if err != nil {
+		t.Fatalf("assemble the run: %v", err)
+	}
+	return run
+}
+
+// noTrimNoWindowRun is noWindowBootRun beside the seed trim off, so the live
+// ledger holds exactly the facts the boot decoded and the decode depth of a boot
+// is readable.
+func noTrimNoWindowRun(t *testing.T, ctx context.Context, opts ...Option) *Run {
+	t.Helper()
+	provider := &snapshotTestModel{answer: func(*model.Request) *model.Response {
+		return &model.Response{Choices: []model.Choice{{Message: model.Message{Role: model.RoleAssistant, Content: factWindowAnswer}}}, Done: true}
+	}}
+	options := append([]Option{
+		WithGovernance(snapshotTestGovernance{}),
+		WithStorage(ledger.StorageConfig{Type: ledger.StorageMemory}),
+	}, opts...)
+	run, err := assemble(ctx, &config.Declaration{
+		Entry:  "agent-a",
+		Agents: []config.AgentSpec{{ID: "agent-a", Model: "model-a"}},
+	}, map[event.AgentID]NativeAgent{"agent-a": {Model: provider}}, false, options...)
 	if err != nil {
 		t.Fatalf("assemble the run: %v", err)
 	}
@@ -36,22 +58,34 @@ func noWindowBootRun(t *testing.T, ctx context.Context, addr event.Address) *Run
 
 // TestAnchoredSurvivorsFollowTheResidentBound pins the survivor trim.
 // - a checkpoint naming more survivors than the resident bound rebuilds the bound, not the payload
-// - the rebuilt projection holds the newest survivors in payload order (negative: the oldest are gone)
+// - the rebuilt projection holds the newest survivors in payload order, with their text read back from the chain (negative: the oldest are gone)
 //
 // 契约: docs/wiki/reliability/durable-delivery.md#canonical-fact-resolution
 func TestAnchoredSurvivorsFollowTheResidentBound(t *testing.T) {
 	ctx := context.Background()
 	addr := event.Address{AgentID: "agent-a", SessionID: "session-survivor-bound"}
-	run := noWindowBootRun(t, ctx, addr)
-	survivors := make([]anchorEntry, 0, 2*noWindowResidentFacts+10)
-	for at := 0; at < 2*noWindowResidentFacts+10; at++ {
-		survivors = append(survivors, anchorEntry{
-			Key:     event.EventID(fmt.Sprintf("-%d-survivor", at)),
-			Type:    replay.ProjectionTypeSegmentFold,
-			Summary: "a folded line",
-			Content: fmt.Sprintf("the folded text %d", at),
-			Time:    time.Date(2026, 11, 6, 12, at%60, 0, 0, time.UTC).UnixMilli(),
-		})
+	run := noWindowBootRun(t, ctx)
+	total := 2*noWindowResidentFacts + 10
+	survivors := make([]anchorEntry, 0, total)
+	for at := 0; at < total; at++ {
+		moment := time.Date(2026, 11, 6, 12, at%60, at/60, 0, time.UTC)
+		survivor := anchorEntry{
+			Key:     event.EventID(fmt.Sprintf("%s-survivor-%d", addr.SessionID, at)),
+			Type:    event.TypeExternalInput,
+			Summary: fmt.Sprintf("the survivor %d", at),
+			Time:    moment.UnixMilli(),
+		}
+		if _, err := run.commitFactChecked(ctx, event.Event{
+			Key:       survivor.Key,
+			Type:      survivor.Type,
+			Timestamp: moment,
+			Meta:      map[string]string{event.MetaKeyEventSummary: survivor.Summary},
+			Message:   model.Message{Role: model.RoleUser, Content: fmt.Sprintf("the survivor text %d", at)},
+			Owner:     addr, Source: addr, Target: addr,
+		}); err != nil {
+			t.Fatalf("commit the survivor %d: %v", at, err)
+		}
+		survivors = append(survivors, survivor)
 	}
 	payload, err := json.Marshal(survivors)
 	if err != nil {
@@ -79,8 +113,9 @@ func TestAnchoredSurvivorsFollowTheResidentBound(t *testing.T) {
 		t.Fatalf("the rebuilt projection holds %d entries, want the resident bound %d", len(entries), noWindowResidentFacts)
 	}
 	newest := survivors[len(survivors)-1]
-	if last := entries[len(entries)-1]; last.Key != newest.Key || last.Content != newest.Content {
-		t.Fatalf("the rebuilt projection ends at %s, want the newest survivor %s", last.Key, newest.Key)
+	last := entries[len(entries)-1]
+	if last.Key != newest.Key || last.Content != fmt.Sprintf("the survivor text %d", total-1) {
+		t.Fatalf("the rebuilt projection ends at %s reading %q, want the newest survivor %s reading the text the chain states", last.Key, last.Content, newest.Key)
 	}
 	for _, entry := range entries {
 		if entry.Key == survivors[0].Key {
@@ -264,14 +299,15 @@ func TestDefaultBootRebuildsFromTheAnchor(t *testing.T) {
 	storage := WithStorage(ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: root})
 	addr := event.Address{AgentID: "agent-a", SessionID: "session-default-anchor"}
 	source := noTrimChainRun(t, ctx, storage)
+	source.stopCheckpointFiler()
 	commitWindowTurns(t, ctx, source, addr, 12)
 	if count := countFoldProducts(t, ctx, source); count == 0 {
 		t.Fatal("the fixture folded nothing, so the boot proves nothing")
 	}
-	indexed := chainIndexSize(t, ctx, source)
 	if _, err := source.Close(ctx, agent.CloseRequest{Timeout: time.Now().Add(2 * time.Second)}); err != nil {
 		t.Fatalf("close the source process: %v", err)
 	}
+	indexed := chainIndexSize(t, ctx, source)
 
 	booted := noTrimChainRun(t, ctx, storage)
 	decoded := booted.CommittedFacts()
@@ -314,5 +350,78 @@ func TestDefaultBootRebuildsFromTheAnchor(t *testing.T) {
 	plainBooted := noTrimChainRun(t, ctx, plainStorage)
 	if got, want := plainBooted.CommittedFacts(), chainIndexSize(t, ctx, plainBooted); got > want {
 		t.Fatalf("the boot over an unfolded chain decoded %d of %d facts, want no more than the chain holds", got, want)
+	}
+}
+
+// TestTheRestoredProjectionReadsOnlyPastItsSurvivors pins the read of a boot the projection slice of a carrier rebuilds beside no fold product.
+//   - the boot reads the survivor bodies and the facts committed past the newest of them, never the chain the survivors cover
+//   - the covered history grows without growing one read of the boot
+//   - the covered filler states no content, so the projection the run presents never holds it and the restart has no reason to read it
+//   - the projection the boot serves is the projection the full walk rebuilds
+//
+// 契约: docs/wiki/platform/platform-subsystems.md#framework-checkpoint
+func TestTheRestoredProjectionReadsOnlyPastItsSurvivors(t *testing.T) {
+	reads := map[int]int{}
+	indexed := map[int]int{}
+	for _, filler := range []int{40, 400} {
+		ctx := context.Background()
+		storage := WithStorage(ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: t.TempDir()})
+		addr := event.Address{AgentID: "agent-a", SessionID: event.SessionID(fmt.Sprintf("session-restored-bound-%d", filler))}
+		source := noTrimNoWindowRun(t, ctx, storage)
+		for index := 0; index < filler; index++ {
+			if _, err := source.commitFactChecked(ctx, event.Event{
+				Type:      event.TypeFeedback,
+				Timestamp: time.Now(),
+				Owner:     addr, Source: addr, Target: addr,
+				Meta: map[string]string{event.MetaKeyEventSummary: fmt.Sprintf("covered filler %d", index)},
+			}); err != nil {
+				t.Fatalf("commit covered filler %d: %v", index, err)
+			}
+		}
+		commitWindowTurns(t, ctx, source, addr, 2)
+		if count := countFoldProducts(t, ctx, source); count != 0 {
+			t.Fatalf("the fixture filed %d product(s), want the carrier of a chain that never folded", count)
+		}
+		if _, filed, err := source.Checkpoint(ctx); err != nil || !filed {
+			t.Fatalf("file the carrier of the chain = (%t, %v), want a filed fact", filed, err)
+		}
+		indexed[filler] = chainIndexSize(t, ctx, source)
+		if indexed[filler] <= filler {
+			t.Fatalf("the chain indexes %d fact(s) beside %d covered fact(s), want the covered history on the chain", indexed[filler], filler)
+		}
+		if _, err := source.Close(ctx, agent.CloseRequest{Timeout: time.Now().Add(5 * time.Second)}); err != nil {
+			t.Fatalf("close the source process: %v", err)
+		}
+
+		booted := noTrimNoWindowRun(t, ctx, storage)
+		if filed, _ := booted.CheckpointFiled(); filed == "" {
+			t.Fatal("the boot restored no carrier, so the bound proves nothing")
+		}
+		reads[filler] = booted.CommittedFacts()
+
+		full := noTrimNoWindowRun(t, ctx, storage)
+		fullSeeds, _, _, err := full.seedFullReplay(ctx, full.tier)
+		if err != nil {
+			t.Fatalf("replay the whole chain: %v", err)
+		}
+		want, carried := fullSeeds[addr]
+		if !carried {
+			t.Fatalf("the full walk registered no projection for %v", addr)
+		}
+		served, carried := booted.replays[addr]
+		if !carried {
+			t.Fatalf("the boot registered no projection for %v", addr)
+		}
+		if got, want := replay.RenderProjection(served.projection.Entries()), replay.RenderProjection(want.projection.Entries()); !bytes.Equal(got, want) {
+			t.Fatalf("the boot beside %d covered fact(s) renders %d bytes, want the full walk %d", filler, len(got), len(want))
+		}
+		if reads[filler] >= indexed[filler] {
+			t.Fatalf("the boot beside %d covered fact(s) read %d of the %d the chain indexes, want the carrier to leave the covered material unread",
+				filler, reads[filler], indexed[filler])
+		}
+	}
+	if reads[400] != reads[40] {
+		t.Fatalf("the boot read %d bodies beside 400 covered facts and %d beside 40, want a read that follows the survivors rather than the covered history",
+			reads[400], reads[40])
 	}
 }

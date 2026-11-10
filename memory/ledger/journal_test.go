@@ -13,6 +13,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -514,20 +515,42 @@ func jsonTokenOf(t *testing.T, value []byte) []byte {
 	return token
 }
 
+// carrierFrameValueBytes is the raw size of the value the round trip commits. A
+// byte value rides in a frame base64-encoded, four bytes for every three it
+// holds, so this stands the payload at about 30.7 MiB: near the 32 MiB ceiling,
+// and far over the carrier a commit actually writes (a checkpoint carrier states
+// about 2 KiB; assembly's TestTheCheckpointCarrierStaysBoundedByItsEntries
+// measures it).
+const carrierFrameValueBytes = 23 << 20
+
+// overCeilingValueBytes is the raw size of a value whose payload stands past the
+// ceiling this build states: base64 puts it at about 35 MiB, over 32 MiB and
+// under the 64 MiB a raised ceiling would allow, so a bound inflated back up is
+// caught here instead of passing unnoticed.
+const overCeilingValueBytes = 25 << 20
+
 // TestJournalCarriesTheFrameworkCarrierFrame pins the frame ceiling against the carrier a checkpoint states.
-//   - a record whose payload stands over the ceiling a smaller frame allowed commits and replays byte for byte
+//   - a frame near the ceiling commits and replays byte for byte, so the ceiling bounds a payload the framing reads rather than a carrier
 //   - a frame declaring a payload past the ceiling is refused by name, so the bound still bounds the reader
+//   - a record whose payload stands past the ceiling is refused by name before any frame is written
 //
 // 契约: docs/wiki/memory/memory-architecture.md#local-file-kv
 func TestJournalCarriesTheFrameworkCarrierFrame(t *testing.T) {
-	t.Run("carrier_frame_round_trips", func(t *testing.T) {
+	t.Run("a_frame_near_the_ceiling_round_trips", func(t *testing.T) {
 		dir := t.TempDir()
 		log, err := openJournalLog(dir)
 		if err != nil {
 			t.Fatalf("open the journal: %v", err)
 		}
-		carrier := bytes.Repeat([]byte("c"), 26<<20)
+		carrier := bytes.Repeat([]byte("c"), carrierFrameValueBytes)
 		journalTestAppend(t, log, journalPut{Key: "262:evt:00001:000001", Value: carrier})
+		declared := int(log.size) - journalFrameHeaderBytes
+		if declared > journalMaxFrameBytes {
+			t.Fatalf("the fixture states a %d-byte payload over the %d-byte ceiling", declared, journalMaxFrameBytes)
+		}
+		if declared < 30<<20 {
+			t.Fatalf("the fixture states a %d-byte payload, want one near the ceiling so the round trip proves the bound", declared)
+		}
 		if err := log.sync(); err != nil {
 			t.Fatalf("sync the journal: %v", err)
 		}
@@ -548,6 +571,25 @@ func TestJournalCarriesTheFrameworkCarrierFrame(t *testing.T) {
 		binary.BigEndian.PutUint32(frame[0:4], uint32(journalMaxFrameBytes+1))
 		if _, err := journalPayloadOf(frame); !errors.Is(err, ErrJournalCorrupt) {
 			t.Fatalf("a frame declaring %d payload bytes = %v, want the named corruption", journalMaxFrameBytes+1, err)
+		}
+	})
+
+	t.Run("refuses_a_record_past_the_ceiling", func(t *testing.T) {
+		log, err := openJournalLog(t.TempDir())
+		if err != nil {
+			t.Fatalf("open the journal: %v", err)
+		}
+		defer log.close()
+		value := bytes.Repeat([]byte("c"), overCeilingValueBytes)
+		err = log.append(journalRecord{Version: journalFormatVersion, Puts: []journalPut{{Key: "over-the-ceiling", Value: value}}})
+		if err == nil {
+			t.Fatal("a record past the frame ceiling committed, want the bound to refuse it")
+		}
+		if !strings.Contains(err.Error(), "frame bound") {
+			t.Fatalf("the refusal = %v, want the frame bound named", err)
+		}
+		if log.size != 0 {
+			t.Fatalf("the refused record wrote %d byte(s) of frame, want the bound to refuse it before the write", log.size)
 		}
 	})
 }

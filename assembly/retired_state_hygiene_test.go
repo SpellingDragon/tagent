@@ -253,7 +253,7 @@ func sealHostCaptureErr(capture *rl.TrajectoryCapture) error {
 // TestPinnedFactsReseeded pins the boot order of the hot-window pins.
 //   - the delivery account restored from the chain pins the settlement fact of every obligation that still owes something
 //   - the pins land before the seeded chains are trimmed, so a restart keeps what the previous process kept
-//   - a seed trimmed before any pin is restored drops the settlement fact
+//   - the filler is material the projection presents, so a seed trimmed before any pin is restored drops the settlement fact
 //   - the restarted run holds the pin the live process held
 //   - the pinned settlement fact survives the boot trim
 //
@@ -279,11 +279,12 @@ func TestPinnedFactsReseeded(t *testing.T) {
 	key := deliverySettlementKey(identity, heldStateOf(deliveryReasonApproval))
 	for index := 0; index < noWindowResidentFacts+32; index++ {
 		if _, err := run.commitFactChecked(ctx, event.Event{
-			Type:      event.TypeFeedback,
+			Type:      event.TypeThinkingPlan,
 			Timestamp: time.Now(),
 			Owner:     addr,
 			Source:    addr,
 			Target:    addr,
+			Message:   model.Message{Role: model.RoleAssistant, Content: fmt.Sprintf("filler %d", index)},
 			Meta:      map[string]string{event.MetaKeyEventSummary: fmt.Sprintf("filler %d", index)},
 		}); err != nil {
 			t.Fatalf("commit filler %d: %v", index, err)

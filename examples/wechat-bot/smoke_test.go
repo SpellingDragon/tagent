@@ -2352,7 +2352,8 @@ func smokeIntegrityChainSummary(summary, content string) string {
 
 // smokeIntegrityFoldConsumer 判定正式请求装配持续消费折叠产物：折叠之后的下一
 // 个 /task 回合仍从投影读到那条综述本身，综述按产物键引用它压过的材料而不重抄全文，
-// 而被折掉的原文在事实链上仍逐字节可达。
+// 而被折掉的原文在事实链上仍逐字节可达。体积断言与折叠自身判同一视图：回执同样
+// 呈现给模型，但按装配的折叠判据从不计作对话，所以界的是投影呈现的对话量。
 func smokeIntegrityFoldConsumer(t *testing.T) {
 	host := bootSmokeIntegrityHost(t, "1h", "")
 	defer host.close(t)
@@ -2389,8 +2390,9 @@ func smokeIntegrityFoldConsumer(t *testing.T) {
 		t.Fatalf("the committed original lost its tail beside the follow-up (fact %s)", original.Key)
 	}
 	threshold := assembly.FoldWindow{MaxTokens: 2000, CompressThreshold: 0.3}.VolumeThresholdBytes()
-	if volume := len(replay.RenderProjection(entries)); volume > threshold {
-		t.Fatalf("the projection grew to %d bytes after the follow-up, want <= the %d-byte window", volume, threshold)
+	if volume := smokeIntegrityFoldVolume(entries); volume > threshold {
+		t.Fatalf("the conversation of the projection grew to %d bytes after the follow-up, want <= the %d-byte window (it renders %d bytes beside the delivery accounting)\nprojection:\n%s",
+			volume, threshold, len(replay.RenderProjection(entries)), smokeEntryDigest(entries))
 	}
 	t.Logf("[integrity-fold-consumer] the formal follow-up request on %s read the history summary %s standing for the folded material by key; the original %s stayed reachable",
 		chat, summary.Key, original.Key)
@@ -3180,6 +3182,28 @@ func smokeIntegrityCompressFacts(t *testing.T, rig *smokeRig, chat string) []eve
 	return out
 }
 
+// smokeIntegrityWaitStandingSummary 等早期回合触发的折叠把综述立进投影：综述落链
+// 之后测试才发晚轮请求，晚轮因此稳定读到折叠后的视图，而不是与折叠的落链赛跑。
+// 冥想节奏在正向档钉在 1h，这里等到的是提交触发的折叠，等不到即视为折叠没落地。
+func smokeIntegrityWaitStandingSummary(t *testing.T, rig *smokeRig, chat string) {
+	t.Helper()
+	deadline := time.Now().Add(60 * time.Second)
+	for {
+		es, carried := rig.host.Run().ReplayEntries(rig.addressOf(chat).SessionID)
+		if carried {
+			for _, e := range es {
+				if e.Type == replay.ProjectionTypeHistorySummary {
+					return
+				}
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the early turn of %s triggered no standing history summary within the fold window", chat)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
 // smokeIntegrityAssertFold 驱动小窗口折叠并断言三件事：投影长出带早期输入的历史
 // 摘要、触发轮之后的请求真的读到了综述、原文在事实链上逐字节仍在而投影已用
 // 综述取代它。体积断言取文档声明的窗口（max_tokens 2000 × 4 × 0.3）。
@@ -3193,6 +3217,7 @@ func smokeIntegrityAssertFold(t *testing.T, rig *smokeRig, provider *smokeProvid
 	rig.waitText(chat, "answer "+smokeIntegrityFoldSwitchTurn, 120*time.Second)
 	rig.postTask(smokeIntegrityBulk(smokeIntegrityFoldEarlyTurn))
 	rig.waitText(chat, "answer "+smokeIntegrityFoldEarlyTurn, 120*time.Second)
+	smokeIntegrityWaitStandingSummary(t, rig, chat)
 	rig.postTask(smokeIntegrityBulk(smokeIntegrityFoldLateTurn))
 	rig.waitText(chat, "answer "+smokeIntegrityFoldLateTurn, 120*time.Second)
 

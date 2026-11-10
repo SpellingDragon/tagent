@@ -1,9 +1,11 @@
 package assembly
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"reflect"
 	"slices"
 	"strings"
@@ -11,11 +13,14 @@ import (
 	"testing"
 	"time"
 
+	trpclog "trpc.group/trpc-go/trpc-agent-go/log"
+
 	"github.com/SpellingDragon/tagent/api/config"
 	"github.com/SpellingDragon/tagent/api/event"
 	"github.com/SpellingDragon/tagent/api/model"
 	"github.com/SpellingDragon/tagent/memory"
 	"github.com/SpellingDragon/tagent/memory/ledger"
+	"github.com/SpellingDragon/tagent/memory/replay"
 	"github.com/SpellingDragon/tagent/runtime/agent"
 )
 
@@ -213,6 +218,7 @@ func checkpointBase() time.Time {
 // TestBootRefusesAnUnreadableCheckpoint pins the negative anchor of the anchored boot.
 //   - an unreadable payload, one of another layout version and one stating a foreign identity each refuse the boot
 //   - the refusal is the named one and names the checkpoint fact it refused
+//   - the unreadable carrier is the newest fact of the store: the close files a carrier of its own before it, so the fixture appends the corrupted one last
 //   - the boot answers no run beside the refusal (negative: a reader that skipped the unreadable carrier would start onto an empty state)
 //
 // 契约: docs/wiki/platform/platform-subsystems.md#framework-checkpoint
@@ -262,8 +268,14 @@ func TestBootRefusesAnUnreadableCheckpoint(t *testing.T) {
 			if _, filed, err := source.Checkpoint(ctx); err != nil || !filed {
 				t.Fatalf("file the checkpoint of the chain = (%t, %v), want a filed fact", filed, err)
 			}
+			if _, err := source.Close(ctx, agent.CloseRequest{Timeout: time.Now().Add(5 * time.Second)}); err != nil {
+				t.Fatalf("close the source process: %v", err)
+			}
+			corrupt := windowChainRun(t, ctx, storage())
+			corrupt.checkpointEvery = 1 << 30
+			corrupt.checkpointPeriod = 1000 * time.Hour
 			bad := event.EventID("checkpoint:9999")
-			if _, err := source.commitFactChecked(ctx, event.Event{
+			if _, err := corrupt.commitFactChecked(ctx, event.Event{
 				Key:       bad,
 				Type:      event.TypeCheckpoint,
 				Timestamp: time.Now().UTC(),
@@ -276,9 +288,6 @@ func TestBootRefusesAnUnreadableCheckpoint(t *testing.T) {
 				Message: model.Message{Content: string(content)},
 			}); err != nil {
 				t.Fatalf("file the corrupted checkpoint %s: %v", bad, err)
-			}
-			if _, err := source.Close(ctx, agent.CloseRequest{Timeout: time.Now().Add(5 * time.Second)}); err != nil {
-				t.Fatalf("close the source process: %v", err)
 			}
 			booted, err := bootWindowChain(ctx, storage())
 			if err == nil {
@@ -537,5 +546,409 @@ func TestBootRestoresTheCarrierOnce(t *testing.T) {
 	}
 	if restores != 1 {
 		t.Fatalf("the restart applied the cut %d time(s), want once", restores)
+	}
+}
+
+// checkpointLog records the lines the assembly face writes at ERROR, so a check
+// reads the failure a carrier path reports instead of assuming it reported one.
+type checkpointLog struct {
+	mu     sync.Mutex
+	errors []string
+}
+
+// Error records one error line.
+func (l *checkpointLog) Error(args ...any) { l.Errorf("%s", fmt.Sprint(args...)) }
+
+// Errorf records one formatted error line.
+func (l *checkpointLog) Errorf(format string, args ...any) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.errors = append(l.errors, fmt.Sprintf(format, args...))
+}
+
+// Debug drops one debug line: the carrier failures are the only ones a check reads.
+func (l *checkpointLog) Debug(...any) {}
+
+// Debugf drops one formatted debug line.
+func (l *checkpointLog) Debugf(string, ...any) {}
+
+// Info drops one info line.
+func (l *checkpointLog) Info(...any) {}
+
+// Infof drops one formatted info line.
+func (l *checkpointLog) Infof(string, ...any) {}
+
+// Warn drops one warn line.
+func (l *checkpointLog) Warn(...any) {}
+
+// Warnf drops one formatted warn line.
+func (l *checkpointLog) Warnf(string, ...any) {}
+
+// Fatal drops one fatal line: a check never ends the binary it runs in.
+func (l *checkpointLog) Fatal(...any) {}
+
+// Fatalf drops one formatted fatal line.
+func (l *checkpointLog) Fatalf(string, ...any) {}
+
+// mentions reports whether one recorded error line carries every fragment.
+func (l *checkpointLog) mentions(fragments ...string) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	for _, line := range l.errors {
+		holds := true
+		for _, fragment := range fragments {
+			if !strings.Contains(line, fragment) {
+				holds = false
+				break
+			}
+		}
+		if holds {
+			return true
+		}
+	}
+	return false
+}
+
+// awaitCheckpointLog waits for one error line of the assembly face carrying every
+// fragment, so a check reads the filing failure the filer reported.
+func awaitCheckpointLog(t *testing.T, log *checkpointLog, fragments ...string) {
+	t.Helper()
+	deadline := time.Now().Add(20 * time.Second)
+	for {
+		if log.mentions(fragments...) {
+			return
+		}
+		if time.Now().After(deadline) {
+			log.mu.Lock()
+			lines := append([]string(nil), log.errors...)
+			log.mu.Unlock()
+			t.Fatalf("the assembly face wrote no error line carrying %v after 20s, it wrote %d line(s): %v", fragments, len(lines), lines)
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+}
+
+// commitWindowTurn commits one closed turn of four legs under keys no other turn
+// of the same chain names, so a check drives the fold turn by turn.
+func commitWindowTurn(t *testing.T, ctx context.Context, run *Run, addr event.Address, turn int) {
+	t.Helper()
+	base := checkpointBase()
+	for position, leg := range []struct {
+		typ     string
+		summary string
+	}{
+		{event.TypeExternalInput, "ask"},
+		{event.TypeThinkingPlan, "plan"},
+		{event.TypeActionCommand, "call"},
+		{event.TypeAgentOutput, "answer"},
+	} {
+		evt := event.Event{
+			Key:       event.EventID(fmt.Sprintf("%s-turn-%d-leg-%d", addr.SessionID, turn, position)),
+			Type:      leg.typ,
+			Timestamp: base.Add(time.Duration(turn*10+position) * time.Minute),
+			Meta:      map[string]string{event.MetaKeyEventSummary: leg.summary},
+			Message:   model.Message{Role: model.RoleUser, Content: "the material of the landing walk"},
+			Owner:     addr,
+		}
+		commitWindowFact(t, ctx, run, addr, evt)
+	}
+}
+
+// newestFoldProductKey reports the identity of the newest compression product one
+// chain filed, so a check reads the cut a carrier states against the fact that
+// asked for it.
+func newestFoldProductKey(t *testing.T, ctx context.Context, run *Run) event.EventID {
+	t.Helper()
+	key := event.EventID("")
+	if err := run.tier.Segments.EachIndexNewestFirst(ctx, func(held event.EventID, _ int, _ int64, typ string, _ event.SessionID) error {
+		if key == "" && typ == event.CompressProductType {
+			key = held
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("walk the store index: %v", err)
+	}
+	return key
+}
+
+// TestCheckpointFollowsTheFoldThatDropsMaterial pins the fold trigger of the cadence.
+//   - a chain whose interval and period never fall due files no carrier while it only appends
+//   - the commit that lands a fold product asks for a carrier, and the cut it states covers that product
+//   - a fold can mint several products in one pass, and the carrier answering the last of them states a cut the newest product landed behind
+//
+// 契约: docs/wiki/platform/platform-subsystems.md#framework-checkpoint
+func TestCheckpointFollowsTheFoldThatDropsMaterial(t *testing.T) {
+	ctx := context.Background()
+	run := windowChainRun(t, ctx)
+	run.checkpointEvery = 1 << 30
+	run.checkpointPeriod = 1000 * time.Hour
+	addr := event.Address{AgentID: "agent-a", SessionID: "session-checkpoint-fold"}
+	turn := 0
+	for {
+		if countFoldProducts(t, ctx, run) > 0 {
+			break
+		}
+		if turn >= 12 {
+			t.Fatal("the fixture folded nothing, so the fold trigger proves nothing")
+		}
+		if filed, _ := run.CheckpointFiled(); filed != "" {
+			t.Fatalf("the chain filed the carrier %s beside no fold product, want the cadence clock to owe none before the fold", filed)
+		}
+		turn++
+		commitWindowTurn(t, ctx, run, addr, turn)
+	}
+	product := newestFoldProductKey(t, ctx, run)
+	if product == "" {
+		t.Fatal("the fixture folded no product, so the trigger proves nothing")
+	}
+	partition, productSeq := seqOfFact(t, run, product)
+	deadline := time.Now().Add(20 * time.Second)
+	for {
+		if id, offset := run.CheckpointFiled(); id != "" && offset[partition] >= productSeq {
+			break
+		}
+		if time.Now().After(deadline) {
+			_, offset := run.CheckpointFiled()
+			t.Fatalf("the fold filed no carrier past the product %s at seq %d of partition %d after 20s, the newest cut states %d",
+				product, productSeq, partition, offset[partition])
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+}
+
+// TestCloseFilesTheCarrierTheNextBootReads pins the close trigger of the cadence.
+//   - a run whose interval and period never fell due files no carrier while it commits
+//   - the close files one behind the facts it settled
+//   - the carrier the close filed is the one the next boot restores
+//
+// 契约: docs/wiki/platform/platform-subsystems.md#framework-checkpoint
+func TestCloseFilesTheCarrierTheNextBootReads(t *testing.T) {
+	ctx := context.Background()
+	storage := WithStorage(ledger.StorageConfig{Type: ledger.StorageJournal, Root: t.TempDir()})
+	run := windowChainRun(t, ctx, storage)
+	run.checkpointEvery = 1 << 30
+	run.checkpointPeriod = 1000 * time.Hour
+	addr := event.Address{AgentID: "agent-a", SessionID: "session-checkpoint-close"}
+	commitWindowTurns(t, ctx, run, addr, 1)
+	if filed, _ := run.CheckpointFiled(); filed != "" {
+		t.Fatalf("the chain filed the carrier %s beside no due, want the cadence to owe none before the close", filed)
+	}
+	if _, err := run.Close(ctx, agent.CloseRequest{Timeout: time.Now().Add(30 * time.Second)}); err != nil {
+		t.Fatalf("close the run: %v", err)
+	}
+	id, offset := run.CheckpointFiled()
+	if id == "" {
+		t.Fatal("the close filed no carrier, want the account the run reached at its fixed point")
+	}
+	partition := memory.PartitionIDFromName(string(addr.AgentID))
+	if offset[partition] <= 0 {
+		t.Fatalf("the carrier the close filed states the cut %d of partition %d, want the facts the run settled", offset[partition], partition)
+	}
+	booted := windowChainRun(t, ctx, storage)
+	if restored, _ := booted.CheckpointFiled(); restored != id {
+		t.Fatalf("the boot restored the carrier %q, want the %q the close filed", restored, id)
+	}
+}
+
+// refusingSlice is a state slice its holder refuses to state, so a cut that asks
+// it for an account cannot state the one the run holds.
+type refusingSlice struct{ err error }
+
+// StateName reports the name the refusing slice is keyed by.
+func (s refusingSlice) StateName() string { return "assembly.refusing" }
+
+// SnapshotState refuses to state the account.
+func (s refusingSlice) SnapshotState(context.Context) ([]byte, error) { return nil, s.err }
+
+// RestoreState puts nothing back: the slice never states an account.
+func (s refusingSlice) RestoreState(context.Context, []byte) error { return nil }
+
+// TestAFailedCheckpointSurfaces pins the failure path of the carrier.
+//   - a holder that refuses to state itself fails every cut it is part of, and the filer reports that at ERROR
+//   - the close answers the failure to its caller instead of reporting a close beside a carrier no process can read
+//   - a run whose holders state themselves closes beside no such failure (negative: the failure is the refused account, not the close)
+//
+// 契约: docs/wiki/platform/platform-subsystems.md#framework-checkpoint
+func TestAFailedCheckpointSurfaces(t *testing.T) {
+	ctx := context.Background()
+	observer := &checkpointLog{}
+	original := trpclog.Default
+	trpclog.Default = observer
+	t.Cleanup(func() { trpclog.Default = original })
+
+	run := windowChainRun(t, ctx)
+	run.checkpointEvery = 1
+	refused := errors.New("the holder refuses to state its account")
+	if _, err := run.RegisterStateSlice(refusingSlice{err: refused}); err != nil {
+		t.Fatalf("register the refusing slice: %v", err)
+	}
+	addr := event.Address{AgentID: "agent-a", SessionID: "session-checkpoint-refused"}
+	commitWindowTurns(t, ctx, run, addr, 1)
+	awaitCheckpointLog(t, observer, "the framework checkpoint was not filed", refused.Error())
+	if _, err := run.Close(ctx, agent.CloseRequest{Timeout: time.Now().Add(30 * time.Second)}); err == nil {
+		t.Fatal("the close answered no failure beside a carrier nothing can read, want the refused account it could not state")
+	} else if !strings.Contains(err.Error(), refused.Error()) {
+		t.Fatalf("the close answered %q, want the refused account it could not state", err)
+	}
+
+	whole := windowChainRun(t, ctx)
+	whole.checkpointEvery = 1
+	other := event.Address{AgentID: "agent-a", SessionID: "session-checkpoint-stated"}
+	commitWindowTurns(t, ctx, whole, other, 1)
+	if _, err := whole.Close(ctx, agent.CloseRequest{Timeout: time.Now().Add(30 * time.Second)}); err != nil {
+		t.Fatalf("the close of a run whose holders state themselves answered %v, want a closed run", err)
+	}
+}
+
+// carrierSizes reports the bytes the newest carrier of one run states: the
+// projection slice of the framework checkpoint and the survivor payload of the
+// newest fold product, the two carriers a restart of the run reads.
+func carrierSizes(t *testing.T, ctx context.Context, run *Run) (framework, product int) {
+	t.Helper()
+	id, filed, err := run.Checkpoint(ctx)
+	if err != nil || !filed {
+		t.Fatalf("file the carrier of the chain = (%t, %v), want a filed fact", filed, err)
+	}
+	stored, err := run.CommittedEvent(ctx, id)
+	if err != nil {
+		t.Fatalf("read the carrier %s back: %v", id, err)
+	}
+	checkpoint, stated := event.CheckpointOf(stored)
+	if !stated {
+		t.Fatalf("the carrier %s states no readable checkpoint", id)
+	}
+	for _, slice := range checkpoint.Slices {
+		if slice.Name == checkpointSliceProjection {
+			framework = len(slice.Payload)
+		}
+	}
+	if err := run.tier.Segments.EachIndexNewestFirst(ctx, func(key event.EventID, _ int, _ int64, typ string, _ event.SessionID) error {
+		if product > 0 || typ != event.CompressProductType {
+			return nil
+		}
+		stored, held, err := run.tier.Segments.GetEvent(ctx, key)
+		if err != nil || !held {
+			return err
+		}
+		body, err := memory.DecodeEventBody(stored.Body)
+		if err != nil {
+			return err
+		}
+		evt := body.Event()
+		evt.Key = stored.Key
+		if stated, ok := compressProductOf(evt); ok {
+			product = len(stated.Checkpoint())
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("walk the store index: %v", err)
+	}
+	if framework == 0 {
+		t.Fatal("the carrier states no projection slice, so the size proves nothing")
+	}
+	return framework, product
+}
+
+// TestTheCheckpointCarrierStaysBoundedByItsEntries pins what a carrier states.
+//   - the carrier names every survivor and leaves the text of a mapped entry on the chain, so the bodies a turn was written with never enter it
+//   - a chain of the same turns written with larger bodies states the same carrier
+//   - a longer history states a carrier of the same size, so the carrier follows the entries a fold leaves and never the history behind them
+//   - the boot still serves the projection the full walk rebuilds, so the text left on the chain is read back
+//
+// 契约: docs/wiki/platform/platform-subsystems.md#framework-checkpoint
+func TestTheCheckpointCarrierStaysBoundedByItsEntries(t *testing.T) {
+	staged := map[string]struct {
+		framework int
+		product   int
+	}{}
+	for _, scene := range []struct {
+		name  string
+		turns int
+		body  int
+	}{
+		{name: "the small bodies of a short chain", turns: 12, body: 256},
+		{name: "the large bodies of a short chain", turns: 12, body: 64 << 10},
+		{name: "the large bodies of a long chain", turns: 36, body: 64 << 10},
+	} {
+		t.Run(scene.name, func(t *testing.T) {
+			ctx := context.Background()
+			storage := WithStorage(ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: t.TempDir()})
+			addr := event.Address{AgentID: "agent-a", SessionID: "session-carrier-bound"}
+			source := noTrimChainRun(t, ctx, storage)
+			body := strings.Repeat("b", scene.body)
+			for turn := 1; turn <= scene.turns; turn++ {
+				for position, kind := range []string{event.TypeExternalInput, event.TypeThinkingPlan, event.TypeActionCommand, event.TypeAgentOutput} {
+					commitWindowFact(t, ctx, source, addr, windowEvent(addr,
+						fmt.Sprintf("%s-turn-%d-leg-%d", addr.SessionID, turn, position),
+						fmt.Sprintf("inv-%d-%d", turn, position), body, kind))
+				}
+			}
+			if count := countFoldProducts(t, ctx, source); count == 0 {
+				t.Fatal("the fixture folded nothing, so the carrier proves nothing")
+			}
+			framework, product := carrierSizes(t, ctx, source)
+			if product == 0 {
+				t.Fatal("the chain filed no checkpoint-bearing product, so the carrier proves nothing")
+			}
+			t.Logf("the carrier states %d byte(s) of projection and %d byte(s) of product beside %d turn(s) of %d-byte bodies",
+				framework, product, scene.turns, scene.body)
+			staged[scene.name] = struct {
+				framework int
+				product   int
+			}{framework: framework, product: product}
+			if bound := 16 << 10; framework > bound || product > bound {
+				t.Fatalf("the carrier states %d byte(s) of projection and %d byte(s) of product, want both under the %d-byte bound its entries fit in",
+					framework, product, bound)
+			}
+			if _, err := source.Close(ctx, agent.CloseRequest{Timeout: time.Now().Add(5 * time.Second)}); err != nil {
+				t.Fatalf("close the source process: %v", err)
+			}
+			booted := noTrimChainRun(t, ctx, storage)
+			served, carried := booted.replays[addr]
+			if !carried {
+				t.Fatalf("the boot registered no projection for %v", addr)
+			}
+			full := noTrimChainRun(t, ctx, storage)
+			fullSeeds, _, _, err := full.seedFullReplay(ctx, full.tier)
+			if err != nil {
+				t.Fatalf("replay the whole chain: %v", err)
+			}
+			want, carried := fullSeeds[addr]
+			if !carried {
+				t.Fatalf("the full walk registered no projection for %v", addr)
+			}
+			if got, want := replay.RenderProjection(served.projection.Entries()), replay.RenderProjection(want.projection.Entries()); !bytes.Equal(got, want) {
+				t.Fatalf("the boot renders %d bytes, want the %d the full walk rebuilds from the chain", len(got), len(want))
+			}
+		})
+	}
+	small := staged["the small bodies of a short chain"]
+	large := staged["the large bodies of a short chain"]
+	if small.framework != large.framework || small.product != large.product {
+		t.Fatalf("the carrier states %d/%d byte(s) beside 256-byte bodies and %d/%d beside 64KiB bodies, want the bodies to stay on the chain",
+			small.framework, small.product, large.framework, large.product)
+	}
+	long := staged["the large bodies of a long chain"]
+	if long.framework > small.framework || long.product > small.product {
+		t.Fatalf("the carrier states %d/%d byte(s) beside 36 turns and %d/%d beside 12, want a carrier that follows the entries a fold leaves rather than the history",
+			long.framework, long.product, small.framework, small.product)
+	}
+}
+
+// requireCoveredByTheCut requires one committed fact of a restarted run to stand
+// at or below the cut its carrier states for one state slice, so the check that
+// reads the fact reads the account the carrier restores rather than the chain walk
+// past the cut. The consequence names what a fact past the cut would leave the
+// check proving nothing about.
+func requireCoveredByTheCut(t *testing.T, run *Run, slice string, key event.EventID, consequence string) {
+	t.Helper()
+	cut := run.checkpointCut(slice)
+	if len(cut) == 0 {
+		t.Fatalf("the boot restored no %s cut, so %s", slice, consequence)
+	}
+	partition, seq := seqOfFact(t, run, key)
+	if seq > cut[partition] {
+		t.Fatalf("the fact %s stands at seq %d of partition %d past the %s cut %d, so %s",
+			key, seq, partition, slice, cut[partition], consequence)
 	}
 }

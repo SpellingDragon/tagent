@@ -122,11 +122,13 @@ func TestCandidateEmbeddingNeverSeesMechanismWording(t *testing.T) {
 // TestTierQueryMatchesObservedRead pins durable queries to the existing semantics.
 // - four closed turns put a band older than the recent window beside the newest one, which the fold mints a product for
 // - a shorter walk leaves every band new, so the fold judges nothing and the fixture files no mechanism fact
+// - the checkpoint filer ends before the baseline is read, so the tier the two reads compare stands still
 //
 // 契约: docs/wiki/memory/memory-architecture.md#read-paths
 func TestTierQueryMatchesObservedRead(t *testing.T) {
 	ctx := context.Background()
 	run := windowChainRun(t, ctx)
+	run.stopCheckpointFiler()
 	addrA := event.Address{AgentID: "agent-a", SessionID: "session-query-a"}
 	addrB := event.Address{AgentID: "agent-b", SessionID: "session-query-b"}
 	commitWindowTurns(t, ctx, run, addrA, 4)

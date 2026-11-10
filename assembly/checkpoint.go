@@ -88,6 +88,13 @@ const (
 // restored from it.
 var ErrCheckpointUnreadable = errors.New("assembly: the checkpoint fact states no readable checkpoint")
 
+// ErrCheckpointSurvivorUnstated reports a checkpoint naming a survivor the chain
+// states no entry for. The carrier names every survivor by identity, type,
+// summary and moment and leaves the text to the chain, so a key the chain does
+// not state is a carrier no boot can rebuild: restoring the entry beside no text
+// would present the model material the process never wrote.
+var ErrCheckpointSurvivorUnstated = errors.New("assembly: the checkpoint names a survivor the chain states no entry for")
+
 // commitFence is the quiet point of the fact pipeline: one unit of work holds it
 // from the landing of a fact to the state that fact leaves its holder in, and the
 // coordinator drains the fence before it reads any state, so a cut is taken where
@@ -332,27 +339,48 @@ func (r *Run) noteCheckpointCommit() {
 	r.mu.Lock()
 	r.checkpointCommits++
 	due := r.checkpointCommits >= r.checkpointEvery || time.Since(r.checkpointAt) >= r.checkpointPeriod
-	if due {
-		r.checkpointDuePending = true
-	}
 	r.mu.Unlock()
 	if !due {
 		return
 	}
+	r.requestCheckpoint()
+}
+
+// requestCheckpoint wakes the filer for a carrier whatever the cadence clock
+// says: the caller knows a cut is worth taking now. The request is a signal and
+// never a cut of its own, because the caller stands inside the unit of work the
+// cut would wait out — the commit that filed the material, held on the
+// quiet-point fence until the state that material leaves its holder in is
+// applied — and a cut taken there would drain the fence that asks for it. The
+// filer takes the cut on its own goroutine, where no commit of any holder is
+// held.
+//
+// A request that arrives beside a due already pending is the one due: the
+// carrier states the whole account at the cut it takes, so a later request adds
+// no state an earlier one would have missed.
+func (r *Run) requestCheckpoint() {
+	if r == nil || r.checkpointDue == nil {
+		return
+	}
+	r.mu.Lock()
+	r.checkpointDuePending = true
+	r.mu.Unlock()
 	select {
 	case r.checkpointDue <- struct{}{}:
 	default:
 	}
 }
 
-// fileCheckpoints files the carrier the commit cadence owes, from a goroutine
-// that holds no lock of this run and no lock of a state holder.
+// fileCheckpoints files the carrier whatever cadence asked for it, from a
+// goroutine that holds no lock of this run and no lock of a state holder.
 //
-// The cut asks every holder for its state, and a commit of that holder may stand
-// under the holder's own lock (the delivery flush commits its settlement under the
-// task registry lock). A commit that took the cut itself would therefore wait on
-// the holder whose commit is waiting on the cut, and no timeout breaks that
-// cycle: one side of it is a held lock. The commit signals this wait instead.
+//   - The cut asks every holder for its state, and a commit of that holder may stand under the holder's own lock (the delivery flush commits its settlement under the task registry lock). A commit that took the cut itself would therefore wait on the holder whose commit is waiting on the cut, and no timeout breaks that cycle: one side of it is a held lock. The commit signals this wait instead.
+//
+// A cut that cannot be taken is reported at ERROR: the cadence is the bound on the
+// material a restart reads, and a carrier this filer never filed widens that bound
+// silently behind a chain that keeps committing. The close files the carrier it
+// owes itself and answers the failure to its caller, so a filing that stays broken
+// reaches the process that stops the run instead of a log line alone.
 func (r *Run) fileCheckpoints(ctx context.Context) {
 	for {
 		select {
@@ -364,7 +392,7 @@ func (r *Run) fileCheckpoints(ctx context.Context) {
 			continue
 		}
 		if _, _, err := r.Checkpoint(ctx); err != nil {
-			assemblyWarn("tagent: the framework checkpoint was not filed: %v", err)
+			assemblyError("tagent: the framework checkpoint was not filed: %v", err)
 		}
 	}
 }
@@ -398,17 +426,46 @@ func (r *Run) stopCheckpointFiler() {
 	r.checkpointStopOnce.Do(func() { close(r.checkpointStop) })
 }
 
-// CheckpointAfterFold files a checkpoint after a fold produced a product: a fold
-// is the moment the projection drops material, so it is the moment the recovery
-// carrier is worth refreshing whatever the cadence says. The call is made from
-// the commit that filed the product and takes a cut of its own.
-func (r *Run) CheckpointAfterFold(ctx context.Context) {
+// fileClosingCheckpoint files the carrier a close owes the restart that reads
+// this chain: the state the run reached at the fixed point of its close, so a
+// process that stops well after its last cadence still leaves a carrier stating
+// what it settled. The filer is stopped before the close takes it, so the cut is
+// the last one the process files and no wake races the drain the close judges.
+//
+// The cut waits for the quiet point, so it is taken under the budget the close
+// was given: a run that never reached that point inside the budget answers the
+// carrier of the position it stands at, and the drain report names the work that
+// kept it there. A cut that fails for any other reason is answered to the close's
+// caller, because the bound on the next boot is that carrier and a failure to
+// state it is not a fact the run may keep to itself.
+func (r *Run) fileClosingCheckpoint(ctx context.Context, budget time.Time) error {
 	if r == nil {
-		return
+		return nil
 	}
-	if _, _, err := r.Checkpoint(ctx); err != nil {
-		assemblyWarn("tagent: the framework checkpoint after a fold was not filed: %v", err)
+	cutCtx := context.WithoutCancel(ctx)
+	if !budget.IsZero() {
+		var cancel context.CancelFunc
+		cutCtx, cancel = context.WithDeadline(cutCtx, budget)
+		defer cancel()
 	}
+	if _, _, err := r.Checkpoint(cutCtx); err != nil {
+		if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+			assemblyWarn("tagent: the close reached its budget before the final checkpoint was filed: %v", err)
+			return nil
+		}
+		return fmt.Errorf("tagent: file the checkpoint the close owes: %w", err)
+	}
+	return nil
+}
+
+// CheckpointAfterFold asks for a carrier because a fold produced a product: a
+// fold is the moment the projection drops material, so the state a restart reads
+// is worth refreshing whatever the cadence clock says. The product lands inside
+// the quiet-point fence of the commit that filed it, so this is a request and not
+// a cut — the filer takes the cut and the commit that asked for it never waits on
+// itself.
+func (r *Run) CheckpointAfterFold() {
+	r.requestCheckpoint()
 }
 
 // CheckpointFiled reports the identity of the newest checkpoint this run filed
@@ -688,7 +745,10 @@ func restoredSeedOf(seeds map[event.Address]*restoredChain, slot anchorSlot) (*r
 }
 
 // anchorEntriesOf states the projection entries one fold or one checkpoint
-// carries: the fields that name the entry as the chain states it.
+// carries: the fields that name the entry as the chain states it, beside the text
+// a fold product minted. The text of a mapped entry stays on the chain, so the
+// carrier of a projection is the size of its entries and never the size of the
+// bodies behind them.
 func anchorEntriesOf(entries []replay.ProjectionEntry) []anchorEntry {
 	out := make([]anchorEntry, 0, len(entries))
 	for _, entry := range entries {
@@ -696,7 +756,7 @@ func anchorEntriesOf(entries []replay.ProjectionEntry) []anchorEntry {
 			Key:     entry.Key,
 			Type:    entry.Type,
 			Summary: entry.Summary,
-			Content: entry.Content,
+			Content: carriedTextOf(entry),
 			Time:    entry.Time.UnixMilli(),
 		})
 	}

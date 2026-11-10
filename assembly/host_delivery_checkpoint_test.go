@@ -208,7 +208,7 @@ func TestCheckpointCarriesOpenObligationAcrossFold(t *testing.T) {
 	if owed.Content != body || owed.Lineage != "user" || owed.Agent != string(addr.AgentID) || owed.Session != string(addr.SessionID) {
 		t.Fatalf("the checkpoint states %+v, want the body, lineage and target the obligation was opened with", owed)
 	}
-	if owed.State != heldStateOf(deliveryReasonRetrying) || owed.HeldAt != heldAt.UnixMilli() {
+	if owed.State != heldStateOf(deliveryReasonRetrying) || !owed.HeldAt.Equal(heldAt) {
 		t.Fatalf("the checkpoint states %+v, want the hold it stands in and the moment it was parked", owed)
 	}
 	attempted := false

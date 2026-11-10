@@ -127,6 +127,9 @@ func (r *Run) Close(ctx context.Context, req agent.CloseRequest) (agent.DrainRep
 		Outcome:   closeOutcome(read, drained),
 		Failed:    r.failedAnswers(),
 	}
+	if err := r.fileClosingCheckpoint(judge, timeout); err != nil {
+		return report, err
+	}
 	if req.Address.IsComplete() {
 		if closeErr := r.store.CloseSession(ctx, req.Address); closeErr != nil && !errors.Is(closeErr, state.ErrUnknownTarget) {
 			return agent.DrainReport{}, closeErr

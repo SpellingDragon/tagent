@@ -84,6 +84,7 @@ func timeStampKey(base time.Time, addr event.Address, turn, position int) string
 func TestLandedSeqRidesTheWalk(t *testing.T) {
 	ctx := context.Background()
 	run := windowChainRun(t, ctx)
+	run.stopCheckpointFiler()
 	addr := event.Address{AgentID: "agent-a", SessionID: "session-walk-a"}
 	other := event.Address{AgentID: "agent-b", SessionID: "session-walk-b"}
 	commitWindowTurns(t, ctx, run, addr, 3)
