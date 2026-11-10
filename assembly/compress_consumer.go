@@ -411,33 +411,73 @@ func (c *CompressionConsumer) noteAnswered(request event.EventID) {
 	c.answered[request] = struct{}{}
 }
 
-// noteSeededJudgment notes one compression judgment the chain already carries,
-// so a restarted run executes the judgment the process before it filed instead
-// of waiting for the material to be judged a second time: the judgment is a fact
-// of the chain, and the execution is owed by the judgment whichever process
-// reads it. A judgment a product already answers executes nothing, because the
-// rebuild notes every product of the chain beside its requests.
+// judgmentOf reads one committed fact back as the judgment it states: the session
+// chain whose material was judged, the identity the judgment is quoted by, the
+// reason it was filed under and the moment it was filed. A fact of another frozen
+// type, a fact naming no session chain and a fact carrying no identity are not
+// judgments of this consumer.
 //
 // The fact states the identity and the reason the judgment is quoted by; the
 // producer and the subject were folded into the content-addressed identity when
 // the judgment was filed, and the execution matches on that identity alone, so
 // the reconstruction carries what the chain holds and invents none of what it
-// does not. A fact of another frozen type, and a judgment naming no session
-// chain, are not judgments of this consumer.
-func (c *CompressionConsumer) noteSeededJudgment(evt event.Event) {
-	if c == nil || evt.Type != event.CompressRequestType || evt.Key == "" {
-		return
+// does not. It is the one read of a judgment fact — the live consumer seats the
+// request it filed and the rebuild seats the same request from the fact — so the
+// account a restart states is the account the process before it stated.
+func judgmentOf(evt event.Event) (event.SessionID, event.CompressRequest, bool) {
+	if evt.Type != event.CompressRequestType || evt.Key == "" {
+		return "", event.CompressRequest{}, false
 	}
 	session := sessionOf(evt)
 	if session == "" {
-		return
+		return "", event.CompressRequest{}, false
 	}
-	c.Record(session, event.CompressRequest{
+	return session, event.CompressRequest{
 		ID:     evt.Key,
 		Reason: evt.Meta[event.MetaKeyEventSummary],
 		At:     evt.Timestamp,
-	})
+	}, true
 }
+
+// Reduce folds one committed compression fact into the account this consumer
+// derives: a judgment the chain carries is a batch the consumer still owes, and a
+// product answers the judgment it names, whichever process committed it. The fold
+// is the consumer's whole derivation face — the live commit and the rebuild of a
+// chain past its cut both drive it — so a restarted run reads the judgments the
+// chain filed instead of waiting for the material to be judged a second time, and
+// a judgment a product answers executes nothing.
+//
+// The fold starts no work: the judgments it seats wait for the observation duty
+// of this consumer (Execute), which the recovery never drives.
+func (c *CompressionConsumer) Reduce(ctx context.Context, evt event.Event) error {
+	if c == nil {
+		return nil
+	}
+	if session, request, judgment := judgmentOf(evt); judgment {
+		c.Record(session, request)
+		return nil
+	}
+	if product, stated := compressProductOf(evt); stated {
+		c.NoteProduct(product)
+	}
+	return nil
+}
+
+// Reduce folds one committed fact into the compression account the run mounts,
+// through the consumer that holds it.
+func (s compressStateSlice) Reduce(ctx context.Context, evt event.Event) error {
+	r := s.run
+	r.mu.Lock()
+	consumer := r.compress
+	r.mu.Unlock()
+	return consumer.Reduce(ctx, evt)
+}
+
+// DrivesObservation declares that the consumer behind this slice executes the
+// judgments it seats: the material folds and the products are filed beside the
+// state this slice states, so a recovery seats the judgments and leaves their
+// execution to the process that serves the chain.
+func (s compressStateSlice) DrivesObservation() {}
 
 // FileCompressProduct files one execution result on the chain of the session
 // whose material was folded.

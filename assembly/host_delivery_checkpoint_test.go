@@ -258,10 +258,11 @@ func TestCheckpointCarriesOpenObligationAcrossFold(t *testing.T) {
 		t.Fatalf("restore the folded account: %v", err)
 	}
 	defer deliveryTestStopRetries(recovered)
-	_, declared, attempts, err := recovered.deliveryRecoveryFacts(ctx)
+	attempts, err := recovered.replayDeliveryFacts(ctx)
 	if err != nil {
 		t.Fatalf("read the recovery facts of the restart: %v", err)
 	}
+	declared := recovered.deliveryObligations()
 	if got := declaredIdentities(declared)[identity]; got != 1 {
 		t.Fatalf("the restart declares the open obligation %d time(s), want it discovered exactly once", got)
 	}
@@ -292,7 +293,7 @@ func TestCheckpointCarriesOpenObligationAcrossFold(t *testing.T) {
 		t.Fatalf("restore the settled account: %v", err)
 	}
 	defer deliveryTestStopRetries(again)
-	if _, _, _, err := again.deliveryRecoveryFacts(ctx); err != nil {
+	if _, err := again.replayDeliveryFacts(ctx); err != nil {
 		t.Fatalf("read the recovery facts of the third process: %v", err)
 	}
 	if terminal, settled, err := again.deliverySettledOnChain(ctx, identity); err != nil || !settled || terminal != deliveryStateSent {

@@ -1034,6 +1034,20 @@ func (s projectionStateSlice) RestoreState(ctx context.Context, payload []byte) 
 	return s.run.restoreProjectionSlice(payload)
 }
 
+// Reduce folds one committed fact into the survivors of its session chain. The
+// fold is the one derivation of the mapped sequence: the live commit drives it,
+// and the replay of a chain past its cut folds the same entries through the same
+// step, so a restart presents the sequence the process before it presented
+// instead of a second reading of the same facts.
+func (s projectionStateSlice) Reduce(ctx context.Context, evt event.Event) error {
+	entry, mapped := mappedEntryOf(evt)
+	if !mapped {
+		return nil
+	}
+	s.run.foldMapped(ctx, evt, entry)
+	return nil
+}
+
 // projectionSlice states the survivors of every session chain the run presents.
 func (r *Run) projectionSlice() ([]byte, error) {
 	return r.projectionSliceWhere(nil)

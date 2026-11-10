@@ -105,9 +105,13 @@ func TestFactsStayInTheirSessionWindow(t *testing.T) {
 		run := factWindowTestRun(t, ctx)
 		addr := factWindowAddr
 		for at := 0; at < noWindowResidentFacts+64; at++ {
-			run.seedFact(windowEvent(addr, fmt.Sprintf("replay-%05d", at), "inv-window-replay", "the replayed material", event.TypeExternalInput))
+			if err := run.seedFact(ctx, windowEvent(addr, fmt.Sprintf("replay-%05d", at), "inv-window-replay", "the replayed material", event.TypeExternalInput)); err != nil {
+				t.Fatalf("seed the replayed fact: %v", err)
+			}
 		}
-		run.seedFact(windowEvent(addr, "replay-closing", "inv-window-replay", "the answer the earlier process committed", event.TypeAgentOutput))
+		if err := run.seedFact(ctx, windowEvent(addr, "replay-closing", "inv-window-replay", "the answer the earlier process committed", event.TypeAgentOutput)); err != nil {
+			t.Fatalf("seed the closing fact: %v", err)
+		}
 		run.trimSeededFacts()
 
 		facts := run.SessionFacts(addr)
@@ -155,10 +159,14 @@ func TestDeliveryAfterRestartKeepsTheTurnAnswer(t *testing.T) {
 	run := factWindowTestRun(t, ctx)
 	addr := factWindowAddr
 	for at := 0; at < noWindowResidentFacts+64; at++ {
-		run.seedFact(windowEvent(addr, fmt.Sprintf("restart-%05d", at), "inv-window-earlier", "the material the restart replays", event.TypeExternalInput))
+		if err := run.seedFact(ctx, windowEvent(addr, fmt.Sprintf("restart-%05d", at), "inv-window-earlier", "the material the restart replays", event.TypeExternalInput)); err != nil {
+			t.Fatalf("seed the replayed fact: %v", err)
+		}
 	}
-	run.seedFact(windowEvent(addr, "restart-closing", "inv-window-earlier",
-		"the answer the earlier process delivered", event.TypeAgentOutput))
+	if err := run.seedFact(ctx, windowEvent(addr, "restart-closing", "inv-window-earlier",
+		"the answer the earlier process delivered", event.TypeAgentOutput)); err != nil {
+		t.Fatalf("seed the closing fact: %v", err)
+	}
 	run.trimSeededFacts()
 	if got := len(run.SessionFacts(addr)); got != noWindowResidentFacts {
 		t.Fatalf("the replayed chain = %d facts, want the window %d", got, noWindowResidentFacts)

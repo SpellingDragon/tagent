@@ -1508,3 +1508,461 @@ func TestReplayFiresNoSettleDuringRebuild(t *testing.T) {
 		t.Fatalf("the boot sent %d delivery attempt(s), want a rebuild that drives no observation", attempts)
 	}
 }
+
+// foldRecorder is a consumer state slice a check counts the reducers of: it
+// derives its state from the facts the seam folds and reports every attempt, so a
+// check reads how many times one fact reached one consumer.
+type foldRecorder struct {
+	name string
+	mu   sync.Mutex
+	// folded counts the fold attempts per identity, and derived states what each
+	// attempt applied, so a check compares the state one fact derived live with the
+	// state the same fact derives beside a rebuild.
+	folded  map[event.EventID]int
+	derived map[event.EventID]string
+}
+
+// StateName reports the name the recorded slice is keyed by.
+func (s *foldRecorder) StateName() string { return s.name }
+
+// SnapshotState states what the folds derived, in the identity order the carrier
+// renders the same bytes for the same facts.
+func (s *foldRecorder) SnapshotState(context.Context) ([]byte, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	keys := make([]string, 0, len(s.derived))
+	for key := range s.derived {
+		keys = append(keys, string(key))
+	}
+	slices.Sort(keys)
+	stated := make([]string, 0, len(keys))
+	for _, key := range keys {
+		stated = append(stated, key+"="+s.derived[event.EventID(key)])
+	}
+	return json.Marshal(stated)
+}
+
+// RestoreState puts one stated account back.
+func (s *foldRecorder) RestoreState(_ context.Context, payload []byte) error {
+	var stated []string
+	if err := json.Unmarshal(payload, &stated); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.derived == nil {
+		s.derived = map[event.EventID]string{}
+	}
+	for _, line := range stated {
+		at := strings.IndexByte(line, '=')
+		if at <= 0 {
+			return fmt.Errorf("the recorded slice states no entry in %q", line)
+		}
+		if _, held := s.derived[event.EventID(line[:at])]; held {
+			continue
+		}
+		s.derived[event.EventID(line[:at])] = line[at+1:]
+	}
+	return nil
+}
+
+// Reduce folds one fact into the recorded account and counts the attempt.
+func (s *foldRecorder) Reduce(_ context.Context, evt event.Event) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.folded == nil {
+		s.folded = map[event.EventID]int{}
+	}
+	if s.derived == nil {
+		s.derived = map[event.EventID]string{}
+	}
+	s.folded[evt.Key]++
+	s.derived[evt.Key] = evt.Type + ":" + evt.Message.Content
+	return nil
+}
+
+// folds reports the fold attempts the recorder counted, per identity.
+func (s *foldRecorder) folds() map[event.EventID]int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make(map[event.EventID]int, len(s.folded))
+	for key, count := range s.folded {
+		out[key] = count
+	}
+	return out
+}
+
+// derivedOf reports the state the recorder derived for one identity.
+func (s *foldRecorder) derivedOf(key event.EventID) (string, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	state, held := s.derived[key]
+	return state, held
+}
+
+// recordingBoot mounts the named recorder the moment the run opens, so the
+// restore and the rebuild the same boot runs reach it.
+func recordingBoot(recorder *foldRecorder) Option {
+	return withBootConfigReconcile(func(ctx context.Context, run *Run, decl *config.Declaration, agents map[event.AgentID]NativeAgent) error {
+		if _, err := run.RegisterStateSlice(recorder); err != nil {
+			return err
+		}
+		_, err := run.Publish(ctx, decl, agents)
+		return err
+	})
+}
+
+// projectionKeysOf reports the mapped sequence one chain presents, in display order.
+func projectionKeysOf(t *testing.T, run *Run, addr event.Address) []event.EventID {
+	t.Helper()
+	entries, carried := run.ReplayEntries(addr.SessionID)
+	if !carried {
+		t.Fatalf("the chain %v presents no mapped sequence", addr)
+	}
+	keys := make([]event.EventID, 0, len(entries))
+	for _, entry := range entries {
+		keys = append(keys, entry.Key)
+	}
+	return keys
+}
+
+// obligationLinesOf states the obligations an account owes as identity=state lines,
+// in the order the account answers them.
+func obligationLinesOf(obligations []deliverySettlement) []string {
+	lines := make([]string, 0, len(obligations))
+	for _, obligation := range obligations {
+		lines = append(lines, obligation.identity+"="+obligation.state)
+	}
+	return lines
+}
+
+// TestReducerDerivesEqualAtRuntimeAndRecovery pins the one derivation path of the state seam.
+//   - positive: one chain's projection, compression account and delivery obligations are entry-equal live and after a boot
+//   - negative: a consumer that rebuilds its state through a reader of its own answers a different account, which the entry comparison of each of the three rejects
+//   - consumer: the real boot entry (restoreCheckpointState → seedAnchoredReplay → seedFact → StateRegistry.Reduce)
+//   - consumer: the live commit entry (commitFactNoCadence → StateRegistry.Reduce)
+//
+// 契约: docs/wiki/platform/platform-subsystems.md#framework-checkpoint
+func TestReducerDerivesEqualAtRuntimeAndRecovery(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
+	defer cancel()
+	storage := WithStorage(ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: t.TempDir()})
+	addr := event.Address{AgentID: deliveryTestAgent, SessionID: "session-reducer-parity"}
+	sourceAddr := event.Address{AgentID: deliveryTestAgent, SessionID: "session-reducer-parity-source"}
+	source := windowChainRun(t, ctx, storage)
+	source.stopCheckpointFiler()
+	sourceHost := deliveryTestHost(ctx, source, nil)
+	if err := sourceHost.registerDeliverySlice(); err != nil {
+		t.Fatalf("mount the delivery account of the live process: %v", err)
+	}
+	commitSessionTurns(t, ctx, source, addr, "reducer-parity", 10)
+	if identity := declareObligationTargeting(t, ctx, source, addr, addr, "reducer-parity-owed", "the body the chain owes"); identity == "" {
+		t.Fatal("the declaration seated no identity")
+	}
+	liveProjection := projectionKeysOf(t, source, addr)
+	liveCompress := compressAccountOf(t, source.compress)
+	liveObligations := obligationLinesOf(sourceHost.deliveryObligations())
+	if len(liveProjection) == 0 || liveCompress.judgedCount() == 0 || len(liveObligations) == 0 {
+		t.Fatalf("the fixture derived %d projection entries, %d judgments and %d obligations, want every consumer to have derived something",
+			len(liveProjection), liveCompress.judgedCount(), len(liveObligations))
+	}
+	if _, _, err := source.CheckpointSession(ctx, addr); err != nil {
+		t.Fatalf("file the carrier of the chain: %v", err)
+	}
+	declareObligationTargeting(t, ctx, source, sourceAddr, addr, "reducer-parity-after-cut", "the body the chain owes past the cut")
+	liveObligations = obligationLinesOf(sourceHost.deliveryObligations())
+	if _, err := source.Close(ctx, agent.CloseRequest{Timeout: time.Now()}); err != nil {
+		t.Fatalf("close the live process: %v", err)
+	}
+
+	booted := windowChainRun(t, ctx, storage)
+	booted.stopCheckpointFiler()
+	bootedHost := deliveryTestHost(ctx, booted, nil)
+	if err := bootedHost.registerDeliverySlice(); err != nil {
+		t.Fatalf("mount the delivery account of the boot: %v", err)
+	}
+	if _, err := bootedHost.replayDeliveryFacts(ctx); err != nil {
+		t.Fatalf("fold the delivery facts past the cut: %v", err)
+	}
+	bootedProjection := projectionKeysOf(t, booted, addr)
+	if !slices.Equal(bootedProjection, liveProjection) {
+		t.Fatalf("the boot presents %d projection entries beside the %d the live process presents: %v against %v",
+			len(bootedProjection), len(liveProjection), bootedProjection, liveProjection)
+	}
+	requireSameAccount(t, "booted", compressAccountOf(t, booted.compress), liveCompress)
+	bootedObligations := obligationLinesOf(bootedHost.deliveryObligations())
+	if !slices.Equal(bootedObligations, liveObligations) {
+		t.Fatalf("the boot owes %v beside the %v the live process owes", bootedObligations, liveObligations)
+	}
+}
+
+// TestSnapshotFlushesNothing pins the pure read of a cut.
+//   - positive: the cut answers beside a holder that proves no lock of the run is held while its state is read
+//   - positive: the cut leaves the ledger as it found it, so the carrier it files is the only write
+//   - negative: a cut that read its holders under a lock of the run fails the holder's proof, and one that flushed state grows the ledger
+//   - consumer: Run.Checkpoint, the cut the cadence and the close file through
+//
+// 契约: docs/wiki/platform/platform-subsystems.md#framework-checkpoint
+func TestSnapshotFlushesNothing(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+	run := windowChainRun(t, ctx, WithStorage(ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: t.TempDir()}))
+	run.stopCheckpointFiler()
+	holder := &pureReadSlice{run: run}
+	if _, err := run.RegisterStateSlice(holder); err != nil {
+		t.Fatalf("register the pure-read holder: %v", err)
+	}
+	addr := event.Address{AgentID: "agent-a", SessionID: "session-pure-read"}
+	commitSessionTurns(t, ctx, run, addr, "pure-read", 3)
+
+	before := run.CommittedFacts()
+	key, filed, err := run.Checkpoint(ctx)
+	if err != nil || !filed {
+		t.Fatalf("file the cut = (%t, %v), want a filed carrier", filed, err)
+	}
+	if holder.lockedHeld {
+		t.Fatal("the cut read the holders beside a lock of the run held, want a read taken with no lock of the run")
+	}
+	if after := run.CommittedFacts(); after != before {
+		t.Fatalf("the cut left %d committed fact(s) beside the %d before it, want the carrier on the store alone and nothing a holder flushed into the ledger",
+			after, before)
+	}
+	if stated := carrierOfIdentity(t, ctx, run, key); !slices.Contains(stated.CheckpointSliceNames(), holder.StateName()) {
+		t.Fatalf("the carrier names the slices %v, want the pure-read holder's", stated.CheckpointSliceNames())
+	}
+}
+
+// pureReadSlice is a state holder whose snapshot proves the read is pure: it takes
+// the run lock, which the cut leaves free, and records whether the lock was held.
+type pureReadSlice struct {
+	run        *Run
+	lockedHeld bool
+}
+
+// StateName reports the name the slice is keyed by.
+func (s *pureReadSlice) StateName() string { return "assembly.pure-read" }
+
+// SnapshotState states the slice and reports a run lock held beside the read.
+func (s *pureReadSlice) SnapshotState(context.Context) ([]byte, error) {
+	if !s.run.mu.TryLock() {
+		s.lockedHeld = true
+		return nil, errors.New("the cut read the holder beside the run lock")
+	}
+	s.run.mu.Unlock()
+	return []byte("{}"), nil
+}
+
+// RestoreState puts the stated slice back.
+func (s *pureReadSlice) RestoreState(context.Context, []byte) error { return nil }
+
+// TestSeedFactReusesTheReducer pins that a rebuild folds its facts through the reducer the live commit drives.
+//   - positive: every fact the boot folds is a fact the live process folded, and it derives the same state from it
+//   - negative: a fact the rebuild reaches that the live process never folded, and one whose derived state differs from the live state, both fail
+//   - consumer: seedFact (assembly/run.go) over StateRegistry.Reduce, driven by the real boot entry
+//
+// 契约: docs/wiki/platform/platform-subsystems.md#framework-checkpoint
+func TestSeedFactReusesTheReducer(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+	storage := WithStorage(ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: t.TempDir()})
+	addr := event.Address{AgentID: "agent-a", SessionID: "session-seed-reducer"}
+	live := &foldRecorder{name: "assembly.seed-reducer"}
+	source := windowChainRun(t, ctx, storage, recordingBoot(live))
+	source.stopCheckpointFiler()
+	commitSessionTurns(t, ctx, source, addr, "seed-reducer", 6)
+	if liveFolds := live.folds(); len(liveFolds) == 0 {
+		t.Fatal("the live commit folded nothing, so the reuse proves nothing")
+	}
+	if _, _, err := source.CheckpointSession(ctx, addr); err != nil {
+		t.Fatalf("file the carrier of the chain: %v", err)
+	}
+	if _, err := source.Close(ctx, agent.CloseRequest{Timeout: time.Now().Add(2 * time.Second)}); err != nil {
+		t.Fatalf("close the live process: %v", err)
+	}
+
+	booted := &foldRecorder{name: "assembly.seed-reducer"}
+	rebuilt := windowChainRun(t, ctx, storage, recordingBoot(booted))
+	rebuilt.stopCheckpointFiler()
+	bootFolds := booted.folds()
+	if len(bootFolds) == 0 {
+		t.Fatal("the boot folded no fact through the recorder, want the reducer the live commit drives")
+	}
+	for key := range bootFolds {
+		if _, folded := live.folds()[key]; !folded {
+			t.Fatalf("the boot folded the fact %s the live process never folded", key)
+		}
+		bootedState, _ := booted.derivedOf(key)
+		liveState, _ := live.derivedOf(key)
+		if bootedState != liveState {
+			t.Fatalf("the fact %s derived %q beside the boot and %q beside the live process, want one derivation", key, bootedState, liveState)
+		}
+	}
+}
+
+// TestRecoveryDerivesNoSecondTime pins that the rebuild folds each fact once.
+//   - positive: each fact the boot replays reaches the reducer exactly once
+//   - negative: a second derivation of the same fact beside the rebuild fails the count, which is what a bespoke recovery reader produces
+//   - negative: the fold of the delivery account sends nothing, so the observation duty is not driven inside the recovery
+//   - consumer: seedFact over StateRegistry.Reduce, and the delivery fold replayDeliveryFacts
+//
+// 契约: docs/wiki/reliability/durable-delivery.md#envelope-states
+func TestRecoveryDerivesNoSecondTime(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
+	defer cancel()
+	storage := WithStorage(ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: t.TempDir()})
+	addr := event.Address{AgentID: deliveryTestAgent, SessionID: "session-single-derivation"}
+	live := &foldRecorder{name: "assembly.single-derivation"}
+	source := windowChainRun(t, ctx, storage, recordingBoot(live))
+	source.stopCheckpointFiler()
+	sourceHost := deliveryTestHost(ctx, source, newDeliveryTestSender(nil))
+	if err := sourceHost.registerDeliverySlice(); err != nil {
+		t.Fatalf("mount the delivery account of the live process: %v", err)
+	}
+	commitSessionTurns(t, ctx, source, addr, "single-derivation", 8)
+	declareObligationTargeting(t, ctx, source, addr, addr, "single-derivation-owed", "the body the chain owes")
+	if _, _, err := source.CheckpointSession(ctx, addr); err != nil {
+		t.Fatalf("file the carrier of the chain: %v", err)
+	}
+	deliveryTestStopRetries(sourceHost)
+	if _, err := source.Close(ctx, agent.CloseRequest{Timeout: time.Now().Add(2 * time.Second)}); err != nil {
+		t.Fatalf("close the live process: %v", err)
+	}
+
+	booted := &foldRecorder{name: "assembly.single-derivation"}
+	rebuilt := windowChainRun(t, ctx, storage, recordingBoot(booted))
+	rebuilt.stopCheckpointFiler()
+	bootFolds := booted.folds()
+	if len(bootFolds) == 0 {
+		t.Fatal("the boot folded no fact, so the count proves nothing")
+	}
+	for key, count := range bootFolds {
+		if count != 1 {
+			t.Fatalf("the boot folded the fact %s %d time(s), want one derivation per fact", key, count)
+		}
+	}
+
+	sender := newDeliveryTestSender(nil)
+	bootedHost := deliveryTestHost(ctx, rebuilt, sender)
+	if err := bootedHost.registerDeliverySlice(); err != nil {
+		t.Fatalf("mount the delivery account of the boot: %v", err)
+	}
+	if _, err := bootedHost.replayDeliveryFacts(ctx); err != nil {
+		t.Fatalf("fold the delivery facts past the cut: %v", err)
+	}
+	defer deliveryTestStopRetries(bootedHost)
+	sender.mu.Lock()
+	attempts := len(sender.attempts)
+	sender.mu.Unlock()
+	if attempts != 0 {
+		t.Fatalf("the fold sent %d delivery attempt(s), want the account seated without driving the duty", attempts)
+	}
+}
+
+// TestNewConsumerRegistersSliceOnly pins that a slice is all a consumer mounts.
+//   - positive: a consumer registered through Run.RegisterStateSlice alone is stated by the cut and handed back by the boot
+//   - positive: the state it reads after the boot is the state the carrier and the tail derive
+//   - negative: a consumer the framework named a hook for would need wiring beside the registration, which this consumer has none of
+//   - consumer: Run.RegisterStateSlice at boot, then the real boot entry that restores the carrier and replays the tail into it
+//
+// 契约: docs/wiki/platform/platform-subsystems.md#framework-checkpoint
+func TestNewConsumerRegistersSliceOnly(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+	storage := WithStorage(ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: t.TempDir()})
+	addr := event.Address{AgentID: "agent-a", SessionID: "session-new-consumer"}
+	live := &foldRecorder{name: "assembly.new-consumer"}
+	source := windowChainRun(t, ctx, storage, recordingBoot(live))
+	source.stopCheckpointFiler()
+	commitSessionTurns(t, ctx, source, addr, "new-consumer", 4)
+	if !slices.Contains(source.StateRegistry().Names(), live.StateName()) {
+		t.Fatalf("the registry names %v, want the registered slice among them", source.StateRegistry().Names())
+	}
+	if len(live.folds()) == 0 {
+		t.Fatal("the registered consumer folded nothing, so the cut states nothing about it")
+	}
+	key, filed, err := source.Checkpoint(ctx)
+	if err != nil || !filed {
+		t.Fatalf("file the carrier of the run = (%t, %v), want a filed fact", filed, err)
+	}
+	if !slices.Contains(carrierOfIdentity(t, ctx, source, key).CheckpointSliceNames(), live.StateName()) {
+		t.Fatalf("the carrier names the slices %v, want the registered consumer's", carrierOfIdentity(t, ctx, source, key).CheckpointSliceNames())
+	}
+	if _, err := source.Close(ctx, agent.CloseRequest{Timeout: time.Now().Add(2 * time.Second)}); err != nil {
+		t.Fatalf("close the live process: %v", err)
+	}
+
+	booted := &foldRecorder{name: "assembly.new-consumer"}
+	rebuilt := windowChainRun(t, ctx, storage, recordingBoot(booted))
+	rebuilt.stopCheckpointFiler()
+	if len(booted.folds()) == 0 {
+		t.Fatal("the boot restored and folded nothing into the registered slice, want the carrier and the tail it states")
+	}
+	bootedState, err := booted.SnapshotState(ctx)
+	if err != nil {
+		t.Fatalf("state the restored slice: %v", err)
+	}
+	if len(string(bootedState)) <= len("null") {
+		t.Fatalf("the restored slice states %q, want the entries the carrier and the tail derive", bootedState)
+	}
+}
+
+// TestNoPerConsumerDispatchPath pins that the seam dispatches by declaration.
+//   - positive: two consumers registered under different names, one of them a name the framework itself uses, fold exactly the same facts
+//   - negative: a dispatch that routed a fact by the consumer's name would answer different sets for the two names
+//   - consumer: StateRegistry.Reduce over the live commit entry and the rebuild entry, which name no consumer
+//
+// 契约: docs/wiki/platform/platform-subsystems.md#framework-checkpoint
+func TestNoPerConsumerDispatchPath(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+	run := windowChainRun(t, ctx, WithStorage(ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: t.TempDir()}))
+	run.stopCheckpointFiler()
+	named := &foldRecorder{name: checkpointSliceDelivery}
+	free := &foldRecorder{name: "assembly.no-dispatch"}
+	for _, recorder := range []*foldRecorder{named, free} {
+		if _, err := run.RegisterStateSlice(recorder); err != nil {
+			t.Fatalf("register the %q slice: %v", recorder.StateName(), err)
+		}
+	}
+	addr := event.Address{AgentID: deliveryTestAgent, SessionID: "session-no-dispatch"}
+	commitSessionTurns(t, ctx, run, addr, "no-dispatch", 3)
+	declareObligationTargeting(t, ctx, run, addr, addr, "no-dispatch-owed", "the body of the no-dispatch chain")
+	if err := run.fileCompressRequest(ctx, addr.SessionID, event.CompressRequest{
+		ID:     "no-dispatch-judgment",
+		Reason: "the material of the no-dispatch chain",
+		At:     checkpointBase(),
+	}); err != nil {
+		t.Fatalf("file the judgment of the no-dispatch chain: %v", err)
+	}
+	if _, err := run.CommitToSession(ctx, addr, event.Event{
+		Key:       deliverySettlementKey("no-dispatch-owed", deliveryStateSent),
+		Type:      deliverySettlementType,
+		Timestamp: checkpointBase(),
+		Message:   model.Message{Role: model.RoleUser, Content: "no-dispatch settlement"},
+		Meta: map[string]string{
+			event.MetaKeyEventSummary: deliverySettlementSummary,
+			deliveryMetaIdentity:      "no-dispatch-owed",
+			deliveryMetaState:         deliveryStateSent,
+			deliveryMetaTargetAgent:   string(addr.AgentID),
+			deliveryMetaTargetSession: string(addr.SessionID),
+		},
+		Owner: addr, Source: addr, Target: addr,
+	}); err != nil {
+		t.Fatalf("commit the settlement of the no-dispatch chain: %v", err)
+	}
+	namedFolds := named.folds()
+	freeFolds := free.folds()
+	if len(namedFolds) == 0 {
+		t.Fatal("the named consumer folded nothing, so the dispatch comparison proves nothing")
+	}
+	if len(namedFolds) != len(freeFolds) {
+		t.Fatalf("the %q consumer folded %d fact(s) and the %q consumer folded %d, want the same set from the same facts",
+			named.StateName(), len(namedFolds), free.StateName(), len(freeFolds))
+	}
+	for key := range namedFolds {
+		if _, folded := freeFolds[key]; !folded {
+			t.Fatalf("the %q consumer folded the fact %s and the %q consumer did not, so the dispatch read a consumer name",
+				named.StateName(), key, free.StateName())
+		}
+	}
+}

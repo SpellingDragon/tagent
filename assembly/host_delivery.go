@@ -1714,29 +1714,106 @@ func (h *Host) restorePendingDeliveries(ctx context.Context) error {
 	return h.restoreEventifiedDeliveries(ctx)
 }
 
-// deliveryRecoveryFacts returns the latest settlement per obligation beside
-// every owed declaration and the highest retry attempt recorded per obligation.
-// The account the newest checkpoint restored is the state the facts below its cut
-// produced, so only the facts that landed past the cut are read again: the
-// obligations of a long-lived store cost what is still in flight, never the whole
-// chain the account already settled. A store holding no checkpoint, and an
-// in-memory run beside no durable history, answer the facts the run still holds.
-func (h *Host) deliveryRecoveryFacts(ctx context.Context) (map[string]deliverySettlement, []deliverySettlement, map[string]int, error) {
-	states := map[string]deliverySettlement{}
-	declared := make([]deliverySettlement, 0, 8)
+// Reduce folds one committed fact into the delivery account: the declaration an
+// answer carries enters the account under the identity, body, target, lineage and
+// moment it stated, and a settlement fact moves the obligation it names to the
+// state it records. The fold is the account's whole derivation face — the live
+// commit and the replay of the chain past a cut both drive it — so an obligation
+// a restart owes is the obligation the process before it owed, derived from the
+// same facts instead of rebuilt by a reader of its own.
+//
+// The fold sends nothing and starts nothing: the work the account owes is the
+// duty of this consumer (see DrivesObservation), and a recovery folds the account
+// and leaves the duty to the process that serves it.
+func (s deliveryStateSlice) Reduce(ctx context.Context, evt event.Event) error {
+	if s.host == nil {
+		return nil
+	}
+	return s.host.reduceDeliveryFact(ctx, evt)
+}
+
+// DrivesObservation declares that the host drives the deliveries this slice
+// states: the owed bodies leave through the sender and the retrying obligations
+// run their bounded backoff beside the account. A recovery seats the account and
+// fires none of it.
+func (s deliveryStateSlice) DrivesObservation() {}
+
+// reduceDeliveryFact folds one committed fact into the account of this host.
+func (h *Host) reduceDeliveryFact(ctx context.Context, evt event.Event) error {
+	if settlement, stated := settlementOf(evt); stated {
+		h.applyDeliverySettlement(settlement)
+		return nil
+	}
+	if declaration, declared := declaredObligationOf(evt); declared {
+		h.noteHeldSeq(declaration.identity)
+		h.applyDeclaredObligation(evt)
+	}
+	return nil
+}
+
+// applyDeliverySettlement seats one settlement fact in the account: the state the
+// fact records is the state its obligation stands at, a held state parks the body
+// under the moment the fact recorded, and a settled state releases the hold the
+// receipt closes. The seating is idempotent by the identity the fact names, so a
+// settlement the live write applied and the replay past a cut folds again leaves
+// the account in one state.
+func (h *Host) applyDeliverySettlement(settlement deliverySettlement) {
+	if h == nil || settlement.identity == "" {
+		return
+	}
+	h.noteHeldSeq(settlement.identity)
+	session := settlement.delivery.Target.SessionID
+	if settlement.state != "" && settlement.state != deliveryStateOwed && !deliveryStateSettled(settlement.state) {
+		heldAt := settlement.heldAt
+		if heldAt.IsZero() {
+			heldAt = settlement.fact.Timestamp
+		}
+		h.parkHeld(settlement.identity, settlement.delivery, heldAt)
+	}
+	if deliveryStateSettled(settlement.state) {
+		h.dropHeld(session, settlement.identity)
+	}
+	h.noteDeliveryState(session, settlement.identity, settlement.state)
+}
+
+// noteHeldSeq keeps the minting sequence of this host past every identity the
+// chain names, so a restart that mints a host-local identity never takes one the
+// chain already states.
+func (h *Host) noteHeldSeq(identity string) {
+	if h == nil || identity == "" {
+		return
+	}
+	seq := deliveryHeldSeq(identity)
+	h.mu.Lock()
+	if seq > h.heldSeq {
+		h.heldSeq = seq
+	}
+	h.mu.Unlock()
+}
+
+// replayDeliveryFacts rebuilds the delivery account of this host from the fact
+// chain alone: every settlement and declaration fact committed past the cut the
+// newest delivery slice states is folded through the same reducer the live commit
+// drives, and the redrive each obligation stands at is read beside it.
+// - The account the newest carrier restored is the state the facts below its cut produced, so only the facts past the cut are folded: the obligations of a long-lived store cost what is still in flight, never the whole chain the account already settled.
+// - A store holding no carrier cut folds the facts the chain holds, which is the whole chain in commit order and the same bound the account has always paid beside no carrier.
+// - The retry attempt facts are not account state: they are the clock of the duty that sends the obligation, so they are collected here for the drive instead of seated in the account.
+//
+// A settlement fact that cannot be decoded refuses the boot by name: the host
+// never starts beside an obligation it cannot honor.
+func (h *Host) replayDeliveryFacts(ctx context.Context) (map[string]int, error) {
 	attempts := map[string]int{}
+	for _, retry := range h.retryConsumer().pendingRedrives() {
+		if retry.Identity != "" && retry.Attempt > attempts[retry.Identity] {
+			attempts[retry.Identity] = retry.Attempt
+		}
+	}
 	r := h.run
 	r.mu.Lock()
 	tier := r.tier
 	r.mu.Unlock()
-	if h.restoredDelivery {
-		h.collectRestoredAccount(states, &declared, attempts)
-	}
 	if tier == nil {
-		for _, evt := range r.factWindowEvents() {
-			collectDeliveryRecoveryFact(evt, states, &declared, attempts)
-		}
-		return states, declared, attempts, nil
+		return attempts, nil
 	}
 	allowed := map[int]bool{}
 	for _, partition := range r.registeredPartitions() {
@@ -1752,80 +1829,115 @@ func (h *Host) deliveryRecoveryFacts(ctx context.Context) (map[string]deliverySe
 		}
 		evt := body.Event()
 		evt.Key = stored.Key
-		collectDeliveryRecoveryFact(evt, states, &declared, attempts)
-		return nil
+		if identity, attempt, retried := deliveryRetryAttemptOf(evt); retried {
+			if attempt > attempts[identity] {
+				attempts[identity] = attempt
+			}
+			return nil
+		}
+		return h.reduceDeliveryFact(ctx, evt)
 	})
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, err
 	}
-	return states, declared, attempts, nil
+	return attempts, nil
 }
 
-// collectRestoredAccount folds the account the checkpoint restored into the
-// recovery set: every settlement state the account remembers beside the
-// obligations it still owes with the delivery and hold moment they carry, and
-// the redrive each of them stands at, so a restart resumes the bounded backoff
-// where the process before it stopped instead of starting it over. The
-// declarations the carrier stated are folded beside the review table: both stand
-// owed a send, and the state each carries tells the recovery which table it
-// belongs to.
-func (h *Host) collectRestoredAccount(states map[string]deliverySettlement, declared *[]deliverySettlement, attempts map[string]int) {
+// deliveryObligations reports the obligations the account still owes, in identity
+// order: the declarations no settlement answered, the holds the review table
+// parked and the unsettled states the settlement facts folded in. The settled
+// states are left out — the cut states them and the chain answers any one of them
+// by its exact key — so the drive costs the work in flight and never the history
+// the account already settled.
+func (h *Host) deliveryObligations() []deliverySettlement {
+	if h == nil {
+		return nil
+	}
 	h.mu.Lock()
-	for _, account := range h.deliveryAccounts {
-		for identity, state := range account.states {
-			states[identity] = deliverySettlement{identity: identity, state: state}
+	defer h.mu.Unlock()
+	out := make([]deliverySettlement, 0, len(h.deliveryAccounts))
+	seen := make(map[string]bool, len(h.deliveryAccounts))
+	at := func(identity, state string, held *heldDelivery) {
+		if identity == "" || seen[identity] || deliveryStateSettled(state) {
+			return
 		}
+		seen[identity] = true
+		settlement := deliverySettlement{identity: identity, state: state}
+		if held != nil {
+			settlement.delivery = held.delivery
+			settlement.heldAt = held.heldAt
+		}
+		out = append(out, settlement)
 	}
 	for _, account := range h.deliveryAccounts {
 		for identity, held := range account.held {
-			if held == nil {
-				continue
-			}
-			*declared = append(*declared, deliverySettlement{
-				identity: identity,
-				state:    account.states[identity],
-				delivery: held.delivery,
-				heldAt:   held.heldAt,
-			})
+			at(identity, account.states[identity], held)
 		}
-		for identity, held := range account.declared {
-			if held == nil {
-				continue
-			}
-			if _, parked := account.held[identity]; parked {
-				continue
-			}
-			*declared = append(*declared, deliverySettlement{
-				identity: identity,
-				state:    account.states[identity],
-				delivery: held.delivery,
-				heldAt:   held.heldAt,
-			})
+		for identity, declared := range account.declared {
+			at(identity, account.states[identity], declared)
+		}
+		for identity, state := range account.states {
+			at(identity, state, nil)
 		}
 	}
-	h.mu.Unlock()
-	for _, retry := range h.retryConsumer().pendingRedrives() {
-		if retry.Identity == "" || retry.Attempt <= attempts[retry.Identity] {
-			continue
-		}
-		attempts[retry.Identity] = retry.Attempt
-	}
-	sort.Slice(*declared, func(i, j int) bool { return (*declared)[i].identity < (*declared)[j].identity })
+	sort.Slice(out, func(i, j int) bool { return out[i].identity < out[j].identity })
+	return out
 }
 
-// collectDeliveryRecoveryFact folds one committed fact into the recovery set.
-func collectDeliveryRecoveryFact(evt event.Event, states map[string]deliverySettlement, declared *[]deliverySettlement, attempts map[string]int) {
-	if identity, attempt, ok := deliveryRetryAttemptOf(evt); ok {
-		if attempt > attempts[identity] {
-			attempts[identity] = attempt
+// driveRestoredDeliveries drives the duty the delivery slice declares over the
+// account the reducer seated: an obligation a settlement already closed is left
+// as it stands, a held one waits again under the identity and moment the chain
+// recorded, and an owed one is delivered through the review ruling the live path
+// applies — or retired when its target is not the entry. A held(retrying)
+// obligation resumes its bounded backoff at the attempt the chain records.
+//
+//   - the newest settlement fact decides the state of an obligation the account states no state for, and the state of one whose body the account does not carry: a restored owed entry whose settlement already landed is never sent a second time.
+//   - the open identities are the work in flight, so the probe stays bounded by them and never by the settled history.
+func (h *Host) driveRestoredDeliveries(ctx context.Context, attempts map[string]int) error {
+	resumed := make(map[string]event.SessionID)
+	for _, obligation := range h.deliveryObligations() {
+		settlement := obligation
+		if settlement.state == "" || settlement.delivery.Content == "" {
+			exact, stated, err := h.settlementStateOf(ctx, settlement.identity)
+			if err != nil {
+				return err
+			}
+			if stated {
+				settlement = exact
+			}
+		}
+		if err := h.restoreObligation(ctx, settlement); err != nil {
+			return err
+		}
+		if settlement.state == heldStateOf(deliveryReasonRetrying) {
+			resumed[settlement.identity] = settlement.delivery.Target.SessionID
 		}
 	}
-	if settlement, ok := settlementOf(evt); ok {
-		states[settlement.identity] = settlement
+	identities := make([]string, 0, len(resumed))
+	for identity := range resumed {
+		identities = append(identities, identity)
 	}
-	if declaration, ok := declaredObligationOf(evt); ok {
-		*declared = append(*declared, declaration)
+	sort.Strings(identities)
+	for _, identity := range identities {
+		session := resumed[identity]
+		if state, known := h.deliveryStateOf(session, identity); !known || state != heldStateOf(deliveryReasonRetrying) {
+			continue
+		}
+		held, parked := h.parkedDelivery(identity)
+		if !parked {
+			continue
+		}
+		attempt := attempts[identity]
+		if attempt >= deliveryRetryLimit {
+			if writeErr := h.writeDeliveryState(ctx, identity, held.delivery, heldStateOf(deliveryReasonRetryExhausted), time.Time{}); writeErr != nil {
+				assemblyWarn("tagent: the exhausted retry state of %s did not commit beside the restart: %v", identity, writeErr)
+			}
+			assemblyInfo("tagent: the redelivery of %s refused beside the restart: the chain records %d attempts at the bound", identity, attempt)
+			continue
+		}
+		h.retryConsumer().schedule(identity, held.delivery, attempt)
 	}
+	return nil
 }
 
 // declaredObligationOf reports the delivery obligation one committed fact
@@ -1928,99 +2040,20 @@ func (h *Host) applyDeclaredObligation(evt event.Event) {
 }
 
 // restoreEventifiedDeliveries restores the account from the chain the run
-// replayed: every owed declaration the window holds is weighed against the
-// newest settlement fact of its identity, and every settlement fact no
-// declaration of the window explains is restored as the obligation it states.
+// replayed: every declaration and settlement fact committed past the cut of the
+// newest delivery slice is folded through the reducer the live commit drives, and
+// the duty the slice declares is then driven over the account that fold left.
+// There is no second reconstruction of the account: the obligations a restart owes
+// are the obligations the facts state, derived once.
 //
-//   - a restored account states the settlement it held at the cut and can trail the settlement fact that landed with it, so the exact key read of the one obligation decides its state: a restored owed entry whose settlement already landed is never sent a second time.
+//   - a restored account states the settlement it held at the cut and can trail the settlement fact that landed with it, so the drive probes the exact key of an obligation the account states no state for: a restored owed entry whose settlement already landed is never sent a second time.
 //   - the same read decides the state of every obligation the account states as open with no owed declaration beside it, because a carrier filed by the commit that settled the obligation states the state that commit had not yet applied: the open identities are the work in flight, so the probe stays bounded by them and never by the settled history.
 func (h *Host) restoreEventifiedDeliveries(ctx context.Context) error {
-	window, declared, attempts, err := h.deliveryRecoveryFacts(ctx)
+	attempts, err := h.replayDeliveryFacts(ctx)
 	if err != nil {
 		return err
 	}
-	h.mu.Lock()
-	for identity := range window {
-		if seq := deliveryHeldSeq(identity); seq > h.heldSeq {
-			h.heldSeq = seq
-		}
-	}
-	h.mu.Unlock()
-	seen := make(map[string]bool, len(declared))
-	resumed := make(map[string]event.SessionID, len(window))
-	for _, declaration := range declared {
-		seen[declaration.identity] = true
-		settlement, known := window[declaration.identity]
-		if h.restoredDelivery || !known {
-			var err error
-			exact, stated, err := h.settlementStateOf(ctx, declaration.identity)
-			if err != nil {
-				return err
-			}
-			if stated && (!known || exact.fact.Timestamp.After(settlement.fact.Timestamp)) {
-				settlement, known = exact, true
-			}
-		}
-		if !known {
-			settlement = declaration
-		} else if settlement.delivery.Content == "" {
-			settlement.delivery.Content = declaration.delivery.Content
-		}
-		if settlement.delivery.Target.IsZero() || !settlement.delivery.Target.IsComplete() {
-			settlement.delivery.Target = declaration.delivery.Target
-		}
-		if err := h.restoreObligation(ctx, settlement); err != nil {
-			return err
-		}
-		if settlement.state == heldStateOf(deliveryReasonRetrying) {
-			resumed[settlement.identity] = settlement.delivery.Target.SessionID
-		}
-	}
-	identities := make([]string, 0, len(window))
-	for identity := range window {
-		identities = append(identities, identity)
-	}
-	sort.Strings(identities)
-	for _, identity := range identities {
-		if seen[identity] {
-			continue
-		}
-		settlement := window[identity]
-		if !deliveryStateSettled(settlement.state) {
-			exact, stated, err := h.settlementStateOf(ctx, identity)
-			if err != nil {
-				return err
-			}
-			if stated && (settlement.fact.Timestamp.IsZero() || exact.fact.Timestamp.After(settlement.fact.Timestamp)) {
-				settlement = exact
-			}
-		}
-		if err := h.restoreObligation(ctx, settlement); err != nil {
-			return err
-		}
-		if settlement.state == heldStateOf(deliveryReasonRetrying) {
-			resumed[identity] = settlement.delivery.Target.SessionID
-		}
-	}
-	for identity, session := range resumed {
-		if state, known := h.deliveryStateOf(session, identity); !known || state != heldStateOf(deliveryReasonRetrying) {
-			continue
-		}
-		held, parked := h.parkedDelivery(identity)
-		if !parked {
-			continue
-		}
-		attempt := attempts[identity]
-		if attempt >= deliveryRetryLimit {
-			if writeErr := h.writeDeliveryState(ctx, identity, held.delivery, heldStateOf(deliveryReasonRetryExhausted), time.Time{}); writeErr != nil {
-				assemblyWarn("tagent: the exhausted retry state of %s did not commit beside the restart: %v", identity, writeErr)
-			}
-			assemblyInfo("tagent: the redelivery of %s refused beside the restart: the chain records %d attempts at the bound", identity, attempt)
-			continue
-		}
-		h.retryConsumer().schedule(identity, held.delivery, attempt)
-	}
-	return nil
+	return h.driveRestoredDeliveries(ctx, attempts)
 }
 
 // restoreObligation restores one obligation from the settlement fact that states

@@ -81,7 +81,7 @@ func BenchmarkDeliveryOwedColdRead(b *testing.B) {
 			seedOwedColdChain(b, ctx, warmRoot, 16, shape.pin)
 			warmRun := benchOwedRun(b, ctx, warmRoot)
 			warmHost := deliveryTestHost(ctx, warmRun, newDeliveryTestSender(nil))
-			if _, _, _, err := warmHost.deliveryRecoveryFacts(ctx); err != nil {
+			if _, err := warmHost.replayDeliveryFacts(ctx); err != nil {
 				b.Fatalf("warm-up read: %v", err)
 			}
 			deliveryTestStopRetries(warmHost)
@@ -96,7 +96,7 @@ func BenchmarkDeliveryOwedColdRead(b *testing.B) {
 				run := benchOwedRun(b, ctx, root)
 				host := deliveryTestHost(ctx, run, newDeliveryTestSender(nil))
 				b.StartTimer()
-				if _, _, _, err := host.deliveryRecoveryFacts(ctx); err != nil {
+				if _, err := host.replayDeliveryFacts(ctx); err != nil {
 					b.Fatalf("cold recovery read: %v", err)
 				}
 				b.StopTimer()

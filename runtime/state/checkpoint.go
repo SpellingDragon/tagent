@@ -49,6 +49,41 @@ type Stateful interface {
 // readings of "no state" are one JSON.
 const emptyStateJSON = "null"
 
+// reducer is the derivation face of a holder whose recoverable state is folded
+// from committed facts: one fact in, the same derived state either way. A holder
+// that states sums of its own — the task registry's account, the mailbox's owed
+// notices — implements no such face, because its state follows an account this
+// seam does not read.
+//
+// The face is one derivation and not a second reader beside the restore: the
+// live commit folds a fact through it, and so does the replay of a chain past
+// its cut, so the state a cut states and the state a boot rebuilds are the same
+// function of the same facts. The fold is idempotent by the identity the fact
+// carries: a fact a restore already folded, and a fact two read paths both
+// reach, leave the state it states once. The fold carries no duty of its own: it
+// applies a fact and answers an error, and never fires the work a consumer owes
+// (see emitter).
+type reducer interface {
+	// Reduce folds one committed fact into the holder's derived state.
+	Reduce(ctx context.Context, evt event.Event) error
+}
+
+// emitter is the declaration face of a holder that also drives observation: the
+// consumer seats its state through Reduce and starts work of its own — a send, a
+// fold, a follow-up turn — beside it. The declaration is what keeps the two apart:
+// the seam's own pass folds state and drives nothing, and the recovery a boot runs
+// leaves every declared drive to the owner that drives it after the recovery
+// returned.
+//
+// A holder that declares no such face reads facts and owes nothing of them: its
+// failure is a gap beside the committed fact, never work left owed.
+type emitter interface {
+	// DrivesObservation marks the holder as one whose consumer drives work beside
+	// the state it states. The method carries no answer of its own: the duty is the
+	// declaration, and the account the work rests in is the consumer's.
+	DrivesObservation()
+}
+
 // sessionSnapshotter is the session face of a holder whose state is spelled per
 // session chain. A cut taken for one session reads that face instead of the whole
 // account, so a carrier states the material of the session that asked for it and
@@ -171,6 +206,82 @@ func (r *StateRegistry) mounted() []Stateful {
 		ordered = append(ordered, r.holders[name])
 	}
 	return ordered
+}
+
+// Reduce folds one committed fact into the derived state of every mounted holder
+// that derives its state from facts, in registration order, and answers the first
+// refusal by the holder that made it: a fact one consumer cannot fold is a state
+// this runtime would read as behind the chain it serves. A holder that states an
+// account of its own is not asked — it implements no reducer face — so the pass
+// names no consumer and needs no hook per consumer: a slice mounted through
+// Register takes part the moment it is mounted.
+//
+// The pass is the recovery's face as much as the live commit's: a boot replays the
+// facts committed past a cut through the same call, so the state a restart derives
+// is the state the live process derived from the same facts. Nothing here drives
+// an emitter: the work a consumer owes is started by the owner of that duty, never
+// by a fold of the fact it owes it for.
+func (r *StateRegistry) Reduce(ctx context.Context, evt event.Event) error {
+	if r == nil {
+		return nil
+	}
+	for _, holder := range r.mounted() {
+		if err := reduceInto(ctx, holder, evt); err != nil {
+			return fmt.Errorf("state: fold the fact %s into the %q state slice: %w", evt.Key, holder.StateName(), err)
+		}
+	}
+	return nil
+}
+
+// ReduceInto folds one committed fact into one named holder's derived state, so a
+// consumer that reads the facts past the cut of its own slice replays them through
+// the same derivation the live commit drives. A holder that derives nothing from
+// facts is not asked, and a name no holder answers is refused by name rather than
+// silently folding nothing: a recovery reading a cut of a slice this runtime does
+// not mount would leave that consumer behind the chain it serves.
+func (r *StateRegistry) ReduceInto(ctx context.Context, name string, evt event.Event) error {
+	if r == nil {
+		return nil
+	}
+	r.mu.Lock()
+	holder, mounted := r.holders[name]
+	r.mu.Unlock()
+	if !mounted {
+		return fmt.Errorf("state: no state holder answers the name %q", name)
+	}
+	if err := reduceInto(ctx, holder, evt); err != nil {
+		return fmt.Errorf("state: fold the fact %s into the %q state slice: %w", evt.Key, name, err)
+	}
+	return nil
+}
+
+// reduceInto folds one fact into one holder when that holder derives its state
+// from facts. The read is a type assertion on the declaration, never a table of
+// consumer names: a holder that states an account of its own answers nothing.
+func reduceInto(ctx context.Context, holder Stateful, evt event.Event) error {
+	derives, declared := holder.(reducer)
+	if !declared {
+		return nil
+	}
+	return derives.Reduce(ctx, evt)
+}
+
+// ObservationDrivers reports the mounted holders that declare an observation
+// drive, in registration order. The names are what a recovery states it folded
+// without driving: the seam's pass folds state alone, and the owner of each duty
+// starts it after the recovery returned.
+func (r *StateRegistry) ObservationDrivers() []string {
+	if r == nil {
+		return nil
+	}
+	var drivers []string
+	for _, holder := range r.mounted() {
+		if _, drives := holder.(emitter); !drives {
+			continue
+		}
+		drivers = append(drivers, holder.StateName())
+	}
+	return drivers
 }
 
 // SnapshotState aggregates the state of every mounted holder in registration order. A

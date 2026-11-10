@@ -81,7 +81,7 @@ func (r *Run) commitFactChecked(ctx context.Context, evt event.Event) (event.Eve
 // states the account never triggers the cadence that files another.
 //
 //   - a checkpoint fact stays on the store the boot reads it from and enters no session chain: it is a framework state carrier, not material of any chain, so the live ledger keeps the window of the chains it serves and never one fact per cut.
-//   - the whole commit holds the quiet-point fence, so a cut that drained the pipeline reads every state this fact left behind instead of one caught between the landing and its application. The obligation account a mounted host keeps is applied inside that unit for the same reason: the declaration a fact carries and the account that owes it are one step, never a landing the account beside it has not read yet.
+//   - the whole commit holds the quiet-point fence, so a cut that drained the pipeline reads every state this fact left behind instead of one caught between the landing and its application. The derived state of every consumer mounted on the state seam is folded inside that unit for the same reason: the fact and the state it leaves behind are one step, never a landing a consumer beside it has not read yet.
 //   - a product is the moment the projection drops material, so the chain's carrier is worth refreshing whatever the cadence clock says. The request is a signal: the filer takes the cut on its own goroutine, where this commit's unit of work is not held.
 func (r *Run) commitFactNoCadence(ctx context.Context, evt event.Event) (event.EventID, error) {
 	if evt.Key == "" {
@@ -109,7 +109,7 @@ func (r *Run) commitFactNoCadence(ctx context.Context, evt event.Event) (event.E
 	if evt.Type == event.TypeCheckpoint {
 		return evt.Key, nil
 	}
-	entry, mapped := mappedEntryOf(evt)
+	_, mapped := mappedEntryOf(evt)
 	r.mu.Lock()
 	r.facts[evt.Key] = evt
 	r.factOrder = append(r.factOrder, evt.Key)
@@ -118,44 +118,39 @@ func (r *Run) commitFactNoCadence(ctx context.Context, evt event.Event) (event.E
 	}
 	r.mu.Unlock()
 	r.movement.Advance()
-	r.applyObligation(evt)
+	if mapped {
+		r.attachDeclaredReplay(evt)
+	}
+	r.reduceCommitted(ctx, evt)
 	if evt.Type == event.CompressProductType && session != "" {
 		r.requestSessionCheckpoint(event.Address{AgentID: agentOf(evt), SessionID: session})
 	}
-	if !mapped {
-		r.trimFacts(sessionOf(evt))
-		return evt.Key, nil
-	}
-	r.attachDeclaredReplay(evt)
-	r.recordMapped(evt, entry)
 	r.trimFacts(sessionOf(evt))
 	return evt.Key, nil
 }
 
-// mountObligationAccount mounts the account every landed fact is applied to, so
-// the account a declaration leaves behind is derived by the commit that landed
-// it rather than by a reader of the chain that follows. One account is mounted
-// per run: the delivery account of the host, which states the obligations the
-// chain declared and no settlement has closed.
-func (r *Run) mountObligationAccount(apply func(event.Event)) {
+// reduceCommitted folds one landed fact into the derived state of every consumer
+// mounted on the state seam: the one derivation path of this run. The live commit
+// and the replay of a chain past its cut both fold through the same reducer, so a
+// restart derives exactly the state the process before it derived from the same
+// facts instead of rebuilding it through a reader of its own.
+//
+// A fact is committed before it is folded, so a refusal is reported beside the
+// fact rather than answered as a failed commit: the chain keeps the fact either
+// way, and a consumer whose fold failed is the state this run must not read as
+// current.
+func (r *Run) reduceCommitted(ctx context.Context, evt event.Event) {
 	if r == nil {
 		return
 	}
 	r.mu.Lock()
-	r.obligations = apply
+	states := r.states
 	r.mu.Unlock()
-}
-
-// applyObligation hands one landed fact to the mounted account. The call is made
-// inside the landing unit of the fact — the same unit the quiet-point fence
-// counts — so a cut taken after that unit reads the declaration from the account,
-// and a cut taken before it lands past the cut's watermark and is replayed.
-func (r *Run) applyObligation(evt event.Event) {
-	r.mu.Lock()
-	apply := r.obligations
-	r.mu.Unlock()
-	if apply != nil {
-		apply(evt)
+	if states == nil {
+		return
+	}
+	if err := states.Reduce(ctx, evt); err != nil {
+		assemblyError("tagent: the committed fact %s was not folded into the state of its consumers: %v", evt.Key, err)
 	}
 }
 
@@ -449,8 +444,21 @@ func storedFactConflict(key event.EventID, stored ledger.StoredEvent, body memor
 	return fmt.Errorf("%w: %s", memory.ErrFactKeyConflict, key)
 }
 
-// recordMapped appends one mapped entry to the sequence of its session and
-// moves the boundary between the material that ended and the material still in
+// foldIntoProjection folds one mapped entry into the replay projection of one
+// chain under the window that chain declared, and answers the projection the fold
+// left: the append beside the resident bound is one step, taken by the live commit
+// and by the replay of a chain past its cut alike, so the bound is applied to the
+// sequence once instead of once per read path.
+func foldIntoProjection(ctx context.Context, projection *replay.ReplayProjection, entry replay.ProjectionEntry, window FoldWindow) *replay.ReplayProjection {
+	if projection == nil {
+		return nil
+	}
+	projection.Append(ctx, entry)
+	return trimReplayProjection(ctx, projection, window)
+}
+
+// foldMapped folds one mapped entry into the sequence of its session and moves
+// the boundary between the material that ended and the material still in
 // flight: the boundary advances only where a segment stands closed — the
 // agent_output fact that closed it — so the input that starts the next range
 // lands every earlier segment committed as ended material the next request
@@ -466,15 +474,14 @@ func storedFactConflict(key event.EventID, stored ledger.StoredEvent, body memor
 // increment instead of from a lane of its own.
 //
 // - Boundary move on close: the agent_output that closed a segment lands the segment itself as ended material — the boundary moves onto it (inclusive, see endedPrefix), so a later arrival presents everything the closed segment committed, the input that reached the chain while it flew but no decision of it read included.
-func (r *Run) recordMapped(evt event.Event, entry replay.ProjectionEntry) {
+func (r *Run) foldMapped(ctx context.Context, evt event.Event, entry replay.ProjectionEntry) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	slot, held, carried := r.replaySlotLocked(replayAddressOf(evt))
 	if !carried {
 		return
 	}
-	held.projection.Append(context.Background(), entry)
-	held.projection = trimReplayProjection(context.Background(), held.projection, held.window)
+	held.projection = foldIntoProjection(ctx, held.projection, entry, held.window)
 	if evt.Type == event.TypeAgentOutput {
 		held.endedAt = entry.Key
 		held.rangeOpen = false

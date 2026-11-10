@@ -2158,22 +2158,6 @@ func (r *Run) factWindowQuery(ctx context.Context, opts memory.QueryOptions) ([]
 	return query.QueryEvents(ctx, opts)
 }
 
-// factWindowEvents reports the facts this run holds in its hot window, in commit
-// order: the material the delivery recovery reads the owed declarations off. The
-// window — never the whole chain — is the scope, for the same reason the
-// settlement query has no wider one.
-func (r *Run) factWindowEvents() []event.Event {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	out := make([]event.Event, 0, len(r.factOrder))
-	for _, key := range r.factOrder {
-		if evt, held := r.facts[key]; held {
-			out = append(out, evt)
-		}
-	}
-	return out
-}
-
 // registeredPartitions reports the partitions of the chains this run registered,
 // derived from the replay registration keys: the recovery reads the chains the
 // run actually serves instead of scanning every partition of the store. A
@@ -2451,6 +2435,9 @@ func (r *Run) seedReplay(ctx context.Context, tier *ledger.Tier) (map[int]int64,
 	if len(order) > 0 {
 		r.attachNoticeFeed()
 	}
+	if drivers := r.StateRegistry().ObservationDrivers(); len(drivers) > 0 {
+		assemblyInfo("tagent: the rebuild folded the state slices of the chains it replayed and drove none of the observation drivers %v", drivers)
+	}
 	return report.Landed, nil
 }
 
@@ -2492,7 +2479,9 @@ func (r *Run) seedFullReplay(ctx context.Context, tier *ledger.Tier) (map[event.
 		}
 		evt := body.Event()
 		evt.Key = stored.Key
-		r.seedFact(evt)
+		if err := r.seedFact(ctx, evt); err != nil {
+			return err
+		}
 		addr := replayAddressOf(evt)
 		if addr.SessionID == "" {
 			return nil
@@ -2520,8 +2509,7 @@ func (r *Run) seedFullReplay(ctx context.Context, tier *ledger.Tier) (map[event.
 			seeds[addr] = seed
 			order = append(order, addr)
 		}
-		seed.projection.Append(ctx, entry)
-		seed.projection = trimReplayProjection(ctx, seed.projection, seed.window)
+		seed.projection = foldIntoProjection(ctx, seed.projection, entry, seed.window)
 		return nil
 	}); err != nil {
 		return nil, nil, report, err
@@ -2738,7 +2726,9 @@ func (r *Run) seedConfigurationFacts(ctx context.Context, tier *ledger.Tier, ref
 		}
 		evt := body.Event()
 		evt.Key = stored.Key
-		r.seedFact(evt)
+		if err := r.seedFact(ctx, evt); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -2775,7 +2765,9 @@ func (r *Run) restoreSurvivors(ctx context.Context, tier *ledger.Tier, seed *ses
 			}
 			evt := body.Event()
 			evt.Key = stored.Key
-			r.seedFact(evt)
+			if err := r.seedFact(ctx, evt); err != nil {
+				return 0, err
+			}
 			if entry, ok := mappedEntryOf(evt); ok {
 				seed.projection.Append(ctx, entry)
 				continue
@@ -2865,7 +2857,9 @@ func (r *Run) seedAccountFact(ctx context.Context, tier *ledger.Tier, key event.
 	}
 	evt := body.Event()
 	evt.Key = stored.Key
-	r.seedFact(evt)
+	if err := r.seedFact(ctx, evt); err != nil {
+		return err
+	}
 	if evt.Type == event.CompressProductType {
 		if product, stated := compressProductOf(evt); stated {
 			r.compress.NoteProduct(product)
@@ -2897,7 +2891,9 @@ func (r *Run) replayRef(ctx context.Context, tier *ledger.Tier, key event.EventI
 	}
 	evt := body.Event()
 	evt.Key = stored.Key
-	r.seedFact(evt)
+	if err := r.seedFact(ctx, evt); err != nil {
+		return event.CompressProduct{}, false, "", err
+	}
 	if evt.Type == event.CompressProductType {
 		product, stated := compressProductOf(evt)
 		if stated {
@@ -2914,8 +2910,7 @@ func (r *Run) replayRef(ctx context.Context, tier *ledger.Tier, key event.EventI
 	if !ok {
 		return event.CompressProduct{}, false, agentOf(evt), nil
 	}
-	seed.projection.Append(ctx, entry)
-	seed.projection = trimReplayProjection(ctx, seed.projection, seed.window)
+	seed.projection = foldIntoProjection(ctx, seed.projection, entry, seed.window)
 	return event.CompressProduct{}, false, agentOf(evt), nil
 }
 
@@ -2926,27 +2921,35 @@ func (r *Run) replayRef(ctx context.Context, tier *ledger.Tier, key event.EventI
 // resolves again, so the call-result pairing a request replays is recovered
 // from the facts alone — and a re-commit of an identity the tier already holds
 // is judged against the very fact it names instead of writing a second one.
-// A compression judgment the chain carries is handed to the consumer that
-// executes judgments, so the material a judgment names folds in this process
-// too; the products of the chain answer their judgments beside it, so a
-// judgment already executed is never executed twice.
 //
-// The rebuild reaches one fact by more than one read path — the survivors a
-// checkpoint states are hydrated by key and the tail of their chain is replayed
-// whole over them — so the seed answers the fact the ledger already holds
-// instead of filing its key twice: one identity names one immutable fact, and a
-// commit order naming it twice would read one fact as two.
-func (r *Run) seedFact(evt event.Event) {
-	if evt.Type == event.CompressRequestType {
-		r.compress.noteSeededJudgment(evt)
-	}
+// The fact is then folded into the derived state of every consumer mounted on the
+// state seam, through the same reducer the live commit drives: a restart derives
+// the state the process before it derived instead of rebuilding it through a
+// reader of its own, and a consumer that registers a slice takes part without a
+// hook of its own. Nothing here drives an observation duty — the work a consumer
+// owes is started by the owner of that duty after the rebuild returned — so the
+// judgments and deliveries the chain already carries wait for the process that
+// executes them rather than firing inside the recovery. A rebuild reaches one
+// fact by more than one read path — the survivors a checkpoint states are
+// hydrated by key and the tail of their chain is replayed whole over them — and
+// the seed answers the fact the ledger already holds instead of filing its key
+// twice: the fold stays per read because a reducer is idempotent by the identity
+// the fact carries, so a fact two paths reach leaves the state it derives once.
+func (r *Run) seedFact(ctx context.Context, evt event.Event) error {
 	r.mu.Lock()
-	defer r.mu.Unlock()
-	if _, held := r.facts[evt.Key]; held {
-		return
+	if _, held := r.facts[evt.Key]; !held {
+		r.facts[evt.Key] = evt
+		r.factOrder = append(r.factOrder, evt.Key)
 	}
-	r.facts[evt.Key] = evt
-	r.factOrder = append(r.factOrder, evt.Key)
+	states := r.states
+	r.mu.Unlock()
+	if states == nil {
+		return nil
+	}
+	if err := states.Reduce(ctx, evt); err != nil {
+		return fmt.Errorf("tagent: fold the replayed fact %s into the state of its consumers: %w", evt.Key, err)
+	}
+	return nil
 }
 
 // eventRecordOf projects one committed fact onto the query record the

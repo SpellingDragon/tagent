@@ -141,19 +141,16 @@ func (s deliveryStateSlice) RestoreState(ctx context.Context, payload []byte) er
 
 // registerDeliverySlice mounts the delivery account on the run's state seam, so
 // every checkpoint the framework files carries it and a boot restores it instead
-// of scanning the committed history for settlements. The same call mounts the
-// account a landed declaration is applied to, so the obligation a fact declares
-// enters the account inside that fact's landing unit and no cut falls between the
-// declaration and the account that owes it.
+// of scanning the committed history for settlements. The same mount seats the
+// account among the consumers a landed fact is folded into, so the obligation a
+// fact declares enters the account inside that fact's landing unit and no cut
+// falls between the declaration and the account that owes it.
 func (h *Host) registerDeliverySlice() error {
 	if h == nil || h.run == nil {
 		return nil
 	}
-	if _, err := h.run.RegisterStateSlice(deliveryStateSlice{host: h}); err != nil {
-		return err
-	}
-	h.run.mountObligationAccount(h.applyDeclaredObligation)
-	return nil
+	_, err := h.run.RegisterStateSlice(deliveryStateSlice{host: h})
+	return err
 }
 
 // deliverySlice states the whole open account of the host: the obligations still

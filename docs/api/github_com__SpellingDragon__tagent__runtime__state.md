@@ -1699,10 +1699,40 @@ func NewStateRegistry() *StateRegistry
 func (r *StateRegistry) Names() []string
     Names reports the mounted state slice names in registration order.
 
+func (r *StateRegistry) ObservationDrivers() []string
+    ObservationDrivers reports the mounted holders that declare an observation
+    drive, in registration order. The names are what a recovery states it folded
+    without driving: the seam's pass folds state alone, and the owner of each
+    duty starts it after the recovery returned.
+
 func (r *StateRegistry) PendingRestore() []string
     PendingRestore reports the state slices a restore named that no mounted
     holder states yet, in name order. A wiring that answers no name once it is
     complete has restored every slice the checkpoint carries.
+
+func (r *StateRegistry) Reduce(ctx context.Context, evt event.Event) error
+    Reduce folds one committed fact into the derived state of every mounted
+    holder that derives its state from facts, in registration order, and answers
+    the first refusal by the holder that made it: a fact one consumer cannot
+    fold is a state this runtime would read as behind the chain it serves.
+    A holder that states an account of its own is not asked — it implements no
+    reducer face — so the pass names no consumer and needs no hook per consumer:
+    a slice mounted through Register takes part the moment it is mounted.
+
+    The pass is the recovery's face as much as the live commit's: a boot replays
+    the facts committed past a cut through the same call, so the state a restart
+    derives is the state the live process derived from the same facts. Nothing
+    here drives an emitter: the work a consumer owes is started by the owner of
+    that duty, never by a fold of the fact it owes it for.
+
+func (r *StateRegistry) ReduceInto(ctx context.Context, name string, evt event.Event) error
+    ReduceInto folds one committed fact into one named holder's derived state,
+    so a consumer that reads the facts past the cut of its own slice replays
+    them through the same derivation the live commit drives. A holder that
+    derives nothing from facts is not asked, and a name no holder answers is
+    refused by name rather than silently folding nothing: a recovery reading a
+    cut of a slice this runtime does not mount would leave that consumer behind
+    the chain it serves.
 
 func (r *StateRegistry) Register(holder Stateful) (func(), error)
     Register mounts one holder and answers the disposer that unmounts it. A

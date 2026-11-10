@@ -2609,10 +2609,10 @@ func TestDeliveryOwedTrimNegative(t *testing.T) {
 		t.Fatal("the owed declaration stayed in the hot window, so the trim control never exercised the defect boundary")
 	}
 	host := deliveryTestHost(ctx, restarted, newDeliveryTestSender(nil))
-	_, declared, _, err := host.deliveryRecoveryFacts(ctx)
-	if err != nil {
+	if _, err := host.replayDeliveryFacts(ctx); err != nil {
 		t.Fatalf("read the recovery facts: %v", err)
 	}
+	declared := host.deliveryObligations()
 	identity := hostDeliveryFreshPrefix + string(owedKey)
 	found := false
 	for _, declaration := range declared {

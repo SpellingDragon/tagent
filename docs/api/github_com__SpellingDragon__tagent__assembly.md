@@ -700,6 +700,18 @@ func (c *CompressionConsumer) Record(session event.SessionID, request event.Comp
     executes it. A judgment already noted is noted once: the identity is
     content-addressed, so a re-filed judgment is the same judgment.
 
+func (c *CompressionConsumer) Reduce(ctx context.Context, evt event.Event) error
+    Reduce folds one committed compression fact into the account this consumer
+    derives: a judgment the chain carries is a batch the consumer still owes,
+    and a product answers the judgment it names, whichever process committed it.
+    The fold is the consumer's whole derivation face — the live commit and the
+    rebuild of a chain past its cut both drive it — so a restarted run reads the
+    judgments the chain filed instead of waiting for the material to be judged a
+    second time, and a judgment a product answers executes nothing.
+
+    The fold starts no work: the judgments it seats wait for the observation
+    duty of this consumer (Execute), which the recovery never drives.
+
 type DeliveryLedger struct {
 	// Has unexported fields.
 }
