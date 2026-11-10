@@ -1031,6 +1031,7 @@ func (r *Run) restoreCheckpointState(ctx context.Context, tier *ledger.Tier) err
 //   - a chain the newest framework checkpoint states is folded from the link that landed past the stated revision, and one the checkpoint states with no such link is not read at all: a restart costs the account it keeps plus the increment past the cut, never the chains it already settled.
 //   - a chain the checkpoint did not state — one younger than the cut — is folded whole, which is the fallback that keeps the two paths agreeing.
 //   - a chain the checkpoint states with no record past its cut costs no read: it joins the covered set the checkpoint-state call restores.
+//   - a checkpoint-stated task the carrier rebuilt at the cut, whose tail links the fold completes, is held by the registry already and the fold reports no rebuild of its own: its recovery is the checkpoint's account, credited here as Recovered=true beside the covered tasks so the read projection serves it.
 //   - the report names the tasks in chain order whichever path restored them, so a restart answers the same account whether it read a chain or the checkpoint.
 //   - the whole fold is observed as one line at INFO — the chains read, the links they carry, the chains the checkpoint covered, the tasks rebuilt and the chains dropped beside the elapsed time — and a failed fold at ERROR beside the chain it stopped on.
 func (r *Run) restoreChains(ctx context.Context, durable *state.DurableCommit) (task.RestoreReport, error) {
@@ -1043,7 +1044,8 @@ func (r *Run) restoreChains(ctx context.Context, durable *state.DurableCommit) (
 	var covered []event.TaskID
 	links := 0
 	for _, taskID := range chains {
-		if revision, stated := coverage[taskID]; stated && durable.Revision(taskID) <= revision {
+		revision, stated := coverage[taskID]
+		if stated && durable.Revision(taskID) <= revision {
 			covered = append(covered, taskID)
 			continue
 		}
@@ -1052,16 +1054,21 @@ func (r *Run) restoreChains(ctx context.Context, durable *state.DurableCommit) (
 			assemblyError("tagent: restore stopped task=%s err=%v", taskID, err)
 			return merged, err
 		}
-		if revision, stated := coverage[taskID]; stated {
+		if stated {
 			chain = chainPast(chain, revision)
 		}
 		links += len(chain)
 		report, err := r.registry.Restore(ctx, chain, owners)
-		folded.Tasks = append(folded.Tasks, report.Tasks...)
 		if err != nil {
 			assemblyError("tagent: restore stopped task=%s err=%v", taskID, err)
 			return merged, err
 		}
+		if stated {
+			for i := range report.Tasks {
+				report.Tasks[i].Recovered = true
+			}
+		}
+		folded.Tasks = append(folded.Tasks, report.Tasks...)
 		for _, outcome := range report.Tasks {
 			if outcome.Recovered {
 				r.commit.remember(outcome.TaskID)
