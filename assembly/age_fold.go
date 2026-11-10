@@ -239,6 +239,8 @@ func (s ageFoldSessions) FileCompressRequest(ctx context.Context, session event.
 // carries the owning agent of its session, so the judgment persists beside the
 // product that answers it: an ownerless judgment never reaches the durable
 // chain, and the resident window would release it with nothing to read back.
+//
+//   - The judgment fact and the account noted for it are one unit of work: the whole write holds the run's quiet-point fence, so a cut taken after the landing states the judgment instead of restoring a consumer beside a judgment the chain already carries.
 func (r *Run) fileCompressRequest(ctx context.Context, session event.SessionID, request event.CompressRequest) error {
 	if session == "" {
 		return errors.New("tagent: the compression judgment names no session chain")
@@ -246,6 +248,8 @@ func (r *Run) fileCompressRequest(ctx context.Context, session event.SessionID, 
 	if request.FactKey() == "" {
 		return errors.New("tagent: the compression judgment carries no identity")
 	}
+	r.flight.enter()
+	defer r.flight.leave()
 	r.mu.Lock()
 	held, filed := r.facts[request.ID]
 	agent := r.agentOfSessionLocked(session)

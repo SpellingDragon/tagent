@@ -379,7 +379,7 @@ func (p *smokeProvider) serve(w http.ResponseWriter, r *http.Request) {
 	if hook != nil && hook(w, index, modelName, messages) {
 		return
 	}
-	fmt.Fprint(w, p.answerFor(modelName, messages, index))
+	fmt.Fprint(w, p.answerFor(modelName, messages, tools, index))
 }
 
 // claimMarker reports whether this turn is the one that settles the marker and
@@ -426,8 +426,8 @@ func (p *smokeProvider) finalAnswer(marker, body string) string {
 //   - 冥想的投递是 send{target:{agent,session}}：目标取反思输入列出的活跃会话对，
 //     脚本不猜会址，读不到的退到台架注册的首个会话。
 //   - 老带的语义摘要由 smokeBandSummaryMaterial 认出来并原样回它收到的有锚读法：摘要请求不是一轮决策，不消耗决策面也不认领轮次标记。
-func (p *smokeProvider) answerFor(modelName string, messages []smokeModelMessage, index int) string {
-	if material, summary := smokeBandSummaryMaterial(messages); summary {
+func (p *smokeProvider) answerFor(modelName string, messages []smokeModelMessage, tools []string, index int) string {
+	if material, summary := smokeBandSummaryMaterial(messages, tools); summary {
 		return smokeAnswerBody(material)
 	}
 	last := smokeLastUserText(messages)
@@ -491,20 +491,23 @@ func (p *smokeProvider) answerFor(modelName string, messages []smokeModelMessage
 	return p.finalAnswer(marker, smokeAnswerBody("answer "+marker))
 }
 
+// smokeBandReadAnchor 匹配一条渲染后的来源锚，即折叠产物里每条读法的开头：
+// [MM-DD HH:MM|gen:<generation>]。
+var smokeBandReadAnchor = regexp.MustCompile(`\[\d\d-\d\d \d\d:\d\d\|gen:[^\]]*\]`)
+
 // smokeBandSummaryMaterial 报告一次请求是否是老带的语义摘要请求，并给出它携带的
 // 有锚读法：折叠拿会话自己的模型求最老带的 gist，这条请求因此落在与决策同一个端点
-// 上，形状恰是一条用户消息、正文以 assembly.BandSummaryInstruction 开头、不带工具面。
-// 摘要请求读的是被折材料的机械行，正文里因此带着那些行的轮次标记；按结构认它，
-// 它就不会被决策脚本当成某一轮去答。
-func smokeBandSummaryMaterial(messages []smokeModelMessage) (string, bool) {
-	if len(messages) != 1 || messages[0].Role != "user" {
+// 上，只带一条用户消息、不带工具面，被折材料的有锚读法跟在指令段之后。不声明工具的
+// agent 的决策请求同样不带工具面，所以按材料里渲染出来的来源锚认它：摘要请求回的就是
+// 被折材料的机械行，它因此既不会被决策脚本当成某一轮去答，也不消耗决策面。
+func smokeBandSummaryMaterial(messages []smokeModelMessage, tools []string) (string, bool) {
+	if len(tools) != 0 || len(messages) != 1 || messages[0].Role != "user" {
 		return "", false
 	}
-	content := messages[0].Content
-	if !strings.HasPrefix(content, assembly.BandSummaryInstruction) {
+	_, material, asked := strings.Cut(messages[0].Content, "\n\n")
+	if !asked || !smokeBandReadAnchor.MatchString(material) {
 		return "", false
 	}
-	material := strings.TrimPrefix(strings.TrimPrefix(content, assembly.BandSummaryInstruction), "\n\n")
 	return strings.TrimSpace(material), true
 }
 
@@ -4840,13 +4843,13 @@ func TestSmokeLongDelegateScriptAnswersBatchedSettle(t *testing.T) {
 	}
 
 	provider := &smokeProvider{}
-	if got := provider.answerFor(smokeEntryModel, toolResult, 1); !strings.Contains(got, "delegate ack "+marker) {
+	if got := provider.answerFor(smokeEntryModel, toolResult, nil, 1); !strings.Contains(got, "delegate ack "+marker) {
 		t.Fatalf("the tool-result-only request answered %q, want the separate-shape delegate ack", got)
 	}
-	if got := provider.answerFor(smokeEntryModel, noticeOnly, 2); !strings.Contains(got, "settle-ack "+marker) {
+	if got := provider.answerFor(smokeEntryModel, noticeOnly, nil, 2); !strings.Contains(got, "settle-ack "+marker) {
 		t.Fatalf("the notice-only request answered %q, want the closing settle-ack", got)
 	}
-	if got := provider.answerFor(smokeEntryModel, batched, 3); !strings.Contains(got, "settle-ack "+marker) {
+	if got := provider.answerFor(smokeEntryModel, batched, nil, 3); !strings.Contains(got, "settle-ack "+marker) {
 		t.Fatalf("the batched request answered %q, want the closing settle-ack: the notice rode the same request as the tool result", got)
 	}
 }

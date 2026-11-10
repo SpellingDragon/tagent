@@ -530,7 +530,7 @@ func assemble(ctx context.Context, decl *config.Declaration, agents map[event.Ag
 	if cfg.observer != nil {
 		r.enableGenerationObservation()
 	}
-	for _, slice := range []state.Stateful{projectionStateSlice{run: r}, inputsStateSlice{run: r}} {
+	for _, slice := range []state.Stateful{projectionStateSlice{run: r}, inputsStateSlice{run: r}, compressStateSlice{run: r}} {
 		if _, err := r.states.Register(slice); err != nil {
 			return nil, err
 		}
@@ -2537,6 +2537,7 @@ func (r *Run) seedAnchoredReplay(ctx context.Context, tier *ledger.Tier) (map[ev
 		}
 	}
 	seedsRestored := r.takeRestoredProjection()
+	accountCut := r.checkpointCut(checkpointSliceCompress)
 	anchors := map[anchorSlot]int{}
 	seen := map[anchorSlot]struct{}{}
 	var order []anchorSlot
@@ -2648,13 +2649,33 @@ func (r *Run) seedAnchoredReplay(ctx context.Context, tier *ledger.Tier) (map[ev
 					// commit; its seq is then below the anchor's but above the
 					// newest survivor the checkpoint already holds. Replaying
 					// by that boundary keeps it instead of silently losing it.
-					var tail []anchorRef
+					//
+					// The anchor states the projection at its own boundary, which
+					// is not the cut the restored compression account was stated
+					// at: a compression fact of this chain between the two cuts is
+					// past the cut the account covers and behind the boundary the
+					// anchor covers, so neither the carrier nor the tail states
+					// it. It joins the account alone — the survivors already hold
+					// the projection it folded.
+					var tail, behind []anchorRef
 					for i := range refs {
 						ref := refs[i]
-						if ref.session != slot.session || ref.partition != slot.partition || ref.seq <= boundary || ref.key == refs[at].key {
+						if ref.session != slot.session || ref.partition != slot.partition || ref.key == refs[at].key {
 							continue
 						}
-						tail = append(tail, ref)
+						if ref.seq > boundary {
+							tail = append(tail, ref)
+							continue
+						}
+						if accountCut != nil && event.CompressionMechanism(ref.typ) && pastCut(accountCut, ref) {
+							behind = append(behind, ref)
+						}
+					}
+					sort.Slice(behind, func(i, j int) bool { return behind[i].seq < behind[j].seq })
+					for _, ref := range behind {
+						if err := r.seedAccountFact(ctx, tier, ref.key, &report); err != nil {
+							return nil, report, err
+						}
 					}
 					sort.Slice(tail, func(i, j int) bool { return tail[i].seq < tail[j].seq })
 					for _, ref := range tail {
@@ -2776,6 +2797,35 @@ func (r *Run) restoreSurvivors(ctx context.Context, tier *ledger.Tier, seed *ses
 		})
 	}
 	return boundary, nil
+}
+
+// seedAccountFact seeds one compression fact into the compression account of a
+// rebuilding run without appending it to the projection: the fact stands behind
+// the boundary the anchor states, so the projection already holds the material it
+// folded, while the account the carrier states was taken at a cut of its own and
+// owes the judgment or the answer this fact carries.
+func (r *Run) seedAccountFact(ctx context.Context, tier *ledger.Tier, key event.EventID, report *seedReport) error {
+	stored, held, err := tier.Segments.GetEvent(ctx, key)
+	if err != nil {
+		return err
+	}
+	if !held {
+		return fmt.Errorf("%w: %s", ledger.ErrSegmentBodyMissing, key)
+	}
+	report.Decoded++
+	body, err := memory.DecodeEventBody(stored.Body)
+	if err != nil {
+		return fmt.Errorf("tagent: replay the committed event %s: %w", stored.Key, err)
+	}
+	evt := body.Event()
+	evt.Key = stored.Key
+	r.seedFact(evt)
+	if evt.Type == event.CompressProductType {
+		if product, stated := compressProductOf(evt); stated {
+			r.compress.NoteProduct(product)
+		}
+	}
+	return nil
 }
 
 // replayRef decodes one indexed event and applies it to a rebuilding seed:

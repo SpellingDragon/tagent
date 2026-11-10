@@ -6,6 +6,19 @@
 
 **甲案阶段（r47/r48 后，用户裁决「一口气做干净」）**：Wave1 夹带清零（S/C/D 三轨并行）→ Wave2 会话级协调者下沉＋`Stateful` 收编 g(x) → Wave3 有界投影 → 收口合并。当前最大风险＝Wave3 若再以「删已提交事实」或「跳过压缩判决集」换有界，会原样重演 12.12/12.13 的整段回退（证据见 12/tasks.md 五节判决理由）；故 Wave3 重开的前置是 answered 切片，不是压缩手段本身。
 
+**W8 干净终点（2026-11-10 用户终裁「不起新变更，一笔做完，这就是这趟旅途的目的」——session-checkpoint-material-unification scope 并入本篇，不延后）**：三真因已修并 push（4280d208：WAL 逆扫去 sort／compactFactOrderLocked panic／smoke harness 缝）＋D 类真话纠正。剩余按触碰集不相交并发：
+
+| 轨 | 孙任务 | 前置 | 触碰集 | 并发 |
+|---|---|---|---|---|
+| CORE | answered 切片→B4 past-cut→cadence②③→carrier 有界化 | answered 切片先行（解 7/22 parity） | assembly/compress_consumer.go·checkpoint.go·run.go·invoke.go | 簇内串行（同文件簇） |
+| RO | RestoreOwed 退役（邮箱全走切片） | 无 | runtime/state/memory.go·mailbox.go·mailbox_checkpoint.go·assembly/settle_turn.go | ∥CORE（触碰集互斥） |
+| BS | BandSummaryInstruction 测试钩子退回纯粹缝 | 无 | assembly/summary_gist.go＋四 harness _test.go | ∥CORE/RO（互斥） |
+| FR | 帧上限 64→32MiB | CORE carrier 有界化 | memory/ledger/journal.go·journal_test.go | blocked（待 CORE） |
+| ECH | eachCommittedEvent/EachSessionFact 全扫面清理 | CORE（run.go 重叠） | assembly/run.go·read.go | blocked（待 CORE） |
+| UNIFY | 会话级协调者下沉＋Stateful 收编 g(x)＋六端口→Material | CORE/RO/BS/ECH | 全插件管线面 | 末轨 |
+
+并发准入＝触碰集不相交：CORE∥RO∥BS 三轨互斥已核（CORE=assembly checkpoint 簇／RO=runtime/state+settle_turn／BS=summary_gist+harness）。FR/ECH 待 CORE 释放 run.go/journal 锁后当场补派；UNIFY 末轨。最大风险＝CORE 的 answered 切片若再跳判决集换有界即重演 12.13 回退（验收锚＝live≡锚定≡全量三方判决集相等，负锚＝删切片恢复即缺判决红）。
+
 ## 二、编排四问
 
 ### 2.1 次序（就绪孙任务表；派发原子=孙任务）

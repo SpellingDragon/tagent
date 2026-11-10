@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"regexp"
 	"sort"
 	"strings"
 	"testing"
@@ -470,19 +471,26 @@ func (m *replayModel) GenerateContent(_ context.Context, req *model.Request) (<-
 	return ch, nil
 }
 
+// bandReadAnchor matches one rendered provenance anchor, the form every read a
+// fold product carries opens with: [MM-DD HH:MM|gen:<generation>].
+var bandReadAnchor = regexp.MustCompile(`\[\d\d-\d\d \d\d:\d\d\|gen:[^\]]*\]`)
+
 // replayBandSummary reports the mechanical reads a band summary request carries,
 // and whether the request is one at all: the fold asks the session's own model
 // for the gist of its oldest band, so that ask reaches the same provider a
-// decision does, with the band summary instruction as its one user message.
+// decision does, carrying the band's anchored reads behind the instruction
+// paragraph and no tool surface. A decision of an agent that declares no tools
+// carries no tool surface either, so the rendered anchors of those reads are
+// what tells the two apart.
 func replayBandSummary(req model.Request) (string, bool) {
 	if len(req.Tools) != 0 || len(req.Messages) != 1 || req.Messages[0].Role != model.RoleUser {
 		return "", false
 	}
-	content := req.Messages[0].Content
-	if !strings.HasPrefix(content, assembly.BandSummaryInstruction) {
+	_, material, asked := strings.Cut(req.Messages[0].Content, "\n\n")
+	if !asked || !bandReadAnchor.MatchString(material) {
 		return "", false
 	}
-	return strings.TrimSpace(strings.TrimPrefix(strings.TrimPrefix(content, assembly.BandSummaryInstruction), "\n\n")), true
+	return strings.TrimSpace(material), true
 }
 
 // Info reports the scripted provider's descriptor.

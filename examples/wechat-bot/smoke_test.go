@@ -3201,29 +3201,16 @@ func smokeIntegrityAssertFold(t *testing.T, rig *smokeRig, provider *smokeProvid
 		t.Fatalf("session %s registered no projection", chat)
 	}
 	synthetic := syntheticEntries(entries)
-	proof := ""
-	for _, entry := range synthetic {
-		if entry.Type == replay.ProjectionTypeHistorySummary &&
-			strings.Contains(entry.Content, "external_input: "+smokeIntegrityFoldEarlyTurn) {
-			proof = entry.Content
-			break
-		}
-	}
-	if proof == "" {
-		t.Fatalf("the fold minted no history summary carrying %s (entries=%d synthetic=%d, rendered=%d bytes)\nprojection:\n%s",
-			smokeIntegrityFoldEarlyTurn, len(entries), len(synthetic),
-			len(replay.RenderProjection(entries)), smokeEntryDigest(entries))
-	}
+	summary := smokeIntegrityStandingSummary(t, entries, chat)
 
 	late := smokeIntegrityRequestsCarryingWhole(provider, smokeEntryModel, smokeIntegrityFoldLateTurn)
 	if len(late) != 1 {
 		t.Fatalf("the late fold turn reached %d entry request(s) with its whole body, want one\nentry requests:\n%s\ncarrying the marker:\n%s",
 			len(late), smokeRequestDetail(provider, smokeEntryModel), smokeRequestsContaining(provider, smokeIntegrityFoldLateTurn))
 	}
-	wantRendered := "external_input: " + smokeIntegrityFoldEarlyTurn
-	if !strings.Contains(late[0].text(), "history summary:") || !strings.Contains(late[0].text(), wantRendered) {
-		t.Fatalf("the request after the fold read no history summary carrying %q\nprojection:\n%s\nrequests carrying a history summary:\n%s",
-			wantRendered, smokeEntryDigest(entries), smokeRequestsContaining(provider, "history summary"))
+	if !strings.Contains(late[0].text(), "history summary:") || !strings.Contains(late[0].text(), summary.Summary+": "+summary.Content) {
+		t.Fatalf("the request after the fold read no standing history summary\nsummary:\n%s\nprojection:\n%s\nrequests carrying a history summary:\n%s",
+			summary.Content, smokeEntryDigest(entries), smokeRequestsContaining(provider, "history summary"))
 	}
 	threshold := assembly.FoldWindow{MaxTokens: 2000, CompressThreshold: 0.3}.VolumeThresholdBytes()
 	if volume := smokeIntegrityFoldVolume(entries); volume > threshold {
@@ -3247,9 +3234,9 @@ func smokeIntegrityAssertFold(t *testing.T, rig *smokeRig, provider *smokeProvid
 			t.Fatalf("the folded original %s is still an entry of the projection", original.Key)
 		}
 	}
-	t.Logf("[integrity-fold] %s: entries=%d synthetic=%d rendered=%d bytes (window=%d); the next request read a history summary carrying %q and the original fact %s stays reachable",
+	t.Logf("[integrity-fold] %s: entries=%d synthetic=%d rendered=%d bytes (window=%d); the next request read the standing history summary %s and the original fact %s stays reachable",
 		chat, len(entries), len(synthetic), len(replay.RenderProjection(entries)), threshold,
-		wantRendered, original.Key)
+		summary.Key, original.Key)
 	return original
 }
 

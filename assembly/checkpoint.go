@@ -56,9 +56,9 @@ const CheckpointCommitInterval = 64
 const CheckpointPeriod = 30 * time.Second
 
 // checkpointSliceProjection, checkpointSliceDelivery, checkpointSliceMailbox,
-// checkpointSliceTasks and checkpointSliceInputs name the framework's own state
-// slices. A consumer mounted beside them carries a name of its own, so the two
-// families never collide on the seam.
+// checkpointSliceTasks, checkpointSliceInputs and checkpointSliceCompress name
+// the framework's own state slices. A consumer mounted beside them carries a name
+// of its own, so the two families never collide on the seam.
 const (
 	// checkpointSliceProjection carries the survivors of every session
 	// projection the run presents.
@@ -76,6 +76,11 @@ const (
 	// with no answer, so the owed drives a restart reads are the rounds the cut
 	// covered rather than only the ones that landed past it.
 	checkpointSliceInputs = "inputs"
+	// checkpointSliceCompress carries the compression consumer's account: the
+	// judgments a producer filed and the identities a product answers, so a boot
+	// that reads the carrier answers every judgment the cut covered instead of
+	// executing the ones it skipped.
+	checkpointSliceCompress = "compress"
 )
 
 // ErrCheckpointUnreadable reports a checkpoint fact whose payload does not state

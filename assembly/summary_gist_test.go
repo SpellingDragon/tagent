@@ -80,7 +80,7 @@ func TestBandSummaryGistReadsTheSessionModel(t *testing.T) {
 		t.Fatalf("the model saw %d request(s), want the one band summary request", len(provider.requests))
 	}
 	asked := provider.requests[0].Messages[len(provider.requests[0].Messages)-1].Content
-	if !strings.Contains(asked, BandSummaryInstruction) || !strings.Contains(asked, "[11-06 12:00|gen:?] external_input: ask") {
+	if !strings.Contains(asked, bandSummaryInstruction) || !strings.Contains(asked, "[11-06 12:00|gen:?] external_input: ask") {
 		t.Fatalf("request = %q, want the instruction beside the mechanical reads of the band", asked)
 	}
 }
@@ -210,7 +210,7 @@ const gistModelAnswer = "[11-06 13:00|gen:?] the band settled on one decision"
 func gistAnsweringModel() *snapshotTestModel {
 	return &snapshotTestModel{answer: func(req *model.Request) *model.Response {
 		content := factWindowAnswer
-		if last := req.Messages[len(req.Messages)-1].Content; strings.HasPrefix(last, BandSummaryInstruction) {
+		if last := req.Messages[len(req.Messages)-1].Content; strings.HasPrefix(last, bandSummaryInstruction) {
 			content = gistModelAnswer
 		}
 		return &model.Response{Choices: []model.Choice{{Message: model.Message{
@@ -225,7 +225,7 @@ func askedBandSummaries(provider *snapshotTestModel) []model.Request {
 	defer provider.mu.Unlock()
 	asked := make([]model.Request, 0, len(provider.requests))
 	for _, req := range provider.requests {
-		if strings.Contains(req.Messages[len(req.Messages)-1].Content, BandSummaryInstruction) {
+		if strings.Contains(req.Messages[len(req.Messages)-1].Content, bandSummaryInstruction) {
 			asked = append(asked, req)
 		}
 	}

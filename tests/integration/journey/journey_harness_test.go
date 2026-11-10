@@ -16,6 +16,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -211,10 +212,16 @@ func (r journeyRequest) text() string {
 	return strings.Join(parts, "\n")
 }
 
+// bandReadAnchor matches one rendered provenance anchor, the form every read a
+// fold product carries opens with: [MM-DD HH:MM|gen:<generation>].
+var bandReadAnchor = regexp.MustCompile(`\[\d\d-\d\d \d\d:\d\d\|gen:[^\]]*\]`)
+
 // bandSummaryGist reports the gist the endpoint answers a band summary request
 // with, and whether the request is one at all: the fold asks the session's own
 // model for the bounded summary of its oldest band, and the faithful answer to
-// that ask is the anchored reads it was handed.
+// that ask is the anchored reads it was handed. A decision of an agent that
+// declares no tools carries no tool surface either, so the rendered anchors of
+// the reads behind the instruction paragraph are what tells the two apart.
 func bandSummaryGist(request journeyRequest) (string, bool) {
 	messages := request.messages()
 	if len(messages) != 1 || messages[0].Role != "user" {
@@ -223,10 +230,11 @@ func bandSummaryGist(request journeyRequest) (string, bool) {
 	if _, carried := request.Body["tools"]; carried {
 		return "", false
 	}
-	if !strings.HasPrefix(messages[0].Content, assembly.BandSummaryInstruction) {
+	_, material, asked := strings.Cut(messages[0].Content, "\n\n")
+	if !asked || !bandReadAnchor.MatchString(material) {
 		return "", false
 	}
-	return strings.TrimSpace(strings.TrimPrefix(strings.TrimPrefix(messages[0].Content, assembly.BandSummaryInstruction), "\n\n")), true
+	return strings.TrimSpace(material), true
 }
 
 // messages decodes the messages one recorded request carried.

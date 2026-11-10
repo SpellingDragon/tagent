@@ -79,7 +79,10 @@ type compressSessions interface {
 	// beside the window it was registered under.
 	ProjectionOf(ctx context.Context, session event.SessionID) (*replay.ReplayProjection, FoldWindow, bool)
 	// FileCompressProduct files one execution result on the chain of the session
-	// whose material was folded.
+	// whose material was folded, and answers the judgment it names: the answer
+	// follows the fact inside one unit of the run's quiet-point fence, so a cut
+	// taken after the landing states the answer beside the fact, and the execution
+	// the consumer reads as owed stops being owed.
 	FileCompressProduct(ctx context.Context, session event.SessionID, product event.CompressProduct) error
 }
 
@@ -188,6 +191,7 @@ func (c *CompressionConsumer) NoteProduct(product event.CompressProduct) {
 // - A history summary covers every settlement fact inside the band it folds: settlement lines never count as fold material (foldProjectionOf), the summary consumes their accounting beside the turns, and the facts stay on the chain readable by identity.
 // - The checkpoint is a pure whole-batch preflight, so its survivors equal the entries left by applying that same batch.
 // - The oldest-band gist is read before the checkpoint, so the survivors a restart rebuilds state the text the chain records rather than the mechanical form the fold minted.
+// - Every product is filed through the session face, which answers the judgment it names: the batch shrinks as it is filed, so the account the consumer holds is never one the chain disagrees with.
 func (c *CompressionConsumer) Execute(ctx context.Context, session event.SessionID) error {
 	if c == nil || c.sessions == nil || session == "" {
 		return nil
@@ -244,7 +248,6 @@ func (c *CompressionConsumer) Execute(ctx context.Context, session event.Session
 		if err := c.sessions.FileCompressProduct(ctx, session, minted); err != nil {
 			return err
 		}
-		c.noteAnswered(product.Request.ID)
 		projection.ApplyProducts([]replay.FoldProduct{product})
 	}
 	return nil
@@ -417,7 +420,8 @@ func (s ageFoldSessions) FileCompressProduct(ctx context.Context, session event.
 // fileCompressProduct lands one execution result in the live ledger of this run
 // under the product's content-addressed identity: a product already on record is
 // left as it stands, so one judgment answers one product however often the
-// execution runs.
+// execution runs. The consumer answers the judgment here rather than beside the
+// call, so the answer follows the fact inside one unit of the quiet-point fence.
 func (r *Run) fileCompressProduct(ctx context.Context, session event.SessionID, product event.CompressProduct) error {
 	if session == "" {
 		return errors.New("tagent: the compression product names no session chain")
@@ -425,17 +429,22 @@ func (r *Run) fileCompressProduct(ctx context.Context, session event.SessionID, 
 	if product.FactKey() == "" {
 		return errors.New("tagent: the compression product carries no identity")
 	}
+	r.flight.enter()
+	defer r.flight.leave()
 	r.mu.Lock()
 	_, filed := r.facts[product.ID]
 	agent := r.agentOfSessionLocked(session)
+	consumer := r.compress
 	r.mu.Unlock()
 	if filed {
+		consumer.noteAnswered(product.Answers.Request)
 		return nil
 	}
 	if _, err := r.commitFactChecked(ctx, compressProductEvent(session, agent, product, time.Now())); err != nil {
 		assemblyWarn("tagent: the compression product of session %s was not committed err=%v", session, err)
 		return err
 	}
+	consumer.noteAnswered(product.Answers.Request)
 	return nil
 }
 
