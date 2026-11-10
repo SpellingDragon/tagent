@@ -116,9 +116,11 @@ func ageBandRequest(t *testing.T, run *assembly.Run, provider *replayModel, inpu
 }
 
 // TestAgeBandsReachTheRequest pins the consumer of an age-band fold in the next request.
-//   - the oldest and middle bands read as one history summary leading the request
-//   - the newest band keeps its input and output and drops its process detail
-//   - the raw text of the folded bands never reaches the request
+//   - one fold promotes the segments that left the recent window into the middle band, whose process detail folds into one segment product each
+//   - a later fold promotes that material into the oldest band, since the bands follow the folds
+//   - the fold settles once no segment outside the recent window carries process detail
+//   - the settled projection reads as one history summary leading the request, stated by the one-line reads and the keys of the folded products
+//   - the raw text of the folded bands never reaches the request, and the newest turn stays whole in front of the input
 //
 // 契约: docs/wiki/memory/memory-architecture.md#event-shape
 func TestAgeBandsReachTheRequest(t *testing.T) {
@@ -129,18 +131,49 @@ func TestAgeBandsReachTheRequest(t *testing.T) {
 	}
 	projection := ageBandProjection(t, facts)
 
-	report, err := projection.FoldByAge(ctx, replay.AgeFoldPlan{KeepRecent: 1, VolumeThreshold: 600})
+	plan := replay.AgeFoldPlan{KeepRecent: 1, VolumeThreshold: 600}
+	first, err := projection.FoldByAge(ctx, plan)
 	if err != nil {
 		t.Fatalf("FoldByAge: %v", err)
 	}
-	if !report.Triggered {
-		t.Fatalf("report = %+v, want the fold to trigger past the threshold", report)
+	if !first.Triggered || first.NewFolded != 6 || first.MidFolded != 0 {
+		t.Fatalf("first fold report = %+v, want the six process entries of the three segments that left the window folded and no history summary minted yet", first)
 	}
-	if report.NewFolded != 2 || report.MidFolded != 12 {
-		t.Fatalf("report = %+v, want the newest turn's two process entries folded and the twelve older entries summarised", report)
+	if len(first.Products) != 3 || len(first.Requests) != 3 {
+		t.Fatalf("first fold report = %+v, want one segment product per folded segment, each beside its judgment", first)
 	}
-	if len(report.Products) != 2 || len(report.Requests) != 2 {
-		t.Fatalf("report = %+v, want one segment-fold product and one history summary, each with its judgment", report)
+	for _, product := range first.Products {
+		if product.Type != replay.ProjectionTypeSegmentFold {
+			t.Fatalf("first fold product %s = %q, want a segment fold", product.Key, product.Type)
+		}
+	}
+
+	promoting := replay.AgeFoldReport{}
+	settled := false
+	for round := 2; round <= 4; round++ {
+		report, err := projection.FoldByAge(ctx, plan)
+		if err != nil {
+			t.Fatalf("FoldByAge round %d: %v", round, err)
+		}
+		if !report.Triggered {
+			settled = true
+			break
+		}
+		promoting = report
+	}
+	if !settled {
+		t.Fatal("the fold minted a product in every round up to the fourth, want the generational fold to settle")
+	}
+	if promoting.NewFolded != 0 || promoting.MidFolded != 9 || len(promoting.Products) != 1 || promoting.Products[0].Type != replay.ProjectionTypeHistorySummary {
+		t.Fatalf("promoting fold report = %+v, want the nine entries the earlier fold left read as one history summary and no process detail folded twice", promoting)
+	}
+
+	entries := projection.Entries()
+	if len(entries) != 5 || entries[0].Type != replay.ProjectionTypeHistorySummary {
+		t.Fatalf("settled projection = %v, want the history summary followed by the four entries of the newest turn", projectionKeysOf(entries))
+	}
+	if string(entries[1].Key) != "03-0-in" || string(entries[4].Key) != "03-3-out" {
+		t.Fatalf("settled projection = %v, want the newest turn kept whole behind the summary", projectionKeysOf(entries))
 	}
 
 	run, provider := ageBandRun(t, projection)
@@ -155,35 +188,43 @@ func TestAgeBandsReachTheRequest(t *testing.T) {
 	if lead >= len(got) || !strings.HasPrefix(got[lead].Content, "history summary: ") {
 		t.Fatalf("message %d = %q, want the history summary of the older bands leading the material", lead, got[min(lead, len(got)-1)].Content)
 	}
+	summary := strings.TrimPrefix(got[lead].Content, "history summary: ")
+	for _, want := range []string{"external_input: ask first", "agent_output: answer first", "external_input: ask third", "agent_output: answer third"} {
+		if !strings.Contains(summary, want) {
+			t.Fatalf("history summary = %q, want the one-line read %q of the folded turn", summary, want)
+		}
+	}
+	if !strings.Contains(summary, "segment fold (-seg-") {
+		t.Fatalf("history summary = %q, want the folded segments stated by the keys of their products", summary)
+	}
+	for _, line := range strings.Split(summary, "; ") {
+		if !strings.HasPrefix(line, "[") || !strings.Contains(line, "|gen:?]") {
+			t.Fatalf("history summary line %q opens with no provenance anchor naming the generation this chain leaves unstated", line)
+		}
+	}
 	if last := got[len(got)-1]; last.Content != "折叠后的新请求。" || last.Role != model.RoleUser {
 		t.Fatalf("last message = (%q, %q), want the input that opened this turn", last.Role, last.Content)
 	}
-	folded := ""
-	for _, message := range got {
-		if strings.HasPrefix(message.Content, "[") && strings.Contains(message.Content, "thinking_plan: plan fourth") {
-			folded = message.Content
-		}
-	}
-	if !strings.Contains(folded, "] thinking_plan: plan fourth") || !strings.Contains(folded, "] action_command: call fourth") {
-		t.Fatalf("folded product = %q, want the newest turn's process detail opening with the provenance anchor", folded)
-	}
-	if !strings.Contains(folded, "|gen:?]") {
-		t.Fatalf("folded product = %q, want the explicit generation placeholder of a chain that names none", folded)
-	}
 	for _, message := range got {
 		for _, raw := range []string{
-			strings.Repeat("思考正文 fourth。", 12),
-			strings.Repeat("工具输出 fourth。", 12),
 			strings.Repeat("思考正文 first。", 12),
 			strings.Repeat("工具输出 first。", 12),
+			strings.Repeat("思考正文 second。", 12),
+			strings.Repeat("工具输出 second。", 12),
+			strings.Repeat("思考正文 third。", 12),
+			strings.Repeat("工具输出 third。", 12),
 		} {
 			if strings.Contains(message.Content, raw) {
 				t.Fatalf("request still carries the raw folded text %q", raw)
 			}
 		}
 	}
-	if !strings.Contains(strings.Join(contentsOf(got), "\n"), strings.Repeat("回答正文 fourth。", 12)) {
+	joined := strings.Join(contentsOf(got), "\n")
+	if !strings.Contains(joined, strings.Repeat("回答正文 fourth。", 12)) {
 		t.Fatal("request dropped the output that closed the newest turn, want the input and output of that turn kept")
+	}
+	if !strings.Contains(joined, strings.Repeat("思考正文 fourth。", 12)) || !strings.Contains(joined, strings.Repeat("工具输出 fourth。", 12)) {
+		t.Fatal("request dropped the process detail of the newest turn, want the recent window kept whole")
 	}
 }
 

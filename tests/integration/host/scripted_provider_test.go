@@ -11,6 +11,9 @@ import (
 	"strings"
 	"sync"
 	"testing"
+
+	"github.com/SpellingDragon/tagent/api/model"
+	"github.com/SpellingDragon/tagent/assembly"
 )
 
 // scriptedTerminalAnswer is the one terminal answer the scripted provider
@@ -178,6 +181,48 @@ func scriptedContent(raw json.RawMessage) string {
 		}
 	}
 	return strings.Join(texts, "")
+}
+
+// bandSummaryMaterial reports the mechanical reads a band summary request
+// carries, and whether the request is one at all. The fold asks the session's
+// own model for the gist of its oldest band, so that request reaches the same
+// endpoint a decision does: it carries the band summary instruction as its one
+// user message beside the anchored reads, and no tool surface.
+func bandSummaryMaterial(request scriptedRequest) (string, bool) {
+	if len(request.Tools) != 0 || len(request.Messages) != 1 || request.Messages[0].Role != string(model.RoleUser) {
+		return "", false
+	}
+	content := request.Messages[0].Content
+	if !strings.HasPrefix(content, assembly.BandSummaryInstruction) {
+		return "", false
+	}
+	return strings.TrimPrefix(strings.TrimPrefix(content, assembly.BandSummaryInstruction), "\n\n"), true
+}
+
+// bandSummaryGist renders the gist the scripted endpoint answers a band summary
+// with: the anchored reads it was handed, kept as a faithful model keeps them.
+// A scripted band summary therefore stands for the same material the mechanical
+// form stood for, and a check reads the bound and the anchors rather than one
+// summarizer's wording.
+func bandSummaryGist(material string) string {
+	return strings.TrimSpace(material)
+}
+
+// bandSummaryRequestMaterial reports the mechanical reads a band summary request
+// carries at the native model seam, and whether the request is one at all. It
+// reads the same request bandSummaryMaterial reads over the wire: the fold asks
+// the session's own model for the gist of its oldest band, so a native stand-in
+// tells that request apart from a decision by the one instructed user message
+// beside no tool surface.
+func bandSummaryRequestMaterial(request model.Request) (string, bool) {
+	if len(request.Tools) != 0 || len(request.Messages) != 1 || request.Messages[0].Role != model.RoleUser {
+		return "", false
+	}
+	content := request.Messages[0].Content
+	if !strings.HasPrefix(content, assembly.BandSummaryInstruction) {
+		return "", false
+	}
+	return strings.TrimPrefix(strings.TrimPrefix(content, assembly.BandSummaryInstruction), "\n\n"), true
 }
 
 // scriptedCarriesAgentTool reports whether the invocation that made the request

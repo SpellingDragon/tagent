@@ -34,7 +34,16 @@ const (
 	productFactRequest = "compress_request"
 	productFactKey     = "compress_key"
 	productFactText    = "compress_text"
+	productFactCovered = "compress_covered"
 )
+
+// productFactCoveredSeparator separates the covered keys one product fact states,
+// as the durable chain spells the list.
+const productFactCoveredSeparator = "\n"
+
+// firstCompressTurnInput is the entry the first task turn of a compress anchor
+// opens with: the material a product that folded the turn away stands for.
+const firstCompressTurnInput = event.EventID("00-0-in")
 
 // compressProductFact is one compress product fact as the chain states it.
 type compressProductFact struct {
@@ -118,6 +127,31 @@ func compressProductsOf(t *testing.T, run *assembly.Run, session event.SessionID
 		answers[request]++
 	}
 	return products, answers
+}
+
+// compressChainProductsOf reports the product facts the durable chain of one
+// session holds, in commit order: every product the folds filed, including the
+// ones a later fold promoted, which the projection reads through the summary that
+// covers them rather than under their own key.
+func compressChainProductsOf(t *testing.T, root string, session event.SessionID) []compressProductFact {
+	t.Helper()
+	facts := compressChainFactsOf(t, root, session)
+	products := make([]compressProductFact, 0, len(facts))
+	for _, evt := range facts {
+		if evt.Type != event.CompressProductType {
+			continue
+		}
+		key := event.EventID(evt.Meta[productFactKey])
+		if key == "" {
+			t.Fatalf("the product fact %s of the chain states no product key: %v", evt.Key, evt.Meta)
+		}
+		products = append(products, compressProductFact{
+			Request: event.EventID(evt.Meta[productFactRequest]),
+			Key:     key,
+			Text:    evt.Meta[productFactText],
+		})
+	}
+	return products
 }
 
 // compressSyntheticKeysOf reports the synthetic product keys one session's
@@ -308,6 +342,7 @@ func TestCompressRequestIsFiledWithoutExecution(t *testing.T) {
 // TestCompressPipelineJudgesThenExecutes anchors the three stages of compression over the public commit entry.
 //   - the age fold files a compress request for every product the material is due
 //   - the consumer executes each judgment and files the compress product beside it
+//   - the chain is append-only, so its whole account holds both product kinds, while the projection presents the products the last fold minted
 //   - every synthetic entry of the projection is answered by a product fact, so no stage mints a product of its own
 //   - one request answers exactly one product, and a later commit files no second one
 //   - the window after the later commits is what this anchor judges: a fold that re-summarizes earlier products releases the facts behind it
@@ -316,6 +351,7 @@ func TestCompressRequestIsFiledWithoutExecution(t *testing.T) {
 func TestCompressPipelineJudgesThenExecutes(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
+	storage := ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: t.TempDir()}
 	provider := &entryModel{name: "model-a", answer: func(*model.Request) *model.Response {
 		return entryFinalTurn("the compress answer")
 	}}
@@ -329,7 +365,7 @@ func TestCompressPipelineJudgesThenExecutes(t *testing.T) {
 	}
 	run, err := assembly.Assemble(ctx, decl, map[event.AgentID]assembly.NativeAgent{
 		"agent-a": {Model: provider},
-	}, assembly.WithGovernance(passPolicy{}))
+	}, assembly.WithGovernance(passPolicy{}), assembly.WithStorage(storage))
 	if err != nil {
 		t.Fatalf("assemble the runtime: %v", err)
 	}
@@ -342,11 +378,12 @@ func TestCompressPipelineJudgesThenExecutes(t *testing.T) {
 	if len(products) == 0 {
 		t.Fatalf("the executed judgments filed no compress product after %d turn(s), so consumption never ran", turns)
 	}
-	if len(products) < 2 {
-		t.Fatalf("the chain carries %d product(s) after %d turn(s), want the segment fold and the history summary both executed", len(products), turns)
+	onChain := compressChainProductsOf(t, storage.Root, addr.SessionID)
+	if len(onChain) < 2 {
+		t.Fatalf("the chain carries %d product(s) after %d turn(s), want the segment fold and the history summary both executed", len(onChain), turns)
 	}
-	if !compressCoversBothKinds(products) {
-		t.Fatalf("the products %v state no segment fold and no history summary: one product kind never reached the chain", keysOfProducts(products))
+	if !compressCoversBothKinds(onChain) {
+		t.Fatalf("the products %v the chain holds state no segment fold and no history summary: one product kind never reached the chain", keysOfProducts(onChain))
 	}
 	requests := compressRequestIDsOf(run, addr.SessionID)
 	if len(requests) == 0 {
@@ -416,7 +453,7 @@ func TestCompressPipelineJudgesThenExecutes(t *testing.T) {
 //   - a second assembly over the same storage restores the same product keys, key for key
 //   - the restart files no judgment and no product: the fold form is read, never re-derived
 //   - both claims are read from the chain, not the window: the resident ledger holds only the band the projection presents
-//   - the next real request carries the restored product text and none of the raw detail the product consumed
+//   - the next real request names the restored product by key, which stands for the first turn, and carries none of the raw detail the product consumed
 //
 // 契约: docs/wiki/agent/event-flow.md#projection-lifecycle
 func TestCompressProductRestoresAfterRestart(t *testing.T) {
@@ -430,8 +467,8 @@ func TestCompressProductRestoresAfterRestart(t *testing.T) {
 	newAgents := func(provider *entryModel) map[event.AgentID]assembly.NativeAgent {
 		return map[event.AgentID]assembly.NativeAgent{"agent-a": {Model: provider}}
 	}
-	first := &entryModel{name: "model-a", answer: func(*model.Request) *model.Response {
-		return entryFinalTurn("the first-boot answer")
+	first := &entryModel{name: "model-a", answer: func(req *model.Request) *model.Response {
+		return compressAnswerOf(*req, "the first-boot answer")
 	}}
 	run, err := assembly.Assemble(ctx, decl, newAgents(first), assembly.WithGovernance(passPolicy{}), assembly.WithStorage(storage))
 	if err != nil {
@@ -460,8 +497,8 @@ func TestCompressProductRestoresAfterRestart(t *testing.T) {
 		}
 	}
 
-	probe := &entryModel{name: "model-a", answer: func(*model.Request) *model.Response {
-		return entryFinalTurn("the restarted answer")
+	probe := &entryModel{name: "model-a", answer: func(req *model.Request) *model.Response {
+		return compressAnswerOf(*req, "the restarted answer")
 	}}
 	chainBefore := compressChainFactsOf(t, storage.Root, addr.SessionID)
 	restarted, err := assembly.Assemble(ctx, decl, newAgents(probe), assembly.WithGovernance(passPolicy{}), assembly.WithStorage(storage))
@@ -491,26 +528,78 @@ func TestCompressProductRestoresAfterRestart(t *testing.T) {
 		t.Fatalf("drive the probe turn after the restart: %v", err)
 	}
 	recorded := probe.recorded()
-	if len(recorded) == 0 {
-		t.Fatal("the restarted run served no model request, so the restored projection never reached the wire")
-	}
-	wire := compressWireOf(recorded[0])
-	carried := 0
+	request := compressFormalRequestOf(t, recorded)
+	wire := compressWireOf(request)
+	covered := compressCoveredKeysOf(t, storage.Root, addr.SessionID)
+	named := make([]event.EventID, 0, len(products))
 	for _, product := range products {
-		if product.Text != "" && strings.Contains(wire, product.Text) {
-			carried++
+		if strings.Contains(wire, string(product.Key)) {
+			named = append(named, product.Key)
 		}
 	}
-	if carried == 0 {
-		t.Fatalf("the request after the restart carries none of the %d restored product text(s), so the restore never reached the wire: %v", len(products), compressWireOf(recorded[0]))
+	if len(named) == 0 {
+		t.Fatalf("the request after the restart names none of the %d restored product(s), so the restore never reached the wire: %v", len(products), wire)
 	}
-	if !strings.Contains(wire, "external_input: ask 00") {
-		t.Fatalf("the request after the restart carries no product that consumed the first turn, so the restored form is incomplete: %v", keysOfEventIDs(restored))
+	reachesFirst := false
+	for _, key := range named {
+		if compressStandsFor(covered, key, firstCompressTurnInput) {
+			reachesFirst = true
+		}
+	}
+	if !reachesFirst {
+		t.Fatalf("the request after the restart names the product(s) %v and none of them stands for the first turn, so the restored form is incomplete: %v", named, keysOfEventIDs(restored))
 	}
 	if strings.Contains(wire, compressBody(0, "1-plan")) {
 		t.Fatalf("the request after the restart carries the raw process detail %q the fold consumed, so the projection was re-folded or never restored", compressBody(0, "1-plan"))
 	}
-	t.Logf("[compress 3] consumer: %d product(s) restored key for key (%v); the probe request carries %d of their texts and no raw detail", len(restored), restored, carried)
+	t.Logf("[compress 3] consumer: %d product(s) restored key for key (%v); the probe request names %d of them and stands for the first turn, with no raw detail", len(restored), restored, len(named))
+}
+
+// compressCoveredKeysOf reports the entry keys each compress product of one
+// session's chain covers, read from the product facts themselves: a summary
+// stands for the material it covers by key and never re-carries its text, so
+// this is how a check reads what a product the wire names stands for.
+func compressCoveredKeysOf(t *testing.T, root string, session event.SessionID) map[event.EventID][]event.EventID {
+	t.Helper()
+	covered := map[event.EventID][]event.EventID{}
+	for _, evt := range compressChainFactsOf(t, root, session) {
+		if evt.Type != event.CompressProductType {
+			continue
+		}
+		key := event.EventID(evt.Meta[productFactKey])
+		if key == "" {
+			continue
+		}
+		keys := make([]event.EventID, 0, 4)
+		for _, part := range strings.Split(evt.Meta[productFactCovered], productFactCoveredSeparator) {
+			if part == "" {
+				continue
+			}
+			keys = append(keys, event.EventID(part))
+		}
+		covered[key] = keys
+	}
+	return covered
+}
+
+// compressStandsFor reports whether one product key stands for the named entry,
+// following the covered keys through the products a later fold promoted.
+func compressStandsFor(covered map[event.EventID][]event.EventID, key, want event.EventID) bool {
+	seen := map[event.EventID]bool{}
+	pending := []event.EventID{key}
+	for len(pending) > 0 {
+		at := pending[0]
+		pending = pending[1:]
+		if at == want {
+			return true
+		}
+		if seen[at] {
+			continue
+		}
+		seen[at] = true
+		pending = append(pending, covered[at]...)
+	}
+	return false
 }
 
 // compressWireOf renders every message content of one served request in message
@@ -522,6 +611,35 @@ func compressWireOf(request model.Request) string {
 		out.WriteByte('\n')
 	}
 	return out.String()
+}
+
+// compressFormalRequestOf reports the first request one served sequence carries
+// that is the decision of a turn rather than a band summary: the fold asks the
+// session's own model for the gist of its oldest band, and that request reaches
+// the same endpoint beside the decision the turn drives.
+func compressFormalRequestOf(t *testing.T, recorded []model.Request) model.Request {
+	t.Helper()
+	if len(recorded) == 0 {
+		t.Fatal("the restarted run served no model request, so the restored projection never reached the wire")
+	}
+	for _, request := range recorded {
+		if _, summary := bandSummaryRequestMaterial(request); summary {
+			continue
+		}
+		return request
+	}
+	t.Fatalf("the restarted run served %d band summary request(s) and no decision, so no turn reached the wire", len(recorded))
+	return model.Request{}
+}
+
+// compressAnswerOf answers one native request of a compress anchor: a band
+// summary is answered with the reads it was handed, and every other request is
+// the decision the turn drives.
+func compressAnswerOf(request model.Request, decision string) *model.Response {
+	if material, summary := bandSummaryRequestMaterial(request); summary {
+		return entryFinalTurn(bandSummaryGist(material))
+	}
+	return entryFinalTurn(decision)
 }
 
 // compressCoversBothKinds reports whether the products state both product kinds:

@@ -5,13 +5,15 @@
 // as consumed beside the process detail, with the inputs it did not name rolling
 // into the next segment — exactly the way the deterministic compress level reads
 // them, and each segment is placed in one of three bands by its folding
-// generation. The segments inside the recent window are the new band and stay
-// whole; a segment older than that window that no fold has consumed is the
-// middle band, whose process detail folds into one segment product; a segment
-// that already carries a product of an earlier fold is the oldest band, which
-// folds into the one history summary. Every fold promotes the material outside
-// the window one band, so the promotion follows the folds and never the absolute
-// distance a segment sits from the newest one.
+// generation. A history summary covers the turns one earlier fold consumed and
+// belongs to no single turn, so it stands as a complete segment of its own and
+// the turns beside it keep their own material. The segments inside the recent
+// window are the new band and stay whole; a segment older than that window that
+// no fold has consumed is the middle band, whose process detail folds into one
+// segment product; a segment that already carries a product of an earlier fold
+// is the oldest band, which folds into the one history summary. Every fold
+// promotes the material outside the window one band, so the promotion follows
+// the folds and never the absolute distance a segment sits from the newest one.
 //
 // The fold is segment-grained while AssembleBudget is entry-grained: the
 // assembly decides how one entry is presented under its budget and never
@@ -201,8 +203,8 @@ func (s Segment) Legacy() bool {
 // fact records as consumed, an input it leaves unnamed rolls into the segment
 // the next output closes, and the process entries between stay with the closing
 // output. An output beside no readable relation closes every entry before it at
-// the positional boundary. A tail no agent output closed stays its own segment
-// in progress.
+// the positional boundary. A history summary stands as one complete segment of
+// its own. A tail no agent output closed stays its own segment in progress.
 //
 // Each segment is banded by its fold generation: the newest keepRecent segments
 // are the new band, a segment already carrying a product of an earlier fold is
@@ -243,7 +245,8 @@ func bandOfSegment(segment Segment, total, keepRecent int) Band {
 
 // carriesFoldProduct reports whether one segment already carries a product of an
 // earlier age fold, which is the mark that the segment's own fold is spent and
-// the material beside it is the oldest band.
+// the material beside it is the oldest band. A history summary segment carries
+// the summary it stands for and is the oldest band from the round it is placed.
 func carriesFoldProduct(entries []ProjectionEntry) bool {
 	for _, entry := range entries {
 		if entry.Type == ProjectionTypeSegmentFold || entry.Type == ProjectionTypeHistorySummary {
@@ -304,6 +307,11 @@ func parseInputEvents(raw string) ([]event.EventID, bool) {
 // run the next segment opens with; an output beside no readable relation keeps
 // the positional boundary and closes the whole run, so a chain without the
 // relation is never re-cut. A tail no output closed stays one run in progress.
+// A history summary covers the turns one earlier fold consumed and belongs to no
+// single turn, so it closes as one complete segment of its own and the material
+// either side of it keeps its own segment; a segment product stays inside the
+// turn that minted it, because replacing that turn's process detail is what the
+// product records.
 //
 // Segments group by arrival order by default; an entry that carries a
 // consumption relation folds along that relation instead. The relation is
@@ -314,6 +322,14 @@ func splitSegments(entries []ProjectionEntry) []segmentRun {
 	var runs []segmentRun
 	var current []ProjectionEntry
 	for _, entry := range entries {
+		if entry.Type == ProjectionTypeHistorySummary {
+			if len(current) > 0 {
+				runs = append(runs, segmentRun{entries: current})
+				current = nil
+			}
+			runs = append(runs, segmentRun{entries: []ProjectionEntry{entry}, complete: true})
+			continue
+		}
 		current = append(current, entry)
 		if entry.Type != event.TypeAgentOutput {
 			continue

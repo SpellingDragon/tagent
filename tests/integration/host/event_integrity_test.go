@@ -5173,7 +5173,15 @@ func bootSmallWindowHost(t *testing.T, provider *scriptedProvider, sender record
 // the terminal word alone. The match is deliberately loose, so a check reads the
 // shape the notice actually had instead of waiting out a script that never
 // matches.
+//
+// A band summary is never the follow-up: the fold asks the session's own model
+// for the gist of its oldest band over the same endpoint, and the material it
+// carries quotes the settled notice beside the turns. The decision the notice
+// drives is the request that holds no band summary instruction.
 func requestMentionsSettleNotice(request scriptedRequest) bool {
+	if _, summary := bandSummaryMaterial(request); summary {
+		return false
+	}
 	for _, message := range request.Messages {
 		if message.Role == string(model.RoleUser) && strings.Contains(message.Content, "settled") {
 			return true

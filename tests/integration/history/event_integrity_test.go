@@ -1735,6 +1735,20 @@ func projectionKeysOf(entries []replay.ProjectionEntry) []string {
 	return keys
 }
 
+// noticeRewriteOf reports the entry keys of one session's projection with the
+// notice fact left out: the commit appends that fact as material of its own, so
+// the remaining sequence is the transcript the age fold rewrote under it.
+func noticeRewriteOf(t *testing.T, run *assembly.Run, addr event.Address, notice event.EventID) []string {
+	t.Helper()
+	rewritten := make([]string, 0, 8)
+	for _, key := range projectionKeysOf(projectionEntriesOf(t, run, addr.SessionID)) {
+		if event.EventID(key) != notice {
+			rewritten = append(rewritten, key)
+		}
+	}
+	return rewritten
+}
+
 // projectionProductsOf reports the synthetic product keys of one session's
 // projection in projection order.
 func projectionProductsOf(t *testing.T, run *assembly.Run, session event.SessionID) []event.EventID {
@@ -1875,21 +1889,21 @@ func runSmallWindowFoldAndRestore(t *testing.T) {
 	for _, entry := range entries {
 		held[entry.Key] = true
 	}
-	for _, key := range []event.EventID{projectionKey(2, "1-plan"), projectionKey(2, "2-call")} {
+	for _, key := range []event.EventID{projectionKey(0, "1-plan"), projectionKey(0, "2-call"), projectionKey(1, "1-plan"), projectionKey(1, "2-call")} {
 		if held[key] {
 			t.Fatalf("the folded projection still carries the process detail %s the fold consumed", key)
 		}
 	}
-	for _, key := range []event.EventID{projectionKey(2, "0-in"), projectionKey(2, "3-out")} {
+	for _, key := range []event.EventID{projectionKey(2, "0-in"), projectionKey(2, "3-out"), projectionKey(2, "1-plan"), projectionKey(2, "2-call")} {
 		if !held[key] {
-			t.Fatalf("the folded projection dropped %s, want the input and output of a turn kept whole", key)
+			t.Fatalf("the folded projection dropped %s, want the turns still inside the recent window kept whole", key)
 		}
 	}
-	original, err := folded.CommittedEvent(ctx, projectionKey(2, "1-plan"))
+	original, err := folded.CommittedEvent(ctx, projectionKey(0, "1-plan"))
 	if err != nil {
 		t.Fatalf("read the folded original: %v", err)
 	}
-	if original.Message.Content != projectionBody(2, "1-plan") {
+	if original.Message.Content != projectionBody(0, "1-plan") {
 		t.Fatal("the folded original is no longer the text the chain committed")
 	}
 
@@ -1915,18 +1929,30 @@ func runSmallWindowFoldAndRestore(t *testing.T) {
 	if !first.Triggered || first.NewFolded == 0 || len(first.Products) == 0 {
 		t.Fatalf("fold report = %+v, want the fold the commits triggered", first)
 	}
-	recoveredEntries := rebuilt.Entries()
-	recovered := projectionKeysOf(recoveredEntries)
-	second, err := rebuilt.FoldByAge(ctx, plan)
+	for round := 0; round < 4; round++ {
+		next, err := rebuilt.FoldByAge(ctx, plan)
+		if err != nil {
+			t.Fatalf("fold the rebuilt projection again: %v", err)
+		}
+		if !next.Triggered {
+			break
+		}
+		if next.NewFolded != 0 {
+			t.Fatalf("round %d report = %+v, want the folds after the first to consume no process detail: the promotion summarizes what the round before folded", round+1, next)
+		}
+	}
+	fixed := projectionKeysOf(rebuilt.Entries())
+	settled, err := rebuilt.FoldByAge(ctx, plan)
 	if err != nil {
-		t.Fatalf("fold the rebuilt projection again: %v", err)
+		t.Fatalf("fold the settled projection: %v", err)
 	}
-	if second.NewFolded != 0 {
-		t.Fatalf("fold report = %+v, want a second fold to consume no process detail", second)
+	if settled.Triggered {
+		t.Fatalf("fold report = %+v, want the fold to reach its fixed point", settled)
 	}
-	if !sameKeys(projectionKeysOf(rebuilt.Entries()), recovered) {
-		t.Fatalf("a second fold changed the recovered keys %v into %v", recovered, projectionKeysOf(rebuilt.Entries()))
+	if !sameKeys(projectionKeysOf(rebuilt.Entries()), fixed) {
+		t.Fatalf("the settled fold changed the keys %v into %v", fixed, projectionKeysOf(rebuilt.Entries()))
 	}
+	recoveredEntries := rebuilt.Entries()
 	if !sameKeys(projectionRawKeysOf(recoveredEntries), projectionRawKeysOf(entries)) {
 		t.Fatalf("the recovered raw keys = %v, want the folded projection's own %v", projectionRawKeysOf(recoveredEntries), projectionRawKeysOf(entries))
 	}
@@ -1971,8 +1997,12 @@ func runRebuildRefoldsFromWAL(t *testing.T) {
 	if _, held := projectionEntryOfKey(online, projectionKey(3, "0-in")); !held {
 		t.Fatalf("the online projection dropped the newest input %s the fold keeps whole", projectionKey(3, "0-in"))
 	}
-	if segments := projectionProductKeysOfType(online, replay.ProjectionTypeSegmentFold); len(segments) == 0 {
-		t.Fatalf("the online fold carries no segment product beside %v, want the band products it minted", projectionProductsOf(t, run, addr.SessionID))
+	if segments := projectionProductKeysOfType(online, replay.ProjectionTypeSegmentFold); len(segments) != 0 {
+		t.Fatalf("the online fold presents the segment products %v beside the summary %v, want every segment product promoted into the summary that covers it",
+			segments, projectionProductsOf(t, run, addr.SessionID))
+	}
+	if products := projectionFactCountOf(run, addr.SessionID, event.CompressProductType); products < 2 {
+		t.Fatalf("the chain carries %d compress product fact(s), want the segment folds and the summary the online fold executed", products)
 	}
 	filed := projectionFactCountOf(run, addr.SessionID, event.CompressRequestType)
 	if filed == 0 {
@@ -2017,6 +2047,24 @@ func runRebuildRefoldsFromWAL(t *testing.T) {
 	if !onePass.Triggered || onePass.NewFolded == 0 || len(onePass.Products) == 0 {
 		t.Fatalf("the fold of the rebuilt projection = %+v, want the fold the online commits triggered", onePass)
 	}
+	if summaries := projectionProductKeysOfType(rebuilt.Entries(), replay.ProjectionTypeHistorySummary); len(summaries) != 0 {
+		t.Fatalf("the first fold over the raw sequence minted %d history summaries, want none: the middle band folds its process detail before any material reaches the oldest band", len(summaries))
+	}
+	if segments := projectionProductKeysOfType(rebuilt.Entries(), replay.ProjectionTypeSegmentFold); len(segments) == 0 {
+		t.Fatalf("the first fold over the raw sequence minted no segment product, want the one the middle band folds into")
+	}
+	for round := 0; round < 4; round++ {
+		fold, err := rebuilt.FoldByAge(ctx, plan)
+		if err != nil {
+			t.Fatalf("fold the rebuilt projection again: %v", err)
+		}
+		if !fold.Triggered {
+			break
+		}
+		if fold.NewFolded != 0 {
+			t.Fatalf("pass %d = %+v, want the passes after the first to fold no process detail again", round+2, fold)
+		}
+	}
 	if got := projectionRawKeysOf(rebuilt.Entries()); !sameKeys(got, onlineKept) {
 		t.Fatalf("the rebuilt fold keeps %v whole, want the online fold's own %v", got, onlineKept)
 	}
@@ -2024,20 +2072,13 @@ func runRebuildRefoldsFromWAL(t *testing.T) {
 		t.Fatalf("the rebuilt fold consumes %v, want the online fold's own %v", got, projectionConsumedRawKeysOf(committed, online))
 	}
 	if got, want := projectionProductKeysOfType(rebuilt.Entries(), replay.ProjectionTypeSegmentFold), projectionProductKeysOfType(online, replay.ProjectionTypeSegmentFold); !sameKeys(got, want) {
-		t.Fatalf("the rebuilt fold mints the segment products %v, want the online fold's own %v", got, want)
-	}
-	for _, key := range projectionProductKeysOfType(online, replay.ProjectionTypeSegmentFold) {
-		want, _ := projectionEntryOfKey(online, event.EventID(key))
-		got, held := projectionEntryOfKey(rebuilt.Entries(), event.EventID(key))
-		if !held || stripFoldGenerations(got.Content) != stripFoldGenerations(want.Content) || got.Type != want.Type || !got.Time.Equal(want.Time) {
-			t.Fatalf("the rebuilt segment product %s = %+v (found=%v), want the online fold's own %+v apart from the recorder generation the raw facts cannot name", key, got, held, want)
-		}
+		t.Fatalf("the rebuilt fold presents the segment products %v, want the online fold's own %v", got, want)
 	}
 	onePassSummary := projectionProductKeysOfType(rebuilt.Entries(), replay.ProjectionTypeHistorySummary)
 	if len(onePassSummary) != 1 {
 		t.Fatalf("the rebuilt fold carries %d history summaries, want the one summary the band reads", len(onePassSummary))
 	}
-	t.Logf("rebuild_refolds_from_wal: one_pass summary online=%v rebuilt=%v", projectionProductKeysOfType(online, replay.ProjectionTypeHistorySummary), onePassSummary)
+	t.Logf("rebuild_refolds_from_wal: settled summary online=%v rebuilt=%v", projectionProductKeysOfType(online, replay.ProjectionTypeHistorySummary), onePassSummary)
 
 	refolded := replay.NewReplayProjection()
 	var rejudged []event.CompressRequest
@@ -2149,8 +2190,9 @@ func projectionCompressFactsOf(run *assembly.Run, session event.SessionID) map[e
 
 // runUnconsumedNotLost is the negative anchor of the unconsumed tail: an input
 // and its reasoning no output closed stay whole in the projection, no product
-// speaks them, and the original text stays on the chain; only the output that
-// closes the turn lets the fold consume the process detail.
+// speaks them, and the original text stays on the chain; a turn folds its process
+// detail only once the output closed it and it left the recent window, so the
+// closing output alone folds nothing.
 func runUnconsumedNotLost(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
@@ -2188,6 +2230,25 @@ func runUnconsumedNotLost(t *testing.T) {
 	commitProjectionLeg(t, ctx, run, addr, 2, "2-call", event.TypeActionCommand, "call 02", projectionBody(2, "2-call"))
 	commitProjectionLeg(t, ctx, run, addr, 2, "3-out", event.TypeAgentOutput, "answer 02", projectionBody(2, "3-out"))
 	entries = projectionEntriesOf(t, run, addr.SessionID)
+	if _, still := projectionEntryOfKey(entries, projectionKey(2, "1-plan")); !still {
+		t.Fatalf("the just-closed turn folded its process detail while it was still inside the recent window: %v", projectionKeysOf(entries))
+	}
+
+	folded := false
+	for turn := 3; turn <= 5 && !folded; turn++ {
+		for _, leg := range projectionTurnLegs(turn) {
+			commitProjectionLeg(t, ctx, run, addr, turn, leg.position, leg.typ, leg.summary, projectionBody(turn, leg.position))
+			entries = projectionEntriesOf(t, run, addr.SessionID)
+			if _, still := projectionEntryOfKey(entries, projectionKey(2, "1-plan")); !still {
+				folded = true
+				break
+			}
+		}
+	}
+	if !folded {
+		t.Fatalf("no fold consumed the process detail of the closed turn that left the recent window: %v", projectionKeysOf(projectionEntriesOf(t, run, addr.SessionID)))
+	}
+	entries = projectionEntriesOf(t, run, addr.SessionID)
 	held := make(map[event.EventID]bool, len(entries))
 	for _, entry := range entries {
 		held[entry.Key] = true
@@ -2197,19 +2258,27 @@ func runUnconsumedNotLost(t *testing.T) {
 			t.Fatalf("the closed tail still carries the process detail %s the fold should consume", key)
 		}
 	}
-	for _, key := range []event.EventID{projectionKey(2, "0-in"), projectionKey(2, "3-out")} {
-		if !held[key] {
-			t.Fatalf("the closed tail dropped %s, want the input and output of the turn kept whole", key)
-		}
-	}
-	folded := false
+	spoken := false
 	for _, product := range projectionProductsEntries(t, run, addr.SessionID) {
 		if strings.Contains(product.Content, "plan 02") {
-			folded = true
+			spoken = true
 		}
 	}
-	if !folded {
+	if !spoken {
 		t.Fatalf("no fold product speaks the closed tail: %v", projectionProductsOf(t, run, addr.SessionID))
+	}
+	rendered := string(replay.RenderProjection(entries))
+	for _, read := range []string{"ask 02", "answer 02"} {
+		if !strings.Contains(rendered, read) {
+			t.Fatalf("the projection states no %q: the folded turn left neither its input nor its output behind", read)
+		}
+	}
+	foldedOriginal, err := run.CommittedEvent(ctx, projectionKey(2, "2-call"))
+	if err != nil {
+		t.Fatalf("read the folded original: %v", err)
+	}
+	if foldedOriginal.Message.Content != projectionBody(2, "2-call") {
+		t.Fatal("the folded tool command is no longer the text the chain committed")
 	}
 	t.Logf("unconsumed_not_lost: entries=%d products=%d", len(entries), len(projectionProductsOf(t, run, addr.SessionID)))
 }
@@ -2312,10 +2381,12 @@ func runRestartRestoresFoldForm(t *testing.T) {
 	t.Logf("restart_restores_fold_form: restored %v; the replay filed no judgment", got)
 }
 
-// runFoldProductNoSelfTrigger is the negative anchor of the product guard: a
-// fold repeated over material it already folded mints no second product and
-// consumes none of the products it minted, and a synthetic-keyed process entry
-// is never folded even when it sits in a closed segment over the threshold.
+// runFoldProductNoSelfTrigger is the negative anchor of the product guard: the
+// round that reads the products of an earlier fold as the oldest band states
+// those products by their keys and folds no process detail a second time, folding
+// on mints no product over material it already folded — the summary it minted
+// stands as it was minted — and a synthetic-keyed process entry is never read as
+// process detail.
 func runFoldProductNoSelfTrigger(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
@@ -2336,26 +2407,50 @@ func runFoldProductNoSelfTrigger(t *testing.T) {
 	if !first.Triggered || first.NewFolded == 0 || len(first.Products) == 0 {
 		t.Fatalf("first fold report = %+v, want the fold the restored chain judged due", first)
 	}
-	minted := projectionProductsEntriesOf(t, rebuilt.Entries())
-	keys := projectionKeysOf(rebuilt.Entries())
-	second, err := rebuilt.FoldByAge(ctx, plan)
+	for _, product := range first.Products {
+		if product.Type != replay.ProjectionTypeSegmentFold {
+			t.Fatalf("first fold product %s = %q, want the segment fold of the process detail it consumed", product.Key, product.Type)
+		}
+	}
+
+	promoting, err := rebuilt.FoldByAge(ctx, plan)
 	if err != nil {
 		t.Fatalf("fold the folded projection again: %v", err)
 	}
-	if second.Triggered {
-		t.Fatalf("second fold report = %+v, want the candidate-gated fold to report not triggered", second)
+	if !promoting.Triggered || promoting.NewFolded != 0 {
+		t.Fatalf("promoting fold report = %+v, want the products of the earlier fold read as the oldest band with no process detail folded twice", promoting)
 	}
-	if second.NewFolded != 0 || second.MidFolded != 0 || len(second.Products) != 0 || len(second.Requests) != 0 {
-		t.Fatalf("second fold report = %+v, want a fold that consumes and mints nothing", second)
+	if len(promoting.Products) != 1 || promoting.Products[0].Type != replay.ProjectionTypeHistorySummary {
+		t.Fatalf("promoting fold products = %+v, want the one history summary the oldest band reads as", promoting.Products)
+	}
+	summary := promoting.Products[0]
+	for _, product := range first.Products {
+		if !strings.Contains(summary.Content, "segment fold ("+string(product.Key)+")") {
+			t.Fatalf("history summary = %q, want the product %s it covers stated by its key", summary.Content, product.Key)
+		}
+	}
+
+	keys := projectionKeysOf(rebuilt.Entries())
+	settled := false
+	for round := 3; round <= 4; round++ {
+		report, err := rebuilt.FoldByAge(ctx, plan)
+		if err != nil {
+			t.Fatalf("fold the settled projection, round %d: %v", round, err)
+		}
+		if !report.Triggered {
+			settled = true
+			break
+		}
+	}
+	if !settled {
+		t.Fatal("the fold kept minting products, want the generational fold to settle")
 	}
 	if !sameKeys(projectionKeysOf(rebuilt.Entries()), keys) {
-		t.Fatalf("the second fold changed the folded keys %v into %v", keys, projectionKeysOf(rebuilt.Entries()))
+		t.Fatalf("the settled fold changed the folded keys %v into %v", keys, projectionKeysOf(rebuilt.Entries()))
 	}
-	for _, product := range minted {
-		entry, held := projectionEntryOfKey(rebuilt.Entries(), product.Key)
-		if !held || entry.Content != product.Content || entry.Type != product.Type {
-			t.Fatalf("the product %s = %+v (found=%v), want it kept as the fold minted it", product.Key, entry, held)
-		}
+	entry, held := projectionEntryOfKey(rebuilt.Entries(), summary.Key)
+	if !held || entry.Content != summary.Content || entry.Type != summary.Type {
+		t.Fatalf("the product %s = %+v (found=%v), want it kept as the fold minted it", summary.Key, entry, held)
 	}
 
 	guarded := replay.NewReplayProjection()
@@ -2375,13 +2470,16 @@ func runFoldProductNoSelfTrigger(t *testing.T) {
 	if _, held := projectionEntryOfKey(guarded.Entries(), "-seg-minted"); !held {
 		t.Fatal("the fold consumed the synthetic-keyed product it should have skipped")
 	}
-	t.Logf("fold_product_no_self_trigger: products=%d second=+%d", len(minted), second.NewFolded)
+	t.Logf("fold_product_no_self_trigger: round1=%d promoting=%d settled=%v", len(first.Products), promoting.MidFolded, keys)
 }
 
 // runActualRequestAssembly is the consumer anchor of the projection fold: the
-// formal request assembly presents the history summary the fold minted and the
-// product of the newest band, the raw folded bodies stay off the request, and
-// the chain still answers the original text of a folded key.
+// process detail of the turn behind the history summary reaches the request as
+// the skeleton product the middle band minted, the summary the fold wrote before
+// it stands apart with the text it holds, the summary minted afterwards states
+// the band it covers by its reads and the products it covers by their keys, the
+// raw folded bodies stay off the request, and the chain still answers the
+// original text of a folded key.
 func runActualRequestAssembly(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
@@ -2390,11 +2488,11 @@ func runActualRequestAssembly(t *testing.T) {
 	for turn := 0; turn < 4; turn++ {
 		commitProjectionTurn(t, ctx, run, addr, turn)
 	}
-	before := projectionEntriesOf(t, run, addr.SessionID)
-	if len(before) == 0 {
-		t.Fatal("the session registered no projection entries to present")
+	seed := projectionEntriesOf(t, run, addr.SessionID)
+	if len(seed) == 0 || seed[0].Type != replay.ProjectionTypeHistorySummary {
+		t.Fatalf("the projection = %v, want the history summary of the folded bands leading it", projectionKeysOf(seed))
 	}
-	t.Logf("actual_request_assembly: before=%v", projectionKeysOf(before))
+	t.Logf("actual_request_assembly: seed=%v", projectionKeysOf(seed))
 
 	if _, err := run.Invoke(ctx, assembly.InvokeRequest{
 		InvocationID: "inv-projection",
@@ -2411,87 +2509,88 @@ func runActualRequestAssembly(t *testing.T) {
 	for i, message := range messages {
 		t.Logf("actual_request_assembly: message[%d] role=%s len=%d text=%.80q", i, message.Role, len(message.Content), message.Content)
 	}
-	if len(messages) < 2 {
-		t.Fatalf("the request carries %d messages, want the presented projection beside the input", len(messages))
+	if len(messages) != 9 {
+		t.Fatalf("the request carries %d messages, want the history summary, the turn beside its skeleton, the newest turn and the caller's input: %+v", len(messages), messages)
 	}
 	input := messages[len(messages)-1]
 	if input.Role != model.RoleUser || input.Content != "projection request" {
 		t.Fatalf("the last message = %+v, want the caller's input", input)
 	}
-	after := projectionEntriesOf(t, run, addr.SessionID)
-	start := -1
-	for i, entry := range after {
-		if entry.Type == replay.ProjectionTypeHistorySummary && messages[0].Content == projectionPresentationOf(entry) {
-			start = i
-			break
+
+	if got, want := messages[0].Content, projectionPresentationOf(seed[0]); got != want {
+		t.Fatalf("the request opens with %q, want the standing history summary %q presented as it stands: the turn beside it folds into its own product", got, want)
+	}
+	if !strings.HasPrefix(messages[2].Content, "[") || !strings.Contains(messages[2].Content, "|gen:") {
+		t.Fatalf("the middle message = %q, want the skeleton product opening with its provenance anchor", messages[2].Content)
+	}
+	for _, want := range []string{"thinking_plan: plan 02", "action_command: call 02"} {
+		if !strings.Contains(messages[2].Content, want) {
+			t.Fatalf("the middle message = %q, want the one-line read %q of the turn it folds", messages[2].Content, want)
 		}
 	}
-	if start < 0 {
-		t.Fatalf("the request opens with %q, want the history summary of the projection %v", messages[0].Content, projectionKeysOf(after))
+	productRole, err := agent.RoleOf(replay.ProjectionTypeSegmentFold)
+	if err != nil {
+		t.Fatalf("the skeleton product carries the unmapped type %q: %v", replay.ProjectionTypeSegmentFold, err)
 	}
-	presented := messages[:len(messages)-1]
-	if start+len(presented) > len(after) {
-		t.Fatalf("the request presents %d entries from position %d of a %d-entry projection", len(presented), start, len(after))
+	if messages[2].Role != productRole {
+		t.Fatalf("the middle message carries role %q, want the %q role a folded product is presented under", messages[2].Role, productRole)
 	}
-	for i, message := range presented {
-		entry := after[start+i]
-		if message.Content != projectionPresentationOf(entry) {
-			t.Fatalf("message %d = %q, want the presented entry %s = %q", i, message.Content, entry.Key, projectionPresentationOf(entry))
-		}
-		role, err := agent.RoleOf(entry.Type)
-		if err != nil {
-			t.Fatalf("the presented entry %s carries the unmapped type %q: %v", entry.Key, entry.Type, err)
-		}
-		if message.Role != role {
-			t.Fatalf("message %d of %s carries role %q, want %q", i, entry.Key, message.Role, role)
+	for _, leg := range []struct {
+		at   int
+		name string
+		body string
+		role model.Role
+	}{
+		{1, "input", projectionBody(2, "0-in"), model.RoleUser},
+		{3, "output", projectionBody(2, "3-out"), model.RoleAssistant},
+		{4, "input", projectionBody(3, "0-in"), model.RoleUser},
+		{5, "reasoning", projectionBody(3, "1-plan"), model.RoleAssistant},
+		{6, "tool command", projectionBody(3, "2-call"), model.RoleTool},
+		{7, "output", projectionBody(3, "3-out"), model.RoleAssistant},
+	} {
+		if messages[leg.at].Content != leg.body || messages[leg.at].Role != leg.role {
+			t.Fatalf("message %d = (%q, %q), want the raw %s %q presented as a %q message", leg.at, messages[leg.at].Content, messages[leg.at].Role, leg.name, leg.body, leg.role)
 		}
 	}
 
-	if !strings.HasPrefix(messages[0].Content, "history summary: ") {
-		t.Fatalf("the first message = %q, want the history summary the fold minted", messages[0].Content)
+	after := projectionEntriesOf(t, run, addr.SessionID)
+	t.Logf("actual_request_assembly: after=%v", projectionKeysOf(after))
+	if len(after) == 0 || after[0].Type != replay.ProjectionTypeHistorySummary {
+		t.Fatalf("the projection = %v, want the history summary the fold minted leading it", projectionKeysOf(after))
 	}
-	for _, want := range []string{"external_input: ask 00", "thinking_plan: plan 00", "action_command: call 00", "agent_output: answer 02"} {
-		if !strings.Contains(messages[0].Content, want) {
-			t.Fatalf("the history summary %q carries no %q", messages[0].Content, want)
+	summary := after[0]
+	if summary.Key == seed[0].Key {
+		t.Fatalf("the projection still holds the standing summary %q, want the summary the fold minted over it", summary.Key)
+	}
+	for _, want := range []string{
+		"history summary (" + string(seed[0].Key) + ")",
+		"external_input: ask 02",
+		"agent_output: answer 02",
+		"segment fold (-seg-",
+	} {
+		if !strings.Contains(summary.Content, want) {
+			t.Fatalf("the history summary %q carries no %q", summary.Content, want)
 		}
 	}
-	for _, line := range strings.Split(strings.TrimPrefix(messages[0].Content, "history summary: "), "; ") {
+	for _, raw := range []string{"thinking_plan:", "action_command:"} {
+		if strings.Contains(summary.Content, raw) {
+			t.Fatalf("the history summary %q spells a raw %q line, want the process detail of the turn stated by the skeleton product it folded into", summary.Content, raw)
+		}
+	}
+	if seedText := seed[0].Content; seedText != "" && strings.Contains(summary.Content, seedText) {
+		t.Fatalf("the history summary %q re-carries the text of the summary it stands for", summary.Content)
+	}
+	for _, line := range strings.Split(summary.Content, "; ") {
 		if !strings.HasPrefix(line, "[") || !strings.Contains(line, "|gen:") {
 			t.Fatalf("the history summary line %q opens with no provenance anchor", line)
 		}
 	}
-	product := false
-	for _, message := range messages {
-		if strings.HasPrefix(message.Content, "[") && strings.Contains(message.Content, "thinking_plan: plan 03") {
-			product = true
+	for _, key := range projectionKeysOf(after) {
+		if strings.HasPrefix(key, "03-") {
+			return
 		}
 	}
-	if !product {
-		t.Fatalf("no presented message carries a segment-fold product: %v", messages)
-	}
-	if body := projectionBody(3, "0-in"); !containsMessage(messages, body, model.RoleUser) {
-		t.Fatalf("the request presents no raw input of the newest turn %q as a user message", body)
-	}
-	if body := projectionBody(3, "3-out"); !containsMessage(messages, body, model.RoleAssistant) {
-		t.Fatalf("the request presents no raw output of the newest turn %q as an assistant message", body)
-	}
-
-	for _, foldedKey := range []event.EventID{projectionKey(0, "1-plan"), projectionKey(0, "2-call"), projectionKey(2, "1-plan")} {
-		body := projectionBodyOfKey(foldedKey)
-		for _, message := range messages {
-			if strings.Contains(message.Content, body) {
-				t.Fatalf("the request re-carries the raw folded body of %s", foldedKey)
-			}
-		}
-		original, err := run.CommittedEvent(ctx, foldedKey)
-		if err != nil {
-			t.Fatalf("read the folded original %s: %v", foldedKey, err)
-		}
-		if original.Message.Content != body {
-			t.Fatalf("the folded original %s = %q, want the chain's %q", foldedKey, original.Message.Content, body)
-		}
-	}
-	t.Logf("actual_request_assembly: messages=%d entries=%d requests=%d", len(messages), len(before), projectionFactCountOf(run, addr.SessionID, event.CompressRequestType))
+	t.Fatalf("the projection = %v, want the newest turn whole beside the summary", projectionKeysOf(after))
 }
 
 // projectionEntryOfKey reports the entry one key names.
@@ -3560,7 +3659,7 @@ func runNoticeVisibleUnderFold(t *testing.T) {
 		material   = "tagent: task task-9 settled\nresult:\nthe folded-window worker reports 88"
 	)
 	notice := task.Notice{TaskID: taskID, Kind: task.NoticeSettled}
-	before := len(projectionEntriesOf(t, run, addr.SessionID))
+	before := projectionKeysOf(projectionEntriesOf(t, run, addr.SessionID))
 	if _, err := run.CommitToSession(ctx, addr, event.Event{
 		Key:       agent.NoticeFactKey(invocation, notice),
 		Type:      event.TypeFeedback,
@@ -3577,9 +3676,8 @@ func runNoticeVisibleUnderFold(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("commit the notice fact: %v", err)
 	}
-	after := projectionEntriesOf(t, run, addr.SessionID)
-	if len(after) >= before {
-		t.Fatalf("the notice commit folded nothing (entries before=%d after=%d), so the sequence the boundary was measured on still stands and the check would not read the rewrite", before, len(after))
+	if sameKeys(noticeRewriteOf(t, run, addr, agent.NoticeFactKey(invocation, notice)), before) {
+		t.Fatalf("the notice commit left the sequence the boundary was measured on as it stood (%v), so the check would not read the rewrite", before)
 	}
 
 	if _, err := run.Invoke(ctx, assembly.InvokeRequest{
@@ -3622,7 +3720,7 @@ func runRangeHeadSurvivesFoldRewrite(t *testing.T) {
 		material   = "tagent: task task-77 settled\nresult:\nthe fold-rewritten head worker reports 91"
 	)
 	notice := task.Notice{TaskID: taskID, Kind: task.NoticeSettled}
-	before := len(projectionEntriesOf(t, run, addr.SessionID))
+	before := projectionKeysOf(projectionEntriesOf(t, run, addr.SessionID))
 	if _, err := run.CommitToSession(ctx, addr, event.Event{
 		Key:       agent.NoticeFactKey(invocation, notice),
 		Type:      event.TypeFeedback,
@@ -3639,9 +3737,8 @@ func runRangeHeadSurvivesFoldRewrite(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("commit the notice: %v", err)
 	}
-	after := projectionEntriesOf(t, run, addr.SessionID)
-	if len(after) >= before {
-		t.Fatalf("the notice commit folded nothing (entries before=%d after=%d), so the sequence the boundary was measured on still stands", before, len(after))
+	if sameKeys(noticeRewriteOf(t, run, addr, agent.NoticeFactKey(invocation, notice)), before) {
+		t.Fatalf("the notice commit left the sequence the boundary was measured on as it stood (%v), so the check would not read the rewrite", before)
 	}
 
 	if _, err := run.Invoke(ctx, assembly.InvokeRequest{

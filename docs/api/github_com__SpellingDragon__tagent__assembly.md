@@ -226,6 +226,17 @@ const (
 const AgeFoldPluginName = "age-fold"
     AgeFoldPluginName is the stable name the age fold plugin instance answers.
 
+const BandSummaryInstruction = "Compress the task-turn reads below into one bounded summary. " +
+	"Keep every line's leading [MM-DD HH:MM|gen:...] anchor exactly as it stands and shorten only the text after it. " +
+	"Keep the decisions, the results and anything still open; drop repetition and step-by-step detail. " +
+	"Answer with the summary lines only, within 2048 bytes."
+    BandSummaryInstruction is the one instruction the band summary request
+    carries: the reads are already anchored, so the model compresses the text
+    after each anchor and keeps the anchors themselves. A summary is asked of
+    the same model the session's agent decides with and answers no tool call, so
+    the instruction is exported for a scripted provider to tell a summary apart
+    from a decision and answer it without consuming a scripted decision step.
+
 const CheckpointCommitInterval = 64
     CheckpointCommitInterval is the number of commits after which the framework
     files a checkpoint whatever its period: a busy chain keeps its recovery cost

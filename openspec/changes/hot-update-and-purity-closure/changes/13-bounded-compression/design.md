@@ -14,7 +14,9 @@
 - **新**＝recent 保留的那批（keepRecent 最新段），原样。
 - **中**＝上一次折叠时还在「新」的（上次新 − 本次新），做**折叠**（foldProcessDetail：丢 thinking/tool 命令，留 input/output 骨架；结构性重组，内容基本保全）。
 - **老**＝上一次折叠时已在「中/老」的，做**摘要**（summarization，减内容的有界压缩，与折叠是两种操作）。
-晋升节奏 tied to 折叠事件：新→中（折叠）→老（摘要），每折一次晋升一级。实现需记录上一次折叠的 band 归属，本次据此晋升（非按绝对段数 LevelOfAge）。
+晋升节奏 tied to 折叠事件：新→中（折叠）→老（摘要），每折一次晋升一级。
+
+**实现裁定（2026-11-10，甲案，取代「另记上一次 band 归属」措辞）**：band 不另立世代台账，而是**读材料自带的压缩标记**——`bandOfSegment` 以 `carriesFoldProduct`（段内是否已持 segment_fold/history_summary 产物）判老带：窗口内/进行中＝新，离开窗口且未持产物＝中，已持产物＝老。产物本身就是「已折叠过」的记录，band 是当前投影内容的纯函数（删投影可从链重建同一 band，live≡replay 同算），不引入与产物冗余的路径依赖计数器（纯粹判据 1/2/4）。曾考虑乙案（显式跟踪每段上一折 band）：忠实本节字面但另立冗余世代账、违判据 4，未采。
 
 ## D3 老带摘要＝LLM 语义摘要优先（设计本意）
 - **正常路径**：LLM 生成有界语义 gist，**作为摘要事实落链**。回放/恢复读已存储的摘要事实（确定）→ parity（锚定≡全量）天然成立（两路读同一条摘要事实，非重新生成）。摘要生成在持模型访问的层（assembly）触发，memory/replay 消费已落链摘要事实，保层纯度与恢复确定性。
@@ -41,3 +43,9 @@
 
 ## D7 行为变更（已裁决接受）
 模型上下文从「逐字全史」变为「近期逐字（新）＋中段骨架（中）＋老段 LLM 有界摘要（按需回链查原文）」。符合有界派生视图哲学。
+
+## D8 折叠产物自成语义单元（2026-11-10，甲案内边界修正）
+**症状**：全局 `history_summary` 覆盖多回合、置于投影首位，但 `splitSegments` 只在 agent output 处切段，摘要条目（非 input/非 output）滚入首个 turn 段；该段因 `carriesFoldProduct` 被判老带，使其**本应新/中带的自有材料**未经中段骨架折叠直接进摘要（实证：`runActualRequestAssembly` 的 turn 02 plan/call 从未 mint segment_fold 即入 summary）。损「越新越全」的逐级保真。
+**裁定**：边界画在语义单元上（元规则三）——全局 `history_summary` 是独立压缩产物，不属任何单个 turn 段。`splitSegments` 让全局摘要自成一 segment（complete，判老带、再摘有界幂等），turn 段不再被外来摘要污染；段内自带的 `segment_fold`（foldProcessDetail 替换本段过程细节所生）仍留本段作「已折过一次」标记，世代递推不变。
+**不采**：乙案显式世代台账（D2 已否）；或仅在 `bandOfSegment` 屏蔽首位摘要（治标不治边界，留污染段结构）。
+**症状直译锚**：含首位 history_summary＋一个近期 closed turn 的投影，折叠后该近期 turn 的过程细节先 mint segment_fold（中段骨架），而非直接进 summary；此锚当前红、修后绿。保真/有界/收敛/parity 不变量全套复跑绿。

@@ -583,9 +583,11 @@ func TestAgeFoldKeepsTheSegmentInProgressWhole(t *testing.T) {
 //   - a standing history summary is judged a product by its Type and contributes a bounded reference to its own key
 //   - the text it stands for is never copied into the next summary, so folding a summary does not re-carry the material it compressed
 //   - the summary a fold mints spells no type label of its own, so what kind of product it is stays its Type
+//   - the round the summary is minted is the one whose oldest band carries the standing summary beside the turns they folded
 func TestRefoldReadsTypeNotPrefix(t *testing.T) {
 	ctx := context.Background()
 	const early = "EARLY-INPUT: the first turn of the session"
+	plan := AgeFoldPlan{KeepRecent: 1, VolumeThreshold: 600}
 	standing := ProjectionEntry{
 		Key:     "-hist-standing",
 		Type:    ProjectionTypeHistorySummary,
@@ -599,12 +601,25 @@ func TestRefoldReadsTypeNotPrefix(t *testing.T) {
 	}
 	projection := ageProjection(t, entries)
 
-	report, err := projection.FoldByAge(ctx, AgeFoldPlan{KeepRecent: 1, VolumeThreshold: 600})
+	first, err := projection.FoldByAge(ctx, plan)
 	if err != nil {
-		t.Fatalf("FoldByAge: %v", err)
+		t.Fatalf("first FoldByAge: %v", err)
+	}
+	if !first.Triggered {
+		t.Fatalf("report = %+v, want the turns to pass the volume threshold", first)
+	}
+	for _, product := range first.Products {
+		if product.Type != ProjectionTypeSegmentFold {
+			t.Fatalf("first fold = %+v, want the skeleton of the turns the window dropped beside the standing summary", first.Products)
+		}
+	}
+
+	report, err := projection.FoldByAge(ctx, plan)
+	if err != nil {
+		t.Fatalf("second FoldByAge: %v", err)
 	}
 	if !report.Triggered || len(report.Products) == 0 {
-		t.Fatalf("report = %+v, want the four turns to pass the volume threshold", report)
+		t.Fatalf("report = %+v, want the oldest band to fold into the one history summary", report)
 	}
 	summary := report.Products[len(report.Products)-1]
 	if summary.Type != ProjectionTypeHistorySummary {
@@ -619,7 +634,7 @@ func TestRefoldReadsTypeNotPrefix(t *testing.T) {
 	if strings.Contains(summary.Content, ProjectionTypeHistorySummary+": ") {
 		t.Fatalf("history summary content = %q, want no type label written into the material", summary.Content)
 	}
-	if !strings.Contains(summary.Content, "input t2") {
+	if !strings.Contains(summary.Content, "external_input: input t2") {
 		t.Fatalf("history summary content = %q, want the turn folded beside the standing product", summary.Content)
 	}
 }
@@ -1287,10 +1302,109 @@ func TestSymptomAnchorCompressionStaysBounded(t *testing.T) {
 	}
 }
 
+// TestGlobalSummaryStandsApartFromTheRecentTurn pins the segment a standing history summary draws for itself.
+//
+// - a summary that covers several turns belongs to none of them, so it stands as one complete segment of its own
+// - the turn the window dropped beside it reads the middle band and folds its process detail into one segment product
+// - that turn's input and output stay whole around the product, so the newest material keeps its own text
+// - the standing summary keeps the text it holds: it is neither re-carried nor widened by the turn beside it
+// - 症状：摘要滚入首个 turn 段，该段因持有折叠产物被判最老带，turn 自有过程细节未经中段骨架折叠即进摘要
+//
+// 契约: docs/wiki/memory/memory-architecture.md#event-shape
+func TestGlobalSummaryStandsApartFromTheRecentTurn(t *testing.T) {
+	ctx := context.Background()
+	standing := ProjectionEntry{
+		Key:     "-hist-standing",
+		Type:    ProjectionTypeHistorySummary,
+		Summary: "history summary",
+		Content: "external_input: ask t0; [09-30 08:00|gen:?] agent_output: answer t0",
+		Time:    ageBase,
+	}
+	entries := []ProjectionEntry{standing}
+	for step, seed := range []string{"t1", "t2", "t3"} {
+		entries = append(entries, ageTurn(seed, step+1, 1)...)
+	}
+	projection := ageProjection(t, entries)
+	plan := AgeFoldPlan{KeepRecent: DefaultAgeKeepRecent, VolumeThreshold: 600}
+
+	entriesOf := func(keys ...event.EventID) []string {
+		out := make([]string, 0, len(keys))
+		for _, key := range keys {
+			out = append(out, string(key))
+		}
+		return out
+	}
+	originalOf := func(want event.EventID) ProjectionEntry {
+		for _, entry := range entries {
+			if entry.Key == want {
+				return entry
+			}
+		}
+		return ProjectionEntry{}
+	}
+	bandOf := func(want event.EventID) (Band, bool) {
+		for _, segment := range SegmentsOf(projection.Entries(), DefaultAgeKeepRecent) {
+			for _, entry := range segment.Entries {
+				if entry.Key == want {
+					return segment.Band, true
+				}
+			}
+		}
+		return BandNew, false
+	}
+	if band, held := bandOf("t1-in"); !held || band != BandMid {
+		t.Fatalf("the turn beside the standing summary reads the %v band (held %v), want the middle band its own fold generation names", band, held)
+	}
+
+	report, err := projection.FoldByAge(ctx, plan)
+	if err != nil {
+		t.Fatalf("FoldByAge: %v", err)
+	}
+	if len(report.Products) != 1 || report.Products[0].Type != ProjectionTypeSegmentFold {
+		t.Fatalf("products = %+v, want the one segment product the turn beside the summary folds into", report.Products)
+	}
+	product := report.Products[0]
+	for _, want := range []string{"thinking_plan: plan t1", "action_command: call t1"} {
+		if !strings.Contains(product.Content, want) {
+			t.Fatalf("segment product = %q, want the one-line read %q of the turn it folds", product.Content, want)
+		}
+	}
+
+	got := projection.Entries()
+	for at, want := range []event.EventID{standing.Key, "t1-in", product.Key, "t1-out"} {
+		if at >= len(got) || got[at].Key != want {
+			t.Fatalf("projection = %v, want the standing summary, the turn's input, its product and its output in order", entriesOf(standing.Key, "t1-in", product.Key, "t1-out"))
+		}
+	}
+	if got[0].Type != ProjectionTypeHistorySummary || got[0].Content != standing.Content {
+		t.Fatalf("first entry = %+v, want the standing summary holding the text it stands for", got[0])
+	}
+	for _, absorbed := range []string{"plan t1", "call t1", "input t1", "output t1"} {
+		if strings.Contains(got[0].Content, absorbed) {
+			t.Fatalf("standing summary = %q, want no %q of the turn it stands beside: the turn folds into its own product", got[0].Content, absorbed)
+		}
+	}
+	for at, key := range map[int]event.EventID{1: "t1-in", 3: "t1-out"} {
+		if original := originalOf(key); got[at].Content != original.Content {
+			t.Fatalf("entry %d = %+v, want the original text of the turn's own %q kept whole", at, got[at], key)
+		}
+	}
+	summaries := 0
+	for _, entry := range got {
+		if entry.Type == ProjectionTypeHistorySummary {
+			summaries++
+		}
+	}
+	if summaries != 1 {
+		t.Fatalf("projection carries %d history summaries, want the one standing summary it already held", summaries)
+	}
+}
+
 // TestSymptomAnchorCompressionConverges pins the fold as a convergent compression.
 //
 // - 轨迹症状：折叠上一层 history summary 时把它的正文整段抄进下一份，摘要每折一次就重抄一遍，产物随折叠次数膨胀。
-// - 钉住底线：站在投影里的摘要被再折一次只贡献有界引用，产出的摘要正文 ≤ 界、不含它上一层的正文。
+// - 钉住底线：站在投影里的摘要被下一份摘要引用时只贡献有界引用，产出的摘要正文 ≤ 界、不含它上一层的正文。
+// - 晋升节奏：摘要自成一后才折它后面离开窗口的 turn（中段骨架），最老带把该摘要连同那些骨架折进下一份摘要的那一轮才诞生新摘要。
 // - 收敛（r49 裁定）：世代递推下第一次折叠把材料晋一级、第二次再晋一级，故 fold² 不必等于 fold¹；不变量是迭代终有稳定不动点——某轮起产出零产品、投影逐字不变，且体积全程不超界。
 // - 取数面：PlanByAge ＋ ApplyProducts 之后的投影本身。
 //
@@ -1313,10 +1427,15 @@ func TestSymptomAnchorCompressionConverges(t *testing.T) {
 	projection := ageProjection(t, entries)
 
 	var summary *ProjectionEntry
-	for _, product := range foldOnce(t, projection, plan) {
-		if product.Entry.Type == ProjectionTypeHistorySummary {
-			entry := product.Entry
-			summary = &entry
+	for round := 0; round < 6 && summary == nil; round++ {
+		for _, product := range foldOnce(t, projection, plan) {
+			if product.Entry.Type == ProjectionTypeHistorySummary {
+				entry := product.Entry
+				summary = &entry
+			}
+		}
+		if rendered := RenderProjection(projection.Entries()); len(rendered) > budget {
+			t.Fatalf("round %d renders %d bytes, want at most %d: the compressed view must not grow with the folds it absorbs", round+1, len(rendered), budget)
 		}
 	}
 	if summary == nil {

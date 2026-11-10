@@ -440,8 +440,14 @@ func (replayPolicy) Check(context.Context, state.StatePlan) (map[state.CheckName
 }
 
 // replayModel is the scripted provider stand-in: it records every native
-// request it is driven with and answers with a fixed final. It never reaches a
-// real endpoint.
+// request the session's agent is driven with and answers with a fixed final. It
+// never reaches a real endpoint. A band summary request is answered with the
+// anchored reads it was handed — the gist a faithful summarizer returns — so the
+// summary a fold files stands for the same material the mechanical form stood
+// for, and a check reads the anchors and the bound rather than one summarizer's
+// wording. A band summary is the fold asking that same model for a gist and not
+// a turn the agent ran, so it is answered without being recorded: recorded
+// answers the formal requests alone.
 type replayModel struct {
 	name     string
 	requests []model.Request
@@ -449,14 +455,34 @@ type replayModel struct {
 
 // GenerateContent records the native request and streams the fixed final.
 func (m *replayModel) GenerateContent(_ context.Context, req *model.Request) (<-chan *model.Response, error) {
-	m.requests = append(m.requests, *req)
+	answer := "settled"
+	if material, summary := replayBandSummary(*req); summary {
+		answer = material
+	} else {
+		m.requests = append(m.requests, *req)
+	}
 	ch := make(chan *model.Response, 1)
 	ch <- &model.Response{
-		Choices: []model.Choice{{Message: model.Message{Role: model.RoleAssistant, Content: "settled"}}},
+		Choices: []model.Choice{{Message: model.Message{Role: model.RoleAssistant, Content: answer}}},
 		Done:    true,
 	}
 	close(ch)
 	return ch, nil
+}
+
+// replayBandSummary reports the mechanical reads a band summary request carries,
+// and whether the request is one at all: the fold asks the session's own model
+// for the gist of its oldest band, so that ask reaches the same provider a
+// decision does, with the band summary instruction as its one user message.
+func replayBandSummary(req model.Request) (string, bool) {
+	if len(req.Tools) != 0 || len(req.Messages) != 1 || req.Messages[0].Role != model.RoleUser {
+		return "", false
+	}
+	content := req.Messages[0].Content
+	if !strings.HasPrefix(content, assembly.BandSummaryInstruction) {
+		return "", false
+	}
+	return strings.TrimSpace(strings.TrimPrefix(strings.TrimPrefix(content, assembly.BandSummaryInstruction), "\n\n")), true
 }
 
 // Info reports the scripted provider's descriptor.
@@ -464,7 +490,9 @@ func (m *replayModel) Info() model.Info {
 	return model.Info{Name: m.name}
 }
 
-// recorded reports the native requests the fake provider was driven with.
+// recorded reports the formal native requests the fake provider was driven with,
+// in the order the session's agent ran them: the band summaries the fold asked
+// the same provider for are not among them.
 func (m *replayModel) recorded() []model.Request {
 	return append([]model.Request(nil), m.requests...)
 }

@@ -118,6 +118,11 @@ func (p *journeyProvider) scriptGated(modelName string, gate <-chan struct{}, co
 // serve answers one chat completion: it records the request, pops the next
 // scripted reply of that model name, waits for the gate the reply names and
 // answers with the reply body.
+//
+// A band summary is answered from its own material and pops no scripted reply:
+// the fold asks the session's model for the gist of its oldest band, and that
+// request stands outside the decision script, so a fold never shifts the
+// answers a journey declared turn by turn.
 func (p *journeyProvider) serve(w http.ResponseWriter, r *http.Request) {
 	if !strings.HasSuffix(r.URL.Path, "/chat/completions") {
 		http.Error(w, "not found", http.StatusNotFound)
@@ -129,11 +134,14 @@ func (p *journeyProvider) serve(w http.ResponseWriter, r *http.Request) {
 	if raw, ok := body["model"]; ok {
 		_ = json.Unmarshal(raw, &modelName)
 	}
+	recorded := journeyRequest{Model: modelName, Body: body}
 	p.mu.Lock()
 	p.models = append(p.models, modelName)
-	p.bodies = append(p.bodies, journeyRequest{Model: modelName, Body: body})
+	p.bodies = append(p.bodies, recorded)
 	var reply journeyReply
-	if queued := p.scripts[modelName]; len(queued) > 0 {
+	if gist, summary := bandSummaryGist(recorded); summary {
+		reply = journeyReply{body: journeyAnswer(gist)}
+	} else if queued := p.scripts[modelName]; len(queued) > 0 {
 		reply = queued[0]
 		p.scripts[modelName] = queued[1:]
 	}
@@ -201,6 +209,24 @@ func (r journeyRequest) text() string {
 		}
 	}
 	return strings.Join(parts, "\n")
+}
+
+// bandSummaryGist reports the gist the endpoint answers a band summary request
+// with, and whether the request is one at all: the fold asks the session's own
+// model for the bounded summary of its oldest band, and the faithful answer to
+// that ask is the anchored reads it was handed.
+func bandSummaryGist(request journeyRequest) (string, bool) {
+	messages := request.messages()
+	if len(messages) != 1 || messages[0].Role != "user" {
+		return "", false
+	}
+	if _, carried := request.Body["tools"]; carried {
+		return "", false
+	}
+	if !strings.HasPrefix(messages[0].Content, assembly.BandSummaryInstruction) {
+		return "", false
+	}
+	return strings.TrimSpace(strings.TrimPrefix(strings.TrimPrefix(messages[0].Content, assembly.BandSummaryInstruction), "\n\n")), true
 }
 
 // messages decodes the messages one recorded request carried.

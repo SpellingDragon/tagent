@@ -67,6 +67,7 @@ const (
 	soakDescriptorSlack  = 12
 	soakChildReadyWait   = 90 * time.Second
 	soakChildStartWindow = 120 * time.Second
+	soakChildOutputTail  = 2000
 )
 
 var (
@@ -117,7 +118,7 @@ func TestSoakContinuity(t *testing.T) {
 		child := startSoakChild(t, soakModeResident, root, out, *soakRounds, *soakEvents)
 		child.wait(t)
 		if child.exitCode != 0 {
-			t.Fatalf("resident child exit = %d, want a clean end; stderr = %s", child.exitCode, child.stderr.String())
+			t.Fatalf("resident child exit = %d, want a clean end; output = %s", child.exitCode, child.output())
 		}
 		events := child.events
 		rounds := soakEventsNamed(events, "round")
@@ -195,7 +196,7 @@ func TestSoakContinuity(t *testing.T) {
 		reader := startSoakChild(t, soakModeReader, root, readerOut, *soakRounds, *soakEvents)
 		reader.wait(t)
 		if reader.exitCode != 0 {
-			t.Fatalf("reader child exit = %d, want a clean read-back; stderr = %s", reader.exitCode, reader.stderr.String())
+			t.Fatalf("reader child exit = %d, want a clean read-back; output = %s", reader.exitCode, reader.output())
 		}
 		if reader.pid == crashedPID {
 			t.Fatalf("reader pid = %d, want a process other than the killed %d", reader.pid, crashedPID)
@@ -219,7 +220,7 @@ func TestSoakContinuity(t *testing.T) {
 		empty := startSoakChild(t, soakModeReader, emptyRoot, emptyOut, *soakRounds, *soakEvents)
 		empty.wait(t)
 		if empty.exitCode != 0 {
-			t.Fatalf("empty-root reader exit = %d, want a clean read of nothing; stderr = %s", empty.exitCode, empty.stderr.String())
+			t.Fatalf("empty-root reader exit = %d, want a clean read of nothing; output = %s", empty.exitCode, empty.output())
 		}
 		emptyRecovered := soakEventsNamed(empty.events, "recovery")
 		emptyRead := soakEventsNamed(empty.events, "read")
@@ -237,7 +238,7 @@ func TestSoakContinuity(t *testing.T) {
 		child := startSoakChild(t, soakModeHot, root, out, 0, 0)
 		child.wait(t)
 		if child.exitCode != 0 {
-			t.Fatalf("hot child exit = %d, want the switch and return driven on one resident; stderr = %s", child.exitCode, child.stderr.String())
+			t.Fatalf("hot child exit = %d, want the switch and return driven on one resident; output = %s", child.exitCode, child.output())
 		}
 		serving := soakEventsNamed(child.events, "serving")
 		if len(serving) != 3 {
@@ -281,7 +282,7 @@ func TestSoakContinuity(t *testing.T) {
 		child := startSoakChild(t, soakModeLeak, root, out, *soakRounds, *soakEvents)
 		child.wait(t)
 		if child.exitCode != 0 {
-			t.Fatalf("leak child exit = %d, want a clean end; stderr = %s", child.exitCode, child.stderr.String())
+			t.Fatalf("leak child exit = %d, want a clean end; output = %s", child.exitCode, child.output())
 		}
 		samples := soakEventsNamed(child.events, "sample")
 		if len(samples) < 3 {
@@ -696,7 +697,20 @@ type soakChildProcess struct {
 	pid      int
 	events   []soakEvent
 	exitCode int
+	stdout   bytes.Buffer
 	stderr   bytes.Buffer
+}
+
+// output reports the test log a child wrote: a child that ends without a clean
+// end states the reason on it, so the parent reads the failure instead of the
+// empty stderr a passing child leaves.
+func (c *soakChildProcess) output() string {
+	text := strings.TrimSpace(c.stdout.String())
+	const tail = soakChildOutputTail
+	if len(text) > tail {
+		text = text[len(text)-tail:]
+	}
+	return text
 }
 
 // startSoakChild starts one soak child as its own process over the storage root
@@ -712,8 +726,7 @@ func startSoakChild(t *testing.T, mode, root, out string, rounds, events int) *s
 		fmt.Sprintf("%s=%d", soakChildRoundsEnv, rounds),
 		fmt.Sprintf("%s=%d", soakChildEventsEnv, events),
 	)
-	var stdout bytes.Buffer
-	child.cmd.Stdout = &stdout
+	child.cmd.Stdout = &child.stdout
 	child.cmd.Stderr = &child.stderr
 	if err := child.cmd.Start(); err != nil {
 		t.Fatalf("start the %s child: %v", mode, err)
