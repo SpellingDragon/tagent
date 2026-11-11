@@ -51,8 +51,8 @@ agents:
     tools:
       - { kind: tool, id: send }         # 反思会话的唯一跨会话写面(教训推送)
     memory:
-      type: localfile
-      path: .wechat-config/data          # 旧世界 KV/事件目录:接回跨重启历史知识
+      type: journal
+      path: .wechat-config/data-v2       # 日志根:scripts/migrate-kv 从旧分片快照根迁移而来
       read_namespaces: [tagent]          # 跨分区读授权(recall.New);自身命名空间恒在内
       engine:
         backend: memory
