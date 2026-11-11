@@ -342,9 +342,13 @@ type Run struct {
 	sessionCuts   map[event.SessionID]event.CheckpointOffset
 	sessionSlices map[event.SessionID]map[string]bool
 	// checkpointStop ends the filer once the close of this run began, and the once
-	// makes a repeated close stop it once.
+	// makes a repeated close stop it once. checkpointDone states that the filer
+	// goroutine has returned, so a close joins the cut in flight instead of
+	// returning beside a commit still on its way to the store.
 	checkpointStop     chan struct{}
 	checkpointStopOnce sync.Once
+	checkpointDone     chan struct{}
+	checkpointDoneOnce sync.Once
 	// checkpointFiled is the fact key of the newest checkpoint this run filed or
 	// restored, so a cadence that reaches the same cut files nothing twice.
 	checkpointFiled event.EventID
@@ -530,6 +534,7 @@ func assemble(ctx context.Context, decl *config.Declaration, agents map[event.Ag
 		checkpointAt:     time.Now(),
 		checkpointDue:    make(chan struct{}, 1),
 		checkpointStop:   make(chan struct{}),
+		checkpointDone:   make(chan struct{}),
 		approver:         cfg.approver,
 		policy:           cfg.policy,
 		enforcement:      cfg.enforcement,

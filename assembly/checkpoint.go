@@ -574,9 +574,16 @@ func (r *Run) requestCheckpoint() {
 // material a restart reads, and a checkpoint this filer never filed widens that bound
 // silently behind a chain that keeps committing. The close files the checkpoint it
 // owes itself and answers the failure to its caller, so a filing that stays broken
-// reaches the process that stops the run instead of a log line alone.
+// reaches the process that stops the run instead of a log line alone. A due already
+// queued when the stop arrives files nothing, because the stop is read before the
+// wake: the cut the close takes is the last one this goroutine takes.
 func (r *Run) fileCheckpoints(ctx context.Context) {
 	for {
+		select {
+		case <-r.checkpointStop:
+			return
+		default:
+		}
 		select {
 		case <-r.checkpointStop:
 			return
@@ -654,21 +661,41 @@ func (r *Run) takeSessionDue() []event.Address {
 
 // startCheckpointFiler starts the goroutine that files the checkpoint the cadence
 // owes. The context keeps the values of the boot and none of its cancellation, so
-// a cut is never refused by a caller that already returned.
+// a cut is never refused by a caller that already returned. A run beside no wake
+// channel files no cut, and states that at once, so a close of it joins nothing.
 func (r *Run) startCheckpointFiler(ctx context.Context) {
 	if r == nil || r.checkpointDue == nil || r.checkpointStop == nil {
+		r.finishCheckpointFiler()
 		return
 	}
-	go r.fileCheckpoints(context.WithoutCancel(ctx))
+	go func() {
+		defer r.finishCheckpointFiler()
+		r.fileCheckpoints(context.WithoutCancel(ctx))
+	}()
 }
 
-// stopCheckpointFiler ends the filer at its next wake, so no cut is taken under
-// the drain a close judges the run by. A repeated close stops nothing twice.
+// finishCheckpointFiler states that the filer returned, so a close that joined it
+// waits for a cut that exists and never for one that never started.
+func (r *Run) finishCheckpointFiler() {
+	if r == nil || r.checkpointDone == nil {
+		return
+	}
+	r.checkpointDoneOnce.Do(func() { close(r.checkpointDone) })
+}
+
+// stopCheckpointFiler ends the filer at its next wake and joins it, so no cut is
+// taken under the drain a close judges the run by and none is still on its way to
+// the store when the close returns: a cut in flight completes before the closing
+// checkpoint is taken, so that checkpoint is the last fact the process files. A
+// repeated close stops nothing twice and joins nothing twice.
 func (r *Run) stopCheckpointFiler() {
 	if r == nil || r.checkpointStop == nil {
 		return
 	}
 	r.checkpointStopOnce.Do(func() { close(r.checkpointStop) })
+	if r.checkpointDone != nil {
+		<-r.checkpointDone
+	}
 }
 
 // fileClosingCheckpoint files the checkpoint a close owes the restart that reads

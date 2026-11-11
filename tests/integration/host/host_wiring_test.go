@@ -276,6 +276,7 @@ func TestRiskRulesAbsentKeepsTheSendFace(t *testing.T) {
 //   - a document declaring the exec id boots the run beside the release tool
 //   - the run tool acquires and reports the frame the declared command wrote
 //   - the release tool stops the very resource the run started
+//   - the declared command outlives the round trip, so the release stops a held key instead of the one the tracker settled once the pane's drain window ran out
 //   - no request answers ErrUnwired, so the boot wired the shared resource ledger
 //
 // 契约: docs/wiki/tool/tool-architecture.md#action-tool
@@ -296,7 +297,7 @@ func TestExecFaceWiredFromDocument(t *testing.T) {
 			return wiringToolCallsAnswer(wiringCall{
 				id:   "call-exec-run",
 				name: "exec_run",
-				arguments: fmt.Sprintf(`{"command":"echo","args":["wiring-ok"],"kind":%q,"resource":%q}`,
+				arguments: fmt.Sprintf(`{"command":"sh","args":["-c","echo wiring-ok; sleep 30"],"kind":%q,"resource":%q}`,
 					tagentexec.KindTmux, resource),
 			})
 		case 1:

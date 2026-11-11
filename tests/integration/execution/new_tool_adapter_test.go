@@ -190,6 +190,9 @@ func TestNewToolAdapterNeedsNoHostCompensation(t *testing.T) {
 		if tasks[0].State.TaskStatus != task.StatusFailed {
 			t.Fatalf("task status = %s, want the failure the adapter's error states", statusName(tasks[0].State.TaskStatus))
 		}
+		if _, err := run.Close(ctx, agent.CloseRequest{Timeout: time.Now().Add(5 * time.Second)}); err != nil {
+			t.Fatalf("drain the run's settlement writers before reading the notice phase (a slow runner otherwise reads the notice still claimed): %v", err)
+		}
 		notices := listObjects(t, ctx, run, addr, query.ObjectNotice)
 		if len(notices) != 1 || notices[0].State != query.DetailRetired {
 			t.Fatalf("notice objects = %+v, want the one consumed failure notification beside no second pass", notices)
