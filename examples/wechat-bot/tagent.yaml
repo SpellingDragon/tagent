@@ -149,8 +149,8 @@ agents:
     reasoning_effort: high
     # 看门狗收尾轮:本 agent 自己的预算(声明即生效,不再只读 entry)。
     final_round:
-      max_rounds: 5
-      timeout_seconds: 120
+      max_rounds: 50
+      timeout_seconds: 1200
     # 知识面:skill_dirs 是技能仓根,read_root 限定 read_file 的沙箱根。
     # 三工具复用 trpc skill/file 面(skill_search/skill_load/read_file),不自行造轮。
     skill_dirs: [skills]
@@ -170,8 +170,8 @@ agents:
     # 检索求快:关闭思考,自设收尾预算。
     thinking_enabled: false
     final_round:
-      max_rounds: 5
-      timeout_seconds: 120      # 本目录自带(工具名按本部署的声明书写:recall_query/recall_get/recall_recent/recall_trace)
+      max_rounds: 50
+      timeout_seconds: 1200      # 本目录自带(工具名按本部署的声明书写:recall_query/recall_get/recall_recent/recall_trace)
     # 记忆读面:声明即授权(不声明的 agent 看不见该工具);四工具经 tool/recall 装配,
     # 读面由宿主注入(hostRecallSeam):Searcher 走装配后的 Run.Recall,Table 直读
     # 持久事件链,Originals 走 storage 的 scoped 原始层,Embedder 由宿主绑定,而 Trace
