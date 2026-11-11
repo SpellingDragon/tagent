@@ -1,6 +1,6 @@
 // Package execution holds the execution-layer integration contract tests: event
 // identity and native payload fidelity beside the in-memory task admission and
-// commit carriers.
+// commits.
 package execution
 
 import (
@@ -199,7 +199,7 @@ func TestIdentityAndCommitContract(t *testing.T) {
 	t.Run("commit outcomes stay separate", func(t *testing.T) {
 		ctx := context.Background()
 		uncertain := false
-		carrier := task.NewMemoryCommit(func(task.CommitRecord) bool { return uncertain })
+		commit := task.NewMemoryCommit(func(task.CommitRecord) bool { return uncertain })
 
 		record := task.CommitRecord{
 			MutationID:       "m-1",
@@ -207,14 +207,14 @@ func TestIdentityAndCommitContract(t *testing.T) {
 			ExpectedRevision: 0,
 			Status:           task.StatusAccepted,
 		}
-		committed, err := carrier.Commit(ctx, record)
+		committed, err := commit.Commit(ctx, record)
 		if committed != task.CommitCommitted || err != nil {
 			t.Fatalf("commit = (%v, %v), want (committed, nil)", committed, err)
 		}
-		if got := carrier.Facts("task-c"); len(got) != 1 {
+		if got := commit.Facts("task-c"); len(got) != 1 {
 			t.Fatalf("facts = %d, want 1", len(got))
 		}
-		if got := carrier.Revision("task-c"); got != 1 {
+		if got := commit.Revision("task-c"); got != 1 {
 			t.Fatalf("revision = %d, want 1", got)
 		}
 
@@ -224,11 +224,11 @@ func TestIdentityAndCommitContract(t *testing.T) {
 			ExpectedRevision: 0,
 			Status:           task.StatusRunning,
 		}
-		refused, err := carrier.Commit(ctx, conflict)
+		refused, err := commit.Commit(ctx, conflict)
 		if refused != task.CommitNotCommitted || !errors.Is(err, task.ErrRevisionConflict) {
 			t.Fatalf("conflicting commit = (%v, %v), want (not-committed, %v)", refused, err, task.ErrRevisionConflict)
 		}
-		if got := carrier.Facts("task-c"); len(got) != 1 {
+		if got := commit.Facts("task-c"); len(got) != 1 {
 			t.Fatalf("facts = %d after a refused commit, want 1", len(got))
 		}
 
@@ -239,33 +239,33 @@ func TestIdentityAndCommitContract(t *testing.T) {
 			ExpectedRevision: 1,
 			Status:           task.StatusSettled,
 		}
-		unknown, err := carrier.Commit(ctx, probe)
+		unknown, err := commit.Commit(ctx, probe)
 		if unknown != task.CommitUncertain || err != nil {
 			t.Fatalf("uncertain commit = (%v, %v), want (uncertain, nil)", unknown, err)
 		}
-		if got := carrier.Facts("task-c"); len(got) != 1 {
+		if got := commit.Facts("task-c"); len(got) != 1 {
 			t.Fatalf("facts = %d after an uncertain commit, want 1", len(got))
 		}
-		if got := carrier.Revision("task-c"); got != 1 {
+		if got := commit.Revision("task-c"); got != 1 {
 			t.Fatalf("revision = %d after an uncertain commit, want 1", got)
 		}
 
 		uncertain = false
-		reconciled, err := carrier.Commit(ctx, probe)
+		reconciled, err := commit.Commit(ctx, probe)
 		if reconciled != task.CommitCommitted || err != nil {
 			t.Fatalf("reconciled commit = (%v, %v), want (committed, nil)", reconciled, err)
 		}
-		if got := carrier.Facts("task-c"); len(got) != 2 {
+		if got := commit.Facts("task-c"); len(got) != 2 {
 			t.Fatalf("facts = %d after the repeat lands, want 2", len(got))
 		}
 
 		altered := probe
 		altered.Status = task.StatusFailed
-		sameIdentity, err := carrier.Commit(ctx, altered)
+		sameIdentity, err := commit.Commit(ctx, altered)
 		if sameIdentity != task.CommitNotCommitted || !errors.Is(err, task.ErrMutationConflict) {
 			t.Fatalf("same identity with other content = (%v, %v), want (not-committed, %v)", sameIdentity, err, task.ErrMutationConflict)
 		}
-		if got := carrier.Facts("task-c"); len(got) != 2 {
+		if got := commit.Facts("task-c"); len(got) != 2 {
 			t.Fatalf("facts = %d after a refused repeat, want 2", len(got))
 		}
 		seen := map[task.CommitResult]bool{committed: true, refused: true, unknown: true}
@@ -285,8 +285,8 @@ func TestIdentityAndCommitContract(t *testing.T) {
 		}, "task-e")
 		before := receipt
 
-		carrier := task.NewMemoryCommit(nil)
-		result, err := carrier.Commit(ctx, task.CommitRecord{
+		commit := task.NewMemoryCommit(nil)
+		result, err := commit.Commit(ctx, task.CommitRecord{
 			MutationID:       "m-5",
 			TaskID:           "task-e",
 			ExpectedRevision: 7,
@@ -301,14 +301,14 @@ func TestIdentityAndCommitContract(t *testing.T) {
 		if !receipt.Accepted || receipt.Kind != task.AdmissionFresh {
 			t.Fatalf("receipt = %+v, want an accepted fresh admission", receipt)
 		}
-		if got := carrier.Outbox("task-e"); len(got) != 0 {
+		if got := commit.Outbox("task-e"); len(got) != 0 {
 			t.Fatalf("outbox = %d entries after a refused commit, want 0", len(got))
 		}
 	})
 
 	t.Run("idempotent commit is not delivery", func(t *testing.T) {
 		ctx := context.Background()
-		carrier := task.NewMemoryCommit(nil)
+		commit := task.NewMemoryCommit(nil)
 		notice := task.Notice{
 			TaskID: "task-f",
 			Round:  1,
@@ -330,11 +330,11 @@ func TestIdentityAndCommitContract(t *testing.T) {
 			Outbox:           []task.Envelope{envelope},
 		}
 
-		first, err := carrier.Commit(ctx, record)
+		first, err := commit.Commit(ctx, record)
 		if first != task.CommitCommitted || err != nil {
 			t.Fatalf("commit = (%v, %v), want (committed, nil)", first, err)
 		}
-		owed := carrier.Outbox("task-f")
+		owed := commit.Outbox("task-f")
 		if len(owed) != 1 || owed[0].Notice != envelope {
 			t.Fatalf("outbox = %+v, want the single committed notification owed beside its frozen envelope", owed)
 		}
@@ -342,18 +342,18 @@ func TestIdentityAndCommitContract(t *testing.T) {
 			t.Fatalf("delivery = %v, want pending after a commit", owed[0].Delivery)
 		}
 
-		again, err := carrier.Commit(ctx, record)
+		again, err := commit.Commit(ctx, record)
 		if again != task.CommitCommitted || err != nil {
 			t.Fatalf("repeat commit = (%v, %v), want (committed, nil)", again, err)
 		}
-		facts := carrier.Facts("task-f")
+		facts := commit.Facts("task-f")
 		if len(facts) != 1 || !reflect.DeepEqual(facts[0], record) {
 			t.Fatalf("facts = %+v, want the one stored fact returned by the repeat", facts)
 		}
-		if got := carrier.Revision("task-f"); got != 1 {
+		if got := commit.Revision("task-f"); got != 1 {
 			t.Fatalf("revision = %d after the repeat, want 1", got)
 		}
-		owed = carrier.Outbox("task-f")
+		owed = commit.Outbox("task-f")
 		if len(owed) != 1 || owed[0].Delivery != task.DeliveryPending {
 			t.Fatalf("outbox = %+v, want the delivery obligation still open after a repeat commit", owed)
 		}
@@ -361,7 +361,7 @@ func TestIdentityAndCommitContract(t *testing.T) {
 
 	t.Run("the commit record freezes the notification target", func(t *testing.T) {
 		ctx := context.Background()
-		carrier := task.NewMemoryCommit(nil)
+		commit := task.NewMemoryCommit(nil)
 		notice := task.Notice{TaskID: "task-g", Round: 1, Kind: task.NoticeSettled, Seq: 0, Event: "evt-g"}
 		frozen := task.Envelope{
 			Notice:         notice,
@@ -369,7 +369,7 @@ func TestIdentityAndCommitContract(t *testing.T) {
 			Source:         event.Address{AgentID: "agent-b", SessionID: "session-b"},
 			TargetInstance: "instance-old",
 		}
-		if result, err := carrier.Commit(ctx, task.CommitRecord{
+		if result, err := commit.Commit(ctx, task.CommitRecord{
 			MutationID:       "m-7",
 			TaskID:           "task-g",
 			ExpectedRevision: 0,
@@ -379,7 +379,7 @@ func TestIdentityAndCommitContract(t *testing.T) {
 			t.Fatalf("commit = (%v, %v), want (committed, nil)", result, err)
 		}
 
-		facts := carrier.Facts("task-g")
+		facts := commit.Facts("task-g")
 		if len(facts) != 1 || len(facts[0].Outbox) != 1 {
 			t.Fatalf("facts = %+v, want one fact carrying one notification", facts)
 		}
@@ -391,7 +391,7 @@ func TestIdentityAndCommitContract(t *testing.T) {
 			t.Fatalf("envelope routing = (target %+v, source %+v, instance %q), want all three frozen and non-empty",
 				got.Target, got.Source, got.TargetInstance)
 		}
-		owed := carrier.Outbox("task-g")
+		owed := commit.Outbox("task-g")
 		if len(owed) != 1 || owed[0].Notice != frozen {
 			t.Fatalf("outbox = %+v, want the owed notification kept beside its original frozen target", owed)
 		}

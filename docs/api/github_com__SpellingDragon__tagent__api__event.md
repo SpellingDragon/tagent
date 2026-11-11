@@ -64,7 +64,7 @@ No type, constructor or event shape stands beside the five-field change; a lease
 observer reads the same fact under these keys, exactly as it reads the dimension
 and the publication generation beside them.
 
-Package event is the runtime's event identity and fact carrier: it defines the
+Package event is the runtime's event identity and fact contract: it defines the
 typed identifiers an event carries, the address of the agent session an event
 belongs to, and the event payload itself.
 

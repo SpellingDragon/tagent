@@ -201,7 +201,7 @@
           "value": "tagent/task/v1/reject:"
         }
       ],
-      "reason": "The five durable record kinds share one KV face; the carrier tables they rebuild are the one truth of the tasks a process serves.",
+      "reason": "The five durable record kinds share one KV face; the commit tables they rebuild are the one truth of the tasks a process serves.",
       "review_by": "2027-05-05"
     },
     {

@@ -22,7 +22,7 @@ func TestTaskReactivation(t *testing.T) {
 	ctx := context.Background()
 
 	t.Run("a settled task re-enters as the next round", func(t *testing.T) {
-		registry, carrier := invariantRegistry(t)
+		registry, commit := invariantRegistry(t)
 		taskID := reactivationSettled(t, registry)
 
 		round, err := registry.Reactivate(ctx, taskID)
@@ -36,9 +36,9 @@ func TestTaskReactivation(t *testing.T) {
 		if err != nil || status != StatusRunning {
 			t.Fatalf("status after the re-entry = (%v, %v), want the active round", status, err)
 		}
-		fact, found := reactivationFact(carrier, taskID, 1)
+		fact, found := reactivationFact(commit, taskID, 1)
 		if !found {
-			t.Fatalf("chain of %s carries no reactivation fact: %+v", taskID, carrier.Facts(taskID))
+			t.Fatalf("chain of %s carries no reactivation fact: %+v", taskID, commit.Facts(taskID))
 		}
 		if fact.Status != StatusRunning {
 			t.Fatalf("reactivation fact status = %v, want the active round the chain reads back", fact.Status)
@@ -46,7 +46,7 @@ func TestTaskReactivation(t *testing.T) {
 	})
 
 	t.Run("the reactivated task settles its new round", func(t *testing.T) {
-		registry, carrier := invariantRegistry(t)
+		registry, commit := invariantRegistry(t)
 		taskID := reactivationSettled(t, registry)
 		if _, err := registry.Reactivate(ctx, taskID); err != nil {
 			t.Fatalf("re-enter the settled task: %v", err)
@@ -62,31 +62,31 @@ func TestTaskReactivation(t *testing.T) {
 		if round != 3 {
 			t.Fatalf("round after the second re-entry = %d, want the third round", round)
 		}
-		if _, found := reactivationFact(carrier, taskID, 2); !found {
-			t.Fatalf("chain of %s carries no second reactivation fact: %+v", taskID, carrier.Facts(taskID))
+		if _, found := reactivationFact(commit, taskID, 2); !found {
+			t.Fatalf("chain of %s carries no second reactivation fact: %+v", taskID, commit.Facts(taskID))
 		}
 	})
 
 	t.Run("rejects_failed_reactivation", func(t *testing.T) {
-		registry, carrier := invariantRegistry(t)
+		registry, commit := invariantRegistry(t)
 		taskID := reactivationTerminal(t, registry, StatusFailed)
-		stored := len(carrier.Facts(taskID))
+		stored := len(commit.Facts(taskID))
 		if _, err := registry.Reactivate(ctx, taskID); !errors.Is(err, ErrReactivationFailed) {
 			t.Fatalf("re-entering a failed task = %v, want %v", err, ErrReactivationFailed)
 		}
-		if got := len(carrier.Facts(taskID)); got != stored {
+		if got := len(commit.Facts(taskID)); got != stored {
 			t.Fatalf("facts after the refused re-entry = %d, want the stored ones alone", got)
 		}
 	})
 
 	t.Run("rejects_cancelled_reactivation", func(t *testing.T) {
-		registry, carrier := invariantRegistry(t)
+		registry, commit := invariantRegistry(t)
 		taskID := reactivationTerminal(t, registry, StatusCancelled)
-		stored := len(carrier.Facts(taskID))
+		stored := len(commit.Facts(taskID))
 		if _, err := registry.Reactivate(ctx, taskID); !errors.Is(err, ErrReactivationCancelled) {
 			t.Fatalf("re-entering a cancelled task = %v, want %v", err, ErrReactivationCancelled)
 		}
-		if got := len(carrier.Facts(taskID)); got != stored {
+		if got := len(commit.Facts(taskID)); got != stored {
 			t.Fatalf("facts after the refused re-entry = %d, want the stored ones alone", got)
 		}
 	})
@@ -103,7 +103,7 @@ func TestTaskReactivation(t *testing.T) {
 	})
 
 	t.Run("rejects_concurrent_reactivation", func(t *testing.T) {
-		registry, carrier := invariantRegistry(t)
+		registry, commit := invariantRegistry(t)
 		taskID := reactivationSettled(t, registry)
 		const racers = 8
 		rounds := make([]int64, racers)
@@ -133,10 +133,10 @@ func TestTaskReactivation(t *testing.T) {
 		if won != 1 {
 			t.Fatalf("reactivations that committed a round = %d, want exactly one", won)
 		}
-		if _, found := reactivationFact(carrier, taskID, 1); !found {
-			t.Fatalf("chain of %s carries no single reactivation fact: %+v", taskID, carrier.Facts(taskID))
+		if _, found := reactivationFact(commit, taskID, 1); !found {
+			t.Fatalf("chain of %s carries no single reactivation fact: %+v", taskID, commit.Facts(taskID))
 		}
-		if _, found := reactivationFact(carrier, taskID, 2); found {
+		if _, found := reactivationFact(commit, taskID, 2); found {
 			t.Fatalf("chain of %s carries a second reactivation fact, want one", taskID)
 		}
 	})
@@ -176,9 +176,9 @@ func reactivationTerminal(t *testing.T, registry *MemoryRegistry, terminal Statu
 }
 
 // reactivationFact reports the fact of the nth re-entry of one task.
-func reactivationFact(carrier *MemoryCommit, taskID event.TaskID, seq int64) (CommitRecord, bool) {
+func reactivationFact(commit *MemoryCommit, taskID event.TaskID, seq int64) (CommitRecord, bool) {
 	wanted := MutationID(reactivatePrefix + string(taskID) + ":" + strconv.FormatInt(seq, 10))
-	for _, fact := range carrier.Facts(taskID) {
+	for _, fact := range commit.Facts(taskID) {
 		if fact.MutationID == wanted {
 			return fact, true
 		}
@@ -211,8 +211,8 @@ func (c *reentryClock) Advance(span time.Duration) {
 // reentryRegistry returns one registry whose stamps are read from the given
 // clock under the given threshold set.
 func reentryRegistry(clock *reentryClock, policy Policy) (*MemoryRegistry, *MemoryCommit) {
-	carrier := NewMemoryCommit(nil)
-	return NewMemoryRegistry(carrier, NewMemoryAdmission(), WithPolicy(policy), WithClock(clock.Now)), carrier
+	commit := NewMemoryCommit(nil)
+	return NewMemoryRegistry(commit, NewMemoryAdmission(), WithPolicy(policy), WithClock(clock.Now)), commit
 }
 
 // reentryLifetime is the threshold set the re-entry checks read a task under: the
@@ -288,7 +288,7 @@ func TestTaskReactivationRollback(t *testing.T) {
 	ctx := context.Background()
 
 	t.Run("a round nothing served is put back", func(t *testing.T) {
-		registry, carrier := invariantRegistry(t)
+		registry, commit := invariantRegistry(t)
 		taskID := reactivationSettled(t, registry)
 		round, err := registry.Reactivate(ctx, taskID)
 		if err != nil {
@@ -307,8 +307,8 @@ func TestTaskReactivationRollback(t *testing.T) {
 		if got := reactivationAwaitingTool(registry, taskID); got != 0 {
 			t.Fatalf("open execution obligations after the rollback = %d, want none: the round that opened them was withdrawn", got)
 		}
-		if _, found := reactivationRollbackFact(carrier, taskID, round); !found {
-			t.Fatalf("chain of %s carries no compensating fact for round %d: %+v", taskID, round, carrier.Facts(taskID))
+		if _, found := reactivationRollbackFact(commit, taskID, round); !found {
+			t.Fatalf("chain of %s carries no compensating fact for round %d: %+v", taskID, round, commit.Facts(taskID))
 		}
 	})
 
@@ -332,17 +332,17 @@ func TestTaskReactivationRollback(t *testing.T) {
 	})
 
 	t.Run("rejects_rollback_of_another_round", func(t *testing.T) {
-		registry, carrier := invariantRegistry(t)
+		registry, commit := invariantRegistry(t)
 		taskID := reactivationSettled(t, registry)
 		round, err := registry.Reactivate(ctx, taskID)
 		if err != nil {
 			t.Fatalf("re-enter the settled task: %v", err)
 		}
-		stored := len(carrier.Facts(taskID))
+		stored := len(commit.Facts(taskID))
 		if err := registry.RollbackReactivation(ctx, taskID, round+1); !errors.Is(err, ErrReactivationRollback) {
 			t.Fatalf("rollback of round %d = %v, want %v", round+1, err, ErrReactivationRollback)
 		}
-		if got := len(carrier.Facts(taskID)); got != stored {
+		if got := len(commit.Facts(taskID)); got != stored {
 			t.Fatalf("facts after the refused rollback = %d, want the stored ones alone", got)
 		}
 		if _, status, _ := registry.Lookup(ctx, taskID); status != StatusRunning {
@@ -378,9 +378,9 @@ func reactivationAwaitingTool(registry *MemoryRegistry, taskID event.TaskID) int
 }
 
 // reactivationRollbackFact reports the compensating fact of the nth re-entry of one task.
-func reactivationRollbackFact(carrier *MemoryCommit, taskID event.TaskID, round int64) (CommitRecord, bool) {
+func reactivationRollbackFact(commit *MemoryCommit, taskID event.TaskID, round int64) (CommitRecord, bool) {
 	wanted := MutationID(rollbackPrefix + string(taskID) + ":" + strconv.FormatInt(round, 10))
-	for _, fact := range carrier.Facts(taskID) {
+	for _, fact := range commit.Facts(taskID) {
 		if fact.MutationID == wanted {
 			return fact, true
 		}

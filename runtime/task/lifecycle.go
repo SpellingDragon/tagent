@@ -47,7 +47,7 @@ var ErrResumeCancelled = errors.New("task: a cancelled task is resumed by relaun
 // change is reconciled before any repeat of it.
 var ErrCommitUncertain = errors.New("task: the commit outcome of this change is unknown")
 
-// RegistryOption configures one in-memory task registry beyond its commit carrier
+// RegistryOption configures one in-memory task registry beyond its commit port
 // and admission face.
 type RegistryOption func(*MemoryRegistry)
 
@@ -88,13 +88,13 @@ type obligationEntry struct {
 	envelope   Envelope
 }
 
-// specDeclarer is the optional admission-material face a commit carrier may
-// offer beside the commit port. A registry that registers a fresh task stores
+// specDeclarer is the optional admission-material face a commit implementation
+// may offer beside the commit port. A registry that registers a fresh task stores
 // the task's admission material through this face beside the task's first
-// commit, so the fact chain one durable carrier writes is self-contained: a
+// commit, so the fact chain DurableCommit writes is self-contained: a
 // restore rebuilds the task from material the chain already carries and no
-// external declaration is needed. A carrier that does not offer the face keeps
-// its own persistence shape and the registry declares nothing beside it.
+// external declaration is needed. An implementation that does not offer the face
+// keeps its own persistence shape and the registry declares nothing beside it.
 type specDeclarer interface {
 	Declare(ctx context.Context, taskID event.TaskID, spec Spec) error
 }
@@ -111,7 +111,7 @@ type memoryTask struct {
 	obligations []obligationEntry
 	// blocked keeps the reason beside each notification whose delivery could not
 	// proceed. It keeps its write authority for the same reason obligationEntry
-	// keeps answered: a refusal's own words have no fact carrier, so the chain
+	// keeps answered: a refusal's own words have no fact, so the chain
 	// cannot compute them back, and the record changes what a reader may conclude
 	// about the task — an obligation reported as blocked is not reported as still
 	// on its way. Writing the reason into the account is a new persistent surface
@@ -149,12 +149,12 @@ type memoryTask struct {
 }
 
 // MemoryRegistry is the in-memory task registry: it admits a task declaration, moves a
-// task through the state machine on the commit carrier, and answers lookups,
+// task through the state machine on the commit port, and answers lookups,
 // cancellation requests and resume declarations. It satisfies Registry and holds no
 // recovery of its own.
 type MemoryRegistry struct {
 	mu        sync.Mutex
-	carrier   Commit
+	commit    Commit
 	admission *MemoryAdmission
 	seq       *NoticeSequencer
 	limit     int
@@ -181,12 +181,12 @@ type MemoryRegistry struct {
 // The registry satisfies the task registry port.
 var _ Registry = (*MemoryRegistry)(nil)
 
-// NewMemoryRegistry returns an in-memory task registry over one commit carrier and one
-// admission face. Each status change is submitted to the carrier before the registry
-// reports it, so a change the carrier did not store is never made visible.
-func NewMemoryRegistry(carrier Commit, admission *MemoryAdmission, opts ...RegistryOption) *MemoryRegistry {
+// NewMemoryRegistry returns an in-memory task registry over one commit port and one
+// admission face. Each status change is submitted to the commit port before the
+// registry reports it, so a change the commit did not store is never made visible.
+func NewMemoryRegistry(commit Commit, admission *MemoryAdmission, opts ...RegistryOption) *MemoryRegistry {
 	r := &MemoryRegistry{
-		carrier:   carrier,
+		commit:    commit,
 		admission: admission,
 		seq:       NewNoticeSequencer(),
 		tasks:     map[event.TaskID]*memoryTask{},
@@ -205,8 +205,8 @@ func NewMemoryRegistry(carrier Commit, admission *MemoryAdmission, opts ...Regis
 // and adds no obligation; an admission past the concurrency limit is refused by name
 // and leaves every admitted task untouched. A fresh admission keeps its pre-registered
 // obligation open until the task settles. The admission material of a fresh task is
-// stored beside its first commit through the carrier's admission-material face when
-// the carrier offers one, so the stored chain of the task is self-contained and a
+// stored beside its first commit through the commit port's admission-material face
+// when the port offers one, so the stored chain of the task is self-contained and a
 // restore needs no external declaration.
 func (r *MemoryRegistry) Register(ctx context.Context, spec Spec) (AdmissionReceipt, error) {
 	r.mu.Lock()
@@ -242,7 +242,7 @@ func (r *MemoryRegistry) Register(ctx context.Context, spec Spec) (AdmissionRece
 		ExpectedRevision: 0,
 		Status:           StatusAccepted,
 	}
-	if declarer, ok := r.carrier.(specDeclarer); ok {
+	if declarer, ok := r.commit.(specDeclarer); ok {
 		if err := declarer.Declare(ctx, taskID, spec); err != nil {
 			return AdmissionReceipt{CallID: spec.CallID, Accepted: false, Kind: AdmissionRejected}, err
 		}
@@ -276,8 +276,8 @@ func (r *MemoryRegistry) Lookup(ctx context.Context, taskID event.TaskID) (Spec,
 }
 
 // Advance moves one task to the next status and submits the change beside its pending
-// notifications to the commit carrier first. A repeated mutation returns the fact
-// already stored and records no second one; a change the carrier refuses leaves the
+// notifications to the commit port first. A repeated mutation returns the fact
+// already stored and records no second one; a change the commit refuses leaves the
 // task where it is; a task that holds its terminal fact moves no more.
 func (r *MemoryRegistry) Advance(ctx context.Context, taskID event.TaskID, to Status, mutation MutationID, outbox []Envelope) (CommitResult, error) {
 	r.mu.Lock()
@@ -371,13 +371,13 @@ func (r *MemoryRegistry) Resume(ctx context.Context, taskID event.TaskID, input 
 	return AdmissionReceipt{TaskID: taskID, Accepted: true, Kind: AdmissionFresh}, nil
 }
 
-// applyCommitLocked submits one record to the commit carrier and applies the stored
+// applyCommitLocked submits one record to the commit port and applies the stored
 // fact to the task: its status and revision move, the mutation is remembered, and each
 // notification the record carries opens a delivery obligation. The applied fact is
 // reported through the activity pulse once it is visible to every reader, so a close
 // waiting on the account re-reads it instead of polling for it.
 func (r *MemoryRegistry) applyCommitLocked(ctx context.Context, entry *memoryTask, record CommitRecord) (CommitResult, bool, error) {
-	result, err := r.carrier.Commit(ctx, record)
+	result, err := r.commit.Commit(ctx, record)
 	if result != CommitCommitted {
 		return result, false, err
 	}

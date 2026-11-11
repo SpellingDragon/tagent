@@ -66,7 +66,7 @@ type taskLookup interface {
 }
 
 // fixtureReading is the single read port of the fixture: the plan it publishes,
-// the session sites the state owner holds and the tasks the task carriers hold.
+// the session sites the state owner holds and the tasks the task layer holds.
 // A site source that is not wired at all reports its refusal through sitesErr
 // instead of answering an empty site list, so a refused dimension stays
 // distinguishable from an empty one.
@@ -119,7 +119,7 @@ func (r fixtureReading) Sites(ctx context.Context) ([]query.SiteReading, error) 
 	return readings, nil
 }
 
-// Tasks returns every task the commit carrier lists, each beside its declaration
+// Tasks returns every task the commit lists, each beside its declaration
 // and status, the obligations its manager keeps and the notifications its record
 // still owes.
 func (r fixtureReading) Tasks(ctx context.Context) ([]query.TaskReading, error) {

@@ -20,9 +20,9 @@ import (
 // 契约: docs/wiki/agent/task-lifecycle.md#status-machine
 func TestTaskLifecycle(t *testing.T) {
 	ctx := context.Background()
-	carrier := task.NewMemoryCommit(nil)
+	commit := task.NewMemoryCommit(nil)
 	admission := task.NewMemoryAdmission()
-	registry := task.NewMemoryRegistry(carrier, admission, task.WithConcurrencyLimit(1))
+	registry := task.NewMemoryRegistry(commit, admission, task.WithConcurrencyLimit(1))
 	refusalText := "the target refused the notification"
 	deliveries := 0
 	manager := task.NewMemoryManager(registry, func(ctx context.Context, notice task.Notice) (task.DeliveryAcceptance, error) {
@@ -136,7 +136,7 @@ func TestTaskLifecycle(t *testing.T) {
 			t.Fatalf("repeated settle = (%v, %v), want the fact already stored", result, err)
 		}
 		facts := 0
-		for _, record := range carrier.Facts(taskA) {
+		for _, record := range commit.Facts(taskA) {
 			if record.MutationID == "settle-a" {
 				facts++
 			}
@@ -209,7 +209,7 @@ func TestTaskLifecycle(t *testing.T) {
 		// frozen at the stop: target, source and target instance are filled from
 		// the declaration the task was admitted under.
 		var cancelled []task.Envelope
-		for _, record := range carrier.Facts(taskB) {
+		for _, record := range commit.Facts(taskB) {
 			for _, envelope := range record.Outbox {
 				if envelope.Notice.Kind == task.NoticeCancelled {
 					cancelled = append(cancelled, envelope)
@@ -288,7 +288,7 @@ func TestTaskLifecycle(t *testing.T) {
 			t.Fatalf("blocked = %+v, want the refused notification kept beside its reason on the diagnostic face", open.Blocked)
 		}
 
-		for _, record := range carrier.Facts(taskC) {
+		for _, record := range commit.Facts(taskC) {
 			for _, envelope := range record.Outbox {
 				if envelope.TargetInstance != specC.InstanceID {
 					t.Fatalf("envelope = %+v, want the pre-handoff notification kept beside the frozen instance %q", envelope, specC.InstanceID)
@@ -298,7 +298,7 @@ func TestTaskLifecycle(t *testing.T) {
 	})
 
 	t.Run("resume feeds one declared input under the same identity", func(t *testing.T) {
-		before := len(carrier.Facts(taskA))
+		before := len(commit.Facts(taskA))
 		input := event.Event{Key: "evt-resume-a", TaskID: taskA, Type: event.TypeFeedback, InvocationID: specA.InvocationID, InstanceID: specA.InstanceID}
 		receipt, err := registry.Resume(ctx, taskA, input)
 		if err != nil || !receipt.Accepted || receipt.Kind != task.AdmissionFresh || receipt.TaskID != taskA {
@@ -315,7 +315,7 @@ func TestTaskLifecycle(t *testing.T) {
 		if err != nil || !again.Accepted || again.TaskID != taskA {
 			t.Fatalf("repeated resume = (%+v, %v), want the same declaration accepted once", again, err)
 		}
-		if facts := len(carrier.Facts(taskA)); facts != before+1 {
+		if facts := len(commit.Facts(taskA)); facts != before+1 {
 			t.Fatalf("stored %d facts, want the one resume declaration stored", facts)
 		}
 		if open, err := manager.Obligations(ctx, taskA); err != nil || open.Count != 3 {

@@ -13,7 +13,7 @@ import (
 	a2aprotocol "trpc.group/trpc-go/trpc-a2a-go/protocol"
 )
 
-// TestHandoffEnvelopeDataPartCarriesTheSameSchema holds the remote carrier against the local one:
+// TestHandoffEnvelopeDataPartCarriesTheSameSchema holds the remote envelope against the local one:
 // - the data part names the data kind and carries the envelope's own field names
 // - a data part decoded from the message JSON restores every field of the envelope
 // - a decoded envelope naming no intent or no acceptance constraint is still refused by Validate
@@ -129,7 +129,7 @@ func TestHandoffEnvelopeDataPartCarriesTheSameSchema(t *testing.T) {
 	})
 }
 
-// TestHandoffEnvelopeContract holds the structured carrier of one delegated call:
+// TestHandoffEnvelopeContract holds the structured envelope of one delegated call:
 // - a complete envelope validates and keeps every field it was built with
 // - an envelope naming no intent or no non-empty constraint is refused by name
 // - the external-context block renders every field under its own heading in fixed order

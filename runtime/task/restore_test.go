@@ -90,13 +90,13 @@ func TestHandoffRestoreInvariants(t *testing.T) {
 	})
 
 	t.Run("a handoff is one durable mutation and its repeat records no second link", func(t *testing.T) {
-		registry, carrier := invariantRegistry(t)
+		registry, commit := invariantRegistry(t)
 		manager := NewMemoryManager(registry, nil)
 		taskID := invariantRegister(t, registry, "call-1", "dedup-1")
 		if err := manager.Handoff(ctx, taskID, invariantHandoffTarget); err != nil {
 			t.Fatalf("hand the future notifications over: %v", err)
 		}
-		facts := carrier.Facts(taskID)
+		facts := commit.Facts(taskID)
 		links := 0
 		for _, fact := range facts {
 			if strings.HasPrefix(string(fact.MutationID), handoffPrefix) {
@@ -106,13 +106,13 @@ func TestHandoffRestoreInvariants(t *testing.T) {
 		if links != 1 {
 			t.Fatalf("handoff links on the chain = %d, want the move carried beside the task's facts", links)
 		}
-		if got := carrier.Revision(taskID); got != int64(len(facts)) {
+		if got := commit.Revision(taskID); got != int64(len(facts)) {
 			t.Fatalf("revision after the handoff = %d, want one per stored fact", got)
 		}
 		if err := manager.Handoff(ctx, taskID, invariantHandoffTarget); err != nil {
 			t.Fatalf("repeat the handoff: %v", err)
 		}
-		if got := len(carrier.Facts(taskID)); got != len(facts) {
+		if got := len(commit.Facts(taskID)); got != len(facts) {
 			t.Fatalf("facts after a repeated handoff = %d, want no second link", got)
 		}
 	})

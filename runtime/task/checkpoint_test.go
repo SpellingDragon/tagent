@@ -96,7 +96,7 @@ func TestRegistryCheckpointRoundTrip(t *testing.T) {
 	})
 
 	t.Run("a restore never overwrites a task rebuilt from its chain", func(t *testing.T) {
-		source, carrier := invariantRegistry(t)
+		source, commit := invariantRegistry(t)
 		taskID := invariantRegister(t, source, "call-chain", "dedup-chain")
 		payload, err := source.SnapshotCheckpoint(ctx)
 		if err != nil {
@@ -105,7 +105,7 @@ func TestRegistryCheckpointRoundTrip(t *testing.T) {
 		if result, err := source.Advance(ctx, taskID, StatusFailed, "failed-chain", nil); err != nil || result != CommitCommitted {
 			t.Fatalf("end the task on its chain = (%v, %v), want a committed change", result, err)
 		}
-		facts := carrier.Facts(taskID)
+		facts := commit.Facts(taskID)
 		chain := make([]TaskRecord, 0, len(facts))
 		for at, fact := range facts {
 			link := TaskRecord{Fact: fact}
@@ -177,8 +177,8 @@ func (r *MemoryRegistry) checkpointOf(t *testing.T, taskID event.TaskID) StatedT
 func TestRegistryCheckpointStatesTheAccountNotTheHistory(t *testing.T) {
 	ctx := context.Background()
 	clock := &invariantClock{at: time.Date(2026, 11, 6, 12, 0, 0, 0, time.UTC)}
-	carrier := NewMemoryCommit(nil)
-	registry := NewMemoryRegistry(carrier, NewMemoryAdmission(), WithClock(clock.now), WithTerminalTTL(time.Hour))
+	commit := NewMemoryCommit(nil)
+	registry := NewMemoryRegistry(commit, NewMemoryAdmission(), WithClock(clock.now), WithTerminalTTL(time.Hour))
 	var taskIDs []event.TaskID
 	for round := 0; round < 6; round++ {
 		receipt, err := registry.Register(ctx, invariantTaskSpec("call-"+string(rune('a'+round)), "dedup-"+string(rune('a'+round))))

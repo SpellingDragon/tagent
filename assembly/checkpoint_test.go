@@ -23,6 +23,7 @@ import (
 	"github.com/SpellingDragon/tagent/memory/ledger"
 	"github.com/SpellingDragon/tagent/memory/replay"
 	"github.com/SpellingDragon/tagent/runtime/agent"
+	"github.com/SpellingDragon/tagent/runtime/state"
 )
 
 // TestCheckpointEmittedAtCadenceAndFold pins the bounded cadence and the cut it files.
@@ -1148,7 +1149,7 @@ func TestSessionCutStatesOnlyTheTriggeringSession(t *testing.T) {
 	if len(names) == 0 {
 		t.Fatal("the session checkpoint states no slice, so it carries no state of the chain that asked for it")
 	}
-	for _, unsessioned := range []string{checkpointSliceTasks, checkpointSliceMailbox} {
+	for _, unsessioned := range []string{checkpointSliceTasks, state.StateSliceMailbox} {
 		if slices.Contains(names, unsessioned) {
 			t.Fatalf("the session checkpoint states the %q slice beside %v, want the slices a session chain owns", unsessioned, names)
 		}

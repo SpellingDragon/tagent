@@ -49,7 +49,7 @@ const (
 	// journalMaxFrameBytes bounds one payload, so a damaged length field cannot
 	// make the reader allocate an unbounded span. The ceiling is headroom over
 	// every payload a commit writes, never a payload size: the largest record a
-	// commit files is a framework carrier, and a carrier states the projection
+	// commit files is a framework checkpoint, and a checkpoint states the projection
 	// entries a fold leaves instead of the text behind them, which stands at
 	// about 2 KiB beside 36 turns of 64 KiB bodies. The round-trip test pins a
 	// frame near the ceiling, so a payload past it is refused rather than read.

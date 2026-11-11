@@ -9,16 +9,16 @@ import (
 	"github.com/SpellingDragon/tagent/api/event"
 )
 
-// logicalRig is one registry read under the given threshold set, beside the commit carrier its facts are stored in.
+// logicalRig is one registry read under the given threshold set, beside the commit its facts are stored in.
 type logicalRig struct {
 	registry *MemoryRegistry
-	carrier  *MemoryCommit
+	commit   *MemoryCommit
 }
 
 // logicalRegistry returns one empty registry read under the given threshold set.
 func logicalRegistry(policy Policy) logicalRig {
-	carrier := NewMemoryCommit(nil)
-	return logicalRig{registry: NewMemoryRegistry(carrier, NewMemoryAdmission(), WithPolicy(policy)), carrier: carrier}
+	commit := NewMemoryCommit(nil)
+	return logicalRig{registry: NewMemoryRegistry(commit, NewMemoryAdmission(), WithPolicy(policy)), commit: commit}
 }
 
 // logicalThresholds is the threshold set the logical status checks read one task under: every threshold is a minute
@@ -82,7 +82,7 @@ func TestLogicalStatusRecognition(t *testing.T) {
 
 	t.Run("an execution past the timeout is marked timed out beside its result still owed", func(t *testing.T) {
 		rig := logicalRegistry(logicalThresholds)
-		registry, carrier := rig.registry, rig.carrier
+		registry, commit := rig.registry, rig.commit
 		manager := NewMemoryManager(registry, nil)
 		taskID := invariantRegister(t, registry, "call-1", "dedup-1")
 		if result, err := registry.Advance(ctx, taskID, StatusRunning, "running", nil); err != nil || result != CommitCommitted {
@@ -99,7 +99,7 @@ func TestLogicalStatusRecognition(t *testing.T) {
 		if result, err := registry.Advance(ctx, taskID, StatusSettled, "settled-after-timeout", settled); err != nil || result != CommitCommitted {
 			t.Fatalf("settle the timed out task = (%v, %v), want its result stored as the notification it owes", result, err)
 		}
-		if stored := len(carrier.Facts(taskID)); stored != 3 {
+		if stored := len(commit.Facts(taskID)); stored != 3 {
 			t.Fatalf("stored facts of the timed out task = %d, want the admission, the move under way and the settlement", stored)
 		}
 		if held, err := manager.Obligations(ctx, taskID); err != nil || held.Count != 1 || held.Open[0].Notice != settled[0].Notice {
@@ -136,10 +136,10 @@ func TestLogicalStatusRecognition(t *testing.T) {
 
 	t.Run("reading the logical status moves no status and stores no fact", func(t *testing.T) {
 		rig := logicalRegistry(logicalThresholds)
-		registry, carrier := rig.registry, rig.carrier
+		registry, commit := rig.registry, rig.commit
 		manager := NewMemoryManager(registry, nil)
 		taskID := invariantRegister(t, registry, "call-1", "dedup-1")
-		stored := len(carrier.Facts(taskID))
+		stored := len(commit.Facts(taskID))
 		held := invariantObligationCount(t, manager, taskID)
 		probe := time.Now().Add(3*time.Minute + logicalMargin)
 		if got, err := registry.Logical(ctx, taskID, probe); err != nil || got != LogicalSuspect {
@@ -148,7 +148,7 @@ func TestLogicalStatusRecognition(t *testing.T) {
 		if changes := registry.Watch(ctx, probe); len(changes) != 1 || changes[0].To != LogicalSuspect {
 			t.Fatalf("changes the identification reported = %+v, want the one suspected task", changes)
 		}
-		if got := len(carrier.Facts(taskID)); got != stored {
+		if got := len(commit.Facts(taskID)); got != stored {
 			t.Fatalf("stored facts after the identification = %d, want the admission alone", got)
 		}
 		if _, status, err := registry.Lookup(ctx, taskID); err != nil || status != StatusAccepted {
@@ -161,7 +161,7 @@ func TestLogicalStatusRecognition(t *testing.T) {
 
 	t.Run("a suspected or timed out task is marked but never terminated", func(t *testing.T) {
 		rig := logicalRegistry(logicalThresholds)
-		registry, carrier := rig.registry, rig.carrier
+		registry, commit := rig.registry, rig.commit
 		manager := NewMemoryManager(registry, nil)
 		silent := invariantRegister(t, registry, "call-1", "dedup-1")
 		running := invariantRegister(t, registry, "call-2", "dedup-2")
@@ -178,7 +178,7 @@ func TestLogicalStatusRecognition(t *testing.T) {
 		if changes := registry.Watch(ctx, probe); len(changes) != 2 {
 			t.Fatalf("changes the identification reported = %+v, want the suspected and the timed out task", changes)
 		}
-		facts := map[event.TaskID]int{silent: len(carrier.Facts(silent)), running: len(carrier.Facts(running))}
+		facts := map[event.TaskID]int{silent: len(commit.Facts(silent)), running: len(commit.Facts(running))}
 		held := map[event.TaskID]int{
 			silent:  invariantObligationCount(t, manager, silent),
 			running: invariantObligationCount(t, manager, running),
@@ -190,7 +190,7 @@ func TestLogicalStatusRecognition(t *testing.T) {
 			t.Fatalf("status of the timed out task = (%v, %v), want the running status kept", status, err)
 		}
 		for _, taskID := range []event.TaskID{silent, running} {
-			if got := len(carrier.Facts(taskID)); got != facts[taskID] {
+			if got := len(commit.Facts(taskID)); got != facts[taskID] {
 				t.Fatalf("stored facts of %s after the identification = %d, want %d", taskID, got, facts[taskID])
 			}
 			if got := invariantObligationCount(t, manager, taskID); got != held[taskID] {

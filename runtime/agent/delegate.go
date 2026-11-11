@@ -225,7 +225,7 @@ type DelegationTasks interface {
 	// obligation.
 	Admit(ctx context.Context, spec task.Spec) (task.AdmissionReceipt, error)
 	// Advance moves one task to the next status and submits the change beside its
-	// pending notifications to the commit carrier first.
+	// pending notifications to the commit port first.
 	Advance(ctx context.Context, taskID event.TaskID, to task.Status, mutation task.MutationID, outbox []task.Envelope) (task.CommitResult, error)
 	// Obligations reports the obligations the task still owes, each classified
 	// by the wait it is in.
@@ -262,7 +262,7 @@ var (
 	// ErrDelegationAdmissionRefused reports a delegated call the task face
 	// refused to admit without naming a cause of its own.
 	ErrDelegationAdmissionRefused = errors.New("agent: the delegated call was refused admission")
-	// ErrDelegationCommitRefused reports a settle the commit carrier did not
+	// ErrDelegationCommitRefused reports a settle the commit port did not
 	// store: the task moves nowhere and the ledger reports no terminal.
 	ErrDelegationCommitRefused = errors.New("agent: the delegation settle was not committed")
 	// ErrDelegationNotSettled reports a reopen of a delegation whose round has

@@ -158,7 +158,7 @@ var (
 	// ErrDelegationAdmissionRefused reports a delegated call the task face
 	// refused to admit without naming a cause of its own.
 	ErrDelegationAdmissionRefused = errors.New("agent: the delegated call was refused admission")
-	// ErrDelegationCommitRefused reports a settle the commit carrier did not
+	// ErrDelegationCommitRefused reports a settle the commit port did not
 	// store: the task moves nowhere and the ledger reports no terminal.
 	ErrDelegationCommitRefused = errors.New("agent: the delegation settle was not committed")
 	// ErrDelegationNotSettled reports a reopen of a delegation whose round has
@@ -843,7 +843,7 @@ type DelegationTasks interface {
 	// obligation.
 	Admit(ctx context.Context, spec task.Spec) (task.AdmissionReceipt, error)
 	// Advance moves one task to the next status and submits the change beside its
-	// pending notifications to the commit carrier first.
+	// pending notifications to the commit port first.
 	Advance(ctx context.Context, taskID event.TaskID, to task.Status, mutation task.MutationID, outbox []task.Envelope) (task.CommitResult, error)
 	// Obligations reports the obligations the task still owes, each classified
 	// by the wait it is in.
@@ -1232,9 +1232,9 @@ type HandoffEnvelope struct {
     capabilities the handoff grants it, the decisions it may not take on its own
     and the stored facts it starts from. It travels beside the natural-language
     request of the call and never replaces it, and one schema serves every
-    carrier: the JSON field names below are the wire names it travels under,
-    an A2A data part carries that JSON as its payload, and the local channel
-    renders the same fields as the text block ExternalContext states.
+    representation: the JSON field names below are the wire names it travels
+    under, an A2A data part carries that JSON as its payload, and the local
+    channel renders the same fields as the text block ExternalContext states.
 
     The four segments of the handoff contract map onto this record: - the
     task is Intent; - the context summary is Refs beside the natural-language

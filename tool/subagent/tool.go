@@ -505,8 +505,8 @@ func roundStart(started func(error)) func(error) {
 // returned so the caller of a re-entered round learns that the outcome it produced was
 // not recorded; a first round reports it beside the contract it always had.
 func (d delegationFaces) completeDelegation(ctx context.Context, taskID event.TaskID, status task.Status, body string) error {
-	if carrier, ok := d.delegation.(ResultDelegation); ok {
-		_, err := carrier.CompleteWithResult(ctx, taskID, status, "", body)
+	if result, ok := d.delegation.(ResultDelegation); ok {
+		_, err := result.CompleteWithResult(ctx, taskID, status, "", body)
 		return err
 	}
 	_, err := d.delegation.Complete(ctx, taskID, status, "")

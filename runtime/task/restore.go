@@ -97,7 +97,7 @@ type RestoreOutcome struct {
 	// is empty when the resolution refused.
 	Owner event.AgentID
 	// Recovered reports whether this restore rebuilt the task: from the chain
-	// links it folded, from the carrier a checkpoint stated, or from neither —
+	// links it folded, from the cut a checkpoint stated, or from neither —
 	// false reports an idempotent hit, where the registry already held the task
 	// and the link added no second fact, or a chain the restore refused without
 	// rebuilding anything.
@@ -175,7 +175,7 @@ func (r *MemoryRegistry) Restore(ctx context.Context, chain []TaskRecord, owners
 // restored: the state the restored record holds and the owner the current
 // orchestration binding resolves its target to, resolved exactly as Restore
 // resolves the target of a rebuilt task. The outcome reports the recovery,
-// because the carrier rebuilt the task exactly as a chain fold rebuilds it and
+// because the checkpoint rebuilt the task exactly as a chain fold rebuilds it and
 // the two paths answer the same account; a task the registry does not hold is
 // left out of the report.
 func (r *MemoryRegistry) CheckpointRestored(ctx context.Context, taskIDs []event.TaskID, owners OwnerBinding) (RestoreReport, error) {

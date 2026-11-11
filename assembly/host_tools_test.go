@@ -1028,7 +1028,7 @@ var errReentryNoLedgerEntry = fmt.Errorf("agent: %w", errReentryUnknownDelegatio
 // so the stand-in reports the case it models instead of a refusal invented here.
 var errReentryUnknownDelegation = fmt.Errorf("no delegation is recorded for that task")
 
-// reentryRegistry returns an empty task table over an in-memory commit carrier, so the
+// reentryRegistry returns an empty task table over an in-memory commit, so the
 // anchors read a real task state machine instead of a stand-in for it.
 func reentryRegistry(t *testing.T) *task.MemoryRegistry {
 	t.Helper()

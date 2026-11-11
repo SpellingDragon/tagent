@@ -89,7 +89,7 @@ var (
 )
 
 // The read port the assembled run answers the inventory through, the commit
-// carrier its tasks are listed from and the task face its close settles through
+// port its tasks are listed from and the task face its close settles through
 // each satisfy the port the owner packages declare.
 var (
 	_ query.Reading         = runReading{}

@@ -55,10 +55,11 @@ const CheckpointCommitInterval = 64
 // a due filed.
 const CheckpointPeriod = 30 * time.Second
 
-// checkpointSliceProjection, checkpointSliceDelivery, checkpointSliceMailbox,
-// checkpointSliceTasks, checkpointSliceInputs and checkpointSliceCompress name
-// the framework's own state slices. A consumer mounted beside them carries a name
-// of its own, so the two families never collide on the seam.
+// checkpointSliceProjection, checkpointSliceDelivery, checkpointSliceTasks,
+// checkpointSliceInputs and checkpointSliceCompress name the framework's own
+// state slices. A consumer mounted beside them carries a name of its own, so the
+// two families never collide on the seam. The mailbox slice is not among them: it
+// is keyed by state.StateSliceMailbox beside the holder that states it.
 const (
 	// checkpointSliceProjection carries the survivors of every session
 	// projection the run presents.
@@ -67,8 +68,6 @@ const (
 	// settlement state of every obligation, the obligations still owed with
 	// their body, target, lineage, attempt and hold, and the ordering sequence.
 	checkpointSliceDelivery = "delivery"
-	// checkpointSliceMailbox carries the notifications the mailbox still owes.
-	checkpointSliceMailbox = "mailbox"
 	// checkpointSliceTasks carries the terminal state of every task the
 	// registry settled.
 	checkpointSliceTasks = "tasks"

@@ -26,7 +26,7 @@ func TestLifecycleStateMachineInvariants(t *testing.T) {
 	ctx := context.Background()
 
 	t.Run("a terminal fact is recorded once and moves no more", func(t *testing.T) {
-		registry, carrier := invariantRegistry(t)
+		registry, commit := invariantRegistry(t)
 		taskID := invariantRegister(t, registry, "call-1", "dedup-1")
 		if result, err := registry.Advance(ctx, taskID, StatusRunning, "running", nil); err != nil || result != CommitCommitted {
 			t.Fatalf("move the task under way = (%v, %v), want a committed change", result, err)
@@ -35,14 +35,14 @@ func TestLifecycleStateMachineInvariants(t *testing.T) {
 		if result, err := registry.Advance(ctx, taskID, StatusSettled, "settled", settled); err != nil || result != CommitCommitted {
 			t.Fatalf("settle the task = (%v, %v), want a committed change", result, err)
 		}
-		stored := len(carrier.Facts(taskID))
+		stored := len(commit.Facts(taskID))
 		if _, err := registry.Advance(ctx, taskID, StatusFailed, "failed", nil); !errors.Is(err, ErrTerminalState) {
 			t.Fatalf("a transition beside a terminal fact = %v, want %v", err, ErrTerminalState)
 		}
 		if _, err := registry.Advance(ctx, taskID, StatusSettled, "settled-again", settled); !errors.Is(err, ErrTerminalState) {
 			t.Fatalf("a second terminal fact = %v, want %v", err, ErrTerminalState)
 		}
-		if got := len(carrier.Facts(taskID)); got != stored {
+		if got := len(commit.Facts(taskID)); got != stored {
 			t.Fatalf("facts after the refused transitions = %d, want the stored ones alone", got)
 		}
 		if _, status, err := registry.Lookup(ctx, taskID); err != nil || status != StatusSettled {
@@ -51,16 +51,16 @@ func TestLifecycleStateMachineInvariants(t *testing.T) {
 	})
 
 	t.Run("an undeterminable status and a re-admission are refused by name", func(t *testing.T) {
-		registry, carrier := invariantRegistry(t)
+		registry, commit := invariantRegistry(t)
 		taskID := invariantRegister(t, registry, "call-1", "dedup-1")
-		stored := len(carrier.Facts(taskID))
+		stored := len(commit.Facts(taskID))
 		if _, err := registry.Advance(ctx, taskID, StatusUnknown, "unknown", nil); !errors.Is(err, ErrStatusUnknown) {
 			t.Fatalf("a transition to an undeterminable status = %v, want %v", err, ErrStatusUnknown)
 		}
 		if _, err := registry.Advance(ctx, taskID, StatusAccepted, "admitted-again", nil); !errors.Is(err, ErrIllegalTransition) {
 			t.Fatalf("a transition back to admission = %v, want %v", err, ErrIllegalTransition)
 		}
-		if got := len(carrier.Facts(taskID)); got != stored {
+		if got := len(commit.Facts(taskID)); got != stored {
 			t.Fatalf("facts after the refused transitions = %d, want the stored one alone", got)
 		}
 	})
@@ -80,20 +80,20 @@ func TestLifecycleStateMachineInvariants(t *testing.T) {
 	})
 
 	t.Run("a repeated mutation identity stores no second fact", func(t *testing.T) {
-		registry, carrier := invariantRegistry(t)
+		registry, commit := invariantRegistry(t)
 		taskID := invariantRegister(t, registry, "call-1", "dedup-1")
 		if result, err := registry.Advance(ctx, taskID, StatusRunning, "running", nil); err != nil || result != CommitCommitted {
 			t.Fatalf("move the task under way = (%v, %v), want a committed change", result, err)
 		}
-		stored := len(carrier.Facts(taskID))
-		revision := carrier.Revision(taskID)
+		stored := len(commit.Facts(taskID))
+		revision := commit.Revision(taskID)
 		if result, err := registry.Advance(ctx, taskID, StatusRunning, "running", nil); err != nil || result != CommitCommitted {
 			t.Fatalf("repeat the mutation = (%v, %v), want the stored fact reported again", result, err)
 		}
-		if got := len(carrier.Facts(taskID)); got != stored {
+		if got := len(commit.Facts(taskID)); got != stored {
 			t.Fatalf("facts after a repeated mutation = %d, want the stored ones alone", got)
 		}
-		if got := carrier.Revision(taskID); got != revision {
+		if got := commit.Revision(taskID); got != revision {
 			t.Fatalf("revision after a repeated mutation = %d, want it unmoved", got)
 		}
 		if _, err := registry.Advance(ctx, taskID, StatusSettled, "running", nil); !errors.Is(err, ErrMutationConflict) {
@@ -102,8 +102,8 @@ func TestLifecycleStateMachineInvariants(t *testing.T) {
 	})
 
 	t.Run("an admission past the concurrency limit is refused and leaves the admitted tasks untouched", func(t *testing.T) {
-		carrier := NewMemoryCommit(nil)
-		registry := NewMemoryRegistry(carrier, NewMemoryAdmission(), WithConcurrencyLimit(1))
+		commit := NewMemoryCommit(nil)
+		registry := NewMemoryRegistry(commit, NewMemoryAdmission(), WithConcurrencyLimit(1))
 		taskID := invariantRegister(t, registry, "call-1", "dedup-1")
 		receipt, err := registry.Register(ctx, invariantTaskSpec("call-2", "dedup-2"))
 		if !errors.Is(err, ErrConcurrencyLimit) {
@@ -119,7 +119,7 @@ func TestLifecycleStateMachineInvariants(t *testing.T) {
 		if _, status, err := registry.Lookup(ctx, taskID); err != nil || status != StatusAccepted {
 			t.Fatalf("status of the admitted task = (%v, %v), want admission untouched", status, err)
 		}
-		if got := len(carrier.Facts(taskID)); got != 1 {
+		if got := len(commit.Facts(taskID)); got != 1 {
 			t.Fatalf("facts of the admitted task = %d, want its admission alone", got)
 		}
 		if _, err := registry.Advance(ctx, taskID, StatusSettled, "settled", nil); err != nil {
@@ -151,7 +151,7 @@ func TestLifecycleStateMachineInvariants(t *testing.T) {
 	})
 
 	t.Run("a repeated resume declaration opens no second round", func(t *testing.T) {
-		registry, carrier := invariantRegistry(t)
+		registry, commit := invariantRegistry(t)
 		manager := NewMemoryManager(registry, nil)
 		taskID := invariantRegister(t, registry, "call-1", "dedup-1")
 		opened := invariantObligationCount(t, manager, taskID)
@@ -168,14 +168,14 @@ func TestLifecycleStateMachineInvariants(t *testing.T) {
 		if got := envelope.Notice.Round; got != 2 {
 			t.Fatalf("round of the resumed notification = %d, want the resumed round", got)
 		}
-		revision := carrier.Revision(taskID)
+		revision := commit.Revision(taskID)
 		if receipt, err := registry.Resume(ctx, taskID, event.Event{Key: "input-1"}); err != nil || receipt.Kind != AdmissionFresh {
 			t.Fatalf("repeat the resume declaration = (%+v, %v), want the stored fact reported", receipt, err)
 		}
 		if got := invariantObligationCount(t, manager, taskID); got != opened+1 {
 			t.Fatalf("obligations after a repeated resume = %d, want no second one", got)
 		}
-		if got := carrier.Revision(taskID); got != revision {
+		if got := commit.Revision(taskID); got != revision {
 			t.Fatalf("revision after a repeated resume = %d, want it unmoved", got)
 		}
 		again, err := registry.IssueNotice(ctx, taskID, NoticeAccepted, "fact-2")
@@ -225,11 +225,11 @@ func TestLifecycleStateMachineInvariants(t *testing.T) {
 	})
 }
 
-// invariantRegistry returns one registry over a fresh in-memory commit carrier.
+// invariantRegistry returns one registry over a fresh in-memory commit.
 func invariantRegistry(t *testing.T) (*MemoryRegistry, *MemoryCommit) {
 	t.Helper()
-	carrier := NewMemoryCommit(nil)
-	return NewMemoryRegistry(carrier, NewMemoryAdmission()), carrier
+	commit := NewMemoryCommit(nil)
+	return NewMemoryRegistry(commit, NewMemoryAdmission()), commit
 }
 
 // invariantTaskSpec builds one task declaration of an explicitly named call.
@@ -290,19 +290,19 @@ func TestReentryRefusalAndStaleSignals(t *testing.T) {
 	ctx := context.Background()
 
 	t.Run("rejects_inflight_reentry", func(t *testing.T) {
-		registry, carrier := invariantRegistry(t)
+		registry, commit := invariantRegistry(t)
 		taskID := invariantRegister(t, registry, "call-1", "dedup-1")
 		if result, err := registry.Advance(ctx, taskID, StatusRunning, "running", nil); err != nil || result != CommitCommitted {
 			t.Fatalf("move the task under way = (%v, %v), want a committed change", result, err)
 		}
-		stored := len(carrier.Facts(taskID))
+		stored := len(commit.Facts(taskID))
 		if _, err := registry.Reactivate(ctx, taskID); !errors.Is(err, ErrRoundInFlight) {
 			t.Fatalf("re-entering a task whose round is in flight = %v, want %v", err, ErrRoundInFlight)
 		}
 		if _, status, err := registry.Lookup(ctx, taskID); err != nil || status != StatusRunning {
 			t.Fatalf("status after the refused re-entry = (%v, %v), want the round already running", status, err)
 		}
-		if got := len(carrier.Facts(taskID)); got != stored {
+		if got := len(commit.Facts(taskID)); got != stored {
 			t.Fatalf("facts after the refused re-entry = %d, want the stored ones alone", got)
 		}
 		if result, err := registry.Advance(ctx, taskID, StatusSettled, "settled", []Envelope{invariantEnvelope(taskID, NoticeSettled, 0)}); err != nil || result != CommitCommitted {
@@ -509,9 +509,9 @@ func (c *ttlClock) advance(by time.Duration) {
 func ttlRegistry(t *testing.T, ttl time.Duration, start time.Time) (*MemoryRegistry, *MemoryCommit, *ttlClock) {
 	t.Helper()
 	clock := &ttlClock{at: start}
-	carrier := NewMemoryCommit(nil)
-	registry := NewMemoryRegistry(carrier, NewMemoryAdmission(), WithClock(clock.now), WithTerminalTTL(ttl))
-	return registry, carrier, clock
+	commit := NewMemoryCommit(nil)
+	registry := NewMemoryRegistry(commit, NewMemoryAdmission(), WithClock(clock.now), WithTerminalTTL(ttl))
+	return registry, commit, clock
 }
 
 // ttlSettled admits one task and settles it, so the check starts from the terminal a sweep reads.

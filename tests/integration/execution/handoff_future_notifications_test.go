@@ -28,9 +28,9 @@ func (removedOwners) OwnerOf(ctx context.Context, owner, target event.AgentID) (
 // 契约: docs/wiki/agent/task-lifecycle.md#status-machine
 func TestHandoffFutureNotifications(t *testing.T) {
 	ctx := context.Background()
-	carrier := task.NewMemoryCommit(nil)
+	commit := task.NewMemoryCommit(nil)
 	admission := task.NewMemoryAdmission()
-	registry := task.NewMemoryRegistry(carrier, admission)
+	registry := task.NewMemoryRegistry(commit, admission)
 
 	oldTarget := event.Address{AgentID: "agent-recv", SessionID: "session-old"}
 	newTarget := event.Address{AgentID: "agent-recv", SessionID: "session-new"}
@@ -170,7 +170,7 @@ func TestHandoffFutureNotifications(t *testing.T) {
 		}
 		claims := map[identity]event.InstanceID{}
 		facts := 0
-		for _, record := range carrier.Facts(taskID) {
+		for _, record := range commit.Facts(taskID) {
 			facts++
 			for _, envelope := range record.Outbox {
 				key := identity{envelope.Notice.TaskID, envelope.Notice.Round, envelope.Notice.Kind, envelope.Notice.Seq}
@@ -204,7 +204,7 @@ func TestHandoffFutureNotifications(t *testing.T) {
 			t.Fatalf("repeated mutation = (%v, %v), want the fact already stored", result, err)
 		}
 		repeated := 0
-		for _, record := range carrier.Facts(taskID) {
+		for _, record := range commit.Facts(taskID) {
 			repeated += len(record.Outbox)
 		}
 		if repeated != len(claims) {
@@ -396,7 +396,7 @@ func TestHandoffFutureNotifications(t *testing.T) {
 			t.Fatalf("obligations = %+v, want the execution obligation beside the three still owed after the repeated transport", open)
 		}
 		owed := 0
-		for _, record := range carrier.Facts(taskID) {
+		for _, record := range commit.Facts(taskID) {
 			owed += len(record.Outbox)
 		}
 		if owed != 3 {
@@ -405,7 +405,7 @@ func TestHandoffFutureNotifications(t *testing.T) {
 		if result, err := registry.Advance(ctx, taskID, task.StatusRunning, "progress-seq", notices); result != task.CommitCommitted || err != nil {
 			t.Fatalf("repeated mutation = (%v, %v), want the fact already stored", result, err)
 		}
-		if facts := len(carrier.Facts(taskID)); facts != 3 {
+		if facts := len(commit.Facts(taskID)); facts != 3 {
 			t.Fatalf("stored %d facts, want the admission, the run and the one progress fact", facts)
 		}
 		fourth, err := registry.IssueNotice(ctx, taskID, task.NoticeProgress, "evt-seq-3")

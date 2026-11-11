@@ -9,16 +9,16 @@ The segment-age axis of the mapped sequence: a projection is partitioned into
 task-turn segments that an agent output closes — the inputs its fact records as
 consumed beside the process detail, with the inputs it did not name rolling into
 the next segment — exactly the way the deterministic compress level reads them,
-and each segment is placed in one of three bands by its folding generation.
-A history summary covers the turns one earlier fold consumed and belongs to no
-single turn, so it stands as a complete segment of its own and the turns beside
-it keep their own material. The segments inside the recent window are the new
-band and stay whole; a segment older than that window that no fold has consumed
-is the middle band, whose process detail folds into one segment product;
-a segment that already carries a product of an earlier fold is the oldest band,
-which folds into the one history summary. Every fold promotes the material
-outside the window one band, so the promotion follows the folds and never the
-absolute distance a segment sits from the newest one.
+and each segment is placed in one of three bands by the band promotion it has
+taken. A history summary covers the turns one earlier fold consumed and belongs
+to no single turn, so it stands as a complete segment of its own and the turns
+beside it keep their own material. The segments inside the recent window are
+the new band and stay whole; a segment older than that window that no fold
+has consumed is the middle band, whose process detail folds into one segment
+product; a segment that already carries a product of an earlier fold is the
+oldest band, which folds into the one history summary. Every fold promotes the
+material outside the window one band, so the promotion follows the folds and
+never the absolute distance a segment sits from the newest one.
 
 The fold is segment-grained while AssembleBudget is entry-grained: the assembly
 decides how one entry is presented under its budget and never removes an entry,

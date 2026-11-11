@@ -32,6 +32,7 @@
 
 - [x] 5.1 压缩 answered 集纳入切片：判决集作为 Stateful 切片参与切面与恢复，past-cut 跳读不缺项。证据：`TestCompressionJudgmentsSurviveTheBootCut`（assembly/compress_checkpoint_test.go:151，live≡booted≡full 三方 parity）；`go test ./assembly/ -run TestCompressionJudgmentsSurviveTheBootCut -count=1` 绿（36d328a4）。负锚＝跳过 boundary 判决集缺项必红（该测试 covered>0 断言钉载体承载判决）。会话级切面落地后复核仍成立（WU3）。
 - [x] 5.2 载体有界不删事实：boot 只读最新一条＋carriedTextOf 有界，全史读者按身份读回正文。证据：`TestTheCheckpointCarrierStaysBoundedByItsEntries`（assembly/checkpoint_test.go:859，载体≤16KiB 且 boot≡full）＋`TestObservedEventsReadsBeyondHotWindow`（assembly/read_test.go:236）＋`TestTierQueryMatchesObservedRead`（assembly/read_test.go:128）；`go test ./assembly/ -run 'TestTheCheckpointCarrierStaysBoundedByItsEntries|TestObservedEventsReadsBeyondHotWindow|TestTierQueryMatchesObservedRead' -count=1` 绿（7de9f08f）。负锚＝退役/删除已提交事实必红。会话级切面落地后复核载体只含本会话切片且仍有界（WU3）。
+> 勘误（code-vocabulary-alignment）：上引 TestTheCheckpointCarrierStaysBoundedByItsEntries 并非真名，实际测试为 TestTheCheckpointStaysBoundedByItsEntries（assembly/checkpoint_test.go:860，名字里没有 Carrier）；原文冻结不改写。
 
 ## 六、收口
 
