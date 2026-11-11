@@ -741,7 +741,9 @@ func MigrateShardedRoot(ctx context.Context, sourceRoot, targetRoot string) (Mig
     and a migration interrupted anywhere leaves the source exactly as it was.
     The target is refused when it already holds keys, so no copy overwrites
     a root in use. A root whose copy does not read back byte for byte returns
-    ErrMigrateMismatch naming the key that differs.
+    ErrMigrateMismatch naming the key that differs. A copied root whose
+    reference names no independent body returns ErrSnapshotCorrupt naming the
+    orphaned key, the same refusal the original store's load reports at boot.
 
 type OriginalRef struct {
 	// Key is the EventID that owns this original. Different keys never share

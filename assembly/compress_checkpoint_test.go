@@ -246,7 +246,7 @@ func commitCheckpointWithoutTheCompressionSlice(t *testing.T, ctx context.Contex
 	run.mu.Unlock()
 	partition := memory.PartitionIDFromName(string(owner.AgentID))
 	run.landing.Lock()
-	key := event.EventID(event.CheckpointKey(run.landedSeq[partition] + 1))
+	key := event.EventID(event.CheckpointKey(partition, run.landedSeq[partition]+1))
 	run.landing.Unlock()
 	if _, err := run.commitFactChecked(ctx, event.Event{
 		Key:       key,
