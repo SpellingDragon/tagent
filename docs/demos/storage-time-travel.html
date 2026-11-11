@@ -100,7 +100,7 @@
 <tr><td class="mono">kv/tagent%2Ftask%2Fv1%2Fspec/ · attempt/</td><td>任务规约 / settle 尝试终态</td><td class="mono">…v1/spec:task-…</td></tr>
 <tr><td class="mono">kv/ref/ <span class="tag t-cons">74KB·164条</span></td><td>引用登记（跨会话血缘，fork 后仍可溯源）</td><td class="mono">ref:1-784fbbd7aa3b…</td></tr>
 <tr><td class="mono">kv/blob/</td><td>大对象正文</td><td class="mono">blob:&lt;id&gt;</td></tr>
-<tr><td class="mono">relations/relations.journal <span class="tag t-plug">追加日志</span></td><td><b>因果链（WAL 形态）</b>：谁引用谁，Append 返回即持久</td><td class="mono">RelationRecord（JSON 行）</td></tr>
+<tr><td class="mono">事件索引（(partition, seq)）</td><td><b>父边按需推导</b>：当前键之后同链的下一个非合成键，不另存 journal</td><td class="mono">(PartitionID, SessionID)</td></tr>
 </table>
 <div class="note">写入：一批 kvBatch 触碰哪几个分片，就把那几个 snapshot <b>写临时文件 → 原子 rename 换入</b>。不存在半开状态；跨批无事务，正确性靠「先登记 owed、后消费回执」的顺序不变量。</div>
 </div>
@@ -161,7 +161,7 @@
 <tr><th>场景</th><th>现状</th><th>依据</th></tr>
 <tr><td><b>时光回退（as-of 读）</b></td><td><span class="tag t-cons">天然友好</span>能力在，接口缺</td><td>事件按 <span class="mono">evt:&lt;ms&gt;:&lt;seq&gt;</span> 时间编址；迁移不覆盖；重放即投影。补一个「读到 key X 为止」的读面即成 API。</td></tr>
 <tr><td><b>回到之前上下文</b></td><td><span class="tag t-cons">天然友好</span></td><td>正文链全量保留；三龄段折叠只动投影层；按预算重算 → 任意时刻×预算可复现。</td></tr>
-<tr><td><b>Session Fork</b></td><td><span class="tag t-gold">布局友好</span>门面缺</td><td>分片=会话前缀聚簇（144/976 实证）；复制前缀即复制链；跨链血缘在 ref: 片 + relations.journal。</td></tr>
+<tr><td><b>Session Fork</b></td><td><span class="tag t-gold">布局友好</span>门面缺</td><td>分片=会话前缀聚簇（144/976 实证）；复制前缀即复制链；跨链血缘在 ref: 片，父边按需从链推导。</td></tr>
 <tr><td><b>回滚重跑（branch/rewrite）</b></td><td><span class="tag t-rose">范式外</span></td><td>链不可变，修正=前滚。git 式改写历史需单独立案，是范式变更非补丁。</td></tr>
 </table>
 </div>
@@ -175,7 +175,7 @@ const STEPS=[
  {t:"① Boot(config)",f:["wechat-config/config.yaml"],x:"读宿主文档，决定 storage root、agent 面、sender。尚未触碰数据。"},
  {t:"② OpenTier：分片装载",f:["kv/*/snapshot.json ×8"],x:"8 个快照顺序读入，JSON 解析成<b>全内存 map</b>（实测 1.0MB，毫秒级）。此后热路径零磁盘 IO —— 检索=内存查找。解析失败=ErrSnapshotCorrupt 拒开（冷重建，不半开）。"},
  {t:"③ fold：重放迁移与回执",f:["kv/tagent…fact/","kv/tagent…consume/"],x:"逐条重放任务迁移（admit→settle，149 条）与消费回执，<b>重放即状态</b>：任务表、席位、noticePhase（owed/claimed/consumed）全部算出来 —— 磁盘上没有「status=running」这种字段。"},
- {t:"④ 恢复账本与因果",f:["kv/tagent…attempt/","relations/relations.journal"],x:"settle 尝试终态回读（落地即销判据）；因果日志重放出引用链 —— 谁消费了谁、谁是谁的 worker。日志损坏=拒开而非断链。"},
+ {t:"④ 恢复账本与因果",f:["kv/tagent…attempt/","事件索引（(partition, seq)"],x:"settle 尝试终态回读（落地即销判据）；父边按提交序从事件索引推导，不读取关系 journal。"},
  {t:"⑤ 装配：按预算重组上下文",f:["kv/144/snapshot.json"],x:"消费面增量读会话链（memory/replay），按<b>当前预算</b>重算装配（新/中/老三龄段，Full→Ticket→Summary）。presentation 不落盘 —— 这就是「任意时刻 × 任意预算」可复现的原因。"}
 ];
 let cur=0;

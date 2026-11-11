@@ -132,6 +132,23 @@ var (
     each names the way an export was refused, so a caller routes it by name.
 
 var (
+	// ErrEvidenceLinesMissing reports an evidence export built beside no landed
+	// evidence: a dataset is never invented for a chain nothing landed.
+	ErrEvidenceLinesMissing = errors.New("rl: the evidence export was built beside no landed evidence")
+	// ErrSnapshotReadBackMissing reports an evidence export built beside no
+	// snapshot read-back: a request is exported from content read back through its
+	// reference, never from the record alone.
+	ErrSnapshotReadBackMissing = errors.New("rl: the evidence export was built beside no snapshot read-back")
+	// ErrEvidenceMissing reports a capture directory holding no record file: an
+	// export names the missing evidence rather than reporting an empty dataset as
+	// a complete one.
+	ErrEvidenceMissing = errors.New("rl: the landed request evidence is missing")
+)
+    ErrEvidenceLinesMissing and the other named errors of the evidence export:
+    each names the way an export was refused before it read anything, so a
+    caller routes it by name.
+
+var (
 	// ErrSchemaMissing reports a line that carries no schema version at all.
 	ErrSchemaMissing = errors.New("rl: the record line carries no schema version")
 	// ErrSchemaUnknown reports a line whose schema version this package does not
@@ -228,6 +245,11 @@ var (
     ErrWriterSealed and the other named errors of the durable write point: each
     names the way a write or a seal was refused, so a caller routes it by name.
 
+var ErrAnnexIdentityMissing = errors.New("rl: the annex record carries no sample identity")
+    ErrAnnexIdentityMissing reports an annex line carrying no sample identity:
+    an annex joins on the attempt and the bench task together, so a line without
+    either is refused rather than written as an annex no sample aggregates from.
+
 var ErrCaptureRefused = errors.New("rl: the capture refused the record at admission")
     ErrCaptureRefused reports a record the capture refused at admission on the
     recorder face: the refusal is counted in the loss ledger under the bound
@@ -276,6 +298,10 @@ var ErrLogprobsSourceMissing = errors.New("rl: the logprobs unsupported state ca
     state with no declaration named: an unsupported state rests on a provider
     declaration and is never written or read without naming it.
 
+var ErrRequestEvidenceMissing = errors.New("rl: the request evidence carries no decision identity")
+    ErrRequestEvidenceMissing reports request evidence that names no decision:
+    an evidence line nothing joins to a request is refused where it is written.
+
 FUNCTIONS
 
 func AttemptError(outcome model.Outcome) string
@@ -291,8 +317,11 @@ func MarshalLine(line Line) ([]byte, error)
     than written without its version.
 
     - An attempt line is written only in a shape that can be read back:
-    LogprobsUnsupported without its declaration source is refused here, never
-    persisted to be refused at the read side.
+    LogprobsUnsupported without its declaration source is refused here,
+    never persisted to be refused at the read side. - An annex line carries the
+    sample identity it joins on: a line without both the attempt and the bench
+    task identity is refused here rather than written as an annex no sample can
+    be aggregated from.
 
 func MarshalSnapshot(snapshot RequestSnapshot) ([]byte, error)
     MarshalSnapshot encodes one safe snapshot for persistence.
@@ -307,6 +336,10 @@ func NewCaptureSink(id string, cfg SinkConfig, writer CaptureWriter) (*CaptureSi
     NewCaptureSink returns the bounded admission queue of one capture, draining
     into writer. A missing capture id or writer is refused, and a negative bound
     is refused rather than read as unlimited: a zero bound takes its default.
+
+func NewEvidenceExporter(lines EvidenceLines, snaps SnapshotReadBack) (*EvidenceExporter, error)
+    NewEvidenceExporter returns the exporter reading the landed lines through
+    lines and the request content through snaps.
 
 func NewFileCaptureWriter(dir string, maxOpenFiles int) (*FileCaptureWriter, error)
     NewFileCaptureWriter returns the real writer rooted at dir. The open file
@@ -339,6 +372,9 @@ func NewTrajectoryCaptureWithBudget(id string, sink *CaptureSink, policy Snapsho
     name, and a budget below the floor is tightened to it rather than obeyed:
     a capture never runs unbounded because it was built with a small bound.
 
+func OpenFileEvidenceLines(dir string) (*FileEvidenceLines, error)
+    OpenFileEvidenceLines returns the landed lines of one capture directory.
+
 func ParseLine(data []byte) (Line, error)
     ParseLine decodes one versioned record line: it reads the declared schema
     first and selects the parse path from that value alone. A legacy line is
@@ -349,10 +385,15 @@ func ParseLine(data []byte) (Line, error)
 
     - On the read side an attempt line carrying a declaration-free unsupported
     logprobs state is refused as well: the wire is never trusted to hold a shape
-    the write side would have refused.
+    the write side would have refused. - On the read side an annex line without
+    the two sample identities is refused as well: the write side never persists
+    an identity-free annex, and the reader does not accept one as the referenced
+    annex.
 
 func ParseSnapshot(content []byte) (RequestSnapshot, error)
-    ParseSnapshot decodes one safe snapshot from its persisted bytes.
+    ParseSnapshot decodes one safe runtime request snapshot from its persisted
+    bytes: the content is the runtime request as it stood before the request
+    started, never the wire body a provider encodes.
 
 func ReadCaptureSeal(dir string) (CaptureManifest, error)
     ReadCaptureSeal reads the state of one capture back from the writer's
@@ -386,6 +427,13 @@ func SnapshotRequest(view ModelViewRef, req model.Request, policy SnapshotPolicy
     never edited: the projection runs over deep copies, so the caller's request
     keeps every original value including its credentials.
 
+func ValidateAnnex(record AnnexRecord) error
+    ValidateAnnex reports whether one annex record may be written and read back.
+    It holds exactly one rule: the sample identity is the attempt and the
+    bench task together, so an annex carrying neither, or only one of them,
+    is refused. The verdict is data: an unrated record is a valid annex that
+    says no verdict exists, and this rule never invents one.
+
 func ValidateAttempt(record AttemptRecord) error
     ValidateAttempt reports whether one attempt record may be written and read
     back. It holds exactly one rule: a LogprobsUnsupported state is valid only
@@ -393,11 +441,19 @@ func ValidateAttempt(record AttemptRecord) error
     response returned and needs no source, and an unknown state is never forced
     into either of the other two.
 
+func ValidateRequestEvidence(record RequestEvidenceRecord) error
+    ValidateRequestEvidence reports whether one request evidence record can be
+    landed and read back: the decision identity is required, and the reference
+    must be readable, so evidence no request can be joined to and evidence no
+    content can be read through are both refused by name.
+
 func VerifySnapshot(ref SnapshotRef, content []byte) error
-    VerifySnapshot rechecks snapshot content against the reference it is read
-    back under: an empty reference cannot read content back and is refused
-    as unreadable, and content that does not match its digest is refused as a
-    mismatch rather than read as the referenced snapshot.
+    VerifySnapshot rechecks runtime request snapshot content against the
+    reference it is read back under: an empty reference cannot read content
+    back and is refused as unreadable, and content that does not match its
+    digest is refused as a mismatch rather than read as the referenced snapshot.
+    The content checked is the runtime request snapshot, so a wire body standing
+    in for it never matches.
 
 func WriteSamples(w io.Writer, samples []SFTSample) error
     WriteSamples writes the sample rows as JSONL: one encoded sample per line,
@@ -405,6 +461,34 @@ func WriteSamples(w io.Writer, samples []SFTSample) error
     and a write that fails is reported by name rather than counted as written.
 
 TYPES
+
+type AnnexRecord struct {
+	// AttemptID identifies the attempt whose artifacts were judged.
+	AttemptID event.AttemptID `json:"attempt_id"`
+	// TaskID identifies the bench task the attempt ran; with AttemptID it is
+	// the sample's join key.
+	TaskID string `json:"task_id"`
+	// Verdict is the independent verdict: a pass or fail the verifier reached
+	// from the artifacts, unrated when no verdict exists, or incomplete when the
+	// sample gate found an element missing. It is never derived from the
+	// execution path's self-report.
+	Verdict string `json:"verdict"`
+	// RuleVersion names the version of the derivation rules the verdict was
+	// reached under; an unrated verdict carries none.
+	RuleVersion string `json:"rule_version,omitempty"`
+	// Artifacts lists the artifact references the verdict was reached on.
+	Artifacts []string `json:"artifacts,omitempty"`
+}
+    AnnexRecord is one training sample's acceptance annex: the verdict an
+    independent verifier reached from the task's artifacts, the version of the
+    derivation rules the verdict was reached under, and the artifacts it read.
+
+    The record is bound to a sample by two identities together: the attempt
+    that produced the artifacts and the bench task it ran. Neither alone joins
+    the three elements of one sample, so both are carried here. An annex is
+    append-only data: a later verdict is a new line under the same identity and
+    never an edit of the attempt record or of an earlier annex line, and the
+    record carries no field of the attempt it judges.
 
 type AttemptRecord struct {
 	// Schema is the record schema version the line was written with.
@@ -698,6 +782,16 @@ func (s *CaptureSink) Record(ctx context.Context, attempt AttemptRecord) (Captur
     BoundClosed. The record line is marshaled through the versioned line,
     which refuses a record shape that cannot be read back.
 
+func (s *CaptureSink) RecordAnnex(ctx context.Context, record AnnexRecord) error
+    RecordAnnex admits the acceptance annex of one training sample through
+    the same bounded capture entry every record kind enters: the annex line
+    is marshaled through the versioned line, judged by the same per-record,
+    in-flight and byte bounds, and counted in the loss ledger and the sealed
+    manifest exactly as an episode, decision or attempt line is. It is
+    append-only: the entry writes one new line under the sample identity and
+    never edits an earlier annex or the attempt record it judges. A refusal is
+    reported by name with the bound that refused it, never a silent bypass.
+
 func (s *CaptureSink) RecordAttempt(ctx context.Context, record AttemptRecord) error
     RecordAttempt admits the attempt record of one observable model attempt
     through the single capture entry, refused and accounted exactly as
@@ -720,6 +814,17 @@ func (s *CaptureSink) RecordOutcome(ctx context.Context, attemptID event.Attempt
     single observation face AttemptOf: the terminal it records is the Kind the
     model reduction derived and none is re-derived here, so the capture and the
     model share exactly one terminal account.
+
+func (s *CaptureSink) RecordRequestEvidence(ctx context.Context, record RequestEvidenceRecord) error
+    RecordRequestEvidence admits the request evidence of one decision through
+    the same bounded capture entry every record kind enters: the evidence line
+    is marshaled through the versioned line, judged by the same per-record,
+    in-flight and byte bounds, and counted in the loss ledger and the sealed
+    manifest exactly as an episode, decision, attempt or annex line is.
+    A refusal is reported by name with the bound that refused it and counted
+    in the loss ledger under that bound, so a request whose evidence could not
+    be landed stays a counted loss rather than an export that silently reads
+    nothing.
 
 func (s *CaptureSink) Seal(ctx context.Context) (CaptureManifest, error)
     Seal closes the capture and returns the manifest a real writer confirmed.
@@ -762,28 +867,49 @@ type ChainExporter struct {
     and the label the assistant produced. It reads the chain, derives nothing,
     and never touches the production path.
 
-    The redline list (3 rules): MUST read the chain through the read-only fact
-    face and write nothing back. MUST pair one turn's input with the assistant
-    output that answered it on the chain. MUST NOT invent a sample for a turn
-    that presented no input or produced no assistant output. ChainExporter
-    assembles SFT sample rows from the fact chain of sessions. It holds the
-    read-only fact face and keeps no state of its own, so one exporter may
-    export the same chain again and again without moving it.
+    The redline list (3 rules): MUST read the chain through the read-only
+    fact face and write nothing back. MUST pair one turn's inputs with the
+    assistant output that consumed them, by the input identities that output
+    recorded rather than by invocation or chain order. MUST NOT invent a
+    sample for a turn that consumed no input or produced no assistant output.
+    ChainExporter assembles SFT sample rows from the fact chain of sessions.
+    It holds the read-only fact face and keeps no state of its own, so one
+    exporter may export the same chain again and again without moving it.
 
 func NewChainExporter(facts FactReader) *ChainExporter
     NewChainExporter returns the exporter reading the chain through facts.
 
 func (e *ChainExporter) Export(ctx context.Context, opts ExportOptions) ([]SFTSample, error)
     Export assembles the SFT sample rows of the named sessions: it reads each
-    session's chain in commit order and pairs by order — the input events a
-    segment presents open the turn, the assistant output that answers them
-    closes it. The input fact carries the identity of the entry that committed
-    it and the output fact the identity of the segment that answered, so the
-    pairing never keys on invocation identity: the chain order is the pair.
+    session's chain in commit order and pairs every agent output with the
+    inputs that output consumed — the input identities its fact carries in
+    event.MetaKeyInputEvents — so a batch that mixed sources lands in one row
+    while an input no output carried produces none and stays in the segment
+    in progress. The pairing never keys on invocation identity: two inputs of
+    different invocations enter one row, and one output of a third invocation
+    answers both.
 
-    A turn that presented no input or produced no assistant output is skipped
+    An output beside no readable relation pairs positionally — every input
+    committed ahead of it that no earlier output consumed — so a chain recorded
+    without the relation exports as it always did rather than losing its inputs.
+    A turn that consumed no input or produced no assistant output is skipped
     rather than filled with an invented side. The limit bounds the rows emitted,
     never the pairing.
+
+type DatasetRefusal struct {
+	// DecisionID names the decision the refused row belonged to.
+	DecisionID string `json:"decision_id,omitempty"`
+	// AttemptID names the attempt the refused row belonged to.
+	AttemptID string `json:"attempt_id,omitempty"`
+	// TaskID names the bench task of a refused preference pair.
+	TaskID string `json:"task_id,omitempty"`
+	// Name is the closed refusal name the row was refused under.
+	Name RefusalName `json:"name"`
+	// Reason states why the row was refused.
+	Reason string `json:"reason"`
+}
+    DatasetRefusal is one row an export refused, named so an operator routes it
+    rather than reading the row count as complete.
 
 type DecisionRecord struct {
 	// Schema is the record schema version the line was written with.
@@ -900,6 +1026,55 @@ type EpisodeRecord struct {
     equality is forced. A record whose origin could not be read carries
     LineageUnknown with an empty ParentID instead of a guessed parent.
 
+type EvidenceExporter struct {
+	// Has unexported fields.
+}
+    EvidenceExporter assembles training rows from the request evidence a capture
+    landed: each decision's runtime request snapshot read back through its
+    reference and rechecked against the digest, beside the attempt the capture
+    observed for that decision.
+
+    The exporter reads and never writes: it derives no request, no completion
+    and no verdict, and a row it cannot assemble from what landed is refused by
+    name with its reason rather than filled or skipped in silence.
+
+func (e *EvidenceExporter) DPO(ctx context.Context, opts EvidenceOptions) (PreferenceDataset, error)
+    DPO assembles the preference dataset of the landed evidence.
+
+    A pair joins two attempts of one bench task whose prompts and tool
+    declarations are the same, one judged a pass and one a fail by the annex
+    that carries the verdict and the version of the rules it was reached under:
+    the passing completion is the chosen side and the failing completion the
+    rejected one. Attempts of one task whose prompts differ are never paired,
+    an attempt the annex never judged carries no preference, and a verdict
+    without the rule version it was reached under is no exported preference.
+
+func (e *EvidenceExporter) SFT(ctx context.Context, opts EvidenceOptions) (SFTDataset, error)
+    SFT assembles the supervised fine-tuning dataset of the landed evidence.
+
+    A row is one landed request beside the attempt observed for its decision:
+    the prompt and the tool declarations come from the request read back through
+    its reference, and the completion is the assistant message that attempt
+    observed. A target carrying only tool calls is a target, an unknown terminal
+    is never a target, and a row the evidence cannot support is refused by name
+    with its reason rather than written with an invented side.
+
+type EvidenceLines interface {
+	// LandedLines reports the record lines one capture landed, in landing order.
+	LandedLines() ([]Line, error)
+}
+    EvidenceLines is the read-only face of the record lines one capture landed:
+    the versioned lines as the capture's single writer stored them, in landing
+    order. The face carries no write method, so an export never moves the chain
+    it reads.
+
+type EvidenceOptions struct {
+	// Limit bounds the rows written; zero leaves the export unbounded and a
+	// negative bound is refused.
+	Limit int
+}
+    EvidenceOptions bounds the rows one evidence export emits.
+
 type ExportOptions struct {
 	// SessionIDs names the sessions whose chains are read, in the order the
 	// export visits them. An empty list exports no sample.
@@ -971,6 +1146,20 @@ func (w *FileCaptureWriter) Seal() ([]CaptureFileDigest, WriterSyncResult)
     and the sync result the writer observed. A sync that did not complete is
     reported with its reason and is never presented as a completed sync.
 
+type FileEvidenceLines struct {
+	// Has unexported fields.
+}
+    FileEvidenceLines is the record lines one capture directory holds: the lines
+    the capture's single writer appended, parsed through the versioned line
+    parser. A directory without the record file is reported as missing evidence
+    rather than as an empty chain.
+
+func (f *FileEvidenceLines) LandedLines() ([]Line, error)
+    LandedLines reports the record lines the capture landed, in landing order. A
+    directory holding no record file is refused as missing evidence, and a line
+    that does not parse as a versioned record is refused rather than skipped:
+    an export reads the chain it was given or reports what it could not read.
+
 type LeaseModel struct {
 	// Has unexported fields.
 }
@@ -1022,6 +1211,11 @@ type LeaseObserver struct {
     another type, another dimension, another owner or another stated result is
     not the observation this instance serves and is passed over.
 
+func (o *LeaseObserver) Material() plugin.Material
+    Material declares what this observer reads, when it reads it and what a
+    failed reading leaves behind: one committed fact read after its commit,
+    where a failed observation is a named gap and the fact keeps standing.
+
 func (o *LeaseObserver) Name() string
     Name reports the stable name of this plugin instance.
 
@@ -1051,9 +1245,23 @@ type Line struct {
 	Decision *DecisionRecord `json:"decision,omitempty"`
 	// Attempt is the attempt record of an attempt line.
 	Attempt *AttemptRecord `json:"attempt,omitempty"`
+
+	// Has unexported fields.
 }
     Line is one versioned record line: the schema it was written with, the kind
     it carries and exactly one record payload.
+
+    The annex payload is carried in an unexported field and read through Annex:
+    the versioned line keeps its declared export surface, and a reader still
+    reads the acceptance annex it was written with. NewAnnexLine constructs the
+    line; the codec marshals the payload under the "annex" key exactly as the
+    other kinds are marshaled under theirs.
+
+func NewAnnexLine(record AnnexRecord) Line
+    NewAnnexLine builds the versioned line of one acceptance annex. The annex is
+    append-only: the constructor stamps the versioned envelope and carries the
+    record under the sample identity, and a later verdict is another line rather
+    than an edit of this one.
 
 func NewAttemptLine(record AttemptRecord) Line
     NewAttemptLine builds the versioned line of one attempt record, stamped with
@@ -1066,6 +1274,33 @@ func NewDecisionLine(record DecisionRecord) Line
 func NewEpisodeLine(record EpisodeRecord) Line
     NewEpisodeLine builds the versioned line of one episode record, stamped with
     the schema version this package writes.
+
+func NewRequestEvidenceLine(record RequestEvidenceRecord) Line
+    NewRequestEvidenceLine builds the versioned line of one request evidence
+    record, stamped with the schema version this package writes.
+
+func (l Line) Annex() *AnnexRecord
+    Annex reports the acceptance annex of an annex line, or nil for a line of
+    another kind. The returned record is the line's own payload: a reader takes
+    it as the append-only annex that was written and never edits the line in
+    place.
+
+func (l Line) MarshalJSON() ([]byte, error)
+    MarshalJSON writes the line through its wire shape, including the annex
+    payload kept in the unexported field. It is the encoding the versioned line
+    always had for episode, decision and attempt lines, with the annex kind
+    carried beside them.
+
+func (l Line) RequestEvidence() *RequestEvidenceRecord
+    RequestEvidence reports the request evidence of a request line, or nil for
+    a line of another kind. The returned record is the line's own payload:
+    it names the reference the request content is read back through and holds no
+    second copy of that content.
+
+func (l *Line) UnmarshalJSON(data []byte) error
+    UnmarshalJSON reads a line through its wire shape. The annex payload enters
+    the unexported field; the reader reaches it through Annex, exactly as the
+    write side built it through NewAnnexLine.
 
 type Lineage int
     Lineage states how certain a record's lineage is.
@@ -1245,8 +1480,39 @@ type ModelViewRef struct {
     through Snapshot and never stand in for it, and a visible member is pinned
     by name and version together rather than by name alone.
 
+type PreferenceDataset struct {
+	// Rows are the assembled pairs, in landing order.
+	Rows []PreferenceRow `json:"rows"`
+	// Refused lists every row the export refused beside the reason it refused it.
+	Refused []DatasetRefusal `json:"refused"`
+}
+    PreferenceDataset is the preference export of one evidence chain: the pairs
+    it assembled and the rows it refused by name.
+
+type PreferenceRow struct {
+	// TaskID names the bench task both attempts ran.
+	TaskID string `json:"task_id"`
+	// Prompt is the conversation both attempts presented.
+	Prompt []model.Message `json:"prompt"`
+	// Tools holds the declaration of every tool visible to both attempts.
+	Tools []json.RawMessage `json:"tools,omitempty"`
+	// Chosen is the completion the passing verdict chose.
+	Chosen model.Message `json:"chosen"`
+	// Rejected is the completion the failing verdict rejected.
+	Rejected model.Message `json:"rejected"`
+	// Source names where the preference came from.
+	Source string `json:"preference_source"`
+	// Version names the version of the derivation rules the preference was
+	// reached under.
+	Version string `json:"preference_version"`
+}
+    PreferenceRow is one preference pair assembled from landed evidence:
+    the prompt both attempts ran on, the completion the passing verdict chose,
+    the completion the failing verdict rejected, and the source and version of
+    that preference.
+
 type RecordKind string
-    RecordKind names which of the three record kinds one line carries.
+    RecordKind names which of the record kinds one line carries.
 
     - The versioned record line: one JSONL line carries its schema version
     and exactly one record kind, and a reader selects its parse path from
@@ -1261,6 +1527,14 @@ const (
 	RecordKindDecision RecordKind = "decision"
 	// RecordKindAttempt names a line carrying one AttemptRecord.
 	RecordKindAttempt RecordKind = "attempt"
+	// RecordKindAnnex names a line carrying one AnnexRecord: a sample's
+	// acceptance verdict, appended under the sample's identity and never
+	// rewritten.
+	RecordKindAnnex RecordKind = "annex"
+	// RecordKindRequest names a line carrying one RequestEvidenceRecord: the
+	// request evidence of one decision, landed before the request starts and
+	// readable back through the reference it carries.
+	RecordKindRequest RecordKind = "request"
 )
 type Recorder interface {
 	// RecordEpisode writes the episode record of one business process at the
@@ -1340,6 +1614,44 @@ func (a RecorderAdapter) Snapshot(ctx context.Context, decisionID event.Decision
     a record of its own: the snapshot is the capture's to fix, and the view is
     read back from that evidence rather than restated as a decision record here.
 
+type RefusalName string
+    RefusalName names the way one row of an export was refused, so a caller
+    routes the refusal instead of counting it as a row.
+
+const (
+	// RefusalMissingEvidence marks a row whose request evidence or attempt was not
+	// landed, or whose snapshot cannot be read back.
+	RefusalMissingEvidence RefusalName = "missing_evidence"
+	// RefusalDigestMismatch marks a row whose read-back content does not recheck
+	// against the digest of its reference.
+	RefusalDigestMismatch RefusalName = "digest_mismatch"
+	// RefusalRedacted marks a row whose read-back request carries a projected
+	// credential value where request content stood: the projected value is not the
+	// value the request held.
+	RefusalRedacted RefusalName = "redacted_not_exact"
+	// RefusalDuplicateEvidence marks a second evidence line of one decision: one
+	// request is evidenced once.
+	RefusalDuplicateEvidence RefusalName = "duplicate_evidence"
+	// RefusalTerminalUnknown marks a row whose attempt reached no determined
+	// terminal: an unknown terminal is never exported as a target.
+	RefusalTerminalUnknown RefusalName = "unknown_terminal"
+	// RefusalTerminalNotCompleted marks a row whose attempt ended in a terminal
+	// other than completed, which is no completion to train on.
+	RefusalTerminalNotCompleted RefusalName = "terminal_not_completed"
+	// RefusalUnsupportedMedia marks a row whose prompt carries a media part the
+	// row cannot carry: the dataset holds the reference the request carried, not
+	// the media bytes behind it.
+	RefusalUnsupportedMedia RefusalName = "unsupported_media"
+	// RefusalEmptyTarget marks a row whose completion carries neither text nor a
+	// tool call: an empty target is refused rather than written as a blank label.
+	RefusalEmptyTarget RefusalName = "empty_target"
+	// RefusalDifferentPrefix marks attempts of one task whose prompts differ: two
+	// different prompts are never paired as one preference.
+	RefusalDifferentPrefix RefusalName = "different_prefix"
+	// RefusalMissingPreference marks attempts one task holds without the verdict
+	// pair a preference needs, or with a verdict carrying no rule version.
+	RefusalMissingPreference RefusalName = "missing_preference"
+)
 type ReplacementRecord struct {
 	// Schema is the record schema version the attempt was recorded under.
 	Schema SchemaVersion `json:"schema"`
@@ -1388,6 +1700,26 @@ func (s *ReplacementState) UnmarshalJSON(data []byte) error
     a name this package does not know is refused rather than read as the zero
     value.
 
+type RequestEvidenceRecord struct {
+	// DecisionID identifies the decision whose request this evidence is.
+	DecisionID event.DecisionID `json:"decision_id"`
+	// EpisodeID names the episode the decision belongs to; it is empty for a
+	// decision whose facts name no episode boundary.
+	EpisodeID event.EpisodeID `json:"episode_id,omitempty"`
+	// Snapshot is the readable reference to the safe snapshot of the request.
+	Snapshot SnapshotRef `json:"snapshot"`
+}
+    RequestEvidenceRecord is the durable request evidence of one model decision:
+    the decision and the episode it belonged to, beside the readable reference
+    to the safe runtime request snapshot the request was fixed against.
+
+    The record lands the reference and not a second copy of the request: the
+    content is read back through Snapshot and rechecked against its digest, so a
+    persisted evidence line never stands as a derived view of a finished call.
+    An evidence line that names no decision or carries no readable reference is
+    refused where it is written rather than landed as evidence nothing can be
+    read back from.
+
 type RequestSnapshot struct {
 	// Model names the model the request was declared against.
 	Model string `json:"model,omitempty"`
@@ -1401,8 +1733,9 @@ type RequestSnapshot struct {
 	VisibleTools []VersionedName `json:"visible_tools,omitempty"`
 	// VisibleSkills lists the skills visible to the request.
 	VisibleSkills []VersionedName `json:"visible_skills,omitempty"`
-	// Parameters is the generation configuration the request was declared with,
-	// kept as the actual parameters rather than a digest of them.
+	// Parameters is the generation configuration the runtime request carried,
+	// kept as the parameters themselves rather than a digest of them. It records
+	// the runtime request and not the wire body a provider encodes.
 	Parameters json.RawMessage `json:"parameters,omitempty"`
 	// StructuredOutput is the structured output declaration of the request.
 	StructuredOutput json.RawMessage `json:"structured_output,omitempty"`
@@ -1423,30 +1756,80 @@ type RequestSnapshot struct {
     the model view it was declared against and the request content it carried,
     projected so no header, cookie or URL credential is persisted.
 
-    The snapshot is fixed before the request starts and holds the request as
-    it stood then: the messages, tool schemas, multimodal parts, reasoning and
-    actual parameters are kept verbatim while a credential carrier is projected,
-    so the projection never rewrites business content. The headers are kept as
-    their names with their values projected to RedactedValue, because a header
-    value is a transport credential carrier rather than request content.
+    The snapshot is the runtime request as it stood before the request started:
+    the messages, tool schemas, multimodal parts, reasoning and the generation
+    parameters the request carried are kept verbatim while a credential
+    carrier is projected, so the projection never rewrites business content.
+    It is not the wire body a provider encodes: field names, stream framing and
+    provider extensions of that body are the provider's, and a reader takes
+    this content as what the runtime request held. The headers are kept as their
+    names with their values projected to RedactedValue, because a header value
+    is a transport credential carrier rather than request content.
 
 func (s RequestSnapshot) Ref(snapshotID, readEntry string) (SnapshotRef, error)
     Ref reports the readable reference to this snapshot under the named read
     entry: the digest covers the exact bytes MarshalSnapshot writes, and a
     reader rechecks it against what it reads back.
 
+type SFTDataset struct {
+	// Rows are the assembled rows, in landing order.
+	Rows []SFTRow `json:"rows"`
+	// Refused lists every row the export refused beside the reason it refused it.
+	Refused []DatasetRefusal `json:"refused"`
+}
+    SFTDataset is the SFT export of one evidence chain: the rows it assembled
+    and the rows it refused by name.
+
+type SFTInput struct {
+	// Agent is the agent of the address the input fact came from.
+	Agent string `json:"agent"`
+	// Session is the session of that address.
+	Session string `json:"session"`
+	// Text is the text the input presented, as the fact carries it.
+	Text string `json:"text"`
+}
+    SFTInput is one input a batched turn presented, beside the source it came
+    from: two inputs of different sources enter one request, so a row that
+    carries both keeps each one's own origin instead of reading them as one
+    anonymous block of text.
+
+type SFTRow struct {
+	// DecisionID names the decision whose request the prompt is.
+	DecisionID string `json:"decision_id"`
+	// AttemptID names the attempt whose response the completion is.
+	AttemptID string `json:"attempt_id"`
+	// Prompt is the conversation the request presented, as the snapshot holds it.
+	Prompt []model.Message `json:"prompt"`
+	// Completion is the assistant message the attempt observed.
+	Completion model.Message `json:"completion"`
+	// Tools holds the declaration of every tool visible to the request.
+	Tools []json.RawMessage `json:"tools,omitempty"`
+}
+    SFTRow is one supervised fine-tuning row assembled from landed evidence:
+    the prompt the request presented, the completion the attempt observed and
+    the tool declarations the request ran with.
+
+    The completion is carried as the assistant message the attempt observed,
+    so a target that is only a tool call is a target and never an empty label.
+
 type SFTSample struct {
 	// SessionID names the session the turn's input committed on.
 	SessionID string `json:"session_id"`
 	// Turn is the one-based turn number inside the episode.
 	Turn int `json:"turn"`
-	// Input is the text the turn's own input events presented.
+	// Input is the text the turn's own input events presented, in the order the
+	// output consumed them.
 	Input string `json:"input"`
-	// Label is the text the assistant output of the same invocation produced.
+	// Label is the text the assistant output that consumed the inputs produced.
 	Label string `json:"label"`
 	// EpisodeID names the episode the turn belongs to; it is empty for a turn
 	// whose facts name no episode boundary.
 	EpisodeID string `json:"episode_id,omitempty"`
+	// Inputs names the inputs of a turn that presented more than one, each beside
+	// the source it came from: Input is then a rendering of several, and the row
+	// keeps the per-input attribution beside it. A turn that presented one input
+	// names none, because that input's text is Input itself.
+	Inputs []SFTInput `json:"inputs,omitempty"`
 }
     SFTSample is one supervised fine-tuning row assembled from the chain:
     the input one turn presented, the label the assistant produced for it,
@@ -1507,6 +1890,15 @@ type SnapshotPolicy struct {
     under. The zero policy is the default projection: credential-named extra
     field keys and URL credentials are redacted and everything else keeps its
     bytes. A projection replaces values; it never edits the request itself.
+
+type SnapshotReadBack interface {
+	// SnapshotOf reads one request snapshot back through its reference.
+	SnapshotOf(ref SnapshotRef) (RequestSnapshot, error)
+}
+    SnapshotReadBack reads the runtime request snapshot behind one reference
+    back: the content returned is the snapshot that reference was fixed on.
+    An export rechecks it against the reference digest, so a store that answers
+    other content is refused rather than exported.
 
 type SnapshotRef struct {
 	// SnapshotID identifies the safe snapshot persisted at the request boundary,

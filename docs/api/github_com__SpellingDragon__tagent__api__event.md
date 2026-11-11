@@ -1,5 +1,13 @@
 package event // import "github.com/SpellingDragon/tagent/api/event"
 
+The framework checkpoint family: one fact carrying every recoverable state
+slice of the runtime, stated at one partition-sequence cut. A checkpoint is
+the framework's own fact and never material of a session chain, so it names no
+message the model reads and carries the state of every consumer that delegated
+its state to the framework beside the offset that state corresponds to. One
+family, one offset semantics: the recovery of any consumer is "read the newest
+checkpoint, restore the slices, replay the facts past the offset".
+
 The compress product family: the product a consumer minted for one compress
 request, stated as the fact it is — which request it answers, which producer
 executed it, the product key the projection carries, the entries the product
@@ -227,6 +235,16 @@ const (
 	// MetaKeyAttentionClearance names the word a clearance carries: answer,
 	// expiry or work-end.
 	MetaKeyAttentionClearance = "attention.clearance"
+
+	// MetaKeyCheckpointOffset names the partition-sequence watermark one
+	// framework checkpoint covers, rendered as the sorted partition:seq pairs.
+	// It is read to decide coverage without decoding the state slices, and it
+	// states the same cut the payload states.
+	MetaKeyCheckpointOffset = "checkpoint.offset"
+	// MetaKeyCheckpointSlices names the state slices one framework checkpoint
+	// carries, rendered as the sorted consumer names, so what a checkpoint
+	// covers is queryable without decoding the state of every consumer.
+	MetaKeyCheckpointSlices = "checkpoint.slices"
 )
     MetaKeyEventKey, MetaKeyPartitionID, MetaKeyEventType, MetaKeyEventSummary,
     MetaKeyTriggerSource, MetaKeySettleTriggerSource, MetaKeyBundleID,
@@ -257,6 +275,11 @@ const (
     the producer states. The model move adds no exported field to the change:
     these keys are its payload.
 
+const CheckpointVersion = 1
+    CheckpointVersion is the payload layout version of a checkpoint fact: a
+    payload of another version is refused by name, because restoring state under
+    a layout the reader does not know would invent the slices it cannot read.
+
 const CompressProductType = "compress.product"
     CompressProductType is the frozen type of a compress product fact.
 
@@ -285,8 +308,30 @@ const ModelReplacementResultRequested = "requested"
     and the lease records whether the replacement actually took effect in its
     own history.
 
+const TypeCheckpoint = "checkpoint"
+    TypeCheckpoint is the frozen type of a framework checkpoint fact.
+
 const TypeConfigChange = "config_change"
     TypeConfigChange is the frozen type of a configuration change fact.
+
+FUNCTIONS
+
+func CheckpointKey(seq int64) string
+    CheckpointKey is the fact key one checkpoint is filed under: the frozen
+    `checkpoint:<partitionSeq>` spelling, whose sequence slot is the partition
+    sequence the cut advanced to.
+
+func CheckpointPayloadOf(c Checkpoint) ([]byte, error)
+    CheckpointPayloadOf renders the canonical payload bytes of one checkpoint:
+    the cut, the identity and the slices exactly as the identity was
+    content-addressed over them.
+
+func CompressionMechanism(typ string) bool
+    CompressionMechanism reports whether one frozen event type names a fact of
+    the compression mechanism itself: a judgment or the product that answers it.
+    Such a fact carries an internal summary and recovery metadata, never
+    material the query face, candidate embedding or the model's context may
+    surface.
 
 TYPES
 
@@ -312,6 +357,89 @@ type AttemptID string
     AttemptID identifies one observable model attempt; a retry hidden below the
     decision boundary does not fake a new attempt.
 
+type Checkpoint struct {
+	// Key is the fact key the checkpoint commits under: the partition-sequence
+	// slot it was taken at, so the key of every checkpoint of a partition is
+	// monotone past the key of the one before it and no two cuts share one.
+	Key string
+	// ID is the content-addressed identity of the checkpoint: two cuts stating
+	// the same state answer the same identity.
+	ID EventID
+	// Offset is the partition-sequence watermark the state corresponds to.
+	Offset CheckpointOffset
+	// Slices is the state of every registered consumer, in registration order.
+	Slices []CheckpointSlice
+}
+    Checkpoint is one framework checkpoint fact: the content-addressed identity,
+    the cut it states and the state slices restored from it. The writing moment
+    is the commit stamp of the fact, so it is not stated twice.
+
+func CheckpointFor(offset CheckpointOffset, slices []CheckpointSlice) (Checkpoint, error)
+    CheckpointFor returns the checkpoint fact for one cut: the identity is
+    content-addressed over the layout version, the offset and the slices,
+    so a cut that states the very state a filed checkpoint already states keeps
+    one identity instead of stating a second copy of it.
+
+func CheckpointOf(evt Event) (Checkpoint, bool)
+    CheckpointOf reads one committed fact back as the checkpoint it carries,
+    and reports whether the fact states one. A fact of another frozen type,
+    a payload of another layout version, and a payload whose stated offset
+    and slices do not content-address to the identity it states all answer
+    no checkpoint: state is restored from the one payload that states it,
+    and a payload that states other state under that identity is refused rather
+    than restored as if it were its own.
+
+func (c Checkpoint) CheckpointSliceNames() []string
+    CheckpointSliceNames reports the names of the slices one checkpoint carries,
+    sorted, so a reader that only needs to know what a checkpoint covers answers
+    without decoding the state of every consumer.
+
+func (c Checkpoint) FactKey() string
+    FactKey returns the checkpoint's identity as a fact key: the partition
+    sequence slot the checkpoint commits under.
+
+func (c Checkpoint) FactType() string
+    FactType returns the frozen type a checkpoint is read as.
+
+func (c Checkpoint) MetaEntries() map[string]string
+    MetaEntries states the two metadata entries one checkpoint fact carries
+    from the cut it was taken at: the partition-sequence watermark and the slice
+    names, both sorted so the fact renders the same text for the same coverage.
+
+type CheckpointOffset map[int]int64
+    CheckpointOffset is the partition-sequence watermark one checkpoint covers:
+    for every partition, the sequence slot the partition had committed when the
+    cut was taken. It is the partition sequence the landing path numbers commits
+    with, never a process-local counter: a process-local number is neither
+    monotonic across restarts nor comparable between partitions, so it can never
+    stand for "everything up to here is covered".
+
+func (o CheckpointOffset) String() string
+    String renders one watermark as the sorted partition:seq pairs.
+
+type CheckpointPayload struct {
+	Version int               `json:"version"`
+	ID      EventID           `json:"id"`
+	Offset  CheckpointOffset  `json:"offset"`
+	Slices  []CheckpointSlice `json:"slices"`
+}
+    CheckpointPayload is the payload layout of one checkpoint fact: the layout
+    version, the identity the payload content-addresses to, the cut and the
+    state slices — Projection, Delivery, Mailbox and Tasks — in registration
+    order.
+
+type CheckpointSlice struct {
+	// Name is the consumer name the slice is keyed by.
+	Name string `json:"name"`
+	// Payload is the consumer's own recoverable state, as JSON.
+	Payload json.RawMessage `json:"payload"`
+}
+    CheckpointSlice is the recoverable state one registered consumer delegated
+    to the framework: the consumer name it is keyed by beside the consumer's
+    own payload. The payload is the consumer's business — the fact family
+    carries the name and the bytes, never a structure a reader of the fact could
+    interpret as state of its own.
+
 type CompressProduct struct {
 	// ID is the identity of the product: content-addressed over the answers and
 	// the product key, so one request answers one product identity.
@@ -326,6 +454,8 @@ type CompressProduct struct {
 	Covered []EventID
 	// Text is the product text the projection presents.
 	Text string
+
+	// Has unexported fields.
 }
     CompressProduct is one compress product fact: the material a consumer folded
     for one judgment. It is immutable once filed, and it is the only source the
@@ -339,12 +469,18 @@ func CompressProductFor(request EventID, producer string, key EventID, covered [
     it carries, so a repeated execution of the same judgment files nothing new.
     The filing moment stays zero for the log to stamp on first filing.
 
+func (p CompressProduct) Checkpoint() []byte
+    Checkpoint reports the opaque recovery payload this product fact carries.
+
 func (p CompressProduct) FactKey() string
     FactKey returns the product's identity as a fact key: the identity one
     execution is quoted by, unchanged by every retry of that execution.
 
 func (p CompressProduct) FactType() string
     FactType returns the frozen type a compress product is read as.
+
+func (p CompressProduct) WithCheckpoint(payload []byte) CompressProduct
+    WithCheckpoint states the opaque recovery payload this product fact carries.
 
 type CompressRequest struct {
 	// ID is the identity of the judgment: the content-addressed key the request

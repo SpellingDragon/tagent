@@ -117,16 +117,16 @@ func TestInstancesSymptomMultiTargetLedger(t *testing.T) {
 		targets = append(targets, event.Address{AgentID: deliveryPeerAgent, SessionID: event.SessionID(session)})
 	}
 	for _, target := range targets {
-		records := ledger.ByTarget(target)
+		records := deliveryByTarget(t, ledger, target)
 		if len(records) != 1 {
 			t.Fatalf("deliveries the account lists for %q = %d, want the one body its call carried:\n%s",
-				target.SessionID, len(records), deliveryDescribe(ledger.Records()))
+				target.SessionID, len(records), deliveryDescribe(deliveryRecords(t, ledger)))
 		}
 		sources[records[0].Source] = true
 	}
 	if len(sources) != 1 {
 		t.Fatalf("source events the three deliveries are filed under = %d, want the one event that caused them:\n%s",
-			len(sources), deliveryDescribe(ledger.Records()))
+			len(sources), deliveryDescribe(deliveryRecords(t, ledger)))
 	}
 	var source event.EventID
 	for held := range sources {
@@ -135,10 +135,10 @@ func TestInstancesSymptomMultiTargetLedger(t *testing.T) {
 	if !strings.Contains(string(source), deliveryMeditationSession) {
 		t.Fatalf("source event of the three deliveries = %q, want the invocation of the reflecting turn %q", source, deliveryMeditationSession)
 	}
-	bySource := ledger.BySource(source)
+	bySource := deliveryBySource(t, ledger, source)
 	if len(bySource) != len(deliveryPeerSessions) {
 		t.Fatalf("deliveries the account lists for %q = %d, want one per target session (%d):\n%s",
-			source, len(bySource), len(deliveryPeerSessions), deliveryDescribe(ledger.Records()))
+			source, len(bySource), len(deliveryPeerSessions), deliveryDescribe(deliveryRecords(t, ledger)))
 	}
 	seenTargets := map[string]bool{}
 	for _, record := range bySource {
@@ -147,7 +147,7 @@ func TestInstancesSymptomMultiTargetLedger(t *testing.T) {
 		}
 		if seenTargets[string(record.Target.SessionID)] {
 			t.Fatalf("target session %q is listed twice in one source event, want every target exactly once:\n%s",
-				record.Target.SessionID, deliveryDescribe(ledger.Records()))
+				record.Target.SessionID, deliveryDescribe(deliveryRecords(t, ledger)))
 		}
 		seenTargets[string(record.Target.SessionID)] = true
 		if record.Identity == "" {
@@ -220,7 +220,7 @@ func TestInstancesSymptomTwoEntriesOneAccount(t *testing.T) {
 	deliveryAwaitReceipts(t, provider, 1)
 
 	ledger := host.Run().DeliveryLedger()
-	byTarget := ledger.ByTarget(peer)
+	byTarget := deliveryByTarget(t, ledger, peer)
 	if len(byTarget) != 2 {
 		t.Fatalf("deliveries the account lists for %q = %d, want the body a session sent beside the settle the framework delivered:\n%s",
 			peer.SessionID, len(byTarget), deliveryDescribe(byTarget))
@@ -600,8 +600,48 @@ func deliveryCarries(request intakeRequest, material string) bool {
 	return false
 }
 
-// deliveryDescribe renders the delivery account the anchor read, so a failure states
-// what the run really accounted for.
+// deliveryRecords reads the delivery account for a check and refuses the check
+// by name when the durable chain could not be read, instead of reading a partial
+// window as the whole account.
+func deliveryRecords(t *testing.T, ledger *assembly.DeliveryLedger) []assembly.DeliveryRecord {
+	t.Helper()
+	records, err := ledger.Records()
+	if err != nil {
+		t.Fatalf("the delivery account could not be read: %v", err)
+	}
+	return records
+}
+
+// deliveryByTarget reads one target's deliveries for a check.
+func deliveryByTarget(t *testing.T, ledger *assembly.DeliveryLedger, target event.Address) []assembly.DeliveryRecord {
+	t.Helper()
+	records, err := ledger.ByTarget(target)
+	if err != nil {
+		t.Fatalf("the deliveries of target %+v could not be read: %v", target, err)
+	}
+	return records
+}
+
+// deliveryBySource reads one source event's deliveries for a check.
+func deliveryBySource(t *testing.T, ledger *assembly.DeliveryLedger, source event.EventID) []assembly.DeliveryRecord {
+	t.Helper()
+	records, err := ledger.BySource(source)
+	if err != nil {
+		t.Fatalf("the deliveries of source %s could not be read: %v", source, err)
+	}
+	return records
+}
+
+// deliveryRefusals reads the refusal account for a check.
+func deliveryRefusals(t *testing.T, ledger *assembly.DeliveryLedger) []assembly.DeliveryRefusal {
+	t.Helper()
+	refusals, err := ledger.Refusals()
+	if err != nil {
+		t.Fatalf("the delivery refusal account could not be read: %v", err)
+	}
+	return refusals
+}
+
 func deliveryDescribe(records []assembly.DeliveryRecord) string {
 	described := make([]string, 0, len(records))
 	for _, record := range records {
@@ -721,7 +761,7 @@ func TestSendSymptomDoubleDeliveryToOneSession(t *testing.T) {
 		}
 	}
 
-	records := host.Run().DeliveryLedger().ByTarget(peer)
+	records := deliveryByTarget(t, host.Run().DeliveryLedger(), peer)
 	if len(records) != len(deliveryDoubleBodies) {
 		t.Fatalf("deliveries the account lists for %q = %d, want one per body (%d):\n%s",
 			peer.SessionID, len(records), len(deliveryDoubleBodies), deliveryDescribe(records))

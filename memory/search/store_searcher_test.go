@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -19,6 +20,7 @@ type tuningSource struct {
 	refs     []memory.EventReference
 	keyword  *int
 	partless *int
+	texts    map[event.EventID]string
 }
 
 func (s *tuningSource) QueryEvents(ctx context.Context, opts memory.QueryOptions) ([]memory.EventReference, error) {
@@ -46,18 +48,41 @@ func (s *tuningSource) Reference(key event.EventID) (ledger.OriginalRef, bool) {
 	return ledger.OriginalRef{}, false
 }
 
-// tuningVectors answers one ready vector for every key it names.
-type tuningVectors map[event.EventID][]float32
-
-func (v tuningVectors) Vector(key event.EventID) ([]float32, bool) {
-	vec, held := v[key]
-	return vec, held
+// Text returns the original text of one candidate.
+func (s *tuningSource) Text(key event.EventID) (string, bool) {
+	text, held := s.texts[key]
+	return text, held
 }
 
-// tuningEmbedder answers one fixed query vector.
-type tuningEmbedder struct{ vec []float32 }
+// tuningEmbedder answers the query vector and each candidate's distinct vector.
+type tuningEmbedder struct {
+	vec    []float32
+	byText map[string][]float32
+}
 
-func (e tuningEmbedder) Embed(context.Context, string) ([]float32, error) { return e.vec, nil }
+// Embed returns the candidate-specific vector when one is registered.
+func (e tuningEmbedder) Embed(_ context.Context, text string) ([]float32, error) {
+	if e.byText != nil {
+		if vector, held := e.byText[text]; held {
+			return vector, nil
+		}
+		return nil, nil
+	}
+	return e.vec, nil
+}
+
+// tuningEmbedderFor builds the candidate vectors from the original text.
+func tuningEmbedderFor(source *tuningSource) tuningEmbedder {
+	embedder := tuningEmbedder{vec: []float32{1, 0}, byText: map[string][]float32{}}
+	source.texts = map[event.EventID]string{}
+	for i, ref := range source.refs {
+		text := fmt.Sprintf("text-%d", i)
+		source.texts[ref.Key] = text
+		embedder.byText[text] = []float32{1, float32(i) * 0.1}
+	}
+	embedder.byText["x"] = embedder.vec
+	return embedder
+}
 
 func tuningRefs(n int) []memory.EventReference {
 	refs := make([]memory.EventReference, 0, n)
@@ -68,48 +93,38 @@ func tuningRefs(n int) []memory.EventReference {
 	return refs
 }
 
-// TestStoreSearcherHonoursRetrievalTuning pins the two leg bounds and the rank constant a deployment declares.
-//   - the bounds cap each leg's contribution to the fusion: the keyword bound at the read, the vector bound after the scoring over the whole candidate set
-//   - a zero tuning leaves both legs unbounded, which is the standing behaviour
+// TestRetrievalTuningDerived pins the retrieval rules as the mechanism's own.
+//   - the constructor derives both leg bounds from DefaultLimit
+//   - the fusion runs under the canonical RRFRankConstant
+//   - the searcher carries no independent write of either bound
 //
 // 契约: docs/wiki/memory/memory-architecture.md#read-paths
-func TestStoreSearcherHonoursRetrievalTuning(t *testing.T) {
+func TestRetrievalTuningDerived(t *testing.T) {
 	ctx := context.Background()
 	var keywordLimit, vectorLimit int
-	source := &tuningSource{refs: tuningRefs(6), keyword: &keywordLimit, partless: &vectorLimit}
-	vectors := tuningVectors{}
-	for i, ref := range source.refs {
-		vectors[ref.Key] = []float32{1, float32(i) * 0.1}
-	}
-	searcher := NewStoreSearcher(source, vectors, tuningEmbedder{vec: []float32{1, 0}})
-	query := Query{Text: "x", Partitions: []string{"p"}, Limit: 10}
+	source := &tuningSource{refs: tuningRefs(25), keyword: &keywordLimit, partless: &vectorLimit}
+	searcher := NewStoreSearcher(source, tuningEmbedderFor(source))
 
-	if _, err := searcher.Search(ctx, query); err != nil {
-		t.Fatalf("search under the zero tuning: %v", err)
+	if searcher.keywordTopK != DefaultLimit || searcher.vectorTopK != DefaultLimit {
+		t.Fatalf("leg bounds = keyword %d vector %d, want the mechanism bound %d on both",
+			searcher.keywordTopK, searcher.vectorTopK, DefaultLimit)
 	}
-	if keywordLimit != 0 || vectorLimit != 0 {
-		t.Fatalf("zero tuning bounded the legs (keyword=%d vector=%d), want unbounded legs", keywordLimit, vectorLimit)
+	if _, held := reflect.TypeOf(searcher).MethodByName("SetRetrievalTuning"); held {
+		t.Fatal("the searcher carries an independent write of the retrieval bounds, want them derived from the mechanism constants")
+	}
+	rrf, fusionHeld := searcher.fusion.(RRFFusion)
+	if !fusionHeld || rrf.K != RRFRankConstant {
+		t.Fatalf("fusion = %#v, want the reciprocal rank fusion under the canonical constant %d", searcher.fusion, RRFRankConstant)
 	}
 
-	if err := searcher.SetRetrievalTuning(3, 2, 7); err != nil {
-		t.Fatalf("apply the retrieval tuning: %v", err)
+	if _, err := searcher.Search(ctx, Query{Text: "x", Partitions: []string{"p"}, Limit: 5}); err != nil {
+		t.Fatalf("search under the derived bounds: %v", err)
 	}
-	result, err := searcher.Search(ctx, query)
-	if err != nil {
-		t.Fatalf("search under the declared tuning: %v", err)
-	}
-	if keywordLimit != 2 {
-		t.Fatalf("keyword leg ran under limit %d, want the declared 2", keywordLimit)
+	if keywordLimit != DefaultLimit {
+		t.Fatalf("keyword leg read under limit %d, want the mechanism bound %d", keywordLimit, DefaultLimit)
 	}
 	if vectorLimit != 0 {
 		t.Fatalf("vector leg pre-truncated the candidates at %d, want the whole candidate set read and cut after the scoring", vectorLimit)
-	}
-	if len(result.Refs) != 3 {
-		t.Fatalf("tuned search answered %d references, want the 3 best-scoring vector hits beside the keyword bound", len(result.Refs))
-	}
-
-	if err := searcher.SetRetrievalTuning(-1, 0, 0); err == nil {
-		t.Fatal("negative tuning was accepted")
 	}
 }
 
@@ -174,10 +189,15 @@ func (s *completenessSource) Reference(key event.EventID) (ledger.OriginalRef, b
 	return ledger.OriginalRef{}, false
 }
 
-// TestVectorCandidateCompleteness pins whole-candidate scoring: the declared bound cuts the best hits after the scoring.
-//   - an unbounded vector leg recalls the old relevant record a synonym query shares no word with
-//   - a bound of one still recalls that record, which the newest candidates carry no vector for
-//   - a query with no retrieval text, a negative tuning and a zero bound keep their named refusals and standing behaviour
+// Text returns the original text of one candidate.
+func (s *completenessSource) Text(key event.EventID) (string, bool) {
+	text, held := s.texts[key]
+	return text, held
+}
+
+// TestVectorCandidateCompleteness pins whole-candidate scoring: the mechanism bound cuts the best hits after the scoring.
+//   - the vector leg scores every candidate, so the old relevant record a synonym query shares no word with is recalled
+//   - a query with no retrieval text keeps its named refusal and the keyword leg reads under the mechanism bound
 //
 // 契约: docs/wiki/memory/memory-architecture.md#read-paths
 func TestVectorCandidateCompleteness(t *testing.T) {
@@ -194,57 +214,35 @@ func TestVectorCandidateCompleteness(t *testing.T) {
 			"old-relevant":  "部署失败回滚",
 		},
 	}
-	vectors := tuningVectors{
-		"old-relevant":  {1, 0},
-		"new-unrelated": {0, 1},
-	}
+	vectors := tuningEmbedder{vec: []float32{1, 0}, byText: map[string][]float32{
+		"上线出问题撤回了": {1, 0},
+		"部署失败回滚":   {1, 0},
+		"不相关的新记录":  {0, 1},
+	}}
 	query := Query{Text: "上线出问题撤回了", Partitions: []string{"p"}, Limit: 10}
 
-	t.Run("unbounded candidates recall the old relevant record", func(t *testing.T) {
-		searcher := NewStoreSearcher(source, vectors, tuningEmbedder{vec: []float32{1, 0}})
+	t.Run("the whole candidate set is scored, so the old relevant record is recalled", func(t *testing.T) {
+		searcher := NewStoreSearcher(source, vectors)
 		result, err := searcher.Search(ctx, query)
 		if err != nil {
 			t.Fatalf("search: %v", err)
 		}
 		if !carriesKey(result.Refs, "old-relevant") {
-			t.Fatalf("unbounded candidates = %v, want the old relevant record recalled", keysOf(result.Refs))
+			t.Fatalf("scored candidates = %v, want the old relevant record recalled", keysOf(result.Refs))
 		}
 	})
 
-	t.Run("bound one still recalls the old relevant record", func(t *testing.T) {
-		searcher := NewStoreSearcher(source, vectors, tuningEmbedder{vec: []float32{1, 0}})
-		if err := searcher.SetRetrievalTuning(1, 0, 0); err != nil {
-			t.Fatalf("apply the retrieval tuning: %v", err)
-		}
-		result, err := searcher.Search(ctx, query)
-		if err != nil {
-			t.Fatalf("search under the bound of one: %v", err)
-		}
-		if !carriesKey(result.Refs, "old-relevant") {
-			t.Fatalf("vector_top_k=1 answered %v, want the old relevant record among the scored candidates", keysOf(result.Refs))
-		}
-		if len(result.Refs) != 1 {
-			t.Fatalf("vector_top_k=1 answered %d references, want the one best-scoring candidate", len(result.Refs))
-		}
-	})
-
-	t.Run("the named refusals and the zero bound stand", func(t *testing.T) {
-		searcher := NewStoreSearcher(source, vectors, tuningEmbedder{vec: []float32{1, 0}})
+	t.Run("the named refusal and the mechanism bound stand", func(t *testing.T) {
+		searcher := NewStoreSearcher(source, vectors)
 		if _, err := searcher.Search(ctx, Query{Partitions: []string{"p"}}); !errors.Is(err, ErrQueryTextMissing) {
 			t.Fatalf("query without text answered %v, want the named refusal %v", err, ErrQueryTextMissing)
 		}
-		if err := searcher.SetRetrievalTuning(-1, 0, 0); !errors.Is(err, ErrRetrievalTuning) {
-			t.Fatalf("negative tuning answered %v, want the named refusal %v", err, ErrRetrievalTuning)
-		}
-		if err := searcher.SetRetrievalTuning(0, 0, 0); err != nil {
-			t.Fatalf("zero tuning: %v", err)
-		}
 		result, err := searcher.Search(ctx, query)
 		if err != nil {
-			t.Fatalf("search under the zero tuning: %v", err)
+			t.Fatalf("search under the mechanism bound: %v", err)
 		}
-		if !carriesKey(result.Refs, "old-relevant") || source.limit != 0 {
-			t.Fatalf("zero bound answered %v under read bound %d, want the leg unbounded and the old record recalled", keysOf(result.Refs), source.limit)
+		if !carriesKey(result.Refs, "old-relevant") {
+			t.Fatalf("search answered %v, want the old record recalled under the mechanism bound", keysOf(result.Refs))
 		}
 	})
 }

@@ -17,6 +17,7 @@ import (
 	"github.com/SpellingDragon/tagent/assembly"
 	"github.com/SpellingDragon/tagent/memory/ledger"
 	"github.com/SpellingDragon/tagent/memory/query"
+	"github.com/SpellingDragon/tagent/runtime/agent"
 	"github.com/SpellingDragon/tagent/runtime/state"
 	"github.com/SpellingDragon/tagent/runtime/task"
 
@@ -117,6 +118,9 @@ func TestNewToolAdapterNeedsNoHostCompensation(t *testing.T) {
 		if got := adapter.calls(); got != 1 {
 			t.Fatalf("adapter executions = %d, want the admitted call executed exactly once", got)
 		}
+		if _, err := run.Close(ctx, agent.CloseRequest{Timeout: time.Now().Add(5 * time.Second)}); err != nil {
+			t.Fatalf("drain the first run's settlement writers before rebuilding from the same store (a slow runner otherwise leaves the notice owed): %v", err)
+		}
 
 		restarted := &minimalAdapter{name: "probe", output: "adapter-out"}
 		second, err := assembly.Assemble(ctx, adapterDeclaration(), map[event.AgentID]assembly.NativeAgent{
@@ -185,6 +189,9 @@ func TestNewToolAdapterNeedsNoHostCompensation(t *testing.T) {
 		assertClosedStatus(t, "the failed task", tasks[0].State.TaskStatus)
 		if tasks[0].State.TaskStatus != task.StatusFailed {
 			t.Fatalf("task status = %s, want the failure the adapter's error states", statusName(tasks[0].State.TaskStatus))
+		}
+		if _, err := run.Close(ctx, agent.CloseRequest{Timeout: time.Now().Add(5 * time.Second)}); err != nil {
+			t.Fatalf("drain the run's settlement writers before reading the notice phase (a slow runner otherwise reads the notice still claimed): %v", err)
 		}
 		notices := listObjects(t, ctx, run, addr, query.ObjectNotice)
 		if len(notices) != 1 || notices[0].State != query.DetailRetired {

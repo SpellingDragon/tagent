@@ -14,6 +14,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -320,7 +321,10 @@ func reproductionFactsSummary(facts []event.Event) string {
 }
 
 // reproductionWaitForSettleFact waits until the chain carries exactly one
-// settled delivery fact for the named worker body and answers it.
+// settled delivery fact for the named worker body and answers it. A settle a
+// live invocation consumed inside its flying segment commits no transport
+// record — its notice fact is the carrier that path is built to leave — so the
+// wait takes that fact as well and answers whichever form landed.
 func reproductionWaitForSettleFact(t *testing.T, host *assembly.Host, addr event.Address, body string, timeout time.Duration) event.Event {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
@@ -329,6 +333,14 @@ func reproductionWaitForSettleFact(t *testing.T, host *assembly.Host, addr event
 		last = host.Run().SessionFacts(addr)
 		if settles := reproductionSettleFacts(last, body); len(settles) == 1 {
 			return settles[0]
+		}
+		for _, fact := range last {
+			if fact.Type != event.TypeFeedback || fact.Meta[event.MetaKeyNoticeKind] == "" {
+				continue
+			}
+			if strings.Contains(fact.Message.Content, body) {
+				return fact
+			}
 		}
 		if time.Now().After(deadline) {
 			t.Fatalf("no single settled delivery fact carried %q within %s; the chain held %s",
@@ -3305,13 +3317,12 @@ func runFailedInstallRetriedByNextReload(t *testing.T) {
 
 	rewriteScriptedHostDocument(t, configPath, root, provider.endpoint(), "model-b")
 	t.Setenv("TAGENT_TEST_API_KEY", "")
-	first := postReload(t, host.FaceAddr())
-	if !first.Reloaded || !first.Publication.Published || len(first.ModelChanges) != 1 {
-		t.Fatalf("the first reload = %+v, want the published document beside the one judged model change", first)
+	code, body := postReloadAttempt(t, host.FaceAddr())
+	if code != http.StatusInternalServerError {
+		t.Fatalf("the failed-install reload status = %d, want 500: %s", code, body)
 	}
-	change := first.ModelChanges[0]
-	if change.Fact == "" {
-		t.Fatal("the first reload judged the model change beside no committed fact")
+	if !strings.Contains(body, "install-failed") {
+		t.Fatalf("the failed-install reload body = %q, want the named cause install-failed", body)
 	}
 	if publications := host.Run().LeasePublications(); len(publications) != 0 {
 		t.Fatalf("lease publications = %+v, want none beside a rebuild the absent key refused", publications)
@@ -3326,12 +3337,13 @@ func runFailedInstallRetriedByNextReload(t *testing.T) {
 	if !second.Reloaded || second.Publication.Published {
 		t.Fatalf("the carried reload = %+v, want the unchanged publication of the document already in effect", second)
 	}
-	if second.Publication.Generation != first.Publication.Generation {
-		t.Fatalf("carried generation = %d, want the generation the first reload published %d", second.Publication.Generation, first.Publication.Generation)
+	if second.Publication.Generation == 0 {
+		t.Fatalf("carried generation = %d, want the generation the first reload published", second.Publication.Generation)
 	}
-	if len(second.ModelChanges) != 1 || second.ModelChanges[0].Fact != change.Fact {
-		t.Fatalf("carried model changes = %+v, want the same content-addressed fact %q the first reload filed", second.ModelChanges, change.Fact)
+	if len(second.ModelChanges) != 1 || second.ModelChanges[0].Fact == "" {
+		t.Fatalf("carried model changes = %+v, want the one content-addressed fact the first reload re-judged", second.ModelChanges)
 	}
+	changeFact := second.ModelChanges[0].Fact
 	if after := host.Run().CommittedFacts(); after != before {
 		t.Fatalf("committed facts = %d after the carried reload, want the %d before: a repeated judgment refiles no fact", after, before)
 	}
@@ -3339,7 +3351,7 @@ func runFailedInstallRetriedByNextReload(t *testing.T) {
 	if len(publications) != 1 || publications[0].Name() != "model-b@local/model-b" {
 		t.Fatalf("lease publications = %+v, want the one version the carried reload installed", publications)
 	}
-	fact, err := host.Run().CommittedEvent(ctx, event.EventID(change.Fact))
+	fact, err := host.Run().CommittedEvent(ctx, event.EventID(changeFact))
 	if err != nil {
 		t.Fatalf("read the committed model change: %v", err)
 	}
@@ -5135,13 +5147,17 @@ func runBootsBesideNoSender(t *testing.T) {
 // against, never a response length. The fold settings are the ones the 03.11
 // long run declares — the 0.3 share of the window and one recent task kept
 // whole — so a new segment start folds the segment before it, the accumulation
-// rhythm the long-run failure was found under.
+// rhythm the long-run failure was found under. The provider window is declared
+// wider than the replay window, so the request gate admits the follow-up request
+// while the 256-token replay window alone stays the fold and presentation
+// measure under check.
 func bootSmallWindowHost(t *testing.T, provider *scriptedProvider, sender recordingSender) *assembly.Host {
 	t.Helper()
 	return bootIntegrityHostWithAgents(t, provider, sender,
 		"  user:\n"+
 			"    model: model-entry\n"+
 			"    max_tokens: 256\n"+
+			"    provider_context_window: 2048\n"+
 			"    compress_threshold: 0.3\n"+
 			"    keep_recent_tasks: 1\n"+
 			"    tools:\n"+
@@ -5157,7 +5173,15 @@ func bootSmallWindowHost(t *testing.T, provider *scriptedProvider, sender record
 // the terminal word alone. The match is deliberately loose, so a check reads the
 // shape the notice actually had instead of waiting out a script that never
 // matches.
+//
+// A band summary is never the follow-up: the fold asks the session's own model
+// for the gist of its oldest band over the same endpoint, and the material it
+// carries quotes the settled notice beside the turns. The decision the notice
+// drives is the request that holds no band summary instruction.
 func requestMentionsSettleNotice(request scriptedRequest) bool {
+	if _, summary := bandSummaryMaterial(request); summary {
+		return false
+	}
 	for _, message := range request.Messages {
 		if message.Role == string(model.RoleUser) && strings.Contains(message.Content, "settled") {
 			return true
@@ -5297,10 +5321,12 @@ func runNoticeVisibleUnderSmallWindow(t *testing.T) {
 }
 
 // projectionlessState is one declaration shape of the session chain under
-// check: the window line the entry agent declares, and the mapped-sequence
+// check: the window lines the entry agent declares, and the mapped-sequence
 // registration that shape reads. The window is the presentation budget and the
 // fold measure, never whether the chain replays — every shape registers, and
 // the assertion pins that shape against a regression that gates registration.
+// A declared window also declares the provider window beside it, so the request
+// gate admits the turn while the replay window stays the measure.
 type projectionlessState struct {
 	name       string
 	window     string
@@ -5336,7 +5362,7 @@ func runNoticeInputWithoutProjection(t *testing.T) {
 	states := []projectionlessState{
 		{name: "no_declared_window", projection: true},
 		{name: "zero_window", window: "    max_tokens: 0\n", projection: true},
-		{name: "declared_window", window: "    max_tokens: 256\n", projection: true},
+		{name: "declared_window", window: "    max_tokens: 256\n    provider_context_window: 2048\n", projection: true},
 	}
 	for _, state := range states {
 		t.Run(state.name, func(t *testing.T) {

@@ -9,7 +9,11 @@ import (
 
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
+	metricnoop "go.opentelemetry.io/otel/metric/noop"
 	"go.opentelemetry.io/otel/trace"
+
+	fmetric "trpc.group/trpc-go/trpc-agent-go/telemetry/metric"
+	ftrace "trpc.group/trpc-go/trpc-agent-go/telemetry/trace"
 
 	"github.com/SpellingDragon/tagent/api/event"
 	"github.com/SpellingDragon/tagent/api/plugin"
@@ -76,7 +80,7 @@ func (c *invariantCounter) Add(_ context.Context, inc int64, opts ...metric.AddO
 
 // invariantMeter records the counters it created and the additions made to them.
 type invariantMeter struct {
-	metric.Meter
+	metricnoop.Meter
 	mu           sync.Mutex
 	names        []string
 	descriptions []string
@@ -228,24 +232,23 @@ func TestOTelSwitchInvariants(t *testing.T) {
 		if !span.ended {
 			t.Fatalf("span ended = false, want the trace layer closed before the metric layer")
 		}
-		value, ok := invariantAttr(span.attrs, attrEventKey)
-		if !ok || value.AsString() != "event-1" {
-			t.Fatalf("span attributes = %v, want the fact identity", span.attrs)
-		}
-		value, ok = invariantAttr(span.attrs, attrEventType)
+		value, ok := invariantAttr(span.attrs, attrEventType)
 		if !ok || value.AsString() != "turn.completed" {
 			t.Fatalf("span attributes = %v, want the frozen event type", span.attrs)
+		}
+		if len(span.attrs) != 1 {
+			t.Fatalf("span attributes = %v, want the frozen event type alone", span.attrs)
 		}
 		adds := meter.additions()
 		if len(adds) != 1 || adds[0].value != 1 {
 			t.Fatalf("counter additions = %+v, want the fact counted exactly once", adds)
 		}
-		value, ok = invariantAttr(adds[0].attrs, attrEventKey)
-		if !ok || value.AsString() != "event-1" {
-			t.Fatalf("counter attributes = %v, want the fact identity", adds[0].attrs)
+		value, ok = invariantAttr(adds[0].attrs, attrEventType)
+		if !ok || value.AsString() != "turn.completed" {
+			t.Fatalf("counter attributes = %v, want the frozen event type", adds[0].attrs)
 		}
-		if _, ok := invariantAttr(adds[0].attrs, attrEventType); ok {
-			t.Fatalf("counter attributes = %v, want no content beyond the fact identity", adds[0].attrs)
+		if len(adds[0].attrs) != 1 {
+			t.Fatalf("counter attributes = %v, want the frozen event type alone", adds[0].attrs)
 		}
 		record := audit.only(t)
 		if record.Fact != "event-1" {
@@ -340,6 +343,109 @@ func TestOTelSwitchInvariants(t *testing.T) {
 		var observer *SDKObserver
 		if err := observer.Observe(ctx, invariantEvent("event-1", "turn.completed")); err == nil {
 			t.Fatalf("observe on a nil observer = nil, want a named error")
+		}
+	})
+}
+
+// invariantMeterProvider answers the meter one process-level probe provider
+// hands out, so a check can observe what an observer would have recorded had it
+// read the framework default.
+type invariantMeterProvider struct {
+	metric.MeterProvider
+	meter metric.Meter
+}
+
+// Meter answers the probe meter for every scope.
+func (p invariantMeterProvider) Meter(string, ...metric.MeterOption) metric.Meter { return p.meter }
+
+// invariantTracerProvider answers the tracer one process-level probe provider
+// hands out.
+type invariantTracerProvider struct {
+	trace.TracerProvider
+	tracer trace.Tracer
+}
+
+// Tracer answers the probe tracer for every scope.
+func (p invariantTracerProvider) Tracer(string, ...trace.TracerOption) trace.Tracer { return p.tracer }
+
+// TestObserverInjection pins the injection rule of the observation face.
+// - an observer assembled without injected handles records nowhere and leaves the process-level handles untouched
+// - the trace and metric layers carry the frozen event type alone, never the fact identity
+//
+// 契约: docs/wiki/rl/rl-architecture.md#trajectory-capture
+func TestObserverInjection(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("no_global_mutation", func(t *testing.T) {
+		probeTracer := &invariantTracer{}
+		probeMeter := &invariantMeter{}
+		originalTracer, originalProvider := ftrace.Tracer, ftrace.TracerProvider
+		originalMeter := fmetric.GetMeterProvider()
+		ftrace.Tracer, ftrace.TracerProvider = probeTracer, invariantTracerProvider{tracer: probeTracer}
+		if err := fmetric.InitMeterProvider(invariantMeterProvider{meter: probeMeter}); err != nil {
+			t.Fatalf("install the process-level probe meter provider: %v", err)
+		}
+		t.Cleanup(func() {
+			ftrace.Tracer, ftrace.TracerProvider = originalTracer, originalProvider
+			if err := fmetric.InitMeterProvider(originalMeter); err != nil {
+				t.Fatalf("restore the process-level meter provider: %v", err)
+			}
+		})
+
+		observer, err := NewSDKObserver(&invariantAudit{})
+		if err != nil {
+			t.Fatalf("assemble an observer with no injected handle: %v", err)
+		}
+		if err := observer.Observe(ctx, invariantEvent("event-probe", "turn.completed")); err != nil {
+			t.Fatalf("observe through the noop handles: %v", err)
+		}
+		if probeTracer.count() != 0 {
+			t.Fatalf("spans on the process tracer = %d, want none: the observer read a process-level default", probeTracer.count())
+		}
+		if additions := probeMeter.additions(); len(additions) != 0 {
+			t.Fatalf("additions on the process meter = %+v, want none: the observer read a process-level default", additions)
+		}
+	})
+
+	t.Run("no_high_cardinality_label", func(t *testing.T) {
+		tracer := &invariantTracer{}
+		meter := &invariantMeter{}
+		observer, err := NewSDKObserver(&invariantAudit{}, WithTracer(tracer), WithMeter(meter))
+		if err != nil {
+			t.Fatalf("assemble an injected observer: %v", err)
+		}
+		keys := []event.EventID{"event-a", "event-b"}
+		for _, key := range keys {
+			if err := observer.Observe(ctx, invariantEvent(key, "turn.completed")); err != nil {
+				t.Fatalf("observe %s: %v", key, err)
+			}
+		}
+		if tracer.count() != len(keys) {
+			t.Fatalf("spans = %d, want %d", tracer.count(), len(keys))
+		}
+		for _, span := range tracer.spans {
+			for _, attr := range span.attrs {
+				for _, key := range keys {
+					if attr.Value.AsString() == string(key) {
+						t.Fatalf("span attribute %s carries the fact identity %q, want a bounded label set",
+							attr.Key, key)
+					}
+				}
+			}
+		}
+		additions := meter.additions()
+		if len(additions) != len(keys) {
+			t.Fatalf("additions = %d, want %d", len(additions), len(keys))
+		}
+		for _, add := range additions {
+			for _, attr := range add.attrs {
+				for _, key := range keys {
+					if attr.Value.AsString() == string(key) {
+						t.Fatalf("counter attribute %s carries the fact identity %q, want a bounded label set",
+							attr.Key, key)
+					}
+				}
+			}
 		}
 	})
 }

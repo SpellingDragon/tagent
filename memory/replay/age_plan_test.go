@@ -2,9 +2,15 @@ package replay
 
 import (
 	"context"
+	"encoding/json"
+	"flag"
+	"fmt"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/SpellingDragon/tagent/api/event"
 )
@@ -151,7 +157,9 @@ func (s capacityState) assertUnchanged(t *testing.T, projection *ReplayProjectio
 
 // TestFoldCapacityAndCandidateRules pins the two gates of an age fold: the rendered volume and a candidate.
 //
-// 契约: docs/wiki/agent/compression-and-telemetry.md#projection-fold
+// - 不动点：折叠每轮把窗口外的材料晋一级，故窗口丢弃的回合摘要完之后投影到达不动点，此后一次判定产出零产品、投影逐字不变。
+//
+// 契约: docs/wiki/memory/memory-architecture.md#overview
 func TestFoldCapacityAndCandidateRules(t *testing.T) {
 	ctx := context.Background()
 
@@ -225,8 +233,8 @@ func TestFoldCapacityAndCandidateRules(t *testing.T) {
 	})
 
 	t.Run("past the threshold still folds a small candidate", func(t *testing.T) {
-		entries := capacityTurn("small-candidate", 2048, 1)
-		plan := AgeFoldPlan{KeepRecent: 2, VolumeThreshold: len(RenderProjection(entries)) / 2}
+		entries := append(capacityTurn("small-candidate", 2048, 1), capacityTurn("skeleton", 2048, 0)...)
+		plan := AgeFoldPlan{KeepRecent: 1, VolumeThreshold: len(RenderProjection(entries)) / 2}
 		projection := capacityProjection(t, entries)
 
 		report, err := projection.PlanByAge(ctx, plan)
@@ -251,7 +259,7 @@ func TestFoldCapacityAndCandidateRules(t *testing.T) {
 		}
 	})
 
-	t.Run("large material plan-apply equals a direct fold and is idempotent", func(t *testing.T) {
+	t.Run("large material plan-apply equals a direct fold and converges", func(t *testing.T) {
 		var entries []ProjectionEntry
 		for _, seed := range []string{"large-1", "large-2", "large-3", "large-4"} {
 			entries = append(entries, capacityTurn(seed, 512, 2)...)
@@ -290,14 +298,30 @@ func TestFoldCapacityAndCandidateRules(t *testing.T) {
 		planned.ApplyProducts(report.Products)
 		folded.assertUnchanged(t, planned, "applying the plan twice")
 
+		fixed := false
+		for round := 0; round < 4; round++ {
+			again, err := planned.FoldByAge(ctx, plan)
+			if err != nil {
+				t.Fatalf("FoldByAge after the plan: %v", err)
+			}
+			if again.Triggered || len(again.Products) != 0 || len(again.Requests) != 0 {
+				continue
+			}
+			fixed = true
+			break
+		}
+		if !fixed {
+			t.Fatalf("projection = %+v, want the folds to reach a fixed point", planned.Entries())
+		}
+		settled := capacityStateOf(planned)
 		again, err := planned.FoldByAge(ctx, plan)
 		if err != nil {
-			t.Fatalf("FoldByAge after the plan: %v", err)
+			t.Fatalf("FoldByAge at the fixed point: %v", err)
 		}
 		if again.Triggered || len(again.Products) != 0 || len(again.Requests) != 0 {
-			t.Fatalf("fold after the plan = %+v, want no candidate left to fold", again)
+			t.Fatalf("fold at the fixed point = %+v, want no candidate left to fold", again)
 		}
-		folded.assertUnchanged(t, planned, "folding after the plan")
+		settled.assertUnchanged(t, planned, "folding at the fixed point")
 	})
 
 	t.Run("a threshold of one does not force a trigger", func(t *testing.T) {
@@ -480,4 +504,141 @@ func digestOf(entries []ProjectionEntry) string {
 		digest.WriteString(entry.Content)
 	}
 	return digest.String()
+}
+
+var updateFoldGolden = flag.Bool("update-fold-golden", false, "rewrite the fold plan golden")
+
+type foldGoldenSegment struct {
+	Index    int    `json:"index"`
+	Age      int    `json:"age"`
+	Level    int    `json:"level"`
+	Band     string `json:"band"`
+	Complete bool   `json:"complete"`
+	Entries  int    `json:"entries"`
+}
+
+type foldGoldenProduct struct {
+	Type      string   `json:"type"`
+	Key       string   `json:"key"`
+	Summary   string   `json:"summary"`
+	Content   string   `json:"content"`
+	TimeMS    int64    `json:"time_ms"`
+	Covered   []string `json:"covered"`
+	RequestID string   `json:"request_id"`
+	Reason    string   `json:"reason"`
+}
+
+type foldGoldenReport struct {
+	KeepRecent int                 `json:"keep_recent"`
+	Triggered  bool                `json:"triggered"`
+	Volume     int                 `json:"volume"`
+	Threshold  int                 `json:"threshold"`
+	Segment    int                 `json:"segment"`
+	Middle     int                 `json:"middle"`
+	Segments   []foldGoldenSegment `json:"segments"`
+	Products   []foldGoldenProduct `json:"products"`
+}
+
+// foldGoldenEntry builds one deterministic projection entry of the fixture.
+func foldGoldenEntry(key, typ, content, summary string, at time.Time) ProjectionEntry {
+	return ProjectionEntry{
+		Key:     event.EventID(key),
+		Type:    typ,
+		Summary: summary,
+		Content: content,
+		Time:    at,
+	}
+}
+
+// foldGoldenProjection builds the fixture: six closed task-turn segments (input,
+// plan, command, output each) beside one segment still in flight (input and
+// command, no output), so the newest band, the middle bands, the oldest band and
+// the never-folded in-flight tail all appear in one judgment.
+func foldGoldenProjection(t *testing.T) *ReplayProjection {
+	t.Helper()
+	ctx := context.Background()
+	projection := NewReplayProjection()
+	at := time.Date(2026, 11, 6, 12, 0, 0, 0, time.UTC)
+	next := func() time.Time {
+		at = at.Add(time.Minute)
+		return at
+	}
+	for index := 1; index <= 6; index++ {
+		segment := fmt.Sprintf("s%d", index)
+		projection.Append(ctx, foldGoldenEntry("in-"+segment, event.TypeExternalInput, "input "+segment, "question "+segment, next()))
+		projection.Append(ctx, foldGoldenEntry("plan-"+segment, event.TypeThinkingPlan, "reasoning "+segment, "plan "+segment, next()))
+		projection.Append(ctx, foldGoldenEntry("cmd-"+segment, event.TypeActionCommand, "command "+segment, "call "+segment, next()))
+		projection.Append(ctx, foldGoldenEntry("out-"+segment, event.TypeAgentOutput, "answer "+segment, "reply "+segment, next()))
+	}
+	projection.Append(ctx, foldGoldenEntry("in-tail", event.TypeExternalInput, "input tail", "question tail", next()))
+	projection.Append(ctx, foldGoldenEntry("cmd-tail", event.TypeActionCommand, "command tail", "call tail", next()))
+	return projection
+}
+
+// foldGoldenJudgment judges the fixture and renders the golden form of the plan.
+func foldGoldenJudgment(t *testing.T, projection *ReplayProjection) foldGoldenReport {
+	t.Helper()
+	ctx := context.Background()
+	const keepRecent = 2
+	report, err := projection.PlanByAge(ctx, AgeFoldPlan{KeepRecent: keepRecent, VolumeThreshold: 1})
+	if err != nil {
+		t.Fatalf("judge the fold plan: %v", err)
+	}
+	golden := foldGoldenReport{
+		KeepRecent: keepRecent,
+		Triggered:  report.Triggered,
+		Volume:     report.Volume,
+		Threshold:  report.Threshold,
+		Segment:    report.Counts.Segment,
+		Middle:     report.Counts.Middle,
+	}
+	for _, segment := range SegmentsOf(projection.Entries(), keepRecent) {
+		golden.Segments = append(golden.Segments, foldGoldenSegment{
+			Index: segment.Index, Age: segment.Age, Level: segment.Level,
+			Band: segment.Band.String(), Complete: segment.Complete, Entries: len(segment.Entries),
+		})
+	}
+	for _, product := range report.Products {
+		covered := make([]string, 0, len(product.Covered))
+		for _, key := range product.Covered {
+			covered = append(covered, string(key))
+		}
+		golden.Products = append(golden.Products, foldGoldenProduct{
+			Type: product.Entry.Type, Key: string(product.Entry.Key),
+			Summary: product.Entry.Summary, Content: product.Entry.Content,
+			TimeMS: product.Entry.Time.UnixMilli(), Covered: covered,
+			RequestID: string(product.Request.ID), Reason: product.Request.Reason,
+		})
+	}
+	return golden
+}
+
+// TestFoldPlanGolden pins the segment-age judgment against the recorded plan.
+// - the ladder each segment reads and every product the plan mints are recorded
+// - a change to the rule drifts the golden and fails here
+//
+// 契约: docs/wiki/memory/memory-architecture.md#event-shape
+func TestFoldPlanGolden(t *testing.T) {
+	projection := foldGoldenProjection(t)
+	got := foldGoldenJudgment(t, projection)
+	encoded, err := json.MarshalIndent(got, "", "  ")
+	if err != nil {
+		t.Fatalf("encode the fold plan golden: %v", err)
+	}
+	encoded = append(encoded, '\n')
+	path := filepath.Join("..", "..", "golden", "runtime", "fold_plan_golden.json")
+	if *updateFoldGolden {
+		if err := os.WriteFile(path, encoded, 0o644); err != nil {
+			t.Fatalf("rewrite the fold plan golden: %v", err)
+		}
+		return
+	}
+	want, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read the fold plan golden: %v", err)
+	}
+	if string(want) == string(encoded) {
+		return
+	}
+	t.Fatalf("the fold plan golden drifted; rerun with -update-fold-golden only for an intended rule change\nwant:\n%s\ngot:\n%s", want, encoded)
 }

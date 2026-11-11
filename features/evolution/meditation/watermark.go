@@ -62,19 +62,31 @@ var ErrAnchorStoreUnusable = errors.New("evolution: the anchor store requires a 
 // no default and no fallback criterion is substituted for it.
 var ErrAnchorUnreadable = errors.New("evolution: the anchor record cannot be read")
 
-// Anchors is the persisted pair of loop anchors: the moment the last reflection
-// turn was consumed and the moment the last turn of the session ended.
+// AnchorRecordName is the file name one anchor record persists under: the one a
+// plan names inside its agent directory, and the one the host wires for a
+// document that enables no meditation yet. A restart resumes from the record the
+// plan names, so the fallback record has to sit under the same name.
+const AnchorRecordName = "anchors.json"
+
+// Anchors is the persisted record of one loop: the moment the last reflection
+// turn was consumed, the moment the last turn of the session ended, and the
+// state machine's open charge.
 //
 // The reflection watermark heads the freshness window and the rhythm floor, so
 // it is the anchor the gate reads and the anchor a consumed reflection advances.
-// The session anchor is carried beside it in the same record, and an entry this
-// structure does not name is ignored when the record is read rather than
-// refused.
+// The session anchor and the charge are carried beside it in the same record, and
+// an entry this structure does not name is ignored when the record is read rather
+// than refused.
 type Anchors struct {
 	// LastTurnEnd is the moment the last turn of the session ended.
 	LastTurnEnd time.Time `json:"last_turn_end"`
 	// LastMeditation is the moment of the last consumed reflection turn.
 	LastMeditation time.Time `json:"last_meditation"`
+	// Energy is the persisted charge of the reflection state machine: the
+	// external facts accumulated since the last activation. It lives in the
+	// same record as the watermark, so the state is audited beside the anchor it
+	// belongs to and never in a second store.
+	Energy *energyRecord `json:"energy,omitempty"`
 }
 
 // AnchorStore is the anchor record of one observing agent: the pair of loop
@@ -168,6 +180,41 @@ func (s *AnchorStore) Advance(ctx context.Context, moment time.Time) error {
 		return nil
 	}
 	record.LastMeditation = moment
+	return s.saveLocked(record)
+}
+
+// LoadEnergy reads the persisted charge of the reflection state machine. An
+// absent record or an absent charge section is an empty charge with no error.
+func (s *AnchorStore) LoadEnergy() (energyRecord, error) {
+	if s == nil {
+		return energyRecord{}, ErrAnchorStoreUnusable
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	record, err := s.loadLocked()
+	if err != nil {
+		return energyRecord{}, err
+	}
+	if record.Energy == nil {
+		return energyRecord{}, nil
+	}
+	return *record.Energy, nil
+}
+
+// SaveEnergy rewrites the anchor record with the given charge, keeping the
+// watermark and the session anchor exactly as they stand: the state machine owns
+// only its own section of the shared record.
+func (s *AnchorStore) SaveEnergy(state energyRecord) error {
+	if s == nil {
+		return ErrAnchorStoreUnusable
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	record, err := s.loadLocked()
+	if err != nil {
+		return err
+	}
+	record.Energy = &state
 	return s.saveLocked(record)
 }
 

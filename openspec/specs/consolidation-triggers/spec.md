@@ -1,5 +1,7 @@
 # consolidation-triggers Specification
 
+> **复核注记（2026-11-04 逐模块核对）**：本规范对已退役符号（`TagentAgent` / `EventBus` / `SessionProjection` / `PlainTool` / `SwappableModel` 等，全仓 Go 0 命中）的引用均为 MUST NOT 禁止项、历史实现注记或迁移期条款，**无现行 SHALL/MUST 建立在已退役符号上**；现行契约以 `assembly` 组合根 + 每地址常驻消费循环 + 装配期按声明分派为准。逐条映射见 `openspec/changes/archive/2026-11-03-runtime-architecture-convergence/evidence/10-doc-gap-register.md`。
+
 ## Purpose
 
 记忆巩固触发能力:以建议式(容量路与冥想 hint 路)而非自动执行的方式提示巩固,执行权保留在 LLM 与 memory_consolidate 工具;BuildConsolidationEvent 前置硬门控校验实际源事件数,SNOOZED 状态持久化于 vmeta KV 键,零值配置即禁用、默认行为不变。

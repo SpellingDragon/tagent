@@ -5,10 +5,52 @@
 
 ## [Unreleased]
 
+### Changed（0 债务清理：非预期设计与实现，2026-11-06）
+
+- **术语更名「转世」→「重启恢复」**：项目术语与生产标识符统一（`maybeInjectReincarnationNotice`→`injectRestartNotice`、`detectReincarnation`→`detectRestartMarker`），历史快照与已发布条目保持原文。冻结契约拼写不随更名：`"reincarnation"`、`[reincarnation]`、`REINCARNATION_NOTICE`、`[转世通报]` 与两个验收测试名，登记见 [GLOSSARY「五、契约拼写」](docs/GLOSSARY.md)。
+
+- **九个 TBD Purpose 补齐**：归档生成的主 spec 骨架 Purpose 是 CLI 占位文本（长度恰好绕过 ≥50 字符门），全部改写为对应能力的真实用途。**影响范围**：九个主 spec 的 Purpose；**触发条件**：读主 spec Purpose；**自查方法**：`grep -rl '^TBD' openspec/specs/*/spec.md` 零命中。
+
+- **幽灵 spec 删除**：`prompt-loader-fallback` 主 spec 描述 2026-10-26 已移除的 prompt 装载回退子系统（6 个符号全仓 0 命中），整个目录删除；`event-segment-store` 里 DeleteEvent/count_known 两族无实现条款与 scenario 删除。**影响范围**：主 spec 集合 149→148；**自查方法**：`bash scripts/gates/check-openspec.sh` exit 0。
+
+- **旧叙事与幽灵路径清理**：根 `resources/prompts/meditation.md` 的 ticker 时代「定时冥想/自我改进引擎/refine/三类产物」叙事改写为事件驱动反思（169→29 行，产品未加载该文件）；`GLOSSARY.md` 五处「实施中」与两处已归档幽灵路径、`ADR 0002` 依据路径、`fact-vocabulary` 陈旧登记指令同步落地事实；`self-improvement-meditation` 与 `meditation-agent-partition` 主 spec 对齐当前机制。**自查方法**：`grep -rn 'boundary-closure 实施中\|前瞻豁免\|refine register' docs/ openspec/specs/` 零命中。
+
+- **中位数聚合真实落地**：06 域 design 原写「每任务 3 重复取中位数」，实现却是均值且 design 自相矛盾；`bench/metrics.Aggregate` 改为 cold/hot 首 token 与完整延迟的中位数聚合（偶数取两中值平均），新增单测钉住「10/20/300→20 而非 110」，design 偏差自白删除。**影响范围**：`bench/metrics/`、06 归档 design；**自查方法**：`go test ./bench/... -count=1`。
+
+- **TTL 前瞻豁免删除**：`delivery.settlement` 族的负 TTL 注册被明确标注「当前无生产挂载的前瞻豁免」，而 `LifecycleConfig.Window` 已按族构造性豁免；删除冗余注册与 `TestSettlementTTLEntryRegistered`，保留 Window 构造性保证，spec/文档/归档措辞同步。**影响范围**：`memory/ledger/lifecycle_config.go`、`assembly/host_delivery_test.go`、FACT-VOCABULARY 与相关 spec；**自查方法**：`go test ./memory/ledger ./assembly -count=1`。
+
+- **债务措辞清零**：L5 桥、reward 派生、判定结论事实族、中位数偏差自白、规格债单列、归档 12 个未勾任务行，全部改为「不在本变更范围」的干净边界或如实补勾；`spec_hygiene` grandfather 基线 291→287（只清 stale、零新增违规）。**自查方法**：`python3 scripts/gates/check_spec_hygiene.py` errors=0。
+
+- **CI 长分片就绪窗对齐**：03.11 长跑父进程用固定 5m 就绪窗早于子进程自身 15m 硬超时杀掉正常但慢的世代（W2 结算事实进链后每代恢复链单调增长，CI 6 分片并行放大）；就绪窗改为复用子进程硬超时，单一上限。**影响范围**：`examples/wechat-bot/smoke_harness_test.go`；**触发条件**：CI event-integrity-long 分片；**自查方法**：`go -C examples/wechat-bot test -tags smoke . -run '^TestLocalSmokeSymptom' -count=1`。
+
+### Changed（boundary-closure：九域纯化，2026-11-05）
+
+- **交付义务事件化**：`agent_output.Meta` 携带 owed 声明，与答案同笔成立；发送结果落 `delivery.settlement` 结算事实（追加式、键含终态），恢复只读链、旧 KV 仅迁移读；删除旧 KV 写入面、实验开关与兼容回退。**影响范围**：`assembly/host_delivery.go`、`assembly/host.go`、失败/延迟告知与重启补送；**触发条件**：任一跨 task、会话送达或进程重启；**自查方法**：`go test ./assembly -run 'TestDeliveryEventificationIsUnconditional|TestSymptomAnchor' -count=1`。
+
+- **统一最终请求预算**：模型请求离开系统前整包核算（system/messages/工具 schema/reasoning/ContentParts/任务板/恢复提示），按可降级次序裁剪，删无可删时具名拒绝；`ProviderContextWindow`/`OutputReserve` 在 `api/config` 声明，`MaxTokens` 保持回放窗口语义。**影响范围**：`runtime/agent/loop.go`、`request_assembly.go`、`api/config`；**触发条件**：任一模型回合；**自查方法**：`go test ./runtime/agent -run 'Budget' -count=1`。
+
+- **资源有界**：本地 KV 条目驻留预算 1MiB、段缓存 1MiB，地址空闲回收，真占用常驻斜率门（300 轮 `slope=103789 B/round <= 131072`）。**影响范围**：`memory/ledger`、`examples/wechat-bot` 冒烟；**触发条件**：长跑与重启；**自查方法**：`go test ./examples/wechat-bot -tags smoke -run '^TestLocalSmoke$' -count=1`（日志含 slope）。
+
+- **exec 代际与折叠溯源**：会话代际令牌无条件探活、死屏重建；折叠摘要携带完整 `instance_id` 世代前缀。**影响范围**：`tool/exec`、`memory/replay`；**触发条件**：复用历史会话执行；**自查方法**：`go test ./tool/exec -run 'TestGenerationCheckIsUnconditional|TestSymptomAnchor' -count=1`。
+
+- **配置链真相**：`config.declaration` 事实 + 发布记录 + 失败回执上链，watcher 消费变更，Boot 对账；安装失败如实返回错误而非假成功。**影响范围**：`assembly/host_reload.go`、`examples/wechat-bot/config_watch.go`；**触发条件**：配置热更新或重启；**自查方法**：`go test ./tests/integration/config -count=1`。
+
+- **冥想自持状态机**：激活是真实 `external_input`（带因果元数据），宿主自身在 `tagent-session:tagent:reflection` 会话反思，idle-gating 内化，独立 meditator 退役为可选策展注释；插件按三挂点挂载。**影响范围**：`features/evolution/meditation`、`examples/wechat-bot/tagent.yaml`；**触发条件**：空闲或状态激活；**自查方法**：`go test ./features/evolution/meditation -count=1`。
+
+- **真实任务对照与样本回路**：`bench` 夹具/验收器/三方 runner，真实 run `bench-20261105T150446Z-9a9d7d`（三方各 36/36、369 次调用、五指标）；训练样本 annex 与资格门（回读 failure-closed）。**影响范围**：`bench/`、`features/rl/sample/`；**触发条件**：基准运行或样本导出；**自查方法**：`go test ./bench/... ./features/rl/... -count=1`。
+
+- **三挂点机械守护**：ADR 0006 + 四条门禁规则（schema 白名单/装配符号/持久真相登记/spec 卫生），突破协议需 ADR＋用户裁定＋注册表例外三缺一即红。**影响范围**：`scripts/gates/check_*.py`、`golden/runtime/`、lint/CI；**触发条件**：新增特性节、持久面或规格条款；**自查方法**：`bash scripts/gates/lint.sh --only contracts`。
+
+- **preflight 提速**：长事件矩阵由 6 分片改为 2 分片并行、新增 `--skip-event-long`（本地快检约 3 分钟），CI 保留全 6 分片覆盖。**影响范围**：`scripts/gates/preflight.sh`、CI 校验器自测；**触发条件**：本地 MR 等价门；**自查方法**：`bash -n scripts/gates/preflight.sh`。
+
+### Changed
+
+- preflight 的 wechat-bot smoke 段超时由 30m 放宽到 75m：覆盖 30-60 分钟上界与裕量，只放宽时限、不改门语义。**影响范围**：本地 MR 等价门 `scripts/gates/preflight.sh` 与 CI 的 smoke 入口；**触发条件**：完整 300 轮 smoke 在 30m 内未完成时被误判超时；**自查方法**：`grep -n 'timeout 75m' scripts/gates/preflight.sh` 命中该行。
+
 ### Documentation
 
 - README 将 tagent 定位为可嵌入的 Go Super-agent 框架，补充事件驱动、插件、公开技术阅读参考、使用场景与运行挑战，并提供英文入口。
-- 公开 2026-11-01 开发快照的冒烟与吞吐证据：18 组 benchmark 通过；完整长冒烟反思失败、消费红锚和真实 provider 跳过状态分别记录，不混作通过。
+- 公开 2026-11-01 开发快照的冒烟与吞吐证据：6 个基准场景 × 3 次重复（18 组样本）通过；完整长冒烟反思失败、消费红锚和真实 provider 跳过状态分别记录，不混作通过。
 - 中英文 README 将 DeepSeek 材料移至文末参考与致谢，澄清引用不表示项目隶属、合作或背书，感谢实际底层依赖项目 tRPC-Agent-Go，并关联实验 fork、保留官方上游归属。
 
 ### Breaking Changes（模型面：send 收敛为唯一跨 task、会话通信工具；`deliver_summary`、`resume_task` 退役）
@@ -49,6 +91,58 @@
 - **影响范围**：`assembly/host_tools.go` 的装配面；`tests/integration/host` 的 send 出网场景（场景迁移不删场景、不改断言语义）；依赖“send 即出网”的部署提示。
 - **触发条件**：部署提示仍以 send 作为对用户说话的手段；或对未接线的寻址面调 send——应得 `[send_denied]`，而不是投递。
 - **自查方法**：`grep -rn "hostSendLineage" --include=*.go .` 零命中（若保留须有注释写明保留理由）；`grep -c "user address of this call" assembly/host_tools.go` 为 0；对照 `assembly/host_tools.go` 的 dispatch：task 走重入面、其余寻址面在未装配时拒绝而非出网。
+
+### Breaking Changes（运行时：一条事实链、一个消费循环；`170ef267` squash）
+
+同提交 `170ef267`（2026-11-04）落地 150 轮编排的运行时收敛，下面的公共面变化此前未记入 CHANGELOG，现按四要素补齐。概念净账见 `openspec/changes/archive/2026-11-03-runtime-architecture-convergence/evidence/04-concept-net-ledger.md`。
+
+#### 1. 十个公共导出面删除（概念净减）
+
+- **内容**：`Writers`、`PresentedFace`、`Movement`、`Continuations`、`Channel/ChannelRow/Change/Dimension/Router`、`ModelReplacement`（事实族）整体退役；`domain_surface.removed=10`、`renames=0`、`exported_interfaces 78→77`，无兼容别名。
+- **影响范围**：直接引用上述符号的嵌入方；`golden/runtime/architecture.json::concept_ratchet` 冻结 `removed≥10 / new≤1 / interfaces≤77`，回加任一公共面即判红。
+- **触发条件**：升级后引用旧公共面编译失败；或以 `--skip-specs` 绕过规格同步。
+- **自查方法**：`python3 scripts/gates/check_concept_budget.py --json` → `errors: []` 且 `domain_surface.removed=10`；`grep -rnE 'TagentAgent|RegisterBuiltinTools|ToolRegistry' --include=*.go .` 零命中。
+
+#### 2. `Loop.Drive` 退出公共面，装配根与关闭入口正名
+
+- **内容**：`Assemble` 从模块根包迁至 `assembly/run.go:368`；`Run.Close` 形状为 `(ctx, agent.CloseRequest)`；`hostFace` 的 `/healthz` 与 `/task` 共用同一鉴权门（`TAGENT_RL_AUTH_TOKEN` 非空时回环也必须带 Bearer）。`runtime/agent/shutdown.go` 不存在。
+- **影响范围**：按 `tagent.Assemble`／`tagent.NativeAgent` 写的示例与部署脚本；`examples/cli-host/README.md`、`examples/wechat-bot/README.md` 已同步正名。
+- **触发条件**：旧 `tagent.*` import 路径；或 healthcheck 不传 Bearer 而容器设了 token（恒 unhealthy）。
+- **自查方法**：`go build ./...`；`grep -rn 'tagent.Assemble' --include=*.go .` 零命中；`grep -c 'CMD-SHELL' examples/wechat-bot/docker-compose.yml` > 0。
+
+#### 3. 每地址一个常驻消费循环，同步入口等待闭合段
+
+- **内容**：`Host.Invoke`／`Run.Invoke`／`Run.InjectEvent` 只提交事实并唤醒目标地址，调用方等待其输入所属闭合段的不可变结果；`Loop.drive` 无生产调用者（仅测试），`tagent: consumer drive start/end` 只在这条死面发出。现行观察面为 `consumer segment open/close` 与 `consumer decision`（见 `docs/OPERATION.md` §七·E）。
+- **影响范围**：把「调用即驱动一次模型」当作同步语义的嵌入方；依赖 `consumer drive start/end` 日志行的运维脚本。
+- **触发条件**：升级后按旧同步语义假设调用返回即回合结束；或按 `consumer drive start` 抓日志为空。
+- **自查方法**：`go test ./tests/integration/host -run '^TestQuiesceCancelledCallerAnswersCut$' -count=1`；`grep -rn 'consumer drive start' --include=*.go .` 仅命中 `Consumer.driveInvocation`。
+
+#### 4. CI 事件门十分片 + 症状锚六例
+
+- **内容**：`event-integrity-short` 由 `--repeat 10` 改为 10 路 matrix `--repeat-index`（artifact `event-integrity-short-1..10`）；本地 `scripts/gates/preflight.sh` 仍用 `--repeat 10`，两个入口不可混写。`event-semantics-symptoms` 选择六个 `TestLocalSmokeSymptom*`（含 NoSendTool、DeliveryHold）。
+- **影响范围**：按旧 artifact 名 `event-integrity-short` 取证据的脚本；`docs/OPERATION.md` §5.4 已同步。
+- **触发条件**：CI 里出现裸 `--repeat`（`test_check_runtime_workflow.py` 明禁）；或按「四个」症状锚计数。
+- **自查方法**：`python3 -m unittest discover -s scripts/gates -p 'test_check_runtime_workflow.py'`；`grep -c 'func TestLocalSmokeSymptom' examples/wechat-bot/smoke_test.go` = 6。
+
+### Documentation
+
+- 逐模块代码核对（api/runtime/assembly、memory/tool/features、examples/tests/scripts/workflows、specs/wiki 四簇）：修正热更结构拒绝范围、model replacement 退役符号、投递五键、注意力冻结类型与元数据键、`DecisionCount`／`CloseOutcome` 四值、`Assemble`／`shutdown.go` 等假指针、wechat/cli-host/bench 示例 README 的 phantom 符号与鉴权口径；补 7 篇历史页锚点、manifest 声明、`docs/wiki/README.md` 分类与门禁口径。证据与逐条缺口见 `openspec/changes/archive/2026-11-03-runtime-architecture-convergence/evidence/07-11` 与 `10-doc-gap-register.md`。
+
+## [v0.5.0] - 2026-10-30
+
+> 事后补齐（2026-11-04）：tag `v0.5.0`（`21713e47` → `c111d7a2`）打 tag 时未定版 CHANGELOG（`git show v0.5.0:CHANGELOG.md` 从 `[Unreleased]` 直接跳 v0.4.0）。本节据 tag message 与当期提交补齐，**不改变 tag 指向**。注意 tag 目标是 feature squash（#32 的 `c111d7a2`）而非独立 release commit；`[Unreleased]` 在打 tag 时未定版，故本节与 `[Unreleased]` 存在时间重叠，发布流程偏差登记在 `openspec/changes/archive/2026-11-03-runtime-architecture-convergence/evidence/09-ci-run-attestation.md`。该提交信息整段照抄了 #31 的冥想条目（`PendingCount`/`summary_timeout` 等符号在树中不存在），仅消息误植，非工作丢失。
+
+### Added（tag message 所列）
+
+- **intake 每个决策边界读链**：在途输入在链上受理，不再 park。
+- **冥想让位**：会话活跃时让位并在既定节奏重评（`TickDisposition` 五值、`DeferredCount()`／`LastDeferredAt()`）。
+- **稳定前缀 + 尾部动态 system 段**：工具定义随 `ToolOrder` 传递（tag message 记 fork `v1.11.2-tagent.2`；当前 `go.mod:116` 已推进到 `v1.11.2-tagent.3`）。
+- **可见面运行期收窄**：工具/MCP/skill 面是配置子集，默认全集。
+
+### Documentation
+
+- 中文 README 重写为可嵌入的 Go Super-agent 框架（Super-agent 实践对照表、架构 mermaid 图、6 行吞吐实测与可复现证据）；英文版保留「完整长冒烟 FAIL / provider SKIPPED」披露。
+- 16 篇活契约 wiki 页按当时代码重写式修订；`docs/archive/wiki/PRE-REWRITE-MANIFEST.md` 记录保全对象（其「131→131 一个未删」为写时结论，`1ac7cf88` 后现行 106/131，见该 manifest 的 2026-11-04 注记）。
 
 ## [v0.4.0] - 2026-10-26
 

@@ -1,7 +1,7 @@
 # partition-local-storage-access Specification
 
 ## Purpose
-TBD - created by archiving change optimize-partition-storage. Update Purpose after archive.
+分区本地存储访问：按分区局部性组织读写并保留等价回退路径，查询优化不改变事实语义，同步屏障与磁盘格式在优化前后保持不变。
 ## Requirements
 ### Requirement: 分区访问局部性与等价回退
 LocalFileKV SHALL 对可证明属于单命名空间的Scan/Range仅访问该桶；模糊或跨桶查询 SHALL 保守遍历并保持现有词典序/limit结果。

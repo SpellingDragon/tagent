@@ -496,7 +496,7 @@ POST /openapi/wiki/v1/get_media_info
 
 ## Preflight Check
 
-使用 `scripts/preflight-check.cjs` 脚本自动完成类型检测和大小校验。脚本按以下优先级解析：
+使用 `scripts/preflight-check.cjs` 脚本在上传前完成原始文件的类型、图片真实签名和大小校验。脚本按以下优先级解析声明类型；图片还必须通过 MIME/扩展名与真实签名一致性校验：
 
 1. **`--content-type` 已提供且可识别** → content-type 优先，直接使用
 2. **`--content-type` 不可识别** → 回退到扩展名
@@ -505,10 +505,10 @@ POST /openapi/wiki/v1/get_media_info
 
 ```bash
 # 有扩展名（自动推断）
-node .claude/skills/ima-skill/knowledge-base/scripts/preflight-check.cjs --file report.pdf
+node "$SKILL_DIR/knowledge-base/scripts/preflight-check.cjs" --file report.pdf
 
 # 无扩展名或扩展名不可识别（需传入 content-type）
-node .claude/skills/ima-skill/knowledge-base/scripts/preflight-check.cjs --file downloaded_file --content-type application/pdf
+node "$SKILL_DIR/knowledge-base/scripts/preflight-check.cjs" --file downloaded_file --content-type application/pdf
 ```
 
 ---

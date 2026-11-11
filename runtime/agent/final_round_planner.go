@@ -91,6 +91,17 @@ func (p *FinalRoundPlanner) Name() string { return FinalRoundPlannerName }
 // judgment of one spent budget out.
 func (p *FinalRoundPlanner) Port() plugin.Port { return plugin.PortFactObservation }
 
+// Material declares what this planner reads, when it reads it and what a failed
+// reading leaves behind: one committed fact read after its commit, where a failed
+// judgment is a named gap and the fact keeps standing.
+func (p *FinalRoundPlanner) Material() plugin.Material {
+	return plugin.Material{
+		Reads:   plugin.PortFactObservation,
+		Timing:  plugin.TimingPostCommit,
+		Failure: plugin.RecordGap,
+	}
+}
+
 // ObserveCommit judges the budget of the segment one committed fact belongs to
 // and files the closing round of the range whose budget is spent.
 //

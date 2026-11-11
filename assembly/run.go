@@ -18,8 +18,10 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"sort"
 	"strconv"
 	"strings"
@@ -72,6 +74,15 @@ type NativeAgent struct {
 	// carries: the one Before pass grades and the After pass presents every call
 	// of that generation over these instances, in the declared order.
 	Plugins []plugin.Instance
+	// reflectionSession names the dedicated session whose request alone may see
+	// the reflection-only tools; empty for an agent without host self-reflection.
+	// These two fields carry the session-scoped tool face from the composition
+	// root into the published binding, so it survives a reload unchanged.
+	reflectionSession event.SessionID
+	// reflectionOnly names the cross-session tools only reflectionSession may
+	// see. Every other session of the agent has them filtered out of its request
+	// face, so the entry tool face stays free of the channel-bypassing send.
+	reflectionOnly []string
 }
 
 // InvokeRequest is one invocation admitted at the assembly entry: the
@@ -209,14 +220,17 @@ type Run struct {
 	recovery  task.RestoreReport
 	bindings  *state.Bindings
 	publisher *state.Publisher
-	occupancy *state.Occupancy
-	authority *state.Authority
-	store     *state.MemoryStore
-	inspector state.Subject
-	admission *task.MemoryAdmission
-	commit    *runCommit
-	registry  *task.MemoryRegistry
-	manager   *task.MemoryManager
+	// observationEnabled records that the composition root wired the commit
+	// observation face; guarded by mu like the faces it gates.
+	observationEnabled bool
+	occupancy          *state.Occupancy
+	authority          *state.Authority
+	store              *state.MemoryStore
+	inspector          state.Subject
+	admission          *task.MemoryAdmission
+	commit             *runCommit
+	registry           *task.MemoryRegistry
+	manager            *task.MemoryManager
 	// writers is the ledger of the productions this run started — the drives, the
 	// model streams of their decisions and the tool productions of their calls —
 	// and the close reads it as the writer-stopped criterion of the run. The loop
@@ -240,7 +254,6 @@ type Run struct {
 	projection    *query.Projection
 	retrieval     *retrievalSupply
 	tier          *ledger.Tier
-	observed      *memory.MemoryEventQuery
 	embedder      memory.Embedder
 	loop          *agent.Loop
 	sites         map[event.Address]bool
@@ -248,9 +261,23 @@ type Run struct {
 	// factOrder keeps the commit order of the live facts, so a read of one
 	// session's chain answers in the order that chain was written.
 	factOrder []event.EventID
+	// controlFacts counts the live facts that are control-plane records of the
+	// configuration chain instead of facts of a session chain, and controlScanned
+	// is the point of factOrder that count has been brought up to. A trim shrinks
+	// factOrder and recomputes both over the kept prefix (compactFactOrderLocked),
+	// so the cursor stays a valid index and the count tracks the surviving records.
+	controlFacts   int
+	controlScanned int
 	// sessionFactCount counts the live facts each session chain holds, so the
 	// per-commit window trim stays O(1) until a chain can actually hold a cut.
 	sessionFactCount map[event.SessionID]int
+	// pinnedFacts names the facts the delivery account still owes a target: a
+	// settlement fact of an unsettled obligation (owed or held) is exempt from
+	// the hot window trim, so the read face of the obligation never falls out
+	// of the window while the obligation stands. The set is pinned by the
+	// delivery layer (host_delivery.go) and never by a commit, so a fact no
+	// obligation names ages out on the ordinary trim.
+	pinnedFacts map[event.EventID]struct{}
 	// plugins holds the run-level instances every agent generation carries.
 	plugins []plugin.Instance
 	factSeq uint64
@@ -269,11 +296,84 @@ type Run struct {
 	// landing serializes the sequence slot of one partition beside the segment
 	// commit that takes it, so two facts committed at once never claim one slot.
 	landing sync.Mutex
+	// checkpointMu serializes the framework checkpoint cuts of this run with each
+	// other, so one account is stated by one cut: two cuts over one slot would
+	// file two payloads under one identity. No commit takes it.
+	checkpointMu sync.Mutex
+	// flight is the quiet point of the fact pipeline: a commit holds it while it
+	// lands and until the state it leaves its holder in, and the coordinator
+	// drains it before it reads any state. The drain is what makes a cut state a
+	// state without a lock over the commit stream — a lock that a holder's own
+	// commit waits on from inside the state reading that asked for it.
+	flight commitFence
+	// states is the state seam of this run: the registry every consumer's
+	// recoverable state slice is mounted on, aggregated into one checkpoint.
+	states *state.StateRegistry
+	// obligations is the account every landed fact is applied to (see
+	// mountObligationAccount): the delivery account of the host mounted on this
+	// run. A run beside no mounted account lands its facts without one.
+	obligations func(event.Event)
+	// checkpointEvery and checkpointPeriod are the two cadence dials of the
+	// framework checkpoint: a busy chain files one after this many commits and a
+	// quiet chain still files one after this long.
+	checkpointEvery  int
+	checkpointPeriod time.Duration
+	// checkpointCommits counts the commits since the last checkpoint, and
+	// checkpointAt is the moment it was filed: it opens at the assembly, so the
+	// period measures a chain that has been committing rather than the wall clock
+	// since the epoch.
+	checkpointCommits int
+	checkpointAt      time.Time
+	// checkpointDue wakes the goroutine that files the checkpoint the cadence owes:
+	// a commit that reaches the due signals it and takes no cut itself.
+	checkpointDue chan struct{}
+	// checkpointDuePending records the due a wake stands for, so a wake a cut
+	// already answered files nothing.
+	checkpointDuePending bool
+	// checkpointSessionPending names the session chains a session cut is owed
+	// for: a chain asks for its own checkpoint when its context reached a moment
+	// worth stating, and the filer takes those cuts on its own goroutine.
+	checkpointSessionPending map[event.Address]struct{}
+	// sessionFiled, sessionCuts and sessionSlices are the session face of the
+	// checkpoint account: the checkpoint each chain last filed or restored, the cut
+	// that state corresponds to, and the slices that checkpoint stated. A chain the
+	// run filed no checkpoint of reads the framework's own cut instead.
+	sessionFiled  map[event.SessionID]event.EventID
+	sessionCuts   map[event.SessionID]event.CheckpointOffset
+	sessionSlices map[event.SessionID]map[string]bool
+	// checkpointStop ends the filer once the close of this run began, and the once
+	// makes a repeated close stop it once. checkpointDone states that the filer
+	// goroutine has returned, so a close joins the cut in flight instead of
+	// returning beside a commit still on its way to the store.
+	checkpointStop     chan struct{}
+	checkpointStopOnce sync.Once
+	checkpointDone     chan struct{}
+	checkpointDoneOnce sync.Once
+	// checkpointFiled is the fact key of the newest checkpoint this run filed or
+	// restored, so a cadence that reaches the same cut files nothing twice.
+	checkpointFiled event.EventID
+	// checkpointOffset is the cut the newest checkpoint of this run states: the
+	// partition-sequence watermark the restored state corresponds to.
+	checkpointOffset event.CheckpointOffset
+	// restoredProjection is the session survivors the newest checkpoint stated:
+	// the boot rebuilds each chain from them instead of folding the covered
+	// history, and it is emptied as the boot takes them.
+	restoredProjection map[event.Address]*restoredChain
+	// checkpointSlices names the state slices the newest checkpoint carried, so a
+	// reader reads only past the cut of a checkpoint that actually states its
+	// state and reads the whole chain beside one that does not.
+	checkpointSlices map[string]bool
+	// restoredInputs is the input rounds the newest checkpoint stated with no
+	// answer: they stand before every fact that landed past the cut, so the rest
+	// criterion judges the owed drives of a restart beside the tail it replays.
+	restoredInputs []restoredInput
 	// landedSeq holds the last sequence slot each partition committed: it is
 	// seeded from the events the tier already published, so a fact committed
-	// after a restart takes the slot after the last committed one.
+	// after a restart takes the slot after the last committed one. The landing
+	// lock guards the map, so the commit that claims a slot and the cut that reads
+	// them never read a partition beside a write of it.
 	landedSeq   map[int]int64
-	records     memoryPublications
+	records     publicationRecords
 	approver    task.Approver
 	policy      plugin.Governor
 	enforcement governance.Enforcement
@@ -281,6 +381,29 @@ type Run struct {
 	// through and the lease explanation reads; a declaration that grants the
 	// exec face beside no ledger is refused by name at call time.
 	execManager *tagentexec.Manager
+	// genRegistry is the generation-scoped consumer registry of this run: the
+	// consumers mount themselves through the options that wire them, and the
+	// publication path drives the registry without naming any consumer.
+	genRegistry *state.GenRegistry
+	// genFaces reports the per-generation native face of every declared agent as
+	// the consumer that owns it built it for one generation: the publication
+	// path reads the face of the candidate generation here instead of carrying
+	// the tools of one generation in the natives the caller handed over. It is
+	// wired by the composition root that owns the document those faces are read
+	// from; a run assembled beside none keeps the natives it was handed.
+	genFaces GenerationFaces
+	// genConsumers is the ordered account of the consumers mounted on
+	// genRegistry: the name each registration is keyed by, in the order the
+	// wiring mounted them. The publication path builds a candidate generation in
+	// exactly this order and unwinds it in the reverse, so a consumer that reads
+	// a face another consumer installed is mounted after it. The order is read
+	// from the wiring alone and never from map iteration, so the same wiring
+	// always builds the same order.
+	genConsumers []string
+	// publishMu serializes one publication attempt end to end: the consumer
+	// faces a candidate installs are read by its own binding construction, so
+	// two attempts never interleave the faces they install and restore.
+	publishMu sync.Mutex
 	// mcpServers is the live registry the MCP gateways read, mcpGateways the
 	// fixed gateway tools over it and mcpBinder the binding of the declared
 	// server generation onto it.
@@ -366,6 +489,11 @@ type Run struct {
 // - The producer of the closing round is an instance of the same flow: every agent's After pass judges the budget of the segment its commit grew, so the closing round of a spent budget stands on the chain as the fact it is.
 // - The loop builds the writer ledger for itself and the run reads it through the loop, so the close judges the very registrations the productions made.
 func Assemble(ctx context.Context, decl *config.Declaration, agents map[event.AgentID]NativeAgent, opts ...Option) (*Run, error) {
+	return assemble(ctx, decl, agents, true, opts...)
+}
+
+// assemble builds a run and optionally trims before the host's delivery recovery.
+func assemble(ctx context.Context, decl *config.Declaration, agents map[event.AgentID]NativeAgent, trimAfterSeed bool, opts ...Option) (*Run, error) {
 	if decl == nil {
 		return nil, errors.New("tagent: the assembly carries no declaration")
 	}
@@ -400,21 +528,54 @@ func Assemble(ctx context.Context, decl *config.Declaration, agents map[event.Ag
 		fixers:           map[event.AgentID]*fileFixer{},
 		replays:          map[event.Address]replayEntry{},
 		landedSeq:        map[int]int64{},
+		states:           state.NewStateRegistry(),
+		checkpointEvery:  CheckpointCommitInterval,
+		checkpointPeriod: CheckpointPeriod,
+		checkpointAt:     time.Now(),
+		checkpointDue:    make(chan struct{}, 1),
+		checkpointStop:   make(chan struct{}),
+		checkpointDone:   make(chan struct{}),
 		approver:         cfg.approver,
 		policy:           cfg.policy,
 		enforcement:      cfg.enforcement,
 		recorder:         cfg.recorder,
 		observer:         cfg.observer,
 		execManager:      cfg.execManager,
+		genRegistry:      state.NewGenRegistry(),
+		genFaces:         cfg.genFaces,
 		capture:          cfg.capture,
 		leases:           map[event.AgentID]*leaseState{},
 		leaseObservers:   map[event.AgentID]*rl.LeaseObserver{},
+	}
+	if cfg.observer != nil {
+		r.enableGenerationObservation()
+	}
+	for _, slice := range []state.Stateful{projectionStateSlice{run: r}, inputsStateSlice{run: r}, compressStateSlice{run: r}} {
+		if _, err := r.states.Register(slice); err != nil {
+			return nil, err
+		}
 	}
 	for id, held := range cfg.leases {
 		lease := held
 		r.leases[id] = &lease
 	}
-	r.compress = NewCompressionConsumer(ageFoldSessions{run: r})
+	for _, reg := range cfg.genRegistrations {
+		if err := r.genRegistry.Register(reg); err != nil {
+			return nil, err
+		}
+		r.genConsumers = append(r.genConsumers, reg.Name)
+	}
+	for _, port := range cfg.genPorts {
+		port.bind(r)
+	}
+	traceStart := time.Now()
+	booTTrace := func(name string) {
+		if os.Getenv("TAGENT_BOOT_TRACE") == "1" {
+			assemblyInfo("tagent: boot trace phase=%s elapsed=%s", name, time.Since(traceStart).Round(time.Microsecond))
+		}
+	}
+	booTTrace("built")
+	r.compress = NewCompressionConsumer(ageFoldSessions{run: r}).withSummaryGist(bandSummaries{run: r})
 	r.ageFold = NewAgeFoldPlugin(ageFoldSessions{run: r})
 	r.ageFold.setExecutor(r.compress)
 	r.finalRound = agent.NewFinalRoundPlanner(finalRoundChain{run: r}, r.finalRoundPolicyOf)
@@ -457,8 +618,15 @@ func Assemble(ctx context.Context, decl *config.Declaration, agents map[event.Ag
 		if err != nil {
 			return nil, err
 		}
+		for _, s := range durable.LoadStats().Scans {
+			assemblyInfo("tagent: durable load scan prefix=%s keys=%d bytes=%d elapsed=%s",
+				s.Prefix, s.Keys, s.Bytes, s.Elapsed.Round(time.Microsecond))
+		}
 		r.commit = &runCommit{inner: durable, held: map[event.TaskID]bool{}}
-	} else {
+		booTTrace("storage")
+	}
+	r.records.attach(tier)
+	if durable == nil {
 		r.commit = &runCommit{inner: task.NewMemoryCommit(nil), held: map[event.TaskID]bool{}}
 	}
 	if durable != nil {
@@ -467,10 +635,17 @@ func Assemble(ctx context.Context, decl *config.Declaration, agents map[event.Ag
 		r.store = state.NewMemoryStore(r.authority)
 	}
 	r.registry = task.NewMemoryRegistry(r.commit, r.admission, task.WithActivity(r.noteProgress), task.WithTerminalTTL(cfg.terminalTTL()))
+	if _, err := r.states.Register(state.NewMailboxState(r.store)); err != nil {
+		return nil, err
+	}
+	if _, err := r.states.Register(tasksStateSlice{registry: r.registry}); err != nil {
+		return nil, err
+	}
 	r.movement = runMovement{registry: r.registry, store: r.store}
 	r.manager = task.NewMemoryManager(r.registry, nil, task.WithEnvelopeDeliverer(r.deliver))
 	r.delegations = agent.NewDelegator(closeGate{run: r, face: closeFace{manager: r.manager, registry: r.registry}}, r.bindings, r.instance)
 	r.publisher = state.NewPublisher(r.bindings, publishContract, cfg.governance, &r.records)
+	r.publisher.ObserveRetirements(r.recordGenerationRetirement)
 	r.loop = agent.NewLoop(r.publisher, r.occupancy, r.instance, r.resolveFact)
 	r.writers = r.loop
 	r.delegations.SetResident(r.loop)
@@ -481,6 +656,7 @@ func Assemble(ctx context.Context, decl *config.Declaration, agents map[event.Ag
 	})
 	r.loop.SetFactPipelines(r.factPipeline)
 	r.loop.SetRequestFace(r.requestBoundary)
+	r.loop.SetDeliveryPending(r.deliveryPendingFor)
 	inventory := query.NewInventory(hostReading{runReading: runReading{run: r}, approvals: cfg.approvals})
 	r.projection = query.NewProjection(inventory, projectionWindow)
 	r.mcpServers = mcpgw.NewServerRegistry()
@@ -492,47 +668,63 @@ func Assemble(ctx context.Context, decl *config.Declaration, agents map[event.Ag
 	if err := r.mountCapture(); err != nil {
 		return nil, err
 	}
-	if _, err := r.Publish(ctx, decl, agents); err != nil {
-		return nil, err
-	}
-	if durable != nil {
-		report, err := r.restoreChains(ctx, durable)
-		if err != nil {
+	if cfg.bootReconcile != nil {
+		if err := cfg.bootReconcile(ctx, r, decl, agents); err != nil {
 			return nil, err
 		}
-		r.mu.Lock()
-		r.recovery = report
-		r.mu.Unlock()
+	} else if _, err := r.Publish(ctx, decl, agents); err != nil {
+		return nil, err
+	}
+	r.mu.Lock()
+	if r.sessionFiled == nil {
+		r.sessionFiled = map[event.SessionID]event.EventID{}
+	}
+	if r.sessionCuts == nil {
+		r.sessionCuts = map[event.SessionID]event.CheckpointOffset{}
+	}
+	if r.sessionSlices == nil {
+		r.sessionSlices = map[event.SessionID]map[string]bool{}
+	}
+	r.mu.Unlock()
+	if durable != nil {
+		if err := r.restoreCheckpointState(ctx, tier); err != nil {
+			return nil, err
+		}
+		if err := r.restoreInMemoryState(ctx, durable); err != nil {
+			return nil, err
+		}
+		booTTrace("restoreChains")
 	}
 	if tier != nil {
 		supply, err := supplyRetrieval(ctx, tier, cfg.embedder)
 		if err != nil {
 			return nil, err
 		}
-		if err := supply.searcher.SetRetrievalTuning(cfg.vectorTopK, cfg.keywordTopK, cfg.rrfK); err != nil {
-			return nil, err
-		}
-		observed, err := seedObservedEvents(ctx, tier)
+		booTTrace("supplyRetrieval")
+		landed, err := r.seedReplay(ctx, tier)
 		if err != nil {
 			return nil, err
 		}
-		landed, err := seedLandedSeq(ctx, tier)
-		if err != nil {
-			return nil, err
-		}
-		if err := r.seedReplay(ctx, tier); err != nil {
-			return nil, err
-		}
+		booTTrace("seedReplay")
 		r.mu.Lock()
 		r.retrieval = supply
 		r.tier = tier
-		r.observed = observed
-		r.landedSeq = landed
 		r.mu.Unlock()
+		r.landing.Lock()
+		r.landedSeq = landed
+		r.landing.Unlock()
+		if trimAfterSeed {
+			r.trimSeededFacts()
+		}
 	}
 	r.mu.Lock()
 	r.embedder = cfg.embedder
 	r.mu.Unlock()
+	if err := r.convergeGenerationRetirements(ctx); err != nil {
+		return nil, err
+	}
+	booTTrace("converge")
+	r.startCheckpointFiler(ctx)
 	return r, nil
 }
 
@@ -547,13 +739,41 @@ func Assemble(ctx context.Context, decl *config.Declaration, agents map[event.Ag
 // account the publication just admitted, so the read source follows the owner
 // of the live scene instead of a static copy or an empty ledger.
 func (r *Run) Publish(ctx context.Context, decl *config.Declaration, agents map[event.AgentID]NativeAgent) (state.PublishOutcome, error) {
+	return r.publishDeclared(ctx, decl, agents, publicationWindow{})
+}
+
+// generationLeaseKind is the resource kind a generation-scoped consumer's
+// exclusive registration takes in the candidate ledger, so the diagnostic read
+// of the run names the same kind the publication path registered.
+const generationLeaseKind = "gen"
+
+// publishDeclared is the one preparation of a publication candidate: the
+// declaration fingerprint, the declared MCP servers, the prepared live binding
+// of every declared agent and the one publication entry, with the decision
+// window the record of this attempt carries. It is the same path Publish runs,
+// so every caller that judges a window still enters through the sole entry.
+//
+// The generation-scoped consumers build their instances for the candidate
+// generation before the binding construction reads their faces, and their
+// exclusive resources enter the candidate ledger beside the binding's own, so
+// the retirement of a superseded generation releases them through the existing
+// drain. A candidate whose own plan does not take effect — a failed
+// preparation, a refused publication, unchanged content or a publication that
+// rolled back to other content — puts the faces it installed back and frees only
+// what it acquired; a candidate that published keeps them installed.
+//
+// - The host dialect a publication of a host document carries is part of the fingerprint: the shared declaration does not hold the risk table, the observation section or the skill and read face of an agent, so a document that moved only those sections would otherwise publish nothing.
+func (r *Run) publishDeclared(ctx context.Context, decl *config.Declaration, agents map[event.AgentID]NativeAgent, window publicationWindow) (state.PublishOutcome, error) {
 	if decl == nil {
 		return state.PublishOutcome{}, errors.New("tagent: the candidate carries no declaration")
 	}
+	r.publishMu.Lock()
+	defer r.publishMu.Unlock()
 	fingerprint, err := config.Fingerprint(*decl)
 	if err != nil {
 		return state.PublishOutcome{}, err
 	}
+	fingerprint = publicationFingerprint(fingerprint, window.dialectKey)
 	servers := declaredServersOf(decl)
 	if err := mcpgw.ValidateDeclared(servers); err != nil {
 		return state.PublishOutcome{}, err
@@ -563,11 +783,39 @@ func (r *Run) Publish(ctx context.Context, decl *config.Declaration, agents map[
 		Baseline:    r.publisher.Baseline(),
 		Fingerprint: fingerprint,
 	}
-	cand, err := prepare(ctx, plan, r.suppliers(decl, agents))
+	gen := state.Generation(r.publisher.Current().Generation + 1)
+	built, err := r.genRegistry.Build(ctx, decl, gen)
 	if err != nil {
 		return state.PublishOutcome{}, err
 	}
+	if r.genFaces != nil {
+		faces, ok := r.genFaces.Face(gen)
+		if !ok {
+			built.Restore()
+			return state.PublishOutcome{}, errors.Join(
+				fmt.Errorf("tagent: the consumer side built no native face for generation %d", gen),
+				built.Release(ctx),
+			)
+		}
+		agents = faces
+	}
+	cand, err := prepare(ctx, plan, r.suppliers(decl, agents))
+	if err != nil {
+		built.Restore()
+		return state.PublishOutcome{}, errors.Join(err, built.Release(ctx))
+	}
+	for _, consumer := range built {
+		if consumer.Resources.Resources == nil {
+			continue
+		}
+		ref := cand.Resources.Register(generationLeaseKind, state.GenLeaseKey(gen, consumer.Name), consumer.Resources.Resources.ReleaseAll)
+		cand.Plan.Leases = append(cand.Plan.Leases, ref)
+	}
+	cand = cand.WithWindow(window.previous, window.previousFingerprint, window.models, window.dimensions, window.at)
 	outcome, err := r.publisher.Publish(ctx, cand)
+	if outcome.Result != state.PublishApplied {
+		built.Restore()
+	}
 	if err == nil {
 		r.loop.SetFinalRound(finalRoundPolicy(decl))
 		r.loop.SetAgentFinalRounds(agentFinalRoundPolicies(decl))
@@ -580,6 +828,19 @@ func (r *Run) Publish(ctx context.Context, decl *config.Declaration, agents map[
 		}
 	}
 	return outcome, err
+}
+
+// publicationFingerprint reports the publication fingerprint of one declaration
+// under one host dialect: the declaration fingerprint beside the digest of the
+// sections the shared declaration does not carry. A document that declares no
+// dialect section answers the digest of nothing, so its fingerprint stays the
+// declaration fingerprint and a publication of the same configuration again
+// reads as unchanged.
+func publicationFingerprint(fingerprint, dialectKey string) string {
+	if dialectKey == "" {
+		return fingerprint
+	}
+	return fingerprint + "|host:" + dialectKey
 }
 
 // declaredServersOf maps the server section of one declaration onto the named
@@ -635,6 +896,22 @@ func (r *Run) NarrowFace(ctx context.Context, agent event.AgentID, selection sta
 	}
 	resources.SetVisible(selection)
 	return nil
+}
+
+// SessionToolNames reports the tool names one session's request face exposes,
+// in the order the request emits them. It reads the live, session-scoped tool
+// face of the agent's current binding — reflection-only tools appear only for
+// the agent's dedicated reflection session — so a caller observes exactly the
+// face a request at that session would carry, without driving a turn.
+func (r *Run) SessionToolNames(agent event.AgentID, session event.SessionID) ([]string, error) {
+	ctx := context.Background()
+	handle, err := r.bindings.Borrow(ctx, agent)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = handle.Release(ctx) }()
+	_, order := state.ToolFace(handle.Binding, session)
+	return append([]string(nil), order...), nil
 }
 
 // CloseMCPServers releases every MCP server the live registry holds: the close
@@ -743,43 +1020,136 @@ func finalRoundSpecOf(decl *config.Declaration) config.FinalRoundSpec {
 	return config.FinalRoundSpec{}
 }
 
-// restoreChains folds every durable fact chain the storage already holds back
-// into the registry of this assembly under the current orchestration binding,
-// one outcome per task the chains cover. A chain carrying no admission
-// material is refused by name in the report and rebuilds nothing.
+// restoreInMemoryState is the second step of the restart-recovery consumption
+// logic: the in-memory state is restored from the checkpoint the last process
+// filed, or from the full replay of the fact chains beside a store that holds
+// none.
+func (r *Run) restoreInMemoryState(ctx context.Context, durable *state.DurableCommit) error {
+	report, err := r.restoreChains(ctx, durable)
+	if err != nil {
+		return err
+	}
+	r.mu.Lock()
+	r.recovery = report
+	r.mu.Unlock()
+	return nil
+}
+
+// restoreCheckpointState reads the newest framework checkpoint the storage holds
+// and hands every state slice back to its holder, so the fold that follows
+// completes an account instead of rebuilding one: the task slice states every
+// task of the cut beside the chain revision it stands at, and the delivery,
+// mailbox and input slices state the work the process still owed.
 //
-// The whole fold is observed as one line at INFO — the chains read, the tasks
-// rebuilt and the chains dropped (a chain the restore refused, or a link the
-// registry already held) beside the elapsed time — so a restart states what it
-// recovered instead of leaving the reader to count report entries. A failed fold
-// is observed at ERROR beside the chain it stopped on.
+//   - A tier holding no checkpoint states the empty cut, and the holders are restored from that the same way: each starts from the empty state and the replay past the cut rebuilds it, which past the zero cut is the whole chain.
+//   - The mailbox states the obligations its durable account still owes on either cut, so the work a stopped process left open is seated by this restore and no consumer keeps a restore path of its own.
+//   - The checkpoint is read once per boot: a holder mounted after this call states its slice from the pending set, and the chain rebuild that follows takes the state this call restored instead of restoring it again.
+//   - The framework's checkpoint states the whole account and each session checkpoint states one chain, so both are restored: the framework one first, which covers the holders that keep no state of a chain, then the newest checkpoint of every chain the storage holds, which states the chains past the framework cut. The restores merge, so a chain named by both stands once at the newer state.
+func (r *Run) restoreCheckpointState(ctx context.Context, tier *ledger.Tier) error {
+	if tier == nil {
+		return nil
+	}
+	if _, restored, err := r.restoreNewestCheckpoint(ctx, tier); err != nil {
+		return err
+	} else if !restored {
+		if err := r.states.RestoreEmptyState(ctx); err != nil {
+			return err
+		}
+	}
+	return r.restoreSessionCheckpoints(ctx, tier)
+}
+
+// restoreChains folds the durable fact chains the storage already holds back
+// into the registry of this assembly under the current orchestration binding,
+// one outcome per task the chains cover. A chain carrying no admission material
+// is refused by name in the report and rebuilds nothing.
+//
+//   - a chain the newest framework checkpoint states is folded from the link that landed past the stated revision, and one the checkpoint states with no such link is not read at all: a restart costs the account it keeps plus the increment past the cut, never the chains it already settled.
+//   - a chain the checkpoint did not state — one younger than the cut — is folded whole, which is the fallback that keeps the two paths agreeing.
+//   - a chain the checkpoint states with no record past its cut costs no read: it joins the covered set the checkpoint-state call restores.
+//   - a checkpoint-stated task the checkpoint rebuilt at the cut, whose tail links the fold completes, is held by the registry already and the fold reports no rebuild of its own: its recovery is the checkpoint's account, credited here as Recovered=true beside the covered tasks so the read projection serves it.
+//   - the report names the tasks in chain order whichever path restored them, so a restart answers the same account whether it read a chain or the checkpoint.
+//   - the whole fold is observed as one line at INFO — the chains read, the links they carry, the chains the checkpoint covered, the tasks rebuilt and the chains dropped beside the elapsed time — and a failed fold at ERROR beside the chain it stopped on.
 func (r *Run) restoreChains(ctx context.Context, durable *state.DurableCommit) (task.RestoreReport, error) {
 	started := time.Now()
 	owners := runOwners{bindings: r.bindings}
 	merged := task.RestoreReport{}
+	coverage := r.registry.CheckpointCoverage()
 	chains := durable.TaskIDs()
+	folded := task.RestoreReport{}
+	var covered []event.TaskID
+	links := 0
 	for _, taskID := range chains {
+		revision, stated := coverage[taskID]
+		if stated && durable.Revision(taskID) <= revision {
+			covered = append(covered, taskID)
+			continue
+		}
 		chain, err := durable.Records(ctx, taskID)
 		if err != nil {
 			assemblyError("tagent: restore stopped task=%s err=%v", taskID, err)
 			return merged, err
 		}
+		if stated {
+			chain = chainPast(chain, revision)
+		}
+		links += len(chain)
 		report, err := r.registry.Restore(ctx, chain, owners)
-		merged.Tasks = append(merged.Tasks, report.Tasks...)
 		if err != nil {
 			assemblyError("tagent: restore stopped task=%s err=%v", taskID, err)
 			return merged, err
 		}
+		if stated {
+			for i := range report.Tasks {
+				report.Tasks[i].Recovered = true
+			}
+		}
+		folded.Tasks = append(folded.Tasks, report.Tasks...)
 		for _, outcome := range report.Tasks {
 			if outcome.Recovered {
 				r.commit.remember(outcome.TaskID)
 			}
 		}
 	}
-	recovered, dropped := restoredCounts(merged)
-	assemblyInfo("tagent: restore folded chains=%d recovered=%d dropped=%d elapsed=%s",
-		len(chains), recovered, dropped, time.Since(started).Round(time.Microsecond))
+	restored, err := r.registry.CheckpointRestored(ctx, covered, owners)
+	if err != nil {
+		assemblyError("tagent: restore stopped at the tasks the checkpoint states err=%v", err)
+		return merged, err
+	}
+	byTask := make(map[event.TaskID]task.RestoreReport, len(chains))
+	for _, outcome := range folded.Tasks {
+		held := byTask[outcome.TaskID]
+		held.Tasks = append(held.Tasks, outcome)
+		byTask[outcome.TaskID] = held
+	}
+	for _, outcome := range restored.Tasks {
+		held := byTask[outcome.TaskID]
+		held.Tasks = append(held.Tasks, outcome)
+		byTask[outcome.TaskID] = held
+		r.commit.remember(outcome.TaskID)
+	}
+	merged.Tasks = make([]task.RestoreOutcome, 0, len(chains))
+	for _, taskID := range chains {
+		merged.Tasks = append(merged.Tasks, byTask[taskID].Tasks...)
+	}
+	recovered, dropped := restoredCounts(folded)
+	assemblyInfo("tagent: restore folded chains=%d links=%d covered=%d recovered=%d dropped=%d elapsed=%s",
+		len(chains)-len(covered), links, len(covered), recovered, dropped, time.Since(started).Round(time.Microsecond))
 	return merged, nil
+}
+
+// chainPast reports the links of one chain that landed past the state a
+// checkpoint already states: the links a fold completes the restored account
+// with, and no link the account already covers.
+func chainPast(chain []task.TaskRecord, revision int64) []task.TaskRecord {
+	past := make([]task.TaskRecord, 0, len(chain))
+	for _, link := range chain {
+		if link.Fact.ExpectedRevision < revision {
+			continue
+		}
+		past = append(past, link)
+	}
+	return past
 }
 
 // restoredCounts reports how many tasks the fold rebuilt and how many outcomes
@@ -828,13 +1198,14 @@ func assemblyDebug(format string, args ...any) {
 }
 
 // assemblyInfo renders one line of the assembly face at INFO: the storage tier
-// the assembly opened and what the fold of the durable chains recovered from it.
-// One assembly writes one line per event, so the INFO stream is bounded by the
-// assemblies a process builds.
+// the assembly opened, the per-prefix read cost of the durable load (five scan
+// lines beside a durable tier) and what the fold of the durable chains
+// recovered from it. One assembly writes a bounded line set, so the INFO stream
+// stays proportional to the assemblies a process builds.
 //
 // The redline list (3 rules):
 // MUST stay a bypass: a failing logger is a missing line, never a failed assembly.
-// MUST write one line per opened tier and one per completed fold.
+// MUST write one line per opened tier, five scan lines per durable load, and one per completed fold.
 // MUST NOT render the stored records, the prompts or the model output.
 func assemblyInfo(format string, args ...any) {
 	if trpclog.Default == nil {
@@ -887,8 +1258,8 @@ var publishContract = state.PublishContract{Required: []state.CheckName{"eval", 
 var ErrGovernanceMissing = errors.New("tagent: the formal assembly carries no governance")
 
 // ErrRetrievalUnwired reports a recall against a run assembled beside no
-// storage tier: the retrieval face reads through the observation table over
-// the committed store, and a run whose facts live only in memory carries no
+// storage tier: the retrieval face reads the durable chain on demand, and a
+// run whose facts live only in memory carries no
 // such store, so the recall is refused by name instead of answered as an empty
 // reference set that would read as "nothing was found".
 var ErrRetrievalUnwired = errors.New("tagent: the run carries no retrieval face (assembled beside no storage)")
@@ -914,16 +1285,21 @@ type assemblyConfig struct {
 	enforcement governance.Enforcement
 	storage     *ledger.StorageConfig
 	embedder    memory.Embedder
-	// vectorTopK and keywordTopK bound the two retrieval legs; rrfK is the
-	// rank constant their fusion scores under. The zero value keeps the legs
-	// unbounded and the canonical constant, so an untuned assembly behaves
-	// exactly as it did before the tuning existed.
-	vectorTopK  int
-	keywordTopK int
-	rrfK        int
 	recorder    rl.Recorder
 	observer    plugin.Observer
 	execManager *tagentexec.Manager
+	// genRegistrations carries the generation-scoped consumer mounts the
+	// wiring options contribute: each consumer registers its own builder, and
+	// the assembly drives the registry without naming any consumer.
+	genRegistrations []state.GenRegistration
+	// genFaces reports the per-generation native face the host consumer built
+	// for one generation, so the publication path composes the candidate binding
+	// over the face of its own generation.
+	genFaces GenerationFaces
+	// genPorts are the consumers of the host's own dialect this assembly hands
+	// the run it builds, so the builder of every candidate generation installs
+	// its face on the run before that generation's binding is prepared.
+	genPorts []hostGenerationPort
 	// reflectionAnchors is the anchor record path whose watermark the
 	// reflection face reports.
 	reflectionAnchors string
@@ -948,6 +1324,21 @@ type assemblyConfig struct {
 	// read as task_terminal_ttl: an assembly that names none keeps DefaultTerminalTTL, and
 	// a negative one keeps every record the run ever admitted.
 	taskTerminalTTL time.Duration
+	// bootReconcile is the startup reconciliation the host entry names: it runs
+	// after the storage tier is open and the configuration chain is attached,
+	// and before the first publication, so a restart decides whether the source
+	// file or the chain is the truth of this process instead of publishing the
+	// file unconditionally. A nil hook keeps the plain first publication.
+	bootReconcile func(context.Context, *Run, *config.Declaration, map[event.AgentID]NativeAgent) error
+}
+
+// withBootConfigReconcile attaches the startup reconciliation of the host entry:
+// the hook reads the configuration chain before the first publication and
+// decides which declaration this process serves. It is the host entry's own
+// wiring, never a second publication path: the hook enters the sole publication
+// entry (or adopts the ledger's publication) the same way a reload does.
+func withBootConfigReconcile(reconcile func(context.Context, *Run, *config.Declaration, map[event.AgentID]NativeAgent) error) Option {
+	return func(c *assemblyConfig) { c.bootReconcile = reconcile }
 }
 
 // Option configures the formal assembly at construction. It is the assembly
@@ -955,13 +1346,13 @@ type assemblyConfig struct {
 // accept the same constructors.
 type Option = HostOption
 
-// WithTaskTerminalTTL sets how long a task record outlives the terminal outcome it holds: the
+// withTaskTerminalTTL sets how long a task record outlives the terminal outcome it holds: the
 // record of a settled, failed or cancelled task older than this is dropped beside the next
 // admission, so this run's account of tasks is bounded by it. A call naming a pruned task is
 // refused by name, and every fact of that task stays on the chain — the bound is the live
 // account, never the history. The zero value keeps task.DefaultTerminalTTL, and a negative
 // one keeps every record for the life of the run.
-func WithTaskTerminalTTL(ttl time.Duration) Option {
+func withTaskTerminalTTL(ttl time.Duration) Option {
 	return func(c *assemblyConfig) { c.taskTerminalTTL = ttl }
 }
 
@@ -1031,11 +1422,11 @@ func WithStorage(cfg ledger.StorageConfig) Option {
 	return func(c *assemblyConfig) { c.storage = &cfg }
 }
 
-// WithEmbedder attaches the embedding binding the retrieval face of this
-// assembly generates its event vectors under. An assembly beside no embedder
-// builds no vector generation at all: recall answers through the keyword leg
-// alone and behaves exactly as it did before the embedding existed. The seam
-// borrows the binding per vector generation and never owns the endpoint.
+// WithEmbedder attaches the binding the retrieval face calls only while a
+// query scores its candidates. An assembly beside no embedder calls no
+// embedding at all: recall answers through the keyword leg alone and behaves
+// exactly as it did before the embedding existed. The binding is used on
+// demand and never owns a runtime vector table.
 func WithEmbedder(embedder memory.Embedder) Option {
 	return func(c *assemblyConfig) { c.embedder = embedder }
 }
@@ -1092,16 +1483,292 @@ func WithPlugins(build func(*Run) ([]plugin.Instance, error)) Option {
 	return func(c *assemblyConfig) { c.plugins = build }
 }
 
+// WithGenerationConsumer mounts one consumer on the generation-scoped registry
+// of this assembly: the consumer answers the builder of its per-generation
+// instance, the publication path rebuilds it for every candidate generation
+// without naming the consumer, and the order the options are applied in is the
+// order the registry builds.
+//
+// 契约: docs/adr/0007-generation-scoped-runtime-plugin-lifecycle.md
+//
+//   - The builder owns the whole life of its instance: it constructs the instance, installs it as the face the candidate's binding construction reads, and answers the exclusive resources it acquired beside the restore that puts the previous face back; a builder that acquires nothing exclusive answers a nil resource ledger and is registered nowhere.
+//   - Only the process-private resources of one generation enter that ledger: an external durable resource survives the switch and is re-probed by the next generation, and a shared native is reused as it stands, so a retirement releases neither.
+func WithGenerationConsumer(reg state.GenRegistration) Option {
+	return func(c *assemblyConfig) { c.genRegistrations = append(c.genRegistrations, reg) }
+}
+
+// GenerationFaces reports the per-generation native face of every declared agent
+// of one generation. A generation-scoped consumer builds the face of a candidate
+// generation from the declaration that generation publishes, and the publication
+// path reads it here when it composes the candidate binding: the model of an
+// agent is the shared native that survives every switch, while the tools, skill
+// roots, read root, file surface and reflection scope are the face of exactly
+// one generation.
+type GenerationFaces interface {
+	// Face reports the composed natives of one generation, and false beside a
+	// generation the source never built.
+	Face(gen state.Generation) (map[event.AgentID]NativeAgent, bool)
+}
+
+// WithGenerationFaces wires the source of the per-generation native face. A run
+// assembled beside none composes every candidate over the natives its caller
+// handed over, which is the shape a caller that owns its own agent materials
+// reads; a host wires the consumer that rebuilds the face from its document.
+func WithGenerationFaces(source GenerationFaces) Option {
+	return func(c *assemblyConfig) { c.genFaces = source }
+}
+
+// hostGenerationPort is one consumer of the host's own dialect that keeps its
+// face on the run: the assembly hands it the run it built before the first
+// generation is published, so the builder of every candidate generation installs
+// its face where the binding construction of that generation reads it.
+type hostGenerationPort interface {
+	// bind attaches the assembled run the consumer installs its face on.
+	bind(run *Run)
+}
+
+// withHostGenerationPorts hands the host dialect consumers of this assembly the
+// run it builds, before the first generation is published.
+func withHostGenerationPorts(ports ...hostGenerationPort) Option {
+	return func(c *assemblyConfig) { c.genPorts = append(c.genPorts, ports...) }
+}
+
 // WithExecManager attaches the execution resource ledger this assembly acquires
 // through and explains its registered leases by: a declaration that grants the
 // exec face acquires through this ledger under the monitor rhythm its own
 // declaration fixes, and the blocker explanation read of the run reports each
-// registration beside the retention facts the ledger records under its key. An
-// assembly beside no ledger still explains its task and notification blockers,
-// refuses to explain a registered lease by name, and refuses a call of the
-// granted exec face by name instead of starting anything.
+// registration beside the retention facts the ledger records under its key. The
+// ledger also mounts the execution consumer on the generation-scoped registry,
+// so every published generation rebuilds its exec instance over this ledger's
+// executor and options. An assembly beside no ledger still explains its task
+// and notification blockers, refuses to explain a registered lease by name, and
+// refuses a call of the granted exec face by name instead of starting anything.
 func WithExecManager(manager *tagentexec.Manager) Option {
-	return func(c *assemblyConfig) { c.execManager = manager }
+	mount := WithGenerationConsumer(tagentexec.GenRegistration(manager))
+	return func(c *assemblyConfig) {
+		c.execManager = manager
+		if manager != nil {
+			mount(c)
+		}
+	}
+}
+
+// GenerationConsumer is one consumer of the generation-scoped registry as the
+// run reports it: the name its registration is keyed by, the frozen key its
+// exclusive registration takes in one generation, and whether the generation
+// the run serves carries that registration.
+type GenerationConsumer struct {
+	// Name is the consumer's registered name.
+	Name string
+	// Exclusive is the frozen key of its exclusive registration in one
+	// generation, in the form "gen:<id>:<consumer>".
+	Exclusive string
+	// Registered reports whether the generation the run serves carries that
+	// exclusive registration: a consumer that acquired nothing exclusive
+	// registers none, and a consumer a generation never built carries none
+	// either.
+	Registered bool
+}
+
+// GenerationConsumers reports the consumers the generation-scoped registry
+// rebuilds, in build order: the name each registration is keyed by beside the
+// exclusive registration the served generation carries for it. The read is the
+// diagnostic face of the registry the publication path drives, so it moves
+// nothing; it names a generation other than the served one as the registrations
+// that generation would take rather than the ones in service.
+func (r *Run) GenerationConsumers(gen state.Generation) []GenerationConsumer {
+	if r == nil {
+		return nil
+	}
+	r.mu.Lock()
+	names := append([]string(nil), r.genConsumers...)
+	registered := make(map[string]bool, len(r.current.Leases))
+	for _, ref := range r.current.Leases {
+		if ref.Kind == generationLeaseKind {
+			registered[ref.Key] = true
+		}
+	}
+	r.mu.Unlock()
+	out := make([]GenerationConsumer, 0, len(names))
+	for _, name := range names {
+		key := state.GenLeaseKey(gen, name)
+		out = append(out, GenerationConsumer{Name: name, Exclusive: key, Registered: registered[key]})
+	}
+	return out
+}
+
+// generationRetireDimension is the configuration dimension the retirement of one
+// generation is filed under, beside the frozen generation stamp: the
+// configuration chain's control-plane records reuse the one configuration change
+// fact type under their own dimension, so the retirement is a fact of that chain
+// instead of a second fact type no reader of this build maps.
+const generationRetireDimension = "generation-retire"
+
+// generationRetirePrefix is the frozen key prefix one retirement is quoted by:
+// the key derives from the generation alone, so a boot replay that derives the
+// same retirement again is answered as the fact the chain already holds.
+const generationRetirePrefix = "gen-retire:"
+
+// generationRetireKey names the record of one retired generation: the frozen key
+// "gen-retire:<id>" a retirement is quoted by. The key is derived from the
+// generation alone, so a boot replay that derives the same retirement again is
+// answered as the fact the chain already holds instead of adding a second one.
+func generationRetireKey(gen state.Generation) event.EventID {
+	return event.EventID(generationRetirePrefix + strconv.FormatUint(uint64(gen), 10))
+}
+
+// generationRetirementRecord reports whether one committed fact is the
+// retirement of a generation: a control-plane record of the configuration chain
+// rather than a fact of a session chain.
+func generationRetirementRecord(evt event.Event) bool {
+	return strings.HasPrefix(string(evt.Key), generationRetirePrefix)
+}
+
+// recordGenerationRetirement files the retirement of one generation on the
+// chain: the drain freed the exclusive resources of a generation no publication
+// serves any more, and the record states that retirement beside the generation
+// number. The record is written after the release and never triggers one, and the
+// boot convergence reads it as the anchor of a retirement the restart does not
+// have to derive again.
+//
+// 契约: docs/wiki/platform/org-hot-reload.md#apply-record
+func (r *Run) recordGenerationRetirement(ctx context.Context, gen state.Generation) error {
+	if r == nil || gen == 0 {
+		return nil
+	}
+	number := strconv.FormatUint(uint64(gen), 10)
+	summary := "generation " + number + " retired"
+	evt := event.Event{
+		Key:       generationRetireKey(gen),
+		Type:      event.TypeConfigChange,
+		Timestamp: time.Now().UTC(),
+		Message:   model.Message{Role: model.RoleSystem, Content: summary},
+		Meta: map[string]string{
+			event.MetaKeyEventSummary:           summary,
+			event.MetaKeyTriggerSource:          generationRetireDimension,
+			event.MetaKeyConfigChangeDimension:  generationRetireDimension,
+			event.MetaKeyConfigChangeGeneration: number,
+		},
+		Owner: r.generationOwner(),
+	}
+	if _, err := r.commitFactChecked(ctx, evt); err != nil {
+		return fmt.Errorf("tagent: record the retirement of generation %d: %w", gen, err)
+	}
+	return nil
+}
+
+// generationOwner reports the address the generation records of this run are
+// owned by: the entry agent of the declaration in effect, the agent the chain
+// files the organization-level judgments of the configuration under. A run
+// beside no declaration in effect answers no owner, and its records stay the
+// in-process facts they are.
+func (r *Run) generationOwner() event.Address {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.current.Plan.Declaration == nil {
+		return event.Address{}
+	}
+	entry := strings.TrimSpace(r.current.Plan.Declaration.Entry)
+	if entry == "" {
+		return event.Address{}
+	}
+	return event.Address{AgentID: event.AgentID(entry)}
+}
+
+// convergeGenerationRetirements records the retirement of every generation the
+// chain this process booted over already left behind: a generation older than the
+// one in effect was superseded before this process started and holds no request,
+// so a boot that finds no record of its retirement files one. It closes the
+// window a crash opens between the generation switch and the drain that retires
+// the generation it replaced.
+//
+// The convergence records only: the exclusive resources of those generations were
+// process-private and went with the process that ended, so the record says what
+// happened instead of releasing anything again.
+func (r *Run) convergeGenerationRetirements(ctx context.Context) error {
+	current := state.Generation(r.publisher.Current().Generation)
+	for gen := state.Generation(1); gen < current; gen++ {
+		_, err := r.CommittedEvent(ctx, generationRetireKey(gen))
+		if err == nil {
+			continue
+		}
+		if !errors.Is(err, ErrCommittedFactMissing) {
+			return fmt.Errorf("tagent: read the retirement record of generation %d: %w", gen, err)
+		}
+		if err := r.recordGenerationRetirement(ctx, gen); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// trackGenerationConsumers records the exclusive resources the consumers of one
+// adopted generation acquired on the generation the publication adopted: each
+// enters the retirement ledger under the frozen generation key it was registered
+// by, so a later publication that supersedes this generation drains them through
+// the same release a published candidate's resources go through, and the plan in
+// effect names those registrations beside the resources of the adoption itself.
+func (r *Run) trackGenerationConsumers(ctx context.Context, gen state.Generation, built state.GenInstances) error {
+	resources := state.NewLeases()
+	refs := make([]state.LeaseRef, 0, len(built))
+	for _, consumer := range built {
+		if consumer.Resources.Resources == nil {
+			continue
+		}
+		refs = append(refs, resources.Register(generationLeaseKind, state.GenLeaseKey(gen, consumer.Name), consumer.Resources.Resources.ReleaseAll))
+	}
+	if len(refs) == 0 {
+		return nil
+	}
+	r.mu.Lock()
+	r.current.Leases = append(r.current.Leases, refs...)
+	r.mu.Unlock()
+	return r.publisher.TrackGeneration(ctx, gen, resources)
+}
+
+// installObserver installs the observation face one candidate generation
+// declares: the commit observer its bindings are built with reads it here, so a
+// generation that moved its telemetry section observes every fact through the
+// observer it declared.
+func (r *Run) installObserver(observer plugin.Observer) {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	r.observer = observer
+	r.mu.Unlock()
+}
+
+// observerInEffect reports the observation face of the generation in effect.
+func (r *Run) observerInEffect() plugin.Observer {
+	if r == nil {
+		return nil
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.observer
+}
+
+// installGovernor installs the governance face one candidate generation
+// declares: the admission wrap a generation's tools are registered under rules
+// each call over it.
+func (r *Run) installGovernor(policy plugin.Governor) {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	r.policy = policy
+	r.mu.Unlock()
+}
+
+// governorInEffect reports the governance face of the generation in effect.
+func (r *Run) governorInEffect() plugin.Governor {
+	if r == nil {
+		return nil
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.policy
 }
 
 // ExecState reports the retained state of one execution resource the ledger of
@@ -1337,47 +2004,259 @@ func (r *Run) SessionFacts(addr event.Address) []event.Event {
 
 // CommittedFacts reports how many facts this run holds: the counter the metrics
 // endpoint reports beside the turns and deliveries of the host.
+//
+// The control-plane records of the configuration chain are not part of it: a
+// generation retirement is filed under the configuration change type with the
+// frozen generation key and names no session chain, so it is held and readable
+// by identity while it never stands for a fact of the material this run carries.
 func (r *Run) CommittedFacts() int {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return len(r.facts)
+	r.countControlFactsLocked()
+	return len(r.facts) - r.controlFacts
 }
 
-// ReflectionGate reports the watermark gate the reflection face of this run
-// reads, or nil when the assembly was configured beside none. The gate is the
-// one anchor store the assembly built, so a reflection never opens a second
-// store over the same record.
+// countControlFactsLocked brings the control-plane count up to the commit order
+// the run holds: it judges the suffix past controlScanned once. A trim resets the
+// cursor and count over the kept prefix (compactFactOrderLocked), so the suffix
+// this reads is always a valid slice of the current order. The caller holds the
+// run lock.
+func (r *Run) countControlFactsLocked() {
+	for _, key := range r.factOrder[r.controlScanned:] {
+		if evt, held := r.facts[key]; held && generationRetirementRecord(evt) {
+			r.controlFacts++
+		}
+	}
+	r.controlScanned = len(r.factOrder)
+}
+
+// ReflectionGate reports the watermark gate of the generation in effect: the
+// anchor store the reflection loop it mounted reads its consumed watermark from,
+// and the store the assembly holds beside a generation that enables no
+// meditation. It answers nil only beside an assembly wired with no anchor record
+// at all.
 func (r *Run) ReflectionGate() meditation.WatermarkGate {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.watermark
 }
 
-// ObservedEvents answers one query over the fact chain this run can observe:
-// the events its storage tier already committed, merged with every fact this
-// process committed, landed idempotently under the identity each fact carries.
+// installWatermark installs the anchor store of one generation's reflection loop
+// as the gate the run reports and the diagnostics read.
+func (r *Run) installWatermark(gate meditation.WatermarkGate) {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	r.watermark = gate
+	r.mu.Unlock()
+}
+
+// generationObserver is the observation face one binding is built with: it
+// forwards every committed fact to the observer of the generation in effect, so
+// a dialect install that replaces the observation face reaches the binding
+// already in service instead of the one it was built under.
+type generationObserver struct {
+	run *Run
+}
+
+var _ plugin.Observer = generationObserver{}
+
+// Observe reports one committed fact to the observation face in effect. A run
+// beside no observer observes nothing and reports no failure.
+func (o generationObserver) Observe(ctx context.Context, evt event.Event) error {
+	face := o.run.observerInEffect()
+	if face == nil {
+		return nil
+	}
+	return face.Observe(ctx, evt)
+}
+
+// enableGenerationObservation wires the commit observer of every binding this
+// run builds: its observation face is read when a fact commits, so a host whose
+// observation consumer is mounted observes through the face of the generation in
+// effect, including a face a later install replaced. A run assembled beside no
+// face wires none: its bindings carry no commit observer.
+func (r *Run) enableGenerationObservation() {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	r.observationEnabled = true
+	r.mu.Unlock()
+}
+
+// observationWired reports whether the bindings of this run observe committed
+// facts through the face in effect.
+func (r *Run) observationWired() bool {
+	if r == nil {
+		return false
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.observationEnabled
+}
+
+// admissionRuling resolves the ruling of one call when the call is admitted: the
+// governance policy of the generation in effect rules it, and beside no policy
+// the approver this assembly was configured with rules it, or the strict grade
+// refuses it. The ruling is resolved per call, so a governance table a reload
+// installed rules the bindings already in service.
+func (r *Run) admissionRuling() task.Approver {
+	return func(ctx context.Context, name string, jsonArgs []byte) (task.Ruling, error) {
+		if policy := r.governorInEffect(); policy != nil {
+			return policyRuling(policy)(ctx, name, jsonArgs)
+		}
+		if r.approver != nil {
+			return r.approver(ctx, name, jsonArgs)
+		}
+		if r.enforcement == governance.EnforcementStrict {
+			return denyWithoutApprover(ctx, name, jsonArgs)
+		}
+		return task.Ruling{Kind: task.RulingRun}, nil
+	}
+}
+
+// ObservedEvents answers one query over the durable fact chain, independent
+// of the runtime window and of any landing pass.
 // A run assembled beside no storage tier refuses the read by name.
 func (r *Run) ObservedEvents(ctx context.Context, opts memory.QueryOptions) ([]memory.EventReference, error) {
 	r.mu.Lock()
-	observed := r.observed
-	facts := make([]event.Event, 0, len(r.facts))
-	for _, evt := range r.facts {
-		facts = append(facts, evt)
-	}
+	tier := r.tier
 	r.mu.Unlock()
-	if observed == nil {
+	if tier == nil {
 		return nil, ErrObservationUnwired
 	}
+	return NewTierQuerySource(tier.Segments).QueryEvents(ctx, opts)
+}
+
+// factWindowQuery answers one query over the facts this run holds in its hot
+// window — nothing outside it and nothing from the storage tier it did not seed.
+// The delivery recovery reads the settlement facts of the registered chains
+// through it (F3/F11): the read is O(事实窗口内), the partitions come from the
+// chains the replays registered, and the returned set is narrowed by the
+// unexported key prefix the caller states, which is an index-free filter on the
+// window and never a second scan. Every QueryOptions term applies exactly as it
+// does on the observed read; the narrowing only removes records from the result.
+func (r *Run) factWindowQuery(ctx context.Context, opts memory.QueryOptions) ([]memory.EventReference, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	query := memory.NewMemoryEventQuery()
+	r.mu.Lock()
+	facts := make([]event.Event, 0, len(r.factOrder))
+	for _, key := range r.factOrder {
+		if evt, held := r.facts[key]; held {
+			facts = append(facts, evt)
+		}
+	}
+	r.mu.Unlock()
 	for _, evt := range facts {
 		record, held := eventRecordOf(evt)
 		if !held {
 			continue
 		}
-		if err := observed.Store(ctx, record); err != nil {
+		if err := query.Store(ctx, record); err != nil {
 			return nil, err
 		}
 	}
-	return observed.QueryEvents(ctx, opts)
+	return query.QueryEvents(ctx, opts)
+}
+
+// registeredPartitions reports the partitions of the chains this run registered,
+// derived from the replay registration keys: the recovery reads the chains the
+// run actually serves instead of scanning every partition of the store. A
+// registration naming no agent (the AttachReplay seam) names no partition and is
+// skipped, because its session is read through the chain that does name one.
+func (r *Run) registeredPartitions() []int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	seen := make(map[int]bool, len(r.replays))
+	partitions := make([]int, 0, len(r.replays))
+	for addr := range r.replays {
+		if addr.AgentID == "" {
+			continue
+		}
+		partition := memory.PartitionIDFromName(string(addr.AgentID))
+		if seen[partition] {
+			continue
+		}
+		seen[partition] = true
+		partitions = append(partitions, partition)
+	}
+	sort.Ints(partitions)
+	return partitions
+}
+
+// pinFact marks one committed fact as one the hot window keeps however far the
+// chain grows: the delivery account pins the settlement fact of every obligation
+// that still owes something, so the fact is inside the window for as long as the
+// obligation is. The read is taken under the run lock by the trim, and the pin
+// set is written under the same lock here.
+func (r *Run) pinFact(key event.EventID) {
+	if key == "" {
+		return
+	}
+	r.mu.Lock()
+	if r.pinnedFacts == nil {
+		r.pinnedFacts = map[event.EventID]struct{}{}
+	}
+	r.pinnedFacts[key] = struct{}{}
+	r.mu.Unlock()
+}
+
+// unpinFact releases one pin: the obligation the fact named is settled, so the
+// fact ages out on the ordinary window trim from here on.
+func (r *Run) unpinFact(key event.EventID) {
+	if key == "" {
+		return
+	}
+	r.mu.Lock()
+	delete(r.pinnedFacts, key)
+	r.mu.Unlock()
+}
+
+// deliveryPendingFor reports whether the delivery account of this run still
+// owes the named address a body: the settlement fact of an owed or held
+// obligation is pinned on the hot window (host_delivery.go), and the held-with-
+// retrying state is unsettled too, so the retry gap never reads as settled. The
+// fact's target is the address the delivery reached, which is the address the
+// reaper asks about. The scan is bounded by the fact window, never by the chain.
+func (r *Run) deliveryPendingFor(addr event.Address) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for key := range r.pinnedFacts {
+		evt, held := r.facts[key]
+		if held && evt.Target == addr {
+			return true
+		}
+	}
+	return false
+}
+
+// pinnedFact reports whether one identity is exempt from the window trim.
+func (r *Run) pinnedFact(key event.EventID) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	_, held := r.pinnedFacts[key]
+	return held
+}
+
+// keepPinnedLocked drops the pinned entries from one window cut, so the trim
+// keeps the facts an unsettled obligation still reads. The caller holds the run
+// lock.
+func (r *Run) keepPinnedLocked(cut []event.EventID) []event.EventID {
+	if len(cut) == 0 || len(r.pinnedFacts) == 0 {
+		return cut
+	}
+	kept := cut[:0]
+	for _, key := range cut {
+		if _, pinned := r.pinnedFacts[key]; pinned {
+			continue
+		}
+		kept = append(kept, key)
+	}
+	return kept
 }
 
 // CommittedEvent reports the fact an identity names: the live fact of this
@@ -1415,85 +2294,216 @@ func (r *Run) CommittedEvent(ctx context.Context, id event.EventID) (event.Event
 	return restored, nil
 }
 
-// seedObservedEvents lands every event the storage tier already committed into
-// the observation table this run merges its live facts into: the body decodes
-// under the schema, including the earlier generation an older writer left, and
-// the record keeps the partition and window the segment index committed it
-// under.
-func seedObservedEvents(ctx context.Context, tier *ledger.Tier) (*memory.MemoryEventQuery, error) {
-	observed := memory.NewMemoryEventQuery()
-	events, err := tier.Segments.Events(ctx)
-	if err != nil {
-		return nil, err
-	}
-	for _, stored := range events {
-		body, err := memory.DecodeEventBody(stored.Body)
-		if err != nil {
-			return nil, fmt.Errorf("tagent: observe the committed event %s: %w", stored.Key, err)
-		}
-		if err := observed.Store(ctx, body.Record(stored.PartitionID, stored.WindowTS)); err != nil {
-			return nil, err
-		}
-	}
-	return observed, nil
-}
-
-// seedReplay registers the mapped sequence every session chain already
-// committed, so a restarted run presents the material the tier holds to its
-// next request instead of reading a transcript no process carries any more.
-// Every committed fact enters the live ledger of this run beside the
-// registration (see seedFact), which is held to the hot window of its chain at
-// the end of the replay, so a restart reads the ledger a process that stayed up
-// carries; a projected entry resolves the fact it was minted from and the
-// call-result pairing survives the restart. A compression
-// product the chain holds is placed onto the projection of its session as the
-// synthetic entry it recorded: the chain says which entries the product covered,
-// so the restart restores the fold form the process left without folding the
-// material again, and a judgment whose product the chain misses is read as the
-// unexecuted judgment it is. The whole
-// registered sequence reads as ended material: a cold start has no range in
-// flight, and the next committed input opens the first one, which
-// moves the boundary without dropping a restored entry. A session whose
-// declaration names no model window registers under the no-budget window
-// exactly as the live attach path does, and a body the schema cannot decode
-// fails the boot instead of silently dropping the material the tier holds.
-func (r *Run) seedReplay(ctx context.Context, tier *ledger.Tier) error {
-	events, err := tier.Segments.Events(ctx)
-	if err != nil {
+// eachCommittedEvent reads every stored event in the order its commits landed
+// in, ranked across partitions rather than by partition and sequence: the index
+// walk answers commit order newest first, so reversing its references gives the
+// commit order itself. The index walk carries no bodies; one commit-order read
+// seam serves the full replay and the session reader.
+func eachCommittedEvent(ctx context.Context, tier *ledger.Tier, visit func(ledger.StoredEvent) error) error {
+	var refs []anchorRef
+	if err := tier.Segments.EachIndexNewestFirst(ctx, func(key event.EventID, partition int, seq int64, typ string, session event.SessionID) error {
+		refs = append(refs, anchorRef{key: key, partition: partition, seq: seq, typ: typ, session: session})
+		return nil
+	}); err != nil {
 		return err
 	}
-	type sessionSeed struct {
-		projection *replay.ReplayProjection
-		window     FoldWindow
+	for i := len(refs) - 1; i >= 0; i-- {
+		stored, held, err := tier.Segments.GetEvent(ctx, refs[i].key)
+		if err != nil {
+			return err
+		}
+		if !held {
+			return fmt.Errorf("%w: %s", ledger.ErrSegmentBodyMissing, refs[i].key)
+		}
+		if err := visit(stored); err != nil {
+			return err
+		}
 	}
-	seeds := map[event.Address]*sessionSeed{}
-	products := map[event.Address][]event.CompressProduct{}
-	var order []event.Address
-	for _, stored := range events {
+	return nil
+}
+
+// EachSessionFact streams the durable chain of one session in commit order: the
+// cold-start read of a chain, which names every fact the session committed —
+// beside the window the live ledger still presents — decoded from the tier the
+// way CommittedEvent decodes one identity, ordered by the partition sequence
+// the landing path numbers commits with — the order the run committed in, which
+// a replay refolds at the boundaries the commits recorded, while the segment
+// index orders by event time and a later-judged product names a later moment of
+// than the material it folded. A run beside no storage tier holds
+// no durable chain, so the visit answers the resident window alone in commit
+// order. A visit error ends the stream and is returned.
+//
+// A framework checkpoint names the chain it states without entering it,
+// so the stream leaves it out under either branch: the index answers which chain
+// a checkpoint belongs to, while the state it carries is the boundary a boot starts
+// from rather than material the chain committed. The commit path already holds
+// that line by keeping a checkpoint out of the resident ledger, so a stream that
+// read the stored checkpoint back would hand a reader — a projection rebuild above
+// all — the state slices as transcript lines the run never committed.
+func (r *Run) EachSessionFact(ctx context.Context, addr event.Address, visit func(event.Event) error) error {
+	r.mu.Lock()
+	tier := r.tier
+	r.mu.Unlock()
+	if tier == nil {
+		for _, key := range r.factOrder {
+			evt, held := r.facts[key]
+			if !held || sessionOf(evt) != addr.SessionID {
+				continue
+			}
+			if addr.AgentID != "" && agentOf(evt) != addr.AgentID {
+				continue
+			}
+			if err := visit(evt); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	return eachCommittedEvent(ctx, tier, func(stored ledger.StoredEvent) error {
 		body, err := memory.DecodeEventBody(stored.Body)
 		if err != nil {
 			return fmt.Errorf("tagent: replay the committed event %s: %w", stored.Key, err)
 		}
 		evt := body.Event()
 		evt.Key = stored.Key
-		r.seedFact(evt)
+		if evt.Type == event.TypeCheckpoint {
+			return nil
+		}
+		if sessionOf(evt) != addr.SessionID {
+			return nil
+		}
+		if addr.AgentID != "" && agentOf(evt) != addr.AgentID {
+			return nil
+		}
+		return visit(evt)
+	})
+}
+
+// sessionSeed is one session chain a restart rebuild collects: the projection
+// it replays into, beside the window its agent declared.
+type sessionSeed struct {
+	projection *replay.ReplayProjection
+	window     FoldWindow
+}
+
+// seedReport counts what one rebuild pass decoded. The pass reads the whole
+// store: no earlier stop is safe in commit order, because a surviving original
+// can sit deeper than an old product event.
+type seedReport struct {
+	Decoded   int
+	Anchors   int
+	Fallbacks int
+	// Checkpoints counts the chains a framework checkpoint restored: their
+	// material below the cut is read from the checkpoint, never re-decoded.
+	Checkpoints int
+	Landed      map[int]int64
+}
+
+// seedReplay registers the mapped sequence every session chain already
+// committed, so a restarted run presents the material the tier holds to its
+// next request instead of reading a transcript no process carries any more.
+// The rebuild starts from the newest fold anchor of each chain and replays only
+// the material committed past the checkpoint, so the decoded bodies of a boot do
+// not grow with the history the folds already summarised: a chain that never
+// folded, an anchor whose payload cannot be read and a store whose index carries
+// no frozen type each answer the full walk of that chain instead, and the
+// rebuilt state is the state the full walk answers. The delivery recovery reads
+// the durable chain rather than this ledger, so the material an anchor folded
+// away is still read by the obligation it settled.
+// Every chain the walk registered is established as a site of this instance, so
+// the active set and the unanswered rounds survive the restart instead of
+// resetting with the process.
+func (r *Run) seedReplay(ctx context.Context, tier *ledger.Tier) (map[int]int64, error) {
+	seeds, report, err := r.seedAnchoredReplay(ctx, tier)
+	if err != nil {
+		return nil, err
+	}
+	var order []event.Address
+	for addr := range seeds {
+		order = append(order, addr)
+	}
+	sort.Slice(order, func(i, j int) bool {
+		if order[i].AgentID != order[j].AgentID {
+			return order[i].AgentID < order[j].AgentID
+		}
+		return order[i].SessionID < order[j].SessionID
+	})
+	for _, addr := range order {
+		seed := seeds[addr]
+		if err := r.attachScopedReplay(addr, seed.window, seed.projection); err != nil {
+			return nil, err
+		}
+	}
+	if err := r.seedSites(ctx, order); err != nil {
+		return nil, err
+	}
+	if len(order) > 0 {
+		r.attachNoticeFeed()
+	}
+	if drivers := r.StateRegistry().ObservationDrivers(); len(drivers) > 0 {
+		assemblyInfo("tagent: the rebuild folded the state slices of the chains it replayed and drove none of the observation drivers %v", drivers)
+	}
+	return report.Landed, nil
+}
+
+// seedSites makes every session chain a restart rebuilt a site of this
+// instance, so the active set a cross-session delivery resolves against is the
+// set the chain holds rather than the set this process happened to open. The
+// establishment is the one door every address passes, whatever admitted it, so
+// a restarted run answers the same active addresses and the same unanswered
+// rounds the process before it answered.
+func (r *Run) seedSites(ctx context.Context, order []event.Address) error {
+	for _, addr := range order {
+		if !addr.IsComplete() {
+			continue
+		}
+		if err := r.establish(ctx, addr); err != nil {
+			return fmt.Errorf("tagent: establish the session site %v the chain holds: %w", addr, err)
+		}
+	}
+	return nil
+}
+
+// seedFullReplay replays every session chain from the beginning, the path a
+// chain that minted no summary answers: each committed fact is seeded, each
+// mapped entry appended in commit order and each product restored on top.
+func (r *Run) seedFullReplay(ctx context.Context, tier *ledger.Tier) (map[event.Address]*sessionSeed, map[int]int64, seedReport, error) {
+	seeds := map[event.Address]*sessionSeed{}
+	products := map[event.Address][]event.CompressProduct{}
+	var order []event.Address
+	report := seedReport{}
+	landed := map[int]int64{}
+	if err := eachCommittedEvent(ctx, tier, func(stored ledger.StoredEvent) error {
+		report.Decoded++
+		if stored.Seq > landed[stored.PartitionID] {
+			landed[stored.PartitionID] = stored.Seq
+		}
+		body, err := memory.DecodeEventBody(stored.Body)
+		if err != nil {
+			return fmt.Errorf("tagent: replay the committed event %s: %w", stored.Key, err)
+		}
+		evt := body.Event()
+		evt.Key = stored.Key
+		if err := r.seedFact(ctx, evt); err != nil {
+			return err
+		}
 		addr := replayAddressOf(evt)
 		if addr.SessionID == "" {
-			continue
+			return nil
 		}
 		if evt.Type == event.CompressProductType {
 			product, stated := compressProductOf(evt)
 			if !stated {
 				assemblyWarn("tagent: the compression product %s states no readable product and is not restored", evt.Key)
-				continue
+				return nil
 			}
 			products[addr] = append(products[addr], product)
 			r.compress.NoteProduct(product)
-			continue
+			return nil
 		}
 		entry, ok := mappedEntryOf(evt)
 		if !ok {
-			continue
+			return nil
 		}
 		seed, held := seeds[addr]
 		if !held {
@@ -1504,20 +2514,412 @@ func (r *Run) seedReplay(ctx context.Context, tier *ledger.Tier) error {
 			seeds[addr] = seed
 			order = append(order, addr)
 		}
-		seed.projection.Append(ctx, entry)
+		seed.projection = foldIntoProjection(ctx, seed.projection, entry, seed.window)
+		return nil
+	}); err != nil {
+		return nil, nil, report, err
 	}
 	for _, addr := range order {
 		seed := seeds[addr]
 		seed.projection.RestoreProducts(products[addr])
-		if err := r.attachScopedReplay(addr, seed.window, seed.projection); err != nil {
+	}
+	return seeds, landed, report, nil
+}
+
+// anchorRef is the chain locator one resident index entry gives a restart
+// rebuild: identity, position, frozen event type and session, with no event body
+// attached. Every index-driven read names its target this way — a compression
+// fold's anchor and a checkpoint reference alike — so no second locator type
+// stands beside it.
+type anchorRef struct {
+	key       event.EventID
+	partition int
+	seq       int64
+	typ       string
+	session   event.SessionID
+}
+
+// anchorSlot is the isolation key one chain is rebuilt under: the partition
+// the facts were filed into beside the session they belong to. Two agents that
+// happen to share a session id remain two chains, as ChainKey requires.
+type anchorSlot struct {
+	partition int
+	session   event.SessionID
+}
+
+// seedAnchoredReplay rebuilds each session chain from the newest compress
+// product the index names by frozen event type, then replays the events of that
+// chain committed past the newest survivor the product states. The index walk
+// reads no event body; a product whose anchor payload is unreadable, and a
+// session that never folded, answer the full replay of that session instead.
+// Anchor discovery never inspects a fact key's spelling.
+//
+// - The survivors a checkpoint states are held to the same resident bound the full walk applies as it appends: a chain that declared no window keeps the recent material rather than every survivor the payload names.
+// - The checkpoint slices this boot restored are the state every slice of the runtime had reached at the cut. A chain beside a fold product reads only the bodies of the facts committed past that product's newest survivor, so the entries the product covers never reach a body read and the chain's boot costs the increment. A chain the restored slices carry beside no fold product reads the bodies of its survivors and of the facts committed past the newest of them, so that boot costs the survivor count plus the increment instead of the history the survivors already state. Configuration records belong to no session chain and stay, being the declaration ledger the restarted run states that no slice carries.
+// - A chain the checkpoint stated is a chain of this run even beside no fact past its cut, so its slot joins the rebuild and the tail of its chain is replayed onto the state the checkpoint states.
+// - The boundary both checkpoints are read past is the newest survivor the payload names, which is the material the projection states rather than the cut the checkpoint states: a cut read before the holders were asked may state a position the survivors behind it already present, and a fact between the two is one the projection already holds.
+// - A compression fact the cut did not cover but the boundary did is handed to the compression account alone, because the projection states the material it folded and the account does not state the judgment or the answer it carries.
+func (r *Run) seedAnchoredReplay(ctx context.Context, tier *ledger.Tier) (map[event.Address]*sessionSeed, seedReport, error) {
+	report := seedReport{}
+	var refs []anchorRef
+	if err := tier.Segments.EachIndexNewestFirst(ctx, func(key event.EventID, partition int, seq int64, typ string, session event.SessionID) error {
+		refs = append(refs, anchorRef{key: key, partition: partition, seq: seq, typ: typ, session: session})
+		return nil
+	}); err != nil {
+		return nil, report, err
+	}
+	report.Landed = map[int]int64{}
+	for _, entry := range refs {
+		if entry.seq > report.Landed[entry.partition] {
+			report.Landed[entry.partition] = entry.seq
+		}
+	}
+	seedsRestored := r.takeRestoredProjection()
+	compressCut := r.checkpointCut(checkpointSliceCompress)
+	anchors := map[anchorSlot]int{}
+	seen := map[anchorSlot]struct{}{}
+	var order []anchorSlot
+	for at, ref := range refs {
+		if ref.session == "" {
+			continue
+		}
+		slot := anchorSlot{partition: ref.partition, session: ref.session}
+		if _, held := seen[slot]; !held {
+			seen[slot] = struct{}{}
+			order = append(order, slot)
+		}
+		if ref.typ == event.CompressProductType {
+			if _, held := anchors[slot]; !held {
+				anchors[slot] = at
+			}
+		}
+	}
+	restoredSlots := map[anchorSlot]struct{}{}
+	for addr := range seedsRestored {
+		slot := anchorSlot{partition: memory.PartitionIDFromName(string(addr.AgentID)), session: addr.SessionID}
+		restoredSlots[slot] = struct{}{}
+		if _, held := seen[slot]; !held {
+			seen[slot] = struct{}{}
+			order = append(order, slot)
+		}
+	}
+	sort.Slice(order, func(i, j int) bool {
+		if order[i].session != order[j].session {
+			return order[i].session < order[j].session
+		}
+		return order[i].partition < order[j].partition
+	})
+	if err := r.seedConfigurationFacts(ctx, tier, refs, &report); err != nil {
+		return nil, report, err
+	}
+	seeds := map[event.Address]*sessionSeed{}
+	for _, slot := range order {
+		session := slot.session
+		seed := &sessionSeed{projection: replay.NewReplayProjection()}
+		at, hasAnchor := anchors[slot]
+		usable := false
+		var tailProducts []event.CompressProduct
+		if base, addr, held := restoredSeedOf(seedsRestored, slot); held && !hasAnchor {
+			seed.window = r.foldWindowOfAgent(addr.AgentID)
+			boundary, err := r.restoreSurvivors(ctx, tier, seed, base.survivors, &report)
+			if err != nil {
+				return nil, report, err
+			}
+			seed.projection = trimReplayProjection(ctx, seed.projection, seed.window)
+			tailProducts, err = r.replayChainPastCut(ctx, tier, refs, slot, seed, boundary, compressCut, "", &report)
+			if err != nil {
+				return nil, report, err
+			}
+			seed.projection.RestoreProducts(tailProducts)
+			seeds[addr] = seed
+			report.Checkpoints++
+			usable = true
+			hasAnchor = false
+		}
+		if hasAnchor {
+			stored, held, err := tier.Segments.GetEvent(ctx, refs[at].key)
+			if err != nil {
+				return nil, report, err
+			}
+			if held {
+				report.Decoded++
+				body, err := memory.DecodeEventBody(stored.Body)
+				if err != nil {
+					return nil, report, fmt.Errorf("tagent: replay the anchor %s: %w", stored.Key, err)
+				}
+				evt := body.Event()
+				evt.Key = stored.Key
+				product, stated := compressProductOf(evt)
+				var survivors []anchorEntry
+				if stated {
+					if err := json.Unmarshal(product.Checkpoint(), &survivors); err != nil {
+						stated = false
+					}
+				}
+				if stated && len(survivors) > 0 {
+					addr := replayAddressOf(evt)
+					if agent := agentOf(evt); agent != "" {
+						seed.window = r.foldWindowOfAgent(agent)
+					}
+					boundary, err := r.restoreSurvivors(ctx, tier, seed, survivors, &report)
+					if err != nil {
+						return nil, report, err
+					}
+					seed.projection = trimReplayProjection(ctx, seed.projection, seed.window)
+					r.compress.NoteProduct(product)
+					report.Anchors++
+					seeds[addr] = seed
+					tailProducts, err = r.replayChainPastCut(ctx, tier, refs, slot, seed, boundary, compressCut, refs[at].key, &report)
+					if err != nil {
+						return nil, report, err
+					}
+					seed.projection.RestoreProducts(tailProducts)
+					usable = true
+				} else {
+					assemblyWarn("tagent: the anchor %s of session %s states no readable survivor payload, falling back to the full replay", refs[at].key, session)
+				}
+			} else {
+				assemblyWarn("tagent: the anchor %s of session %s is missing from the chain, falling back to the full replay", refs[at].key, session)
+			}
+		}
+		if !usable {
+			report.Fallbacks++
+			var products []event.CompressProduct
+			agent := event.AgentID("")
+			for i := len(refs) - 1; i >= 0; i-- {
+				if refs[i].session != slot.session || refs[i].partition != slot.partition {
+					continue
+				}
+				product, stated, owner, err := r.replayRef(ctx, tier, refs[i].key, seed, &report)
+				if err != nil {
+					return nil, report, err
+				}
+				if agent == "" {
+					agent = owner
+				}
+				if stated {
+					products = append(products, product)
+				}
+			}
+			seed.projection.RestoreProducts(products)
+			seeds[event.Address{AgentID: agent, SessionID: session}] = seed
+		}
+	}
+	return seeds, report, nil
+}
+
+// seedConfigurationFacts seeds the indexed facts that belong to no session
+// chain: the configuration chain records of the tier. The full walk seeds them
+// beside the session material, so a boot that rebuilds from anchors holds them
+// too — a configuration change a restart reads back by identity is one of them,
+// and its retention is the ledger a restarted run states about the configuration
+// it serves. The facts are seeded in commit order, and none of them may be
+// answered by the anchor of a session it never belonged to.
+func (r *Run) seedConfigurationFacts(ctx context.Context, tier *ledger.Tier, refs []anchorRef, report *seedReport) error {
+	for i := len(refs) - 1; i >= 0; i-- {
+		if refs[i].session != "" || refs[i].typ == event.TypeCheckpoint {
+			continue
+		}
+		stored, held, err := tier.Segments.GetEvent(ctx, refs[i].key)
+		if err != nil {
+			return err
+		}
+		if !held {
+			continue
+		}
+		report.Decoded++
+		body, err := memory.DecodeEventBody(stored.Body)
+		if err != nil {
+			return fmt.Errorf("tagent: replay the committed event %s: %w", stored.Key, err)
+		}
+		evt := body.Event()
+		evt.Key = stored.Key
+		if err := r.seedFact(ctx, evt); err != nil {
 			return err
 		}
 	}
-	r.trimSeededFacts()
-	if len(order) > 0 {
-		r.attachNoticeFeed()
+	return nil
+}
+
+// foldWindowOfAgent answers the replay window one chain's agent declared.
+func (r *Run) foldWindowOfAgent(agent event.AgentID) FoldWindow {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return foldWindowOf(specOfLocked(r.current.Plan.Declaration, agent))
+}
+
+// restoreSurvivors hydrates one anchor payload in display order: a key the
+// chain still holds is read back through the fact->projection mapping so its
+// private fields are recovered and its text is the chain's, and a fold product —
+// whose text the product fact files under an identity of its own — is stated from
+// the text the payload carries. Nothing here reads a kind off a key's prefix, and
+// a survivor with neither a mapped fact nor a carried text refuses the boot by
+// name instead of presenting an entry with no text.
+func (r *Run) restoreSurvivors(ctx context.Context, tier *ledger.Tier, seed *sessionSeed, survivors []anchorEntry, report *seedReport) (int64, error) {
+	boundary := int64(0)
+	for _, survivor := range survivors {
+		stored, held, err := tier.Segments.GetEvent(ctx, survivor.Key)
+		if err != nil {
+			return 0, err
+		}
+		if held {
+			if stored.Seq > boundary {
+				boundary = stored.Seq
+			}
+			report.Decoded++
+			body, err := memory.DecodeEventBody(stored.Body)
+			if err != nil {
+				return 0, fmt.Errorf("tagent: hydrate the survivor %s: %w", stored.Key, err)
+			}
+			evt := body.Event()
+			evt.Key = stored.Key
+			if err := r.seedFact(ctx, evt); err != nil {
+				return 0, err
+			}
+			if entry, ok := mappedEntryOf(evt); ok {
+				seed.projection.Append(ctx, entry)
+				continue
+			}
+		}
+		if survivor.Content == "" {
+			return 0, fmt.Errorf("%w: %s", ErrCheckpointSurvivorUnstated, survivor.Key)
+		}
+		seed.projection.Append(ctx, replay.ProjectionEntry{
+			Key:     survivor.Key,
+			Type:    survivor.Type,
+			Summary: survivor.Summary,
+			Content: survivor.Content,
+			Time:    time.UnixMilli(survivor.Time),
+		})
+	}
+	return boundary, nil
+}
+
+// replayChainPastCut replays one chain onto the state its checkpoint states and
+// answers the products a restart applies on top of that state: a fact committed
+// past the boundary is replayed whole, a compression fact the checkpoint's cut did
+// not cover but the boundary did is handed to the compression account alone, and
+// the material the boundary covers is read by neither path because the checkpoint
+// already states it.
+//
+//   - The boundary is the newest survivor the checkpoint names, never the cut it states: the state read at the quiet point carries every commit that landed before the holders were asked, so the survivors may stand past the watermark. A fact between the two landed after the cut and before the boundary, so the checkpoint holds the material it folded and the replay must not seat it twice.
+//   - A checkpoint names the chain it states without entering it: the state it carries is the boundary this replay starts from, never material the chain replays.
+//
+// The covered range costs one index walk and no body read. The exception is a
+// compression fact of that range, which the checkpoint's account states only up to
+// the cut: a checkpoint stating no account at all leaves the range unread.
+func (r *Run) replayChainPastCut(ctx context.Context, tier *ledger.Tier, refs []anchorRef, slot anchorSlot, seed *sessionSeed, boundary int64, compressCut event.CheckpointOffset, skip event.EventID, report *seedReport) ([]event.CompressProduct, error) {
+	var tail, behind []anchorRef
+	for _, ref := range refs {
+		if ref.session != slot.session || ref.partition != slot.partition || ref.key == skip {
+			continue
+		}
+		if ref.typ == event.TypeCheckpoint {
+			continue
+		}
+		if ref.seq > boundary {
+			tail = append(tail, ref)
+			continue
+		}
+		if compressCut != nil && event.CompressionMechanism(ref.typ) && pastCut(compressCut, ref) {
+			behind = append(behind, ref)
+		}
+	}
+	sort.Slice(behind, func(i, j int) bool { return behind[i].seq < behind[j].seq })
+	for _, ref := range behind {
+		if err := r.seedAccountFact(ctx, tier, ref.key, report); err != nil {
+			return nil, err
+		}
+	}
+	sort.Slice(tail, func(i, j int) bool { return tail[i].seq < tail[j].seq })
+	products := make([]event.CompressProduct, 0, len(tail))
+	for _, ref := range tail {
+		product, stated, _, err := r.replayRef(ctx, tier, ref.key, seed, report)
+		if err != nil {
+			return nil, err
+		}
+		if stated {
+			products = append(products, product)
+		}
+	}
+	return products, nil
+}
+
+// seedAccountFact seeds one compression fact into the compression account of a
+// rebuilding run without appending it to the projection: the fact stands behind
+// the boundary the anchor states, so the projection already holds the material it
+// folded, while the account the checkpoint states was taken at a cut of its own and
+// owes the judgment or the answer this fact carries.
+func (r *Run) seedAccountFact(ctx context.Context, tier *ledger.Tier, key event.EventID, report *seedReport) error {
+	stored, held, err := tier.Segments.GetEvent(ctx, key)
+	if err != nil {
+		return err
+	}
+	if !held {
+		return fmt.Errorf("%w: %s", ledger.ErrSegmentBodyMissing, key)
+	}
+	report.Decoded++
+	body, err := memory.DecodeEventBody(stored.Body)
+	if err != nil {
+		return fmt.Errorf("tagent: replay the committed event %s: %w", stored.Key, err)
+	}
+	evt := body.Event()
+	evt.Key = stored.Key
+	if err := r.seedFact(ctx, evt); err != nil {
+		return err
+	}
+	if evt.Type == event.CompressProductType {
+		if product, stated := compressProductOf(evt); stated {
+			r.compress.NoteProduct(product)
+		}
 	}
 	return nil
+}
+
+// replayRef decodes one indexed event and applies it to a rebuilding seed:
+// the live ledger takes every fact, the projection takes every mapped entry,
+// and a product fact is left to the anchor that already stated its result.
+// replayRef replays one committed event of a chain into the seed the walk
+// carries and answers the compression product the event states beside the agent
+// that committed it.
+//
+// - A product reaches the compression ledger whichever side of the anchor it stands on, so a restarted run never executes a judgment a second time.
+func (r *Run) replayRef(ctx context.Context, tier *ledger.Tier, key event.EventID, seed *sessionSeed, report *seedReport) (event.CompressProduct, bool, event.AgentID, error) {
+	stored, held, err := tier.Segments.GetEvent(ctx, key)
+	if err != nil {
+		return event.CompressProduct{}, false, "", err
+	}
+	if !held {
+		return event.CompressProduct{}, false, "", nil
+	}
+	report.Decoded++
+	body, err := memory.DecodeEventBody(stored.Body)
+	if err != nil {
+		return event.CompressProduct{}, false, "", fmt.Errorf("tagent: replay the committed event %s: %w", stored.Key, err)
+	}
+	evt := body.Event()
+	evt.Key = stored.Key
+	if err := r.seedFact(ctx, evt); err != nil {
+		return event.CompressProduct{}, false, "", err
+	}
+	if evt.Type == event.CompressProductType {
+		product, stated := compressProductOf(evt)
+		if stated {
+			r.compress.NoteProduct(product)
+		}
+		return product, stated, agentOf(evt), nil
+	}
+	if seed.window.MaxTokens == 0 {
+		if agent := agentOf(evt); agent != "" {
+			seed.window = r.foldWindowOfAgent(agent)
+		}
+	}
+	entry, ok := mappedEntryOf(evt)
+	if !ok {
+		return event.CompressProduct{}, false, agentOf(evt), nil
+	}
+	seed.projection = foldIntoProjection(ctx, seed.projection, entry, seed.window)
+	return event.CompressProduct{}, false, agentOf(evt), nil
 }
 
 // seedFact holds one fact the storage tier already committed in the live
@@ -1527,37 +2929,50 @@ func (r *Run) seedReplay(ctx context.Context, tier *ledger.Tier) error {
 // resolves again, so the call-result pairing a request replays is recovered
 // from the facts alone — and a re-commit of an identity the tier already holds
 // is judged against the very fact it names instead of writing a second one.
-func (r *Run) seedFact(evt event.Event) {
+//
+// The fact is then folded into the derived state of every consumer mounted on the
+// state seam, through the same reducer the live commit drives: a restart derives
+// the state the process before it derived instead of rebuilding it through a
+// reader of its own, and a consumer that registers a slice takes part without a
+// hook of its own. Nothing here drives an observation duty — the work a consumer
+// owes is started by the owner of that duty after the rebuild returned — so the
+// judgments and deliveries the chain already carries wait for the process that
+// executes them rather than firing inside the recovery. A rebuild reaches one
+// fact by more than one read path — the survivors a checkpoint states are
+// hydrated by key and the tail of their chain is replayed whole over them — and
+// the seed answers the fact the ledger already holds instead of filing its key
+// twice: the fold stays per read because a reducer is idempotent by the identity
+// the fact carries, so a fact two paths reach leaves the state it derives once.
+func (r *Run) seedFact(ctx context.Context, evt event.Event) error {
 	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.facts[evt.Key] = evt
-	r.factOrder = append(r.factOrder, evt.Key)
-}
-
-// seedLandedSeq reports the last sequence slot every partition already
-// committed, so the landing path of a restarted run continues the positions the
-// tier holds instead of claiming one of them again.
-func seedLandedSeq(ctx context.Context, tier *ledger.Tier) (map[int]int64, error) {
-	events, err := tier.Segments.Events(ctx)
-	if err != nil {
-		return nil, err
+	if _, held := r.facts[evt.Key]; !held {
+		r.facts[evt.Key] = evt
+		r.factOrder = append(r.factOrder, evt.Key)
 	}
-	landed := map[int]int64{}
-	for _, stored := range events {
-		if stored.Seq > landed[stored.PartitionID] {
-			landed[stored.PartitionID] = stored.Seq
-		}
+	states := r.states
+	r.mu.Unlock()
+	if states == nil {
+		return nil
 	}
-	return landed, nil
+	if err := states.Reduce(ctx, evt); err != nil {
+		return fmt.Errorf("tagent: fold the replayed fact %s into the state of its consumers: %w", evt.Key, err)
+	}
+	return nil
 }
 
 // eventRecordOf projects one committed fact onto the query record the
-// observation table reads it under: the partition its owning agent resolves to,
+// durable query reads it under: the partition its owning agent resolves to,
 // its frozen type, its summary and content, and its event time on the
 // millisecond axis. A fact naming no owning agent belongs to no partition and
-// is not observed rather than filed under an invented one.
+// is not observed rather than filed under an invented one. A compression
+// mechanism fact carries an internal summary and an anchor payload: both are
+// recovery metadata read by the rebuild, so the read face refuses the fact by
+// its frozen type and never surfaces that wording into the model's context.
 func eventRecordOf(evt event.Event) (memory.EventRecord, bool) {
 	if evt.Key == "" {
+		return memory.EventRecord{}, false
+	}
+	if event.CompressionMechanism(evt.Type) {
 		return memory.EventRecord{}, false
 	}
 	agent := agentOf(evt)
@@ -1618,8 +3033,8 @@ type MemoryPlan struct {
 // assembly opens, beside the storage section the document states at its top
 // level. Every declaring agent must name the same tier and the same engine: a
 // shared store read under two different engines would answer one query two
-// ways. An engine beside no tier is refused by name, because an embedding with
-// nowhere to persist its vectors is no engine at all. A document that declares
+// ways. An engine beside no tier is refused by name: without a durable chain
+// query-time embedding has no candidates. A document that declares
 // neither reports a nil plan, which wires no storage face and no embedder.
 func MemoryPlanOf(decl *config.Declaration, storageType, storageRoot string) (*MemoryPlan, error) {
 	if decl == nil {
@@ -1700,7 +3115,7 @@ func (p *MemoryPlan) Engine() *config.EngineSpec {
 	return p.engine
 }
 
-// Embedder reports the embedding binding the plan generates its vectors under:
+// Embedder reports the binding candidate queries call on demand:
 // the core default implementation over the declared engine, built on the first
 // call and cached so one run runs over one binding. A plan beside no engine
 // reports no embedder, which is the keyword-only retrieval.
@@ -1719,21 +3134,12 @@ func (p *MemoryPlan) Embedder() (memory.Embedder, error) {
 	return built, nil
 }
 
-// Tuning reports the two leg bounds and the rank constant the merged engine
-// declares. A plan beside no engine reports the zero tuning, which keeps the
-// retrieval exactly as it stood.
-func (p *MemoryPlan) Tuning() (int, int, int) {
-	if p == nil || p.engine == nil {
-		return 0, 0, 0
-	}
-	return p.engine.VectorTopK, p.engine.KeywordTopK, p.engine.RRFK
-}
-
 // resolveMemory folds the declared memory plan into the faces this assembly
 // opens. A face an option states directly keeps it, so a host that wires its
 // own embedder over a declared tier is never overridden. The declaration is the
-// one source of the retrieval tuning: a zero bound keeps that leg unbounded and
-// a zero constant keeps search.RRFRankConstant.
+// one source of the storage and embedding faces. The retrieval leg bounds and
+// the fusion rank constant are mechanism constants: both legs run under the one
+// page bound and the fusion keeps its canonical rank constant.
 func (c *assemblyConfig) resolveMemory() error {
 	if c.memory == nil {
 		return nil
@@ -1748,7 +3154,6 @@ func (c *assemblyConfig) resolveMemory() error {
 		}
 		c.embedder = embedder
 	}
-	c.vectorTopK, c.keywordTopK, c.rrfK = c.memory.Tuning()
 	return nil
 }
 
@@ -1759,8 +3164,7 @@ func declaresEngine(engine config.EngineSpec) bool {
 		strings.TrimSpace(engine.Embedding.Model) != "" ||
 		strings.TrimSpace(engine.Embedding.APIKeyEnv) != "" ||
 		engine.Embedding.Dimensions != 0 ||
-		strings.TrimSpace(engine.Embedding.APIEndpoint) != "" ||
-		engine.VectorTopK != 0 || engine.KeywordTopK != 0 || engine.RRFK != 0
+		strings.TrimSpace(engine.Embedding.APIEndpoint) != ""
 }
 
 // validateEngine validates one merged semantic engine: the backend must be the
@@ -1773,10 +3177,6 @@ func validateEngine(engine config.EngineSpec) error {
 	}
 	if backend != memoryEngineBackend {
 		return fmt.Errorf("%w: backend %q is not a known engine backend", ErrMemoryEngine, backend)
-	}
-	if engine.VectorTopK < 0 || engine.KeywordTopK < 0 || engine.RRFK < 0 {
-		return fmt.Errorf("%w: the engine carries a negative retrieval bound (vector_top_k=%d keyword_top_k=%d rrf_k=%d)",
-			ErrMemoryEngine, engine.VectorTopK, engine.KeywordTopK, engine.RRFK)
 	}
 	if err := embedder.Validate(engine.Embedding); err != nil {
 		return fmt.Errorf("%w: %w", ErrMemoryEngine, err)

@@ -82,11 +82,14 @@ func TestReloadPublishesTheHotFieldsAsOneGeneration(t *testing.T) {
 	}
 }
 
-// TestReloadRefusesTheFieldsOnlyBootReads moves one field per case whose only consumer Boot built:
+// TestReloadRefusesTheFieldsOnlyBootReads moves one field per case whose only consumer the process opens once.
 //   - the exported entry answers the restart refusal by name, inside the structural family
 //   - the refusal names the field path the operator searches the source for
 //   - the reload endpoint answers the same refusal as a conflict
 //   - nothing entered service: no lease published a version and the next turn is the boot model
+//   - the tool declarations, skill roots, read root, file face and execution face are rebuilt by the generation-scoped consumers rather than refused here
+//   - the memory read namespaces, the request timeout, the meditation loop, the governance table and the observation face follow the same rule
+//   - TestReloadPublishesTheRebuiltFaces below reads that rebuild through the served tool face
 //
 // 契约: docs/wiki/platform/org-hot-reload.md#restart-required-dimensions
 func TestReloadRefusesTheFieldsOnlyBootReads(t *testing.T) {
@@ -95,35 +98,8 @@ func TestReloadRefusesTheFieldsOnlyBootReads(t *testing.T) {
 		path   string
 		change func(root, endpoint string) string
 	}{
-		{"tool declaration", "agents.user.tools", func(root, endpoint string) string {
-			return reloadTierDocument(root, endpoint, "model-a", "", "    tools:\n      - {kind: tool, id: send}\n")
-		}},
-		{"skill roots", "agents.user.skill_dirs", func(root, endpoint string) string {
-			return reloadTierDocument(root, endpoint, "model-a", "", "    skill_dirs: [\""+filepath.Join(root, "skills")+"\"]\n")
-		}},
-		{"read root", "agents.user.read_root", func(root, endpoint string) string {
-			return reloadTierDocument(root, endpoint, "model-a", "", "    read_root: \""+root+"\"\n")
-		}},
-		{"file surface", "agents.user.file", func(root, endpoint string) string {
-			return reloadTierDocument(root, endpoint, "model-a", "", "    file:\n      base_dir: \""+root+"\"\n")
-		}},
-		{"execution face", "agents.user.exec", func(root, endpoint string) string {
-			return reloadTierDocument(root, endpoint, "model-a", "", "    exec:\n      monitor:\n        interval: 3s\n")
-		}},
-		{"memory section", "agents.user.memory", func(root, endpoint string) string {
+		{"memory tier", "agents.user.memory", func(root, endpoint string) string {
 			return reloadTierDocument(root, endpoint, "model-a", "", "    memory:\n      type: localfile\n      path: \""+filepath.Join(root, "store")+"\"\n")
-		}},
-		{"meditation section", "agents.user.meditation", func(root, endpoint string) string {
-			return reloadTierDocument(root, endpoint, "model-a", "", "    meditation:\n      enabled: true\n      interval: 30m\n")
-		}},
-		{"governance rules", "governance", func(root, endpoint string) string {
-			return reloadTierDocument(root, endpoint, "model-a", "", "", "governance:\n  risk_rules: []\n")
-		}},
-		{"observation face", "telemetry", func(root, endpoint string) string {
-			return reloadTierDocument(root, endpoint, "model-a", "", "", "telemetry:\n  otel_enabled: true\n")
-		}},
-		{"request timeout", "request_timeout_seconds", func(root, endpoint string) string {
-			return reloadTierDocument(root, endpoint, "model-a", "", "", "request_timeout_seconds: 42\n")
 		}},
 		{"storage root", "storage.root", func(root, endpoint string) string {
 			return reloadTierDocument(filepath.Join(root, "moved"), endpoint, "model-a", "", "")

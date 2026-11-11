@@ -7,6 +7,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"os/signal"
 	"syscall"
@@ -39,6 +40,10 @@ func main() {
 		dieIf(err, "Bind the wechat channel")
 	}
 	app.banner(path)
+	watcher := watchHostConfig(path, host, func(err error) {
+		fmt.Fprintf(os.Stderr, "config reload refused: %v\n", err)
+	})
+	go watcher.run(ctx)
 	if err := app.run(ctx); err != nil {
 		app.close(host)
 		dieIf(err, "Run the wechat channel")

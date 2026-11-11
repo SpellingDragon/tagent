@@ -1,8 +1,8 @@
 // 契约: docs/wiki/tool/tool-architecture.md#recall-contract
 //
-// The observation-table port of the recall surface: the references a time,
-// type and keyword query matches, the reference of one landed event and the
-// original reference that event was landed with.
+// The durable query port of the recall surface: the references a time, type
+// and keyword query matches, the reference of one event and the original
+// reference the chain states for it.
 package recall
 
 import (
@@ -13,22 +13,22 @@ import (
 	"github.com/SpellingDragon/tagent/memory/ledger"
 )
 
-// Table is the observation-table read face the recall tools consume: the event
-// references one declarative query matches, the reference of one event the
-// table has landed, and the original reference that event was landed with.
+// Table is the durable read face the recall tools consume: the event
+// references one declarative query matches, the reference of one event read
+// from the chain, and the original reference the chain states for it.
 //
 // The redline list (3 rules):
-// MUST answer over the events the table has already landed and never over a store behind it.
-// MUST answer a key the table holds no event for as not held.
+// MUST answer by reading the durable chain on demand, not a pre-landed copy.
+// MUST answer a key the chain holds no readable event for as not held.
 // MUST NOT widen the granted partition set: an event outside it takes no part in an answer.
 type Table interface {
 	// QueryEvents returns the references matching opts, totally ordered and
 	// paged on the declarative terms of the memory read face.
 	QueryEvents(ctx context.Context, opts memory.QueryOptions) ([]memory.EventReference, error)
-	// Event returns the reference of the landed event under key and reports
-	// whether the table holds it.
+	// Event returns the reference of the event under key and reports whether
+	// the chain holds a readable one.
 	Event(key event.EventID) (memory.EventReference, bool)
-	// Reference returns the original reference key was landed with and reports
-	// whether the table holds one.
+	// Reference returns the original reference of key and reports whether the
+	// chain holds a readable one.
 	Reference(key event.EventID) (ledger.OriginalRef, bool)
 }

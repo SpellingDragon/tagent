@@ -30,6 +30,7 @@ import (
 	"syscall"
 	"testing"
 	"time"
+	"unsafe"
 
 	"github.com/SpellingDragon/tagent/api/event"
 	tagentmodel "github.com/SpellingDragon/tagent/api/model"
@@ -185,6 +186,10 @@ func (c *smokeConfig) write(t *testing.T) {
 // 入口不声明 send：正文只经自动投递出口落地，工具面无 send（D4）。
 // 冥想 agent 的工具面恰一个通信工具 send（D6）：跨会话投递是它的唯一写面，
 // 目标由反思输入的 delivery targets 段给出。
+//
+// 入口显式声明 provider_context_window = 2×回放窗口：max_tokens 是回放窗口
+// （折叠节奏），请求预算门量的是 provider 窗口；不声明时 02 门按 max_tokens
+// 本值计量，固定提示词与工具面会先撞 3/4 输入预算（r32 的 1519/1500）。
 func (c *smokeConfig) document() string {
 	if c.Doc != nil {
 		return c.Doc(c)
@@ -202,6 +207,7 @@ agents:
     tools:
       - { kind: agent, agent: smoke-worker }
     max_tokens: %d
+    provider_context_window: %d
     compress_threshold: 0.3
     keep_recent_tasks: 1
     max_tool_iterations: 3
@@ -235,7 +241,7 @@ app:
     approvers: [%s]
 `,
 		smokeSessionTag, c.Model, c.PromptDir, c.Endpoint,
-		smokeSessionTag, c.Model, c.maxTokens(),
+		smokeSessionTag, c.Model, c.maxTokens(), c.maxTokens()*4,
 		smokeSessionTag, c.meditationInterval(), c.meditationMinGap(),
 		smokeSessionTag, smokeSessionTag,
 		c.StorageRoot, c.ApprovalDir,
@@ -373,7 +379,7 @@ func (p *smokeProvider) serve(w http.ResponseWriter, r *http.Request) {
 	if hook != nil && hook(w, index, modelName, messages) {
 		return
 	}
-	fmt.Fprint(w, p.answerFor(modelName, messages, index))
+	fmt.Fprint(w, p.answerFor(modelName, messages, tools, index))
 }
 
 // claimMarker reports whether this turn is the one that settles the marker and
@@ -419,7 +425,11 @@ func (p *smokeProvider) finalAnswer(marker, body string) string {
 //   - 受理回执按结构取键（tool 角色 + 本次调用的 id）：回执是裸 "ok"，正文里没有可识别的字样，按正文取键会让脚本答不上来而重复发起委派。
 //   - 冥想的投递是 send{target:{agent,session}}：目标取反思输入列出的活跃会话对，
 //     脚本不猜会址，读不到的退到台架注册的首个会话。
-func (p *smokeProvider) answerFor(modelName string, messages []smokeModelMessage, index int) string {
+//   - 老带的语义摘要由 smokeBandSummaryMaterial 认出来并原样回它收到的有锚读法：摘要请求不是一轮决策，不消耗决策面也不认领轮次标记。
+func (p *smokeProvider) answerFor(modelName string, messages []smokeModelMessage, tools []string, index int) string {
+	if material, summary := smokeBandSummaryMaterial(messages, tools); summary {
+		return smokeAnswerBody(material)
+	}
 	last := smokeLastUserText(messages)
 	switch modelName {
 	case smokeWorkerModel:
@@ -479,6 +489,26 @@ func (p *smokeProvider) answerFor(modelName string, messages []smokeModelMessage
 		return p.finalAnswer(marker, smokeAnswerBody(smokeLongBody(marker)))
 	}
 	return p.finalAnswer(marker, smokeAnswerBody("answer "+marker))
+}
+
+// smokeBandReadAnchor 匹配一条渲染后的来源锚，即折叠产物里每条读法的开头：
+// [MM-DD HH:MM|gen:<generation>]。
+var smokeBandReadAnchor = regexp.MustCompile(`\[\d\d-\d\d \d\d:\d\d\|gen:[^\]]*\]`)
+
+// smokeBandSummaryMaterial 报告一次请求是否是老带的语义摘要请求，并给出它携带的
+// 有锚读法：折叠拿会话自己的模型求最老带的 gist，这条请求因此落在与决策同一个端点
+// 上，只带一条用户消息、不带工具面，被折材料的有锚读法跟在指令段之后。不声明工具的
+// agent 的决策请求同样不带工具面，所以按材料里渲染出来的来源锚认它：摘要请求回的就是
+// 被折材料的机械行，它因此既不会被决策脚本当成某一轮去答，也不消耗决策面。
+func smokeBandSummaryMaterial(messages []smokeModelMessage, tools []string) (string, bool) {
+	if len(tools) != 0 || len(messages) != 1 || messages[0].Role != "user" {
+		return "", false
+	}
+	_, material, asked := strings.Cut(messages[0].Content, "\n\n")
+	if !asked || !smokeBandReadAnchor.MatchString(material) {
+		return "", false
+	}
+	return strings.TrimSpace(material), true
 }
 
 // count 报告端点已经回答的请求数。
@@ -1748,19 +1778,38 @@ func (r *smokeRig) sessionFacts(chat string) []event.Event {
 	return r.host.Run().SessionFacts(r.addressOf(chat))
 }
 
-// smokeSample 是一次资源采样。
+// smokeSample 是一次资源采样：判定用的真占用（强制 GC 后仍驻留的堆）、
+// 单独记录的虚胖分量（进程 RSS 减去堆），以及 goroutine 数。
 type smokeSample struct {
 	Round      int
 	Goroutines int
 	HeapInuse  uint64
+	// RSSBytes 是采样时刻进程的当前常驻内存；平台读不到时为零。
+	RSSBytes int64
+	// RSSReadable 报告 RSSBytes 是否真的读到了。
+	RSSReadable bool
 }
 
-// sampleResources 采一次样，用于 goroutine 与堆的稳定性断言。
+// sampleResources 采一次样，用于 goroutine 与内存的稳定性断言：先强制 GC
+// 把可回收的分配归还，再读堆；真占用判定只读这次 GC 之后的 HeapInuse。
+// RSS 的当前值在 GC 之后读，虚胖分量=RSS−HeapInuse，单独记录、不参与判定；
+// 平台读不到 RSS 时这一路具名跳过，不把零当成一次读数。
 func (r *smokeRig) sampleResources(round int) smokeSample {
+	runtime.GC()
 	runtime.GC()
 	var stats runtime.MemStats
 	runtime.ReadMemStats(&stats)
-	return smokeSample{Round: round, Goroutines: runtime.NumGoroutine(), HeapInuse: stats.HeapInuse}
+	rss, readable := smokeCurrentRSSBytes()
+	sample := smokeSample{
+		Round:       round,
+		Goroutines:  runtime.NumGoroutine(),
+		HeapInuse:   stats.HeapInuse,
+		RSSReadable: readable,
+	}
+	if readable {
+		sample.RSSBytes = rss
+	}
+	return sample
 }
 
 // smokeLogRecorder 是替换 log.Default 的记录器：只记录，不转发，保持测试输出干净。
@@ -1898,6 +1947,18 @@ func (l *smokeLogRecorder) sample(substr string, limit int) []string {
 type smokeLogSwitch struct {
 	mu  sync.Mutex
 	cur *smokeLogRecorder
+	// mirror 是一代宿主子进程的产品日志出口：被 spawn 的宿主把它指向自己的
+	// stderr，父进程把 stderr 重定向到 logs/genNN.log，因此装配面与运行面的
+	// 日志行（含 durable load scan 的五行）真的落进代日志。进程内的冒烟不留
+	// 出口，测试输出保持干净。
+	mirror io.Writer
+}
+
+// setMirror 装上（或摘掉，传 nil）分发器的第二出口。
+func (s *smokeLogSwitch) setMirror(writer io.Writer) {
+	s.mu.Lock()
+	s.mirror = writer
+	s.mu.Unlock()
 }
 
 func (s *smokeLogSwitch) set(recorder *smokeLogRecorder) {
@@ -1915,11 +1976,15 @@ func (s *smokeLogSwitch) clear(recorder *smokeLogRecorder) {
 }
 
 func (s *smokeLogSwitch) add(format string, args ...any) {
+	line := fmt.Sprintf(format, args...)
 	s.mu.Lock()
-	recorder := s.cur
+	recorder, mirror := s.cur, s.mirror
 	s.mu.Unlock()
 	if recorder != nil {
-		recorder.add(format, args...)
+		recorder.add("%s", line)
+	}
+	if mirror != nil {
+		_, _ = fmt.Fprintln(mirror, line)
 	}
 }
 
@@ -1959,6 +2024,9 @@ var (
 )
 
 // installSmokeLog 把 trpc 日志面换成进程级分发器，并把当前记录器切到本次测试；测试结束时只摘掉自己的记录器，不改写全局日志面。
+// 被 spawn 的宿主子进程另把分发器的第二出口指向自己的 stderr：那一代的
+// logs/genNN.log 因此既载着 durable load scan 的五行（重启证据的取证对象），
+// 也在整代运行时持续增长（父进程据此区分「卡住」与「慢」）。
 func installSmokeLog(t *testing.T) *smokeLogRecorder {
 	t.Helper()
 	recorder := &smokeLogRecorder{}
@@ -1967,6 +2035,9 @@ func installSmokeLog(t *testing.T) *smokeLogRecorder {
 		log.ContextDefault = &smokeLogs
 	})
 	smokeLogs.set(recorder)
+	if os.Getenv(smokeCalibrationModeEnv) == smokeCalibrationModeHost {
+		smokeLogs.setMirror(os.Stderr)
+	}
 	t.Cleanup(func() { smokeLogs.clear(recorder) })
 	return recorder
 }
@@ -2216,8 +2287,11 @@ const (
 	// smokeCalibrationReviewNote 必须进报告：外推值在 03.11 全量首轮后复核。
 	smokeCalibrationReviewNote = "外推值，03.11 全量首轮后复核"
 
-	smokeCalibrationChildTimeout      = 15 * time.Minute
-	smokeCalibrationReadyTimeout      = 5 * time.Minute
+	smokeCalibrationChildTimeout = 15 * time.Minute
+	// smokeCalibrationLivenessStall 是心跳停写的判据：一代宿主在跑 1200 输入的
+	// 过程中持续写日志，日志五分钟不前进说明它没有新事可报。这个值只用来把
+	// 「卡住」与「慢」分开，不作为就绪窗——健康的一代由 self-reported ready 判到位。
+	smokeCalibrationLivenessStall     = 5 * time.Minute
 	smokeCalibrationGenerationTimeout = 10 * time.Minute
 	smokeCalibrationColdBuildTimeout  = 20 * time.Minute
 )
@@ -2668,7 +2742,149 @@ func smokeCalibrationReadJSON(path string, value any) error {
 	return json.Unmarshal(payload, value)
 }
 
-// smokeCalibrationAwaitFile 轮询到文件出现，回报观测到的时刻（父侧时钟）。
+// smokeCalibrationLivenessReady 与其兄弟是等一代宿主报到 ready 时可能落到的四种具名结论，
+// 按名字区分故障本身：child-exit 是启动即崩（还没报就退了），log-stall 是心跳停写
+// （卡在某一步且日志停止前进），child-bound 是子进程自报的 -test.timeout 到期。
+const (
+	smokeCalibrationLivenessReady   = "ready"
+	smokeCalibrationLivenessExit    = "child-exit"
+	smokeCalibrationLivenessStalled = "log-stall"
+	smokeCalibrationLivenessBound   = "child-bound"
+)
+
+// smokeCalibrationHeartbeatInterval 是宿主子进程写日志心跳的间隔。
+//
+// 父进程的 log-stall 判据只看代日志是否还在增长（见 smokeCalibrationAwaitLiveness），
+// 而产品日志只在有事件时写：引导恢复、四个会话的重绑、一次慢回合之间都能静默数
+// 分钟。CI runner 被同机任务挤占时，健康的一代因此在五分钟里没有一行新日志而被
+// 判死（03.11 第 29 代的代日志：引导本身占去两分半，此后的重绑还没有产品日志）。
+// 心跳让「日志停写」只由真死进程产生；判定阈值仍是五分钟，检测紧度不因心跳放宽。
+const smokeCalibrationHeartbeatInterval = 30 * time.Second
+
+// smokeCalibrationHeartbeat 是一代宿主子进程的心跳写手：产品日志经日志分发器的
+// 第二出口、心跳直接写 stderr，两者都落进父进程重定向的 logs/genNN.log。心跳不
+// 进产品日志记录器——durable load scan 的取证对象与故障核对的日志计数都是产品
+// 日志，心跳只是存活证据。
+type smokeCalibrationHeartbeat struct {
+	gen   int
+	start time.Time
+	stop  chan struct{}
+	done  chan struct{}
+
+	mu    sync.Mutex
+	phase string
+	steps int
+}
+
+// startSmokeCalibrationHeartbeat 起一代心跳，先写一行报到再按间隔续；stopBeat 由
+// 调用方 defer 收掉：t.Fatalf 走 Goexit 时 defer 仍执行，心跳不会留到下一代。
+func startSmokeCalibrationHeartbeat(gen int) *smokeCalibrationHeartbeat {
+	beat := &smokeCalibrationHeartbeat{gen: gen, start: time.Now(),
+		stop: make(chan struct{}), done: make(chan struct{})}
+	beat.beat()
+	go func() {
+		defer close(beat.done)
+		ticker := time.NewTicker(smokeCalibrationHeartbeatInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-beat.stop:
+				return
+			case <-ticker.C:
+				beat.beat()
+			}
+		}
+	}()
+	return beat
+}
+
+// mark 记录本代走到哪一步、已完成几步；两次心跳之间父进程只看得到这一行。
+func (h *smokeCalibrationHeartbeat) mark(phase string, steps int) {
+	h.mu.Lock()
+	h.phase, h.steps = phase, steps
+	h.mu.Unlock()
+}
+
+// beat 写一行心跳，带上代次、阶段与已处理计数。
+func (h *smokeCalibrationHeartbeat) beat() {
+	h.mu.Lock()
+	phase, steps := h.phase, h.steps
+	h.mu.Unlock()
+	if phase == "" {
+		phase = "spawn"
+	}
+	_, _ = fmt.Fprintf(os.Stderr,
+		"tagent: calibration heartbeat generation=%d phase=%s processed=%d elapsed=%s\n",
+		h.gen, phase, steps, time.Since(h.start).Round(time.Second))
+}
+
+// stopBeat 停住心跳并等它收尾，避免它在代日志关闭后再写。
+func (h *smokeCalibrationHeartbeat) stopBeat() {
+	close(h.stop)
+	<-h.done
+}
+
+// smokeCalibrationLivenessWindow 是等一代宿主报到 ready 的两条观察窗：日志停写
+// 多久算卡死，以及子进程自己的 -test.timeout 到期。生产只用一个值
+// （smokeCalibrationLiveness）；另一组窗口只给判据本身的正反锚用。
+type smokeCalibrationLivenessWindow struct {
+	Stall time.Duration
+	Bound time.Duration
+}
+
+// smokeCalibrationLiveness 是生产口径。
+var smokeCalibrationLiveness = smokeCalibrationLivenessWindow{
+	Stall: smokeCalibrationLivenessStall,
+	Bound: smokeCalibrationChildTimeout,
+}
+
+// smokeCalibrationAwaitLiveness 等一代宿主报到 ready，失败时给出具名 liveness。
+//
+// 这里没有固定的就绪窗：一段比宿主生命周期短的墙钟会把健康但慢的一代判死（每一代
+// 都要重放整条链，成本随重启次数增长），一段比它长的墙钟对挂死没有区分力。因此判据
+// 只看三件可观测的事——ready 文件出现、子进程退出、日志心跳是否还在前进——唯一的
+// 硬上限是子进程自己声明的 -test.timeout。
+func smokeCalibrationAwaitLiveness(child *smokeCalibrationChild, readyPath string) (time.Time, error) {
+	return smokeCalibrationAwaitLivenessWithin(child, readyPath, smokeCalibrationLiveness)
+}
+
+// smokeCalibrationAwaitLivenessWithin 是判据本体，窗口由调用方给出：生产传
+// smokeCalibrationLiveness，正反锚各传一组短窗口。
+func smokeCalibrationAwaitLivenessWithin(child *smokeCalibrationChild, readyPath string, window smokeCalibrationLivenessWindow) (time.Time, error) {
+	lastSize, lastGrowth := int64(-1), time.Now()
+	for {
+		if _, err := os.Stat(readyPath); err == nil {
+			return time.Now(), nil
+		}
+		if info, err := child.LogFile.Stat(); err == nil && info.Size() != lastSize {
+			lastSize, lastGrowth = info.Size(), time.Now()
+		}
+		select {
+		case err := <-child.exited:
+			child.exited <- err
+			return time.Time{}, fmt.Errorf(
+				"smoke calibration: liveness=%s: the generation exited before it reported ready: %v\n%s",
+				smokeCalibrationLivenessExit, err, smokeCalibrationLogTail(child.LogFile.Name(), 40))
+		default:
+		}
+		if stalled := time.Since(lastGrowth); stalled > window.Stall {
+			return time.Time{}, fmt.Errorf(
+				"smoke calibration: liveness=%s: the generation log has not grown for %s\n%s",
+				smokeCalibrationLivenessStalled, stalled.Round(time.Second),
+				smokeCalibrationLogTail(child.LogFile.Name(), 40))
+		}
+		if elapsed := time.Since(child.Spawned); elapsed > window.Bound {
+			return time.Time{}, fmt.Errorf(
+				"smoke calibration: liveness=%s: the child's own -test.timeout %s expired after %s, "+
+					"and its log is still the only evidence of how far it got\n%s",
+				smokeCalibrationLivenessBound, window.Bound,
+				elapsed.Round(time.Second), smokeCalibrationLogTail(child.LogFile.Name(), 40))
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// smokeCalibrationAwaitFile 等一个产物文件出现，用于子进程自报的代内报告。
 func smokeCalibrationAwaitFile(path string, timeout time.Duration) (time.Time, error) {
 	deadline := time.Now().Add(timeout)
 	for {
@@ -2684,6 +2900,58 @@ func smokeCalibrationAwaitFile(path string, timeout time.Duration) (time.Time, e
 
 // smokeCalibrationMS 把时长换成毫秒浮点。
 func smokeCalibrationMS(d time.Duration) float64 { return float64(d) / float64(time.Millisecond) }
+
+// TestSmokeCalibrationLivenessStall 是 log-stall 判据的正反两锚，判据本体不改。
+// - silent_log_is_stalled：日志真的停写时仍按停写时长判死，心跳不得把死进程洗成健康
+// - growing_log_is_not_stalled：日志只要还在增长就不判死，这是贫弱 runner 上健康长代需要的宽容
+func TestSmokeCalibrationLivenessStall(t *testing.T) {
+	window := smokeCalibrationLivenessWindow{Stall: 60 * time.Millisecond, Bound: 3 * time.Second}
+	standIn := func(t *testing.T) *smokeCalibrationChild {
+		t.Helper()
+		logFile, err := os.Create(filepath.Join(t.TempDir(), "gen00.log"))
+		if err != nil {
+			t.Fatalf("create the stand-in generation log: %v", err)
+		}
+		t.Cleanup(func() { _ = logFile.Close() })
+		return &smokeCalibrationChild{LogFile: logFile, Spawned: time.Now(), exited: make(chan error, 1)}
+	}
+
+	t.Run("silent_log_is_stalled", func(t *testing.T) {
+		child := standIn(t)
+		_, err := smokeCalibrationAwaitLivenessWithin(child, filepath.Join(t.TempDir(), "gen00.ready"), window)
+		if err == nil {
+			t.Fatalf("a generation whose log stopped growing was not judged dead")
+		}
+		if !strings.Contains(err.Error(), "liveness="+smokeCalibrationLivenessStalled) {
+			t.Fatalf("the verdict = %v, want liveness=%s", err, smokeCalibrationLivenessStalled)
+		}
+	})
+
+	t.Run("growing_log_is_not_stalled", func(t *testing.T) {
+		child := standIn(t)
+		readyPath := filepath.Join(t.TempDir(), "gen00.ready")
+		stop := make(chan struct{})
+		defer close(stop)
+		go func() {
+			for {
+				select {
+				case <-stop:
+					return
+				case <-time.After(10 * time.Millisecond):
+					_, _ = fmt.Fprintf(child.LogFile,
+						"tagent: calibration heartbeat generation=0 phase=rebind processed=1\n")
+				}
+			}
+		}()
+		go func() {
+			time.Sleep(6 * window.Stall)
+			_ = os.WriteFile(readyPath, []byte("{}"), 0o644)
+		}()
+		if _, err := smokeCalibrationAwaitLivenessWithin(child, readyPath, window); err != nil {
+			t.Fatalf("a generation whose log keeps growing was judged dead: %v", err)
+		}
+	})
+}
 
 // smokeCalibrationEnv 返回一份去掉了重复键的环境：追加项覆盖旧值，保证子进程
 // 看到的 GOCACHE 等变量只有一个。
@@ -2879,6 +3147,120 @@ func smokeCalibrationLogTail(path string, lines int) string {
 	return strings.Join(all, "\n")
 }
 
+// smokeLongScanMarker 是装配面为一次 durable load 写的计数行前缀。重启证据的取证
+// 对象就是这一行：scripts/scenarios/run_runtime_scenarios.py 读同一行判 attested，
+// 两侧的前缀清单互为镜像。
+const smokeLongScanMarker = "tagent: durable load scan prefix="
+
+// smokeLongScanPrefixes 是每次 durable load 都读的五个前缀；smokeLongScanDataPrefixes
+// 是其中在跑完的场景里必然载着数据的那三个。attempt 与 reject 可以合法为零。
+var (
+	smokeLongScanPrefixes = []string{
+		"tagent/task/v1/spec:", "tagent/task/v1/consume:", "tagent/task/v1/attempt:",
+		"tagent/task/v1/reject:", "tagent/task/v1/fact:",
+	}
+	smokeLongScanDataPrefixes = []string{
+		"tagent/task/v1/spec:", "tagent/task/v1/consume:", "tagent/task/v1/fact:",
+	}
+)
+
+// smokeLongScanEvidence 汇总整套代日志的 durable load 计数：每个前缀跨代读到的最深
+// 键数，以及一行都没出现的五个前缀。取跨代最大是因为一代从空链开始读零，早代的零
+// 不该掩盖后续重启真正读到的数据；首次出现即登记，故每代都读零键的前缀仍算行已出现，
+// 零键与缺行分开判；缺行说明宿主的日志出口断了，取证面当场为空。
+func smokeLongScanEvidence(paths []string) (map[string]int, []string, error) {
+	counts := map[string]int{}
+	for _, path := range paths {
+		payload, err := os.ReadFile(path)
+		if err != nil {
+			return nil, nil, fmt.Errorf("read the host log %s: %v", path, err)
+		}
+		for _, line := range strings.Split(string(payload), "\n") {
+			at := strings.Index(line, smokeLongScanMarker)
+			if at < 0 {
+				continue
+			}
+			prefix, rest, ok := strings.Cut(line[at+len(smokeLongScanMarker):], " keys=")
+			if !ok {
+				continue
+			}
+			digits, _, _ := strings.Cut(rest, " ")
+			keys, err := strconv.Atoi(strings.TrimSpace(digits))
+			if err != nil {
+				continue
+			}
+			if held, seen := counts[prefix]; !seen || keys > held {
+				counts[prefix] = keys
+			}
+		}
+	}
+	missing := make([]string, 0, len(smokeLongScanPrefixes))
+	for _, prefix := range smokeLongScanPrefixes {
+		if _, seen := counts[prefix]; !seen {
+			missing = append(missing, prefix)
+		}
+	}
+	return counts, missing, nil
+}
+
+// TestLongScanEvidenceNamesMissingPrefix 是重启证据判定里「缺行」一面的负锚。
+//
+// - 五行齐备且数据前缀读到键时判定通过；少写一行（这里少的是 reject）则缺行清单点名它。
+// - reject 那一行写成 keys=0 时仍算行已出现、缺行清单不点名它：行在不在与键读没读到是两件事。
+// - 数据前缀读零的那一面由 restart-evidence 子测试在真实代日志上判。
+func TestLongScanEvidenceNamesMissingPrefix(t *testing.T) {
+	dir := t.TempDir()
+	write := func(name, text string) string {
+		path := filepath.Join(dir, name)
+		if err := os.WriteFile(path, []byte(text), 0o644); err != nil {
+			t.Fatalf("write the fixture log %s: %v", path, err)
+		}
+		return path
+	}
+	line := func(prefix string, keys int) string {
+		return "tagent: durable load scan prefix=" + prefix + " keys=" + strconv.Itoa(keys) +
+			" bytes=64 elapsed=3µs\n"
+	}
+	var whole strings.Builder
+	for _, prefix := range smokeLongScanPrefixes {
+		whole.WriteString(line(prefix, 2))
+	}
+	full := write("gen00.log", whole.String())
+	truncated := write("gen01.log",
+		strings.Replace(whole.String(), line("tagent/task/v1/reject:", 2), "", 1))
+
+	zeroReject := write("gen02.log",
+		strings.Replace(whole.String(), line("tagent/task/v1/reject:", 2), line("tagent/task/v1/reject:", 0), 1))
+
+	counts, missing, err := smokeLongScanEvidence([]string{full})
+	if err != nil {
+		t.Fatalf("read the fixture logs: %v", err)
+	}
+	if len(missing) > 0 {
+		t.Fatalf("a complete five-line log reported missing prefixes %v", missing)
+	}
+	if counts["tagent/task/v1/fact:"] != 2 {
+		t.Fatalf("fact scan keys = %d, want the 2 the fixture wrote", counts["tagent/task/v1/fact:"])
+	}
+
+	if _, missing, err := smokeLongScanEvidence([]string{zeroReject}); err != nil {
+		t.Fatalf("read the fixture logs: %v", err)
+	} else if len(missing) > 0 {
+		t.Fatalf("a rejected-notification row written as keys=0 reported missing prefixes %v: the row is in the log, only its key count is zero", missing)
+	}
+
+	_, missing, err = smokeLongScanEvidence([]string{truncated})
+	if err != nil {
+		t.Fatalf("read the fixture logs: %v", err)
+	}
+	if len(missing) == 0 {
+		t.Fatal("a log without its reject line reported no missing prefix")
+	}
+	if missing[0] != "tagent/task/v1/reject:" {
+		t.Fatalf("missing prefixes = %v, want the dropped reject line named first", missing)
+	}
+}
+
 // smokeCalibrationHostChild 是宿主子进程的一代：真实 Boot、恢复、四个会话
 // 重新绑定，再驱动本代时间线；遇到重启步骤就落盘报告并等父进程 SIGKILL。
 func smokeCalibrationHostChild(t *testing.T) {
@@ -2907,6 +3289,9 @@ func smokeCalibrationHostChild(t *testing.T) {
 	}
 
 	started := time.Now()
+	beat := startSmokeCalibrationHeartbeat(gen)
+	defer beat.stopBeat()
+	beat.mark("boot", 0)
 	rig := bootSmokeRig(t, cfg, nil)
 	report := &smokeCalibrationGenerationReport{
 		Leaf: smokeCalibrationLeaf, Generation: gen, Window: plan.Window,
@@ -2924,6 +3309,7 @@ func smokeCalibrationHostChild(t *testing.T) {
 			Generation: gen, Session: chat, Marker: marker,
 			MS: smokeCalibrationMS(time.Since(start)),
 		})
+		beat.mark("rebind", len(report.Rebinds))
 	}
 	report.Self = smokeCalibrationReadSelfUsage()
 	report.WrittenAt = time.Now().UTC().Format(time.RFC3339Nano)
@@ -2946,11 +3332,13 @@ func smokeCalibrationHostChild(t *testing.T) {
 			Generation: gen, Session: step.Session, Index: step.Index,
 			Marker: step.Marker, MS: smokeCalibrationMS(time.Since(start)),
 		})
+		beat.mark("inputs", len(report.Inputs))
 	}
 
 	report.Self = smokeCalibrationReadSelfUsage()
 	report.WrittenAt = time.Now().UTC().Format(time.RFC3339Nano)
 	if report.TriggerSession != "" {
+		beat.mark("restart_point", len(report.Inputs))
 		report.Phase = "restart_point"
 		if err := smokeCalibrationWriteJSON(reportPath, report); err != nil {
 			t.Fatalf("write the restart point %s: %v", reportPath, err)
@@ -2967,10 +3355,26 @@ func smokeCalibrationHostChild(t *testing.T) {
 	}
 }
 
+// smokeCalibrationChild 是一代宿主子进程：命令、日志句柄、spawn 时刻，以及一条
+// 只被等一次的退出通道。退出由启动时就起的 goroutine 收尸，等待方读通道，所以任何
+// 位置的失败路径都能问「它退了吗」而不会与后文的 cmd.Wait() 抢同一个进程。
+type smokeCalibrationChild struct {
+	Cmd     *exec.Cmd
+	LogFile *os.File
+	Spawned time.Time
+	exited  chan error
+}
+
+// wait 收尸并返回退出结果。一代子进程只死一次，因此这条通道只被读一次；调用方
+// 在失败路径上不得再调 Cmd.Wait()，否则会与 goroutine 重复收尸。
+func (c *smokeCalibrationChild) wait() error {
+	return <-c.exited
+}
+
 // smokeCalibrationSpawn 启动下一代宿主子进程，返回命令、日志句柄与 spawn 时刻。
 // childTest 是子进程入口测试名：03.10 用校准入口，03.11 用长程入口，同一个
 // 自执行二进制与同一套启机/握手结构。
-func smokeCalibrationSpawn(t *testing.T, binary, planPath, runDir string, gen int, childTest string) (*exec.Cmd, *os.File, time.Time) {
+func smokeCalibrationSpawn(t *testing.T, binary, planPath, runDir string, gen int, childTest string) *smokeCalibrationChild {
 	t.Helper()
 	if childTest == "" {
 		childTest = "TestEventIntegrityLongRunCalibration"
@@ -3000,7 +3404,10 @@ func smokeCalibrationSpawn(t *testing.T, binary, planPath, runDir string, gen in
 		_ = logFile.Close()
 		t.Fatalf("spawn the calibration host generation %d: %v", gen, err)
 	}
-	return cmd, logFile, time.Now()
+	child := &smokeCalibrationChild{Cmd: cmd, LogFile: logFile, Spawned: time.Now(),
+		exited: make(chan error, 1)}
+	go func() { child.exited <- cmd.Wait() }()
+	return child
 }
 
 // smokeCalibrationRun 是一轮场景（primary 或非 race 基线）的父侧观测。
@@ -3049,16 +3456,17 @@ func smokeCalibrationRunGenerations(t *testing.T, binary, planPath, runDir strin
 	started := time.Now()
 	var lastKill time.Time
 	for gen := 0; gen <= plan.restarts(); gen++ {
-		cmd, logFile, spawned := smokeCalibrationSpawn(t, binary, planPath, runDir, gen, plan.ChildTest)
+		child := smokeCalibrationSpawn(t, binary, planPath, runDir, gen, plan.ChildTest)
 		reportPath := filepath.Join(runDir, "reports", fmt.Sprintf("gen%02d.json", gen))
-		run.ChildLogs = append(run.ChildLogs, logFile.Name())
-		readyAt, err := smokeCalibrationAwaitFile(reportPath+".ready", smokeCalibrationReadyTimeout)
+		run.ChildLogs = append(run.ChildLogs, child.LogFile.Name())
+		readyAt, err := smokeCalibrationAwaitLiveness(child, reportPath+".ready")
 		if err != nil {
-			_ = cmd.Process.Kill()
-			_ = cmd.Wait()
-			_ = logFile.Close()
-			t.Fatalf("calibration generation %d never became ready: %v\n%s", gen, err, smokeCalibrationLogTail(logFile.Name(), 40))
+			_ = child.Cmd.Process.Kill()
+			_ = child.wait()
+			_ = child.LogFile.Close()
+			t.Fatalf("calibration generation %d never became ready: %v", gen, err)
 		}
+		spawned := child.Spawned
 		var ready smokeCalibrationGenerationReport
 		if err := smokeCalibrationReadJSON(reportPath+".ready", &ready); err != nil {
 			t.Fatalf("read the ready report of generation %d: %v", gen, err)
@@ -3078,45 +3486,43 @@ func smokeCalibrationRunGenerations(t *testing.T, binary, planPath, runDir strin
 		}
 
 		if _, err := smokeCalibrationAwaitFile(reportPath, smokeCalibrationGenerationTimeout); err != nil {
-			_ = cmd.Process.Kill()
-			_ = cmd.Wait()
-			_ = logFile.Close()
-			t.Fatalf("calibration generation %d never reported: %v\n%s", gen, err, smokeCalibrationLogTail(logFile.Name(), 40))
+			_ = child.Cmd.Process.Kill()
+			_ = child.wait()
+			_ = child.LogFile.Close()
+			t.Fatalf("calibration generation %d never reported: %v\n%s", gen, err, smokeCalibrationLogTail(child.LogFile.Name(), 40))
 		}
 		var report smokeCalibrationGenerationReport
 		if err := smokeCalibrationReadJSON(reportPath, &report); err != nil {
 			t.Fatalf("read the report of generation %d: %v", gen, err)
 		}
 		if report.Phase == "failed" {
-			exited := make(chan error, 1)
-			go func() { exited <- cmd.Wait() }()
 			select {
-			case <-exited:
+			case <-child.exited:
 			case <-time.After(30 * time.Second):
-				_ = cmd.Process.Kill()
-				<-exited
+				_ = child.Cmd.Process.Kill()
+				_ = child.wait()
 			}
-			_ = logFile.Close()
-			t.Fatalf("generation %d failed: %s\n%s", gen, report.Failure, smokeCalibrationLogTail(logFile.Name(), 40))
+			_ = child.LogFile.Close()
+			t.Fatalf("generation %d failed: %s\n%s", gen, report.Failure, smokeCalibrationLogTail(child.LogFile.Name(), 40))
 		}
 		run.Generations = append(run.Generations, report)
 		run.ReportPaths = append(run.ReportPaths, reportPath)
 
 		if report.Phase == "done" {
-			if err := cmd.Wait(); err != nil {
-				t.Fatalf("the final generation exited with error: %v\n%s", err, smokeCalibrationLogTail(logFile.Name(), 40))
+			if err := child.wait(); err != nil {
+				t.Fatalf("the final generation exited with error: %v\n%s", err, smokeCalibrationLogTail(child.LogFile.Name(), 40))
 			}
-			rss, cpu := smokeCalibrationProcessUsage(cmd.ProcessState)
+			rss, cpu := smokeCalibrationProcessUsage(child.Cmd.ProcessState)
 			run.Peak.absorb(rss, cpu, report.Self)
-			_ = logFile.Close()
+			_ = child.LogFile.Close()
 			break
 		}
 		killAt := time.Now()
-		killErr := cmd.Process.Kill()
-		waitErr := cmd.Wait()
-		rss, cpu := smokeCalibrationProcessUsage(cmd.ProcessState)
+		killErr := child.Cmd.Process.Kill()
+		waitErr := child.wait()
+		rss, cpu := smokeCalibrationProcessUsage(child.Cmd.ProcessState)
 		run.Peak.absorb(rss, cpu, report.Self)
-		_ = logFile.Close()
+		_ = child.LogFile.Close()
 		if killErr != nil {
 			t.Fatalf("kill generation %d at its restart point: %v", gen, killErr)
 		}
@@ -3634,6 +4040,9 @@ func smokeLongHostChild(t *testing.T) {
 	recorder := installSmokeLog(t)
 	channel := newSmokeLongChannel(plan)
 	started := time.Now()
+	beat := startSmokeCalibrationHeartbeat(gen)
+	defer beat.stopBeat()
+	beat.mark("boot", 0)
 	rig := bootSmokeRigWithPort(t, cfg, nil, nil, channel.fakeChannel, channel)
 	report := &smokeCalibrationGenerationReport{
 		Leaf: smokeLongLeaf, Generation: gen, Window: plan.Window,
@@ -3664,9 +4073,11 @@ func smokeLongHostChild(t *testing.T) {
 			Generation: gen, Session: chat, Marker: marker,
 			MS: smokeCalibrationMS(time.Since(start)),
 		})
+		beat.mark("rebind", len(report.Rebinds))
 	}
 
 	if reload, ok := smokeLongFindReload(plan, gen); ok {
+		beat.mark("reload", len(report.Rebinds))
 		result := rig.smokeIntegrityReload(reload.Model)
 		outcome := smokeLongReloadOutcome{Generation: gen, Model: reload.Model}
 		if result.err != nil {
@@ -3686,6 +4097,7 @@ func smokeLongHostChild(t *testing.T) {
 	if err := smokeCalibrationWriteJSON(reportPath+".ready", report); err != nil {
 		t.Fatalf("write the long-run ready report %s: %v", reportPath, err)
 	}
+	beat.mark("inputs", 0)
 
 	inputs, trigger := smokeLongGenerationSteps(plan, gen)
 	consumerTurn := smokeLongConsumerMarker(plan, gen, inputs)
@@ -3717,6 +4129,7 @@ func smokeLongHostChild(t *testing.T) {
 					Generation: gen, Session: item.Session, Index: item.Index, Marker: item.Marker,
 				})
 			}
+			beat.mark("inputs", len(report.Inputs))
 			i = end
 			continue
 		}
@@ -3739,6 +4152,7 @@ func smokeLongHostChild(t *testing.T) {
 			Generation: gen, Session: step.Session, Index: step.Index, Marker: step.Marker,
 			MS: smokeCalibrationMS(time.Since(start)),
 		})
+		beat.mark("inputs", len(report.Inputs))
 		i++
 	}
 
@@ -3765,6 +4179,7 @@ func smokeLongHostChild(t *testing.T) {
 	report.WrittenAt = time.Now().UTC().Format(time.RFC3339Nano)
 
 	if trigger != "" {
+		beat.mark("restart_point", len(report.Inputs))
 		report.TriggerSession = trigger
 		report.Phase = "restart_point"
 		if err := smokeCalibrationWriteJSON(reportPath, report); err != nil {
@@ -3774,6 +4189,7 @@ func smokeLongHostChild(t *testing.T) {
 		return
 	}
 
+	beat.mark("drain", len(report.Inputs))
 	report.Phase = "done"
 	if err := rig.close(); err != nil {
 		report.CloseErr = err.Error()
@@ -4427,13 +4843,13 @@ func TestSmokeLongDelegateScriptAnswersBatchedSettle(t *testing.T) {
 	}
 
 	provider := &smokeProvider{}
-	if got := provider.answerFor(smokeEntryModel, toolResult, 1); !strings.Contains(got, "delegate ack "+marker) {
+	if got := provider.answerFor(smokeEntryModel, toolResult, nil, 1); !strings.Contains(got, "delegate ack "+marker) {
 		t.Fatalf("the tool-result-only request answered %q, want the separate-shape delegate ack", got)
 	}
-	if got := provider.answerFor(smokeEntryModel, noticeOnly, 2); !strings.Contains(got, "settle-ack "+marker) {
+	if got := provider.answerFor(smokeEntryModel, noticeOnly, nil, 2); !strings.Contains(got, "settle-ack "+marker) {
 		t.Fatalf("the notice-only request answered %q, want the closing settle-ack", got)
 	}
-	if got := provider.answerFor(smokeEntryModel, batched, 3); !strings.Contains(got, "settle-ack "+marker) {
+	if got := provider.answerFor(smokeEntryModel, batched, nil, 3); !strings.Contains(got, "settle-ack "+marker) {
 		t.Fatalf("the batched request answered %q, want the closing settle-ack: the notice rode the same request as the tool result", got)
 	}
 }
@@ -4465,4 +4881,85 @@ func TestSmokeLongReconcileCountsBatchedNotification(t *testing.T) {
 	if len(recon.MissingNotifications) != 0 || len(recon.DuplicateNotifications) != 0 {
 		t.Fatalf("batched notification identity = missing %v duplicate %v, want neither", recon.MissingNotifications, recon.DuplicateNotifications)
 	}
+}
+
+// procTaskInfo is the kernel's proc_taskinfo record for one process. The
+// resident size is pti_resident_size, the bytes the process currently holds in
+// physical memory.
+type procTaskInfo struct {
+	VirtualSize   uint64
+	ResidentSize  uint64
+	TotalUser     uint64
+	TotalSystem   uint64
+	ThreadsUser   uint64
+	ThreadsSystem uint64
+	Policy        int32
+	Faults        int32
+	Pageins       int32
+	CowFaults     int32
+	MessagesSent  int32
+	MessagesRecv  int32
+	SyscallsMach  int32
+	SyscallsUnix  int32
+	Csw           int32
+	Threadnum     int32
+	Numrunning    int32
+	Priority      int32
+}
+
+// procInfoCallPIDInfo and procPIDTaskInfo are the proc_info syscall arguments as
+// (call number, pid, flavor, argument, buffer, size): PROC_INFO_CALL_PIDINFO asks
+// about a process and PROC_PIDTASKINFO asks for its task info.
+const (
+	procInfoCallPIDInfo = 2
+	procPIDTaskInfo     = 4
+	// procInfoDarwinSyscall is the darwin SYS_PROC_INFO trap number, named here
+	// because the platform branch is selected at run time.
+	procInfoDarwinSyscall = 336
+)
+
+// smokeCurrentRSSBytes reports the current resident size of this process, or
+// false when the platform read is unavailable: the task info the darwin kernel
+// keeps for the process, the resident field of /proc/self/statm on linux, and no
+// reading on any other platform.
+func smokeCurrentRSSBytes() (int64, bool) {
+	switch runtime.GOOS {
+	case "darwin":
+		return smokeDarwinRSSBytes()
+	case "linux":
+		return smokeLinuxRSSBytes()
+	default:
+		return 0, false
+	}
+}
+
+// smokeDarwinRSSBytes reads the resident size through proc_pidinfo: a read the
+// kernel refuses reports no reading instead of a number the sampler invented.
+func smokeDarwinRSSBytes() (int64, bool) {
+	var info procTaskInfo
+	read, _, errno := syscall.Syscall6(procInfoDarwinSyscall, procInfoCallPIDInfo, uintptr(os.Getpid()),
+		procPIDTaskInfo, 0, uintptr(unsafe.Pointer(&info)), unsafe.Sizeof(info))
+	if errno != 0 || read < unsafe.Sizeof(info) || info.ResidentSize == 0 {
+		return 0, false
+	}
+	return int64(info.ResidentSize), true
+}
+
+// smokeLinuxRSSBytes reads the resident field of /proc/self/statm, scaled by
+// the page size, and reports no reading when the kernel refuses to describe the
+// process.
+func smokeLinuxRSSBytes() (int64, bool) {
+	data, err := os.ReadFile("/proc/self/statm")
+	if err != nil {
+		return 0, false
+	}
+	fields := strings.Fields(string(data))
+	if len(fields) < 2 {
+		return 0, false
+	}
+	pages, err := strconv.ParseInt(fields[1], 10, 64)
+	if err != nil || pages <= 0 {
+		return 0, false
+	}
+	return pages * int64(os.Getpagesize()), true
 }

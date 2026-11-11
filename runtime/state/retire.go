@@ -3,6 +3,7 @@ package state
 import (
 	"context"
 	"errors"
+	"sort"
 	"sync"
 
 	"github.com/SpellingDragon/tagent/api/event"
@@ -24,11 +25,23 @@ type retirement struct {
 	mu       sync.Mutex
 	bindings *Bindings
 	pending  map[Generation]*Leases
+	record   func(context.Context, Generation) error
 }
 
 // newRetirement returns an empty retirement ledger over one binding holder.
 func newRetirement(bindings *Bindings) *retirement {
 	return &retirement{bindings: bindings, pending: map[Generation]*Leases{}}
+}
+
+// setRecord attaches the record one retirement writes once it has freed the
+// resources of a generation. The record runs after the release and never
+// triggers one: the drain decides when a generation retires, and the record
+// states the retirement on the chain so a restart reads it instead of deriving
+// it again.
+func (r *retirement) setRecord(record func(context.Context, Generation) error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.record = record
 }
 
 // track registers the resources of one published generation beside the release
@@ -44,20 +57,34 @@ func (r *retirement) track(gen Generation, resources *Leases) {
 
 // sweep frees the resources of every retired generation exactly once and joins
 // the release failures it finds; a release that fails does not stop the
-// releases beside it.
+// releases beside it. Every generation it frees reaches the record attached to
+// this ledger, in generation order, after the release ran — the record states
+// the retirement and never decides it.
 func (r *retirement) sweep(ctx context.Context) error {
 	r.mu.Lock()
-	defer r.mu.Unlock()
 	var errs []error
+	freed := make([]Generation, 0, len(r.pending))
 	for gen, resources := range r.pending {
 		if !r.retired(gen) {
 			continue
 		}
 		delete(r.pending, gen)
+		freed = append(freed, gen)
 		if resources == nil {
 			continue
 		}
 		if err := resources.ReleaseAll(ctx); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	record := r.record
+	r.mu.Unlock()
+	sort.Slice(freed, func(i, j int) bool { return freed[i] < freed[j] })
+	for _, gen := range freed {
+		if record == nil {
+			break
+		}
+		if err := record(ctx, gen); err != nil {
 			errs = append(errs, err)
 		}
 	}

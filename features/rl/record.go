@@ -322,3 +322,31 @@ type AttemptRecord struct {
 	// Timestamp is the time the record was written.
 	Timestamp time.Time `json:"timestamp"`
 }
+
+// AnnexRecord is one training sample's acceptance annex: the verdict an
+// independent verifier reached from the task's artifacts, the version of the
+// derivation rules the verdict was reached under, and the artifacts it read.
+//
+// The record is bound to a sample by two identities together: the attempt that
+// produced the artifacts and the bench task it ran. Neither alone joins the
+// three elements of one sample, so both are carried here. An annex is
+// append-only data: a later verdict is a new line under the same identity and
+// never an edit of the attempt record or of an earlier annex line, and the
+// record carries no field of the attempt it judges.
+type AnnexRecord struct {
+	// AttemptID identifies the attempt whose artifacts were judged.
+	AttemptID event.AttemptID `json:"attempt_id"`
+	// TaskID identifies the bench task the attempt ran; with AttemptID it is
+	// the sample's join key.
+	TaskID string `json:"task_id"`
+	// Verdict is the independent verdict: a pass or fail the verifier reached
+	// from the artifacts, unrated when no verdict exists, or incomplete when the
+	// sample gate found an element missing. It is never derived from the
+	// execution path's self-report.
+	Verdict string `json:"verdict"`
+	// RuleVersion names the version of the derivation rules the verdict was
+	// reached under; an unrated verdict carries none.
+	RuleVersion string `json:"rule_version,omitempty"`
+	// Artifacts lists the artifact references the verdict was reached on.
+	Artifacts []string `json:"artifacts,omitempty"`
+}

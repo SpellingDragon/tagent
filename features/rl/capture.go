@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/SpellingDragon/tagent/api/event"
 	"github.com/SpellingDragon/tagent/api/model"
 )
 
@@ -198,12 +199,15 @@ func (p SnapshotPolicy) extraProjector() func(map[string]any) map[string]any {
 // the model view it was declared against and the request content it carried,
 // projected so no header, cookie or URL credential is persisted.
 //
-// The snapshot is fixed before the request starts and holds the request as it
-// stood then: the messages, tool schemas, multimodal parts, reasoning and
-// actual parameters are kept verbatim while a credential carrier is projected,
-// so the projection never rewrites business content. The headers are kept as
-// their names with their values projected to RedactedValue, because a header
-// value is a transport credential carrier rather than request content.
+// The snapshot is the runtime request as it stood before the request started:
+// the messages, tool schemas, multimodal parts, reasoning and the generation
+// parameters the request carried are kept verbatim while a credential carrier is
+// projected, so the projection never rewrites business content. It is not the
+// wire body a provider encodes: field names, stream framing and provider
+// extensions of that body are the provider's, and a reader takes this content as
+// what the runtime request held. The headers are kept as their names with their
+// values projected to RedactedValue, because a header value is a transport
+// credential carrier rather than request content.
 type RequestSnapshot struct {
 	// Model names the model the request was declared against.
 	Model string `json:"model,omitempty"`
@@ -217,8 +221,9 @@ type RequestSnapshot struct {
 	VisibleTools []VersionedName `json:"visible_tools,omitempty"`
 	// VisibleSkills lists the skills visible to the request.
 	VisibleSkills []VersionedName `json:"visible_skills,omitempty"`
-	// Parameters is the generation configuration the request was declared with,
-	// kept as the actual parameters rather than a digest of them.
+	// Parameters is the generation configuration the runtime request carried,
+	// kept as the parameters themselves rather than a digest of them. It records
+	// the runtime request and not the wire body a provider encodes.
 	Parameters json.RawMessage `json:"parameters,omitempty"`
 	// StructuredOutput is the structured output declaration of the request.
 	StructuredOutput json.RawMessage `json:"structured_output,omitempty"`
@@ -517,7 +522,9 @@ func MarshalSnapshot(snapshot RequestSnapshot) ([]byte, error) {
 	return json.Marshal(snapshot)
 }
 
-// ParseSnapshot decodes one safe snapshot from its persisted bytes.
+// ParseSnapshot decodes one safe runtime request snapshot from its persisted
+// bytes: the content is the runtime request as it stood before the request
+// started, never the wire body a provider encodes.
 func ParseSnapshot(content []byte) (RequestSnapshot, error) {
 	var snapshot RequestSnapshot
 	if err := json.Unmarshal(content, &snapshot); err != nil {
@@ -545,10 +552,12 @@ func snapshotRef(content []byte, snapshotID, readEntry string) SnapshotRef {
 	return SnapshotRef{SnapshotID: snapshotID, Digest: hex.EncodeToString(sum[:]), ReadEntry: readEntry}
 }
 
-// VerifySnapshot rechecks snapshot content against the reference it is read
-// back under: an empty reference cannot read content back and is refused as
-// unreadable, and content that does not match its digest is refused as a
-// mismatch rather than read as the referenced snapshot.
+// VerifySnapshot rechecks runtime request snapshot content against the reference
+// it is read back under: an empty reference cannot read content back and is
+// refused as unreadable, and content that does not match its digest is refused
+// as a mismatch rather than read as the referenced snapshot. The content checked
+// is the runtime request snapshot, so a wire body standing in for it never
+// matches.
 func VerifySnapshot(ref SnapshotRef, content []byte) error {
 	if ref.SnapshotID == "" || ref.Digest == "" {
 		return fmt.Errorf("%w: reference (%q, %q)", ErrSnapshotUnreadable, ref.SnapshotID, ref.Digest)
@@ -556,6 +565,44 @@ func VerifySnapshot(ref SnapshotRef, content []byte) error {
 	sum := sha256.Sum256(content)
 	if got := hex.EncodeToString(sum[:]); got != ref.Digest {
 		return fmt.Errorf("%w: reference %s, content %s", ErrSnapshotMismatch, ref.Digest, got)
+	}
+	return nil
+}
+
+// RequestEvidenceRecord is the durable request evidence of one model decision:
+// the decision and the episode it belonged to, beside the readable reference to
+// the safe runtime request snapshot the request was fixed against.
+//
+// The record lands the reference and not a second copy of the request: the
+// content is read back through Snapshot and rechecked against its digest, so a
+// persisted evidence line never stands as a derived view of a finished call. An
+// evidence line that names no decision or carries no readable reference is
+// refused where it is written rather than landed as evidence nothing can be read
+// back from.
+type RequestEvidenceRecord struct {
+	// DecisionID identifies the decision whose request this evidence is.
+	DecisionID event.DecisionID `json:"decision_id"`
+	// EpisodeID names the episode the decision belongs to; it is empty for a
+	// decision whose facts name no episode boundary.
+	EpisodeID event.EpisodeID `json:"episode_id,omitempty"`
+	// Snapshot is the readable reference to the safe snapshot of the request.
+	Snapshot SnapshotRef `json:"snapshot"`
+}
+
+// ErrRequestEvidenceMissing reports request evidence that names no decision: an
+// evidence line nothing joins to a request is refused where it is written.
+var ErrRequestEvidenceMissing = errors.New("rl: the request evidence carries no decision identity")
+
+// ValidateRequestEvidence reports whether one request evidence record can be
+// landed and read back: the decision identity is required, and the reference
+// must be readable, so evidence no request can be joined to and evidence no
+// content can be read through are both refused by name.
+func ValidateRequestEvidence(record RequestEvidenceRecord) error {
+	if record.DecisionID == "" {
+		return fmt.Errorf("%w: request evidence joins no request without one", ErrRequestEvidenceMissing)
+	}
+	if record.Snapshot.SnapshotID == "" || record.Snapshot.Digest == "" {
+		return fmt.Errorf("%w: request evidence of decision %q carries reference (%q, %q)", ErrSnapshotUnreadable, record.DecisionID, record.Snapshot.SnapshotID, record.Snapshot.Digest)
 	}
 	return nil
 }

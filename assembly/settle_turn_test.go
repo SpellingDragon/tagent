@@ -132,9 +132,6 @@ type scopeGateWake struct {
 	claiming int
 }
 
-// RestoreOwed keeps the entry as it stands: the check wrote the account itself.
-func (w *scopeGateWake) RestoreOwed(context.Context) error { return nil }
-
 // Unconsumed reports the entry while its consumption has not completed.
 func (w *scopeGateWake) Unconsumed() []state.WorkSeat {
 	w.mu.Lock()

@@ -285,7 +285,7 @@ func TestRebuildRefusesToPassABrokenChainAsWhole(t *testing.T) {
 
 	t.Run("a whole snapshot and a bounded tail restore in order", func(t *testing.T) {
 		target := replay.NewReplayProjection()
-		relations := replay.NewMemoryRelations()
+		relations := &replay.MemoryRelations{}
 		report, err := replay.RebuildProjectionFromWAL(ctx, target, newChain(t, wholeRefs), relations, chainKey, replay.RebuildOptions{})
 		if err != nil {
 			t.Fatalf("rebuild a whole chain: %v", err)
@@ -326,7 +326,7 @@ func TestRebuildRefusesToPassABrokenChainAsWhole(t *testing.T) {
 	t.Run("a missing snapshot ref is refused by name and reported partial", func(t *testing.T) {
 		target := replay.NewReplayProjection()
 		refs := append(append([]replay.CompactionRef{}, wholeRefs...), replay.CompactionRef{Key: "fb09", Type: "agent.output", Summary: "gone"})
-		report, err := replay.RebuildProjectionFromWAL(ctx, target, newChain(t, refs), replay.NewMemoryRelations(), chainKey, replay.RebuildOptions{})
+		report, err := replay.RebuildProjectionFromWAL(ctx, target, newChain(t, refs), &replay.MemoryRelations{}, chainKey, replay.RebuildOptions{})
 		if !errors.Is(err, replay.ErrRebuildPartial) {
 			t.Fatalf("rebuild over a missing ref = %v, want replay.ErrRebuildPartial", err)
 		}
@@ -343,14 +343,14 @@ func TestRebuildRefusesToPassABrokenChainAsWhole(t *testing.T) {
 		if err := chain.Commit(ctx, replay.ChainFact{Key: "fb01", Chain: chainKey, Type: replay.CompactionEventType, Content: "{not a payload", Time: at}); err != nil {
 			t.Fatalf("commit the corrupt compaction: %v", err)
 		}
-		if _, err := replay.RebuildProjectionFromWAL(ctx, replay.NewReplayProjection(), chain, replay.NewMemoryRelations(), chainKey, replay.RebuildOptions{}); !errors.Is(err, replay.ErrCompactionCorrupt) {
+		if _, err := replay.RebuildProjectionFromWAL(ctx, replay.NewReplayProjection(), chain, &replay.MemoryRelations{}, chainKey, replay.RebuildOptions{}); !errors.Is(err, replay.ErrCompactionCorrupt) {
 			t.Fatalf("rebuild over a corrupt payload = %v, want replay.ErrCompactionCorrupt", err)
 		}
 	})
 
 	t.Run("a failed chain read is refused and not reported as a scanned chain", func(t *testing.T) {
 		report, err := replay.RebuildProjectionFromWAL(ctx, replay.NewReplayProjection(), failingChain{err: errors.New("segment read failed")},
-			replay.NewMemoryRelations(), chainKey, replay.RebuildOptions{})
+			&replay.MemoryRelations{}, chainKey, replay.RebuildOptions{})
 		if !errors.Is(err, replay.ErrChainScan) {
 			t.Fatalf("rebuild over a failing read = %v, want replay.ErrChainScan", err)
 		}
@@ -360,7 +360,7 @@ func TestRebuildRefusesToPassABrokenChainAsWhole(t *testing.T) {
 	})
 
 	t.Run("an empty chain is reported as scanned empty", func(t *testing.T) {
-		report, err := replay.RebuildProjectionFromWAL(ctx, replay.NewReplayProjection(), replay.NewMemoryEventChain(), replay.NewMemoryRelations(), chainKey, replay.RebuildOptions{})
+		report, err := replay.RebuildProjectionFromWAL(ctx, replay.NewReplayProjection(), replay.NewMemoryEventChain(), &replay.MemoryRelations{}, chainKey, replay.RebuildOptions{})
 		if err != nil {
 			t.Fatalf("rebuild an empty chain: %v", err)
 		}
@@ -370,7 +370,7 @@ func TestRebuildRefusesToPassABrokenChainAsWhole(t *testing.T) {
 	})
 
 	t.Run("an empty session is refused by name", func(t *testing.T) {
-		if _, err := replay.RebuildProjectionFromWAL(ctx, replay.NewReplayProjection(), replay.NewMemoryEventChain(), replay.NewMemoryRelations(),
+		if _, err := replay.RebuildProjectionFromWAL(ctx, replay.NewReplayProjection(), replay.NewMemoryEventChain(), &replay.MemoryRelations{},
 			replay.ChainKey{PartitionID: 7}, replay.RebuildOptions{}); !errors.Is(err, replay.ErrChainKeyRequired) {
 			t.Fatalf("rebuild under an empty session = %v, want replay.ErrChainKeyRequired", err)
 		}
@@ -379,7 +379,7 @@ func TestRebuildRefusesToPassABrokenChainAsWhole(t *testing.T) {
 	t.Run("a non-empty projection is skipped with its reason", func(t *testing.T) {
 		target := replay.NewReplayProjection()
 		target.Append(ctx, replay.ProjectionEntry{Key: "fb10", Type: "tool.result", Content: "already here"})
-		report, err := replay.RebuildProjectionFromWAL(ctx, target, newChain(t, wholeRefs), replay.NewMemoryRelations(), chainKey, replay.RebuildOptions{})
+		report, err := replay.RebuildProjectionFromWAL(ctx, target, newChain(t, wholeRefs), &replay.MemoryRelations{}, chainKey, replay.RebuildOptions{})
 		if err != nil {
 			t.Fatalf("rebuild over a non-empty projection: %v", err)
 		}

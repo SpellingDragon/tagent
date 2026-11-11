@@ -1,5 +1,7 @@
 # event-sourced-projection Specification
 
+> **复核注记（2026-11-04 逐模块核对）**：本规范部分条款仍以已退役符号（`TagentAgent` / `AgentToolWrapper` / `EventBus` / `SessionProjection` / `PlainTool` / `ToolRegistry` / `RegisterBuiltinTools` / `SwappableModel` 等，全仓 Go 0 命中）表述现行 SHALL/MUST；现行实现为 `assembly` 组合根 + 每地址常驻消费循环 + 装配期按声明分派。这些条款属于历史契约残句，**阅读现行要求时不得据此断言现行行为**；正式迁移/退役须走 OpenSpec change delta（B-02 待裁定）。逐条映射见 `openspec/changes/archive/2026-11-03-runtime-architecture-convergence/evidence/10-doc-gap-register.md`。
+
 ## Purpose
 
 投影作为事实链（KV LSM 事件日志）的纯回放映射：压缩产物以 `compress.product` 一等事实入链，重启从产物事实恢复合成条目；历史链的 compaction 事实只作只读兼容。单一真相源（事实链），无游离 checkpoint。覆盖 R1（上下文跨重启连续）。

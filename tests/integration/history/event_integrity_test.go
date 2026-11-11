@@ -1,6 +1,6 @@
 // TestEventIntegrityConsumptionRecovery drives the consumption bookkeeping of
 // the mailbox beside the durable material a task chain carries, over the real
-// localfile tier and one real process boundary:
+// journal tier and one real process boundary:
 // - claim_then_commit_retry_recovers: a claim survives an uncertain commit, and the retry leaves the obligation owed and restorable
 // - consume_only_after_durable_commit: no acceptance and no consumption precede the committed outbox fact
 // - handover_before_confirmation: a stop inside the handover leaves the settled notification owed and its result recoverable
@@ -21,7 +21,6 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -94,7 +93,7 @@ func TestEventIntegrityConsumptionRecovery(t *testing.T) {
 func runClaimThenCommitRetry(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
-	cfg := ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: t.TempDir()}
+	cfg := ledger.StorageConfig{Type: ledger.StorageJournal, Root: t.TempDir()}
 	spec := consumptionSpec("task-retry")
 	notice := task.Notice{TaskID: "", Round: 1, Kind: task.NoticeSettled, Seq: 0, Event: "evt-settle-retry"}
 	uncertain := true
@@ -221,7 +220,7 @@ func runClaimThenCommitRetry(t *testing.T) {
 func runConsumeOnlyAfterDurableCommit(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
-	cfg := ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: t.TempDir()}
+	cfg := ledger.StorageConfig{Type: ledger.StorageJournal, Root: t.TempDir()}
 	tier, err := ledger.OpenTier(ctx, cfg)
 	if err != nil {
 		t.Fatalf("open the durable tier: %v", err)
@@ -915,7 +914,7 @@ func assembleHandoverRun(t *testing.T, ctx context.Context, root string, probe *
 			}},
 			Tools: []trpctool.CallableTool{&chainTool{name: "probe", output: "out-handover"}},
 		},
-	}, assembly.WithGovernance(passPolicy{}), assembly.WithStorage(ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: root}),
+	}, assembly.WithGovernance(passPolicy{}), assembly.WithStorage(ledger.StorageConfig{Type: ledger.StorageJournal, Root: root}),
 		assembly.WithPlugins(func(assembled *assembly.Run) ([]plugin.Instance, error) {
 			probe.run = assembled
 			return []plugin.Instance{probe}, nil
@@ -930,7 +929,7 @@ func assembleHandoverRun(t *testing.T, ctx context.Context, root string, probe *
 // the notification the seed claims but never consumes.
 func consumptionSeedClaimedTask(t *testing.T, ctx context.Context, root string) (task.Spec, task.Notice) {
 	t.Helper()
-	cfg := ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: root}
+	cfg := ledger.StorageConfig{Type: ledger.StorageJournal, Root: root}
 	tier, err := ledger.OpenTier(ctx, cfg)
 	if err != nil {
 		t.Fatalf("open the seed tier: %v", err)
@@ -981,7 +980,7 @@ func recoverConsumptionRun(t *testing.T, ctx context.Context, root string) *asse
 // consumptionHostDocument renders the bare host document the restart boots:
 // the one entry agent and the durable root, no tool and no sender.
 func consumptionHostDocument(root string) string {
-	return fmt.Sprintf("entry: agent-a\nprovider: local\nmodel: model-a\nproviders:\n  local: { provider: openai, api_endpoint: \"http://127.0.0.1:1/v1\", api_key_env: TAGENT_TEST_API_KEY }\nagents:\n  agent-a: {}\nstorage: { type: localfile, root: %q }\n", root)
+	return fmt.Sprintf("entry: agent-a\nprovider: local\nmodel: model-a\nproviders:\n  local: { provider: openai, api_endpoint: \"http://127.0.0.1:1/v1\", api_key_env: TAGENT_TEST_API_KEY }\nagents:\n  agent-a: {}\nstorage: { type: journal, root: %q }\n", root)
 }
 
 // assembleConsumptionRun assembles the runtime the restart anchors drive over
@@ -999,7 +998,7 @@ func assembleConsumptionRun(t *testing.T, ctx context.Context, root string) *ass
 			}},
 			Tools: []trpctool.CallableTool{&chainTool{name: "probe", output: "out-a"}},
 		},
-	}, assembly.WithGovernance(passPolicy{}), assembly.WithStorage(ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: root}))
+	}, assembly.WithGovernance(passPolicy{}), assembly.WithStorage(ledger.StorageConfig{Type: ledger.StorageJournal, Root: root}))
 	if err != nil {
 		t.Fatalf("assemble the consumption runtime: %v", err)
 	}
@@ -1085,7 +1084,7 @@ func restoreAssertOriginalText(t *testing.T, outcome func(*testing.T, string) re
 			}
 		}
 		if want := string(o.Seed.ResultFact); !restoreCarriesString(o.Recover.Observed, want) {
-			t.Fatalf("the %s restart's observation table does not carry the tool result %s; observed=%v", mode, want, o.Recover.Observed)
+			t.Fatalf("the %s restart's durable query does not carry the tool result %s; observed=%v", mode, want, o.Recover.Observed)
 		}
 	}
 }
@@ -1676,10 +1675,10 @@ func newProjectionRun(t *testing.T, maxTokens int, provider model.Model) (*assem
 	t.Helper()
 	run, err := assembly.Assemble(context.Background(), &config.Declaration{
 		Entry:  "agent-a",
-		Agents: []config.AgentSpec{{ID: "agent-a", Model: "model-a", MaxTokens: maxTokens}},
+		Agents: []config.AgentSpec{{ID: "agent-a", Model: "model-a", MaxTokens: maxTokens, ProviderContextWindow: maxTokens * 2}},
 	}, map[event.AgentID]assembly.NativeAgent{
 		"agent-a": {Model: provider},
-	}, assembly.WithGovernance(passPolicy{}))
+	}, assembly.WithGovernance(passPolicy{}), assembly.WithStorage(ledger.StorageConfig{Type: ledger.StorageMemory}))
 	if err != nil {
 		t.Fatalf("assemble the runtime: %v", err)
 	}
@@ -1736,6 +1735,20 @@ func projectionKeysOf(entries []replay.ProjectionEntry) []string {
 	return keys
 }
 
+// noticeRewriteOf reports the entry keys of one session's projection with the
+// notice fact left out: the commit appends that fact as material of its own, so
+// the remaining sequence is the transcript the age fold rewrote under it.
+func noticeRewriteOf(t *testing.T, run *assembly.Run, addr event.Address, notice event.EventID) []string {
+	t.Helper()
+	rewritten := make([]string, 0, 8)
+	for _, key := range projectionKeysOf(projectionEntriesOf(t, run, addr.SessionID)) {
+		if event.EventID(key) != notice {
+			rewritten = append(rewritten, key)
+		}
+	}
+	return rewritten
+}
+
 // projectionProductsOf reports the synthetic product keys of one session's
 // projection in projection order.
 func projectionProductsOf(t *testing.T, run *assembly.Run, session event.SessionID) []event.EventID {
@@ -1753,16 +1766,19 @@ func projectionProductsOf(t *testing.T, run *assembly.Run, session event.Session
 // chain holds.
 func projectionFactCountOf(run *assembly.Run, session event.SessionID, factType string) int {
 	count := 0
-	for _, evt := range run.SessionFacts(event.Address{SessionID: session}) {
+	_ = run.EachSessionFact(context.Background(), event.Address{SessionID: session}, func(evt event.Event) error {
 		if evt.Type == factType {
 			count++
 		}
-	}
+		return nil
+	})
 	return count
 }
 
 // rebuildProjectionFromRun replays the mapped facts of one session chain into an
-// empty projection, as the cold start reads them: a compress request carries no
+// empty projection, as the cold start reads them: the live ledger holds the
+// window the projection still presents, so the chain streams from the durable
+// store instead of the resident window alone. A compress request carries no
 // message and maps onto no projection entry, so the rebuild reads back exactly
 // the material the commits mapped. It reports the rebuilt projection, the
 // rebuild report and how many mapped facts the chain carried.
@@ -1771,24 +1787,24 @@ func rebuildProjectionFromRun(t *testing.T, ctx context.Context, run *assembly.R
 	chainKey := replay.ChainKey{PartitionID: 1, SessionID: session}
 	chain := replay.NewMemoryEventChain()
 	mapped := 0
-	for _, evt := range run.SessionFacts(event.Address{SessionID: session}) {
+	if err := run.EachSessionFact(ctx, event.Address{SessionID: session}, func(evt event.Event) error {
 		if evt.Type == event.CompressRequestType || evt.Message.Content == "" {
-			continue
+			return nil
 		}
 		mapped++
-		if err := chain.Commit(ctx, replay.ChainFact{
+		return chain.Commit(ctx, replay.ChainFact{
 			Key:     evt.Key,
 			Chain:   chainKey,
 			Type:    evt.Type,
 			Summary: evt.Meta[event.MetaKeyEventSummary],
 			Content: evt.Message.Content,
-			Time:    evt.Timestamp,
-		}); err != nil {
-			t.Fatalf("commit the chain fact %s: %v", evt.Key, err)
-		}
+			Time:    evt.Timestamp.UTC(),
+		})
+	}); err != nil {
+		t.Fatalf("stream the session chain: %v", err)
 	}
 	rebuilt := replay.NewReplayProjection()
-	report, err := replay.RebuildProjectionFromWAL(ctx, rebuilt, chain, replay.NewMemoryRelations(), chainKey, replay.RebuildOptions{})
+	report, err := replay.RebuildProjectionFromWAL(ctx, rebuilt, chain, &replay.MemoryRelations{}, chainKey, replay.RebuildOptions{})
 	if err != nil {
 		t.Fatalf("rebuild the projection from the chain: %v", err)
 	}
@@ -1873,21 +1889,21 @@ func runSmallWindowFoldAndRestore(t *testing.T) {
 	for _, entry := range entries {
 		held[entry.Key] = true
 	}
-	for _, key := range []event.EventID{projectionKey(2, "1-plan"), projectionKey(2, "2-call")} {
+	for _, key := range []event.EventID{projectionKey(0, "1-plan"), projectionKey(0, "2-call"), projectionKey(1, "1-plan"), projectionKey(1, "2-call")} {
 		if held[key] {
 			t.Fatalf("the folded projection still carries the process detail %s the fold consumed", key)
 		}
 	}
-	for _, key := range []event.EventID{projectionKey(2, "0-in"), projectionKey(2, "3-out")} {
+	for _, key := range []event.EventID{projectionKey(2, "0-in"), projectionKey(2, "3-out"), projectionKey(2, "1-plan"), projectionKey(2, "2-call")} {
 		if !held[key] {
-			t.Fatalf("the folded projection dropped %s, want the input and output of a turn kept whole", key)
+			t.Fatalf("the folded projection dropped %s, want the turns still inside the recent window kept whole", key)
 		}
 	}
-	original, err := folded.CommittedEvent(ctx, projectionKey(2, "1-plan"))
+	original, err := folded.CommittedEvent(ctx, projectionKey(0, "1-plan"))
 	if err != nil {
 		t.Fatalf("read the folded original: %v", err)
 	}
-	if original.Message.Content != projectionBody(2, "1-plan") {
+	if original.Message.Content != projectionBody(0, "1-plan") {
 		t.Fatal("the folded original is no longer the text the chain committed")
 	}
 
@@ -1913,18 +1929,30 @@ func runSmallWindowFoldAndRestore(t *testing.T) {
 	if !first.Triggered || first.NewFolded == 0 || len(first.Products) == 0 {
 		t.Fatalf("fold report = %+v, want the fold the commits triggered", first)
 	}
-	recoveredEntries := rebuilt.Entries()
-	recovered := projectionKeysOf(recoveredEntries)
-	second, err := rebuilt.FoldByAge(ctx, plan)
+	for round := 0; round < 4; round++ {
+		next, err := rebuilt.FoldByAge(ctx, plan)
+		if err != nil {
+			t.Fatalf("fold the rebuilt projection again: %v", err)
+		}
+		if !next.Triggered {
+			break
+		}
+		if next.NewFolded != 0 {
+			t.Fatalf("round %d report = %+v, want the folds after the first to consume no process detail: the promotion summarizes what the round before folded", round+1, next)
+		}
+	}
+	fixed := projectionKeysOf(rebuilt.Entries())
+	settled, err := rebuilt.FoldByAge(ctx, plan)
 	if err != nil {
-		t.Fatalf("fold the rebuilt projection again: %v", err)
+		t.Fatalf("fold the settled projection: %v", err)
 	}
-	if second.NewFolded != 0 {
-		t.Fatalf("fold report = %+v, want a second fold to consume no process detail", second)
+	if settled.Triggered {
+		t.Fatalf("fold report = %+v, want the fold to reach its fixed point", settled)
 	}
-	if !sameKeys(projectionKeysOf(rebuilt.Entries()), recovered) {
-		t.Fatalf("a second fold changed the recovered keys %v into %v", recovered, projectionKeysOf(rebuilt.Entries()))
+	if !sameKeys(projectionKeysOf(rebuilt.Entries()), fixed) {
+		t.Fatalf("the settled fold changed the keys %v into %v", fixed, projectionKeysOf(rebuilt.Entries()))
 	}
+	recoveredEntries := rebuilt.Entries()
 	if !sameKeys(projectionRawKeysOf(recoveredEntries), projectionRawKeysOf(entries)) {
 		t.Fatalf("the recovered raw keys = %v, want the folded projection's own %v", projectionRawKeysOf(recoveredEntries), projectionRawKeysOf(entries))
 	}
@@ -1969,8 +1997,12 @@ func runRebuildRefoldsFromWAL(t *testing.T) {
 	if _, held := projectionEntryOfKey(online, projectionKey(3, "0-in")); !held {
 		t.Fatalf("the online projection dropped the newest input %s the fold keeps whole", projectionKey(3, "0-in"))
 	}
-	if segments := projectionProductKeysOfType(online, replay.ProjectionTypeSegmentFold); len(segments) == 0 {
-		t.Fatalf("the online fold carries no segment product beside %v, want the band products it minted", projectionProductsOf(t, run, addr.SessionID))
+	if segments := projectionProductKeysOfType(online, replay.ProjectionTypeSegmentFold); len(segments) != 0 {
+		t.Fatalf("the online fold presents the segment products %v beside the summary %v, want every segment product promoted into the summary that covers it",
+			segments, projectionProductsOf(t, run, addr.SessionID))
+	}
+	if products := projectionFactCountOf(run, addr.SessionID, event.CompressProductType); products < 2 {
+		t.Fatalf("the chain carries %d compress product fact(s), want the segment folds and the summary the online fold executed", products)
 	}
 	filed := projectionFactCountOf(run, addr.SessionID, event.CompressRequestType)
 	if filed == 0 {
@@ -1980,7 +2012,7 @@ func runRebuildRefoldsFromWAL(t *testing.T) {
 	t.Logf("rebuild_refolds_from_wal: online entries=%v products=%v requests=%d", projectionKeysOf(online), projectionProductsOf(t, run, addr.SessionID), filed)
 
 	plan := projectionWindowPlan(projectionWindowTokens)
-	facts := projectionCommitFactsOf(t, run, addr.SessionID)
+	facts := projectionCommitFactsOf(t, ctx, run, addr.SessionID)
 	chainKey := replay.ChainKey{PartitionID: 1, SessionID: addr.SessionID}
 	chain := replay.NewMemoryEventChain()
 	committed := make([]string, 0, len(facts))
@@ -1991,7 +2023,7 @@ func runRebuildRefoldsFromWAL(t *testing.T) {
 		}
 	}
 	rebuilt := replay.NewReplayProjection()
-	report, err := replay.RebuildProjectionFromWAL(ctx, rebuilt, chain, replay.NewMemoryRelations(), chainKey, replay.RebuildOptions{})
+	report, err := replay.RebuildProjectionFromWAL(ctx, rebuilt, chain, &replay.MemoryRelations{}, chainKey, replay.RebuildOptions{})
 	if err != nil {
 		t.Fatalf("rebuild the projection from the WAL: %v", err)
 	}
@@ -2015,6 +2047,24 @@ func runRebuildRefoldsFromWAL(t *testing.T) {
 	if !onePass.Triggered || onePass.NewFolded == 0 || len(onePass.Products) == 0 {
 		t.Fatalf("the fold of the rebuilt projection = %+v, want the fold the online commits triggered", onePass)
 	}
+	if summaries := projectionProductKeysOfType(rebuilt.Entries(), replay.ProjectionTypeHistorySummary); len(summaries) != 0 {
+		t.Fatalf("the first fold over the raw sequence minted %d history summaries, want none: the middle band folds its process detail before any material reaches the oldest band", len(summaries))
+	}
+	if segments := projectionProductKeysOfType(rebuilt.Entries(), replay.ProjectionTypeSegmentFold); len(segments) == 0 {
+		t.Fatalf("the first fold over the raw sequence minted no segment product, want the one the middle band folds into")
+	}
+	for round := 0; round < 4; round++ {
+		fold, err := rebuilt.FoldByAge(ctx, plan)
+		if err != nil {
+			t.Fatalf("fold the rebuilt projection again: %v", err)
+		}
+		if !fold.Triggered {
+			break
+		}
+		if fold.NewFolded != 0 {
+			t.Fatalf("pass %d = %+v, want the passes after the first to fold no process detail again", round+2, fold)
+		}
+	}
 	if got := projectionRawKeysOf(rebuilt.Entries()); !sameKeys(got, onlineKept) {
 		t.Fatalf("the rebuilt fold keeps %v whole, want the online fold's own %v", got, onlineKept)
 	}
@@ -2022,20 +2072,13 @@ func runRebuildRefoldsFromWAL(t *testing.T) {
 		t.Fatalf("the rebuilt fold consumes %v, want the online fold's own %v", got, projectionConsumedRawKeysOf(committed, online))
 	}
 	if got, want := projectionProductKeysOfType(rebuilt.Entries(), replay.ProjectionTypeSegmentFold), projectionProductKeysOfType(online, replay.ProjectionTypeSegmentFold); !sameKeys(got, want) {
-		t.Fatalf("the rebuilt fold mints the segment products %v, want the online fold's own %v", got, want)
-	}
-	for _, key := range projectionProductKeysOfType(online, replay.ProjectionTypeSegmentFold) {
-		want, _ := projectionEntryOfKey(online, event.EventID(key))
-		got, held := projectionEntryOfKey(rebuilt.Entries(), event.EventID(key))
-		if !held || got.Content != want.Content || got.Type != want.Type || !got.Time.Equal(want.Time) {
-			t.Fatalf("the rebuilt segment product %s = %+v (found=%v), want the online fold's own %+v", key, got, held, want)
-		}
+		t.Fatalf("the rebuilt fold presents the segment products %v, want the online fold's own %v", got, want)
 	}
 	onePassSummary := projectionProductKeysOfType(rebuilt.Entries(), replay.ProjectionTypeHistorySummary)
 	if len(onePassSummary) != 1 {
 		t.Fatalf("the rebuilt fold carries %d history summaries, want the one summary the band reads", len(onePassSummary))
 	}
-	t.Logf("rebuild_refolds_from_wal: one_pass summary online=%v rebuilt=%v", projectionProductKeysOfType(online, replay.ProjectionTypeHistorySummary), onePassSummary)
+	t.Logf("rebuild_refolds_from_wal: settled summary online=%v rebuilt=%v", projectionProductKeysOfType(online, replay.ProjectionTypeHistorySummary), onePassSummary)
 
 	refolded := replay.NewReplayProjection()
 	var rejudged []event.CompressRequest
@@ -2047,8 +2090,15 @@ func runRebuildRefoldsFromWAL(t *testing.T) {
 		}
 		rejudged = append(rejudged, fold.Requests...)
 	}
-	if got, want := replay.RenderProjection(refolded.Entries()), replay.RenderProjection(online); !bytes.Equal(got, want) {
-		t.Fatalf("the WAL re-fold restored %d bytes = %v, want the online fold's own %d bytes = %v", len(got), projectionKeysOf(refolded.Entries()), len(want), projectionKeysOf(online))
+	if got, want := stripFoldGenerations(string(replay.RenderProjection(refolded.Entries()))), stripFoldGenerations(string(replay.RenderProjection(online))); got != want {
+		t.Fatalf("the WAL re-fold restored %d bytes = %v, want the online fold's own %d bytes = %v apart from the recorder generation the raw facts cannot name", len(got), projectionKeysOf(refolded.Entries()), len(want), projectionKeysOf(online))
+	}
+	for _, entry := range projectionProductsEntriesOf(t, refolded.Entries()) {
+		for _, line := range strings.Split(entry.Content, "; ") {
+			if !strings.HasPrefix(line, "[") || !strings.Contains(line, "|gen:?]") {
+				t.Fatalf("the WAL re-fold writes %q, want every line to open with the explicit gen:? placeholder of a chain that names no generation", line)
+			}
+		}
 	}
 
 	if len(rejudged) == 0 {
@@ -2078,7 +2128,7 @@ func runRebuildRefoldsFromWAL(t *testing.T) {
 			t.Fatalf("the folded original %s = %q, want the chain's %q", key, original.Message.Content, projectionBodyOfKey(key))
 		}
 	}
-	t.Logf("rebuild_refolds_from_wal: restored=%d raw facts; re-folded %d entries=%d bytes identical to the online %d entries=%d bytes; products=%v judgments=%d",
+	t.Logf("rebuild_refolds_from_wal: restored=%d raw facts; re-folded %d entries=%d bytes matching the online %d entries=%d bytes apart from the recorder generation; products=%v judgments=%d",
 		len(facts), refolded.Len(), len(replay.RenderProjection(refolded.Entries())), len(online), len(replay.RenderProjection(online)),
 		projectionProductsEntriesOf(t, refolded.Entries()), len(rejudged))
 }
@@ -2102,12 +2152,12 @@ func projectionConsumedRawKeysOf(committed []string, entries []replay.Projection
 // projectionCommitFactsOf reports the mapped facts of one session chain in
 // commit order, in the shape a cold start replays the WAL under: a compress
 // request carries no message and maps onto no projection entry.
-func projectionCommitFactsOf(t *testing.T, run *assembly.Run, session event.SessionID) []replay.ChainFact {
+func projectionCommitFactsOf(t *testing.T, ctx context.Context, run *assembly.Run, session event.SessionID) []replay.ChainFact {
 	t.Helper()
 	facts := make([]replay.ChainFact, 0, 16)
-	for _, evt := range run.SessionFacts(event.Address{SessionID: session}) {
+	if err := run.EachSessionFact(ctx, event.Address{SessionID: session}, func(evt event.Event) error {
 		if evt.Type == event.CompressRequestType || evt.Message.Content == "" {
-			continue
+			return nil
 		}
 		facts = append(facts, replay.ChainFact{
 			Key:     evt.Key,
@@ -2115,8 +2165,11 @@ func projectionCommitFactsOf(t *testing.T, run *assembly.Run, session event.Sess
 			Type:    evt.Type,
 			Summary: evt.Meta[event.MetaKeyEventSummary],
 			Content: evt.Message.Content,
-			Time:    evt.Timestamp,
+			Time:    evt.Timestamp.UTC(),
 		})
+		return nil
+	}); err != nil {
+		t.Fatalf("stream the session chain: %v", err)
 	}
 	return facts
 }
@@ -2126,18 +2179,20 @@ func projectionCommitFactsOf(t *testing.T, run *assembly.Run, session event.Sess
 // content-addressed identity.
 func projectionCompressFactsOf(run *assembly.Run, session event.SessionID) map[event.EventID]bool {
 	keys := map[event.EventID]bool{}
-	for _, evt := range run.SessionFacts(event.Address{SessionID: session}) {
+	_ = run.EachSessionFact(context.Background(), event.Address{SessionID: session}, func(evt event.Event) error {
 		if evt.Type == event.CompressRequestType {
 			keys[evt.Key] = true
 		}
-	}
+		return nil
+	})
 	return keys
 }
 
 // runUnconsumedNotLost is the negative anchor of the unconsumed tail: an input
 // and its reasoning no output closed stay whole in the projection, no product
-// speaks them, and the original text stays on the chain; only the output that
-// closes the turn lets the fold consume the process detail.
+// speaks them, and the original text stays on the chain; a turn folds its process
+// detail only once the output closed it and it left the recent window, so the
+// closing output alone folds nothing.
 func runUnconsumedNotLost(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
@@ -2175,6 +2230,25 @@ func runUnconsumedNotLost(t *testing.T) {
 	commitProjectionLeg(t, ctx, run, addr, 2, "2-call", event.TypeActionCommand, "call 02", projectionBody(2, "2-call"))
 	commitProjectionLeg(t, ctx, run, addr, 2, "3-out", event.TypeAgentOutput, "answer 02", projectionBody(2, "3-out"))
 	entries = projectionEntriesOf(t, run, addr.SessionID)
+	if _, still := projectionEntryOfKey(entries, projectionKey(2, "1-plan")); !still {
+		t.Fatalf("the just-closed turn folded its process detail while it was still inside the recent window: %v", projectionKeysOf(entries))
+	}
+
+	folded := false
+	for turn := 3; turn <= 5 && !folded; turn++ {
+		for _, leg := range projectionTurnLegs(turn) {
+			commitProjectionLeg(t, ctx, run, addr, turn, leg.position, leg.typ, leg.summary, projectionBody(turn, leg.position))
+			entries = projectionEntriesOf(t, run, addr.SessionID)
+			if _, still := projectionEntryOfKey(entries, projectionKey(2, "1-plan")); !still {
+				folded = true
+				break
+			}
+		}
+	}
+	if !folded {
+		t.Fatalf("no fold consumed the process detail of the closed turn that left the recent window: %v", projectionKeysOf(projectionEntriesOf(t, run, addr.SessionID)))
+	}
+	entries = projectionEntriesOf(t, run, addr.SessionID)
 	held := make(map[event.EventID]bool, len(entries))
 	for _, entry := range entries {
 		held[entry.Key] = true
@@ -2184,19 +2258,27 @@ func runUnconsumedNotLost(t *testing.T) {
 			t.Fatalf("the closed tail still carries the process detail %s the fold should consume", key)
 		}
 	}
-	for _, key := range []event.EventID{projectionKey(2, "0-in"), projectionKey(2, "3-out")} {
-		if !held[key] {
-			t.Fatalf("the closed tail dropped %s, want the input and output of the turn kept whole", key)
-		}
-	}
-	folded := false
+	spoken := false
 	for _, product := range projectionProductsEntries(t, run, addr.SessionID) {
 		if strings.Contains(product.Content, "plan 02") {
-			folded = true
+			spoken = true
 		}
 	}
-	if !folded {
+	if !spoken {
 		t.Fatalf("no fold product speaks the closed tail: %v", projectionProductsOf(t, run, addr.SessionID))
+	}
+	rendered := string(replay.RenderProjection(entries))
+	for _, read := range []string{"ask 02", "answer 02"} {
+		if !strings.Contains(rendered, read) {
+			t.Fatalf("the projection states no %q: the folded turn left neither its input nor its output behind", read)
+		}
+	}
+	foldedOriginal, err := run.CommittedEvent(ctx, projectionKey(2, "2-call"))
+	if err != nil {
+		t.Fatalf("read the folded original: %v", err)
+	}
+	if foldedOriginal.Message.Content != projectionBody(2, "2-call") {
+		t.Fatal("the folded tool command is no longer the text the chain committed")
 	}
 	t.Logf("unconsumed_not_lost: entries=%d products=%d", len(entries), len(projectionProductsOf(t, run, addr.SessionID)))
 }
@@ -2221,8 +2303,8 @@ func runRebuildDoesNotRefold(t *testing.T) {
 	if !report.Fallback || report.Entries != mapped || report.Dropped != 0 || !report.Scanned {
 		t.Fatalf("rebuild report = %+v, want the bounded fallback replaying %d mapped facts whole", report, mapped)
 	}
-	if rebuilt.Compaction() != nil || rebuilt.FullBoundary() != "" {
-		t.Fatalf("the rebuild restored compaction=%+v boundary=%q from a chain that carries none", rebuilt.Compaction(), rebuilt.FullBoundary())
+	if rebuilt.Compaction() != nil {
+		t.Fatalf("the rebuild restored compaction=%+v from a chain that carries none", rebuilt.Compaction())
 	}
 	expected := make([]string, 0, 16)
 	for turn := 0; turn < 4; turn++ {
@@ -2254,10 +2336,10 @@ func runRestartRestoresFoldForm(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
 
-	storage := ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: t.TempDir()}
+	storage := ledger.StorageConfig{Type: ledger.StorageJournal, Root: t.TempDir()}
 	declaration := &config.Declaration{
 		Entry:  "agent-a",
-		Agents: []config.AgentSpec{{ID: "agent-a", Model: "model-a", MaxTokens: projectionWindowTokens}},
+		Agents: []config.AgentSpec{{ID: "agent-a", Model: "model-a", MaxTokens: projectionWindowTokens, ProviderContextWindow: projectionWindowTokens * 32}},
 	}
 	agents := map[event.AgentID]assembly.NativeAgent{
 		"agent-a": {Model: &replayModel{name: "model-a"}},
@@ -2293,16 +2375,18 @@ func runRestartRestoresFoldForm(t *testing.T) {
 	if !sameKeys(got, want) {
 		t.Fatalf("the restart restored the fold products %v, want the %v the chain held: the fold form is owed to the rule over the same commit boundaries", got, want)
 	}
-	if after := projectionFactCountOf(restarted, addr.SessionID, event.CompressRequestType); after != 0 {
-		t.Fatalf("the restart filed %d compress request(s), want none: the replay reads the judgments the chain holds and writes no second one", after)
+	if after := projectionFactCountOf(restarted, addr.SessionID, event.CompressRequestType); after != filed {
+		t.Fatalf("the restart holds %d compress request(s), want the %d the chain already held: the replay reads the judgments the chain holds and writes no second one", after, filed)
 	}
 	t.Logf("restart_restores_fold_form: restored %v; the replay filed no judgment", got)
 }
 
-// runFoldProductNoSelfTrigger is the negative anchor of the product guard: a
-// fold repeated over material it already folded mints no second product and
-// consumes none of the products it minted, and a synthetic-keyed process entry
-// is never folded even when it sits in a closed segment over the threshold.
+// runFoldProductNoSelfTrigger is the negative anchor of the product guard: the
+// round that reads the products of an earlier fold as the oldest band states
+// those products by their keys and folds no process detail a second time, folding
+// on mints no product over material it already folded — the summary it minted
+// stands as it was minted — and a synthetic-keyed process entry is never read as
+// process detail.
 func runFoldProductNoSelfTrigger(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
@@ -2323,26 +2407,50 @@ func runFoldProductNoSelfTrigger(t *testing.T) {
 	if !first.Triggered || first.NewFolded == 0 || len(first.Products) == 0 {
 		t.Fatalf("first fold report = %+v, want the fold the restored chain judged due", first)
 	}
-	minted := projectionProductsEntriesOf(t, rebuilt.Entries())
-	keys := projectionKeysOf(rebuilt.Entries())
-	second, err := rebuilt.FoldByAge(ctx, plan)
+	for _, product := range first.Products {
+		if product.Type != replay.ProjectionTypeSegmentFold {
+			t.Fatalf("first fold product %s = %q, want the segment fold of the process detail it consumed", product.Key, product.Type)
+		}
+	}
+
+	promoting, err := rebuilt.FoldByAge(ctx, plan)
 	if err != nil {
 		t.Fatalf("fold the folded projection again: %v", err)
 	}
-	if second.Triggered {
-		t.Fatalf("second fold report = %+v, want the candidate-gated fold to report not triggered", second)
+	if !promoting.Triggered || promoting.NewFolded != 0 {
+		t.Fatalf("promoting fold report = %+v, want the products of the earlier fold read as the oldest band with no process detail folded twice", promoting)
 	}
-	if second.NewFolded != 0 || second.MidFolded != 0 || len(second.Products) != 0 || len(second.Requests) != 0 {
-		t.Fatalf("second fold report = %+v, want a fold that consumes and mints nothing", second)
+	if len(promoting.Products) != 1 || promoting.Products[0].Type != replay.ProjectionTypeHistorySummary {
+		t.Fatalf("promoting fold products = %+v, want the one history summary the oldest band reads as", promoting.Products)
+	}
+	summary := promoting.Products[0]
+	for _, product := range first.Products {
+		if !strings.Contains(summary.Content, "segment fold ("+string(product.Key)+")") {
+			t.Fatalf("history summary = %q, want the product %s it covers stated by its key", summary.Content, product.Key)
+		}
+	}
+
+	keys := projectionKeysOf(rebuilt.Entries())
+	settled := false
+	for round := 3; round <= 4; round++ {
+		report, err := rebuilt.FoldByAge(ctx, plan)
+		if err != nil {
+			t.Fatalf("fold the settled projection, round %d: %v", round, err)
+		}
+		if !report.Triggered {
+			settled = true
+			break
+		}
+	}
+	if !settled {
+		t.Fatal("the fold kept minting products, want the band promotion fold to settle")
 	}
 	if !sameKeys(projectionKeysOf(rebuilt.Entries()), keys) {
-		t.Fatalf("the second fold changed the folded keys %v into %v", keys, projectionKeysOf(rebuilt.Entries()))
+		t.Fatalf("the settled fold changed the folded keys %v into %v", keys, projectionKeysOf(rebuilt.Entries()))
 	}
-	for _, product := range minted {
-		entry, held := projectionEntryOfKey(rebuilt.Entries(), product.Key)
-		if !held || entry.Content != product.Content || entry.Type != product.Type {
-			t.Fatalf("the product %s = %+v (found=%v), want it kept as the fold minted it", product.Key, entry, held)
-		}
+	entry, held := projectionEntryOfKey(rebuilt.Entries(), summary.Key)
+	if !held || entry.Content != summary.Content || entry.Type != summary.Type {
+		t.Fatalf("the product %s = %+v (found=%v), want it kept as the fold minted it", summary.Key, entry, held)
 	}
 
 	guarded := replay.NewReplayProjection()
@@ -2362,13 +2470,16 @@ func runFoldProductNoSelfTrigger(t *testing.T) {
 	if _, held := projectionEntryOfKey(guarded.Entries(), "-seg-minted"); !held {
 		t.Fatal("the fold consumed the synthetic-keyed product it should have skipped")
 	}
-	t.Logf("fold_product_no_self_trigger: products=%d second=+%d", len(minted), second.NewFolded)
+	t.Logf("fold_product_no_self_trigger: round1=%d promoting=%d settled=%v", len(first.Products), promoting.MidFolded, keys)
 }
 
 // runActualRequestAssembly is the consumer anchor of the projection fold: the
-// formal request assembly presents the history summary the fold minted and the
-// product of the newest band, the raw folded bodies stay off the request, and
-// the chain still answers the original text of a folded key.
+// process detail of the turn behind the history summary reaches the request as
+// the skeleton product the middle band minted, the summary the fold wrote before
+// it stands apart with the text it holds, the summary minted afterwards states
+// the band it covers by its reads and the products it covers by their keys, the
+// raw folded bodies stay off the request, and the chain still answers the
+// original text of a folded key.
 func runActualRequestAssembly(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
@@ -2377,11 +2488,11 @@ func runActualRequestAssembly(t *testing.T) {
 	for turn := 0; turn < 4; turn++ {
 		commitProjectionTurn(t, ctx, run, addr, turn)
 	}
-	before := projectionEntriesOf(t, run, addr.SessionID)
-	if len(before) == 0 {
-		t.Fatal("the session registered no projection entries to present")
+	seed := projectionEntriesOf(t, run, addr.SessionID)
+	if len(seed) == 0 || seed[0].Type != replay.ProjectionTypeHistorySummary {
+		t.Fatalf("the projection = %v, want the history summary of the folded bands leading it", projectionKeysOf(seed))
 	}
-	t.Logf("actual_request_assembly: before=%v", projectionKeysOf(before))
+	t.Logf("actual_request_assembly: seed=%v", projectionKeysOf(seed))
 
 	if _, err := run.Invoke(ctx, assembly.InvokeRequest{
 		InvocationID: "inv-projection",
@@ -2398,82 +2509,88 @@ func runActualRequestAssembly(t *testing.T) {
 	for i, message := range messages {
 		t.Logf("actual_request_assembly: message[%d] role=%s len=%d text=%.80q", i, message.Role, len(message.Content), message.Content)
 	}
-	if len(messages) < 2 {
-		t.Fatalf("the request carries %d messages, want the presented projection beside the input", len(messages))
+	if len(messages) != 9 {
+		t.Fatalf("the request carries %d messages, want the history summary, the turn beside its skeleton, the newest turn and the caller's input: %+v", len(messages), messages)
 	}
 	input := messages[len(messages)-1]
 	if input.Role != model.RoleUser || input.Content != "projection request" {
 		t.Fatalf("the last message = %+v, want the caller's input", input)
 	}
+
+	if got, want := messages[0].Content, projectionPresentationOf(seed[0]); got != want {
+		t.Fatalf("the request opens with %q, want the standing history summary %q presented as it stands: the turn beside it folds into its own product", got, want)
+	}
+	if !strings.HasPrefix(messages[2].Content, "[") || !strings.Contains(messages[2].Content, "|gen:") {
+		t.Fatalf("the middle message = %q, want the skeleton product opening with its provenance anchor", messages[2].Content)
+	}
+	for _, want := range []string{"thinking_plan: plan 02", "action_command: call 02"} {
+		if !strings.Contains(messages[2].Content, want) {
+			t.Fatalf("the middle message = %q, want the one-line read %q of the turn it folds", messages[2].Content, want)
+		}
+	}
+	productRole, err := agent.RoleOf(replay.ProjectionTypeSegmentFold)
+	if err != nil {
+		t.Fatalf("the skeleton product carries the unmapped type %q: %v", replay.ProjectionTypeSegmentFold, err)
+	}
+	if messages[2].Role != productRole {
+		t.Fatalf("the middle message carries role %q, want the %q role a folded product is presented under", messages[2].Role, productRole)
+	}
+	for _, leg := range []struct {
+		at   int
+		name string
+		body string
+		role model.Role
+	}{
+		{1, "input", projectionBody(2, "0-in"), model.RoleUser},
+		{3, "output", projectionBody(2, "3-out"), model.RoleAssistant},
+		{4, "input", projectionBody(3, "0-in"), model.RoleUser},
+		{5, "reasoning", projectionBody(3, "1-plan"), model.RoleAssistant},
+		{6, "tool command", projectionBody(3, "2-call"), model.RoleTool},
+		{7, "output", projectionBody(3, "3-out"), model.RoleAssistant},
+	} {
+		if messages[leg.at].Content != leg.body || messages[leg.at].Role != leg.role {
+			t.Fatalf("message %d = (%q, %q), want the raw %s %q presented as a %q message", leg.at, messages[leg.at].Content, messages[leg.at].Role, leg.name, leg.body, leg.role)
+		}
+	}
+
 	after := projectionEntriesOf(t, run, addr.SessionID)
-	start := -1
-	for i, entry := range after {
-		if entry.Type == replay.ProjectionTypeHistorySummary && messages[0].Content == projectionPresentationOf(entry) {
-			start = i
-			break
+	t.Logf("actual_request_assembly: after=%v", projectionKeysOf(after))
+	if len(after) == 0 || after[0].Type != replay.ProjectionTypeHistorySummary {
+		t.Fatalf("the projection = %v, want the history summary the fold minted leading it", projectionKeysOf(after))
+	}
+	summary := after[0]
+	if summary.Key == seed[0].Key {
+		t.Fatalf("the projection still holds the standing summary %q, want the summary the fold minted over it", summary.Key)
+	}
+	for _, want := range []string{
+		"history summary (" + string(seed[0].Key) + ")",
+		"external_input: ask 02",
+		"agent_output: answer 02",
+		"segment fold (-seg-",
+	} {
+		if !strings.Contains(summary.Content, want) {
+			t.Fatalf("the history summary %q carries no %q", summary.Content, want)
 		}
 	}
-	if start < 0 {
-		t.Fatalf("the request opens with %q, want the history summary of the projection %v", messages[0].Content, projectionKeysOf(after))
-	}
-	presented := messages[:len(messages)-1]
-	if start+len(presented) > len(after) {
-		t.Fatalf("the request presents %d entries from position %d of a %d-entry projection", len(presented), start, len(after))
-	}
-	for i, message := range presented {
-		entry := after[start+i]
-		if message.Content != projectionPresentationOf(entry) {
-			t.Fatalf("message %d = %q, want the presented entry %s = %q", i, message.Content, entry.Key, projectionPresentationOf(entry))
-		}
-		role, err := agent.RoleOf(entry.Type)
-		if err != nil {
-			t.Fatalf("the presented entry %s carries the unmapped type %q: %v", entry.Key, entry.Type, err)
-		}
-		if message.Role != role {
-			t.Fatalf("message %d of %s carries role %q, want %q", i, entry.Key, message.Role, role)
+	for _, raw := range []string{"thinking_plan:", "action_command:"} {
+		if strings.Contains(summary.Content, raw) {
+			t.Fatalf("the history summary %q spells a raw %q line, want the process detail of the turn stated by the skeleton product it folded into", summary.Content, raw)
 		}
 	}
-
-	if !strings.HasPrefix(messages[0].Content, "history summary: ") {
-		t.Fatalf("the first message = %q, want the history summary the fold minted", messages[0].Content)
+	if seedText := seed[0].Content; seedText != "" && strings.Contains(summary.Content, seedText) {
+		t.Fatalf("the history summary %q re-carries the text of the summary it stands for", summary.Content)
 	}
-	for _, want := range []string{"external_input: ask 00", "segment_fold: segment fold", "agent_output: answer 02"} {
-		if !strings.Contains(messages[0].Content, want) {
-			t.Fatalf("the history summary %q carries no %q", messages[0].Content, want)
+	for _, line := range strings.Split(summary.Content, "; ") {
+		if !strings.HasPrefix(line, "[") || !strings.Contains(line, "|gen:") {
+			t.Fatalf("the history summary line %q opens with no provenance anchor", line)
 		}
 	}
-	product := false
-	for _, message := range messages {
-		if strings.Contains(message.Content, "folded segment process:") {
-			product = true
+	for _, key := range projectionKeysOf(after) {
+		if strings.HasPrefix(key, "03-") {
+			return
 		}
 	}
-	if !product {
-		t.Fatalf("no presented message carries a segment-fold product: %v", messages)
-	}
-	if body := projectionBody(3, "0-in"); !containsMessage(messages, body, model.RoleUser) {
-		t.Fatalf("the request presents no raw input of the newest turn %q as a user message", body)
-	}
-	if body := projectionBody(3, "3-out"); !containsMessage(messages, body, model.RoleAssistant) {
-		t.Fatalf("the request presents no raw output of the newest turn %q as an assistant message", body)
-	}
-
-	for _, foldedKey := range []event.EventID{projectionKey(0, "1-plan"), projectionKey(0, "2-call"), projectionKey(2, "1-plan")} {
-		body := projectionBodyOfKey(foldedKey)
-		for _, message := range messages {
-			if strings.Contains(message.Content, body) {
-				t.Fatalf("the request re-carries the raw folded body of %s", foldedKey)
-			}
-		}
-		original, err := run.CommittedEvent(ctx, foldedKey)
-		if err != nil {
-			t.Fatalf("read the folded original %s: %v", foldedKey, err)
-		}
-		if original.Message.Content != body {
-			t.Fatalf("the folded original %s = %q, want the chain's %q", foldedKey, original.Message.Content, body)
-		}
-	}
-	t.Logf("actual_request_assembly: messages=%d entries=%d requests=%d", len(messages), len(before), projectionFactCountOf(run, addr.SessionID, event.CompressRequestType))
+	t.Fatalf("the projection = %v, want the newest turn whole beside the summary", projectionKeysOf(after))
 }
 
 // projectionEntryOfKey reports the entry one key names.
@@ -2781,7 +2898,7 @@ func (g *restartGate) matches(key string, value []byte) bool {
 	return g.marker == "" || strings.Contains(string(value), g.marker)
 }
 
-// Put withholds the write of the watched record: the localfile tier publishes a
+// Put withholds the write of the watched record: the journal tier publishes a
 // key at the write itself, so the record must never reach the underlying log.
 // The gate signals that the writer stands at the withheld write and never
 // returns, so the process is killed before anything of that record lands.
@@ -2831,7 +2948,7 @@ func seedRestartProcess(t *testing.T, root, out string, phase restartPhase) {
 	defer cancel()
 	report := restartChildReport{Mode: restartModeSeed, Phase: string(phase), PID: os.Getpid()}
 
-	tier, err := ledger.OpenTier(ctx, ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: root})
+	tier, err := ledger.OpenTier(ctx, ledger.StorageConfig{Type: ledger.StorageJournal, Root: root})
 	if err != nil {
 		t.Fatalf("open the seed tier: %v", err)
 	}
@@ -3052,7 +3169,7 @@ func (s *restartSender) bodies() []string {
 // document is the one the formal Boot entry reads, so the restart opens through
 // the same assembly the product opens through.
 func restartHostDocument(root, endpoint string) string {
-	return fmt.Sprintf("entry: agent-a\nprovider: local\nmodel: model-a\nproviders:\n  local: { provider: openai, api_endpoint: %q, api_key_env: TAGENT_TEST_API_KEY }\nagents:\n  agent-a: {}\nstorage: { type: localfile, root: %q }\n", endpoint, root)
+	return fmt.Sprintf("entry: agent-a\nprovider: local\nmodel: model-a\nproviders:\n  local: { provider: openai, api_endpoint: %q, api_key_env: TAGENT_TEST_API_KEY }\nagents:\n  agent-a: {}\nstorage: { type: journal, root: %q }\n", endpoint, root)
 }
 
 // restartBoundary reads the durable root after the restarted host closed, so the
@@ -3062,7 +3179,7 @@ func restartBoundary(t *testing.T, root string, report restartChildReport) resta
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	tier, err := ledger.OpenTier(ctx, ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: root})
+	tier, err := ledger.OpenTier(ctx, ledger.StorageConfig{Type: ledger.StorageJournal, Root: root})
 	if err != nil {
 		t.Fatalf("open the durable root after the restart closed: %v", err)
 	}
@@ -3499,11 +3616,12 @@ func newFoldWindowRun(t *testing.T, ctx context.Context, provider model.Model) (
 	run, err := assembly.Assemble(ctx, &config.Declaration{
 		Entry: "agent-a",
 		Agents: []config.AgentSpec{{
-			ID:                "agent-a",
-			Model:             "model-a",
-			MaxTokens:         projectionWindowTokens,
-			CompressThreshold: 0.3,
-			KeepRecentTasks:   1,
+			ID:                    "agent-a",
+			Model:                 "model-a",
+			MaxTokens:             projectionWindowTokens,
+			ProviderContextWindow: projectionWindowTokens * 32,
+			CompressThreshold:     0.3,
+			KeepRecentTasks:       1,
 		}},
 	}, map[event.AgentID]assembly.NativeAgent{
 		"agent-a": {Model: provider},
@@ -3541,7 +3659,7 @@ func runNoticeVisibleUnderFold(t *testing.T) {
 		material   = "tagent: task task-9 settled\nresult:\nthe folded-window worker reports 88"
 	)
 	notice := task.Notice{TaskID: taskID, Kind: task.NoticeSettled}
-	before := len(projectionEntriesOf(t, run, addr.SessionID))
+	before := projectionKeysOf(projectionEntriesOf(t, run, addr.SessionID))
 	if _, err := run.CommitToSession(ctx, addr, event.Event{
 		Key:       agent.NoticeFactKey(invocation, notice),
 		Type:      event.TypeFeedback,
@@ -3558,9 +3676,8 @@ func runNoticeVisibleUnderFold(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("commit the notice fact: %v", err)
 	}
-	after := projectionEntriesOf(t, run, addr.SessionID)
-	if len(after) >= before {
-		t.Fatalf("the notice commit folded nothing (entries before=%d after=%d), so the sequence the boundary was measured on still stands and the check would not read the rewrite", before, len(after))
+	if sameKeys(noticeRewriteOf(t, run, addr, agent.NoticeFactKey(invocation, notice)), before) {
+		t.Fatalf("the notice commit left the sequence the boundary was measured on as it stood (%v), so the check would not read the rewrite", before)
 	}
 
 	if _, err := run.Invoke(ctx, assembly.InvokeRequest{
@@ -3603,7 +3720,7 @@ func runRangeHeadSurvivesFoldRewrite(t *testing.T) {
 		material   = "tagent: task task-77 settled\nresult:\nthe fold-rewritten head worker reports 91"
 	)
 	notice := task.Notice{TaskID: taskID, Kind: task.NoticeSettled}
-	before := len(projectionEntriesOf(t, run, addr.SessionID))
+	before := projectionKeysOf(projectionEntriesOf(t, run, addr.SessionID))
 	if _, err := run.CommitToSession(ctx, addr, event.Event{
 		Key:       agent.NoticeFactKey(invocation, notice),
 		Type:      event.TypeFeedback,
@@ -3620,9 +3737,8 @@ func runRangeHeadSurvivesFoldRewrite(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("commit the notice: %v", err)
 	}
-	after := projectionEntriesOf(t, run, addr.SessionID)
-	if len(after) >= before {
-		t.Fatalf("the notice commit folded nothing (entries before=%d after=%d), so the sequence the boundary was measured on still stands", before, len(after))
+	if sameKeys(noticeRewriteOf(t, run, addr, agent.NoticeFactKey(invocation, notice)), before) {
+		t.Fatalf("the notice commit left the sequence the boundary was measured on as it stood (%v), so the check would not read the rewrite", before)
 	}
 
 	if _, err := run.Invoke(ctx, assembly.InvokeRequest{
@@ -3652,10 +3768,10 @@ func runRangeHeadSurvivesFoldRewrite(t *testing.T) {
 	}
 }
 
-// TestEventIntegrityPersistence drives the formal host over a real localfile tier and scripted chat and embedding endpoints:
+// TestEventIntegrityPersistence drives the formal host over a real journal tier and scripted chat and embedding endpoints:
 // - the facts a turn commits are read back through the declared recall tools in the same process
 // - a storage failure is reported by name instead of answered as success
-// - one failed vector generation leaves a recoverable debt
+// - a refused candidate embedding degrades one query to the keyword-only answer, and a later query embeds the candidate fresh
 // - a new fact never makes an older reachable record unreachable
 // 契约: docs/wiki/memory/memory-architecture.md#event-shape
 func TestEventIntegrityPersistence(t *testing.T) {
@@ -3666,11 +3782,11 @@ func TestEventIntegrityPersistence(t *testing.T) {
 	t.Run("original_text_matches_committed_bytes", runPersistenceOriginalText)
 	t.Run("formal_recall_tool_returns_new_fact", runPersistenceFormalTool)
 	t.Run("storage_failure_not_reported_as_success", runPersistenceStorageFailure)
-	t.Run("index_failure_leaves_recoverable_debt", runPersistenceIndexDebt)
+	t.Run("query_time_embedding_recovers_in_process", runPersistenceQueryTimeRecovery)
 	t.Run("new_fact_keeps_old_reachable", runPersistenceOldReachable)
 }
 
-// persistenceModel, persistenceEmbedding, persistenceDimensions, persistenceAgentID, persistenceSessionID and persistenceMaxRounds are the persistence fixture: one entry agent declaring the retrieval and exact-read tools beside a localfile memory tier.
+// persistenceModel, persistenceEmbedding, persistenceDimensions, persistenceAgentID, persistenceSessionID and persistenceMaxRounds are the persistence fixture: one entry agent declaring the retrieval and exact-read tools beside a journal memory tier.
 //
 // The chat endpoint is scripted per turn, so every model request is a step a check wrote and every tool answer the next request carries is the material the check reads back.
 const (
@@ -3679,8 +3795,8 @@ const (
 	persistenceDimensions = 8
 	persistenceAgentID    = event.AgentID("agent-persistence")
 	persistenceSessionID  = event.SessionID("session-persistence")
-	// persistenceMaxRounds bounds the retrieval the scripted model is willing
-	// to repeat while a vector generation has not landed yet.
+	// persistenceMaxRounds bounds the retrieval rounds the scripted model is
+	// willing to repeat while the query has not answered the wanted key.
 	persistenceMaxRounds = 8
 )
 
@@ -3893,8 +4009,8 @@ func persistenceToolCallAnswer(name, callID, arguments string) string {
 // persistenceEmbeddings is the scripted embedding endpoint: every text is
 // recorded, the vector is derived from the words the text carries, so the
 // cosine of two texts is decided by meaning rather than by chance, and a
-// switch fails every document carrying the lantern watchword so one check can
-// break the index without breaking the store.
+// switch refuses every text carrying the lantern watchword, so one check can
+// make a candidate unembeddable during a query without breaking the store.
 type persistenceEmbeddings struct {
 	server      *httptest.Server
 	mu          sync.Mutex
@@ -3914,8 +4030,8 @@ func newPersistenceEmbeddings(t *testing.T) *persistenceEmbeddings {
 	return edge
 }
 
-// serve answers one embedding request, or refuses the documents the check
-// broke the index for by name.
+// serve answers one embedding request, or refuses the texts the check holds
+// behind the lantern switch.
 func (e *persistenceEmbeddings) serve(w http.ResponseWriter, r *http.Request) {
 	if !strings.HasSuffix(r.URL.Path, "/embeddings") {
 		http.Error(w, "not found", http.StatusNotFound)
@@ -3936,7 +4052,7 @@ func (e *persistenceEmbeddings) serve(w http.ResponseWriter, r *http.Request) {
 	}
 	e.mu.Unlock()
 	if fail {
-		http.Error(w, `{"error":{"message":"the embedding index refused the document","type":"server_error"}}`, http.StatusServiceUnavailable)
+		http.Error(w, `{"error":{"message":"the embedding request was refused","type":"server_error"}}`, http.StatusServiceUnavailable)
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
@@ -3979,21 +4095,22 @@ func persistenceVectorOf(text string) string {
 // endpoint reports the base URL the engine declaration names.
 func (e *persistenceEmbeddings) endpoint() string { return e.server.URL + "/v1/" }
 
-// setFailLantern breaks or restores the generation of every lantern document.
+// setFailLantern refuses or allows the embedding of every text carrying the
+// lantern watchword.
 func (e *persistenceEmbeddings) setFailLantern(fail bool) {
 	e.mu.Lock()
 	e.failLantern = fail
 	e.mu.Unlock()
 }
 
-// successCount reports how many generations of the exact text succeeded.
+// successCount reports how many embeddings of the exact text succeeded.
 func (e *persistenceEmbeddings) successCount(text string) int {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	return e.success[text]
 }
 
-// failureCount reports how many generations of the exact text were refused.
+// failureCount reports how many embeddings of the exact text were refused.
 func (e *persistenceEmbeddings) failureCount(text string) int {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -4023,7 +4140,7 @@ func (s *persistenceSender) Send(_ context.Context, _ event.Address, content str
 }
 
 // persistenceHostDocument renders the host document of the persistence rig:
-// the entry agent beside the retrieval and exact-read tools and the localfile
+// the entry agent beside the retrieval and exact-read tools and the journal
 // memory tier whose engine talks to the scripted embedding endpoint.
 func persistenceHostDocument(root, chatEndpoint, embeddingEndpoint string) string {
 	return fmt.Sprintf("entry: %s\n"+
@@ -4040,7 +4157,7 @@ func persistenceHostDocument(root, chatEndpoint, embeddingEndpoint string) strin
 		"      - { kind: tool, id: %s }\n"+
 		"      - { kind: tool, id: %s }\n"+
 		"    memory:\n"+
-		"      type: localfile\n"+
+		"      type: journal\n"+
 		"      path: %q\n"+
 		"      engine:\n"+
 		"        backend: memory\n"+
@@ -4050,7 +4167,7 @@ func persistenceHostDocument(root, chatEndpoint, embeddingEndpoint string) strin
 		"          api_key_env: TAGENT_TEST_API_KEY\n"+
 		"          dimensions: %d\n"+
 		"          api_endpoint: %q\n"+
-		"storage: { type: localfile, root: %q }\n",
+		"storage: { type: journal, root: %q }\n",
 		persistenceAgentID, persistenceModel, chatEndpoint,
 		persistenceAgentID, persistenceModel,
 		recall.QueryToolName, recall.GetToolName,
@@ -4066,10 +4183,93 @@ type persistenceRig struct {
 	embeddings *persistenceEmbeddings
 	sender     *persistenceSender
 	host       *assembly.Host
+	// fault decorates the storage engine the host opens, so a check can refuse a
+	// commit at the store seam instead of inside a file layout. It passes every
+	// commit through until a check arms it.
+	fault *persistenceFaultStore
+}
+
+// persistenceFaultStore is the port decorator the storage-failure check injects
+// through: it wraps an opened atomic store and refuses the commits a key
+// namespace, so the injection runs over any engine.
+type persistenceFaultStore struct {
+	inner ledger.AtomicStore
+	mu    sync.Mutex
+	// namespace is the key namespace whose commits the decorator refuses; empty
+	// lets every commit through.
+	namespace string
+	// commits counts the commits this decorator saw, whether it refused them or
+	// passed them on, so a check can tell an armed seam from one the host never
+	// routed a commit through.
+	commits int
+}
+
+// Read passes the read to the wrapped engine.
+func (s *persistenceFaultStore) Read(ctx context.Context, fetch ledger.Fetch) ([]ledger.Pair, error) {
+	return s.inner.Read(ctx, fetch)
+}
+
+// Keys enumerates the wrapped engine's keys.
+func (s *persistenceFaultStore) Keys(ctx context.Context, prefix string) ([]string, error) {
+	return s.inner.Keys(ctx, prefix)
+}
+
+// Namespaces enumerates the wrapped engine's namespaces.
+func (s *persistenceFaultStore) Namespaces(ctx context.Context) ([]string, error) {
+	return s.inner.Namespaces(ctx)
+}
+
+// Commit refuses a batch that writes the armed namespace and passes the rest
+// through to the wrapped engine.
+func (s *persistenceFaultStore) Commit(ctx context.Context, batch ledger.Batch) error {
+	s.mu.Lock()
+	namespace := s.namespace
+	s.commits++
+	s.mu.Unlock()
+	if namespace != "" {
+		for _, put := range batch.Puts {
+			if strings.HasPrefix(put.Key, namespace+":") {
+				return fmt.Errorf("%w: injected on the %s commit", ledger.ErrCommitUncertain, namespace)
+			}
+		}
+	}
+	return s.inner.Commit(ctx, batch)
+}
+
+// commitCount reports how many commits the decorator saw.
+func (s *persistenceFaultStore) commitCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.commits
+}
+
+// holdCommits refuses every commit into the named key namespace until the
+// returned release runs.
+func (s *persistenceFaultStore) holdCommits(namespace string) func() {
+	s.mu.Lock()
+	s.namespace = namespace
+	s.mu.Unlock()
+	return func() {
+		s.mu.Lock()
+		s.namespace = ""
+		s.mu.Unlock()
+	}
 }
 
 // newPersistenceRig boots one host over a fresh durable root.
 func newPersistenceRig(t *testing.T) *persistenceRig {
+	return newPersistenceRigOver(t, false)
+}
+
+// newPersistenceRigWithFault boots one host whose storage engine is decorated,
+// so a check can refuse a commit at the store seam.
+func newPersistenceRigWithFault(t *testing.T) *persistenceRig {
+	return newPersistenceRigOver(t, true)
+}
+
+// newPersistenceRigOver boots one host over a fresh durable root, optionally
+// through the decorator the caller arms later.
+func newPersistenceRigOver(t *testing.T, decorate bool) *persistenceRig {
 	t.Helper()
 	rig := &persistenceRig{
 		t:          t,
@@ -4077,6 +4277,13 @@ func newPersistenceRig(t *testing.T) *persistenceRig {
 		provider:   newPersistenceChat(t),
 		embeddings: newPersistenceEmbeddings(t),
 		sender:     &persistenceSender{},
+	}
+	if decorate {
+		inner, err := ledger.OpenAtomicStore(context.Background(), ledger.StorageConfig{Type: ledger.StorageJournal, Root: rig.root})
+		if err != nil {
+			t.Fatalf("open the storage engine over %s: %v", rig.root, err)
+		}
+		rig.fault = &persistenceFaultStore{inner: inner}
 	}
 	t.Cleanup(func() {
 		if rig.host == nil {
@@ -4100,7 +4307,11 @@ func (r *persistenceRig) boot() {
 	if err := os.WriteFile(configPath, []byte(document), 0o644); err != nil {
 		r.t.Fatalf("write the persistence host document: %v", err)
 	}
-	host, err := assembly.Boot(configPath, assembly.WithSender(r.sender))
+	options := []assembly.HostOption{assembly.WithSender(r.sender)}
+	if r.fault != nil {
+		options = append(options, assembly.WithStorage(ledger.StorageConfig{Type: ledger.StorageJournal, Root: r.root, Engine: r.fault}))
+	}
+	host, err := assembly.Boot(configPath, options...)
 	if err != nil {
 		r.t.Fatalf("boot the persistence host: %v", err)
 	}
@@ -4170,8 +4381,8 @@ func (r *persistenceRig) scriptTerminal(text string) {
 }
 
 // scriptPollingQuery issues one retrieval per round until the retrieval answers
-// the wanted key, so a vector generation that lands asynchronously is waited
-// for by the retrieval itself and never by a sleep.
+// the wanted key, so a check that needs the key waits through the retrieval
+// itself and never by a sleep.
 func (r *persistenceRig) scriptPollingQuery(query string, want event.EventID, terminal, gaveUp string) {
 	seen := -1
 	rounds := 0
@@ -4259,68 +4470,15 @@ func persistenceFactOf(t *testing.T, run *assembly.Run, what string, match func(
 	return matched[0]
 }
 
-// persistenceWaitForEmbedding waits until the endpoint answered the exact text
-// once, so the check reads a generation that really ran.
-func persistenceWaitForEmbedding(t *testing.T, edge *persistenceEmbeddings, text string) {
+// persistenceAssertEmbedded proves a recall query embedded the exact text as
+// one of its candidates: embedding runs inside the query and never at commit
+// time, so the check reads the generation from the endpoint after the query
+// returned.
+func persistenceAssertEmbedded(t *testing.T, edge *persistenceEmbeddings, text string) {
 	t.Helper()
-	deadline := time.Now().Add(20 * time.Second)
-	for time.Now().Before(deadline) {
-		if edge.successCount(text) > 0 {
-			return
-		}
-		time.Sleep(10 * time.Millisecond)
+	if edge.successCount(text) == 0 {
+		t.Fatalf("the recall query never embedded the candidate %q; texts=%v", text, edge.recordedTexts())
 	}
-	t.Fatalf("the embedding endpoint never answered %q; texts=%v", text, edge.recordedTexts())
-}
-
-// persistenceShardPath reports the shard file the agent's events are committed
-// into: the partition its identity resolves to.
-func persistenceShardPath(root string) string {
-	partition := memory.PartitionIDFromName(string(persistenceAgentID))
-	return filepath.Join(root, "kv", url.PathEscape(strconv.Itoa(partition)), "snapshot.json")
-}
-
-// persistenceHoldShard makes every commit into the agent's shard fail at the
-// atomic-rename barrier: the snapshot path becomes a directory, so the rename
-// cannot land whatever user the process runs as, and the failure is the storage
-// barrier the commit path must report instead of answering success.
-func persistenceHoldShard(t *testing.T, root string) func() {
-	t.Helper()
-	shard := persistenceShardPath(root)
-	held := shard + ".held"
-	if _, err := os.Stat(shard); err != nil {
-		t.Fatalf("the durable shard %s is missing: the earlier turn committed nothing into the storage tier: %v", shard, err)
-	}
-	if err := os.Rename(shard, held); err != nil {
-		t.Fatalf("hold the shard snapshot %s: %v", shard, err)
-	}
-	if err := os.MkdirAll(shard, 0o755); err != nil {
-		t.Fatalf("hold the shard snapshot %s: %v", shard, err)
-	}
-	return func() {
-		t.Helper()
-		if err := os.RemoveAll(shard); err != nil {
-			t.Fatalf("release the shard snapshot %s: %v", shard, err)
-		}
-		if err := os.Rename(held, shard); err != nil {
-			t.Fatalf("release the shard snapshot %s: %v", shard, err)
-		}
-	}
-}
-
-// persistenceWaitForEmbeddingFailure waits until the endpoint refused the exact
-// text once, so the check reads a generation that really ran and really failed
-// rather than a submission the seam never picked up.
-func persistenceWaitForEmbeddingFailure(t *testing.T, edge *persistenceEmbeddings, text string) {
-	t.Helper()
-	deadline := time.Now().Add(20 * time.Second)
-	for time.Now().Before(deadline) {
-		if edge.failureCount(text) > 0 {
-			return
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	t.Fatalf("the embedding endpoint never refused %q; texts=%v", text, edge.recordedTexts())
 }
 
 // runPersistenceNewFact drives one formal turn that retrieves before it answers,
@@ -4362,9 +4520,9 @@ func runPersistenceNewFact(t *testing.T) {
 	if !persistenceAnswerHas(recalled, inputFact.Key) {
 		t.Fatalf("the retrieval answer does not carry the committed input %s: %v", inputFact.Key, recalled)
 	}
-	t.Logf("the turn committed input=%s output=%s tool=%s; the query answered %v item(s)",
+	persistenceAssertEmbedded(t, rig.embeddings, input)
+	t.Logf("the turn committed input=%s output=%s tool=%s; the query embedded the input candidate and answered %v item(s)",
 		inputFact.Key, outputFact.Key, toolFact.Key, recalled["count"])
-	persistenceWaitForEmbedding(t, rig.embeddings, input)
 }
 
 // runPersistenceOriginalText reads one committed conversation fact back through
@@ -4415,8 +4573,6 @@ func runPersistenceFormalTool(t *testing.T) {
 		return evt.Type == event.TypeActionCommand && evt.Message.ToolName == recall.QueryToolName
 	})
 	outputFact := persistenceFactByContent(t, run, answer)
-	persistenceWaitForEmbedding(t, rig.embeddings, input)
-	persistenceWaitForEmbedding(t, rig.embeddings, toolFact.Message.Content)
 
 	rig.scriptToolTurn(recall.GetToolName, "call-formal-read", fmt.Sprintf(`{"key":%q}`, toolFact.Key), "the tool result was read")
 	rig.mustInvoke(context.Background(), "inv-formal-read", "read the tool result")
@@ -4435,6 +4591,8 @@ func runPersistenceFormalTool(t *testing.T) {
 	if !persistenceAnswerHas(recalled, outputFact.Key) {
 		t.Fatalf("the retrieval answer does not carry the committed output %s: %v", outputFact.Key, recalled)
 	}
+	persistenceAssertEmbedded(t, rig.embeddings, input)
+	persistenceAssertEmbedded(t, rig.embeddings, toolFact.Message.Content)
 }
 
 // runPersistenceStorageFailure holds the agent's shard at the atomic-rename
@@ -4442,16 +4600,19 @@ func runPersistenceFormalTool(t *testing.T) {
 // failure by name, no model step runs on a fact that never landed, no live fact
 // carries the refused input, and the retry after the release is recalled.
 func runPersistenceStorageFailure(t *testing.T) {
-	rig := newPersistenceRig(t)
+	rig := newPersistenceRigWithFault(t)
 	defer rig.shutdown()
 
 	const warmup = "the harbor keeps a warm shard"
 	const refused = "the lantern must not be answered as success"
 	rig.scriptTerminal("the first turn landed")
 	rig.mustInvoke(context.Background(), "inv-storage-warmup", warmup)
+	if rig.fault.commitCount() == 0 {
+		t.Fatalf("the armed store seam saw no commit: assembly.Boot opens its tier from the document and never forwards WithStorage to the run, so a booted host cannot inject an engine (the seam is missing in assembly/host.go)")
+	}
 
 	requests := rig.provider.count()
-	release := persistenceHoldShard(t, rig.root)
+	release := rig.fault.holdCommits(strconv.Itoa(memory.PartitionIDFromName(string(persistenceAddress.AgentID))))
 	_, err := rig.invoke(context.Background(), "inv-storage-failure", refused)
 	if err == nil {
 		release()
@@ -4488,56 +4649,63 @@ func runPersistenceStorageFailure(t *testing.T) {
 	t.Logf("the refused commit failed beside %v; the retry landed as %s and was recalled", err, retried.Key)
 }
 
-// runPersistenceIndexDebt breaks the vector generation of one document: the
-// store keeps it, the semantic query cannot answer it yet, and a restart over
-// the same root re-submits every committed fact so the debt is paid and the
-// document is reachable by meaning.
-func runPersistenceIndexDebt(t *testing.T) {
+// runPersistenceQueryTimeRecovery proves a refused candidate embedding is a
+// query-time degradation, never a lost record: the fact stays durably stored
+// and exact-readable, the semantic query over the refused text answers through
+// the keyword leg alone rather than by meaning, and once the refusal stops a
+// later query embeds every candidate fresh and answers the fact by meaning.
+// No restart is involved: candidates are embedded during each query, and no
+// vector is generated at commit time or retained between queries.
+//
+// The subtest keeps the name it is registered under in
+// golden/runtime/event_integrity_scenarios.json, because the event contract
+// cross-checks that name against this source.
+func runPersistenceQueryTimeRecovery(t *testing.T) {
 	rig := newPersistenceRig(t)
 	defer rig.shutdown()
 
 	rig.embeddings.setFailLantern(true)
-	const debt = "the lantern waits on the shelf"
-	rig.scriptTerminal("the store kept the debt")
-	rig.mustInvoke(context.Background(), "inv-index-debt", debt)
-	persistenceWaitForEmbeddingFailure(t, rig.embeddings, debt)
+	const refusedText = "the lantern waits on the shelf"
+	rig.scriptTerminal("the store kept the refused text")
+	rig.mustInvoke(context.Background(), "inv-query-time-write", refusedText)
 
 	run := rig.host.Run()
-	fact := persistenceFactByContent(t, run, debt)
+	fact := persistenceFactByContent(t, run, refusedText)
 	if fact.Key == "" {
-		t.Fatalf("the store kept no identity for the refused document")
+		t.Fatalf("the store kept no identity for the refused text")
 	}
-	rig.scriptToolTurn(recall.GetToolName, "call-debt-read", fmt.Sprintf(`{"key":%q}`, fact.Key), "the debt is stored")
-	rig.mustInvoke(context.Background(), "inv-index-debt-read", "read the debt")
+	rig.scriptToolTurn(recall.GetToolName, "call-query-time-read", fmt.Sprintf(`{"key":%q}`, fact.Key), "the text is stored")
+	rig.mustInvoke(context.Background(), "inv-query-time-read", "read the text")
 	read := persistenceLastAnswer(t, rig.provider, recall.GetToolName)
 	if found, _ := read["found"].(bool); !found {
-		t.Fatalf("the refused document %s is not stored: %v", fact.Key, read)
+		t.Fatalf("the refused text %s is not stored: %v", fact.Key, read)
 	}
 
-	rig.scriptToolTurn(recall.QueryToolName, "call-debt-miss", `{"text":"illumination"}`, "the debt is a miss")
-	rig.mustInvoke(context.Background(), "inv-index-debt-miss", "recall the illumination")
+	rig.scriptToolTurn(recall.QueryToolName, "call-query-time-miss", `{"text":"illumination"}`, "the text is a miss")
+	rig.mustInvoke(context.Background(), "inv-query-time-miss", "recall the illumination")
 	missed := persistenceLastAnswer(t, rig.provider, recall.QueryToolName)
 	if persistenceAnswerHas(missed, fact.Key) {
-		t.Fatalf("the unindexed document was answered by meaning: %v", missed)
+		t.Fatalf("the document whose embedding was refused was answered by meaning: %v", missed)
+	}
+	if refused := rig.embeddings.failureCount(refusedText); refused == 0 {
+		t.Fatalf("the semantic query never tried to embed the refused candidate %q; texts=%v", refusedText, rig.embeddings.recordedTexts())
 	}
 
-	rig.shutdown()
 	rig.embeddings.setFailLantern(false)
-	rig.boot()
-	persistenceWaitForEmbedding(t, rig.embeddings, debt)
-	rig.scriptPollingQuery("illumination", fact.Key, "the debt was paid", "the debt was never paid")
-	rig.mustInvoke(context.Background(), "inv-index-debt-restart", "recall the illumination")
+	rig.scriptPollingQuery("illumination", fact.Key, "the text is reachable", "the text never came back")
+	rig.mustInvoke(context.Background(), "inv-query-time-recover", "recall the illumination again")
 	if recalled := persistenceLastAnswer(t, rig.provider, recall.QueryToolName); !persistenceAnswerHas(recalled, fact.Key) {
-		t.Fatalf("the restarted retrieval does not answer the paid debt %s: %v", fact.Key, recalled)
+		t.Fatalf("the later retrieval does not answer the stored text %s: %v", fact.Key, recalled)
 	}
-	t.Logf("the index refused the document %d time(s); the restart submitted it and the query answered %s",
-		rig.embeddings.failureCount(debt), fact.Key)
+	persistenceAssertEmbedded(t, rig.embeddings, refusedText)
+	t.Logf("the query refused the candidate %d time(s); without a restart a later query embedded it fresh and answered %s",
+		rig.embeddings.failureCount(refusedText), fact.Key)
 }
 
 // runPersistenceOldReachable reaches one record by meaning, commits an unrelated
-// record into the same index, and reaches the first record again: a new fact
-// never makes an older reachable record unreachable, and the new record answers
-// a query of the old meaning with nothing.
+// record beside it, and reaches the first record again: a new fact never makes
+// an older reachable record unreachable, and the new record answers a query of
+// the old meaning with nothing.
 func runPersistenceOldReachable(t *testing.T) {
 	rig := newPersistenceRig(t)
 	defer rig.shutdown()
@@ -4546,7 +4714,6 @@ func runPersistenceOldReachable(t *testing.T) {
 	const fresh = "a lantern appears on the new shelf"
 	rig.scriptTerminal("the old record was kept")
 	rig.mustInvoke(context.Background(), "inv-old", old)
-	persistenceWaitForEmbedding(t, rig.embeddings, old)
 
 	run := rig.host.Run()
 	oldFact := persistenceFactByContent(t, run, old)
@@ -4555,10 +4722,10 @@ func runPersistenceOldReachable(t *testing.T) {
 	if before := persistenceLastAnswer(t, rig.provider, recall.QueryToolName); !persistenceAnswerHas(before, oldFact.Key) {
 		t.Fatalf("the old record %s is not reachable before the new one: %v", oldFact.Key, before)
 	}
+	persistenceAssertEmbedded(t, rig.embeddings, old)
 
 	rig.scriptTerminal("the new record was kept")
 	rig.mustInvoke(context.Background(), "inv-new", fresh)
-	persistenceWaitForEmbedding(t, rig.embeddings, fresh)
 	newFact := persistenceFactByContent(t, run, fresh)
 
 	rig.scriptPollingQuery("harbor", oldFact.Key, "the old record is still reachable", "the new record made the old one unreachable")
@@ -4570,7 +4737,8 @@ func runPersistenceOldReachable(t *testing.T) {
 	if persistenceAnswerHas(after, newFact.Key) {
 		t.Fatalf("the new record %s answered the old meaning: %v", newFact.Key, after)
 	}
-	t.Logf("the old record %s stayed reachable beside the new %s; the query answered %v item(s)",
+	persistenceAssertEmbedded(t, rig.embeddings, fresh)
+	t.Logf("the old record %s stayed reachable beside the new %s; the query embedded the new candidate and answered %v item(s)",
 		oldFact.Key, newFact.Key, after["count"])
 }
 
@@ -5014,7 +5182,7 @@ func recoverRestoreProcess(t *testing.T, root, out, seedPath string) {
 		EventTypes:   []string{event.TypeActionCommand},
 	})
 	if err != nil {
-		t.Fatalf("the restart read the observation table: %v", err)
+		t.Fatalf("the restart read the durable query: %v", err)
 	}
 	for _, ref := range observed {
 		report.Observed = append(report.Observed, string(ref.Key))
@@ -5112,7 +5280,7 @@ func restoreTaskViews(t *testing.T, ctx context.Context, run *assembly.Run, addr
 // to the call.
 func restoreChainViews(t *testing.T, ctx context.Context, root string) []restoreChainView {
 	t.Helper()
-	tier, err := ledger.OpenTier(ctx, ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: root})
+	tier, err := ledger.OpenTier(ctx, ledger.StorageConfig{Type: ledger.StorageJournal, Root: root})
 	if err != nil {
 		t.Fatalf("open the durable tier of the restart: %v", err)
 	}
@@ -5145,4 +5313,31 @@ func restoreChainViews(t *testing.T, ctx context.Context, root string) []restore
 		views = append(views, view)
 	}
 	return views
+}
+
+// stripFoldGenerations rewrites the recorder generation of every provenance
+// anchor in a rendered projection to the explicit gen:? placeholder. The WAL
+// facts a replay reads name no recorder generation (replay.ChainFact carries the
+// fact's read, not the recorder's identity), so a fold re-derived from them
+// writes the placeholder where the online fold writes the live run's generation;
+// the two forms must agree in everything but that token.
+func stripFoldGenerations(rendered string) string {
+	const marker = "|gen:"
+	var out strings.Builder
+	rest := rendered
+	for {
+		at := strings.Index(rest, marker)
+		if at < 0 {
+			out.WriteString(rest)
+			return out.String()
+		}
+		rel := strings.IndexByte(rest[at:], ']')
+		if rel < 0 {
+			out.WriteString(rest)
+			return out.String()
+		}
+		out.WriteString(rest[:at])
+		out.WriteString(marker + "?]")
+		rest = rest[at+rel+1:]
+	}
 }

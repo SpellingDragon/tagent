@@ -107,12 +107,10 @@ func (r *Run) Close(ctx context.Context, req agent.CloseRequest) (agent.DrainRep
 	r.mu.Lock()
 	r.closing = true
 	r.mu.Unlock()
+	r.stopCheckpointFiler()
 	defer r.markCloseReturned()
 	if flying := r.loop.StopResidentsWithin(timeout); len(flying) > 0 {
 		assemblyWarn("tagent: the close budget ended beside %d resident loop(s) still inside a model production: %s", len(flying), strings.Join(flying, ", "))
-	}
-	if r.retrieval != nil {
-		defer r.retrieval.close()
 	}
 	judge := context.WithoutCancel(ctx)
 	read := r.quiesce(ctx, timeout)
@@ -128,6 +126,9 @@ func (r *Run) Close(ctx context.Context, req agent.CloseRequest) (agent.DrainRep
 		Drained:   drained,
 		Outcome:   closeOutcome(read, drained),
 		Failed:    r.failedAnswers(),
+	}
+	if err := r.fileClosingCheckpoint(judge, timeout); err != nil {
+		return report, err
 	}
 	if req.Address.IsComplete() {
 		if closeErr := r.store.CloseSession(ctx, req.Address); closeErr != nil && !errors.Is(closeErr, state.ErrUnknownTarget) {
@@ -175,16 +176,6 @@ func (g closeGate) Obligations(ctx context.Context, taskID event.TaskID) (task.O
 // Flush delivers the notifications one task still owes through the task face.
 func (g closeGate) Flush(ctx context.Context, taskID event.TaskID) error {
 	return g.face.Flush(ctx, taskID)
-}
-
-// restoreOwed folds the notifications the durable account behind this run still
-// owes back into its mailbox, so a restart reads them through the same criterion
-// the close does instead of through a restore path of its own.
-func (r *Run) restoreOwed(ctx context.Context) error {
-	if r.store == nil {
-		return nil
-	}
-	return r.store.RestoreOwed(ctx)
 }
 
 // brokenCloseReason names why one close could not judge the run: the criterion
@@ -430,13 +421,21 @@ func (s runUnsettled) Unconsumed(ctx context.Context) ([]task.UnsettledNotice, e
 // input this process accepted and never drove is owed a drive rather than lost
 // beside a cursor kept in memory — and a restart over the same chain reads the
 // very same rounds, because the boundary is the one fact the chain records.
+//
+// The rounds split by the cut of the newest checkpoint: the rounds it covered
+// come back from the carrier by identity and are read out of the durable chain
+// the run holds, and the rounds that landed past it are the resident window of
+// each chain. A run beside no storage tier restores no cut and reads the window
+// alone.
 func (s runUnsettled) Unanswered(ctx context.Context) ([]task.UnsettledInput, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 	var unanswered []task.UnsettledInput
 	for _, addr := range s.run.ActiveSessions("") {
-		pending := agent.PendingInputs(s.run.SessionFacts(addr))
+		facts := s.run.restoredInputFacts(ctx, addr)
+		facts = append(facts, s.run.SessionFacts(addr)...)
+		pending := agent.PendingInputs(facts)
 		if len(pending) == 0 {
 			continue
 		}

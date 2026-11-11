@@ -161,6 +161,11 @@ type MemoryRegistry struct {
 	tasks     map[event.TaskID]*memoryTask
 	policy    Policy
 	now       func() time.Time
+	// restored is the chain revision every task the newest framework checkpoint
+	// stated stands at, so the boot that restores the account folds only the
+	// links that landed past it instead of every chain the storage holds. It is
+	// empty beside a registry no checkpoint was restored into.
+	restored map[event.TaskID]int64
 	// terminalTTL is how long the record of a terminal task is kept: the sweep reads it on
 	// every admission, and a zero bound keeps every record.
 	terminalTTL time.Duration

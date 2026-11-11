@@ -15,6 +15,7 @@ import (
 	"github.com/SpellingDragon/tagent/api/model"
 	"github.com/SpellingDragon/tagent/assembly"
 	"github.com/SpellingDragon/tagent/memory/ledger"
+	"github.com/SpellingDragon/tagent/runtime/agent"
 	"github.com/SpellingDragon/tagent/runtime/state"
 	"github.com/SpellingDragon/tagent/runtime/task"
 )
@@ -282,12 +283,12 @@ func (o *historyObserver) mentions(level string, fragments ...string) bool {
 
 // watchHistoryLog points the framework logger at the observer for the duration of
 // one check and answers the restore that ends it, so a check reads the lines of
-// its own face and leaves the package logger as it found it.
+// its own face and leaves the package logger as it found it. The swap runs
+// through the locked framework entry: a raw write beside a running consumer is
+// the race the lock exists to close.
 func watchHistoryLog(t *testing.T, observer trpclog.Logger) func() {
 	t.Helper()
-	original := trpclog.Default
-	trpclog.Default = observer
-	restore := func() { trpclog.Default = original }
+	restore := agent.SwapFrameworkLogger(observer)
 	t.Cleanup(restore)
 	return restore
 }

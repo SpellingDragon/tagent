@@ -117,7 +117,6 @@ func (p *ReplayProjection) Fold(ctx context.Context) (ProjectionEntry, error) {
 		ConsumedKeys: consumed,
 	}
 	p.fold = &payload
-	p.boundary = boundary
 	summaryEntry := entryOfRef(summaryRef)
 	p.entries = append([]ProjectionEntry{summaryEntry}, refEntries...)
 	p.recomputeVolumeLocked()

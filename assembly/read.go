@@ -2,14 +2,17 @@ package assembly
 
 import (
 	"context"
+	"fmt"
 	"sort"
 
 	"github.com/SpellingDragon/tagent/api/event"
 	"github.com/SpellingDragon/tagent/memory"
 	"github.com/SpellingDragon/tagent/memory/ledger"
 	"github.com/SpellingDragon/tagent/memory/query"
+	"github.com/SpellingDragon/tagent/memory/replay"
 	"github.com/SpellingDragon/tagent/memory/search"
 	"github.com/SpellingDragon/tagent/runtime/state"
+	"github.com/SpellingDragon/tagent/tool/recall"
 )
 
 // 契约: docs/wiki/platform/platform-subsystems.md#composition-root
@@ -45,10 +48,10 @@ func (r *Run) ModelInFlight(addr event.Address, instance event.InstanceID) (even
 }
 
 // recall runs one retrieval over the recall face of this run and answers the
-// reference set the query hit. The retrieval reads through the observation table
-// over the committed store and the searcher fusing its two legs, so a hit is
-// answered as the recall reference its event was landed with and never as a
-// copy of the text behind it: the original stays behind the scoped read path.
+// reference set the query hit. The retrieval reads the durable chain on demand
+// and the searcher fuses its two legs, so a hit is answered as the original
+// reference the chain states and never as a copy of the text behind it: the
+// original stays behind the scoped read path.
 // The query carries its own authorized partition set — the recall grants no
 // authorization of its own — and a run assembled beside no storage tier is
 // refused by name with ErrRetrievalUnwired instead of answered as an empty set.
@@ -60,66 +63,299 @@ func (r *Run) recall(ctx context.Context, q search.Query) (search.Result, error)
 }
 
 // retrievalSupply is the retrieval face one run consumes recall through: the
-// observation table over the events its storage tier committed, the vector
-// seam the embedding leg borrows its vectors from, and the searcher reading
-// both legs through that table. It is wired once at the composition root over
-// the production components the retrieval domain ships — a query consumes an
-// event after the table observes it, and never at the moment its bytes happen
-// to be committed — and it holds no second copy of any event.
+// stateless durable query source and the searcher that embeds candidates only
+// during a query. It holds no event or vector copy between queries.
 type retrievalSupply struct {
-	source   *memory.StoreQuerySource
-	seam     *memory.VectorSeam
+	source   *tierQuerySource
 	searcher *search.StoreSearcher
 }
 
-// supplyRetrieval wires the retrieval face over one opened storage tier: the
-// observation table lands every event the tier has published, each landed
-// event submits its vector generation without waiting for it, and the searcher
-// fuses the two legs of every query back into the one ordered reference set.
-// A nil embedder names no vector generation at all: no seam is built, no
-// embedding is ever called, and the searcher answers through the keyword leg
-// alone — the zero-change behaviour the embedding contract states. The
-// embedding text of one event is its stored content, falling back to its
-// stored summary when the content is empty.
-func supplyRetrieval(ctx context.Context, tier *ledger.Tier, embedder memory.Embedder) (*retrievalSupply, error) {
-	source := memory.NewStoreQuerySource()
-	if err := source.ObserveStore(ctx, tier.Segments); err != nil {
-		return nil, err
-	}
-	supply := &retrievalSupply{source: source}
-	if embedder == nil {
-		supply.searcher = search.NewStoreSearcher(source, nil, nil)
-		return supply, nil
-	}
-	events, err := tier.Segments.Events(ctx)
-	if err != nil {
-		return nil, err
-	}
-	seam := memory.NewVectorSeam(0)
-	seam.Bind(embedder)
-	for _, stored := range events {
-		body, err := memory.DecodeEventBody(stored.Body)
-		if err != nil {
-			seam.Close()
-			return nil, err
-		}
-		text := body.Message.Content
-		if text == "" {
-			text = body.Meta[event.MetaKeyEventSummary]
-		}
-		seam.Submit(stored.Key, text)
-	}
-	supply.seam = seam
-	supply.searcher = search.NewStoreSearcher(source, seam, embedder)
-	return supply, nil
+// tierQuerySource is the stateless durable read face: every query decodes the
+// chain on demand, while no event or parent map is retained between calls.
+type tierQuerySource struct {
+	segments *ledger.FileSegmentStore
 }
 
-// close releases the vector generation pipeline of the supply. A repeat close
-// is a no-op, and the keyword-only supply beside no seam closes nothing.
-func (s *retrievalSupply) close() {
-	if s.seam != nil {
-		s.seam.Close()
+// NewTierQuerySource attaches the durable read face without landing anything.
+// The returned face answers QueryEvents, Event, Reference, Text and GetParent
+// on demand and retains no event, parent or vector map between calls.
+func NewTierQuerySource(segments *ledger.FileSegmentStore) *tierQuerySource {
+	return &tierQuerySource{segments: segments}
+}
+
+// recordOfTierEvent decodes one stored event into the existing query kernel.
+func recordOfTierEvent(stored ledger.StoredEvent) (memory.EventRecord, ledger.OriginalRef, bool, error) {
+	body, err := memory.DecodeEventBody(stored.Body)
+	if err != nil {
+		return memory.EventRecord{}, ledger.OriginalRef{}, false, err
 	}
+	if body.Key != stored.Key {
+		return memory.EventRecord{}, ledger.OriginalRef{}, false, memory.ErrBodyKeyMismatch
+	}
+	if event.CompressionMechanism(body.Type) {
+		return memory.EventRecord{}, ledger.OriginalRef{}, false, nil
+	}
+	return body.Record(stored.PartitionID, stored.WindowTS), body.Ref(), true, nil
+}
+
+// QueryEvents answers through the existing query kernel over a temporary read.
+func (s *tierQuerySource) QueryEvents(ctx context.Context, opts memory.QueryOptions) ([]memory.EventReference, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if err := opts.Validate(); err != nil {
+		return nil, err
+	}
+	partitions := queryPartitionsOf(opts)
+	if len(partitions) == 0 {
+		return []memory.EventReference{}, nil
+	}
+	query := memory.NewMemoryEventQuery()
+	if err := s.segments.EachIndexNewestFirst(ctx, func(key event.EventID, partition int, _ int64, _ string, _ event.SessionID) error {
+		if !partitions[partition] {
+			return nil
+		}
+		stored, held, err := s.segments.GetEvent(ctx, key)
+		if err != nil {
+			return err
+		}
+		if !held {
+			return fmt.Errorf("%w: %s", ledger.ErrSegmentBodyMissing, key)
+		}
+		record, _, admitted, err := recordOfTierEvent(stored)
+		if err != nil {
+			return err
+		}
+		if !admitted {
+			return nil
+		}
+		return query.Store(ctx, record)
+	}); err != nil {
+		return nil, err
+	}
+	return query.QueryEvents(ctx, opts)
+}
+
+// queryPartitionsOf resolves the authorized partition set before any body read.
+func queryPartitionsOf(opts memory.QueryOptions) map[int]bool {
+	partitions := map[int]bool{}
+	if len(opts.PartitionIDs) > 0 {
+		for _, partition := range opts.PartitionIDs {
+			partitions[partition] = true
+		}
+		return partitions
+	}
+	if opts.PartitionID != 0 {
+		partitions[opts.PartitionID] = true
+	}
+	return partitions
+}
+
+// ChainFailure names why the chain answers no readable event for one key: the
+// failure its durable read returned, or the empty nil when it holds a readable
+// event. A key the chain holds no event for answers nil, because absence is a
+// legitimate answer here — a body that cannot be read or decoded is corruption
+// and never stands in for it.
+func (s *tierQuerySource) ChainFailure(key event.EventID) error {
+	_, _, err := s.eventReference(key)
+	return err
+}
+
+// Event returns one event reference directly from the chain. The declared face
+// answers held-or-not; the failure behind a not-held answer is named by
+// ChainFailure instead of being folded into that answer.
+func (s *tierQuerySource) Event(key event.EventID) (memory.EventReference, bool) {
+	reference, held, _ := s.eventReference(key)
+	return reference, held
+}
+
+// eventReference reads one event reference beside the failure that refused it.
+func (s *tierQuerySource) eventReference(key event.EventID) (memory.EventReference, bool, error) {
+	stored, held, err := s.segments.GetEvent(context.Background(), key)
+	if err != nil {
+		return memory.EventReference{}, false, err
+	}
+	if !held {
+		return memory.EventReference{}, false, nil
+	}
+	record, _, admitted, err := recordOfTierEvent(stored)
+	if err != nil {
+		return memory.EventReference{}, false, err
+	}
+	if !admitted {
+		return memory.EventReference{}, false, nil
+	}
+	return record.Reference(), true, nil
+}
+
+// Text returns the original content of one event for query-time embedding,
+// falling back to its summary when the content is empty. The declared face
+// answers held-or-not on the same terms as Event.
+func (s *tierQuerySource) Text(key event.EventID) (string, bool) {
+	text, held, _ := s.originalText(key)
+	return text, held
+}
+
+// originalText reads the original content of one event beside the failure that
+// refused it.
+func (s *tierQuerySource) originalText(key event.EventID) (string, bool, error) {
+	stored, held, err := s.segments.GetEvent(context.Background(), key)
+	if err != nil {
+		return "", false, err
+	}
+	if !held {
+		return "", false, nil
+	}
+	body, err := memory.DecodeEventBody(stored.Body)
+	if err != nil {
+		return "", false, err
+	}
+	if body.Key != key {
+		return "", false, memory.ErrBodyKeyMismatch
+	}
+	if event.CompressionMechanism(body.Type) {
+		return "", false, nil
+	}
+	text := body.Message.Content
+	if text == "" {
+		text = body.Meta[event.MetaKeyEventSummary]
+	}
+	return text, true, nil
+}
+
+// Reference returns one original reference directly from the chain. The
+// declared face answers held-or-not on the same terms as Event.
+func (s *tierQuerySource) Reference(key event.EventID) (ledger.OriginalRef, bool) {
+	reference, held, _ := s.originalReference(key)
+	return reference, held
+}
+
+// originalReference reads one original reference beside the failure that
+// refused it.
+func (s *tierQuerySource) originalReference(key event.EventID) (ledger.OriginalRef, bool, error) {
+	stored, held, err := s.segments.GetEvent(context.Background(), key)
+	if err != nil {
+		return ledger.OriginalRef{}, false, err
+	}
+	if !held {
+		return ledger.OriginalRef{}, false, nil
+	}
+	_, reference, admitted, err := recordOfTierEvent(stored)
+	if err != nil {
+		return ledger.OriginalRef{}, false, err
+	}
+	if !admitted {
+		return ledger.OriginalRef{}, false, nil
+	}
+	return reference, true, nil
+}
+
+// ChainFailure names why the bound table answers no readable event for one key,
+// so a corruption reaches the exact read instead of being answered as an absent
+// event. The port forwards the face its bound table carries and answers the
+// empty nil when that table names no failures.
+func (p *RecallPort) ChainFailure(key event.EventID) error {
+	p.mu.RLock()
+	table := p.reads.Table
+	p.mu.RUnlock()
+	namer, ok := table.(recall.ChainFailureNamer)
+	if !ok {
+		return nil
+	}
+	return namer.ChainFailure(key)
+}
+
+// GetParent answers the preceding non-synthetic fact on the same chain. The
+// index normally proves the edge without bodies; an index entry with no session
+// falls back to the body walk so two sessions can never be joined accidentally.
+func (s *tierQuerySource) GetParent(key event.EventID) (event.EventID, error) {
+	if key == "" {
+		return "", nil
+	}
+	found := false
+	fallback := false
+	partition := 0
+	session := event.SessionID("")
+	parent := event.EventID("")
+	if err := s.segments.EachIndexNewestFirst(context.Background(), func(candidate event.EventID, part int, _ int64, _ string, sess event.SessionID) error {
+		if !found {
+			if candidate == key {
+				found = true
+				partition = part
+				session = sess
+				if session == "" {
+					fallback = true
+				}
+			}
+			return nil
+		}
+		if parent != "" || part != partition {
+			return nil
+		}
+		if sess == "" {
+			fallback = true
+			return nil
+		}
+		if sess != session || replay.SyntheticKey(candidate) {
+			return nil
+		}
+		parent = candidate
+		return nil
+	}); err != nil {
+		return "", err
+	}
+	if fallback {
+		return s.parentFromBodies(key, partition)
+	}
+	return parent, nil
+}
+
+// parentFromBodies resolves chains whose index carries no session. Only the
+// key's partition is decoded; an empty session remains its own chain.
+func (s *tierQuerySource) parentFromBodies(key event.EventID, partition int) (event.EventID, error) {
+	var refs []anchorRef
+	if err := s.segments.EachIndexNewestFirst(context.Background(), func(candidate event.EventID, part int, seq int64, typ string, session event.SessionID) error {
+		if part == partition {
+			refs = append(refs, anchorRef{key: candidate, partition: part, seq: seq, typ: typ, session: session})
+		}
+		return nil
+	}); err != nil {
+		return "", err
+	}
+	previous := map[replay.ChainKey]event.EventID{}
+	parent := event.EventID("")
+	for i := len(refs) - 1; i >= 0; i-- {
+		stored, held, err := s.segments.GetEvent(context.Background(), refs[i].key)
+		if err != nil {
+			return "", err
+		}
+		if !held {
+			return "", fmt.Errorf("%w: %s", ledger.ErrSegmentBodyMissing, refs[i].key)
+		}
+		body, err := memory.DecodeEventBody(stored.Body)
+		if err != nil {
+			return "", err
+		}
+		evt := body.Event()
+		evt.Key = stored.Key
+		if replay.SyntheticKey(evt.Key) {
+			continue
+		}
+		chain := replay.ChainKey{PartitionID: stored.PartitionID, SessionID: sessionOf(evt)}
+		if evt.Key == key {
+			parent = previous[chain]
+		}
+		previous[chain] = evt.Key
+	}
+	return parent, nil
+}
+
+// supplyRetrieval wires the retrieval face over one opened storage tier: the
+// durable query source reads only when asked and the searcher embeds only the
+// current query's candidates. A nil embedder leaves retrieval keyword-only.
+func supplyRetrieval(_ context.Context, tier *ledger.Tier, embedder memory.Embedder) (*retrievalSupply, error) {
+	source := NewTierQuerySource(tier.Segments)
+	return &retrievalSupply{source: source, searcher: search.NewStoreSearcher(source, embedder)}, nil
 }
 
 // runReading is the read port of the diagnostic read: the binding generation the

@@ -465,13 +465,13 @@ func (c *invariantLoopCapture) admissions() []invariantLoopAdmission {
 }
 
 // invariantLoop returns one loop over one held generation and one empty occupancy ledger.
-func invariantLoop(t *testing.T, behaviour *invariantLoopModel) (*Loop, *state.Bindings, *state.Occupancy) {
+func invariantLoop(t *testing.T, serving model.Model) (*Loop, *state.Bindings, *state.Occupancy) {
 	t.Helper()
 	declaration := &config.Declaration{Entry: "agent-a", Agents: []config.AgentSpec{{ID: "agent-a"}}}
 	plan, err := state.NewStatePlan(
 		state.OrgPlan{Declaration: declaration, Fingerprint: "fp-a"},
 		map[event.AgentID]state.AgentBinding{
-			"agent-a": {Model: behaviour, PromptSource: state.PromptSource{Version: "v1"}},
+			"agent-a": {Model: serving, PromptSource: state.PromptSource{Version: "v1"}},
 		},
 		nil,
 	)
@@ -569,6 +569,7 @@ func watchConsumerLog(tb testing.TB, logger trpclog.Logger) {
 // TestConsumerObservation checks the consumer face of the observation bypass.
 // - one drive renders a start line carrying the address and the ready count, and an end line carrying the decision count and the terminal
 // - every decision the drive consumes renders one line carrying its terminal and the number of calls the decision admitted
+// - a declaration that names no provider window renders one gate-closed fact, so the untrimmed request is observable
 // - the consumer face writes nothing at INFO, so the bounded stream stays with turn boundaries and model requests
 // - a logger that fails does not end the drive
 // 契约: docs/wiki/agent/execution-generations.md#turn-outcome
@@ -599,11 +600,14 @@ func TestConsumerObservation(t *testing.T) {
 		if !logger.mentions("debug", "consumer decision", "invocation=invocation-1", "terminal=completed", "calls=0", "closing=false") {
 			t.Fatalf("debug lines = %v, want the decision line of the one answer", logger.at("debug"))
 		}
+		if !logger.mentions("debug", "request budget gate closed", "invocation=invocation-1", "max_tokens=0", "provider_window=0") {
+			t.Fatalf("debug lines = %v, want the gate-closed fact of a declaration naming no budget", logger.at("debug"))
+		}
 		if !logger.mentions("debug", "consumer drive end", "invocation=invocation-1", "decisions=1", "terminal=completed", "failed=false") {
 			t.Fatalf("debug lines = %v, want the end line of the drive", logger.at("debug"))
 		}
-		if lines := logger.at("debug"); len(lines) != 3 {
-			t.Fatalf("debug lines = %v, want one start, one decision and one end", lines)
+		if lines := logger.at("debug"); len(lines) != 4 {
+			t.Fatalf("debug lines = %v, want one start, one gate fact, one decision and one end", lines)
 		}
 		if lines := logger.at("info"); len(lines) != 1 || !logger.mentions("info", "model response", "terminal=completed") {
 			t.Fatalf("info lines = %v, want the one bounded model-response line and no consumer line above DEBUG", lines)

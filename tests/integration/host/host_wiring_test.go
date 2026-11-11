@@ -276,6 +276,7 @@ func TestRiskRulesAbsentKeepsTheSendFace(t *testing.T) {
 //   - a document declaring the exec id boots the run beside the release tool
 //   - the run tool acquires and reports the frame the declared command wrote
 //   - the release tool stops the very resource the run started
+//   - the declared command outlives the round trip, so the release stops a held key instead of the one the tracker settled once the pane's drain window ran out
 //   - no request answers ErrUnwired, so the boot wired the shared resource ledger
 //
 // 契约: docs/wiki/tool/tool-architecture.md#action-tool
@@ -296,7 +297,7 @@ func TestExecFaceWiredFromDocument(t *testing.T) {
 			return wiringToolCallsAnswer(wiringCall{
 				id:   "call-exec-run",
 				name: "exec_run",
-				arguments: fmt.Sprintf(`{"command":"echo","args":["wiring-ok"],"kind":%q,"resource":%q}`,
+				arguments: fmt.Sprintf(`{"command":"sh","args":["-c","echo wiring-ok; sleep 30"],"kind":%q,"resource":%q}`,
 					tagentexec.KindTmux, resource),
 			})
 		case 1:
@@ -364,27 +365,62 @@ func TestExecFaceWiredFromDocument(t *testing.T) {
 	}
 }
 
-// TestExecFaceDeclaredBesideNoTmuxRefusesTheBoot proves the declared face is wired or refused, never run unwired:
-//   - a document declaring the exec id on a host without tmux refuses the boot
-//   - the refusal names the declared face instead of booting a run beside no ledger
+// TestExecFaceDeclaredBesideNoTmuxRefusesTheCall proves the declared face is mounted lazily and refuses the call, never runs unwired:
+//   - a document declaring the exec id boots on a host without tmux: mounting the consumer costs nothing until a call needs the sessions
+//   - the first exec_run call of that boot is refused by name beside the resource it was asked for, so a system without tmux is named at the call that needs it
+//   - the run acquires no resource, so the refused call started nothing
 //
 // 契约: docs/wiki/tool/tool-architecture.md#action-tool
-func TestExecFaceDeclaredBesideNoTmuxRefusesTheBoot(t *testing.T) {
+func TestExecFaceDeclaredBesideNoTmuxRefusesTheCall(t *testing.T) {
 	t.Setenv("TAGENT_TEST_API_KEY", "test-key")
 	t.Setenv("TAGENT_HTTP_PORT", "0")
 	t.Setenv("TAGENT_RL_AUTH_TOKEN", "")
 	t.Setenv("PATH", t.TempDir())
 	provider := newScriptedProvider(t)
+	resource := fmt.Sprintf("tagent-no-tmux-%d", time.Now().UnixNano())
+	provider.answer = func(index int) string {
+		if index == 0 {
+			return wiringToolCallsAnswer(wiringCall{
+				id:   "call-exec-run",
+				name: "exec_run",
+				arguments: fmt.Sprintf(`{"command":"echo","args":["no-tmux"],"kind":%q,"resource":%q}`,
+					tagentexec.KindTmux, resource),
+			})
+		}
+		return scriptedTerminalAnswer
+	}
 	root := t.TempDir()
 	agentBlock := "    model: model-a\n" +
 		"    tools:\n" +
 		"      - { kind: tool, id: " + tagentexec.PresetName + " }\n"
 	configPath := writeScriptedHostDocument(t, root, provider.endpoint(), "model-a")
 	writeHostDocumentFile(t, configPath, wiringHostDocument(root, provider.endpoint(), agentBlock, ""))
-	if _, err := assembly.Boot(configPath, assembly.WithSender(recordingSender{})); err == nil {
-		t.Fatal("boot of a declared exec face beside no tmux = nil, want the named refusal")
-	} else if !strings.Contains(err.Error(), tagentexec.PresetName) {
-		t.Fatalf("boot error = %v, want the declared %q face named", err, tagentexec.PresetName)
+	host, err := assembly.Boot(configPath, assembly.WithSender(recordingSender{}))
+	if err != nil {
+		t.Fatalf("boot of a declared exec face beside no tmux: %v, want the lazy mount: the face pays nothing until a call needs the sessions", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	if turn := invokeScriptedTurn(t, ctx, host, "session-exec-no-tmux"); turn.Terminal != model.KindCompleted {
+		t.Fatalf("turn terminal = %v, want the completed turn beside the refused call", turn.Terminal)
+	}
+	requests := provider.servedRequests()
+	if len(requests) != 2 {
+		t.Fatalf("model requests = %d, want the exec decision beside the answer that read its refusal", len(requests))
+	}
+	receipt, ok := deliveryToolResult(requests[1], "call-exec-run")
+	if !ok {
+		t.Fatalf("the second decision carried no result for the exec call: %+v", requests[1].Messages)
+	}
+	if want := fmt.Sprintf("exec: %s/%s: the execution capability behind this resource kind is missing", tagentexec.KindTmux, resource); receipt != want {
+		t.Fatalf("the exec receipt = %q, want the refusal %q of the missing tmux capability beside the resource the call named", receipt, want)
+	}
+	key := tagentexec.ResourceKey{Kind: tagentexec.KindTmux, Key: resource}
+	if _, err := host.Run().ExecState(key); !errors.Is(err, tagentexec.ErrResourceUnknown) {
+		t.Fatalf("the state of %s = %v, want %v: a refused call holds no resource", key, err, tagentexec.ErrResourceUnknown)
+	}
+	if err := host.Close(ctx); err != nil {
+		t.Fatalf("close the host: %v", err)
 	}
 }
 

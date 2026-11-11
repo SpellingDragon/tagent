@@ -37,6 +37,10 @@ type Info = trpcmodel.Info
 // conversation history and generation configuration.
 type Request = trpcmodel.Request
 
+// GenerationConfig is an alias for the locked tRPC generation configuration a
+// request carries, preserving the native sampling fields a provider receives.
+type GenerationConfig = trpcmodel.GenerationConfig
+
 // Response is an alias for the locked tRPC model response, which is the unit of
 // the single terminal reduction performed by this package.
 type Response = trpcmodel.Response

@@ -90,7 +90,7 @@ func TestSubagentCallAdmitsTask(t *testing.T) {
 		if notice.TaskID != taskID || notice.Kind != task.NoticeSettled || notice.Round != 1 || notice.Seq != 0 {
 			t.Fatalf("terminal notification = %+v, want the settled identity of %s", notice, taskID)
 		}
-		if got := rig.ledger.View(rig.invocationID); len(got) != 1 || got[0].Status != task.StatusSettled {
+		if got := awaitDelegation(rig.ledger, rig.invocationID, task.StatusSettled); len(got) != 1 || got[0].Status != task.StatusSettled {
 			t.Fatalf("delegation view = %+v, want the call landed at its terminal", got)
 		}
 		if got := delegated.count(); got != 1 {
@@ -138,7 +138,7 @@ func TestSubagentCallAdmitsTask(t *testing.T) {
 		if envelope.Notice.TaskID == "" || envelope.Notice.Kind != task.NoticeSettled {
 			t.Fatalf("terminal notification = %+v, want the settled identity of the admitted call", envelope.Notice)
 		}
-		if got := rig.ledger.View(turn.InvocationID); len(got) != 1 || got[0].Status != task.StatusSettled {
+		if got := awaitDelegation(rig.ledger, turn.InvocationID, task.StatusSettled); len(got) != 1 || got[0].Status != task.StatusSettled {
 			t.Fatalf("delegation view = %+v, want the call landed at its terminal", got)
 		}
 		if got := delegated.count(); got != 1 {
@@ -410,6 +410,26 @@ func awaitEnvelope(t *testing.T, ch <-chan task.Envelope) task.Envelope {
 	case <-time.After(5 * time.Second):
 		t.Fatal("timed out waiting for the terminal notification")
 		return task.Envelope{}
+	}
+}
+
+// awaitDelegation waits for the delegation one invocation issued to stand at the named
+// status and reports the view it read: the settle commits beside its notification while
+// the terminal lands once the task's obligations are cleared, so a reader that takes the
+// view the moment the notification arrives reports the status the record held before the
+// landing. The window bounds the wait, and a view that never reaches the status is
+// returned as it stands for the assertion to name.
+func awaitDelegation(ledger *agent.Delegator, owner event.InvocationID, want task.Status) []agent.Delegation {
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		view := ledger.View(owner)
+		if len(view) == 1 && view[0].Status == want {
+			return view
+		}
+		if !time.Now().Before(deadline) {
+			return view
+		}
+		time.Sleep(5 * time.Millisecond)
 	}
 }
 

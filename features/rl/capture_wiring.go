@@ -435,8 +435,11 @@ var _ Capture = (*scopedCapture)(nil)
 // digests.
 //
 // The request is observed and never edited, and a view is never rebuilt from
-// the options of a finished call. A snapshot the capture could not swap out
-// stays resident and the overrun is reported by name rather than swallowed.
+// the options of a finished call. The evidence of the request lands on the
+// capture's bounded queue under the reference this fix returns, so an export
+// reads the request back through that reference instead of reconstructing it. A
+// snapshot the capture could not swap out stays resident and the overrun is
+// reported by name rather than swallowed.
 func (s *scopedCapture) Snapshot(ctx context.Context, req model.Request) (ModelViewRef, error) {
 	if err := ctx.Err(); err != nil {
 		return ModelViewRef{}, err
@@ -453,10 +456,23 @@ func (s *scopedCapture) Snapshot(ctx context.Context, req model.Request) (ModelV
 	if err := s.owner.keep(s.decisionID, ref, snapshot, int64(len(content))+snapshotResidentOverhead); err != nil {
 		return ModelViewRef{}, err
 	}
+	if err := s.owner.recordEvidence(ctx, RequestEvidenceRecord{DecisionID: s.decisionID, Snapshot: ref}); err != nil {
+		return ModelViewRef{}, err
+	}
 	view := s.view
 	view.Snapshot = ref
 	view.ParametersDigest = digestBytes(snapshot.Parameters)
 	return view, nil
+}
+
+// recordEvidence lands the request evidence of one decision through the capture's
+// bounded sink, beside the snapshot the evidence names: a capture that could not
+// land it reports the refusal by name, which the loop counts as a recording loss.
+func (c *TrajectoryCapture) recordEvidence(ctx context.Context, record RequestEvidenceRecord) error {
+	if c == nil || c.sink == nil {
+		return ErrCaptureSinkMissing
+	}
+	return c.sink.RecordRequestEvidence(ctx, record)
 }
 
 // Record admits one attempt through the trajectory's bounded sink.

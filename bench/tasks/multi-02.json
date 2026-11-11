@@ -1,0 +1,43 @@
+{
+  "id": "multi-02",
+  "category": "multi",
+  "prompts": [
+    "Create notes/plan.md whose first line is `step one`.",
+    "Append a second line to notes/plan.md: `step two`.",
+    "Read notes/plan.md and reply with its two lines, one per line."
+  ],
+  "tools": [
+    "file.read",
+    "file.write"
+  ],
+  "verifier": {
+    "file": {
+      "path": "notes/plan.md",
+      "must_contain": [
+        "step one",
+        "step two"
+      ]
+    },
+    "response": {
+      "must_contain": [
+        "step one",
+        "step two"
+      ]
+    }
+  },
+  "examples": {
+    "positive": {
+      "files": {
+        "notes/plan.md": "step one\nstep two\n"
+      },
+      "output": "step one\nstep two"
+    },
+    "negative": {
+      "files": {
+        "notes/plan.md": "step one\n"
+      },
+      "output": "step one\nstep two",
+      "expect_error_contains": "file"
+    }
+  }
+}

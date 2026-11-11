@@ -32,14 +32,20 @@ type LifecycleConfig struct {
 	MaxEventsPerPartition int `json:"max_events_per_partition" yaml:"max_events_per_partition"`
 }
 
+// deliverySettlementType is the frozen event type of the delivery settlement
+// fact family (assembly/host_delivery.go, FACT-VOCABULARY 第十一族). Window
+// exempts this family by construction: a settlement fact is the read face of an
+// obligation that outlives any age window, so no tombstone may age it out.
+const deliverySettlementType = "delivery.settlement"
+
 // DefaultLifecycleConfig returns the default lifecycle policy: the seven-day
-// global window, no per-type overrides, the one-hour scan cadence and no
-// capacity bound. It is the fallback every unset field resolves to — never a
-// value a composition root hardcodes beside its config.
+// global window, the delivery settlement family's negative (exempt) override,
+// the one-hour scan cadence and no capacity bound. It is the fallback every
+// unset field resolves to — never a value a composition root hardcodes beside
+// its config.
 func DefaultLifecycleConfig() LifecycleConfig {
 	return LifecycleConfig{
 		GlobalTTLDays:         7,
-		TypeTTL:               map[string]int{},
 		CheckInterval:         time.Hour,
 		MaxEventsPerPartition: 0,
 	}
@@ -53,9 +59,6 @@ func (c LifecycleConfig) Normalized() LifecycleConfig {
 	if out.GlobalTTLDays == 0 {
 		out.GlobalTTLDays = DefaultLifecycleConfig().GlobalTTLDays
 	}
-	if out.TypeTTL == nil {
-		out.TypeTTL = map[string]int{}
-	}
 	if out.CheckInterval == 0 {
 		out.CheckInterval = DefaultLifecycleConfig().CheckInterval
 	}
@@ -66,8 +69,13 @@ func (c LifecycleConfig) Normalized() LifecycleConfig {
 // whether that type is exempt from TTL tombstoning entirely: a negative
 // override exempts the type, a negative global window exempts every type, and
 // an absent override falls back to the global window.
+//
+// - The settlement family is exempt by construction: its facts are the read face of obligations that outlive any age window, so no tombstone may age them out.
 func (c LifecycleConfig) Window(eventType string) (time.Duration, bool) {
 	cfg := c.Normalized()
+	if eventType == deliverySettlementType {
+		return 0, true
+	}
 	if override, overridden := cfg.TypeTTL[eventType]; overridden {
 		if override < 0 {
 			return 0, true

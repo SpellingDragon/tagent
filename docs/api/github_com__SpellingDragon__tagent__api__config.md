@@ -125,6 +125,18 @@ type AgentSpec struct {
 	// whole while it folds the older ones. Zero reads the declaration default
 	// of 2.
 	KeepRecentTasks int
+	// ProviderContextWindow is the provider context window this agent's final
+	// requests are budgeted against, in tokens. Zero declares no window of its
+	// own, so the request budget derives the provider window from MaxTokens; a
+	// declaration naming neither opens no budget gate, and every request runs
+	// whole. This field never changes the replay window MaxTokens names.
+	ProviderContextWindow int
+	// OutputReserve is the token allowance the input budget leaves for the
+	// model's output. Zero reads the declaration default share of the provider
+	// window (runtime/agent.DefaultOutputReserveDivisor); a positive value
+	// declares the allowance itself. The input budget is the provider window
+	// minus this allowance.
+	OutputReserve int
 	// EnvironmentBlock states whether every request of this agent closes with
 	// the dynamic environment block: the tool, skill and MCP faces the request
 	// carries beside the open asynchronous task state. False keeps a request
@@ -157,12 +169,6 @@ type AgentSpec struct {
 	// approval book as one batch, the same way an over-cap response does. Zero
 	// keeps the guard off.
 	LongContextTokens int
-	// CaptureBudgetMB bounds the resident memory the trajectory capture of this
-	// agent's requests keeps beside its fixed snapshots, in megabytes. The
-	// oldest snapshot beyond the budget is swapped out to the capture storage
-	// and reads back on demand. Zero reads the declaration default of 64; one
-	// is the tightest budget the capture accepts.
-	CaptureBudgetMB int
 
 	// Memory is the memory section this agent declares: the storage tier its
 	// facts persist through, the namespaces it may read across partitions and
@@ -267,19 +273,11 @@ type EngineSpec struct {
 	Backend string `yaml:"backend"`
 	// Embedding is the connection the vector leg embeds through.
 	Embedding EmbeddingSpec `yaml:"embedding"`
-	// VectorTopK bounds the vector leg of one retrieval; 0 takes the runtime
-	// default.
-	VectorTopK int `yaml:"vector_top_k"`
-	// KeywordTopK bounds the keyword leg of one retrieval; 0 takes the runtime
-	// default.
-	KeywordTopK int `yaml:"keyword_top_k"`
-	// RRFK is the rank constant the reciprocal-rank fusion runs under; 0 takes
-	// the runtime default.
-	RRFK int `yaml:"rrf_k"`
 }
-    EngineSpec is the semantic engine behind one memory declaration: the
-    retrieval backend, the embedding connection and the two leg bounds and rank
-    constant the hybrid retrieval runs under.
+    EngineSpec is the semantic engine behind one memory declaration:
+    the retrieval backend and the embedding connection the vector leg embeds
+    through. The leg bounds and the fusion rank constant are mechanism
+    constants, not declaration knobs.
 
 type ExecSpec struct {
 	// Monitor is the rhythm a run starts from; its zero fields take the
@@ -390,7 +388,7 @@ type MemorySpec struct {
     embeddings with.
 
     The tier is a type and a root, both required together; an engine beside no
-    tier names no place for its vectors to persist.
+    tier names no durable chain for query-time candidates to read.
 
 type MonitorSpec struct {
 	// Interval is the observation cadence.

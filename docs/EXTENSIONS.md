@@ -31,7 +31,7 @@
 
 ---
 <a id="event-vocabulary"></a>
-## 二、event 词汇：一个事实的四个块，八种骨架类型，五类通知
+## 二、event 词汇：一个事实的四个块，十一种冻结事件类型（其中八种由 `RoleOf` 路由到模型角色），五类通知
 
 扩展者只需记住一件事：**事件是不可变事实，身份由 `Key` 单独引用**。`event.Event` 的字段分四块，每块首字段的注释就是该块的契约：
 
@@ -55,7 +55,7 @@
 | `TypeFeedback` | `feedback` | `user` |
 | `TypeGovernance` | `governance` | `user` |
 
-**Notice 族**是任务通知的词汇（`runtime/task/registry.go`），扩展者只需认身份而不必碰载荷：`task.Notice{TaskID, Round, Kind, Seq, Event}`，`Kind` 取 `accepted` / `progress` / `settled` / `failed` / `cancelled` 之一。通知自己的身份是 **`TaskID + Round + Kind + Seq`**，`Event` 指向已提交的事实供消费者还原输入，但**不替代**通知身份：同一身份重复投递不记录第二个事实，重试保留原身份。投递路由另存 `task.Envelope{Notice, Target, Source, TargetInstance}`，目标地址与目标实例在提交那一刻冻结，重建或移交的实例不会重路由一条已提交的通知。
+**Notice 族**是任务通知的词汇（`runtime/task/registry.go`），扩展者只需认身份而不必碰载荷：`task.Notice{TaskID, Round, Kind, Seq, Event, Text}`（`Text` 承载结算正文、不入身份），`Kind` 取 `accepted` / `progress` / `settled` / `failed` / `cancelled` 之一。通知自己的身份是 **`TaskID + Round + Kind + Seq`**，`Event` 指向已提交的事实供消费者还原输入，但**不替代**通知身份：同一身份重复投递不记录第二个事实，重试保留原身份。投递路由另存 `task.Envelope{Notice, Target, Source, TargetInstance}`，目标地址与目标实例在提交那一刻冻结，重建或移交的实例不会重路由一条已提交的通知。
 
 ---
 <a id="event-consumption"></a>
@@ -72,7 +72,7 @@
 
 ---
 <a id="consumer-protocol"></a>
-## 四、消费器协议：三个实例、六个面，一条协议
+## 四、消费器协议：三个实例、五个消费面，一条协议
 
 消费 event 的不止一处：回合驱动、时间驱动与宿主的外部驱动各跑一个循环。它们**共用一条协议**，差别只在驱动源（`runtime/agent/loop.go` 与 `features/evolution/meditation/reflection.go`）：
 
@@ -83,20 +83,20 @@
 
 | 实例 | 驱动源 | 读的事实 | 产出的新事实（族） |
 |---|---|---|---|
-| 常驻消费循环（回合驱动，`runtime/agent/consumer.go`） | 一次 invocation 的 `Ready` 输入，以及终态通知的 `Backflow` 回填 | ready 输入里的事件，身份即 `event.EventID` | 决策记录与尝试记录（`rl.DecisionRecord` / `rl.AttemptRecord`，经 `agent.Recorder` 在产生点提交） |
+| 常驻消费循环（回合驱动，`runtime/agent/consumer.go`） | 一次 invocation 的 `Ready` 输入，以及终态通知的 `Backflow` 回填 | ready 输入里的事件，身份即 `event.EventID` | 决策记录与尝试记录（`rl.DecisionRecord` / `rl.AttemptRecord`，经 `agent.Capture`（由 `rl.RecorderAdapter` 适配）在产生点提交） |
 | `Reflection.Tick`（时间驱动，`features/evolution/meditation/reflection.go`） | 宿主按节拍调用 `Tick`，节奏下限由 `ReflectionCadence` 判定 | 事实链上 watermark 之后、lineage 非自管的已提交事实（观察面） | 反思输入事件（`event.TypeExternalInput`，lineage 为 reflection）；它再交给回合驱动消费 |
 | 宿主循环（外部驱动） | 宿主自己的调度与传输（`Run` 的 sink、`task.WithEnvelopeDeliverer`） | 宿主选中并交进 `Ready` 的事实 | 宿主自己提交的事实：框架在此只给边界，不给循环 |
 
 回合实例与时间实例**不互相收编**：`Tick` 没有 Invocation 与决策语义，把它塞进 `Loop` 的一个相位会造出一个不存在的相位。两个框架内实例由同一条协议用例固定——各读一条事实、各产一条新事实、源事实不变（`tests/integration/evolution/consumer_protocol_test.go`）。
 
-第二辑把同一条协议钉在框架内的**五个消费面**上：它们不各跑一个循环，而是各读一处已提交的事实身份，按自己的义务产/投递/裁决/收尾/观察。五个面各有一个同名协议用例 `TestSecondWaveConsumersShareTheProtocol`，分住在 `tests/integration/` 的 inspection、state、execution、host、learning 五个归属包。
+第二辑把同一条协议钉在框架内的**五个消费面**上：它们不各跑一个循环，而是各读一处已提交的事实身份，按自己的义务产/投递/裁决/收尾/观察。其中四个面各有同名协议用例 `TestSecondWaveConsumersShareTheProtocol`，分住在 `tests/integration/` 的 inspection、state、execution、host 四个归属包；Exporter 面（`features/rl` 的 `SampleLine`）见 FACT-VOCABULARY 附表，无同名用例。
 
 | 面 | 归属（包·入口） | 驱动源 | 产出事实族 | 禁止项 |
 |---|---|---|---|---|
 | Subscribe（推消费） | `query`·`Projection.Follow` | 一次 `Snapshot` 建立的订阅（`Subscription{Revision, Filter}`）之后的增量 | 无：增量是本代投影的读视图（upsert/delete/gap/reset），不登记族 | 不改写源；gap 与 reset 必须具名，不许静默跳过；不许跨代续订 |
 | Deliverer（投递消费） | `task`·`EnvelopeDeliverer`（`WithEnvelopeDeliverer`） | `Flush` 面对的投递义务（`ObligationAwaitingDelivery`） | `task` 通知族的投递状态（同一通知身份不新增行，义务清账在台账） | 不重路由已冻结的 envelope；无显式接受即不清义务；拒绝必须留下原因 |
 | Apply（裁决消费） | `state`·`Publisher.Publish` / `Rollback` | 候选（`Candidate`）与 `Governance.Check` 的裁决 | `state` 发布台账（`PublicationRecord`，代际＋指纹）；不新增任务事实链行 | 同指纹不得重复发布（`PublishUnchanged`）；不得跳过 `PublishContract.Required`；不改写候选 |
-| Shutdown（收尾消费） | `agent`·`Shutdown.Close` | 关停请求（`CloseRequest{Address, Deadline}`）的结算趟 | 无新任务事实：`DrainReport` 是读数（`Drained`/`Unsettled`） | 不把 false 或超时读成结束；不越过 deadline 静默收尾；关停中不受理新输入 |
+| Shutdown（收尾消费） | `agent`·`Agent.Close` | 关停请求（`CloseRequest{Address, Timeout, Deadline}`，`Deadline` 是 `Timeout` 改名前的旧拼写，两者只可给一个）的结算趟 | 无新任务事实：`DrainReport` 是读数（`Drained`/`Unsettled`） | 不把 false 或超时读成结束；不越过 deadline 静默收尾；关停中不受理新输入 |
 | Observer（观察消费） | `telemetry`·`SDKObserver.Observe`（`telemetry.NewCommitObserver` 的 After 趟；抽象端口在 `plugin`，实现归 telemetry 域） | 已提交事实的 `event.EventID`，提交之后 | 零：`AuditRecord` 是观测证据，不产事实 | 不产事实、不回滚、不重跑；不触碰源事实；OTel 关闭只记 skipped，审计仍须落地 |
 
 ---
@@ -206,7 +206,7 @@ agents:
 | 8 | `api/model` | 否：锁定 tRPC 原生模型协议 | `runtime/agent` 的单次决策调用 | 无（边界） | 边界 |
 | 9 | `api/plugin` | 否：三拓展点的窄口抽象（端口、Observer/AuditSink、Governor），实现分派到各领域 | pipeline 按端口派发；组合根注入各领域实现 | 观测 | 消费 |
 | 10 | `memory/query` | 否：只读投影（快照/游标/订阅） | 模型/SDK/CLI/诊断/看板/训练 | 回放 | 时态 |
-| 11 | `rl` | 是：训练记录三族（Episode/Decision/Attempt） | 录制器在产生点写记录；宿主读反馈归因计数 | 在途（记录） | 事实 |
+| 11 | `rl` | 是：训练记录一族（`rl.attempt`） | 录制器在产生点写记录；宿主读反馈归因计数 | 在途（记录） | 事实 |
 | 12 | `runtime/state` | 否：绑定、邮箱、发布台账的唯一持有者 | `runtime/agent`/`runtime/task`/`memory/query` 读绑定与发布代 | 存续 | 时态 |
 | 13 | `runtime/task` | 是：通知族（四元组身份） | `Deliverer`、`Loop` 回填、关停收尾 | 在途（义务） | 事实 |
 | 14 | `telemetry` | 否：观测旁路，只读消费 | audit sink 与 OTel 后端读记录 | 观测 | 消费 |

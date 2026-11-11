@@ -3,9 +3,7 @@
 ## Purpose
 
 真失败的原始原因告知：模型请求真的失败且本次回合没有可交付的助手正文时，用户收到 provider 的原始错误文本，而不是静默、也不是一句无原因的兜底话术。反向边界同样属于本能力：有正文、取消、完成与宿主/协议错误四类情形必须不产生任何失败话术。
-
 ## Requirements
-
 ### Requirement: 真失败且无可交付正文时直投原始错误
 
 当一次回合的终态为 `failed`、该回合没有可交付的 assistant 正文、且归约记录了错误原因时，系统 SHALL 经宿主既有的 `MessageSender` 直投该**原始错误文本**（provider/框架报错原文），MUST NOT 改写为原因码、分类短语或柔化系统话术。投递 MUST 恰发生一次；投递被拒 MUST 只记警告，MUST NOT 改变回合已结束的事实。触发条件 MUST 只认 `failed` 终态：`cancelled`、`completed`、`partial-only`、`unknown` 与宿主/协议错误 MUST NOT 触发。
@@ -86,9 +84,11 @@
 - **WHEN** 一次回合以 `completed` 结束但没有任何可交付正文（如只做了工具调用）
 - **THEN** 该会话 MUST NOT 收到失败告知
 - **AND** 该情形 MUST 只留既有 debug 记录
+- **AND** 除非存在未清 held 交付义务——此时按 delivery-closure 能力的延迟告知恰发一条（非失败话术）
 
 #### Scenario: 旧兜底文案不得回归
 
 - **WHEN** 审阅框架与应用层的全部外发点
 - **THEN** 任一外发点 MUST NOT 再出现无原因的固定失败话术
 - **AND** 应用层 MUST NOT 在框架直投之外追加第二份失败文案（"恰一条"由框架保证）
+

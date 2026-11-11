@@ -14,6 +14,7 @@ import (
 	"github.com/SpellingDragon/tagent/runtime/agent"
 	"github.com/SpellingDragon/tagent/runtime/state"
 	"github.com/SpellingDragon/tagent/runtime/task"
+	"github.com/SpellingDragon/tagent/tool/recall"
 )
 
 // 契约: docs/wiki/platform/platform-subsystems.md#composition-root
@@ -28,6 +29,11 @@ var (
 	_ = NativeAgent{}
 
 	_ = InvokeRequest{}
+
+	_ recall.Table = (*tierQuerySource)(nil)
+	_ interface {
+		GetParent(event.EventID) (event.EventID, error)
+	} = (*tierQuerySource)(nil)
 
 	_ func(context.Context, *config.Declaration, map[event.AgentID]NativeAgent, ...Option) (*Run, error) = Assemble
 

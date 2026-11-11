@@ -147,7 +147,9 @@ type Consumer struct {
 	// count lives in this process only: no restart reads it.
 	pendingPass int
 	// segCount counts the segments this consumer opened, so each minted
-	// invocation identity names the segment it belongs to.
+	// invocation identity names the segment it belongs to. The first pull of a
+	// chain continues the count that chain already committed facts under, so a
+	// restarted loop mints no identity the chain carries.
 	segCount int
 	// answers indexes the closed answers by the key of every input the closing
 	// segment consumed, so an entry that starts waiting after its segment closed
@@ -658,6 +660,7 @@ func (c *Consumer) pullDriving() pulledEvents {
 	if !c.seeded {
 		c.seeded = true
 		c.seedAnsweredLocked(facts, lastOutput)
+		c.seedRoundsLocked(facts)
 	}
 	from := 0
 	if c.cursor != "" && len(c.named) == 0 {
@@ -860,6 +863,44 @@ func (c *Consumer) seedAnsweredLocked(facts []event.Event, lastOutput int) {
 		}
 		c.read[evt.Key] = true
 	}
+}
+
+// seedRoundsLocked starts the segment counter of this consumer past every range
+// the chain already committed facts under, so the identity it mints next is one
+// the chain never carried. The counter lives in this process alone, so a
+// restarted loop that minted from zero would name a range the chain still holds
+// a judgment for, and the final_round.request of that earlier range would close
+// the new segment before its own budget was spent.
+//
+// - The identities are read off the facts the chain committed under them, and a judgment is read past: a producer files the closing round of a range before that segment lands a fact, so counting the range a request names would push the next segment off the very range the judgment was filed for.
+// - A chain that dropped its oldest facts by the boot trim keeps its newest identities: the trim cuts a prefix of commit order and the counter grows with that order, so the surviving suffix holds the highest range.
+func (c *Consumer) seedRoundsLocked(facts []event.Event) {
+	prefix := string(c.addr.SessionID) + "#c"
+	for _, evt := range facts {
+		if evt.Type == event.FinalRoundRequestType {
+			continue
+		}
+		count, held := mintedRoundOf(prefix, evt.InvocationID)
+		if held && count > c.segCount {
+			c.segCount = count
+		}
+	}
+}
+
+// mintedRoundOf reports the round number one invocation identity names in the
+// minted spelling of a session, and whether it names that session's range at
+// all. An identity outside the spelling — a delegated site's own, or a range a
+// producer named — carries no round of this session's counter.
+func mintedRoundOf(prefix string, id event.InvocationID) (int, bool) {
+	text := string(id)
+	if !strings.HasPrefix(text, prefix) {
+		return 0, false
+	}
+	count, err := strconv.Atoi(text[len(prefix):])
+	if err != nil || count <= 0 {
+		return 0, false
+	}
+	return count, true
 }
 
 // openSegment mints the range identity of one segment over the driving facts
@@ -1591,6 +1632,20 @@ type Consumers struct {
 	// progress is the pulse every loop of this set reports its movement
 	// through; nil reports nothing.
 	progress func()
+	// idleTTL is how long a resting address with no unsettled delivery keeps its
+	// instance before the boundary sweep reclaims it; zero uses
+	// defaultIdleAddressTTL and a negative value keeps every instance for the life
+	// of the set.
+	idleTTL time.Duration
+	// idleSince records, per address, the first sweep that found the instance
+	// resting: the TTL is counted from there, so a single sweep never reclaims a
+	// loop that only paused.
+	idleSince map[event.Address]time.Time
+	// deliveryPending reports an address whose delivery account still owes a
+	// target. The assembly registers the predicate; a nil predicate names no
+	// unsettled delivery anywhere. The sweep reads it outside the set lock, so a
+	// predicate that reads the run's ledger never nests under this one.
+	deliveryPending func(event.Address) bool
 }
 
 // SetProgress attaches the pulse every loop of this set reports its movement
@@ -1630,13 +1685,16 @@ func (cs *Consumers) SetTurnContext(decorate func(ctx context.Context, trigger s
 // face receives the fresh answer of every closed segment and may be nil, in
 // which case the answers stay on the chain.
 func NewConsumers(loop *Loop, base context.Context, deliver SegmentDelivery) *Consumers {
-	return &Consumers{
-		loop:     loop,
-		base:     base,
-		deliver:  deliver,
-		live:     map[event.Address]*Consumer{},
-		stopping: make(chan struct{}),
+	cs := &Consumers{
+		loop:      loop,
+		base:      base,
+		deliver:   deliver,
+		live:      map[event.Address]*Consumer{},
+		idleSince: map[event.Address]time.Time{},
+		idleTTL:   defaultIdleAddressTTL,
+		stopping:  make(chan struct{}),
 	}
+	return cs
 }
 
 // Ensure answers the resident instance of one address, assembling and starting
@@ -1650,10 +1708,12 @@ func NewConsumers(loop *Loop, base context.Context, deliver SegmentDelivery) *Co
 // never runs two drivers of its own decisions, however many sets were mounted.
 // - The lifecycle is the run's: an instance lives as long as the context the set was built under, and a set that stopped mounts none, so a call arriving beside a drained run answers no instance instead of starting a driver beside the drain.
 // - The loop resumes behind the last agent_output the chain carries — the inputs past it are the material a restart still owes — and a chain beside no agent_output at all resumes from its head, so an unanswered input stays owed instead of vanishing behind a restart.
+// - The call is the input boundary of the set: it sweeps the addresses it already drives first, so an address that rested a full idle window ends here and the mount this call answers reads the chain from its own head instead of a parked driver.
 func (cs *Consumers) Ensure(addr event.Address) *Consumer {
 	if cs == nil || !addr.IsComplete() {
 		return nil
 	}
+	cs.RecycleIdle(time.Now())
 	return cs.loop.instanceFor(addr, cs, false)
 }
 

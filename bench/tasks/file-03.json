@@ -1,0 +1,36 @@
+{
+  "id": "file-03",
+  "category": "file",
+  "prompts": [
+    "Read data/events.log and write summary.json containing a JSON object with integer counts under keys `open` and `closed`. No other keys."
+  ],
+  "tools": [
+    "file.read",
+    "file.write"
+  ],
+  "setup": {
+    "data/events.log": "open\nclosed\nopen\n"
+  },
+  "verifier": {
+    "file": {
+      "path": "summary.json",
+      "must_match": [
+        "\"open\"\\s*:\\s*2",
+        "\"closed\"\\s*:\\s*1"
+      ]
+    }
+  },
+  "examples": {
+    "positive": {
+      "files": {
+        "summary.json": "{\"open\": 2, \"closed\": 1}"
+      }
+    },
+    "negative": {
+      "files": {
+        "summary.json": "{\"open\": 1, \"closed\": 2}"
+      },
+      "expect_error_contains": "file"
+    }
+  }
+}

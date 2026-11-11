@@ -221,6 +221,10 @@ type Loop struct {
 	// book refuses a parked batch whole instead of truncating it, so a storm is
 	// never cut down to a limit nobody approved.
 	book ApprovalBook
+	// deliveryPending reports an address whose delivery account still owes a
+	// target; the idle reaper of the attached consumer set reads it before it
+	// reclaims an address. Nil names no unsettled delivery anywhere.
+	deliveryPending func(event.Address) bool
 }
 
 // NewLoop returns the event loop over the state owner's borrowing face, the
@@ -542,6 +546,31 @@ const (
 	outputMetaDecisionCount = "decision_count"
 )
 
+// outputMetaDeliveryOwed, outputMetaDeliveryTargetAgent,
+// outputMetaDeliveryTargetSession and outputMetaDeliveryLineage name the
+// delivery obligation one turn-end output declares (W1 01, ADR 0002). The
+// declaration rides on the agent_output fact itself, in the same commit as the
+// body, so "an answer landed and its obligation did not" is not a shape the
+// chain can take: the atomicity is the commit's, not a second write's. The
+// identity of the obligation is derived from the fact key by the delivery layer
+// (assembly/host_delivery.go) — never stamped here — so this package carries no
+// delivery identity of its own. The keys are pass-through business metadata
+// (event.MetaPrefix) and must stay byte-identical to the assembly-side spellings
+// that read them back (deliveryOwedMeta and its siblings).
+const (
+	outputMetaDeliveryOwed          = event.MetaPrefix + "delivery_owed"
+	outputMetaDeliveryTargetAgent   = event.MetaPrefix + "delivery_target_agent"
+	outputMetaDeliveryTargetSession = event.MetaPrefix + "delivery_target_session"
+	outputMetaDeliveryLineage       = event.MetaPrefix + "delivery_lineage"
+)
+
+// outputMetaDeliveryUserLineage is the lineage a turn that names no trigger
+// source declares: the user stamp the delivery layer reads back for the same
+// turn (assembly's deliveryLineageOf). The two spellings name one semantic, so
+// an obligation declared by a plain user turn carries the lineage the live
+// delivery would have given it instead of an empty entry.
+const outputMetaDeliveryUserLineage = "user"
+
 // commitOutput commits the assistant output one ended drive answers with as the
 // turn-end fact of the range and runs its After pass: the message the drive
 // commits to the transcript of its session beside the decision, invocation and
@@ -553,6 +582,7 @@ const (
 // commit the ledger refuses is reported to the caller of the drive beside a
 // failed terminal, so a turn never answers completed over a fact that never
 // landed.
+// - The owed declaration is one more entry of the same fact: a turn that answers with a body owes that body to its own address, and a turn with no deliverable body declares no obligation, so no obligation can outlive it.
 func (l *Loop) commitOutput(ctx context.Context, inv Invocation, decision Decision, outcome model.Outcome, inputs []event.EventID) error {
 	encoded, err := json.Marshal(inputs)
 	if err != nil {
@@ -565,6 +595,24 @@ func (l *Loop) commitOutput(ctx context.Context, inv Invocation, decision Decisi
 		}
 	}
 	decisionCount, finalRound, trigger := l.closingTurnOf(inv.InvocationID)
+	meta := map[string]string{
+		event.MetaKeyInputEvents: string(encoded),
+		outputMetaTerminal:       outcome.Kind.String(),
+		outputMetaFailure:        failure,
+		outputMetaFinalRound:     string(finalRound),
+		outputMetaTrigger:        trigger,
+		outputMetaDecisionCount:  strconv.Itoa(decisionCount),
+	}
+	if carriesDeliverableBody(assistantOf(outcome)) {
+		meta[outputMetaDeliveryOwed] = "1"
+		meta[outputMetaDeliveryTargetAgent] = string(inv.Address.AgentID)
+		meta[outputMetaDeliveryTargetSession] = string(inv.Address.SessionID)
+		lineage := strings.TrimSpace(trigger)
+		if lineage == "" {
+			lineage = outputMetaDeliveryUserLineage
+		}
+		meta[outputMetaDeliveryLineage] = lineage
+	}
 	return l.commitFact(ctx, inv.Address.AgentID, event.Event{
 		Type:         event.TypeAgentOutput,
 		Timestamp:    time.Now(),
@@ -576,15 +624,20 @@ func (l *Loop) commitOutput(ctx context.Context, inv Invocation, decision Decisi
 		InstanceID:   inv.Instance,
 		DecisionID:   decision.DecisionID,
 		EpisodeID:    episodeOfReady(inv.Ready),
-		Meta: map[string]string{
-			event.MetaKeyInputEvents: string(encoded),
-			outputMetaTerminal:       outcome.Kind.String(),
-			outputMetaFailure:        failure,
-			outputMetaFinalRound:     string(finalRound),
-			outputMetaTrigger:        trigger,
-			outputMetaDecisionCount:  strconv.Itoa(decisionCount),
-		},
+		Meta:         meta,
 	})
+}
+
+// carriesDeliverableBody reports whether one turn-end message is a body a
+// delivery could carry: a plain assistant answer with text and no tool call.
+// The test is the producer-side half of the owed declaration and the same shape
+// the delivery layer reads back off the chain (assembly's assistantBodyOf), so a
+// declared obligation always names a body the layer can send.
+func carriesDeliverableBody(msg model.Message) bool {
+	if msg.Role != model.RoleAssistant || len(msg.ToolCalls) > 0 {
+		return false
+	}
+	return strings.TrimSpace(msg.Content) != ""
 }
 
 // closingTurnOf reports the stable closing fields of one range's turn: the
@@ -853,6 +906,30 @@ func (l *Loop) SetRequestFace(face RequestFace) {
 	l.boundary = face
 }
 
+// effectiveConfigModel is the optional model capability that reports the
+// generation configuration its provider will actually receive for one request:
+// a model that declares host-side sampling fills the parameters the request
+// itself leaves unset. A model beside no such declaration is asked nothing and
+// the request keeps the configuration it was built with.
+type effectiveConfigModel interface {
+	// EffectiveGenerationConfig reports the configuration the provider receives.
+	EffectiveGenerationConfig(request *model.Request) model.GenerationConfig
+}
+
+// withEffectiveConfig returns the request as the provider will receive it: a
+// model that reports an effective configuration replaces the one the request was
+// built with, so the request evidence fixed before the call states the values
+// the provider really runs under. The request a model does not report one for is
+// returned as it stands.
+func withEffectiveConfig(request model.Request, serving model.Model) model.Request {
+	reporting, ok := serving.(effectiveConfigModel)
+	if !ok {
+		return request
+	}
+	request.GenerationConfig = reporting.EffectiveGenerationConfig(&request)
+	return request
+}
+
 // fixCapture fixes the request view of one decision through the attached
 // capture before that request starts, or fixes nothing while no capture is
 // attached. A fix the capture refused is counted as an explicit recording loss
@@ -927,7 +1004,7 @@ func (l *Loop) beginWriter(name string) func() {
 // through the attached face, or returns an empty view while no face is
 // attached: the request then runs on its transcript alone. The boundary of a
 // closing round is marked as such, so the face reads the round a request is.
-func (l *Loop) requestBoundary(ctx context.Context, inv Invocation, binding state.AgentBinding, final bool) (BoundaryView, error) {
+func (l *Loop) requestBoundary(ctx context.Context, inv Invocation, binding state.AgentBinding, final bool, projectionBudget int) (BoundaryView, error) {
 	l.mu.Lock()
 	face := l.boundary
 	l.mu.Unlock()
@@ -935,11 +1012,112 @@ func (l *Loop) requestBoundary(ctx context.Context, inv Invocation, binding stat
 		return BoundaryView{}, nil
 	}
 	return face(ctx, RequestBoundary{
-		Agent:      inv.Address.AgentID,
-		Chain:      RequestChain{SessionID: inv.Address.SessionID},
-		Binding:    binding,
-		FinalRound: final,
+		Agent:            inv.Address.AgentID,
+		Chain:            RequestChain{SessionID: inv.Address.SessionID},
+		Binding:          binding,
+		FinalRound:       final,
+		ProjectionBudget: projectionBudget,
 	})
+}
+
+// budgetedRequest assembles the final request of one decision under the request
+// budget the boundary declared. The gate is open exactly when the declaration
+// names a provider window — explicitly or derived from MaxTokens (see
+// assembly.requestBudgetPolicy) — and a closed gate runs the request whole, the
+// debug fact of a declaration that names no budget.
+//
+// An open gate degrades the request in the one order the declaration can
+// observe: the dynamic environment block yields first, the skill bodies next
+// (the dynamic bodies and the prefix bodies together), and the projection folds
+// further last, under the room the remaining faces leave. Every step is a
+// re-measure of the assembled candidate, never an estimate of what a step would
+// save, so the request leaves only after the meter proves it fits. A request
+// whose system-required material still does not fit is refused: the refusal is
+// a named failure (ErrRequestBudgetExceeded) that the loop's existing failure
+// path carries into the failed terminal and the host's existing failure notice.
+func (l *Loop) budgetedRequest(ctx context.Context, inv Invocation, binding state.AgentBinding, round decisionRound, transcript []model.Message, tools map[string]trpctool.Tool, toolOrder []string) (BoundaryView, model.Request, error) {
+	view, err := l.requestBoundary(ctx, inv, binding, round.final, 0)
+	if err != nil {
+		return BoundaryView{}, model.Request{}, err
+	}
+	policy := view.budget
+	if !policy.gateOpen() {
+		consumerDebug("tagent: request budget gate closed invocation=%s agent=%s max_tokens=0 provider_window=0",
+			inv.InvocationID, inv.Address.AgentID)
+		return view, model.Request{Messages: finalRequestMessages(view.Messages, transcript, round, view.dynamicParts()), Tools: tools, ToolOrder: toolOrder}, nil
+	}
+	input := policy.inputBudget()
+	dropEnvironment, dropSkills := false, false
+	projectionBudget, attempts := 0, 0
+	var measured map[string]int
+	var unknown []string
+	total := 0
+	for {
+		candidate := view
+		if projectionBudget > 0 {
+			next, err := l.requestBoundary(ctx, inv, binding, round.final, projectionBudget)
+			if err != nil {
+				return BoundaryView{}, model.Request{}, err
+			}
+			candidate = next
+		}
+		prefix, sources := budgetPrefix(candidate, dropSkills)
+		dynamic := budgetDynamic(candidate, dropEnvironment, dropSkills)
+		measured, unknown, total = accountRequestCandidate(prefix, sources, transcript, round, dynamic, tools)
+		if total <= input {
+			consumerDebug("tagent: request budget accepted invocation=%s agent=%s window=%d reserve=%d input=%d estimated=%d dropped_environment=%t dropped_skills=%t projection_budget=%d unknown=%d",
+				inv.InvocationID, inv.Address.AgentID, policy.providerWindow, policy.outputReserve, input, total,
+				dropEnvironment, dropSkills, projectionBudget, len(unknown))
+			candidate.Messages = prefix
+			candidate.Sources = sources
+			candidate.dynamic = dynamic
+			candidate.DynamicSystem = joinBoundaryDynamic(dynamic)
+			return candidate, model.Request{Messages: finalRequestMessages(prefix, transcript, round, dynamic), Tools: tools, ToolOrder: toolOrder}, nil
+		}
+		if !dropEnvironment && hasDynamicFace(candidate.dynamicParts(), BudgetFaceEnvironment) {
+			dropEnvironment = true
+			consumerDebug("tagent: request budget step=environment invocation=%s agent=%s estimated=%d input=%d",
+				inv.InvocationID, inv.Address.AgentID, total, input)
+			continue
+		}
+		if !dropSkills && (hasDynamicFace(candidate.dynamicParts(), BudgetFaceSkillBodies) || hasSourceFace(candidate.Sources, BudgetFaceSkillBodies)) {
+			dropSkills = true
+			consumerDebug("tagent: request budget step=skills invocation=%s agent=%s estimated=%d input=%d",
+				inv.InvocationID, inv.Address.AgentID, total, input)
+			continue
+		}
+		if history := measured[BudgetFaceHistory]; history > 0 && attempts < 6 {
+			over := total - input
+			target := history - over - budgetMessageOverheadTokens
+			if target >= history {
+				target = history - 1
+			}
+			if target < 1 {
+				break
+			}
+			projectionBudget = target
+			attempts++
+			consumerDebug("tagent: request budget step=projection invocation=%s agent=%s history=%d target=%d over=%d",
+				inv.InvocationID, inv.Address.AgentID, history, target, over)
+			continue
+		}
+		break
+	}
+	cause := fmt.Errorf("%w: invocation %s agent %s estimated %d input tokens over the declared input budget %d (provider window %d, output reserve %d) with no degradable material left",
+		ErrRequestBudgetExceeded, inv.InvocationID, inv.Address.AgentID, total, input, policy.providerWindow, policy.outputReserve)
+	consumerDebug("tagent: request budget refused invocation=%s agent=%s window=%d reserve=%d input=%d estimated=%d",
+		inv.InvocationID, inv.Address.AgentID, policy.providerWindow, policy.outputReserve, input, total)
+	return BoundaryView{}, model.Request{}, cause
+}
+
+// hasSourceFace reports whether the source list names one face anywhere.
+func hasSourceFace(sources []string, face string) bool {
+	for _, source := range sources {
+		if source == face {
+			return true
+		}
+	}
+	return false
 }
 
 // RecordingLoss is one training record a production point could not write:
@@ -1006,8 +1184,28 @@ func (l *Loop) SetConsumers(consumers *Consumers) *Consumers {
 	defer l.mu.Unlock()
 	if l.consumers == nil && consumers != nil {
 		l.consumers = consumers
+		if l.deliveryPending != nil {
+			consumers.SetDeliveryPending(l.deliveryPending)
+		}
 	}
 	return l.consumers
+}
+
+// SetDeliveryPending registers the predicate the idle reaper reads before it
+// reclaims an address, and applies it to the set this loop already drives. The
+// assembly registers it: the obligation state lives there, and the consumer
+// registry only asks. A nil predicate clears the registration.
+func (l *Loop) SetDeliveryPending(pending func(event.Address) bool) {
+	if l == nil {
+		return
+	}
+	l.mu.Lock()
+	l.deliveryPending = pending
+	held := l.consumers
+	l.mu.Unlock()
+	if held != nil {
+		held.SetDeliveryPending(pending)
+	}
 }
 
 // drivingSet reports the consumption loops that drive the addresses of this loop's
@@ -1540,6 +1738,7 @@ func (l *Loop) decideOn(ctx context.Context, inv Invocation, transcript []model.
 // moment otherwise. A decision on a named binding is captured by that binding's own
 // model beside the turn it serves, so the loop fixes no second view of the same calls
 // and records no second attempt.
+// - The request reads the session-scoped tool face: reflection-only tools stay visible to the dedicated reflection session alone, and no entry turn carries them.
 func (l *Loop) decideWith(ctx context.Context, inv Invocation, transcript []model.Message, round decisionRound, bound *state.AgentBinding) (Decision, model.Outcome, []model.Message, []admittedCall, error) {
 	if round.final {
 		var cancel context.CancelFunc
@@ -1559,15 +1758,15 @@ func (l *Loop) decideWith(ctx context.Context, inv Invocation, transcript []mode
 		return Decision{}, model.Outcome{}, nil, nil, err
 	}
 
-	tools, toolOrder := state.ToolFace(handle.Binding)
+	tools, toolOrder := state.ToolFace(handle.Binding, inv.Address.SessionID)
 	callable := make(map[string]trpctool.CallableTool, len(tools))
 	for name, tool := range tools {
 		if native, ok := tool.(trpctool.CallableTool); ok {
 			callable[name] = native
 		}
 	}
-	view := modelViewOf(handle.Binding)
-	boundary, err := l.requestBoundary(ctx, inv, handle.Binding, round.final)
+	view := modelViewOf(handle.Binding, inv.Address.SessionID)
+	boundary, req, err := l.budgetedRequest(ctx, inv, handle.Binding, round, transcript, tools, toolOrder)
 	if err != nil {
 		_ = l.slots.Vacate(inv.Address, l.instance, inv.InvocationID)
 		_ = handle.Release(ctx)
@@ -1577,16 +1776,8 @@ func (l *Loop) decideWith(ctx context.Context, inv Invocation, transcript []mode
 		view.promptVersion = boundary.PromptVersion
 	}
 	view.visibleSkills = boundary.VisibleSkills
-	messages := make([]model.Message, 0, len(boundary.Messages)+len(transcript)+2)
-	messages = append(messages, boundary.Messages...)
-	messages = append(messages, transcript...)
-	if round.final {
-		messages = append(messages, model.Message{Role: model.RoleUser, Content: round.prompt})
-	}
-	if boundary.DynamicSystem != "" {
-		messages = append(messages, model.Message{Role: model.RoleSystem, Content: boundary.DynamicSystem})
-	}
-	req := model.Request{Messages: messages, Tools: tools, ToolOrder: toolOrder}
+	messages := req.Messages
+	req = withEffectiveConfig(req, handle.Binding.Model)
 	if bound == nil {
 		l.fixCapture(ctx, decisionID, view, req)
 	}
@@ -2171,12 +2362,12 @@ type modelView struct {
 // request boundary view beside this, because the boundary assembly is the one
 // home of the rule naming which skills a request makes visible. The view is
 // never rebuilt from the options of a finished call.
-func modelViewOf(binding state.AgentBinding) modelView {
+func modelViewOf(binding state.AgentBinding, session event.SessionID) modelView {
 	view := modelView{
 		modelName:     binding.Model.Info().Name,
 		promptVersion: binding.PromptSource.Version,
 	}
-	_, order := state.ToolFace(binding)
+	_, order := state.ToolFace(binding, session)
 	view.visibleTools = append(view.visibleTools, order...)
 	return view
 }

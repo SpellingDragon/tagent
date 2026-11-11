@@ -12,10 +12,8 @@ package host
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
-	"os"
-	"path/filepath"
+	"fmt"
 	"strconv"
 	"strings"
 	"sync"
@@ -24,6 +22,7 @@ import (
 
 	"github.com/SpellingDragon/tagent/api/event"
 	"github.com/SpellingDragon/tagent/assembly"
+	"github.com/SpellingDragon/tagent/memory/ledger"
 	"github.com/SpellingDragon/tagent/memory/query"
 	taskpkg "github.com/SpellingDragon/tagent/runtime/task"
 )
@@ -76,6 +75,11 @@ const (
 	// the pre-commit denial the negative anchor keeps, and the refusal a repeated
 	// identity of an in-flight or a failed task answers beside no round served.
 	retroDenialTask = "task"
+
+	// retroTaskFactNamespace is the key namespace the durable task facts commit
+	// under, so a check holds exactly those commits while the account stays
+	// writable.
+	retroTaskFactNamespace = "tagent/task/v1/fact"
 )
 
 // errRetroRoundRefusal is the refusal the reviewer's second round answers with
@@ -139,6 +143,10 @@ type retroRig struct {
 	// busySend renders the decision that sends a second body beside the round
 	// the first send opened, while that round is still in flight.
 	busySend func(task string) string
+	// fault decorates the storage engine the booted host commits into, so a
+	// check holds the task-fact commits without naming the engine's file layout.
+	// It passes every commit through until a check arms it.
+	fault *retroFaultStore
 }
 
 // newRetroRig starts the endpoint the rig boots against.
@@ -258,8 +266,8 @@ func (l *retroLatch) open() { l.opened.Do(func() { close(l.release) }) }
 
 // retroBoot boots the entry document the rig drives: the entry agent beside
 // both the communication tool and the delegation tool, beside the reviewing
-// agent a delegation names, over the localfile tier whose task-fact shard the
-// check holds.
+// agent a delegation names. A rig that carries a fault boots over the decorated
+// engine, so the check holds the task-fact commits of that run.
 func retroBoot(t *testing.T, rig *retroRig, root string) *assembly.Host {
 	t.Helper()
 	t.Setenv("TAGENT_TEST_API_KEY", "test-key")
@@ -274,7 +282,11 @@ func retroBoot(t *testing.T, rig *retroRig, root string) *assembly.Host {
 		"  " + retroReviewerAgent + ":\n" +
 		"    model: " + retroReviewerModel + "\n"
 	writeHostDocumentFile(t, configPath, scriptedHostDocumentWithAgentSections(root, rig.provider.endpoint(), retroEntryModel, sections))
-	host, err := assembly.Boot(configPath, assembly.WithSender(newDeliverySender(nil)))
+	options := []assembly.HostOption{assembly.WithSender(newDeliverySender(nil))}
+	if rig.fault != nil {
+		options = append(options, assembly.WithStorage(ledger.StorageConfig{Type: ledger.StorageJournal, Root: root, Engine: rig.fault}))
+	}
+	host, err := assembly.Boot(configPath, options...)
 	if err != nil {
 		t.Fatalf("boot the no-retroactive-denial rig: %v", err)
 	}
@@ -288,56 +300,84 @@ func retroBoot(t *testing.T, rig *retroRig, root string) *assembly.Host {
 	return host
 }
 
-// retroTaskFactShard is the storage shard directory the durable task facts of
-// one localfile tier commit under: every task mutation — the reactivation, the
-// settle and the compensating rollback — writes its snapshot here, while the
-// session events and the refusal records of the account land in the partition
-// shards beside it. Holding this one directory therefore fails exactly the task
-// commits of a run whose account stays writable.
-func retroTaskFactShard(t *testing.T, root string) string {
+// retroDecorate opens the engine the booted run commits into behind the port
+// decorator a check arms, so the rig boots over a seam rather than a layout.
+func retroDecorate(t *testing.T, rig *retroRig, root string) {
 	t.Helper()
-	const namespace = "tagent/task/v1/fact:"
-	shards, err := os.ReadDir(filepath.Join(root, "kv"))
+	inner, err := ledger.OpenAtomicStore(context.Background(), ledger.StorageConfig{Type: ledger.StorageJournal, Root: root})
 	if err != nil {
-		t.Fatalf("the localfile tier %s holds no shard directory: %v", root, err)
+		t.Fatalf("open the storage engine over %s: %v", root, err)
 	}
-	for _, entry := range shards {
-		if !entry.IsDir() {
-			continue
-		}
-		dir := filepath.Join(root, "kv", entry.Name())
-		body, err := os.ReadFile(filepath.Join(dir, "snapshot.json"))
-		if err != nil {
-			continue
-		}
-		var snapshot struct {
-			Entries map[string]json.RawMessage `json:"entries"`
-		}
-		if err := json.Unmarshal(body, &snapshot); err != nil {
-			t.Fatalf("read the shard snapshot %s: %v", dir, err)
-		}
-		for key := range snapshot.Entries {
-			if strings.HasPrefix(key, namespace) {
-				return dir
+	rig.fault = &retroFaultStore{inner: inner}
+}
+
+// retroFaultStore is the port decorator this rig injects through: it wraps the
+// storage engine the run commits into and refuses the commits of one key
+// namespace, so holding the task facts needs no knowledge of the file layout the
+// engine writes.
+type retroFaultStore struct {
+	inner ledger.AtomicStore
+	mu    sync.Mutex
+	// namespace is the key namespace whose commits the decorator refuses; empty
+	// lets every commit through.
+	namespace string
+	// commits counts the commits the decorator saw, so a check tells an armed
+	// seam from one the run never routed a commit through.
+	commits int
+}
+
+// Read passes the read to the wrapped engine.
+func (s *retroFaultStore) Read(ctx context.Context, fetch ledger.Fetch) ([]ledger.Pair, error) {
+	return s.inner.Read(ctx, fetch)
+}
+
+// Keys enumerates the wrapped engine's keys.
+func (s *retroFaultStore) Keys(ctx context.Context, prefix string) ([]string, error) {
+	return s.inner.Keys(ctx, prefix)
+}
+
+// Namespaces enumerates the wrapped engine's namespaces.
+func (s *retroFaultStore) Namespaces(ctx context.Context) ([]string, error) {
+	return s.inner.Namespaces(ctx)
+}
+
+// Commit refuses a batch that writes the armed namespace and passes the rest
+// through to the wrapped engine.
+func (s *retroFaultStore) Commit(ctx context.Context, batch ledger.Batch) error {
+	s.mu.Lock()
+	namespace := s.namespace
+	s.commits++
+	s.mu.Unlock()
+	if namespace != "" {
+		for _, put := range batch.Puts {
+			if strings.HasPrefix(put.Key, namespace+":") {
+				return fmt.Errorf("%w: injected on the %s commit", ledger.ErrCommitUncertain, namespace)
 			}
 		}
 	}
-	t.Fatalf("the localfile tier %s holds no task-fact shard: no snapshot carries the %q namespace", root, namespace)
-	return ""
+	return s.inner.Commit(ctx, batch)
 }
 
-// retroHoldTaskFacts makes the task-fact shard refuse further writes, and
-// restores it with the check.
-func retroHoldTaskFacts(t *testing.T, shard string) {
-	t.Helper()
-	if err := os.Chmod(shard, 0o500); err != nil {
-		t.Fatalf("hold the task-fact shard %s: %v", shard, err)
+// commitCount reports how many commits the decorator saw.
+func (s *retroFaultStore) commitCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.commits
+}
+
+// holdTaskFacts refuses every commit into the task-fact namespace until the
+// returned release runs: the reactivation, the settle and the compensating
+// rollback write there, while the session events and the refusal records of the
+// account land in other namespaces and stay writable.
+func (s *retroFaultStore) holdTaskFacts() func() {
+	s.mu.Lock()
+	s.namespace = retroTaskFactNamespace
+	s.mu.Unlock()
+	return func() {
+		s.mu.Lock()
+		s.namespace = ""
+		s.mu.Unlock()
 	}
-	t.Cleanup(func() {
-		if err := os.Chmod(shard, 0o755); err != nil {
-			t.Logf("restore the task-fact shard %s: %v", shard, err)
-		}
-	})
 }
 
 // retroReceiptsOf reports every result the model read beside one call, in the
@@ -444,9 +484,14 @@ func retroAwaitReviewerBodyFor(t *testing.T, rig *retroRig, body string) {
 // retroRefusalsOf reads the attempts the account filed against one task, so a
 // check tells the receipts the run answered retroactively from the refusals a
 // later attempt asked for by name.
-func retroRefusalsOf(host *assembly.Host, taskID event.TaskID) []assembly.DeliveryRefusal {
+func retroRefusalsOf(t *testing.T, host *assembly.Host, taskID event.TaskID) []assembly.DeliveryRefusal {
+	t.Helper()
+	refusals, err := host.Run().DeliveryLedger().Refusals()
+	if err != nil {
+		t.Fatalf("the delivery refusal account could not be read: %v", err)
+	}
 	var filed []assembly.DeliveryRefusal
-	for _, refusal := range host.Run().DeliveryLedger().Refusals() {
+	for _, refusal := range refusals {
 		if !strings.HasSuffix(refusal.Identity, "\x00"+string(taskID)) {
 			continue
 		}
@@ -459,9 +504,10 @@ func retroRefusalsOf(host *assembly.Host, taskID event.TaskID) []assembly.Delive
 // input already committed: a denied receipt under the round stage, and every
 // broken receipt, name a withdrawal or a compensation of a round the ok
 // already stood for, and neither may exist after the input fact is committed.
-func retroRetroactiveRefusals(host *assembly.Host, taskID event.TaskID) []assembly.DeliveryRefusal {
+func retroRetroactiveRefusals(t *testing.T, host *assembly.Host, taskID event.TaskID) []assembly.DeliveryRefusal {
+	t.Helper()
 	var retroactive []assembly.DeliveryRefusal
-	for _, refusal := range retroRefusalsOf(host, taskID) {
+	for _, refusal := range retroRefusalsOf(t, host, taskID) {
 		if refusal.Category == retroDenialRound || refusal.Category == retroDenialRollback ||
 			refusal.Receipt == assembly.DeliveryReceiptBroken {
 			retroactive = append(retroactive, refusal)
@@ -542,7 +588,7 @@ func retroAwaitRoundClosed(t *testing.T, host *assembly.Host, taskID event.TaskI
 	t.Helper()
 	deadline := time.Now().Add(retroWindow)
 	for {
-		if len(retroRetroactiveRefusals(host, taskID)) > 0 {
+		if len(retroRetroactiveRefusals(t, host, taskID)) > 0 {
 			time.Sleep(100 * time.Millisecond)
 			return
 		}
@@ -612,6 +658,7 @@ func retroLegUnrecordedTerminal(t *testing.T) {
 
 	root := t.TempDir()
 	rig := newRetroRig(t)
+	retroDecorate(t, rig, root)
 	round2 := newRetroLatch()
 	rig.secondRound = func() (string, error) {
 		round2.hold()
@@ -638,8 +685,11 @@ func retroLegUnrecordedTerminal(t *testing.T) {
 	retroAwaitReviewerBody(t, rig)
 	round2.awaitArrived(t)
 
-	shard := retroTaskFactShard(t, root)
-	retroHoldTaskFacts(t, shard)
+	if rig.fault.commitCount() == 0 {
+		t.Fatalf("the armed store seam saw no commit: assembly.Boot opens its tier from the document and never forwards WithStorage to the run, so a booted host cannot inject an engine (the seam is missing in assembly/host.go)")
+	}
+	release := rig.fault.holdTaskFacts()
+	t.Cleanup(release)
 	round2.open()
 	retroAwaitRoundClosed(t, host, task)
 
@@ -649,7 +699,7 @@ func retroLegUnrecordedTerminal(t *testing.T) {
 	if booked := retroDelegationBookings(t, host); booked != 1 {
 		t.Fatalf("delegation terminals booked after the unrecorded terminal = %d, want the one round the ok answered for: the re-entry withdrew the reopen of a round whose input had already committed", booked)
 	}
-	if filed := retroRetroactiveRefusals(host, task); len(filed) > 0 {
+	if filed := retroRetroactiveRefusals(t, host, task); len(filed) > 0 {
 		t.Fatalf("the account answers the committed re-entry of %s retroactively: %+v; the ok it already answered may not be denied after the input committed", task, filed)
 	}
 	if receipts := retroReceiptsOf(rig, retroCallSend); len(receipts) == 0 || receipts[0] != retroReceiptOK {
@@ -698,7 +748,7 @@ func retroLegRoundFailure(t *testing.T) {
 	}
 	time.Sleep(retroGrace)
 
-	if filed := retroRetroactiveRefusals(host, task); len(filed) > 0 {
+	if filed := retroRetroactiveRefusals(t, host, task); len(filed) > 0 {
 		t.Fatalf("the account answers the failed round of %s retroactively: %+v; a genuine failure is the terminal of its own round and never a denial of the input", task, filed)
 	}
 	refused := retroAwaitLastReceipt(t, rig, retroCallSend)
@@ -757,7 +807,7 @@ func retroLegPreCommitRefusal(t *testing.T) {
 		t.Fatalf("the refusal of the body sent beside the round in flight = %q, want it to name the round that owns the task", refused)
 	}
 	time.Sleep(retroGrace)
-	filed := retroRefusalsOf(host, task)
+	filed := retroRefusalsOf(t, host, task)
 	if len(filed) == 0 {
 		t.Fatalf("the account files no refusal of %s, so the pre-commit denial lives only in the text the model read", task)
 	}

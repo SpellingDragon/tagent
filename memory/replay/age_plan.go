@@ -22,7 +22,7 @@ type FoldProduct struct {
 	// Entry is the synthetic entry the projection carries under Entry.Key.
 	Entry ProjectionEntry
 	// Covered lists the entry keys the product consumes, in their original
-	// order: the process detail of one closed segment, or the middle bands.
+	// order: the process detail of one middle-band segment, or the oldest band.
 	Covered []event.EventID
 	// Request is the judgment this product answers.
 	Request event.CompressRequest
@@ -48,7 +48,7 @@ type AgeFoldPlanReport struct {
 type FoldedCounts struct {
 	// Segment counts the process-detail entries a segment product consumes.
 	Segment int
-	// Middle counts the entries a history summary consumes.
+	// Middle counts the entries a history summary consumes: the oldest band.
 	Middle int
 }
 
@@ -91,31 +91,35 @@ func planFold(entries []ProjectionEntry, plan AgeFoldPlan, volume int) AgeFoldPl
 	if len(entries) == 0 || volume <= threshold {
 		return report
 	}
-	var middle []ProjectionEntry
+	var oldest []ProjectionEntry
 	for _, segment := range SegmentsOf(entries, keepRecent) {
-		if segment.Band != BandNew {
-			middle = append(middle, segment.Entries...)
-			continue
+		switch segment.Band {
+		case BandOld:
+			oldest = append(oldest, segment.Entries...)
+		case BandMid:
+			folded, product := foldProcessDetail(segment.Entries, segment.Complete)
+			report.Counts.Segment += folded
+			if product == nil {
+				oldest = append(oldest, segment.Entries...)
+				continue
+			}
+			report.Products = append(report.Products, FoldProduct{
+				Entry:   *product,
+				Covered: processDetailKeys(segment.Entries),
+				Request: ageRequest(AgeReasonSegmentFold, *product),
+			})
 		}
-		folded, product := foldProcessDetail(segment.Entries, segment.Complete)
-		report.Counts.Segment += folded
-		if product == nil {
-			continue
-		}
-		report.Products = append(report.Products, FoldProduct{
-			Entry:   *product,
-			Covered: processDetailKeys(segment.Entries),
-			Request: ageRequest(AgeReasonSegmentFold, *product),
-		})
 	}
-	report.Counts.Middle = len(middle)
-	if len(middle) > 0 {
-		summary := historySummaryOf(middle)
-		report.Products = append(report.Products, FoldProduct{
-			Entry:   summary,
-			Covered: entryKeysOf(middle),
-			Request: ageRequest(AgeReasonHistorySummary, summary),
-		})
+	report.Counts.Middle = len(oldest)
+	if len(oldest) > 0 {
+		summary := historySummaryOf(oldest)
+		if _, stands := heldKeysOf(entries)[summary.Key]; !stands {
+			report.Products = append(report.Products, FoldProduct{
+				Entry:   summary,
+				Covered: entryKeysOf(oldest),
+				Request: ageRequest(AgeReasonHistorySummary, summary),
+			})
+		}
 	}
 	report.Triggered = len(report.Products) > 0
 	return report
@@ -136,6 +140,14 @@ func (p *ReplayProjection) ApplyProducts(products []FoldProduct) {
 	p.entries = applyFoldProducts(p.entries, products)
 	p.recomputeVolumeLocked()
 	p.forgetDroppedLocked()
+}
+
+// FoldedEntries answers the entry sequence a batch of fold products would leave
+// on entries, without touching any projection. A producer states the checkpoint
+// one fold leaves through this pure form, so a restart rebuilds the same
+// sequence without judging the fold again.
+func FoldedEntries(entries []ProjectionEntry, products []FoldProduct) []ProjectionEntry {
+	return applyFoldProducts(entries, products)
 }
 
 // applyFoldProducts places one batch of products onto a fixed entry sequence.
@@ -233,9 +245,11 @@ func foldProductOf(product event.CompressProduct, entries []ProjectionEntry) (Fo
 	}, true
 }
 
-// foldKindOf reports the product kind one synthetic key names: the fold files a
-// segment fold and a history summary under one prefix each, and the prefix is
-// the only thing the fact carries about what it minted.
+// foldKindOf reports the product kind one synthetic key names: the fold files
+// a segment fold and a history summary under one prefix each, and the prefix
+// is the only thing the fact carries about what it minted. A rebuild reads it
+// to tell the summary that bounds a chain from the segment folds its window
+// still presents.
 func foldKindOf(key event.EventID) (string, bool) {
 	name := strings.TrimPrefix(string(key), "-")
 	switch {

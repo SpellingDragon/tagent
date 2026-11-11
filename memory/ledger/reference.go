@@ -19,29 +19,27 @@ import (
 // it was registered in, the retention policy it is held under, and the
 // completeness information of its bytes.
 //
-// The bytes of a blob may be deduplicated by content, while the reference
-// metadata stays separate: references that differ in owner, format or retention
-// policy MUST NOT overwrite one another, and a later commit MUST NOT invalidate
-// an earlier effective reference.
+// Every event key owns an independent body. Reference metadata stays separate:
+// references that differ in owner, format or retention policy MUST NOT overwrite
+// one another, and a later commit MUST NOT invalidate an earlier reference.
 type OriginalRef struct {
-	// Key is the canonical identity of the original blob, in its hex form. Two
-	// references may share it while their content is byte-identical; the
-	// metadata below is what keeps them apart.
+	// Key is the EventID that owns this original. Different keys never share
+	// a body, even when their bytes are identical.
 	Key event.EventID
 	// Owner is the address the reference belongs to. It is part of the
-	// deduplication scope, so two owners never overwrite each other.
+	// reference scope, so two owners never overwrite each other.
 	Owner event.Address
 	// Format is the original format the reference was registered in. It is part
-	// of the deduplication scope.
+	// of the reference scope.
 	Format string
 	// RetentionPolicy is the retention policy the reference is held under. It is
-	// part of the deduplication scope.
+	// part of the reference scope.
 	RetentionPolicy string
 	// Integrity is the completeness information of the stored bytes.
 	Integrity Integrity
 }
 
-// refScope is the deduplication scope of one reference: the owner it was
+// refScope is the reference scope of one reference: the owner it was
 // registered for, the format it was registered in and the retention policy it is
 // held under. Two references share a scope only when all three agree, so
 // references that differ in any of them stay registered side by side.
@@ -51,7 +49,7 @@ type refScope struct {
 	retentionPolicy string
 }
 
-// scope returns the deduplication scope the reference is registered under.
+// scope returns the reference scope the reference is registered under.
 func (r OriginalRef) scope() refScope {
 	return refScope{owner: r.Owner, format: r.Format, retentionPolicy: r.RetentionPolicy}
 }
@@ -129,9 +127,9 @@ type Integrity struct {
 // MUST NOT answer a read with a model view in place of the original.
 // MUST NOT invalidate an accepted reference by a later Put.
 type OriginalStore interface {
-	// Put commits the original bytes of ref. Content may be deduplicated by
-	// blob, while owner, format and retention policy scope the reference
-	// metadata, so an accepted reference is never invalidated by a later Put.
+	// Put commits the independent body owned by ref.Key. Owner, format and
+	// retention policy scope the reference metadata, so an accepted reference
+	// is never invalidated by a later Put.
 	Put(ctx context.Context, ref OriginalRef, body []byte) error
 
 	// Get returns the exact recall result for key: the original bytes,
@@ -250,6 +248,9 @@ func (s *kvOriginalStore) GetScoped(ctx context.Context, key event.EventID, scop
 	if err := ctx.Err(); err != nil {
 		return RecallResult{Key: key, Outcome: RecallFailed, Err: err}
 	}
+	if err := s.ensureLoaded(); err != nil {
+		return RecallResult{Key: key, Outcome: RecallFailed, Err: err}
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return scopedRecall(s.byKey, s.windows, key, scope)
@@ -259,6 +260,9 @@ func (s *kvOriginalStore) GetScoped(ctx context.Context, key event.EventID, scop
 // under key as visible inside scope, exactly as the in-memory tier serves it.
 func (s *kvOriginalStore) ReadSegmentScoped(ctx context.Context, key event.EventID, scope ReadScope, req SegmentRequest) (SegmentResult, error) {
 	if err := ctx.Err(); err != nil {
+		return SegmentResult{}, err
+	}
+	if err := s.ensureLoaded(); err != nil {
 		return SegmentResult{}, err
 	}
 	s.mu.Lock()

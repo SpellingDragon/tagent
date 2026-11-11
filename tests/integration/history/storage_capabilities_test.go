@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"errors"
-	"io/fs"
 	"os"
 	"path/filepath"
 	"testing"
@@ -17,8 +16,8 @@ import (
 // TestStorageCapabilities proves the commit barrier contract on every storage tier.
 //
 // - the memory tier keeps the business contract and declares no recovery
-// - the localfile tier reads back byte for byte across an independent reopen
-// - damaged snapshot content refuses the open
+// - the durable tier reads back byte for byte across an independent reopen
+// - damaged record content refuses the open
 // - a failed barrier reports no durable success and publishes no part of the record
 // - the file tier runs the real rustviking CLI and names its absence instead of mocking
 //
@@ -101,15 +100,15 @@ func TestStorageCapabilities(t *testing.T) {
 		}
 	})
 
-	t.Run("localfile tier reads back byte for byte across an independent reopen", func(t *testing.T) {
+	t.Run("durable tier reads back byte for byte across an independent reopen", func(t *testing.T) {
 		root := t.TempDir()
-		cfg := ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: root}
+		cfg := ledger.StorageConfig{Type: ledger.StorageJournal, Root: root}
 		first, err := ledger.OpenTier(ctx, cfg)
 		if err != nil {
-			t.Fatalf("OpenTier(localfile): %v", err)
+			t.Fatalf("OpenTier(journal): %v", err)
 		}
-		if first.Capabilities.Tier != ledger.StorageLocalFile || !first.Capabilities.Durable {
-			t.Fatalf("Capabilities = %+v, want the localfile tier declaring itself durable", first.Capabilities)
+		if first.Capabilities.Tier != ledger.StorageJournal || !first.Capabilities.Durable {
+			t.Fatalf("Capabilities = %+v, want the journal tier declaring itself durable", first.Capabilities)
 		}
 		if err := first.Originals.Put(ctx, refA, original); err != nil {
 			t.Fatalf("Put(%s): %v", refA.Key, err)
@@ -128,7 +127,7 @@ func TestStorageCapabilities(t *testing.T) {
 		}
 		second, err := ledger.OpenTier(ctx, cfg)
 		if err != nil {
-			t.Fatalf("reopen OpenTier(localfile): %v", err)
+			t.Fatalf("reopen OpenTier(journal): %v", err)
 		}
 		for _, want := range []struct {
 			ref  ledger.OriginalRef
@@ -178,12 +177,62 @@ func TestStorageCapabilities(t *testing.T) {
 		}
 	})
 
-	t.Run("localfile open refuses a damaged snapshot", func(t *testing.T) {
+	t.Run("the durable tier keeps identical content independent per event key", func(t *testing.T) {
 		root := t.TempDir()
-		cfg := ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: root}
+		cfg := ledger.StorageConfig{Type: ledger.StorageJournal, Root: root}
 		tier, err := ledger.OpenTier(ctx, cfg)
 		if err != nil {
-			t.Fatalf("OpenTier(localfile): %v", err)
+			t.Fatalf("OpenTier(journal): %v", err)
+		}
+		first := ledger.OriginalRef{Key: "same-content-a", Owner: refA.Owner, Format: "text", RetentionPolicy: "keep"}
+		second := ledger.OriginalRef{Key: "same-content-b", Owner: refA.Owner, Format: "text", RetentionPolicy: "keep"}
+		for _, ref := range []ledger.OriginalRef{first, second} {
+			if err := tier.Originals.Put(ctx, ref, original); err != nil {
+				t.Fatalf("Put(%s): %v", ref.Key, err)
+			}
+		}
+		reopened, err := ledger.OpenTier(ctx, cfg)
+		if err != nil {
+			t.Fatalf("reopen the independent originals: %v", err)
+		}
+		counter := reopened.Originals.(interface{ BlobCount() int })
+		if got := counter.BlobCount(); got != 2 {
+			t.Fatalf("BlobCount() after reopen = %d, want 2 independent bodies", got)
+		}
+		for _, ref := range []ledger.OriginalRef{first, second} {
+			if got := reopened.Originals.Get(ctx, ref.Key); got.Outcome != ledger.RecallFound || !bytes.Equal(got.Body, original) {
+				t.Fatalf("Get(%s) after reopen = %+v, want the committed bytes", ref.Key, got)
+			}
+		}
+	})
+
+	t.Run("the durable tier reopens an empty original body", func(t *testing.T) {
+		root := t.TempDir()
+		cfg := ledger.StorageConfig{Type: ledger.StorageJournal, Root: root}
+		tier, err := ledger.OpenTier(ctx, cfg)
+		if err != nil {
+			t.Fatalf("OpenTier(journal): %v", err)
+		}
+		ref := ledger.OriginalRef{Key: "empty-original", Owner: refA.Owner, Format: "text", RetentionPolicy: "keep"}
+		if err := tier.Originals.Put(ctx, ref, []byte{}); err != nil {
+			t.Fatalf("commit the empty original: %v", err)
+		}
+		reopened, err := ledger.OpenTier(ctx, cfg)
+		if err != nil {
+			t.Fatalf("reopen the empty original: %v", err)
+		}
+		got := reopened.Originals.Get(ctx, ref.Key)
+		if got.Outcome != ledger.RecallFound || got.Err != nil || len(got.Body) != 0 {
+			t.Fatalf("the empty original after reopen = %+v, want found with zero bytes", got)
+		}
+	})
+
+	t.Run("durable tier open refuses a damaged record", func(t *testing.T) {
+		root := t.TempDir()
+		cfg := ledger.StorageConfig{Type: ledger.StorageJournal, Root: root}
+		tier, err := ledger.OpenTier(ctx, cfg)
+		if err != nil {
+			t.Fatalf("OpenTier(journal): %v", err)
 		}
 		if err := tier.Originals.Put(ctx, refA, original); err != nil {
 			t.Fatalf("Put(%s): %v", refA.Key, err)
@@ -192,34 +241,39 @@ func TestStorageCapabilities(t *testing.T) {
 		if err := tier.Segments.StoreEvent(ctx, rec); err != nil {
 			t.Fatalf("StoreEvent(e3a1): %v", err)
 		}
-		overwriteTreeFiles(t, root, []byte("{ damaged snapshot"))
-		if _, err := ledger.OpenTier(ctx, cfg); !errors.Is(err, ledger.ErrSnapshotCorrupt) {
-			t.Fatalf("reopen over damaged snapshot = %v, want %v", err, ledger.ErrSnapshotCorrupt)
+		corruptLastRecord(t, root)
+		if _, err := ledger.OpenTier(ctx, cfg); !errors.Is(err, ledger.ErrJournalCorrupt) {
+			t.Fatalf("reopen over a damaged record = %v, want %v", err, ledger.ErrJournalCorrupt)
 		}
 	})
 
 	t.Run("a failed barrier reports no durable success and publishes no part", func(t *testing.T) {
 		root := t.TempDir()
-		cfg := ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: root}
-		tier, err := ledger.OpenTier(ctx, cfg)
+		cfg := ledger.StorageConfig{Type: ledger.StorageJournal, Root: root}
+		engine, err := ledger.OpenAtomicStore(ctx, cfg)
 		if err != nil {
-			t.Fatalf("OpenTier(localfile): %v", err)
+			t.Fatalf("open the journal engine: %v", err)
+		}
+		faults := &failingCommitStore{inner: engine}
+		tier, err := ledger.OpenTier(ctx, ledger.StorageConfig{Type: ledger.StorageJournal, Root: root, Engine: faults})
+		if err != nil {
+			t.Fatalf("OpenTier(journal): %v", err)
 		}
 		committed := ledger.SegmentRecord{PartitionID: 7, WindowTS: 700, Seq: 1, EventKey: "c0ffee", EventTime: 11, Body: eventBody}
 		if err := tier.Segments.StoreEvent(ctx, committed); err != nil {
 			t.Fatalf("StoreEvent(c0ffee): %v", err)
 		}
-		restore := makeTreeReadOnly(t, root)
+		faults.fail = true
 		rejected := ledger.SegmentRecord{PartitionID: 7, WindowTS: 700, Seq: 2, EventKey: "badbad", EventTime: 12, Body: eventBodyOther}
 		err = tier.Segments.StoreEvent(ctx, rejected)
 		if err == nil {
-			t.Fatalf("StoreEvent(badbad) under a read-only tree reported durable success")
+			t.Fatalf("StoreEvent(badbad) behind a refused barrier reported durable success")
 		}
 		if !errors.Is(err, ledger.ErrSegmentBarrier) {
 			t.Fatalf("StoreEvent(badbad) = %v, want %v", err, ledger.ErrSegmentBarrier)
 		}
-		if !errors.Is(err, fs.ErrPermission) {
-			t.Fatalf("StoreEvent(badbad) = %v, want the write failure kept as its cause", err)
+		if !errors.Is(err, errInjectedCommit) {
+			t.Fatalf("StoreEvent(badbad) = %v, want the commit failure kept as its cause", err)
 		}
 		if n := tier.Segments.EventCount(); n != 1 {
 			t.Fatalf("EventCount() = %d after a failed barrier, want 1", n)
@@ -227,14 +281,14 @@ func TestStorageCapabilities(t *testing.T) {
 		if _, held, err := tier.Segments.GetEvent(ctx, rejected.EventKey); err != nil || held {
 			t.Fatalf("GetEvent(badbad) = held %v, %v, want nothing published", held, err)
 		}
-		restore()
+		faults.fail = false
 		after := ledger.SegmentRecord{PartitionID: 9, WindowTS: 900, Seq: 1, EventKey: "feed01", EventTime: 13, Body: eventBody}
 		if err := tier.Segments.StoreEvent(ctx, after); err != nil {
 			t.Fatalf("StoreEvent(feed01): %v", err)
 		}
-		reopened, err := ledger.OpenTier(ctx, cfg)
+		reopened, err := ledger.OpenTier(ctx, ledger.StorageConfig{Type: ledger.StorageJournal, Root: root})
 		if err != nil {
-			t.Fatalf("reopen OpenTier(localfile): %v", err)
+			t.Fatalf("reopen OpenTier(journal): %v", err)
 		}
 		if n := reopened.Segments.EventCount(); n != 2 {
 			t.Fatalf("reopened EventCount() = %d, want the 2 successful commits and none of the rejected one", n)
@@ -321,56 +375,56 @@ func assertSameBytes(t *testing.T, what string, got, want []byte) {
 	}
 }
 
-// makeTreeReadOnly removes write permission from every directory under root and
-// returns the restore that hands it back; a caller that can still write the tree
-// afterwards gets the injection skipped instead of a false result.
-func makeTreeReadOnly(t *testing.T, root string) (restore func()) {
+// corruptLastRecord flips one byte inside the payload of the last frame the
+// durable tier holds, so the frame is fully present and fails its checksum
+// instead of looking like the torn tail a stopped writer leaves.
+func corruptLastRecord(t *testing.T, root string) {
 	t.Helper()
-	dirs := []string{root}
-	if err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		if entry.IsDir() {
-			dirs = append(dirs, path)
-		}
-		return nil
-	}); err != nil {
-		t.Fatalf("walk %s: %v", root, err)
+	path := filepath.Join(root, "kv", "journal.log")
+	content, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read the record file %s: %v", path, err)
 	}
-	for _, dir := range dirs {
-		if err := os.Chmod(dir, 0o555); err != nil {
-			t.Fatalf("chmod %s: %v", dir, err)
-		}
+	if len(content) == 0 {
+		t.Fatalf("the record file %s holds no frame to damage", path)
 	}
-	restore = func() {
-		for _, dir := range dirs {
-			_ = os.Chmod(dir, 0o755)
-		}
+	content[len(content)-1] ^= 0x01
+	if err := os.WriteFile(path, content, 0o600); err != nil {
+		t.Fatalf("damage the record file %s: %v", path, err)
 	}
-	t.Cleanup(restore)
-	probe := filepath.Join(root, ".write-probe")
-	if err := os.WriteFile(probe, nil, 0o600); err == nil {
-		_ = os.Remove(probe)
-		restore()
-		t.Skipf("this user can still write a read-only tree, so no write error can be injected here")
-	}
-	return restore
 }
 
-// overwriteTreeFiles replaces the content of every regular file under root, so a
-// store that reads it back meets content that is not the snapshot it claims.
-func overwriteTreeFiles(t *testing.T, root string, content []byte) {
-	t.Helper()
-	if err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		if entry.IsDir() {
-			return nil
-		}
-		return os.WriteFile(path, content, 0o644)
-	}); err != nil {
-		t.Fatalf("damage %s: %v", root, err)
+// errInjectedCommit is the failure the decorator below hands the committing
+// store, so a check can fail exactly the commit it names without naming a file.
+var errInjectedCommit = errors.New("history: injected commit failure")
+
+// failingCommitStore is a port decorator over the one atomic store seam: while
+// fail is set every commit is refused before the wrapped store sees it, so the
+// failure runs over the tier the same way whatever engine is behind it.
+type failingCommitStore struct {
+	inner ledger.AtomicStore
+	fail  bool
+}
+
+// Read passes the read through to the wrapped store.
+func (s *failingCommitStore) Read(ctx context.Context, fetch ledger.Fetch) ([]ledger.Pair, error) {
+	return s.inner.Read(ctx, fetch)
+}
+
+// Keys enumerates the wrapped store's keys.
+func (s *failingCommitStore) Keys(ctx context.Context, prefix string) ([]string, error) {
+	return s.inner.Keys(ctx, prefix)
+}
+
+// Namespaces enumerates the wrapped store's namespaces.
+func (s *failingCommitStore) Namespaces(ctx context.Context) ([]string, error) {
+	return s.inner.Namespaces(ctx)
+}
+
+// Commit refuses the batch while the failure is armed, and commits it otherwise.
+func (s *failingCommitStore) Commit(ctx context.Context, batch ledger.Batch) error {
+	if s.fail {
+		return errInjectedCommit
 	}
+	return s.inner.Commit(ctx, batch)
 }

@@ -22,9 +22,12 @@ import (
 //
 // 契约: docs/wiki/agent/task-lifecycle.md#ttl-reclaim
 type Manager struct {
-	mu         sync.Mutex
-	backend    Executor
-	now        func() time.Time
+	mu      sync.Mutex
+	backend Executor
+	now     func() time.Time
+	// reuseMu serializes the admission of one manager: a held key is probed
+	// before reuse, and a dead one is released and rebuilt as one decision.
+	reuseMu    sync.Mutex
 	available  func(ResourceKey) bool
 	defaultTTL time.Duration
 	resources  map[ResourceKey]*heldResource
@@ -37,11 +40,24 @@ type Manager struct {
 	reused             int
 	released           int
 	escalations        int
+	rebuilt            int
+	retried            int
 	// observer is the optional lifecycle observer of this manager and the only
 	// thing that starts the post-return tracker; closing reports that the
 	// manager close began, so no tracker starts behind it.
 	observer StateObserver
 	closing  bool
+	// genMu guards the generation faces of this manager as a template: the
+	// instances built from it and the one the candidate construction reads.
+	genMu sync.Mutex
+	// genInstances holds every generation instance this template installed, in
+	// installation order; genCurrent is the instance the candidate construction
+	// binds, nil beside no installed generation.
+	genInstances []*Manager
+	genCurrent   *Manager
+	// detached reports that this instance's process-private life ended through
+	// Detach, so a repeated retirement release joins nothing a second time.
+	detached bool
 }
 
 // DefaultLeaseTTL is the floor lease of an execution resource whose caller
@@ -73,6 +89,16 @@ var ErrLeaseInvalid = errors.New("exec: the lease must not be negative")
 // explicit stop handling of a sweep, so a late renewal never revives it beside
 // a settlement already in flight.
 var ErrLeaseExpired = errors.New("exec: the lease reached its deadline before this renewal")
+
+// errReuseUnconfirmed reports an acquisition refused because the held resource
+// behind the key was not observed alive: an undecidable probe is not a licence to
+// reuse whatever the old session left behind.
+var errReuseUnconfirmed = errors.New("exec: the held resource was not observed alive for reuse")
+
+// errRebuildUnconfirmed reports a rebuild refused because the dead session could
+// not be released: a session whose stop stayed unconfirmed is never reopened
+// under the same key, so the explicit failure names the release that blocked it.
+var errRebuildUnconfirmed = errors.New("exec: the held resource could not be released for a rebuild")
 
 // ErrFinalOutputUnsettled reports a final-output read refused because the
 // resource is still held: its execution may still produce output, so no final
@@ -111,6 +137,12 @@ type heldResource struct {
 	// done closes when it returned. Both are nil beside no tracker.
 	stop chan struct{}
 	done chan struct{}
+	// rebuilds reports that this generation started as the rebuild of a dead
+	// session under the same key, so the receipt can name the fact.
+	rebuilds int
+	// staleRetries reports that a stale generation was released and this
+	// generation answered in its place, so the receipt can name the retry.
+	staleRetries int
 }
 
 // Acquisition configures one acquisition at its call.
@@ -121,6 +153,10 @@ type Acquisition struct {
 	// already held resource never shrinks a lease this call did not name.
 	declared bool
 	owner    Owner
+	// observed is the probe the caller already took over the held resource;
+	// Acquire consults it instead of probing a second time. It never stands in
+	// for the probe a direct Acquire takes itself.
+	observed *ProbeResult
 }
 
 // AcquireOption configures one acquisition at its call.
@@ -139,6 +175,14 @@ func WithTTL(ttl time.Duration) AcquireOption {
 // opens, so the rhythm travels with the call that consumes it.
 func WithMonitorConfig(rhythm MonitorConfig) AcquireOption {
 	return func(a *Acquisition) { a.rhythm = rhythm }
+}
+
+// withReuseProbe hands the acquisition the probe the caller took over the held
+// resource, so the reuse decision reads that observation instead of probing a
+// second time. It changes no verdict: dead still rebuilds and undecidable still
+// refuses.
+func withReuseProbe(observed ProbeResult) AcquireOption {
+	return func(a *Acquisition) { a.observed = &observed }
 }
 
 // ManagerOption configures one manager at construction.
@@ -200,11 +244,15 @@ func defaultAvailability(key ResourceKey) bool {
 
 // Acquire starts the execution declared by decl and returns the canonical key
 // of the resource it now holds, or returns the key of the resource already held
-// under that identity without starting a second one. A held resource whose last
-// stop stayed unconfirmed refuses the acquisition instead, so its key is never
-// handed to a second writer beside an unresolved stop. A resource whose system
-// capability is missing is refused beside the degrade report of that refusal,
-// and the monitor rhythm of the call rides that report.
+// under that identity without starting a second one. A held resource is probed
+// before it is reused: a live pane is reused, a dead pane is released and the
+// declaration starts in a fresh session under the same key, and a probe that
+// cannot decide refuses the reuse by name rather than answering the old
+// scrollback. A held resource whose last stop stayed unconfirmed refuses the
+// acquisition instead, so its key is never handed to a second writer beside an
+// unresolved stop. A resource whose system capability is missing is refused
+// beside the degrade report of that refusal, and the monitor rhythm of the call
+// rides that report.
 func (m *Manager) Acquire(ctx context.Context, decl ExecutionDecl, opts ...AcquireOption) (ResourceKey, error) {
 	if decl.Resource.Key == "" {
 		return ResourceKey{}, ErrKeyMissing
@@ -219,19 +267,74 @@ func (m *Manager) Acquire(ctx context.Context, decl ExecutionDecl, opts ...Acqui
 	if acq.ttl == 0 {
 		acq.ttl = m.defaultTTL
 	}
+	m.reuseMu.Lock()
+	defer m.reuseMu.Unlock()
+
 	m.mu.Lock()
-	defer m.mu.Unlock()
-	if held, ok := m.resources[decl.Resource]; ok {
-		if held.lastStop != nil && !held.lastStop.Confirmed {
-			return ResourceKey{}, fmt.Errorf("%w: %s", ErrResourceHeld, decl.Resource)
+	held, ok := m.resources[decl.Resource]
+	unconfirmedStop := ok && held.lastStop != nil && !held.lastStop.Confirmed
+	m.mu.Unlock()
+	if unconfirmedStop {
+		return ResourceKey{}, fmt.Errorf("%w: %s", ErrResourceHeld, decl.Resource)
+	}
+	if !ok {
+		return m.startFresh(ctx, decl, acq, 0)
+	}
+
+	observed := ProbeResult{State: ProbeAlive}
+	if acq.observed != nil {
+		observed = *acq.observed
+	} else {
+		probe, probeErr := m.backend.Probe(ctx, decl.Resource)
+		if probeErr != nil {
+			return ResourceKey{}, probeErr
+		}
+		observed = probe
+	}
+	switch observed.State {
+	case ProbeAlive:
+		m.mu.Lock()
+		current, stillHeld := m.resources[decl.Resource]
+		if !stillHeld {
+			m.mu.Unlock()
+			return m.startFresh(ctx, decl, acq, 0)
 		}
 		m.reused++
 		if acq.declared {
-			held.ttl = acq.ttl
+			current.ttl = acq.ttl
 		}
-		held.owner = acq.owner
+		current.owner = acq.owner
+		m.mu.Unlock()
 		return decl.Resource, nil
+	case ProbeDead:
+		evidence, releaseErr := m.releaseHeld(ctx, decl.Resource)
+		if releaseErr == nil && evidence.Released {
+			return m.startFresh(ctx, decl, acq, 1)
+		}
+		if errors.Is(releaseErr, ErrResourceUnknown) {
+			return m.startFresh(ctx, decl, acq, 1)
+		}
+		reason := evidence.Reason
+		if reason == "" && releaseErr != nil {
+			reason = releaseErr.Error()
+		}
+		if reason == "" {
+			reason = evidence.Stop.Reason
+		}
+		if reason == "" {
+			reason = "the dead session could not be confirmed stopped"
+		}
+		return ResourceKey{}, fmt.Errorf("%w: %s: %s", errRebuildUnconfirmed, decl.Resource, reason)
+	default:
+		return ResourceKey{}, fmt.Errorf("%w: %s: %s", errReuseUnconfirmed, decl.Resource, observed.Detail)
 	}
+}
+
+// startFresh opens a new execution for one declaration and holds it under its
+// key. rebuilds names how many generations the key had to replace to get here,
+// so the explanation carries the rebuild fact and the receipt can say it ran in
+// a new session.
+func (m *Manager) startFresh(ctx context.Context, decl ExecutionDecl, acq Acquisition, rebuilds int) (ResourceKey, error) {
 	if !m.available(decl.Resource) {
 		return ResourceKey{}, &DegradeError{Key: decl.Resource, Rhythm: acq.rhythm, Reason: "the execution capability behind this resource kind is missing"}
 	}
@@ -239,6 +342,8 @@ func (m *Manager) Acquire(ctx context.Context, decl ExecutionDecl, opts ...Acqui
 	if err != nil {
 		return ResourceKey{}, err
 	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	m.resources[key] = &heldResource{
 		decl:        decl,
 		rhythm:      acq.rhythm,
@@ -246,8 +351,12 @@ func (m *Manager) Acquire(ctx context.Context, decl ExecutionDecl, opts ...Acqui
 		obligations: []string{"the execution outcome is unsettled"},
 		ttl:         acq.ttl,
 		owner:       acq.owner,
+		rebuilds:    rebuilds,
 	}
 	m.acquired++
+	if rebuilds > 0 {
+		m.rebuilt++
+	}
 	return key, nil
 }
 
@@ -370,6 +479,16 @@ func (m *Manager) Capture(ctx context.Context, key ResourceKey) ([]byte, error) 
 // own context, so a caller context already cancelled neither stops nor frees
 // anything.
 func (m *Manager) Release(ctx context.Context, key ResourceKey) (ReleaseEvidence, error) {
+	m.reuseMu.Lock()
+	defer m.reuseMu.Unlock()
+	return m.releaseHeld(ctx, key)
+}
+
+// releaseHeld performs the tracked release of one key: it stops the tracker,
+// runs the stop and reports what was observed. It is the shared middle of the
+// explicit Release and of the release a dead-pane rebuild drives. The caller
+// must not hold the manager lock or reuseMu.
+func (m *Manager) releaseHeld(ctx context.Context, key ResourceKey) (ReleaseEvidence, error) {
 	owner, held := m.stopTracking(key)
 	if !held {
 		return ReleaseEvidence{Resource: key}, fmt.Errorf("%w: %s", ErrResourceUnknown, key)
@@ -464,10 +583,13 @@ func (m *Manager) noteStop(key ResourceKey, stop StopEvidence) {
 
 // Close ends the life of one manager: every post-return tracker of it stops and
 // is joined, the expired leases are settled through the sweep of this manager,
-// and every resource still held is released through the executor. A resource
-// whose stop stays unconfirmed stays held and is reported by name, so the close
-// never announces an ending it did not observe. A repeated close reports nil and
-// releases nothing a second time; the manager is final once it closed.
+// and every resource still held is released through the executor. A manager
+// that installed generation instances closes each of them beside itself, so
+// the close of the template frees the resources the process still serves. A
+// resource whose stop stays unconfirmed stays held and is reported by name, so
+// the close never announces an ending it did not observe. A repeated close
+// reports nil and releases nothing a second time; the manager is final once it
+// closed.
 func (m *Manager) Close(ctx context.Context) []SweepReport {
 	m.mu.Lock()
 	if m.closing {
@@ -487,7 +609,11 @@ func (m *Manager) Close(ctx context.Context) []SweepReport {
 	for _, done := range waits {
 		<-done
 	}
-	reports := m.Sweep(ctx)
+	var reports []SweepReport
+	for _, instance := range m.generationInstances() {
+		reports = append(reports, instance.Close(ctx)...)
+	}
+	reports = append(reports, m.Sweep(ctx)...)
 	attempted := make(map[ResourceKey]bool, len(reports))
 	for _, report := range reports {
 		attempted[report.Key] = true
@@ -575,11 +701,29 @@ type Explanation struct {
 	LastStop *StopEvidence
 	// Obligations are the open obligations kept beside the lease.
 	Obligations []string
+	// rebuilds reports how many dead generations this generation replaced
+	// under the same key: zero beside a first start.
+	rebuilds int
+	// staleRetries reports how many stale generations were released and this
+	// generation answered in their place: zero beside a first start.
+	staleRetries int
 }
 
 // Explain reports the retained state of one held resource beside the facts it
-// is held on. A key nothing is held under answers as not held.
+// is held on. A key nothing is held under answers as not held. A manager that
+// installed generation instances answers from the instance that holds the
+// lease — the current generation first — so the diagnostic reads the ledger
+// the resource actually lives in while an older generation drains.
 func (m *Manager) Explain(key ResourceKey) (Explanation, error) {
+	if holder := m.generationHolder(key); holder != nil {
+		return holder.explainHeld(key)
+	}
+	return m.explainHeld(key)
+}
+
+// explainHeld reports the retained state of one resource held by this manager
+// itself, beside the facts it is held on.
+func (m *Manager) explainHeld(key ResourceKey) (Explanation, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	res, ok := m.resources[key]
@@ -596,9 +740,65 @@ func (m *Manager) Explain(key ResourceKey) (Explanation, error) {
 		ConsecutiveUnknowns: res.unknownRun,
 		Escalations:         res.escalations,
 		LastStop:            res.lastStop,
+		rebuilds:            res.rebuilds,
+		staleRetries:        res.staleRetries,
 	}
 	explanation.Obligations = append(explanation.Obligations, res.obligations...)
 	return explanation, nil
+}
+
+// noteStaleRetry records that a stale generation was released and the key now
+// answers from a rebuilt one, so Explain names the retry beside the generation
+// that replaced it.
+func (m *Manager) noteStaleRetry(key ResourceKey) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if res, ok := m.resources[key]; ok {
+		res.staleRetries++
+	}
+	m.retried++
+}
+
+// rebuiltCount reports how many dead sessions the manager rebuilt under their
+// keys.
+func (m *Manager) rebuiltCount() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.rebuilt
+}
+
+// carryRebuilds keeps the rebuild fact of the generation a retry replaced: the
+// retried generation answers in its place, so the receipt still names the dead
+// session that had to be rebuilt before the stale frame was seen.
+func (m *Manager) carryRebuilds(key ResourceKey, rebuilds int) {
+	if rebuilds <= 0 {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if res, ok := m.resources[key]; ok {
+		res.rebuilds += rebuilds
+	}
+}
+
+// retryCount reports how many stale generations the manager released and
+// retried.
+func (m *Manager) retryCount() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.retried
+}
+
+// proofOf reports the execution proof the executor behind one key can offer: a
+// generation-verifying executor answers the generation marker it verified, and
+// an executor without that face answers no proof rather than a claim it cannot
+// make.
+func (m *Manager) proofOf(key ResourceKey) (string, bool) {
+	prover, ok := m.backend.(generationTracker)
+	if !ok {
+		return "", false
+	}
+	return prover.proofOf(key)
 }
 
 // Held reports how many resources the manager currently holds.

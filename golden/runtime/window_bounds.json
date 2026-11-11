@@ -1,0 +1,230 @@
+{
+  "schema_version": 1,
+  "adr": "docs/adr/0006-three-hooks-is-the-core-iteration-principle.md",
+  "user_ruling": "restart-recovery-optimization r31/r34",
+  "reason": "Every window, budget, policy and mechanism constant in the declaration and product surface is registered once. A new declaration key that names a window/budget/policy must add a reviewed entry before it can pass; a mechanism constant can never be a declaration key. The checker has no auto-write mode.",
+  "classes": {
+    "window": "回放窗：唯一外部窗口输入（max_tokens）",
+    "budget": "预算面：请求预算的窗口与输出余量（可声明，缺省派生）",
+    "policy": "策略面：可调的压缩、保留与长上下文审批策略",
+    "constant": "机制常量：换算、页界、算法与内存/缓存上限，不可声明"
+  },
+  "bounds": [
+    {
+      "id": "replay-window",
+      "class": "window",
+      "name": "max_tokens",
+      "kind": "config_key",
+      "file": "api/config/decode.go",
+      "source": "external: the model window",
+      "reason": "唯一的回放窗：折叠节奏与恢复窗口都由它决定。"
+    },
+    {
+      "id": "provider-window",
+      "class": "budget",
+      "name": "provider_context_window",
+      "kind": "config_key",
+      "file": "api/config/decode.go",
+      "source": "declared, defaults to max_tokens",
+      "reason": "预算面：请求预算门的窗口。与回放窗刻意解耦（smoke 入口 = 2×回放窗；合并会先撞预算，见 r32 的 1519/1500）。"
+    },
+    {
+      "id": "output-reserve",
+      "class": "budget",
+      "name": "output_reserve",
+      "kind": "config_key",
+      "file": "api/config/decode.go",
+      "source": "declared, defaults to provider window / DefaultOutputReserveDivisor",
+      "reason": "预算面：输入预算留给输出的余量。"
+    },
+    {
+      "id": "compress-threshold",
+      "class": "policy",
+      "name": "compress_threshold",
+      "kind": "config_key",
+      "file": "api/config/decode.go",
+      "source": "declared, defaults to DefaultCompressThreshold",
+      "reason": "策略面：何时开始折叠，决定压缩程度，可调。"
+    },
+    {
+      "id": "keep-recent-tasks",
+      "class": "policy",
+      "name": "keep_recent_tasks",
+      "kind": "config_key",
+      "file": "api/config/decode.go",
+      "source": "declared, defaults to DefaultKeepRecentTasks",
+      "reason": "策略面：最新段保留多少原样，决定压缩程度，可调。"
+    },
+    {
+      "id": "long-context-tokens",
+      "class": "policy",
+      "name": "long_context_tokens",
+      "kind": "config_key",
+      "file": "api/config/decode.go",
+      "source": "declared, defaults to DefaultLongContextTokens",
+      "reason": "策略面：长上下文审批档。它是模型开始退化的位置，不是窗口派生量。"
+    },
+    {
+      "id": "output-reserve-divisor",
+      "class": "constant",
+      "name": "DefaultOutputReserveDivisor",
+      "kind": "const",
+      "file": "runtime/agent/request_assembly.go",
+      "reason": "输出余量的缺省除数（4）。"
+    },
+    {
+      "id": "compress-threshold-default",
+      "class": "constant",
+      "name": "DefaultCompressThreshold",
+      "kind": "const",
+      "file": "api/config/defaults.go",
+      "reason": "策略缺省值；策略可调而缺省值不可配。"
+    },
+    {
+      "id": "keep-recent-default",
+      "class": "constant",
+      "name": "DefaultKeepRecentTasks",
+      "kind": "const",
+      "file": "api/config/defaults.go",
+      "reason": "策略缺省值。"
+    },
+    {
+      "id": "long-context-default",
+      "class": "constant",
+      "name": "DefaultLongContextTokens",
+      "kind": "const",
+      "file": "runtime/agent/fuse.go",
+      "reason": "策略缺省值。"
+    },
+    {
+      "id": "age-keep-recent-default",
+      "class": "constant",
+      "name": "DefaultAgeKeepRecent",
+      "kind": "const",
+      "file": "memory/replay/age_segments.go",
+      "reason": "折叠计划读不到策略值时的兜底。"
+    },
+    {
+      "id": "age-volume-default",
+      "class": "constant",
+      "name": "DefaultAgeVolumeThreshold",
+      "kind": "const",
+      "file": "memory/replay/age_segments.go",
+      "reason": "折叠计划读不到体积阈值时的兜底。"
+    },
+    {
+      "id": "age-summary-text-limit",
+      "class": "constant",
+      "name": "DefaultAgeSummaryTextLimit",
+      "kind": "const",
+      "file": "memory/replay/age_segments.go",
+      "reason": "机制常量：一份 history summary 正文的字节上界。超界的最老行退化为按 key 引用，摘要体积不随它所压缩的历史增长。"
+    },
+    {
+      "id": "age-summary-drop-reserve",
+      "class": "constant",
+      "name": "ageSummaryDropReserve",
+      "kind": "const",
+      "file": "memory/replay/age_segments.go",
+      "reason": "机制常量：摘要正文里 covered-by-key 标记占用的字节预留，保证正文不超上界。"
+    },
+    {
+      "id": "chars-per-token",
+      "class": "constant",
+      "name": "BudgetCharsPerToken",
+      "kind": "const",
+      "file": "memory/replay/replay_budget.go",
+      "reason": "token 与字符的唯一换算常量。"
+    },
+    {
+      "id": "fallback-resident-facts",
+      "class": "constant",
+      "name": "noWindowResidentFacts",
+      "kind": "const",
+      "file": "assembly/facts.go",
+      "reason": "无回放窗会话链的兜底常驻条数：不折的链没有带界，只能按这个机制常量保留；带窗链的常驻由投影边界决定。"
+    },
+    {
+      "id": "segment-cache-budget",
+      "class": "constant",
+      "name": "segmentCacheBudgetBytes",
+      "kind": "const",
+      "file": "memory/ledger/segment_store.go",
+      "reason": "段读缓存的字节上限，性能常量。"
+    },
+    {
+      "id": "capture-budget",
+      "class": "constant",
+      "name": "DefaultCaptureBudgetBytes",
+      "kind": "const",
+      "file": "features/rl/capture_wiring.go",
+      "reason": "轨迹捕获常驻预算（64MB），机制常量。"
+    },
+    {
+      "id": "page-limit",
+      "class": "constant",
+      "name": "DefaultLimit",
+      "kind": "const",
+      "file": "memory/search/port.go",
+      "reason": "检索页界，同时是两腿上限的唯一来源。"
+    },
+    {
+      "id": "rrf-rank",
+      "class": "constant",
+      "name": "RRFRankConstant",
+      "kind": "const",
+      "file": "memory/search/fusion.go",
+      "reason": "RRF 秩常数，算法常量。"
+    },
+    {
+      "id": "capture-budget-min",
+      "class": "constant",
+      "name": "MinCaptureBudgetBytes",
+      "kind": "const",
+      "file": "features/rl/capture_wiring.go",
+      "reason": "捕获预算的下界（1MB），机制常量。"
+    },
+    {
+      "id": "chars-per-token-alias",
+      "class": "constant",
+      "name": "budgetCharsPerToken",
+      "kind": "const",
+      "file": "memory/replay/replay_budget.go",
+      "reason": "换算常量的非导出源值，BudgetCharsPerToken 的别名。"
+    },
+    {
+      "id": "budget-message-overhead",
+      "class": "constant",
+      "name": "budgetMessageOverheadTokens",
+      "kind": "const",
+      "file": "runtime/agent/request_assembly.go",
+      "reason": "请求预算计量里每条消息的固定开销（token）。长上下文熔断的近似计量不另立字节数：它按 chars-per-token 登记的换算比反向导出字节framing（runtime/agent/fuse.go 的 messageOverheadBytes 是派生常量），两处计量因此只有这一份登记。"
+    },
+    {
+      "id": "budget-tool-call-overhead",
+      "class": "constant",
+      "name": "budgetToolCallOverheadTokens",
+      "kind": "const",
+      "file": "runtime/agent/request_assembly.go",
+      "reason": "请求预算计量里每次工具调用的固定开销（token）。"
+    },
+    {
+      "id": "checkpoint-cadence",
+      "class": "constant",
+      "name": "CheckpointCommitInterval",
+      "kind": "const",
+      "file": "assembly/checkpoint.go",
+      "source": "mechanism: the framework checkpoint cadence",
+      "reason": "checkpoint 节奏常量：每 N 条提交落一条 checkpoint。与回放窗口刻意解耦——窗口决定请求带多少材料，节奏只决定恢复载体的新鲜度；数量级取 64 使 boot 回放增量远小于窗口。"
+    },
+    {
+      "id": "checkpoint-period",
+      "class": "constant",
+      "name": "CheckpointPeriod",
+      "kind": "const",
+      "file": "assembly/checkpoint.go",
+      "source": "mechanism: the framework checkpoint period",
+      "reason": "checkpoint 周期常量：安静链仍按墙钟补一条载体，避免最后一条提交远落后于读它的 boot。"
+    }
+  ]
+}

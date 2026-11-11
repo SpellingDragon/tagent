@@ -41,3 +41,21 @@ ls -d openspec/changes/archive/*/
 | 归档 | 主题 | 证据入口 |
 |---|---|---|
 | [2026-10-18-runtime-rebuild](2026-10-18-runtime-rebuild/) | 运行时十域重建：把「以 prototype 为准」的表述与落地后的 16 包现架构对齐，概念瘦身（S1–S4）与契约守护随同收口 | [tasks.md](2026-10-18-runtime-rebuild/tasks.md)（叶任务与勾选）· [ORCHESTRATION.md](2026-10-18-runtime-rebuild/ORCHESTRATION.md)（波次台账与放行凭据）· [design.md](2026-10-18-runtime-rebuild/design.md)（D2 子域表/D4 合并规则/D5 三级验收）· [evidence/](2026-10-18-runtime-rebuild/evidence/)（run-id 与指标） |
+
+## boundary-closure 归档导览（2026-11-05）
+
+一级变更 [2026-11-05-boundary-closure](2026-11-05-boundary-closure/) 的九域按 01→09 逐一 `openspec validate <name> --strict` 后 `openspec archive <name> --yes`（各域归档输出含 `Totals:`、不含 `Aborted`；父归档 `Totals: + 3, ~ 3, - 3, → 1`）。域→证据/主规格锚如下（锚指对应 `### Requirement:` 条款）：
+
+| # | 域归档（证据入口） | 主规格锚 |
+|---|---|---|
+| 01 | [01-delivery-closure](2026-11-05-01-delivery-closure/) · [tasks](2026-11-05-01-delivery-closure/tasks.md) · [design](2026-11-05-01-delivery-closure/design.md) | [delivery-closure](../../specs/delivery-closure/spec.md)「交付义务随答案同笔成立」· [delivery-dispatch-receipts](../../specs/delivery-dispatch-receipts/spec.md)「发送动作身份与未确认结果」· [fact-vocabulary](../../specs/fact-vocabulary/spec.md)「交付结算族（第十一族）」· [failure-notice](../../specs/failure-notice/spec.md)「成功与静默边界不得被失败话术污染」 |
+| 02 | [02-request-budget](2026-11-05-02-request-budget/) · [tasks](2026-11-05-02-request-budget/tasks.md) | [request-budget-accounting](../../specs/request-budget-accounting/spec.md)「完整预算输入与诚实精度」 |
+| 03 | [03-resource-bounds](2026-11-05-03-resource-bounds/) · [tasks](2026-11-05-03-resource-bounds/tasks.md) | [resource-bounds](../../specs/resource-bounds/spec.md)「KV 本地存储条目驻留有界」「冒烟内存门（口径已裁决：真占用）」；慢锚绿证 `rounds=300`、`slope=103789 B/r`（台账 r36/r48/r50） |
+| 04 | [04-exec-integrity](2026-11-05-04-exec-integrity/) · [tasks](2026-11-05-04-exec-integrity/tasks.md) | [exec-integrity](../../specs/exec-integrity/spec.md)「回执与执行事实一致」「复用路径必探活（r2 F15 根因更正）」 |
+| 05 | [05-fold-provenance](2026-11-05-05-fold-provenance/) · [tasks](2026-11-05-05-fold-provenance/tasks.md) | [fold-provenance](../../specs/fold-provenance/spec.md)「折叠摘要携带时序与世代」 |
+| 06 | [06-live-benchmark](2026-11-05-06-live-benchmark/) · [tasks](2026-11-05-06-live-benchmark/tasks.md) | [live-benchmark](../../specs/live-benchmark/spec.md)「三方对照可判定」「真实资源三态门」 |
+| 07 | [07-training-sample-loop](2026-11-05-07-training-sample-loop/) · [tasks](2026-11-05-07-training-sample-loop/tasks.md) | [training-sample-loop](../../specs/training-sample-loop/spec.md)「样本三要素齐备」「回读失败关闭」 |
+| 08 | [08-config-liveness](2026-11-05-08-config-liveness/) · [tasks](2026-11-05-08-config-liveness/tasks.md) | [config-liveness](../../specs/config-liveness/spec.md)「文件是编辑界面，链是账」等五条 · [config-hot-reload](../../specs/config-hot-reload/spec.md)「配置热更维度矩阵」 |
+| 09 | [09-meditation-autonomy](2026-11-05-09-meditation-autonomy/) · [tasks](2026-11-05-09-meditation-autonomy/tasks.md) | [meditation-autonomy](../../specs/meditation-autonomy/spec.md)「冥想自主整理面」· [meditation-idle-gating](../../specs/meditation-idle-gating/spec.md)「独立门控能力保持退役」· [meditation-agent-partition](../../specs/meditation-agent-partition/spec.md)「反思事件注入本 agent 的专属反思会话」· [self-improvement-meditation](../../specs/self-improvement-meditation/spec.md)「冥想定位叙事(自我改进引擎)」 |
+
+真实对照 run-id（逐字符）：`bench-20261105T150446Z-9a9d7d`。本地证据（git-ignored）：`bench/runs/bench-20261105T150446Z-9a9d7d/{run.json,metrics.json,report.md}`；台账见 [ORCHESTRATION.md r47](2026-11-05-boundary-closure/ORCHESTRATION.md)。

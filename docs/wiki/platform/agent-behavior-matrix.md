@@ -1,4 +1,4 @@
-> **历史文档（historical-verbatim）**：本篇描述已移除的生产实现；当前架构见 [docs/wiki/README.md](README.md#当前架构速览)。文中文件引用按各篇快照提交锚定。
+> **历史文档（historical-verbatim）**：本篇描述已移除的生产实现；当前架构见 [docs/wiki/README.md](../README.md#当前架构速览)。文中文件引用按各篇快照提交锚定。
 
 # agent 行为矩阵 — 启用全平台子系统后的复杂场景反应
 
@@ -100,7 +100,7 @@
 
 | 重启后恢复项 | 来源 | 效果 |
 |-------------|------|------|
-| 冥想单锚（last-meditation 执行水位；旧空闲锚已退役，历史锚文件旧键 Load 忽略、无迁移） | `data/reliability/anchors/<agent>.json`（按 agent 名分文件） | 重启后节奏门按上次执行正常间隔判定（纯内存则锚缺失=冷启动直通一次，读尽存量后水位自锁，幂等安全）；同一锚兼作观察面新鲜度水位（缺省即自身分区） |
+| 冥想单锚（last-meditation 执行水位；旧空闲锚已退役，历史锚文件旧键 Load 忽略、无迁移） | `<root>/meditation/<id>/anchors.json`（按 agent 名分文件） | 重启后节奏门按上次执行正常间隔判定（纯内存则锚缺失=冷启动直通一次，读尽存量后水位自锁，幂等安全）；同一锚兼作观察面新鲜度水位（缺省即自身分区） |
 | 治理预算窗口 | `data/governance/budget/<agent>` | 预算计数跨重启延续（不清零） |
 | 待批审批 | `data/governance/approvals/` | pending 请求跨重启可见 |
 | 未消费事件/记忆兜底 | bus/mem spill | 重启后回灌/重放，不丢 |

@@ -9,12 +9,16 @@ The segment-age axis of the mapped sequence: a projection is partitioned into
 task-turn segments that an agent output closes — the inputs its fact records as
 consumed beside the process detail, with the inputs it did not name rolling into
 the next segment — exactly the way the deterministic compress level reads them,
-and each segment is placed in one of three age bands by its age — the newest
-band the segments still inside the recent window, the middle band the segments
-one and two windows back, the oldest band everything before that. A fold acts
-on the band next to the material it consumes: the process detail of the newest
-band folds into one middle-band product, and the middle band folds into the one
-history summary the oldest band reads as.
+and each segment is placed in one of three bands by its folding generation.
+A history summary covers the turns one earlier fold consumed and belongs to no
+single turn, so it stands as a complete segment of its own and the turns beside
+it keep their own material. The segments inside the recent window are the new
+band and stay whole; a segment older than that window that no fold has consumed
+is the middle band, whose process detail folds into one segment product;
+a segment that already carries a product of an earlier fold is the oldest band,
+which folds into the one history summary. Every fold promotes the material
+outside the window one band, so the promotion follows the folds and never the
+absolute distance a segment sits from the newest one.
 
 The fold is segment-grained while AssembleBudget is entry-grained: the assembly
 decides how one entry is presented under its budget and never removes an entry,
@@ -43,9 +47,8 @@ A compaction payload is restored from the chain exactly as the fold left it
 positive keys hydrate from the chain — and the tail is paged by minimum event
 key and appended in EventKey write order, never by timestamp approximation.
 
-The causal relation ledger: the parent chain one fact chain's replay maintains,
-committed to the append-only journal before the held link moves, and rebuilt
-from that journal when the ledger is opened again.
+The in-memory parent map used by a canonical replay. The zero value is ready to
+use; durable recall reads parents from the event chain instead of a journal.
 
 Budget assembly of one projection.
 
@@ -84,10 +87,18 @@ const (
 	// AgeProducerSegmentAge names the mechanism that judges a projection due for
 	// an age fold.
 	AgeProducerSegmentAge = "memory.replay.segment-age"
-	// AgeReasonSegmentFold states why the new band is folded.
-	AgeReasonSegmentFold = "the process detail of the new band is over its volume threshold"
-	// AgeReasonHistorySummary states why the middle band is folded away.
-	AgeReasonHistorySummary = "the middle band is over its volume threshold"
+	// AgeReasonSegmentFold states why the middle band is folded.
+	AgeReasonSegmentFold = "the process detail of the middle band is over its volume threshold"
+	// AgeReasonHistorySummary states why the oldest band is folded away.
+	AgeReasonHistorySummary = "the oldest band is over its volume threshold"
+
+	// DefaultAgeSummaryTextLimit bounds the text one history summary carries, in
+	// bytes. The summary is a derived view of material that stays on the chain,
+	// so it carries the newest reads while they fit and states the older ones by
+	// count: the text is bounded by this limit whatever the length of the history
+	// it compresses, and folding one summary a second time answers the same bound
+	// instead of copying the text it stands for.
+	DefaultAgeSummaryTextLimit = 2048
 )
 const (
 	// RebuildPageSize is the page size the rebuild pages the fact chain with:
@@ -126,8 +137,8 @@ var (
 	// under it would join one user's facts to a shared partition chain.
 	ErrChainKeyRequired = errors.New("memory: chain key names no session")
 	// ErrRebuildUnwired reports a rebuild without the target projection, the fact
-	// chain or the relation ledger it maintains the causal chain through.
-	ErrRebuildUnwired = errors.New("memory: rebuild needs a target projection, a fact chain and a relation ledger")
+	// chain or the parent map it maintains the causal chain through.
+	ErrRebuildUnwired = errors.New("memory: rebuild needs a target projection, a fact chain and a parent map")
 	// ErrChainPageLimit reports a chain page request that asks for no fact at all.
 	ErrChainPageLimit = errors.New("memory: chain page must read at least one fact")
 	// ErrChainScan reports a fact chain read that failed, so an empty result is
@@ -140,15 +151,6 @@ var (
 	// ref of the snapshot from the fact chain. The result it accompanies is
 	// partial and is never reported as a byte-exact rebuild.
 	ErrRebuildPartial = errors.New("memory: rebuild is partial: the fact chain misses snapshot keys")
-)
-var (
-	// ErrRelationsJournalUnwired reports a replay check asked of a ledger that
-	// holds no journal, so it has no durable source to compare against.
-	ErrRelationsJournalUnwired = errors.New("memory: the relation ledger holds no journal")
-	// ErrRelationsReplayMismatch reports a journal whose replay names a chain
-	// other than the one the ledger holds, so the served chain is not the durable
-	// record.
-	ErrRelationsReplayMismatch = errors.New("memory: the replayed relation chain differs from the held chain")
 )
 var (
 	// ErrBudgetInvalid reports a budget assembly asked to pack a request under a
@@ -165,7 +167,10 @@ func LevelOfAge(age, keepRecent int) int
     LevelOfAge reports the compress level the age of one closed segment reads
     under the deterministic rule the age axis is shared with: the recent window
     whole, the next window dropping tool commands, the window after that keeping
-    the skeleton only, and everything older archived.
+    the skeleton only, and everything older archived. The ladder is recorded on
+    the segment as the diagnostic read of its distance from the newest segment;
+    which band a segment folds in is decided by band promotion and never by this
+    distance.
 
 func RenderProjection(entries []ProjectionEntry) []byte
     RenderProjection renders the projection in its canonical form: one JSON
@@ -221,13 +226,18 @@ type AgeFoldReport struct {
 	Threshold int
 	// Triggered reports whether the fold minted a product to write.
 	Triggered bool
-	// NewFolded is how many entries the new-band fold consumed.
+	// NewFolded is how many process-detail entries the middle-band fold consumed:
+	// the material that left the recent window this round and folded its process
+	// detail into a segment product. The field keeps the name the report was
+	// first placed under; the band it counts is the middle band of the band
+	// promotion rule.
 	NewFolded int
-	// MidFolded is how many entries the middle and oldest bands contributed to
-	// the history summary.
+	// MidFolded is how many entries the oldest band contributed to the history
+	// summary: the material an earlier fold already consumed, which this fold
+	// compresses into the one bounded summary.
 	MidFolded int
 	// Products lists the product entries the fold minted, in projection order:
-	// one segment fold per folded new-band segment, then the history summary.
+	// one segment fold per folded middle-band segment, then the history summary.
 	Products []ProjectionEntry
 	// Requests lists the compress requests the fold filed, one per product, in
 	// the order the products were minted.
@@ -242,22 +252,26 @@ type Band int
     Band names one band of the segment-age axis a segment belongs to.
 
 const (
-	// BandNew is the newest band, level L0: the projection of these segments
-	// corresponds to the context text as it stands.
+	// BandNew is the newest band: the segments still inside the recent window,
+	// which the projection keeps whole.
 	BandNew Band = iota
-	// BandMid is the middle band, levels L1 and L2: the process detail between
-	// the user input and the agent output of these segments is what folds.
+	// BandMid is the middle band: the segments that left the recent window and
+	// that no fold has consumed yet, whose process detail is what folds.
 	BandMid
-	// BandOld is the oldest band, level L3: these segments read as one history
-	// summary.
+	// BandOld is the oldest band: the segments already carrying a product of an
+	// earlier fold, which read as one history summary.
 	BandOld
 )
 func BandOfAge(age, keepRecent int) Band
-    BandOfAge reports the band a closed segment of the given age belongs to.
+    BandOfAge reports the band a closed segment of the given distance from the
+    newest one belongs to under the age ladder.
 
 func BandOfLevel(level int) Band
-    BandOfLevel reports the band one compress level belongs to: L0 the new band,
-    L1 and L2 the middle band, L3 the old band.
+    BandOfLevel reports the band one compress level belongs to under the age
+    ladder: L0 the newest band, L1 and L2 the middle band, L3 the oldest band.
+    The answer states where the ladder places material of a given distance;
+    a fold bands its segments by band promotion instead, so this reading is the
+    ladder's own and never the fold's decision.
 
 func (b Band) String() string
     String reports the band as the age axis names it.
@@ -356,7 +370,7 @@ type FoldProduct struct {
 	// Entry is the synthetic entry the projection carries under Entry.Key.
 	Entry ProjectionEntry
 	// Covered lists the entry keys the product consumes, in their original
-	// order: the process detail of one closed segment, or the middle bands.
+	// order: the process detail of one middle-band segment, or the oldest band.
 	Covered []event.EventID
 	// Request is the judgment this product answers.
 	Request event.CompressRequest
@@ -369,7 +383,7 @@ type FoldProduct struct {
 type FoldedCounts struct {
 	// Segment counts the process-detail entries a segment product consumes.
 	Segment int
-	// Middle counts the entries a history summary consumes.
+	// Middle counts the entries a history summary consumes: the oldest band.
 	Middle int
 }
     FoldedCounts reports what one fold judgment would consume.
@@ -397,42 +411,15 @@ func (c *MemoryEventChain) ScanFrom(ctx context.Context, after event.EventID, li
 type MemoryRelations struct {
 	// Has unexported fields.
 }
-    MemoryRelations is the causal parent ledger between committed facts:
-    the parent of one fact is set and read back here, never on the fact payload.
-    The replay maintains these links inside one (PartitionID, SessionID) chain,
-    so a walk never crosses from one session's chain into another's.
-
-    A ledger opened over a journal commits a link to that journal before the
-    held link moves: a SetParent that returns success names a link a later
-    replay reads back, and one that returns an error leaves the held chain as
-    it was. The ledger is the one relation surface a rebuild writes through:
-    it is the only implementation, so the rebuild names it directly rather than
-    declaring a port with no second implementer behind it.
-
-func NewMemoryRelations() *MemoryRelations
-    NewMemoryRelations returns an empty relation ledger with no journal behind
-    it: its links live for the life of the process and declare no recovery
-    across process exit.
-
-func OpenMemoryRelations(root string) (*MemoryRelations, error)
-    OpenMemoryRelations opens the relation ledger rooted at root: every
-    record the journal holds is replayed into the held chain, and every link a
-    SetParent commits reaches that same journal before the held chain moves.
+    MemoryRelations is the causal parent map between committed facts. Parents
+    are set and read here, never on the fact payload, inside one (PartitionID,
+    SessionID) chain. Its zero value is an empty usable map.
 
 func (r *MemoryRelations) GetParent(child event.EventID) (event.EventID, error)
     GetParent returns the parent of child, empty when there is none.
 
-func (r *MemoryRelations) Links() map[event.EventID]event.EventID
-    Links returns a copy of the parent links the ledger holds, so a caller can
-    compare a rebuilt chain against the one it serves.
-
 func (r *MemoryRelations) SetParent(child event.EventID, parent event.EventID) error
     SetParent sets the parent of child, or clears it when parent is empty.
-
-func (r *MemoryRelations) VerifyReplay(ctx context.Context) error
-    VerifyReplay reports whether the journal replays to the chain the ledger
-    holds, so a caller can assert the durable record and the served chain agree.
-    A ledger opened without a journal has no replay source and says so.
 
 type ProjectionEntry struct {
 	// Key is the canonical identity of the fact, in its hex form.
@@ -455,6 +442,12 @@ type ProjectionEntry struct {
     of a committed fact, its type and summary, the original text it carries,
     and its time, in the same shape a recall card entry uses.
 
+func FoldedEntries(entries []ProjectionEntry, products []FoldProduct) []ProjectionEntry
+    FoldedEntries answers the entry sequence a batch of fold products would
+    leave on entries, without touching any projection. A producer states the
+    checkpoint one fold leaves through this pure form, so a restart rebuilds the
+    same sequence without judging the fold again.
+
 func WithInputEvents(entry ProjectionEntry, raw string) ProjectionEntry
     WithInputEvents returns the entry beside the input relation its fact
     recorded: the input_events metadata entry, a JSON array of the input
@@ -463,10 +456,22 @@ func WithInputEvents(entry ProjectionEntry, raw string) ProjectionEntry
     rebuild reads one under — so the segment rule closes the output positionally
     instead of guessing inputs it never named.
 
+func WithInstanceID(entry ProjectionEntry, generation event.InstanceID) ProjectionEntry
+    WithInstanceID returns the entry beside the recorder generation its fact
+    was written under: the one setter for the field the fact→projection mapping
+    fills, so the entry's public shape stays closed and the generation is read
+    back only through Generation.
+
 func WithMessageRole(entry ProjectionEntry, role string) ProjectionEntry
     WithMessageRole returns the entry beside the role its own message carried:
     the one setter for a field a cross-package assembly fills, so the entry's
     public shape stays closed.
+
+func (e ProjectionEntry) Generation() event.InstanceID
+    Generation reports the recorder generation the fact behind the entry was
+    written under: the envelope's runtime instance identity, verbatim and never
+    truncated. An entry whose fact named no generation answers empty, which the
+    fold renders as its explicit gen:? placeholder rather than inventing one.
 
 func (e ProjectionEntry) StatedRole() string
     StatedRole reports the role the fact's own message carried, empty beside a
@@ -628,12 +633,18 @@ func (p *ReplayProjection) Fold(ctx context.Context) (ProjectionEntry, error)
 
 func (p *ReplayProjection) FoldByAge(ctx context.Context, plan AgeFoldPlan) (AgeFoldReport, error)
     FoldByAge folds the projection along its segment-age bands once its rendered
-    volume passes the plan's threshold and the round has a candidate to fold:
-    the process detail of every closed new-band segment is replaced by one
-    segment-fold product, and the middle and oldest bands are replaced by
-    one history summary placed first. A projection whose volume stays inside
-    the threshold, or whose volume passes it without a new candidate, is left
-    exactly as it stands.
+    volume passes the plan's threshold: the process detail of every middle-band
+    segment is replaced by one segment-fold product, the oldest band is replaced
+    by one history summary placed first, and the new band is left exactly as
+    it stands. The bands follow the folds — a band is defined by the material
+    an earlier fold consumed — so every fold promotes the material outside
+    the recent window one band, and a projection whose volume stays inside the
+    threshold, or whose volume passes it without a band to work on, is left as
+    it stands.
+
+    A middle-band segment carrying no process detail is summarized in the same
+    round instead of waiting for the next one: nothing of it folds, and leaving
+    it in the middle band would grow that band with every turn.
 
     - The entries a product replaces leave the projection with their per-key
     material (the kept original, the dedup key and the consumed mark), so a fold
@@ -644,8 +655,8 @@ func (p *ReplayProjection) FoldByAge(ctx context.Context, plan AgeFoldPlan) (Age
     enter the projection under content-addressed synthetic keys, so folding the
     same sequence twice mints the same keys and appends no second product.
 
-func (p *ReplayProjection) FullBoundary() event.EventID
-    FullBoundary returns the event-key boundary the compaction payload carried.
+    - A history summary whose key already answers the projection mints no second
+    product: the oldest band leaves with the summary that covers it.
 
 func (p *ReplayProjection) Len() int
     Len returns how many entries the projection holds.
@@ -675,25 +686,42 @@ type Segment struct {
 	Index int
 	// Age is the distance of the segment from the newest one, zero for it.
 	Age int
-	// Level is the compress level the age reads, zero for a segment in progress.
+	// Level is the ladder level the age reads, zero for a segment in progress.
 	Level int
-	// Band is the age band the level belongs to.
+	// Band is the band band promotion places the segment in.
 	Band Band
 	// Complete reports whether an agent output closed the segment.
 	Complete bool
 	// Entries are the projection entries the segment spans, in projection order.
 	Entries []ProjectionEntry
 }
-    Segment is one task-turn segment of a projection: the entries it spans, the
-    age and level it reads, whether an agent output closed it, and the band it
-    therefore belongs to. A segment no agent output closed is still in progress,
-    reads L0 and is never folded.
+    Segment is one task-turn segment of a projection: the entries it spans,
+    the age and ladder level it reads, whether an agent output closed it,
+    and the band band promotion places it in. A segment no agent output closed
+    is still in progress, reads L0 and is never folded.
 
 func SegmentsOf(entries []ProjectionEntry, keepRecent int) []Segment
     SegmentsOf partitions the entries of one projection into its task-turn
     segments, oldest first: an agent output closes the segment of the inputs
     its fact records as consumed, an input it leaves unnamed rolls into the
     segment the next output closes, and the process entries between stay with
-    the closing output. An output beside no readable relation closes every entry
-    before it at the positional boundary. A tail no agent output closed stays
-    its own segment in progress.
+    the closing output. An output beside no readable relation closes every
+    entry before it at the positional boundary. A history summary stands as one
+    complete segment of its own. A tail no agent output closed stays its own
+    segment in progress.
+
+    Each segment is banded by band promotion: the newest keepRecent segments are
+    the new band, a segment already carrying a product of an earlier fold is
+    the oldest band, and the rest left the window without being folded and are
+    the middle band. A segment still in progress is the newest one and is never
+    folded.
+
+func (s Segment) Legacy() bool
+    Legacy reports whether the segment was closed by an agent output whose fact
+    recorded no readable input relation, so the entries before it were cut at
+    the positional boundary a chain predating the relation is interpreted under.
+    The answer is read from the closing output the segment spans, so it never
+    drifts from the entries: a segment still in progress answers false because
+    no output closed it, and a segment closed by an output that named its inputs
+    answers false whatever those inputs were. The mark is diagnostic only — the
+    segment rule, the bands and the folds read the same segments either way.

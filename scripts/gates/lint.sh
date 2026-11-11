@@ -9,6 +9,8 @@
 #   * the frozen event-ownership direct-call gate (event_ownership in golden)
 #   * the comment policy measured over product packages at zero findings
 #   * the OpenSpec strict spec-hygiene gate when the CLI is installed
+#   * the ADR 0006 three-hook guards (schema allowlist, assembly symbols,
+#     durable truth registry, main-spec hygiene), each with its negative selftest
 #
 # This file holds the rules; scripts/lint.sh is the stable forwarding entry point
 # every caller uses, so CI, the docs and a batch author run the same command.
@@ -96,8 +98,35 @@ echo "lint: checker selftests"
 run python3 -m unittest discover -s scripts/gates -p "test_check_runtime_*.py"
 run python3 scripts/gates/test_check_concept_budget.py
 run python3 -m unittest discover -s scripts/gates -p "test_check_doc_budget.py"
+run python3 scripts/gates/test_check_product_surface.py
+run python3 scripts/gates/check_product_surface.py
+run python3 scripts/gates/test_check_doc_links.py
+run python3 scripts/gates/check_doc_links.py
+run python3 scripts/gates/test_check_feature_boundary.py
+run python3 scripts/gates/check_feature_boundary.py
+run python3 scripts/gates/test_check_config_liveness.py
+run python3 scripts/gates/check_config_liveness.py
 run python3 scripts/scenarios/test_verify_restart_prefix.py
 run bash scripts/gates/test_race_check.sh
+
+# ADR 0006 三挂点守护（每条规则先跑正反样例自测，再判现树）：
+# R1 agent 声明的 schema 节白名单；R2 装配根的专属路径符号；
+# R3 持久真相登记；R4 主 spec requirement 文本的机制细节。
+# 规则修改必须同时更新自测；自测只打印 PASS 不拒绝负例时这里先红。
+echo "lint: three-hook guards (ADR 0006)"
+run python3 scripts/gates/test_check_schema_allowlist.py
+run python3 scripts/gates/check_schema_allowlist.py
+run python3 scripts/gates/test_check_assembly_symbols.py
+run python3 scripts/gates/check_assembly_symbols.py
+run python3 scripts/gates/test_check_durable_truth_registry.py
+run python3 scripts/gates/check_durable_truth_registry.py
+run python3 scripts/gates/test_check_spec_hygiene.py
+run python3 scripts/gates/check_spec_hygiene.py
+
+# 窗口/预算/策略/常量登记：四类不得串用；新增窗口类可配项即红（4.0c）。
+echo "lint: window and bound registry"
+run python3 scripts/gates/test_check_window_bounds.py
+run python3 scripts/gates/check_window_bounds.py
 
 # 运行时契约（CI 的 format-and-contract job）：计划/场景契约在无 task-graph 时
 # 没有判定对象，如实打印 skip；架构政策、概念预算与实现覆盖对现树恒判定。

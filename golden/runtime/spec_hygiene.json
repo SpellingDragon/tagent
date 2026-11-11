@@ -1,0 +1,2298 @@
+{
+  "schema_version": 1,
+  "adr": "docs/adr/0006-three-hooks-is-the-core-iteration-principle.md",
+  "user_ruling": "boundary-closure r19",
+  "review_by": "2027-05-05",
+  "reason": "Requirement prose that already carried mechanism detail when ADR 0006 R4 landed is grandfathered once. The baseline allows no new violation: a new .go name, call shape or numeric constant in requirement prose is red, and a fixed line is reported stale so the next reviewed tightening removes it.",
+  "spec_glob": "openspec/specs/*/spec.md",
+  "exceptions": [
+    {
+      "file": "openspec/specs/action-tool-config/spec.md",
+      "requirement": "tmux 可用性真实探测",
+      "rule": "numeric-constant",
+      "text_sha256": "daecb1415eb516de5a6c928c71d556a1f263519bf8e5ce576646e71bd0093418",
+      "preview": "IsTmuxAvailable SHALL 反映系统真实状态（经 PATH 探测 tmux 二进制），MUST NOT 恒返回 true；依赖该判定的降级分支（如受限模式提示）SHALL 因真实探测而获得实际语义。`IsTmuxAvailable` 的真实性以**真实 PATH 探测**为准，MUST NOT 以构造成",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/adaptive-poll-scheduling/spec.md",
+      "requirement": "Default behavior preserved",
+      "rule": "function-call",
+      "text_sha256": "7f8c680754bbce4641c171f5272f93587fd532ae0cc32bc9df23819a7a1bd0c3",
+      "preview": "Default schedule parameters SHALL preserve the prior default sync/async behavior: `dense_duration` approximately equals the retired `sync_wait`, so commands sho",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/adaptive-segment-size/spec.md",
+      "requirement": "Compaction honors max_events_per_segment at L2/L3",
+      "rule": "function-call",
+      "text_sha256": "f7ab7cfd2e9fc1913ae8bcda0da3e3b2d142c5dbe6fe0001f158eb11c05419c4",
+      "preview": "`CompactL1ToL2()` and `CompactL2ToL3()` SHALL split merged output into multiple segments if the merged event count exceeds `max_events_per_segment`. Each output",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/adaptive-segment-size/spec.md",
+      "requirement": "Segment seals early when event count reaches threshold",
+      "rule": "function-call",
+      "text_sha256": "3e7cc00b031476250d75a81c8e9859601fa04c9d0003827e1b403d40509e9a7d",
+      "preview": "`PartitionDefaults` SHALL expose `max_events_per_segment` (default `10000`). Before accepting a new event via `StoreEvent()` or processing a batch via `StoreEve",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/adaptive-segment-size/spec.md",
+      "requirement": "Segment seals early when event count reaches threshold",
+      "rule": "numeric-constant",
+      "text_sha256": "3e7cc00b031476250d75a81c8e9859601fa04c9d0003827e1b403d40509e9a7d",
+      "preview": "`PartitionDefaults` SHALL expose `max_events_per_segment` (default `10000`). Before accepting a new event via `StoreEvent()` or processing a batch via `StoreEve",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/agent-thinking-activation/spec.md",
+      "requirement": "思考修复不回归其它模型 agent",
+      "rule": "numeric-constant",
+      "text_sha256": "921b70be586c4ef7c48bef026192a243258900ae129e5eafe42ca51a49399872",
+      "preview": "对 hy3 思考的修复 SHALL 限定在 hy3 agent 的显式配置层面，SHALL NOT 引入影响其它模型 agent（如 glm-5.2 的 `plan`、deepseek 的 `recall`/`summary`）的全局框架默认——这些 agent 已通过 `thinking_enabled` 正常思考，",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/approval-channels/spec.md",
+      "requirement": "审批消息流抽象",
+      "rule": "function-call",
+      "text_sha256": "e141b961945ba3ed949c47f623748064466cde62127e3cc33b078697c09453ab",
+      "preview": "慢道审批 MUST 以 ApprovalChannel 接口统一（Deliver(request) error）；审批状态机 requested→responded(approve/reject)→consumed；审批请求仍经 ApprovalManager 落盘（digest 绑定不变）。通道投递失败不阻塞审批门（",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/approval-channels/spec.md",
+      "requirement": "审批消息流抽象",
+      "rule": "numeric-constant",
+      "text_sha256": "f2d1051756486c823a802e5102b0e38e0e2a3a95a98071788817ad130e7c038b",
+      "preview": "审批请求 MUST 有可判定的有效期（现行默认 30 分钟，以 ApprovalManager 既有配置为准），回应 SHALL 在有效期边界读取当前有效状态：过期后的回应 MUST 被具名拒绝，MUST NOT 转入 consumed、MUST NOT 执行被审批动作，也 MUST NOT 恢复为待执行义务（Hold",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/architecture-guardrails/spec.md",
+      "requirement": "事件完整性显式测试清单与共用执行引擎",
+      "rule": "numeric-constant",
+      "text_sha256": "586d76ab79b97345dbf1ae645611e0cc8033f905d600cf5c1a1d6ca4c1f602e9",
+      "preview": "新旧合同 MUST 共用现有 `run_runtime_scenarios.py` 与 `check_runtime_evidence.py` 执行/对账引擎，MUST NOT 新建平行评估系统或第二份合同解析器。新合同 SHALL 支持独立模块、build tags、`-race`、`--repeat N` 独立重复",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/architecture-guardrails/spec.md",
+      "requirement": "事件完整性显式测试清单与共用执行引擎",
+      "rule": "numeric-constant",
+      "text_sha256": "f3cac8fd31c3265b22faf7e696829f747a995bbcb5ed2d5a641a9a59b2935694",
+      "preview": "规划/回归资产 SHALL 新增 `golden/runtime/event_integrity_scenarios.json`，以 `schema_version: 2` 声明八类机制（E1—E8）、**全部产品测试及其全部必跑子场景**、模块/包/build tags/race/档位与六组合矩阵。计划回写④后 gr",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/architecture-guardrails/spec.md",
+      "requirement": "叶—测试—子场景—证据映射与 lint 对象一致",
+      "rule": "numeric-constant",
+      "text_sha256": "4fe5a18e78204243705e3174dcda1fbfa24a8a17a34c884efbd4ca4feb032107",
+      "preview": "回归门 SHALL 将每个叶任务、spec scenario、Golden 条目、真实 test selector、具名子场景、正式消费者与必跑档位逐项对齐：00—05 共 42 叶 MUST 各自被 `tests[].leaf` 或 `non_product_leaves[].leaf` 恰一次引用；产品叶 MUST",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/architecture-guardrails/spec.md",
+      "requirement": "故障变异必须由具名业务断言杀死",
+      "rule": "numeric-constant",
+      "text_sha256": "e98b521b23b3ecb62af5a97b733b973d12169c6399a89e4da1260f48510b2d83",
+      "preview": "故障变异门 SHALL 在隔离树或 Go overlay 中恢复**已被 00.3 或后续复现证实**的缺陷形态；五类候选（双路正文、忙时忽略、身份破坏、提前确认、错误路由）MUST NOT 在未证实前启用。变异清单 SHALL 随 `scripts/gates/check_event_integrity_mutati",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/architecture-guardrails/spec.md",
+      "requirement": "测试文件族与职责同位",
+      "rule": "go-file",
+      "text_sha256": "46516997b7665aaf6767bfb5089eb1a469919a5bd28a1c06a30eb916a3124330",
+      "preview": "本要求只约束测试文件族，不改动生产文件划分：既有 god file（`context_manager.go`/`tool_agent.go`）的解体另按「变更局部性准绳」既定安排处理，MUST NOT 借测试合并之名提前拆分生产文件。",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/architecture-guardrails/spec.md",
+      "requirement": "测试文件族与职责同位",
+      "rule": "go-file",
+      "text_sha256": "e6206ba7c45264341a162435ba799cdd4dac5269788409610b7a15b429e6f42b",
+      "preview": "「同一职责」的机检判定单位 SHALL 为 `(目录, 包名, build-tag 集, 契约锚点)` 四元组，参与者 SHALL 为含至少一个 `func Test` 声明的 `_test.go`；参与者数量不足 2 的键不构成违规。同键参与者 ≥2 时，组内**无镜像**（同目录不存在去掉 `_test` 后缀的同",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/architecture-guardrails/spec.md",
+      "requirement": "测试文件族与职责同位",
+      "rule": "numeric-constant",
+      "text_sha256": "e6206ba7c45264341a162435ba799cdd4dac5269788409610b7a15b429e6f42b",
+      "preview": "「同一职责」的机检判定单位 SHALL 为 `(目录, 包名, build-tag 集, 契约锚点)` 四元组，参与者 SHALL 为含至少一个 `func Test` 声明的 `_test.go`；参与者数量不足 2 的键不构成违规。同键参与者 ≥2 时，组内**无镜像**（同目录不存在去掉 `_test` 后缀的同",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/architecture-guardrails/spec.md",
+      "requirement": "测试标识不承载迭代编号",
+      "rule": "numeric-constant",
+      "text_sha256": "9e58c1c09dc4daca8309f8a2b22c4549acd5dbc5a8685b07956393a3afc593ff",
+      "preview": "测试文件名与测试/基准函数名 SHALL 以被测职责与工况语义命名，MUST NOT 含变更任务号、批次号、review 小节号、日期或「回归/修复第 N 轮」式代号（此类编号在其所属变更归档后不可解）。重命名 MUST 提供旧→新映射表，并同步所有外部引用（文档、脚本、CI 过滤器），旧标识在仓库内的引用残留 SHA",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/architecture-guardrails/spec.md",
+      "requirement": "直接调用归属检查不冒充完整调用图",
+      "rule": "numeric-constant",
+      "text_sha256": "e28419d4d6b1eb9f6145e858fdc0cfbf3d22086b3463851da013061ba2fc2d9c",
+      "preview": "架构门 SHALL 保留 `golden/runtime/architecture.json` 与 `scripts/gates/check_runtime_architecture.py --implementation` 的包依赖方向判据；事件写入/消费归属 SHALL 以人工冻结的 `event_ownershi",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/architecture-review-standards/spec.md",
+      "requirement": "审查 SHALL 验证内存中心一致性",
+      "rule": "numeric-constant",
+      "text_sha256": "88cc75e5b140c96b41078549a33a442fe0ec21243b36b919035d7c8af5ab6600",
+      "preview": "审查者 SHALL 检查 MemoryStore 是否作为唯一事实来源，Session 是否只保存轻量引用。检查项包括：FullEvent 的完整性（所有必要字段被正确填充）；MemoryPlugin 的 PartitionID 派生（AgentName → FNV-1a hash）；StateDelta 写回（eve",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/architecture-review-standards/spec.md",
+      "requirement": "审查 SHALL 验证生产接线完整性",
+      "rule": "function-call",
+      "text_sha256": "f3b67ed27eed8777e689f84f85fed74d5defc9a81c38a5b9d000c193cdda57eb",
+      "preview": "审查者 SHALL 从生产入口（tagent.go）出发，纵向追踪每个组件是否被正确创建、配置、启动和关闭。检查项包括：MemoryStore 的创建路径是否完整接入所有依赖组件（生命周期清扫 `memory/ledger.Lifecycle`、段存储与墓碑回收）；每个有 Start()/Stop() 方法的组件是否在",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/architecture-review-standards/spec.md",
+      "requirement": "审查 SHALL 验证生产接线完整性",
+      "rule": "go-file",
+      "text_sha256": "f3b67ed27eed8777e689f84f85fed74d5defc9a81c38a5b9d000c193cdda57eb",
+      "preview": "审查者 SHALL 从生产入口（tagent.go）出发，纵向追踪每个组件是否被正确创建、配置、启动和关闭。检查项包括：MemoryStore 的创建路径是否完整接入所有依赖组件（生命周期清扫 `memory/ledger.Lifecycle`、段存储与墓碑回收）；每个有 Start()/Stop() 方法的组件是否在",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/async-task-execution/spec.md",
+      "requirement": "resume 边合法源状态收敛",
+      "rule": "function-call",
+      "text_sha256": "8beec673d0ca5d1b5054d6ab7aed0632090e5dd0d2abad3f8323ba981c5b5360",
+      "preview": "任务状态机的重入边 SHALL 为：合法源状态 {alive-detached, stable, completed(settled)} → running/活跃（存活类=会话注入续行；settled=重激活并**修改状态**）；**failed / cancelled SHALL 拒绝**并引导（relaunch 或",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/async-task-execution/spec.md",
+      "requirement": "task_settled 为通知类 input 事件",
+      "rule": "numeric-constant",
+      "text_sha256": "6dd24f331d8d280d777a28e0bcdd6d29329f386eafc6e3cdad71a3e7f04046ae",
+      "preview": "> 迁移说明：本条**取代**主 spec 中「通知结果按字符数阈值（`MaxTokens/2×4`）全文内联 / 超限转储到 workspace 唯一 tool-output 目录 / 大结果永不经召回回流」的旧表述——原文持久引用与有界视图的边界改按 `recall-protocol`/`tool-output-i",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/async-task-execution/spec.md",
+      "requirement": "工具调用经 spawn + dense 窗口执行",
+      "rule": "function-call",
+      "text_sha256": "45e7c9763553e02f98a6005fb7a77a94104cf704a94a940d720c226be5b98a26",
+      "preview": "原「`Call()` 等待第一个 settle 直到 dense 阶段结束 / 窗口内内联返回 / 越窗返回 ack」的**等待式窗口语义 SHALL 被本条取代**：`Call()` 返回值语义是**受理回执**（任务已受理、结果将随后台结果回流），而**不是**该调用的最终结果；`dense`／`sync-wait",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/async-task-execution/spec.md",
+      "requirement": "并行 dense 窗口",
+      "rule": "function-call",
+      "text_sha256": "c5f86f6faa3a8dfb45efc3fcc007e714e866576a5acd67d5aab5eb67f0528e1f",
+      "preview": "当一个 turn 内 LLM 并行发起多个纳入任务层的调用时，各调用的**受理** SHALL 并行、互不阻塞事件循环；事件循环被受理占用的总时长 SHALL NOT 随调用数串行累加。（原以「并行 dense 计时窗口」表达的等待式语义不再作为 `Call()` 返回或结算依据，见「工具调用经 spawn + den",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/async-task-execution/spec.md",
+      "requirement": "服务型任务转 alive-detached",
+      "rule": "function-call",
+      "text_sha256": "be78d149c6c6e14f674366e6885b01f4844aebcd7f70de05852e47510db6b89a",
+      "preview": "服务型任务（`LifetimeOf(spec) == service`）的**运行中 / 就绪 / 终局**三类观测能力 SHALL 按已批准新合同**分维度保留**：运行中（alive）与就绪（ready）属**非终局**观测，MUST NOT 被记为 `completed`；**终局结算 SHALL 只由统一终态归",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/async-task-execution/spec.md",
+      "requirement": "通知义务存活至逻辑消费确认",
+      "rule": "function-call",
+      "text_sha256": "572451bb1679a9c3ca450073b4da757e33ba65cc6091df7c1d193fd67c05ce63",
+      "preview": "未消费通知（下称通知义务）的判据载体 SHALL 为权威未消费账（mailbox 未消费 ∪ 持久欠通知），经同源函数 `Unsettled()`（未终态工作 ∪ 未消费通知）求值，关闭、重启、报告三处同源；MUST NOT 以进程内影子账本（不可从链上算回的记忆字段）作为结清判据。",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/async-task-lifetime/spec.md",
+      "requirement": "TTL 回收与外部停止证据对齐",
+      "rule": "function-call",
+      "text_sha256": "037ae8a501c5a102e60dee154b80f2d23923f8cd0f1002783e19e79d8b09aa73",
+      "preview": "任务在派生时 SHALL 确定有限 TTL；到期唯一回收器经任务 owner 的 `Cancel()` 终止底层进程/会话。回收 SHALL 以**真实停止证据**（停止凭证/终态）为判据，`unknown` 外部状态 MUST NOT 被记作已完成回收。",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/async-task-lifetime/spec.md",
+      "requirement": "统一 TTL 是所有任务的绝对寿命上限",
+      "rule": "function-call",
+      "text_sha256": "38ebaed85bc4d02d8b413b72fb4690d39039569d41bbe4c257fb77a77de086a8",
+      "preview": "任务 SHALL 按 `runtime/task.DefaultPolicy`（`runtime/task/logical.go:89-95`，默认 TTL 2 小时）判定寿命读数；`task_default_ttl` 未接线。TTL MUST NOT 提供 0／负值／无限等\"禁用\"哨兵。到期只改变 `classify",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/async-task-lifetime/spec.md",
+      "requirement": "统一 TTL 是所有任务的绝对寿命上限",
+      "rule": "go-file",
+      "text_sha256": "38ebaed85bc4d02d8b413b72fb4690d39039569d41bbe4c257fb77a77de086a8",
+      "preview": "任务 SHALL 按 `runtime/task.DefaultPolicy`（`runtime/task/logical.go:89-95`，默认 TTL 2 小时）判定寿命读数；`task_default_ttl` 未接线。TTL MUST NOT 提供 0／负值／无限等\"禁用\"哨兵。到期只改变 `classify",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/async-task-lifetime/spec.md",
+      "requirement": "统一 TTL 是所有任务的绝对寿命上限",
+      "rule": "go-file",
+      "text_sha256": "4ff0397ff9ef122e90cb0854d201309b0fe1a15c4476f3bf89fc370a642e3726",
+      "preview": "subagent 委派的 `call_subagent` 参数面（`tool/subagent/tool.go:213+`）不含 `ttl` 键；exec 面另有 duration 租约（`tool/exec/tool.go:157`），不是任务 TTL。跨重启的寿命读数 MUST 由链上事实同形复原，而非依赖声明式参",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/async-task-lifetime/spec.md",
+      "requirement": "统一 TTL 是所有任务的绝对寿命上限",
+      "rule": "numeric-constant",
+      "text_sha256": "38ebaed85bc4d02d8b413b72fb4690d39039569d41bbe4c257fb77a77de086a8",
+      "preview": "任务 SHALL 按 `runtime/task.DefaultPolicy`（`runtime/task/logical.go:89-95`，默认 TTL 2 小时）判定寿命读数；`task_default_ttl` 未接线。TTL MUST NOT 提供 0／负值／无限等\"禁用\"哨兵。到期只改变 `classify",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/async-task-lifetime/spec.md",
+      "requirement": "统一 TTL 是所有任务的绝对寿命上限",
+      "rule": "numeric-constant",
+      "text_sha256": "4ff0397ff9ef122e90cb0854d201309b0fe1a15c4476f3bf89fc370a642e3726",
+      "preview": "subagent 委派的 `call_subagent` 参数面（`tool/subagent/tool.go:213+`）不含 `ttl` 键；exec 面另有 duration 租约（`tool/exec/tool.go:157`），不是任务 TTL。跨重启的寿命读数 MUST 由链上事实同形复原，而非依赖声明式参",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/async-tool-event-fix/spec.md",
+      "requirement": "冻结批次消费时归一化外部消息角色",
+      "rule": "go-file",
+      "text_sha256": "c915344d475236bbf178d79a9c98cb2b7c5681660114550fbd3ddb5d665f3339",
+      "preview": "> 承载坐标（现行码面）：消费侧 `agent/context_manager.go` 的 BeforeModel 回调（`msg := *evt.Message` 后按角色转换，日志串仍作 `[InjectBusInputs]`）；canonical 侧同文件的 `buildBusFact`（注释明示\"durable",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/attention-clearance/spec.md",
+      "requirement": "回答后清除写死",
+      "rule": "numeric-constant",
+      "text_sha256": "5eedae340c7aa22929c0badd4e03c1251f4eeacabd3b3f50d93901ab13056ef1",
+      "preview": "记录（与 02 域同一条款）；清除 SHALL 只作用于在场读数，MUST NOT 删除任何已落",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/attention-primitive/spec.md",
+      "requirement": "一次要答案是一次 question 事实",
+      "rule": "numeric-constant",
+      "text_sha256": "422d3cc6d0eb19d0151378a8b97783166b160018be7183555f1313db9773d5ca",
+      "preview": "调用 ID/任务 ID/反思来源）与有效期（`attention.expires_ms`，0 表示随工作结束",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/attention-primitive/spec.md",
+      "requirement": "对外面收敛为两个方法",
+      "rule": "numeric-constant",
+      "text_sha256": "afe14375722dc4d921e90690f631ffca516e843c42d9a09770bce56e59613f18",
+      "preview": "MUST NOT 导出（概念预算 S1：多态接口 ≤2 方法）。",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/bounded-trajectory-capture/spec.md",
+      "requirement": "折叠清理投影原文副本",
+      "rule": "numeric-constant",
+      "text_sha256": "a5cb6a425c2ed4da51060b8da733ffb91742a98859496a6b30325eee3f062f0e",
+      "preview": "AgeFold 折叠重写投影时 SHALL 同步删除 `originals/seen/consumed` 中被折叠条目的键；`Run.facts` 内存面 SHALL 按会话热窗口（最近 2,048 条 + 未闭合段全部）保留，重启恢复路径不变。",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/bounded-trajectory-capture/spec.md",
+      "requirement": "轨迹捕获常驻有界",
+      "rule": "numeric-constant",
+      "text_sha256": "abd566897eb0d54be5adb392ee22190dd88933909122c0df1bc6a69d074becf5",
+      "preview": "TrajectoryCapture 的常驻快照集合 SHALL 受字节预算约束（`rl.capture_budget_mb`，缺省 64）：超出预算时最旧快照 SHALL 换出落盘，seal/导出 SHALL 能按需读回且逐字段等价。seal 后整集 SHALL 释放。",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/causal-chain-isolation/spec.md",
+      "requirement": "Causal chain is isolated by session",
+      "rule": "function-call",
+      "text_sha256": "b70d7a1f14dd00f72c35f94c979e99ea3f2b0f33bca6646b740b18b1601aaf97",
+      "preview": "投影回放与召回 SHALL 尊重该隔离：冷启动重建与 `recall(turn_key=...)` 沿 `GetParent` 回走时，MUST NOT 跨 `(PartitionID, SessionID)` 把不同会话的事件连成父子；回走以 `external_input` 为停止条件，仍限于本会话链。隔离键 SH",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/code-documentation/spec.md",
+      "requirement": "代码注释形态白名单",
+      "rule": "function-call",
+      "text_sha256": "cfbdfd988a50fc5c1a9224f5cf784c50c87db2bf3d0a3bd0dd6fa9926392e53e",
+      "preview": "Go 源文件中的注释 SHALL 只存在两种形态：package/声明的 go doc 契约注释，与指向长期文档的单行索引。编译器/工具指令与一行式 `TODO(owner):` 作为机械语法豁免，豁免集合 SHALL 显式穷举于扫描器规则表。代码中 MUST NOT 存在设计理由、实现机制叙述、迭代过程记录或历史对比",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/code-documentation/spec.md",
+      "requirement": "文档索引语法与目标限制",
+      "rule": "numeric-constant",
+      "text_sha256": "5c0c1b920ce4d91e075900aa5bd236c087bf4668b8af5d06cf253c6a95af9528",
+      "preview": "注释正文 MUST NOT 出现**外部文档坐标**——变更名（含已归档变更）与计划内坐标（`design line N`、`N.M①` 之类的阶段/验收标准编号、`Red→green`、`Fail-before` 一类过程叙述）。这类引用与\"不得指向变更工件路径\"是同一条契约的两种写法：读者在代码里看到 `resid",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/code-documentation/spec.md",
+      "requirement": "注释政策扫描与豁免台账",
+      "rule": "numeric-constant",
+      "text_sha256": "a872b484453593c89653515571c7ce0bd059ea50384cc674b01c442910acd711",
+      "preview": "项目 SHALL 提供扫描器判定：非 doc 槽位注释、命中设计/迭代叙述特征、路径引用不符索引语法、指向过程工件、package/导出符号缺文档。扫描器 MUST 以内容形态为判据（长度不判定合规），违规数 SHALL 为 0 方可准出；每条豁免 MUST 登记规则与理由。",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/code-documentation/spec.md",
+      "requirement": "测试文件的注释政策",
+      "rule": "numeric-constant",
+      "text_sha256": "fbd918d3727b12c1750eb87c8c783c0559317b94a22135b34f7fd6d69b4770cb",
+      "preview": "测试文件的 doc 槽位 SHALL 只包含一行意图句、可选的并列要点列表（每行以 `- ` 起始），以及文档索引；MUST NOT 包含机制叙述、踩坑记录或用例论证。**折行是被刻意的形态而非违例**：一条契约含多个并列判据时，写成一行星号式长行（曾出现 823 rune 的单行）比分行更难读，因此规范以\"行\"为排版",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/code-documentation/spec.md",
+      "requirement": "源文件职责索引",
+      "rule": "go-file",
+      "text_sha256": "5bfdd1645f2b7ad67e9e72cc2c5982993003ac2811820569901a573c2d47d15d",
+      "preview": "每个非测试 Go 源文件 SHALL 在其文件级 doc 槽位（package 子句之前）以一行索引声明所辖职责（`// 契约: <docs/** 路径>` 或 `// 规格: <docs/** 路径>`），索引目标 MUST 满足既有「文档索引语法与目标限制」「索引必须落到具体章节」的全部约束。`scripts/` ",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/code-documentation/spec.md",
+      "requirement": "索引必须落到具体章节",
+      "rule": "numeric-constant",
+      "text_sha256": "2f3963cba9725c1c4e6680175750913afb03674b365ab8784dd9d265512f6200",
+      "preview": "指向长文档的索引 SHALL 携带章节锚点，且该锚点 SHALL 在目标文档中解析得到（显式 `<a id=\"…\">` 或含该词的标题）。判据：读者按索引跳转后 MUST NOT 需要自行在长文档里搜索。若目标文档超过 200 行而未带锚点，即为违规。反向承诺同样成立：被索引指向的契约描述 MUST 在文档中真实存在，",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/cognitive-asset-guard/spec.md",
+      "requirement": "认知资产漂移审计（终态）",
+      "rule": "numeric-constant",
+      "text_sha256": "78e4b5a39c1052a9a7406c6f4a3206933666afded9c32a7f4ef39a0048ca89b6",
+      "preview": "系统 SHALL 在启动时对认知资产文件集做 hash 快照（持久化至 resident meta 目录，跨重启保留），并周期（默认 10 分钟）比对；检测到内容变更时 SHALL 产生 `cognitive_asset_changed` 事件入事实链（携带文件路径、旧/新 hash 摘要、大小、修改时间）并记 Inf",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/compaction-scheduler/spec.md",
+      "requirement": "Compaction scheduler triggers L1→L2 compaction automatically",
+      "rule": "function-call",
+      "text_sha256": "7419c196e62169a133a04aef591c34c3daa69e6f85a474f8d50c63eed66ae497",
+      "preview": "The `Compactor.checkAndCompact()` method SHALL automatically detect when a partition's L1 segment count reaches the configured threshold (default: 24) and trigg",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/compaction-scheduler/spec.md",
+      "requirement": "Compaction scheduler triggers L1→L2 compaction automatically",
+      "rule": "numeric-constant",
+      "text_sha256": "7419c196e62169a133a04aef591c34c3daa69e6f85a474f8d50c63eed66ae497",
+      "preview": "The `Compactor.checkAndCompact()` method SHALL automatically detect when a partition's L1 segment count reaches the configured threshold (default: 24) and trigg",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/compaction-scheduler/spec.md",
+      "requirement": "Compaction scheduler triggers L2→L3 compaction automatically",
+      "rule": "function-call",
+      "text_sha256": "72f012a0e2dcbff793ebdc796f80d259be598f7b064cc70db7320a2abc57e2e2",
+      "preview": "The `Compactor.checkAndCompact()` method SHALL automatically detect when a partition's L2 segment count reaches the configured threshold (default: 7) and trigge",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/compaction-scheduler/spec.md",
+      "requirement": "Compaction scheduler triggers L2→L3 compaction automatically",
+      "rule": "numeric-constant",
+      "text_sha256": "72f012a0e2dcbff793ebdc796f80d259be598f7b064cc70db7320a2abc57e2e2",
+      "preview": "The `Compactor.checkAndCompact()` method SHALL automatically detect when a partition's L2 segment count reaches the configured threshold (default: 7) and trigge",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/compress-event-enrichment/spec.md",
+      "requirement": "历史条款已退役",
+      "rule": "go-file",
+      "text_sha256": "0d190c58bdf2f1bcc7f2aa7ebbf4487e92e1b5e51eac311ecc662cc7c9c5ed1f",
+      "preview": "本文件保留已退役的压缩事件富集注记历史记录。原条款中的规范化关键词（SHALLs/MUSTs）已全部迁出或退役；现行要求见 `task-skeleton-compression` 的段折叠与历史综述条款，公共行为锚见 `memory/replay/age_segments_test.go` 的 `TestAgeFold",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/compression-user-message/spec.md",
+      "requirement": "历史条款已退役",
+      "rule": "go-file",
+      "text_sha256": "b48d7d17e17812c322ffce4d1347e159684d23a07509a960a9ff91480467e703",
+      "preview": "本文件保留已退役的压缩后 pending user 保留与摘要 System role 历史记录。原条款中的规范化关键词（SHALLs/MUSTs）已全部迁出或退役；现行要求见 `task-skeleton-compression` 的「进行中段与近期窗口保持原样」，公共行为锚见 `memory/replay/age_",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/config-hot-reload/spec.md",
+      "requirement": "配置热更统一应用模型",
+      "rule": "numeric-constant",
+      "text_sha256": "05a83ec8b5d0ce1d182e5f3968d12e3951c9058edfadb5b6a7cf7dbdcb7188f2",
+      "preview": "配置热更 MUST 以逐 agent 解析默认值后的完整有效配置为基线。三个既有独立热参数（compress_threshold / max_tokens / keep_recent_tasks；`task_terminal_ttl` / `task_default_ttl` 未接线，见 `tagent.yaml:12",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/config-hot-reload/spec.md",
+      "requirement": "配置热更维度矩阵",
+      "rule": "numeric-constant",
+      "text_sha256": "25c9f3b1d5797897ea644923ec65e1919a0fbd50c9c64aae477bab7a7b421c81",
+      "preview": "每个子 agent 配置维度 SHALL 归属且仅归属一条热通道：**FP 代际面**（视图变更，下回合生效、在途钉定；入口移动与代理集合增删属此面——随发布换代生效、在途回合保持旧视图、移除代理的地址对新输入具名拒绝）、**SRC 源拉取面**（参数变更，下一次消费即生效）或 **FILE 事实面**（文件是声明来源",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/config-liveness/spec.md",
+      "requirement": "声明事实带载荷可审计",
+      "rule": "function-call",
+      "text_sha256": "ddb63253af680dc655b16b33d8fa3258eca2f82708b5d6db790ebd304a260557",
+      "preview": "每次 Boot/Reload 装载成功后 MUST 提交一条带载荷的声明事实：类型 `config.declaration`（单源 `api/config` 既有 `Declaration.FactType()`，assembly 只读引用、不自立常量）、身份=规范指纹（族 4 既有）、Content=规范声明序列化；",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/config-liveness/spec.md",
+      "requirement": "声明事实带载荷可审计",
+      "rule": "numeric-constant",
+      "text_sha256": "ddb63253af680dc655b16b33d8fa3258eca2f82708b5d6db790ebd304a260557",
+      "preview": "每次 Boot/Reload 装载成功后 MUST 提交一条带载荷的声明事实：类型 `config.declaration`（单源 `api/config` 既有 `Declaration.FactType()`，assembly 只读引用、不自立常量）、身份=规范指纹（族 4 既有）、Content=规范声明序列化；",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/config-state-twinship/spec.md",
+      "requirement": "config→plan→govern→state 管道",
+      "rule": "numeric-constant",
+      "text_sha256": "b27e8f5fa27cd505a9127b6a453c64cee22c8e665e5147d5f2caa02898f6789e",
+      "preview": "**发布前置契约**（由 00.3 先行审定）SHALL 声明哪些治理检查为**必需**：**必需检查缺失时 MUST 拒绝发布**，MUST NOT 视作恒真通过；**不适用或被显式禁用的检查 SHALL 显式记录豁免理由与范围**，MUST NOT 计入「证据通过」。本管道只判定**能否发布**：发布机制的确定性验",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/consolidation-triggers/spec.md",
+      "requirement": "硬门控",
+      "rule": "numeric-constant",
+      "text_sha256": "ccf09c32ce38d39133b23808e7d7b6a960aeb446008445469aeb5cbc1a8e9faf",
+      "preview": "系统 MUST 在 BuildConsolidationEvent 前置校验 min_source_events（实际取回的源事件数不足即拒绝），SNOOZED 状态记于 `0:vmeta:consolidation_state` KV 键。",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/conversation-self-heal/spec.md",
+      "requirement": "投影按 EventKey 幂等追加",
+      "rule": "numeric-constant",
+      "text_sha256": "d54df1d1fa2ec812fd4ee01a3a5b933e251d8c1ae0e30dcdfb74741dc968a43f",
+      "preview": "`SessionProjection` 追加事件引用时 SHALL 按 `EventKey` 幂等：当一个 `EventKey > 0` 的引用已存在于投影中时，重复追加 SHALL 被跳过（不产生第二份），并 SHALL 记录一条 warning 以便观测重复来源。`EventKey == 0`（未编号事件）SHAL",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/cross-session-delivery/spec.md",
+      "requirement": "投递收口于既有注入入口并保持 meditation 谱系",
+      "rule": "function-call",
+      "text_sha256": "0d89e44fa4068937db1f18a15d645e019cbe43ccec34acc49f1dca50f373a734",
+      "preview": "投递 SHALL 经目标 agent 的既有 `InjectMessageWithSource(\"meditation\", …)` 单入口进入其 mailbox；目标侧的谱系语义 SHALL 全部沿用既有契约：消息在目标侧是 meditation 谱系输入——可投递宿主（外显）、遥测审计计自管流量、**不 re-arm",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/degradation-behaviors/spec.md",
+      "requirement": "依赖退化行为响应（警告级、默认关）",
+      "rule": "numeric-constant",
+      "text_sha256": "7b15086c41d5b0d9f4358cc42b37b7e8ab0a3a5b5a0992ebdfd832e5f3f3349b",
+      "preview": "系统 MUST 提供三项独立可配置行为，仅在 DegradationManager 启用时生效，每项默认关闭（零行为变化）：model 退化→runEventLoop turn 间退避（`degradation_model_backoff`，默认 0 关）；mcp 退化→mcp_call 熔断快失败（返回含自纠材料的 ",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/delivery-closure/spec.md",
+      "requirement": "兜底告知两支：失败告知与延迟告知（r8 F1 定版；r9 F3 收口）",
+      "rule": "numeric-constant",
+      "text_sha256": "07a2e195508a16f2a615541f344d235727a078f3d1f8f47a81ebc626738df960",
+      "preview": "支② MUST NOT 以“成功终态”为前置：body 存在⇒owed 随 agent_output 在链上，send 失败落 held，该前提不可达；延迟告知在模型感知 held 之后、该驱动轮（=当前观察轮，产生该通知判定的那一轮）无面向用户产出时发出，**且不限于 answer 轮终态**（任何驱动该义务的轮结束",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/delivery-closure/spec.md",
+      "requirement": "兜底告知两支：失败告知与延迟告知（r8 F1 定版；r9 F3 收口）",
+      "rule": "numeric-constant",
+      "text_sha256": "aa302b114a9e43c6d6bb13d7a7479feed800a5de26258c858b78e25b2eef36fc",
+      "preview": "| ② | **延迟告知** | **存在未清 held 交付义务 × 该义务的驱动轮（=当前观察轮，产生该通知判定的那一轮）结束无面向用户产出** | 01 新增恰一条最小延迟告知，话术按 held.reason 分层：`retrying`→稍后必补送；`approval`/`unknown`/`retry-exha",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/delivery-closure/spec.md",
+      "requirement": "兜底告知两支：失败告知与延迟告知（r8 F1 定版；r9 F3 收口）",
+      "rule": "numeric-constant",
+      "text_sha256": "d6629b1d92e2845bdd1e13f30fa121ab5b220595647c799efb3de83d915cf9d6",
+      "preview": "| ① | **失败告知** | failed 终态 + 无正文 + 有原因（义务是否未清不影响） | 既有 failure-notice 照发；01 不新增第二条告知通道，只保证该通知必然发生 |",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/delivery-closure/spec.md",
+      "requirement": "恢复只读链与旧 KV 六态迁移",
+      "rule": "function-call",
+      "text_sha256": "55ace1277a7655aeabc2c3d8fcf12aa47f04b087705262d356a6ba8370da2fbe",
+      "preview": "重启恢复的补送范围 MUST 为**无结算事实 ∪ held(reason=retrying)** 的义务：中断在退避途中的义务 MUST 在重启后续跑重试（不因重启搁浅），已确认 sent 的义务 MUST NOT 重发（**at-least-once**：发过未销账窗口内可能重发一次，与 durable-deliv",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/delivery-closure/spec.md",
+      "requirement": "错误分类驱动的重试",
+      "rule": "function-call",
+      "text_sha256": "ddbba233fdfeef4a4b8f04dfb5e063fe046ca634e41e0cc0e7b395d750d8feff",
+      "preview": "发送失败的分类 MUST 互斥：渠道确定性拒绝（连接被拒、鉴证失败、渠道明确否定完成，且非超时形状）为**明确失败**，MUST 有界退避自动重试（退避序列与次数上限为实现常量，见 design）；**首次重试前 MUST 写 held(reason=retrying) 结算事实**（成功后由 sent 覆盖对账），重",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/delivery-dispatch-receipts/spec.md",
+      "requirement": "回执走持久总线且血统内部",
+      "rule": "function-call",
+      "text_sha256": "793a6604d8fe70078e312b52149a745baddb73e65a594a26399d619a0e57a8b0",
+      "preview": "回执 SHALL 经 `InjectMessageWithSource(\"delivery_receipt\", …)` 注入持久总线（重启恢复/换装后仍在账上）；`delivery_receipt` 血统 SHALL 保持非投递（回执轮自身输出静默、不武装冥想新颖门）；回执与用户消息同批时 user 一票否决，该轮产出",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/deterministic-compress-level/spec.md",
+      "requirement": "确定性段龄定级纯函数",
+      "rule": "function-call",
+      "text_sha256": "244d53e3532d63c044da72e9ec89c545f2d8bb4fede0ebfab96419fd732aeaf9",
+      "preview": "系统 SHALL 提供纯函数 `LevelOfAge(age, keepRecent) int`：给定一个已闭合任务回合段的段龄（0 = 最新段），按线性边界返回压缩级别——`age < keepRecent` 为 L0、`age < 2×keepRecent` 为 L1、`age < 3×keepRecent` 为 ",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/deterministic-compress-level/spec.md",
+      "requirement": "确定性段龄定级纯函数",
+      "rule": "numeric-constant",
+      "text_sha256": "244d53e3532d63c044da72e9ec89c545f2d8bb4fede0ebfab96419fd732aeaf9",
+      "preview": "系统 SHALL 提供纯函数 `LevelOfAge(age, keepRecent) int`：给定一个已闭合任务回合段的段龄（0 = 最新段），按线性边界返回压缩级别——`age < keepRecent` 为 L0、`age < 2×keepRecent` 为 L1、`age < 3×keepRecent` 为 ",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/error-handling-consistency/spec.md",
+      "requirement": "Stale comments referencing removed mechanisms are cleaned",
+      "rule": "numeric-constant",
+      "text_sha256": "8242bb80d92c9dd1dbdae3e2c852dec20c3b12aea53af5c668aee35849d90776",
+      "preview": "All comments referencing removed FullEvent.ParentKey field or Phase 1 event view transformation SHALL be updated or removed.",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/evals-harness/spec.md",
+      "requirement": "共享 Host 多会话真实重启长程矩阵",
+      "rule": "numeric-constant",
+      "text_sha256": "c1d46fd4b265c72a9b4e70c43a83b3287c5e9e86b8065a892a9558dc7a39c7a1",
+      "preview": "长程模拟 SHALL 在**同一个 Host** 上运行 4 个会话，每会话 300 个不同业务输入（1200 输入/组合）；每会话 SHALL 轮流安排 30 个重启触发点（合计 120 次真实子进程重启/组合），每次重启 MUST 恢复全部四会话。矩阵 SHALL 为 seed `1/7/42` × 回放窗口 `2",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/evals-harness/spec.md",
+      "requirement": "控制事件消费者矩阵",
+      "rule": "numeric-constant",
+      "text_sha256": "ff2265f544e924f580bbe5bec74be363ee5e2c9bf8b368eb406d21db1ed1226f",
+      "preview": "五类控制机制 SHALL 各自使用独立父测试与独立叶（03.4 审批、03.5 反思回流、03.6 压缩投影、03.7 替换、03.8 采集），MUST NOT 合为单一控制父测试。每个父测试 SHALL 具名 `positive`/`negative`/`consumer` 三锚，且消费者锚 MUST 引用正式生产消",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/evals-harness/spec.md",
+      "requirement": "模拟成本先校准后冻结预算",
+      "rule": "numeric-constant",
+      "text_sha256": "12ee9f0fc1217b76906ac950774ebf917911f87fb03a0d728eb0a42118441955",
+      "preview": "长程与故障变异预算 SHALL 在冻结前由独立的一次性只读校准父测试（03.10）测得：先测两个窗口的单组合成本，分别记录冷构建、热运行、120 次重启、`-race`、存储增长与峰值资源，产出校准报告；该父测试 MUST NOT 登记进每 MR 的 short/long 选择器，MUST NOT 参与父测试与锚计数。",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/evals-harness/spec.md",
+      "requirement": "正式装配多决策模拟",
+      "rule": "numeric-constant",
+      "text_sha256": "f32ff57a843cc901b674fd66c7b19e485efe29366e9bc99c86e8f0ed669a1896",
+      "preview": "正式装配模拟 SHALL 从产品公开入口启动：根场景使用 `Run.Invoke`/`Host.Invoke`/Boot 装配，微信场景使用配置 → 应用 options → Boot → 渠道绑定 → `registerHandlers` → HTTP `/task`。模型协议与渠道出站 SHALL 使用本地替身，内",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/event-compaction/spec.md",
+      "requirement": "历史条款已退役",
+      "rule": "go-file",
+      "text_sha256": "801e2a8e5ea83caf38630a66cbe1f5c0d14bd031418cb92b7888726c882291a3",
+      "preview": "本文件保留已退役的统一分段与 BeforeModel 压缩回调链的历史记录。原条款中的规范化关键词（SHALLs/MUSTs）已全部迁出或退役；现行要求见 `compression-pipeline` 与 `task-skeleton-compression`，公共行为锚见 `tests/integration/hos",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/event-lifecycle/spec.md",
+      "requirement": "TTL 扫描为周期性全量扫描",
+      "rule": "function-call",
+      "text_sha256": "86e93a391952397625531a2efab0e8402f4b296a43579dbf6fc2c4c1154fbe9f",
+      "preview": "该实现的成本为 O(分区内事件数)/周期；有界成本的增量扫描（游标或按段年龄剪枝）为已知缺口，记录于 memory 架构文档，SHALL 在单独变更中评估。",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/event-lifecycle/spec.md",
+      "requirement": "生命周期策略经声明式配置注入",
+      "rule": "function-call",
+      "text_sha256": "75800f2b711827daff0f35a7f989118e103a7ee4928f1c6923942eedeaf95c54",
+      "preview": "`LifecycleConfig` SHALL 可经 agent 的 memory 配置（YAML）注入，至少覆盖 `global_ttl_days`、`type_ttl`（按事件类型覆写，负值 = 豁免）、`check_interval`、`max_events_per_partition`。组合根 SHALL NO",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/event-relation-store/spec.md",
+      "requirement": "Create and load snapshots",
+      "rule": "function-call",
+      "text_sha256": "c847ac9b3b93bd24417a93641fcdd24e707ec2180ee1ef42bab804436c607a28",
+      "preview": "The system SHALL support creating a full snapshot of the current relation graph (`Snapshot()`). The snapshot SHALL be writable to a file (`relations.snap`) for ",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/event-relation-store/spec.md",
+      "requirement": "Recover relation graph from snapshot and journal on restart",
+      "rule": "numeric-constant",
+      "text_sha256": "fc4df788ae09d4d3038677c3535baa234b3827c705d8237205b4e761ff662ecc",
+      "preview": "The system SHALL recover the full relation graph on restart by: (1) loading the most recent snapshot file (`relations.snap`), (2) replaying all journal entries ",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/event-relation-store/spec.md",
+      "requirement": "RelationStore is in-memory with bounded size",
+      "rule": "numeric-constant",
+      "text_sha256": "a424df2756974a00f413d26b11cce5b429307cef9dbf99530b3f76459bbd3f42",
+      "preview": "The system SHALL maintain all relationships entirely in memory using two Go maps: `childToParent map[int64]int64` and `parentToChildren map[int64][]int64`. For ",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/event-relation-store/spec.md",
+      "requirement": "Remove all relationships for an event",
+      "rule": "function-call",
+      "text_sha256": "51f65e83c97a9bd2d333872583268d2e0abd1e2137ff45627833ad8cb072334a",
+      "preview": "The system SHALL support removing all relationships for a given EventKey (used when an event is tombstoned). `RemoveRelations(key)` SHALL delete the key's entry",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/event-relation-store/spec.md",
+      "requirement": "Set and retrieve parent-child event relationships",
+      "rule": "function-call",
+      "text_sha256": "ff7662dc5d562dfa9e8aa8edf3e5ce0db63a246c17ee76f277e59b0f13e57f56",
+      "preview": "The system SHALL maintain a mutable directed graph of event causal relationships, independent of event content storage. `SetParent(childKey, parentKey)` SHALL e",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/event-relation-store/spec.md",
+      "requirement": "Set and retrieve parent-child event relationships",
+      "rule": "numeric-constant",
+      "text_sha256": "ff7662dc5d562dfa9e8aa8edf3e5ce0db63a246c17ee76f277e59b0f13e57f56",
+      "preview": "The system SHALL maintain a mutable directed graph of event causal relationships, independent of event content storage. `SetParent(childKey, parentKey)` SHALL e",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/event-segment-store/spec.md",
+      "requirement": "FileSegmentStore supports graceful shutdown via Close",
+      "rule": "function-call",
+      "text_sha256": "f8360e41f854b1b7f101677d6ef75ec350e70b48155503627033b547639f3fac",
+      "preview": "`FileSegmentStore` SHALL provide a `Close() error` method that gracefully shuts down all lifecycle subsystems: stops LifecycleManager scanner loop, stops Compac",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/event-segment-store/spec.md",
+      "requirement": "LocalFileKV Sync 为原子快照屏障",
+      "rule": "function-call",
+      "text_sha256": "5440cc2d13e55eb570897556fd6845188065f797e7c20a71be20837faaf11563",
+      "preview": "LocalFileKV 的 `Sync()` SHALL 将全部键值整序列化并以临时文件写入加原子 rename 落盘；快照 SHALL 按分区分片（每分区独立文件），`Sync()` 只重写自上次屏障以来变更过的分区——单次提交的屏障成本 SHALL 与其触碰的分区成正比，MUST NOT 与全库键数成正比。`Syn",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/event-segment-store/spec.md",
+      "requirement": "resolvePartitions 默认隔离（无分区参数返回空）",
+      "rule": "function-call",
+      "text_sha256": "4d58c66d324d57cf2708aeb1679aa2c187aee0af7f7f0bef5aa3765e3ef2046c",
+      "preview": "`resolvePartitions(query)` 在 `PartitionIDs` 与 `PartitionID` 均未指定时 SHALL 返回空集（即不扫描任何分区）——子 Agent SHALL NOT 通过无参查询盲扫其他分区的历史；分区读取 SHALL 由工具层显式注入 `PartitionIDs`：自身命",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/event-segment-store/spec.md",
+      "requirement": "seq 槽位与事件身份一一对应",
+      "rule": "numeric-constant",
+      "text_sha256": "90cff81cea8ae6a027038195f7d039d4eb134f19786612c7c76886bcffb3f918",
+      "preview": "写入时分配的 `{pid}:evt:{window_ts}:{seq}` 槽位 SHALL NOT 覆写已存在的事件。当内存态判定进入一个“新窗口”时（含进程重启后首次写入），存储层 SHALL 先从 KV 恢复该窗口已使用的最大 seq，并从 `max+1` 续写（空窗口则从 0）。",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/event-segment-store/spec.md",
+      "requirement": "seqCounter recovered from existing segment data",
+      "rule": "function-call",
+      "text_sha256": "ca22385706e78aa2042d49ca378f70341bc8128726156e5b32c0ac35b8d4a729",
+      "preview": "存储层 SHALL 在进入新窗口时从已有段数据恢复 `seqCounter`：扫 `{pid}:evt:{window_ts}:` 前缀取最大 seq，从 `max+1` 续写。扫描域 SHALL 仅限当前窗口，SHALL NOT 全分区或全层扫描。`Init()` 可保持惰性（不预扫分区），因为恢复已在写入路径上保证",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/event-segment-store/spec.md",
+      "requirement": "seqCounter recovered from existing segment data",
+      "rule": "numeric-constant",
+      "text_sha256": "ca22385706e78aa2042d49ca378f70341bc8128726156e5b32c0ac35b8d4a729",
+      "preview": "存储层 SHALL 在进入新窗口时从已有段数据恢复 `seqCounter`：扫 `{pid}:evt:{window_ts}:` 前缀取最大 seq，从 `max+1` 续写。扫描域 SHALL 仅限当前窗口，SHALL NOT 全分区或全层扫描。`Init()` 可保持惰性（不预扫分区），因为恢复已在写入路径上保证",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/event-segment-store/spec.md",
+      "requirement": "恢复能力经过包装层真实透传",
+      "rule": "function-call",
+      "text_sha256": "aeaca3aed06880c0da6210966bcb5f2ecd69418841dd29bed14d8aa783ca6e71",
+      "preview": "内置后端及 engine／error-tracking 包装链 SHALL **递归**核验并透传**恢复/保留/登记屏障**所需能力；能力 SHALL 按**真实消费者**所需端口表达（具体端口名称/签名**不在此冻结**，DESIGN-GATE(G1) 依真实 consumer 收敛——不复述旧 5 方法清单）。包",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/event-segment-store/spec.md",
+      "requirement": "恢复能力经过包装层真实透传",
+      "rule": "numeric-constant",
+      "text_sha256": "aeaca3aed06880c0da6210966bcb5f2ecd69418841dd29bed14d8aa783ca6e71",
+      "preview": "内置后端及 engine／error-tracking 包装链 SHALL **递归**核验并透传**恢复/保留/登记屏障**所需能力；能力 SHALL 按**真实消费者**所需端口表达（具体端口名称/签名**不在此冻结**，DESIGN-GATE(G1) 依真实 consumer 收敛——不复述旧 5 方法清单）。包",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/event-segment-store/spec.md",
+      "requirement": "未确认恢复材料的有限保留租约",
+      "rule": "function-call",
+      "text_sha256": "6bbeb42959c52cc2c18ac8bd25df12c28d5659abb33043510e0fc187d053d8aa",
+      "preview": "`Sync()` 屏障与保留租约 SHALL 协同：屏障成功是提交对外可见的前提，租约则是「恢复清点完成前不得销毁」的保护，两者不得互相短路（屏障不因租约存在而放宽，租约不因屏障成功而解除）。",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/event-segment-store/spec.md",
+      "requirement": "未确认恢复材料的有限保留租约",
+      "rule": "go-file",
+      "text_sha256": "eb59fa540e199a913c9de9beb15bce564d9ce6475478b9f96fae9d4982c6871a",
+      "preview": "保护期内 TTL 过期、容量淘汰、内容降分辨率与墓碑最终清理 MUST NOT 物理销毁所需原文——只拒销毁，无损搬迁（压实复制原文到高层段）允许。显式删除受保护 key MUST 返回可判定的 protected 错误，MUST NOT 静默销毁。遗忘扫描的首轮破坏性动作 MUST 等待租约武装与登记屏障解除；无耐久",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/event-segment-store/spec.md",
+      "requirement": "窗口剪枝跨度按段层级取值",
+      "rule": "numeric-constant",
+      "text_sha256": "c239d928b8399a524ed02fbc00f196b6f69d07b47b4a8daf09f1c1fcf87d5534",
+      "preview": "窗口级时间剪枝 SHALL 按段的 `SegmentMeta.Layer` 取窗口跨度：L0/L1 为 3600 秒、L2 为 86400 秒、L3 为 604800 秒；layer 缺失或解析失败时 SHALL 回退 3600 秒（保守少剪）。layer SHALL 从 meta 扫描已返回的 value 解析，SH",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/event-sourced-projection/spec.md",
+      "requirement": "投影的通道分区与统一装配",
+      "rule": "numeric-constant",
+      "text_sha256": "3945401d926bad64f6c887c707a8eaaf8b5bb81e2f5c153ed6e2ba5eb7272a99",
+      "preview": "SessionProjection SHALL 支持通道分区（对话/遥测/反思）：assembleRequest 仍为唯一装配源（不变量 1 不变），按 system + 反思综述 + 对话窗口 + 遥测卡片/看板 + 本轮新事件的次序统一装配。遥测分区的降级/退出操作 SHALL 仅作用于投影（「Compact 只改",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/event-timeline-rendering/spec.md",
+      "requirement": "BeforeModel 时投影完整性为构造保证",
+      "rule": "numeric-constant",
+      "text_sha256": "1afb58d8e604b67c6fcba523f3924437476a9918c70a207fea7e5f05ee096e80",
+      "preview": "对任意第 K 次迭代的 BeforeModel，投影 SHALL 已包含此前所有已存储事件（含第 K-1 迭代的 assistant 与 tool result）。该完整性 SHALL 由机制保证（框架对工具结果事件的 completion-wait 覆盖插件处理；runner FIFO 处理顺序的传递性），SHALL",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/event-timeline-rendering/spec.md",
+      "requirement": "投影为 LLM 输入的唯一装配源",
+      "rule": "function-call",
+      "text_sha256": "d6a3784f477a8f1cefc98885e180b1754fd079556758c48c936e38f35c130839",
+      "preview": "每次 BeforeModel 组装发送给模型的消息时，系统 SHALL 仅以 `[system 消息] + render(投影) + 任务看板` 组装请求。系统 SHALL NOT 读取框架 `args.Request.Messages` 中除 system 消息以外的任何内容（不读回框架维护的消息尾部、不按字符串前缀",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/example-local-file-delivery/spec.md",
+      "requirement": "从 agent 回复中解析本地文件路径",
+      "rule": "function-call",
+      "text_sha256": "e8e2e64bb82fc7e5e0952bba4945a77bbc32798207bb5266ad9993ceea6098f1",
+      "preview": "wechat-bot 投递层 SHALL 提供纯函数 `ExtractFilePaths(text string, workspaceDir string) []string`，从 agent 最终回复文本中识别本地文件路径。识别规则：",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/example-local-file-delivery/spec.md",
+      "requirement": "从 agent 回复中解析本地文件路径",
+      "rule": "numeric-constant",
+      "text_sha256": "78c8b0ce36bf4c1876246a44be62a8861e9a520f3b6a741b2bf63bd1f3e87053",
+      "preview": "3. 候选必须以文件扩展名结尾（正则 `\\.[A-Za-z0-9]{1,10}$`）。",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/example-local-file-delivery/spec.md",
+      "requirement": "从 agent 回复中解析本地文件路径",
+      "rule": "numeric-constant",
+      "text_sha256": "960b13b769e3876b9c7bb4c728d0ab44d9c82215a8ab0fa2b8e260d6a3012cb4",
+      "preview": "6. **排除可执行文件**：候选文件若具有任意可执行权限位（`mode & 0111 != 0`）或扩展名属于拒绝列表（`exe|dll|bat|cmd|sh|bin|out|app|msi|com|run`），则不予纳入。此规则为硬性限制，不可配置。",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/example-local-file-delivery/spec.md",
+      "requirement": "投递文件并保留原始文本",
+      "rule": "function-call",
+      "text_sha256": "1316618fbafe2eb032d07bb0b5d0d0231fba80cf092e8a0173fc4d9412285ced",
+      "preview": "wechat-bot SHALL 在收到 agent 最终回复后，将原始文本发送给用户（保留文本，不做路径剥离；长文本沿用既有 `SendLongText` 分片/转文件逻辑），并对文本中解析出的每个本地文件路径按其类型调用对应的 `Send*FromPath(chatID, path)`。文本与文件均使用与 `cha",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/example-rl-visibility/spec.md",
+      "requirement": "HTTPAPI 服务启动",
+      "rule": "numeric-constant",
+      "text_sha256": "87c97128bf6dbc3246d23d29b8f5c9286bb43089926863fe58897368080caf4c",
+      "preview": "wechat-bot 示例 SHALL 在启动时同时启动 `agent.HTTPAPI` HTTP 服务，暴露健康检查和任务提交端点，端口通过 `TAGENT_HTTP_PORT` 环境变量配置，默认 8089。HTTPAPI SHALL NOT 提供 trajectory 查询端点。",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/fact-vocabulary/spec.md",
+      "requirement": "事实类别契约",
+      "rule": "numeric-constant",
+      "text_sha256": "0c06abaf26a8ef0e9acb3788e866f738bfa6ca976a74b8b33b47677bf3c199ef",
+      "preview": "框架 SHALL 在 event 包声明事实类别接口（`Fact`：身份与类型两问），每个事实族（核心事件、通知、训练记录、声明、引用票据、压缩请求、压缩产物、收尾判定、注意力；编号 6「回放结算」已退役留空）MUST 在其所属包内实现该接口；事实族的归属包 MUST 在词汇表文档中逐族登记（族/身份/类型/归属/锁定",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/failure-polarity/spec.md",
+      "requirement": "结算信号与通知携带 exit_code",
+      "rule": "numeric-constant",
+      "text_sha256": "0071915b300f19194513735947fe98155c230aff7280316e67d961e8639cf6ae",
+      "preview": "`SettleSignal` SHALL 携带显式 `ExitCode` 字段（零退出=0，未知=-1 哨兵，信号死=负数）；action 工具结果结构体 SHALL 暴露 `exit_code` JSON 字段；`task_settled` 通知文本对失败结算 SHALL 含 `exit_code=N`。下游消费 M",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/feedback-binding/spec.md",
+      "requirement": "feedback 事件类型",
+      "rule": "numeric-constant",
+      "text_sha256": "6e732cf4e41c4a248de59e985285000333e96c2d4f01ae1ef97547133b97f2cc",
+      "preview": "系统 MUST 经 EventTypeSpec 注册表注册 `feedback` 事件类型：正 key、Role=system、TTL 可配置（默认 30 天）、不进 LowValueEventTypes、Recallable=true。",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/feedback-binding/spec.md",
+      "requirement": "guardrail 负反馈判据",
+      "rule": "numeric-constant",
+      "text_sha256": "5f328762830ebe43d9f2394b25488c6e6d232a687e7d78155442e51138b8d0e3",
+      "preview": "MetricGuardrail canary 窗口 MUST 聚合 `negative_feedback_rate`（经 feedback 因果边 join 到 parent 事件的 bundle_id 归因），阈值独立配置（MaxNegFbRate：0=默认 0.3，负值=显式禁用）。",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/fold-provenance/spec.md",
+      "requirement": "折叠摘要携带时序与世代",
+      "rule": "numeric-constant",
+      "text_sha256": "2d32fe0bc8c1d3fdf8c6fae87faa5807fe5dd7f8b579679251e4039f56292b7d",
+      "preview": "折叠摘要行 MUST 以行首锚点携带事件时刻（至少天级+时:分）与 recorder 世代标识；世代标识 MUST 取信封 instance_id 的**完整值**（MUST NOT 截断，如只取前 8 位）；该值 MUST 可经既有投影条目读取面取得（承载字段与读取方法的实现形态见 design，MUST NOT 新",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/framework-prompt/spec.md",
+      "requirement": "tagent framework prompt injected before user system prompt",
+      "rule": "numeric-constant",
+      "text_sha256": "49d3a001b15c1e1bc8857627bf385ec7e77c4613774ed60b4c903414d077db01",
+      "preview": "ContextManager SHALL prepend a framework runtime description before the user-configured system prompt (from AGENTS.md/SOUL.md/etc). The framework prompt describ",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/inbound-intent-declaration/spec.md",
+      "requirement": "声明受理 fail-closed 三重校验",
+      "rule": "numeric-constant",
+      "text_sha256": "0edf3ef197f5f12bfa385f346ae0b1a5f40f836e02f74500701568192e7fef52",
+      "preview": "声明 SHALL 满足三点，任一不满足即 400 拒绝整请求（fail-closed）：值域当前仅 `\"user\"`（扩域需显式裁决并修订本条）；**受理前提为端点已鉴权（配置了 auth token）或请求源为回环地址**（127.0.0.0/8、::1；源地址解析失败一律按非回环保守拒）；缺省为不声明。经回环前提受",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/llm-event-valuation/spec.md",
+      "requirement": "历史条款已退役",
+      "rule": "go-file",
+      "text_sha256": "13c6c83c69337beddca02f9eb04b0d304ef49e156e66f07281155d7b9ca19d15",
+      "preview": "本文件保留已退役的 LLM 事件估值历史记录。原条款中的规范化关键词（SHALLs/MUSTs）已全部迁出或退役；现行要求见 `deterministic-compress-level` 与 `task-skeleton-compression`，公共行为锚见 `memory/replay/age_segments_t",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/llm-summary-generator/spec.md",
+      "requirement": "历史条款已退役",
+      "rule": "go-file",
+      "text_sha256": "0b721a0736822d07d9876f44cd3c1c295bf97455d2e8f29d174c433f18161d5e",
+      "preview": "本文件保留已退役的 LLM 摘要管线历史记录。原条款中的规范化关键词（SHALLs/MUSTs）已全部迁出或退役；现行要求见 `task-skeleton-compression` 与 `compression-pipeline`，公共行为锚见 `memory/replay/age_segments_test.go` ",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/mcp-call-tool/spec.md",
+      "requirement": "注册表解析与直调",
+      "rule": "function-call",
+      "text_sha256": "4bcd8eebed86693748908a54696a9d4ee1a8d654d71f49b9ee4f36e9cf70ad76",
+      "preview": "`mcp_call` SHALL 按 `server` 从注册表解析 toolset,经 `Tools(ctx)` 按 `Declaration().Name` 精确匹配 `tool`,并以 `args` 的 JSON 序列化调用目标 `CallableTool.Call`,透传其返回值。",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/mcp-call-tool/spec.md",
+      "requirement": "自纠错误反馈",
+      "rule": "function-call",
+      "text_sha256": "4ce742af4a4cd56f9491722e02850eacda6df31a0d6813f7327e4002a05d37f4",
+      "preview": "调用失败时 `mcp_call` SHALL 返回可供模型自纠的结构化错误:未知 server 时携带注册表 `Names()` 清单;未知 tool 时携带该 server 的工具名清单;目标工具调用出错时附带该工具的 InputSchema JSON 回显。",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/mcp-discovery/spec.md",
+      "requirement": "发现与绑定代际一致",
+      "rule": "function-call",
+      "text_sha256": "bf1f9631090b95a770ef2e87e825d43972890c0a5ca66ac428f5a2d5d2740084",
+      "preview": "`mcp_discover` SHALL 在每次调用时从**当次请求借用代**的注入 `MCPRegistry` 读取 server 集合；发现的调用指引 `mcp_call(server=..., tool=..., args=...)` SHALL 在该代下真实可执行；发现结果 SHALL 携带目标工具 Input",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/mcp-discovery/spec.md",
+      "requirement": "基于实时注册表的发现",
+      "rule": "function-call",
+      "text_sha256": "533230e11e6cb6742ed6cabf2b35ced7c2ca4e9114abf56a86d28d373d71f967",
+      "preview": "`mcp_discover` SHALL 从注入的 `MCPRegistry` 在每次调用时实时读取 server 集合(而非构建期快照),对每个 server 经 `Tools(ctx)` 拉取工具并按 query 与 name/description 做大小写不敏感匹配;朴素子串不中时 SHALL 回退分词 AND",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/mcp-discovery/spec.md",
+      "requirement": "如实的调用指引",
+      "rule": "function-call",
+      "text_sha256": "a2240a63f69326292e098787988c315afb1bddf6d600ce5565dd455db355d48d",
+      "preview": "发现结果的 content SHALL 包含真实可执行的调用指引 `mcp_call(server=\"<toolset 名>\", tool=\"<工具名>\", args={...})` 及该工具的 InputSchema JSON;MUST NOT 输出\"经 command/exec 调用\"的指引。source 字段保持",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/mcp-discovery/spec.md",
+      "requirement": "空注册表与无匹配行为",
+      "rule": "numeric-constant",
+      "text_sha256": "5fd0cb967a73284a22b37cc8e89e46cf3aed202c427f82a23304362f1e4b6f7c",
+      "preview": "注册表为空或无匹配时,`mcp_discover` SHALL 返回空结果集(count=0)而非错误;单个 server 拉取工具失败 MUST NOT 中断对其余 server 的发现。",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/mcp-server-registry/spec.md",
+      "requirement": "构建期装配与生命周期",
+      "rule": "function-call",
+      "text_sha256": "69717cee3240f1aee69e6329a7da3a3926db53287ca836c9bc98ed61cdddeee0",
+      "preview": "`tagent.New()` SHALL 从 `Config.MCPServers` 构建注册表并经 `PlainToolFactoryConfig.MCPRegistry` 注入工具工厂;`WithMCPToolSets` 注入的 toolset SHALL 以其 `Name()` 并入注册表;注册表 SHALL 实",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/mcp-server-registry/spec.md",
+      "requirement": "运行时注册表",
+      "rule": "function-call",
+      "text_sha256": "c2ea1ab7a17b35bb1198740b18de8214d6cc848b33353639b4f907037069b72b",
+      "preview": "系统 SHALL 提供并发安全的 `MCPRegistry`:`Get(name)`、`List()`、`Names()`(输出按名排序)、`Add(name, toolset)`、`Remove(name)`(Remove 时关闭对应 toolset)。注册表操作 MUST NOT 改变任何 agent 的工具声明集",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/meditation-delivery-tool/spec.md",
+      "requirement": "投递内容有界",
+      "rule": "numeric-constant",
+      "text_sha256": "3e544829149625f230c825095677a39d44962ba4ecfeda5aac5be61ce662400b",
+      "preview": "`content` SHALL 有上界（8KiB）；超限具名拒绝且回合继续。每次成功/被拒 SHALL 有 run 级日志可观测，MUST NOT 为此新建第二账本。",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/memory-curation/spec.md",
+      "requirement": "卡片序列（历史表示的唯一对象）",
+      "rule": "numeric-constant",
+      "text_sha256": "9fade750d6a36fdf93149e951fc4ced3be6b7f813dcedb7ca7f7d29bc0a3261d",
+      "preview": "滚动 summaryRef 的内容 SHALL 为:累计计数 + 卡片行序列 + 近期 key 清单（现状有界规则）。卡片行 SHALL 在 Compact 时刻工程化提取（零 LLM）:有 SummaryModel 时取段摘要首行,无 SummaryModel 时取段边界事件摘要首行+任务层元数据（settle 状态",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/memory-curation/spec.md",
+      "requirement": "记忆三原语与固化级联",
+      "rule": "numeric-constant",
+      "text_sha256": "1a577afc6edeca49d567f9648965d6c3d87461ca306b1067bff2b39bc2e3a08a",
+      "preview": "内容级总结 SHALL 收归压缩固化时刻,遵循素材律:第 N 层素材恒为第 N-1 层固化物（事件原文 →L3 段摘要 →工程提取卡片行 →超限时浓缩卡片）,唯一例外是第 0→1 层（段内事件原文）。SummaryPlugin SHALL 退位为元数据标注（`event_summary`=\"原文截断视图\",键名与消费端",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/memory-observation/spec.md",
+      "requirement": "运行时内存观测面",
+      "rule": "numeric-constant",
+      "text_sha256": "5897c883c5e1b802ffc9ad8c12fa440584ccb25f2d67b82e5e16d95c5cbf6588",
+      "preview": "host face SHALL 提供 `/debug/pprof/{heap,goroutine,allocs}`（仅 localhost 绑定）；`TAGENT_GCTRACE=1` SHALL 透传 GODEBUG=gctrace=1。作为 S4（堆棘轮残差）钉死与长期内存回归的证据面。",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/ops-deployment-integrity/spec.md",
+      "requirement": "探针五态分类",
+      "rule": "numeric-constant",
+      "text_sha256": "a20afcf7f4d10be37f9eca74e6fe47ee9c045725ef941177eef38e13007b9b3c",
+      "preview": "restart / maintenance 健康探针 SHALL 区分五态：200→健康；401/403→AUTH_FAIL（告警、**不触发杀进程**）；超时→等待窗口内正常状态；连接拒绝→等待窗口内正常状态。鉴权失败 MUST NOT 被视作进程失效。",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/ops-deployment-integrity/spec.md",
+      "requirement": "运维探针认证集成",
+      "rule": "numeric-constant",
+      "text_sha256": "4d52049aca5b21b870f28b051491a1453febfe2835d403b76aa429722f0408d3",
+      "preview": "restart / maintenance 健康探针与 mail poller MUST 从受控凭证源（环境变量或 rl 配置文件）读取认证 token 并随请求发送；`/healthz` 保持鉴权不豁免。探针 MUST 区分响应类别：401 → AUTH_FAIL（告警、不触发杀进程）、连接拒绝 → 等待窗口内正常状",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/orchestration/spec.md",
+      "requirement": "三段验收",
+      "rule": "numeric-constant",
+      "text_sha256": "d371882cc949bd56b513b7f15c18c77ddd123a1136d7ed1c2ede97a4f45aa95e",
+      "preview": "孙任务 SHALL exit 0 且带正/负/消费者三锚；子域 Scenario 逐条映射测试；变更级 DoD SHALL 含症状锚红转绿与回滚即红双证据。",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/orchestration/spec.md",
+      "requirement": "两阶段交付与骨架评审门",
+      "rule": "function-call",
+      "text_sha256": "96904da4d20945f4ee8c0c08e5f23552c9f730b7d3efec91938d8ecf4217c55a",
+      "preview": "交付 SHALL 分两阶段。阶段一 = 24 个骨架叶任务（编号 `NN.P0.M`）**仅含**数据/接口定义与 CI 合规注释文档，stub 方法体**仅**返回哨兵错误 `errors.New(\"phase 2: not implemented\")`（无返回值方法仅 `// TODO(phase2)` 空体）、*",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/orchestration/spec.md",
+      "requirement": "两阶段交付与骨架评审门",
+      "rule": "numeric-constant",
+      "text_sha256": "96904da4d20945f4ee8c0c08e5f23552c9f730b7d3efec91938d8ecf4217c55a",
+      "preview": "交付 SHALL 分两阶段。阶段一 = 24 个骨架叶任务（编号 `NN.P0.M`）**仅含**数据/接口定义与 CI 合规注释文档，stub 方法体**仅**返回哨兵错误 `errors.New(\"phase 2: not implemented\")`（无返回值方法仅 `// TODO(phase2)` 空体）、*",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/orchestration/spec.md",
+      "requirement": "共享面由冻结方单写",
+      "rule": "numeric-constant",
+      "text_sha256": "9b268a751986271f960021ecbcb4de4666f53fd79fa117de4ff3c21c74920839",
+      "preview": "`api/event` 的类型与 meta 键 SHALL 由 01 域单写并在其入 main 后冻结；此后任何",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/orchestration/spec.md",
+      "requirement": "协议保真热点串行",
+      "rule": "go-file",
+      "text_sha256": "3a63b0a962f58ebab530fde388a0f3d659f9618bf7364fa7dbb06aba15ad3a2e",
+      "preview": "`request.go` 触碰的叶（1.0、2.1、4.x）SHALL 串行；`facts.go`/`loop.go` 簇（2.2）与 `host.go` 簇（3.1/3.2）合单。",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/orchestration/spec.md",
+      "requirement": "协议保真热点串行",
+      "rule": "numeric-constant",
+      "text_sha256": "3a63b0a962f58ebab530fde388a0f3d659f9618bf7364fa7dbb06aba15ad3a2e",
+      "preview": "`request.go` 触碰的叶（1.0、2.1、4.x）SHALL 串行；`facts.go`/`loop.go` 簇（2.2）与 `host.go` 簇（3.1/3.2）合单。",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/orchestration/spec.md",
+      "requirement": "同文件簇串行",
+      "rule": "go-file",
+      "text_sha256": "670f9d86fa945067f05946da43b580e14243c7167943e618e1fb73d93b399b9c",
+      "preview": "`host.go` 与 `api/plugin/governance.go` 由 1.1/1.2 同时触碰的，SHALL 串行或合单；entry 配置与台架文档（1.3）在其后。",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/orchestration/spec.md",
+      "requirement": "同文件簇串行",
+      "rule": "numeric-constant",
+      "text_sha256": "670f9d86fa945067f05946da43b580e14243c7167943e618e1fb73d93b399b9c",
+      "preview": "`host.go` 与 `api/plugin/governance.go` 由 1.1/1.2 同时触碰的，SHALL 串行或合单；entry 配置与台架文档（1.3）在其后。",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/orchestration/spec.md",
+      "requirement": "启动门——症状锚先红",
+      "rule": "numeric-constant",
+      "text_sha256": "fbc84a753a0febdec82c729dfe02cfca5cd929b69b65a82480a3338e38a3114d",
+      "preview": "一级变更 SHALL 在任何实现派发前，把六条症状锚（快）测试落在基线树上并确认全部红着（锚①-④在 assembly、⑥在 tool/exec、⑦在 memory/replay），并以症状锚⑤（慢）（既有 TestLocalSmoke）的评审两次实测红凭据为计划期凭据（自有红证于 W2 首日、W1 合并增量（01+0",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/orchestration/spec.md",
+      "requirement": "启动门未过不得派发",
+      "rule": "numeric-constant",
+      "text_sha256": "17f285598f67bdf8a12c546eea1c97253a2b0b0aadc20c1f9dc9b49e0735cff7",
+      "preview": "启动门的裁定背景：attention 与 PR #33 并行推进、在同一分支汇合后一并合并；实施基线 = 含 PR #33 内容的合并线。",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/orchestration/spec.md",
+      "requirement": "契约守护",
+      "rule": "go-file",
+      "text_sha256": "0bd22e4e2428a3b5601f3db27281af9170c5ae5ac69ca65e66575a7cdc9d9686",
+      "preview": "本变更 SHALL 保持 `api/**` 零改动，唯一例外=`api/config` 新增两个可选字段（02 的 provider 窗口与输出余量声明；**预算门开 ⟺ 显式 provider 窗口声明 ∨ AgentSpec.MaxTokens>0（缺省推导）；MaxTokens=0 且未显式声明 = 预算门不启用",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/orchestration/spec.md",
+      "requirement": "契约守护",
+      "rule": "numeric-constant",
+      "text_sha256": "0bd22e4e2428a3b5601f3db27281af9170c5ae5ac69ca65e66575a7cdc9d9686",
+      "preview": "本变更 SHALL 保持 `api/**` 零改动，唯一例外=`api/config` 新增两个可选字段（02 的 provider 窗口与输出余量声明；**预算门开 ⟺ 显式 provider 窗口声明 ∨ AgentSpec.MaxTokens>0（缺省推导）；MaxTokens=0 且未显式声明 = 预算门不启用",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/orchestration/spec.md",
+      "requirement": "最小可证伪路径先行",
+      "rule": "numeric-constant",
+      "text_sha256": "4fcaa475428e042113e0d95bfeb656e3f4daa9cfa108d8262d947180cadc2c8e",
+      "preview": "W0 SHALL 在全量展开前完成症状锚 S2 的红→绿短测（从用户症状直通缺陷机制）；S2 未绿，W1 之外的实现单 MUST NOT 派发（R34 规模警戒：叶数>20）。",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/orchestration/spec.md",
+      "requirement": "症状锚启动门",
+      "rule": "numeric-constant",
+      "text_sha256": "8d9a5fd666876ffe6e7429f058d23e93852bb44ae0bdf5248f5d8cd2d24d9710",
+      "preview": "本变更 SHALL 以三条症状直译测试的**先红**作为其余一切编码工作的启动门：任何一域的行为修改在 00 域红证产出之前不得开始。",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/orchestration/spec.md",
+      "requirement": "确定性验收不扩张外部授权",
+      "rule": "numeric-constant",
+      "text_sha256": "5ecceac7697eba22fa05e79bb7e8394637ee1cb5bab228acdd9a8b4327bfea99",
+      "preview": "编排 SHALL 保留既有 CI、Lint、Golden 与发布证据要求。新增事件汇总只覆盖新增三档，不替代既有必跑检查。成本超预算 SHALL 先优化组织或报告裁定，MUST NOT 自动缩减覆盖或关闭消费者；真实模型、微信、掉电、72h、训练制品、提交/推送及归档 SHALL 分别登记授权和实际证据。",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/orchestration/spec.md",
+      "requirement": "触碰集不相交与热点合单",
+      "rule": "go-file",
+      "text_sha256": "41c1500e5e68be9ad1f6c6fb4259065e29c1f5a9fcc9ababa413353de9181946",
+      "preview": "同文件簇的孙任务 SHALL 合单或严格串行（01 与 02 同动 host.go 即串行）；仅文件簇零相交的任务可并发。",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/orchestration/spec.md",
+      "requirement": "触碰集不相交与热点合单",
+      "rule": "numeric-constant",
+      "text_sha256": "41c1500e5e68be9ad1f6c6fb4259065e29c1f5a9fcc9ababa413353de9181946",
+      "preview": "同文件簇的孙任务 SHALL 合单或严格串行（01 与 02 同动 host.go 即串行）；仅文件簇零相交的任务可并发。",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/orchestration/spec.md",
+      "requirement": "防护启动门",
+      "rule": "numeric-constant",
+      "text_sha256": "847b01c7644a0658d641e254ee1a09a059f805225d38724499dd4a0e4a627162",
+      "preview": "G1 实现单派发前，settle 恰好一次、会话占位、白名单 fail-closed 三条红线的既有测试 SHALL 复跑绿且防护用例立起；W0 未完成，01 域实现单 MUST NOT 派发。改动期间任一红线测试红 SHALL 立即停线。",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/orchestration/spec.md",
+      "requirement": "麻雀闭环",
+      "rule": "numeric-constant",
+      "text_sha256": "7d2fa1249c888b870ec7c08d3eab2fe7d4be08eefcf668e925d75398ed01fa53",
+      "preview": "01.1（受理回执→`ok`）SHALL 在 W0 内完成，使症状 2 的直译测试由红转绿，作为其余域的机制样板。",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/production-wiring-fix/spec.md",
+      "requirement": "FileSegmentStore 支持构造后注入 TombstoneSet",
+      "rule": "function-call",
+      "text_sha256": "5c00572976ccce2759abd1df40440bfc2c9eb6fbea7c17eb1e6d0bce5fdea362",
+      "preview": "FileSegmentStore SHALL 提供 SetTombstoneSet(ts *TombstoneSet) 方法，允许在构造后注入 TombstoneSet。注入后，GetEvent 和 QueryEvents MUST 使用 TombstoneSet.IsTombstone() 过滤已标记墓碑的事件。",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/production-wiring-fix/spec.md",
+      "requirement": "wiki 记录 SessionService AppendEventHook",
+      "rule": "function-call",
+      "text_sha256": "0ef54b236ad34ed0ac9e3899e6bc118322ddbdaca438e216f0312813b8e2c1f5",
+      "preview": "- AppendEventHook 在 Session 追加事件前创建事件副本（含 Response.Clone()）",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/production-wiring-fix/spec.md",
+      "requirement": "wiki 记录 SessionService AppendEventHook",
+      "rule": "function-call",
+      "text_sha256": "17734a9d8cbd6378c9ae837c3ae03b1fb37263d8035e723ec534e0fe0bc8daa2",
+      "preview": "- SessionService 通过 `sessioninmemory.NewSessionService()` 创建",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/production-wiring-fix/spec.md",
+      "requirement": "wiki 记录 resolveMemoryStore 完整组装",
+      "rule": "function-call",
+      "text_sha256": "0ca5d34835940ac7abedfa606e1a286563db87d50d7ebd54e05fb895e7c78540",
+      "preview": "- `NewInMemRelationStore(mc.Path)` 创建关系存储",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/production-wiring-fix/spec.md",
+      "requirement": "wiki 记录 resolveMemoryStore 完整组装",
+      "rule": "function-call",
+      "text_sha256": "21c2f603cd4cee676ea1091f617501bffcc7c07a455c123286abceff0367835f",
+      "preview": "- `NewCompactor(store, kv, rel, tombstone, config)` 创建压实器",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/production-wiring-fix/spec.md",
+      "requirement": "wiki 记录 resolveMemoryStore 完整组装",
+      "rule": "function-call",
+      "text_sha256": "28ba06e18552371f78f891d6b199263a7944026928552d1dd5515e2bb334b5b7",
+      "preview": "- `NewTombstoneSet(rel, kv, 0)` 创建墓碑集",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/production-wiring-fix/spec.md",
+      "requirement": "wiki 记录 resolveMemoryStore 完整组装",
+      "rule": "function-call",
+      "text_sha256": "61effa09dac7b80a4ddedf231cb20eef51154f3a20d1354157df8dbf7dbaeb6b",
+      "preview": "- `kv.NewRustVikingClient(mc.RustVikingBinary, configPath)` 创建 KV 客户端（`memory/kv` 子包）",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/production-wiring-fix/spec.md",
+      "requirement": "wiki 记录 resolveMemoryStore 完整组装",
+      "rule": "function-call",
+      "text_sha256": "82e4e364298c6545476a61a5f067f76f206aca89879a4dba2abcaba93ea48ddf",
+      "preview": "- `NewLifecycleManager(store, tombstone, config)` 创建生命周期管理器",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/production-wiring-fix/spec.md",
+      "requirement": "wiki 记录 resolveMemoryStore 完整组装",
+      "rule": "function-call",
+      "text_sha256": "853c0ce329c346f5332b410e9441a7826b739a2fecadffa2e769851385cf2121",
+      "preview": "- `NewFileSegmentStore(kv, rel, mc.Path, 1000)` 创建文件段存储",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/production-wiring-fix/spec.md",
+      "requirement": "wiki 记录 resolveMemoryStore 完整组装",
+      "rule": "go-file",
+      "text_sha256": "7ac201f9a16185a255a09a41ceff35e9afa73cb800ecacaa8a8d2dde6c9ac1e9",
+      "preview": "wiki 文档 SHALL 记录 tagent.go 中 resolveMemoryStore 的完整组装逻辑（file 类型）：",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/production-wiring-fix/spec.md",
+      "requirement": "wiki 记录 resolveMemoryStore 完整组装",
+      "rule": "numeric-constant",
+      "text_sha256": "28ba06e18552371f78f891d6b199263a7944026928552d1dd5515e2bb334b5b7",
+      "preview": "- `NewTombstoneSet(rel, kv, 0)` 创建墓碑集",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/production-wiring-fix/spec.md",
+      "requirement": "wiki 记录 resolveMemoryStore 完整组装",
+      "rule": "numeric-constant",
+      "text_sha256": "853c0ce329c346f5332b410e9441a7826b739a2fecadffa2e769851385cf2121",
+      "preview": "- `NewFileSegmentStore(kv, rel, mc.Path, 1000)` 创建文件段存储",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/production-wiring-fix/spec.md",
+      "requirement": "优雅关闭流程",
+      "rule": "function-call",
+      "text_sha256": "2abb49c19e48400d20c94b22b4ac54e933626cb1aadd9e3b8d62ea9ead885e77",
+      "preview": "FileSegmentStore SHALL 提供 Close() 方法，按顺序停止 Compactor → 停止 LifecycleManager → flush TombstoneSet 持久化 → 关闭 RelationStore。Close() MUST 幂等（多次调用不 panic）。",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/production-wiring-fix/spec.md",
+      "requirement": "生产入口创建并启动生命周期组件",
+      "rule": "function-call",
+      "text_sha256": "791132a84a70a25c295f45d13cd597b26fb94e065161d22619e1106403157cc1",
+      "preview": "当 MemoryConfig.Type 为 \"file\" 时，resolveMemoryStore SHALL 创建 TombstoneSet 并注入 FileSegmentStore，创建 LifecycleManager 并调用 Start()，创建 Compactor 并调用 Start()。这些组件 MUST ",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/production-wiring/spec.md",
+      "requirement": "Close follows strict shutdown order",
+      "rule": "function-call",
+      "text_sha256": "066ac77d8ee13b9560637e7b1c13232ccb903a4423061487a775f4fd2564aac0",
+      "preview": "1. `Compactor.Stop()` — wait for any in-flight compaction task to drain; no new compaction SHALL start",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/production-wiring/spec.md",
+      "requirement": "Close follows strict shutdown order",
+      "rule": "function-call",
+      "text_sha256": "22e8c4b15a7bed28f072fc275411e6b3789929a76213b7b2578af3a199d26ab5",
+      "preview": "`FileSegmentStore.Close()` SHALL shut down subsystems in the following order, waiting for each step before proceeding:",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/production-wiring/spec.md",
+      "requirement": "Close follows strict shutdown order",
+      "rule": "function-call",
+      "text_sha256": "5152b215b174e434371f42516ef3df038035397eb5318715976b3b124d413eed",
+      "preview": "4. `RelationStore.Close()` — flush LRU dirty entries (if any) and sync RocksDB WAL (see capability `relation-store-lru-rocks`)",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/production-wiring/spec.md",
+      "requirement": "Close follows strict shutdown order",
+      "rule": "function-call",
+      "text_sha256": "8e585aca41518520ea4f61a3db81e59d9d1e821400ca01c894b2373900de9a5b",
+      "preview": "2. `LifecycleManager.Stop()` — stop TTL/capacity scanner goroutines",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/production-wiring/spec.md",
+      "requirement": "Production wiring creates and starts all lifecycle subsystems",
+      "rule": "function-call",
+      "text_sha256": "848f8a342d1bc71f6360466847dd72c5db00dc547331a9d3b97e0c13a7719f03",
+      "preview": "`resolveMemoryStore(\"file\")` in `tagent.go` SHALL create and start the complete lifecycle management stack in addition to the base FileSegmentStore. This includ",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/production-wiring/spec.md",
+      "requirement": "Production wiring creates and starts all lifecycle subsystems",
+      "rule": "go-file",
+      "text_sha256": "848f8a342d1bc71f6360466847dd72c5db00dc547331a9d3b97e0c13a7719f03",
+      "preview": "`resolveMemoryStore(\"file\")` in `tagent.go` SHALL create and start the complete lifecycle management stack in addition to the base FileSegmentStore. This includ",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/production-wiring/spec.md",
+      "requirement": "Subsystem references injected via setter methods",
+      "rule": "function-call",
+      "text_sha256": "f4ee55d462690e15a35abf3e740b882ccf7e4cd36ac3787d1d8cf189b80f993f",
+      "preview": "FileSegmentStore SHALL provide `SetLifecycleManager(*LifecycleManager)` and `SetCompactor(*Compactor)` setter methods to receive subsystem references injected b",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/production-wiring/spec.md",
+      "requirement": "公开运行时入口在根包装配入口上完善，不重复建立运行时",
+      "rule": "numeric-constant",
+      "text_sha256": "c3f207f4c453d288b93fa9407234f0b785a30ecaadf70e338579a72aad0a4e7a",
+      "preview": "公共运行时入口 SHALL 位于 module 根 `package tagent`（import 路径 `github.com/SpellingDragon/tagent`），是**唯一**公共门面；系统 MUST NOT 同时提供 `tagent/` 同名第二层门面或另建第二套组合根。公开 SDK/CLI 的构造/",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/race-gate-coverage/spec.md",
+      "requirement": "race 门覆盖第一方全包",
+      "rule": "numeric-constant",
+      "text_sha256": "fa2ca0f247ba74c0e929964ca9e12c5f47f2c04aa50dcbc95f23207f70fa12a3",
+      "preview": "race job SHALL 同时覆盖微信独立 module 的适用并发测试（`go -C examples/wechat-bot` 同参命令），该 module MUST NOT 因\"非根 module\"被排除在 race 证据之外。race 清单 SHALL 按新代码实际包**全量登记**（含子包）。本地确定性新增",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/readme-enhancement/spec.md",
+      "requirement": "README 包含快速启动指引",
+      "rule": "go-file",
+      "text_sha256": "30f1ca40aa1976e82fa226b096a6726928e98c2ece54fc4a51bf5db8a9fc9055",
+      "preview": "README.md SHALL 包含基于 config.go 声明式配置的快速启动指引，展示如何通过 YAML/JSON 配置文件启动 tagent。",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/recall-hybrid-fusion/spec.md",
+      "requirement": "query 模式 RRF 融合",
+      "rule": "function-call",
+      "text_sha256": "e7f354cefcb9282ed124bf81849a79c435645448ed3411e0165eeff6cbade778",
+      "preview": "recall 统一入口的 query 模式在向量可用时 SHALL 执行 hybrid 检索:向量 topK 与分词关键词 topK 并行取回,按 RRF(rank 倒数和,k=60)融合重排,截断至调用 limit。向量不可用(未配置/重建中/该分区无向量)时 SHALL 自动退化为纯关键词路径,行为与现状一致。",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/recall-hybrid-fusion/spec.md",
+      "requirement": "query 模式 RRF 融合",
+      "rule": "numeric-constant",
+      "text_sha256": "e7f354cefcb9282ed124bf81849a79c435645448ed3411e0165eeff6cbade778",
+      "preview": "recall 统一入口的 query 模式在向量可用时 SHALL 执行 hybrid 检索:向量 topK 与分词关键词 topK 并行取回,按 RRF(rank 倒数和,k=60)融合重排,截断至调用 limit。向量不可用(未配置/重建中/该分区无向量)时 SHALL 自动退化为纯关键词路径,行为与现状一致。",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/recall-hybrid-fusion/spec.md",
+      "requirement": "recall 工具声明恒定",
+      "rule": "function-call",
+      "text_sha256": "2af4279f63375137ab5de71685fd2a9cefc5e963aeed6e8e5820ede8aa11c383",
+      "preview": "hybrid 升级 MUST NOT 改变 recall 工具的 Declaration(名称/描述/InputSchema);融合逻辑全部位于工具实现内部。",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/recall-hybrid-fusion/spec.md",
+      "requirement": "融合在授权面上生效且保持票据形态",
+      "rule": "numeric-constant",
+      "text_sha256": "dc4175bafe4097ade3d5ed1e8d9213bf01058ed51cf949186996626ed3c9dbb6",
+      "preview": "query 模式的 hybrid 融合（RRF, k=60）SHALL 仅在调用方**已授权**的分区/时间/类型/关系面上执行；授权过滤 MUST 先于/并列于融合；融合结果 SHALL 保持 `EventReference` 票据形态，全文经既有取回路径。",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/recall-protocol/spec.md",
+      "requirement": "memory_turn 因果链召回工具",
+      "rule": "function-call",
+      "text_sha256": "e39e006ac494fce473c71ef170c2ff5b5015fde94804ee1d651700e96e05517d",
+      "preview": "（并入统一入口——`recall` 的 `turn_key` 参数形态即原 `memory_turn`，行为契约不变）系统 SHALL 经由 `recall(turn_key=<EventKey>)` 提供因果链召回：给定一个 EventKey（通常为 `agent_output` 卡片），沿 `GetParent` ",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/recall-protocol/spec.md",
+      "requirement": "索引卡为召回标准协议（输入形态分流）",
+      "rule": "function-call",
+      "text_sha256": "3216b58b242f0e1d5c407bcf059fcdbb4b0a93af5b72f702ea6c48bb3c205537",
+      "preview": "输出协议统一:条目 `{key(hex), type, summary, content, time}`。触发 SHALL 保持显式工具调用（不做隐式自动换出）。`memory_recall`/`memory_turn` 工具名 SHALL 退役（能力由 `recall` 的对应参数形态承接，协议输出不变）。",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/reflection-loop-golden/spec.md",
+      "requirement": "长时反思循环 golden 门",
+      "rule": "numeric-constant",
+      "text_sha256": "368adff32ea17c10e7323fb2435874445ce903f108490984f69f005ab493a197",
+      "preview": "CI 常规测试面 SHALL 含长时反思循环 golden（脚本模型驱动 30–50 轮，墙钟分钟级）；断言面 SHALL 至少覆盖：反思水位单调不回退、零重复消费、零资源泄漏、跨会话投递逐目标恰一次、重启后水位续接。断言 SHALL 基于事件计数与状态读数（不基于墙钟），红即阻 CI。",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/relation-store-lru-rocks/spec.md",
+      "requirement": "GetChildren uses reverse index with range scan + limit",
+      "rule": "function-call",
+      "text_sha256": "1da58ebf9920bebb41eb8ab2f335e6fefd17bb8558b42d79c0282b3cbb8c3970",
+      "preview": "`RelationStore.GetChildren(parent int64, limit int)` SHALL return `([]int64, hasMore bool, error)`. Implementation SHALL use RocksDB range scan over `{pid}:revr",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/relation-store-lru-rocks/spec.md",
+      "requirement": "GetChildren uses reverse index with range scan + limit",
+      "rule": "function-call",
+      "text_sha256": "5ee5e42605036901ad8f70d1379a3326aef3555504db1b991a1b71b4516d7fcb",
+      "preview": "> **状态核验（2026-09-09，签名漂移）**：现签名为 `GetChildren(parentKey int64) ([]int64, error)`（`memory/relation_store.go`，InMemRelationStore）——无 limit/hasMore 参数，全量返回子节点；反向索引",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/relation-store-lru-rocks/spec.md",
+      "requirement": "GetChildren uses reverse index with range scan + limit",
+      "rule": "go-file",
+      "text_sha256": "5ee5e42605036901ad8f70d1379a3326aef3555504db1b991a1b71b4516d7fcb",
+      "preview": "> **状态核验（2026-09-09，签名漂移）**：现签名为 `GetChildren(parentKey int64) ([]int64, error)`（`memory/relation_store.go`，InMemRelationStore）——无 limit/hasMore 参数，全量返回子节点；反向索引",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/relation-store-lru-rocks/spec.md",
+      "requirement": "GetChildren uses reverse index with range scan + limit",
+      "rule": "numeric-constant",
+      "text_sha256": "1da58ebf9920bebb41eb8ab2f335e6fefd17bb8558b42d79c0282b3cbb8c3970",
+      "preview": "`RelationStore.GetChildren(parent int64, limit int)` SHALL return `([]int64, hasMore bool, error)`. Implementation SHALL use RocksDB range scan over `{pid}:revr",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/relation-store-lru-rocks/spec.md",
+      "requirement": "GetChildren uses reverse index with range scan + limit",
+      "rule": "numeric-constant",
+      "text_sha256": "5ee5e42605036901ad8f70d1379a3326aef3555504db1b991a1b71b4516d7fcb",
+      "preview": "> **状态核验（2026-09-09，签名漂移）**：现签名为 `GetChildren(parentKey int64) ([]int64, error)`（`memory/relation_store.go`，InMemRelationStore）——无 limit/hasMore 参数，全量返回子节点；反向索引",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/relation-store-lru-rocks/spec.md",
+      "requirement": "RelationStore Close flushes dirty LRU entries",
+      "rule": "function-call",
+      "text_sha256": "820968ec70dee6c50212f07e689bd05b2149d8db67e587d6598d2af5fd41c557",
+      "preview": "`RelationStore.Close()` SHALL ensure any LRU entries with unpersisted updates (should not occur under write-through semantics, but defensive) are flushed to Roc",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/relation-store-lru-rocks/spec.md",
+      "requirement": "RelationStore drops journal/snapshot methods",
+      "rule": "function-call",
+      "text_sha256": "78825b97cf7ae6b88242a15e3155e4db22d58318263314d5d1da46bb8b85e6d3",
+      "preview": "`RelationStore` interface SHALL NOT expose `Snapshot()`, `LoadSnapshot()`, or `ReplayJournal()`. Existing callers of these methods SHALL be removed.",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/relation-store-lru-rocks/spec.md",
+      "requirement": "RelationStore uses LRU hot cache backed by RocksDB",
+      "rule": "numeric-constant",
+      "text_sha256": "f640fd0bbdfdc0f846cef29a87e059822f4134c35eca940ce09542a89adbca4b",
+      "preview": "`RelationStore` SHALL maintain an in-memory LRU cache (default 1M entries) for parent lookups, with RocksDB as the authoritative persistent store. Independent j",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/relation-store-provider/spec.md",
+      "requirement": "Callers use RelationStoreProvider instead of anonymous interface",
+      "rule": "function-call",
+      "text_sha256": "7712fa16364ff2f369804986f8d7333ff1b29646228a64f691e3f94097734386",
+      "preview": "All call sites that currently use anonymous interface type assertions (e.g., `interface{ RelationStore() memory.RelationStore }`) SHALL be replaced with the nam",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/relation-store-provider/spec.md",
+      "requirement": "RelationStoreProvider interface defined",
+      "rule": "function-call",
+      "text_sha256": "cb4867fbd98857b8e84731cd44d46dd6e967e734b0c7b0975f9280b81e03b347",
+      "preview": "The `memory` package SHALL define a `RelationStoreProvider` interface with a single method `RelationStore() RelationStore`, providing a named, discoverable way ",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/remote-agent-communication/spec.md",
+      "requirement": "Remote sub-agent via ToolRef.Remote",
+      "rule": "function-call",
+      "text_sha256": "b47a803cbbaa486ec7e5045053ae59e7bdc4e4630431bc8b392d372303bef2f2",
+      "preview": "When `ToolRef.Remote` is configured with a URL, the system SHALL create an `a2aagent.A2AAgent` with `WithAgentCardURL(url)` and `WithTransferStateKey(\"external_",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/remote-agent-communication/spec.md",
+      "requirement": "TagentAgent as A2A Server",
+      "rule": "function-call",
+      "text_sha256": "b4ab780113e7f534b3ef31d7a2a2bdbf981f571222767b516bb73c20ead66c9e",
+      "preview": "The system SHALL provide `NewA2AServer(ta *TagentAgent, host string)` that creates an A2A server exposing the TagentAgent via A2A protocol.",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/request-budget-accounting/spec.md",
+      "requirement": "完整预算输入与诚实精度",
+      "rule": "numeric-constant",
+      "text_sha256": "8b72106d580931a6d66076be155882990078cc0f5045bd7c6f5db77f8c813bd3",
+      "preview": "预算 SHALL 包括 system、messages、工具 schema/参数、reasoning、ContentParts、任务板和恢复提示；无法可靠估计的媒体 MUST 标 unknown，不能当零或宣称精确。输入预算与输出 limit 语义保持分离。预算裁决 MUST 位于最终请求拼装处（模型请求离开系统前的最",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/resident-release-evidence/spec.md",
+      "requirement": "required 汇总不因取消跳过缺失而放行",
+      "rule": "function-call",
+      "text_sha256": "8685ba99832c72b36668d1c67b8328ad2a6916be9a4ef48a0661490a8bf6449c",
+      "preview": "事件门 SHALL 提供稳定检查名 `event-integrity-required` 作为**新增事件三档的汇总检查**供分支保护引用；该检查 MUST NOT 替代或删除 `test`/`race`/`validators`/`openspec`/`soak` 等既有检查，旧检查名 MUST 继续保留。该作业 M",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/resident-release-evidence/spec.md",
+      "requirement": "required 汇总不因取消跳过缺失而放行",
+      "rule": "numeric-constant",
+      "text_sha256": "8685ba99832c72b36668d1c67b8328ad2a6916be9a4ef48a0661490a8bf6449c",
+      "preview": "事件门 SHALL 提供稳定检查名 `event-integrity-required` 作为**新增事件三档的汇总检查**供分支保护引用；该检查 MUST NOT 替代或删除 `test`/`race`/`validators`/`openspec`/`soak` 等既有检查，旧检查名 MUST 继续保留。该作业 M",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/resident-release-evidence/spec.md",
+      "requirement": "常驻准出证据",
+      "rule": "numeric-constant",
+      "text_sha256": "c00db0643701ee87d1e1c8ebe2ccdd3ec8999d0e4005a410bacdf55857cca9d8",
+      "preview": "发布候选 SHALL 具备确定性 30 轮独立进程重启 E2E 与 72h 隔离长跑记录。长跑 SHALL 包含并发输入、存储拒写、慢消费者、mock 模型/MCP 故障、任务重挂及热更；durable 接收项不得无解释丢失，确认项不得重复投影。资源指标按 design D7 的稳态阈值验收，失败先定因而非调宽门槛。",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/resident-release-evidence/spec.md",
+      "requirement": "文档只陈述已落地能力与可证明边界",
+      "rule": "numeric-constant",
+      "text_sha256": "b9267c6f9a673ad0ccb29fdc07a0f92832d02257a2f94fd4f60aa0f71f73c387",
+      "preview": "`README.md`、`docs/OPERATION.md`、`docs/FACT-VOCABULARY.md`、`docs/GLOSSARY.md` SHALL 登记事件双档、故障变异、required 汇总、证据档位与失败处置，且只陈述已完成并有真实命令/退出码的能力。未落地的作业、合同或检查器 MUST 标注为",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/resident-release-evidence/spec.md",
+      "requirement": "本地完成与远端必跑门分层登记",
+      "rule": "numeric-constant",
+      "text_sha256": "8a45ab9545adecfd727448991a03aea7ee7c80acb32e9e048b6a94afc2deb532",
+      "preview": "最终验收 SHALL 把证据分为三层并分别登记：L1 本地确定性完成（最终集成树的 MR 等价命令、原始退出码、artifact 与指纹；计划校验 MAY 直接按域执行 `openspec change validate event-consumption-integrity/changes/<domain> --st",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/resident-release-evidence/spec.md",
+      "requirement": "每 MR 事件双档与故障变异必跑",
+      "rule": "numeric-constant",
+      "text_sha256": "d32bac892079629161464948e7f3c628ab0defdeb7dc5c4027a769b7b5797965",
+      "preview": "事件完整性回归 SHALL 在每次 `pull_request` 与 `main`/`dev` 的 `push` 上运行短程、长程与故障变异三类作业，MUST NOT 以路径过滤、仅手动触发、`continue-on-error`、凭据缺失或标签条件跳过。短程 SHALL 由共用 runner 发起 **10 次独立*",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/resident-release-evidence/spec.md",
+      "requirement": "编排热更以生产委派变化验收",
+      "rule": "numeric-constant",
+      "text_sha256": "def161b16970de891302a3537f337501594afbbe80097d4e8f838e422df5c263",
+      "preview": "性能 SHALL 分报候选构造/发布成本、请求获取版本开销与退役回收成本。真实 LLM、掉电、72h、真实渠道和生产存储单列授权；历史完成勾选不得继承为本目标完成证据。",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/resident-session-continuity/spec.md",
+      "requirement": "外部执行停止凭证与真实停止确认",
+      "rule": "numeric-constant",
+      "text_sha256": "95111865fede76f85d65d1b3c64e8510e8860f5a566590baec5ea0b92574da66",
+      "preview": "exec/tmux 派生的外部执行 SHALL 具备可判定的**停止凭证**（能证明目标进程/会话已真实停止）；SHALL 区分 `alive`/`dead`/`unknown` 三态（`unknown≠dead`），停止未确认时 MUST NOT 把任务标为已收束。**连续 `unknown` MUST NOT 作为",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/resident-session-continuity/spec.md",
+      "requirement": "存活探测三态化（dead/unknown/dead 可辨）",
+      "rule": "numeric-constant",
+      "text_sha256": "5cc2e0c26ba98e75d00e681e6ae8195f98505feae907e07ec7f7dfd1bdcaf56e",
+      "preview": "会话存活判定 SHALL 三态：**alive**（list-sessions 列出该会话）/ **dead**（命令成功且会话不在列表）/ **unknown**（命令 err）。探测 SHALL 以 `list-sessions` 为准（`has-session` 的 exit 1 不可辨 dead 与 unkno",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/resource-bounds/spec.md",
+      "requirement": "冒烟内存门（口径已裁决：真占用）",
+      "rule": "numeric-constant",
+      "text_sha256": "011ece509e0310a101a208599cf49f75ffcd726c09b81b59c4c4670a9e6be96b",
+      "preview": "完整本地冒烟（300 轮）的真占用堆增长 MUST ≤128 KiB/轮（强制 GC 后稳定常驻采样为判定数）；虚胖分量（已归还系统未收回）MUST 单独记录并设观测上限=**真占用门的 50%（64 KiB/轮）**，超限 MUST 记告警事实，MUST NOT 无限膨胀，但不作过关判据。",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/resource-bounds/spec.md",
+      "requirement": "空闲地址回收",
+      "rule": "function-call",
+      "text_sha256": "478d41b1226d8998a1da3f3313084c5103fb8d23394dce7e8656f96249c9ef25",
+      "preview": "常驻消费地址在无在途段、无未收通知**且无未清交付义务（含 held(reason=retrying) 的重试间隙）**超过空闲 TTL 后 MUST 被回收且可幂等重建；有在途工作或未清义务的地址 MUST NOT 被回收。回收与虚胖告警 MUST 以具名计数与日志可观测。",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/resource-bounds/spec.md",
+      "requirement": "装配侧观察与回放内存有界",
+      "rule": "numeric-constant",
+      "text_sha256": "37acda019b0989ab7ea7b15bed75efa96cf0c22e3906f66fcad594ba25903e57",
+      "preview": "装配根的观察面、回放注册表与已提交事实表 MUST 以事实窗口为界：事实窗口外的材料 MUST 按既有键/前缀从持久段回读，MUST NOT 随进程运行时长无界常驻；事实窗口内 MUST 有显式预算并被测试锁定。**未清交付事实（held/owed 活动集）MUST 驻留事实窗口内，MUST NOT 落到事实窗口外；D",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/rl-feedback/spec.md",
+      "requirement": "HTTP 输入与通知资源有界",
+      "rule": "numeric-constant",
+      "text_sha256": "0f26a1d320c383697ad02d27c054c9ddf093848cf1c02fb2de47aa679c2cd634",
+      "preview": "HTTPAPI SHALL 默认限制 body=1 MiB、messages=32、单条 content=256 KiB、feedback 通知队列=1024；宿主可设置正上限，零采用默认，负值拒绝。请求 SHALL 完整验证后才产生副作用，超限返回 413，格式/role 非法返回 400。合法输入 role 为 u",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/rl-feedback/spec.md",
+      "requirement": "RL HTTP API 认证与监听约束",
+      "rule": "function-call",
+      "text_sha256": "16c1d9baf647abe1704bc2a687876a0ee6f9f2dd93fa354238011b9aaa44a214",
+      "preview": "RL HTTP API SHALL 支持 token 认证（API 层）：宿主经 `SetAuthToken`（或等价构造选项）启用后，ServeHTTP 顶部单一强制点 SHALL 验证 `Authorization: Bearer <token>`，不匹配返回 401 且不执行任何端点副作用； SHALL 提供 `",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/rl-feedback/spec.md",
+      "requirement": "RL HTTP API 认证与监听约束",
+      "rule": "numeric-constant",
+      "text_sha256": "16c1d9baf647abe1704bc2a687876a0ee6f9f2dd93fa354238011b9aaa44a214",
+      "preview": "RL HTTP API SHALL 支持 token 认证（API 层）：宿主经 `SetAuthToken`（或等价构造选项）启用后，ServeHTTP 顶部单一强制点 SHALL 验证 `Authorization: Bearer <token>`，不匹配返回 401 且不执行任何端点副作用； SHALL 提供 `",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/rl-feedback/spec.md",
+      "requirement": "RL 反馈 long-poll 通道",
+      "rule": "numeric-constant",
+      "text_sha256": "7fb412724fe6d5433c297899eb24d85ae4117881f255d8d75e369f911bd09fc2",
+      "preview": "HTTPAPI SHALL 提供 `GET /feedback/wait?timeout=N`(上限 30s):阻塞至超时或新 feedback 事件,返回最近待评分摘要列表(event_key+summary);TurnTracker 使评估窗口 Evidence 的 TurnCount 真实采集(TypeTurnS",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/rl-feedback/spec.md",
+      "requirement": "真实端点单次门控",
+      "rule": "numeric-constant",
+      "text_sha256": "42a2657f202021b2b7285ff76282724ed8e66a629346628984c1ec05b520b669",
+      "preview": "真实 RL 端点/allowlist 资源验收 MUST 独立单次门控（`-count=1`）；并发族用例走 `-race -count=10`；缺凭据或不可达 MUST NOT 计为完成。",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/rl-feedback/spec.md",
+      "requirement": "认证与运维同源",
+      "rule": "numeric-constant",
+      "text_sha256": "e00afbf8ce26b9702cbb8ddcda5a8ed6d3116c7987004376a188759428ad0c02",
+      "preview": "随载宿主和探针 SHALL 使用同一 token 契约，所有端点包括 healthz 均遵守认证；无 token 仅允许 loopback。401 SHALL 被判为认证失败而非进程死亡，不能触发误杀/假成功 marker。server SHALL 设置有限读写/空闲超时并由宿主关闭。",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/rl-feedback/spec.md",
+      "requirement": "诊断快照消费面",
+      "rule": "function-call",
+      "text_sha256": "61320e3d15b0d6b48521f07b825ff98b00f145becef68693bc5e230e1e24982c",
+      "preview": "rl HTTPAPI SHALL 提供 `GET /diagnostics` 端点,输出 DiagnosticsSnapshot JSON(向量健康/存储规模等);构造器经装配层注入(SetDiagnosticsFn 模式)。",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/rl-feedback/spec.md",
+      "requirement": "请求取消与接收回执",
+      "rule": "numeric-constant",
+      "text_sha256": "a51a6ea7a54c2f0fa779d6b5fc2869751df077d9cb4ad43579fb0985d0aae25f",
+      "preview": "long-poll SHALL 响应请求取消及 server shutdown。POST /task SHALL 使用可判定接收接口，以单 envelope 提交整个 messages 列表；成功返回 202 + request_id + durability，失败返回结构化错误；SHALL NOT 把丢弃或只收到部分",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/roadmap-governance/spec.md",
+      "requirement": "阶段准出门禁",
+      "rule": "numeric-constant",
+      "text_sha256": "eb5f903c2fc8988737b5bf51503922e67d54931485ab0a55064b264dfaf0a2f3",
+      "preview": "每个阶段子变更 archive 前 SHALL 依次通过三道门禁:①`go build ./...` + `go vet ./...` + `go test -race`(新增代码必须有配套测试);②真实集成抽查(LLM/网络级测试,遵循 tests/ 惯例:无 key 自动 Skip、-short 跳过);③Code",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/rustviking-client/spec.md",
+      "requirement": "Batch operations are atomic",
+      "rule": "function-call",
+      "text_sha256": "5fd0bae12bbc5b5db39a8e8e9f4f21c8c75a2ac2efd17b6ae8a779af989623f4",
+      "preview": "All `KVBatch(ops)` invocations SHALL translate to a single `rustviking kv batch` CLI call, which on the RustViking side SHALL use `KvStore::batch().commit()` (W",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/rustviking-client/spec.md",
+      "requirement": "KV batch operations for compaction",
+      "rule": "function-call",
+      "text_sha256": "3bd0ad18970d8bf847db6884c4daf14715c50ad6fdf8383840a5564f7fb14190",
+      "preview": "The system SHALL support atomic batch write operations via `KVBatch(ops)`. The RustViking CLI `kv batch` command SHALL use RocksDB `WriteBatch` to ensure all op",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/rustviking-client/spec.md",
+      "requirement": "KV range scan for time-based queries",
+      "rule": "function-call",
+      "text_sha256": "99610f92c9b4fd8224b8e69db4172309a619089a00933fc5ba1c0070f9d95ab5",
+      "preview": "The system SHALL support range-based scanning via `KVRange(start, end, limit)`. This SHALL invoke the RustViking CLI `kv range` subcommand (native RocksDB range",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/rustviking-client/spec.md",
+      "requirement": "RustVikingClient is CLI-only",
+      "rule": "go-file",
+      "text_sha256": "a4b292d43b381a8c945e691430d5ade662e5f6b4c76e331b28cbf29ce75a2f2e",
+      "preview": "实现居于 `memory/kv` 子包（KV 存储后端专区）；`KVStore` 契约本身居核心包 `memory/kv.go`。",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/rustviking-config/spec.md",
+      "requirement": "Production MemoryStore wiring uses real RustVikingClient",
+      "rule": "function-call",
+      "text_sha256": "9e5d4f1ae21f741ef479a79fdad00db2a268880e3971c6fa454c8c8b50237c04",
+      "preview": "**具体包路径、类型名与构造签名不在此冻结**（DESIGN-GATE(G1)：按真实消费者最小签名收敛）。实现布局 MUST NOT 以**复活旧 `memory/kv` 子包结构、旧类名**（如 `MockRustVikingClient`、`simpleInMemRelationStore`）或**镜像 prov",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/rustviking-config/spec.md",
+      "requirement": "Production MemoryStore wiring uses real RustVikingClient",
+      "rule": "numeric-constant",
+      "text_sha256": "32254b37dd07a7149532079e78c0c5cd632d34ca196f51126d3b8e25c24fd334",
+      "preview": "`type: file` 档位的**实际提交屏障** SHALL 由真实 rustviking 客户端与分片原子快照后端兑现，MUST NOT 由 mock/占位实现充当（见 `event-segment-store`「LocalFileKV Sync 为原子快照屏障」）。真实 CLI 的集成用例 SHALL 独立 `",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/rustviking-config/spec.md",
+      "requirement": "Production MemoryStore wiring uses real RustVikingClient",
+      "rule": "numeric-constant",
+      "text_sha256": "9e5d4f1ae21f741ef479a79fdad00db2a268880e3971c6fa454c8c8b50237c04",
+      "preview": "**具体包路径、类型名与构造签名不在此冻结**（DESIGN-GATE(G1)：按真实消费者最小签名收敛）。实现布局 MUST NOT 以**复活旧 `memory/kv` 子包结构、旧类名**（如 `MockRustVikingClient`、`simpleInMemRelationStore`）或**镜像 prov",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/rustviking-range-scan/spec.md",
+      "requirement": "Go client uses range command instead of client-side filtering",
+      "rule": "function-call",
+      "text_sha256": "cc6238f5150aa590c64c640d03b93b01cd3961e49e648e587b58f5a47295d7e7",
+      "preview": "`RustVikingClient.KVRange()` SHALL invoke `rustviking kv range` with the exact start/end parameters instead of computing a common prefix and filtering on the cl",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/self-telemetry-audit/spec.md",
+      "requirement": "L3 冻结与 disk block spawn 同构",
+      "rule": "numeric-constant",
+      "text_sha256": "81d142d51c30d7679f10be2ff831698827b00ad56d749b15164fe8f98938086c",
+      "preview": "审计 L3 冻结 SHALL 复用 spawnGate 判定链（与 `degradation_disk_block_spawn` 同一道闸、新增触发源），自动执行、无人工审批（宿主裁决 2026-09-27）：进行中任务不受影响，新 spawn 被拒且文案如实（区别于 disk 退化的 reason）。冻结解除 SHA",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/semantic-search/spec.md",
+      "requirement": "SearchByEmbedding 落地",
+      "rule": "function-call",
+      "text_sha256": "56ff4f9889563b1c4baf02a285a64acc1984e337816706d90c34b7dc57d2592b",
+      "preview": "`InMemoryStore` 与 `FileSegmentStore` 的 `SearchByEmbedding(query, topK)` SHALL 从 stub(ErrVectorSearchNotSupported)变为可用实现:余弦相似度 topK,返回 EventReference 列表(票据形态);`S",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/semantic-search/spec.md",
+      "requirement": "embedder 配置与降级",
+      "rule": "numeric-constant",
+      "text_sha256": "0de7c08d48eb0ed691d4ed40c87706316d452eeed9111d1c4619b35c31d7f20f",
+      "preview": "embedder SHALL 经 MemoryConfig 的 embedding 段声明(provider/model/api_key_env/dimensions/event_types);API 调用失败 SHALL 重试至多 1 次后放弃该事件向量(不报错、不中断);api_key_env 缺失时 SHALL ",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/semantic-search/spec.md",
+      "requirement": "向量持久化与启动重建",
+      "rule": "function-call",
+      "text_sha256": "a9d2d5d7724164dda1f437e47e7df211a4c21fd5a039dea22c4f5d6b56331270",
+      "preview": "向量 SHALL 以独立键空间前缀持久化到既有 RustViking KV(localfile/file 存储);进程启动时 SHALL 经 KVRange 扫描异步重建内存索引。重建完成前,语义检索 SHALL 返回空结果集(触发 recall 的关键词退化路径),MUST NOT 阻塞启动或报错。",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/semantic-search/spec.md",
+      "requirement": "向量链路可观测",
+      "rule": "function-call",
+      "text_sha256": "ea9b7ebf9f0874788566dd27781d1f434749dc6be2a6f7b1bd8672570113baf7",
+      "preview": "EmbeddingWorker 的批量 embed 调用 SHALL 产生符合上游 GenAI 语义约定的 span(含 gen_ai.embeddings.dimension.count 属性);丢弃计数与索引条目数 SHALL 以 otel metric 暴露;未配置 OTLP 导出时 MUST 为 noop(零开",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/semantic-search/spec.md",
+      "requirement": "异步向量生成流水线",
+      "rule": "function-call",
+      "text_sha256": "a7c884eace91f6e882a7e480c6249d92b15a1f0faf5de15aa38d504adf90cfd1",
+      "preview": "系统 SHALL 提供 EmbeddingWorker:事件经 MemoryPlugin 入库后以非阻塞方式投递 (EventKey, text),Worker 异步批量(≤16/批)调用 embedder 生成向量并写入索引与持久层。投递 MUST NOT 阻塞事件循环;队列满时 SHALL 丢弃并计数,不背压。向量",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/semantic-search/spec.md",
+      "requirement": "异步向量生成流水线",
+      "rule": "numeric-constant",
+      "text_sha256": "a7c884eace91f6e882a7e480c6249d92b15a1f0faf5de15aa38d504adf90cfd1",
+      "preview": "系统 SHALL 提供 EmbeddingWorker:事件经 MemoryPlugin 入库后以非阻塞方式投递 (EventKey, text),Worker 异步批量(≤16/批)调用 embedder 生成向量并写入索引与持久层。投递 MUST NOT 阻塞事件循环;队列满时 SHALL 丢弃并计数,不背压。向量",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/session-fact-lifecycle/spec.md",
+      "requirement": "会话事实提交即持久化且当次可召回",
+      "rule": "function-call",
+      "text_sha256": "86d259509f79d9ff4979f70a4d5c478b71ef36b012a3d06401bbe8ac93e0bc8a",
+      "preview": "正式回合产生的对话与工具结果 SHALL 在提交成功时即由同一 durable 根持久保存，并在当次回合经正式召回入口（`Run.RecallReads()` 暴露的 `Table`/`Originals`/`Embedder` → 声明式 recall 工具）查到原文；召回返回的原文 MUST 与已提交事实的字节一致",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/snowflake-overflow-handling/spec.md",
+      "requirement": "Clock regression aborts generation",
+      "rule": "function-call",
+      "text_sha256": "33fb071ab40c7b5f88340ae57f0b4920e62f55f45203e8c482d93747d3b04763",
+      "preview": "If `time.Now().UnixMilli()` is strictly less than the previously recorded `lastMs` (system clock moved backwards), the generator SHALL return an error rather th",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/snowflake-overflow-handling/spec.md",
+      "requirement": "Snowflake blocks on same-millisecond sequence exhaustion",
+      "rule": "numeric-constant",
+      "text_sha256": "afd29a1dda48768113cf15483f552b8342d595f8354186892b6caab7a1c956cf",
+      "preview": "The Snowflake ID generator SHALL detect sequence exhaustion (12-bit sequence = 4096 IDs per millisecond) and block until the next millisecond before returning a",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/startup-active-partition-bitmap/spec.md",
+      "requirement": "Active partition bitmap drives Init discovery",
+      "rule": "function-call",
+      "text_sha256": "9fb030ac3fc5d4b5c02b36f98145b879ae354164c04c4eb9f90626157521deeb",
+      "preview": "The system SHALL maintain a `global:active_partitions` KV entry as a fixed-size 2048-bit bitmap (256 bytes), with bit `N` set iff partition `N` has at least one",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/startup-active-partition-bitmap/spec.md",
+      "requirement": "Active partition bitmap drives Init discovery",
+      "rule": "numeric-constant",
+      "text_sha256": "9fb030ac3fc5d4b5c02b36f98145b879ae354164c04c4eb9f90626157521deeb",
+      "preview": "The system SHALL maintain a `global:active_partitions` KV entry as a fixed-size 2048-bit bitmap (256 bytes), with bit `N` set iff partition `N` has at least one",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/startup-active-partition-bitmap/spec.md",
+      "requirement": "Init cold-start latency bounded by active partition count",
+      "rule": "function-call",
+      "text_sha256": "f227bb7b1dbcc9add1e48e11ff951485c74b9dacf5096d1cbc6f00e8538c3246",
+      "preview": "`Init()` SHALL complete in O(active_partitions) time. For 1000 active partitions, `Init()` SHALL use concurrent KV gets (errgroup) to read all cursors in parall",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/startup-active-partition-bitmap/spec.md",
+      "requirement": "Init cold-start latency bounded by active partition count",
+      "rule": "numeric-constant",
+      "text_sha256": "f227bb7b1dbcc9add1e48e11ff951485c74b9dacf5096d1cbc6f00e8538c3246",
+      "preview": "`Init()` SHALL complete in O(active_partitions) time. For 1000 active partitions, `Init()` SHALL use concurrent KV gets (errgroup) to read all cursors in parall",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/startup-active-partition-bitmap/spec.md",
+      "requirement": "Per-partition cursor replaces seq scanning",
+      "rule": "function-call",
+      "text_sha256": "1a1a4255ef9e92d4a8620c1d021810458896d16cba62fec179a96b3121462da7",
+      "preview": "Each partition SHALL maintain `{pid}:cursor` → JSON `{current_window, seq_counter, last_event_key, updated_at}`. Every `StoreEvent`/`StoreEvents` batch SHALL up",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/storage-lifecycle-completion/spec.md",
+      "requirement": "保留保护与回收协调",
+      "rule": "function-call",
+      "text_sha256": "d9d62b111ec8829e1f9f94607313f36b6aaab007f94acfb22358981011c73fe2",
+      "preview": "保留租约 SHALL 由**共享资源 owner** 持有（非任一 agent），SHALL 支持多持有者引用计数递减、归零才解除，MUST 幂等。保护/回收协调能力 SHALL 复用存储生命周期既有能力，端口按**真实 consumer 所需**表达，具体名称/签名**不在此冻结**（DESIGN-GATE(G1)）",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/storm-fuse/spec.md",
+      "requirement": "关闭态零行为差异",
+      "rule": "numeric-constant",
+      "text_sha256": "ef19286554acd20d6efdc5dc6eabf13e4dc20f330c29bf40f1880626af897c7f",
+      "preview": "两键均为 0 时系统行为 SHALL 与熔断引入前逐字节等价。",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/storm-fuse/spec.md",
+      "requirement": "单响应工具调用整批挂人审",
+      "rule": "numeric-constant",
+      "text_sha256": "4d3247608a862f116f59a10ffd87e82ea8c1475b0295c40037affecfa8767349",
+      "preview": "单次模型响应的工具调用数 SHALL 受 `max_calls_per_response`（0=关）约束：超限时**整批 N 个调用作为一次审批**挂起（审批插件检查 input、人确认后执行），MUST NOT 截断丢弃。无审批簿接线时 SHALL fail-closed 拒绝整批（不得回退为截断或直接执行）。",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/storm-fuse/spec.md",
+      "requirement": "长上下文防线同挂人审",
+      "rule": "numeric-constant",
+      "text_sha256": "38e392297d98c32700cc5f88fe9a97be13e7d9415e9b7836abb6792293e943d7",
+      "preview": "prompt_tokens 超过 `long_context_tokens`（0=关）时，该响应的全部调用 SHALL 同形态整批挂审批（与调用数上限同一代码点、同一审批通道）。",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/storm-fuse/spec.md",
+      "requirement": "降级消息限长",
+      "rule": "numeric-constant",
+      "text_sha256": "a71c1464cb4bfbe9969bf8a678e306476b48fa213aad0f0dd6df738de455f583",
+      "preview": "sanitize 降级 user message（调用与结果两类路径）的 payload 段 SHALL 受 4KB 上限约束（超出截断并标记），防降级消息二次膨胀链。",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/subagent-turn-execution/spec.md",
+      "requirement": "Sub-agent 保持并发隔离与调用契约不变",
+      "rule": "function-call",
+      "text_sha256": "e68102d4552c3b0b5807b1f2c4061672c0131453fac1f99c8bba711f48005329",
+      "preview": "每次 sub-agent 调用 SHALL 保持并发隔离与**原生 `CallableTool` 接口兼容**（`Call(ctx, jsonArgs)` 形态；业务受理回执属已明定变更）；**MUST NOT** 承诺「旧历史 API 返回值保持不变」。本条**不冻结**历史类名/方法。",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/subagent-turn-execution/spec.md",
+      "requirement": "Sub-agent 调用执行恰好一个 turn",
+      "rule": "numeric-constant",
+      "text_sha256": "bfedca27af6af1d86a1425a1150d1cdb1798c652eccb6ce20589b0c9c8415a18",
+      "preview": "Sub-agent 工具调用 SHALL 经**统一事件调度**执行：同一 invocation SHALL 由一个调度面驱动，**可包含多个 decision**（工具结果/后台观察回流驱动下一步 decision），MUST NOT 引入 LLMAgent 或任何**第二工具迭代循环**。本条**不冻结**历史类名",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/subagent-turn-execution/spec.md",
+      "requirement": "Sub-agent 调用超时对多轮工作宽容",
+      "rule": "numeric-constant",
+      "text_sha256": "601b2919195dddd2746bdfdaff916ddcdc6e86bf8a9445ecb27b98398094bc24",
+      "preview": "`defaultSubAgentTimeout` SHALL 不小于 600 秒。",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/subagent-turn-execution/spec.md",
+      "requirement": "子 agent 调用可作为异步任务执行",
+      "rule": "function-call",
+      "text_sha256": "2c1e9825cb0a4452bd3138e7e7c1dcc402c76ffce40bc6cd5cef57ed4c7fb66c",
+      "preview": "子 agent 工具 SHALL 保持**原生 `CallableTool` 接口兼容**（`Call(ctx, jsonArgs)` 形态，见 `trpc-reuse.md` §2）；返回值为一次**受理回执**（属已明定的业务面变更，见上）；**MUST NOT** 承诺「旧历史 API 返回值保持不变」。本条**",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/subagent-turn-execution/spec.md",
+      "requirement": "子 agent 调用可作为异步任务执行",
+      "rule": "numeric-constant",
+      "text_sha256": "16d21e5b205f5a3a4b931e4163fcdf8ad1e8d7a09b1ee16ae30b8cae13bda7d6",
+      "preview": "**子 agent 使用应用选择的 session**：子 agent 调用 SHALL 在**应用显式选择的 session**（见 01 `config-state-twinship`「session 身份与授权」）内执行，并借用 state 同代绑定；MUST NOT 为每次调用创建**私有可写事件真源**（第二",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/subagent-turn-execution/spec.md",
+      "requirement": "子 agent 调用可作为异步任务执行",
+      "rule": "numeric-constant",
+      "text_sha256": "2c1e9825cb0a4452bd3138e7e7c1dcc402c76ffce40bc6cd5cef57ed4c7fb66c",
+      "preview": "子 agent 工具 SHALL 保持**原生 `CallableTool` 接口兼容**（`Call(ctx, jsonArgs)` 形态，见 `trpc-reuse.md` §2）；返回值为一次**受理回执**（属已明定的业务面变更，见上）；**MUST NOT** 承诺「旧历史 API 返回值保持不变」。本条**",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/summary-memory-rag/spec.md",
+      "requirement": "历史条款已退役",
+      "rule": "go-file",
+      "text_sha256": "81796f68a64968f0c54790d09586c52ea7e8f37124eadffe5ee00485091cd817",
+      "preview": "本文件保留已退役的压缩摘要持久化与召回的历史记录。原条款中的规范化关键词（SHALLs/MUSTs）已全部迁出或退役；现行要求见 `compression-pipeline`（产物事实）与 `recall-protocol`（票据召回），公共行为锚见 `tests/integration/host/compress_p",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/swappable-executor/spec.md",
+      "requirement": "build-validate-then-swap 可逆（fail-closed，副作用 ownership）",
+      "rule": "function-call",
+      "text_sha256": "d231d43e21cb087ee18e7e4907d60bf10498ae9f2896d0bc3eaa1b11195c65a0",
+      "preview": "Reload SHALL 先完整构建并校验新执行器装配（LoadConfig 校验 + fwAgent/runner/tools 构造）：**失败 SHALL fail-closed**——旧 runner 原样服务、记 ERROR 与通知，SHALL NOT 半换。换代 SHALL 按副作用 ownership 表执",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/swappable-executor/spec.md",
+      "requirement": "build-validate-then-swap 可逆（fail-closed，副作用 ownership）",
+      "rule": "numeric-constant",
+      "text_sha256": "d231d43e21cb087ee18e7e4907d60bf10498ae9f2896d0bc3eaa1b11195c65a0",
+      "preview": "Reload SHALL 先完整构建并校验新执行器装配（LoadConfig 校验 + fwAgent/runner/tools 构造）：**失败 SHALL fail-closed**——旧 runner 原样服务、记 ERROR 与通知，SHALL NOT 半换。换代 SHALL 按副作用 ownership 表执",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/swappable-executor/spec.md",
+      "requirement": "执行器可热换（cm.runner 级换代，非重启）",
+      "rule": "function-call",
+      "text_sha256": "11297b7390aba7909526e01d407010b1367be43db2c6385d17fc6be433f52f55",
+      "preview": "执行器（fwAgent+runner+其 tools 装配）SHALL 是「配置→turn 行为」的可重导出函数，经 **cm 内可换执行器缝**原子换入：`SwapExecutor(newRunner)` 在 RWMutex 下原子替换；`RunFlow` 每 turn 取当前 runner 引用（**drain-f",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/swappable-executor/spec.md",
+      "requirement": "退役执行器与模型延迟回收",
+      "rule": "numeric-constant",
+      "text_sha256": "54966501f13b5174ff70e143efee14d9c0984e9d66f7c40696c2d0eabce9e4a0",
+      "preview": "ring-2 SHALL 保留配置快照以支持重建回滚，不以存活 runner 作为回滚真源。旧 runner 在无 in-flight turn 后 SHALL 由 owner 幂等 Close。SwappableModel 的 in-flight SHALL 覆盖返回流关闭/取消之前的完整生命周期，而非仅 Gener",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/symptom-anchors/spec.md",
+      "requirement": "受理静默症状锚",
+      "rule": "numeric-constant",
+      "text_sha256": "c57268b95ca75ccaaae1edb47f76a2a02d1e1ea0225eee23c06e09c4b3b777c3",
+      "preview": "系统 SHALL 提供一条用户视角测试 `TestLocalSmokeSymptomAcceptedSilent`：在独立注入会话上驱动一次委派，断言**受理被受理后、任务结算前**该会话的 outbound 事件数为 0，且受理后的下一次模型请求中本次调用的 tool 结果恰为最小确认 `ok`（MUST NOT 含",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/symptom-anchors/spec.md",
+      "requirement": "失败必告知症状锚",
+      "rule": "numeric-constant",
+      "text_sha256": "4152e426a0212f41a294a63cc1d8dddbfb6ba23234eaae60e6394b297d4dd032",
+      "preview": "系统 SHALL 提供一条用户视角测试 `TestLocalSmokeSymptomFailureNotice`：经生产入站路径（`hostRuntime.Drive`）驱动一轮，脚本 provider 对指定标记返回 500，断言该会话 outbound 恰有一条失败告知、正文含原始错误标识（MUST 含 HTTP ",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/symptom-anchors/spec.md",
+      "requirement": "完成恰一条症状锚",
+      "rule": "numeric-constant",
+      "text_sha256": "4576faa79f2580488685ea74e79a8cf923ba49cb8c8ceb2a8589d9b9d4697a86",
+      "preview": "系统 SHALL 提供一条用户视角测试 `TestLocalSmokeSymptomSettledOnce`：同一条委派链路从受理到结算，断言该会话本轮 outbound 文本数恰为 1、该条不命中确认词表（`accepted`/`(running)`/`background task`/`will arrive as",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/symptom-anchors/spec.md",
+      "requirement": "锚迁移不缩水",
+      "rule": "numeric-constant",
+      "text_sha256": "929d8d5ab03f367ba00c9506f239b4ddd5e91b1d582e48d4571a2ef04994d2d7",
+      "preview": "既有 send 相关症状锚已于 2026-11 迁移完成；deliver_summary / resume_task 已删除，MUST NOT 复活。其用户视角断言 MUST NOT 被弱化或删除；新增九则直译锚 SHALL 第一天红着并随域完成转绿。",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/task-reentry/spec.md",
+      "requirement": "nil 接口模式级审计留痕",
+      "rule": "function-call",
+      "text_sha256": "99288b8029e8503d59186f3c6e2e73c716a5abcd8a5041039cacb45fe437c4d1",
+      "preview": "对全库「close(通道) / 接口方法调用」中依赖调用方非 nil 口头契约的点 SHALL 完成一次模式级审计，清单（含 file:line 与处置）SHALL 记录于 LEDGER 台账；审计发现的同型裂缝 MUST 逐个修复或显式豁免（豁免须写明理由）。",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/task-registry-and-board/spec.md",
+      "requirement": "LLM 任务操作工具",
+      "rule": "go-file",
+      "text_sha256": "7c852a2fd629c46909524c0e7c29b0d25517a6861c9d544a750f2e8a1ace6286",
+      "preview": "任务操作 SHALL 经 `send{target:{task}}`（`assembly/host_tools.go:44-53`）与看板事实呈现；取消为 `runtime/task` 的 `RequestCancel`/`CancelReceipt`。`list_tasks`/`cancel_task`/`relau",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/task-registry-and-board/spec.md",
+      "requirement": "LLM 任务操作工具",
+      "rule": "numeric-constant",
+      "text_sha256": "7c852a2fd629c46909524c0e7c29b0d25517a6861c9d544a750f2e8a1ace6286",
+      "preview": "任务操作 SHALL 经 `send{target:{task}}`（`assembly/host_tools.go:44-53`）与看板事实呈现；取消为 `runtime/task` 的 `RequestCancel`/`CancelReceipt`。`list_tasks`/`cancel_task`/`relau",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/task-registry-and-board/spec.md",
+      "requirement": "TaskManager 内存 registry 与幂等 spawn",
+      "rule": "function-call",
+      "text_sha256": "df1845f640d39a5c66d6818723ac1a7f67cf1ae122ab3380dc64eb86ebe60817",
+      "preview": "**TaskSpec 声明式化（按 Kind 拆分承诺）**：`RebuildClosures(declarative)` 工厂承诺表——command：Relaunch/Resume/Alive 全可用（Resume 跨重启由 resident-session-continuity 重挂供能）；subagent：Re",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/task-registry-and-board/spec.md",
+      "requirement": "live 任务看板投影",
+      "rule": "numeric-constant",
+      "text_sha256": "782ddd0a3f09aa617b28fcd16ba2b0efd96e198da4bf663c962b701f89dc6327",
+      "preview": "系统 SHALL 在每次 LLM 调用的 `BeforeModel` 阶段从 TaskManager registry **重新渲染**一个紧凑的任务看板注入上下文。看板 SHALL **追加在消息列表末尾**（当前输入与任何待答工具结果之后）——看板字节随任务年龄/状态逐次变化，置于末尾使前缀缓存的损失严格限于看板自",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/task-registry-and-board/spec.md",
+      "requirement": "自包含的 task_settled 事件",
+      "rule": "numeric-constant",
+      "text_sha256": "36f4a185d15968b3fa05e688457f43cce563c861c8ed000e25d1e499e0fe453e",
+      "preview": "- **内联上限 SHALL 为编译期命名常量（不设配置旋钮、不设回退开关）**：结果 ≤ 常量（初始 600 字符）SHALL 单行内联；> 常量 SHALL 转储文件（复用 tool-output 落盘管线）并在通知中携带路径与尾部预览",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/task-registry-and-board/spec.md",
+      "requirement": "自包含的 task_settled 事件",
+      "rule": "numeric-constant",
+      "text_sha256": "3e8874dbe4ed3aca66f3ef798a1e3e8c8032735db4d1e80b27acd8450a7cb0b6",
+      "preview": "大结果 SHALL 按转储文件路径回写,事件正文仅放摘要/预览,LLM SHALL 可按需经 `read_file` 拉取全量（本要求使实现与该既有约束收敛——旧实现内联上限派生自 token 预算公式,在 128K 配置下达 ~256K 字符,与\"事件仅放摘要\"相悖）。",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/task-registry-rebuild/spec.md",
+      "requirement": "重建任务不得因缺失探测器而崩溃",
+      "rule": "function-call",
+      "text_sha256": "e3e2a150267b4ea59715ed99d22af13427976ddbe123430a78d905aeb9cafb55",
+      "preview": "由事实链重建的任务（`RestoreTask`）SHALL 允许携带 nil 探测器（跨重启无资源可回收）。任务回收路径（`pruneTerminal`）在调用探测器 `Cancel()` 前 MUST 判空；nil 时 MUST 跳过 `Cancel` 并仍回收该任务条目，MUST NOT 因此 panic。",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/task-skeleton-compression/spec.md",
+      "requirement": "以 agent_output 为段边界切分任务回合",
+      "rule": "numeric-constant",
+      "text_sha256": "c8a91eaac73ea4c383f73a26804bf626ca42c0d8390d8bfe77f65bf2d41d5fbf",
+      "preview": "系统 SHALL 以 `agent_output` 条目为段闭合边界，用 `SegmentsOf` 把投影条目切分为任务回合段，段边界 SHALL 按该输出事实的 `input_events` 消费关系归段：它命名的输入键 SHALL 归入它所在的段并随该段闭合，段内已见但未被它命名的输入 SHALL 滚入下一段，段间",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/task-skeleton-compression/spec.md",
+      "requirement": "压缩窗口由三字段界定",
+      "rule": "numeric-constant",
+      "text_sha256": "d9a92ca684cd232471ee30663d5374c49ed7571a575f8643d45dcc60d47b6396",
+      "preview": "压缩参数 SHALL 由 `FoldWindow` 的 `MaxTokens`、`CompressThreshold`、`KeepRecentTasks` 三字段界定；`VolumeThresholdBytes` SHALL 按 `MaxTokens × BudgetCharsPerToken × CompressTh",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/task-skeleton-compression/spec.md",
+      "requirement": "段龄定级为线性三带",
+      "rule": "numeric-constant",
+      "text_sha256": "cb6a48e1212b3ff66b85f4ae96a1567328581f7b4c7df2c3ee01c52694324b22",
+      "preview": "折叠 SHALL 使用 `LevelOfAge`/`BandOfLevel` 的线性段龄规则：`age < KeepRecentTasks` 为 L0（新带），`age < 2×KeepRecentTasks` 为 L1（中带），`age < 3×KeepRecentTasks` 为 L2（中带），其余为 L3（老带）",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/telemetry-channel/spec.md",
+      "requirement": "遥测通知的通道身份与卡片形态",
+      "rule": "numeric-constant",
+      "text_sha256": "424bcab1a15437c4ac9b7f6ff7aa3c00603a3e57714f7d2e8dedb5d76b214386",
+      "preview": "task_settled 通知 SHALL 以独立的遥测通道身份参与上下文装配，MUST NOT 以对话时间线成员形态（与用户输入同权的 external_input 全文消息）进入常驻投影。回收 turn 装配中每条通知以卡片呈现（状态+task_id+摘要+票据，≤300 chars）；failed 极性卡片行 S",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/thinking-plan-event-classification/spec.md",
+      "requirement": "thinking_plan as special event type",
+      "rule": "function-call",
+      "text_sha256": "8ecd6dbe4bc1ca6691b2518d9c85521f77226fde877cd791a029534b917d1566",
+      "preview": "The system SHALL treat `thinking_plan` as a special event type. `IsSpecialEventType(\"thinking_plan\")` MUST return `true`, ensuring that `GenerateEventSummary` p",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/thinking-plan-event-classification/spec.md",
+      "requirement": "thinking_plan event type classification",
+      "rule": "function-call",
+      "text_sha256": "2ce2efac7ff2e4f2484ee4074ed185a2e7ad5346a25be3185596e3ae7368621a",
+      "preview": "分类 SHALL 仅依据原生 `Role` 与 `len(ToolCalls)`；assistant 同时携带 `Content`（叙述）与 `ToolCalls` 时 SHALL 仍分类为 `thinking_plan`，其 `Content` 与 `ContentParts`（多模态）MUST NOT 因分类被剥离",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/tombstone-partition-isolation/spec.md",
+      "requirement": "TombstoneSet auto-recovers from KV on initialization",
+      "rule": "function-call",
+      "text_sha256": "6357313e8f65e1b082d36b7864401bd15a9713489e422a4e5daed92dfea105fe",
+      "preview": "When a per-partition `TombstoneSet` is lazy-initialized, it SHALL automatically call `RecoverFromKV()` to restore tombstone state from the KV store, without req",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/tool-output-interception/spec.md",
+      "requirement": "OutputLimitTool 实现 trpctool.Tool 接口",
+      "rule": "function-call",
+      "text_sha256": "677fd340288ef42fcdb250731210b6a211db4bda1505616c331f491aeb30dd53",
+      "preview": "`OutputLimitTool` SHALL 实现 `trpctool.Tool` 接口，包装内部工具的 `Definition()` 和 `Call()` 方法。`Definition()` SHALL 原样返回内部工具的定义。`Call()` SHALL 执行内部工具后拦截返回值。",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/tool-output-interception/spec.md",
+      "requirement": "工具输出大小拦截包装器",
+      "rule": "function-call",
+      "text_sha256": "f7fc464b085709edc1c70d575597b14be2c1bb92f0f341da95346eedbb84995f",
+      "preview": "tagent SHALL 在 `NewTagentAgent` 中为所有工具添加输出大小拦截包装器（`OutputLimitTool`）。包装器 SHALL 拦截工具 `Call()` 方法的返回值，当序列化后的输出字符数超过阈值时，截断输出并附加错误提示信息。该包装器 SHALL 作为 **tagent 面类型经注入",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/tool-output-interception/spec.md",
+      "requirement": "工具输出大小拦截包装器",
+      "rule": "go-file",
+      "text_sha256": "f7fc464b085709edc1c70d575597b14be2c1bb92f0f341da95346eedbb84995f",
+      "preview": "tagent SHALL 在 `NewTagentAgent` 中为所有工具添加输出大小拦截包装器（`OutputLimitTool`）。包装器 SHALL 拦截工具 `Call()` 方法的返回值，当序列化后的输出字符数超过阈值时，截断输出并附加错误提示信息。该包装器 SHALL 作为 **tagent 面类型经注入",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/tool-output-interception/spec.md",
+      "requirement": "工具输出大小拦截包装器",
+      "rule": "numeric-constant",
+      "text_sha256": "f7fc464b085709edc1c70d575597b14be2c1bb92f0f341da95346eedbb84995f",
+      "preview": "tagent SHALL 在 `NewTagentAgent` 中为所有工具添加输出大小拦截包装器（`OutputLimitTool`）。包装器 SHALL 拦截工具 `Call()` 方法的返回值，当序列化后的输出字符数超过阈值时，截断输出并附加错误提示信息。该包装器 SHALL 作为 **tagent 面类型经注入",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/tool-output-interception/spec.md",
+      "requirement": "拦截阈值与 MaxTokens 对齐",
+      "rule": "numeric-constant",
+      "text_sha256": "98963c3d5f6426b5797f637c3c778d25b1ab5867aa746b4bb1da7a8f2153052e",
+      "preview": "拦截阈值 SHALL 为 `MaxTokens / 2 * 4`（字符数），其中 MaxTokens 来自 TagentConfig.MaxTokens，1 token 估算为 4 字符。当 TagentConfig.MaxTokens 为 0 时，SHALL 使用默认值 8000（对应 16000 字符阈值）。",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/trajectory-recording/spec.md",
+      "requirement": "Composability with SwappableModel",
+      "rule": "function-call",
+      "text_sha256": "065f236bf5b6e0cdf8f0e4bfd8590d9446a87dd60dd2707aa82a10acf5e2c8a6",
+      "preview": "TrajectoryRecorder SHALL be composable with SwappableModel in either order: `TrajectoryRecorder(SwappableModel(model))` or `SwappableModel(TrajectoryRecorder(mo",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/trajectory-recording/spec.md",
+      "requirement": "Configuration via tagent.yaml",
+      "rule": "function-call",
+      "text_sha256": "c4f7a8f1ead36ecd9f8fa59879b6ab1dc41b67368db8e3a825600582d6020ef1",
+      "preview": "The system SHALL read `trajectory_dump` (bool, default `false`) and `trajectory_dir` (string, default `data/trajectories`) from the tagent config. When `traject",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/trajectory-recording/spec.md",
+      "requirement": "Conversion to AReaL SFT dataset",
+      "rule": "numeric-constant",
+      "text_sha256": "4c7bb71b36d9c243fefe34e74c6b5b4f4cb559aad8f418c71a5f1a0c3ffa255d",
+      "preview": "系统 SHALL 提供一条将 tagent JSONL 轨迹转换为**可被某个 SFT 消费者读取**的数据集（含 `input_ids` 与 `loss_mask`，prompt 置 `loss_mask=0`、completion 置 `loss_mask=1`）的路径。**具体 tokenizer / chat ",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/trajectory-recording/spec.md",
+      "requirement": "JSONL trajectory format",
+      "rule": "numeric-constant",
+      "text_sha256": "616137e6d7bbc47ec1838acfdfb24afdc65f3b9b2086191c6af19eb7b4c1940b",
+      "preview": "The system SHALL persist trajectory records as JSONL files at `{trajectory_dir}/{session_id}.jsonl`. Each line SHALL be a JSON object containing the following f",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/trajectory-recording/spec.md",
+      "requirement": "版本化记录与生产点",
+      "rule": "numeric-constant",
+      "text_sha256": "81caf80dff1123eb085b8f073d43f1b869f096e5ed71d2fabc65997e7ceac338",
+      "preview": "训练记录 SHALL 显式版本化；episode/decision/attempt 的**生产点** MUST 前移到装配与模型终局处（02.5/02.4），字段解释在 **00.3 审定**后由本域落实。**episode ≠ session（非强制等同，也非强制拆分）**：episode SHALL 表示业务过程（",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/turn-tracing/spec.md",
+      "requirement": "turn 级 root span",
+      "rule": "function-call",
+      "text_sha256": "3f42c494b31bced476dbc054ea4b3f8e7aa6bac1da4120a32a0d2c9e3f85d352",
+      "preview": "事件循环 SHALL 为每个 turn(一次批量拉取→RunFlow→settle/退化重试的完整轮次)开启 root span(名 `tagent.turn`),属性 MUST 包含:批内 EventKey(canonical hex 列表)、trigger_source、agent 名;有会话元数据时 SHALL ",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/turn-tracing/spec.md",
+      "requirement": "异步任务 span link",
+      "rule": "function-call",
+      "text_sha256": "168b12256361891497dca5964028154034660bb8b86d81ef089e0dad8eb57db5",
+      "preview": "工具经 TaskSpawner 派生后台任务时 SHALL 捕获当前 span context 随任务透传(task 层不解释,沿用 Origin baggage 模式);任务 settle 触发的新 turn 中,处理该 settle 的 span SHALL 以 span link 指向派生时的 span cont",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/unified-task-semantics/spec.md",
+      "requirement": "可选聚合窗不控制粒度",
+      "rule": "numeric-constant",
+      "text_sha256": "abe6656eebd28e1f438e93958a025826ac1abd57042769d01f9eb8f06b770490",
+      "preview": "任务完成通知 SHALL 支持按条数聚合（窗口默认 0 即发，攒满批量投递，关闭时 flush 残余）；模型触发粒度 SHALL 保持 pull 自然聚合，窗口不等待输入、不试图控制整体节奏。",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/view-transform-stateless/spec.md",
+      "requirement": "历史条款已退役",
+      "rule": "go-file",
+      "text_sha256": "dc721a9b8611ca93e1ff270d5dd7b2a0893f177e6514af3d2ffa14d13290c371",
+      "preview": "本文件保留已退役的无段早退与 pending 段保护移除的历史记录。原条款中的规范化关键词（SHALLs/MUSTs）已全部迁出或退役；现行要求见 `task-skeleton-compression` 与 `compression-pipeline`，公共行为锚见 `memory/replay/age_segment",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/wechat-host-send-tool/spec.md",
+      "requirement": "target 对象二选一",
+      "rule": "numeric-constant",
+      "text_sha256": "5c954dcbb687f74e8b37cf6482b4ca7092b86e952395c0e0df7bde9ec870e42e",
+      "preview": "参数 SHALL 为 `{target, content}`；`target` SHALL 为对象二选一：`{\"task\": \"<id>\"}` 或 `{\"agent\": \"<id>\", \"session\": \"<id>\"}`。双目标同现、目标皆缺、agent/session 不成对、未知字段、空 content、con",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/wiki-code-sync/spec.md",
+      "requirement": "头条承诺与默认行为对齐",
+      "rule": "go-file",
+      "text_sha256": "b4ff4dd56cbe8bc484c33cd567c42b1db450ed5cb25f150b675c4481ac440bce",
+      "preview": "README 头条与心智模型中关于存储期限的表述 SHALL 与默认行为一致：以「事件不可变入库 + 默认 7 天全局窗（`global_ttl_days`，`type_ttl` 可覆盖）+ 可配置永久」的实述替代「永久入库/永久存储」的绝对表述；配置永久之法 SHALL 可从文档直达。代码内失真注释 SHALL 改为",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/wiki-code-sync/spec.md",
+      "requirement": "头条承诺与默认行为对齐",
+      "rule": "numeric-constant",
+      "text_sha256": "b4ff4dd56cbe8bc484c33cd567c42b1db450ed5cb25f150b675c4481ac440bce",
+      "preview": "README 头条与心智模型中关于存储期限的表述 SHALL 与默认行为一致：以「事件不可变入库 + 默认 7 天全局窗（`global_ttl_days`，`type_ttl` 可覆盖）+ 可配置永久」的实述替代「永久入库/永久存储」的绝对表述；配置永久之法 SHALL 可从文档直达。代码内失真注释 SHALL 改为",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/wiki-code-sync/spec.md",
+      "requirement": "禁止行号与行数标注",
+      "rule": "go-file",
+      "text_sha256": "2b4ca68d0a3f18915a2a7e70e84f398c624d24f7a3ce158c32e410207a812aaa",
+      "preview": "wiki 文档 SHALL NOT 标注源码行号（如 `file.go:120-145`）或文件行数（如「266 行」、文件清单表的",
+      "count": 1
+    },
+    {
+      "file": "openspec/specs/wiki-code-sync/spec.md",
+      "requirement": "禁止行号与行数标注",
+      "rule": "numeric-constant",
+      "text_sha256": "2b4ca68d0a3f18915a2a7e70e84f398c624d24f7a3ce158c32e410207a812aaa",
+      "preview": "wiki 文档 SHALL NOT 标注源码行号（如 `file.go:120-145`）或文件行数（如「266 行」、文件清单表的",
+      "count": 1
+    }
+  ]
+}

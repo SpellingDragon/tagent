@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "baseline": {
+    "file.read": ["read_file"],
+    "file.write": ["write_file"],
+    "exec": ["run_command"]
+  },
+  "tagent": {
+    "file.read": ["read_file", "list_file", "search_file", "search_content", "read_multiple_files"],
+    "file.write": ["save_file", "replace_content"],
+    "exec": ["exec_run", "exec_release"]
+  },
+  "dsh": {
+    "file.read": ["read"],
+    "file.write": ["write", "edit"],
+    "exec": ["bash"]
+  }
+}

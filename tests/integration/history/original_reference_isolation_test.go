@@ -20,7 +20,7 @@ import (
 )
 
 // TestOriginalReferenceIsolation checks the original-text contract end to end on the in-memory tier:
-// - identical bytes serve references of different owners and formats without any of them overwriting another
+// - identical bytes under different event keys keep independent bodies while references never overwrite
 // - one key keeps every scope registered on it
 // - exact recall returns the committed bytes byte for byte, and a missing or expired recall names why
 // - a read runs inside the scope it is bound to, and a read that cannot serve names its failure
@@ -31,7 +31,7 @@ func TestOriginalReferenceIsolation(t *testing.T) {
 	ctx := context.Background()
 	original := []byte("first line\nsecond line\n")
 
-	t.Run("same blob keeps one reference per owner and format", func(t *testing.T) {
+	t.Run("different event keys keep independent bodies and references", func(t *testing.T) {
 		store := ledger.NewMemoryOriginalStore(ledger.WithRetentionWindow("keep", 24*time.Hour))
 		wants := []ledger.OriginalRef{
 			{Key: "0a01", Owner: event.Address{AgentID: "writer-a", SessionID: "s1"}, Format: "text/plain", RetentionPolicy: "keep"},
@@ -42,8 +42,8 @@ func TestOriginalReferenceIsolation(t *testing.T) {
 				t.Fatalf("Put(%s): %v", want.Key, err)
 			}
 		}
-		if n := store.BlobCount(); n != 1 {
-			t.Fatalf("BlobCount() = %d, want 1 stored blob for identical bytes", n)
+		if n := store.BlobCount(); n != 2 {
+			t.Fatalf("BlobCount() = %d, want one independent body per event key", n)
 		}
 		for _, want := range wants {
 			got := store.References(want.Key)

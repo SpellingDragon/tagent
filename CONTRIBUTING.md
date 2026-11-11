@@ -6,7 +6,7 @@
 
 - **三个 Go module**：根 module `github.com/SpellingDragon/tagent`，以及 `examples/wechat-bot`、`examples/cli-host`（各自独立 module，无 `go.work`）。根 `./...` 永远不覆盖这两个示例 module，三者都要构建与测试。
 - **Go 下限** `go 1.24.1`（见 [`go.mod`](go.mod)）。
-- **代码面**：顶层产品包为 `api`、`runtime`、`memory`、`evolution`、`telemetry`、`rl`、`tool`、`internal`（基准面 `internal/bench`），加 `cli` 宿主壳与 `assembly` 组合根（组合根住 `assembly/`，目录名即包名）；包边界登记在 [`golden/runtime/architecture.json`](golden/runtime/architecture.json)。
+- **代码面**：顶层产品包为 `api`、`runtime`、`memory`、`tool`、`internal`（基准面 `internal/bench`）、`bench`（真实任务基准夹具、runner 与指标）；可选能力 `telemetry`/`evolution`/`rl` 住 `features/` 下；加 `cli` 宿主壳与 `assembly` 组合根（组合根住 `assembly/`，目录名即包名）；包边界登记在 [`golden/runtime/architecture.json`](golden/runtime/architecture.json)。
 - **门禁工具**：bash、Go、git；spec 门另需 openspec CLI 1.2.0；校验器自测需 python3。
 
 ## 二、包结构
@@ -41,7 +41,7 @@
 
 ```bash
 go run ./scripts/codetools package-layout . examples/wechat-bot examples/cli-host
-# 期望：package-layout: 505 file(s); names, skeleton pins and test mirrors hold（exit 0）
+# 期望：package-layout: N file(s)（N 随包数增长，`git ls-files '*.go'` 现为 690）；names, skeleton pins and test mirrors hold（exit 0）
 ```
 
 门自身有负例见证 `scripts/gates/test_check_package_layout.sh`（干净／变体名／撞名／大写／孤儿测试五个 fixture 跑真命令，看退出码）。它也在 `scripts/lint.sh` 里跑：只打印不拒绝的检查器过不了干净 fixture，恒红的检查器过不了负例。
@@ -59,12 +59,12 @@ bash scripts/lint.sh
 ```
 
 - `-short` 是常规测试面：soak 与需要真实进程/凭据的用例在 `-short` 下跳过。
-- [`scripts/lint.sh`](scripts/lint.sh) 是唯一门禁入口：gofmt、根与 wechat-bot 的 build/vet、注释棘轮、doc budget、`name-check`、`doc-refs`、`docs/api` 新鲜度、`proc-refs`、`tracked-hygiene`、`package-layout`（含负例自测）、`dotted-refs`、`commit-scope`。
-- 只改文档时可用 `bash scripts/lint.sh --only fmt`：只跑 gofmt，九个文档/脚本门仍然照跑；改了源码注释后先 `bash scripts/gates/gen_godoc.sh` 重新生成 [`docs/api/`](docs/api/index.md)，再 `bash scripts/gates/gen_godoc.sh --check`。**不要手改生成面。**
+- [`scripts/lint.sh`](scripts/lint.sh) 是唯一门禁入口：gofmt、三个 module 的 build/vet、注释棘轮、doc budget、`name-check`、`doc-refs`、`docs/api` 新鲜度、`proc-refs`、`tracked-hygiene`、`package-layout`（含负例自测）、`dotted-refs`、`commit-scope`。
+- 只改文档时可用 `bash scripts/lint.sh --only fmt`：只跑 gofmt，文档/脚本门仍然照跑；改了源码注释后先 `bash scripts/gates/gen_godoc.sh` 重新生成 [`docs/api/`](docs/api/index.md)，再 `bash scripts/gates/gen_godoc.sh --check`。**不要手改生成面。**
 - race 门（与 CI 同一条命令，较慢）：
 
 ```bash
-./scripts/gates/race_check.sh . ./memory/... ./runtime/agent/... ./evolution/ ./api/event/ ./tool/... ./api/plugin/ ./rl/
+./scripts/gates/race_check.sh . ./assembly/... ./cli/... ./api/event/... ./api/config/... ./api/document/... ./api/model/... ./api/view/... ./api/plugin/... ./runtime/agent/... ./runtime/task/... ./runtime/state/... ./memory/... ./features/... ./tool/... ./internal/... ./tests/integration/execution/... ./tests/integration/history/... ./tests/integration/host/... ./tests/integration/capabilities/... ./tests/integration/evolution/... ./tests/integration/learning/...
 ```
 
 - spec 卫生门（需 openspec 1.2.0）：
@@ -88,21 +88,21 @@ bash scripts/gates/check-openspec.sh
 
 ## 四、PR 规范
 
-- **分支**：`dev` 接受直推并由 CI 全量验证，`main` 是发布线；跨线合并前按 CHANGELOG 口径评审。CI 对 `main`/`dev` 的 push 与所有 PR 触发（[`ci.yml`](.github/workflows/ci.yml)）。
-- **合入前四条 job 全绿**：`test`（含两个示例 module 与调度下限）、`race`、`validators`、`openspec`。soak job 仅 `workflow_dispatch` 手动触发，不参与每 PR 判定。
+- **分支**：`dev` 接受直推并由 CI 全量验证，`main` 是发布线；跨线合并前按 CHANGELOG 口径评审。CI 对 `main`/`dev` 的 push 与所有 PR 触发（[`ci.yml`](.github/workflows/ci.yml)）。PR 以 squash 并入 `main` 后，`origin/dev` 会强制更新到该 squash 点（[ADR-0001](docs/adr/0001-dev-reverse-sync.md)）：本地须 `git fetch origin dev` + `git checkout -B dev origin/dev` 采纳，普通 `git pull` 不可用；切分支前先 stash 未提交工作。
+- **合入前四条 job 全绿**：`test`（含两个示例 module 与调度下限）、`race`、`validators`、`openspec`；另需 `event-integrity-required` 汇总、`runtime-contracts` 的 `format-and-contract` 与 `event-semantics-symptoms` 均无红（分支保护 required 清单是外部设置，仓库只钉稳定 job 名）。soak job 仅 `workflow_dispatch` 手动触发，不参与每 PR 判定。
 - **提交主题**用 `type(scope): 摘要`（`feat` / `fix` / `docs` / `chore` / `refactor`）。
 - **`docs(` / `docs:` 开头的提交不得携带代码路径**：`.go` / `.sh` / `.yml` / `.yaml` / `.py`（`docs/`、`openspec/` 与 `*.md` 除外）会被 `commit-scope` 具名拒绝。因此文档与 CI/代码不要放进同一个 docs 提交，分两次提交。（契约见 [`docs/comment-gate-tooling.md`](docs/comment-gate-tooling.md) §八。）
 - **一个意图一个落点**：同一意图的改动聚在单一包/文件族；不顺手重构、不整文件重排。
 - **用户可见变更记入 [`CHANGELOG.md`](CHANGELOG.md) 的 `[Unreleased]`**（Keep a Changelog + SemVer）；Breaking Changes 写"用户会感知到什么"。
 - **不把运行期产物入库**：`*.test`、`*.out`、`*.log`、`*.prof`、`data/` 等由 `tracked-hygiene` 拒绝；新增顶层目录必须同时登记 `scripts/codetools/hygiene.go` 的白名单与 README 布局说明。
-- **公共 API 变更**须保持 [`examples/contract/`](examples/contract/) 的编译期契约样例可编译（74 个 `Example` 函数）。
+- **公共 API 变更**须保持 [`examples/contract/`](examples/contract/) 的编译期契约样例可编译（85 个 `Example` 函数）。
 
 ## 五、pre-release 姿态
 
-- 仓库处于 **v0.3.0 pre-release、单人维护**：**不承诺迁移**——数据、配置与 API 都可能 breaking。
+- 仓库处于 **pre-release、单人维护**（版本以 git tag / CHANGELOG 为准，现至 `v0.5.0`）：**不承诺迁移**——数据、配置与 API 都可能 breaking。
 - 配置装载是**严格 YAML/JSON**：未知键拒绝启动而非静默忽略。升级前对照 CHANGELOG 的 Breaking Changes 删键。
 - 先例：旧单文件快照 `kv.json` 不迁移，存在即忽略、报告一次、冷启动重建。
-- 依赖 `trpc-agent-go` 当前指向 fork tag `v1.11.2-tagent.1`；回正条件与移除步骤写在 `go.mod` 的 `replace` 旁与 [`docs/OPERATION.md`](docs/OPERATION.md) §七·D1。
+- 依赖 `trpc-agent-go` 当前指向 fork tag `v1.11.2-tagent.3`；回正条件与移除步骤写在 `go.mod` 的 `replace` 旁与 [`docs/OPERATION.md`](docs/OPERATION.md) §七·D1。
 
 ## 六、测试要求
 
@@ -112,13 +112,13 @@ bash scripts/gates/check-openspec.sh
 - **白盒不变量**：包内测试文件镜像生产文件命名（`durable_test.go` 守 `durable.go`），断言内部不变量，不是把公共 API 再测一遍。参考 [`runtime/state/durable_test.go`](runtime/state/durable_test.go)、[`runtime/task/lifecycle_test.go`](runtime/task/lifecycle_test.go)、[`runtime/agent/loop_test.go`](runtime/agent/loop_test.go)。
   - 测试 doc 用要点行列出被钉住的事实；错误路径要有**具名拒绝**断言，只测 happy path 不算覆盖。
   - 单条复跑：`go test ./runtime/state -run TestDurableFactChainInvariants -count=1` → `ok …/runtime/state 0.174s`。
-- **资源门三态**：无门是合法 `Skip`；有门缺凭据是致命失败；半配必须拒绝。真实模型用例在无 `ZAI_API_KEY` / `TENCENT_HY_API_KEY` 时自跳过，不阻塞 CI。
+- **资源门三态**：无门是合法 `Skip`；有门缺凭据是致命失败；半配必须拒绝。真实模型用例在无 `TAGENT_REAL_JUDGE_*` / `TAGENT_REAL_EMBEDDING_*` 三件套（0/3）时自跳过，半配（1-2/3）具名拒绝，不阻塞 CI。
 - **测试标识不承载批次/轮次编号**（`name-check` 门）。
 
 ## 七、文档要求
 
 - **[`docs/api/`](docs/api/index.md) 是生成面**：真源是源码注释，作者是 `scripts/gates/gen_godoc.sh`，手改必被 `gen_godoc --check` 判红。
-- **[`docs/wiki/`](docs/wiki/README.md) 分两类**：被代码 `// 契约:` 引用的 16 篇是**活契约页**（随代码重写式修订，锚 slug 不可改）；其余各篇是历史快照（historical-verbatim），真源是各自的快照提交，不许"对齐今天"式改写，引用由 `doc-refs` 按快照锚定保护。
+- **[`docs/wiki/`](docs/wiki/README.md) 分四类**：被代码 `// 契约:` 引用的 16 篇是**活契约页**（随代码重写式修订，锚 slug 不可改）；7 篇 historical-verbatim 是历史快照，真源是各自的快照提交，不许"对齐今天"式改写，引用由 `doc-refs` 按快照锚定保护；1 篇导览页（mechanism-tour，不承载契约）；1 篇索引（README.md）。分区口径见 [`docs/OPERATION.md`](docs/OPERATION.md) §八.1。
 - **长期事实文档**（`docs/*.md`、根级 `README.md` / `CONTRIBUTING.md`）：真源是今天的树，引用的路径必须存在。`doc-refs` 的扫描面是 `docs/wiki` 与 `docs/*.md`；根级 markdown 不在扫描面内，但同一纪律适用——写下的路径先 `ls` 到。
 - **未提交的 `docs/wiki` 编辑会取消该篇的历史锚定**，使其引用集体报 dangling。文档批次先落盘再跑门禁；需要当场判单篇时用 `go run ./scripts/codetools doc-refs docs/wiki/README.md`。机制说明见 [`docs/OPERATION.md`](docs/OPERATION.md) §五·3(a)。
 - **`openspec/specs/` 是已接受需求的真源**；过程记录放 `openspec/changes/`（归档后只读）。脚本与 CI 不得把读者指向过程工件（`proc-refs` 门）。

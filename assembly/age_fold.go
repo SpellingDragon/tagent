@@ -38,6 +38,13 @@ type FoldWindow struct {
 // assembly packs requests under, so the fold fires where the assembly would
 // start degrading the projection rather than after it already had. A window
 // naming no tokens reports no threshold, and a fold read under it never fires.
+//
+// The threshold bounds the conversation alone. The delivery settlement receipts
+// a projection carries beside it state what the host owes and how far a delivery
+// got: they are presented to the model, but they are not a turn, so they neither
+// spend this threshold nor make the material beside them fold sooner. A receipt
+// leaves the projection with the turns it arrived beside, covered by the fold
+// that overtakes them (see coverSettlementFacts).
 func (w FoldWindow) VolumeThresholdBytes() int {
 	if w.MaxTokens <= 0 {
 		return 0
@@ -124,6 +131,17 @@ func (p *AgeFoldPlugin) Port() plugin.Port {
 	return plugin.PortFactObservation
 }
 
+// Material declares what this plugin reads, when it reads it and what a failed
+// reading leaves behind: one committed fact read after its commit, where a failed
+// fold is a named gap and the fact keeps standing.
+func (p *AgeFoldPlugin) Material() plugin.Material {
+	return plugin.Material{
+		Reads:   plugin.PortFactObservation,
+		Timing:  plugin.TimingPostCommit,
+		Failure: plugin.RecordGap,
+	}
+}
+
 // ObserveCommit judges the projection of the session the committed fact belongs
 // to once that projection's rendered volume passes the window threshold, and
 // files the judgment of every product the fold would mint. The material itself is
@@ -133,6 +151,8 @@ func (p *AgeFoldPlugin) Port() plugin.Port {
 // session registered no projection, a session whose window names no positive
 // token window and a projection still inside its threshold each leave the commit
 // as it stands. A failed judgment is reported without rolling the commit back.
+// - The presented projection is read first as the cheap gate: inside the threshold, the accounting-free view is inside it too, so the common commit pays one read and no rebuilt view.
+// - The fold judges that accounting-free view, because delivery accounting is presented to the model but never counts as the history that trips a fold (foldProjectionOf).
 func (p *AgeFoldPlugin) ObserveCommit(ctx context.Context, id event.EventID) error {
 	if p == nil || p.sessions == nil {
 		return nil
@@ -152,10 +172,19 @@ func (p *AgeFoldPlugin) ObserveCommit(ctx context.Context, id event.EventID) err
 	if threshold <= 0 {
 		return nil
 	}
-	report, err := projection.PlanByAge(ctx, replay.AgeFoldPlan{
-		KeepRecent:      window.KeepRecentTasks,
-		VolumeThreshold: threshold,
-	})
+	plan := replay.AgeFoldPlan{KeepRecent: window.KeepRecentTasks, VolumeThreshold: threshold}
+	gated, err := projection.PlanByAge(ctx, plan)
+	if err != nil {
+		return err
+	}
+	if !gated.Triggered {
+		return nil
+	}
+	folded := foldProjectionOf(ctx, projection)
+	if folded == nil {
+		return nil
+	}
+	report, err := folded.PlanByAge(ctx, plan)
 	if err != nil {
 		return err
 	}
@@ -224,7 +253,12 @@ func (s ageFoldSessions) FileCompressRequest(ctx context.Context, session event.
 // A judgment the commit refused lands in no ledger and reaches no consumer: the
 // refusal — a commit that failed, or an identity already naming another fact —
 // is answered to the caller instead of being handed to memory as a filed
-// judgment, so no product can answer a request the chain never holds.
+// judgment, so no product can answer a request the chain never holds. The fact
+// carries the owning agent of its session, so the judgment persists beside the
+// product that answers it: an ownerless judgment never reaches the durable
+// chain, and the resident window would release it with nothing to read back.
+//
+//   - The judgment fact and the account noted for it are one unit of work: the whole write holds the run's quiet-point fence, so a cut taken after the landing states the judgment instead of restoring a consumer beside a judgment the chain already carries.
 func (r *Run) fileCompressRequest(ctx context.Context, session event.SessionID, request event.CompressRequest) error {
 	if session == "" {
 		return errors.New("tagent: the compression judgment names no session chain")
@@ -232,8 +266,11 @@ func (r *Run) fileCompressRequest(ctx context.Context, session event.SessionID, 
 	if request.FactKey() == "" {
 		return errors.New("tagent: the compression judgment carries no identity")
 	}
+	r.flight.enter()
+	defer r.flight.leave()
 	r.mu.Lock()
 	held, filed := r.facts[request.ID]
+	agent := r.agentOfSessionLocked(session)
 	consumer := r.compress
 	r.mu.Unlock()
 	if filed && held.Type != request.FactType() {
@@ -249,7 +286,7 @@ func (r *Run) fileCompressRequest(ctx context.Context, session event.SessionID, 
 			Type:      request.FactType(),
 			Timestamp: stamp,
 			Meta:      map[string]string{event.MetaKeyEventSummary: request.Reason},
-			Owner:     event.Address{SessionID: session},
+			Owner:     event.Address{AgentID: agent, SessionID: session},
 		}); err != nil {
 			return fmt.Errorf("tagent: the compression judgment of session %s was not committed: %w", session, err)
 		}

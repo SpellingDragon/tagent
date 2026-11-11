@@ -80,6 +80,21 @@ func (m *hostParameterizedModel) GenerateContent(ctx context.Context, request *m
 	return m.inner.GenerateContent(ctx, m.decorate(request))
 }
 
+// EffectiveGenerationConfig reports the generation configuration this model
+// will actually hand the provider for one request: the parameters the request
+// itself names, beside the declared sampling that fills only the parameters the
+// request leaves unset. An undeclared parameter stays absent rather than being
+// written as a zero, and a value the request already carries is never
+// overridden, so a request evidence fixed over this answer states the values
+// the provider receives instead of the ones the caller happened to name.
+func (m *hostParameterizedModel) EffectiveGenerationConfig(request *model.Request) model.GenerationConfig {
+	effective := m.decorate(request)
+	if effective == nil {
+		return model.GenerationConfig{}
+	}
+	return effective.GenerationConfig
+}
+
 // GenerateContentIter serves one request in the caller goroutine, keeping the
 // iterator capability of the wrapped model rather than bridging it behind a
 // channel.

@@ -24,7 +24,7 @@ type recallSurface struct {
 }
 
 // newRecallSurface commits the corpus into a real file tier, lands every event
-// into the observation table, wires the four tools over it inside the alpha
+// into the durable query face, wires the four tools over it inside the alpha
 // partition, and records the two parent links the causal walk follows. The
 // embedder is the capability handed to the tools, while the retrieval chain
 // keeps its own hash embedder, so a call refused for want of an embedding
@@ -32,8 +32,7 @@ type recallSurface struct {
 func newRecallSurface(t *testing.T, wired memory.Embedder) *recallSurface {
 	t.Helper()
 	chain := newRealStoreChain(t, memoryembedder.NewHashEmbedder(0))
-	chain.landStore(t)
-	relations := replay.NewMemoryRelations()
+	relations := &replay.MemoryRelations{}
 	if err := relations.SetParent("0a02", "0a01"); err != nil {
 		t.Fatalf("SetParent(0a02 -> 0a01): %v", err)
 	}
@@ -212,7 +211,7 @@ func TestRecallToolSurface(t *testing.T) {
 				t.Fatalf("recall_get(0a02) answered no parent: %v", child)
 			}
 			if got := parent["key"]; got != "0a01" {
-				t.Fatalf("recall_get(0a02) parent = %v, want 0a01: the walk reads the link the relation ledger holds", got)
+				t.Fatalf("recall_get(0a02) parent = %v, want 0a01: the walk reads the parent link", got)
 			}
 		})
 

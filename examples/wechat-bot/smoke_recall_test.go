@@ -21,7 +21,6 @@ import (
 	tagentmodel "github.com/SpellingDragon/tagent/api/model"
 	"github.com/SpellingDragon/tagent/memory"
 	"github.com/SpellingDragon/tagent/memory/ledger"
-	"github.com/SpellingDragon/tagent/memory/replay"
 	"github.com/SpellingDragon/tagent/tool/recall"
 )
 
@@ -303,13 +302,6 @@ func smokeRecallSeed(t *testing.T, root string) {
 		if err := tier.Originals.Put(ctx, body.Ref(), []byte(seed.original)); err != nil {
 			t.Fatalf("store the original %s: %v", seed.key, err)
 		}
-	}
-	relations, err := replay.OpenMemoryRelations(filepath.Join(root, "relations"))
-	if err != nil {
-		t.Fatalf("open the seed relations: %v", err)
-	}
-	if err := relations.SetParent(smokeRecallChildKey, smokeRecallParentKey); err != nil {
-		t.Fatalf("link %s under %s: %v", smokeRecallChildKey, smokeRecallParentKey, err)
 	}
 }
 

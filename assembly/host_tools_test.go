@@ -534,6 +534,49 @@ var ledgerTargets = []event.Address{
 	{AgentID: "peer", SessionID: "session-ledger-three"},
 }
 
+// testLedgerRecords reads the delivery account for a check and refuses the check
+// by name when the durable chain could not be read: a healthy chain answers no
+// error, so a surfaced error is a defect the check reports rather than a partial
+// view it reads as the whole account.
+func testLedgerRecords(t *testing.T, l *DeliveryLedger) []DeliveryRecord {
+	t.Helper()
+	records, err := l.Records()
+	if err != nil {
+		t.Fatalf("the delivery account could not be read: %v", err)
+	}
+	return records
+}
+
+// testLedgerRefusals reads the refusal account for a check, refusing a read error.
+func testLedgerRefusals(t *testing.T, l *DeliveryLedger) []DeliveryRefusal {
+	t.Helper()
+	refusals, err := l.Refusals()
+	if err != nil {
+		t.Fatalf("the delivery refusal account could not be read: %v", err)
+	}
+	return refusals
+}
+
+// testLedgerBySource reads one source event's deliveries for a check.
+func testLedgerBySource(t *testing.T, l *DeliveryLedger, source event.EventID) []DeliveryRecord {
+	t.Helper()
+	records, err := l.BySource(source)
+	if err != nil {
+		t.Fatalf("the deliveries of source %s could not be read: %v", source, err)
+	}
+	return records
+}
+
+// testLedgerByTarget reads one target's deliveries for a check.
+func testLedgerByTarget(t *testing.T, l *DeliveryLedger, target event.Address) []DeliveryRecord {
+	t.Helper()
+	records, err := l.ByTarget(target)
+	if err != nil {
+		t.Fatalf("the deliveries of target %+v could not be read: %v", target, err)
+	}
+	return records
+}
+
 // TestDeliveryLedgerEachTargetExactlyOnce pins the per-target account of one source event (design D9).
 // - each_target_exactly_once: one source event delivered to three targets answers three records, no target twice
 // - a read of one target answers only the record of that target
@@ -545,7 +588,7 @@ func TestDeliveryLedgerEachTargetExactlyOnce(t *testing.T) {
 	}
 	ledger := ledgerTestRun(facts...).DeliveryLedger()
 
-	records := ledger.Records()
+	records := testLedgerRecords(t, ledger)
 	if len(records) != len(ledgerTargets) {
 		t.Fatalf("deliveries the account lists = %d, want one per target (%d):\n%s", len(records), len(ledgerTargets), ledgerDescribe(records))
 	}
@@ -562,13 +605,13 @@ func TestDeliveryLedgerEachTargetExactlyOnce(t *testing.T) {
 			t.Fatalf("receipt of the delivery to %+v = %q, want %q", record.Target, record.Receipt, DeliveryReceiptSent)
 		}
 	}
-	if got := ledger.BySource(ledgerSource); len(got) != len(ledgerTargets) {
+	if got := testLedgerBySource(t, ledger, ledgerSource); len(got) != len(ledgerTargets) {
 		t.Fatalf("deliveries answered by the source event = %d, want %d", len(got), len(ledgerTargets))
 	}
-	if got := ledger.ByTarget(ledgerTargets[1]); len(got) != 1 {
+	if got := testLedgerByTarget(t, ledger, ledgerTargets[1]); len(got) != 1 {
 		t.Fatalf("deliveries answered by one target = %d, want the one body it received:\n%s", len(got), ledgerDescribe(got))
 	}
-	if first, second := ledgerDescribe(records), ledgerDescribe(ledger.Records()); first != second {
+	if first, second := ledgerDescribe(records), ledgerDescribe(testLedgerRecords(t, ledger)); first != second {
 		t.Fatalf("two reads of one chain disagree:\n%s\n%s", first, second)
 	}
 }
@@ -582,7 +625,7 @@ func TestDeliveryLedgerFactTypeDistinct(t *testing.T) {
 		ledgerSent("ledger-sent", ledgerSource, target, "the note one session hands a peer"),
 		ledgerSettled("ledger-settled", target, "the review settled"),
 	)
-	records := run.DeliveryLedger().ByTarget(target)
+	records := testLedgerByTarget(t, run.DeliveryLedger(), target)
 	if len(records) != 2 {
 		t.Fatalf("deliveries the account lists for %+v = %d, want the sent body beside the framework settle:\n%s",
 			target, len(records), ledgerDescribe(records))
@@ -614,7 +657,7 @@ func TestDeliveryLedgerIdentityIsTheCommittedFact(t *testing.T) {
 		ledgerSent("ledger-sent", ledgerSource, target, "the note one session hands a peer"),
 		ledgerSettled("ledger-settled", target, "the review settled"),
 	)
-	for _, record := range run.DeliveryLedger().Records() {
+	for _, record := range testLedgerRecords(t, run.DeliveryLedger()) {
 		if _, held := run.facts[event.EventID(record.Identity)]; !held {
 			t.Fatalf("identity %q of the delivery to %+v names no fact of this run", record.Identity, record.Target)
 		}
@@ -628,7 +671,7 @@ func TestDeliveryLedgerIdentityIsTheCommittedFact(t *testing.T) {
 		ledgerSent("ledger-sent", ledgerSource, target, "the note one session hands a peer"),
 		ledgerSent("ledger-sent", ledgerSource, target, "the same call presented again"),
 	)
-	if got := repeat.DeliveryLedger().Records(); len(got) != 1 {
+	if got := testLedgerRecords(t, repeat.DeliveryLedger()); len(got) != 1 {
 		t.Fatalf("deliveries listed for one identity presented twice = %d, want the one the chain holds:\n%s",
 			len(got), ledgerDescribe(got))
 	}
@@ -645,7 +688,7 @@ func TestDeliveryLedgerQueryableWithoutParsingBody(t *testing.T) {
 		ledgerSent("ledger-quiet", ledgerSource, ledgerTargets[1], bodies[1]),
 		ledgerSettled("ledger-settled", ledgerTargets[2], bodies[2]),
 	)
-	records := run.DeliveryLedger().Records()
+	records := testLedgerRecords(t, run.DeliveryLedger())
 	if len(records) != len(bodies) {
 		t.Fatalf("deliveries the account lists = %d, want one per delivered target (%d):\n%s", len(records), len(bodies), ledgerDescribe(records))
 	}
@@ -660,7 +703,7 @@ func TestDeliveryLedgerQueryableWithoutParsingBody(t *testing.T) {
 	if ledger := unassembled.DeliveryLedger(); ledger != nil {
 		t.Fatalf("the account of a run that was never assembled = %+v, want none", ledger)
 	}
-	if got := unassembled.DeliveryLedger().Records(); len(got) != 0 {
+	if got := testLedgerRecords(t, unassembled.DeliveryLedger()); len(got) != 0 {
 		t.Fatalf("records of an unassembled account = %d, want none:\n%s", len(got), ledgerDescribe(got))
 	}
 }
@@ -853,10 +896,10 @@ func TestReentrantSendFilesARoundItCouldNotPutBack(t *testing.T) {
 			t.Fatalf("rounds the port put back = %v, want the one round it opened", got)
 		}
 
-		broken, held := reentryRefusalOf(run, DeliveryReceiptBroken, hostDenialRollback)
+		broken, held := reentryRefusalOf(t, run, DeliveryReceiptBroken, hostDenialRollback)
 		if !held {
 			t.Fatalf("refusals the account files = %s, want the one broken attempt of the round nothing could put back:\n%s",
-				refusalDescribe(run.DeliveryLedger().Refusals()), refusalDescribe(run.DeliveryLedger().Refusals()))
+				refusalDescribe(testLedgerRefusals(t, run.DeliveryLedger())), refusalDescribe(testLedgerRefusals(t, run.DeliveryLedger())))
 		}
 		if broken.Identity != identity {
 			t.Fatalf("identity of the broken attempt = %q, want the one the call and the task share %q", broken.Identity, identity)
@@ -867,11 +910,11 @@ func TestReentrantSendFilesARoundItCouldNotPutBack(t *testing.T) {
 		if broken.Source != event.EventID(frame.Identity.InvocationID) {
 			t.Fatalf("source of the broken attempt = %q, want the responsibility range it belongs to %q", broken.Source, frame.Identity.InvocationID)
 		}
-		if _, ok := reentryRefusalOf(run, DeliveryReceiptDenied, hostDenialStart); !ok {
+		if _, ok := reentryRefusalOf(t, run, DeliveryReceiptDenied, hostDenialStart); !ok {
 			t.Fatalf("refusals the account files = %s, want the ordinary refusal of the same call beside the broken one",
-				refusalDescribe(run.DeliveryLedger().Refusals()))
+				refusalDescribe(testLedgerRefusals(t, run.DeliveryLedger())))
 		}
-		if got := run.DeliveryLedger().Records(); len(got) != 0 {
+		if got := testLedgerRecords(t, run.DeliveryLedger()); len(got) != 0 {
 			t.Fatalf("deliveries the account lists = %d, want none: an attempt the account turned away reached no target:\n%s",
 				len(got), ledgerDescribe(got))
 		}
@@ -890,13 +933,13 @@ func TestReentrantSendFilesARoundItCouldNotPutBack(t *testing.T) {
 		if outcome, cause := port.ReenterTask(ctx, taskID, "review it again"); outcome == deliverySent {
 			t.Fatalf("re-entry of a task whose round never landed = %q (%q), want the refusal the round reported", outcome, cause)
 		}
-		if _, held := reentryRefusalOf(run, DeliveryReceiptBroken, hostDenialRollback); held {
+		if _, held := reentryRefusalOf(t, run, DeliveryReceiptBroken, hostDenialRollback); held {
 			t.Fatalf("refusals the account files = %s, want none broken: the round was put back",
-				refusalDescribe(run.DeliveryLedger().Refusals()))
+				refusalDescribe(testLedgerRefusals(t, run.DeliveryLedger())))
 		}
-		if _, ok := reentryRefusalOf(run, DeliveryReceiptDenied, hostDenialStart); !ok {
+		if _, ok := reentryRefusalOf(t, run, DeliveryReceiptDenied, hostDenialStart); !ok {
 			t.Fatalf("refusals the account files = %s, want the refused attempt beside the put-back round",
-				refusalDescribe(run.DeliveryLedger().Refusals()))
+				refusalDescribe(testLedgerRefusals(t, run.DeliveryLedger())))
 		}
 	})
 }
@@ -953,8 +996,9 @@ func (s *reentryTasksStub) RollbackReactivation(_ context.Context, _ event.TaskI
 func (s *reentryTasksStub) rolledBackRounds() []int64 { return append([]int64(nil), s.rolledBack...) }
 
 // reentryRefusalOf reports the one refusal the account files at the named receipt and stage.
-func reentryRefusalOf(run *Run, receipt, category string) (DeliveryRefusal, bool) {
-	for _, refusal := range run.DeliveryLedger().Refusals() {
+func reentryRefusalOf(t *testing.T, run *Run, receipt, category string) (DeliveryRefusal, bool) {
+	t.Helper()
+	for _, refusal := range testLedgerRefusals(t, run.DeliveryLedger()) {
 		if refusal.Receipt == receipt && refusal.Category == category {
 			return refusal, true
 		}

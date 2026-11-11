@@ -33,6 +33,7 @@ providers:
   moonshot:   { provider: openai, api_endpoint: "https://api.moonshot.cn/v1",                  api_key_env: "MOONSHOT_API_KEY" }
   tencent_hy: { provider: openai, api_endpoint: "https://api.lkeap.cloud.tencent.com/plan/v3", api_key_env: "TENCENT_HY_API_KEY" }
   tencent:    { provider: openai, api_endpoint: "https://tokenhub.tencentmaas.com/v1",         api_key_env: "TENCENT_API_KEY" }
+  gemini_oc:  { provider: openai, api_endpoint: "https://generativelanguage.googleapis.com/v1beta/openai", api_key_env: "GOOGLE_API_KEY" }
   # 私有协议按需启用:
   # anthropic: { provider: anthropic, api_endpoint: "https://api.anthropic.com", api_key_env: "ANTHROPIC_API_KEY" }
   # gemini:    { provider: gemini, api_key_env: "GOOGLE_API_KEY" }
@@ -55,13 +56,13 @@ mcp_servers:
 # 存储不再有顶层 storage 段:它由各 agent 的 memory 段声明,宿主把全体声明归并成
 # 一个 tier + 一个 engine(hostDocument.memorySettings)——同一份存储被两种引擎读会答出
 # 两种结果,所以只有一处声明引擎、其余处只声明存储与读授权;声明不一致一律拒启动。
-#   · type/path:localfile 的原始层与分段层根;.wechat-config/data 是旧世界的
+#   · type/path:journal 的原始层与分段层根;.wechat-config/data 是旧世界的
 #     KV/事件目录,指向它即接回跨重启的历史知识(legacy body 由 DecodeEventBody 兼容)。
 #   · read_namespaces:跨分区读授权(recall.New 的授权面);自身命名空间恒在授权内,
 #     这里列出的名字追加到它之后。不声明则不跨区。
 #   · engine:语义引擎,embedding 经 trpc knowledge/embedder/openai 真调用;
-#     vector_top_k/keyword_top_k 是混合检索两腿的上限,rrf_k 是融合秩常数(零值=历史行为)。
-#     api_key_env 指向的变量缺失时具名拒启动(embedding key is not set)。
+#     两腿上限与融合秩常数是机制常量(不在声明面),api_key_env 指向的变量缺失时
+#     具名拒启动(embedding key is not set)。
 
 # ===== 治理闸(装配期恒挂 WithGovernance;此处开启审批面)=====
 # 行为详情见 docs/wiki/platform/agent-behavior-matrix.md 与 platform-subsystems.md(historical-verbatim,
@@ -85,9 +86,14 @@ agents:
     # 部署方把 USER.md 放进 prompt_dir 即被加载。
     system_prompt:
       files: [AGENTS.md, SOUL.md, USER.md]
-    # 送达面:send 保留为跨代理工具(装配位),entry 不再声明——正文只经自动投递出口落地(D4)。
-    # 委派面:knowledge/recall/plan 声明为 agent 引用——模型看到名为 knowledge/recall/plan 的工具,
-    # 工具面是被委派 agent 自己的 tools[],描述从 description_file 热载。
+    # 送达面:业务正文只经自动投递出口落地(D4);入口工具面不声明 send——
+    # 冻结症状锚 G-A 要求入口回合不持有跨会话写面,教训入己记忆走事实链。
+    # 反思会话(tagent-session:tagent:reflection)的 send 由宿主按 meditation 声明
+    # 授予、由运行时按会话隔离:入口与反思会话共享同一 agent 的工具绑定,
+    # 只有该反思会话的请求面保留 send,其他会话一律过滤。
+    # 委派面:knowledge/recall/plan/action 声明为 agent 引用——模型看到名为 knowledge/recall/plan/action
+    # 的工具,工具面是被委派 agent 自己的 tools[](file/exec 在 action、recall 在 recall),
+    # 冥想整理轮因此天然具备 file 读/exec 受限执行/recall 三种能力,零新机制。
     tools:
       - { kind: agent, agent: knowledge, description_file: knowledge_backend.md }
       - { kind: agent, agent: recall, event_params: [event_keys] }
@@ -100,12 +106,12 @@ agents:
     # 第 24 个工具轮或跑满 3300 秒后,下一决策转为收尾轮——请求尾部追加收尾指令,
     # 该轮走 120 秒短超时,发起的工具调用一律不受理并配好回执,回答本轮已产出的东西。
     final_round:
-      max_rounds: 24
-      budget_seconds: 3300
+      max_rounds: 2400
+      budget_seconds: 33000
       timeout_seconds: 120
     # 记忆面:本 agent 是共享 tier 的声明处(见文件头的记忆面说明),也是语义引擎的唯一声明处。
     memory:
-      type: localfile
+      type: journal
       path: .wechat-config/data
       read_namespaces: [tagent]
       engine:
@@ -115,9 +121,19 @@ agents:
           model: embedding-3
           api_key_env: ZAI_API_KEY
           dimensions: 512
-        vector_top_k: 20
-        keyword_top_k: 20
-        rrf_k: 60
+    # 冥想(自察缺省,r14/r14b/ADR 0005):主语=本 agent 自身,反思回合跑在专属反思会话
+    # (tagent-session:tagent:reflection),经验卡片落本分区与本会话链——用户业务会话零污染,
+    # 同一 agent 的全分区真实内容可读,教训由 recall 拉取、send 推送到目标活跃会话。
+    # 触发是自持状态机(ADR 0003):外部事件充电,激活即一条既有 external_input 携带因果元数据;
+    # 没有 ticker,interval 是两次点火之间的下限,min_gap 是两次已消费反思的最小间隔。
+    # observed_namespaces 缺省=自身分区(自察);显式列他人分区即跨域策展,须落在 read 授权内。
+    # 一个进程只驱动一条反思循环:第二个 enabled 的 agent 拒启动。
+    meditation:
+      enabled: true
+      interval: 30m
+      min_gap: 2h
+      prompt_file: meditation.md
+      deliver_to: [tagent]
     # 已接线的模型参数(不写走模型默认): temperature / thinking_enabled /
     #   reasoning_effort / max_tool_iterations(映射看门狗轮数)
     # 待接线: task_terminal_ttl / task_default_ttl
@@ -144,7 +160,6 @@ agents:
       - { kind: tool, id: skill_search }
       - { kind: tool, id: skill_load }
       - { kind: tool, id: read_file }
-      - { kind: tool, id: mcp_call }
       - { kind: tool, id: mcp_discover }
     # 待接线:memory / max_tokens / compress_threshold / memory_query
 
@@ -158,9 +173,9 @@ agents:
       max_rounds: 5
       timeout_seconds: 120      # 本目录自带(工具名按本部署的声明书写:recall_query/recall_get/recall_recent/recall_trace)
     # 记忆读面:声明即授权(不声明的 agent 看不见该工具);四工具经 tool/recall 装配,
-    # 读面由宿主注入(hostRecallSeam):Searcher 走装配后的 Run.Recall,Table 走已提交
-    # 存储的观察表,Originals 走 storage 的 scoped 原始层,Embedder 由宿主绑定,而 Trace
-    # 走宿主自持的 relation 账本(运行时本身不维护 relations)。不声明 storage 时读面为空,
+    # 读面由宿主注入(hostRecallSeam):Searcher 走装配后的 Run.Recall,Table 直读
+    # 持久事件链,Originals 走 storage 的 scoped 原始层,Embedder 由宿主绑定,而 Trace
+    # 沿同一条链按需推导父边(不维护独立 relation 账本)。不声明 storage 时读面为空,
     # 调用即具名拒绝(recall: the deployment wires no read face)。
     tools:
       - { kind: tool, id: recall_query }
@@ -170,7 +185,7 @@ agents:
     # 记忆面:与 tagent 同一 tier(归并校验);read_namespaces 把 tagent 分区追加进读授权,
     # 于是 recall_query 能在自身分区之外检索业务分区的历史。
     memory:
-      type: localfile
+      type: journal
       path: .wechat-config/data
       read_namespaces: [tagent]
     # 待接线:max_tool_iterations / max_tokens / compress_threshold / reasoning_effort
@@ -201,7 +216,6 @@ agents:
       - { kind: tool, id: replace_content }
       - { kind: tool, id: exec }
       - { kind: tool, id: mcp_call }
-      - { kind: tool, id: mcp_discover }
     # 待接线:memory / max_tool_iterations / max_tokens / compress_threshold /
     #         temperature / thinking_enabled / reasoning_effort
 
@@ -228,39 +242,6 @@ agents:
       - { kind: tool, id: replace_content }
     # 待接线:thinking_enabled / max_tool_iterations / max_tokens / compress_threshold / temperature
 
-  # ---- Meditator:旁路冥想线(独立反思主体,常驻第二条循环)----
-  meditator:
-    system_prompt:
-      files: [meditator_agent.md]
-    # 冥想自己的窗口:反思上下文同样按窗口管理。
-    max_tokens: 32000
-    # 跨会话写面:唯一通信工具 send,只有模型在反思回合内显式调用
-    # send{target:{agent,session}} 才落链;目标=deliver_to 白名单里的活跃绑定会话,
-    # 具体 agent/session 由反思输入里的 delivery targets 段给出,机制侧不代投。
-    tools:
-      - { kind: tool, id: send }
-    # 观察面:与 tagent 同一 tier;read_namespaces 授权它读业务分区,
-    # meditation.observed_namespaces 再从中圈定真正反思的分区(越界拒启动)。
-    memory:
-      type: localfile
-      path: .wechat-config/data
-      read_namespaces: [tagent]
-    # 事件驱动策展:enabled 即挂载冥想驱动——事实提交推进计时器,水位后有新素材且
-    # interval(默认 30m)期满、min_gap(两次已消费反思的最小间隔)满足才反思一轮;
-    # prompt_file 是每次注入随摘要携带的静态提示(相对 prompt_dir);
-    # observed_namespaces 必须落在各自 read 授权内;deliver_to 是 send 对外投递的目标白名单——
-    # 反思回合按输入里列出的每个活跃会话各发一次 send{target:{agent,session}};不调用则不投递。
-    # 一个进程只驱动一条反思循环:第二个 enabled 的 agent 拒启动。
-    meditation:
-      enabled: true
-      interval: 30m
-      min_gap: 2h
-      prompt_file: meditation.md
-      observed_namespaces: [tagent]
-      deliver_to: [tagent]
-    # 待接线:max_tool_iterations / max_tokens / temperature / compress_threshold,
-    #         以及 recall + file 工具 + exec
-
 # ===== 应用专属配置(各应用自行反序列化)=====
 app:
   wechat:
@@ -268,5 +249,5 @@ app:
     token_file: "token.json"
     context_token_dir: ".wechat-context-tokens"
     workspace_dir: ".tagent-workspace"   # 入站附件/长文本落盘(容器内 TAGENT_WECHAT_WORKSPACE_DIR 覆盖)
-    # ops_session: "wxid_owner"          # 启动通知(转世通报/系统告警)的固定目标会话;空=宿主运维会址 <session-prefix>ops
+    # ops_session: "wxid_owner"          # 启动通知(重启恢复通报/系统告警)的固定目标会话;空=宿主运维会址 <session-prefix>ops
     # approvers: ["wxid_owner"]          # critical 操作的消息批准白名单;空=消息批准关闭,只经 CLI 批准

@@ -62,7 +62,7 @@ var ErrStrategyUnknown = errors.New("search: the query names an unknown strategy
 // RRFFusion is the Fusion implementation of this package. It carries the two strategies that have
 // consumers — hybrid and keyword-only — and refuses the rest by name.
 //
-// - The hybrid fallback is byte-identical by contract: an empty vector leg (unconfigured embedder, dropped generation or no hit) runs the very same code path keyword-only runs, so a caller cannot tell the two apart and a vector pipeline coming up later never changes what a keyword-only answer looked like.
+// - The hybrid fallback is byte-identical by contract: an empty vector leg (no embedder, failed embedding or no hit) runs the very same code path keyword-only runs, so a caller cannot tell the two apart.
 // - The fusion grants nothing: both legs arrive already read under the caller's authorized scope and the fused result stays inside it.
 // - A fused hit stays a reference, so a fused set is never a second copy of the text behind it.
 type RRFFusion struct {

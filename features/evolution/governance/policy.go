@@ -98,6 +98,17 @@ func (p *Policy) Port() plugin.Port {
 	return plugin.PortCallRuling
 }
 
+// Material declares what this policy reads, when it reads it and what a failed
+// ruling leaves behind: one tool call read before its side effect, where a failed
+// ruling refuses the pass so the call neither runs nor is recorded.
+func (p *Policy) Material() plugin.Material {
+	return plugin.Material{
+		Reads:   plugin.PortCallRuling,
+		Timing:  plugin.TimingPreSideEffect,
+		Failure: plugin.FailClosed,
+	}
+}
+
 // PolicyOption configures the governance gate at construction.
 type PolicyOption func(*Policy)
 

@@ -1,0 +1,5 @@
+# Tasks: 11-derived-faces
+
+- [x] 11.1 训练导出按消费键配对（跨来源合批含两输入保留来源；未消费输入不出样本） —— 验证：正 `go test ./features/rl/ -run TestExportPairsByConsumptionKeys -count=1` + 负 `go test ./features/rl/ -run TestExportUnconsumedInputNoSample -count=1`
+- [x] 11.2 一次装配一次快照（热更窗口内工具/技能/环境/capture 同代；不跨请求缓存） —— 验证：正 `go test ./assembly/ -run TestRequestSingleGenerationSnapshot -count=1` + 负 `go test ./assembly/ -run TestRequestSnapshotNotCachedAcrossRequests -count=1`
+  - 拷问 r1-3 补区分性锚（J2）：原正锚只变环境块/窗口，工具与技能两面未被区分性覆盖。新增 `go test ./assembly/ -run TestRequestToolAndSkillFacesStayOnTheStartingGeneration -count=1`（EXIT=0）：装配中途发布 skill alpha→beta、tool tool-a→tool-b 的第二代，断言块内 `- tools: skill_load, tool-a` / `- skills: alpha`、`view.VisibleSkills=[alpha]`，且驱动一轮后 `RequestSnapshots()` 的 VisibleTools 含 tool-a 不含 tool-b、VisibleSkills=[alpha]。负锚：临时令 `requestAssembly.assemble` 从 `run.current` 重取 tools/skills（即破坏「一次装配一次快照」）→ 红「dynamic section = ... - tools: skill_load, tool-b - skills: beta」，复原后 `grep -c 'a.run.current.Agents\[a.boundary.Agent\]' assembly/request.go` = 0

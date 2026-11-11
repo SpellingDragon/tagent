@@ -68,7 +68,14 @@ type canonicalAgentCore struct {
 	MaxTokens         int     `json:"max_tokens,omitempty"`
 	CompressThreshold float64 `json:"compress_threshold,omitempty"`
 	KeepRecentTasks   int     `json:"keep_recent_tasks,omitempty"`
-	EnvironmentBlock  bool    `json:"environment_block,omitempty"`
+	// ProviderContextWindow and OutputReserve are the request budget the agent
+	// declares. Both encode even at zero: the budget gate reads zero as "derive
+	// the window from MaxTokens" and "take the default output reserve", and the
+	// fields are always part of the canonical core so a declaration's budget is
+	// visible in the one fingerprint that decides whether a reload republishes.
+	ProviderContextWindow int  `json:"provider_context_window"`
+	OutputReserve         int  `json:"output_reserve"`
+	EnvironmentBlock      bool `json:"environment_block,omitempty"`
 	// Temperature, ThinkingEnabled and ReasoningEffort are the request sampling
 	// the agent declares beside MaxToolIterations, the tool-round bound. A nil
 	// pointer omits the key, so a declaration that names no sampling keeps the
@@ -101,11 +108,8 @@ type canonicalMemory struct {
 
 // canonicalEngine is one semantic engine in canonical field order.
 type canonicalEngine struct {
-	Backend     string              `json:"backend"`
-	Embedding   *canonicalEmbedding `json:"embedding,omitempty"`
-	VectorTopK  int                 `json:"vector_top_k,omitempty"`
-	KeywordTopK int                 `json:"keyword_top_k,omitempty"`
-	RRFK        int                 `json:"rrf_k,omitempty"`
+	Backend   string              `json:"backend"`
+	Embedding *canonicalEmbedding `json:"embedding,omitempty"`
 }
 
 // canonicalEmbedding is one embedding connection in canonical field order.
@@ -196,23 +200,25 @@ func canonicalAgents(in []AgentSpec) []canonicalAgent {
 	for _, a := range in {
 		out = append(out, canonicalAgent{
 			canonicalAgentCore: canonicalAgentCore{
-				ID:                a.ID,
-				ParentID:          a.ParentID,
-				Model:             a.Model,
-				Tools:             canonicalToolRefs(a.Tools),
-				Plugins:           canonicalStrings(a.Plugins),
-				TaskPolicy:        a.TaskPolicy,
-				Files:             canonicalFileRefs(a.Files),
-				Params:            canonicalFloatMap(a.Params),
-				FinalRound:        canonicalFinalRoundOf(a.FinalRound),
-				MaxTokens:         a.MaxTokens,
-				CompressThreshold: canonicalFloat(a.CompressThreshold),
-				KeepRecentTasks:   a.KeepRecentTasks,
-				EnvironmentBlock:  a.EnvironmentBlock,
-				Temperature:       a.Temperature,
-				ThinkingEnabled:   a.ThinkingEnabled,
-				ReasoningEffort:   strings.TrimSpace(a.ReasoningEffort),
-				MaxToolIterations: a.MaxToolIterations,
+				ID:                    a.ID,
+				ParentID:              a.ParentID,
+				Model:                 a.Model,
+				Tools:                 canonicalToolRefs(a.Tools),
+				Plugins:               canonicalStrings(a.Plugins),
+				TaskPolicy:            a.TaskPolicy,
+				Files:                 canonicalFileRefs(a.Files),
+				Params:                canonicalFloatMap(a.Params),
+				FinalRound:            canonicalFinalRoundOf(a.FinalRound),
+				MaxTokens:             a.MaxTokens,
+				CompressThreshold:     canonicalFloat(a.CompressThreshold),
+				KeepRecentTasks:       a.KeepRecentTasks,
+				ProviderContextWindow: a.ProviderContextWindow,
+				OutputReserve:         a.OutputReserve,
+				EnvironmentBlock:      a.EnvironmentBlock,
+				Temperature:           a.Temperature,
+				ThinkingEnabled:       a.ThinkingEnabled,
+				ReasoningEffort:       strings.TrimSpace(a.ReasoningEffort),
+				MaxToolIterations:     a.MaxToolIterations,
 			},
 			Memory:     a.Memory.canonical(),
 			Meditation: a.Meditation.canonical(),
@@ -249,11 +255,8 @@ func (s EngineSpec) canonical() *canonicalEngine {
 		return nil
 	}
 	return &canonicalEngine{
-		Backend:     s.Backend,
-		Embedding:   s.Embedding.canonical(),
-		VectorTopK:  s.VectorTopK,
-		KeywordTopK: s.KeywordTopK,
-		RRFK:        s.RRFK,
+		Backend:   s.Backend,
+		Embedding: s.Embedding.canonical(),
 	}
 }
 

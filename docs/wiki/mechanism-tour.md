@@ -6,7 +6,7 @@
 
 系统只有一份权威记录——**事实链**。每个事实（用户消息、模型输出、工具结果、通知、压缩请求、冥想注入）经**单一入口** `commitFactChecked`（`assembly/facts.go`）提交：存储层先落盘、活账本后登记；拒收即报错（绝不"成功但没存住"）；同键同内容幂等、同键异内容具名冲突。
 
-一次提交，三处同时知晓：查询表（关键词检索）、向量管线（语义检索）、映射序列（该会话的投影，供下轮请求回放）。**其余一切读面（缓存、投影、折叠、呈现）都是从这条链派生的，崩溃后从链精确重建。**
+一次提交，链即唯一真相：查询与召回按需读链，语义检索在查询候选项上现算嵌入，映射序列（该会话的投影）供下轮请求回放。**其余一切读面（缓存、投影、折叠、呈现）都是从这条链派生的；崩溃后由框架 checkpoint 事实族恢复——取最新 checkpoint 身份、载入状态切片、经 `seedFact` 隔离重建只回放偏移后事实（不跑 After pass，故恢复期不重发通知、不重驱动回合），链仍是语义真相与回放源（[平台篇 §六](platform/platform-subsystems.md#framework-checkpoint)）。**
 
 ## 2. 三个挂点
 
@@ -51,7 +51,9 @@ assistant 输出 → 作为事实提交（提交失败=回合失败）
 → 渠道送达；失败自动转为持久补投义务（重启后仍欠）
 ```
 
-同一段路上有**两族投递**：agent 自己发的正文（`send`，落 `external_input`）与框架的结算/终态通知（落 `task_settled`）。两族事实类型分立，却盖同一套四键（`delivery.target`/`delivery.identity`/`delivery.receipt`/`delivery.source`），因此"一个源事件到达了哪些目标、各自什么回执"只有一种读法：`Run.DeliveryLedger()`。（[reliability/durable-delivery.md](reliability/durable-delivery.md#lineage-visibility)）
+同一段路上有**两族投递**：agent 自己发的正文（`send`，落 `external_input`）与框架的结算/终态通知（落 `task_settled`）。两族事实类型分立，却盖同一套五键（`delivery.target`/`delivery.identity`/`delivery.receipt`/`delivery.source`/`delivery.denial`），因此"一个源事件到达了哪些目标、各自什么回执"只有一种读法：`Run.DeliveryLedger()`。（[reliability/durable-delivery.md](reliability/durable-delivery.md#lineage-visibility)）
+
+**还欠什么是链上事实，不是旁路账本**：一条带正文的输出在**同一笔事实**里声明 owed（目标+血统），交付身份由落链后的 fact key 导出；之后**四结算态**（held[带 reason]/sent/refused/headless-retired）＋**迁移专用 owed 态**作为 `delivery.settlement` 族以「身份+状态」为键**追加式**落同一地址的链。重启经框架 checkpoint 的 delivery 切片恢复整本账、只回放偏移后事实：已确认 sent 不重发，无结算事实或 held(retrying) 的续跑重试，**结果未知（超时）绝不自动重发**。可见性口径：结算事实按类型→角色映射进模型请求，owed 声明随 `agent_output` 本体呈现、无独立可见面；「发不出去且模型也没说」由既有失败告知与一条按 reason 分层的延迟告知兜住，对用户怎么说由模型自主。
 
 ## 6. 异步任务：受理与结算分离，mailbox 是唯一唤醒账
 
@@ -70,7 +72,7 @@ assistant 输出 → 作为事实提交（提交失败=回合失败）
 
 **委派走同一条账，不是另一个调用层**：一次 sub-agent 调用给这次委派铸一个专属会址（`<调用方会话>#sub:<原生调用号>`），会址有自己的常驻消费实例；发起方的回合照常继续，结果以结算通知回流发起方的责任范围、恰驱动它一次。于是 main 与 sub 之间是**事件管线**（数据编排），不是调用-阻塞关系。（[agent/agent-architecture.md](agent/agent-architecture.md)）
 
-## 7. 冥想：事件驱动，没有定时器
+## 7. 冥想：事件驱动，没有定时器 <a id="冥想"></a>
 
 冥想（features/evolution/meditation/driver.go）是纯观察者：观察到"有交互在等"的新事实、且距上次反思过了节奏下限、且上次反思已被消费——才起一个独立反思回合。产出作为新输入推主循环；跨会话写入只经 `send` 工具（`target` 写 `{"agent", "session"}`，模型显式决策，机制绝不静默代笔）。**没有新事件，就永远不触发。**
 

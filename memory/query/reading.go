@@ -28,7 +28,7 @@ import (
 //   - ReadingSource.Freeze answers one DetailSource beside the per-source watermarks of the same gathering
 //   - DetailSource is the frozen view a reading serves from: Order and DetailOf answer one identity at a time
 //   - NewProjection(inventory, window) and NewBoundedProjection(source, window, budget) are the Projection over that source
-//   - Projection.Snapshot, List, Detail and Subscribe read only frozen readings and never re-read the owners
+//   - Projection.Snapshot, List, Detail and Follow read only frozen readings and never re-read the owners
 //   - a frozen reading is never re-read or rewritten: later owner changes never reach it
 //
 // 红线清单（4 条）：

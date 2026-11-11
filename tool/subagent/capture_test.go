@@ -24,7 +24,7 @@ import (
 // TestWorkerCallsEnterTrajectory pins the delegated worker's model calls in the run's trajectory:
 // - a builder carrying the run's capture fixes one request view per model call the delegated turn served
 // - every response the worker model served is admitted as one attempt beside the call that produced it
-// - the turn seals the capture, so the attempts land in the record file and the writer-confirmed manifest reads back complete
+// - the turn seals the capture, so the attempts and their request evidence land in the record file and the writer-confirmed manifest reads back complete
 // - the attempt and snapshot accounts reconcile with the calls the worker model actually served
 // - both provider shapes enter the same account: an iterating model and a channel-only model
 // 契约: docs/wiki/agent/agent-architecture.md#subagent-loop
@@ -93,8 +93,8 @@ func requireWorkerCallsEnterTrajectory(t *testing.T, provider workerProvider) {
 	if !manifest.Sealed || manifest.Partial {
 		t.Fatalf("manifest = %+v, want the writer-confirmed seal of a complete capture", manifest)
 	}
-	if manifest.CaptureID != "cap-worker" || manifest.Records != 2 || manifest.Dropped != 0 {
-		t.Fatalf("manifest = %+v, want the capture id, the two records and no loss", manifest)
+	if manifest.CaptureID != "cap-worker" || manifest.Records != 2*int64(len(attempts)) || manifest.Dropped != 0 {
+		t.Fatalf("manifest = %+v, want the capture id, the attempt of each model call beside its request evidence and no loss", manifest)
 	}
 
 	refs := capture.SnapshotRefs()

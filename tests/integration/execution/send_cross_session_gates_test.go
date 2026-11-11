@@ -142,7 +142,7 @@ func TestSendCrossSessionSenderFace(t *testing.T) {
 		scene := newGateScene(t, gateSendCall("call-gate-declared-sender",
 			`{"target":{"agent":`+intakeQuoted(gateEntryAgent)+`,"session":`+intakeQuoted(gateSession)+`},"content":`+intakeQuoted(gateBody)+`}`))
 		scene.invokeMeditation(t)
-		receipt := scene.awaitReceipt(t, "call-gate-declared-sender")
+		receipt := scene.awaitReceipt(t, scene.meditate, "call-gate-declared-sender")
 		if receipt != symptomReceiptOK {
 			t.Fatalf("receipt of the declaring agent's call = %q, want the bare %q of a delivered body:\n%s",
 				receipt, symptomReceiptOK, symptomDescribe(scene.provider.requests()))
@@ -153,14 +153,14 @@ func TestSendCrossSessionSenderFace(t *testing.T) {
 	t.Run("non_meditation_sender_denied", func(t *testing.T) {
 		scene := newGateSceneSentBy(t, gateSendCall("call-gate-ordinary-sender",
 			`{"target":{"agent":`+intakeQuoted(gateEntryAgent)+`,"session":`+intakeQuoted(gateSession)+`},"content":`+intakeQuoted(gateBody)+`}`), gateEntryModel)
-		receipt := scene.awaitReceipt(t, "call-gate-ordinary-sender")
+		receipt := scene.awaitReceipt(t, scene.entry, "call-gate-ordinary-sender")
 		gateAssertDenied(t, receipt, "call-gate-ordinary-sender")
 		if !strings.Contains(receipt, `carries no cross-session delivery face`) || !strings.Contains(receipt, gateMeditatorAgent) {
 			t.Fatalf("receipt = %q, want the refusal naming the agent the white list belongs to %q", receipt, gateMeditatorAgent)
 		}
 		scene.refuteDelivered(t)
 		t.Run("the_refusal_is_filed_in_the_account", func(t *testing.T) {
-			refusals := scene.host.Run().DeliveryLedger().Refusals()
+			refusals := deliveryRefusals(t, scene.host.Run().DeliveryLedger())
 			for _, refusal := range refusals {
 				if refusal.Receipt == assembly.DeliveryReceiptDenied && refusal.Target == scene.entry {
 					return
@@ -284,19 +284,20 @@ func (s *gateScene) invokeMeditation(t *testing.T) {
 	}()
 }
 
-// awaitMeditationReceipt waits for the result text the reflecting turn read beside
-// one call.
+// awaitMeditationReceipt waits for the result the reflecting turn's call really settled
+// into and reports it.
 func (s *gateScene) awaitMeditationReceipt(t *testing.T, callID string) string {
-	return s.awaitReceipt(t, callID)
+	return s.awaitReceipt(t, s.meditate, callID)
 }
 
-// awaitReceipt waits for the result text any turn read beside one call: the receipt is in the
-// request the next decision of that turn carries, whichever agent issued the call.
-func (s *gateScene) awaitReceipt(t *testing.T, callID string) string {
+// awaitReceipt waits for the result one call really settled into in the chain of the
+// session that issued it, whichever agent issued the call, and reports it once a served
+// request carried it to the model.
+func (s *gateScene) awaitReceipt(t *testing.T, addr event.Address, callID string) string {
 	t.Helper()
 	deadline := time.Now().Add(gateWindow)
 	for {
-		if receipt, ok := symptomReceipt(s.provider.requests(), callID); ok {
+		if receipt, ok := symptomReceipt(s.host.Run().SessionFacts(addr), s.provider.requests(), callID); ok {
 			return receipt
 		}
 		if !time.Now().Before(deadline) {

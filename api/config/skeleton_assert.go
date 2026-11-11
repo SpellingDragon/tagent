@@ -63,11 +63,8 @@ var (
 	}
 
 	_ = EngineSpec{
-		Backend:     "",
-		Embedding:   EmbeddingSpec{},
-		VectorTopK:  0,
-		KeywordTopK: 0,
-		RRFK:        0,
+		Backend:   "",
+		Embedding: EmbeddingSpec{},
 	}
 
 	_ = EmbeddingSpec{

@@ -10,6 +10,7 @@ package host
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -151,9 +152,16 @@ func singleHistoryRequest(t *testing.T, provider *scriptedProvider, input string
 }
 
 // requireSameHistory requires two histories to carry the same messages in the
-// same roles and order, and names the first message that differs.
+// same roles and order, and names the first message that differs. Delivery
+// settlement lines are accounting, not dialogue: each arm commits them under its
+// own delivery identity (the identity is derived from the random fact key), so
+// two runs of the same turns present the same dialogue beside different receipt
+// identities. The comparison is over the dialogue both arms committed; the
+// settlement lines ride on top and are not part of the history this anchor
+// compares.
 func requireSameHistory(t *testing.T, what string, want, got []scriptedMessage) {
 	t.Helper()
+	want, got = dialogueOnly(want), dialogueOnly(got)
 	if len(want) != len(got) {
 		t.Fatalf("%s restored %d message(s), want the %d of the other arm: %+v vs %+v", what, len(got), len(want), got, want)
 	}
@@ -163,6 +171,34 @@ func requireSameHistory(t *testing.T, what string, want, got []scriptedMessage) 
 				what, at, got[at].Role, got[at].Content, want[at].Role, want[at].Content)
 		}
 	}
+}
+
+// dialogueOnly drops the delivery settlement lines from one presented history,
+// so a comparison reads the turns and never the receipt identities each arm
+// minted from its own fact keys. A settlement line is the one user-role message
+// the delivery layer renders as "delivery <state>: <identity> -> <target> (N
+// bytes)".
+func dialogueOnly(history []scriptedMessage) []scriptedMessage {
+	out := make([]scriptedMessage, 0, len(history))
+	for _, message := range history {
+		if message.Role == string(model.RoleUser) && isDeliverySettlementLine(message.Content) {
+			continue
+		}
+		out = append(out, message)
+	}
+	return out
+}
+
+// isDeliverySettlementLine reports whether one message is a rendered delivery
+// settlement line: the fixed state words the settlement family renders beside
+// its identity.
+func isDeliverySettlementLine(content string) bool {
+	for _, state := range []string{"owed", "sent", "refused", "held", "headless retired"} {
+		if strings.HasPrefix(content, "delivery "+state+": ") {
+			return true
+		}
+	}
+	return false
 }
 
 // requireHistoryExtends requires the longer history to carry the shorter one as

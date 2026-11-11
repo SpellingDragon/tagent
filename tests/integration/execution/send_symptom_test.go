@@ -79,7 +79,7 @@ func TestSendSymptomReentersAgentTask(t *testing.T) {
 		t.Fatalf("turn terminal = %v, want the completed turn of the delegating invocation", turn.Terminal)
 	}
 
-	receipt, found := symptomAwaitSendReceipt(t, provider, symptomReentryWindow)
+	receipt, found := symptomAwaitSendReceipt(t, host, addr, provider, symptomReentryWindow)
 	if !found {
 		t.Fatalf("the turn that reads the settled review never issued the send call:\n%s", symptomDescribe(provider.requests()))
 	}
@@ -264,13 +264,13 @@ func symptomSettledTask(facts []event.Event) event.TaskID {
 	return ""
 }
 
-// symptomAwaitSendReceipt waits for the result the model read beside the send call and
+// symptomAwaitSendReceipt waits for the result the send call really settled into and
 // reports it, or reports that no decision issued the call at all.
-func symptomAwaitSendReceipt(t *testing.T, provider *symptomProvider, window time.Duration) (string, bool) {
+func symptomAwaitSendReceipt(t *testing.T, host *assembly.Host, addr event.Address, provider *symptomProvider, window time.Duration) (string, bool) {
 	t.Helper()
 	deadline := time.Now().Add(window)
 	for {
-		if receipt, ok := symptomReceipt(provider.requests(), symptomCallSend); ok {
+		if receipt, ok := symptomReceipt(host.Run().SessionFacts(addr), provider.requests(), symptomCallSend); ok {
 			return receipt, true
 		}
 		if !time.Now().Before(deadline) {
@@ -280,55 +280,46 @@ func symptomAwaitSendReceipt(t *testing.T, provider *symptomProvider, window tim
 	}
 }
 
-// symptomTaskNoticePrefix opens the input material one task notification lands as: the
-// notification names the task and the terminal it settled on, so a message opening with
-// it reports that task rather than answering a call of this transcript.
-const symptomTaskNoticePrefix = "tagent: task "
+// symptomReceipt reports the result text one call really settled into, or reports that the
+// run holds no result for it.
+//
+// The receipt of a call the run admitted is the body the run recorded as the result of that
+// call, read once a served request carried it to the model: reentryResultFact pairs the body
+// with the call identity the run recorded it for, and reentryServed states that the
+// transcript reached the model with it. A read that walks the transcript positionally beside
+// the call takes, while the answer of the call still runs, the admission receipt it was
+// acknowledged with, or the settled body of a neighbouring call that landed first, and
+// reports that as this call's answer.
+func symptomReceipt(facts []event.Event, requests []intakeRequest, callID string) (string, bool) {
+	if receipt, ok := reentryResultFact(facts, callID); ok && reentryServed(requests, receipt) {
+		return receipt, true
+	}
+	return symptomUnadmittedAnswer(requests, callID)
+}
 
-// symptomReceipt reports the result text the model saw beside one call: the answer the
-// call settled into is replayed under the call identity in every request the run
-// assembles after the result lands, and the decision that reads the live result carries
-// it as the input material of the turn. Two other messages stand beside a call whose
-// answer still runs — the bare admission receipt it was acknowledged with and the input
-// material of a task notification that settled in the same chain — and neither answers
-// this call. The replay is read from every recorded request before the positional read,
-// so a request whose range ended before the result landed never answers a call the
-// result fact already answered; only a call whose answer is the bare receipt itself is
-// read positionally, because its replay and its admission carry the same text.
-func symptomReceipt(requests []intakeRequest, callID string) (string, bool) {
+// symptomUnadmittedAnswer reports the answer one call read back when the run recorded no
+// result for it: a call the admission gate fronting the tool turns away never enters the
+// task machinery, so no result fact pairs it with a body and the tool message the request
+// carries under that call identity is the whole record of the refusal. The bare admission
+// receipt acknowledges a call whose body lands as the recorded result instead, and a
+// delivery settlement line beside a call is accounting material rather than an answer the
+// tool spoke, so neither reads as the answer of the call.
+func symptomUnadmittedAnswer(requests []intakeRequest, callID string) (string, bool) {
+	isSettlement := func(content string) bool {
+		return strings.HasPrefix(strings.TrimSpace(content), "delivery ")
+	}
 	for at := len(requests) - 1; at >= 0; at-- {
 		for _, message := range requests[at].Messages {
-			if message.ToolCallID != callID {
+			if message.ToolCallID != callID || isSettlement(message.Content) {
 				continue
 			}
-			if strings.TrimSpace(message.Content) != task.AdmissionReceiptText {
-				return message.Content, true
-			}
-		}
-	}
-next:
-	for at := len(requests) - 1; at >= 0; at-- {
-		request := requests[at]
-		for index, message := range request.Messages {
-			if message.ToolCallID != callID {
+			if strings.TrimSpace(message.Content) == task.AdmissionReceiptText {
 				continue
 			}
-			for _, later := range request.Messages[index+1:] {
-				if later.Role != string(model.RoleUser) || symptomTaskNotice(later.Content) {
-					continue
-				}
-				return later.Content, true
-			}
-			continue next
+			return message.Content, true
 		}
 	}
 	return "", false
-}
-
-// symptomTaskNotice reports whether one message is the input material of a task
-// notification, which reports the task it belongs to rather than the answer of a call.
-func symptomTaskNotice(content string) bool {
-	return strings.HasPrefix(strings.TrimSpace(content), symptomTaskNoticePrefix)
 }
 
 // symptomAwaitReviewerRound waits for a reviewing request that carries the re-entry body

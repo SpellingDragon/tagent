@@ -1,0 +1,32 @@
+{
+  "id": "qa-02",
+  "category": "qa",
+  "prompts": [
+    "Read notes/release.md. Reply with only the release name."
+  ],
+  "tools": [
+    "file.read"
+  ],
+  "setup": {
+    "notes/release.md": "# Release brief\n\nThe release is named ORBIT.\nFreeze window: 2026-11-20.\n"
+  },
+  "verifier": {
+    "response": {
+      "must_contain": [
+        "ORBIT"
+      ],
+      "must_not_contain": [
+        "NEBULA"
+      ]
+    }
+  },
+  "examples": {
+    "positive": {
+      "output": "ORBIT"
+    },
+    "negative": {
+      "output": "The release is named NEBULA.",
+      "expect_error_contains": "response"
+    }
+  }
+}

@@ -12,13 +12,11 @@ import (
 	"github.com/SpellingDragon/tagent/api/event"
 	"github.com/SpellingDragon/tagent/api/model"
 	"github.com/SpellingDragon/tagent/api/plugin"
-	"github.com/SpellingDragon/tagent/features/evolution/governance"
 	"github.com/SpellingDragon/tagent/features/evolution/meditation"
 	"github.com/SpellingDragon/tagent/features/rl"
 	"github.com/SpellingDragon/tagent/features/telemetry"
 	"github.com/SpellingDragon/tagent/memory"
 	"github.com/SpellingDragon/tagent/memory/ledger"
-	"github.com/SpellingDragon/tagent/memory/replay"
 	"github.com/SpellingDragon/tagent/memory/search"
 	"github.com/SpellingDragon/tagent/runtime/agent"
 	"github.com/SpellingDragon/tagent/runtime/state"
@@ -154,9 +152,8 @@ func settleDeliveryKey(notice task.Notice) event.EventID {
 }
 
 // RecallReads returns the recall read faces this run wires beside the retrieval
-// face Run.Recall serves: the observation table over the events the storage tier
-// committed, the scoped original store of that tier and the embedding binding of
-// this assembly. A run assembled beside no storage tier wires no table and no
+// face Run.Recall serves: the durable query and parent reader, the scoped
+// original store of that tier and the embedding binding of this assembly. A run assembled beside no storage tier wires no table and no
 // original store, and a run beside no embedder wires no embedding, so a caller
 // binds exactly the faces that answer and leaves the rest as the named refusal
 // the recall surface already states.
@@ -166,6 +163,7 @@ func (r *Run) RecallReads() recall.Reads {
 	reads := recall.Reads{Embedder: r.embedder}
 	if r.retrieval != nil {
 		reads.Table = r.retrieval.source
+		reads.Trace = r.retrieval.source
 	}
 	if r.tier != nil {
 		if scoped, ok := r.tier.Originals.(ledger.ScopedOriginalStore); ok {
@@ -254,13 +252,15 @@ func (r *Run) suppliers(decl *config.Declaration, agents map[event.AgentID]Nativ
 				if spec.MaxTokens > 0 && r.ageFold != nil {
 					elements = append(elements, r.ageFold)
 				}
-				if r.observer != nil {
+				if r.observationWired() {
 					elements = append(elements,
-						observePlugin{observer: telemetry.NewCommitObserver(runFacts{run: r}, r.observer)})
+						observePlugin{observer: telemetry.NewCommitObserver(runFacts{run: r}, generationObserver{run: r})})
 				}
 				return elements, nil
 			},
-			wrap: r.wrap,
+			wrap:              r.wrap,
+			reflectionSession: contributed.reflectionSession,
+			reflectionOnly:    append([]string(nil), contributed.reflectionOnly...),
 		}
 	}
 	return out
@@ -701,13 +701,7 @@ func (r *Run) presetPrompt(ctx context.Context, id event.AgentID, spec config.Ag
 // so the close of this run waits for its real stop instead of counting the
 // detached execution's cancellation as one.
 func (r *Run) wrap(tool trpctool.CallableTool) trpctool.Tool {
-	approve := r.approver
-	if r.policy != nil {
-		approve = policyRuling(r.policy)
-	} else if approve == nil && r.enforcement == governance.EnforcementStrict {
-		approve = denyWithoutApprover
-	}
-	return &admissionGate{run: r, inner: r.wrappedTool(tool, approve)}
+	return &admissionGate{run: r, inner: r.wrappedTool(tool, r.admissionRuling())}
 }
 
 // wrappedTool builds the registration wrapper of one native callable tool and
@@ -852,15 +846,13 @@ func denyWithoutApprover(context.Context, string, []byte) (task.Ruling, error) {
 // page that would read as "nothing was found".
 //
 // The port carries the read faces the tools consume and forwards each to the
-// face the run wires: the retrieval port, the observation table over the
-// committed store and the scoped original store of the storage tier. The
-// relation ledger is the host's own, because a run assembled beside no relation
-// face wires none, so it is held here from the first call and never rebound.
+// face the run wires: the retrieval port, the durable query source and the
+// scoped original store of the storage tier. The parent reader is bound with
+// the other faces after assembly, never held as a second relation graph.
 type RecallPort struct {
 	mu       sync.RWMutex
 	searcher func(ctx context.Context, query search.Query) (search.Result, error)
 	reads    recall.Reads
-	trace    *replay.MemoryRelations
 }
 
 var _ search.Searcher = (*RecallPort)(nil)
@@ -870,11 +862,9 @@ var _ recall.Table = (*RecallPort)(nil)
 var _ ledger.ScopedOriginalStore = (*RecallPort)(nil)
 
 // NewRecallPort opens the port over the embedding binding the recall tools are
-// built with and the relation ledger the host holds. The binding is fixed at
-// construction because the tools read it once when they are built; every other
-// face is attached by Bind.
-func NewRecallPort(embedder memory.Embedder, trace *replay.MemoryRelations) *RecallPort {
-	return &RecallPort{reads: recall.Reads{Embedder: embedder}, trace: trace}
+// built with. Every other face, including the parent reader, is attached by Bind.
+func NewRecallPort(embedder memory.Embedder) *RecallPort {
+	return &RecallPort{reads: recall.Reads{Embedder: embedder}}
 }
 
 // Bind attaches the read faces of the assembled run.
@@ -897,7 +887,7 @@ func (p *RecallPort) Search(ctx context.Context, query search.Query) (search.Res
 }
 
 // QueryEvents answers the event references one query matches through the bound
-// observation table.
+// durable query source.
 func (p *RecallPort) QueryEvents(ctx context.Context, opts memory.QueryOptions) ([]memory.EventReference, error) {
 	p.mu.RLock()
 	table := p.reads.Table
@@ -908,7 +898,7 @@ func (p *RecallPort) QueryEvents(ctx context.Context, opts memory.QueryOptions) 
 	return table.QueryEvents(ctx, opts)
 }
 
-// Event answers the reference of one landed event through the bound table.
+// Event answers the reference of one event through the bound table.
 func (p *RecallPort) Event(key event.EventID) (memory.EventReference, bool) {
 	p.mu.RLock()
 	table := p.reads.Table
@@ -919,8 +909,8 @@ func (p *RecallPort) Event(key event.EventID) (memory.EventReference, bool) {
 	return table.Event(key)
 }
 
-// Reference answers the original reference one landed event carries through the
-// bound table.
+// Reference answers the original reference one event carries through the bound
+// table.
 func (p *RecallPort) Reference(key event.EventID) (ledger.OriginalRef, bool) {
 	p.mu.RLock()
 	table := p.reads.Table
@@ -956,7 +946,7 @@ func (p *RecallPort) ReadSegmentScoped(ctx context.Context, key event.EventID, s
 
 // Reads reports the read face this port wires for the recall tools: the
 // retrieval port, the embedding binding and the table and original store of the
-// bound run, beside the relation ledger the host holds. A face the deployment
+// bound run, beside its parent reader. A face the deployment
 // wires nothing for stays absent, so the tool that needs it refuses by name
 // instead of answering an empty result.
 func (p *RecallPort) Reads() recall.Reads {
@@ -964,7 +954,7 @@ func (p *RecallPort) Reads() recall.Reads {
 	defer p.mu.RUnlock()
 	reads := p.reads
 	reads.Searcher = p
-	reads.Trace = p.trace
+	reads.Trace = p
 	if reads.Table != nil {
 		reads.Table = p
 	}
@@ -972,6 +962,17 @@ func (p *RecallPort) Reads() recall.Reads {
 		reads.Originals = p
 	}
 	return reads
+}
+
+// GetParent forwards one parent read to the durable reader bound after assembly.
+func (p *RecallPort) GetParent(key event.EventID) (event.EventID, error) {
+	p.mu.RLock()
+	trace := p.reads.Trace
+	p.mu.RUnlock()
+	if trace == nil {
+		return "", fmt.Errorf("recall_trace: %w", recall.ErrRecallUnwired)
+	}
+	return trace.GetParent(key)
 }
 
 // ObservationFacts returns the read-only fact-chain face the scheduled

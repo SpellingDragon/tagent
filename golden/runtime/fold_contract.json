@@ -1,0 +1,61 @@
+{
+  "schema_version": 1,
+  "adr": "docs/adr/0006-three-hooks-is-the-core-iteration-principle.md",
+  "user_ruling": "restart-recovery-optimization r31/r33/r36；hot-update-and-purity-closure 13 域 r49（有界＋收敛，替换严格 fold²==fold）",
+  "reason": "这条契约记录段龄规则本身：年龄阶梯（诊断读）、世代递推的带归属、带与动作的映射、产物形状、体积阈值因子；golden 向量 golden/runtime/fold_plan_golden.json 由 memory/replay 的 TestFoldPlanGolden 逐字段比对，四条 mutation 证明改规则会被抓到。",
+  "golden_test": "memory/replay/age_plan_test.go#TestFoldPlanGolden",
+  "golden_vector": "golden/runtime/fold_plan_golden.json",
+  "mutations": [
+    "MUT-FOLD-01-segment-age-window",
+    "MUT-FOLD-02-mid-level-window",
+    "MUT-FOLD-03-inflight-fold",
+    "MUT-FOLD-04-product-type"
+  ],
+  "segment_age": {
+    "keep_recent_default": 2,
+    "levels": [
+      {"level": 0, "when": "age < keep_recent"},
+      {"level": 1, "when": "age < 2 * keep_recent"},
+      {"level": 2, "when": "age < 3 * keep_recent"},
+      {"level": 3, "when": "otherwise"}
+    ],
+    "level_note": "阶梯只是记在段上的年龄诊断读（Segment.Level），不决定折叠动作",
+    "bands": [
+      {"band": "new", "when": "index >= total - keep_recent 或段仍在进行中", "action": "kept_whole"},
+      {"band": "mid", "when": "离开 recent 窗口且未持任何年龄折叠产物", "action": "fold_process_detail"},
+      {"band": "old", "when": "已持早前折叠的产物（segment_fold 或 history_summary）", "action": "fold_to_history_summary"}
+    ],
+    "generation_note": "带由折叠世代递推：每次折叠把窗口外的材料晋升一级（新→中→老），不由绝对段数位置决定",
+    "in_flight": {"complete": false, "level": 0, "band": "new", "never_folded": true}
+  },
+  "actions": [
+    {
+      "band": "new",
+      "action": "kept_whole",
+      "note": "新带原样保留，其过程细节不折"
+    },
+    {
+      "band": "mid",
+      "complete": true,
+      "action": "fold_process_detail",
+      "product": "segment_fold",
+      "reason": "the process detail of the middle band is over its volume threshold"
+    },
+    {
+      "band": "old",
+      "action": "fold_to_history_summary",
+      "product": "history_summary",
+      "reason": "the oldest band is over its volume threshold"
+    }
+  ],
+  "volume": {
+    "chars_per_token": 4,
+    "default_compress_threshold": 0.8,
+    "default_age_volume_threshold": 4096,
+    "formula": "max_tokens * chars_per_token * compress_threshold"
+  },
+  "products": {
+    "segment_fold": {"type": "segment_fold", "key_prefix": "seg", "summary": "segment fold"},
+    "history_summary": {"type": "history_summary", "key_prefix": "hist", "summary": "history summary"}
+  }
+}

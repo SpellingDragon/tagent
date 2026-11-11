@@ -2,10 +2,10 @@
 //
 // The OTel/audit face of the observation bypass: the layered SDK observation
 // attempted for one committed fact, beside the audit record that layering
-// leaves behind. The observer is a thin wrapper over the tracer and meter
-// handles the locked framework exposes, so the framework's own OTel SDK is
-// reused rather than re-hosted, and every layer is attempted after the fact
-// committed and never before it.
+// leaves behind. The tracer and meter handles are injected by the assembly that
+// owns the export pipeline, so this package reads no process-level default and
+// rewrites none; every layer is attempted after the fact committed and never
+// before it.
 //
 // Nothing here owns runtime state. The observation is switched off by
 // configuration and never by data: with OTel closed the trace and metric
@@ -21,10 +21,9 @@ import (
 
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
+	metricnoop "go.opentelemetry.io/otel/metric/noop"
 	"go.opentelemetry.io/otel/trace"
-
-	fmetric "trpc.group/trpc-go/trpc-agent-go/telemetry/metric"
-	ftrace "trpc.group/trpc-go/trpc-agent-go/telemetry/trace"
+	tracenoop "go.opentelemetry.io/otel/trace/noop"
 
 	"github.com/SpellingDragon/tagent/api/event"
 	"github.com/SpellingDragon/tagent/api/plugin"
@@ -59,25 +58,23 @@ const meterName = "tagent/telemetry"
 // counterName is the counter the metric layer adds to for one committed fact.
 const counterName = "tagent.committed.facts"
 
-// attrEventKey and attrEventType are the only attributes the trace and metric
-// layers carry: the committed fact's identity and frozen type. Event content
-// and message text never enter a span or a metric.
-var (
-	attrEventKey  = attribute.Key("tagent.event.key")
-	attrEventType = attribute.Key("tagent.event.type")
-)
+// attrEventType is the only attribute the trace and metric layers carry: the
+// committed fact's frozen type. The fact identity and the event content stay
+// out of every span and metric, because a per-fact label multiplies the series
+// count by the number of facts the runtime commits.
+var attrEventType = attribute.Key("tagent.event.type")
 
 // Option configures one SDKObserver at assembly time.
 type Option func(*SDKObserver)
 
-// WithTracer replaces the default framework tracer handle, so a caller that
-// hosts its own tracer provider can point the trace layer at it.
+// WithTracer injects the tracer handle the trace layer records through, so the
+// assembly that owns the export pipeline decides where the span goes.
 func WithTracer(tracer trace.Tracer) Option {
 	return func(o *SDKObserver) { o.tracer = tracer }
 }
 
-// WithMeter replaces the default framework meter handle, so a caller that
-// hosts its own meter provider can point the metric layer at it.
+// WithMeter injects the meter handle the metric layer records through, so the
+// assembly that owns the export pipeline decides where the counter goes.
 func WithMeter(meter metric.Meter) Option {
 	return func(o *SDKObserver) { o.meter = meter }
 }
@@ -91,15 +88,14 @@ func WithOTelDisabled() Option {
 }
 
 // NewSDKObserver assembles one post-commit observer: the audit sink the
-// layered records land in, beside the options that redirect or close the OTel
-// layers. The default handles are the framework's own, so an unconfigured
-// runtime observes through the framework's noop SDK at zero cost and a
-// configured one exports through the framework's OTel pipeline without this
-// package re-hosting an SDK.
+// layered records land in, beside the handles and switches the assembly
+// injects. Without an injected handle the layers record into the OpenTelemetry
+// noop SDK, so an unconfigured runtime pays nothing for observation without
+// this package reading a process-level default or installing one.
 func NewSDKObserver(audit plugin.AuditSink, opts ...Option) (*SDKObserver, error) {
 	o := &SDKObserver{
-		tracer:  ftrace.Tracer,
-		meter:   fmetric.GetMeterProvider().Meter(meterName),
+		tracer:  tracenoop.NewTracerProvider().Tracer(meterName),
+		meter:   metricnoop.NewMeterProvider().Meter(meterName),
 		audit:   audit,
 		enabled: true,
 	}
@@ -140,7 +136,7 @@ func (o *SDKObserver) Observe(ctx context.Context, evt event.Event) error {
 		traceAttempt.Skipped = true
 	} else {
 		_, span := o.tracer.Start(ctx, spanName)
-		span.SetAttributes(attrEventKey.String(string(evt.Key)), attrEventType.String(evt.Type))
+		span.SetAttributes(attrEventType.String(evt.Type))
 		span.End()
 	}
 	record.Attempts = append(record.Attempts, traceAttempt)
@@ -149,7 +145,7 @@ func (o *SDKObserver) Observe(ctx context.Context, evt event.Event) error {
 	if !o.enabled {
 		metricAttempt.Skipped = true
 	} else {
-		o.counter.Add(ctx, 1, metric.WithAttributes(attrEventKey.String(string(evt.Key))))
+		o.counter.Add(ctx, 1, metric.WithAttributes(attrEventType.String(evt.Type)))
 	}
 	record.Attempts = append(record.Attempts, metricAttempt)
 

@@ -89,9 +89,6 @@ func newLatticeWake(kind task.NoticeKind, attempt state.SettleAttempt, held bool
 	}
 }
 
-// RestoreOwed reports nothing to restore: the one seat is already on the account.
-func (w *latticeWake) RestoreOwed(context.Context) error { return nil }
-
 // Unconsumed reports the one seat while its consumption has not completed.
 func (w *latticeWake) Unconsumed() []state.WorkSeat {
 	w.mu.Lock()

@@ -16,6 +16,14 @@ import (
 // CompressProductType is the frozen type of a compress product fact.
 const CompressProductType = "compress.product"
 
+// CompressionMechanism reports whether one frozen event type names a fact of
+// the compression mechanism itself: a judgment or the product that answers it.
+// Such a fact carries an internal summary and recovery metadata, never material
+// the query face, candidate embedding or the model's context may surface.
+func CompressionMechanism(typ string) bool {
+	return typ == CompressRequestType || typ == CompressProductType
+}
+
 // CompressProduct is one compress product fact: the material a consumer folded
 // for one judgment. It is immutable once filed, and it is the only source the
 // projection restores a synthetic product entry from. What the product is — a
@@ -35,6 +43,19 @@ type CompressProduct struct {
 	Covered []EventID
 	// Text is the product text the projection presents.
 	Text string
+	// checkpoint is the opaque recovery payload the fold leaves on this fact.
+	// Its structure belongs to the consumer that reads it back: the fact family
+	// carries bytes, never a public shape a query could surface into the view.
+	checkpoint []byte
+}
+
+// Checkpoint reports the opaque recovery payload this product fact carries.
+func (p CompressProduct) Checkpoint() []byte { return p.checkpoint }
+
+// WithCheckpoint states the opaque recovery payload this product fact carries.
+func (p CompressProduct) WithCheckpoint(payload []byte) CompressProduct {
+	p.checkpoint = payload
+	return p
 }
 
 // ProductAnswers names the judgment one product answers beside the mechanism

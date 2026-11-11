@@ -2,7 +2,7 @@
 //
 // TierFacts is the durable fact surface of one opened tier: put, get, prefix
 // scan and the sync barrier a commit reports its success behind. It commits
-// through the same key-value backend the tier's segment store uses, so the
+// through the same atomic store engine the tier's segment store uses, so the
 // replay and the durable task commit share one database with the events already
 // stored there. Its signatures carry built-in types only, so it matches the
 // state layer's fact-log port structurally and no package edge is required in
@@ -16,11 +16,11 @@ import (
 
 // TierFacts is the durable fact surface of one opened tier.
 type TierFacts struct {
-	kv kvPort
+	kv AtomicStore
 }
 
 // TierFactLog returns the durable fact surface of one opened tier, so a durable
-// commit and a replay run on the same backend the tier's events are committed
+// commit and a replay run on the same engine the tier's events are committed
 // through — no second database is introduced for either.
 func TierFactLog(tier *Tier) *TierFacts {
 	return &TierFacts{kv: tier.Segments.kv}
@@ -28,35 +28,35 @@ func TierFactLog(tier *Tier) *TierFacts {
 
 // Put stages one key and its value.
 func (l TierFacts) Put(ctx context.Context, key string, value []byte) error {
-	return l.kv.kvCommit(ctx, kvBatch{puts: []kvPair{{key: key, value: value}}})
+	return l.kv.Commit(ctx, Batch{Puts: []Pair{{Key: key, Value: value}}})
 }
 
 // Get returns the value stored under key and whether one is held.
 func (l TierFacts) Get(ctx context.Context, key string) ([]byte, bool, error) {
-	pairs, err := l.kv.kvRead(ctx, kvFetch{key: key})
+	pairs, err := l.kv.Read(ctx, Fetch{Key: key})
 	if err != nil {
 		return nil, false, err
 	}
 	if len(pairs) == 0 {
 		return nil, false, nil
 	}
-	return pairs[0].value, true, nil
+	return pairs[0].Value, true, nil
 }
 
 // Scan returns every stored pair under the key prefix as key and value.
 func (l TierFacts) Scan(ctx context.Context, prefix string) (map[string][]byte, error) {
-	pairs, err := l.kv.kvRead(ctx, kvFetch{prefix: prefix})
+	pairs, err := l.kv.Read(ctx, Fetch{Prefix: prefix})
 	if err != nil {
 		return nil, err
 	}
 	found := make(map[string][]byte, len(pairs))
 	for _, pair := range pairs {
-		found[pair.key] = pair.value
+		found[pair.Key] = pair.Value
 	}
 	return found, nil
 }
 
 // Sync completes the write barrier over everything staged so far.
 func (l TierFacts) Sync(ctx context.Context) error {
-	return l.kv.kvCommit(ctx, kvBatch{})
+	return l.kv.Commit(ctx, Batch{})
 }

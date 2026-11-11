@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"regexp"
 	"sort"
 	"strings"
 	"testing"
@@ -191,7 +192,7 @@ func TestProjectionReplayAndBudget(t *testing.T) {
 		}
 		reopenedChain := durableChain{log: ledger.TierFactLog(reopened)}
 		projB := replay.NewReplayProjection()
-		relations := replay.NewMemoryRelations()
+		relations := &replay.MemoryRelations{}
 		report, err := replay.RebuildProjectionFromWAL(ctx, projB, reopenedChain, relations, session, replay.RebuildOptions{PageSize: 1})
 		if err != nil {
 			t.Fatalf("RebuildProjectionFromWAL: %v", err)
@@ -206,8 +207,8 @@ func TestProjectionReplayAndBudget(t *testing.T) {
 		if projB.Len() != projA.Len() {
 			t.Fatalf("rebuilt entries = %d, want %d (snapshot refs and the whole tail)", projB.Len(), projA.Len())
 		}
-		if projB.FullBoundary() != event.EventID("k-0004") || report.FullBoundary != event.EventID("k-0004") {
-			t.Fatalf("full boundary = %q/%q, want the payload value k-0004", projB.FullBoundary(), report.FullBoundary)
+		if report.FullBoundary != event.EventID("k-0004") {
+			t.Fatalf("full boundary = %q, want the payload value k-0004", report.FullBoundary)
 		}
 		meditation := map[event.EventID]bool{}
 		for _, key := range projB.ConsumedKeys() {
@@ -230,7 +231,7 @@ func TestProjectionReplayAndBudget(t *testing.T) {
 			}
 		}
 		proj := replay.NewReplayProjection()
-		report, err := replay.RebuildProjectionFromWAL(ctx, proj, chain, replay.NewMemoryRelations(), session, replay.RebuildOptions{FallbackBound: 3})
+		report, err := replay.RebuildProjectionFromWAL(ctx, proj, chain, &replay.MemoryRelations{}, session, replay.RebuildOptions{FallbackBound: 3})
 		if err != nil {
 			t.Fatalf("RebuildProjectionFromWAL: %v", err)
 		}
@@ -291,7 +292,7 @@ func TestProjectionReplayAndBudget(t *testing.T) {
 			t.Fatalf("Commit: %v", err)
 		}
 		proj := replay.NewReplayProjection()
-		report, err := replay.RebuildProjectionFromWAL(ctx, proj, chain, replay.NewMemoryRelations(), session, replay.RebuildOptions{})
+		report, err := replay.RebuildProjectionFromWAL(ctx, proj, chain, &replay.MemoryRelations{}, session, replay.RebuildOptions{})
 		if err != nil {
 			t.Fatalf("RebuildProjectionFromWAL: %v", err)
 		}
@@ -328,7 +329,7 @@ func TestProjectionReplayAndBudget(t *testing.T) {
 				t.Fatalf("Commit %s: %v", fact.Key, err)
 			}
 		}
-		relations := replay.NewMemoryRelations()
+		relations := &replay.MemoryRelations{}
 		proj := replay.NewReplayProjection()
 		report, err := replay.RebuildProjectionFromWAL(ctx, proj, chain, relations, session, replay.RebuildOptions{})
 		if err != nil {
@@ -367,7 +368,7 @@ func TestProjectionReplayAndBudget(t *testing.T) {
 			}
 		}
 		proj := replay.NewReplayProjection()
-		if _, err := replay.RebuildProjectionFromWAL(ctx, proj, chain, replay.NewMemoryRelations(), session, replay.RebuildOptions{}); err != nil {
+		if _, err := replay.RebuildProjectionFromWAL(ctx, proj, chain, &replay.MemoryRelations{}, session, replay.RebuildOptions{}); err != nil {
 			t.Fatalf("RebuildProjectionFromWAL: %v", err)
 		}
 		presented, err := proj.AssembleBudget(ctx, 100)
@@ -440,8 +441,14 @@ func (replayPolicy) Check(context.Context, state.StatePlan) (map[state.CheckName
 }
 
 // replayModel is the scripted provider stand-in: it records every native
-// request it is driven with and answers with a fixed final. It never reaches a
-// real endpoint.
+// request the session's agent is driven with and answers with a fixed final. It
+// never reaches a real endpoint. A band summary request is answered with the
+// anchored reads it was handed — the gist a faithful summarizer returns — so the
+// summary a fold files stands for the same material the mechanical form stood
+// for, and a check reads the anchors and the bound rather than one summarizer's
+// wording. A band summary is the fold asking that same model for a gist and not
+// a turn the agent ran, so it is answered without being recorded: recorded
+// answers the formal requests alone.
 type replayModel struct {
 	name     string
 	requests []model.Request
@@ -449,14 +456,41 @@ type replayModel struct {
 
 // GenerateContent records the native request and streams the fixed final.
 func (m *replayModel) GenerateContent(_ context.Context, req *model.Request) (<-chan *model.Response, error) {
-	m.requests = append(m.requests, *req)
+	answer := "settled"
+	if material, summary := replayBandSummary(*req); summary {
+		answer = material
+	} else {
+		m.requests = append(m.requests, *req)
+	}
 	ch := make(chan *model.Response, 1)
 	ch <- &model.Response{
-		Choices: []model.Choice{{Message: model.Message{Role: model.RoleAssistant, Content: "settled"}}},
+		Choices: []model.Choice{{Message: model.Message{Role: model.RoleAssistant, Content: answer}}},
 		Done:    true,
 	}
 	close(ch)
 	return ch, nil
+}
+
+// bandReadAnchor matches one rendered provenance anchor, the form every read a
+// fold product carries opens with: [MM-DD HH:MM|gen:<generation>].
+var bandReadAnchor = regexp.MustCompile(`\[\d\d-\d\d \d\d:\d\d\|gen:[^\]]*\]`)
+
+// replayBandSummary reports the mechanical reads a band summary request carries,
+// and whether the request is one at all: the fold asks the session's own model
+// for the gist of its oldest band, so that ask reaches the same provider a
+// decision does, carrying the band's anchored reads behind the instruction
+// paragraph and no tool surface. A decision of an agent that declares no tools
+// carries no tool surface either, so the rendered anchors of those reads are
+// what tells the two apart.
+func replayBandSummary(req model.Request) (string, bool) {
+	if len(req.Tools) != 0 || len(req.Messages) != 1 || req.Messages[0].Role != model.RoleUser {
+		return "", false
+	}
+	_, material, asked := strings.Cut(req.Messages[0].Content, "\n\n")
+	if !asked || !bandReadAnchor.MatchString(material) {
+		return "", false
+	}
+	return strings.TrimSpace(material), true
 }
 
 // Info reports the scripted provider's descriptor.
@@ -464,7 +498,9 @@ func (m *replayModel) Info() model.Info {
 	return model.Info{Name: m.name}
 }
 
-// recorded reports the native requests the fake provider was driven with.
+// recorded reports the formal native requests the fake provider was driven with,
+// in the order the session's agent ran them: the band summaries the fold asked
+// the same provider for are not among them.
 func (m *replayModel) recorded() []model.Request {
 	return append([]model.Request(nil), m.requests...)
 }

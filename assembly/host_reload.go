@@ -42,12 +42,13 @@ import (
 var ErrHostReloadStructural = errors.New("tagent: the reload cannot apply its change without a restart")
 
 // ErrHostReloadRestartRequired reports a reload that moves a field whose only
-// consumer Boot built: the storage tier, the request timeout, the observation
-// face, the governance rules, and per agent the tool, skill, read, file,
-// execution, memory and meditation sections. No path in a running host rebuilds
-// those consumers, so the reload refuses the change by name rather than
-// answering success for a value nothing reads; a host that needs it is restarted
-// with the document.
+// consumer the process itself built: the storage tier and its root, which every
+// chain of the run is opened over. No generation rebuilds those consumers, so
+// the reload refuses the change by name rather than answering success for a
+// value nothing reads; a host that needs it is restarted with the document.
+// Every other section a document declares is rebuilt by a generation-scoped
+// consumer and moves with the generation (restartRequiredChanges names the
+// fields that stay).
 var ErrHostReloadRestartRequired error = errHostReloadRestartRequired{}
 
 // errHostReloadRestartRequired is the named refusal of a restart-only change.
@@ -174,18 +175,28 @@ func (b *hostModelBuilder) rebuild(agentID event.AgentID) func(string) (trpcmode
 	}
 }
 
-// Reload reads the configuration source again, publishes the declaration it
-// carries, and files the configuration facts the move judged: one config change
-// per declaration dimension that moved and one model configuration change per
-// agent whose lease holds a version the document does not name. The publication is
-// the one entry the run already owns; the model change is the configuration
-// change family's model dimension, committed after the publication settled —
-// including a carried document, so a move whose install failed is judged again.
-// The lease mounted on each agent runs its own rebuild, publication and
-// installation order and decides whether the new version takes effect.
+// Reload reads the configuration source again, commits the declaration the load
+// produced as one fact of the configuration chain, and builds the candidate from
+// the declaration the chain carries: the file is the edit surface, the chain is
+// the ledger one publication consumes. It publishes through the one entry, files
+// the configuration facts the move judged and records the result of the attempt
+// on the chain, so the receipt is the fact the chain holds and never a
+// self-report.
 //
-// - The generation declares the agent set: an agent both documents name keeps the contribution already in service, an added agent is constructed through the same native path Boot ran, and its model lease is built beside the publication so the address serves its first turn on the model the declaration names.
-// - The leases are mounted only once the generation that declared the agents published: a refused reload attaches nothing, and the next publication reads the extended table through the same lease path Boot filled.
+// A load or declaration failure, a structural refusal, a restart-required move,
+// a refused publication or an install that did not take effect each files a
+// result fact and leaves the running binding, the document in effect and the
+// generation where they were. One attempt files one outcome: the result fact
+// states what the attempt took into service, and a failure that follows a
+// generation this attempt published reaches the caller beside that result
+// instead of being filed as a contradicting refusal of the same attempt. An
+// added agent is constructed through the same native path Boot ran, and its
+// lease is mounted only once the generation that declared it published: a
+// refused reload attaches nothing.
+//
+// - A candidate is published under the host dialect of its own document: the skill roots, the read root, the tool declarations, the request timeout, the risk table and the observation face are the sections the shared declaration does not carry, so the attempt claims them beside the declaration the chain is about to publish and the generation-scoped consumers read that claim.
+//
+// 契约: docs/wiki/platform/org-hot-reload.md#overview
 func (h *Host) Reload(ctx context.Context) (hostReloadReport, error) {
 	report := hostReloadReport{
 		Reloaded:      false,
@@ -209,99 +220,286 @@ func (h *Host) Reload(ctx context.Context) (hostReloadReport, error) {
 	}
 	doc, err := loadHostDocument(configPath)
 	if err != nil {
-		return report, err
+		return report, h.failReload(ctx, publicationResultLoadFailed, err)
 	}
 	decl, err := doc.Declaration()
 	if err != nil {
-		return report, err
+		return report, h.failReload(ctx, publicationResultLoadFailed, err)
+	}
+	previousDecl, err := previous.Declaration()
+	if err != nil {
+		return report, h.failReload(ctx, publicationResultLoadFailed, err)
+	}
+	generation := uint64(h.run.publisher.Current().Generation) + 1
+	if _, err := h.run.recordDeclarationFact(ctx, decl, generation); err != nil {
+		return report, h.failReload(ctx, publicationResultLoadFailed, err)
+	}
+	_, chainDecl, held, err := h.run.latestDeclaration(ctx)
+	if err != nil || !held {
+		if err == nil {
+			err = fmt.Errorf("tagent: the declaration fact of %s is not readable after its commit", configPath)
+		}
+		return report, h.failReload(ctx, publicationResultLoadFailed, err)
+	}
+	if chainDecl.FactKey() != decl.FactKey() {
+		return report, h.failReload(ctx, publicationResultLoadFailed, fmt.Errorf("tagent: the chain declaration %q does not answer the loaded declaration %q", chainDecl.FactKey(), decl.FactKey()))
 	}
 	if err := previous.compatibleWith(doc); err != nil {
-		return report, err
+		return report, h.failReload(ctx, publicationResultGovernanceRejected, err)
 	}
-	next := make(map[event.AgentID]NativeAgent, len(decl.Agents))
-	added := make([]event.AgentID, 0, len(decl.Agents))
-	for _, spec := range decl.Agents {
+	dialect, err := specOfDocument(doc)
+	if err != nil {
+		return report, h.failReload(ctx, publicationResultLoadFailed, err)
+	}
+	h.specs.claim(chainDecl, dialect)
+	defer h.specs.drop(chainDecl)
+	next := make(map[event.AgentID]NativeAgent, len(chainDecl.Agents))
+	added := make([]event.AgentID, 0, len(chainDecl.Agents))
+	for _, spec := range chainDecl.Agents {
 		id := event.AgentID(spec.ID)
 		if held, ok := natives[id]; ok {
 			next[id] = held
 			continue
 		}
 		if h.nativeFor == nil {
-			return report, fmt.Errorf("tagent: the host carries no native construction to assemble the added agent %q", spec.ID)
+			return report, h.failReload(ctx, publicationResultLoadFailed, fmt.Errorf("tagent: the host carries no native construction to assemble the added agent %q", spec.ID))
 		}
 		native, err := h.nativeFor(ctx, doc, id)
 		if err != nil {
-			return report, err
+			return report, h.failReload(ctx, publicationResultLoadFailed, err)
 		}
 		next[id] = native
 		added = append(added, id)
 	}
 	extensions, err := h.modelLeaseExtensions(next, doc, added)
 	if err != nil {
-		return report, err
+		return report, h.failReload(ctx, publicationResultGovernanceRejected, err)
 	}
-	previousDecl, err := previous.Declaration()
+	changes := h.modelChanges(chainDecl, doc)
+	configChanges := configChangesOf(previousDecl, chainDecl)
+	dialectKey, err := hostDialectDigest(dialect)
 	if err != nil {
-		return report, err
+		return report, h.failReload(ctx, publicationResultLoadFailed, err)
 	}
-	changes := h.modelChanges(decl, doc)
-	configChanges := configChangesOf(previousDecl, decl)
-	outcome, err := h.run.Publish(ctx, decl, next)
-	if err != nil {
-		return report, err
+	window := publicationWindow{
+		previous:            state.Generation(h.run.publisher.Current().Generation),
+		previousFingerprint: h.run.publisher.Current().Fingerprint,
+		models:              modelVersionsOf(doc, chainDecl),
+		dimensions:          configDimensionOutcomes(configChanges),
+		dialectKey:          dialectKey,
+		at:                  time.Now().UTC(),
+	}
+	outcome, pubErr := h.run.publishDeclared(ctx, chainDecl, next, window)
+	if !candidateInService(outcome) {
+		cause := pubErr
+		if cause == nil {
+			cause = fmt.Errorf("tagent: the publication left generation %d in service beside no outcome", outcome.Publication.Generation)
+		}
+		return report, h.failReload(ctx, publicationResultGovernanceRejected, cause)
 	}
 	report.Publication = hostReloadPublication{
 		Generation: outcome.Publication.Generation,
-		Published:  outcome.Result != state.PublishUnchanged,
+		Published:  outcome.Result == state.PublishApplied,
 	}
 	h.run.installModelLeases(extensions)
 	h.models.set(doc)
+	h.specs.install(dialect)
 	h.mu.Lock()
 	h.doc = doc
 	h.natives = next
 	h.mu.Unlock()
 	report.Reloaded = true
 	var configFailed, modelFailed []error
+	dimensions := configDimensionOutcomes(configChanges)
 	if outcome.Result != state.PublishUnchanged {
 		for _, change := range configChanges {
 			fact := event.ConfigChangeFor(event.AgentID(change.Agent), change.Dimension, outcome.Publication.Generation, change.description)
 			key, commitErr := h.run.commitFactChecked(ctx, fact.Event(time.Now().UTC()))
 			if commitErr != nil {
 				configFailed = append(configFailed, fmt.Errorf("tagent: file the %s configuration change of agent %q: %w", change.Dimension, change.Agent, commitErr))
+				dimensions[change.Agent+"|"+change.Dimension] = "held"
 				continue
 			}
 			change.Fact = string(key)
 			report.ConfigChanges = append(report.ConfigChanges, change)
 		}
 	}
+	modelChanged := make(map[event.AgentID]bool, len(changes))
 	for _, change := range changes {
-		key, err := h.run.noteModelConfigurationChange(ctx, event.AgentID(change.Agent), outcome.Publication.Generation, "", change.To)
-		if err != nil {
-			h.run.recordLeaseLoss(err)
-			modelFailed = append(modelFailed, fmt.Errorf("tagent: file the model configuration change of agent %q: %w", change.Agent, err))
+		modelChanged[event.AgentID(change.Agent)] = true
+		key, noteErr := h.run.noteModelConfigurationChange(ctx, event.AgentID(change.Agent), outcome.Publication.Generation, "", change.To)
+		if noteErr != nil {
+			h.run.recordLeaseLoss(noteErr)
+			modelFailed = append(modelFailed, fmt.Errorf("tagent: file the model configuration change of agent %q: %w", change.Agent, noteErr))
+			dimensions[change.Agent+"|"+event.ConfigChangeDimensionModel] = "held"
 			continue
 		}
 		change.Fact = string(key)
 		report.ModelChanges = append(report.ModelChanges, change)
+		installed, reason := leaseInstalled(h.run.leaseOf(event.AgentID(change.Agent)), change.To)
+		if installed {
+			dimensions[change.Agent+"|"+event.ConfigChangeDimensionModel] = "applied"
+			continue
+		}
+		dimensions[change.Agent+"|"+event.ConfigChangeDimensionModel] = "held"
+		modelFailed = append(modelFailed, fmt.Errorf("tagent: the model of agent %q stayed at %q instead of %q: %s", change.Agent, change.From, change.To, reason))
 	}
-	switch {
-	case len(configFailed) > 0 && len(modelFailed) > 0:
-		failed := append(append([]error{}, configFailed...), modelFailed...)
-		return report, fmt.Errorf("tagent: %d configuration changes and %d model changes failed: %w", len(configFailed), len(modelFailed), errors.Join(failed...))
-	case len(configFailed) > 0:
-		return report, fmt.Errorf("tagent: %d of %d configuration changes failed: %w", len(configFailed), len(configChanges), errors.Join(configFailed...))
-	case len(modelFailed) > 0:
-		return report, fmt.Errorf("tagent: %d of %d model changes failed: %w", len(modelFailed), len(changes), errors.Join(modelFailed...))
+	for _, spec := range chainDecl.Agents {
+		if !modelChanged[event.AgentID(spec.ID)] {
+			dimensions[spec.ID+"|"+event.ConfigChangeDimensionModel] = "skipped"
+		}
 	}
-	return report, nil
+	fillSkippedDimensions(dimensions, chainDecl)
+	result := publicationResultPublished
+	if outcome.Result == state.PublishUnchanged {
+		result = publicationResultUnchanged
+	}
+	var failed []error
+	failed = append(failed, configFailed...)
+	failed = append(failed, modelFailed...)
+	if len(failed) > 0 {
+		result = publicationResultInstallFailed
+	}
+	attempt := publicationAttempt{
+		Result:              result,
+		Fingerprint:         chainDecl.FactKey(),
+		Generation:          outcome.Publication.Generation,
+		PreviousGeneration:  uint64(window.previous),
+		PreviousFingerprint: window.previousFingerprint,
+		Models:              window.models,
+		Dimensions:          dimensions,
+	}
+	if len(failed) > 0 {
+		attempt.Reason = errors.Join(failed...).Error()
+	}
+	if _, err := h.run.recordPublicationAttempt(ctx, attempt); err != nil {
+		return report, fmt.Errorf("tagent: record the publication attempt of generation %d: %w", outcome.Publication.Generation, err)
+	}
+	fact, held, err := h.run.latestPublicationAttempt(ctx)
+	if err != nil {
+		return report, err
+	}
+	if !held {
+		return report, fmt.Errorf("tagent: the publication attempt of generation %d left no result fact", outcome.Publication.Generation)
+	}
+	if fact.Result == publicationResultPublished || fact.Result == publicationResultUnchanged {
+		if pubErr != nil {
+			return report, fmt.Errorf("tagent: the reload published generation %d beside %w", outcome.Publication.Generation, pubErr)
+		}
+		return report, nil
+	}
+	return report, fmt.Errorf("tagent: the reload ended %s: %s", fact.Result, fact.Reason)
 }
 
-// modelLeaseExtensions constructs the model leases of the agents one publication
-// adds, through the same lease the assembly attaches at Boot: the native model the
-// document names beside the version in effect and the rebuild the document's model
-// builder runs. The leases are built before the publication, so a model that
-// cannot be leased refuses the reload before a generation enters service; they are
-// mounted on the run only after the generation that declared them published.
+// candidateInService reports whether the content of one publication attempt is
+// what the generation in service carries: an applied publication was built from
+// this candidate, and an unchanged one carries content its own fingerprint
+// already named. A rolled-back publication took the content it rolled back to
+// into service instead, a refused attempt answers no publication at all, so
+// neither serves this candidate.
+func candidateInService(outcome state.PublishOutcome) bool {
+	if outcome.Publication.Generation == 0 {
+		return false
+	}
+	return outcome.Result == state.PublishApplied || outcome.Result == state.PublishUnchanged
+}
+
+// failReload records one refused reload attempt on the configuration chain and
+// answers the failure: the running binding, the document in effect and the
+// natives are untouched, and the receipt names the result the chain holds.
+func (h *Host) failReload(ctx context.Context, result string, cause error) error {
+	if h.run == nil {
+		return cause
+	}
+	current := h.run.publisher.Current()
+	_, recordErr := h.run.recordPublicationAttempt(ctx, publicationAttempt{
+		Result:              result,
+		Generation:          current.Generation,
+		PreviousGeneration:  current.Generation,
+		PreviousFingerprint: current.Fingerprint,
+		Reason:              cause.Error(),
+	})
+	if recordErr != nil {
+		return errors.Join(cause, fmt.Errorf("tagent: record the %s publication attempt: %w", result, recordErr))
+	}
+	fact, held, readErr := h.run.latestPublicationAttempt(ctx)
+	if readErr != nil {
+		return errors.Join(cause, readErr)
+	}
+	if held && fact.Result != publicationResultPublished && fact.Result != publicationResultUnchanged {
+		return errors.Join(cause, fmt.Errorf("tagent: the ledger records %s: %s", fact.Result, fact.Reason))
+	}
+	return cause
+}
+
+// leaseInstalled reports whether the agent's lease now serves the version the
+// declaration names, beside the reason of the last refused replacement when it
+// does not.
+func leaseInstalled(held *leaseState, want string) (bool, string) {
+	if held == nil || held.lease == nil {
+		return false, "no model lease is attached"
+	}
+	version, _ := heldModelVersion(held.lease)
+	if version == want {
+		return true, ""
+	}
+	replacements := held.lease.Replacements()
+	for i := len(replacements) - 1; i >= 0; i-- {
+		if replacements[i].State == rl.ReplacementRefused {
+			if replacements[i].Reason != "" {
+				return false, replacements[i].Reason
+			}
+			break
+		}
+	}
+	return false, "the replacement was refused without a named reason"
+}
+
+// configDimensionOutcomes names every configuration dimension one published
+// move judged as applied: the change fact that records the judgment is filed
+// beside the generation the publication took into service.
+func configDimensionOutcomes(changes []hostReloadConfigChange) map[string]string {
+	out := make(map[string]string, len(changes))
+	for _, change := range changes {
+		out[change.Agent+"|"+change.Dimension] = "applied"
+	}
+	return out
+}
+
+// fillSkippedDimensions names every declaration dimension the window did not
+// move as skipped, so a reader of the result fact reconstructs the whole
+// organization switch: the dimensions that moved carry their outcome, the ones
+// that did not are named as carried instead of being absent from the window.
+func fillSkippedDimensions(out map[string]string, decl *config.Declaration) {
+	if decl == nil {
+		return
+	}
+	judged := []string{
+		event.ConfigChangeDimensionPrompt,
+		event.ConfigChangeDimensionOrgAssembly,
+		event.ConfigChangeDimensionBinding,
+	}
+	for _, spec := range decl.Agents {
+		for _, dimension := range judged {
+			key := spec.ID + "|" + dimension
+			if _, held := out[key]; !held {
+				out[key] = "skipped"
+			}
+		}
+	}
+	entry := strings.TrimSpace(decl.Entry)
+	if _, held := out[entry+"|"+event.ConfigChangeDimensionOrgEntry]; !held {
+		out[entry+"|"+event.ConfigChangeDimensionOrgEntry] = "skipped"
+	}
+	if _, held := out[entry+"|"+event.ConfigChangeDimensionOrgAgents]; !held {
+		out[entry+"|"+event.ConfigChangeDimensionOrgAgents] = "skipped"
+	}
+}
+
+// modelLeaseExtensions builds the model leases of the agents a publication adds.
+// The leases are built before the publication, so a model that cannot be leased
+// refuses the reload before a generation enters service; they are mounted on the
+// run only after the generation that declared them published.
 func (h *Host) modelLeaseExtensions(natives map[event.AgentID]NativeAgent, doc *hostDocument, added []event.AgentID) ([]modelLeaseBinding, error) {
 	extensions := make([]modelLeaseBinding, 0, len(added))
 	for _, id := range added {
@@ -530,7 +728,6 @@ func bindingChangeDescription(before, after config.AgentSpec) string {
 	note("max_tool_iterations", before.MaxToolIterations != after.MaxToolIterations)
 	note("max_calls_per_response", before.MaxCallsPerResponse != after.MaxCallsPerResponse)
 	note("long_context_tokens", before.LongContextTokens != after.LongContextTokens)
-	note("capture_budget_mb", before.CaptureBudgetMB != after.CaptureBudgetMB)
 	note("memory", !reflect.DeepEqual(before.Memory, after.Memory))
 	note("meditation", !reflect.DeepEqual(before.Meditation, after.Meditation))
 	note("file", !reflect.DeepEqual(before.File, after.File))
@@ -603,34 +800,17 @@ func (d *hostDocument) compatibleWith(next *hostDocument) error {
 }
 
 // restartRequiredChanges lists the fields the next document moves while the only
-// consumer of each was built at Boot: the storage tier, the request timeout, the
-// observation face, the governance rules and, per agent, the host-contributed tool
-// declarations, the skill roots, the read root, the file surface, the execution
-// face, the memory section and the meditation section. Boot constructs those
-// consumers once beside the natives it contributes, and a reload hands the natives
-// back as they were, so a reload that took a moved value would answer success for
-// a change no consumer takes.
+// consumer of each is the process itself: the storage tier and its root, the root
+// state every chain is opened over. Those are opened once for the process and no
+// generation rebuilds them, so a reload that took a moved value would answer
+// success for a change no consumer takes. Every path is the YAML key an operator
+// searches the configuration source for, and the order is fixed here, so the same
+// edit always answers the same names.
 //
-// The tool comparison covers the host-contributed tool references alone, the same
-// way the declaration maps them: an agent reference is the configuration's own
-// delegation assembly, built afresh for every published generation, so it moves
-// with the generation instead of being refused here - the org.assembly dimension
-// states that move. Per agent the comparison covers the fields of an agent both
-// documents declare. An added agent's tool, skill, read and file sections are
-// built through the same native path Boot ran, so they take effect with its first
-// generation; its execution, memory and meditation sections are not, because the
-// execution manager, the memory plan and the reflection driver are built once at
-// Boot. Carrying one of those on an added agent is therefore a restart-required
-// change refused by name, not a section the new binding would take. A removed
-// agent's sections leave with the generation that dropped it, so it is not
-// compared.
-// Every path is the YAML key an operator searches the configuration source for,
-// and the order is fixed here and then by agent id, so the same edit always
-// answers the same names.
-//
-// - An added agent's exec, memory and meditation consumers were assembled once at Boot over the boot declaration, so a section it carries has no live reader and is compared against the zero value.
+// - Everything else a document declares is rebuilt by the generation-scoped consumers and therefore moves with the generation: the tool declarations, the skill roots, the read root and the file face of every agent (the host's native face consumer), the request timeout (the client reads it when a request begins), the observation face, the governance rules, the meditation loop and the memory declaration (the host's own dialect consumers).
+// - The memory declaration is judged by its own consumer rather than by this list: the durable chain under the storage root is the store this process opened, so a candidate naming another tier or another engine is refused there by the field an operator searches for, and an inconsistent one is refused before anything is published.
 func (d *hostDocument) restartRequiredChanges(next *hostDocument) []string {
-	changed := make([]string, 0, 4)
+	changed := make([]string, 0, 2)
 	compare := func(path string, before, after any) {
 		if !reflect.DeepEqual(before, after) {
 			changed = append(changed, path)
@@ -638,68 +818,7 @@ func (d *hostDocument) restartRequiredChanges(next *hostDocument) []string {
 	}
 	compare("storage.type", d.Storage.Type, next.Storage.Type)
 	compare("storage.root", d.Storage.Root, next.Storage.Root)
-	compare("request_timeout_seconds", d.TimeoutSeconds, next.TimeoutSeconds)
-	compare("governance", d.Governance, next.Governance)
-	compare("telemetry", d.Telemetry, next.Telemetry)
-	for _, id := range d.agentIDsIn(next) {
-		before, held := d.Agents[id]
-		after := next.Agents[id]
-		if !held {
-			compare("agents."+id+".exec", config.ExecSpec{}, after.Exec)
-			compare("agents."+id+".memory", config.MemorySpec{}, after.Memory)
-			compare("agents."+id+".meditation", config.MeditationSpec{}, after.Meditation)
-			continue
-		}
-		compare("agents."+id+".tools", hostToolDeclarations(before.Tools), hostToolDeclarations(after.Tools))
-		compare("agents."+id+".skill_dirs", before.SkillDirs, after.SkillDirs)
-		compare("agents."+id+".read_root", before.ReadRoot, after.ReadRoot)
-		compare("agents."+id+".file", before.File, after.File)
-		compare("agents."+id+".exec", before.Exec, after.Exec)
-		compare("agents."+id+".memory", before.Memory, after.Memory)
-		compare("agents."+id+".meditation", before.Meditation, after.Meditation)
-	}
 	return changed
-}
-
-// hostToolDeclarations lists the tool references of one agent section whose only
-// consumer Boot built: the host-contributed tool instances, in declaration order.
-// An agent reference is the configuration's own delegation assembly and is built
-// afresh for every published generation, so it is judged by the org.assembly
-// dimension instead of being refused here.
-func hostToolDeclarations(refs []hostToolRef) []hostToolRef {
-	out := make([]hostToolRef, 0, len(refs))
-	for _, ref := range refs {
-		if namesDeclaredAgent(ref) {
-			continue
-		}
-		out = append(out, ref)
-	}
-	return out
-}
-
-// namesDeclaredAgent reports whether one declared tool reference names a declared
-// agent, the way the declaration mapping reads it: the explicit agent kind, or a
-// bare reference carrying a target agent.
-func namesDeclaredAgent(ref hostToolRef) bool {
-	kind := strings.TrimSpace(ref.Kind)
-	if kind == "agent" {
-		return true
-	}
-	return kind == "" && strings.TrimSpace(ref.Agent) != ""
-}
-
-// agentIDsIn lists every agent the next document declares, in name order: the
-// fields an agent both documents name are compared, and the restart-only sections
-// an added agent carries are judged against their zero value. A removed agent is
-// absent from the next document and is not judged here, because its sections leave
-// with the generation that dropped it.
-func (d *hostDocument) agentIDsIn(next *hostDocument) []string {
-	ids := make([]string, 0, len(next.Agents))
-	for id := range next.Agents {
-		ids = append(ids, id)
-	}
-	sort.Strings(ids)
-	return ids
 }
 
 // heldModelVersion reports the model version one agent's lease holds, and the

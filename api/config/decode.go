@@ -157,9 +157,10 @@ func agentsField(source string, e *sourceEntry) ([]AgentSpec, error) {
 // fields of AgentSpec.
 var agentKeys = []string{
 	"id", "parent_id", "model", "tools", "plugins", "task_policy", "files", "params",
-	"final_round", "max_tokens", "compress_threshold", "keep_recent_tasks", "environment_block",
+	"final_round", "max_tokens", "compress_threshold", "keep_recent_tasks",
+	"provider_context_window", "output_reserve", "environment_block",
 	"temperature", "thinking_enabled", "reasoning_effort", "max_tool_iterations",
-	"max_calls_per_response", "long_context_tokens", "capture_budget_mb",
+	"max_calls_per_response", "long_context_tokens",
 	"memory", "meditation", "file", "exec",
 }
 
@@ -210,6 +211,12 @@ func decodeAgent(source, path string, n *sourceNode) (*AgentSpec, error) {
 	if a.KeepRecentTasks, err = countField(source, joinField(path, "keep_recent_tasks"), fields["keep_recent_tasks"]); err != nil {
 		return nil, err
 	}
+	if a.ProviderContextWindow, err = countField(source, joinField(path, "provider_context_window"), fields["provider_context_window"]); err != nil {
+		return nil, err
+	}
+	if a.OutputReserve, err = countField(source, joinField(path, "output_reserve"), fields["output_reserve"]); err != nil {
+		return nil, err
+	}
 	if a.EnvironmentBlock, err = boolField(source, joinField(path, "environment_block"), fields["environment_block"]); err != nil {
 		return nil, err
 	}
@@ -229,9 +236,6 @@ func decodeAgent(source, path string, n *sourceNode) (*AgentSpec, error) {
 		return nil, err
 	}
 	if a.LongContextTokens, err = countField(source, joinField(path, "long_context_tokens"), fields["long_context_tokens"]); err != nil {
-		return nil, err
-	}
-	if a.CaptureBudgetMB, err = countField(source, joinField(path, "capture_budget_mb"), fields["capture_budget_mb"]); err != nil {
 		return nil, err
 	}
 	if a.Memory, err = memoryField(source, joinField(path, "memory"), fields["memory"]); err != nil {
@@ -293,7 +297,7 @@ func memoryField(source, field string, e *sourceEntry) (MemorySpec, error) {
 // or null engine declares no engine, which is the keyword-only retrieval.
 func engineField(source, field string, e *sourceEntry) (EngineSpec, error) {
 	spec := EngineSpec{}
-	fields, declared, err := sectionFields(source, field, e, "backend", "embedding", "vector_top_k", "keyword_top_k", "rrf_k")
+	fields, declared, err := sectionFields(source, field, e, "backend", "embedding")
 	if err != nil || !declared {
 		return spec, err
 	}
@@ -301,15 +305,6 @@ func engineField(source, field string, e *sourceEntry) (EngineSpec, error) {
 		return EngineSpec{}, err
 	}
 	if spec.Embedding, err = embeddingField(source, joinField(field, "embedding"), fields["embedding"]); err != nil {
-		return EngineSpec{}, err
-	}
-	if spec.VectorTopK, err = countField(source, joinField(field, "vector_top_k"), fields["vector_top_k"]); err != nil {
-		return EngineSpec{}, err
-	}
-	if spec.KeywordTopK, err = countField(source, joinField(field, "keyword_top_k"), fields["keyword_top_k"]); err != nil {
-		return EngineSpec{}, err
-	}
-	if spec.RRFK, err = countField(source, joinField(field, "rrf_k"), fields["rrf_k"]); err != nil {
 		return EngineSpec{}, err
 	}
 	return spec, nil

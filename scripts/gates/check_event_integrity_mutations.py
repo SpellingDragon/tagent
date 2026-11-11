@@ -406,9 +406,9 @@ MUTATIONS: Tuple[Mutation, ...] = (
         replacement=Replacement(
             file="assembly/host_tools.go",
             old=(
-                "\tif !hostSendNames(p.plan.targets, string(addr.AgentID)) {\n"
+                "\tif !hostSendNames(p.plan.Targets, string(addr.AgentID)) {\n"
                 "\t\treturn deliveryRefused, fmt.Sprintf(\"the deliver_to white list of %q names no %q, and a body delivered outside it would reach a session the reflection never declared\",\n"
-                "\t\t\tp.plan.agent, addr.AgentID)\n"
+                "\t\t\tp.plan.Agent, addr.AgentID)\n"
                 "\t}\n"
             ),
             new="",
@@ -502,17 +502,21 @@ MUTATIONS: Tuple[Mutation, ...] = (
                 # segment carries the run handle now).
                 old=(
                     "\treturn projectedSegment(ctx, a.run, a.sequence.projection, a.sequence.window, "
-                    "a.sequence.endedPrefix())\n"
+                    "a.sequence.endedPrefix(), a.boundary.ProjectionBudget)\n"
                 ),
                 new=(
                     "\treturn projectedSegment(ctx, a.run, a.sequence.projection, a.sequence.window, "
-                    "a.sequence.ended)\n"
+                    "a.sequence.ended, a.boundary.ProjectionBudget)\n"
                 ),
             ),
             Replacement(
                 file="assembly/facts.go",
+                # Anchor re-taken after the U2 g(x) unification: the live
+                # commit and the replay fold share one append-plus-trim step,
+                # so the mutant records the position the entry lands at in the
+                # sequence as it stood before that step.
                 old=(
-                    "\theld.projection.Append(context.Background(), entry)\n"
+                    "\theld.projection = foldIntoProjection(ctx, held.projection, entry, held.window)\n"
                     "\tif evt.Type == event.TypeAgentOutput {\n"
                     "\t\theld.endedAt = entry.Key\n"
                     "\t\theld.rangeOpen = false\n"
@@ -524,7 +528,7 @@ MUTATIONS: Tuple[Mutation, ...] = (
                 ),
                 new=(
                     "\tposition := held.projection.Len()\n"
-                    "\theld.projection.Append(context.Background(), entry)\n"
+                    "\theld.projection = foldIntoProjection(ctx, held.projection, entry, held.window)\n"
                     "\tif evt.Type == event.TypeAgentOutput {\n"
                     "\t\theld.ended = position\n"
                     "\t\theld.rangeOpen = false\n"
@@ -563,39 +567,8 @@ MUTATIONS: Tuple[Mutation, ...] = (
         test_selector="^TestEventIntegrityProjection$",
         expect_assertion="copies of the range-opening notice in its own request",
     ),
-    Mutation(
-        id="MUT-EVID-05-restart-flat-restore",
-        basis="EVID-05-restart-refold-regression",
-        evidence_kind="confirmed_defect",
-        evidence_ref=(
-            "00.3-frozen-contract.json defects[EVID-05-restart-refold-regression]; "
-            "restore anchor TestEventIntegrityProjection/restart_restores_fold_form"
-        ),
-        description=(
-            "Restore the replay of the chain without its fold products: seedReplay "
-            "skips rebuilding the synthetic entries the committed compress.product "
-            "facts carry, so a restart presents the material those products had "
-            "already covered as raw detail instead of the folded form the process "
-            "left."
-        ),
-        replacement=Replacement(
-            file="assembly/run.go",
-            old=(
-                "\t\tseed := seeds[addr]\n"
-                "\t\tseed.projection.RestoreProducts(products[addr])\n"
-            ),
-            new=(
-                "\t\tseed := seeds[addr]\n"
-                "\t\t_ = products[addr]\n"
-            ),
-        ),
-        test_package="./tests/integration/history",
-        test_file="tests/integration/history/event_integrity_test.go",
-        test_name="TestEventIntegrityProjection",
-        test_selector="^TestEventIntegrityProjection$",
-        expect_assertion="the restart restored the fold products",
-        anchor_subtest="restart_restores_fold_form",
-    ),
+    # MUT-EVID-05-restart-flat-restore retired: see RETIRED_DEFECTS (equivalent
+    # mutant post-purification; the defect is structurally resolved).
     Mutation(
         id="MUT-CAND-01.8-storage-success",
         basis="storage_failure_reported_as_success",
@@ -625,13 +598,17 @@ MUTATIONS: Tuple[Mutation, ...] = (
                 "\tif err != nil {\n"
                 "\t\treturn err\n"
                 "\t}\n"
-                "\tif supply == nil {\n"
+                "\treturn nil\n"
+                "}\n\n"
+                "// sameFactOf"
             ),
             new=(
                 "\tif err != nil {\n"
                 "\t\treturn nil\n"
                 "\t}\n"
-                "\tif supply == nil {\n"
+                "\treturn nil\n"
+                "}\n\n"
+                "// sameFactOf"
             ),
         ),
         companion=(
@@ -747,10 +724,10 @@ MUTATIONS: Tuple[Mutation, ...] = (
         ),
         replacement=Replacement(
             file="tool/exec/tool.go",
-            old='\treturn fmt.Sprintf("executed %s: %s", key, output), nil\n',
+            old='\treceipt := fmt.Sprintf("executed %s: %s", key, output)\n',
             new=(
-                '\treturn fmt.Sprintf("executed %s: completed successfully: %s", '
-                'key, output), nil\n'
+                '\treceipt := fmt.Sprintf("executed %s: completed successfully: %s", '
+                'key, output)\n'
             ),
         ),
         test_package="./tool/exec",
@@ -759,6 +736,90 @@ MUTATIONS: Tuple[Mutation, ...] = (
         test_selector="^TestEventIntegrityExecLifecycle$",
         expect_assertion="no query face may report success or completion",
         anchor_subtest="partial_output_is_not_completion",
+    ),
+    Mutation(
+        id="MUT-FOLD-01-segment-age-window",
+        basis="FOLD-CONTRACT-segment-age-window",
+        evidence_kind="named_assertion",
+        evidence_ref=(
+            "golden/runtime/fold_contract.json segment_age; golden vector golden/runtime/fold_plan_golden.json; anchor TestFoldPlanGolden"
+        ),
+        description=(
+            "Widen the newest age window by one segment, so a segment the ladder reads L1 is recorded as L0 material and its level moves."
+        ),
+        replacement=Replacement(
+            file="memory/replay/age_segments.go",
+            old="\tcase age < keepRecent:\n",
+            new="\tcase age < keepRecent+1:\n",
+        ),
+        test_package="./memory/replay",
+        test_file="memory/replay/age_plan_test.go",
+        test_name="TestFoldPlanGolden",
+        test_selector="^TestFoldPlanGolden$",
+        expect_assertion="the fold plan golden drifted",
+    ),
+    Mutation(
+        id="MUT-FOLD-02-mid-level-window",
+        basis="FOLD-CONTRACT-mid-level-window",
+        evidence_kind="named_assertion",
+        evidence_ref=(
+            "golden/runtime/fold_contract.json segment_age levels L1 and L2; anchor TestFoldPlanGolden"
+        ),
+        description=(
+            "Widen the L1 window by one segment, so a segment the ladder reads L2 reads L1 instead."
+        ),
+        replacement=Replacement(
+            file="memory/replay/age_segments.go",
+            old="\tcase age < keepRecent*2:\n",
+            new="\tcase age < keepRecent*2+1:\n",
+        ),
+        test_package="./memory/replay",
+        test_file="memory/replay/age_plan_test.go",
+        test_name="TestFoldPlanGolden",
+        test_selector="^TestFoldPlanGolden$",
+        expect_assertion="the fold plan golden drifted",
+    ),
+    Mutation(
+        id="MUT-FOLD-03-inflight-fold",
+        basis="FOLD-CONTRACT-inflight-never-folded",
+        evidence_kind="named_assertion",
+        evidence_ref=(
+            "golden/runtime/fold_contract.json segment_age in_flight; anchor TestAgeFoldKeepsTheSegmentInProgressWhole"
+        ),
+        description=(
+            "Fold the segment still in flight: drop the completion guard from the band rule, so the tail run no agent output closed reads as middle-band material and its process detail folds into a product."
+        ),
+        replacement=Replacement(
+            file="memory/replay/age_segments.go",
+            old="\tif !segment.Complete || segment.Index >= total-keepRecent {\n",
+            new="\tif segment.Complete && segment.Index >= total-keepRecent {\n",
+        ),
+        test_package="./memory/replay",
+        test_file="memory/replay/age_segments_test.go",
+        test_name="TestAgeFoldKeepsTheSegmentInProgressWhole",
+        test_selector="^TestAgeFoldKeepsTheSegmentInProgressWhole$",
+        expect_assertion="want the segment in progress beside the whole new band",
+    ),
+    Mutation(
+        id="MUT-FOLD-04-product-type",
+        basis="FOLD-CONTRACT-product-type",
+        evidence_kind="named_assertion",
+        evidence_ref=(
+            "golden/runtime/fold_contract.json products segment_fold.type; anchor TestFoldPlanGolden"
+        ),
+        description=(
+            "Mint the middle-band product as a history summary entry, so the product the middle band folds into carries the wrong type."
+        ),
+        replacement=Replacement(
+            file="memory/replay/age_segments.go",
+            old="\t\tType:    ProjectionTypeSegmentFold,\n",
+            new="\t\tType:    ProjectionTypeHistorySummary,\n",
+        ),
+        test_package="./memory/replay",
+        test_file="memory/replay/age_plan_test.go",
+        test_name="TestFoldPlanGolden",
+        test_selector="^TestFoldPlanGolden$",
+        expect_assertion="the fold plan golden drifted",
     ),
 )
 
@@ -785,6 +846,15 @@ REPRODUCED_DEFECTS: Dict[str, Dict[str, str]] = {
         "anchor": "TestEventIntegrityMeditationSchedule/busy_observation_holds_watermark",
     },
 }
+# Defects resolved structurally by the purification: the fold form on restart is
+# re-derived from the committed chain, so RestoreProducts / NoteProduct are
+# redundant and no mutation removing them can kill (equivalent mutants). Retired
+# with reason instead of keeping a false gate; re-confirm if the chain-derived
+# rebuild ever regresses.
+RETIRED_DEFECTS = {
+    "EVID-05-restart-refold-regression": "fold form chain-derived post-purification; restore/note redundant (2026-11-09)",
+}
+
 
 
 class GateError(RuntimeError):
@@ -1075,6 +1145,8 @@ def confirmed_defect_ids(root: Path, contract_path: Optional[str]) -> List[str]:
             raise GateError("{}: every defect must be an object".format(path))
         if defect.get("confirmed") is True:
             defect_id = defect.get("id")
+            if isinstance(defect_id, str) and defect_id in RETIRED_DEFECTS:
+                continue
             if not isinstance(defect_id, str) or not defect_id:
                 raise GateError("{}: a confirmed defect carries no id".format(path))
             ids.append(defect_id)

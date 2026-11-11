@@ -202,10 +202,6 @@ var ErrNoticeTurnIncomplete = errors.New("tagent: the follow-up turn did not com
 // MUST NOT replay an entry whose consumption receipt is already recorded.
 // MUST NOT hold a claimed entry beside a turn that stopped before its delivery.
 type SettleWake interface {
-	// RestoreOwed folds the unconsumed work a durable account still owes back
-	// into the mailbox, so a stopped run's notices wait for the next decision
-	// instead of dying with the process that accepted them.
-	RestoreOwed(ctx context.Context) error
 	// Unconsumed reports every mailbox entry whose consumption has not
 	// completed, in the one order the account answers in.
 	Unconsumed() []state.WorkSeat
@@ -300,6 +296,17 @@ func (d *SettleDriver) Name() string { return "settle-driver" }
 // observation out. The observation is the follow-up turn the fact may fire.
 func (d *SettleDriver) Port() plugin.Port {
 	return plugin.PortFactObservation
+}
+
+// Material declares what this driver reads, when it reads it and what a failed
+// reading leaves behind: one committed fact read after its commit, where a failed
+// observation keeps the follow-up turn owed on the mailbox account.
+func (d *SettleDriver) Material() plugin.Material {
+	return plugin.Material{
+		Reads:   plugin.PortFactObservation,
+		Timing:  plugin.TimingPostCommit,
+		Failure: plugin.PreserveObligation,
+	}
 }
 
 // DrivesObligation marks this face's duty: the observation wakes the pump, and the
@@ -466,9 +473,6 @@ func (d *SettleDriver) drain() {
 		wake := d.wake()
 		if wake == nil {
 			return
-		}
-		if err := wake.RestoreOwed(ctx); err != nil {
-			assemblyWarn("tagent: the settle restore of the mailbox reported: %v", err)
 		}
 		seats := wake.Unconsumed()
 		worked := false

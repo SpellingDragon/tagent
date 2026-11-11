@@ -16,6 +16,9 @@
 # GODOC_OUT overrides the destination (used to verify the generator before the
 # repository adopts docs/api/). Stale files are reported, never deleted: removal
 # stays a human decision.
+# Pin the toolchain so go doc output matches across Go versions. Blank-line
+# squeezing is normalized below because GNU and BSD cat -s differ on trailing
+# blanks, which would otherwise make docs/api drift between Linux CI and macOS.
 export GOTOOLCHAIN=go1.24.1
 set -euo pipefail
 cd "$(dirname "$0")/../.."
@@ -68,7 +71,7 @@ while IFS= read -r pkg; do
   if [ -z "$body" ]; then
     echo "no documentation" > "$gen_root/$name.md"
   else
-    printf '%s\n' "$body" | sed -E -e '/(契约|规格):/d' -e 's#^[[:space:]]*docs/[^[:space:]]+$##' | cat -s > "$gen_root/$name.md"
+    printf '%s\n' "$body" | sed -E -e '/(契约|规格):/d' -e 's#^[[:space:]]*docs/[^[:space:]]+$##' | awk '/^$/{if(++b>1)next; print; next}{b=0;print}' > "$gen_root/$name.md"
   fi
   count=$((count + 1))
   printf '| `%s` | [%s.md](%s.md) |\n' "$pkg" "$name" "$name" >> "$index"

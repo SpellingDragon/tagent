@@ -1,5 +1,7 @@
 # resident-continuity Specification
 
+> **复核注记（2026-11-04 逐模块核对）**：本规范对已退役符号（`TagentAgent` / `EventBus` / `SessionProjection` / `PlainTool` / `SwappableModel` 等，全仓 Go 0 命中）的引用均为 MUST NOT 禁止项、历史实现注记或迁移期条款，**无现行 SHALL/MUST 建立在已退役符号上**；现行契约以 `assembly` 组合根 + 每地址常驻消费循环 + 装配期按声明分派为准。逐条映射见 `openspec/changes/archive/2026-11-03-runtime-architecture-convergence/evidence/10-doc-gap-register.md`。
+
 ## Purpose
 
 常驻 Agent 架构不变量（守护契约，后续涉及状态层/执行器的变更须对照）：状态与执行器分离、状态层事件溯源模式（旁路产物+回放重建+外置）、执行器可换语义（drain-free turn 级）、R1→R2/R3→R4 依赖序。R1=对话上下文（event-sourced-projection）；R2=任务板（task-registry-and-board）；R3=常驻会话（resident-session-continuity）；R4=热更（swappable-executor）。

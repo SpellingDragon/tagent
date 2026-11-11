@@ -1,6 +1,6 @@
 # 持久投递与消费账：先登记后销账
 
-> **活契约页**：逐条对齐当前码面（`runtime/state/`、`runtime/task/`、`assembly/host_delivery.go`），代码内 `// 契约:` 注释指向本页锚点。口径统一于[存储概念地图](../../demos/storage-concept-map.html)：链管身份与因果、原文仓管字节、**账本管责任**、其余现算。历史快照见 [PRE-REWRITE-MANIFEST](../../archive/wiki/PRE-REWRITE-MANIFEST.md)。
+> **活契约页**：逐条对齐当前码面（`runtime/state/`、`runtime/task/`、`assembly/host_delivery.go`），代码内 `// 契约:` 注释指向本页锚点。口径统一于[存储概念地图](../../demos/storage-concept-map.html)：链管身份与因果、原文仓管字节、**账本管责任**、其余现算；可恢复状态的持久载体统一为[框架 checkpoint 事实族](../platform/platform-subsystems.md#framework-checkpoint)。历史快照见 [PRE-REWRITE-MANIFEST](../../archive/wiki/PRE-REWRITE-MANIFEST.md)。
 
 本页承载两件事：**一条通知被谁认领、是否被消费**（通知消费账），以及**一条已生成的正文有没有送出去**（交付账本）。两者的失效表现都不是报错——而是重复驱动、重复投递或静默漏送。
 
@@ -22,41 +22,39 @@
 
 ### 1.2 交付账本（`assembly/host_delivery.go`）
 
-一个正文义务落在 `tagent/task/v1/delivery:<义务ID>` 上，义务 ID 是 **`delivery-fresh-<factKey>`**——以承载该正文的事实的身份命名。因此**登记、补交接、重启恢复读的是同一条记录**：同一事实只有一个义务，重启与实时面不会各自造一份。
+一个正文义务在链上声明：带正文的输出在**同一笔 `agent_output` 事实**里登记 owed（目标＋血统元数据），义务 ID 是 **`delivery-fresh-<factKey>`**——以承载该正文的事实的身份命名；此后每次状态迁移作为 `delivery.settlement` 族事实以「身份＋状态」为键**追加式**落链（`writeDeliveryState` 是唯一记录入口）。因此**登记、补交接、重启恢复读的是同一套身份**：同一事实只有一个义务，重启与实时面不会各自造一份。
 
-码面是**六个状态常量**，加上"还没登记"这个缺省态，合起来就是常说的七态：缺省态不是常量，而是 kv 里没有这条键。
+码面是**四个结算终态常量**（`sent`/`refused`/`headless-retired`＋带 reason 的 `held`，reason ∈ `approval`/`retrying`/`retry-exhausted`/`unknown`），外加迁移专用的 `owed` 态——旧 KV 六态记录只在 `migrateRetiredDeliveries` 里一次性映射成结算事实后只读留存，不再是活账。
 
 | 状态 | 含义 | 进入条件 | 出口 |
 |---|---|---|---|
-| （无记录） | 还没登记 | — | 登记为 `owed` |
-| `owed` | 已生成、未销账 | 生成面登记（**只在入口地址**） | 发送成功→`sent`；被裁决挂起→`held`；通道拒收→`retry`；非入口→`headless` |
-| `held` | 审核挂起，等裁决 | 裁决 err/挂起/不许 | `ApproveDelivery`→`sent`；`RefuseDelivery`→`refused` |
-| `retry` | 通道拒收，欠一次重投 | `sender.Send` 失败 | 下次发送→`sent` |
-| `sent` | 已送达的回执 | 发送成功后写回执并过屏障 | 终止态（**回执落地是唯一阻止重投的凭据**） |
-| `refused` | 已放弃并留审计 | 显式拒绝（另写一条不含模型正文的审计事实） | 终止态 |
-| `headless` | 具名销账，未发送 | 恢复时发现义务目标是**非入口地址** | 终止态，**记录保留正文与目标供审计** |
+| `owed`（迁移专用） | 旧账留下的未发送义务 | 旧 KV 记录迁移 | 恢复时按仍欠处理：入口地址重投，非入口具名销账 |
+| `held.<reason>` | 等待：审批挂起或重投退避 | 裁决挂起（approval）／通道拒收（retrying）／重试耗尽（retry-exhausted）／结果未知（unknown） | `ApproveDelivery`→`sent`；`RefuseDelivery`→`refused`；retrying 续跑重投 |
+| `sent` | 已送达的回执 | 发送成功后落结算事实 | 终止态（**回执落链是唯一阻止重投的凭据**） |
+| `refused` | 已放弃并留审计 | 显式拒绝 | 终止态 |
+| `headless-retired` | 具名销账，未发送 | 义务目标是**非入口地址**：生成它的段关闭时即销账，恢复读面遇到遗留的非入口 owed 义务同样销账 | 终止态，**记录保留正文与目标供审计** |
 
-入口门禁是硬判据：`recordDeliveryOwed` 在 `addr.AgentID != entry` 时**什么都不登记**；`restorePendingDeliveries` 读到非入口的 `owed` 记录时调 `retireHeadlessDelivery` 具名销账而不是投递——非入口地址的答复归驱动它的调用方，永不进消息渠道。
+入口门禁是硬判据：owed 声明随每一笔带正文的输出**同笔落链**（不看地址），能出宿主的只有入口地址——段关闭时非入口地址的正文由 `retireHeadlessBodies` 具名销账，恢复读面遇到遗留的非入口 owed 义务由 `retireHeadlessDelivery` 销账而不是投递。非入口地址的答复归驱动它的调用方，永不进消息渠道；销账必须发生在生成它的那次段关闭，因为框架 checkpoint 的切片只覆盖到自己的切点，把销账推迟到重启就可能被切点吞掉。
 
 ### 1.3 顺序：先交接，后销账
 
 | 时机 | 动作 | 为什么 |
 |---|---|---|
-| 生成后、发送前 | `recordDeliveryOwed`：一批写齐并过写屏障，返回**整套仍为 owed 的正文**（本次登记的 + 早先登记未销的） | 崩溃点落在"已登记未发送"时，重启读得回这条义务 |
-| 通知终态落地时 | `handoffSettledBodies` **在消费邮箱条目之前**跑：登记本批义务，并补投整套仍 owed 的正文 | 消费回执一旦落地，该通知永不再被唤醒；补投必须发生在销账之前 |
-| 启动 | `restorePendingDeliveries`：`owed`→按实时同一裁决发送；`held`/`retry`→回填待裁表；不可解析或缺身份 → **具名拒启** | 不容许"带着看不懂的义务启动" |
-| 每次状态迁移 | 写记录 + `Sync` 屏障成功后才发布内存态 | 失败即具名返回，内存态不动（**状态提交 checked**） |
+| 生成后、发送前 | `recordDeliveryOwed`：owed 声明随输出事实同笔落链，返回**整套仍欠的正文**（本次登记的 + 早先登记未销的） | 崩溃点落在"已登记未发送"时，重启读得回这条义务 |
+| 通知终态落地时 | `handoffSettledBodies` **在消费邮箱条目之前**跑：登记本批义务，并补投整套仍欠的正文 | 消费回执一旦落地，该通知永不再被唤醒；补投必须发生在销账之前 |
+| 启动 | 框架 checkpoint 的 `delivery` 切片先恢复整本账（结算态＋开账清单＋重试 attempt），`restorePendingDeliveries` 再叠加偏移后事实：仍欠的入口义务按实时同一裁决发送，held 回填待裁表，retrying 从已有 attempt 续跑退避；不可解析或缺身份 → **具名拒启** | 不容许"带着看不懂的义务启动"；已确认 sent 的义务不重发 |
+| 每次状态迁移 | 结算事实经 `commitFactChecked` 落链成功后才发布内存态 | 失败即具名返回，内存态不动（**状态提交 checked**） |
 
 ### 1.4 语义：at-least-once，窗口显式声明
 
-- **回执落地是唯一凭据**：`sent` 记录过屏障之后，该义务再也不被投递。发送与"发送已落"是两个崩溃点，任何实现只能选一个顺序；这里选"先发送、后回执"，代价是**恰好一次多投**被容忍——重投写的是同一条回执，正是它阻止第三次。
-- **六条 checked 条款**（`openspec/changes/success-semantics/specs/orchestration/spec.md`）：先交接后销账｜只登记入口地址的正文｜未销义务进程内补投｜状态提交 checked｜旧格式具名拒绝｜残余窗口显式声明。本页的每条状态迁移都能对回其中一条。
+- **回执落链是唯一凭据**：`sent` 结算事实落链之后，该义务再也不被投递。发送与"发送已落"是两个崩溃点，任何实现只能选一个顺序；这里选"先发送、后回执"，代价是**恰好一次多投**被容忍——重投写的是同一条回执，正是它阻止第三次。
+- **六条 checked 条款**（`openspec/changes/archive/2026-11-08-success-semantics/specs/orchestration/spec.md`）：先交接后销账｜只登记入口地址的正文｜未销义务进程内补投｜状态提交 checked｜旧格式具名拒绝｜残余窗口显式声明。本页的每条状态迁移都能对回其中一条。
 - **残余窗口不可恢复，故不承诺**：用户轮"`invoke` 返回 → 交付登记"是同一调用栈内的微窗口；结果在 `invoke` 返回之后才存在，登记只能在拿到结果之后写，进程在该窗口内被杀时账上还没有这条义务、也没有可读的持久正文。契约承诺的是**已登记义务的恢复**，不是窗口本身。另有两个"登记完成、发送未发生"的窗口（消费回执已落而发送未发生；用户轮登记后发送前），其恢复面是**重启**，不是进程内补投。
 
 <a id="canonical-fact-resolution"></a>
 ## 二、重放取哪份事实：账本键就是身份
 
-账本不重建状态，它**记住身份**；状态是重放的纯读数。四类记录同在一份事实面上（`FactLog`：`Put`/`Get`/`Scan`/`Sync`，四条红线要求"暂存不声称持久、屏障之后才报成功、不得把暂存当已存、前缀扫描不得给子集"）。
+账本不重建状态，它**记住身份**；状态是重放的纯读数。四类记录同在一份事实面上（`FactLog`：`Put`/`Get`/`Scan`/`Sync`，四条红线要求"暂存不声称持久、屏障之后才报成功、不得把暂存当已存、前缀扫描不得给子集"）。账本自身的可恢复状态（邮箱欠账、任务账户、送达账、未应答输入、投影幸存者）由框架 checkpoint 事实族承载（见[平台篇 §六](../platform/platform-subsystems.md#framework-checkpoint)）：boot 读最新 checkpoint 载入切片、只回放偏移后事实，不再对这些前缀做全史扫描；无 checkpoint 的年轻链才全量回放，坏 checkpoint 具名拒 boot。
 
 | 记录 | 键 | 值 | 身份从哪来 |
 |---|---|---|---|
@@ -81,12 +79,12 @@
 
 | 判据 | 位置 | 规则 |
 |---|---|---|
-| **入口地址门禁**（渠道可见性的执行面） | `assembly/host_delivery.go` | 只有 entry 地址的正文登记义务；其余地址 headless，恢复时具名销账 |
+| **入口地址门禁**（渠道可见性的执行面） | `assembly/host_delivery.go` | 只有 entry 地址的正文出宿主；其余地址 headless，生成时销账，遗留的由恢复面销账 |
 | **域内可见性策略**（该产出的性质） | `features/evolution/meditation/judgment.go` | 宿主面印花集合 `{user, task, reincarnation, system_alert}`；`meditation` 是反思回合自己的印花，可外发；**未声明的印花一律按自管处理**（fail-closed，不投递、不计新鲜度） |
 
 三条由此固定的判据：①`delegation` 印花（`api/event/meta.go` `LineageDelegation`）是自管流量，不开宿主面、不计新鲜度；②未知/空印花既不投递也不构成新鲜材料——"不认识"永远不等于"可以发"；③headless 销账**保留正文与目标**，所以"给了谁、为什么没发"事后可问，而不是删痕了事。
 
-**进程内投递的账目是同一套身份的读面**：`Run.DeliveryLedger()` 把本 run 提交过的投递事实按源事件、目标与投递身份回读（`Records`／`BySource`／`ByTarget`）。两族投递——agent 主动发出的正文落 `external_input`，框架的结算通知落 `task_settled`——盖同一套四键，所以"一个源事件到达了哪些目标、各自站在什么回执"不按来路分两种读法。账目不解析正文，也不松上面两道判据：它是回读面，不是第三条门。
+**进程内投递的账目是同一套身份的读面**：`Run.DeliveryLedger()` 把本 run 提交过的投递事实按源事件、目标与投递身份回读（`Records`／`BySource`／`ByTarget`）。两族投递——agent 主动发出的正文落 `external_input`，框架的结算通知落 `task_settled`——盖同一套五键（含 `delivery.denial`），所以"一个源事件到达了哪些目标、各自站在什么回执"不按来路分两种读法。账目不解析正文，也不松上面两道判据：它是回读面，不是第三条门。
 
 <a id="gaps"></a>
 ## 四、已知缺口与演进方向
@@ -96,5 +94,4 @@
 | **残余微窗口不可恢复** | `invoke` 返回→登记之间的崩溃没有可恢复源；契约只承诺已登记义务 | 接受为声明性边界（已写入 spec）；若要收窄，必须让结果先生成成一条已登记事实 |
 | **至少一次容许一次多投** | `sent` 回执未落地时重启会再发一次，两份回执同键覆盖 | 与 `delivery-dispatch-receipts` 的动作身份对齐后可做到"复用原动作结论"，但发送与回执的顺序不可能两全 |
 | **无进程内孤儿清扫** | `fact:`/`consume:` 前缀只增不改，没有压实面 | 以链为真源的清理器（当前无） |
-| **账本状态是"读侧重放"而非可查询视图** | 每次重启全量 `Scan` 四个前缀 | 有界快照 + 尾部重放（与 `runtime-simplicity-upgrade` 同向） |
-| **交付账本的 `sync` 覆盖批次而非单键** | 一批一屏障：提交成功覆盖整批，跨批无事务 | 顺序不变量补偿（先登记后发送、先回执后发布） |
+| **交付账本的批次原子性靠提交入口** | 结算事实经 `commitFactChecked` 单条落链，一批多键之间无事务 | 顺序不变量补偿（先登记后发送、先回执后发布） |

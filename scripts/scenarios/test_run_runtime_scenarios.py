@@ -320,7 +320,9 @@ class FakeGo:
         exit_code = 0
         if self.mutate:
             rows, exit_code = self.mutate(position, rows)
-        return exit_code, "".join(json.dumps(row) + "\n" for row in rows), ""
+        return (exit_code, "".join(json.dumps(row) + "\n" for row in rows), "",
+                {"name": runner.LIVENESS_GO_TEST_BOUND, "state": "completed",
+                 "bound_seconds": timeout})
 
 
 class EventRunnerTest(unittest.TestCase):
@@ -588,7 +590,9 @@ class EventRunnerTest(unittest.TestCase):
         self.assertIsNone(args.seed)
         self.assertIsNone(args.window)
         self.assertEqual(args.test_id, [])
-        fake = mock.Mock(return_value=(0, "", ""))
+        fake = mock.Mock(return_value=(0, "", "",
+                                      {"name": runner.LIVENESS_GO_TEST_BOUND,
+                                       "state": "completed", "bound_seconds": 900.0}))
         v1_args = runner.parse_args(["--root", str(REPO), "--contract", str(REAL_CONTRACT),
                                      "--out", str(self.root / "v1"), "--scope", "deterministic"])
         with mock.patch.object(runner, "run_go_test", fake):

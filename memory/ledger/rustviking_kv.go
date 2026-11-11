@@ -7,6 +7,8 @@ import (
 	"errors"
 	"fmt"
 	"os/exec"
+	"sort"
+	"strings"
 )
 
 // ErrRustViking reports a rustviking CLI call that did not succeed, carrying the
@@ -52,38 +54,38 @@ func newRustVikingKV(binary, config string) *rustvikingKV {
 	return &rustvikingKV{binary: binary, config: config}
 }
 
-var _ kvPort = (*rustvikingKV)(nil)
+var _ AtomicStore = (*rustvikingKV)(nil)
 
-// kvRead returns the pairs the fetch names: one `kv get` for the key it names,
+// Read returns the pairs the fetch names: one `kv get` for the key it names,
 // or one bounded `kv scan` page in key order for the prefix it names.
-func (r *rustvikingKV) kvRead(ctx context.Context, fetch kvFetch) ([]kvPair, error) {
-	if fetch.key != "" {
-		data, err := r.call(ctx, "kv", "get", "-k", fetch.key)
+func (r *rustvikingKV) Read(ctx context.Context, fetch Fetch) ([]Pair, error) {
+	if fetch.Key != "" {
+		data, err := r.call(ctx, "kv", "get", "-k", fetch.Key)
 		if err != nil {
 			return nil, err
 		}
 		var entry cliEntry
 		if err := json.Unmarshal(data, &entry); err != nil {
-			return nil, fmt.Errorf("%w: get response for key %q: %w", ErrRustViking, fetch.key, err)
+			return nil, fmt.Errorf("%w: get response for key %q: %w", ErrRustViking, fetch.Key, err)
 		}
 		if entry.Value == nil {
 			return nil, nil
 		}
 		value, err := base64.StdEncoding.DecodeString(*entry.Value)
 		if err != nil {
-			return nil, fmt.Errorf("%w: value of key %q is not valid base64: %w", ErrRustViking, fetch.key, err)
+			return nil, fmt.Errorf("%w: value of key %q is not valid base64: %w", ErrRustViking, fetch.Key, err)
 		}
-		return []kvPair{{key: fetch.key, value: value}}, nil
+		return []Pair{{Key: fetch.Key, Value: value}}, nil
 	}
-	data, err := r.call(ctx, "kv", "scan", "-p", fetch.prefix, "-l", "1000000")
+	data, err := r.call(ctx, "kv", "scan", "-p", fetch.Prefix, "-l", "1000000")
 	if err != nil {
 		return nil, err
 	}
 	var scan cliScanResult
 	if err := json.Unmarshal(data, &scan); err != nil {
-		return nil, fmt.Errorf("%w: scan response for prefix %q: %w", ErrRustViking, fetch.prefix, err)
+		return nil, fmt.Errorf("%w: scan response for prefix %q: %w", ErrRustViking, fetch.Prefix, err)
 	}
-	out := make([]kvPair, 0, len(scan.Entries))
+	out := make([]Pair, 0, len(scan.Entries))
 	for _, entry := range scan.Entries {
 		var value []byte
 		if entry.Value != nil {
@@ -93,24 +95,65 @@ func (r *rustvikingKV) kvRead(ctx context.Context, fetch kvFetch) ([]kvPair, err
 			}
 			value = decoded
 		}
-		out = append(out, kvPair{key: entry.Key, value: value})
+		out = append(out, Pair{Key: entry.Key, Value: value})
 	}
 	return out, nil
 }
 
-// kvCommit applies the batch one CLI call per key and completes the barrier:
+// Keys returns the keys the prefix names, in key order. The scan page the read
+// path already asks for carries the keys beside their values; the enumeration
+// keeps the keys and drops the values, so it never materializes what it does not
+// answer.
+func (r *rustvikingKV) Keys(ctx context.Context, prefix string) ([]string, error) {
+	data, err := r.call(ctx, "kv", "scan", "-p", prefix, "-l", "1000000")
+	if err != nil {
+		return nil, err
+	}
+	var scan cliScanResult
+	if err := json.Unmarshal(data, &scan); err != nil {
+		return nil, fmt.Errorf("%w: scan response for prefix %q: %w", ErrRustViking, prefix, err)
+	}
+	out := make([]string, 0, len(scan.Entries))
+	for _, entry := range scan.Entries {
+		if strings.HasPrefix(entry.Key, prefix) {
+			out = append(out, entry.Key)
+		}
+	}
+	return out, nil
+}
+
+// Namespaces returns the key namespaces of the stored keys, in name order,
+// without reading any value.
+func (r *rustvikingKV) Namespaces(ctx context.Context) ([]string, error) {
+	keys, err := r.Keys(ctx, "")
+	if err != nil {
+		return nil, err
+	}
+	seen := map[string]struct{}{}
+	for _, key := range keys {
+		seen[keyNamespaceOf(key)] = struct{}{}
+	}
+	out := make([]string, 0, len(seen))
+	for namespace := range seen {
+		out = append(out, namespace)
+	}
+	sort.Strings(out)
+	return out, nil
+}
+
+// Commit applies the batch one CLI call per key and completes the barrier:
 // every call this view returns success for has already been applied by the
 // rustviking store, so no staged state outlives a commit. Deletes run before
 // puts, and a key stands on one side or the other, so the order names no
 // different state.
-func (r *rustvikingKV) kvCommit(ctx context.Context, batch kvBatch) error {
-	for _, key := range batch.deletes {
+func (r *rustvikingKV) Commit(ctx context.Context, batch Batch) error {
+	for _, key := range batch.Deletes {
 		if _, err := r.call(ctx, "kv", "del", "-k", key); err != nil {
 			return err
 		}
 	}
-	for _, put := range batch.puts {
-		if _, err := r.call(ctx, "kv", "put", "-k", put.key, "-v", base64.StdEncoding.EncodeToString(put.value)); err != nil {
+	for _, put := range batch.Puts {
+		if _, err := r.call(ctx, "kv", "put", "-k", put.Key, "-v", base64.StdEncoding.EncodeToString(put.Value)); err != nil {
 			return err
 		}
 	}

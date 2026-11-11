@@ -156,7 +156,16 @@ func (s *integrityScript) actionBodies() []string {
 // the stream the request's identity names, and nothing else. A request outside
 // the script, a step reached twice and a step reached after the script ran out
 // are refused, so the drive fails instead of reading a default answer.
+//
+// A band summary is not a decision: the fold asks the session's own model for
+// the gist of its oldest band, and that request carries no tool call and stands
+// outside the decision script. It is answered with the gist the script declares
+// (or the identity gist of its material) and consumes no step, so a fold never
+// shifts the decisions the script pinned.
 func (s *integrityScript) decide(request scriptedRequest) (string, error) {
+	if material, summary := bandSummaryMaterial(request); summary {
+		return scriptedAnswerOf(bandSummaryGist(material)), nil
+	}
 	s.mu.Lock()
 	stream := s.byIdentity[request.Model]
 	if stream == nil {

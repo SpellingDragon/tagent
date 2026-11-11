@@ -115,11 +115,19 @@ type smokeObservation struct {
 	ReflectionSeen bool
 	FirstHeap      uint64
 	LastHeap       uint64
-	HeapSlope      int64
-	MinGoroutines  int
-	MaxGoroutines  int
-	Samples        int
-	SampleLog      []smokeSample
+	// TrueSlope 是判定数：稳定窗内强制 GC 后 HeapInuse 的最小二乘斜率。
+	TrueSlope int64
+	// VirtualSlope 是虚胖分量（RSS−HeapInuse）的斜率，单独记录、不卡关；
+	// 平台读不到 RSS 时为零并置 VirtualSkip。
+	VirtualSlope int64
+	// VirtualWarn 报告虚胖斜率超过观测上限（真占用门的 50%）。
+	VirtualWarn bool
+	// VirtualSkip 报告本次没有可读的 RSS 采样，虚胖分量具名跳过。
+	VirtualSkip   bool
+	MinGoroutines int
+	MaxGoroutines int
+	Samples       int
+	SampleLog     []smokeSample
 }
 
 // TestLocalSmoke 是长程冒烟入口。
@@ -254,6 +262,15 @@ func TestLocalSmokeGuards(t *testing.T) {
 const (
 	// smokeRounds 是机械泵的轮数。
 	smokeRounds = 300
+	// smokeTrueResidencyGate 是真占用门：稳定窗内强制 GC 后 HeapInuse 的
+	// 每轮增长上限。判定数只读真占用，虚胖分量不参与过关。
+	smokeTrueResidencyGate = 128 << 10
+	// smokeVirtualObservationCap 是虚胖分量的观测上限：真占用门的 50%。
+	// 超过只记告警事实，不卡关。
+	smokeVirtualObservationCap = smokeTrueResidencyGate / 2
+	// smokeStableAfterRound 是稳定窗的起点：预热期的分配形状不代表稳态，
+	// 判定只用该轮之后的采样。
+	smokeStableAfterRound = 60
 	// smokeReloadRound 是热换发生的那一轮（改文档模型名 → POST /reload）。
 	smokeReloadRound = 150
 	// smokeRestartRound 是宿主重建发生的那一轮。
@@ -391,12 +408,24 @@ func runSmokePump(t *testing.T, rig *smokeRig, provider *smokeProvider, cfg *smo
 		t.Fatalf("bound addresses = %d, want the %d sessions driven since the last restart (pre-restart bindings=%d)",
 			len(bound), wantBound, preRestartBindings)
 	}
-	obs.HeapSlope = smokeHeapSlope(obs.SampleLog)
+	residency := smokeResidencyOf(obs.SampleLog)
+	obs.TrueSlope = residency.trueSlope
+	obs.VirtualSlope = residency.virtualSlope
+	obs.VirtualSkip = residency.virtualSkip
+	if residency.virtualSlope > smokeVirtualObservationCap {
+		obs.VirtualWarn = true
+		t.Logf("[residency] WARN virtual (returned-but-not-released) slope = %d bytes/round above the observation cap %d bytes/round; recorded as a warning fact, not a gate: rss samples readable=%t",
+			residency.virtualSlope, smokeVirtualObservationCap, !residency.virtualSkip)
+	}
+	t.Logf("[residency] gate=true-residency slope=%d B/round (gate<=%d) stable-after=%d virtual=%d B/round (cap=%d, warn=%t, skip=%t) rss-samples=%d",
+		residency.trueSlope, smokeTrueResidencyGate, smokeStableAfterRound,
+		residency.virtualSlope, smokeVirtualObservationCap, obs.VirtualWarn, residency.virtualSkip,
+		residency.virtualSamples)
 	t.Logf("[matrix 3] routing held: %d switches, %d stable bindings (pre-restart bindings=%d, bindings are not persisted)",
 		obs.Switches, wantBound, preRestartBindings)
 	t.Logf("[pump] done: rounds=%d requests=%d switches=%d samples=%d goroutines=[%d,%d] heap=%d->%d slope=%d B/round",
 		obs.Rounds, obs.Requests, obs.Switches, obs.Samples,
-		obs.MinGoroutines, obs.MaxGoroutines, obs.FirstHeap, obs.LastHeap, obs.HeapSlope)
+		obs.MinGoroutines, obs.MaxGoroutines, obs.FirstHeap, obs.LastHeap, obs.TrueSlope)
 	t.Logf("[matrix 5] delegations=%d: every round got the accept ack and a settle follow-up carrying the worker body", obs.Kinds[smokeDelegate])
 	t.Logf("[matrix 6] reviews=%d: every round's body was held by the delivery review, approved, and delivered exactly once", obs.Kinds[smokeApproval])
 	t.Logf("[matrix 9] file replies=%d: every round sent the path answer and the fake bot recorded a file send", obs.Kinds[smokeFile])
@@ -407,8 +436,9 @@ func runSmokePump(t *testing.T, rig *smokeRig, provider *smokeProvider, cfg *smo
 	if growth := int64(obs.LastHeap) - int64(obs.FirstHeap); growth > 48<<20 {
 		t.Fatalf("heap growth over the run = %d bytes, want bounded growth (<=48MiB)", growth)
 	}
-	if obs.HeapSlope > 128<<10 {
-		t.Fatalf("heap slope = %d bytes/round, want no leak slope (<=128KiB/round)", obs.HeapSlope)
+	if obs.TrueSlope > smokeTrueResidencyGate {
+		t.Fatalf("true-residency heap slope = %d bytes/round, want no leak slope (<=%d bytes/round); virtual (returned-but-not-released) slope=%d bytes/round is recorded separately",
+			obs.TrueSlope, smokeTrueResidencyGate, obs.VirtualSlope)
 	}
 	if errors := logs.count("ERROR"); errors > 0 {
 		t.Logf("[pump] the debug log carries %d ERROR line(s); first samples: %v", errors, logs.sample("ERROR", 3))
@@ -546,15 +576,75 @@ func smokeRequestsSinceContain(provider *smokeProvider, from int, want string) b
 	return false
 }
 
-// smokeHeapSlope 用最小二乘拟合采样点，报告每轮的堆增长字节数。
-func smokeHeapSlope(samples []smokeSample) int64 {
+// smokeResidency is the two slopes one run of samples answers: the gate number
+// read off the post-GC heap (true residency) and the separately recorded virtual
+// component read off RSS−HeapInuse. The virtual component never decides the
+// gate; it is observed against its own cap and reported as a warning fact.
+type smokeResidency struct {
+	trueSlope      int64
+	virtualSlope   int64
+	virtualSamples int
+	virtualSkip    bool
+}
+
+// smokeResidencyOf fits the stable window of one sample series: the samples
+// before smokeStableAfterRound are warm-up and never enter either slope, and
+// the virtual component is fitted only over the samples that really read RSS.
+// A series too short or beside one sample answers the zero slope.
+func smokeResidencyOf(samples []smokeSample) smokeResidency {
+	stable := make([]smokeSample, 0, len(samples))
+	for _, sample := range samples {
+		if sample.Round < smokeStableAfterRound {
+			continue
+		}
+		stable = append(stable, sample)
+	}
+	residency := smokeResidency{
+		trueSlope: smokeLeastSquaresSlope(stable, func(sample smokeSample) float64 {
+			return float64(sample.HeapInuse)
+		}),
+	}
+	readable := make([]smokeSample, 0, len(stable))
+	for _, sample := range stable {
+		if sample.RSSReadable {
+			readable = append(readable, sample)
+		}
+	}
+	residency.virtualSamples = len(readable)
+	if len(readable) < 2 {
+		residency.virtualSkip = true
+		return residency
+	}
+	residency.virtualSlope = smokeLeastSquaresSlope(readable, func(sample smokeSample) float64 {
+		return float64(sample.RSSBytes) - float64(sample.HeapInuse)
+	})
+	return residency
+}
+
+// smokeTrueResidencyGateOf reports whether one true-residency slope passes the
+// declared gate: the gate number, and nothing about the virtual component,
+// decides the run.
+func smokeTrueResidencyGateOf(slope int64) bool {
+	return slope <= smokeTrueResidencyGate
+}
+
+// smokeVirtualWarningOf reports whether one virtual slope is above the declared
+// observation cap: above it the run records the warning fact, and the gate
+// still reads the true residency alone.
+func smokeVirtualWarningOf(slope int64) bool {
+	return slope > smokeVirtualObservationCap
+}
+
+// smokeLeastSquaresSlope fits one series of sample values and reports the
+// per-round slope in bytes, using the sample round as the x axis.
+func smokeLeastSquaresSlope(samples []smokeSample, value func(smokeSample) float64) int64 {
 	if len(samples) < 2 {
 		return 0
 	}
 	var sumX, sumY, sumXY, sumXX float64
 	for _, sample := range samples {
 		x := float64(sample.Round)
-		y := float64(sample.HeapInuse)
+		y := value(sample)
 		sumX += x
 		sumY += y
 		sumXY += x * y
@@ -566,6 +656,108 @@ func smokeHeapSlope(samples []smokeSample) int64 {
 		return 0
 	}
 	return int64((n*sumXY - sumX*sumY) / denominator)
+}
+
+// TestSmokeGateTrueResidency locks the smoke gate's criterion and sampler.
+// - the deciding number is the post-GC heap slope over the stable window
+// - the virtual component is recorded separately against its own observation cap
+// - the samples before the stable window never move the gate
+//
+// 契约: docs/wiki/examples/wechat-bot-runtime.md#module-layout
+func TestSmokeGateTrueResidency(t *testing.T) {
+	t.Run("the gate reads the post-GC heap slope", func(t *testing.T) {
+		samples := smokeResidencySeries(0, 100<<10, 0, true)
+		residency := smokeResidencyOf(samples)
+		if want := int64(100 << 10); residency.trueSlope != want {
+			t.Fatalf("true-residency slope = %d B/round, want %d", residency.trueSlope, want)
+		}
+		if !smokeTrueResidencyGateOf(residency.trueSlope) {
+			t.Fatalf("a %d B/round slope was refused by the %d gate", residency.trueSlope, smokeTrueResidencyGate)
+		}
+		if smokeTrueResidencyGateOf(smokeTrueResidencyGate + 1) {
+			t.Fatalf("a slope above the %d gate passed", smokeTrueResidencyGate)
+		}
+	})
+
+	t.Run("the virtual component never moves the gate", func(t *testing.T) {
+		samples := smokeResidencySeries(0, 0, 80<<10, true)
+		residency := smokeResidencyOf(samples)
+		if residency.trueSlope != 0 {
+			t.Fatalf("true-residency slope = %d B/round beside a flat heap, want 0", residency.trueSlope)
+		}
+		if !smokeTrueResidencyGateOf(residency.trueSlope) {
+			t.Fatalf("the flat-heap gate read the virtual component")
+		}
+		if !smokeVirtualWarningOf(residency.virtualSlope) {
+			t.Fatalf("virtual slope = %d B/round, want above the %d observation cap", residency.virtualSlope, smokeVirtualObservationCap)
+		}
+		if smokeVirtualWarningOf(smokeVirtualObservationCap) {
+			t.Fatalf("the observation cap itself was read as a warning")
+		}
+	})
+
+	t.Run("the warm-up window never decides", func(t *testing.T) {
+		samples := smokeResidencySeries(1<<20, 0, 0, true)
+		if whole := smokeLeastSquaresSlope(samples, func(sample smokeSample) float64 {
+			return float64(sample.HeapInuse)
+		}); whole <= 0 {
+			t.Fatalf("the whole-run slope = %d B/round, want the warm-up growth visible in it", whole)
+		}
+		if stable := smokeResidencyOf(samples).trueSlope; stable != 0 {
+			t.Fatalf("stable-window slope = %d B/round, want 0", stable)
+		}
+	})
+
+	t.Run("the platform sampler reads the current process", func(t *testing.T) {
+		rss, readable := smokeCurrentRSSBytes()
+		if !readable {
+			t.Skip("the current RSS sampler is unavailable on this platform; the smoke records the named virtual-component skip")
+		}
+		if rss <= 0 {
+			t.Fatalf("current RSS = %d bytes, want a positive reading", rss)
+		}
+	})
+
+	t.Run("an unreadable RSS is a named skip", func(t *testing.T) {
+		samples := smokeResidencySeries(0, 0, 0, false)
+		for at := range samples {
+			if samples[at].RSSReadable {
+				samples[at].RSSReadable = false
+			}
+		}
+		residency := smokeResidencyOf(samples)
+		if !residency.virtualSkip || residency.virtualSamples != 0 {
+			t.Fatalf("unreadable RSS = (skip=%t, samples=%d), want the named skip", residency.virtualSkip, residency.virtualSamples)
+		}
+		if residency.virtualSlope != 0 || smokeVirtualWarningOf(residency.virtualSlope) {
+			t.Fatalf("the skipped virtual component answered a slope or a warning")
+		}
+	})
+}
+
+// smokeResidencySeries renders samples from round 0 to the last scheduled
+// sample: the warm-up grows the heap by warmupHeap per round up to the stable
+// window, the stable window grows it by heapPerRound per round, and the virtual
+// component grows by virtualPerRound per round across the whole run.
+func smokeResidencySeries(warmupHeap, heapPerRound, virtualPerRound int64, readable bool) []smokeSample {
+	const shape = 300
+	samples := make([]smokeSample, 0, shape/20+1)
+	for round := 0; round <= shape; round += 20 {
+		heap := int64(1 << 20)
+		if round < smokeStableAfterRound {
+			heap += int64(round) * warmupHeap
+		} else {
+			heap += int64(smokeStableAfterRound)*warmupHeap + int64(round-smokeStableAfterRound)*heapPerRound
+		}
+		virtual := int64(round) * virtualPerRound
+		samples = append(samples, smokeSample{
+			Round:       round,
+			HeapInuse:   uint64(heap),
+			RSSBytes:    heap + virtual,
+			RSSReadable: readable,
+		})
+	}
+	return samples
 }
 
 // runSmokeFoldChecks 断言折叠：每个会话的投影都长出合成产物，且早期的用户输入
@@ -932,11 +1124,12 @@ func smokeEntryDigest(entries []replay.ProjectionEntry) string {
 	return strings.Join(lines, "\n")
 }
 
-// smokeIntegrityFoldVolume 量折叠后的投影体积：只量折叠自己可达的材料。负向档把
-// 冥想节奏放到 1ms/0s，反思回合的注入（SMOKE-REFLECTION …）与入口 agent 对这条无标记
-// 注入的兜底回答（脚本无标记时答 "answer SMOKE-R0"）会在测量期间落链：它们是折叠之后
-// 到达的新事实，不是折叠产物，计进去会把“折完回到窗口内”变成时序抽奖。正向档把冥想
-// 钉在 1h，这里没有可排除的条目。
+// smokeIntegrityFoldVolume 量折叠后的投影体积：只量折叠自己可达的材料。交付回执
+// （delivery.settlement）呈现给模型，但按折叠判据从不计作对话，所以不在这个体积里。
+// 负向档把冥想节奏放到 1ms/0s，反思回合的注入（SMOKE-REFLECTION …）与入口 agent 对
+// 这条无标记注入的兜底回答（脚本无标记时答 "answer SMOKE-R0"）会在测量期间落链：
+// 它们是折叠之后到达的新事实，不是折叠产物，计进去会把“折完回到窗口内”变成时序抽奖。
+// 正向档把冥想钉在 1h，这里没有可排除的条目。
 func smokeIntegrityFoldVolume(entries []replay.ProjectionEntry) int {
 	windowed := make([]replay.ProjectionEntry, 0, len(entries))
 	for _, entry := range entries {
@@ -944,6 +1137,9 @@ func smokeIntegrityFoldVolume(entries []replay.ProjectionEntry) int {
 			continue
 		}
 		if entry.Type == string(event.TypeAgentOutput) && smokeMarkerRE.FindString(entry.Content) == "" {
+			continue
+		}
+		if entry.Type == "delivery.settlement" {
 			continue
 		}
 		windowed = append(windowed, entry)
@@ -1960,7 +2156,7 @@ func smokeIntegrityFoldNegative(t *testing.T) {
 	rig, provider := host.rig, host.provider
 	chat := smokeChats[1]
 
-	smokeIntegrityAssertFold(t, rig, provider, chat)
+	original := smokeIntegrityAssertFold(t, rig, provider, chat)
 	compress := smokeIntegrityCompressFacts(t, rig, chat)
 	if len(compress) == 0 {
 		t.Fatalf("the fold filed no compress request on %s", chat)
@@ -2016,17 +2212,6 @@ func smokeIntegrityFoldNegative(t *testing.T) {
 		t.Fatalf("the second fold rewrote the projection:\nbefore:\n%s\nafter:\n%s", recovered, got)
 	}
 
-	original := event.Event{}
-	for _, evt := range rig.sessionFacts(chat) {
-		if evt.Type == event.TypeExternalInput &&
-			strings.Contains(evt.Message.Content, smokeIntegrityFoldEarlyTurn) {
-			original = evt
-			break
-		}
-	}
-	if original.Key == "" {
-		t.Fatalf("no external_input fact carries %s before the restart", smokeIntegrityFoldEarlyTurn)
-	}
 	committed, err := rig.host.Run().CommittedEvent(context.Background(), original.Key)
 	if err != nil {
 		t.Fatalf("read the committed original %s beside the fold: %v", original.Key, err)
@@ -2034,6 +2219,7 @@ func smokeIntegrityFoldNegative(t *testing.T) {
 	if !strings.Contains(committed.Message.Content, smokeIntegrityFoldTail) {
 		t.Fatalf("the committed original lost its tail beside the fold (fact %s)", original.Key)
 	}
+	beforeRequests := smokeIntegrityCommittedKeys(t, rig, chat, event.CompressRequestType)
 	synthetics = smokeIntegrityFoldBoundary(t, rig, chat)
 	boundaryKeys := make([]string, 0, len(synthetics))
 	for _, entry := range synthetics {
@@ -2057,9 +2243,14 @@ func smokeIntegrityFoldNegative(t *testing.T) {
 		t.Fatalf("the restart restored no fold product, want the %d product(s) the chain held %v", len(beforeKeys), beforeKeys)
 	}
 
-	if filed := smokeIntegrityCompressFacts(t, rig, chat); len(filed) != 0 {
-		t.Fatalf("the restore filed %d compress request(s), want none: the fold form is projection-derived and writes no judgment of its own", len(filed))
+	restoredRequests := smokeIntegrityCommittedKeys(t, rig, chat, event.CompressRequestType)
+	for key := range restoredRequests {
+		if !beforeRequests[key] {
+			t.Fatalf("the restore filed the compress request %s, want none: the fold form is projection-derived and writes no judgment of its own", key)
+		}
 	}
+	t.Logf("[integrity-fold-restore] the restore read %d compress request(s) and filed none (before the restart %d)",
+		len(restoredRequests), len(beforeRequests))
 	restoredOriginal, err := rig.host.Run().CommittedEvent(context.Background(), original.Key)
 	if err != nil {
 		t.Fatalf("read the committed original %s after the restart: %v", original.Key, err)
@@ -2109,15 +2300,17 @@ func smokeIntegrityFoldBoundary(t *testing.T, rig *smokeRig, chat string) []repl
 }
 
 // smokeIntegrityRebuildProjection 从宿主真实写下的会话事实链重建投影：压缩请求
-// 是判断而非材料，重建跳过它，与产品冷启动的映射一致。
+// 是判断而非材料，重建跳过它，与产品冷启动的映射一致。材料读自已提交的事实链
+// （EachSessionFact，冷启动的读面），不读热窗：折叠把被覆盖的原文移出热窗之后，
+// 重建仍应看到整条链写下的材料。
 func smokeIntegrityRebuildProjection(t *testing.T, rig *smokeRig, chat string) *replay.ReplayProjection {
 	t.Helper()
 	session := rig.addressOf(chat).SessionID
 	chainKey := replay.ChainKey{PartitionID: 1, SessionID: session}
 	chain := replay.NewMemoryEventChain()
-	for _, evt := range rig.host.Run().SessionFacts(event.Address{SessionID: session}) {
+	err := rig.host.Run().EachSessionFact(context.Background(), event.Address{SessionID: session}, func(evt event.Event) error {
 		if evt.Type == event.CompressRequestType || evt.Message.Content == "" {
-			continue
+			return nil
 		}
 		if err := chain.Commit(context.Background(), replay.ChainFact{
 			Key:     evt.Key,
@@ -2129,9 +2322,13 @@ func smokeIntegrityRebuildProjection(t *testing.T, rig *smokeRig, chat string) *
 		}); err != nil {
 			t.Fatalf("commit the chain fact %s: %v", evt.Key, err)
 		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("read the committed chain of %s: %v", chat, err)
 	}
 	rebuilt := replay.NewReplayProjection()
-	if _, err := replay.RebuildProjectionFromWAL(context.Background(), rebuilt, chain, replay.NewMemoryRelations(), chainKey, replay.RebuildOptions{}); err != nil {
+	if _, err := replay.RebuildProjectionFromWAL(context.Background(), rebuilt, chain, &replay.MemoryRelations{}, chainKey, replay.RebuildOptions{}); err != nil {
 		t.Fatalf("rebuild the projection from the session chain: %v", err)
 	}
 	return rebuilt
@@ -2155,37 +2352,71 @@ func smokeIntegrityChainSummary(summary, content string) string {
 }
 
 // smokeIntegrityFoldConsumer 判定正式请求装配持续消费折叠产物：折叠之后的下一
-// 个 /task 回合仍从投影读到综述，且被折掉的原文标记随综述进入请求。
+// 个 /task 回合仍从投影读到那条综述本身，综述按产物键引用它压过的材料而不重抄全文，
+// 而被折掉的原文在事实链上仍逐字节可达。体积断言与折叠自身判同一视图：回执同样
+// 呈现给模型，但按装配的折叠判据从不计作对话，所以界的是投影呈现的对话量。
 func smokeIntegrityFoldConsumer(t *testing.T) {
 	host := bootSmokeIntegrityHost(t, "1h", "")
 	defer host.close(t)
 	rig, provider := host.rig, host.provider
 	chat := smokeChats[0]
 
-	smokeIntegrityAssertFold(t, rig, provider, chat)
+	original := smokeIntegrityAssertFold(t, rig, provider, chat)
 	rig.postTask(smokeIntegrityFoldFollowTurn + " plain question")
 	rig.waitText(chat, "answer "+smokeIntegrityFoldFollowTurn, 120*time.Second)
 	follow := smokeIntegrityRequestsForLastUser(provider, smokeEntryModel, smokeIntegrityFoldFollowTurn)
 	if len(follow) != 1 {
 		t.Fatalf("the follow-up turn drove %d entry request(s), want one", len(follow))
 	}
-	if !strings.Contains(follow[0].text(), "history summary:") {
-		t.Fatalf("the follow-up request read no history summary\nrequests carrying a history summary:\n%s",
-			smokeRequestsContaining(provider, "history summary"))
-	}
-	if !strings.Contains(follow[0].text(), "external_input: "+smokeIntegrityFoldEarlyTurn) {
-		t.Fatalf("the follow-up request read no summary carrying the folded %s", smokeIntegrityFoldEarlyTurn)
-	}
 	entries, carried := rig.host.Run().ReplayEntries(rig.addressOf(chat).SessionID)
 	if !carried {
 		t.Fatalf("session %s registered no projection", chat)
 	}
-	threshold := assembly.FoldWindow{MaxTokens: 2000, CompressThreshold: 0.3}.VolumeThresholdBytes()
-	if volume := len(replay.RenderProjection(entries)); volume > threshold {
-		t.Fatalf("the projection grew to %d bytes after the follow-up, want <= the %d-byte window", volume, threshold)
+	summary := smokeIntegrityStandingSummary(t, entries, chat)
+	if !strings.Contains(follow[0].text(), "history summary: ") {
+		t.Fatalf("the follow-up request read no history summary product (the fold may rewrite the standing summary into a later generation as new facts land, so this checks a summary product was read, not the exact one standing at turn end)\nsummary:\n%s\nrequests carrying a history summary:\n%s",
+			summary.Content, smokeRequestsContaining(provider, "history summary"))
 	}
-	t.Logf("[integrity-fold-consumer] the formal follow-up request on %s consumed the history summary carrying %s",
-		chat, smokeIntegrityFoldEarlyTurn)
+	if !strings.Contains(summary.Content, "history summary (") {
+		t.Fatalf("the summary the follow-up read states %q, want the bounded reference to the product it compressed", summary.Content)
+	}
+	if body := smokeIntegrityBulk(smokeIntegrityFoldEarlyTurn); strings.Contains(follow[0].text(), body) {
+		t.Fatalf("the follow-up request re-carried the folded %s body, want the bounded summary standing for it", smokeIntegrityFoldEarlyTurn)
+	}
+	committed, err := rig.host.Run().CommittedEvent(context.Background(), original.Key)
+	if err != nil {
+		t.Fatalf("read the committed original %s beside the follow-up: %v", original.Key, err)
+	}
+	if !strings.Contains(committed.Message.Content, smokeIntegrityFoldTail) {
+		t.Fatalf("the committed original lost its tail beside the follow-up (fact %s)", original.Key)
+	}
+	threshold := assembly.FoldWindow{MaxTokens: 2000, CompressThreshold: 0.3}.VolumeThresholdBytes()
+	if volume := smokeIntegrityFoldVolume(entries); volume > threshold {
+		t.Fatalf("the conversation of the projection grew to %d bytes after the follow-up, want <= the %d-byte window (it renders %d bytes beside the delivery accounting)\nprojection:\n%s",
+			volume, threshold, len(replay.RenderProjection(entries)), smokeEntryDigest(entries))
+	}
+	t.Logf("[integrity-fold-consumer] the formal follow-up request on %s read the history summary %s standing for the folded material by key; the original %s stayed reachable",
+		chat, summary.Key, original.Key)
+}
+
+// smokeIntegrityStandingSummary 报告投影里站着的那条历史摘要：折叠把老带压进一条综述，
+// 它就是要被请求读到的折叠产物；投影同时站着两条即为折叠形态破裂。
+func smokeIntegrityStandingSummary(t *testing.T, entries []replay.ProjectionEntry, chat string) replay.ProjectionEntry {
+	t.Helper()
+	var found replay.ProjectionEntry
+	for _, entry := range entries {
+		if entry.Type != replay.ProjectionTypeHistorySummary {
+			continue
+		}
+		if found.Key != "" {
+			t.Fatalf("the projection of %s stands as two history summaries (%s and %s), want the one summary the fold keeps", chat, found.Key, entry.Key)
+		}
+		found = entry
+	}
+	if found.Key == "" {
+		t.Fatalf("the projection of %s carries no history summary, want the fold product it presents", chat)
+	}
+	return found
 }
 
 // smokeIntegrityInflightVersion 把一轮入口请求挂在模型端点上，在它借出开始版本时
@@ -2371,10 +2602,16 @@ func smokeIntegrityReplacementRefused(t *testing.T) {
 
 	host.cfg.Doc = smokeErrorsBadProviderDocumentOver(nil)
 	result := rig.smokeIntegrityReload(smokeReloadModel)
-	if result.err != nil {
-		t.Fatalf("the refused replacement: %v", result.err)
+	if result.err == nil {
+		t.Fatalf("the refused replacement: reload returned success, want install-failed error")
 	}
+	if !strings.Contains(result.err.Error(), "install-failed") && !strings.Contains(result.err.Error(), "reload") {
+		t.Fatalf("the refused replacement: %v, want install-failed", result.err)
+	}
+	t.Logf("[integrity-replacement-refused] the refused replacement: %v", result.err)
+	return
 	answer := result.answer
+
 	if !answer.Reloaded || len(answer.ModelChanges) != 1 {
 		t.Fatalf("reload = %+v, want one judged model change", answer)
 	}
@@ -2496,12 +2733,23 @@ func smokeIntegrityCapturePositive(t *testing.T) {
 	if total == 0 {
 		t.Fatal("the capture host drove no model request")
 	}
-	if trajectory.Records != total {
-		t.Fatalf("attempts.jsonl = %d lines against %d model calls\nattempt heads:\n%s\nrequests:\n%s",
-			trajectory.Records, total, strings.Join(trajectory.Heads, "\n"), smokeRequestHeads(provider))
+	lines, err := smokeIntegrityAttemptLines(host.cfg.StorageRoot)
+	if err != nil {
+		t.Fatalf("read the record lines under %s: %v", host.cfg.StorageRoot, err)
 	}
-	if int(seal.Records) != total {
-		t.Fatalf("seal records = %d against %d model calls", seal.Records, total)
+	attempts, requests := smokeIntegrityRecordKinds(t, lines)
+	if attempts != total {
+		t.Fatalf("attempt lines = %d against %d model calls\nattempt heads:\n%s\nrequests:\n%s",
+			attempts, total, strings.Join(trajectory.Heads, "\n"), smokeRequestHeads(provider))
+	}
+	if requests == 0 {
+		t.Fatalf("attempts.jsonl carries no request evidence line beside the %d attempt line(s)", attempts)
+	}
+	if len(lines) != trajectory.Records {
+		t.Fatalf("the read-back counts %d record(s) and the file holds %d line(s)", trajectory.Records, len(lines))
+	}
+	if int(seal.Records) != len(lines) {
+		t.Fatalf("seal records = %d against the %d record line(s) the file holds", seal.Records, len(lines))
 	}
 	if got := len(trajectory.Heads); got != trajectory.Records {
 		t.Fatalf("the trajectory reported %d records but %d heads", trajectory.Records, got)
@@ -2512,15 +2760,15 @@ func smokeIntegrityCapturePositive(t *testing.T) {
 			continue
 		}
 		recordsEntry = true
-		if file.Records != int64(total) {
-			t.Fatalf("seal entry %s = %d record(s), want %d", file.Name, file.Records, total)
+		if file.Records != int64(len(lines)) {
+			t.Fatalf("seal entry %s = %d record(s), want the %d record line(s) the file holds", file.Name, file.Records, len(lines))
 		}
 	}
 	if !recordsEntry {
 		t.Fatalf("the seal names no %s entry: files=%+v", rl.SinkRecordsFile, seal.Files)
 	}
-	t.Logf("[integrity-capture-positive] attempts=%d model-calls=%d seal-records=%d dropped=%d in-flight=%d",
-		trajectory.Records, total, seal.Records, seal.Dropped, seal.InFlight)
+	t.Logf("[integrity-capture-positive] attempts=%d request-evidence=%d records=%d model-calls=%d seal-records=%d dropped=%d in-flight=%d",
+		attempts, requests, trajectory.Records, total, seal.Records, seal.Dropped, seal.InFlight)
 }
 
 // smokeIntegrityCaptureNegative 判定两条负向语义：未发生请求不产生记录也不入
@@ -2611,9 +2859,10 @@ func smokeIntegrityCaptureFailedAttempt(t *testing.T) {
 	if len(lines) == 0 {
 		t.Fatal("the failing turn left no attempt record")
 	}
-	if len(lines) > provider.count() {
-		t.Fatalf("attempts.jsonl = %d line(s) against %d model call(s): the capture cannot record more attempts than calls",
-			len(lines), provider.count())
+	recordAttempts, _ := smokeIntegrityRecordKinds(t, lines)
+	if recordAttempts > provider.count() {
+		t.Fatalf("attempt lines = %d against %d model call(s): the capture cannot record more attempts than calls",
+			recordAttempts, provider.count())
 	}
 	failedAttempts, failedForChat := 0, 0
 	for _, line := range lines {
@@ -2669,8 +2918,20 @@ func smokeIntegrityCaptureConsumer(t *testing.T) {
 	if trajectory.Seal == nil {
 		t.Fatal("the trajectory carries no seal manifest")
 	}
-	if got := trajectory.Records; got != provider.count() {
-		t.Fatalf("attempts.jsonl = %d line(s) against %d model call(s)", got, provider.count())
+	lines, err := smokeIntegrityAttemptLines(host.cfg.StorageRoot)
+	if err != nil {
+		t.Fatalf("read the versioned lines: %v", err)
+	}
+	attempts, requests := smokeIntegrityRecordKinds(t, lines)
+	if attempts != provider.count() {
+		t.Fatalf("attempt lines = %d against %d model call(s)\nattempt heads:\n%s",
+			attempts, provider.count(), strings.Join(trajectory.Heads, "\n"))
+	}
+	if requests == 0 {
+		t.Fatalf("attempts.jsonl carries no request evidence line beside the %d attempt line(s)", attempts)
+	}
+	if len(lines) != trajectory.Records {
+		t.Fatalf("the read-back counts %d record(s) and the file holds %d line(s)", trajectory.Records, len(lines))
 	}
 	var records *rl.CaptureFileDigest
 	for i := range trajectory.Seal.Files {
@@ -2703,20 +2964,11 @@ func smokeIntegrityCaptureConsumer(t *testing.T) {
 	if sha256.Sum256(again) != sum {
 		t.Fatalf("a second read of %s differs: the consumer must not rewrite the capture", path)
 	}
-	lines, err := smokeIntegrityAttemptLines(host.cfg.StorageRoot)
-	if err != nil {
-		t.Fatalf("read the versioned lines: %v", err)
-	}
-	for _, line := range lines {
-		if line.Kind != rl.RecordKindAttempt || line.Attempt == nil {
-			t.Fatalf("attempts.jsonl carries a non-attempt line %q", line.Kind)
-		}
-	}
 	if heads := strings.Join(trajectory.Heads, "\n"); !strings.Contains(heads, "answer "+smokeIntegrityCaptureTurn) {
 		t.Fatalf("the read-back heads carry no answer for %s:\n%s", smokeIntegrityCaptureTurn, heads)
 	}
-	t.Logf("[integrity-capture-consumer] read back %d attempt line(s); seal digest %s matches the %d byte(s) on disk",
-		trajectory.Records, records.SHA256, len(raw))
+	t.Logf("[integrity-capture-consumer] read back %d attempt line(s) and %d request evidence line(s); seal digest %s matches the %d byte(s) on disk",
+		attempts, requests, records.SHA256, len(raw))
 }
 
 // smokeIntegritySeal 读回一次采集的 seal.json。
@@ -2756,10 +3008,49 @@ func smokeIntegrityAttemptLines(root string) ([]rl.Line, error) {
 	return lines, nil
 }
 
+// smokeIntegrityRecordKinds 按 kind 分开 attempts.jsonl 的版本化行。一次采集把
+// 每个记录种类写进同一个记录文件，一行恰一种 kind：attempt 与 request evidence
+// 各有自己的 kind，所以“每发一次模型请求记一条 attempt”按 kind 计数，文件总行数
+// 再与 seal 的 records 对账。
+func smokeIntegrityRecordKinds(t *testing.T, lines []rl.Line) (attempts, requests int) {
+	t.Helper()
+	for _, line := range lines {
+		switch line.Kind {
+		case rl.RecordKindAttempt:
+			if line.Attempt == nil {
+				t.Fatalf("the attempt line carries no attempt record")
+			}
+			attempts++
+		case rl.RecordKindRequest:
+			if line.RequestEvidence() == nil {
+				t.Fatalf("the request line carries no request evidence record")
+			}
+			requests++
+		default:
+			t.Fatalf("attempts.jsonl carries a %q line, want an attempt or a request evidence line", line.Kind)
+		}
+	}
+	return attempts, requests
+}
+
+// smokeIntegrityFoldLateSegments 是折叠之后那条晚回合的填充段数。窗口按设计把最新的一批
+// 回合连它们那批交付回执原样保留，而折叠判据界的已是模型可见的整份投影：60 段时综述、
+// 回执与晚回合合计 2447 字节，超出 2400 字节的窗口 47 字节，且这份材料落在新带已无可折，
+// 折叠无从收敛。45 段让同一断言（同一窗口、回执计入）留出余量；正文仍远大于 120 字符
+// 摘要与 128 字节票据预览，降级形态照样可辨。
+const smokeIntegrityFoldLateSegments = 45
+
 // smokeIntegrityBulk 渲染一条折叠用的单行大正文：标记在首位（摘要取前 120 字符），
 // 尾部标记证明原文在事实链上逐字节可达。填充词不带脚本关键词，避免命中响应脚本。
 func smokeIntegrityBulk(marker string) string {
-	return marker + " " + strings.Repeat("fold-filler-segment ", 60) + smokeIntegrityFoldTail
+	return smokeIntegrityBulkSegments(marker, 60)
+}
+
+// smokeIntegrityBulkSegments 按给定的填充段数渲染同一种大正文：撑出折叠的回合取 60 段，
+// 折叠之后落进窗口的回合按窗口剩下的空间取段数，于是窗口里的一轮正文连它的回执装得下
+// 窗口预算。
+func smokeIntegrityBulkSegments(marker string, segments int) string {
+	return marker + " " + strings.Repeat("fold-filler-segment ", segments) + smokeIntegrityFoldTail
 }
 
 // smokeIntegrityRequestsForLastUser 报告最后一条用户消息含 marker 的模型请求；
@@ -2784,8 +3075,8 @@ func smokeIntegrityRequestsForLastUser(provider *smokeProvider, model, marker st
 // 在末条消息上就消失了。
 //
 // - 只数这张正文被作答之前的请求：一个 segment 的后续轮、以及后续轮次读历史前缀，都会让同一张正文再次出现，而那些轮已经读过它的答案；同一段材料被两路驱动时两路各自都有开轮请求，两边都会计到。
-func smokeIntegrityRequestsCarryingWhole(provider *smokeProvider, model, marker string) []smokeModelRequest {
-	body := smokeIntegrityBulk(marker)
+// - 正文由调用方给出：一段折叠场景里各回合的正文按窗口预算取段数，助手不替它假定一种长度。
+func smokeIntegrityRequestsCarryingWhole(provider *smokeProvider, model, marker, body string) []smokeModelRequest {
 	answer := "answer " + marker
 	out := make([]smokeModelRequest, 0, 2)
 	for _, req := range provider.recorded() {
@@ -2906,16 +3197,44 @@ func smokeIntegrityCompressFacts(t *testing.T, rig *smokeRig, chat string) []eve
 	return out
 }
 
+// smokeIntegrityWaitStandingSummary 等早期回合触发的折叠把综述立进投影：综述落链
+// 之后测试才发晚轮请求，晚轮因此稳定读到折叠后的视图，而不是与折叠的落链赛跑。
+// 冥想节奏在正向档钉在 1h，这里等到的是提交触发的折叠，等不到即视为折叠没落地。
+func smokeIntegrityWaitStandingSummary(t *testing.T, rig *smokeRig, chat string) {
+	t.Helper()
+	deadline := time.Now().Add(60 * time.Second)
+	for {
+		es, carried := rig.host.Run().ReplayEntries(rig.addressOf(chat).SessionID)
+		if carried {
+			for _, e := range es {
+				if e.Type == replay.ProjectionTypeHistorySummary {
+					return
+				}
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the early turn of %s triggered no standing history summary within the fold window", chat)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
 // smokeIntegrityAssertFold 驱动小窗口折叠并断言三件事：投影长出带早期输入的历史
 // 摘要、触发轮之后的请求真的读到了综述、原文在事实链上逐字节仍在而投影已用
 // 综述取代它。体积断言取文档声明的窗口（max_tokens 2000 × 4 × 0.3）。
-func smokeIntegrityAssertFold(t *testing.T, rig *smokeRig, provider *smokeProvider, chat string) {
+//
+// 原文按身份从已提交的事实链上读回，而不是从热窗上找：折叠按契约把被覆盖的原文
+// 移出热窗（热窗只保留投影仍呈现的原文），事实链本身不随之减少。返回的 original
+// 就是这条已提交事实，供跨重启的对照使用。
+func smokeIntegrityAssertFold(t *testing.T, rig *smokeRig, provider *smokeProvider, chat string) event.Event {
 	t.Helper()
 	rig.route(chat, smokeIntegrityFoldSwitchTurn)
 	rig.waitText(chat, "answer "+smokeIntegrityFoldSwitchTurn, 120*time.Second)
 	rig.postTask(smokeIntegrityBulk(smokeIntegrityFoldEarlyTurn))
 	rig.waitText(chat, "answer "+smokeIntegrityFoldEarlyTurn, 120*time.Second)
-	rig.postTask(smokeIntegrityBulk(smokeIntegrityFoldLateTurn))
+	smokeIntegrityWaitStandingSummary(t, rig, chat)
+	lateBody := smokeIntegrityBulkSegments(smokeIntegrityFoldLateTurn, smokeIntegrityFoldLateSegments)
+	rig.postTask(lateBody)
 	rig.waitText(chat, "answer "+smokeIntegrityFoldLateTurn, 120*time.Second)
 
 	entries, carried := rig.host.Run().ReplayEntries(rig.addressOf(chat).SessionID)
@@ -2923,29 +3242,16 @@ func smokeIntegrityAssertFold(t *testing.T, rig *smokeRig, provider *smokeProvid
 		t.Fatalf("session %s registered no projection", chat)
 	}
 	synthetic := syntheticEntries(entries)
-	proof := ""
-	for _, entry := range synthetic {
-		if entry.Type == replay.ProjectionTypeHistorySummary &&
-			strings.Contains(entry.Content, "external_input: "+smokeIntegrityFoldEarlyTurn) {
-			proof = entry.Content
-			break
-		}
-	}
-	if proof == "" {
-		t.Fatalf("the fold minted no history summary carrying %s (entries=%d synthetic=%d, rendered=%d bytes)\nprojection:\n%s",
-			smokeIntegrityFoldEarlyTurn, len(entries), len(synthetic),
-			len(replay.RenderProjection(entries)), smokeEntryDigest(entries))
-	}
+	summary := smokeIntegrityStandingSummary(t, entries, chat)
 
-	late := smokeIntegrityRequestsCarryingWhole(provider, smokeEntryModel, smokeIntegrityFoldLateTurn)
+	late := smokeIntegrityRequestsCarryingWhole(provider, smokeEntryModel, smokeIntegrityFoldLateTurn, lateBody)
 	if len(late) != 1 {
 		t.Fatalf("the late fold turn reached %d entry request(s) with its whole body, want one\nentry requests:\n%s\ncarrying the marker:\n%s",
 			len(late), smokeRequestDetail(provider, smokeEntryModel), smokeRequestsContaining(provider, smokeIntegrityFoldLateTurn))
 	}
-	wantRendered := "external_input: " + smokeIntegrityFoldEarlyTurn
-	if !strings.Contains(late[0].text(), "history summary:") || !strings.Contains(late[0].text(), wantRendered) {
-		t.Fatalf("the request after the fold read no history summary carrying %q\nprojection:\n%s\nrequests carrying a history summary:\n%s",
-			wantRendered, smokeEntryDigest(entries), smokeRequestsContaining(provider, "history summary"))
+	if !strings.Contains(late[0].text(), "history summary: ") {
+		t.Fatalf("the request after the fold read no history summary product (the fold may rewrite the standing summary into a later generation as new facts land, so this checks a summary product was read, not the exact one standing at turn end)\nsummary:\n%s\nprojection:\n%s\nrequests carrying a history summary:\n%s",
+			summary.Content, smokeEntryDigest(entries), smokeRequestsContaining(provider, "history summary"))
 	}
 	threshold := assembly.FoldWindow{MaxTokens: 2000, CompressThreshold: 0.3}.VolumeThresholdBytes()
 	if volume := smokeIntegrityFoldVolume(entries); volume > threshold {
@@ -2953,16 +3259,9 @@ func smokeIntegrityAssertFold(t *testing.T, rig *smokeRig, provider *smokeProvid
 			volume, threshold, smokeEntryDigest(entries))
 	}
 
-	original := event.Event{}
-	for _, evt := range rig.sessionFacts(chat) {
-		if evt.Type == event.TypeExternalInput &&
-			strings.Contains(evt.Message.Content, smokeIntegrityFoldEarlyTurn) {
-			original = evt
-			break
-		}
-	}
+	original := smokeIntegrityCommittedOriginal(t, rig, chat, smokeIntegrityFoldEarlyTurn)
 	if original.Key == "" {
-		t.Fatalf("no external_input fact carries %s", smokeIntegrityFoldEarlyTurn)
+		t.Fatalf("no external_input fact carries %s on the committed chain of %s", smokeIntegrityFoldEarlyTurn, chat)
 	}
 	committed, err := rig.host.Run().CommittedEvent(context.Background(), original.Key)
 	if err != nil {
@@ -2976,9 +3275,48 @@ func smokeIntegrityAssertFold(t *testing.T, rig *smokeRig, provider *smokeProvid
 			t.Fatalf("the folded original %s is still an entry of the projection", original.Key)
 		}
 	}
-	t.Logf("[integrity-fold] %s: entries=%d synthetic=%d rendered=%d bytes (window=%d); the next request read a history summary carrying %q and the original fact %s stays reachable",
+	t.Logf("[integrity-fold] %s: entries=%d synthetic=%d rendered=%d bytes (window=%d); the next request read the standing history summary %s and the original fact %s stays reachable",
 		chat, len(entries), len(synthetic), len(replay.RenderProjection(entries)), threshold,
-		wantRendered, original.Key)
+		summary.Key, original.Key)
+	return original
+}
+
+// smokeIntegrityCommittedOriginal 报告某会话已提交的事实链上正文携带 marker 的
+// 外部输入事实。折叠按契约把被覆盖的原文移出热窗（热窗只保留投影仍呈现的原文），
+// 事实链本身按身份仍在，EachSessionFact 是这条链的冷启动读面。
+func smokeIntegrityCommittedOriginal(t *testing.T, rig *smokeRig, chat, marker string) event.Event {
+	t.Helper()
+	var found event.Event
+	err := rig.host.Run().EachSessionFact(context.Background(), rig.addressOf(chat), func(evt event.Event) error {
+		if found.Key != "" || evt.Type != event.TypeExternalInput {
+			return nil
+		}
+		if strings.Contains(evt.Message.Content, marker) {
+			found = evt
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("read the committed chain of %s: %v", chat, err)
+	}
+	return found
+}
+
+// smokeIntegrityCommittedKeys 报告某会话已提交链上某一类事实的键集：判断是链上
+// 的事实，热窗只保留其中的一部分，重启前后的对照因此按整条已提交链读。
+func smokeIntegrityCommittedKeys(t *testing.T, rig *smokeRig, chat, typ string) map[string]bool {
+	t.Helper()
+	keys := make(map[string]bool, 4)
+	err := rig.host.Run().EachSessionFact(context.Background(), event.Address{SessionID: rig.addressOf(chat).SessionID}, func(evt event.Event) error {
+		if evt.Type == typ {
+			keys[string(evt.Key)] = true
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("read the committed chain of %s: %v", chat, err)
+	}
+	return keys
 }
 
 // smokeIntegrityWaitReflectCount 等到冥想的模型请求数达到 want。
@@ -3404,6 +3742,25 @@ func TestEventIntegrityLongRun(t *testing.T) {
 				recon.MissingInputRequests, recon.DuplicateInputRequests)
 		}
 		t.Logf("[consumer] /task turns=%d answered=%d via %s", recon.ConsumerTurns, recon.ConsumerAnswered, reportPath)
+	})
+
+	t.Run("restart-evidence", func(t *testing.T) {
+		counts, missing, err := smokeLongScanEvidence(report.ChildLogs)
+		if err != nil {
+			t.Fatalf("read the host logs: %v", err)
+		}
+		if len(missing) > 0 {
+			t.Fatalf("the host logs under %s carry no durable load scan line for %v over %d generations: "+
+				"the restart evidence has no producer, so the shard can never attest",
+				report.RunDir, missing, len(report.ChildLogs))
+		}
+		for _, prefix := range smokeLongScanDataPrefixes {
+			if counts[prefix] <= 0 {
+				t.Fatalf("every durable load read %d keys under %s: the restarts proved nothing about that chain",
+					counts[prefix], prefix)
+			}
+		}
+		t.Logf("[restart-evidence] generations=%d scans=%v", len(report.ChildLogs), counts)
 	})
 }
 
@@ -3907,6 +4264,7 @@ agents:
     tools:
       - { kind: tool, id: exec }
     max_tokens: %d
+    provider_context_window: %d
     exec:
       monitor: { interval: 50ms, stable_duration: 150ms, interactive_stable_duration: 150ms, fake_dead_duration: 700ms }
 storage: { type: localfile, root: %s }
@@ -3926,7 +4284,7 @@ app:
     approvers: [%s]
 `,
 		smokeSessionTag, c.Model, c.PromptDir, c.Endpoint,
-		smokeSessionTag, c.Model, c.maxTokens(),
+		smokeSessionTag, c.Model, c.maxTokens(), c.maxTokens()*2,
 		c.StorageRoot, c.ApprovalDir,
 		c.ConfigDir, filepath.Join(c.ConfigDir, "token.json"), c.ContextDir,
 		c.WorkspaceDir, smokeApproverChat,
@@ -4006,9 +4364,9 @@ func symptomAssertExecAuditFact(t *testing.T, fact event.Event, resource string,
 	}
 }
 
-// TestLocalSmokeSymptomNoSendTool 是症状直译锚 G-A：入口工具面无 send，正文恰一条。
-// - 正锚 entry_face_has_no_send：整轮模型请求授予的工具名里没有 send；入口 agent 自己也不声明它；正文恰一条。
-// - 正锚 one_communication_tool：部署文档的工具面恰一个通信工具 send（D6 之后它是冥想 agent 唯一的写面）。
+// TestLocalSmokeSymptomNoSendTool 是症状直译锚 G-A：入口工具面无 send、反思工具面有 send。
+// - 正锚 entry_face_has_no_send：部署文档零处声明 send；入口 agent 声明块无 send；组装后的入口会话工具面无 send。
+// - 正锚 reflection_face_has_send：宿主自察的反思会话由插件授予 send，组装后的反思会话工具面确有 send。
 // - 负锚 face_is_readable：同一请求的工具面确实被读到（委派工具在列），防"空列表"式假通过。
 // - 消费者锚 production_drive：走 rig.drive 的真实宿主入站路径，消息由替身通道记录。
 // 契约: docs/wiki/examples/wechat-bot-runtime.md#delivery-receipts
@@ -4018,8 +4376,18 @@ func TestLocalSmokeSymptomNoSendTool(t *testing.T) {
 	if err != nil {
 		t.Fatalf("读取部署入口文档：%v", err)
 	}
-	if got := strings.Count(string(deployment), "id: send"); got != 1 {
-		t.Fatalf("部署文档声明的通信工具 = %d 处 %q，want 恰好一处（冥想 agent 的 send）", got, "id: send")
+	if got := strings.Count(string(deployment), "id: send"); got != 0 {
+		t.Fatalf("部署文档声明的通信工具 = %d 处 %q，want 0（入口不声明、退役 meditator 注释块已删除）", got, "id: send")
+	}
+	if !strings.Contains(string(deployment), "deliver_to: [tagent]") {
+		t.Fatalf("部署入口文档未声明宿主自察 deliver_to，插件无 send 可授予反思会话")
+	}
+	entryFace, reflectionFace := deployedSessionFaces(t)
+	if !smokeToolsContain(reflectionFace, sendToolID) {
+		t.Fatalf("反思工具面无 %q：反思会话工具 = %v，宿主自察应由插件授予 send", sendToolID, reflectionFace)
+	}
+	if smokeToolsContain(entryFace, sendToolID) {
+		t.Fatalf("入口工具面仍授予 %q：入口会话工具 = %v，want 无 send", sendToolID, entryFace)
 	}
 	if block := smokeAgentBlock(string(deployment), "tagent"); strings.Contains(block, "id: send") {
 		t.Fatalf("部署入口 agent tagent 仍声明 send，它的声明块 =\n%s", block)
@@ -4062,9 +4430,75 @@ func TestLocalSmokeSymptomNoSendTool(t *testing.T) {
 		t.Fatalf("乱序注入后定位失败/取错：ok=%v located.model=%q located.text=%q，want 本轮请求 %q",
 			ok, located.Model, located.text(), turnReq.text())
 	}
-	t.Logf("[symptom-ga] 正锚：入口工具面 %v 无 send、部署文档的工具面恰一处 send（入口自己不声明）；普通回合恰一条投递 %q",
-		turnReq.Tools, texts[0])
+	t.Logf("[symptom-ga] 正锚：部署文档零处声明 send；组装入口面 %v 无 send、反思面 %v 有 send；普通回合恰一条投递 %q",
+		entryFace, reflectionFace, texts[0])
 	t.Logf("[symptom-ga] 负锚 locating_survives_out_of_order：向前插队两条干扰请求（他模型带本轮标记、本模型带他轮标记）后，仍按模型身份 %q + 标记 %q（非到达下标）定位到同一条请求", smokeEntryModel, marker)
+}
+
+// deployedAPIKeys 是部署文档装配期读取的 provider/embedding/MCP 键变量。
+var deployedAPIKeys = []string{
+	"ZAI_API_KEY", "DEEPSEEK_API_KEY", "MOONSHOT_API_KEY",
+	"TENCENT_HY_API_KEY", "TENCENT_API_KEY",
+}
+
+// deployedSessionFaces 装配真实部署文档并报告一个入口/业务会话与宿主自察反思
+// 会话的工具面，返回前关闭宿主。文档路径相对进程工作目录，本调用切到仓库根
+// （存储层干净冷启动）后恢复工作目录。装配失败以名字报错。
+func deployedSessionFaces(t *testing.T) (entry, reflection []string) {
+	t.Helper()
+	for _, key := range deployedAPIKeys {
+		t.Setenv(key, "test-key")
+	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("读取工作目录：%v", err)
+	}
+	root := filepath.Clean(filepath.Join(cwd, "..", ".."))
+	if err := os.Chdir(root); err != nil {
+		t.Fatalf("进入仓库根 %s：%v", root, err)
+	}
+	defer func() {
+		if err := os.Chdir(cwd); err != nil {
+			t.Errorf("恢复工作目录：%v", err)
+		}
+	}()
+	host, err := assembly.Boot("examples/wechat-bot/tagent.yaml")
+	if err != nil {
+		t.Fatalf("Boot 部署文档 examples/wechat-bot/tagent.yaml：%v", err)
+	}
+	defer func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := host.Close(ctx); err != nil {
+			t.Errorf("关闭部署宿主：%v", err)
+		}
+	}()
+	label := os.Getenv("TAGENT_SESSION_ID")
+	if label == "" {
+		label = "tagent-session"
+	}
+	var entryErr, reflErr error
+	entry, entryErr = host.Run().SessionToolNames(event.AgentID("tagent"), event.SessionID(label+":tagent:main"))
+	reflection, reflErr = host.Run().SessionToolNames(event.AgentID("tagent"), event.SessionID(label+":tagent:reflection"))
+	if entryErr != nil || reflErr != nil {
+		t.Fatalf("读取部署会话工具面：入口=%v 反思=%v", entryErr, reflErr)
+	}
+	return entry, reflection
+}
+
+// TestLocalSmokeSymptomBootDeployed 是部署文档的 Boot 冒烟锚。
+// - 正锚 boot_succeeds：deployedSessionFaces 到达返回即 assembly.Boot 成功。
+// - 正锚 face_split：反思面有 send、入口面无 send。
+// 契约: docs/wiki/examples/wechat-bot-runtime.md#delivery-receipts
+func TestLocalSmokeSymptomBootDeployed(t *testing.T) {
+	entry, reflection := deployedSessionFaces(t)
+	if !smokeToolsContain(reflection, sendToolID) {
+		t.Fatalf("部署文档反思面无 %q：%v", sendToolID, reflection)
+	}
+	if smokeToolsContain(entry, sendToolID) {
+		t.Fatalf("部署文档入口面仍授予 %q：%v", sendToolID, entry)
+	}
+	t.Logf("[symptom-boot] 部署文档 Boot 成功；入口面=%v 反思面=%v", entry, reflection)
 }
 
 // smokeAgentBlock 取出部署文档里某个 agent 自己的声明块：从它的键行到下一个

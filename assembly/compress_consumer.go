@@ -9,6 +9,7 @@ package assembly
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"strings"
 	"sync"
@@ -27,16 +28,17 @@ const CompressionConsumerName = "compress-consumer"
 const compressionProducer = "assembly.compress-consumer"
 
 // metaKeyCompressRequest, metaKeyCompressProducer, metaKeyCompressKey,
-// metaKeyCompressCovered and metaKeyCompressText are the metadata keys a compress
-// product fact carries: the product states its five fields, and the event metadata
+// metaKeyCompressCovered, metaKeyCompressText and metaKeyCompressSurvivors are
+// the metadata keys a compress product fact carries: the product states its five fields, and the event metadata
 // is the one durable carrier of them, because a product is material of the
 // projection and never a message of the transcript.
 const (
-	metaKeyCompressRequest  = "compress_request"
-	metaKeyCompressProducer = "compress_producer"
-	metaKeyCompressKey      = "compress_key"
-	metaKeyCompressCovered  = "compress_covered"
-	metaKeyCompressText     = "compress_text"
+	metaKeyCompressRequest   = "compress_request"
+	metaKeyCompressProducer  = "compress_producer"
+	metaKeyCompressKey       = "compress_key"
+	metaKeyCompressCovered   = "compress_covered"
+	metaKeyCompressText      = "compress_text"
+	metaKeyCompressSurvivors = "compress_survivors"
 )
 
 // compressCoveredSeparator separates the covered keys one product fact states:
@@ -54,7 +56,11 @@ const compressCoveredSeparator = "\n"
 // MUST NOT execute a judgment whose material does not stand: it stays pending rather than answering a product of other material.
 type CompressionConsumer struct {
 	sessions compressSessions
-	mu       sync.Mutex
+	// gists is the model face the consumer asks for the semantic summary of the
+	// oldest band. A consumer beside none records the mechanical form, which is
+	// the bounded text the fold itself minted.
+	gists summaryGists
+	mu    sync.Mutex
 	// judgments holds the requests one session filed, in filing order, keyed by
 	// the session whose material they name.
 	judgments map[event.SessionID][]event.CompressRequest
@@ -73,7 +79,10 @@ type compressSessions interface {
 	// beside the window it was registered under.
 	ProjectionOf(ctx context.Context, session event.SessionID) (*replay.ReplayProjection, FoldWindow, bool)
 	// FileCompressProduct files one execution result on the chain of the session
-	// whose material was folded.
+	// whose material was folded, and answers the judgment it names: the answer
+	// follows the fact inside one unit of the run's quiet-point fence, so a cut
+	// taken after the landing states the answer beside the fact, and the execution
+	// the consumer reads as owed stops being owed.
 	FileCompressProduct(ctx context.Context, session event.SessionID, product event.CompressProduct) error
 }
 
@@ -107,9 +116,33 @@ func NewCompressionConsumer(sessions compressSessions) *CompressionConsumer {
 // Name reports the stable name of this plugin instance.
 func (c *CompressionConsumer) Name() string { return CompressionConsumerName }
 
+// withSummaryGist attaches the model face the consumer asks for the semantic
+// summary of the oldest band. The face is what turns a summary fact into a gist
+// of the material it covers; a consumer beside none records the bounded
+// mechanical form the fold minted.
+func (c *CompressionConsumer) withSummaryGist(gists summaryGists) *CompressionConsumer {
+	if c == nil {
+		return c
+	}
+	c.gists = gists
+	return c
+}
+
 // Port reports the consumption the consumer serves: one committed fact in, one
 // execution of the judgments already on the chain.
 func (c *CompressionConsumer) Port() plugin.Port { return plugin.PortFactObservation }
+
+// Material declares what this consumer reads, when it reads it and what a failed
+// reading leaves behind: one committed fact read after its commit, where a failed
+// execution is a named gap and the judgments on the chain keep standing for the
+// next reading.
+func (c *CompressionConsumer) Material() plugin.Material {
+	return plugin.Material{
+		Reads:   plugin.PortFactObservation,
+		Timing:  plugin.TimingPostCommit,
+		Failure: plugin.RecordGap,
+	}
+}
 
 // ObserveCommit executes the judgments one session filed that no product answers
 // yet: the fact that triggered it names the session, and every judgment of that
@@ -166,6 +199,11 @@ func (c *CompressionConsumer) NoteProduct(product event.CompressProduct) {
 // The pass reads the projection and never judges it: whether material is over
 // its bound is already the request on the chain, and the plan only answers which
 // product that request names.
+// - The plan is executed over the accounting-free view the production judged (foldProjectionOf): the products name the conversation material, and delivery settlement lines stay in the projection the model reads.
+// - A history summary covers every settlement fact inside the band it folds: settlement lines never count as fold material (foldProjectionOf), the summary consumes their accounting beside the turns, and the facts stay on the chain readable by identity.
+// - The checkpoint is a pure whole-batch preflight, so its survivors equal the entries left by applying that same batch.
+// - The oldest-band gist is read before the checkpoint, so the survivors a restart rebuilds state the text the chain records rather than the mechanical form the fold minted.
+// - Every product is filed through the session face, which answers the judgment it names: the batch shrinks as it is filed, so the account the consumer holds is never one the chain disagrees with.
 func (c *CompressionConsumer) Execute(ctx context.Context, session event.SessionID) error {
 	if c == nil || c.sessions == nil || session == "" {
 		return nil
@@ -185,7 +223,11 @@ func (c *CompressionConsumer) Execute(ctx context.Context, session event.Session
 	if threshold <= 0 {
 		return nil
 	}
-	report, err := projection.PlanByAge(ctx, replay.AgeFoldPlan{
+	folded := foldProjectionOf(ctx, projection)
+	if folded == nil {
+		return nil
+	}
+	report, err := folded.PlanByAge(ctx, replay.AgeFoldPlan{
 		KeepRecent:      window.KeepRecentTasks,
 		VolumeThreshold: threshold,
 	})
@@ -196,19 +238,151 @@ func (c *CompressionConsumer) Execute(ctx context.Context, session event.Session
 	for _, product := range report.Products {
 		named[product.Request.ID] = product
 	}
+	batch := make([]replay.FoldProduct, 0, len(pending))
 	for _, request := range pending {
 		product, stands := named[request.ID]
-		if !stands {
-			continue
+		if stands {
+			batch = append(batch, coverSettlementFacts(product, projection))
 		}
-		minted := event.CompressProductFor(request.ID, compressionProducer, product.Entry.Key, product.Covered, product.Entry.Content)
+	}
+	for at := range batch {
+		batch[at] = c.summarizeProduct(ctx, session, batch[at])
+	}
+	var checkpoint []byte
+	if len(batch) > 0 {
+		checkpoint = anchorCheckpointOf(replay.FoldedEntries(projection.Entries(), batch))
+	}
+	for at, product := range batch {
+		minted := event.CompressProductFor(product.Request.ID, compressionProducer, product.Entry.Key, product.Covered, product.Entry.Content)
+		if at == len(batch)-1 {
+			minted = minted.WithCheckpoint(checkpoint)
+		}
 		if err := c.sessions.FileCompressProduct(ctx, session, minted); err != nil {
 			return err
 		}
-		c.noteAnswered(request.ID)
 		projection.ApplyProducts([]replay.FoldProduct{product})
 	}
 	return nil
+}
+
+// summarizeProduct answers the text one history summary records: the semantic
+// gist the session's model answers for the material the fold consumed, cut to the
+// bound the mechanical form obeys. A consumer beside no gist face, a session
+// whose agent holds no model, a failed request and an empty answer all keep the
+// mechanical text the fold minted, so a summary is never empty, never blocks the
+// fold and never grows past the bound: the degradation is the form the fold
+// already states, and the reason it was taken is reported.
+func (c *CompressionConsumer) summarizeProduct(ctx context.Context, session event.SessionID, product replay.FoldProduct) replay.FoldProduct {
+	if c == nil || c.gists == nil || product.Entry.Type != replay.ProjectionTypeHistorySummary {
+		return product
+	}
+	gist, err := c.gists.SummaryGist(ctx, session, product.Entry.Content)
+	if err != nil {
+		assemblyWarn("tagent: the semantic summary of session %s stayed mechanical err=%v", session, err)
+		return product
+	}
+	bounded := boundedSummaryGist(gist)
+	if bounded == "" {
+		assemblyWarn("tagent: the semantic summary of session %s answered no text, kept mechanical", session)
+		return product
+	}
+	product.Entry.Content = bounded
+	return product
+}
+
+// anchorEntry is one entry of the projection state a fold checkpoint carries.
+// Its fields name the entry as the chain states it: identity, frozen type, one
+// line of summary, the text of a fold product and the moment. No field reads a
+// kind off a key's spelling.
+//
+//   - A mapped entry carries no text: the fact the entry names states its message, so a restore reads that text back by key and the checkpoint stays the size of the entries it names instead of the size of the bodies behind them.
+//   - A fold product carries the text it minted, because the product fact files that text under an identity of its own: the entry names the material the fold covered, and the fact's key is content-addressed over the material and the text together, so no read of the entry's key reaches it. That text is the bounded summary the age bound already holds, never the material it covered.
+type anchorEntry struct {
+	Key     event.EventID
+	Type    string
+	Summary string
+	Content string `json:",omitempty"`
+	Time    int64
+}
+
+// carriedTextOf reports the text one projection entry states in a checkpoint: the
+// text a fold minted, and nothing for an entry the chain states itself.
+func carriedTextOf(entry replay.ProjectionEntry) string {
+	switch entry.Type {
+	case replay.ProjectionTypeSegmentFold, replay.ProjectionTypeHistorySummary:
+		return entry.Content
+	default:
+		return ""
+	}
+}
+
+// anchorCheckpointOf states the projection entries a fold leaves as an opaque
+// recovery payload: identity, frozen type, summary, the minted text of a fold
+// product and moment, in display order. The bytes are a chain fact's payload,
+// never a wording the model reads, and they grow with the entries a fold leaves
+// rather than with the material those entries were folded from: the text every
+// mapped entry renders stands on the chain under the key the payload names, and
+// the text a fold product minted is bounded by the age bound.
+func anchorCheckpointOf(entries []replay.ProjectionEntry) []byte {
+	out := make([]anchorEntry, 0, len(entries))
+	for _, entry := range entries {
+		out = append(out, anchorEntry{
+			Key:     entry.Key,
+			Type:    entry.Type,
+			Summary: entry.Summary,
+			Content: carriedTextOf(entry),
+			Time:    entry.Time.UnixMilli(),
+		})
+	}
+	encoded, err := json.Marshal(out)
+	if err != nil {
+		return nil
+	}
+	return encoded
+}
+
+// coverSettlementFacts extends the coverage of one history summary with the
+// delivery settlement facts that stand between the oldest and the newest entry
+// it folds. A segment product is left as it stands: it folds process detail of
+// the new band, which the settlement facts never join. The function is a no-op
+// for a summary that covers no entry of the projection it is applied to.
+func coverSettlementFacts(product replay.FoldProduct, projection *replay.ReplayProjection) replay.FoldProduct {
+	if projection == nil || product.Entry.Type != replay.ProjectionTypeHistorySummary {
+		return product
+	}
+	entries := projection.Entries()
+	position := make(map[event.EventID]int, len(entries))
+	for at, entry := range entries {
+		position[entry.Key] = at
+	}
+	low, high := len(entries), -1
+	for _, key := range product.Covered {
+		at, held := position[key]
+		if !held {
+			continue
+		}
+		if at < low {
+			low = at
+		}
+		if at > high {
+			high = at
+		}
+	}
+	if high < low {
+		return product
+	}
+	extra := make([]event.EventID, 0, 2)
+	for at := low; at <= high; at++ {
+		if entries[at].Type != deliverySettlementType {
+			continue
+		}
+		extra = append(extra, entries[at].Key)
+	}
+	if len(extra) == 0 {
+		return product
+	}
+	product.Covered = append(append([]event.EventID{}, product.Covered...), extra...)
+	return product
 }
 
 // pending reports the judgments one session filed that no product answers yet,
@@ -237,6 +411,74 @@ func (c *CompressionConsumer) noteAnswered(request event.EventID) {
 	c.answered[request] = struct{}{}
 }
 
+// judgmentOf reads one committed fact back as the judgment it states: the session
+// chain whose material was judged, the identity the judgment is quoted by, the
+// reason it was filed under and the moment it was filed. A fact of another frozen
+// type, a fact naming no session chain and a fact carrying no identity are not
+// judgments of this consumer.
+//
+// The fact states the identity and the reason the judgment is quoted by; the
+// producer and the subject were folded into the content-addressed identity when
+// the judgment was filed, and the execution matches on that identity alone, so
+// the reconstruction carries what the chain holds and invents none of what it
+// does not. It is the one read of a judgment fact — the live consumer seats the
+// request it filed and the rebuild seats the same request from the fact — so the
+// account a restart states is the account the process before it stated.
+func judgmentOf(evt event.Event) (event.SessionID, event.CompressRequest, bool) {
+	if evt.Type != event.CompressRequestType || evt.Key == "" {
+		return "", event.CompressRequest{}, false
+	}
+	session := sessionOf(evt)
+	if session == "" {
+		return "", event.CompressRequest{}, false
+	}
+	return session, event.CompressRequest{
+		ID:     evt.Key,
+		Reason: evt.Meta[event.MetaKeyEventSummary],
+		At:     evt.Timestamp,
+	}, true
+}
+
+// Reduce folds one committed compression fact into the account this consumer
+// derives: a judgment the chain carries is a batch the consumer still owes, and a
+// product answers the judgment it names, whichever process committed it. The fold
+// is the consumer's whole derivation face — the live commit and the rebuild of a
+// chain past its cut both drive it — so a restarted run reads the judgments the
+// chain filed instead of waiting for the material to be judged a second time, and
+// a judgment a product answers executes nothing.
+//
+// The fold starts no work: the judgments it seats wait for the observation duty
+// of this consumer (Execute), which the recovery never drives.
+func (c *CompressionConsumer) Reduce(ctx context.Context, evt event.Event) error {
+	if c == nil {
+		return nil
+	}
+	if session, request, judgment := judgmentOf(evt); judgment {
+		c.Record(session, request)
+		return nil
+	}
+	if product, stated := compressProductOf(evt); stated {
+		c.NoteProduct(product)
+	}
+	return nil
+}
+
+// Reduce folds one committed fact into the compression account the run mounts,
+// through the consumer that holds it.
+func (s compressStateSlice) Reduce(ctx context.Context, evt event.Event) error {
+	r := s.run
+	r.mu.Lock()
+	consumer := r.compress
+	r.mu.Unlock()
+	return consumer.Reduce(ctx, evt)
+}
+
+// DrivesObservation declares that the consumer behind this slice executes the
+// judgments it seats: the material folds and the products are filed beside the
+// state this slice states, so a recovery seats the judgments and leaves their
+// execution to the process that serves the chain.
+func (s compressStateSlice) DrivesObservation() {}
+
 // FileCompressProduct files one execution result on the chain of the session
 // whose material was folded.
 func (s ageFoldSessions) FileCompressProduct(ctx context.Context, session event.SessionID, product event.CompressProduct) error {
@@ -246,7 +488,8 @@ func (s ageFoldSessions) FileCompressProduct(ctx context.Context, session event.
 // fileCompressProduct lands one execution result in the live ledger of this run
 // under the product's content-addressed identity: a product already on record is
 // left as it stands, so one judgment answers one product however often the
-// execution runs.
+// execution runs. The consumer answers the judgment here rather than beside the
+// call, so the answer follows the fact inside one unit of the quiet-point fence.
 func (r *Run) fileCompressProduct(ctx context.Context, session event.SessionID, product event.CompressProduct) error {
 	if session == "" {
 		return errors.New("tagent: the compression product names no session chain")
@@ -254,17 +497,23 @@ func (r *Run) fileCompressProduct(ctx context.Context, session event.SessionID, 
 	if product.FactKey() == "" {
 		return errors.New("tagent: the compression product carries no identity")
 	}
+	r.flight.enter()
+	defer r.flight.leave()
 	r.mu.Lock()
 	_, filed := r.facts[product.ID]
 	agent := r.agentOfSessionLocked(session)
+	consumer := r.compress
 	r.mu.Unlock()
 	if filed {
+		consumer.noteAnswered(product.Answers.Request)
 		return nil
 	}
 	if _, err := r.commitFactChecked(ctx, compressProductEvent(session, agent, product, time.Now())); err != nil {
 		assemblyWarn("tagent: the compression product of session %s was not committed err=%v", session, err)
 		return err
 	}
+	consumer.noteAnswered(product.Answers.Request)
+	r.CheckpointAfterFold()
 	return nil
 }
 
@@ -301,6 +550,7 @@ func compressProductEvent(session event.SessionID, agent event.AgentID, product 
 	for _, key := range product.Covered {
 		covered = append(covered, string(key))
 	}
+	survivors := product.Checkpoint()
 	return event.Event{
 		Key:       product.ID,
 		Type:      product.FactType(),
@@ -312,6 +562,7 @@ func compressProductEvent(session event.SessionID, agent event.AgentID, product 
 			metaKeyCompressKey:        string(product.Key),
 			metaKeyCompressCovered:    strings.Join(covered, compressCoveredSeparator),
 			metaKeyCompressText:       product.Text,
+			metaKeyCompressSurvivors:  string(survivors),
 		},
 		Owner: event.Address{AgentID: agent, SessionID: session},
 	}
@@ -331,6 +582,13 @@ func compressProductOf(evt event.Event) (event.CompressProduct, bool) {
 	product := event.CompressProductFor(request, evt.Meta[metaKeyCompressProducer], key, compressCoveredOf(evt.Meta[metaKeyCompressCovered]), evt.Meta[metaKeyCompressText])
 	if product.ID != evt.Key {
 		return event.CompressProduct{}, false
+	}
+	if carried := evt.Meta[metaKeyCompressSurvivors]; carried != "" {
+		var checkpoint []anchorEntry
+		if err := json.Unmarshal([]byte(carried), &checkpoint); err != nil {
+			return event.CompressProduct{}, false
+		}
+		product = product.WithCheckpoint([]byte(carried))
 	}
 	return product, true
 }

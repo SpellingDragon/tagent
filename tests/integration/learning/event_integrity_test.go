@@ -574,12 +574,26 @@ func integrityAttempts(t *testing.T, root string) []rl.AttemptRecord {
 		if err != nil {
 			t.Fatalf("parse the stored record %q: %v", integrityTruncate(string(raw)), err)
 		}
-		if line.Kind != rl.RecordKindAttempt || line.Attempt == nil {
-			t.Fatalf("stored record kind = %q, want the attempt line the sink writes", line.Kind)
+		switch line.Kind {
+		case rl.RecordKindRequest:
+			continue
+		case rl.RecordKindAttempt:
+			if line.Attempt == nil {
+				t.Fatalf("stored attempt line carries no attempt record")
+			}
+			attempts = append(attempts, *line.Attempt)
+		default:
+			t.Fatalf("stored record kind = %q, want an attempt line or the request evidence line beside it", line.Kind)
 		}
-		attempts = append(attempts, *line.Attempt)
 	}
 	return attempts
+}
+
+// integrityRecords reports the record count one boot capture writes for the given
+// number of decisions: each decision lands its request evidence line beside the
+// attempt line the sink writes for it.
+func integrityRecords(decisions int) int {
+	return 2 * decisions
 }
 
 // integrityRequireCleanSeal checks the sealed manifest accounts exactly the
@@ -918,7 +932,7 @@ func runIntegrityRequestsAndAttempts(t *testing.T) {
 	if losses := host.Run().RecordingLosses(); len(losses) != 0 {
 		t.Fatalf("recording losses = %+v, want none for the admitted capture", losses)
 	}
-	integrityRequireCleanSeal(t, root, total)
+	integrityRequireCleanSeal(t, root, integrityRecords(total))
 }
 
 // runIntegrityFailedAttempt drives one entry failure and one delegated worker failure and checks both are recorded as failures:
@@ -1066,7 +1080,7 @@ func runIntegrityFailedAttempt(t *testing.T) {
 	if losses := host.Run().RecordingLosses(); len(losses) != 0 {
 		t.Fatalf("recording losses = %+v, want the failures recorded as attempts instead", losses)
 	}
-	integrityRequireCleanSeal(t, root, total)
+	integrityRequireCleanSeal(t, root, integrityRecords(total))
 }
 
 // runIntegrityRejectedAdmission checks a record the capture refused at admission is a counted loss and never a silent disappearance:
@@ -1125,17 +1139,17 @@ func integrityRejectedEntryScenario(t *testing.T) {
 	if !manifest.Sealed || !manifest.Partial {
 		t.Fatalf("manifest = %+v, want a sealed but partial capture", manifest)
 	}
-	if manifest.Records != 0 || manifest.Dropped != 1 || manifest.InFlight != 0 {
-		t.Fatalf("manifest = %+v, want the one refused record counted and no stored record", manifest)
+	if manifest.Records != 1 || manifest.Dropped != 1 || manifest.InFlight != 0 {
+		t.Fatalf("manifest = %+v, want the refused attempt counted beside the one request evidence line the decision landed before it", manifest)
 	}
-	if len(manifest.Files) != 0 {
-		t.Fatalf("manifest files = %+v, want none for a capture that stored no record", manifest.Files)
+	if len(manifest.Files) != 1 {
+		t.Fatalf("manifest files = %+v, want the one record file the landed evidence line reached", manifest.Files)
 	}
 	if !integrityReasonsContain(manifest.Reasons, "refused under an admission bound") {
 		t.Fatalf("manifest reasons = %v, want the admission refusal named", manifest.Reasons)
 	}
-	if _, err := os.Stat(filepath.Join(integrityDir(root), rl.SinkRecordsFile)); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("record file stat error = %v, want the file absent when every record was refused", err)
+	if _, err := os.Stat(filepath.Join(integrityDir(root), rl.SinkRecordsFile)); err != nil {
+		t.Fatalf("record file stat error = %v, want the file holding the landed evidence line", err)
 	}
 }
 
@@ -1196,11 +1210,11 @@ func integrityRejectedWorkerScenario(t *testing.T) {
 	if !manifest.Sealed || !manifest.Partial {
 		t.Fatalf("manifest = %+v, want a sealed but partial capture", manifest)
 	}
-	if manifest.Records != 3 || manifest.Dropped != 1 || manifest.InFlight != 0 {
-		t.Fatalf("manifest = %+v, want three stored entry attempts and the one refused worker attempt", manifest)
+	if manifest.Records != 7 || manifest.Dropped != 1 || manifest.InFlight != 0 {
+		t.Fatalf("manifest = %+v, want the three stored entry attempts beside the four request evidence lines their decisions landed and the one refused worker attempt", manifest)
 	}
-	if len(manifest.Files) != 1 || manifest.Files[0].Name != rl.SinkRecordsFile || manifest.Files[0].Records != 3 {
-		t.Fatalf("manifest files = %+v, want the record file with three attempts", manifest.Files)
+	if len(manifest.Files) != 1 || manifest.Files[0].Name != rl.SinkRecordsFile || manifest.Files[0].Records != 7 {
+		t.Fatalf("manifest files = %+v, want the record file with the three attempts and the four landed evidence lines", manifest.Files)
 	}
 	if !integrityReasonsContain(manifest.Reasons, "refused under an admission bound") {
 		t.Fatalf("manifest reasons = %v, want the worker admission refusal named", manifest.Reasons)
@@ -1293,7 +1307,7 @@ func runIntegrityExportCorrelationIsNotReward(t *testing.T) {
 	for i := 0; i < typ.NumField(); i++ {
 		fields[typ.Field(i).Name] = true
 	}
-	wantFields := map[string]bool{"SessionID": true, "Turn": true, "Input": true, "Label": true, "EpisodeID": true}
+	wantFields := map[string]bool{"SessionID": true, "Turn": true, "Input": true, "Label": true, "EpisodeID": true, "Inputs": true}
 	if !reflect.DeepEqual(fields, wantFields) {
 		t.Fatalf("SFTSample fields = %v, want exactly the correlation fields %v", fields, wantFields)
 	}
@@ -1329,7 +1343,7 @@ func runIntegrityExportCorrelationIsNotReward(t *testing.T) {
 			t.Fatalf("attempt %s episode = %q, want the sample episode %q", attempt.ID, attempt.EpisodeID, sample.EpisodeID)
 		}
 	}
-	integrityRequireCleanSeal(t, root, 2)
+	integrityRequireCleanSeal(t, root, integrityRecords(2))
 }
 
 // runIntegrityFormalCaptureThenOfflineExport drives two real turns through Boot, exports the chain with the public API and correlates every sample:
@@ -1447,5 +1461,5 @@ func runIntegrityFormalCaptureThenOfflineExport(t *testing.T) {
 	if losses := host.Run().RecordingLosses(); len(losses) != 0 {
 		t.Fatalf("recording losses = %+v, want none for the exported capture", losses)
 	}
-	integrityRequireCleanSeal(t, root, 2)
+	integrityRequireCleanSeal(t, root, integrityRecords(2))
 }

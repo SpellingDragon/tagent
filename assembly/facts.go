@@ -28,13 +28,12 @@ import (
 // mapped sequence speaks.
 const mappedSummaryRunes = 120
 
-// factWindow bounds the live facts one session chain of this run keeps: the most
-// recent entries beside the whole segment still in flight — the turn-end fact that
-// closed the previous segment together with every entry committed after it. A
-// drive reads the segment it flies and the transcript it presents, so the window is
-// the bound of what a live read reaches; the durable chain of the storage tier
-// keeps the whole history.
-const factWindow = 2048
+// noWindowResidentFacts is the mechanism constant a session chain without a
+// replay window keeps: a chain that declares no window folds nothing, so the
+// band rule cannot bound it and the resident set falls back to this many recent
+// entries beside the whole segment still in flight. A chain that declares a
+// window is bounded by its projection instead (see trimFacts).
+const noWindowResidentFacts = 2048
 
 // factCommitFormat and factCommitRetention name the reference registration
 // every committed fact of this run carries: the original format and the
@@ -67,9 +66,30 @@ const (
 // storage tier answers under, so the live ledger and the durable record never
 // disagree about what one identity names.
 func (r *Run) commitFactChecked(ctx context.Context, evt event.Event) (event.EventID, error) {
+	id, err := r.commitFactNoCadence(ctx, evt)
+	if err != nil {
+		return id, err
+	}
+	if evt.Type != event.TypeCheckpoint {
+		r.noteCheckpointCommit()
+	}
+	return id, nil
+}
+
+// commitFactNoCadence is the commit entry that files no checkpoint and advances
+// no cadence: the coordinator files its own checkpoint through it, so the fact that
+// states the account never triggers the cadence that files another.
+//
+//   - a checkpoint fact stays on the store the boot reads it from and enters no session chain: it is a framework state checkpoint, not material of any chain, so the live ledger keeps the window of the chains it serves and never one fact per cut.
+//   - the whole commit holds the quiet-point fence, so a cut that drained the pipeline reads every state this fact left behind instead of one caught between the landing and its application. The derived state of every consumer mounted on the state seam is folded inside that unit for the same reason: the fact and the state it leaves behind are one step, never a landing a consumer beside it has not read yet.
+//   - a product is the moment the projection drops material, so the chain's checkpoint is worth refreshing whatever the cadence clock says. The request is a signal: the filer takes the cut on its own goroutine, where this commit's unit of work is not held.
+func (r *Run) commitFactNoCadence(ctx context.Context, evt event.Event) (event.EventID, error) {
 	if evt.Key == "" {
 		evt.Key = r.mintEventID()
 	}
+	session := sessionOf(evt)
+	r.flight.enterSession(session)
+	defer r.flight.leaveSession(session)
 	r.mu.Lock()
 	held, seen := r.facts[evt.Key]
 	r.mu.Unlock()
@@ -86,54 +106,145 @@ func (r *Run) commitFactChecked(ctx context.Context, evt event.Event) (event.Eve
 	if err := r.persistFact(ctx, evt); err != nil {
 		return "", err
 	}
-	entry, mapped := mappedEntryOf(evt)
+	if evt.Type == event.TypeCheckpoint {
+		return evt.Key, nil
+	}
+	_, mapped := mappedEntryOf(evt)
 	r.mu.Lock()
 	r.facts[evt.Key] = evt
 	r.factOrder = append(r.factOrder, evt.Key)
 	if session := sessionOf(evt); session != "" {
 		r.sessionFactCount[session]++
-		if r.sessionFactCount[session] >= factWindow {
-			r.trimFactsLocked(session)
-		}
 	}
 	r.mu.Unlock()
 	r.movement.Advance()
-	if !mapped {
-		return evt.Key, nil
+	if mapped {
+		r.attachDeclaredReplay(evt)
 	}
-	r.attachDeclaredReplay(evt)
-	r.recordMapped(evt, entry)
+	r.reduceCommitted(ctx, evt)
+	if evt.Type == event.CompressProductType && session != "" {
+		r.requestSessionCheckpoint(event.Address{AgentID: agentOf(evt), SessionID: session})
+	}
+	r.trimFacts(sessionOf(evt))
 	return evt.Key, nil
 }
 
-// trimFactsLocked holds the chain of one session to its hot window: the entries
-// before the window and before the segment in flight leave the live ledger, and
-// the commit order is trimmed beside the map so neither grows with the history of
-// the chain. The durable chain of the storage tier is untouched, so a fact outside
-// the window is still read back by identity. The read is taken under the run lock
-// the caller holds; the per-session live count the caller guards with keeps a
-// far-below-window chain at O(1) per commit, so the full scan only starts once
-// a chain can actually hold a cut.
-func (r *Run) trimFactsLocked(session event.SessionID) {
+// reduceCommitted folds one landed fact into the derived state of every consumer
+// mounted on the state seam: the one derivation path of this run. The live commit
+// and the replay of a chain past its cut both fold through the same reducer, so a
+// restart derives exactly the state the process before it derived from the same
+// facts instead of rebuilding it through a reader of its own.
+//
+// A fact is committed before it is folded, so a refusal is reported beside the
+// fact rather than answered as a failed commit: the chain keeps the fact either
+// way, and a consumer whose fold failed is the state this run must not read as
+// current.
+func (r *Run) reduceCommitted(ctx context.Context, evt event.Event) {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	states := r.states
+	r.mu.Unlock()
+	if states == nil {
+		return
+	}
+	if err := states.Reduce(ctx, evt); err != nil {
+		assemblyError("tagent: the committed fact %s was not folded into the state of its consumers: %v", evt.Key, err)
+	}
+}
+
+// trimFacts holds one session chain to what its projection still presents — and
+// releases only facts that can persist: an ownerless judgment never reaches the
+// durable chain, so releasing it would erase the only copy and it stays resident
+// instead. A run beside no storage tier keeps the destructive window contract it
+// always carried. A
+// chain carrying a positive replay window releases the facts before the oldest
+// original its projection still carries — the fold that replaced covered
+// entries with a product released them already, so the resident set follows the
+// window and not the history. A chain carrying no window folds nothing, so it
+// keeps the fallback count beside the whole segment in flight. The durable
+// chain of the storage tier is untouched, so a released fact is still read back
+// by identity; a fact of a run beside no tier exists only here, and the window
+// bound is the contract that run carries.
+func (r *Run) trimFacts(session event.SessionID) {
 	if session == "" {
 		return
 	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.trimFactsLocked(session)
+}
+
+// trimFactsLocked is trimFacts under the run lock the caller holds.
+func (r *Run) trimFactsLocked(session event.SessionID) {
 	keys := make([]event.EventID, 0, len(r.factOrder))
 	for _, key := range r.factOrder {
 		if evt, held := r.facts[key]; held && sessionOf(evt) == session {
 			keys = append(keys, key)
 		}
 	}
-	cut := keys[:r.windowCutLocked(keys)]
+	if len(keys) == 0 {
+		return
+	}
+	cut := r.keepPinnedLocked(keys[:r.liveWindowCutLocked(keys, session)])
+	if len(cut) == 0 {
+		return
+	}
+	released := cut[:0]
+	for _, key := range cut {
+		evt, held := r.facts[key]
+		if !held || evt.Owner.AgentID == "" {
+			continue
+		}
+		released = append(released, key)
+	}
+	if len(released) == 0 {
+		return
+	}
+	cut = released
 	for _, key := range cut {
 		delete(r.facts, key)
 	}
-	r.sessionFactCount[session] -= len(cut)
-	dropped := map[event.EventID]struct{}{}
+	r.sessionFactCount[session] = len(keys) - len(cut)
+	dropped := make(map[event.EventID]struct{}, len(cut))
 	for _, key := range cut {
 		dropped[key] = struct{}{}
 	}
 	r.compactFactOrderLocked(dropped)
+}
+
+// liveWindowCutLocked reports how many leading entries of one chain its live
+// window drops: the entries before the oldest original the session's windowed
+// projections still present, or — for a chain carrying no positive window — the
+// fallback count beside the segment in flight.
+func (r *Run) liveWindowCutLocked(keys []event.EventID, session event.SessionID) int {
+	position := make(map[event.EventID]int, len(keys))
+	for at, key := range keys {
+		position[key] = at
+	}
+	boundary := -1
+	for addr, held := range r.replays {
+		if addr.SessionID != session || held.window.MaxTokens <= 0 || held.projection == nil {
+			continue
+		}
+		for _, entry := range held.projection.Entries() {
+			if replay.SyntheticKey(entry.Key) {
+				continue
+			}
+			at, carried := position[entry.Key]
+			if !carried {
+				continue
+			}
+			if boundary < 0 || at < boundary {
+				boundary = at
+			}
+		}
+	}
+	if boundary < 0 {
+		return r.fallbackCutLocked(keys)
+	}
+	return boundary
 }
 
 // trimSeededFacts holds every chain a restart replayed to its hot window: the
@@ -155,7 +266,7 @@ func (r *Run) trimSeededFacts() {
 	}
 	dropped := make(map[event.EventID]struct{}, len(r.factOrder))
 	for session, keys := range chains {
-		cut := keys[:r.windowCutLocked(keys)]
+		cut := r.keepPinnedLocked(keys[:r.liveWindowCutLocked(keys, session)])
 		for _, key := range cut {
 			dropped[key] = struct{}{}
 			delete(r.facts, key)
@@ -165,13 +276,13 @@ func (r *Run) trimSeededFacts() {
 	r.compactFactOrderLocked(dropped)
 }
 
-// windowCutLocked reports how many leading entries of one chain its hot window
-// drops: the window keeps the most recent factWindow entries beside the segment a
-// drive may still read, which is the turn-end fact that closed the previous
-// segment together with every entry committed after it. A chain beside no
-// turn-end fact is one segment in flight from its head, so it is kept whole.
-func (r *Run) windowCutLocked(keys []event.EventID) int {
-	cut := len(keys) - factWindow
+// fallbackCutLocked reports how many leading entries of one chain its fallback
+// window drops: the most recent noWindowResidentFacts entries beside the
+// segment a drive may still read, which is the turn-end fact that closed the
+// previous segment together with every entry committed after it. A chain beside
+// no turn-end fact is one segment in flight from its head, so it is kept whole.
+func (r *Run) fallbackCutLocked(keys []event.EventID) int {
+	cut := len(keys) - noWindowResidentFacts
 	if cut < 0 {
 		cut = 0
 	}
@@ -186,35 +297,64 @@ func (r *Run) windowCutLocked(keys []event.EventID) int {
 	return 0
 }
 
+// trimReplayProjection holds one registered projection to its resident window: a
+// chain carrying a positive replay window is bounded by its age fold, so its
+// projection is left as the fold built it; a chain carrying no window folds
+// nothing, so a projection grown past twice the fallback count is rebuilt down
+// to the fallback count and the rest is left to the durable chain. Rebuilding is
+// the one way to drop the per-key material the projection accumulates beside its
+// entries, so the trim leaves no map entry behind.
+func trimReplayProjection(ctx context.Context, projection *replay.ReplayProjection, window FoldWindow) *replay.ReplayProjection {
+	if projection == nil || window.MaxTokens > 0 || projection.Len() <= 2*noWindowResidentFacts {
+		return projection
+	}
+	entries := projection.Entries()
+	trimmed := replay.NewReplayProjection()
+	for _, entry := range entries[len(entries)-noWindowResidentFacts:] {
+		trimmed.Append(ctx, entry)
+	}
+	return trimmed
+}
+
 // compactFactOrderLocked removes the named identities from the commit order of
-// this run, so the order reads the facts the live ledger still holds.
+// this run, so the order reads the facts the live ledger still holds. A trim
+// shrinks the order, so the control-plane scan cursor and count are recomputed
+// over the kept prefix: controlScanned stays a valid index into the shorter
+// order and controlFacts still counts the control records before it.
 func (r *Run) compactFactOrderLocked(dropped map[event.EventID]struct{}) {
 	if len(dropped) == 0 {
 		return
 	}
 	kept := r.factOrder[:0]
-	for _, key := range r.factOrder {
+	scanned, control := 0, 0
+	for i, key := range r.factOrder {
 		if _, gone := dropped[key]; gone {
 			continue
+		}
+		if i < r.controlScanned {
+			scanned++
+			if evt, held := r.facts[key]; held && generationRetirementRecord(evt) {
+				control++
+			}
 		}
 		kept = append(kept, key)
 	}
 	r.factOrder = kept
+	r.controlScanned = scanned
+	r.controlFacts = control
 }
 
 // persistFact writes one fact of this run to the storage tier it declares: the
 // body commits byte for byte as the original the recall face reads back, the
 // record commits behind the segment barrier under the next sequence slot of the
-// fact's partition, and the observation table and the vector pipeline learn the
-// event so the same process recalls what it just committed.
+// fact's partition; a query reads the chain directly, so the same process
+// recalls what it just committed without a landing step.
 // - A run beside no storage tier, and a fact naming no owning agent, keep the fact in memory alone: no tier means no durable carrier to write.
 // - The segment commit is the durable write: nothing enters the live ledger before it returns success, and a refused commit leaves the previous position untouched.
 // - An event the tier already published is not committed twice: the very fact the identity already names is answered as the commitment it is, and another content under that identity is refused by name, so a retry of one fact keeps one record and a second fact never lands beside it.
-// - Landing the query record and submitting the vector generation are consequences of a commit that already landed; their failure is reported and never rolls the fact back.
 func (r *Run) persistFact(ctx context.Context, evt event.Event) error {
 	r.mu.Lock()
 	tier := r.tier
-	supply := r.retrieval
 	r.mu.Unlock()
 	if tier == nil || evt.Owner.AgentID == "" {
 		return nil
@@ -244,14 +384,15 @@ func (r *Run) persistFact(ctx context.Context, evt event.Event) error {
 	}
 	r.landing.Lock()
 	seq := r.landedSeq[partition] + 1
-	err = tier.Segments.StoreEvent(ctx, ledger.SegmentRecord{
+	record := ledger.SegmentRecord{
 		PartitionID: partition,
 		WindowTS:    window,
 		Seq:         seq,
 		EventKey:    evt.Key,
 		EventTime:   window,
 		Body:        encoded,
-	})
+	}.WithChain(evt.Type, sessionOf(evt))
+	err = tier.Segments.StoreEvent(ctx, record)
 	if err == nil {
 		r.landedSeq[partition] = seq
 	}
@@ -268,20 +409,6 @@ func (r *Run) persistFact(ctx context.Context, evt event.Event) error {
 	}
 	if err != nil {
 		return err
-	}
-	if supply == nil {
-		return nil
-	}
-	landed := ledger.StoredEvent{Key: evt.Key, PartitionID: partition, WindowTS: window, Seq: seq, Body: encoded}
-	if err := supply.source.LandEvent(ctx, landed); err != nil {
-		assemblyWarn("tagent: the committed fact %s is not landed in the query table err=%v", evt.Key, err)
-	}
-	if supply.seam != nil {
-		text := body.Message.Content
-		if text == "" {
-			text = body.Meta[event.MetaKeyEventSummary]
-		}
-		supply.seam.Submit(evt.Key, text)
 	}
 	return nil
 }
@@ -317,8 +444,21 @@ func storedFactConflict(key event.EventID, stored ledger.StoredEvent, body memor
 	return fmt.Errorf("%w: %s", memory.ErrFactKeyConflict, key)
 }
 
-// recordMapped appends one mapped entry to the sequence of its session and
-// moves the boundary between the material that ended and the material still in
+// foldIntoProjection folds one mapped entry into the replay projection of one
+// chain under the window that chain declared, and answers the projection the fold
+// left: the append beside the resident bound is one step, taken by the live commit
+// and by the replay of a chain past its cut alike, so the bound is applied to the
+// sequence once instead of once per read path.
+func foldIntoProjection(ctx context.Context, projection *replay.ReplayProjection, entry replay.ProjectionEntry, window FoldWindow) *replay.ReplayProjection {
+	if projection == nil {
+		return nil
+	}
+	projection.Append(ctx, entry)
+	return trimReplayProjection(ctx, projection, window)
+}
+
+// foldMapped folds one mapped entry into the sequence of its session and moves
+// the boundary between the material that ended and the material still in
 // flight: the boundary advances only where a segment stands closed — the
 // agent_output fact that closed it — so the input that starts the next range
 // lands every earlier segment committed as ended material the next request
@@ -334,14 +474,14 @@ func storedFactConflict(key event.EventID, stored ledger.StoredEvent, body memor
 // increment instead of from a lane of its own.
 //
 // - Boundary move on close: the agent_output that closed a segment lands the segment itself as ended material — the boundary moves onto it (inclusive, see endedPrefix), so a later arrival presents everything the closed segment committed, the input that reached the chain while it flew but no decision of it read included.
-func (r *Run) recordMapped(evt event.Event, entry replay.ProjectionEntry) {
+func (r *Run) foldMapped(ctx context.Context, evt event.Event, entry replay.ProjectionEntry) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	slot, held, carried := r.replaySlotLocked(replayAddressOf(evt))
 	if !carried {
 		return
 	}
-	held.projection.Append(context.Background(), entry)
+	held.projection = foldIntoProjection(ctx, held.projection, entry, held.window)
 	if evt.Type == event.TypeAgentOutput {
 		held.endedAt = entry.Key
 		held.rangeOpen = false
@@ -599,32 +739,75 @@ func agentOf(evt event.Event) event.AgentID {
 
 // mappedEntryOf projects one committed fact onto the projection entry its
 // consumption carries: the canonical identity of the fact, its frozen type, the
-// one-line read stored beside it and the text the model view speaks for it. A
-// fact that carries no model payload maps onto no entry, so the mapped sequence
-// never carries an empty message the model would read.
+// one-line read stored beside it, the text the model view speaks for it and the
+// recorder generation the envelope names. The generation is copied verbatim and
+// never truncated, so a folded line can tell which runtime instance wrote the
+// fact it reads; a fact that carries no model payload maps onto no entry, so the
+// mapped sequence never carries an empty message the model would read.
 //
 // A configuration change is control-plane material, never a transcript line: the
 // fact names what moved and is read by its identity and metadata, so it maps
 // onto no entry even though it carries a message body. The skip is explicit by
 // type — a producer that stamps a session on the fact still cannot leak the
-// change into a model request.
+// change into a model request. A compression mechanism fact is refused here by
+// its frozen type as well, so an internal summary can never be mapped into a
+// model request even if a caller gives the fact a message body, and a checkpoint
+// checkpoint is refused the same way: the checkpoint a session files is tagged with that
+// session in the index, so a rebuild that walks the chain would otherwise read the
+// checkpoint's payload as one line of the transcript.
+// A delivery retry attempt rides the settlement family but is pipeline
+// accounting, not a settlement state: the fact records how many redrives the
+// chain already scheduled, so it maps onto no entry and never reaches the model
+// as a line of dialogue.
 //
 // 契约: docs/wiki/agent/event-flow.md#projection-lifecycle
 func mappedEntryOf(evt event.Event) (replay.ProjectionEntry, bool) {
-	if evt.Type == event.TypeConfigChange {
+	if evt.Type == event.TypeConfigChange || evt.Type == event.TypeCheckpoint || event.CompressionMechanism(evt.Type) {
+		return replay.ProjectionEntry{}, false
+	}
+	if _, _, isRetryAttempt := deliveryRetryAttemptOf(evt); isRetryAttempt {
 		return replay.ProjectionEntry{}, false
 	}
 	content := mappedContentOf(evt.Message)
 	if content == "" {
 		return replay.ProjectionEntry{}, false
 	}
-	return replay.WithInputEvents(replay.ProjectionEntry{
+	return replay.WithInstanceID(replay.WithInputEvents(replay.ProjectionEntry{
 		Key:     evt.Key,
 		Type:    evt.Type,
 		Summary: oneLineOf(evt.Meta[event.MetaKeyEventSummary], content),
 		Content: content,
 		Time:    evt.Timestamp,
-	}, evt.Meta[event.MetaKeyInputEvents]), true
+	}, evt.Meta[event.MetaKeyInputEvents]), evt.InstanceID), true
+}
+
+// foldProjectionOf renders the projection the age fold judges from the one the
+// session presents: the same mapped sequence without the delivery settlement
+// facts. Delivery accounting is not dialogue. A settlement fact is presented to
+// the model (the spec requires it), but it must not move the fold threshold, the
+// band ages or the segment boundaries a request reads — the tokens of an owed
+// receipt are not the tokens of a turn, and a held obligation pinned in the hot
+// window must not make the history fold sooner. The fold therefore judges and
+// mints products on this accounting-free view, while the consumer applies the
+// products to the full projection, so the settlement lines stay visible where
+// they belong and nowhere count as conversation.
+//
+// The view is derived on every judgment, never kept as a second mutable
+// sequence: a fold rewrites the full projection, and the derived view follows
+// that rewrite by construction instead of drifting from it.
+func foldProjectionOf(ctx context.Context, projection *replay.ReplayProjection) *replay.ReplayProjection {
+	if projection == nil {
+		return nil
+	}
+	entries := projection.Entries()
+	folded := replay.NewReplayProjection()
+	for _, entry := range entries {
+		if entry.Type == deliverySettlementType {
+			continue
+		}
+		folded.Append(ctx, entry)
+	}
+	return folded
 }
 
 // mappedContentOf reports the text one committed message speaks for on the
@@ -889,6 +1072,17 @@ func (p observePlugin) Name() string { return "commit-observer" }
 // Port reports the fact->observation port this instance serves.
 func (p observePlugin) Port() plugin.Port {
 	return plugin.PortFactObservation
+}
+
+// Material declares what this observer reads, when it reads it and what a failed
+// reading leaves behind: one committed fact read after its commit, where a failed
+// observation is a named gap and the fact keeps standing.
+func (p observePlugin) Material() plugin.Material {
+	return plugin.Material{
+		Reads:   plugin.PortFactObservation,
+		Timing:  plugin.TimingPostCommit,
+		Failure: plugin.RecordGap,
+	}
 }
 
 // ObserveCommit delegates one committed fact to the wired commit observer.

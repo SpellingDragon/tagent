@@ -5,6 +5,7 @@ import (
 	"errors"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/SpellingDragon/tagent/api/config"
 	"github.com/SpellingDragon/tagent/api/event"
@@ -283,6 +284,34 @@ func TestGenerationBookkeepingInvariants(t *testing.T) {
 			t.Fatalf("released candidates = %d, want the refused candidate freed once", got)
 		}
 	})
+}
+
+// TestPublicationWindowIsolatedFromTheCaller pins that a published record copies the caller's maps once, so a later mutation reaches neither.
+//
+// 契约: docs/wiki/platform/org-hot-reload.md#generations
+func TestPublicationWindowIsolatedFromTheCaller(t *testing.T) {
+	ctx := context.Background()
+	_, publisher, records := invariantPublisher(t)
+	models := map[string]string{"agent-a": "model-a"}
+	dimensions := map[string]string{"agent-a|evidence": "pass"}
+	candidate := Candidate{
+		Plan: invariantGenerationPlan(t, "agent-a", "model-a", "fp-a", publisher.Baseline()),
+	}.WithWindow(0, "", models, dimensions, time.Time{})
+	if _, err := publisher.Publish(ctx, candidate); err != nil {
+		t.Fatalf("publish the candidate carrying a window: %v", err)
+	}
+	record := records.last(t)
+	models["agent-a"] = "model-b"
+	dimensions["agent-a|evidence"] = "reject"
+	if got := record.ModelVersions()["agent-a"]; got != "model-a" {
+		t.Fatalf("the recorded model version = %q after the caller mutated its map, want model-a", got)
+	}
+	if got := record.DimensionOutcomes()["agent-a|evidence"]; got != "pass" {
+		t.Fatalf("the recorded dimension outcome = %q after the caller mutated its map, want pass", got)
+	}
+	if got := candidate.window.models["agent-a"]; got != "model-a" {
+		t.Fatalf("the candidate's model version = %q after the caller mutated its map, want model-a", got)
+	}
 }
 
 // invariantGenerationPlan builds one candidate plan of a single declared agent.

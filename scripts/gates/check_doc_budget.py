@@ -15,7 +15,7 @@
     12 篇 submodule 内容。它们在 CI 的干净 checkout 里不存在，若入预算，基线会凭空
     多出约 9.4 万行余量——棘轮等于不设，且本地判红/CI 判绿会不一致；
   * 不计生成物：`docs/api/` 是 `scripts/gates/gen_godoc.sh` 从源码注释生成的，体量由生成器
-    和包数决定（现有 48 篇/17805 行）；它的新鲜度已由 `gen_godoc.sh --check` 强制，
+    和包数决定（现有 69 篇/20851 行）；它的新鲜度已由 `gen_godoc.sh --check` 强制，
     拿它进预算只会让「新增一个 Go 包」逼作者删等量散文——那不是本门要拦的熵；
   * 不计过程工件：`openspec/changes/**` 是变更期的计划件与归档件（活跃 change 与
     archive 同属过程记录），其体量由变更自身的评审与 `scripts/gates/check-openspec.sh`
@@ -36,7 +36,7 @@
 `python3 scripts/gates/check_doc_budget.py --json`，HEAD 7610629 之上的索引（含未提交的批内
 改动）；基线文件里的 measured_at / measured_on 是同一快照）。2026-10-22 口径调整：
 `openspec/changes/**`（活跃计划件与归档件）退出预算，基线随之收紧到长期文档面的
-实测值 206 篇 / 21917 行——变更计划的体量不再需要用删散文来对冲。
+实测值 206 篇 / 21917 行（现行基线 214 篇 / 21794 行，见 doc_budget.json）——变更计划的体量不再需要用删散文来对冲。
 与 R-H 登记值 1855 篇 / 212905 行 的对账（旧口径；登记值用 `find . -name '*.md'` 量，
 把不进仓库的东西和生成物也算进去了）：1855 = 1150（旧口径）+ 607（gitignored
 本地物料）+ 48（`docs/api` 生成物）+ 21（node_modules 第三方包）+ 19（`.git/review-notes`

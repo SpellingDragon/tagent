@@ -1,7 +1,7 @@
 // 契约: docs/wiki/memory/memory-architecture.md#read-paths
 //
 // The retrieval over a real store: both legs of one query read through the
-// QueryEvents face of the observation table, the keyword leg matches the query
+// durable QueryEvents face, the keyword leg matches the query
 // text and the vector leg recalls the text an embedding places near it, and the
 // fusion port merges them into the one ordered reference set the page is cut
 // from. A hit stays a reference and the text behind it stays in the original
@@ -32,14 +32,14 @@ import (
 var ErrCursorUnbound = errors.New("search: continuation cursor does not bind to this query")
 
 // ReferenceSource is the query face a retrieval reads through: the event
-// references a QueryOptions matches, and the recall reference of any event key
-// the observation table holds. Both legs of a query read through it, so the
-// consumption order of the read face holds for the vector leg as well.
+// references a QueryOptions matches, and the original reference of any readable
+// event key. Both legs of a query read through it, so the consumption order of
+// the read face holds for the vector leg as well.
 //
 // The redline list (3 rules):
 // MUST return the matching set filtered, totally ordered by (Timestamp, Key), deduplicated by event key and paged by Offset and Limit.
 // MUST return identical sequences for two identical queries over identical state.
-// MUST NOT read anything of the query implementation beyond these two reads.
+// MUST NOT expose query internals or add a public body-read method; query-time candidate text stays on the internal candidateTextSource seam.
 type ReferenceSource interface {
 	// QueryEvents returns the references matching opts: the matching set
 	// filtered, totally ordered by (Timestamp, Key) under the named direction,
@@ -48,21 +48,9 @@ type ReferenceSource interface {
 	// whatever the order the events were recorded in.
 	QueryEvents(ctx context.Context, opts memory.QueryOptions) ([]memory.EventReference, error)
 
-	// Reference returns the recall reference the event key was landed with,
-	// and reports whether the table holds one.
+	// Reference returns the original reference of key, and reports whether the
+	// durable source holds a readable one.
 	Reference(key event.EventID) (ledger.OriginalRef, bool)
-}
-
-// VectorSource is the embedding seam a retrieval borrows its vectors from: the
-// vector of one event key and whether its generation completed.
-//
-// The redline list (2 rules):
-// MUST return the vector of the event key and whether its generation completed.
-// MUST NOT infer a ready vector from a generation that has not completed.
-type VectorSource interface {
-	// Vector returns the embedding vector of the event key and whether it is
-	// ready.
-	Vector(key event.EventID) ([]float32, bool)
 }
 
 // cursorToken is the decoded form of one continuation cursor: the result
@@ -73,50 +61,37 @@ type cursorToken struct {
 	Sig    string `json:"sig"`
 }
 
-// StoreSearcher is the Searcher over a real store: the query source both legs
-// read through, the vector seam the embedding leg borrows, and the embedder
-// bound for the retrieval text. A searcher constructed without a vector seam or
-// without an embedder answers through the keyword leg alone, which is the
-// byte-identical fallback the hybrid contract states.
+// StoreSearcher is the Searcher over a real store: the durable query source
+// both legs read through and the embedder called only for the current query's
+// candidates. A searcher beside no embedder answers through the keyword leg
+// alone, which is the byte-identical fallback the hybrid contract states.
+//
+// Both leg bounds are the one page bound of this package and the fusion runs
+// under its canonical rank constant: the retrieval rules are the mechanism's
+// own, so no deployment tunes them through a searcher.
 type StoreSearcher struct {
 	source      ReferenceSource
-	vectors     VectorSource
 	embedder    memory.Embedder
 	fusion      Fusion
 	vectorTopK  int
 	keywordTopK int
 }
 
-// NewStoreSearcher returns a searcher over source. vectors and embedder may
-// name nothing, and then the vector leg is empty for every query; the fusion
-// behind the searcher is the reciprocal rank fusion of this package.
-func NewStoreSearcher(source ReferenceSource, vectors VectorSource, embedder memory.Embedder) *StoreSearcher {
-	return &StoreSearcher{source: source, vectors: vectors, embedder: embedder, fusion: NewRRFFusion()}
+// NewStoreSearcher returns a searcher over source. embedder may name nothing,
+// and then the vector leg is empty for every query; both leg bounds are
+// DefaultLimit and the fusion behind the searcher is the reciprocal rank fusion
+// of this package under RRFRankConstant.
+func NewStoreSearcher(source ReferenceSource, embedder memory.Embedder) *StoreSearcher {
+	return &StoreSearcher{
+		source:      source,
+		embedder:    embedder,
+		fusion:      NewRRFFusion(),
+		vectorTopK:  DefaultLimit,
+		keywordTopK: DefaultLimit,
+	}
 }
 
 var _ Searcher = (*StoreSearcher)(nil)
-
-// ErrRetrievalTuning reports retrieval tuning a deployment named outside the
-// range this searcher can honour: a negative leg bound or a negative rank
-// constant is refused by name instead of being coerced into a default.
-var ErrRetrievalTuning = errors.New("search: retrieval tuning carries a negative bound")
-
-// SetRetrievalTuning applies the leg bounds and the rank constant one
-// deployment declares. A zero bound keeps that leg unbounded, and a zero rank
-// constant keeps the canonical RRFRankConstant, so the zero value of the
-// tuning is exactly the searcher's historical behaviour. The call configures
-// the searcher before it serves queries and is not a per-query setting.
-func (s *StoreSearcher) SetRetrievalTuning(vectorTopK, keywordTopK, rrfK int) error {
-	if vectorTopK < 0 || keywordTopK < 0 || rrfK < 0 {
-		return ErrRetrievalTuning
-	}
-	s.vectorTopK = vectorTopK
-	s.keywordTopK = keywordTopK
-	if rrfK > 0 {
-		s.fusion = RRFFusion{K: rrfK}
-	}
-	return nil
-}
 
 // Search returns the reference set of q, ranked by the retrieval rule the
 // query runs under and cut to the page the query asks for.
@@ -171,17 +146,20 @@ func (s *StoreSearcher) keywordLeg(ctx context.Context, q Query, partitions []in
 	return s.referencesOf(refs), nil
 }
 
+// candidateTextSource supplies the original text of one event key on demand.
+type candidateTextSource interface {
+	Text(event.EventID) (string, bool)
+}
+
 // vectorLeg returns the vector leg of q: the references of the authorized
 // partition set ranked by the cosine of their embedding against the embedding
-// of the query text. The candidates are read whole and scored whole, so the
-// declared vector bound cuts the best hits after the scoring instead of the
-// most recent candidates before it — a bound of one still recalls the old
-// relevant record an embedding places near the query, and never just the newest
-// candidate. A searcher with no seam or no embedder, and an embedder that fails
-// or returns no vector, all answer an empty leg, which is the keyword-only
-// fallback rather than a failed retrieval.
+// of the query text. Each candidate's original text is embedded only for this
+// query, and the declared vector bound cuts the best hits after scoring. A bound
+// of one still recalls the old relevant record rather than just the newest
+// candidate. No embedder, or a failed/empty query or candidate vector, answers
+// the keyword-only fallback rather than a failed retrieval.
 func (s *StoreSearcher) vectorLeg(ctx context.Context, q Query, partitions []int, strategy Strategy) ([]ledger.OriginalRef, error) {
-	if strategy == StrategyKeywordOnly || s.vectors == nil || s.embedder == nil {
+	if strategy == StrategyKeywordOnly || s.embedder == nil {
 		return nil, nil
 	}
 	queryVector, err := s.embedder.Embed(ctx, q.Text)
@@ -203,16 +181,22 @@ func (s *StoreSearcher) vectorLeg(ctx context.Context, q Query, partitions []int
 	}
 	var hits []scoredRef
 	for _, ref := range refs {
-		vector, ready := s.vectors.Vector(ref.Key)
-		if !ready {
+		original, held := s.source.Reference(ref.Key)
+		if !held {
+			continue
+		}
+		text := ref.Summary
+		if source, ok := s.source.(candidateTextSource); ok {
+			if originalText, stated := source.Text(ref.Key); stated {
+				text = originalText
+			}
+		}
+		vector, err := s.embedder.Embed(ctx, text)
+		if err != nil || len(vector) == 0 {
 			continue
 		}
 		score := cosine(queryVector, vector)
 		if score <= 0 {
-			continue
-		}
-		original, held := s.source.Reference(ref.Key)
-		if !held {
 			continue
 		}
 		hits = append(hits, scoredRef{ref: original, score: score, key: ref.Key})
@@ -235,7 +219,7 @@ func (s *StoreSearcher) vectorLeg(ctx context.Context, q Query, partitions []int
 }
 
 // referencesOf resolves the recall reference of each event reference, dropping
-// the hits the observation table holds no reference for.
+// the hits the durable read holds no reference for.
 func (s *StoreSearcher) referencesOf(refs []memory.EventReference) []ledger.OriginalRef {
 	out := make([]ledger.OriginalRef, 0, len(refs))
 	for _, ref := range refs {

@@ -157,8 +157,8 @@ type pendingReflection struct {
 
 // Reflection is the reflection loop of one agent: it reads the authorized
 // observation face, decides whether a reflection is due, injects the input event
-// into the agent's own loop session and advances the execution watermark when that
-// turn is consumed.
+// into the agent's own reflected session and advances the execution watermark when
+// that turn is consumed.
 //
 // One mechanism covers every observation face: observing the agent's own
 // partition is self-maintenance and observing others' partitions is the
@@ -179,10 +179,14 @@ type Reflection struct {
 	pending    *pendingReflection
 	deferred   int
 	deferredAt time.Time
+
+	// machine is the self-sustaining charge of this loop: external facts
+	// accumulate, one rule discharges and the activation resets it.
+	machine *stateMachine
 }
 
 // NewReflection assembles the reflection loop of one agent over its watermark gate,
-// its observed fact-chain face and the loop-session injection face. A declared
+// its observed fact-chain face and the reflection-session injection face. A declared
 // observation face outside the authorized scope refuses the assembly by name.
 func NewReflection(cfg ReflectionConfig, gate WatermarkGate, facts ObservedFacts, input ReflectionInput) (*Reflection, error) {
 	scope, err := ResolveObservationScope(cfg.Loop.Agent, cfg.Face.ObservedNamespaces, cfg.Face.ReadNamespaces)
@@ -190,12 +194,13 @@ func NewReflection(cfg ReflectionConfig, gate WatermarkGate, facts ObservedFacts
 		return nil, err
 	}
 	return &Reflection{
-		cfg:   cfg,
-		scope: scope,
-		addr:  event.Address{AgentID: event.AgentID(cfg.Loop.Agent), SessionID: event.SessionID(cfg.Loop.Session)},
-		gate:  gate,
-		facts: facts,
-		input: input,
+		cfg:     cfg,
+		scope:   scope,
+		addr:    event.Address{AgentID: event.AgentID(cfg.Loop.Agent), SessionID: event.SessionID(cfg.Loop.Session)},
+		gate:    gate,
+		facts:   facts,
+		input:   input,
+		machine: newStateMachine(gate),
 	}, nil
 }
 
@@ -311,6 +316,9 @@ func (r *Reflection) Tick(ctx context.Context, now time.Time) TickOutcome {
 	if err != nil {
 		return TickOutcome{Decision: TickDecision{Disposition: TickClosed, Reason: "the observed face cannot be read: " + err.Error(), Cause: err}}
 	}
+	for _, fact := range scan.Facts {
+		r.machine.charge(fact)
+	}
 	digest, err := NewScanDigest(scan, r.cfg.Face.FactLimit).Render(ctx, watermark)
 	if err != nil {
 		return TickOutcome{Decision: TickDecision{Disposition: TickClosed, Reason: "the digest cannot be rendered: " + err.Error(), Cause: err}, Scan: scan}
@@ -335,7 +343,15 @@ func (r *Reflection) Tick(ctx context.Context, now time.Time) TickOutcome {
 			Digest: digest,
 		}
 	}
-	return r.fire(ctx, now, watermark, scan, digest)
+	discharge, ok := r.machine.evaluate(now, r.cfg.Cadence.Interval)
+	if !ok {
+		discharge = activation{Rule: ruleNovelty, WindowStart: watermark.Moment, WindowEnd: now, Charges: 1}
+		if recent := scan.Verdict.Recent; recent != nil {
+			discharge.Source = string(recent.Identity.Key)
+			discharge.Lineage = recent.Attribution.Lineage
+		}
+	}
+	return r.fire(ctx, now, watermark, scan, digest, discharge)
 }
 
 // pendingOutcome reports the outcome of a tick held off by an input still awaiting
@@ -364,15 +380,15 @@ func (r *Reflection) watermark(ctx context.Context) (Watermark, error) {
 	return r.gate.Current(ctx)
 }
 
-// fire injects one explicit reflection input into the agent's own loop session
-// and settles the outcome the loop side reported: a consumed turn advances the
+// fire injects one explicit reflection input into the agent's own reflection
+// session and settles the outcome the loop side reported: a consumed turn advances the
 // watermark to the injection moment, a deferred turn leaves it where it stands,
 // and an in-flight turn keeps the input pending.
-func (r *Reflection) fire(ctx context.Context, now time.Time, watermark Watermark, scan *ObservationScan, digest DigestSummary) TickOutcome {
+func (r *Reflection) fire(ctx context.Context, now time.Time, watermark Watermark, scan *ObservationScan, digest DigestSummary, activation activation) TickOutcome {
 	if r.input == nil {
 		return TickOutcome{Decision: TickDecision{Disposition: TickClosed, Reason: "the loop-session injection face is not wired"}, Scan: scan, Digest: digest}
 	}
-	evt := r.reflectionEvent(now, watermark.Moment, digest)
+	evt := r.reflectionEvent(now, watermark.Moment, digest, scan, activation)
 	receipt, err := r.input.InjectReflection(ctx, evt)
 	if err != nil {
 		return TickOutcome{Decision: TickDecision{Disposition: TickClosed, Reason: "the reflection input was not injected: " + err.Error(), Cause: err}, Scan: scan, Digest: digest}
@@ -381,6 +397,7 @@ func (r *Reflection) fire(ctx context.Context, now time.Time, watermark Watermar
 		return TickOutcome{Decision: TickDecision{Disposition: TickClosed, Reason: ErrReflectionInputUnkeyed.Error(), Cause: ErrReflectionInputUnkeyed}, Scan: scan, Digest: digest}
 	}
 	evt.Key = receipt.Key
+	r.machine.reset(activation)
 	injection := &ReflectionInjection{Key: receipt.Key, At: now, Event: evt, Digest: digest}
 	r.mu.Lock()
 	r.pending = &pendingReflection{key: receipt.Key, at: now, event: evt}
@@ -453,12 +470,14 @@ func (r *Reflection) NoteOutcome(ctx context.Context, receipt ReflectionReceipt)
 // external input of the observing agent's own address, stamped with the reflection
 // lineage, whose body is the static prompt led by the digest of the very pass that
 // fired it.
-func (r *Reflection) reflectionEvent(now, since time.Time, digest DigestSummary) event.Event {
+func (r *Reflection) reflectionEvent(now, since time.Time, digest DigestSummary, scan *ObservationScan, activation activation) event.Event {
+	meta := activationMeta(activation)
+	meta[event.MetaKeyTriggerSource] = LineageReflection
 	return event.Event{
 		Type:      event.TypeExternalInput,
 		Timestamp: now,
-		Meta:      map[string]string{event.MetaKeyTriggerSource: LineageReflection},
-		Message:   model.Message{Role: model.RoleUser, Content: r.reflectionText(now, since, digest.Body)},
+		Meta:      meta,
+		Message:   model.Message{Role: model.RoleUser, Content: r.reflectionTextWithMaterial(now, since, digest.Body, scan)},
 		Owner:     r.addr,
 		Source:    r.addr,
 		Target:    r.addr,
@@ -470,10 +489,20 @@ func (r *Reflection) reflectionEvent(now, since time.Time, digest DigestSummary)
 // declared delivery targets currently bind and the static prompt. An empty section is
 // omitted, so a reflection with nothing to report carries no empty shell.
 func (r *Reflection) reflectionText(now, since time.Time, digest string) string {
+	return r.reflectionTextWithMaterial(now, since, digest, nil)
+}
+
+// reflectionTextWithMaterial renders the same input beside the committed bodies
+// of the pass: the plain reflectionText form carries no scan and therefore no
+// material section.
+func (r *Reflection) reflectionTextWithMaterial(now, since time.Time, digest string, scan *ObservationScan) string {
 	parts := []string{fmt.Sprintf("[reflection] a scheduled reflection input\n\nlast consumed reflection: %s\ninjected at: %s",
 		describeMoment(since), now.UTC().Format(time.RFC3339Nano))}
 	if digest != "" {
 		parts = append(parts, digest)
+	}
+	if material := materialText(scan); material != "" {
+		parts = append(parts, material)
 	}
 	if delivery := r.deliveryText(); delivery != "" {
 		parts = append(parts, delivery)
@@ -482,6 +511,54 @@ func (r *Reflection) reflectionText(now, since time.Time, digest string) string 
 		parts = append(parts, r.cfg.Prompt)
 	}
 	return strings.Join(parts, "\n\n")
+}
+
+// materialFactLimit bounds how many committed bodies the material section of a
+// reflection input carries.
+const materialFactLimit = 4
+
+// materialText renders the real committed bodies of the pass, newest first: the
+// same agent's own facts read as content beside the digest's summaries, so a
+// self-observation reflects on the conversation itself instead of a shadow of it.
+// The section is bounded and states how many bodies the bound left out.
+func materialText(scan *ObservationScan) string {
+	if scan == nil {
+		return ""
+	}
+	ordered := make([]ScannedFact, 0, len(scan.negatives)+len(scan.Facts))
+	ordered = append(ordered, scan.negatives...)
+	ordered = append(ordered, scan.Facts...)
+	seen := make(map[event.EventID]bool, len(ordered))
+	lines := []string{"observed material (committed bodies, newest first):"}
+	listed := 0
+	omitted := 0
+	for _, fact := range ordered {
+		if seen[fact.Identity.Key] {
+			continue
+		}
+		seen[fact.Identity.Key] = true
+		if strings.TrimSpace(fact.body) == "" {
+			continue
+		}
+		if listed >= materialFactLimit {
+			omitted++
+			continue
+		}
+		lineage := "external"
+		if fact.Attribution.SelfManaged {
+			lineage = "self-managed"
+		}
+		lines = append(lines, fmt.Sprintf("- [%s] %s (%s, %s):\n%s",
+			fact.Identity.Key, fact.Content.Type, fact.Identity.Partition, lineage, fact.body))
+		listed++
+	}
+	if listed == 0 {
+		return ""
+	}
+	if omitted > 0 {
+		lines = append(lines, fmt.Sprintf("omitted: %d committed body(ies) beyond the material bound", omitted))
+	}
+	return strings.Join(lines, "\n")
 }
 
 // deliveryText renders the delivery face of one reflection input: every declared

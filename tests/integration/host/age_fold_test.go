@@ -77,9 +77,10 @@ func TestAgeFoldFiresFromCommits(t *testing.T) {
 	decl := &config.Declaration{
 		Entry: "agent-a",
 		Agents: []config.AgentSpec{{
-			ID:        "agent-a",
-			Model:     "model-a",
-			MaxTokens: 100,
+			ID:                    "agent-a",
+			Model:                 "model-a",
+			MaxTokens:             100,
+			ProviderContextWindow: 300,
 		}},
 	}
 	run, err := assembly.Assemble(ctx, decl, map[event.AgentID]assembly.NativeAgent{
@@ -233,7 +234,7 @@ func TestRebuildRefoldsIdempotent(t *testing.T) {
 		}
 	}
 	rebuilt := replay.NewReplayProjection()
-	if _, err := replay.RebuildProjectionFromWAL(ctx, rebuilt, chain, replay.NewMemoryRelations(), chainKey, replay.RebuildOptions{}); err != nil {
+	if _, err := replay.RebuildProjectionFromWAL(ctx, rebuilt, chain, &replay.MemoryRelations{}, chainKey, replay.RebuildOptions{}); err != nil {
 		t.Fatalf("rebuild the projection from the chain: %v", err)
 	}
 	report, err := rebuilt.FoldByAge(ctx, replay.AgeFoldPlan{

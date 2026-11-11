@@ -1,6 +1,6 @@
 # 事实词汇表（FACT-VOCABULARY）
 
-**这份文档面向扩展者与评审者**：读完之后应当知道两件事——框架里"事实"的判据是什么，以及每一族事实住在哪个包、身份是什么、类型是什么、靠什么机制锁定。表里每一行都能在对应包内逐字核到（方法名、类型值、锁定拒绝都能复跑）。族名的一行白话读法与领域类比见 [`docs/GLOSSARY.md`](GLOSSARY.md)「事实七族」表；身份、类型与锁定机制以本表为准。
+**这份文档面向扩展者与评审者**：读完之后应当知道两件事——框架里"事实"的判据是什么，以及每一族事实住在哪个包、身份是什么、类型是什么、靠什么机制锁定。表里每一行都能在对应包内逐字核到（方法名、类型值、锁定拒绝都能复跑）。族名的一行白话读法与领域类比见 [`docs/GLOSSARY.md`](GLOSSARY.md)「事实族登记表」表（十一族）；身份、类型与锁定机制以本表为准。
 
 <a id="fact-category"></a>
 ## 一、事实类别契约
@@ -19,18 +19,20 @@
 | 1 | 核心事件 | `event` | `Event.Key`（规范 hex 存储键） | `Event.Type`（`TypeAgentOutput` 等冻结类型） | 存储键即身份：同一 Key 只存一条事实，Type 随事实冻结 |
 | 2 | 通知 | `task` | `TaskID:Round:Kind:Seq` 合成（`runtime/task/fact.go`） | `string(Kind)` | 幂等派发：同一身份重复投递不记第二条事实，重试保留原身份 |
 | 3 | 训练记录 | `rl` | `AttemptRecord.ID` | `rl.attempt` | 决策边界下的一次隐藏重试不算第二次 attempt，记录只追加 |
-| 4 | 声明 | `config` | `Fingerprint(d)` 的规范指纹 hex（`api/config/fact.go`） | `config.declaration` | 指纹只取声明面：同内容重载同一身份；源文档 `Raw` 与运行期绑定不入指纹；config 不 import event，结构性满足 `Fact` |
-| 5 | 引用票据 | `memory/ledger` | `OriginalRef.Key`（原文 blob 的规范 hex 键，`reference.go`） | `memory.original` | 去重域（owner/format/retention）只分开票据、不重标识 blob：同内容多票据共键，`Put` 不失效既有票据 |
+| 4 | 声明 | `config` | `Fingerprint(d)` 的规范指纹 hex（`api/config/fact.go`） | `config.declaration` | 指纹只取声明面：同内容重载同一身份；源文档 `Raw` 与运行期绑定不入指纹；config 不 import event，结构性满足 `Fact`。身份不等于唯一：配置链按生效次序追加，同一身份可在链上多次出现（回退加载各记一条生效事实） |
+| 5 | 引用票据 | `memory/ledger` | `OriginalRef.Key`（拥有该正文的 EventID，`reference.go`） | `memory.original` | 引用域（owner/format/retention）只分开票据；正文始终按 EventID 独立，同内容也不跨消息共享，`Put` 不失效既有票据 |
 | 7 | 压缩请求 | `event` | `CompressRequest.ID`（producer‖subject‖reason 内容寻址，`api/event/compress_request.go`；日志随事实入链） | `compress.request` | 同判定同身份：重复/重试判定不分叉第二条请求，`At` 只作首落盘戳；消费后单次 retire |
 | 8 | 压缩产物 | `event` | `CompressProduct.ID`（request‖producer‖key 内容寻址，`api/event/compress_product.go`） | `compress.product` | 一条 request 至多一条产物：重试执行同身份；键与正文是投影恢复的唯一来源 |
 | 9 | 收尾判定 | `event` | `FinalRoundRequest.ID`（range‖reason 内容寻址，`api/event/final_round_request.go`） | `final_round.request` | 同一 range 同原因至多一条：判定输入（轮次/耗时）随事实走但不入身份 |
 | 10 | 注意力 | `task` | `AttentionFact.FactKey`（`attention:` 前缀 + 角色与 kind/target/lineage 的散列，`runtime/task/attention.go`） | `event.TypeAttentionQuestion` / `TypeAttentionAnswer` / `TypeAttentionClearance` | 同身份同角色重复提交不落第二条事实（同键拒二落）；answer/clearance 命名不到链上 question 具名拒绝 |
+| 11 | 交付结算 | `assembly` | `delivery.<交付身份>.<状态>` 合成（`assembly/host_delivery.go` 的 `deliverySettlementKey`；交付身份由落链后的 fact key 确定性导出） | `delivery.settlement` | 追加式：同（身份,状态）键重放不添第二条、同键异内容按 `memory.ErrFactKeyConflict` 拒收；状态转移即新键（事实键不可改）；未清事实驻留事实窗口，按族构造性豁免 TTL 墓碑化 |
+| 13 | 框架检查点 | `event` | `Checkpoint.Key`（`checkpoint:<partitionSeq>` 合成，`api/event/checkpoint.go` 的 `CheckpointKey`；内部 `ID` 是载荷内容寻址） | `checkpoint` | 一身份一事实：键随分区序号单调，同槽位不二落；载荷自带内容寻址 ID，读回时按载荷重算不符即拒恢复（坏 checkpoint 具名拒 boot，不退全量）；承载全部可恢复状态切片 + 一致性切面水位 |
 
-合成身份的语义（具名裁定）：通知的身份是它自己携带的四元组，`Notice.Event` 指向的已提交事实**永不替换**这个身份，所以四元组才是 `FactKey` 的输入、被指向的事件只是消费线索；声明的身份是规范指纹（`api/config/fact.go` 具名注释）；票据的身份是原文 hex 键，去重域只决定票据能否并存，不改写身份。
+合成身份的语义（具名裁定）：通知的身份是它自己携带的四元组，`Notice.Event` 指向的已提交事实**永不替换**这个身份，所以四元组才是 `FactKey` 的输入、被指向的事件只是消费线索；声明的身份是规范指纹（`api/config/fact.go` 具名注释）；票据的身份是原文 EventID，引用域只决定票据能否并存，正文不跨消息共享。
 
 **触发源戳的归属**：`event.MetaKeyTriggerSource` 写入的戳名由产出它的机制包持有；宿主经 `InvokeRequest.TriggerSource` 自带的戳由 `assembly/run.go` 原样写入。戳只标记来源、不构成身份，因此不在上表新增族。
 
-**投递四键同理**：`delivery.target`／`delivery.identity`／`delivery.receipt`／`delivery.source` 是两族投递（agent 主动发送、框架结算通知）共用的元数据条目——投递身份只是去重键，承载它的事实本身就落在已有的核心事件族（`external_input`／`task_settled`），因此不登记新族；投递账目（`assembly/host_tools.go` 的 `DeliveryLedger`）是从这些事实投影出来的读面，不是第八族。
+**投递五键同理**：`delivery.target`／`delivery.identity`／`delivery.receipt`／`delivery.source`／`delivery.denial` 是两族投递（agent 主动发送、框架结算通知）共用的元数据条目——投递身份只是去重键，承载它的事实本身就落在已有的核心事件族（`external_input`／`task_settled`），因此不登记新族；投递账目（`assembly/host_tools.go` 的 `DeliveryLedger`）是从这些事实投影出来的读面，不另立族（编号 8 已属压缩产物）。
 
 | 戳 | 常量 | 归属包 |
 |---|---|---|
@@ -39,7 +41,7 @@
 
 **投影账本 vs 事实链**：呈现不落账——视图属于那一次装配，按当前事实、声明与预算现算（`replay_budget.go`），模型实际看到什么由请求快照记录；`context_compress` 是核心事件族（族 1）的一条事件，回放按载荷里的 `full_boundary` 续读（`memory/replay/fold.go`、`projection.go` 的 `CompactionEventType`）。**`Summary` 不是模型总结**：投影条目的 `Summary` 取自已提交事件的 `event_summary` 元数据，是原文的一行读数（工具调用的工具行、消息的短渲染），不是模型二次改写的摘要；`Content` 才是原文，摘要级视图只换读这一行，原文仍按 `Key` 逐字节读回；折叠载荷里 summary ref 同理。
 
-**六面产物的归属**（消费者协议第二辑，面见 `docs/EXTENSIONS.md` 第四节）：
+**五面产物的归属**（消费者协议第二辑，面见 `docs/EXTENSIONS.md` 第四节）：
 
 | 消费面 | 产物（身份） | 事实族归属 |
 |---|---|---|
@@ -48,9 +50,9 @@
 | Apply | `state.PublicationRecord`（代际＋指纹） | 不入族：发布台账，不是任务事实链 |
 | Shutdown | `agent.DrainReport`（Drained/Unsettled） | 不入族：结算读数 |
 | Observer | `plugin.AuditRecord`（Fact＋Attempts） | 不入族：观测证据，只引事实身份 |
-| Exporter | `rl.SampleLine`（`Provenance.ExportID` 为快照身份，`Fact.EventKey` 引用源事实） | `rl` 制品事实（导出快照）；源事实仍属 `event` 族 |
+| （无 Exporter 面） | `rl.SampleLine` / `Provenance.ExportID` / `Fact.EventKey` 全仓 0 命中；rl 侧只有 `rl.SFTSample`（不实现 `event.Fact`）与唯一事实族 `rl.attempt` | 不入族：无制品事实 |
 
-一句话裁定：只有导出的封印快照是制品事实，其余五面的产物是读视图、投递状态、发布台账、结算读数或观测证据，都不新登记族——新族只在本表第二节登记。**门禁裁决也不是事实**：事件门的 killed/uncovered、required 汇总与 L1/L2/L3 证据是门禁证据（只引事实身份、不入链、无 `FactKey`），口径见 [`docs/OPERATION.md`](OPERATION.md#event-gates)。
+一句话裁定：五面的产物是读视图、投递状态、发布台账、结算读数或观测证据，都不新登记族（无第六面制品事实）——新族只在本表第二节登记。**门禁裁决也不是事实**：事件门的 killed/uncovered、required 汇总与 L1/L2/L3 证据是门禁证据（只引事实身份、不入链、无 `FactKey`），口径见 [`docs/OPERATION.md`](OPERATION.md#event-gates)。
 
 <a id="reduction-criteria"></a>
 ## 三、化归判据：新增能力先过三问

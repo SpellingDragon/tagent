@@ -38,8 +38,8 @@ const hostCaptureSwapDir = "swap"
 // under <root>/trajectories, and admissions run through the sink's default
 // bounds, so a capture never waits on the writer and never blocks a request.
 //
-// - The resident budget comes from the entry agent's capture_budget_mb declaration (zero reads the capture default of 64MB), and a snapshot swapped out of that budget lands under trajectories/swap and reads back from there on demand.
-func openHostCapture(root string, budgetMB int) (*rl.TrajectoryCapture, error) {
+// - The resident budget is the capture's own default: no entry agent declares capture bytes, so the sink's registered bound applies, and a snapshot swapped out of that budget lands under trajectories/swap and reads back from there on demand.
+func openHostCapture(root string) (*rl.TrajectoryCapture, error) {
 	dir := filepath.Join(root, hostTrajectoriesDir)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, fmt.Errorf("tagent: create the trajectory directory %s: %w", dir, err)
@@ -55,9 +55,6 @@ func openHostCapture(root string, budgetMB int) (*rl.TrajectoryCapture, error) {
 	budget := rl.CaptureBudget{SwapDir: filepath.Join(dir, hostCaptureSwapDir)}
 	if err := os.RemoveAll(budget.SwapDir); err != nil {
 		return nil, fmt.Errorf("tagent: clear the trajectory swap directory %s: %w", budget.SwapDir, err)
-	}
-	if budgetMB > 0 {
-		budget.Bytes = int64(budgetMB) << 20
 	}
 	capture, err := rl.NewTrajectoryCaptureWithBudget(hostCaptureID, sink, rl.SnapshotPolicy{}, budget)
 	if err != nil {

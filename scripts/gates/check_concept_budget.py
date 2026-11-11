@@ -120,6 +120,15 @@ BASELINE = (
     ("iface-methods", "features/rl/capture.go:Capture", 3),
     ("iface-methods", "features/rl/capture_wiring.go:CaptureScope", 4),
     ("iface-methods", "runtime/agent/loop.go:Capture", 3),
+    # memory/ledger AtomicStore 4m（2026-11-05 03 资源有界；hot-update-and-purity-closure
+    # 09 改写后由 kvPort 3m 正名为原子存储引擎 4m）：同一 KV 面上的三种读动作（单键/前缀
+    # 枚举、前缀键序、命名空间清单）与一次带屏障提交，拆成两个接口会让前缀枚举或命名
+    # 空间清单绕开内存脏合并另立一条读路，与本域“不立第二读路”的裁决冲突。
+    ("iface-methods", "memory/ledger/atomic_store.go:AtomicStore", 4),
+    # features/evolution/governance GovernanceEventLog 3m（2026-11-05 03 收口）：治理账的
+    # 持久面＝写入、前缀回放与同步屏障三种动作，同一本账；拆窄口会让前缀回放绕开
+    # Sync 屏障另立一条读路，与本域“一条链一本账”的裁决冲突。
+    ("iface-methods", "features/evolution/governance/denial.go:GovernanceEventLog", 3),
     ("struct-fields", "runtime/agent/delegate.go:Delegation", 9),
     ("struct-fields", "runtime/task/spec.go:Spec", 9),
     ("struct-fields", "tool/subagent/builder.go:Builder", 8),
@@ -132,6 +141,11 @@ BASELINE = (
     ("iface-methods", "runtime/agent/delegate.go:DelegationTasks", 4),
     ("iface-methods", "runtime/state/durable.go:FactLog", 4),
     ("iface-methods", "runtime/state/store.go:Store", 4),
+    # hot-update-and-purity-closure 12 引入叶：Stateful 是一份可恢复状态切片在接缝上的
+    # 三问（键名/说出状态/放回状态），5 个实现者（投影、送达账、邮箱、任务账、输入轮）。
+    # 拆窄口会让恢复路径绕过快照面另立一条写回通道（说出状态者与放回状态者分离），
+    # 与「一份切片一个持有者」的接缝裁决冲突；收窄留作后续，ratchet 警示保持可见。
+    ("iface-methods", "runtime/state/checkpoint.go:Stateful", 3),
     ("iface-methods", "runtime/task/registry.go:Manager", 4),
     ("iface-methods", "runtime/task/registry.go:Registry", 4),
     ("iface-methods", "tool/exec/stop.go:Executor", 4),
@@ -144,8 +158,8 @@ BASELINE = (
     ("struct-fields", "tool/subagent/subagent.go:Definition", 10),
     # Declaration 6f（声明面本体）：组织声明=入口/代理/引用/基线/MCP 服务器代际/原始文档，MCP 面随 mcp_servers 声明下沉各成一格，拆开会让声明面出现影子结构。
     ("struct-fields", "api/config/config.go:Declaration", 6),
-    # AgentSpec 24f（声明面本体）：单个 agent 的声明格＝核心（身份/模型/引用/参数/回合预算/回放窗口）＋熔断两镜（max_calls_per_response/long_context_tokens，单响应调用量与长上下文阈值，人审挂起式）＋捕获预算（capture_budget_mb，轨迹常驻上限）＋ memory/meditation/file/exec 四个域段平铺在同一格；窗口三字段（max_tokens/compress_threshold/keep_recent_tasks）替代 replay_budget；三个熔断/预算键与 max_tool_iterations 同模式，是声明字段不是影子结构（oom-bounded-capture-and-storm-fuse）。
-    ("struct-fields", "api/config/config.go:AgentSpec", 24),
+    # AgentSpec 26f（声明面本体）：单个 agent 的声明格＝核心（身份/模型/引用/参数/回合预算/回放窗口）＋熔断两镜（max_calls_per_response/long_context_tokens，单响应调用量与长上下文阈值，人审挂起式）＋捕获预算（capture_budget_mb，轨迹常驻上限）＋请求预算两字段（provider_context_window/output_reserve，provider 窗口与输出余量的可选声明；导出是 YAML 解码前提，MUST NOT 退回未导出访问）＋ memory/meditation/file/exec 四个域段平铺在同一格；窗口三字段（max_tokens/compress_threshold/keep_recent_tasks）替代 replay_budget；三个熔断/预算键与 max_tool_iterations 同模式，是声明字段不是影子结构（oom-bounded-capture-and-storm-fuse）。
+    ("struct-fields", "api/config/config.go:AgentSpec", 26),
     # MeditationSpec 6f：冥想运行声明本体，六个格分别是启用、节奏两格、提示、观察面与回流白名单，字段即声明形状。
     ("struct-fields", "api/config/config.go:MeditationSpec", 6),
     # event.ParsedMeta 9f（00.25 具名登记）：ParseEventMeta 的解析结果本体＝数据面，
@@ -201,6 +215,11 @@ BASELINE = (
     ("struct-fields", "runtime/state/resources.go:SkillLoad", 6),
     ("struct-fields", "runtime/state/session.go:MailboxEntry", 6),
     ("struct-fields", "runtime/task/wrapper.go:Result", 6),
+    # hot-update-and-purity-closure 12 引入叶（S2 类别豁免，同 event.Event 16f 先例）：
+    # StatedTask 是框架 checkpoint 状态的任务账本体＝数据保真面——一格对应「重启后
+    # 与链折叠逐格相等」所需的一条数据（声明/状态/链修订/轮次/四个移动戳/改道两格/
+    # 幂等变更账/未结义务），收窄字段即让恢复面在链折叠侧二次归并或丢掉一格保真。
+    ("struct-fields", "runtime/task/checkpoint.go:StatedTask", 13),
     # 04.2 执行资源解释（引入叶）：租约/续期/停滞/义务的只读投影，字段即
     # Manager.Explain 的回复本体，拆块即解释面需要二次装配。
     ("struct-fields", "tool/exec/exec.go:Explanation", 10),
@@ -208,16 +227,45 @@ BASELINE = (
     # 数据面，资源键/相位/退出码/确认/释放/细节/归属/时刻八格是一次生命周期快照的语义
     # 本体，收窄字段等于拆数据面，消费方须把同一观察二次归并。
     ("struct-fields", "tool/exec/state.go:StateEvent", 8),
+    # hot-update-and-purity-closure 11/09 引入叶（S2 类别豁免，同 event.Event 16f 先例）：
+    # meditation.Plan 是文档启用的一段反思声明本体（观察 agent/会话/节奏与下限/静态提示/
+    # 观察与读取命名空间/回流目标/水位锚），Faces 是一次挂载装配所读写的运行面集合
+    # （锚存储、观察与注入面、模型在飞读、实例、会话查询）——两者都是解析后的声明/装配
+    # 结果本体，不是可选配置开关，收窄字段等于让 root 重新读冥想要参数（ADR 0004）。
+    ("struct-fields", "features/evolution/meditation/mount.go:Plan", 10),
+    ("struct-fields", "features/evolution/meditation/mount.go:Faces", 6),
+    # rl SFTSample（export_chain 11 引入叶）：一行 SFT 样本＝该回合呈现的输入、助手给出的
+    # 标签、所属 episode 与回合号、会话，以及批回合逐条输入归属；六格是导出行本体，
+    # 收窄会让归属二次归并成匿名文本块。
+    ("struct-fields", "features/rl/export_chain.go:SFTSample", 6),
+    # rl PreferenceRow（偏好导出行）：两两对齐的一次尝试对＝提示、工具声明、胜出补全、
+    # 被弃补全、偏好来源与推导版本；七格是偏好行本体，收窄即丢掉一次偏好判定的归属依据。
+    ("struct-fields", "features/rl/export_chain.go:PreferenceRow", 7),
     # S3 ctx-bare — accessor 落点具名登记（调用点裸读=0；实现体单次 ctx.Value=合法）
     ("ctx-bare", "api/plugin/phases.go:*", 1),   # CallPassFrom：派发→受理 pass 传输（锁定工具端口无第二通道）
     ("ctx-bare", "runtime/task/wrapper.go:*", 1),    # CallFrameFrom：per-call 身份经端口唯一通道
-    ("ctx-bare", "assembly/host_delivery.go:*", 1),    # deliveryLineageFrom：回合血统经类型化 accessor 落到 send 投递
     ("ctx-bare", "assembly/settle_turn.go:*", 1),    # settleBarrierFrom：回合终态屏障经类型化 accessor 落到驱动与投递之间
+    ("ctx-bare", "assembly/checkpoint.go:*", 1),     # flightHeldBy：切面排水判 caller 是否持 fence 单元，经类型化 accessor 单通道
     # S4 contract-surface 已出清（叶 00.24）：全部导出接口的 canonical 范例与 Godoc
     # 红线均已落地，本表不再登记 S4 债务。以下一条为再次登记：ResultDelegation 是
     # 结算携带结果正文引入的可选拓展面，范例与红线随后续批次补齐；在此之前显式
     # 计入债务，新增接口不因“尚未补范例”而免检。
     ("contract-surface", "tool/subagent/tool.go:ResultDelegation", None),
+    # hot-update-and-purity-closure 引入叶的三条 S4 债务（同 ResultDelegation 先例：范例与
+    # Godoc 红线随后续批次补齐，在此之前显式计入，新增接口不因“尚未补范例”而免检）：
+    # GenerationFaces＝每代 native 面的报告口，AtomicStore＝每层打开的原子存储引擎口，
+    # ChainFailureNamer＝durable 读面具名说出“无正文”的原因。
+    ("contract-surface", "assembly/run.go:GenerationFaces", None),
+    ("contract-surface", "memory/ledger/atomic_store.go:AtomicStore", None),
+    ("contract-surface", "tool/recall/get.go:ChainFailureNamer", None),
+    # 同批 rl 证据导出的两个读面口（EvidenceLines 只读行记录面、SnapshotReadBack 快照
+    # 回读面）：范例与红线随证据导出叶补齐前显式计入债务。
+    ("contract-surface", "features/rl/export_chain.go:EvidenceLines", None),
+    ("contract-surface", "features/rl/export_chain.go:SnapshotReadBack", None),
+    # 同波 domain 12 的第四条 S4 债务（同 ResultDelegation 先例）：Stateful 是状态接缝的
+    # 委托面，范例与 Godoc 红线随后续批次补齐；在此之前显式计入，新增接口不因“尚未补
+    # 范例”而免检。
+    ("contract-surface", "runtime/state/checkpoint.go:Stateful", None),
 )
 # ---- Go 源码静态扫描（纯 stdlib；不做类型检查，见模块 docstring 的局限）----
 IFACE_DECL_RE = re.compile(r"^type\s+(?P<name>[A-Za-z_]\w*)\s+interface\s*\{", re.M)

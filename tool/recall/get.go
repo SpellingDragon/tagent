@@ -61,6 +61,18 @@ type getAnswer struct {
 	Parent *eventItem `json:"parent,omitempty"`
 }
 
+// ChainFailureNamer is the durable read face that names why it answers no
+// readable event for one key. A Table that does not carry it loses nothing it
+// promised: a key it does not hold is answered as missing, exactly as Table
+// states. A table that does carry it separates a key the chain really does not
+// hold from a body it holds and cannot read, so corruption is refused by name
+// instead of being answered as an absent event.
+type ChainFailureNamer interface {
+	// ChainFailure names the failure that stopped the chain from answering key,
+	// or answers the empty nil when the chain holds no event for it.
+	ChainFailure(key event.EventID) error
+}
+
 // getTool is the model-facing exact read tool.
 type getTool struct{ base }
 
@@ -118,6 +130,9 @@ func (t *getTool) Call(ctx context.Context, jsonArgs []byte) (any, error) {
 	answer := getAnswer{Tool: GetToolName, Key: key}
 	landed, held := t.reads.Table.Event(key)
 	if !held {
+		if err := t.chainFailure(key); err != nil {
+			return nil, err
+		}
 		answer.Reason = reasonMissing
 		return encode(GetToolName, answer)
 	}
@@ -129,6 +144,9 @@ func (t *getTool) Call(ctx context.Context, jsonArgs []byte) (any, error) {
 	answer.Time, answer.Partition = landed.Timestamp, landed.PartitionID
 	reference, held := t.reads.Table.Reference(key)
 	if !held {
+		if err := t.chainFailure(key); err != nil {
+			return nil, err
+		}
 		answer.Reason = reasonMissing
 		return encode(GetToolName, answer)
 	}
@@ -143,31 +161,59 @@ func (t *getTool) Call(ctx context.Context, jsonArgs []byte) (any, error) {
 		}
 		return encode(GetToolName, answer)
 	}
+	if args.IncludeParent {
+		parent, err := t.parentOf(key)
+		if err != nil {
+			return nil, fmt.Errorf("%s: read the parent of %s: %w", GetToolName, key, err)
+		}
+		answer.Parent = parent
+	}
 	answer.Found = true
 	answer.Body = string(segment.Body)
 	answer.Offset = args.Offset
 	answer.Next = segment.Next.Offset
 	answer.EOF = segment.EOF
-	if args.IncludeParent {
-		answer.Parent = t.parentOf(key)
-	}
 	return encode(GetToolName, answer)
 }
 
-// parentOf renders the summary of the parent event of one key, or nothing when
-// the chain has no parent there or the parent lies outside the granted
-// partitions.
-func (t *getTool) parentOf(key event.EventID) *eventItem {
-	parent, err := t.reads.Trace.GetParent(key)
-	if err != nil || parent == "" {
+// chainFailure names the failure that stopped the durable chain from answering
+// key, or answers nil when it holds no readable event for a reason absence
+// already states. A table carrying no failure face answers nil, so a deployment
+// that wires the declared Table alone keeps answering missing.
+func (t *getTool) chainFailure(key event.EventID) error {
+	namer, ok := t.reads.Table.(ChainFailureNamer)
+	if !ok {
 		return nil
+	}
+	failure := namer.ChainFailure(key)
+	if failure == nil {
+		return nil
+	}
+	return fmt.Errorf("%s: read %s: %w", GetToolName, key, failure)
+}
+
+// parentOf renders the summary of the parent event of one key and names a
+// parent-read failure instead of presenting it as no parent.
+func (t *getTool) parentOf(key event.EventID) (*eventItem, error) {
+	parent, err := t.reads.Trace.GetParent(key)
+	if err != nil {
+		return nil, fmt.Errorf("read the parent link: %w", err)
+	}
+	if parent == "" {
+		return nil, nil
 	}
 	landed, held := t.reads.Table.Event(parent)
-	if !held || !t.admits(landed.PartitionID) {
-		return nil
+	if !held {
+		if err := t.chainFailure(parent); err != nil {
+			return nil, err
+		}
+		return nil, nil
+	}
+	if !t.admits(landed.PartitionID) {
+		return nil, nil
 	}
 	item := itemOf(landed)
-	return &item
+	return &item, nil
 }
 
 // readReason names the reason a scoped read served no text, or the empty string

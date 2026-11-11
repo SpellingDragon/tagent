@@ -52,6 +52,14 @@ type ProjectionEntry struct {
 	// consumption path. The field stays private so the entry's public shape
 	// remains the five fields of a projection record.
 	messageRole string
+	// instanceID is the recorder generation the fact behind the entry was
+	// written under: the runtime instance identity of the event envelope. It
+	// stays private so the entry's public shape remains the five fields of a
+	// projection record; the fact→projection mapping fills it through
+	// WithInstanceID and the fold reads it through Generation, so a folded line
+	// names the generation it came from without the envelope being copied beside
+	// the entry or the identity being truncated to a shorter form.
+	instanceID event.InstanceID
 	// Time is the time the fact was recorded.
 	Time time.Time
 }
@@ -74,8 +82,8 @@ var (
 	// under it would join one user's facts to a shared partition chain.
 	ErrChainKeyRequired = errors.New("memory: chain key names no session")
 	// ErrRebuildUnwired reports a rebuild without the target projection, the fact
-	// chain or the relation ledger it maintains the causal chain through.
-	ErrRebuildUnwired = errors.New("memory: rebuild needs a target projection, a fact chain and a relation ledger")
+	// chain or the parent map it maintains the causal chain through.
+	ErrRebuildUnwired = errors.New("memory: rebuild needs a target projection, a fact chain and a parent map")
 	// ErrChainPageLimit reports a chain page request that asks for no fact at all.
 	ErrChainPageLimit = errors.New("memory: chain page must read at least one fact")
 	// ErrChainScan reports a fact chain read that failed, so an empty result is
@@ -398,7 +406,6 @@ func RebuildProjectionFromWAL(ctx context.Context, target *ReplayProjection, cha
 		}
 		report.FullBoundary = payload.FullBoundary
 		target.fold = &payload
-		target.boundary = payload.FullBoundary
 		target.Append(ctx, entryOfRef(payload.Summary))
 		report.Entries++
 		report.Consumed = append(report.Consumed, payload.ConsumedKeys...)
@@ -509,5 +516,20 @@ func (e ProjectionEntry) StatedRole() string { return e.messageRole }
 // public shape stays closed.
 func WithMessageRole(entry ProjectionEntry, role string) ProjectionEntry {
 	entry.messageRole = role
+	return entry
+}
+
+// Generation reports the recorder generation the fact behind the entry was
+// written under: the envelope's runtime instance identity, verbatim and never
+// truncated. An entry whose fact named no generation answers empty, which the
+// fold renders as its explicit gen:? placeholder rather than inventing one.
+func (e ProjectionEntry) Generation() event.InstanceID { return e.instanceID }
+
+// WithInstanceID returns the entry beside the recorder generation its fact was
+// written under: the one setter for the field the fact→projection mapping fills,
+// so the entry's public shape stays closed and the generation is read back only
+// through Generation.
+func WithInstanceID(entry ProjectionEntry, generation event.InstanceID) ProjectionEntry {
+	entry.instanceID = generation
 	return entry
 }

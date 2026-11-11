@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sync"
 	"testing"
 	"time"
@@ -334,7 +335,7 @@ func scenario10Grouped(samples []rl.SFTSample) bool {
 		return false
 	}
 	for i := range want {
-		if samples[i] != want[i] {
+		if !reflect.DeepEqual(samples[i], want[i]) {
 			return false
 		}
 	}

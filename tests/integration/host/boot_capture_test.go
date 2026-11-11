@@ -17,8 +17,10 @@ import (
 // TestBootMountsCapture boots a host over a storage root and reads the capture it wrote:
 //   - the turns complete against the scripted provider
 //   - no writer seal exists while the run serves, so the per-turn seal stays a no-op
-//   - <root>/trajectories/attempts.jsonl holds the attempt of every turn's decision
-//   - every stored line parses as the versioned attempt record the sink writes
+//   - <root>/trajectories/attempts.jsonl holds the attempt of every turn's decision beside that decision's request evidence
+//   - every stored line parses as a versioned record the sink writes: one attempt line per decision
+//   - a request evidence line names the reference that decision's request is read back through
+//   - the sealed manifest accounts both kinds the writer confirmed: the attempts together with the evidence beside them
 //   - the sealed trajectory reads back complete under the boot capture identity
 //
 // 契约: docs/wiki/rl/rl-architecture.md#trajectory-capture
@@ -64,6 +66,7 @@ func TestBootMountsCapture(t *testing.T) {
 		t.Fatalf("read the boot capture record file: %v", err)
 	}
 	lines := 0
+	evidence := 0
 	for _, raw := range bytes.Split(content, []byte("\n")) {
 		if len(raw) == 0 {
 			continue
@@ -72,6 +75,13 @@ func TestBootMountsCapture(t *testing.T) {
 		if err != nil {
 			t.Fatalf("parse the stored record %q: %v", raw, err)
 		}
+		if line.Kind == rl.RecordKindRequest {
+			if line.RequestEvidence() == nil {
+				t.Fatalf("stored record kind = %q beside no evidence: %q", line.Kind, raw)
+			}
+			evidence++
+			continue
+		}
 		if line.Kind != rl.RecordKindAttempt || line.Attempt == nil {
 			t.Fatalf("stored record kind = %q, want the attempt line the sink writes", line.Kind)
 		}
@@ -79,6 +89,9 @@ func TestBootMountsCapture(t *testing.T) {
 	}
 	if lines != 2 {
 		t.Fatalf("stored record lines = %d, want the attempt of each turn's decision under one sink", lines)
+	}
+	if evidence != 2 {
+		t.Fatalf("stored evidence lines = %d, want the request evidence of each turn's decision", evidence)
 	}
 
 	manifest, err := rl.ReadCaptureSeal(dir)
@@ -91,8 +104,8 @@ func TestBootMountsCapture(t *testing.T) {
 	if manifest.CaptureID != "host-trajectory" {
 		t.Fatalf("manifest capture id = %q, want the boot capture identity", manifest.CaptureID)
 	}
-	if manifest.Records != int64(lines) || manifest.Dropped != 0 {
-		t.Fatalf("manifest = %+v, want the %d stored records and no loss", manifest, lines)
+	if want := int64(lines + evidence); manifest.Records != want || manifest.Dropped != 0 {
+		t.Fatalf("manifest = %+v, want the %d stored records and no loss", manifest, want)
 	}
 	if len(manifest.Files) == 0 || manifest.Files[0].Name != rl.SinkRecordsFile || manifest.Files[0].Records < 1 {
 		t.Fatalf("manifest files = %+v, want the sealed record file entry", manifest.Files)

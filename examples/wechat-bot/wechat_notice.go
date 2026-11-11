@@ -1,4 +1,4 @@
-// wechat_notice.go 是两条一次性启动通知：保险链换装的转世通报与上一世重启失败的系统告警。
+// wechat_notice.go 是两条一次性启动通知：保险链换装的重启恢复通报与上一世重启失败的系统告警。
 // 两者都把一条内部消息塞进宿主的收件箱，让第一回合读到；传输是微信宿主的启动语义，
 // 与装配无关。
 //
@@ -23,7 +23,7 @@ import (
 )
 
 const (
-	// restartDoneFreshWindow 是新鲜度窗：标记文件新于此窗内的启动才算转世，否则按冷启动处理。
+	// restartDoneFreshWindow 是新鲜度窗：标记文件新于此窗内的启动才算重启恢复，否则按冷启动处理。
 	restartDoneFreshWindow = 10 * time.Minute
 
 	// walTailEventLimit 与 walTailSummaryMaxChars 是通报的令牌预算：尾现场块只取最新的有限条、
@@ -75,9 +75,9 @@ func wakeOpsNotice(ctx context.Context, ops noticeOps, admitted, source string) 
 	}
 }
 
-// detectReincarnation 判定本次启动是否为转世：只看换装标记是否存在且足够新鲜。标记由保险链在
+// detectRestartMarker 判定本次启动是否为重启恢复：只看换装标记是否存在且足够新鲜。标记由保险链在
 // 派生新进程之前写好，故无竞态；冷启动从不产生标记，故不会假阳性。
-func detectReincarnation(noticePath string, now time.Time) bool {
+func detectRestartMarker(noticePath string, now time.Time) bool {
 	st, err := os.Stat(noticePath)
 	if err != nil {
 		return false
@@ -236,12 +236,12 @@ func waitNoticeAppearance(noticePath string, maxWait, poll time.Duration) bool {
 	}
 }
 
-// maybeInjectReincarnationNotice 是一次性启动钩子：轮询标记、判新鲜、组装通报、入箱、唤醒。
+// injectRestartNotice 是一次性启动钩子：轮询标记、判新鲜、组装通报、入箱、唤醒。
 // ops 是固定目标（预定会址 + 唤醒路）；tail 为事件尾查询面，nil 表示本进程未接事件存储，
 // 通报正文显式写出该降级。每一步都记日志，任何一步都不允许让机器人起不来。
 // - 已消费标记由读到通报的那一轮的确认写出，不在这里写：入箱时重命名它，进程在回合接手前死掉就把通报丢了。
 // - 通报已入箱且 ops 会址空闲时立刻驱动它那一轮，不等下一条用户消息把通报捎进来。
-func maybeInjectReincarnationNotice(inj inboxInjector, ops noticeOps, tail tailQuerier, agentName, runDir string, noticeWait time.Duration) {
+func injectRestartNotice(inj inboxInjector, ops noticeOps, tail tailQuerier, agentName, runDir string, noticeWait time.Duration) {
 	if !filepath.IsAbs(runDir) {
 		if exe, err := os.Executable(); err == nil {
 			runDir = filepath.Join(filepath.Dir(exe), runDir)
@@ -252,7 +252,7 @@ func maybeInjectReincarnationNotice(inj inboxInjector, ops noticeOps, tail tailQ
 	if !waitNoticeAppearance(noticePath, noticeWait, noticePollStep) {
 		return
 	}
-	if !detectReincarnation(noticePath, time.Now()) {
+	if !detectRestartMarker(noticePath, time.Now()) {
 		return
 	}
 	log.Infof("[reincarnation] D1 hit: fresh REINCARNATION_NOTICE at %s", noticePath)

@@ -26,13 +26,15 @@
 #       SSE goroutine (streamable_client.go family), trpc-mcp-go v0.0.10;
 #       both the symbol line and the file path line need a signature, since
 #       the transport symbol never carries its file name.
-#   C3  timing flakiness is NOT waived here — those tests skip via the
-#       agent/race_enabled_test.go build-tag mechanism instead.
+#   C3  timing flakiness is NOT waived here — the upstream race signatures
+#       waived below are classified by name, not by a build-tag skip.
 # Removal condition: upgrade past the upstream fix (trpc-agent-go, or
-# trpc-mcp-go for U5), delete the signature AND the per-test skips, rerun
-# `go test ./agent/... -race` (and the MCP face test for U5).
+# trpc-mcp-go for U5), delete the signature AND the per-test waivers, rerun
+# `go test ./runtime/agent/... -race` (and the MCP face test for U5).
 #
-# Usage: ./scripts/gates/race_check.sh [packages...]   (default: the ci.yml race set)
+# Usage: ./scripts/gates/race_check.sh [packages...]   (default: a subset; CI passes the
+#        explicit ci.yml race set. Running with no args does NOT cover cli/,
+#        internal/, the api/* split, or the six tests/integration trees.)
 # Test hook: RACE_CHECK_CLASSIFY_ONLY=1 RACE_CHECK_FAKE_EXIT=<n> feeds stdin
 # to the classifier without running go test (used by scripts/gates/test_race_check.sh).
 set -uo pipefail
@@ -121,7 +123,7 @@ race_check_classify() {
 
 pkgs=("$@")
 if [ ${#pkgs[@]} -eq 0 ]; then
-	pkgs=(./assembly/... ./memory/... ./runtime/... ./features/... ./api/... ./tool/...)
+	pkgs=(./assembly/... ./memory/... ./runtime/... ./features/... ./api/... ./tool/... ./bench/...)
 fi
 
 if [ -n "${RACE_CHECK_CLASSIFY_ONLY:-}" ]; then

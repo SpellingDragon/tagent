@@ -16,10 +16,12 @@ import (
 
 	"github.com/SpellingDragon/tagent/api/event"
 	"github.com/SpellingDragon/tagent/api/model"
+	"github.com/SpellingDragon/tagent/assembly"
 	"github.com/SpellingDragon/tagent/memory"
 	memoryembedder "github.com/SpellingDragon/tagent/memory/embedder"
 	"github.com/SpellingDragon/tagent/memory/ledger"
 	"github.com/SpellingDragon/tagent/memory/search"
+	"github.com/SpellingDragon/tagent/tool/recall"
 )
 
 // realStoreEvent is one corpus event: the fact its body derives from and the
@@ -36,14 +38,13 @@ type realStoreEvent struct {
 }
 
 // realStoreChain is the real store retrieval chain one case drives: the file
-// tier its events are committed into, the observation table its query face
+// tier its events are committed into, the durable query face
 // reads, and the searcher and scoped reader standing on them.
 type realStoreChain struct {
 	tier     *ledger.Tier
 	scoped   ledger.ScopedOriginalStore
 	store    *ledger.FileSegmentStore
-	source   *memory.StoreQuerySource
-	seam     *memory.VectorSeam
+	source   recall.Table
 	searcher *search.StoreSearcher
 	events   []realStoreEvent
 }
@@ -55,7 +56,6 @@ const (
 	realEventRetention = "keep"
 	realRecallText     = "迁移阶段回填索引顺序"
 	realFusionText     = "回填演练"
-	realAwaitLimit     = 5 * time.Second
 )
 
 // realOwnerOf is the address every corpus reference is registered under.
@@ -98,9 +98,9 @@ func realBodyOf(t *testing.T, ev realStoreEvent) []byte {
 	return encoded
 }
 
-// newRealStoreChain commits the corpus into a real file tier, registers every
-// original under the reference its body carries, and generates every event
-// vector through the given embedder binding.
+// newRealStoreChain commits the corpus into a real file tier and registers
+// every original under the reference its body carries; the searcher embeds
+// candidate text only when a query asks.
 func newRealStoreChain(t *testing.T, embedder memory.Embedder) *realStoreChain {
 	t.Helper()
 	ctx := context.Background()
@@ -133,61 +133,14 @@ func newRealStoreChain(t *testing.T, embedder memory.Embedder) *realStoreChain {
 			t.Fatalf("Put(original %s): %v", ev.key, err)
 		}
 	}
-	seam := memory.NewVectorSeam(0)
-	t.Cleanup(seam.Close)
-	seam.Bind(embedder)
-	for _, ev := range events {
-		if !seam.Submit(ev.key, ev.content) {
-			t.Fatalf("Submit(%s) refused: the seam is bound and the queue is empty", ev.key)
-		}
-		awaitStoreVector(t, seam, ev.key)
-	}
-	source := memory.NewStoreQuerySource()
+	source := assembly.NewTierQuerySource(tier.Segments)
 	return &realStoreChain{
 		tier:     tier,
 		scoped:   scoped,
 		store:    tier.Segments,
 		source:   source,
-		seam:     seam,
-		searcher: search.NewStoreSearcher(source, seam, embedder),
+		searcher: search.NewStoreSearcher(source, embedder),
 		events:   events,
-	}
-}
-
-// awaitStoreVector waits until the vector of key is ready, failing on a bounded
-// wait so a stalled generation fails the case instead of hanging the run.
-func awaitStoreVector(t *testing.T, seam *memory.VectorSeam, key event.EventID) {
-	t.Helper()
-	deadline := time.Now().Add(realAwaitLimit)
-	for time.Now().Before(deadline) {
-		if _, ready := seam.Vector(key); ready {
-			return
-		}
-		time.Sleep(time.Millisecond)
-	}
-	t.Fatalf("vector of %s never became ready", key)
-}
-
-// landEvent lands one committed event into the observation table by name.
-func (c *realStoreChain) landEvent(t *testing.T, key event.EventID) {
-	t.Helper()
-	stored, held, err := c.store.GetEvent(context.Background(), key)
-	if err != nil {
-		t.Fatalf("GetEvent(%s): %v", key, err)
-	}
-	if !held {
-		t.Fatalf("GetEvent(%s) held nothing: the commit never published", key)
-	}
-	if err := c.source.LandEvent(context.Background(), stored); err != nil {
-		t.Fatalf("LandEvent(%s): %v", key, err)
-	}
-}
-
-// landStore lands every event the real store has published into the table.
-func (c *realStoreChain) landStore(t *testing.T) {
-	t.Helper()
-	if err := c.source.ObserveStore(context.Background(), c.store); err != nil {
-		t.Fatalf("ObserveStore: %v", err)
 	}
 }
 
@@ -256,7 +209,7 @@ func scopedReadBack(t *testing.T, scoped ledger.ScopedOriginalStore, scope ledge
 }
 
 // TestSearchRecallsFromRealStore drives the real store retrieval chain: a committed event reaches the query face and its original reads back byte for byte.
-//   - a committed event is consumed only after the observation table lands it, so the read face never serves unobserved bytes
+//   - a committed event is visible through the durable query face without any landing pass
 //   - the retrieval text appears in no stored summary or content, so a recalled context is the vector leg speaking
 //   - hybrid fusion leads with the hit both legs carry, on the reciprocal rank rule the fusion states
 //   - an event under an unauthorized partition takes no part, and a reader outside the scope is refused by name
@@ -267,74 +220,28 @@ func scopedReadBack(t *testing.T, scoped ledger.ScopedOriginalStore, scope ledge
 func TestSearchRecallsFromRealStore(t *testing.T) {
 	ctx := context.Background()
 
-	t.Run("a committed event is consumed only after the observation table lands it", func(t *testing.T) {
+	t.Run("a committed event is visible directly without landing", func(t *testing.T) {
 		chain := newRealStoreChain(t, memoryembedder.NewHashEmbedder(0))
 		if got := chain.store.EventCount(); got != len(chain.events) {
 			t.Fatalf("real store holds %d committed events, want %d", got, len(chain.events))
-		}
-		if got := chain.source.ObservedCount(); got != 0 {
-			t.Fatalf("observation table holds %d events before any landing, want 0", got)
-		}
-		landed, err := chain.source.QueryEvents(ctx, memory.QueryOptions{
-			PartitionIDs: []int{memory.PartitionIDFromName(realAlphaPartition)},
-			OrderBy:      memory.QueryOrderByDesc,
-		})
-		if err != nil {
-			t.Fatalf("QueryEvents(unlanded): %v", err)
-		}
-		if len(landed) != 0 {
-			t.Fatalf("QueryEvents answered %v before any landing, want none: a query consumes an event after the table observes it", eventKeysOf(landed))
-		}
-		unseen := chain.recall(t, realRecallText, realAlphaPartition, string(search.StrategyHybrid), 10, "")
-		if len(unseen.Refs) != 0 {
-			t.Fatalf("Search answered %v before any landing, want none: the retrieval reads through the query face", originalKeysOf(unseen.Refs))
-		}
-
-		chain.landEvent(t, "0a01")
-		if got := chain.source.ObservedCount(); got != 1 {
-			t.Fatalf("observation table holds %d events after one landing, want 1", got)
-		}
-		if !chain.source.Observed("0a01") {
-			t.Fatalf("Observed(0a01) = false after its landing")
-		}
-		partial, err := chain.source.QueryEvents(ctx, memory.QueryOptions{
-			PartitionIDs: []int{memory.PartitionIDFromName(realAlphaPartition)},
-			OrderBy:      memory.QueryOrderByDesc,
-		})
-		if err != nil {
-			t.Fatalf("QueryEvents(one landed): %v", err)
-		}
-		if got := eventKeysOf(partial); !reflect.DeepEqual(got, []event.EventID{"0a01"}) {
-			t.Fatalf("QueryEvents keys = %v, want [0a01]: only the landed event is visible", got)
-		}
-		seen := chain.recall(t, realRecallText, realAlphaPartition, string(search.StrategyHybrid), 10, "")
-		if got := originalKeysOf(seen.Refs); !reflect.DeepEqual(got, []event.EventID{"0a01"}) {
-			t.Fatalf("Search keys = %v, want [0a01]: the retrieval consumes exactly what the table observed", got)
-		}
-
-		chain.landStore(t)
-		if got := chain.source.ObservedCount(); got != len(chain.events) {
-			t.Fatalf("observation table holds %d events after observing the store, want %d", got, len(chain.events))
-		}
-		chain.landStore(t)
-		if got := chain.source.ObservedCount(); got != len(chain.events) {
-			t.Fatalf("observation table holds %d events after observing twice, want %d: a repeat moves nothing", got, len(chain.events))
 		}
 		all, err := chain.source.QueryEvents(ctx, memory.QueryOptions{
 			PartitionIDs: []int{memory.PartitionIDFromName(realAlphaPartition)},
 			OrderBy:      memory.QueryOrderByDesc,
 		})
 		if err != nil {
-			t.Fatalf("QueryEvents(landed): %v", err)
+			t.Fatalf("QueryEvents(durable): %v", err)
 		}
 		if got := eventKeysOf(all); !reflect.DeepEqual(got, []event.EventID{"0a04", "0a03", "0a02", "0a01"}) {
-			t.Fatalf("QueryEvents keys = %v, want newest first over the four landed partition events", got)
+			t.Fatalf("QueryEvents keys = %v, want the four durable partition events", got)
+		}
+		seen := chain.recall(t, realRecallText, realAlphaPartition, string(search.StrategyHybrid), 10, "")
+		if got := originalKeysOf(seen.Refs); !reflect.DeepEqual(got, []event.EventID{"0a01", "0a02", "0a03"}) {
+			t.Fatalf("Search keys = %v, want the durable vector hits [0a01 0a02 0a03]", got)
 		}
 	})
-
 	t.Run("the retrieval recalls the context and reads its original back byte for byte", func(t *testing.T) {
 		chain := newRealStoreChain(t, memoryembedder.NewHashEmbedder(0))
-		chain.landStore(t)
 		for _, ev := range chain.events {
 			if strings.Contains(strings.ToLower(ev.summary), strings.ToLower(realRecallText)) || strings.Contains(strings.ToLower(ev.content), strings.ToLower(realRecallText)) {
 				t.Fatalf("corpus event %s carries the retrieval text in its query fields, so the keyword leg could reach it", ev.key)
@@ -364,7 +271,6 @@ func TestSearchRecallsFromRealStore(t *testing.T) {
 
 	t.Run("hybrid fusion leads with the hit both legs carry", func(t *testing.T) {
 		chain := newRealStoreChain(t, memoryembedder.NewHashEmbedder(0))
-		chain.landStore(t)
 		keywordLeg, err := chain.source.QueryEvents(ctx, memory.QueryOptions{
 			PartitionIDs: []int{memory.PartitionIDFromName(realAlphaPartition)},
 			Keyword:      realFusionText,
@@ -401,7 +307,6 @@ func TestSearchRecallsFromRealStore(t *testing.T) {
 
 	t.Run("an event outside the authorized partition never appears", func(t *testing.T) {
 		chain := newRealStoreChain(t, memoryembedder.NewHashEmbedder(0))
-		chain.landStore(t)
 		scoped := chain.recall(t, realRecallText, realAlphaPartition, string(search.StrategyHybrid), 10, "")
 		for _, ref := range scoped.Refs {
 			if ref.Key == "0b05" {
@@ -426,7 +331,6 @@ func TestSearchRecallsFromRealStore(t *testing.T) {
 
 	t.Run("a reader outside the reference scope is refused by name", func(t *testing.T) {
 		chain := newRealStoreChain(t, memoryembedder.NewHashEmbedder(0))
-		chain.landStore(t)
 		inside := ledger.ReadScope{Owner: realOwnerOf(), Format: realEventFormat, RetentionPolicy: realEventRetention}
 		exact, _ := scopedReadBack(t, chain.scoped, inside, "0a01")
 		if !bytes.Equal(exact, []byte(chain.events[0].original)) {
@@ -455,7 +359,6 @@ func TestSearchRecallsFromRealStore(t *testing.T) {
 
 	t.Run("continuation pages union to the full result", func(t *testing.T) {
 		chain := newRealStoreChain(t, memoryembedder.NewHashEmbedder(0))
-		chain.landStore(t)
 		full := chain.recall(t, realRecallText, realAlphaPartition, string(search.StrategyHybrid), 20, "")
 		want := []event.EventID{"0a01", "0a02", "0a03"}
 		if got := originalKeysOf(full.Refs); !reflect.DeepEqual(got, want) {
@@ -521,7 +424,6 @@ func TestSearchRecallsFromRealStore(t *testing.T) {
 			t.Fatalf("the provisioned embedding endpoint produced no vector, want a non-empty one: zero output is refused")
 		}
 		chain := newRealStoreChain(t, embedder)
-		chain.landStore(t)
 		recalled := chain.recall(t, realRecallText, realAlphaPartition, string(search.StrategyHybrid), 10, "")
 		if len(recalled.Refs) == 0 || recalled.Refs[0].Key != "0a01" {
 			t.Fatalf("endpoint recall keys = %v, want the context 0a01 first: the retrieval text is no stored substring, so an empty answer names a zero-output endpoint", originalKeysOf(recalled.Refs))

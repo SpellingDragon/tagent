@@ -46,6 +46,21 @@ var mirrorExemptTrees = []string{contractExamplesDir, "tests/integration/"}
 // across its exec/state/monitor files, so no single production stem exists to
 // mirror. Exact paths keep the exemption from covering a neighbour that does
 // have a family; a renamed or copied fixture must be reviewed as a new entry.
+//
+// The second group holds the same kind of proof from the hot-update work: each subject is an assembled face or a seam spanning files, and the sibling <production>_test.go already mirrors those files, so renaming one of these to a production stem would only make the file name state the wrong subject.
+//   - assembly/anchored_boot_parity_test.go: one rebuild's projection and judgments across host_reload, host_document and host_delivery
+//   - assembly/genregistry_rebuild_test.go: the generation-scoped registry, whose subject lives in runtime/state while the composition root drives it
+//   - assembly/host_delivery_bench_test.go: the benchmark counterpart of host_delivery.go, beside the existing host_delivery_test.go
+//   - assembly/hotupdate_anchor_test.go: the symptom anchor of a running Host.Reload that moves one agent's exec section (build tag only)
+//   - assembly/hotupdate_generation_test.go: the three per-generation host faces — native face, document dialect and self-registration
+//   - assembly/recovery_judgment_test.go: recovery judgments answered alike on the assembled faces
+//   - assembly/recovery_sites_test.go: the recovery sites over the call chain
+//   - assembly/reload_outcome_test.go: one reload attempt files one outcome, across host_reload and settle_turn
+//   - assembly/retired_state_hygiene_test.go: retired-state hygiene across commit, host_capture and run
+//   - memory/ledger/original_write_ahead_test.go: one original's write-ahead boundary across original_store, localfile and journal
+//   - runtime/agent/consumer_round_seed_test.go: the consumer round seed across consumer and loop
+//   - runtime/agent/effective_config_test.go: the effective config across loop, request_assembly and the model stand-in
+//   - tool/recall/get_public_test.go: get's public entry over the durable read face, beside the existing get_test.go
 var mirrorExemptFiles = []string{
 	"examples/wechat-bot/smoke_test.go",
 	"examples/wechat-bot/smoke_harness_test.go",
@@ -57,6 +72,19 @@ var mirrorExemptFiles = []string{
 	"examples/wechat-bot/smoke_mcp_test.go",
 	"examples/wechat-bot/smoke_exec_test.go",
 	"tool/exec/event_integrity_test.go",
+	"assembly/anchored_boot_parity_test.go",
+	"assembly/genregistry_rebuild_test.go",
+	"assembly/host_delivery_bench_test.go",
+	"assembly/hotupdate_anchor_test.go",
+	"assembly/hotupdate_generation_test.go",
+	"assembly/recovery_judgment_test.go",
+	"assembly/recovery_sites_test.go",
+	"assembly/reload_outcome_test.go",
+	"assembly/retired_state_hygiene_test.go",
+	"memory/ledger/original_write_ahead_test.go",
+	"runtime/agent/consumer_round_seed_test.go",
+	"runtime/agent/effective_config_test.go",
+	"tool/recall/get_public_test.go",
 }
 
 // layoutFile is one Go source the layout rules judge, as a repo-relative path.

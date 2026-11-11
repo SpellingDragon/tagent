@@ -1,0 +1,37 @@
+{
+  "id": "multi-03",
+  "category": "multi",
+  "prompts": [
+    "Create state.txt containing only the number 21.",
+    "Read state.txt, double the number, and write the result to final.txt.",
+    "Reply with the contents of final.txt only."
+  ],
+  "tools": [
+    "file.read",
+    "file.write"
+  ],
+  "verifier": {
+    "file": {
+      "path": "final.txt",
+      "equals": "42"
+    },
+    "response": {
+      "equals": "42"
+    }
+  },
+  "examples": {
+    "positive": {
+      "files": {
+        "final.txt": "42"
+      },
+      "output": "42"
+    },
+    "negative": {
+      "files": {
+        "final.txt": "41"
+      },
+      "output": "42",
+      "expect_error_contains": "file"
+    }
+  }
+}

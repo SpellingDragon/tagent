@@ -1,6 +1,6 @@
 # 公开基准（bench）
 
-本目录是 tagent 的公开基准套件：三类读数（吞吐 / 恢复时延 / 常驻内存），全部通过模块根包 `tagent` 的公开入口驱动，模型是脚本化 mock（不访问任何端点，不需要凭据），不修改产品代码。
+本目录是 tagent 的公开基准套件：三类读数（吞吐 / 恢复时延 / 常驻内存），全部通过 `assembly` 组合根的公开入口驱动，模型是脚本化 mock（不访问任何端点，不需要凭据），不修改产品代码。
 
 口径先说清：
 
@@ -88,17 +88,17 @@ go test -run '^$' -bench '^BenchmarkInvokeSharedSession$' -benchtime=5000x -coun
 
 ## 复跑与对照
 
-- 单基准复跑：`go test -run '^$' -bench '^BenchmarkInvokeTurn$' -benchtime=2s -count=5 ./bench/`
-- 编译与静态检查：`go vet ./bench/`
+- 单基准复跑：`go test -run '^$' -bench '^BenchmarkInvokeTurn$' -benchtime=2s -count=5 ./internal/bench/`
+- 编译与静态检查：`go vet ./internal/bench/`
 - 与产品隔离的证明：`git status --short -- ':!internal/bench'`（本批次不改产品代码）；`go test ./tests/integration/... -count=1` 保持绿。
-- 基准只 import 公开根包与 `config`/`event`/`memory`/`model`/`state`，不触碰内部字段，也不读环境变量。
+- 基准 import `assembly` 与 `api/config`、`api/event`、`api/model`、`memory/ledger`、`runtime/state`，不触碰内部字段，也不读环境变量。
 
 ## 已知集成待办（本批次白名单外，提交前必须补）
 
-新增顶层 `bench/` 包会触发三条仓库门禁，它们的修改面不在 `bench/**` 白名单内：
+新增 `internal/bench` 包时曾触发三条仓库门禁；**三条均已完成**（2026-11-04 复核）：
 
-1. `scripts/gates/check_runtime_architecture.py --implementation` 报 `unknown first-party package 'bench'`：需在架构策略里登记 `bench` 的显式边（禁止通配）。
-2. `scripts/codetools` 的 `tracked-hygiene` 只允许登记过的顶层目录（`scripts/codetools/hygiene.go` 的 `registeredTopDirs`）：需登记 `bench`，并同步根 `README.md` 的目录说明。
-3. `scripts/gates/gen_godoc.sh --check` 会因新包生成 `docs/api/github_com__SpellingDragon__tagent__bench.md` 而报 stale：需重新生成 `docs/api` 并纳入本仓文档预算。
+1. `golden/runtime/architecture.json:201` 已登记 `internal/bench` 的显式边（禁止通配）。
+2. `scripts/codetools/hygiene.go:24-29` 的 `registeredTopDirs` 已含 `internal`。
+3. `docs/api/github_com__SpellingDragon__tagent__internal__bench.md` 已生成，`gen_godoc.sh --check` 通过。
 
-在上述三项补齐前，`bash scripts/lint.sh` 会在最后两步失败；`go test`/`go vet` 与 `tests/integration` 不受影响。
+三项完成后 `bash scripts/lint.sh` 不再因此失败；`go test`/`go vet` 与 `tests/integration` 亦不受影响。

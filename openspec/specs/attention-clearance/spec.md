@@ -76,7 +76,7 @@ notice 四元组、settle 驱动与段语义 MUST NOT 改动；已被段消费�
 
 ### Requirement: 反思投递按 summary kind 接入
 
-`deliver_summary` 投递 SHALL 产生一条 kind=summary 的在场记录（投递路径
+反思投递 SHALL 产生一条 kind=summary 的在场记录（投递路径
 `CommitToSession` 不动，在场为读时推导）；目标会话产出下一轮输出 SHALL 即视为
 该摘要已被读到并清除在场（design 回退条款的宽清除点）；未被读到的摘要 SHALL
 在读面随工作结束退出在场。

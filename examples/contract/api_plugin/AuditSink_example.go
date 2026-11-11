@@ -40,7 +40,7 @@ var _ plugin.AuditSink = (*ledgerSink)(nil)
 // fact keeps its identity, while a record that does not land comes back as an error
 // instead of being dropped quietly.
 //
-// 契约: docs/wiki/agent/compression-and-telemetry.md#telemetry-ladder
+// 契约: docs/wiki/plugin/plugin-architecture.md#overview
 func ExampleAuditSink() {
 	sink := &ledgerSink{}
 	record := plugin.AuditRecord{

@@ -4,13 +4,16 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	trpclog "trpc.group/trpc-go/trpc-agent-go/log"
 
 	"github.com/SpellingDragon/tagent/api/event"
+	"github.com/SpellingDragon/tagent/memory/ledger"
 	"github.com/SpellingDragon/tagent/runtime/task"
 )
 
@@ -1101,4 +1104,264 @@ type roundOwners struct{}
 // OwnerOf reports the target as its own owner.
 func (roundOwners) OwnerOf(_ context.Context, _ event.AgentID, target event.AgentID) (event.AgentID, error) {
 	return target, nil
+}
+
+// TestLoadScanCounts pins the five per-prefix read measurements of one load.
+// - a load that reaches the end reports exactly five entries in scan order
+// - each entry carries its own key count and byte total from the real writes
+// 契约: docs/wiki/reliability/durable-delivery.md#canonical-fact-resolution
+func TestLoadScanCounts(t *testing.T) {
+	ctx := context.Background()
+	log := newInvariantFactLog()
+	first, err := NewDurableCommit(log, nil)
+	if err != nil {
+		t.Fatalf("open the first carrier: %v", err)
+	}
+	taskID := event.TaskID("task-load-scan")
+	if err := first.Declare(ctx, taskID, task.Spec{}); err != nil {
+		t.Fatalf("declare the admission material: %v", err)
+	}
+	record := invariantRecord(taskID, 0, task.StatusRunning, invariantNotice(taskID, 1))
+	if result, err := first.Commit(ctx, record); err != nil || result != task.CommitCommitted {
+		t.Fatalf("commit one fact = (%v, %v), want committed", result, err)
+	}
+	if err := first.recordConsumption(ctx, record.Outbox[0].Notice); err != nil {
+		t.Fatalf("record the consumption receipt: %v", err)
+	}
+	second, err := NewDurableCommit(log, nil)
+	if err != nil {
+		t.Fatalf("rebuild the carrier from the same log: %v", err)
+	}
+	stats := second.LoadStats()
+	if len(stats.Scans) != 5 {
+		t.Fatalf("scan entries = %d, want the five prefix reads", len(stats.Scans))
+	}
+	order := []string{specPrefix, consumePrefix, attemptPrefix, rejectPrefix, factPrefix}
+	for i, s := range stats.Scans {
+		if s.Prefix != order[i] {
+			t.Errorf("scan %d prefix = %q, want %q", i, s.Prefix, order[i])
+		}
+		wantKeys, wantBytes := barrierTotals(log, s.Prefix)
+		if s.Keys != wantKeys {
+			t.Errorf("scan %q keys = %d, want %d from the completed barrier", s.Prefix, s.Keys, wantKeys)
+		}
+		if s.Bytes != wantBytes {
+			t.Errorf("scan %q bytes = %d, want %d from the completed barrier", s.Prefix, s.Bytes, wantBytes)
+		}
+		if s.Elapsed < 0 {
+			t.Errorf("scan %q elapsed is negative", s.Prefix)
+		}
+	}
+	if got := len(second.Facts(taskID)); got != 1 {
+		t.Fatalf("rebuilt facts = %d, want the measurement to leave the recovery intact", got)
+	}
+}
+
+// barrierTotals counts the completed pairs one prefix holds and their total
+// value length, straight from the log's own barrier — the independent source
+// the scan measurement is checked against.
+func barrierTotals(log *invariantFactLog, prefix string) (keys int, bytes int64) {
+	log.mu.Lock()
+	defer log.mu.Unlock()
+	for key, value := range log.barrier {
+		if strings.HasPrefix(key, prefix) {
+			keys++
+			bytes += int64(len(value))
+		}
+	}
+	return keys, bytes
+}
+
+// selectiveScanLog forwards to an inner log but refuses the scans of one
+// named prefix, so a check can observe the carrier beside a read that fails
+// partway instead of refusing every prefix at once.
+type selectiveScanLog struct {
+	inner     FactLog
+	failEvery map[string]bool
+}
+
+// Put stages one pair on the inner log.
+func (l *selectiveScanLog) Put(ctx context.Context, key string, value []byte) error {
+	return l.inner.Put(ctx, key, value)
+}
+
+// Get reads one pair from the inner log.
+func (l *selectiveScanLog) Get(ctx context.Context, key string) ([]byte, bool, error) {
+	return l.inner.Get(ctx, key)
+}
+
+// Scan refuses the named prefixes and forwards the rest.
+func (l *selectiveScanLog) Scan(ctx context.Context, prefix string) (map[string][]byte, error) {
+	if l.failEvery[prefix] {
+		return nil, errors.New("state: the read was refused")
+	}
+	return l.inner.Scan(ctx, prefix)
+}
+
+// Sync completes the barrier on the inner log.
+func (l *selectiveScanLog) Sync(ctx context.Context) error {
+	return l.inner.Sync(ctx)
+}
+
+// TestLoadScanCountsRefusedScanRecordsNothing pins the refused-scan negative.
+//   - a failed prefix read records no measurement, so only completed reads appear
+func TestLoadScanCountsRefusedScanRecordsNothing(t *testing.T) {
+	d := &DurableCommit{log: &selectiveScanLog{inner: newInvariantFactLog(),
+		failEvery: map[string]bool{consumePrefix: true}}}
+	if _, err := d.scan(context.Background(), specPrefix); err != nil {
+		t.Fatalf("the first prefix read: %v", err)
+	}
+	if _, err := d.scan(context.Background(), consumePrefix); err == nil {
+		t.Fatal("the refused prefix read was reported as a success")
+	}
+	if got := d.LoadStats(); len(got.Scans) != 1 || got.Scans[0].Prefix != specPrefix {
+		t.Fatalf("stats after a refused read = %+v, want only the read that reached its end", got.Scans)
+	}
+}
+
+// seededSpec builds the admission material each seeded task declares: every
+// exported field of task.Spec holds a non-zero value, so a comparison of two
+// carriers sees a difference on any field the load path could drop.
+func seededSpec(tag string) task.Spec {
+	return task.Spec{
+		CallID:        "call-" + tag,
+		DedupKey:      task.DedupKey("dedup-" + tag),
+		InvocationID:  event.InvocationID("inv-" + tag),
+		InstanceID:    event.InstanceID("inst-" + tag),
+		Description:   "the seeded task " + tag,
+		Source:        event.Address{AgentID: "agent-a", SessionID: event.SessionID("session-" + tag)},
+		Target:        event.Address{AgentID: "agent-b", SessionID: event.SessionID("session-" + tag)},
+		TriggerSource: "user",
+		Execution:     task.Serialization("session-" + tag + "-serialized"),
+	}
+}
+
+// seedCarrier drives one real write set with non-zero content on every table:
+// specs with identities, two commits carrying outboxes, one consumption, one
+// attempt and one refusal with its routing and moment frozen.
+func seedCarrier(t *testing.T, ctx context.Context, log FactLog, taskID event.TaskID, tag string) {
+	t.Helper()
+	carrier, err := NewDurableCommit(log, nil)
+	if err != nil {
+		t.Fatalf("open the seeding carrier: %v", err)
+	}
+	spec := seededSpec(tag)
+	if err := carrier.Declare(ctx, taskID, spec); err != nil {
+		t.Fatalf("declare %s: %v", tag, err)
+	}
+	first := invariantRecord(taskID, 0, task.StatusRunning, invariantNotice(taskID, 1))
+	first.Outbox[0].Target = event.Address{AgentID: "agent-b", SessionID: event.SessionID("session-" + tag)}
+	first.Outbox[0].Source = event.Address{AgentID: "agent-a", SessionID: event.SessionID("session-" + tag)}
+	if result, err := carrier.Commit(ctx, first); err != nil || result != task.CommitCommitted {
+		t.Fatalf("commit the first fact of %s = (%v, %v)", tag, result, err)
+	}
+	second := invariantRecord(taskID, 1, task.StatusSettled, invariantNotice(taskID, 2))
+	second.Outbox[0].Target = event.Address{AgentID: "agent-b", SessionID: event.SessionID("session-" + tag)}
+	if result, err := carrier.Commit(ctx, second); err != nil || result != task.CommitCommitted {
+		t.Fatalf("commit the second fact of %s = (%v, %v)", tag, result, err)
+	}
+	if err := carrier.recordConsumption(ctx, first.Outbox[0].Notice); err != nil {
+		t.Fatalf("record the consumption of %s: %v", tag, err)
+	}
+	if err := carrier.recordAttempt(ctx, second.Outbox[0].Notice, SettleAttempt{Terminal: "completed"}); err != nil {
+		t.Fatalf("record the attempt of %s: %v", tag, err)
+	}
+	refused := invariantNotice(event.TaskID("task-other-"+tag), 9)
+	if err := carrier.recordRejection(ctx, Rejection{
+		Notice:   refused,
+		Target:   event.Address{AgentID: "agent-c", SessionID: event.SessionID("session-refused-" + tag)},
+		Instance: event.InstanceID("inst-refused-" + tag),
+		Reason:   "refused in the seed " + tag,
+		At:       time.Unix(1700000000, 0),
+	}); err != nil {
+		t.Fatalf("record the rejection of %s: %v", tag, err)
+	}
+}
+
+// TestSeedCarriesEverySpecField pins the seed against task.Spec itself.
+// - every exported field holds a non-zero value, so a 0 == 0 comparison cannot hide one
+// - a field added to task.Spec later fails here until it is seeded
+//
+// 契约: docs/wiki/reliability/durable-delivery.md#canonical-fact-resolution
+func TestSeedCarriesEverySpecField(t *testing.T) {
+	spec := seededSpec("every")
+	value := reflect.ValueOf(spec)
+	for i := 0; i < value.NumField(); i++ {
+		field := value.Type().Field(i)
+		if !field.IsExported() {
+			continue
+		}
+		if value.Field(i).IsZero() {
+			t.Fatalf("the seed leaves task.Spec.%s at its zero value, so the comparison cannot see a difference there", field.Name)
+		}
+	}
+}
+
+// barrierFailureLog is one fact log whose completed barrier is replaced by a
+// failure, so a check can pin what a commit reports when the barrier it reports
+// success behind did not complete. The store itself is the real journal tier:
+// only the barrier is injected.
+type barrierFailureLog struct {
+	FactLog
+}
+
+// Sync reports a barrier that did not complete without touching the store.
+func (barrierFailureLog) Sync(context.Context) error { return ErrBarrierRefused }
+
+// ErrBarrierRefused is the injected barrier failure of the checks below.
+var ErrBarrierRefused = errors.New("state: the injected barrier did not complete")
+
+// TestDurableCommitBarrier pins the commit barrier on the journal tier.
+// - a commit behind a completed barrier survives a reopen of the same tier: the task fact, its spec and its owed notification all read back
+// - a barrier that did not complete reports CommitUncertain and stores nothing the next carrier reads
+//
+// 契约: docs/wiki/reliability/durable-delivery.md#canonical-fact-resolution
+func TestDurableCommitBarrier(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("committed_record_survives_reopen", func(t *testing.T) {
+		root := t.TempDir()
+		cfg := ledger.StorageConfig{Type: ledger.StorageJournal, Root: root}
+		tier, err := ledger.OpenTier(ctx, cfg)
+		if err != nil {
+			t.Fatalf("open the journal tier: %v", err)
+		}
+		taskID := event.TaskID("task-barrier")
+		seedCarrier(t, ctx, ledger.TierFactLog(tier), taskID, "barrier")
+		reopened, err := ledger.OpenTier(ctx, cfg)
+		if err != nil {
+			t.Fatalf("reopen the journal tier: %v", err)
+		}
+		restored, err := NewDurableCommit(ledger.TierFactLog(reopened), nil)
+		if err != nil {
+			t.Fatalf("restore the carrier beside the committed facts: %v", err)
+		}
+		if len(restored.Facts(taskID)) != 2 {
+			t.Fatalf("restored facts of %s = %d, want the 2 committed", taskID, len(restored.Facts(taskID)))
+		}
+		if restored.specs[taskID] != seededSpec("barrier") {
+			t.Fatalf("restored spec of %s = %+v, want the declared one", taskID, restored.specs[taskID])
+		}
+	})
+
+	t.Run("barrier_failure_returns_uncertain", func(t *testing.T) {
+		root := t.TempDir()
+		tier, err := ledger.OpenTier(ctx, ledger.StorageConfig{Type: ledger.StorageJournal, Root: root})
+		if err != nil {
+			t.Fatalf("open the journal tier: %v", err)
+		}
+		log := barrierFailureLog{FactLog: ledger.TierFactLog(tier)}
+		carrier, err := NewDurableCommit(log, nil)
+		if err != nil {
+			t.Fatalf("open the carrier behind the failing barrier: %v", err)
+		}
+		taskID := event.TaskID("task-uncertain")
+		if err := carrier.Declare(ctx, taskID, seededSpec("uncertain")); err == nil || !errors.Is(err, ErrBarrierRefused) {
+			t.Fatalf("declare behind the failing barrier = %v, want the named barrier failure", err)
+		}
+		result, err := carrier.Commit(ctx, invariantRecord(taskID, 0, task.StatusRunning))
+		if result != task.CommitUncertain || err == nil || !errors.Is(err, ErrBarrierRefused) {
+			t.Fatalf("commit behind the failing barrier = (%v, %v), want the uncertain outcome beside the named failure", result, err)
+		}
+	})
 }

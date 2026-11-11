@@ -19,7 +19,7 @@ services:
       - DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY:?knowledge 子 agent 的 provider 密钥必需}
       - TAGENT_CONFIG=/app/tagent.yaml  # 配置已烘入镜像
       - TAGENT_HTTP_PORT=8089           # 宿主 HTTP 面端口（healthcheck 探它）
-      # 非空则 /task 要求 Bearer 凭据；留空则只信回环对端（仅容器内可达）
+      # 非空则 /healthz 与 /task 都要求 Bearer 凭据（同一鉴权门）；留空则只信回环对端
       - TAGENT_RL_AUTH_TOKEN=${TAGENT_RL_AUTH_TOKEN:-}
     ports:
       - "127.0.0.1:8089:8089"       # 仅绑本地，经反代/网络策略暴露
@@ -35,7 +35,7 @@ services:
     security_opt:
       - no-new-privileges:true      # 禁止 setuid 提权
     healthcheck:
-      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8089/healthz"]
+      test: ["CMD-SHELL", "curl -fsS -H \"Authorization: Bearer $${TAGENT_RL_AUTH_TOKEN}\" http://127.0.0.1:8089/healthz || exit 1"]
       interval: 30s
       timeout: 5s
       retries: 3

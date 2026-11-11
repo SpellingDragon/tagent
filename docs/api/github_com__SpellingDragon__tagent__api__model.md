@@ -129,6 +129,10 @@ type FunctionDefinitionParam = trpcmodel.FunctionDefinitionParam
     FunctionDefinitionParam is an alias for the locked tRPC function definition
     and JSON-encoded arguments of a ToolCall.
 
+type GenerationConfig = trpcmodel.GenerationConfig
+    GenerationConfig is an alias for the locked tRPC generation configuration a
+    request carries, preserving the native sampling fields a provider receives.
+
 type Info = trpcmodel.Info
     Info is an alias for the locked tRPC model descriptor returned by
     Model.Info.

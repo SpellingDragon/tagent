@@ -79,11 +79,10 @@ type vectorSource interface {
 	GetEmbedding(ctx context.Context, text string) ([]float64, error)
 }
 
-// Embedder adapts a provider embedder to the memory seam: it resolves the key
-// variable once at assembly, converts the provider's float64 vector into the
-// float32 the seam stores, and refuses an empty vector or one whose width is
-// not the declared width by name rather than storing it into a vector space it
-// does not belong to.
+// Embedder adapts a provider embedder to the memory.Embedder port: it resolves
+// the key variable once at assembly, converts the provider's float64 vector
+// into the float32 the query-time cosine compares, and refuses an empty vector
+// or one whose width is not the declared width by name.
 type Embedder struct {
 	provider   string
 	model      string
@@ -92,9 +91,9 @@ type Embedder struct {
 	source     vectorSource
 }
 
-// New assembles the embedding seam of one declared connection. The key is read
-// at assembly and travels in the client, so a missing variable refuses the
-// assembly by name before any request is prepared.
+// New assembles the query-time embedding binding of one declared connection.
+// The key is read at assembly and travels in the client, so a missing variable
+// refuses the assembly by name before any request is prepared.
 func New(spec config.EmbeddingSpec) (*Embedder, error) {
 	if err := Validate(spec); err != nil {
 		return nil, err

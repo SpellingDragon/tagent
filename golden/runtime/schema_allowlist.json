@@ -1,0 +1,39 @@
+{
+  "schema_version": 1,
+  "adr": "docs/adr/0006-three-hooks-is-the-core-iteration-principle.md",
+  "user_ruling": "boundary-closure r19",
+  "review_by": "2027-05-05",
+  "reason": "The generic agent sections are the shared declaration vocabulary; a feature-specific section is red unless a reviewed exception is registered here.",
+  "note": "ADR 0006 R1: agent declarations may use only these generic sections. Feature-specific sections are red unless an exception below carries reason + ADR + user ruling + review deadline.",
+  "generic_keys": [
+    "provider",
+    "model",
+    "system_prompt",
+    "tools",
+    "skill_dirs",
+    "read_root",
+    "final_round",
+    "memory",
+    "file",
+    "exec",
+    "plugins",
+    "temperature",
+    "thinking_enabled",
+    "reasoning_effort",
+    "max_tool_iterations",
+    "max_tokens",
+    "provider_context_window",
+    "output_reserve",
+    "compress_threshold",
+    "keep_recent_tasks"
+  ],
+  "exceptions": [
+    {
+      "key": "meditation",
+      "reason": "The host schema still declares meditation as a dedicated section. The schema migration to a generic plugins mount was ruled out of scope for boundary-closure (ADR 0004); meditation is instead mounted through the three hooks as a plugin while its configuration section stays. Registered once as grandfather debt at the guard landing, not as a precedent for another feature section.",
+      "adr": "docs/adr/0006-three-hooks-is-the-core-iteration-principle.md",
+      "user_ruling": "boundary-closure r19",
+      "review_by": "2027-05-05"
+    }
+  ]
+}

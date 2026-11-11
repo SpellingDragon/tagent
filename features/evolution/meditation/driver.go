@@ -103,6 +103,18 @@ func (d *Driver) Port() plugin.Port {
 	return plugin.PortFactObservation
 }
 
+// Material declares what this driver reads, when it reads it and what a failed
+// reading leaves behind: one committed fact read after its commit, where a failed
+// reflection is a named gap and the fact keeps standing. The reflection a later
+// commit fires is the driver's own schedule, not work this reading owes.
+func (d *Driver) Material() plugin.Material {
+	return plugin.Material{
+		Reads:   plugin.PortFactObservation,
+		Timing:  plugin.TimingPostCommit,
+		Failure: plugin.RecordGap,
+	}
+}
+
 // SetObserver attaches the reading of each pass this driver runs. It is the
 // host's log face; a nil observer drops the readings.
 func (d *Driver) SetObserver(observer func(TickOutcome)) {

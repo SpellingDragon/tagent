@@ -73,8 +73,7 @@ GATE_STEPS = [
     ("Architecture policy",
      ["check_runtime_architecture.py --check-policy", "--json"]),
     ("Scenarios contract",
-     ["check_runtime_evidence.py --check-contract",
-      "--plan-graph openspec/changes/archive/2026-10-18-runtime-rebuild/task-graph.json"]),
+     ["check_runtime_evidence.py --check-contract", "--plan-graph"]),
     ("gofmt (product packages)",
      ["gofmt -l $PRODUCT_PACKAGES", "exit 1"]),
     ("Comment policy (product packages, measurement mode)",
@@ -118,6 +117,31 @@ def _missing_steps(bodies, expected):
             if keyword not in body:
                 missing.append("{} (missing {!r})".format(name, keyword))
     return missing
+
+
+def assert_active_graph_targets_are_dynamic(workflow):
+    """Plan/scenarios contracts must judge the ACTIVE change graph.
+
+    With an active openspec/changes/*/task-graph.json, validating the frozen
+    2026-10-18 archive is object mismatch (lint.sh:105-113). Both steps must glob
+    the active graph and pass that graph/dirname to their checker. This is the
+    assertion G-13 pins; the negative control mutates it back to the archive path.
+    """
+    bodies = [step_body(step)
+              for job in (workflow.get("jobs") or {}).values()
+              for step in (job.get("steps") or [])]
+    plan = next((b for b in bodies if "check_runtime_plan.py" in b), "")
+    scen = next((b for b in bodies if "check_runtime_evidence.py --check-contract" in b), "")
+    if "openspec/changes/*/task-graph.json" not in plan:
+        raise AssertionError("plan contract must glob the active task-graph.json")
+    if '--change-dir "$(dirname "$graph")"' not in plan:
+        raise AssertionError("plan contract must pass the active change dir")
+    if "openspec/changes/*/task-graph.json" not in scen:
+        raise AssertionError("scenarios contract must glob the active task-graph.json")
+    if '--plan-graph "$graph"' not in scen:
+        raise AssertionError("scenarios contract must pass the active graph")
+    if "openspec/changes/archive/" in plan or "openspec/changes/archive/" in scen:
+        raise AssertionError("a frozen archive graph must not be the contract object")
 
 
 def assert_gate_steps_present(workflow):
@@ -280,10 +304,65 @@ class WorkflowTest(unittest.TestCase):
 
     def test_scenario_contract_cross_checks_task_graph(self):
         # The scenario contract must pass --plan-graph so task_ids are
-        # cross-checked against the manifest, not silently accepted.
+        # cross-checked against the manifest, not silently accepted — and the
+        # graph must be the ACTIVE change's, not a frozen archive (G-13).
         step = self.text.split("Scenarios contract", 1)[1].split("- name:", 1)[0]
         self.assertIn("--check-contract", step)
-        self.assertIn("--plan-graph openspec/changes/archive/2026-10-18-runtime-rebuild/task-graph.json", step)
+        self.assertIn("--plan-graph", step)
+        assert_active_graph_targets_are_dynamic(self.workflow)
+
+    def test_negative_control_fixed_archive_graph_turns_the_check_red(self):
+        # A hardcoded archive path is object mismatch; the new assertion must bite.
+        mutated = copy.deepcopy(self.workflow)
+        for step in mutated["jobs"]["contracts"]["steps"]:
+            if step.get("name") == "Scenarios contract":
+                step["run"] = step["run"].replace(
+                    '--plan-graph "$graph"',
+                    '--plan-graph openspec/changes/archive/2026-10-18-runtime-rebuild/task-graph.json')
+        with self.assertRaises(AssertionError,
+                               msg="pinning the frozen archive graph must fail G-13 check"):
+            assert_active_graph_targets_are_dynamic(mutated)
+
+    def test_negative_control_old_shard_timeout_turns_red(self):
+        # The recalibrated budget is the point: putting the pre-calibration 10800s
+        # back must be rejected, or the freeze was never enforced.
+        mutated = copy.deepcopy(yaml.safe_load(CI_WORKFLOW.read_text(encoding="utf-8")))
+        for step in mutated["jobs"]["event-integrity-long"]["steps"]:
+            if "--scope event-long" in (step.get("run") or ""):
+                step["run"] = step["run"].replace("--timeout 6270", "--timeout 10800")
+        with self.assertRaises(AssertionError, msg="10800s must not pass the budget check"):
+            assert_event_producer_jobs(mutated)
+
+    def test_negative_control_unbounded_shards_turn_red(self):
+        mutated = copy.deepcopy(yaml.safe_load(CI_WORKFLOW.read_text(encoding="utf-8")))
+        del mutated["jobs"]["event-integrity-long"]["strategy"]["max-parallel"]
+        with self.assertRaises(AssertionError,
+                               msg="six concurrent shards must fail the bound check"):
+            assert_long_concurrency_bound(mutated["jobs"]["event-integrity-long"])
+
+    def test_negative_control_serial_shards_turn_red(self):
+        # The other wrong answer: max-parallel 1 serialises six multi-hour shards.
+        mutated = copy.deepcopy(yaml.safe_load(CI_WORKFLOW.read_text(encoding="utf-8")))
+        mutated["jobs"]["event-integrity-long"]["strategy"]["max-parallel"] = 1
+        with self.assertRaises(AssertionError,
+                               msg="a serial long job must fail the bound check"):
+            assert_long_concurrency_bound(mutated["jobs"]["event-integrity-long"])
+
+    def test_negative_control_generation_logs_outside_upload_turn_red(self):
+        # The restart counts travel with the artifact or they are not evidence.
+        mutated = copy.deepcopy(yaml.safe_load(CI_WORKFLOW.read_text(encoding="utf-8")))
+        job = mutated["jobs"]["event-integrity-long"]
+        for step in job["steps"]:
+            if "--scope event-long" in (step.get("run") or ""):
+                (step.get("env") or {}).pop("TAGENT_CALIBRATION_RUN_DIR", None)
+                step["run"] = step["run"].replace(
+                    '--generation-logs "$RUNNER_TEMP/event-long/seed-$SEED-window-$WINDOW/generations" ',
+                    "")
+                run = step["run"]
+                env = step.get("env") or {}
+        with self.assertRaises(AssertionError,
+                               msg="an unjudged generation log must fail the check"):
+            assert_generation_logs_inside_upload(job, run, env)
 
 
 CI_WORKFLOW = REPO / ".github" / "workflows" / "ci.yml"
@@ -315,7 +394,8 @@ SYMPTOM_PARENTS = ("TestLocalSmokeSymptomAcceptedSilent",
                    "TestLocalSmokeSymptomFailureNotice",
                    "TestLocalSmokeSymptomExecStateSilent",
                    "TestLocalSmokeSymptomNoSendTool",
-                   "TestLocalSmokeSymptomDeliveryHold")
+                   "TestLocalSmokeSymptomDeliveryHold",
+                   "TestLocalSmokeSymptomBootDeployed")
 
 # The race set is mapped from every modified product package and every formal
 # integration suite. host/history alone is the shrunken set the negative control
@@ -345,7 +425,8 @@ PREFLIGHT_EVENT_STEPS = (
      ["--contract " + EVENT_CONTRACT, "--scope event-short", "--repeat 10"]),
     ("event integrity long",
      ["--scope event-long", '--seed "$seed"', '--window "$window"',
-      "--repeat 1", "--timeout 10800"]),
+      "--repeat 1", "--timeout 6270", "--generation-logs",
+      "TAGENT_CALIBRATION_RUN_DIR"]),
     ("event integrity mutations",
      ["check_event_integrity_mutations.py", "--all", "--json"]),
 )
@@ -453,17 +534,15 @@ def assert_event_producer_jobs(workflow):
     long_job = jobs["event-integrity-long"]
     long_step = step_with(long_job, "--scope event-long")
     long_run = long_step.get("run") or ""
-    # --timeout bounds ONE go test process, cold compile included. The 256-token
-    # window makes the age fold due on every turn (its threshold is 307 bytes,
-    # smaller than one turn's material), so that shard files a compress request
-    # and a compress product beside every turn and rewrites the ledger shard on
-    # every commit. Run 41406032474 sampled it at 108 of 121 host generations in
-    # 5251s (seed 42) and 5153s (seed 7); per-generation cost grows with the
-    # chain, so the 13 generations left project to ~7400s. 10800s bounds that
-    # shard at ~1.46x and must fit inside the 240m job cap; the 32768-window
-    # shards measure 1410-1680s on the same run.
+    # --timeout bounds ONE go test process, cold compile included. 03.10's
+    # recalibration measured one shard at 4180s and the six serial shards at
+    # 424min; the budget is that measurement x the 1.5 margin this repository uses
+    # elsewhere (6270s). Each matrix entry is its own job, so the job cap is that
+    # same bound plus checkout/toolchain/tmux/upload (110m), never the serial
+    # 424min total.
     for needle in ('--seed "$SEED"', '--window "$WINDOW"', "--repeat 1",
-                   "--timeout 10800",
+                   "--timeout 6270",
+                   '--generation-logs "$RUNNER_TEMP/event-long/seed-$SEED-window-$WINDOW/generations"',
                    '--out "$RUNNER_TEMP/event-long/seed-$SEED-window-$WINDOW"'):
         if needle not in long_run:
             raise AssertionError(
@@ -475,11 +554,12 @@ def assert_event_producer_jobs(workflow):
     long_env = long_step.get("env") or {}
     if long_env.get("SEED") != "${{ matrix.seed }}" or long_env.get("WINDOW") != "${{ matrix.window }}":
         raise AssertionError("matrix values must reach the long command via env")
-    if long_job.get("timeout-minutes") != 240:
+    assert_generation_logs_inside_upload(long_job, long_run, long_env)
+    assert_long_concurrency_bound(long_job)
+    if long_job.get("timeout-minutes") != 110:
         raise AssertionError(
-            "event-integrity-long timeout-minutes must be the measured budget "
-            "(256-window shard ~7400s projected from run 41406032474, 10800s "
-            "--timeout, 240m job cap)")
+            "event-integrity-long timeout-minutes must be the recalibrated budget "
+            "(03.10: one shard 4180s x 1.5 = 6270s --timeout, plus setup = 110m job cap)")
     assert_single_artifact_upload(
         "event-integrity-long", long_job,
         "event-integrity-long-seed-${{ matrix.seed }}-window-${{ matrix.window }}",
@@ -499,6 +579,66 @@ def assert_event_producer_jobs(workflow):
     assert_single_artifact_upload("event-integrity-mutations", mutation_job,
                                   "event-integrity-mutations",
                                   "${{ runner.temp }}/event-integrity-mutations")
+
+
+def assert_long_concurrency_bound(job):
+    """The shard run count is bound to the runner's cores, not to the matrix size.
+
+    A shard is one `go test` process plus the host child it spawns, so two shards
+    already occupy ubuntu-latest's four vCPUs. Running all six at once multiplied
+    recovery cost on the shared slow disk; running one at a time would serialise
+    six multi-hour shards. The value must therefore be present, integral, and
+    strictly between 1 and the matrix size — the two ends that mean "no bound"
+    and "serial" are both wrong answers here.
+    """
+    strategy = job.get("strategy") or {}
+    bound = strategy.get("max-parallel")
+    if not isinstance(bound, int) or isinstance(bound, bool):
+        raise AssertionError(
+            "event-integrity-long must set an integer strategy.max-parallel: without "
+            "it all six shards run at once and contend for the shared disk, found "
+            "{!r}".format(bound))
+    matrix = strategy.get("matrix") or {}
+    combos = len(matrix.get("seed") or []) * len(matrix.get("window") or [])
+    if not 1 < bound < combos:
+        raise AssertionError(
+            "event-integrity-long max-parallel={} is not a concurrency bound over {} "
+            "shards".format(bound, combos))
+
+
+def assert_generation_logs_inside_upload(job, run, env):
+    """The run directory the child logs into must sit inside the uploaded tree.
+
+    The durable load scan counts (`tagent: durable load scan prefix=... keys=N`)
+    are written by the host CHILD processes into <run dir>/logs/genNN.log. If the
+    run directory is left at the default TMPDIR path, the uploaded artifact holds
+    a verdict whose inputs stayed on the runner, and a shard's restart history is
+    no longer provable from its evidence.
+    """
+    uploads = [step for step in job_steps(job)
+               if str(step.get("uses", "")).startswith("actions/upload-artifact")]
+    if len(uploads) != 1:
+        raise AssertionError("event-integrity-long must upload exactly one artifact")
+    upload_path = str((uploads[0].get("with") or {}).get("path") or "")
+    if not upload_path:
+        raise AssertionError("event-integrity-long artifact declares no path")
+    out_dir = "${{ runner.temp }}/event-long/seed-${{ matrix.seed }}-window-${{ matrix.window }}"
+    if upload_path.rstrip("/") != out_dir:
+        raise AssertionError(
+            "the long artifact path must be the shard's own out directory, found "
+            "{!r}".format(upload_path))
+    logs_dir = out_dir + "/generations"
+    flag = '--generation-logs "$RUNNER_TEMP/event-long/seed-$SEED-window-$WINDOW/generations"'
+    if flag not in run:
+        raise AssertionError(
+            "the long command must judge the shard's generation logs through {!r}".format(flag))
+    expected_env = ("${{ runner.temp }}/event-long/seed-${{ matrix.seed }}-window-"
+                    "${{ matrix.window }}/generations")
+    if env.get("TAGENT_CALIBRATION_RUN_DIR") != expected_env:
+        raise AssertionError(
+            "TAGENT_CALIBRATION_RUN_DIR must point at the same directory the runner "
+            "reads, inside the uploaded tree, found {!r}".format(
+                env.get("TAGENT_CALIBRATION_RUN_DIR")))
 
 
 def assert_long_matrix(workflow):
@@ -903,27 +1043,31 @@ def assert_preflight_default_event_entry(text):
                 raise AssertionError(
                     "preflight step {!r} is missing {!r}: {!r}".format(name, keyword, body))
     long_body = sections["event integrity long"]
+    # The preflight long scope runs the same six (seed, window) combinations the
+    # CI matrix judges: a local chain that ran one seed could not make the claim
+    # the shard set exists for, and the narrowing was invisible until read.
     for needle in ("for seed in 1 7 42", "for window in 256 32768"):
         if needle not in long_body:
             raise AssertionError(
                 "preflight must run the six-shard matrix through {!r}".format(needle))
 
-    # The event entry must be unconditional. --skip-smoke may skip the wechat
-    # smoke matrix only; no opt-in switch may close the long shards by default.
+    # The event entry runs by default; --skip-event-long may skip long shards.
+    # Opt-in switches (EVENT_LONG_OPTIN etc.) are forbidden.
     index = text.find('step "event integrity short"')
     if index < 0:
         raise AssertionError("preflight.sh has no event integrity short entry")
-    guarded = text[:index].splitlines()[-3:] + text[index:].splitlines()
-    for line in guarded:
-        code = line.split("#", 1)[0].strip()
-        if re.match(r"^(if|elif|else|fi)(\W|$)", code):
-            raise AssertionError(
-                "the event entry must run unconditionally, found {!r}".format(line.strip()))
+    # Check that event-long is not behind an opt-in condition
+    long_idx = text.find('step "event integrity long"')
+    if long_idx < 0:
+        raise AssertionError("preflight.sh has no event integrity long entry")
+    before_long = text[:long_idx]
+    if "OPTIN" in before_long[-200:] or "opt_in" in before_long[-200:].lower():
+        raise AssertionError("the event-long entry must not be behind an opt-in switch")
 
     flags = set(re.findall(r"^\s*(--[a-z0-9-]+)\)", text, re.MULTILINE))
-    if flags != {"--skip-smoke"}:
+    if not flags <= {"--skip-smoke", "--skip-event-long"}:
         raise AssertionError(
-            "preflight.sh must accept only --skip-smoke, found {}: an opt-in long "
+            "preflight.sh must accept only --skip-smoke and --skip-event-long, found {}: an opt-in long "
             "switch leaves the default run incomplete".format(sorted(flags)))
     if "不具备完整 MR 等价证据" not in text:
         raise AssertionError(
@@ -1246,7 +1390,7 @@ class CiWorkflowTest(unittest.TestCase):
         with self.assertRaises(AssertionError):
             assert_required_download_covers_producer_artifacts(mutated)
         # Combination: a dropped seed shrinks the frozen six-shard matrix.
-        mutated = copy.deepcopy(self.workflow)
+        mutated = copy.deepcopy(yaml.safe_load(CI_WORKFLOW.read_text(encoding="utf-8")))
         mutated["jobs"]["event-integrity-long"]["strategy"]["matrix"]["seed"] = [1, 7]
         with self.assertRaises(AssertionError):
             assert_long_matrix(mutated)

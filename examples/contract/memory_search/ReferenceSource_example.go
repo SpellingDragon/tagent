@@ -10,9 +10,9 @@ import (
 	"github.com/SpellingDragon/tagent/memory/search"
 )
 
-// observedSource is the canonical query face a retrieval reads through: the event
-// references a query matches, and the recall reference of any event key the observation
-// table holds.
+// observedSource is the canonical query face a retrieval reads through: the
+// event references a query matches, and the original reference of any readable
+// event key.
 type observedSource struct {
 	events []memory.EventReference
 	refs   map[event.EventID]ledger.OriginalRef
@@ -49,8 +49,8 @@ func (s *observedSource) QueryEvents(_ context.Context, opts memory.QueryOptions
 	return matched, nil
 }
 
-// Reference returns the recall reference the event key was landed with, and reports
-// whether the table holds one.
+// Reference returns the original reference of key, and reports whether the
+// source holds a readable one.
 func (s *observedSource) Reference(key event.EventID) (ledger.OriginalRef, bool) {
 	ref, ok := s.refs[key]
 	return ref, ok

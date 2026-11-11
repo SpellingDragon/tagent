@@ -28,11 +28,11 @@
 <a id="action-tool"></a>
 ## 二、执行面：资源、租约与停止证据（`tool/exec`）
 
-**声明是纯值**（`ExecutionDecl{Command, Args, Dir, Resource}`）：`Dir` 为空是"调用方没声明目录"，不是"不适用目录"；句柄、连接、锁、租约都不属于声明，所以重启前记下的声明能在重启后重放出同一次执行。`ResourceKey{Kind, Key}` 一起命名资源，同键不二次打开；`KindTmux` 是唯一资源族，**tmux 是硬依赖**——`IsTmuxAvailable()` 每次真实查 PATH，缺了以 `ErrTmuxUnavailable` 拒绝，不悄悄换语义。
+**声明是纯值**（`ExecutionDecl{Command, Args, Dir, Resource}`）：`Dir` 为空是"调用方没声明目录"，不是"不适用目录"；句柄、连接、锁、租约都不属于声明，所以重启前记下的声明能在重启后重放出同一次执行。`ResourceKey{Kind, Key}` 一起命名资源，**同键复用前必先 Probe**：活着才复用，pane_dead 则释放旧世代后以新世代重开（重建并真跑，不是探活后报错）；`KindTmux` 是唯一资源族，**tmux 是硬依赖**——`IsTmuxAvailable()` 每次真实查 PATH，缺了以 `ErrTmuxUnavailable` 拒绝，不悄悄换语义。
 
 `Executor` 四方法四红线：`Start`（返回资源键）／`Probe`（`ProbeState` 三值，**零值是 `ProbeUnknown`**：判不了只升级诊断、绝不判死）／`Capture`（运行期观测到的帧）／`Stop`（`StopEvidence{Resource, Confirmed, ExitCode, Reason}`）。红线：必须持有自己持有的每个资源的租约；**必须报告探测或停止观测到什么，而不是请求了什么**；停止未确认的资源不得释放；未确认的退出不得报成干净退出。
 
-`Manager` 在端口之上管租约与证据：`Acquire` 先探可用性再开资源；`Renew` 按本次的监控节奏续租——**长执行不会因为花得久被清扫**；`Sweep` 到期只驱动停止、**到期本身不释放任何东西**（`SweepReport.Evidence` 带未确认者继续持有）；`Observe` 把判不了的探测累计成连续 unknown 段，达阈才升级诊断；`Release` 返回 `ReleaseEvidence{Resource, Released, Stop, Reason}`，`Released` 只在停止已确认时为真。排障读 `Explain` 一处，不靠猜。
+`Manager` 在端口之上管租约与证据：`Acquire` 命中已持有键时先探活再复用——活着复用、死了释放并重建、判不了具名拒绝，新开资源仍先探可用性；每次 Start 铸一个世代令牌，`Capture` 的帧不带本世代标记即判陈旧（先释放旧世代、有界重试一次，仍陈旧则具名失败，绝不把旧 scrollback 当本次结果）；`Renew` 按本次的监控节奏续租——**长执行不会因为花得久被清扫**；`Sweep` 到期只驱动停止、**到期本身不释放任何东西**（`SweepReport.Evidence` 带未确认者继续持有）；`Observe` 把判不了的探测累计成连续 unknown 段，达阈才升级诊断；`Release` 返回 `ReleaseEvidence{Resource, Released, Stop, Reason}`，`Released` 只在停止已确认时为真。排障读 `Explain` 一处，不靠猜。
 
 工具面：`PresetName = "exec"`，`exec_run` 按参数声明的键获取（同键复用）、回答执行记录到的内容，`exec_release` 显式停止并按证据回答（未确认就**报告保留**）。两个工具的 schema 是显式键集，**传入集合外的键被接受但不消费**（含已退役的工具级 compress 段）：它的存在不改变行为，也不构成拒绝理由。`kind` 只接受空值与 `KindTmux`，`resource` 是 tmux 会话名的字符集与长度模式（示例 `wx-fetch`），不是路径、也不是 `<kind>:<key>` 键。
 
@@ -77,7 +77,7 @@
 
 `Reads{Searcher, Embedder, Table, Originals, Trace}` 是四把工具消费的**读面**，本包不持存储、不留事件副本。任一字段为 nil 就是"这次部署没接这面"，需要它的工具**具名拒绝**（`ErrRecallUnwired`），绝不拿空结果冒充。
 
-授权是**构造期固定的分区集合**：`New(reads, partitions)` 收下调用方授予的分区名，`admits(partitionID)` 逐条比对，**空集不放行任何事件**——任何一次调用的参数都无法把可读范围撑大。响应里读不到正文只有三个具名原因：`missing`（读面没有这个事件）／`expired`（原文已出保留窗）／`out_of_scope`（事件不在授予的分区内）。**"没有匹配"与"读不了"必须可区分**——这是本节唯一的交易。
+授权是**构造期固定的分区集合**：`New(reads, partitions)` 收下调用方授予的分区名，`admits(partitionID)` 逐条比对，**空集不放行任何事件**——任何一次调用的参数都无法把可读范围撑大。响应里读不到正文时，`reason` 是四个具名原因之一：`missing`（读面没有这个事件）／`expired`（原文已出保留窗）／`out_of_scope`（事件不在授予的分区内）／`relation_error`（父边读取出错，与"这条事件没有父"区分：没有父时 `found` 为真而 `reason` 为空）。走父链的 `recall_trace` 用 `missing_ancestor` 指出链上第一处读不到的位置，而不是把整条走读成空。**"没有匹配"与"读不了"必须可区分**——这是本节唯一的交易。
 
 <a id="recall-subtools"></a>
 ## 五、召回面（下）：四把工具各自的有界读
@@ -96,9 +96,9 @@
 
 四把工具对模型呈现的 `Declaration` 里**没有任何向量或嵌入参数**：两次独立构造的声明**逐字节一致**，与"这份部署有没有开向量"无关；声明文本也不得出现 `embedding`／向量存储／索引结构／融合算法一类实现字样。
 
-**是否做语义检索在运行期判定**：判据是 accessor 暴露的引擎能力位 `MemoryEngine().Capabilities().Vector`，存储侧另有一个 `SupportsVectorSearch()` 探测面而**召回路径不看它**——把"能力探测"错写成召回分支的前提，声明就会随部署漂移，前缀缓存整段失效。
+**是否做语义检索在运行期判定**：判据是 `Reads.Embedder` 是否接线（`tool/recall/query.go` 的 `Call`）；未接线即 `ErrRecallUnwired`，没有第二个能力探测位——把"能力探测"错写成召回分支的前提，声明就会随部署漂移，前缀缓存整段失效。
 
-`tool/recall/skeleton_assert.go` 把这层约定做成**编译期断言**：四把工具都是 `CallableTool`（所以每次调用都先过任务包装）、`New` 的签名与三个具名错误不变、`Table` 与 `ledger.ScopedOriginalStore` 由生产组件（`memory.StoreQuerySource`、`ledger.MemoryOriginalStore`）满足而不是测试替身。
+`tool/recall/skeleton_assert.go` 把工具约定做成**编译期断言**：四把工具都是 `CallableTool`（所以每次调用都先过任务包装）、`New` 的签名与三个具名错误不变、`ledger.ScopedOriginalStore` 由 `ledger.MemoryOriginalStore` 满足；`assembly/skeleton_assert.go` 另以真实 `tierQuerySource` 钉住 `Table` 与父边读取，均不使用测试替身。
 
 ## 七、其余工具面速记
 

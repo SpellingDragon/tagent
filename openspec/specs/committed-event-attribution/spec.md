@@ -1,7 +1,7 @@
 # committed-event-attribution Specification
 
 ## Purpose
-TBD - created by archiving change optimize-committed-facts. Update Purpose after archive.
+提交成功的事实才发布可召回票据：票据身份与提交结果绑定，同一因果域内按提交序线性化，回溯不完整时具名可辨，绝不把未提交或不可辨的回溯伪装成完整事实。
 ## Requirements
 
 ### Requirement: 提交成功才发布可召回票据

@@ -81,7 +81,7 @@ func TestSendSymptomCrossSessionDrivesTurn(t *testing.T) {
 		t.Fatalf("invoke the reflecting turn: %v", err)
 	}
 
-	receipt, found := crossSymptomAwaitReceipt(provider, crossSymptomCallSend, crossSymptomWindow)
+	receipt, found := crossSymptomAwaitReceipt(host, meditate, provider, crossSymptomCallSend, crossSymptomWindow)
 	if !found {
 		t.Fatalf("the reflecting turn never read a result beside its send call:\n%s", symptomDescribe(provider.requests()))
 	}
@@ -235,11 +235,12 @@ func crossSymptomBodyFacts(t *testing.T, host *assembly.Host, peer event.Address
 	return out
 }
 
-// crossSymptomAwaitReceipt waits for the result text the model read beside one call.
-func crossSymptomAwaitReceipt(provider *crossSymptomProvider, callID string, window time.Duration) (string, bool) {
+// crossSymptomAwaitReceipt waits for the result the call really settled into in the chain
+// of the session that issued it, and reports it once a served request carried it.
+func crossSymptomAwaitReceipt(host *assembly.Host, addr event.Address, provider *crossSymptomProvider, callID string, window time.Duration) (string, bool) {
 	deadline := time.Now().Add(window)
 	for {
-		if receipt, ok := symptomReceipt(provider.requests(), callID); ok {
+		if receipt, ok := symptomReceipt(host.Run().SessionFacts(addr), provider.requests(), callID); ok {
 			return receipt, true
 		}
 		if !time.Now().Before(deadline) {

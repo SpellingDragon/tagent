@@ -1,5 +1,13 @@
 package state // import "github.com/SpellingDragon/tagent/runtime/state"
 
+The state seam of a runtime: a consumer that holds recoverable state delegates
+the state to the framework here, and the framework aggregates every registered
+slice into one checkpoint cut and restores them from one. The consumer never
+owns a recovery read path of its own, because a bespoke reader grows with the
+history it reads while a checkpoint slice stays the size of the state it states.
+Registration is an effect: the returned disposer is the only way a slice leaves
+the registry.
+
 The failure cause chain of the two reload paths: a structural change that is
 refused or fails keeps the chain of the causes it rests on — the source file,
 the normalized line within it and the named reason beside it — so the failure is
@@ -24,6 +32,19 @@ a newer file. - Skill content is read through the framework skill repository
 (the RefreshableRepository rescan that replaces the whole index and the parser
 behind it); this face is only the request-boundary glue around it, with no skill
 scanner and no parsing copied here.
+
+The generation-scoped consumer registry of one assembly: a Boot-once consumer
+registers the builder of its per-generation instance here, and the publication
+path drives the registry without naming any consumer. The registry owns
+construction order and the fail-closed release of a candidate that stops part
+way; the whole-generation switch, the borrow drain and the retirement release
+stay with the publication entry and its ledger.
+
+The mailbox state slice: the notifications the mailbox still owes a delivery
+for, as the framework checkpoint carries them. The slice is the size of the work
+still owed, never of the work the process already delivered, so a boot restores
+the obligations a stopped run left open instead of replaying the history that
+produced them.
 
 Package state is the runtime's state owner: it establishes the agent and session
 sites an explicit address names, admits a prepared plan as the next effective
@@ -50,6 +71,8 @@ const (
 	// under.
 	ArchiveOriginalFormat = "archive-import-v1"
 )
+const StateSliceMailbox = "mailbox"
+    StateSliceMailbox is the name the mailbox slice is keyed by in a checkpoint.
 
 VARIABLES
 
@@ -245,6 +268,11 @@ func ArchiveDigest(root string) (string, error)
     content digest, so any added, removed or altered byte changes the digest and
     a read-only pass over the tree can prove the source held still.
 
+func GenLeaseKey(gen Generation, consumer string) string
+    GenLeaseKey names the candidate-exclusive registration of one
+    generation-scoped consumer: the generation the candidate publishes beside
+    the consumer's registered name, in the frozen form "gen:<id>:<consumer>".
+
 func MigrateArchive(ctx context.Context, root string, tasks ArchiveTaskWriter, originals OriginalMigrator) (MigrationReport, error)
     MigrateArchive imports one old archive into the new path under read-only
     access to the archive: the checkpoint and its external dumps are read,
@@ -288,15 +316,18 @@ func RollbackArchive(ctx context.Context, root string, tasks ArchiveTaskReader, 
     is reported as residue, and one the new path holds nothing under is named
     absent rather than written back.
 
-func ToolFace(binding AgentBinding) (map[string]trpctool.Tool, []string)
-    ToolFace reports the native tools one binding's request carries beside the
-    order their definitions are emitted in: the tools published with the binding
-    in name order first, then the tools registered on its resources after the
-    binding was published, in registration order. Both the request's tool map
-    and the environment block's tool list read this one face, so a model never
-    reads a tool name it cannot call. Keeping the later-registered tools behind
-    the published ones also keeps the provider-side prefix cache valid for the
-    larger stable part of the request.
+func ToolFace(binding AgentBinding, session ...event.SessionID) (map[string]trpctool.Tool, []string)
+    ToolFace reports the native tools one binding's request carries beside
+    the order their definitions are emitted in: the tools published with the
+    binding in name order first, then the tools registered on its resources
+    after the binding was published, in registration order. Both the request's
+    tool map and the environment block's tool list read this one face, so a
+    model never reads a tool name it cannot call. Keeping the later-registered
+    tools behind the published ones also keeps the provider-side prefix cache
+    valid for the larger stable part of the request. - A named session reads
+    the session-scoped face: reflection-only tools are dropped for every session
+    other than the binding's dedicated reflection session; a call that names no
+    session reads the full published face.
 
 TYPES
 
@@ -317,6 +348,8 @@ type AgentBinding struct {
 	// Set is the tool-set connection of the agent; its Close is governed by a
 	// resource lease rather than by the release of this binding.
 	Set trpctool.ToolSet
+
+	// Has unexported fields.
 }
     AgentBinding is the live binding of one agent: the native model, tools and
     ordered plugin pipeline a request executes with, together with the prompt
@@ -325,6 +358,11 @@ type AgentBinding struct {
     The binding is constructed privately for a candidate. A request takes one
     generation of it and keeps that generation for its whole life; the binding
     is released when its user is done, not when a newer generation is published.
+
+func (b AgentBinding) WithScopedFace(session event.SessionID, only []string) AgentBinding
+    WithScopedFace reports a copy of the binding carrying the dedicated
+    reflection session and the tools only that session may see. The composition
+    root calls it when it contributes a self-reflecting host agent.
 
 type ArchiveTaskReader interface {
 	// TaskIDs returns every task the chain holds facts for.
@@ -531,12 +569,21 @@ type Candidate struct {
 	Plan StatePlan
 	// Resources is the ledger of the candidate-exclusive resources.
 	Resources *Leases
+
+	// Has unexported fields.
 }
     Candidate is one prepared publication candidate: the state plan it
     carries and the resource ledger of the candidate-exclusive resources its
     construction acquired. The ledger is the candidate's own release face,
     so a candidate that leaves the publication frees exactly what it acquired
     and touches neither the shared faces nor the resources already in service.
+
+func (c Candidate) WithWindow(previous Generation, previousFingerprint string, models, dimensions map[string]string, at time.Time) Candidate
+    WithWindow returns a copy of the candidate carrying the decision window of
+    the attempt: the generation it moves from, the model version of each agent
+    and the outcome of each configuration dimension. The publication record
+    committed for this candidate carries that window, so one generation switch
+    is auditable from its record alone.
 
 type Cause struct {
 	// Source is the source file the failure comes from.
@@ -673,6 +720,10 @@ func (d *DurableCommit) Declare(ctx context.Context, taskID event.TaskID, spec t
 func (d *DurableCommit) Facts(taskID event.TaskID) []task.CommitRecord
     Facts returns the records the carrier stored for one task, in commit order.
 
+func (d *DurableCommit) LoadStats() LoadStats
+    LoadStats reports the measured read cost of the load that built this commit
+    carrier. It is read-only; the caller cannot mutate the carrier through it.
+
 func (d *DurableCommit) Outbox(taskID event.TaskID) []task.OutboxNotice
     Outbox returns the notifications one task still owes delivery, each paired
     with its delivery-layer state, ordered by round, kind and sequence.
@@ -787,6 +838,88 @@ const (
 	// rather than settled by guess.
 	GapUnrecoverableTask GapKind = "unrecoverable-task"
 )
+type GenBuilder func(ctx context.Context, decl *config.Declaration, gen Generation) (GenResources, error)
+    GenBuilder constructs the per-generation instance of one registered consumer
+    from the declaration the candidate generation publishes. The builder
+    installs the instance as the face the candidate's binding construction
+    reads, and answers the exclusive resources the construction acquired.
+    A builder that fails leaves the face it serves as it was.
+
+type GenBuilt struct {
+	// Name is the consumer's registered name.
+	Name string
+	// Resources is what the consumer's builder answered.
+	Resources GenResources
+}
+    GenBuilt is one constructed consumer of one candidate generation: its
+    registered name beside the resources its construction answered.
+
+type GenInstances []GenBuilt
+    GenInstances is the constructed consumer set of one candidate generation,
+    in registration order.
+
+func (g GenInstances) Release(ctx context.Context) error
+    Release frees the exclusive resources of one built candidate generation in
+    reverse registration order and once each, joining the failures it finds.
+    It is the release a preparation that stopped after the consumers were built
+    runs; a candidate that reached the publication entry is released by the
+    entry's own candidate ledger instead.
+
+func (g GenInstances) Restore()
+    Restore puts the face each built consumer installed back, in reverse
+    registration order. The publication path calls it when the candidate
+    left without taking effect; the resources themselves are released by the
+    candidate ledger or by Release.
+
+type GenRegistration struct {
+	// Name names the consumer. The candidate-exclusive registration of its
+	// instance is keyed by GenLeaseKey under this name.
+	Name string
+	// BuildGen constructs the instance of one candidate generation.
+	BuildGen GenBuilder
+}
+    GenRegistration is one consumer's mount on the generation-scoped registry:
+    the name its exclusive registration is keyed by beside the builder that
+    constructs its per-generation instance.
+
+type GenRegistry struct {
+	// Has unexported fields.
+}
+    GenRegistry is the generation-scoped consumer registry of one assembly.
+    A consumer mounts itself through the option that wires it; the publication
+    path drives the registry and never names a consumer.
+
+func NewGenRegistry() *GenRegistry
+    NewGenRegistry returns an empty generation-scoped consumer registry.
+
+func (g *GenRegistry) Build(ctx context.Context, decl *config.Declaration, gen Generation) (GenInstances, error)
+    Build constructs the per-generation instances of every registered consumer
+    in registration order. A builder that fails refuses the whole candidate
+    generation: the instances built before it are released and their faces
+    restored, and the failure is the returned cause. The faces of a returned set
+    stay installed until the publication path restores them.
+
+func (g *GenRegistry) Register(reg GenRegistration) error
+    Register mounts one consumer's builder. An empty name, a missing builder or
+    a name already mounted refuses the registration by name, so a wiring mistake
+    stops the assembly instead of silently dropping a consumer.
+
+type GenResources struct {
+	// Resources carries the exclusive resources the construction acquired. Its
+	// ReleaseAll frees them once each when the candidate is refused or the
+	// generation retires, and never touches the shared faces or the resources
+	// already in service. A consumer that acquires nothing exclusive carries
+	// nil and is registered nowhere.
+	Resources *Leases
+	// Restore puts the face the previous generation served back. The
+	// publication path calls it when the candidate did not take effect; a
+	// candidate that published keeps its face installed.
+	Restore func()
+}
+    GenResources is what one per-generation consumer construction answers:
+    the ledger of the exclusive resources it acquired beside the restore that
+    puts the previous face back when the candidate leaves without taking effect.
+
 type Generation uint64
 
     Generation is the publication identity of one effective binding generation:
@@ -853,6 +986,26 @@ func (l *Leases) ReleaseAll(ctx context.Context) error
     ReleaseAll frees every registered resource in the reverse of the acquisition
     order and exactly once each. A release that fails does not stop the releases
     behind it: its error is joined with the others into the returned error.
+
+type LoadScan struct {
+	Prefix  string
+	Keys    int
+	Bytes   int64
+	Elapsed time.Duration
+}
+    LoadScan is the read cost of one prefix scan made while rebuilding
+    the commit carrier at startup — the store this port writes through,
+    never the framework checkpoint. Keys is the number of pairs returned,
+    Bytes their total value length, and Elapsed the wall time of the read alone
+    — folding the pairs into the carrier tables happens after the measurement
+    and is covered by the restore observation instead. It is a measurement,
+    not a durable record.
+
+type LoadStats struct {
+	Scans []LoadScan
+}
+    LoadStats is the per-prefix read cost of the last load. The five entries
+    appear in scan order; a load that returned early holds fewer entries.
 
 type MailboxEntry struct {
 	// Notice is the stable identity of the notification this entry accepted.
@@ -1007,17 +1160,6 @@ func (m *MemoryStore) Release(ctx context.Context, addr event.Address, instance 
     again and finishes it. An entry still pending is refused as not claimed,
     and an entry whose consumption completed is refused by name: a settled entry
     never returns to work.
-
-func (m *MemoryStore) RestoreOwed(ctx context.Context) error
-    RestoreOwed folds the notifications the durable account behind this mailbox
-    still owes back into the mailbox: the target site each notification's frozen
-    routing names is opened beside the instance that froze it, so the work a
-    stopped run left unconsumed waits for the next decision instead of being
-    lost with the process. The restore is idempotent — a notification already
-    sitting in its mailbox is accepted once and never appended twice — and the
-    site it opens beside a frozen instance never takes the address over from the
-    instance currently serving it. A mailbox beside no durable account restores
-    nothing, because nothing outside the process owes it work.
 
 func (m *MemoryStore) Site(ctx context.Context, subject Subject, addr event.Address, instance event.InstanceID) (*Session, error)
     Site returns a copy of the bookkeeping one established site holds, for the
@@ -1251,6 +1393,8 @@ type PublicationRecord struct {
 	// Checks carries every check disposition the publication recorded, each
 	// self-contained.
 	Checks []CheckAnswer
+
+	// Has unexported fields.
 }
     PublicationRecord is the self-contained ledger unit of one publication: the
     generation it assigned, the fingerprint it published, the result it took and
@@ -1258,6 +1402,32 @@ type PublicationRecord struct {
     it recorded so an exemption stays visible with its reason and scope.
     The unit is committed through the publication recorder alone and shares no
     commit with a task finality transition or a pending notification.
+
+func (r PublicationRecord) DimensionOutcomes() map[string]string
+    DimensionOutcomes reports the outcome of each configuration dimension the
+    recorded attempt judged, keyed by "agent|dimension", as a copy the caller
+    owns.
+
+func (r PublicationRecord) ModelVersions() map[string]string
+    ModelVersions reports the model version each agent runs after the recorded
+    attempt, keyed by agent id, as a copy the caller owns.
+
+func (r PublicationRecord) PreviousFingerprint() string
+    PreviousFingerprint reports the fingerprint the recorded attempt moved from.
+
+func (r PublicationRecord) PreviousGeneration() Generation
+    PreviousGeneration reports the generation the recorded attempt moved from,
+    and zero for a record that carries no window.
+
+func (r PublicationRecord) RecordedAt() time.Time
+    RecordedAt reports the time the recorded attempt was recorded, and the zero
+    time for a record that carries no window.
+
+func (r PublicationRecord) WithWindow(previous Generation, previousFingerprint string, models, dimensions map[string]string, at time.Time) PublicationRecord
+    WithWindow returns a copy of the record carrying the decision window of
+    the attempt: the generation it moved from, the model version of each agent
+    and the outcome of each configuration dimension. The maps are copied,
+    so a caller mutating them afterwards changes no recorded window.
 
 type PublicationRecorder interface {
 	// CommitPublication stores one publication record.
@@ -1328,6 +1498,16 @@ func NewPublisher(bindings *Bindings, contract PublishContract, governance Gover
     recorder to commit each publication record through. The entry starts with no
     generation published, so no rollback source exists yet.
 
+func (p *Publisher) Adopt(ctx context.Context, cand Candidate, record PublicationRecord) error
+    Adopt restores the publication a restarted process reads from its durable
+    ledger as the binding generation in effect, without publishing anything:
+    the holder is seeded to the recorded number, the candidate plan is held at
+    that very generation and no record is committed, because the publication
+    the record names already happened. It is the restart-reconciliation path of
+    the sole entry, never a second publication path, and it refuses a candidate
+    whose fingerprint the record does not name, a recorded generation of zero
+    and a holder that already published a generation of its own.
+
 func (p *Publisher) Baseline() string
     Baseline returns the version baseline a candidate records at construction.
     The commit point re-checks the recorded value and discards the candidate if
@@ -1349,6 +1529,11 @@ func (p *Publisher) Current() Publication
     Current returns the publication in effect: the generation, the fingerprint
     it published and the baseline it was admitted against. The zero publication
     stands while nothing has been published.
+
+func (p *Publisher) ObserveRetirements(record func(context.Context, Generation) error)
+    ObserveRetirements attaches the record this entry writes once a generation's
+    exclusive resources are freed: the generation the drain retired, stated
+    after the release that freed it. The record never triggers a release.
 
 func (p *Publisher) Publish(ctx context.Context, cand Candidate) (PublishOutcome, error)
     Publish runs one prepared candidate through the sole publication entry
@@ -1376,6 +1561,14 @@ func (p *Publisher) RollbackConfig() (OrgPlan, bool)
     and whether one exists. The caller rebuilds it beside freshly constructed
     live objects and submits that candidate through Rollback; the source stays
     the same across consecutive rollbacks.
+
+func (p *Publisher) TrackGeneration(ctx context.Context, gen Generation, resources *Leases) error
+    TrackGeneration records the exclusive resources of one generation the
+    restart reconciliation rebuilt: they are freed once that generation retires,
+    through the same drain a published candidate's resources go through, and
+    a generation still in service keeps them. Nothing is published here — the
+    adoption already records the generation on the chain — and the drain runs at
+    once so a generation that never entered service releases what it acquired.
 
 type Rejection struct {
 	Notice   task.Notice      `json:"notice"`
@@ -1492,6 +1685,129 @@ type StatePlan struct {
     The plan is admitted as a whole. A candidate that is refused or fails part
     way through construction releases only its own resources, so the shared face
     and the live bindings already in effect are never touched.
+
+type StateRegistry struct {
+	// Has unexported fields.
+}
+    StateRegistry is the ordered account of the state holders mounted on
+    one runtime. The order is the registration order, never map iteration,
+    so the same wiring aggregates the same slice order and a checkpoint renders
+    the same bytes for the same state.
+
+func NewStateRegistry() *StateRegistry
+    NewStateRegistry returns an empty state registry.
+
+func (r *StateRegistry) Names() []string
+    Names reports the mounted state slice names in registration order.
+
+func (r *StateRegistry) ObservationDrivers() []string
+    ObservationDrivers reports the mounted holders that declare an observation
+    drive, in registration order. The names are what a recovery states it folded
+    without driving: the seam's pass folds state alone, and the owner of each
+    duty starts it after the recovery returned.
+
+func (r *StateRegistry) PendingRestore() []string
+    PendingRestore reports the state slices a restore named that no mounted
+    holder states yet, in name order. A wiring that answers no name once it is
+    complete has restored every slice the checkpoint carries.
+
+func (r *StateRegistry) Reduce(ctx context.Context, evt event.Event) error
+    Reduce folds one committed fact into the derived state of every mounted
+    holder that derives its state from facts, in registration order, and answers
+    the first refusal by the holder that made it: a fact one consumer cannot
+    fold is a state this runtime would read as behind the chain it serves.
+    A holder that states an account of its own is not asked — it implements no
+    reducer face — so the pass names no consumer and needs no hook per consumer:
+    a slice mounted through Register takes part the moment it is mounted.
+
+    The pass is the recovery's face as much as the live commit's: a boot replays
+    the facts committed past a cut through the same call, so the state a restart
+    derives is the state the live process derived from the same facts. Nothing
+    here drives an emitter: the work a consumer owes is started by the owner of
+    that duty, never by a fold of the fact it owes it for.
+
+func (r *StateRegistry) ReduceInto(ctx context.Context, name string, evt event.Event) error
+    ReduceInto folds one committed fact into one named holder's derived state,
+    so a consumer that reads the facts past the cut of its own slice replays
+    them through the same derivation the live commit drives. A holder that
+    derives nothing from facts is not asked, and a name no holder answers is
+    refused by name rather than silently folding nothing: a recovery reading a
+    cut of a slice this runtime does not mount would leave that consumer behind
+    the chain it serves.
+
+func (r *StateRegistry) Register(holder Stateful) (func(), error)
+    Register mounts one holder and answers the disposer that unmounts it. A
+    holder naming no state and a name already mounted refuse the registration by
+    name, so a wiring mistake stops the assembly instead of silently overwriting
+    a slice another consumer owns.
+
+func (r *StateRegistry) RestoreEmptyState(ctx context.Context) error
+    RestoreEmptyState restores every mounted holder from the state a cut
+    that states no slice carries: the empty state. A boot whose tier holds no
+    checkpoint states that cut, so it restores the holders the way a filed
+    cut restores them instead of skipping them, and the replay past the cut
+    rebuilds each one — past the zero cut that replay is the whole chain.
+    The restore is the framework's, so a holder that can state itself from what
+    it serves states that work here instead of through a reader of its own:
+    the mailbox seats the obligations its durable account still owes beside
+    the ones a cut states, by the notification identity acceptance answers to.
+    A holder that refuses the empty state refuses the boot by name, because a
+    runtime that starts beside a holder it could not restore reads work it does
+    not hold.
+
+func (r *StateRegistry) RestoreState(ctx context.Context, slices []event.CheckpointSlice) error
+    RestoreState hands every stated slice to the holder that owns it, in the
+    order the checkpoint states. A slice no mounted holder owns is reported by
+    name instead of dropped: a checkpoint whose state cannot be restored is not
+    a checkpoint this runtime can start from.
+
+func (r *StateRegistry) SnapshotSessionState(ctx context.Context, session event.SessionID) ([]event.CheckpointSlice, error)
+    SnapshotSessionState aggregates the state the mounted holders state about
+    one session chain, in registration order. A holder that keeps no state of
+    a session is asked nothing and states no slice, so the checkpoint of one
+    session is the size of that session's state and never of the account the
+    run holds beside it. The same read rules hold as for the whole account:
+    no framework lock is held across the holders' reads, and a holder that
+    refuses to state itself refuses the whole cut by name rather than filing a
+    checkpoint missing its slice.
+
+func (r *StateRegistry) SnapshotState(ctx context.Context) ([]event.CheckpointSlice, error)
+    SnapshotState aggregates the state of every mounted holder in registration
+    order. A holder that fails to state its state refuses the whole snapshot
+    by name: a checkpoint missing one slice would restore that consumer
+    beside an empty state, which is worse than filing no checkpoint at all.
+    The reads happen with no framework lock held and take only the holder's own,
+    so a holder that is committing beside the cut answers it instead of waiting
+    on it.
+
+type Stateful interface {
+	// StateName is the name the slice is keyed by in a checkpoint.
+	StateName() string
+	// SnapshotState states the recoverable state as JSON. The read is pure: the
+	// state the holder already derived, with no flush, commit or blocking wait.
+	SnapshotState(ctx context.Context) ([]byte, error)
+	// RestoreState puts one snapshot back. A payload the holder does not recognize is
+	// refused by name rather than restored as an empty state.
+	RestoreState(ctx context.Context, payload []byte) error
+}
+    Stateful is one consumer's recoverable state as the framework sees it:
+    the name the slice is keyed by, the state it states, and the restore that
+    puts that state back. The payload is the holder's own business — it is JSON,
+    and no other holder and no reader of the checkpoint interprets it.
+
+    The snapshot is a pure read: it states the state the holder already derived
+    and never flushes, commits, asks another party for work, or waits for a
+    lock a commit of its own holds. The framework reads every slice at the quiet
+    point of the fact pipeline with no lock of the run held, so a holder that
+    commits under its own lock (the task registry's durable commit, the host's
+    settlement write) can never wait on the cut that is asking it for its state.
+    A holder whose state follows a fact it committed applies that fact inside
+    the commit's flight, never after it, so the state read at the quiet point
+    states every fact the cut covers.
+
+func NewMailboxState(store *MemoryStore) Stateful
+    NewMailboxState returns the mailbox's recoverable state as the framework
+    sees it: the slice one mailbox store states and restores.
 
 type Store interface {
 	// Establish creates the session site for one explicit (agent, session)

@@ -2,7 +2,6 @@ package assembly
 
 import (
 	"context"
-	"encoding/json"
 	"sort"
 	"strings"
 	"sync"
@@ -22,9 +21,9 @@ import (
 )
 
 // TestHandoffRedrivesStalledOwedRecords pins the send face of the hand-off as every obligation that still stands owed, not only the bodies one call registered.
-//   - a body recorded owed whose send never happened is redriven by the next hand-off that meets it, and its record closes as sent
+//   - a body whose owed declaration landed and whose send never happened is redriven by the next hand-off that meets it, and its obligation closes as sent
 //   - a body the account already discharged is not sent a second time
-//   - the turn commits its body under the notification's own invocation, and a host beside no outbound sender records the obligation without sending
+//   - the turn commits its body under the notification's own invocation, and a host beside no outbound sender leaves the obligation owed without a settlement fact
 //
 // 契约: docs/wiki/reliability/durable-delivery.md#envelope-states
 func TestHandoffRedrivesStalledOwedRecords(t *testing.T) {
@@ -40,30 +39,41 @@ func TestHandoffRedrivesStalledOwedRecords(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("drive the follow-up turn: %v", err)
 	}
-	host := &Host{run: run, entry: "agent-a", pendingDeliveries: map[string]*heldDelivery{}}
+	bodies := generatedBodiesOf(run.SessionFacts(addr), noticeInvocation(notice))
+	if len(bodies) != 1 {
+		t.Fatalf("bodies the follow-up turn generated = %+v, want the one answer", bodies)
+	}
+	obligation, ok := freshObligationOf(bodies[0])
+	if !ok {
+		t.Fatalf("the generated body names no delivery obligation: %+v", bodies[0])
+	}
+	host := &Host{run: run, entry: "agent-a"}
 	if err := host.handoffSettledBodies(ctx, addr, notice); err != nil {
 		t.Fatalf("hand the settled bodies off beside no sender: %v", err)
 	}
-	stalled := hostTestDeliveryRecords(t, ctx, host)
-	if len(stalled) != 1 || stalled[0].Status != hostDeliveryOwed {
-		t.Fatalf("records beside no sender = %+v, want the one obligation left owed", stalled)
+	if settled := hostTestSettlements(t, host, addr); len(settled) != 0 {
+		t.Fatalf("settlement facts beside no sender = %+v, want the obligation still owed (no settlement fact)", settled)
 	}
 	channel := &hostTestChannel{}
 	host.sender = channel
 	if err := host.handoffSettledBodies(ctx, addr, notice); err != nil {
 		t.Fatalf("hand the settled bodies off beside a sender: %v", err)
 	}
-	if got := channel.bodies(); len(got) != 1 || got[0] != stalled[0].Content {
-		t.Fatalf("bodies the hand-off sent = %q, want the one stalled obligation %q", got, stalled[0].Content)
+	if got := channel.bodies(); len(got) != 1 || got[0] != bodies[0].content {
+		t.Fatalf("bodies the hand-off sent = %q, want the one stalled obligation %q", got, bodies[0].content)
 	}
-	if records := hostTestDeliveryRecords(t, ctx, host); len(records) != 1 || records[0].Status != hostDeliverySent {
-		t.Fatalf("records beside the redrive = %+v, want the one obligation closed as sent", records)
+	settled := hostTestSettlements(t, host, addr)
+	if len(settled) != 1 || settled[0].state != deliveryStateSent || settled[0].identity != obligation {
+		t.Fatalf("settlement facts beside the redrive = %+v, want the one obligation %s closed as sent", settled, obligation)
 	}
 	if err := host.handoffSettledBodies(ctx, addr, notice); err != nil {
 		t.Fatalf("hand the settled bodies off a third time: %v", err)
 	}
 	if got := channel.bodies(); len(got) != 1 {
 		t.Fatalf("bodies after the discharged hand-off = %q, want the one body already sent", got)
+	}
+	if settled := hostTestSettlements(t, host, addr); len(settled) != 1 {
+		t.Fatalf("settlement facts after the discharged hand-off = %+v, want the one receipt", settled)
 	}
 }
 
@@ -77,7 +87,7 @@ func TestDeliveredBodyNamesAnUnconfirmedReceipt(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 	run := snapshotTestRun(t, ctx, WithStorage(ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: t.TempDir()}))
-	host := &Host{run: run, entry: "agent-a", pendingDeliveries: map[string]*heldDelivery{}}
+	host := &Host{run: run, entry: "agent-a"}
 	addr := event.Address{AgentID: "agent-a", SessionID: "session-unconfirmed-receipt"}
 	unconfirmed := &hostTestChannel{}
 	unconfirmedCtx, unconfirmedCancel := context.WithCancel(ctx)
@@ -96,38 +106,30 @@ func TestDeliveredBodyNamesAnUnconfirmedReceipt(t *testing.T) {
 	if outcome != deliverySent || cause != "" {
 		t.Fatalf("outcome and cause of the confirmed send = %v, %q, want a delivered send beside no cause", outcome, cause)
 	}
-	if records := hostTestDeliveryRecords(t, ctx, host); len(records) != 1 || records[0].Status != hostDeliverySent || records[0].ID != "delivery-fresh-confirmed" {
-		t.Fatalf("records beside the two sends = %+v, want the one receipt the live account took", records)
+	if settled := hostTestSettlements(t, host, addr); len(settled) != 1 || settled[0].state != deliveryStateSent || settled[0].identity != "delivery-fresh-confirmed" {
+		t.Fatalf("settlement facts beside the two sends = %+v, want the one receipt the live account took", settled)
 	}
 }
 
-// hostTestDeliveryRecords reads every delivery record the host's storage tier
-// holds, ordered by identity so one check judges the same account however the
-// tier answers a scan.
-func hostTestDeliveryRecords(t *testing.T, ctx context.Context, host *Host) []hostDeliveryRecord {
+// hostTestSettlements reads every settlement fact of one address's chain,
+// ordered by fact key, so a check judges the account the chain states however
+// the window answers.
+func hostTestSettlements(t *testing.T, host *Host, addr event.Address) []deliverySettlement {
 	t.Helper()
-	log := host.deliveryDurable()
-	if log == nil {
-		t.Fatalf("the assembled run opened no storage tier to read delivery records from")
+	if host == nil || host.run == nil {
+		t.Fatalf("the check handed no assembled run to read settlement facts from")
 	}
-	held, err := log.Scan(ctx, hostDeliveryPrefix)
-	if err != nil {
-		t.Fatalf("scan the delivery records: %v", err)
-	}
-	keys := make([]string, 0, len(held))
-	for key := range held {
-		keys = append(keys, key)
-	}
-	sort.Strings(keys)
-	records := make([]hostDeliveryRecord, 0, len(keys))
-	for _, key := range keys {
-		var record hostDeliveryRecord
-		if err := json.Unmarshal(held[key], &record); err != nil {
-			t.Fatalf("read the delivery record %s back: %v", key, err)
+	facts := host.run.SessionFacts(addr)
+	settled := make([]deliverySettlement, 0, len(facts))
+	for _, fact := range facts {
+		settlement, ok := settlementOf(fact)
+		if !ok {
+			continue
 		}
-		records = append(records, record)
+		settled = append(settled, settlement)
 	}
-	return records
+	sort.Slice(settled, func(i, j int) bool { return settled[i].fact.Key < settled[j].fact.Key })
+	return settled
 }
 
 // hostTestChannel is the outbound face one check hands the host: it keeps every

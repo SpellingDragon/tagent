@@ -23,6 +23,15 @@ scan or expire an attention fact on a goroutine or a timer of its own. MUST NOT
 reach the composition root: the chain is a narrow port the composition supplies
 to this package.
 
+The task registry's recoverable state as the framework checkpoint carries it:
+the account the registry holds — every task it admitted that the terminal sweep
+did not drop — stated whole, beside the chain revision each record stands at.
+The account is the size of the work the registry keeps, never the size of the
+chains it already settled, so a restarted process reads the tasks of the cut
+out of the carrier instead of folding every chain the storage ever accumulated.
+The fact chain stays the truth of a task and the source the tail replays from:
+the checkpoint is the derived snapshot that spares the covered part of it.
+
 This file holds the logical status of a task: the classification of how long
 the task's recorded state has stood unchanged. It is a second read-out beside
 the status machine, never a value the machine stores: the status a task holds is
@@ -1080,6 +1089,21 @@ func (r *MemoryRegistry) Cancel(ctx context.Context, taskID event.TaskID) error
     Cancel requests cancellation of the named task only; it does not cancel
     other invocations of the same session.
 
+func (r *MemoryRegistry) CheckpointCoverage() map[event.TaskID]int64
+    CheckpointCoverage reports the chain revision every task a checkpoint
+    restored stands at, and is nil beside a registry this boot restored no
+    checkpoint into. A boot reads it to fold only the links at or past the
+    stated revision, so the covered part of a chain is never read again.
+
+func (r *MemoryRegistry) CheckpointRestored(ctx context.Context, taskIDs []event.TaskID, owners OwnerBinding) (RestoreReport, error)
+    CheckpointRestored reports one outcome per task a framework checkpoint
+    restored: the state the restored record holds and the owner the current
+    orchestration binding resolves its target to, resolved exactly as Restore
+    resolves the target of a rebuilt task. The outcome reports the recovery,
+    because the carrier rebuilt the task exactly as a chain fold rebuilds it and
+    the two paths answer the same account; a task the registry does not hold is
+    left out of the report.
+
 func (r *MemoryRegistry) IssueNotice(ctx context.Context, taskID event.TaskID, kind NoticeKind, fact event.EventID) (Envelope, error)
     IssueNotice allocates the stable identity of one notification of the named
     task and freezes its delivery routing into the envelope it returns: the
@@ -1173,6 +1197,15 @@ func (r *MemoryRegistry) Restore(ctx context.Context, chain []TaskRecord, owners
     binding are supplied per call and nothing captured by an earlier run is
     revived through it.
 
+func (r *MemoryRegistry) RestoreCheckpoint(ctx context.Context, payload []byte) error
+    RestoreCheckpoint puts the tasks a checkpoint states back as the account
+    of this registry, and reports the revision each of them stands at through
+    CheckpointCoverage, so the boot folds only the links that landed past it.
+
+    The restore never overwrites a task the registry already holds: a task a
+    chain fold rebuilt in this boot stands as the chain stated it, which is the
+    state the checkpoint's entry is only a prefix of.
+
 func (r *MemoryRegistry) Resume(ctx context.Context, taskID event.TaskID, input event.Event) (AdmissionReceipt, error)
     Resume feeds one declared input into an existing task and re-enters the
     standard lifecycle under the same task identity. A round already in
@@ -1213,6 +1246,10 @@ func (r *MemoryRegistry) RollbackReactivation(ctx context.Context, taskID event.
     followed keep their own — and the re-entry deadline keeps counting from the
     reactivation, which reads no differently for a task that holds its terminal
     fact.
+
+func (r *MemoryRegistry) SnapshotCheckpoint(ctx context.Context) ([]byte, error)
+    SnapshotCheckpoint states every task record this registry holds, in task
+    identity order, with the revision each record stands at.
 
 func (r *MemoryRegistry) Unfinished(ctx context.Context) ([]UnsettledWork, error)
     Unfinished reports the work this registry holds with no terminal, read from
@@ -1456,6 +1493,13 @@ type Registry interface {
     content. MUST NOT cancel other invocations of the same session when one task
     is cancelled.
 
+type RegistryCheckpoint struct {
+	// Tasks is the account of the registry at the cut.
+	Tasks []StatedTask `json:"tasks,omitempty"`
+}
+    RegistryCheckpoint is the state one task registry states to the framework:
+    one entry per task record the registry holds, in task identity order.
+
 type RegistryOption func(*MemoryRegistry)
     RegistryOption configures one in-memory task registry beyond its commit
     carrier and admission face.
@@ -1499,9 +1543,10 @@ type RestoreOutcome struct {
 	// Owner is the owner the current binding resolved the task's target to; it
 	// is empty when the resolution refused.
 	Owner event.AgentID
-	// Recovered reports whether this restore rebuilt the task from the chain.
-	// False reports an idempotent hit: the registry already held the task and
-	// the link added no second fact — or a chain the restore refused without
+	// Recovered reports whether this restore rebuilt the task: from the chain
+	// links it folded, from the carrier a checkpoint stated, or from neither —
+	// false reports an idempotent hit, where the registry already held the task
+	// and the link added no second fact, or a chain the restore refused without
 	// rebuilding anything.
 	Recovered bool
 	// Refused is the named refusal of this restore, set when the current
@@ -1607,6 +1652,52 @@ type Spec struct {
     Spec is the declaration a task is admitted under. It names the native call
     the task answers, the identity a duplicate admission is resolved against,
     the addresses the task belongs to, and the execution shape the task runs in.
+
+type StatedTask struct {
+	// TaskID is the task this entry states.
+	TaskID event.TaskID `json:"task_id"`
+	// Spec is the admission material of the task: the declaration its
+	// notifications route by and its duplicate admissions resolve against.
+	Spec Spec `json:"spec"`
+	// Status is the state the task holds at the cut.
+	Status Status `json:"status"`
+	// Revision is the chain revision the state corresponds to: the record that
+	// lands next expects this revision, so a boot folds only the links at or
+	// past it and reads no link the entry already covers.
+	Revision int64 `json:"revision"`
+	// Round is the execution round the task stands in.
+	Round int64 `json:"round,omitempty"`
+	// AdmittedAt, ChangedAt, RunSince and TTLAnchor are the movement stamps the
+	// record is classified by. ChangedAt is the stamp the terminal sweep reads, so
+	// a restored task kept the deadline it always had instead of one counted from
+	// the restart; a link the tail of a chain folds past the cut carries no
+	// instant, so the stamp such a transition leaves is unknown and the sweep
+	// keeps the record, exactly as it does for a task rebuilt from its chain alone.
+	AdmittedAt time.Time `json:"admitted_at,omitempty"`
+	ChangedAt  time.Time `json:"changed_at,omitempty"`
+	RunSince   time.Time `json:"run_since,omitempty"`
+	TTLAnchor  time.Time `json:"ttl_anchor,omitempty"`
+	// Handoff is the routing an explicit handoff moved the future notifications
+	// to, and HandoffRecord is the link that move recorded. A task no handoff
+	// moved carries neither.
+	Handoff       *HandoffTarget `json:"handoff,omitempty"`
+	HandoffRecord HandoffRecord  `json:"handoff_record,omitempty"`
+	// Mutations is every mutation the task committed, so a repeated mutation
+	// after a restart is recognized as the one already stored instead of being
+	// applied a second time.
+	Mutations []CommitRecord `json:"mutations,omitempty"`
+	// Obligations is every obligation the registry still holds for the task.
+	Obligations []checkpointObligation `json:"obligations,omitempty"`
+}
+    StatedTask is one task record as a checkpoint states it: the declaration the
+    task was admitted under, the state it holds, the chain revision that state
+    corresponds to, and the obligations the registry still owes.
+
+    The fields a chain fold cannot compute back stay out of it — the blocked
+    reasons, the exit reason, the cancellation request, the stop evidence and
+    the reported verdict — because no committed fact carries them and a rebuilt
+    task reads them empty rather than inferred. The checkpoint restores exactly
+    what the fold restores, so the two recovery paths answer the same account.
 
 type Status int
     Status is the state a task moves through from admission to settlement.

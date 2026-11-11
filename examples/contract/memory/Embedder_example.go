@@ -10,8 +10,8 @@ import (
 // errEmptyText is the named failure an embedder reports instead of a zero vector.
 var errEmptyText = errors.New("memoryexample: embedder was handed empty text")
 
-// sizedEmbedder is the canonical embedding seam: it generates the vector of one text and
-// reports a named failure rather than a zero vector.
+// sizedEmbedder is the canonical query-time embedder: it generates the vector of one text
+// on demand and reports a named failure rather than a zero vector.
 type sizedEmbedder struct{}
 
 // Embed returns the embedding vector of text, or a named failure.
@@ -24,7 +24,7 @@ func (sizedEmbedder) Embed(_ context.Context, text string) ([]float32, error) {
 
 var _ memory.Embedder = sizedEmbedder{}
 
-// ExampleEmbedder embeds one text under the binding that borrowed the seam and reports
+// ExampleEmbedder embeds one candidate text under the bound embedder and reports
 // that empty text is refused by name instead of answered with a zero vector.
 //
 // 契约: docs/wiki/memory/memory-architecture.md#embedder-contract

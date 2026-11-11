@@ -263,8 +263,8 @@ func TestConsumersResumeTheOwedNotice(t *testing.T) {
 		if answer.Err != nil {
 			t.Fatalf("the resumed segment of %s closed beside %v, want a completed turn", addr.SessionID, answer.Err)
 		}
-		if want := event.InvocationID(string(addr.SessionID) + "#c1"); answer.Turn.InvocationID != want {
-			t.Fatalf("the resumed attempt of %s answered under %q, want the segment identity %q", addr.SessionID, answer.Turn.InvocationID, want)
+		if want := event.InvocationID(string(addr.SessionID) + "#c2"); answer.Turn.InvocationID != want {
+			t.Fatalf("the resumed attempt of %s answered under %q, want the segment identity %q, past the range the closed answer already used", addr.SessionID, answer.Turn.InvocationID, want)
 		}
 		if len(answer.Consumed) != 1 || answer.Consumed[0] != notice {
 			t.Fatalf("the resumed segment of %s consumed %v, want the named notice %q", addr.SessionID, answer.Consumed, notice)

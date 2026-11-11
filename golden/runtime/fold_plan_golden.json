@@ -1,0 +1,133 @@
+{
+  "keep_recent": 2,
+  "triggered": true,
+  "volume": 2983,
+  "threshold": 1,
+  "segment": 10,
+  "middle": 0,
+  "segments": [
+    {
+      "index": 0,
+      "age": 6,
+      "level": 3,
+      "band": "mid",
+      "complete": true,
+      "entries": 4
+    },
+    {
+      "index": 1,
+      "age": 5,
+      "level": 2,
+      "band": "mid",
+      "complete": true,
+      "entries": 4
+    },
+    {
+      "index": 2,
+      "age": 4,
+      "level": 2,
+      "band": "mid",
+      "complete": true,
+      "entries": 4
+    },
+    {
+      "index": 3,
+      "age": 3,
+      "level": 1,
+      "band": "mid",
+      "complete": true,
+      "entries": 4
+    },
+    {
+      "index": 4,
+      "age": 2,
+      "level": 1,
+      "band": "mid",
+      "complete": true,
+      "entries": 4
+    },
+    {
+      "index": 5,
+      "age": 1,
+      "level": 0,
+      "band": "new",
+      "complete": true,
+      "entries": 4
+    },
+    {
+      "index": 6,
+      "age": 0,
+      "level": 0,
+      "band": "new",
+      "complete": false,
+      "entries": 2
+    }
+  ],
+  "products": [
+    {
+      "type": "segment_fold",
+      "key": "-seg-43689e98ee8be1fa",
+      "summary": "segment fold",
+      "content": "[11-06 12:02|gen:?] thinking_plan: plan s1; [11-06 12:03|gen:?] action_command: call s1",
+      "time_ms": 1793966520000,
+      "covered": [
+        "plan-s1",
+        "cmd-s1"
+      ],
+      "request_id": "cmp-519c6e621309e490",
+      "reason": "the process detail of the middle band is over its volume threshold"
+    },
+    {
+      "type": "segment_fold",
+      "key": "-seg-75c269bd18eb9cf4",
+      "summary": "segment fold",
+      "content": "[11-06 12:06|gen:?] thinking_plan: plan s2; [11-06 12:07|gen:?] action_command: call s2",
+      "time_ms": 1793966760000,
+      "covered": [
+        "plan-s2",
+        "cmd-s2"
+      ],
+      "request_id": "cmp-c5727698a443fb13",
+      "reason": "the process detail of the middle band is over its volume threshold"
+    },
+    {
+      "type": "segment_fold",
+      "key": "-seg-111ad9c57c1a083e",
+      "summary": "segment fold",
+      "content": "[11-06 12:10|gen:?] thinking_plan: plan s3; [11-06 12:11|gen:?] action_command: call s3",
+      "time_ms": 1793967000000,
+      "covered": [
+        "plan-s3",
+        "cmd-s3"
+      ],
+      "request_id": "cmp-fc3d0e6d77733eb1",
+      "reason": "the process detail of the middle band is over its volume threshold"
+    },
+    {
+      "type": "segment_fold",
+      "key": "-seg-0f343093bc5c4129",
+      "summary": "segment fold",
+      "content": "[11-06 12:14|gen:?] thinking_plan: plan s4; [11-06 12:15|gen:?] action_command: call s4",
+      "time_ms": 1793967240000,
+      "covered": [
+        "plan-s4",
+        "cmd-s4"
+      ],
+      "request_id": "cmp-191479245b166998",
+      "reason": "the process detail of the middle band is over its volume threshold"
+    },
+    {
+      "type": "segment_fold",
+      "key": "-seg-b9968ce58c56c4f7",
+      "summary": "segment fold",
+      "content": "[11-06 12:18|gen:?] thinking_plan: plan s5; [11-06 12:19|gen:?] action_command: call s5",
+      "time_ms": 1793967480000,
+      "covered": [
+        "plan-s5",
+        "cmd-s5"
+      ],
+      "request_id": "cmp-77990da82cded524",
+      "reason": "the process detail of the middle band is over its volume threshold"
+    }
+  ]
+}

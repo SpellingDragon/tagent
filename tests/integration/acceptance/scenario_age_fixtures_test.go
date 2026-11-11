@@ -47,10 +47,6 @@ const scenarioPartTranscript = "transcript"
 // rendered with.
 const scenarioHistorySummaryPrefix = "history summary: "
 
-// scenarioSegmentFoldPrefix is the content prefix a folded segment is rendered
-// with.
-const scenarioSegmentFoldPrefix = "folded segment process: "
-
 // scenarioEnvironmentPrefix is the content prefix the dynamic environment block
 // is rendered with: the named section the system channel carries, the same way
 // the fixed prompt carries its own material.
@@ -122,7 +118,7 @@ func scenarioProjection(t *testing.T, facts []replay.ChainFact) *replay.ReplayPr
 		}
 	}
 	projection := replay.NewReplayProjection()
-	if _, err := replay.RebuildProjectionFromWAL(ctx, projection, chain, replay.NewMemoryRelations(), scenarioChainKey, replay.RebuildOptions{}); err != nil {
+	if _, err := replay.RebuildProjectionFromWAL(ctx, projection, chain, &replay.MemoryRelations{}, scenarioChainKey, replay.RebuildOptions{}); err != nil {
 		t.Fatalf("rebuild the projection from the chain: %v", err)
 	}
 	return projection

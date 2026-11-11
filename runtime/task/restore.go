@@ -8,6 +8,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/SpellingDragon/tagent/api/event"
 )
@@ -95,9 +96,10 @@ type RestoreOutcome struct {
 	// Owner is the owner the current binding resolved the task's target to; it
 	// is empty when the resolution refused.
 	Owner event.AgentID
-	// Recovered reports whether this restore rebuilt the task from the chain.
-	// False reports an idempotent hit: the registry already held the task and
-	// the link added no second fact — or a chain the restore refused without
+	// Recovered reports whether this restore rebuilt the task: from the chain
+	// links it folded, from the carrier a checkpoint stated, or from neither —
+	// false reports an idempotent hit, where the registry already held the task
+	// and the link added no second fact, or a chain the restore refused without
 	// rebuilding anything.
 	Recovered bool
 	// Refused is the named refusal of this restore, set when the current
@@ -165,6 +167,40 @@ func (r *MemoryRegistry) Restore(ctx context.Context, chain []TaskRecord, owners
 		}
 		report.Tasks[pos].Status = r.tasks[taskID].status
 	}
+	r.resolveOutcomeOwnersLocked(ctx, &report, owners)
+	return report, nil
+}
+
+// CheckpointRestored reports one outcome per task a framework checkpoint
+// restored: the state the restored record holds and the owner the current
+// orchestration binding resolves its target to, resolved exactly as Restore
+// resolves the target of a rebuilt task. The outcome reports the recovery,
+// because the carrier rebuilt the task exactly as a chain fold rebuilds it and
+// the two paths answer the same account; a task the registry does not hold is
+// left out of the report.
+func (r *MemoryRegistry) CheckpointRestored(ctx context.Context, taskIDs []event.TaskID, owners OwnerBinding) (RestoreReport, error) {
+	if owners == nil {
+		return RestoreReport{}, ErrNoOwnerBinding
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	report := RestoreReport{Tasks: make([]RestoreOutcome, 0, len(taskIDs))}
+	for _, taskID := range taskIDs {
+		entry, held := r.tasks[taskID]
+		if !held {
+			continue
+		}
+		report.Tasks = append(report.Tasks, RestoreOutcome{TaskID: taskID, Status: entry.status, Recovered: true})
+	}
+	r.resolveOutcomeOwnersLocked(ctx, &report, owners)
+	return report, nil
+}
+
+// resolveOutcomeOwnersLocked resolves the owner of every outcome of one report
+// against the current orchestration binding, under the registry lock its caller
+// holds: a target the binding does not hold keeps its task and is refused by
+// name instead of being re-routed.
+func (r *MemoryRegistry) resolveOutcomeOwnersLocked(ctx context.Context, report *RestoreReport, owners OwnerBinding) {
 	for i := range report.Tasks {
 		entry, ok := r.tasks[report.Tasks[i].TaskID]
 		if !ok {
@@ -183,7 +219,6 @@ func (r *MemoryRegistry) Restore(ctx context.Context, chain []TaskRecord, owners
 		}
 		report.Tasks[i].Owner = resolved
 	}
-	return report, nil
 }
 
 // foldLocked applies one chain link to the registry. A link the registry
@@ -200,6 +235,8 @@ func (r *MemoryRegistry) Restore(ctx context.Context, chain []TaskRecord, owners
 // still owes are stripped from their outbox once the log confirms consumption,
 // so the round reads from the mutations beside them too: a confirmed terminal
 // is consumed, not unopened.
+//
+//   - a link carries no instant, so the movement stamp its transition leaves is unknown rather than the one a checkpoint stated before the cut: a record a fold moved is stamped exactly as a record rebuilt from the chain alone, and the sweep and the logical read answer the same thing on both recovery paths.
 func (r *MemoryRegistry) foldLocked(record TaskRecord) (bool, error) {
 	fact := record.Fact
 	if fact.MutationID == "" {
@@ -240,6 +277,7 @@ func (r *MemoryRegistry) foldLocked(record TaskRecord) (bool, error) {
 		return false, fmt.Errorf("%w: task %s expects revision %d, the chain carries %d",
 			ErrChainBroken, taskID, entry.revision, fact.ExpectedRevision)
 	}
+	entry.markMovement(fact.Status, time.Time{})
 	entry.status = fact.Status
 	entry.revision = fact.ExpectedRevision + 1
 	entry.mutations[fact.MutationID] = fact
