@@ -37,7 +37,7 @@
 | 任务层 | `runtime/task/` | 责任四问的账：受理、状态、通知、交付义务、恢复 |
 | 原文与投影 | `memory/replay/` `memory/ledger/` `memory/query/` | 链的重放与滚界、字节仓落盘、只读投影读缝 |
 | 组合根 | `assembly/` | 唯一装配与发布点，host 簇按域分文件 |
-| 扩展端口 | `api/plugin/` | 按材料流一趟派发、六端口 |
+| 扩展端口 | `api/plugin/` | 按材料流一趟派发、六端口收敛统一 `Material` 声明 |
 | 旁路 | `features/{evolution,telemetry,rl}` | 治理、冥想、观测、训练数据 |
 
 **2.1 一次驱动的骨架**：借执行开始那一刻的绑定代；聚合**本 invocation 自己**的 ready 输入（同会话两次 invocation 永不并批——各自只聚合自己的输入，各自的决策独立于对方的终结）；装配一次原生请求；经唯一归约入口读出终结；每次工具调用经任务包装受理；settled 通知回流到发起调用的那次 invocation，驱动它的下一次决策，而那一次借的是**它自己开始时**生效的代。`Turn{InvocationID,DecisionCount,Terminal,Failure,FinalRound}` 是驱动交回的结局：终态只读 `model.Kind`；`Failure` 是失败时宿主可投递的原文，归约没观察到原因就留空，不编一个。
@@ -90,7 +90,7 @@
 | `api/config` | 纯组织声明：解析、规范化、指纹，不依赖运行时包 |
 | `api/document` | 宿主文档方言的共用适配面 |
 | `api/model` | 锁定 tRPC 模型协议的薄别名层，唯一自有行为是请求作用域终结归约 |
-| `api/plugin` | 六端口窄口扩展点（`call->call`/`call->ruling`/`request->environment`/`fact->observation`/`fact->view`/`fact->compression`） |
+| `api/plugin` | 六端口窄口扩展点（`call->call`/`call->ruling`/`request->environment`/`fact->observation`/`fact->view`/`fact->compression`），每面以统一 `Material` 声明时机与失败语义 |
 | `api/view` | 呈现面的共用类型 |
 | `runtime/agent` | 事件调度与单次决策：`agent.go`（三方法与四条红线）`loop.go`（驱动、捕获、通知与历史读缝）`invocation.go` `request_assembly.go` `delegate.go` `handoff.go` `final_round.go` `consumer.go` `fuse.go` `final_round_planner.go` `skeleton_assert.go` |
 | `runtime/state` | 生效绑定、发布与退役、会话与邮箱、席位、授权：`binding.go` `publish.go` `retire.go` `lease.go` `session.go` `mailbox.go` `durable.go` `occupancy.go` `authority.go` |

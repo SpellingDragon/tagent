@@ -1,11 +1,13 @@
 # session-checkpoint-material Specification
 
 ## Purpose
-TBD - created by archiving change session-checkpoint-material-unification. Update Purpose after archive.
+统一框架恢复的事实源与插件材料声明：checkpoint 以会话为触发与切面粒度，经状态接缝的同一条 g(x) 派生路径恢复（运行期增量与回放重建一致），派生态以开放项加水位有界表达而不删除已提交事实；插件面以统一 `Material` 契约把时机与失败语义声明为策略，六端口收敛为兼容读法。
+
+归档溯源：`session-checkpoint-material-unification` 的 delta 经归档转正为本 spec。
 ## Requirements
 ### Requirement: checkpoint 协调者按会话触发并写该会话的派生态
 
-框架 SHALL 以会话为 checkpoint 的触发与切面粒度：协调者按该会话的上下文（压缩、输入轮变化、会话关闭）请求一次切面，切面 SHALL 只写该会话各 g(x) 消费者此刻的派生状态，SHALL NOT 为另一会话的状态付出读取或落链成本。已落链的 checkpoint 事实 SHALL 保持既有一身份一不可变事实与内容寻址校验；新建载体 SHALL 复用 `checkpoint:<partitionSeq>` 键族的单调性。恢复 SHALL 读最近 checkpoint 并只对该会话尾部重跑 g(x)，SHALL NOT 因恢复而重放 observation 副作用。
+框架 SHALL 以会话为 checkpoint 的触发与切面粒度：协调者按该会话的上下文（压缩、输入轮变化、会话关闭）请求一次切面，切面 SHALL 只写该会话各消费者此刻的派生读态，SHALL NOT 为另一会话的状态付出读取或落链成本。已落链的 checkpoint 事实 SHALL 保持既有一身份一不可变事实与内容寻址校验；新建载体 SHALL 复用 `checkpoint:<partitionSeq>` 键族的单调性。恢复 SHALL 读最近 checkpoint 并只对该会话尾部重跑派生，SHALL NOT 因恢复而重放 observation 副作用。
 
 #### Scenario: 会话级切面只写本会话状态
 
@@ -19,7 +21,7 @@ TBD - created by archiving change session-checkpoint-material-unification. Updat
 
 ### Requirement: `Stateful` 收编消费者读态且不新增挂点
 
-状态接缝 SHALL 同时承载消费者的派生读态：reducer 为该消费者的 g(x) 纯派生面，emitter 为该消费者的 observation 驱动者；同一事实的恢复重建 SHALL 走与运行期同一派生路径，SHALL NOT 为恢复另立一套派生实现。接入一个新的可恢复消费者 SHALL 只注册一个切片，SHALL NOT 要求新增挂点、端口或第二份真相。
+状态接缝 SHALL 同时承载消费者的派生读态：reducer 为该消费者的纯派生面，emitter 为该消费者的 observation 驱动者；同一事实的恢复重建 SHALL 走与运行期同一派生路径，SHALL NOT 为恢复另立一套派生实现。接入一个新的可恢复消费者 SHALL 只注册一个切片，SHALL NOT 要求新增挂点、端口或第二份真相。
 
 #### Scenario: 新消费者只注册切片即获得恢复
 

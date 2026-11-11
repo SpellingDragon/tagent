@@ -21,7 +21,7 @@
 
 **`tool/spec` 是规约面而非执行面**：七个操作闭集（`init`／`new`／`status`／`validate`／`archive`／`instructions`／`list`），闭集外的 op 以 `ErrUnknownOp` **连允许集一起**拒绝；每个参数落成 argv 的**一个离散条目**（含 `p; rm -rf /` 这种值），从不拼 shell 字符串。
 
-**六端口是插件面的词汇，不是工具面的**：`api/plugin` 只声明 `call->call`／`call->ruling`／`request->environment`／`fact->observation`／`fact->view`／`fact->compression` 六个端口常量，`validatePort` 是闭表，一个 instance 按它声明的端口分派；**`Material` 这个词已从码面消失**（全仓无 `type Material`），材料集合不再被当作可遍历的集合。工具面沿用同一条纪律：能漂移的东西（端口名、注册表内容）不进声明。
+**六端口是插件面的词汇，不是工具面的**：`api/plugin` 声明 `call->call`／`call->ruling`／`request->environment`／`fact->observation`／`fact->view`／`fact->compression` 六个端口常量，`validatePort` 是闭表，一个 instance 按它声明的端口分派，每个面再以统一 `Material{Reads, Timing, Failure}` 声明时机与失败语义（曾经的 Material×Product 九常量矩阵已删，材料不再被当作可遍历的集合）。工具面沿用同一条纪律：能漂移的东西（端口名、注册表内容）不进声明。
 
 **新工具的验收锚**：`tests/integration/execution/new_tool_adapter_test.go` 的 `TestNewToolAdapterNeedsNoHostCompensation`——一个 `CallableTool` 放进 `NativeAgent.Tools` 就走完受理→执行→结算→交付（tool result 恰为 `ok`、结算正文以用户角色回填、一个 notice 且已消费）；重启按记录结果的那条事实重放而不问适配器；适配器失败走同一套面、不产生第二条通知；进度与停止证据在端口与任务面之间传递；**晚到的结算不补偿任何东西**；状态词表仍是核声明的闭集。
 

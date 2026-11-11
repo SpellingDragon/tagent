@@ -25,10 +25,10 @@
 | 症状直译锚（symptom anchor） | 把用户原话直接变成的第一行验收测试：修复前必失败、修复后必通过；工程指标全绿替代不了它。 | 病情自述本身就是复查项目：化验单全部正常，不能替病人说"没事"。 | `openspec/specs/symptom-anchors/spec.md`；`TestSymptomAnchor*` 测试家族（assembly／tool/exec／memory/replay） |
 | 请求预算（request budget） | 发给模型前对整包内容的总量守恒：固定说明、技能、环境材料、历史与工具说明一起计量；装不下按次序舍可舍的，舍不动就拒发并记账。窗口与上限分四类、逐项登记于 `golden/runtime/window_bounds.json`：**回放窗**（`max_tokens`，唯一外部窗口）、**预算面**（`provider_context_window`、`output_reserve`，缺省由回放窗派生）、**策略面**（`compress_threshold`、`keep_recent_tasks`、`long_context_tokens`，可调压缩与审批）、**机制常量**（换算、页界、算法与内存/缓存上限，不可声明）。 | 装箱发货：箱子尺寸固定，先保单据，塞不下抽填充物，实在装不下就拒发并告警。 | `openspec/specs/request-budget-accounting/spec.md`；`assembly/request.go` |
 | 世代（generation） | 此词只指两件事，别处不用：**记录世代**＝一条事实由哪个进程实例写下（跨重启回放时分辨"这是前任写的"，不是陈年化石）；**会话世代**＝一条命令回执属于终端会话第几任（只有本任的输出与退出码算数，前任旧屏绝不当本次结果）。 | 交接班记录上的值班员工号；客房号不变、每换一任住客就换房卡。 | 事件信封 `instance_id`；`memory/replay/age_segments.go`（折叠行 `gen:` 前缀）；`tool/exec`（世代令牌） |
-| 材料声明面（`Material`） | 一个插件面对框架声明的读材料契约：它消费哪条路由、什么时候消费、失败留下什么（降级/欠账/阻断），框架据此装配与判定，插件不各自开读口。 | 点菜时交的不是菜，是「我吃哪几样、什么时候上、上不来怎么办」的单子。 | `api/event`（`Material` 声明面）；`openspec/changes/session-checkpoint-material-unification/` |
+| 材料声明面（`Material`） | 一个插件面对框架声明的读材料契约：它消费哪条路由（`Reads`）、什么时候消费（`Timing`：副作用前/提交后/读取时）、失败留下什么（`Failure`：拒整趟/记缺口/保义务/报丢弃），框架据此装配与判定，插件不各自开读口；六端口收敛为兼容读法。 | 点菜时交的不是菜，是「我吃哪几样、什么时候上、上不来怎么办」的单子。 | `api/plugin/material.go`（`Material` 声明面）；`openspec/specs/session-checkpoint-material/spec.md` |
 | 独立验收（independent acceptance） | 训练样本的合格判定只看任务产物本身（文件在不在、内容对不对），不采信执行者自述"我做完了"。 | 阅卷只看答卷，不听考生自我感觉。 | `openspec/changes/archive/2026-11-05-07-training-sample-loop/`；`openspec/specs/offline-training-export/spec.md`（不自动映射奖励的边界） |
 
-## 二、事实族登记表（编号 6 退役留空；身份/类型/锁定以 [FACT-VOCABULARY](FACT-VOCABULARY.md) 第二节为准）
+## 二、事实族登记表（编号 6、12 退役留空；身份/类型/锁定以 [FACT-VOCABULARY](FACT-VOCABULARY.md) 第二节为准）
 
 | # | 族 | 一句话 | 在哪看 |
 |---|---|---|---|
@@ -42,7 +42,7 @@
 | 9 | 收尾判定 | 一次"该收尾了"的判定：同一 range 同原因至多一条。 | `api/event/final_round_request.go` |
 | 10 | 注意力 | 一条在场问题／回答／清除记录：同键拒二落，answer/clearance 具名拒绝。 | `runtime/task/attention.go` |
 | 11 | 交付结算 | 一条对外发送承诺的状态：随答案同笔声明 owed、按身份+状态追加落链，重启照链对账。 | `assembly/host_delivery.go`（`deliverySettlementKey`） |
-| 12 | 框架检查点 | 框架在安静点（先读水位、排水到无在飞提交与状态应用）不持锁纯读各切片、按分区 Seq 水位落链的 checkpoint 事实：切片由持有者经状态接缝 `Stateful`（`StateName`／`SnapshotState`／`RestoreState`）声明，载投影幸存者、送达账（派生态；`DeliveryLedger` 是它的读回面）、邮箱欠账与未应答输入，恢复只经它加偏移后隔离回放。 | `api/event/checkpoint.go`、`assembly/checkpoint.go` |
+| 13 | 框架检查点 | 框架在安静点（先读水位、排水到无在飞提交与状态应用）不持锁纯读各切片、按分区 Seq 水位落链的 checkpoint 事实：切片由持有者经状态接缝 `Stateful`（`StateName`／`SnapshotState`／`RestoreState`）声明，载投影幸存者、送达账（派生态；`DeliveryLedger` 是它的读回面）、邮箱欠账与未应答输入，恢复只经它加偏移后隔离回放。 | `api/event/checkpoint.go`、`assembly/checkpoint.go` |
 
 ## 三、读代码前的五个通用词
 

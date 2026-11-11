@@ -713,7 +713,7 @@ Material×Product 组合词汇若不做真正组合推导 SHALL 删除；六具�
 
 ### Requirement: 共享面契约守护
 
-跨域共享面（run.go 装配缝、host_reload.go、api/event、api/config）SHALL 由编排者单写或经 D6 冻结签名级契约后独立派发；收尾 SHALL 以 F1 diff 断言契约零未授权改动。
+跨域共享面（装配缝、热重载面、api/event、api/config）SHALL 由编排者单写或经 D6 冻结签名级契约后独立派发；收尾 SHALL 以 F1 diff 断言契约零未授权改动。
 
 #### Scenario: 消费者域不改共享缝
 
