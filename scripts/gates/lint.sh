@@ -122,6 +122,11 @@ run python3 scripts/gates/test_check_durable_truth_registry.py
 run python3 scripts/gates/check_durable_truth_registry.py
 run python3 scripts/gates/test_check_spec_hygiene.py
 run python3 scripts/gates/check_spec_hygiene.py
+# 词汇对齐（docs/GLOSSARY）：纯短语禁，无基线/豁免，命中即红。carrier 全退役子串禁
+# （carries/carried/carrying 不含子串故放行）；压缩晋升禁 generational／fold generation；
+# api/plugin 禁 Product；退役词禁；注释续行归并匹配跨行短语，单行命中只计一次。
+run python3 scripts/gates/test_check_vocabulary_alignment.py
+run python3 scripts/gates/check_vocabulary_alignment.py
 
 # 窗口/预算/策略/常量登记：四类不得串用；新增窗口类可配项即红（4.0c）。
 echo "lint: window and bound registry"

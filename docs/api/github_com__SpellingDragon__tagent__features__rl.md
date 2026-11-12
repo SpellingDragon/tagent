@@ -63,9 +63,9 @@ const MaxOpenFilesCap = 16
     above the cap is clamped to the cap rather than obeyed.
 
 const RedactedValue = "[redacted]"
-    RedactedValue is what every credential carrier is projected to: a header
-    name, a query key or a field name stays readable while the credential itself
-    is never persisted.
+    RedactedValue is what every credential is projected to: a header name,
+    a query key or a field name stays readable while the credential itself is
+    never persisted.
 
     - Safe snapshot face: one snapshot is fixed from the request before the
     request starts, projected so no header, cookie or URL credential reaches
@@ -409,8 +409,8 @@ func RedactExtraFields(fields map[string]any) map[string]any
     SanitizeURL, and everything else keeps its value as it stood.
 
 func SanitizeURL(raw string) string
-    SanitizeURL projects one URL carrier to its safe form: a URL that carries
-    no credential keeps its bytes exactly as they stand, while a URL carrying a
+    SanitizeURL projects one URL to its safe form: a URL that carries no
+    credential keeps its bytes exactly as they stand, while a URL carrying a
     userinfo or a credential query value loses that credential to RedactedValue
     and keeps its readable structure. A URL that cannot be parsed is projected
     to empty rather than persisted as it stands.
@@ -1739,8 +1739,8 @@ type RequestSnapshot struct {
 	Parameters json.RawMessage `json:"parameters,omitempty"`
 	// StructuredOutput is the structured output declaration of the request.
 	StructuredOutput json.RawMessage `json:"structured_output,omitempty"`
-	// Messages holds the conversation the request carried, projected at its URL
-	// carriers and verbatim everywhere else.
+	// Messages holds the conversation the request carried, projected at its
+	// URLs and verbatim everywhere else.
 	Messages []model.Message `json:"messages"`
 	// ToolSchemas holds the declaration of every tool visible to the request,
 	// in tool name order so the snapshot bytes are deterministic.
@@ -1758,13 +1758,13 @@ type RequestSnapshot struct {
 
     The snapshot is the runtime request as it stood before the request started:
     the messages, tool schemas, multimodal parts, reasoning and the generation
-    parameters the request carried are kept verbatim while a credential
-    carrier is projected, so the projection never rewrites business content.
-    It is not the wire body a provider encodes: field names, stream framing and
-    provider extensions of that body are the provider's, and a reader takes
-    this content as what the runtime request held. The headers are kept as their
-    names with their values projected to RedactedValue, because a header value
-    is a transport credential carrier rather than request content.
+    parameters the request carried are kept verbatim while a credential is
+    projected, so the projection never rewrites business content. It is not
+    the wire body a provider encodes: field names, stream framing and provider
+    extensions of that body are the provider's, and a reader takes this content
+    as what the runtime request held. The headers are kept as their names
+    with their values projected to RedactedValue, because a header value is a
+    transport credential rather than request content.
 
 func (s RequestSnapshot) Ref(snapshotID, readEntry string) (SnapshotRef, error)
     Ref reports the readable reference to this snapshot under the named read
@@ -1882,7 +1882,7 @@ type SnapshotPolicy struct {
 	// persisted. It receives the JSON-normalized deep copy of the request's
 	// extra fields and returns the projected map.
 	ProjectExtraFields func(map[string]any) map[string]any
-	// ProjectURL projects one URL carrier of a message content part before it is
+	// ProjectURL projects one URL of a message content part before it is
 	// persisted.
 	ProjectURL func(string) string
 }

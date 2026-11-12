@@ -1402,7 +1402,7 @@ func eventIntegrityAwaitConsumed(t *testing.T, run *assembly.Run, addr event.Add
 
 // eventIntegrityRequestsFirstCarryingToolCall reports the ordinal of the first
 // request of one model that carries the assistant message of a call identity.
-// The requests of a model form its decision stream, so the first carrier is the
+// The requests of a model form its decision stream, so the first request is the
 // decision the issuing invocation took after it asked for the call, while the
 // delegated turns of other models and the later replays of one history do not
 // answer here.

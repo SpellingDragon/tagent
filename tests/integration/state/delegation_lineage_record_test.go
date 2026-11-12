@@ -14,7 +14,7 @@ import (
 
 // TestDelegationLineageLandsOnTheAdmissionRecord pins the delegation lineage onto the admission record.
 // - a delegated admission records event.LineageDelegation on its task_spawned material, beside the fact chain
-// - a reopened carrier reads the stamp back from the stored material instead of deriving one again
+// - a reopened commit reads the stamp back from the stored material instead of deriving one again
 // - a user-path admission keeps an empty stamp, so the InvokeRequest lineage is unchanged
 // - the meditation domain reads the delegation stamp as self-managed and never delivers it
 // 契约: docs/wiki/agent/agent-architecture.md#subagent-loop
@@ -23,7 +23,7 @@ func TestDelegationLineageLandsOnTheAdmissionRecord(t *testing.T) {
 	log := newLineageFactLog()
 	durable, err := orgstate.NewDurableCommit(log, nil)
 	if err != nil {
-		t.Fatalf("open the durable carrier: %v", err)
+		t.Fatalf("open the durable commit: %v", err)
 	}
 	registry := task.NewMemoryRegistry(durable, task.NewMemoryAdmission())
 	tasks := lineageTasks{MemoryManager: task.NewMemoryManager(registry, nil), MemoryRegistry: registry}
@@ -60,7 +60,7 @@ func TestDelegationLineageLandsOnTheAdmissionRecord(t *testing.T) {
 	}
 	reopened, err := orgstate.NewDurableCommit(log, nil)
 	if err != nil {
-		t.Fatalf("reopen the durable carrier: %v", err)
+		t.Fatalf("reopen the durable commit: %v", err)
 	}
 	replayed, err := reopened.Records(ctx, receipt.TaskID)
 	if err != nil {

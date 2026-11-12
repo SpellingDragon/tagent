@@ -433,7 +433,7 @@ func BenchmarkSegmentWindowRead(b *testing.B) {
 
 // TestNewestOfTypeReadsTheCommitOrderAndCopiesNoIndex pins the newest-of-type read.
 //   - the answer is the newest commit, whatever window and slot that commit took
-//   - the lookup reads the commits filed since the carrier, not the history behind it
+//   - the lookup reads the commits filed since the checkpoint, not the history behind it
 //   - the lookup allocates the same beside a long history as beside none
 //
 // 契约: docs/wiki/memory/memory-architecture.md#file-segment-store
@@ -441,24 +441,24 @@ func TestNewestOfTypeReadsTheCommitOrderAndCopiesNoIndex(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
 	store, _ := openJournalSegmentStore(t, root)
-	earlier := segmentRecord(7, 2000, 4, "carrier-old", 32).WithChain(event.TypeCheckpoint, "")
+	earlier := segmentRecord(7, 2000, 4, "checkpoint-old", 32).WithChain(event.TypeCheckpoint, "")
 	if err := store.StoreEvent(ctx, earlier); err != nil {
-		t.Fatalf("commit the earlier carrier: %v", err)
+		t.Fatalf("commit the earlier checkpoint: %v", err)
 	}
-	later := segmentRecord(2, 1000, 1, "carrier-new", 32).WithChain(event.TypeCheckpoint, "")
+	later := segmentRecord(2, 1000, 1, "checkpoint-new", 32).WithChain(event.TypeCheckpoint, "")
 	if err := store.StoreEvent(ctx, later); err != nil {
-		t.Fatalf("commit the later carrier: %v", err)
+		t.Fatalf("commit the later checkpoint: %v", err)
 	}
 	newest, held, err := store.NewestOfType(ctx, event.TypeCheckpoint)
 	if err != nil || !held {
-		t.Fatalf("read the newest carrier = (%t, %v), want the committed one", held, err)
+		t.Fatalf("read the newest checkpoint = (%t, %v), want the committed one", held, err)
 	}
 	if newest != later.EventKey {
-		t.Fatalf("the newest carrier reads as %s, want %s, the identity the later commit filed beside the higher window and slot of %s", newest, later.EventKey, earlier.EventKey)
+		t.Fatalf("the newest checkpoint reads as %s, want %s, the identity the later commit filed beside the higher window and slot of %s", newest, later.EventKey, earlier.EventKey)
 	}
 	reopened, _ := openJournalSegmentStore(t, root)
 	if boot, held, err := reopened.NewestOfType(ctx, event.TypeCheckpoint); err != nil || !held || boot != later.EventKey {
-		t.Fatalf("the boot over the same log reads the newest carrier as (%s, %t, %v), want %s", boot, held, err, later.EventKey)
+		t.Fatalf("the boot over the same log reads the newest checkpoint as (%s, %t, %v), want %s", boot, held, err, later.EventKey)
 	}
 	if _, held, err := reopened.NewestOfType(ctx, "no-such-type"); err != nil || held {
 		t.Fatalf("a type the store holds no entry of reads as (%t, %v), want no entry and no error", held, err)
@@ -467,15 +467,15 @@ func TestNewestOfTypeReadsTheCommitOrderAndCopiesNoIndex(t *testing.T) {
 	brief := newestOfTypeCostOf(t, 0)
 	long := newestOfTypeCostOf(t, 2000)
 	if long.bytes > brief.bytes {
-		t.Fatalf("the lookup allocates %d byte(s) per read beside 2000 commits behind the carrier and %d beside none, want no whole-index copy", long.bytes, brief.bytes)
+		t.Fatalf("the lookup allocates %d byte(s) per read beside 2000 commits behind the checkpoint and %d beside none, want no whole-index copy", long.bytes, brief.bytes)
 	}
 	if long.nanos > 8*brief.nanos+2_000 {
-		t.Fatalf("the lookup costs %d ns beside 2000 commits behind the carrier and %d beside none, want the commits since the carrier and not the history behind it", long.nanos, brief.nanos)
+		t.Fatalf("the lookup costs %d ns beside 2000 commits behind the checkpoint and %d beside none, want the commits since the checkpoint and not the history behind it", long.nanos, brief.nanos)
 	}
 }
 
 // newestOfTypeCostOf opens a store carrying the given number of commits behind
-// one carrier, files the carrier and the cadence of commits that follow it, and
+// one checkpoint, files the checkpoint and the cadence of commits that follow it, and
 // reports what one newest-of-type read beside them allocates and takes.
 func newestOfTypeCostOf(t *testing.T, behind int) struct{ bytes, nanos int64 } {
 	t.Helper()
@@ -487,9 +487,9 @@ func newestOfTypeCostOf(t *testing.T, behind int) struct{ bytes, nanos int64 } {
 			t.Fatalf("commit history event %d: %v", at, err)
 		}
 	}
-	carrier := segmentRecord(2, 1000, 1, "carrier", 32).WithChain(event.TypeCheckpoint, "")
-	if err := store.StoreEvent(ctx, carrier); err != nil {
-		t.Fatalf("commit the carrier: %v", err)
+	checkpoint := segmentRecord(2, 1000, 1, "checkpoint", 32).WithChain(event.TypeCheckpoint, "")
+	if err := store.StoreEvent(ctx, checkpoint); err != nil {
+		t.Fatalf("commit the checkpoint: %v", err)
 	}
 	for at := 0; at < 4; at++ {
 		rec := segmentRecord(0, 4000+int64(at), 1, fmt.Sprintf("tail-%02d", at), 16)
@@ -593,7 +593,7 @@ func newestOfTypeAllocBytes(store *FileSegmentStore) int64 {
 		b.ReportAllocs()
 		for at := 0; at < b.N; at++ {
 			if _, _, err := store.NewestOfType(ctx, event.TypeCheckpoint); err != nil {
-				b.Fatalf("read the newest carrier: %v", err)
+				b.Fatalf("read the newest checkpoint: %v", err)
 			}
 		}
 	})
@@ -608,7 +608,7 @@ func newestOfTypeNanoseconds(store *FileSegmentStore) int64 {
 	measured := testing.Benchmark(func(b *testing.B) {
 		for at := 0; at < b.N; at++ {
 			if _, _, err := store.NewestOfType(ctx, event.TypeCheckpoint); err != nil {
-				b.Fatalf("read the newest carrier: %v", err)
+				b.Fatalf("read the newest checkpoint: %v", err)
 			}
 		}
 	})

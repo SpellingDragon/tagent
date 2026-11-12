@@ -16,7 +16,9 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"testing"
+	"time"
 )
 
 // migrateSourceKeys are the keys one migration moves: two namespaces, a key that
@@ -31,22 +33,29 @@ func migrateSourceKeys() []Pair {
 	}
 }
 
-// migrateSourceWrite writes the source pairs as the retired sharded-snapshot
-// layout — one directory per key namespace under the key-value directory, one
-// snapshot file per shard — and returns its directory.
+// migrateSourceWrite writes the contract source pairs as the retired
+// sharded-snapshot layout and returns its directory.
 func migrateSourceWrite(t *testing.T) string {
 	t.Helper()
+	return migrateSourceWritePairs(t, migrateSourceKeys())
+}
+
+// migrateSourceWritePairs writes pairs as the retired sharded-snapshot layout —
+// one directory per key namespace under the key-value directory, one snapshot
+// file per shard — and returns its directory.
+func migrateSourceWritePairs(t *testing.T, pairs []Pair) string {
+	t.Helper()
 	root := t.TempDir()
-	pairs := map[string]map[string][]byte{}
-	for _, pair := range migrateSourceKeys() {
+	shards := map[string]map[string][]byte{}
+	for _, pair := range pairs {
 		label := keyNamespaceOf(pair.Key)
-		if pairs[label] == nil {
-			pairs[label] = map[string][]byte{}
+		if shards[label] == nil {
+			shards[label] = map[string][]byte{}
 		}
-		pairs[label][pair.Key] = pair.Value
+		shards[label][pair.Key] = pair.Value
 	}
-	labels := make([]string, 0, len(pairs))
-	for label := range pairs {
+	labels := make([]string, 0, len(shards))
+	for label := range shards {
 		labels = append(labels, label)
 	}
 	sort.Strings(labels)
@@ -58,7 +67,7 @@ func migrateSourceWrite(t *testing.T) string {
 		snapshot, err := json.Marshal(struct {
 			Version int               `json:"version"`
 			Entries map[string][]byte `json:"entries"`
-		}{Version: legacyShardVersion, Entries: pairs[label]})
+		}{Version: legacyShardVersion, Entries: shards[label]})
 		if err != nil {
 			t.Fatalf("encode the retired shard %s: %v", label, err)
 		}
@@ -185,5 +194,90 @@ func TestMigrateShardedRootContract(t *testing.T) {
 				t.Fatalf("a migration onto its own source returned %v, want the target-not-empty refusal", err)
 			}
 		})
+	})
+}
+
+// migrateStoredRef encodes one reference record of body as the stored form the
+// original store's load reads.
+func migrateStoredRef(t *testing.T, body []byte) []byte {
+	t.Helper()
+	stored, err := json.Marshal([]storedRef{{Format: "text", StoredAt: time.Now(), Digest: digestOf(body), Length: int64(len(body))}})
+	if err != nil {
+		t.Fatalf("encode the stored reference: %v", err)
+	}
+	return stored
+}
+
+// TestMigrateShardedRootOriginalPairing pins the pairing rule the boot loader enforces over the copied root.
+//   - every reference key names an independent body key
+//   - a root that breaks the rule is refused by name instead of reported as a complete migration
+//
+// 契约: docs/wiki/memory/memory-architecture.md#local-file-kv
+func TestMigrateShardedRootOriginalPairing(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("orphan_reference_refused", func(t *testing.T) {
+		pairedBody := []byte("the body the retired commit landed")
+		orphanBody := []byte("the body the retired commit lost")
+		sourceRoot := migrateSourceWritePairs(t, []Pair{
+			{Key: "blob:1408-1760000000123-1", Value: pairedBody},
+			{Key: "ref:1408-1760000000123-1", Value: migrateStoredRef(t, pairedBody)},
+			{Key: "ref:1408-1760000000123-2", Value: migrateStoredRef(t, orphanBody)},
+		})
+		targetRoot := t.TempDir()
+		_, err := MigrateShardedRoot(ctx, sourceRoot, targetRoot)
+
+		copied, openErr := OpenAtomicStore(ctx, StorageConfig{Type: StorageJournal, Root: targetRoot})
+		if openErr != nil {
+			t.Fatalf("open the copied root %s: %v", targetRoot, openErr)
+		}
+		store, storeErr := newKVOriginalStore(copied, nil)
+		if storeErr != nil {
+			t.Fatalf("open the original store over the copied root: %v", storeErr)
+		}
+		got := store.Get(ctx, "1408-1760000000123-2")
+		if got.Outcome != RecallFailed || !errors.Is(got.Err, ErrSnapshotCorrupt) || !strings.Contains(got.Err.Error(), "1408-1760000000123-2") {
+			t.Fatalf("the boot load of the copied root = %+v, want the named orphan refusal", got)
+		}
+		if !errors.Is(err, ErrSnapshotCorrupt) {
+			t.Fatalf("migrating a root whose reference names no body returned %v, want the named pairing refusal the boot load reports", err)
+		}
+		if !strings.Contains(err.Error(), "1408-1760000000123-2") {
+			t.Fatalf("the migration refusal %q does not name the orphan key", err)
+		}
+	})
+
+	t.Run("fully_paired_source_still_migrates", func(t *testing.T) {
+		firstBody := []byte("the first original body")
+		secondBody := []byte("the second original body")
+		pairs := append(migrateSourceKeys(),
+			Pair{Key: "blob:1408-1760000000123-1", Value: firstBody},
+			Pair{Key: "ref:1408-1760000000123-1", Value: migrateStoredRef(t, firstBody)},
+			Pair{Key: "blob:1408-1760000000123-2", Value: secondBody},
+			Pair{Key: "ref:1408-1760000000123-2", Value: migrateStoredRef(t, secondBody)},
+		)
+		sourceRoot := migrateSourceWritePairs(t, pairs)
+		targetRoot := t.TempDir()
+		report, err := MigrateShardedRoot(ctx, sourceRoot, targetRoot)
+		if err != nil {
+			t.Fatalf("migrate the fully paired root into %s: %v", targetRoot, err)
+		}
+		if report.Keys != len(pairs) {
+			t.Fatalf("the migration report = %+v, want %d keys", report, len(pairs))
+		}
+		copied, err := OpenAtomicStore(ctx, StorageConfig{Type: StorageJournal, Root: targetRoot})
+		if err != nil {
+			t.Fatalf("open the copied root %s: %v", targetRoot, err)
+		}
+		store, err := newKVOriginalStore(copied, nil)
+		if err != nil {
+			t.Fatalf("open the original store over the copied root: %v", err)
+		}
+		if got := store.Get(ctx, "1408-1760000000123-1"); got.Outcome != RecallFound || !bytes.Equal(got.Body, firstBody) {
+			t.Fatalf("the boot load of the paired copy = %+v, want the first original", got)
+		}
+		if got := store.Get(ctx, "1408-1760000000123-2"); got.Outcome != RecallFound || !bytes.Equal(got.Body, secondBody) {
+			t.Fatalf("the boot load of the paired copy = %+v, want the second original", got)
+		}
 	})
 }

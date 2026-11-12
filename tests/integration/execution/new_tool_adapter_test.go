@@ -415,7 +415,7 @@ func newAdapterRig(t *testing.T, ctx context.Context) *adapterRig {
 	return rig
 }
 
-// durable opens the rig's tier as the commit carrier the registry writes to.
+// durable opens the rig's tier as the commit the registry writes to.
 func (r *adapterRig) durable(t *testing.T) *state.DurableCommit {
 	t.Helper()
 	tier, err := ledger.OpenTier(r.ctx, r.cfg)

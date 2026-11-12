@@ -423,7 +423,7 @@ func (s runUnsettled) Unconsumed(ctx context.Context) ([]task.UnsettledNotice, e
 // very same rounds, because the boundary is the one fact the chain records.
 //
 // The rounds split by the cut of the newest checkpoint: the rounds it covered
-// come back from the carrier by identity and are read out of the durable chain
+// come back from the checkpoint by identity and are read out of the durable chain
 // the run holds, and the rounds that landed past it are the resident window of
 // each chain. A run beside no storage tier restores no cut and reads the window
 // alone.

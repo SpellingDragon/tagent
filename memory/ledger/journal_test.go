@@ -515,13 +515,13 @@ func jsonTokenOf(t *testing.T, value []byte) []byte {
 	return token
 }
 
-// carrierFrameValueBytes is the raw size of the value the round trip commits. A
+// checkpointFrameValueBytes is the raw size of the value the round trip commits. A
 // byte value rides in a frame base64-encoded, four bytes for every three it
 // holds, so this stands the payload at about 30.7 MiB: near the 32 MiB ceiling,
-// and far over the carrier a commit actually writes (a checkpoint carrier states
-// about 2 KiB; assembly's TestTheCheckpointCarrierStaysBoundedByItsEntries
+// and far over the checkpoint a commit actually writes (a checkpoint states
+// about 2 KiB; assembly's TestTheCheckpointStaysBoundedByItsEntries
 // measures it).
-const carrierFrameValueBytes = 23 << 20
+const checkpointFrameValueBytes = 23 << 20
 
 // overCeilingValueBytes is the raw size of a value whose payload stands past the
 // ceiling this build states: base64 puts it at about 35 MiB, over 32 MiB and
@@ -529,21 +529,21 @@ const carrierFrameValueBytes = 23 << 20
 // caught here instead of passing unnoticed.
 const overCeilingValueBytes = 25 << 20
 
-// TestJournalCarriesTheFrameworkCarrierFrame pins the frame ceiling against the carrier a checkpoint states.
-//   - a frame near the ceiling commits and replays byte for byte, so the ceiling bounds a payload the framing reads rather than a carrier
+// TestJournalCarriesTheFrameworkCheckpointFrame pins the frame ceiling against the record a checkpoint states.
+//   - a frame near the ceiling commits and replays byte for byte, so the ceiling bounds a payload the framing reads rather than a checkpoint
 //   - a frame declaring a payload past the ceiling is refused by name, so the bound still bounds the reader
 //   - a record whose payload stands past the ceiling is refused by name before any frame is written
 //
 // 契约: docs/wiki/memory/memory-architecture.md#local-file-kv
-func TestJournalCarriesTheFrameworkCarrierFrame(t *testing.T) {
+func TestJournalCarriesTheFrameworkCheckpointFrame(t *testing.T) {
 	t.Run("a_frame_near_the_ceiling_round_trips", func(t *testing.T) {
 		dir := t.TempDir()
 		log, err := openJournalLog(dir)
 		if err != nil {
 			t.Fatalf("open the journal: %v", err)
 		}
-		carrier := bytes.Repeat([]byte("c"), carrierFrameValueBytes)
-		journalTestAppend(t, log, journalPut{Key: "262:evt:00001:000001", Value: carrier})
+		checkpoint := bytes.Repeat([]byte("c"), checkpointFrameValueBytes)
+		journalTestAppend(t, log, journalPut{Key: "262:evt:00001:000001", Value: checkpoint})
 		declared := int(log.size) - journalFrameHeaderBytes
 		if declared > journalMaxFrameBytes {
 			t.Fatalf("the fixture states a %d-byte payload over the %d-byte ceiling", declared, journalMaxFrameBytes)
@@ -559,10 +559,10 @@ func TestJournalCarriesTheFrameworkCarrierFrame(t *testing.T) {
 		}
 		value, held := journalTestRead(t, dir, "262:evt:00001:000001")
 		if !held {
-			t.Fatal("the reopened journal holds no carrier record")
+			t.Fatal("the reopened journal holds no checkpoint record")
 		}
-		if !bytes.Equal(value, carrier) {
-			t.Fatalf("the reopened journal answered %d byte(s) of the carrier, want the %d it committed", len(value), len(carrier))
+		if !bytes.Equal(value, checkpoint) {
+			t.Fatalf("the reopened journal answered %d byte(s) of the checkpoint, want the %d it committed", len(value), len(checkpoint))
 		}
 	})
 

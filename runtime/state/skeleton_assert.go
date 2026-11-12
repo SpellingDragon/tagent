@@ -222,7 +222,7 @@ var (
 )
 
 // The durable commit face keeps its documented shapes: the byte-level fact
-// log, the durable carrier behind the task commit port and the owner
+// log, the durable implementation of the task commit port and the owner
 // resolution over the current orchestration binding.
 var (
 	_ FactLog = (FactLog)(nil)

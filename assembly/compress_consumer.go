@@ -30,7 +30,7 @@ const compressionProducer = "assembly.compress-consumer"
 // metaKeyCompressRequest, metaKeyCompressProducer, metaKeyCompressKey,
 // metaKeyCompressCovered, metaKeyCompressText and metaKeyCompressSurvivors are
 // the metadata keys a compress product fact carries: the product states its five fields, and the event metadata
-// is the one durable carrier of them, because a product is material of the
+// is the one durable record of them, because a product is material of the
 // projection and never a message of the transcript.
 const (
 	metaKeyCompressRequest   = "compress_request"

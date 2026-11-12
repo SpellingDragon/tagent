@@ -258,7 +258,7 @@ func TestRequestCarriesProjectedBudget(t *testing.T) {
 
 // TestNativeToolFamiliesAdmitted checks the composition-root admission of the native tool families beside the evaluation criterion reference.
 //   - every native family enters the model tool face and answers with a real admission receipt
-//   - the evaluation reference — a criterion carrier, not a callable tool — is never listed on that face
+//   - the evaluation reference — a criterion, not a callable tool — is never listed on that face
 func TestNativeToolFamiliesAdmitted(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()

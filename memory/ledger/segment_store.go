@@ -675,11 +675,11 @@ func (s *FileSegmentStore) eventByKey(ctx context.Context, key event.EventID) (S
 // NewestOfType answers the identity of the newest published index entry of one
 // frozen event type: the walk reads the resident commit order from the newest
 // commit backwards and stops at the first entry of the type, so a lookup beside a
-// carrier filed every cadence commits reads a bounded prefix of the order whatever
+// checkpoint filed every cadence commits reads a bounded prefix of the order whatever
 // the history behind it, copies and sorts nothing, and reads no event body. The
 // answer spans partitions: an identity is newer than another because its commit
 // landed later, never because its window, its sequence slot or its partition is
-// higher, so a run whose owner moved between processes reads the carrier its
+// higher, so a run whose owner moved between processes reads the checkpoint its
 // newest process filed instead of the one of the highest partition.
 //
 // A type the store holds no entry of answers found=false and no error.

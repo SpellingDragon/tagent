@@ -18,7 +18,7 @@ import (
 
 // 契约: docs/wiki/reliability/durable-delivery.md#canonical-fact-resolution
 //
-// FactLog is the durable fact surface one durable commit carrier stores
+// FactLog is the durable fact surface DurableCommit stores
 // through: put, get, prefix scan and the sync barrier a commit reports its
 // success behind. Its signatures carry built-in types only, so any backend —
 // the memory tier's key-value port among them — satisfies it structurally and
@@ -42,7 +42,7 @@ type FactLog interface {
 }
 
 // factPrefix, specPrefix, consumePrefix, attemptPrefix and rejectPrefix locate
-// the five durable record kinds the carrier keeps on one log: the commit facts,
+// the five durable record kinds the commit keeps on one log: the commit facts,
 // the admission material of their tasks, the receipt of each logical
 // consumption a notification completed, the attempt the follow-up turn of one
 // notification is, and the feedback fact of each notification a target refused.
@@ -104,7 +104,7 @@ type attemptRecorder interface {
 // Rejection is the durable feedback fact of one notification a target refused:
 // the identity of the notification it answers, the routing the delivery was
 // offered to, and the reason the target gave. The record is the consumption
-// result of that notification, so a carrier opened over the same log reads the
+// result of that notification, so a DurableCommit opened over the same log reads the
 // refusal back and owes the notification no delivery a second time.
 type Rejection struct {
 	Notice   task.Notice      `json:"notice"`
@@ -148,7 +148,7 @@ type rejectionRecorder interface {
 	refusals() []Rejection
 }
 
-// ErrNoticeNotOwed reports an acceptance of a notification the carrier holds no
+// ErrNoticeNotOwed reports an acceptance of a notification the commit holds no
 // delivery obligation for, so there is no delivery state to advance.
 var ErrNoticeNotOwed = errors.New("state: the notification carries no delivery obligation")
 
@@ -156,18 +156,18 @@ var ErrNoticeNotOwed = errors.New("state: the notification carries no delivery o
 // material of a task with other content than the material already stored.
 var ErrSpecConflict = errors.New("state: the task's admission material is already declared with other content")
 
-// DurableCommit is the durable carrier behind the task commit port: it stores
+// DurableCommit is the durable implementation of the task commit port: it stores
 // one self-contained record per mutation identity through a FactLog behind the
 // sync barrier, and holds every committed notification as an open delivery
 // obligation. A repeated record of a mutation identity already stored returns
 // the fact already stored and records no second one — and never advances a
 // delivery state, because an idempotent hit reports a stored fact and not a
 // delivered notification. Only an explicit acceptance by the target moves a
-// delivery, through Accept. The carrier also keeps the receipt of each logical
-// consumption a notification completed, so a carrier opened over the same log
+// delivery, through Accept. It also keeps the receipt of each logical
+// consumption a notification completed, so a DurableCommit opened over the same log
 // owes no delivery for a notice the log confirms as consumed.
 //
-// The carrier holds no wrapper, binding or lease: the log it stores through is
+// DurableCommit holds no wrapper, binding or lease: the log it stores through is
 // supplied at construction and nothing an earlier run captured is revived.
 type DurableCommit struct {
 	mu        sync.Mutex
@@ -184,11 +184,11 @@ type DurableCommit struct {
 	loadStats LoadStats
 }
 
-// LoadScan is the read cost of one prefix scan made while rebuilding the
-// commit carrier at startup — the store this port writes through, never the
+// LoadScan is the read cost of one prefix scan made while rebuilding
+// DurableCommit at startup — the store this port writes through, never the
 // framework checkpoint. Keys is the number of pairs returned, Bytes their total
 // value length, and Elapsed the wall time of the read alone — folding the
-// pairs into the carrier tables happens after the measurement and is covered
+// pairs into the commit tables happens after the measurement and is covered
 // by the restore observation instead. It is a measurement, not a durable
 // record.
 type LoadScan struct {
@@ -204,8 +204,8 @@ type LoadStats struct {
 	Scans []LoadScan
 }
 
-// LoadStats reports the measured read cost of the load that built this commit
-// carrier. It is read-only; the caller cannot mutate the carrier through it.
+// LoadStats reports the measured read cost of the load that built this
+// DurableCommit. It is read-only; the caller cannot mutate the commit through it.
 func (d *DurableCommit) LoadStats() LoadStats {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -217,14 +217,14 @@ func (d *DurableCommit) LoadStats() LoadStats {
 // DurableCommit satisfies the task commit port.
 var _ task.Commit = (*DurableCommit)(nil)
 
-// NewDurableCommit returns a durable commit carrier over one fact log and
+// NewDurableCommit returns a DurableCommit over one fact log and
 // loads every fact and consumption receipt the log already holds, so a second
 // process over the same log sees exactly the facts the first one committed and
 // owes no delivery for a notice that process already consumed. uncertain, when
 // it is not nil, marks matching commit attempts as uncertain, so all three
 // commit outcomes stay observable.
 func NewDurableCommit(log FactLog, uncertain task.UncertainProbe) (*DurableCommit, error) {
-	d := newCarrier(log)
+	d := newDurableCommit(log)
 	d.uncertain = uncertain
 	if err := d.load(context.Background()); err != nil {
 		durableError("tagent: durable commit load failed err=%v", err)
@@ -233,8 +233,8 @@ func NewDurableCommit(log FactLog, uncertain task.UncertainProbe) (*DurableCommi
 	return d, nil
 }
 
-// newCarrier answers one empty carrier over the named log.
-func newCarrier(log FactLog) *DurableCommit {
+// newDurableCommit answers one empty durable commit over the named log.
+func newDurableCommit(log FactLog) *DurableCommit {
 	return &DurableCommit{
 		log:       log,
 		revisions: map[event.TaskID]int64{},
@@ -248,7 +248,7 @@ func newCarrier(log FactLog) *DurableCommit {
 	}
 }
 
-// load folds every record the log already holds back into the commit carrier's
+// load folds every record the log already holds back into DurableCommit's
 // tables.
 // A committed notification is loaded owed and pending again unless the log holds
 // the receipt of its logical consumption: the storage layer records no
@@ -372,7 +372,7 @@ type attemptRecord struct {
 }
 
 // recordAttempt stores the attempt of one notification's follow-up turn behind
-// the sync barrier, so a carrier opened over the same log reads the terminal the
+// the sync barrier, so a DurableCommit opened over the same log reads the terminal the
 // stopped process's turn ended on. The record is keyed by the notice's
 // four-part identity and a repeated record of the same content stages no second
 // pair. A barrier that did not complete reports the write failure and confirms
@@ -412,7 +412,7 @@ func (d *DurableCommit) recordAttempt(ctx context.Context, notice task.Notice, a
 }
 
 // attemptOf reports the attempt record of one notification, and whether the
-// carrier holds one at all: no record means no turn ever started for the
+// commit holds one at all: no record means no turn ever started for the
 // notification, and a record beside an empty terminal means the turn started
 // and has not reported a terminal yet.
 func (d *DurableCommit) attemptOf(notice task.Notice) (SettleAttempt, bool) {
@@ -426,7 +426,7 @@ func (d *DurableCommit) attemptOf(notice task.Notice) (SettleAttempt, bool) {
 }
 
 // recordConsumption stores the receipt of one completed logical consumption
-// behind the sync barrier, so a carrier opened over the same log reads that
+// behind the sync barrier, so a DurableCommit opened over the same log reads that
 // notice as consumed and owes it no delivery. The receipt is keyed by the
 // notice's four-part identity: a repeated receipt of the same identity stages no
 // second pair and reports success. A receipt whose barrier did not complete
@@ -468,7 +468,7 @@ func (d *DurableCommit) recordConsumption(ctx context.Context, notice task.Notic
 }
 
 // recordRejection stores the feedback fact of one notification a target refused
-// behind the sync barrier, so a carrier opened over the same log reads that
+// behind the sync barrier, so a DurableCommit opened over the same log reads that
 // refusal and owes the notification no delivery a second time. The refusal is
 // keyed by the notice's four-part identity: a repeated refusal of the same
 // identity stages no second fact and reports success. A barrier that did not
@@ -509,7 +509,7 @@ func (d *DurableCommit) recordRejection(ctx context.Context, rejection Rejection
 	return nil
 }
 
-// Rejections reports every refusal the carrier holds, in the stable task, round,
+// Rejections reports every refusal the commit holds, in the stable task, round,
 // kind and sequence order of the notifications they answer.
 func (d *DurableCommit) Rejections() []Rejection {
 	return d.refusals()
@@ -527,7 +527,7 @@ func (d *DurableCommit) refusalOf(notice task.Notice) (Rejection, bool) {
 	return rejection, held
 }
 
-// refusals reports every refusal the carrier holds, in the stable task, round,
+// refusals reports every refusal the commit holds, in the stable task, round,
 // kind and sequence order of the notifications they answer.
 func (d *DurableCommit) refusals() []Rejection {
 	if d == nil {
@@ -556,12 +556,12 @@ func (d *DurableCommit) refusals() []Rejection {
 }
 
 // Commit implements the task commit port. A record of a mutation identity the
-// carrier already stores returns the fact already stored and records no second
+// commit already stores returns the fact already stored and records no second
 // fact — and advances no delivery state: the notifications of the stored fact
 // stay owed and pending until their targets explicitly accept them. The same
 // identity beside other content is refused by name, as is a record expecting
 // another revision. A record is staged behind the sync barrier before the
-// carrier reports it committed, so a barrier that fails reports an uncertain
+// commit reports it committed, so a barrier that fails reports an uncertain
 // outcome instead of a durable success.
 func (d *DurableCommit) Commit(ctx context.Context, record task.CommitRecord) (task.CommitResult, error) {
 	d.mu.Lock()
@@ -642,7 +642,7 @@ func (d *DurableCommit) Declare(ctx context.Context, taskID event.TaskID, spec t
 // Accept advances the delivery state of one notification to accepted. This is
 // the only advance there is: a commit never moves a delivery, and an idempotent
 // commit repeat leaves every notification owed and pending. A notification the
-// carrier holds no obligation for is refused by name.
+// commit holds no obligation for is refused by name.
 func (d *DurableCommit) Accept(ctx context.Context, notice task.Notice) (task.DeliveryAcceptance, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -656,7 +656,7 @@ func (d *DurableCommit) Accept(ctx context.Context, notice task.Notice) (task.De
 	return task.DeliveryAccepted, nil
 }
 
-// Facts returns the records the carrier stored for one task, in commit order.
+// Facts returns the records the commit stored for one task, in commit order.
 func (d *DurableCommit) Facts(taskID event.TaskID) []task.CommitRecord {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -694,7 +694,7 @@ func (d *DurableCommit) Outbox(taskID event.TaskID) []task.OutboxNotice {
 	return owed
 }
 
-// OwedNotices reports every notification the carrier still owes delivery on,
+// OwedNotices reports every notification the commit still owes delivery on,
 // in the stable task, round, kind and sequence order: the open obligations of
 // the account, beside which the ones a consumption receipt confirms never
 // appear again.
@@ -721,7 +721,7 @@ func (d *DurableCommit) OwedNotices() []task.OutboxNotice {
 	return owed
 }
 
-// TaskIDs returns every task the carrier holds facts for, in numeric order.
+// TaskIDs returns every task the commit holds facts for, in numeric order.
 func (d *DurableCommit) TaskIDs() []event.TaskID {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -837,7 +837,7 @@ func rejectKey(notice task.Notice) string {
 }
 
 // durableError renders one line of the persistence face at ERROR: a write, a
-// barrier or a load the durable carrier could not complete, beside the task and
+// barrier or a load the durable commit could not complete, beside the task and
 // the mutation it was about and the outcome the caller is answered with. A
 // failure here changes what the process may claim to have stored, which is a
 // semantic change nobody should have to grep for, so the level is ERROR and

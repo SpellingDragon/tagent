@@ -53,7 +53,7 @@ func (r scenarioReading) Sites(ctx context.Context) ([]query.SiteReading, error)
 	return out, nil
 }
 
-// Tasks reports every task the commit carrier lists beside its obligations.
+// Tasks reports every task the commit lists beside its obligations.
 func (r scenarioReading) Tasks(ctx context.Context) ([]query.TaskReading, error) {
 	ids := r.durable.TaskIDs()
 	out := make([]query.TaskReading, 0, len(ids))

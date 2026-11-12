@@ -778,7 +778,7 @@ func deltaOf(prev, cur *reading, keep func(Detail) bool) []Update {
 
 // detailEqual reports whether two detail entries read the same: the same
 // reference content, the same state and the same blocked records. The
-// comparison is written out field by field on purpose: the frozen carriers
+// comparison is written out field by field on purpose: the frozen Detail values
 // carry a slice beside comparable fields and the equality an increment is
 // decided on must stay exact and explicit.
 func detailEqual(a, b Detail) bool {
@@ -977,7 +977,7 @@ func walkBounded(r *reading, filter ListFilter, budget Budget, after ObjectRef, 
 }
 
 const (
-	// wordBytes is the estimated size of one word-sized carrier field.
+	// wordBytes is the estimated size of one word-sized field.
 	wordBytes = 8
 	// detailBaseBytes is the fixed base of one snapshot object beside its fields.
 	detailBaseBytes = 64

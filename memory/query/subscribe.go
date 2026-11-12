@@ -41,7 +41,7 @@ const (
 
 // UpdateOp names which of the four operations one increment of the projection
 // carries: upsert, delete, gap and reset. The vocabulary sits beside the gap
-// kinds of GapKind and the carriers already declared here; nothing of the
+// kinds of GapKind and the payloads already declared here; nothing of the
 // earlier increment shapes is removed by it.
 type UpdateOp string
 
@@ -101,7 +101,7 @@ type Gap struct {
 	To Revision
 	// Reason names why the range is missing, in the gap vocabulary the
 	// subscription already reports gaps in (GapKind), so the existing
-	// classification stands beside the range carrier instead of being replaced
+	// classification stands beside the missing range instead of being replaced
 	// by it.
 	Reason GapKind
 }

@@ -8,7 +8,7 @@
 // The package holds the effective bindings and the session sites, and an
 // executor borrows a binding for one request rather than keeping a second
 // writable source of its own. The store, the borrowing face, the send seam and
-// the durable commit carrier are the behaviour behind the ports.
+// the durable commit are the behaviour behind the ports.
 package state
 
 import (

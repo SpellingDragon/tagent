@@ -7,7 +7,7 @@
 ## Requirements
 ### Requirement: checkpoint 协调者按会话触发并写该会话的派生态
 
-框架 SHALL 以会话为 checkpoint 的触发与切面粒度：协调者按该会话的上下文（压缩、输入轮变化、会话关闭）请求一次切面，切面 SHALL 只写该会话各消费者此刻的派生读态，SHALL NOT 为另一会话的状态付出读取或落链成本。已落链的 checkpoint 事实 SHALL 保持既有一身份一不可变事实与内容寻址校验；新建载体 SHALL 复用 `checkpoint:<partitionSeq>` 键族的单调性。恢复 SHALL 读最近 checkpoint 并只对该会话尾部重跑派生，SHALL NOT 因恢复而重放 observation 副作用。
+框架 SHALL 以会话为 checkpoint 的触发与切面粒度：协调者按该会话的上下文（压缩、输入轮变化、会话关闭）请求一次切面，切面 SHALL 只写该会话各消费者此刻的派生读态，SHALL NOT 为另一会话的状态付出读取或落链成本。已落链的 checkpoint 事实 SHALL 保持既有一身份一不可变事实与内容寻址校验；新建 checkpoint SHALL 复用 `checkpoint:<partitionSeq>` 键族的单调性。恢复 SHALL 读最近 checkpoint 并只对该会话尾部重跑派生，SHALL NOT 因恢复而重放 observation 副作用。
 
 #### Scenario: 会话级切面只写本会话状态
 
@@ -44,12 +44,12 @@
 
 ### Requirement: 派生态有界且不删除已提交事实
 
-checkpoint 承载的派生态 SHALL 以开放项加水位表达，已结部分 SHALL 留在链上而不嵌入载体，载体大小 SHALL 有界于开放项数量。任何有界化手段 SHALL NOT 删除、覆盖或改写已提交事实；恢复期读全史的消费者 SHALL 仍能按身份读到其正文。
+checkpoint 承载的派生态 SHALL 以开放项加水位表达，已结部分 SHALL 留在链上而不嵌入 checkpoint，checkpoint 大小 SHALL 有界于开放项数量。任何有界化手段 SHALL NOT 删除、覆盖或改写已提交事实；恢复期读全史的消费者 SHALL 仍能按身份读到其正文。
 
-#### Scenario: 已结集合不进入载体
+#### Scenario: 已结集合不进入 checkpoint
 
 - **WHEN** 一个会话积累了大量已结交付或已答压缩判决
-- **THEN** checkpoint SHALL 以水位加开放项表达这些集合，载体大小 SHALL 不随已结数量线性增长
+- **THEN** checkpoint SHALL 以水位加开放项表达这些集合，checkpoint 大小 SHALL 不随已结数量线性增长
 
 #### Scenario: 有界化不打断全史读者
 

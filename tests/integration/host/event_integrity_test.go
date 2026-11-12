@@ -323,7 +323,7 @@ func reproductionFactsSummary(facts []event.Event) string {
 // reproductionWaitForSettleFact waits until the chain carries exactly one
 // settled delivery fact for the named worker body and answers it. A settle a
 // live invocation consumed inside its flying segment commits no transport
-// record — its notice fact is the carrier that path is built to leave — so the
+// record — its notice fact is the record that path is built to leave — so the
 // wait takes that fact as well and answers whichever form landed.
 func reproductionWaitForSettleFact(t *testing.T, host *assembly.Host, addr event.Address, body string, timeout time.Duration) event.Event {
 	t.Helper()
@@ -711,8 +711,8 @@ func runBusyNoticeLoss(t *testing.T) {
 // one: the settled delivery fact, the follow-up fact key, the unique request
 // that carries the material and the unique action the notice answers. The check
 // commits nothing by hand; every fact it reads was committed by Boot. The
-// delegation result probe pins its first carrier: the replayed chain repeats
-// the pairing in every later request, so the first carrier is the accept
+// delegation result probe pins its first request: the replayed chain repeats
+// the pairing in every later request, so the first request is the accept
 // decision the probe maps back.
 //
 // - A notice the settle lands beside the segment still flying is read by that segment's own next decision, and the spec allows the settled result and the notice to share one request.

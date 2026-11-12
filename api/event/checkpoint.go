@@ -51,9 +51,10 @@ type CheckpointSlice struct {
 // the cut it states and the state slices restored from it. The writing moment is
 // the commit stamp of the fact, so it is not stated twice.
 type Checkpoint struct {
-	// Key is the fact key the checkpoint commits under: the partition-sequence
-	// slot it was taken at, so the key of every checkpoint of a partition is
-	// monotone past the key of the one before it and no two cuts share one.
+	// Key is the fact key the checkpoint commits under: the partition it was
+	// filed in beside the sequence slot it was taken at. The slot advances with
+	// every landing of that partition, so no two cuts of one partition name one
+	// key.
 	Key string
 	// ID is the content-addressed identity of the checkpoint: two cuts stating
 	// the same state answer the same identity.
@@ -64,10 +65,16 @@ type Checkpoint struct {
 	Slices []CheckpointSlice
 }
 
-// CheckpointKey is the fact key one checkpoint is filed under: the frozen
-// `checkpoint:<partitionSeq>` spelling, whose sequence slot is the partition
-// sequence the cut advanced to.
-func CheckpointKey(seq int64) string { return checkpointKeyPrefix + strconv.FormatInt(seq, 10) }
+// CheckpointKey is the fact key one checkpoint is filed under:
+// `checkpoint:<partition>:<partitionSeq>`, the partition the cut is filed in
+// beside the sequence slot that partition advanced to. The key is the global
+// identity of the fact, so it names the partition as well as the slot: every
+// partition numbers its own commits, two partitions stand at one slot, and a key
+// naming the slot alone names one fact twice as soon as the owner moves between
+// them. The family is read back by the frozen event type, never by this spelling.
+func CheckpointKey(partition int, seq int64) string {
+	return checkpointKeyPrefix + strconv.Itoa(partition) + ":" + strconv.FormatInt(seq, 10)
+}
 
 // checkpointKeyPrefix marks a checkpoint fact key: the family is read back by
 // the frozen event type and never by a key's spelling.
@@ -133,7 +140,7 @@ func CheckpointOf(evt Event) (Checkpoint, bool) {
 	return stated, true
 }
 
-// FactKey returns the checkpoint's identity as a fact key: the partition
+// FactKey returns the checkpoint's identity as a fact key: the partition and the
 // sequence slot the checkpoint commits under.
 //
 // 契约: docs/FACT-VOCABULARY.md#families

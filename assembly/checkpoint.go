@@ -55,10 +55,11 @@ const CheckpointCommitInterval = 64
 // a due filed.
 const CheckpointPeriod = 30 * time.Second
 
-// checkpointSliceProjection, checkpointSliceDelivery, checkpointSliceMailbox,
-// checkpointSliceTasks, checkpointSliceInputs and checkpointSliceCompress name
-// the framework's own state slices. A consumer mounted beside them carries a name
-// of its own, so the two families never collide on the seam.
+// checkpointSliceProjection, checkpointSliceDelivery, checkpointSliceTasks,
+// checkpointSliceInputs and checkpointSliceCompress name the framework's own
+// state slices. A consumer mounted beside them carries a name of its own, so the
+// two families never collide on the seam. The mailbox slice is not among them: it
+// is keyed by state.StateSliceMailbox beside the holder that states it.
 const (
 	// checkpointSliceProjection carries the survivors of every session
 	// projection the run presents.
@@ -67,8 +68,6 @@ const (
 	// settlement state of every obligation, the obligations still owed with
 	// their body, target, lineage, attempt and hold, and the ordering sequence.
 	checkpointSliceDelivery = "delivery"
-	// checkpointSliceMailbox carries the notifications the mailbox still owes.
-	checkpointSliceMailbox = "mailbox"
 	// checkpointSliceTasks carries the terminal state of every task the
 	// registry settled.
 	checkpointSliceTasks = "tasks"
@@ -338,7 +337,7 @@ func (r *Run) Checkpoint(ctx context.Context) (event.EventID, bool, error) {
 // serializes the cuts of one run with each other — one cut states one account — and
 // it is taken by no commit, so it never stands between a fact and its landing.
 //
-//   - every cut of one run states a key no earlier cut stated: the key is the sequence the owner partition stands at, and the checkpoint's own landing takes a slot past the cut it states, so the next cut beside no new fact names a later slot instead of repeating the filed one.
+//   - every cut states a key no earlier cut stated: the key names the owner partition beside the sequence that partition stands at, and the checkpoint's own landing takes a slot past the cut it states, so the next cut of one owner names a later slot and a cut whose owner moved names another partition's key instead of the filed one.
 func (r *Run) checkpointLocked(ctx context.Context) (event.EventID, bool, error) {
 	if err := ctx.Err(); err != nil {
 		return "", false, err
@@ -351,7 +350,8 @@ func (r *Run) checkpointLocked(ctx context.Context) (event.EventID, bool, error)
 		return "", false, nil
 	}
 	offset := r.checkpointWatermark()
-	key := event.EventID(event.CheckpointKey(offset[memory.PartitionIDFromName(string(owner.AgentID))]))
+	partition := memory.PartitionIDFromName(string(owner.AgentID))
+	key := event.EventID(event.CheckpointKey(partition, offset[partition]))
 	if err := r.flight.await(ctx); err != nil {
 		return "", false, err
 	}
@@ -417,7 +417,8 @@ func (r *Run) checkpointSessionLocked(ctx context.Context, addr event.Address) (
 		return "", false, nil
 	}
 	offset := r.checkpointWatermark()
-	key := event.EventID(event.CheckpointKey(offset[memory.PartitionIDFromName(string(owner.AgentID))]))
+	partition := memory.PartitionIDFromName(string(owner.AgentID))
+	key := event.EventID(event.CheckpointKey(partition, offset[partition]))
 	if err := r.flight.awaitSession(ctx, addr.SessionID); err != nil {
 		return "", false, err
 	}
@@ -475,7 +476,7 @@ func (r *Run) sessionCut(session event.SessionID, slice string) event.Checkpoint
 }
 
 // checkpointEventOf renders one checkpoint as the fact it commits as: the
-// partition-sequence key, the payload as the message body and the two cut
+// partition and sequence key, the payload as the message body and the two cut
 // entries in the metadata. The checkpoint is filed under the run's checkpoint owner
 // beside the session it states, so the index answers which chain a checkpoint
 // belongs to without reading its body. A session checkpoint names a chain in its
@@ -499,9 +500,12 @@ func checkpointEventOf(checkpoint event.Checkpoint, owner event.Address) event.E
 }
 
 // checkpointOwnerLocked reports the address a framework checkpoint is filed
-// under: the smallest agent the run holds a chain for, so the same run files its
-// checkpoints in one partition and a restart reads them back from the index in
-// the order they were committed. The read is taken under the run lock.
+// under: the smallest agent the run holds a chain for. The owner moves as a
+// smaller agent's chain attaches, so the cut names the owner's partition beside
+// its sequence slot — a cut whose owner moved names another partition's key
+// instead of repeating the filed one. A restart reads the newest cut of the
+// frozen type back from the index in the order they were committed. The read is
+// taken under the run lock.
 func (r *Run) checkpointOwnerLocked() event.Address {
 	agents := make([]event.AgentID, 0, len(r.replays))
 	seen := make(map[event.AgentID]bool, len(r.replays))

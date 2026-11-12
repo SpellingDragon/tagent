@@ -617,7 +617,7 @@ func (s *consumptionSite) entry(t *testing.T, seq state.AcceptSeq) (state.Mailbo
 
 // consumptionBarrierLog records the write and barrier order of the real tier
 // log it delegates to: the record it stages, the barrier behind which the
-// carrier reports it durable, and how many barriers returned.
+// commit reports it durable, and how many barriers returned.
 type consumptionBarrierLog struct {
 	state.FactLog
 	mu       sync.Mutex
@@ -2090,7 +2090,7 @@ func runRebuildRefoldsFromWAL(t *testing.T) {
 		}
 		rejudged = append(rejudged, fold.Requests...)
 	}
-	if got, want := stripFoldGenerations(string(replay.RenderProjection(refolded.Entries()))), stripFoldGenerations(string(replay.RenderProjection(online))); got != want {
+	if got, want := stripRecorderGenerations(string(replay.RenderProjection(refolded.Entries()))), stripRecorderGenerations(string(replay.RenderProjection(online))); got != want {
 		t.Fatalf("the WAL re-fold restored %d bytes = %v, want the online fold's own %d bytes = %v apart from the recorder generation the raw facts cannot name", len(got), projectionKeysOf(refolded.Entries()), len(want), projectionKeysOf(online))
 	}
 	for _, entry := range projectionProductsEntriesOf(t, refolded.Entries()) {
@@ -2817,7 +2817,7 @@ type restartDrainView struct {
 
 // restartBoundaryView is what a third opener of the durable root reads after the
 // restart closed: the tasks and owed notifications the log alone still holds,
-// and the acceptance the carrier answers for the seeded notification.
+// and the acceptance the commit answers for the seeded notification.
 type restartBoundaryView struct {
 	Tasks     int    `json:"tasks"`
 	Owed      int    `json:"owed"`
@@ -3254,7 +3254,7 @@ func restartSettle(ctx context.Context, registry *task.MemoryRegistry, envelope 
 }
 
 // newRestartSite establishes the mailbox site of one seeded address beside the
-// durable carrier the run's own store is built with, so the claim and the
+// durable commit the run's own store is built with, so the claim and the
 // consumption receipt of the seed land exactly as the production face lands
 // them.
 func newRestartSite(t *testing.T, addr event.Address, instance event.InstanceID, durable *state.DurableCommit) *consumptionSite {
@@ -5315,13 +5315,13 @@ func restoreChainViews(t *testing.T, ctx context.Context, root string) []restore
 	return views
 }
 
-// stripFoldGenerations rewrites the recorder generation of every provenance
+// stripRecorderGenerations rewrites the recorder generation of every provenance
 // anchor in a rendered projection to the explicit gen:? placeholder. The WAL
 // facts a replay reads name no recorder generation (replay.ChainFact carries the
 // fact's read, not the recorder's identity), so a fold re-derived from them
 // writes the placeholder where the online fold writes the live run's generation;
 // the two forms must agree in everything but that token.
-func stripFoldGenerations(rendered string) string {
+func stripRecorderGenerations(rendered string) string {
 	const marker = "|gen:"
 	var out strings.Builder
 	rest := rendered

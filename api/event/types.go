@@ -1,7 +1,7 @@
 // 契约: docs/wiki/event/event-architecture.md#overview
 // 契约: docs/FACT-VOCABULARY.md#fact-category
 //
-// Package event is the runtime's event identity and fact carrier: it defines
+// Package event is the runtime's event identity and fact contract: it defines
 // the typed identifiers an event carries, the address of the agent session an
 // event belongs to, and the event payload itself.
 //

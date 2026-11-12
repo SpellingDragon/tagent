@@ -280,7 +280,7 @@ type testRig struct {
 }
 
 // newTestRig returns one in-memory task stack: an admission face, a registry over
-// one memory commit carrier, and the manager holding the obligation ledger.
+// one memory commit, and the manager holding the obligation ledger.
 func newTestRig() testRig {
 	admission := task.NewMemoryAdmission()
 	registry := task.NewMemoryRegistry(task.NewMemoryCommit(nil), admission)

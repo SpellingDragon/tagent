@@ -1203,12 +1203,12 @@
         "spec": "offline-training-export"
       },
       "LoadScan": {
-        "concept": "read cost measurement of one prefix scanned while the carrier rebuilds from the durable record kinds",
+        "concept": "read cost measurement of one prefix scanned while the commit rebuilds from the durable record kinds",
         "kind": "declaration",
         "spec": "delivery-closure"
       },
       "LoadStats": {
-        "concept": "read cost measurement set of the carrier rebuild",
+        "concept": "read cost measurement set of the commit rebuild",
         "kind": "declaration",
         "spec": "delivery-closure"
       },

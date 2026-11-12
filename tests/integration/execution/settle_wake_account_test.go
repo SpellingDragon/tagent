@@ -100,7 +100,7 @@ func wakeAccountMailbox(t *testing.T, durable *state.DurableCommit) *state.Memor
 		t.Fatalf("mount the mailbox state slice: %v", err)
 	}
 	if err := states.RestoreEmptyState(context.Background()); err != nil {
-		t.Fatalf("restore the mailbox slice of the account beside no carrier: %v", err)
+		t.Fatalf("restore the mailbox slice of the account beside no checkpoint: %v", err)
 	}
 	return store
 }

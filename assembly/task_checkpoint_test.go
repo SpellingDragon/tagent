@@ -171,7 +171,7 @@ func TestTaskRestoreBoundedByCheckpoint(t *testing.T) {
 	}
 	durable, held := booted.commit.inner.(*state.DurableCommit)
 	if !held {
-		t.Fatal("the booted run holds no durable carrier to fold the chain through")
+		t.Fatal("the booted run holds no durable commit to fold the chain through")
 	}
 	chain, err := durable.Records(ctx, covered[0])
 	if err != nil {

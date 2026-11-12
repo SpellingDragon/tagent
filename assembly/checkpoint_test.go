@@ -23,6 +23,7 @@ import (
 	"github.com/SpellingDragon/tagent/memory/ledger"
 	"github.com/SpellingDragon/tagent/memory/replay"
 	"github.com/SpellingDragon/tagent/runtime/agent"
+	"github.com/SpellingDragon/tagent/runtime/state"
 )
 
 // TestCheckpointEmittedAtCadenceAndFold pins the bounded cadence and the cut it files.
@@ -209,6 +210,211 @@ func seqOfFact(t *testing.T, run *Run, key event.EventID) (int, int64) {
 		t.Fatalf("the fact %s is not in the store index", key)
 	}
 	return partition, seq
+}
+
+// TestCheckpointKeySurvivesTheOwnerMovingToASmallerAgent pins the key of a cut against the owner the run files it under.
+//   - the chain committed first owns the cut, and the smaller agent that attaches beside it takes the ownership over
+//   - the two partitions stand at the same watermark, so a key naming the watermark alone names one fact twice and the second cut is refused as a key conflict
+//   - both cuts stay readable by their own identity, each in the partition of the owner that filed it
+//   - a restart over the same store restores the newest cut of the frozen type and files a cut past it
+//
+// 契约: docs/wiki/platform/platform-subsystems.md#framework-checkpoint
+func TestCheckpointKeySurvivesTheOwnerMovingToASmallerAgent(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	storage := func() Option {
+		return WithStorage(ledger.StorageConfig{Type: ledger.StorageJournal, Root: root})
+	}
+	large := event.Address{AgentID: "agent-b", SessionID: "session-owner-large"}
+	small := event.Address{AgentID: "agent-a", SessionID: "session-owner-small"}
+	largePartition := memory.PartitionIDFromName(string(large.AgentID))
+	smallPartition := memory.PartitionIDFromName(string(small.AgentID))
+	if largePartition == smallPartition {
+		t.Fatalf("both agents fold into partition %d, so the owner move proves no key of another partition", largePartition)
+	}
+	run := windowChainRun(t, ctx, storage())
+	run.checkpointEvery = 1 << 30
+	run.checkpointPeriod = 1000 * time.Hour
+
+	commitWindowTurns(t, ctx, run, large, 2)
+	run.mu.Lock()
+	owner := run.checkpointOwnerLocked()
+	run.mu.Unlock()
+	if owner.AgentID != large.AgentID {
+		t.Fatalf("the run files its cut under %q, want the only chain it holds, %q", owner.AgentID, large.AgentID)
+	}
+	firstID, filed, err := run.Checkpoint(ctx)
+	if err != nil || !filed {
+		t.Fatalf("file the cut of the first owner = (%t, %v), want a filed fact", filed, err)
+	}
+	firstPartition, _ := seqOfFact(t, run, firstID)
+	if firstPartition != largePartition {
+		t.Fatalf("the first cut landed in partition %d, want the partition %d of its owner", firstPartition, largePartition)
+	}
+	_, firstOffset := run.CheckpointFiled()
+	watermark := firstOffset[largePartition]
+
+	for turn := 0; ; turn++ {
+		run.landing.Lock()
+		at := run.landedSeq[smallPartition]
+		run.landing.Unlock()
+		if at == watermark {
+			break
+		}
+		if at > watermark || turn >= 8 {
+			t.Fatalf("partition %d stands at seq %d after %d turn(s), want the watermark %d the first cut stated",
+				smallPartition, at, turn, watermark)
+		}
+		commitWindowTurn(t, ctx, run, small, turn)
+	}
+	run.mu.Lock()
+	owner = run.checkpointOwnerLocked()
+	run.mu.Unlock()
+	if owner.AgentID != small.AgentID {
+		t.Fatalf("the owner stayed %q beside the smaller chain %q, so the cut proves no owner move", owner.AgentID, small.AgentID)
+	}
+	secondID, filed, err := run.Checkpoint(ctx)
+	if err != nil {
+		t.Fatalf("file the cut of the owner that moved to %s = %v (fact key conflict: %t), want a checkpoint beside the %s already filed",
+			small.AgentID, err, errors.Is(err, memory.ErrFactKeyConflict), firstID)
+	}
+	if !filed || secondID == "" || secondID == firstID {
+		t.Fatalf("the cut of the moved owner filed (%q, %t), want a fact of its own beside %q", secondID, filed, firstID)
+	}
+	secondPartition, _ := seqOfFact(t, run, secondID)
+	if secondPartition != smallPartition {
+		t.Fatalf("the second cut landed in partition %d, want the partition %d of its owner", secondPartition, smallPartition)
+	}
+	_, secondOffset := run.CheckpointFiled()
+	for _, id := range []event.EventID{firstID, secondID} {
+		stored, err := run.CommittedEvent(ctx, id)
+		if err != nil {
+			t.Fatalf("read the checkpoint %s back: %v", id, err)
+		}
+		if stored.Type != event.TypeCheckpoint {
+			t.Fatalf("the fact %s is %q, want the frozen checkpoint type", id, stored.Type)
+		}
+		if _, stated := event.CheckpointOf(stored); !stated {
+			t.Fatalf("the fact %s states no readable checkpoint", id)
+		}
+	}
+
+	restarted := windowChainRun(t, ctx, storage())
+	restarted.checkpointEvery = 1 << 30
+	restarted.checkpointPeriod = 1000 * time.Hour
+	restoredID, restoredOffset := restarted.CheckpointFiled()
+	if restoredID != secondID {
+		t.Fatalf("the restart restored %q, want the newest cut %q read by the frozen type", restoredID, secondID)
+	}
+	if !reflect.DeepEqual(map[int]int64(restoredOffset), map[int]int64(secondOffset)) {
+		t.Fatalf("the restart restored the cut %v, want the cut %v the newest checkpoint states", restoredOffset, secondOffset)
+	}
+	thirdID, filed, err := restarted.Checkpoint(ctx)
+	if err != nil || !filed {
+		t.Fatalf("file the cut of the restarted run = (%t, %v), want a checkpoint past the restored one", filed, err)
+	}
+	thirdPartition, thirdSeq := seqOfFact(t, restarted, thirdID)
+	restoredPartition, restoredSeq := seqOfFact(t, restarted, secondID)
+	if thirdID == secondID || thirdPartition != restoredPartition || thirdSeq <= restoredSeq {
+		t.Fatalf("the restarted cut %s landed at seq %d of partition %d beside %s at seq %d of partition %d, want a later slot of the same partition",
+			thirdID, thirdSeq, thirdPartition, secondID, restoredSeq, restoredPartition)
+	}
+}
+
+// TestCheckpointKeysNameTheOwnerPartition pins the key of both filings of a cut against the partition it lands in.
+//   - a session cut is filed under the owner partition beside the slot that partition stands at, exactly as the framework cut is
+//   - the owner moving to a smaller agent standing at the same watermark files a session cut beside the one already filed
+//   - successive framework cuts of one owner name later slots of that partition, so no two cuts of one partition share a key
+//
+// 契约: docs/wiki/platform/platform-subsystems.md#framework-checkpoint
+func TestCheckpointKeysNameTheOwnerPartition(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	run := windowChainRun(t, ctx, WithStorage(ledger.StorageConfig{Type: ledger.StorageJournal, Root: root}))
+	run.checkpointEvery = 1 << 30
+	run.checkpointPeriod = 1000 * time.Hour
+	large := event.Address{AgentID: "agent-b", SessionID: "session-key-large"}
+	small := event.Address{AgentID: "agent-a", SessionID: "session-key-small"}
+	largePartition := memory.PartitionIDFromName(string(large.AgentID))
+	smallPartition := memory.PartitionIDFromName(string(small.AgentID))
+	if largePartition == smallPartition {
+		t.Fatalf("both agents fold into partition %d, so the owner move proves no key of another partition", largePartition)
+	}
+
+	commitWindowTurns(t, ctx, run, large, 2)
+	largeCut, filed, err := run.CheckpointSession(ctx, large)
+	if err != nil || !filed {
+		t.Fatalf("file the session cut of the first owner = (%t, %v), want a filed fact", filed, err)
+	}
+	cutPartition, cutSeq := seqOfFact(t, run, largeCut)
+	if cutPartition != largePartition {
+		t.Fatalf("the session cut landed in partition %d, want the partition %d of its owner", cutPartition, largePartition)
+	}
+	if string(largeCut) != event.CheckpointKey(largePartition, cutSeq-1) {
+		t.Fatalf("the session cut is keyed %s, want the partition %d beside the slot %d it states", largeCut, largePartition, cutSeq-1)
+	}
+
+	watermark := cutSeq - 1
+	for turn := 0; ; turn++ {
+		run.landing.Lock()
+		at := run.landedSeq[smallPartition]
+		run.landing.Unlock()
+		if at == watermark {
+			break
+		}
+		if at > watermark || turn >= 8 {
+			t.Fatalf("partition %d stands at seq %d after %d turn(s), want the watermark %d the session cut stated",
+				smallPartition, at, turn, watermark)
+		}
+		commitWindowTurn(t, ctx, run, small, turn)
+	}
+	smallCut, filed, err := run.CheckpointSession(ctx, small)
+	if err != nil {
+		t.Fatalf("file the session cut of the owner that moved to %s = %v (fact key conflict: %t), want a checkpoint beside the %s already filed",
+			small.AgentID, err, errors.Is(err, memory.ErrFactKeyConflict), largeCut)
+	}
+	if !filed || smallCut == largeCut {
+		t.Fatalf("the session cut of the moved owner filed (%q, %t), want a fact of its own beside %q", smallCut, filed, largeCut)
+	}
+	movedPartition, movedSeq := seqOfFact(t, run, smallCut)
+	if movedPartition != smallPartition {
+		t.Fatalf("the moved session cut landed in partition %d, want the partition %d of its owner", movedPartition, smallPartition)
+	}
+	if string(smallCut) != event.CheckpointKey(smallPartition, movedSeq-1) {
+		t.Fatalf("the moved session cut is keyed %s, want the partition %d beside the slot %d it states", smallCut, smallPartition, movedSeq-1)
+	}
+	if movedSeq != cutSeq {
+		t.Fatalf("the two session cuts landed at seq %d and %d, want the one watermark both partitions stood at", movedSeq, cutSeq)
+	}
+	for _, id := range []event.EventID{largeCut, smallCut} {
+		stored, err := run.CommittedEvent(ctx, id)
+		if err != nil {
+			t.Fatalf("read the session checkpoint %s back: %v", id, err)
+		}
+		if _, stated := event.CheckpointOf(stored); !stated {
+			t.Fatalf("the fact %s states no readable checkpoint", id)
+		}
+	}
+
+	previous, previousSeq := event.EventID(""), int64(0)
+	for cut := 0; cut < 2; cut++ {
+		id, filed, err := run.Checkpoint(ctx)
+		if err != nil || !filed {
+			t.Fatalf("file the framework cut %d of the moved owner = (%t, %v), want a filed fact", cut, filed, err)
+		}
+		partition, seq := seqOfFact(t, run, id)
+		if partition != smallPartition {
+			t.Fatalf("the framework cut landed in partition %d, want the partition %d of its owner", partition, smallPartition)
+		}
+		if string(id) != event.CheckpointKey(partition, seq-1) {
+			t.Fatalf("the framework cut is keyed %s, want the partition %d beside the slot %d it states", id, partition, seq-1)
+		}
+		if previous != "" && (id == previous || seq <= previousSeq) {
+			t.Fatalf("the framework cut %s landed at seq %d beside the earlier %s at seq %d, want a later slot of the same partition",
+				id, seq, previous, previousSeq)
+		}
+		previous, previousSeq = id, seq
+	}
 }
 
 // checkpointBase is the moment the seeded turns of a window chain start at.
@@ -1148,7 +1354,7 @@ func TestSessionCutStatesOnlyTheTriggeringSession(t *testing.T) {
 	if len(names) == 0 {
 		t.Fatal("the session checkpoint states no slice, so it carries no state of the chain that asked for it")
 	}
-	for _, unsessioned := range []string{checkpointSliceTasks, checkpointSliceMailbox} {
+	for _, unsessioned := range []string{checkpointSliceTasks, state.StateSliceMailbox} {
 		if slices.Contains(names, unsessioned) {
 			t.Fatalf("the session checkpoint states the %q slice beside %v, want the slices a session chain owns", unsessioned, names)
 		}

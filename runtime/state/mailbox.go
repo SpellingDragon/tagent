@@ -55,7 +55,7 @@ type consumptionRecorder interface {
 
 // durableConsumption is the durable account one mailbox may be opened over: the
 // receipt of each completed logical consumption and the open obligations a
-// restore folds back into the mailbox, so the same carrier answers both the
+// restore folds back into the mailbox, so the same account answers both the
 // consumption the account records and the work it still owes. The attempt
 // record of a notification's follow-up turn is served by its own narrow port
 // beside this one, because a mailbox reads the two accounts for two decisions.

@@ -5,7 +5,7 @@
 // sweep did not drop — stated whole, beside the chain revision each record
 // stands at. The account is the size of the work the registry keeps, never the
 // size of the chains it already settled, so a restarted process reads the tasks
-// of the cut out of the carrier instead of folding every chain the storage ever
+// of the cut out of the checkpoint instead of folding every chain the storage ever
 // accumulated. The fact chain stays the truth of a task and the source the tail
 // replays from: the checkpoint is the derived snapshot that spares the covered
 // part of it.
