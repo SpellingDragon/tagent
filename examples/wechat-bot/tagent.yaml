@@ -113,7 +113,7 @@ agents:
     # 记忆面:本 agent 是共享 tier 的声明处(见文件头的记忆面说明),也是语义引擎的唯一声明处。
     memory:
       type: journal
-      path: .wechat-config/data-v2
+      path: .wechat-config/data
       read_namespaces: [tagent]
       engine:
         backend: memory
@@ -187,7 +187,7 @@ agents:
     # 于是 recall_query 能在自身分区之外检索业务分区的历史。
     memory:
       type: journal
-      path: .wechat-config/data-v2
+      path: .wechat-config/data
       read_namespaces: [tagent]
     # 待接线:max_tool_iterations / max_tokens / compress_threshold / reasoning_effort
 
