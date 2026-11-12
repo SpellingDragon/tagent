@@ -312,3 +312,21 @@
 - **仅注释、零逻辑改动**：3 文件均 Phase2-excluded，克隆 vocab face `git diff --stat` 该 3 文件**空**、克隆 73 文件 diff 不变 → 词汇 commit 纯度与克隆 CI 等价不受影响。
 
 **真树 full lint 余红**：exit 1 唯外来未跟踪 `scripts/gates/test_check_runtime_symptoms.py`（test_registry_matches_the_module：registry 列 TestLocalSmokeSymptomBootDeployed 而模块异）；零触碰、CI 克隆不含此文件 → 非本变更债。
+
+### F4 归档（用户明示「归档并commit and push，然后PR squash merge main」，A3 停点解除）
+
+**授权**：用户明示归档＋提交＋推送＋PR squash merge main，A3 发布授权法定停点解除。
+
+**编排 delta 处置（spec 最小化，不重复转正）**：top-level `specs/orchestration/spec.md` 四条要求经逐条比对主 orchestration spec，确认系既有通用原则的本变更实例化——启动门与波次解锁≈主 :700（后置域待前置入 main、波次仅汇报）、共享面单写守护≈主 :714（编排者单写＋F1 契约断言）、症状锚优先与独立放行≈主 :728（症状锚第一行＋工程目标只追加＋独立审者 frontier 空）；spec 最小化不新建重复能力一条其内容（公共概念只减不增、词汇归既有主）亦为既有纯化原则。四条均点名本变更 C/A/B/D/E/F 轨与 390 锚，属变更局部编排契约，非通用新增。按本 delta 自身「MUST NOT 新建重复能力」→ `git mv specs/orchestration/spec.md orchestration-spec.md`（变更根），随档冻结留存，**不入主 spec**（避免名称碰撞与通用 spec 被变更局部实例污染）。探针实证：若留 specs/ 内，CLI 转正即因「启动门与波次解锁 already exists」中止。
+
+**唯一真新增能力转正**：02 嵌套 `changes/02-vocabulary-gate/specs/architecture-guardrails/spec.md`（代码词汇对齐机械门需求＋6 场景）提升至 top-level `specs/architecture-guardrails/spec.md`，标题归一 `# architecture-guardrails delta`→`# architecture-guardrails Specification`，`## ADDED Requirements` 保留供 CLI 识别。提升件与探针归档件逐字 diff 为空（IDENTICAL）。CLI `openspec archive code-vocabulary-alignment -y`（无 --skip-specs/--no-validate）把该需求并入主 `openspec/specs/architecture-guardrails/spec.md` `## Requirements` 末（探针实证 :330，无 `## ADDED` 泄漏）。
+
+**doc-budget 具名上调（M4 先例）**：转正使主 architecture-guardrails spec 330→365 行（+37 新增需求 −2 归档器归一化空行＝净 +35），实测 231 篇/21957→21992 行。此 +35 纯系权威 spec delta 转正（新门验收契约），零顺手散文；按 M4 先例「权威文档不得靠删散文对冲」（删等量有效文档＝restart-recovery r4 已否之 B 案），取具名上调路径：`doc_budget.json` baseline.lines 21957→21992，note 逐项列清（+37/−2 构成、M4 类归属），此后仍只降不升。`--tighten` 机械拒升，故具名上调走 manifest 直编＋note 注明（M4/2026-11-11 两次先例同路径）。外来未跟踪 .md 不入计数（agent-interview-helper 系嵌入仓不被 ls-files --others 列出；runtime-architecture-convergence 在 openspec/changes/ 排除区；migrate-kv.md 在 docs/api/ 排除区），故真树计数与干净克隆等价（均 231/21992），CI 干净 checkout 同绿。
+
+**验证（逐项原始退出码）**：
+- `openspec validate code-vocabulary-alignment --strict`（归档前，prepared）→ exit 0「Change is valid」。
+- `bash scripts/gates/check-openspec.sh`（归档前）→ exit 0「all main specs pass validate --strict」（event-driven-consumption/post-training-data-loop 系既有 WIP，not gated，零触碰）。
+- `openspec archive code-vocabulary-alignment -y` → 归档至 `archive/2026-11-12-code-vocabulary-alignment/`，orchestration-spec.md 与 02 嵌套 delta 均随档留存。
+- `bash scripts/gates/check-openspec.sh`（归档后）→ exit 0。
+- `python3 scripts/gates/check_doc_budget.py`（具名上调后）→ 棘轮绿（231 篇/21992 行＝基线，slack 0）。
+- 导览：`archive/README.md` 增 code-vocabulary-alignment 节（域→证据/主规格锚，仿 boundary-closure 导览；README 在 openspec/changes/ 排除区，不入预算）。
