@@ -142,7 +142,7 @@ type CaptureManifest struct {
 	Reasons []string
 }
 
-// RedactedValue is what every credential carrier is projected to: a header
+// RedactedValue is what every credential is projected to: a header
 // name, a query key or a field name stays readable while the credential itself
 // is never persisted.
 //
@@ -174,7 +174,7 @@ type SnapshotPolicy struct {
 	// persisted. It receives the JSON-normalized deep copy of the request's
 	// extra fields and returns the projected map.
 	ProjectExtraFields func(map[string]any) map[string]any
-	// ProjectURL projects one URL carrier of a message content part before it is
+	// ProjectURL projects one URL of a message content part before it is
 	// persisted.
 	ProjectURL func(string) string
 }
@@ -201,13 +201,13 @@ func (p SnapshotPolicy) extraProjector() func(map[string]any) map[string]any {
 //
 // The snapshot is the runtime request as it stood before the request started:
 // the messages, tool schemas, multimodal parts, reasoning and the generation
-// parameters the request carried are kept verbatim while a credential carrier is
+// parameters the request carried are kept verbatim while a credential is
 // projected, so the projection never rewrites business content. It is not the
 // wire body a provider encodes: field names, stream framing and provider
 // extensions of that body are the provider's, and a reader takes this content as
 // what the runtime request held. The headers are kept as their names with their
 // values projected to RedactedValue, because a header value is a transport
-// credential carrier rather than request content.
+// credential rather than request content.
 type RequestSnapshot struct {
 	// Model names the model the request was declared against.
 	Model string `json:"model,omitempty"`
@@ -227,8 +227,8 @@ type RequestSnapshot struct {
 	Parameters json.RawMessage `json:"parameters,omitempty"`
 	// StructuredOutput is the structured output declaration of the request.
 	StructuredOutput json.RawMessage `json:"structured_output,omitempty"`
-	// Messages holds the conversation the request carried, projected at its URL
-	// carriers and verbatim everywhere else.
+	// Messages holds the conversation the request carried, projected at its
+	// URLs and verbatim everywhere else.
 	Messages []model.Message `json:"messages"`
 	// ToolSchemas holds the declaration of every tool visible to the request,
 	// in tool name order so the snapshot bytes are deterministic.
@@ -293,7 +293,7 @@ func SnapshotFromOptions(messages []model.Message, opts ...func(*model.Request))
 	return RequestSnapshot{}, fmt.Errorf("%w: %d request options over %d messages would reconstruct a finished call", ErrRebuildRefused, len(opts), len(messages))
 }
 
-// SanitizeURL projects one URL carrier to its safe form: a URL that carries no
+// SanitizeURL projects one URL to its safe form: a URL that carries no
 // credential keeps its bytes exactly as they stand, while a URL carrying a
 // userinfo or a credential query value loses that credential to RedactedValue
 // and keeps its readable structure. A URL that cannot be parsed is projected to
@@ -409,7 +409,7 @@ var credentialKeys = []string{
 	"x-goog-api-key",
 }
 
-// credentialKey reports whether one key names a credential carrier.
+// credentialKey reports whether one key names a credential.
 func credentialKey(key string) bool {
 	normalized := strings.ToLower(strings.TrimSpace(key))
 	for _, known := range credentialKeys {
@@ -421,7 +421,7 @@ func credentialKey(key string) bool {
 }
 
 // redactHeaders projects every header value to RedactedValue and keeps the
-// header names: a header value is a transport credential carrier and never
+// header names: a header value is a transport credential and never
 // reaches a persisted record, while the names stay readable.
 func redactHeaders(headers map[string]string) map[string]string {
 	if len(headers) == 0 {
@@ -469,7 +469,7 @@ func deepCopyExtraFields(fields map[string]any) (map[string]any, error) {
 	return cloned, nil
 }
 
-// projectURLs projects every URL carrier of the message content parts in place.
+// projectURLs projects every URL of the message content parts in place.
 // A text body, a tool call and a reasoning field are request content and are
 // never projected here.
 func projectURLs(messages []model.Message, project func(string) string) {

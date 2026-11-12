@@ -107,7 +107,7 @@ func (h hostReading) AttentionQuestions(ctx context.Context) ([]task.AttentionQu
 
 // attentionWorkEnd reports whether the close of this run began and whether it
 // drained every obligation it owed. The drain is judged the way the close itself
-// judges it: every task the commit carrier lists answers no open obligation, so a
+// judges it: every task the commit port lists answers no open obligation, so a
 // process that stopped before its drain settled one clears nothing.
 func (h hostReading) attentionWorkEnd(ctx context.Context) (ended, drained bool, err error) {
 	run := h.run

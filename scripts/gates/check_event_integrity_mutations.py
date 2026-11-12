@@ -1180,12 +1180,12 @@ def validate_registry(root: Path, mutations: Sequence[Mutation]) -> List[str]:
     by_id = {mutation.id: mutation for mutation in mutations}
     for entry in CANDIDATE_FORMS:
         for carrying in entry["carried_by"]:
-            carrier = by_id.get(carrying)
-            if carrier is None:
+            mutation = by_id.get(carrying)
+            if mutation is None:
                 problems.append(
                     "candidate form {} points at an unknown mutation {}".format(
                         entry["form"], carrying))
-            elif not carrier.enabled:
+            elif not mutation.enabled:
                 problems.append(
                     "candidate form {} is carried by the pending mutation {}".format(
                         entry["form"], carrying))

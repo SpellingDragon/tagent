@@ -925,7 +925,7 @@ func mediaOf(messages []model.Message) string {
 // redactedField reports the field of one read-back request whose content lost its
 // value to the redaction projection, or an empty string when the read-back
 // content is the exact request. Header values are excluded: they are transport
-// carriers the projection always replaces, and they are no request content.
+// credentials the projection always replaces, and they are no request content.
 func redactedField(snapshot RequestSnapshot) string {
 	content := snapshot
 	content.Headers = nil

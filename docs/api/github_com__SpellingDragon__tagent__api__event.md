@@ -64,7 +64,7 @@ No type, constructor or event shape stands beside the five-field change; a lease
 observer reads the same fact under these keys, exactly as it reads the dimension
 and the publication generation beside them.
 
-Package event is the runtime's event identity and fact carrier: it defines the
+Package event is the runtime's event identity and fact contract: it defines the
 typed identifiers an event carries, the address of the agent session an event
 belongs to, and the event payload itself.
 
@@ -316,10 +316,15 @@ const TypeConfigChange = "config_change"
 
 FUNCTIONS
 
-func CheckpointKey(seq int64) string
-    CheckpointKey is the fact key one checkpoint is filed under: the frozen
-    `checkpoint:<partitionSeq>` spelling, whose sequence slot is the partition
-    sequence the cut advanced to.
+func CheckpointKey(partition int, seq int64) string
+    CheckpointKey is the fact key one checkpoint is filed under:
+    `checkpoint:<partition>:<partitionSeq>`, the partition the cut is filed
+    in beside the sequence slot that partition advanced to. The key is the
+    global identity of the fact, so it names the partition as well as the slot:
+    every partition numbers its own commits, two partitions stand at one slot,
+    and a key naming the slot alone names one fact twice as soon as the owner
+    moves between them. The family is read back by the frozen event type,
+    never by this spelling.
 
 func CheckpointPayloadOf(c Checkpoint) ([]byte, error)
     CheckpointPayloadOf renders the canonical payload bytes of one checkpoint:
@@ -358,9 +363,10 @@ type AttemptID string
     decision boundary does not fake a new attempt.
 
 type Checkpoint struct {
-	// Key is the fact key the checkpoint commits under: the partition-sequence
-	// slot it was taken at, so the key of every checkpoint of a partition is
-	// monotone past the key of the one before it and no two cuts share one.
+	// Key is the fact key the checkpoint commits under: the partition it was
+	// filed in beside the sequence slot it was taken at. The slot advances with
+	// every landing of that partition, so no two cuts of one partition name one
+	// key.
 	Key string
 	// ID is the content-addressed identity of the checkpoint: two cuts stating
 	// the same state answer the same identity.
@@ -395,8 +401,8 @@ func (c Checkpoint) CheckpointSliceNames() []string
     without decoding the state of every consumer.
 
 func (c Checkpoint) FactKey() string
-    FactKey returns the checkpoint's identity as a fact key: the partition
-    sequence slot the checkpoint commits under.
+    FactKey returns the checkpoint's identity as a fact key: the partition and
+    the sequence slot the checkpoint commits under.
 
 func (c Checkpoint) FactType() string
     FactType returns the frozen type a checkpoint is read as.

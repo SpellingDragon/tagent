@@ -16,6 +16,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 const (
@@ -69,7 +70,9 @@ type MigrateReport struct {
 // interrupted anywhere leaves the source exactly as it was. The target is
 // refused when it already holds keys, so no copy overwrites a root in use. A
 // root whose copy does not read back byte for byte returns ErrMigrateMismatch
-// naming the key that differs.
+// naming the key that differs. A copied root whose reference names no
+// independent body returns ErrSnapshotCorrupt naming the orphaned key, the same
+// refusal the original store's load reports at boot.
 func MigrateShardedRoot(ctx context.Context, sourceRoot, targetRoot string) (MigrateReport, error) {
 	if sourceRoot == "" || targetRoot == "" {
 		return MigrateReport{}, ErrRootRequired
@@ -125,7 +128,9 @@ func MigrateShardedRoot(ctx context.Context, sourceRoot, targetRoot string) (Mig
 // compares every key the retired layout names with the bytes under it, so a copy
 // reported as complete is one a restart of the new build reads whole. A source
 // that names a different key set on this second pass is refused as changed under
-// the copy instead of being half compared.
+// the copy instead of being half compared. Every reference key of the copy names
+// an independent body key, the pairing kvOriginalStore.load enforces at boot; an
+// orphan reference is refused by name with the loader's ErrSnapshotCorrupt.
 func verifyMigratedRoot(ctx context.Context, sourceRoot, targetRoot string, copied int) error {
 	reopened, err := OpenAtomicStore(ctx, StorageConfig{Type: StorageJournal, Root: targetRoot})
 	if err != nil {
@@ -137,6 +142,21 @@ func verifyMigratedRoot(ctx context.Context, sourceRoot, targetRoot string, copi
 	}
 	if len(holding) != copied {
 		return fmt.Errorf("%w: %s holds %d keys, the copy landed %d", ErrMigrateMismatch, targetRoot, len(holding), copied)
+	}
+	blobs := make(map[string]bool, len(holding))
+	refs := make([]string, 0, len(holding))
+	for _, key := range holding {
+		if name, ok := strings.CutPrefix(key, "blob:"); ok {
+			blobs[name] = true
+		}
+		if name, ok := strings.CutPrefix(key, "ref:"); ok {
+			refs = append(refs, name)
+		}
+	}
+	for _, name := range refs {
+		if !blobs[name] {
+			return fmt.Errorf("%w: original %q has a reference but no independent body", ErrSnapshotCorrupt, name)
+		}
 	}
 	seen := 0
 	if err := eachLegacyPair(ctx, sourceRoot, func(pair Pair) error {

@@ -54,7 +54,7 @@ task intends to deliver.
 The package holds the effective bindings and the session sites, and an executor
 borrows a binding for one request rather than keeping a second writable source
 of its own. The store, the borrowing face, the send seam and the durable commit
-carrier are the behaviour behind the ports.
+are the behaviour behind the ports.
 
 CONSTANTS
 
@@ -249,8 +249,8 @@ var ErrBaselineAdvanced = errors.New("state: the candidate baseline was advanced
     so the candidate is stale and never overwrites the newer publication.
 
 var ErrNoticeNotOwed = errors.New("state: the notification carries no delivery obligation")
-    ErrNoticeNotOwed reports an acceptance of a notification the carrier holds
-    no delivery obligation for, so there is no delivery state to advance.
+    ErrNoticeNotOwed reports an acceptance of a notification the commit holds no
+    delivery obligation for, so there is no delivery state to advance.
 
 var ErrReadNotAllowed = errors.New("state: read is not allowed for this subject and target")
     ErrReadNotAllowed reports a read of a target no grant covers for the subject
@@ -291,12 +291,12 @@ func MigrateArchive(ctx context.Context, root string, tasks ArchiveTaskWriter, o
     verbatim.
 
 func NewDurableCommit(log FactLog, uncertain task.UncertainProbe) (*DurableCommit, error)
-    NewDurableCommit returns a durable commit carrier over one fact log
-    and loads every fact and consumption receipt the log already holds,
-    so a second process over the same log sees exactly the facts the first one
-    committed and owes no delivery for a notice that process already consumed.
-    uncertain, when it is not nil, marks matching commit attempts as uncertain,
-    so all three commit outcomes stay observable.
+    NewDurableCommit returns a DurableCommit over one fact log and loads every
+    fact and consumption receipt the log already holds, so a second process
+    over the same log sees exactly the facts the first one committed and owes no
+    delivery for a notice that process already consumed. uncertain, when it is
+    not nil, marks matching commit attempts as uncertain, so all three commit
+    outcomes stay observable.
 
 func NewStatePlan(plan OrgPlan, agents map[event.AgentID]AgentBinding, leases []LeaseRef) (StatePlan, error)
     NewStatePlan instantiates the candidate StatePlan of one configuration
@@ -678,34 +678,34 @@ type ConsumeReceipt struct {
 type DurableCommit struct {
 	// Has unexported fields.
 }
-    DurableCommit is the durable carrier behind the task commit port: it stores
-    one self-contained record per mutation identity through a FactLog behind the
-    sync barrier, and holds every committed notification as an open delivery
-    obligation. A repeated record of a mutation identity already stored returns
-    the fact already stored and records no second one — and never advances a
-    delivery state, because an idempotent hit reports a stored fact and not a
-    delivered notification. Only an explicit acceptance by the target moves a
-    delivery, through Accept. The carrier also keeps the receipt of each logical
-    consumption a notification completed, so a carrier opened over the same log
-    owes no delivery for a notice the log confirms as consumed.
+    DurableCommit is the durable implementation of the task commit port:
+    it stores one self-contained record per mutation identity through a FactLog
+    behind the sync barrier, and holds every committed notification as an open
+    delivery obligation. A repeated record of a mutation identity already
+    stored returns the fact already stored and records no second one — and never
+    advances a delivery state, because an idempotent hit reports a stored fact
+    and not a delivered notification. Only an explicit acceptance by the target
+    moves a delivery, through Accept. It also keeps the receipt of each logical
+    consumption a notification completed, so a DurableCommit opened over the
+    same log owes no delivery for a notice the log confirms as consumed.
 
-    The carrier holds no wrapper, binding or lease: the log it stores through is
-    supplied at construction and nothing an earlier run captured is revived.
+    DurableCommit holds no wrapper, binding or lease: the log it stores through
+    is supplied at construction and nothing an earlier run captured is revived.
 
 func (d *DurableCommit) Accept(ctx context.Context, notice task.Notice) (task.DeliveryAcceptance, error)
     Accept advances the delivery state of one notification to accepted.
     This is the only advance there is: a commit never moves a delivery,
     and an idempotent commit repeat leaves every notification owed and pending.
-    A notification the carrier holds no obligation for is refused by name.
+    A notification the commit holds no obligation for is refused by name.
 
 func (d *DurableCommit) Commit(ctx context.Context, record task.CommitRecord) (task.CommitResult, error)
     Commit implements the task commit port. A record of a mutation identity the
-    carrier already stores returns the fact already stored and records no second
+    commit already stores returns the fact already stored and records no second
     fact — and advances no delivery state: the notifications of the stored fact
     stay owed and pending until their targets explicitly accept them. The same
     identity beside other content is refused by name, as is a record expecting
     another revision. A record is staged behind the sync barrier before the
-    carrier reports it committed, so a barrier that fails reports an uncertain
+    commit reports it committed, so a barrier that fails reports an uncertain
     outcome instead of a durable success.
 
 func (d *DurableCommit) Declare(ctx context.Context, taskID event.TaskID, spec task.Spec) error
@@ -718,18 +718,19 @@ func (d *DurableCommit) Declare(ctx context.Context, taskID event.TaskID, spec t
     other content.
 
 func (d *DurableCommit) Facts(taskID event.TaskID) []task.CommitRecord
-    Facts returns the records the carrier stored for one task, in commit order.
+    Facts returns the records the commit stored for one task, in commit order.
 
 func (d *DurableCommit) LoadStats() LoadStats
-    LoadStats reports the measured read cost of the load that built this commit
-    carrier. It is read-only; the caller cannot mutate the carrier through it.
+    LoadStats reports the measured read cost of the load that built this
+    DurableCommit. It is read-only; the caller cannot mutate the commit through
+    it.
 
 func (d *DurableCommit) Outbox(taskID event.TaskID) []task.OutboxNotice
     Outbox returns the notifications one task still owes delivery, each paired
     with its delivery-layer state, ordered by round, kind and sequence.
 
 func (d *DurableCommit) OwedNotices() []task.OutboxNotice
-    OwedNotices reports every notification the carrier still owes delivery on,
+    OwedNotices reports every notification the commit still owes delivery on,
     in the stable task, round, kind and sequence order: the open obligations
     of the account, beside which the ones a consumption receipt confirms never
     appear again.
@@ -742,7 +743,7 @@ func (d *DurableCommit) Records(ctx context.Context, taskID event.TaskID) ([]tas
     opens no delivery obligation for a notice already confirmed as consumed.
 
 func (d *DurableCommit) Rejections() []Rejection
-    Rejections reports every refusal the carrier holds, in the stable task,
+    Rejections reports every refusal the commit holds, in the stable task,
     round, kind and sequence order of the notifications they answer.
 
 func (d *DurableCommit) Revision(taskID event.TaskID) int64
@@ -750,7 +751,7 @@ func (d *DurableCommit) Revision(taskID event.TaskID) int64
     it.
 
 func (d *DurableCommit) TaskIDs() []event.TaskID
-    TaskIDs returns every task the carrier holds facts for, in numeric order.
+    TaskIDs returns every task the commit holds facts for, in numeric order.
 
 type FactLog interface {
 	// Put stages one key and its value.
@@ -764,11 +765,11 @@ type FactLog interface {
 	Sync(ctx context.Context) error
 }
 
-    FactLog is the durable fact surface one durable commit carrier stores
-    through: put, get, prefix scan and the sync barrier a commit reports its
-    success behind. Its signatures carry built-in types only, so any backend —
-    the memory tier's key-value port among them — satisfies it structurally and
-    no package edge is required in either direction.
+    FactLog is the durable fact surface DurableCommit stores through: put,
+    get, prefix scan and the sync barrier a commit reports its success behind.
+    Its signatures carry built-in types only, so any backend — the memory tier's
+    key-value port among them — satisfies it structurally and no package edge is
+    required in either direction.
 
     The redline list (4 rules): MUST stage one key and its value without
     claiming it durable. MUST complete the write barrier over everything staged
@@ -994,10 +995,10 @@ type LoadScan struct {
 	Elapsed time.Duration
 }
     LoadScan is the read cost of one prefix scan made while rebuilding
-    the commit carrier at startup — the store this port writes through,
+    DurableCommit at startup — the store this port writes through,
     never the framework checkpoint. Keys is the number of pairs returned,
     Bytes their total value length, and Elapsed the wall time of the read alone
-    — folding the pairs into the carrier tables happens after the measurement
+    — folding the pairs into the commit tables happens after the measurement
     and is covered by the restore observation instead. It is a measurement,
     not a durable record.
 
@@ -1039,11 +1040,11 @@ type MemoryStore struct {
 	// Has unexported fields.
 }
 
-    MemoryStore is the in-memory carrier behind the Store face: it establishes
-    one site per explicit address and instance, keeps the instance currently
-    serving each address, and routes a notification to the site its delivery
-    registration names. The memory carrier keeps the business contract of a
-    durable one and promises no recovery of its own.
+    MemoryStore is the in-memory implementation behind the Store face: it
+    establishes one site per explicit address and instance, keeps the instance
+    currently serving each address, and routes a notification to the site its
+    delivery registration names. It keeps the business contract of a durable one
+    and promises no recovery of its own.
 
 func NewMemoryStore(authority *Authority, consumptions ...*DurableCommit) *MemoryStore
     NewMemoryStore returns an empty in-memory state store that checks reads
@@ -1580,8 +1581,8 @@ type Rejection struct {
     Rejection is the durable feedback fact of one notification a target refused:
     the identity of the notification it answers, the routing the delivery was
     offered to, and the reason the target gave. The record is the consumption
-    result of that notification, so a carrier opened over the same log reads the
-    refusal back and owes the notification no delivery a second time.
+    result of that notification, so a DurableCommit opened over the same log
+    reads the refusal back and owes the notification no delivery a second time.
 
 func (r Rejection) Feedback() event.Event
     Feedback reports the refusal as the feedback fact it is: an audit fact of

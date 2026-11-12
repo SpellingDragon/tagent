@@ -10,10 +10,10 @@ import (
 
 // 契约: docs/wiki/agent/agent-architecture.md#core-components
 //
-// Skeleton compile-time assertions for the query carriers. The assertions pin
+// Skeleton compile-time assertions for the query projections. The assertions pin
 // what the package proves on its own: every declared field keeps its name and
 // type and every declared vocabulary stays a compile-time constant. The
-// inventory carriers beside them are served by the read ports they declare, and
+// inventory projections beside them are served by the read ports they declare, and
 // those ports are asserted below against the owner faces that satisfy them.
 var (
 	_ = AuthorizationScope{
@@ -229,7 +229,7 @@ const (
 // declared value of the vocabulary and not a computed one.
 var _ DetailState = DetailRetired
 
-// The inventory carriers keep their declared shape: a renamed or retyped field
+// The inventory projections keep their declared shape: a renamed or retyped field
 // stops these blocks from compiling.
 var (
 	_ = InventoryView{

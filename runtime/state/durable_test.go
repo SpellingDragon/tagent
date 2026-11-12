@@ -24,130 +24,130 @@ var invariantAddress = event.Address{AgentID: "agent-a", SessionID: "session-a"}
 // - a repeated mutation identity stores one fact and leaves every delivery where it was
 // - one mutation identity beside other content, and a record expecting another revision, are refused by name
 // - a commit the write barrier left unconfirmed reports uncertain and keeps no fact
-// - a second carrier over the same log revives the facts and every delivery as pending again
+// - a second commit over the same log revives the facts and every delivery as pending again
 // - the admission material is declared once and never replaced by other content
-// - an acceptance of a notification the carrier owes nothing for is refused by name
+// - an acceptance of a notification the commit owes nothing for is refused by name
 // 契约: docs/wiki/reliability/durable-delivery.md#envelope-states
 func TestDurableFactChainInvariants(t *testing.T) {
 	ctx := context.Background()
 	taskID := event.TaskID("task-1")
 
 	t.Run("a repeated mutation identity stores one fact and leaves every delivery where it was", func(t *testing.T) {
-		carrier, err := NewDurableCommit(newInvariantFactLog(), nil)
+		commit, err := NewDurableCommit(newInvariantFactLog(), nil)
 		if err != nil {
-			t.Fatalf("open the durable carrier: %v", err)
+			t.Fatalf("open the durable commit: %v", err)
 		}
 		record := invariantRecord(taskID, 0, task.StatusRunning, invariantNotice(taskID, 1))
-		if result, err := carrier.Commit(ctx, record); err != nil || result != task.CommitCommitted {
+		if result, err := commit.Commit(ctx, record); err != nil || result != task.CommitCommitted {
 			t.Fatalf("commit the first fact = (%v, %v), want a committed record", result, err)
 		}
-		if result, err := carrier.Commit(ctx, record); err != nil || result != task.CommitCommitted {
+		if result, err := commit.Commit(ctx, record); err != nil || result != task.CommitCommitted {
 			t.Fatalf("repeat the mutation = (%v, %v), want the stored fact reported again", result, err)
 		}
-		if got := len(carrier.Facts(taskID)); got != 1 {
+		if got := len(commit.Facts(taskID)); got != 1 {
 			t.Fatalf("facts after a repeated mutation = %d, want one", got)
 		}
-		if got := carrier.Revision(taskID); got != 1 {
+		if got := commit.Revision(taskID); got != 1 {
 			t.Fatalf("revision after a repeated mutation = %d, want one", got)
 		}
-		owed := carrier.Outbox(taskID)
+		owed := commit.Outbox(taskID)
 		if len(owed) != 1 || owed[0].Delivery != task.DeliveryPending {
 			t.Fatalf("outbox after a repeated mutation = %+v, want one pending notification", owed)
 		}
-		accepted, err := carrier.Accept(ctx, record.Outbox[0].Notice)
+		accepted, err := commit.Accept(ctx, record.Outbox[0].Notice)
 		if err != nil || accepted != task.DeliveryAccepted {
 			t.Fatalf("accept the delivered notification = (%v, %v), want it accepted", accepted, err)
 		}
-		if _, err := carrier.Commit(ctx, record); err != nil {
+		if _, err := commit.Commit(ctx, record); err != nil {
 			t.Fatalf("repeat the mutation beside an accepted delivery: %v", err)
 		}
-		owed = carrier.Outbox(taskID)
+		owed = commit.Outbox(taskID)
 		if len(owed) != 1 || owed[0].Delivery != task.DeliveryAccepted {
 			t.Fatalf("outbox after a repeated mutation = %+v, want the acceptance kept", owed)
 		}
 	})
 
 	t.Run("one mutation identity beside other content is refused by name", func(t *testing.T) {
-		carrier, err := NewDurableCommit(newInvariantFactLog(), nil)
+		commit, err := NewDurableCommit(newInvariantFactLog(), nil)
 		if err != nil {
-			t.Fatalf("open the durable carrier: %v", err)
+			t.Fatalf("open the durable commit: %v", err)
 		}
 		record := invariantRecord(taskID, 0, task.StatusRunning)
-		if _, err := carrier.Commit(ctx, record); err != nil {
+		if _, err := commit.Commit(ctx, record); err != nil {
 			t.Fatalf("commit the first fact: %v", err)
 		}
 		conflict := record
 		conflict.Status = task.StatusSettled
-		if _, err := carrier.Commit(ctx, conflict); !errors.Is(err, task.ErrMutationConflict) {
+		if _, err := commit.Commit(ctx, conflict); !errors.Is(err, task.ErrMutationConflict) {
 			t.Fatalf("one identity beside other content = %v, want %v", err, task.ErrMutationConflict)
 		}
-		if got := len(carrier.Facts(taskID)); got != 1 {
+		if got := len(commit.Facts(taskID)); got != 1 {
 			t.Fatalf("facts after the refused mutation = %d, want the stored one alone", got)
 		}
-		if got := carrier.Revision(taskID); got != 1 {
+		if got := commit.Revision(taskID); got != 1 {
 			t.Fatalf("revision after the refused mutation = %d, want it unmoved", got)
 		}
 	})
 
 	t.Run("a record expecting another revision is refused by name", func(t *testing.T) {
-		carrier, err := NewDurableCommit(newInvariantFactLog(), nil)
+		commit, err := NewDurableCommit(newInvariantFactLog(), nil)
 		if err != nil {
-			t.Fatalf("open the durable carrier: %v", err)
+			t.Fatalf("open the durable commit: %v", err)
 		}
-		if _, err := carrier.Commit(ctx, invariantRecord(taskID, 5, task.StatusRunning)); !errors.Is(err, task.ErrRevisionConflict) {
+		if _, err := commit.Commit(ctx, invariantRecord(taskID, 5, task.StatusRunning)); !errors.Is(err, task.ErrRevisionConflict) {
 			t.Fatalf("a record expecting revision 5 = %v, want %v", err, task.ErrRevisionConflict)
 		}
-		if got := len(carrier.Facts(taskID)); got != 0 {
+		if got := len(commit.Facts(taskID)); got != 0 {
 			t.Fatalf("facts after the refused revision = %d, want none", got)
 		}
 	})
 
 	t.Run("a commit the write barrier left unconfirmed reports uncertain and keeps no fact", func(t *testing.T) {
 		log := newInvariantFactLog()
-		carrier, err := NewDurableCommit(log, nil)
+		commit, err := NewDurableCommit(log, nil)
 		if err != nil {
-			t.Fatalf("open the durable carrier: %v", err)
+			t.Fatalf("open the durable commit: %v", err)
 		}
 		log.refuseSync(true)
 		record := invariantRecord(taskID, 0, task.StatusRunning)
-		result, err := carrier.Commit(ctx, record)
+		result, err := commit.Commit(ctx, record)
 		if err == nil || result != task.CommitUncertain {
 			t.Fatalf("commit behind a failed barrier = (%v, %v), want an uncertain outcome", result, err)
 		}
-		if got := len(carrier.Facts(taskID)); got != 0 {
+		if got := len(commit.Facts(taskID)); got != 0 {
 			t.Fatalf("facts behind a failed barrier = %d, want none counted as stored", got)
 		}
-		if got := carrier.Revision(taskID); got != 0 {
+		if got := commit.Revision(taskID); got != 0 {
 			t.Fatalf("revision behind a failed barrier = %d, want none", got)
 		}
 		log.refuseSync(false)
-		if result, err := carrier.Commit(ctx, record); err != nil || result != task.CommitCommitted {
+		if result, err := commit.Commit(ctx, record); err != nil || result != task.CommitCommitted {
 			t.Fatalf("reconciled retry = (%v, %v), want the record stored once", result, err)
 		}
-		if got := len(carrier.Facts(taskID)); got != 1 {
+		if got := len(commit.Facts(taskID)); got != 1 {
 			t.Fatalf("facts after the reconciled retry = %d, want one", got)
 		}
 	})
 
 	t.Run("a probed attempt is uncertain and is never counted as stored", func(t *testing.T) {
 		probe := func(task.CommitRecord) bool { return true }
-		carrier, err := NewDurableCommit(newInvariantFactLog(), probe)
+		commit, err := NewDurableCommit(newInvariantFactLog(), probe)
 		if err != nil {
-			t.Fatalf("open the durable carrier: %v", err)
+			t.Fatalf("open the durable commit: %v", err)
 		}
-		if result, err := carrier.Commit(ctx, invariantRecord(taskID, 0, task.StatusRunning)); err != nil || result != task.CommitUncertain {
+		if result, err := commit.Commit(ctx, invariantRecord(taskID, 0, task.StatusRunning)); err != nil || result != task.CommitUncertain {
 			t.Fatalf("probed commit = (%v, %v), want an uncertain outcome", result, err)
 		}
-		if got := len(carrier.Facts(taskID)); got != 0 {
+		if got := len(commit.Facts(taskID)); got != 0 {
 			t.Fatalf("facts after a probed commit = %d, want none", got)
 		}
 	})
 
-	t.Run("a second carrier over the same log revives the facts and every delivery as pending again", func(t *testing.T) {
+	t.Run("a second commit over the same log revives the facts and every delivery as pending again", func(t *testing.T) {
 		log := newInvariantFactLog()
 		first, err := NewDurableCommit(log, nil)
 		if err != nil {
-			t.Fatalf("open the first durable carrier: %v", err)
+			t.Fatalf("open the first durable commit: %v", err)
 		}
 		opened := invariantRecord(taskID, 0, task.StatusRunning, invariantNotice(taskID, 1))
 		if _, err := first.Commit(ctx, opened); err != nil {
@@ -166,7 +166,7 @@ func TestDurableFactChainInvariants(t *testing.T) {
 		}
 		second, err := NewDurableCommit(log, nil)
 		if err != nil {
-			t.Fatalf("reopen the durable carrier over the same log: %v", err)
+			t.Fatalf("reopen the durable commit over the same log: %v", err)
 		}
 		if got := len(second.Facts(taskID)); got != 2 {
 			t.Fatalf("facts revived from the log = %d, want both", got)
@@ -199,30 +199,30 @@ func TestDurableFactChainInvariants(t *testing.T) {
 	})
 
 	t.Run("the admission material is declared once and never replaced by other content", func(t *testing.T) {
-		carrier, err := NewDurableCommit(newInvariantFactLog(), nil)
+		commit, err := NewDurableCommit(newInvariantFactLog(), nil)
 		if err != nil {
-			t.Fatalf("open the durable carrier: %v", err)
+			t.Fatalf("open the durable commit: %v", err)
 		}
 		spec := invariantSpec()
-		if err := carrier.Declare(ctx, taskID, spec); err != nil {
+		if err := commit.Declare(ctx, taskID, spec); err != nil {
 			t.Fatalf("declare the admission material: %v", err)
 		}
-		if err := carrier.Declare(ctx, taskID, spec); err != nil {
+		if err := commit.Declare(ctx, taskID, spec); err != nil {
 			t.Fatalf("repeat the declaration: %v", err)
 		}
 		other := spec
 		other.Description = "another admission material"
-		if err := carrier.Declare(ctx, taskID, other); !errors.Is(err, ErrSpecConflict) {
+		if err := commit.Declare(ctx, taskID, other); !errors.Is(err, ErrSpecConflict) {
 			t.Fatalf("declaration beside other content = %v, want %v", err, ErrSpecConflict)
 		}
 	})
 
-	t.Run("an acceptance of a notification the carrier owes nothing for is refused by name", func(t *testing.T) {
-		carrier, err := NewDurableCommit(newInvariantFactLog(), nil)
+	t.Run("an acceptance of a notification the commit owes nothing for is refused by name", func(t *testing.T) {
+		commit, err := NewDurableCommit(newInvariantFactLog(), nil)
 		if err != nil {
-			t.Fatalf("open the durable carrier: %v", err)
+			t.Fatalf("open the durable commit: %v", err)
 		}
-		if _, err := carrier.Accept(ctx, invariantNotice("task-unknown", 1)); !errors.Is(err, ErrNoticeNotOwed) {
+		if _, err := commit.Accept(ctx, invariantNotice("task-unknown", 1)); !errors.Is(err, ErrNoticeNotOwed) {
 			t.Fatalf("acceptance beside no obligation = %v, want %v", err, ErrNoticeNotOwed)
 		}
 	})
@@ -629,7 +629,7 @@ func (l *invariantFactLog) refuseScan(err error) {
 // - a refused write reports the uncommitted outcome at ERROR and stores no fact
 // - a refused barrier reports the uncertain outcome at ERROR and reports no durable success
 // - a refused declaration reports the undeclared outcome at ERROR
-// - an unreadable log reports the failed load at ERROR and answers no carrier
+// - an unreadable log reports the failed load at ERROR and answers no commit
 // - a failing logger changes no outcome: the bypass drops the line and keeps the refusal
 //
 // 契约: docs/wiki/reliability/durable-delivery.md#envelope-states
@@ -642,12 +642,12 @@ func TestDurableCommitFailureObservation(t *testing.T) {
 		observer := &durableObserver{}
 		defer watchDurableLog(t, observer)()
 		log := newInvariantFactLog()
-		carrier, err := NewDurableCommit(log, nil)
+		commit, err := NewDurableCommit(log, nil)
 		if err != nil {
-			t.Fatalf("open the carrier: %v", err)
+			t.Fatalf("open the commit: %v", err)
 		}
 		log.refusePut(writeErr)
-		result, err := carrier.Commit(ctx, invariantRecord(taskID, 0, task.StatusAccepted))
+		result, err := commit.Commit(ctx, invariantRecord(taskID, 0, task.StatusAccepted))
 		if !errors.Is(err, writeErr) || result != task.CommitNotCommitted {
 			t.Fatalf("commit beside a refused write = (%v, %v), want the uncommitted outcome beside its failure", result, err)
 		}
@@ -660,12 +660,12 @@ func TestDurableCommitFailureObservation(t *testing.T) {
 		observer := &durableObserver{}
 		defer watchDurableLog(t, observer)()
 		log := newInvariantFactLog()
-		carrier, err := NewDurableCommit(log, nil)
+		commit, err := NewDurableCommit(log, nil)
 		if err != nil {
-			t.Fatalf("open the carrier: %v", err)
+			t.Fatalf("open the commit: %v", err)
 		}
 		log.refuseSync(true)
-		result, err := carrier.Commit(ctx, invariantRecord(taskID, 0, task.StatusAccepted))
+		result, err := commit.Commit(ctx, invariantRecord(taskID, 0, task.StatusAccepted))
 		if err == nil || result != task.CommitUncertain {
 			t.Fatalf("commit beside a refused barrier = (%v, %v), want the uncertain outcome", result, err)
 		}
@@ -678,12 +678,12 @@ func TestDurableCommitFailureObservation(t *testing.T) {
 		observer := &durableObserver{}
 		defer watchDurableLog(t, observer)()
 		log := newInvariantFactLog()
-		carrier, err := NewDurableCommit(log, nil)
+		commit, err := NewDurableCommit(log, nil)
 		if err != nil {
-			t.Fatalf("open the carrier: %v", err)
+			t.Fatalf("open the commit: %v", err)
 		}
 		log.refusePut(writeErr)
-		if err := carrier.Declare(ctx, taskID, invariantSpec()); !errors.Is(err, writeErr) {
+		if err := commit.Declare(ctx, taskID, invariantSpec()); !errors.Is(err, writeErr) {
 			t.Fatalf("declaration beside a refused write = %v, want the failure of the log", err)
 		}
 		if !observer.mentions("error", "durable declare write failed", "task=task-1", "result=undeclared") {
@@ -696,9 +696,9 @@ func TestDurableCommitFailureObservation(t *testing.T) {
 		defer watchDurableLog(t, observer)()
 		log := newInvariantFactLog()
 		log.refuseScan(writeErr)
-		carrier, err := NewDurableCommit(log, nil)
-		if !errors.Is(err, writeErr) || carrier != nil {
-			t.Fatalf("open beside an unreadable log = (%v, %v), want no carrier beside the failure", carrier, err)
+		commit, err := NewDurableCommit(log, nil)
+		if !errors.Is(err, writeErr) || commit != nil {
+			t.Fatalf("open beside an unreadable log = (%v, %v), want no commit beside the failure", commit, err)
 		}
 		if !observer.mentions("error", "durable commit load failed") {
 			t.Fatalf("error lines = %v, want the failed load", observer.all())
@@ -709,12 +709,12 @@ func TestDurableCommitFailureObservation(t *testing.T) {
 		observer := &durableObserver{panicsLeft: 1}
 		defer watchDurableLog(t, observer)()
 		log := newInvariantFactLog()
-		carrier, err := NewDurableCommit(log, nil)
+		commit, err := NewDurableCommit(log, nil)
 		if err != nil {
-			t.Fatalf("open the carrier beside a failing logger: %v", err)
+			t.Fatalf("open the commit beside a failing logger: %v", err)
 		}
 		log.refusePut(writeErr)
-		result, err := carrier.Commit(ctx, invariantRecord(taskID, 0, task.StatusAccepted))
+		result, err := commit.Commit(ctx, invariantRecord(taskID, 0, task.StatusAccepted))
 		if !errors.Is(err, writeErr) || result != task.CommitNotCommitted {
 			t.Fatalf("commit beside a failing logger = (%v, %v), want the uncommitted outcome kept", result, err)
 		}
@@ -850,7 +850,7 @@ func (l *countingFactLog) writes() int {
 
 // TestSettleAttemptRecordInvariants pins the attempt record the settle pump reads before a second drive.
 // - the in-flight marker lands first and the terminal replaces it, so one notification holds one attempt record
-// - a carrier opened over the same log reads the attempt the stopped process left
+// - a commit opened over the same log reads the attempt the stopped process left
 // - a repeated record of the same content stages no second pair
 // - a refused write confirms no attempt and reports the failure of the log
 // - a mailbox beside no durable account answers from its own bookkeeping alone, and refuses a notice without identity
@@ -862,21 +862,21 @@ func TestSettleAttemptRecordInvariants(t *testing.T) {
 
 	t.Run("the in-flight marker and the terminal are one record per notification", func(t *testing.T) {
 		log := &countingFactLog{FactLog: newInvariantFactLog()}
-		carrier, err := NewDurableCommit(log, nil)
+		commit, err := NewDurableCommit(log, nil)
 		if err != nil {
-			t.Fatalf("open the carrier: %v", err)
+			t.Fatalf("open the commit: %v", err)
 		}
-		if err := carrier.recordAttempt(ctx, notice, SettleAttempt{}); err != nil {
+		if err := commit.recordAttempt(ctx, notice, SettleAttempt{}); err != nil {
 			t.Fatalf("record the in-flight attempt: %v", err)
 		}
-		read, held := carrier.attemptOf(notice)
+		read, held := commit.attemptOf(notice)
 		if !held || read.Terminal != "" {
 			t.Fatalf("attempt = (%+v, %v), want the in-flight marker the drive lands before its turn", read, held)
 		}
-		if err := carrier.recordAttempt(ctx, notice, SettleAttempt{Terminal: "completed"}); err != nil {
+		if err := commit.recordAttempt(ctx, notice, SettleAttempt{Terminal: "completed"}); err != nil {
 			t.Fatalf("record the terminal: %v", err)
 		}
-		read, held = carrier.attemptOf(notice)
+		read, held = commit.attemptOf(notice)
 		if !held || read.Terminal != "completed" {
 			t.Fatalf("attempt = (%+v, %v), want the terminal the turn ended on", read, held)
 		}
@@ -892,33 +892,33 @@ func TestSettleAttemptRecordInvariants(t *testing.T) {
 		}
 	})
 
-	t.Run("a carrier opened over the same log reads the attempt back", func(t *testing.T) {
+	t.Run("a commit opened over the same log reads the attempt back", func(t *testing.T) {
 		log := newInvariantFactLog()
 		first, err := NewDurableCommit(log, nil)
 		if err != nil {
-			t.Fatalf("open the carrier: %v", err)
+			t.Fatalf("open the commit: %v", err)
 		}
 		if err := first.recordAttempt(ctx, notice, SettleAttempt{Terminal: "completed"}); err != nil {
 			t.Fatalf("record the attempt: %v", err)
 		}
 		second, err := NewDurableCommit(log, nil)
 		if err != nil {
-			t.Fatalf("reopen the carrier: %v", err)
+			t.Fatalf("reopen the commit: %v", err)
 		}
 		read, held := second.attemptOf(notice)
 		if !held || read.Terminal != "completed" {
-			t.Fatalf("attempt read by the second carrier = (%+v, %v), want the terminal the first one landed", read, held)
+			t.Fatalf("attempt read by the second commit = (%+v, %v), want the terminal the first one landed", read, held)
 		}
 	})
 
 	t.Run("a repeated record of the same content stages no second pair", func(t *testing.T) {
 		log := &countingFactLog{FactLog: newInvariantFactLog()}
-		carrier, err := NewDurableCommit(log, nil)
+		commit, err := NewDurableCommit(log, nil)
 		if err != nil {
-			t.Fatalf("open the carrier: %v", err)
+			t.Fatalf("open the commit: %v", err)
 		}
 		for i := 0; i < 3; i++ {
-			if err := carrier.recordAttempt(ctx, notice, SettleAttempt{}); err != nil {
+			if err := commit.recordAttempt(ctx, notice, SettleAttempt{}); err != nil {
 				t.Fatalf("record the in-flight attempt %d: %v", i+1, err)
 			}
 		}
@@ -929,15 +929,15 @@ func TestSettleAttemptRecordInvariants(t *testing.T) {
 
 	t.Run("a refused write confirms no attempt", func(t *testing.T) {
 		log := newInvariantFactLog()
-		carrier, err := NewDurableCommit(log, nil)
+		commit, err := NewDurableCommit(log, nil)
 		if err != nil {
-			t.Fatalf("open the carrier: %v", err)
+			t.Fatalf("open the commit: %v", err)
 		}
 		log.refusePut(attemptWriteErr)
-		if err := carrier.recordAttempt(ctx, notice, SettleAttempt{}); !errors.Is(err, attemptWriteErr) {
+		if err := commit.recordAttempt(ctx, notice, SettleAttempt{}); !errors.Is(err, attemptWriteErr) {
 			t.Fatalf("record beside a refused write = %v, want the failure of the log", err)
 		}
-		if _, held := carrier.attemptOf(notice); held {
+		if _, held := commit.attemptOf(notice); held {
 			t.Fatalf("attempt held beside a refused write = true, want nothing confirmed")
 		}
 	})
@@ -995,8 +995,8 @@ func TestRestoredTaskRoundHighWater(t *testing.T) {
 	}
 	restore := func(t *testing.T, links []roundLink, consumed []int64) *task.MemoryRegistry {
 		t.Helper()
-		carrier, chain := durableRoundChain(t, taskID, links, consumed)
-		registry := task.NewMemoryRegistry(carrier, task.NewMemoryAdmission())
+		commit, chain := durableRoundChain(t, taskID, links, consumed)
+		registry := task.NewMemoryRegistry(commit, task.NewMemoryAdmission())
 		if _, err := registry.Restore(ctx, chain, roundOwners{}); err != nil {
 			t.Fatalf("restore the task chain: %v", err)
 		}
@@ -1040,17 +1040,17 @@ type roundLink struct {
 }
 
 // durableRoundChain stores one task's chain on a fresh durable log, consumes the
-// terminal notices of the rounds named, and reopens the carrier over the log, so a
+// terminal notices of the rounds named, and reopens the commit over the log, so a
 // restored registry reads the chain the way a restarted process does.
 func durableRoundChain(t *testing.T, taskID event.TaskID, links []roundLink, consumed []int64) (*DurableCommit, []task.TaskRecord) {
 	t.Helper()
 	ctx := context.Background()
 	log := newInvariantFactLog()
-	carrier, err := NewDurableCommit(log, nil)
+	commit, err := NewDurableCommit(log, nil)
 	if err != nil {
-		t.Fatalf("open the durable carrier: %v", err)
+		t.Fatalf("open the durable commit: %v", err)
 	}
-	if err := carrier.Declare(ctx, taskID, invariantSpec()); err != nil {
+	if err := commit.Declare(ctx, taskID, invariantSpec()); err != nil {
 		t.Fatalf("declare the admission material: %v", err)
 	}
 	for at, link := range links {
@@ -1068,7 +1068,7 @@ func durableRoundChain(t *testing.T, taskID event.TaskID, links []roundLink, con
 				TargetInstance: "instance-a",
 			}}
 		}
-		if result, err := carrier.Commit(ctx, record); err != nil || result != task.CommitCommitted {
+		if result, err := commit.Commit(ctx, record); err != nil || result != task.CommitCommitted {
 			t.Fatalf("commit %s = (%v, %v), want a committed fact", link.mutation, result, err)
 		}
 	}
@@ -1082,13 +1082,13 @@ func durableRoundChain(t *testing.T, taskID event.TaskID, links []roundLink, con
 		if notice.TaskID == "" {
 			t.Fatalf("the chain carries no notice of round %d to consume", round)
 		}
-		if err := carrier.recordConsumption(ctx, notice); err != nil {
+		if err := commit.recordConsumption(ctx, notice); err != nil {
 			t.Fatalf("record the consumption of round %d: %v", round, err)
 		}
 	}
 	reopened, err := NewDurableCommit(log, nil)
 	if err != nil {
-		t.Fatalf("reopen the durable carrier: %v", err)
+		t.Fatalf("reopen the durable commit: %v", err)
 	}
 	chain, err := reopened.Records(ctx, taskID)
 	if err != nil {
@@ -1115,7 +1115,7 @@ func TestLoadScanCounts(t *testing.T) {
 	log := newInvariantFactLog()
 	first, err := NewDurableCommit(log, nil)
 	if err != nil {
-		t.Fatalf("open the first carrier: %v", err)
+		t.Fatalf("open the first commit: %v", err)
 	}
 	taskID := event.TaskID("task-load-scan")
 	if err := first.Declare(ctx, taskID, task.Spec{}); err != nil {
@@ -1130,7 +1130,7 @@ func TestLoadScanCounts(t *testing.T) {
 	}
 	second, err := NewDurableCommit(log, nil)
 	if err != nil {
-		t.Fatalf("rebuild the carrier from the same log: %v", err)
+		t.Fatalf("rebuild the commit from the same log: %v", err)
 	}
 	stats := second.LoadStats()
 	if len(stats.Scans) != 5 {
@@ -1173,7 +1173,7 @@ func barrierTotals(log *invariantFactLog, prefix string) (keys int, bytes int64)
 }
 
 // selectiveScanLog forwards to an inner log but refuses the scans of one
-// named prefix, so a check can observe the carrier beside a read that fails
+// named prefix, so a check can observe the commit beside a read that fails
 // partway instead of refusing every prefix at once.
 type selectiveScanLog struct {
 	inner     FactLog
@@ -1221,7 +1221,7 @@ func TestLoadScanCountsRefusedScanRecordsNothing(t *testing.T) {
 
 // seededSpec builds the admission material each seeded task declares: every
 // exported field of task.Spec holds a non-zero value, so a comparison of two
-// carriers sees a difference on any field the load path could drop.
+// commits sees a difference on any field the load path could drop.
 func seededSpec(tag string) task.Spec {
 	return task.Spec{
 		CallID:        "call-" + tag,
@@ -1236,38 +1236,38 @@ func seededSpec(tag string) task.Spec {
 	}
 }
 
-// seedCarrier drives one real write set with non-zero content on every table:
+// seedCommit drives one real write set with non-zero content on every table:
 // specs with identities, two commits carrying outboxes, one consumption, one
 // attempt and one refusal with its routing and moment frozen.
-func seedCarrier(t *testing.T, ctx context.Context, log FactLog, taskID event.TaskID, tag string) {
+func seedCommit(t *testing.T, ctx context.Context, log FactLog, taskID event.TaskID, tag string) {
 	t.Helper()
-	carrier, err := NewDurableCommit(log, nil)
+	commit, err := NewDurableCommit(log, nil)
 	if err != nil {
-		t.Fatalf("open the seeding carrier: %v", err)
+		t.Fatalf("open the seeding commit: %v", err)
 	}
 	spec := seededSpec(tag)
-	if err := carrier.Declare(ctx, taskID, spec); err != nil {
+	if err := commit.Declare(ctx, taskID, spec); err != nil {
 		t.Fatalf("declare %s: %v", tag, err)
 	}
 	first := invariantRecord(taskID, 0, task.StatusRunning, invariantNotice(taskID, 1))
 	first.Outbox[0].Target = event.Address{AgentID: "agent-b", SessionID: event.SessionID("session-" + tag)}
 	first.Outbox[0].Source = event.Address{AgentID: "agent-a", SessionID: event.SessionID("session-" + tag)}
-	if result, err := carrier.Commit(ctx, first); err != nil || result != task.CommitCommitted {
+	if result, err := commit.Commit(ctx, first); err != nil || result != task.CommitCommitted {
 		t.Fatalf("commit the first fact of %s = (%v, %v)", tag, result, err)
 	}
 	second := invariantRecord(taskID, 1, task.StatusSettled, invariantNotice(taskID, 2))
 	second.Outbox[0].Target = event.Address{AgentID: "agent-b", SessionID: event.SessionID("session-" + tag)}
-	if result, err := carrier.Commit(ctx, second); err != nil || result != task.CommitCommitted {
+	if result, err := commit.Commit(ctx, second); err != nil || result != task.CommitCommitted {
 		t.Fatalf("commit the second fact of %s = (%v, %v)", tag, result, err)
 	}
-	if err := carrier.recordConsumption(ctx, first.Outbox[0].Notice); err != nil {
+	if err := commit.recordConsumption(ctx, first.Outbox[0].Notice); err != nil {
 		t.Fatalf("record the consumption of %s: %v", tag, err)
 	}
-	if err := carrier.recordAttempt(ctx, second.Outbox[0].Notice, SettleAttempt{Terminal: "completed"}); err != nil {
+	if err := commit.recordAttempt(ctx, second.Outbox[0].Notice, SettleAttempt{Terminal: "completed"}); err != nil {
 		t.Fatalf("record the attempt of %s: %v", tag, err)
 	}
 	refused := invariantNotice(event.TaskID("task-other-"+tag), 9)
-	if err := carrier.recordRejection(ctx, Rejection{
+	if err := commit.recordRejection(ctx, Rejection{
 		Notice:   refused,
 		Target:   event.Address{AgentID: "agent-c", SessionID: event.SessionID("session-refused-" + tag)},
 		Instance: event.InstanceID("inst-refused-" + tag),
@@ -1313,7 +1313,7 @@ var ErrBarrierRefused = errors.New("state: the injected barrier did not complete
 
 // TestDurableCommitBarrier pins the commit barrier on the journal tier.
 // - a commit behind a completed barrier survives a reopen of the same tier: the task fact, its spec and its owed notification all read back
-// - a barrier that did not complete reports CommitUncertain and stores nothing the next carrier reads
+// - a barrier that did not complete reports CommitUncertain and stores nothing the next commit reads
 //
 // 契约: docs/wiki/reliability/durable-delivery.md#canonical-fact-resolution
 func TestDurableCommitBarrier(t *testing.T) {
@@ -1327,14 +1327,14 @@ func TestDurableCommitBarrier(t *testing.T) {
 			t.Fatalf("open the journal tier: %v", err)
 		}
 		taskID := event.TaskID("task-barrier")
-		seedCarrier(t, ctx, ledger.TierFactLog(tier), taskID, "barrier")
+		seedCommit(t, ctx, ledger.TierFactLog(tier), taskID, "barrier")
 		reopened, err := ledger.OpenTier(ctx, cfg)
 		if err != nil {
 			t.Fatalf("reopen the journal tier: %v", err)
 		}
 		restored, err := NewDurableCommit(ledger.TierFactLog(reopened), nil)
 		if err != nil {
-			t.Fatalf("restore the carrier beside the committed facts: %v", err)
+			t.Fatalf("restore the commit beside the committed facts: %v", err)
 		}
 		if len(restored.Facts(taskID)) != 2 {
 			t.Fatalf("restored facts of %s = %d, want the 2 committed", taskID, len(restored.Facts(taskID)))
@@ -1351,15 +1351,15 @@ func TestDurableCommitBarrier(t *testing.T) {
 			t.Fatalf("open the journal tier: %v", err)
 		}
 		log := barrierFailureLog{FactLog: ledger.TierFactLog(tier)}
-		carrier, err := NewDurableCommit(log, nil)
+		commit, err := NewDurableCommit(log, nil)
 		if err != nil {
-			t.Fatalf("open the carrier behind the failing barrier: %v", err)
+			t.Fatalf("open the commit behind the failing barrier: %v", err)
 		}
 		taskID := event.TaskID("task-uncertain")
-		if err := carrier.Declare(ctx, taskID, seededSpec("uncertain")); err == nil || !errors.Is(err, ErrBarrierRefused) {
+		if err := commit.Declare(ctx, taskID, seededSpec("uncertain")); err == nil || !errors.Is(err, ErrBarrierRefused) {
 			t.Fatalf("declare behind the failing barrier = %v, want the named barrier failure", err)
 		}
-		result, err := carrier.Commit(ctx, invariantRecord(taskID, 0, task.StatusRunning))
+		result, err := commit.Commit(ctx, invariantRecord(taskID, 0, task.StatusRunning))
 		if result != task.CommitUncertain || err == nil || !errors.Is(err, ErrBarrierRefused) {
 			t.Fatalf("commit behind the failing barrier = (%v, %v), want the uncertain outcome beside the named failure", result, err)
 		}

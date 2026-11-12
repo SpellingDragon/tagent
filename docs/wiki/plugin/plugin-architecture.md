@@ -1,32 +1,36 @@
 # tagent/plugin：六端口材料流与窄口扩展点
 
-`api/plugin` 是一条**材料流**的声明。框架在三个位置注入差异化能力——执行前的一次调用变换与一次裁决、请求装配时的一次环境块贡献、提交后的一次观测、一次呈现、一次压缩触发。一个插件是一个注册单元：报告一个稳定名字与**恰好一个**端口，实现那个端口的**一个**窄接口。
+`api/plugin` 是一条**材料流**的声明。框架在六处注入差异化能力——执行前的调用变换与裁决、请求装配时的环境块贡献、提交后的观测、呈现与压缩触发。一个插件是一个注册单元：报告一个稳定名字与**恰好一个**端口，实现那个端口的**一个**窄接口，并以一份 `Material` 声明它读哪面材料、什么时候读、失败留下什么。
 
 <a id="overview"></a>
 ## 一、词汇与窄接口
 
-端口是具名常量，常量名就是它代表的转向——**读的那一面材料挨着答的那一面产物**：
+端口是具名常量，常量名就是它代表的转向——**读的那一面材料挨着答的那一面产物**；每个端口钉死一种时机与它能落的失败语义（下表第三列即 `Material` 的兼容读法）：
 
-| 端口（`plugin.Port` 常量值） | 窄接口 | 时点与判据 |
+| 端口（`plugin.Port` 常量值） | 窄接口 | `Material`：时机 / 失败语义与判据 |
 |---|---|---|
-| `call->call` | `TransformCall` | 副作用之前、准入之前，每 call 一次；可改工具名与参数，**不得改 call 身份**（`CallID` 与已解析信任域），改了以 `ErrCallIdentityChanged` 具名拒 |
-| `call->ruling` | `RiskAssessor` + `Governor` | 同一裁定的两张脸：`AssessRisk` 出 grade，`Governor` 在 grade 上出唯一执行前裁定；grade 只读一次，绝不重算 |
-| `request->environment` | `EnvironmentInject` | 请求装配的 InjectEnvironment 趟；每块是一个产物，回查发起它的请求；不写运行时、不改请求 |
-| `fact->observation` | `PostCommitObserver` | 事实的规范提交**之后**，只读旁路；失败记具名 gap 或保留义务，不回滚、不重跑、不写事实 |
-| `fact->view` | `FinalPresenter` | 为渠道渲染呈现文本并回答是否被丢弃；**丢弃必须报告**，不撤回事实 |
-| `fact->compression` | `CompressTrigger` | 已归档压缩请求的 TriggerCompress 趟；请求身份与 subject 保持原样，本面不压缩、不退役请求 |
+| `call->call` | `TransformCall` | **pre-side-effect / fail-closed**；副作用之前、准入之前，每 call 一次；可改工具名与参数，**不得改 call 身份**（`CallID` 与已解析信任域），改了以 `ErrCallIdentityChanged` 具名拒 |
+| `call->ruling` | `RiskAssessor` + `Governor` | **pre-side-effect / fail-closed**；同一裁定的两张脸：`AssessRisk` 出 grade，`Governor` 在 grade 上出唯一执行前裁定；grade 只读一次，绝不重算 |
+| `request->environment` | `EnvironmentInject` | **read / fail-closed**；请求装配的 InjectEnvironment 趟；每块是一个产物，回查发起它的请求；不写运行时、不改请求 |
+| `fact->observation` | `PostCommitObserver` | **post-commit / record-gap 或 preserve-obligation**；事实的规范提交**之后**，只读旁路；失败记具名 gap 或保留义务，不回滚、不重跑、不写事实 |
+| `fact->view` | `FinalPresenter` | **post-commit / report-loss**；为渠道渲染呈现文本并回答是否被丢弃；**丢弃必须报告**，不撤回事实 |
+| `fact->compression` | `CompressTrigger` | **post-commit / preserve-obligation**；已归档压缩请求的 TriggerCompress 趟；请求身份与 subject 保持原样，本面不压缩、不退役请求 |
 
-六个端口就是闭表：`validatePort` 是一个 `switch`，六 case 全中返回 nil，其余按名拒（"不是本流的已声明端口"）。`assemble` 也是六 case 具名派发，每个 case 只做一次类型断言，断言不中即"声明的端口没有实现它的窄接口"。**曾经的 Material×Product 九常量矩阵已删**——没有任何一趟按"材料集合"走路，端口常量就是完整声明，读材料与产产物分开声明的写法也不再存在。
+六个端口就是闭表：`validatePort` 是一个 `switch`，六 case 全中返回 nil，其余按名拒（"不是本流的已声明端口"）。`assemble` 也是六 case 具名派发，每个 case 只做一次类型断言，断言不中即"声明的端口没有实现它的窄接口"。**曾经的 Material×Product 九常量矩阵已删**——没有任何一趟按"材料集合"走路；端口常量只表达路由（读哪面材料、答哪面产物），一个面完整的声明是 `Material`。
+
+`Material{Reads, Timing, Failure}` 是一个面的完整声明：`Reads` 是它消费的端口路由，`Timing` 三值（`pre-side-effect` 副作用前／`post-commit` 提交后／`read` 装配读取时）与 `Failure` 四值（`fail-closed` 拒整趟／`record-gap` 记具名缺口继续／`preserve-obligation` 保留欠账／`report-loss` 报产物丢弃）是两条正交策略字段——同一材料可声明不同失败语义，分派按声明走、不由端口名推断。`admitted` 是一张冻结映射，把六端口钉到各自趟能跑的时机与能落的失败：回 error 的趟只能 fail-closed，提交后的趟不返回自己的 error，失败只能落 gap／保留义务／丢弃产物；`fact->observation` 是唯一带两种失败语义的端口（observer-only 记 gap、driver 保义务）。
+
+声明从面本身在装配期读出（可选缝 `materialDeclarer`，不是 `Instance` 的第三个方法）：实现 `Material()` 的面自陈时机与失败，只报 `Port()` 的面经 `compatMaterialOf` 读该端口的兼容映射，直到迁移完成——迁移期不静默改变任一既有面的失败行为。`validateMaterial` 按名拒绝端口趟跑不了／落不了的时机或失败（回 error 的趟不能被答成 gap，提交后的趟不能拒已提交事实），`NewFlow` 再拒端口与所声明材料相矛盾的面。
 
 **一个候选注记，不占槽**：`route`（event->ownership：把一条已提交的事件读作"它归谁"的判定）登记为第七端口的候选，只注记不占位——没有常量、没有窄接口、没有派发分支，声明它和声明任何未登记名一样按名拒。开它的条件写着两条：它要判的那层工作关系先存在，并且真有一个消费者声明它；在那之前闭表仍是六个。
 
-红线（`Instance` 的三条）：必须报告自己服务的那一个端口并实现它的窄接口；不得报告未实现其窄接口的端口；一个注册元素只服务一个端口（`call->ruling` 可同时带两张脸）。
+红线（`Instance` 的三条）：必须报告自己服务的那一个端口并实现它的窄接口；不得报告未实现其窄接口的端口；不得声明其端口趟跑不了或落不了的材料（一个注册元素只服务一个端口，`call->ruling` 可同时带两张脸）。
 
 落在一趟里的词汇也是契约：`CallPass{Final, Risk, TriggerSource}` 是裁决者拿到的**全部输入**（最终 call、risk face 已出的最强档、派发层声明的触发来源），裁定没有隐藏输入；`RiskLevel` 四档 `low`/`medium`/`high`/`critical`，`Rank()` 是"取最强"与"比阈值"共用的唯一排序；`Disposition` 三值 `allow`/`record`/`hold`——拒不是第四种 Disposition，而是 `Decision.Refused()` 为真、`Denial` 非 nil 的终局结果，所以"挂起"永远不会被读成"拒绝"。
 
-## 二、装配的四条拒绝（`NewFlow`）
+## 二、装配的拒绝（`NewFlow`）
 
-nil 实例、端口不在闭表、端口合法但没实现该端口的窄接口、同一个名字声明两次——各自按名拒绝，不静默修剪，因为一个产物的名字必须溯回写它的那一个元素。`assemble` 末尾再判一次 `servedAny`：声明了端口却一个窄接口都没实现的元素不会静默通过。
+nil 实例、端口不在闭表、材料声明的时机／失败其端口趟跑不了或落不了、端口与所声明材料相矛盾、端口合法但没实现该端口的窄接口、同一个名字声明两次——各自按名拒绝，不静默修剪，因为一个产物的名字必须溯回写它的那一个元素。`assemble` 末尾再判一次 `servedAny`：声明了端口却一个窄接口都没实现的元素不会静默通过。
 
 ## 三、三趟语义
 
@@ -34,7 +38,7 @@ nil 实例、端口不在闭表、端口合法但没实现该端口的窄接口�
 
 `After`：先跑全部 observer，再跑全部 presenter。观测失败进 `view.Presentation.Gaps`；presenter 丢弃只丢视图。**pass 不返回 error**：这里的失败只能是 gap、保留的义务或 dropped view，绝不是碰已提交事实的理由。
 
-`TriggerCompress` 与 `InjectEnvironment` 各自成趟：前者驱动一个已归档压缩请求的映射链（失败即拒该请求，材料不压缩、请求保持待处理）；后者按声明序追加环境块（空面必须如实报空，单面失败即拒这次装配）。
+`TriggerCompress` 与 `InjectEnvironment` 各自成趟：前者驱动一个已归档压缩请求的映射链（失败即拒这次触发，材料不压缩、请求保持待处理，义务仍欠着）；后者按声明序追加环境块（空面必须如实报空，单面失败即拒这次装配）。
 
 `fact->observation` 内部还有一层区分：**observer-only** 只读事实（观测、日志、审计不欠任何工作，失败就是 gap）；**driver** 面被事实要求去启动别人欠的工作（follow-up 回合、一次投递），失败时义务仍欠着，于是回 `ErrObservationObligationRetained`——"观察失败"与"工作还欠着"是必须分开报的两件事。duty 在装配期从面本身读出（`dutyOfObserved`），注册处只声明一次。
 
@@ -67,10 +71,6 @@ pass 的消费者到此为止：`CallPassFrom` 只被受理 wrap 读。send 工�
 - **交付前审查**（`DeliveryRuler`，`delivery->disposition` 端口）是**另一条缝**：它裁决"这条正文该不该发出去"，与六端口闭表不重叠，契约在[治理分级处置](../agent/governance-enforcement.md#disposition-and-risk)。把它读成六端口之一，会让"工具调用裁决"与"投递审查"共用一套判据，而两者的对象与重试语义都不同。
 - **消费者协议**（订阅 / 投递 / 应用 / 关闭 / 观察的那几个面）不在本篇：它属事件消费器一侧，见 [docs/EXTENSIONS.md](../../EXTENSIONS.md) 第四节"消费器协议：三个实例、六个面，一条协议"。
 - **记忆写入**：本仓不再有 `MemoryPlugin` / `SummaryPlugin` 这类 `OnEvent` 钩子，事件持久化与摘要视图归记忆写入路径；`plugin` 只留这条材料流。
-
-## 七、历史对照（一行注记）
-
-原版的两相位 `OnEvent` 插件（`MemoryPlugin` / `SummaryPlugin`）与九常量的 Material×Product 端口矩阵已移除：前者归记忆写入路径，后者由六端口闭表取代。
 
 ## 已知缺口与演进方向
 

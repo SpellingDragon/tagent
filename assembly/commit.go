@@ -343,28 +343,28 @@ func (l *memoryFactLog) Scan(_ context.Context, prefix string) (map[string][]byt
 // Sync completes no barrier of an in-process log: every Put is already visible.
 func (l *memoryFactLog) Sync(context.Context) error { return nil }
 
-// commitCarrier is the fact carrier behind one run's commit port: the commit
+// commitLedger is the fact ledger behind one run's commit port: the commit
 // port itself beside the notification ledger the close and the diagnostic read
 // settle and list through. Both the in-memory commit and the durable commit
-// satisfy it, so the run keeps one shape over either carrier.
-type commitCarrier interface {
+// satisfy it, so the run keeps one shape over either commit.
+type commitLedger interface {
 	task.Commit
 	Outbox(taskID event.TaskID) []task.OutboxNotice
 }
 
-// runCommit is the commit carrier of one assembled run: every task fact is
+// runCommit is the commit port of one assembled run: every task fact is
 // stored in the commit ledger behind it — the in-memory ledger of the task
 // layer or the durable one the configured storage tier opens — and the
 // identity of each task that committed a fact is remembered beside it, so the
 // diagnostic read face lists the tasks the run holds without keeping a second
 // copy of their content.
 type runCommit struct {
-	inner commitCarrier
+	inner commitLedger
 	mu    sync.Mutex
 	held  map[event.TaskID]bool
 }
 
-// The carrier is the very commit port the registry submits through.
+// runCommit is the very commit port the registry submits through.
 var _ task.Commit = (*runCommit)(nil)
 
 // Commit stores one task fact and remembers the identity of its task.
@@ -379,9 +379,9 @@ func (c *runCommit) Commit(ctx context.Context, record task.CommitRecord) (task.
 }
 
 // Declare stores the admission material of one task beside its first commit
-// when the carrier behind this run holds a durable chain, so every fact chain
+// when the commit behind this run holds a durable chain, so every fact chain
 // the storage keeps is self-contained and a cold start rebuilds the task from
-// material the chain already carries. A carrier beside no durable chain stores
+// material the chain already carries. A commit beside no durable chain stores
 // nothing and keeps the admission material in the registry of the run alone.
 func (c *runCommit) Declare(ctx context.Context, taskID event.TaskID, spec task.Spec) error {
 	type declarer interface {

@@ -59,3 +59,15 @@ ls -d openspec/changes/archive/*/
 | 09 | [09-meditation-autonomy](2026-11-05-09-meditation-autonomy/) · [tasks](2026-11-05-09-meditation-autonomy/tasks.md) | [meditation-autonomy](../../specs/meditation-autonomy/spec.md)「冥想自主整理面」· [meditation-idle-gating](../../specs/meditation-idle-gating/spec.md)「独立门控能力保持退役」· [meditation-agent-partition](../../specs/meditation-agent-partition/spec.md)「反思事件注入本 agent 的专属反思会话」· [self-improvement-meditation](../../specs/self-improvement-meditation/spec.md)「冥想定位叙事(自我改进引擎)」 |
 
 真实对照 run-id（逐字符）：`bench-20261105T150446Z-9a9d7d`。本地证据（git-ignored）：`bench/runs/bench-20261105T150446Z-9a9d7d/{run.json,metrics.json,report.md}`；台账见 [ORCHESTRATION.md r47](2026-11-05-boundary-closure/ORCHESTRATION.md)。
+
+## code-vocabulary-alignment 归档导览（2026-11-12）
+
+一级变更 [2026-11-12-code-vocabulary-alignment](2026-11-12-code-vocabulary-alignment/) 把多义退役词 carrier 全义退役、统一到既有精确实名（commit/DurableCommit/credential/URL/projection/envelope/fact/record），并以**纯短语禁机械门**（无基线/分类/豁免/棘轮/镜像）承载词汇对齐。三域 01/02/03 并发实施；症状锚＝词汇门对当前树 **390 红→清理后 0 绿→仅回退清理复红**（因果，门系本变更新建故因果取「回退清理」而非「回滚全变更」）。域→证据/主规格锚如下：
+
+| # | 域（证据入口） | 主规格锚 / 产物 |
+|---|---|---|
+| 01 | [01-residual-cleanup](2026-11-12-code-vocabulary-alignment/changes/01-residual-cleanup/) · [tasks](2026-11-12-code-vocabulary-alignment/changes/01-residual-cleanup/tasks.md) | 生产/测试 `.go` carrier 全退役（A 97/B1 113/B2 131 命中）＋golden/wiki/GLOSSARY 漂移对齐（D）；导出 API 零改动、逻辑零改 |
+| 02 | [02-vocabulary-gate](2026-11-12-code-vocabulary-alignment/changes/02-vocabulary-gate/) · [tasks](2026-11-12-code-vocabulary-alignment/changes/02-vocabulary-gate/tasks.md) | [architecture-guardrails](../../specs/architecture-guardrails/spec.md)「代码词汇对齐 GLOSSARY 规范词（机械门）」；门 `scripts/gates/check_vocabulary_alignment.py`（266 行纯短语禁）＋负例自测 17 例 52 断言＋lint/CI 接线 |
+| 03 | [03-structural-golden](2026-11-12-code-vocabulary-alignment/changes/03-structural-golden/) · [tasks](2026-11-12-code-vocabulary-alignment/changes/03-structural-golden/tasks.md) | checkpoint 切片重复常量去重（checkpointSliceMailbox→StateSliceMailbox）＋window_bounds 检查点义对齐；SnapshotCheckpoint/RestoreCheckpoint 裁定 KEEP |
+
+收尾证据：[tasks.md](2026-11-12-code-vocabulary-alignment/tasks.md)（F0–F4 勾选）· [ORCHESTRATION.md](2026-11-12-code-vocabulary-alignment/ORCHESTRATION.md)（波次台账与放行凭据）· [run-notes.md](2026-11-12-code-vocabulary-alignment/run-notes.md)（红转绿因果、净负代码门 550→266/自测 480→215/基线 2377→0、克隆 CI 等价、F4 归档与 doc-budget 具名上调 +35）· [red-anchor-390.log](2026-11-12-code-vocabulary-alignment/red-anchor-390.log)（症状锚红存证）。编排 delta 四条要求系主 orchestration spec 既有通用原则之变更局部实例化，按 spec 最小化不重复转正，留存于 [orchestration-spec.md](2026-11-12-code-vocabulary-alignment/orchestration-spec.md)（随档冻结，不入主 spec）。

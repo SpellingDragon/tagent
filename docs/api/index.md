@@ -61,6 +61,7 @@
 | `github.com/SpellingDragon/tagent/scripts/codetools` | [github_com__SpellingDragon__tagent__scripts__codetools.md](github_com__SpellingDragon__tagent__scripts__codetools.md) |
 | `github.com/SpellingDragon/tagent/scripts/comment_policy` | [github_com__SpellingDragon__tagent__scripts__comment_policy.md](github_com__SpellingDragon__tagent__scripts__comment_policy.md) |
 | `github.com/SpellingDragon/tagent/scripts/migrate-kv` | [github_com__SpellingDragon__tagent__scripts__migrate-kv.md](github_com__SpellingDragon__tagent__scripts__migrate-kv.md) |
+| `github.com/SpellingDragon/tagent/scripts/recover-kv` | [github_com__SpellingDragon__tagent__scripts__recover-kv.md](github_com__SpellingDragon__tagent__scripts__recover-kv.md) |
 | `github.com/SpellingDragon/tagent/tests/integration` | [github_com__SpellingDragon__tagent__tests__integration.md](github_com__SpellingDragon__tagent__tests__integration.md) |
 | `github.com/SpellingDragon/tagent/tests/integration/acceptance` | [github_com__SpellingDragon__tagent__tests__integration__acceptance.md](github_com__SpellingDragon__tagent__tests__integration__acceptance.md) |
 | `github.com/SpellingDragon/tagent/tests/integration/capabilities` | [github_com__SpellingDragon__tagent__tests__integration__capabilities.md](github_com__SpellingDragon__tagent__tests__integration__capabilities.md) |
@@ -84,4 +85,4 @@
 | `wechat-bot` | [wechat-bot.md](wechat-bot.md) |
 | `wechat-bot/cmd/bench-bridge` | [wechat-bot__cmd__bench-bridge.md](wechat-bot__cmd__bench-bridge.md) |
 
-包总数：79。文档覆盖由 scripts/comment_policy 单点判定。
+包总数：80。文档覆盖由 scripts/comment_policy 单点判定。

@@ -44,7 +44,7 @@ These are framework composition directions. External connectors are not all bund
 
 Inputs and execution outcomes become traceable facts. Plugins govern calls, contribute environment information, observe facts, shape model-visible views and request compression. Projections and request assembly determine what the model sees; retained originals support later reads.
 
-The six named ports and dependency boundaries are documented in [extensions](docs/EXTENSIONS.md). The public entry points live in `assembly/`; optional governance, reflection, telemetry and training capabilities live under `features/`.
+The six named ports — each face declaring a unified `Material` (what it reads, when, and what a failure leaves behind) — and the dependency boundaries are documented in [extensions](docs/EXTENSIONS.md). The public entry points live in `assembly/`; optional governance, reflection, telemetry and training capabilities live under `features/`.
 
 ## The hard parts of running continuously
 

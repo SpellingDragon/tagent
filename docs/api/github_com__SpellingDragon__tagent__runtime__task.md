@@ -27,8 +27,8 @@ The task registry's recoverable state as the framework checkpoint carries it:
 the account the registry holds — every task it admitted that the terminal sweep
 did not drop — stated whole, beside the chain revision each record stands at.
 The account is the size of the work the registry keeps, never the size of the
-chains it already settled, so a restarted process reads the tasks of the cut
-out of the carrier instead of folding every chain the storage ever accumulated.
+chains it already settled, so a restarted process reads the tasks of the cut out
+of the checkpoint instead of folding every chain the storage ever accumulated.
 The fact chain stays the truth of a task and the source the tail replays from:
 the checkpoint is the derived snapshot that spares the covered part of it.
 
@@ -70,7 +70,7 @@ committed and its notifications are registered.
 A task is the runtime's unit of responsibility and accounting. The admission,
 commit and scheduling behaviour runs behind those ports in this package:
 the registry owns the life of a task, the manager owns its obligations, and the
-commit carrier records the transitions.
+commit port records the transitions.
 
 This file holds the one criterion that answers whether a run is at rest: the
 work it accepted and has not finished, beside the notifications no consumption
@@ -936,27 +936,27 @@ func (m *MemoryAdmission) Lookup(key DedupKey) (event.TaskID, bool)
 type MemoryCommit struct {
 	// Has unexported fields.
 }
-    MemoryCommit is the in-memory carrier behind the Commit port: it stores
-    one self-contained record per mutation identity, keeps the revision each
-    record advanced, and holds every committed notification as an open delivery
-    obligation. The memory carrier keeps the business contract of a durable one
-    and promises no recovery of its own.
+    MemoryCommit is the in-memory implementation behind the Commit port: it
+    stores one self-contained record per mutation identity, keeps the revision
+    each record advanced, and holds every committed notification as an open
+    delivery obligation. It keeps the business contract of a durable one and
+    promises no recovery of its own.
 
 func NewMemoryCommit(uncertain UncertainProbe) *MemoryCommit
-    NewMemoryCommit returns an empty in-memory commit carrier. uncertain,
-    when it is not nil, marks matching commit attempts as uncertain, so all
-    three commit outcomes stay observable.
+    NewMemoryCommit returns an empty MemoryCommit. uncertain, when it is not
+    nil, marks matching commit attempts as uncertain, so all three commit
+    outcomes stay observable.
 
 func (m *MemoryCommit) Commit(ctx context.Context, record CommitRecord) (CommitResult, error)
     Commit implements the commit port. A record of a mutation identity the
-    carrier already stores returns the fact already stored and records no second
+    commit already stores returns the fact already stored and records no second
     fact; the same identity with different content reports CommitNotCommitted
     beside a named error, as does a record expecting another revision.
     An uncertain attempt reports CommitUncertain and stores nothing until that
     record is submitted once more.
 
 func (m *MemoryCommit) Facts(taskID event.TaskID) []CommitRecord
-    Facts returns the records the carrier stored for one task, in commit order.
+    Facts returns the records the commit stored for one task, in commit order.
 
 func (m *MemoryCommit) Outbox(taskID event.TaskID) []OutboxNotice
     Outbox returns the notifications one task still owes delivery, each paired
@@ -1068,22 +1068,22 @@ type MemoryRegistry struct {
 	// Has unexported fields.
 }
     MemoryRegistry is the in-memory task registry: it admits a task declaration,
-    moves a task through the state machine on the commit carrier, and answers
+    moves a task through the state machine on the commit port, and answers
     lookups, cancellation requests and resume declarations. It satisfies
     Registry and holds no recovery of its own.
 
-func NewMemoryRegistry(carrier Commit, admission *MemoryAdmission, opts ...RegistryOption) *MemoryRegistry
-    NewMemoryRegistry returns an in-memory task registry over one commit carrier
-    and one admission face. Each status change is submitted to the carrier
-    before the registry reports it, so a change the carrier did not store is
+func NewMemoryRegistry(commit Commit, admission *MemoryAdmission, opts ...RegistryOption) *MemoryRegistry
+    NewMemoryRegistry returns an in-memory task registry over one commit port
+    and one admission face. Each status change is submitted to the commit port
+    before the registry reports it, so a change the commit did not store is
     never made visible.
 
 func (r *MemoryRegistry) Advance(ctx context.Context, taskID event.TaskID, to Status, mutation MutationID, outbox []Envelope) (CommitResult, error)
-    Advance moves one task to the next status and submits the change beside
-    its pending notifications to the commit carrier first. A repeated mutation
-    returns the fact already stored and records no second one; a change the
-    carrier refuses leaves the task where it is; a task that holds its terminal
-    fact moves no more.
+    Advance moves one task to the next status and submits the change beside its
+    pending notifications to the commit port first. A repeated mutation returns
+    the fact already stored and records no second one; a change the commit
+    refuses leaves the task where it is; a task that holds its terminal fact
+    moves no more.
 
 func (r *MemoryRegistry) Cancel(ctx context.Context, taskID event.TaskID) error
     Cancel requests cancellation of the named task only; it does not cancel
@@ -1100,9 +1100,9 @@ func (r *MemoryRegistry) CheckpointRestored(ctx context.Context, taskIDs []event
     restored: the state the restored record holds and the owner the current
     orchestration binding resolves its target to, resolved exactly as Restore
     resolves the target of a rebuilt task. The outcome reports the recovery,
-    because the carrier rebuilt the task exactly as a chain fold rebuilds it and
-    the two paths answer the same account; a task the registry does not hold is
-    left out of the report.
+    because the checkpoint rebuilt the task exactly as a chain fold rebuilds it
+    and the two paths answer the same account; a task the registry does not hold
+    is left out of the report.
 
 func (r *MemoryRegistry) IssueNotice(ctx context.Context, taskID event.TaskID, kind NoticeKind, fact event.EventID) (Envelope, error)
     IssueNotice allocates the stable identity of one notification of the named
@@ -1175,8 +1175,8 @@ func (r *MemoryRegistry) Register(ctx context.Context, spec Spec) (AdmissionRece
     the concurrency limit is refused by name and leaves every admitted task
     untouched. A fresh admission keeps its pre-registered obligation open until
     the task settles. The admission material of a fresh task is stored beside
-    its first commit through the carrier's admission-material face when the
-    carrier offers one, so the stored chain of the task is self-contained and a
+    its first commit through the commit port's admission-material face when the
+    port offers one, so the stored chain of the task is self-contained and a
     restore needs no external declaration.
 
 func (r *MemoryRegistry) RequestCancel(ctx context.Context, taskID event.TaskID) (CancelReceipt, error)
@@ -1501,8 +1501,8 @@ type RegistryCheckpoint struct {
     one entry per task record the registry holds, in task identity order.
 
 type RegistryOption func(*MemoryRegistry)
-    RegistryOption configures one in-memory task registry beyond its commit
-    carrier and admission face.
+    RegistryOption configures one in-memory task registry beyond its commit port
+    and admission face.
 
 func WithActivity(report func()) RegistryOption
     WithActivity attaches the pulse the registry reports each time it applied
@@ -1544,7 +1544,7 @@ type RestoreOutcome struct {
 	// is empty when the resolution refused.
 	Owner event.AgentID
 	// Recovered reports whether this restore rebuilt the task: from the chain
-	// links it folded, from the carrier a checkpoint stated, or from neither —
+	// links it folded, from the cut a checkpoint stated, or from neither —
 	// false reports an idempotent hit, where the registry already held the task
 	// and the link added no second fact, or a chain the restore refused without
 	// rebuilding anything.

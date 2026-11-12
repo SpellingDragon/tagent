@@ -150,11 +150,11 @@ type noticeKey struct {
 	seq   int64
 }
 
-// MemoryCommit is the in-memory carrier behind the Commit port: it stores one
+// MemoryCommit is the in-memory implementation behind the Commit port: it stores one
 // self-contained record per mutation identity, keeps the revision each record
 // advanced, and holds every committed notification as an open delivery
-// obligation. The memory carrier keeps the business contract of a durable one
-// and promises no recovery of its own.
+// obligation. It keeps the business contract of a durable one and promises no
+// recovery of its own.
 type MemoryCommit struct {
 	mu        sync.Mutex
 	uncertain UncertainProbe
@@ -167,7 +167,7 @@ type MemoryCommit struct {
 // MemoryCommit satisfies the commit port.
 var _ Commit = (*MemoryCommit)(nil)
 
-// NewMemoryCommit returns an empty in-memory commit carrier. uncertain, when it
+// NewMemoryCommit returns an empty MemoryCommit. uncertain, when it
 // is not nil, marks matching commit attempts as uncertain, so all three commit
 // outcomes stay observable.
 func NewMemoryCommit(uncertain UncertainProbe) *MemoryCommit {
@@ -180,7 +180,7 @@ func NewMemoryCommit(uncertain UncertainProbe) *MemoryCommit {
 	}
 }
 
-// Commit implements the commit port. A record of a mutation identity the carrier
+// Commit implements the commit port. A record of a mutation identity the commit
 // already stores returns the fact already stored and records no second fact; the
 // same identity with different content reports CommitNotCommitted beside a named
 // error, as does a record expecting another revision. An uncertain attempt
@@ -226,7 +226,7 @@ func sameContent(stored, record CommitRecord) bool {
 		slices.Equal(stored.Outbox, record.Outbox)
 }
 
-// Facts returns the records the carrier stored for one task, in commit order.
+// Facts returns the records the commit stored for one task, in commit order.
 func (m *MemoryCommit) Facts(taskID event.TaskID) []CommitRecord {
 	m.mu.Lock()
 	defer m.mu.Unlock()

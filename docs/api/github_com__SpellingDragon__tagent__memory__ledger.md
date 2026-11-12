@@ -375,16 +375,16 @@ func (s *FileSegmentStore) Load(ctx context.Context) error
     order is the one the engine states for the records it published.
 
 func (s *FileSegmentStore) NewestOfType(ctx context.Context, typ string) (event.EventID, bool, error)
-    NewestOfType answers the identity of the newest published index entry of
-    one frozen event type: the walk reads the resident commit order from the
-    newest commit backwards and stops at the first entry of the type, so a
-    lookup beside a carrier filed every cadence commits reads a bounded prefix
+    NewestOfType answers the identity of the newest published index entry of one
+    frozen event type: the walk reads the resident commit order from the newest
+    commit backwards and stops at the first entry of the type, so a lookup
+    beside a checkpoint filed every cadence commits reads a bounded prefix
     of the order whatever the history behind it, copies and sorts nothing,
     and reads no event body. The answer spans partitions: an identity is newer
     than another because its commit landed later, never because its window,
     its sequence slot or its partition is higher, so a run whose owner moved
-    between processes reads the carrier its newest process filed instead of the
-    one of the highest partition.
+    between processes reads the checkpoint its newest process filed instead of
+    the one of the highest partition.
 
     A type the store holds no entry of answers found=false and no error.
 
@@ -741,7 +741,9 @@ func MigrateShardedRoot(ctx context.Context, sourceRoot, targetRoot string) (Mig
     and a migration interrupted anywhere leaves the source exactly as it was.
     The target is refused when it already holds keys, so no copy overwrites
     a root in use. A root whose copy does not read back byte for byte returns
-    ErrMigrateMismatch naming the key that differs.
+    ErrMigrateMismatch naming the key that differs. A copied root whose
+    reference names no independent body returns ErrSnapshotCorrupt naming the
+    orphaned key, the same refusal the original store's load reports at boot.
 
 type OriginalRef struct {
 	// Key is the EventID that owns this original. Different keys never share

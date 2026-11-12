@@ -71,10 +71,10 @@ func newMovement() *movement { return &movement{} }
 
 // 契约: docs/wiki/platform/org-hot-reload.md#owner-retirement
 //
-// MemoryStore is the in-memory carrier behind the Store face: it establishes
+// MemoryStore is the in-memory implementation behind the Store face: it establishes
 // one site per explicit address and instance, keeps the instance currently
 // serving each address, and routes a notification to the site its delivery
-// registration names. The memory carrier keeps the business contract of a
+// registration names. It keeps the business contract of a
 // durable one and promises no recovery of its own.
 type MemoryStore struct {
 	mu           sync.Mutex
@@ -415,7 +415,7 @@ func (m *MemoryStore) RecordAttempt(ctx context.Context, notice task.Notice, att
 	return nil
 }
 
-// foldOwed folds the notifications one carrier states back into the mailbox:
+// foldOwed folds the notifications one checkpoint states back into the mailbox:
 // the target site each notification's frozen routing names is opened beside the
 // instance that froze it, so the work a stopped run left unconsumed waits for
 // the next decision instead of being lost with the process. The fold is

@@ -362,11 +362,11 @@ func supplyRetrieval(_ context.Context, tier *ledger.Tier, embedder memory.Embed
 // sole publication entry admitted, the session sites this run established and
 // the tasks the task layer of this run holds. Every reading goes back to the
 // owner that already holds the fact — the current binding account, the state
-// owner's own authorized read and the task carriers — so the run keeps no
+// owner's own authorized read and the task layer — so the run keeps no
 // second copy of the live scene and a reload that adds or removes an agent is
 // visible in the next reading.
 //
-// A task the commit carrier lists is read beside the obligations its manager
+// A task the commit lists is read beside the obligations its manager
 // still holds and the notifications its record still owes; a task the owner
 // cannot answer for refuses the reading by name instead of being dropped from
 // it in silence.

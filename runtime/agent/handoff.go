@@ -14,7 +14,7 @@ import (
 // delegated turn serves, the acceptance constraints its result is held to, the
 // capabilities the handoff grants it, the decisions it may not take on its own and
 // the stored facts it starts from. It travels beside the natural-language request
-// of the call and never replaces it, and one schema serves every carrier: the
+// of the call and never replaces it, and one schema serves every representation: the
 // JSON field names below are the wire names it travels under, an A2A data part
 // carries that JSON as its payload, and the local channel renders the same
 // fields as the text block ExternalContext states.

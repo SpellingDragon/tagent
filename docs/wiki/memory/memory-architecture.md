@@ -144,7 +144,7 @@
 2. 已提交过同一记录 → `return nil`（重复提交是幂等成功）；同一槽位换一份字节 → `ErrContentConflict`。
 3. `Commit` 返回成功**之后**才写进内存索引、读缓存与 `count`：失败包成 `ErrSegmentBarrier`，本批任何一个键都不发布，内存态不出现"读得到但没落盘"的事件。
 
-`Events()` 的顺序是 `(PartitionID, WindowTS, Seq, Key)`；`Load()` 只在 body、idx、meta **三件齐备**时发布该记录，缺任何一件就当作没提交过。`SegmentRequest` 按字节切读（`DefaultSegmentMaxBytes = 64 KiB`），越界与 EOF 分开报。发布面的次序是**提交次序**：`FileSegmentStore.order` 记下已发布身份在引擎里的落盘次序，`EachIndexNewestFirst` 逆着它逐条读取（不拷贝、不排序），`NewestOfType` 逆着它走并在第一条命中类型处停下——载体每 cadence 条提交一枚，所以读最新载体只花它到链尾的那几条，与历史长度无关。引擎不声明次序时（key 序 KV，或未转发 `commitOrder` 的包装）退化为 `(分区, seq, 身份)` 的槽位次序，代价是装配时一次排序，且答不出跨分区的新旧。
+`Events()` 的顺序是 `(PartitionID, WindowTS, Seq, Key)`；`Load()` 只在 body、idx、meta **三件齐备**时发布该记录，缺任何一件就当作没提交过。`SegmentRequest` 按字节切读（`DefaultSegmentMaxBytes = 64 KiB`），越界与 EOF 分开报。发布面的次序是**提交次序**：`FileSegmentStore.order` 记下已发布身份在引擎里的落盘次序，`EachIndexNewestFirst` 逆着它逐条读取（不拷贝、不排序），`NewestOfType` 逆着它走并在第一条命中类型处停下——checkpoint 每 cadence 条提交一枚，所以读最新 checkpoint 只花它到链尾的那几条，与历史长度无关。引擎不声明次序时（key 序 KV，或未转发 `commitOrder` 的包装）退化为 `(分区, seq, 身份)` 的槽位次序，代价是装配时一次排序，且答不出跨分区的新旧。
 
 **线上没有分层压实、没有墓碑执行、没有 TTL 扫描**：分层压实/TTL/回收这一整套仍在 `lifecycle.go` 里在册（其代码注释自述"过期只标墓碑、物理销毁在压实发生"），但装配面未接线，所以链在线上天然只有一层——这也是"链恒重放"能成立的前提。追加日志本身也没有压实阶段（[§六](#local-file-kv)），两处缺口互不相干。
 

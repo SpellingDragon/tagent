@@ -3516,7 +3516,7 @@ func (r *Run) LeaseLosses() []error {
 // metaKeyFinalRoundRange, metaKeyFinalRoundReason, metaKeyFinalRoundRounds and
 // metaKeyFinalRoundElapsed are the metadata keys a final round request fact states
 // the fields of its judgment under: a request is a judgment about a range and never
-// material of a transcript, so the event metadata is the one durable carrier of
+// material of a transcript, so the event metadata is the one durable record of
 // what it judged.
 const (
 	metaKeyFinalRoundRange   = "final_round_range"
