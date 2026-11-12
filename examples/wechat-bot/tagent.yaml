@@ -56,9 +56,10 @@ mcp_servers:
 # 存储不再有顶层 storage 段:它由各 agent 的 memory 段声明,宿主把全体声明归并成
 # 一个 tier + 一个 engine(hostDocument.memorySettings)——同一份存储被两种引擎读会答出
 # 两种结果,所以只有一处声明引擎、其余处只声明存储与读授权;声明不一致一律拒启动。
-#   · type/path:journal 的原始层与分段层根;.wechat-config/data-v2 由 scripts/migrate-kv 从旧
-#     分片快照根(.wechat-config/data,已退役,新构建拒开,原样保留作回退)逐字节迁移而来,
-#     历史知识随迁(legacy body 由 DecodeEventBody 兼容)。
+#   · type/path:journal 的原始层与分段层根;.wechat-config/data 是当前在用的根,
+#     指向它即接回跨重启的历史知识(legacy body 由 DecodeEventBody 兼容)。
+#     仅当某根仍是旧分片布局(kv/ 下有子目录或 shard_*.json)、新构建拒开时,
+#     才用 scripts/migrate-kv 逐字节迁到新根,再把各 agent 的 memory.path 指过去。
 #   · read_namespaces:跨分区读授权(recall.New 的授权面);自身命名空间恒在授权内,
 #     这里列出的名字追加到它之后。不声明则不跨区。
 #   · engine:语义引擎,embedding 经 trpc knowledge/embedder/openai 真调用;
