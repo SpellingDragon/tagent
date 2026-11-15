@@ -39,10 +39,10 @@ const (
 func isolationAgentSections() string {
 	return "  user:\n" +
 		"    model: model-alpha\n" +
-		"    max_tokens: 32000\n" +
+		"    replay_window: 32000\n" +
 		"  other:\n" +
 		"    model: model-beta\n" +
-		"    max_tokens: 32000\n"
+		"    replay_window: 32000\n"
 }
 
 // isolationRequestText renders every model-visible character one request

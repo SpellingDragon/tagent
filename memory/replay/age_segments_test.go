@@ -330,8 +330,24 @@ func TestAgeFoldFoldsTheMiddleBandIntoOneProduct(t *testing.T) {
 		if product.Type != ProjectionTypeSegmentFold || !SyntheticKey(product.Key) {
 			t.Fatalf("product %d = %+v, want a synthetic segment-fold product", i, product)
 		}
-		if !foldAnchorLine.MatchString(product.Content) || !strings.Contains(product.Content, "|gen:?] thinking_plan: ") {
-			t.Fatalf("product %d content = %q, want the provenance anchor beside the one-line reads of the folded detail", i, product.Content)
+		for _, line := range strings.Split(product.Content, "; ") {
+			if !foldAnchorLine.MatchString(line) {
+				t.Fatalf("product %d line = %q, want the provenance anchor opening each one-line read of the folded detail", i, line)
+			}
+		}
+		folded := 0
+		for _, source := range entries {
+			if !strings.HasPrefix(string(source.Key), fmt.Sprintf("t%d-", i+1)) || !isProcessDetail(source) {
+				continue
+			}
+			ticket := TicketOf(source.Key, source.Type)
+			if !strings.Contains(product.Content, ticket+" "+source.Type+": "+source.Summary) {
+				t.Fatalf("product %d content = %q, want the recallable ticket %q beside the folded read of %q, so every folded read keeps the ticket addressing its own event", i, product.Content, ticket, source.Key)
+			}
+			folded++
+		}
+		if folded == 0 {
+			t.Fatalf("product %d folded no process detail of turn t%d", i, i+1)
 		}
 		want := event.CompressRequestFor(AgeProducerSegmentAge, strings.TrimPrefix(string(product.Key), "-"), AgeReasonSegmentFold)
 		if len(report.Requests) <= i || report.Requests[i].ID != want.ID {

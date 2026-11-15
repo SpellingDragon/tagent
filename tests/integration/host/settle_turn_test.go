@@ -76,7 +76,7 @@ func TestSettledNoticeDrivesFollowUpTurn(t *testing.T) {
 	writeHostDocumentFile(t, configPath, scriptedHostDocumentWithAgentSections(root, provider.endpoint(), "model-entry",
 		"  user:\n"+
 			"    model: model-entry\n"+
-			"    max_tokens: 32000\n"+
+			"    replay_window: 32000\n"+
 			"    tools:\n"+
 			"      - { kind: agent, agent: worker }\n"+
 			"  worker:\n"+

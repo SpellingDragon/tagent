@@ -14,7 +14,6 @@ import (
 	"github.com/SpellingDragon/tagent/api/plugin"
 	"github.com/SpellingDragon/tagent/features/evolution/meditation"
 	"github.com/SpellingDragon/tagent/features/rl"
-	"github.com/SpellingDragon/tagent/features/telemetry"
 	"github.com/SpellingDragon/tagent/memory"
 	"github.com/SpellingDragon/tagent/memory/ledger"
 	"github.com/SpellingDragon/tagent/memory/search"
@@ -244,19 +243,7 @@ func (r *Run) suppliers(decl *config.Declaration, agents map[event.AgentID]Nativ
 				return state.PromptSource{Files: spec.Files}, nil
 			},
 			plugins: func(_ context.Context, spec config.AgentSpec) ([]plugin.Instance, error) {
-				elements := append([]plugin.Instance(nil), contributed.Plugins...)
-				elements = append(elements, r.plugins...)
-				if observer := r.leaseObserverOf(event.AgentID(spec.ID)); observer != nil {
-					elements = append(elements, observer)
-				}
-				if spec.MaxTokens > 0 && r.ageFold != nil {
-					elements = append(elements, r.ageFold)
-				}
-				if r.observationWired() {
-					elements = append(elements,
-						observePlugin{observer: telemetry.NewCommitObserver(runFacts{run: r}, generationObserver{run: r})})
-				}
-				return elements, nil
+				return r.agentPlugins(contributed.Plugins, spec)
 			},
 			wrap:              r.wrap,
 			reflectionSession: contributed.reflectionSession,

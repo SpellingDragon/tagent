@@ -106,9 +106,9 @@ type smokeConfig struct {
 	MeditationInterval string
 	// MeditationMinGap 覆盖上次反思被消费后的最小间隔；空值保持默认的 10s。
 	MeditationMinGap string
-	// MaxTokens 覆盖入口 agent 的回放窗口；0 保持既有 2000，校准与长程用它
-	// 参数化 256/32768 两档（语义是回放 MaxTokens，不是响应长度）。
-	MaxTokens int
+	// ReplayWindow 覆盖入口 agent 的回放窗口；0 保持既有 2000，校准与长程用它
+	// 参数化 256/32768 两档（语义是回放窗口，不是响应长度）。
+	ReplayWindow int
 	// DeliveryRuler 把投递审核注入宿主；nil 保持默认不拦截（D5）。症状 G-B
 	// 与收尾轮迁移用它在投递侧挂起/放行。
 	DeliveryRuler plugin.DeliveryRuler
@@ -130,10 +130,10 @@ func (c *smokeConfig) meditationMinGap() string {
 	return "10s"
 }
 
-// maxTokens 报告文档渲染的回放窗口；0 保持既有 smoke 的 2000。
-func (c *smokeConfig) maxTokens() int {
-	if c.MaxTokens > 0 {
-		return c.MaxTokens
+// replayWindow 报告文档渲染的回放窗口；0 保持既有 smoke 的 2000。
+func (c *smokeConfig) replayWindow() int {
+	if c.ReplayWindow > 0 {
+		return c.ReplayWindow
 	}
 	return 2000
 }
@@ -187,9 +187,11 @@ func (c *smokeConfig) write(t *testing.T) {
 // 冥想 agent 的工具面恰一个通信工具 send（D6）：跨会话投递是它的唯一写面，
 // 目标由反思输入的 delivery targets 段给出。
 //
-// 入口显式声明 provider_context_window = 2×回放窗口：max_tokens 是回放窗口
-// （折叠节奏），请求预算门量的是 provider 窗口；不声明时 02 门按 max_tokens
-// 本值计量，固定提示词与工具面会先撞 3/4 输入预算（r32 的 1519/1500）。
+// 入口显式声明 context_window = 2×回放窗口：replay_window 是回放窗口
+// （折叠节奏），context_window 是请求预算门的唯一窗口来源（裁定乙），二者刻意
+// 解耦——合并会先撞预算（r32 的 1519/1500）。未声明 context_window 则门闭、
+// 整包发送（不再按 replay_window 派生缺省）；输出限 max_tokens 未声明=0=不预留，
+// 输入预算即整个 context_window（不再凭空缺省 window/4）。
 func (c *smokeConfig) document() string {
 	if c.Doc != nil {
 		return c.Doc(c)
@@ -206,8 +208,8 @@ agents:
     model: %s
     tools:
       - { kind: agent, agent: smoke-worker }
-    max_tokens: %d
-    provider_context_window: %d
+    replay_window: %d
+    context_window: %d
     compress_threshold: 0.3
     keep_recent_tasks: 1
     max_tool_iterations: 3
@@ -241,7 +243,7 @@ app:
     approvers: [%s]
 `,
 		smokeSessionTag, c.Model, c.PromptDir, c.Endpoint,
-		smokeSessionTag, c.Model, c.maxTokens(), c.maxTokens()*4,
+		smokeSessionTag, c.Model, c.replayWindow(), c.replayWindow()*4,
 		smokeSessionTag, c.meditationInterval(), c.meditationMinGap(),
 		smokeSessionTag, smokeSessionTag,
 		c.StorageRoot, c.ApprovalDir,
@@ -682,7 +684,7 @@ func smokeCalibrationBaselineScenario(t *testing.T) {
 	cfg := newSmokeConfig(t, "http://127.0.0.1:1/v1")
 	provider := newSmokeProvider(t, filepath.Join(cfg.WorkspaceDir, smokeFileMarker))
 	cfg.Endpoint = provider.endpoint()
-	cfg.MaxTokens = *smokeCalibrationWindowFlag
+	cfg.ReplayWindow = *smokeCalibrationWindowFlag
 	cfg.write(t)
 	plan := smokeCalibrationBuildPlan(cfg, runDir, *smokeCalibrationWindowFlag, *smokeCalibrationSeedFlag)
 	planPath := filepath.Join(runDir, "plan.json")
@@ -1003,7 +1005,7 @@ func smokeCalibrationPrimary(t *testing.T) (*smokeCalibrationReport, string) {
 	cfg := newSmokeConfig(t, "http://127.0.0.1:1/v1")
 	provider := newSmokeProvider(t, filepath.Join(cfg.WorkspaceDir, smokeFileMarker))
 	cfg.Endpoint = provider.endpoint()
-	cfg.MaxTokens = window
+	cfg.ReplayWindow = window
 	cfg.write(t)
 
 	plan := smokeCalibrationBuildPlan(cfg, runDir, window, seed)
@@ -3285,7 +3287,7 @@ func smokeCalibrationHostChild(t *testing.T) {
 		Root: plan.Root, WorkspaceDir: plan.WorkspaceDir, ConfigDir: plan.ConfigDir,
 		ContextDir: plan.ContextDir, ApprovalDir: plan.ApprovalDir, PromptDir: plan.PromptDir,
 		StorageRoot: plan.StorageRoot, ConfigPath: plan.ConfigPath, Endpoint: plan.Endpoint,
-		Model: smokeEntryModel, MaxTokens: plan.Window,
+		Model: smokeEntryModel, ReplayWindow: plan.Window,
 	}
 
 	started := time.Now()
@@ -4034,7 +4036,7 @@ func smokeLongHostChild(t *testing.T) {
 		Root: plan.Root, WorkspaceDir: plan.WorkspaceDir, ConfigDir: plan.ConfigDir,
 		ContextDir: plan.ContextDir, ApprovalDir: plan.ApprovalDir, PromptDir: plan.PromptDir,
 		StorageRoot: plan.StorageRoot, ConfigPath: plan.ConfigPath, Endpoint: plan.Endpoint,
-		Model: smokeEntryModel, MaxTokens: plan.Window,
+		Model: smokeEntryModel, ReplayWindow: plan.Window,
 	}
 
 	recorder := installSmokeLog(t)
@@ -4477,7 +4479,7 @@ func smokeLongPrimary(t *testing.T) (*smokeLongReport, string) {
 	cfg := newSmokeConfig(t, "http://127.0.0.1:1/v1")
 	provider := newSmokeProvider(t, filepath.Join(cfg.WorkspaceDir, smokeFileMarker))
 	cfg.Endpoint = provider.endpoint()
-	cfg.MaxTokens = window
+	cfg.ReplayWindow = window
 	cfg.write(t)
 
 	plan := smokeLongBuildPlan(cfg, runDir, window, seed)

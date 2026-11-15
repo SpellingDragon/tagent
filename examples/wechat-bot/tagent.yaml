@@ -56,8 +56,10 @@ mcp_servers:
 # 存储不再有顶层 storage 段:它由各 agent 的 memory 段声明,宿主把全体声明归并成
 # 一个 tier + 一个 engine(hostDocument.memorySettings)——同一份存储被两种引擎读会答出
 # 两种结果,所以只有一处声明引擎、其余处只声明存储与读授权;声明不一致一律拒启动。
-#   · type/path:journal 的原始层与分段层根;.wechat-config/data 是旧世界的
-#     KV/事件目录,指向它即接回跨重启的历史知识(legacy body 由 DecodeEventBody 兼容)。
+#   · type/path:journal 的原始层与分段层根;.wechat-config/data 是当前在用的根,
+#     指向它即接回跨重启的历史知识(legacy body 由 DecodeEventBody 兼容)。
+#     仅当某根仍是旧分片布局(kv/ 下有子目录或 shard_*.json)、新构建拒开时,
+#     才用 scripts/migrate-kv 逐字节迁到新根,再把各 agent 的 memory.path 指过去。
 #   · read_namespaces:跨分区读授权(recall.New 的授权面);自身命名空间恒在授权内,
 #     这里列出的名字追加到它之后。不声明则不跨区。
 #   · engine:语义引擎,embedding 经 trpc knowledge/embedder/openai 真调用;
@@ -99,9 +101,13 @@ agents:
       - { kind: agent, agent: recall, event_params: [event_keys] }
       - { kind: agent, agent: plan, description_file: plan_tool_desc.md }
       - { kind: agent, agent: action, description_file: action_tool_desc.md }
-    # 模型窗口:声明即注册会话投影——历史按窗口余量呈现,三龄段折叠随体积默认触发;
+    # 回放窗:声明即注册会话投影——历史按窗口余量呈现,三龄段折叠随体积默认触发;
     # compress_threshold(缺省0.8)/keep_recent_tasks(缺省2)不写即走默认。
-    max_tokens: 128000
+    # 预算窗是另一个键:context_window 是预算门的唯一窗源(乙),漏写即门闭——请求整包
+    # 发送、不受预算保护,故此处必须显式声明。输出限 max_tokens 不声明即 0=不留
+    # reserve,输入预算＝整个 context_window。
+    replay_window: 128000
+    context_window: 128000
     # 看门狗收尾轮(声明即 opt-in;不声明=无界,与未接此键时完全一致):
     # 第 24 个工具轮或跑满 3300 秒后,下一决策转为收尾轮——请求尾部追加收尾指令,
     # 该轮走 120 秒短超时,发起的工具调用一律不受理并配好回执,回答本轮已产出的东西。
@@ -135,7 +141,7 @@ agents:
       prompt_file: meditation.md
       deliver_to: [tagent]
     # 已接线的模型参数(不写走模型默认): temperature / thinking_enabled /
-    #   reasoning_effort / max_tool_iterations(映射看门狗轮数)
+    #   reasoning_effort / max_tokens(输出限,经 decorate 发 provider) / max_tool_iterations(映射看门狗轮数)
     # 待接线: task_terminal_ttl / task_default_ttl
 
   # ---- Knowledge:知识获取 & 翻译子 Agent ----
@@ -149,8 +155,8 @@ agents:
     reasoning_effort: high
     # 看门狗收尾轮:本 agent 自己的预算(声明即生效,不再只读 entry)。
     final_round:
-      max_rounds: 5
-      timeout_seconds: 120
+      max_rounds: 50
+      timeout_seconds: 1200
     # 知识面:skill_dirs 是技能仓根,read_root 限定 read_file 的沙箱根。
     # 三工具复用 trpc skill/file 面(skill_search/skill_load/read_file),不自行造轮。
     skill_dirs: [skills]
@@ -161,7 +167,7 @@ agents:
       - { kind: tool, id: skill_load }
       - { kind: tool, id: read_file }
       - { kind: tool, id: mcp_discover }
-    # 待接线:memory / max_tokens / compress_threshold / memory_query
+    # 待接线:memory / replay_window / compress_threshold / memory_query
 
   # ---- Recall:记忆检索子 Agent ----
   recall:
@@ -170,8 +176,8 @@ agents:
     # 检索求快:关闭思考,自设收尾预算。
     thinking_enabled: false
     final_round:
-      max_rounds: 5
-      timeout_seconds: 120      # 本目录自带(工具名按本部署的声明书写:recall_query/recall_get/recall_recent/recall_trace)
+      max_rounds: 50
+      timeout_seconds: 1200      # 本目录自带(工具名按本部署的声明书写:recall_query/recall_get/recall_recent/recall_trace)
     # 记忆读面:声明即授权(不声明的 agent 看不见该工具);四工具经 tool/recall 装配,
     # 读面由宿主注入(hostRecallSeam):Searcher 走装配后的 Run.Recall,Table 直读
     # 持久事件链,Originals 走 storage 的 scoped 原始层,Embedder 由宿主绑定,而 Trace
@@ -188,7 +194,7 @@ agents:
       type: journal
       path: .wechat-config/data
       read_namespaces: [tagent]
-    # 待接线:max_tool_iterations / max_tokens / compress_threshold / reasoning_effort
+    # 待接线:max_tool_iterations / replay_window / compress_threshold / reasoning_effort
 
   # ---- Action:执行中枢(调度 file/exec/mcp)----
   action:
@@ -216,7 +222,7 @@ agents:
       - { kind: tool, id: replace_content }
       - { kind: tool, id: exec }
       - { kind: tool, id: mcp_call }
-    # 待接线:memory / max_tool_iterations / max_tokens / compress_threshold /
+    # 待接线:memory / max_tool_iterations / replay_window / compress_threshold /
     #         temperature / thinking_enabled / reasoning_effort
 
   # ---- Plan:工作计划管理子 Agent(计划后端 CLI,无通用 shell 逃逸面)----
@@ -240,7 +246,7 @@ agents:
       - { kind: tool, id: search_file }
       - { kind: tool, id: search_content }
       - { kind: tool, id: replace_content }
-    # 待接线:thinking_enabled / max_tool_iterations / max_tokens / compress_threshold / temperature
+    # 待接线:thinking_enabled / max_tool_iterations / replay_window / compress_threshold / temperature
 
 # ===== 应用专属配置(各应用自行反序列化)=====
 app:

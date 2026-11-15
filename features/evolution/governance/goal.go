@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"sync"
 	"time"
 
@@ -99,8 +100,10 @@ type goalEventPayload struct {
 //
 // The registry is concurrent safe, and its durable face is late-bound and nil
 // safe: without a store it degrades to memory state instead of failing, and
-// binding one replays the stored goal events back into the registry, so a
-// restart keeps the goals it already declared.
+// binding one folds the stored goal events that landed past the state cut this
+// registry holds, so a restart keeps the goals it already declared. The cut is
+// seated by the framework state slice (see StateSeat); a registry beside no seat
+// holds the zero cut, so the events past it are the whole stream.
 //
 // 契约: docs/wiki/agent/governance-enforcement.md#goal-registry
 type GoalRegistry struct {
@@ -112,26 +115,73 @@ type GoalRegistry struct {
 	evtSeq int64
 }
 
-// NewGoalRegistry builds one goal registry in memory state. BindStore hands it
-// the durable face whenever the wiring has one.
+// NewGoalRegistry builds one goal registry in memory state. Bind hands it the
+// durable face whenever the wiring has one.
 func NewGoalRegistry() *GoalRegistry {
 	return &GoalRegistry{goals: make(map[string]*Goal)}
 }
 
-// BindStore hands the registry its durable face and replays the goal events
-// already stored there back into it — declarations and resolutions in the
+// Bind hands the registry its durable face and folds the goal events that landed
+// past the state cut it holds back into it — declarations and resolutions in the
 // order the operations happened, so a resolved goal is never resurrected and a
-// later declaration never reuses an identity. It is nil safe, and it runs
-// single threaded at construction.
-func (g *GoalRegistry) BindStore(log GovernanceEventLog) {
+// later declaration never reuses an identity. It is nil safe, and it runs single
+// threaded at construction.
+//
+// The error of a fold belongs to the caller that can stop the boot: a stream this
+// registry could not read leaves the goals behind the chain that serves them.
+func (g *GoalRegistry) Bind(ctx context.Context, log GovernanceEventLog) error {
 	if g == nil || log == nil {
-		return
+		return nil
 	}
 	g.mu.Lock()
 	g.log = log
-	g.evtSeq = g.seedSeqLocked()
+	cut := g.evtSeq
 	g.mu.Unlock()
-	g.rebuildFromStore()
+	return g.foldTail(ctx, log, cut)
+}
+
+// seat states the registry the cut, the declaration order and the goals one
+// framework state slice restored, so a restarted registry continues both
+// numberings where the stated stream ended. The declaration order never lands
+// below an identity the stated goals already took: a payload that understates it
+// would hand a later declaration an identity a stored goal holds.
+func (g *GoalRegistry) seat(goals []*Goal, order int, cut int64) {
+	if g == nil {
+		return
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	seated := make(map[string]*Goal, len(goals))
+	for _, goal := range goals {
+		if goal == nil || goal.ID == "" {
+			continue
+		}
+		cp := *goal
+		seated[cp.ID] = &cp
+		if seq := goalSeqOf(cp.ID); seq > order {
+			order = seq
+		}
+	}
+	g.goals = seated
+	g.seq = order
+	g.evtSeq = cut
+}
+
+// stated reports the cut, the declaration order and the goals the framework state
+// slice states for this registry.
+func (g *GoalRegistry) stated() (int64, int, []*Goal) {
+	if g == nil {
+		return 0, 0, nil
+	}
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	goals := make([]*Goal, 0, len(g.goals))
+	for _, goal := range g.goals {
+		cp := *goal
+		goals = append(goals, &cp)
+	}
+	sort.Slice(goals, func(i, j int) bool { return goals[i].ID < goals[j].ID })
+	return g.evtSeq, g.seq, goals
 }
 
 // Declare registers one goal and returns its identity. The declaration writes
@@ -295,12 +345,6 @@ func (g *GoalRegistry) eventKeyLocked() string {
 	return fmt.Sprintf("%s%019d", goalEventPrefix, g.evtSeq)
 }
 
-// seedSeqLocked continues the event numbering where the stored stream ends, so
-// a restarted registry never reuses a key. The caller holds the lock.
-func (g *GoalRegistry) seedSeqLocked() int64 {
-	return seedEventSeq(context.Background(), g.log, goalEventPrefix)
-}
-
 // writeGoalEvent writes one goal operation as the governance event its
 // declaration or resolution requires. A write that fails is dropped beside the
 // standing memory entry: the goal gate keeps working and the audit
@@ -328,19 +372,17 @@ func (g *GoalRegistry) writeGoalEvent(log GovernanceEventLog, p goalEventPayload
 	putGovernanceEvent(context.Background(), log, key, evt)
 }
 
-// rebuildFromStore replays the stored goal events back into the registry: the
-// declared goals and their resolutions in the order the operations happened,
-// with the declaration order realigned so a later declaration never reuses an
-// identity a stored goal already took. A malformed event is skipped rather
-// than failing the rebuild.
-func (g *GoalRegistry) rebuildFromStore() {
-	g.mu.RLock()
-	log := g.log
-	g.mu.RUnlock()
-	if log == nil {
-		return
+// foldTail folds the stored goal events that landed past one cut into the
+// registry — the declared goals and their resolutions in the order the
+// operations happened, with the declaration order realigned so a later
+// declaration never reuses an identity a stored goal already took — and
+// continues the stream numbering from the newest event it read. A malformed
+// event is skipped rather than failing the fold.
+func (g *GoalRegistry) foldTail(ctx context.Context, log GovernanceEventLog, cut int64) error {
+	events, newest, err := governanceEventsPast(ctx, log, goalEventPrefix, cut)
+	if err != nil {
+		return err
 	}
-	events := replayGovernanceEvents(context.Background(), log, goalEventPrefix)
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	maxSeq := g.seq
@@ -368,4 +410,8 @@ func (g *GoalRegistry) rebuildFromStore() {
 		}
 	}
 	g.seq = maxSeq
+	if newest > g.evtSeq {
+		g.evtSeq = newest
+	}
+	return nil
 }

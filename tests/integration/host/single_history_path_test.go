@@ -55,8 +55,8 @@ func TestSingleHistoryPath(t *testing.T) {
 // same roles: the budget changes what a request presents, never which history
 // the chain reads it from.
 func runSingleHistoryPath(t *testing.T) {
-	noBudget := driveSingleHistoryChain(t, "    max_tokens: 0\n")
-	budgeted := driveSingleHistoryChain(t, "    max_tokens: 32000\n")
+	noBudget := driveSingleHistoryChain(t, "    replay_window: 0\n")
+	budgeted := driveSingleHistoryChain(t, "    replay_window: 32000\n")
 
 	if len(noBudget.afterRestart) == 0 || len(budgeted.afterRestart) == 0 {
 		t.Fatalf("the probe request of an arm carries no material: no-budget=%d budgeted=%d", len(noBudget.afterRestart), len(budgeted.afterRestart))
@@ -66,8 +66,8 @@ func runSingleHistoryPath(t *testing.T) {
 	if len(restoredNoBudget) == 0 {
 		t.Fatalf("the restarted no-budget chain restored no history: the probe request carried %d message(s)", len(noBudget.afterRestart))
 	}
-	requireSameHistory(t, "the second turns of the two windows, which differ only in the budget the declaration names", noBudget.beforeRestart, budgeted.beforeRestart)
-	requireSameHistory(t, "the restarted probes of the two windows, which read the same session forward", noBudget.afterRestart, budgeted.afterRestart)
+	requireSameHistory(t, "the second turns of the two windows, which differ only in the budget the declaration names", historyWithoutMintedKeys(t, noBudget.beforeRestart), historyWithoutMintedKeys(t, budgeted.beforeRestart))
+	requireSameHistory(t, "the restarted probes of the two windows, which read the same session forward", historyWithoutMintedKeys(t, noBudget.afterRestart), historyWithoutMintedKeys(t, budgeted.afterRestart))
 	requireHistoryExtends(t, "the restarted no-budget chain, whose second turn is the head of the probe's material", noBudget.beforeRestart[:len(noBudget.beforeRestart)-1], restoredNoBudget)
 	requireHistoryExtends(t, "the restarted budgeted chain", budgeted.beforeRestart[:len(budgeted.beforeRestart)-1], restoredBudgeted)
 	requireHistoryCarries(t, restoredNoBudget, singleHistoryInputOne, singleHistoryAnswerOne)
@@ -194,11 +194,30 @@ func dialogueOnly(history []scriptedMessage) []scriptedMessage {
 // its identity.
 func isDeliverySettlementLine(content string) bool {
 	for _, state := range []string{"owed", "sent", "refused", "held", "headless retired"} {
-		if strings.HasPrefix(content, "delivery "+state+": ") {
+		if strings.HasPrefix(withoutPresentedTicket(content), "delivery "+state+": ") {
 			return true
 		}
 	}
 	return false
+}
+
+// historyWithoutMintedKeys answers one arm's history with each presented ticket
+// read for its frozen type alone: the two arms are separate runs, and a run mints
+// its own fact identities, so the key a ticket carries is no part of what the two
+// arms must agree on while the type and the material behind it are. A message
+// opening with no ticket, or with a ticket the presentation cut short, is answered
+// as it stands.
+func historyWithoutMintedKeys(t *testing.T, history []scriptedMessage) []scriptedMessage {
+	t.Helper()
+	out := make([]scriptedMessage, 0, len(history))
+	for _, message := range history {
+		if at := strings.Index(message.Content, "] "); strings.HasPrefix(message.Content, "[evt_") && at >= 0 {
+			_, typ, rest := splitPresentedTicket(t, message.Content)
+			message.Content = "[evt_" + typ + "] " + rest
+		}
+		out = append(out, message)
+	}
+	return out
 }
 
 // requireHistoryExtends requires the longer history to carry the shorter one as
@@ -220,10 +239,10 @@ func requireHistoryCarries(t *testing.T, history []scriptedMessage, input, answe
 	t.Helper()
 	var carriedInput, carriedAnswer bool
 	for _, message := range history {
-		if message.Role == string(model.RoleUser) && message.Content == input {
+		if message.Role == string(model.RoleUser) && withoutPresentedTicket(message.Content) == input {
 			carriedInput = true
 		}
-		if message.Role == string(model.RoleAssistant) && message.Content == answer {
+		if message.Role == string(model.RoleAssistant) && withoutPresentedTicket(message.Content) == answer {
 			carriedAnswer = true
 		}
 	}

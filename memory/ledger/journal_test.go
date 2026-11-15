@@ -74,7 +74,7 @@ func TestJournalFraming(t *testing.T) {
 			t.Fatalf("journal holds %d bytes and the log counted %d", len(raw), size)
 		}
 		var payloads [][]byte
-		end, err := journalReplay(mustOpen(t, filepath.Join(dir, journalFileName)), size,
+		end, err := journalReplay(mustOpen(t, filepath.Join(dir, journalFileName)), 0, size,
 			func(payload []byte, _ int64) error {
 				payloads = append(payloads, payload)
 				return nil

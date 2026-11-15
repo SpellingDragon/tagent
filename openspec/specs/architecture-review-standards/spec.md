@@ -38,7 +38,7 @@
 
 ### Requirement: 审查 SHALL 验证压缩判定与执行分层
 
-审查者 SHALL 检查压缩是否保持判定与执行各成事实：判定只提交 `compress.request`，执行只读链上 request 并提交 `compress.product`；投影按 product 恢复产物条目，MUST NOT 在恢复时重新折叠，也 MUST NOT 从内存 pending 创造链上没有 request 的 product。检查项包括：判定是否越权改写投影；执行是否只执行 request 命名的材料；折叠是否按线性段龄三带执行（新带折过程细节，中/老带整段折为历史综述）；被折原文是否仍留在事实链供召回。
+审查者 SHALL 检查压缩是否保持判定与执行各成事实：判定只提交 `compress.request`，执行只读链上 request 并提交 `compress.product`；投影按 product 恢复产物条目，MUST NOT 在恢复时重新折叠，也 MUST NOT 从内存 pending 创造链上没有 request 的 product。检查项包括：判定是否越权改写投影；执行是否只执行 request 命名的材料；折叠是否按带晋升执行（近期窗口内的段原样保留，中带段折过程细节、老带段整段折为历史综述）；被折原文是否仍留在事实链供召回。
 
 #### Scenario: 判定只提交 request
 

@@ -18,7 +18,7 @@ import (
 
 	"github.com/SpellingDragon/tagent/api/event"
 	"github.com/SpellingDragon/tagent/api/model"
-	"github.com/SpellingDragon/tagent/memory/replay"
+	"github.com/SpellingDragon/tagent/features/rl"
 )
 
 // ErrNoSummaryModel reports a band summary asked of a session whose agent holds
@@ -30,17 +30,22 @@ var ErrNoSummaryModel = errors.New("assembly: the session names no model for a b
 // oldest band: the semantic summary of the material a history summary stands for.
 // The face answers the text to record, or an error the consumer degrades on.
 type summaryGists interface {
-	// SummaryGist answers the bounded summary of one band's mechanical reads.
-	SummaryGist(ctx context.Context, session event.SessionID, material string) (string, error)
+	// SummaryGist answers the bounded summary of one band's mechanical reads,
+	// cut to the declared byte budget the plan folds under.
+	SummaryGist(ctx context.Context, session event.SessionID, material string, budget int) (string, error)
 }
 
 // bandSummaryInstruction opens the one user message a band summary request
 // carries: the anchored reads of the band follow it after a blank line, so the
 // model compresses the text after each anchor and keeps the anchors themselves.
-const bandSummaryInstruction = "Compress the task-turn reads below into one bounded summary. " +
-	"Keep every line's leading [MM-DD HH:MM|gen:...] anchor exactly as it stands and shorten only the text after it. " +
-	"Keep the decisions, the results and anything still open; drop repetition and step-by-step detail. " +
-	"Answer with the summary lines only, within 2048 bytes."
+// The byte bound is the declared budget rather than a literal, so the
+// instruction and the cut the consumer applies state the same number.
+func bandSummaryInstruction(budget int) string {
+	return "Compress the task-turn reads below into one bounded summary. " +
+		"Keep every line's leading [MM-DD HH:MM|gen:...] anchor exactly as it stands and shorten only the text after it. " +
+		"Keep the decisions, the results and anything still open; drop repetition and step-by-step detail. " +
+		fmt.Sprintf("Answer with the summary lines only, within %d bytes.", budget)
+}
 
 // bandSummaries is the gist face of one run: the model of the session's agent,
 // read beside the run so a session that named no agent answers the model of the
@@ -54,7 +59,12 @@ var _ summaryGists = bandSummaries{}
 // naming no model for the session answers ErrNoSummaryModel, and a request that
 // failed, never completed or answered no text is answered as an error, so the
 // consumer degrades to the mechanical form instead of recording an empty summary.
-func (s bandSummaries) SummaryGist(ctx context.Context, session event.SessionID, material string) (string, error) {
+//
+// The model is read the way the suppliers of the same agent read theirs: an
+// agent holding a lease asks the version in effect when the request begins, and
+// a run beside no lease asks the model the host contributed. Either face carries
+// the sampling the agent declared, filled only where the request names none.
+func (s bandSummaries) SummaryGist(ctx context.Context, session event.SessionID, material string, budget int) (string, error) {
 	if s.run == nil || session == "" || strings.TrimSpace(material) == "" {
 		return "", ErrNoSummaryModel
 	}
@@ -64,11 +74,19 @@ func (s bandSummaries) SummaryGist(ctx context.Context, session event.SessionID,
 	s.run.mu.Lock()
 	agent := s.run.agentOfSessionLocked(session)
 	native, held := s.run.natives[agent]
+	lease := s.run.leases[agent]
 	s.run.mu.Unlock()
-	if !held || native.Model == nil {
+	spec := s.run.agentSpecOf(agent)
+	var serving model.Model
+	switch {
+	case lease != nil:
+		serving = rl.NewLeaseModel(lease.lease)
+	case held && native.Model != nil:
+		serving = native.Model
+	default:
 		return "", ErrNoSummaryModel
 	}
-	stream, err := native.Model.GenerateContent(ctx, bandSummaryRequest(material))
+	stream, err := withHostModelParams(serving, spec).GenerateContent(ctx, bandSummaryRequest(material, budget))
 	if err != nil {
 		return "", fmt.Errorf("tagent: the band summary request of session %s failed: %w", session, err)
 	}
@@ -85,11 +103,11 @@ func (s bandSummaries) SummaryGist(ctx context.Context, session event.SessionID,
 
 // bandSummaryRequest states the one request a band summary is asked under: the
 // instruction beside the mechanical reads the fold already produced.
-func bandSummaryRequest(material string) *model.Request {
+func bandSummaryRequest(material string, budget int) *model.Request {
 	return &model.Request{
 		Messages: []model.Message{{
 			Role:    model.RoleUser,
-			Content: bandSummaryInstruction + "\n\n" + material,
+			Content: bandSummaryInstruction(budget) + "\n\n" + material,
 		}},
 	}
 }
@@ -110,13 +128,14 @@ func modelTextOf(outcome model.Outcome) string {
 
 // boundedSummaryGist cuts one model answer down to the bound a history summary
 // obeys, on a rune boundary so the recorded text stays valid UTF-8: the bound is
-// the summary's own, because the text a gist replaces answers it too.
-func boundedSummaryGist(gist string) string {
+// the summary's own declared budget, because the text a gist replaces answers it
+// too.
+func boundedSummaryGist(gist string, budget int) string {
 	text := strings.TrimSpace(gist)
-	if len(text) <= replay.DefaultAgeSummaryTextLimit {
+	if len(text) <= budget {
 		return text
 	}
-	cut := replay.DefaultAgeSummaryTextLimit
+	cut := budget
 	for cut > 0 && !utf8.RuneStart(text[cut]) {
 		cut--
 	}

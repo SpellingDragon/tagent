@@ -208,7 +208,7 @@ func noticeCard(entry ProjectionEntry, original string, room int) string {
 	if bound > noticeCardChars {
 		bound = noticeCardChars
 	}
-	ticket := ticketText(entry.Key)
+	ticket := TicketOf(entry.Key, entry.Type)
 	if bound <= len(ticket) {
 		return cutBytes(ticket, bound)
 	}
@@ -219,14 +219,17 @@ func noticeCard(entry ProjectionEntry, original string, room int) string {
 	if statusRoom := bound - len(ticket) - 1 - len(noticeStatusFrame); statusRoom < len(status) {
 		status = cutBytes(status, statusRoom)
 	}
-	if status == "" {
-		return ticket
-	}
 	head := original
 	if at := strings.IndexByte(head, '\n'); at >= 0 {
 		head = head[:at]
 	}
 	prefix := "[notice " + status + "] "
+	if ticket == "" {
+		return cutBytes(prefix+head, bound)
+	}
+	if status == "" {
+		return ticket
+	}
 	headRoom := bound - len(prefix) - len(ticket) - 1
 	if headRoom <= 0 || head == "" {
 		return prefix + ticket
@@ -244,7 +247,10 @@ func shown(entry ProjectionEntry, content string) ProjectionEntry {
 
 // presentWithin presents one entry at the first form from the full text down
 // that fits the room the assembly leaves: the full text, the ticket, the stored
-// summary and, for a notice, the identity card. An entry no form fits is
+// summary and, for a notice, the identity card. A fold product is its own form:
+// its text is the folded lines, so the room takes the whole lines it carries —
+// each line a complete read the model can hand back — and a room too small for
+// one line degrades the product to its summary. An entry no form fits is
 // presented by nothing at all, so a roomier assembly can still present it in
 // full; a notice card is the one form cut to the room instead of skipped, because
 // the arrival of a notice is material the model must see.
@@ -255,8 +261,14 @@ func presentWithin(entry ProjectionEntry, original string, room int) (Projection
 	if len(original) <= room {
 		return shown(entry, original), true
 	}
-	if ticket := boundedText(original, ticketPreviewBytes) + "\n" + ticketText(entry.Key); len(ticket) <= room {
-		return shown(entry, ticket), true
+	if SyntheticKey(entry.Key) {
+		if view, ok := productTextWithin(original, room); ok {
+			return shown(entry, view), true
+		}
+	} else if ticket := TicketOf(entry.Key, entry.Type); ticket != "" {
+		if view := boundedText(original, ticketPreviewBytes) + "\n" + ticket; len(view) <= room {
+			return shown(entry, view), true
+		}
 	}
 	if len(entry.Summary) <= room {
 		return shown(entry, entry.Summary), true
@@ -314,13 +326,16 @@ func (p *ReplayProjection) forgetDroppedLocked() {
 	}
 }
 
-// ticketText renders the ticket that reaches the full original by segment, so a
-// presented ticket stays usable without re-carrying the full text.
-func ticketText(key event.EventID) string {
-	if key == "" {
-		return "[ticket: full text retrievable by segment]"
+// TicketOf renders the ticket one entry reaches the model as: the fact key under
+// the recall prefix beside the frozen type of the entry, in the one form the
+// recall surface parses. A key naming no committed fact — the empty key, or the
+// synthetic key a fold minted — answers the empty ticket, because that address
+// can only answer missing: a caller states no ticket rather than promise one.
+func TicketOf(key event.EventID, typ string) string {
+	if key == "" || SyntheticKey(key) {
+		return ""
 	}
-	return "[ticket " + string(key) + ": full text retrievable by segment]"
+	return "[evt_" + string(key) + "|" + typ + "]"
 }
 
 // boundedText bounds text to n bytes on a rune boundary, marking the cut.

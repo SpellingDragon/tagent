@@ -54,7 +54,7 @@ func TestTheMicroWindowMessageIsConsumedByTheNextTurn(t *testing.T) {
 	provider.decide = fidelityGate(script.decide)
 
 	sender, gate := newGatedRecordingSender()
-	host, _ := bootFidelityHost(t, provider, sender, t.TempDir(), "    max_tokens: 0\n")
+	host, _ := bootFidelityHost(t, provider, sender, t.TempDir(), "    replay_window: 0\n")
 	keepIntegrityHost(t, script, host)
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()

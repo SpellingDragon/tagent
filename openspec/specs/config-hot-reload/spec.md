@@ -2,12 +2,12 @@
 
 ## Purpose
 
-> **复核注记（2026-11-04 逐模块核对，行号 2026-11-06 复核）**：:9 的「五个既有独立热参数」与 :37 的 `task_default_ttl` 场景已按码面就地更正为三个热参（`api/config/decode.go:160-161` 只声明 `max_tokens`/`compress_threshold`/`keep_recent_tasks`）。`task_terminal_ttl`/`task_default_ttl` 两个配置键当前未开放部署（在 `tagent.yaml:141` 以「待接线」注释登记）；底层能力 `assembly.WithTaskTerminalTTL`（`assembly/run.go:1022`）真实存在，未声明时由 `task.DefaultTerminalTTL` 兜底。本页只记录当前装配事实，不为配置面开放预设结论。
+> **复核注记（2026-11-04 逐模块核对，行号 2026-11-06 复核）**：:9 的「五个既有独立热参数」与 :37 的 `task_default_ttl` 场景已按码面就地更正为三个热参（`api/config/decode.go:160-161` 只声明 `max_tokens`/`compress_threshold`/`keep_recent_tasks`）。`task_terminal_ttl`/`task_default_ttl` 两个配置键当前未开放部署（在 `tagent.yaml:141` 以「待接线」注释登记）；底层能力 `assembly.WithTaskTerminalTTL`（`assembly/run.go:1022`）真实存在，未声明时由 `task.DefaultTerminalTTL` 兜底。本页只记录当前装配事实，不为配置面开放预设结论。**勘误（`config-surface-normalization`）**：上文「`decode.go:160-161` 只声明 `max_tokens`/`compress_threshold`/`keep_recent_tasks`」的键名与行号均已过时——原 `max_tokens` 热参（回放窗）更名为 `replay_window`，配置面另增预算门窗口 `context_window`，`max_tokens` 一名改指输出限，`api/config/decode.go` 的行号随之位移；本页正文的 `replay_window` 即该注记所称的热参，注记正文按其历史时点保留不改写。
 配置热重载的统一应用模型：全部热参数与结构候选在同一次混合事务中准备就绪才提交，结构发布不跳过数值应用、数值应用不落在无人服务的对象上，杜绝半应用代。
 ## Requirements
 ### Requirement: 配置热更统一应用模型
 
-配置热更 MUST 以逐 agent 解析默认值后的完整有效配置为基线。三个既有独立热参数（compress_threshold / max_tokens / keep_recent_tasks；`task_terminal_ttl` / `task_default_ttl` 未接线，见 `tagent.yaml:123`）与结构指纹字段在同一次混合候选中 MUST 全部准备成功才提交；结构发布不能跳过数值应用，数值应用不能仅修改常驻 entry 或不服务请求的 resident 对象。
+配置热更 MUST 以逐 agent 解析默认值后的完整有效配置为基线。三个既有独立热参数（compress_threshold / replay_window / keep_recent_tasks；`task_terminal_ttl` / `task_default_ttl` 未接线，见 `examples/wechat-bot/tagent.yaml` 的「待接线」注释）与结构指纹字段在同一次混合候选中 MUST 全部准备成功才提交；结构发布不能跳过数值应用，数值应用不能仅修改常驻 entry 或不服务请求的 resident 对象。
 
 五个热参数 SHALL 保留原热应用语义，不为修补对象错位而一律纳入结构指纹。每个 owner SHALL 通过稳定读取入口取得同一已提交应用记录中的完整热参，子调用初始化及在途安全预算／压缩边界按需读取；一次压缩内外层使用同一组参数。MUST NOT 靠对全部私有 CM 的后台逐实例 setter 广播维持一致，也不让执行壳自建权威快照。活跃调用登记只服务实际取消／完成责任，不成为热参订阅历史。
 
@@ -20,12 +20,12 @@
 
 #### Scenario: 同次修改结构字段与数值字段
 
-- **WHEN** 一次保存修改 entry 的 system_prompt 和子 agent 的 max_tokens
+- **WHEN** 一次保存修改 entry 的 system_prompt 和子 agent 的 replay_window
 - **THEN** 全部候选成功后一起生效，后续真实子调用的预算读取使用新值；失败时结构及热参源均保持旧值
 
 #### Scenario: 数值修改到达实际子调用
 
-- **WHEN** 仅修改热新增或结构发布后子 agent 的 max_tokens 或 keep_recent_tasks，而当前委派使用已发布工具绑定
+- **WHEN** 仅修改热新增或结构发布后子 agent 的 replay_window 或 keep_recent_tasks，而当前委派使用已发布工具绑定
 - **THEN** 不必重建结构 generation，新调用和存活调用下一次安全读取使用新参数；只读 resident getter 不构成通过证据
 
 #### Scenario: 字段删除回落默认
@@ -35,14 +35,14 @@
 
 #### Scenario: 默认 TTL 不改写已有显式任务寿命
 
-- **WHEN** 更新 max_tokens，同时存在使用旧值的存量请求和随后使用新值创建的请求
+- **WHEN** 更新 replay_window，同时存在使用旧值的存量请求和随后使用新值创建的请求
 - **THEN** 新任务使用有效默认值，已有显式 TTL 与寿命锚点保持；回执与真实任务行为一致
 
 ### Requirement: 压缩参数同代快照
 热更后的压缩参数 MUST 作为同一有效代快照应用：会话折叠窗口（`FoldWindow` 的 MaxTokens/CompressThreshold/KeepRecentTasks 及派生 `VolumeThresholdBytes`）MUST 在一次应用中同步换装，单次压缩的判定与执行 MUST 读取同一快照。MUST NOT 由判定侧与执行侧各自持有可独立写入的旧值。
 
 #### Scenario: 运行中缩小窗口后触发压缩
-- **WHEN** 运行中把 max_tokens 从 512k 调小到 128k 并随后触发压缩
+- **WHEN** 运行中把 replay_window 从 512k 调小到 128k 并随后触发压缩
 - **THEN** 折叠判定与执行 MUST 按新窗口执行（最终请求降到新预算内），而非沿用冷构造旧值导致 no-op
 
 ### Requirement: 热更回执报告 effective 状态

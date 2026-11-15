@@ -7,7 +7,7 @@ package config
 // documents that spell a default out and documents that omit it normalize onto
 // the same declaration. A file whose kind is omitted plays the prompt role; an
 // agent that declares a replay window but names neither fold field takes the
-// declaration defaults, so a declaration naming only max_tokens folds under the
+// declaration defaults, so a declaration naming only replay_window folds under the
 // default share of its window and keeps the default recent turns. Values
 // written in the source are never overwritten and no other field is given a
 // value the source did not name.
@@ -19,12 +19,15 @@ func applyDefaults(d *Declaration) {
 				a.Files[j].Kind = defaultFileKind
 			}
 		}
-		if a.MaxTokens > 0 {
+		if a.ReplayWindow > 0 {
 			if a.CompressThreshold <= 0 {
 				a.CompressThreshold = DefaultCompressThreshold
 			}
 			if a.KeepRecentTasks <= 0 {
 				a.KeepRecentTasks = DefaultKeepRecentTasks
+			}
+			if a.SummaryBudgetBytes <= 0 {
+				a.SummaryBudgetBytes = DefaultSummaryBudgetBytes
 			}
 		}
 	}
@@ -41,4 +44,8 @@ const (
 	// DefaultKeepRecentTasks is the number of recent task turns the age fold
 	// keeps whole, taken when a declaration names no count.
 	DefaultKeepRecentTasks = 2
+	// DefaultSummaryBudgetBytes is the byte bound a history summary obeys, taken
+	// when a declaration names no budget: the policy default the declared
+	// summary_budget_bytes replaces, never a bound the mechanism fixes on its own.
+	DefaultSummaryBudgetBytes = 2048
 )

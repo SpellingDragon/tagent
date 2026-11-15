@@ -23,16 +23,23 @@ import (
 // with: the moment and the recorder generation of the entry it stands for.
 var gistAnchorLine = regexp.MustCompile(`^\[\d{2}-\d{2} \d{2}:\d{2}\|gen:(\?|[0-9A-Za-z_.-]+)\] `)
 
+// bandSummaryRequestOpening is the stable opening of every band summary request
+// instruction: the byte bound it states varies with the declared budget, so the
+// scripted providers recognize a summary request by its opening.
+const bandSummaryRequestOpening = "Compress the task-turn reads below"
+
 // fakeSummaryGist answers the gist of one band from a scripted function and
-// records the material it was asked about.
+// records the material and the budget it was asked about.
 type fakeSummaryGist struct {
 	answer   func(material string) (string, error)
 	material []string
+	budgets  []int
 }
 
 // SummaryGist answers the scripted gist of one band.
-func (f *fakeSummaryGist) SummaryGist(_ context.Context, _ event.SessionID, material string) (string, error) {
+func (f *fakeSummaryGist) SummaryGist(_ context.Context, _ event.SessionID, material string, budget int) (string, error) {
 	f.material = append(f.material, material)
+	f.budgets = append(f.budgets, budget)
 	return f.answer(material)
 }
 
@@ -69,7 +76,7 @@ func TestBandSummaryGistReadsTheSessionModel(t *testing.T) {
 	run.mu.Unlock()
 
 	face := bandSummaries{run: run}
-	gist, err := face.SummaryGist(ctx, "session-gist", "[11-06 12:00|gen:?] external_input: ask")
+	gist, err := face.SummaryGist(ctx, "session-gist", "[11-06 12:00|gen:?] external_input: ask", replay.DefaultAgeSummaryTextLimit)
 	if err != nil {
 		t.Fatalf("SummaryGist: %v", err)
 	}
@@ -80,7 +87,7 @@ func TestBandSummaryGistReadsTheSessionModel(t *testing.T) {
 		t.Fatalf("the model saw %d request(s), want the one band summary request", len(provider.requests))
 	}
 	asked := provider.requests[0].Messages[len(provider.requests[0].Messages)-1].Content
-	if !strings.Contains(asked, bandSummaryInstruction) || !strings.Contains(asked, "[11-06 12:00|gen:?] external_input: ask") {
+	if !strings.Contains(asked, bandSummaryInstruction(replay.DefaultAgeSummaryTextLimit)) || !strings.Contains(asked, "[11-06 12:00|gen:?] external_input: ask") {
 		t.Fatalf("request = %q, want the instruction beside the mechanical reads of the band", asked)
 	}
 }
@@ -90,10 +97,10 @@ func TestBandSummaryGistReadsTheSessionModel(t *testing.T) {
 // - a face beside no run answers the same, so the consumer keeps the mechanical form
 func TestBandSummaryGistReportsAMissingModel(t *testing.T) {
 	ctx := context.Background()
-	if _, err := (bandSummaries{run: &Run{}}).SummaryGist(ctx, "session-bare", "material"); !errors.Is(err, ErrNoSummaryModel) {
+	if _, err := (bandSummaries{run: &Run{}}).SummaryGist(ctx, "session-bare", "material", replay.DefaultAgeSummaryTextLimit); !errors.Is(err, ErrNoSummaryModel) {
 		t.Fatalf("err = %v, want ErrNoSummaryModel beside a run that names no model", err)
 	}
-	if _, err := (bandSummaries{}).SummaryGist(ctx, "session-bare", "material"); !errors.Is(err, ErrNoSummaryModel) {
+	if _, err := (bandSummaries{}).SummaryGist(ctx, "session-bare", "material", replay.DefaultAgeSummaryTextLimit); !errors.Is(err, ErrNoSummaryModel) {
 		t.Fatalf("err = %v, want ErrNoSummaryModel beside no run at all", err)
 	}
 }
@@ -110,7 +117,7 @@ func TestCompressionSummaryRecordsTheGist(t *testing.T) {
 		},
 	})
 	product := mechanicalSummary(t)
-	got := consumer.summarizeProduct(ctx, "session-gist", product)
+	got := consumer.summarizeProduct(ctx, "session-gist", product, replay.DefaultAgeSummaryTextLimit)
 	if len(got.Entry.Content) > replay.DefaultAgeSummaryTextLimit {
 		t.Fatalf("summary carries %d bytes, want at most %d: a gist answers the bound the mechanical form obeys", len(got.Entry.Content), replay.DefaultAgeSummaryTextLimit)
 	}
@@ -124,7 +131,7 @@ func TestCompressionSummaryRecordsTheGist(t *testing.T) {
 	segment := replay.FoldProduct{Entry: replay.ProjectionEntry{
 		Key: "-seg-mechanical", Type: replay.ProjectionTypeSegmentFold, Content: "[11-06 12:00|gen:?] thinking_plan: plan",
 	}}
-	if kept := consumer.summarizeProduct(ctx, "session-gist", segment); kept.Entry.Content != segment.Entry.Content {
+	if kept := consumer.summarizeProduct(ctx, "session-gist", segment, replay.DefaultAgeSummaryTextLimit); kept.Entry.Content != segment.Entry.Content {
 		t.Fatalf("segment fold = %q, want its own text kept: only the history summary is the model's", kept.Entry.Content)
 	}
 }
@@ -145,7 +152,7 @@ func TestCompressionSummaryKeepsTheMechanicalForm(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			consumer := NewCompressionConsumer(nil).withSummaryGist(&fakeSummaryGist{answer: answer})
 			product := mechanicalSummary(t)
-			got := consumer.summarizeProduct(ctx, "session-gist", product)
+			got := consumer.summarizeProduct(ctx, "session-gist", product, replay.DefaultAgeSummaryTextLimit)
 			if got.Entry.Content != product.Entry.Content {
 				t.Fatalf("summary = %q, want the mechanical text %q kept", got.Entry.Content, product.Entry.Content)
 			}
@@ -156,7 +163,7 @@ func TestCompressionSummaryKeepsTheMechanicalForm(t *testing.T) {
 			}
 		})
 	}
-	if consumer := NewCompressionConsumer(nil); consumer.summarizeProduct(context.Background(), "session-gist", mechanicalSummary(t)).Entry.Content != mechanicalSummary(t).Entry.Content {
+	if consumer := NewCompressionConsumer(nil); consumer.summarizeProduct(context.Background(), "session-gist", mechanicalSummary(t), replay.DefaultAgeSummaryTextLimit).Entry.Content != mechanicalSummary(t).Entry.Content {
 		t.Fatal("a consumer beside no gist face reworded the summary, want the mechanical form")
 	}
 }
@@ -210,7 +217,7 @@ const gistModelAnswer = "[11-06 13:00|gen:?] the band settled on one decision"
 func gistAnsweringModel() *snapshotTestModel {
 	return &snapshotTestModel{answer: func(req *model.Request) *model.Response {
 		content := factWindowAnswer
-		if last := req.Messages[len(req.Messages)-1].Content; strings.HasPrefix(last, bandSummaryInstruction) {
+		if last := req.Messages[len(req.Messages)-1].Content; strings.Contains(last, bandSummaryRequestOpening) {
 			content = gistModelAnswer
 		}
 		return &model.Response{Choices: []model.Choice{{Message: model.Message{
@@ -225,7 +232,7 @@ func askedBandSummaries(provider *snapshotTestModel) []model.Request {
 	defer provider.mu.Unlock()
 	asked := make([]model.Request, 0, len(provider.requests))
 	for _, req := range provider.requests {
-		if strings.Contains(req.Messages[len(req.Messages)-1].Content, bandSummaryInstruction) {
+		if strings.Contains(req.Messages[len(req.Messages)-1].Content, bandSummaryRequestOpening) {
 			asked = append(asked, req)
 		}
 	}

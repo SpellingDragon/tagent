@@ -120,7 +120,7 @@ func TestAttentionClearsNoticeOnWorkEnd(t *testing.T) {
 	writeHostDocumentFile(t, configPath, scriptedHostDocumentWithAgentSections(root, provider.endpoint(), "model-entry",
 		"  user:\n"+
 			"    model: model-entry\n"+
-			"    max_tokens: 32000\n"+
+			"    replay_window: 32000\n"+
 			"    tools:\n"+
 			"      - { kind: agent, agent: worker }\n"+
 			"  worker:\n"+
@@ -275,7 +275,7 @@ func bootUnconsumedNoticeScene(t *testing.T) (host *assembly.Host, addr event.Ad
 	writeHostDocumentFile(t, configPath, scriptedHostDocumentWithAgentSections(root, provider.endpoint(), "model-entry",
 		"  user:\n"+
 			"    model: model-entry\n"+
-			"    max_tokens: 32000\n"+
+			"    replay_window: 32000\n"+
 			"    tools:\n"+
 			"      - { kind: agent, agent: worker }\n"+
 			"  worker:\n"+

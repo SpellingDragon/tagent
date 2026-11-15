@@ -1,0 +1,5 @@
+# 04 远端同步 · 孙任务
+
+> W2 并行（依赖 01 键名落地）。verify 三要素随任务行冻结。
+
+- [x] 4.1 `tagent.yaml`/`tagent.rl.yaml`：`max_tokens:128000`→`replay_window:128000` + **必显式** `context_window:128000`（乙门唯一来源，漏写则微信助手失预算保护）；按需声明输出限 `max_tokens`；注释如实改写 —— 验证：正锚 `go test ./assembly -run 'TestProviderWindowGateSemantics|TestSymptomAnchorUnifiedRequestBudget' -count=1`（门开 context_window>0）；负锚 漏写 context_window→门闭整包发送（S4：`TestSymptomAnchorReplayWindowAloneOpensNoGate`）、误把 max_tokens 当回放窗写大值→输出限挤占输入预算→拒发（`TestBudgetReservesOutputAllowance`）；消费者锚 远端真 yaml 装配 `go -C examples/wechat-bot test -tags smoke -run TestLocalSmokeSymptomBootDeployed -count=1`（2×回放窗解耦保留）。**勘误（实施期 R29 锚精化，非缩水）**：原正锚点名 `TestHostDocument` 不存在（`-run` 零匹配空转 exit 0），改真 assembly 门锚＋smoke boot 消费者锚；原负锚「max_tokens 作回放窗→unknown field 拒启动」为伪——max_tokens 已归位为合法输出限键，声明它不触发 decode 拒而是挤占预算，故改真实预算语义错误路径。

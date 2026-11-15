@@ -204,7 +204,7 @@ func smokeSkillDocument(c *smokeConfig, skillRoot string) string {
 	fmt.Fprintf(&b, "      - { kind: tool, id: %s }\n", knowledge.SkillSearchToolName)
 	fmt.Fprintf(&b, "      - { kind: tool, id: %s }\n", knowledge.SkillLoadToolName)
 
-	b.WriteString("    max_tokens: 2000\n")
+	b.WriteString("    replay_window: 2000\n")
 	b.WriteString("    compress_threshold: 0.3\n")
 	b.WriteString("    keep_recent_tasks: 1\n")
 	b.WriteString("    max_tool_iterations: 3\n")

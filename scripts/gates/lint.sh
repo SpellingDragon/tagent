@@ -10,7 +10,8 @@
 #   * the comment policy measured over product packages at zero findings
 #   * the OpenSpec strict spec-hygiene gate when the CLI is installed
 #   * the ADR 0006 three-hook guards (schema allowlist, assembly symbols,
-#     durable truth registry, main-spec hygiene), each with its negative selftest
+#     durable truth registry, main-spec hygiene, plugin mounting), each with its
+#     negative selftest
 #
 # This file holds the rules; scripts/lint.sh is the stable forwarding entry point
 # every caller uses, so CI, the docs and a batch author run the same command.
@@ -111,7 +112,8 @@ run bash scripts/gates/test_race_check.sh
 
 # ADR 0006 三挂点守护（每条规则先跑正反样例自测，再判现树）：
 # R1 agent 声明的 schema 节白名单；R2 装配根的专属路径符号；
-# R3 持久真相登记；R4 主 spec requirement 文本的机制细节。
+# R3 持久真相登记；R4 主 spec requirement 文本的机制细节；
+# R5 插件挂载动态性（装配根零具体特性构造＋plugins: 声明活体）。
 # 规则修改必须同时更新自测；自测只打印 PASS 不拒绝负例时这里先红。
 echo "lint: three-hook guards (ADR 0006)"
 run python3 scripts/gates/test_check_schema_allowlist.py
@@ -122,6 +124,8 @@ run python3 scripts/gates/test_check_durable_truth_registry.py
 run python3 scripts/gates/check_durable_truth_registry.py
 run python3 scripts/gates/test_check_spec_hygiene.py
 run python3 scripts/gates/check_spec_hygiene.py
+run python3 scripts/gates/test_check_plugin_mounting.py
+run python3 scripts/gates/check_plugin_mounting.py
 # 词汇对齐（docs/GLOSSARY）：纯短语禁，无基线/豁免，命中即红。carrier 全退役子串禁
 # （carries/carried/carrying 不含子串故放行）；压缩晋升禁 generational／fold generation；
 # api/plugin 禁 Product；退役词禁；注释续行归并匹配跨行短语，单行命中只计一次。

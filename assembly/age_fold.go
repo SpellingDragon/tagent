@@ -20,7 +20,7 @@ const AgeFoldPluginName = "age-fold"
 // FoldWindow is the replay window one session chain registered: the model window
 // the chain is replayed into, in tokens, and the fold settings the declaration
 // gave that window. The unset settings read their declaration defaults when the
-// window is normalized, so a declaration naming only max_tokens folds under the
+// window is normalized, so a declaration naming only replay_window folds under the
 // default share of its own window.
 type FoldWindow struct {
 	// MaxTokens is the model window the chain is replayed into, in tokens.
@@ -30,6 +30,10 @@ type FoldWindow struct {
 	CompressThreshold float64
 	// KeepRecentTasks is the number of recent task turns the age fold keeps whole.
 	KeepRecentTasks int
+	// SummaryBudgetBytes is the byte bound one history summary obeys: the
+	// declared summary budget of the agent, read by both the mechanical fold and
+	// the model gist the fold asks for, so the two sides bound the same text.
+	SummaryBudgetBytes int
 }
 
 // VolumeThresholdBytes reports the rendered volume a projection of this window
@@ -172,7 +176,11 @@ func (p *AgeFoldPlugin) ObserveCommit(ctx context.Context, id event.EventID) err
 	if threshold <= 0 {
 		return nil
 	}
-	plan := replay.AgeFoldPlan{KeepRecent: window.KeepRecentTasks, VolumeThreshold: threshold}
+	plan := replay.AgeFoldPlan{
+		KeepRecent:         window.KeepRecentTasks,
+		VolumeThreshold:    threshold,
+		SummaryBudgetBytes: window.SummaryBudgetBytes,
+	}
 	gated, err := projection.PlanByAge(ctx, plan)
 	if err != nil {
 		return err

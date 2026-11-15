@@ -533,7 +533,7 @@ func newFormalMeditationRig(t *testing.T, medAnswer func(*model.Request) *model.
 	decl := &config.Declaration{
 		Entry: "user-agent",
 		Agents: []config.AgentSpec{
-			{ID: "user-agent", Model: "model-user", MaxTokens: 100},
+			{ID: "user-agent", Model: "model-user", ReplayWindow: 100},
 			{ID: "meditator", Model: "model-meditator"},
 		},
 	}

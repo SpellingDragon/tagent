@@ -233,33 +233,35 @@ func TestReceiptAndBackgroundStaySeparate(t *testing.T) {
 	shared := awaitSepFlush(t, provider)
 	latest := ""
 	for _, msg := range shared {
-		if msg.Role == model.RoleUser && (msg.Content == "turn-1" || msg.Content == "turn-2" || msg.Content == "turn-3") {
-			latest = msg.Content
+		if material := withoutPresentedTicket(msg.Content); msg.Role == model.RoleUser &&
+			(material == "turn-1" || material == "turn-2" || material == "turn-3") {
+			latest = material
 		}
 	}
 	if latest != "turn-3" {
 		t.Fatalf("latest user input of the flush view = %q, want its own input beside no neighbour input after it", latest)
 	}
 	for _, msg := range shared {
-		if msg.Content == "ok" {
+		if withoutPresentedTicket(msg.Content) == "ok" {
 			t.Fatalf("restored message = %+v, want no admission receipt restored on the projection face: the receipt is the in-flight confirmation requests[1] holds, not a committed fact", msg)
 		}
 	}
 	counts := map[string]int{}
 	answers := 0
 	for _, msg := range shared {
+		material := withoutPresentedTicket(msg.Content)
 		switch {
-		case msg.Role == model.RoleUser && msg.Content == "turn-1":
+		case msg.Role == model.RoleUser && material == "turn-1":
 			counts["first input"]++
-		case msg.Role == model.RoleUser && msg.Content == "turn-2":
+		case msg.Role == model.RoleUser && material == "turn-2":
 			counts["second input"]++
-		case msg.Role == model.RoleUser && msg.Content == "turn-3":
+		case msg.Role == model.RoleUser && material == "turn-3":
 			counts["third input"]++
 		case msg.Role == model.RoleAssistant && len(msg.ToolCalls) == 2:
 			counts["tool call turn"]++
-		case msg.Role == model.RoleTool && msg.ToolID == "call-a" && msg.ToolName == "slow-tool" && msg.Content == "bg-slow":
+		case msg.Role == model.RoleTool && msg.ToolID == "call-a" && msg.ToolName == "slow-tool" && material == "bg-slow":
 			counts["slow settled body"]++
-		case msg.Role == model.RoleTool && msg.ToolID == "call-b" && msg.ToolName == "fast-tool" && msg.Content == "bg-fast":
+		case msg.Role == model.RoleTool && msg.ToolID == "call-b" && msg.ToolName == "fast-tool" && material == "bg-fast":
 			counts["fast settled body"]++
 		case msg.Role == model.RoleAssistant:
 			answers++
@@ -346,7 +348,7 @@ func awaitSepFlush(t *testing.T, provider *convModel) []model.Message {
 // the history reads one authority for the material it pins.
 func sepCarries(messages []model.Message, content string) bool {
 	for _, message := range messages {
-		if message.Content == content {
+		if withoutPresentedTicket(message.Content) == content {
 			return true
 		}
 	}
@@ -361,9 +363,9 @@ func latestSepInput(messages []model.Message) string {
 		if messages[at].Role != model.RoleUser {
 			continue
 		}
-		switch messages[at].Content {
+		switch material := withoutPresentedTicket(messages[at].Content); material {
 		case "turn-2", "turn-3":
-			return messages[at].Content
+			return material
 		}
 	}
 	return ""

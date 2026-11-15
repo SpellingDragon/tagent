@@ -129,14 +129,16 @@ type ApprovalChannel interface {
 	Deliver(ctx context.Context, req ApprovalRequest) error
 }
 
-// DeliveryGap is one visible channel failure: an approval request the channels
-// could not be handed. The gap is recorded and exposed instead of being
+// DeliveryGap is one visible failure of the book that is not a ruling: an
+// approval request the channels could not be handed, or a boot that could not read
+// the row of request files. The gap is recorded and exposed instead of being
 // swallowed, and the gate keeps waiting rather than treating the failure as an
 // approval or as a crash.
 type DeliveryGap struct {
-	// Request is the approval identity the failed delivery was for.
+	// Request is the approval identity the failed delivery was for; it is empty
+	// beside a failure that belongs to the book rather than to one request.
 	Request string
-	// Err is the delivery failure the channel reported.
+	// Err is the failure the channel or the boot read reported.
 	Err error
 }
 

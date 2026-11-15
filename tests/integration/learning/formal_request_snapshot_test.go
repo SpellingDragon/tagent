@@ -93,10 +93,10 @@ func TestFormalRequestSnapshotHasNoSecrets(t *testing.T) {
 		if first[1].Role != model.RoleSystem || !strings.Contains(first[1].Content, "greet body v1") {
 			t.Fatalf("snapshot message 1 = %+v, want the fixed skill body", first[1])
 		}
-		if first[2].Role != snapshotRoleOf(t, event.TypeExternalInput) || first[2].Content != "投影原文一" {
+		if first[2].Role != snapshotRoleOf(t, event.TypeExternalInput) || withoutPresentedTicket(first[2].Content) != "投影原文一" {
 			t.Fatalf("snapshot message 2 = %+v, want the first projected entry under the frozen role table", first[2])
 		}
-		if first[3].Role != snapshotRoleOf(t, event.TypeAgentOutput) || first[3].Content != "投影原文二" {
+		if first[3].Role != snapshotRoleOf(t, event.TypeAgentOutput) || withoutPresentedTicket(first[3].Content) != "投影原文二" {
 			t.Fatalf("snapshot message 3 = %+v, want the second projected entry under the frozen role table", first[3])
 		}
 		if first[4].Role != model.RoleUser || first[4].Content != "first" {
@@ -106,16 +106,16 @@ func TestFormalRequestSnapshotHasNoSecrets(t *testing.T) {
 		if len(following) != 7 {
 			t.Fatalf("second request snapshot carries %d messages, want seven: the boundary material plus the whole transcript", len(following))
 		}
-		if following[2].Content != "投影原文一" || following[3].Content != "投影原文二" {
+		if withoutPresentedTicket(following[2].Content) != "投影原文一" || withoutPresentedTicket(following[3].Content) != "投影原文二" {
 			t.Fatalf("snapshot messages 2-3 = (%q, %q), want both projected entries again", following[2].Content, following[3].Content)
 		}
-		if following[4].Role != model.RoleUser || following[4].Content != "first" {
+		if following[4].Role != model.RoleUser || withoutPresentedTicket(following[4].Content) != "first" {
 			t.Fatalf("snapshot message 4 = %+v, want the settled input of the previous drive", following[4])
 		}
-		if following[5].Role != model.RoleAssistant || following[5].Content != "settled" {
+		if following[5].Role != model.RoleAssistant || withoutPresentedTicket(following[5].Content) != "settled" {
 			t.Fatalf("snapshot message 5 = %+v, want the settled answer of the previous drive", following[5])
 		}
-		if following[6].Role != model.RoleUser || following[6].Content != "second" {
+		if following[6].Role != model.RoleUser || withoutPresentedTicket(following[6].Content) != "second" {
 			t.Fatalf("snapshot message 6 = %+v, want the input of this drive", following[6])
 		}
 		view := snaps[0].Snapshot
@@ -296,6 +296,22 @@ func invokeSnapshotWith(t *testing.T, ctx context.Context, run *assembly.Run, in
 		t.Fatalf("invoke the formal runtime: %v", err)
 	}
 	return turn
+}
+
+// withoutPresentedTicket answers the material one snapshot message carries with
+// the ticket that addresses it peeled off: this check reads which material sat in
+// which slot of the request the model saw, and the address a projected entry
+// opens with is not that material. A message opening with no ticket is answered
+// as it stands.
+func withoutPresentedTicket(content string) string {
+	if !strings.HasPrefix(content, "[evt_") {
+		return content
+	}
+	at := strings.Index(content, "] ")
+	if at < 0 {
+		return content
+	}
+	return content[at+2:]
 }
 
 // snapshotRoleOf maps one projected event type onto the frozen message role of the request boundary.

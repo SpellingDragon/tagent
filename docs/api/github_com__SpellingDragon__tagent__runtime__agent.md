@@ -98,13 +98,6 @@ const (
     meter; the total is their sum, so a material the meter cannot measure still
     reports its face instead of folding into another.
 
-const DefaultOutputReserveDivisor = 4
-    DefaultOutputReserveDivisor is the fixed ratio of the provider context
-    window a declaration that names no output reserve leaves for the model's
-    answer. The input budget is the window minus that share; the constant
-    is frozen here because a silent change of the default would move every
-    undeclared budget.
-
 const FinalRoundPlannerName = "final-round-planner"
     FinalRoundPlannerName is the stable name the final round planner answers.
 
@@ -257,13 +250,6 @@ func NoticeFactPrefix(invocationID event.InvocationID) event.EventID
     carries: the range marker of the fact family, spelled as hex so the identity
     stays a canonical event key. A read face selects the notifications of that
     range alone through it.
-
-func OutputReserveOf(providerWindow int) int
-    OutputReserveOf reports the default output allowance of one provider context
-    window: the fixed share of the window the declaration leaves for the model's
-    answer. A window of zero declares no budget and both sides report zero;
-    a window that divides below one token still reserves the one token it can,
-    so the input budget never silently swallows the whole window.
 
 func PendingInputs(facts []event.Event) []event.Event
     PendingInputs reports the driving facts one session chain holds with no

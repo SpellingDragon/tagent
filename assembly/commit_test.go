@@ -25,13 +25,13 @@ import (
 // livenessDoc is one source document of the configuration liveness fixture:
 // two agents, one provider, an optional durable storage root.
 type livenessDoc struct {
-	Root          string
-	UserProvider  string
-	UserModel     string
-	WorkerModel   string
-	UserMaxTokens int
-	WorkerMax     int
-	Storage       bool
+	Root             string
+	UserProvider     string
+	UserModel        string
+	WorkerModel      string
+	UserReplayWindow int
+	WorkerMax        int
+	Storage          bool
 }
 
 // yaml renders the source document.
@@ -40,7 +40,7 @@ func (d livenessDoc) yaml() string {
 	if d.Storage {
 		storage = "storage: { type: localfile, root: " + filepath.Join(d.Root, "storage") + " }\n"
 	}
-	maxTokens := d.UserMaxTokens
+	maxTokens := d.UserReplayWindow
 	if maxTokens == 0 {
 		maxTokens = 256
 	}
@@ -63,10 +63,10 @@ agents:
   user:
     provider: %s
     model: %s
-    max_tokens: %d
+    replay_window: %d
   worker:
     model: %s
-    max_tokens: %d
+    replay_window: %d
 %s`, d.UserModel, d.Root, userProvider, d.UserModel, maxTokens, d.WorkerModel, workerMax, storage)
 }
 
@@ -203,7 +203,7 @@ func TestPublishConsumesDeclarationFact(t *testing.T) {
 	host := bootLiveness(t, path)
 	run := host.Run()
 
-	doc.UserMaxTokens = 512
+	doc.UserReplayWindow = 512
 	if err := os.WriteFile(path, []byte(doc.yaml()), 0o644); err != nil {
 		t.Fatalf("rewrite the configuration source: %v", err)
 	}
@@ -269,7 +269,7 @@ func TestRevertedReloadAnswersTheChainDeclaration(t *testing.T) {
 	}
 	previous := bootDecl.FactKey()
 	for i, maxTokens := range []int{512, 256, 512, 256} {
-		doc.UserMaxTokens = maxTokens
+		doc.UserReplayWindow = maxTokens
 		if err := os.WriteFile(path, []byte(doc.yaml()), 0o644); err != nil {
 			t.Fatalf("rewrite the configuration source: %v", err)
 		}
@@ -327,14 +327,14 @@ func TestRevertedDeclarationSurvivesRestart(t *testing.T) {
 	if err != nil || !held {
 		t.Fatalf("read the boot declaration: held=%v err=%v", held, err)
 	}
-	doc.UserMaxTokens = 512
+	doc.UserReplayWindow = 512
 	if err := os.WriteFile(path, []byte(doc.yaml()), 0o644); err != nil {
 		t.Fatalf("rewrite the configuration source: %v", err)
 	}
 	if report, err := host.Reload(ctx); err != nil || !report.Publication.Published {
 		t.Fatalf("reload the moved document: publication=%+v err=%v", report.Publication, err)
 	}
-	doc.UserMaxTokens = 256
+	doc.UserReplayWindow = 256
 	if err := os.WriteFile(path, []byte(doc.yaml()), 0o644); err != nil {
 		t.Fatalf("revert the configuration source: %v", err)
 	}
@@ -446,7 +446,7 @@ func TestLoadFailureFactAuditable(t *testing.T) {
 		t.Fatalf("generation in effect after a load failure = %d, want %d", got, before.Generation)
 	}
 
-	doc.UserMaxTokens = 640
+	doc.UserReplayWindow = 640
 	if err := os.WriteFile(path, []byte(doc.yaml()), 0o644); err != nil {
 		t.Fatalf("repair the configuration source: %v", err)
 	}
@@ -516,7 +516,7 @@ func TestRestartReconcilesFileWithChain(t *testing.T) {
 	if generation := first.Run().publisher.Current().Generation; generation != 1 {
 		t.Fatalf("first boot generation = %d, want 1", generation)
 	}
-	doc.UserMaxTokens = 512
+	doc.UserReplayWindow = 512
 	if err := os.WriteFile(path, []byte(doc.yaml()), 0o644); err != nil {
 		t.Fatalf("rewrite the configuration source: %v", err)
 	}
@@ -542,7 +542,7 @@ func TestRestartReconcilesFileWithChain(t *testing.T) {
 		t.Fatalf("publication records after a consistent restart = %d, want 2", recordsBefore)
 	}
 
-	doc.UserMaxTokens = 768
+	doc.UserReplayWindow = 768
 	if err := os.WriteFile(path, []byte(doc.yaml()), 0o644); err != nil {
 		t.Fatalf("rewrite the newer configuration source: %v", err)
 	}
@@ -559,7 +559,7 @@ func TestRestartReconcilesFileWithChain(t *testing.T) {
 	}
 	closeLiveness(t, third)
 
-	doc.UserMaxTokens = 512
+	doc.UserReplayWindow = 512
 	if err := os.WriteFile(path, []byte(doc.yaml()), 0o644); err != nil {
 		t.Fatalf("roll the configuration source back: %v", err)
 	}

@@ -43,6 +43,21 @@ func sessionOf(messages []model.Message) (int, int, bool) {
 	return session, round, session >= 0
 }
 
+// withoutPresentedTicket answers the material one presented message carries with
+// the ticket that addresses it peeled off: these checks read the material a
+// request carries, and the address a projected entry opens with is not material.
+// A message opening with no ticket is answered as it stands.
+func withoutPresentedTicket(content string) string {
+	if !strings.HasPrefix(content, "[evt_") {
+		return content
+	}
+	at := strings.Index(content, "] ")
+	if at < 0 {
+		return content
+	}
+	return content[at+2:]
+}
+
 // parseSessionInput reads one rendered session input back.
 func parseSessionInput(content string) (int, int, bool) {
 	match := sessionInputPattern.FindStringSubmatch(content)
@@ -298,10 +313,11 @@ func TestCrossSessionContentIsRefused(t *testing.T) {
 	assembled := requests[1].Messages
 	alphaAt, inputAt := -1, -1
 	for at, msg := range assembled {
-		if msg.Content == alphaContent {
+		content := withoutPresentedTicket(msg.Content)
+		if content == alphaContent {
 			alphaAt = at
 		}
-		if msg.Content == "alpha asks its own question" {
+		if content == "alpha asks its own question" {
 			inputAt = at
 		}
 	}
@@ -319,7 +335,7 @@ func sessionInputsOf(messages []model.Message) []string {
 			continue
 		}
 		if _, _, ok := parseSessionInput(msg.Content); ok {
-			inputs = append(inputs, msg.Content)
+			inputs = append(inputs, withoutPresentedTicket(msg.Content))
 		}
 	}
 	return inputs

@@ -35,7 +35,9 @@ func TestGovernanceRecovery(t *testing.T) {
 		logFace := recOpenLog(t, "")
 		goals := governance.NewGoalRegistry()
 		ledger := governance.NewDenialLedger()
-		ledger.BindStore(logFace)
+		if err := ledger.Bind(context.Background(), logFace); err != nil {
+			t.Fatalf("bind the ledger to the governance store: %v", err)
+		}
 		rig := newGovRig(t, govConfig{mode: governance.EnforcementStrict, grade: plugin.RiskHigh, tool: "shell_exec", rules: []governance.RiskRule{recDeployRule()}, goals: goals, ledger: ledger, goalRequired: []string{"model"}})
 
 		if _, err := rig.call("call-goal-missing", "shell_exec", `{"cmd":"deploy"}`); !errors.Is(err, task.ErrDenied) {
@@ -203,9 +205,13 @@ func TestGovernanceRecovery(t *testing.T) {
 		root := t.TempDir()
 		firstLog := recOpenLog(t, root)
 		goals1 := governance.NewGoalRegistry()
-		goals1.BindStore(firstLog)
+		if err := goals1.Bind(context.Background(), firstLog); err != nil {
+			t.Fatalf("bind the registry to the first store: %v", err)
+		}
 		ledger1 := governance.NewDenialLedger()
-		ledger1.BindStore(firstLog)
+		if err := ledger1.Bind(context.Background(), firstLog); err != nil {
+			t.Fatalf("bind the ledger to the first store: %v", err)
+		}
 
 		g1 := goals1.Declare("ship the release", "entry", 0)
 		g2 := goals1.Declare("watch the rollout", "entry", 0)
@@ -249,9 +255,13 @@ func TestGovernanceRecovery(t *testing.T) {
 
 		secondLog := recOpenLog(t, root)
 		goals2 := governance.NewGoalRegistry()
-		goals2.BindStore(secondLog)
+		if err := goals2.Bind(context.Background(), secondLog); err != nil {
+			t.Fatalf("bind the registry to the second store: %v", err)
+		}
 		ledger2 := governance.NewDenialLedger()
-		ledger2.BindStore(secondLog)
+		if err := ledger2.Bind(context.Background(), secondLog); err != nil {
+			t.Fatalf("bind the ledger to the second store: %v", err)
+		}
 
 		if got := recGoal(t, goals2, g1).Status; got != governance.GoalAchieved {
 			t.Fatalf("replayed goal %s status = %q, want achieved replayed in operation order", g1, got)
@@ -277,9 +287,13 @@ func TestGovernanceRecovery(t *testing.T) {
 	t.Run("concurrent declarations and records keep every counter exact", func(t *testing.T) {
 		logFace := recOpenLog(t, "")
 		goals := governance.NewGoalRegistry()
-		goals.BindStore(logFace)
+		if err := goals.Bind(context.Background(), logFace); err != nil {
+			t.Fatalf("bind the registry to the governance store: %v", err)
+		}
 		ledger := governance.NewDenialLedger()
-		ledger.BindStore(logFace)
+		if err := ledger.Bind(context.Background(), logFace); err != nil {
+			t.Fatalf("bind the ledger to the governance store: %v", err)
+		}
 		budget := governance.NewBudgetManager(governance.BudgetConfig{}, "")
 
 		const workers, perWorker = 8, 10
@@ -336,9 +350,13 @@ func TestGovernanceRecovery(t *testing.T) {
 	t.Run("a failing store and a bad snapshot degrade instead of failing the gate", func(t *testing.T) {
 		failing := recFailingLog{}
 		goals := governance.NewGoalRegistry()
-		goals.BindStore(failing)
+		if err := goals.Bind(context.Background(), failing); err == nil {
+			t.Fatalf("a store that cannot be read must report the unread tail to the binder")
+		}
 		ledger := governance.NewDenialLedger()
-		ledger.BindStore(failing)
+		if err := ledger.Bind(context.Background(), failing); err == nil {
+			t.Fatalf("a store that cannot be read must report the unread tail to the binder")
+		}
 		if id := goals.Declare("keep going", "entry", 0); id == "" {
 			t.Fatalf("a failing store must not swallow the declaration")
 		}
@@ -347,9 +365,13 @@ func TestGovernanceRecovery(t *testing.T) {
 			t.Fatalf("a failing store must never block the operation: goals=%d records=%d", len(goals.List()), ledger.Count())
 		}
 		memGoals := governance.NewGoalRegistry()
-		memGoals.BindStore(nil)
+		if err := memGoals.Bind(context.Background(), nil); err != nil {
+			t.Fatalf("a registry bound to no store must report nothing: %v", err)
+		}
 		memLedger := governance.NewDenialLedger()
-		memLedger.BindStore(nil)
+		if err := memLedger.Bind(context.Background(), nil); err != nil {
+			t.Fatalf("a ledger bound to no store must report nothing: %v", err)
+		}
 		if memGoals.Declare("memory only", "entry", 0) == "" {
 			t.Fatalf("a registry without a store must degrade to memory state")
 		}

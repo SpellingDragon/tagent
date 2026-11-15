@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -50,6 +51,14 @@ type kvOriginalStore struct {
 	windows map[string]time.Duration
 	byKey   map[event.EventID]*originalEntry
 	loaded  bool
+	// coldRoot is the directory of the cold journal the originals of settled facts
+	// were relocated into, empty for a store that relocates none. The cold view is
+	// opened on the first read of an original the hot journal does not hold, never
+	// at boot: a boot that opened it would read the settled history it exists to
+	// keep out of the boot.
+	coldRoot string
+	// cold is the opened cold view, nil until a read misses the hot journal.
+	cold AtomicStore
 }
 
 // newKVOriginalStore opens the original store without reading it. The existing
@@ -103,6 +112,20 @@ func (s *kvOriginalStore) load() error {
 	if err != nil {
 		return err
 	}
+	byKey, err := originalsOf(blobPairs, refPairs)
+	if err != nil {
+		return err
+	}
+	s.byKey = byKey
+	return nil
+}
+
+// originalsOf answers the entries two families of stored records state together:
+// one entry per event key, holding the references of that key beside the
+// independent body they name. A reference record whose body the same records do
+// not carry fails by name instead of disappearing, so a store never publishes a
+// reference a reader can name and never read.
+func originalsOf(blobPairs, refPairs []Pair) (map[event.EventID]*originalEntry, error) {
 	blobs := make(map[event.EventID][]byte, len(blobPairs))
 	for _, pair := range blobPairs {
 		if name, ok := strings.CutPrefix(pair.Key, "blob:"); ok {
@@ -117,7 +140,7 @@ func (s *kvOriginalStore) load() error {
 		}
 		var stored []storedRef
 		if err := json.Unmarshal(pair.Value, &stored); err != nil {
-			return fmt.Errorf("%w: reference record %q: %w", ErrSnapshotCorrupt, name, err)
+			return nil, fmt.Errorf("%w: reference record %q: %w", ErrSnapshotCorrupt, name, err)
 		}
 		refs[event.EventID(name)] = stored
 	}
@@ -127,7 +150,7 @@ func (s *kvOriginalStore) load() error {
 		for _, record := range stored {
 			bytes, held := blobs[key]
 			if !held {
-				return fmt.Errorf("%w: original %q has a reference but no independent body", ErrSnapshotCorrupt, key)
+				return nil, fmt.Errorf("%w: original %q has a reference but no independent body", ErrSnapshotCorrupt, key)
 			}
 			blob := &originalBlob{digest: record.Digest, length: record.Length, bytes: bytes}
 			ref := OriginalRef{
@@ -144,13 +167,104 @@ func (s *kvOriginalStore) load() error {
 			byKey[key] = entry
 		}
 	}
-	s.byKey = byKey
-	return nil
+	return byKey, nil
+}
+
+// WithColdRoot declares the directory of the cold journal the originals of
+// settled facts were relocated into. A store opened without one answers only the
+// originals its hot journal holds, which is the behavior of a deployment that
+// keeps every fact hot.
+func (s *kvOriginalStore) WithColdRoot(root string) *kvOriginalStore {
+	s.coldRoot = root
+	return s
+}
+
+// coldViewLocked answers the opened cold journal, opening it on the first read of
+// an original the hot journal does not hold and never at boot. A store beside no
+// cold root, and one whose hot journal states that nothing was ever relocated,
+// answers false: opening a cold journal no pass filled would read an empty store.
+// The caller holds the lock.
+func (s *kvOriginalStore) coldViewLocked(ctx context.Context) (AtomicStore, bool, error) {
+	if s.coldRoot == "" {
+		return nil, false, nil
+	}
+	relocated, err := s.relocatedLocked(ctx)
+	if err != nil || !relocated {
+		return nil, false, err
+	}
+	if s.cold != nil {
+		return s.cold, true, nil
+	}
+	cold, err := OpenAtomicStore(ctx, StorageConfig{Type: StorageJournal, Root: s.coldRoot})
+	if err != nil {
+		return nil, false, fmt.Errorf("tagent: open the cold journal %s: %w", s.coldRoot, err)
+	}
+	s.cold = cold
+	return cold, true, nil
+}
+
+// relocatedLocked reports whether a relocation pass moved any fact out of the hot
+// journal, as the hot journal itself states it. The marker is what keeps a store
+// that never relocated out of a cold journal it would read empty. The caller holds
+// the lock.
+func (s *kvOriginalStore) relocatedLocked(ctx context.Context) (bool, error) {
+	pairs, err := s.kv.Read(ctx, Fetch{Key: segmentSettledCommitKey})
+	if err != nil {
+		return false, err
+	}
+	if len(pairs) == 0 {
+		return false, nil
+	}
+	commit, err := strconv.ParseInt(string(pairs[0].Value), 10, 64)
+	if err != nil {
+		return false, fmt.Errorf("%w: the settled commit %q: %w", ErrSnapshotCorrupt, segmentSettledCommitKey, err)
+	}
+	return commit > 0, nil
+}
+
+// coldEntryLocked answers the original one event key owns from the cold journal,
+// so a relocation never changes what a read by identity answers. It answers false
+// beside no error for a key neither journal holds, and it names ErrSnapshotCorrupt
+// for a cold reference whose independent body the cold journal does not carry,
+// instead of reporting the original as absent. The caller holds the lock.
+func (s *kvOriginalStore) coldEntryLocked(ctx context.Context, key event.EventID) (*originalEntry, bool, error) {
+	cold, held, err := s.coldViewLocked(ctx)
+	if err != nil || !held {
+		return nil, false, err
+	}
+	refPairs, err := cold.Read(ctx, Fetch{Key: refKVKey(key)})
+	if err != nil {
+		return nil, false, err
+	}
+	if len(refPairs) == 0 {
+		return nil, false, nil
+	}
+	blobPairs, err := cold.Read(ctx, Fetch{Key: blobKVKey(key)})
+	if err != nil {
+		return nil, false, err
+	}
+	entries, err := originalsOf(blobPairs, refPairs)
+	if err != nil {
+		return nil, false, err
+	}
+	entry, held := entries[key]
+	return entry, held, nil
+}
+
+// entryLocked answers the original one event key owns: the entry the hot journal
+// published, and past that the cold journal, so an original a relocation moved out
+// is still answered by identity. The caller holds the lock.
+func (s *kvOriginalStore) entryLocked(ctx context.Context, key event.EventID) (*originalEntry, bool, error) {
+	if entry, held := s.byKey[key]; held {
+		return entry, true, nil
+	}
+	return s.coldEntryLocked(ctx, key)
 }
 
 // Put commits the original bytes of ref and publishes the reference once its barrier returns success.
 //   - Different event keys always own independent bodies; a second scope on the same key joins its references, and other bytes under a held key are refused
 //   - The body and the reference that names it travel in one batch, so a reader never sees a reference whose body is missing and a failed commit leaves neither behind
+//   - An original a relocation moved into the cold journal is still a committed original: a repeating commit answers as the duplicate it is, other bytes under the identity are refused, and a new reference re-files the body beside the reference it names
 func (s *kvOriginalStore) Put(ctx context.Context, ref OriginalRef, body []byte) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -172,6 +286,16 @@ func (s *kvOriginalStore) Put(ctx context.Context, ref OriginalRef, body []byte)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	entry, held := s.byKey[ref.Key]
+	settled := false
+	if !held {
+		coldEntry, coldHeld, err := s.coldEntryLocked(ctx, ref.Key)
+		if err != nil {
+			return err
+		}
+		if coldHeld {
+			entry, held, settled = coldEntry, true, true
+		}
+	}
 	if held && entry.blob != nil && entry.blob.digest != digest {
 		return ErrContentConflict
 	}
@@ -196,7 +320,7 @@ func (s *kvOriginalStore) Put(ctx context.Context, ref OriginalRef, body []byte)
 	}
 	refKey := refKVKey(ref.Key)
 	blobKey := blobKVKey(ref.Key)
-	blobStaged := !held || entry.blob == nil
+	blobStaged := !held || entry.blob == nil || settled
 	puts := make([]Pair, 0, 2)
 	if blobStaged {
 		puts = append(puts, Pair{Key: blobKey, Value: body})
@@ -205,10 +329,16 @@ func (s *kvOriginalStore) Put(ctx context.Context, ref OriginalRef, body []byte)
 	if err := s.kv.Commit(ctx, Batch{Puts: puts}); err != nil {
 		return fmt.Errorf("%w: %w", ErrCommitBarrier, err)
 	}
-	if !held {
-		entry = &originalEntry{refs: map[refScope]referenceRecord{}}
-		s.byKey[ref.Key] = entry
+	if !held || settled {
+		staged := &originalEntry{refs: map[refScope]referenceRecord{}}
+		if entry != nil {
+			for stagedScope, record := range entry.refs {
+				staged.refs[stagedScope] = record
+			}
+		}
+		entry = staged
 	}
+	s.byKey[ref.Key] = entry
 	if blobStaged {
 		entry.blob = &originalBlob{digest: digest, length: length, bytes: append([]byte(nil), body...)}
 	}
@@ -234,7 +364,12 @@ func (s *kvOriginalStore) Get(ctx context.Context, key event.EventID) RecallResu
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	entry, held := s.byKey[key]
+	entry, held, err := s.entryLocked(ctx, key)
+	if err != nil {
+		result.Outcome = RecallFailed
+		result.Err = err
+		return result
+	}
 	if !held || len(entry.refs) == 0 {
 		result.Outcome = RecallMissing
 		return result
@@ -268,7 +403,10 @@ func (s *kvOriginalStore) ReadSegment(ctx context.Context, key event.EventID, st
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	entry, held := s.byKey[key]
+	entry, held, err := s.entryLocked(ctx, key)
+	if err != nil {
+		return nil, err
+	}
 	if !held || len(entry.refs) == 0 {
 		return nil, ErrOriginalMissing
 	}
@@ -312,8 +450,8 @@ func (s *kvOriginalStore) References(key event.EventID) []OriginalRef {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	entry, held := s.byKey[key]
-	if !held {
+	entry, held, err := s.entryLocked(context.Background(), key)
+	if err != nil || !held {
 		return nil
 	}
 	scopes := make([]refScope, 0, len(entry.refs))

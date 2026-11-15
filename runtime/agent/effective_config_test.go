@@ -85,8 +85,8 @@ func (c *requestEvidenceCapture) fixedParameters() [][]byte {
 //
 // 契约: docs/wiki/agent/agent-architecture.md#request-budget
 func TestLoopRequestEvidenceCarriesEffectiveConfig(t *testing.T) {
-	temperature, effort := 0.3, "high"
-	declared := tagentmodel.GenerationConfig{Temperature: &temperature, ReasoningEffort: &effort}
+	temperature, effort, outputLimit := 0.3, "high", 8000
+	declared := tagentmodel.GenerationConfig{Temperature: &temperature, ReasoningEffort: &effort, MaxTokens: &outputLimit}
 	drive := func(t *testing.T, serving tagentmodel.Model) (*requestEvidenceCapture, tagentmodel.GenerationConfig) {
 		t.Helper()
 		loop, _, _ := invariantLoop(t, serving)
@@ -128,6 +128,9 @@ func TestLoopRequestEvidenceCarriesEffectiveConfig(t *testing.T) {
 		if served.ReasoningEffort == nil || *served.ReasoningEffort != effort {
 			t.Fatalf("provider reasoning effort = %v, want the declared %q", served.ReasoningEffort, effort)
 		}
+		if served.MaxTokens == nil || *served.MaxTokens != outputLimit {
+			t.Fatalf("provider output limit = %v, want the declared %d", served.MaxTokens, outputLimit)
+		}
 	})
 
 	t.Run("a model reporting no declaration leaves the evidence naming none", func(t *testing.T) {
@@ -140,7 +143,7 @@ func TestLoopRequestEvidenceCarriesEffectiveConfig(t *testing.T) {
 		if err := json.Unmarshal(fixed[0], &held); err != nil {
 			t.Fatalf("decode the fixed parameters %s: %v", fixed[0], err)
 		}
-		for _, invented := range []string{"temperature", "reasoning_effort", "thinking_enabled"} {
+		for _, invented := range []string{"temperature", "reasoning_effort", "thinking_enabled", "max_tokens"} {
 			if _, present := held[invented]; present {
 				t.Fatalf("fixed parameters = %s, want no %s invented beside a request that declares none", fixed[0], invented)
 			}

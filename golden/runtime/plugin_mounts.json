@@ -1,0 +1,8 @@
+{
+  "schema_version": 1,
+  "adr": "docs/adr/0006-three-hooks-is-the-core-iteration-principle.md",
+  "user_ruling": "ADR 0006（2026-11-05 用户裁定 boundary-closure r19）守护套件 R5；runtime-recovery-ideal D6.15（用户确立：三挂点动态拓展是框架核心，立为 golden 并先立判据）",
+  "review_by": "2027-11-15",
+  "reason": "装配根对插件管道集合做过具体成员增补（单个具体成员或复合字面量），而非转发已解析集合或取声明/注册表的解析结果。每条例外是当前树的具名裁决，不是先例：挂载点须改形态（经声明与代际注册表解析）或按 ADR 0006 突破协议登记，并删掉已在树上消失的旧条目。exceptions 现为空数组——「现树无豁免」是显式陈述，现树红集即交接给 02-plugin-dynamic-mount 的工作清单。",
+  "exceptions": []
+}

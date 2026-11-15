@@ -156,10 +156,11 @@ func agentsField(source string, e *sourceEntry) ([]AgentSpec, error) {
 // this package reads itself and the four domain sections, which are plain
 // fields of AgentSpec.
 var agentKeys = []string{
-	"id", "parent_id", "model", "tools", "plugins", "task_policy", "files", "params",
-	"final_round", "max_tokens", "compress_threshold", "keep_recent_tasks",
-	"provider_context_window", "output_reserve", "environment_block",
-	"temperature", "thinking_enabled", "reasoning_effort", "max_tool_iterations",
+	"id", "parent_id", "model", "tools", "plugins", "task_policy", "files",
+	"final_round", "replay_window", "compress_threshold", "keep_recent_tasks",
+	"summary_budget_bytes",
+	"context_window", "environment_block",
+	"temperature", "thinking_enabled", "reasoning_effort", "max_tokens", "max_tool_iterations",
 	"max_calls_per_response", "long_context_tokens",
 	"memory", "meditation", "file", "exec",
 }
@@ -196,13 +197,10 @@ func decodeAgent(source, path string, n *sourceNode) (*AgentSpec, error) {
 	if a.Files, err = filesField(source, joinField(path, "files"), fields["files"]); err != nil {
 		return nil, err
 	}
-	if a.Params, err = floatMapField(source, joinField(path, "params"), fields["params"]); err != nil {
-		return nil, err
-	}
 	if a.FinalRound, err = finalRoundField(source, joinField(path, "final_round"), fields["final_round"]); err != nil {
 		return nil, err
 	}
-	if a.MaxTokens, err = countField(source, joinField(path, "max_tokens"), fields["max_tokens"]); err != nil {
+	if a.ReplayWindow, err = countField(source, joinField(path, "replay_window"), fields["replay_window"]); err != nil {
 		return nil, err
 	}
 	if a.CompressThreshold, err = ratioField(source, joinField(path, "compress_threshold"), fields["compress_threshold"]); err != nil {
@@ -211,10 +209,10 @@ func decodeAgent(source, path string, n *sourceNode) (*AgentSpec, error) {
 	if a.KeepRecentTasks, err = countField(source, joinField(path, "keep_recent_tasks"), fields["keep_recent_tasks"]); err != nil {
 		return nil, err
 	}
-	if a.ProviderContextWindow, err = countField(source, joinField(path, "provider_context_window"), fields["provider_context_window"]); err != nil {
+	if a.SummaryBudgetBytes, err = countField(source, joinField(path, "summary_budget_bytes"), fields["summary_budget_bytes"]); err != nil {
 		return nil, err
 	}
-	if a.OutputReserve, err = countField(source, joinField(path, "output_reserve"), fields["output_reserve"]); err != nil {
+	if a.ContextWindow, err = countField(source, joinField(path, "context_window"), fields["context_window"]); err != nil {
 		return nil, err
 	}
 	if a.EnvironmentBlock, err = boolField(source, joinField(path, "environment_block"), fields["environment_block"]); err != nil {
@@ -227,6 +225,9 @@ func decodeAgent(source, path string, n *sourceNode) (*AgentSpec, error) {
 		return nil, err
 	}
 	if a.ReasoningEffort, err = stringField(source, joinField(path, "reasoning_effort"), fields["reasoning_effort"]); err != nil {
+		return nil, err
+	}
+	if a.MaxTokens, err = countField(source, joinField(path, "max_tokens"), fields["max_tokens"]); err != nil {
 		return nil, err
 	}
 	if a.MaxToolIterations, err = countField(source, joinField(path, "max_tool_iterations"), fields["max_tool_iterations"]); err != nil {
@@ -736,29 +737,6 @@ func stringSeqField(source, field string, e *sourceEntry) ([]string, error) {
 			return nil, err
 		}
 		out = append(out, s)
-	}
-	return out, nil
-}
-
-// floatMapField reads one optional free-form map of numbers.
-func floatMapField(source, field string, e *sourceEntry) (map[string]float64, error) {
-	if isAbsent(e) {
-		return nil, nil
-	}
-	if e.value.kind != sourceMap {
-		return nil, &decodeError{source: source, line: entryLine(e), field: field, reason: "expected a mapping"}
-	}
-	entries, err := mapEntryFields(source, field, e.value)
-	if err != nil {
-		return nil, err
-	}
-	out := make(map[string]float64, len(entries))
-	for key, ent := range entries {
-		v, err := numberNode(source, joinField(field, key), ent.value)
-		if err != nil {
-			return nil, err
-		}
-		out[key] = v
 	}
 	return out, nil
 }

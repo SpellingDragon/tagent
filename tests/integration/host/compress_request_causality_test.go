@@ -46,7 +46,7 @@ func TestCompressionRequestCommitFailureKeepsFactChainConsistent(t *testing.T) {
 	}}
 	decl := &config.Declaration{
 		Entry:  "agent-a",
-		Agents: []config.AgentSpec{{ID: "agent-a", Model: "model-a", MaxTokens: 100}},
+		Agents: []config.AgentSpec{{ID: "agent-a", Model: "model-a", ReplayWindow: 100}},
 	}
 	run, err := assembly.Assemble(ctx, decl, map[event.AgentID]assembly.NativeAgent{
 		"agent-a": {Model: provider},

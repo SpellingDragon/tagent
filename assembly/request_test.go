@@ -749,12 +749,12 @@ func TestRequestBudgetAccountsAllFaces(t *testing.T) {
 	}
 }
 
-// TestProviderWindowGateSemantics pins the one gate predicate and the three declarations that decide it.
+// TestProviderWindowGateSemantics pins the one gate predicate and the declarations that decide it.
 //
-// - MaxTokens=0 and no explicit window: the gate is closed and the whole request is sent
-// - MaxTokens=0 with an explicit window: the gate is open and the oversized request is refused
-// - MaxTokens>0 with no explicit window: the window is derived and the gate is open
-// - an explicit window replaces MaxTokens as the provider window in both directions
+// - no context window: the gate is closed and the whole request is sent
+// - an explicit context window: the gate is open and the oversized request is refused
+// - a replay window alone opens no gate: it drives folding, not the provider's capacity
+// - the context window alone is the provider window; the replay window never stands in for it
 //
 // 契约: docs/wiki/agent/agent-architecture.md#request-budget
 func TestProviderWindowGateSemantics(t *testing.T) {
@@ -774,13 +774,19 @@ func TestProviderWindowGateSemantics(t *testing.T) {
 		t.Fatalf("gate-closed turn terminal = %v, want completed", closed.turn.Terminal)
 	}
 
-	explicit := budgetTestRun(t, ctx, config.AgentSpec{ProviderContextWindow: 64}, big, "explicit window input", "session-budget-gate-explicit")
+	explicit := budgetTestRun(t, ctx, config.AgentSpec{ContextWindow: 64}, big, "explicit window input", "session-budget-gate-explicit")
 	budgetTestRefusal(t, explicit, "explicit window")
 
-	derived := budgetTestRun(t, ctx, config.AgentSpec{MaxTokens: 64}, big, "derived window input", "session-budget-gate-derived")
-	budgetTestRefusal(t, derived, "derived window")
+	replayAlone := budgetTestRun(t, ctx, config.AgentSpec{ReplayWindow: 64}, big, "replay-window-only input", "session-budget-gate-replay-alone")
+	replayAloneRequest := replayAlone.oneRequest(t, "replay window alone")
+	if len(replayAloneRequest.Messages) == 0 {
+		t.Fatal("replay-window-only request carries no message, want the whole prompt served with no gate")
+	}
+	if replayAloneRequest.Messages[0].Content != big {
+		t.Fatalf("replay-window-only first message = %q, want the whole fixed prompt", boundaryAnchorPreview(replayAloneRequest.Messages[0].Content, 120))
+	}
 
-	replayOnly := budgetTestRun(t, ctx, config.AgentSpec{MaxTokens: 32, ProviderContextWindow: 4096, OutputReserve: 1}, small, "replay window input", "session-budget-gate-replay")
+	replayOnly := budgetTestRun(t, ctx, config.AgentSpec{ReplayWindow: 32, ContextWindow: 4096, MaxTokens: 1}, small, "replay window input", "session-budget-gate-replay")
 	replayRequest := replayOnly.oneRequest(t, "replay window")
 	if len(replayRequest.Messages) == 0 {
 		t.Fatal("replay-window request carries no message, want the whole fixed prompt")
@@ -789,52 +795,86 @@ func TestProviderWindowGateSemantics(t *testing.T) {
 		t.Fatalf("replay-window first message = %q, want the whole fixed prompt", boundaryAnchorPreview(replayRequest.Messages[0].Content, 120))
 	}
 
-	narrow := budgetTestRun(t, ctx, config.AgentSpec{MaxTokens: 4096, ProviderContextWindow: 32, OutputReserve: 1}, small, "explicit small window input", "session-budget-gate-narrow")
+	narrow := budgetTestRun(t, ctx, config.AgentSpec{ReplayWindow: 4096, ContextWindow: 32, MaxTokens: 1}, small, "explicit small window input", "session-budget-gate-narrow")
 	budgetTestRefusal(t, narrow, "explicit small window")
 }
 
-// TestBudgetDefaultOutputReserve pins the default output reserve as the frozen share of the provider window.
-// - the share is the frozen ratio of the window
-// - a declaration that leaves the reserve unset behaves as the ratio says
+// TestSymptomAnchorPhantomReserveRefusesFittingRequest pins the request a window without a declared output limit serves.
+//   - a request that fits the declared physical window is served, whatever the provider window
+//   - the output reserve is the declared output limit, or zero when none is declared, so no reserve stands in for an undeclared one
+//   - the fixed prompt is sized at 385600 bytes, which is 96400 tokens at the four-chars-per-token ratio
+//   - that ratio puts the request over the 96000 a quarter-window reserve subtracts and under the 128000 physical window
+//   - the served total is calibrated with the gate closed, so the band assertion pins the numbers rather than trusting the byte size alone
+//   - the declaration names a physical window and a replay window and no output reserve, and the fitting request must be served rather than refused
 //
 // 契约: docs/wiki/agent/agent-architecture.md#request-budget
-func TestBudgetDefaultOutputReserve(t *testing.T) {
-	if agent.DefaultOutputReserveDivisor != 4 {
-		t.Fatalf("DefaultOutputReserveDivisor = %d, want the frozen 4", agent.DefaultOutputReserveDivisor)
-	}
-	for _, testCase := range []struct {
-		window int
-		want   int
-	}{
-		{0, 0}, {1, 1}, {2, 1}, {3, 1}, {4, 1}, {5, 2}, {8, 2}, {100, 25},
-	} {
-		if got := agent.OutputReserveOf(testCase.window); got != testCase.want {
-			t.Fatalf("OutputReserveOf(%d) = %d, want %d", testCase.window, got, testCase.want)
-		}
+func TestSymptomAnchorPhantomReserveRefusesFittingRequest(t *testing.T) {
+	ctx := context.Background()
+	prompt := budgetTestPromptBody("the c75 fixed prompt line that fits the physical window", 385600)
+	const physicalWindow = 128000
+
+	base := budgetTestRun(t, ctx, config.AgentSpec{}, prompt, "c75 symptom input", "session-c75-calibrate")
+	total := budgetTestTotal(base.oneRequest(t, "c75 calibration"))
+	if total <= 96000 || total >= physicalWindow {
+		t.Fatalf("calibrated total = %d tokens, want the c75 band (96000, %d): the anchor must reproduce a request that fits the window but exceeds window - window/4", total, physicalWindow)
 	}
 
-	ctx := context.Background()
-	prompt := budgetTestPromptBody("the default reserve prompt", 512)
-	session := "session-budget-default-reserve"
-	base := budgetTestDriveSpec(t, ctx, config.AgentSpec{Files: []config.FileRef{
-		budgetTestFileRef(t, "system.md", prompt, config.FileKindPrompt),
-	}}, "reserve input", session, attachEmptyBudgetProjection(t, session))
-	total := budgetTestTotal(base.oneRequest(t, "default reserve base"))
-	if total <= 8 {
-		t.Fatalf("calibration total = %d tokens, want enough material to exercise the reserve", total)
+	drive := budgetTestRun(t, ctx, config.AgentSpec{
+		ReplayWindow:  physicalWindow,
+		ContextWindow: physicalWindow,
+	}, prompt, "c75 symptom input", "session-c75-symptom")
+	request := drive.oneRequest(t, "c75 fitting request")
+	if len(request.Messages) == 0 {
+		t.Fatal("c75 request carries no message, want the whole fixed prompt served")
 	}
-	window := total + 1
-	defaulted := budgetTestDriveSpec(t, ctx, config.AgentSpec{
-		ProviderContextWindow: window,
-		Files:                 []config.FileRef{budgetTestFileRef(t, "system.md", prompt, config.FileKindPrompt)},
-	}, "reserve input", "session-budget-defaulted", attachEmptyBudgetProjection(t, "session-budget-defaulted"))
-	budgetTestRefusal(t, defaulted, "default output reserve")
-	explicit := budgetTestDriveSpec(t, ctx, config.AgentSpec{
-		ProviderContextWindow: window,
-		OutputReserve:         1,
-		Files:                 []config.FileRef{budgetTestFileRef(t, "system.md", prompt, config.FileKindPrompt)},
-	}, "reserve input", "session-budget-explicit-one", attachEmptyBudgetProjection(t, "session-budget-explicit-one"))
-	explicit.oneRequest(t, "explicit output reserve")
+	if drive.turn.Terminal != model.KindCompleted {
+		t.Fatalf("c75 turn terminal = %v, want completed (failure=%q)", drive.turn.Terminal, drive.failureText())
+	}
+}
+
+// TestSymptomAnchorReplayWindowAloneOpensNoGate pins the gate a declaration opens.
+//   - a declaration naming only the replay window opens no budget gate, because the replay window drives the fold cadence, not the provider's physical capacity
+//   - the gate opens only on ContextWindow, so the request runs whole
+//
+// 契约: docs/wiki/agent/agent-architecture.md#request-budget
+func TestSymptomAnchorReplayWindowAloneOpensNoGate(t *testing.T) {
+	ctx := context.Background()
+	big := budgetTestPromptBody("the fixed prompt line of the replay-window-only gate", 10<<10)
+	drive := budgetTestRun(t, ctx, config.AgentSpec{ReplayWindow: 64}, big, "replay-window-only input", "session-replay-only-gate")
+	request := drive.oneRequest(t, "replay window alone")
+	if len(request.Messages) == 0 {
+		t.Fatal("replay-window-only request carries no message, want the whole prompt served with no gate")
+	}
+	if request.Messages[0].Content != big {
+		t.Fatalf("replay-window-only first message = %q, want the whole fixed prompt", boundaryAnchorPreview(request.Messages[0].Content, 120))
+	}
+	if drive.turn.Terminal != model.KindCompleted {
+		t.Fatalf("replay-window-only turn terminal = %v, want completed (failure=%q)", drive.turn.Terminal, drive.failureText())
+	}
+}
+
+// TestSymptomAnchorOutputLimitServed pins the output limit a declaration serves.
+//   - a declared max_tokens reaches the provider as the output limit
+//   - a declaration that names none leaves the served limit absent, so no undeclared reserve stands in for it
+//
+// 契约: docs/wiki/agent/agent-architecture.md#request-budget
+func TestSymptomAnchorOutputLimitServed(t *testing.T) {
+	ctx := context.Background()
+	t.Run("a declared output limit reaches the provider", func(t *testing.T) {
+		const outputLimit = 8000
+		drive := budgetTestRun(t, ctx, config.AgentSpec{ReplayWindow: 128000, ContextWindow: 128000, MaxTokens: outputLimit}, "", "the output limit input", "session-output-limit-served")
+		request := drive.oneRequest(t, "output limit served")
+		if request.GenerationConfig.MaxTokens == nil || *request.GenerationConfig.MaxTokens != outputLimit {
+			t.Fatalf("served output limit = %v, want the declared %d", request.GenerationConfig.MaxTokens, outputLimit)
+		}
+	})
+	t.Run("no declaration leaves the output limit absent", func(t *testing.T) {
+		drive := budgetTestRun(t, ctx, config.AgentSpec{ReplayWindow: 128000, ContextWindow: 128000}, "", "the output limit baseline input", "session-output-limit-baseline")
+		request := drive.oneRequest(t, "output limit baseline")
+		if request.GenerationConfig.MaxTokens != nil {
+			t.Fatalf("served output limit = %d, want nil when none is declared", *request.GenerationConfig.MaxTokens)
+		}
+	})
 }
 
 // attachEmptyBudgetProjection answers the preparation that registers an empty
@@ -847,9 +887,9 @@ func attachEmptyBudgetProjection(t *testing.T, session string) func(*Run) {
 	}
 }
 
-// TestBudgetReservesOutputAllowance pins the optional output-reserve declaration.
-// - the reserve enters the canonical fingerprint
-// - its explicit value is the allowance the input budget leaves
+// TestBudgetReservesOutputAllowance pins the output-limit declaration as the allowance the budget reserves.
+// - the limit enters the canonical fingerprint
+// - its declared value is the allowance the input budget leaves
 //
 // 契约: docs/wiki/agent/agent-architecture.md#request-budget
 func TestBudgetReservesOutputAllowance(t *testing.T) {
@@ -866,16 +906,16 @@ func TestBudgetReservesOutputAllowance(t *testing.T) {
 	window := total + 1
 
 	one := budgetTestDriveSpec(t, ctx, config.AgentSpec{
-		ProviderContextWindow: window,
-		OutputReserve:         1,
-		Files:                 []config.FileRef{budgetTestFileRef(t, "system.md", prompt, config.FileKindPrompt)},
+		ContextWindow: window,
+		MaxTokens:     1,
+		Files:         []config.FileRef{budgetTestFileRef(t, "system.md", prompt, config.FileKindPrompt)},
 	}, "allowance input", "session-budget-allowance-one", attachEmptyBudgetProjection(t, "session-budget-allowance-one"))
 	one.oneRequest(t, "reserve one")
 
 	whole := budgetTestDriveSpec(t, ctx, config.AgentSpec{
-		ProviderContextWindow: window,
-		OutputReserve:         window,
-		Files:                 []config.FileRef{budgetTestFileRef(t, "system.md", prompt, config.FileKindPrompt)},
+		ContextWindow: window,
+		MaxTokens:     window,
+		Files:         []config.FileRef{budgetTestFileRef(t, "system.md", prompt, config.FileKindPrompt)},
 	}, "allowance input", "session-budget-allowance-whole", attachEmptyBudgetProjection(t, "session-budget-allowance-whole"))
 	budgetTestRefusal(t, whole, "reserve consumes the whole window")
 
@@ -888,10 +928,10 @@ func TestBudgetReservesOutputAllowance(t *testing.T) {
 		return got
 	}
 	bare := fingerprint(config.Declaration{Entry: "a", Agents: []config.AgentSpec{{ID: "a"}}})
-	withWindow := fingerprint(config.Declaration{Entry: "a", Agents: []config.AgentSpec{{ID: "a", ProviderContextWindow: 128000}}})
-	withReserve := fingerprint(config.Declaration{Entry: "a", Agents: []config.AgentSpec{{ID: "a", OutputReserve: 4096}}})
-	if bare == withWindow || bare == withReserve || withWindow == withReserve {
-		t.Fatalf("fingerprints bare=%s window=%s reserve=%s, want each budget declaration to change the canonical core", bare, withWindow, withReserve)
+	withWindow := fingerprint(config.Declaration{Entry: "a", Agents: []config.AgentSpec{{ID: "a", ContextWindow: 128000}}})
+	withOutputLimit := fingerprint(config.Declaration{Entry: "a", Agents: []config.AgentSpec{{ID: "a", MaxTokens: 4096}}})
+	if bare == withWindow || bare == withOutputLimit || withWindow == withOutputLimit {
+		t.Fatalf("fingerprints bare=%s window=%s output_limit=%s, want each budget declaration to change the canonical core", bare, withWindow, withOutputLimit)
 	}
 }
 
@@ -929,9 +969,9 @@ func TestFoldWindowSemanticsUnchanged(t *testing.T) {
 
 	session := "session-budget-fold"
 	drive := budgetTestDriveSpec(t, ctx, config.AgentSpec{
-		MaxTokens:             100,
-		ProviderContextWindow: 10000,
-		OutputReserve:         1,
+		ReplayWindow:  100,
+		ContextWindow: 10000,
+		MaxTokens:     1,
 		Files: []config.FileRef{
 			budgetTestFileRef(t, "system.md", "you are terse.", config.FileKindPrompt),
 		},
@@ -943,8 +983,9 @@ func TestFoldWindowSemanticsUnchanged(t *testing.T) {
 		t.Fatalf("the request carries %d messages, want the prompt beside the %d replay-window entries and the input (%d)", len(request.Messages), len(expected), want)
 	}
 	for i, entry := range expected {
-		if request.Messages[i+1].Content != entry.Content {
-			t.Fatalf("projected entry %d = %q, want %q: the replay window must present the projection it always did", i, boundaryAnchorPreview(request.Messages[i+1].Content, 120), boundaryAnchorPreview(entry.Content, 120))
+		want := replay.TicketOf(entry.Key, entry.Type) + " " + entry.Content
+		if request.Messages[i+1].Content != want {
+			t.Fatalf("projected entry %d = %q, want %q: the replay window must present the projection it always did, under the ticket injection", i, boundaryAnchorPreview(request.Messages[i+1].Content, 120), boundaryAnchorPreview(want, 120))
 		}
 	}
 	for _, message := range request.Messages {
@@ -991,7 +1032,7 @@ func TestBudgetDegradeLadder(t *testing.T) {
 	}
 
 	spec := func(environment, skill bool, window int) config.AgentSpec {
-		decl := config.AgentSpec{ProviderContextWindow: window, OutputReserve: 1}
+		decl := config.AgentSpec{ContextWindow: window, MaxTokens: 1}
 		if environment {
 			decl.EnvironmentBlock = true
 		}
@@ -1095,7 +1136,8 @@ func TestBudgetRefusalWhenUndegradable(t *testing.T) {
 
 	prompt := budgetTestPromptBody("the refusal prompt line", 10<<10)
 	spec := boundaryAnchorSpec()
-	spec.MaxTokens = 32
+	spec.ReplayWindow = boundaryAnchorWindow
+	spec.ContextWindow = boundaryAnchorWindow
 	spec.Files = append(spec.Files, budgetTestFileRef(t, "system.md", prompt, config.FileKindPrompt))
 	run, provider := boundaryAnchorAssemble(t, ctx, spec, boundaryAnchorAnswer("the refusal must never be served"))
 	addr := boundaryAnchorAddress("session-budget-refusal")
@@ -1148,14 +1190,14 @@ func TestBudgetConsumerPathEvidence(t *testing.T) {
 
 	withEnvSession := "session-budget-consumer-with-environment"
 	withEnv := budgetTestDriveSpec(t, ctx, config.AgentSpec{
-		ProviderContextWindow: wide, OutputReserve: 1, EnvironmentBlock: true,
+		ContextWindow: wide, MaxTokens: 1, EnvironmentBlock: true,
 		Files: []config.FileRef{budgetTestFileRef(t, "system.md", prompt, config.FileKindPrompt)},
 	}, input, withEnvSession, attachEmptyBudgetProjection(t, withEnvSession))
 	withEnvTotal := budgetTestTotal(withEnv.oneRequest(t, "consumer path with environment"))
 
 	withoutEnvSession := "session-budget-consumer-without-environment"
 	withoutEnv := budgetTestDriveSpec(t, ctx, config.AgentSpec{
-		ProviderContextWindow: wide, OutputReserve: 1, EnvironmentBlock: false,
+		ContextWindow: wide, MaxTokens: 1, EnvironmentBlock: false,
 		Files: []config.FileRef{budgetTestFileRef(t, "system.md", prompt, config.FileKindPrompt)},
 	}, input, withoutEnvSession, attachEmptyBudgetProjection(t, withoutEnvSession))
 	withoutEnvTotal := budgetTestTotal(withoutEnv.oneRequest(t, "consumer path without environment"))
@@ -1170,7 +1212,7 @@ func TestBudgetConsumerPathEvidence(t *testing.T) {
 	capture := snapshotTestCapture(t)
 	evidenceSession := "session-budget-consumer-evidence"
 	evidence := budgetTestDriveSpec(t, ctx, config.AgentSpec{
-		ProviderContextWindow: inputBudget + 1, OutputReserve: 1, EnvironmentBlock: true,
+		ContextWindow: inputBudget + 1, MaxTokens: 1, EnvironmentBlock: true,
 		Files: []config.FileRef{budgetTestFileRef(t, "system.md", prompt, config.FileKindPrompt)},
 	}, input, evidenceSession, attachEmptyBudgetProjection(t, evidenceSession), WithCapture(capture))
 	request := evidence.oneRequest(t, "consumer path evidence")
@@ -1226,12 +1268,12 @@ type snapshotTestGeneration struct {
 func snapshotTestGenerations(t *testing.T, ctx context.Context) snapshotTestGeneration {
 	t.Helper()
 	first := config.AgentSpec{
-		ID:                    string(snapshotTestAgent),
-		Model:                 "model-snapshot",
-		EnvironmentBlock:      true,
-		ProviderContextWindow: 4096,
-		OutputReserve:         1,
-		Files:                 []config.FileRef{budgetTestFileRef(t, "system.md", "snapshot generation one prompt", config.FileKindPrompt)},
+		ID:               string(snapshotTestAgent),
+		Model:            "model-snapshot",
+		EnvironmentBlock: true,
+		ContextWindow:    4096,
+		MaxTokens:        1,
+		Files:            []config.FileRef{budgetTestFileRef(t, "system.md", "snapshot generation one prompt", config.FileKindPrompt)},
 	}
 	natives := map[event.AgentID]NativeAgent{snapshotTestAgent: {Model: &snapshotTestModel{answer: boundaryAnchorAnswer("the snapshot answer")}}}
 	run, err := Assemble(ctx, &config.Declaration{Entry: string(snapshotTestAgent), Agents: []config.AgentSpec{first}}, natives,
@@ -1263,17 +1305,17 @@ func snapshotTestGenerations(t *testing.T, ctx context.Context) snapshotTestGene
 func (g snapshotTestGeneration) next(t *testing.T, ctx context.Context) {
 	t.Helper()
 	second := config.AgentSpec{
-		ID:                    string(snapshotTestAgent),
-		Model:                 "model-snapshot",
-		EnvironmentBlock:      false,
-		ProviderContextWindow: 65536,
-		OutputReserve:         1,
-		Files:                 g.files,
+		ID:               string(snapshotTestAgent),
+		Model:            "model-snapshot",
+		EnvironmentBlock: false,
+		ContextWindow:    65536,
+		MaxTokens:        1,
+		Files:            g.files,
 	}
 	if _, err := g.run.Publish(ctx, &config.Declaration{Entry: string(snapshotTestAgent), Agents: []config.AgentSpec{second}}, g.natives); err != nil {
 		t.Fatalf("publish the next generation: %v", err)
 	}
-	if spec := g.run.agentSpecOf(snapshotTestAgent); spec.EnvironmentBlock || spec.ProviderContextWindow != 65536 {
+	if spec := g.run.agentSpecOf(snapshotTestAgent); spec.EnvironmentBlock || spec.ContextWindow != 65536 {
 		t.Fatalf("spec in effect = %+v, want the later generation published", spec)
 	}
 }
@@ -1329,12 +1371,12 @@ func TestRequestToolAndSkillFacesStayOnTheStartingGeneration(t *testing.T) {
 	}
 	declarationOf := func(skill config.FileRef) *config.Declaration {
 		return &config.Declaration{Entry: string(facesAgent), Agents: []config.AgentSpec{{
-			ID:                    string(facesAgent),
-			Model:                 "model-snapshot",
-			EnvironmentBlock:      true,
-			ProviderContextWindow: 4096,
-			OutputReserve:         1,
-			Files:                 []config.FileRef{prompt, skill},
+			ID:               string(facesAgent),
+			Model:            "model-snapshot",
+			EnvironmentBlock: true,
+			ContextWindow:    4096,
+			MaxTokens:        1,
+			Files:            []config.FileRef{prompt, skill},
 		}}}
 	}
 

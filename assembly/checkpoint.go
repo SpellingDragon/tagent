@@ -374,7 +374,89 @@ func (r *Run) checkpointLocked(ctx context.Context) (event.EventID, bool, error)
 	r.checkpointCommits = 0
 	r.checkpointAt = time.Now()
 	r.mu.Unlock()
+	if err := r.relocateSettledFacts(ctx, tier, offset); err != nil {
+		assemblyError("tagent: the facts the checkpoint %s settled were not relocated: %v", key, err)
+	}
 	return key, true, nil
+}
+
+// relocateSettledFacts moves the facts the checkpoint settled out of the hot
+// journal, so the journal a boot opens holds the tail the checkpoint leaves and
+// not the history behind it. The pass drains the pipeline first, so the key set it
+// keeps is read from a pipeline that applied every fact it landed.
+//
+//   - The pass is exclusive at the engine and nowhere else: the store holds its own lock across the copy, the byte-for-byte verification and the rewrite of the hot journal, so no commit lands inside the rewrite, and a commit that lands between reading the kept key set and the rewrite is one this pass never judged — the store settles the keys its snapshot read, so that fact keeps its place in the hot journal and the next pass reads it in its own snapshot.
+//   - Keeping such a fact hot is what a reader that scans the hot journal alone needs — the task records a boot rebuilds its chains from are such a reader — and the pass still bounds the journal, because the fact it left behind is one a later cut settles.
+//   - The kept key set is what the boot reads hot: the tail past the cut — the facts committed after the checkpoint, which the boot replays — beside the newest checkpoint of each session chain, which is the state a boot restores instead of folding the covered history.
+//   - Every other fact is copied to the cold journal first and stays readable by identity, so a bounded hot journal is never a store that lost its history.
+//   - A tier that declares no retirement answers ErrColdArchiveUnavailable, which this pass reads as the deployment choosing to keep only appending: the hot journal then keeps every fact and the boot pays the whole history, which is the behavior of a store that never relocated anything.
+//   - A run whose boot is over begins no rewrite of the hot journal: the pass is housekeeping a later boot files, and one started here would write beside a process that is already stopping. The pass reads the boot context for the same reason, so one already under way stops at its next step boundary instead of rewriting a journal nothing of this process will read.
+func (r *Run) relocateSettledFacts(ctx context.Context, tier *ledger.Tier, offset event.CheckpointOffset) error {
+	if r == nil || tier == nil || !tier.Capabilities.Durable {
+		return nil
+	}
+	passContext := ctx
+	if r.bootContext != nil {
+		if r.bootContext.Err() != nil {
+			return nil
+		}
+		passContext = r.bootContext
+	}
+	if err := r.flight.await(ctx); err != nil {
+		return err
+	}
+	keep, err := r.keptHotKeys(ctx, tier, offset)
+	if err != nil {
+		return err
+	}
+	report, err := tier.Segments.RetireFacts(passContext, keep)
+	if errors.Is(err, ledger.ErrColdArchiveUnavailable) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if report.Settled > 0 {
+		assemblyInfo("tagent: relocated the facts the checkpoint settled settled=%d skipped=%d batches=%d kept=%d",
+			report.Settled, report.Skipped, report.Batches, len(keep))
+	}
+	return nil
+}
+
+// keptHotKeys answers the keys the hot journal keeps for the cut a checkpoint
+// states: every fact committed past the cut, which the boot replays, beside the
+// newest checkpoint of every session chain and the framework checkpoint itself,
+// which are the states a boot restores instead of folding the history behind them.
+// The walk stops at the framework checkpoint because a boot restoring it reads no
+// checkpoint filed before it.
+func (r *Run) keptHotKeys(ctx context.Context, tier *ledger.Tier, offset event.CheckpointOffset) (map[event.EventID]struct{}, error) {
+	if r == nil || tier == nil {
+		return nil, nil
+	}
+	keep := make(map[event.EventID]struct{})
+	chains := make(map[event.SessionID]struct{})
+	err := tier.Segments.EachIndexNewestFirst(ctx, func(key event.EventID, partition int, seq int64, typ string, session event.SessionID) error {
+		if seq > offset[partition] {
+			keep[key] = struct{}{}
+			return nil
+		}
+		if typ != event.TypeCheckpoint {
+			return nil
+		}
+		if _, held := chains[session]; held {
+			return nil
+		}
+		chains[session] = struct{}{}
+		keep[key] = struct{}{}
+		if session == "" {
+			return errStopIndexWalk
+		}
+		return nil
+	})
+	if err != nil && !errors.Is(err, errStopIndexWalk) {
+		return nil, err
+	}
+	return keep, nil
 }
 
 // CheckpointSession takes one cut of the named session chain and files the fact
@@ -795,6 +877,9 @@ func (r *Run) restoreCheckpoint(ctx context.Context, tier *ledger.Tier, ref anch
 	if !stated {
 		return nil, fmt.Errorf("%w: %s", ErrCheckpointUnreadable, ref.key)
 	}
+	if err := r.seatDurableAccount(ctx, tier, checkpoint.Slices); err != nil {
+		return nil, err
+	}
 	if err := r.states.RestoreState(ctx, checkpoint.Slices); err != nil {
 		return nil, err
 	}
@@ -814,6 +899,62 @@ func (r *Run) restoreCheckpoint(ctx context.Context, tier *ledger.Tier, ref anch
 // newest commit first, so the first entry that answers the question is the one
 // the caller asked for and nothing behind it can answer better.
 var errStopIndexWalk = errors.New("assembly: the index walk answered")
+
+// seatDurableAccount seats the durable task account before the slices are handed
+// to their holders: the mailbox reads the notifications that account still owes,
+// so an account seated after the mailbox restore leaves every notice past the cut
+// unseated and undelivered, which is a work item a restart silently loses.
+//
+// The account is read from the tasks slice of this checkpoint beside the keys the
+// storage committed past its cut, so the tasks the checkpoint covers cost no
+// durable prefix read and the chains younger than the cut cost their own length.
+// A checkpoint that states no tasks slice, and a storage that states no cut, seat
+// nothing here and the boot reads the whole log instead.
+func (r *Run) seatDurableAccount(ctx context.Context, tier *ledger.Tier, slices []event.CheckpointSlice) error {
+	durable := r.durableAccount()
+	if durable == nil || durable.Seated() {
+		return nil
+	}
+	var stated json.RawMessage
+	for _, slice := range slices {
+		if slice.Name == checkpointSliceTasks {
+			stated = slice.Payload
+			break
+		}
+	}
+	if err := durable.Seat(ctx, stated, tailFactKeys(tier)); err != nil {
+		return fmt.Errorf("tagent: seat the durable task account of the checkpoint: %w", err)
+	}
+	return nil
+}
+
+// durableAccount answers the durable task account this run commits through, and
+// nil beside a run over the in-memory commit, which keeps no record across exit
+// and therefore states no account to seat.
+func (r *Run) durableAccount() *state.DurableCommit {
+	if r == nil || r.commit == nil {
+		return nil
+	}
+	durable, held := r.commit.inner.(*state.DurableCommit)
+	if !held {
+		return nil
+	}
+	return durable
+}
+
+// tailFactKeys answers the keys the storage tier committed past its own index cut,
+// and nil beside a tier whose engine states no cut: nil is the boot that reads the
+// whole log, never a boot that reads an empty tail.
+func tailFactKeys(tier *ledger.Tier) map[string]struct{} {
+	if tier == nil || tier.Store == nil {
+		return nil
+	}
+	probe, held := tier.Store.(interface{ TailKeys() map[string]struct{} })
+	if !held {
+		return nil
+	}
+	return probe.TailKeys()
+}
 
 // newestSessionCheckpointRef answers the newest checkpoint one session chain filed,
 // by the frozen type and the session the index records beside it. The walk reads

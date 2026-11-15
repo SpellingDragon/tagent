@@ -1210,21 +1210,29 @@ func restoreAssertNextRequest(t *testing.T, outcome func(*testing.T, string) res
 		want := []struct {
 			role    string
 			content string
+			key     event.EventID
+			typ     string
 			what    string
 		}{
-			{string(model.RoleUser), o.Seed.Input, "the conversation input"},
-			{string(model.RoleAssistant), persistenceCallText, "the assistant tool call"},
-			{string(model.RoleTool), o.Seed.ResultText, "the tool result"},
-			{string(model.RoleAssistant), o.Seed.Answer, "the assistant output"},
+			{string(model.RoleUser), o.Seed.Input, o.Seed.InputFact, event.TypeExternalInput, "the conversation input"},
+			{string(model.RoleAssistant), persistenceCallText, "", event.TypeThinkingPlan, "the assistant tool call"},
+			{string(model.RoleTool), o.Seed.ResultText, o.Seed.ResultFact, event.TypeActionCommand, "the tool result"},
+			{string(model.RoleAssistant), o.Seed.Answer, o.Seed.AnswerFact, event.TypeAgentOutput, "the assistant output"},
 		}
 		if len(messages) < len(want)+1 {
 			t.Fatalf("the %s restart's next request carried %d message(s) %s, want the restored material beside its own input",
 				mode, len(messages), restoreDescribe(messages))
 		}
 		for at, expectation := range want {
-			if messages[at].Role != expectation.role || !bytes.Equal([]byte(messages[at].Content), []byte(expectation.content)) {
-				t.Fatalf("the %s restart's next request message %d = %s %q, want %s %q (the restored material must be carried, not only read from the ledger); messages=%s",
-					mode, at, messages[at].Role, messages[at].Content, expectation.role, expectation.content, restoreDescribe(messages))
+			typ, addressed := presentedTicketType(messages[at].Content)
+			addressed = addressed && typ == expectation.typ
+			if expectation.key != "" {
+				addressed = addressed && strings.HasPrefix(messages[at].Content, presentedTicket(expectation.key, expectation.typ)+" ")
+			}
+			material := withoutPresentedTicket(messages[at].Content)
+			if messages[at].Role != expectation.role || !bytes.Equal([]byte(material), []byte(expectation.content)) || !addressed {
+				t.Fatalf("the %s restart's next request message %d = %s %q, want %s %q behind the ticket %q (the restored material must be carried, not only read from the ledger); messages=%s",
+					mode, at, messages[at].Role, messages[at].Content, expectation.role, expectation.content, presentedTicket(expectation.key, expectation.typ), restoreDescribe(messages))
 			}
 		}
 		carriedCalls := messages[1].ToolCalls
@@ -1263,19 +1271,36 @@ func restoreAssertLedgerIsNotCompletion(t *testing.T, outcome func(*testing.T, s
 		}
 		carried := map[string]bool{}
 		for _, message := range o.Recover.Messages {
-			carried[message.Content] = true
+			carried[withoutPresentedTicket(message.Content)] = true
 		}
 		for _, want := range []struct {
 			what string
 			text string
+			key  event.EventID
+			typ  string
 		}{
-			{"conversation input", o.Seed.Input},
-			{"tool result", o.Seed.ResultText},
-			{"assistant output", o.Seed.Answer},
+			{"conversation input", o.Seed.Input, o.Seed.InputFact, event.TypeExternalInput},
+			{"tool result", o.Seed.ResultText, o.Seed.ResultFact, event.TypeActionCommand},
+			{"assistant output", o.Seed.Answer, o.Seed.AnswerFact, event.TypeAgentOutput},
 		} {
 			if !carried[want.text] {
 				t.Fatalf("restore_only_ledger_is_not_completion: the %s restart recovered the %s in the ledger but its next actual request carried none of it; messages=%s",
 					mode, want.what, restoreDescribe(o.Recover.Messages))
+			}
+			address := presentedTicket(want.key, want.typ) + " "
+			matched := false
+			for _, message := range o.Recover.Messages {
+				if !strings.HasPrefix(message.Content, address) {
+					continue
+				}
+				if withoutPresentedTicket(message.Content) == want.text {
+					matched = true
+					break
+				}
+			}
+			if !matched {
+				t.Fatalf("restore_only_ledger_is_not_completion: the %s restart carried the %s without the ticket %q of the fact it was restored from; messages=%s",
+					mode, want.what, strings.TrimSuffix(address, " "), restoreDescribe(o.Recover.Messages))
 			}
 		}
 	}
@@ -1675,7 +1700,7 @@ func newProjectionRun(t *testing.T, maxTokens int, provider model.Model) (*assem
 	t.Helper()
 	run, err := assembly.Assemble(context.Background(), &config.Declaration{
 		Entry:  "agent-a",
-		Agents: []config.AgentSpec{{ID: "agent-a", Model: "model-a", MaxTokens: maxTokens, ProviderContextWindow: maxTokens * 2}},
+		Agents: []config.AgentSpec{{ID: "agent-a", Model: "model-a", ReplayWindow: maxTokens, ContextWindow: maxTokens * 2}},
 	}, map[event.AgentID]assembly.NativeAgent{
 		"agent-a": {Model: provider},
 	}, assembly.WithGovernance(passPolicy{}), assembly.WithStorage(ledger.StorageConfig{Type: ledger.StorageMemory}))
@@ -2339,7 +2364,7 @@ func runRestartRestoresFoldForm(t *testing.T) {
 	storage := ledger.StorageConfig{Type: ledger.StorageJournal, Root: t.TempDir()}
 	declaration := &config.Declaration{
 		Entry:  "agent-a",
-		Agents: []config.AgentSpec{{ID: "agent-a", Model: "model-a", MaxTokens: projectionWindowTokens, ProviderContextWindow: projectionWindowTokens * 32}},
+		Agents: []config.AgentSpec{{ID: "agent-a", Model: "model-a", ReplayWindow: projectionWindowTokens, ContextWindow: projectionWindowTokens * 32}},
 	}
 	agents := map[event.AgentID]assembly.NativeAgent{
 		"agent-a": {Model: &replayModel{name: "model-a"}},
@@ -2539,17 +2564,21 @@ func runActualRequestAssembly(t *testing.T) {
 		at   int
 		name string
 		body string
+		key  event.EventID
+		typ  string
 		role model.Role
 	}{
-		{1, "input", projectionBody(2, "0-in"), model.RoleUser},
-		{3, "output", projectionBody(2, "3-out"), model.RoleAssistant},
-		{4, "input", projectionBody(3, "0-in"), model.RoleUser},
-		{5, "reasoning", projectionBody(3, "1-plan"), model.RoleAssistant},
-		{6, "tool command", projectionBody(3, "2-call"), model.RoleTool},
-		{7, "output", projectionBody(3, "3-out"), model.RoleAssistant},
+		{1, "input", projectionBody(2, "0-in"), projectionKey(2, "0-in"), event.TypeExternalInput, model.RoleUser},
+		{3, "output", projectionBody(2, "3-out"), projectionKey(2, "3-out"), event.TypeAgentOutput, model.RoleAssistant},
+		{4, "input", projectionBody(3, "0-in"), projectionKey(3, "0-in"), event.TypeExternalInput, model.RoleUser},
+		{5, "reasoning", projectionBody(3, "1-plan"), projectionKey(3, "1-plan"), event.TypeThinkingPlan, model.RoleAssistant},
+		{6, "tool command", projectionBody(3, "2-call"), projectionKey(3, "2-call"), event.TypeActionCommand, model.RoleTool},
+		{7, "output", projectionBody(3, "3-out"), projectionKey(3, "3-out"), event.TypeAgentOutput, model.RoleAssistant},
 	} {
-		if messages[leg.at].Content != leg.body || messages[leg.at].Role != leg.role {
-			t.Fatalf("message %d = (%q, %q), want the raw %s %q presented as a %q message", leg.at, messages[leg.at].Content, messages[leg.at].Role, leg.name, leg.body, leg.role)
+		want := presentedTicket(leg.key, leg.typ) + " " + leg.body
+		if messages[leg.at].Content != want || messages[leg.at].Role != leg.role {
+			t.Fatalf("message %d = (%q, %q), want the raw %s %q presented as a %q message behind the ticket of the fact it carries",
+				leg.at, messages[leg.at].Content, messages[leg.at].Role, leg.name, want, leg.role)
 		}
 	}
 
@@ -3616,12 +3645,12 @@ func newFoldWindowRun(t *testing.T, ctx context.Context, provider model.Model) (
 	run, err := assembly.Assemble(ctx, &config.Declaration{
 		Entry: "agent-a",
 		Agents: []config.AgentSpec{{
-			ID:                    "agent-a",
-			Model:                 "model-a",
-			MaxTokens:             projectionWindowTokens,
-			ProviderContextWindow: projectionWindowTokens * 32,
-			CompressThreshold:     0.3,
-			KeepRecentTasks:       1,
+			ID:                "agent-a",
+			Model:             "model-a",
+			ReplayWindow:      projectionWindowTokens,
+			ContextWindow:     projectionWindowTokens * 32,
+			CompressThreshold: 0.3,
+			KeepRecentTasks:   1,
 		}},
 	}, map[event.AgentID]assembly.NativeAgent{
 		"agent-a": {Model: provider},
@@ -3720,9 +3749,10 @@ func runRangeHeadSurvivesFoldRewrite(t *testing.T) {
 		material   = "tagent: task task-77 settled\nresult:\nthe fold-rewritten head worker reports 91"
 	)
 	notice := task.Notice{TaskID: taskID, Kind: task.NoticeSettled}
+	noticeKey := agent.NoticeFactKey(invocation, notice)
 	before := projectionKeysOf(projectionEntriesOf(t, run, addr.SessionID))
 	if _, err := run.CommitToSession(ctx, addr, event.Event{
-		Key:       agent.NoticeFactKey(invocation, notice),
+		Key:       noticeKey,
 		Type:      event.TypeFeedback,
 		Timestamp: projectionBase.Add(time.Hour),
 		Meta: map[string]string{
@@ -3754,10 +3784,17 @@ func runRangeHeadSurvivesFoldRewrite(t *testing.T) {
 	}
 	copies := 0
 	for _, msg := range requests[len(requests)-1].Messages {
+		// Every form the notice reaches a request in: its material, the ticket
+		// that addresses it, the notice card, and the one-line read the budget
+		// degrades it to. The ticket is peeled off before the degraded read is
+		// matched, so the address a correct presentation carries in front of that
+		// read is not mistaken for a second copy of the notice.
+		read := withoutPresentedTicket(msg.Content)
 		if strings.Contains(msg.Content, "task-77 settled") ||
-			strings.HasPrefix(msg.Content, "[ticket ") ||
-			strings.HasPrefix(msg.Content, "[notice ") ||
-			msg.Content == "settled" {
+			strings.Contains(msg.Content, string(noticeKey)) ||
+			strings.HasPrefix(read, "[ticket ") ||
+			strings.HasPrefix(read, "[notice ") ||
+			read == "settled" {
 			copies++
 		}
 	}
@@ -4151,7 +4188,7 @@ func persistenceHostDocument(root, chatEndpoint, embeddingEndpoint string) strin
 		"agents:\n"+
 		"  %s:\n"+
 		"    model: %s\n"+
-		"    max_tokens: 4096\n"+
+		"    replay_window: 4096\n"+
 		"    max_tool_iterations: 12\n"+
 		"    tools:\n"+
 		"      - { kind: tool, id: %s }\n"+

@@ -182,7 +182,6 @@ func skillBodyTurn(t *testing.T, ctx context.Context, surface []trpctool.Callabl
 			ID:     string(agent),
 			Model:  "model-a",
 			Tools:  []config.ToolRef{{Name: knowledge.SkillLoadToolName}},
-			Params: map[string]float64{},
 		}},
 	}, map[event.AgentID]assembly.NativeAgent{
 		agent: {Model: provider, Tools: surface},

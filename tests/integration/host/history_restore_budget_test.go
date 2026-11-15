@@ -1,6 +1,6 @@
 // The history-restore anchors of the host: a session chain's history must
 // survive the restart and reach the next request no matter what presentation
-// budget its declaration names. A declaration of max_tokens: 0 names no
+// budget its declaration names. A declaration of replay_window: 0 names no
 // presentation budget — the window is the budget and the fold measure, never
 // the registration gate — so the chain registers its mapped sequence exactly
 // as a budgeted one does and the request after the restart carries the old
@@ -58,11 +58,11 @@ func requireRequestHistory(t *testing.T, request scriptedRequest, role model.Rol
 		what, role, content, len(request.Messages))
 }
 
-// TestHistoryRestoresWithoutBudget requires a max_tokens: 0 chain to restore its history into the next request.
+// TestHistoryRestoresWithoutBudget requires a replay_window: 0 chain to restore its history into the next request.
 //   - positive: the request after the restart carries the turn-one input and answer of the same session
-//   - negative A: max_tokens: 32000 still folds the chain into synthetic products and still shapes presentation
-//   - negative B: the budgeted probe request degrades to a ticket and cuts the huge tail; max_tokens: 0 never does
-//   - consumer: the scenario boots the formal assembly over a max_tokens: 0 document and drives real Host.Invoke turns
+//   - negative A: replay_window: 32000 still folds the chain into synthetic products and still shapes presentation
+//   - negative B: the budgeted probe request degrades to a ticket and cuts the huge tail; replay_window: 0 never does
+//   - consumer: the scenario boots the formal assembly over a replay_window: 0 document and drives real Host.Invoke turns
 //
 // 契约: docs/wiki/agent/event-flow.md#projection-lifecycle
 func TestHistoryRestoresWithoutBudget(t *testing.T) {
@@ -73,7 +73,7 @@ func TestHistoryRestoresWithoutBudget(t *testing.T) {
 }
 
 // runHistoryRestoresWithoutBudget drives one conversation turn under a
-// max_tokens: 0 declaration, closes the host and re-boots the same document
+// replay_window: 0 declaration, closes the host and re-boots the same document
 // over the same storage root, and requires the next turn's request to carry the
 // turn the run before it committed: the input that opened it and the answer
 // that closed it, each in its own role. The zero window registers its mapped
@@ -97,7 +97,7 @@ func runHistoryRestoresWithoutBudget(t *testing.T) {
 	provider.decide = fidelityGate(script.decide)
 
 	sender := newRecordingSender()
-	host, configPath := bootFidelityHost(t, provider, sender, t.TempDir(), "    max_tokens: 0\n")
+	host, configPath := bootFidelityHost(t, provider, sender, t.TempDir(), "    replay_window: 0\n")
 	keepIntegrityHost(t, script, host)
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
@@ -131,7 +131,7 @@ func runHistoryRestoresWithoutBudget(t *testing.T) {
 	requireRequestHistory(t, target, model.RoleUser, inputOne, "turn-one input")
 	requireRequestHistory(t, target, model.RoleAssistant, answerOne, "turn-one answer")
 	if _, registered := rebooted.Run().ReplayEntries(addr.SessionID); !registered {
-		t.Fatalf("the restarted run registered no mapped sequence for the max_tokens: 0 chain, so the history above could not have been assembled from it")
+		t.Fatalf("the restarted run registered no mapped sequence for the replay_window: 0 chain, so the history above could not have been assembled from it")
 	}
 	if turnTwoErr != nil {
 		t.Fatalf("the turn after the restart ended by error: %v", turnTwoErr)
@@ -139,12 +139,12 @@ func runHistoryRestoresWithoutBudget(t *testing.T) {
 	if turnTwo.Terminal != model.KindCompleted {
 		t.Fatalf("the turn after the restart = %v, want the completed turn", turnTwo.Terminal)
 	}
-	t.Logf("[history-restore 1] positive: the request after the restart carries the turn-one history (%q, %q) under max_tokens: 0", inputOne, answerOne)
+	t.Logf("[history-restore 1] positive: the request after the restart carries the turn-one history (%q, %q) under replay_window: 0", inputOne, answerOne)
 	closeIntegrityHost(t, ctx, rebooted)
 }
 
 // runPresentationUnlimitedAtZero drives one oversized turn under a
-// max_tokens: 0 declaration, restarts the run and requires the next request to
+// replay_window: 0 declaration, restarts the run and requires the next request to
 // carry the whole projection: the tail marker of the huge turn is on the wire
 // and no ticket stands in its place. A presentation capped at some default
 // budget would degrade the entry to a ticket here, and a fold that consumed
@@ -169,7 +169,7 @@ func runPresentationUnlimitedAtZero(t *testing.T) {
 	provider.decide = fidelityGate(script.decide)
 
 	sender := newRecordingSender()
-	host, configPath := bootFidelityHost(t, provider, sender, t.TempDir(), "    max_tokens: 0\n")
+	host, configPath := bootFidelityHost(t, provider, sender, t.TempDir(), "    replay_window: 0\n")
 	keepIntegrityHost(t, script, host)
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
@@ -202,13 +202,13 @@ func runPresentationUnlimitedAtZero(t *testing.T) {
 	}
 	text := requestText(target)
 	if !strings.Contains(text, hugeTail) {
-		t.Fatalf("the max_tokens: 0 request presented no full projection: the tail marker %q is absent, so the unbounded material degraded (wire carries %d chars)", hugeTail, len(text))
+		t.Fatalf("the replay_window: 0 request presented no full projection: the tail marker %q is absent, so the unbounded material degraded (wire carries %d chars)", hugeTail, len(text))
 	}
 	if !strings.Contains(text, hugeHead) {
-		t.Fatalf("the max_tokens: 0 request presented no full projection: the head marker %q is absent", hugeHead)
+		t.Fatalf("the replay_window: 0 request presented no full projection: the head marker %q is absent", hugeHead)
 	}
-	if strings.Contains(text, "[ticket") {
-		t.Fatalf("the max_tokens: 0 request degraded material to a ticket although the declaration names no budget: %q", text)
+	if strings.Contains(text, "…\n[evt_") {
+		t.Fatalf("the replay_window: 0 request degraded material to a ticket although the declaration names no budget: %q", text)
 	}
 	if turnTwoErr != nil {
 		t.Fatalf("the unbounded probe ended by error: %v", turnTwoErr)
@@ -216,12 +216,12 @@ func runPresentationUnlimitedAtZero(t *testing.T) {
 	if turnTwo.Terminal != model.KindCompleted {
 		t.Fatalf("the unbounded probe = %v, want the completed turn", turnTwo.Terminal)
 	}
-	t.Logf("[history-restore 2] negative: the max_tokens: 0 request presents the whole %d-char projection with no ticket", len(text))
+	t.Logf("[history-restore 2] negative: the replay_window: 0 request presents the whole %d-char projection with no ticket", len(text))
 	closeIntegrityHost(t, ctx, rebooted)
 }
 
 // runBudgetWindowStillFoldsAndShapes fills one session chain under a budgeted
-// declaration (max_tokens: 32000) — small fill turns, one oversized turn, and a
+// declaration (replay_window: 32000) — small fill turns, one oversized turn, and a
 // probe — and requires both identities of the budget to stand: the age fold
 // still folds the aged turns into synthetic products, and the presentation
 // budget still shapes the probe request, which degrades the oversized turn to a
@@ -259,8 +259,8 @@ func runBudgetWindowStillFoldsAndShapes(t *testing.T) {
 
 	sender := newRecordingSender()
 	host, _ := bootFidelityHost(t, provider, sender, t.TempDir(),
-		"    max_tokens: 32000\n"+
-			"    provider_context_window: 64000\n"+
+		"    replay_window: 32000\n"+
+			"    context_window: 64000\n"+
 			"    compress_threshold: 0.1\n"+
 			"    keep_recent_tasks: 2\n")
 	keepIntegrityHost(t, script, host)
@@ -302,7 +302,7 @@ func runBudgetWindowStillFoldsAndShapes(t *testing.T) {
 		t.Fatalf("the provider served no request for the probe turn")
 	}
 	text := requestText(target)
-	if !strings.Contains(text, "[ticket") {
+	if !strings.Contains(text, "…\n[evt_") {
 		t.Fatalf("the budgeted request degraded nothing although the chain carries %d entries over the window: %q", len(entries), text)
 	}
 	if strings.Contains(text, hugeTail) {

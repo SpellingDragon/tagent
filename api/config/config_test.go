@@ -133,11 +133,10 @@ agents:
 `
 
 // sectionsFingerprint is the canonical fingerprint of sectionsCanonical.
-// The request-budget fields (provider_context_window/output_reserve) always
-// encode in the canonical agent core, so this hash migrated once when the two
-// optional budget fields entered the declaration surface; that migration is the
+// The canonical agent core encodes context_window even at zero, so this hash
+// migrates whenever the always-encoded core keys change; each migration is the
 // one config-change fact such a reload publishes, never a silent re-key.
-const sectionsFingerprint = "c8adbfa3fb7121c02814c2ed1b1f742d9a0d11014397dcd90dbef8783fbab0aa"
+const sectionsFingerprint = "3a1232e65efc75960cd95d93a2ac7bd712245585a7a00767df943047ba811ee0"
 
 // TestRequestBudgetFieldsDecodeAndFingerprint pins the two optional budget fields end to end.
 // - both decode from an agent mapping by their declared keys
@@ -149,14 +148,14 @@ func TestRequestBudgetFieldsDecodeAndFingerprint(t *testing.T) {
 		"agents:\n"+
 		"  - id: main\n"+
 		"    model: m1\n"+
-		"    provider_context_window: 128000\n"+
-		"    output_reserve: 4096\n")
+		"    context_window: 128000\n"+
+		"    max_tokens: 4096\n")
 	agent := declaration.Agents[0]
-	if agent.ProviderContextWindow != 128000 {
-		t.Fatalf("provider context window = %d, want 128000", agent.ProviderContextWindow)
+	if agent.ContextWindow != 128000 {
+		t.Fatalf("provider context window = %d, want 128000", agent.ContextWindow)
 	}
-	if agent.OutputReserve != 4096 {
-		t.Fatalf("output reserve = %d, want 4096", agent.OutputReserve)
+	if agent.MaxTokens != 4096 {
+		t.Fatalf("output limit = %d, want 4096", agent.MaxTokens)
 	}
 
 	bare := loadSections(t, "bare-budget.yaml", "entry: main\nagents:\n  - id: main\n    model: m1\n")
@@ -165,8 +164,8 @@ func TestRequestBudgetFieldsDecodeAndFingerprint(t *testing.T) {
 	}
 
 	for _, body := range []string{
-		"entry: main\nagents:\n  - id: main\n    model: m1\n    provider_context_window: -1\n",
-		"entry: main\nagents:\n  - id: main\n    model: m1\n    output_reserve: -1\n",
+		"entry: main\nagents:\n  - id: main\n    model: m1\n    context_window: -1\n",
+		"entry: main\nagents:\n  - id: main\n    model: m1\n    max_tokens: -1\n",
 	} {
 		_, err := decodeConfigFile(context.Background(), writeConfigSource(t, "negative-budget.yaml", body))
 		if err == nil {

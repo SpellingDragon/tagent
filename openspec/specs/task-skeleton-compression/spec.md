@@ -2,7 +2,7 @@
 
 ## Purpose
 
-压缩折叠规则：以 `agent_output` 闭合、按其 `input_events` 消费关系归段的任务回合为段，按线性段龄把已闭合段归入新/中/老三带；新带的过程细节折叠为一条段折叠产物，中/老带整段折叠为一条历史综述。折叠只由投影渲染容量触发，判定与执行各成 `compress.request`/`compress.product` 事实，恢复从产物事实重建。
+压缩折叠规则：以 `agent_output` 闭合、按其 `input_events` 消费关系归段的任务回合为段，按带晋升把已闭合段归入新/中/老三带——近期窗口内的段为新带并原样保留，已离开窗口而未被折叠过的段为中带，其过程细节折叠为一条带事件键票据的段折叠产物，已携带更早折叠产物的段为老带，整段并入一条历史综述。综述正文以机械有界读法为底，会话持有模型时由压缩消费插件产出有界语义综述，字节预算由声明面界定。折叠只由投影渲染容量触发，判定与执行各成 `compress.request`/`compress.product` 事实，恢复从产物事实重建。
 
 ## Requirements
 
@@ -46,16 +46,23 @@
 - **WHEN** 执行切段
 - **THEN** 最后一段为进行中段，其全部条目保留在段内
 
-### Requirement: 新带段折叠过程细节为段折叠产物
+### Requirement: 中带段的过程细节折叠为带事件键票据的段折叠产物
 
-对已闭合且处于新带（`BandNew`，段龄 < `KeepRecentTasks`）的段，折叠 SHALL 只把段内过程细节（`thinking_plan` 与 `action_command`）替换为一条 `segment_fold` 产物，开段输入与闭合 `agent_output` SHALL 原样保留。无过程细节的段 SHALL NOT 产生产物；进行中段 SHALL NOT 折叠；已含合成键的条目 MUST NOT 再次折叠。产物正文 SHALL 是过程条目的一行读法（类型 + 摘要），MUST NOT 是 LLM 生成文本。
+对已离开近期窗口且尚未被折叠过的段（中带），折叠 SHALL 只把段内过程细节（`thinking_plan` 与 `action_command`）替换为一条 `segment_fold` 产物，开段输入与闭合 `agent_output` SHALL 原样保留。近期窗口内的段与进行中段 SHALL 原样保留，其过程细节 MUST NOT 在窗口内被折叠。无过程细节的段 SHALL NOT 产生产物；已携带更早折叠产物的段 MUST NOT 再次折叠其条目；已含合成键的条目 MUST NOT 再次折叠。产物正文 SHALL 是过程条目的一行读法（类型 + 摘要），每行 SHALL 携带该被折条目自己的事件键票据，MUST NOT 是模型生成文本。
 
-#### Scenario: 新带段折叠为一条段折叠产物
+#### Scenario: 中带段折叠为一条段折叠产物
 
-- **GIVEN** 两个已闭合的新带段，每段各有若干 `thinking_plan` 与 `action_command`
+- **GIVEN** 两个已离开近期窗口且过程细节完整的已闭合段，每段各有若干 `thinking_plan` 与 `action_command`
 - **WHEN** 投影容量超过阈值并执行折叠
 - **THEN** 每段的过程细节 SHALL 各自折叠为一条 `segment_fold` 产物
 - **AND** 产物 SHALL 站在原过程条目第一位的位置，输入保持在前、`agent_output` 保持在后
+- **AND** 产物正文每行 SHALL 携带该被折条目自己的 `[evt_<KEY>|<type>]` 票据，票据键集 SHALL 恰等于该产物覆盖的条目集，顺序同折前
+
+#### Scenario: 近期窗口内的段不被折叠过程细节
+
+- **GIVEN** 一个仍在近期窗口内、已闭合且含 `thinking_plan` 与 `action_command` 的段
+- **WHEN** 执行折叠
+- **THEN** 该段 SHALL 原样保留其输入、过程细节与 `agent_output`，MUST NOT 产生段折叠产物
 
 #### Scenario: 无过程细节不产生产物
 
@@ -69,22 +76,43 @@
 - **WHEN** 执行折叠
 - **THEN** 该段的过程细节 SHALL 原样保留，MUST NOT 产生段折叠产物
 
-### Requirement: 中带与老带整段折叠为一条历史综述
+### Requirement: 老带段整段折叠为一条历史综述
 
-段龄达到 `KeepRecentTasks` 的段（`BandMid` 与 `BandOld`）SHALL 整段离开时间线，并合并为一条 `history_summary` 产物置于投影首位。综述正文 SHALL 逐条保留被折条目的类型与摘要读法，MUST NOT 改写为 LLM 生成文本；既有历史综述 SHALL 原样并入，MUST NOT 重复嵌套或丢失其正文。被折叠的原始事件 SHALL 仍留在事实链，可经 `[evt_key]` 票据召回。
+已携带更早一次折叠产物的段（老带）SHALL 整段离开时间线，并合并为一条 `history_summary` 产物置于投影首位。综述正文 SHALL 以机械有界读法为底：逐条保留被折条目的类型与摘要读法，并服从综述字节预算。会话 agent 持有模型时，压缩消费插件 SHALL 以模型产出的有界语义综述取代该机械正文；无模型、请求失败或答空 SHALL 保留机械正文并记一行可检索告警，MUST NOT 提交空正文、MUST NOT 阻塞折叠、MUST NOT 使正文超过预算。综述字节预算 SHALL 由声明面 `summary_budget_bytes` 界定，未声明 SHALL 读声明缺省；MUST NOT 由机制常量界定，也 MUST NOT 静默抬到缺省。既有历史综述 SHALL 原样并入，MUST NOT 重复嵌套或丢失其正文。被折叠的原始事件 SHALL 仍留在事实链，可经 `[evt_key]` 票据召回。
 
-#### Scenario: 中带段折成一条历史综述
+#### Scenario: 老带段折成一条历史综述
 
-- **GIVEN** keepRecent=1，历史含 4 个已闭合段，容量超过阈值
+- **GIVEN** keepRecent=1，历史含 4 个已闭合段，其中 3 个已携带更早一次折叠的产物，容量超过阈值
 - **WHEN** 执行折叠
-- **THEN** 段龄 1–3 的段 SHALL 全部离开时间线，合并为投影首位的一条 `history_summary`
+- **THEN** 这 3 个老带段 SHALL 全部离开时间线，合并为投影首位的一条 `history_summary`
 - **AND** 综述正文 SHALL 含这些段的类型 + 摘要读法，最新段仍保留输入、段折叠产物与 `agent_output`
+
+#### Scenario: 中带段的过程细节不并入综述
+
+- **GIVEN** 历史含一个已离开近期窗口、尚未被折叠过的段与一个已携带折叠产物的段
+- **WHEN** 执行折叠
+- **THEN** 前者 SHALL 折为一条段折叠产物留在时间线，MUST NOT 并入历史综述
+- **AND** 后者 SHALL 并入历史综述
+
+#### Scenario: 综述正文由模型产出并服从声明预算
+
+- **GIVEN** 声明 `summary_budget_bytes: 512`，会话 agent 持有模型，老带材料折为一条 `history_summary`
+- **WHEN** 压缩消费插件执行该判定
+- **THEN** 落链 `compress.product` 的正文 SHALL 是模型产出的语义综述，其长度 SHALL 不超过该声明预算
+- **AND** 未声明该键时正文长度 SHALL 不超过声明缺省，判定侧与执行侧 SHALL 取同一预算
+
+#### Scenario: 无模型或答空保留机械正文并告警
+
+- **GIVEN** 会话 agent 不持有模型，或摘要请求失败、终态非完成、答空
+- **WHEN** 压缩消费插件执行该判定
+- **THEN** 综述正文 SHALL 保留折叠自己铸的机械有界读法，折叠 SHALL NOT 被阻塞
+- **AND** SHALL 记一行可检索告警，MUST NOT 提交空正文或伪造正文
 
 #### Scenario: 老带段并入同一综述
 
-- **GIVEN** keepRecent=2，历史含段龄 6 及以上的段
+- **GIVEN** keepRecent=2，历史含多个已携带折叠产物的老带段
 - **WHEN** 执行折叠
-- **THEN** 老带段 SHALL 与中带段一起并入同一条历史综述，MUST NOT 产生第二条综述
+- **THEN** 老带段 SHALL 一起并入同一条历史综述，MUST NOT 产生第二条综述
 
 #### Scenario: 被折原文仍可召回
 
@@ -94,14 +122,14 @@
 
 ### Requirement: 段龄定级为线性三带
 
-折叠 SHALL 使用 `LevelOfAge`/`BandOfLevel` 的线性段龄规则：`age < KeepRecentTasks` 为 L0（新带），`age < 2×KeepRecentTasks` 为 L1（中带），`age < 3×KeepRecentTasks` 为 L2（中带），其余为 L3（老带）。进行中段 SHALL 读 L0/新带。MUST NOT 使用指数段龄边界（`keepRecent × 2^level`），也 MUST NOT 把基础定级封顶于 L2。`KeepRecentTasks < 1` SHALL 读默认值 2。
+段龄阶梯 SHALL 为线性三带：段龄小于 `KeepRecentTasks` 为最新一档，小于其窗口两倍为第二档，小于其窗口三倍为第三档，其余为最老一档。MUST NOT 使用指数段龄边界，也 MUST NOT 把基础定级封顶于第二档。该阶梯 SHALL 只陈述段与最新段之间的距离读法，MUST NOT 决定段归入哪一带：折叠的带归属 SHALL 由带晋升决定——近期窗口内的段为新带，已携带更早折叠产物的段为老带，其余为中带。进行中段 SHALL 读最新一档。`KeepRecentTasks` 未设置 SHALL 读声明缺省窗口值。
 
-#### Scenario: keepRecent=2 的线性边界
+#### Scenario: 缺省窗口的线性边界
 
-- **GIVEN** KeepRecentTasks=2
-- **WHEN** 计算已闭合段的级别与带
-- **THEN** age=1 SHALL 为 L0/新带，age=2 与 age=4 SHALL 为 L1/L2（中带），age=6 SHALL 为 L3/老带
-- **AND** SHALL NOT 出现指数边界的更早降级（例如 age=4 仍应为 L2 而非 L3）
+- **GIVEN** KeepRecentTasks 未设置（读缺省窗口）
+- **WHEN** 计算已闭合段的段龄阶梯与带晋升结果
+- **THEN** 相邻两段窗口内的段龄 SHALL 读同一档，阶梯 SHALL 随段龄线性推进，SHALL NOT 出现指数边界的更早降级
+- **AND** 段的折叠带 SHALL 只由带晋升给出（窗口内为新带、携带折叠产物为老带、其余为中带），SHALL NOT 由阶梯档位直接给出
 
 #### Scenario: 未设置窗口读默认值
 
@@ -138,7 +166,7 @@
 
 ### Requirement: 进行中段与近期窗口保持原样
 
-无 `agent_output` 闭合的进行中段 SHALL 不参与任何折叠，其全部条目（含 pending 输入与过程细节）SHALL 原样保留。最近 `KeepRecentTasks` 个已闭合段 SHALL 保持输入与输出骨架；只有其段内过程细节可被折为段折叠产物。折叠 MUST NOT 移动进行中段、改变其条目顺序或改写其渲染内容。
+无 `agent_output` 闭合的进行中段 SHALL 不参与任何折叠，其全部条目（含 pending 输入与过程细节）SHALL 原样保留。最近 `KeepRecentTasks` 个已闭合段（新带）SHALL 原样保留输入、输出骨架与段内过程细节，MUST NOT 在窗口内被折叠。折叠 MUST NOT 移动进行中段、改变其条目顺序或改写其渲染内容。
 
 #### Scenario: 进行中段完整保留
 
@@ -146,11 +174,11 @@
 - **WHEN** 执行任意折叠
 - **THEN** 该进行中段的全部条目 SHALL 原样保留，不被丢弃、归档或改写
 
-#### Scenario: 最近窗口骨架保留
+#### Scenario: 最近窗口原样保留
 
-- **GIVEN** keepRecent=2，历史含 3 个已闭合段
-- **WHEN** 执行折叠且最老段进入历史综述
-- **THEN** 最近 2 段的 `external_input` 与 `agent_output` SHALL 保持原样，仅其过程细节可被折为段折叠产物
+- **GIVEN** keepRecent=2，历史含数个已闭合段
+- **WHEN** 执行折叠且窗口外的段离开时间线
+- **THEN** 最近两段的 `external_input`、`agent_output` 与过程细节 SHALL 保持原样，MUST NOT 出现段折叠产物
 
 ### Requirement: 压缩窗口由三字段界定
 

@@ -41,7 +41,7 @@ func TestJourneySettledResultReachesUser(t *testing.T) {
 	provider.scriptAnswers(journeyEntryModel, firstAnswer)
 	provider.scriptAnswers(journeyEntryModel, settledBody)
 	provider.scriptGated(journeyWorkerModel, gate, workerResult)
-	host := bootJourney(t, provider, journeySpec{Delegate: "worker", MaxTokens: 4096})
+	host := bootJourney(t, provider, journeySpec{Delegate: "worker", ReplayWindow: 4096})
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 

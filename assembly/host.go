@@ -551,6 +551,14 @@ func Boot(configPath string, opts ...HostOption) (*Host, error) {
 	// reads the variable at call time instead of capturing a nil instance, because
 	// a call can only ever run beside a published host.
 	var host *Host
+	// The governance state is the host's own whenever the host opens the gate: the
+	// ledger, the goal registry and the approval book are one state the framework
+	// checkpoint carries, so a restart reads the cut they state instead of scanning
+	// the streams and the request files they committed. A caller that mounted its
+	// own policy owns that state and seats it itself.
+	var governanceLedger *governance.DenialLedger
+	var governanceGoals *governance.GoalRegistry
+	var governanceState *governance.StateSeat
 	hostApprovals := cfg.approvals
 	if hostApprovals == nil {
 		if root := storageRootOf(plan); root != "" {
@@ -559,9 +567,14 @@ func Boot(configPath string, opts ...HostOption) (*Host, error) {
 				cancel()
 				return nil, fmt.Errorf("tagent: create the approvals directory %s: %w", dir, err)
 			}
-			book := approval.NewApprovalManager(dir, 0)
+			book := approval.NewApprovalManager(dir, 0, hostApprovalSeat(cfg.policy == nil)...)
 			hostApprovals = book
 		}
+	}
+	if cfg.policy == nil {
+		governanceLedger = governance.NewDenialLedger()
+		governanceGoals = governance.NewGoalRegistry()
+		governanceState = governance.NewStateSeat(governanceLedger, governanceGoals, hostApprovals)
 	}
 	var capture *rl.TrajectoryCapture
 	if root := storageRootOf(plan); root != "" {
@@ -608,6 +621,8 @@ func Boot(configPath string, opts ...HostOption) (*Host, error) {
 			return governance.Open(
 				governance.WithRiskRules(rules...),
 				governance.WithApprovals(hostApprovals),
+				governance.WithLedger(governanceLedger),
+				governance.WithGoals(governanceGoals),
 			)
 		})
 	} else {
@@ -672,45 +687,19 @@ func Boot(configPath string, opts ...HostOption) (*Host, error) {
 		options = append(options, WithReflectionAnchors(anchorsPath))
 	}
 	options = append(options, WithPlugins(func(run *Run) ([]plugin.Instance, error) {
-		instances := make([]plugin.Instance, 0, 2)
-		meditationPort.bindFaces(meditation.Faces{
-			Gate:          run.ReflectionGate(),
-			Observed:      run.ObservationFacts(),
-			Input:         run.ReflectionInput(),
-			ModelInFlight: run.ModelInFlight,
-			Instance:      run.instance,
-			Sessions:      meditationPort,
-		}, func(outcome meditation.TickOutcome) {
-			plan := meditationPort.planInEffect()
-			if plan == nil {
-				return
-			}
-			assemblyInfo("tagent: meditation driver of %s: %s (%s)", plan.Agent, outcome.Decision.Disposition, outcome.Decision.Reason)
-		})
-		if _, err := meditationPort.mountReflection(meditationPlan); err != nil {
+		seam := &hostRunPluginSeam{
+			run:  run,
+			host: func() *Host { return host },
+			port: meditationPort,
+			plan: meditationPlan,
+			decl: decl,
+		}
+		instances, err := hostPlugins(seam)
+		if err != nil {
 			return nil, err
 		}
-		driver = newGenerationReflection(meditationPort)
-		instances = append(instances, driver)
-		settleDriver = NewSettleDriver(
-			run.CommittedEvent,
-			func() SettleWake {
-				if run.store == nil {
-					return nil
-				}
-				return run.store
-			},
-			func(ctx context.Context, addr event.Address, fact event.Event) error {
-				return host.fireNoticeTurn(ctx, addr, fact)
-			},
-		)
-		settleDriver.setHandoff(func(ctx context.Context, addr event.Address, notice task.Notice) error {
-			return host.handoffSettledBodies(ctx, addr, notice)
-		})
-		if scope, declared := settleScopeOfDocument(decl); declared {
-			settleDriver.DeclareScope(scope.declaring, scope.targets...)
-		}
-		instances = append(instances, settleDriver)
+		driver = seam.driver
+		settleDriver = seam.settle
 		return instances, nil
 	}))
 	if cfg.approver != nil {
@@ -778,6 +767,10 @@ func Boot(configPath string, opts ...HostOption) (*Host, error) {
 	}
 	trace("host built")
 	if err := host.registerDeliverySlice(); err != nil {
+		cancel()
+		return nil, host.abortBoot(err)
+	}
+	if err := host.seatGovernance(ctx, governanceState); err != nil {
 		cancel()
 		return nil, host.abortBoot(err)
 	}

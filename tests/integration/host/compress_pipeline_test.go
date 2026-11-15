@@ -358,9 +358,9 @@ func TestCompressPipelineJudgesThenExecutes(t *testing.T) {
 	decl := &config.Declaration{
 		Entry: "agent-a",
 		Agents: []config.AgentSpec{{
-			ID:        "agent-a",
-			Model:     "model-a",
-			MaxTokens: 100,
+			ID:           "agent-a",
+			Model:        "model-a",
+			ReplayWindow: 100,
 		}},
 	}
 	run, err := assembly.Assemble(ctx, decl, map[event.AgentID]assembly.NativeAgent{
@@ -462,7 +462,7 @@ func TestCompressProductRestoresAfterRestart(t *testing.T) {
 	storage := ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: t.TempDir()}
 	decl := &config.Declaration{
 		Entry:  "agent-a",
-		Agents: []config.AgentSpec{{ID: "agent-a", Model: "model-a", MaxTokens: 100, ProviderContextWindow: 200}},
+		Agents: []config.AgentSpec{{ID: "agent-a", Model: "model-a", ReplayWindow: 100, ContextWindow: 200}},
 	}
 	newAgents := func(provider *entryModel) map[event.AgentID]assembly.NativeAgent {
 		return map[event.AgentID]assembly.NativeAgent{"agent-a": {Model: provider}}
