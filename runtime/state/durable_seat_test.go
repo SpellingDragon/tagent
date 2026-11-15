@@ -49,15 +49,9 @@ func statedPayloadOf(t *testing.T, ctx context.Context, account task.SettleAccou
 	return body
 }
 
-// TestDurableLoadReadsTheTaskSlice pins the read a boot pays for a task its
-// checkpoint covers: the entry states the account, so the commit reads no key of the
-// task families and holds the same tables a whole-log load holds.
-//
-//   - positive: the seated account equals the loaded one in every table a recovery
-//     reads — revisions, facts, mutations, owed notifications, consumption receipts,
-//     attempts and refusals — and no fact, admission or receipt prefix was read
-//   - negative of the read: the same commit seated from no entry reads the five
-//     prefixes whole, so a zero read is the slice and never an empty log
+// TestDurableLoadReadsTheTaskSlice pins the read a boot pays for a task its checkpoint covers.
+//   - positive: the seated account equals the loaded one in the tables a recovery reads — revisions, facts, owed notices, receipts — with no prefix read
+//   - negative of the read: the same commit seated from no entry reads the five prefixes whole, so a zero read is the slice and never an empty log
 //
 // 契约: docs/wiki/reliability/durable-delivery.md#canonical-fact-resolution
 func TestDurableLoadReadsTheTaskSlice(t *testing.T) {
@@ -76,8 +70,6 @@ func TestDurableLoadReadsTheTaskSlice(t *testing.T) {
 	}
 
 	seated := NewEmptyDurableCommit(log, nil)
-	// The tail is stated empty rather than left nil: nil is a storage that states no
-	// cut, which is the whole-log read this anchor holds the slice against.
 	if err := seated.Seat(ctx, statedPayloadOf(t, ctx, loaded, entry), map[string]struct{}{}); err != nil {
 		t.Fatalf("seat the task account from the checkpoint: %v", err)
 	}
@@ -101,20 +93,16 @@ func TestDurableLoadReadsTheTaskSlice(t *testing.T) {
 			len(loadedReceipts.Consumed), len(loadedReceipts.Attempts), len(loadedReceipts.Rejected))
 	}
 
-	// The negative of the read: an account seated from no entry pays the whole log.
 	whole := NewEmptyDurableCommit(log, nil)
 	if err := whole.Seat(ctx, nil, nil); err != nil {
 		t.Fatalf("seat the commit from the whole log: %v", err)
 	}
 	if scans := whole.LoadStats().Scans; len(scans) != 5 {
-		t.Fatalf("the whole-log seat read %d prefix(es), want the five", len(scans))
+		t.Fatalf("the whole-log seat read %d prefix(es), want the five an account seated from no entry pays", len(scans))
 	}
 }
 
-// TestDurableLoadRefusesAMismatchedReceiptIdentity pins the checkpoint a boot refuses
-// to seat: an entry stating a receipt under another task than the one it answers. A
-// seat that dropped such a receipt would owe the notification it closed a second
-// delivery, so the refusal is named and nothing is seated.
+// TestDurableLoadRefusesAMismatchedReceiptIdentity pins the checkpoint a boot refuses to seat: a receipt stated under another task.
 //
 // 契约: docs/wiki/reliability/durable-delivery.md#canonical-fact-resolution
 func TestDurableLoadRefusesAMismatchedReceiptIdentity(t *testing.T) {
@@ -139,7 +127,7 @@ func TestDurableLoadRefusesAMismatchedReceiptIdentity(t *testing.T) {
 	}
 	err = NewEmptyDurableCommit(log, nil).Seat(ctx, body, map[string]struct{}{})
 	if !errors.Is(err, ErrSeatRefused) {
-		t.Fatalf("the seat of a refusal stated under another task = %v, want the mismatch named", err)
+		t.Fatalf("the seat of a refusal stated under another task = %v, want the mismatch named: a seat that dropped such a receipt would owe the notification it closed a second delivery", err)
 	}
 }
 

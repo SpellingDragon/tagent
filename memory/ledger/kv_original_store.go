@@ -53,7 +53,7 @@ type kvOriginalStore struct {
 	loaded  bool
 	// coldRoot is the directory of the cold journal the originals of settled facts
 	// were relocated into, empty for a store that relocates none. The cold view is
-	// opened on the first read of an original the hot journal no longer holds, never
+	// opened on the first read of an original the hot journal does not hold, never
 	// at boot: a boot that opened it would read the settled history it exists to
 	// keep out of the boot.
 	coldRoot string
@@ -180,7 +180,7 @@ func (s *kvOriginalStore) WithColdRoot(root string) *kvOriginalStore {
 }
 
 // coldViewLocked answers the opened cold journal, opening it on the first read of
-// an original the hot journal no longer holds and never at boot. A store beside no
+// an original the hot journal does not hold and never at boot. A store beside no
 // cold root, and one whose hot journal states that nothing was ever relocated,
 // answers false: opening a cold journal no pass filled would read an empty store.
 // The caller holds the lock.
@@ -264,6 +264,7 @@ func (s *kvOriginalStore) entryLocked(ctx context.Context, key event.EventID) (*
 // Put commits the original bytes of ref and publishes the reference once its barrier returns success.
 //   - Different event keys always own independent bodies; a second scope on the same key joins its references, and other bytes under a held key are refused
 //   - The body and the reference that names it travel in one batch, so a reader never sees a reference whose body is missing and a failed commit leaves neither behind
+//   - An original a relocation moved into the cold journal is still a committed original: a repeating commit answers as the duplicate it is, other bytes under the identity are refused, and a new reference re-files the body beside the reference it names
 func (s *kvOriginalStore) Put(ctx context.Context, ref OriginalRef, body []byte) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -287,11 +288,6 @@ func (s *kvOriginalStore) Put(ctx context.Context, ref OriginalRef, body []byte)
 	entry, held := s.byKey[ref.Key]
 	settled := false
 	if !held {
-		// An original a relocation moved into the cold journal is still a committed
-		// original: a commit repeating it answers as the duplicate it is, other bytes
-		// under the identity are refused, and a new reference re-files the body beside
-		// the reference it names, so neither journal ever states a reference without
-		// the independent body of the same key.
 		coldEntry, coldHeld, err := s.coldEntryLocked(ctx, ref.Key)
 		if err != nil {
 			return err

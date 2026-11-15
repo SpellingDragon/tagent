@@ -286,7 +286,7 @@ type FileSegmentStore struct {
 	// commitSeq is the greatest commit sequence this store assigned, so the next
 	// commit takes one past it and no commit ever shares the rank of another. It is
 	// past EventCount when an entry whose window meta did not arrive stayed
-	// unpublished, because such an entry states a commit the count no longer holds.
+	// unpublished, because such an entry states a commit the count does not report.
 	commitSeq int64
 	// coldCommit is the greatest commit sequence a relocation moved into the cold
 	// journal. A newest-first walk reads the cold journal only while its resident
@@ -418,10 +418,6 @@ func (s *FileSegmentStore) Load(ctx context.Context) error {
 	s.commitSeq = int64(s.count)
 	s.retired = retired
 	s.coldCommit = coldCommit
-	// A published entry states its own commit sequence, which is past the count
-	// when an entry whose window meta did not arrive stayed out of the published
-	// state: assigning the next sequence below one already filed would rank a new
-	// commit as an old one.
 	for _, position := range published {
 		if position.commit > s.commitSeq {
 			s.commitSeq = position.commit
@@ -549,9 +545,10 @@ func segmentIndexEntry(key string) (int, event.EventID, bool) {
 // StoreEvent commits one event behind the segment commit barrier: the event
 // body, its index entry and the window meta the window needs are one batch
 // committed before the event reaches the read cache, the resident index, the
-// event count or the caller. A repeat of the committed record returns success
-// without a second fact, other bytes under the same event key are refused, and a
-// failed commit leaves nothing published.
+// event count or the caller.
+//
+//   - A repeat of the committed record returns success without a second fact, other bytes under the same event key are refused, and a failed commit leaves nothing published.
+//   - A fact a relocation moved into the cold journal is still a committed fact: committing it again answers as the duplicate it is, never as a second landing of one identity.
 func (s *FileSegmentStore) StoreEvent(ctx context.Context, rec SegmentRecord) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -580,9 +577,6 @@ func (s *FileSegmentStore) StoreEvent(ctx context.Context, rec SegmentRecord) er
 		}
 		return nil
 	}
-	// A fact a relocation moved into the cold journal is still a committed fact: a
-	// commit of it again answers as the duplicate it is, never as a second landing
-	// of one identity.
 	coldStored, coldHeld, err := s.coldEventLocked(ctx, rec.EventKey)
 	if err != nil {
 		return err
@@ -789,7 +783,7 @@ func (s *FileSegmentStore) coldViewLocked(ctx context.Context) (AtomicStore, boo
 	return cold, true, nil
 }
 
-// coldEventLocked answers one event the hot journal no longer holds, from the cold
+// coldEventLocked answers one event the hot journal does not hold, from the cold
 // journal: the bytes that were committed and the position they were committed at,
 // so a relocation never changes what a read by identity answers. It answers false
 // beside no error for an identity neither journal holds — a key no commit ever
@@ -875,17 +869,10 @@ func (s *FileSegmentStore) WithRetirement(on bool) *FileSegmentStore {
 // identity from the cold journal and EventCount keeps stating the whole committed
 // history, so a bounded hot journal is never a store that lost its history.
 //
-// The kept key set is the caller's, never one this store derives: which facts the
-// recovery authority still reads hot is its answer, and a store that invented its
-// own would be a second oracle beside it. The set is what the watermark leaves
-// behind — the tail past the checkpoint — because a fact the watermark settled
-// stays readable from the cold journal by identity.
-//
-// A pass settles the keys it read in one snapshot and nothing else: a key a writer
-// commits while the pass is deciding is kept hot, because a family whose reader
-// cannot reach the cold journal — the task records a boot scans — would otherwise
-// move away under the reader that needs it. The next pass reads that key in its own
-// snapshot and settles it from there.
+//   - The kept key set is the caller's, never one this store derives: which facts the recovery authority still reads hot is its answer, and a store that invented its own would be a second oracle beside it.
+//   - The set is what the watermark leaves behind, the tail past the checkpoint, because a fact the watermark settled stays readable from the cold journal by identity.
+//   - A pass settles the keys it read in one snapshot, so a key a writer commits while the pass is deciding is kept hot: a family whose reader cannot reach the cold journal, the task records a boot scans, would otherwise move away under the reader that needs it.
+//   - The pass appends the settled keys to the cold journal, so a view opened before it answers the index it read then: the next cold read opens the journal that holds the bytes this pass copied.
 func (s *FileSegmentStore) RetireFacts(ctx context.Context, keepKeys map[event.EventID]struct{}) (RelocateReport, error) {
 	if err := ctx.Err(); err != nil {
 		return RelocateReport{}, err
@@ -936,9 +923,6 @@ func (s *FileSegmentStore) RetireFacts(ctx context.Context, keepKeys map[event.E
 	s.windows = windows
 	s.retired = retired
 	s.coldCommit = coldCommit
-	// The pass appended the settled keys to the cold journal, so a view opened
-	// before it answers the index it read then: the next cold read opens the journal
-	// that holds the bytes this pass copied.
 	s.cold = nil
 	return report, nil
 }
@@ -964,6 +948,9 @@ func originalFamilyEntry(key string) (event.EventID, bool) {
 // because a set of event keys says nothing about a checkpoint count or a task
 // record. A key a writer commits after this snapshot is not in the answer, so the
 // pass leaves it hot for the next one. The caller holds the lock.
+//
+//   - An original of a fact this pass settles leaves with its fact: the reference and the independent body are the bytes the fact was committed with, so a hot journal that keeps them beside a cold fact keeps the settled history on disk.
+//   - An original whose fact this store does not state stays where it is: a key set of settled facts judges no fact it cannot name, and the two families travel together, which is the pairing the cold copy verification enforces.
 func (s *FileSegmentStore) keepKeysLocked(ctx context.Context, keepKeys map[event.EventID]struct{}) ([]string, int, int64, error) {
 	keys, err := s.kv.Keys(ctx, "")
 	if err != nil {
@@ -1009,12 +996,6 @@ func (s *FileSegmentStore) keepKeysLocked(ctx context.Context, keepKeys map[even
 			}
 			continue
 		}
-		// An original of a fact this pass settles leaves with its fact: the reference
-		// and the independent body are the bytes the fact was committed with, so a
-		// hot journal that keeps them beside a cold fact keeps the settled history on
-		// disk. The two families travel together, which is the pairing the cold copy
-		// verification enforces. An original whose fact this store does not state
-		// stays where it is: a key set of settled facts judges no fact it cannot name.
 		if eventKey, named := originalFamilyEntry(key); named {
 			if _, kept := keepKeys[eventKey]; kept {
 				continue
@@ -1053,6 +1034,9 @@ func (s *FileSegmentStore) IndexEntries() int {
 // window, with the event key as the last tie-break. The body of each event is
 // read on demand and handed to visit alone, so an enumeration never holds the
 // whole store in memory. A visit error ends the enumeration and is returned.
+//
+//   - A store that relocated part of its history still answers every event it committed: the delivery scan that reconciles what the chain settled walks the settled facts after the resident ones, each answer carrying the position it was committed at.
+//   - An identity the hot journal also states is walked once, at its resident place: one identity names one immutable fact, and a copy a relocation left in the cold journal is that same fact rather than a second one.
 func (s *FileSegmentStore) EachEvent(ctx context.Context, visit func(StoredEvent) error) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -1073,13 +1057,6 @@ func (s *FileSegmentStore) EachEvent(ctx context.Context, visit func(StoredEvent
 			return err
 		}
 	}
-	// The settled facts: a store that relocated part of its history still answers
-	// every event it committed, so a consumer that reads the whole history — the
-	// delivery scan that reconciles what the chain settled — walks them after the
-	// resident ones, each answer carrying the position it was committed at. An
-	// identity the hot journal also states is walked once, at its resident place:
-	// one identity names one immutable fact, and a copy a relocation left in the
-	// cold journal is that same fact rather than a second one.
 	relocated, err := s.coldEventKeys(ctx)
 	if err != nil {
 		return err
@@ -1265,18 +1242,11 @@ func (s *FileSegmentStore) eventByKey(ctx context.Context, key event.EventID) (S
 // type: the walk reads the store's commit order from the newest commit backwards
 // and stops at the first entry of the type, so a lookup beside a checkpoint filed
 // every cadence commits reads a bounded prefix of the order whatever the history
-// behind it, copies and sorts nothing, and reads no event body. The answer spans
-// partitions: an identity is newer than another because its commit landed later,
-// never because its window, its sequence slot or its partition is higher, so a run
-// whose owner moved between processes reads the checkpoint its newest process
-// filed instead of the one of the highest partition.
+// behind it, copies and sorts nothing, and reads no event body.
 //
-// The order spans the whole history: an entry a relocation moved into the cold
-// journal keeps the commit sequence it was committed with, so it is ranked beside
-// the resident entries instead of behind them, and the cold journal is read only
-// while it could hold an entry newer than the newest resident one.
-//
-// A type the store holds no entry of answers found=false and no error.
+//   - The answer spans partitions: an identity is newer than another because its commit landed later, never because its window, its sequence slot or its partition is higher, so a run whose owner moved between processes reads the checkpoint its newest process filed.
+//   - The order spans the whole history: an entry a relocation moved into the cold journal keeps the commit sequence it was committed with, so it is ranked beside the resident entries and the cold journal is read only while it could hold an entry newer than the newest resident one.
+//   - A type the store holds no entry of answers found=false and no error.
 func (s *FileSegmentStore) NewestOfType(ctx context.Context, typ string) (event.EventID, bool, error) {
 	if err := ctx.Err(); err != nil {
 		return "", false, err
@@ -1306,11 +1276,10 @@ func (s *FileSegmentStore) NewestOfType(ctx context.Context, typ string) (event.
 // relocation moved into the cold journal, ranked into the same order by the commit
 // sequence they carry. An entry whose type is empty leaves the caller to read its
 // body.
+//
+//   - A visit that answers an error ends the walk and answers it: a caller stops a newest-first walk by returning the sentinel its own order names, so the error is the stop and never a failure the walk swallows.
 func (s *FileSegmentStore) EachIndexNewestFirst(ctx context.Context, visit func(key event.EventID, partition int, seq int64, typ string, session event.SessionID) error) error {
 	return s.eachIndexEntryNewestFirst(ctx, func(key event.EventID, position indexPosition) (bool, error) {
-		// A visit that answers an error ends the walk and answers it: a caller stops
-		// a newest-first walk by returning the sentinel its own order names, so the
-		// error is the stop and never a failure the walk swallows.
 		if err := visit(key, position.partition, position.seq, position.typ, position.session); err != nil {
 			return false, err
 		}
@@ -1325,10 +1294,8 @@ func (s *FileSegmentStore) EachIndexNewestFirst(ctx context.Context, visit func(
 // commit sequence, so an entry a relocation moved out keeps the place its commit
 // gave it.
 //
-// The cold journal is read only when it can change the answer: the settled commit
-// the relocation left in the hot journal bounds every entry it moved, so a walk
-// whose resident head is past that bound answers from the hot journal alone and
-// opens no settled history.
+//   - The cold journal is read only when it can change the answer: the settled commit the relocation left in the hot journal bounds every entry it moved, so a walk whose resident head is past that bound answers from the hot journal alone and opens no settled history.
+//   - An identity the hot journal also states is one fact, and the resident place it takes is the newest commit of it: the cold copy a relocation left behind is skipped rather than ranked a second time.
 func (s *FileSegmentStore) eachIndexEntryNewestFirst(ctx context.Context, visit func(key event.EventID, position indexPosition) (bool, error)) error {
 	s.mu.Lock()
 	total := len(s.order)
@@ -1349,8 +1316,6 @@ func (s *FileSegmentStore) eachIndexEntryNewestFirst(ctx context.Context, visit 
 			key, position, held = s.orderEntry(at)
 		}
 		if !readSettled && (!held || position.commit <= coldBound) {
-			// The settled entries can be newer than this resident one, so the two
-			// orders have to be merged from here on.
 			entries, err := s.coldIndex(ctx)
 			if err != nil {
 				return err
@@ -1376,9 +1341,6 @@ func (s *FileSegmentStore) eachIndexEntryNewestFirst(ctx context.Context, visit 
 		if takeSettled {
 			entryKey, entry = settledHead.key, settledHead.position
 			next++
-			// An identity the hot journal also states is one fact, and the resident
-			// place it takes is the newest commit of it: the cold copy a relocation
-			// left behind is skipped rather than ranked a second time.
 			if s.published(entryKey) {
 				continue
 			}

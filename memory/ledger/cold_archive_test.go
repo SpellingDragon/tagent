@@ -1,3 +1,8 @@
+// The relocation contract of the journal tier: a pass moves the facts the caller's
+// live key set does not name out of the hot journal, and every settled fact still
+// answers the bytes and the position it was committed at.
+//
+// 契约: docs/wiki/memory/memory-architecture.md#hard-contracts
 package ledger
 
 import (
@@ -15,10 +20,8 @@ import (
 // settledFixture commits the facts one relocation pass is measured on: three
 // generations of settled events beside the fold each generation filed, and one
 // event of the last generation the live set still names.
-//   - every generation writes its own window, so a window stays hot only while a
-//     live event of that window remains
-//   - each generation's fold is the newest checkpoint of its time, so a rewrite
-//     that lost the commit order would answer an older fold as the newest
+//   - every generation writes its own window, so a window stays hot only while a live event of that window remains
+//   - each generation's fold is the newest checkpoint of its time, so a rewrite that lost the commit order would answer an older fold as the newest
 type settledFixture struct {
 	tier  *Tier
 	root  string
@@ -68,14 +71,10 @@ func commitSettledFacts(t *testing.T, ctx context.Context, root string, generati
 	return fixture
 }
 
-// TestColdArchiveRelocatesSettledKeys pins the relocation pass: the facts the live
-// set does not name leave the hot journal for the cold one, the hot journal shrinks
-// to the live key set, and every relocated fact still reads back with the position
-// it was committed at.
-//   - positive: the settled index entries leave the hot journal and the cold
-//     journal holds their bodies byte for byte
-//   - negative: the live key set never leaves the hot journal, because nothing
-//     settled about it
+// TestColdArchiveRelocatesSettledKeys pins the relocation pass: the facts the live set does not name leave the hot journal.
+//   - positive: the settled index entries leave the hot journal and the cold journal holds their bodies byte for byte
+//   - positive: every relocated fact still reads back with the position it was committed at
+//   - negative: the live key set never leaves the hot journal, because nothing settled about it
 func TestColdArchiveRelocatesSettledKeys(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
@@ -125,8 +124,6 @@ func TestColdArchiveRelocatesSettledKeys(t *testing.T) {
 		t.Fatalf("the hot journal holds %d byte(s) after the relocation beside the %d it held before, want the settled bytes gone", after.Size(), before.Size())
 	}
 
-	// The identity read: every settled fact answers the bytes and the position it
-	// was committed at, whatever journal now holds it.
 	for at, key := range fixture.keys {
 		stored, held, err := fixture.tier.Segments.GetEvent(ctx, key)
 		if err != nil {
@@ -141,9 +138,8 @@ func TestColdArchiveRelocatesSettledKeys(t *testing.T) {
 	}
 }
 
-// TestColdTierReadSurvivesReopen pins the identity read across a restart: the cold
-// journal is opened lazily by the read that needs it, and a process that never read
-// a settled fact pays nothing for the facts it did not read.
+// TestColdTierReadSurvivesReopen pins the identity read across a restart that opened no pass.
+//   - the cold journal is opened lazily by the read that needs it, so a process that never read a settled fact pays nothing for it
 func TestColdTierReadSurvivesReopen(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
@@ -184,10 +180,9 @@ func TestColdTierReadSurvivesReopen(t *testing.T) {
 	}
 }
 
-// TestColdArchiveRewriteKeepsCommitOrder pins the order invariant of the rewrite:
-// the newest checkpoint is still the newest after every settled fact left the hot
-// journal, because a rewrite that walked the log forwards would name an older fold
-// as the newest one.
+// TestColdArchiveRewriteKeepsCommitOrder pins the order invariant of the rewrite.
+//   - the newest checkpoint is still the newest after every settled fact left the hot journal
+//   - negative: a rewrite that walked the log forwards would name an older fold as the newest one
 func TestColdArchiveRewriteKeepsCommitOrder(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
@@ -225,18 +220,10 @@ func TestColdArchiveRewriteKeepsCommitOrder(t *testing.T) {
 	}
 }
 
-// TestColdArchiveRanksTheSettledCommitsBesideTheResidentOnes pins the one order
-// that spans both journals: the hot journal and the cold one each keep their own
-// frame order, and a frame order ranks the records of one log alone, so a walk
-// that read one journal after the other would answer a fact a relocation moved out
-// as older than a fact it left behind.
-//   - positive: a settled fact that was committed after a resident one is answered
-//     as the newer of the two, by NewestOfType and by the newest-first walk
-//   - positive: a store whose newest resident entry is past the settled bound
-//     answers newest-first without opening the cold journal at all
-//   - negative: an identity left hot beside settled ones that are newer is not
-//     answered as the newest, because a merge that took the journals in turn would
-//     answer it
+// TestColdArchiveRanksTheSettledCommitsBesideTheResidentOnes pins the one order that spans both journals.
+//   - positive: a settled fact committed after a resident one is answered as the newer, by NewestOfType and by the walk
+//   - positive: a store whose newest resident entry is past the settled bound answers newest-first without opening the cold journal
+//   - negative: an identity left hot beside settled ones that are newer is not answered as the newest, which a merge in turn would answer
 func TestColdArchiveRanksTheSettledCommitsBesideTheResidentOnes(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
@@ -263,9 +250,6 @@ func TestColdArchiveRanksTheSettledCommitsBesideTheResidentOnes(t *testing.T) {
 	commit("rank-settled-fact", 2, "fact")
 	newestFold := commit("rank-settled-fold", 3, "checkpoint")
 
-	// The survivor is the oldest commit of the store and stays hot, so the merged
-	// walk has to read the newer settled commits out of the cold journal before it
-	// reaches it.
 	if _, err := tier.Segments.RetireFacts(ctx, map[event.EventID]struct{}{survivor: {}}); err != nil {
 		t.Fatalf("relocate the settled facts: %v", err)
 	}
@@ -298,9 +282,6 @@ func TestColdArchiveRanksTheSettledCommitsBesideTheResidentOnes(t *testing.T) {
 		}
 	}
 
-	// A resident entry past the settled bound is newer than every settled one, so
-	// the walk answers without opening the cold journal: the bound the relocation
-	// left in the hot journal is what keeps a boot out of the settled history.
 	tail := commit("rank-tail-fact", 4, "fact")
 	if err := tier.Segments.Close(); err != nil {
 		t.Fatalf("close the tier before the restart: %v", err)
@@ -320,11 +301,9 @@ func TestColdArchiveRanksTheSettledCommitsBesideTheResidentOnes(t *testing.T) {
 	}
 }
 
-// TestColdArchiveRefusesToOverwriteAnIdentity pins the one-identity-one-fact rule
-// of the cold journal: a key it already holds with other bytes refuses the whole
-// pass, and the hot journal keeps every key it started with. A pass that overwrote
-// the cold bytes would rewrite a committed fact under the identity it was committed
-// with, which is the one thing a relocation may never do.
+// TestColdArchiveRefusesToOverwriteAnIdentity pins the one-identity-one-fact rule of the cold journal.
+//   - negative: a key the cold journal already holds with other bytes refuses the whole pass
+//   - positive: the hot journal keeps every key it started with, and still answers the fact it refused to overwrite
 func TestColdArchiveRefusesToOverwriteAnIdentity(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
@@ -359,9 +338,8 @@ func TestColdArchiveRefusesToOverwriteAnIdentity(t *testing.T) {
 	}
 }
 
-// TestColdArchiveRefusesAnUnavailableColdRoot pins the named refusal of a relocation
-// a store cannot express, so a deployment that declared retirement never reads a
-// silent no-op as a bounded journal.
+// TestColdArchiveRefusesAnUnavailableColdRoot pins the named refusal of a relocation a store cannot express.
+//   - a deployment that declared retirement never reads a silent no-op as a bounded journal
 func TestColdArchiveRefusesAnUnavailableColdRoot(t *testing.T) {
 	ctx := context.Background()
 	tier, err := OpenTier(ctx, StorageConfig{Type: StorageJournal, Root: t.TempDir()})
@@ -401,15 +379,10 @@ func commitFactWithOriginal(t *testing.T, ctx context.Context, tier *Tier, key e
 	}
 }
 
-// TestRelocatedFactReadsByIdentity pins the first red line of a relocation: a
-// fact a pass moved into the cold journal answers the bytes and the position it
-// was committed at, and so does the original it owns, before and after the
-// process that moved it ends.
-//   - positive: the settled fact and its original answer their committed bytes by
-//     identity after the pass and after a restart, and the hot journal holds none
-//     of the three keys the settled fact owned
-//   - negative: a pass that retired the segment family alone would leave the
-//     reference and the independent body hot, which the hot key set names
+// TestRelocatedFactReadsByIdentity pins the first red line of a relocation: a settled fact answers what it was committed with.
+//   - positive: the fact and the original answer their committed bytes by identity after the pass and after a restart
+//   - positive: the hot journal holds none of the three keys the settled fact owned, and a repeat lands no second fact
+//   - negative: a pass that retired the segment family alone would leave the reference and the body hot, which the key set names
 func TestRelocatedFactReadsByIdentity(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
@@ -465,10 +438,6 @@ func TestRelocatedFactReadsByIdentity(t *testing.T) {
 		}
 	}
 	answers(tier, "in the process that relocated it")
-	// A settled fact is still a committed one: a commit that repeats it answers as
-	// the duplicate it is and lands no second record, and other bytes under the
-	// identity are refused, so a relocation never turns a duplicate into a second
-	// landing.
 	if err := tier.Segments.StoreEvent(ctx, SegmentRecord{
 		PartitionID: 1,
 		WindowTS:    1,
@@ -504,12 +473,9 @@ func TestRelocatedFactReadsByIdentity(t *testing.T) {
 	answers(reopened, "after a restart that opened no pass")
 }
 
-// TestColdArchiveRefusesCorruptColdTier pins the second red line of a relocation:
-// a cold journal that cannot be read back is refused by name, never answered as a
-// fact that does not exist.
-//   - positive: a damaged frame of the cold journal refuses the read by name
-//   - negative: a read that reported the settled fact missing would let a
-//     deployment read a corrupt store as one that kept fewer facts
+// TestColdArchiveRefusesCorruptColdTier pins the second red line of a relocation: a cold journal that cannot be read back is refused by name.
+//   - positive: a damaged frame of the cold journal refuses the read by name, and so does the original the fact owns
+//   - negative: a read that reported the settled fact missing would let a deployment read a corrupt store as one that kept fewer facts
 func TestColdArchiveRefusesCorruptColdTier(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()

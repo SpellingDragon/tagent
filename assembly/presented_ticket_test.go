@@ -1,4 +1,4 @@
-// 契约: docs/wiki/agent/event-flow.md#projection-lifecycle
+// 契约: docs/wiki/agent/agent-architecture.md#context-management
 //
 // The ticket injection of the request presentation: each projected entry becomes
 // the model message it was assembled into plus, in front of it, the ticket of the

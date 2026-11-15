@@ -1,4 +1,4 @@
-// 契约: docs/wiki/agent/event-flow.md#projection-lifecycle
+// 契约: docs/GLOSSARY.md
 //
 // The ticket the projection writes: the middle-band fold states the event key of
 // every entry it consumes, and the one ticket form the recall surface parses is

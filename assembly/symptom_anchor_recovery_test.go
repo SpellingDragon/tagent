@@ -1,4 +1,4 @@
-// 契约: docs/wiki/platform/platform-subsystems.md#framework-checkpoint
+// 契约: docs/wiki/memory/memory-architecture.md#overview
 package assembly
 
 import (
@@ -21,14 +21,9 @@ import (
 
 // bootQuantities is the four real quantities one boot of the recovery fixture
 // pays, and the four faces a bounded recovery is stated against:
-//   - journalBytes is the journal the open replayed, read from the engine's own
-//     open measure: never the depth the log grew to, which is a property of the
-//     writes and not of the boot
-//   - indexEntries is the resident index the load published, read from the store:
-//     never EventCount, which is the whole committed history and answers the same
-//     number for a bounded load as for an unbounded one
-//   - durableLoadCount is the durable prefix keys the task load scanned, read from
-//     the load stats the commit already keeps
+//   - journalBytes is the journal the open replayed, read from the engine's own open measure: never the depth the log grew to, which is a property of the writes and not of the boot
+//   - indexEntries is the resident index the load published, read from the store: never EventCount, which is the whole committed history and answers the same number for a bounded load as for an unbounded one
+//   - durableLoadCount is the durable prefix keys the task load scanned, read from the load stats the commit already keeps
 //   - wallClock is the time the assemble that did all three took
 //
 // None of them is a decoded-body count: a body count states how much material a
@@ -40,8 +35,8 @@ type bootQuantities struct {
 	wallClock        time.Duration
 }
 
-// series renders the four quantities of every generation on one line, so a failed
-// bound names the whole series beside the quantity that broke it.
+// bootQuantitySeries renders the four quantities of every generation on one line,
+// so a failed bound names the whole series beside the quantity that broke it.
 func bootQuantitySeries(observed []generationBoot) string {
 	journal := make([]int64, 0, len(observed))
 	index := make([]int, 0, len(observed))
@@ -134,6 +129,7 @@ func measureBootQuantities(tier *ledger.Tier, commit task.Commit, wallClock time
 // The judgements are the fixture's own: a flat boot quantity is only a claim about
 // recovery if the tasks the boot reads really accumulated and the chain behind them
 // really grew.
+//   - The durable face is judged where a boot pays it, and a boot pays the durable families of the tasks a checkpoint does not cover: this fixture files its checkpoint last, so the account it restores is stated whole by that checkpoint and costs no durable prefix key. That is the bound this domain states, so the fixture judges the probes that must pay every generation — the journal tail and the resident index — and leaves the durable face to the anchors that settle tasks past a cut (TestTaskRestoreBoundedByCheckpoint).
 func judgeBootFixture(observed []generationBoot, generations, perGeneration int) error {
 	if len(observed) != generations {
 		return fmt.Errorf("the fixture booted %d generation(s), want the %d it was asked for", len(observed), generations)
@@ -165,13 +161,6 @@ func judgeBootFixture(observed []generationBoot, generations, perGeneration int)
 	if observed[generations-1].quantities.journalBytes == 0 {
 		return fmt.Errorf("the boot of the last generation replayed no journal byte, so the tail the open pays is not measured")
 	}
-	// The durable face is measured where a boot pays it, and a boot pays the
-	// durable families of the tasks a checkpoint does not cover: this fixture files
-	// its checkpoint last, so the account it restores is stated whole by that
-	// checkpoint and costs no durable prefix key. That is the bound this domain
-	// states, so the fixture judges the probes that must pay every generation — the
-	// journal tail and the resident index — and leaves the durable face to the
-	// anchors that settle tasks past a cut (TestTaskRestoreBoundedByCheckpoint).
 	if last, second := observed[generations-1].indexed, observed[1].indexed; last <= second {
 		return fmt.Errorf("the chain indexed %d facts at the last generation and %d at the second, want a chain that grew so the boot quantities are held against a growing history", last, second)
 	}
@@ -233,19 +222,14 @@ func walkBootGenerations(t *testing.T, ctx context.Context, storage Option, addr
 	return observed
 }
 
-// TestBootFixtureGrowsTasksAcrossGenerations pins the fixture the boot anchors are
-// measured on, so an anchor that reads flat never reads flat because the fixture
-// did nothing.
-//   - every generation settles its tasks through the registry and the durable
-//     record holds more of them than the generation before
-//   - the task identities of one generation never repeat another's, so the
-//     account the boot reads is a growing account rather than one task rewritten
-//   - the durable load face is measured at all: a boot that scanned no durable
-//     prefix key fails by name
-//   - the chain index grows across the generations, the denominator the boot
-//     quantities are held against
+// TestBootFixtureGrowsTasksAcrossGenerations pins the fixture the boot anchors are measured on.
+//   - every generation settles its tasks through the registry and the durable record holds more of them than the generation before
+//   - the task identities of one generation never repeat another's, so the account the boot reads is a growing account rather than one task rewritten
+//   - the durable load face is measured at all: a boot that scanned no durable prefix key fails by name
+//   - the chain index grows across the generations, the denominator the boot quantities are held against
+//   - an anchor that reads flat therefore never reads flat because the fixture did nothing
 //
-// 契约: docs/wiki/platform/platform-subsystems.md#framework-checkpoint
+// 契约: docs/wiki/memory/memory-architecture.md#overview
 func TestBootFixtureGrowsTasksAcrossGenerations(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
@@ -257,33 +241,29 @@ func TestBootFixtureGrowsTasksAcrossGenerations(t *testing.T) {
 	if err := judgeBootFixture(observed, generations, perGeneration); err != nil {
 		t.Fatalf("the boot fixture proves nothing: %v", err)
 	}
-	// The negative of the fixture judgement: a fixture that settled nothing is
-	// refused by name instead of reading as a flat cost, so the anchors measured
-	// over this fixture can never be green because nothing happened.
 	quiet := make([]generationBoot, generations)
 	for at := range quiet {
 		quiet[at] = generationBoot{}
 	}
 	if err := judgeBootFixture(quiet, generations, perGeneration); err == nil {
-		t.Fatal("the fixture judgement accepted a fixture that settled no task, want it refused by name")
+		t.Fatal("the fixture judgement accepted a fixture that settled no task, want it refused by name, so the anchors measured over this fixture are never green because nothing happened")
 	} else if !strings.Contains(err.Error(), "the fixture settled no task") {
 		t.Fatalf("the fixture judgement refused the empty fixture with %v, want the settled count named", err)
 	}
 }
 
-// TestBootQuantityProbesReadTheRealBoot pins the four probes a boot cost is
-// measured with, on one real boot.
-//   - the journal probe answers the bytes the open replayed, which is the file the
-//     open read: a boot that replays the whole journal states the whole journal,
-//     and a probe reading the append offset instead would answer the same number
-//     only by coincidence
-//   - the index probe answers the resident index the load published, so it states
-//     the commits a boot keeps in memory rather than the history it committed
-//   - the durable probe answers the load stats the commit already keeps, and the
-//     boot scanned the prefixes of the tasks it held
+// TestBootQuantityProbesReadTheRealBoot pins the four probes a boot cost is measured with, on one real boot.
+//   - the journal probe answers the bytes the open replayed, which is the file the open read: a boot that replays the whole journal states the whole journal
+//   - a probe reading the append offset instead would answer the same number only by coincidence
+//   - the index probe answers the resident index the load published, so it states the commits a boot keeps in memory rather than the history it committed
+//   - the durable probe answers the load stats the commit already keeps, and the boot scanned the prefixes of the tasks it held
 //   - the wall clock is the assemble the fixture timed
+//   - the durable face is paid only for the tasks a checkpoint does not cover, and this fixture checkpoints last, so the measured boot pays no durable prefix key
+//   - that face is pinned by the negative below and by TestTaskRestoreBoundedByCheckpoint, whose boot reads the chains that landed past its cut by identity
+//   - the negatives: every probe that cannot read its face answers the failure by name, so a zero is never mistaken for a boot that paid nothing
+//   - the tier of a memory run holds an engine that keeps no journal and a commit that answers no load stats, which is exactly the pair these failures name
 //
-// 契约: docs/wiki/platform/platform-subsystems.md#framework-checkpoint
+// 契约: docs/wiki/memory/memory-architecture.md#overview
 func TestBootQuantityProbesReadTheRealBoot(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
@@ -319,33 +299,17 @@ func TestBootQuantityProbesReadTheRealBoot(t *testing.T) {
 	if quantities.journalBytes == 0 {
 		t.Fatal("the probe read no journal byte of the boot")
 	}
-	// The read is the tail past the engine's index cut, so the log size bounds it and
-	// never states it: an open that places the cut pays the records the rewrite filed
-	// after them, and an open that reads the whole log pays all of it. The positive
-	// statement of the cut itself is the engine's own anchor
-	// (TestOpenReplaysOnlyPastTheIndexCut), which pins the read against the cut.
 	if want := info.Size(); quantities.journalBytes > want {
-		t.Fatalf("the probe read %d journal byte(s) of a boot over a %d byte log, want at most the bytes the log holds",
+		t.Fatalf("the probe read %d journal byte(s) of a boot over a %d byte log, want at most the bytes the log holds: the read is the tail past the engine's index cut, so the log size bounds it and never states it, and an open that places the cut pays only the records filed after them (TestOpenReplaysOnlyPastTheIndexCut pins that cut)",
 			quantities.journalBytes, want)
 	}
 	if quantities.indexEntries == 0 {
 		t.Fatal("the probe read no entry of the resident index the load published")
 	}
-	// The durable face is the one a bounded boot pays only for the tasks its
-	// checkpoint does not cover. This fixture checkpoints last, so the boot it
-	// measures restores a covered account and pays no durable prefix key — the bound
-	// this face is held to, not a missing measurement. The face itself is pinned by
-	// the negative below (a commit that keeps no load stats fails by name) and
-	// positively by TestTaskRestoreBoundedByCheckpoint, whose boot reads the chains
-	// that landed past its cut by identity.
 	if quantities.wallClock <= 0 {
 		t.Fatalf("the fixture timed %s around the assemble, want a measured wall clock", quantities.wallClock)
 	}
 
-	// The negatives: every probe that cannot read its face answers the failure by
-	// name, so a zero is never mistaken for a boot that paid nothing. The tier of a
-	// memory run holds an engine that keeps no journal and a commit that answers no
-	// load stats, which is exactly the pair these failures name.
 	storeless := storelessBootRun(t, ctx)
 	storeless.stopCheckpointFiler()
 	if _, err := journalBytesOf(storeless.tier); err == nil {
@@ -365,36 +329,21 @@ func TestBootQuantityProbesReadTheRealBoot(t *testing.T) {
 	}
 }
 
-// TestSymptomAnchorBootCostFlatAcrossGenerations is the S2 symptom anchor
-// (runtime-recovery-ideal design.md §六): the real quantities one boot pays SHALL
-// stay flat across generations while the chain grows.
-//   - fixture: one session over one durable root, five generations; each boot
-//     reopens the process, measures what it paid, then the generation commits its
-//     turns, settles its tasks and files its session and framework checkpoints
-//     (walkBootGenerations, the same fixture the full-history anchor reads)
-//   - positive: the three certain quantities a boot pays — the journal bytes the
-//     open replays, the resident index the load publishes, the durable prefix keys
-//     the task load scans — stay bounded beside the second boot, whatever the chain
-//     behind it
-//   - wall clock: the assemble of a boot is the fourth quantity, held to a loose
-//     bound because it is noise beside the three measured reads
-//   - negative: today the open replays the whole journal, the load publishes the
-//     whole history into the resident index and the task load scans every prefix
-//     whole, so all three grow in step with the history and the bound fails with
-//     the quantity, the generation and the whole series named
-//   - proxy: the decoded-body count the earlier anchor measured cannot be the
-//     judgement — a boot that reads the whole history still decodes its checkpoint
-//     and its tail alone, so the body count states what a rebuild presented and
-//     never what a boot had to read. TestSymptomAnchorSessionBootCostFlatAcrossGenerations
-//     is the sibling that keeps measuring that proxy, and it stays green over the
-//     same growth this anchor turns red on
-//   - self-evidence: the indexed chain grows across the generations and the tasks
-//     settle through the registry, so a red anchor is a claim about boot cost, not
-//     about a chain that stood still or a fixture that settled nothing
-//   - consumer: every boot goes through the real boot entry
-//     (restoreCheckpointState → seedAnchoredReplay) of noTrimChainRun; the journal
-//     face is the engine's own open measure, the index face the index the load
-//     published, and the durable face the load stats the commit already keeps
+// TestSymptomAnchorBootCostFlatAcrossGenerations is the boot-cost symptom anchor: the quantities one boot pays stay flat while the chain grows.
+//   - fixture: one session over one durable root, five generations (walkBootGenerations, the same fixture the full-history anchor reads)
+//   - each generation reopens the process, measures what its boot paid, then commits its turns, settles its tasks and files its checkpoints
+//   - positive: the three certain quantities a boot pays stay bounded beside the second boot, whatever the chain behind them
+//   - those three are the journal bytes the open replays, the resident index the load publishes and the durable prefix keys the task load scans
+//   - wall clock: the assemble of a boot is the fourth quantity, held to a loose bound because it is noise beside the three measured reads
+//   - negative: today the open replays the whole journal, the load publishes the whole history into the resident index and the task load scans every prefix whole
+//   - so all three grow in step with the history and the bound fails with the quantity, the generation and the whole series named
+//   - proxy: the decoded-body count cannot be the judgement, because a boot that reads the whole history still decodes its checkpoint and its tail alone
+//   - the body count states what a rebuild presented and never what a boot had to read
+//   - TestSymptomAnchorSessionBootCostFlatAcrossGenerations keeps measuring that proxy, and it stays green over the same growth this anchor turns red on
+//   - self-evidence: the indexed chain grows and the tasks settle through the registry, so a red anchor claims boot cost, not a fixture that did nothing
+//   - assertion: each bound names the quantity it judged, the generation that broke it and the series it stands in
+//   - consumer: every boot goes through the real boot entry (restoreCheckpointState → seedAnchoredReplay) of noTrimChainRun
+//   - the journal face is the engine's own open measure, the index face the index the load published, and the durable face the load stats the commit already keeps
 func TestSymptomAnchorBootCostFlatAcrossGenerations(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
@@ -405,8 +354,6 @@ func TestSymptomAnchorBootCostFlatAcrossGenerations(t *testing.T) {
 	series := bootQuantitySeries(observed)
 	t.Logf("the boots paid %s", series)
 
-	// The denominators: the chain grew and the tasks settled, so the bounds below
-	// are about boot cost and not about a store that stood still.
 	if last, second := observed[generations-1].indexed, observed[1].indexed; last <= second {
 		t.Fatalf("the chain indexed %d facts at the last generation and %d at the second, want a chain that grew so the flat cost is a claim about recovery rather than about a chain that stood still: the index is the denominator the recovery is measured against",
 			last, second)
@@ -420,9 +367,6 @@ func TestSymptomAnchorBootCostFlatAcrossGenerations(t *testing.T) {
 		t.Fatalf("the journal holds no byte before the second boot, want a durable root the open reads: %s", series)
 	}
 
-	// The three certain quantities: bounded recovery pays the second boot's cost
-	// again at every later generation. Each bound names the quantity it judged, the
-	// generation that broke it and the series it stands in.
 	for generation := 2; generation < generations; generation++ {
 		held := observed[generation].quantities
 		if bound := observed[1].quantities.journalBytes * 2; held.journalBytes > bound {

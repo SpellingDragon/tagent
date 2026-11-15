@@ -385,36 +385,16 @@ func (r *Run) checkpointLocked(ctx context.Context) (event.EventID, bool, error)
 // not the history behind it. The pass drains the pipeline first, so the key set it
 // keeps is read from a pipeline that applied every fact it landed.
 //
-// The pass is exclusive at the engine and nowhere else: the store holds its own
-// lock across the copy, the byte-for-byte verification and the rewrite of the hot
-// journal, so no commit lands inside the rewrite, and a commit that lands between
-// reading the kept key set and the rewrite is one this pass never judged: the store
-// settles the keys its snapshot read, so that fact keeps its place in the hot
-// journal and the next pass reads it in its own snapshot. Keeping it hot is what a
-// reader that scans the hot journal alone needs — the task records a boot rebuilds
-// its chains from are such a reader — and the pass still bounds the journal, because
-// the fact it left behind is one a later cut settles.
-//
-// The kept key set is what the boot reads hot: the tail past the cut — the facts
-// committed after the checkpoint, which the boot replays — beside the newest
-// checkpoint of each session chain, which is the state a boot restores instead of
-// folding the covered history. Every other fact is copied to the cold journal
-// first and stays readable by identity, so a bounded hot journal is never a store
-// that lost its history.
-//
-// A tier that declares no retirement answers ErrColdArchiveUnavailable, which this
-// pass reads as the deployment choosing to keep only appending: the hot journal
-// then keeps every fact and the boot pays the whole history, which is the
-// behavior of a store that never relocated anything.
+//   - The pass is exclusive at the engine and nowhere else: the store holds its own lock across the copy, the byte-for-byte verification and the rewrite of the hot journal, so no commit lands inside the rewrite, and a commit that lands between reading the kept key set and the rewrite is one this pass never judged — the store settles the keys its snapshot read, so that fact keeps its place in the hot journal and the next pass reads it in its own snapshot.
+//   - Keeping such a fact hot is what a reader that scans the hot journal alone needs — the task records a boot rebuilds its chains from are such a reader — and the pass still bounds the journal, because the fact it left behind is one a later cut settles.
+//   - The kept key set is what the boot reads hot: the tail past the cut — the facts committed after the checkpoint, which the boot replays — beside the newest checkpoint of each session chain, which is the state a boot restores instead of folding the covered history.
+//   - Every other fact is copied to the cold journal first and stays readable by identity, so a bounded hot journal is never a store that lost its history.
+//   - A tier that declares no retirement answers ErrColdArchiveUnavailable, which this pass reads as the deployment choosing to keep only appending: the hot journal then keeps every fact and the boot pays the whole history, which is the behavior of a store that never relocated anything.
+//   - A run whose boot is over begins no rewrite of the hot journal: the pass is housekeeping a later boot files, and one started here would write beside a process that is already stopping. The pass reads the boot context for the same reason, so one already under way stops at its next step boundary instead of rewriting a journal nothing of this process will read.
 func (r *Run) relocateSettledFacts(ctx context.Context, tier *ledger.Tier, offset event.CheckpointOffset) error {
 	if r == nil || tier == nil || !tier.Capabilities.Durable {
 		return nil
 	}
-	// A run whose boot is over begins no rewrite of the hot journal: the pass is
-	// housekeeping a later boot files, and one started here would write beside a
-	// process that is already stopping. The pass reads the boot context for the same
-	// reason, so one already under way stops at its next step boundary instead of
-	// rewriting a journal nothing of this process will read.
 	passContext := ctx
 	if r.bootContext != nil {
 		if r.bootContext.Err() != nil {

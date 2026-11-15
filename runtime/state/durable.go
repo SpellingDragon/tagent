@@ -390,29 +390,13 @@ func (d *DurableCommit) applyRecordLocked(record task.CommitRecord) {
 
 // Seat reads the account this commit holds from the tasks one checkpoint states
 // beside the records the storage committed past that cut, and states it without
-// scanning the durable prefixes of a history those tasks already settled.
+// scanning the durable prefixes of a history those tasks already settled. The read
+// is stated once: a repeated Seat answers nothing, so the framework checkpoint and
+// the session checkpoints of one boot seat one account.
 //
-//   - The covered part is seated from the entries themselves: the admission
-//     material, the mutation identities a repeat resolves against, the revision the
-//     next record expects and the consumption receipts, attempts and refusals the
-//     task holds. A task a checkpoint states therefore costs no durable key of any
-//     family, which is what stops the load from growing with the tasks the storage
-//     already settled.
-//   - The tail is what `tail` names: the keys the storage committed past the cut.
-//     The tasks those keys belong to are read by their own identity — the admission
-//     key, the fact prefix of that task and its three receipt prefixes — so a chain
-//     younger than the cut costs its own length and never the history behind it.
-//     `tail` beside no cut is nil, and nil is not the empty set: nil is a storage
-//     that states no cut at all.
-//   - The fallback reads the whole log: a caller that holds no checkpoint payload
-//     and a storage that states no cut are a boot with no cut to read from. An
-//     entry that states no receipt family is read back from its chain the same way,
-//     because a checkpoint written before those families existed cannot state the
-//     account of one, and reading its missing keys as "no receipt" would owe every
-//     consumption it completed a second time.
-//
-// The read is stated once: a repeated Seat answers nothing, so the framework
-// checkpoint and the session checkpoints of one boot seat one account.
+//   - The covered part is seated from the entries themselves: the admission material, the mutation identities a repeat resolves against, the revision the next record expects and the consumption receipts, attempts and refusals the task holds, so a task a checkpoint states costs no durable key of any family and the load does not grow with the tasks the storage already settled.
+//   - The tail is what `tail` names: the keys the storage committed past the cut, whose tasks are read by their own identity — the admission key, the fact prefix of that task and its three receipt prefixes — so a chain younger than the cut costs its own length and never the history behind it; `tail` beside no cut is nil, and nil is not the empty set, because nil is a storage that states no cut at all.
+//   - The fallback reads the whole log: a caller that holds no checkpoint payload beside a storage that states no cut is a boot with no cut to read from, and an entry that states no receipt family is read back from its chain the same way, because a checkpoint written before those families existed cannot state the account of one — reading its missing keys as "no receipt" would owe every consumption it completed a second time.
 func (d *DurableCommit) Seat(ctx context.Context, stated []byte, tail map[string]struct{}) error {
 	if d == nil {
 		return nil

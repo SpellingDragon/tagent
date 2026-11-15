@@ -114,11 +114,8 @@ func TestJournalStatesItsCommitOrderNewestFirst(t *testing.T) {
 	}
 }
 
-// TestRetirementDropsTheSettledKeysFromTheResidentSet pins the view a hot log states
-// after a pass moved keys out of it: the resident set holds the keys the rewritten log
-// holds and nothing else, so the answer a process gives for a settled key is the answer
-// the next process to open the log gives.
-//
+// TestRetirementDropsTheSettledKeysFromTheResidentSet pins the view a hot log states after a pass moved keys out of it.
+//   - the resident set holds the keys the rewritten log holds and nothing else, so this view answers as the next open does
 //   - positive: the key the pass kept still reads its bytes through this view
 //   - negative: a settled key reads absent through this view, which is what a view that opens the same directory answers
 //

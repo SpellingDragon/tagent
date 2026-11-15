@@ -66,11 +66,10 @@ type StorageConfig struct {
 	// engine and never names a file layout. A tier beside no wrapper opens the
 	// engine Type names.
 	Engine AtomicStore
-	// RetireFacts declares that facts the recovery authority no longer needs may
-	// leave the hot journal for the cold one under Type's root. A deployment
-	// varies this choice from its configuration; the zero value keeps every fact
-	// in the hot journal, which is the behavior of a store that never relocated
-	// anything.
+	// RetireFacts declares that facts the recovery authority does not need may leave
+	// the hot journal for the cold one under Type's root. A deployment varies this
+	// choice from its configuration; the zero value keeps every fact in the hot
+	// journal, which is the behavior of a store that never relocated anything.
 	RetireFacts bool
 }
 
@@ -216,10 +215,6 @@ func OpenTier(ctx context.Context, cfg StorageConfig) (*Tier, error) {
 	if err != nil {
 		return nil, err
 	}
-	// The cold journal is declared beside every journal root, whatever the
-	// retirement switch says: a store reopened with the switch off still answers a
-	// fact an earlier deployment relocated, because the switch decides whether a
-	// pass runs and never whether a settled fact stays readable.
 	if cfg.Root != "" && (cfg.Type == StorageJournal || cfg.Type == StorageLocalFile) {
 		cold := filepath.Join(cfg.Root, coldDirName)
 		segments.WithColdRoot(cold).WithRetirement(cfg.RetireFacts)

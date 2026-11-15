@@ -335,8 +335,6 @@ func TestAgeFoldFoldsTheMiddleBandIntoOneProduct(t *testing.T) {
 				t.Fatalf("product %d line = %q, want the provenance anchor opening each one-line read of the folded detail", i, line)
 			}
 		}
-		// every folded read keeps the ticket addressing its own event, so the
-		// model can recall the detail the product stands for.
 		folded := 0
 		for _, source := range entries {
 			if !strings.HasPrefix(string(source.Key), fmt.Sprintf("t%d-", i+1)) || !isProcessDetail(source) {
@@ -344,7 +342,7 @@ func TestAgeFoldFoldsTheMiddleBandIntoOneProduct(t *testing.T) {
 			}
 			ticket := TicketOf(source.Key, source.Type)
 			if !strings.Contains(product.Content, ticket+" "+source.Type+": "+source.Summary) {
-				t.Fatalf("product %d content = %q, want the recallable ticket %q beside the folded read of %q", i, product.Content, ticket, source.Key)
+				t.Fatalf("product %d content = %q, want the recallable ticket %q beside the folded read of %q, so every folded read keeps the ticket addressing its own event", i, product.Content, ticket, source.Key)
 			}
 			folded++
 		}

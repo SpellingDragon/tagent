@@ -1,4 +1,7 @@
-// 契约: docs/wiki/memory/memory-architecture.md#local-file-kv
+// The quiet point of a retirement pass at the engine: the copy, its verification and
+// the rewrite of the hot journal run under the one store lock a commit also takes.
+//
+// 契约: docs/wiki/memory/memory-architecture.md#store-instance-sharing
 package ledger
 
 import (
@@ -11,28 +14,15 @@ import (
 	"github.com/SpellingDragon/tagent/api/event"
 )
 
-// TestColdArchiveHoldsTheExclusiveGate pins the quiet point of the relocation
-// pass at the engine (runtime-recovery-ideal 08-fact-retirement 6.2): the pass
-// copies, verifies and rewrites the hot journal under the one store lock a commit
-// also takes, so no write lands inside the rewrite and no reader observes a fact
-// that is half moved.
-//   - denominator: the pass settles a key set of its own snapshot — the report
-//     states more than zero settled keys — and a writer commits beside it, so a
-//     green below is a claim about a pass that ran beside writes and not about an
-//     idle store
-//   - positive: every write the store acknowledged is held after the pass and
-//     after a reopen, byte for byte, and the event count states the whole history
-//     the fixture and the writer committed
-//   - positive (reader): a fact committed before the pass answers its bytes to a
-//     reader running beside the pass, so the moved fact is never observed missing
-//     while it is being moved
-//   - negative: a pass that opens the gate between reading its snapshot and
-//     rewriting the hot journal erases the writes that landed in that window — the
-//     rewrite keeps its snapshot's keys alone — so the acknowledged write reads
-//     back missing, which is the red this anchor turns on when the gate is removed
-//   - consumer: the writer and the reader are the store's own StoreEvent and
-//     GetEvent — the two faces the assembly commits and reads through — and the
-//     reopen is the boot's own OpenTier over the same root
+// TestColdArchiveHoldsTheExclusiveGate pins the quiet point of the relocation pass at the engine.
+//   - denominator: the pass settles a key set of its own snapshot and a writer commits beside it
+//   - positive: every acknowledged write is held after the pass and after a reopen, byte for byte
+//   - positive: the event count states the whole history the fixture and the writer committed
+//   - positive: a fact committed before the pass answers its bytes to a reader running beside it
+//   - negative: a gate opened between the snapshot and the rewrite erases the writes that landed there
+//   - consumer: StoreEvent and GetEvent are the faces the assembly commits through; the reopen is OpenTier
+//
+// 契约: docs/wiki/memory/memory-architecture.md#store-instance-sharing
 func TestColdArchiveHoldsTheExclusiveGate(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
@@ -56,7 +46,6 @@ func TestColdArchiveHoldsTheExclusiveGate(t *testing.T) {
 	var wg sync.WaitGroup
 	wg.Add(3)
 
-	// The pass: the store's own relocation, over the key set the live fold names.
 	go func() {
 		defer wg.Done()
 		defer close(passDone)
@@ -65,8 +54,6 @@ func TestColdArchiveHoldsTheExclusiveGate(t *testing.T) {
 		passReport <- report
 	}()
 
-	// The writer: commits of its own partition beside the pass, each one acknowledged
-	// before the next, so every key it holds is a write the store said it kept.
 	go func() {
 		defer wg.Done()
 		for at := 0; at < writes; at++ {
@@ -89,8 +76,6 @@ func TestColdArchiveHoldsTheExclusiveGate(t *testing.T) {
 		}
 	}()
 
-	// The reader: a fact committed before the pass is never observed missing while
-	// the pass moves it.
 	go func() {
 		defer wg.Done()
 		for {
@@ -127,8 +112,6 @@ func TestColdArchiveHoldsTheExclusiveGate(t *testing.T) {
 		t.Fatalf("%v", readerErr)
 	}
 
-	// The denominator: the pass settled a key set of its own, and every write beside
-	// it was acknowledged, so the assertions below judge a pass that ran beside work.
 	if report.Settled == 0 {
 		t.Fatalf("the pass settled no key beside %d write(s), want the settled facts this fixture commits", writes)
 	}

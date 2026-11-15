@@ -164,7 +164,7 @@ type journalValue struct {
 // cold log, the keys the cold log already held with the same bytes, and the
 // batched commits the copy took to land them.
 type RelocateReport struct {
-	// Settled is the number of keys the hot log no longer holds.
+	// Settled is the number of keys that left the hot log for the cold one.
 	Settled int
 	// Skipped is the number of settled keys the cold log already held.
 	Skipped int
@@ -518,20 +518,17 @@ func journalPayloadOf(frame []byte) ([]byte, error) {
 // relocate copies every key the caller names as settled out of this log and into
 // the cold root, verifies the copy byte for byte through a freshly opened view, and
 // only then rewrites this log to hold what it kept. The three steps do not commute:
-// a copy that never verified leaves the hot log intact, because a key removed
-// before its bytes landed somewhere readable is a fact that disappears.
+// a copy that never verified leaves the hot log intact, because a key removed before
+// its bytes landed somewhere readable is a fact that disappears.
 //
-// The cold root accumulates across passes, so a root that already holds keys is
-// not a reason to refuse. A key the cold root already holds with the same bytes is
-// skipped and a key it holds with other bytes refuses the whole pass: one identity
-// carries one immutable fact. The caller holds the log's lock and has stopped the
-// writers of this view, so no key moves under the copy.
+// The cold root accumulates across passes, so a root that already holds keys is not
+// a reason to refuse. The caller holds the log's lock and has stopped the writers of
+// this view, so no key moves under the copy.
 //
-// The settled keys are the caller's snapshot, never the set the engine finds when
-// the copy starts: a key a writer filed between that snapshot and this call is one
-// the pass never judged, so it keeps its place in the hot log until a pass that
-// read it settles it. Which facts a store still needs is the consumer's answer, and
-// an engine that moved the rest would be a second oracle beside it.
+//   - A key the cold root holds with the same bytes is skipped, and a key it holds with other bytes refuses the whole pass: one identity carries one immutable fact.
+//   - The settled keys are the caller's snapshot, never the set the engine finds when the copy starts, so a key a writer filed between that snapshot and this call keeps its place until a pass that read it settles it.
+//   - Which facts a store still needs is the consumer's answer, and an engine that moved the rest would be a second oracle beside it.
+//   - The steps after the copy run only while the caller is still there: a rewrite entered after it stopped would move the hot journal for a process that reads nothing of it.
 func (l *journalLog) relocate(ctx context.Context, coldDir string, settle []string, replaced []journalPut) (RelocateReport, error) {
 	if err := ctx.Err(); err != nil {
 		return RelocateReport{}, err
@@ -576,10 +573,6 @@ func (l *journalLog) relocate(ctx context.Context, coldDir string, settle []stri
 	if copyErr != nil {
 		return report, copyErr
 	}
-	// The steps below run only while the caller is still there: a copy that landed
-	// cold is the state the next pass finds and verifies, while a rewrite entered
-	// after the caller stopped would move the hot journal for a process that reads
-	// nothing of it.
 	if err := ctx.Err(); err != nil {
 		return report, err
 	}
@@ -681,22 +674,16 @@ func (l *journalLog) verifyColdCopy(coldDir string, settled []string) error {
 
 // rewrite replaces this log with one holding the kept keys in commit order: every
 // key appears once, at the record its latest commit sits in, so the walk backwards
-// still meets the newest record of a key first. Ordering follows the log's own
-// frame order rather than the key order, because a checkpoint recognised by its
-// position in the log is a fact read back by where its commit landed.
+// still meets the newest record of a key first. Ordering follows the log's own frame
+// order rather than the key order, because a checkpoint recognised by its position in
+// the log is a fact read back by where its commit landed.
 //
 // The rewrite is also the moment the index cut is placed, because it is the only
 // moment the log's frames move: the cut states where every kept key landed, so the
-// open that follows pays only the records the rewrite files after them. The cut is
-// removed before the log is replaced and written after it, so a process that stops
-// inside the pass leaves a log with no cut — read whole — and never a cut beside a
-// log it does not describe.
+// open that follows pays only the records the rewrite files after them.
 //
-// The handle is reopened onto the log the rename left before the cut is placed: the
-// rename unlinks the inode the open handle names, so a cut that cannot be written
-// answers beside a log that reads whole and a handle that is the file a later commit
-// reaches, never beside a handle on the unlinked inode that every later commit would
-// write into and lose.
+//   - The cut is removed before the log is replaced and written after it, so a process that stops inside the pass leaves a log with no cut, which is read whole, and never a cut beside a log it does not describe.
+//   - The handle is reopened onto the log the rename left before the cut is placed: the rename unlinks the inode the open handle names, so a cut that cannot be written answers beside a log that reads whole and a handle that every later commit reaches, never a handle on the unlinked inode.
 func (l *journalLog) rewrite(keep map[string]struct{}, replaced []journalPut) error {
 	staged := filepath.Join(l.dir, journalRewriteFileName)
 	cut, err := l.rewriteInto(staged, keep, replaced)
@@ -786,9 +773,6 @@ func (l *journalLog) rewriteInto(path string, keep map[string]struct{}, replaced
 		cut.Index[key] = cutValue(spans.puts[0].value)
 		cut.Order = append(cut.Order, key)
 	}
-	// The tail starts here: every frame from this byte on is read again by the open
-	// that follows, so the keys of these records are what a caller sees as the work
-	// the cut does not cover.
 	cut.Offset = at
 	if len(replaced) > 0 {
 		payload, err := json.Marshal(journalRecord{Version: journalFormatVersion, Puts: replaced})
@@ -944,8 +928,6 @@ func openJournalLog(dir string) (*journalLog, error) {
 	log.size = complete
 	log.openBytes = size - from
 	if !seeded {
-		// The whole log was read, so no frame is past a cut: nil states that, where an
-		// empty set would state a tail that is already covered.
 		log.tail = nil
 	}
 	return log, nil

@@ -356,8 +356,6 @@ func (a *ApprovalManager) Lookup(tool, argsDigest string) *ApprovalRequest {
 		return req
 	}
 	if a.rescanDue() {
-		// A rescan that cannot read its directory leaves the standing book in place;
-		// the wait it did not see is reported on the next read.
 		_ = a.rebuild(context.Background())
 	}
 	return a.lookupFacts(tool, argsDigest)
@@ -567,7 +565,8 @@ func (a *ApprovalManager) write(req *ApprovalRequest) error {
 // This is the row of request files, not the boot's reader: a book the framework
 // state slice seats reads the stated state at boot and keeps this read for the
 // runtime rescan, which is how a ruling an external approver writes to a file
-// lands without a restart.
+// lands without a restart. A rescan that cannot read its directory leaves the
+// standing book in place, and the wait it did not see is reported on the next read.
 func (a *ApprovalManager) rebuild(ctx context.Context) error {
 	if a == nil || a.dir == "" {
 		return nil

@@ -13,12 +13,11 @@ import (
 	"github.com/SpellingDragon/tagent/memory/replay"
 )
 
-// TestFoldWindowCarriesTheSummaryBudget pins the summary budget the fold window
-// carries: a declaration naming only its model window takes the declaration
-// default, and a declared budget passes through as it stands, so the fold reads
-// the policy value instead of a constant.
+// TestFoldWindowCarriesTheSummaryBudget pins the summary budget the fold window carries.
+//   - a declaration naming only its model window takes the declaration default
+//   - a declared budget passes through as it stands, so the fold reads the policy value instead of a constant
 //
-// 契约: docs/wiki/agent/event-flow.md#projection-lifecycle
+// 契约: docs/wiki/agent/event-flow.md#unified-compression
 func TestFoldWindowCarriesTheSummaryBudget(t *testing.T) {
 	undeclared := foldWindowOf(config.AgentSpec{ReplayWindow: 100})
 	if undeclared.SummaryBudgetBytes != config.DefaultSummaryBudgetBytes {
@@ -30,11 +29,11 @@ func TestFoldWindowCarriesTheSummaryBudget(t *testing.T) {
 	}
 }
 
-// TestBandSummaryPromptStatesTheDeclaredBudget pins the instruction a band
-// summary is asked under: the byte bound it states is the declared budget, so no
-// fixed literal bound stands beside a declaration that names another one.
+// TestBandSummaryPromptStatesTheDeclaredBudget pins the instruction a band summary is asked under.
+//   - the byte bound the instruction states is the declared budget
+//   - no fixed literal bound stands beside a declaration that names another one
 //
-// 契约: docs/wiki/agent/event-flow.md#projection-lifecycle
+// 契约: docs/wiki/agent/event-flow.md#unified-compression
 func TestBandSummaryPromptStatesTheDeclaredBudget(t *testing.T) {
 	instruction := bandSummaryInstruction(512)
 	if !strings.Contains(instruction, "within 512 bytes") {
@@ -45,11 +44,10 @@ func TestBandSummaryPromptStatesTheDeclaredBudget(t *testing.T) {
 	}
 }
 
-// TestCompressionSummaryCutsToTheDeclaredBudget pins the cut the consumer applies
-// to one model answer: the recorded text answers the declared budget, not the
-// policy default.
+// TestCompressionSummaryCutsToTheDeclaredBudget pins the cut the consumer applies to one model answer.
+//   - the recorded text answers the declared budget, not the policy default
 //
-// 契约: docs/wiki/agent/event-flow.md#projection-lifecycle
+// 契约: docs/wiki/agent/event-flow.md#unified-compression
 func TestCompressionSummaryCutsToTheDeclaredBudget(t *testing.T) {
 	ctx := context.Background()
 	gists := &fakeSummaryGist{answer: func(string) (string, error) {
@@ -68,9 +66,9 @@ func TestCompressionSummaryCutsToTheDeclaredBudget(t *testing.T) {
 	}
 }
 
-// TestBandSummaryGistReadsTheLease pins the model face a band summary asks: an
-// agent holding a model lease is served by the lease's version in effect, never
-// by the model the host contributed beside it.
+// TestBandSummaryGistReadsTheLease pins the model face a band summary asks.
+//   - an agent holding a model lease is served by the lease's version in effect
+//   - the model the host contributed beside that lease is asked nothing
 //
 // 契约: docs/wiki/rl/rl-architecture.md#swappable-model
 func TestBandSummaryGistReadsTheLease(t *testing.T) {
@@ -104,9 +102,8 @@ func TestBandSummaryGistReadsTheLease(t *testing.T) {
 	}
 }
 
-// TestBandSummaryGistCarriesTheDeclaredSampling pins the sampling a band summary
-// request carries: the temperature and the output limit the agent declares reach
-// the provider although the request itself names none.
+// TestBandSummaryGistCarriesTheDeclaredSampling pins the sampling a band summary request carries.
+//   - the temperature and the output limit the agent declares reach the provider although the request itself names none
 //
 // 契约: docs/wiki/rl/rl-architecture.md#swappable-model
 func TestBandSummaryGistCarriesTheDeclaredSampling(t *testing.T) {

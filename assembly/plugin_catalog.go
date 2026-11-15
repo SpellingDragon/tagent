@@ -28,8 +28,8 @@ import (
 	"github.com/SpellingDragon/tagent/runtime/task"
 )
 
-// The names the builtin plugins are declared by. A name is the whole address of
-// one plugin: a plugins: declaration names it, a refusal quotes it.
+// compressConsumerPluginName and the names beside it are the whole address of one
+// builtin plugin: a plugins: declaration names one, a refusal quotes it.
 const (
 	compressConsumerPluginName  = "compress-consumer"
 	finalRoundPluginName        = "final-round"

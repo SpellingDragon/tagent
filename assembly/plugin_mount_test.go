@@ -1,3 +1,4 @@
+// 契约: docs/adr/0004-feature-mounting-is-a-plugin-registry.md
 package assembly
 
 import (
@@ -90,9 +91,9 @@ func TestBuiltinCatalogMountsEveryFeature(t *testing.T) {
 	}
 }
 
-// TestHostPluginsMountThroughTheCatalog pins the host-level catalog path: the
-// host assembly forwards the collections the catalog resolves and keeps the faces
-// they install, without naming any feature itself.
+// TestHostPluginsMountThroughTheCatalog pins the host-level catalog path.
+//   - the host assembly forwards the collections the catalog resolves and keeps the faces they install
+//   - the assembly root names no feature of its own
 func TestHostPluginsMountThroughTheCatalog(t *testing.T) {
 	ctx := context.Background()
 	run := windowChainRun(t, ctx)
@@ -113,9 +114,9 @@ func TestHostPluginsMountThroughTheCatalog(t *testing.T) {
 	}
 }
 
-// TestHostDocumentCarriesTheDeclaredPluginMount pins the declaration surface end
-// to end: the host dialect reads the plugins key and the mapping writes it into
-// the agent spec.
+// TestHostDocumentCarriesTheDeclaredPluginMount pins the declaration surface end to end.
+//   - the host dialect reads the plugins key
+//   - the mapping writes that key into the agent spec
 func TestHostDocumentCarriesTheDeclaredPluginMount(t *testing.T) {
 	root := t.TempDir()
 	path := filepath.Join(root, "tagent.yaml")
@@ -143,9 +144,9 @@ func TestHostDocumentCarriesTheDeclaredPluginMount(t *testing.T) {
 	}
 }
 
-// TestPluginDeclarationDisablesABuiltinPlugin pins the customization semantics:
-// an absent declaration mounts every agent-level builtin, and the "-" prefix
-// disables exactly one of them.
+// TestPluginDeclarationDisablesABuiltinPlugin pins the customization semantics.
+//   - an absent declaration mounts every agent-level builtin
+//   - the "-" prefix disables exactly one of them
 func TestPluginDeclarationDisablesABuiltinPlugin(t *testing.T) {
 	ctx := context.Background()
 	run := windowChainRun(t, ctx)
@@ -168,8 +169,8 @@ func TestPluginDeclarationDisablesABuiltinPlugin(t *testing.T) {
 	}
 }
 
-// TestPluginDeclarationMountsANamedPluginOnce pins the idempotent entry: naming a
-// builtin twice mounts one instance.
+// TestPluginDeclarationMountsANamedPluginOnce pins the idempotent entry.
+//   - naming a builtin twice mounts one instance
 func TestPluginDeclarationMountsANamedPluginOnce(t *testing.T) {
 	ctx := context.Background()
 	run := windowChainRun(t, ctx)
@@ -182,8 +183,8 @@ func TestPluginDeclarationMountsANamedPluginOnce(t *testing.T) {
 	}
 }
 
-// TestPluginDeclarationRefusesAnUnregisteredName pins the loud refusal: a name no
-// plugin registers stops the assembly instead of mounting nothing.
+// TestPluginDeclarationRefusesAnUnregisteredName pins the loud refusal.
+//   - a name no plugin registers stops the assembly instead of mounting nothing
 func TestPluginDeclarationRefusesAnUnregisteredName(t *testing.T) {
 	ctx := context.Background()
 	run := windowChainRun(t, ctx)
@@ -193,9 +194,9 @@ func TestPluginDeclarationRefusesAnUnregisteredName(t *testing.T) {
 	}
 }
 
-// TestPluginDeclarationRefusesARunLevelPluginName pins the scope refusal: an agent
-// declaration can neither disable nor restate a plugin the run or the host
-// carries, so a deployment never believes it turned one off.
+// TestPluginDeclarationRefusesARunLevelPluginName pins the scope refusal.
+//   - an agent declaration can neither disable nor restate a plugin the run or the host carries
+//   - so a deployment never believes it turned one off
 func TestPluginDeclarationRefusesARunLevelPluginName(t *testing.T) {
 	ctx := context.Background()
 	run := windowChainRun(t, ctx)
@@ -205,8 +206,8 @@ func TestPluginDeclarationRefusesARunLevelPluginName(t *testing.T) {
 	}
 }
 
-// TestBuiltinCatalogRefusesADuplicateName pins the catalog check: one name twice
-// would make a declaration mount an arbitrary one of the two entries.
+// TestBuiltinCatalogRefusesADuplicateName pins the catalog check.
+//   - one name twice would make a declaration mount an arbitrary one of the two entries
 func TestBuiltinCatalogRefusesADuplicateName(t *testing.T) {
 	err := checkPluginCatalog([]builtinPlugin{{name: "twice"}, {name: "twice"}})
 	if err == nil || !strings.Contains(err.Error(), "registered twice") {
@@ -224,9 +225,9 @@ func (n namedInstance) Name() string { return n.name }
 // Port reports the consumption the instance serves.
 func (n namedInstance) Port() plugin.Port { return plugin.PortFactObservation }
 
-// TestPluginDeclarationCarriesAContributedInstance pins the extension surface: a
-// name the host contributed in the native face resolves, and naming it with the
-// "-" prefix leaves the instance out of the pipeline.
+// TestPluginDeclarationCarriesAContributedInstance pins the extension surface.
+//   - a name the host contributed in the native face resolves
+//   - naming it with the "-" prefix leaves the instance out of the pipeline
 func TestPluginDeclarationCarriesAContributedInstance(t *testing.T) {
 	ctx := context.Background()
 	run := windowChainRun(t, ctx)

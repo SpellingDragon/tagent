@@ -187,15 +187,8 @@ func (k *journalKV) valueLocked(key string) ([]byte, bool, error) {
 // rewrite — the in-process tier, which holds nothing across exit — does not answer
 // this capability at all.
 //
-// settle names the keys this pass moves, read from the one snapshot the caller
-// took: a key a writer commits after that snapshot is not in the list and stays in
-// the hot log, so a family whose reader never reads the cold journal cannot be
-// moved out from under it.
-//
-// replaced carries the records the rewrite files after the kept keys, so the state
-// the caller derives from the relocation lands in the same atomic replacement: a
-// process that stops during the pass reads either the log it started with or the
-// rewritten one, never a rewritten log missing the count of what it settled.
+//   - settle names the keys this pass moves, read from the one snapshot the caller took: a key a writer commits after that snapshot is not in the list and stays in the hot log, so a family whose reader never reads the cold journal cannot be moved out from under it.
+//   - replaced carries the records the rewrite files after the kept keys, so the state the caller derives from the relocation lands in the same atomic replacement: a process that stops during the pass reads either the log it started with or the rewritten one.
 type coldRetirement interface {
 	retireSettled(ctx context.Context, coldDir string, settle []string, replaced []journalPut) (RelocateReport, error)
 }
@@ -206,6 +199,8 @@ type coldRetirement interface {
 // runs and states the keys the pass settles: which facts are still needed is the
 // consumer's answer, never the engine's, and a key the caller did not name is
 // never moved by the pass that did not see it.
+//
+//   - The resident set drops the settled keys, because a value kept here would answer a key this log does not hold, which is a view the next process to open the log cannot reproduce.
 func (k *journalKV) retireSettled(ctx context.Context, coldDir string, settle []string, replaced []journalPut) (RelocateReport, error) {
 	if err := ctx.Err(); err != nil {
 		return RelocateReport{}, err
@@ -216,10 +211,6 @@ func (k *journalKV) retireSettled(ctx context.Context, coldDir string, settle []
 	if err != nil {
 		return report, err
 	}
-	// The rewrite left the hot log holding the keys the pass did not settle, so the
-	// resident set drops the settled ones: a value kept here would answer a key this
-	// log no longer holds, which is a view the next process that opens the log cannot
-	// reproduce.
 	for _, key := range settle {
 		k.resident.remove(key)
 	}

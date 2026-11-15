@@ -269,16 +269,10 @@ type statedSettleAccount map[event.TaskID]Receipts
 // ReceiptsOf answers the receipts of one task.
 func (a statedSettleAccount) ReceiptsOf(taskID event.TaskID) Receipts { return a[taskID] }
 
-// TestTaskSliceStatesTheSettleAccount pins what a task checkpoint states beside
-// the registry's own account.
-//   - the three receipt families of a task the checkpoint names are stated, entry
-//     for entry, and a round trip of the payload restores the same account
-//   - a task beside no receipt states the three families as empty lists, never as
-//     a missing key: an account that completed no consumption is a statement, and
-//     a checkpoint that stated nothing could not be told apart from one written
-//     before the families existed
-//   - the tasks the payload states are unchanged in every other field, so the
-//     receipts cost the checkpoint no part of the account it already carried
+// TestTaskSliceStatesTheSettleAccount pins what a task checkpoint states beside the registry's own account.
+//   - the three receipt families of a task the checkpoint names are stated entry for entry, and a payload round trip restores the same account
+//   - a task beside no receipt states the three families as empty lists, never as missing keys, so a quiet account cannot be told from an older checkpoint
+//   - the tasks the payload states are unchanged in every other field, so the receipts cost the checkpoint no part of the account it already carried
 //
 // 契约: docs/wiki/platform/platform-subsystems.md#framework-checkpoint
 func TestTaskSliceStatesTheSettleAccount(t *testing.T) {
@@ -370,12 +364,9 @@ func TestTaskSliceStatesTheSettleAccount(t *testing.T) {
 	}
 }
 
-// TestTaskSliceRefusesAReceiptOfAnotherTask pins the identity check of a stated
-// receipt.
-//   - a receipt filed under a task it does not answer refuses the restore by name,
-//     naming both identities
-//   - the same receipt filed under the task it answers is accepted, so the refusal
-//     is the mismatch and not the family
+// TestTaskSliceRefusesAReceiptOfAnotherTask pins the identity check of a stated receipt.
+//   - a receipt filed under a task it does not answer refuses the restore by name, naming both identities
+//   - the same receipt filed under the task it answers is accepted, so the refusal is the mismatch and not the family
 //
 // 契约: docs/wiki/platform/platform-subsystems.md#framework-checkpoint
 func TestTaskSliceRefusesAReceiptOfAnotherTask(t *testing.T) {

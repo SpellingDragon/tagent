@@ -1,10 +1,9 @@
-// 契约: docs/wiki/memory/memory-architecture.md#local-file-kv
+// The recoverability a retirement pass owes a reader that never reads the cold
+// journal: a family the boot scans by key stays in the hot journal for every pass
+// that ran, and a key a writer filed after the pass read its snapshot is not
+// settled by that pass at all.
 //
-// The two anchors below pin the recoverability a retirement pass owes a reader
-// that never reads the cold journal: a family the boot scans by key — the task
-// records a durable commit rebuilds its chains from — stays in the hot journal for
-// every pass that ran, and a key a writer filed after the pass read its snapshot is
-// not settled by that pass at all.
+// 契约: docs/wiki/memory/memory-architecture.md#read-paths
 package ledger
 
 import (
@@ -69,11 +68,9 @@ func lateRetirementFixture(t *testing.T) (context.Context, *Tier, *lateKeyEngine
 	return ctx, tier, engine, root
 }
 
-// TestRetirementSettlesOnlyTheKeysItsSnapshotRead pins the pass settling the keys it
-// read and nothing else: a key a writer filed after that snapshot is kept in the hot
-// journal, because the family that reads it at boot scans the hot journal alone. The
-// negative is stated beside it — the late key is absent from the cold journal — so a
-// green anchor is a claim about the pass, not about a key nothing tried to move.
+// TestRetirementSettlesOnlyTheKeysItsSnapshotRead pins the pass settling the keys it read and nothing else.
+//   - positive: a key a writer filed after that snapshot stays in the hot journal, because the boot reads it there
+//   - negative: the late key is absent from the cold journal, so a green anchor is a claim about the pass
 func TestRetirementSettlesOnlyTheKeysItsSnapshotRead(t *testing.T) {
 	ctx, tier, engine, root := lateRetirementFixture(t)
 	report, err := tier.Segments.RetireFacts(ctx, map[event.EventID]struct{}{})
@@ -100,11 +97,9 @@ func TestRetirementSettlesOnlyTheKeysItsSnapshotRead(t *testing.T) {
 	}
 }
 
-// TestTaskAdmissionMaterialStaysHotAcrossARetirementPass pins the read a boot owes a
-// task record: the admission material of a durable task is in the hot journal after
-// a pass settled the events beside it, and a store opened afterwards reads it there.
-// The negative is the settled event, which the same pass moved: a hot journal that
-// kept everything would answer both.
+// TestTaskAdmissionMaterialStaysHotAcrossARetirementPass pins the read a boot owes a task record.
+//   - positive: the admission material of a durable task is in the hot journal after a pass, and a later open reads it there
+//   - negative: the settled event beside it moved, so a hot journal that kept everything would answer both
 func TestTaskAdmissionMaterialStaysHotAcrossARetirementPass(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()

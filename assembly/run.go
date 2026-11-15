@@ -1073,6 +1073,7 @@ func (r *Run) restoreInMemoryState(ctx context.Context, durable *state.DurableCo
 //   - A tier holding no checkpoint states the empty cut, and the holders are restored from that the same way: each starts from the empty state and the replay past the cut rebuilds it, which past the zero cut is the whole chain.
 //   - The mailbox states the obligations its durable account still owes on either cut, so the work a stopped process left open is seated by this restore and no consumer keeps a restore path of its own.
 //   - The checkpoint is read once per boot: a holder mounted after this call states its slice from the pending set, and the chain rebuild that follows takes the state this call restored instead of restoring it again.
+//   - The account is seated from the whole log before the empty cut is restored, because the mailbox reads the notifications that account owes: an account seated after it delivers nothing a stopped process left open.
 //   - The framework's checkpoint states the whole account and each session checkpoint states one chain, so both are restored: the framework one first, which covers the holders that keep no state of a chain, then the newest checkpoint of every chain the storage holds, which states the chains past the framework cut. The restores merge, so a chain named by both stands once at the newer state.
 func (r *Run) restoreCheckpointState(ctx context.Context, tier *ledger.Tier) error {
 	if tier == nil {
@@ -1085,10 +1086,6 @@ func (r *Run) restoreCheckpointState(ctx context.Context, tier *ledger.Tier) err
 		restored = held
 	}
 	if !restored {
-		// A tier holding no checkpoint seats the account from the whole log before the
-		// empty cut is restored, because the mailbox reads the notifications that
-		// account owes: an account seated after it delivers nothing a stopped process
-		// left open.
 		if err := r.seatDurableAccount(ctx, tier, nil); err != nil {
 			return err
 		}

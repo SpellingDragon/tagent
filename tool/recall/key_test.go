@@ -59,9 +59,9 @@ func keyReadAnswer(t *testing.T, tool *getTool, arg string) getAnswer {
 	return answer
 }
 
-// TestParseKeyRefusesTheLegacyTicketForm pins the ticket form the fold no longer writes.
-//   - the legacy [ticket <key>: full text retrievable by segment] argument answers missing, not the key it names
-//   - the same key handed back in the ticket form the fold writes now is served, so the refusal is the shape and not the fixture
+// TestParseKeyRefusesTheLegacyTicketForm pins the ticket form the fold does not write.
+//   - the bracketed [ticket <key>: full text retrievable by segment] argument answers missing, not the key it names
+//   - the same key handed back in the ticket form the fold writes is served, so the refusal is the shape and not the fixture
 func TestParseKeyRefusesTheLegacyTicketForm(t *testing.T) {
 	tool := keyReadFixture(t, "seg-abc")
 	legacy := "[ticket seg-abc: full text retrievable by segment]"

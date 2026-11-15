@@ -1,4 +1,7 @@
-// 契约: docs/wiki/memory/memory-architecture.md#local-file-kv
+// The open's replay cost and the index cut that bounds it: a rewrite places the cut
+// it states, and every open after it reads only the frames the cut does not cover.
+//
+// 契约: docs/wiki/memory/memory-architecture.md#gaps
 package ledger
 
 import (
@@ -44,11 +47,9 @@ func journalTestKey(at int) string {
 	return "0:evt:" + string(rune('a'+at))
 }
 
-// TestOpenReplaysOnlyPastTheIndexCut pins the read one open pays beside an index
-// cut: the bytes from the cut to the end of the log, never the frames the cut
-// already places. The negative of the fixture is stated beside it — a directory
-// holding no cut reads the whole log — so a green anchor is a claim about the cut
-// and not about a log that held nothing to read.
+// TestOpenReplaysOnlyPastTheIndexCut pins the read one open pays beside an index cut: the bytes past the cut to the log's end.
+//   - positive: the key the pass kept answers its own bytes from the span the cut states, so a bounded open is never a lost fact
+//   - negative: the same log with no cut beside it is read whole, so a bounded open is never a flat open beside nothing
 //
 // 契约: docs/wiki/memory/memory-architecture.md#local-file-kv
 func TestOpenReplaysOnlyPastTheIndexCut(t *testing.T) {
@@ -78,10 +79,6 @@ func TestOpenReplaysOnlyPastTheIndexCut(t *testing.T) {
 	if got, want := reopened.JournalBytesOpen(), stat.Size(); got == want {
 		t.Fatalf("the open replayed the whole %d byte log, want the tail past the cut", got)
 	}
-	// The positive of the placement: the key the pass kept answers its own bytes from
-	// the span the cut states, so a bounded open is a placement and never a lost fact.
-	// Every other key of the fixture left the hot log for the cold root, which is the
-	// retention pass's own contract and not this anchor's.
 	for _, key := range []string{journalTestKey(11)} {
 		pairs, err := reopened.Read(context.Background(), Fetch{Key: key})
 		if err != nil || len(pairs) != 1 {
@@ -91,7 +88,6 @@ func TestOpenReplaysOnlyPastTheIndexCut(t *testing.T) {
 			t.Fatalf("read %s = %q, want %q", key, pairs[0].Value, want)
 		}
 	}
-	// The negative: the same log with no cut beside it is read whole.
 	if err := os.Remove(filepath.Join(dir, journalIndexCutFileName)); err != nil {
 		t.Fatalf("remove the index cut: %v", err)
 	}
@@ -105,11 +101,9 @@ func TestOpenReplaysOnlyPastTheIndexCut(t *testing.T) {
 	}
 }
 
-// TestOpenRefusesToTrustAnIndexCutItCannotPlace pins the two cuts a build refuses to
-// read: one stating a tail past the log it sits beside, and one that does not decode.
-// Both are answered by reading the log whole, which is the fallback that keeps the
-// facts reachable, and the open states the fallback by name so it is never mistaken
-// for a log whose cut was placed.
+// TestOpenRefusesToTrustAnIndexCutItCannotPlace pins the cuts a build refuses to trust.
+//   - a cut stating a tail past the log it sits beside, one that does not decode, and one declaring another format
+//   - positive: each is answered by reading the log whole, the fallback that keeps the facts reachable, never as a placed cut
 //
 // 契约: docs/wiki/memory/memory-architecture.md#local-file-kv
 func TestOpenRefusesToTrustAnIndexCutItCannotPlace(t *testing.T) {
@@ -147,10 +141,8 @@ func TestOpenRefusesToTrustAnIndexCutItCannotPlace(t *testing.T) {
 	}
 }
 
-// TestOpenReadsTheLogWholeBesideNoIndexCut pins the store that never relocated: a
-// directory holding no cut answers the whole log, and a key past the last commit is
-// answered by the log alone. It is the negative the bounded open is measured
-// against, so a flat open beside a cut is never a flat open beside nothing.
+// TestOpenReadsTheLogWholeBesideNoIndexCut pins the store that never relocated: a directory holding no cut answers the whole log.
+//   - a key past the last commit answers from the log alone, and the open states no tail beside a whole read
 //
 // 契约: docs/wiki/memory/memory-architecture.md#local-file-kv
 func TestOpenReadsTheLogWholeBesideNoIndexCut(t *testing.T) {
@@ -186,13 +178,10 @@ func TestOpenReadsTheLogWholeBesideNoIndexCut(t *testing.T) {
 	}
 }
 
-// TestRewriteKeepsTheHandleOnTheLogItLeft pins what a rewrite answers with when it
-// cannot place the index cut it states: the handle is on the log the rename left, so
-// the pass answers a cut failure beside a log that reads whole, and never beside a
-// handle on the inode the rename unlinked.
-//
-//   - positive: the rewritten log holds the key the pass kept, and no cut sits beside it
-//   - negative: the commit a later call files after the failed pass is read by a view that opens the same directory, so a handle left on the unlinked inode loses it
+// TestRewriteKeepsTheHandleOnTheLogItLeft pins what a rewrite answers with when it cannot place the cut it states.
+//   - the cut lands through a temporary file in the log's directory, so a directory at that path is the obstruction the pass meets
+//   - positive: the handle is on the log the rename left, so the rewritten log holds the key the pass kept and no cut sits beside it
+//   - negative: a commit filed after the failed pass is read by a view that opens the directory, where a handle on the unlinked inode loses it
 //
 // 契约: docs/wiki/memory/memory-architecture.md#local-file-kv
 func TestRewriteKeepsTheHandleOnTheLogItLeft(t *testing.T) {
@@ -214,8 +203,6 @@ func TestRewriteKeepsTheHandleOnTheLogItLeft(t *testing.T) {
 	for at := 0; at < 11; at++ {
 		settle = append(settle, journalTestKey(at))
 	}
-	// The cut is placed through a temporary file inside the log's directory, so a
-	// directory at that path is the one obstruction the pass meets after the rename.
 	blocked := filepath.Join(dir, journalIndexCutFileName+".tmp")
 	if err := os.Mkdir(blocked, 0o700); err != nil {
 		t.Fatalf("obstruct the index cut: %v", err)
@@ -229,7 +216,6 @@ func TestRewriteKeepsTheHandleOnTheLogItLeft(t *testing.T) {
 	if _, held := readJournalIndexCut(dir); held {
 		t.Fatal("the failed pass left an index cut beside the log, want none: a cut never sits beside a log it does not describe")
 	}
-	// The positive: the log the rename left holds the key the pass kept.
 	kept := journalTestKey(11)
 	if got, held, err := kv.log.read(kept); err != nil || !held || string(got) != "body-"+kept {
 		t.Fatalf("the kept key after the failed cut = (%q, %v, %v), want the bytes the rewrite filed", got, held, err)

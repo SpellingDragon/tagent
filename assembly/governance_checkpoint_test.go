@@ -124,10 +124,10 @@ func governanceStateOf(t *testing.T, run *Run) governanceSliceState {
 	return governanceSliceState{}
 }
 
-// TestGovernanceSliceWiredInProduction pins the governance state the production
-// boot seats.
+// TestGovernanceSliceWiredInProduction pins the governance state the production boot seats.
 //   - positive: the real host mounts the governance slice on the run's state seam, and the cut it files states the ledger index the ruling wrote
 //   - negative: a restarted host reads that cut instead of scanning the stream, so its streams continue past the keys already written and no key is re-keyed
+//   - the restart reads the cut the first process stated: the two records it states, and the stream past the two denial events already written
 //   - consumer: the boot entry seats the ledger and the goal registry the governance gate rules through, and one restart restores them
 //
 // 契约: docs/wiki/platform/platform-subsystems.md#framework-checkpoint
@@ -152,8 +152,6 @@ func TestGovernanceSliceWiredInProduction(t *testing.T) {
 	}
 	closeLiveness(t, first)
 
-	// The restart reads the cut the first process stated: the two records it states,
-	// and the stream past the two denial events already written.
 	second := bootGovernanceHost(t, configPath, document)
 	restarted := second.Run()
 	if names := restarted.StateRegistry().Names(); !slices.Contains(names, "governance") {
@@ -172,8 +170,6 @@ func TestGovernanceSliceWiredInProduction(t *testing.T) {
 	}
 	closeLiveness(t, second)
 
-	// The keys the two processes wrote are three in one stream: a stream that reset
-	// its numbering would re-key the third ruling over an event already stored.
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	tier, err := ledger.OpenTier(ctx, ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: filepath.Join(root, "storage")})
@@ -195,14 +191,14 @@ func TestGovernanceSliceWiredInProduction(t *testing.T) {
 		"tagent/governance/v1/denial:0000000000000000003",
 	}
 	if strings.Join(keys, " ") != strings.Join(want, " ") {
-		t.Fatalf("stored denial events = %v, want the three the two processes wrote under their own keys", keys)
+		t.Fatalf("stored denial events = %v, want the three the two processes wrote under their own keys: the keys the two processes wrote are three in one stream, and a stream that reset its numbering would re-key the third ruling over an event already stored", keys)
 	}
 }
 
-// TestGovernanceApprovalBootReadsStateSlice pins the approval book of a boot that
-// states a governance cut.
+// TestGovernanceApprovalBootReadsStateSlice pins the approval book of a boot that states a governance cut.
 //   - positive: the restarted host reports the hold and the ruling the stated book carries
 //   - negative: the boot reads the stated book, so a process whose request files are gone still reports them
+//   - the request files are the per-request durable write beside the stated book, so the files are gone by the time the boot reads
 //   - consumer: the approval channel a real boot wires answers its presence from the restored state
 //
 // 契约: docs/wiki/agent/governance-enforcement.md#approval-channel
@@ -224,8 +220,6 @@ func TestGovernanceApprovalBootReadsStateSlice(t *testing.T) {
 	}
 	closeLiveness(t, first)
 
-	// The request files are the per-request durable write beside the stated book;
-	// the boot reads the stated state, so the files are gone by then.
 	if err := os.RemoveAll(filepath.Join(root, "approvals")); err != nil {
 		t.Fatalf("withdraw the request files under %s: %v", root, err)
 	}
@@ -241,8 +235,7 @@ func TestGovernanceApprovalBootReadsStateSlice(t *testing.T) {
 	}
 }
 
-// TestGovernanceBootRefusesUnreadableStateCut pins the refusal of a governance cut
-// this code cannot read.
+// TestGovernanceBootRefusesUnreadableStateCut pins the refusal of a governance cut this code cannot read.
 //   - positive: the cut a boot restored before the governance state was mounted lands on the mount, and the state seam names the slice it could not restore
 //   - negative: an unreadable cut stops the boot instead of restoring an empty state the streams would then re-key over
 //   - consumer: the production seating entry answers that refusal, so no runtime starts beside a governance state it could not read

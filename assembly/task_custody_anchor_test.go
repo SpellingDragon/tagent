@@ -1,4 +1,4 @@
-// 契约: docs/wiki/platform/platform-subsystems.md#framework-checkpoint
+// 契约: docs/wiki/agent/task-lifecycle.md#restore-rebuild
 package assembly
 
 import (
@@ -14,20 +14,16 @@ import (
 	"github.com/SpellingDragon/tagent/runtime/task"
 )
 
-// TestBootSeatsTheMailboxAfterTheDurableAccount pins the order one boot states the
-// durable account in: the account is seated before the slices are restored, so a
-// notification that landed past the checkpoint's cut is seated by the mailbox of the
-// same boot instead of waiting for one the checkpoint never states.
+// TestBootSeatsTheMailboxAfterTheDurableAccount pins the order one boot states the durable account in.
+//   - the account is seated before the slices are restored, so a notification that landed past the checkpoint's cut is seated by the mailbox of the same boot
+//   - a boot that restored the slices first would wait for a checkpoint that never states that notification
+//   - the fixture files a checkpoint, then commits one task record whose outbox the stopped process never delivered
+//   - the record is past the cut, so the tasks slice does not cover it and the boot must read the chain that landed after it
+//   - that record is the increment a boot reads by identity: the run that wrote it stopped before any later checkpoint could cover it
+//   - positive: the booted mailbox seats that notification, routed to the address the record froze, and the durable load reached it by the identity of its task
+//   - negative of the order: an account seated after the mailbox restore seats nothing there, which is the work item a restart silently loses
 //
-//   - the fixture files a checkpoint, then commits one task record whose outbox the
-//     stopped process never delivered: the record is past the cut, so the tasks slice
-//     does not cover it and the boot must read the chain that landed after it
-//   - positive: the booted mailbox seats that notification, routed to the address the
-//     record froze, and the durable load reached it by the identity of its task
-//   - negative of the order: an account seated after the mailbox restore seats nothing
-//     there, which is the work item a restart silently loses
-//
-// 契约: docs/wiki/platform/platform-subsystems.md#framework-checkpoint
+// 契约: docs/wiki/agent/task-lifecycle.md#restore-rebuild
 func TestBootSeatsTheMailboxAfterTheDurableAccount(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
@@ -43,8 +39,6 @@ func TestBootSeatsTheMailboxAfterTheDurableAccount(t *testing.T) {
 		t.Fatalf("close the source process: %v", err)
 	}
 
-	// One record lands past the cut: the run that wrote it stopped before any later
-	// checkpoint could cover it, which is the increment a boot reads by identity.
 	owedAddr := event.Address{AgentID: "agent-a", SessionID: "session-seat-after-cut-tail"}
 	owedTask := event.TaskID("task-seat-after-cut")
 	tier, err := ledger.OpenTier(ctx, ledger.StorageConfig{Type: ledger.StorageJournal, Root: root})
@@ -90,13 +84,10 @@ func TestBootSeatsTheMailboxAfterTheDurableAccount(t *testing.T) {
 	if !held {
 		t.Fatalf("the booted mailbox seats %+v, want the notification that landed past the cut", seats)
 	}
-	// The read it cost: the account was seated from the tasks slice beside the chain
-	// that landed after it, so no prefix of the whole history was scanned and the task
-	// the slice covers cost no durable key.
 	scanned := false
 	for _, scan := range booted.commit.inner.(*state.DurableCommit).LoadStats().Scans {
 		if scan.Prefix == "tagent/task/v1/fact:tagent/" {
-			t.Fatal("the boot scanned the fact family of the whole history")
+			t.Fatal("the boot scanned the fact family of the whole history, want the tasks slice beside the chain that landed after it: the account was seated from that slice, so no prefix of the whole history costs a key")
 		}
 		if strings.Contains(scan.Prefix, string(owedTask)) {
 			scanned = true

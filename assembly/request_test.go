@@ -799,33 +799,26 @@ func TestProviderWindowGateSemantics(t *testing.T) {
 	budgetTestRefusal(t, narrow, "explicit small window")
 }
 
-// TestSymptomAnchorPhantomReserveRefusesFittingRequest is the c75 symptom anchor:
-// a request that fits the declared physical window is refused because the budget
-// subtracts an output reserve nothing declared. The user saw "estimated 96407
-// input tokens over the declared input budget 96000 (provider window 128000,
-// output reserve 32000) with no degradable material left". Under the normalized
-// contract the output reserve is the declared output limit, or zero when none is
-// declared, so a fitting request is served. W0 baseline red = the phantom reserve
-// is in place; the red cause MUST be the budget refusal, not a compile failure.
+// TestSymptomAnchorPhantomReserveRefusesFittingRequest pins the request a window without a declared output limit serves.
+//   - a request that fits the declared physical window is served, whatever the provider window
+//   - the output reserve is the declared output limit, or zero when none is declared, so no reserve stands in for an undeclared one
+//   - the fixed prompt is sized at 385600 bytes, which is 96400 tokens at the four-chars-per-token ratio
+//   - that ratio puts the request over the 96000 a quarter-window reserve subtracts and under the 128000 physical window
+//   - the served total is calibrated with the gate closed, so the band assertion pins the numbers rather than trusting the byte size alone
+//   - the declaration names a physical window and a replay window and no output reserve, and the fitting request must be served rather than refused
 //
-// 契约: openspec/changes/config-surface-normalization/changes/01-budget-normalization/specs/request-budget-accounting/spec.md
+// 契约: docs/wiki/agent/agent-architecture.md#request-budget
 func TestSymptomAnchorPhantomReserveRefusesFittingRequest(t *testing.T) {
 	ctx := context.Background()
-	// Size the fixed prompt into the c75 band: over 96000 (window - window/4) but
-	// under 128000 (the physical window). 385600 bytes / 4 = 96400 tokens.
 	prompt := budgetTestPromptBody("the c75 fixed prompt line that fits the physical window", 385600)
 	const physicalWindow = 128000
 
-	// Calibrate the served total with the gate closed, so the band assertion pins
-	// the symptom's numbers rather than trusting the byte size alone.
 	base := budgetTestRun(t, ctx, config.AgentSpec{}, prompt, "c75 symptom input", "session-c75-calibrate")
 	total := budgetTestTotal(base.oneRequest(t, "c75 calibration"))
 	if total <= 96000 || total >= physicalWindow {
 		t.Fatalf("calibrated total = %d tokens, want the c75 band (96000, %d): the anchor must reproduce a request that fits the window but exceeds window - window/4", total, physicalWindow)
 	}
 
-	// The c75 declaration: a physical window and a replay window, no output
-	// reserve. The fitting request must be served, not refused at 96000.
 	drive := budgetTestRun(t, ctx, config.AgentSpec{
 		ReplayWindow:  physicalWindow,
 		ContextWindow: physicalWindow,
@@ -839,14 +832,11 @@ func TestSymptomAnchorPhantomReserveRefusesFittingRequest(t *testing.T) {
 	}
 }
 
-// TestSymptomAnchorReplayWindowAloneOpensNoGate is the gate-source symptom anchor:
-// a declaration naming only the replay window (no physical context window) must
-// open no budget gate, because the replay window drives the fold cadence, not the
-// provider's physical capacity. Under the normalized contract the gate opens only
-// on ContextWindow, so the request runs whole. W0 baseline red = the derived gate
-// is in place; the red cause MUST be the budget refusal, not a compile failure.
+// TestSymptomAnchorReplayWindowAloneOpensNoGate pins the gate a declaration opens.
+//   - a declaration naming only the replay window opens no budget gate, because the replay window drives the fold cadence, not the provider's physical capacity
+//   - the gate opens only on ContextWindow, so the request runs whole
 //
-// 契约: openspec/changes/config-surface-normalization/changes/01-budget-normalization/specs/request-budget-accounting/spec.md
+// 契约: docs/wiki/agent/agent-architecture.md#request-budget
 func TestSymptomAnchorReplayWindowAloneOpensNoGate(t *testing.T) {
 	ctx := context.Background()
 	big := budgetTestPromptBody("the fixed prompt line of the replay-window-only gate", 10<<10)
@@ -863,15 +853,11 @@ func TestSymptomAnchorReplayWindowAloneOpensNoGate(t *testing.T) {
 	}
 }
 
-// TestSymptomAnchorOutputLimitServed is the output-limit symptom anchor: a
-// declared max_tokens reaches the provider as the output limit, and a declaration
-// that names none leaves it absent. Before normalization nothing was served
-// (GenerationConfig.MaxTokens stayed nil even when the agent named max_tokens,
-// which was consumed as the replay window); domain 01.2 introduces the
-// output-limit declaration and decorate fills it, so the served limit equals the
-// declared one. This is the S2 red→green anchor, not one of the two W0 启动门 reds.
+// TestSymptomAnchorOutputLimitServed pins the output limit a declaration serves.
+//   - a declared max_tokens reaches the provider as the output limit
+//   - a declaration that names none leaves the served limit absent, so no undeclared reserve stands in for it
 //
-// 契约: openspec/changes/config-surface-normalization/changes/01-budget-normalization/specs/request-budget-accounting/spec.md
+// 契约: docs/wiki/agent/agent-architecture.md#request-budget
 func TestSymptomAnchorOutputLimitServed(t *testing.T) {
 	ctx := context.Background()
 	t.Run("a declared output limit reaches the provider", func(t *testing.T) {

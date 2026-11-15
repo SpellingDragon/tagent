@@ -393,8 +393,6 @@ func TestGovernanceRecoveryFromStateSlice(t *testing.T) {
 		t.Fatalf("next denial event key = %q, want the sequence past the eight already written", got)
 	}
 
-	// A cut stated past every stored event reads nothing: the tail is empty and the
-	// recovery pays for the state it holds, never for the stream behind it.
 	full := newSliceFixture(t)
 	if err := full.seat.RestoreState(ctx, mustStateCut(t, restarted.seat)); err != nil {
 		t.Fatalf("restore the cut stated after the tail was folded: %v", err)
@@ -408,15 +406,12 @@ func TestGovernanceRecoveryFromStateSlice(t *testing.T) {
 		goalEventPrefix + "0000000000000000002",
 	}
 	if reads := log.scansSince(mark); strings.Join(reads, " ") != strings.Join(emptyTail, " ") {
-		t.Fatalf("recovery reads beside a cut that already states the stream = %v, want the miss that ends each walk and no key behind the cut", reads)
+		t.Fatalf("recovery reads beside a cut that already states the stream = %v, want the miss that ends each walk and no key behind the cut: the recovery pays for the state it holds, never for the stream behind it", reads)
 	}
 	if got := full.ledger.Count(); got != 9 {
 		t.Fatalf("records beside a cut that states the stream = %d, want the nine the cut states", got)
 	}
 
-	// A cut this code cannot read is refused by name, and the refusal leaves the
-	// stated watermark standing: a reset to zero would hand the streams' keys to a
-	// writer that re-keys over the events already stored.
 	broken := append([]byte(nil), cut...)
 	broken = append(broken, []byte("!")...)
 	if err := restarted.seat.RestoreState(ctx, broken); err == nil {
@@ -429,7 +424,7 @@ func TestGovernanceRecoveryFromStateSlice(t *testing.T) {
 	restarted.recordDenial(t, "remount")
 	wrote = log.keysOf(denialEventPrefix)
 	if got := wrote[len(wrote)-1]; got != fmt.Sprintf("%s%019d", denialEventPrefix, 10) {
-		t.Fatalf("next denial event key after the refused restores = %q, want the sequence past the nine written", got)
+		t.Fatalf("next denial event key after the refused restores = %q, want the sequence past the nine written: the refusal left the stated watermark standing, where a reset to zero would hand the streams' keys to a writer that re-keys over the events already stored", got)
 	}
 }
 
@@ -455,8 +450,7 @@ func mustStateCut(t *testing.T, seat *StateSeat) []byte {
 	return payload
 }
 
-// TestGovernanceBindReportsAReadFailure pins the report of a stream a boot could
-// not read.
+// TestGovernanceBindReportsAReadFailure pins the report of a stream a boot could not read.
 //   - positive: the cut a boot restored keeps its watermark, so a refused read is not a zero state
 //   - negative: a store whose read fails answers an error instead of folding nothing, so no writer re-keys over the events already stored
 //   - consumer: the state seam's bind answers that error to the boot that seats it
@@ -478,10 +472,8 @@ func TestGovernanceBindReportsAReadFailure(t *testing.T) {
 		t.Fatalf("the report of a store whose read fails = %v, want the denial stream named", err)
 	}
 	seat.ledger.Record(DenialRecord{Subtype: SubtypeDenial, ToolName: "shell_exec", Level: plugin.RiskHigh})
-	// The refused read left the stated watermark standing: a writer that reset it
-	// to zero would re-key over the seven events the cut states.
 	if got := seat.ledger.evtSeq; got != 8 {
-		t.Fatalf("stream sequence after the refused read = %d, want the stated cut continued instead of reset", got)
+		t.Fatalf("stream sequence after the refused read = %d, want the stated cut continued instead of reset: a watermark reset to zero would re-key over the seven events the cut states", got)
 	}
 }
 
@@ -509,8 +501,6 @@ func TestGovernanceApprovalRestoredFromStateSlice(t *testing.T) {
 	seat := NewStateSeat(NewDenialLedger(), NewGoalRegistry(), book)
 	cut := mustStateCut(t, seat)
 
-	// The request files are the per-request durable write beside the stated book;
-	// the boot reads the stated state, so the files are gone by then.
 	if err := os.RemoveAll(filepath.Join(dir, "approvals")); err != nil {
 		t.Fatalf("withdraw the request files under %s: %v", dir, err)
 	}
@@ -522,7 +512,7 @@ func TestGovernanceApprovalRestoredFromStateSlice(t *testing.T) {
 	}
 	presence := restartedBook.Pending()
 	if len(presence) != 1 || presence[0].ID != held.ID {
-		t.Fatalf("pending requests beside the restored book = %+v, want the one hold that still waits", presence)
+		t.Fatalf("pending requests beside the restored book = %+v, want the one hold that still waits, read from the stated book now that the per-request files are gone", presence)
 	}
 	approved := restartedBook.Lookup("shell_exec", approval.ArgsDigest([]byte(`{"cmd":"rollback"}`)))
 	if approved == nil || approved.Status != approval.ApprovalApproved || approved.DecidedBy != "operator" {
@@ -532,8 +522,6 @@ func TestGovernanceApprovalRestoredFromStateSlice(t *testing.T) {
 		t.Fatalf("hold read beside the restored book = %+v, want the pending request it stated", decided)
 	}
 
-	// A request past its validity is not resurrected: the restore drops the hold the
-	// clock already ended instead of handing it a second life.
 	expired := mustStateCut(t, seat)
 	var wire stateSliceWire
 	if err := json.Unmarshal(expired, &wire); err != nil {
@@ -551,6 +539,6 @@ func TestGovernanceApprovalRestoredFromStateSlice(t *testing.T) {
 		t.Fatalf("restore the expired book: %v", err)
 	}
 	if presence := afterExpiry.Pending(); len(presence) != 0 {
-		t.Fatalf("pending requests beside an expired cut = %+v, want none resurrected", presence)
+		t.Fatalf("pending requests beside an expired cut = %+v, want none resurrected: the restore drops the hold the clock already ended instead of handing it a second life", presence)
 	}
 }

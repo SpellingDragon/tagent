@@ -15,7 +15,8 @@ type effectiveConfigReporter interface {
 }
 
 // TestEffectiveGenerationConfig pins the configuration one parameterized model reports to the request evidence against what it hands the provider.
-//   - a declared temperature, thinking switch, reasoning effort and output limit fill the parameters the request leaves unset, and the provider receives exactly them
+//   - a declared temperature, thinking switch, reasoning effort and output limit fill the parameters the request leaves unset
+//   - the provider receives exactly those filled parameters
 //   - a parameter the request names keeps its value while the rest is filled
 //   - a parameter neither side declares stays absent, and a spec that declares none adds no wrapper at all
 //

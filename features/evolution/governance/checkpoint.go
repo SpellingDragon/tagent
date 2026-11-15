@@ -5,12 +5,10 @@
 // slice. The governance events stay the truth of the governance history and the
 // replay source; this slice is the state they already folded, so a restarted
 // process reads a cut the size of the state it holds instead of scanning the
-// stream it committed.
-//
-// The slice carries the cut beside the state it cut: the tail each stream ended
-// at, so a restarted writer continues its numbering past the keys already written
-// instead of re-keying over commitments, and a boot that finds a cut reads the
-// events past it alone.
+// stream it committed. The slice carries the cut beside the state it cut: the tail
+// each stream ended at, so a restarted writer continues its numbering past the keys
+// already written instead of re-keying over commitments, and a boot that finds a
+// cut reads the events past it alone.
 //
 // The redline list (3 rules):
 // MUST keep the governance events as the truth: the slice is derived, never the source, and no statement here rewrites or drops a committed event.

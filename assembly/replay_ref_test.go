@@ -1,4 +1,4 @@
-// 契约: docs/wiki/memory/memory-architecture.md#file-segment-store
+// 契约: docs/wiki/memory/memory-architecture.md#read-paths
 package assembly
 
 import (
@@ -12,21 +12,15 @@ import (
 	"github.com/SpellingDragon/tagent/memory/ledger"
 )
 
-// TestReplayRefNamesAMissingBody pins the answer of the anchored rebuild's
-// per-slot walk when the store it walks cannot answer one body.
-//   - a fact the walk names but the store answers no body for is refused with
-//     ErrSegmentBodyMissing carrying that key, never returned as an empty product
-//     beside a nil error
-//   - the refusal is the same named error the sibling recovery reads answer
-//     (eachCommittedEvent, eachFactPastCut, EachEvent), so the two paths of one
-//     store cannot disagree about one missing body
+// TestReplayRefNamesAMissingBody pins the answer of the anchored rebuild's per-slot walk when the store it walks cannot answer one body.
+//   - a fact the walk names but the store answers no body for is refused with ErrSegmentBodyMissing carrying that key
+//   - it is never returned as an empty product beside a nil error
+//   - the refusal is the same named error the sibling recovery reads answer (eachCommittedEvent, eachFactPastCut, EachEvent)
+//   - so the two paths of one store cannot disagree about one missing body
+//   - the branch the walk takes is the one a derived index publishes fewer entries than the commit order names
+//   - today the load publishes every entry, so the walk reaches it only through a store that answers no body for the named fact, which is what this test drives
 //
-// The branch the walk takes is the one a derived index publishes fewer entries
-// than the commit order names: today the load publishes every entry, so the walk
-// reaches it only through a store that answers no body for the named fact, which
-// is what this test drives directly.
-//
-// 契约: docs/wiki/memory/memory-architecture.md#file-segment-store
+// 契约: docs/wiki/memory/memory-architecture.md#read-paths
 func TestReplayRefNamesAMissingBody(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()

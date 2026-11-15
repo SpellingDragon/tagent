@@ -48,12 +48,12 @@ func historySummaryUnder(t *testing.T, plan AgeFoldPlan) (ProjectionEntry, *Repl
 	return ProjectionEntry{}, nil
 }
 
-// TestHistorySummaryObeysThePlanBudget pins the summary text bound the fold reads
-// off its plan: the plan's SummaryBudgetBytes bounds the mechanical summary, the
-// zero plan reads the policy default, and folding the standing summary again
-// answers the same text instead of growing past the bound.
+// TestHistorySummaryObeysThePlanBudget pins the summary text bound the fold reads off its plan.
+//   - the plan's SummaryBudgetBytes bounds the mechanical summary the oldest band folds into
+//   - the zero plan reads the policy default instead of the declared bound
+//   - folding the standing summary again answers the same text instead of growing past the bound
 //
-// 契约: docs/wiki/memory/memory-architecture.md#event-shape
+// 契约: docs/wiki/agent/event-flow.md#unified-compression
 func TestHistorySummaryObeysThePlanBudget(t *testing.T) {
 	const declared = 512
 	tight, projection := historySummaryUnder(t, AgeFoldPlan{
