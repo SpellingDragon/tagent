@@ -31,7 +31,7 @@ const settlePendingSession = "session-settle-pending"
 
 const settlePendingAgentSections = "  user:\n" +
 	"    model: model-entry\n" +
-	"    max_tokens: 32000\n" +
+	"    replay_window: 32000\n" +
 	"    tools:\n" +
 	"      - { kind: tool, id: call_subagent }\n" +
 	"  reviewer:\n" +

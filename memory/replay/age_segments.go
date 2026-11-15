@@ -92,15 +92,18 @@ const (
 	AgeReasonHistorySummary = "the oldest band is over its volume threshold"
 
 	// DefaultAgeSummaryTextLimit bounds the text one history summary carries, in
-	// bytes. The summary is a derived view of material that stays on the chain,
-	// so it carries the newest reads while they fit and states the older ones by
-	// count: the text is bounded by this limit whatever the length of the history
-	// it compresses, and folding one summary a second time answers the same bound
-	// instead of copying the text it stands for.
+	// bytes, when the fold plan names no budget: the policy default a
+	// declaration replaces (summary_budget_bytes), read here so a plan built
+	// without a declaration still folds under a bound. The summary is a derived
+	// view of material that stays on the chain, so it carries the newest reads
+	// while they fit and states the older ones by count: the text is bounded by
+	// the plan's budget whatever the length of the history it compresses, and
+	// folding one summary a second time answers the same bound instead of
+	// copying the text it stands for.
 	DefaultAgeSummaryTextLimit = 2048
 	// ageSummaryDropReserve is the room the covered-by-key marker takes inside
-	// DefaultAgeSummaryTextLimit: the count it states is the only part of the
-	// dropped material the summary keeps.
+	// the summary budget: the count it states is the only part of the dropped
+	// material the summary keeps.
 	ageSummaryDropReserve = 64
 	// ageSummaryLineJoin is the separator two folded lines are joined under, in
 	// bytes.
@@ -417,6 +420,10 @@ type AgeFoldPlan struct {
 	// VolumeThreshold is the rendered volume a projection may carry, in bytes;
 	// zero reads DefaultAgeVolumeThreshold.
 	VolumeThreshold int
+	// SummaryBudgetBytes is the byte bound one history summary obeys; zero reads
+	// DefaultAgeSummaryTextLimit. It is the policy value the declaration names,
+	// carried into the plan so the fold reads one bound rather than a constant.
+	SummaryBudgetBytes int
 }
 
 // AgeFoldReport is the structured result of one age-band fold: the volume the
@@ -477,6 +484,7 @@ func (p *ReplayProjection) FoldByAge(ctx context.Context, plan AgeFoldPlan) (Age
 	if threshold <= 0 {
 		threshold = DefaultAgeVolumeThreshold
 	}
+	budget := summaryBudgetOf(plan)
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	report := AgeFoldReport{Volume: p.volume, Threshold: threshold}
@@ -506,7 +514,7 @@ func (p *ReplayProjection) FoldByAge(ctx context.Context, plan AgeFoldPlan) (Age
 	}
 	report.MidFolded = len(oldest)
 	if len(oldest) > 0 {
-		summary := historySummaryOf(oldest)
+		summary := historySummaryOf(oldest, budget)
 		kept = append([]ProjectionEntry{summary}, kept...)
 		if _, stands := held[summary.Key]; !stands {
 			report.Products = append(report.Products, summary)
@@ -542,7 +550,7 @@ func foldProcessDetail(entries []ProjectionEntry, complete bool) (int, *Projecti
 			continue
 		}
 		process = append(process, entry)
-		lines = append(lines, foldLineOf(entry))
+		lines = append(lines, foldTicketLineOf(entry))
 	}
 	if len(process) == 0 {
 		return 0, nil
@@ -595,12 +603,12 @@ func segmentWithProduct(entries []ProjectionEntry, product ProjectionEntry) []Pr
 // presentation that needs a label renders it from there instead of the fold
 // writing it into the material.
 //
-// The text is bounded by DefaultAgeSummaryTextLimit whatever it folds: the newest
+// The text is bounded by the plan's summary budget whatever it folds: the newest
 // reads are kept while they fit and the older material is stated by the count of
 // entries the summary covers. A standing history summary is its own summary, so
 // folding one a second time answers the entry it already is — the fold is
 // idempotent and a summary never re-carries the text it stands for.
-func historySummaryOf(entries []ProjectionEntry) ProjectionEntry {
+func historySummaryOf(entries []ProjectionEntry, budget int) ProjectionEntry {
 	if len(entries) == 1 && entries[0].Type == ProjectionTypeHistorySummary {
 		return entries[0]
 	}
@@ -612,7 +620,7 @@ func historySummaryOf(entries []ProjectionEntry) ProjectionEntry {
 		Key:     ageKey(ageHistoryKeyPrefix, entries),
 		Type:    ProjectionTypeHistorySummary,
 		Summary: "history summary",
-		Content: ageSummaryTextOf(lines),
+		Content: ageSummaryTextOf(lines, budget),
 		Time:    entries[0].Time,
 	}
 }
@@ -633,17 +641,18 @@ func historySummaryLine(entry ProjectionEntry) string {
 	return foldLineOf(entry)
 }
 
-// ageSummaryTextOf joins the folded lines under the summary text bound: the
-// newest lines keep their one-line read while they fit under it, and the older
-// ones are stated as the count of entries the summary covers by key. The answer
-// is deterministic over the lines it reads and never runs past the bound, so a
-// summary compressed twice answers the same text a third time would.
-func ageSummaryTextOf(lines []string) string {
+// ageSummaryTextOf joins the folded lines under the summary text bound the plan
+// carries: the newest lines keep their one-line read while they fit under it,
+// and the older ones are stated as the count of entries the summary covers by
+// key. The answer is deterministic over the lines it reads and never runs past
+// the bound, so a summary compressed twice answers the same text a third time
+// would.
+func ageSummaryTextOf(lines []string, budget int) string {
 	joined := strings.Join(lines, "; ")
-	if len(joined) <= DefaultAgeSummaryTextLimit {
+	if len(joined) <= budget {
 		return joined
 	}
-	room := DefaultAgeSummaryTextLimit - ageSummaryDropReserve
+	room := budget - ageSummaryDropReserve
 	if room < 0 {
 		room = 0
 	}
@@ -670,7 +679,7 @@ func ageSummaryTextOf(lines []string) string {
 		out = append(out, ageSummaryDropMarker(dropped))
 	}
 	out = append(out, kept...)
-	return cutBytes(strings.Join(out, "; "), DefaultAgeSummaryTextLimit)
+	return cutBytes(strings.Join(out, "; "), budget)
 }
 
 // foldLineOf renders the one-line read one folded entry contributes to a fold
@@ -679,6 +688,46 @@ func ageSummaryTextOf(lines []string) string {
 // a later fold reads a product's source lines exactly as the product wrote them.
 func foldLineOf(entry ProjectionEntry) string {
 	return provenancePrefixOf(entry) + entry.Type + ": " + entry.Summary
+}
+
+// foldTicketLineOf renders the one-line read one process-detail entry contributes
+// to a segment fold: its provenance anchor, then the ticket naming the entry's own
+// event key, then the type and summary the line has always carried. The ticket is
+// what the fold owes the model: the process text leaves the projection with the
+// fold, so the address that reads it back off the chain is the only handle left,
+// and it stands after the anchor so the anchor contract holds unchanged.
+func foldTicketLineOf(entry ProjectionEntry) string {
+	ticket := TicketOf(entry.Key, entry.Type)
+	if ticket == "" {
+		return foldLineOf(entry)
+	}
+	return provenancePrefixOf(entry) + ticket + " " + entry.Type + ": " + entry.Summary
+}
+
+// productTextWithin reports the leading whole lines of one fold product that fit
+// the room the assembly leaves, and whether any line fits at all. The lines are
+// the reads the fold joined, so a truncated view carries complete reads: the
+// model is never handed half a ticket it cannot hand back, and a room too small
+// for one line answers no view so the caller degrades the product to its summary.
+func productTextWithin(content string, room int) (string, bool) {
+	lines := strings.Split(content, "; ")
+	kept := make([]string, 0, len(lines))
+	used := 0
+	for _, line := range lines {
+		size := len(line)
+		if len(kept) > 0 {
+			size += ageSummaryLineJoin
+		}
+		if used+size > room {
+			break
+		}
+		kept = append(kept, line)
+		used += size
+	}
+	if len(kept) == 0 {
+		return "", false
+	}
+	return strings.Join(kept, "; "), true
 }
 
 // provenancePrefixOf renders the anchor a folded line opens with:

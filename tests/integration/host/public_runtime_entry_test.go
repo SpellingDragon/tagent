@@ -238,7 +238,7 @@ func TestPublicRuntimeEntry(t *testing.T) {
 			if tail.Content == "hello again" {
 				history := false
 				for _, msg := range req.Messages[:len(req.Messages)-1] {
-					if msg.Role == model.RoleUser && msg.Content == "hello" {
+					if msg.Role == model.RoleUser && withoutPresentedTicket(msg.Content) == "hello" {
 						history = true
 					}
 				}

@@ -72,6 +72,121 @@ type StatedTask struct {
 	Mutations []CommitRecord `json:"mutations,omitempty"`
 	// Obligations is every obligation the registry still holds for the task.
 	Obligations []checkpointObligation `json:"obligations,omitempty"`
+	// Consumed, Attempts and Rejected are the settle account of the task: the
+	// consumption receipts it completed, the attempts its follow-up turns are and
+	// the refusals its targets answered. They are stated beside the chain so a boot
+	// reads the account of a task the checkpoint covers instead of scanning the
+	// durable prefixes of the whole history, and they are stated as empty lists
+	// rather than left out, because an empty account is the answer "this task
+	// completed no consumption", which is a different statement from a checkpoint
+	// that never stated the family at all.
+	Consumed []StatedConsumption `json:"consumed"`
+	Attempts []StatedAttempt     `json:"attempts"`
+	Rejected []StatedRefusal     `json:"rejected"`
+}
+
+// StatedConsumption is one completed logical consumption of a task as a
+// checkpoint states it: the notice identity the receipt answers beside the
+// committed event the notice pointed at.
+type StatedConsumption struct {
+	// Notice is the four-part identity of the notification the receipt confirms.
+	Notice Notice `json:"notice"`
+	// Event is the committed fact the notification pointed at.
+	Event event.EventID `json:"event,omitempty"`
+}
+
+// StatedAttempt is the attempt of one notification's follow-up turn as a
+// checkpoint states it: the notice it belongs to beside the terminal that turn
+// ended on, empty while the turn is in flight.
+type StatedAttempt struct {
+	// Notice is the four-part identity of the notification the attempt belongs to.
+	Notice Notice `json:"notice"`
+	// Terminal is the terminal the driven turn ended on.
+	Terminal string `json:"terminal,omitempty"`
+}
+
+// StatedRefusal is the feedback fact of one notification a target refused as a
+// checkpoint states it: the notice it answers beside the routing the delivery was
+// offered to, the instance that offered it, the reason the target gave and the
+// instant the refusal landed.
+type StatedRefusal struct {
+	// Notice is the four-part identity of the notification the target refused.
+	Notice Notice `json:"notice"`
+	// Target is the routing the delivery was offered to.
+	Target event.Address `json:"target"`
+	// Instance is the instance that offered the delivery.
+	Instance event.InstanceID `json:"instance"`
+	// Reason is the reason the target gave.
+	Reason string `json:"reason"`
+	// At is the instant the refusal landed.
+	At time.Time `json:"at"`
+}
+
+// Receipts is the settle account one task's durable record holds: the
+// consumption receipts it completed, the attempts its follow-up turns are and the
+// refusals its targets answered.
+type Receipts struct {
+	Consumed []StatedConsumption
+	Attempts []StatedAttempt
+	Rejected []StatedRefusal
+}
+
+// SettleAccount is the durable receipt account a checkpoint states: the receipts
+// one task holds. A commit over the durable log answers it; a checkpoint beside no
+// durable commit states the empty account of every task it names.
+//
+// The redline list (3 rules):
+// 红线: 结算账是只读面——只读已提交的 durable 记录，不写账、不改任务状态。
+// MUST answer every task the checkpoint names, empty families stated as empty lists.
+// MUST NOT answer a receipt of a task other than the one its notice belongs to.
+// MUST NOT scan a durable prefix a checkpoint receipt already covers.
+type SettleAccount interface {
+	// ReceiptsOf answers the receipts one task holds, ordered by notice identity.
+	ReceiptsOf(taskID event.TaskID) Receipts
+}
+
+// StateSettleAccount answers the account a registry states with the settle
+// account of every task it names: the consumption receipts, the attempts and the
+// refusals the durable record of that task holds. A boot that reads the checkpoint
+// then reads the receipts of the tasks it covers out of the checkpoint instead of
+// scanning the durable prefixes of a history the tasks already settled, and the
+// account it states is the whole account of those tasks.
+//
+// A task beside no receipt states the three families as empty lists: a checkpoint
+// that stated nothing would be indistinguishable from one written before the
+// families existed, and the boot would have to scan the prefixes to tell them
+// apart. A nil account, and a payload stating no task, answer the payload
+// unchanged.
+func StateSettleAccount(ctx context.Context, payload []byte, account SettleAccount) ([]byte, error) {
+	if account == nil {
+		return payload, nil
+	}
+	var wire RegistryCheckpoint
+	if err := json.Unmarshal(payload, &wire); err != nil {
+		return nil, err
+	}
+	if len(wire.Tasks) == 0 {
+		return payload, nil
+	}
+	for at := range wire.Tasks {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		receipts := account.ReceiptsOf(wire.Tasks[at].TaskID)
+		wire.Tasks[at].Consumed = statedReceipts(receipts.Consumed)
+		wire.Tasks[at].Attempts = statedReceipts(receipts.Attempts)
+		wire.Tasks[at].Rejected = statedReceipts(receipts.Rejected)
+	}
+	return json.Marshal(wire)
+}
+
+// statedReceipts answers one receipt family as a checkpoint states it: the
+// receipts held, or an empty list when the task holds none.
+func statedReceipts[T any](held []T) []T {
+	if len(held) == 0 {
+		return []T{}
+	}
+	return held
 }
 
 // checkpointObligation is one obligation a checkpoint states: the class it waits
@@ -195,6 +310,9 @@ func (t *memoryTask) checkpointOf(taskID event.TaskID) StatedTask {
 		HandoffRecord: t.handoffRecord,
 		Mutations:     make([]CommitRecord, 0, len(t.mutations)),
 		Obligations:   make([]checkpointObligation, 0, len(t.obligations)),
+		Consumed:      []StatedConsumption{},
+		Attempts:      []StatedAttempt{},
+		Rejected:      []StatedRefusal{},
 	}
 	if t.handoff != nil {
 		moved := *t.handoff
@@ -258,5 +376,51 @@ func (stated StatedTask) record() (*memoryTask, error) {
 			envelope:   open.Envelope,
 		})
 	}
+	for _, receipt := range stated.Consumed {
+		if err := receipt.statedUnder(stated.TaskID, "consumption receipt"); err != nil {
+			return nil, err
+		}
+	}
+	for _, attempt := range stated.Attempts {
+		if err := attempt.statedUnder(stated.TaskID, "attempt"); err != nil {
+			return nil, err
+		}
+	}
+	for _, refusal := range stated.Rejected {
+		if err := refusal.statedUnder(stated.TaskID, "refusal"); err != nil {
+			return nil, err
+		}
+	}
 	return entry, nil
+}
+
+// statedUnder refuses a receipt the checkpoint states under another task than the
+// one it answers: a receipt filed under the wrong entry is a settle account the
+// boot would lose without a word, so the restore names the mismatch instead of
+// dropping the receipt.
+func (consumed StatedConsumption) statedUnder(taskID event.TaskID, family string) error {
+	return receiptStatedUnder(taskID, consumed.Notice, family)
+}
+
+// statedUnder refuses an attempt the checkpoint states under another task than
+// the one it answers.
+func (attempt StatedAttempt) statedUnder(taskID event.TaskID, family string) error {
+	return receiptStatedUnder(taskID, attempt.Notice, family)
+}
+
+// statedUnder refuses a refusal the checkpoint states under another task than the
+// one it answers.
+func (refusal StatedRefusal) statedUnder(taskID event.TaskID, family string) error {
+	return receiptStatedUnder(taskID, refusal.Notice, family)
+}
+
+// receiptStatedUnder answers nil when one receipt's notice belongs to the task
+// the checkpoint states it under, and names the mismatch otherwise. A receipt
+// whose own identity is empty is refused too: a notice identity is the four parts
+// a receipt is read back by, so one without a task cannot be answered to anyone.
+func receiptStatedUnder(taskID event.TaskID, notice Notice, family string) error {
+	if notice.TaskID != taskID {
+		return fmt.Errorf("task: the checkpoint states the %s of the task %s under %s", family, notice.TaskID, taskID)
+	}
+	return nil
 }

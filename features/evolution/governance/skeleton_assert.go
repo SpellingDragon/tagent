@@ -95,12 +95,9 @@ const (
 )
 
 // The 04.6 governance recovery declarations keep their exact shapes: the goal
-// registry entry points, the budget gate, the denial ledger and the durable
-// governance event face the two bind to for recovery.
+// registry entry points, the budget gate and the denial ledger.
 var (
 	_ func() *GoalRegistry = NewGoalRegistry
-
-	_ func(*GoalRegistry, GovernanceEventLog) = (*GoalRegistry).BindStore
 
 	_ func(*GoalRegistry, string, string, int64) string = (*GoalRegistry).Declare
 
@@ -121,8 +118,6 @@ var (
 	_ func(*BudgetManager, plugin.RiskLevel) int64 = (*BudgetManager).Usage
 
 	_ func() *DenialLedger = NewDenialLedger
-
-	_ func(*DenialLedger, GovernanceEventLog) = (*DenialLedger).BindStore
 
 	_ func(*DenialLedger, DenialRecord) = (*DenialLedger).Record
 

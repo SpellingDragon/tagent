@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -258,5 +259,160 @@ func TestRestoredTaskKeepsTheRevisionTheTailExpects(t *testing.T) {
 	}
 	if _, status, err := restored.Lookup(ctx, taskID); err != nil || status != StatusSettled {
 		t.Fatalf("the folded task states (%v, %v), want the settled tail", status, err)
+	}
+}
+
+// statedSettleAccount is a receipt account one test states by hand: the three
+// families one task holds, keyed by the task they answer.
+type statedSettleAccount map[event.TaskID]Receipts
+
+// ReceiptsOf answers the receipts of one task.
+func (a statedSettleAccount) ReceiptsOf(taskID event.TaskID) Receipts { return a[taskID] }
+
+// TestTaskSliceStatesTheSettleAccount pins what a task checkpoint states beside
+// the registry's own account.
+//   - the three receipt families of a task the checkpoint names are stated, entry
+//     for entry, and a round trip of the payload restores the same account
+//   - a task beside no receipt states the three families as empty lists, never as
+//     a missing key: an account that completed no consumption is a statement, and
+//     a checkpoint that stated nothing could not be told apart from one written
+//     before the families existed
+//   - the tasks the payload states are unchanged in every other field, so the
+//     receipts cost the checkpoint no part of the account it already carried
+//
+// 契约: docs/wiki/platform/platform-subsystems.md#framework-checkpoint
+func TestTaskSliceStatesTheSettleAccount(t *testing.T) {
+	ctx := context.Background()
+	source, _ := invariantRegistry(t)
+	withReceipts := invariantRegister(t, source, "call-account", "dedup-account")
+	without := invariantRegister(t, source, "call-quiet", "dedup-quiet")
+	payload, err := source.SnapshotCheckpoint(ctx)
+	if err != nil {
+		t.Fatalf("state the account: %v", err)
+	}
+	refused := time.Date(2026, 11, 6, 12, 30, 0, 0, time.UTC)
+	account := statedSettleAccount{
+		withReceipts: Receipts{
+			Consumed: []StatedConsumption{{
+				Notice: Notice{TaskID: withReceipts, Round: 1, Kind: NoticeSettled, Seq: 2},
+				Event:  "event-consumed",
+			}},
+			Attempts: []StatedAttempt{{
+				Notice:   Notice{TaskID: withReceipts, Round: 1, Kind: NoticeSettled, Seq: 2},
+				Terminal: "completed",
+			}},
+			Rejected: []StatedRefusal{{
+				Notice:   Notice{TaskID: withReceipts, Round: 2, Kind: NoticeAccepted, Seq: 0},
+				Target:   event.Address{AgentID: "agent-a", SessionID: "session-account"},
+				Instance: "instance-account",
+				Reason:   "the target answered no",
+				At:       refused,
+			}},
+		},
+	}
+	stated, err := StateSettleAccount(ctx, payload, account)
+	if err != nil {
+		t.Fatalf("state the settle account: %v", err)
+	}
+	var wire RegistryCheckpoint
+	if err := json.Unmarshal(stated, &wire); err != nil {
+		t.Fatalf("the stated payload carries no readable account: %v", err)
+	}
+	byTask := map[event.TaskID]StatedTask{}
+	for _, entry := range wire.Tasks {
+		byTask[entry.TaskID] = entry
+	}
+	held, carried := byTask[withReceipts]
+	if !carried {
+		t.Fatalf("the stated payload names no task %s", withReceipts)
+	}
+	if !reflect.DeepEqual(held.Consumed, account[withReceipts].Consumed) {
+		t.Fatalf("the stated consumption receipts = %+v, want the account's %+v", held.Consumed, account[withReceipts].Consumed)
+	}
+	if !reflect.DeepEqual(held.Attempts, account[withReceipts].Attempts) {
+		t.Fatalf("the stated attempts = %+v, want the account's %+v", held.Attempts, account[withReceipts].Attempts)
+	}
+	if !reflect.DeepEqual(held.Rejected, account[withReceipts].Rejected) {
+		t.Fatalf("the stated refusals = %+v, want the account's %+v", held.Rejected, account[withReceipts].Rejected)
+	}
+	quiet, carried := byTask[without]
+	if !carried {
+		t.Fatalf("the stated payload names no task %s", without)
+	}
+	if quiet.Consumed == nil || quiet.Attempts == nil || quiet.Rejected == nil {
+		t.Fatalf("the quiet task states %+v, want the three families as empty lists rather than missing keys", quiet)
+	}
+	var rendered map[string]json.RawMessage
+	if err := json.Unmarshal(stated, &rendered); err != nil {
+		t.Fatalf("read the stated payload as a document: %v", err)
+	}
+	var entries []map[string]json.RawMessage
+	if err := json.Unmarshal(rendered["tasks"], &entries); err != nil {
+		t.Fatalf("read the stated tasks: %v", err)
+	}
+	for _, entry := range entries {
+		if string(entry["task_id"]) != `"`+string(without)+`"` {
+			continue
+		}
+		for _, family := range []string{"consumed", "attempts", "rejected"} {
+			stated, carried := entry[family]
+			if !carried || string(stated) != "[]" {
+				t.Fatalf("the quiet task states the %s family as %s, want an empty list", family, string(stated))
+			}
+		}
+	}
+	restored, _ := invariantRegistry(t)
+	if err := restored.RestoreCheckpoint(ctx, stated); err != nil {
+		t.Fatalf("put the account back: %v", err)
+	}
+	if got, want := restored.checkpointOf(t, withReceipts), source.checkpointOf(t, withReceipts); !reflect.DeepEqual(got, want) {
+		t.Fatalf("the restored record = %+v, want the record the source held %+v", got, want)
+	}
+}
+
+// TestTaskSliceRefusesAReceiptOfAnotherTask pins the identity check of a stated
+// receipt.
+//   - a receipt filed under a task it does not answer refuses the restore by name,
+//     naming both identities
+//   - the same receipt filed under the task it answers is accepted, so the refusal
+//     is the mismatch and not the family
+//
+// 契约: docs/wiki/platform/platform-subsystems.md#framework-checkpoint
+func TestTaskSliceRefusesAReceiptOfAnotherTask(t *testing.T) {
+	ctx := context.Background()
+	source, _ := invariantRegistry(t)
+	answered := invariantRegister(t, source, "call-answered", "dedup-answered")
+	other := invariantRegister(t, source, "call-other", "dedup-other")
+	payload, err := source.SnapshotCheckpoint(ctx)
+	if err != nil {
+		t.Fatalf("state the account: %v", err)
+	}
+	receipt := StatedConsumption{Notice: Notice{TaskID: other, Round: 0, Kind: NoticeSettled, Seq: 0}}
+	under := func(taskID event.TaskID) []byte {
+		var wire RegistryCheckpoint
+		if err := json.Unmarshal(payload, &wire); err != nil {
+			t.Fatalf("the snapshot states no readable account: %v", err)
+		}
+		for at := range wire.Tasks {
+			if wire.Tasks[at].TaskID == taskID {
+				wire.Tasks[at].Consumed = []StatedConsumption{receipt}
+			}
+		}
+		body, err := json.Marshal(wire)
+		if err != nil {
+			t.Fatalf("state the receipt under %s: %v", taskID, err)
+		}
+		return body
+	}
+	restored, _ := invariantRegistry(t)
+	err = restored.RestoreCheckpoint(ctx, under(answered))
+	if err == nil {
+		t.Fatalf("the restore accepted the receipt of %s filed under %s, want it refused by name", other, answered)
+	}
+	if !strings.Contains(err.Error(), string(other)) || !strings.Contains(err.Error(), string(answered)) {
+		t.Fatalf("the refusal = %v, want both identities named", err)
+	}
+	if err := restored.RestoreCheckpoint(ctx, under(other)); err != nil {
+		t.Fatalf("the restore refused the receipt of %s filed under %s: %v", other, other, err)
 	}
 }

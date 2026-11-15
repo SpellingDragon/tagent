@@ -169,7 +169,7 @@ func scenarioContextRun(t *testing.T, projection *replay.ReplayProjection) (*ass
 		Agents: []config.AgentSpec{{
 			ID:               "agent-a",
 			Model:            "model-a",
-			MaxTokens:        1 << 16,
+			ReplayWindow:     1 << 16,
 			EnvironmentBlock: true,
 			Files:            files,
 		}},

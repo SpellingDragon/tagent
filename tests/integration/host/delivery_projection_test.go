@@ -32,7 +32,7 @@ func TestUserTurnDeliversThroughProjectionSession(t *testing.T) {
 	root := t.TempDir()
 	configPath := writeScriptedHostDocument(t, root, provider.endpoint(), "model-a")
 	writeHostDocumentFile(t, configPath, scriptedHostDocumentWithAgent(root, provider.endpoint(), "model-a",
-		"    max_tokens: 32000\n"))
+		"    replay_window: 32000\n"))
 	sender := &deliveryRecorder{}
 	host, err := assembly.Boot(configPath, assembly.WithSender(sender))
 	if err != nil {
@@ -92,7 +92,7 @@ func TestUserTurnDeliversOnlyThisInvocation(t *testing.T) {
 	root := t.TempDir()
 	configPath := writeScriptedHostDocument(t, root, provider.endpoint(), "model-a")
 	writeHostDocumentFile(t, configPath, scriptedHostDocumentWithAgent(root, provider.endpoint(), "model-a",
-		"    max_tokens: 32000\n"))
+		"    replay_window: 32000\n"))
 	sender := &deliveryRecorder{}
 	host, err := assembly.Boot(configPath, assembly.WithSender(sender))
 	if err != nil {

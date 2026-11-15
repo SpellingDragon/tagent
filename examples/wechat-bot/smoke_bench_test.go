@@ -196,8 +196,8 @@ func benchConfig(b *testing.B, maxTokens int) *smokeConfig {
 	cfg.Doc = func(c *smokeConfig) string {
 		base := *c
 		base.Doc = nil
-		raw := strings.Replace(base.document(), "max_tokens: 2000",
-			fmt.Sprintf("max_tokens: %d", maxTokens), 1)
+		raw := strings.Replace(base.document(), "replay_window: 2000",
+			fmt.Sprintf("replay_window: %d", maxTokens), 1)
 		return strings.Replace(raw, "interval: 5s", "interval: 24h", 1)
 	}
 	writeBenchConfig(b, cfg)

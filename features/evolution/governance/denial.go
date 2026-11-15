@@ -97,8 +97,10 @@ type DenialRecord struct {
 //
 // The ledger is concurrent safe, and the durable face is late-bound and nil
 // safe: without a store it degrades to memory state instead of failing, and
-// binding one replays the stored governance events back into the index, so a
-// restart keeps the records it already made.
+// binding one folds the stored governance events that landed past the state cut
+// this ledger holds, so a restart keeps the records it already made. The cut is
+// seated by the framework state slice (see StateSeat); a ledger beside no seat
+// holds the zero cut, so the events past it are the whole stream.
 //
 // 契约: docs/wiki/agent/governance-enforcement.md#denial-ledger
 type DenialLedger struct {
@@ -108,25 +110,30 @@ type DenialLedger struct {
 	evtSeq  int64
 }
 
-// NewDenialLedger builds one ledger in memory state. BindStore hands it the
-// durable face whenever the wiring has one.
+// NewDenialLedger builds one ledger in memory state. Bind hands it the durable
+// face whenever the wiring has one.
 func NewDenialLedger() *DenialLedger {
 	return &DenialLedger{}
 }
 
-// BindStore hands the ledger its durable face and replays the governance
-// events already stored there back into the index. It is nil safe, and it runs
-// single threaded at construction — the same discipline the goal registry
-// binds under.
-func (l *DenialLedger) BindStore(log GovernanceEventLog) {
+// Bind hands the ledger its durable face and folds the stored governance events
+// that landed past the state cut this ledger holds back into the index. It is
+// nil safe, and it runs single threaded at construction — the same discipline
+// the goal registry binds under.
+//
+// The error of a fold belongs to the caller that can stop the boot: a stream this
+// ledger could not read leaves the index behind the chain it serves, and the
+// caller that holds the cut decides whether that is a boot to stop. The
+// framework state seam is that caller (see StateSeat.Bind).
+func (l *DenialLedger) Bind(ctx context.Context, log GovernanceEventLog) error {
 	if l == nil || log == nil {
-		return
+		return nil
 	}
 	l.mu.Lock()
 	l.log = log
-	l.evtSeq = l.seedSeqLocked()
+	cut := l.evtSeq
 	l.mu.Unlock()
-	l.rebuildFromStore()
+	return l.foldTail(ctx, log, cut)
 }
 
 // Record writes the governance double of one record: the ledger entry and the
@@ -190,10 +197,52 @@ func (l *DenialLedger) eventKeyLocked() string {
 	return fmt.Sprintf("%s%019d", denialEventPrefix, l.evtSeq)
 }
 
-// seedSeqLocked continues the event numbering where the stored stream ends, so
-// a restarted ledger never reuses a key. The caller holds the lock.
-func (l *DenialLedger) seedSeqLocked() int64 {
-	return seedEventSeq(context.Background(), l.log, denialEventPrefix)
+// seat states the ledger the cut and the index one framework state slice
+// restored, so a restarted ledger continues its numbering where the stated
+// stream ended and reads the records the cut already folded.
+func (l *DenialLedger) seat(records []DenialRecord, cut int64) {
+	if l == nil {
+		return
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.records = append([]DenialRecord(nil), records...)
+	l.evtSeq = cut
+}
+
+// stated reports the cut and the index the framework state slice states for this
+// ledger: the sequence the stored stream ended at and the records folded by then.
+func (l *DenialLedger) stated() (int64, []DenialRecord) {
+	if l == nil {
+		return 0, nil
+	}
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	return l.evtSeq, append([]DenialRecord(nil), l.records...)
+}
+
+// foldTail folds the stored governance events that landed past one cut into the
+// index, in the order the operations happened, and continues the stream
+// numbering from the newest event it read. A malformed event is skipped rather
+// than failing the fold; the sequence its key names still counts, so a body the
+// store could not parse never hands its key to a later write.
+func (l *DenialLedger) foldTail(ctx context.Context, log GovernanceEventLog, cut int64) error {
+	events, newest, err := governanceEventsPast(ctx, log, denialEventPrefix, cut)
+	if err != nil {
+		return err
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	for _, evt := range events {
+		if evt.Type != event.TypeGovernance {
+			continue
+		}
+		l.records = append(l.records, recordOfEvent(evt))
+	}
+	if newest > l.evtSeq {
+		l.evtSeq = newest
+	}
+	return nil
 }
 
 // writeGovernanceEvent writes one record as the governance event its double
@@ -222,27 +271,6 @@ func (l *DenialLedger) writeGovernanceEvent(log GovernanceEventLog, key string, 
 		Message:   contentMessage(content),
 	}
 	putGovernanceEvent(context.Background(), log, key, evt)
-}
-
-// rebuildFromStore replays the stored governance events back into the ledger
-// index, in the order the operations happened. A malformed event is skipped
-// rather than failing the rebuild.
-func (l *DenialLedger) rebuildFromStore() {
-	l.mu.RLock()
-	log := l.log
-	l.mu.RUnlock()
-	if log == nil {
-		return
-	}
-	events := replayGovernanceEvents(context.Background(), log, denialEventPrefix)
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	for _, evt := range events {
-		if evt.Type != event.TypeGovernance {
-			continue
-		}
-		l.records = append(l.records, recordOfEvent(evt))
-	}
 }
 
 // recordOfEvent rebuilds one ledger record from the governance event it was
@@ -297,47 +325,83 @@ func putGovernanceEvent(ctx context.Context, log GovernanceEventLog, key string,
 	_ = log.Sync(ctx)
 }
 
-// replayGovernanceEvents returns every stored governance event under the
-// prefix, ordered by the key it was written under — the order the operations
-// happened in. A body that does not parse is skipped rather than failing the
-// replay.
-func replayGovernanceEvents(ctx context.Context, log GovernanceEventLog, prefix string) []event.Event {
-	stored, err := log.Scan(ctx, prefix)
+// governanceEventsPast returns the stored governance events of one stream that
+// landed past a cut, ordered by the key they were written under — the order the
+// operations happened in — beside the newest sequence those keys name. A body
+// that does not parse is skipped rather than failing the read.
+//
+// The read pays for the tail and never for the stream behind it: past a stated
+// cut it reads the one key each next sequence names and stops at the first the
+// store does not hold, so a boot that is behind by a handful of events reads a
+// handful. A cut at zero states that no state was ever seated, so the tail past
+// it is the whole stream and the read is the one scan that stream needs.
+func governanceEventsPast(ctx context.Context, log GovernanceEventLog, prefix string, cut int64) ([]event.Event, int64, error) {
+	if log == nil {
+		return nil, cut, nil
+	}
+	stored, err := governanceTail(ctx, log, prefix, cut)
 	if err != nil {
-		return nil
+		return nil, cut, err
 	}
 	keys := make([]string, 0, len(stored))
 	for key := range stored {
 		keys = append(keys, key)
 	}
 	sort.Strings(keys)
+	newest := cut
 	out := make([]event.Event, 0, len(keys))
 	for _, key := range keys {
+		if seq := eventSeqOf(prefix, key); seq > newest {
+			newest = seq
+		}
 		var evt event.Event
 		if err := json.Unmarshal(stored[key], &evt); err != nil {
 			continue
 		}
 		out = append(out, evt)
 	}
-	return out
+	return out, newest, nil
 }
 
-// seedEventSeq continues one event stream's numbering where the stored stream
-// ends, so a restarted writer never reuses a key it already wrote.
-func seedEventSeq(ctx context.Context, log GovernanceEventLog, prefix string) int64 {
-	if log == nil {
-		return 0
+// governanceTail reads the stored pairs of one stream that landed past a cut: the
+// stream prefix beside no cut, and the single key each next sequence names past
+// one. The two readings state the same set, and only the second one leaves the
+// keys behind the cut unread.
+//
+// The walk ends at the first sequence the store does not hold. A governance write
+// the store lost ends the tail there, and the events past it are still folded by
+// the next cut's index, because the writing process keeps the record beside the
+// lost durable half.
+func governanceTail(ctx context.Context, log GovernanceEventLog, prefix string, cut int64) (map[string][]byte, error) {
+	if cut <= 0 {
+		stored, err := log.Scan(ctx, prefix)
+		if err != nil {
+			return nil, fmt.Errorf("read the %s events: %w", prefix, err)
+		}
+		return stored, nil
 	}
-	stored, err := log.Scan(ctx, prefix)
+	tail := map[string][]byte{}
+	for seq := cut + 1; ; seq++ {
+		key := fmt.Sprintf("%s%019d", prefix, seq)
+		stored, err := log.Scan(ctx, key)
+		if err != nil {
+			return nil, fmt.Errorf("read the %s event: %w", key, err)
+		}
+		if len(stored) == 0 {
+			return tail, nil
+		}
+		for held, raw := range stored {
+			tail[held] = raw
+		}
+	}
+}
+
+// eventSeqOf reads the sequence one governance event key names, and zero for a
+// key the stream does not number.
+func eventSeqOf(prefix, key string) int64 {
+	seq, err := strconv.ParseInt(strings.TrimPrefix(key, prefix), 10, 64)
 	if err != nil {
 		return 0
 	}
-	var max int64
-	for key := range stored {
-		n, err := strconv.ParseInt(strings.TrimPrefix(key, prefix), 10, 64)
-		if err == nil && n > max {
-			max = n
-		}
-	}
-	return max
+	return seq
 }

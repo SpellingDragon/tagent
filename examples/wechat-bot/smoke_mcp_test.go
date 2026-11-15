@@ -184,7 +184,7 @@ agents:
     model: %s
     tools:
       - { kind: tool, id: mcp_call }
-    max_tokens: 2000
+    replay_window: 2000
     compress_threshold: 0.3
     keep_recent_tasks: 1
     max_tool_iterations: 3

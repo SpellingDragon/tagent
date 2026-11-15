@@ -228,8 +228,9 @@ func (c *CompressionConsumer) Execute(ctx context.Context, session event.Session
 		return nil
 	}
 	report, err := folded.PlanByAge(ctx, replay.AgeFoldPlan{
-		KeepRecent:      window.KeepRecentTasks,
-		VolumeThreshold: threshold,
+		KeepRecent:         window.KeepRecentTasks,
+		VolumeThreshold:    threshold,
+		SummaryBudgetBytes: window.SummaryBudgetBytes,
 	})
 	if err != nil || len(report.Products) == 0 {
 		return err
@@ -246,7 +247,7 @@ func (c *CompressionConsumer) Execute(ctx context.Context, session event.Session
 		}
 	}
 	for at := range batch {
-		batch[at] = c.summarizeProduct(ctx, session, batch[at])
+		batch[at] = c.summarizeProduct(ctx, session, batch[at], window.SummaryBudgetBytes)
 	}
 	var checkpoint []byte
 	if len(batch) > 0 {
@@ -267,21 +268,21 @@ func (c *CompressionConsumer) Execute(ctx context.Context, session event.Session
 
 // summarizeProduct answers the text one history summary records: the semantic
 // gist the session's model answers for the material the fold consumed, cut to the
-// bound the mechanical form obeys. A consumer beside no gist face, a session
-// whose agent holds no model, a failed request and an empty answer all keep the
-// mechanical text the fold minted, so a summary is never empty, never blocks the
-// fold and never grows past the bound: the degradation is the form the fold
-// already states, and the reason it was taken is reported.
-func (c *CompressionConsumer) summarizeProduct(ctx context.Context, session event.SessionID, product replay.FoldProduct) replay.FoldProduct {
+// declared byte budget the mechanical form obeys. A consumer beside no gist
+// face, a session whose agent holds no model, a failed request and an empty
+// answer all keep the mechanical text the fold minted, so a summary is never
+// empty, never blocks the fold and never grows past the budget: the degradation
+// is the form the fold already states, and the reason it was taken is reported.
+func (c *CompressionConsumer) summarizeProduct(ctx context.Context, session event.SessionID, product replay.FoldProduct, budget int) replay.FoldProduct {
 	if c == nil || c.gists == nil || product.Entry.Type != replay.ProjectionTypeHistorySummary {
 		return product
 	}
-	gist, err := c.gists.SummaryGist(ctx, session, product.Entry.Content)
+	gist, err := c.gists.SummaryGist(ctx, session, product.Entry.Content, budget)
 	if err != nil {
 		assemblyWarn("tagent: the semantic summary of session %s stayed mechanical err=%v", session, err)
 		return product
 	}
-	bounded := boundedSummaryGist(gist)
+	bounded := boundedSummaryGist(gist, budget)
 	if bounded == "" {
 		assemblyWarn("tagent: the semantic summary of session %s answered no text, kept mechanical", session)
 		return product

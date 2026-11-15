@@ -143,8 +143,8 @@ type requestBudgetPolicy struct {
 }
 
 // gateOpen reports whether the declaration opened the request budget gate. The
-// gate is open exactly when the declaration names a provider window, explicitly
-// or by deriving it from MaxTokens.
+// gate is open exactly when the declaration names a provider window (ContextWindow
+// > 0); the replay window drives folding alone and never opens it.
 func (p requestBudgetPolicy) gateOpen() bool { return p.providerWindow > 0 }
 
 // inputBudget reports the room the request's input material may take: the
@@ -373,12 +373,6 @@ const (
 	BudgetFaceRecoveryHint = "recovery_hint"
 )
 
-// DefaultOutputReserveDivisor is the fixed ratio of the provider context window
-// a declaration that names no output reserve leaves for the model's answer. The
-// input budget is the window minus that share; the constant is frozen here
-// because a silent change of the default would move every undeclared budget.
-const DefaultOutputReserveDivisor = 4
-
 // budgetMessageOverheadTokens is the per-message framing the provider charges
 // beyond the material itself: the role markers and separators around a message.
 // It is the one home of that framing: the approximate prompt measure reads it at
@@ -400,18 +394,6 @@ const budgetToolCallOverheadTokens = 5
 // loop's existing failure path (a failed terminal and the host's existing
 // failure notice), never a new output channel.
 var ErrRequestBudgetExceeded = errors.New("agent: the request exceeds the declared input budget")
-
-// OutputReserveOf reports the default output allowance of one provider context
-// window: the fixed share of the window the declaration leaves for the model's
-// answer. A window of zero declares no budget and both sides report zero; a
-// window that divides below one token still reserves the one token it can, so
-// the input budget never silently swallows the whole window.
-func OutputReserveOf(providerWindow int) int {
-	if providerWindow <= 0 {
-		return 0
-	}
-	return (providerWindow + DefaultOutputReserveDivisor - 1) / DefaultOutputReserveDivisor
-}
 
 // AccountRequestBudget measures one final request's input material and answers
 // the tokens each of the nine input faces takes, the media it could not measure

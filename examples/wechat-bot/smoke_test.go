@@ -3221,7 +3221,7 @@ func smokeIntegrityWaitStandingSummary(t *testing.T, rig *smokeRig, chat string)
 
 // smokeIntegrityAssertFold 驱动小窗口折叠并断言三件事：投影长出带早期输入的历史
 // 摘要、触发轮之后的请求真的读到了综述、原文在事实链上逐字节仍在而投影已用
-// 综述取代它。体积断言取文档声明的窗口（max_tokens 2000 × 4 × 0.3）。
+// 综述取代它。体积断言取文档声明的窗口（replay_window 2000 × 4 × 0.3）。
 //
 // 原文按身份从已提交的事实链上读回，而不是从热窗上找：折叠按契约把被覆盖的原文
 // 移出热窗（热窗只保留投影仍呈现的原文），事实链本身不随之减少。返回的 original
@@ -4263,8 +4263,8 @@ agents:
     model: %s
     tools:
       - { kind: tool, id: exec }
-    max_tokens: %d
-    provider_context_window: %d
+    replay_window: %d
+    context_window: %d
     exec:
       monitor: { interval: 50ms, stable_duration: 150ms, interactive_stable_duration: 150ms, fake_dead_duration: 700ms }
 storage: { type: localfile, root: %s }
@@ -4284,7 +4284,7 @@ app:
     approvers: [%s]
 `,
 		smokeSessionTag, c.Model, c.PromptDir, c.Endpoint,
-		smokeSessionTag, c.Model, c.maxTokens(), c.maxTokens()*2,
+		smokeSessionTag, c.Model, c.replayWindow(), c.replayWindow()*2,
 		c.StorageRoot, c.ApprovalDir,
 		c.ConfigDir, filepath.Join(c.ConfigDir, "token.json"), c.ContextDir,
 		c.WorkspaceDir, smokeApproverChat,

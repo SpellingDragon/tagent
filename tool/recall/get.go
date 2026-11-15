@@ -88,7 +88,7 @@ func (t *getTool) Declaration() *trpctool.Declaration {
 			Properties: map[string]*trpctool.Schema{
 				"key": {
 					Type:        "string",
-					Description: "事件键：[evt_KEY|type]、evt_KEY 或裸键三种写法都接受",
+					Description: "事件键：[evt_KEY|type]、evt_KEY 或裸键三种写法都接受；也可直接贴材料里的整行，行内票据会被取出",
 				},
 				"offset": {
 					Type:        "integer",

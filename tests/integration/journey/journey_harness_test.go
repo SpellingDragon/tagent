@@ -374,12 +374,12 @@ type journeySpec struct {
 	Model string
 	// WorkerModel is the delegated worker's model name.
 	WorkerModel string
-	// MaxTokens is the entry agent's declared model window, zero for none.
-	MaxTokens int
-	// ProviderContextWindow is the entry agent's declared provider context
+	// ReplayWindow is the entry agent's declared model window, zero for none.
+	ReplayWindow int
+	// ContextWindow is the entry agent's declared provider context
 	// window, zero for none: the window the request gate measures the final
-	// request against, beside the replay window MaxTokens names.
-	ProviderContextWindow int
+	// request against, beside the replay window ReplayWindow names.
+	ContextWindow int
 	// EntryTools lists the host tool ids the entry agent declares.
 	EntryTools []string
 	// Delegate names the worker agent the entry agent may call; empty declares
@@ -471,11 +471,11 @@ func journeyDocument(root, endpoint string, spec journeySpec) string {
 	b.WriteString("agents:\n")
 	b.WriteString("  user:\n")
 	writeJourneyTools(&b, spec.EntryTools, spec.Delegate)
-	if spec.MaxTokens > 0 {
-		b.WriteString(fmt.Sprintf("    max_tokens: %d\n", spec.MaxTokens))
+	if spec.ReplayWindow > 0 {
+		b.WriteString(fmt.Sprintf("    replay_window: %d\n", spec.ReplayWindow))
 	}
-	if spec.ProviderContextWindow > 0 {
-		b.WriteString(fmt.Sprintf("    provider_context_window: %d\n", spec.ProviderContextWindow))
+	if spec.ContextWindow > 0 {
+		b.WriteString(fmt.Sprintf("    context_window: %d\n", spec.ContextWindow))
 	}
 	for _, line := range spec.EntryExtra {
 		b.WriteString(line + "\n")

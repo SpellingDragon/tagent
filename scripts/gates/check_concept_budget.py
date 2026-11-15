@@ -158,8 +158,10 @@ BASELINE = (
     ("struct-fields", "tool/subagent/subagent.go:Definition", 10),
     # Declaration 6f（声明面本体）：组织声明=入口/代理/引用/基线/MCP 服务器代际/原始文档，MCP 面随 mcp_servers 声明下沉各成一格，拆开会让声明面出现影子结构。
     ("struct-fields", "api/config/config.go:Declaration", 6),
-    # AgentSpec 26f（声明面本体）：单个 agent 的声明格＝核心（身份/模型/引用/参数/回合预算/回放窗口）＋熔断两镜（max_calls_per_response/long_context_tokens，单响应调用量与长上下文阈值，人审挂起式）＋捕获预算（capture_budget_mb，轨迹常驻上限）＋请求预算两字段（provider_context_window/output_reserve，provider 窗口与输出余量的可选声明；导出是 YAML 解码前提，MUST NOT 退回未导出访问）＋ memory/meditation/file/exec 四个域段平铺在同一格；窗口三字段（max_tokens/compress_threshold/keep_recent_tasks）替代 replay_budget；三个熔断/预算键与 max_tool_iterations 同模式，是声明字段不是影子结构（oom-bounded-capture-and-storm-fuse）。
-    ("struct-fields", "api/config/config.go:AgentSpec", 26),
+    # AgentSpec 25f（声明面本体）：单个 agent 的声明格＝核心（身份/模型/引用/任务策略/回合预算）＋回放窗（replay_window）＋请求预算两字段（context_window 预算门唯一来源、max_tokens 输出限；导出是 YAML 解码前提，MUST NOT 退回未导出访问）＋折叠策略（compress_threshold/keep_recent_tasks）＋摘要预算（summary_budget_bytes，03 compression-configurable 引入：老段摘要的生成上限是声明格而非硬编码常数，与 compress_threshold 同是折叠策略的一格）＋采样三字段（temperature/thinking_enabled/reasoning_effort）＋熔断两镜（max_calls_per_response/long_context_tokens，单响应调用量与长上下文阈值，人审挂起式）＋ max_tool_iterations/environment_block ＋ memory/meditation/file/exec 四个域段平铺在同一格；这些键与 max_tool_iterations 同模式，是声明字段不是影子结构。
+    # runtime-recovery-ideal W3 按名抬升 24->25（03 compression-configurable 新增
+    # SummaryBudgetBytes：摘要预算必须由部署配置，硬编码常数不允许；M4 先例具名抬升）。
+    ("struct-fields", "api/config/config.go:AgentSpec", 25),
     # MeditationSpec 6f：冥想运行声明本体，六个格分别是启用、节奏两格、提示、观察面与回流白名单，字段即声明形状。
     ("struct-fields", "api/config/config.go:MeditationSpec", 6),
     # event.ParsedMeta 9f（00.25 具名登记）：ParseEventMeta 的解析结果本体＝数据面，
@@ -219,7 +221,15 @@ BASELINE = (
     # StatedTask 是框架 checkpoint 状态的任务账本体＝数据保真面——一格对应「重启后
     # 与链折叠逐格相等」所需的一条数据（声明/状态/链修订/轮次/四个移动戳/改道两格/
     # 幂等变更账/未结义务），收窄字段即让恢复面在链折叠侧二次归并或丢掉一格保真。
-    ("struct-fields", "runtime/task/checkpoint.go:StatedTask", 13),
+    # runtime-recovery-ideal W3 按名抬升 13->16（task 托管 05 新增三个结算账目族：
+    # Consumed/Attempts/Rejected——「该任务已结清什么」必须随 checkpoint 一起stated，
+    # 否则 boot 要重扫它已关闭的 durable 前缀；三者各成一格是账目本体）。
+    ("struct-fields", "runtime/task/checkpoint.go:StatedTask", 16),
+    # runtime-recovery-ideal W3（08 fact-retirement 引入叶）：StorageConfig 是存储层
+    # 定位与两个注入面（Engine 观察/延迟/失败注入、RetireFacts 退位选择）的配置本体。
+    # 六个格＝一份配置的语义本体（tier/Root 两个定位、rustviking 两格、两个注入面），
+    # 收窄即让拆块调用方二次归并同一份定位；按 M4 先例具名登记，非收敛目标。
+    ("struct-fields", "memory/ledger/config.go:StorageConfig", 6),
     # 04.2 执行资源解释（引入叶）：租约/续期/停滞/义务的只读投影，字段即
     # Manager.Explain 的回复本体，拆块即解释面需要二次装配。
     ("struct-fields", "tool/exec/exec.go:Explanation", 10),
@@ -245,7 +255,6 @@ BASELINE = (
     ("ctx-bare", "api/plugin/phases.go:*", 1),   # CallPassFrom：派发→受理 pass 传输（锁定工具端口无第二通道）
     ("ctx-bare", "runtime/task/wrapper.go:*", 1),    # CallFrameFrom：per-call 身份经端口唯一通道
     ("ctx-bare", "assembly/settle_turn.go:*", 1),    # settleBarrierFrom：回合终态屏障经类型化 accessor 落到驱动与投递之间
-    ("ctx-bare", "assembly/checkpoint.go:*", 1),     # flightHeldBy：切面排水判 caller 是否持 fence 单元，经类型化 accessor 单通道
     # S4 contract-surface 已出清（叶 00.24）：全部导出接口的 canonical 范例与 Godoc
     # 红线均已落地，本表不再登记 S4 债务。以下一条为再次登记：ResultDelegation 是
     # 结算携带结果正文引入的可选拓展面，范例与红线随后续批次补齐；在此之前显式

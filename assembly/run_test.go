@@ -35,7 +35,7 @@ func windowChainRun(t *testing.T, ctx context.Context, opts ...Option) *Run {
 	}, opts...)
 	run, err := Assemble(ctx, &config.Declaration{
 		Entry:  "agent-a",
-		Agents: []config.AgentSpec{{ID: "agent-a", Model: "model-a", MaxTokens: 60}, {ID: "agent-b", Model: "model-a", MaxTokens: 60}},
+		Agents: []config.AgentSpec{{ID: "agent-a", Model: "model-a", ReplayWindow: 60}, {ID: "agent-b", Model: "model-a", ReplayWindow: 60}},
 	}, map[event.AgentID]NativeAgent{"agent-a": {Model: provider}, "agent-b": {Model: provider}}, options...)
 	if err != nil {
 		t.Fatalf("assemble the run: %v", err)
@@ -364,7 +364,7 @@ func TestNeverFoldedSessionFallsBack(t *testing.T) {
 	}}
 	run, err := Assemble(ctx, &config.Declaration{
 		Entry:  "agent-a",
-		Agents: []config.AgentSpec{{ID: "agent-a", Model: "model-a", MaxTokens: 100000}},
+		Agents: []config.AgentSpec{{ID: "agent-a", Model: "model-a", ReplayWindow: 100000}},
 	}, map[event.AgentID]NativeAgent{"agent-a": {Model: provider}},
 		WithGovernance(snapshotTestGovernance{}),
 		WithStorage(ledger.StorageConfig{Type: ledger.StorageMemory}))
@@ -531,7 +531,7 @@ func TestAnchoredRebuildOnAFreshRun(t *testing.T) {
 		t.Helper()
 		run, err := Assemble(ctx, &config.Declaration{
 			Entry:  "agent-a",
-			Agents: []config.AgentSpec{{ID: "agent-a", Model: "model-a", MaxTokens: 60}},
+			Agents: []config.AgentSpec{{ID: "agent-a", Model: "model-a", ReplayWindow: 60}},
 		}, map[event.AgentID]NativeAgent{"agent-a": {Model: provider}},
 			WithGovernance(snapshotTestGovernance{}),
 			WithStorage(ledger.StorageConfig{Type: ledger.StorageMemory}))

@@ -242,7 +242,7 @@ func runFidelityNextTurnAfterToolCall(t *testing.T) {
 	provider.decide = fidelityGate(script.decide)
 
 	sender := newRecordingSender()
-	host, _ := bootFidelityHost(t, provider, sender, t.TempDir(), "    max_tokens: 32000\n")
+	host, _ := bootFidelityHost(t, provider, sender, t.TempDir(), "    replay_window: 32000\n")
 	keepIntegrityHost(t, script, host)
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
@@ -319,8 +319,8 @@ func runFidelityRequestAfterCompression(t *testing.T) {
 
 	sender := newRecordingSender()
 	host, _ := bootFidelityHost(t, provider, sender, t.TempDir(),
-		"    max_tokens: 440\n"+
-			"    provider_context_window: 2048\n"+
+		"    replay_window: 440\n"+
+			"    context_window: 2048\n"+
 			"    compress_threshold: 1.0\n"+
 			"    keep_recent_tasks: 1\n")
 	keepIntegrityHost(t, script, host)
@@ -418,7 +418,7 @@ func runFidelityRequestAfterColdBoot(t *testing.T) {
 	provider.decide = fidelityGate(script.decide)
 
 	sender := newRecordingSender()
-	host, configPath := bootFidelityHost(t, provider, sender, t.TempDir(), "    max_tokens: 32000\n")
+	host, configPath := bootFidelityHost(t, provider, sender, t.TempDir(), "    replay_window: 32000\n")
 	keepIntegrityHost(t, script, host)
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()

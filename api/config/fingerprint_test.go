@@ -3,7 +3,6 @@ package config
 import (
 	"context"
 	"encoding/json"
-	"math"
 	"reflect"
 	"strings"
 	"testing"
@@ -15,7 +14,6 @@ import (
 // - a file kind spelled out and one omitted normalize onto the same fingerprint
 // - source key order and map entry order do not move the fingerprint
 // - a changed declared field moves the fingerprint
-// - a negative zero parameter normalizes onto zero, so two spellings of zero fingerprint the same
 // - computing the fingerprint leaves the declaration, including its raw document, unmodified
 // 契约: docs/wiki/platform/org-hot-reload.md#fingerprint
 func TestFingerprintIsStableUnderDefaultsAndRepeatedLoads(t *testing.T) {
@@ -35,9 +33,6 @@ agents:
       - name: local
     plugins:
       - audit
-    params:
-      temperature: 0.2
-      top_p: 0.9
     files:
       - path: prompt.md
 `
@@ -76,9 +71,6 @@ agents:
       - name: local
     plugins:
       - audit
-    params:
-      temperature: 0.2
-      top_p: 0.9
     files:
       - path: prompt.md
         kind: prompt
@@ -92,9 +84,6 @@ entry: main
 agents:
   - model: m1
     id: main
-    params:
-      top_p: 0.9
-      temperature: 0.2
     files:
       - path: prompt.md
     plugins: [audit]
@@ -127,22 +116,11 @@ agents:
       - name: local
     plugins:
       - audit
-    params:
-      temperature: 0.2
-      top_p: 0.9
     files:
       - path: prompt.md
 `)
 	if got := fingerprintOf(t, *changed); got == fp1 {
 		t.Fatalf("fingerprint did not move when the model changed: %q", got)
-	}
-
-	zero := *d1.Clone()
-	negativeZero := *d1.Clone()
-	zero.Agents[0].Params["temperature"] = 0
-	negativeZero.Agents[0].Params["temperature"] = math.Copysign(0, -1)
-	if got, want := fingerprintOf(t, negativeZero), fingerprintOf(t, zero); got != want {
-		t.Fatalf("fingerprint of negative zero = %q, want the %q of zero", got, want)
 	}
 
 	before := d1.Clone()
@@ -284,8 +262,6 @@ agents:
       - audit
     files:
       - path: prompt.md
-    params:
-      temperature: 0.2
 `
 	original := loadConfigDeclaration(t, source)
 	before := original.Clone()
@@ -297,7 +273,6 @@ agents:
 	clone.Agents[0].Tools[0].Params["mode"] = "slow"
 	clone.Agents[0].Plugins[0] = "changed"
 	clone.Agents[0].Files[0].Path = "other.md"
-	clone.Agents[0].Params["temperature"] = 1
 	clone.Raw["entry"] = "other"
 	rawAgents := clone.Raw["agents"].([]any)
 	rawAgents[0].(map[string]any)["id"] = "other"

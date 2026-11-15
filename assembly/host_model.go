@@ -1,11 +1,11 @@
 // 契约: docs/wiki/platform/platform-subsystems.md#composition-root
 //
-// The model sampling of one declared agent: the temperature, thinking switch
-// and reasoning effort a host document declares flow onto every request of that
-// agent's model. The wrapper sits between the published binding and the model
-// the provider registry built, so a parameter declared in the document reaches
-// the provider even though the trpc model constructors accept no per-model
-// sampling of their own.
+// The model sampling of one declared agent: the temperature, thinking switch,
+// reasoning effort and output limit a host document declares flow onto every
+// request of that agent's model. The wrapper sits between the published binding
+// and the model the provider registry built, so a parameter declared in the
+// document reaches the provider even though the trpc model constructors accept
+// no per-model sampling of their own.
 //
 // The wrapper fills a value only while the request itself names none: an
 // undeclared parameter is never written as a zero, and a sampling a request
@@ -28,6 +28,7 @@ type hostModelParams struct {
 	Temperature     *float64
 	ThinkingEnabled *bool
 	ReasoningEffort string
+	MaxTokens       int
 }
 
 // hostModelParamsOf reads the sampling one agent spec declares.
@@ -36,13 +37,14 @@ func hostModelParamsOf(spec config.AgentSpec) hostModelParams {
 		Temperature:     spec.Temperature,
 		ThinkingEnabled: spec.ThinkingEnabled,
 		ReasoningEffort: strings.TrimSpace(spec.ReasoningEffort),
+		MaxTokens:       spec.MaxTokens,
 	}
 }
 
 // isZero reports whether the spec declares no sampling at all, so the model is
 // installed without a wrapper.
 func (p hostModelParams) isZero() bool {
-	return p.Temperature == nil && p.ThinkingEnabled == nil && p.ReasoningEffort == ""
+	return p.Temperature == nil && p.ThinkingEnabled == nil && p.ReasoningEffort == "" && p.MaxTokens == 0
 }
 
 // withHostModelParams wraps one model with the sampling its agent spec declares.
@@ -134,6 +136,10 @@ func (m *hostParameterizedModel) decorate(request *model.Request) *model.Request
 	if m.params.ReasoningEffort != "" && out.ReasoningEffort == nil {
 		value := m.params.ReasoningEffort
 		out.ReasoningEffort = &value
+	}
+	if m.params.MaxTokens > 0 && out.MaxTokens == nil {
+		value := m.params.MaxTokens
+		out.MaxTokens = &value
 	}
 	return &out
 }

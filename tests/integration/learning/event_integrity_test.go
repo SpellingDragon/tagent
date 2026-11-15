@@ -460,13 +460,13 @@ func integrityDocument(root, endpoint string, worker bool) string {
 	b.WriteString("agents:\n")
 	b.WriteString("  user:\n")
 	b.WriteString("    model: " + integrityEntryModel + "\n")
-	b.WriteString("    max_tokens: 32000\n")
+	b.WriteString("    replay_window: 32000\n")
 	if worker {
 		b.WriteString("    tools:\n")
 		b.WriteString("      - { kind: agent, agent: " + integrityWorkerAgent + " }\n")
 		b.WriteString("  " + integrityWorkerAgent + ":\n")
 		b.WriteString("    model: " + integrityWorkerModel + "\n")
-		b.WriteString("    max_tokens: 32000\n")
+		b.WriteString("    replay_window: 32000\n")
 	}
 	b.WriteString("storage: { type: localfile, root: " + root + " }\n")
 	return b.String()

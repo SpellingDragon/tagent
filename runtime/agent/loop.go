@@ -1022,9 +1022,9 @@ func (l *Loop) requestBoundary(ctx context.Context, inv Invocation, binding stat
 
 // budgetedRequest assembles the final request of one decision under the request
 // budget the boundary declared. The gate is open exactly when the declaration
-// names a provider window — explicitly or derived from MaxTokens (see
-// assembly.requestBudgetPolicy) — and a closed gate runs the request whole, the
-// debug fact of a declaration that names no budget.
+// names a provider window (ContextWindow > 0; see assembly.requestBudgetPolicy) —
+// and a closed gate runs the request whole, the debug fact of a declaration that
+// names no context window.
 //
 // An open gate degrades the request in the one order the declaration can
 // observe: the dynamic environment block yields first, the skill bodies next
@@ -1042,7 +1042,7 @@ func (l *Loop) budgetedRequest(ctx context.Context, inv Invocation, binding stat
 	}
 	policy := view.budget
 	if !policy.gateOpen() {
-		consumerDebug("tagent: request budget gate closed invocation=%s agent=%s max_tokens=0 provider_window=0",
+		consumerDebug("tagent: request budget gate closed invocation=%s agent=%s provider_window=0",
 			inv.InvocationID, inv.Address.AgentID)
 		return view, model.Request{Messages: finalRequestMessages(view.Messages, transcript, round, view.dynamicParts()), Tools: tools, ToolOrder: toolOrder}, nil
 	}

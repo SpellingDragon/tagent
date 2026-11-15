@@ -15,17 +15,18 @@ type effectiveConfigReporter interface {
 }
 
 // TestEffectiveGenerationConfig pins the configuration one parameterized model reports to the request evidence against what it hands the provider.
-//   - a declared temperature, thinking switch and reasoning effort fill the parameters the request leaves unset, and the provider receives exactly them
+//   - a declared temperature, thinking switch, reasoning effort and output limit fill the parameters the request leaves unset, and the provider receives exactly them
 //   - a parameter the request names keeps its value while the rest is filled
 //   - a parameter neither side declares stays absent, and a spec that declares none adds no wrapper at all
 //
 // 契约: docs/wiki/agent/agent-architecture.md#request-budget
 func TestEffectiveGenerationConfig(t *testing.T) {
-	temperature, thinking, effort := 0.3, true, "high"
+	temperature, thinking, effort, outputLimit := 0.3, true, "high", 8000
 	wrapped := withHostModelParams(&snapshotTestModel{}, config.AgentSpec{
 		Temperature:     &temperature,
 		ThinkingEnabled: &thinking,
 		ReasoningEffort: effort,
+		MaxTokens:       outputLimit,
 	})
 	reporting, ok := wrapped.(effectiveConfigReporter)
 	if !ok {
@@ -43,6 +44,9 @@ func TestEffectiveGenerationConfig(t *testing.T) {
 		}
 		if effective.ReasoningEffort == nil || *effective.ReasoningEffort != effort {
 			t.Fatalf("effective reasoning effort = %v, want the declared %q", effective.ReasoningEffort, effort)
+		}
+		if effective.MaxTokens == nil || *effective.MaxTokens != outputLimit {
+			t.Fatalf("effective output limit = %v, want the declared %d", effective.MaxTokens, outputLimit)
 		}
 		served := wrapped.(*hostParameterizedModel).decorate(&request)
 		if !reflect.DeepEqual(served.GenerationConfig, effective) {
@@ -68,8 +72,8 @@ func TestEffectiveGenerationConfig(t *testing.T) {
 	t.Run("undeclared_stays_absent", func(t *testing.T) {
 		narrow := &hostParameterizedModel{inner: &snapshotTestModel{}, params: hostModelParams{ReasoningEffort: effort}}
 		effective := narrow.EffectiveGenerationConfig(&model.Request{})
-		if effective.Temperature != nil || effective.ThinkingEnabled != nil {
-			t.Fatalf("effective configuration = %+v, want no temperature or thinking switch invented", effective)
+		if effective.Temperature != nil || effective.ThinkingEnabled != nil || effective.MaxTokens != nil {
+			t.Fatalf("effective configuration = %+v, want no temperature, thinking switch or output limit invented", effective)
 		}
 		if effective.ReasoningEffort == nil || *effective.ReasoningEffort != effort {
 			t.Fatalf("effective reasoning effort = %v, want the one parameter that was declared", effective.ReasoningEffort)

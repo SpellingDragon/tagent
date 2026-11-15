@@ -47,8 +47,8 @@ func TestJourneyFoldKeepsContextReadable(t *testing.T) {
 		"the fourth answer of the long session",
 	)
 	host := bootJourney(t, provider, journeySpec{
-		MaxTokens:             64,
-		ProviderContextWindow: 256,
+		ReplayWindow:  64,
+		ContextWindow: 256,
 		EntryExtra: []string{
 			"    compress_threshold: 0.2",
 		},

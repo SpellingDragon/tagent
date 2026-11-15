@@ -58,32 +58,33 @@ type canonicalAgentCore struct {
 	Plugins    []string             `json:"plugins"`
 	TaskPolicy string               `json:"task_policy"`
 	Files      []canonicalFileRef   `json:"files"`
-	Params     map[string]float64   `json:"params"`
 	FinalRound *canonicalFinalRound `json:"final_round,omitempty"`
-	// MaxTokens, CompressThreshold and KeepRecentTasks are the replay window of
-	// the agent beside EnvironmentBlock, the request-context switch: an agent
+	// ReplayWindow, CompressThreshold and KeepRecentTasks are the replay window
+	// of the agent beside EnvironmentBlock, the request-context switch: an agent
 	// that declares none of them carries no entry of its own, so its canonical
 	// form names no window and its fingerprint stays the one the declaration
 	// surface had before the window existed.
-	MaxTokens         int     `json:"max_tokens,omitempty"`
+	ReplayWindow      int     `json:"replay_window,omitempty"`
 	CompressThreshold float64 `json:"compress_threshold,omitempty"`
 	KeepRecentTasks   int     `json:"keep_recent_tasks,omitempty"`
-	// ProviderContextWindow and OutputReserve are the request budget the agent
-	// declares. Both encode even at zero: the budget gate reads zero as "derive
-	// the window from MaxTokens" and "take the default output reserve", and the
-	// fields are always part of the canonical core so a declaration's budget is
-	// visible in the one fingerprint that decides whether a reload republishes.
-	ProviderContextWindow int  `json:"provider_context_window"`
-	OutputReserve         int  `json:"output_reserve"`
-	EnvironmentBlock      bool `json:"environment_block,omitempty"`
-	// Temperature, ThinkingEnabled and ReasoningEffort are the request sampling
-	// the agent declares beside MaxToolIterations, the tool-round bound. A nil
-	// pointer omits the key, so a declaration that names no sampling keeps the
-	// fingerprint the surface had before the sampling existed while a declared
-	// zero encodes as zero.
+	// SummaryBudgetBytes is the declared summary bound the age fold reads beside
+	// the two fold settings. It encodes only when declared, so a declaration
+	// naming no budget keeps the fingerprint the surface had before it existed.
+	SummaryBudgetBytes int `json:"summary_budget_bytes,omitempty"`
+	// ContextWindow is the request budget gate the agent declares. It encodes
+	// even at zero, so a declaration's capacity is visible in the one fingerprint
+	// that decides whether a reload republishes.
+	ContextWindow    int  `json:"context_window"`
+	EnvironmentBlock bool `json:"environment_block,omitempty"`
+	// Temperature, ThinkingEnabled, ReasoningEffort and MaxTokens are the request
+	// sampling and output limit the agent declares beside MaxToolIterations, the
+	// tool-round bound. A nil pointer or a zero omits the key, so a declaration
+	// that names none keeps the fingerprint the surface had before they existed
+	// while a declared value encodes as itself.
 	Temperature       *float64 `json:"temperature,omitempty"`
 	ThinkingEnabled   *bool    `json:"thinking_enabled,omitempty"`
 	ReasoningEffort   string   `json:"reasoning_effort,omitempty"`
+	MaxTokens         int      `json:"max_tokens,omitempty"`
 	MaxToolIterations int      `json:"max_tool_iterations,omitempty"`
 }
 
@@ -200,25 +201,26 @@ func canonicalAgents(in []AgentSpec) []canonicalAgent {
 	for _, a := range in {
 		out = append(out, canonicalAgent{
 			canonicalAgentCore: canonicalAgentCore{
-				ID:                    a.ID,
-				ParentID:              a.ParentID,
-				Model:                 a.Model,
-				Tools:                 canonicalToolRefs(a.Tools),
-				Plugins:               canonicalStrings(a.Plugins),
-				TaskPolicy:            a.TaskPolicy,
-				Files:                 canonicalFileRefs(a.Files),
-				Params:                canonicalFloatMap(a.Params),
-				FinalRound:            canonicalFinalRoundOf(a.FinalRound),
-				MaxTokens:             a.MaxTokens,
-				CompressThreshold:     canonicalFloat(a.CompressThreshold),
-				KeepRecentTasks:       a.KeepRecentTasks,
-				ProviderContextWindow: a.ProviderContextWindow,
-				OutputReserve:         a.OutputReserve,
-				EnvironmentBlock:      a.EnvironmentBlock,
-				Temperature:           a.Temperature,
-				ThinkingEnabled:       a.ThinkingEnabled,
-				ReasoningEffort:       strings.TrimSpace(a.ReasoningEffort),
-				MaxToolIterations:     a.MaxToolIterations,
+				ID:                a.ID,
+				ParentID:          a.ParentID,
+				Model:             a.Model,
+				Tools:             canonicalToolRefs(a.Tools),
+				Plugins:           canonicalStrings(a.Plugins),
+				TaskPolicy:        a.TaskPolicy,
+				Files:             canonicalFileRefs(a.Files),
+				FinalRound:        canonicalFinalRoundOf(a.FinalRound),
+				ReplayWindow:      a.ReplayWindow,
+				CompressThreshold: a.CompressThreshold,
+				KeepRecentTasks:   a.KeepRecentTasks,
+
+				SummaryBudgetBytes: a.SummaryBudgetBytes,
+				ContextWindow:      a.ContextWindow,
+				EnvironmentBlock:   a.EnvironmentBlock,
+				Temperature:        a.Temperature,
+				ThinkingEnabled:    a.ThinkingEnabled,
+				ReasoningEffort:    strings.TrimSpace(a.ReasoningEffort),
+				MaxTokens:          a.MaxTokens,
+				MaxToolIterations:  a.MaxToolIterations,
 			},
 			Memory:     a.Memory.canonical(),
 			Meditation: a.Meditation.canonical(),
@@ -370,8 +372,8 @@ func canonicalFinalRoundOf(s FinalRoundSpec) *canonicalFinalRound {
 	}
 	return &canonicalFinalRound{
 		MaxRounds:      s.MaxRounds,
-		BudgetSeconds:  canonicalFloat(s.BudgetSeconds),
-		TimeoutSeconds: canonicalFloat(s.TimeoutSeconds),
+		BudgetSeconds:  s.BudgetSeconds,
+		TimeoutSeconds: s.TimeoutSeconds,
 		Prompt:         s.Prompt,
 	}
 }
@@ -412,21 +414,4 @@ func canonicalStringMap(in map[string]string) map[string]string {
 		out[k] = v
 	}
 	return out
-}
-
-// canonicalFloatMap maps a float map onto its canonical form.
-func canonicalFloatMap(in map[string]float64) map[string]float64 {
-	out := make(map[string]float64, len(in))
-	for k, v := range in {
-		out[k] = canonicalFloat(v)
-	}
-	return out
-}
-
-// canonicalFloat normalizes negative zero onto zero.
-func canonicalFloat(v float64) float64 {
-	if v == 0 {
-		return 0
-	}
-	return v
 }

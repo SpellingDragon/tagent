@@ -5,6 +5,10 @@
 
 ## [Unreleased]
 
+### Changed（config-surface-normalization：配置面预算归位，2026-11-13）
+
+- **预算两键归位，`max_tokens` 收回输出限**：声明面回放窗键 `max_tokens` 更名 `replay_window`（只管折叠节律）；预算容量键 `provider_context_window` 更名 `context_window`（预算门唯一来源）；`max_tokens` 一名收回为真实输出限，经 decorate 送达 `GenerationConfig.MaxTokens`，与预算预留同一来源；删除 `output_reserve`/`DefaultOutputReserveDivisor`/`OutputReserveOf` 与死字段 `AgentSpec.Params`（连带 `canonicalFloat` 级联）。预算门语义：`context_window>0` 才开门，未声明即门闭整包发；输出限未声明则预留 0，不再凭空按回放窗 1/4 派生。**影响范围**：`api/config`（`AgentSpec` 声明与解码）、`assembly`（预算门/预留/decorate）、`runtime/agent`、`examples/wechat-bot/tagent.yaml` 与全部消费者文档。**触发条件**：任何声明了 `replay_window`/`context_window`/`max_tokens` 的 agent 配置，或读旧键名的外部配置。**自查方法**：`go test ./assembly -run 'TestSymptomAnchor(PhantomReserve|ReplayWindowAlone|OutputLimitServed)' -count=1`（未声明输出限不再产生幻影预留、只声明回放窗不开门、声明的输出限真达 provider）。
+
 ### Changed（0 债务清理：非预期设计与实现，2026-11-06）
 
 - **术语更名「转世」→「重启恢复」**：项目术语与生产标识符统一（`maybeInjectReincarnationNotice`→`injectRestartNotice`、`detectReincarnation`→`detectRestartMarker`），历史快照与已发布条目保持原文。冻结契约拼写不随更名：`"reincarnation"`、`[reincarnation]`、`REINCARNATION_NOTICE`、`[转世通报]` 与两个验收测试名，登记见 [GLOSSARY「五、契约拼写」](docs/GLOSSARY.md)。

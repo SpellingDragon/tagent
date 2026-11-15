@@ -247,8 +247,9 @@ func TestRequestCarriesProjectedBudget(t *testing.T) {
 		event.TypeAgentOutput:   model.RoleAssistant,
 	}
 	for i, entry := range presented {
-		if got[i].Content != entry.Content {
-			t.Fatalf("message %d content = %q, want the budget assembly view %q", i, got[i].Content, entry.Content)
+		want := presentedTicket(entry.Key, entry.Type) + " " + entry.Content
+		if got[i].Content != want {
+			t.Fatalf("message %d content = %q, want the ticket of the entry in front of the budget assembly view %q", i, got[i].Content, want)
 		}
 		if want := wantRoles[entry.Type]; got[i].Role != want {
 			t.Fatalf("message %d role = %q, want the frozen type %s mapped onto %q", i, got[i].Role, entry.Type, want)

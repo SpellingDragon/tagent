@@ -54,6 +54,14 @@ func WithApprovalRescanInterval(window time.Duration) ApprovalOption {
 	return func(a *ApprovalManager) { a.rescanInterval = window }
 }
 
+// WithApprovalSeat declares that the framework state slice seats this book: the
+// book reads no request file at construction, and the restore of the stated state
+// puts it back (see RestoreEvidence and RestoreBoot). A book wired through its
+// directory alone keeps restoring itself from the files at construction.
+func WithApprovalSeat() ApprovalOption {
+	return func(a *ApprovalManager) { a.seated = true }
+}
+
 // approvalRescanInterval is the default minimum interval between two rescans of
 // the approvals directory after an unapproved read.
 const approvalRescanInterval = 2 * time.Second
@@ -81,6 +89,7 @@ type ApprovalManager struct {
 	ttl            time.Duration
 	rescanInterval time.Duration
 	now            func() time.Time
+	seated         bool
 
 	chain *attentionLedger
 	face  *task.Attention
@@ -95,8 +104,10 @@ type ApprovalManager struct {
 // NewApprovalManager returns the approval manager over one directory. A non-empty
 // dir keeps the requests under <dir>/approvals/ as one file per request and
 // restores the attention questions and answers the files state; an empty dir
-// keeps the manager on its in-memory chain alone. The ttl is the validity a
-// request is issued with.
+// keeps the manager on its in-memory chain alone. A manager seated by the
+// framework state slice (WithApprovalSeat) reads no file here: the restore of the
+// stated state puts the book back instead. The ttl is the validity a request is
+// issued with.
 func NewApprovalManager(dir string, ttl time.Duration, opts ...ApprovalOption) *ApprovalManager {
 	if ttl <= 0 {
 		ttl = defaultApprovalTTL
@@ -115,9 +126,81 @@ func NewApprovalManager(dir string, ttl time.Duration, opts ...ApprovalOption) *
 	if dir != "" {
 		a.dir = filepath.Join(dir, "approvals")
 		_ = os.MkdirAll(a.dir, 0o755)
-		a.rebuild()
+		if !a.seated {
+			_ = a.rebuild(context.Background())
+		}
 	}
 	return a
+}
+
+// SnapshotEvidence reports the requests the book holds, for the framework state
+// slice to state: the identity, the evidence an approver reads and the state each
+// request stands in. The read takes the book's own read lock and nothing else, so
+// it never waits on a write of its own nor flushes one.
+func (a *ApprovalManager) SnapshotEvidence() []ApprovalRequest {
+	if a == nil {
+		return nil
+	}
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	out := make([]ApprovalRequest, 0, len(a.evidence))
+	for _, held := range a.evidence {
+		out = append(out, *held)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
+	return out
+}
+
+// RestoreEvidence puts one stated approval state back: every request still within
+// its validity is seated beside the question it stands on and, when a ruling
+// landed, beside the answer that ruling was filed as, so a restarted book reports
+// the same presence and the same rulings the process before it reported.
+//
+// The read is the stated state alone — no request file is opened — and a request
+// past its validity is dropped rather than resurrected: an expired request never
+// proceeds, so a restart that put one back would hand a dead hold a second life.
+func (a *ApprovalManager) RestoreEvidence(ctx context.Context, stated []ApprovalRequest) error {
+	if a == nil {
+		return nil
+	}
+	now := a.now().UnixMilli()
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	for _, held := range stated {
+		if held.ID == "" || (held.ExpiresMs > 0 && now >= held.ExpiresMs) {
+			continue
+		}
+		restored := held
+		a.evidence[restored.ID] = &restored
+		if err := a.fileQuestion(ctx, &restored); err != nil {
+			return err
+		}
+		if restored.Status == ApprovalApproved || restored.Status == ApprovalDenied {
+			if err := a.fileAnswer(ctx, &restored); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// RestoreBoot restores the book from the row of request files, for the boot whose
+// state states no approval book: the files are the per-request durable write and
+// the only record a process that took no cut left behind.
+//
+// A row this boot cannot read leaves the book empty and the failure visible beside
+// it, never a boot that dies on it: an unreadable row states no ruling either way,
+// so the restore it refuses approves nothing, and a call that still needs a ruling
+// parks again and reports the same failure when it files its own request. A boot
+// that stopped here would be a wall around a gate.
+func (a *ApprovalManager) RestoreBoot(ctx context.Context) error {
+	if a == nil {
+		return nil
+	}
+	if err := a.rebuild(ctx); err != nil {
+		a.recordGap(DeliveryGap{Err: err})
+	}
+	return nil
 }
 
 // AddChannel attaches one outbound delivery face the manager offers its
@@ -273,7 +356,9 @@ func (a *ApprovalManager) Lookup(tool, argsDigest string) *ApprovalRequest {
 		return req
 	}
 	if a.rescanDue() {
-		a.rebuild()
+		// A rescan that cannot read its directory leaves the standing book in place;
+		// the wait it did not see is reported on the next read.
+		_ = a.rebuild(context.Background())
 	}
 	return a.lookupFacts(tool, argsDigest)
 }
@@ -478,16 +563,20 @@ func (a *ApprovalManager) write(req *ApprovalRequest) error {
 // and a ruling an external approver wrote over a question already on the chain
 // lands as the answer and withdraws the file it was read from. A file whose
 // validity ran out is removed instead of restored.
-func (a *ApprovalManager) rebuild() {
-	if a.dir == "" {
-		return
+//
+// This is the row of request files, not the boot's reader: a book the framework
+// state slice seats reads the stated state at boot and keeps this read for the
+// runtime rescan, which is how a ruling an external approver writes to a file
+// lands without a restart.
+func (a *ApprovalManager) rebuild(ctx context.Context) error {
+	if a == nil || a.dir == "" {
+		return nil
 	}
 	entries, err := os.ReadDir(a.dir)
 	if err != nil {
-		return
+		return fmt.Errorf("approval: read the approval request files under %s: %w", a.dir, err)
 	}
 	now := a.now().UnixMilli()
-	ctx := context.Background()
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	for _, entry := range entries {
@@ -525,6 +614,7 @@ func (a *ApprovalManager) rebuild() {
 			_ = os.Remove(path)
 		}
 	}
+	return nil
 }
 
 // truncateArgs bounds the argument preview an approver reads.

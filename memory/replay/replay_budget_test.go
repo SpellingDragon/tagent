@@ -68,7 +68,7 @@ func TestRequestBudgetEnforced(t *testing.T) {
 		if err != nil {
 			t.Fatalf("AssembleBudget: %v", err)
 		}
-		if len(first) != 1 || !strings.Contains(first[0].Content, "[ticket fact-1:") {
+		if len(first) != 1 || !strings.Contains(first[0].Content, "[evt_fact-1|") {
 			t.Fatalf("first assembly = %+v, want the ticket settlement the budget affords", first)
 		}
 		stale := first[0].Content
@@ -272,7 +272,7 @@ func TestNoticeCardKeepsItsBound(t *testing.T) {
 		if total := contentBytes(tight); total > 240 {
 			t.Fatalf("the request carried %d bytes under a 240-byte budget: %q", total, card)
 		}
-		if !strings.HasPrefix(card, "[notice ") || !strings.HasSuffix(card, ticketText(key)) {
+		if !strings.HasPrefix(card, "[notice ") || !strings.HasSuffix(card, TicketOf(key, event.TypeFeedback)) {
 			t.Fatalf("notice card = %q, want a status frame and the ticket that reaches the original", card)
 		}
 	})
@@ -293,8 +293,8 @@ func TestNoticeCardKeepsItsBound(t *testing.T) {
 		if len(card) > noticeCardChars {
 			t.Fatalf("the notice card carried %d bytes, want at most %d: the ticket is reserved before the status and the head", len(card), noticeCardChars)
 		}
-		if !strings.HasSuffix(card, ticketText(key)) {
-			t.Fatalf("the notice card = %q, want it to end with the whole ticket %q", card, ticketText(key))
+		if !strings.HasSuffix(card, TicketOf(key, event.TypeFeedback)) {
+			t.Fatalf("the notice card = %q, want it to end with the whole ticket %q", card, TicketOf(key, event.TypeFeedback))
 		}
 	})
 
@@ -314,7 +314,7 @@ func TestNoticeCardKeepsItsBound(t *testing.T) {
 		if total := contentBytes(tight); total > 240 {
 			t.Fatalf("the request carried %d bytes under a 240-byte budget: %q", total, card)
 		}
-		if !strings.HasPrefix(ticketText(key), card) {
+		if !strings.HasPrefix(TicketOf(key, event.TypeFeedback), card) {
 			t.Fatalf("the tight notice card = %q, want the ticket the room can carry rather than a card built past its bound", card)
 		}
 	})

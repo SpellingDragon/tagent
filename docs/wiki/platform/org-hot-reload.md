@@ -42,7 +42,7 @@ flowchart TD
 <a id="fingerprint"></a>
 ## 二、指纹：只有声明面参与
 
-`config.Fingerprint(d)` 是规范化 JSON 的 SHA-256。canonical 形只含五项：`entry`、`agents`、`refs`、`baseline`、`mcp_servers`。其中每个 agent 收进 `model`、`tools`、`plugins`、`task_policy`、`files`、`params`、回放窗三值（`max_tokens`/`compress_threshold`/`keep_recent_tasks`）、采样三值与 `max_tool_iterations`，外加 `memory`/`meditation`/`file`/`exec` 四个域段；`id`/`parent_id`/`final_round`/`environment_block` 也在 `canonicalAgentCore` 里，改它们同样换代。
+`config.Fingerprint(d)` 是规范化 JSON 的 SHA-256。canonical 形只含五项：`entry`、`agents`、`refs`、`baseline`、`mcp_servers`。其中每个 agent 收进 `model`、`tools`、`plugins`、`task_policy`、`files`、回放窗三值（`replay_window`/`compress_threshold`/`keep_recent_tasks`）、预算两值（`context_window` 容量与 `max_tokens` 输出限）、采样三值与 `max_tool_iterations`，外加 `memory`/`meditation`/`file`/`exec` 四个域段；`id`/`parent_id`/`final_round`/`environment_block` 也在 `canonicalAgentCore` 里，改它们同样换代。预算两值里只有 `context_window` 不带 `omitempty`，零也编码，所以声明的容量一定进指纹。
 
 规范化三件事：先 `Clone` 再 `applyDefaults`（省略的集合编成空集合、`nil` 指针省略键、负零归零）；字段顺序由 canonical 结构固定；map 按名排序。**活对象与 `Raw` 源文档永不进指纹**，所以同一份声明在任何 YAML 迭代顺序下算出同一串。
 

@@ -1955,7 +1955,7 @@ func TestSymptomAnchorRetryAutoRedrive(t *testing.T) {
 
 // TestSymptomAnchorUnifiedRequestBudget pins that the declared window bounds the final request as one total.
 //
-// - 场景：经真实 AgentSpec 与正式装配链驱动一轮，历史窗口声明 32 token，固定提示约 10KB。
+// - 场景：经真实 AgentSpec 与正式装配链驱动一轮，预算窗口 context_window 声明 32 token（乙下门唯一来源），固定提示约 10KB。
 // - 最终请求必须被统一预算约束：要么降级到窗口内，要么显式拒发；不得静默全量进入。
 // - 显式拒发是合法出口，但“没有请求”本身还不够，拒绝必须被观测到。
 //
@@ -1974,7 +1974,8 @@ func TestSymptomAnchorUnifiedRequestBudget(t *testing.T) {
 	}
 
 	spec := boundaryAnchorSpec()
-	spec.MaxTokens = boundaryAnchorWindow
+	spec.ReplayWindow = boundaryAnchorWindow
+	spec.ContextWindow = boundaryAnchorWindow
 	spec.Files = []config.FileRef{{Path: promptPath, Kind: config.FileKindPrompt}}
 	run, provider := boundaryAnchorAssemble(t, ctx, spec, boundaryAnchorAnswer("the request was served"))
 	addr := boundaryAnchorAddress("session-anchor-budget")

@@ -77,10 +77,10 @@ func TestAgeFoldFiresFromCommits(t *testing.T) {
 	decl := &config.Declaration{
 		Entry: "agent-a",
 		Agents: []config.AgentSpec{{
-			ID:                    "agent-a",
-			Model:                 "model-a",
-			MaxTokens:             100,
-			ProviderContextWindow: 300,
+			ID:            "agent-a",
+			Model:         "model-a",
+			ReplayWindow:  100,
+			ContextWindow: 300,
 		}},
 	}
 	run, err := assembly.Assemble(ctx, decl, map[event.AgentID]assembly.NativeAgent{
@@ -124,9 +124,9 @@ func TestUnderThresholdUntouched(t *testing.T) {
 	decl := &config.Declaration{
 		Entry: "agent-a",
 		Agents: []config.AgentSpec{{
-			ID:        "agent-a",
-			Model:     "model-a",
-			MaxTokens: 1 << 16,
+			ID:           "agent-a",
+			Model:        "model-a",
+			ReplayWindow: 1 << 16,
 		}},
 	}
 	run, err := assembly.Assemble(ctx, decl, map[event.AgentID]assembly.NativeAgent{
@@ -173,9 +173,9 @@ func TestRebuildRefoldsIdempotent(t *testing.T) {
 	decl := &config.Declaration{
 		Entry: "agent-a",
 		Agents: []config.AgentSpec{{
-			ID:        "agent-a",
-			Model:     "model-a",
-			MaxTokens: maxTokens,
+			ID:           "agent-a",
+			Model:        "model-a",
+			ReplayWindow: maxTokens,
 		}},
 	}
 	run, err := assembly.Assemble(ctx, decl, map[event.AgentID]assembly.NativeAgent{

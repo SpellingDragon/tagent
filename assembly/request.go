@@ -600,6 +600,9 @@ func normalizeFoldWindow(window FoldWindow) FoldWindow {
 	if window.KeepRecentTasks <= 0 {
 		window.KeepRecentTasks = config.DefaultKeepRecentTasks
 	}
+	if window.SummaryBudgetBytes <= 0 {
+		window.SummaryBudgetBytes = config.DefaultSummaryBudgetBytes
+	}
 	return window
 }
 
@@ -608,9 +611,10 @@ func normalizeFoldWindow(window FoldWindow) FoldWindow {
 // the unset settings read as their declaration defaults.
 func foldWindowOf(spec config.AgentSpec) FoldWindow {
 	return normalizeFoldWindow(FoldWindow{
-		MaxTokens:         spec.MaxTokens,
-		CompressThreshold: spec.CompressThreshold,
-		KeepRecentTasks:   spec.KeepRecentTasks,
+		MaxTokens:          spec.ReplayWindow,
+		CompressThreshold:  spec.CompressThreshold,
+		KeepRecentTasks:    spec.KeepRecentTasks,
+		SummaryBudgetBytes: spec.SummaryBudgetBytes,
 	})
 }
 
@@ -835,8 +839,7 @@ func (a *requestAssembly) assemble(ctx context.Context) (agent.BoundaryView, err
 		PromptVersion: a.promptVersion,
 		VisibleSkills: a.snapshot.visibleNames(a.loadedSkillNames()),
 	}
-	window := a.budgetWindow()
-	view = view.WithBudget(window, a.budgetReserve(window))
+	view = view.WithBudget(a.budgetWindow(), a.budgetReserve())
 	if skills := a.dynamicSkillBodies(); skills != "" {
 		view = view.WithDynamicSkills(skills)
 	}
@@ -847,26 +850,21 @@ func (a *requestAssembly) assemble(ctx context.Context) (agent.BoundaryView, err
 }
 
 // budgetWindow reports the provider context window the final request budget is
-// measured against: the window the declaration names explicitly, or — when it
-// names none — the replay window MaxTokens as the declaration's one window
-// word. A declaration naming neither opens no gate.
+// measured against: the physical capacity the declaration names as ContextWindow.
+// It is the sole gate source — a declaration naming none opens no gate, and the
+// replay window ReplayWindow drives folding alone, never standing in for it.
 func (a *requestAssembly) budgetWindow() int {
-	spec := a.snapshot.spec
-	if spec.ProviderContextWindow > 0 {
-		return spec.ProviderContextWindow
-	}
-	return spec.MaxTokens
+	return a.snapshot.spec.ContextWindow
 }
 
-// budgetReserve reports the output allowance the input budget leaves: the
-// allowance the declaration names, or the fixed share of the provider window
-// when it names none. The reserve is derived from the window the gate uses, so
-// a window derived from MaxTokens carries the same default share.
-func (a *requestAssembly) budgetReserve(window int) int {
-	if reserve := a.snapshot.spec.OutputReserve; reserve > 0 {
-		return reserve
-	}
-	return agent.OutputReserveOf(window)
+// budgetReserve reports the output allowance the input budget leaves: the output
+// limit the declaration names as MaxTokens, the same value decorate serves the
+// provider as GenerationConfig.MaxTokens. One declaration drives both, so the
+// budget never reserves room the provider was not told to leave for output. A
+// declaration naming no output limit reserves nothing, leaving the whole window
+// for input.
+func (a *requestAssembly) budgetReserve() int {
+	return a.snapshot.spec.MaxTokens
 }
 
 // dynamicSkillBodies renders the bodies the skill loads published, in
@@ -1348,11 +1346,34 @@ func (r *Run) factOf(id event.EventID) (event.Event, bool) {
 // content it folded, so the model sees what kind of material follows; the label
 // is composed here, from the entry's Summary, and never written into the product
 // the fold minted.
+//
+// An entry carrying a committed fact key opens with its ticket, so the address
+// that reads the original back off the chain travels with the material. This is
+// the one place a projection entry becomes a model message, and the injection
+// never writes back into the projection: the ticket is composed for the request
+// that presents the entry. A fold product carries a synthetic key and states no
+// ticket — its lines already name the facts it folded — and content that already
+// opens with a ticket is left as it stands, so a ticket the model imitated and
+// fed back is never doubled. An entry the budget presented as nothing states no
+// ticket either: the address is owed to material the request carries, and a
+// ticket alone would both promise a read of material the model never saw and
+// inflate the measured request past the budget the assembly just fitted it to.
 func presentedProjectionContent(entry replay.ProjectionEntry) string {
+	content := entry.Content
 	if entry.Type == replay.ProjectionTypeHistorySummary && entry.Summary != "" {
-		return entry.Summary + ": " + entry.Content
+		content = entry.Summary + ": " + content
 	}
-	return entry.Content
+	if strings.HasPrefix(content, "[evt_") {
+		return content
+	}
+	if content == "" {
+		return content
+	}
+	ticket := replay.TicketOf(entry.Key, entry.Type)
+	if ticket == "" {
+		return content
+	}
+	return ticket + " " + content
 }
 
 // environmentBlockGenerations counts the environment blocks the request boundary

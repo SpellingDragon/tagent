@@ -1202,7 +1202,7 @@ func TestRestartColdStartRecomputesTheWindow(t *testing.T) {
 		}}
 		run, err := assemble(ctx, &config.Declaration{
 			Entry:  "agent-a",
-			Agents: []config.AgentSpec{{ID: "agent-a", Model: "model-a", MaxTokens: maxTokens}},
+			Agents: []config.AgentSpec{{ID: "agent-a", Model: "model-a", ReplayWindow: maxTokens}},
 		}, map[event.AgentID]NativeAgent{"agent-a": {Model: provider}}, true,
 			WithGovernance(snapshotTestGovernance{}),
 			WithStorage(ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: root}))
@@ -1225,11 +1225,11 @@ func TestRestartColdStartRecomputesTheWindow(t *testing.T) {
 	if !carried {
 		t.Fatalf("the restarted run registered no sequence for %v", addr)
 	}
-	want := foldWindowOf(config.AgentSpec{ID: "agent-a", Model: "model-a", MaxTokens: 4096})
+	want := foldWindowOf(config.AgentSpec{ID: "agent-a", Model: "model-a", ReplayWindow: 4096})
 	if entry.window != want {
 		t.Fatalf("the restarted window = %+v, want the %+v this declaration publishes", entry.window, want)
 	}
-	if carried := foldWindowOf(config.AgentSpec{ID: "agent-a", Model: "model-a", MaxTokens: 60}); entry.window == carried {
+	if carried := foldWindowOf(config.AgentSpec{ID: "agent-a", Model: "model-a", ReplayWindow: 60}); entry.window == carried {
 		t.Fatalf("the restarted window = %+v, want the window this declaration publishes rather than the one the chain was written under", entry.window)
 	}
 	if entry.projection.Len() == 0 {

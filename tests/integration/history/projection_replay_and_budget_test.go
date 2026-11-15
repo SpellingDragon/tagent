@@ -261,7 +261,7 @@ func TestProjectionReplayAndBudget(t *testing.T) {
 			t.Fatalf("assembly returned %d entries, want 1", len(first))
 		}
 		view := first[0].Content
-		if !strings.Contains(view, "[ticket big-1:") {
+		if !strings.Contains(view, "[evt_big-1|") {
 			t.Fatalf("ticket view = %q, want a ticket reaching the original by segment", view)
 		}
 		if strings.Contains(view, full) || len(view) > 512 {
@@ -405,8 +405,12 @@ func TestProjectionReplayAndBudget(t *testing.T) {
 		}
 		sawInput, sawPlan, sawTool := false, false, false
 		for i, message := range got[:len(presented)] {
-			if message.Content != presented[i].Content {
-				t.Fatalf("message %d content = %q, want the presented view %q", i, message.Content, presented[i].Content)
+			want := presented[i].Content
+			if strings.HasPrefix(string(presented[i].Key), "q-") {
+				want = presentedTicket(presented[i].Key, presented[i].Type) + " " + want
+			}
+			if message.Content != want {
+				t.Fatalf("message %d content = %q, want the presented view %q behind the ticket of the fact it was minted from", i, message.Content, want)
 			}
 			switch presented[i].Type {
 			case event.TypeExternalInput:

@@ -43,7 +43,7 @@ func wakeEnv(t *testing.T) {
 // under: the entry agent delegates to one worker beside its own model.
 const wakeAgentSections = "  user:\n" +
 	"    model: model-entry\n" +
-	"    max_tokens: 32000\n" +
+	"    replay_window: 32000\n" +
 	"    tools:\n" +
 	"      - { kind: agent, agent: worker }\n" +
 	"  worker:\n" +

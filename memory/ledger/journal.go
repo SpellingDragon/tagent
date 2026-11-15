@@ -11,6 +11,8 @@ package ledger
 
 import (
 	"bufio"
+	"bytes"
+	"context"
 	"encoding/binary"
 	"encoding/json"
 	"errors"
@@ -19,6 +21,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -57,7 +60,70 @@ const (
 	// journalReplayBufferBytes is the read size the replay takes the log in: one
 	// sequential read per buffer instead of one read per frame part.
 	journalReplayBufferBytes = 1 << 20
+	// journalRewriteFileName is the file a retirement pass writes the kept keys
+	// into before it replaces the log with it: a temporary file inside the same
+	// directory, renamed over journal.log once it is whole, so a process that stops
+	// during the rewrite leaves the log it started with.
+	journalRewriteFileName = "journal.rewrite"
+	// journalIndexCutFileName is the file beside the log that states the index the
+	// open below it already read: the value span of every key the log holds before
+	// the cut, in the commit order those records were filed in. It is a derived
+	// carrier and never a second truth — a cut that is missing, unreadable or
+	// behind the log is rebuilt from the log itself — and it exists so an open pays
+	// the tail past the cut instead of the whole history behind it.
+	journalIndexCutFileName = "journal.index"
+	// journalIndexCutVersion is the cut format this build writes and the only one
+	// it reads: another version is a cut this build cannot place, and the log is
+	// read whole rather than trusted through a carrier it does not understand.
+	journalIndexCutVersion = 1
 )
+
+// journalIndexCut is the index one open has already read, as the file beside the
+// log states it: the byte the tail starts at, the size the cut was taken at, the
+// key positions of everything before that byte and the commit order those
+// positions were filed in.
+type journalIndexCut struct {
+	// Version is the cut format, and a cut of another version is not read.
+	Version int `json:"version"`
+	// Offset is the byte the open starts replaying at: every frame before it is
+	// carried by Index and Order, so the open reads the tail alone.
+	Offset int64 `json:"offset"`
+	// Size is the log size the cut was taken at. A log shorter than the cut states
+	// is a log the cut cannot place, and the open reads it whole.
+	Size int64 `json:"size"`
+	// Order is the commit order of the records before Offset, oldest first.
+	Order []string `json:"order"`
+	// Index locates the value of every key the records before Offset wrote.
+	Index map[string]journalCutValue `json:"index"`
+}
+
+// journalCutValue is one key's position as the cut states it: the byte span of the
+// value token the record carries, or the tombstone that deleted the key. It is the
+// stated form of journalValue, which keeps its own fields unexported.
+type journalCutValue struct {
+	// Offset is the byte offset of the value's own JSON token.
+	Offset int64 `json:"offset"`
+	// Length is the byte length of that token, its quotes included.
+	Length int `json:"length"`
+	// Null reports a value the record wrote as JSON null.
+	Null bool `json:"null,omitempty"`
+	// Deleted reports a tombstone: the key is held by no record.
+	Deleted bool `json:"deleted,omitempty"`
+}
+
+// value answers the position the cut states as the index keeps it.
+func (v journalCutValue) value() journalValue {
+	return journalValue{
+		valueOffset: v.Offset, valueLength: v.Length, valueNull: v.Null, deleted: v.Deleted,
+	}
+}
+
+// cutValue answers the position the index keeps as the cut states it.
+func cutValue(value journalValue) journalCutValue {
+	return journalCutValue{
+		Offset: value.valueOffset, Length: value.valueLength, Null: value.valueNull, Deleted: value.deleted,
+	}
+}
 
 // journalCRCTable is the checksum table of the frame format: Castagnoli, the
 // CRC32C polynomial.
@@ -94,6 +160,18 @@ type journalValue struct {
 	deleted bool
 }
 
+// RelocateReport counts what one retirement pass did: the keys it settled into the
+// cold log, the keys the cold log already held with the same bytes, and the
+// batched commits the copy took to land them.
+type RelocateReport struct {
+	// Settled is the number of keys the hot log no longer holds.
+	Settled int
+	// Skipped is the number of settled keys the cold log already held.
+	Skipped int
+	// Batches is the number of cold commits the copy took.
+	Batches int
+}
+
 // journalLog is one append-only file of committed records: a single writer
 // appends whole frames, and the key index is updated only after the write of the
 // frame that carries the key returned success. The index holds positions, never
@@ -110,6 +188,12 @@ type journalLog struct {
 	file *os.File
 	// size is the offset the next frame starts at.
 	size int64
+	// openBytes is how many journal bytes the open replayed: the span it read
+	// from the start of the file to the end of the file, torn tail included. It is
+	// set once at open and never moves, so it measures the read one boot pays
+	// instead of the offset the next append starts at (size, which follows every
+	// write).
+	openBytes int64
 	// index locates the latest record of each key.
 	index map[string]journalValue
 	// order is the log's own commit order: the keys each committed record
@@ -121,6 +205,18 @@ type journalLog struct {
 	order []string
 	// unsynced counts the bytes appended since the last completed barrier.
 	unsynced int64
+	// tail names the keys the records past the index cut wrote, and is nil beside a
+	// log no cut covers: nil is a log the open read whole, which is the statement a
+	// reader of the tail must not mistake for an empty tail.
+	tail map[string]struct{}
+	// cutOffset is the byte the index cut states: the frames at or past it are the
+	// tail, and zero is the first frame of a log no cut covers.
+	cutOffset int64
+	// cutNotice states why the cut beside this log was not read, and is empty beside
+	// a log whose cut was placed or which holds none. The ledger package keeps no
+	// logger, so the open names the fallback here and the caller that holds a logger
+	// states it.
+	cutNotice string
 }
 
 // journalSpans is the index material one record states: the format version it was
@@ -419,20 +515,349 @@ func journalPayloadOf(frame []byte) ([]byte, error) {
 	return payload, nil
 }
 
-// journalReplay reads every complete frame of one log through visit, which is
-// answered the payload and the offset it starts at, and answers the offset just
-// past the last complete frame. Bytes shorter than a frame, or a frame whose
-// declared payload is not all present, end the replay as a torn tail: they are
-// what a writer left when it stopped mid-frame, and the offset answered is where
-// they start. A frame that is fully present and fails its checksum is not a torn
-// tail, so the replay stops with the named corruption instead of dropping the
-// records behind it.
+// relocate copies every key the caller names as settled out of this log and into
+// the cold root, verifies the copy byte for byte through a freshly opened view, and
+// only then rewrites this log to hold what it kept. The three steps do not commute:
+// a copy that never verified leaves the hot log intact, because a key removed
+// before its bytes landed somewhere readable is a fact that disappears.
+//
+// The cold root accumulates across passes, so a root that already holds keys is
+// not a reason to refuse. A key the cold root already holds with the same bytes is
+// skipped and a key it holds with other bytes refuses the whole pass: one identity
+// carries one immutable fact. The caller holds the log's lock and has stopped the
+// writers of this view, so no key moves under the copy.
+//
+// The settled keys are the caller's snapshot, never the set the engine finds when
+// the copy starts: a key a writer filed between that snapshot and this call is one
+// the pass never judged, so it keeps its place in the hot log until a pass that
+// read it settles it. Which facts a store still needs is the consumer's answer, and
+// an engine that moved the rest would be a second oracle beside it.
+func (l *journalLog) relocate(ctx context.Context, coldDir string, settle []string, replaced []journalPut) (RelocateReport, error) {
+	if err := ctx.Err(); err != nil {
+		return RelocateReport{}, err
+	}
+	if len(settle) == 0 {
+		return RelocateReport{}, nil
+	}
+	keep := make(map[string]struct{}, len(l.index))
+	settling := make(map[string]struct{}, len(settle))
+	for _, key := range settle {
+		settling[key] = struct{}{}
+	}
+	for key, value := range l.index {
+		if value.deleted {
+			continue
+		}
+		if _, moved := settling[key]; moved {
+			continue
+		}
+		keep[key] = struct{}{}
+	}
+	settled := make([]string, 0, len(settle))
+	for _, key := range settle {
+		if value, held := l.index[key]; !held || value.deleted {
+			continue
+		}
+		settled = append(settled, key)
+	}
+	if len(settled) == 0 {
+		return RelocateReport{}, nil
+	}
+	sort.Strings(settled)
+	cold, err := openJournalLog(filepath.Join(coldDir, kvDirName))
+	if err != nil {
+		return RelocateReport{}, fmt.Errorf("tagent: open the cold journal %s: %w", coldDir, err)
+	}
+	report := RelocateReport{}
+	copyErr := l.copyToCold(cold, settled, &report)
+	if closeErr := cold.close(); copyErr == nil {
+		copyErr = closeErr
+	}
+	if copyErr != nil {
+		return report, copyErr
+	}
+	// The steps below run only while the caller is still there: a copy that landed
+	// cold is the state the next pass finds and verifies, while a rewrite entered
+	// after the caller stopped would move the hot journal for a process that reads
+	// nothing of it.
+	if err := ctx.Err(); err != nil {
+		return report, err
+	}
+	if err := l.verifyColdCopy(coldDir, settled); err != nil {
+		return report, err
+	}
+	if err := ctx.Err(); err != nil {
+		return report, err
+	}
+	if err := l.rewrite(keep, replaced); err != nil {
+		return report, err
+	}
+	report.Settled = len(settled)
+	return report, nil
+}
+
+// copyToCold appends the settled keys of this log to the cold log in bounded
+// batches, so one pass pays bounded memory for a settled set of any size. A key
+// the cold log already holds is skipped when its bytes match and refuses the pass
+// when they do not.
+func (l *journalLog) copyToCold(cold *journalLog, settled []string, report *RelocateReport) error {
+	for start := 0; start < len(settled); start += migrateBatchKeys {
+		end := min(start+migrateBatchKeys, len(settled))
+		record := journalRecord{Version: journalFormatVersion}
+		for _, key := range settled[start:end] {
+			body, held, err := l.read(key)
+			if err != nil {
+				return err
+			}
+			if !held {
+				continue
+			}
+			coldBody, coldHeld, err := cold.read(key)
+			if err != nil {
+				return err
+			}
+			if coldHeld {
+				if !bytes.Equal(coldBody, body) {
+					return fmt.Errorf("%w: the cold root already holds %q with other bytes", ErrMigrateMismatch, key)
+				}
+				report.Skipped++
+				continue
+			}
+			record.Puts = append(record.Puts, journalPut{Key: key, Value: body})
+		}
+		if len(record.Puts) == 0 {
+			continue
+		}
+		if err := cold.append(record); err != nil {
+			return fmt.Errorf("tagent: copy %d settled key(s) to the cold journal: %w", len(record.Puts), err)
+		}
+		if err := cold.sync(); err != nil {
+			return fmt.Errorf("tagent: confirm the cold copy of %d settled key(s): %w", len(record.Puts), err)
+		}
+		report.Batches++
+	}
+	return nil
+}
+
+// verifyColdCopy reads the settled keys back through a freshly opened view of the
+// cold log and compares them with the bytes this log still holds, so the rewrite
+// that follows is entered only for a copy a later open reads whole. A reference
+// the copy left without its independent body is refused by name, the pairing the
+// original store's load enforces at boot.
+func (l *journalLog) verifyColdCopy(coldDir string, settled []string) error {
+	cold, err := openJournalLog(filepath.Join(coldDir, kvDirName))
+	if err != nil {
+		return fmt.Errorf("tagent: reopen the cold journal to verify it: %w", err)
+	}
+	defer cold.close()
+	for _, key := range settled {
+		want, held, err := l.read(key)
+		if err != nil {
+			return err
+		}
+		if !held {
+			continue
+		}
+		got, coldHeld, err := cold.read(key)
+		if err != nil {
+			return err
+		}
+		if !coldHeld {
+			return fmt.Errorf("%w: the cold root does not hold %q", ErrMigrateMismatch, key)
+		}
+		if !bytes.Equal(got, want) {
+			return fmt.Errorf("%w: the cold root holds %q with other bytes", ErrMigrateMismatch, key)
+		}
+		if name, ok := strings.CutPrefix(key, "ref:"); ok {
+			if _, paired, err := cold.read("blob:" + name); err != nil {
+				return err
+			} else if !paired {
+				return fmt.Errorf("%w: original %q has a reference but no independent body", ErrSnapshotCorrupt, name)
+			}
+		}
+	}
+	return nil
+}
+
+// rewrite replaces this log with one holding the kept keys in commit order: every
+// key appears once, at the record its latest commit sits in, so the walk backwards
+// still meets the newest record of a key first. Ordering follows the log's own
+// frame order rather than the key order, because a checkpoint recognised by its
+// position in the log is a fact read back by where its commit landed.
+//
+// The rewrite is also the moment the index cut is placed, because it is the only
+// moment the log's frames move: the cut states where every kept key landed, so the
+// open that follows pays only the records the rewrite files after them. The cut is
+// removed before the log is replaced and written after it, so a process that stops
+// inside the pass leaves a log with no cut — read whole — and never a cut beside a
+// log it does not describe.
+//
+// The handle is reopened onto the log the rename left before the cut is placed: the
+// rename unlinks the inode the open handle names, so a cut that cannot be written
+// answers beside a log that reads whole and a handle that is the file a later commit
+// reaches, never beside a handle on the unlinked inode that every later commit would
+// write into and lose.
+func (l *journalLog) rewrite(keep map[string]struct{}, replaced []journalPut) error {
+	staged := filepath.Join(l.dir, journalRewriteFileName)
+	cut, err := l.rewriteInto(staged, keep, replaced)
+	if err != nil {
+		return err
+	}
+	if err := os.Remove(filepath.Join(l.dir, journalIndexCutFileName)); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("tagent: retire the index cut of the replaced journal: %w", err)
+	}
+	if err := os.Rename(staged, l.path); err != nil {
+		return fmt.Errorf("tagent: replace the journal with its rewritten form: %w", err)
+	}
+	if err := l.reopen(cut); err != nil {
+		return err
+	}
+	return writeJournalIndexCut(l.dir, cut)
+}
+
+// rewriteInto writes the kept keys of this log into a new file at path, one frame
+// per key, at the order their latest records sit in, then the replaced records. It
+// answers the cut the file it wrote states: the positions of the kept keys, the
+// commit order they were filed in and the byte the tail — the replaced records and
+// whatever a later commit appends — starts at.
+func (l *journalLog) rewriteInto(path string, keep map[string]struct{}, replaced []journalPut) (journalIndexCut, error) {
+	out, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0o600)
+	if err != nil {
+		return journalIndexCut{}, fmt.Errorf("tagent: open the rewritten journal: %w", err)
+	}
+	seen := make(map[string]struct{}, len(keep))
+	kept := make([]string, 0, len(keep))
+	for at := len(l.order) - 1; at >= 0; at-- {
+		key := l.order[at]
+		if _, walked := seen[key]; walked {
+			continue
+		}
+		seen[key] = struct{}{}
+		if _, keptKey := keep[key]; !keptKey {
+			continue
+		}
+		value, held := l.index[key]
+		if !held || value.deleted {
+			continue
+		}
+		kept = append(kept, key)
+	}
+	slices.Reverse(kept)
+	cut := journalIndexCut{
+		Version: journalIndexCutVersion,
+		Index:   make(map[string]journalCutValue, len(kept)),
+	}
+	at := int64(0)
+	write := func(key string) (journalSpans, error) {
+		body, held, err := l.read(key)
+		if err != nil {
+			return journalSpans{}, err
+		}
+		if !held {
+			return journalSpans{}, nil
+		}
+		payload, err := json.Marshal(journalRecord{Version: journalFormatVersion, Puts: []journalPut{{Key: key, Value: body}}})
+		if err != nil {
+			return journalSpans{}, err
+		}
+		if len(payload) > journalMaxFrameBytes {
+			return journalSpans{}, fmt.Errorf("tagent: one kept record carries %d bytes, over the %d-byte frame bound", len(payload), journalMaxFrameBytes)
+		}
+		frame := journalFrameOf(payload)
+		if _, err := out.Write(frame); err != nil {
+			return journalSpans{}, fmt.Errorf("tagent: write the rewritten journal: %w", err)
+		}
+		spans, err := journalSpansAt(payload, at+journalFrameHeaderBytes)
+		if err != nil {
+			return journalSpans{}, fmt.Errorf("tagent: index the record the rewrite just wrote: %w", err)
+		}
+		at += int64(len(frame))
+		return spans, nil
+	}
+	for _, key := range kept {
+		spans, err := write(key)
+		if err != nil {
+			out.Close()
+			return journalIndexCut{}, err
+		}
+		if len(spans.puts) == 0 {
+			continue
+		}
+		cut.Index[key] = cutValue(spans.puts[0].value)
+		cut.Order = append(cut.Order, key)
+	}
+	// The tail starts here: every frame from this byte on is read again by the open
+	// that follows, so the keys of these records are what a caller sees as the work
+	// the cut does not cover.
+	cut.Offset = at
+	if len(replaced) > 0 {
+		payload, err := json.Marshal(journalRecord{Version: journalFormatVersion, Puts: replaced})
+		if err != nil {
+			out.Close()
+			return journalIndexCut{}, err
+		}
+		if _, err := out.Write(journalFrameOf(payload)); err != nil {
+			out.Close()
+			return journalIndexCut{}, fmt.Errorf("tagent: write the replaced records of the rewritten journal: %w", err)
+		}
+		at += int64(len(journalFrameOf(payload)))
+	}
+	if err := out.Sync(); err != nil {
+		out.Close()
+		return journalIndexCut{}, fmt.Errorf("%w: confirm the rewritten journal: %w", ErrJournalBarrier, err)
+	}
+	if err := out.Close(); err != nil {
+		return journalIndexCut{}, err
+	}
+	cut.Size = at
+	return cut, nil
+}
+
+// reopen releases the writer handle of this log, opens the file the rewrite left
+// in its place and seeds the index the cut states, then reads the tail past it, so
+// the view a caller reads afterwards is the rewritten log and not the one it
+// replaced. It reads no cut file: the caller that places the cut does so after this
+// returns, once the handle names the log the cut describes.
+func (l *journalLog) reopen(cut journalIndexCut) error {
+	if err := l.file.Close(); err != nil {
+		return err
+	}
+	file, err := os.OpenFile(l.path, os.O_RDWR|os.O_CREATE|os.O_APPEND, 0o600)
+	if err != nil {
+		return fmt.Errorf("tagent: reopen the rewritten journal: %w", err)
+	}
+	stat, err := file.Stat()
+	if err != nil {
+		file.Close()
+		return err
+	}
+	l.file = file
+	l.seedIndexCut(cut)
+	l.cutOffset = cut.Offset
+	l.tail = map[string]struct{}{}
+	l.unsynced = 0
+	complete, err := journalReplay(file, cut.Offset, stat.Size(), l.publish)
+	if err != nil {
+		return err
+	}
+	l.size = complete
+	return nil
+}
+
+// journalReplay reads every complete frame of one log from the given offset
+// through visit, which is answered the payload and the offset it starts at, and
+// answers the offset just past the last complete frame. Bytes shorter than a
+// frame, or a frame whose declared payload is not all present, end the replay as a
+// torn tail: they are what a writer left when it stopped mid-frame, and the offset
+// answered is where they start. A frame that is fully present and fails its
+// checksum is not a torn tail, so the replay stops with the named corruption
+// instead of dropping the records behind it.
 //
 // - The frames are read through one sequential buffered reader and one payload buffer, so a log of any size costs one read per buffer instead of two reads and one allocation per frame.
 //   - The payload handed to visit is valid for that visit alone: the buffer it points into is reused by the next frame.
-func journalReplay(file *os.File, size int64, visit func(payload []byte, at int64) error) (int64, error) {
-	reader := bufio.NewReaderSize(io.NewSectionReader(file, 0, size), journalReplayBufferBytes)
-	offset := int64(0)
+func journalReplay(file *os.File, from, size int64, visit func(payload []byte, at int64) error) (int64, error) {
+	reader := bufio.NewReaderSize(io.NewSectionReader(file, from, size-from), journalReplayBufferBytes)
+	offset := from
 	header := make([]byte, journalFrameHeaderBytes)
 	var payload []byte
 	for offset < size {
@@ -464,10 +889,15 @@ func journalReplay(file *os.File, size int64, visit func(payload []byte, at int6
 	return offset, nil
 }
 
-// openJournalLog opens the journal of one directory, replaying the index of
-// every complete record and cutting off a torn tail. It refuses a directory that
-// holds another format or another layout, so a build never reads a log it does
-// not understand and never rewrites the files of one it does.
+// openJournalLog opens the journal of one directory, replaying the index of the
+// records past the index cut and seeding the records before it from the cut, so an
+// open pays the tail the last rewrite left and never the history behind it. A
+// directory holding no cut, or a cut this build cannot place, reads the whole log
+// and says so at WARN: the cut is a derived carrier and a log is never read through
+// one that does not describe it. A torn tail is cut off either way, and a
+// directory that holds another format or another layout is refused, so a build
+// never reads a log it does not understand and never rewrites the files of one it
+// does.
 func openJournalLog(dir string) (*journalLog, error) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, err
@@ -487,7 +917,20 @@ func openJournalLog(dir string) (*journalLog, error) {
 		return nil, err
 	}
 	size := stat.Size()
-	complete, err := journalReplay(file, size, log.publish)
+	from, seeded := int64(0), false
+	if cut, held := readJournalIndexCut(dir); held {
+		switch {
+		case cut.Offset < 0 || cut.Size > size:
+			log.cutNotice = fmt.Sprintf("the index cut of %s states offset=%d beside a %d byte log, so the open read the log whole",
+				dir, cut.Offset, size)
+		default:
+			log.seedIndexCut(cut)
+			from, seeded = cut.Offset, true
+			log.cutOffset = cut.Offset
+			log.tail = map[string]struct{}{}
+		}
+	}
+	complete, err := journalReplay(file, from, size, log.publish)
 	if err != nil {
 		file.Close()
 		return nil, err
@@ -499,7 +942,44 @@ func openJournalLog(dir string) (*journalLog, error) {
 		}
 	}
 	log.size = complete
+	log.openBytes = size - from
+	if !seeded {
+		// The whole log was read, so no frame is past a cut: nil states that, where an
+		// empty set would state a tail that is already covered.
+		log.tail = nil
+	}
 	return log, nil
+}
+
+// seedIndexCut places the positions and the commit order one cut states, so the
+// open below the cut reads no frame the cut already describes.
+func (l *journalLog) seedIndexCut(cut journalIndexCut) {
+	l.index = make(map[string]journalValue, len(cut.Index))
+	for key, value := range cut.Index {
+		l.index[key] = value.value()
+	}
+	l.order = append(l.order[:0], cut.Order...)
+}
+
+// tailKeys answers the keys the records past the index cut wrote, and nil beside a
+// log no cut covers: a caller that reads this set reads the work the cut does not
+// cover, and nil is the whole log rather than nothing.
+func (l *journalLog) tailKeys() map[string]struct{} {
+	if l == nil || l.tail == nil {
+		return nil
+	}
+	out := make(map[string]struct{}, len(l.tail))
+	for key := range l.tail {
+		out[key] = struct{}{}
+	}
+	return out
+}
+
+// openReadBytes answers the journal bytes the open replayed. It is the read cost
+// of one boot at the engine layer, fixed at open, and it is never the append
+// offset the log grew to afterwards.
+func (l *journalLog) openReadBytes() int64 {
+	return l.openBytes
 }
 
 // publish folds one replayed payload into the index: the record it reads, at the
@@ -515,7 +995,63 @@ func (l *journalLog) publish(payload []byte, at int64) error {
 	}
 	l.indexRecord(record)
 	l.noteOrder(record)
+	l.noteTail(record, at)
 	return nil
+}
+
+// readJournalIndexCut reads the index cut beside one log, and answers false beside
+// a directory that holds none, a cut of another format and a cut that does not
+// decode: the three are the cut this build cannot place, and the caller reads the
+// log whole rather than trusting a carrier it does not understand.
+func readJournalIndexCut(dir string) (journalIndexCut, bool) {
+	body, err := os.ReadFile(filepath.Join(dir, journalIndexCutFileName))
+	if err != nil {
+		return journalIndexCut{}, false
+	}
+	var cut journalIndexCut
+	if err := json.Unmarshal(body, &cut); err != nil {
+		return journalIndexCut{}, false
+	}
+	if cut.Version != journalIndexCutVersion {
+		return journalIndexCut{}, false
+	}
+	return cut, true
+}
+
+// writeJournalIndexCut places one cut beside the log it describes: a temporary
+// file inside the same directory, renamed over the cut, so a reader meets the cut
+// it started with or the whole one and never half of each.
+func writeJournalIndexCut(dir string, cut journalIndexCut) error {
+	cut.Version = journalIndexCutVersion
+	body, err := json.Marshal(cut)
+	if err != nil {
+		return fmt.Errorf("tagent: state the index cut of %s: %w", dir, err)
+	}
+	path := filepath.Join(dir, journalIndexCutFileName)
+	staged := path + ".tmp"
+	if err := os.WriteFile(staged, body, 0o600); err != nil {
+		return fmt.Errorf("tagent: write the index cut of %s: %w", dir, err)
+	}
+	if err := os.Rename(staged, path); err != nil {
+		return fmt.Errorf("tagent: place the index cut of %s: %w", dir, err)
+	}
+	return nil
+}
+
+// noteTail files the keys one record wrote into the tail the index cut does not
+// cover, so a reader asked what landed past the cut answers the records it has not
+// read through the cut. A log beside no cut keeps no tail: nil states that the
+// whole log was read, and a set of keys would state a tail that is already covered.
+func (l *journalLog) noteTail(record journalSpans, at int64) {
+	if l.tail == nil || at < l.cutOffset {
+		return
+	}
+	for _, put := range record.puts {
+		l.tail[put.key] = struct{}{}
+	}
+	for _, key := range record.deletes {
+		l.tail[key] = struct{}{}
+	}
 }
 
 // indexRecord folds one committed record into the index at the value span each
@@ -585,6 +1121,7 @@ func (l *journalLog) append(record journalRecord) error {
 	}
 	l.indexRecord(spans)
 	l.noteOrder(spans)
+	l.noteTail(spans, l.size)
 	l.size += int64(len(frame))
 	l.unsynced += int64(len(frame))
 	return nil

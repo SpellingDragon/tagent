@@ -22,7 +22,7 @@ func restartSitesRun(t *testing.T, ctx context.Context, root string) *Run {
 	}}
 	run, err := assemble(ctx, &config.Declaration{
 		Entry:  "agent-a",
-		Agents: []config.AgentSpec{{ID: "agent-a", Model: "model-a", MaxTokens: 4096}, {ID: "agent-b", Model: "model-a", MaxTokens: 4096}},
+		Agents: []config.AgentSpec{{ID: "agent-a", Model: "model-a", ReplayWindow: 4096}, {ID: "agent-b", Model: "model-a", ReplayWindow: 4096}},
 	}, map[event.AgentID]NativeAgent{"agent-a": {Model: provider}, "agent-b": {Model: provider}}, true,
 		WithGovernance(snapshotTestGovernance{}),
 		WithStorage(ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: root}))

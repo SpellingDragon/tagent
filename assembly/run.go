@@ -318,6 +318,10 @@ type Run struct {
 	// quiet chain still files one after this long.
 	checkpointEvery  int
 	checkpointPeriod time.Duration
+	// bootContext is the context this run was assembled with. A relocation pass
+	// reads it to tell a live run from a stopping one: the pass rewrites the hot
+	// journal, and a process whose boot is over begins no rewrite of it.
+	bootContext context.Context
 	// checkpointCommits counts the commits since the last checkpoint, and
 	// checkpointAt is the moment it was filed: it opens at the assembly, so the
 	// period measures a chain that has been committing rather than the wall clock
@@ -492,6 +496,24 @@ func Assemble(ctx context.Context, decl *config.Declaration, agents map[event.Ag
 	return assemble(ctx, decl, agents, true, opts...)
 }
 
+// relocatableStorage answers the storage configuration the assembly opens: a
+// durable journal tier relocates the facts its checkpoints settled, so the journal
+// a boot opens holds what the run still reads instead of the whole history behind
+// it. The choice is the configuration's when it is declared, and the journal
+// configurations this build opens declare the durable local tier without saying
+// otherwise, so the default here is the relocation. A tier that persists nothing
+// keeps its facts in the process and relocates none of them.
+func relocatableStorage(cfg ledger.StorageConfig) ledger.StorageConfig {
+	if cfg.Root == "" {
+		return cfg
+	}
+	switch cfg.Type {
+	case ledger.StorageJournal, ledger.StorageLocalFile:
+		cfg.RetireFacts = true
+	}
+	return cfg
+}
+
 // assemble builds a run and optionally trims before the host's delivery recovery.
 func assemble(ctx context.Context, decl *config.Declaration, agents map[event.AgentID]NativeAgent, trimAfterSeed bool, opts ...Option) (*Run, error) {
 	if decl == nil {
@@ -531,6 +553,7 @@ func assemble(ctx context.Context, decl *config.Declaration, agents map[event.Ag
 		states:           state.NewStateRegistry(),
 		checkpointEvery:  CheckpointCommitInterval,
 		checkpointPeriod: CheckpointPeriod,
+		bootContext:      ctx,
 		checkpointAt:     time.Now(),
 		checkpointDue:    make(chan struct{}, 1),
 		checkpointStop:   make(chan struct{}),
@@ -575,10 +598,6 @@ func assemble(ctx context.Context, decl *config.Declaration, agents map[event.Ag
 		}
 	}
 	booTTrace("built")
-	r.compress = NewCompressionConsumer(ageFoldSessions{run: r}).withSummaryGist(bandSummaries{run: r})
-	r.ageFold = NewAgeFoldPlugin(ageFoldSessions{run: r})
-	r.ageFold.setExecutor(r.compress)
-	r.finalRound = agent.NewFinalRoundPlanner(finalRoundChain{run: r}, r.finalRoundPolicyOf)
 	if cfg.reflectionAnchors != "" {
 		anchors, err := meditation.NewAnchorStore(cfg.reflectionAnchors)
 		if err != nil {
@@ -593,17 +612,14 @@ func assemble(ctx context.Context, decl *config.Declaration, agents map[event.Ag
 		}
 		r.plugins = instances
 	}
-	if r.compress != nil {
-		r.plugins = append(r.plugins, r.compress)
-	}
-	if r.finalRound != nil {
-		r.plugins = append(r.plugins, r.finalRound)
+	if err := r.mountBuiltinPlugins(); err != nil {
+		return nil, err
 	}
 	r.authority = state.NewAuthority()
 	var durable *state.DurableCommit
 	var tier *ledger.Tier
 	if cfg.storage != nil {
-		opened, err := ledger.OpenTier(ctx, *cfg.storage)
+		opened, err := ledger.OpenTier(ctx, relocatableStorage(*cfg.storage))
 		if err != nil {
 			return nil, err
 		}
@@ -614,14 +630,12 @@ func assemble(ctx context.Context, decl *config.Declaration, agents map[event.Ag
 			assemblyWarn("tagent: storage tier keeps no record across process exit tier=%s restored=none",
 				tier.Capabilities.Tier)
 		}
-		durable, err = state.NewDurableCommit(ledger.TierFactLog(tier), nil)
-		if err != nil {
-			return nil, err
+		if probe, held := tier.Store.(interface{ IndexCutNotice() string }); held {
+			if notice := probe.IndexCutNotice(); notice != "" {
+				assemblyWarn("tagent: %s", notice)
+			}
 		}
-		for _, s := range durable.LoadStats().Scans {
-			assemblyInfo("tagent: durable load scan prefix=%s keys=%d bytes=%d elapsed=%s",
-				s.Prefix, s.Keys, s.Bytes, s.Elapsed.Round(time.Microsecond))
-		}
+		durable = state.NewEmptyDurableCommit(ledger.TierFactLog(tier), nil)
 		r.commit = &runCommit{inner: durable, held: map[event.TaskID]bool{}}
 		booTTrace("storage")
 	}
@@ -638,7 +652,7 @@ func assemble(ctx context.Context, decl *config.Declaration, agents map[event.Ag
 	if _, err := r.states.Register(state.NewMailboxState(r.store)); err != nil {
 		return nil, err
 	}
-	if _, err := r.states.Register(tasksStateSlice{registry: r.registry}); err != nil {
+	if _, err := r.states.Register(tasksStateSlice{registry: r.registry, receipts: durableReceipts(durable)}); err != nil {
 		return nil, err
 	}
 	r.movement = runMovement{registry: r.registry, store: r.store}
@@ -689,6 +703,10 @@ func assemble(ctx context.Context, decl *config.Declaration, agents map[event.Ag
 	if durable != nil {
 		if err := r.restoreCheckpointState(ctx, tier); err != nil {
 			return nil, err
+		}
+		for _, s := range durable.LoadStats().Scans {
+			assemblyInfo("tagent: durable load scan prefix=%s keys=%d bytes=%d elapsed=%s",
+				s.Prefix, s.Keys, s.Bytes, s.Elapsed.Round(time.Microsecond))
 		}
 		if err := r.restoreInMemoryState(ctx, durable); err != nil {
 			return nil, err
@@ -1020,6 +1038,17 @@ func finalRoundSpecOf(decl *config.Declaration) config.FinalRoundSpec {
 	return config.FinalRoundSpec{}
 }
 
+// durableReceipts answers the settle account the task slice states beside the
+// registry's own account: the durable commit of this run when it keeps one, and
+// nil beside a run whose commit keeps no durable record, whose slice then states
+// an empty account instead of claiming receipts no record holds.
+func durableReceipts(durable *state.DurableCommit) task.SettleAccount {
+	if durable == nil {
+		return nil
+	}
+	return durable
+}
+
 // restoreInMemoryState is the second step of the restart-recovery consumption
 // logic: the in-memory state is restored from the checkpoint the last process
 // filed, or from the full replay of the fact chains beside a store that holds
@@ -1049,9 +1078,20 @@ func (r *Run) restoreCheckpointState(ctx context.Context, tier *ledger.Tier) err
 	if tier == nil {
 		return nil
 	}
-	if _, restored, err := r.restoreNewestCheckpoint(ctx, tier); err != nil {
+	restored := false
+	if _, held, err := r.restoreNewestCheckpoint(ctx, tier); err != nil {
 		return err
-	} else if !restored {
+	} else {
+		restored = held
+	}
+	if !restored {
+		// A tier holding no checkpoint seats the account from the whole log before the
+		// empty cut is restored, because the mailbox reads the notifications that
+		// account owes: an account seated after it delivers nothing a stopped process
+		// left open.
+		if err := r.seatDurableAccount(ctx, tier, nil); err != nil {
+			return err
+		}
 		if err := r.states.RestoreEmptyState(ctx); err != nil {
 			return err
 		}
@@ -2884,13 +2924,14 @@ func (r *Run) seedAccountFact(ctx context.Context, tier *ledger.Tier, key event.
 // that committed it.
 //
 // - A product reaches the compression ledger whichever side of the anchor it stands on, so a restarted run never executes a judgment a second time.
+// - A key the index named but whose body cannot be read is refused by name, with the same ErrSegmentBodyMissing every other recovery read answers: the walk reached the key out of the store's own commit order, so the index does point at it, and a boot that skipped it would present a projection with one fact fewer than the chain holds.
 func (r *Run) replayRef(ctx context.Context, tier *ledger.Tier, key event.EventID, seed *sessionSeed, report *seedReport) (event.CompressProduct, bool, event.AgentID, error) {
 	stored, held, err := tier.Segments.GetEvent(ctx, key)
 	if err != nil {
 		return event.CompressProduct{}, false, "", err
 	}
 	if !held {
-		return event.CompressProduct{}, false, "", nil
+		return event.CompressProduct{}, false, "", fmt.Errorf("%w: %s", ledger.ErrSegmentBodyMissing, key)
 	}
 	report.Decoded++
 	body, err := memory.DecodeEventBody(stored.Body)

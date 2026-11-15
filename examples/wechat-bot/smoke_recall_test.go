@@ -233,7 +233,7 @@ func smokeRecallDocument(c *smokeConfig, embeddingEndpoint string) string {
 	for _, name := range []string{recall.QueryToolName, recall.GetToolName, recall.RecentToolName, recall.TraceToolName} {
 		fmt.Fprintf(&b, "      - { kind: tool, id: %s }\n", name)
 	}
-	b.WriteString("    max_tokens: 2000\n")
+	b.WriteString("    replay_window: 2000\n")
 	b.WriteString("    compress_threshold: 0.3\n")
 	b.WriteString("    keep_recent_tasks: 1\n")
 	b.WriteString("    max_tool_iterations: 3\n")

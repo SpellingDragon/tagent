@@ -101,9 +101,13 @@ agents:
       - { kind: agent, agent: recall, event_params: [event_keys] }
       - { kind: agent, agent: plan, description_file: plan_tool_desc.md }
       - { kind: agent, agent: action, description_file: action_tool_desc.md }
-    # 模型窗口:声明即注册会话投影——历史按窗口余量呈现,三龄段折叠随体积默认触发;
+    # 回放窗:声明即注册会话投影——历史按窗口余量呈现,三龄段折叠随体积默认触发;
     # compress_threshold(缺省0.8)/keep_recent_tasks(缺省2)不写即走默认。
-    max_tokens: 128000
+    # 预算窗是另一个键:context_window 是预算门的唯一窗源(乙),漏写即门闭——请求整包
+    # 发送、不受预算保护,故此处必须显式声明。输出限 max_tokens 不声明即 0=不留
+    # reserve,输入预算＝整个 context_window。
+    replay_window: 128000
+    context_window: 128000
     # 看门狗收尾轮(声明即 opt-in;不声明=无界,与未接此键时完全一致):
     # 第 24 个工具轮或跑满 3300 秒后,下一决策转为收尾轮——请求尾部追加收尾指令,
     # 该轮走 120 秒短超时,发起的工具调用一律不受理并配好回执,回答本轮已产出的东西。
@@ -137,7 +141,7 @@ agents:
       prompt_file: meditation.md
       deliver_to: [tagent]
     # 已接线的模型参数(不写走模型默认): temperature / thinking_enabled /
-    #   reasoning_effort / max_tool_iterations(映射看门狗轮数)
+    #   reasoning_effort / max_tokens(输出限,经 decorate 发 provider) / max_tool_iterations(映射看门狗轮数)
     # 待接线: task_terminal_ttl / task_default_ttl
 
   # ---- Knowledge:知识获取 & 翻译子 Agent ----
@@ -163,7 +167,7 @@ agents:
       - { kind: tool, id: skill_load }
       - { kind: tool, id: read_file }
       - { kind: tool, id: mcp_discover }
-    # 待接线:memory / max_tokens / compress_threshold / memory_query
+    # 待接线:memory / replay_window / compress_threshold / memory_query
 
   # ---- Recall:记忆检索子 Agent ----
   recall:
@@ -190,7 +194,7 @@ agents:
       type: journal
       path: .wechat-config/data
       read_namespaces: [tagent]
-    # 待接线:max_tool_iterations / max_tokens / compress_threshold / reasoning_effort
+    # 待接线:max_tool_iterations / replay_window / compress_threshold / reasoning_effort
 
   # ---- Action:执行中枢(调度 file/exec/mcp)----
   action:
@@ -218,7 +222,7 @@ agents:
       - { kind: tool, id: replace_content }
       - { kind: tool, id: exec }
       - { kind: tool, id: mcp_call }
-    # 待接线:memory / max_tool_iterations / max_tokens / compress_threshold /
+    # 待接线:memory / max_tool_iterations / replay_window / compress_threshold /
     #         temperature / thinking_enabled / reasoning_effort
 
   # ---- Plan:工作计划管理子 Agent(计划后端 CLI,无通用 shell 逃逸面)----
@@ -242,7 +246,7 @@ agents:
       - { kind: tool, id: search_file }
       - { kind: tool, id: search_content }
       - { kind: tool, id: replace_content }
-    # 待接线:thinking_enabled / max_tool_iterations / max_tokens / compress_threshold / temperature
+    # 待接线:thinking_enabled / max_tool_iterations / replay_window / compress_threshold / temperature
 
 # ===== 应用专属配置(各应用自行反序列化)=====
 app:

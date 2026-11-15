@@ -47,11 +47,11 @@ func TestProjectionAssemblyServesTheThreeUses(t *testing.T) {
 		decl := &config.Declaration{
 			Entry: "agent-a",
 			Agents: []config.AgentSpec{{
-				ID:                    "agent-a",
-				Model:                 "model-a",
-				MaxTokens:             assemblyBudget,
-				ProviderContextWindow: assemblyBudget * 2,
-				EnvironmentBlock:      true,
+				ID:               "agent-a",
+				Model:            "model-a",
+				ReplayWindow:     assemblyBudget,
+				ContextWindow:    assemblyBudget * 2,
+				EnvironmentBlock: true,
 			}},
 		}
 		run, err := assembly.Assemble(context.Background(), decl, map[event.AgentID]assembly.NativeAgent{
@@ -79,14 +79,15 @@ func TestProjectionAssemblyServesTheThreeUses(t *testing.T) {
 		if !strings.Contains(main.Content, assemblyPreview) {
 			t.Fatalf("main context carries no %d-rune preview under budget %d: %q", 128, assemblyBudget, main.Content)
 		}
-		if !strings.Contains(main.Content, "full text retrievable by segment") {
+		if !strings.Contains(main.Content, "…\n[evt_") {
 			t.Fatalf("main context carries no ticket line: %q", main.Content)
 		}
 		if strings.Contains(main.Content, assemblyFullText) {
 			t.Fatalf("main context carries the full text past the budget: %q", main.Content)
 		}
-		if got[1].Role != model.RoleAssistant || got[1].Content != "回答第1轮" {
-			t.Fatalf("message 1 = (%q, %q), want the mapped answer in full", got[1].Role, got[1].Content)
+		_, typ, rest := splitPresentedTicket(t, got[1].Content)
+		if got[1].Role != model.RoleAssistant || typ != event.TypeAgentOutput || rest != "回答第1轮" {
+			t.Fatalf("message 1 = (%q, %q), want the mapped answer in full under the ticket of its %s fact", got[1].Role, got[1].Content, event.TypeAgentOutput)
 		}
 		block, at := environmentBlockMessage(t, got)
 		if at != len(got)-1 {
@@ -152,7 +153,7 @@ func TestProjectionAssemblyServesTheThreeUses(t *testing.T) {
 		if !strings.Contains(got, assemblyPreview) {
 			t.Fatalf("delegated refs carry no %d-rune preview under budget %d: %q", 128, assemblyBudget, got)
 		}
-		if !strings.Contains(got, "full text retrievable by segment") {
+		if !strings.Contains(got, "…\n[evt_") {
 			t.Fatalf("delegated refs carry no ticket line: %q", got)
 		}
 		if strings.Contains(got, assemblyFullText) {
@@ -177,10 +178,10 @@ func TestUndeclaredEnvironmentBlockKeepsTheAssemblyUnchanged(t *testing.T) {
 	decl := &config.Declaration{
 		Entry: "agent-a",
 		Agents: []config.AgentSpec{{
-			ID:                    "agent-a",
-			Model:                 "model-a",
-			MaxTokens:             assemblyBudget,
-			ProviderContextWindow: assemblyBudget * 2,
+			ID:            "agent-a",
+			Model:         "model-a",
+			ReplayWindow:  assemblyBudget,
+			ContextWindow: assemblyBudget * 2,
 		}},
 	}
 	run, err := assembly.Assemble(context.Background(), decl, map[event.AgentID]assembly.NativeAgent{
@@ -221,11 +222,11 @@ func assembleWithBudget(t *testing.T, session string, budget int) []model.Messag
 	decl := &config.Declaration{
 		Entry: "agent-a",
 		Agents: []config.AgentSpec{{
-			ID:                    "agent-a",
-			Model:                 "model-a",
-			MaxTokens:             budget,
-			ProviderContextWindow: 4096,
-			EnvironmentBlock:      true,
+			ID:               "agent-a",
+			Model:            "model-a",
+			ReplayWindow:     budget,
+			ContextWindow:    4096,
+			EnvironmentBlock: true,
 		}},
 	}
 	run, err := assembly.Assemble(context.Background(), decl, map[event.AgentID]assembly.NativeAgent{

@@ -56,7 +56,7 @@ func TestJourneyMeditationSummaryVisible(t *testing.T) {
 		`{"target":{"agent":"user","session":`+journeyQuote(session)+`},"content":`+journeyQuote(summary)+`}`)})
 	provider.scriptAnswers(journeyReflectionModel, "reflection recorded")
 	host := bootJourney(t, provider, journeySpec{
-		MaxTokens: 4096,
+		ReplayWindow: 4096,
 		PromptFiles: map[string]string{
 			"meditation.md": "Reflect over the observed session and deliver one summary.\n",
 		},

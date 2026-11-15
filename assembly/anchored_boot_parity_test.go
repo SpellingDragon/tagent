@@ -277,7 +277,7 @@ func noTrimChainRun(t *testing.T, ctx context.Context, opts ...Option) *Run {
 	}, opts...)
 	run, err := assemble(ctx, &config.Declaration{
 		Entry:  "agent-a",
-		Agents: []config.AgentSpec{{ID: "agent-a", Model: "model-a", MaxTokens: 60}, {ID: "agent-b", Model: "model-a", MaxTokens: 60}},
+		Agents: []config.AgentSpec{{ID: "agent-a", Model: "model-a", ReplayWindow: 60}, {ID: "agent-b", Model: "model-a", ReplayWindow: 60}},
 	}, map[event.AgentID]NativeAgent{"agent-a": {Model: provider}, "agent-b": {Model: provider}}, false, options...)
 	if err != nil {
 		t.Fatalf("assemble the run: %v", err)

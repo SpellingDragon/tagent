@@ -36,7 +36,7 @@ def bound(class_, name, kind=None, source=None):
 
 
 WINDOW = bound("window", "max_tokens", "config_key", "external: the model window")
-BUDGET = bound("budget", "provider_context_window", "config_key")
+BUDGET = bound("budget", "context_window", "config_key")
 POLICY = bound("policy", "compress_threshold", "config_key")
 CONSTANT = bound("constant", "factWindow", "const")
 
@@ -118,7 +118,7 @@ def reverse_scan_case():
 
 
 def main():
-    declared_keys = ["max_tokens", "provider_context_window", "compress_threshold"]
+    declared_keys = ["max_tokens", "context_window", "compress_threshold"]
     run("a registered four-class registry is green", None,
         registry(WINDOW, BUDGET, POLICY, CONSTANT), declared_keys, True)
     run("a window-shaped knob by another spelling is red", "replay_window",
@@ -133,7 +133,7 @@ def main():
     run("a stale constant is red", "gone from x.go",
         registry(WINDOW, BUDGET, POLICY, CONSTANT), declared_keys, False)
     run("a registered key missing from the surface is red", "absent from the declaration surface",
-        registry(WINDOW, BUDGET, POLICY, CONSTANT), ["max_tokens", "provider_context_window"], True)
+        registry(WINDOW, BUDGET, POLICY, CONSTANT), ["max_tokens", "context_window"], True)
     run("an unknown class is red", "is not one of",
         registry(WINDOW, {**POLICY, "class": "knob"}, CONSTANT), declared_keys, True)
     scan_case()

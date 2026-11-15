@@ -17,21 +17,32 @@ import (
 )
 
 // tasksStateSlice is the task registry's recoverable state as the framework
-// sees it.
+// sees it: the account of the registry beside the settle account the durable
+// record of those tasks holds.
 type tasksStateSlice struct {
 	registry *task.MemoryRegistry
+	// receipts is the durable settle account stated beside the registry's own, so
+	// a boot reads the consumption receipts, attempts and refusals of the tasks the
+	// checkpoint covers out of the checkpoint. It is nil beside a run whose commit
+	// keeps no durable record, and the slice then states an empty account.
+	receipts task.SettleAccount
 }
 
 // StateName reports the name the task slice is keyed by.
 func (s tasksStateSlice) StateName() string { return checkpointSliceTasks }
 
 // SnapshotState states the account of the registry: every task it holds beside
-// the chain revision each one stands at.
+// the chain revision each one stands at and the settle account the durable record
+// of that task holds.
 func (s tasksStateSlice) SnapshotState(ctx context.Context) ([]byte, error) {
 	if s.registry == nil {
 		return []byte("null"), nil
 	}
-	return s.registry.SnapshotCheckpoint(ctx)
+	payload, err := s.registry.SnapshotCheckpoint(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return task.StateSettleAccount(ctx, payload, s.receipts)
 }
 
 // RestoreState puts the account back, so the boot folds only the chain links

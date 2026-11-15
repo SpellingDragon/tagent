@@ -54,7 +54,7 @@ func buildHostDocument(config bridgeConfig) ([]byte, error) {
 	}
 	file["base_dir"] = config.workspace
 	action["temperature"] = 0
-	action["max_tokens"] = 128000
+	action["replay_window"] = 128000
 	action["final_round"] = map[string]any{
 		"max_rounds":      12,
 		"budget_seconds":  280,

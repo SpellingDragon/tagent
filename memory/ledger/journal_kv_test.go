@@ -113,3 +113,62 @@ func TestJournalStatesItsCommitOrderNewestFirst(t *testing.T) {
 		t.Fatalf("the walk visited %d records after a visit answered false, want the one it stopped at", stops)
 	}
 }
+
+// TestRetirementDropsTheSettledKeysFromTheResidentSet pins the view a hot log states
+// after a pass moved keys out of it: the resident set holds the keys the rewritten log
+// holds and nothing else, so the answer a process gives for a settled key is the answer
+// the next process to open the log gives.
+//
+//   - positive: the key the pass kept still reads its bytes through this view
+//   - negative: a settled key reads absent through this view, which is what a view that opens the same directory answers
+//
+// 契约: docs/wiki/memory/memory-architecture.md#local-file-kv
+func TestRetirementDropsTheSettledKeysFromTheResidentSet(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	kv, err := openJournalKV(dir)
+	if err != nil {
+		t.Fatalf("open the fixture journal: %v", err)
+	}
+	defer kv.log.close()
+	for at := 0; at < 4; at++ {
+		key := journalTestKey(at)
+		if err := kv.Commit(ctx, Batch{Puts: []Pair{{Key: key, Value: []byte("body-" + key)}}}); err != nil {
+			t.Fatalf("commit %s: %v", key, err)
+		}
+	}
+	settle := []string{journalTestKey(0), journalTestKey(2)}
+	if _, err := kv.retireSettled(ctx, t.TempDir(), settle, nil); err != nil {
+		t.Fatalf("relocate the settled keys: %v", err)
+	}
+	kept := journalTestKey(3)
+	if pairs, err := kv.Read(ctx, Fetch{Key: kept}); err != nil {
+		t.Fatalf("read %s after the pass: %v", kept, err)
+	} else if len(pairs) != 1 || string(pairs[0].Value) != "body-"+kept {
+		t.Fatalf("the key the pass kept reads %+v, want the bytes it holds", pairs)
+	}
+	reopened, err := openJournalKV(dir)
+	if err != nil {
+		t.Fatalf("reopen the journal: %v", err)
+	}
+	defer reopened.log.close()
+	for _, key := range settle {
+		held := len(mustReadPairs(t, ctx, kv, key))
+		reopenedHeld := len(mustReadPairs(t, ctx, reopened, key))
+		if held != 0 || reopenedHeld != 0 {
+			t.Fatalf("the settled key %s reads %d pair(s) through this view and %d through a view that opened the log, want absent from both: a value kept in memory answers a key the log no longer holds",
+				key, held, reopenedHeld)
+		}
+	}
+}
+
+// mustReadPairs answers the pairs one journal view holds under key, failing the check
+// when the read itself reports an error.
+func mustReadPairs(t *testing.T, ctx context.Context, kv *journalKV, key string) []Pair {
+	t.Helper()
+	pairs, err := kv.Read(ctx, Fetch{Key: key})
+	if err != nil {
+		t.Fatalf("read %s: %v", key, err)
+	}
+	return pairs
+}

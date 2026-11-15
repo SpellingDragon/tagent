@@ -420,7 +420,6 @@ func declarationOf(root string) *config.Declaration {
 			{Path: filepath.Join(root, "prompts", "system.md"), Kind: config.FileKindPrompt},
 			skillFileRef(root, "greet"),
 		},
-		Params: map[string]float64{},
 	}
 	spec.File = config.FileSpec{BaseDir: root}
 	return &config.Declaration{
