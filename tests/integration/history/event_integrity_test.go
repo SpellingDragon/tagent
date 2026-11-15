@@ -3749,9 +3749,10 @@ func runRangeHeadSurvivesFoldRewrite(t *testing.T) {
 		material   = "tagent: task task-77 settled\nresult:\nthe fold-rewritten head worker reports 91"
 	)
 	notice := task.Notice{TaskID: taskID, Kind: task.NoticeSettled}
+	noticeKey := agent.NoticeFactKey(invocation, notice)
 	before := projectionKeysOf(projectionEntriesOf(t, run, addr.SessionID))
 	if _, err := run.CommitToSession(ctx, addr, event.Event{
-		Key:       agent.NoticeFactKey(invocation, notice),
+		Key:       noticeKey,
 		Type:      event.TypeFeedback,
 		Timestamp: projectionBase.Add(time.Hour),
 		Meta: map[string]string{
@@ -3783,10 +3784,17 @@ func runRangeHeadSurvivesFoldRewrite(t *testing.T) {
 	}
 	copies := 0
 	for _, msg := range requests[len(requests)-1].Messages {
+		// Every form the notice reaches a request in: its material, the ticket
+		// that addresses it, the notice card, and the one-line read the budget
+		// degrades it to. The ticket is peeled off before the degraded read is
+		// matched, so the address a correct presentation carries in front of that
+		// read is not mistaken for a second copy of the notice.
+		read := withoutPresentedTicket(msg.Content)
 		if strings.Contains(msg.Content, "task-77 settled") ||
-			strings.HasPrefix(msg.Content, "[ticket ") ||
-			strings.HasPrefix(msg.Content, "[notice ") ||
-			msg.Content == "settled" {
+			strings.Contains(msg.Content, string(noticeKey)) ||
+			strings.HasPrefix(read, "[ticket ") ||
+			strings.HasPrefix(read, "[notice ") ||
+			read == "settled" {
 			copies++
 		}
 	}
