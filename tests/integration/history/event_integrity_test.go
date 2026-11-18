@@ -32,6 +32,7 @@ import (
 	"time"
 
 	"github.com/SpellingDragon/tagent/api/config"
+	"github.com/SpellingDragon/tagent/api/durable"
 	"github.com/SpellingDragon/tagent/api/event"
 	"github.com/SpellingDragon/tagent/api/model"
 	"github.com/SpellingDragon/tagent/api/plugin"
@@ -93,7 +94,7 @@ func TestEventIntegrityConsumptionRecovery(t *testing.T) {
 func runClaimThenCommitRetry(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
-	cfg := ledger.StorageConfig{Type: ledger.StorageJournal, Root: t.TempDir()}
+	cfg := ledger.StorageConfig{Type: ledger.StorageJournal, Root: t.TempDir(), WriteRights: true}
 	spec := consumptionSpec("task-retry")
 	notice := task.Notice{TaskID: "", Round: 1, Kind: task.NoticeSettled, Seq: 0, Event: "evt-settle-retry"}
 	uncertain := true
@@ -167,6 +168,9 @@ func runClaimThenCommitRetry(t *testing.T) {
 	if len(owed) != 1 || owed[0].Delivery != task.DeliveryPending || owed[0].Notice.Notice != notice {
 		t.Fatalf("outbox after the retried commit = %+v, want %s owed and pending", owed, notice.FactKey())
 	}
+	if err := tier.Close(); err != nil {
+		t.Fatalf("close the tier before the reopen: %v; the rebuild below opens the same root, so this view ends first", err)
+	}
 
 	reopenedTier, err := ledger.OpenTier(ctx, cfg)
 	if err != nil {
@@ -220,7 +224,7 @@ func runClaimThenCommitRetry(t *testing.T) {
 func runConsumeOnlyAfterDurableCommit(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
-	cfg := ledger.StorageConfig{Type: ledger.StorageJournal, Root: t.TempDir()}
+	cfg := ledger.StorageConfig{Type: ledger.StorageJournal, Root: t.TempDir(), WriteRights: true}
 	tier, err := ledger.OpenTier(ctx, cfg)
 	if err != nil {
 		t.Fatalf("open the durable tier: %v", err)
@@ -261,6 +265,9 @@ func runConsumeOnlyAfterDurableCommit(t *testing.T) {
 	put, barrier, syncs := recording.order()
 	if syncs <= syncsBefore || barrier < put {
 		t.Fatalf("barrier order = put@%d sync@%d (barriers %d before %d), want the record staged before the barrier it reports durable behind", put, barrier, syncsBefore, syncs)
+	}
+	if err := tier.Close(); err != nil {
+		t.Fatalf("close the tier before the reopen: %v; the reopen below reads the same root beside this view and the acceptance that follows reads the mailbox this process holds, so nothing writes here again", err)
 	}
 
 	reopenedTier, err := ledger.OpenTier(ctx, cfg)
@@ -619,7 +626,7 @@ func (s *consumptionSite) entry(t *testing.T, seq state.AcceptSeq) (state.Mailbo
 // log it delegates to: the record it stages, the barrier behind which the
 // commit reports it durable, and how many barriers returned.
 type consumptionBarrierLog struct {
-	state.FactLog
+	durable.FactLog
 	mu       sync.Mutex
 	step     int
 	lastPut  int
@@ -929,7 +936,7 @@ func assembleHandoverRun(t *testing.T, ctx context.Context, root string, probe *
 // the notification the seed claims but never consumes.
 func consumptionSeedClaimedTask(t *testing.T, ctx context.Context, root string) (task.Spec, task.Notice) {
 	t.Helper()
-	cfg := ledger.StorageConfig{Type: ledger.StorageJournal, Root: root}
+	cfg := ledger.StorageConfig{Type: ledger.StorageJournal, Root: root, WriteRights: true}
 	tier, err := ledger.OpenTier(ctx, cfg)
 	if err != nil {
 		t.Fatalf("open the seed tier: %v", err)
@@ -957,6 +964,9 @@ func consumptionSeedClaimedTask(t *testing.T, ctx context.Context, root string) 
 	result, err := registry.Advance(ctx, receipt.TaskID, task.StatusSettled, task.MutationID("settle:"+string(receipt.TaskID)), []task.Envelope{envelope})
 	if err != nil || result != task.CommitCommitted {
 		t.Fatalf("commit the claimed task = %v, %v, want committed", result, err)
+	}
+	if err := tier.Close(); err != nil {
+		t.Fatalf("close the seed tier: %v; the caller assembles a runtime over this root next, so this view ends first", err)
 	}
 	return spec, notice
 }
@@ -1114,8 +1124,11 @@ func restoreAssertAttribution(t *testing.T, outcome func(*testing.T, string) res
 					mode, o.Seed.TaskID, view.Owner, persistenceAgentID)
 			}
 		}
-		if !recovered {
-			t.Fatalf("the %s restart rebuilt no task %s; recovery=%+v", mode, o.Seed.TaskID, o.Recover.Recovery)
+		if mode == restoreModeSeedGraceful && recovered {
+			t.Fatalf("the %s restart stated the settled task %s in recovery=%+v; the checkpoint a drained close files states nothing of a task settled before the cut", mode, o.Seed.TaskID, o.Recover.Recovery)
+		}
+		if mode == restoreModeSeedKill && !recovered {
+			t.Fatalf("the %s restart rebuilt no task %s; recovery=%+v, want the full-load fallback beside no checkpoint to fold the chain", mode, o.Seed.TaskID, o.Recover.Recovery)
 		}
 
 		invocation, held := restoreInvocationOf(o.Recover, o.Seed.TurnInvocation)
@@ -2389,6 +2402,9 @@ func runRestartRestoresFoldForm(t *testing.T) {
 	if filed == 0 {
 		t.Fatal("the online fold filed no compress request, so the restart proves no judgment")
 	}
+	if _, err := run.Close(ctx, agent.CloseRequest{Timeout: time.Now().Add(20 * time.Second)}); err != nil {
+		t.Fatalf("close the first runtime: %v; the restart opens the same root, so this runtime ends first", err)
+	}
 
 	restarted, err := assembly.Assemble(ctx, declaration, agents, assembly.WithGovernance(passPolicy{}), assembly.WithStorage(storage))
 	if err != nil {
@@ -2892,7 +2908,7 @@ func runRestartChild(t *testing.T, mode string) {
 // barrier has not returned: the parent kills it there, and the log keeps
 // nothing of the record a later process could read.
 type restartGate struct {
-	state.FactLog
+	durable.FactLog
 	barrier string
 	watch   string
 	marker  string
@@ -2905,7 +2921,7 @@ type restartGate struct {
 
 // newRestartGate returns the gate of one phase, withholding the barrier that
 // phase must not cross.
-func newRestartGate(log state.FactLog, phase restartPhase) *restartGate {
+func newRestartGate(log durable.FactLog, phase restartPhase) *restartGate {
 	gate := &restartGate{FactLog: log, entered: make(chan struct{}), hold: make(chan struct{})}
 	switch phase {
 	case restartBeforeCommit:
@@ -2977,7 +2993,7 @@ func seedRestartProcess(t *testing.T, root, out string, phase restartPhase) {
 	defer cancel()
 	report := restartChildReport{Mode: restartModeSeed, Phase: string(phase), PID: os.Getpid()}
 
-	tier, err := ledger.OpenTier(ctx, ledger.StorageConfig{Type: ledger.StorageJournal, Root: root})
+	tier, err := ledger.OpenTier(ctx, ledger.StorageConfig{Type: ledger.StorageJournal, Root: root, WriteRights: true})
 	if err != nil {
 		t.Fatalf("open the seed tier: %v", err)
 	}
@@ -3734,6 +3750,7 @@ func runNoticeVisibleUnderFold(t *testing.T) {
 // that opened it a second time as ended material beside the transcript.
 // - the notice that opens the range lands, then a fold rewrites the sequence under it
 // - the request of that range reads the notice identity exactly once, in no presentation form beside the transcript
+// - the counted forms: the notice's material, the ticket that addresses it, the notice card and the one-line read the budget degrades it to, with the ticket peeled off before the degraded read is matched, so the address a correct presentation carries in front of that read is not mistaken for a second copy
 func runRangeHeadSurvivesFoldRewrite(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
@@ -3784,11 +3801,6 @@ func runRangeHeadSurvivesFoldRewrite(t *testing.T) {
 	}
 	copies := 0
 	for _, msg := range requests[len(requests)-1].Messages {
-		// Every form the notice reaches a request in: its material, the ticket
-		// that addresses it, the notice card, and the one-line read the budget
-		// degrades it to. The ticket is peeled off before the degraded read is
-		// matched, so the address a correct presentation carries in front of that
-		// read is not mistaken for a second copy of the notice.
 		read := withoutPresentedTicket(msg.Content)
 		if strings.Contains(msg.Content, "task-77 settled") ||
 			strings.Contains(msg.Content, string(noticeKey)) ||
@@ -4316,7 +4328,7 @@ func newPersistenceRigOver(t *testing.T, decorate bool) *persistenceRig {
 		sender:     &persistenceSender{},
 	}
 	if decorate {
-		inner, err := ledger.OpenAtomicStore(context.Background(), ledger.StorageConfig{Type: ledger.StorageJournal, Root: rig.root})
+		inner, err := ledger.OpenAtomicStore(context.Background(), ledger.StorageConfig{Type: ledger.StorageJournal, Root: rig.root, WriteRights: true})
 		if err != nil {
 			t.Fatalf("open the storage engine over %s: %v", rig.root, err)
 		}

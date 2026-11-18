@@ -23,6 +23,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/SpellingDragon/tagent/api/durable"
 	"github.com/SpellingDragon/tagent/runtime/task/approval"
 )
 
@@ -47,8 +48,9 @@ var (
 )
 
 // stateSliceWire is the payload of the governance state slice: the layout version,
-// the tail each event stream ended at, the derived state those streams folded, and
-// the approval requests the book holds.
+// the tail each event stream ended at, the state those streams must keep in force
+// and the approval requests the book holds. The denial history is not stated: the
+// cut numbers it, and the index a reader asks for is derived from that stream.
 type stateSliceWire struct {
 	// Version is the payload layout this cut states.
 	Version int `json:"version"`
@@ -59,12 +61,17 @@ type stateSliceWire struct {
 	// GoalOrder is the declaration order the registry had reached: the sequence the
 	// goal identities are minted in, kept apart from the event stream numbering.
 	GoalOrder int `json:"goal_order"`
-	// Records is the ledger index the denial stream folded, oldest first.
-	Records []DenialRecord `json:"records,omitempty"`
-	// Goals is every goal the registry held, ordered by identity.
+	// Goals is the goals the registry still keeps in force: the ones in flight, the
+	// rulings the gate still reads beside them.
 	Goals []*Goal `json:"goals,omitempty"`
-	// Approvals is every request the approval book held.
+	// Approvals is every request the approval book holds in force: the holds a
+	// restoration keeps and the rulings that still decide the gate.
 	Approvals []approval.ApprovalRequest `json:"approvals,omitempty"`
+	// ApprovalKeys is the caller identity each stated request is seated under, in
+	// the same order as Approvals: a second registration aliases one caller
+	// identity onto a standing request, so the identity and the request are two
+	// answers a cut has to carry.
+	ApprovalKeys []string `json:"approval_keys,omitempty"`
 }
 
 // StateSeat is the governance recoverable state as the framework sees it: the
@@ -90,29 +97,30 @@ func NewStateSeat(ledger *DenialLedger, goals *GoalRegistry, approvals *approval
 func (s *StateSeat) StateName() string { return stateSliceName }
 
 // SnapshotState states the governance state as JSON: the tail each stream ended at,
-// the derived index those streams folded and the approval book. The read takes the
+// the state those streams keep in force and the approval book. The read takes the
 // holders' own read locks and nothing else — it never flushes, commits or waits for
 // a commit of its own — so the cut never stands between a governance write and its
-// landing.
+// landing. The denial history stays behind the tail it numbers: a cut costs the
+// live state instead of the history the stream already keeps.
 func (s *StateSeat) SnapshotState(_ context.Context) ([]byte, error) {
 	if s == nil {
 		return nil, nil
 	}
 	wire := stateSliceWire{Version: stateSliceVersion}
 	if s.ledger != nil {
-		wire.DenialSeq, wire.Records = s.ledger.stated()
+		wire.DenialSeq = s.ledger.stated()
 	}
 	if s.goals != nil {
 		wire.GoalSeq, wire.GoalOrder, wire.Goals = s.goals.stated()
 	}
 	if s.approvals != nil {
-		wire.Approvals = s.approvals.SnapshotEvidence()
+		wire.Approvals, wire.ApprovalKeys = s.approvals.SnapshotEvidence()
 	}
 	return json.Marshal(wire)
 }
 
 // RestoreState puts one governance state back: the cut each stream continues from,
-// the index the streams already folded and the approval requests the book held. The
+// the state the cut kept in force and the approval requests the book held. The
 // events past the cut are folded beside it when the durable face is bound
 // (StateSeat.Bind), so a boot states the same governance as the process that cut it.
 //
@@ -125,7 +133,7 @@ func (s *StateSeat) RestoreState(ctx context.Context, payload []byte) error {
 	}
 	if statesNothing(payload) {
 		if s.ledger != nil {
-			s.ledger.seat(nil, 0)
+			s.ledger.seat(0)
 		}
 		if s.goals != nil {
 			s.goals.seat(nil, 0, 0)
@@ -147,22 +155,25 @@ func (s *StateSeat) RestoreState(ctx context.Context, payload []byte) error {
 			errStateUnreadable, wire.DenialSeq, wire.GoalSeq, wire.GoalOrder)
 	}
 	if s.ledger != nil {
-		s.ledger.seat(wire.Records, wire.DenialSeq)
+		s.ledger.seat(wire.DenialSeq)
 	}
 	if s.goals != nil {
 		s.goals.seat(wire.Goals, wire.GoalOrder, wire.GoalSeq)
 	}
 	if s.approvals != nil {
-		return s.approvals.RestoreEvidence(ctx, wire.Approvals)
+		return s.approvals.RestoreEvidence(ctx, wire.Approvals, wire.ApprovalKeys)
 	}
 	return nil
 }
 
 // Bind hands the governance state the durable face the slice's cut belongs to: each
 // stream folds the events that landed past the cut it restored, so the state this
-// process serves is the state the cut plus its tail states. A nil log is a process
-// with no durable tier: the state stays the memory state the restore seated.
-func (s *StateSeat) Bind(ctx context.Context, log GovernanceEventLog) error {
+// process serves is the state the cut plus its tail states. The approval book's
+// attention chain is written to and folded from the same face, so the questions
+// and the rulings behind the gate outlive the process beside the two streams they
+// are read with. A nil log is a process with no durable tier: the state stays the
+// memory state the restore seated.
+func (s *StateSeat) Bind(ctx context.Context, log durable.FactLog) error {
 	if s == nil || log == nil {
 		return nil
 	}
@@ -174,6 +185,11 @@ func (s *StateSeat) Bind(ctx context.Context, log GovernanceEventLog) error {
 	if s.goals != nil {
 		if err := s.goals.Bind(ctx, log); err != nil {
 			return fmt.Errorf("governance: read the goal stream past the state cut: %w", err)
+		}
+	}
+	if s.approvals != nil {
+		if err := s.approvals.BindAttention(ctx, log); err != nil {
+			return fmt.Errorf("governance: read the attention facts past the state cut: %w", err)
 		}
 	}
 	return nil

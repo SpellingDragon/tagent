@@ -24,13 +24,21 @@ reach the composition root: the chain is a narrow port the composition supplies
 to this package.
 
 The task registry's recoverable state as the framework checkpoint carries it:
-the account the registry holds — every task it admitted that the terminal sweep
-did not drop — stated whole, beside the chain revision each record stands at.
-The account is the size of the work the registry keeps, never the size of the
-chains it already settled, so a restarted process reads the tasks of the cut out
-of the checkpoint instead of folding every chain the storage ever accumulated.
-The fact chain stays the truth of a task and the source the tail replays from:
-the checkpoint is the derived snapshot that spares the covered part of it.
+the work the registry is still driving — every task it admitted that holds no
+terminal fact, or that reached one still owing a delivery — stated whole beside
+the chain revision each record stands at. A task that finished with every
+obligation cleared is stated by nothing at all: its record stays on the chain,
+and a reader that names it reads it back by identity. The derived account
+therefore costs the open work alone, never the tasks the registry finished
+however many of them the storage holds, which is what keeps the checkpoint body
+equal at every depth of a finished history.
+
+The cut the account corresponds to is the position of the checkpoint fact in the
+storage's commit order: the links the storage committed past it are the tail a
+boot replays, and the store states that position itself, so the account carries
+no watermark of its own. The fact chain stays the truth of a task and the source
+both the tail and an on-demand read come from: the checkpoint is the derived
+snapshot that spares the covered part of it and nothing else.
 
 This file holds the logical status of a task: the classification of how long
 the task's recorded state has stood unchanged. It is a second read-out beside
@@ -334,6 +342,21 @@ func NewApprovalID() string
     a call in a hold, so one held call is resolved against a globally unique
     identity rather than against a native CallID, which is not globally unique.
 
+func StateSettleAccount(ctx context.Context, payload []byte, account SettleAccount) ([]byte, error)
+    StateSettleAccount answers the account a registry states with the settle
+    account of every task it names: the consumption receipts, the attempts
+    and the refusals the durable record of that task holds. A boot that reads
+    the checkpoint then reads the receipts of the tasks it covers out of the
+    checkpoint instead of scanning the durable prefixes of a history the tasks
+    already settled, and the account it states is the whole account of those
+    tasks.
+
+    A task beside no receipt states the three families as empty lists:
+    a checkpoint that stated nothing would be indistinguishable from one written
+    before the families existed, and the boot would have to scan the prefixes
+    to tell them apart. A nil account, and a payload stating no task, answer the
+    payload unchanged.
+
 func WithCallFrame(ctx context.Context, frame CallFrame) context.Context
     WithCallFrame carries one call frame on the context, so the wrapped call
     that context reaches is admitted under that identity. The dispatch states
@@ -595,6 +618,24 @@ type CancelReceipt struct {
     It reports the request and nothing more: the task ends when the executor
     reports an actual stop through StopEvidence, so the receipt is never read as
     termination.
+
+type ChainSource interface {
+	// Records answers the durable fact chain of one task in commit order, the
+	// admission link carrying the declaration the task was admitted under.
+	Records(ctx context.Context, taskID event.TaskID) ([]TaskRecord, error)
+}
+    ChainSource answers the durable fact chain of one task by its identity:
+    the read a checkpoint spares for the tasks it states whole, and the read a
+    task the checkpoint never stated answers the first time a reader names it.
+    An identity the source holds no link for answers no chain, which is how a
+    task this storage never admitted reads as unknown. Its signature carries
+    built-in and event types only, so the storage layer's commit satisfies it
+    structurally and no package edge is required in either direction.
+
+    The redline list (3 rules): MUST answer the fact chain of one task in commit
+    order, its admission link first. MUST carry the admission material on the
+    admission link alone. MUST NOT answer a chain that carries no admission
+    material.
 
 type Commit interface {
 	// Commit stores one record and reports the commit outcome. A committed
@@ -1007,9 +1048,12 @@ func (m *MemoryManager) Flush(ctx context.Context, taskID event.TaskID) error
     instance is closed is retained by name as ErrInstanceClosed: it is neither
     dropped nor delivered into a later instance that reuses the address.
 
-    A notification no target accepted stays owed, and the reason it could not
-    be accepted is recorded beside it, so a report names why a delivery waits
-    instead of only that it waits.
+    A notification no target accepted stays owed, and the reason it could
+    not be accepted is recorded beside it, so a report names why a delivery
+    waits instead of only that it waits. A task the newest checkpoint stated
+    no entry for is read back from its chain first, so a restart flushes the
+    notifications the record still owes instead of answering that the task is
+    unknown.
 
 func (m *MemoryManager) Handoff(ctx context.Context, taskID event.TaskID, target HandoffTarget) error
     Handoff moves a task's future notifications to the target address and the
@@ -1023,18 +1067,25 @@ func (m *MemoryManager) Handoff(ctx context.Context, taskID event.TaskID, target
     its frozen routing never moves. Every notification already created keeps
     the routing its envelope froze: a retry of one delivers beside that frozen
     routing and re-resolves no current target. A repeat of the handoff already
-    recorded applies nothing a second time.
+    recorded applies nothing a second time. A task the newest checkpoint stated
+    no entry for is read back from its chain first, so a restart records the
+    move beside the record the chain holds instead of answering that the task is
+    unknown.
 
 func (m *MemoryManager) HandoffOf(ctx context.Context, taskID event.TaskID) (HandoffRecord, error)
     HandoffOf reports the recorded handoff link of one task: the previous target
     its notifications moved from beside the new target they move to, with the
     source and target instance identities kept apart. A task no explicit handoff
-    moved reports ErrNoHandoff.
+    moved reports ErrNoHandoff. A task the newest checkpoint stated no entry
+    for is read back from its chain here, so a restart reports the handoff the
+    record holds instead of answering that the task is unknown.
 
 func (m *MemoryManager) Obligations(ctx context.Context, taskID event.TaskID) (Obligations, error)
     Obligations reports the obligations the manager still holds for a task,
     each entry classified by the wait it is in beside the task and notification
-    it points at.
+    it points at. A task the newest checkpoint stated no entry for is read
+    back from its chain here, so the report answers a finished task by identity
+    alone, with no lookup having to materialize the record first.
 
 func (m *MemoryManager) Owed(ctx context.Context) ([]UnsettledNotice, error)
     Owed reports the notifications the tasks of this manager still owe
@@ -1047,7 +1098,9 @@ func (m *MemoryManager) RecordStop(ctx context.Context, evidence StopEvidence) e
     that confirms no stop is recorded and moves no status; a confirmed stop of a
     task under a cancellation request stores the cancelled terminal fact beside
     its pending notification and closes the task's execution obligation with the
-    reported reason.
+    reported reason. A task the newest checkpoint stated no entry for is read
+    back from its chain first, so a restart records the report beside the record
+    the chain holds instead of answering that the task is unknown.
 
 func (m *MemoryManager) RecoveryMaterial(ctx context.Context, instance event.InstanceID) ([]TaskRecord, error)
     RecoveryMaterial returns the durable fact chain covering the tasks whose
@@ -1085,6 +1138,10 @@ func (r *MemoryRegistry) Advance(ctx context.Context, taskID event.TaskID, to St
     refuses leaves the task where it is; a task that holds its terminal fact
     moves no more.
 
+    A task the newest checkpoint stated no entry for is read back from its chain
+    first, so the account a restart kept answers the refusal its terminal holds
+    instead of answering that the task is unknown.
+
 func (r *MemoryRegistry) Cancel(ctx context.Context, taskID event.TaskID) error
     Cancel requests cancellation of the named task only; it does not cancel
     other invocations of the same session.
@@ -1102,7 +1159,9 @@ func (r *MemoryRegistry) CheckpointRestored(ctx context.Context, taskIDs []event
     resolves the target of a rebuilt task. The outcome reports the recovery,
     because the checkpoint rebuilt the task exactly as a chain fold rebuilds it
     and the two paths answer the same account; a task the registry does not hold
-    is left out of the report.
+    — one that finished before the cut, which the checkpoint states nothing of —
+    is left out of the report and read back from its chain when a reader names
+    it.
 
 func (r *MemoryRegistry) IssueNotice(ctx context.Context, taskID event.TaskID, kind NoticeKind, fact event.EventID) (Envelope, error)
     IssueNotice allocates the stable identity of one notification of the named
@@ -1111,15 +1170,24 @@ func (r *MemoryRegistry) IssueNotice(ctx context.Context, taskID event.TaskID, k
     under, or of the explicit handoff already applied. A handoff touches only
     the notifications issued after it, so the envelopes already issued keep the
     routing they froze and a retry of one never re-resolves a current target.
+    A task the newest checkpoint stated no entry for is read back from its chain
+    here, so a restart issues the next identity of the round the record holds
+    instead of answering that the task is unknown.
 
 func (r *MemoryRegistry) Logical(ctx context.Context, taskID event.TaskID, at time.Time) (LogicalStatus, error)
-    Logical reports the logical status of one task at the given instant: the
-    silence its recorded state has stood in, read beside the status machine. The
-    status, revision, mutations and obligations of the task stay as they stand.
+    Logical reports the logical status of one task at the given instant:
+    the silence its recorded state has stood in, read beside the status machine.
+    The status, revision, mutations and obligations of the task stay as they
+    stand. A task the newest checkpoint stated no entry for is read back from
+    its chain here, so a restart classifies a finished task by the outcome its
+    record holds instead of answering that the task is unknown.
 
 func (r *MemoryRegistry) Lookup(ctx context.Context, taskID event.TaskID) (Spec, Status, error)
     Lookup returns the declaration and status of the task with the given
-    identity.
+    identity. A task the newest checkpoint stated no entry for is read back
+    from its chain here, so the boot that restores an account costs no read
+    per finished task and a reader still answers the declaration that task was
+    admitted under.
 
 func (r *MemoryRegistry) ProgressReported(ctx context.Context, taskID event.TaskID) (bool, error)
     ProgressReported reports whether the task stands in the running phase with
@@ -1130,7 +1198,10 @@ func (r *MemoryRegistry) ProgressReported(ctx context.Context, taskID event.Task
     The round a task is at is not readable from the chain alone — folding a
     chain advances the round past the notices it carries — so a round-scoped
     read would answer differently for a live task and for the task restored from
-    its own chain. The chain-wide read is the one both faces agree on.
+    its own chain. The chain-wide read is the one both faces agree on. A task
+    the newest checkpoint stated no entry for is read back from its chain here,
+    so a restart derives the progress read of a finished task from the record it
+    committed instead of answering that the task is unknown.
 
 func (r *MemoryRegistry) PruneTerminal(at time.Time) int
     PruneTerminal drops the records whose task reached a terminal outcome at
@@ -1159,14 +1230,19 @@ func (r *MemoryRegistry) Reactivate(ctx context.Context, taskID event.TaskID) (i
     running. The transition is committed on the commit port with the revision
     it applies to, so two reactivations racing on one task commit one round:
     the first moves the task out of its settled status and the second is refused
-    by name.
+    by name. A task the newest checkpoint stated no entry for is read back from
+    its chain first, so a restart re-enters the settled outcome the record holds
+    instead of answering that the task is unknown.
 
 func (r *MemoryRegistry) Reentrant(ctx context.Context, taskID event.TaskID) error
     Reentrant reports whether the task may be re-entered, without moving it:
     the settled status design D7 admits, and the named refusal of every status
     it does not. A caller that settles more than one precondition before it
     opens a round reads this first, so the round it opens is the only thing it
-    has to put back when a later precondition turns out to be gone.
+    has to put back when a later precondition turns out to be gone. A task the
+    newest checkpoint stated no entry for is read back from its chain here,
+    so a restart answers the re-entry from the settled outcome the record holds
+    instead of answering that the task is unknown.
 
 func (r *MemoryRegistry) Register(ctx context.Context, spec Spec) (AdmissionReceipt, error)
     Register admits one task declaration and returns its admission receipt.
@@ -1182,7 +1258,10 @@ func (r *MemoryRegistry) Register(ctx context.Context, spec Spec) (AdmissionRece
 func (r *MemoryRegistry) RequestCancel(ctx context.Context, taskID event.TaskID) (CancelReceipt, error)
     RequestCancel records one cancellation request and returns its control
     receipt. A repeated request returns the same receipt and records no second
-    one; a task that already holds its terminal fact refuses the request.
+    one; a task that already holds its terminal fact refuses the request. A task
+    the newest checkpoint stated no entry for is read back from its chain first,
+    so a restart refuses the request of a finished task by its terminal status
+    instead of answering that the task is unknown.
 
 func (r *MemoryRegistry) Restore(ctx context.Context, chain []TaskRecord, owners OwnerBinding) (RestoreReport, error)
     Restore rebuilds the registry from one durable fact chain and admits each
@@ -1197,14 +1276,27 @@ func (r *MemoryRegistry) Restore(ctx context.Context, chain []TaskRecord, owners
     binding are supplied per call and nothing captured by an earlier run is
     revived through it.
 
-func (r *MemoryRegistry) RestoreCheckpoint(ctx context.Context, payload []byte) error
-    RestoreCheckpoint puts the tasks a checkpoint states back as the account
-    of this registry, and reports the revision each of them stands at through
-    CheckpointCoverage, so the boot folds only the links that landed past it.
+func (r *MemoryRegistry) RestoreChainSource(chains ChainSource)
+    RestoreChainSource attaches the source this registry reads a task from
+    when a reader names one the checkpoint never stated. A registry beside none
+    answers the tasks the checkpoint stated and refuses every other identity,
+    which is the account a run over the in-memory commit restores.
 
-    The restore never overwrites a task the registry already holds: a task a
-    chain fold rebuilt in this boot stands as the chain stated it, which is the
-    state the checkpoint's entry is only a prefix of.
+func (r *MemoryRegistry) RestoreCheckpoint(ctx context.Context, payload []byte) error
+    RestoreCheckpoint puts the open tasks a checkpoint states back as the
+    account of this registry, and reports the revision each of them stands at
+    through CheckpointCoverage, so the boot folds only the links that landed
+    past it. A task the checkpoint never stated — one that finished before the
+    cut — stays out of the account, and a reader that names it reads its chain
+    by identity.
+
+    The restore never overwrites a task the registry already holds:
+    a task a chain fold rebuilt in this boot stands as the chain stated it,
+    which is the state the checkpoint's entry is only a prefix of. It hands the
+    sequencer every notice identity the stated mutations carry — the identities
+    the account committed, open or closed — so both recovery paths answer one
+    identity sequence: a notice issued after a restart never repeats an identity
+    the account already used.
 
 func (r *MemoryRegistry) Resume(ctx context.Context, taskID event.TaskID, input event.Event) (AdmissionReceipt, error)
     Resume feeds one declared input into an existing task and re-enters the
@@ -1219,7 +1311,10 @@ func (r *MemoryRegistry) Resume(ctx context.Context, taskID event.TaskID, input 
     this state machine through Reactivate and the continuation table instead,
     so the input channel stays beneath both without a declaration of its own.
     It carries an event identity rather than free text, so a call naming no
-    identity opens no round.
+    identity opens no round. A task the newest checkpoint stated no entry for
+    is read back from its chain first, so a restart answers the refusal or the
+    re-entry that task's own status decides instead of answering that the task
+    is unknown.
 
 func (r *MemoryRegistry) RollbackReactivation(ctx context.Context, taskID event.TaskID, round int64) error
     RollbackReactivation puts one task back to the settled outcome the
@@ -1248,8 +1343,12 @@ func (r *MemoryRegistry) RollbackReactivation(ctx context.Context, taskID event.
     fact.
 
 func (r *MemoryRegistry) SnapshotCheckpoint(ctx context.Context) ([]byte, error)
-    SnapshotCheckpoint states every task record this registry holds, in task
-    identity order, with the revision each record stands at.
+    SnapshotCheckpoint states every task this registry still drives, in task
+    identity order: the tasks holding no terminal fact, and the tasks that
+    reached one still owing a delivery, each whole beside the revision its
+    record stands at. A task the registry finished states no entry: its record
+    stays on the chain and is read back by identity, so the account costs the
+    open work alone whatever the registry holds beside it.
 
 func (r *MemoryRegistry) Unfinished(ctx context.Context) ([]UnsettledWork, error)
     Unfinished reports the work this registry holds with no terminal, read from
@@ -1466,6 +1565,15 @@ func PolicyNamed(name string) (Policy, bool)
     read as the default, so a misspelled declaration is visible where it is
     resolved.
 
+type Receipts struct {
+	Consumed []StatedConsumption
+	Attempts []StatedAttempt
+	Rejected []StatedRefusal
+}
+    Receipts is the settle account one task's durable record holds: the
+    consumption receipts it completed, the attempts its follow-up turns are and
+    the refusals its targets answered.
+
 type Registry interface {
 	// Register admits one task declaration and returns the admission receipt.
 	// Admission is not a result and does not clear the task's obligation.
@@ -1494,11 +1602,12 @@ type Registry interface {
     is cancelled.
 
 type RegistryCheckpoint struct {
-	// Tasks is the account of the registry at the cut.
+	// Tasks is the open account of the registry at the cut.
 	Tasks []StatedTask `json:"tasks,omitempty"`
 }
     RegistryCheckpoint is the state one task registry states to the framework:
-    one entry per task record the registry holds, in task identity order.
+    one entry per task the registry still drives, in task identity order.
+    A task the registry finished is named by no entry at all.
 
 type RegistryOption func(*MemoryRegistry)
     RegistryOption configures one in-memory task registry beyond its commit port
@@ -1620,6 +1729,21 @@ type Serialization string
     session at a time and queues the rest; the declaration names the shape the
     queueing follows.
 
+type SettleAccount interface {
+	// ReceiptsOf answers the receipts one task holds, ordered by notice identity.
+	ReceiptsOf(taskID event.TaskID) Receipts
+}
+    SettleAccount is the durable receipt account a checkpoint states:
+    the receipts one task holds. A commit over the durable log answers it;
+    a checkpoint beside no durable commit states the empty account of every task
+    it names.
+
+    The redline list (3 rules): 红线: 结算账是只读面——只读已提交的 durable 记录，不写账、不改任务状态。
+    MUST answer every task the checkpoint names, empty families stated as empty
+    lists. MUST NOT answer a receipt of a task other than the one its notice
+    belongs to. MUST NOT scan a durable prefix a checkpoint receipt already
+    covers.
+
 type Spec struct {
 	// CallID is the native provider call identifier, kept byte-identical and
 	// never regenerated.
@@ -1653,12 +1777,49 @@ type Spec struct {
     the task answers, the identity a duplicate admission is resolved against,
     the addresses the task belongs to, and the execution shape the task runs in.
 
+type StatedAttempt struct {
+	// Notice is the four-part identity of the notification the attempt belongs to.
+	Notice Notice `json:"notice"`
+	// Terminal is the terminal the driven turn ended on.
+	Terminal string `json:"terminal,omitempty"`
+}
+    StatedAttempt is the attempt of one notification's follow-up turn as a
+    checkpoint states it: the notice it belongs to beside the terminal that turn
+    ended on, empty while the turn is in flight.
+
+type StatedConsumption struct {
+	// Notice is the four-part identity of the notification the receipt confirms.
+	Notice Notice `json:"notice"`
+	// Event is the committed fact the notification pointed at.
+	Event event.EventID `json:"event,omitempty"`
+}
+    StatedConsumption is one completed logical consumption of a task as a
+    checkpoint states it: the notice identity the receipt answers beside the
+    committed event the notice pointed at.
+
+type StatedRefusal struct {
+	// Notice is the four-part identity of the notification the target refused.
+	Notice Notice `json:"notice"`
+	// Target is the routing the delivery was offered to.
+	Target event.Address `json:"target"`
+	// Instance is the instance that offered the delivery.
+	Instance event.InstanceID `json:"instance"`
+	// Reason is the reason the target gave.
+	Reason string `json:"reason"`
+	// At is the instant the refusal landed.
+	At time.Time `json:"at"`
+}
+    StatedRefusal is the feedback fact of one notification a target refused as a
+    checkpoint states it: the notice it answers beside the routing the delivery
+    was offered to, the instance that offered it, the reason the target gave and
+    the instant the refusal landed.
+
 type StatedTask struct {
 	// TaskID is the task this entry states.
 	TaskID event.TaskID `json:"task_id"`
 	// Spec is the admission material of the task: the declaration its
 	// notifications route by and its duplicate admissions resolve against.
-	Spec Spec `json:"spec"`
+	Spec Spec `json:"spec,omitzero"`
 	// Status is the state the task holds at the cut.
 	Status Status `json:"status"`
 	// Revision is the chain revision the state corresponds to: the record that
@@ -1673,21 +1834,32 @@ type StatedTask struct {
 	// the restart; a link the tail of a chain folds past the cut carries no
 	// instant, so the stamp such a transition leaves is unknown and the sweep
 	// keeps the record, exactly as it does for a task rebuilt from its chain alone.
-	AdmittedAt time.Time `json:"admitted_at,omitempty"`
-	ChangedAt  time.Time `json:"changed_at,omitempty"`
-	RunSince   time.Time `json:"run_since,omitempty"`
-	TTLAnchor  time.Time `json:"ttl_anchor,omitempty"`
+	AdmittedAt time.Time `json:"admitted_at,omitzero"`
+	ChangedAt  time.Time `json:"changed_at,omitzero"`
+	RunSince   time.Time `json:"run_since,omitzero"`
+	TTLAnchor  time.Time `json:"ttl_anchor,omitzero"`
 	// Handoff is the routing an explicit handoff moved the future notifications
 	// to, and HandoffRecord is the link that move recorded. A task no handoff
 	// moved carries neither.
 	Handoff       *HandoffTarget `json:"handoff,omitempty"`
-	HandoffRecord HandoffRecord  `json:"handoff_record,omitempty"`
+	HandoffRecord HandoffRecord  `json:"handoff_record,omitzero"`
 	// Mutations is every mutation the task committed, so a repeated mutation
 	// after a restart is recognized as the one already stored instead of being
 	// applied a second time.
 	Mutations []CommitRecord `json:"mutations,omitempty"`
 	// Obligations is every obligation the registry still holds for the task.
 	Obligations []checkpointObligation `json:"obligations,omitempty"`
+	// Consumed, Attempts and Rejected are the settle account of the task: the
+	// consumption receipts it completed, the attempts its follow-up turns are and
+	// the refusals its targets answered. They are stated beside the chain so a boot
+	// reads the account of a task the checkpoint covers instead of scanning the
+	// durable prefixes of the whole history, and they are stated as empty lists
+	// rather than left out, because an empty account is the answer "this task
+	// completed no consumption", which is a different statement from a checkpoint
+	// that never stated the family at all.
+	Consumed []StatedConsumption `json:"consumed,omitzero"`
+	Attempts []StatedAttempt     `json:"attempts,omitzero"`
+	Rejected []StatedRefusal     `json:"rejected,omitzero"`
 }
     StatedTask is one task record as a checkpoint states it: the declaration the
     task was admitted under, the state it holds, the chain revision that state

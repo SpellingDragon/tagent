@@ -893,12 +893,14 @@ class LintObjectSelectionTest(unittest.TestCase):
         for name in ("check_schema_allowlist.py", "check_assembly_symbols.py",
                      "check_durable_truth_registry.py", "check_spec_hygiene.py",
                      "check_window_bounds.py", "check_vocabulary_alignment.py",
-                     "check_plugin_mounting.py"):
+                     "check_plugin_mounting.py", "check_dod_coverage.py",
+                     "check_dead_producers.py"):
             write(gates / name, PY_STUB)
         for name in ("test_check_schema_allowlist.py", "test_check_assembly_symbols.py",
                      "test_check_durable_truth_registry.py", "test_check_spec_hygiene.py",
                      "test_check_window_bounds.py", "test_check_vocabulary_alignment.py",
-                     "test_check_plugin_mounting.py"):
+                     "test_check_plugin_mounting.py", "test_check_dod_coverage.py",
+                     "test_check_dead_producers.py"):
             write(gates / name, SELFTEST_STUB)
 
         self.bin = self.root / "bin"

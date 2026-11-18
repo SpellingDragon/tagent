@@ -28,7 +28,6 @@ import (
 	"github.com/SpellingDragon/tagent/api/event"
 	"github.com/SpellingDragon/tagent/api/model"
 	"github.com/SpellingDragon/tagent/assembly"
-	"github.com/SpellingDragon/tagent/features/rl"
 	"github.com/SpellingDragon/tagent/memory/query"
 	"github.com/SpellingDragon/tagent/runtime/agent"
 )
@@ -65,7 +64,6 @@ type CLI struct {
 	run         *assembly.Run
 	scope       query.AuthorizationScope
 	credential  string
-	feedback    http.Handler
 	diagnostics assembly.DiagnosticSwitches
 }
 
@@ -245,13 +243,12 @@ func (c *CLI) authenticate(r *http.Request) error {
 }
 
 // handler returns the host HTTP face of the run: a liveness probe, the unified
-// runtime reading, the diagnostic reading of every optional face and, when the
-// host mounts one, the RL feedback endpoint, all served under the scope the
-// shell already holds. The request subject of every request authenticates at one
-// gate ahead of the route resolution, and an unauthenticated request is refused
-// with the named denial and the 401 status before any route runs. The handler
-// grants no authorization of its own, so the host keeps the request boundary it
-// deploys behind.
+// runtime reading and the diagnostic reading of every optional face, all served
+// under the scope the shell already holds. The request subject of every request
+// authenticates at one gate ahead of the route resolution, and an unauthenticated
+// request is refused with the named denial and the 401 status before any route
+// runs. The handler grants no authorization of its own, so the host keeps the
+// request boundary it deploys behind.
 func (c *CLI) handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
@@ -273,16 +270,9 @@ func (c *CLI) handler() http.Handler {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		if source, ok := c.feedback.(interface{ Attribution() rl.FeedbackAttribution }); ok {
-			attribution := source.Attribution()
-			report.Training.Feedback = &attribution
-		}
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(report)
 	})
-	if c.feedback != nil {
-		mux.Handle("POST /feedback", c.feedback)
-	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if err := c.authenticate(r); err != nil {
 			w.Header().Set("WWW-Authenticate", `Bearer realm="tagent"`)

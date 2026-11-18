@@ -656,7 +656,7 @@ func (s *partFaultStore) holdCommits(namespace string) func() {
 // agent's events commit under.
 func factFidelityFault(t *testing.T, root string) (*partFaultStore, string) {
 	t.Helper()
-	inner, err := ledger.OpenAtomicStore(context.Background(), ledger.StorageConfig{Type: ledger.StorageJournal, Root: root})
+	inner, err := ledger.OpenAtomicStore(context.Background(), ledger.StorageConfig{Type: ledger.StorageJournal, Root: root, WriteRights: true})
 	if err != nil {
 		t.Fatalf("open the storage engine over %s: %v", root, err)
 	}

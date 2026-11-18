@@ -48,6 +48,10 @@ const (
 	// DefaultKeepRecentTasks is the number of recent task turns the age fold
 	// keeps whole, taken when a declaration names no count.
 	DefaultKeepRecentTasks = 2
+	// DefaultSummaryBudgetBytes is the byte bound a history summary obeys, taken
+	// when a declaration names no budget: the policy default the declared
+	// summary_budget_bytes replaces, never a bound the mechanism fixes on its own.
+	DefaultSummaryBudgetBytes = 2048
 )
 
 VARIABLES
@@ -98,7 +102,10 @@ type AgentSpec struct {
 	// request carries is a subset of it, the full list by default, and the host
 	// narrows it at run time without republishing the binding.
 	Tools []ToolRef
-	// Plugins lists the agent's plugin references in pipeline order.
+	// Plugins customizes the agent's builtin plugin set: an entry names a
+	// builtin plugin the framework mounts by default, and a "-" prefix disables
+	// it. An empty list mounts every builtin plugin, so a declaration that
+	// customizes one plugin never drops the others silently.
 	Plugins []string
 	// TaskPolicy references the task policy applied to the agent's tasks.
 	TaskPolicy string
@@ -123,6 +130,11 @@ type AgentSpec struct {
 	// whole while it folds the older ones. Zero reads the declaration default
 	// of 2.
 	KeepRecentTasks int
+	// SummaryBudgetBytes bounds the text one history summary carries, in bytes:
+	// the declared bound the mechanical fold and the model gist both obey. Zero
+	// reads the declaration default of 2048, so a declaration naming only
+	// replay_window still bounds its summaries.
+	SummaryBudgetBytes int
 	// ContextWindow is the provider context window this agent's final requests
 	// are budgeted against, in tokens: the physical input capacity the declaration
 	// names. It is the sole source of the request budget gate — zero declares no

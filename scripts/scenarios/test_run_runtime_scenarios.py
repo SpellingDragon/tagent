@@ -579,6 +579,47 @@ class EventRunnerTest(unittest.TestCase):
         self.assertEqual(payload["counts"]["event_anchors_checked"], 8)
         self.assertIsNone(payload["productVerified"])
 
+    def test_the_evidence_records_the_environment_the_run_inherited(self):
+        ambient = {"GOMAXPROCS": "3", "GOFLAGS": "-count=1 -json",
+                   "TAGENT_CALIBRATION_MODE": "host"}
+        with mock.patch.dict(runner.os.environ, ambient):
+            expected = {name: runner.os.environ[name]
+                        for name in runner.EVENT_ENVIRONMENT_NAMES
+                        if name in runner.os.environ}
+            report = self.execute(FakeGo(self.contract), "--scope", "event-short",
+                                  "--repeat", "1")
+        recorded = self.evidence_of(report, 0)["run_config"]["environment"]
+        self.assertEqual(recorded, expected)
+        self.assertEqual(recorded["GOMAXPROCS"], "3")
+        self.assertEqual(recorded["TAGENT_CALIBRATION_MODE"], "host")
+        # Recorded as inherited: the runner does not normalise or re-derive GOFLAGS.
+        self.assertEqual(recorded["GOFLAGS"], "-count=1 -json")
+
+    def test_an_unset_determinant_is_recorded_as_absent(self):
+        with mock.patch.dict(runner.os.environ, {}, clear=True):
+            report = self.execute(FakeGo(self.contract), "--scope", "event-short",
+                                  "--repeat", "1")
+        self.assertEqual(self.evidence_of(report, 0)["run_config"]["environment"], {})
+
+    def test_a_credential_bearing_variable_is_never_recorded(self):
+        secrets = {"TAGENT_RL_AUTH_TOKEN": "s3cret-token", "SMOKE_API_KEY": "smoke-key",
+                   "TAGENT_REAL_JUDGE_API_KEY": "judge-key", "OPENAI_API_KEY": "openai-key"}
+        with mock.patch.dict(runner.os.environ, secrets, clear=True):
+            report = self.execute(FakeGo(self.contract), "--scope", "event-short",
+                                  "--repeat", "1")
+        self.assertEqual(self.evidence_of(report, 0)["run_config"]["environment"], {})
+        written = (Path(report["repeats"][0]["directory"]) / "evidence.json").read_text(
+            encoding="utf-8")
+        for value in secrets.values():
+            self.assertNotIn(value, written)
+
+    def test_a_declared_credential_name_is_refused(self):
+        with mock.patch.object(runner, "EVENT_ENVIRONMENT_NAMES",
+                               runner.EVENT_ENVIRONMENT_NAMES + ("TAGENT_REAL_JUDGE_API_KEY",)):
+            with self.assertRaises(runner.RunnerError) as caught:
+                runner.recorded_environment({"TAGENT_REAL_JUDGE_API_KEY": "judge-key"})
+        self.assertIn("credential marker", str(caught.exception))
+
     def test_v1_command_shape_is_unchanged(self):
         self.assertEqual(
             runner.go_test_command(["tests/integration/acceptance"],

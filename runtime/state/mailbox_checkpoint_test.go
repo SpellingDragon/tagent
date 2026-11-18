@@ -129,6 +129,51 @@ func TestMailboxSliceRestoresTheOwedSetBesideACutThatStatesNothing(t *testing.T)
 	}
 }
 
+// TestMailboxSliceRestoreSkipsANoticeTheAccountSettledPastTheCut pins the restore of a payload that predates a settlement.
+//   - positive: the obligation the account still owes comes back from the payload
+//   - negative: a notice the account consumed and one it refused past the cut open no seat, because the payload naming them predates both answers
+//   - consumer: StateRegistry.RestoreState hands the slice to the mailbox holder the way assembly restores a boot
+//
+// 契约: docs/wiki/platform/platform-subsystems.md#framework-checkpoint
+func TestMailboxSliceRestoreSkipsANoticeTheAccountSettledPastTheCut(t *testing.T) {
+	ctx := context.Background()
+	log := newInvariantFactLog()
+	taskID := eventTaskID()
+	notices := seedThreeNoticeTask(t, ctx, log, taskID)
+	account, err := NewDurableCommit(log, nil)
+	if err != nil {
+		t.Fatalf("open the durable account: %v", err)
+	}
+	payload, err := NewMailboxState(NewMemoryStore(NewAuthority(), account)).SnapshotState(ctx)
+	if err != nil {
+		t.Fatalf("state the mailbox slice before the settlement: %v", err)
+	}
+	if err := account.recordConsumption(ctx, notices[1]); err != nil {
+		t.Fatalf("record the consumption past the cut: %v", err)
+	}
+	if err := account.recordRejection(ctx, Rejection{Notice: notices[2],
+		Target: invariantAddress, Instance: "instance-a", Reason: "refused past the cut"}); err != nil {
+		t.Fatalf("record the refusal past the cut: %v", err)
+	}
+
+	booted := NewMemoryStore(NewAuthority(), account)
+	states := NewStateRegistry()
+	if _, err := states.Register(NewMailboxState(booted)); err != nil {
+		t.Fatalf("mount the mailbox state slice: %v", err)
+	}
+	if err := states.RestoreState(ctx, []event.CheckpointSlice{{Name: StateSliceMailbox, Payload: payload}}); err != nil {
+		t.Fatalf("restore the mailbox slice: %v", err)
+	}
+
+	seats := booted.Unconsumed()
+	if len(seats) != 1 || seats[0].Notice.Seq != 1 {
+		t.Fatalf("restored seats = %+v, want the one obligation the account still owes: a payload that predates a receipt and a refusal must not seat either of them again", seats)
+	}
+	if owed := account.OwedNotices(); len(owed) != len(seats) {
+		t.Fatalf("restored seats = %d beside the %d the account owes, want the same set", len(seats), len(owed))
+	}
+}
+
 // noticeSeqOf reports whether the restored seats carry the notification of one
 // sequence number.
 func noticeSeqOf(seats []WorkSeat, seq int64) bool {

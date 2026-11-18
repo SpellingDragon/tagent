@@ -51,9 +51,20 @@ type orphan struct {
 	OwnerSession string
 }
 
-// report is one scan of a journal root: every orphan reference classified by what
-// the chain holds for its key, each list in key order.
+// report is one scan of a journal root: what the open stated about the log's tail and
+// the index it read, then every orphan reference classified by what the chain holds for
+// its key, each list in key order.
 type report struct {
+	// TornTailBytes is the byte of the log the last frame the open read starts at, taken
+	// from the open itself: the frame at that byte is torn, so the log ends there.
+	TornTailBytes int64
+	// TornTail reports whether the log ended in a torn frame at all, which the byte alone
+	// cannot state: a log whose one frame is torn from its first byte stops at the zero a
+	// log of whole frames stops at.
+	TornTail bool
+	// IndexNotice states what the open said about the index files of the root, and is
+	// empty beside an open that read the commits past an index watermark.
+	IndexNotice string
 	// Recoverable holds the orphans whose body the chain rebuilds, as a dry run
 	// reports them.
 	Recoverable []orphan
@@ -97,13 +108,18 @@ func main() {
 //   - The orphan keys are walked in key order, so one root reports the same classes in the same order on every run
 //   - A rebuilt body is committed only when its sha256 digest and byte length equal the ones the reference recorded; a key the chain holds no event for and a body that differs are reported by name and left untouched
 //   - restore=false writes nothing and reports the rebuildable keys as recoverable
+//   - The open declares the root's write rights only when restore is set, so a dry run reads beside the live runtime instead of being refused by it, and a restore is refused by name while that runtime holds the root
 //   - After a commit the root is re-read through a freshly opened engine, and a restored key whose body or reference is not held is reported as an error
 //   - A reference or chain body that does not decode is reported as an error naming its key; the bodies already committed stay, each having matched its reference before it was written
+//   - What the open found at the end of the log and in the index files is taken from it before any commit, so the report states the root the scan met
 func recoverOrphanOriginals(ctx context.Context, root string, restore bool) (report, error) {
-	tier, err := ledger.OpenTier(ctx, ledger.StorageConfig{Type: ledger.StorageJournal, Root: root})
+	tier, err := ledger.OpenTier(ctx, ledger.StorageConfig{Type: ledger.StorageJournal, Root: root, WriteRights: restore})
 	if err != nil {
 		return report{}, err
 	}
+	var scanned report
+	scanned.TornTailBytes, scanned.TornTail = tornTailOf(tier)
+	scanned.IndexNotice = indexNoticeOf(tier)
 	blobKeys, err := tier.Store.Keys(ctx, "blob:")
 	if err != nil {
 		return report{}, err
@@ -126,7 +142,6 @@ func recoverOrphanOriginals(ctx context.Context, root string, restore bool) (rep
 		}
 	}
 	sort.Strings(keys)
-	var scanned report
 	for _, key := range keys {
 		var records []storedRef
 		if err := json.Unmarshal(refs[key], &records); err != nil {
@@ -200,9 +215,20 @@ func verifyRestored(ctx context.Context, root string, restored []orphan) error {
 	return nil
 }
 
-// printReport writes the summary of one scan: the count of every class, each
-// reference named with its owner, and whether anything was committed.
+// printReport writes the summary of one scan: what the open stated about the log's tail
+// and the index it read, the count of every class, each reference named with its owner,
+// and whether anything was committed.
 func printReport(root string, restore bool, scanned report) {
+	if scanned.IndexNotice != "" {
+		fmt.Printf("recover-kv: %s: %s\n", root, scanned.IndexNotice)
+	}
+	if scanned.TornTail {
+		if restore {
+			fmt.Printf("recover-kv: %s: the open cut the torn tail the log ended in: it now ends at %d, the byte its last whole frame ends at\n", root, scanned.TornTailBytes)
+		} else {
+			fmt.Printf("recover-kv: %s: the log ends in a torn tail at %d, and the dry run cut nothing: the scan served the whole frames before it\n", root, scanned.TornTailBytes)
+		}
+	}
 	total := len(scanned.Recoverable) + len(scanned.Restored) + len(scanned.TrulyLost) + len(scanned.Mismatch)
 	if total == 0 {
 		fmt.Printf("recover-kv: %s: nothing to recover, every reference names its independent body\n", root)
@@ -229,6 +255,27 @@ func printOrphans(class string, list []orphan) {
 	for _, item := range list {
 		fmt.Printf("recover-kv:   %s owner agent=%s session=%s\n", item.Key, item.OwnerAgent, item.OwnerSession)
 	}
+}
+
+// tornTailOf answers the byte the log the open read ends its last whole frame at and
+// whether that open met a torn tail there, through the measure the journal engine states.
+// A store that states no such measure answers none.
+func tornTailOf(tier *ledger.Tier) (int64, bool) {
+	probe, held := tier.Store.(interface{ TornTailBytesOpen() (int64, bool) })
+	if !held {
+		return 0, false
+	}
+	return probe.TornTailBytesOpen()
+}
+
+// indexNoticeOf answers what the open of tier said about the index files it read, through
+// the method the journal engine states. A store that states no notice answers empty.
+func indexNoticeOf(tier *ledger.Tier) string {
+	probe, held := tier.Store.(interface{ IndexUnstatedNotice() string })
+	if !held {
+		return ""
+	}
+	return probe.IndexUnstatedNotice()
 }
 
 // keySet returns the keys as a membership set.

@@ -153,10 +153,11 @@ func (k *filteredKV) Commit(ctx context.Context, batch Batch) error {
 	return k.inner.Commit(ctx, batch)
 }
 
-// TestKVOriginalStoreLoadReadsItsOwnEntries pins the read scope of one load.
-//
-// - The load reads the body and reference entries it files, never the whole store
-//   - the durable tier shares its keyspace with the segment store, whose event bodies the load never reads
+// TestKVOriginalStoreLoadReadsItsOwnEntries pins the read scope of the two loads the store states.
+//   - a read that names one identity reads the body and the reference of that identity, never the original family behind it
+//   - so the bytes a boot pays to recall or to commit one fact are the two entries of that identity
+//   - the load that answers the whole set reads under the two prefixes it files, never the whole store
+//   - the durable tier shares its keyspace with the segment store, whose event bodies neither load reads
 func TestKVOriginalStoreLoadReadsItsOwnEntries(t *testing.T) {
 	ctx := context.Background()
 	backing := newMemKV()
@@ -165,6 +166,10 @@ func TestKVOriginalStoreLoadReadsItsOwnEntries(t *testing.T) {
 	body := []byte("the original text")
 	if err := first.Put(ctx, ref, body); err != nil {
 		t.Fatalf("commit the original: %v", err)
+	}
+	beside := OriginalRef{Key: "beside-original", Format: "text"}
+	if err := first.Put(ctx, beside, []byte("the original beside it")); err != nil {
+		t.Fatalf("commit the original beside it: %v", err)
 	}
 	events := make([]Pair, 0, 64)
 	for at := 0; at < 64; at++ {
@@ -179,18 +184,34 @@ func TestKVOriginalStoreLoadReadsItsOwnEntries(t *testing.T) {
 		t.Fatalf("open the original store: %v", err)
 	}
 	if got := reopened.Get(ctx, ref.Key); got.Outcome != RecallFound || !bytes.Equal(got.Body, body) {
-		t.Fatalf("the lazy read = %+v, want the committed original", got)
+		t.Fatalf("the point read = %+v, want the committed original", got)
 	}
 	if filtered.unfiltered != 0 {
-		t.Fatalf("the load read the whole store %d time(s), want the two entries it files", filtered.unfiltered)
+		t.Fatalf("the point read read the whole store %d time(s), want the two entries of one identity", filtered.unfiltered)
 	}
-	prefixes := make([]string, 0, len(filtered.filtered))
+	keys := make([]string, 0, len(filtered.filtered))
 	for _, fetch := range filtered.filtered {
+		if fetch.Prefix != "" {
+			t.Fatalf("the read that names one identity read under the prefix %q, want the two keys of that identity", fetch.Prefix)
+		}
+		keys = append(keys, fetch.Key)
+	}
+	sort.Strings(keys)
+	if got, want := strings.Join(keys, ","), blobKVKey(ref.Key)+","+refKVKey(ref.Key); got != want {
+		t.Fatalf("the point read read %q, want %q: the two entries of the identity it names, never the original the store holds beside it", got, want)
+	}
+
+	reopened.BlobCount()
+	if filtered.unfiltered != 0 {
+		t.Fatalf("the whole-set load read the whole store %d time(s), want the two prefixes it files", filtered.unfiltered)
+	}
+	prefixes := make([]string, 0, len(filtered.filtered)-len(keys))
+	for _, fetch := range filtered.filtered[len(keys):] {
 		prefixes = append(prefixes, fetch.Prefix)
 	}
 	sort.Strings(prefixes)
 	if got, want := strings.Join(prefixes, ","), "blob:,ref:"; got != want {
-		t.Fatalf("the load read under %q, want %q", got, want)
+		t.Fatalf("the whole-set load read under %q, want %q", got, want)
 	}
 }
 
@@ -274,7 +295,7 @@ func TestOriginalStoreCommitsBodyAndReferenceInOneBatch(t *testing.T) {
 				if !held || !bytes.Equal(stored, body) {
 					t.Fatalf("the stored body = (%q, %v), want the committed bytes", stored, held)
 				}
-				reopened, err := newKVOriginalStore(engine.openAt(t, root), nil)
+				reopened, err := newKVOriginalStore(engine.openReaderAt(t, root), nil)
 				if err != nil {
 					t.Fatalf("reopen the original store: %v", err)
 				}
@@ -310,7 +331,7 @@ func TestOriginalStoreCommitsBodyAndReferenceInOneBatch(t *testing.T) {
 					t.Fatalf("the original beside no reference reads %+v, want it unreadable", got)
 				}
 				faults.setCommitFault(nil)
-				reopened, err := newKVOriginalStore(engine.openAt(t, root), nil)
+				reopened, err := newKVOriginalStore(engine.openReaderAt(t, root), nil)
 				if err != nil {
 					t.Fatalf("reopen the original store: %v", err)
 				}
@@ -319,5 +340,164 @@ func TestOriginalStoreCommitsBodyAndReferenceInOneBatch(t *testing.T) {
 				}
 			})
 		})
+	}
+}
+
+// TestCommitFactReadsTheOriginalItNames pins what one whole-fact commit reads of the original family.
+//   - the commit reads the body and the reference of the identity it commits, two point reads of that identity
+//   - it loads no whole original family, so the originals a chain already committed are never read back by a commit beside them
+//   - the identity reads are counted, so the zero above is a commit that named what it committed rather than one that read no original
+func TestCommitFactReadsTheOriginalItNames(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	tier, err := OpenTier(ctx, StorageConfig{Type: StorageLocalFile, Root: root, WriteRights: true})
+	if err != nil {
+		t.Fatalf("open the tier of the fixture: %v", err)
+	}
+	defer func() {
+		if err := tier.Close(); err != nil {
+			t.Fatalf("close the tier of the fixture: %v", err)
+		}
+	}()
+	originals, held := tier.Originals.(*kvOriginalStore)
+	if !held {
+		t.Fatalf("the durable tier holds the originals %T, want the store this check measures", tier.Originals)
+	}
+	beside := FactCommit{
+		Record: SegmentRecord{PartitionID: 1, WindowTS: 1700000000000, Seq: 1, EventKey: "beside-event", EventTime: 1700000000000, Body: []byte("beside body")}.WithChain("answer", "session-originals"),
+		Ref:    OriginalRef{Key: "beside-original", Format: "text"},
+		Body:   []byte("the original the chain already holds"),
+	}
+	if outcome, err := CommitFact(ctx, tier, beside); err != nil || outcome != FactCommitted {
+		t.Fatalf("the commit of the original beside it = (%v, %v), want a committed fact", outcome, err)
+	}
+	before, _, _ := originals.OriginalsReads()
+	fact := FactCommit{
+		Record: SegmentRecord{PartitionID: 1, WindowTS: 1700000000000, Seq: 2, EventKey: "named-event", EventTime: 1700000000000, Body: []byte("named body")}.WithChain("answer", "session-originals"),
+		Ref:    OriginalRef{Key: "named-original", Format: "text"},
+		Body:   []byte("the original the commit names"),
+	}
+	if outcome, err := CommitFact(ctx, tier, fact); err != nil || outcome != FactCommitted {
+		t.Fatalf("the commit of the named original = (%v, %v), want a committed fact", outcome, err)
+	}
+	loads, _, keys := originals.OriginalsReads()
+	if loads != before {
+		t.Fatalf("the commit loaded the whole original family %d time(s), want none beside the %d it started from: the originals the chain already holds stay unread", loads-before, before)
+	}
+	if keys == 0 {
+		t.Fatal("the commit read no key of the identity it committed, so the zero above states a commit that read no original")
+	}
+}
+
+// TestCommitReadsTheOriginalOfItsOwnIdentityAtEveryDepth pins what one whole-fact commit reads as the original family grows.
+//   - the commit reads the body and the reference of the identity it commits at every depth
+//   - the keys one commit reads are bounded by that identity and never by the family beside it
+//   - it loads no whole original family at any depth, which is where a commit that read the family would pay for every original the chain holds
+//   - the family is the denominator: it holds one more identity a generation, so the constant read is a bound and not a chain that stood still
+//   - the whole-store load is still reachable and measured, so the zero above is a commit that named its identity rather than a counter nothing drives
+func TestCommitReadsTheOriginalOfItsOwnIdentityAtEveryDepth(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	tier, err := OpenTier(ctx, StorageConfig{Type: StorageLocalFile, Root: root, WriteRights: true})
+	if err != nil {
+		t.Fatalf("open the tier of the fixture: %v", err)
+	}
+	defer func() {
+		if err := tier.Close(); err != nil {
+			t.Fatalf("close the tier of the fixture: %v", err)
+		}
+	}()
+	originals, held := tier.Originals.(*kvOriginalStore)
+	if !held {
+		t.Fatalf("the durable tier holds the originals %T, want the store this check measures", tier.Originals)
+	}
+	const generations = 24
+	identityReads := make([]int64, 0, generations)
+	wholeSetLoads := make([]int, 0, generations)
+	wholeSetFetched := make([]int64, 0, generations)
+	for generation := 0; generation < generations; generation++ {
+		beforeLoads, beforePairs, beforeKeys := originals.OriginalsReads()
+		fact := FactCommit{
+			Record: SegmentRecord{
+				PartitionID: 1, WindowTS: 1700000000000, Seq: int64(generation + 1),
+				EventKey: event.EventID(fmt.Sprintf("depth-event-%02d", generation)), EventTime: 1700000000000,
+				Body: []byte("the body of the fact committed at this depth of the chain"),
+			}.WithChain("answer", "session-original-depth"),
+			Ref:  OriginalRef{Key: event.EventID(fmt.Sprintf("depth-original-%02d", generation)), Format: "text"},
+			Body: []byte("the original the commit of this depth names"),
+		}
+		if outcome, err := CommitFact(ctx, tier, fact); err != nil || outcome != FactCommitted {
+			t.Fatalf("the commit at depth %d = (%v, %v), want a committed fact", generation, outcome, err)
+		}
+		afterLoads, afterPairs, afterKeys := originals.OriginalsReads()
+		wholeSetLoads = append(wholeSetLoads, afterLoads-beforeLoads)
+		wholeSetFetched = append(wholeSetFetched, afterPairs-beforePairs)
+		identityReads = append(identityReads, afterKeys-beforeKeys)
+	}
+	series := fmt.Sprintf("loads=%v fetched=%v keys=%v", wholeSetLoads, wholeSetFetched, identityReads)
+	for generation := range identityReads {
+		if wholeSetLoads[generation] != 0 {
+			t.Fatalf("the commit at depth %d loaded the whole original family %d time(s), want none: the commit reads the identity it commits and never the originals the chain already holds (%s)",
+				generation, wholeSetLoads[generation], series)
+		}
+		if wholeSetFetched[generation] != 0 {
+			t.Fatalf("the commit at depth %d fetched %d record(s) of the whole original family, want none: the family the chain holds is read by the identity that names it and never whole (%s)",
+				generation, wholeSetFetched[generation], series)
+		}
+		if identityReads[generation] != 2 {
+			t.Fatalf("the commit at depth %d read %d key(s) of the original family, want the body and the reference of the identity it commits (%s)",
+				generation, identityReads[generation], series)
+		}
+	}
+	family, err := tier.Store.Keys(ctx, "blob:")
+	if err != nil {
+		t.Fatalf("count the originals the chain holds: %v", err)
+	}
+	if len(family) != generations {
+		t.Fatalf("the original family holds %d identit(ies) beside the %d generations committed, want one a generation: the bound above is taken over a family that grew",
+			len(family), generations)
+	}
+	if counted := originals.BlobCount(); counted != generations {
+		t.Fatalf("the whole-store read answers %d identit(ies) of the %d the family holds, want the whole family: the load face is not measured", counted, generations)
+	}
+	if wholeSet, fetched, _ := originals.OriginalsReads(); wholeSet != 1 || fetched != 2*generations {
+		t.Fatalf("the whole-store read loaded the family %d time(s) and fetched %d record(s), want the one load of the %d records the family holds: a load the counter never sees makes the zero above a zero nothing measures",
+			wholeSet, fetched, 2*generations)
+	}
+}
+
+// TestCommitFactMemoryTierRecallsTheOriginalByBareKey pins the memory tier's whole-fact commit: the original it commits reads back by bare key.
+//   - fixture: one memory tier opened without an engine, one fact committed through CommitFact
+//   - the scoped read runs before the bare recall, so the whole-set load publishes the stored family the recall answers from
+//   - the bare recall serves the committed text byte for byte, and the scoped read serves it inside the reference's own scope
+func TestCommitFactMemoryTierRecallsTheOriginalByBareKey(t *testing.T) {
+	ctx := context.Background()
+	tier, err := OpenTier(ctx, StorageConfig{Type: StorageMemory})
+	if err != nil {
+		t.Fatalf("open the memory tier of the fixture: %v", err)
+	}
+	defer func() {
+		if err := tier.Close(); err != nil {
+			t.Fatalf("close the tier of the fixture: %v", err)
+		}
+	}()
+	const body = "the original the memory tier commits"
+	fact := FactCommit{
+		Record: SegmentRecord{PartitionID: 1, WindowTS: 1700000000000, Seq: 1, EventKey: "memory-event", EventTime: 1700000000000, Body: []byte("event body")}.WithChain("answer", "session-memory-original"),
+		Ref:    OriginalRef{Key: "memory-original", Owner: event.Address{AgentID: "agent-a", SessionID: "session-memory-original"}, Format: "text"},
+		Body:   []byte(body),
+	}
+	if outcome, err := CommitFact(ctx, tier, fact); err != nil || outcome != FactCommitted {
+		t.Fatalf("the commit of the memory-tier fact = (%v, %v), want a committed fact", outcome, err)
+	}
+	scoped, held := tier.Originals.(ScopedOriginalStore)
+	if !held {
+		t.Fatalf("the memory tier holds the originals %T, want the scoped read face", tier.Originals)
+	}
+	if got := scoped.GetScoped(ctx, fact.Ref.Key, fact.Ref.ReadScope()); got.Outcome != RecallFound || string(got.Body) != body {
+		t.Fatalf("the scoped read of %q = %+v, want the committed text %q: the whole-set load reads the engine the commit wrote", fact.Ref.Key, got, body)
+	}
+	if got := tier.Originals.Get(ctx, fact.Ref.Key); got.Outcome != RecallFound || string(got.Body) != body {
+		t.Fatalf("recall_get(%q) = %+v, want the committed text %q served by bare key: the memory tier's original and segment share one engine", fact.Ref.Key, got, body)
 	}
 }

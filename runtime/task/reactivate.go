@@ -53,11 +53,17 @@ const rollbackPrefix = "reactivate-rollback:"
 // still in flight is refused by name beside the round already running. The
 // transition is committed on the commit port with the revision it applies to, so
 // two reactivations racing on one task commit one round: the first moves the
-// task out of its settled status and the second is refused by name.
+// task out of its settled status and the second is refused by name. A task the
+// newest checkpoint stated no entry for is read back from its chain first, so a
+// restart re-enters the settled outcome the record holds instead of answering
+// that the task is unknown.
 func (r *MemoryRegistry) Reactivate(ctx context.Context, taskID event.TaskID) (int64, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	entry, ok := r.tasks[taskID]
+	entry, ok, err := r.hydrateLocked(ctx, taskID)
+	if err != nil {
+		return 0, err
+	}
 	if !ok {
 		return 0, ErrTaskNotFound
 	}
@@ -92,11 +98,17 @@ func (r *MemoryRegistry) Reactivate(ctx context.Context, taskID event.TaskID) (i
 // settled status design D7 admits, and the named refusal of every status it does
 // not. A caller that settles more than one precondition before it opens a round
 // reads this first, so the round it opens is the only thing it has to put back
-// when a later precondition turns out to be gone.
+// when a later precondition turns out to be gone. A task the newest checkpoint
+// stated no entry for is read back from its chain here, so a restart answers the
+// re-entry from the settled outcome the record holds instead of answering that
+// the task is unknown.
 func (r *MemoryRegistry) Reentrant(ctx context.Context, taskID event.TaskID) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	entry, ok := r.tasks[taskID]
+	entry, ok, err := r.hydrateLocked(ctx, taskID)
+	if err != nil {
+		return err
+	}
 	if !ok {
 		return ErrTaskNotFound
 	}

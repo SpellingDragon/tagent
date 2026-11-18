@@ -25,9 +25,8 @@ partitions, on the same declarative query semantics the memory read face states,
 newest first and cut to one page.
 
 Compile-time assertions of the recall surface: the four tools stay native
-callable tools, the declared names stay the vocabulary the prompt spells, the
-table port stays satisfied by the production read face, and the scoped original
-store stays satisfied by the in-process original store.
+callable tools, the declared names stay the vocabulary the prompt spells,
+and the table port stays satisfied by the production read face.
 
 The durable query port of the recall surface: the references a time, type and
 keyword query matches, the reference of one event and the original reference the

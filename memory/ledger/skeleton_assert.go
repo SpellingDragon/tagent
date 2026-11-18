@@ -109,12 +109,11 @@ const (
 	_ = DefaultSegmentMaxBytes
 )
 
-// The durable fact surface one opened tier keeps its documented shapes: put, get,
+// The durable fact surface one opened tier keeps its documented shapes: put,
 // prefix scan and the sync barrier a commit reports its success behind.
 var (
 	_ func(*Tier) *TierFacts                                              = TierFactLog
 	_ func(TierFacts, context.Context, string, []byte) error              = TierFacts.Put
-	_ func(TierFacts, context.Context, string) ([]byte, bool, error)      = TierFacts.Get
 	_ func(TierFacts, context.Context, string) (map[string][]byte, error) = TierFacts.Scan
 	_ func(TierFacts, context.Context) error                              = TierFacts.Sync
 )

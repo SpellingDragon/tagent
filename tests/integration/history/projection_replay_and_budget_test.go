@@ -74,9 +74,13 @@ func (c durableChain) ScanFrom(ctx context.Context, after event.EventID, limit i
 }
 
 func (c durableChain) Fact(ctx context.Context, key event.EventID) (replay.ChainFact, bool, error) {
-	value, held, err := c.log.Get(ctx, chainPrefix+string(key))
-	if err != nil || !held {
+	stored, err := c.log.Scan(ctx, chainPrefix+string(key))
+	if err != nil {
 		return replay.ChainFact{}, false, err
+	}
+	value, held := stored[chainPrefix+string(key)]
+	if !held {
+		return replay.ChainFact{}, false, nil
 	}
 	var fact replay.ChainFact
 	if err := json.Unmarshal(value, &fact); err != nil {
@@ -116,7 +120,7 @@ func TestProjectionReplayAndBudget(t *testing.T) {
 	}
 
 	t.Run("G2.1 逐字节重建 snapshot+尾部: snapshot and multi-page tail rebuild byte for byte", func(t *testing.T) {
-		cfg := ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: t.TempDir()}
+		cfg := ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: t.TempDir(), WriteRights: true}
 		tier, err := ledger.OpenTier(ctx, cfg)
 		if err != nil {
 			t.Fatalf("OpenTier: %v", err)
@@ -186,6 +190,9 @@ func TestProjectionReplayAndBudget(t *testing.T) {
 			}
 		}
 
+		if err := tier.Close(); err != nil {
+			t.Fatalf("close the tier before the reopen: %v", err)
+		}
 		reopened, err := ledger.OpenTier(ctx, cfg)
 		if err != nil {
 			t.Fatalf("reopen OpenTier: %v", err)

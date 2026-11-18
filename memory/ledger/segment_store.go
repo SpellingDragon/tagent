@@ -7,11 +7,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"slices"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"github.com/SpellingDragon/tagent/api/event"
 )
@@ -96,6 +96,11 @@ var ErrSegmentPosition = errors.New("memory: segment record carries a negative w
 // ErrSegmentBarrier reports a commit whose barrier did not complete, so the
 // record reaches no reader and no count.
 var ErrSegmentBarrier = errors.New("memory: segment commit barrier failed")
+
+// ErrFactCommitUnsupported reports a tier this build cannot commit a whole fact
+// through: the caller states the tier it was handed instead of committing one
+// family beside a judgment it never made.
+var ErrFactCommitUnsupported = errors.New("memory: the tier cannot commit a whole fact")
 
 // segmentCacheEntry is one event body the cache holds: the stored event beside
 // the bytes it accounts for.
@@ -193,21 +198,10 @@ const (
 	// segmentCacheEntryOverheadBytes is the accounting cost of one cached event
 	// beside its key and body bytes.
 	segmentCacheEntryOverheadBytes int64 = 128
-	// segmentIndexPrefix names the stored index entry of one event key: the
-	// resident index is the small projection of exactly these entries, so the
-	// read path keeps one index and never opens a second one.
+	// segmentIndexPrefix names the stored index entry of one event key: the read
+	// path files every position under exactly this entry and reads it back from
+	// there, so a store opens no second index beside the chain.
 	segmentIndexPrefix = "idx:"
-	// segmentSettledKey names the record a relocation pass leaves in the hot
-	// journal: how many events it moved into the cold journal. The count is what
-	// lets a restart state the whole committed history from a hot journal that
-	// holds a fraction of it.
-	segmentSettledKey = "settled:events"
-	// segmentSettledCommitKey names the record a relocation pass leaves in the hot
-	// journal: the greatest commit sequence it moved into the cold journal. It is
-	// what lets a newest-first walk of the hot journal answer without opening the
-	// cold one: a hot entry whose sequence is past this bound is newer than every
-	// cold entry, so the cold journal cannot change the answer and is not read.
-	segmentSettledCommitKey = "settled:commit"
 )
 
 // ErrSegmentBodyMissing reports an event the index names but whose persisted
@@ -215,19 +209,16 @@ const (
 // event as an absent one.
 var ErrSegmentBodyMissing = errors.New("memory: committed event body is missing")
 
-// indexPosition is the resident form of one stored index entry: the partition,
-// window and sequence slot the event key was committed at. It is the small
-// projection of the persisted {pid}:idx:{event_key} entry, so the index stays
-// resident while event bodies do not.
+// indexPosition is the decoded form of one stored index entry: the partition,
+// window and sequence slot the event key was committed at beside the type, the
+// session and the commit sequence the entry states. It is answered by a read of the
+// entry and kept by no store between reads.
 //
 // commit is the store-wide commit sequence the commit of this entry was assigned.
 // A window and a sequence slot number the events of one partition window, so they
 // order two entries of one window and say nothing about an entry of another; the
 // commit sequence orders every entry of the store, which is what a newest-first
-// walk states and what ranks a resident entry against one a relocation moved into
-// the cold journal. The two journals each keep their own frame order, and a frame
-// order is relative to its own log, so the sequence is the only order the two
-// share.
+// walk states and what ranks two entries of different partitions.
 type indexPosition struct {
 	partition int
 	window    int64
@@ -246,81 +237,82 @@ type segmentIndexCarried struct {
 	Commit  int64           `json:"commit"`
 }
 
-// commitOrder is the engine capability of stating the order of its commits: the
-// keys it holds, named from the newest committed record to the oldest, stopping
-// when visit answers false. An append-log engine keeps that order on disk, so
-// naming it costs the records walked; a key-ordered key-value engine keeps no
-// such order and does not answer this capability at all.
-type commitOrder interface {
-	eachCommittedNewestFirst(ctx context.Context, visit func(key string) (bool, error)) error
+// IndexEntry is one store index entry as a commit filed it: the partition and event
+// identity the key places beside the frozen type and session the value states.
+type IndexEntry struct {
+	// Partition is the partition the entry places the event in.
+	Partition int
+	// Key is the canonical identity of the event the entry places.
+	Key event.EventID
+	// Type is the frozen event type the entry states.
+	Type string
+	// Session is the session chain the entry states, empty beside a framework record.
+	Session event.SessionID
 }
 
 // FileSegmentStore commits events into time-window segments over one atomic
-// store engine; it names no engine and no file layout, so any engine backs it. One commit stages the event body, its index entry and the window meta
-// the window needs as one batch, and publishes the event to the read cache, the
-// resident index and the event count only when that commit returns success. A
-// commit that fails names the barrier as its step, carries its cause, unstages
-// what it wrote, and publishes no part of the record.
+// store engine; it names no engine and no file layout, so any engine backs it. One commit stages the event body, its index entry, the window meta
+// the window needs, the store's seat and the partition set as one batch, and
+// publishes the event to the read cache and the event count only when that commit
+// returns success. A commit that fails names the barrier as its step, carries its
+// cause, unstages what it wrote, and publishes no part of the record.
 //
-// The resident state is bounded: the index keeps one small position per event
-// key (the projection of the persisted index entries), the order keeps those keys
-// in the order their commits landed, the read cache keeps bodies under a byte
-// budget, and Load reads only the index, the window meta and the engine's commit
-// order at startup. An event body the cache evicted is read back from its
-// persisted {pid}:evt:{window}:{seq} entry, so a bounded process still answers
-// every read.
+// The resident state is bounded by the chain's shape and never by its history: the
+// seat states the count and the commit sequence, the partition set states the
+// partitions holding at least one event, and the read cache keeps bodies under a
+// byte budget. Load reads the seat and the partition set and both are single keys,
+// so opening a store reads no index entry whatever the history behind it. A point
+// read probes the index entry of the identity in each stated partition and reads
+// the value that entry spans, and a point read that names the partition probes
+// that one entry and consults no set, so the set is an accelerator over the index
+// and never the bound a caller that placed the event pays; a newest-first walk
+// reads the commit order the engine states and stops where a caller stops; an
+// enumeration reads the index of the partitions it names and therefore costs their
+// entries. No window meta is held:
+// the {pid}:meta:{window} key a window is filed under is the record, and the one
+// commit that reads it reads that key.
 //
 // 契约: docs/wiki/memory/memory-architecture.md#file-segment-store
 type FileSegmentStore struct {
-	mu    sync.Mutex
-	kv    AtomicStore
-	index map[event.EventID]indexPosition
-	// order is the published index in commit order, oldest commit first: the
-	// order the records sit in the engine, so a walk from its end answers
-	// newest-first and stops where a caller stops instead of ranking the entries
-	// against each other. It is append-only, like the commits it projects.
-	order   []event.EventID
-	cache   *segmentCache
-	count   int
-	windows map[string]*storedWindowMeta
+	mu sync.Mutex
+	kv AtomicStore
+	// partitions are the partitions the chain states it holds an index entry in,
+	// ascending: the set a point read of an identity that names no partition probes,
+	// so a read of one event pays one small read per partition and never a walk of
+	// the history. A read that names the partition its caller placed the event in
+	// pays one read and never this set.
+	partitions []int
+	// entriesRead is the index entries this load enumerated: none beside a chain
+	// that states its seat and its partition set, and the whole index beside a chain
+	// that states neither.
+	entriesRead int
+	cache       *segmentCache
+	// count is the events this store published: the whole committed history,
+	// spelled in the seat of the chain, so an open states it without an aggregate
+	// over the entries behind it.
+	count int
 	// commitSeq is the greatest commit sequence this store assigned, so the next
 	// commit takes one past it and no commit ever shares the rank of another. It is
 	// past EventCount when an entry whose window meta did not arrive stayed
 	// unpublished, because such an entry states a commit the count does not report.
 	commitSeq int64
-	// coldCommit is the greatest commit sequence a relocation moved into the cold
-	// journal. A newest-first walk reads the cold journal only while its resident
-	// head is not past it, so a store whose resident head is newer answers without
-	// opening the settled history at all.
-	coldCommit int64
-	// coldRoot is the directory of the second journal the settled facts of this
-	// store were relocated into, empty for a store that relocates none. The cold
-	// view is opened on the first read that misses the resident index, never at
-	// boot: a boot that opened it would read the settled history it exists to keep
-	// out of the boot.
-	coldRoot string
-	// cold is the opened cold view, nil until a read misses it.
-	cold AtomicStore
-	// retire reports whether this store relocates settled facts. It is the
-	// deployment's declaration, so a store it answers false for keeps every fact in
-	// the hot journal even beside a cold root another deployment filled.
-	retire bool
-	// retired counts the events a relocation moved out of the hot journal. The
-	// count rides in the hot journal so it survives a restart, and EventCount adds
-	// it back: the events of a store are every event it committed, whatever
-	// fraction of them the hot journal still holds.
-	retired int
+	// indexWalkVisits is the index entries the commit-order walk named,
+	// indexWalkValueBytes the value bytes it read to name them and indexWalkValueReads
+	// the values those bytes came from. A boot states all three, because an index walk
+	// that reads a value per held key and one that reads the index family alone name
+	// the same entries at different costs, and only the values read tell them apart.
+	indexWalkVisits     atomic.Int64
+	indexWalkValueBytes atomic.Int64
+	indexWalkValueReads atomic.Int64
 }
 
 // newFileSegmentStore opens the segment store held in kv and publishes the
-// index and window table of every stored record, leaving the event bodies on
-// the key-value seam until a read names one.
+// partitions the chain states, leaving every event body and every index position
+// on the key-value seam until a read names one.
 func newFileSegmentStore(kv AtomicStore) (*FileSegmentStore, error) {
 	store := &FileSegmentStore{
-		kv:      kv,
-		index:   map[event.EventID]indexPosition{},
-		cache:   newSegmentCache(),
-		windows: map[string]*storedWindowMeta{},
+		kv:    kv,
+		cache: newSegmentCache(),
 	}
 	if err := store.Load(context.Background()); err != nil {
 		return nil, err
@@ -328,40 +320,118 @@ func newFileSegmentStore(kv AtomicStore) (*FileSegmentStore, error) {
 	return store, nil
 }
 
-// Load rebuilds the resident index and window table from the persisted store
-// without returning an event body. It enumerates the engine's key namespaces to
-// discover the partitions, then reads the index and meta prefixes of each
-// partition: both are small entries, and no {pid}:evt:{window}:{seq} body is
-// read. A record whose index and window meta did not both arrive stays out of
-// the published state, EventCount counts the published records, and the commit
-// order is the one the engine states for the records it published.
+// Load states the count, the commit sequence and the partitions the chain holds
+// events in, without reading one index entry and without returning an event body:
+// one read of the seat states all three, so the open costs one small read whatever
+// the history behind it.
+//   - The seat states the count, the commit sequence and the partitions of the whole history with one read of one key, so neither the count nor the set of partitions a point read probes costs a reader an aggregate over the entries behind them
+//   - A seat the chain does not state, states unreadably, states a commit sequence below its count, or states a count beside no partition falls back to the count and the partitions the index states: one enumeration of the index, which is the derived answer a chain that states no seat costs
+//   - A store that writes again states the seat in the frame of its next commit, so a root whose seat could not be read is read without an aggregate from the next commit on
 func (s *FileSegmentStore) Load(ctx context.Context) error {
-	namespaces, err := s.kv.Namespaces(ctx)
+	seat, seated, err := s.readSeat(ctx)
 	if err != nil {
 		return err
 	}
-	partitions := map[int]struct{}{}
+	if !seated {
+		return s.rederive(ctx, seat, false)
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.count = seat.Count
+	s.commitSeq = seat.CommitSeq
+	s.partitions = append([]int(nil), seat.Partitions...)
+	s.entriesRead = 0
+	return nil
+}
+
+// rederive states the count, the commit sequence and the partitions from the index
+// itself: every partition the chain names, and the entries of one partition the
+// index states beside the window meta that publishes them. It is the one
+// enumeration a chain that states no seat costs, and it keeps no entry: the three
+// answers together are the whole of what it publishes.
+func (s *FileSegmentStore) rederive(ctx context.Context, seat storeSeat, seated bool) error {
+	partitions, err := s.indexPartitions(ctx)
+	if err != nil {
+		return err
+	}
+	entries, err := s.publishedEntriesOf(ctx, partitions)
+	if err != nil {
+		return err
+	}
+	count := len(entries)
+	commitSeq := int64(count)
+	for _, entry := range entries {
+		if entry.position.commit > commitSeq {
+			commitSeq = entry.position.commit
+		}
+	}
+	if seated {
+		count, commitSeq = seat.Count, seat.CommitSeq
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.count = count
+	s.commitSeq = commitSeq
+	s.partitions = partitions
+	s.entriesRead = len(entries)
+	return nil
+}
+
+// indexPartitions answers the partitions the chain files an index entry under:
+// the integer namespaces its held keys carry. A key namespace states no key of its
+// own, so the answer costs one enumeration of the namespaces and no index entry.
+func (s *FileSegmentStore) indexPartitions(ctx context.Context) ([]int, error) {
+	namespaces, err := s.kv.Namespaces(ctx)
+	if err != nil {
+		return nil, err
+	}
+	partitions := make([]int, 0, len(namespaces))
 	for _, namespace := range namespaces {
 		partition, err := strconv.Atoi(namespace)
 		if err != nil {
 			continue
 		}
-		partitions[partition] = struct{}{}
+		partitions = append(partitions, partition)
 	}
-	sorted := make([]int, 0, len(partitions))
-	for partition := range partitions {
-		sorted = append(sorted, partition)
-	}
-	sort.Ints(sorted)
-	positions := map[event.EventID]indexPosition{}
-	meta := map[windowSlot]storedWindowMeta{}
-	for _, partition := range sorted {
-		idxPairs, err := s.kv.Read(ctx, Fetch{Prefix: fmt.Sprintf("%d:%s", partition, segmentIndexPrefix)})
+	sort.Ints(partitions)
+	return partitions, nil
+}
+
+// indexEntry is one published index entry as an enumeration answers it: the event
+// key beside the position it was committed at.
+type indexEntry struct {
+	key      event.EventID
+	position indexPosition
+}
+
+// publishedEntriesOf answers every published index entry of the named partitions in
+// index order: partition first, then the window it is grouped under, then the
+// sequence slot it takes. It reads the index prefix of each partition and the
+// window keys that publish it, and reads no window meta value and no event body, so
+// the enumeration costs the entries of the partitions it names.
+func (s *FileSegmentStore) publishedEntriesOf(ctx context.Context, partitions []int) ([]indexEntry, error) {
+	entries := make([]indexEntry, 0, 16)
+	for _, partition := range partitions {
+		prefix := fmt.Sprintf("%d:%s", partition, segmentIndexPrefix)
+		idxPairs, err := s.kv.Read(ctx, Fetch{Prefix: prefix})
 		if err != nil {
-			return err
+			return nil, err
+		}
+		if len(idxPairs) == 0 {
+			continue
+		}
+		windowKeys, err := s.kv.Keys(ctx, fmt.Sprintf("%d:meta:", partition))
+		if err != nil {
+			return nil, err
+		}
+		filed := make(map[windowSlot]struct{}, len(windowKeys))
+		for _, key := range windowKeys {
+			if slot, named := segmentMetaSlot(key); named {
+				filed[slot] = struct{}{}
+			}
 		}
 		for _, pair := range idxPairs {
-			eventKey, held := strings.CutPrefix(pair.Key, fmt.Sprintf("%d:%s", partition, segmentIndexPrefix))
+			eventKey, held := strings.CutPrefix(pair.Key, prefix)
 			if !held || eventKey == "" {
 				continue
 			}
@@ -369,158 +439,133 @@ func (s *FileSegmentStore) Load(ctx context.Context) error {
 			if !named {
 				continue
 			}
-			positions[event.EventID(eventKey)] = position
-		}
-		metaPairs, err := s.kv.Read(ctx, Fetch{Prefix: fmt.Sprintf("%d:meta:", partition)})
-		if err != nil {
-			return err
-		}
-		for _, pair := range metaPairs {
-			name, held := strings.CutPrefix(pair.Key, fmt.Sprintf("%d:meta:", partition))
-			if !held {
+			if _, published := filed[windowSlot{partition: position.partition, window: position.window}]; !published {
 				continue
 			}
-			window, err := strconv.ParseInt(name, 10, 64)
-			if err != nil {
-				continue
-			}
-			var entry storedWindowMeta
-			if err := json.Unmarshal(pair.Value, &entry); err != nil {
-				return fmt.Errorf("%w: window meta %q: %w", ErrSnapshotCorrupt, pair.Key, err)
-			}
-			meta[windowSlot{partition: partition, window: window}] = entry
+			entries = append(entries, indexEntry{key: event.EventID(eventKey), position: position})
 		}
 	}
-	published := map[event.EventID]indexPosition{}
-	for key, position := range positions {
-		if _, held := meta[windowSlot{partition: position.partition, window: position.window}]; !held {
-			continue
-		}
-		published[key] = position
-	}
-	order, err := s.commitOrderOf(ctx, published)
-	if err != nil {
-		return err
-	}
-	retired, err := s.retiredCountOf(ctx)
-	if err != nil {
-		return err
-	}
-	coldCommit, err := s.coldCommitOf(ctx)
-	if err != nil {
-		return err
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.index = published
-	s.windows = map[string]*storedWindowMeta{}
-	s.count = len(published) + retired
-	s.commitSeq = int64(s.count)
-	s.retired = retired
-	s.coldCommit = coldCommit
-	for _, position := range published {
-		if position.commit > s.commitSeq {
-			s.commitSeq = position.commit
-		}
-	}
-	s.order = order
-	for slot, entry := range meta {
-		carried := entry
-		s.windows[windowKey(slot.partition, slot.window)] = &carried
-	}
-	return nil
-}
-
-// coldCommitOf answers the greatest commit sequence a relocation moved into the
-// cold journal, as the hot journal states it. Zero means no settled entry can be
-// newer than any resident one, which is the answer of a store that never
-// relocated anything.
-func (s *FileSegmentStore) coldCommitOf(ctx context.Context) (int64, error) {
-	pairs, err := s.kv.Read(ctx, Fetch{Key: segmentSettledCommitKey})
-	if err != nil {
-		return 0, err
-	}
-	if len(pairs) == 0 {
-		return 0, nil
-	}
-	commit, err := strconv.ParseInt(string(pairs[0].Value), 10, 64)
-	if err != nil {
-		return 0, fmt.Errorf("%w: the settled commit %q: %w", ErrSnapshotCorrupt, segmentSettledCommitKey, err)
-	}
-	if commit < 0 {
-		return 0, fmt.Errorf("%w: the settled commit %q states %d", ErrSnapshotCorrupt, segmentSettledCommitKey, commit)
-	}
-	return commit, nil
-}
-
-// retiredCountOf answers the events a relocation pass moved out of the hot journal,
-// as the hot journal states them. The count is what keeps EventCount stating the
-// whole committed history instead of the fraction the hot journal still holds, so a
-// bounded hot journal never reads as a store that lost its history.
-func (s *FileSegmentStore) retiredCountOf(ctx context.Context) (int, error) {
-	pairs, err := s.kv.Read(ctx, Fetch{Key: segmentSettledKey})
-	if err != nil {
-		return 0, err
-	}
-	if len(pairs) == 0 {
-		return 0, nil
-	}
-	retired, err := strconv.Atoi(string(pairs[0].Value))
-	if err != nil {
-		return 0, fmt.Errorf("%w: the settled count %q: %w", ErrSnapshotCorrupt, segmentSettledKey, err)
-	}
-	if retired < 0 {
-		return 0, fmt.Errorf("%w: the settled count %q states %d", ErrSnapshotCorrupt, segmentSettledKey, retired)
-	}
-	return retired, nil
-}
-
-// commitOrderOf answers the published index entries in the order their commits
-// landed, oldest first. The engine states that order itself when it keeps one, so
-// the answer costs one walk of the records filed and no sort; an engine that keeps
-// no commit order — a key-ordered key-value engine, or a wrapper that does not
-// forward this capability — answers the slot order its index entries state
-// instead, which costs one sort of the entries and cannot tell that a commit of
-// one partition landed after a commit of another.
-func (s *FileSegmentStore) commitOrderOf(ctx context.Context, published map[event.EventID]indexPosition) ([]event.EventID, error) {
-	order := make([]event.EventID, 0, len(published))
-	if ordered, ok := s.kv.(commitOrder); ok {
-		seen := make(map[event.EventID]struct{}, len(published))
-		if err := ordered.eachCommittedNewestFirst(ctx, func(key string) (bool, error) {
-			partition, id, named := segmentIndexEntry(key)
-			position, held := published[id]
-			if !named || !held || position.partition != partition {
-				return true, nil
-			}
-			if _, placed := seen[id]; placed {
-				return true, nil
-			}
-			seen[id] = struct{}{}
-			order = append(order, id)
-			return len(order) < len(published), nil
-		}); err != nil {
-			return nil, err
-		}
-		if len(order) != len(published) {
-			return nil, fmt.Errorf("tagent: the engine states the commits of %d of the %d index entries it published", len(order), len(published))
-		}
-		slices.Reverse(order)
-		return order, nil
-	}
-	for key := range published {
-		order = append(order, key)
-	}
-	sort.Slice(order, func(i, j int) bool {
-		a, b := published[order[i]], published[order[j]]
+	sort.Slice(entries, func(i, j int) bool {
+		a, b := entries[i].position, entries[j].position
 		if a.partition != b.partition {
 			return a.partition < b.partition
+		}
+		if a.window != b.window {
+			return a.window < b.window
 		}
 		if a.seq != b.seq {
 			return a.seq < b.seq
 		}
-		return order[i] < order[j]
+		return entries[i].key < entries[j].key
 	})
-	return order, nil
+	return entries, nil
+}
+
+// withPartition answers the ascending partition set carrying partition, which the
+// commit that files the first entry of a partition states in its own frame.
+func withPartition(partitions []int, partition int) []int {
+	at := sort.SearchInts(partitions, partition)
+	if at < len(partitions) && partitions[at] == partition {
+		return partitions
+	}
+	stated := make([]int, 0, len(partitions)+1)
+	stated = append(stated, partitions[:at]...)
+	stated = append(stated, partition)
+	return append(stated, partitions[at:]...)
+}
+
+// readSeat answers the count, the commit sequence and the partitions this store
+// states in its seat, and whether the chain states a seat this build can read: one
+// read of the seat key, decoded. A seat that is absent, that does not decode, that
+// names a negative count, that names a commit sequence below its count, or that
+// names events beside no partition is answered false, so the caller counts the
+// entries the index states instead of trusting a seat it cannot read. A read that
+// failed answers its error, because a store that could not read a key states no
+// count at all.
+func (s *FileSegmentStore) readSeat(ctx context.Context) (storeSeat, bool, error) {
+	pairs, err := s.kv.Read(ctx, Fetch{Key: storeSeatKey})
+	if err != nil {
+		return storeSeat{}, false, err
+	}
+	if len(pairs) == 0 {
+		return storeSeat{}, false, nil
+	}
+	var seat storeSeat
+	if err := json.Unmarshal(pairs[0].Value, &seat); err != nil {
+		return storeSeat{}, false, nil
+	}
+	if seat.Count < 0 || seat.CommitSeq < int64(seat.Count) {
+		return storeSeat{}, false, nil
+	}
+	if seat.Count > 0 && len(seat.Partitions) == 0 {
+		return storeSeat{}, false, nil
+	}
+	return seat, true, nil
+}
+
+// storeSeatKey names the chain key the store states its own count under: the one
+// value of the whole committed history, committed in the frame of every event
+// family, so a reader of the count reads one key and never an aggregate.
+const storeSeatKey = "store:seat"
+
+// storeSeat is the value of storeSeatKey: the events the store published, the
+// greatest commit sequence it assigned, and the partitions it filed an index entry
+// in. Both scalars travel, because an entry whose window meta did not arrive leaves
+// the sequence past the count, and the partitions travel beside them because the
+// frame of every event family states the seat: a point read of an identity probes
+// the partitions this one key names instead of enumerating the index behind them.
+type storeSeat struct {
+	Count      int   `json:"count"`
+	CommitSeq  int64 `json:"commitSeq"`
+	Partitions []int `json:"partitions"`
+}
+
+// publishedPositionLocked answers the position of the event filed under key, and
+// whether the store published one: the index entry the chain holds for that
+// identity in one of the partitions it states, beside the window meta of the
+// window the entry names. It probes one key per partition, so the answer costs one
+// small read per partition and never the entries behind them. The caller holds the
+// lock.
+func (s *FileSegmentStore) publishedPositionLocked(ctx context.Context, key event.EventID) (indexPosition, bool, error) {
+	for _, partition := range s.partitions {
+		position, held, err := s.partitionPositionLocked(ctx, partition, key)
+		if err != nil || held {
+			return position, held, err
+		}
+	}
+	return indexPosition{}, false, nil
+}
+
+// partitionPositionLocked answers the position of the published index entry one
+// partition files under key, and false beside an entry that partition does not
+// hold or one whose window meta does not publish. The caller holds the lock.
+func (s *FileSegmentStore) partitionPositionLocked(ctx context.Context, partition int, key event.EventID) (indexPosition, bool, error) {
+	pairs, err := s.kv.Read(ctx, Fetch{Key: fmt.Sprintf("%d:%s%s", partition, segmentIndexPrefix, key)})
+	if err != nil {
+		return indexPosition{}, false, err
+	}
+	if len(pairs) == 0 {
+		return indexPosition{}, false, nil
+	}
+	position, named := indexPositionOf(partition, pairs[0].Value)
+	if !named {
+		return indexPosition{}, false, nil
+	}
+	return s.publishedPosition(ctx, position)
+}
+
+// publishedPosition answers position beside the window meta that publishes it: an
+// entry whose window states no meta is not a published record, so a read of it
+// answers absence instead of a body the count never covered.
+func (s *FileSegmentStore) publishedPosition(ctx context.Context, position indexPosition) (indexPosition, bool, error) {
+	pairs, err := s.kv.Read(ctx, Fetch{Key: windowMetaKey(position.partition, position.window)})
+	if err != nil {
+		return indexPosition{}, false, err
+	}
+	if len(pairs) == 0 {
+		return indexPosition{}, false, nil
+	}
+	return position, true, nil
 }
 
 // segmentIndexEntry splits one stored index key into the partition it was filed
@@ -544,11 +589,11 @@ func segmentIndexEntry(key string) (int, event.EventID, bool) {
 
 // StoreEvent commits one event behind the segment commit barrier: the event
 // body, its index entry and the window meta the window needs are one batch
-// committed before the event reaches the read cache, the resident index, the
+// committed before the event reaches the read cache, the partition set, the
 // event count or the caller.
 //
 //   - A repeat of the committed record returns success without a second fact, other bytes under the same event key are refused, and a failed commit leaves nothing published.
-//   - A fact a relocation moved into the cold journal is still a committed fact: committing it again answers as the duplicate it is, never as a second landing of one identity.
+//   - A fact the store holds is a committed fact: committing it again answers as the duplicate it is, never as a second landing of one identity.
 func (s *FileSegmentStore) StoreEvent(ctx context.Context, rec SegmentRecord) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -561,91 +606,336 @@ func (s *FileSegmentStore) StoreEvent(ctx context.Context, rec SegmentRecord) er
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if prior, held := s.index[rec.EventKey]; held {
-		if prior.partition != rec.PartitionID || prior.window != rec.WindowTS || prior.seq != rec.Seq {
-			return ErrContentConflict
-		}
-		existing, found, err := s.duplicateBodyLocked(ctx, rec.EventKey, prior)
-		if err != nil {
-			return err
-		}
-		if !found {
-			return fmt.Errorf("%w: %s", ErrSegmentBodyMissing, rec.EventKey)
-		}
-		if !bytes.Equal(existing, rec.Body) {
-			return ErrContentConflict
-		}
-		return nil
-	}
-	coldStored, coldHeld, err := s.coldEventLocked(ctx, rec.EventKey)
+	plan, err := s.planEventLocked(ctx, rec)
 	if err != nil {
 		return err
 	}
-	if coldHeld {
-		if coldStored.PartitionID != rec.PartitionID || coldStored.WindowTS != rec.WindowTS || coldStored.Seq != rec.Seq {
-			return ErrContentConflict
-		}
-		if !bytes.Equal(coldStored.Body, rec.Body) {
-			return ErrContentConflict
-		}
+	if plan.duplicate {
 		return nil
 	}
-	meta := s.nextWindowMeta(rec)
+	if err := s.kv.Commit(ctx, Batch{Puts: plan.puts}); err != nil {
+		return fmt.Errorf("%w: %w", ErrSegmentBarrier, err)
+	}
+	s.publishEventLocked(plan)
+	return nil
+}
+
+// planEventLocked answers the event family of one commit: the pairs one batch
+// carries, or the duplicate the store already holds under the record's identity.
+// The caller checks the record's own fields and holds the lock.
+func (s *FileSegmentStore) planEventLocked(ctx context.Context, rec SegmentRecord) (*segmentEventPlan, error) {
+	prior, held, err := s.heldPositionLocked(ctx, rec)
+	if err != nil {
+		return nil, err
+	}
+	if held {
+		if prior.partition != rec.PartitionID || prior.window != rec.WindowTS || prior.seq != rec.Seq {
+			return nil, ErrContentConflict
+		}
+		existing, found, err := s.duplicateBodyLocked(ctx, rec.EventKey, prior)
+		if err != nil {
+			return nil, err
+		}
+		if !found {
+			return nil, fmt.Errorf("%w: %s", ErrSegmentBodyMissing, rec.EventKey)
+		}
+		if !bytes.Equal(existing, rec.Body) {
+			return nil, ErrContentConflict
+		}
+		return &segmentEventPlan{duplicate: true}, nil
+	}
+	meta, err := s.nextWindowMeta(ctx, rec)
+	if err != nil {
+		return nil, err
+	}
 	evtKey := fmt.Sprintf("%d:evt:%d:%d", rec.PartitionID, rec.WindowTS, rec.Seq)
 	idxKey := fmt.Sprintf("%d:idx:%s", rec.PartitionID, rec.EventKey)
-	metaKey := fmt.Sprintf("%d:meta:%d", rec.PartitionID, rec.WindowTS)
+	metaKey := windowMetaKey(rec.PartitionID, rec.WindowTS)
 	evtValue := append([]byte(nil), rec.Body...)
 	commit := s.commitSeq + 1
 	idxMeta, err := json.Marshal(segmentIndexCarried{Type: rec.typ, Session: rec.session, Commit: commit})
 	if err != nil {
-		return fmt.Errorf("tagent: encode the index type of %s: %w", rec.EventKey, err)
+		return nil, fmt.Errorf("tagent: encode the index type of %s: %w", rec.EventKey, err)
 	}
 	idxValue := []byte(fmt.Sprintf("%d:%d:%s", rec.WindowTS, rec.Seq, idxMeta))
 	metaValue, err := json.Marshal(meta)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	batch := Batch{Puts: []Pair{
-		{Key: evtKey, Value: evtValue},
-		{Key: idxKey, Value: idxValue},
-		{Key: metaKey, Value: metaValue},
-	}}
-	if err := s.kv.Commit(ctx, batch); err != nil {
-		return fmt.Errorf("%w: %w", ErrSegmentBarrier, err)
+	seat, err := s.seatOfCommitLocked(ctx, rec, commit)
+	if err != nil {
+		return nil, err
 	}
-	stored := StoredEvent{
+	seatValue, err := json.Marshal(seat)
+	if err != nil {
+		return nil, fmt.Errorf("tagent: encode the seat of the store: %w", err)
+	}
+	return &segmentEventPlan{
+		puts: []Pair{
+			{Key: evtKey, Value: evtValue},
+			{Key: idxKey, Value: idxValue},
+			{Key: metaKey, Value: metaValue},
+			{Key: storeSeatKey, Value: seatValue},
+		},
+		record: rec,
+		commit: commit,
+		value:  evtValue,
+	}, nil
+}
+
+// seatOfCommitLocked answers the seat one commit states: the count one past the
+// greater of the count this process published and the count the seat states, the
+// commit sequence of the greater of this commit's rank and the sequence the seat
+// states, and the partitions of every frame the log already holds beside the one
+// this commit lands, so a frame that landed without its barrier naming the outcome
+// stays counted and stays stated instead of leaving the seat of the next frame. The
+// caller holds the lock.
+//   - The frame writes the union of the partitions the store published in this process, the partitions the seat states and the record's own, because a commit publishes nothing to the process state when its barrier names no outcome, and a seat recomputed from that state alone drops the partition an uncertain commit landed in
+//   - The seat is read here and written back in the same batch, so the set it states only ever gains a partition, and the write costs one small read whatever the history behind it
+func (s *FileSegmentStore) seatOfCommitLocked(ctx context.Context, rec SegmentRecord, commit int64) (storeSeat, error) {
+	next := storeSeat{Count: s.count + 1, CommitSeq: commit, Partitions: withPartition(append([]int(nil), s.partitions...), rec.PartitionID)}
+	stated, seated, err := s.readSeat(ctx)
+	if err != nil {
+		return storeSeat{}, err
+	}
+	if !seated {
+		return next, nil
+	}
+	if stated.Count+1 > next.Count {
+		next.Count = stated.Count + 1
+	}
+	if stated.CommitSeq > next.CommitSeq {
+		next.CommitSeq = stated.CommitSeq
+	}
+	for _, partition := range stated.Partitions {
+		next.Partitions = withPartition(next.Partitions, partition)
+	}
+	return next, nil
+}
+
+// heldPositionLocked answers the published position the store holds the record's
+// event under, and whether it holds one at all: the record's own partition first,
+// so a repeat of a committed fact costs one small read, then every other partition
+// the chain states, so an identity filed under another partition is the conflict it
+// was. The caller holds the lock.
+func (s *FileSegmentStore) heldPositionLocked(ctx context.Context, rec SegmentRecord) (indexPosition, bool, error) {
+	position, held, err := s.partitionPositionLocked(ctx, rec.PartitionID, rec.EventKey)
+	if err != nil || held {
+		return position, held, err
+	}
+	for _, partition := range s.partitions {
+		if partition == rec.PartitionID {
+			continue
+		}
+		position, held, err := s.partitionPositionLocked(ctx, partition, rec.EventKey)
+		if err != nil || held {
+			return position, held, err
+		}
+	}
+	return indexPosition{}, false, nil
+}
+
+// publishEventLocked files one committed event family into the read cache, the
+// partition set and the event count.
+func (s *FileSegmentStore) publishEventLocked(plan *segmentEventPlan) {
+	rec := plan.record
+	s.partitions = withPartition(s.partitions, rec.PartitionID)
+	s.cache.put(StoredEvent{
 		Key:         rec.EventKey,
 		PartitionID: rec.PartitionID,
 		WindowTS:    rec.WindowTS,
 		Seq:         rec.Seq,
-		Body:        evtValue,
-	}
-	s.index[rec.EventKey] = indexPosition{partition: rec.PartitionID, window: rec.WindowTS, seq: rec.Seq, commit: commit, typ: rec.typ, session: rec.session}
-	s.order = append(s.order, rec.EventKey)
-	s.cache.put(stored)
-	s.commitSeq = commit
+		Body:        plan.value,
+	})
+	s.commitSeq = plan.commit
 	s.count++
-	s.windows[windowKey(rec.PartitionID, rec.WindowTS)] = meta
-	return nil
+}
+
+// segmentEventPlan is the event family of one whole-fact commit: the pairs the one
+// batch carries and the position the commit publishes once its barrier returned.
+type segmentEventPlan struct {
+	// puts are the pairs the commit writes for this family.
+	puts []Pair
+	// duplicate reports that the store already holds this very record.
+	duplicate bool
+	// record, commit and value are what the publication files.
+	record SegmentRecord
+	commit int64
+	value  []byte
+}
+
+// FactCommit is one fact's whole key set: the record that places it and the
+// original bytes the recall face reads back. The two name one fact, so the
+// record's event key and the reference's key carry one identity.
+type FactCommit struct {
+	// Record is the segment record the fact commits as.
+	Record SegmentRecord
+	// Ref names the original the fact commits.
+	Ref OriginalRef
+	// Body is the original bytes the reference names.
+	Body []byte
+}
+
+// FactCommitOutcome names what one whole-fact commit left in the store.
+type FactCommitOutcome int
+
+const (
+	// FactCommitted reports a fact that landed whole and took one sequence slot.
+	FactCommitted FactCommitOutcome = iota
+	// FactAlreadyPresent reports a fact the store already held whole: no key moved and no slot was taken.
+	FactAlreadyPresent
+	// FactConflict reports an identity the store holds under another content: no key moved.
+	FactConflict
+	// FactUncertain reports a commit whose durable outcome the store cannot name: only an open that took no part in it can decide what landed.
+	FactUncertain
+	// FactRefused reports a fact that landed no key, with the error naming the cause.
+	FactRefused
+)
+
+// CommitFact commits one fact of one tier as one unit: the original family and the
+// event family travel in one batch, so a reader meets the fact whole or not at all
+// and neither family ever stands committed beside the other missing.
+//   - The duplicate judgment of both families and the commit under it run in one critical section, and the storage root's exclusive write rights keep every other writer out of that section, so no two writers interleave the judgment and the landing of one fact
+//   - A fact the store already holds stays the fact it is: no key moves, no sequence slot is taken and the window meta is not refreshed
+//   - A refusal the engine decides before writing is reported as the refusal it is, never as an uncertain outcome the caller would re-read
+//   - An uncertain outcome publishes nothing to either store's in-process state, because that view answers absence beside a batch that landed whole
+//
+// 契约: docs/wiki/memory/memory-architecture.md#event-shape
+func CommitFact(ctx context.Context, tier *Tier, fact FactCommit) (FactCommitOutcome, error) {
+	if err := ctx.Err(); err != nil {
+		return FactRefused, err
+	}
+	if tier == nil || tier.Segments == nil {
+		return FactRefused, fmt.Errorf("%w: no tier", ErrFactCommitUnsupported)
+	}
+	rec := fact.Record
+	if rec.EventKey == "" {
+		return FactRefused, ErrEventKeyRequired
+	}
+	if rec.Seq < 0 || rec.WindowTS < 0 {
+		return FactRefused, ErrSegmentPosition
+	}
+	if fact.Ref.Key == "" {
+		return FactRefused, ErrKeyRequired
+	}
+	originals, ok := tier.Originals.(*kvOriginalStore)
+	if !ok {
+		return FactRefused, fmt.Errorf("%w: %T", ErrFactCommitUnsupported, tier.Originals)
+	}
+	digest, length, err := checkOriginalRef(fact.Ref, fact.Body)
+	if err != nil {
+		return FactRefused, err
+	}
+	segments := tier.Segments
+	segments.mu.Lock()
+	defer segments.mu.Unlock()
+	originals.mu.Lock()
+	defer originals.mu.Unlock()
+	eventPlan, err := segments.planEventLocked(ctx, rec)
+	if err != nil {
+		return factCommitOutcomeOf(err), err
+	}
+	if eventPlan.duplicate {
+		return FactAlreadyPresent, nil
+	}
+	originalPlan, err := originals.planFactLocked(ctx, fact.Ref, fact.Body, digest, length)
+	if err != nil {
+		return factCommitOutcomeOf(err), err
+	}
+	puts := append([]Pair{}, eventPlan.puts...)
+	if originalPlan != nil {
+		puts = append(puts, originalPlan.puts...)
+	}
+	if err := segments.kv.Commit(ctx, Batch{Puts: puts}); err != nil {
+		outcome := FactUncertain
+		if factCommitRefused(err) {
+			outcome = FactRefused
+		}
+		return outcome, fmt.Errorf("%w: %w", ErrSegmentBarrier, err)
+	}
+	segments.publishEventLocked(eventPlan)
+	if originalPlan != nil {
+		originals.publishFactLocked(originalPlan)
+	}
+	return FactCommitted, nil
+}
+
+// factCommitOutcomeOf classifies one judgment the plan of a family refused before
+// any key of the fact was written.
+func factCommitOutcomeOf(err error) FactCommitOutcome {
+	if errors.Is(err, ErrContentConflict) {
+		return FactConflict
+	}
+	return FactRefused
+}
+
+// factCommitRefused reports whether one failed commit was decided before it wrote
+// any key, so it names a refusal instead of an outcome the caller must re-read.
+func factCommitRefused(err error) bool {
+	return errors.Is(err, ErrJournalFrameTooLarge) || errors.Is(err, ErrCommitAfterClose)
 }
 
 // GetEvent returns the committed event under key together with the index
-// position it was committed at, and reports whether any is published. A body the
-// cache evicted is read back from its persisted entry; an index entry whose body
-// cannot be read reports ErrSegmentBodyMissing instead of an absent event.
+// position it was committed at, and reports whether any is published. The
+// position is the index entry of that identity in one of the partitions the chain
+// states, so the answer costs one small read per partition and no walk of the
+// history behind them. A body the cache evicted is read back from its persisted
+// entry; an index entry whose body cannot be read reports ErrSegmentBodyMissing
+// instead of an absent event.
+//
+//   - This read serves the callers an identity reaches without a partition: the seat is the only index such a caller has, because enumerating the index behind it is the walk the seat replaces, so the answer is exactly as wide as the partitions the seat states and the seat that under-states one answers absence beside a body the log holds.
+//   - A caller that holds the partition SHALL name it with GetEventInPartition, which addresses that partition's index entry and consults no seat.
 func (s *FileSegmentStore) GetEvent(ctx context.Context, key event.EventID) (StoredEvent, bool, error) {
 	if err := ctx.Err(); err != nil {
 		return StoredEvent{}, false, err
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	position, held, err := s.publishedPositionLocked(ctx, key)
+	if err != nil || !held {
+		return StoredEvent{}, false, err
+	}
+	return s.storedAtLocked(ctx, key, position)
+}
+
+// GetEventInPartition returns the committed event under key that one named
+// partition files, and reports whether that partition published one. The read
+// addresses the index entry of the identity in the partition the caller names, so
+// it pays one small read and probes no partition set. A caller that names the
+// partition pays that read whatever the seat states. A body the cache evicted is
+// read back from its persisted entry; an index entry whose body cannot be read
+// reports ErrSegmentBodyMissing instead of an absent event.
+func (s *FileSegmentStore) GetEventInPartition(ctx context.Context, key event.EventID, partition int) (StoredEvent, bool, error) {
+	if err := ctx.Err(); err != nil {
+		return StoredEvent{}, false, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	position, held, err := s.partitionPositionLocked(ctx, partition, key)
+	if err != nil || !held {
+		return StoredEvent{}, false, err
+	}
+	return s.storedAtLocked(ctx, key, position)
+}
+
+// duplicateBodyLocked answers the committed body of one indexed event for a
+// duplicate commit check: the cache first, then the persisted entry. The caller
+// holds the lock.
+func (s *FileSegmentStore) duplicateBodyLocked(ctx context.Context, key event.EventID, position indexPosition) ([]byte, bool, error) {
+	if cached, held := s.cache.get(key); held {
+		return append([]byte(nil), cached.Body...), true, nil
+	}
+	return s.readBodyLocked(ctx, position)
+}
+
+// storedAtLocked answers one event at a position the caller already resolved: the
+// body from the read cache, or the persisted entry the position names. An index
+// entry whose body cannot be read reports ErrSegmentBodyMissing, so a record the
+// index names is never published as an absent one. The caller holds the lock.
+func (s *FileSegmentStore) storedAtLocked(ctx context.Context, key event.EventID, position indexPosition) (StoredEvent, bool, error) {
 	if cached, held := s.cache.get(key); held {
 		cached.Body = append([]byte(nil), cached.Body...)
 		return cached, true, nil
-	}
-	position, held := s.index[key]
-	if !held {
-		return s.coldEventLocked(ctx, key)
 	}
 	body, found, err := s.readBodyLocked(ctx, position)
 	if err != nil {
@@ -663,16 +953,6 @@ func (s *FileSegmentStore) GetEvent(ctx context.Context, key event.EventID) (Sto
 	}
 	s.cache.put(stored)
 	return stored, true, nil
-}
-
-// duplicateBodyLocked answers the committed body of one indexed event for a
-// duplicate commit check: the cache first, then the persisted entry. The caller
-// holds the lock.
-func (s *FileSegmentStore) duplicateBodyLocked(ctx context.Context, key event.EventID, position indexPosition) ([]byte, bool, error) {
-	if cached, held := s.cache.get(key); held {
-		return append([]byte(nil), cached.Body...), true, nil
-	}
-	return s.readBodyLocked(ctx, position)
 }
 
 // readBodyLocked reads the persisted body of one indexed event. The caller
@@ -693,10 +973,9 @@ func readBodyAt(ctx context.Context, kv AtomicStore, position indexPosition) ([]
 	return append([]byte(nil), pairs[0].Value...), true, nil
 }
 
-// indexPositionOf parses one stored index entry value into the position the
-// resident index keeps: the window and the sequence slot the event was committed
-// at beside the frozen type, the session and the commit sequence the commit filed
-// with it.
+// indexPositionOf parses one stored index entry value into the position the entry
+// states: the window and the sequence slot the event was committed at beside the
+// frozen type, the session and the commit sequence the commit filed with it.
 func indexPositionOf(partition int, value []byte) (indexPosition, bool) {
 	fields := strings.SplitN(string(value), ":", 3)
 	if len(fields) < 2 {
@@ -722,26 +1001,21 @@ func indexPositionOf(partition int, value []byte) (indexPosition, bool) {
 	return position, true
 }
 
-// segmentEventSlot splits one stored event body key into the position it occupies
-// and answers false for a key of another family.
-func segmentEventSlot(key string) (positionSlot, bool) {
-	fields := strings.Split(key, ":")
-	if len(fields) != 4 || fields[1] != "evt" {
-		return positionSlot{}, false
+// CommittedIndexEntry answers the store index entry one committed key carries: the
+// partition and event identity it places beside the frozen type and session the
+// entry states, and false beside a key that carries none, such as a fact the tier's
+// fact log committed on the same engine. It reads no store, so a caller that walks
+// an engine's commit order identifies an entry from the pair the walk handed it.
+func CommittedIndexEntry(key string, value []byte) (IndexEntry, bool) {
+	partition, id, named := segmentIndexEntry(key)
+	if !named {
+		return IndexEntry{}, false
 	}
-	partition, err := strconv.Atoi(fields[0])
-	if err != nil {
-		return positionSlot{}, false
+	position, named := indexPositionOf(partition, value)
+	if !named {
+		return IndexEntry{}, false
 	}
-	window, err := strconv.ParseInt(fields[2], 10, 64)
-	if err != nil {
-		return positionSlot{}, false
-	}
-	seq, err := strconv.ParseInt(fields[3], 10, 64)
-	if err != nil {
-		return positionSlot{}, false
-	}
-	return positionSlot{partition: partition, window: window, seq: seq}, true
+	return IndexEntry{Partition: partition, Key: id, Type: position.typ, Session: position.session}, true
 }
 
 // segmentMetaSlot splits one window meta key into the window it describes and
@@ -762,253 +1036,6 @@ func segmentMetaSlot(key string) (windowSlot, bool) {
 	return windowSlot{partition: partition, window: window}, true
 }
 
-// coldViewLocked answers the opened cold journal, opening it on the first read
-// that needs it and never at boot. A store with no cold root answers false beside
-// no error: it relocates nothing, so nothing of it is cold. A store whose hot
-// journal states no settled commit answers false as well, because no fact can be
-// in the cold journal before a pass moved one there, so a store that never
-// relocated opens nothing it would read empty. The caller holds the lock.
-func (s *FileSegmentStore) coldViewLocked(ctx context.Context) (AtomicStore, bool, error) {
-	if s.coldRoot == "" || s.coldCommit == 0 {
-		return nil, false, nil
-	}
-	if s.cold != nil {
-		return s.cold, true, nil
-	}
-	cold, err := OpenAtomicStore(ctx, StorageConfig{Type: StorageJournal, Root: s.coldRoot})
-	if err != nil {
-		return nil, false, fmt.Errorf("tagent: open the cold journal %s: %w", s.coldRoot, err)
-	}
-	s.cold = cold
-	return cold, true, nil
-}
-
-// coldEventLocked answers one event the hot journal does not hold, from the cold
-// journal: the bytes that were committed and the position they were committed at,
-// so a relocation never changes what a read by identity answers. It answers false
-// beside no error for an identity neither journal holds — a key no commit ever
-// landed, or a commit that was refused — and it names ErrSegmentBodyMissing for a
-// cold index entry whose body cannot be read, instead of reporting the event as an
-// absent one. The caller holds the lock.
-func (s *FileSegmentStore) coldEventLocked(ctx context.Context, key event.EventID) (StoredEvent, bool, error) {
-	cold, held, err := s.coldViewLocked(ctx)
-	if err != nil || !held {
-		return StoredEvent{}, false, err
-	}
-	namespaces, err := cold.Namespaces(ctx)
-	if err != nil {
-		return StoredEvent{}, false, fmt.Errorf("tagent: enumerate the cold journal %s: %w", s.coldRoot, err)
-	}
-	for _, namespace := range namespaces {
-		partition, err := strconv.Atoi(namespace)
-		if err != nil {
-			continue
-		}
-		pairs, err := cold.Read(ctx, Fetch{Key: fmt.Sprintf("%d:%s%s", partition, segmentIndexPrefix, key)})
-		if err != nil {
-			return StoredEvent{}, false, err
-		}
-		if len(pairs) == 0 {
-			continue
-		}
-		position, named := indexPositionOf(partition, pairs[0].Value)
-		if !named {
-			return StoredEvent{}, false, fmt.Errorf("%w: the cold index entry of %s", ErrSnapshotCorrupt, key)
-		}
-		body, found, err := readBodyAt(ctx, cold, position)
-		if err != nil {
-			return StoredEvent{}, false, err
-		}
-		if !found {
-			return StoredEvent{}, false, fmt.Errorf("%w: %s", ErrSegmentBodyMissing, key)
-		}
-		return StoredEvent{
-			Key:         key,
-			PartitionID: position.partition,
-			WindowTS:    position.window,
-			Seq:         position.seq,
-			Body:        body,
-		}, true, nil
-	}
-	return StoredEvent{}, false, nil
-}
-
-// ErrColdArchiveUnavailable reports a relocation requested on a store that cannot
-// express one: no cold journal is declared, or the engine behind the store keeps no
-// rewrite. The refusal is by name rather than a silent no-op, so a deployment that
-// declared retirement never reads a bounded store as an unbounded one.
-var ErrColdArchiveUnavailable = errors.New("memory: this store keeps no cold journal to relocate settled facts into")
-
-// WithColdRoot declares the directory of the cold journal this store reads the
-// settled facts of and relocates them into. A store opened without one keeps every
-// fact in its hot journal and refuses a relocation by name.
-func (s *FileSegmentStore) WithColdRoot(root string) *FileSegmentStore {
-	s.coldRoot = root
-	return s
-}
-
-// WithRetirement declares whether this store relocates its settled facts, which is
-// the deployment's choice: the switch decides whether a pass runs and never whether
-// a fact an earlier pass moved out stays readable, so a store that answers false
-// here still reads its cold journal by identity and still refuses a relocation by
-// name.
-func (s *FileSegmentStore) WithRetirement(on bool) *FileSegmentStore {
-	s.retire = on
-	return s
-}
-
-// RetireFacts moves every settled fact of this store into the cold journal and
-// rewrites the hot journal to hold the key set the caller states: an event the set
-// does not name leaves the hot journal with its index entry, its body and the
-// window meta no kept event of that window needs, and every other key of the store
-// stays where it is, because a set of event keys names no fact of those families.
-//
-// The pass is copy, verify, rewrite in that order: the hot journal is rewritten
-// only for a copy a fresh open reads back byte for byte, so a key is never removed
-// before its bytes landed somewhere readable. Every settled fact stays readable by
-// identity from the cold journal and EventCount keeps stating the whole committed
-// history, so a bounded hot journal is never a store that lost its history.
-//
-//   - The kept key set is the caller's, never one this store derives: which facts the recovery authority still reads hot is its answer, and a store that invented its own would be a second oracle beside it.
-//   - The set is what the watermark leaves behind, the tail past the checkpoint, because a fact the watermark settled stays readable from the cold journal by identity.
-//   - A pass settles the keys it read in one snapshot, so a key a writer commits while the pass is deciding is kept hot: a family whose reader cannot reach the cold journal, the task records a boot scans, would otherwise move away under the reader that needs it.
-//   - The pass appends the settled keys to the cold journal, so a view opened before it answers the index it read then: the next cold read opens the journal that holds the bytes this pass copied.
-func (s *FileSegmentStore) RetireFacts(ctx context.Context, keepKeys map[event.EventID]struct{}) (RelocateReport, error) {
-	if err := ctx.Err(); err != nil {
-		return RelocateReport{}, err
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.coldRoot == "" || !s.retire {
-		return RelocateReport{}, ErrColdArchiveUnavailable
-	}
-	retiring, held := s.kv.(coldRetirement)
-	if !held {
-		return RelocateReport{}, fmt.Errorf("%w: the engine %T states no journal rewrite", ErrColdArchiveUnavailable, s.kv)
-	}
-	settle, settled, coldCommit, err := s.keepKeysLocked(ctx, keepKeys)
-	if err != nil {
-		return RelocateReport{}, err
-	}
-	if len(settle) == 0 {
-		return RelocateReport{}, nil
-	}
-	retired := s.retired + settled
-	report, err := retiring.retireSettled(ctx, s.coldRoot, settle, []journalPut{
-		{Key: segmentSettledKey, Value: []byte(strconv.Itoa(retired))},
-		{Key: segmentSettledCommitKey, Value: []byte(strconv.FormatInt(coldCommit, 10))},
-	})
-	if err != nil {
-		return report, err
-	}
-	index := make(map[event.EventID]indexPosition, len(keepKeys))
-	order := make([]event.EventID, 0, len(s.order))
-	windows := make(map[string]*storedWindowMeta, len(s.windows))
-	for _, key := range s.order {
-		position, published := s.index[key]
-		if !published {
-			continue
-		}
-		if _, kept := keepKeys[key]; !kept {
-			continue
-		}
-		index[key] = position
-		order = append(order, key)
-		if meta, held := s.windows[windowKey(position.partition, position.window)]; held {
-			windows[windowKey(position.partition, position.window)] = meta
-		}
-	}
-	s.index = index
-	s.order = order
-	s.windows = windows
-	s.retired = retired
-	s.coldCommit = coldCommit
-	s.cold = nil
-	return report, nil
-}
-
-// originalFamilyEntry splits one stored original key into the event key it belongs
-// to, and answers false for a key of another family. The reference and the
-// independent body of one original are the two families a commit files beside a
-// fact, and both name the fact they belong to.
-func originalFamilyEntry(key string) (event.EventID, bool) {
-	for _, prefix := range [2]string{"ref:", "blob:"} {
-		if name, held := strings.CutPrefix(key, prefix); held && name != "" {
-			return event.EventID(name), true
-		}
-	}
-	return "", false
-}
-
-// keepKeysLocked answers the keys one relocation pass settles, from the one
-// snapshot it reads, beside the number of settled index entries it drops and the
-// greatest commit sequence it settles. An event the caller does not keep takes its
-// index entry out with its body and, when no kept event of that window remains, the
-// window meta beside them; every key of another family is not settled at all,
-// because a set of event keys says nothing about a checkpoint count or a task
-// record. A key a writer commits after this snapshot is not in the answer, so the
-// pass leaves it hot for the next one. The caller holds the lock.
-//
-//   - An original of a fact this pass settles leaves with its fact: the reference and the independent body are the bytes the fact was committed with, so a hot journal that keeps them beside a cold fact keeps the settled history on disk.
-//   - An original whose fact this store does not state stays where it is: a key set of settled facts judges no fact it cannot name, and the two families travel together, which is the pairing the cold copy verification enforces.
-func (s *FileSegmentStore) keepKeysLocked(ctx context.Context, keepKeys map[event.EventID]struct{}) ([]string, int, int64, error) {
-	keys, err := s.kv.Keys(ctx, "")
-	if err != nil {
-		return nil, 0, 0, err
-	}
-	keptSlots := make(map[positionSlot]struct{}, len(keepKeys))
-	keptWindows := make(map[windowSlot]struct{}, len(keepKeys))
-	settledCommit := s.coldCommit
-	for key := range keepKeys {
-		position, published := s.index[key]
-		if !published {
-			continue
-		}
-		keptSlots[positionSlot{partition: position.partition, window: position.window, seq: position.seq}] = struct{}{}
-		keptWindows[windowSlot{partition: position.partition, window: position.window}] = struct{}{}
-	}
-	settle := make([]string, 0, len(keys))
-	settled := 0
-	for _, key := range keys {
-		if partition, id, named := segmentIndexEntry(key); named {
-			position, published := s.index[id]
-			if _, kept := keepKeys[id]; kept {
-				continue
-			}
-			settle = append(settle, key)
-			if published && position.partition == partition {
-				settled++
-				if position.commit > settledCommit {
-					settledCommit = position.commit
-				}
-			}
-			continue
-		}
-		if slot, named := segmentEventSlot(key); named {
-			if _, kept := keptSlots[slot]; !kept {
-				settle = append(settle, key)
-			}
-			continue
-		}
-		if slot, named := segmentMetaSlot(key); named {
-			if _, kept := keptWindows[slot]; !kept {
-				settle = append(settle, key)
-			}
-			continue
-		}
-		if eventKey, named := originalFamilyEntry(key); named {
-			if _, kept := keepKeys[eventKey]; kept {
-				continue
-			}
-			if _, published := s.index[eventKey]; published {
-				settle = append(settle, key)
-			}
-			continue
-		}
-	}
-	return settle, settled, settledCommit, nil
-}
-
 // EventCount returns the number of events published by successful commits, so
 // the count moves only where durable success was reported.
 func (s *FileSegmentStore) EventCount() int {
@@ -1017,16 +1044,29 @@ func (s *FileSegmentStore) EventCount() int {
 	return s.count
 }
 
-// IndexEntries reports the size of the resident index the load published: the
-// number of positions the store keeps in memory. It is the quantity a bounded
+// IndexEntriesRead reports the index entries this store's load enumerated: none
+// beside a chain that states its seat and its partition set, and the whole index of
+// every partition beside a chain that states neither. It is the quantity a bounded
 // recovery is measured by, and never EventCount, which counts the whole committed
-// history: a store that publishes every commit it holds answers the same number
-// twice, which is exactly the unbounded recovery the measure has to be able to
-// tell apart from a bounded one.
-func (s *FileSegmentStore) IndexEntries() int {
+// history: a load that enumerated every entry answers the same number twice, which
+// is exactly the unbounded recovery the measure has to be able to tell apart from a
+// bounded one.
+func (s *FileSegmentStore) IndexEntriesRead() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return len(s.index)
+	return s.entriesRead
+}
+
+// IndexWalkReads reports what the commit-order walks of this store cost: the index
+// entries they named, the value bytes they read to name them and how many values
+// those bytes were. It is the
+// quantity a bounded boot is measured by after the entries stopped being
+// materialized, because a walk that reads a value per held key and one that reads
+// the index family alone name the same entries at different costs, and only the
+// bytes tell the two apart. Both are counted by the walk, so a caller reads what
+// the boot paid, never an estimate kept beside it.
+func (s *FileSegmentStore) IndexWalkReads() (visits int, valueBytes int64, valueReads int) {
+	return int(s.indexWalkVisits.Load()), s.indexWalkValueBytes.Load(), int(s.indexWalkValueReads.Load())
 }
 
 // EachEvent streams every published event in index order: partition first, then
@@ -1035,45 +1075,36 @@ func (s *FileSegmentStore) IndexEntries() int {
 // read on demand and handed to visit alone, so an enumeration never holds the
 // whole store in memory. A visit error ends the enumeration and is returned.
 //
-//   - A store that relocated part of its history still answers every event it committed: the delivery scan that reconciles what the chain settled walks the settled facts after the resident ones, each answer carrying the position it was committed at.
-//   - An identity the hot journal also states is walked once, at its resident place: one identity names one immutable fact, and a copy a relocation left in the cold journal is that same fact rather than a second one.
+// It reads the index of every partition the chain states, so the enumeration costs
+// the entries of the whole history: that is the cost of the question, and no
+// narrower answer names every event.
 func (s *FileSegmentStore) EachEvent(ctx context.Context, visit func(StoredEvent) error) error {
+	return s.EachEventOfPartitions(ctx, nil, visit)
+}
+
+// EachEventOfPartitions streams every published event of the named partitions in
+// the index order EachEvent states, reading the index of those partitions alone. A
+// nil or empty set names every partition the chain states. It is the face a scoped
+// query reads: a caller that names the partitions it may read pays their entries
+// rather than the entries of the whole chain.
+//
+// A partition the chain states no entry in answers nothing rather than a failure: a
+// partition no commit filed an event under holds no event to present.
+func (s *FileSegmentStore) EachEventOfPartitions(ctx context.Context, partitions []int, visit func(StoredEvent) error) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	positions := s.snapshotPositions()
-	for _, key := range positions.order {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		stored, held, err := s.eventByKey(ctx, key)
-		if err != nil {
-			return err
-		}
-		if !held {
-			return fmt.Errorf("%w: %s", ErrSegmentBodyMissing, key)
-		}
-		if err := visit(stored); err != nil {
-			return err
-		}
-	}
-	relocated, err := s.coldEventKeys(ctx)
+	entries, err := s.publishedEntriesOf(ctx, s.statedPartitions(partitions))
 	if err != nil {
 		return err
 	}
-	for _, key := range relocated {
+	for _, entry := range entries {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		if s.published(key) {
-			continue
-		}
-		stored, held, err := s.coldEvent(ctx, key)
+		stored, _, err := s.storedOfLocked(ctx, entry.key, entry.position)
 		if err != nil {
 			return err
-		}
-		if !held {
-			return fmt.Errorf("%w: %s", ErrSegmentBodyMissing, key)
 		}
 		if err := visit(stored); err != nil {
 			return err
@@ -1082,273 +1113,176 @@ func (s *FileSegmentStore) EachEvent(ctx context.Context, visit func(StoredEvent
 	return nil
 }
 
-// coldEvent answers one event from the cold journal under the store lock.
-func (s *FileSegmentStore) coldEvent(ctx context.Context, key event.EventID) (StoredEvent, bool, error) {
+// statedPartitions answers the partitions one enumeration reads: the ones the
+// caller names, or every partition the chain states beside an empty set.
+func (s *FileSegmentStore) statedPartitions(partitions []int) []int {
+	if len(partitions) > 0 {
+		stated := append([]int(nil), partitions...)
+		sort.Ints(stated)
+		return stated
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.coldEventLocked(ctx, key)
+	return append([]int(nil), s.partitions...)
 }
 
-// coldEventKeys answers the identities the cold journal holds, in the index order
-// the store enumerates events in. It is the enumeration a consumer that reads the
-// whole history pays, never a boot: the cold view is opened here only for a caller
-// that asked for every event.
-func (s *FileSegmentStore) coldEventKeys(ctx context.Context) ([]event.EventID, error) {
-	entries, err := s.coldIndex(ctx)
-	if err != nil {
-		return nil, err
-	}
-	sort.Slice(entries, func(i, j int) bool {
-		a, b := entries[i].position, entries[j].position
-		if a.partition != b.partition {
-			return a.partition < b.partition
-		}
-		if a.window != b.window {
-			return a.window < b.window
-		}
-		if a.seq != b.seq {
-			return a.seq < b.seq
-		}
-		return entries[i].key < entries[j].key
-	})
-	out := make([]event.EventID, 0, len(entries))
-	for _, entry := range entries {
-		out = append(out, entry.key)
-	}
-	return out, nil
-}
-
-// coldIndexEntry is one event the cold journal holds, with the position and the
-// commit sequence it was committed at.
-type coldIndexEntry struct {
-	key      event.EventID
-	position indexPosition
-}
-
-// coldIndex answers every event the cold journal holds, in no stated order. An
-// entry the cold journal names without the position and the commit sequence a
-// commit filed is refused by name: a settled fact whose rank cannot be read would
-// otherwise slot into the newest-first walk at an arbitrary place.
-func (s *FileSegmentStore) coldIndex(ctx context.Context) ([]coldIndexEntry, error) {
+// storedOfLocked answers one event the enumeration already placed: its body from
+// the read cache, or from the persisted entry the position names. The caller states
+// the position, so the answer costs the body alone. It holds the lock.
+func (s *FileSegmentStore) storedOfLocked(ctx context.Context, key event.EventID, position indexPosition) (StoredEvent, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.coldIndexLocked(ctx)
-}
-
-// coldIndexLocked answers every event the cold journal holds. The caller holds the
-// store lock.
-func (s *FileSegmentStore) coldIndexLocked(ctx context.Context) ([]coldIndexEntry, error) {
-	cold, held, err := s.coldViewLocked(ctx)
-	if err != nil || !held {
-		return nil, err
-	}
-	namespaces, err := cold.Namespaces(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("tagent: enumerate the cold journal %s: %w", s.coldRoot, err)
-	}
-	entries := make([]coldIndexEntry, 0)
-	for _, namespace := range namespaces {
-		partition, err := strconv.Atoi(namespace)
-		if err != nil {
-			continue
-		}
-		prefix := fmt.Sprintf("%d:%s", partition, segmentIndexPrefix)
-		pairs, err := cold.Read(ctx, Fetch{Prefix: prefix})
-		if err != nil {
-			return nil, err
-		}
-		for _, pair := range pairs {
-			id, named := strings.CutPrefix(pair.Key, prefix)
-			if !named || id == "" {
-				continue
-			}
-			position, named := indexPositionOf(partition, pair.Value)
-			if !named {
-				return nil, fmt.Errorf("%w: the cold index entry of %s", ErrSnapshotCorrupt, pair.Key)
-			}
-			entries = append(entries, coldIndexEntry{key: event.EventID(id), position: position})
-		}
-	}
-	return entries, nil
-}
-
-// segmentPositionOrder is one ordered enumeration of the published index.
-type segmentPositionOrder struct {
-	order []event.EventID
-}
-
-// snapshotPositions freezes the published index keys in index order, so a
-// concurrent commit never reshapes an enumeration already under way.
-func (s *FileSegmentStore) snapshotPositions() segmentPositionOrder {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	keys := make([]event.EventID, 0, len(s.index))
-	for key := range s.index {
-		keys = append(keys, key)
-	}
-	sort.Slice(keys, func(i, j int) bool {
-		a, b := s.index[keys[i]], s.index[keys[j]]
-		if a.partition != b.partition {
-			return a.partition < b.partition
-		}
-		if a.window != b.window {
-			return a.window < b.window
-		}
-		if a.seq != b.seq {
-			return a.seq < b.seq
-		}
-		return keys[i] < keys[j]
-	})
-	return segmentPositionOrder{order: keys}
-}
-
-// published reports whether the resident index names key, so a walk that reads
-// both journals states an identity the hot journal holds once.
-func (s *FileSegmentStore) published(key event.EventID) bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	_, held := s.index[key]
-	return held
-}
-
-// eventByKey answers one event by its key under the store lock.
-func (s *FileSegmentStore) eventByKey(ctx context.Context, key event.EventID) (StoredEvent, bool, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if cached, held := s.cache.get(key); held {
-		cached.Body = append([]byte(nil), cached.Body...)
-		return cached, true, nil
-	}
-	position, held := s.index[key]
-	if !held {
-		return s.coldEventLocked(ctx, key)
-	}
-	body, found, err := s.readBodyLocked(ctx, position)
-	if err != nil || !found {
-		return StoredEvent{}, false, err
-	}
-	stored := StoredEvent{
-		Key:         key,
-		PartitionID: position.partition,
-		WindowTS:    position.window,
-		Seq:         position.seq,
-		Body:        body,
-	}
-	s.cache.put(stored)
-	return stored, true, nil
+	return s.storedAtLocked(ctx, key, position)
 }
 
 // NewestOfType answers the identity of the newest index entry of one frozen event
-// type: the walk reads the store's commit order from the newest commit backwards
-// and stops at the first entry of the type, so a lookup beside a checkpoint filed
-// every cadence commits reads a bounded prefix of the order whatever the history
-// behind it, copies and sorts nothing, and reads no event body.
+// type beside the partition that entry landed in: the walk reads the store's commit
+// order from the newest commit backwards and stops at the first entry of the type,
+// so a lookup beside a checkpoint filed every cadence commits reads a bounded
+// prefix of the order whatever the history behind it, sorts nothing, and reads no
+// event body.
 //
 //   - The answer spans partitions: an identity is newer than another because its commit landed later, never because its window, its sequence slot or its partition is higher, so a run whose owner moved between processes reads the checkpoint its newest process filed.
-//   - The order spans the whole history: an entry a relocation moved into the cold journal keeps the commit sequence it was committed with, so it is ranked beside the resident entries and the cold journal is read only while it could hold an entry newer than the newest resident one.
-//   - A type the store holds no entry of answers found=false and no error.
-func (s *FileSegmentStore) NewestOfType(ctx context.Context, typ string) (event.EventID, bool, error) {
+//   - The partition travels beside the identity because the walk already holds the position it answered, so the caller reads that body back with GetEventInPartition and pays one read instead of a probe of the partitions the seat states.
+//   - A type the store holds no entry of answers found=false, partition 0 and no error.
+func (s *FileSegmentStore) NewestOfType(ctx context.Context, typ string) (event.EventID, int, bool, error) {
 	if err := ctx.Err(); err != nil {
-		return "", false, err
+		return "", 0, false, err
 	}
 	answer := event.EventID("")
+	partition := 0
 	held := false
 	err := s.eachIndexEntryNewestFirst(ctx, func(key event.EventID, position indexPosition) (bool, error) {
 		if position.typ != typ {
 			return true, nil
 		}
-		answer, held = key, true
+		answer, partition, held = key, position.partition, true
 		return false, nil
 	})
 	if err != nil {
-		return "", false, err
+		return "", 0, false, err
 	}
-	return answer, held, nil
+	return answer, partition, held, nil
+}
+
+// EachIndexNewestFirstUntil streams the index in commit order, newest commit
+// first, and stops where the visit answers false: a point query reads the prefix
+// its own answer bounds instead of the history behind it.
+//
+// The order is the one the engine's records sit in, so it ranks every entry
+// against every other — a commit of one partition that landed after a commit of
+// another comes first — and a caller that wants commit order walks it backwards.
+// The walk streams the order the engine states, so it holds no entry between two
+// visits and costs the commits it walks.
+//
+//   - false is the stop: the walk ends where the visit stands and answers nil, so a query that has its answer pays the commits down to it and not the ones behind it.
+//   - An error ends the walk and is answered as the failure it is, so a stop is never spelled as a failure a caller has to recognize.
+//   - A visit reads the store: the walk hands the engine back before every visit, so a visit reads one event body beside the walk and never waits on it.
+func (s *FileSegmentStore) EachIndexNewestFirstUntil(ctx context.Context, visit func(key event.EventID, partition int, seq int64, typ string, session event.SessionID) (bool, error)) error {
+	return s.eachIndexEntryNewestFirst(ctx, func(key event.EventID, position indexPosition) (bool, error) {
+		return visit(key, position.partition, position.seq, position.typ, position.session)
+	})
 }
 
 // EachIndexNewestFirst streams the index of the whole history in commit order,
 // newest commit first, handing each entry its key, position, frozen event type and
-// session without reading any body. The order is the one the engine's records sit
-// in, so it ranks every entry against every other — a commit of one partition that
-// landed after a commit of another comes first — and a caller that wants commit
-// order walks it backwards. The resident entries are read in place, one entry at a
-// time, so a visit may read the store again; the settled entries are the ones a
-// relocation moved into the cold journal, ranked into the same order by the commit
-// sequence they carry. An entry whose type is empty leaves the caller to read its
-// body.
+// session without reading any body. It is the walk of a caller that names every
+// entry — a replay, an export, a listing — and it holds no stop of its own, so a
+// caller that reads a bounded prefix asks EachIndexNewestFirstUntil instead.
 //
-//   - A visit that answers an error ends the walk and answers it: a caller stops a newest-first walk by returning the sentinel its own order names, so the error is the stop and never a failure the walk swallows.
+//   - A visit that answers an error ends the walk and answers it.
+//   - A visit reads the store: the walk hands the engine back before every visit, so a visit reads one event body beside the walk and never waits on it.
 func (s *FileSegmentStore) EachIndexNewestFirst(ctx context.Context, visit func(key event.EventID, partition int, seq int64, typ string, session event.SessionID) error) error {
-	return s.eachIndexEntryNewestFirst(ctx, func(key event.EventID, position indexPosition) (bool, error) {
-		if err := visit(key, position.partition, position.seq, position.typ, position.session); err != nil {
+	return s.EachIndexNewestFirstUntil(ctx, func(key event.EventID, partition int, seq int64, typ string, session event.SessionID) (bool, error) {
+		if err := visit(key, partition, seq, typ, session); err != nil {
 			return false, err
 		}
 		return true, nil
 	})
 }
 
-// eachIndexEntryNewestFirst walks the index of the whole history in commit order,
-// newest first, and stops where visit answers false. The resident entries and the
-// settled ones are each in their own log's frame order, and a frame order ranks
-// the records of one log alone: the merge takes the newer of the two heads by the
-// commit sequence, so an entry a relocation moved out keeps the place its commit
-// gave it.
+// indexKeyOrder is one engine whose walk names the held keys newest commit first and
+// reads no value, so the store reads the value of the keys it names and never the
+// value of the event, window-meta, seat and original families committed beside them.
+//   - A walk that names keys alone is what holds the walk to the index family, because the engine cannot tell which key its caller wants a body of
+type indexKeyOrder interface {
+	eachCommittedNewestFirst(ctx context.Context, visit func(key string) (bool, error)) error
+}
+
+// eachIndexEntryNewestFirst walks the published index in commit order, newest
+// first, and stops where visit answers false. The order is the one the engine's
+// records sit in, so it ranks every entry against every other and costs the commits
+// walked; an engine that states no commit order answers the index of every stated
+// partition ranked by the commit sequence each entry carries, and the walk still
+// stops where visit does.
 //
-//   - The cold journal is read only when it can change the answer: the settled commit the relocation left in the hot journal bounds every entry it moved, so a walk whose resident head is past that bound answers from the hot journal alone and opens no settled history.
-//   - An identity the hot journal also states is one fact, and the resident place it takes is the newest commit of it: the cold copy a relocation left behind is skipped rather than ranked a second time.
+//   - A visit that answers false ends the walk where it stands, so a caller reads the prefix its order bounds instead of the whole history.
+//   - The walk reads the value of the index keys it names and no value of another family, so a key a commit filed beside an index entry is never read back by a walk over the index.
+//   - indexWalkVisits, indexWalkValueBytes and indexWalkValueReads count what the walk cost: the entries it named, and the values and bytes it read to name them.
 func (s *FileSegmentStore) eachIndexEntryNewestFirst(ctx context.Context, visit func(key event.EventID, position indexPosition) (bool, error)) error {
-	s.mu.Lock()
-	total := len(s.order)
-	coldBound := s.coldCommit
-	s.mu.Unlock()
-	var settled []coldIndexEntry
-	readSettled := false
-	at := total - 1
-	next := 0
-	for {
+	if keys, holds := s.kv.(indexKeyOrder); holds {
+		walked := map[event.EventID]struct{}{}
+		return keys.eachCommittedNewestFirst(ctx, func(rawKey string) (bool, error) {
+			partition, key, named := segmentIndexEntry(rawKey)
+			if !named {
+				return true, nil
+			}
+			if _, placed := walked[key]; placed {
+				return true, nil
+			}
+			pairs, err := s.kv.Read(ctx, Fetch{Key: rawKey})
+			if err != nil {
+				return false, err
+			}
+			if len(pairs) == 0 {
+				return false, fmt.Errorf("%w: the commit order named %s and the store holds no value for it", ErrJournalCorrupt, rawKey)
+			}
+			value := pairs[0].Value
+			s.indexWalkValueBytes.Add(int64(len(value)))
+			s.indexWalkValueReads.Add(1)
+			position, named := indexPositionOf(partition, value)
+			if !named {
+				return true, nil
+			}
+			walked[key] = struct{}{}
+			s.indexWalkVisits.Add(1)
+			return visit(key, position)
+		})
+	}
+	if ordered, holds := s.kv.(CommitOrder); holds {
+		walked := map[event.EventID]struct{}{}
+		return ordered.EachCommittedNewestFirst(ctx, func(rawKey string, value []byte) (bool, error) {
+			partition, key, named := segmentIndexEntry(rawKey)
+			if !named {
+				return true, nil
+			}
+			if _, placed := walked[key]; placed {
+				return true, nil
+			}
+			s.indexWalkValueBytes.Add(int64(len(value)))
+			s.indexWalkValueReads.Add(1)
+			position, named := indexPositionOf(partition, value)
+			if !named {
+				return true, nil
+			}
+			walked[key] = struct{}{}
+			s.indexWalkVisits.Add(1)
+			return visit(key, position)
+		})
+	}
+	entries, err := s.publishedEntriesOf(ctx, s.statedPartitions(nil))
+	if err != nil {
+		return err
+	}
+	sort.SliceStable(entries, func(i, j int) bool {
+		return entries[i].position.commit > entries[j].position.commit
+	})
+	for at := 0; at < len(entries); at++ {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		var key event.EventID
-		var position indexPosition
-		held := false
-		if at >= 0 {
-			key, position, held = s.orderEntry(at)
-		}
-		if !readSettled && (!held || position.commit <= coldBound) {
-			entries, err := s.coldIndex(ctx)
-			if err != nil {
-				return err
-			}
-			sort.Slice(entries, func(i, j int) bool {
-				if entries[i].position.commit != entries[j].position.commit {
-					return entries[i].position.commit > entries[j].position.commit
-				}
-				return entries[i].key > entries[j].key
-			})
-			settled, readSettled = entries, true
-		}
-		var settledHead *coldIndexEntry
-		if readSettled && next < len(settled) {
-			settledHead = &settled[next]
-		}
-		if !held && settledHead == nil {
-			return nil
-		}
-		takeSettled := !held || (settledHead != nil && settledHead.position.commit > position.commit)
-		var entryKey event.EventID
-		var entry indexPosition
-		if takeSettled {
-			entryKey, entry = settledHead.key, settledHead.position
-			next++
-			if s.published(entryKey) {
-				continue
-			}
-		} else {
-			entryKey, entry = key, position
-			at--
-		}
-		more, err := visit(entryKey, entry)
+		s.indexWalkVisits.Add(1)
+		more, err := visit(entries[at].key, entries[at].position)
 		if err != nil {
 			return err
 		}
@@ -1356,22 +1290,7 @@ func (s *FileSegmentStore) eachIndexEntryNewestFirst(ctx context.Context, visit 
 			return nil
 		}
 	}
-}
-
-// orderEntry answers one entry of the resident commit order by its position, and
-// answers false when the order holds no such position. The order names exactly the
-// published index keys, and it only grows at its end while Load stays inside the
-// constructor, so a walk reads the same entry at every position it took from the
-// order while a visit reads the store again — nothing is copied to stay
-// consistent.
-func (s *FileSegmentStore) orderEntry(at int) (event.EventID, indexPosition, bool) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if at >= len(s.order) {
-		return "", indexPosition{}, false
-	}
-	key := s.order[at]
-	return key, s.index[key], true
+	return nil
 }
 
 // Events returns every published event in index order. It is the materialized
@@ -1388,18 +1307,37 @@ func (s *FileSegmentStore) Events(ctx context.Context) ([]StoredEvent, error) {
 	return events, nil
 }
 
-// Close ends the store with a final barrier over whatever the backend still
-// holds staged, and repeats as a no-op.
+// Close ends the store with a final barrier over whatever the backend still holds
+// staged, releases the write rights this store's open took on its storage root and
+// the journal handle behind them, and repeats as a no-op.
 func (s *FileSegmentStore) Close() error {
-	return s.kv.Commit(context.Background(), Batch{})
+	barrierErr := s.kv.Commit(context.Background(), Batch{})
+	closer, ok := s.kv.(interface{ Close() error })
+	if !ok {
+		return barrierErr
+	}
+	return errors.Join(barrierErr, closer.Close())
 }
 
 // nextWindowMeta returns the window meta the record leaves behind: one more
-// event in the window, and the event time range widened to cover this one.
-func (s *FileSegmentStore) nextWindowMeta(rec SegmentRecord) *storedWindowMeta {
-	previous, held := s.windows[windowKey(rec.PartitionID, rec.WindowTS)]
+// event in the window, and the event time range widened to cover this one. The
+// meta the window was last committed under is the record of the chain under
+// {pid}:meta:{window}, read here and nowhere else, so the store holds no window
+// table that a window count could grow.
+//
+// 契约: docs/wiki/memory/memory-architecture.md#file-segment-store
+func (s *FileSegmentStore) nextWindowMeta(ctx context.Context, rec SegmentRecord) (*storedWindowMeta, error) {
 	meta := &storedWindowMeta{PartitionID: rec.PartitionID, WindowTS: rec.WindowTS, MinTime: rec.EventTime, MaxTime: rec.EventTime}
-	if held {
+	key := windowMetaKey(rec.PartitionID, rec.WindowTS)
+	pairs, err := s.kv.Read(ctx, Fetch{Key: key})
+	if err != nil {
+		return nil, err
+	}
+	if len(pairs) > 0 {
+		var previous storedWindowMeta
+		if err := json.Unmarshal(pairs[0].Value, &previous); err != nil {
+			return nil, fmt.Errorf("%w: window meta %q: %w", ErrSnapshotCorrupt, key, err)
+		}
 		meta.EventCount = previous.EventCount
 		meta.MinTime = previous.MinTime
 		meta.MaxTime = previous.MaxTime
@@ -1411,12 +1349,12 @@ func (s *FileSegmentStore) nextWindowMeta(rec SegmentRecord) *storedWindowMeta {
 		}
 	}
 	meta.EventCount++
-	return meta
+	return meta, nil
 }
 
-// windowKey names one partition window in the store's window meta table.
-func windowKey(partition int, window int64) string {
-	return fmt.Sprintf("%d:%d", partition, window)
+// windowMetaKey names the chain key one partition window states its meta under.
+func windowMetaKey(partition int, window int64) string {
+	return fmt.Sprintf("%d:meta:%d", partition, window)
 }
 
 // SegmentPosition names one byte position inside a stored original, so one

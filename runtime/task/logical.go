@@ -221,11 +221,17 @@ type LogicalChange struct {
 
 // Logical reports the logical status of one task at the given instant: the
 // silence its recorded state has stood in, read beside the status machine. The
-// status, revision, mutations and obligations of the task stay as they stand.
+// status, revision, mutations and obligations of the task stay as they stand. A
+// task the newest checkpoint stated no entry for is read back from its chain
+// here, so a restart classifies a finished task by the outcome its record holds
+// instead of answering that the task is unknown.
 func (r *MemoryRegistry) Logical(ctx context.Context, taskID event.TaskID, at time.Time) (LogicalStatus, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	entry, ok := r.tasks[taskID]
+	entry, ok, err := r.hydrateLocked(ctx, taskID)
+	if err != nil {
+		return LogicalActive, err
+	}
 	if !ok {
 		return LogicalActive, ErrTaskNotFound
 	}

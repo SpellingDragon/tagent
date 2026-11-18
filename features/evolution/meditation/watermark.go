@@ -137,17 +137,6 @@ func (s *AnchorStore) Load() (Anchors, error) {
 	return s.loadLocked()
 }
 
-// Save rewrites the anchor record atomically: the new record is written beside
-// it and renamed over it, so no reader observes a partial record.
-func (s *AnchorStore) Save(record Anchors) error {
-	if s == nil {
-		return ErrAnchorStoreUnusable
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.saveLocked(record)
-}
-
 // Current reports the execution watermark the anchor record holds. An absent
 // record reports the zero watermark of a start with no prior execution, and an
 // unreadable record is refused with ErrAnchorUnreadable so the gate stays closed.

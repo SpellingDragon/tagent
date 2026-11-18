@@ -43,6 +43,19 @@ func windowChainRun(t *testing.T, ctx context.Context, opts ...Option) *Run {
 	return run
 }
 
+// endRun ends the storage view one fixture booted, so the restart it compares
+// against opens the root beside no earlier writer: the tier gives the root's write
+// rights up in its close, and a view left open refuses every later writer.
+//   - The closing checkpoint a clean Run.Close owes is not filed, because the fixture compares two processes over one root and a cut this process alone would state is state neither of them committed
+//   - The checkpoint filer stops first, so the view is not closed under a cadence that is still writing
+func endRun(t *testing.T, run *Run) {
+	t.Helper()
+	run.stopCheckpointFiler()
+	if err := run.tier.Close(); err != nil {
+		t.Fatalf("end the storage view the fixture booted: %v", err)
+	}
+}
+
 // commitWindowTurns commits closed turns of four legs until the chain holds
 // turns count, letting the fold fire between commits as it does online.
 func commitWindowTurns(t *testing.T, ctx context.Context, run *Run, addr event.Address, turns int) {
@@ -118,7 +131,7 @@ func TestLandedSeqRidesTheWalk(t *testing.T) {
 // TestAnchoredRebuildEqualsFullWalk pins the fold anchor theorem.
 // - the newest product fact of each session carries the post-batch survivors
 // - rebuilding from the anchor answers the full walk entry by entry
-// - the anchor path decodes fewer bodies than the full walk
+// - beside no checkpoint the anchor bounds the projection read alone, so the bodies the seam decodes equal the full walk: only a cut vouches covered material, and the saving rides a checkpoint a real boot restores (TestDefaultBootRebuildsFromTheAnchor, TestSymptomAnchorSessionBootCostFlatAcrossGenerations)
 // - the index answers the same landed slots as the full walk
 // - the checkpoint filer ends before the walk that arms it, so the chain the two reads compare stands still
 //
@@ -142,8 +155,8 @@ func TestAnchoredRebuildEqualsFullWalk(t *testing.T) {
 	if anchoredReport.Anchors == 0 {
 		t.Fatal("the folded chain minted no anchor the rebuild could use")
 	}
-	if anchoredReport.Decoded >= fullReport.Decoded {
-		t.Fatalf("the anchored rebuild decoded %d bodies, want fewer than the full walk %d", anchoredReport.Decoded, fullReport.Decoded)
+	if anchoredReport.Decoded != fullReport.Decoded {
+		t.Fatalf("the anchored rebuild decoded %d bodies beside the %d the full walk holds, want the same read: no checkpoint vouches the anchor's range, so the seam skips nothing", anchoredReport.Decoded, fullReport.Decoded)
 	}
 	if len(anchoredReport.Landed) != len(fullLanded) {
 		t.Fatalf("the index answered %d landed partitions, want the %d the full walk holds", len(anchoredReport.Landed), len(fullLanded))
@@ -802,7 +815,7 @@ func (s *faultyEngine) Commit(ctx context.Context, batch ledger.Batch) error {
 // it.
 func engineOverRoot(t *testing.T, root string) (*faultyEngine, ledger.StorageConfig) {
 	t.Helper()
-	cfg := ledger.StorageConfig{Type: ledger.StorageJournal, Root: root}
+	cfg := ledger.StorageConfig{Type: ledger.StorageJournal, Root: root, WriteRights: true}
 	inner, err := ledger.OpenAtomicStore(context.Background(), cfg)
 	if err != nil {
 		t.Fatalf("open the storage engine over %s: %v", root, err)
@@ -862,6 +875,7 @@ func TestBootOverJournalTier(t *testing.T) {
 	if committed == 0 {
 		t.Fatal("the journal tier committed no session fact")
 	}
+	endRun(t, first)
 
 	restarted := windowChainRun(t, ctx, storage())
 	if got := restarted.tier.Originals.Get(ctx, key); got.Outcome != ledger.RecallFound {
@@ -874,6 +888,7 @@ func TestBootOverJournalTier(t *testing.T) {
 	if !carried {
 		t.Fatalf("the reopened run registered no sequence for %v", addr)
 	}
+	endRun(t, restarted)
 	full := windowChainRun(t, ctx, storage())
 	fullSeeds, _, _, err := full.seedFullReplay(ctx, full.tier)
 	if err != nil {
@@ -904,7 +919,7 @@ func TestYoungLogBootRestoresTheOwedMailboxThroughTheSlice(t *testing.T) {
 	root := t.TempDir()
 	owedAddr := event.Address{AgentID: "agent-a", SessionID: "session-young-owed"}
 	owedTask := event.TaskID("task-young-owed")
-	tier, err := ledger.OpenTier(ctx, ledger.StorageConfig{Type: ledger.StorageJournal, Root: root})
+	tier, err := ledger.OpenTier(ctx, ledger.StorageConfig{Type: ledger.StorageJournal, Root: root, WriteRights: true})
 	if err != nil {
 		t.Fatalf("open the storage tier: %v", err)
 	}
@@ -932,6 +947,9 @@ func TestYoungLogBootRestoresTheOwedMailboxThroughTheSlice(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("commit the owed notification: %v", err)
 	}
+	if err := tier.Close(); err != nil {
+		t.Fatalf("close the seeding tier: %v", err)
+	}
 
 	reopened := windowChainRun(t, ctx, WithStorage(ledger.StorageConfig{Type: ledger.StorageJournal, Root: root}))
 	if key, _ := reopened.CheckpointFiled(); key != "" {
@@ -943,5 +961,39 @@ func TestYoungLogBootRestoresTheOwedMailboxThroughTheSlice(t *testing.T) {
 	}
 	if got := seats[0].Address; got != owedAddr {
 		t.Fatalf("the restored seat routes to %v, want the frozen routing %v", got, owedAddr)
+	}
+}
+
+// TestReplayRefNamesAMissingBody pins the answer of the anchored rebuild's per-slot walk when the store it walks cannot answer one body.
+//   - a fact the walk names but the store answers no body for is refused with ErrSegmentBodyMissing carrying that key
+//   - it is never returned as an empty product beside a nil error
+//   - the refusal is the same named error the sibling recovery reads answer (eachCommittedEvent, eachFactPastCut, EachEvent)
+//   - so the two paths of one store cannot disagree about one missing body
+//   - the branch the walk takes is the one a derived index publishes fewer entries than the commit order names
+//   - today the load publishes every entry, so the walk reaches it only through a store that answers no body for the named fact, which is what this test drives
+//
+// 契约: docs/wiki/memory/memory-architecture.md#read-paths
+func TestReplayRefNamesAMissingBody(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	run := noTrimChainRun(t, ctx, WithStorage(ledger.StorageConfig{Type: ledger.StorageMemory}))
+	addr := event.Address{AgentID: "agent-a", SessionID: "session-replay-ref-missing"}
+	partition := replayRefFixturePartition(t, ctx, run, addr)
+	missing := event.EventID("session-replay-ref-missing-fact")
+	report := seedReport{}
+	seed := &sessionSeed{}
+	product, stated, agent, err := run.replayRef(ctx, run.tier, missing, partition, seed, &report)
+	if err == nil {
+		t.Fatalf("the walk answered the missing fact %s as (%+v, %t, %s, nil), want the missing body refused by name",
+			missing, product, stated, agent)
+	}
+	if !errors.Is(err, ledger.ErrSegmentBodyMissing) {
+		t.Fatalf("the walk refused the missing fact with %v, want ErrSegmentBodyMissing", err)
+	}
+	if !strings.Contains(err.Error(), string(missing)) {
+		t.Fatalf("the refusal = %v, want the key %s named", err, missing)
+	}
+	if report.Decoded != 0 {
+		t.Fatalf("the walk decoded %d fact(s) of a body it never read, want none counted", report.Decoded)
 	}
 }

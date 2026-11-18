@@ -650,38 +650,6 @@ func (l *Loop) closingTurnOf(invocationID event.InvocationID) (decisions int, fi
 	return in.decisions, in.finalRound, in.trigger
 }
 
-// inputKeysOf returns the stable identities of the facts a direct drive consumed,
-// in their original order and without duplicates.
-func inputKeysOf(events []event.Event) []event.EventID {
-	keys := make([]event.EventID, 0, len(events))
-	seen := map[event.EventID]bool{}
-	for _, evt := range events {
-		if evt.Key == "" || seen[evt.Key] {
-			continue
-		}
-		seen[evt.Key] = true
-		keys = append(keys, evt.Key)
-	}
-	return keys
-}
-
-// appendInputKeys appends only identities not already consumed, preserving the
-// order in which the facts actually entered the drive.
-func appendInputKeys(keys []event.EventID, additions []event.EventID) []event.EventID {
-	seen := make(map[event.EventID]bool, len(keys))
-	for _, key := range keys {
-		seen[key] = true
-	}
-	for _, key := range additions {
-		if key == "" || seen[key] {
-			continue
-		}
-		seen[key] = true
-		keys = append(keys, key)
-	}
-	return keys
-}
-
 // commitCalls commits the assistant message one decision issued its tool calls
 // as the call fact of the range, before the calls it names are admitted: the
 // message the model produced beside every call identity, function name and the

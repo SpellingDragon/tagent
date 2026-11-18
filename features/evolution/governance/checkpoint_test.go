@@ -17,6 +17,7 @@ import (
 	"github.com/SpellingDragon/tagent/api/plugin"
 	"github.com/SpellingDragon/tagent/runtime/state"
 	"github.com/SpellingDragon/tagent/runtime/task/approval"
+	trpcmodel "trpc.group/trpc-go/trpc-agent-go/model"
 )
 
 // sliceLog is one governance store in memory: the pairs written beside a log of
@@ -222,8 +223,8 @@ func TestGovernanceSliceSnapshot(t *testing.T) {
 		if wire.Version != stateSliceVersion {
 			t.Fatalf("stated layout = %d, want the layout this code reads", wire.Version)
 		}
-		if wire.DenialSeq != 2 || len(wire.Records) != 2 {
-			t.Fatalf("stated denial stream = tail %d over %d records, want the two records the ledger folded", wire.DenialSeq, len(wire.Records))
+		if wire.DenialSeq != 2 {
+			t.Fatalf("stated denial stream = tail %d, want the two records the ledger folded", wire.DenialSeq)
 		}
 		if wire.GoalSeq != 2 || wire.GoalOrder != 1 || len(wire.Goals) != 1 {
 			t.Fatalf("stated goal stream = tail %d order %d over %d goals, want the declaration and its resolution", wire.GoalSeq, wire.GoalOrder, len(wire.Goals))
@@ -239,9 +240,15 @@ func TestGovernanceSliceSnapshot(t *testing.T) {
 		if err := restarted.seat.RestoreState(ctx, payload); err != nil {
 			t.Fatalf("restore the stated governance cut: %v", err)
 		}
+		if got := restarted.ledger.Count(); got != 0 {
+			t.Fatalf("records beside the restored cut before its stream is bound = %d, want none: the cut states the stream's tail, never its history", got)
+		}
+		if err := restarted.ledger.Bind(ctx, log); err != nil {
+			t.Fatalf("bind the stream the restored cut numbers: %v", err)
+		}
 		records := restarted.ledger.Query(0)
 		if len(records) != 2 || records[0].ToolName != "read_file" || records[1].ToolName != "shell_exec" {
-			t.Fatalf("restored records = %+v, want the two the cut folded in the order they happened", records)
+			t.Fatalf("restored records = %+v, want the two the cut numbers in the order they happened", records)
 		}
 		if goals := restarted.goals.List(); len(goals) != 1 || goals[0].ID != declared || goals[0].Status != GoalAchieved {
 			t.Fatalf("restored goals = %+v, want %s resolved", goals, declared)
@@ -250,7 +257,7 @@ func TestGovernanceSliceSnapshot(t *testing.T) {
 			t.Fatal("restored registry reports an active goal, want the resolution the cut stated")
 		}
 		if got := restarted.ledger.Count(); got != 2 {
-			t.Fatalf("restored record count = %d, want the index the cut stated and no tail past it", got)
+			t.Fatalf("restored record count = %d, want the index the stream behind the cut holds and no tail past it", got)
 		}
 	})
 
@@ -540,5 +547,541 @@ func TestGovernanceApprovalRestoredFromStateSlice(t *testing.T) {
 	}
 	if presence := afterExpiry.Pending(); len(presence) != 0 {
 		t.Fatalf("pending requests beside an expired cut = %+v, want none resurrected: the restore drops the hold the clock already ended instead of handing it a second life", presence)
+	}
+}
+
+// statedWire reads one stated cut as the payload the seam carries.
+func statedWire(t *testing.T, payload []byte) stateSliceWire {
+	t.Helper()
+	var wire stateSliceWire
+	if err := json.Unmarshal(payload, &wire); err != nil {
+		t.Fatalf("the stated cut is no governance state: %v (%s)", err, payload)
+	}
+	return wire
+}
+
+// restatedWire renders one wire back into a cut payload.
+func restatedWire(t *testing.T, wire stateSliceWire) []byte {
+	t.Helper()
+	raw, err := json.Marshal(wire)
+	if err != nil {
+		t.Fatalf("state the tampered cut: %v", err)
+	}
+	return raw
+}
+
+// TestGovernanceSliceStatesTheValidStateNotTheHistory pins what one cut states against the denial history.
+//   - positive: the records and bytes of a cut follow the live work, so five generations of history state one budget
+//   - negative: the same live work over five generations must not state five times the index
+//   - consumer: StateSeat.SnapshotState as the framework state seam states the governance payload
+//
+// 契约: docs/wiki/platform/platform-subsystems.md#framework-checkpoint
+func TestGovernanceSliceStatesTheValidStateNotTheHistory(t *testing.T) {
+	ctx := context.Background()
+	log := newSliceLog()
+	ledger, goals := NewDenialLedger(), NewGoalRegistry()
+	if err := ledger.Bind(ctx, log); err != nil {
+		t.Fatalf("bind the ledger: %v", err)
+	}
+	if err := goals.Bind(ctx, log); err != nil {
+		t.Fatalf("bind the registry: %v", err)
+	}
+	clock := newObservationClock()
+	book := approval.NewApprovalManager("", time.Hour, approval.WithApprovalClock(clock.Now))
+	seat := NewStateSeat(ledger, goals, book)
+
+	goals.Declare("ship the release", "entry", 0)
+	if _, err := book.Request(ctx, "live-hold", "shell_exec", []byte(`{"cmd":"deploy"}`),
+		plugin.RiskCritical, "no-deploy", "critical risk awaits approval"); err != nil {
+		t.Fatalf("register the live hold: %v", err)
+	}
+
+	const generations = 5
+	const perGeneration = 4
+	var first, last []byte
+	for gen := 1; gen <= generations; gen++ {
+		for i := 0; i < perGeneration; i++ {
+			ledger.Record(DenialRecord{
+				Subtype: SubtypeDenial, ToolName: fmt.Sprintf("tool-%d-%d", gen, i),
+				Level: plugin.RiskHigh, RuleID: "no-history", Reason: "refused",
+			})
+		}
+		payload, err := seat.SnapshotState(ctx)
+		if err != nil {
+			t.Fatalf("state the cut of generation %d: %v", gen, err)
+		}
+		wire := statedWire(t, payload)
+		if wire.DenialSeq != int64(gen*perGeneration) {
+			t.Fatalf("generation %d states denial tail %d, want the %d events the stream holds", gen, wire.DenialSeq, gen*perGeneration)
+		}
+		if gen == 1 {
+			first = payload
+		}
+		last = payload
+		t.Logf("generation %d: stated approvals=%d bytes=%d denial tail=%d; stored denial events=%d",
+			gen, len(wire.Approvals), len(payload), wire.DenialSeq, len(log.keysOf(denialEventPrefix)))
+	}
+
+	if got := len(log.keysOf(denialEventPrefix)); got != generations*perGeneration {
+		t.Fatalf("stored denial events = %d, want %d: the fixture did not grow the history it measures",
+			got, generations*perGeneration)
+	}
+	if !goals.HasActive() {
+		t.Fatal("the live goal is not in flight, so the constant live work guard proves nothing")
+	}
+	if pending := book.Pending(); len(pending) != 1 || pending[0].ID != "live-hold" {
+		t.Fatalf("live holds = %+v, want exactly the one hold the fixture registered", pending)
+	}
+	if len(first) == 0 {
+		t.Fatal("the first generation stated nothing, so the growth bound has an empty denominator")
+	}
+
+	if len(last) > len(first)*2 {
+		t.Fatalf("the cut grew with the denial history: %d -> %d bytes over %d generations while the live work stayed "+
+			"1 goal in flight and 1 hold — a cut states the live state, never the history its tail numbers; "+
+			"ratio %d/%d equals the generation ratio %d/1",
+			len(first), len(last), generations, len(last), len(first), generations)
+	}
+	if wire, was := statedWire(t, first), statedWire(t, last); len(wire.Approvals) != len(was.Approvals) {
+		t.Fatalf("stated approval entries grew with the denial history: %d -> %d", len(wire.Approvals), len(was.Approvals))
+	}
+
+	restated := newSliceFixtureAt(t, log, NewDenialLedger(), NewGoalRegistry())
+	if err := restated.seat.RestoreState(ctx, last); err != nil {
+		t.Fatalf("restore the last cut: %v", err)
+	}
+	if got := restated.ledger.Count(); got != 0 {
+		t.Fatalf("records beside the restored cut before its stream is bound = %d, want none: the cut numbers the stream instead of carrying it", got)
+	}
+	if err := restated.seat.Bind(ctx, log); err != nil {
+		t.Fatalf("bind the stream the restored cut numbers: %v", err)
+	}
+	if got := restated.ledger.Count(); got != generations*perGeneration {
+		t.Fatalf("records the restored cut and its stream answer = %d, want the %d the process that cut it held: "+
+			"a cut that states the live state must not lose the history it numbers", got, generations*perGeneration)
+	}
+}
+
+// criticalCall renders the one critical call these probes rule.
+func criticalCall(tool, args string) plugin.CallPass {
+	return plugin.CallPass{
+		Final: trpcmodel.ToolCall{
+			ID:       "call-" + tool,
+			Function: trpcmodel.FunctionDefinitionParam{Name: tool, Arguments: []byte(args)},
+		},
+		Risk: plugin.RiskCritical,
+	}
+}
+
+// governanceGate opens the production gate over one book, ledger and registry.
+func governanceGate(book *approval.ApprovalManager, ledger *DenialLedger, goals *GoalRegistry) *Policy {
+	return Open(WithApprovals(book), WithLedger(ledger), WithGoals(goals))
+}
+
+// withdrawApprovalFiles removes the per-request file mirror, leaving the stated cut as the only record.
+func withdrawApprovalFiles(t *testing.T, dir string) {
+	t.Helper()
+	if err := os.RemoveAll(filepath.Join(dir, "approvals")); err != nil {
+		t.Fatalf("withdraw the request files under %s: %v", dir, err)
+	}
+}
+
+// TestGovernanceSliceRefusesToDropAnOpenApproval pins the identity a dropped open hold must keep answering.
+//   - mutation: one unexpired pending approval is removed from the payload and the request files are withdrawn
+//   - positive: the original identity still resolves a ruling and the gate parks naming it, never a freshly minted hold
+//   - negative: the untampered cut resolves the same identity, and the tampered restore seated nothing before the chain bound
+//   - consumer: Policy.Judge rules the call and ApprovalManager.Decide answers the identity the approver was handed
+//
+// 契约: docs/wiki/agent/governance-enforcement.md#approval-channel
+func TestGovernanceSliceRefusesToDropAnOpenApproval(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	clock := newObservationClock()
+	store := newSliceLog()
+	book := approval.NewApprovalManager(dir, time.Hour, approval.WithApprovalClock(clock.Now), approval.WithApprovalSeat())
+	if err := book.BindAttention(ctx, store); err != nil {
+		t.Fatalf("bind the durable face: %v", err)
+	}
+	args := `{"cmd":"deploy"}`
+	held, err := book.Request(ctx, "open-hold", "shell_exec", []byte(args),
+		plugin.RiskCritical, "no-deploy", "critical risk awaits approval")
+	if err != nil {
+		t.Fatalf("register the open hold: %v", err)
+	}
+	seat := NewStateSeat(NewDenialLedger(), NewGoalRegistry(), book)
+	payload, err := seat.SnapshotState(ctx)
+	if err != nil {
+		t.Fatalf("state the cut: %v", err)
+	}
+	wire := statedWire(t, payload)
+	if len(wire.Approvals) != 1 || wire.Approvals[0].ID != held.ID {
+		t.Fatalf("the first cut states %+v, want the one open hold: the mutation has nothing to remove", wire.Approvals)
+	}
+	if wire.Approvals[0].ExpiresMs <= clock.Now().UnixMilli() {
+		t.Fatal("the hold is already past its validity, so dropping it proves nothing about an open hold")
+	}
+
+	keepBook := approval.NewApprovalManager(t.TempDir(), time.Hour, approval.WithApprovalClock(clock.Now), approval.WithApprovalSeat())
+	keepSeat := NewStateSeat(NewDenialLedger(), NewGoalRegistry(), keepBook)
+	if err := keepSeat.RestoreState(ctx, payload); err != nil {
+		t.Fatalf("restore the untampered cut: %v", err)
+	}
+	if _, err := keepBook.Decide("open-hold", approval.ApprovalApproved, "operator"); err != nil {
+		t.Fatalf("the untampered cut must resolve the identity the approver was handed: %v", err)
+	}
+
+	wire.Approvals = nil
+	wire.ApprovalKeys = nil
+	tampered := restatedWire(t, wire)
+	if got := statedWire(t, tampered); len(got.Approvals) != 0 {
+		t.Fatalf("the tampered cut still states %+v, want the hold removed", got.Approvals)
+	}
+	mirror := filepath.Join(dir, "approvals", "open-hold.json")
+	if _, err := os.Stat(mirror); err != nil {
+		t.Fatalf("the request file %s is gone before the withdrawal, so the directory never held the hold this probe withdraws: %v", mirror, err)
+	}
+	withdrawApprovalFiles(t, dir)
+	if _, err := os.Stat(filepath.Join(dir, "approvals")); !os.IsNotExist(err) {
+		t.Fatalf("the request directory still answers stat (%v), so the chain is not the only durable record left", err)
+	}
+
+	restartedBook := approval.NewApprovalManager(dir, time.Hour, approval.WithApprovalClock(clock.Now), approval.WithApprovalSeat())
+	restartedLedger, restartedGoals := NewDenialLedger(), NewGoalRegistry()
+	restarted := NewStateSeat(restartedLedger, restartedGoals, restartedBook)
+	if err := restarted.RestoreState(ctx, tampered); err != nil {
+		t.Fatalf("restore the tampered cut: %v", err)
+	}
+	if pending := restartedBook.Pending(); len(pending) != 0 {
+		t.Fatalf("the tampered cut seated %+v, want the empty book: the identity this probe resolves must come from the chain, not the cut", pending)
+	}
+	if err := restarted.Bind(ctx, store); err != nil {
+		t.Fatalf("bind the durable face the first process wrote: %v", err)
+	}
+	gate := governanceGate(restartedBook, restartedLedger, restartedGoals)
+	decision, err := gate.Judge(criticalCall("shell_exec", args))
+	if err != nil {
+		t.Fatalf("rule the critical call: %v", err)
+	}
+	if restartedLedger.Count() == 0 {
+		t.Fatal("the gate recorded nothing, so it never ruled the call this probe measures")
+	}
+	if decision.Disposition == plugin.DispositionAllow || decision.Disposition == plugin.DispositionRecord {
+		t.Fatalf("the gate let the call run on a dropped hold: disposition=%q reason=%q — a missing approval must park or refuse, never permit",
+			decision.Disposition, decision.Reason)
+	}
+	if decision.Disposition != plugin.DispositionHold {
+		t.Fatalf("disposition = %q, want the hold this probe measures (reason=%q)", decision.Disposition, decision.Reason)
+	}
+	if !strings.Contains(decision.Reason, "open-hold") {
+		t.Fatalf("the gate parked under reason %q, want the original identity open-hold named: a freshly minted hold is not the dropped one surviving",
+			decision.Reason)
+	}
+	if _, err := restartedBook.Decide("open-hold", approval.ApprovalApproved, "operator"); err != nil {
+		t.Fatalf("the approval identity the first process handed the approver does not resolve after the dropped cut: %v — "+
+			"the gate parked under %q, so answering the identity the approver was given is refused by name while a second hold waits for an answer nobody was asked for",
+			err, decision.Reason)
+	}
+}
+
+// TestOpenApprovalIdentityMustSurviveTheCut pins the identity an approver was handed.
+//   - positive: the identity the first process named still resolves a ruling after the restore
+//   - negative: the untampered cut resolves the same identity, so the refusal is the mutation's doing
+//   - consumer: ApprovalManager.Decide as an external approver answers by that identity
+//
+// 契约: docs/wiki/agent/governance-enforcement.md#approval-channel
+func TestOpenApprovalIdentityMustSurviveTheCut(t *testing.T) {
+	ctx := context.Background()
+	clock := newObservationClock()
+	args := `{"cmd":"deploy"}`
+	store := newSliceLog()
+	build := func(dir string, face *sliceLog) (*approval.ApprovalManager, *StateSeat) {
+		book := approval.NewApprovalManager(dir, time.Hour, approval.WithApprovalClock(clock.Now), approval.WithApprovalSeat())
+		if err := book.BindAttention(ctx, face); err != nil {
+			t.Fatalf("bind the durable face: %v", err)
+		}
+		return book, NewStateSeat(NewDenialLedger(), NewGoalRegistry(), book)
+	}
+	book, seat := build(t.TempDir(), store)
+	if _, err := book.Request(ctx, "identity-hold", "shell_exec", []byte(args),
+		plugin.RiskCritical, "no-deploy", "critical risk awaits approval"); err != nil {
+		t.Fatalf("register the hold: %v", err)
+	}
+	payload, err := seat.SnapshotState(ctx)
+	if err != nil {
+		t.Fatalf("state the cut: %v", err)
+	}
+
+	keepBook, keepSeat := build(t.TempDir(), newSliceLog())
+	if err := keepSeat.RestoreState(ctx, payload); err != nil {
+		t.Fatalf("restore the untampered cut: %v", err)
+	}
+	if _, err := keepBook.Decide("identity-hold", approval.ApprovalApproved, "operator"); err != nil {
+		t.Fatalf("the untampered cut must resolve the identity the approver was handed: %v", err)
+	}
+
+	wire := statedWire(t, payload)
+	wire.Approvals = nil
+	dropBook, dropSeat := build(t.TempDir(), store)
+	if err := dropSeat.RestoreState(ctx, restatedWire(t, wire)); err != nil {
+		t.Fatalf("restore the dropped cut: %v", err)
+	}
+	gate := governanceGate(dropBook, NewDenialLedger(), NewGoalRegistry())
+	decision, err := gate.Judge(criticalCall("shell_exec", args))
+	if err != nil {
+		t.Fatalf("rule the critical call: %v", err)
+	}
+	if decision.Disposition != plugin.DispositionHold {
+		t.Fatalf("disposition = %q, want the hold this probe measures", decision.Disposition)
+	}
+	if _, err := dropBook.Decide("identity-hold", approval.ApprovalApproved, "operator"); err != nil {
+		t.Fatalf("the approval identity the first process handed the approver no longer resolves after the restore: %v — "+
+			"the gate parked the call again under a newly minted identity (%q), so answering the identity the approver was given is refused by name "+
+			"while a second hold waits for an answer nobody was asked for", err, decision.Reason)
+	}
+}
+
+// TestDeniedRulingMustSurviveItsValidityAcrossRestart pins the terminal refusal across a restart.
+//   - positive: arguments a human refused are not freshly approvable after a restart past the request validity
+//   - negative: the same instant in the same process mints no new request, so the two paths must agree
+//   - consumer: the production gate rules the call, and the approver answers the request the gate names
+//
+// 契约: docs/wiki/agent/governance-enforcement.md#approval-channel
+func TestDeniedRulingMustSurviveItsValidityAcrossRestart(t *testing.T) {
+	ctx := context.Background()
+	clock := newObservationClock()
+	args := `{"cmd":"deploy"}`
+	digest := approval.ArgsDigest([]byte(args))
+	dir := t.TempDir()
+	book := approval.NewApprovalManager(dir, time.Hour, approval.WithApprovalClock(clock.Now), approval.WithApprovalSeat())
+	ledger, goals := NewDenialLedger(), NewGoalRegistry()
+	seat := NewStateSeat(ledger, goals, book)
+	if _, err := book.Request(ctx, "denied-hold", "shell_exec", []byte(args),
+		plugin.RiskCritical, "no-deploy", "critical risk awaits approval"); err != nil {
+		t.Fatalf("register the hold: %v", err)
+	}
+	if _, err := book.Decide("denied-hold", approval.ApprovalDenied, "operator"); err != nil {
+		t.Fatalf("rule the hold denied: %v", err)
+	}
+	gate := governanceGate(book, ledger, goals)
+	live, err := gate.Judge(criticalCall("shell_exec", args))
+	if err != nil {
+		t.Fatalf("rule the refused call: %v", err)
+	}
+	if live.Denial == nil || live.Disposition == plugin.DispositionAllow || live.Disposition == plugin.DispositionRecord {
+		t.Fatalf("the live refusal is disposition=%q denial=%v, want a named refusal: the fixture never refused the call",
+			live.Disposition, live.Denial)
+	}
+
+	clock.advance(2 * time.Hour)
+	sameProcess, err := gate.Judge(criticalCall("shell_exec", args))
+	if err != nil {
+		t.Fatalf("rule the refused call past its validity: %v", err)
+	}
+	livePending := len(book.Pending())
+	liveLookup := book.Lookup("shell_exec", digest)
+	if liveLookup == nil || liveLookup.ID != "denied-hold" {
+		t.Fatalf("the live book names %+v, want the refused request it still holds", liveLookup)
+	}
+
+	payload, err := seat.SnapshotState(ctx)
+	if err != nil {
+		t.Fatalf("state the cut past the validity: %v", err)
+	}
+	if wire := statedWire(t, payload); len(wire.Approvals) != 1 || wire.Approvals[0].Status != approval.ApprovalDenied {
+		t.Fatalf("the cut states %+v, want the refused request: the restart has nothing to drop", wire.Approvals)
+	}
+	withdrawApprovalFiles(t, dir)
+
+	restartedBook := approval.NewApprovalManager(dir, time.Hour, approval.WithApprovalClock(clock.Now), approval.WithApprovalSeat())
+	restartedLedger, restartedGoals := NewDenialLedger(), NewGoalRegistry()
+	restarted := NewStateSeat(restartedLedger, restartedGoals, restartedBook)
+	if err := restarted.RestoreState(ctx, payload); err != nil {
+		t.Fatalf("restore the cut: %v", err)
+	}
+	restartedGate := governanceGate(restartedBook, restartedLedger, restartedGoals)
+	after, err := restartedGate.Judge(criticalCall("shell_exec", args))
+	if err != nil {
+		t.Fatalf("rule the refused call after the restart: %v", err)
+	}
+	restartedLookup := restartedBook.Lookup("shell_exec", digest)
+	fresh := restartedBook.Pending()
+	if len(fresh) > 0 {
+		if _, err := restartedBook.Decide(fresh[0].ID, approval.ApprovalApproved, "operator"); err != nil {
+			t.Fatalf("answer the request the restarted gate named: %v", err)
+		}
+		ruled, err := restartedGate.Judge(criticalCall("shell_exec", args))
+		if err != nil {
+			t.Fatalf("rule the call once the fresh request is approved: %v", err)
+		}
+		if ruled.Disposition == plugin.DispositionAllow || ruled.Disposition == plugin.DispositionRecord {
+			t.Fatalf("a call a human explicitly refused became runnable after a restart: RestoreEvidence (approval_store.go:170) "+
+				"drops every entry past its ExpiresMs including the refused one, the attention chain is in-memory only "+
+				"(approval_store.go:124 newAttentionLedger), so the refusal has no durable record; the restarted gate minted "+
+				"request %q for the same digest and approved it (disposition=%q), while the same instant in the same process "+
+				"names %q and mints nothing (pending=%d, disposition=%q)",
+				fresh[0].ID, ruled.Disposition, liveLookup.ID, livePending, sameProcess.Disposition)
+		}
+	}
+	if restartedLookup == nil || restartedLookup.ID != liveLookup.ID {
+		t.Fatalf("the restarted book names %+v for the refused arguments while the live book names %q: "+
+			"the same instant renders two different request identities (live disposition=%q, restarted disposition=%q)",
+			restartedLookup, liveLookup.ID, sameProcess.Disposition, after.Disposition)
+	}
+}
+
+// TestExpiredApprovalNeverRunsAfterRestart pins the validity boundary that holds.
+//   - positive: an approval past its validity never lets the call run after a restart
+//   - negative: the same call inside its validity does run, so the assertion can fail
+//   - consumer: the production gate rules the call over the restored book
+//
+// 契约: docs/wiki/agent/governance-enforcement.md#approval-channel
+func TestExpiredApprovalNeverRunsAfterRestart(t *testing.T) {
+	ctx := context.Background()
+	clock := newObservationClock()
+	args := `{"cmd":"deploy"}`
+	dir := t.TempDir()
+	book := approval.NewApprovalManager(dir, time.Hour, approval.WithApprovalClock(clock.Now), approval.WithApprovalSeat())
+	ledger, goals := NewDenialLedger(), NewGoalRegistry()
+	seat := NewStateSeat(ledger, goals, book)
+	if _, err := book.Request(ctx, "approved-hold", "shell_exec", []byte(args),
+		plugin.RiskCritical, "no-deploy", "critical risk awaits approval"); err != nil {
+		t.Fatalf("register the hold: %v", err)
+	}
+	if _, err := book.Decide("approved-hold", approval.ApprovalApproved, "operator"); err != nil {
+		t.Fatalf("approve the hold: %v", err)
+	}
+	gate := governanceGate(book, ledger, goals)
+	inside, err := gate.Judge(criticalCall("shell_exec", args))
+	if err != nil {
+		t.Fatalf("rule the approved call: %v", err)
+	}
+	if inside.Disposition != plugin.DispositionRecord {
+		t.Fatalf("the approved call inside its validity is disposition=%q, want it to run: the fixture proves nothing about expiry",
+			inside.Disposition)
+	}
+
+	clock.advance(2 * time.Hour)
+	payload, err := seat.SnapshotState(ctx)
+	if err != nil {
+		t.Fatalf("state the cut past the validity: %v", err)
+	}
+	withdrawApprovalFiles(t, dir)
+	restartedBook := approval.NewApprovalManager(dir, time.Hour, approval.WithApprovalClock(clock.Now), approval.WithApprovalSeat())
+	restarted := NewStateSeat(NewDenialLedger(), NewGoalRegistry(), restartedBook)
+	if err := restarted.RestoreState(ctx, payload); err != nil {
+		t.Fatalf("restore the expired cut: %v", err)
+	}
+	restartedGate := governanceGate(restartedBook, NewDenialLedger(), NewGoalRegistry())
+	after, err := restartedGate.Judge(criticalCall("shell_exec", args))
+	if err != nil {
+		t.Fatalf("rule the expired call after the restart: %v", err)
+	}
+	if after.Disposition == plugin.DispositionAllow || after.Disposition == plugin.DispositionRecord {
+		t.Fatalf("an expired approval was revived by the restart: disposition=%q reason=%q", after.Disposition, after.Reason)
+	}
+	for _, held := range restartedBook.Pending() {
+		if held.ExpiresMs > 0 && held.ExpiresMs <= clock.Now().UnixMilli() {
+			t.Fatalf("the restart resurrected an expired hold %+v", held)
+		}
+	}
+}
+
+// TestSeatedApprovalBookStillReadsTheRequestDirectory pins the authority of the stated cut over the file mirror.
+//   - positive: a seated book answers from the cut it restored, so a request the cut omits stays unstated
+//   - negative: the restore really dropped the hold and the file really survives, so the resurrection has a named source
+//   - consumer: ApprovalManager.Lookup is the read the production gate rules a critical call through
+//
+// 契约: docs/wiki/agent/governance-enforcement.md#approval-channel
+func TestSeatedApprovalBookStillReadsTheRequestDirectory(t *testing.T) {
+	ctx := context.Background()
+	clock := newObservationClock()
+	dir := t.TempDir()
+	args := `{"cmd":"deploy"}`
+	book := approval.NewApprovalManager(dir, time.Hour, approval.WithApprovalClock(clock.Now), approval.WithApprovalSeat())
+	if _, err := book.Request(ctx, "dir-hold", "shell_exec", []byte(args),
+		plugin.RiskCritical, "no-deploy", "critical risk awaits approval"); err != nil {
+		t.Fatalf("register the hold: %v", err)
+	}
+	seat := NewStateSeat(NewDenialLedger(), NewGoalRegistry(), book)
+	payload, err := seat.SnapshotState(ctx)
+	if err != nil {
+		t.Fatalf("state the cut: %v", err)
+	}
+	wire := statedWire(t, payload)
+	wire.Approvals = nil
+	tampered := restatedWire(t, wire)
+
+	mirror := filepath.Join(dir, "approvals", "dir-hold.json")
+	if _, err := os.Stat(mirror); err != nil {
+		t.Fatalf("the request file %s is gone, so the directory cannot resurrect anything: %v", mirror, err)
+	}
+	restartedBook := approval.NewApprovalManager(dir, time.Hour, approval.WithApprovalClock(clock.Now), approval.WithApprovalSeat())
+	restarted := NewStateSeat(NewDenialLedger(), NewGoalRegistry(), restartedBook)
+	if err := restarted.RestoreState(ctx, tampered); err != nil {
+		t.Fatalf("restore the dropped cut: %v", err)
+	}
+	if pending := restartedBook.Pending(); len(pending) != 0 {
+		t.Fatalf("the restore itself seated %+v, want the empty book the dropped cut states", pending)
+	}
+	gate := governanceGate(restartedBook, NewDenialLedger(), NewGoalRegistry())
+	decision, err := gate.Judge(criticalCall("shell_exec", args))
+	if err != nil {
+		t.Fatalf("rule the critical call: %v", err)
+	}
+	if got := restartedBook.Lookup("shell_exec", approval.ArgsDigest([]byte(args))); got != nil && got.ID == "dir-hold" {
+		t.Fatalf("the seated book resurrected a request the cut did not state: Lookup answers %q after the restore seated nothing — "+
+			"Lookup (approval_store.go:358-360) calls rebuild on the first unapproved read even when WithApprovalSeat is set, "+
+			"and rebuild (approval_store.go:570-574) reads every non-expired file under the directory, so the request file is a "+
+			"live second source beside the cut and narrowing SnapshotEvidence alone does not bound the book (gate reason=%q)",
+			got.ID, decision.Reason)
+	}
+}
+
+// TestApprovalAliasCollapsesAcrossTheCut pins the second registration of one standing pair.
+//   - positive: every identity the book answered before the cut still resolves a ruling after it
+//   - negative: the cut states one entry per map key, so the alias is visible in the payload
+//   - consumer: Request aliases a second caller identity, and a ruling answered under it must survive a restart
+//
+// 契约: docs/wiki/agent/governance-enforcement.md#approval-channel
+func TestApprovalAliasCollapsesAcrossTheCut(t *testing.T) {
+	ctx := context.Background()
+	clock := newObservationClock()
+	args := []byte(`{"calls":["a","b"]}`)
+	book := approval.NewApprovalManager(t.TempDir(), time.Hour, approval.WithApprovalClock(clock.Now), approval.WithApprovalSeat())
+	if _, err := book.Request(ctx, "alias-a", "tagent:tool-call-batch", args,
+		plugin.RiskCritical, "fuse", "the batch awaits approval"); err != nil {
+		t.Fatalf("register the first identity: %v", err)
+	}
+	second, err := book.Request(ctx, "alias-b", "tagent:tool-call-batch", args,
+		plugin.RiskCritical, "fuse", "the batch awaits approval")
+	if err != nil {
+		t.Fatalf("register the second identity over the same pair: %v", err)
+	}
+	if second.ID != "alias-a" {
+		t.Fatalf("the second registration answered %q, want the standing request it aliases", second.ID)
+	}
+	if pending := book.Pending(); len(pending) != 1 {
+		t.Fatalf("the waiting set widened to %d entries, want the one question the alias must not duplicate", len(pending))
+	}
+	seat := NewStateSeat(NewDenialLedger(), NewGoalRegistry(), book)
+	payload, err := seat.SnapshotState(ctx)
+	if err != nil {
+		t.Fatalf("state the cut: %v", err)
+	}
+	wire := statedWire(t, payload)
+	if len(wire.Approvals) != 2 {
+		t.Fatalf("the cut states %d approval entries, want the two the evidence map keys hold", len(wire.Approvals))
+	}
+	restartedBook := approval.NewApprovalManager(t.TempDir(), time.Hour, approval.WithApprovalClock(clock.Now), approval.WithApprovalSeat())
+	restarted := NewStateSeat(NewDenialLedger(), NewGoalRegistry(), restartedBook)
+	if err := restarted.RestoreState(ctx, payload); err != nil {
+		t.Fatalf("restore the cut: %v", err)
+	}
+	if _, err := restartedBook.Decide("alias-b", approval.ApprovalApproved, "operator"); err != nil {
+		t.Fatalf("the aliased identity no longer resolves after the restore: %v — Request (approval_store.go:256-262) aliases a second "+
+			"caller identity to the standing request, SnapshotEvidence (:146-149) states one entry per map key so the cut carries %d "+
+			"copies of identity %q, and RestoreEvidence (:174) keys the book by restored.ID so only one survives; the tool fuse "+
+			"(runtime/agent/fuse.go:363) registers each batch under its own decision identity, so a ruling answered under the second "+
+			"identity is refused by name after a restart", err, len(wire.Approvals), second.ID)
 	}
 }

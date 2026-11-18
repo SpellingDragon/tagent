@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -13,6 +14,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -53,6 +55,7 @@ func TestRecoverOrphanOriginalsRebuildsFromChain(t *testing.T) {
 	records := []storedRefFixture{refFixture([]byte(content), evt.Owner), refFixture([]byte(content), joined)}
 	refValue := refJSON(t, records)
 	commitPairs(t, ctx, tier, ledger.Pair{Key: "ref:" + key, Value: refValue})
+	closeSeeded(t, tier)
 	assertBootRefuses(t, ctx, root, key)
 	before := rootFiles(t, root)
 
@@ -117,6 +120,7 @@ func TestRecoverOrphanOriginalsTrulyLost(t *testing.T) {
 	tier, root := seedRoot(t, ctx)
 	records := []storedRefFixture{refFixture([]byte("the body no chain event holds"), owner)}
 	commitPairs(t, ctx, tier, ledger.Pair{Key: "ref:" + key, Value: refJSON(t, records)})
+	closeSeeded(t, tier)
 	before := rootFiles(t, root)
 
 	scanned, err := recoverOrphanOriginals(ctx, root, true)
@@ -165,6 +169,7 @@ func TestRecoverOrphanOriginalsDigestMismatch(t *testing.T) {
 			tier, root := seedRoot(t, ctx)
 			commitChainEvent(t, ctx, tier, chainEvent(key, content), 1)
 			commitPairs(t, ctx, tier, ledger.Pair{Key: "ref:" + key, Value: refJSON(t, []storedRefFixture{tc.record})})
+			closeSeeded(t, tier)
 			before := rootFiles(t, root)
 
 			scanned, err := recoverOrphanOriginals(ctx, root, true)
@@ -205,6 +210,7 @@ func TestRecoverOrphanOriginalsPairedRoot(t *testing.T) {
 	commitPairs(t, ctx, tier,
 		ledger.Pair{Key: "blob:" + key, Value: []byte(content)},
 		ledger.Pair{Key: "ref:" + key, Value: refJSON(t, []storedRefFixture{refFixture([]byte(content), evt.Owner)})})
+	closeSeeded(t, tier)
 	before := rootFiles(t, root)
 
 	for _, restore := range []bool{false, true} {
@@ -255,6 +261,7 @@ func TestRecoverOrphanOriginalsSortedOrder(t *testing.T) {
 		records := []storedRefFixture{refFixture([]byte(fixture.refBody), owner)}
 		commitPairs(t, ctx, tier, ledger.Pair{Key: "ref:" + fixture.key, Value: refJSON(t, records)})
 	}
+	closeSeeded(t, tier)
 	before := rootFiles(t, root)
 	wantRecoverable := []string{"1408-cccc", "1408-dddd"}
 	wantLost := []string{"1408-aaaa", "1408-eeee"}
@@ -330,6 +337,7 @@ func TestRecoverOrphanOriginalsUndecodableReference(t *testing.T) {
 			tier, root := seedRoot(t, ctx)
 			commitChainEvent(t, ctx, tier, chainEvent(key, "the body the chain holds"), 1)
 			commitPairs(t, ctx, tier, ledger.Pair{Key: "ref:" + key, Value: tc.value})
+			closeSeeded(t, tier)
 			before := rootFiles(t, root)
 
 			if _, err := recoverOrphanOriginals(ctx, root, true); err == nil || !strings.Contains(err.Error(), key) {
@@ -372,6 +380,8 @@ func TestRecoverKVCommandExitCodes(t *testing.T) {
 	lostTier, lostRoot := seedRoot(t, ctx)
 	lostKey := "1408-0000000000000000000000000000d00d"
 	commitPairs(t, ctx, lostTier, ledger.Pair{Key: "ref:" + lostKey, Value: refJSON(t, []storedRefFixture{refFixture([]byte("the body no chain event holds"), owner)})})
+	closeSeeded(t, tier)
+	closeSeeded(t, lostTier)
 
 	out, errOut, code := runRecoverKV(t, ctx, binary)
 	if code != 1 || !strings.Contains(errOut, "--root is required") {
@@ -413,11 +423,27 @@ func TestRecoverKVCommandExitCodes(t *testing.T) {
 }
 
 // seedRoot opens a journal root in a temporary directory for one case to commit
-// into, and returns the tier beside the root path.
+// into, and returns the tier beside the root path. The seeding view declares the
+// root's write rights, which is the declaration a commit needs.
 func seedRoot(t *testing.T, ctx context.Context) (*ledger.Tier, string) {
 	t.Helper()
 	root := t.TempDir()
-	return openRoot(t, ctx, root), root
+	tier, err := ledger.OpenTier(ctx, ledger.StorageConfig{Type: ledger.StorageJournal, Root: root, WriteRights: true})
+	if err != nil {
+		t.Fatalf("open the journal root %s to seed it: %v", root, err)
+	}
+	return tier, root
+}
+
+// closeSeeded ends the view one case seeded its root through: one root carries one
+// writer, so the scan under test opens a root the seeding writer gave up rather
+// than one it holds. It runs before the case snapshots the root, because the close
+// completes the seeding barrier.
+func closeSeeded(t *testing.T, tier *ledger.Tier) {
+	t.Helper()
+	if err := tier.Close(); err != nil {
+		t.Fatalf("close the seeding view: %v", err)
+	}
 }
 
 // openRoot opens a fresh view of root, so an assertion reads what the journal
@@ -528,8 +554,12 @@ func assertBootRefuses(t *testing.T, ctx context.Context, root, key string) {
 	}
 }
 
+// rootWriteLockMarker names the file a write-rights open keeps inside the root it writes.
+const rootWriteLockMarker = ".write-lock"
+
 // rootFiles returns the bytes of every file under root keyed by its relative
 // path, so a case can pin a scan that writes nothing byte for byte.
+//   - the write-lock marker of the root is left out: it carries no journal byte, being the file the kernel holds an open's write rights on
 func rootFiles(t *testing.T, root string) map[string][]byte {
 	t.Helper()
 	files := map[string][]byte{}
@@ -540,11 +570,14 @@ func rootFiles(t *testing.T, root string) map[string][]byte {
 		if entry.IsDir() {
 			return nil
 		}
-		value, err := os.ReadFile(path)
+		name, err := filepath.Rel(root, path)
 		if err != nil {
 			return err
 		}
-		name, err := filepath.Rel(root, path)
+		if name == rootWriteLockMarker {
+			return nil
+		}
+		value, err := os.ReadFile(path)
 		if err != nil {
 			return err
 		}
@@ -583,6 +616,101 @@ func orphanKeys(list []orphan) []string {
 		keys = append(keys, item.Key)
 	}
 	return keys
+}
+
+// kvDirectory is the directory under a journal root that holds the journal and its index
+// files, which is where a case appends the torn frame a writer left.
+const kvDirectory = "kv"
+
+// TestRecoverScanStatesTheTornTailAndTheIndexItRead pins what a dry run states about a root whose log ends torn.
+//   - the scan completes and classifies the root's references instead of refusing the root
+//   - stdout names the torn tail the open found, the bytes the dry run left uncut and the whole log it replayed
+//   - the root keeps every file byte for byte
+//
+// 契约: docs/wiki/memory/memory-architecture.md#event-shape
+func TestRecoverScanStatesTheTornTailAndTheIndexItRead(t *testing.T) {
+	ctx := context.Background()
+	const key = "1408-8d0c9b7a6f5e4d3c2b1a0918f7e6d5c4"
+	const content = "the body the chain still holds"
+	evt := chainEvent(key, content)
+	tier, root := seedRoot(t, ctx)
+	commitChainEvent(t, ctx, tier, evt, 1)
+	commitPairs(t, ctx, tier, ledger.Pair{
+		Key:   "ref:" + key,
+		Value: refJSON(t, []storedRefFixture{refFixture([]byte(content), evt.Owner)}),
+	})
+	closeSeeded(t, tier)
+	kvDir := filepath.Join(root, kvDirectory)
+	torn := appendTornFrame(t, filepath.Join(kvDir, "journal.log"))
+	stateAnotherVersion(t, filepath.Join(kvDir, "slots"))
+	before := rootFiles(t, root)
+
+	binary := buildRecoverKV(t, ctx)
+	out, errOut, code := runRecoverKV(t, ctx, binary, "--root", root)
+	if code != 0 {
+		t.Fatalf("the dry run of a root whose index states no watermark exited %d with stderr %q, want 0: the scan reads the log whole",
+			code, errOut)
+	}
+	for _, want := range []string{
+		"states no watermark this build reads",
+		"replayed the whole log",
+		"the log ends in a torn tail at " + strconv.FormatInt(torn, 10),
+		"and the dry run cut nothing",
+		"recoverable",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("the stdout %q does not name %q", out, want)
+		}
+	}
+	assertRootUnchanged(t, root, before)
+}
+
+// appendTornFrame appends the first bytes of a frame the case never finishes to path, which
+// is the tail a writer that stopped mid-frame left, and answers the byte that tail starts at.
+func appendTornFrame(t *testing.T, path string) int64 {
+	t.Helper()
+	stat, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("state the log %s: %v", path, err)
+	}
+	torn := make([]byte, 8+20)
+	binary.BigEndian.PutUint32(torn[0:4], 64)
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_APPEND, 0o600)
+	if err != nil {
+		t.Fatalf("open the log %s to append a torn frame: %v", path, err)
+	}
+	if _, err := file.Write(torn); err != nil {
+		file.Close()
+		t.Fatalf("append a torn frame to %s: %v", path, err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatalf("close the log %s: %v", path, err)
+	}
+	return stat.Size()
+}
+
+// stateAnotherVersion writes a slot table header of another version over the table at path,
+// which is the header a build that wrote another format left and this build states no
+// watermark from.
+func stateAnotherVersion(t *testing.T, path string) {
+	t.Helper()
+	file, err := os.OpenFile(path, os.O_RDWR, 0o600)
+	if err != nil {
+		t.Fatalf("open the slot table %s: %v", path, err)
+	}
+	version := make([]byte, 4)
+	if _, err := file.ReadAt(version, 4); err != nil {
+		file.Close()
+		t.Fatalf("read the version of %s: %v", path, err)
+	}
+	binary.LittleEndian.PutUint32(version, binary.LittleEndian.Uint32(version)+1)
+	if _, err := file.WriteAt(version, 4); err != nil {
+		file.Close()
+		t.Fatalf("state another version in %s: %v", path, err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatalf("close the slot table %s: %v", path, err)
+	}
 }
 
 // buildRecoverKV builds the command into a temporary directory and returns its

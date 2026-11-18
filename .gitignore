@@ -5,6 +5,10 @@
 *.so
 *.dylib
 
+# Command binaries built at the repository root from scripts/<name>/main.go
+/fold-cold-root
+/recover-kv
+
 # Test binary, built with `go test -c`
 *.test
 

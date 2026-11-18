@@ -205,15 +205,22 @@ func TestSoakContinuity(t *testing.T) {
 		if len(recovered) != 1 {
 			t.Fatalf("recovery reports = %d, want the one report of the restarted runtime", len(recovered))
 		}
-		if got, want := recovered[0].TaskIDs, ready[0].TaskIDs; !sameSoakIDs(got, want) {
-			t.Fatalf("recovered tasks = %v, want the %d tasks durable before the crash %v", got, len(want), want)
+		durable := ready[0].TaskIDs
+		owed := recovered[0].TaskIDs
+		if len(owed) == 0 || len(owed) >= len(durable) {
+			t.Fatalf("recovered tasks = %d of the %d durable before the crash, want the recovery report to state only what the cut still owed", len(owed), len(durable))
+		}
+		for _, id := range owed {
+			if !soakNamesID(durable, id) {
+				t.Fatalf("recovered task %q is no task the crashed process wrote, want every reported identity drawn from the %d durable before the crash", id, len(durable))
+			}
 		}
 		restored := soakEventsNamed(reader.events, "read")
 		if len(restored) != 1 {
 			t.Fatalf("read reports = %d, want the one diagnostic reading of the restarted runtime", len(restored))
 		}
-		if got, want := restored[0].TaskIDs, ready[0].TaskIDs; !sameSoakIDs(got, want) {
-			t.Fatalf("tasks read after the restart = %v, want the crashed process's tasks %v", got, want)
+		if got := restored[0].TaskIDs; !sameSoakIDs(got, durable) {
+			t.Fatalf("tasks read after the restart = %v, want the recovery report to state only what the cut still owed, while the %d tasks durable before the crash stay readable by identity %v", got, len(durable), durable)
 		}
 
 		emptyRoot, emptyOut := t.TempDir(), t.TempDir()
@@ -369,7 +376,7 @@ func soakResidentChild(t *testing.T, root, out string, rounds, events int) {
 		Event:       "closed",
 		Round:       rounds,
 		Invocations: rounds * events,
-		Tasks:       len(soakTaskIDs(t, ctx, run, sessions)),
+		Tasks:       len(soakTasksAfterClose(t, ctx, root, sessions)),
 		Executions:  tool.calls(),
 		Drained:     report.Drained,
 		Unsettled:   len(report.Unsettled),
@@ -481,7 +488,7 @@ func soakHotChild(t *testing.T, root, out string) {
 	if err != nil {
 		t.Fatalf("close the resident: %v", err)
 	}
-	ledger.report(soakEvent{Event: "closed", Drained: report.Drained, Unsettled: len(report.Unsettled), Tasks: len(soakTaskIDs(t, ctx, run, []event.Address{addr}))})
+	ledger.report(soakEvent{Event: "closed", Drained: report.Drained, Unsettled: len(report.Unsettled), Tasks: len(soakTasksAfterClose(t, ctx, root, []event.Address{addr}))})
 }
 
 // soakLeakChild samples the descriptor and goroutine budget of one resident
@@ -515,7 +522,7 @@ func soakLeakChild(t *testing.T, root, out string, rounds, events int) {
 	if err != nil {
 		t.Fatalf("close the resident: %v", err)
 	}
-	ledger.report(soakEvent{Event: "closed", Drained: report.Drained, Unsettled: len(report.Unsettled), Tasks: len(soakTaskIDs(t, ctx, run, sessions))})
+	ledger.report(soakEvent{Event: "closed", Drained: report.Drained, Unsettled: len(report.Unsettled), Tasks: len(soakTasksAfterClose(t, ctx, root, sessions))})
 }
 
 // soakAnswer is the scripted model answer of the soak: one tool call for the
@@ -617,6 +624,20 @@ func soakTaskIDs(t *testing.T, ctx context.Context, run *assembly.Run, sessions 
 	}
 	sort.Strings(ids)
 	return ids
+}
+
+// soakTasksAfterClose reads the durable task identities back through a runtime
+// opened over the root the closed one gave up, so the state the work ended in is
+// read through a view the close did not end.
+func soakTasksAfterClose(t *testing.T, ctx context.Context, root string, sessions []event.Address) []string {
+	t.Helper()
+	reopened, _, _ := assembleSoakRuntime(t, ctx, root)
+	defer func() {
+		if _, err := reopened.Close(ctx, agent.CloseRequest{Deadline: time.Now().Add(30 * time.Second)}); err != nil {
+			t.Fatalf("close the runtime opened to read the ended work: %v", err)
+		}
+	}()
+	return soakTaskIDs(t, ctx, reopened, sessions)
 }
 
 // openFDs reports the descriptors this process holds open.
@@ -828,6 +849,18 @@ func sameSoakIDs(got, want []string) bool {
 		}
 	}
 	return true
+}
+
+// soakNamesID reports whether one identity is among the ones a soak child wrote,
+// so a report of what a cut still owed is held against the identities the crashed
+// process really landed.
+func soakNamesID(ids []string, id string) bool {
+	for _, held := range ids {
+		if held == id {
+			return true
+		}
+	}
+	return false
 }
 
 // soakDurableBytes reports the durable files under one storage root, whatever

@@ -2,6 +2,7 @@ package state
 
 import (
 	"context"
+	"sort"
 	"sync"
 	"testing"
 
@@ -149,17 +150,6 @@ func (l *lineageFactLog) Put(ctx context.Context, key string, value []byte) erro
 	return nil
 }
 
-// Get returns the value stored under key and whether one is held.
-func (l *lineageFactLog) Get(ctx context.Context, key string) ([]byte, bool, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, false, err
-	}
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	value, ok := l.values[key]
-	return append([]byte(nil), value...), ok, nil
-}
-
 // Scan returns every stored pair under the key prefix as key and value.
 func (l *lineageFactLog) Scan(ctx context.Context, prefix string) (map[string][]byte, error) {
 	if err := ctx.Err(); err != nil {
@@ -173,6 +163,23 @@ func (l *lineageFactLog) Scan(ctx context.Context, prefix string) (map[string][]
 			out[key] = append([]byte(nil), value...)
 		}
 	}
+	return out, nil
+}
+
+// Keys returns the stored keys under the key prefix in key order.
+func (l *lineageFactLog) Keys(ctx context.Context, prefix string) ([]string, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	out := make([]string, 0, len(l.values))
+	for key := range l.values {
+		if len(key) >= len(prefix) && key[:len(prefix)] == prefix {
+			out = append(out, key)
+		}
+	}
+	sort.Strings(out)
 	return out, nil
 }
 

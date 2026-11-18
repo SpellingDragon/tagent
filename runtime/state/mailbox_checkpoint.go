@@ -71,28 +71,36 @@ func (s mailboxState) RestoreState(ctx context.Context, payload []byte) error {
 // owedOfWork reports the obligations this restore folds: the ones the cut
 // stated beside the ones the account behind the mailbox still owes, each named
 // once by the notification identity acceptance answers to, so one obligation
-// two sources state is seated once.
+// two sources state is seated once. A notice the account already answered opens
+// nothing, whichever source names it: the payload the cut wrote can predate the
+// receipt or the refusal a stopped process landed past that cut, and a
+// settlement is the notification's consumption result, not work a boot owes
+// again. A mailbox beside no account settles nothing, so the stated payload is
+// its only source.
 func (s mailboxState) owedOfWork(stated []task.OutboxNotice) []task.OutboxNotice {
 	owed := make([]task.OutboxNotice, 0, len(stated))
 	seen := make(map[noticeKey]bool, len(stated))
+	settled := func(notice task.Notice) bool {
+		return s.store.consumptions != nil && s.store.consumptions.settled(notice)
+	}
+	fold := func(notice task.OutboxNotice) {
+		key := noticeKeyOf(notice.Notice.Notice)
+		if seen[key] {
+			return
+		}
+		seen[key] = true
+		if settled(notice.Notice.Notice) {
+			return
+		}
+		owed = append(owed, notice)
+	}
 	for _, notice := range stated {
-		key := noticeKeyOf(notice.Notice.Notice)
-		if seen[key] {
-			continue
-		}
-		seen[key] = true
-		owed = append(owed, notice)
+		fold(notice)
 	}
-	if s.store.consumptions == nil {
-		return owed
-	}
-	for _, notice := range s.store.consumptions.OwedNotices() {
-		key := noticeKeyOf(notice.Notice.Notice)
-		if seen[key] {
-			continue
+	if s.store.consumptions != nil {
+		for _, notice := range s.store.consumptions.OwedNotices() {
+			fold(notice)
 		}
-		seen[key] = true
-		owed = append(owed, notice)
 	}
 	return owed
 }

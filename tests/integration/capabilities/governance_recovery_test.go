@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/SpellingDragon/tagent/api/durable"
 	"github.com/SpellingDragon/tagent/api/event"
 	"github.com/SpellingDragon/tagent/api/model"
 	"github.com/SpellingDragon/tagent/api/plugin"
@@ -32,7 +33,7 @@ import (
 // 契约: docs/wiki/agent/governance-enforcement.md#goal-registry
 func TestGovernanceRecovery(t *testing.T) {
 	t.Run("a declared goal activates the goal gate and a refusal permeates the goal context", func(t *testing.T) {
-		logFace := recOpenLog(t, "")
+		logFace, _ := recOpenLog(t, "")
 		goals := governance.NewGoalRegistry()
 		ledger := governance.NewDenialLedger()
 		if err := ledger.Bind(context.Background(), logFace); err != nil {
@@ -203,7 +204,7 @@ func TestGovernanceRecovery(t *testing.T) {
 
 	t.Run("a restart replays the governance events back and keeps the records it made", func(t *testing.T) {
 		root := t.TempDir()
-		firstLog := recOpenLog(t, root)
+		firstLog, firstTier := recOpenLog(t, root)
 		goals1 := governance.NewGoalRegistry()
 		if err := goals1.Bind(context.Background(), firstLog); err != nil {
 			t.Fatalf("bind the registry to the first store: %v", err)
@@ -253,7 +254,10 @@ func TestGovernanceRecovery(t *testing.T) {
 			t.Fatalf("goal events = %d declared / %d resolved, want the two declarations and the one resolution on the wire", declared, resolved)
 		}
 
-		secondLog := recOpenLog(t, root)
+		if err := firstTier.Close(); err != nil {
+			t.Fatalf("close the first governance tier before the restart: %v", err)
+		}
+		secondLog, _ := recOpenLog(t, root)
 		goals2 := governance.NewGoalRegistry()
 		if err := goals2.Bind(context.Background(), secondLog); err != nil {
 			t.Fatalf("bind the registry to the second store: %v", err)
@@ -285,7 +289,7 @@ func TestGovernanceRecovery(t *testing.T) {
 	})
 
 	t.Run("concurrent declarations and records keep every counter exact", func(t *testing.T) {
-		logFace := recOpenLog(t, "")
+		logFace, _ := recOpenLog(t, "")
 		goals := governance.NewGoalRegistry()
 		if err := goals.Bind(context.Background(), logFace); err != nil {
 			t.Fatalf("bind the registry to the governance store: %v", err)
@@ -413,19 +417,20 @@ func recJudge(t *testing.T, policy *governance.Policy, callID, args string) plug
 }
 
 // recOpenLog opens the durable governance event face over the real memory
-// tier: the in-memory tier when root is empty, the localfile tier otherwise.
-// Reopening the same root is the restart these sub-cases recover across.
-func recOpenLog(t *testing.T, root string) governance.GovernanceEventLog {
+// tier: the in-memory tier when root is empty, the localfile tier under write
+// rights otherwise. Reopening the same root is the restart these sub-cases
+// recover across, so the caller closes the returned tier before the next open.
+func recOpenLog(t *testing.T, root string) (durable.FactLog, *ledger.Tier) {
 	t.Helper()
 	cfg := ledger.StorageConfig{Type: ledger.StorageMemory}
 	if root != "" {
-		cfg = ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: root}
+		cfg = ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: root, WriteRights: true}
 	}
 	tier, err := ledger.OpenTier(context.Background(), cfg)
 	if err != nil {
 		t.Fatalf("open the memory tier under %q: %v", root, err)
 	}
-	return ledger.TierFactLog(tier)
+	return ledger.TierFactLog(tier), tier
 }
 
 // recFind reports the newest ledger record filed under the subtype, or nil

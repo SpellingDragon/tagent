@@ -5,6 +5,23 @@ policy that rules each tool call, the budget and goal registry it consults, and
 the denial ledger a refusal leaves behind. The abstract faces stay in plugin;
 this package is their implementation domain and owns no runtime state.
 
+The governance state slice: the ledger's and the goal registry's derived state,
+the two event streams' tails and the approval book as one framework checkpoint
+slice. The governance events stay the truth of the governance history and the
+replay source; this slice is the state they already folded, so a restarted
+process reads a cut the size of the state it holds instead of scanning the
+stream it committed. The slice carries the cut beside the state it cut:
+the tail each stream ended at, so a restarted writer continues its numbering
+past the keys already written instead of re-keying over commitments, and a boot
+that finds a cut reads the events past it alone.
+
+The redline list (3 rules): MUST keep the governance events as the truth:
+the slice is derived, never the source, and no statement here rewrites or drops
+a committed event. MUST keep the stream keys at their 19-digit form, so the
+lexicographic order of the keys stays the order the operations happened in.
+MUST refuse a payload it does not recognize by name instead of restoring an
+empty state over a cut the process committed.
+
 CONSTANTS
 
 const (
@@ -109,34 +126,63 @@ type DenialLedger struct {
     the ledger record and the governance event — so the model reads the refusal
     and the host and the observation face see it too.
 
-    The ledger is concurrent safe, and the durable face is late-bound and nil
-    safe: without a store it degrades to memory state instead of failing,
-    and binding one replays the stored governance events back into the index,
-    so a restart keeps the records it already made.
+    - concurrent safe, with a late-bound and nil safe durable face:
+    without a store it degrades to memory state, and binding one folds the
+    events past the stated cut so a restart keeps the records it made - the
+    write path is serialized and numbers behind a barrier it confirmed:
+    a refused write hands its number back, and a barrier that did not confirm
+    stops the stream numbering on - a hole is not the chain's end: the first
+    writer continuing a seated cut resolves the tail from the highest committed
+    sequence and names every missing sequence (see resolveContinuationTail),
+    so a restart never re-keys over an event already stored - a write meets
+    the store under its key before it lands: the same bytes replay as the
+    commitment already held, and other bytes under that key are refused by name
+    (see errGovernanceEventConflict), so an identity is never overwritten - the
+    records a query reads are the derived index: a cut states the tail alone and
+    the history behind it is read from the stream on demand
+
+    The redline list (2 rules): MUST key every governance event under the stream
+    key its family numbers. MUST NOT rewrite or drop a governance event already
+    stored.
 
 func NewDenialLedger() *DenialLedger
-    NewDenialLedger builds one ledger in memory state. BindStore hands it the
-    durable face whenever the wiring has one.
+    NewDenialLedger builds one ledger in memory state. Bind hands it the durable
+    face whenever the wiring has one.
 
-func (l *DenialLedger) BindStore(log GovernanceEventLog)
-    BindStore hands the ledger its durable face and replays the governance
-    events already stored there back into the index. It is nil safe, and it runs
-    single threaded at construction — the same discipline the goal registry
-    binds under.
+func (l *DenialLedger) Bind(ctx context.Context, log durable.FactLog) error
+    Bind hands the ledger its durable face and folds the stored governance
+    events that landed past the state cut this ledger holds back into the index.
+    It is nil safe, and it runs single threaded at construction — the same
+    discipline the goal registry binds under.
+
+    The error of a fold belongs to the caller that can stop the boot: a stream
+    this ledger could not read leaves the index behind the chain it serves,
+    and the caller that holds the cut decides whether that is a boot to stop.
+    The framework state seam is that caller (see StateSeat.Bind).
 
 func (l *DenialLedger) Count() int
-    Count reports how many records the ledger holds.
+    Count reports how many records the ledger holds: the index it folded, which
+    a seated cut derives from the stream it numbers on the first question. It
+    never answers the tail sequence, because a cut numbers events a window may
+    leave out of the index, and a count that reported those would over-report
+    the records.
 
 func (l *DenialLedger) Query(limit int) []DenialRecord
     Query returns the newest records, at most limit of them. A limit of zero or
     less returns all of them. The records are copies, so a reader never observes
-    a concurrent write.
+    a concurrent write. A ledger seated by a cut reads the history its cut
+    covers from the stream on the first question, so the cut carries the live
+    state and the history is paid for by the reader that asks for it.
 
 func (l *DenialLedger) Record(rec DenialRecord)
     Record writes the governance double of one record: the ledger entry and the
     governance event beside it. A record that carries no timestamp is stamped
-    here, and an event write that fails never blocks the operation — the ledger
-    entry stands and the record keeps its meaning.
+    here. The durable face decides the entry: a landed event indexes the record,
+    a replay of the event already held indexes nothing twice, and a key naming
+    other content is refused by name and indexes nothing. A store-side failure
+    never blocks the operation — the ledger entry stands and the failure is
+    named at ERROR beside it, a gap in the stream the next writer must not close
+    by re-keying over it.
 
 type DenialRecord struct {
 	// Subtype is the governance subtype the record is filed under.
@@ -203,24 +249,30 @@ type GoalRegistry struct {
     activates the governance goal gate, and a refusal of a goal-required call
     permeates the goal context into its record.
 
-    The registry is concurrent safe, and its durable face is late-bound and
-    nil safe: without a store it degrades to memory state instead of failing,
-    and binding one replays the stored goal events back into the registry,
-    so a restart keeps the goals it already declared.
+    The registry is concurrent safe, and its durable face is late-bound and nil
+    safe: without a store it degrades to memory state instead of failing, and
+    binding one folds the stored goal events that landed past the state cut this
+    registry holds, so a restart keeps the goals it already declared. The cut
+    is seated by the framework state slice (see StateSeat); a registry beside no
+    seat holds the zero cut, so the events past it are the whole stream.
 
 func NewGoalRegistry() *GoalRegistry
-    NewGoalRegistry builds one goal registry in memory state. BindStore hands it
-    the durable face whenever the wiring has one.
+    NewGoalRegistry builds one goal registry in memory state. Bind hands it the
+    durable face whenever the wiring has one.
 
 func (g *GoalRegistry) Active() []*Goal
     Active returns every unexpired active goal, for diagnostics and tools.
 
-func (g *GoalRegistry) BindStore(log GovernanceEventLog)
-    BindStore hands the registry its durable face and replays the goal events
-    already stored there back into it — declarations and resolutions in the
-    order the operations happened, so a resolved goal is never resurrected and
-    a later declaration never reuses an identity. It is nil safe, and it runs
-    single threaded at construction.
+func (g *GoalRegistry) Bind(ctx context.Context, log durable.FactLog) error
+    Bind hands the registry its durable face and folds the goal events
+    that landed past the state cut it holds back into it — declarations and
+    resolutions in the order the operations happened, so a resolved goal is
+    never resurrected and a later declaration never reuses an identity. It is
+    nil safe, and it runs single threaded at construction.
+
+    The error of a fold belongs to the caller that can stop the boot: a stream
+    this registry could not read leaves the goals behind the chain that serves
+    them.
 
 func (g *GoalRegistry) Current() *Goal
     Current returns the goal the registry reads as the current goal context:
@@ -278,26 +330,6 @@ const (
 	// statistics and budget attribution.
 	GoalExpired GoalStatus = "expired"
 )
-type GovernanceEventLog interface {
-	// Put stages one governance event under its key.
-	Put(ctx context.Context, key string, value []byte) error
-	// Scan returns every stored governance event under the key prefix, keyed by
-	// the event key it was written under.
-	Scan(ctx context.Context, prefix string) (map[string][]byte, error)
-	// Sync completes the write barrier over everything staged so far.
-	Sync(ctx context.Context) error
-}
-    GovernanceEventLog is the durable face one governance double is written to
-    and replayed from: put, prefix scan and the sync barrier a durable write
-    reports its success behind. Its signatures carry built-in types only,
-    so any durable backend — the memory tier's fact log among them — satisfies
-    it structurally and no package edge is required in either direction.
-
-    The redline list (3 rules): MUST key every governance event under the
-    stream key its family numbers. MUST NOT report a staged write as durable
-    before Sync returns nil. MUST NOT rewrite or drop a governance event already
-    stored.
-
 type Policy struct {
 	// Has unexported fields.
 }
@@ -452,6 +484,53 @@ type RiskRules []ToolRiskRule
     grade only when the one Before pass carries none — and the selection prefers
     an exact tool name over the longest matching prefix, then the policy's
     default grade.
+
+type StateSeat struct {
+	// Has unexported fields.
+}
+    StateSeat is the governance recoverable state as the framework sees it:
+    the ledger and the goal registry that fold the two governance streams,
+    and the approval book those rulings park calls on. The seat is what the
+    composition mounts on the runtime's state seam, so one checkpoint cut states
+    the governance state and one restore puts it back.
+
+func NewStateSeat(ledger *DenialLedger, goals *GoalRegistry, approvals *approval.ApprovalManager) *StateSeat
+    NewStateSeat returns the governance state of one process as a state seam
+    slice: the ledger, the goal registry and the approval book that stand behind
+    it.
+
+func (s *StateSeat) Bind(ctx context.Context, log durable.FactLog) error
+    Bind hands the governance state the durable face the slice's cut belongs to:
+    each stream folds the events that landed past the cut it restored, so the
+    state this process serves is the state the cut plus its tail states. The
+    approval book's attention chain is written to and folded from the same face,
+    so the questions and the rulings behind the gate outlive the process beside
+    the two streams they are read with. A nil log is a process with no durable
+    tier: the state stays the memory state the restore seated.
+
+func (s *StateSeat) RestoreState(ctx context.Context, payload []byte) error
+    RestoreState puts one governance state back: the cut each stream continues
+    from, the state the cut kept in force and the approval requests the book
+    held. The events past the cut are folded beside it when the durable face is
+    bound (StateSeat.Bind), so a boot states the same governance as the process
+    that cut it.
+
+    A cut that states nothing is the zero cut: the streams continue from their
+    first key, the events past it are the whole stream, and the approval book
+    reads the request files, because a process that took no cut left them as its
+    only record.
+
+func (s *StateSeat) SnapshotState(_ context.Context) ([]byte, error)
+    SnapshotState states the governance state as JSON: the tail each stream
+    ended at, the state those streams keep in force and the approval book. The
+    read takes the holders' own read locks and nothing else — it never flushes,
+    commits or waits for a commit of its own — so the cut never stands between
+    a governance write and its landing. The denial history stays behind the tail
+    it numbers: a cut costs the live state instead of the history the stream
+    already keeps.
+
+func (s *StateSeat) StateName() string
+    StateName reports the name the governance state is keyed by in a checkpoint.
 
 type ToolRiskRule struct {
 	// Tool is the tool name, or the tool-name prefix when Prefix is set.

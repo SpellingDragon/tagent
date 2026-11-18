@@ -190,8 +190,8 @@ func (c *smokeConfig) write(t *testing.T) {
 // 入口显式声明 context_window = 2×回放窗口：replay_window 是回放窗口
 // （折叠节奏），context_window 是请求预算门的唯一窗口来源（裁定乙），二者刻意
 // 解耦——合并会先撞预算（r32 的 1519/1500）。未声明 context_window 则门闭、
-// 整包发送（不再按 replay_window 派生缺省）；输出限 max_tokens 未声明=0=不预留，
-// 输入预算即整个 context_window（不再凭空缺省 window/4）。
+// 整包发送（缺省不按 replay_window 派生）；输出限 max_tokens 未声明=0=不预留，
+// 输入预算即整个 context_window，不凭空缺省 window/4。
 func (c *smokeConfig) document() string {
 	if c.Doc != nil {
 		return c.Doc(c)

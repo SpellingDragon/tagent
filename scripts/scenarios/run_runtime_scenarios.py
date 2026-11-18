@@ -41,13 +41,18 @@ schema v2（`event-integrity` 合同）额外能力，v1 行为不变：
   * 零匹配即失败：进程退出 0 但日志里没有该测试的 run 终局时判 unattested，
     不把退出码单独当凭据；
   * `--generation-logs DIR`：给出时读 `DIR/logs/genNN.log` 里的
-    `tagent: durable load scan prefix=... keys=N` 计数，五行缺段或 spec/consume/fact
-    任一为零即判红（attempt/reject 合法为零），判定写进每轮 evidence 的
-    `durable_scan`；
+    `tagent: durable load scan prefix=... keys=N` 计数与每代的
+    `tagent: boot seated the task account tasks=… tail=…` 行：五行缺段、spec/consume/fact
+    任一为零而座账户行解释不了该零读（切片座则族前缀按构造零读、空账户全量扫零读）、
+    或没有任何一代座入非空账户，即判红（attempt/reject 合法为零），判定写进每轮
+    evidence 的 `durable_scan`；
   * 超时不再抛异常：兜底时限触发时仍写 test-log 与 evidence，并在 `liveness`
     里具名 `go-test-bound`/`expired`，避免分片被 kill 后 CI 无产物可上传；
   * 指纹覆盖受影响第一方源码、未跟踪测试、fixture、合同与各模块 go.mod/go.sum，
-    不只记 HEAD。
+    不只记 HEAD；
+  * `run_config.environment`：记录本轮实际继承的决定性环境变量
+    （`EVENT_ENVIRONMENT_NAMES`）。子进程继承本进程环境，argv 之外还能改变判定或
+    度量的取值必须与 argv 一并落盘；未设置的变量不写，凭证类变量名一律拒收。
 """
 from __future__ import annotations
 
@@ -109,6 +114,35 @@ EXIT_DRIFT = 3
 LIVENESS_GO_TEST_BOUND = "go-test-bound"
 TIMEOUT_EXIT_CODE = 124
 
+# The ambient variables that decide what an event run measures. A child inherits
+# this process's environment unchanged, so an inherited value here is a
+# determinant of the verdict and has to be recorded beside the argv: the argv
+# alone would describe a run that may not be the one that happened.
+#   GOFLAGS    go supplies these as defaults for commands that do not override
+#              them ("go help environment": command-line flags are applied after
+#              GOFLAGS and override it).
+#   GOMAXPROCS scheduler width, parsed as a positive integer by the runtime
+#              (runtime/proc.go).
+#   GOWORK     workspace resolution for `go -C <module>`.
+#   GODEBUG    runtime facilities; a boot reads it when it merges gctrace
+#              (assembly/host.go) and covered tests assert on it.
+# The TAGENT_* switches are read by the product while a boot runs inside these
+# tests (assembly/host.go, assembly/run.go, assembly/host_face.go,
+# features/evolution/meditation/mount.go); the SMOKE_ROUNDS and
+# TAGENT_CALIBRATION_* reads select the branch and the round count of the
+# in-scope wechat-bot tests (examples/wechat-bot/smoke_test.go,
+# smoke_harness_test.go).
+EVENT_ENVIRONMENT_NAMES = (
+    "GOFLAGS", "GODEBUG", "GOMAXPROCS", "GOWORK",
+    "TAGENT_BOOT_TRACE", "TAGENT_GCTRACE", "TAGENT_HTTP_PORT", "TAGENT_SESSION_ID",
+    "SMOKE_ROUNDS", "TAGENT_CALIBRATION_BASELINE", "TAGENT_CALIBRATION_COLD_BUILD_MS",
+    "TAGENT_CALIBRATION_MODE", "TAGENT_CALIBRATION_PLAN", "TAGENT_CALIBRATION_RUN_DIR",
+)
+# A declared name carrying one of these marks names a credential, or the variable
+# one lives in. Evidence files are written to disk and may be committed, so such
+# a name must never enter the recorded set.
+EVENT_CREDENTIAL_MARKERS = ("AUTH", "CREDENTIAL", "KEY", "PASSWORD", "SECRET", "TOKEN")
+
 # The five prefix reads one durable load performs, in scan order. The scan order
 # and the prefix values are owned by runtime/state/durable.go; this list only
 # mirrors them so a shard can be judged on what its restart actually loaded.
@@ -131,6 +165,11 @@ DURABLE_SCAN_DATA_PREFIXES = frozenset({
 })
 DURABLE_SCAN_LINE_RE = re.compile(
     r"tagent: durable load scan prefix=(\S+) keys=(\d+) bytes=(\d+)")
+# One line per boot stating the path its task-account seat read by, written by
+# assembly/checkpoint.go: `tail=none` is the whole-log scan the family prefixes
+# count, a stated cut is a seat the checkpoint covers and reads by task identity.
+SEAT_LINE_RE = re.compile(
+    r"tagent: boot seated the task account tasks=(\d+) tail=(\S+) reads=(\d+) keys=(\d+)")
 
 
 class RunnerError(Exception):
@@ -904,14 +943,42 @@ def read_durable_scan_counts(log_path: str) -> dict:
     return counts
 
 
+def read_seat_paths(log_path: str) -> list:
+    """Read one generation log's seated-account lines: the read path each boot stated."""
+    seats = []
+    with open(log_path, "r", encoding="utf-8", errors="replace") as handle:
+        for line in handle:
+            match = SEAT_LINE_RE.search(line)
+            if match is None:
+                continue
+            seats.append({"tasks": int(match.group(1)), "tail": match.group(2),
+                          "reads": int(match.group(3)), "keys": int(match.group(4))})
+    return seats
+
+
+def zero_read_is_explained(seat: dict) -> bool:
+    """Report whether one seated-account line explains a zero family-prefix read.
+
+    A stated cut seats the account from the checkpoint, so the family prefixes read
+    zero by construction and the chains past the cut read by task identity. A
+    whole-log seat explains a zero only for an account that held nothing.
+    """
+    if seat["tail"] != "none":
+        return True
+    return seat["tasks"] == 0
+
+
 def durable_scan_attestation(directory: str) -> dict:
     """Attest that a shard's restarts really reloaded the durable chain.
 
-    The host writes one `durable load scan` line per prefix and generation. A
-    shard is red when a prefix was never scanned at all (the five-line record is
-    truncated) or when a data-carrying prefix loaded zero keys (the restart ran
-    over an empty chain, so the 120 restarts proved nothing). `attempt` and
-    `reject` may legitimately be zero.
+    The host writes one `durable load scan` line per prefix and generation, and one
+    `boot seated the task account` line per boot stating the path that seat read by.
+    A shard is red when a prefix was never scanned at all (the five-line record is
+    truncated), when a data-carrying prefix loaded zero keys and no seat explains
+    that zero, and when no boot seated a non-empty task account. A stated cut
+    explains a zero: the checkpoint covers the tasks it names, so the family
+    prefixes read zero and the rest reads by task identity. `attempt` and `reject`
+    may legitimately be zero.
     """
     logs_dir = os.path.join(directory, "logs")
     attestation = {"directory": directory, "prefixes": {}, "log_files": [],
@@ -926,8 +993,12 @@ def durable_scan_attestation(directory: str) -> dict:
         return attestation
     attestation["log_files"] = log_files
     counts = {}
+    files = {}
     for name in log_files:
-        for prefix, seen in read_durable_scan_counts(os.path.join(logs_dir, name)).items():
+        path = os.path.join(logs_dir, name)
+        scanned = read_durable_scan_counts(path)
+        files[name] = {"scanned": scanned, "seats": read_seat_paths(path)}
+        for prefix, seen in scanned.items():
             merged = counts.setdefault(prefix, {"keys": 0, "bytes": 0, "reads": 0})
             merged["keys"] = max(merged["keys"], seen["keys"])
             merged["bytes"] = max(merged["bytes"], seen["bytes"])
@@ -941,8 +1012,26 @@ def durable_scan_attestation(directory: str) -> dict:
     empty = [prefix for prefix in DURABLE_SCAN_PREFIXES
              if prefix in DURABLE_SCAN_DATA_PREFIXES and counts[prefix]["keys"] == 0]
     if empty:
-        attestation["reason"] = "durable load scan loaded zero keys for {}".format(empty)
-        return attestation
+        unexplained = [name for name in log_files
+                       if any(prefix in files[name]["scanned"] for prefix in empty)
+                       and not (files[name]["seats"]
+                                and all(zero_read_is_explained(seat)
+                                        for seat in files[name]["seats"]))]
+        if unexplained:
+            attestation["reason"] = ("durable load scan loaded zero keys for {} and the log of {} "
+                                     "states no seat that explains it".format(empty, unexplained))
+            return attestation
+        seats = [seat for name in log_files for seat in files[name]["seats"]]
+        if not any(seat["tasks"] > 0 for seat in seats):
+            attestation["reason"] = ("durable load scan loaded zero keys for {} and no boot seated "
+                                     "a non-empty task account".format(empty))
+            return attestation
+        attestation["zero_reads"] = {
+            prefix: {"bounded_seats": sum(1 for seat in seats if seat["tail"] != "none"),
+                     "empty_account_seats": sum(1 for seat in seats
+                                                if seat["tail"] == "none" and seat["tasks"] == 0),
+                     "deepest_seat_keys": max([seat["keys"] for seat in seats] or [0])}
+            for prefix in empty}
     attestation["state"] = "attested"
     return attestation
 
@@ -961,11 +1050,32 @@ def attach_durable_scan(repeat: dict, attestation: dict) -> None:
         repeat["verdict"] = "unattested"
 
 
+def recorded_environment(environ) -> dict:
+    """Record the declared determinants this run actually inherited.
+
+    Only the `EVENT_ENVIRONMENT_NAMES` the process holds are copied: an unset
+    name is left out rather than recorded as a default the run never had, and a
+    declared name that marks a credential is refused outright, because the
+    evidence file is written to disk and may be committed.
+    """
+    for name in EVENT_ENVIRONMENT_NAMES:
+        marker = next((mark for mark in EVENT_CREDENTIAL_MARKERS if mark in name.upper()), None)
+        if marker is not None:
+            raise RunnerError("event environment {!r} carries the credential marker {!r}; a "
+                              "recorded determinant must never name a credential".format(
+                                  name, marker))
+    return {name: environ[name] for name in EVENT_ENVIRONMENT_NAMES if name in environ}
+
+
 def run_event_repeat(args, root: str, index: dict, groups: list, selected: list,
                      seed, window, repeat_index: int, repeat_total: int,
                      out_dir: str, contract_digest: str, fingerprints: list) -> dict:
     """Run every group once, in its own directory, under one fresh run_id."""
     run_id = str(uuid.uuid4())
+    # Captured before the invocations start: this is the environment the children
+    # inherit, not a re-read of it after they ran.
+    environment = recorded_environment(os.environ)
+
     repeat_dir = os.path.join(out_dir, "repeat-{}".format(repeat_index))
     os.makedirs(repeat_dir, exist_ok=True)
     chunks = []
@@ -1020,6 +1130,8 @@ def run_event_repeat(args, root: str, index: dict, groups: list, selected: list,
             "window": window,
             "tags": sorted({tag for group in groups for tag in group["tags"]}),
             "race": all(group["race"] for group in groups),
+            "environment": environment,
+
             "selectors": [
                 {"test_id": test_id, "module_path": index[test_id]["module_path"],
                  "test_package": event_package_arg(index[test_id]["module_path"],
@@ -1211,7 +1323,8 @@ def parse_args(argv):
     parser.add_argument("--generation-logs", default=None, dest="generation_logs",
                         metavar="DIR",
                         help="v2：长跑子进程生成日志目录（其 logs/genNN.log 持有 durable load "
-                             "scan 计数）；给出即按「五行缺段或数据前缀全零」判红")
+                             "scan 计数与座账户行）；给出即按「五行缺段、数据前缀全零且座账户行"
+                             "解释不了、无一代座入非空账户」判红")
     parser.add_argument("--json", action="store_true", help="把报告以 JSON 打到 stdout")
     return parser.parse_args(argv)
 

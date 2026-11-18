@@ -27,12 +27,20 @@ import (
 // - segmented reading hands out whole lines that concatenate back to the exact bytes
 // - byte bounded segments stay bounded and resume exactly
 // - a protection hold is cleared only by the release its holder makes and outlives one holder
+// - every store opens through OpenTier with its recall windows registered by the storage config
 func TestOriginalReferenceIsolation(t *testing.T) {
 	ctx := context.Background()
 	original := []byte("first line\nsecond line\n")
 
 	t.Run("different event keys keep independent bodies and references", func(t *testing.T) {
-		store := ledger.NewMemoryOriginalStore(ledger.WithRetentionWindow("keep", 24*time.Hour))
+		store := openOriginalTier(t, map[string]time.Duration{"keep": 24 * time.Hour})
+		inspect, ok := store.(interface {
+			References(event.EventID) []ledger.OriginalRef
+			BlobCount() int
+		})
+		if !ok {
+			t.Fatalf("the memory tier holds %T, want the reference and blob inspection face", store)
+		}
 		wants := []ledger.OriginalRef{
 			{Key: "0a01", Owner: event.Address{AgentID: "writer-a", SessionID: "s1"}, Format: "text/plain", RetentionPolicy: "keep"},
 			{Key: "0b02", Owner: event.Address{AgentID: "writer-b", SessionID: "s2"}, Format: "text/markdown", RetentionPolicy: "keep"},
@@ -42,11 +50,11 @@ func TestOriginalReferenceIsolation(t *testing.T) {
 				t.Fatalf("Put(%s): %v", want.Key, err)
 			}
 		}
-		if n := store.BlobCount(); n != 2 {
+		if n := inspect.BlobCount(); n != 2 {
 			t.Fatalf("BlobCount() = %d, want one independent body per event key", n)
 		}
 		for _, want := range wants {
-			got := store.References(want.Key)
+			got := inspect.References(want.Key)
 			if len(got) != 1 || got[0].Owner != want.Owner || got[0].Format != want.Format || got[0].RetentionPolicy != want.RetentionPolicy {
 				t.Fatalf("References(%s) = %+v, want only the reference registered as owner=%s format=%s policy=%s", want.Key, got, want.Owner.AgentID, want.Format, want.RetentionPolicy)
 			}
@@ -58,7 +66,14 @@ func TestOriginalReferenceIsolation(t *testing.T) {
 	})
 
 	t.Run("one key keeps every scope registered on it", func(t *testing.T) {
-		store := ledger.NewMemoryOriginalStore(ledger.WithRetentionWindow("keep", 24*time.Hour))
+		store := openOriginalTier(t, map[string]time.Duration{"keep": 24 * time.Hour})
+		inspect, ok := store.(interface {
+			References(event.EventID) []ledger.OriginalRef
+			BlobCount() int
+		})
+		if !ok {
+			t.Fatalf("the memory tier holds %T, want the reference and blob inspection face", store)
+		}
 		first := ledger.OriginalRef{Key: "0c03", Owner: event.Address{AgentID: "writer-a", SessionID: "s1"}, Format: "text/plain", RetentionPolicy: "keep"}
 		second := ledger.OriginalRef{Key: "0c03", Owner: event.Address{AgentID: "writer-b", SessionID: "s2"}, Format: "application/json", RetentionPolicy: "keep"}
 		for _, ref := range []ledger.OriginalRef{first, second} {
@@ -66,7 +81,7 @@ func TestOriginalReferenceIsolation(t *testing.T) {
 				t.Fatalf("Put(%s/%s): %v", ref.Owner.AgentID, ref.Format, err)
 			}
 		}
-		got := store.References("0c03")
+		got := inspect.References("0c03")
 		if len(got) != 2 {
 			t.Fatalf("References(0c03) = %+v, want the two scopes registered side by side", got)
 		}
@@ -81,7 +96,7 @@ func TestOriginalReferenceIsolation(t *testing.T) {
 				t.Fatalf("References(0c03) = %+v, want the scope owner=%s format=%s policy=%s kept beside the other", got, want.Owner.AgentID, want.Format, want.RetentionPolicy)
 			}
 		}
-		if n := store.BlobCount(); n != 1 {
+		if n := inspect.BlobCount(); n != 1 {
 			t.Fatalf("BlobCount() = %d, want 1 stored blob for identical bytes", n)
 		}
 		recalled := store.Get(ctx, "0c03")
@@ -91,10 +106,10 @@ func TestOriginalReferenceIsolation(t *testing.T) {
 	})
 
 	t.Run("missing and expired recall are named", func(t *testing.T) {
-		store := ledger.NewMemoryOriginalStore(
-			ledger.WithRetentionWindow("transient", 0),
-			ledger.WithRetentionWindow("keep", 24*time.Hour),
-		)
+		store := openOriginalTier(t, map[string]time.Duration{
+			"transient": 0,
+			"keep":      24 * time.Hour,
+		})
 		missing := store.Get(ctx, "0d04")
 		if missing.Outcome != ledger.RecallMissing || missing.Body != nil || missing.Err != nil {
 			t.Fatalf("Get(0d04) = %+v, want named missing without body or error", missing)
@@ -124,10 +139,14 @@ func TestOriginalReferenceIsolation(t *testing.T) {
 	})
 
 	t.Run("a read runs inside the scope it is bound to", func(t *testing.T) {
-		store := ledger.NewMemoryOriginalStore(
-			ledger.WithRetentionWindow("transient", 0),
-			ledger.WithRetentionWindow("keep", 24*time.Hour),
-		)
+		store := openOriginalTier(t, map[string]time.Duration{
+			"transient": 0,
+			"keep":      24 * time.Hour,
+		})
+		scoped, ok := store.(ledger.ScopedOriginalStore)
+		if !ok {
+			t.Fatalf("the memory tier holds %T, want the scoped original read face", store)
+		}
 		key := event.EventID("0j10")
 		short := ledger.OriginalRef{Key: key, Owner: event.Address{AgentID: "writer-a", SessionID: "s1"}, Format: "text/plain", RetentionPolicy: "transient"}
 		kept := ledger.OriginalRef{Key: key, Owner: event.Address{AgentID: "writer-b", SessionID: "s2"}, Format: "text/markdown", RetentionPolicy: "keep"}
@@ -139,14 +158,14 @@ func TestOriginalReferenceIsolation(t *testing.T) {
 		if recalled := store.Get(ctx, key); recalled.Outcome != ledger.RecallFound {
 			t.Fatalf("Get(%s) = outcome %v, want found while one reference is inside its window", key, recalled.Outcome)
 		}
-		keptReader, err := ledger.NewScopedReader(store, kept.ReadScope())
+		keptReader, err := ledger.NewScopedReader(scoped, kept.ReadScope())
 		if err != nil {
 			t.Fatalf("NewScopedReader(kept scope): %v", err)
 		}
 		if recalled := keptReader.Get(ctx, key); recalled.Outcome != ledger.RecallFound || !bytes.Equal(recalled.Body, original) {
 			t.Fatalf("scoped Get(%s) = outcome %v, want found inside the kept scope", key, recalled.Outcome)
 		}
-		shortReader, err := ledger.NewScopedReader(store, short.ReadScope())
+		shortReader, err := ledger.NewScopedReader(scoped, short.ReadScope())
 		if err != nil {
 			t.Fatalf("NewScopedReader(transient scope): %v", err)
 		}
@@ -154,20 +173,20 @@ func TestOriginalReferenceIsolation(t *testing.T) {
 			t.Fatalf("scoped Get(%s) = outcome %v body %q, want expired inside the transient scope alone", key, recalled.Outcome, recalled.Body)
 		}
 		stranger := ledger.ReadScope{Owner: event.Address{AgentID: "writer-c", SessionID: "s3"}, Format: "text/plain", RetentionPolicy: "keep"}
-		strangerReader, err := ledger.NewScopedReader(store, stranger)
+		strangerReader, err := ledger.NewScopedReader(scoped, stranger)
 		if err != nil {
 			t.Fatalf("NewScopedReader(stranger scope): %v", err)
 		}
 		if recalled := strangerReader.Get(ctx, key); recalled.Outcome != ledger.RecallMissing || recalled.Body != nil || recalled.Err != nil {
 			t.Fatalf("scoped Get(%s) = %+v, want named missing without body or error for a foreign scope", key, recalled)
 		}
-		if _, err := ledger.NewScopedReader(store, ledger.ReadScope{}); !errors.Is(err, ledger.ErrScopeRequired) {
+		if _, err := ledger.NewScopedReader(scoped, ledger.ReadScope{}); !errors.Is(err, ledger.ErrScopeRequired) {
 			t.Fatalf("NewScopedReader(zero scope) error = %v, want %v", err, ledger.ErrScopeRequired)
 		}
 	})
 
 	t.Run("a read that fails is named", func(t *testing.T) {
-		store := ledger.NewMemoryOriginalStore()
+		store := openOriginalTier(t, nil)
 		ref := ledger.OriginalRef{Key: "0f06", Owner: event.Address{AgentID: "writer-a", SessionID: "s1"}, Format: "text/plain", RetentionPolicy: "keep"}
 		if err := store.Put(ctx, ref, original); err != nil {
 			t.Fatalf("Put(0f06): %v", err)
@@ -182,7 +201,7 @@ func TestOriginalReferenceIsolation(t *testing.T) {
 
 	t.Run("segmented reading keeps whole lines byte identical", func(t *testing.T) {
 		body := []byte("第一行：中文与 English 混排\nsecond line\n\n第四行末尾不换行")
-		store := ledger.NewMemoryOriginalStore()
+		store := openOriginalTier(t, nil)
 		ref := ledger.OriginalRef{Key: "0g07", Owner: event.Address{AgentID: "writer-a", SessionID: "s1"}, Format: "text/plain", RetentionPolicy: "keep"}
 		if err := store.Put(ctx, ref, body); err != nil {
 			t.Fatalf("Put(0g07): %v", err)
@@ -225,12 +244,16 @@ func TestOriginalReferenceIsolation(t *testing.T) {
 
 	t.Run("byte bounded segments stay bounded and resume exactly", func(t *testing.T) {
 		body := append(bytes.Repeat([]byte("a"), 3*int(ledger.DefaultSegmentMaxBytes)), []byte("\r\n混排 ✓")...)
-		store := ledger.NewMemoryOriginalStore()
+		store := openOriginalTier(t, nil)
+		scoped, ok := store.(ledger.ScopedOriginalStore)
+		if !ok {
+			t.Fatalf("the memory tier holds %T, want the scoped original read face", store)
+		}
 		ref := ledger.OriginalRef{Key: "0k11", Owner: event.Address{AgentID: "writer-a", SessionID: "s1"}, Format: "text/plain", RetentionPolicy: "keep"}
 		if err := store.Put(ctx, ref, body); err != nil {
 			t.Fatalf("Put(0k11): %v", err)
 		}
-		reader, err := ledger.NewScopedReader(store, ref.ReadScope())
+		reader, err := ledger.NewScopedReader(scoped, ref.ReadScope())
 		if err != nil {
 			t.Fatalf("NewScopedReader: %v", err)
 		}
@@ -335,6 +358,22 @@ func TestOriginalReferenceIsolation(t *testing.T) {
 		}
 		assertProtected(t, guard, ledger.OriginalRef{Key: "0i09", Owner: holderB.Owner}, false)
 	})
+}
+
+// openOriginalTier opens the memory tier through the production config entry
+// with the given recall windows registered, and closes the tier when the test
+// ends.
+func openOriginalTier(t *testing.T, windows map[string]time.Duration) ledger.OriginalStore {
+	t.Helper()
+	tier, err := ledger.OpenTier(context.Background(), ledger.StorageConfig{
+		Type:             ledger.StorageMemory,
+		RetentionWindows: windows,
+	})
+	if err != nil {
+		t.Fatalf("open the memory tier: %v", err)
+	}
+	t.Cleanup(func() { tier.Close() })
+	return tier.Originals
 }
 
 // assertProtected fails the test when the protection state of the original does

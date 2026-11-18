@@ -128,11 +128,6 @@ var (
 	_ error = ErrBudgetExhausted
 )
 
-// The governance event log stays a declared interface whose method signatures
-// carry built-in types only: the structural match the memory tier's fact log
-// satisfies without a package edge in either direction.
-var _ GovernanceEventLog = (GovernanceEventLog)(nil)
-
 // The 04.6 declarations keep every documented field.
 var (
 	_ = Goal{

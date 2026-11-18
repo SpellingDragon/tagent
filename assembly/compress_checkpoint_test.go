@@ -4,7 +4,9 @@ package assembly
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -67,38 +69,30 @@ func (a compressAccount) judgedCount() int {
 	return count
 }
 
-// requireSameAccount reports whether two rebuilds answer one account: the same
-// judgments session by session, the same identities answered and the same batch
-// still owed. The comparison is the parity a restart owes, never a count alone: a
-// rebuild answering the right number of other judgments is no rebuild.
+// requireSameAccount reports whether two rebuilds owe one batch: the same owed judgments session by session, and no judgment a product answers among them.
+//   - The batch is compared instead of the whole judged set: a judgment a product answers stays on the chain and is owed by no boot, so agreeing over the answered identities would be restating settled work.
+//   - The comparison is the parity a restart owes, never a count alone: a rebuild owing the right number of other judgments is no rebuild.
 func requireSameAccount(t *testing.T, name string, got, want compressAccount) {
 	t.Helper()
-	if len(got.Judgments) != len(want.Judgments) {
-		t.Fatalf("the %s rebuild holds the judgments of %d chain(s), want the %d the live process holds",
-			name, len(got.Judgments), len(want.Judgments))
+	if len(got.Owed) != len(want.Owed) {
+		t.Fatalf("the %s rebuild owes the judgments of %d chain(s), want the %d the live process owes",
+			name, len(got.Owed), len(want.Owed))
 	}
-	for session, filed := range want.Judgments {
-		if !slices.Equal(got.Judgments[session], filed) {
-			t.Fatalf("the %s rebuild holds %d judgment(s) of session %s, want the %d the live process holds",
-				name, len(got.Judgments[session]), session, len(filed))
-		}
-		if !slices.Equal(got.Owed[session], want.Owed[session]) {
+	for session, filed := range want.Owed {
+		if !slices.Equal(got.Owed[session], filed) {
 			t.Fatalf("the %s rebuild owes %d judgment(s) of session %s, want the %d the live process owes",
-				name, len(got.Owed[session]), session, len(want.Owed[session]))
+				name, len(got.Owed[session]), session, len(filed))
 		}
-	}
-	if len(got.Answered) != len(want.Answered) {
-		t.Fatalf("the %s rebuild answers %d judgment(s), want the %d the live process answers",
-			name, len(got.Answered), len(want.Answered))
-	}
-	for request := range want.Answered {
-		if !got.Answered[request] {
-			t.Fatalf("the %s rebuild leaves the judgment %s unanswered beside the product that answers it", name, request)
+		for _, request := range filed {
+			if want.Answered[request] {
+				t.Fatalf("the %s rebuild owes the judgment %s of session %s beside the product that answers it, want an answered judgment owed by no rebuild", name, request, session)
+			}
 		}
 	}
 }
 
-// statedCompressAccount reads the compression account one checkpoint states back.
+// statedCompressAccount reads the compression account one checkpoint states back:
+// the batch every chain it names still owes.
 func statedCompressAccount(t *testing.T, checkpoint event.Checkpoint) compressAccount {
 	t.Helper()
 	for _, slice := range checkpoint.Slices {
@@ -111,7 +105,7 @@ func statedCompressAccount(t *testing.T, checkpoint event.Checkpoint) compressAc
 		}
 		account := compressAccount{
 			Judgments: make(map[event.SessionID][]event.EventID, len(wire.Sessions)),
-			Answered:  make(map[event.EventID]bool, len(wire.Answered)),
+			Answered:  map[event.EventID]bool{},
 			Owed:      map[event.SessionID][]event.EventID{},
 		}
 		for _, session := range wire.Sessions {
@@ -120,20 +114,7 @@ func statedCompressAccount(t *testing.T, checkpoint event.Checkpoint) compressAc
 				keys = append(keys, judgment.ID)
 			}
 			account.Judgments[event.SessionID(session.Session)] = keys
-		}
-		for i := range wire.Answered {
-			account.Answered[wire.Answered[i]] = true
-		}
-		for session, filed := range account.Judgments {
-			owed := make([]event.EventID, 0, len(filed))
-			for _, request := range filed {
-				if !account.Answered[request] {
-					owed = append(owed, request)
-				}
-			}
-			if len(owed) > 0 {
-				account.Owed[session] = owed
-			}
+			account.Owed[event.SessionID(session.Session)] = keys
 		}
 		return account
 	}
@@ -142,10 +123,10 @@ func statedCompressAccount(t *testing.T, checkpoint event.Checkpoint) compressAc
 }
 
 // TestCompressionJudgmentsSurviveTheBootCut pins the compression state slice.
-//   - the checkpoint states the judgments the live consumer holds and the identities its products answer
-//   - the boot answers those judgments without reading the covered facts back, so the account survives the cut
-//   - the booted, the anchored and the full walk answer one account
-//   - a boot beside a checkpoint stating no compression account answers the batch past the cut alone (negative: the parity is the checkpoint's, not a replay's)
+//   - the checkpoint states the batch the live consumer still owes, and names no identity a product answers
+//   - the boot owes that batch, so the account survives the cut
+//   - the booted, the anchored and the full walk owe one batch
+//   - negative: a boot beside a checkpoint stating no compression account restores no slice, so the batch is the checkpoint's
 //
 // 契约: docs/wiki/agent/event-flow.md#projection-lifecycle
 func TestCompressionJudgmentsSurviveTheBootCut(t *testing.T) {
@@ -158,10 +139,20 @@ func TestCompressionJudgmentsSurviveTheBootCut(t *testing.T) {
 	if products == 0 {
 		t.Fatal("the fixture folded nothing, so the judgment parity proves nothing")
 	}
+	owed := event.CompressRequest{
+		ID:     event.EventID("event-compress-cut-owed"),
+		Reason: "material over the window no product answers yet",
+		At:     time.Date(2026, 11, 16, 12, 0, 0, 0, time.UTC),
+	}
+	if err := source.fileCompressRequest(ctx, addr.SessionID, owed); err != nil {
+		t.Fatalf("file the owed judgment of the chain: %v", err)
+	}
 	live := compressAccountOf(t, source.compress)
-	if live.judgedCount() != products || len(live.Answered) != products {
-		t.Fatalf("the live consumer judged %d and answered %d judgment(s), want the %d products the chain holds",
-			live.judgedCount(), len(live.Answered), products)
+	if len(live.Answered) != products {
+		t.Fatalf("the live consumer answers %d judgment(s), want the %d products the chain holds", len(live.Answered), products)
+	}
+	if held := live.Owed[addr.SessionID]; !slices.Equal(held, []event.EventID{owed.ID}) {
+		t.Fatalf("the live consumer owes %v, want the judgment %s it filed beside the %d its products answer", held, owed.ID, products)
 	}
 
 	checkpointID, filed, err := source.Checkpoint(ctx)
@@ -177,28 +168,22 @@ func TestCompressionJudgmentsSurviveTheBootCut(t *testing.T) {
 		t.Fatalf("the checkpoint %s states no readable checkpoint", checkpointID)
 	}
 	if names := checkpoint.CheckpointSliceNames(); !slices.Contains(names, checkpointSliceCompress) {
-		t.Fatalf("the checkpoint states the slices %v, want the compression account beside them", names)
+		t.Fatalf("the checkpoint states the slices %v, want the batch the chain owes beside them", names)
 	}
 	requireSameAccount(t, "checkpoint", statedCompressAccount(t, checkpoint), live)
+	for _, slice := range checkpoint.Slices {
+		if slice.Name != checkpointSliceCompress {
+			continue
+		}
+		for request := range live.Answered {
+			if strings.Contains(string(slice.Payload), string(request)) {
+				t.Fatalf("the compression slice names the answered judgment %s, want the batch still owed alone: the request and the product that answers it stay on the chain", request)
+			}
+		}
+	}
 	if _, err := source.Close(ctx, agent.CloseRequest{Timeout: time.Now().Add(2 * time.Second)}); err != nil {
 		t.Fatalf("close the source process: %v", err)
 	}
-
-	booted := windowChainRun(t, ctx, storage)
-	requireSameAccount(t, "booted", compressAccountOf(t, booted.compress), live)
-	covered := 0
-	for request := range live.Answered {
-		booted.mu.Lock()
-		_, read := booted.facts[request]
-		booted.mu.Unlock()
-		if !read {
-			covered++
-		}
-	}
-	if covered == 0 {
-		t.Fatal("the boot read every judgment it answers, so the checkpoint carried none of them")
-	}
-	t.Logf("the boot answers %d judgment(s), %d of them beside no judgment fact in its ledger", len(live.Answered), covered)
 
 	full := windowChainRun(t, ctx, storage)
 	resetCompression(full)
@@ -206,16 +191,26 @@ func TestCompressionJudgmentsSurviveTheBootCut(t *testing.T) {
 		t.Fatalf("replay the whole chain: %v", err)
 	}
 	requireSameAccount(t, "full walk", compressAccountOf(t, full.compress), live)
+	endRun(t, full)
 
+	booted := windowChainRun(t, ctx, storage)
+	requireSameAccount(t, "booted", compressAccountOf(t, booted.compress), live)
+	if bootedOwed := compressAccountOf(t, booted.compress).Owed[addr.SessionID]; len(bootedOwed) != 1 || bootedOwed[0] != owed.ID {
+		t.Fatalf("the boot owes %v, want the judgment %s the checkpoint states beside the %d an answered judgment restates", bootedOwed, owed.ID, len(live.Answered))
+	}
+
+	booted.stopCheckpointFiler()
 	stripped := commitCheckpointWithoutTheCompressionSlice(t, ctx, booted, checkpoint)
+	endRun(t, booted)
 	bare := windowChainRun(t, ctx, storage)
 	if restored, _ := bare.CheckpointFiled(); restored != stripped {
 		t.Fatalf("the boot restored the checkpoint %s, want the stripped checkpoint %s", restored, stripped)
 	}
-	bareAccount := compressAccountOf(t, bare.compress)
-	if want := len(live.Answered) - covered; len(bareAccount.Answered) != want {
-		t.Fatalf("the boot beside a checkpoint stating no compression account answers %d judgment(s), want the %d past the cut beside the %d the live process answers",
-			len(bareAccount.Answered), want, len(live.Answered))
+	bare.mu.Lock()
+	statedSlices := bare.checkpointSlices[checkpointSliceCompress]
+	bare.mu.Unlock()
+	if statedSlices {
+		t.Fatal("the boot beside a checkpoint stating no compression account read a compression slice, want the account of the stripped cut alone")
 	}
 }
 
@@ -259,4 +254,71 @@ func commitCheckpointWithoutTheCompressionSlice(t *testing.T, ctx context.Contex
 		t.Fatalf("file the stripped checkpoint %s: %v", key, err)
 	}
 	return key
+}
+
+// TestCompressionSliceBodyIsBoundedByTheBatchItOwes pins what the compression slice costs the checkpoint body.
+//   - an all-answered account states nothing at four, eight and sixteen answered judgments, so no depth grows the body and no settled judgment is restated
+//   - one more owed judgment costs the same bytes at four, eight and sixteen of them, so no depth grows an entry either
+//   - negative: an owed judgment costs the reason and the moment it was filed with beside the nothing an answered one costs, so the owed batch is what the bound is
+//   - consumer: compressStateSlice.SnapshotState, the slice the framework checkpoint files
+//
+// 契约: docs/wiki/agent/event-flow.md#projection-lifecycle
+func TestCompressionSliceBodyIsBoundedByTheBatchItOwes(t *testing.T) {
+	ctx := context.Background()
+	const session = event.SessionID("session-compress-body")
+	request := func(at int) event.CompressRequest {
+		return event.CompressRequest{
+			ID:     event.EventID(fmt.Sprintf("event-compress-body-%02d", at)),
+			Reason: strings.Repeat("the reason the band was compressed ", 12),
+			At:     time.Date(2026, 11, 16, 12, 0, at, 0, time.UTC),
+		}
+	}
+	accountBytes := func(count, answered int) int {
+		consumer := NewCompressionConsumer(nil)
+		for at := 0; at < count; at++ {
+			consumer.judgments[session] = append(consumer.judgments[session], request(at))
+			if at < answered {
+				consumer.answered[request(at).ID] = struct{}{}
+			}
+		}
+		run := &Run{compress: consumer}
+		payload, err := compressStateSlice{run: run}.SnapshotState(ctx)
+		if err != nil {
+			t.Fatalf("state the compression slice of %d judgment(s), %d answered: %v", count, answered, err)
+		}
+		if payload == nil {
+			return 0
+		}
+		if err := json.Unmarshal(payload, &compressSliceWire{}); err != nil {
+			t.Fatalf("the slice of %d judgment(s) states no readable payload", count)
+		}
+		return len(payload)
+	}
+
+	for _, count := range []int{4, 8, 16} {
+		if settled := accountBytes(count, count); settled != 0 {
+			t.Fatalf("the %d answered judgment(s) state the body %d byte(s), want nothing: a judgment a product answers stays on the chain", count, settled)
+		}
+	}
+
+	shallow, middling, deep := accountBytes(4, 0), accountBytes(8, 0), accountBytes(16, 0)
+	first := (middling - shallow) / 4
+	second := (deep - middling) / 8
+	if first <= 0 || second <= 0 {
+		t.Fatalf("one owed judgment costs the body %d and %d byte(s) at the two depths, want the identity, the reason and the moment it was filed with", first, second)
+	}
+	if first != second {
+		t.Fatalf("one owed judgment costs the body %d byte(s) at 4 beside %d byte(s) at 8, want the same entry at every depth", first, second)
+	}
+	if got, want := deep-shallow, first*12; got != want {
+		t.Fatalf("the body grew %d byte(s) from 4 to 16 owed judgment(s), want the %d the stated judgments take", got, want)
+	}
+	identity := 2 * (len(string(request(0).ID)) + 8)
+	if first <= identity {
+		t.Fatalf("one owed judgment costs the body %d byte(s), want more than the %d two bare identities of one request take: an owed judgment is stated with the reason and the moment it was filed with", first, identity)
+	}
+	if settled := accountBytes(8, 8); settled >= middling {
+		t.Fatalf("the batch of 8 answered judgments states %d byte(s) beside the %d of the 8 owed ones, want the answered batch stated nowhere",
+			settled, middling)
+	}
 }

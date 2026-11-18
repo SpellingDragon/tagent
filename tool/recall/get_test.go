@@ -79,7 +79,16 @@ func TestParentOfNamesRelationError(t *testing.T) {
 // 契约: docs/wiki/tool/tool-architecture.md#recall-contract
 func TestRecallReasonFoundConsistent(t *testing.T) {
 	ctx := context.Background()
-	originals := ledger.NewMemoryOriginalStore()
+	tier, err := ledger.OpenTier(ctx, ledger.StorageConfig{Type: ledger.StorageMemory})
+	if err != nil {
+		t.Fatalf("open the memory tier: %v", err)
+	}
+	t.Cleanup(func() { tier.Segments.Close() })
+	originals := tier.Originals
+	scoped, ok := originals.(ledger.ScopedOriginalStore)
+	if !ok {
+		t.Fatalf("the memory tier holds %T, want the scoped original read face", originals)
+	}
 	events := map[event.EventID]memory.EventReference{}
 	refs := map[event.EventID]ledger.OriginalRef{}
 	for _, key := range []event.EventID{"served", "parented", "orphaned"} {
@@ -92,7 +101,7 @@ func TestRecallReasonFoundConsistent(t *testing.T) {
 	}
 	tool := &getTool{base: newBase(Reads{
 		Table:     tableStub{events: events, refs: refs},
-		Originals: originals,
+		Originals: scoped,
 		Trace:     traceStub{},
 	}, []string{"agent-a"})}
 	for _, call := range []struct {

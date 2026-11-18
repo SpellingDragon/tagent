@@ -51,6 +51,99 @@ func pendingIdentities(consumer *CompressionConsumer, session event.SessionID) m
 	return out
 }
 
+// productStride counts how many times one index walk hands each compress product
+// to its reader.
+func productStride(t *testing.T, ctx context.Context, run *Run) map[event.EventID]int {
+	t.Helper()
+	out := map[event.EventID]int{}
+	if err := run.tier.Segments.EachIndexNewestFirst(ctx, func(key event.EventID, _ int, _ int64, typ string, _ event.SessionID) error {
+		if typ != event.CompressProductType {
+			return nil
+		}
+		out[key]++
+		return nil
+	}); err != nil {
+		t.Fatalf("walk the index: %v", err)
+	}
+	return out
+}
+
+// requireOneProductPerStep requires every product key one walk handed to its
+// reader to have been handed once.
+func requireOneProductPerStep(t *testing.T, stride map[event.EventID]int, walk string) {
+	t.Helper()
+	if len(stride) == 0 {
+		t.Fatalf("the %s walk read no product, so it proves nothing", walk)
+	}
+	for key, times := range stride {
+		if times != 1 {
+			t.Fatalf("the %s walk handed the compression product %s to its reader %d times, want once", walk, key, times)
+		}
+	}
+}
+
+// TestCompressionJudgmentDoesNotExecuteTwiceAcrossCheckpoint pins one product per judgment across a process boundary.
+// - the walk hands every product once (control)
+// - every judgment answers exactly one product identity
+// - a restart over the same root reads one product per judgment back (negative: the second answer was a reading of the chain, never a fact on it)
+//
+// 契约: docs/wiki/agent/execution-generations.md#reentry-resolution
+func TestCompressionJudgmentDoesNotExecuteTwiceAcrossCheckpoint(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+	root := t.TempDir()
+	storage := WithStorage(ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: root})
+	addr := event.Address{AgentID: "agent-a", SessionID: "session-interleaved-judgment"}
+
+	judged := windowChainRun(t, ctx, storage)
+	judged.compress.sessions = nil
+	judged.ageFold.setExecutor(nil)
+	commitWindowTurns(t, ctx, judged, addr, 12)
+	if len(pendingIdentities(judged.compress, addr.SessionID)) == 0 {
+		t.Fatal("the fixture filed no compression judgment, so the restart proves nothing")
+	}
+	if _, err := judged.Close(ctx, agent.CloseRequest{Timeout: time.Now().Add(2 * time.Second)}); err != nil {
+		t.Fatalf("close the judging process: %v", err)
+	}
+
+	restarted := windowChainRun(t, ctx, storage)
+	if len(pendingIdentities(restarted.compress, addr.SessionID)) == 0 {
+		t.Fatal("the restarted run rebuilt no judgment from the chain, so the interleaving proves nothing")
+	}
+	restarted.stopCheckpointFiler()
+	commitWindowFact(t, ctx, restarted, addr, windowEvent(addr, "j1-in", "inv-interleaved", "the commit that executes the pending judgment", event.TypeExternalInput))
+	if count := countFoldProducts(t, ctx, restarted); count == 0 {
+		t.Fatal("the fixture filed no product beside the executed judgment, so the interleaving proves nothing")
+	}
+
+	requireOneProductPerStep(t, productStride(t, ctx, restarted), "control")
+
+	products := productsByRequest(t, ctx, restarted)
+	if len(products) == 0 {
+		t.Fatal("the chain states no product, so the judgment read proves nothing")
+	}
+	for request, count := range products {
+		if count != 1 {
+			t.Fatalf("the judgment %s answers %d product steps, want one", request, count)
+		}
+	}
+	if _, err := restarted.Close(ctx, agent.CloseRequest{Timeout: time.Now().Add(2 * time.Second)}); err != nil {
+		t.Fatalf("close the restarted process: %v", err)
+	}
+
+	again := windowChainRun(t, ctx, storage)
+	again.stopCheckpointFiler()
+	answers := productsByRequest(t, ctx, again)
+	if len(answers) == 0 {
+		t.Fatal("the restart read no product back, so the counterexample proves nothing")
+	}
+	for request, count := range answers {
+		if count != 1 {
+			t.Fatalf("the restart reads %d products answering the judgment %s, want one", count, request)
+		}
+	}
+}
+
 // TestRestartExecutesTheChainJudgmentOnce pins the chain judgment a restart owes.
 // - a judgment the chain holds with no product is pending again after a restart
 // - the next commit of that chain executes it and files its product

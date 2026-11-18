@@ -527,3 +527,29 @@ func assertMapsSpeakForEntries(t *testing.T, projection *ReplayProjection) {
 		}
 	}
 }
+
+// TestTicketTextIsTheRecallTicketOfTheEntry pins the one ticket form.
+//   - the ticket of a fact key is [evt_<key>|<type>], the form the recall surface parses
+//   - the empty key and the synthetic key of a fold product answer no ticket: the address would answer missing
+//   - the presented view the budget degrades to a shortened entry ends with the same ticket the fold writes
+//
+// 契约: docs/GLOSSARY.md
+func TestTicketTextIsTheRecallTicketOfTheEntry(t *testing.T) {
+	if got, want := TicketOf("02-1-plan", event.TypeActionCommand), "[evt_02-1-plan|action_command]"; got != want {
+		t.Fatalf("TicketOf = %q, want %q: one form, written by one producer", got, want)
+	}
+	for _, key := range []event.EventID{"", "-seg-abc123", "-hist-abc123", "-recovery"} {
+		if got := TicketOf(key, event.TypeActionCommand); got != "" {
+			t.Fatalf("TicketOf(%q) = %q, want no ticket: a key naming no committed fact is an address that answers missing", key, got)
+		}
+	}
+
+	entry := ProjectionEntry{Key: "e-9", Type: event.TypeThinkingPlan, Summary: "plan", Content: strings.Repeat("过程细节。", 40), Time: ageBase}
+	view, ok := presentWithin(entry, entry.Content, 500)
+	if !ok {
+		t.Fatal("the budget presented nothing for an entry it had room to shorten")
+	}
+	if !strings.HasSuffix(view.Content, "\n"+TicketOf(entry.Key, entry.Type)) {
+		t.Fatalf("the shortened view = %q, want it to end with the ticket the fold writes for the same entry", view.Content)
+	}
+}

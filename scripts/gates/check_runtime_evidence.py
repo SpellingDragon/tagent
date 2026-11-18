@@ -83,7 +83,29 @@ EVENT_SCOPES = ("event-short", "event-long")
 EVENT_TEST_ID_RE = re.compile(r"^\d{2}\.\d+[a-z]?/Test[A-Za-z0-9_]+$")
 EVENT_SUBTEST_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_./-]*$")
 EVENT_WHOLE_CHAIN_ID_RE = re.compile(r"^EI\d{2}$")
+# The ambient variables an event run may declare beside its argv. The producer
+# (`scripts/scenarios/run_runtime_scenarios.py`: EVENT_ENVIRONMENT_NAMES) records
+# the ones it inherited; declaring anything else here would accept a determinant
+# the runner never claimed, so the two lists are deliberately compared the strict
+# way — a name the runner starts recording without being declared below is
+# rejected rather than silently trusted.
+EVENT_ENVIRONMENT_NAMES = (
+    "GOFLAGS", "GODEBUG", "GOMAXPROCS", "GOWORK",
+    "TAGENT_BOOT_TRACE", "TAGENT_GCTRACE", "TAGENT_HTTP_PORT", "TAGENT_SESSION_ID",
+    "SMOKE_ROUNDS", "TAGENT_CALIBRATION_BASELINE", "TAGENT_CALIBRATION_COLD_BUILD_MS",
+    "TAGENT_CALIBRATION_MODE", "TAGENT_CALIBRATION_PLAN", "TAGENT_CALIBRATION_RUN_DIR",
+)
+# `go test` flags that decide what an invocation runs or measures. GOFLAGS supplies
+# them as defaults for commands that do not pass the flag themselves, so a GOFLAGS
+# entry is only described by the recorded argv when that argv decides the same flag.
+EVENT_RUN_SHAPING_FLAGS = ("-count", "-cpu", "-failfast", "-json", "-parallel", "-race",
+                           "-run", "-short", "-shuffle", "-skip", "-tags", "-timeout")
+# The runtime parses GOMAXPROCS as a positive integer and ignores anything else
+# (runtime/proc.go: `strconv.ParseInt(gogetenv("GOMAXPROCS"), 10, 32)`), so a
+# declared non-integer names a width the run did not apply.
+EVENT_GOMAXPROCS_RE = re.compile(r"^[1-9][0-9]*$")
 EVENT_TEST_FUNC_RE = re.compile(r"^func (Test[A-Za-z0-9_]+)\(", re.MULTILINE)
+
 EVENT_RUN_RE = re.compile(r"\bt\.Run\(\s*\"([^\"]+)\"")
 EVENT_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 # Fixed policy values from 04 design D1: any shrink or arithmetic drift is rejected.
@@ -2013,6 +2035,296 @@ def check_event_run_config(report, run_config, index, selected):
         report.error("run_config.race must be true (all event tests run under -race)")
 
 
+def _event_command_flags(tokens, name):
+    """Every value the argv gives `name`, in both `-flag=v` and `-flag v` forms."""
+    values = []
+    index = 0
+    while index < len(tokens):
+        token = tokens[index]
+        if token == name and index + 1 < len(tokens):
+            values.append(tokens[index + 1])
+            index += 2
+            continue
+        if token.startswith(name + "="):
+            values.append(token[len(name) + 1:])
+        index += 1
+    return values
+
+
+def check_event_liveness(report, liveness):
+    """The run's own measurement interval, named and bounded.
+
+    `bound_seconds` is the only quantity this evidence face carries: the runner's
+    wait. It must be declared with a name and a positive integer bound, and it
+    must not itself be expired — a bound that fired means the log was cut short,
+    so whatever the log still holds cannot stand for a completed run.
+    """
+    if not isinstance(liveness, dict):
+        report.error("evidence.liveness must be an object naming the run's bound")
+        return None
+    name = liveness.get("name")
+    if not isinstance(name, str) or not name.strip():
+        report.error("evidence.liveness.name must be a non-empty quantity name")
+    if liveness.get("state") != "completed":
+        report.error("evidence.liveness.state {!r}: the run's own bound fired, so the log is "
+                     "a truncated run and cannot stand for a completed one".format(
+                         liveness.get("state")))
+    bound = liveness.get("bound_seconds")
+    if type(bound) not in (int, float) or bound <= 0:
+        report.error("evidence.liveness.bound_seconds {!r} must be a positive number of seconds"
+                     .format(bound))
+        return None
+    return bound
+
+
+def check_event_selectors(report, run_config, index, selected):
+    """The selectors the run declares must be the contract's own selectors.
+
+    `test_ids` alone states which contract rows were claimed; the selector list
+    states which test each invocation actually drove. Reading only the ids trusts
+    the claim, so a run could name one test and drive another. One selector per
+    selected id, in the contract's own module/package/name vocabulary.
+    """
+    selectors = run_config.get("selectors")
+    if not isinstance(selectors, list) or not selectors:
+        report.error("run_config.selectors must be a non-empty list of the tests actually driven")
+        return
+    seen = {}
+    for position, entry in enumerate(selectors):
+        where = "run_config.selectors[{}]".format(position)
+        if not isinstance(entry, dict):
+            report.error("{} must be an object".format(where))
+            continue
+        test_id = entry.get("test_id")
+        if test_id not in selected:
+            report.error("{}: test_id {!r} is not one of the selected tests".format(where, test_id))
+            continue
+        if test_id in seen:
+            report.error("{}: duplicate selector for {}".format(where, test_id))
+            continue
+        seen[test_id] = entry
+        declared = index["tests"][test_id]
+        if entry.get("module_path") != declared.get("module_path"):
+            report.error("{}: {} drives module {!r}, the contract registers {!r}".format(
+                where, test_id, entry.get("module_path"), declared.get("module_path")))
+        expected_package = _event_package_rel(report, where, declared.get("module_path"),
+                                              declared.get("test_package"))
+        observed_package = _event_package_rel(report, where, declared.get("module_path"),
+                                             entry.get("test_package"))
+        if expected_package is not None and observed_package is not None \
+                and expected_package != observed_package:
+            report.error("{}: {} drives package {!r}, the contract registers {!r}".format(
+                where, test_id, observed_package, expected_package))
+        if entry.get("test_name") != declared.get("test_name"):
+            report.error("{}: {} drives test {!r}, the contract registers {!r}".format(
+                where, test_id, entry.get("test_name"), declared.get("test_name")))
+    for test_id in selected:
+        if test_id not in seen:
+            report.error("run_config.selectors names no selector for selected test {}".format(
+                test_id))
+
+
+def check_event_invocations(report, run_config, fingerprints, index, selected, bound):
+    """Every command the run declares must be the one the contract derives.
+
+    The runner records one invocation per (module dir, tags, race) group: its
+    argv, working directory, packages, tags, race flag and exit code. Recording
+    them proves nothing unless they are read, so this binds the argv to the
+    selection: the packages each command names must cover exactly the selected
+    packages, `-run` must name exactly the selected tests, the flags must carry a
+    fresh (`-count=1`) machine-readable (`-json`) race run with the declared tags,
+    the working directory must be the fingerprinted module directory, and the
+    exit code must be zero. A command whose own `-timeout` is missing or longer
+    than the runner's wait measures an interval that contains the runner's, so a
+    killed call and a completed one would read alike.
+    """
+    invocations = run_config.get("invocations")
+    if not isinstance(invocations, list) or not invocations:
+        report.error("run_config.invocations must be a non-empty list of the commands actually run")
+        return
+    dirs = {}
+    for entry in fingerprints or []:
+        if isinstance(entry, dict) and isinstance(entry.get("module_path"), str):
+            dirs[entry["module_path"]] = entry.get("dir")
+    expected = {}
+    for test_id in selected:
+        declared = index["tests"][test_id]
+        module_path = declared.get("module_path")
+        package = _event_package_rel(report, "test {}".format(test_id), module_path,
+                                     declared.get("test_package"))
+        if package is None:
+            continue
+        expected.setdefault(module_path, {}).setdefault(package, set()).add(
+            declared.get("test_name"))
+    covered = {}
+    covered_selected = {}
+    for position, entry in enumerate(invocations):
+        where = "run_config.invocations[{}]".format(position)
+        if not isinstance(entry, dict):
+            report.error("{} must be an object".format(where))
+            continue
+        module_path = entry.get("module_path")
+        if module_path not in dirs:
+            report.error("{}: module {!r} carries no module_fingerprints entry, so the command "
+                         "cannot be tied to the tree it was run against".format(where, module_path))
+            continue
+        directory = entry.get("dir")
+        if directory != dirs[module_path]:
+            report.error("{}: working directory {!r} is not the fingerprinted module directory "
+                         "{!r}; the command ran against another tree".format(
+                             where, directory, dirs[module_path]))
+        tags = entry.get("tags")
+        if (not isinstance(tags, list)
+                or any(not isinstance(tag, str) or not tag.strip() for tag in tags)):
+            report.error("{}: tags must be a list of non-empty strings".format(where))
+            tags = []
+        if entry.get("race") is not True:
+            report.error("{}: race must be true; every event test runs under -race".format(where))
+        if type(entry.get("exit_code")) is not int or entry.get("exit_code") != 0:
+            report.error("{}: exit_code {!r} is not a successful integer 0; a command that failed "
+                         "cannot be evidence for a green round".format(where, entry.get("exit_code")))
+        packages = entry.get("packages")
+        if (not isinstance(packages, list) or not packages
+                or any(not isinstance(package, str) or not package.strip() for package in packages)):
+            report.error("{}: packages must be a non-empty list of package arguments".format(where))
+            continue
+        resolved = []
+        for package in packages:
+            rel = _event_package_rel(report, where, module_path, package)
+            if rel is not None:
+                resolved.append(rel)
+                covered.setdefault(module_path, set()).add(rel)
+        command = entry.get("command")
+        if not isinstance(command, str) or not command.strip():
+            report.error("{}: command must be the non-empty argv the runner executed".format(where))
+            continue
+        tokens = command.split()
+        if "-count=1" not in tokens:
+            report.error("{}: the recorded argv carries no '-count=1'; a cached run is not a "
+                         "fresh execution".format(where))
+        if "-json" not in tokens:
+            report.error("{}: the recorded argv carries no '-json'; the log cannot be attributed "
+                         "to this command".format(where))
+        if "-race" not in tokens:
+            report.error("{}: the recorded argv carries no '-race'".format(where))
+        module_flag = _event_command_flags(tokens, "-C")
+        if module_flag != [directory]:
+            report.error("{}: the recorded argv runs in {!r}, the invocation declares {!r}".format(
+                where, module_flag, directory))
+        for package in packages:
+            if package not in tokens:
+                report.error("{}: the recorded argv does not name package {!r}".format(
+                    where, package))
+        declared_tags = sorted(tags)
+        if declared_tags:
+            observed = _event_command_flags(tokens, "-tags")
+            observed_tags = sorted({tag for value in observed for tag in value.split(",") if tag})
+            if observed_tags != declared_tags:
+                report.error("{}: the recorded argv builds with tags {}, the invocation declares "
+                             "{}".format(where, observed_tags, declared_tags))
+        elif _event_command_flags(tokens, "-tags"):
+            report.error("{}: the recorded argv builds with -tags the invocation does not declare"
+                         .format(where))
+        inner = _event_command_flags(tokens, "-timeout")
+        if not inner:
+            report.error("{}: the recorded argv declares no '-timeout', so the child's own "
+                         "default bound nests inside the runner's wait (nested interval)".format(
+                             where))
+        else:
+            for value in inner:
+                seconds = value[:-1] if value.endswith("s") else value
+                if not seconds.isdigit():
+                    report.error("{}: '-timeout {}' is not a whole number of seconds".format(
+                        where, value))
+                    continue
+                if bound is not None and int(seconds) > bound:
+                    report.error("{}: '-timeout {}' outlives the runner's bound of {}s, so the "
+                                 "measured interval contains another (nested interval)".format(
+                                     where, value, bound))
+        pattern = _event_command_flags(tokens, "-run")
+        if not pattern:
+            report.error("{}: the recorded argv carries no '-run' selector".format(where))
+            continue
+        named = set()
+        for value in pattern:
+            named.update(re.findall(r"[A-Za-z0-9_]+", value))
+        for package in resolved:
+            # A package can be driven twice in one round (different build tags), so
+            # what must hold is that the union of the selectors naming this package
+            # covers every selected test of it, not that one command names them all.
+            covered_selected.setdefault((module_path, package), set()).update(named)
+    for module_path in sorted(expected):
+        for package in sorted(expected[module_path]):
+            if package not in covered.get(module_path, set()):
+                report.error("no invocation runs selected package {!r} of module {!r}".format(
+                    package, module_path))
+                continue
+            missing = expected[module_path][package] - covered_selected.get(
+                (module_path, package), set())
+            if missing:
+                report.error("no '-run' selector names selected test(s) {} of package {!r} in "
+                             "module {!r}".format(sorted(missing), package, module_path))
+
+
+def check_event_environment(report, run_config):
+    """The recorded environment must be the one the recorded argv ran under.
+
+    The runner inherits its environment, so it records the declared determinants
+    it held. Nothing here can prove the ambient values; the record is the
+    runner's own statement. What it can reject is a record that is not a possible
+    environment for a green round: a determinant the runner never declares, a
+    credential-bearing name (evidence is written to disk), a `GOMAXPROCS` the
+    runtime would ignore, and a `GOFLAGS` entry that decides a flag no recorded
+    argv decides. That last one is directional: GOFLAGS supplies defaults and the
+    command line overrides them ("go help environment"), so a flag the argv does
+    decide stays described by the argv, while an extra flag the argv omits means
+    the run was shaped by something the recorded command does not show.
+    """
+    environment = run_config.get("environment")
+    if environment is None:
+        report.error("run_config.environment is absent; the runner records the ambient "
+                     "determinants the invocations ran under, and an argv alone does not "
+                     "describe them")
+        return
+    if not isinstance(environment, dict):
+        report.error("run_config.environment must be an object of name/value strings")
+        return
+    for name, value in sorted(environment.items()):
+        if not isinstance(name, str) or not name.strip():
+            report.error("run_config.environment holds a non-string variable name")
+            continue
+        if name not in EVENT_ENVIRONMENT_NAMES:
+            report.error("run_config.environment variable {!r} is outside the recorded "
+                         "determinants {}".format(name, list(EVENT_ENVIRONMENT_NAMES)))
+            continue
+        if not isinstance(value, str):
+            report.error("run_config.environment[{}] must be a string".format(name))
+            continue
+        if name == "GOMAXPROCS" and not EVENT_GOMAXPROCS_RE.match(value):
+            report.error("run_config.environment.GOMAXPROCS {!r} is not a positive integer, "
+                         "which the runtime ignores; the declared width was not the one the "
+                         "run used".format(value))
+    flags = environment.get("GOFLAGS")
+    if isinstance(flags, str):
+        invocations = run_config.get("invocations")
+        commands = [entry.get("command") for entry in invocations or []
+                    if isinstance(entry, dict) and isinstance(entry.get("command"), str)]
+        for token in flags.split():
+            flag = next((name for name in EVENT_RUN_SHAPING_FLAGS
+                         if token == name or token.startswith(name + "=")), None)
+            if flag is None:
+                continue
+            undecided = next((position for position, command in enumerate(commands)
+                              if not any(word == flag or word.startswith(flag + "=")
+                                         for word in command.split())), None)
+            if undecided is not None:
+                report.error(
+                    "run_config.environment.GOFLAGS sets {!r}, which no recorded argv decides "
+                    "(run_config.invocations[{}] does not pass it); GOFLAGS supplies the default "
+                    "the argv does not override, so the recorded command would not be the "
+                    "command that ran".format(token, undecided))
+
+
 def check_event_evidence_shape(report, evidence, index, contract_digest):
     """Validate the v2 evidence envelope; returns the parsed facts or None."""
     if evidence.get("schema_version") != EVENT_SCHEMA_VERSION:
@@ -2063,6 +2375,12 @@ def check_event_evidence_shape(report, evidence, index, contract_digest):
     check_event_fingerprints(report, evidence.get("module_fingerprints"))
     run_config = evidence.get("run_config")
     check_event_run_config(report, run_config, index, selected)
+    bound = check_event_liveness(report, evidence.get("liveness"))
+    if isinstance(run_config, dict):
+        check_event_selectors(report, run_config, index, selected)
+        check_event_invocations(report, run_config, evidence.get("module_fingerprints"),
+                                index, selected, bound)
+        check_event_environment(report, run_config)
     exit_code = evidence.get("go_test_exit_code")
     if type(exit_code) is not int or exit_code != 0:
         report.error("evidence.go_test_exit_code must be successful integer exit 0")

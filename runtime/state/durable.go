@@ -13,35 +13,13 @@ import (
 
 	trpclog "trpc.group/trpc-go/trpc-agent-go/log"
 
+	"github.com/SpellingDragon/tagent/api/durable"
 	"github.com/SpellingDragon/tagent/api/event"
 	"github.com/SpellingDragon/tagent/runtime/task"
 )
 
 // 契约: docs/wiki/reliability/durable-delivery.md#canonical-fact-resolution
 //
-// FactLog is the durable fact surface DurableCommit stores
-// through: put, get, prefix scan and the sync barrier a commit reports its
-// success behind. Its signatures carry built-in types only, so any backend —
-// the memory tier's key-value port among them — satisfies it structurally and
-// no package edge is required in either direction.
-//
-// The redline list (4 rules):
-// MUST stage one key and its value without claiming it durable.
-// MUST complete the write barrier over everything staged before anyone reports durable success.
-// MUST NOT report staged bytes as stored.
-// MUST NOT answer a prefix scan with a subset of the pairs under that prefix.
-type FactLog interface {
-	// Put stages one key and its value.
-	Put(ctx context.Context, key string, value []byte) error
-	// Get returns the value stored under key and whether one is held.
-	Get(ctx context.Context, key string) ([]byte, bool, error)
-	// Scan returns every stored pair under the key prefix as key and value.
-	Scan(ctx context.Context, prefix string) (map[string][]byte, error)
-	// Sync completes the write barrier over everything staged so far, so a
-	// caller reports durable success only behind a barrier that returned.
-	Sync(ctx context.Context) error
-}
-
 // factPrefix, specPrefix, consumePrefix, attemptPrefix and rejectPrefix locate
 // the five durable record kinds the commit keeps on one log: the commit facts,
 // the admission material of their tasks, the receipt of each logical
@@ -165,7 +143,7 @@ var ErrSpecConflict = errors.New("state: the task's admission material is alread
 var ErrSeatRefused = errors.New("state: the task checkpoint states an account this commit cannot hold")
 
 // DurableCommit is the durable implementation of the task commit port: it stores
-// one self-contained record per mutation identity through a FactLog behind the
+// one self-contained record per mutation identity through a durable fact log behind the
 // sync barrier, and holds every committed notification as an open delivery
 // obligation. A repeated record of a mutation identity already stored returns
 // the fact already stored and records no second one — and never advances a
@@ -179,7 +157,7 @@ var ErrSeatRefused = errors.New("state: the task checkpoint states an account th
 // supplied at construction and nothing an earlier run captured is revived.
 type DurableCommit struct {
 	mu        sync.Mutex
-	log       FactLog
+	log       durable.FactLog
 	uncertain task.UncertainProbe
 	revisions map[event.TaskID]int64
 	facts     map[event.TaskID][]task.CommitRecord
@@ -189,10 +167,15 @@ type DurableCommit struct {
 	// consumed is the receipt of each logical consumption a notification completed,
 	// beside the committed fact the notice pointed at: the receipt is what answers
 	// the delivery, and the fact identity is content the checkpoint states beside it.
-	consumed  map[noticeKey]event.EventID
-	attempts  map[noticeKey]SettleAttempt
-	rejected  map[noticeKey]Rejection
-	loadStats LoadStats
+	consumed map[noticeKey]event.EventID
+	attempts map[noticeKey]SettleAttempt
+	rejected map[noticeKey]Rejection
+	// receiptsByTask files each receipt identity under the task it answers, so one
+	// task's settle account costs its own receipts and never the receipts of the
+	// tasks the account holds beside it. It is written by the one function every
+	// receipt write goes through, and read by ReceiptsOf alone.
+	receiptsByTask map[event.TaskID]map[noticeKey]struct{}
+	loadStats      LoadStats
 	// seated reports that Seat read the account of this commit, so a second seat
 	// states nothing twice.
 	seated bool
@@ -237,7 +220,7 @@ var _ task.Commit = (*DurableCommit)(nil)
 // owes no delivery for a notice that process already consumed. uncertain, when
 // it is not nil, marks matching commit attempts as uncertain, so all three
 // commit outcomes stay observable.
-func NewDurableCommit(log FactLog, uncertain task.UncertainProbe) (*DurableCommit, error) {
+func NewDurableCommit(log durable.FactLog, uncertain task.UncertainProbe) (*DurableCommit, error) {
 	d := newDurableCommit(log)
 	d.uncertain = uncertain
 	if err := d.load(context.Background()); err != nil {
@@ -253,24 +236,25 @@ func NewDurableCommit(log FactLog, uncertain task.UncertainProbe) (*DurableCommi
 // durable prefixes of the whole history. A boot that holds a checkpoint reads it
 // that way; NewDurableCommit is the entry for a caller that holds none and pays
 // the whole log.
-func NewEmptyDurableCommit(log FactLog, uncertain task.UncertainProbe) *DurableCommit {
+func NewEmptyDurableCommit(log durable.FactLog, uncertain task.UncertainProbe) *DurableCommit {
 	d := newDurableCommit(log)
 	d.uncertain = uncertain
 	return d
 }
 
 // newDurableCommit answers one empty durable commit over the named log.
-func newDurableCommit(log FactLog) *DurableCommit {
+func newDurableCommit(log durable.FactLog) *DurableCommit {
 	return &DurableCommit{
-		log:       log,
-		revisions: map[event.TaskID]int64{},
-		facts:     map[event.TaskID][]task.CommitRecord{},
-		specs:     map[event.TaskID]task.Spec{},
-		mutations: map[mutationKey]task.CommitRecord{},
-		owed:      map[noticeKey]task.OutboxNotice{},
-		consumed:  map[noticeKey]event.EventID{},
-		attempts:  map[noticeKey]SettleAttempt{},
-		rejected:  map[noticeKey]Rejection{},
+		log:            log,
+		revisions:      map[event.TaskID]int64{},
+		facts:          map[event.TaskID][]task.CommitRecord{},
+		specs:          map[event.TaskID]task.Spec{},
+		mutations:      map[mutationKey]task.CommitRecord{},
+		owed:           map[noticeKey]task.OutboxNotice{},
+		consumed:       map[noticeKey]event.EventID{},
+		attempts:       map[noticeKey]SettleAttempt{},
+		rejected:       map[noticeKey]Rejection{},
+		receiptsByTask: map[event.TaskID]map[noticeKey]struct{}{},
 	}
 }
 
@@ -302,8 +286,10 @@ func (d *DurableCommit) load(ctx context.Context) error {
 		if err := json.Unmarshal(body, &receipt); err != nil {
 			return err
 		}
-		d.consumed[noticeKey{task: receipt.TaskID, round: receipt.Round,
-			kind: receipt.Kind, seq: receipt.Seq}] = receipt.Event
+		notice := noticeKey{task: receipt.TaskID, round: receipt.Round,
+			kind: receipt.Kind, seq: receipt.Seq}
+		d.consumed[notice] = receipt.Event
+		d.holdReceiptLocked(notice)
 	}
 	attempts, err := d.scan(ctx, attemptPrefix)
 	if err != nil {
@@ -314,8 +300,10 @@ func (d *DurableCommit) load(ctx context.Context) error {
 		if err := json.Unmarshal(body, &record); err != nil {
 			return err
 		}
-		d.attempts[noticeKey{task: record.TaskID, round: record.Round,
-			kind: record.Kind, seq: record.Seq}] = record.Attempt
+		notice := noticeKey{task: record.TaskID, round: record.Round,
+			kind: record.Kind, seq: record.Seq}
+		d.attempts[notice] = record.Attempt
+		d.holdReceiptLocked(notice)
 	}
 	rejections, err := d.scan(ctx, rejectPrefix)
 	if err != nil {
@@ -326,7 +314,9 @@ func (d *DurableCommit) load(ctx context.Context) error {
 		if err := json.Unmarshal(body, &rejection); err != nil {
 			return err
 		}
-		d.rejected[noticeKeyOf(rejection.Notice)] = rejection
+		notice := noticeKeyOf(rejection.Notice)
+		d.rejected[notice] = rejection
+		d.holdReceiptLocked(notice)
 	}
 	facts, err := d.scan(ctx, factPrefix)
 	if err != nil {
@@ -372,20 +362,59 @@ func (d *DurableCommit) applyRecordLocked(record task.CommitRecord) {
 	if revision := record.ExpectedRevision + 1; revision > d.revisions[record.TaskID] {
 		d.revisions[record.TaskID] = revision
 	}
+	d.oweLocked(record)
+}
+
+// settledLocked reports whether one notification identity is already answered: a
+// consumption receipt or a refusal is that notification's consumption result, so
+// neither leaves a delivery obligation open. The caller holds the lock.
+func (d *DurableCommit) settledLocked(notice noticeKey) bool {
+	if _, consumed := d.consumed[notice]; consumed {
+		return true
+	}
+	_, rejected := d.rejected[notice]
+	return rejected
+}
+
+// holdReceiptLocked files one receipt identity under the task it answers. Every
+// write of the three receipt families goes through it, so a task holds a receipt
+// of the account exactly when ReceiptsOf answers it. The caller holds the lock.
+func (d *DurableCommit) holdReceiptLocked(notice noticeKey) {
+	held, known := d.receiptsByTask[notice.task]
+	if !known {
+		held = map[noticeKey]struct{}{}
+		d.receiptsByTask[notice.task] = held
+	}
+	held[notice] = struct{}{}
+}
+
+// oweLocked opens the delivery obligations one committed record carries: every
+// notification of its outbox no receipt and no refusal has already closed. The
+// runtime commit and the recovery seat of the same record both fold it through
+// here, so one account answers one owed set whichever path built it — a record
+// committing a notification the account already settled re-owes nothing. The
+// caller holds the lock.
+func (d *DurableCommit) oweLocked(record task.CommitRecord) {
 	for _, envelope := range record.Outbox {
 		notice := noticeKeyOf(envelope.Notice)
-		if _, consumed := d.consumed[notice]; consumed {
+		if d.settledLocked(notice) {
 			continue
 		}
-		if _, rejected := d.rejected[notice]; rejected {
-			continue
-		}
-		d.owed[noticeKey{task: envelope.Notice.TaskID, round: envelope.Notice.Round,
-			kind: envelope.Notice.Kind, seq: envelope.Notice.Seq}] = task.OutboxNotice{
-			Notice:   envelope,
-			Delivery: task.DeliveryPending,
-		}
+		d.owed[notice] = task.OutboxNotice{Notice: envelope, Delivery: task.DeliveryPending}
 	}
+}
+
+// settled reports whether the account already answered one notification: the
+// consumption receipt or the refusal the log holds for it. A restore reads the
+// account through it so a payload stating a notice the account settled past the
+// cut opens no delivery for it.
+func (d *DurableCommit) settled(notice task.Notice) bool {
+	if d == nil {
+		return false
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.settledLocked(noticeKeyOf(notice))
 }
 
 // Seat reads the account this commit holds from the tasks one checkpoint states
@@ -394,7 +423,7 @@ func (d *DurableCommit) applyRecordLocked(record task.CommitRecord) {
 // is stated once: a repeated Seat answers nothing, so the framework checkpoint and
 // the session checkpoints of one boot seat one account.
 //
-//   - The covered part is seated from the entries themselves: the admission material, the mutation identities a repeat resolves against, the revision the next record expects and the consumption receipts, attempts and refusals the task holds, so a task a checkpoint states costs no durable key of any family and the load does not grow with the tasks the storage already settled.
+//   - The covered part is seated from the entries themselves: the admission material, the mutation identities a repeat resolves against, the revision the next record expects and the consumption receipts, attempts and refusals the task holds, so a task a checkpoint states costs no durable key of any family and the load does not grow with the tasks the storage already settled. A task that finished before the cut states no entry, so the account holds no identity of it until a reader names it.
 //   - The tail is what `tail` names: the keys the storage committed past the cut, whose tasks are read by their own identity — the admission key, the fact prefix of that task and its three receipt prefixes — so a chain younger than the cut costs its own length and never the history behind it; `tail` beside no cut is nil, and nil is not the empty set, because nil is a storage that states no cut at all.
 //   - The fallback reads the whole log: a caller that holds no checkpoint payload beside a storage that states no cut is a boot with no cut to read from, and an entry that states no receipt family is read back from its chain the same way, because a checkpoint written before those families existed cannot state the account of one — reading its missing keys as "no receipt" would owe every consumption it completed a second time.
 func (d *DurableCommit) Seat(ctx context.Context, stated []byte, tail map[string]struct{}) error {
@@ -455,7 +484,10 @@ func (d *DurableCommit) Seated() bool {
 // settle account beside it, and the records it committed. A receipt the entry
 // files under another task than the one it answers, and a record of another task,
 // refuse the seat by name: an account seated with a silently dropped receipt owes
-// the notification it closed a second delivery. The caller holds the lock.
+// the notification it closed a second delivery. The account holds the identity
+// whether or not the entry carried a record, so a task the checkpoint states is
+// answered by this account and never read by identity as one it never seated. The
+// caller holds the lock.
 func (d *DurableCommit) seatTaskLocked(entry task.StatedTask) error {
 	taskID := entry.TaskID
 	if taskID == "" {
@@ -470,24 +502,30 @@ func (d *DurableCommit) seatTaskLocked(entry task.StatedTask) error {
 			return fmt.Errorf("%w: the task %s states a consumption receipt of the task %s",
 				ErrSeatRefused, taskID, consumed.Notice.TaskID)
 		}
-		d.consumed[noticeKeyOf(consumed.Notice)] = consumed.Event
+		notice := noticeKeyOf(consumed.Notice)
+		d.consumed[notice] = consumed.Event
+		d.holdReceiptLocked(notice)
 	}
 	for _, attempt := range entry.Attempts {
 		if attempt.Notice.TaskID != taskID {
 			return fmt.Errorf("%w: the task %s states an attempt of the task %s",
 				ErrSeatRefused, taskID, attempt.Notice.TaskID)
 		}
-		d.attempts[noticeKeyOf(attempt.Notice)] = SettleAttempt{Terminal: attempt.Terminal}
+		notice := noticeKeyOf(attempt.Notice)
+		d.attempts[notice] = SettleAttempt{Terminal: attempt.Terminal}
+		d.holdReceiptLocked(notice)
 	}
 	for _, refusal := range entry.Rejected {
 		if refusal.Notice.TaskID != taskID {
 			return fmt.Errorf("%w: the task %s states a refusal of the task %s",
 				ErrSeatRefused, taskID, refusal.Notice.TaskID)
 		}
-		d.rejected[noticeKeyOf(refusal.Notice)] = Rejection{
+		notice := noticeKeyOf(refusal.Notice)
+		d.rejected[notice] = Rejection{
 			Notice: refusal.Notice, Target: refusal.Target, Instance: refusal.Instance,
 			Reason: refusal.Reason, At: refusal.At,
 		}
+		d.holdReceiptLocked(notice)
 	}
 	records := make([]task.CommitRecord, len(entry.Mutations))
 	copy(records, entry.Mutations)
@@ -506,6 +544,9 @@ func (d *DurableCommit) seatTaskLocked(entry task.StatedTask) error {
 			return fmt.Errorf("%w: the task %s states a record of no mutation identity", ErrSeatRefused, taskID)
 		}
 		d.applyRecordLocked(record)
+	}
+	if _, held := d.facts[taskID]; !held {
+		d.facts[taskID] = nil
 	}
 	return nil
 }
@@ -537,8 +578,10 @@ func (d *DurableCommit) readTaskLocked(ctx context.Context, taskID event.TaskID)
 		if err := json.Unmarshal(body, &receipt); err != nil {
 			return err
 		}
-		d.consumed[noticeKey{task: receipt.TaskID, round: receipt.Round,
-			kind: receipt.Kind, seq: receipt.Seq}] = receipt.Event
+		notice := noticeKey{task: receipt.TaskID, round: receipt.Round,
+			kind: receipt.Kind, seq: receipt.Seq}
+		d.consumed[notice] = receipt.Event
+		d.holdReceiptLocked(notice)
 	}
 	attempts, err := d.scan(ctx, attemptPrefix+string(taskID)+"\x00")
 	if err != nil {
@@ -549,8 +592,10 @@ func (d *DurableCommit) readTaskLocked(ctx context.Context, taskID event.TaskID)
 		if err := json.Unmarshal(body, &record); err != nil {
 			return err
 		}
-		d.attempts[noticeKey{task: record.TaskID, round: record.Round,
-			kind: record.Kind, seq: record.Seq}] = record.Attempt
+		notice := noticeKey{task: record.TaskID, round: record.Round,
+			kind: record.Kind, seq: record.Seq}
+		d.attempts[notice] = record.Attempt
+		d.holdReceiptLocked(notice)
 	}
 	rejections, err := d.scan(ctx, rejectPrefix+string(taskID)+"\x00")
 	if err != nil {
@@ -561,7 +606,9 @@ func (d *DurableCommit) readTaskLocked(ctx context.Context, taskID event.TaskID)
 		if err := json.Unmarshal(body, &rejection); err != nil {
 			return err
 		}
-		d.rejected[noticeKeyOf(rejection.Notice)] = rejection
+		notice := noticeKeyOf(rejection.Notice)
+		d.rejected[notice] = rejection
+		d.holdReceiptLocked(notice)
 	}
 	facts, err := d.scan(ctx, factPrefix+string(taskID)+"\x00")
 	if err != nil {
@@ -686,6 +733,7 @@ func (d *DurableCommit) recordAttempt(ctx context.Context, notice task.Notice, a
 		return err
 	}
 	d.attempts[key] = attempt
+	d.holdReceiptLocked(key)
 	return nil
 }
 
@@ -741,6 +789,7 @@ func (d *DurableCommit) recordConsumption(ctx context.Context, notice task.Notic
 		return err
 	}
 	d.consumed[key] = notice.Event
+	d.holdReceiptLocked(key)
 	delete(d.owed, key)
 	return nil
 }
@@ -783,6 +832,7 @@ func (d *DurableCommit) recordRejection(ctx context.Context, rejection Rejection
 		return err
 	}
 	d.rejected[key] = rejection
+	d.holdReceiptLocked(key)
 	delete(d.owed, key)
 	return nil
 }
@@ -838,9 +888,12 @@ func (d *DurableCommit) refusals() []Rejection {
 // fact — and advances no delivery state: the notifications of the stored fact
 // stay owed and pending until their targets explicitly accept them. The same
 // identity beside other content is refused by name, as is a record expecting
-// another revision. A record is staged behind the sync barrier before the
-// commit reports it committed, so a barrier that fails reports an uncertain
-// outcome instead of a durable success.
+// another revision. The record opens a delivery obligation for each notification
+// of its outbox no consumption receipt and no refusal has already closed, which
+// is the obligation a recovery seat of the same record opens, so one account
+// answers one owed set whichever path built it. A record is staged behind the
+// sync barrier before the commit reports it committed, so a barrier that fails
+// reports an uncertain outcome instead of a durable success.
 func (d *DurableCommit) Commit(ctx context.Context, record task.CommitRecord) (task.CommitResult, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -878,13 +931,7 @@ func (d *DurableCommit) Commit(ctx context.Context, record task.CommitRecord) (t
 	d.revisions[record.TaskID] = record.ExpectedRevision + 1
 	d.facts[record.TaskID] = append(d.facts[record.TaskID], record)
 	d.mutations[key] = record
-	for _, envelope := range record.Outbox {
-		d.owed[noticeKey{task: envelope.Notice.TaskID, round: envelope.Notice.Round,
-			kind: envelope.Notice.Kind, seq: envelope.Notice.Seq}] = task.OutboxNotice{
-			Notice:   envelope,
-			Delivery: task.DeliveryPending,
-		}
-	}
+	d.oweLocked(record)
 	return task.CommitCommitted, nil
 }
 
@@ -999,8 +1046,16 @@ func (d *DurableCommit) OwedNotices() []task.OutboxNotice {
 	return owed
 }
 
-// TaskIDs returns every task the commit holds facts for, in numeric order.
+// TaskIDs returns every task this account holds, in identity order: the tasks a
+// checkpoint stated beside the tasks the storage committed past its cut. The set
+// is the open work of the account and costs no read of its own, so a boot asks it
+// to name the chains it must fold and no chain of a task that finished before the
+// cut appears in the answer. The whole history behind that account is
+// HistoryTaskIDs, which is the read of a caller that asks for it.
 func (d *DurableCommit) TaskIDs() []event.TaskID {
+	if d == nil {
+		return nil
+	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	ids := make([]event.TaskID, 0, len(d.facts))
@@ -1013,17 +1068,66 @@ func (d *DurableCommit) TaskIDs() []event.TaskID {
 	return ids
 }
 
+// HistoryTaskIDs reports every task identity the log holds a fact for, across the
+// whole history the storage carries: the tasks this account holds beside every
+// task a checkpoint left on its chain.
+//
+// The read is the whole fact family of the log, so its cost is linear in the
+// history — O(history) — and it belongs to a caller that asks for the history: a
+// boot reads the account its checkpoint states and the tail past it and pays
+// neither. A caller that names this set reads each task back by identity through
+// Records, so the set alone costs the fact bodies the scan returns.
+func (d *DurableCommit) HistoryTaskIDs(ctx context.Context) ([]event.TaskID, error) {
+	if d == nil {
+		return nil, nil
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	facts, err := d.scan(ctx, factPrefix)
+	if err != nil {
+		return nil, err
+	}
+	seen := make(map[event.TaskID]struct{}, len(facts))
+	for key := range facts {
+		rest, held := strings.CutPrefix(key, factPrefix)
+		if !held {
+			continue
+		}
+		if at := strings.Index(rest, "\x00"); at > 0 {
+			seen[event.TaskID(rest[:at])] = struct{}{}
+		}
+	}
+	ids := make([]event.TaskID, 0, len(seen))
+	for taskID := range seen {
+		ids = append(ids, taskID)
+	}
+	sort.Slice(ids, func(i, j int) bool {
+		return ids[i] < ids[j]
+	})
+	return ids, nil
+}
+
 // Records returns the durable fact chain of one task as restore links, in
 // commit order: the admission link carries the stored task_spawned material,
 // every later link carries its fact alone. A notification whose consumption
 // receipt the log holds is left out of the outbox of its link, so a rebuild
 // opens no delivery obligation for a notice already confirmed as consumed.
+//
+// A task this account does not hold is read by its own identity here, the first
+// time a reader asks for its chain: a task that finished before the cut states no
+// entry, so its record is answered on demand and no boot pays for a task nobody
+// names. An identity the log holds no link for answers no chain.
 func (d *DurableCommit) Records(ctx context.Context, taskID event.TaskID) ([]task.TaskRecord, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	if _, held := d.facts[taskID]; !held {
+		if err := d.readTaskLocked(ctx, taskID); err != nil {
+			return nil, err
+		}
+	}
 	records := d.facts[taskID]
 	chain := make([]task.TaskRecord, 0, len(records))
 	for i, fact := range records {
@@ -1041,8 +1145,9 @@ func (d *DurableCommit) Records(ctx context.Context, taskID event.TaskID) ([]tas
 // refusals its targets answered, each ordered by the notice identity it names. A
 // checkpoint states the account through it, so a boot reads the receipts of the
 // tasks the checkpoint covers instead of scanning the durable prefixes of every
-// task the storage ever held. The answer is a copy: the caller cannot change the
-// account through it.
+// task the storage ever held. The answer is filed per task, so it costs the
+// receipts of that task and never those of the tasks the account holds beside it.
+// The answer is a copy: the caller cannot change the account through it.
 func (d *DurableCommit) ReceiptsOf(taskID event.TaskID) task.Receipts {
 	if d == nil {
 		return task.Receipts{}
@@ -1050,32 +1155,26 @@ func (d *DurableCommit) ReceiptsOf(taskID event.TaskID) task.Receipts {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	receipts := task.Receipts{}
-	for key, committed := range d.consumed {
-		if key.task != taskID {
-			continue
+	for key := range d.receiptsByTask[taskID] {
+		notice := task.Notice{TaskID: key.task, Round: key.round, Kind: key.kind, Seq: key.seq}
+		if committed, consumed := d.consumed[key]; consumed {
+			receipts.Consumed = append(receipts.Consumed, task.StatedConsumption{
+				Notice: notice,
+				Event:  committed,
+			})
 		}
-		receipts.Consumed = append(receipts.Consumed, task.StatedConsumption{
-			Notice: task.Notice{TaskID: key.task, Round: key.round, Kind: key.kind, Seq: key.seq},
-			Event:  committed,
-		})
-	}
-	for key, attempt := range d.attempts {
-		if key.task != taskID {
-			continue
+		if attempt, held := d.attempts[key]; held {
+			receipts.Attempts = append(receipts.Attempts, task.StatedAttempt{
+				Notice:   notice,
+				Terminal: attempt.Terminal,
+			})
 		}
-		receipts.Attempts = append(receipts.Attempts, task.StatedAttempt{
-			Notice:   task.Notice{TaskID: key.task, Round: key.round, Kind: key.kind, Seq: key.seq},
-			Terminal: attempt.Terminal,
-		})
-	}
-	for key, rejection := range d.rejected {
-		if key.task != taskID {
-			continue
+		if rejection, refused := d.rejected[key]; refused {
+			receipts.Rejected = append(receipts.Rejected, task.StatedRefusal{
+				Notice: rejection.Notice, Target: rejection.Target, Instance: rejection.Instance,
+				Reason: rejection.Reason, At: rejection.At,
+			})
 		}
-		receipts.Rejected = append(receipts.Rejected, task.StatedRefusal{
-			Notice: rejection.Notice, Target: rejection.Target, Instance: rejection.Instance,
-			Reason: rejection.Reason, At: rejection.At,
-		})
 	}
 	sort.Slice(receipts.Consumed, func(i, j int) bool {
 		return noticeBefore(receipts.Consumed[i].Notice, receipts.Consumed[j].Notice)
@@ -1118,10 +1217,7 @@ func (d *DurableCommit) unowedLocked(fact task.CommitRecord) task.CommitRecord {
 	}
 	outbox := make([]task.Envelope, 0, len(fact.Outbox))
 	for _, envelope := range fact.Outbox {
-		if _, consumed := d.consumed[noticeKeyOf(envelope.Notice)]; consumed {
-			continue
-		}
-		if _, rejected := d.rejected[noticeKeyOf(envelope.Notice)]; rejected {
+		if d.settledLocked(noticeKeyOf(envelope.Notice)) {
 			continue
 		}
 		outbox = append(outbox, envelope)

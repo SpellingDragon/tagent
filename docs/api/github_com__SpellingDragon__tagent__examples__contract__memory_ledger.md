@@ -1,14 +1,20 @@
 package memoryledgerexample // import "github.com/SpellingDragon/tagent/examples/contract/memory_ledger"
 
-Package memoryledgerexample holds the canonical examples of the ledger faces a
-reclaimer, a retention guard and a scoped read drive the original store through:
-the protection guard, the lifecycle store, the original-text store and its
-scoped read.
+Package memoryledgerexample holds the canonical examples of the ledger faces
+a reclaimer, a retention guard, a scoped read and a boot tail walk drive:
+the protection guard, the lifecycle store, the original-text store, its scoped
+read and the commit order.
 
 One file per interface, each a minimal implementation beside the Example
 function that drives it through its real caller.
 
 FUNCTIONS
+
+func ExampleCommitOrder()
+    ExampleCommitOrder walks the records five commits landed: it names each key
+    once at its newest commit from the newest record to the oldest, skips the
+    key whose newest commit deleted it, and ends a second walk where the visit
+    answers false.
 
 func ExampleGuard()
     ExampleGuard holds one original, reports it as protected, releases it under

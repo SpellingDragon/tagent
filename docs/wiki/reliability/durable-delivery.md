@@ -54,7 +54,7 @@
 <a id="canonical-fact-resolution"></a>
 ## 二、重放取哪份事实：账本键就是身份
 
-账本不重建状态，它**记住身份**；状态是重放的纯读数。四类记录同在一份事实面上（`FactLog`：`Put`/`Get`/`Scan`/`Sync`，四条红线要求"暂存不声称持久、屏障之后才报成功、不得把暂存当已存、前缀扫描不得给子集"）。账本自身的可恢复状态（邮箱欠账、任务账户、送达账、未应答输入、投影幸存者）由框架 checkpoint 事实族承载（见[平台篇 §六](../platform/platform-subsystems.md#framework-checkpoint)）：boot 读最新 checkpoint 载入切片、只回放偏移后事实，不再对这些前缀做全史扫描；无 checkpoint 的年轻链才全量回放，坏 checkpoint 具名拒 boot。
+账本不重建状态，它**记住身份**；状态是重放的纯读数。四类记录同在一份事实面上（`api/durable.FactLog`：`Put`/`Scan`/`Sync`，四条红线要求"暂存不声称持久、屏障之后才报成功、不得把暂存当已存、前缀扫描不得给子集"）。账本自身的可恢复状态（邮箱欠账、任务账户、送达账、未应答输入、投影幸存者）由框架 checkpoint 事实族承载（见[平台篇 §六](../platform/platform-subsystems.md#framework-checkpoint)）：boot 读最新 checkpoint 载入切片、只回放偏移后事实，不再对这些前缀做全史扫描；无 checkpoint 的年轻链才全量回放，坏 checkpoint 具名拒 boot。
 
 | 记录 | 键 | 值 | 身份从哪来 |
 |---|---|---|---|

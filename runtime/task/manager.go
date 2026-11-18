@@ -56,10 +56,16 @@ func (m *MemoryManager) Admit(ctx context.Context, spec Spec) (AdmissionReceipt,
 
 // Obligations reports the obligations the manager still holds for a task, each entry
 // classified by the wait it is in beside the task and notification it points at.
+// A task the newest checkpoint stated no entry for is read back from its chain
+// here, so the report answers a finished task by identity alone, with no lookup
+// having to materialize the record first.
 func (m *MemoryManager) Obligations(ctx context.Context, taskID event.TaskID) (Obligations, error) {
 	m.registry.mu.Lock()
 	defer m.registry.mu.Unlock()
-	entry, ok := m.registry.tasks[taskID]
+	entry, ok, err := m.registry.hydrateLocked(ctx, taskID)
+	if err != nil {
+		return Obligations{}, err
+	}
 	if !ok {
 		return Obligations{}, ErrTaskNotFound
 	}
@@ -86,11 +92,17 @@ func (m *MemoryManager) Obligations(ctx context.Context, taskID event.TaskID) (O
 // target and its identity; a notification with no answer yet has only its open delivery obligation reclassified as handed-off bookkeeping — its frozen routing never moves.
 // Every notification already created keeps the routing its envelope froze: a retry of
 // one delivers beside that frozen routing and re-resolves no current target. A repeat
-// of the handoff already recorded applies nothing a second time.
+// of the handoff already recorded applies nothing a second time. A task the
+// newest checkpoint stated no entry for is read back from its chain first, so a
+// restart records the move beside the record the chain holds instead of
+// answering that the task is unknown.
 func (m *MemoryManager) Handoff(ctx context.Context, taskID event.TaskID, target HandoffTarget) error {
 	m.registry.mu.Lock()
 	defer m.registry.mu.Unlock()
-	entry, ok := m.registry.tasks[taskID]
+	entry, ok, err := m.registry.hydrateLocked(ctx, taskID)
+	if err != nil {
+		return err
+	}
 	if !ok {
 		return ErrTaskNotFound
 	}
@@ -145,12 +157,17 @@ func (m *MemoryManager) Handoff(ctx context.Context, taskID event.TaskID, target
 //
 // A notification no target accepted stays owed, and the reason it could not be
 // accepted is recorded beside it, so a report names why a delivery waits instead
-// of only that it waits.
+// of only that it waits. A task the newest checkpoint stated no entry for is read
+// back from its chain first, so a restart flushes the notifications the record
+// still owes instead of answering that the task is unknown.
 func (m *MemoryManager) Flush(ctx context.Context, taskID event.TaskID) error {
 	m.registry.mu.Lock()
 	defer m.registry.mu.Unlock()
 	defer m.registry.noteActivity()
-	entry, ok := m.registry.tasks[taskID]
+	entry, ok, err := m.registry.hydrateLocked(ctx, taskID)
+	if err != nil {
+		return err
+	}
 	if !ok {
 		return ErrTaskNotFound
 	}

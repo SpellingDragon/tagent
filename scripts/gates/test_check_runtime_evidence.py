@@ -25,6 +25,11 @@ CHECKER = SCRIPTS / "check_runtime_evidence.py"
 REAL_CONTRACT = REPO / "golden" / "runtime" / "scenarios.json"
 MODULE = "github.com/SpellingDragon/tagent"
 
+sys.path.insert(0, str(SCRIPTS))
+import check_runtime_evidence as checker  # noqa: E402
+
+CHECKER_ENVIRONMENT_NAMES = checker.EVENT_ENVIRONMENT_NAMES
+
 
 def run_checker(*args):
     proc = subprocess.run([sys.executable, str(CHECKER)] + list(args),
@@ -598,6 +603,14 @@ def event_full_package(module_path, test_package):
     return module_path if rel == "." else module_path + "/" + rel
 
 
+def event_package_arg(module_path, test_package):
+    """The `go test` argument the runner derives from one contract package."""
+    rel = test_package[2:] if test_package.startswith("./") else test_package
+    if rel in ("", ".", module_path):
+        return "."
+    return "./" + rel
+
+
 def event_row(package, test, action):
     return {"Time": "2026-01-01T00:00:00Z", "Action": action,
             "Package": package, "Test": test, "Output": ""}
@@ -651,6 +664,49 @@ def event_fingerprints(scope):
 
 def event_digest(path):
     return "sha256:" + hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
+EVENT_FIXTURE_BOUND = 600
+
+
+def event_selectors(tests):
+    """The selectors a run declares: the contract's own module/package/name rows."""
+    return [{"test_id": test["id"], "module_path": test["module_path"],
+             "test_package": test["test_package"], "test_name": test["test_name"]}
+            for test in tests]
+
+
+def event_invocations(tests, seed=None, window=None, bound=EVENT_FIXTURE_BOUND):
+    """The argv the runner derives: one invocation per (module dir, tags, race) group."""
+    groups = {}
+    for test in tests:
+        key = (test["dir"], tuple(sorted(test.get("tags") or [])))
+        group = groups.setdefault(key, {"module_path": test["module_path"],
+                                        "dir": test["dir"],
+                                        "packages": [], "tests": []})
+        package = event_package_arg(test["module_path"], test["test_package"])
+        if package not in group["packages"]:
+            group["packages"].append(package)
+        group["tests"].append(test)
+    invocations = []
+    for key in sorted(groups):
+        group = groups[key]
+        tags = list(key[1])
+        names = sorted({test["test_name"] for test in group["tests"]})
+        command = ["go", "-C", group["dir"], "test"] + sorted(group["packages"])
+        command += ["-run", "^({})$".format("|".join(names)), "-count=1",
+                    "-timeout", "{}s".format(bound)]
+        if tags:
+            command += ["-tags", ",".join(tags)]
+        command.append("-race")
+        command.append("-json")
+        if seed is not None:
+            command += ["-args", "-seed={}".format(seed), "-window={}".format(window)]
+        invocations.append({"module_path": group["module_path"], "dir": group["dir"],
+                            "packages": sorted(group["packages"]), "tags": tags,
+                            "race": True, "command": " ".join(command), "exit_code": 0})
+    return invocations
+
 
 
 def mutation_evidence(contract_digest=None, fingerprints=None):
@@ -1062,7 +1118,12 @@ class EventFixture:
                 "window": window,
                 "tags": sorted({tag for test in tests for tag in test.get("tags") or []}),
                 "race": True,
+                "environment": {"GOMAXPROCS": "4"},
+                "selectors": event_selectors(tests),
+                "invocations": event_invocations(tests, seed, window),
             },
+            "liveness": {"name": "go_test_bound", "state": "completed",
+                         "bound_seconds": EVENT_FIXTURE_BOUND},
             "go_test_exit_code": 0,
             "test_log": "",
             "test_log_sha256": "",
@@ -1152,6 +1213,153 @@ class EventEvidenceTest(EventFixture, unittest.TestCase):
         code, out, err = self.verify(self.evidence("event-long", tests, seed=7, window=256),
                                      event_log(self.contract, tests))
         self.assertEqual(code, 0, out + err)
+
+    def test_a_command_without_count_one_is_rejected(self):
+        tests = event_tests(self.contract, "event-short")
+        evidence = self.evidence("event-short", tests)
+        evidence["run_config"]["invocations"][0]["command"] = (
+            evidence["run_config"]["invocations"][0]["command"].replace(" -count=1", ""))
+        code, out, err = self.verify(evidence, event_log(self.contract, tests))
+        self.assertNotEqual(code, 0)
+        self.assertIn("no '-count=1'", out)
+
+    def test_a_command_run_in_another_directory_is_rejected(self):
+        tests = event_tests(self.contract, "event-short")
+        evidence = self.evidence("event-short", tests)
+        invocation = evidence["run_config"]["invocations"][0]
+        invocation["command"] = invocation["command"].replace(
+            "go -C {} test".format(invocation["dir"]), "go -C /elsewhere test")
+        code, out, err = self.verify(evidence, event_log(self.contract, tests))
+        self.assertNotEqual(code, 0)
+        self.assertIn("the recorded argv runs in", out)
+
+    def test_a_command_that_omits_a_selected_package_is_rejected(self):
+        tests = event_tests(self.contract, "event-short")
+        evidence = self.evidence("event-short", tests)
+        invocation = evidence["run_config"]["invocations"][0]
+        dropped = invocation["packages"].pop()
+        invocation["command"] = invocation["command"].replace(" " + dropped, "", 1)
+        code, out, err = self.verify(evidence, event_log(self.contract, tests))
+        self.assertNotEqual(code, 0)
+        self.assertIn("no invocation runs selected package", out)
+
+    def test_a_command_that_names_another_test_is_rejected(self):
+        tests = event_tests(self.contract, "event-short")
+        evidence = self.evidence("event-short", tests)
+        invocation = evidence["run_config"]["invocations"][0]
+        dropped = sorted({test["test_name"] for test in tests
+                          if test["dir"] == invocation["dir"]})[0]
+        tokens = invocation["command"].split()
+        tokens[tokens.index("-run") + 1] = tokens[tokens.index("-run") + 1].replace(
+            dropped, "TestUnrelated")
+        invocation["command"] = " ".join(tokens)
+        code, out, err = self.verify(evidence, event_log(self.contract, tests))
+        self.assertNotEqual(code, 0)
+        self.assertIn("no '-run' selector names selected test", out)
+
+    def test_a_selector_that_names_another_test_is_rejected(self):
+        tests = event_tests(self.contract, "event-short")
+        evidence = self.evidence("event-short", tests)
+        evidence["run_config"]["selectors"][0]["test_name"] = "TestSomethingElse"
+        code, out, err = self.verify(evidence, event_log(self.contract, tests))
+        self.assertNotEqual(code, 0)
+        self.assertIn("drives test", out)
+
+    def test_a_run_whose_own_bound_fired_is_rejected(self):
+        tests = event_tests(self.contract, "event-short")
+        evidence = self.evidence("event-short", tests)
+        evidence["liveness"]["state"] = "expired"
+        code, out, err = self.verify(evidence, event_log(self.contract, tests))
+        self.assertNotEqual(code, 0)
+        self.assertIn("the run's own bound fired", out)
+
+    def test_an_inner_timeout_outliving_the_runner_bound_is_rejected(self):
+        tests = event_tests(self.contract, "event-short")
+        evidence = self.evidence("event-short", tests)
+        evidence["run_config"]["invocations"][0]["command"] = (
+            evidence["run_config"]["invocations"][0]["command"].replace(
+                "-timeout {}s".format(EVENT_FIXTURE_BOUND),
+                "-timeout {}s".format(EVENT_FIXTURE_BOUND * 2)))
+        code, out, err = self.verify(evidence, event_log(self.contract, tests))
+        self.assertNotEqual(code, 0)
+        self.assertIn("nested interval", out)
+
+    def test_a_command_without_its_own_timeout_is_rejected(self):
+        tests = event_tests(self.contract, "event-short")
+        evidence = self.evidence("event-short", tests)
+        evidence["run_config"]["invocations"][0]["command"] = (
+            evidence["run_config"]["invocations"][0]["command"].replace(
+                " -timeout {}s".format(EVENT_FIXTURE_BOUND), ""))
+        code, out, err = self.verify(evidence, event_log(self.contract, tests))
+        self.assertNotEqual(code, 0)
+        self.assertIn("nested interval", out)
+
+    def test_a_failed_invocation_is_rejected(self):
+        tests = event_tests(self.contract, "event-short")
+        evidence = self.evidence("event-short", tests)
+        evidence["run_config"]["invocations"][0]["exit_code"] = 2
+        code, out, err = self.verify(evidence, event_log(self.contract, tests))
+        self.assertNotEqual(code, 0)
+        self.assertIn("cannot be evidence for a green round", out)
+
+    def test_a_goflags_flag_no_recorded_argv_decides_is_rejected(self):
+        tests = event_tests(self.contract, "event-short")
+        evidence = self.evidence("event-short", tests)
+        evidence["run_config"]["environment"] = {"GOFLAGS": "-short -count=1"}
+        code, out, err = self.verify(evidence, event_log(self.contract, tests))
+        self.assertNotEqual(code, 0)
+        self.assertIn("would not be the command that ran", out)
+        self.assertIn("-short", out)
+        self.assertNotIn("-count=1', which no recorded argv", out)
+
+    def test_a_complete_consistent_environment_record_is_accepted(self):
+        tests = event_tests(self.contract, "event-short")
+        evidence = self.evidence("event-short", tests)
+        evidence["run_config"]["environment"] = {
+            "GOFLAGS": "-count=1 -json",
+            "GOMAXPROCS": "4",
+            "GODEBUG": "",
+            "TAGENT_CALIBRATION_MODE": "host",
+        }
+        code, out, err = self.verify(evidence, event_log(self.contract, tests))
+        self.assertEqual(code, 0, out + err)
+
+    def test_a_missing_environment_record_is_rejected(self):
+        tests = event_tests(self.contract, "event-short")
+        evidence = self.evidence("event-short", tests)
+        del evidence["run_config"]["environment"]
+        code, out, err = self.verify(evidence, event_log(self.contract, tests))
+        self.assertNotEqual(code, 0)
+        self.assertIn("run_config.environment is absent", out)
+
+    def test_a_gomaxprocs_the_runtime_ignores_is_rejected(self):
+        tests = event_tests(self.contract, "event-short")
+        evidence = self.evidence("event-short", tests)
+        evidence["run_config"]["environment"] = {"GOMAXPROCS": "auto"}
+        code, out, err = self.verify(evidence, event_log(self.contract, tests))
+        self.assertNotEqual(code, 0)
+        self.assertIn("the runtime ignores", out)
+        self.assertIn("GOMAXPROCS", out)
+
+    def test_a_credential_bearing_variable_is_rejected_and_its_value_never_echoed(self):
+        tests = event_tests(self.contract, "event-short")
+        evidence = self.evidence("event-short", tests)
+        evidence["run_config"]["environment"] = {"TAGENT_RL_AUTH_TOKEN": "s3cret-token"}
+        code, out, err = self.verify(evidence, event_log(self.contract, tests))
+        self.assertNotEqual(code, 0)
+        self.assertIn("outside the recorded determinants", out)
+        self.assertIn("TAGENT_RL_AUTH_TOKEN", out)
+        self.assertNotIn("s3cret-token", out + err)
+
+    def test_the_recorded_determinants_match_the_runner_declaration(self):
+        """The checker's declaration and the producer's must not drift apart."""
+        sys.path.insert(0, str(REPO / "scripts" / "scenarios"))
+        try:
+            import run_runtime_scenarios as runner
+        finally:
+            sys.path.pop(0)
+        self.assertEqual(tuple(sorted(runner.EVENT_ENVIRONMENT_NAMES)),
+                         tuple(sorted(CHECKER_ENVIRONMENT_NAMES)))
 
     def test_skipped_subtest_is_rejected(self):
         tests = event_tests(self.contract, "event-short")

@@ -11,9 +11,9 @@ import (
 	"errors"
 	"fmt"
 	"sort"
-	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/SpellingDragon/tagent/api/event"
@@ -51,14 +51,15 @@ type kvOriginalStore struct {
 	windows map[string]time.Duration
 	byKey   map[event.EventID]*originalEntry
 	loaded  bool
-	// coldRoot is the directory of the cold journal the originals of settled facts
-	// were relocated into, empty for a store that relocates none. The cold view is
-	// opened on the first read of an original the hot journal does not hold, never
-	// at boot: a boot that opened it would read the settled history it exists to
-	// keep out of the boot.
-	coldRoot string
-	// cold is the opened cold view, nil until a read misses the hot journal.
-	cold AtomicStore
+	// wholeSetLoads counts the loads that read the whole original family, and
+	// wholeSetPairs the records those loads fetched; identityKeys counts the keys
+	// a point read of one identity read. A boot states all three, because the
+	// family a load reads is the cost a commit that named no identity pays and two
+	// keys are the cost a commit that named one owes, whatever the store holds
+	// under them.
+	wholeSetLoads atomic.Int64
+	wholeSetPairs atomic.Int64
+	identityKeys  atomic.Int64
 }
 
 // newKVOriginalStore opens the original store without reading it. The existing
@@ -84,8 +85,11 @@ func newEmptyKVOriginalStore(kv AtomicStore, windows map[string]time.Duration) *
 
 var _ OriginalStore = (*kvOriginalStore)(nil)
 
-// ensureLoaded runs the existing whole-store load on first access. Failures are
-// returned without being cached, so a repaired backend can be retried.
+// ensureLoaded runs the whole-store load on first access. Failures are returned
+// without being cached, so a repaired backend can be retried. It is the load of a
+// caller that needs the whole set, which is the count of keys holding a body and
+// the scoped read faces that take the stored state as a map; a caller that names
+// one identity reads that identity through entryLocked instead.
 func (s *kvOriginalStore) ensureLoaded() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -99,10 +103,42 @@ func (s *kvOriginalStore) ensureLoaded() error {
 	return nil
 }
 
+// entryLocked answers the entry one identity holds, reading the body and the
+// reference that names it from the store on a miss: two point reads of that
+// identity, never a walk of the original family behind it. The caller holds the
+// lock.
+//   - A reference the store files beside no body fails by name, so a read never answers a reference it cannot serve
+//   - The entry a commit of this process published is answered from the store, so a key committed before this read costs no read at all
+func (s *kvOriginalStore) entryLocked(ctx context.Context, key event.EventID) (*originalEntry, bool, error) {
+	if entry, held := s.byKey[key]; held {
+		return entry, true, nil
+	}
+	blobPairs, err := s.kv.Read(ctx, Fetch{Key: blobKVKey(key)})
+	if err != nil {
+		return nil, false, err
+	}
+	refPairs, err := s.kv.Read(ctx, Fetch{Key: refKVKey(key)})
+	if err != nil {
+		return nil, false, err
+	}
+	s.identityKeys.Add(2)
+	entries, err := originalsOf(blobPairs, refPairs)
+	if err != nil {
+		return nil, false, err
+	}
+	entry, held := entries[key]
+	if !held {
+		return nil, false, nil
+	}
+	s.byKey[key] = entry
+	return entry, true, nil
+}
+
 // load publishes references only with the independent body of the same event
 // key; a reference without that body fails by name instead of disappearing.
 //
 // - The load reads the two entries it files, the body and the reference, by prefix: a whole-store read of a durable tier walks every event body the segment store owns, so the load would pay for the record it never reads.
+// - It is the load of the whole set alone: a caller that names one identity reads that identity, because a boot that paid this prefix walk on its first commit read the whole original family whatever the fact it committed.
 func (s *kvOriginalStore) load() error {
 	blobPairs, err := s.kv.Read(context.Background(), Fetch{Prefix: "blob:"})
 	if err != nil {
@@ -116,6 +152,8 @@ func (s *kvOriginalStore) load() error {
 	if err != nil {
 		return err
 	}
+	s.wholeSetLoads.Add(1)
+	s.wholeSetPairs.Add(int64(len(blobPairs) + len(refPairs)))
 	s.byKey = byKey
 	return nil
 }
@@ -170,101 +208,10 @@ func originalsOf(blobPairs, refPairs []Pair) (map[event.EventID]*originalEntry, 
 	return byKey, nil
 }
 
-// WithColdRoot declares the directory of the cold journal the originals of
-// settled facts were relocated into. A store opened without one answers only the
-// originals its hot journal holds, which is the behavior of a deployment that
-// keeps every fact hot.
-func (s *kvOriginalStore) WithColdRoot(root string) *kvOriginalStore {
-	s.coldRoot = root
-	return s
-}
-
-// coldViewLocked answers the opened cold journal, opening it on the first read of
-// an original the hot journal does not hold and never at boot. A store beside no
-// cold root, and one whose hot journal states that nothing was ever relocated,
-// answers false: opening a cold journal no pass filled would read an empty store.
-// The caller holds the lock.
-func (s *kvOriginalStore) coldViewLocked(ctx context.Context) (AtomicStore, bool, error) {
-	if s.coldRoot == "" {
-		return nil, false, nil
-	}
-	relocated, err := s.relocatedLocked(ctx)
-	if err != nil || !relocated {
-		return nil, false, err
-	}
-	if s.cold != nil {
-		return s.cold, true, nil
-	}
-	cold, err := OpenAtomicStore(ctx, StorageConfig{Type: StorageJournal, Root: s.coldRoot})
-	if err != nil {
-		return nil, false, fmt.Errorf("tagent: open the cold journal %s: %w", s.coldRoot, err)
-	}
-	s.cold = cold
-	return cold, true, nil
-}
-
-// relocatedLocked reports whether a relocation pass moved any fact out of the hot
-// journal, as the hot journal itself states it. The marker is what keeps a store
-// that never relocated out of a cold journal it would read empty. The caller holds
-// the lock.
-func (s *kvOriginalStore) relocatedLocked(ctx context.Context) (bool, error) {
-	pairs, err := s.kv.Read(ctx, Fetch{Key: segmentSettledCommitKey})
-	if err != nil {
-		return false, err
-	}
-	if len(pairs) == 0 {
-		return false, nil
-	}
-	commit, err := strconv.ParseInt(string(pairs[0].Value), 10, 64)
-	if err != nil {
-		return false, fmt.Errorf("%w: the settled commit %q: %w", ErrSnapshotCorrupt, segmentSettledCommitKey, err)
-	}
-	return commit > 0, nil
-}
-
-// coldEntryLocked answers the original one event key owns from the cold journal,
-// so a relocation never changes what a read by identity answers. It answers false
-// beside no error for a key neither journal holds, and it names ErrSnapshotCorrupt
-// for a cold reference whose independent body the cold journal does not carry,
-// instead of reporting the original as absent. The caller holds the lock.
-func (s *kvOriginalStore) coldEntryLocked(ctx context.Context, key event.EventID) (*originalEntry, bool, error) {
-	cold, held, err := s.coldViewLocked(ctx)
-	if err != nil || !held {
-		return nil, false, err
-	}
-	refPairs, err := cold.Read(ctx, Fetch{Key: refKVKey(key)})
-	if err != nil {
-		return nil, false, err
-	}
-	if len(refPairs) == 0 {
-		return nil, false, nil
-	}
-	blobPairs, err := cold.Read(ctx, Fetch{Key: blobKVKey(key)})
-	if err != nil {
-		return nil, false, err
-	}
-	entries, err := originalsOf(blobPairs, refPairs)
-	if err != nil {
-		return nil, false, err
-	}
-	entry, held := entries[key]
-	return entry, held, nil
-}
-
-// entryLocked answers the original one event key owns: the entry the hot journal
-// published, and past that the cold journal, so an original a relocation moved out
-// is still answered by identity. The caller holds the lock.
-func (s *kvOriginalStore) entryLocked(ctx context.Context, key event.EventID) (*originalEntry, bool, error) {
-	if entry, held := s.byKey[key]; held {
-		return entry, true, nil
-	}
-	return s.coldEntryLocked(ctx, key)
-}
-
 // Put commits the original bytes of ref and publishes the reference once its barrier returns success.
 //   - Different event keys always own independent bodies; a second scope on the same key joins its references, and other bytes under a held key are refused
 //   - The body and the reference that names it travel in one batch, so a reader never sees a reference whose body is missing and a failed commit leaves neither behind
-//   - An original a relocation moved into the cold journal is still a committed original: a repeating commit answers as the duplicate it is, other bytes under the identity are refused, and a new reference re-files the body beside the reference it names
+//   - An original the store holds stays committed: a repeat answers as the duplicate, other bytes under that identity are refused, and a new reference re-files the body
 func (s *kvOriginalStore) Put(ctx context.Context, ref OriginalRef, body []byte) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -272,37 +219,79 @@ func (s *kvOriginalStore) Put(ctx context.Context, ref OriginalRef, body []byte)
 	if ref.Key == "" {
 		return ErrKeyRequired
 	}
-	digest := digestOf(body)
-	length := int64(len(body))
-	if ref.Integrity.Digest != "" && ref.Integrity.Digest != digest {
-		return ErrIntegrityMismatch
-	}
-	if ref.Integrity.Length != 0 && ref.Integrity.Length != length {
-		return ErrIntegrityMismatch
-	}
-	if err := s.ensureLoaded(); err != nil {
+	digest, length, err := checkOriginalRef(ref, body)
+	if err != nil {
 		return err
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	entry, held := s.byKey[ref.Key]
-	settled := false
-	if !held {
-		coldEntry, coldHeld, err := s.coldEntryLocked(ctx, ref.Key)
-		if err != nil {
-			return err
-		}
-		if coldHeld {
-			entry, held, settled = coldEntry, true, true
-		}
+	plan, err := s.planFactLocked(ctx, ref, body, digest, length)
+	if err != nil {
+		return err
+	}
+	if plan == nil {
+		return nil
+	}
+	if err := s.kv.Commit(ctx, Batch{Puts: plan.puts}); err != nil {
+		return fmt.Errorf("%w: %w", ErrCommitBarrier, err)
+	}
+	s.publishFactLocked(plan)
+	return nil
+}
+
+// factOriginalPlan is the original family of one whole-fact commit: the pairs one
+// batch carries and the state the commit publishes once its barrier returned.
+type factOriginalPlan struct {
+	// puts are the pairs the commit writes for this family.
+	puts []Pair
+	// key names the event key the reference belongs to.
+	key event.EventID
+	// entry is the entry the publication files.
+	entry *originalEntry
+	// ref and scope are the reference the commit registers.
+	ref   OriginalRef
+	scope refScope
+	// digest, length and body are the bytes the commit carries.
+	digest string
+	length int64
+	body   []byte
+	// blobStaged reports that the body travels in this commit.
+	blobStaged bool
+	// staged reports that the publication files an entry of its own.
+	staged bool
+}
+
+// checkOriginalRef answers the completeness information of one original the
+// commit carries, or the refusal of a reference whose stated completeness
+// disagrees with the bytes about to be committed.
+func checkOriginalRef(ref OriginalRef, body []byte) (string, int64, error) {
+	digest := digestOf(body)
+	length := int64(len(body))
+	if ref.Integrity.Digest != "" && ref.Integrity.Digest != digest {
+		return "", 0, ErrIntegrityMismatch
+	}
+	if ref.Integrity.Length != 0 && ref.Integrity.Length != length {
+		return "", 0, ErrIntegrityMismatch
+	}
+	return digest, length, nil
+}
+
+// planFactLocked answers the original family of one commit: the pairs one batch
+// carries and the state the commit publishes, or nothing for a reference the
+// store already registered under its scope. The caller loaded the store and
+// holds the lock.
+func (s *kvOriginalStore) planFactLocked(ctx context.Context, ref OriginalRef, body []byte, digest string, length int64) (*factOriginalPlan, error) {
+	entry, held, err := s.entryLocked(ctx, ref.Key)
+	if err != nil {
+		return nil, err
 	}
 	if held && entry.blob != nil && entry.blob.digest != digest {
-		return ErrContentConflict
+		return nil, ErrContentConflict
 	}
 	scope := ref.scope()
 	if held {
 		if _, accepted := entry.refs[scope]; accepted {
-			return nil
+			return nil, nil
 		}
 	}
 	ref.Integrity = Integrity{Digest: digest, Length: length}
@@ -316,20 +305,33 @@ func (s *kvOriginalStore) Put(ctx context.Context, ref OriginalRef, body []byte)
 		Length:          length,
 	}))
 	if err != nil {
-		return err
+		return nil, err
 	}
-	refKey := refKVKey(ref.Key)
-	blobKey := blobKVKey(ref.Key)
-	blobStaged := !held || entry.blob == nil || settled
+	blobStaged := !held || entry.blob == nil
 	puts := make([]Pair, 0, 2)
 	if blobStaged {
-		puts = append(puts, Pair{Key: blobKey, Value: body})
+		puts = append(puts, Pair{Key: blobKVKey(ref.Key), Value: body})
 	}
-	puts = append(puts, Pair{Key: refKey, Value: value})
-	if err := s.kv.Commit(ctx, Batch{Puts: puts}); err != nil {
-		return fmt.Errorf("%w: %w", ErrCommitBarrier, err)
-	}
-	if !held || settled {
+	puts = append(puts, Pair{Key: refKVKey(ref.Key), Value: value})
+	return &factOriginalPlan{
+		puts:       puts,
+		key:        ref.Key,
+		entry:      entry,
+		ref:        ref,
+		scope:      scope,
+		digest:     digest,
+		length:     length,
+		body:       body,
+		blobStaged: blobStaged,
+		staged:     !held,
+	}, nil
+}
+
+// publishFactLocked files one committed original family: the body, its
+// references and the entry the reads of the key answer with.
+func (s *kvOriginalStore) publishFactLocked(plan *factOriginalPlan) {
+	entry := plan.entry
+	if plan.staged {
 		staged := &originalEntry{refs: map[refScope]referenceRecord{}}
 		if entry != nil {
 			for stagedScope, record := range entry.refs {
@@ -338,12 +340,11 @@ func (s *kvOriginalStore) Put(ctx context.Context, ref OriginalRef, body []byte)
 		}
 		entry = staged
 	}
-	s.byKey[ref.Key] = entry
-	if blobStaged {
-		entry.blob = &originalBlob{digest: digest, length: length, bytes: append([]byte(nil), body...)}
+	s.byKey[plan.key] = entry
+	if plan.blobStaged {
+		entry.blob = &originalBlob{digest: plan.digest, length: plan.length, bytes: append([]byte(nil), plan.body...)}
 	}
-	entry.refs[scope] = referenceRecord{ref: ref, storedAt: time.Now()}
-	return nil
+	entry.refs[plan.scope] = referenceRecord{ref: plan.ref, storedAt: time.Now()}
 }
 
 // Get returns the exact recall result for key, classified exactly as the
@@ -353,11 +354,6 @@ func (s *kvOriginalStore) Put(ctx context.Context, ref OriginalRef, body []byte)
 func (s *kvOriginalStore) Get(ctx context.Context, key event.EventID) RecallResult {
 	result := RecallResult{Key: key}
 	if err := ctx.Err(); err != nil {
-		result.Outcome = RecallFailed
-		result.Err = err
-		return result
-	}
-	if err := s.ensureLoaded(); err != nil {
 		result.Outcome = RecallFailed
 		result.Err = err
 		return result
@@ -397,9 +393,6 @@ func (s *kvOriginalStore) ReadSegment(ctx context.Context, key event.EventID, st
 	}
 	if startLine < 1 || numLines < 1 {
 		return nil, ErrSegmentRange
-	}
-	if err := s.ensureLoaded(); err != nil {
-		return nil, err
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -445,9 +438,6 @@ func (s *kvOriginalStore) BlobCount() int {
 // scope in a stable order, so which owners, formats and retention policies still
 // name the original stays observable.
 func (s *kvOriginalStore) References(key event.EventID) []OriginalRef {
-	if err := s.ensureLoaded(); err != nil {
-		return nil
-	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	entry, held, err := s.entryLocked(context.Background(), key)
@@ -522,6 +512,15 @@ func (s *kvOriginalStore) anyReadable(entry *originalEntry) bool {
 		}
 	}
 	return false
+}
+
+// OriginalsReads reports what the reads of this store cost: the loads that read the
+// whole original family beside the records those loads fetched, and the keys the point
+// reads of one identity read. It is the quantity a bounded boot is measured by, because
+// a commit that read the family paid for every original the store holds and one that
+// names its identity pays for that original alone.
+func (s *kvOriginalStore) OriginalsReads() (wholeSetLoads int, wholeSetPairs int64, identityKeys int64) {
+	return int(s.wholeSetLoads.Load()), s.wholeSetPairs.Load(), s.identityKeys.Load()
 }
 
 // refKVKey returns the key the references of one original are stored under.

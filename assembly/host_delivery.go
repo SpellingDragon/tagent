@@ -25,13 +25,13 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/SpellingDragon/tagent/api/durable"
 	"github.com/SpellingDragon/tagent/api/event"
 	"github.com/SpellingDragon/tagent/api/model"
 	"github.com/SpellingDragon/tagent/api/plugin"
 	"github.com/SpellingDragon/tagent/memory"
 	"github.com/SpellingDragon/tagent/memory/ledger"
 	"github.com/SpellingDragon/tagent/runtime/agent"
-	"github.com/SpellingDragon/tagent/runtime/state"
 	"github.com/SpellingDragon/tagent/runtime/task"
 )
 
@@ -556,7 +556,7 @@ func (h *Host) RefuseDelivery(ctx context.Context, id string) error {
 // from: the storage tier the run opened, and nil beside a run that keeps no
 // tier. The migration is its one reader; the live account reads and writes the
 // chain instead.
-func (h *Host) deliveryDurable() state.FactLog {
+func (h *Host) deliveryDurable() durable.FactLog {
 	if h == nil {
 		return nil
 	}

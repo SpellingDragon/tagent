@@ -166,7 +166,7 @@ func visibilityTaskFilter(scope query.AuthorizationScope) query.ListFilter {
 //   - a face the assembly carries no wiring for names that absence instead of answering a zero reading
 //   - the reading is taken from the owners of the state, so a later admission shows up and no copy is kept
 //   - the host serves its reading behind the request gate and closes through the drain on a termination signal
-//   - a restarted host restores the persisted task and the persisted watermark, and invents no record it never stored
+//   - a restarted host states no outcome for the task settled before the cut and reads it and the watermark back by identity, inventing no record
 //
 // 契约: docs/wiki/platform/platform-subsystems.md#composition-root
 func TestRuntimeVisibility(t *testing.T) {
@@ -438,12 +438,8 @@ func TestRuntimeVisibility(t *testing.T) {
 		if err != nil {
 			t.Fatalf("read the restarted host: %v", err)
 		}
-		if len(report.Lifecycle.Recovered) != 1 {
-			t.Fatalf("recovery outcomes = %+v, want the one task the persisted chain covers", report.Lifecycle.Recovered)
-		}
-		outcome := report.Lifecycle.Recovered[0]
-		if outcome.TaskID != taskID || !outcome.Recovered || outcome.Refusal != "" || outcome.Status != task.StatusSettled {
-			t.Fatalf("recovery outcome = %+v, want %s rebuilt beside the settled status it stored", outcome, taskID)
+		if outcomes := report.Lifecycle.Recovered; len(outcomes) != 0 {
+			t.Fatalf("recovery outcomes = %+v, want no outcome for %s settled before the cut, while its chain still answers by identity: the boot seats the account from the checkpoint slice instead of re-reading the task fact families", outcomes, taskID)
 		}
 		if report.Instance == instance {
 			t.Fatalf("instance identity = %q, want a fresh identity beside the one the persisted task keeps", report.Instance)
@@ -457,6 +453,9 @@ func TestRuntimeVisibility(t *testing.T) {
 		}
 		if got := restored.Details[0].Ref; got.TaskID != taskID || got.InstanceID != instance {
 			t.Fatalf("restored task ref = %+v, want the admission material of %s / %s kept", got, taskID, instance)
+		}
+		if status := restored.Details[0].State.TaskStatus; status != task.StatusSettled {
+			t.Fatalf("restored task status = %d, want the settlement the chain stores for %s answered by identity", int(status), taskID)
 		}
 		watermark := report.Reflection.Watermark
 		if !watermark.Wired || !watermark.Established || !watermark.Moment.Equal(moment) {

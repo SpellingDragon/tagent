@@ -5,27 +5,49 @@ R5a pipeline member sourcing. A pipeline collection is any container whose type
 is a slice of plugin instances ([]plugin.Instance). The set is derived from the
 source, never registered: a container added later joins the judged set without a
 registry edit, and an empty derivation is red because it means the type anchor
-this rule reads has moved away. An append into a pipeline collection may carry
-only forwarded (spread) arguments; a single concrete member (a field, a local
-component, a constructor result) or a composite literal is red unless it is
-registered with the review that accepted it. A whole assignment of a resolved
-collection into the container is not an append and is not judged here.
+this rule reads has moved away. Every declaration shape of that type is a
+derivation: a struct field, a local initialised from it, a long declaration, a
+composite literal initialiser, and a parameter, where a parameter group declares
+every name its comma list carries (a, b []plugin.Instance derives both). An
+append into a pipeline collection may carry only forwarded arguments: a spread of
+a collection resolved elsewhere, or an element a range binds over one. A single
+concrete member (a field, a local component, a constructor result) or a composite
+literal is red unless it is registered with the review that accepted it, and a
+spread of a composite literal names a construction rather than a collection. A
+whole assignment of a resolved collection into the container is not an append and
+is not judged here.
 
-The plugin's own mount file and the one-line registry entry are the legal
-landing point for a concrete construction, so they are out of the R5a scan: the
-files registered under mounting.registry_implementation in
-golden/runtime/architecture.json are skipped. Without that skip the rule would
-judge away the only place a plugin may be built, an unsatisfiable criterion that
-justifies itself.
+Neither forward may launder a construction of this file. A name this file binds
+from a []plugin.Instance literal holds concrete constructions, so spreading it or
+ranging over it is not a resolution and stays red; an alias of such a name is the
+same name. Resolution is interprocedural-blind: a local bound from a call result
+is read as resolved, because the gate judges appends and does not follow returns.
+
+The plugin's own mount file and the one-line registry entry under
+mounting.registry_implementation in golden/runtime/architecture.json are the
+legal landing point for a concrete construction, so a forwarded element is
+accepted there: the element an append names may be one member a range binds over
+a collection resolved elsewhere. That exemption is a shape, not a file: outside
+those files only a whole spread forwards, and inside them a concrete member or a
+composite literal stays red, so a hardcoded mount cannot hide behind the
+registry's name. A registered entry whose file is absent is red: the exemption
+names a file the gate must be able to scan.
 
 R5b declaration liveness. The plugins declaration is live only when all four
 hold: C1 the declaration surface accepts the key (api/config/decode.go
 agentKeys); C2 the host document dialect declares the key
 (assembly/host_document.go hostAgent); C3 the mapping writes it into the agent
 spec (host_document.go mapDocument); C4 production code iterates the declared
-names (range <expr>.Plugins). The config package's own encode/decode, clone and
-fingerprint mapping, a compile-time assertion, and a change note carrying
-reflect.DeepEqual are not consumers.
+names. C4 is type-aware: the range subject's field must be the name set, so the
+subject's type resolves through the declarations beside it and the slice fields
+declared in the sources. A field whose element type is the plugin instance the
+pipeline carries ([]plugin.Instance) is an instance collection, not the declared
+names, and a subject whose type does not resolve is not a consumer either - both
+fail closed instead of passing on a field name. The limit of the resolution: it
+reads parameters, receivers, fields, long and short declarations, and a path with
+a scalar field in its middle stays unresolved. The config package's own
+encode/decode, clone and fingerprint mapping, a compile-time assertion, and a
+change note carrying reflect.DeepEqual are not consumers.
 
 Registration. golden/runtime/architecture.json carries the mounting invariant:
 the three SHALL clauses, the gate entry, and the declaration key anchored both
@@ -79,20 +101,74 @@ PRODUCT_DIRS = (
     "bench",
 )
 
-# The two shapes a pipeline collection is declared in: a field of the given type
-# and a local initialized from one. Both are derived from the type anchor.
+# Every shape a pipeline collection is declared in, all derived from the type
+# anchor: a field of the given type, a local initialised from one, a long or
+# short declaration of the type itself, and a parameter of it. A parameter group
+# carries a comma list of names sharing the type that follows it, so the pattern
+# captures the whole list and every name in it is derived; the prefix stays one
+# of the three group delimiters, so the derived set only ever grows.
 PIPELINE_FIELD_RE = re.compile(
     r"^[ \t]*([A-Za-z_][A-Za-z0-9_]*)[ \t]+\[\]plugin\.Instance[ \t]*$", re.M
 )
 PIPELINE_LOCAL_RE = re.compile(
     r"^[ \t]*([A-Za-z_][A-Za-z0-9_]*)[ \t]:?=[ \t]*(?:"
-    r"append\([ \t]*\[\]plugin\.Instance\(nil\)|make\([ \t]*\[\]plugin\.Instance,)",
+    r"append\([ \t]*\[\]plugin\.Instance\(nil\)|make\([ \t]*\[\]plugin\.Instance,"
+    r"|\[\]plugin\.Instance[ \t]*\{|\[\]plugin\.Instance\(nil\))",
     re.M,
 )
+PIPELINE_VAR_RE = re.compile(
+    r"^[ \t]*var[ \t]+([A-Za-z_][A-Za-z0-9_]*)[ \t]+\[\]plugin\.Instance[ \t]*(?:=|$)",
+    re.M,
+)
+PIPELINE_PARAM_RE = re.compile(
+    r"[(\[,][ \t]*([A-Za-z_][A-Za-z0-9_]*"
+    r"(?:[ \t\r\n]*,[ \t\r\n]*[A-Za-z_][A-Za-z0-9_]*)*)[ \t]+\[\]plugin\.Instance\b"
+)
+PIPELINE_DECLARATIONS = (
+    PIPELINE_FIELD_RE,
+    PIPELINE_LOCAL_RE,
+    PIPELINE_VAR_RE,
+    PIPELINE_PARAM_RE,
+)
+# A name this file binds from a []plugin.Instance literal holds constructions of
+# this file, which no forward may then launder into a pipeline collection.
+PIPELINE_LITERAL_RE = re.compile(
+    r"^[ \t]*(?:var[ \t]+)?([A-Za-z_][A-Za-z0-9_]*)[ \t]*:?=[ \t]*"
+    r"(?:append\([ \t]*)?\[\]plugin\.Instance[ \t]*\{",
+    re.M,
+)
+PIPELINE_ALIAS_RE = re.compile(
+    r"^[ \t]*(?:var[ \t]+)?([A-Za-z_][A-Za-z0-9_]*)[ \t]*:?=[ \t]*"
+    r"([A-Za-z_][A-Za-z0-9_]*)[ \t]*$",
+    re.M,
+)
+# A spread may carry a slice of the collection it names; the name is still the
+# operand, so a subscript does not launder what the name holds.
+SPREAD_BASE_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)[ \t]*\[")
 APPEND_RE = re.compile(r"\bappend\(")
 LITERAL_TARGET_RE = re.compile(r"^\[\]plugin\.Instance\(")
 TAIL_IDENT_RE = re.compile(r"([A-Za-z_][A-Za-z0-9_]*)$")
 COMPOSITE_RE = re.compile(r"[A-Za-z0-9_\]]\s*\{")
+IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+IDENT_PREFIX_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+# A range clause: the names it binds and the collection it reads. A composite
+# literal cannot match, so a range over a literal is never read as a resolution.
+FOR_RANGE_RE = re.compile(r"\bfor[ \t]+([^;{}\n]*?)\brange[ \t]+([^;{}\n]+)")
+
+# The two element types the judgement separates: the instance slice the pipeline
+# carries, and the type of the names a declaration holds.
+INSTANCE_TYPE = "plugin.Instance"
+STRUCT_DECL_RE = re.compile(r"^type[ \t]+([A-Za-z_][A-Za-z0-9_]*)[ \t]+struct[ \t]*\{", re.M)
+SLICE_FIELD_RE = re.compile(r"^[ \t]*([A-Za-z_][A-Za-z0-9_]*)[ \t]+\[\]([A-Za-z_][A-Za-z0-9_.]*)", re.M)
+FUNC_DECL_RE = re.compile(r"\bfunc\b")
+TYPE_TOKEN_RE = re.compile(r"^[*\[\]]*[A-Za-z_][A-Za-z0-9_.]*$")
+VAR_DECL_RE = re.compile(
+    r"^[ \t]*(?:var[ \t]+)?([a-z][A-Za-z0-9_]*)[ \t]+(\*?[A-Za-z_][A-Za-z0-9_.]*)[ \t]*(?:`[^`]*`)?[ \t]*$",
+    re.M,
+)
+LITERAL_ASSIGN_RE = re.compile(
+    r"\b([a-z][A-Za-z0-9_]*)[ \t]*:?=[ \t]*&?([A-Za-z_][A-Za-z0-9_.]*)[ \t]*\{"
+)
 
 # The declaration surfaces read rather than restated: the decoder vocabulary, the
 # host document dialect and the mapping into the agent spec.
@@ -103,7 +179,9 @@ YAML_TAG = re.compile(r'yaml:"([a-z_]+)"')
 AGENT_SPEC_BLOCK = re.compile(r"^type AgentSpec struct \{(.*?)^\}", re.S | re.M)
 MAP_DOCUMENT_RE = re.compile(r"^func[ \t]+\([^)\n]*\)[ \t]*mapDocument\(", re.M)
 SPEC_LITERAL_RE = re.compile(r"config\.AgentSpec\{")
-RANGE_PLUGINS_RE = re.compile(r"\brange\s+[A-Za-z_][A-Za-z0-9_.\[\]]*\.Plugins\b")
+RANGE_PLUGINS_RE = re.compile(
+    r"\brange[ \t]+([A-Za-z_][A-Za-z0-9_.]*)[ \t]*\.Plugins\b"
+)
 CHANGE_NOTE_MARKER = "reflect.DeepEqual"
 
 
@@ -140,6 +218,158 @@ def split_top_level(text):
         current.append(char)
     parts.append("".join(current))
     return [part.strip() for part in parts if part.strip()]
+
+
+def unqualified(type_name):
+    """A type name without its pointer, slice and package qualifiers."""
+    return type_name.lstrip("*[]").rsplit(".", 1)[-1]
+
+
+def literal_sources(code):
+    """The names this file binds from a []plugin.Instance literal, aliases closed.
+
+    A rebinding of one of those names keeps the literal as its source, so the set
+    is closed to a fixed point: a forward through an alias is the same laundering.
+    """
+    names = {match.group(1) for match in PIPELINE_LITERAL_RE.finditer(code)}
+    pending = True
+    while pending:
+        pending = False
+        for match in PIPELINE_ALIAS_RE.finditer(code):
+            target, source = match.group(1), match.group(2)
+            if source in names and target not in names:
+                names.add(target)
+                pending = True
+    return names
+
+
+def forwards_resolved(code, offset, element, literal_names, exempt):
+    """Whether an append element forwards a collection resolved outside this file.
+
+    A spread forwards the operand it names, or a slice of it; an element forwards
+    one member a range binds. A spread of a composite literal names a construction,
+    not a collection, and either operand is refused when this file binds the name
+    from a []plugin.Instance literal, because the elements are then constructions
+    of this file. `exempt` admits the element form, which only a registry
+    implementation may use while it filters. When several ranges bind the element,
+    one of them reading a literal is enough to refuse it.
+
+    Returns (forwarded, laundered_from): laundered_from names the local the
+    element was laundered through when that binding is the only reason to refuse
+    it, and is None for every other rejection.
+    """
+    if element.endswith("..."):
+        operand = element[:-3].strip()
+        base = SPREAD_BASE_RE.match(operand)
+        if base is not None:
+            operand = base.group(1)
+        if operand in literal_names:
+            return False, operand
+        return not COMPOSITE_RE.search(element[:-3].strip()), None
+    if not exempt or not IDENT_RE.match(element):
+        return False, None
+    body_start = code.rfind("\nfunc", 0, offset)
+    body = code[body_start if body_start >= 0 else 0:offset]
+    bound, laundered = False, None
+    for match in FOR_RANGE_RE.finditer(body):
+        names = [name.strip() for name in match.group(1).replace(":=", " ").split(",")]
+        if element not in names:
+            continue
+        bound = True
+        source = match.group(2).strip()
+        if source in literal_names:
+            laundered = source
+    if bound and laundered is None:
+        return True, None
+    return False, laundered
+
+
+def struct_field_elements(code):
+    """The slice fields each struct type declares, with their element types."""
+    fields = {}
+    for match in STRUCT_DECL_RE.finditer(code):
+        open_at = code.find("{", match.end() - 1)
+        close_at = matching_close(code, open_at) if open_at >= 0 else None
+        if close_at is None:
+            continue
+        entry = fields.setdefault(match.group(1), {})
+        for field in SLICE_FIELD_RE.finditer(code[open_at + 1:close_at]):
+            entry[field.group(1)] = field.group(2)
+    return fields
+
+
+def parameter_pairs(code):
+    """The name and type pairs the parenthesised groups of a func declare.
+
+    A receiver group, a parameter list and a result list are all read the same
+    way, so a receiver's type resolves as well as a parameter's.
+    """
+    pairs = []
+    for match in FUNC_DECL_RE.finditer(code):
+        position = match.end()
+        while position < len(code) and code[position] in " \t\n":
+            position += 1
+        if position < len(code) and code[position] == "(":
+            close_at = matching_close(code, position)
+            if close_at is not None:
+                pairs.extend(pairs_of_group(code[position + 1:close_at]))
+                position = close_at + 1
+                while position < len(code) and code[position] in " \t\n":
+                    position += 1
+        name = IDENT_PREFIX_RE.match(code, position)
+        if name is not None:
+            position = name.end()
+        while True:
+            while position < len(code) and code[position] in " \t\n":
+                position += 1
+            if position >= len(code) or code[position] != "(":
+                break
+            close_at = matching_close(code, position)
+            if close_at is None:
+                break
+            pairs.extend(pairs_of_group(code[position + 1:close_at]))
+            position = close_at + 1
+    return pairs
+
+
+def pairs_of_group(group):
+    """The name and type pairs one parenthesised group declares."""
+    pairs = []
+    for part in split_top_level(group):
+        tokens = part.split()
+        if len(tokens) < 2 or not TYPE_TOKEN_RE.match(tokens[-1]):
+            continue
+        for name in tokens[:-1]:
+            if IDENT_RE.match(name):
+                pairs.append((name, tokens[-1]))
+    return pairs
+
+
+def declared_types(code):
+    """The type each identifier of one file is declared with, by shape."""
+    types = {}
+    for name, type_name in parameter_pairs(code):
+        types.setdefault(name, set()).add(unqualified(type_name))
+    for match in VAR_DECL_RE.finditer(code):
+        types.setdefault(match.group(1), set()).add(unqualified(match.group(2)))
+    for match in LITERAL_ASSIGN_RE.finditer(code):
+        types.setdefault(match.group(1), set()).add(unqualified(match.group(2)))
+    return types
+
+
+def declared_name_element(parts, types, fields):
+    """The element type of the slice field a range subject names, or None.
+
+    A subject resolves when it is one identifier this file declares with a single
+    type, followed by a slice field that type declares. Any other shape stays
+    unresolved, and an unresolved subject is not a consumer.
+    """
+    if len(parts) != 2:
+        return None
+    candidates = types.get(parts[0])
+    if not candidates or len(candidates) != 1:
+        return None
+    return fields.get(next(iter(candidates)), {}).get(parts[1])
 
 
 def load_registry(root, path):
@@ -284,33 +514,44 @@ def registry_implementation(root, mounting):
                 )
             )
             continue
+        if not os.path.isfile(os.path.join(root, entry)):
+            errors.append(
+                "{}: mounting.registry_implementation[{}] {!r} does not exist".format(
+                    GOLDEN_LABEL, index, entry
+                )
+            )
+            continue
         paths.append(entry)
     return paths, errors
 
 
-def pipeline_containers(root, skipped):
+def pipeline_containers(root):
     """Derive the pipeline collections from the []plugin.Instance type anchor."""
     containers, files = set(), []
     for path in lib.go_files(root, [SCOPE_DIR]):
         rel = lib.rel_path(root, path)
-        if rel in skipped:
-            continue
         files.append(rel)
         code = lib.scan_go_strings(lib.strip_go_comments(lib.read_text(path)))
-        for match in PIPELINE_FIELD_RE.finditer(code):
-            containers.add(match.group(1))
-        for match in PIPELINE_LOCAL_RE.finditer(code):
-            containers.add(match.group(1))
+        for pattern in PIPELINE_DECLARATIONS:
+            for match in pattern.finditer(code):
+                for name in match.group(1).split(","):
+                    containers.add(name.strip())
     return containers, files
 
 
-def mount_violations(root, containers, files):
-    """Appends into a pipeline collection that carry a concrete member."""
+def mount_violations(root, containers, files, forwarded):
+    """Appends into a pipeline collection that carry a concrete member.
+
+    In the registry implementation files a member a range forwards is accepted;
+    everywhere else, and for every other element, only a spread forwards. Neither
+    forward may carry a name this file binds from a []plugin.Instance literal.
+    """
     found = []
     for rel in files:
         code = lib.scan_go_strings(
             lib.strip_go_comments(lib.read_text(os.path.join(root, rel)))
         )
+        literal_names = literal_sources(code)
         for match in APPEND_RE.finditer(code):
             open_at = match.end() - 1
             close_at = matching_close(code, open_at)
@@ -325,13 +566,32 @@ def mount_violations(root, containers, files):
                 if tail is None or tail.group(1) not in containers:
                     continue
             for element in args[1:]:
-                if element.endswith("..."):
-                    continue
-                form = (
-                    "composite literal" if COMPOSITE_RE.search(element) else "concrete member"
+                forwarded_ok, laundered = forwards_resolved(
+                    code, match.start(), element, literal_names, rel in forwarded
                 )
+                if forwarded_ok:
+                    continue
+                if element.endswith("..."):
+                    form = "spread"
+                    note = (
+                        ", a name this file binds from a []plugin.Instance literal"
+                        if laundered
+                        else ""
+                    )
+                else:
+                    form = (
+                        "composite literal"
+                        if COMPOSITE_RE.search(element)
+                        else "concrete member"
+                    )
+                    note = (
+                        ", forwarded from {!r}, which this file binds from a "
+                        "[]plugin.Instance literal".format(laundered)
+                        if laundered
+                        else ""
+                    )
                 found.append(
-                    (rel, lib.line_of(code, match.start()), form, normalize(element))
+                    (rel, lib.line_of(code, match.start()), form, normalize(element), note)
                 )
     return found
 
@@ -403,21 +663,44 @@ def declaration_liveness(root):
                     "declaration never reaches the spec".format(HOST_DOCUMENT_FILE, field)
                 )
 
-    consumers = []
+    consumers, rejected = [], []
+    fields, sources = {}, []
     for path in lib.go_files(root, list(PRODUCT_DIRS)):
-        rel = lib.rel_path(root, path)
+        code = lib.strip_go_comments(lib.read_text(path))
+        sources.append((lib.rel_path(root, path), code))
+        for type_name, mapping in struct_field_elements(code).items():
+            fields.setdefault(type_name, {}).update(mapping)
+    field = DECLARATION_KEY.capitalize()
+    for rel, code in sources:
         if rel.startswith("api/config/"):
             continue
-        code = lib.strip_go_comments(lib.read_text(path))
+        types = declared_types(code)
         for number, line in enumerate(code.splitlines(), 1):
             if CHANGE_NOTE_MARKER in line:
                 continue
-            if RANGE_PLUGINS_RE.search(line):
-                consumers.append("{}:{}".format(rel, number))
+            match = RANGE_PLUGINS_RE.search(line)
+            if match is None:
+                continue
+            subject = "{}.{}".format(match.group(1), field)
+            element = declared_name_element(subject.split("."), types, fields)
+            where = "{}:{}".format(rel, number)
+            if element is None:
+                rejected.append((where, subject, "resolves to no type that declares it"))
+            elif element == INSTANCE_TYPE:
+                rejected.append(
+                    (where, subject, "reads a {} field, an instance collection".format(element))
+                )
+            else:
+                consumers.append(where)
     if not consumers:
         errors.append(
             "R5b C4: no production code iterates the declared names "
             "(range <expr>.Plugins); the declaration is a dead field"
+        )
+    for where, subject, why in rejected:
+        errors.append(
+            "R5b C4 {}: range {} {} - the declared name set is not what it reads; "
+            "the declaration stays a dead field".format(where, subject, why)
         )
     return errors, agent_keys, consumers
 
@@ -449,23 +732,23 @@ def main(argv=None):
         errors.extend(registration_errors(root, mounting, agent_keys))
         skipped, impl_errors = registry_implementation(root, mounting)
         errors.extend(impl_errors)
-        containers, files = pipeline_containers(root, set(skipped))
+        containers, files = pipeline_containers(root)
         if not containers:
             errors.append(
                 "R5a {}/: no []plugin.Instance pipeline collection was derived; the "
                 "type anchor this rule reads is gone".format(SCOPE_DIR)
             )
         seen = set()
-        violations = mount_violations(root, containers, files)
-        for rel, lineno, form, element in violations:
+        violations = mount_violations(root, containers, files, set(skipped))
+        for rel, lineno, form, element, note in violations:
             key = (rel, element)
             if key in registered:
                 seen.add(key)
                 continue
             errors.append(
-                "{}:{}: R5a pipeline collection takes a {} {!r}; forward a resolved "
+                "{}:{}: R5a pipeline collection takes a {} {!r}{}; forward a resolved "
                 "collection or assign one, or register the breakthrough in {}".format(
-                    rel, lineno, form, element, DEFAULT_REGISTRY
+                    rel, lineno, form, element, note, DEFAULT_REGISTRY
                 )
             )
         for key in sorted(registered):

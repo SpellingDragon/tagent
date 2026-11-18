@@ -24,6 +24,7 @@ import (
 	"github.com/SpellingDragon/tagent/memory"
 	"github.com/SpellingDragon/tagent/memory/ledger"
 	"github.com/SpellingDragon/tagent/memory/replay"
+	"github.com/SpellingDragon/tagent/runtime/agent"
 )
 
 // productFactRequest, productFactKey and productFactText are the metadata keys a
@@ -500,6 +501,11 @@ func TestCompressProductRestoresAfterRestart(t *testing.T) {
 	probe := &entryModel{name: "model-a", answer: func(req *model.Request) *model.Response {
 		return compressAnswerOf(*req, "the restarted answer")
 	}}
+	if report, closeErr := run.Close(ctx, agent.CloseRequest{Deadline: time.Now().Add(20 * time.Second)}); closeErr != nil {
+		t.Fatalf("close the first assembly before the restart: %v", closeErr)
+	} else if report.Outcome != agent.CloseQuiesced {
+		t.Fatalf("close of the first assembly = (%+v), want the run at rest so the root it wrote reaches the restart", report)
+	}
 	chainBefore := compressChainFactsOf(t, storage.Root, addr.SessionID)
 	restarted, err := assembly.Assemble(ctx, decl, newAgents(probe), assembly.WithGovernance(passPolicy{}), assembly.WithStorage(storage))
 	if err != nil {

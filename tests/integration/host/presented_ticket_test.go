@@ -3,6 +3,8 @@
 // check that reads the material of a request peels the ticket off, a check that
 // knows the fact key asserts the ticket literally, and a check that requires the
 // address to be answerable requires the key to name a fact the session committed.
+//
+// 契约: docs/wiki/agent/event-flow.md#projection-lifecycle
 package host
 
 import (

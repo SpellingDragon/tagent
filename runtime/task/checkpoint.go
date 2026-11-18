@@ -1,14 +1,21 @@
 // 契约: docs/wiki/platform/platform-subsystems.md#framework-checkpoint
 //
 // The task registry's recoverable state as the framework checkpoint carries it:
-// the account the registry holds — every task it admitted that the terminal
-// sweep did not drop — stated whole, beside the chain revision each record
-// stands at. The account is the size of the work the registry keeps, never the
-// size of the chains it already settled, so a restarted process reads the tasks
-// of the cut out of the checkpoint instead of folding every chain the storage ever
-// accumulated. The fact chain stays the truth of a task and the source the tail
-// replays from: the checkpoint is the derived snapshot that spares the covered
-// part of it.
+// the work the registry is still driving — every task it admitted that holds no
+// terminal fact, or that reached one still owing a delivery — stated whole
+// beside the chain revision each record stands at. A task that finished with
+// every obligation cleared is stated by nothing at all: its record stays on the
+// chain, and a reader that names it reads it back by identity. The derived
+// account therefore costs the open work alone, never the tasks the registry
+// finished however many of them the storage holds, which is what keeps the
+// checkpoint body equal at every depth of a finished history.
+//
+// The cut the account corresponds to is the position of the checkpoint fact in
+// the storage's commit order: the links the storage committed past it are the
+// tail a boot replays, and the store states that position itself, so the account
+// carries no watermark of its own. The fact chain stays the truth of a task and
+// the source both the tail and an on-demand read come from: the checkpoint is
+// the derived snapshot that spares the covered part of it and nothing else.
 package task
 
 import (
@@ -22,9 +29,10 @@ import (
 )
 
 // RegistryCheckpoint is the state one task registry states to the framework: one
-// entry per task record the registry holds, in task identity order.
+// entry per task the registry still drives, in task identity order. A task the
+// registry finished is named by no entry at all.
 type RegistryCheckpoint struct {
-	// Tasks is the account of the registry at the cut.
+	// Tasks is the open account of the registry at the cut.
 	Tasks []StatedTask `json:"tasks,omitempty"`
 }
 
@@ -42,7 +50,7 @@ type StatedTask struct {
 	TaskID event.TaskID `json:"task_id"`
 	// Spec is the admission material of the task: the declaration its
 	// notifications route by and its duplicate admissions resolve against.
-	Spec Spec `json:"spec"`
+	Spec Spec `json:"spec,omitzero"`
 	// Status is the state the task holds at the cut.
 	Status Status `json:"status"`
 	// Revision is the chain revision the state corresponds to: the record that
@@ -57,15 +65,15 @@ type StatedTask struct {
 	// the restart; a link the tail of a chain folds past the cut carries no
 	// instant, so the stamp such a transition leaves is unknown and the sweep
 	// keeps the record, exactly as it does for a task rebuilt from its chain alone.
-	AdmittedAt time.Time `json:"admitted_at,omitempty"`
-	ChangedAt  time.Time `json:"changed_at,omitempty"`
-	RunSince   time.Time `json:"run_since,omitempty"`
-	TTLAnchor  time.Time `json:"ttl_anchor,omitempty"`
+	AdmittedAt time.Time `json:"admitted_at,omitzero"`
+	ChangedAt  time.Time `json:"changed_at,omitzero"`
+	RunSince   time.Time `json:"run_since,omitzero"`
+	TTLAnchor  time.Time `json:"ttl_anchor,omitzero"`
 	// Handoff is the routing an explicit handoff moved the future notifications
 	// to, and HandoffRecord is the link that move recorded. A task no handoff
 	// moved carries neither.
 	Handoff       *HandoffTarget `json:"handoff,omitempty"`
-	HandoffRecord HandoffRecord  `json:"handoff_record,omitempty"`
+	HandoffRecord HandoffRecord  `json:"handoff_record,omitzero"`
 	// Mutations is every mutation the task committed, so a repeated mutation
 	// after a restart is recognized as the one already stored instead of being
 	// applied a second time.
@@ -80,9 +88,9 @@ type StatedTask struct {
 	// rather than left out, because an empty account is the answer "this task
 	// completed no consumption", which is a different statement from a checkpoint
 	// that never stated the family at all.
-	Consumed []StatedConsumption `json:"consumed"`
-	Attempts []StatedAttempt     `json:"attempts"`
-	Rejected []StatedRefusal     `json:"rejected"`
+	Consumed []StatedConsumption `json:"consumed,omitzero"`
+	Attempts []StatedAttempt     `json:"attempts,omitzero"`
+	Rejected []StatedRefusal     `json:"rejected,omitzero"`
 }
 
 // StatedConsumption is one completed logical consumption of a task as a
@@ -203,8 +211,12 @@ type checkpointObligation struct {
 	Envelope Envelope `json:"envelope,omitempty"`
 }
 
-// SnapshotCheckpoint states every task record this registry holds, in task
-// identity order, with the revision each record stands at.
+// SnapshotCheckpoint states every task this registry still drives, in task
+// identity order: the tasks holding no terminal fact, and the tasks that reached
+// one still owing a delivery, each whole beside the revision its record stands
+// at. A task the registry finished states no entry: its record stays on the
+// chain and is read back by identity, so the account costs the open work alone
+// whatever the registry holds beside it.
 func (r *MemoryRegistry) SnapshotCheckpoint(ctx context.Context) ([]byte, error) {
 	if r == nil {
 		return []byte("null"), nil
@@ -216,6 +228,9 @@ func (r *MemoryRegistry) SnapshotCheckpoint(ctx context.Context) ([]byte, error)
 			r.mu.Unlock()
 			return nil, err
 		}
+		if entry.settledAtCut() {
+			continue
+		}
 		wire.Tasks = append(wire.Tasks, entry.checkpointOf(taskID))
 	}
 	r.mu.Unlock()
@@ -223,13 +238,18 @@ func (r *MemoryRegistry) SnapshotCheckpoint(ctx context.Context) ([]byte, error)
 	return json.Marshal(wire)
 }
 
-// RestoreCheckpoint puts the tasks a checkpoint states back as the account of
-// this registry, and reports the revision each of them stands at through
-// CheckpointCoverage, so the boot folds only the links that landed past it.
+// RestoreCheckpoint puts the open tasks a checkpoint states back as the account
+// of this registry, and reports the revision each of them stands at through
+// CheckpointCoverage, so the boot folds only the links that landed past it. A
+// task the checkpoint never stated — one that finished before the cut — stays
+// out of the account, and a reader that names it reads its chain by identity.
 //
 // The restore never overwrites a task the registry already holds: a task a chain
 // fold rebuilt in this boot stands as the chain stated it, which is the state the
-// checkpoint's entry is only a prefix of.
+// checkpoint's entry is only a prefix of. It hands the sequencer every notice
+// identity the stated mutations carry — the identities the account committed,
+// open or closed — so both recovery paths answer one identity sequence: a notice
+// issued after a restart never repeats an identity the account already used.
 func (r *MemoryRegistry) RestoreCheckpoint(ctx context.Context, payload []byte) error {
 	if r == nil {
 		return nil
@@ -249,6 +269,9 @@ func (r *MemoryRegistry) RestoreCheckpoint(ctx context.Context, payload []byte) 
 		if stated.Status == StatusUnknown {
 			return fmt.Errorf("task: the checkpoint states the task %s at no determinable status", stated.TaskID)
 		}
+		if stated.Revision < 0 {
+			return fmt.Errorf("task: the checkpoint states the task %s at revision %d", stated.TaskID, stated.Revision)
+		}
 		restored[stated.TaskID] = stated.Revision
 		r.mu.Lock()
 		if _, held := r.tasks[stated.TaskID]; held {
@@ -264,8 +287,10 @@ func (r *MemoryRegistry) RestoreCheckpoint(ctx context.Context, payload []byte) 
 		if entry.spec.DedupKey != "" {
 			r.admission.AdmitKey(entry.spec.DedupKey, entry.spec.CallID, stated.TaskID)
 		}
-		for _, open := range entry.obligations {
-			r.seq.Observe(open.envelope.Notice)
+		for _, mutation := range stated.Mutations {
+			for _, envelope := range mutation.Outbox {
+				r.seq.Observe(envelope.Notice)
+			}
 		}
 		r.mu.Unlock()
 	}
@@ -295,7 +320,82 @@ func (r *MemoryRegistry) CheckpointCoverage() map[event.TaskID]int64 {
 	return coverage
 }
 
-// checkpointOf states one task record as a checkpoint names it.
+// settledAtCut reports whether this task finished before the cut: a task holding
+// a terminal status with every obligation the work opened cleared is a task the
+// run finished, so its record stays on its chain and the checkpoint states
+// nothing of it. A terminal task still owing a delivery keeps its record stated,
+// because that obligation is work the next process still holds.
+func (t *memoryTask) settledAtCut() bool {
+	return isTerminal(t.status) && len(t.obligations) == 0
+}
+
+// ChainSource answers the durable fact chain of one task by its identity: the
+// read a checkpoint spares for the tasks it states whole, and the read a task
+// the checkpoint never stated answers the first time a reader names it. An
+// identity the source holds no link for answers no chain, which is how a task
+// this storage never admitted reads as unknown. Its signature carries built-in
+// and event types only, so the storage layer's commit satisfies it structurally
+// and no package edge is required in either direction.
+//
+// The redline list (3 rules):
+// MUST answer the fact chain of one task in commit order, its admission link first.
+// MUST carry the admission material on the admission link alone.
+// MUST NOT answer a chain that carries no admission material.
+type ChainSource interface {
+	// Records answers the durable fact chain of one task in commit order, the
+	// admission link carrying the declaration the task was admitted under.
+	Records(ctx context.Context, taskID event.TaskID) ([]TaskRecord, error)
+}
+
+// RestoreChainSource attaches the source this registry reads a task from when a
+// reader names one the checkpoint never stated. A registry beside none answers
+// the tasks the checkpoint stated and refuses every other identity, which is the
+// account a run over the in-memory commit restores.
+func (r *MemoryRegistry) RestoreChainSource(chains ChainSource) {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	r.chains = chains
+	r.mu.Unlock()
+}
+
+// hydrateLocked rebuilds one task the registry does not hold by reading its chain,
+// the first time a reader names it instead of at the restore every boot pays: a
+// task the checkpoint left on its chain — one that finished before the cut, or one
+// whose record the process never restored — is answered from the record it
+// committed, and one identity the source states no link for is answered as
+// unknown. A registry beside no source answers the tasks it holds and refuses
+// every other identity. The caller holds the lock.
+func (r *MemoryRegistry) hydrateLocked(ctx context.Context, taskID event.TaskID) (*memoryTask, bool, error) {
+	if entry, held := r.tasks[taskID]; held {
+		return entry, true, nil
+	}
+	if r.chains == nil {
+		return nil, false, nil
+	}
+	chain, err := r.chains.Records(ctx, taskID)
+	if err != nil {
+		return nil, false, err
+	}
+	for _, link := range chain {
+		if _, err := r.foldLocked(link); err != nil {
+			return nil, false, err
+		}
+	}
+	entry, held := r.tasks[taskID]
+	if !held {
+		return nil, false, nil
+	}
+	if entry.spec.DedupKey != "" {
+		r.admission.AdmitKey(entry.spec.DedupKey, entry.spec.CallID, taskID)
+	}
+	return entry, true, nil
+}
+
+// checkpointOf states one task record whole as a checkpoint names it: the record
+// while the task holds work the registry still owes. The caller skips the tasks
+// that finished at the cut, whose record stays on the chain.
 func (t *memoryTask) checkpointOf(taskID event.TaskID) StatedTask {
 	stated := StatedTask{
 		TaskID:        taskID,

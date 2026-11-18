@@ -107,6 +107,27 @@ func checkTrackedAndIgnored(ignored []string) []trackedHygieneFinding {
 	return out
 }
 
+// checkWhitelistUnnamedSource reports Go source that no ignore rule names and no
+// index holds. A whitelist-mode .gitignore ("*" first) makes every new file
+// invisible to `git status`, so a test file added there is never staged and CI
+// never compiles it while the author's `go test` runs it green.
+//
+// The list must come from `git ls-files -o -i --exclude-standard`: untracked AND
+// ignored. Only `*.go` entries are judged, because that is the set the Go test
+// face would compile; local scratch scripts outside that face are out of scope.
+// A nested checkout comes back as a directory entry and is not a Go file.
+func checkWhitelistUnnamedSource(entries []string) []trackedHygieneFinding {
+	var out []trackedHygieneFinding
+	for _, p := range entries {
+		clean := filepath.ToSlash(p)
+		if !strings.HasSuffix(clean, ".go") {
+			continue
+		}
+		out = append(out, trackedHygieneFinding{clean, "whitelist-unnamed-source", "a whitelist-mode .gitignore must name this Go file; until it does, it is never staged and CI never compiles it while `go test` runs it locally"})
+	}
+	return out
+}
+
 func runTrackedHygiene([]string) int {
 	out, err := exec.Command("git", "ls-files", "-z").Output()
 	if err != nil {
@@ -138,6 +159,18 @@ func runTrackedHygiene([]string) int {
 		return st.Size(), nil
 	})
 	findings = append(findings, checkTrackedAndIgnored(ignored)...)
+	unnamed, err := exec.Command("git", "ls-files", "-o", "-i", "--exclude-standard", "-z").Output()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "tracked-hygiene: git ls-files -o -i failed:", err)
+		return 1
+	}
+	var untrackedIgnored []string
+	for _, p := range strings.Split(string(unnamed), "\x00") {
+		if p != "" {
+			untrackedIgnored = append(untrackedIgnored, p)
+		}
+	}
+	findings = append(findings, checkWhitelistUnnamedSource(untrackedIgnored)...)
 	for _, f := range findings {
 		fmt.Println("tracked-hygiene:", f)
 	}

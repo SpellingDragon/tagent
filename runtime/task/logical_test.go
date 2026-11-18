@@ -293,3 +293,29 @@ func TestObligationsReportTheLogicalStatus(t *testing.T) {
 		t.Fatal("the logical status of an unknown task is reported without a refusal")
 	}
 }
+
+// TestRestartLogicalReadsASettledTaskFromItsChain pins the logical read against the account a restart keeps.
+// - positive: Logical answers a finished task the checkpoint never stated, classified by the terminal outcome it holds
+// - the terminal outcome carries no silence even at an instant past every threshold of the policy
+// - negative: an identity no chain holds answers ErrTaskNotFound
+// 契约: docs/wiki/agent/task-lifecycle.md#status-machine
+func TestRestartLogicalReadsASettledTaskFromItsChain(t *testing.T) {
+	ctx := context.Background()
+	source, commit := invariantRegistry(t)
+	taskID := restartSettled(t, source, "call-logical-restart", "dedup-logical-restart")
+	restored := restartAccount(t, source, commit, taskID)
+	restartUnheld(t, restored, taskID)
+
+	got, err := restored.Logical(ctx, taskID, time.Now().Add(24*time.Hour))
+	if err != nil {
+		t.Fatalf("the restart read the settled task as %v, want the classification its chain holds", err)
+	}
+	if got != LogicalActive {
+		t.Fatalf("logical status of the finished task = %q, want %q: its silence is its stored outcome", got, LogicalActive)
+	}
+
+	stranger := event.TaskID("task-no-chain-holds")
+	if _, err := restored.Logical(ctx, stranger, time.Now()); !errors.Is(err, ErrTaskNotFound) {
+		t.Fatalf("Logical of an identity no chain holds = %v, want %v", err, ErrTaskNotFound)
+	}
+}

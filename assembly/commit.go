@@ -5,11 +5,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/SpellingDragon/tagent/api/config"
+	"github.com/SpellingDragon/tagent/api/durable"
 	"github.com/SpellingDragon/tagent/api/event"
 	"github.com/SpellingDragon/tagent/memory/ledger"
 	"github.com/SpellingDragon/tagent/runtime/agent"
@@ -186,13 +188,13 @@ func (w configPublicationWire) record() state.PublicationRecord {
 // new fact, so a reader of this run reads the ledger the previous process left.
 type configChain struct {
 	mu     sync.Mutex
-	log    state.FactLog
+	log    durable.FactLog
 	facts  []configFact
 	loaded bool
 }
 
 // attach points the chain at one fact log.
-func (c *configChain) attach(log state.FactLog) {
+func (c *configChain) attach(log durable.FactLog) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.log = log
@@ -217,6 +219,13 @@ func (c *configChain) loadLocked(ctx context.Context) error {
 	if c.log == nil {
 		return fmt.Errorf("tagent: the configuration chain is not attached")
 	}
+	if addressed, held := c.log.(addressedChainLog); held {
+		if order, states := addressed.CommitOrder(); states {
+			if keys, names := order.(addressedKeyOrder); names {
+				return c.loadAddressedLocked(ctx, addressed, keys)
+			}
+		}
+	}
 	pairs, err := c.log.Scan(ctx, configChainPrefix)
 	if err != nil {
 		return fmt.Errorf("tagent: read the configuration chain: %w", err)
@@ -235,6 +244,85 @@ func (c *configChain) loadLocked(ctx context.Context) error {
 		facts = append(facts, fact)
 	}
 	c.facts = facts
+	c.loaded = true
+	return nil
+}
+
+// addressedChainLog is the fact surface that answers one key by name and states
+// the commit order of its engine: a chain whose keys it names itself reads them
+// by address, so the load costs the facts the chain holds and never the keys of
+// every other family the log stores beside them.
+type addressedChainLog interface {
+	Get(ctx context.Context, key string) ([]byte, bool, error)
+	CommitOrder() (ledger.CommitOrder, bool)
+}
+
+// addressedKeyOrder is the commit order that names the keys of its commits alone:
+// the newest fact of the chain is found by key, so the discovery pays the records it
+// walks and reads no value of the statements it passes. A caller that reads the value
+// of each key it names asks ledger.CommitOrder instead, which answers that value
+// beside the order.
+type addressedKeyOrder interface {
+	EachCommittedKeyNewestFirst(ctx context.Context, visit func(key string) (bool, error)) error
+}
+
+// loadAddressedLocked reads the chain by the addresses its own keys name: the
+// newest committed fact bounds the sequence, and every fact below it is read by
+// its key alone.
+//   - the key order names the newest fact first, so the walk stops at the first key carrying the prefix and reads no statement older than it, and it reads no value on the way
+//   - the newest fact is read back by its key, the one value the discovery costs, because the order states which key is newest and never what it carries
+//   - the sequence numbers are contiguous: the chain is append-only and its sole writer numbers each fact after the last, so a number the newest fact states but the log holds no fact for is a named refusal, never a shorter chain
+//   - a commit order naming no fact of the chain loads an empty ledger, the same answer a scan of no pair gives; proving that absence walks the order whole, which is the one read an empty chain costs
+//   - an engine that states the order but no key-only walk loads the chain through the prefix scan below, the answer every engine beside no order reads
+func (c *configChain) loadAddressedLocked(ctx context.Context, log addressedChainLog, keys addressedKeyOrder) error {
+	var newestKey string
+	err := keys.EachCommittedKeyNewestFirst(ctx, func(key string) (bool, error) {
+		if !strings.HasPrefix(key, configChainPrefix) {
+			return true, nil
+		}
+		newestKey = key
+		return false, nil
+	})
+	if err != nil {
+		return fmt.Errorf("tagent: read the configuration chain: %w", err)
+	}
+	if newestKey == "" {
+		c.facts = nil
+		c.loaded = true
+		return nil
+	}
+	seq, err := strconv.ParseUint(strings.TrimPrefix(newestKey, configChainPrefix), 10, 64)
+	if err != nil || seq == 0 {
+		return fmt.Errorf("tagent: the configuration fact %s names no sequence number of the chain", newestKey)
+	}
+	newestValue, held, err := log.Get(ctx, newestKey)
+	if err != nil {
+		return fmt.Errorf("tagent: read the configuration chain: %w", err)
+	}
+	if !held {
+		return fmt.Errorf("tagent: the commit order names the configuration fact %s and the log holds no value for it", newestKey)
+	}
+	var facts []configFact
+	for at := uint64(1); at < seq; at++ {
+		key := fmt.Sprintf("%s%020d", configChainPrefix, at)
+		value, held, err := log.Get(ctx, key)
+		if err != nil {
+			return fmt.Errorf("tagent: read the configuration chain: %w", err)
+		}
+		if !held {
+			return fmt.Errorf("tagent: the configuration chain states fact %d and holds no fact %d: the chain is append-only, so a hole is a damaged ledger", seq, at)
+		}
+		var fact configFact
+		if err := json.Unmarshal(value, &fact); err != nil {
+			return fmt.Errorf("tagent: decode the configuration fact %s: %w", key, err)
+		}
+		facts = append(facts, fact)
+	}
+	var newest configFact
+	if err := json.Unmarshal(newestValue, &newest); err != nil {
+		return fmt.Errorf("tagent: decode the configuration fact %s: %w", newestKey, err)
+	}
+	c.facts = append(facts, newest)
 	c.loaded = true
 	return nil
 }
@@ -317,14 +405,6 @@ func (l *memoryFactLog) Put(_ context.Context, key string, value []byte) error {
 	}
 	l.pairs[key] = append([]byte(nil), value...)
 	return nil
-}
-
-// Get answers the value stored under one key.
-func (l *memoryFactLog) Get(_ context.Context, key string) ([]byte, bool, error) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	value, held := l.pairs[key]
-	return append([]byte(nil), value...), held, nil
 }
 
 // Scan answers every pair under a prefix.
@@ -635,6 +715,36 @@ func (r *Run) latestDeclaration(ctx context.Context) (configFact, *config.Declar
 		return configFact{}, nil, false, fmt.Errorf("tagent: the declaration fact %d names fingerprint %q beside %q", fact.Seq, fact.Fingerprint, got)
 	}
 	return fact, decl, true, nil
+}
+
+// adoptRecordedPublication takes the generation the chain already records into
+// service when the declaration this boot carries is the one that generation
+// published, and answers whether it did. An adopted boot publishes nothing, so the
+// chain keeps the facts the process before it filed and this boot reads the ones it
+// serves.
+//   - The publication record names the configuration it published, so a boot whose own declaration answers that fingerprint serves the generation already in effect
+//   - A record of another configuration, or a chain holding no record, leaves the boot to publish through the one entry
+//
+// 契约: docs/wiki/platform/org-hot-reload.md#generations
+func (r *Run) adoptRecordedPublication(ctx context.Context, decl *config.Declaration, agents map[event.AgentID]NativeAgent) (bool, error) {
+	if decl == nil {
+		return false, fmt.Errorf("tagent: the boot carries no declaration")
+	}
+	fingerprint := decl.FactKey()
+	if fingerprint == "" {
+		return false, fmt.Errorf("tagent: the source declaration answers no canonical fingerprint")
+	}
+	record, published, err := r.latestPublishedRecord(ctx)
+	if err != nil {
+		return false, err
+	}
+	if !published || record.Generation == 0 || record.Fingerprint != publicationFingerprint(fingerprint, "") {
+		return false, nil
+	}
+	if err := adoptBootGeneration(ctx, r, decl, agents, r.genFaces, record, ""); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // adoptConfigPublication restores one publication record as the generation

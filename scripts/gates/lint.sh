@@ -137,6 +137,19 @@ echo "lint: window and bound registry"
 run python3 scripts/gates/test_check_window_bounds.py
 run python3 scripts/gates/check_window_bounds.py
 
+# 定义做（DoD）纯度判据覆盖门：design 的每条判据须绑定一个真量锚、一个已杀死
+# 的变异与一个 CI 作业；锚只判断代理量（boot 读字节冒充墙钟）或判断口径比登记
+# 的界更松即红。判据集从 design 读，不从登记表读——两边不一致两个方向都红。
+echo "lint: definition-of-done coverage"
+run python3 scripts/gates/test_check_dod_coverage.py
+run python3 scripts/gates/check_dod_coverage.py
+
+# 死生产者门：产品包内每个生产函数须有消费者。测试调用算消费者、skeleton_assert 断言不算，
+# 家族互相调用而无人可达仍判死；白名单只收「消费者在本仓之外」的已审豁免，过期豁免即红。
+echo "lint: dead producers (no producer without a consumer)"
+run python3 scripts/gates/test_check_dead_producers.py
+run python3 scripts/gates/check_dead_producers.py
+
 # 运行时契约（CI 的 format-and-contract job）：计划/场景契约在无 task-graph 时
 # 没有判定对象，如实打印 skip；架构政策、概念预算与实现覆盖对现树恒判定。
 #

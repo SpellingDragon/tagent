@@ -118,23 +118,6 @@ func (l *Loop) SetFuseLimits(limits FuseLimits) {
 	l.fuses = limits
 }
 
-// SetResponseCallCap attaches the per-response tool call cap alone; zero or a
-// negative value leaves the cap off. The composition root that carries only
-// this key wires it without assembling a second declaration.
-func (l *Loop) SetResponseCallCap(cap int) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	l.fuses.CallCap = cap
-}
-
-// SetLongContextTokens attaches the long-context threshold alone; zero or a
-// negative value leaves the fuse off.
-func (l *Loop) SetLongContextTokens(tokens int) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	l.fuses.LongContextTokens = tokens
-}
-
 // fusesOf reports the declaration this loop admits under.
 func (l *Loop) fusesOf() FuseLimits {
 	l.mu.Lock()

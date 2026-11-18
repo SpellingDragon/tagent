@@ -113,27 +113,27 @@ governance 可恢复态 SHALL 作为框架 checkpoint 的注册切片承载（�
 
 ### Requirement: 派生态有界且不删除已提交事实
 
-checkpoint 承载的派生态 SHALL 以开放项加水位表达，已结部分 SHALL 留在链上而不嵌入 checkpoint，checkpoint 大小 SHALL 有界于开放项数量。热层 SHALL 同样有界：切面水位之前已结的事实 SHALL 搬迁出热层并仍可按身份读，热层 SHALL 只保留水位之后的尾段与各链最新切面点名的键。退位判据 SHALL 是水位制，MUST NOT 依赖容量或龄期阈值。任何有界化手段 SHALL NOT 删除、覆盖或改写已提交事实：已搬迁的事实按身份读 SHALL 仍返回原字节（透明回冷层），SHALL NOT 答 missing；恢复期读全史的消费者 SHALL 仍能按身份读到其正文。
+checkpoint 承载的派生态 SHALL 以开放项加水位表达，已结部分 SHALL 留在链上而不嵌入 checkpoint，checkpoint 大小 SHALL 有界于开放项数量。任何有界化手段 SHALL NOT 删除、覆盖或改写已提交事实：在本构建写出的根上，按身份读一条已提交事实 SHALL 恒返回其原字节与原索引位置，SHALL NOT 答 missing；恢复期读全史的消费者 SHALL 仍能按身份读到其正文。根下的 `cold/kv/journal.log` 由旧构建写出，其冷档事实不在本构建读面内：该形态 SHALL 先经 `scripts/fold-cold-root` 折回新根再供本构建服务，折回前按身份读冷档事实答不存在，该退化是已声明的运维前置，不构成本要求的违反。热层字节的增长 SHALL 被显式声明，MUST NOT 被声称为本要求已达成的有界。
 
 #### Scenario: 已结集合不进入 checkpoint
 
 - **WHEN** 一个会话积累了大量已结交付或已答压缩判决
 - **THEN** checkpoint SHALL 以水位加开放项表达这些集合，checkpoint 大小 SHALL 不随已结数量线性增长
 
-#### Scenario: 水位前已结事实搬迁而尾段留热
+#### Scenario: 已提交事实按身份恒可读
 
-- **WHEN** 一次切面之后热层持有水位之前的已结事实与水位之后的尾段事实
-- **THEN** 水位之前的已结事实 SHALL 被搬迁出热层，尾段事实与各链最新切面点名的键 SHALL 留在热层
-- **AND** 热层字节 SHALL 有界于存活键集，SHALL NOT 随历史线性增长
-
-#### Scenario: 已搬迁事实按身份仍可读
-
-- **WHEN** 按身份读一条已搬迁的事实
+- **WHEN** 在本构建写出的根上按身份读一条已提交的事实，无论它落在哪一代、是否被某次切面覆盖
 - **THEN** SHALL 返回该事实的原字节与原索引位置，SHALL NOT 答 missing
-- **AND** 冷层持有而正文读不出或校验失败 SHALL 具名拒绝，MUST NOT 降级为「不存在」
+- **AND** 索引点名而正文读不出或校验失败 SHALL 具名拒绝，MUST NOT 降级为「不存在」
+
+#### Scenario: 旧冷档根未折回时按身份读答不存在
+
+- **WHEN** 根下存在旧构建写出的 `cold/kv/journal.log` 而该根尚未折回
+- **THEN** 本构建按身份读冷档里的事实 SHALL 答不存在，该形态 SHALL 被读作已声明的运维前置，MUST NOT 被读作本要求的违反
+- **AND** 该形态 SHALL 先以 `go run ./scripts/fold-cold-root -source <旧根> -root <新根>` 折回新根（默认干跑只报待折键数，加 `-restore` 才写入），折回后按身份读 SHALL 返回原字节与源提交序
 
 #### Scenario: 有界化不打断全史读者
 
-- **WHEN** 一个有界化实现试图退役或删除已被切面覆盖的事实
+- **WHEN** 一个有界化实现试图删除、覆盖或改写已被切面覆盖的事实
 - **THEN** 该实现 SHALL 被拒绝，且按身份读全史的消费者 SHALL 仍能取回正文
 

@@ -23,6 +23,25 @@ path external approvers already write, its three blocks flat. MUST NOT run an
 unapproved call: a store that cannot record the request leaves the gate waiting,
 never executing.
 
+The durable face of the attention chain: the fact one question, answer or
+clearance is filed as, written behind the store's barrier under the identity it
+stands for and folded back into the chain a restarted process reads. The chain
+is the truth of every presence and every ruling the approval channel answers,
+so it outlives the process instead of being the one record the cut happens to
+state. The write-and-read surface it fills is durable.FactLog, declared beside
+the other ledgers' surfaces; the rules below are this chain's own filing and
+folding obligations over that surface.
+
+- one fact is one key, so a repeated filing rewrites nothing and no sequence
+the stream skipped can sit beside it - a write the store refused is named to
+the caller and at ERROR, and the fact it refused is not reported as durable - a
+fold orders the stored facts by the landing stamp they carry, ties read by the
+identity, so a read never depends on the map the store answers in
+
+The redline list (2 rules): MUST refuse a stored pair whose body states another
+fact than its key names. MUST fold the stored facts into the chain beside
+presence and ruling it already holds, so a read answers both alike.
+
 The attention face of the approval channel: the question one held call raises,
 the answer an approver rules it with and the clearance that removes it, each
 filed as a fact on a chain instead of an index of the store's own. The manager
@@ -122,7 +141,9 @@ func NewApprovalManager(dir string, ttl time.Duration, opts ...ApprovalOption) *
     NewApprovalManager returns the approval manager over one directory.
     A non-empty dir keeps the requests under <dir>/approvals/ as one file per
     request and restores the attention questions and answers the files state;
-    an empty dir keeps the manager on its in-memory chain alone. The ttl is the
+    an empty dir keeps the manager on its in-memory chain alone. A manager
+    seated by the framework state slice (WithApprovalSeat) reads no file here:
+    the restore of the stated state puts the book back instead. The ttl is the
     validity a request is issued with.
 
 func (a *ApprovalManager) AddChannel(ch ApprovalChannel)
@@ -135,6 +156,19 @@ func (a *ApprovalManager) AttentionPresence(ctx context.Context) []task.Attentio
     holds as questions: the one presence every reader of the channel shares, so
     an answered approval leaves this read exactly as it leaves the waiting face,
     whatever audit record a delivery channel keeps beside it.
+
+func (a *ApprovalManager) BindAttention(ctx context.Context, log durable.FactLog) error
+    BindAttention hands the book the durable face its attention chain is written
+    to and folds the facts a process before it filed: the questions still
+    standing and the rulings already stated, so a restarted book answers the
+    same presence. The request records folded beside them seat the identities
+    those facts were filed under, so an approver answering the identity the
+    process before it named still reaches the request it was asked about.
+    The face is kept as the one every registration writes its request record to,
+    so the identity an approver is handed outlives the process beside the facts
+    it was filed with. The error belongs to the caller that can stop the boot
+    — a chain this book could not read leaves the rulings behind the gate that
+    serves them, and a book bound to no face writes no record.
 
 func (a *ApprovalManager) Decide(id string, status ApprovalStatus, by string) (*ApprovalRequest, error)
     Decide records the ruling of one approval request as the attention
@@ -199,6 +233,45 @@ func (a *ApprovalManager) Request(ctx context.Context, id, tool string, jsonArgs
     so deciding by the id one minted never misses the question the gate filed
     first.
 
+func (a *ApprovalManager) RestoreBoot(ctx context.Context) error
+    RestoreBoot restores the book from the row of request files, for the boot
+    whose state states no approval book: the files are the per-request durable
+    write and the only record a process that took no cut left behind.
+
+    A row this boot cannot read leaves the book empty and the failure visible
+    beside it, never a boot that dies on it: an unreadable row states no ruling
+    either way, so the restore it refuses approves nothing, and a call that
+    still needs a ruling parks again and reports the same failure when it files
+    its own request. A boot that stopped here would be a wall around a gate.
+
+func (a *ApprovalManager) RestoreEvidence(ctx context.Context, stated []ApprovalRequest, keys []string) error
+    RestoreEvidence puts one stated approval state back: every request still
+    within its validity is seated beside the question it stands on and, when a
+    ruling landed, beside the answer that ruling was filed as, so a restarted
+    book reports the same presence and the same rulings the process before it
+    reported.
+
+    The read is the stated state alone — no request file is opened. A hold past
+    its validity is dropped rather than resurrected, because an expired hold
+    never proceeds and a restart that put one back would hand a dead wait a
+    second life. A ruled request is kept past its validity instead: the answer
+    it stands on is the record that these exact arguments were refused or
+    approved by a person, and a book that forgot it would mint a fresh request
+    the same person never saw — the very request a restart must not be able to
+    turn into an approval.
+
+func (a *ApprovalManager) SnapshotEvidence() ([]ApprovalRequest, []string)
+    SnapshotEvidence reports the requests the book holds in force, for the
+    framework state slice to state: the identity each caller asked under,
+    the evidence an approver reads and the state each request stands in. A hold
+    past its validity with no ruling on it is not stated: a restore drops it,
+    so stating it would cost a cut a request no process keeps. The identity each
+    entry is stated under is separate from the request's own identity because
+    a second registration aliases a caller identity onto one standing request:
+    the two answers a cut must carry are the entry and the identity it is read
+    under. The read takes the book's own read lock and nothing else, so it never
+    waits on a write of its own nor flushes one.
+
 type ApprovalOption func(*ApprovalManager)
     ApprovalOption configures an approval manager at construction.
 
@@ -212,6 +285,13 @@ func WithApprovalRescanInterval(window time.Duration) ApprovalOption
     to a request file becomes visible at runtime without rescanning on every
     read; zero rescans on every unapproved read, which a test uses to stay
     deterministic.
+
+func WithApprovalSeat() ApprovalOption
+    WithApprovalSeat declares that the framework state slice seats this book:
+    the book reads no request file at construction, and the restore of the
+    stated state puts it back (see RestoreEvidence and RestoreBoot). A book
+    wired through its directory alone keeps restoring itself from the files at
+    construction.
 
 type ApprovalRequest struct {
 	ApprovalSubject
@@ -282,12 +362,14 @@ type ApprovalSubject struct {
     held call wants to run, and the two names the request is resolved under.
 
 type DeliveryGap struct {
-	// Request is the approval identity the failed delivery was for.
+	// Request is the approval identity the failed delivery was for; it is empty
+	// beside a failure that belongs to the book rather than to one request.
 	Request string
-	// Err is the delivery failure the channel reported.
+	// Err is the failure the channel or the boot read reported.
 	Err error
 }
-    DeliveryGap is one visible channel failure: an approval request the channels
-    could not be handed. The gap is recorded and exposed instead of being
-    swallowed, and the gate keeps waiting rather than treating the failure as an
-    approval or as a crash.
+    DeliveryGap is one visible failure of the book that is not a ruling:
+    an approval request the channels could not be handed, or a boot that could
+    not read the row of request files. The gap is recorded and exposed instead
+    of being swallowed, and the gate keeps waiting rather than treating the
+    failure as an approval or as a crash.

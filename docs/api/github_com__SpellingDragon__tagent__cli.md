@@ -111,19 +111,6 @@ type CLIOption func(*CLI)
 
     CLIOption configures the host shell at construction.
 
-func WithDiagnostics(switches assembly.DiagnosticSwitches) CLIOption
-    WithDiagnostics configures the diagnostic switches the host serves its
-    optional faces with: the unified runtime map keeps its own route, and
-    each switch opens the reflection, training or observation face beside it.
-    The start command reads the same switches from the process environment.
-
-func WithFeedbackEndpoint(endpoint http.Handler) CLIOption
-    WithFeedbackEndpoint mounts the RL feedback face at POST /feedback behind
-    the single authentication gate of the host face. The endpoint is reached
-    only for an authenticated request subject, and it rechecks the same
-    credential at its own point, so a feedback submission has no unauthenticated
-    path into the runtime.
-
 func WithRequestCredential(credential string) CLIOption
     WithRequestCredential configures the request credential the host HTTP face
     authenticates every request subject with. The credential is compared in

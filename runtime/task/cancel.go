@@ -37,11 +37,17 @@ var ErrCancelNotRequested = errors.New("task: no cancellation request is open fo
 
 // RequestCancel records one cancellation request and returns its control receipt. A
 // repeated request returns the same receipt and records no second one; a task that
-// already holds its terminal fact refuses the request.
+// already holds its terminal fact refuses the request. A task the newest checkpoint
+// stated no entry for is read back from its chain first, so a restart refuses the
+// request of a finished task by its terminal status instead of answering that the
+// task is unknown.
 func (r *MemoryRegistry) RequestCancel(ctx context.Context, taskID event.TaskID) (CancelReceipt, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	entry, ok := r.tasks[taskID]
+	entry, ok, err := r.hydrateLocked(ctx, taskID)
+	if err != nil {
+		return CancelReceipt{TaskID: taskID}, err
+	}
 	if !ok {
 		return CancelReceipt{TaskID: taskID}, ErrTaskNotFound
 	}
@@ -63,11 +69,17 @@ func (r *MemoryRegistry) Cancel(ctx context.Context, taskID event.TaskID) error 
 // confirms no stop is recorded and moves no status; a confirmed stop of a task under a
 // cancellation request stores the cancelled terminal fact beside its pending
 // notification and closes the task's execution obligation with the reported reason.
+// A task the newest checkpoint stated no entry for is read back from its chain
+// first, so a restart records the report beside the record the chain holds
+// instead of answering that the task is unknown.
 func (m *MemoryManager) RecordStop(ctx context.Context, evidence StopEvidence) error {
 	registry := m.registry
 	registry.mu.Lock()
 	defer registry.mu.Unlock()
-	entry, ok := registry.tasks[evidence.TaskID]
+	entry, ok, err := registry.hydrateLocked(ctx, evidence.TaskID)
+	if err != nil {
+		return err
+	}
 	if !ok {
 		return ErrTaskNotFound
 	}

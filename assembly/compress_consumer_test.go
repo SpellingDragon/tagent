@@ -3,6 +3,7 @@ package assembly
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/SpellingDragon/tagent/api/event"
@@ -117,4 +118,26 @@ func countFoldProducts(t *testing.T, ctx context.Context, run *Run) int {
 		t.Fatalf("count the filed products: %v", err)
 	}
 	return count
+}
+
+// TestCompressionSummaryCutsToTheDeclaredBudget pins the cut the consumer applies to one model answer.
+//   - the recorded text answers the declared budget, not the policy default
+//
+// 契约: docs/wiki/agent/event-flow.md#unified-compression
+func TestCompressionSummaryCutsToTheDeclaredBudget(t *testing.T) {
+	ctx := context.Background()
+	gists := &fakeSummaryGist{answer: func(string) (string, error) {
+		return strings.Repeat("[11-06 12:00|gen:?] one settled decision\n", 200), nil
+	}}
+	consumer := NewCompressionConsumer(nil).withSummaryGist(gists)
+	got := consumer.summarizeProduct(ctx, "session-gist", mechanicalSummary(t), 512)
+	if len(got.Entry.Content) > 512 {
+		t.Fatalf("summary carries %d bytes, want at most the declared 512", len(got.Entry.Content))
+	}
+	if greedy := len(strings.Repeat("[11-06 12:00|gen:?] one settled decision\n", 200)); greedy <= 512 {
+		t.Fatalf("the scripted answer carries %d bytes, want it longer than the bound the cut applies", greedy)
+	}
+	if len(gists.budgets) != 1 || gists.budgets[0] != 512 {
+		t.Fatalf("the gist face was asked under %v, want the declared 512-byte budget", gists.budgets)
+	}
 }

@@ -624,9 +624,6 @@ func (cs *Consumers) Ensure(addr event.Address) *Consumer
     window ends here and the mount this call answers reads the chain from its
     own head instead of a parked driver.
 
-func (cs *Consumers) Has(addr event.Address) bool
-    Has reports whether one address carries a resident consumption loop.
-
 func (cs *Consumers) RecycleIdle(now time.Time) int
     RecycleIdle runs one reclamation sweep at the given clock reading and
     answers how many instances it reclaimed. An address is reclaimed only when
@@ -1483,10 +1480,6 @@ func (l *Loop) SetHistory(face HistoryFace)
     read through this same attachment, so the loop has no second presentation
     seam to inject.
 
-func (l *Loop) SetLongContextTokens(tokens int)
-    SetLongContextTokens attaches the long-context threshold alone; zero or a
-    negative value leaves the fuse off.
-
 func (l *Loop) SetNoticeFeed(feed NoticeFeed)
     SetNoticeFeed attaches the incremental read face the drive reads the
     progress notifications of its range through: the notices are facts of
@@ -1509,11 +1502,6 @@ func (l *Loop) SetRequestFace(face RequestFace)
     skill bodies and the replayed projection of the session chain. A nil face
     keeps every request at its transcript alone. The setter is separate from the
     constructor so the declared construction shape of the loop stays as it is.
-
-func (l *Loop) SetResponseCallCap(cap int)
-    SetResponseCallCap attaches the per-response tool call cap alone; zero or
-    a negative value leaves the cap off. The composition root that carries only
-    this key wires it without assembling a second declaration.
 
 func (l *Loop) StopResidents()
     StopResidents ends the loop's one current Consumer set: no further instance

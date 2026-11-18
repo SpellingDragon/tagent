@@ -9,6 +9,7 @@ package ledger
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 )
@@ -23,15 +24,37 @@ type journalKV struct {
 	log *journalLog
 	// resident is the entry-level LRU: the keys and values the process holds.
 	resident *kvResidentSet
+	// lock is the write rights this open took on its storage root, nil beside a
+	// read view. The view holds it from the open until Close, which is what makes
+	// the duplicate check and the commit of one fact one critical section against
+	// every other process.
+	lock *rootWriteLock
+	// closed reports whether Close ended this view, so a repeated Close releases
+	// nothing a second time and a commit states that it met a closed view.
+	closed bool
 }
 
 var _ AtomicStore = (*journalKV)(nil)
 
-// openJournalKV opens the key-value view rooted at dir, replaying the index of
-// every record the log already holds. The directory that holds the retired
-// sharded-snapshot layout is refused by name, never migrated.
+// ErrCommitWithoutWriteRights reports a commit carrying keys through a view that
+// declared no write rights at open: one root carries one writer, so a view holding
+// none reads beside that writer and its commit is refused by name before any byte
+// is appended, never admitted as a second writer of the root.
+var ErrCommitWithoutWriteRights = errors.New("memory: commit through a view that holds no write rights")
+
+// openJournalKV opens the key-value view a writer holds over the journal of dir: the
+// view that declares the root's write rights.
 func openJournalKV(dir string) (*journalKV, error) {
-	log, err := openJournalLog(dir)
+	return openJournalView(dir, true)
+}
+
+// openJournalView opens the key-value view over the journal of dir for the face the caller
+// declares. The directory that holds the retired sharded-snapshot layout is refused by
+// name, never migrated.
+//   - A view holding the root's write rights opens the log for append and cuts a torn tail a stopped writer left
+//   - A view holding none reads beside the writer, creates no file, cuts nothing, and refuses a commit carrying keys as ErrCommitWithoutWriteRights
+func openJournalView(dir string, writeRights bool) (*journalKV, error) {
+	log, err := openJournalLogFace(dir, writeRights)
 	if err != nil {
 		return nil, err
 	}
@@ -41,12 +64,16 @@ func openJournalKV(dir string) (*journalKV, error) {
 // Read returns the pairs the fetch names: the one value held under the key it
 // names, or every held pair whose key carries the named prefix, ordered by key.
 // A value the resident set evicted is read back from the record that carries it.
+//   - A read through a view Close ended is refused as ErrReadAfterClose, never answered as a key the log holds no body for
 func (k *journalKV) Read(ctx context.Context, fetch Fetch) ([]Pair, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 	k.mu.Lock()
 	defer k.mu.Unlock()
+	if k.closed {
+		return nil, ErrReadAfterClose
+	}
 	if fetch.Key != "" {
 		value, held, err := k.valueLocked(fetch.Key)
 		if err != nil || !held {
@@ -54,41 +81,49 @@ func (k *journalKV) Read(ctx context.Context, fetch Fetch) ([]Pair, error) {
 		}
 		return []Pair{{Key: fetch.Key, Value: value}}, nil
 	}
-	keys := k.log.keys(fetch.Prefix)
-	out := make([]Pair, 0, len(keys))
-	for _, key := range keys {
-		value, held, err := k.valueLocked(key)
+	out := make([]Pair, 0, 16)
+	err := k.log.eachHeld(fetch.Prefix, func(key string, span journalAddressSpan) error {
+		value, err := k.valueOfSpanLocked(key, span)
 		if err != nil {
-			return nil, err
-		}
-		if !held {
-			continue
+			return err
 		}
 		out = append(out, Pair{Key: key, Value: value})
+		return nil
+	})
+	if err != nil {
+		return nil, err
 	}
 	return out, nil
 }
 
 // Keys returns the keys the prefix names, in key order, from the index alone:
 // no value is read, so the enumeration a loader pays for stays small.
+//   - An enumeration through a closed view is refused as ErrReadAfterClose, never answered as a store holding no key
 func (k *journalKV) Keys(ctx context.Context, prefix string) ([]string, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 	k.mu.Lock()
 	defer k.mu.Unlock()
-	return k.log.keys(prefix), nil
+	if k.closed {
+		return nil, ErrReadAfterClose
+	}
+	return k.log.keys(prefix)
 }
 
 // Namespaces returns the key namespaces the held keys carry, without reading
 // values.
+//   - An enumeration through a closed view is refused as ErrReadAfterClose, never answered as a store holding no namespace
 func (k *journalKV) Namespaces(ctx context.Context) ([]string, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 	k.mu.Lock()
 	defer k.mu.Unlock()
-	return k.log.namespaces(), nil
+	if k.closed {
+		return nil, ErrReadAfterClose
+	}
+	return k.log.namespaces()
 }
 
 // JournalBytesOpen reports the journal bytes this view's open replayed: the read
@@ -98,8 +133,10 @@ func (k *journalKV) Namespaces(ctx context.Context) ([]string, error) {
 // the engine's own read instead of a copy kept beside it. A caller that holds the
 // engine as an AtomicStore reads it through the interface the method states.
 //
-// The read it states is the tail past the index cut: an open that places the cut
-// pays the records the last rewrite left and never the history behind it.
+// The read it states is the frames past the watermark the index files state, so it
+// is zero beside a root those files already reach: whether a log holds history is a
+// fact of its length, and this count states the window the open replays into its
+// index, not the integrity verification of the whole log.
 func (k *journalKV) JournalBytesOpen() int64 {
 	if k == nil || k.log == nil {
 		return 0
@@ -107,26 +144,28 @@ func (k *journalKV) JournalBytesOpen() int64 {
 	return k.log.openReadBytes()
 }
 
-// TailKeys reports the keys the records past this view's index cut wrote, and nil
-// beside a view whose open read the whole log: a caller that reads this set reads
-// the work the cut does not cover, and nil states that nothing is covered rather
-// than that nothing is there.
-func (k *journalKV) TailKeys() map[string]struct{} {
-	if k == nil || k.log == nil {
-		return nil
-	}
-	return k.log.tailKeys()
-}
-
-// IndexCutNotice states why the open read the whole log beside a cut it could not
-// place, and is empty beside an open that placed its cut or found none. The ledger
-// package keeps no logger, so the open states the fallback here and the caller that
-// holds one states it.
-func (k *journalKV) IndexCutNotice() string {
-	if k == nil || k.log == nil {
+// IndexUnstatedNotice states why this view read the whole log instead of the commits
+// past an index watermark: the index files beside the log state no watermark this build
+// reads, so the open replayed every frame and the answer states the read that cost. It
+// is empty beside a view whose index files state a watermark. The ledger package keeps
+// no logger, so the open states the fallback here and the caller that holds one states it.
+func (k *journalKV) IndexUnstatedNotice() string {
+	if k == nil || k.log == nil || k.log.addr == nil {
 		return ""
 	}
-	return k.log.cutNotice
+	return k.log.addr.notice
+}
+
+// TornTailBytesOpen reports the byte of the log the last frame the open read starts at
+// when that frame is not whole, and whether the log ended in a torn tail at all. The two
+// answers are one measure because the byte alone cannot state the second: a log whose one
+// frame is torn from its first byte stops at the zero a log of whole frames stops at.
+//   - A view holding the root's write rights cut those bytes off the log at open, and a view holding none served the whole frames before them and cut nothing
+func (k *journalKV) TornTailBytesOpen() (int64, bool) {
+	if k == nil || k.log == nil {
+		return 0, false
+	}
+	return k.log.tornTail, k.log.torn
 }
 
 // Commit appends one record of the batch, completes the barrier over it and
@@ -134,21 +173,40 @@ func (k *journalKV) IndexCutNotice() string {
 // carries nothing to append and only completes the barrier, which confirms what
 // earlier commits appended. The caller holds no staged state across a failed
 // append: the record is one frame, so it is all of the batch or none of it. A
-// failed append or sync leaves the log's own state that the process cannot name,
-// so the failure is reported as ErrCommitUncertain and the caller re-reads.
+// record the frame bound refuses is answered by name: that refusal is decided
+// before the write, so it states a commit that landed no key rather than an
+// uncertain one. Any other failed append or sync leaves the log's own state that
+// the process cannot name, so the failure is reported as ErrCommitUncertain and
+// the caller re-reads. That re-read answers absence for the keys of the failed
+// batch even beside a batch that landed whole: a view publishes nothing from a
+// commit it did not see return success, so an append whose barrier failed is
+// reported and not served. A batch that carries keys through a view Close ended is
+// refused by name instead, because the record it would append belongs to no
+// writer of the root; an empty batch still completes the barrier, so a repeated
+// Close stays a no-op.
+//   - A batch carrying keys through a view holding no write rights is refused as ErrCommitWithoutWriteRights before any append
 func (k *journalKV) Commit(ctx context.Context, batch Batch) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
 	k.mu.Lock()
 	defer k.mu.Unlock()
+	if k.closed && (len(batch.Puts) > 0 || len(batch.Deletes) > 0) {
+		return ErrCommitAfterClose
+	}
 	if len(batch.Puts) > 0 || len(batch.Deletes) > 0 {
+		if k.log.addr != nil && k.log.addr.window != nil {
+			return ErrCommitWithoutWriteRights
+		}
 		record := journalRecord{Version: journalFormatVersion}
 		for _, put := range batch.Puts {
 			record.Puts = append(record.Puts, journalPut{Key: put.Key, Value: append([]byte{}, put.Value...)})
 		}
 		record.Deletes = append(record.Deletes, batch.Deletes...)
 		if err := k.log.append(record); err != nil {
+			if errors.Is(err, ErrJournalFrameTooLarge) {
+				return err
+			}
 			return fmt.Errorf("%w: %w", ErrCommitUncertain, err)
 		}
 	}
@@ -162,6 +220,37 @@ func (k *journalKV) Commit(ctx context.Context, batch Batch) error {
 		k.resident.remove(key)
 	}
 	return nil
+}
+
+// Close ends this view: it releases the journal handle and gives the storage root
+// up to the next writer, and repeats as a no-op.
+//   - The release is the point the root admits its next writer, so a commit after Close is refused by name rather than appended beside that writer
+//   - A read view holds no write rights and releases those of the open it took, so closing one gives up nothing another process was waiting for
+func (k *journalKV) Close() error {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	if k.closed {
+		return nil
+	}
+	k.closed = true
+	logErr := k.log.close()
+	return errors.Join(logErr, k.lock.release())
+}
+
+// valueOfSpanLocked answers the value one enumerated key states, from the resident
+// set or from the span the enumeration already read, so a prefix read probes the
+// table once per key instead of once per listing and once per value. The caller
+// holds the lock.
+func (k *journalKV) valueOfSpanLocked(key string, span journalAddressSpan) ([]byte, error) {
+	if value, held := k.resident.get(key); held {
+		return append([]byte{}, value...), nil
+	}
+	value, _, err := k.log.addr.value(span)
+	if err != nil {
+		return nil, err
+	}
+	k.resident.put(key, value)
+	return append([]byte{}, value...), nil
 }
 
 // valueLocked answers one key's value from the resident set, reading it back
@@ -180,61 +269,60 @@ func (k *journalKV) valueLocked(key string) ([]byte, bool, error) {
 	return append([]byte{}, value...), true, nil
 }
 
-// coldRetirement is the journal-only engine capability of moving the keys a caller
-// did not keep out of the hot log and into a cold root: the copy, its byte-for-byte
-// verification and the rewrite of the hot log are one call, so no caller observes a
-// hot log whose settled keys are half copied. An engine that cannot express the
-// rewrite — the in-process tier, which holds nothing across exit — does not answer
-// this capability at all.
-//
-//   - settle names the keys this pass moves, read from the one snapshot the caller took: a key a writer commits after that snapshot is not in the list and stays in the hot log, so a family whose reader never reads the cold journal cannot be moved out from under it.
-//   - replaced carries the records the rewrite files after the kept keys, so the state the caller derives from the relocation lands in the same atomic replacement: a process that stops during the pass reads either the log it started with or the rewritten one.
-type coldRetirement interface {
-	retireSettled(ctx context.Context, coldDir string, settle []string, replaced []journalPut) (RelocateReport, error)
-}
-
-// retireSettled copies the settled keys of this journal into coldDir, verifies the
-// copy and rewrites the journal to hold every key the pass was not told to settle,
-// beside the replaced records. The caller holds no writer of this view while it
-// runs and states the keys the pass settles: which facts are still needed is the
-// consumer's answer, never the engine's, and a key the caller did not name is
-// never moved by the pass that did not see it.
-//
-//   - The resident set drops the settled keys, because a value kept here would answer a key this log does not hold, which is a view the next process to open the log cannot reproduce.
-func (k *journalKV) retireSettled(ctx context.Context, coldDir string, settle []string, replaced []journalPut) (RelocateReport, error) {
-	if err := ctx.Err(); err != nil {
-		return RelocateReport{}, err
-	}
-	k.mu.Lock()
-	defer k.mu.Unlock()
-	report, err := k.log.relocate(ctx, coldDir, settle, replaced)
-	if err != nil {
-		return report, err
-	}
-	for _, key := range settle {
-		k.resident.remove(key)
-	}
-	for _, put := range replaced {
-		k.resident.put(put.Key, append([]byte(nil), put.Value...))
-	}
-	return report, nil
-}
-
-// eachCommittedNewestFirst names the held keys from the newest commit to the
-// oldest and stops when visit answers false. It walks the order the log appended
-// its frames in, so the answer costs the records walked and never a sort of the
-// index; a key the view deleted is not held and is skipped, and a key a later
-// record rewrote is named at each of its records, newest first.
+// eachCommittedNewestFirst names the held keys from the newest commit to the oldest
+// and stops when visit answers false. It walks the commit order the engine's address
+// states, so the answer costs the records walked and never a sort of the index; a key
+// the newest commit that touched it deleted is not held and is skipped, and a key
+// several commits rewrote is named once, at its newest commit. The walk hands the view
+// back before each visit, the way EachCommittedNewestFirst does, so a caller reads the
+// value of a key it names beside the walk instead of under its lock.
 func (k *journalKV) eachCommittedNewestFirst(ctx context.Context, visit func(key string) (bool, error)) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
 	k.mu.Lock()
 	defer k.mu.Unlock()
+	if k.closed {
+		return ErrReadAfterClose
+	}
 	return k.log.eachKeyNewestFirst(func(key string) (bool, error) {
-		if value, held := k.log.index[key]; !held || value.deleted {
-			return true, nil
-		}
+		k.mu.Unlock()
+		defer k.mu.Lock()
 		return visit(key)
+	})
+}
+
+// EachCommittedKeyNewestFirst names the held keys from the newest commit to the
+// oldest and stops when visit answers false. The walk pays the records it walks and
+// reads no value, so it orders the statements one log holds without the values those
+// statements carry; a caller that reads the value of each key it names asks
+// EachCommittedNewestFirst, which answers that value beside the order.
+func (k *journalKV) EachCommittedKeyNewestFirst(ctx context.Context, visit func(key string) (bool, error)) error {
+	return k.eachCommittedNewestFirst(ctx, visit)
+}
+
+// EachCommittedNewestFirst names the held keys from the newest commit to the oldest
+// beside the value each key's newest commit left under it, and stops when visit
+// answers false. The walk reads the order the address states and one value span per
+// key it names, so a reader that ranks entries beside their values holds the view for
+// the commits it walks and nothing behind them. It is the CommitOrder of this engine.
+//
+// The walk hands the view back before each visit and takes it again behind it, so a
+// visit reads this view — a key, a prefix, a whole event — instead of waiting on the
+// lock the walk holds. The order it states is the one its start stated: a commit that
+// lands while a visit runs is named by the walk that starts after it, never by this one.
+func (k *journalKV) EachCommittedNewestFirst(ctx context.Context, visit func(key string, value []byte) (bool, error)) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	if k.closed {
+		return ErrReadAfterClose
+	}
+	return k.log.eachKeyNewestFirstValue(func(key string, value []byte) (bool, error) {
+		k.mu.Unlock()
+		defer k.mu.Lock()
+		return visit(key, value)
 	})
 }

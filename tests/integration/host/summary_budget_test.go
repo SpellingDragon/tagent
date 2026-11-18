@@ -39,11 +39,11 @@ func historySummaryProducts(t *testing.T, run *assembly.Run, session event.Sessi
 	return out
 }
 
-// TestCompressionSummaryObeysTheDeclaredBudget anchors the declared summary
-// budget over the assembled runtime: a declaration naming summary_budget_bytes
-// hands that bound to the fold, the instruction states it, and the product the
-// execution files carries at most that many bytes while still carrying the model
-// answer rather than the mechanical form.
+// TestCompressionSummaryObeysTheDeclaredBudget anchors the declared summary budget over the assembled runtime.
+//   - declaration: a declaration naming summary_budget_bytes hands that bound to the fold
+//   - instruction: the fold's instruction states the declared bound
+//   - product: the product the execution files carries at most that many bytes
+//   - answer kept: the product still carries the model answer rather than the mechanical form
 //
 // 契约: docs/wiki/agent/event-flow.md#projection-lifecycle
 func TestCompressionSummaryObeysTheDeclaredBudget(t *testing.T) {
@@ -97,10 +97,12 @@ func TestCompressionSummaryObeysTheDeclaredBudget(t *testing.T) {
 	}
 }
 
-// TestCompressionSummaryAsksTheLeaseModel anchors the model face a summary asks
-// over the assembled runtime: the summary is served by the agent's lease, a
-// replacement installs the version the later summaries answer under, and the
-// model the host contributed beside the lease is asked nothing.
+// TestCompressionSummaryAsksTheLeaseModel anchors the model face a summary asks over the assembled runtime.
+//   - lease: the summary is served by the agent's lease
+//   - replacement: a replacement installs the version the later summaries answer under
+//   - contributed model: the model the host contributed beside the lease is asked nothing
+//   - later folds: a session folded after the replacement asks the version the replacement installed
+//   - version in effect: the lease is the agent's, so every summary it serves follows the version in effect when the fold begins
 //
 // 契约: docs/wiki/rl/rl-architecture.md#swappable-model
 func TestCompressionSummaryAsksTheLeaseModel(t *testing.T) {
@@ -156,9 +158,6 @@ func TestCompressionSummaryAsksTheLeaseModel(t *testing.T) {
 	}, func(rl.ModelIdentity, model.Model) error { return nil }); err != nil {
 		t.Fatalf("replace the leased version: %v", err)
 	}
-	// A session folded after the replacement asks the version the replacement
-	// installed: the lease is the agent's, so every summary it serves follows the
-	// version in effect when the fold begins.
 	after := event.Address{AgentID: "agent-a", SessionID: "session-summary-lease-after"}
 	for turn := 20; turn < 28; turn++ {
 		commitCompressTurn(t, ctx, run, after, turn)

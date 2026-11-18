@@ -146,8 +146,6 @@ var (
 
 	_ func(*AnchorStore) (Anchors, error) = (*AnchorStore).Load
 
-	_ func(*AnchorStore, Anchors) error = (*AnchorStore).Save
-
 	_ error = ErrAnchorStoreUnusable
 	_ error = ErrAnchorUnreadable
 	_ error = ErrWatermarkSourceUnwired

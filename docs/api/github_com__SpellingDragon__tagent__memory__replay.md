@@ -93,11 +93,14 @@ const (
 	AgeReasonHistorySummary = "the oldest band is over its volume threshold"
 
 	// DefaultAgeSummaryTextLimit bounds the text one history summary carries, in
-	// bytes. The summary is a derived view of material that stays on the chain,
-	// so it carries the newest reads while they fit and states the older ones by
-	// count: the text is bounded by this limit whatever the length of the history
-	// it compresses, and folding one summary a second time answers the same bound
-	// instead of copying the text it stands for.
+	// bytes, when the fold plan names no budget: the policy default a
+	// declaration replaces (summary_budget_bytes), read here so a plan built
+	// without a declaration still folds under a bound. The summary is a derived
+	// view of material that stays on the chain, so it carries the newest reads
+	// while they fit and states the older ones by count: the text is bounded by
+	// the plan's budget whatever the length of the history it compresses, and
+	// folding one summary a second time answers the same bound instead of
+	// copying the text it stands for.
 	DefaultAgeSummaryTextLimit = 2048
 )
 const (
@@ -189,6 +192,14 @@ func SyntheticKey(key event.EventID) bool
     SyntheticKey reports whether a ref key names a synthetic ref, whose full
     text the payload carries, rather than a fact the chain hydrates.
 
+func TicketOf(key event.EventID, typ string) string
+    TicketOf renders the ticket one entry reaches the model as: the fact key
+    under the recall prefix beside the frozen type of the entry, in the one form
+    the recall surface parses. A key naming no committed fact — the empty key,
+    or the synthetic key a fold minted — answers the empty ticket, because
+    that address can only answer missing: a caller states no ticket rather than
+    promise one.
+
 TYPES
 
 type AgeFoldPlan struct {
@@ -198,6 +209,10 @@ type AgeFoldPlan struct {
 	// VolumeThreshold is the rendered volume a projection may carry, in bytes;
 	// zero reads DefaultAgeVolumeThreshold.
 	VolumeThreshold int
+	// SummaryBudgetBytes is the byte bound one history summary obeys; zero reads
+	// DefaultAgeSummaryTextLimit. It is the policy value the declaration names,
+	// carried into the plan so the fold reads one bound rather than a constant.
+	SummaryBudgetBytes int
 }
     AgeFoldPlan shapes one age-band fold: the window the age rule keeps whole
     and the rendered volume a projection may carry before a fold is due.
@@ -557,13 +572,16 @@ type ReplayProjection struct {
 func NewReplayProjection() *ReplayProjection
     NewReplayProjection returns an empty replayable projection.
 
-func (p *ReplayProjection) Append(_ context.Context, entry ProjectionEntry)
+func (p *ReplayProjection) Append(_ context.Context, entry ProjectionEntry) bool
     Append adds the canonical entry of one committed fact: a keyed entry already
     present is appended once, a keyless entry always is. The entry carries the
     fact's own text, which is what the projection keeps — an append never shapes
     the text for a model, so the same entry presents differently under different
     budgets and the fact reads back unchanged either way. An append is an
     in-memory mutation, so it takes the port's context with nothing to cancel.
+    It answers whether the entry was newly carried, so a caller that moves
+    a boundary onto the entry it folds does not move it again for a fact the
+    projection already holds.
 
 func (p *ReplayProjection) ApplyProducts(products []FoldProduct)
     ApplyProducts places the products a judgment minted onto the projection:

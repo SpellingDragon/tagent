@@ -103,13 +103,16 @@ func NewReplayProjection() *ReplayProjection {
 // fact's own text, which is what the projection keeps — an append never shapes
 // the text for a model, so the same entry presents differently under different
 // budgets and the fact reads back unchanged either way. An append is an
-// in-memory mutation, so it takes the port's context with nothing to cancel.
-func (p *ReplayProjection) Append(_ context.Context, entry ProjectionEntry) {
+// in-memory mutation, so it takes the port's context with nothing to cancel. It
+// answers whether the entry was newly carried, so a caller that moves a boundary
+// onto the entry it folds does not move it again for a fact the projection
+// already holds.
+func (p *ReplayProjection) Append(_ context.Context, entry ProjectionEntry) bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if entry.Key != "" {
 		if _, dup := p.seen[entry.Key]; dup {
-			return
+			return false
 		}
 		p.seen[entry.Key] = struct{}{}
 		p.originals[entry.Key] = entry.Content
@@ -119,6 +122,7 @@ func (p *ReplayProjection) Append(_ context.Context, entry ProjectionEntry) {
 	}
 	p.entries = append(p.entries, entry)
 	p.volume += renderedEntryVolume(entry)
+	return true
 }
 
 // recomputeVolumeLocked reseeds the rendered volume after a rewrite of the

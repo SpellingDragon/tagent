@@ -17,6 +17,7 @@ package assembly
 import (
 	"context"
 
+	"github.com/SpellingDragon/tagent/api/durable"
 	"github.com/SpellingDragon/tagent/features/evolution/governance"
 	"github.com/SpellingDragon/tagent/memory/ledger"
 	"github.com/SpellingDragon/tagent/runtime/task/approval"
@@ -57,7 +58,7 @@ func (h *Host) seatGovernance(ctx context.Context, seat *governance.StateSeat) e
 			return err
 		}
 	}
-	var log governance.GovernanceEventLog
+	var log durable.FactLog
 	if run.tier != nil {
 		log = ledger.TierFactLog(run.tier)
 	}

@@ -1841,14 +1841,6 @@ func (cs *Consumers) wakeFact(addr event.Address, key event.EventID) {
 	consumer.Wake()
 }
 
-// Has reports whether one address carries a resident consumption loop.
-func (cs *Consumers) Has(addr event.Address) bool {
-	if cs == nil || cs.loop == nil {
-		return false
-	}
-	return cs.loop.drivesAddress(addr)
-}
-
 // Resting reports whether every loop this set mounted stands between segments,
 // so the set writes nothing more at any of its addresses. A set this host mounts
 // nothing on reports resting: nothing of it flies.

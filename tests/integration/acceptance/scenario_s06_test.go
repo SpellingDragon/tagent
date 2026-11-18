@@ -115,7 +115,7 @@ func TestScenario06DurableCommitAndReplay(t *testing.T) {
 	refs := []string{}
 
 	spec := scenarioSettleSpec()
-	cfg := ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: t.TempDir()}
+	cfg := ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: t.TempDir(), WriteRights: true}
 	tier, err := ledger.OpenTier(ctx, cfg)
 	if err != nil {
 		t.Fatalf("open the storage tier: %v", err)
@@ -150,6 +150,9 @@ func TestScenario06DurableCommitAndReplay(t *testing.T) {
 	observations["duplicate_reported_as_delivered"] = delivered
 	refs = append(refs, string(taskID))
 
+	if err := tier.Close(); err != nil {
+		t.Fatalf("close the tier before the reopen: %v", err)
+	}
 	reopened, err := ledger.OpenTier(ctx, cfg)
 	if err != nil {
 		t.Fatalf("reopen the storage tier: %v", err)

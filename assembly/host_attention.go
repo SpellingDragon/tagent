@@ -2,7 +2,6 @@ package assembly
 
 import (
 	"context"
-	"errors"
 	"strconv"
 	"time"
 
@@ -86,10 +85,7 @@ func SetAttentionClock(now func() time.Time) (restore func()) {
 // it read before it, so the work-end clearing is judged by the post-drain state
 // alone.
 func (h hostReading) AttentionQuestions(ctx context.Context) ([]task.AttentionQuestion, error) {
-	ended, drained, err := h.attentionWorkEnd(ctx)
-	if err != nil {
-		return nil, err
-	}
+	ended, drained := h.attentionWorkEnd()
 	questions, err := h.approvalQuestions(ctx, ended && drained)
 	if err != nil {
 		return nil, err
@@ -105,34 +101,19 @@ func (h hostReading) AttentionQuestions(ctx context.Context) ([]task.AttentionQu
 	return append(questions, h.summaryQuestions()...), nil
 }
 
-// attentionWorkEnd reports whether the close of this run began and whether it
-// drained every obligation it owed. The drain is judged the way the close itself
-// judges it: every task the commit port lists answers no open obligation, so a
-// process that stopped before its drain settled one clears nothing.
-func (h hostReading) attentionWorkEnd(ctx context.Context) (ended, drained bool, err error) {
+// attentionWorkEnd reports whether the close of this run began and the drain
+// verdict that close reached. Both readings are the close's own: the verdict is
+// the one the close stored off the criterion it reported, so this face repeats
+// none of its terms, and a close that has not reached a verdict yet reads as a
+// drain that did not finish.
+func (h hostReading) attentionWorkEnd() (ended, drained bool) {
 	run := h.run
 	if run == nil {
-		return false, false, nil
+		return false, false
 	}
 	run.mu.Lock()
-	closing := run.closing
-	run.mu.Unlock()
-	if !closing {
-		return false, false, nil
-	}
-	for _, id := range run.commit.TaskIDs() {
-		obligations, err := run.manager.Obligations(ctx, id)
-		if err != nil {
-			if errors.Is(err, task.ErrTaskNotFound) {
-				continue
-			}
-			return true, false, err
-		}
-		if len(obligations.Open) > 0 {
-			return true, false, nil
-		}
-	}
-	return true, true, nil
+	defer run.mu.Unlock()
+	return run.closing, run.closeDrained
 }
 
 // approvalQuestions reads the approval presence the book answers: the questions

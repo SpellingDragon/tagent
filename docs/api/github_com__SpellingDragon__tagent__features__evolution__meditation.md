@@ -186,10 +186,6 @@ func (s *AnchorStore) LoadEnergy() (energyRecord, error)
 func (s *AnchorStore) Path() string
     Path reports the record path this store reads and writes.
 
-func (s *AnchorStore) Save(record Anchors) error
-    Save rewrites the anchor record atomically: the new record is written beside
-    it and renamed over it, so no reader observes a partial record.
-
 func (s *AnchorStore) SaveEnergy(state energyRecord) error
     SaveEnergy rewrites the anchor record with the given charge, keeping the
     watermark and the session anchor exactly as they stand: the state machine

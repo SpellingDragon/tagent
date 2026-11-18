@@ -58,19 +58,6 @@ are the behaviour behind the ports.
 
 CONSTANTS
 
-const (
-	// ArchiveSourcePrefix opens every identity this package derives from an old
-	// archive: a migrated task or original carries its source in the identity
-	// itself, so imported material stays marked and apart from the live identity
-	// space whatever the archive holds.
-	ArchiveSourcePrefix = "archive:"
-	// ArchiveScope is the isolation scope the migrated addresses, instances and
-	// reference metadata register under.
-	ArchiveScope = "archive-import"
-	// ArchiveOriginalFormat is the original format the migrated dumps register
-	// under.
-	ArchiveOriginalFormat = "archive-import-v1"
-)
 const StateSliceMailbox = "mailbox"
     StateSliceMailbox is the name the mailbox slice is keyed by in a checkpoint.
 
@@ -237,11 +224,6 @@ var (
     while a request is under way is never spliced into it, and the next request
     boundary reads the rewritten content anew.
 
-var ErrArchiveUnreadable = errors.New("state: archive checkpoint cannot be read")
-    ErrArchiveUnreadable reports an archive root whose checkpoint cannot be read
-    or decoded, so neither an import nor a rollback can classify anything under
-    it.
-
 var ErrBaselineAdvanced = errors.New("state: the candidate baseline was advanced by a newer publication")
 
     ErrBaselineAdvanced reports a candidate discarded at the commit point: the
@@ -256,41 +238,25 @@ var ErrReadNotAllowed = errors.New("state: read is not allowed for this subject 
     ErrReadNotAllowed reports a read of a target no grant covers for the subject
     that asked. An authority that holds no grants refuses every read.
 
+var ErrSeatRefused = errors.New("state: the task checkpoint states an account this commit cannot hold")
+    ErrSeatRefused reports a checkpoint whose task entry cannot state the
+    account of a commit: an entry of no identity, a receipt filed under another
+    task than the one it answers, or a record of another task than the entry
+    names. The boot refuses such a checkpoint by name instead of seating an
+    account it would answer with a silently dropped receipt.
+
 var ErrSpecConflict = errors.New("state: the task's admission material is already declared with other content")
     ErrSpecConflict reports a declaration that would replace the admission
     material of a task with other content than the material already stored.
 
 FUNCTIONS
 
-func ArchiveDigest(root string) (string, error)
-    ArchiveDigest returns the tree digest of every regular file under root:
-    one canonical digest text over each file's relative path, byte length and
-    content digest, so any added, removed or altered byte changes the digest and
-    a read-only pass over the tree can prove the source held still.
-
 func GenLeaseKey(gen Generation, consumer string) string
     GenLeaseKey names the candidate-exclusive registration of one
     generation-scoped consumer: the generation the candidate publishes beside
     the consumer's registered name, in the frozen form "gen:<id>:<consumer>".
 
-func MigrateArchive(ctx context.Context, root string, tasks ArchiveTaskWriter, originals OriginalMigrator) (MigrationReport, error)
-    MigrateArchive imports one old archive into the new path under read-only
-    access to the archive: the checkpoint and its external dumps are read,
-    every task whose outcome and ownership the checkpoint determines becomes
-    one deterministic terminal fact on the task chain, the external dumps become
-    originals of the tier, and nothing is written under the archive root. Every
-    identity the import lands carries the archive source marker, so migrated
-    facts and originals stay marked and apart from the live chain whatever the
-    archive holds.
-
-    The import is idempotent and rerunnable: every identity and every record
-    it writes derives from the archive content alone, so an interrupted run
-    reruns to the report an uninterrupted run returns. A missing external dump
-    and a task the checkpoint cannot determine are named in the report gaps
-    and imported nowhere, so a refusal stays visible and a rerun repeats it
-    verbatim.
-
-func NewDurableCommit(log FactLog, uncertain task.UncertainProbe) (*DurableCommit, error)
+func NewDurableCommit(log durable.FactLog, uncertain task.UncertainProbe) (*DurableCommit, error)
     NewDurableCommit returns a DurableCommit over one fact log and loads every
     fact and consumption receipt the log already holds, so a second process
     over the same log sees exactly the facts the first one committed and owes no
@@ -305,16 +271,6 @@ func NewStatePlan(plan OrgPlan, agents map[event.AgentID]AgentBinding, leases []
     were constructed. A declared agent no candidate binding was constructed for,
     a binding for an agent the declaration does not name, and a binding that
     carries no model each refuse the plan by name.
-
-func RollbackArchive(ctx context.Context, root string, tasks ArchiveTaskReader, originals OriginalReader) (RollbackReport, error)
-    RollbackArchive reads one archive and its migrated items back under
-    read-only access to both sides: the archive bytes are read, the
-    deterministic identities they migrate under are looked up on the read faces
-    of the new path, and every lookup is accounted in the report beside its
-    outcome. The rollback holds no write face at all, so it records nothing,
-    rewrites nothing and removes nothing: an item the new path still holds
-    is reported as residue, and one the new path holds nothing under is named
-    absent rather than written back.
 
 func ToolFace(binding AgentBinding, session ...event.SessionID) (map[string]trpctool.Tool, []string)
     ToolFace reports the native tools one binding's request carries beside
@@ -363,33 +319,6 @@ func (b AgentBinding) WithScopedFace(session event.SessionID, only []string) Age
     WithScopedFace reports a copy of the binding carrying the dedicated
     reflection session and the tools only that session may see. The composition
     root calls it when it contributes a self-reflecting host agent.
-
-type ArchiveTaskReader interface {
-	// TaskIDs returns every task the chain holds facts for.
-	TaskIDs() []event.TaskID
-	// Records returns the fact chain of one task.
-	Records(ctx context.Context, taskID event.TaskID) ([]task.TaskRecord, error)
-}
-    ArchiveTaskReader is the read face of the new path's task chain: the tasks
-    it holds facts for and the fact chain of one of them.
-
-    The redline list (3 rules): MUST return every task the chain holds facts
-    for. MUST report the fact chain of one task in its recorded order. MUST NOT
-    answer a failed read as an empty chain.
-
-type ArchiveTaskWriter interface {
-	// Declare stores the admission material of one migrated task.
-	Declare(ctx context.Context, taskID event.TaskID, spec task.Spec) error
-	// Commit stores the deterministic fact of one migrated task.
-	Commit(ctx context.Context, record task.CommitRecord) (task.CommitResult, error)
-}
-    ArchiveTaskWriter is the write face of the new path's task chain: the
-    admission material one migrated task declares beside the fact it commits.
-
-    The redline list (3 rules): MUST store the admission material one migrated
-    task declares beside the fact it commits. MUST recognise a repeated migrated
-    fact as the same fact, so a replayed restore records no second one. MUST NOT
-    report a migrated fact as stored before its commit result is committed.
 
 type Authority struct {
 	// Has unexported fields.
@@ -679,18 +608,27 @@ type DurableCommit struct {
 	// Has unexported fields.
 }
     DurableCommit is the durable implementation of the task commit port:
-    it stores one self-contained record per mutation identity through a FactLog
-    behind the sync barrier, and holds every committed notification as an open
-    delivery obligation. A repeated record of a mutation identity already
-    stored returns the fact already stored and records no second one — and never
-    advances a delivery state, because an idempotent hit reports a stored fact
-    and not a delivered notification. Only an explicit acceptance by the target
-    moves a delivery, through Accept. It also keeps the receipt of each logical
-    consumption a notification completed, so a DurableCommit opened over the
-    same log owes no delivery for a notice the log confirms as consumed.
+    it stores one self-contained record per mutation identity through a durable
+    fact log behind the sync barrier, and holds every committed notification
+    as an open delivery obligation. A repeated record of a mutation identity
+    already stored returns the fact already stored and records no second one
+    — and never advances a delivery state, because an idempotent hit reports a
+    stored fact and not a delivered notification. Only an explicit acceptance
+    by the target moves a delivery, through Accept. It also keeps the receipt
+    of each logical consumption a notification completed, so a DurableCommit
+    opened over the same log owes no delivery for a notice the log confirms as
+    consumed.
 
     DurableCommit holds no wrapper, binding or lease: the log it stores through
     is supplied at construction and nothing an earlier run captured is revived.
+
+func NewEmptyDurableCommit(log durable.FactLog, uncertain task.UncertainProbe) *DurableCommit
+    NewEmptyDurableCommit answers the commit of one fact log with no record read
+    into it: every table is empty and the caller states the account afterwards
+    through Seat, which reads the account a checkpoint states instead of the
+    durable prefixes of the whole history. A boot that holds a checkpoint reads
+    it that way; NewDurableCommit is the entry for a caller that holds none and
+    pays the whole log.
 
 func (d *DurableCommit) Accept(ctx context.Context, notice task.Notice) (task.DeliveryAcceptance, error)
     Accept advances the delivery state of one notification to accepted.
@@ -701,12 +639,15 @@ func (d *DurableCommit) Accept(ctx context.Context, notice task.Notice) (task.De
 func (d *DurableCommit) Commit(ctx context.Context, record task.CommitRecord) (task.CommitResult, error)
     Commit implements the task commit port. A record of a mutation identity the
     commit already stores returns the fact already stored and records no second
-    fact — and advances no delivery state: the notifications of the stored fact
-    stay owed and pending until their targets explicitly accept them. The same
-    identity beside other content is refused by name, as is a record expecting
-    another revision. A record is staged behind the sync barrier before the
-    commit reports it committed, so a barrier that fails reports an uncertain
-    outcome instead of a durable success.
+    fact — and advances no delivery state: the notifications of the stored
+    fact stay owed and pending until their targets explicitly accept them.
+    The same identity beside other content is refused by name, as is a record
+    expecting another revision. The record opens a delivery obligation for each
+    notification of its outbox no consumption receipt and no refusal has already
+    closed, which is the obligation a recovery seat of the same record opens, so
+    one account answers one owed set whichever path built it. A record is staged
+    behind the sync barrier before the commit reports it committed, so a barrier
+    that fails reports an uncertain outcome instead of a durable success.
 
 func (d *DurableCommit) Declare(ctx context.Context, taskID event.TaskID, spec task.Spec) error
     Declare stores the admission material of one task — the task_spawned
@@ -719,6 +660,17 @@ func (d *DurableCommit) Declare(ctx context.Context, taskID event.TaskID, spec t
 
 func (d *DurableCommit) Facts(taskID event.TaskID) []task.CommitRecord
     Facts returns the records the commit stored for one task, in commit order.
+
+func (d *DurableCommit) HistoryTaskIDs(ctx context.Context) ([]event.TaskID, error)
+    HistoryTaskIDs reports every task identity the log holds a fact for,
+    across the whole history the storage carries: the tasks this account holds
+    beside every task a checkpoint left on its chain.
+
+    The read is the whole fact family of the log, so its cost is linear in the
+    history — O(history) — and it belongs to a caller that asks for the history:
+    a boot reads the account its checkpoint states and the tail past it and
+    pays neither. A caller that names this set reads each task back by identity
+    through Records, so the set alone costs the fact bodies the scan returns.
 
 func (d *DurableCommit) LoadStats() LoadStats
     LoadStats reports the measured read cost of the load that built this
@@ -735,12 +687,28 @@ func (d *DurableCommit) OwedNotices() []task.OutboxNotice
     of the account, beside which the ones a consumption receipt confirms never
     appear again.
 
+func (d *DurableCommit) ReceiptsOf(taskID event.TaskID) task.Receipts
+    ReceiptsOf answers the settle account one task's durable record holds:
+    the consumption receipts it completed, the attempts its follow-up turns are
+    and the refusals its targets answered, each ordered by the notice identity
+    it names. A checkpoint states the account through it, so a boot reads the
+    receipts of the tasks the checkpoint covers instead of scanning the durable
+    prefixes of every task the storage ever held. The answer is filed per task,
+    so it costs the receipts of that task and never those of the tasks the
+    account holds beside it. The answer is a copy: the caller cannot change the
+    account through it.
+
 func (d *DurableCommit) Records(ctx context.Context, taskID event.TaskID) ([]task.TaskRecord, error)
     Records returns the durable fact chain of one task as restore links, in
     commit order: the admission link carries the stored task_spawned material,
     every later link carries its fact alone. A notification whose consumption
     receipt the log holds is left out of the outbox of its link, so a rebuild
     opens no delivery obligation for a notice already confirmed as consumed.
+
+    A task this account does not hold is read by its own identity here, the
+    first time a reader asks for its chain: a task that finished before the cut
+    states no entry, so its record is answered on demand and no boot pays for a
+    task nobody names. An identity the log holds no link for answers no chain.
 
 func (d *DurableCommit) Rejections() []Rejection
     Rejections reports every refusal the commit holds, in the stable task,
@@ -750,32 +718,45 @@ func (d *DurableCommit) Revision(taskID event.TaskID) int64
     Revision returns the revision the task is at after the records stored for
     it.
 
+func (d *DurableCommit) Seat(ctx context.Context, stated []byte, tail map[string]struct{}) error
+    Seat reads the account this commit holds from the tasks one checkpoint
+    states beside the records the storage committed past that cut, and states
+    it without scanning the durable prefixes of a history those tasks already
+    settled. The read is stated once: a repeated Seat answers nothing,
+    so the framework checkpoint and the session checkpoints of one boot seat one
+    account.
+
+      - The covered part is seated from the entries themselves: the admission
+        material, the mutation identities a repeat resolves against, the
+        revision the next record expects and the consumption receipts, attempts
+        and refusals the task holds, so a task a checkpoint states costs no
+        durable key of any family and the load does not grow with the tasks the
+        storage already settled. A task that finished before the cut states no
+        entry, so the account holds no identity of it until a reader names it.
+      - The tail is what `tail` names: the keys the storage committed past the
+        cut, whose tasks are read by their own identity — the admission key,
+        the fact prefix of that task and its three receipt prefixes — so a
+        chain younger than the cut costs its own length and never the history
+        behind it; `tail` beside no cut is nil, and nil is not the empty set,
+        because nil is a storage that states no cut at all.
+      - The fallback reads the whole log: a caller that holds no checkpoint
+        payload beside a storage that states no cut is a boot with no cut to
+        read from, and an entry that states no receipt family is read back
+        from its chain the same way, because a checkpoint written before those
+        families existed cannot state the account of one — reading its missing
+        keys as "no receipt" would owe every consumption it completed a second
+        time.
+
+func (d *DurableCommit) Seated() bool
+    Seated reports whether this commit read the account it holds.
+
 func (d *DurableCommit) TaskIDs() []event.TaskID
-    TaskIDs returns every task the commit holds facts for, in numeric order.
-
-type FactLog interface {
-	// Put stages one key and its value.
-	Put(ctx context.Context, key string, value []byte) error
-	// Get returns the value stored under key and whether one is held.
-	Get(ctx context.Context, key string) ([]byte, bool, error)
-	// Scan returns every stored pair under the key prefix as key and value.
-	Scan(ctx context.Context, prefix string) (map[string][]byte, error)
-	// Sync completes the write barrier over everything staged so far, so a
-	// caller reports durable success only behind a barrier that returned.
-	Sync(ctx context.Context) error
-}
-
-    FactLog is the durable fact surface DurableCommit stores through: put,
-    get, prefix scan and the sync barrier a commit reports its success behind.
-    Its signatures carry built-in types only, so any backend — the memory tier's
-    key-value port among them — satisfies it structurally and no package edge is
-    required in either direction.
-
-    The redline list (4 rules): MUST stage one key and its value without
-    claiming it durable. MUST complete the write barrier over everything staged
-    before anyone reports durable success. MUST NOT report staged bytes as
-    stored. MUST NOT answer a prefix scan with a subset of the pairs under that
-    prefix.
+    TaskIDs returns every task this account holds, in identity order: the tasks
+    a checkpoint stated beside the tasks the storage committed past its cut.
+    The set is the open work of the account and costs no read of its own, so a
+    boot asks it to name the chains it must fold and no chain of a task that
+    finished before the cut appears in the answer. The whole history behind that
+    account is HistoryTaskIDs, which is the read of a caller that asks for it.
 
 type FileSnapshot struct {
 	// Files are the contents fixed in the structural order of the binding.
@@ -825,20 +806,6 @@ type FixedFile struct {
     FixedFile is one file content fixed at a request boundary: the file
     reference it was read for beside the content read for this request.
 
-type GapKind string
-    GapKind names why one archive item was refused by the migration.
-
-const (
-	// GapMissingExternalFile names an external dump a checkpoint record points
-	// at and the archive root does not hold: the byte source is gone, so the
-	// record depending on it is refused beside the named dump.
-	GapMissingExternalFile GapKind = "missing-external-file"
-	// GapUnrecoverableTask names a task whose outcome or ownership the
-	// checkpoint does not determine: an in-flight status, an unknown status
-	// spelling or an owner the carrying agent does not match, each refused
-	// rather than settled by guess.
-	GapUnrecoverableTask GapKind = "unrecoverable-task"
-)
 type GenBuilder func(ctx context.Context, decl *config.Declaration, gen Generation) (GenResources, error)
     GenBuilder constructs the per-generation instance of one registered consumer
     from the declaration the candidate generation publishes. The builder
@@ -1181,60 +1148,6 @@ func (m *MemoryStore) Unconsumed() []WorkSeat
     An entry an executor claimed but has not consumed yet still owes its work
     and stays listed until its consumption completes.
 
-type MigratedOriginal struct {
-	// Key is the original identity the bytes landed under.
-	Key event.EventID
-	// Source names the archive file the bytes were read from.
-	Source string
-	// Digest is the canonical digest text of the stored bytes.
-	Digest string
-	// Length is the byte length of the stored bytes.
-	Length int64
-}
-    MigratedOriginal is one external dump the migration stored as an original:
-    the key its bytes landed under, the archive file they came from, and the
-    digest and length the stored bytes carry.
-
-type MigratedTask struct {
-	// TaskID is the deterministic task identity the fact landed under.
-	TaskID event.TaskID
-	// Source names the checkpoint record the task was imported from.
-	Source string
-	// Status is the terminal status the fact carries.
-	Status task.Status
-	// MutationID is the mutation identity the fact is idempotent under.
-	MutationID task.MutationID
-}
-    MigratedTask is one task the migration stored in the new path: the
-    deterministic identity its fact landed under, the checkpoint record it came
-    from, the terminal status it carries and the mutation identity its fact is
-    idempotent under.
-
-type MigrationGap struct {
-	// Kind is the classification of the refusal.
-	Kind GapKind
-	// Name names the refused item: the relative dump path or the task identity.
-	Name string
-	// Detail carries the named cause of the refusal.
-	Detail string
-}
-    MigrationGap names one archive item the migration refused, with the kind of
-    the refusal and its named cause, so nothing is skipped silently.
-
-type MigrationReport struct {
-	// SourceDigest is the tree digest of the archive root the import read.
-	SourceDigest string
-	// Tasks lists every task fact the import stored.
-	Tasks []MigratedTask
-	// Originals lists every external original the import stored.
-	Originals []MigratedOriginal
-	// Gaps names every item the import refused.
-	Gaps []MigrationGap
-}
-    MigrationReport is the report one import returns: the digest of the archive
-    root it read, every task and every original it stored in the new path,
-    and every gap it refused by name.
-
 type Occupancy struct {
 	// Has unexported fields.
 }
@@ -1300,36 +1213,6 @@ type OrgPlan struct {
     agent list, so the declaration stays the single source of truth for the
     agent graph. Its fingerprint is the canonical organization fingerprint of
     the declaration and covers only the declaration surface.
-
-type OriginalMigrator interface {
-	OriginalReader
-
-	// PutOriginal stores body under key beside the reference metadata the
-	// import names.
-	PutOriginal(ctx context.Context, key event.EventID, owner event.Address, format, retention, digest string, length int64, body []byte) error
-}
-    OriginalMigrator is the write face beside that read face: the bytes one
-    archive dump lands under, with the reference metadata the import marks it
-    by.
-
-    The redline list (3 rules): MUST store body under key beside the reference
-    metadata the import names. MUST keep the reference metadata of one import
-    effective after a later Put. MUST NOT expose a reference whose original
-    bytes are not stored.
-
-type OriginalReader interface {
-	// GetOriginal returns the bytes stored under key and whether the tier holds
-	// any under it.
-	GetOriginal(ctx context.Context, key event.EventID) ([]byte, bool, error)
-}
-    OriginalReader is the read face of the migrated originals: the bytes one
-    key holds and whether the tier holds any under it. Its signature carries
-    built-in and event types only, so the memory tier's archive face satisfies
-    it structurally and no package edge is required in either direction.
-
-    The redline list (3 rules): MUST return the bytes stored under key byte
-    for byte. MUST report whether the tier holds any bytes under that key.
-    MUST NOT answer an absent key as an empty original.
 
 type PlanChange struct {
 	// Kind classifies the change.
@@ -1590,29 +1473,6 @@ func (r Rejection) Feedback() event.Event
     in its metadata and no model payload in its message, so the fact enters no
     model request.
 
-type RollbackItem struct {
-	// Name names the item: the task identity or the archive file it came from.
-	Name string
-	// Present reports whether the new path still reads the item back.
-	Present bool
-	// Verified reports whether the read-back matches the archive bytes or the
-	// deterministic fact content; it is false whenever Present is false.
-	Verified bool
-}
-    RollbackItem is one migrated item's state in the new path as a rollback pass
-    observes it: whether the new path still reads the item back, and whether
-    that read-back matches what the archive carries.
-
-type RollbackReport struct {
-	// SourceDigest is the tree digest of the archive root the rollback read.
-	SourceDigest string
-	// Items accounts every migrated item the rollback looked for.
-	Items []RollbackItem
-}
-    RollbackReport is the report one rollback returns: the digest of the archive
-    observed under read-only access and the state of every migrated item in the
-    new path, residue named as residue and absence named as absence.
-
 type Session struct {
 	// Address is the explicit address this site was established for.
 	Address event.Address
@@ -1714,27 +1574,11 @@ func (r *StateRegistry) PendingRestore() []string
 
 func (r *StateRegistry) Reduce(ctx context.Context, evt event.Event) error
     Reduce folds one committed fact into the derived state of every mounted
-    holder that derives its state from facts, in registration order, and answers
-    the first refusal by the holder that made it: a fact one consumer cannot
-    fold is a state this runtime would read as behind the chain it serves.
-    A holder that states an account of its own is not asked — it implements no
-    reducer face — so the pass names no consumer and needs no hook per consumer:
-    a slice mounted through Register takes part the moment it is mounted.
-
-    The pass is the recovery's face as much as the live commit's: a boot replays
-    the facts committed past a cut through the same call, so the state a restart
-    derives is the state the live process derived from the same facts. Nothing
-    here drives an emitter: the work a consumer owes is started by the owner of
-    that duty, never by a fold of the fact it owes it for.
-
-func (r *StateRegistry) ReduceInto(ctx context.Context, name string, evt event.Event) error
-    ReduceInto folds one committed fact into one named holder's derived state,
-    so a consumer that reads the facts past the cut of its own slice replays
-    them through the same derivation the live commit drives. A holder that
-    derives nothing from facts is not asked, and a name no holder answers is
-    refused by name rather than silently folding nothing: a recovery reading a
-    cut of a slice this runtime does not mount would leave that consumer behind
-    the chain it serves.
+    holder that derives its state from facts, in registration order,
+    and answers the first refusal by the holder that made it. An unapplied fact
+    prevents a checkpoint of its state until a later successful pass over that
+    identity resolves the refusal. Holders without a reducer face are not asked;
+    no observation driver is invoked.
 
 func (r *StateRegistry) Register(holder Stateful) (func(), error)
     Register mounts one holder and answers the disposer that unmounts it. A
@@ -1769,17 +1613,25 @@ func (r *StateRegistry) SnapshotSessionState(ctx context.Context, session event.
     session is the size of that session's state and never of the account the
     run holds beside it. The same read rules hold as for the whole account:
     no framework lock is held across the holders' reads, and a holder that
-    refuses to state itself refuses the whole cut by name rather than filing a
-    checkpoint missing its slice.
+    refuses to state itself refuses the whole cut by name rather than filing
+    a checkpoint missing its slice. A fact some holder has not applied refuses
+    this cut as it refuses the whole account's: the framework keeps no session
+    measure of its own to scope a refusal by — the holder that refused the
+    fact reads it by the session it is delivered to, the chain by the session
+    that owns it — so the refusal holds every cut until the same identity lands
+    again.
 
 func (r *StateRegistry) SnapshotState(ctx context.Context) ([]event.CheckpointSlice, error)
     SnapshotState aggregates the state of every mounted holder in registration
-    order. A holder that fails to state its state refuses the whole snapshot
-    by name: a checkpoint missing one slice would restore that consumer
-    beside an empty state, which is worse than filing no checkpoint at all.
-    The reads happen with no framework lock held and take only the holder's own,
-    so a holder that is committing beside the cut answers it instead of waiting
-    on it.
+    order. A holder that fails to state its state refuses the whole snapshot by
+    name: a checkpoint missing one slice would restore that consumer beside an
+    empty state, which is worse than filing no checkpoint at all. A fact some
+    holder has not applied refuses the cut for the same reason one step earlier:
+    the state a cut states is the state a restart starts from, and a cut taken
+    past an unapplied fact would start the next boot beside a consumer the chain
+    has already left behind. The reads happen with no framework lock held and
+    take only the holder's own, so a holder that is committing beside the cut
+    answers it instead of waiting on it.
 
 type Stateful interface {
 	// StateName is the name the slice is keyed by in a checkpoint.

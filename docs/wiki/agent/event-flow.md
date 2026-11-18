@@ -14,15 +14,15 @@
 
 **实例面是每个地址一个**：`Consumers.Ensure` 按材料自己声明的完整地址装配并启动实例（`runtime/agent/consumer.go`），入口 agent 之外也挂——委派会址 `<调用方会话>#sub:<原生调用号>` 就靠它得到自己的驱动者。三条硬性质：同一地址重复 Ensure 回已挂的实例，一个地址绝不跑两个驱动者；生命周期就是 run 的，集合已停则一次调用答“无实例”而不是另起驱动者；实例的读游标从链上最后一条 `agent_output` 之后接着读，重启后未答复的输入仍然待办。宿主入口因此只有一条路径：`Host.Invoke` → 提交输入事实 → `Ensure` → `Wake` → `WaitAnswer`（`assembly/host.go` 的 `invokeConsumed`），“调用方阻塞等目标回合跑完”的同步直驱不再是常规驱动路径。
 
-**空闲回收只收没有活的实例**：常驻实例不是无限期缓存（`runtime/agent/recycle.go`）。集合按固定节奏扫一次静止地址，一条地址连续静到空闲窗（缺省十分钟，`SetIdleTTL` 可改；负值=不回收，零值=回缺省）才回收，回收后该地址的下一次输入按新挂载从链上重建，语义与首次启动一致。动工中的地址与**仍欠投递的地址**一律不回收：`SetDeliveryPending` 注册的谓词说明该地址还有未结清的投递义务（held 或 owed 的投递事实），有它就留多久都不收。回收是可观测的：`RecycleCount` 计数 + 一行带地址与原因的日志，不靠猜实例为什么重建。
+**空闲回收只收没有活的实例**：常驻实例不是无限期缓存（`runtime/agent/recycle.go`）。集合按固定节奏扫一次静止地址，一条地址连续静到空闲窗（缺省十分钟，`SetIdleTTL` 可改；负值=不回收，零值=回缺省）才回收，回收后该地址的下一次输入按新挂载从链上重建，语义与首次启动一致。动工中的地址与**仍欠投递的地址**一律不回收：`SetDeliveryPending` 注册的谓词说明该地址还有未结清的投递义务（held 或 owed 的投递事实），有它就留多久都不收。回收是可观测的：`RecycleIdle` 的回收计数 + 一行带地址与原因的日志，不靠猜实例为什么重建。
 
 <a id="event-pipeline-atomic"></a>
 ## 三、事实提交：存储与投影同点，幂等按身份
-事实落链与投影追加是**同一次提交**（`assembly/facts.go:recordMapped`）：先 Append 事实，再按**身份**移动滚动边界。四条判据：同一条事实重投不产第二条（`sameFactOf` 按身份判等）；同一身份带不同内容按 `storedFactConflict` 拒，不覆盖；提交失败即整条不进（不先投影后存储）；边界移动与事实同点，读者永远看不到「已可见但未投影」。
+事实落链与投影追加是**同一次提交**（`assembly/facts.go:foldMapped`）：先 Append 事实，再按**身份**移动滚动边界。四条判据：同一条事实重投不产第二条（`sameFactOf` 按身份判等）；同一身份带不同内容按 `storedFactConflict` 拒，不覆盖；提交失败即整条不进（不先投影后存储）；边界移动与事实同点，读者永远看不到「已可见但未投影」。
 
 <a id="projection-lifecycle"></a>
 ## 四、投影生命周期：边界按身份记，预算是每次现算
-投影是 `ReplayProjection`（entries/seen/originals/consumed/fold/boundary/recovery），`Append` 按事件键幂等。滚动边界记的是**身份**（`replayEntry.endedAt`），不是位置——折叠会重写序列，位置边界会在重写后指错对象。边界**只在两种时刻移动**：段闭合时移向那条 `agent_output`（`endedPrefix` 解读时含自己），无飞行段时移向新开范围的输入（不含自己，它归该段携带）——段飞行中落链的输入不动边界。做法在 `assembly/facts.go` 的 `recordMapped`（`rangeOpen`），解析在 `assembly/request.go` 的 `endedPrefix`：于是已闭合的段整段呈现为前缀、正在飞的段由 transcript 携带，同一条事实不会被读成两条。边界内的判定 `admitsRange`：`TypeExternalInput`，或 `TypeFeedback` 且触发源为 `task`（`TypeExternalInput` 中带 `delegated_part=instruction|material` 的两类不算：委派批次随它自己的 task 进段，不另开范围）；换言之能被拿来回放的只有外部输入与本 agent 自己的随动反馈。呈现预算是**每次装配现算**（`AssembleBudget`/`AssembleBudgetPrefix`），绝不读回上一次的形态：每一条目按所剩 room 取第一个装得下的形态，`Full → Ticket → Summary → notice card`；notice 类（feedback 族）**可缩不可丢**，4 字符/令牌是唯一换算常数。
+投影是 `ReplayProjection`（entries/seen/originals/consumed/fold/boundary/recovery），`Append` 按事件键幂等。滚动边界记的是**身份**（`replayEntry.endedAt`），不是位置——折叠会重写序列，位置边界会在重写后指错对象。边界**只在两种时刻移动**：段闭合时移向那条 `agent_output`（`endedPrefix` 解读时含自己），无飞行段时移向新开范围的输入（不含自己，它归该段携带）——段飞行中落链的输入不动边界。做法在 `assembly/facts.go` 的 `foldMapped`（`rangeOpen`），解析在 `assembly/request.go` 的 `endedPrefix`：于是已闭合的段整段呈现为前缀、正在飞的段由 transcript 携带，同一条事实不会被读成两条。边界内的判定 `admitsRange`：`TypeExternalInput`，或 `TypeFeedback` 且触发源为 `task`（`TypeExternalInput` 中带 `delegated_part=instruction|material` 的两类不算：委派批次随它自己的 task 进段，不另开范围）；换言之能被拿来回放的只有外部输入与本 agent 自己的随动反馈。呈现预算是**每次装配现算**（`AssembleBudget`/`AssembleBudgetPrefix`），绝不读回上一次的形态：每一条目按所剩 room 取第一个装得下的形态，`Full → Ticket → Summary → notice card`；notice 类（feedback 族）**可缩不可丢**，4 字符/令牌是唯一换算常数。
 
 <a id="unified-compression"></a>
 ## 五、三龄段折叠：折叠的是呈现，不是链

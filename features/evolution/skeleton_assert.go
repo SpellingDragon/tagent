@@ -106,8 +106,6 @@ var (
 		CriticalRateMax: 0,
 	}
 
-	_ func() JudgePolicy = DefaultJudgePolicy
-
 	_ = Review{
 		Version:   "",
 		Turns:     0,

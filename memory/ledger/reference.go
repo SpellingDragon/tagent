@@ -237,10 +237,7 @@ func (r *ScopedReader) ReadSegment(ctx context.Context, key event.EventID, req S
 	return r.store.ReadSegmentScoped(ctx, key, r.scope, req)
 }
 
-var (
-	_ ScopedOriginalStore = (*MemoryOriginalStore)(nil)
-	_ ScopedOriginalStore = (*kvOriginalStore)(nil)
-)
+var _ ScopedOriginalStore = (*kvOriginalStore)(nil)
 
 // GetScoped returns the exact recall of key as visible inside scope, exactly
 // as the in-memory tier serves it.

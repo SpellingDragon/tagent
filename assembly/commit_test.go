@@ -20,6 +20,7 @@ import (
 
 	"github.com/SpellingDragon/tagent/api/config"
 	"github.com/SpellingDragon/tagent/api/event"
+	"github.com/SpellingDragon/tagent/memory/ledger"
 )
 
 // livenessDoc is one source document of the configuration liveness fixture:
@@ -729,5 +730,100 @@ func TestCarriedGenerationAddsNoRecord(t *testing.T) {
 	}
 	if fact := latestAttempt(t, run); fact.Result != publicationResultUnchanged {
 		t.Fatalf("carried reload attempt = %+v, want unchanged", fact)
+	}
+}
+
+// TestConfigChainFindsItsNewestFactByKeyAlone pins the discovery the chain's keys bound.
+//   - the newest fact of the chain is found through the commit order's keys, so the statements of other families the walk passes cost no value
+//   - the values the load reads are the facts of the chain alone, and the chain it answers is every fact it holds
+//
+// 契约: docs/wiki/platform/org-hot-reload.md#generations
+func TestConfigChainFindsItsNewestFactByKeyAlone(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	tier, err := ledger.OpenTier(ctx, ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: root, WriteRights: true})
+	if err != nil {
+		t.Fatalf("open the storage tier of the chain fixture: %v", err)
+	}
+	defer func() {
+		if err := tier.Close(); err != nil {
+			t.Fatalf("close the storage tier of the chain fixture: %v", err)
+		}
+	}()
+	writer := &configChain{}
+	writer.attach(ledger.TierFactLog(tier))
+	for at := 1; at <= 2; at++ {
+		if _, err := writer.append(ctx, configFact{Kind: configDeclarationKind}); err != nil {
+			t.Fatalf("commit configuration fact %d: %v", at, err)
+		}
+	}
+	for at := 1; at <= 6; at++ {
+		if err := ledger.TierFactLog(tier).Put(ctx, fmt.Sprintf("1:evt:%d:1", at), []byte("body")); err != nil {
+			t.Fatalf("commit event fact %d: %v", at, err)
+		}
+	}
+	readerTier, err := ledger.OpenTier(ctx, ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: root})
+	if err != nil {
+		t.Fatalf("open the reading view of the chain fixture: %v", err)
+	}
+	defer func() {
+		if err := readerTier.Close(); err != nil {
+			t.Fatalf("close the reading view of the chain fixture: %v", err)
+		}
+	}()
+	probe, held := readerTier.Store.(interface{ ValueReads() int64 })
+	if !held {
+		t.Fatalf("the reading view holds the engine %T, which states no value read measure, so the discovery is not measured", readerTier.Store)
+	}
+	before := probe.ValueReads()
+	reader := &configChain{}
+	reader.attach(ledger.TierFactLog(readerTier))
+	if err := reader.load(ctx); err != nil {
+		t.Fatalf("load the configuration chain: %v", err)
+	}
+	if got := len(reader.facts); got != 2 {
+		t.Fatalf("the load answers %d fact(s), want the 2 the chain holds", got)
+	}
+	if reads := probe.ValueReads() - before; reads != 2 {
+		t.Fatalf("the load read %d value(s) for the 2 fact(s) of the chain, want the chain alone: the discovery read a value of the 6 statement(s) it walked past", reads)
+	}
+}
+
+// TestConfigChainRefusesAHoleInItsSequence pins the refusal of a chain missing a fact.
+//   - a chain whose newest fact states a sequence the log holds no fact of is refused by name
+//   - the refusal is the load's, so a boot never serves a chain shorter than the one the ledger states
+//
+// 契约: docs/wiki/platform/org-hot-reload.md#generations
+func TestConfigChainRefusesAHoleInItsSequence(t *testing.T) {
+	ctx := context.Background()
+	tier, err := ledger.OpenTier(ctx, ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: t.TempDir(), WriteRights: true})
+	if err != nil {
+		t.Fatalf("open the storage tier of the chain fixture: %v", err)
+	}
+	defer func() {
+		if err := tier.Close(); err != nil {
+			t.Fatalf("close the storage tier of the chain fixture: %v", err)
+		}
+	}()
+	log := ledger.TierFactLog(tier)
+	writer := &configChain{}
+	writer.attach(log)
+	for at := 1; at <= 2; at++ {
+		if _, err := writer.append(ctx, configFact{Kind: configDeclarationKind}); err != nil {
+			t.Fatalf("commit configuration fact %d: %v", at, err)
+		}
+	}
+	first := fmt.Sprintf("%s%020d", configChainPrefix, 1)
+	if err := tier.Store.Commit(ctx, ledger.Batch{Deletes: []string{first}}); err != nil {
+		t.Fatalf("delete the first fact of the chain: %v", err)
+	}
+	reader := &configChain{}
+	reader.attach(log)
+	err = reader.load(ctx)
+	if err == nil {
+		t.Fatalf("the load answered %d fact(s) of a chain missing the fact %s, want the hole refused by name", len(reader.facts), first)
+	}
+	if !strings.Contains(err.Error(), "a hole is a damaged ledger") {
+		t.Fatalf("the load refused the chain with %v, want the hole in its own sequence named", err)
 	}
 }

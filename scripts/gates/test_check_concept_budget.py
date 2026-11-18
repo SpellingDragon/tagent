@@ -928,6 +928,32 @@ class ConceptRatchetTest(unittest.TestCase):
         self.write_ratchet(exported_interfaces_max=69)
         self.assert_red_then_green("exported_interfaces")
 
+    def test_unmeasured_domain_scope_warns_instead_of_failing(self):
+        # 规则 scope 不含 D1 时域报告未计算，两个地板无对象：不得拿空计数判 removed=0 变红。
+        self.write_ratchet()
+        self.domain_counts = {}
+        report = self.check()
+        self.assertTrue(report.ok, report.errors)
+        self.assertTrue(
+            any("unjudged" in message for message in report.warnings),
+            "an unmeasured floor must be named, not silently passed: " + str(report.warnings),
+        )
+        self.assertTrue(
+            any("unjudged" in message for message in report.notes),
+            "the held note must not claim a floor it never judged: " + str(report.notes),
+        )
+
+    def test_unmeasured_domain_scope_still_enforces_the_interface_ceiling(self):
+        # 域面未判不得连带关掉接口天花板：metrics 是全 scope 量，仍须判。
+        self.write_ratchet(exported_interfaces_max=69)
+        self.domain_counts = {}
+        report = self.check()
+        self.assertFalse(report.ok)
+        self.assertTrue(
+            any("exported_interfaces" in message for message in report.errors),
+            report.errors,
+        )
+
     def test_missing_ratchet_key_warns_instead_of_passing_silently(self):
         self.path.write_text(json.dumps({"schema_version": 1}), encoding="utf-8")
         report = self.check()

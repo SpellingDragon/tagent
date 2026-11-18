@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"sync"
 
+	"github.com/SpellingDragon/tagent/api/durable"
 	"github.com/SpellingDragon/tagent/api/event"
 	"github.com/SpellingDragon/tagent/runtime/task"
 )
@@ -71,12 +72,14 @@ func rulingIn(answer event.Event) (ApprovalStatus, bool) {
 
 // attentionLedger is the fact chain the manager files attention facts on when the
 // composition wires no chain of its own: the facts in landing order beside the
-// fact each key landed as. It carries no presence of its own, so a face rebuilt
-// over it answers the same presence.
+// fact each key landed as, and the durable face they are written to once one is
+// bound. It carries no presence of its own, so a face rebuilt over it answers the
+// same presence, and a bound store answers the same presence after a restart.
 type attentionLedger struct {
 	mu    sync.Mutex
 	order []event.Event
 	held  map[event.EventID]event.Event
+	log   durable.FactLog
 }
 
 // newAttentionLedger returns an empty fact chain the manager files on.
@@ -86,19 +89,28 @@ func newAttentionLedger() *attentionLedger {
 
 // RecordAttention stores one attention fact and reports whether this call stored
 // it: a repeat of the fact the key already names answers false and stores
-// nothing, and a key already standing for other content is refused by name.
-func (l *attentionLedger) RecordAttention(_ context.Context, fact event.Event) (bool, error) {
+// nothing, and a key already standing for other content is refused by name. A
+// chain beside a durable face writes the fact behind that face's barrier, and a
+// write the store refused is reported to the caller beside the fact it keeps in
+// memory.
+func (l *attentionLedger) RecordAttention(ctx context.Context, fact event.Event) (bool, error) {
 	l.mu.Lock()
-	defer l.mu.Unlock()
 	if held, ok := l.held[fact.Key]; ok {
-		if held.Type != fact.Type || held.Message.Content != fact.Message.Content || !sameMeta(held.Meta, fact.Meta) {
+		conflict := !sameFact(held, fact)
+		l.mu.Unlock()
+		if conflict {
 			return false, fmt.Errorf("%w: %s", errApprovalFactConflict, fact.Key)
 		}
 		return false, nil
 	}
 	l.held[fact.Key] = fact
 	l.order = append(l.order, fact)
-	return true, nil
+	log := l.log
+	l.mu.Unlock()
+	if log == nil {
+		return true, nil
+	}
+	return true, l.storeAttention(ctx, log, fact)
 }
 
 // AttentionFacts returns every attention fact the chain holds, in landing order.

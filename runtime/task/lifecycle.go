@@ -166,6 +166,9 @@ type MemoryRegistry struct {
 	// links that landed past it instead of every chain the storage holds. It is
 	// empty beside a registry no checkpoint was restored into.
 	restored map[event.TaskID]int64
+	// chains is the source a task the checkpoint never stated is read from when a
+	// reader names it; nil answers such an identity as unknown.
+	chains ChainSource
 	// terminalTTL is how long the record of a terminal task is kept: the sweep reads it on
 	// every admission, and a zero bound keeps every record.
 	terminalTTL time.Duration
@@ -265,11 +268,17 @@ func (r *MemoryRegistry) Register(ctx context.Context, spec Spec) (AdmissionRece
 }
 
 // Lookup returns the declaration and status of the task with the given identity.
+// A task the newest checkpoint stated no entry for is read back from its chain
+// here, so the boot that restores an account costs no read per finished task and
+// a reader still answers the declaration that task was admitted under.
 func (r *MemoryRegistry) Lookup(ctx context.Context, taskID event.TaskID) (Spec, Status, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	entry, ok := r.tasks[taskID]
-	if !ok {
+	entry, held, err := r.hydrateLocked(ctx, taskID)
+	if err != nil {
+		return Spec{}, StatusUnknown, err
+	}
+	if !held {
 		return Spec{}, StatusUnknown, ErrTaskNotFound
 	}
 	return entry.spec, entry.status, nil
@@ -279,10 +288,17 @@ func (r *MemoryRegistry) Lookup(ctx context.Context, taskID event.TaskID) (Spec,
 // notifications to the commit port first. A repeated mutation returns the fact
 // already stored and records no second one; a change the commit refuses leaves the
 // task where it is; a task that holds its terminal fact moves no more.
+//
+// A task the newest checkpoint stated no entry for is read back from its chain
+// first, so the account a restart kept answers the refusal its terminal holds
+// instead of answering that the task is unknown.
 func (r *MemoryRegistry) Advance(ctx context.Context, taskID event.TaskID, to Status, mutation MutationID, outbox []Envelope) (CommitResult, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	entry, ok := r.tasks[taskID]
+	entry, ok, err := r.hydrateLocked(ctx, taskID)
+	if err != nil {
+		return CommitNotCommitted, err
+	}
 	if !ok {
 		return CommitNotCommitted, ErrTaskNotFound
 	}
@@ -325,11 +341,16 @@ func (r *MemoryRegistry) Advance(ctx context.Context, taskID event.TaskID, to St
 // sees again). The send tool's re-entry of a task reaches this state machine through
 // Reactivate and the continuation table instead, so the input channel stays beneath
 // both without a declaration of its own. It carries an event identity rather than free
-// text, so a call naming no identity opens no round.
+// text, so a call naming no identity opens no round. A task the newest checkpoint stated
+// no entry for is read back from its chain first, so a restart answers the refusal or
+// the re-entry that task's own status decides instead of answering that the task is unknown.
 func (r *MemoryRegistry) Resume(ctx context.Context, taskID event.TaskID, input event.Event) (AdmissionReceipt, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	entry, ok := r.tasks[taskID]
+	entry, ok, err := r.hydrateLocked(ctx, taskID)
+	if err != nil {
+		return AdmissionReceipt{TaskID: taskID, Accepted: false, Kind: AdmissionRejected}, err
+	}
 	if !ok {
 		return AdmissionReceipt{TaskID: taskID, Accepted: false, Kind: AdmissionRejected}, ErrTaskNotFound
 	}

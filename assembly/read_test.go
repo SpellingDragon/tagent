@@ -3,6 +3,7 @@ package assembly
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -539,5 +540,125 @@ func TestReadCorruptionNamedError(t *testing.T) {
 	}
 	if err := port.ChainFailure("absent-named"); err != nil {
 		t.Fatalf("the recall port answered %v over an absent key, want no failure", err)
+	}
+}
+
+// parentLookupTier opens a journal store holding one named background history
+// beside a six-fact chain, committed so the chain's entries stand among the
+// history's own tail and a lookup steps over entries it does not answer.
+func parentLookupTier(t *testing.T, ctx context.Context, history int) *ledger.Tier {
+	t.Helper()
+	tier, err := ledger.OpenTier(ctx, ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: t.TempDir(), WriteRights: true})
+	if err != nil {
+		t.Fatalf("open the journal store: %v", err)
+	}
+	at := time.Date(2026, 11, 6, 12, 0, 0, 0, time.UTC)
+	seq := map[int]int64{}
+	commit := func(partition int, agent event.AgentID, session string, key event.EventID) {
+		t.Helper()
+		seq[partition]++
+		stamp := at.Add(time.Duration(seq[partition]) * time.Millisecond)
+		evt := event.Event{
+			Key:       key,
+			Type:      event.TypeExternalInput,
+			Timestamp: stamp,
+			Meta:      map[string]string{event.MetaKeyEventSummary: "ask"},
+			Message:   model.Message{Role: model.RoleUser, Content: "parent"},
+			Owner:     event.Address{AgentID: agent, SessionID: event.SessionID(session)},
+		}
+		body, err := memory.BodyFromEvent(evt, "test", "test")
+		if err != nil {
+			t.Fatalf("encode %s: %v", key, err)
+		}
+		encoded, err := body.Encode()
+		if err != nil {
+			t.Fatalf("marshal %s: %v", key, err)
+		}
+		record := ledger.SegmentRecord{PartitionID: partition, WindowTS: stamp.UnixMilli(), Seq: seq[partition], EventKey: key, EventTime: stamp.UnixMilli(), Body: encoded}
+		if err := tier.Segments.StoreEvent(ctx, record.WithChain(event.TypeExternalInput, event.SessionID(session))); err != nil {
+			t.Fatalf("store %s: %v", key, err)
+		}
+	}
+	for i := 1; i <= history; i++ {
+		commit(10, "agent-history", "session-history", event.EventID(fmt.Sprintf("history-%d", i)))
+	}
+	for i := 1; i <= 6; i++ {
+		commit(11, "agent-chain", "session-chain", event.EventID(fmt.Sprintf("chain-%d", i)))
+		commit(10, "agent-history", "session-history", event.EventID(fmt.Sprintf("lag-%d", i)))
+	}
+	return tier
+}
+
+// TestParentLookupCostsItsOwnChainNotTheHistory pins what one parent lookup pays.
+//   - the same chain shape stands past 400, 1600 and 6400 background facts, so a lookup that grew with the history answers four times the smallest at the largest
+//   - the chain's root answers no parent, and that lookup names every background entry: the fixture states a lookup the bound cannot answer
+//
+// 契约: docs/wiki/memory/memory-architecture.md#read-paths
+func TestParentLookupCostsItsOwnChainNotTheHistory(t *testing.T) {
+	ctx := context.Background()
+	depths := []int{400, 1600, 6400}
+	bounded := make([]int, 0, len(depths))
+	controls := make([]int, 0, len(depths))
+	for _, history := range depths {
+		tier := parentLookupTier(t, ctx, history)
+		direct := NewTierQuerySource(tier.Segments)
+		before, _, _ := tier.Segments.IndexWalkReads()
+		parent, err := direct.GetParent("chain-6")
+		if err != nil || parent != "chain-5" {
+			t.Fatalf("the parent of chain-6 = %q/%v, want chain-5 beside %d background facts", parent, err, history)
+		}
+		after, _, _ := tier.Segments.IndexWalkReads()
+		bounded = append(bounded, after-before)
+		before, _, _ = tier.Segments.IndexWalkReads()
+		root, err := direct.GetParent("chain-1")
+		if err != nil || root != "" {
+			t.Fatalf("the root lookup = %q/%v, want no parent beside %d background facts", root, err, history)
+		}
+		after, _, _ = tier.Segments.IndexWalkReads()
+		controls = append(controls, after-before)
+		t.Logf("background=%d parent-lookup-named=%d root-lookup-named=%d", history, bounded[len(bounded)-1], controls[len(controls)-1])
+		if err := tier.Segments.Close(); err != nil {
+			t.Fatalf("close the store of %d background facts: %v", history, err)
+		}
+	}
+	if bounded[len(bounded)-1] > 4*bounded[0] {
+		t.Fatalf("the newest lookup named %d index entries beside %d background facts and %d beside %d: the chain costs the history",
+			bounded[len(bounded)-1], depths[len(depths)-1], bounded[0], depths[0])
+	}
+	if controls[len(controls)-1] < 4*controls[0] {
+		t.Fatalf("the root lookup named %d index entries beside %d background facts and %d beside %d: the fixture shows no lookup that walks the history",
+			controls[len(controls)-1], depths[len(depths)-1], controls[0], depths[0])
+	}
+	for at, history := range depths {
+		if bounded[at] > 8 {
+			t.Fatalf("the newest lookup named %d index entries beside %d background facts, want the chain's own entries", bounded[at], history)
+		}
+	}
+}
+
+// TestAPointQueryThatWalksTheWholeHistoryIsRed pins the bound the parent lookup rests on.
+//   - the entries the newest lookup names are the chain's, and a lookup naming the history instead answers a count the chain cannot explain
+//
+// 契约: docs/wiki/memory/memory-architecture.md#read-paths
+func TestAPointQueryThatWalksTheWholeHistoryIsRed(t *testing.T) {
+	ctx := context.Background()
+	const history = 512
+	tier := parentLookupTier(t, ctx, history)
+	defer func() {
+		if err := tier.Segments.Close(); err != nil {
+			t.Fatalf("close the store: %v", err)
+		}
+	}()
+	direct := NewTierQuerySource(tier.Segments)
+	before, _, _ := tier.Segments.IndexWalkReads()
+	if _, err := direct.GetParent("chain-6"); err != nil {
+		t.Fatalf("the newest lookup answered %v", err)
+	}
+	after, _, _ := tier.Segments.IndexWalkReads()
+	named := after - before
+	t.Logf("history=%d newest-lookup-named=%d", history, named)
+	if named > 8 {
+		t.Fatalf("the newest lookup named %d index entries beside a history of %d entries: the walk reads the history behind the chain and not the chain alone",
+			named, history)
 	}
 }

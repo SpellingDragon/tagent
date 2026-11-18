@@ -176,8 +176,9 @@ func (r *MemoryRegistry) Restore(ctx context.Context, chain []TaskRecord, owners
 // orchestration binding resolves its target to, resolved exactly as Restore
 // resolves the target of a rebuilt task. The outcome reports the recovery,
 // because the checkpoint rebuilt the task exactly as a chain fold rebuilds it and
-// the two paths answer the same account; a task the registry does not hold is
-// left out of the report.
+// the two paths answer the same account; a task the registry does not hold — one
+// that finished before the cut, which the checkpoint states nothing of — is left
+// out of the report and read back from its chain when a reader names it.
 func (r *MemoryRegistry) CheckpointRestored(ctx context.Context, taskIDs []event.TaskID, owners OwnerBinding) (RestoreReport, error) {
 	if owners == nil {
 		return RestoreReport{}, ErrNoOwnerBinding
@@ -186,11 +187,9 @@ func (r *MemoryRegistry) CheckpointRestored(ctx context.Context, taskIDs []event
 	defer r.mu.Unlock()
 	report := RestoreReport{Tasks: make([]RestoreOutcome, 0, len(taskIDs))}
 	for _, taskID := range taskIDs {
-		entry, held := r.tasks[taskID]
-		if !held {
-			continue
+		if entry, held := r.tasks[taskID]; held {
+			report.Tasks = append(report.Tasks, RestoreOutcome{TaskID: taskID, Status: entry.status, Recovered: true})
 		}
-		report.Tasks = append(report.Tasks, RestoreOutcome{TaskID: taskID, Status: entry.status, Recovered: true})
 	}
 	r.resolveOutcomeOwnersLocked(ctx, &report, owners)
 	return report, nil

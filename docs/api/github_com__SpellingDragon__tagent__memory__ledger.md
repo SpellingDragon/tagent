@@ -62,6 +62,9 @@ migrating a deployment root reads that layout as the read-only source and writes
 the journal the build opens now. Every other caller reaches storage through the
 atomic store seam and names no layout at all.
 
+The original-text model: the named refusals of commit and recall, and the blob
+and reference records one event key holds.
+
 Original references and the read scope that authorizes them: one reference names
 one stored original together with the metadata that scopes it, and the scoped
 read face serves only the references registered inside the scope the read runs
@@ -82,13 +85,14 @@ name and type, every declared method signature, and every constant that must
 stay a compile-time constant. A rename or a widened signature stops this file
 from compiling, so the storage face cannot drift silently.
 
-TierFacts is the durable fact surface of one opened tier: put, get, prefix scan
-and the sync barrier a commit reports its success behind. It commits through the
-same atomic store engine the tier's segment store uses, so the replay and the
-durable task commit share one database with the events already stored there.
-Its signatures carry built-in types only, so it matches the state layer's
-fact-log port structurally and no package edge is required in either direction
-— the port is declared where it is consumed (see state's FactLog) and this tier
+TierFacts is the durable fact surface of one opened tier: put, prefix scan,
+the point read of one key, the commit order its engine states and the sync
+barrier a commit reports its success behind. It commits through the same atomic
+store engine the tier's segment store uses, so the replay and the durable task
+commit share one database with the events already stored there. Its fact-log
+signatures carry built-in types only, so it matches the shared durable fact-log
+port structurally and no package edge is required in either direction — the port
+is declared once for every ledger that fills it (see api/durable) and this tier
 names the one surface it offers.
 
 CONSTANTS
@@ -119,6 +123,18 @@ var (
 	// ledger or the store it coordinates.
 	ErrLifecycleUnwired = errors.New("memory: lifecycle needs a retention ledger and a store")
 )
+var ErrBatchNotAtomic = errors.New("memory: this engine lands one key per call and cannot commit a batch whole")
+    ErrBatchNotAtomic reports a commit of a batch carrying several keys
+    handed to an engine whose every call lands one key: the engine refuses
+    the batch before any call runs, so a reader never meets the first keys
+    landed beside a key that failed. A caller reads the same limit off
+    StoreCapabilities.AtomicBatch instead of inferring it from this error.
+
+var ErrCommitAfterClose = errors.New("memory: commit through a closed view")
+    ErrCommitAfterClose reports a commit through a view whose Close ended it,
+    so a caller that kept writing states the closed view instead of writing
+    beside the process that took the root over.
+
 var ErrCommitBarrier = errors.New("memory: commit barrier failed")
     ErrCommitBarrier reports a commit whose barrier did not complete, so nothing
     of it is published.
@@ -129,6 +145,12 @@ var ErrCommitUncertain = errors.New("memory: commit outcome uncertain")
     could not confirm what the store holds, so the caller re-reads instead of
     reporting either outcome.
 
+var ErrCommitWithoutWriteRights = errors.New("memory: commit through a view that holds no write rights")
+    ErrCommitWithoutWriteRights reports a commit carrying keys through a view
+    that declared no write rights at open: one root carries one writer, so a
+    view holding none reads beside that writer and its commit is refused by name
+    before any byte is appended, never admitted as a second writer of the root.
+
 var ErrContentConflict = errors.New("memory: key already names other bytes")
     ErrContentConflict reports a commit whose key already names other bytes:
     one key names one original, so the second content is refused.
@@ -136,6 +158,11 @@ var ErrContentConflict = errors.New("memory: key already names other bytes")
 var ErrEventKeyRequired = errors.New("memory: segment record carries no event key")
     ErrEventKeyRequired reports a segment record that carries no event key,
     so no read could ever name the event again.
+
+var ErrFactCommitUnsupported = errors.New("memory: the tier cannot commit a whole fact")
+    ErrFactCommitUnsupported reports a tier this build cannot commit a whole
+    fact through: the caller states the tier it was handed instead of committing
+    one family beside a judgment it never made.
 
 var ErrHolderRequired = errors.New("memory: protection hold names no holder")
     ErrHolderRequired reports a protection hold that names no holder, so its
@@ -157,6 +184,12 @@ var ErrJournalCorrupt = errors.New("memory: journal frame is corrupt")
 var ErrJournalFormat = errors.New("memory: journal format version is not supported")
     ErrJournalFormat reports a log written under a format version this build
     does not read.
+
+var ErrJournalFrameTooLarge = errors.New("memory: journal record is over the frame bound")
+    ErrJournalFrameTooLarge reports one record whose encoded payload is over
+    the frame bound: the refusal is decided before any byte of the record is
+    written, so no part of it is staged and a caller states the refusal instead
+    of an uncertain outcome.
 
 var ErrJournalLegacyLayout = errors.New("memory: data directory holds the retired shard layout, open a new directory")
     ErrJournalLegacyLayout reports a data directory that holds the retired
@@ -195,9 +228,21 @@ var ErrOriginalExpired = errors.New("memory: every reference is outside its rete
 var ErrOriginalMissing = errors.New("memory: no reference names the key")
     ErrOriginalMissing reports a segmented read of a key no reference names.
 
+var ErrReadAfterClose = errors.New("memory: read through a closed view")
+    ErrReadAfterClose reports a read through a view whose Close ended it:
+    the view states the closed view by name instead of answering the absence its
+    released handle states, so a caller tells a view it ended from a body the
+    log cannot answer.
+
 var ErrRootRequired = errors.New("memory: persistent tiers require a root directory")
     ErrRootRequired reports a persistent tier opened without the directory it
     persists under.
+
+var ErrRootWriteLocked = errors.New("memory: another process holds write rights on this storage root")
+    ErrRootWriteLocked reports a write-rights open of a storage root another
+    process already holds write rights on: one root carries one writer,
+    so the second open is refused by name instead of committing over the slots
+    the first one's index points at.
 
 var ErrRustViking = errors.New("memory: rustviking CLI call failed")
     ErrRustViking reports a rustviking CLI call that did not succeed, carrying
@@ -277,6 +322,19 @@ type AtomicStore interface {
       - A commit whose durable outcome the engine cannot name returns
         ErrCommitUncertain, and the caller re-reads to decide instead of
         reporting success or failure
+      - An engine that can decide before writing that it cannot carry the
+        batch refuses it by name instead, so a refusal that landed no key never
+        answers ErrCommitUncertain
+      - That re-read is an open that took no part in the commit, because the
+        view that committed publishes nothing from a commit it did not see
+        return success: its own read answers absence even beside a batch that
+        landed whole
+      - ErrCommitUncertain never means that nothing landed: a caller that reads
+        a refusal as zero writes re-commits a fact the store already holds
+      - An engine whose every call lands one key keeps this contract by refusing
+        a batch that carries several keys: it names ErrBatchNotAtomic and no
+        key lands, and the tier's StoreCapabilities.AtomicBatch states the same
+        limit
       - Failure injection belongs at this seam: a caller wraps an AtomicStore
         and fails, delays or drops a commit or a read, so the same injection
         runs over any engine and never names a file layout
@@ -297,6 +355,75 @@ type Batch struct {
     deletes. A key stands on one side or the other, so the order the two sides
     are applied in names no different state.
 
+type CommitOrder interface {
+	EachCommittedNewestFirst(ctx context.Context, visit func(key string, value []byte) (bool, error)) error
+}
+    CommitOrder is the capability of stating the order an engine's commits
+    landed in: the keys it holds beside the value each key's newest statement
+    carries, named from the newest committed record to the oldest, stopping
+    when visit answers false. An append-log engine keeps that order on disk,
+    so naming it costs the records walked and the values those records state;
+    a key-ordered key-value engine keeps no such order and does not answer this
+    capability at all, so a caller reads the answer through the type assertion
+    instead of a method every engine carries.
+      - EachCommittedNewestFirst names a key once, at its newest commit,
+        and skips a key the newest commit that touched it deleted
+      - The value is the one that newest statement left under the key, so a
+        caller identifies an entry without a second read
+      - visit answers false to end the walk where it stands, so a caller reads
+        the prefix its order bounds instead of the whole history
+
+    The redline list (4 rules): MUST answer every key once, from the newest
+    committed record to the oldest. MUST end the walk where visit answers
+    false and return the error visit reports. MUST answer the value the newest
+    statement left under the key, so a caller never reads it twice. MUST NOT
+    name a key at an older commit or name a key the newest commit that touched
+    it deleted.
+
+type FactCommit struct {
+	// Record is the segment record the fact commits as.
+	Record SegmentRecord
+	// Ref names the original the fact commits.
+	Ref OriginalRef
+	// Body is the original bytes the reference names.
+	Body []byte
+}
+    FactCommit is one fact's whole key set: the record that places it and the
+    original bytes the recall face reads back. The two name one fact, so the
+    record's event key and the reference's key carry one identity.
+
+type FactCommitOutcome int
+    FactCommitOutcome names what one whole-fact commit left in the store.
+
+const (
+	// FactCommitted reports a fact that landed whole and took one sequence slot.
+	FactCommitted FactCommitOutcome = iota
+	// FactAlreadyPresent reports a fact the store already held whole: no key moved and no slot was taken.
+	FactAlreadyPresent
+	// FactConflict reports an identity the store holds under another content: no key moved.
+	FactConflict
+	// FactUncertain reports a commit whose durable outcome the store cannot name: only an open that took no part in it can decide what landed.
+	FactUncertain
+	// FactRefused reports a fact that landed no key, with the error naming the cause.
+	FactRefused
+)
+func CommitFact(ctx context.Context, tier *Tier, fact FactCommit) (FactCommitOutcome, error)
+    CommitFact commits one fact of one tier as one unit: the original family
+    and the event family travel in one batch, so a reader meets the fact whole
+    or not at all and neither family ever stands committed beside the other
+    missing.
+      - The duplicate judgment of both families and the commit under it run in
+        one critical section, and the storage root's exclusive write rights keep
+        every other writer out of that section, so no two writers interleave the
+        judgment and the landing of one fact
+      - A fact the store already holds stays the fact it is: no key moves,
+        no sequence slot is taken and the window meta is not refreshed
+      - A refusal the engine decides before writing is reported as the refusal
+        it is, never as an uncertain outcome the caller would re-read
+      - An uncertain outcome publishes nothing to either store's in-process
+        state, because that view answers absence beside a batch that landed
+        whole
+
 type Fetch struct {
 	// Key names the one entry to read.
 	Key string
@@ -312,23 +439,32 @@ type FileSegmentStore struct {
 }
     FileSegmentStore commits events into time-window segments over one atomic
     store engine; it names no engine and no file layout, so any engine backs it.
-    One commit stages the event body, its index entry and the window meta the
-    window needs as one batch, and publishes the event to the read cache, the
-    resident index and the event count only when that commit returns success.
-    A commit that fails names the barrier as its step, carries its cause,
-    unstages what it wrote, and publishes no part of the record.
+    One commit stages the event body, its index entry, the window meta the
+    window needs, the store's seat and the partition set as one batch,
+    and publishes the event to the read cache and the event count only when that
+    commit returns success. A commit that fails names the barrier as its step,
+    carries its cause, unstages what it wrote, and publishes no part of the
+    record.
 
-    The resident state is bounded: the index keeps one small position per event
-    key (the projection of the persisted index entries), the order keeps those
-    keys in the order their commits landed, the read cache keeps bodies under a
-    byte budget, and Load reads only the index, the window meta and the engine's
-    commit order at startup. An event body the cache evicted is read back from
-    its persisted {pid}:evt:{window}:{seq} entry, so a bounded process still
-    answers every read.
+    The resident state is bounded by the chain's shape and never by its history:
+    the seat states the count and the commit sequence, the partition set states
+    the partitions holding at least one event, and the read cache keeps bodies
+    under a byte budget. Load reads the seat and the partition set and both
+    are single keys, so opening a store reads no index entry whatever the
+    history behind it. A point read probes the index entry of the identity in
+    each stated partition and reads the value that entry spans, and a point
+    read that names the partition probes that one entry and consults no set,
+    so the set is an accelerator over the index and never the bound a caller
+    that placed the event pays; a newest-first walk reads the commit order the
+    engine states and stops where a caller stops; an enumeration reads the index
+    of the partitions it names and therefore costs their entries. No window meta
+    is held: the {pid}:meta:{window} key a window is filed under is the record,
+    and the one commit that reads it reads that key.
 
 func (s *FileSegmentStore) Close() error
     Close ends the store with a final barrier over whatever the backend still
-    holds staged, and repeats as a no-op.
+    holds staged, releases the write rights this store's open took on its
+    storage root and the journal handle behind them, and repeats as a no-op.
 
 func (s *FileSegmentStore) EachEvent(ctx context.Context, visit func(StoredEvent) error) error
     EachEvent streams every published event in index order: partition first,
@@ -338,16 +474,53 @@ func (s *FileSegmentStore) EachEvent(ctx context.Context, visit func(StoredEvent
     holds the whole store in memory. A visit error ends the enumeration and is
     returned.
 
+    It reads the index of every partition the chain states, so the enumeration
+    costs the entries of the whole history: that is the cost of the question,
+    and no narrower answer names every event.
+
+func (s *FileSegmentStore) EachEventOfPartitions(ctx context.Context, partitions []int, visit func(StoredEvent) error) error
+    EachEventOfPartitions streams every published event of the named partitions
+    in the index order EachEvent states, reading the index of those partitions
+    alone. A nil or empty set names every partition the chain states. It is the
+    face a scoped query reads: a caller that names the partitions it may read
+    pays their entries rather than the entries of the whole chain.
+
+    A partition the chain states no entry in answers nothing rather than a
+    failure: a partition no commit filed an event under holds no event to
+    present.
+
 func (s *FileSegmentStore) EachIndexNewestFirst(ctx context.Context, visit func(key event.EventID, partition int, seq int64, typ string, session event.SessionID) error) error
-    EachIndexNewestFirst streams the published index in commit order, newest
-    commit first, handing each entry its key, position, frozen event type and
-    session without reading any body. The order is the one the engine's records
-    sit in, so it ranks every entry against every other — a commit of one
-    partition that landed after a commit of another comes first — and a caller
-    that wants commit order walks it backwards. Nothing is copied or sorted:
-    the walk reads the order in place, one entry at a time, so a visit may read
-    the store again. An entry whose type is empty leaves the caller to read its
-    body.
+    EachIndexNewestFirst streams the index of the whole history in commit order,
+    newest commit first, handing each entry its key, position, frozen event type
+    and session without reading any body. It is the walk of a caller that names
+    every entry — a replay, an export, a listing — and it holds no stop of its
+    own, so a caller that reads a bounded prefix asks EachIndexNewestFirstUntil
+    instead.
+
+      - A visit that answers an error ends the walk and answers it.
+      - A visit reads the store: the walk hands the engine back before every
+        visit, so a visit reads one event body beside the walk and never waits
+        on it.
+
+func (s *FileSegmentStore) EachIndexNewestFirstUntil(ctx context.Context, visit func(key event.EventID, partition int, seq int64, typ string, session event.SessionID) (bool, error)) error
+    EachIndexNewestFirstUntil streams the index in commit order, newest commit
+    first, and stops where the visit answers false: a point query reads the
+    prefix its own answer bounds instead of the history behind it.
+
+    The order is the one the engine's records sit in, so it ranks every entry
+    against every other — a commit of one partition that landed after a commit
+    of another comes first — and a caller that wants commit order walks it
+    backwards. The walk streams the order the engine states, so it holds no
+    entry between two visits and costs the commits it walks.
+
+      - false is the stop: the walk ends where the visit stands and answers nil,
+        so a query that has its answer pays the commits down to it and not the
+        ones behind it.
+      - An error ends the walk and is answered as the failure it is, so a stop
+        is never spelled as a failure a caller has to recognize.
+      - A visit reads the store: the walk hands the engine back before every
+        visit, so a visit reads one event body beside the walk and never waits
+        on it.
 
 func (s *FileSegmentStore) EventCount() int
     EventCount returns the number of events published by successful commits,
@@ -360,41 +533,98 @@ func (s *FileSegmentStore) Events(ctx context.Context) ([]StoredEvent, error)
 
 func (s *FileSegmentStore) GetEvent(ctx context.Context, key event.EventID) (StoredEvent, bool, error)
     GetEvent returns the committed event under key together with the index
-    position it was committed at, and reports whether any is published. A body
-    the cache evicted is read back from its persisted entry; an index entry
-    whose body cannot be read reports ErrSegmentBodyMissing instead of an absent
-    event.
+    position it was committed at, and reports whether any is published.
+    The position is the index entry of that identity in one of the partitions
+    the chain states, so the answer costs one small read per partition and no
+    walk of the history behind them. A body the cache evicted is read back
+    from its persisted entry; an index entry whose body cannot be read reports
+    ErrSegmentBodyMissing instead of an absent event.
+
+      - This read serves the callers an identity reaches without a partition:
+        the seat is the only index such a caller has, because enumerating the
+        index behind it is the walk the seat replaces, so the answer is exactly
+        as wide as the partitions the seat states and the seat that under-states
+        one answers absence beside a body the log holds.
+      - A caller that holds the partition SHALL name it with
+        GetEventInPartition, which addresses that partition's index entry and
+        consults no seat.
+
+func (s *FileSegmentStore) GetEventInPartition(ctx context.Context, key event.EventID, partition int) (StoredEvent, bool, error)
+    GetEventInPartition returns the committed event under key that one named
+    partition files, and reports whether that partition published one. The read
+    addresses the index entry of the identity in the partition the caller names,
+    so it pays one small read and probes no partition set. A caller that names
+    the partition pays that read whatever the seat states. A body the cache
+    evicted is read back from its persisted entry; an index entry whose body
+    cannot be read reports ErrSegmentBodyMissing instead of an absent event.
+
+func (s *FileSegmentStore) IndexEntriesRead() int
+    IndexEntriesRead reports the index entries this store's load enumerated:
+    none beside a chain that states its seat and its partition set,
+    and the whole index of every partition beside a chain that states neither.
+    It is the quantity a bounded recovery is measured by, and never EventCount,
+    which counts the whole committed history: a load that enumerated every entry
+    answers the same number twice, which is exactly the unbounded recovery the
+    measure has to be able to tell apart from a bounded one.
+
+func (s *FileSegmentStore) IndexWalkReads() (visits int, valueBytes int64, valueReads int)
+    IndexWalkReads reports what the commit-order walks of this store cost:
+    the index entries they named, the value bytes they read to name them and how
+    many values those bytes were. It is the quantity a bounded boot is measured
+    by after the entries stopped being materialized, because a walk that reads
+    a value per held key and one that reads the index family alone name the
+    same entries at different costs, and only the bytes tell the two apart.
+    Both are counted by the walk, so a caller reads what the boot paid, never an
+    estimate kept beside it.
 
 func (s *FileSegmentStore) Load(ctx context.Context) error
-    Load rebuilds the resident index and window table from the persisted store
-    without returning an event body. It enumerates the engine's key namespaces
-    to discover the partitions, then reads the index and meta prefixes of each
-    partition: both are small entries, and no {pid}:evt:{window}:{seq} body is
-    read. A record whose index and window meta did not both arrive stays out of
-    the published state, EventCount counts the published records, and the commit
-    order is the one the engine states for the records it published.
+    Load states the count, the commit sequence and the partitions the chain
+    holds events in, without reading one index entry and without returning an
+    event body: one read of the seat states all three, so the open costs one
+    small read whatever the history behind it.
+      - The seat states the count, the commit sequence and the partitions of the
+        whole history with one read of one key, so neither the count nor the set
+        of partitions a point read probes costs a reader an aggregate over the
+        entries behind them
+      - A seat the chain does not state, states unreadably, states a commit
+        sequence below its count, or states a count beside no partition falls
+        back to the count and the partitions the index states: one enumeration
+        of the index, which is the derived answer a chain that states no seat
+        costs
+      - A store that writes again states the seat in the frame of its next
+        commit, so a root whose seat could not be read is read without an
+        aggregate from the next commit on
 
-func (s *FileSegmentStore) NewestOfType(ctx context.Context, typ string) (event.EventID, bool, error)
-    NewestOfType answers the identity of the newest published index entry of one
-    frozen event type: the walk reads the resident commit order from the newest
-    commit backwards and stops at the first entry of the type, so a lookup
-    beside a checkpoint filed every cadence commits reads a bounded prefix
-    of the order whatever the history behind it, copies and sorts nothing,
-    and reads no event body. The answer spans partitions: an identity is newer
-    than another because its commit landed later, never because its window,
-    its sequence slot or its partition is higher, so a run whose owner moved
-    between processes reads the checkpoint its newest process filed instead of
-    the one of the highest partition.
+func (s *FileSegmentStore) NewestOfType(ctx context.Context, typ string) (event.EventID, int, bool, error)
+    NewestOfType answers the identity of the newest index entry of one frozen
+    event type beside the partition that entry landed in: the walk reads the
+    store's commit order from the newest commit backwards and stops at the
+    first entry of the type, so a lookup beside a checkpoint filed every cadence
+    commits reads a bounded prefix of the order whatever the history behind it,
+    sorts nothing, and reads no event body.
 
-    A type the store holds no entry of answers found=false and no error.
+      - The answer spans partitions: an identity is newer than another because
+        its commit landed later, never because its window, its sequence slot or
+        its partition is higher, so a run whose owner moved between processes
+        reads the checkpoint its newest process filed.
+      - The partition travels beside the identity because the walk already
+        holds the position it answered, so the caller reads that body back
+        with GetEventInPartition and pays one read instead of a probe of the
+        partitions the seat states.
+      - A type the store holds no entry of answers found=false, partition 0 and
+        no error.
 
 func (s *FileSegmentStore) StoreEvent(ctx context.Context, rec SegmentRecord) error
     StoreEvent commits one event behind the segment commit barrier: the event
     body, its index entry and the window meta the window needs are one batch
-    committed before the event reaches the read cache, the resident index, the
-    event count or the caller. A repeat of the committed record returns success
-    without a second fact, other bytes under the same event key are refused,
-    and a failed commit leaves nothing published.
+    committed before the event reaches the read cache, the partition set,
+    the event count or the caller.
+
+      - A repeat of the committed record returns success without a second fact,
+        other bytes under the same event key are refused, and a failed commit
+        leaves nothing published.
+      - A fact the store holds is a committed fact: committing it again answers
+        as the duplicate it is, never as a second landing of one identity.
 
 type Guard interface {
 	// Hold registers one protection hold on the original of ref for holder and
@@ -437,6 +667,28 @@ type HolderID string
     not the owner of the reference it protects. It is stable across retries,
     so a retried hold is recognized as the same hold and counts once, while two
     holders on one original hold and release independently of each other.
+
+type IndexEntry struct {
+	// Partition is the partition the entry places the event in.
+	Partition int
+	// Key is the canonical identity of the event the entry places.
+	Key event.EventID
+	// Type is the frozen event type the entry states.
+	Type string
+	// Session is the session chain the entry states, empty beside a framework record.
+	Session event.SessionID
+}
+    IndexEntry is one store index entry as a commit filed it: the partition and
+    event identity the key places beside the frozen type and session the value
+    states.
+
+func CommittedIndexEntry(key string, value []byte) (IndexEntry, bool)
+    CommittedIndexEntry answers the store index entry one committed key carries:
+    the partition and event identity it places beside the frozen type and
+    session the entry states, and false beside a key that carries none, such as
+    a fact the tier's fact log committed on the same engine. It reads no store,
+    so a caller that walks an engine's commit order identifies an entry from the
+    pair the walk handed it.
 
 type Integrity struct {
 	// Digest is the digest over the stored bytes, in the canonical text form of
@@ -655,72 +907,6 @@ func (s *MemoryLifecycleStore) Tombstone(ctx context.Context, key event.EventID,
 func (s *MemoryLifecycleStore) Tombstoned(key event.EventID) (time.Time, bool)
     Tombstoned reports the tombstone time of one key, and whether it is marked.
 
-type MemoryOption func(*MemoryOriginalStore)
-    MemoryOption shapes one MemoryOriginalStore at construction.
-
-func WithRetentionWindow(policy string, window time.Duration) MemoryOption
-    WithRetentionWindow registers the window one retention policy keeps its
-    references readable for. A policy with no registered window keeps its
-    references readable indefinitely, and a window of zero or less reports every
-    read as expired.
-
-type MemoryOriginalStore struct {
-	// Has unexported fields.
-}
-
-    MemoryOriginalStore is the in-memory OriginalStore: the reference and
-    blob model of the original text — each event key commits its own bytes,
-    every reference registered under its own owner, format and retention policy,
-    exact recall served byte for byte and segmented reading handing out whole
-    lines.
-
-    The model is implemented once over the key-value seam, and this tier
-    is that implementation held in a view that never leaves the process: a
-    durable tier runs the same code over its own view, so nothing about recall,
-    retention is restated per tier. The tier holds only what the process holds:
-    it survives no restart, and no result it returns claims otherwise.
-
-func NewMemoryOriginalStore(options ...MemoryOption) *MemoryOriginalStore
-    NewMemoryOriginalStore returns an empty in-memory original store, shaped by
-    the given options.
-
-func (s MemoryOriginalStore) BlobCount() int
-    BlobCount returns the number of event keys holding an original body.
-
-func (s MemoryOriginalStore) Get(ctx context.Context, key event.EventID) RecallResult
-    Get returns the exact recall result for key, classified exactly as the
-    in-memory tier classifies it: the committed bytes while a reference of the
-    key is inside its retention window, and a named missing, expired or failed
-    result otherwise.
-
-func (s MemoryOriginalStore) GetScoped(ctx context.Context, key event.EventID, scope ReadScope) RecallResult
-    GetScoped returns the exact recall of key as visible inside scope, exactly
-    as the in-memory tier serves it.
-
-func (s MemoryOriginalStore) Put(ctx context.Context, ref OriginalRef, body []byte) error
-    Put commits the original bytes of ref and publishes the reference once its
-    barrier returns success.
-      - Different event keys always own independent bodies; a second scope on
-        the same key joins its references, and other bytes under a held key are
-        refused
-      - The body and the reference that names it travel in one batch, so a
-        reader never sees a reference whose body is missing and a failed commit
-        leaves neither behind
-
-func (s MemoryOriginalStore) ReadSegment(ctx context.Context, key event.EventID, startLine, numLines int) ([]byte, error)
-    ReadSegment returns at most numLines whole lines of the original stored
-    under key, starting at line startLine, and names every read it cannot serve
-    exactly as the in-memory tier names it.
-
-func (s MemoryOriginalStore) ReadSegmentScoped(ctx context.Context, key event.EventID, scope ReadScope, req SegmentRequest) (SegmentResult, error)
-    ReadSegmentScoped returns one byte-bounded segment of the original stored
-    under key as visible inside scope, exactly as the in-memory tier serves it.
-
-func (s MemoryOriginalStore) References(key event.EventID) []OriginalRef
-    References returns every reference registered under key, one per reference
-    scope in a stable order, so which owners, formats and retention policies
-    still name the original stays observable.
-
 type MigrateReport struct {
 	// Keys is the number of keys the target now holds.
 	Keys int
@@ -731,7 +917,7 @@ type MigrateReport struct {
 }
     MigrateReport counts what one migration copied.
 
-func MigrateShardedRoot(ctx context.Context, sourceRoot, targetRoot string) (MigrateReport, error)
+func MigrateShardedRoot(ctx context.Context, sourceRoot, targetRoot string) (report MigrateReport, err error)
     MigrateShardedRoot copies every key of a retired sharded-snapshot root into
     a journal root under targetRoot, in bounded batches, and reads the copy back
     through a freshly opened view before it reports success.
@@ -741,9 +927,13 @@ func MigrateShardedRoot(ctx context.Context, sourceRoot, targetRoot string) (Mig
     and a migration interrupted anywhere leaves the source exactly as it was.
     The target is refused when it already holds keys, so no copy overwrites
     a root in use. A root whose copy does not read back byte for byte returns
-    ErrMigrateMismatch naming the key that differs. A copied root whose
+    ErrMigrateMismatch naming the key that differs, and a copied root whose
     reference names no independent body returns ErrSnapshotCorrupt naming the
     orphaned key, the same refusal the original store's load reports at boot.
+    The copy writes the target, so it takes that root's write rights and gives
+    them up when it returns, and the verifying pass it takes in between opens
+    the copy as a component view that reads beside the writer instead of being
+    refused by it.
 
 type OriginalRef struct {
 	// Key is the EventID that owns this original. Different keys never share
@@ -1144,6 +1334,18 @@ type StorageConfig struct {
 	// engine and never names a file layout. A tier beside no wrapper opens the
 	// engine Type names.
 	Engine AtomicStore
+	// WriteRights declares that this open writes the root it names: it holds that
+	// root's exclusive write lock for as long as the view lives, so a second such
+	// open, in this process or another, is refused by name. A caller that commits
+	// to the root declares it, and the boot that stands for one runtime instance
+	// over that root does too. An open that declares nothing is a component view:
+	// it holds no write rights and reads beside the writer that does.
+	WriteRights bool
+	// RetentionWindows registers, per retention policy, the window an original
+	// recall keeps the references of that policy readable for. A policy with no
+	// registered window keeps its references readable indefinitely, and a window
+	// of zero or less reports every read of that policy as expired.
+	RetentionWindows map[string]time.Duration
 }
     StorageConfig locates one storage tier: the tier name, the root directory
     the persistent tiers persist under, and the rustviking executable and config
@@ -1177,6 +1379,10 @@ type StoreCapabilities struct {
 	// Durable reports whether a successful commit outlives the process that made
 	// it.
 	Durable bool
+	// AtomicBatch reports whether a commit carrying several keys lands whole or
+	// not at all. A tier that declares false lands one key per call and answers
+	// ErrBatchNotAtomic for every larger batch, having landed none of it.
+	AtomicBatch bool
 }
     StoreCapabilities names what one opened tier guarantees, so a tier that
     holds nothing across process exit says so instead of appearing durable.
@@ -1221,6 +1427,8 @@ type Tier struct {
 	Store AtomicStore
 	// Capabilities names what the backend guarantees.
 	Capabilities StoreCapabilities
+
+	// Has unexported fields.
 }
     Tier is one opened storage tier: the original store and the segment store of
     the same backend, together with the capabilities that backend guarantees and
@@ -1239,13 +1447,38 @@ func OpenTier(ctx context.Context, cfg StorageConfig) (*Tier, error)
         unchanged
       - The journal tier's write path is one append-only file with one writer
         handle per opened view, and each commit is appended as one whole frame,
-        so two views of the same directory cannot interleave half frames
-      - A second runtime instance over one directory is refused by the
-        production open path that owns that root, not by an exclusive lock here:
-        in-process checks of the same root appear in the test suite of this
-        repository
-      - Durability holds without that lock, because a frame is appended whole
-        and the barrier is the log's own sync
+        so a view reading beside a writer cannot see half a frame
+      - One directory carries one writer: an open that declares
+        StorageConfig.WriteRights holds the root's write lock, and a second
+        such open, in this process or another, is refused by name with
+        ErrRootWriteLocked, so two writers never commit over one slot
+      - This open hands the declaration through unchanged, so a caller that
+        commits to the root declares the rights and every other caller holds
+        none: a component view opens beside the live writer, a commit carrying
+        keys through it is refused as ErrCommitWithoutWriteRights, and Close
+        gives the root up to the next writer
+      - The kernel holds the lock, so it drops when the holding process exits;
+        no recovery pass clears a stale lock, and durability never depended on
+        the lock, because the barrier is the log's own sync
+      - The config's RetentionWindows register the original-recall window of
+        each retention policy on the tier's original store, so a read of a
+        reference outside its registered window is named expired; a policy the
+        config leaves unregistered keeps its references readable indefinitely
+
+func (t *Tier) Close() error
+    Close ends this tier's view of its backend: the segment store completes its
+    final barrier, the engine behind it closes, and a durable tier gives its
+    storage root up to the next writer.
+      - The root's write rights leave with this close, so the next writer — in
+        this process or another — is admitted instead of being refused for a
+        view that already ended
+      - The release happens however the barrier ended, because the engine closes
+        the journal handle and the write lock together, so a failed barrier
+        never leaves the root locked
+      - A repeated Close ends nothing twice and answers nil, so a caller that
+        closes a run twice does not see an error the first close did not report
+      - The engine closes once, through the segment store, because both stores
+        of a tier read and commit through that one engine
 
 type TierFacts struct {
 	// Has unexported fields.
@@ -1257,8 +1490,17 @@ func TierFactLog(tier *Tier) *TierFacts
     durable commit and a replay run on the same engine the tier's events are
     committed through — no second database is introduced for either.
 
+func (l TierFacts) CommitOrder() (CommitOrder, bool)
+    CommitOrder answers the commit-order walk of the engine this log holds, and
+    whether that engine states one: an engine that keeps no commit order answers
+    false, and a caller that walked to a key reads the prefix whole instead.
+    The walk is the engine's own, so it names the keys newest commit first and
+    stops where the visitor answers false.
+
 func (l TierFacts) Get(ctx context.Context, key string) ([]byte, bool, error)
-    Get returns the value stored under key and whether one is held.
+    Get answers the value held under one key, and whether the log holds it: the
+    point read a caller that names its own keys pays instead of a prefix scan,
+    so the read costs the one value and the probe that locates it.
 
 func (l TierFacts) Put(ctx context.Context, key string, value []byte) error
     Put stages one key and its value.

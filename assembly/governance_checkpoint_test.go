@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/SpellingDragon/tagent/api/durable"
 	"github.com/SpellingDragon/tagent/api/event"
 	"github.com/SpellingDragon/tagent/api/plugin"
 	"github.com/SpellingDragon/tagent/features/evolution/governance"
@@ -22,15 +23,14 @@ import (
 
 // governanceSliceState is the governance state one checkpoint states, as the
 // production boot writes it: the layout version, the tail of each governance
-// stream and the derived state behind those tails.
+// stream, the goals kept in force and the approval book. A tail numbers the
+// history its stream keeps, so Records is the field a check reads to hold one cut
+// to stating no record of that history.
 type governanceSliceState struct {
-	Version   int   `json:"version"`
-	DenialSeq int64 `json:"denial_seq"`
-	GoalSeq   int64 `json:"goal_seq"`
-	Records   []struct {
-		ToolName string `json:"tool"`
-		Subtype  string `json:"subtype"`
-	} `json:"records"`
+	Version   int               `json:"version"`
+	DenialSeq int64             `json:"denial_seq"`
+	GoalSeq   int64             `json:"goal_seq"`
+	Records   []json.RawMessage `json:"records"`
 	Approvals []struct {
 		ID     string `json:"id"`
 		Status string `json:"status"`
@@ -45,7 +45,10 @@ func governanceDoc(t *testing.T) (configPath, root, document string) {
 	root = t.TempDir()
 	configPath = filepath.Join(root, "tagent.yaml")
 	document = generationDocument(root, "http://127.0.0.1:1/v1", "",
-		"governance:\n  risk_rules:\n    - { tool: exec, level: high }\n")
+		"governance:\n  risk_rules:\n"+
+			"    - { tool: exec, level: high }\n"+
+			"    - { tool: read, level: high }\n"+
+			"    - { tool: send, level: high }\n")
 	return configPath, root, document
 }
 
@@ -90,10 +93,10 @@ func seedGovernanceChain(t *testing.T, run *Run, session string) {
 	commitWindowTurns(t, ctx, run, event.Address{AgentID: "user", SessionID: event.SessionID(session)}, 1)
 }
 
-// governanceStateOf cuts one checkpoint through the run's own entry and reads the
-// governance state it states, so a check reads the production cut and never a
+// governanceSliceOf cuts one checkpoint through the run's own entry and reports the
+// governance payload it states, so a check reads the production cut and never a
 // slice the check assembled.
-func governanceStateOf(t *testing.T, run *Run) governanceSliceState {
+func governanceSliceOf(t *testing.T, run *Run) []byte {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -113,21 +116,43 @@ func governanceStateOf(t *testing.T, run *Run) governanceSliceState {
 		if slice.Name != "governance" {
 			continue
 		}
-		var state governanceSliceState
-		if err := json.Unmarshal([]byte(slice.Payload), &state); err != nil {
-			t.Fatalf("the governance slice states no readable state: %v (%s)", err, slice.Payload)
-		}
-		return state
+		return []byte(slice.Payload)
 	}
 	t.Fatalf("the checkpoint %s names the slices %v, want the governance state among them",
 		key, checkpoint.CheckpointSliceNames())
-	return governanceSliceState{}
+	return nil
+}
+
+// governanceStateRead decodes the governance state one stated cut payload carries.
+func governanceStateRead(t *testing.T, payload []byte) governanceSliceState {
+	t.Helper()
+	var state governanceSliceState
+	if err := json.Unmarshal(payload, &state); err != nil {
+		t.Fatalf("the governance slice states no readable state: %v (%s)", err, payload)
+	}
+	return state
+}
+
+// governanceRulingsOf restores one production cut beside the durable face the hosts
+// wrote and binds the two, so the rulings the cut numbers are read the way a restart
+// reads them: the cut states the tail and the stream behind it states the records.
+func governanceRulingsOf(t *testing.T, ctx context.Context, cut []byte, log durable.FactLog) []governance.DenialRecord {
+	t.Helper()
+	fromCut := governance.NewDenialLedger()
+	seat := governance.NewStateSeat(fromCut, nil, nil)
+	if err := seat.RestoreState(ctx, cut); err != nil {
+		t.Fatalf("restore the governance cut the restart filed: %v", err)
+	}
+	if err := seat.Bind(ctx, log); err != nil {
+		t.Fatalf("bind the stream the cut numbers: %v", err)
+	}
+	return fromCut.Query(0)
 }
 
 // TestGovernanceSliceWiredInProduction pins the governance state the production boot seats.
-//   - positive: the real host mounts the governance slice on the run's state seam, and the cut it files states the ledger index the ruling wrote
+//   - positive: the real host mounts the governance slice on the run's state seam, and its cut numbers the two rulings the gate recorded beside no record
 //   - negative: a restarted host reads that cut instead of scanning the stream, so its streams continue past the keys already written and no key is re-keyed
-//   - the restart reads the cut the first process stated: the two records it states, and the stream past the two denial events already written
+//   - the restart reads the cut the first process stated: the tail past the two denial events, and the rulings that stream keeps in the order the gate recorded
 //   - consumer: the boot entry seats the ledger and the goal registry the governance gate rules through, and one restart restores them
 //
 // 契约: docs/wiki/platform/platform-subsystems.md#framework-checkpoint
@@ -141,14 +166,12 @@ func TestGovernanceSliceWiredInProduction(t *testing.T) {
 	}
 	seedGovernanceChain(t, run, "session-governance-cut")
 	judgeGradedCall(t, run, "exec")
-	judgeGradedCall(t, run, "exec")
-	state := governanceStateOf(t, run)
-	if state.Version == 0 || state.DenialSeq != 2 || len(state.Records) != 2 {
-		t.Fatalf("governance state of the first cut = version %d tail %d over %d records, want the two rulings the gate recorded",
+	judgeGradedCall(t, run, "read")
+	cut := governanceSliceOf(t, run)
+	state := governanceStateRead(t, cut)
+	if state.Version == 0 || state.DenialSeq != 2 || len(state.Records) != 0 {
+		t.Fatalf("governance state of the first cut = version %d tail %d over %d records, want the layout this code reads and the tail of the two rulings beside no record the cut keeps",
 			state.Version, state.DenialSeq, len(state.Records))
-	}
-	if state.Records[0].ToolName != "exec" || state.Records[0].Subtype != governance.SubtypeAudit {
-		t.Fatalf("stated record = %+v, want the audit record the high-grade ruling left", state.Records[0])
 	}
 	closeLiveness(t, first)
 
@@ -157,16 +180,12 @@ func TestGovernanceSliceWiredInProduction(t *testing.T) {
 	if names := restarted.StateRegistry().Names(); !slices.Contains(names, "governance") {
 		t.Fatalf("state slices of the restarted host = %v, want the governance state among them", names)
 	}
-	judgeGradedCall(t, restarted, "exec")
-	restated := governanceStateOf(t, restarted)
-	if restated.DenialSeq != 3 || len(restated.Records) != 3 {
-		t.Fatalf("governance state beside the restart = tail %d over %d records, want the two restored rulings and the one it ruled",
+	judgeGradedCall(t, restarted, "send")
+	restatedCut := governanceSliceOf(t, restarted)
+	restated := governanceStateRead(t, restatedCut)
+	if restated.DenialSeq != 3 || len(restated.Records) != 0 {
+		t.Fatalf("governance state beside the restart = tail %d over %d records, want the tail past the two restored rulings and the one it ruled",
 			restated.DenialSeq, len(restated.Records))
-	}
-	for index := 0; index < 2; index++ {
-		if restated.Records[index].ToolName != "exec" {
-			t.Fatalf("restored record %d = %+v, want the ruling the first process recorded", index, restated.Records[index])
-		}
 	}
 	closeLiveness(t, second)
 
@@ -193,6 +212,17 @@ func TestGovernanceSliceWiredInProduction(t *testing.T) {
 	if strings.Join(keys, " ") != strings.Join(want, " ") {
 		t.Fatalf("stored denial events = %v, want the three the two processes wrote under their own keys: the keys the two processes wrote are three in one stream, and a stream that reset its numbering would re-key the third ruling over an event already stored", keys)
 	}
+	rulings := governanceRulingsOf(t, ctx, restatedCut, ledger.TierFactLog(tier))
+	wantRulings := []string{"send", "read", "exec"}
+	if len(rulings) != len(wantRulings) {
+		t.Fatalf("rulings read beside the cut the restart filed = %d, want the %d the gate recorded", len(rulings), len(wantRulings))
+	}
+	for index, tool := range wantRulings {
+		if rulings[index].ToolName != tool || rulings[index].Subtype != governance.SubtypeAudit {
+			t.Fatalf("ruling %d read beside the cut = %+v, want the %s record of %s: the cut numbers the stream and the stream states the records in the order the gate recorded them",
+				index, rulings[index], governance.SubtypeAudit, tool)
+		}
+	}
 }
 
 // TestGovernanceApprovalBootReadsStateSlice pins the approval book of a boot that states a governance cut.
@@ -214,7 +244,7 @@ func TestGovernanceApprovalBootReadsStateSlice(t *testing.T) {
 		t.Fatalf("park one critical call through the approval channel: %v", err)
 	}
 	seedGovernanceChain(t, first.Run(), "session-governance-approval")
-	state := governanceStateOf(t, first.Run())
+	state := governanceStateRead(t, governanceSliceOf(t, first.Run()))
 	if len(state.Approvals) != 1 || state.Approvals[0].ID != held.ID || state.Approvals[0].Status != string(approval.ApprovalPending) {
 		t.Fatalf("stated approvals = %+v, want the hold the channel parked", state.Approvals)
 	}

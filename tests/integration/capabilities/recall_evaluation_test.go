@@ -122,13 +122,14 @@ func (e *evalCountingEmbedder) count() int {
 }
 
 // seedEvalCorpus commits the real corpus into a fresh localfile tier under the
-// given root and returns the tier, so the formal assembly opened over the same
-// root reads exactly what this process committed. The returned tier keeps the
-// scoped read face the original bytes are read back through.
+// given root under write rights, hands the root up, and returns a read view over
+// it, so the formal assembly opened over the same root reads exactly what this
+// process committed. The returned tier keeps the scoped read face the original
+// bytes are read back through beside the assembly's writer.
 func seedEvalCorpus(t *testing.T, root string) *ledger.Tier {
 	t.Helper()
 	ctx := context.Background()
-	tier, err := ledger.OpenTier(ctx, ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: root})
+	tier, err := ledger.OpenTier(ctx, ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: root, WriteRights: true})
 	if err != nil {
 		t.Fatalf("OpenTier(localfile): %v", err)
 	}
@@ -152,7 +153,14 @@ func seedEvalCorpus(t *testing.T, root string) *ledger.Tier {
 			t.Fatalf("Put(original %s): %v", ev.key, err)
 		}
 	}
-	return tier
+	if err := tier.Close(); err != nil {
+		t.Fatalf("close the seeding tier of %s: %v", root, err)
+	}
+	reading, err := ledger.OpenTier(ctx, ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: root})
+	if err != nil {
+		t.Fatalf("reopen the read view of %s: %v", root, err)
+	}
+	return reading
 }
 
 // evalAssemble builds the formal assembly over the given storage root — or
@@ -469,6 +477,12 @@ func TestRecallEvaluation(t *testing.T) {
 		}
 		if want := []event.EventID{"0a02"}; !reflect.DeepEqual(originalKeysOf(keyword.Refs), want) {
 			t.Fatalf("keyword recall beside no embedding = %v, want %v: the keyword leg is unchanged", originalKeysOf(keyword.Refs), want)
+		}
+
+		if report, closeErr := plain.Close(ctx, agent.CloseRequest{Deadline: time.Now().Add(20 * time.Second)}); closeErr != nil {
+			t.Fatalf("close the keyword-only assembly before the next one: %v", closeErr)
+		} else if report.Outcome != agent.CloseQuiesced {
+			t.Fatalf("close of the keyword-only assembly = (%+v), want the run at rest so the root it read reaches the next assembly", report)
 		}
 
 		counter := &evalCountingEmbedder{inner: memoryembedder.NewHashEmbedder(0)}

@@ -37,17 +37,17 @@
 | # | 契约 | 含义 | 保障机制（可查证处） |
 |---|---|---|---|
 | 1 | **事件不可变** | 一个 key 只命名一个事实；写入后的字节永不原地改写 | 同 key 异字节具名拒绝：`ErrFactKeyConflict`（`event_body.go`）、`ErrContentConflict`（`kv_original_store.go` / `segment_store.go` `StoreEvent`） |
-| 2 | **槽位与身份一一对应** | `<pid>:evt:<窗>:<seq>` 里装的就是 `EventID` 指向它的那条事件 | `StoreEvent` 一次 `kvBatch` 同写 evt/idx/meta 三键；`recordOfTierEvent` 拒绝 `body.Key != stored.Key`（`ErrBodyKeyMismatch`） |
-| 3 | **链上没有正文** | 链只存身份、时间、元数据与原生负载；消息正文只走原文仓 | 写入点 `assembly/facts.go:237`：`tier.Originals.Put(ctx, body.Ref(), []byte(body.Message.Content))` |
+| 2 | **槽位与身份一一对应** | `<pid>:evt:<窗>:<seq>` 里装的就是 `EventID` 指向它的那条事件 | `StoreEvent` 一次 `Batch` 同写 evt/idx/meta 三键；`recordOfTierEvent` 拒绝 `body.Key != stored.Key`（`ErrBodyKeyMismatch`） |
+| 3 | **链上没有正文** | 链只存身份、时间、元数据与原生负载；消息正文只走原文仓 | 写入点 `assembly/facts.go:393`：`ledger.CommitFact(ctx, tier, ledger.FactCommit{Record, Ref, Body})` 一次批同写原文族与事件族 |
 | 4 | **声明式查询语义** | 结果 ≡ 全集过滤 → 全序排序 → offset/limit；剪枝与早停只是优化 | 全序键 `(Timestamp, Key)`（`query_events.go` `queryEventRecords`） |
 | 5 | **授权 default-nothing** | 空分区集合＝什么都不授权，绝不回落全库 | `QueryOptions.resolvePartitions` 两字段皆空返回空列表；`search.Searcher` 四条红线含同一条 |
 | 6 | **越权读作不存在** | scope 外的引用一律读作 miss，连"该 key 存在"都不泄漏 | `ScopedOriginalStore` 三条红线 + `kvOriginalStore.GetScoped` 只在 scope 内匹配（`reference.go`） |
 | 7 | **旧格式具名拒绝，不迁移** | 上一版 body 字节按名字拒绝，冷启动重建而非就地猜格式 | `DecodeEventBody` 判据是**顶层是否有 `message` 键**，无则 `ErrEventBody` |
-| 8 | **跨批无事务，靠顺序不变量补偿** | `kvBatch` 是原子单位，批次之间没有事务；正确性由"先写什么后写什么"保证 | 段三键同批、交付先登记后发送 |
+| 8 | **跨批无事务，靠顺序不变量补偿** | `Batch` 是原子单位，批次之间没有事务；正确性由"先写什么后写什么"保证 | 事实两族同批（`ledger.CommitFact`）、段三键同批、交付先登记后发送 |
 | 9 | **能力诚实** | 非持久档必须自报不持久，不得假装恢复面存在 | `StoreCapabilities.Durable=false`（`memory` 档）+ 装配告警 `storage tier keeps no record across process exit` |
 | 10 | **枚举要么全量要么具名失败** | 部分列表不得被当作完整视图来对账 | `LifecycleStore` 红线：`MUST enumerate every key it holds, or fail by name` |
 
-**事实链红线**：任何后台动作（过期、容量、折叠、装配）只能**搬迁、遮蔽或删除可见性**，不得改写正文与身份。压缩只改发给模型的消息视图，`memory/replay` 的投影是链的纯回放：`Fold` 只替换它消费的条目并铸造产物，装配按预算决定一个条目怎么呈现，两者都不写链。
+**事实链红线**：任何后台动作（过期、容量、折叠、装配）只能**遮蔽或删除可见性**，不得改写正文与身份。〔原并列的「搬迁」已无载体：退位分层机制整体删除，热层只追加、不搬事实；既有冷档数据由操作方显式跑 `scripts/fold-cold-root` 折入新根，属框架外的一次性数据搬运，不是运行期机制。〕压缩只改发给模型的消息视图，`memory/replay` 的投影是链的纯回放：`Fold` 只替换它消费的条目并铸造产物，装配按预算决定一个条目怎么呈现，两者都不写链。
 
 <a id="event-shape"></a>
 ## 三、事实形态：`EventBody`、blob 与 ref
@@ -84,7 +84,7 @@
 
 | 写入/读取规则 | 行为 | 理由 |
 |---|---|---|
-| 首次提交 | 一次 `kvBatch` 同写 ref 与 blob，屏障成功后才发布到内存态 | 账目与字节同批可见，不会只剩半条 |
+| 首次提交 | 一次 `Batch` 同写 ref 与 blob，屏障成功后才发布到内存态 | 账目与字节同批可见，不会只剩半条 |
 | 同 key 同 scope 再来一次 | 幂等成功（`return nil`） | 重放与重试不制造第二个事实 |
 | 同 key 不同字节 | `ErrContentConflict` | 一个身份只站一个事实 |
 | 同 key **第二个 scope** | ref 记录里 join 一条账目，引用同一条消息自己的正文 | 同一事实的多个授权不复制；跨 EventID 不共享正文 |
@@ -95,16 +95,16 @@
 
 ### 3.2 写入路径：谁把正文放进原文仓
 
-唯一的生产写入点是 `assembly/facts.go` 的 `persistFact`，顺序是承重的：
+唯一的生产写入点是 `assembly/facts.go` 的 `persistFact`，它把一条事实交给 `ledger.CommitFact`（`memory/ledger/segment_store.go:765`）**一次批提交**：
 
 | 步 | 动作 | 判据 |
 |---|---|---|
-| 1 | `Segments.GetEvent(key)` 预检 | 已提交且 `SameFact` → 幂等成功；已提交但内容不同 → `ErrFactKeyConflict` |
-| 2 | `Originals.Put(ctx, body.Ref(), []byte(body.Message.Content))`（`assembly/facts.go:237`） | **正文先落进原文仓**：段里出现的 `EventID` 一定有可读原文可指 |
-| 3 | `Segments.StoreEvent(...)`，`partition = PartitionIDFromName(Owner.AgentID)`、`window = Timestamp.UnixMilli()`（负值具名拒）、`seq = landedSeq[partition]+1` | **段提交才是持久写**：它不成功，事实就不算落地，`landedSeq` 不前进 |
+| 1 | `Segments.GetEventInPartition(partition, key)` 预检（**按本事实所属分区**） | 该分区内已提交且 `SameFact` → 幂等成功；该分区内已提交但内容不同 → `ErrFactKeyConflict`。**同一 key 落在另一分区时预检不命中**，由第 3 步 `CommitFact` 的权威判重具名拒绝（`ErrContentConflict`）——一个身份只站一个事实，跨分区同键不得被分区内的幂等判断静默放过 |
+| 2 | 定序：`partition = PartitionIDFromName(Owner.AgentID)`、`window = Timestamp.UnixMilli()`（负值具名拒）、`seq = landedSeq[partition]+1`（`r.landing` 锁内） | 序号在提交前定，提交不成则不前进 |
+| 3 | `ledger.CommitFact(ctx, tier, FactCommit{Record, Ref, Body})`（`assembly/facts.go:393`），按 outcome 分派：`FactCommitted` 前进 `landedSeq`；`FactAlreadyPresent` 幂等返回；`FactConflict` 回读已存事实具名冲突；`FactUncertain` 不发布任何进程内状态 | **原文族与事件族同批落地**：读者见到整条事实或什么都见不到，两族不会一族已提交而另一族缺失；判重与提交在同一临界区内，根的排他写权把其他写者挡在区外；不确定结果只由未参与该次提交的一次开档来判落了什么 |
 | 4 | 无提交后向量步骤 | 查询按需读链，在候选上现算嵌入；没有 land 步骤，也没有需要回滚的派生索引 |
 
-三条由此可查证的结论：①无存储档（`tier == nil`）或事实没有 `Owner.AgentID` 时，事实只留在内存，不假称持久；②第 2 步成功而第 3 步失败会留下一条无人引用的 ref/blob——重放同一 EventID 会复用该消息自己的正文，因此不会堆积第二份字节，但清理面不在本层（见[§十二](#gaps)）；③**折叠产物同样是这条路径的事实**：`compress.product`（`api/event/compress_product.go`）把五个字段写进事件元数据——`compress_key` 内容寻址的合成负键（`-seg-<hex>`/`-hist-<hex>`）、`compress_request` 回指它答的那条判定、`compress_covered` 换行分隔列出被它吃掉的条目键、`compress_text` 产物正文、`compress_survivors` 幸存者快照（checkpoint 载荷），`Message` 恒空，因为产物是被投影重建的材料而非会话里的一句话。恢复面因此只有一条判据：`RestoreProducts` 读 `compress_text` 重建合成条目，**不重新生成摘要**——摘要的确定性来自「事实即答案」而非重算（重问一次模型就换一套措辞，锚定重建与全量走查的 parity 也就没了），模型访问也只留在 assembly 一侧，本层回放保持纯读。段的band 晋升定档、按档分职与老档模型摘要的三条降级，见[会话篇 §五](../agent/event-flow.md#unified-compression)。
+三条由此可查证的结论：①无存储档（`tier == nil`）或事实没有 `Owner.AgentID` 时，事实只留在内存，不假称持久；②**原文与段同批，故不存在「正文已落而段未落」的中间态**——一次批要么整条落地要么一个键都不落（`CommitFact` 契约原文，`segment_store.go:756-762`）；③**折叠产物同样是这条路径的事实**：`compress.product`（`api/event/compress_product.go`）把五个字段写进事件元数据——`compress_key` 内容寻址的合成负键（`-seg-<hex>`/`-hist-<hex>`）、`compress_request` 回指它答的那条判定、`compress_covered` 换行分隔列出被它吃掉的条目键、`compress_text` 产物正文、`compress_survivors` 幸存者快照（checkpoint 载荷），`Message` 恒空，因为产物是被投影重建的材料而非会话里的一句话。恢复面因此只有一条判据：`RestoreProducts` 读 `compress_text` 重建合成条目，**不重新生成摘要**——摘要的确定性来自「事实即答案」而非重算（重问一次模型就换一套措辞，锚定重建与全量走查的 parity 也就没了），模型访问也只留在 assembly 一侧，本层回放保持纯读。段的band 晋升定档、按档分职与老档模型摘要的三条降级，见[会话篇 §五](../agent/event-flow.md#unified-compression)。
 
 <a id="causal-chain"></a>
 ## 四、因果：查询时从链推导父边
@@ -142,9 +142,9 @@
 
 1. 窗口 `WindowTS` 为负 → 具名拒绝；`seq` 由调用方按分区单调分配。
 2. 已提交过同一记录 → `return nil`（重复提交是幂等成功）；同一槽位换一份字节 → `ErrContentConflict`。
-3. `Commit` 返回成功**之后**才写进内存索引、读缓存与 `count`：失败包成 `ErrSegmentBarrier`，本批任何一个键都不发布，内存态不出现"读得到但没落盘"的事件。
+3. `Commit` 返回成功**之后**才写进分区集合、读缓存与 `count`：失败包成 `ErrSegmentBarrier`，本批任何一个键都不发布，内存态不出现"读得到但没落盘"的事件。
 
-`Events()` 的顺序是 `(PartitionID, WindowTS, Seq, Key)`；`Load()` 只在 body、idx、meta **三件齐备**时发布该记录，缺任何一件就当作没提交过。`SegmentRequest` 按字节切读（`DefaultSegmentMaxBytes = 64 KiB`），越界与 EOF 分开报。发布面的次序是**提交次序**：`FileSegmentStore.order` 记下已发布身份在引擎里的落盘次序，`EachIndexNewestFirst` 逆着它逐条读取（不拷贝、不排序），`NewestOfType` 逆着它走并在第一条命中类型处停下——checkpoint 每 cadence 条提交一枚，所以读最新 checkpoint 只花它到链尾的那几条，与历史长度无关。引擎不声明次序时（key 序 KV，或未转发 `commitOrder` 的包装）退化为 `(分区, seq, 身份)` 的槽位次序，代价是装配时一次排序，且答不出跨分区的新旧。
+`Events()` 的顺序是 `(PartitionID, WindowTS, Seq, Key)`；`Load()` 只在 body、idx、meta **三件齐备**时发布该记录，缺任何一件就当作没提交过。`SegmentRequest` 按字节切读（`DefaultSegmentMaxBytes = 64 KiB`），越界与 EOF 分开报。发布面的次序是**提交次序**：引擎自己答出已提交键的落盘次序（`CommitOrder`，`journalKV` 逆着盘上的 `order.log` 走），`EachIndexNewestFirst` 逆着它逐条读取（不拷贝、不排序），`NewestOfType` 逆着它走并在第一条命中类型处停下——checkpoint 每 cadence 条提交一枚，所以读最新 checkpoint 只花它到链尾的那几条，与历史长度无关。引擎不声明次序时（key 序 KV，或未转发 `CommitOrder` 的包装）退化为 `(分区, seq, 身份)` 的槽位次序，代价是装配时一次排序，且答不出跨分区的新旧。
 
 **线上没有分层压实、没有墓碑执行、没有 TTL 扫描**：分层压实/TTL/回收这一整套仍在 `lifecycle.go` 里在册（其代码注释自述"过期只标墓碑、物理销毁在压实发生"），但装配面未接线，所以链在线上天然只有一层——这也是"链恒重放"能成立的前提。追加日志本身也没有压实阶段（[§六](#local-file-kv)），两处缺口互不相干。
 
@@ -157,13 +157,13 @@
 |---|---|---|
 | 持久单元 | `<root>/kv/journal.log`：一帧 = 4 字节 payload 长度 + 4 字节 CRC32C + payload | 帧头 8 字节；单帧上限 32 MiB，长度域损坏也不会让读方无界分配 |
 | 提交单位 | 一次提交一帧（`journalRecord`：`version` + `puts`/`deletes`），全有或全无 | 格式版本 `journalFormatVersion = 1`，其他版本 `ErrJournalFormat` 拒开 |
-| 写入 | `journalLog.append` 一次写出整帧，写成功后才更新键索引；索引只存位置，值留在帧里；`journalLog.order` 按落盘次序记下每帧碰过的键（同 key 各记一次，新的在后） | 写失败的记录不进索引，视图只答得出文件里真有的记录；逆着 `order` 走即「最新提交优先」，读最新某一类记录的成本由它到链尾的距离定 |
+| 写入 | `journalLog.append` 一次写出整帧，写成功后才更新键地址；地址只存位置，值留在帧里。提交序记在日志旁的 `order.log`（按落盘次序，同 key 各记一次，新的在后，**每行带校验和**），键→位置记在 `slots` 槽表；两者都是可从日志重建的派生载体，**行/记录校验失败即从日志重述而非拒开**（拒开只针对真相字节 `journal.log`） | 写失败的记录不进索引，视图只答得出文件里真有的记录；逆着 `order.log` 走即「最新提交优先」，读最新某一类记录的成本由它到链尾的距离定 |
 | 屏障 | 屏障是日志自身的 `fsync`（`journalLog.sync`），空批只走屏障不写帧；驻留集是带字节预算的 LRU，冷值按索引位置回读该帧 | 屏障失败 `ErrJournalBarrier`；成败不可判定 `ErrCommitUncertain` 交调用方重读；预算 1 MiB + 每项 96 字节，驱逐只掉内存 |
-| 撕裂尾 | 半写帧在 `open` 时截断到最后一个完整帧；完整帧校验不过即 `ErrJournalCorrupt` 拒开 | 静默接受一帧损坏＝静默丢一条事实，所以不把损坏帧之前的记录当整份日志 |
-| 已退役布局 | 目录里有子目录或 `shard_*.json` → `ErrJournalLegacyLayout` 具名拒开 | 不迁移、不清理、不覆盖；搬迁由操作方显式跑 `MigrateShardedRoot` |
+| 撕裂尾 | 持写权的 `open` 把半写帧截断到最后一个完整帧；只读视图不改写日志，止于最后一个完整帧并经 `TornTailBytesOpen() (int64, bool)` 具名报告；完整帧校验不过即 `ErrJournalCorrupt` 拒开 | 静默接受一帧损坏＝静默丢一条事实，所以不把损坏帧之前的记录当整份日志 |
+| 已退役布局 | 目录里有子目录或 `shard_*.json` → `ErrJournalLegacyLayout` 具名拒开 | 不迁移、不清理、不覆盖；搬迁由操作方显式跑 `MigrateShardedRoot`。**既有冷档**（退位时代的 `<root>/cold/`）里的既有事实由操作方显式跑 `scripts/fold-cold-root -source <旧根> -root <新根>` 折入新根，框架零分支。折回的提交序取每条索引项自述的 commit（`carriedCommit`），冷档须在 `settled:commit` 下声明它所持有的最大 commit，声明别的号码即拒，脚本不向框架索取任何冷读；源根只读（每个日志只复制，拷贝期间长度或修改时间变动即 `ledger.ErrMigrateSourceUnchanged`，故不得对运行中的实例折回），无热档日志的源根 `ErrSourceUnstated`、一身份两种说法的 `ErrSourceConflict`、只持有一半事件的 `ErrSourceIncomplete`、目标根已有键或已有第二个写者的 `ledger.ErrRootWriteLocked`、以及 `file` 档根（一次调用落一键，三键批答 `ledger.ErrBatchNotAtomic`）；默认干跑只报待折键数与留下的键、零写入，`-restore` 一次提交至多带 `foldedBatchKeys` 个原键，写完经新开引擎逐身份回读（事件经 `Segments.GetEvent`、全索引经 `Segments.EachIndexNewestFirst`、条数经 `Segments.EventCount`、原文经 `Originals.Get`），回读不等即非零退出 |
 | 引擎无关 | `AtomicStore`（`Read`/`Keys`/`Namespaces`/`Commit`）是唯一引擎面 | 提交全有全无、恰好一次屏障；失败注入包在这条缝上，不命名任何文件布局 |
 
-读口只有两种形状：单 key 取与前缀列举（按 key 排序），**没有区间原语**，也没有"第二个真源"——内存态是日志索引的投影，真源只有 `journal.log`。提交次序是引擎自己声明的一条附加能力（`commitOrder`，由 `journalKV` 实现）：它答的是「最新提交优先的键序」，不答值，所以段存储拿它当索引的排序来源，而不是在内存里给无序 map 排一次序。
+读口只有两种形状：单 key 取与前缀列举（按 key 排序），**没有区间原语**，也没有"第二个真源"——真源只有 `journal.log`。〔原句「内存态是日志索引的投影」已不成立：引擎不再在内存里整篇建索引（`l.index`／`l.order` 已删），键→位置由盘上的**槽表**回答、提交序由 **`order.log`** 回答，两者都是可从日志重建的派生载体。〕提交次序是引擎自己声明的一条附加能力（`CommitOrder`，由 `journalKV` 实现）：它答的是「最新提交优先的键序」，不答值，所以段存储拿它当索引的排序来源，而不是在内存里给无序 map 排一次序。
 
 <a id="store-instance-sharing"></a>
 ## 七、打开与实例共享
@@ -172,15 +172,15 @@
 
 | 档 | 后端 | 得到的两个 store | 能力声明 |
 |---|---|---|---|
-| `memory` | 进程内 `memKV`（同样是 `AtomicStore`） | `newFileSegmentStore(newMemKV())` + `NewMemoryOriginalStore()` | `Durable=false`（装配期告警明确说"不跨进程"） |
+| `memory` | 进程内 `memKV`（同样是 `AtomicStore`） | `newKVOriginalStore(store, nil)` + `newFileSegmentStore(store)` | `Durable=false`（装配期告警明确说"不跨进程"） |
 | `localfile`／`journal` | `openJournalKV(<Root>/kv)` | `newKVOriginalStore(store, nil)` + `newFileSegmentStore(store)` | `Durable=true` |
 | `file` | rustviking CLI（默认 `rustviking`，配置默认 `<Root>/config.toml`） | `newRustVikingKV` 之上的同一对 store | `Durable=true` |
 
 **共享语义（与旧页相反，按当前码面）**：`OpenTier` **没有单例注册表**——每次调用各开一套 store 落在同一个后端上。这不是缺陷而是判据：共享的是**后端里的那份事实**，不是 Go 对象。因此
 
-- 两次 `OpenTier` 指向同一 root 共享同一后端；第二次打开重放日志索引（只存位置，不读值），冷值在真正读到时才从帧里取回；
+- 两次 `OpenTier` 指向同一 root 共享同一后端；第二次打开只重放**上次索引所陈述水位以来的窗口**（不读值），值在真正读到时才从帧里取回；
 - 不需要"为避免两套生命周期而共享实例"，因为**生命周期组件没有被装配**（[§三](#event-shape) 末段）；
-- 真正的单写者约束由上层给：`file` 档的每次提交是 CLI 调用，`journal` 档每次提交追加一帧，所以同一进程内不要开两份写同一 root。
+- **一根一写者由引擎自己保证**：声明 `StorageConfig.WriteRights` 的开档持有该 root 的写锁（flock），第二次写权开档——本进程或另一进程——一律以 `ErrRootWriteLocked` 具名拒绝，故两份写者不会在同一槽位上各提交一次。只读视图不受此限（不开写锁、不维护派生索引）。
 
 热路径的两个 store 只是**同一个 `AtomicStore` 上的两个视图**，因此"原文仓"与"段存储"永不打架：谁提交谁就带上自己那一次屏障。
 
@@ -216,7 +216,7 @@
 | 融合 | RRF：`score = Σ 1/(K + rank)`，`K = 60`，rank 自 0 起；同分取**更大 Key**，再按 `(Owner.AgentID, Owner.SessionID, Format, RetentionPolicy)` 升序 |
 | 退化 | 空向量腿与 `keyword_only` 走**同一段代码**（`keywordOnly`），两者逐字节相同 |
 | 未接线策略 | `vector_only` 具名拒绝 `ErrStrategyUnwired`（没有消费者）；未知策略 `ErrStrategyUnknown` |
-| 调参 | `SetRetrievalTuning` 负值 → `ErrRetrievalTuning`，不静默夹取 |
+| 调参 | 腿界由机制常量派生（两条腿都取 `DefaultLimit`，融合 `K` 取 `RRFRankConstant`），没有独立写入口：`SetRetrievalTuning` 及其负值拒绝已删，`TestRetrievalTuningDerived` 断言该写入口不存在 |
 
 融合端口自身的红线：只把两条腿合成**一个有序引用集**、不越权读腿、不用正文副本回答融合命中。分页在融合之前由检索端口完成，融合不发放续页。
 
@@ -250,11 +250,10 @@
 
 | 缺口 | 现状与防线 | 候选方向 |
 |---|---|---|
-| **追加日志只追加，没有压实** | 每帧都留在 `journal.log` 里，删除只写墓碑；打开时重放整份日志建索引 | 加一段压实：把仍持有的键重写成新日志再原子换入（当前无） |
-| **原文过期没有执行面** | 租约与生命周期在册未接线，`retention_policy` 取值为 `keep`，原文随链永存 | 接线 `NewLifecycle` + `Retention`；接线前不得声称"按策略过期" |
+| **追加日志只追加，没有压实** | 每帧都留在 `journal.log` 里，删除只写墓碑；**索引回放只读上次索引所陈述水位以来的窗口**（停稳根该窗口实测 0 字节），但**开档另对全 log 每个完整帧做 CRC 完整性校验**，因为水位只陈述「写入时已 sync」，不为之下字节的**此刻完整性**背书；故开档实读字节随日志增长，`JournalBytesOpen` 只报索引窗口那个量、不报完整性校验量 | 加一段压实：把仍持有的键重写成新日志再原子换入（当前无）。热层字节随历史增长，其增长是显式声明的关切，MUST NOT 被声称有界；开档完整性校验的 O(日志字节) 成本同属显式声明面 |
+| **原文过期：窗口注册已接线，TTL 执行面仍未接线** | 召回窗口经 `StorageConfig.RetentionWindows` 由 `OpenTier` 注册进原文仓，窗口外的读取具名 `RecallExpired`／`ErrOriginalExpired`；租约与生命周期仍在册未接线，`retention_policy` 提交值仍只有 `keep`，装配面未注册窗口，原文随链永存 | 接线 `NewLifecycle` + `Retention`；接线前不得声称"按策略过期" |
 | **`file` 档批次无原子性** | 一次 CLI 调用一个键；中途失败留半批 | 依赖顺序不变量与重试幂等；或在 CLI 侧提供批量原子命令 |
 | **检索向量腿按需计算** | 装配面传 `nil` 嵌入器即纯关键词；有嵌入器时查询候选项现算；`vector_only` 无消费者 | 不保留运行期向量表或持久索引 |
-| **`EventRecord.WindowTS` 注释仍提"压实层"** | 码面已无压实；该注释是上一个形态的残留 | 校正该注释（本页已按实际语义写：窗段编号） |
 | **旧格式字节只能拒不能读** | `DecodeEventBody` 具名拒绝上一版 body | 冷启动重建；不做就地迁移 |
 | **退役分片布局不自动迁移** | 目录里带分片布局时 `ErrJournalLegacyLayout` 拒开，不读也不改写 | 操作方显式跑 `MigrateShardedRoot`：只读源、逐键复制、回读校验 |
-| **段提交失败可能留下孤儿原文** | 原文仓先于段提交落地；失败后 ref/blob 无人引用（同 EventID 重放会复用该消息正文，不堆第二份字节） | 需要一个以链为真源的孤儿清扫器（当前无），或把提交改成“先段后原文”的可回滚组合 |
+| **事实路径已无孤儿原文；其他写入点仍可能留孤儿** | 事实经 `ledger.CommitFact` 一次批同写原文族与事件族，故「正文已落而段未落」的中间态在事实路径上不存在（`segment_store.go:756-762`）。**不经 `CommitFact` 的原文写入点仍无此保证**：`Originals.Put` 单独调用时失败即留无人引用的 ref/blob（同 EventID 重放会复用该消息正文，不堆第二份字节） | 把其余原文写入点也收进同批提交；或加一个以链为真源的孤儿清扫器（当前无） |

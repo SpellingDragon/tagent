@@ -32,6 +32,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/SpellingDragon/tagent/api/durable"
 	"github.com/SpellingDragon/tagent/api/event"
 	"github.com/SpellingDragon/tagent/api/plugin"
 	"github.com/SpellingDragon/tagent/runtime/task"
@@ -90,6 +91,7 @@ type ApprovalManager struct {
 	rescanInterval time.Duration
 	now            func() time.Time
 	seated         bool
+	factLog        durable.FactLog
 
 	chain *attentionLedger
 	face  *task.Attention
@@ -133,22 +135,68 @@ func NewApprovalManager(dir string, ttl time.Duration, opts ...ApprovalOption) *
 	return a
 }
 
-// SnapshotEvidence reports the requests the book holds, for the framework state
-// slice to state: the identity, the evidence an approver reads and the state each
-// request stands in. The read takes the book's own read lock and nothing else, so
-// it never waits on a write of its own nor flushes one.
-func (a *ApprovalManager) SnapshotEvidence() []ApprovalRequest {
-	if a == nil {
+// BindAttention hands the book the durable face its attention chain is written to
+// and folds the facts a process before it filed: the questions still standing and
+// the rulings already stated, so a restarted book answers the same presence. The
+// request records folded beside them seat the identities those facts were filed
+// under, so an approver answering the identity the process before it named still
+// reaches the request it was asked about. The face is kept as the one every
+// registration writes its request record to, so the identity an approver is handed
+// outlives the process beside the facts it was filed with. The error belongs to the
+// caller that can stop the boot — a chain this book could not read leaves the
+// rulings behind the gate that serves them, and a book bound to no face writes no
+// record.
+func (a *ApprovalManager) BindAttention(ctx context.Context, log durable.FactLog) error {
+	if a == nil || log == nil {
 		return nil
+	}
+	if err := a.chain.bind(ctx, log); err != nil {
+		return err
+	}
+	if err := a.foldRequestRecords(ctx, log); err != nil {
+		return err
+	}
+	a.mu.Lock()
+	a.factLog = log
+	a.mu.Unlock()
+	return nil
+}
+
+// SnapshotEvidence reports the requests the book holds in force, for the framework
+// state slice to state: the identity each caller asked under, the evidence an
+// approver reads and the state each request stands in. A hold past its validity
+// with no ruling on it is not stated: a restore drops it, so stating it would cost
+// a cut a request no process keeps. The identity each entry is stated under is
+// separate from the request's own identity because a second registration aliases a
+// caller identity onto one standing request: the two answers a cut must carry are
+// the entry and the identity it is read under. The read takes the book's own read
+// lock and nothing else, so it never waits on a write of its own nor flushes one.
+func (a *ApprovalManager) SnapshotEvidence() ([]ApprovalRequest, []string) {
+	if a == nil {
+		return nil, nil
 	}
 	a.mu.RLock()
 	defer a.mu.RUnlock()
-	out := make([]ApprovalRequest, 0, len(a.evidence))
-	for _, held := range a.evidence {
-		out = append(out, *held)
+	now := a.now().UnixMilli()
+	type stated struct {
+		asked string
+		held  ApprovalRequest
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
-	return out
+	pairs := make([]stated, 0, len(a.evidence))
+	for key, held := range a.evidence {
+		if expiredWithoutRuling(*held, now) {
+			continue
+		}
+		pairs = append(pairs, stated{asked: key, held: *held})
+	}
+	sort.Slice(pairs, func(i, j int) bool { return pairs[i].asked < pairs[j].asked })
+	asked := make([]string, 0, len(pairs))
+	out := make([]ApprovalRequest, 0, len(pairs))
+	for _, pair := range pairs {
+		asked = append(asked, pair.asked)
+		out = append(out, pair.held)
+	}
+	return out, asked
 }
 
 // RestoreEvidence puts one stated approval state back: every request still within
@@ -156,22 +204,26 @@ func (a *ApprovalManager) SnapshotEvidence() []ApprovalRequest {
 // landed, beside the answer that ruling was filed as, so a restarted book reports
 // the same presence and the same rulings the process before it reported.
 //
-// The read is the stated state alone — no request file is opened — and a request
-// past its validity is dropped rather than resurrected: an expired request never
-// proceeds, so a restart that put one back would hand a dead hold a second life.
-func (a *ApprovalManager) RestoreEvidence(ctx context.Context, stated []ApprovalRequest) error {
+// The read is the stated state alone — no request file is opened. A hold past its
+// validity is dropped rather than resurrected, because an expired hold never
+// proceeds and a restart that put one back would hand a dead wait a second life.
+// A ruled request is kept past its validity instead: the answer it stands on is
+// the record that these exact arguments were refused or approved by a person, and
+// a book that forgot it would mint a fresh request the same person never saw —
+// the very request a restart must not be able to turn into an approval.
+func (a *ApprovalManager) RestoreEvidence(ctx context.Context, stated []ApprovalRequest, keys []string) error {
 	if a == nil {
 		return nil
 	}
 	now := a.now().UnixMilli()
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	for _, held := range stated {
-		if held.ID == "" || (held.ExpiresMs > 0 && now >= held.ExpiresMs) {
+	for i, held := range stated {
+		if held.ID == "" || expiredWithoutRuling(held, now) {
 			continue
 		}
 		restored := held
-		a.evidence[restored.ID] = &restored
+		a.evidence[aliasOf(keys, i, held.ID)] = &restored
 		if err := a.fileQuestion(ctx, &restored); err != nil {
 			return err
 		}
@@ -182,6 +234,25 @@ func (a *ApprovalManager) RestoreEvidence(ctx context.Context, stated []Approval
 		}
 	}
 	return nil
+}
+
+// expiredWithoutRuling reports whether one stated request is past its validity
+// before any ruling landed on it.
+func expiredWithoutRuling(held ApprovalRequest, nowMs int64) bool {
+	if held.ExpiresMs <= 0 || nowMs < held.ExpiresMs {
+		return false
+	}
+	return held.Status != ApprovalApproved && held.Status != ApprovalDenied
+}
+
+// aliasOf answers the identity one stated request is seated under: the caller
+// identity the book answered before the cut, which is the request's own identity
+// unless a second registration aliased it onto a standing request.
+func aliasOf(keys []string, i int, id string) string {
+	if i < len(keys) && keys[i] != "" {
+		return keys[i]
+	}
+	return id
 }
 
 // RestoreBoot restores the book from the row of request files, for the boot whose
@@ -258,8 +329,9 @@ func (a *ApprovalManager) Request(ctx context.Context, id, tool string, jsonArgs
 		snapshot := *standing
 		snapshot.Status = ApprovalPending
 		snapshot.DecidedBy = ""
+		recordErr := a.recordRequestLocked(ctx, id, snapshot)
 		a.mu.Unlock()
-		return &snapshot, nil
+		return &snapshot, recordErr
 	}
 	req := &ApprovalRequest{
 		ApprovalSubject: ApprovalSubject{
@@ -283,6 +355,7 @@ func (a *ApprovalManager) Request(ctx context.Context, id, tool string, jsonArgs
 	writeErr := a.write(&snapshot)
 	a.evidence[id] = req
 	commitErr := a.fileQuestion(ctx, req)
+	recordErr := a.recordRequestLocked(ctx, id, snapshot)
 	channels := append([]ApprovalChannel(nil), a.channels...)
 	a.mu.Unlock()
 	for _, ch := range channels {
@@ -290,7 +363,7 @@ func (a *ApprovalManager) Request(ctx context.Context, id, tool string, jsonArgs
 			a.recordGap(DeliveryGap{Request: id, Err: deliverErr})
 		}
 	}
-	return &snapshot, errors.Join(writeErr, commitErr)
+	return &snapshot, errors.Join(writeErr, commitErr, recordErr)
 }
 
 // Decide records the ruling of one approval request as the attention answer its
@@ -533,6 +606,19 @@ func (a *ApprovalManager) recordGap(gap DeliveryGap) {
 	a.gaps = append(a.gaps, gap)
 }
 
+// recordRequestLocked writes the request record of one caller identity to the
+// durable face, so the identity an approver was handed outlives a process whose
+// cut states no approval. The caller holds the book's write lock. A book beside
+// no durable face answers nil, and a store that refused the write is reported to
+// the registration beside the hold that stands either way.
+func (a *ApprovalManager) recordRequestLocked(ctx context.Context, asked string, req ApprovalRequest) error {
+	log := a.factLog
+	if log == nil {
+		return nil
+	}
+	return a.storeRequestRecord(ctx, log, asked, req)
+}
+
 // path reports the file one request lives in.
 func (a *ApprovalManager) path(id string) string {
 	return filepath.Join(a.dir, id+".json")
@@ -562,11 +648,9 @@ func (a *ApprovalManager) write(req *ApprovalRequest) error {
 // lands as the answer and withdraws the file it was read from. A file whose
 // validity ran out is removed instead of restored.
 //
-// This is the row of request files, not the boot's reader: a book the framework
-// state slice seats reads the stated state at boot and keeps this read for the
-// runtime rescan, which is how a ruling an external approver writes to a file
-// lands without a restart. A rescan that cannot read its directory leaves the
-// standing book in place, and the wait it did not see is reported on the next read.
+// - this is the row of request files, not the boot's reader: a book the framework state slice seats reads the stated state at boot and keeps this read for the runtime rescan
+// - a seated book takes its holds from the stated state alone: a file whose question the chain does not hold states no hold of that book, so it is neither seated nor filed, and only the ruling it carries lands
+// - a rescan that cannot read its directory leaves the standing book in place, and the wait it did not see is reported on the next read
 func (a *ApprovalManager) rebuild(ctx context.Context) error {
 	if a == nil || a.dir == "" {
 		return nil
@@ -596,11 +680,18 @@ func (a *ApprovalManager) rebuild(ctx context.Context) error {
 			continue
 		}
 		restored := req
-		a.evidence[req.ID] = &restored
 		facts := a.factsLocked(ctx)
 		_, asked := facts.question(req.ToolName, req.ArgsDigest, req.ID)
 		_, answered := facts.answer(req.ToolName, req.ArgsDigest, req.ID)
 		settled := req.Status == ApprovalApproved || req.Status == ApprovalDenied
+		if a.seated {
+			if asked && !answered && settled {
+				_ = a.fileAnswer(ctx, &restored)
+				_ = os.Remove(path)
+			}
+			continue
+		}
+		a.evidence[req.ID] = &restored
 		if !asked {
 			_ = a.fileQuestion(ctx, &restored)
 			if settled {

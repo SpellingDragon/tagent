@@ -46,7 +46,7 @@ func restartMailbox(t *testing.T, ctx context.Context, store *state.MemoryStore,
 // 契约: docs/wiki/reliability/durable-delivery.md#envelope-states
 func TestHandoffRoutingSurvivesRestart(t *testing.T) {
 	ctx := context.Background()
-	cfg := ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: t.TempDir()}
+	cfg := ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: t.TempDir(), WriteRights: true}
 	oldTarget := event.Address{AgentID: "agent-recv", SessionID: "session-old"}
 	newTarget := event.Address{AgentID: "agent-recv", SessionID: "session-new"}
 	const sourceInstance event.InstanceID = "instance-source"
@@ -151,6 +151,9 @@ func TestHandoffRoutingSurvivesRestart(t *testing.T) {
 		t.Fatalf("new-instance mailbox = %+v, want the started notification never delivered to the new instance", got)
 	}
 
+	if err := tier.Close(); err != nil {
+		t.Fatalf("close the tier before the reopen: %v", err)
+	}
 	reopened, err := ledger.OpenTier(ctx, cfg)
 	if err != nil {
 		t.Fatalf("reopen OpenTier: %v", err)

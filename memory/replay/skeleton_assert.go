@@ -27,7 +27,7 @@ var (
 
 // The replay projection keeps its declared methods.
 var (
-	_ func(*ReplayProjection, context.Context, ProjectionEntry) = (*ReplayProjection).Append
+	_ func(*ReplayProjection, context.Context, ProjectionEntry) bool = (*ReplayProjection).Append
 
 	_ func(*ReplayProjection, context.Context) (ProjectionEntry, error) = (*ReplayProjection).Fold
 

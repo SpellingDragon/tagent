@@ -10,6 +10,8 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"syscall"
+	"time"
 )
 
 // StorageType names one storage tier of the original and segment stores.
@@ -40,12 +42,6 @@ const (
 // layout it refuses.
 const kvDirName = "kv"
 
-// coldDirName is the directory under a root that holds the cold journal: the
-// second journal a relocation pass copies settled facts into, at the same frame
-// format and with the same checksum as the hot one, so a cold fact reads back with
-// the bytes it was committed with.
-const coldDirName = "cold"
-
 // StorageConfig locates one storage tier: the tier name, the root directory the
 // persistent tiers persist under, and the rustviking executable and config the
 // file tier drives.
@@ -66,11 +62,18 @@ type StorageConfig struct {
 	// engine and never names a file layout. A tier beside no wrapper opens the
 	// engine Type names.
 	Engine AtomicStore
-	// RetireFacts declares that facts the recovery authority does not need may leave
-	// the hot journal for the cold one under Type's root. A deployment varies this
-	// choice from its configuration; the zero value keeps every fact in the hot
-	// journal, which is the behavior of a store that never relocated anything.
-	RetireFacts bool
+	// WriteRights declares that this open writes the root it names: it holds that
+	// root's exclusive write lock for as long as the view lives, so a second such
+	// open, in this process or another, is refused by name. A caller that commits
+	// to the root declares it, and the boot that stands for one runtime instance
+	// over that root does too. An open that declares nothing is a component view:
+	// it holds no write rights and reads beside the writer that does.
+	WriteRights bool
+	// RetentionWindows registers, per retention policy, the window an original
+	// recall keeps the references of that policy readable for. A policy with no
+	// registered window keeps its references readable indefinitely, and a window
+	// of zero or less reports every read of that policy as expired.
+	RetentionWindows map[string]time.Duration
 }
 
 // StoreCapabilities names what one opened tier guarantees, so a tier that holds
@@ -81,6 +84,10 @@ type StoreCapabilities struct {
 	// Durable reports whether a successful commit outlives the process that made
 	// it.
 	Durable bool
+	// AtomicBatch reports whether a commit carrying several keys lands whole or
+	// not at all. A tier that declares false lands one key per call and answers
+	// ErrBatchNotAtomic for every larger batch, having landed none of it.
+	AtomicBatch bool
 }
 
 // Tier is one opened storage tier: the original store and the segment store of
@@ -97,6 +104,12 @@ type Tier struct {
 	Store AtomicStore
 	// Capabilities names what the backend guarantees.
 	Capabilities StoreCapabilities
+	// mu makes the end of the view one event, so two closes of one tier cannot
+	// both end it.
+	mu sync.Mutex
+	// closed reports whether Close ended this tier, so a repeated Close releases
+	// nothing a second time.
+	closed bool
 }
 
 // ErrUnknownTier reports a storage config whose tier name matches no known tier.
@@ -140,6 +153,70 @@ func rejectLegacyShardLayout(dir string) error {
 // on this machine.
 var ErrRustVikingMissing = errors.New("memory: rustviking CLI is not executable")
 
+// rootWriteLockFileName names the file inside a storage root that carries the
+// root's write lock: the kernel records which process holds the lock, so the file
+// stays a zero-byte marker the lock never writes to.
+const rootWriteLockFileName = ".write-lock"
+
+// ErrRootWriteLocked reports a write-rights open of a storage root another process
+// already holds write rights on: one root carries one writer, so the second open
+// is refused by name instead of committing over the slots the first one's index
+// points at.
+var ErrRootWriteLocked = errors.New("memory: another process holds write rights on this storage root")
+
+// ErrCommitAfterClose reports a commit through a view whose Close ended it, so a
+// caller that kept writing states the closed view instead of writing beside the
+// process that took the root over.
+var ErrCommitAfterClose = errors.New("memory: commit through a closed view")
+
+// ErrReadAfterClose reports a read through a view whose Close ended it: the view
+// states the closed view by name instead of answering the absence its released
+// handle states, so a caller tells a view it ended from a body the log cannot answer.
+var ErrReadAfterClose = errors.New("memory: read through a closed view")
+
+// rootWriteLock is the exclusive lock one write-rights open holds on a storage
+// root for as long as that view lives.
+//   - The lock is the kernel's flock on a marker file inside the root, so the kernel drops it when the holding process exits and no recovery path exists that would clear a stale lock
+//   - Every acquisition is non-blocking, so a writer that cannot take a root is refused at once instead of waiting behind the writer holding it
+//   - One root carries one lock: every write the root admits holds it and takes no lock after it, so the order is that lock and nothing after
+type rootWriteLock struct {
+	// root is the storage root this lock covers.
+	root string
+	// file is the marker the kernel holds the lock on.
+	file *os.File
+}
+
+// acquireRootWriteLock takes the exclusive write lock of root and answers the lock
+// the caller releases when its view ends.
+func acquireRootWriteLock(root string) (*rootWriteLock, error) {
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		return nil, err
+	}
+	file, err := os.OpenFile(filepath.Join(root, rootWriteLockFileName), os.O_RDWR|os.O_CREATE, 0o600)
+	if err != nil {
+		return nil, fmt.Errorf("tagent: open the write lock of %s: %w", root, err)
+	}
+	if err := syscall.Flock(int(file.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		file.Close()
+		if errors.Is(err, syscall.EWOULDBLOCK) || errors.Is(err, syscall.EAGAIN) {
+			return nil, fmt.Errorf("%w: %s", ErrRootWriteLocked, root)
+		}
+		return nil, fmt.Errorf("tagent: take the write lock of %s: %w", root, err)
+	}
+	return &rootWriteLock{root: root, file: file}, nil
+}
+
+// release gives root up to a later writer and repeats as a no-op, so a view that
+// closes twice releases nothing the second time.
+func (l *rootWriteLock) release() error {
+	if l == nil || l.file == nil {
+		return nil
+	}
+	file := l.file
+	l.file = nil
+	return file.Close()
+}
+
 // OpenAtomicStore opens the engine the config names, without opening a tier over
 // it. A caller that wants to observe or fail commits opens the engine here,
 // wraps it, and hands the wrapper back through StorageConfig.Engine: the wrapper
@@ -155,7 +232,21 @@ func OpenAtomicStore(ctx context.Context, cfg StorageConfig) (AtomicStore, error
 		if cfg.Root == "" {
 			return nil, ErrRootRequired
 		}
-		return openJournalKV(filepath.Join(cfg.Root, kvDirName))
+		var lock *rootWriteLock
+		if cfg.WriteRights {
+			held, err := acquireRootWriteLock(cfg.Root)
+			if err != nil {
+				return nil, err
+			}
+			lock = held
+		}
+		store, err := openJournalView(filepath.Join(cfg.Root, kvDirName), cfg.WriteRights)
+		if err != nil {
+			lock.release()
+			return nil, err
+		}
+		store.lock = lock
+		return store, nil
 	case StorageFile:
 		if cfg.Root == "" {
 			return nil, ErrRootRequired
@@ -181,9 +272,11 @@ func OpenAtomicStore(ctx context.Context, cfg StorageConfig) (AtomicStore, error
 //   - The memory tier holds only what the process holds; the durable local tier appends to the journal under Root; the file tier drives the rustviking CLI and reports ErrRustVikingMissing when no such executable is found
 //   - Each call opens its own store over the same backend, so a caller reads exactly what an earlier process committed
 //   - A config that carries an engine opens the tier over that engine instead, so a caller wraps the engine at the seam and the tier takes the wrapper unchanged
-//   - The journal tier's write path is one append-only file with one writer handle per opened view, and each commit is appended as one whole frame, so two views of the same directory cannot interleave half frames
-//   - A second runtime instance over one directory is refused by the production open path that owns that root, not by an exclusive lock here: in-process checks of the same root appear in the test suite of this repository
-//   - Durability holds without that lock, because a frame is appended whole and the barrier is the log's own sync
+//   - The journal tier's write path is one append-only file with one writer handle per opened view, and each commit is appended as one whole frame, so a view reading beside a writer cannot see half a frame
+//   - One directory carries one writer: an open that declares StorageConfig.WriteRights holds the root's write lock, and a second such open, in this process or another, is refused by name with ErrRootWriteLocked, so two writers never commit over one slot
+//   - This open hands the declaration through unchanged, so a caller that commits to the root declares the rights and every other caller holds none: a component view opens beside the live writer, a commit carrying keys through it is refused as ErrCommitWithoutWriteRights, and Close gives the root up to the next writer
+//   - The kernel holds the lock, so it drops when the holding process exits; no recovery pass clears a stale lock, and durability never depended on the lock, because the barrier is the log's own sync
+//   - The config's RetentionWindows register the original-recall window of each retention policy on the tier's original store, so a read of a reference outside its registered window is named expired; a policy the config leaves unregistered keeps its references readable indefinitely
 //
 // 契约: docs/wiki/memory/memory-architecture.md#store-instance-sharing
 func OpenTier(ctx context.Context, cfg StorageConfig) (*Tier, error) {
@@ -195,19 +288,7 @@ func OpenTier(ctx context.Context, cfg StorageConfig) (*Tier, error) {
 		}
 		store = opened
 	}
-	if cfg.Type == StorageMemory && cfg.Engine == nil {
-		segments, err := newFileSegmentStore(store)
-		if err != nil {
-			return nil, err
-		}
-		return &Tier{
-			Originals:    NewMemoryOriginalStore(),
-			Segments:     segments,
-			Store:        store,
-			Capabilities: StoreCapabilities{Tier: StorageMemory, Durable: false},
-		}, nil
-	}
-	originals, err := newKVOriginalStore(store, nil)
+	originals, err := newKVOriginalStore(store, cfg.RetentionWindows)
 	if err != nil {
 		return nil, err
 	}
@@ -215,17 +296,34 @@ func OpenTier(ctx context.Context, cfg StorageConfig) (*Tier, error) {
 	if err != nil {
 		return nil, err
 	}
-	if cfg.Root != "" && (cfg.Type == StorageJournal || cfg.Type == StorageLocalFile) {
-		cold := filepath.Join(cfg.Root, coldDirName)
-		segments.WithColdRoot(cold).WithRetirement(cfg.RetireFacts)
-		originals.WithColdRoot(cold)
-	}
 	return &Tier{
 		Originals:    originals,
 		Segments:     segments,
 		Store:        store,
-		Capabilities: StoreCapabilities{Tier: cfg.Type, Durable: cfg.Type != StorageMemory},
+		Capabilities: StoreCapabilities{Tier: cfg.Type, Durable: cfg.Type != StorageMemory, AtomicBatch: cfg.Type != StorageFile},
 	}, nil
+}
+
+// Close ends this tier's view of its backend: the segment store completes its
+// final barrier, the engine behind it closes, and a durable tier gives its
+// storage root up to the next writer.
+//   - The root's write rights leave with this close, so the next writer — in this process or another — is admitted instead of being refused for a view that already ended
+//   - The release happens however the barrier ended, because the engine closes the journal handle and the write lock together, so a failed barrier never leaves the root locked
+//   - A repeated Close ends nothing twice and answers nil, so a caller that closes a run twice does not see an error the first close did not report
+//   - The engine closes once, through the segment store, because both stores of a tier read and commit through that one engine
+//
+// 契约: docs/wiki/memory/memory-architecture.md#store-instance-sharing
+func (t *Tier) Close() error {
+	if t == nil {
+		return nil
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.closed {
+		return nil
+	}
+	t.closed = true
+	return t.Segments.Close()
 }
 
 // memKV is the memory tier key-value view: it holds every value for the life of

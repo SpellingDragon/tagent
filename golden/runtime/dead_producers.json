@@ -1,0 +1,36 @@
+{
+  "schema_version": 1,
+  "reason": "The product packages the scan reads, and the reviewed exemptions check_dead_producers.py grants. An exemption is not a permission for dead code: it names a producer whose consumer sits outside this repository, so no reference in the tree can spell the call. An entry that matches no dead producer is rejected as stale, so the register cannot outlive the code it names.",
+  "packages": [
+    "assembly",
+    "api",
+    "runtime",
+    "memory",
+    "features",
+    "tool",
+    "internal",
+    "cli"
+  ],
+  "exemptions": [
+    {
+      "package": "assembly",
+      "producer": "RoundTrip",
+      "reason": "hostTimeoutTransport.RoundTrip implements net/http.RoundTripper: assembly/host.go builds http.Client{Transport: &hostTimeoutTransport{...}}, and net/http calls the method, so the consumer is the standard library."
+    },
+    {
+      "package": "features/rl",
+      "producer": "UnmarshalJSON",
+      "reason": "Line.UnmarshalJSON implements encoding/json.Unmarshaler: encoding/json calls it for every line decoded from the wire, so the consumer is the decoder and the call is never spelled by name."
+    },
+    {
+      "package": "tool/subagent",
+      "producer": "GetEmbeddingWithUsage",
+      "reason": "knowledgeEmbedding.GetEmbeddingWithUsage implements the knowledge embedder port of the trpc module: var _ embedder.Embedder = knowledgeEmbedding{} pins the implementation and knowledge.WithEmbedder hands it to that library, so the consumer is the dependency."
+    },
+    {
+      "package": "tool/subagent",
+      "producer": "GetDimensions",
+      "reason": "knowledgeEmbedding.GetDimensions is the second method of the same trpc knowledge embedder port: the library asks for the vector width through the interface, so the consumer is the dependency."
+    }
+  ]
+}

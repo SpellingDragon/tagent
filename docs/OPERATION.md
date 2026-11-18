@@ -158,7 +158,7 @@ bash scripts/gates/test_race_check.sh                       # race 门分类器�
 
 ### B. pre-release：不承诺迁移
 
-README 与 CONTRIBUTING 明示"pre-release 姿态，无迁移承诺"（无版本上限；`v0.4.0`/`v0.5.0` 的 tag 同样不附带迁移承诺）。已发生的先例：旧单文件快照 `kv.json` 不迁移——存在即忽略、报一次、冷启动重建。**结论：升级前读 Breaking Changes，不要假设数据/配置/API 兼容。**
+README 与 CONTRIBUTING 明示"pre-release 姿态，无迁移承诺"（无版本上限；`v0.4.0`/`v0.5.0` 的 tag 同样不附带迁移承诺）。已发生的先例：旧单文件快照 `kv.json` 不迁移——存在即忽略、报一次、冷启动重建。**结论：升级前读 Breaking Changes，不要假设数据/配置/API 兼容。** 存储根的既有数据另有一条硬前置：本构建只读 `<root>/kv/journal.log`，带 `cold/kv/journal.log` 的根会缺一部分历史且**缺得静默**（按身份读答不存在），升级前须由操作方折回新根——命令与四个前置条件见本节 [F](#storage-fold-prerequisite)。
 
 ### C. 资源门清单（哪些测试要真东西）
 
@@ -242,6 +242,13 @@ defer clean(ctx)
 - **级别纪律与旁路**：写盘失败、屏障失败、装载失败一律 ERROR（静默的语义改变必须显式）；非持久 tier 的“进程退出即失忆”是 WARN；审批的每次裁定 INFO，同一等待的重复判定留 DEBUG；其余逐事件 DEBUG。五个专用观察点的 logger 调用都在 `recover` 保护内，且先判 `log.Default` 非 nil——日志失败只丢一条行，不改判定、不改落定、不改恢复结果、不改请求装配。
 - **可复跑**：`go test ./runtime/agent ./features/evolution/governance ./runtime/state -run 'Observation' -count=1` 验三个机制（委派、审批、持久化）与事件消费面各一条输出断言与一条失败不阻断断言；消费者锚 `go test ./tests/integration/history ./tests/integration/execution -run 'Observation' -count=1` 走真实路径（委派受理与落定、重启折叠）读观测行；环境块计数锚 `go test ./tests/integration/host -run 'EnvironmentBlockGenerationIsObserved' -count=1`。压缩请求没有专用观察行，断言面只到 `telemetry.LogObserver` 的通用事实行。
 - **运行时内存观测面**（`oom-bounded-capture-and-storm-fuse`）：host face 提供 `/debug/pprof/{heap,goroutine,allocs}`（同 face 凭据门，仅回环）；`TAGENT_GCTRACE=1` 合并进 GODEBUG（子进程继承；对已启动进程库内不生效，Boot 打边界提示）。锚：`go test ./tests/integration/execution -run '^TestDebugPprofServesHeap$|^TestGCTraceSwitchStatesItsBoundary$' -count=1`。
+
+### F. 存储面升级前置：带冷档的根必须先折回新根 <a id="storage-fold-prerequisite"></a>
+
+1. **折回命令**：`go run ./scripts/fold-cold-root -source <旧根> -root <新根>`，**默认干跑**（只报待折键数与留下的键，零写入）；加 `-restore` 才把事实写进 `-root` 指定的新根。`-source` 与 `-root` 拒绝指向同一目录（否则写权开档会先重建源根）。拒绝语义与写后自校验的细节见 `docs/wiki/memory/memory-architecture.md#local-file-kv`。
+2. **源根只读且必须离线**：脚本对每个日志只做复制，源根一字节不动；拷贝期间日志的长度或修改时间发生变动即具名拒绝（`ErrMigrateSourceUnchanged`），故**不要对正在运行的实例折回**。
+3. **`file` 档根无事实可折**：`file` 档引擎每次调用只落一个键，对一条事实的三键批次答 `ErrBatchNotAtomic`，故它从未产生可折的键集；脚本对这类根按「无热档日志」具名拒绝（`ErrSourceUnstated`）。同理，目标根必须是 `journal` 档（或 `memory` 档以外可供本构建读的形态）。
+4. **目标根须空，且一根一写者**：目标根已有键即拒；`-restore` 声明的写权由内核 flock 独占，同一根上另一个写者存在时以 `ErrRootWriteLocked` 具名拒绝，两个写者不会在同一槽位上各提交一次。写完后脚本经**新开引擎**逐身份回读原字节与提交序自校验，不等即非零退出。
 
 ---
 

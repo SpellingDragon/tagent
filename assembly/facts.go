@@ -61,8 +61,9 @@ const (
 // failure records it at its own call site. One identity names one immutable
 // fact: a commit that repeats the fact the identity already names is answered
 // as the commitment it already is — the original identity beside no second
-// record — and a commit carrying other content under that identity is refused
-// by name before anything under it moves. The judgment is the same one the
+// record, folded again into the consumers that state it — and a commit carrying
+// other content under that identity is refused by name before anything under it
+// moves. The judgment is the same one the
 // storage tier answers under, so the live ledger and the durable record never
 // disagree about what one identity names.
 func (r *Run) commitFactChecked(ctx context.Context, evt event.Event) (event.EventID, error) {
@@ -101,6 +102,8 @@ func (r *Run) commitFactNoCadence(ctx context.Context, evt event.Event) (event.E
 		if !same {
 			return "", fmt.Errorf("%w: %s", memory.ErrFactKeyConflict, evt.Key)
 		}
+		// Reducers are identity-idempotent; repeating them retries an earlier refusal.
+		r.reduceCommitted(ctx, held)
 		return evt.Key, nil
 	}
 	if err := r.persistFact(ctx, evt); err != nil {
@@ -138,7 +141,8 @@ func (r *Run) commitFactNoCadence(ctx context.Context, evt event.Event) (event.E
 // A fact is committed before it is folded, so a refusal is reported beside the
 // fact rather than answered as a failed commit: the chain keeps the fact either
 // way, and a consumer whose fold failed is the state this run must not read as
-// current.
+// current. The seam keeps the identity of that fact, so a cut refuses to state a
+// position past it until the same fact lands in every consumer.
 func (r *Run) reduceCommitted(ctx context.Context, evt event.Event) {
 	if r == nil {
 		return
@@ -345,13 +349,13 @@ func (r *Run) compactFactOrderLocked(dropped map[event.EventID]struct{}) {
 }
 
 // persistFact writes one fact of this run to the storage tier it declares: the
-// body commits byte for byte as the original the recall face reads back, the
-// record commits behind the segment barrier under the next sequence slot of the
-// fact's partition; a query reads the chain directly, so the same process
-// recalls what it just committed without a landing step.
+// body and the record commit as one unit behind the segment barrier, the record
+// taking the next sequence slot of the fact's partition; a query reads the chain
+// directly, so the same process recalls what it just committed without a landing
+// step.
 // - A run beside no storage tier, and a fact naming no owning agent, keep the fact in memory alone: no tier means no durable ledger to write.
-// - The segment commit is the durable write: nothing enters the live ledger before it returns success, and a refused commit leaves the previous position untouched.
-// - An event the tier already published is not committed twice: the very fact the identity already names is answered as the commitment it is, and another content under that identity is refused by name, so a retry of one fact keeps one record and a second fact never lands beside it.
+// - The duplicate judgment runs on this layer's semantics, which the tier's byte comparison cannot answer: the very fact the identity already names is answered as the commitment it is, and another content under that identity is refused by name, so a retry of one fact keeps one record and a second fact never lands beside it.
+// - The tier commits one fact whole or not at all, so a refused commit leaves neither the body nor the record behind.
 func (r *Run) persistFact(ctx context.Context, evt event.Event) error {
 	r.mu.Lock()
 	tier := r.tier
@@ -367,22 +371,20 @@ func (r *Run) persistFact(ctx context.Context, evt event.Event) error {
 	if err != nil {
 		return err
 	}
-	stored, held, err := tier.Segments.GetEvent(ctx, evt.Key)
+	partition := memory.PartitionIDFromName(string(evt.Owner.AgentID))
+	stored, held, err := tier.Segments.GetEventInPartition(ctx, evt.Key, partition)
 	if err != nil {
 		return err
 	}
 	if held {
 		return storedFactConflict(evt.Key, stored, body)
 	}
-	if err := tier.Originals.Put(ctx, body.Ref(), []byte(body.Message.Content)); err != nil {
-		return err
-	}
-	partition := memory.PartitionIDFromName(string(evt.Owner.AgentID))
 	window := evt.Timestamp.UnixMilli()
 	if window < 0 {
 		return fmt.Errorf("tagent: the fact %s carries no event time", evt.Key)
 	}
 	r.landing.Lock()
+	defer r.landing.Unlock()
 	seq := r.landedSeq[partition] + 1
 	record := ledger.SegmentRecord{
 		PartitionID: partition,
@@ -392,13 +394,19 @@ func (r *Run) persistFact(ctx context.Context, evt event.Event) error {
 		EventTime:   window,
 		Body:        encoded,
 	}.WithChain(evt.Type, sessionOf(evt))
-	err = tier.Segments.StoreEvent(ctx, record)
-	if err == nil {
+	outcome, err := ledger.CommitFact(ctx, tier, ledger.FactCommit{
+		Record: record,
+		Ref:    body.Ref(),
+		Body:   []byte(body.Message.Content),
+	})
+	switch outcome {
+	case ledger.FactCommitted:
 		r.landedSeq[partition] = seq
-	}
-	r.landing.Unlock()
-	if errors.Is(err, ledger.ErrContentConflict) {
-		prior, held, getErr := tier.Segments.GetEvent(ctx, evt.Key)
+		return nil
+	case ledger.FactAlreadyPresent:
+		return nil
+	case ledger.FactConflict:
+		prior, held, getErr := tier.Segments.GetEventInPartition(ctx, evt.Key, partition)
 		if getErr != nil {
 			return getErr
 		}
@@ -406,11 +414,9 @@ func (r *Run) persistFact(ctx context.Context, evt event.Event) error {
 			return err
 		}
 		return storedFactConflict(evt.Key, prior, body)
-	}
-	if err != nil {
+	default:
 		return err
 	}
-	return nil
 }
 
 // sameFactOf reports whether one live fact and one commit name the same fact:
@@ -446,15 +452,16 @@ func storedFactConflict(key event.EventID, stored ledger.StoredEvent, body memor
 
 // foldIntoProjection folds one mapped entry into the replay projection of one
 // chain under the window that chain declared, and answers the projection the fold
-// left: the append beside the resident bound is one step, taken by the live commit
-// and by the replay of a chain past its cut alike, so the bound is applied to the
-// sequence once instead of once per read path.
-func foldIntoProjection(ctx context.Context, projection *replay.ReplayProjection, entry replay.ProjectionEntry, window FoldWindow) *replay.ReplayProjection {
+// left beside whether the entry was newly carried: the append beside the resident
+// bound is one step, taken by the live commit and by the replay of a chain past
+// its cut alike, so the bound is applied to the sequence once instead of once per
+// read path.
+func foldIntoProjection(ctx context.Context, projection *replay.ReplayProjection, entry replay.ProjectionEntry, window FoldWindow) (*replay.ReplayProjection, bool) {
 	if projection == nil {
-		return nil
+		return nil, false
 	}
-	projection.Append(ctx, entry)
-	return trimReplayProjection(ctx, projection, window)
+	carried := projection.Append(ctx, entry)
+	return trimReplayProjection(ctx, projection, window), carried
 }
 
 // foldMapped folds one mapped entry into the sequence of its session and moves
@@ -474,6 +481,7 @@ func foldIntoProjection(ctx context.Context, projection *replay.ReplayProjection
 // increment instead of from a lane of its own.
 //
 // - Boundary move on close: the agent_output that closed a segment lands the segment itself as ended material — the boundary moves onto it (inclusive, see endedPrefix), so a later arrival presents everything the closed segment committed, the input that reached the chain while it flew but no decision of it read included.
+// - Boundary move on first carriage only: a repeated fold of an identity the sequence already holds — the retry of a committed fact retried through the same fold — is appended once and moves the boundary once, so the retry of an earlier round's output leaves the boundary of the latest completed round where it stands.
 func (r *Run) foldMapped(ctx context.Context, evt event.Event, entry replay.ProjectionEntry) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -481,7 +489,12 @@ func (r *Run) foldMapped(ctx context.Context, evt event.Event, entry replay.Proj
 	if !carried {
 		return
 	}
-	held.projection = foldIntoProjection(ctx, held.projection, entry, held.window)
+	var landed bool
+	held.projection, landed = foldIntoProjection(ctx, held.projection, entry, held.window)
+	if !landed {
+		r.replays[slot] = held
+		return
+	}
 	if evt.Type == event.TypeAgentOutput {
 		held.endedAt = entry.Key
 		held.rangeOpen = false

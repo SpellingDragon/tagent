@@ -141,12 +141,16 @@ func (r *rustvikingKV) Namespaces(ctx context.Context) ([]string, error) {
 	return out, nil
 }
 
-// Commit applies the batch one CLI call per key and completes the barrier:
-// every call this view returns success for has already been applied by the
-// rustviking store, so no staged state outlives a commit. Deletes run before
-// puts, and a key stands on one side or the other, so the order names no
-// different state.
+// Commit applies a batch carrying at most one key: the CLI lands one key per
+// call, so a batch carrying several keys is refused by name with ErrBatchNotAtomic
+// before any call runs, and StoreCapabilities.AtomicBatch declares the same limit
+// for this tier. A batch it does carry is applied by that one call, which the CLI
+// has already landed when the call returns, so no staged state outlives a commit.
+// Deletes run before puts, and a key stands on one side or the other.
 func (r *rustvikingKV) Commit(ctx context.Context, batch Batch) error {
+	if keys := len(batch.Deletes) + len(batch.Puts); keys > 1 {
+		return fmt.Errorf("%w: the batch carries %d keys", ErrBatchNotAtomic, keys)
+	}
 	for _, key := range batch.Deletes {
 		if _, err := r.call(ctx, "kv", "del", "-k", key); err != nil {
 			return err

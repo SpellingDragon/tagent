@@ -1,10 +1,12 @@
 // 契约: docs/wiki/agent/event-flow.md#projection-lifecycle
 //
-// The compression consumer's state slice: the judgments a producer filed and the
-// request identities a product answers, both of which the consumer derives as it
-// observes the chain. The cut states that account beside the projections it
-// serves, so a boot answers every judgment the covered facts filed without
-// reading one of those facts back, and the judgments the cut left owed stay owed.
+// The compression consumer's state slice: the judgments a chain filed that no
+// product answers yet. The cut states that batch beside the projections it
+// serves, so a boot executes every judgment the covered facts filed without
+// reading one of those facts back, and a judgment a product answers states
+// nothing: its request, its answer and the folding it caused stay on the chain,
+// which is what bounds the slice by the batch still owed instead of by the
+// judgments the chain ever filed.
 package assembly
 
 import (
@@ -23,27 +25,44 @@ import (
 type compressStateSlice struct{ run *Run }
 
 // compressSliceWire is the payload of the compression slice: the judgments of
-// every session chain in session order, and the request identities a product
-// answers in identity order, so the same account renders the same bytes.
+// every session chain that no product answers yet, in session order, so the same
+// account renders the same bytes. A chain that owes nothing is stated nowhere, so
+// the payload is the batch still owed and never the judgments the chain executed.
 type compressSliceWire struct {
 	Sessions []compressSliceSession `json:"sessions"`
-	Answered []event.EventID        `json:"answered"`
 }
 
-// compressSliceSession is the judgments one session chain filed, in the order
+// compressSliceSession is the judgments one session chain still owes, in the order
 // they were filed: the order the consumer executes an owed batch in.
 type compressSliceSession struct {
 	Session   string                  `json:"session"`
 	Judgments []compressSliceJudgment `json:"judgments"`
 }
 
-// compressSliceJudgment is one judgment as the checkpoint states it: the identity
-// the judgment is quoted by, the reason the request fact carries and the moment
-// it was filed on the millisecond axis.
+// compressSliceJudgment is one owed judgment as the checkpoint states it: the
+// identity the judgment is quoted by, the reason the request fact carries and the
+// moment it was filed on the millisecond axis. The judgment is stated whole
+// because it is still owed: a boot executes it without reading the request fact
+// back. A judgment a product answers is stated nowhere, because its request and
+// its answer stay on the chain and no boot owes it again.
 type compressSliceJudgment struct {
 	ID     event.EventID `json:"id"`
-	Reason string        `json:"reason"`
-	At     int64         `json:"at"`
+	Reason string        `json:"reason,omitempty"`
+	At     int64         `json:"at,omitempty"`
+}
+
+// owedJudgments answers the judgments one session chain filed that no product
+// answers yet, in filing order, as the checkpoint states them. The caller holds
+// the consumer lock.
+func owedJudgments(filed []event.CompressRequest, answered map[event.EventID]struct{}) []compressSliceJudgment {
+	out := make([]compressSliceJudgment, 0, len(filed))
+	for _, request := range filed {
+		if _, done := answered[request.ID]; done {
+			continue
+		}
+		out = append(out, compressSliceJudgment{ID: request.ID, Reason: request.Reason, At: request.At.UnixMilli()})
+	}
+	return out
 }
 
 // StateName reports the name the compression slice is keyed by.
@@ -69,45 +88,44 @@ func (s compressStateSlice) RestoreState(_ context.Context, payload []byte) erro
 	return s.run.restoreCompressSlice(payload)
 }
 
-// compressSlice states the account the compression consumer of this run holds:
-// the judgments of every session chain in session order and the identities its
-// products answer in identity order. The read is the consumer's own derived
-// state — it flushes nothing and commits nothing, because the facts that account
-// derives from are already on the chain.
+// compressSlice states the batch the compression consumer of this run still
+// owes: the judgments of every session chain no product answers yet, in filing
+// order. The read is the consumer's own derived state — it flushes nothing and
+// commits nothing, because the facts that account derives from are already on the
+// chain. A judgment a product answers is stated nowhere, because its request and
+// its answer stay on the chain: the checkpoint costs the batch the consumer still
+// owes beside nothing per judgment it already executed.
 func (r *Run) compressSlice() ([]byte, error) {
 	r.mu.Lock()
 	consumer := r.compress
 	r.mu.Unlock()
 	consumer.mu.Lock()
 	defer consumer.mu.Unlock()
-	wire := compressSliceWire{
-		Sessions: make([]compressSliceSession, 0, len(consumer.judgments)),
-		Answered: make([]event.EventID, 0, len(consumer.answered)),
-	}
+	sessions := make([]compressSliceSession, 0, len(consumer.judgments))
 	for session, filed := range consumer.judgments {
-		judgments := make([]compressSliceJudgment, 0, len(filed))
-		for _, request := range filed {
-			judgments = append(judgments, compressSliceJudgment{ID: request.ID, Reason: request.Reason, At: request.At.UnixMilli()})
+		owed := owedJudgments(filed, consumer.answered)
+		if len(owed) == 0 {
+			continue
 		}
-		wire.Sessions = append(wire.Sessions, compressSliceSession{Session: string(session), Judgments: judgments})
+		sessions = append(sessions, compressSliceSession{Session: string(session), Judgments: owed})
 	}
-	sort.Slice(wire.Sessions, func(i, j int) bool { return wire.Sessions[i].Session < wire.Sessions[j].Session })
-	for request := range consumer.answered {
-		wire.Answered = append(wire.Answered, request)
+	if len(sessions) == 0 {
+		return nil, nil
 	}
-	sort.Slice(wire.Answered, func(i, j int) bool { return wire.Answered[i] < wire.Answered[j] })
-	return json.Marshal(wire)
+	sort.Slice(sessions, func(i, j int) bool { return sessions[i].Session < sessions[j].Session })
+	return json.Marshal(compressSliceWire{Sessions: sessions})
 }
 
-// restoreCompressSlice puts the judgments and answers the checkpoint states back
-// into the consumer of this run. The facts the boot replays afterwards land on
-// this account and never beside it: a request recorded twice is one judgment, a
-// product noted twice is one answer, and a judgment the checkpoint leaves unanswered
-// is the execution the chain still owes.
+// restoreCompressSlice puts the owed judgments the checkpoint states back into
+// the consumer of this run. The facts the boot replays afterwards land on this
+// account and never beside it: a request recorded twice is one judgment, and a
+// product the replay reads notes the judgment it answers, so a judgment the
+// checkpoint leaves owed is the execution the chain still owes.
 //
-// The restore merges: a checkpoint states the account of the chains it covers, and a
+// The restore merges: a checkpoint states the batch of the chains it covers, and a
 // boot reads the framework's checkpoint beside the checkpoint of every chain, so each
 // restore states the chain it carries and leaves the chains beside it standing.
+//   - A judgment a product answered before the cut is restored by no checkpoint: the chain states its request and its answer, and no boot owes it again, so the restore seats the batch still owed and never the answers the chain already holds.
 func (r *Run) restoreCompressSlice(payload []byte) error {
 	var wire compressSliceWire
 	if err := json.Unmarshal(payload, &wire); err != nil {
@@ -123,13 +141,13 @@ func (r *Run) restoreCompressSlice(payload []byte) error {
 			if judgment.ID == "" {
 				return fmt.Errorf("assembly: the compression slice states a judgment of session %s with no identity", session.Session)
 			}
-			filed = append(filed, event.CompressRequest{ID: judgment.ID, Reason: judgment.Reason, At: time.UnixMilli(judgment.At)})
+			request := event.CompressRequest{ID: judgment.ID, Reason: judgment.Reason}
+			if judgment.At != 0 {
+				request.At = time.UnixMilli(judgment.At)
+			}
+			filed = append(filed, request)
 		}
 		judgments[event.SessionID(session.Session)] = filed
-	}
-	answered := make(map[event.EventID]struct{}, len(wire.Answered))
-	for _, request := range wire.Answered {
-		answered[request] = struct{}{}
 	}
 	r.mu.Lock()
 	consumer := r.compress
@@ -139,23 +157,18 @@ func (r *Run) restoreCompressSlice(payload []byte) error {
 	if consumer.judgments == nil {
 		consumer.judgments = map[event.SessionID][]event.CompressRequest{}
 	}
-	if consumer.answered == nil {
-		consumer.answered = map[event.EventID]struct{}{}
-	}
 	for session, filed := range judgments {
 		consumer.judgments[session] = filed
-	}
-	for request := range answered {
-		consumer.answered[request] = struct{}{}
 	}
 	return nil
 }
 
-// compressSliceOf states the account one session chain owes: the judgments it
-// filed in filing order and the identities a product answers among them, in
-// identity order, so the same account renders the same bytes. A chain that filed
-// no judgment states nothing, because the checkpoint of that chain has no account to
-// carry.
+// compressSliceOf states the batch one session chain still owes: the judgments it
+// filed that no product answers yet, in filing order. A judgment a product
+// answers states nothing, because the request it was filed as and the answer it
+// drew stay on the chain. A chain that owes no judgment states nothing, so the
+// session checkpoint of a chain the fold already executed carries no compression
+// account at all.
 func (r *Run) compressSliceOf(session event.SessionID) ([]byte, error) {
 	if session == "" {
 		return nil, nil
@@ -169,17 +182,11 @@ func (r *Run) compressSliceOf(session event.SessionID) ([]byte, error) {
 	if !held || len(filed) == 0 {
 		return nil, nil
 	}
-	judgments := make([]compressSliceJudgment, 0, len(filed))
-	answered := make([]event.EventID, 0, len(filed))
-	for _, request := range filed {
-		judgments = append(judgments, compressSliceJudgment{ID: request.ID, Reason: request.Reason, At: request.At.UnixMilli()})
-		if _, answeredByAProduct := consumer.answered[request.ID]; answeredByAProduct {
-			answered = append(answered, request.ID)
-		}
+	owed := owedJudgments(filed, consumer.answered)
+	if len(owed) == 0 {
+		return nil, nil
 	}
-	sort.Slice(answered, func(i, j int) bool { return answered[i] < answered[j] })
 	return json.Marshal(compressSliceWire{
-		Sessions: []compressSliceSession{{Session: string(session), Judgments: judgments}},
-		Answered: answered,
+		Sessions: []compressSliceSession{{Session: string(session), Judgments: owed}},
 	})
 }

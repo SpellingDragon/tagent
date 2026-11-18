@@ -51,11 +51,16 @@ var ErrInstanceClosed = errors.New("task: the receiving instance is closed and i
 // HandoffOf reports the recorded handoff link of one task: the previous target
 // its notifications moved from beside the new target they move to, with the
 // source and target instance identities kept apart. A task no explicit
-// handoff moved reports ErrNoHandoff.
+// handoff moved reports ErrNoHandoff. A task the newest checkpoint stated no
+// entry for is read back from its chain here, so a restart reports the handoff
+// the record holds instead of answering that the task is unknown.
 func (m *MemoryManager) HandoffOf(ctx context.Context, taskID event.TaskID) (HandoffRecord, error) {
 	m.registry.mu.Lock()
 	defer m.registry.mu.Unlock()
-	entry, ok := m.registry.tasks[taskID]
+	entry, ok, err := m.registry.hydrateLocked(ctx, taskID)
+	if err != nil {
+		return HandoffRecord{}, err
+	}
 	if !ok {
 		return HandoffRecord{}, ErrTaskNotFound
 	}
@@ -268,11 +273,17 @@ func (s *NoticeSequencer) Observe(notice Notice) {
 // target, source and target instance of the declaration the task was admitted
 // under, or of the explicit handoff already applied. A handoff touches only the
 // notifications issued after it, so the envelopes already issued keep the
-// routing they froze and a retry of one never re-resolves a current target.
+// routing they froze and a retry of one never re-resolves a current target. A
+// task the newest checkpoint stated no entry for is read back from its chain
+// here, so a restart issues the next identity of the round the record holds
+// instead of answering that the task is unknown.
 func (r *MemoryRegistry) IssueNotice(ctx context.Context, taskID event.TaskID, kind NoticeKind, fact event.EventID) (Envelope, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	entry, ok := r.tasks[taskID]
+	entry, ok, err := r.hydrateLocked(ctx, taskID)
+	if err != nil {
+		return Envelope{}, err
+	}
 	if !ok {
 		return Envelope{}, ErrTaskNotFound
 	}

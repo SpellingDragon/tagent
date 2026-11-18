@@ -8,9 +8,13 @@ shards actually call (`scripts/scenarios/run_runtime_scenarios.py`):
     deadline (`liveness.name = go-test-bound`, `state = expired`) instead of
     escaping as an exception that would leave the upload step with no files;
   * a shard's durable load scan is red when one of the five prefix lines is
-    missing or when spec/consume/fact loaded zero keys, and stays green when only
-    attempt/reject are zero — the difference between "the restart reloaded the
-    chain" and "the restart ran over an empty chain".
+    missing, and when spec/consume/fact loaded zero keys without a seated-account
+    line explaining that zero. A stated cut explains it: the checkpoint covers the
+    tasks it names, so the family prefixes read zero by construction and the chains
+    past the cut read by task identity. A whole-log seat explains a zero only for
+    an account holding nothing, and a shard that never seated a task is red — the
+    difference between "the restart reloaded the chain" and "the restart ran over
+    an empty chain" stays judged, and stays green when only attempt/reject are zero.
 
 The negative cases are the point: each rule is exercised against a fixture that
 must fail, so a future edit cannot turn the rule into a comment.
@@ -52,6 +56,12 @@ def full_scan_log(data_keys=4, attempt_keys=0, reject_keys=0):
     lines.append(scan_line(ZERO_PREFIXES[0], attempt_keys))
     lines.append(scan_line(ZERO_PREFIXES[1], reject_keys))
     return "\n".join(lines) + "\n"
+
+
+def seat_line(tasks, tail, reads=0, keys=0):
+    """One boot's seated-account line: the path its task account read by."""
+    return "tagent: boot seated the task account tasks={} tail={} reads={} keys={}".format(
+        tasks, tail, reads, keys)
 
 
 class DurableScanTest(unittest.TestCase):
@@ -127,6 +137,52 @@ class DurableScanTest(unittest.TestCase):
         empty = runner.durable_scan_attestation(self.dir)
         self.assertEqual(empty["state"], "unattested")
         self.assertIn("no .log file", empty["reason"])
+
+    def test_seat_without_any_scan_line_is_red_and_named(self):
+        # A bounded seat explains a zero read, never an absent scan record: a shard
+        # whose scan never ran must stay red however complete its seat lines are.
+        self.write_log("gen00.log", seat_line(0, "299") + "\n")
+        self.write_log("gen01.log", seat_line(6, "301", reads=5, keys=36) + "\n")
+        state = runner.durable_scan_attestation(self.dir)
+        self.assertEqual(state["state"], "unattested")
+        self.assertIn("missing the prefix line(s)", state["reason"])
+        self.assertIn("tagent/task/v1/spec:", state["reason"])
+
+    def test_bounded_seat_explains_zero_family_reads(self):
+        # The long-run shape the bound window produces: the first boot reads the
+        # whole log of an empty shard, every later boot seats from the checkpoint
+        # and reads its chain by task identity, so the family prefixes read zero for
+        # the whole shard while the restarts demonstrably reloaded tasks.
+        self.write_log("gen00.log",
+                       seat_line(0, "none", reads=5) + "\n" + full_scan_log(data_keys=0))
+        self.write_log("gen01.log", seat_line(9, "733", reads=40, keys=36) + "\n")
+        self.write_log("gen02.log", seat_line(0, "19") + "\n")
+        state = runner.durable_scan_attestation(self.dir)
+        self.assertEqual(state["state"], "attested", state["reason"])
+        zero = state["zero_reads"]["tagent/task/v1/fact:"]
+        self.assertEqual(zero["bounded_seats"], 2)
+        self.assertEqual(zero["empty_account_seats"], 1)
+        self.assertEqual(zero["deepest_seat_keys"], 36)
+
+    def test_whole_log_seat_holding_tasks_explains_no_zero(self):
+        # A whole-log seat that holds tasks read them from the families it scanned,
+        # so a zero beside it names a record that never carried the chain.
+        self.write_log("gen00.log",
+                       seat_line(7, "none", reads=5) + "\n" + full_scan_log(data_keys=0))
+        state = runner.durable_scan_attestation(self.dir)
+        self.assertEqual(state["state"], "unattested")
+        self.assertIn("no seat that explains it", state["reason"])
+        self.assertIn("gen00.log", state["reason"])
+
+    def test_shard_that_never_seated_a_task_is_red(self):
+        # A shard whose every boot seated an empty account ran over an empty chain:
+        # the restarts reloaded nothing, which is what the verdict exists to catch.
+        self.write_log("gen00.log",
+                       seat_line(0, "none", reads=5) + "\n" + full_scan_log(data_keys=0))
+        self.write_log("gen01.log", seat_line(0, "299") + "\n")
+        state = runner.durable_scan_attestation(self.dir)
+        self.assertEqual(state["state"], "unattested")
+        self.assertIn("no boot seated a non-empty task account", state["reason"])
 
 
 class LivenessTest(unittest.TestCase):

@@ -35,17 +35,36 @@ states each owed round beside the address it belongs to and the instance that
 accepted it, and a boot reads it as the rounds committed before the cut so an
 answer that landed past the cut still settles the round it answers.
 
-The compression consumer's state slice: the judgments a producer filed and the
-request identities a product answers, both of which the consumer derives as
-it observes the chain. The cut states that account beside the projections it
-serves, so a boot answers every judgment the covered facts filed without reading
-one of those facts back, and the judgments the cut left owed stay owed.
+The compression consumer's state slice: the judgments a chain filed that no
+product answers yet. The cut states that batch beside the projections it serves,
+so a boot executes every judgment the covered facts filed without reading one of
+those facts back, and a judgment a product answers states nothing: its request,
+its answer and the folding it caused stay on the chain, which is what bounds the
+slice by the batch still owed instead of by the judgments the chain ever filed.
 
 The compression consumer: the execution half of compression. A producer judges
 material over its bound and files a compress request; the consumer reads the
 material that request names, folds it through the projection and files the
 compress product the execution minted. Judgment and execution share no step,
 so what material went is a fact of the chain beside why it went.
+
+The compression consumer's own mount: the one place its concrete type
+is constructed. The consumer executes the judgments the age fold files,
+so its mount also installs it as that plugin's executor; the age fold finds it
+constructed whichever order the catalog lists the two in.
+
+The governance state of a host as the framework checkpoint carries it:
+the ledger and the goal registry that fold the two governance streams and
+the approval book the rulings park calls with. The host seats that state on
+the run's state seam, so one cut states it and one restore puts it back — a
+restarted process reads a state the size of the governance state it holds
+instead of the stream and the request files it committed.
+
+The seat and the streams are one recovery: the cut states where each stream
+ended and the index it folded, and the events past the cut are the tail the bind
+folds beside it. A process whose checkpoint states no governance cut restores
+the zero cut, so the tail past it is the whole stream and the approval book
+reads the request files — the same state a young run starts from.
 
 Boot is the turnkey entry of the composition root: it reads one host document,
 resolves the declaration it carries, and returns the Host the application
@@ -145,6 +164,18 @@ session, and the request shape an inbound channel posts to the task endpoint.
 Each one is a face the host contributes to the assembly, so the host builds it
 here rather than leaving the wiring to every deployment.
 
+The builtin plugin catalog: one entry per feature the framework mounts out of
+the box, beside the resolution the default boot flow, the host assembly and a
+plugins: declaration drive. The assembly root names no feature: it forwards
+the collections this file resolves, so adding a plugin is a catalog line plus,
+for an agent plugin, a declaration line.
+
+This file and assembly/compress_mount.go are the plugin registry
+implementation registered under mounting.registry_implementation in
+golden/runtime/architecture.json. That is why the R5a mount rule does not judge
+the concrete constructions they carry: they are the one legal place a plugin is
+built, and judging them would make the rule unsatisfiable.
+
 The minimal public assembly entry of the runtime: one Run assembles the shared
 faces once, publishes the candidate bindings of one declaration through the
 sole publication entry, and drives the agent's own persistent event loop per
@@ -208,11 +239,11 @@ durable fact chain instead of restoring a body snapshot kept beside the facts.
 
 The task state slice: the account of the task registry as the framework
 checkpoint carries it. Every other slice states work the process holds in
-flight; this one states the tasks it settled beside the ones it is still
-driving, so a restarted run knows its tasks before it reads a single chain.
-The chain stays the truth of a task and the source of the links that landed past
-the cut: the slice only spares the covered part of it, which is what stops the
-recovery cost from growing with the tasks the storage already settled.
+flight; this one states the tasks the registry is still driving, so a restarted
+run knows its open work before it reads a single chain. A task the run finished
+states nothing here, and the chain stays the truth of it: the slice spares the
+covered part of every open chain and nothing else, which is what keeps its body
+equal however many tasks the storage already settled.
 
 CONSTANTS
 
@@ -969,6 +1000,10 @@ type FoldWindow struct {
 	CompressThreshold float64
 	// KeepRecentTasks is the number of recent task turns the age fold keeps whole.
 	KeepRecentTasks int
+	// SummaryBudgetBytes is the byte bound one history summary obeys: the
+	// declared summary budget of the agent, read by both the mechanical fold and
+	// the model gist the fold asks for, so the two sides bound the same text.
+	SummaryBudgetBytes int
 }
     FoldWindow is the replay window one session chain registered: the model
     window the chain is replayed into, in tokens, and the fold settings the
@@ -1646,7 +1681,7 @@ func (r *Run) CheckpointSession(ctx context.Context, addr event.Address) (event.
     MUST state nothing about a holder that keeps no state of a session, rather
     than copy another chain's account into this checkpoint.
 
-func (r *Run) Close(ctx context.Context, req agent.CloseRequest) (agent.DrainReport, error)
+func (r *Run) Close(ctx context.Context, req agent.CloseRequest) (report agent.DrainReport, closeErr error)
     Close closes the runtime's own side for the named session address: the
     request is judged first, new input is refused next, the run quiesces to its
     fixed point, and only then does the session side close. The close reports
@@ -1660,17 +1695,35 @@ func (r *Run) Close(ctx context.Context, req agent.CloseRequest) (agent.DrainRep
     cancelling anything they fly, so the obligations they hold are finished
     for real inside the budget or stay named on the chain — and joined under
     the same deadline, so a close beside a producer that never stops answers
-    Cut beside that producer's name instead of waiting on it without an end. A
-    repeated close retries the quiesce the same way until the run reaches rest.
-    The redline list (5 rules): MUST judge the timeout of the close before any
+    Cut beside that producer's name instead of waiting on it without an end.
+    A repeated close retries the quiesce the same way until the run reaches
+    rest. The storage tier the run opened ends exactly when the process holds
+    no further commit to that root: a resident consumption loop the close left
+    inside a model production, and a writer that has not confirmed its stop,
+    are the two sources a commit after this return could come from, so the root
+    goes to a next writer when neither stands and is kept when either does,
+    whatever state the report names. An obligation left standing on the chain —
+    an input no answer closed, a notice no turn consumed — is state a restart
+    reads and not a commit this process owes, so a cut beside those alone gives
+    the root up; a cut beside work still in flight keeps its write rights, and
+    the refusal a released worker owes a closed session lands through the view
+    the run holds. The kernel drops the lock when the process exits, so a root a
+    close keeps is never a lock a later process inherits nor one anybody has to
+    clear. A repeated close files no second checkpoint, because the first close
+    filed the one it owed through the view it held and that view ends with it.
+    The redline list (7 rules): MUST judge the timeout of the close before any
     side effect it would take, so a close naming none is refused with the run
     untouched. MUST refuse new input before the first quiesce of the close.
     MUST mark the resident consumption loops the loop mounted for itself before
     the first read of the rest criterion, and join them inside the budget the
     request named, so a segment those loops still fly is waited out or named
-    — never unbounded before Cut and never cancelled by the close itself. MUST
-    judge the run by the one rest criterion, never by an emptied queue or an
-    elapsed wait. MUST NOT report a run at rest while a writer has not stopped.
+    — never unbounded before Cut and never cancelled by the close itself.
+    MUST judge the run by the one rest criterion, never by an emptied queue
+    or an elapsed wait. MUST NOT report a run at rest while a writer has not
+    stopped. MUST release the storage tier by the commit sources that stand
+    at the release, never by the state the report names. MUST read the writer
+    ledger again at the release it takes, so a production that began after the
+    criterion keeps the root it would commit through.
 
 func (r *Run) CloseMCPServers() error
     CloseMCPServers releases every MCP server the live registry holds: the close
@@ -1903,8 +1956,13 @@ func (r *Run) RecordingLosses() []agent.RecordingLoss
 
 func (r *Run) Recovery() task.RestoreReport
     Recovery reports how the assembly folded the durable chains its storage
-    already held at startup: one outcome per task the chains covered. The report
-    is empty for an assembly beside no storage.
+    already held at startup: one outcome per task the fold covered, which is
+    the open work of the cut beside the chains the storage committed past it.
+    A task that finished before the cut states no outcome here — the checkpoint
+    that cut carries names none of them, so the boot never enumerated them
+    — and the whole history behind the report is the read a caller asks for
+    through the task account's own enumeration, which is linear in that history.
+    The report is empty for an assembly beside no storage.
 
 func (r *Run) ReflectionGate() meditation.WatermarkGate
     ReflectionGate reports the watermark gate of the generation in effect:

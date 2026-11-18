@@ -1,3 +1,7 @@
+// 契约: docs/wiki/memory/memory-architecture.md#event-shape
+//
+// The original-text model: the named refusals of commit and recall, and the
+// blob and reference records one event key holds.
 package ledger
 
 import (
@@ -34,19 +38,6 @@ var ErrSegmentRange = errors.New("memory: segment must start at line 1 or later 
 // last stored line.
 var ErrSegmentPastEnd = errors.New("memory: segment starts past the last line")
 
-// MemoryOption shapes one MemoryOriginalStore at construction.
-type MemoryOption func(*MemoryOriginalStore)
-
-// WithRetentionWindow registers the window one retention policy keeps its
-// references readable for. A policy with no registered window keeps its
-// references readable indefinitely, and a window of zero or less reports every
-// read as expired.
-func WithRetentionWindow(policy string, window time.Duration) MemoryOption {
-	return func(store *MemoryOriginalStore) {
-		store.windows[policy] = window
-	}
-}
-
 // originalBlob is the independent content of one event key, together with its
 // integrity metadata.
 type originalBlob struct {
@@ -78,33 +69,6 @@ type originalEntry struct {
 	blob *originalBlob
 	refs map[refScope]referenceRecord
 }
-
-// 契约: docs/wiki/memory/memory-architecture.md#event-shape
-//
-// MemoryOriginalStore is the in-memory OriginalStore: the reference and blob
-// model of the original text — each event key commits its own bytes, every
-// reference registered under its own owner, format and retention policy, exact
-// recall served byte for byte and segmented reading handing out whole lines.
-//
-// The model is implemented once over the key-value seam, and this tier is that
-// implementation held in a view that never leaves the process: a durable tier
-// runs the same code over its own view, so nothing about recall, retention is restated per tier. The tier holds only what the process
-// holds: it survives no restart, and no result it returns claims otherwise.
-type MemoryOriginalStore struct {
-	*kvOriginalStore
-}
-
-// NewMemoryOriginalStore returns an empty in-memory original store, shaped by
-// the given options.
-func NewMemoryOriginalStore(options ...MemoryOption) *MemoryOriginalStore {
-	store := &MemoryOriginalStore{kvOriginalStore: newEmptyKVOriginalStore(newMemKV(), nil)}
-	for _, option := range options {
-		option(store)
-	}
-	return store
-}
-
-var _ OriginalStore = (*MemoryOriginalStore)(nil)
 
 // digestOf returns the canonical digest text of the given bytes.
 func digestOf(body []byte) string {

@@ -125,10 +125,11 @@ BASELINE = (
     # 枚举、前缀键序、命名空间清单）与一次带屏障提交，拆成两个接口会让前缀枚举或命名
     # 空间清单绕开内存脏合并另立一条读路，与本域“不立第二读路”的裁决冲突。
     ("iface-methods", "memory/ledger/atomic_store.go:AtomicStore", 4),
-    # features/evolution/governance GovernanceEventLog 3m（2026-11-05 03 收口）：治理账的
-    # 持久面＝写入、前缀回放与同步屏障三种动作，同一本账；拆窄口会让前缀回放绕开
-    # Sync 屏障另立一条读路，与本域“一条链一本账”的裁决冲突。
-    ("iface-methods", "features/evolution/governance/denial.go:GovernanceEventLog", 3),
+    # api/durable FactLog 3m（runtime-recovery-ideal 10.R8b 收口，合并原 governance
+    # GovernanceEventLog 3m 与 state FactLog 4m 两条）：一份耐久面的三种动作＝写入一事实、
+    # 前缀回放、同步屏障。拆窄口会让前缀回放绕开 Sync 屏障另立一条读路。两个生产实现者
+    # （ledger.TierFacts、assembly.memoryFactLog）在冻结包边下结构满足它；Get 生产零调用方故删。
+    ("iface-methods", "api/durable/fact_log.go:FactLog", 3),
     ("struct-fields", "runtime/agent/delegate.go:Delegation", 9),
     ("struct-fields", "runtime/task/spec.go:Spec", 9),
     ("struct-fields", "tool/subagent/builder.go:Builder", 8),
@@ -139,7 +140,6 @@ BASELINE = (
     ("struct-fields", "tool/subagent/target.go:TargetOptions", 8),
     # S1 iface-methods — 8 项（observed=实测接口方法数）
     ("iface-methods", "runtime/agent/delegate.go:DelegationTasks", 4),
-    ("iface-methods", "runtime/state/durable.go:FactLog", 4),
     ("iface-methods", "runtime/state/store.go:Store", 4),
     # hot-update-and-purity-closure 12 引入叶：Stateful 是一份可恢复状态切片在接缝上的
     # 三问（键名/说出状态/放回状态），5 个实现者（投影、送达账、邮箱、任务账、输入轮）。
@@ -227,9 +227,12 @@ BASELINE = (
     ("struct-fields", "runtime/task/checkpoint.go:StatedTask", 16),
     # runtime-recovery-ideal W3（08 fact-retirement 引入叶）：StorageConfig 是存储层
     # 定位与两个注入面（Engine 观察/延迟/失败注入、RetireFacts 退位选择）的配置本体。
-    # 六个格＝一份配置的语义本体（tier/Root 两个定位、rustviking 两格、两个注入面），
-    # 收窄即让拆块调用方二次归并同一份定位；按 M4 先例具名登记，非收敛目标。
-    ("struct-fields", "memory/ledger/config.go:StorageConfig", 6),
+    # 七个格＝一份配置的语义本体（tier/Root 两个定位、rustviking 两格、两个注入面、
+    # 原文召回窗口），收窄即让拆块调用方二次归并同一份定位；按 M4 先例具名登记，非收敛目标。
+    # 按名抬升 6->7：RetentionWindows 是原文召回窗口的生产注册入口（OpenTier 传进
+    # newKVOriginalStore），取代已删的测试专用 WithRetentionWindow；窗口是配置语义本体，
+    # 与 Type/Root 同生命周期，另立一份配置即造第二份存储定位。
+    ("struct-fields", "memory/ledger/config.go:StorageConfig", 7),
     # 04.2 执行资源解释（引入叶）：租约/续期/停滞/义务的只读投影，字段即
     # Manager.Explain 的回复本体，拆块即解释面需要二次装配。
     ("struct-fields", "tool/exec/exec.go:Explanation", 10),
@@ -1382,23 +1385,33 @@ def check_ratchet(report, arch_path, metrics, domain_counts):
         report.warn("concept ratchet: {} names no concept_ratchet; the frozen "
                     "floors are not enforced".format(arch_path))
         return
-    removed = domain_counts.get("domain_surface.removed", 0)
-    new = domain_counts.get("domain_surface.new", 0)
     interfaces = metrics["exported_interfaces"]
-    if removed < int(ratchet.get("removed_min", 0)):
-        report.error("concept ratchet: domain_surface.removed={} below the frozen floor {}".format(
-            removed, ratchet["removed_min"]))
-    if new > int(ratchet.get("new_max", 0)):
-        report.error("concept ratchet: domain_surface.new={} exceeds the frozen ceiling {}".format(
-            new, ratchet["new_max"]))
+    # A rule scope that leaves D1 out never measures the domain surface, so its two
+    # floors have no object here: judging them against the empty counts would state
+    # removed=0 and fail a scope that measured nothing about removals.
+    if "domain_surface.removed" in domain_counts:
+        removed = domain_counts["domain_surface.removed"]
+        new = domain_counts["domain_surface.new"]
+        if removed < int(ratchet.get("removed_min", 0)):
+            report.error("concept ratchet: domain_surface.removed={} below the frozen floor {}".format(
+                removed, ratchet["removed_min"]))
+        if new > int(ratchet.get("new_max", 0)):
+            report.error("concept ratchet: domain_surface.new={} exceeds the frozen ceiling {}".format(
+                new, ratchet["new_max"]))
+        domain_floors = "removed>={}, new<={}".format(
+            ratchet.get("removed_min", 0), ratchet.get("new_max", 0))
+    else:
+        report.warn("concept ratchet: this rule scope measures no domain surface, so the "
+                    "removed floor {} and the new ceiling {} are unjudged".format(
+                        ratchet.get("removed_min", 0), ratchet.get("new_max", 0)))
+        domain_floors = "removed/new unjudged (no domain surface in this scope)"
     if interfaces > int(ratchet.get("exported_interfaces_max", 1000000000)):
         report.error("concept ratchet: exported_interfaces={} exceeds the frozen ceiling {}".format(
             interfaces, ratchet["exported_interfaces_max"]))
     if report.errors:
         return
-    report.note("concept ratchet held: removed>={}, new<={}, interfaces<={}".format(
-        ratchet.get("removed_min", 0), ratchet.get("new_max", 0),
-        ratchet.get("exported_interfaces_max", 0)))
+    report.note("concept ratchet held: {}, interfaces<={}".format(
+        domain_floors, ratchet.get("exported_interfaces_max", 0)))
 
 
 if __name__ == "__main__":

@@ -1,8 +1,12 @@
 package history
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -28,29 +32,15 @@ import (
 //
 // 契约: docs/wiki/agent/task-lifecycle.md#restore-rebuild
 func TestRestoreObservationThroughTheFormalEntry(t *testing.T) {
+	if mode := os.Getenv(restoreFoldChildModeEnv); mode != "" {
+		runRestoreFoldChild(t, mode)
+		return
+	}
 	t.Run("a restart states the chains it folded", func(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 		cfg := ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: t.TempDir()}
-		addr := event.Address{AgentID: "agent-a", SessionID: "session-chain"}
-		first, err := assembly.Assemble(ctx, chainDeclaration(), map[event.AgentID]assembly.NativeAgent{
-			"agent-a": {Model: &chainModel{name: "model-a", answer: func(req *model.Request) *model.Response {
-				if len(req.Messages) == 1 {
-					return chainToolTurn(chainCall("call-1", "probe", `{"x":1}`))
-				}
-				return chainFinalTurn("settled")
-			}}, Tools: []trpctool.CallableTool{&chainTool{name: "probe", output: "out-a"}}},
-		}, assembly.WithGovernance(passPolicy{}), assembly.WithStorage(cfg))
-		if err != nil {
-			t.Fatalf("assemble the durable runtime: %v", err)
-		}
-		if _, err := first.Invoke(ctx, assembly.InvokeRequest{
-			InvocationID: "inv-chain",
-			Address:      addr,
-			Input:        []model.Message{{Role: model.RoleUser, Content: "hello"}},
-		}); err != nil {
-			t.Fatalf("invoke the durable runtime: %v", err)
-		}
+		interruptRestoreFoldRun(t, cfg.Root)
 
 		observer := &historyObserver{}
 		defer watchHistoryLog(t, observer)()
@@ -152,13 +142,101 @@ func TestRestoreObservationThroughTheFormalEntry(t *testing.T) {
 	})
 }
 
+// restoreFoldChildModeEnv, restoreFoldChildRootEnv, restoreFoldChildOutEnv and
+// restoreFoldChildMode name the handshake the fold check hands the first runtime it
+// interrupts: the one phase that child runs, the root it writes and the report it
+// lands once its chain is durable.
+const (
+	restoreFoldChildModeEnv = "TAGENT_RESTORE_FOLD_CHILD_MODE"
+	restoreFoldChildRootEnv = "TAGENT_RESTORE_FOLD_CHILD_ROOT"
+	restoreFoldChildOutEnv  = "TAGENT_RESTORE_FOLD_CHILD_OUT"
+
+	restoreFoldChildMode = "fold"
+)
+
+// interruptRestoreFoldRun runs the runtime the fold check restarts in a process of
+// its own and interrupts it once the chain it committed is durable.
+//   - A close ends that view with the checkpoint the restart would restore instead of folding, so the kill leaves the root holding no shutdown state.
+//   - The root keeps no writer after the kill: the write lock follows the process's descriptors, so the restart takes write rights.
+func interruptRestoreFoldRun(t *testing.T, root string) {
+	t.Helper()
+	out := filepath.Join(t.TempDir(), "restore-fold.json")
+	cmd := exec.Command(os.Args[0], "-test.run=^TestRestoreObservationThroughTheFormalEntry$", "-test.timeout=2m")
+	cmd.Env = append(os.Environ(),
+		restoreFoldChildModeEnv+"="+restoreFoldChildMode,
+		restoreFoldChildRootEnv+"="+root,
+		restoreFoldChildOutEnv+"="+out,
+	)
+	var output bytes.Buffer
+	cmd.Stdout = &output
+	cmd.Stderr = &output
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start the first runtime: %v", err)
+	}
+	report := waitConsumptionReport(t, out, &output, restoreFoldChildMode)
+	if err := cmd.Process.Kill(); err != nil {
+		t.Fatalf("interrupt the first runtime pid=%d: %v", report.PID, err)
+	}
+	if err := cmd.Wait(); err == nil {
+		t.Fatalf("the first runtime ended without the parent's kill; output=%s", output.String())
+	}
+}
+
+// runRestoreFoldChild drives the chain the restart folds and then waits for the
+// parent's interruption, so the root holds the chain and no earlier boot's view.
+func runRestoreFoldChild(t *testing.T, mode string) {
+	t.Helper()
+	root := os.Getenv(restoreFoldChildRootEnv)
+	out := os.Getenv(restoreFoldChildOutEnv)
+	if mode != restoreFoldChildMode || root == "" || out == "" {
+		t.Fatalf("the fold child was handed mode=%q root=%q out=%q, want the one phase over a named root", mode, root, out)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	run, err := assembly.Assemble(ctx, chainDeclaration(), map[event.AgentID]assembly.NativeAgent{
+		"agent-a": {Model: &chainModel{name: "model-a", answer: func(req *model.Request) *model.Response {
+			if len(req.Messages) == 1 {
+				return chainToolTurn(chainCall("call-1", "probe", `{"x":1}`))
+			}
+			return chainFinalTurn("settled")
+		}}, Tools: []trpctool.CallableTool{&chainTool{name: "probe", output: "out-a"}}},
+	}, assembly.WithGovernance(passPolicy{}), assembly.WithStorage(ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: root}))
+	if err != nil {
+		t.Fatalf("assemble the first runtime: %v", err)
+	}
+	if _, err := run.Invoke(ctx, assembly.InvokeRequest{
+		InvocationID: "inv-chain",
+		Address:      event.Address{AgentID: "agent-a", SessionID: "session-chain"},
+		Input:        []model.Message{{Role: model.RoleUser, Content: "hello"}},
+	}); err != nil {
+		t.Fatalf("invoke the first runtime: %v", err)
+	}
+	writeConsumptionReport(t, out, consumptionChildReport{
+		Mode:  mode,
+		PID:   os.Getpid(),
+		Notes: []string{"the first runtime waits for the parent's kill and files no closing checkpoint"},
+	})
+	select {
+	case <-ctx.Done():
+	case <-time.After(5 * time.Minute):
+	}
+}
+
 // commitDamagedChain lands one durable chain whose links carry no admission
 // material, so the restore has to refuse it by name.
-func commitDamagedChain(ctx context.Context, cfg ledger.StorageConfig) error {
+//   - the open declares the root's write rights, so the fixture commits as the root's one writer
+//   - the assemble that follows opens the same root, so this view ends here
+func commitDamagedChain(ctx context.Context, cfg ledger.StorageConfig) (err error) {
+	cfg.WriteRights = true
 	tier, err := ledger.OpenTier(ctx, cfg)
 	if err != nil {
 		return err
 	}
+	defer func() {
+		if closeErr := tier.Close(); closeErr != nil && err == nil {
+			err = closeErr
+		}
+	}()
 	fixture, err := state.NewDurableCommit(ledger.TierFactLog(tier), nil)
 	if err != nil {
 		return err

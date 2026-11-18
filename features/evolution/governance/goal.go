@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/SpellingDragon/tagent/api/durable"
 	"github.com/SpellingDragon/tagent/api/event"
 )
 
@@ -111,8 +112,11 @@ type GoalRegistry struct {
 	goals map[string]*Goal
 	seq   int
 
-	log    GovernanceEventLog
+	log    durable.FactLog
 	evtSeq int64
+
+	writeMu sync.Mutex
+	stopped error
 }
 
 // NewGoalRegistry builds one goal registry in memory state. Bind hands it the
@@ -129,7 +133,7 @@ func NewGoalRegistry() *GoalRegistry {
 //
 // The error of a fold belongs to the caller that can stop the boot: a stream this
 // registry could not read leaves the goals behind the chain that serves them.
-func (g *GoalRegistry) Bind(ctx context.Context, log GovernanceEventLog) error {
+func (g *GoalRegistry) Bind(ctx context.Context, log durable.FactLog) error {
 	if g == nil || log == nil {
 		return nil
 	}
@@ -149,6 +153,8 @@ func (g *GoalRegistry) seat(goals []*Goal, order int, cut int64) {
 	if g == nil {
 		return
 	}
+	g.writeMu.Lock()
+	defer g.writeMu.Unlock()
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	seated := make(map[string]*Goal, len(goals))
@@ -165,6 +171,7 @@ func (g *GoalRegistry) seat(goals []*Goal, order int, cut int64) {
 	g.goals = seated
 	g.seq = order
 	g.evtSeq = cut
+	g.stopped = nil
 }
 
 // stated reports the cut, the declaration order and the goals the framework state
@@ -199,13 +206,12 @@ func (g *GoalRegistry) Declare(statement, createdBy string, expiresMs int64) str
 		Status: GoalActive, CreatedMs: now, ExpiresMs: expiresMs,
 	}
 	g.goals[id] = goal
-	evtKey := g.eventKeyLocked()
 	log := g.log
 	g.mu.Unlock()
 	g.writeGoalEvent(log, goalEventPayload{
 		GoalID: id, Op: goalOpDeclared, Statement: statement,
 		CreatedBy: createdBy, ExpiresMs: expiresMs,
-	}, evtKey, now, SubtypeGoalDeclared)
+	}, now, SubtypeGoalDeclared)
 	return id
 }
 
@@ -223,14 +229,13 @@ func (g *GoalRegistry) Resolve(id string, status GoalStatus) bool {
 	if ok {
 		goal.Status = status
 	}
-	evtKey := g.eventKeyLocked()
 	now := time.Now().UnixMilli()
 	log := g.log
 	g.mu.Unlock()
 	if ok {
 		g.writeGoalEvent(log, goalEventPayload{
 			GoalID: id, Op: goalOpResolved, Status: string(status),
-		}, evtKey, now, SubtypeGoalResolved)
+		}, now, SubtypeGoalResolved)
 	}
 	return ok
 }
@@ -337,24 +342,30 @@ func goalSeqOf(id string) int {
 	return n
 }
 
-// eventKeyLocked allocates the ordered identity of the next goal event. The
-// caller holds the lock, so the key order is the operation order and a replay
-// reconstructs it exactly — a resolved goal is never resurrected by a rebuild.
-func (g *GoalRegistry) eventKeyLocked() string {
-	g.evtSeq++
-	return fmt.Sprintf("%s%019d", goalEventPrefix, g.evtSeq)
-}
-
 // writeGoalEvent writes one goal operation as the governance event its
-// declaration or resolution requires. A write that fails is dropped beside the
-// standing memory entry: the goal gate keeps working and the audit
-// persistence stays best effort.
-func (g *GoalRegistry) writeGoalEvent(log GovernanceEventLog, p goalEventPayload, key string, ts int64, subtype string) {
+// declaration or resolution requires, and numbers the stream only behind a barrier
+// it confirmed: the write path is serialized, a refused write hands its number
+// back, and a barrier that did not confirm stops the stream from numbering on. The
+// memory entry stands either way — the goal gate keeps working — and the failure
+// is named at ERROR instead of dropping out of the durable stream in silence.
+func (g *GoalRegistry) writeGoalEvent(log durable.FactLog, p goalEventPayload, ts int64, subtype string) {
 	if log == nil {
+		return
+	}
+	g.writeMu.Lock()
+	defer g.writeMu.Unlock()
+	g.mu.Lock()
+	stopped := g.stopped
+	seq := g.evtSeq + 1
+	g.mu.Unlock()
+	key := fmt.Sprintf("%s%019d", goalEventPrefix, seq)
+	if stopped != nil {
+		governanceWriteFailure(key, subtype, p.GoalID, stopped)
 		return
 	}
 	content, err := json.Marshal(p)
 	if err != nil {
+		governanceWriteFailure(key, subtype, p.GoalID, err)
 		return
 	}
 	meta := map[string]string{
@@ -369,16 +380,36 @@ func (g *GoalRegistry) writeGoalEvent(log GovernanceEventLog, p goalEventPayload
 		Meta:      meta,
 		Message:   contentMessage(string(content)),
 	}
-	putGovernanceEvent(context.Background(), log, key, evt)
+	staged, err := putGovernanceEvent(context.Background(), log, key, evt)
+	if err == nil {
+		g.mu.Lock()
+		if seq > g.evtSeq {
+			g.evtSeq = seq
+		}
+		g.mu.Unlock()
+		return
+	}
+	if staged {
+		g.mu.Lock()
+		if seq > g.evtSeq {
+			g.evtSeq = seq
+		}
+		if g.stopped == nil {
+			g.stopped = fmt.Errorf("the write barrier at %s%019d did not confirm: %w", goalEventPrefix, seq, err)
+		}
+		g.mu.Unlock()
+	}
+	governanceWriteFailure(key, subtype, p.GoalID, err)
 }
 
 // foldTail folds the stored goal events that landed past one cut into the
 // registry — the declared goals and their resolutions in the order the
 // operations happened, with the declaration order realigned so a later
 // declaration never reuses an identity a stored goal already took — and
-// continues the stream numbering from the newest event it read. A malformed
-// event is skipped rather than failing the fold.
-func (g *GoalRegistry) foldTail(ctx context.Context, log GovernanceEventLog, cut int64) error {
+// continues the stream numbering from the newest event it read. An event body
+// this fold cannot read as a goal operation is skipped, while an event the store
+// cannot parse at all fails the read that returns it (see governanceEventsPast).
+func (g *GoalRegistry) foldTail(ctx context.Context, log durable.FactLog, cut int64) error {
 	events, newest, err := governanceEventsPast(ctx, log, goalEventPrefix, cut)
 	if err != nil {
 		return err

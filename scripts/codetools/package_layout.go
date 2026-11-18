@@ -61,6 +61,9 @@ var mirrorExemptTrees = []string{contractExamplesDir, "tests/integration/"}
 //   - runtime/agent/consumer_round_seed_test.go: the consumer round seed across consumer and loop
 //   - runtime/agent/effective_config_test.go: the effective config across loop, request_assembly and the model stand-in
 //   - tool/recall/get_public_test.go: get's public entry over the durable read face, beside the existing get_test.go
+//   - assembly/symptom_anchor_recovery_test.go: one boot's four quantities beside the integrity, slot-table and index walks it pays, across run, checkpoint, facts, commit, settle_turn, host_delivery and the ledger engines
+//   - assembly/symptom_anchor_longrun_test.go: one generation's whole cost face, across the same boot, checkpoint, settlement and delivery files plus the ledger engines and the durable load account
+//   - runtime/task/task_slice_receipt_anchor_test.go: the receipt seam between task.StateSettleAccount and state.DurableCommit.Seat; state imports task, so the proof stays in the external test package where checkpoint_test.go already holds the internal name
 var mirrorExemptFiles = []string{
 	"examples/wechat-bot/smoke_test.go",
 	"examples/wechat-bot/smoke_harness_test.go",
@@ -81,9 +84,12 @@ var mirrorExemptFiles = []string{
 	"assembly/recovery_sites_test.go",
 	"assembly/reload_outcome_test.go",
 	"assembly/retired_state_hygiene_test.go",
+	"assembly/symptom_anchor_longrun_test.go",
+	"assembly/symptom_anchor_recovery_test.go",
 	"memory/ledger/original_write_ahead_test.go",
 	"runtime/agent/consumer_round_seed_test.go",
 	"runtime/agent/effective_config_test.go",
+	"runtime/task/task_slice_receipt_anchor_test.go",
 	"tool/recall/get_public_test.go",
 }
 

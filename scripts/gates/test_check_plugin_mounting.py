@@ -138,6 +138,218 @@ type AgentSpec struct {
 }
 """
 
+CONFIG_SPEC_WITHOUT_PLUGINS = """package config
+
+type AgentSpec struct {
+	ID string
+}
+"""
+
+CONFIG_SPEC_WITHOUT_SPEC_BLOCK = """package config
+
+const Version = 1
+"""
+
+# The two halves of the host document a rule reads: the dialect that declares the
+# key, and the mapping that writes it into the spec.
+HOST_DOCUMENT_NO_DIALECT = """package assembly
+
+func (d *hostDocument) mapDocument() (document.Document, error) {
+	spec := config.AgentSpec{
+		Model:   d.model,
+		Plugins: append([]string(nil), d.entry.Plugins...),
+	}
+	return document.Document{}, nil
+}
+"""
+
+HOST_DOCUMENT_NO_MAP_DOCUMENT = """package assembly
+
+type hostAgent struct {
+	Provider string `yaml:"provider"`
+	Plugins  []string `yaml:"plugins"`
+}
+"""
+
+DECODE_WITHOUT_AGENT_KEYS = """package config
+
+func decodeAgent() {
+	a.Plugins = nil
+}
+"""
+
+ASSEMBLY_WITHOUT_PIPELINE = """package assembly
+
+type Run struct {
+	seq uint64
+}
+
+func tick(r *Run) { r.seq++ }
+"""
+
+# The member a pipeline collection is appended from is declared in four further
+# shapes: a long declaration, a literal initialiser, a parameter, and a field
+# carrying a struct tag (whose masked string must not hide the type).
+ASSEMBLY_VAR_DECLARED = ASSEMBLY + """
+func hardcodedVar(r *Run) {
+	var extras []plugin.Instance
+	extras = append(extras, r.compress)
+	_ = extras
+}
+"""
+
+ASSEMBLY_LITERAL_INITIALIZED = ASSEMBLY + """
+func hardcodedLiteral(r *Run) {
+	extras := []plugin.Instance{r.compress}
+	extras = append(extras, r.ageFold)
+	_ = extras
+}
+"""
+
+ASSEMBLY_PARAMETER = ASSEMBLY + """
+func hardcodedParam(r *Run, extras []plugin.Instance) []plugin.Instance {
+	return append(extras, r.compress)
+}
+"""
+
+# A parameter group declares every name of its comma list with the type that
+# follows the list, so the first name carries the same judgement as the last.
+ASSEMBLY_GROUPED_PARAMETER = ASSEMBLY + """
+func hardcodedGrouped(r *Run, a, b []plugin.Instance) {
+	a = append(a, r.compress)
+	_ = b
+}
+"""
+
+ASSEMBLY_GROUPED_SPREADS = ASSEMBLY + """
+func forwardedGrouped(r *Run, a, b []plugin.Instance) []plugin.Instance {
+	a = append(a, r.plugins...)
+	return append(b, a...)
+}
+"""
+
+# A name this file binds from a []plugin.Instance literal holds constructions of
+# this file, so spreading it forwards no resolution.
+ASSEMBLY_LITERAL_SPREAD = ASSEMBLY + """
+func launderSpread(r *Run) {
+	extras := []plugin.Instance{r.compress}
+	r.plugins = append(r.plugins, extras...)
+}
+"""
+
+# A spread of a composite literal names a construction rather than a collection.
+ASSEMBLY_INLINE_LITERAL_SPREAD = ASSEMBLY + """
+func inlineSpread(r *Run) {
+	r.plugins = append(r.plugins, []plugin.Instance{r.compress}...)
+}
+"""
+
+# A slice of a laundered name is still that name's elements.
+ASSEMBLY_LITERAL_SLICE_SPREAD = ASSEMBLY + """
+func launderSliceSpread(r *Run) {
+	extras := []plugin.Instance{r.compress}
+	r.plugins = append(r.plugins, extras[:]...)
+}
+"""
+
+ASSEMBLY_TAGGED_FIELD = """package assembly
+
+type Run struct {
+	plugins []plugin.Instance `yaml:"plugins"`
+}
+
+func hardcodedTagged(r *Run) {
+	r.plugins = append(r.plugins, r.compress)
+}
+"""
+
+# The registry implementation builds and filters instances, so the element a
+# range binds there may be re-emitted; a hardcoded member beside it is not.
+REGISTRY_MOUNT_HARDCODED = """package assembly
+
+func (r *Run) hardcoded() {
+	r.plugins = append(r.plugins, r.compress)
+}
+"""
+
+# A local bound from a []plugin.Instance literal holds constructions of this file,
+# so ranging over it and re-emitting its elements forwards no resolution; an
+# alias of that local is the same source.
+REGISTRY_MOUNT_LAUNDERED = """package assembly
+
+func launderElement(r *Run) []plugin.Instance {
+	extras := []plugin.Instance{r.compress}
+	elements := make([]plugin.Instance, 0, len(extras))
+	for _, instance := range extras {
+		elements = append(elements, instance)
+	}
+	return elements
+}
+"""
+
+REGISTRY_MOUNT_LAUNDERED_ALIAS = """package assembly
+
+func launderAlias(r *Run) []plugin.Instance {
+	seed := []plugin.Instance{r.compress}
+	extras := seed
+	elements := make([]plugin.Instance, 0, len(extras))
+	for _, instance := range extras {
+		elements = append(elements, instance)
+	}
+	return elements
+}
+"""
+
+# The registered registry implementation, present so the entry resolves without
+# mounting anything.
+REGISTRY_MOUNT_PRESENT = """package assembly
+
+// mountsNothing is the fixture tree's registry implementation: the registered
+// entry has to name a file that exists, so the tree carries one.
+func mountsNothing() {}
+"""
+
+REGISTRY_MOUNT_FILTER = """package assembly
+
+func filter(r *Run, contributed []plugin.Instance) []plugin.Instance {
+	elements := make([]plugin.Instance, 0, len(contributed))
+	for _, instance := range contributed {
+		if instance.Name() != "" {
+			elements = append(elements, instance)
+		}
+	}
+	elements = append(elements, r.plugins...)
+	return elements
+}
+"""
+
+# The same filter shape outside the registry implementation: only a spread
+# forwards there, so the element-wise re-emit is red.
+ASSEMBLY_FILTER_OUTSIDE_REGISTRY = ASSEMBLY + """
+func hardcodedFilter(r *Run, contributed []plugin.Instance) {
+	elements := make([]plugin.Instance, 0, len(contributed))
+	for _, instance := range contributed {
+		elements = append(elements, instance)
+	}
+	_ = elements
+}
+"""
+
+# An instance collection iterated by name: the field name matches, the element
+# type is the plugin instance the pipeline carries, so it is not the declaration.
+RUNTIME_INSTANCE_CONSUMER = """package runtime
+
+type NativeAgent struct {
+	Plugins []plugin.Instance
+}
+
+func deliver(native *NativeAgent) {
+	for _, instance := range native.Plugins {
+		instance.Name()
+	}
+}
+"""
+
 RUNTIME_MOUNT = """package runtime
 
 func mounts(spec config.AgentSpec) []plugin.Instance {
@@ -171,6 +383,21 @@ ARCHITECTURE = {
         "registry_implementation": ["assembly/compress_mount.go"],
     },
 }
+
+# An exception that names no review date: the breakthrough protocol asks for one.
+EXCEPTION_WITHOUT_REVIEW = {
+    "file": "assembly/fixture.go",
+    "element": "r.compress",
+    "reason": "fixture exception",
+    "adr": ADR,
+    "user_ruling": "fixture ruling",
+}
+
+
+def architecture(**overrides):
+    mounting = dict(ARCHITECTURE["mounting"])
+    mounting.update(overrides)
+    return {"schema_version": ARCHITECTURE["schema_version"], "mounting": mounting}
 
 
 def exception(file_value, element, **overrides):
@@ -213,6 +440,7 @@ def build_fixture(root, **overrides):
     write(root, "scripts/gates/check_plugin_mounting.py", "# fixture gate\n")
     sources = {
         "assembly/fixture.go": ASSEMBLY,
+        "assembly/compress_mount.go": REGISTRY_MOUNT_PRESENT,
         "assembly/host_document.go": HOST_DOCUMENT,
         "api/config/decode.go": DECODE,
         "api/config/config.go": CONFIG_SPEC,
@@ -327,10 +555,169 @@ def main():
     )
 
     case(
+        "an empty pipeline derivation is rejected",
+        sources={"assembly/fixture.go": ASSEMBLY_WITHOUT_PIPELINE},
+        expected_rc=1,
+        contains=["R5a", "no []plugin.Instance pipeline collection", "type anchor"],
+    )
+
+    # A container added in any of the four further declaration shapes joins the
+    # judged set without a registry edit, so its hardcoded append is red.
+    case(
+        "a var-declared pipeline collection is derived",
+        sources={"assembly/fixture.go": ASSEMBLY_VAR_DECLARED},
+        expected_rc=1,
+        contains=["R5a", "concrete member", "r.compress"],
+    )
+
+    case(
+        "a literal-initialized pipeline collection is derived",
+        sources={"assembly/fixture.go": ASSEMBLY_LITERAL_INITIALIZED},
+        expected_rc=1,
+        contains=["R5a", "concrete member", "r.ageFold"],
+    )
+
+    case(
+        "a parameter pipeline collection is derived",
+        sources={"assembly/fixture.go": ASSEMBLY_PARAMETER},
+        expected_rc=1,
+        contains=["R5a", "concrete member", "r.compress"],
+    )
+
+    # A parameter group carries a comma list of names sharing the type that
+    # follows it: the first name is derived as well as the last, and legitimate
+    # spreads through either name stay green.
+    case(
+        "a grouped parameter collection is derived",
+        sources={"assembly/fixture.go": ASSEMBLY_GROUPED_PARAMETER},
+        expected_rc=1,
+        contains=["R5a", "concrete member", "'r.compress'", "errors=1"],
+    )
+
+    case(
+        "a grouped parameter list keeps every legitimate spread",
+        sources={"assembly/fixture.go": ASSEMBLY_GROUPED_SPREADS},
+        contains=ok,
+        excludes=["R5a"],
+    )
+
+    # A forward may not launder a construction of this file: the name a spread
+    # carries, or the source a range reads, must not be bound from a
+    # []plugin.Instance literal.
+    case(
+        "a spread of a slice literal bound in this file is not a forwarded element",
+        sources={"assembly/fixture.go": ASSEMBLY_LITERAL_SPREAD},
+        expected_rc=1,
+        contains=[
+            "R5a",
+            "spread",
+            "extras...",
+            "binds from a []plugin.Instance literal",
+            "errors=1",
+        ],
+    )
+
+    case(
+        "a spread of an inline slice literal is not a forwarded element",
+        sources={"assembly/fixture.go": ASSEMBLY_INLINE_LITERAL_SPREAD},
+        expected_rc=1,
+        contains=[
+            "R5a",
+            "spread",
+            "[]plugin.Instance{r.compress}",
+            "errors=1",
+        ],
+    )
+
+    case(
+        "a spread of a slice of a laundered literal is not a forwarded element",
+        sources={"assembly/fixture.go": ASSEMBLY_LITERAL_SLICE_SPREAD},
+        expected_rc=1,
+        contains=[
+            "R5a",
+            "spread",
+            "extras[:]...",
+            "binds from a []plugin.Instance literal",
+            "errors=1",
+        ],
+    )
+
+    case(
+        "a laundered slice literal is not a forwarded element",
+        sources={"assembly/compress_mount.go": REGISTRY_MOUNT_LAUNDERED},
+        expected_rc=1,
+        contains=[
+            "R5a",
+            "concrete member",
+            "'instance'",
+            "forwarded from 'extras'",
+            "binds from a []plugin.Instance literal",
+            "errors=1",
+        ],
+    )
+
+    case(
+        "an alias of a laundered slice literal is not a forwarded element",
+        sources={"assembly/compress_mount.go": REGISTRY_MOUNT_LAUNDERED_ALIAS},
+        expected_rc=1,
+        contains=[
+            "R5a",
+            "forwarded from 'extras'",
+            "binds from a []plugin.Instance literal",
+            "errors=1",
+        ],
+    )
+
+    case(
+        "a tagged pipeline field is still derived",
+        sources={"assembly/fixture.go": ASSEMBLY_TAGGED_FIELD},
+        expected_rc=1,
+        contains=["R5a", "concrete member", "r.compress"],
+    )
+
+    # The registry implementation is exempt from the whole-file skip but not from
+    # the rule: a forwarded element passes, a hardcoded one is named.
+    case(
+        "a hardcoded append in a registry implementation file is rejected",
+        sources={"assembly/compress_mount.go": REGISTRY_MOUNT_HARDCODED},
+        expected_rc=1,
+        contains=["assembly/compress_mount.go", "R5a", "concrete member", "r.compress"],
+    )
+
+    case(
+        "a resolved collection filter in a registry implementation file passes",
+        sources={"assembly/compress_mount.go": REGISTRY_MOUNT_FILTER},
+        contains=ok + ["mounts=0"],
+        excludes=["R5a"],
+    )
+
+    case(
+        "a forwarded element outside the registry implementation is rejected",
+        sources={"assembly/fixture.go": ASSEMBLY_FILTER_OUTSIDE_REGISTRY},
+        expected_rc=1,
+        contains=["assembly/fixture.go", "R5a", "concrete member", "instance"],
+    )
+
+    # The field name alone does not make a consumer: the element type of the
+    # field decides, so an instance collection iterated as native.Plugins is
+    # named and the declaration stays a dead field. Both C4 emissions must speak:
+    # the error count is what shows neither is printed while the other supplies
+    # the exit code.
+    case(
+        "an instance collection is not a declared name consumer",
+        sources={"runtime/mount.go": RUNTIME_INSTANCE_CONSUMER},
+        expected_rc=1,
+        contains=["R5b C4", "native.Plugins", "instance collection", "dead field", "errors=2"],
+    )
+
+    # Two rules read the same decoder vocabulary, so both must report: a rule
+    # degraded to printing its message would still leave its text in the output,
+    # and only the error count shows the gate itself refused.
+    case(
         "a declaration outside agentKeys is rejected",
         sources={"api/config/decode.go": DECODE_WITHOUT_KEY},
         expected_rc=1,
-        contains=["R5b C1", "plugins"],
+        contains=["R5b C1", "mounting.declaration.key", "errors=2"],
     )
 
     case(
@@ -365,6 +752,182 @@ def main():
         architecture={"schema_version": 1},
         expected_rc=1,
         contains=["mounting is not registered"],
+    )
+
+    case(
+        "a mounting gate that names no file is rejected",
+        architecture=architecture(gate="scripts/gates/absent.py"),
+        expected_rc=1,
+        contains=["mounting.gate", "does not exist"],
+    )
+
+    case(
+        "an invariant without its SHALL clause is rejected",
+        architecture=architecture(
+            invariant=[
+                "装配根 SHALL NOT 直接构造具体特性组件再挂进插件管道。",
+                "特性经声明与代际注册表按名挂载。",
+                "声明 SHALL 有生产消费方。",
+            ]
+        ),
+        expected_rc=1,
+        contains=["mounting.invariant[1]", "SHALL"],
+    )
+
+    case(
+        "an invariant list shorter than three is rejected",
+        architecture=architecture(
+            invariant=[
+                "装配根 SHALL NOT 直接构造具体特性组件再挂进插件管道。",
+                "特性 SHALL 经声明与代际注册表按名挂载。",
+            ]
+        ),
+        expected_rc=1,
+        contains=["mounting.invariant must carry the 3 invariants"],
+    )
+
+    case(
+        "a declaration key no spec field carries is rejected",
+        sources={"api/config/config.go": CONFIG_SPEC_WITHOUT_PLUGINS},
+        expected_rc=1,
+        contains=["names no Plugins field", "errors=3"],
+    )
+
+    # Every remaining emission of the gate's own surfaces: the count is asserted
+    # so each case fails the moment its rule is degraded to printing, instead of
+    # passing on a message another rule also produces.
+    case(
+        "a spec file without an AgentSpec block is rejected",
+        sources={"api/config/config.go": CONFIG_SPEC_WITHOUT_SPEC_BLOCK},
+        expected_rc=1,
+        contains=["carries no AgentSpec block", "errors=3"],
+    )
+
+    case(
+        "a registry exception that is not an object is rejected",
+        registry=registry(exceptions=["assembly/fixture.go"]),
+        expected_rc=1,
+        contains=["exception[0]: must be an object", "errors=1"],
+    )
+
+    case(
+        "a mounting gate that names nothing is rejected",
+        architecture=architecture(gate="  "),
+        expected_rc=1,
+        contains=["mounting.gate must name the checking entry", "errors=1"],
+    )
+
+    case(
+        "a registry implementation entry outside the assembly scope is rejected",
+        architecture=architecture(registry_implementation=["runtime/mount.go"]),
+        expected_rc=1,
+        contains=["must name a assembly file", "errors=1"],
+    )
+
+    case(
+        "a registry implementation entry that is not a Go source is rejected",
+        architecture=architecture(registry_implementation=["assembly/x.txt"]),
+        expected_rc=1,
+        contains=["is not a Go source", "errors=1"],
+    )
+
+    # A registered file the gate cannot scan is a registration that lies: the
+    # exemption resolves to nothing, so the entry has no consumer left.
+    case(
+        "a registry implementation entry naming a missing file is rejected",
+        architecture=architecture(registry_implementation=["assembly/absent_mount.go"]),
+        expected_rc=1,
+        contains=[
+            "mounting.registry_implementation[0]",
+            "'assembly/absent_mount.go' does not exist",
+            "errors=1",
+        ],
+    )
+
+    case(
+        "a missing declaration surface is rejected",
+        sources={"api/config/decode.go": None},
+        expected_rc=1,
+        contains=["R5b C1", "does not exist", "errors=1"],
+    )
+
+    case(
+        "a declaration surface without the agentKeys block is rejected",
+        sources={"api/config/decode.go": DECODE_WITHOUT_AGENT_KEYS},
+        expected_rc=1,
+        contains=["R5b C1", "agentKeys block is missing", "errors=1"],
+    )
+
+    case(
+        "a missing host document is rejected",
+        sources={"assembly/host_document.go": None},
+        expected_rc=1,
+        contains=["R5b C2", "does not exist", "errors=1"],
+    )
+
+    case(
+        "a host document without the hostAgent dialect is rejected",
+        sources={"assembly/host_document.go": HOST_DOCUMENT_NO_DIALECT},
+        expected_rc=1,
+        contains=["R5b C2", "hostAgent dialect is missing", "errors=1"],
+    )
+
+    case(
+        "a host document without mapDocument is rejected",
+        sources={"assembly/host_document.go": HOST_DOCUMENT_NO_MAP_DOCUMENT},
+        expected_rc=1,
+        contains=["R5b C3", "mapDocument is missing", "errors=1"],
+    )
+
+    case(
+        "a declaration key other than the one the rule protects is rejected",
+        architecture=architecture(declaration={"key": "plugin"}),
+        expected_rc=1,
+        contains=["mounting.declaration.key must be 'plugins'"],
+    )
+
+    case(
+        "a registry whose exceptions are not a list is rejected",
+        registry=registry(exceptions={"file": "assembly/fixture.go"}),
+        expected_rc=1,
+        contains=["'exceptions' must be a list"],
+    )
+
+    # Both of these entries are also unmatched, so the stale rule keeps the gate
+    # red on its own: the error count is what shows the entry rule itself spoke.
+    case(
+        "an exception for a file that does not exist is rejected",
+        registry=registry(exceptions=[exception("assembly/absent.go", "r.compress")]),
+        expected_rc=1,
+        contains=["file 'assembly/absent.go' does not exist", "errors=2"],
+    )
+
+    case(
+        "an exception outside the assembly scope is rejected",
+        registry=registry(exceptions=[exception("runtime/mount.go", "r.compress")]),
+        expected_rc=1,
+        contains=["is outside the assembly/ scope", "errors=2"],
+    )
+
+    case(
+        "a duplicate registration is rejected",
+        sources={"assembly/fixture.go": ASSEMBLY_MEMBER},
+        registry=registry(
+            exceptions=[
+                exception("assembly/fixture.go", "r.compress"),
+                exception("assembly/fixture.go", "r.compress"),
+            ]
+        ),
+        expected_rc=1,
+        contains=["duplicate registration of 'r.compress'"],
+    )
+
+    case(
+        "an exception without its review metadata is rejected",
+        sources={"assembly/fixture.go": ASSEMBLY_MEMBER},
+        registry=registry(exceptions=[EXCEPTION_WITHOUT_REVIEW]),
+        expected_rc=1,
+        contains=["missing review_by"],
     )
 
     with tempfile.TemporaryDirectory() as root:

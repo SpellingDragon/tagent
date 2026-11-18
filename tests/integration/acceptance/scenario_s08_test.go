@@ -147,7 +147,7 @@ func TestScenario08QueryWithoutOtel(t *testing.T) {
 	const instance event.InstanceID = "instance-1"
 	addrA := event.Address{AgentID: "agent-a", SessionID: "session-a"}
 	addrB := event.Address{AgentID: "agent-b", SessionID: "session-b"}
-	tier, err := ledger.OpenTier(ctx, ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: t.TempDir()})
+	tier, err := ledger.OpenTier(ctx, ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: t.TempDir(), WriteRights: true})
 	if err != nil {
 		t.Fatalf("open the storage tier: %v", err)
 	}

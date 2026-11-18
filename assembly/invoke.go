@@ -93,23 +93,50 @@ func (r *Run) waitResident(ctx context.Context, addr event.Address, invocationID
 // same deadline, so a close beside a producer that never stops answers Cut
 // beside that producer's name instead of waiting on it without an end. A
 // repeated close retries the quiesce the same way until the run reaches rest.
-// The redline list (5 rules):
+// The storage tier the run opened ends exactly when the process holds no further
+// commit to that root: a resident consumption loop the close left inside a model
+// production, and a writer that has not confirmed its stop, are the two sources a
+// commit after this return could come from, so the root goes to a next writer when
+// neither stands and is kept when either does, whatever state the report names. An
+// obligation left standing on the chain — an input no answer closed, a notice no
+// turn consumed — is state a restart reads and not a commit this process owes, so a
+// cut beside those alone gives the root up; a cut beside work still in flight keeps
+// its write rights, and the refusal a released worker owes a closed session lands
+// through the view the run holds. The kernel drops the lock when the process exits,
+// so a root a close keeps is never a lock a later process inherits nor one anybody
+// has to clear.
+// A repeated close files no second checkpoint, because the first close filed the
+// one it owed through the view it held and that view ends with it.
+// The redline list (7 rules):
 // MUST judge the timeout of the close before any side effect it would take, so a close naming none is refused with the run untouched.
 // MUST refuse new input before the first quiesce of the close.
 // MUST mark the resident consumption loops the loop mounted for itself before the first read of the rest criterion, and join them inside the budget the request named, so a segment those loops still fly is waited out or named — never unbounded before Cut and never cancelled by the close itself.
 // MUST judge the run by the one rest criterion, never by an emptied queue or an elapsed wait.
 // MUST NOT report a run at rest while a writer has not stopped.
-func (r *Run) Close(ctx context.Context, req agent.CloseRequest) (agent.DrainReport, error) {
+// MUST release the storage tier by the commit sources that stand at the release, never by the state the report names.
+// MUST read the writer ledger again at the release it takes, so a production that began after the criterion keeps the root it would commit through.
+func (r *Run) Close(ctx context.Context, req agent.CloseRequest) (report agent.DrainReport, closeErr error) {
 	timeout, timeoutErr := req.Resolve()
 	if timeoutErr != nil {
 		return agent.DrainReport{Outcome: agent.CloseBroken}, timeoutErr
 	}
+	var flying []string
+	defer func() {
+		if len(flying) > 0 {
+			return
+		}
+		if stopped, _ := r.writers.Stopped(); !stopped {
+			return
+		}
+		closeErr = errors.Join(closeErr, r.closeStorage())
+	}()
 	r.mu.Lock()
 	r.closing = true
 	r.mu.Unlock()
 	r.stopCheckpointFiler()
 	defer r.markCloseReturned()
-	if flying := r.loop.StopResidentsWithin(timeout); len(flying) > 0 {
+	flying = r.loop.StopResidentsWithin(timeout)
+	if len(flying) > 0 {
 		assemblyWarn("tagent: the close budget ended beside %d resident loop(s) still inside a model production: %s", len(flying), strings.Join(flying, ", "))
 	}
 	judge := context.WithoutCancel(ctx)
@@ -121,14 +148,19 @@ func (r *Run) Close(ctx context.Context, req agent.CloseRequest) (agent.DrainRep
 	stopped, writers := r.writers.Stopped()
 	landing := r.landingOwed()
 	drained := len(cut) == 0 && read.Resting() && stopped && !landing
-	report := agent.DrainReport{
+	r.mu.Lock()
+	r.closeDrained = drained
+	r.mu.Unlock()
+	report = agent.DrainReport{
 		Unsettled: mergeUnsettled(cut, r.unsettledObligations(read), agent.WriterObligations(writers), landingObligations(landing)),
 		Drained:   drained,
 		Outcome:   closeOutcome(read, drained),
 		Failed:    r.failedAnswers(),
 	}
-	if err := r.fileClosingCheckpoint(judge, timeout); err != nil {
-		return report, err
+	if !r.closeFinished() {
+		if err := r.fileClosingCheckpoint(judge, timeout); err != nil {
+			return report, err
+		}
 	}
 	if req.Address.IsComplete() {
 		if closeErr := r.store.CloseSession(ctx, req.Address); closeErr != nil && !errors.Is(closeErr, state.ErrUnknownTarget) {

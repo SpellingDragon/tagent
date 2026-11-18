@@ -31,6 +31,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strconv"
 	"sync"
 	"time"
 
@@ -374,89 +375,7 @@ func (r *Run) checkpointLocked(ctx context.Context) (event.EventID, bool, error)
 	r.checkpointCommits = 0
 	r.checkpointAt = time.Now()
 	r.mu.Unlock()
-	if err := r.relocateSettledFacts(ctx, tier, offset); err != nil {
-		assemblyError("tagent: the facts the checkpoint %s settled were not relocated: %v", key, err)
-	}
 	return key, true, nil
-}
-
-// relocateSettledFacts moves the facts the checkpoint settled out of the hot
-// journal, so the journal a boot opens holds the tail the checkpoint leaves and
-// not the history behind it. The pass drains the pipeline first, so the key set it
-// keeps is read from a pipeline that applied every fact it landed.
-//
-//   - The pass is exclusive at the engine and nowhere else: the store holds its own lock across the copy, the byte-for-byte verification and the rewrite of the hot journal, so no commit lands inside the rewrite, and a commit that lands between reading the kept key set and the rewrite is one this pass never judged — the store settles the keys its snapshot read, so that fact keeps its place in the hot journal and the next pass reads it in its own snapshot.
-//   - Keeping such a fact hot is what a reader that scans the hot journal alone needs — the task records a boot rebuilds its chains from are such a reader — and the pass still bounds the journal, because the fact it left behind is one a later cut settles.
-//   - The kept key set is what the boot reads hot: the tail past the cut — the facts committed after the checkpoint, which the boot replays — beside the newest checkpoint of each session chain, which is the state a boot restores instead of folding the covered history.
-//   - Every other fact is copied to the cold journal first and stays readable by identity, so a bounded hot journal is never a store that lost its history.
-//   - A tier that declares no retirement answers ErrColdArchiveUnavailable, which this pass reads as the deployment choosing to keep only appending: the hot journal then keeps every fact and the boot pays the whole history, which is the behavior of a store that never relocated anything.
-//   - A run whose boot is over begins no rewrite of the hot journal: the pass is housekeeping a later boot files, and one started here would write beside a process that is already stopping. The pass reads the boot context for the same reason, so one already under way stops at its next step boundary instead of rewriting a journal nothing of this process will read.
-func (r *Run) relocateSettledFacts(ctx context.Context, tier *ledger.Tier, offset event.CheckpointOffset) error {
-	if r == nil || tier == nil || !tier.Capabilities.Durable {
-		return nil
-	}
-	passContext := ctx
-	if r.bootContext != nil {
-		if r.bootContext.Err() != nil {
-			return nil
-		}
-		passContext = r.bootContext
-	}
-	if err := r.flight.await(ctx); err != nil {
-		return err
-	}
-	keep, err := r.keptHotKeys(ctx, tier, offset)
-	if err != nil {
-		return err
-	}
-	report, err := tier.Segments.RetireFacts(passContext, keep)
-	if errors.Is(err, ledger.ErrColdArchiveUnavailable) {
-		return nil
-	}
-	if err != nil {
-		return err
-	}
-	if report.Settled > 0 {
-		assemblyInfo("tagent: relocated the facts the checkpoint settled settled=%d skipped=%d batches=%d kept=%d",
-			report.Settled, report.Skipped, report.Batches, len(keep))
-	}
-	return nil
-}
-
-// keptHotKeys answers the keys the hot journal keeps for the cut a checkpoint
-// states: every fact committed past the cut, which the boot replays, beside the
-// newest checkpoint of every session chain and the framework checkpoint itself,
-// which are the states a boot restores instead of folding the history behind them.
-// The walk stops at the framework checkpoint because a boot restoring it reads no
-// checkpoint filed before it.
-func (r *Run) keptHotKeys(ctx context.Context, tier *ledger.Tier, offset event.CheckpointOffset) (map[event.EventID]struct{}, error) {
-	if r == nil || tier == nil {
-		return nil, nil
-	}
-	keep := make(map[event.EventID]struct{})
-	chains := make(map[event.SessionID]struct{})
-	err := tier.Segments.EachIndexNewestFirst(ctx, func(key event.EventID, partition int, seq int64, typ string, session event.SessionID) error {
-		if seq > offset[partition] {
-			keep[key] = struct{}{}
-			return nil
-		}
-		if typ != event.TypeCheckpoint {
-			return nil
-		}
-		if _, held := chains[session]; held {
-			return nil
-		}
-		chains[session] = struct{}{}
-		keep[key] = struct{}{}
-		if session == "" {
-			return errStopIndexWalk
-		}
-		return nil
-	})
-	if err != nil && !errors.Is(err, errStopIndexWalk) {
-		return nil, err
-	}
-	return keep, nil
 }
 
 // CheckpointSession takes one cut of the named session chain and files the fact
@@ -530,31 +449,6 @@ func (r *Run) checkpointSessionLocked(ctx context.Context, addr event.Address) (
 	r.sessionSlices[addr.SessionID] = names
 	r.mu.Unlock()
 	return key, true, nil
-}
-
-// sessionCut reports the cut the newest checkpoint of one session states for one
-// state slice: the boundary the boot replays that chain past. A session the
-// restored checkpoints did not state, and a checkpoint that states no such slice,
-// answer the framework's own cut instead, which is what bounds a boot that read
-// no checkpoint of that chain.
-func (r *Run) sessionCut(session event.SessionID, slice string) event.CheckpointOffset {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if len(r.sessionCuts[session]) != 0 && r.sessionSlices[session][slice] {
-		cut := make(event.CheckpointOffset, len(r.sessionCuts[session]))
-		for partition, seq := range r.sessionCuts[session] {
-			cut[partition] = seq
-		}
-		return cut
-	}
-	if len(r.checkpointOffset) == 0 || !r.checkpointSlices[slice] {
-		return nil
-	}
-	cut := make(event.CheckpointOffset, len(r.checkpointOffset))
-	for partition, seq := range r.checkpointOffset {
-		cut[partition] = seq
-	}
-	return cut
 }
 
 // checkpointEventOf renders one checkpoint as the fact it commits as: the
@@ -847,20 +741,24 @@ func (r *Run) CheckpointFiled() (event.EventID, event.CheckpointOffset) {
 // a run whose owner moved between processes filed its newest checkpoint in the
 // partition of its newest process, and reading the highest partition instead
 // would restore the state of a process that stopped earlier.
+//
+//   - The reference carries the partition the answered entry landed in, so the restore reads that body by naming it and never by probing the partitions the seat states: a seat that under-states a partition answers absence beside a body the log holds.
 func newestCheckpointRef(ctx context.Context, tier *ledger.Tier) (anchorRef, bool, error) {
-	key, held, err := tier.Segments.NewestOfType(ctx, event.TypeCheckpoint)
+	key, partition, held, err := tier.Segments.NewestOfType(ctx, event.TypeCheckpoint)
 	if err != nil || !held {
 		return anchorRef{}, false, err
 	}
-	return anchorRef{key: key, typ: event.TypeCheckpoint}, true, nil
+	return anchorRef{key: key, partition: partition, typ: event.TypeCheckpoint}, true, nil
 }
 
 // restoreCheckpoint reads one checkpoint fact back and hands every slice to the
 // holder that states it, then reports the cut the restored state corresponds to.
 // A fact that states no readable checkpoint refuses the restore by name: the
 // boot never starts beside state it read as empty.
+//
+//   - The read names the partition the reference carries, so it addresses that one index entry instead of probing the partitions the seat states: a checkpoint whose partition the seat under-states is still read back.
 func (r *Run) restoreCheckpoint(ctx context.Context, tier *ledger.Tier, ref anchorRef) (event.CheckpointOffset, error) {
-	stored, held, err := tier.Segments.GetEvent(ctx, ref.key)
+	stored, held, err := tier.Segments.GetEventInPartition(ctx, ref.key, ref.partition)
 	if err != nil {
 		return nil, err
 	}
@@ -895,21 +793,19 @@ func (r *Run) restoreCheckpoint(ctx context.Context, tier *ledger.Tier, ref anch
 	return checkpoint.Offset, nil
 }
 
-// errStopIndexWalk ends an index walk the visitor has answered: the walk is read
-// newest commit first, so the first entry that answers the question is the one
-// the caller asked for and nothing behind it can answer better.
-var errStopIndexWalk = errors.New("assembly: the index walk answered")
-
 // seatDurableAccount seats the durable task account before the slices are handed
 // to their holders: the mailbox reads the notifications that account still owes,
 // so an account seated after the mailbox restore leaves every notice past the cut
 // unseated and undelivered, which is a work item a restart silently loses.
 //
 // The account is read from the tasks slice of this checkpoint beside the keys the
-// storage committed past its cut, so the tasks the checkpoint covers cost no
-// durable prefix read and the chains younger than the cut cost their own length.
-// A checkpoint that states no tasks slice, and a storage that states no cut, seat
-// nothing here and the boot reads the whole log instead.
+// storage committed past the newest framework checkpoint, so the tasks the
+// checkpoint covers cost no durable prefix read and the chains younger than it cost
+// their own length. A checkpoint that states no tasks slice, a walk that finds no
+// framework checkpoint, and a storage that states no commit order seat nothing here
+// and the boot reads the whole log instead. The boot states what the seat read back
+// by identity, because the reads this account costs are the ones the boot pays and
+// no other record of them reaches a boot report.
 func (r *Run) seatDurableAccount(ctx context.Context, tier *ledger.Tier, slices []event.CheckpointSlice) error {
 	durable := r.durableAccount()
 	if durable == nil || durable.Seated() {
@@ -922,10 +818,37 @@ func (r *Run) seatDurableAccount(ctx context.Context, tier *ledger.Tier, slices 
 			break
 		}
 	}
-	if err := durable.Seat(ctx, stated, tailFactKeys(tier)); err != nil {
+	tail, err := tailFactKeys(ctx, tier)
+	if err != nil {
+		return fmt.Errorf("tagent: walk the commit order of the task account: %w", err)
+	}
+	if err := durable.Seat(ctx, stated, tail); err != nil {
 		return fmt.Errorf("tagent: seat the durable task account of the checkpoint: %w", err)
 	}
+	stateSeatedAccount(durable, tail)
 	return nil
+}
+
+// stateSeatedAccount states what a boot read back by identity when it seated the
+// task account: the tasks the account holds, the size of the tail the storage
+// stated for those reads, and the reads and the keys they answered. A tail of
+// none is the boot that read the whole log, so its reads are the family scans
+// beside a storage that states no cut; a seated account that read no key states
+// zero, which is the checkpoint covering every task the account holds.
+//
+// 契约: docs/wiki/memory/memory-architecture.md#store-instance-sharing
+func stateSeatedAccount(durable *state.DurableCommit, tail map[string]struct{}) {
+	scans := durable.LoadStats().Scans
+	keys := 0
+	for _, scan := range scans {
+		keys += scan.Keys
+	}
+	cut := "none"
+	if tail != nil {
+		cut = strconv.Itoa(len(tail))
+	}
+	assemblyInfo("tagent: boot seated the task account tasks=%d tail=%s reads=%d keys=%d",
+		len(durable.TaskIDs()), cut, len(scans), keys)
 }
 
 // durableAccount answers the durable task account this run commits through, and
@@ -942,18 +865,42 @@ func (r *Run) durableAccount() *state.DurableCommit {
 	return durable
 }
 
-// tailFactKeys answers the keys the storage tier committed past its own index cut,
-// and nil beside a tier whose engine states no cut: nil is the boot that reads the
-// whole log, never a boot that reads an empty tail.
-func tailFactKeys(tier *ledger.Tier) map[string]struct{} {
+// tailFactKeys answers the keys the storage tier committed past its newest framework
+// checkpoint, and nil beside a walk that found no such checkpoint or an engine that
+// states no commit order: nil is the boot that reads the whole log, never a boot that
+// reads an empty tail. The walk ranks entries by the order the engine states and stops
+// at the newest checkpoint the framework itself filed, so the keys between the two are
+// the chains younger than the account and naming them costs their count instead of the
+// history. A checkpoint one session chain filed ends no walk, because the tasks behind
+// it are still younger than the framework checkpoint the walk is looking for.
+func tailFactKeys(ctx context.Context, tier *ledger.Tier) (map[string]struct{}, error) {
 	if tier == nil || tier.Store == nil {
-		return nil
+		return nil, nil
 	}
-	probe, held := tier.Store.(interface{ TailKeys() map[string]struct{} })
-	if !held {
-		return nil
+	order, holds := tier.Store.(ledger.CommitOrder)
+	if !holds {
+		assemblyInfo("tagent: the storage states no commit order, so the boot reads the whole task log")
+		return nil, nil
 	}
-	return probe.TailKeys()
+	tail := map[string]struct{}{}
+	found := false
+	err := order.EachCommittedNewestFirst(ctx, func(key string, value []byte) (bool, error) {
+		if entry, named := ledger.CommittedIndexEntry(key, value); named &&
+			entry.Type == event.TypeCheckpoint && entry.Session == "" {
+			found = true
+			return false, nil
+		}
+		tail[key] = struct{}{}
+		return true, nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	if !found {
+		assemblyInfo("tagent: the commit order states no framework checkpoint, so the boot reads the whole task log")
+		return nil, nil
+	}
+	return tail, nil
 }
 
 // newestSessionCheckpointRef answers the newest checkpoint one session chain filed,
@@ -967,20 +914,20 @@ func newestSessionCheckpointRef(ctx context.Context, tier *ledger.Tier, session 
 		return anchorRef{}, false, nil
 	}
 	held := anchorRef{}
-	err := tier.Segments.EachIndexNewestFirst(ctx, func(key event.EventID, partition int, seq int64, typ string, tagged event.SessionID) error {
+	err := tier.Segments.EachIndexNewestFirstUntil(ctx, func(key event.EventID, partition int, seq int64, typ string, tagged event.SessionID) (bool, error) {
 		if typ != event.TypeCheckpoint || tagged != session {
-			return nil
+			return true, nil
 		}
 		held = anchorRef{key: key, partition: partition, seq: seq, typ: typ, session: tagged}
-		return errStopIndexWalk
+		return false, nil
 	})
-	if errors.Is(err, errStopIndexWalk) {
-		return held, true, nil
-	}
 	if err != nil {
 		return anchorRef{}, false, err
 	}
-	return anchorRef{}, false, nil
+	if held.key == "" {
+		return anchorRef{}, false, nil
+	}
+	return held, true, nil
 }
 
 // restoreSessionCheckpoints reads the newest checkpoint of every session chain the
@@ -1003,21 +950,21 @@ func (r *Run) restoreSessionCheckpoints(ctx context.Context, tier *ledger.Tier) 
 	}
 	newest := map[event.SessionID]anchorRef{}
 	var order []event.SessionID
-	err := tier.Segments.EachIndexNewestFirst(ctx, func(key event.EventID, partition int, seq int64, typ string, session event.SessionID) error {
+	err := tier.Segments.EachIndexNewestFirstUntil(ctx, func(key event.EventID, partition int, seq int64, typ string, session event.SessionID) (bool, error) {
 		if typ != event.TypeCheckpoint {
-			return nil
+			return true, nil
 		}
 		if session == "" {
-			return errStopIndexWalk
+			return false, nil
 		}
 		if _, held := newest[session]; held {
-			return nil
+			return true, nil
 		}
 		newest[session] = anchorRef{key: key, partition: partition, seq: seq, typ: typ, session: session}
 		order = append(order, session)
-		return nil
+		return true, nil
 	})
-	if err != nil && !errors.Is(err, errStopIndexWalk) {
+	if err != nil {
 		return err
 	}
 	if len(newest) == 0 {
@@ -1039,7 +986,7 @@ func (r *Run) restoreSessionCheckpoints(ctx context.Context, tier *ledger.Tier) 
 // whole account, so the two restores name one state per holder without one
 // erasing the other.
 func (r *Run) restoreSessionCheckpoint(ctx context.Context, tier *ledger.Tier, ref anchorRef) error {
-	stored, held, err := tier.Segments.GetEvent(ctx, ref.key)
+	stored, held, err := tier.Segments.GetEventInPartition(ctx, ref.key, ref.partition)
 	if err != nil {
 		return err
 	}
@@ -1121,23 +1068,31 @@ func (r *Run) restoreNewestCheckpoint(ctx context.Context, tier *ledger.Tier) (e
 // covers: the index walk names the positions without bodies, so the recovery of
 // one consumer costs the material committed since the cut instead of the whole
 // chain.
+//
+//   - The walk stops once every partition the cut names has answered an entry at or behind its own cut: nothing older than that entry can stand past a cut the walk already crossed, so the walk costs the tail and not the history the cut covers.
+//   - The stop rests on the count the walk named: a chain that states more entries past the cut than the seat's count less the cut's slots is one the stop cannot answer for, and the walk reads the whole index instead of answering a tail it cannot bound.
 func (r *Run) eachFactPastCut(ctx context.Context, tier *ledger.Tier, cut event.CheckpointOffset, visit func(ledger.StoredEvent) error) error {
 	var refs []anchorRef
-	if err := tier.Segments.EachIndexNewestFirst(ctx, func(key event.EventID, partition int, seq int64, typ string, session event.SessionID) error {
-		ref := anchorRef{key: key, partition: partition, seq: seq, typ: typ, session: session}
-		if typ == event.TypeCheckpoint {
-			return nil
+	walked, _, past, bounded := r.walkIndexPastCut(ctx, tier, cut)
+	if bounded && past == tier.Segments.EventCount()-coveredEntries(cut) {
+		for _, ref := range walked {
+			if ref.typ == event.TypeCheckpoint || !pastCut(cut, ref) {
+				continue
+			}
+			refs = append(refs, ref)
 		}
-		if !pastCut(cut, ref) {
-			return nil
+	} else if err := tier.Segments.EachIndexNewestFirstUntil(ctx, func(key event.EventID, partition int, seq int64, typ string, session event.SessionID) (bool, error) {
+		ref := anchorRef{key: key, partition: partition, seq: seq, typ: typ, session: session}
+		if typ == event.TypeCheckpoint || !pastCut(cut, ref) {
+			return true, nil
 		}
 		refs = append(refs, ref)
-		return nil
+		return true, nil
 	}); err != nil {
 		return err
 	}
 	for i := len(refs) - 1; i >= 0; i-- {
-		stored, held, err := tier.Segments.GetEvent(ctx, refs[i].key)
+		stored, held, err := tier.Segments.GetEventInPartition(ctx, refs[i].key, refs[i].partition)
 		if err != nil {
 			return err
 		}

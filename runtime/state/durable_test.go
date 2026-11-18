@@ -2,9 +2,11 @@ package state
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"reflect"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -12,6 +14,7 @@ import (
 
 	trpclog "trpc.group/trpc-go/trpc-agent-go/log"
 
+	"github.com/SpellingDragon/tagent/api/durable"
 	"github.com/SpellingDragon/tagent/api/event"
 	"github.com/SpellingDragon/tagent/memory/ledger"
 	"github.com/SpellingDragon/tagent/runtime/task"
@@ -828,7 +831,7 @@ var attemptWriteErr = errors.New("state: the log refused the attempt")
 // countingFactLog counts the pairs staged through one fact log, so a check reads
 // whether a repeated record staged a second pair.
 type countingFactLog struct {
-	FactLog
+	durable.FactLog
 	mu   sync.Mutex
 	puts int
 }
@@ -1176,18 +1179,13 @@ func barrierTotals(log *invariantFactLog, prefix string) (keys int, bytes int64)
 // named prefix, so a check can observe the commit beside a read that fails
 // partway instead of refusing every prefix at once.
 type selectiveScanLog struct {
-	inner     FactLog
+	inner     durable.FactLog
 	failEvery map[string]bool
 }
 
 // Put stages one pair on the inner log.
 func (l *selectiveScanLog) Put(ctx context.Context, key string, value []byte) error {
 	return l.inner.Put(ctx, key, value)
-}
-
-// Get reads one pair from the inner log.
-func (l *selectiveScanLog) Get(ctx context.Context, key string) ([]byte, bool, error) {
-	return l.inner.Get(ctx, key)
 }
 
 // Scan refuses the named prefixes and forwards the rest.
@@ -1239,7 +1237,7 @@ func seededSpec(tag string) task.Spec {
 // seedCommit drives one real write set with non-zero content on every table:
 // specs with identities, two commits carrying outboxes, one consumption, one
 // attempt and one refusal with its routing and moment frozen.
-func seedCommit(t *testing.T, ctx context.Context, log FactLog, taskID event.TaskID, tag string) {
+func seedCommit(t *testing.T, ctx context.Context, log durable.FactLog, taskID event.TaskID, tag string) {
 	t.Helper()
 	commit, err := NewDurableCommit(log, nil)
 	if err != nil {
@@ -1302,7 +1300,7 @@ func TestSeedCarriesEverySpecField(t *testing.T) {
 // success behind did not complete. The store itself is the real journal tier:
 // only the barrier is injected.
 type barrierFailureLog struct {
-	FactLog
+	durable.FactLog
 }
 
 // Sync reports a barrier that did not complete without touching the store.
@@ -1321,13 +1319,16 @@ func TestDurableCommitBarrier(t *testing.T) {
 
 	t.Run("committed_record_survives_reopen", func(t *testing.T) {
 		root := t.TempDir()
-		cfg := ledger.StorageConfig{Type: ledger.StorageJournal, Root: root}
+		cfg := ledger.StorageConfig{Type: ledger.StorageJournal, Root: root, WriteRights: true}
 		tier, err := ledger.OpenTier(ctx, cfg)
 		if err != nil {
 			t.Fatalf("open the journal tier: %v", err)
 		}
 		taskID := event.TaskID("task-barrier")
 		seedCommit(t, ctx, ledger.TierFactLog(tier), taskID, "barrier")
+		if err := tier.Close(); err != nil {
+			t.Fatalf("close the journal tier before the reopen: %v", err)
+		}
 		reopened, err := ledger.OpenTier(ctx, cfg)
 		if err != nil {
 			t.Fatalf("reopen the journal tier: %v", err)
@@ -1346,7 +1347,7 @@ func TestDurableCommitBarrier(t *testing.T) {
 
 	t.Run("barrier_failure_returns_uncertain", func(t *testing.T) {
 		root := t.TempDir()
-		tier, err := ledger.OpenTier(ctx, ledger.StorageConfig{Type: ledger.StorageJournal, Root: root})
+		tier, err := ledger.OpenTier(ctx, ledger.StorageConfig{Type: ledger.StorageJournal, Root: root, WriteRights: true})
 		if err != nil {
 			t.Fatalf("open the journal tier: %v", err)
 		}
@@ -1364,4 +1365,816 @@ func TestDurableCommitBarrier(t *testing.T) {
 			t.Fatalf("commit behind the failing barrier = (%v, %v), want the uncertain outcome beside the named failure", result, err)
 		}
 	})
+}
+
+// statedAccountOf renders what a checkpoint would state for one task of a commit:
+// the admission material, every fact the task committed and the settle account the
+// durable record holds. It is the entry a boot reads instead of the task's prefixes.
+func statedAccountOf(t *testing.T, commit *DurableCommit, taskID event.TaskID) task.StatedTask {
+	t.Helper()
+	receipts := commit.ReceiptsOf(taskID)
+	commit.mu.Lock()
+	spec, revision := commit.specs[taskID], commit.revisions[taskID]
+	facts := append([]task.CommitRecord(nil), commit.facts[taskID]...)
+	commit.mu.Unlock()
+	return task.StatedTask{
+		TaskID:    taskID,
+		Spec:      spec,
+		Status:    task.StatusRunning,
+		Revision:  revision,
+		Mutations: facts,
+		Consumed:  receipts.Consumed,
+		Attempts:  receipts.Attempts,
+		Rejected:  receipts.Rejected,
+	}
+}
+
+// statedPayloadOf renders one task account as the tasks slice payload states it: the
+// three receipt families go through the producer the checkpoint uses, so an account
+// that completed nothing is stated as the empty list and never as a missing key.
+func statedPayloadOf(t *testing.T, ctx context.Context, account task.SettleAccount, entries ...task.StatedTask) []byte {
+	t.Helper()
+	body, err := json.Marshal(task.RegistryCheckpoint{Tasks: entries})
+	if err != nil {
+		t.Fatalf("state the task account: %v", err)
+	}
+	body, err = task.StateSettleAccount(ctx, body, account)
+	if err != nil {
+		t.Fatalf("state the settle account beside the tasks: %v", err)
+	}
+	return body
+}
+
+// TestDurableLoadReadsTheTaskSlice pins the read a boot pays for a task its checkpoint covers.
+//   - positive: the seated account equals the loaded one in the tables a recovery reads — revisions, facts, owed notices, receipts — with no prefix read
+//   - negative of the read: the same commit seated from no entry reads the five prefixes whole, so a zero read is the slice and never an empty log
+//
+// 契约: docs/wiki/reliability/durable-delivery.md#canonical-fact-resolution
+func TestDurableLoadReadsTheTaskSlice(t *testing.T) {
+	ctx := context.Background()
+	log := newInvariantFactLog()
+	taskID := event.TaskID("task-seat-covered")
+	seedCommit(t, ctx, log, taskID, "seat")
+	loaded, err := NewDurableCommit(log, nil)
+	if err != nil {
+		t.Fatalf("load the commit from the whole log: %v", err)
+	}
+	entry := statedAccountOf(t, loaded, taskID)
+	if len(entry.Mutations) == 0 || len(entry.Consumed)+len(entry.Attempts)+len(entry.Rejected) == 0 {
+		t.Fatalf("the fixture states mutations=%d receipts=%d, want a task whose account carries both",
+			len(entry.Mutations), len(entry.Consumed)+len(entry.Attempts)+len(entry.Rejected))
+	}
+
+	seated := NewEmptyDurableCommit(log, nil)
+	if err := seated.Seat(ctx, statedPayloadOf(t, ctx, loaded, entry), map[string]struct{}{}); err != nil {
+		t.Fatalf("seat the task account from the checkpoint: %v", err)
+	}
+	for _, scan := range seated.LoadStats().Scans {
+		t.Fatalf("the seat read the prefix %q of a task the checkpoint covers, want no durable prefix read", scan.Prefix)
+	}
+	if got, want := seated.Revision(taskID), loaded.Revision(taskID); got != want {
+		t.Fatalf("the seated revision = %d, want the %d the whole log states", got, want)
+	}
+	if got, want := len(seated.Facts(taskID)), len(loaded.Facts(taskID)); got != want {
+		t.Fatalf("the seated fact chain holds %d record(s), want the %d the whole log states", got, want)
+	}
+	if got, want := len(seated.Outbox(taskID)), len(loaded.Outbox(taskID)); got != want {
+		t.Fatalf("the seated task owes %d notice(s), want the %d the whole log states", got, want)
+	}
+	seatedReceipts, loadedReceipts := seated.ReceiptsOf(taskID), loaded.ReceiptsOf(taskID)
+	if len(seatedReceipts.Consumed) != len(loadedReceipts.Consumed) || len(seatedReceipts.Attempts) != len(loadedReceipts.Attempts) ||
+		len(seatedReceipts.Rejected) != len(loadedReceipts.Rejected) {
+		t.Fatalf("the seated task states %d receipt(s), %d attempt(s) and %d refusal(s), want the %d, %d and %d the whole log states",
+			len(seatedReceipts.Consumed), len(seatedReceipts.Attempts), len(seatedReceipts.Rejected),
+			len(loadedReceipts.Consumed), len(loadedReceipts.Attempts), len(loadedReceipts.Rejected))
+	}
+
+	whole := NewEmptyDurableCommit(log, nil)
+	if err := whole.Seat(ctx, nil, nil); err != nil {
+		t.Fatalf("seat the commit from the whole log: %v", err)
+	}
+	if scans := whole.LoadStats().Scans; len(scans) != 5 {
+		t.Fatalf("the whole-log seat read %d prefix(es), want the five an account seated from no entry pays", len(scans))
+	}
+}
+
+// TestDurableLoadRefusesAMismatchedReceiptIdentity pins the checkpoint a boot refuses to seat: a receipt stated under another task.
+//
+// 契约: docs/wiki/reliability/durable-delivery.md#canonical-fact-resolution
+func TestDurableLoadRefusesAMismatchedReceiptIdentity(t *testing.T) {
+	ctx := context.Background()
+	log := newInvariantFactLog()
+	taskID := event.TaskID("task-seat-mismatched")
+	other := event.TaskID("task-seat-other")
+	if err := NewEmptyDurableCommit(log, nil).Declare(ctx, taskID, task.Spec{CallID: "call-seat"}); err != nil {
+		t.Fatalf("declare the admission material: %v", err)
+	}
+	notice := invariantNotice(taskID, 1)
+	entry := task.StatedTask{
+		TaskID:   taskID,
+		Status:   task.StatusRunning,
+		Consumed: []task.StatedConsumption{{Notice: notice, Event: "fact-seat"}},
+		Attempts: []task.StatedAttempt{},
+		Rejected: []task.StatedRefusal{{Notice: inviteNoticeOf(other)}},
+	}
+	body, err := json.Marshal(task.RegistryCheckpoint{Tasks: []task.StatedTask{entry}})
+	if err != nil {
+		t.Fatalf("state the task account: %v", err)
+	}
+	err = NewEmptyDurableCommit(log, nil).Seat(ctx, body, map[string]struct{}{})
+	if !errors.Is(err, ErrSeatRefused) {
+		t.Fatalf("the seat of a refusal stated under another task = %v, want the mismatch named: a seat that dropped such a receipt would owe the notification it closed a second delivery", err)
+	}
+}
+
+// inviteNoticeOf names one notification of one task, so a refusal the fixture states
+// under another task than the entry it sits in carries a real four-part identity.
+func inviteNoticeOf(taskID event.TaskID) task.Notice {
+	return task.Notice{TaskID: taskID, Round: 1, Kind: task.NoticeProgress, Seq: 1}
+}
+
+// accountFaces is the four recovery faces one account answers, read the same whichever path seated it.
+type accountFaces struct {
+	revision int64
+	facts    int
+	owed     []task.Notice
+	consumed int
+	attempts int
+	rejected int
+}
+
+// facesOf reads the four faces of one task beside its chain position.
+func facesOf(commit *DurableCommit, taskID event.TaskID) accountFaces {
+	receipts := commit.ReceiptsOf(taskID)
+	owed := make([]task.Notice, 0)
+	for _, entry := range commit.Outbox(taskID) {
+		owed = append(owed, entry.Notice.Notice)
+	}
+	return accountFaces{
+		revision: commit.Revision(taskID), facts: len(commit.Facts(taskID)), owed: owed,
+		consumed: len(receipts.Consumed), attempts: len(receipts.Attempts), rejected: len(receipts.Rejected),
+	}
+}
+
+// sameFaces reports whether two reads of one account answer the same four faces.
+func sameFaces(left, right accountFaces) bool {
+	if left.revision != right.revision || left.facts != right.facts ||
+		left.consumed != right.consumed || left.attempts != right.attempts || left.rejected != right.rejected ||
+		len(left.owed) != len(right.owed) {
+		return false
+	}
+	for at := range left.owed {
+		if left.owed[at] != right.owed[at] {
+			return false
+		}
+	}
+	return true
+}
+
+// tailOf names the five durable family keys of one task, the set a storage states past its cut.
+func tailOf(taskID event.TaskID) map[string]struct{} {
+	return map[string]struct{}{
+		specPrefix + string(taskID):    {},
+		factPrefix + string(taskID):    {},
+		consumePrefix + string(taskID): {},
+		attemptPrefix + string(taskID): {},
+		rejectPrefix + string(taskID):  {},
+	}
+}
+
+// seedThreeNoticeTask commits one task carrying three notifications and returns them in sequence order.
+func seedThreeNoticeTask(t *testing.T, ctx context.Context, log durable.FactLog, taskID event.TaskID) []task.Notice {
+	t.Helper()
+	commit := NewEmptyDurableCommit(log, nil)
+	if err := commit.Declare(ctx, taskID, seededSpec("three-notice")); err != nil {
+		t.Fatalf("declare the admission material: %v", err)
+	}
+	notices := []task.Notice{invariantNotice(taskID, 1), invariantNotice(taskID, 2), invariantNotice(taskID, 3)}
+	if result, err := commit.Commit(ctx, invariantRecord(taskID, 0, task.StatusRunning, notices...)); err != nil || result != task.CommitCommitted {
+		t.Fatalf("commit the three-notice record = (%v, %v)", result, err)
+	}
+	return notices
+}
+
+// TestOwedSetKeepsTheHoleWhenLaterNoticesComplete pins the owed set against out-of-order completion.
+//   - positive: the account owes the unfinished notice by identity while the mailbox position stops before the hole
+//   - negative: a maximum settled sequence number drops the hole, so a prefix watermark is not an owed set
+//   - consumer: AcceptNotice/Claim/Consume on the mailbox beside the checkpoint seat of the same account
+//
+// 契约: docs/wiki/reliability/durable-delivery.md#canonical-fact-resolution
+func TestOwedSetKeepsTheHoleWhenLaterNoticesComplete(t *testing.T) {
+	ctx := context.Background()
+	log := newInvariantFactLog()
+	taskID := event.TaskID("task-hole")
+	notices := seedThreeNoticeTask(t, ctx, log, taskID)
+	durable, err := NewDurableCommit(log, nil)
+	if err != nil {
+		t.Fatalf("load the account: %v", err)
+	}
+	store := NewMemoryStore(NewAuthority(), durable)
+	if err := store.TrackDelivery(ctx, taskID, task.HandoffTarget{
+		Target: invariantAddress, TargetInstance: "instance-a",
+	}); err != nil {
+		t.Fatalf("register the delivery: %v", err)
+	}
+	if err := store.restoreSeat(invariantAddress, "instance-a"); err != nil {
+		t.Fatalf("open the site: %v", err)
+	}
+	for _, notice := range notices {
+		if err := store.AcceptNotice(ctx, notice); err != nil {
+			t.Fatalf("accept %s: %v", notice.FactKey(), err)
+		}
+	}
+	for _, seq := range []AcceptSeq{3, 2} {
+		if err := store.Claim(ctx, invariantAddress, "instance-a", seq); err != nil {
+			t.Fatalf("claim %d: %v", seq, err)
+		}
+		if err := store.Consume(ctx, invariantAddress, "instance-a", seq); err != nil {
+			t.Fatalf("consume %d: %v", seq, err)
+		}
+	}
+	store.mu.Lock()
+	position := store.sites[siteKey{addr: invariantAddress, instance: "instance-a"}].session.Consumed
+	store.mu.Unlock()
+	if position != 0 {
+		t.Fatalf("the mailbox position advanced to %d past the hole at acceptance sequence 1, want it to stop before the hole", position)
+	}
+	owed := durable.OwedNotices()
+	if len(owed) != 1 || owed[0].Notice.Notice != notices[0] {
+		t.Fatalf("the account owes %d notice(s) after the later two completed, want exactly the hole %s", len(owed), notices[0].FactKey())
+	}
+	var maxSettled int64
+	for _, receipt := range durable.ReceiptsOf(taskID).Consumed {
+		if receipt.Notice.Seq > maxSettled {
+			maxSettled = receipt.Notice.Seq
+		}
+	}
+	skipped := 0
+	for _, entry := range owed {
+		if entry.Notice.Notice.Seq <= maxSettled {
+			skipped++
+		}
+	}
+	if skipped != len(owed) {
+		t.Fatalf("the maximum-settled-sequence watermark %d skipped %d of %d owed notice(s), want it to skip all of them so the counterexample is the real hazard",
+			maxSettled, skipped, len(owed))
+	}
+	t.Logf("out-of-order: mailbox position=%d, maxSettledSeq=%d, owed=%d (the hole), a max-seq watermark would drop %d/%d",
+		position, maxSettled, len(owed), skipped, len(owed))
+
+	entry := statedAccountOf(t, durable, taskID)
+	seated := NewEmptyDurableCommit(log, nil)
+	if err := seated.Seat(ctx, statedPayloadOf(t, ctx, durable, entry), map[string]struct{}{}); err != nil {
+		t.Fatalf("seat the account: %v", err)
+	}
+	if got, want := facesOf(seated, taskID), facesOf(durable, taskID); !sameFaces(got, want) {
+		t.Fatalf("the seated account %+v differs from the runtime account %+v after out-of-order completion", got, want)
+	}
+}
+
+// TestSeatedAccountAgreesWithIdentityRead pins the three read paths against one another on all four recovery faces.
+//   - positive: the whole-log load, the checkpoint seat and the read of one task by its identity answer the same four faces
+//   - negative: the covered seat reads no prefix while the identity read reads the five, so a zero read is the slice
+//   - consumer: DurableCommit.ReceiptsOf/Outbox/Facts/Revision as a boot and the mailbox read them
+//
+// 契约: docs/wiki/reliability/durable-delivery.md#canonical-fact-resolution
+func TestSeatedAccountAgreesWithIdentityRead(t *testing.T) {
+	ctx := context.Background()
+	log := newInvariantFactLog()
+	taskID := event.TaskID("task-agree")
+	seedCommit(t, ctx, log, taskID, "agree")
+	refusing := NewEmptyDurableCommit(log, nil)
+	if err := refusing.recordRejection(ctx, Rejection{
+		Notice: invariantNotice(taskID, 7), Target: invariantAddress, Instance: "instance-a",
+		Reason: "refused beside the agreed account", At: time.Unix(1700000000, 0),
+	}); err != nil {
+		t.Fatalf("record the refusal of the same task: %v", err)
+	}
+	loaded, err := NewDurableCommit(log, nil)
+	if err != nil {
+		t.Fatalf("load the whole log: %v", err)
+	}
+	want := facesOf(loaded, taskID)
+	if want.consumed == 0 || want.attempts == 0 || want.rejected == 0 || len(want.owed) == 0 {
+		t.Fatalf("the fixture answers %+v, want all three receipt families beside an owed notice", want)
+	}
+
+	seated := NewEmptyDurableCommit(log, nil)
+	if err := seated.Seat(ctx, statedPayloadOf(t, ctx, loaded, statedAccountOf(t, loaded, taskID)), map[string]struct{}{}); err != nil {
+		t.Fatalf("seat from the slice: %v", err)
+	}
+	if got := facesOf(seated, taskID); !sameFaces(got, want) {
+		t.Fatalf("the seated account %+v differs from the whole-log account %+v", got, want)
+	}
+	if scans := seated.LoadStats().Scans; len(scans) != 0 {
+		t.Fatalf("the seat of a covered task read %d prefix(es), want none", len(scans))
+	}
+
+	byIdentity := NewEmptyDurableCommit(log, nil)
+	empty, err := json.Marshal(task.RegistryCheckpoint{})
+	if err != nil {
+		t.Fatalf("state the empty account: %v", err)
+	}
+	if err := byIdentity.Seat(ctx, empty, tailOf(taskID)); err != nil {
+		t.Fatalf("read the task by identity: %v", err)
+	}
+	if got := facesOf(byIdentity, taskID); !sameFaces(got, want) {
+		t.Fatalf("the identity-read account %+v differs from the whole-log account %+v", got, want)
+	}
+	t.Logf("three paths agree: revision=%d facts=%d owed=%d consumed=%d attempts=%d rejected=%d; identity read paid %d prefix scans",
+		want.revision, want.facts, len(want.owed), want.consumed, want.attempts, want.rejected, len(byIdentity.LoadStats().Scans))
+}
+
+// TestEffectiveTaskSetIsTheStatedAccountPlusTheTail pins which tasks a seated account holds.
+//   - positive: the slice names a covered task and the tail names a young one, and the account holds both
+//   - negative: a task neither source names is absent from TaskIDs while its receipts stay readable by identity
+//   - consumer: DurableCommit.TaskIDs as the boot and the chain restore read the effective set
+//
+// 契约: docs/wiki/reliability/durable-delivery.md#canonical-fact-resolution
+func TestEffectiveTaskSetIsTheStatedAccountPlusTheTail(t *testing.T) {
+	ctx := context.Background()
+	log := newInvariantFactLog()
+	covered := event.TaskID("task-covered")
+	young := event.TaskID("task-young")
+	dropped := event.TaskID("task-dropped")
+	seedCommit(t, ctx, log, covered, "covered")
+	seedCommit(t, ctx, log, young, "young")
+	seedCommit(t, ctx, log, dropped, "dropped")
+	loaded, err := NewDurableCommit(log, nil)
+	if err != nil {
+		t.Fatalf("load the whole log: %v", err)
+	}
+	if got := len(loaded.TaskIDs()); got != 3 {
+		t.Fatalf("the whole log holds %d task(s), want the 3 the fixture seeded", got)
+	}
+
+	entry := statedAccountOf(t, loaded, covered)
+	seated := NewEmptyDurableCommit(log, nil)
+	if err := seated.Seat(ctx, statedPayloadOf(t, ctx, loaded, entry), tailOf(young)); err != nil {
+		t.Fatalf("seat the covered task beside the young tail: %v", err)
+	}
+	ids := seated.TaskIDs()
+	if len(ids) != 2 || ids[0] != covered || ids[1] != young {
+		t.Fatalf("the seated account holds %v, want [%s %s]", ids, covered, young)
+	}
+	if got := facesOf(seated, young); !sameFaces(got, facesOf(loaded, young)) {
+		t.Fatalf("the tail-read task %+v differs from its whole-log account %+v", got, facesOf(loaded, young))
+	}
+	if got := len(seated.ReceiptsOf(dropped).Consumed); got != 0 {
+		t.Fatalf("the seated account states %d consumption receipt(s) of a task it never seated, want none", got)
+	}
+	byIdentity := NewEmptyDurableCommit(log, nil)
+	empty, err := json.Marshal(task.RegistryCheckpoint{})
+	if err != nil {
+		t.Fatalf("state the empty account: %v", err)
+	}
+	if err := byIdentity.Seat(ctx, empty, tailOf(dropped)); err != nil {
+		t.Fatalf("read the dropped task by identity: %v", err)
+	}
+	if got := len(byIdentity.ReceiptsOf(dropped).Consumed); got == 0 {
+		t.Fatalf("the identity read of the dropped task answered no consumption receipt, want the one the log holds: the receipt outlives the account that stated it")
+	}
+	t.Logf("effective set: seated=%v, dropped task receipts seated=0 identity-read=%d",
+		ids, len(byIdentity.ReceiptsOf(dropped).Consumed))
+}
+
+// TestRepeatCommitOfAStoredMutationReowsNothing pins the repeat of one stored mutation identity.
+//   - positive: the stored fact is answered, no second fact lands and no delivery state advances
+//   - negative: other content under the same identity is refused by name
+//   - consumer: DurableCommit.Commit as the stable instruction key of a delegated round reaches it
+//
+// 契约: docs/wiki/reliability/durable-delivery.md#canonical-fact-resolution
+func TestRepeatCommitOfAStoredMutationReowsNothing(t *testing.T) {
+	ctx := context.Background()
+	log := newInvariantFactLog()
+	taskID := event.TaskID("task-repeat")
+	notices := seedThreeNoticeTask(t, ctx, log, taskID)
+	durable, err := NewDurableCommit(log, nil)
+	if err != nil {
+		t.Fatalf("load the account: %v", err)
+	}
+	if err := durable.recordConsumption(ctx, notices[0]); err != nil {
+		t.Fatalf("record the consumption: %v", err)
+	}
+	if owed := len(durable.OwedNotices()); owed != 2 {
+		t.Fatalf("the account owes %d notice(s) after one consumption, want 2", owed)
+	}
+	result, err := durable.Commit(ctx, invariantRecord(taskID, 0, task.StatusRunning, notices...))
+	if err != nil || result != task.CommitCommitted {
+		t.Fatalf("the repeat of a stored mutation = (%v, %v), want the stored fact answered", result, err)
+	}
+	if owed := len(durable.OwedNotices()); owed != 2 {
+		t.Fatalf("the repeat of a stored mutation left %d owed notice(s), want the 2 it already owed: an idempotent hit advances no delivery", owed)
+	}
+	if facts := len(durable.Facts(taskID)); facts != 1 {
+		t.Fatalf("the repeat landed %d fact(s), want the 1 already stored", facts)
+	}
+	if _, err := durable.Commit(ctx, invariantRecord(taskID, 0, task.StatusSettled, notices...)); err == nil {
+		t.Fatalf("a repeat carrying other content was accepted, want it refused by name")
+	}
+}
+
+// TestRuntimeCommitMustNotReoweAConsumedNotice pins the runtime commit against the recovery path.
+//   - positive: a mutation naming a notice the account already consumed opens no second obligation
+//   - negative: the recovery seat of the same records owes the smaller set, so the two paths must agree
+//   - consumer: DurableCommit.Commit on the live path and DurableCommit.Seat on the recovery path
+//
+// 契约: docs/wiki/reliability/durable-delivery.md#canonical-fact-resolution
+func TestRuntimeCommitMustNotReoweAConsumedNotice(t *testing.T) {
+	ctx := context.Background()
+	log := newInvariantFactLog()
+	taskID := event.TaskID("task-reowe")
+	notices := seedThreeNoticeTask(t, ctx, log, taskID)
+	durable, err := NewDurableCommit(log, nil)
+	if err != nil {
+		t.Fatalf("load the account: %v", err)
+	}
+	if err := durable.recordConsumption(ctx, notices[0]); err != nil {
+		t.Fatalf("record the consumption: %v", err)
+	}
+	next := task.CommitRecord{
+		MutationID: "task-reowe-mutation-later", TaskID: taskID, ExpectedRevision: 1,
+		Status: task.StatusRunning,
+		Outbox: []task.Envelope{{Notice: notices[0], Target: invariantAddress, Source: invariantAddress, TargetInstance: "instance-a"}},
+	}
+	if result, err := durable.Commit(ctx, next); err != nil || result != task.CommitCommitted {
+		t.Fatalf("commit the later mutation = (%v, %v)", result, err)
+	}
+	runtimeOwed := len(durable.OwedNotices())
+
+	entry := statedAccountOf(t, durable, taskID)
+	seated := NewEmptyDurableCommit(log, nil)
+	if err := seated.Seat(ctx, statedPayloadOf(t, ctx, durable, entry), map[string]struct{}{}); err != nil {
+		t.Fatalf("seat the account: %v", err)
+	}
+	recoveryOwed := len(seated.OwedNotices())
+	if runtimeOwed != recoveryOwed {
+		t.Fatalf("the runtime commit owes %d notice(s) while the recovery path owes %d for the same records and the same consumption receipt: Commit (runtime/state/durable.go:881-887) opens an obligation for every outbox envelope, while applyRecordLocked (:375-388) skips the ones a receipt or refusal already closed",
+			runtimeOwed, recoveryOwed)
+	}
+	if runtimeOwed != 2 {
+		t.Fatalf("the account owes %d notice(s), want the 2 the consumption receipt did not close", runtimeOwed)
+	}
+}
+
+// naiveReceiptsOf answers one task's receipts straight from the three tables the
+// account holds: the whole-table read the per-task index replaced, kept as the
+// reference an index answer is compared against.
+func naiveReceiptsOf(d *DurableCommit, taskID event.TaskID) task.Receipts {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	receipts := task.Receipts{}
+	for key, committed := range d.consumed {
+		if key.task != taskID {
+			continue
+		}
+		receipts.Consumed = append(receipts.Consumed, task.StatedConsumption{
+			Notice: task.Notice{TaskID: key.task, Round: key.round, Kind: key.kind, Seq: key.seq},
+			Event:  committed,
+		})
+	}
+	for key, attempt := range d.attempts {
+		if key.task != taskID {
+			continue
+		}
+		receipts.Attempts = append(receipts.Attempts, task.StatedAttempt{
+			Notice:   task.Notice{TaskID: key.task, Round: key.round, Kind: key.kind, Seq: key.seq},
+			Terminal: attempt.Terminal,
+		})
+	}
+	for key, rejection := range d.rejected {
+		if key.task != taskID {
+			continue
+		}
+		receipts.Rejected = append(receipts.Rejected, task.StatedRefusal{
+			Notice: rejection.Notice, Target: rejection.Target, Instance: rejection.Instance,
+			Reason: rejection.Reason, At: rejection.At,
+		})
+	}
+	sort.Slice(receipts.Consumed, func(i, j int) bool {
+		return noticeBefore(receipts.Consumed[i].Notice, receipts.Consumed[j].Notice)
+	})
+	sort.Slice(receipts.Attempts, func(i, j int) bool {
+		return noticeBefore(receipts.Attempts[i].Notice, receipts.Attempts[j].Notice)
+	})
+	sort.Slice(receipts.Rejected, func(i, j int) bool {
+		return noticeBefore(receipts.Rejected[i].Notice, receipts.Rejected[j].Notice)
+	})
+	return receipts
+}
+
+// settledAccountPair answers two tasks over one log, each with its own consumed
+// notice, attempt and refusal, and returns the account the runtime write paths
+// filled: the account every read path is compared on.
+func settledAccountPair(t *testing.T, ctx context.Context, log durable.FactLog) (*DurableCommit, []event.TaskID) {
+	t.Helper()
+	written := NewEmptyDurableCommit(log, nil)
+	taskIDs := []event.TaskID{"task-index-a", "task-index-b"}
+	for _, taskID := range taskIDs {
+		if err := written.Declare(ctx, taskID, seededSpec(string(taskID))); err != nil {
+			t.Fatalf("declare the admission material of %s: %v", taskID, err)
+		}
+		if result, err := written.Commit(ctx, invariantRecord(taskID, 0, task.StatusRunning,
+			invariantNotice(taskID, 1), invariantNotice(taskID, 2),
+			invariantNotice(taskID, 3), invariantNotice(taskID, 4))); err != nil ||
+			result != task.CommitCommitted {
+			t.Fatalf("commit the three-notice record of %s = (%v, %v)", taskID, result, err)
+		}
+	}
+	store := NewMemoryStore(NewAuthority(), written)
+	for _, taskID := range taskIDs {
+		if err := store.TrackDelivery(ctx, taskID, task.HandoffTarget{
+			Target: invariantAddress, TargetInstance: "instance-a",
+		}); err != nil {
+			t.Fatalf("register the delivery of %s: %v", taskID, err)
+		}
+	}
+	if err := store.restoreSeat(invariantAddress, "instance-a"); err != nil {
+		t.Fatalf("open the site: %v", err)
+	}
+	for _, taskID := range taskIDs {
+		for _, seq := range []int64{1, 2} {
+			if err := store.AcceptNotice(ctx, invariantNotice(taskID, seq)); err != nil {
+				t.Fatalf("accept %s: %v", invariantNotice(taskID, seq).FactKey(), err)
+			}
+		}
+	}
+	for _, seq := range []AcceptSeq{1, 2, 3, 4} {
+		if err := store.Claim(ctx, invariantAddress, "instance-a", seq); err != nil {
+			t.Fatalf("claim %d: %v", seq, err)
+		}
+		if err := store.Consume(ctx, invariantAddress, "instance-a", seq); err != nil {
+			t.Fatalf("consume %d: %v", seq, err)
+		}
+	}
+	for _, taskID := range taskIDs {
+		if err := written.recordAttempt(ctx, invariantNotice(taskID, 3), SettleAttempt{Terminal: "completed"}); err != nil {
+			t.Fatalf("record the attempt of %s: %v", taskID, err)
+		}
+		if err := written.recordRejection(ctx, Rejection{
+			Notice: invariantNotice(taskID, 4), Target: invariantAddress, Instance: "instance-a",
+			Reason: "the target refused it", At: time.Unix(0, 0).UTC(),
+		}); err != nil {
+			t.Fatalf("record the refusal of %s: %v", taskID, err)
+		}
+	}
+	return written, taskIDs
+}
+
+// TestReceiptsOfAnswersTheReceiptsOfOneTask pins the per-task answer against the whole-table read.
+//   - positive: every task of the runtime account, the whole-log load, the checkpoint seat and the identity read answers its own three receipt families
+//   - negative: a task the account never seated answers no receipt, so an indexed answer is the task's receipts and never a neighbour's
+//   - consumer: ReceiptsOf as StateSettleAccount states the account of every task a checkpoint covers
+//
+// 契约: docs/wiki/reliability/durable-delivery.md#canonical-fact-resolution
+func TestReceiptsOfAnswersTheReceiptsOfOneTask(t *testing.T) {
+	ctx := context.Background()
+	log := newInvariantFactLog()
+	runtimeWritten, taskIDs := settledAccountPair(t, ctx, log)
+	written, err := NewDurableCommit(log, nil)
+	if err != nil {
+		t.Fatalf("load the account: %v", err)
+	}
+	entries := make([]task.StatedTask, 0, len(taskIDs))
+	for _, taskID := range taskIDs {
+		entries = append(entries, statedAccountOf(t, written, taskID))
+	}
+	seated := NewEmptyDurableCommit(log, nil)
+	if err := seated.Seat(ctx, statedPayloadOf(t, ctx, written, entries...), map[string]struct{}{}); err != nil {
+		t.Fatalf("seat the stated account: %v", err)
+	}
+	empty, err := json.Marshal(task.RegistryCheckpoint{})
+	if err != nil {
+		t.Fatalf("state the empty account: %v", err)
+	}
+	byIdentity := NewEmptyDurableCommit(log, nil)
+	tail := map[string]struct{}{}
+	for _, taskID := range taskIDs {
+		for key := range tailOf(taskID) {
+			tail[key] = struct{}{}
+		}
+	}
+	if err := byIdentity.Seat(ctx, empty, tail); err != nil {
+		t.Fatalf("read both tasks by identity: %v", err)
+	}
+	paths := []struct {
+		name   string
+		commit *DurableCommit
+	}{{"the runtime account", runtimeWritten}, {"the whole-log load", written}, {"the checkpoint seat", seated}, {"the identity read", byIdentity}}
+	for _, path := range paths {
+		for _, taskID := range taskIDs {
+			answered := path.commit.ReceiptsOf(taskID)
+			if len(answered.Consumed) == 0 || len(answered.Attempts) == 0 || len(answered.Rejected) == 0 {
+				t.Fatalf("%s answers %+v for %s, want the three receipt families the write paths recorded", path.name, answered, taskID)
+			}
+			if reference := naiveReceiptsOf(path.commit, taskID); !reflect.DeepEqual(answered, reference) {
+				t.Fatalf("%s answers %+v for %s while the whole-table read answers %+v: a per-task answer MUST be that task's receipts",
+					path.name, answered, taskID, reference)
+			}
+		}
+		if answered := path.commit.ReceiptsOf("task-never-seated"); len(answered.Consumed)+len(answered.Attempts)+len(answered.Rejected) != 0 {
+			t.Fatalf("%s answers %+v for a task it never seated, want no receipt", path.name, answered)
+		}
+	}
+	for _, taskID := range taskIDs {
+		answered := seated.ReceiptsOf(taskID)
+		if len(answered.Consumed) != 2 || len(answered.Attempts) != 1 || len(answered.Rejected) != 1 {
+			t.Fatalf("the seated account of %s states %d consumed, %d attempt(s) and %d refusal(s), want the 2, 1 and 1 the write paths recorded",
+				taskID, len(answered.Consumed), len(answered.Attempts), len(answered.Rejected))
+		}
+	}
+}
+
+// seatedManyTaskAccount answers an account of tasks tasks, each stating receipts
+// consumed notices, seated from one payload so no log read is paid.
+func seatedManyTaskAccount(t *testing.T, tasks, receipts int) *DurableCommit {
+	t.Helper()
+	wire := task.RegistryCheckpoint{Tasks: make([]task.StatedTask, 0, tasks)}
+	for at := 0; at < tasks; at++ {
+		taskID := costTaskID(tasks, at)
+		consumed := make([]task.StatedConsumption, 0, receipts)
+		for seq := 0; seq < receipts; seq++ {
+			consumed = append(consumed, task.StatedConsumption{
+				Notice: task.Notice{TaskID: taskID, Round: 1, Kind: task.NoticeProgress, Seq: int64(seq)},
+				Event:  event.EventID("cost-fact"),
+			})
+		}
+		wire.Tasks = append(wire.Tasks, task.StatedTask{
+			TaskID: taskID, Revision: 0,
+			Consumed: consumed, Attempts: []task.StatedAttempt{}, Rejected: []task.StatedRefusal{},
+		})
+	}
+	payload, err := json.Marshal(wire)
+	if err != nil {
+		t.Fatalf("state the cost payload: %v", err)
+	}
+	commit := NewEmptyDurableCommit(nil, nil)
+	if err := commit.Seat(context.Background(), payload, map[string]struct{}{}); err != nil {
+		t.Fatalf("seat the cost payload: %v", err)
+	}
+	return commit
+}
+
+// costTaskID answers the identity of the index-th task of a cost account.
+func costTaskID(tasks, index int) event.TaskID {
+	return event.TaskID(fmt.Sprintf("task-cost-%05d-of-%d", index, tasks))
+}
+
+// bestReceiptsOfCost answers the cheapest per-call cost of one task's receipts over
+// several rounds: the statistic that carries the growth axis with the lowest noise.
+func bestReceiptsOfCost(commit *DurableCommit, taskID event.TaskID) time.Duration {
+	const rounds, calls = 5, 20
+	best := time.Duration(1<<62 - 1)
+	for round := 0; round < rounds; round++ {
+		start := time.Now()
+		for call := 0; call < calls; call++ {
+			commit.ReceiptsOf(taskID)
+		}
+		if cost := time.Since(start) / calls; cost < best {
+			best = cost
+		}
+	}
+	return best
+}
+
+// TestReceiptsOfCostsOnlyItsOwnTask pins the growth axis of one task's answer.
+//   - positive: one task's answer costs the same whether the account holds two tasks or 128 times as many
+//   - negative: the whole-table read grows with the account, so the bound fails on the answer it replaced
+//   - consumer: ReceiptsOf inside StateSettleAccount, once per task a checkpoint covers
+//
+// 契约: docs/wiki/reliability/durable-delivery.md#canonical-fact-resolution
+func TestReceiptsOfCostsOnlyItsOwnTask(t *testing.T) {
+	const perTask = 64
+	small := seatedManyTaskAccount(t, 2, perTask)
+	big := seatedManyTaskAccount(t, 256, perTask)
+	target := costTaskID(2, 0)
+	if got := len(small.ReceiptsOf(target).Consumed); got != perTask {
+		t.Fatalf("the small account answers %d receipt(s), want the %d it states", got, perTask)
+	}
+	if got := len(big.ReceiptsOf(costTaskID(256, 0)).Consumed); got != perTask {
+		t.Fatalf("the big account answers %d receipt(s), want the %d it states", got, perTask)
+	}
+	bestReceiptsOfCost(small, target)
+	bestReceiptsOfCost(big, costTaskID(256, 0))
+	smallCost := bestReceiptsOfCost(small, target)
+	bigCost := bestReceiptsOfCost(big, costTaskID(256, 0))
+	const bound = 4
+	if bigCost > bound*smallCost {
+		t.Fatalf("one task's answer costs %v on an account of 256 tasks beside %v on an account of 2 (bound %d×): the answer walks the receipts of the tasks it is not about",
+			bigCost, smallCost, bound)
+	}
+	naive := bestReceiptsOfNaiveCost(big, costTaskID(256, 0))
+	t.Logf("per-task answer: 2 tasks=%v 256 tasks=%v (bound %d×); the whole-table read of the same task costs %v",
+		smallCost, bigCost, bound, naive)
+}
+
+// bestReceiptsOfNaiveCost answers the cheapest per-call cost of the whole-table
+// read, the answer the per-task index replaced.
+func bestReceiptsOfNaiveCost(commit *DurableCommit, taskID event.TaskID) time.Duration {
+	const rounds, calls = 5, 20
+	best := time.Duration(1<<62 - 1)
+	for round := 0; round < rounds; round++ {
+		start := time.Now()
+		for call := 0; call < calls; call++ {
+			naiveReceiptsOf(commit, taskID)
+		}
+		if cost := time.Since(start) / calls; cost < best {
+			best = cost
+		}
+	}
+	return best
+}
+
+// TestSeatStatesTheOpenWorkAndReadsAFinishedTaskBackByIdentity pins what a boot pays for a task that finished before its cut.
+//   - the checkpoint states no entry of the finished task, so the seat reads no durable key of it at all
+//   - the account holds no identity of it, so what a boot reports is the open work and no finished identity
+//   - the chain is read back by identity the first time a reader names the task, and answers the record the whole log states, byte for byte
+//   - the read it pays is that one task's families, so the record stays on the chain instead of being carried by every checkpoint
+//   - the history enumeration names the task the account does not hold, which is the read a caller asking for the whole history pays
+//   - negative: an entry stating a settle account the task never held is refused by name, so the seat states no receipt it cannot answer
+//
+// 契约: docs/wiki/reliability/durable-delivery.md#canonical-fact-resolution
+func TestSeatStatesTheOpenWorkAndReadsAFinishedTaskBackByIdentity(t *testing.T) {
+	ctx := context.Background()
+	log := newInvariantFactLog()
+	taskID := event.TaskID("task-seat-finished")
+	seedCommit(t, ctx, log, taskID, "finished")
+	whole, err := NewDurableCommit(log, nil)
+	if err != nil {
+		t.Fatalf("load the commit from the whole log: %v", err)
+	}
+	want, err := whole.Records(ctx, taskID)
+	if err != nil {
+		t.Fatalf("read the chain of the whole log: %v", err)
+	}
+	if len(want) == 0 {
+		t.Fatal("the fixture seeds no chain, so the read back below proves nothing")
+	}
+
+	seated := NewEmptyDurableCommit(log, nil)
+	if err := seated.Seat(ctx, statedPayloadOf(t, ctx, whole), map[string]struct{}{}); err != nil {
+		t.Fatalf("seat the account of a checkpoint stating no finished task: %v", err)
+	}
+	for _, scan := range seated.LoadStats().Scans {
+		t.Fatalf("the seat read %q of a task the checkpoint states nothing of, want no durable key: the record stays on the chain", scan.Prefix)
+	}
+	if got := seated.TaskIDs(); len(got) != 0 {
+		t.Fatalf("the seated account names %v, want no identity: a task that finished before the cut is no open work of the account", got)
+	}
+	if got := seated.Revision(taskID); got != 0 {
+		t.Fatalf("the seated revision = %d, want no revision: the account holds no record of the finished task", got)
+	}
+
+	got, err := seated.Records(ctx, taskID)
+	if err != nil {
+		t.Fatalf("read the finished task back by identity: %v", err)
+	}
+	if len(got) != len(want) {
+		t.Fatalf("the task read back as %d link(s), want the %d the whole log states", len(got), len(want))
+	}
+	for at := range want {
+		gotBody, err := task.EncodeTaskRecord(got[at])
+		if err != nil {
+			t.Fatalf("render the link %d read back: %v", at, err)
+		}
+		wantBody, err := task.EncodeTaskRecord(want[at])
+		if err != nil {
+			t.Fatalf("render the link %d of the whole log: %v", at, err)
+		}
+		if string(gotBody) != string(wantBody) {
+			t.Fatalf("the link %d read back = %s, want the bytes the whole log states %s", at, gotBody, wantBody)
+		}
+	}
+	reads := seated.LoadStats().Scans
+	if len(reads) == 0 {
+		t.Fatal("the read back paid no durable key, want the families of the one task it named")
+	}
+	for _, scan := range reads {
+		if !strings.Contains(scan.Prefix, string(taskID)) {
+			t.Fatalf("the read back scanned %q, want the families of the task %s alone: the record is read by identity, never by history",
+				scan.Prefix, taskID)
+		}
+	}
+
+	history, err := seated.HistoryTaskIDs(ctx)
+	if err != nil {
+		t.Fatalf("enumerate the task history: %v", err)
+	}
+	if !reflect.DeepEqual(history, []event.TaskID{taskID}) {
+		t.Fatalf("the history enumeration names %v, want the %v the log holds a fact for: the account state is not the history", history, []event.TaskID{taskID})
+	}
+
+	refused := NewEmptyDurableCommit(log, nil)
+	stranger := task.StatedTask{
+		TaskID: taskID, Status: task.StatusRunning, Revision: whole.Revision(taskID),
+		Consumed: []task.StatedConsumption{{Notice: task.Notice{TaskID: "task-seat-other"}, Event: "fact-1"}},
+		Attempts: []task.StatedAttempt{}, Rejected: []task.StatedRefusal{},
+	}
+	strangerPayload, err := json.Marshal(task.RegistryCheckpoint{Tasks: []task.StatedTask{stranger}})
+	if err != nil {
+		t.Fatalf("state the entry beside a receipt: %v", err)
+	}
+	if err := refused.Seat(ctx, strangerPayload, map[string]struct{}{}); err == nil {
+		t.Fatal("the seat accepted an entry stating a receipt of another task, want it refused by name")
+	}
 }

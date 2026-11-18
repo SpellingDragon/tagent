@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/SpellingDragon/tagent/api/config"
+	"github.com/SpellingDragon/tagent/api/durable"
 	"github.com/SpellingDragon/tagent/api/event"
 	"github.com/SpellingDragon/tagent/api/model"
 	"github.com/SpellingDragon/tagent/api/plugin"
@@ -229,7 +230,7 @@ type Host struct {
 	// deliveryLog is the fact surface the delivery account reads and writes; nil
 	// reads the storage tier the run opened. It is the seam the settlement
 	// checks install a counting log on.
-	deliveryLog state.FactLog
+	deliveryLog durable.FactLog
 
 	// configPath is the source the host was booted from and the file a reload
 	// reads again; doc is the document last published, natives are the tool
@@ -1823,20 +1824,6 @@ func (h *Host) rememberUserAddress(addr event.Address) {
 		h.userAddresses[addr.SessionID] = addr
 	}
 	h.mu.Unlock()
-}
-
-// userAddressOf reports the user address the host remembered for one session:
-// the explicit address an unattended follow-up turn runs at. A session the host
-// never admitted answers no address, so a settle of a session no user drives
-// fires nothing.
-func (h *Host) userAddressOf(session event.SessionID) (event.Address, bool) {
-	if h == nil {
-		return event.Address{}, false
-	}
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	addr, ok := h.userAddresses[session]
-	return addr, ok && addr.IsComplete()
 }
 
 // userAddress reports the user session the host admitted last.

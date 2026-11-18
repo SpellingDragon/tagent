@@ -3,6 +3,7 @@ package history
 import (
 	"context"
 	"errors"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -12,6 +13,7 @@ import (
 	"github.com/SpellingDragon/tagent/api/model"
 	"github.com/SpellingDragon/tagent/assembly"
 	"github.com/SpellingDragon/tagent/memory/query"
+	"github.com/SpellingDragon/tagent/runtime/agent"
 	"github.com/SpellingDragon/tagent/runtime/state"
 	"github.com/SpellingDragon/tagent/runtime/task"
 
@@ -42,8 +44,8 @@ func passingCheck(name state.CheckName) state.CheckAnswer {
 }
 
 // TestRestoreRefusesChainWithoutSpec drives the durable chain only through the formal public entries and checks the admission-material contract of the chain.
-//   - the chain the formal register lands is self-contained and a restart rebuilds the task beside the material it carries
-//   - a chain whose links carry no admission material is refused by name and reports no recovery
+//   - the chain the formal register lands is self-contained: a restart reads the settled task back by identity, and the recovery report states nothing of it
+//   - a chain whose links carry no admission material is refused by name: recovery reports no rebuild and the diagnostic read refuses the scene by name
 //
 // 契约: docs/wiki/agent/task-lifecycle.md#restore-rebuild
 func TestRestoreRefusesChainWithoutSpec(t *testing.T) {
@@ -83,7 +85,13 @@ func TestRestoreRefusesChainWithoutSpec(t *testing.T) {
 		if admitted.TaskID == "" || admitted.InstanceID == "" {
 			t.Fatalf("admitted task ref = %+v, want the task beside its instance identity", admitted)
 		}
+		if first.Details[0].State.TaskStatus != task.StatusSettled {
+			t.Fatalf("the admitted task stands at %v, want the settled state the turn commits", first.Details[0].State.TaskStatus)
+		}
 
+		if _, err := run.Close(ctx, agent.CloseRequest{Timeout: time.Now().Add(20 * time.Second)}); err != nil {
+			t.Fatalf("close the first runtime: %v; the restart opens the same root, so the first runtime ends first, since the write rights of a view that is still open refuse every later writer", err)
+		}
 		restarted, err := assembly.Assemble(ctx, chainDeclaration(), map[event.AgentID]assembly.NativeAgent{
 			"agent-a": {Model: &chainModel{name: "model-a", answer: func(*model.Request) *model.Response {
 				return chainFinalTurn("settled")
@@ -93,36 +101,29 @@ func TestRestoreRefusesChainWithoutSpec(t *testing.T) {
 			t.Fatalf("restart the durable runtime: %v", err)
 		}
 		report := restarted.Recovery()
-		if len(report.Tasks) != 1 {
-			t.Fatalf("recovery outcomes = %+v, want the one task the chain covers", report.Tasks)
-		}
-		outcome := report.Tasks[0]
-		if outcome.TaskID != admitted.TaskID || !outcome.Recovered || outcome.Refused != nil {
-			t.Fatalf("recovery outcome = %+v, want %s rebuilt without a refusal", outcome, admitted.TaskID)
-		}
-		if outcome.Owner != "agent-a" {
-			t.Fatalf("recovery owner = %q, want the task restored at its own owner", outcome.Owner)
-		}
-		if outcome.Status != task.StatusSettled {
-			t.Fatalf("restored status = %v, want the settled status the chain folds to", outcome.Status)
+		if len(report.Tasks) != 0 {
+			t.Fatalf("recovery outcomes = %+v, want nothing stated of the task settled before the cut", report.Tasks)
 		}
 		second, err := restarted.Query(ctx, query.ListFilter{Scope: scope, Kinds: []query.ObjectKind{query.ObjectTask}})
 		if err != nil {
 			t.Fatalf("query the restored task: %v", err)
 		}
 		if len(second.Details) != 1 {
-			t.Fatalf("restored tasks = %d, want the rebuilt task visible to the diagnostic read", len(second.Details))
+			t.Fatalf("restored tasks = %d, want the settled task read back by identity through the diagnostic read", len(second.Details))
 		}
 		restored := second.Details[0].Ref
 		if restored.TaskID != admitted.TaskID || restored.InstanceID != admitted.InstanceID || restored.Address != admitted.Address {
 			t.Fatalf("restored task ref = %+v, want the admission material of %+v restored as it was admitted", restored, admitted)
+		}
+		if second.Details[0].State.TaskStatus != task.StatusSettled {
+			t.Fatalf("restored status = %v, want the settled status the chain reads back", second.Details[0].State.TaskStatus)
 		}
 	})
 
 	t.Run("a chain carrying no admission material is refused by name and reports no recovery", func(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
-		cfg := ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: t.TempDir()}
+		cfg := ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: t.TempDir(), WriteRights: true}
 		tier, err := ledger.OpenTier(ctx, cfg)
 		if err != nil {
 			t.Fatalf("open the fixture tier: %v", err)
@@ -138,6 +139,9 @@ func TestRestoreRefusesChainWithoutSpec(t *testing.T) {
 			Status:           task.StatusAccepted,
 		}); err != nil || result != task.CommitCommitted {
 			t.Fatalf("commit the fixture fact = %v, %v, want committed", result, err)
+		}
+		if err := tier.Close(); err != nil {
+			t.Fatalf("close the fixture writer: %v; the assembly opens the same root, so the fixture writer ends first, since one root carries one writer", err)
 		}
 
 		run, err := assembly.Assemble(ctx, chainDeclaration(), map[event.AgentID]assembly.NativeAgent{
@@ -164,8 +168,17 @@ func TestRestoreRefusesChainWithoutSpec(t *testing.T) {
 		}
 		scope := query.AuthorizationScope{Agents: []event.AgentID{"agent-a"}, Sessions: []event.Address{{AgentID: "agent-a", SessionID: "session-damaged"}}}
 		reading, err := run.Query(ctx, query.ListFilter{Scope: scope, Kinds: []query.ObjectKind{query.ObjectTask}})
-		if err != nil {
-			t.Fatalf("query the damaged scene: %v", err)
+		if err == nil {
+			t.Fatalf("query the damaged scene answered %+v, want the named refusal of a chain carrying no admission material", reading.Details)
+		}
+		if !errors.Is(err, task.ErrSpecMissing) || !errors.Is(err, query.ErrSourceUnreadable) {
+			t.Fatalf("query refusal = %v, want the named ErrSpecMissing refusal under the unreadable-source class", err)
+		}
+		dims := refusedDimensions(err)
+		for _, dim := range []query.ObjectKind{query.ObjectInvocation, query.ObjectTask, query.ObjectNotice} {
+			if !slices.Contains(dims, dim) {
+				t.Fatalf("refused dimensions = %v, want %s named beside the dimensions the task reading feeds", dims, dim)
+			}
 		}
 		if len(reading.Details) != 0 {
 			t.Fatalf("task details = %+v, want nothing rebuilt from a chain carrying no admission material", reading.Details)
@@ -179,6 +192,30 @@ func chainDeclaration() *config.Declaration {
 		Entry:  "agent-a",
 		Agents: []config.AgentSpec{{ID: "agent-a", Model: "model-a"}},
 	}
+}
+
+// refusedDimensions collects the dimension every SourceError of one refusal names, walking the joined causes of a multi-dimension refusal.
+func refusedDimensions(err error) []query.ObjectKind {
+	var dims []query.ObjectKind
+	var walk func(error)
+	walk = func(e error) {
+		if e == nil {
+			return
+		}
+		if source, ok := e.(*query.SourceError); ok {
+			dims = append(dims, source.Dimension)
+		}
+		switch joined := e.(type) {
+		case interface{ Unwrap() []error }:
+			for _, part := range joined.Unwrap() {
+				walk(part)
+			}
+		case interface{ Unwrap() error }:
+			walk(joined.Unwrap())
+		}
+	}
+	walk(err)
+	return dims
 }
 
 // chainModel is the scripted native model stand-in of these checks: it answers

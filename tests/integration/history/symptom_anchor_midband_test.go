@@ -28,8 +28,8 @@ const symptomAnchorWindowTokens = 1600
 
 // chainProcessDetail reports the process detail one session chain committed: the
 // reasoning and the tool commands of its turns, in commit order. The fold
-// consumes exactly this material, so the keys the presented projection no longer
-// holds are the material it took.
+// consumes exactly this material, so the keys the presented projection does not
+// hold are the material it took.
 func chainProcessDetail(t *testing.T, ctx context.Context, run *assembly.Run, session event.SessionID) []event.EventID {
 	t.Helper()
 	keys := make([]event.EventID, 0, 8)
@@ -49,8 +49,8 @@ func chainProcessDetail(t *testing.T, ctx context.Context, run *assembly.Run, se
 }
 
 // foldedProcessKeys reports the process-detail keys one fold consumed: the chain
-// keys the presented projection no longer carries. A request that carries no
-// ticket is then a claim about material the fold really took.
+// keys the presented projection does not carry. A request that carries no ticket
+// is then a claim about material the fold really took.
 func foldedProcessKeys(committed []event.EventID, presented []replay.ProjectionEntry) []event.EventID {
 	held := make(map[event.EventID]struct{}, len(presented))
 	for _, entry := range presented {
@@ -126,35 +126,16 @@ func ticketOf(key event.EventID, evtType string) string {
 	return "[evt_" + string(key) + "|" + evtType + "]"
 }
 
-// TestSymptomAnchorMidbandProcessRecalledByTicket is the S3 symptom anchor
-// (runtime-recovery-ideal design.md §六, 04-midband-ticket-recall 4.4): after the
-// middle band folds its process detail, the model SHALL see the event-key ticket
-// of every folded entry and recall_get SHALL answer that ticket with the full
-// process text, so the model recalls the material the fold consumed instead of
-// being fed a summary it cannot ask past.
-//   - fixture: one session over the declared replay window, four closed turns;
-//     the folds the commits drive consume the process detail of the turns that
-//     left the recent window into segment-fold products, so the sequence the
-//     request presents is the middle band the fold rewrote
-//   - denominator: the chain's process-detail keys the presented projection no
-//     longer holds are the material the fold took, named key by key, and the
-//     middle band really is the state presented (a segment-fold product and no
-//     history summary), so a request that carries no ticket is a claim about a
-//     fold that happened
-//   - premise (holds today): the folded key is already readable by identity —
-//     recall_get on the bare key answers found with the committed text — so the
-//     red below is a claim about visibility, never about a key no store holds
-//   - negative (today): the fold line carries the provenance anchor and the
-//     one-line read alone, the framework presents the fold product's summary, and
-//     the request carries no event-key ticket at all, so the model cannot ask for
-//     the folded text it was never handed a handle on. The bound fails naming the
-//     key, the ticket it wanted, the folded set and the messages the request
-//     carried
-//   - consumer: the request is the one the formal Run.Invoke entry drives, and
-//     the read is the recall_get tool built over Run.RecallReads — the read face
-//     the assembled runtime wires beside its retrieval surface — called with the
-//     ticket the request carried, and its body is compared to the committed text
-//     character for character
+// TestSymptomAnchorMidbandProcessRecalledByTicket anchors the middle band: a folded entry reaches the model as an event-key ticket the exact read answers.
+//   - fixture: one session over the declared replay window, four closed turns; the commits drive the folds that consume the process detail which left the window
+//   - band presented: the sequence holds a segment-fold product and no history summary, so it is the middle band the fold rewrote
+//   - denominator: the chain's process-detail keys the presented projection does not hold are the material the fold took, named key by key
+//   - premise: recall_get answers the bare key with the committed text, so a recall that answers no text is a visibility failure, never a lost key
+//   - material: the request carries the folded read and not the raw text it dropped, so a missing ticket is about the handle, not a lost fold
+//   - negative: the fold line carries the provenance anchor and the one-line read alone and no ticket reaches the request, so the model cannot ask past the summary
+//   - failure report: the bound names the key, the ticket it wanted, the folded set and the messages the request carried
+//   - consumer: the request is the one Run.Invoke drives, and the read is recall_get over Run.RecallReads called with the ticket the request carried
+//   - comparison: the recall body is compared to the committed text character for character
 //
 // 契约: docs/wiki/memory/memory-architecture.md#event-shape
 func TestSymptomAnchorMidbandProcessRecalledByTicket(t *testing.T) {
@@ -198,9 +179,6 @@ func TestSymptomAnchorMidbandProcessRecalledByTicket(t *testing.T) {
 	messages := requests[0].Messages
 	carried := strings.Join(contentsOf(messages), "\n")
 
-	// The material the request presents: the folded read reaches it and the raw
-	// text it dropped does not, so the red below is about the handle the model was
-	// given and never about a fold that never reached the request.
 	if !strings.Contains(carried, committed.Meta[event.MetaKeyEventSummary]) {
 		t.Fatalf("the request carries none of the folded read %q of %s, want the fold product presented: the fixture proves nothing without it (messages=%q)",
 			committed.Meta[event.MetaKeyEventSummary], target, carried)
@@ -209,8 +187,6 @@ func TestSymptomAnchorMidbandProcessRecalledByTicket(t *testing.T) {
 		t.Fatalf("the request carries the raw text of the folded fact %s, want the folded process detail kept out of the request", target)
 	}
 
-	// The premise: the folded fact is readable by identity today, so a recall that
-	// answers no text is a visibility failure and never a key the store lost.
 	reads := run.RecallReads()
 	partitions := []string{string(addr.AgentID)}
 	directKey := "evt_" + string(target)
@@ -221,8 +197,6 @@ func TestSymptomAnchorMidbandProcessRecalledByTicket(t *testing.T) {
 	}
 	t.Logf("the premise holds: recall_get(%q) answered %d byte(s) of the committed text", directKey, len(direct.Body))
 
-	// The anchor: every folded entry reaches the model as its own event-key ticket,
-	// so the model can ask for the text instead of being handed a summary.
 	for _, key := range folded {
 		evt, err := run.CommittedEvent(ctx, key)
 		if err != nil {
@@ -235,8 +209,6 @@ func TestSymptomAnchorMidbandProcessRecalledByTicket(t *testing.T) {
 		}
 	}
 
-	// The consumer: the ticket the request carried is what the model hands back,
-	// and the exact read answers it with the committed text.
 	recalled := recallGet(t, ctx, reads, partitions, ticketOf(target, committed.Type))
 	if !recalled.Found {
 		t.Fatalf("recall_get answered the ticket %q with %+v, want the folded text", ticketOf(target, committed.Type), recalled)

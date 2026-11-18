@@ -57,11 +57,11 @@
 - **事实落链**：`lease_observer.go` 把 `model.replacement` 事实接进租约，`TestReplacementFactInstallsNewVersion`／`TestFailedReplacementKeepsOldVersion`／`TestModelReplacementLifecycle` 钉住"失败保旧版本"。
 
 <a id="http-api"></a>
-## 五、对外 HTTP 面：只剩宿主那四个路由
+## 五、对外 HTTP 面：只剩宿主那三个路由
 
-`features/rl` 不再持 HTTP 服务器、鉴权或限流——对外面整体交给宿主（`cli`）。`CLI.handler()` 只有四条路由：`GET /healthz`（回裸 `ok`，不做状态渲染）、`GET /query`、`GET /diagnostics`、可选 `POST /feedback`；**单一鉴权门在路由解析之前**，未鉴权一律 401 且带 `WWW-Authenticate`，没有任何端点旁路。
+`features/rl` 不再持 HTTP 服务器、鉴权或限流——对外面整体交给宿主（`cli`）。`CLI.handler()` 只有三条路由：`GET /healthz`（回裸 `ok`，不做状态渲染）、`GET /query`、`GET /diagnostics`；**单一鉴权门在路由解析之前**，未鉴权一律 401 且带 `WWW-Authenticate`，没有任何端点旁路。
 
-反馈面挂同一道门后（`WithFeedbackEndpoint`，端点自己在自己的位置再核一次凭据），训练侧对外只剩三个计数：`FeedbackAttribution{Bound, Unbound, Ambiguous}`，由 `GET /diagnostics` 的 `Training.Feedback` 读回——`Bound` 归到有据可查的证据，`Unbound` 是没有可定位引用的流量，`Ambiguous` 是证据自相冲突。三者都是现算读数，别指望用它们反推单条反馈的归属。
+反馈提交面在本仓无实现：`features/rl/feedback.go` 只有 `FeedbackAttribution{Bound, Unbound, Ambiguous}` 三个计数的结构声明，既无 `http.Handler` 也无计数生产者；`cli` 不持反馈处理器，`POST /feedback` 不在它的路由表里。训练侧对外读数只有 `GET /diagnostics` 的 `Training`：recorder 是否接线、请求快照数、按 kind 具名的记录损失（`assembly/host_diagnostics.go` 的 `trainingFace`）。报告结构里的 `DiagnosticTraining.Feedback` 全仓无写入点，读回恒为 `nil`。
 
 <a id="live-benchmark"></a>
 ## 六、真实任务基准与样本合格门

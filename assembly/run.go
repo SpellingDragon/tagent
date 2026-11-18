@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"reflect"
 	"sort"
 	"strconv"
 	"strings"
@@ -318,10 +319,6 @@ type Run struct {
 	// quiet chain still files one after this long.
 	checkpointEvery  int
 	checkpointPeriod time.Duration
-	// bootContext is the context this run was assembled with. A relocation pass
-	// reads it to tell a live run from a stopping one: the pass rewrites the hot
-	// journal, and a process whose boot is over begins no rewrite of it.
-	bootContext context.Context
 	// checkpointCommits counts the commits since the last checkpoint, and
 	// checkpointAt is the moment it was filed: it opens at the assembly, so the
 	// period measures a chain that has been committing rather than the wall clock
@@ -462,6 +459,13 @@ type Run struct {
 	// closing reports that a close of this run has begun, so the intake refuses
 	// new work before the first read of the rest criterion.
 	closing bool
+	// closeDrained reports the drain verdict the latest close of this run
+	// reached: whether it ended with every obligation it owed settled. It is
+	// written once per close off the criterion the close reports, so a reader
+	// takes that judgment instead of a second one beside it; a close that has not
+	// reached its verdict yet answers the zero value, which reads as a drain that
+	// did not finish.
+	closeDrained bool
 	// closeReturned reports that a close of this run has returned to its caller.
 	// The consumer set that backed the run stopped with that close, so a result
 	// that lands afterwards is kept owed on the mailbox instead of being handed
@@ -494,24 +498,6 @@ type Run struct {
 // - The loop builds the writer ledger for itself and the run reads it through the loop, so the close judges the very registrations the productions made.
 func Assemble(ctx context.Context, decl *config.Declaration, agents map[event.AgentID]NativeAgent, opts ...Option) (*Run, error) {
 	return assemble(ctx, decl, agents, true, opts...)
-}
-
-// relocatableStorage answers the storage configuration the assembly opens: a
-// durable journal tier relocates the facts its checkpoints settled, so the journal
-// a boot opens holds what the run still reads instead of the whole history behind
-// it. The choice is the configuration's when it is declared, and the journal
-// configurations this build opens declare the durable local tier without saying
-// otherwise, so the default here is the relocation. A tier that persists nothing
-// keeps its facts in the process and relocates none of them.
-func relocatableStorage(cfg ledger.StorageConfig) ledger.StorageConfig {
-	if cfg.Root == "" {
-		return cfg
-	}
-	switch cfg.Type {
-	case ledger.StorageJournal, ledger.StorageLocalFile:
-		cfg.RetireFacts = true
-	}
-	return cfg
 }
 
 // assemble builds a run and optionally trims before the host's delivery recovery.
@@ -553,7 +539,6 @@ func assemble(ctx context.Context, decl *config.Declaration, agents map[event.Ag
 		states:           state.NewStateRegistry(),
 		checkpointEvery:  CheckpointCommitInterval,
 		checkpointPeriod: CheckpointPeriod,
-		bootContext:      ctx,
 		checkpointAt:     time.Now(),
 		checkpointDue:    make(chan struct{}, 1),
 		checkpointStop:   make(chan struct{}),
@@ -619,7 +604,9 @@ func assemble(ctx context.Context, decl *config.Declaration, agents map[event.Ag
 	var durable *state.DurableCommit
 	var tier *ledger.Tier
 	if cfg.storage != nil {
-		opened, err := ledger.OpenTier(ctx, relocatableStorage(*cfg.storage))
+		storage := *cfg.storage
+		storage.WriteRights = true
+		opened, err := ledger.OpenTier(ctx, storage)
 		if err != nil {
 			return nil, err
 		}
@@ -629,11 +616,6 @@ func assemble(ctx context.Context, decl *config.Declaration, agents map[event.Ag
 		if !tier.Capabilities.Durable {
 			assemblyWarn("tagent: storage tier keeps no record across process exit tier=%s restored=none",
 				tier.Capabilities.Tier)
-		}
-		if probe, held := tier.Store.(interface{ IndexCutNotice() string }); held {
-			if notice := probe.IndexCutNotice(); notice != "" {
-				assemblyWarn("tagent: %s", notice)
-			}
 		}
 		durable = state.NewEmptyDurableCommit(ledger.TierFactLog(tier), nil)
 		r.commit = &runCommit{inner: durable, held: map[event.TaskID]bool{}}
@@ -686,8 +668,12 @@ func assemble(ctx context.Context, decl *config.Declaration, agents map[event.Ag
 		if err := cfg.bootReconcile(ctx, r, decl, agents); err != nil {
 			return nil, err
 		}
-	} else if _, err := r.Publish(ctx, decl, agents); err != nil {
+	} else if adopted, err := r.adoptRecordedPublication(ctx, decl, agents); err != nil {
 		return nil, err
+	} else if !adopted {
+		if _, err := r.Publish(ctx, decl, agents); err != nil {
+			return nil, err
+		}
 	}
 	r.mu.Lock()
 	if r.sessionFiled == nil {
@@ -943,6 +929,19 @@ func (r *Run) CloseMCPServers() error {
 	return r.mcpServers.Close()
 }
 
+// closeStorage ends the storage view this run opened at boot, for a close whose
+// release found no commit source standing: the tier stops committing through its
+// engine and gives its storage root up to the next writer, so a second runtime over
+// the same root — in this process or another — is admitted instead of meeting the
+// write rights of a view that already ended. A close that ends beside a resident loop
+// still inside a model production, or beside a writer that has not confirmed its
+// stop, keeps this view open, so the obligations that work still lands commit through
+// the write rights it holds. A run that opened no tier ends nothing, and a repeated
+// close releases nothing anew.
+func (r *Run) closeStorage() error {
+	return r.tier.Close()
+}
+
 // finalRoundPolicy maps the watchdog budget a declaration names for its entry
 // agent onto the default policy the drives of this run run under. The closing
 // round stays opt-in: a declaration that names no budget yields the zero policy,
@@ -1101,10 +1100,11 @@ func (r *Run) restoreCheckpointState(ctx context.Context, tier *ledger.Tier) err
 // one outcome per task the chains cover. A chain carrying no admission material
 // is refused by name in the report and rebuilds nothing.
 //
-//   - a chain the newest framework checkpoint states is folded from the link that landed past the stated revision, and one the checkpoint states with no such link is not read at all: a restart costs the account it keeps plus the increment past the cut, never the chains it already settled.
+//   - the fold enumerates the account the durable commit holds, which is the open work the checkpoint states beside the tasks the storage committed past its cut; a task that finished before the cut is enumerated nowhere and costs no read, and a reader that names it reads its chain by identity.
+//   - a chain the checkpoint states is folded from the link that landed past the stated revision, and one the checkpoint states with no such link is not read at all: a restart costs the account it keeps plus the increment past the cut, never the chains it already settled.
 //   - a chain the checkpoint did not state — one younger than the cut — is folded whole, which is the fallback that keeps the two paths agreeing.
 //   - a chain the checkpoint states with no record past its cut costs no read: it joins the covered set the checkpoint-state call restores.
-//   - a checkpoint-stated task the checkpoint rebuilt at the cut, whose tail links the fold completes, is held by the registry already and the fold reports no rebuild of its own: its recovery is the checkpoint's account, credited here as Recovered=true beside the covered tasks so the read projection serves it.
+//   - a task the checkpoint rebuilt at the cut, whose tail links the fold completes, is held by the registry already and the fold reports no rebuild of its own: its recovery is the checkpoint's account, credited here as Recovered=true beside the covered tasks so the read projection serves it.
 //   - the report names the tasks in chain order whichever path restored them, so a restart answers the same account whether it read a chain or the checkpoint.
 //   - the whole fold is observed as one line at INFO — the chains read, the links they carry, the chains the checkpoint covered, the tasks rebuilt and the chains dropped beside the elapsed time — and a failed fold at ERROR beside the chain it stopped on.
 func (r *Run) restoreChains(ctx context.Context, durable *state.DurableCommit) (task.RestoreReport, error) {
@@ -1175,9 +1175,11 @@ func (r *Run) restoreChains(ctx context.Context, durable *state.DurableCommit) (
 	return merged, nil
 }
 
-// chainPast reports the links of one chain that landed past the state a
-// checkpoint already states: the links a fold completes the restored account
-// with, and no link the account already covers.
+// chainPast reports the links of one chain that landed past the revision a
+// checkpoint states for its task: the links a fold completes the restored account
+// with, and no link the account already covers. Both sides are the task's own
+// revision counter — the `ExpectedRevision` each record carries beside the
+// revision the checkpoint entry states — so the two compare as one unit.
 func chainPast(chain []task.TaskRecord, revision int64) []task.TaskRecord {
 	past := make([]task.TaskRecord, 0, len(chain))
 	for _, link := range chain {
@@ -1205,8 +1207,13 @@ func restoredCounts(report task.RestoreReport) (recovered, dropped int) {
 }
 
 // Recovery reports how the assembly folded the durable chains its storage
-// already held at startup: one outcome per task the chains covered. The report
-// is empty for an assembly beside no storage.
+// already held at startup: one outcome per task the fold covered, which is the
+// open work of the cut beside the chains the storage committed past it. A task
+// that finished before the cut states no outcome here — the checkpoint that cut
+// carries names none of them, so the boot never enumerated them — and the whole
+// history behind the report is the read a caller asks for through the task
+// account's own enumeration, which is linear in that history. The report is empty
+// for an assembly beside no storage.
 func (r *Run) Recovery() task.RestoreReport {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -2345,7 +2352,7 @@ func eachCommittedEvent(ctx context.Context, tier *ledger.Tier, visit func(ledge
 		return err
 	}
 	for i := len(refs) - 1; i >= 0; i-- {
-		stored, held, err := tier.Segments.GetEvent(ctx, refs[i].key)
+		stored, held, err := tier.Segments.GetEventInPartition(ctx, refs[i].key, refs[i].partition)
 		if err != nil {
 			return err
 		}
@@ -2551,7 +2558,7 @@ func (r *Run) seedFullReplay(ctx context.Context, tier *ledger.Tier) (map[event.
 			seeds[addr] = seed
 			order = append(order, addr)
 		}
-		seed.projection = foldIntoProjection(ctx, seed.projection, entry, seed.window)
+		seed.projection, _ = foldIntoProjection(ctx, seed.projection, entry, seed.window)
 		return nil
 	}); err != nil {
 		return nil, nil, report, err
@@ -2584,6 +2591,90 @@ type anchorSlot struct {
 	session   event.SessionID
 }
 
+// bootIndexWalk answers the index entries one boot rebuilds from, in commit order, newest first.
+//   - The newest framework checkpoint states the cut of every partition it covered and the projection of every chain it covers, so the entries at or behind that cut are material the restored state already presents and the boot owes them no read.
+//   - The walk therefore stops once every partition the cut names has answered an entry at or behind its own cut: nothing older than that entry can stand past a cut the walk already crossed.
+//   - The bound rests on the checkpoint stating the chains it covers: the partition a cut does not name, and the count that disagrees with the entries the walk named past the cut, answer the whole chain instead, so a bound is never taken over a chain the boot still owes a read.
+func (r *Run) bootIndexWalk(ctx context.Context, tier *ledger.Tier) ([]anchorRef, map[int]int64, error) {
+	cut := r.checkpointCut(checkpointSliceProjection)
+	if len(cut) > 0 {
+		refs, landed, past, bounded := r.walkIndexPastCut(ctx, tier, cut)
+		if bounded && past == tier.Segments.EventCount()-coveredEntries(cut) {
+			return refs, landed, nil
+		}
+	}
+	return r.walkIndexWhole(ctx, tier)
+}
+
+// coveredEntries answers the index entries one cut covers: the sequence slot each of its partitions stands at.
+func coveredEntries(cut event.CheckpointOffset) int {
+	entries := 0
+	for _, seq := range cut {
+		entries += int(seq)
+	}
+	return entries
+}
+
+// walkIndexPastCut walks the index newest commit first and stops where every partition the
+// cut names has answered an entry at or behind its own cut. It answers the entries it named,
+// the sequence each partition landed at, how many of those entries stood past the cut, and
+// whether the walk stayed inside the cut: a partition the cut does not name ends the walk as
+// unbounded, because that chain's facts are covered by no state the checkpoint states.
+func (r *Run) walkIndexPastCut(ctx context.Context, tier *ledger.Tier, cut event.CheckpointOffset) ([]anchorRef, map[int]int64, int, bool) {
+	var refs []anchorRef
+	landed := make(map[int]int64, len(cut))
+	for partition, seq := range cut {
+		landed[partition] = seq
+	}
+	behind := make(map[int]struct{}, len(cut))
+	past := 0
+	bounded := true
+	err := tier.Segments.EachIndexNewestFirstUntil(ctx, func(key event.EventID, partition int, seq int64, typ string, session event.SessionID) (bool, error) {
+		covered, named := cut[partition]
+		if !named {
+			bounded = false
+			return false, nil
+		}
+		refs = append(refs, anchorRef{key: key, partition: partition, seq: seq, typ: typ, session: session})
+		if seq > covered {
+			if landed[partition] < seq {
+				landed[partition] = seq
+			}
+			past++
+			return true, nil
+		}
+		behind[partition] = struct{}{}
+		if len(behind) == len(cut) {
+			return false, nil
+		}
+		return true, nil
+	})
+	if err != nil {
+		return nil, nil, 0, false
+	}
+	return refs, landed, past, bounded
+}
+
+// walkIndexWhole walks every index entry of the chain, newest commit first, with no bound:
+// it is the answer beside a checkpoint that states no projection and the answer a bounded
+// walk falls back to when the chain states a partition its cut does not cover.
+func (r *Run) walkIndexWhole(ctx context.Context, tier *ledger.Tier) ([]anchorRef, map[int]int64, error) {
+	var refs []anchorRef
+	if err := tier.Segments.EachIndexNewestFirst(ctx, func(key event.EventID, partition int, seq int64, typ string, session event.SessionID) error {
+		refs = append(refs, anchorRef{key: key, partition: partition, seq: seq, typ: typ, session: session})
+		return nil
+	}); err != nil {
+		return nil, nil, err
+	}
+	landed := map[int]int64{}
+	for _, entry := range refs {
+		if entry.seq > landed[entry.partition] {
+			landed[entry.partition] = entry.seq
+		}
+	}
+	return refs, landed, nil
+}
+
 // seedAnchoredReplay rebuilds each session chain from the newest compress
 // product the index names by frozen event type, then replays the events of that
 // chain committed past the newest survivor the product states. The index walk
@@ -2598,19 +2689,11 @@ type anchorSlot struct {
 // - A compression fact the cut did not cover but the boundary did is handed to the compression account alone, because the projection states the material it folded and the account does not state the judgment or the answer it carries.
 func (r *Run) seedAnchoredReplay(ctx context.Context, tier *ledger.Tier) (map[event.Address]*sessionSeed, seedReport, error) {
 	report := seedReport{}
-	var refs []anchorRef
-	if err := tier.Segments.EachIndexNewestFirst(ctx, func(key event.EventID, partition int, seq int64, typ string, session event.SessionID) error {
-		refs = append(refs, anchorRef{key: key, partition: partition, seq: seq, typ: typ, session: session})
-		return nil
-	}); err != nil {
+	refs, landed, err := r.bootIndexWalk(ctx, tier)
+	if err != nil {
 		return nil, report, err
 	}
-	report.Landed = map[int]int64{}
-	for _, entry := range refs {
-		if entry.seq > report.Landed[entry.partition] {
-			report.Landed[entry.partition] = entry.seq
-		}
-	}
+	report.Landed = landed
 	seedsRestored := r.takeRestoredProjection()
 	compressCut := r.checkpointCut(checkpointSliceCompress)
 	anchors := map[anchorSlot]int{}
@@ -2658,12 +2741,12 @@ func (r *Run) seedAnchoredReplay(ctx context.Context, tier *ledger.Tier) (map[ev
 		var tailProducts []event.CompressProduct
 		if base, addr, held := restoredSeedOf(seedsRestored, slot); held && !hasAnchor {
 			seed.window = r.foldWindowOfAgent(addr.AgentID)
-			boundary, err := r.restoreSurvivors(ctx, tier, seed, base.survivors, &report)
+			boundary, err := r.restoreSurvivors(ctx, tier, seed, base.survivors, slot.partition, &report)
 			if err != nil {
 				return nil, report, err
 			}
 			seed.projection = trimReplayProjection(ctx, seed.projection, seed.window)
-			tailProducts, err = r.replayChainPastCut(ctx, tier, refs, slot, seed, boundary, compressCut, "", &report)
+			tailProducts, err = r.replayChainPastCut(ctx, tier, refs, slot, seed, boundary, boundary, compressCut, "", &report)
 			if err != nil {
 				return nil, report, err
 			}
@@ -2674,7 +2757,7 @@ func (r *Run) seedAnchoredReplay(ctx context.Context, tier *ledger.Tier) (map[ev
 			hasAnchor = false
 		}
 		if hasAnchor {
-			stored, held, err := tier.Segments.GetEvent(ctx, refs[at].key)
+			stored, held, err := tier.Segments.GetEventInPartition(ctx, refs[at].key, refs[at].partition)
 			if err != nil {
 				return nil, report, err
 			}
@@ -2698,7 +2781,20 @@ func (r *Run) seedAnchoredReplay(ctx context.Context, tier *ledger.Tier) (map[ev
 					if agent := agentOf(evt); agent != "" {
 						seed.window = r.foldWindowOfAgent(agent)
 					}
-					boundary, err := r.restoreSurvivors(ctx, tier, seed, survivors, &report)
+					anchorBoundary, err := r.newestSurvivorSeq(ctx, tier, survivors, slot.partition)
+					if err != nil {
+						return nil, report, err
+					}
+					seamBoundary := int64(0)
+					if base, _, restored := restoredSeedOf(seedsRestored, slot); restored {
+						if seamBoundary, err = r.newestSurvivorSeq(ctx, tier, base.survivors, slot.partition); err != nil {
+							return nil, report, err
+						}
+					}
+					if err := r.seedCoveredRange(ctx, tier, refs, slot, seamBoundary, anchorBoundary, refs[at].key, survivors, &report); err != nil {
+						return nil, report, err
+					}
+					boundary, err := r.restoreSurvivors(ctx, tier, seed, survivors, slot.partition, &report)
 					if err != nil {
 						return nil, report, err
 					}
@@ -2706,7 +2802,7 @@ func (r *Run) seedAnchoredReplay(ctx context.Context, tier *ledger.Tier) (map[ev
 					r.compress.NoteProduct(product)
 					report.Anchors++
 					seeds[addr] = seed
-					tailProducts, err = r.replayChainPastCut(ctx, tier, refs, slot, seed, boundary, compressCut, refs[at].key, &report)
+					tailProducts, err = r.replayChainPastCut(ctx, tier, refs, slot, seed, boundary, seamBoundary, compressCut, refs[at].key, &report)
 					if err != nil {
 						return nil, report, err
 					}
@@ -2727,7 +2823,7 @@ func (r *Run) seedAnchoredReplay(ctx context.Context, tier *ledger.Tier) (map[ev
 				if refs[i].session != slot.session || refs[i].partition != slot.partition {
 					continue
 				}
-				product, stated, owner, err := r.replayRef(ctx, tier, refs[i].key, seed, &report)
+				product, stated, owner, err := r.replayRef(ctx, tier, refs[i].key, refs[i].partition, seed, &report)
 				if err != nil {
 					return nil, report, err
 				}
@@ -2757,7 +2853,7 @@ func (r *Run) seedConfigurationFacts(ctx context.Context, tier *ledger.Tier, ref
 		if refs[i].session != "" || refs[i].typ == event.TypeCheckpoint {
 			continue
 		}
-		stored, held, err := tier.Segments.GetEvent(ctx, refs[i].key)
+		stored, held, err := tier.Segments.GetEventInPartition(ctx, refs[i].key, refs[i].partition)
 		if err != nil {
 			return err
 		}
@@ -2792,10 +2888,12 @@ func (r *Run) foldWindowOfAgent(agent event.AgentID) FoldWindow {
 // the text the payload carries. Nothing here reads a kind off a key's prefix, and
 // a survivor with neither a mapped fact nor a carried text refuses the boot by
 // name instead of presenting an entry with no text.
-func (r *Run) restoreSurvivors(ctx context.Context, tier *ledger.Tier, seed *sessionSeed, survivors []anchorEntry, report *seedReport) (int64, error) {
+//
+// - A survivor is read in the partition of the chain slot the payload belongs to, because every fact of that chain is filed under the partition its agent names and the payload names no partition of its own.
+func (r *Run) restoreSurvivors(ctx context.Context, tier *ledger.Tier, seed *sessionSeed, survivors []anchorEntry, partition int, report *seedReport) (int64, error) {
 	boundary := int64(0)
 	for _, survivor := range survivors {
-		stored, held, err := tier.Segments.GetEvent(ctx, survivor.Key)
+		stored, held, err := tier.Segments.GetEventInPartition(ctx, survivor.Key, partition)
 		if err != nil {
 			return 0, err
 		}
@@ -2840,12 +2938,13 @@ func (r *Run) restoreSurvivors(ctx context.Context, tier *ledger.Tier, seed *ses
 // already states it.
 //
 //   - The boundary is the newest survivor the checkpoint names, never the cut it states: the state read at the quiet point carries every commit that landed before the holders were asked, so the survivors may stand past the watermark. A fact between the two landed after the cut and before the boundary, so the checkpoint holds the material it folded and the replay must not seat it twice.
+//   - The seam boundary names what a checkpoint vouches beside an anchor rebuild: the anchor bounds only the projection, so the facts it covered down to this boundary were seeded before the survivors hydrated (see seedCoveredRange) and this walk reads none of them again, while the compression facts at or below it still reach the account the way they do beside a checkpoint.
 //   - A checkpoint names the chain it states without entering it: the state it carries is the boundary this replay starts from, never material the chain replays.
 //
 // The covered range costs one index walk and no body read. The exception is a
 // compression fact of that range, which the checkpoint's account states only up to
 // the cut: a checkpoint stating no account at all leaves the range unread.
-func (r *Run) replayChainPastCut(ctx context.Context, tier *ledger.Tier, refs []anchorRef, slot anchorSlot, seed *sessionSeed, boundary int64, compressCut event.CheckpointOffset, skip event.EventID, report *seedReport) ([]event.CompressProduct, error) {
+func (r *Run) replayChainPastCut(ctx context.Context, tier *ledger.Tier, refs []anchorRef, slot anchorSlot, seed *sessionSeed, boundary, seamBoundary int64, compressCut event.CheckpointOffset, skip event.EventID, report *seedReport) ([]event.CompressProduct, error) {
 	var tail, behind []anchorRef
 	for _, ref := range refs {
 		if ref.session != slot.session || ref.partition != slot.partition || ref.key == skip {
@@ -2858,20 +2957,23 @@ func (r *Run) replayChainPastCut(ctx context.Context, tier *ledger.Tier, refs []
 			tail = append(tail, ref)
 			continue
 		}
+		if ref.seq > seamBoundary {
+			continue
+		}
 		if compressCut != nil && event.CompressionMechanism(ref.typ) && pastCut(compressCut, ref) {
 			behind = append(behind, ref)
 		}
 	}
 	sort.Slice(behind, func(i, j int) bool { return behind[i].seq < behind[j].seq })
 	for _, ref := range behind {
-		if err := r.seedAccountFact(ctx, tier, ref.key, report); err != nil {
+		if err := r.seedFactWithoutProjection(ctx, tier, ref.key, ref.partition, report); err != nil {
 			return nil, err
 		}
 	}
 	sort.Slice(tail, func(i, j int) bool { return tail[i].seq < tail[j].seq })
 	products := make([]event.CompressProduct, 0, len(tail))
 	for _, ref := range tail {
-		product, stated, _, err := r.replayRef(ctx, tier, ref.key, seed, report)
+		product, stated, _, err := r.replayRef(ctx, tier, ref.key, ref.partition, seed, report)
 		if err != nil {
 			return nil, err
 		}
@@ -2882,13 +2984,74 @@ func (r *Run) replayChainPastCut(ctx context.Context, tier *ledger.Tier, refs []
 	return products, nil
 }
 
-// seedAccountFact seeds one compression fact into the compression account of a
-// rebuilding run without appending it to the projection: the fact stands behind
-// the boundary the anchor states, so the projection already holds the material it
-// folded, while the account the checkpoint states was taken at a cut of its own and
-// owes the judgment or the answer this fact carries.
-func (r *Run) seedAccountFact(ctx context.Context, tier *ledger.Tier, key event.EventID, report *seedReport) error {
-	stored, held, err := tier.Segments.GetEvent(ctx, key)
+// seedCoveredRange seeds the facts of one chain that lie between the boundary a
+// restored checkpoint vouches for and the boundary the anchor's survivors name.
+// The anchor bounds what the projection reads, and only a checkpoint bounds what
+// the state seam may skip — its cut refuses while a fact stands unapplied, while
+// an anchor commits beside any consumer's failure — so a fact in this range is
+// owed to every consumer the checkpoint does not state. The range is empty in the
+// steady run, where the checkpoint a product's landing requests covers the anchor
+// soon after it files; it holds material exactly when that checkpoint could not
+// advance. Each fact seeds the ledger and the consumers without appending to the
+// projection, which the anchor's fold already states, and the seeding runs before
+// the survivors hydrate so the seam folds the chain in commit order.
+func (r *Run) seedCoveredRange(ctx context.Context, tier *ledger.Tier, refs []anchorRef, slot anchorSlot, seamBoundary, anchorBoundary int64, skip event.EventID, survivors []anchorEntry, report *seedReport) error {
+	if seamBoundary >= anchorBoundary {
+		return nil
+	}
+	retained := make(map[event.EventID]struct{}, len(survivors))
+	for _, survivor := range survivors {
+		retained[survivor.Key] = struct{}{}
+	}
+	var covered []anchorRef
+	for _, ref := range refs {
+		if ref.session != slot.session || ref.partition != slot.partition || ref.key == skip {
+			continue
+		}
+		if ref.typ == event.TypeCheckpoint {
+			continue
+		}
+		if _, survivor := retained[ref.key]; survivor {
+			continue
+		}
+		if ref.seq > seamBoundary && ref.seq <= anchorBoundary {
+			covered = append(covered, ref)
+		}
+	}
+	sort.Slice(covered, func(i, j int) bool { return covered[i].seq < covered[j].seq })
+	for _, ref := range covered {
+		if err := r.seedFactWithoutProjection(ctx, tier, ref.key, ref.partition, report); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// newestSurvivorSeq answers the newest chain position the survivors name, without
+// hydrating them: the boundary read ahead of the seeding the survivors themselves
+// drive, so a range that ends at it folds in commit order first.
+func (r *Run) newestSurvivorSeq(ctx context.Context, tier *ledger.Tier, survivors []anchorEntry, partition int) (int64, error) {
+	boundary := int64(0)
+	for _, survivor := range survivors {
+		stored, held, err := tier.Segments.GetEventInPartition(ctx, survivor.Key, partition)
+		if err != nil {
+			return 0, err
+		}
+		if held && stored.Seq > boundary {
+			boundary = stored.Seq
+		}
+	}
+	return boundary, nil
+}
+
+// seedFactWithoutProjection seeds one fact a rebuild's projection does not read
+// into the live ledger, the state seam and the compression account: the fact
+// stands behind a boundary the projection already states — a compression fact
+// behind the checkpoint's own cut for its account, a covered fact behind the
+// anchor's fold for the consumers — so appending it there would present material
+// the fold replaced, while the seam and the account still owe it.
+func (r *Run) seedFactWithoutProjection(ctx context.Context, tier *ledger.Tier, key event.EventID, partition int, report *seedReport) error {
+	stored, held, err := tier.Segments.GetEventInPartition(ctx, key, partition)
 	if err != nil {
 		return err
 	}
@@ -2918,12 +3081,13 @@ func (r *Run) seedAccountFact(ctx context.Context, tier *ledger.Tier, key event.
 // and a product fact is left to the anchor that already stated its result.
 // replayRef replays one committed event of a chain into the seed the walk
 // carries and answers the compression product the event states beside the agent
-// that committed it.
+// that committed it. The event is read in the partition the walk reported it in,
+// never by probing the partitions a seat states.
 //
 // - A product reaches the compression ledger whichever side of the anchor it stands on, so a restarted run never executes a judgment a second time.
 // - A key the index named but whose body cannot be read is refused by name, with the same ErrSegmentBodyMissing every other recovery read answers: the walk reached the key out of the store's own commit order, so the index does point at it, and a boot that skipped it would present a projection with one fact fewer than the chain holds.
-func (r *Run) replayRef(ctx context.Context, tier *ledger.Tier, key event.EventID, seed *sessionSeed, report *seedReport) (event.CompressProduct, bool, event.AgentID, error) {
-	stored, held, err := tier.Segments.GetEvent(ctx, key)
+func (r *Run) replayRef(ctx context.Context, tier *ledger.Tier, key event.EventID, partition int, seed *sessionSeed, report *seedReport) (event.CompressProduct, bool, event.AgentID, error) {
+	stored, held, err := tier.Segments.GetEventInPartition(ctx, key, partition)
 	if err != nil {
 		return event.CompressProduct{}, false, "", err
 	}
@@ -2956,7 +3120,7 @@ func (r *Run) replayRef(ctx context.Context, tier *ledger.Tier, key event.EventI
 	if !ok {
 		return event.CompressProduct{}, false, agentOf(evt), nil
 	}
-	seed.projection = foldIntoProjection(ctx, seed.projection, entry, seed.window)
+	seed.projection, _ = foldIntoProjection(ctx, seed.projection, entry, seed.window)
 	return event.CompressProduct{}, false, agentOf(evt), nil
 }
 
@@ -3096,7 +3260,7 @@ func MemoryPlanOf(decl *config.Declaration, storageType, storageRoot string) (*M
 				plan.storage = candidate
 				plan.hasStore = true
 				declaredBy = id
-			} else if plan.storage != candidate {
+			} else if !reflect.DeepEqual(plan.storage, candidate) {
 				return nil, fmt.Errorf("%w: agents %q and %q name different storage tiers", ErrMemoryDeclaration, declaredBy, id)
 			}
 		}
@@ -3114,7 +3278,7 @@ func MemoryPlanOf(decl *config.Declaration, storageType, storageRoot string) (*M
 	topRoot := strings.TrimSpace(storageRoot)
 	if topType != "" {
 		top := ledger.StorageConfig{Type: ledger.StorageType(topType), Root: topRoot}
-		if plan.hasStore && plan.storage != top {
+		if plan.hasStore && !reflect.DeepEqual(plan.storage, top) {
 			return nil, fmt.Errorf("%w: the top-level storage disagrees with the memory tier agent %q declares", ErrMemoryDeclaration, declaredBy)
 		}
 		if !plan.hasStore {

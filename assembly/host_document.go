@@ -1135,31 +1135,37 @@ func reconcileBootConfig(ctx context.Context, run *Run, configPath string, doc *
 // adoptBootGeneration takes one recorded generation into service at startup: the
 // generation-scoped consumers rebuild their instances for the generation the
 // record names, the composed native face of that generation is what the adopted
-// binding construction reads, and the exclusive resources those consumers
-// acquired are handed to the retirement ledger of the adopted generation, so the
-// publication that supersedes it later frees them through the same drain.
+// binding construction reads whenever the boot holds a face source, and the
+// exclusive resources those consumers acquired are handed to the retirement
+// ledger of the adopted generation, so the publication that supersedes it later
+// frees them through the same drain.
 //
 // A consumer that refuses the declaration, a generation without a composed face
 // and a refused adoption each leave the boot failed instead of serving a
 // generation whose consumers were only partly built; the instances built so far
-// put their faces back and release what they acquired.
+// put their faces back and release what they acquired. A boot assembled beside no
+// face source composes the adopted generation over the natives it was handed, the
+// same construction its first publication reads.
 //
 // 契约: docs/wiki/platform/org-hot-reload.md#apply-record
-func adoptBootGeneration(ctx context.Context, run *Run, decl *config.Declaration, agents map[event.AgentID]NativeAgent, faces *hostFaces, record state.PublicationRecord, dialectKey string) error {
+func adoptBootGeneration(ctx context.Context, run *Run, decl *config.Declaration, agents map[event.AgentID]NativeAgent, faces GenerationFaces, record state.PublicationRecord, dialectKey string) error {
 	gen := state.Generation(record.Generation)
 	built, err := run.genRegistry.Build(ctx, decl, gen)
 	if err != nil {
 		return err
 	}
-	composed, ok := faces.Face(gen)
-	if !ok {
-		built.Restore()
-		return errors.Join(
-			fmt.Errorf("tagent: the consumer side built no native face for the adopted generation %d", gen),
-			built.Release(ctx),
-		)
+	if faces != nil {
+		composed, ok := faces.Face(gen)
+		if !ok {
+			built.Restore()
+			return errors.Join(
+				fmt.Errorf("tagent: the consumer side built no native face for the adopted generation %d", gen),
+				built.Release(ctx),
+			)
+		}
+		agents = composed
 	}
-	if err := run.adoptConfigPublication(ctx, decl, composed, record, dialectKey); err != nil {
+	if err := run.adoptConfigPublication(ctx, decl, agents, record, dialectKey); err != nil {
 		built.Restore()
 		return errors.Join(err, built.Release(ctx))
 	}
@@ -1645,7 +1651,7 @@ func sameMemoryTier(opened, next *MemoryPlan, judgeEngine bool) bool {
 		}
 		return !judgeEngine || reflect.DeepEqual(opened.Engine(), next.Engine())
 	}
-	if *left != *right {
+	if !reflect.DeepEqual(*left, *right) {
 		return false
 	}
 	return !judgeEngine || reflect.DeepEqual(opened.Engine(), next.Engine())

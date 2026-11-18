@@ -116,7 +116,8 @@ type StateRegistry struct {
 	// accumulates every payload a restore named for it: per-session checkpoints each
 	// state a slice of the same name, and the holder restores them in order rather
 	// than the last checkpoint overwriting the sessions beside it.
-	pending map[string][][]byte
+	pending   map[string][][]byte
+	unapplied map[event.EventID]error
 }
 
 // NewStateRegistry returns an empty state registry.
@@ -210,48 +211,34 @@ func (r *StateRegistry) mounted() []Stateful {
 
 // Reduce folds one committed fact into the derived state of every mounted holder
 // that derives its state from facts, in registration order, and answers the first
-// refusal by the holder that made it: a fact one consumer cannot fold is a state
-// this runtime would read as behind the chain it serves. A holder that states an
-// account of its own is not asked — it implements no reducer face — so the pass
-// names no consumer and needs no hook per consumer: a slice mounted through
-// Register takes part the moment it is mounted.
-//
-// The pass is the recovery's face as much as the live commit's: a boot replays the
-// facts committed past a cut through the same call, so the state a restart derives
-// is the state the live process derived from the same facts. Nothing here drives
-// an emitter: the work a consumer owes is started by the owner of that duty, never
-// by a fold of the fact it owes it for.
+// refusal by the holder that made it. An unapplied fact prevents a checkpoint of
+// its state until a later successful pass over that identity resolves the refusal.
+// Holders without a reducer face are not asked; no observation driver is invoked.
 func (r *StateRegistry) Reduce(ctx context.Context, evt event.Event) error {
 	if r == nil {
 		return nil
 	}
+	r.mu.Lock()
+	prior := r.unapplied[evt.Key]
+	r.mu.Unlock()
 	for _, holder := range r.mounted() {
 		if err := reduceInto(ctx, holder, evt); err != nil {
-			return fmt.Errorf("state: fold the fact %s into the %q state slice: %w", evt.Key, holder.StateName(), err)
+			refused := fmt.Errorf("state: fold the fact %s into the %q state slice: %w", evt.Key, holder.StateName(), err)
+			r.mu.Lock()
+			if r.unapplied == nil {
+				r.unapplied = map[event.EventID]error{}
+			}
+			r.unapplied[evt.Key] = refused
+			r.mu.Unlock()
+			return refused
 		}
 	}
-	return nil
-}
-
-// ReduceInto folds one committed fact into one named holder's derived state, so a
-// consumer that reads the facts past the cut of its own slice replays them through
-// the same derivation the live commit drives. A holder that derives nothing from
-// facts is not asked, and a name no holder answers is refused by name rather than
-// silently folding nothing: a recovery reading a cut of a slice this runtime does
-// not mount would leave that consumer behind the chain it serves.
-func (r *StateRegistry) ReduceInto(ctx context.Context, name string, evt event.Event) error {
-	if r == nil {
-		return nil
-	}
 	r.mu.Lock()
-	holder, mounted := r.holders[name]
+	// A successful pass cannot clear a refusal recorded after that pass began.
+	if r.unapplied[evt.Key] == prior {
+		delete(r.unapplied, evt.Key)
+	}
 	r.mu.Unlock()
-	if !mounted {
-		return fmt.Errorf("state: no state holder answers the name %q", name)
-	}
-	if err := reduceInto(ctx, holder, evt); err != nil {
-		return fmt.Errorf("state: fold the fact %s into the %q state slice: %w", evt.Key, name, err)
-	}
 	return nil
 }
 
@@ -264,6 +251,30 @@ func reduceInto(ctx context.Context, holder Stateful, evt event.Event) error {
 		return nil
 	}
 	return derives.Reduce(ctx, evt)
+}
+
+// unappliedCutRefusal answers the refusal a cut states while a committed fact
+// stands unapplied in any holder, naming each fact in identity order. No session
+// scopes a refusal here: the holder that refused a fact reads it by its own
+// session measure — the delivery slice reads the session the fact is delivered
+// to, the chain the session that owns it — and the framework keeps no measure of
+// its own to guess with, so the refusal holds every cut until the same identity
+// lands again.
+func (r *StateRegistry) unappliedCutRefusal() error {
+	r.mu.Lock()
+	keys := make([]event.EventID, 0, len(r.unapplied))
+	refusals := make(map[event.EventID]error, len(r.unapplied))
+	for key, err := range r.unapplied {
+		keys = append(keys, key)
+		refusals[key] = err
+	}
+	r.mu.Unlock()
+	sort.Slice(keys, func(i, j int) bool { return keys[i] < keys[j] })
+	named := make([]error, 0, len(keys))
+	for _, key := range keys {
+		named = append(named, fmt.Errorf("the committed fact %s stands unapplied: %w", key, refusals[key]))
+	}
+	return errors.Join(named...)
 }
 
 // ObservationDrivers reports the mounted holders that declare an observation
@@ -287,12 +298,18 @@ func (r *StateRegistry) ObservationDrivers() []string {
 // SnapshotState aggregates the state of every mounted holder in registration order. A
 // holder that fails to state its state refuses the whole snapshot by name: a
 // checkpoint missing one slice would restore that consumer beside an empty state,
-// which is worse than filing no checkpoint at all. The reads happen with no
-// framework lock held and take only the holder's own, so a holder that is
-// committing beside the cut answers it instead of waiting on it.
+// which is worse than filing no checkpoint at all. A fact some holder has not
+// applied refuses the cut for the same reason one step earlier: the state a cut
+// states is the state a restart starts from, and a cut taken past an unapplied fact
+// would start the next boot beside a consumer the chain has already left behind.
+// The reads happen with no framework lock held and take only the holder's own, so a
+// holder that is committing beside the cut answers it instead of waiting on it.
 func (r *StateRegistry) SnapshotState(ctx context.Context) ([]event.CheckpointSlice, error) {
 	if r == nil {
 		return nil, nil
+	}
+	if err := r.unappliedCutRefusal(); err != nil {
+		return nil, fmt.Errorf("state: refuse the checkpoint: %w", err)
 	}
 	ordered := r.mounted()
 	slices := make([]event.CheckpointSlice, 0, len(ordered))
@@ -318,10 +335,18 @@ func (r *StateRegistry) SnapshotState(ctx context.Context) ([]event.CheckpointSl
 // of that session's state and never of the account the run holds beside it. The
 // same read rules hold as for the whole account: no framework lock is held across
 // the holders' reads, and a holder that refuses to state itself refuses the whole
-// cut by name rather than filing a checkpoint missing its slice.
+// cut by name rather than filing a checkpoint missing its slice. A fact some
+// holder has not applied refuses this cut as it refuses the whole account's: the
+// framework keeps no session measure of its own to scope a refusal by — the
+// holder that refused the fact reads it by the session it is delivered to, the
+// chain by the session that owns it — so the refusal holds every cut until the
+// same identity lands again.
 func (r *StateRegistry) SnapshotSessionState(ctx context.Context, session event.SessionID) ([]event.CheckpointSlice, error) {
 	if r == nil || session == "" {
 		return nil, nil
+	}
+	if err := r.unappliedCutRefusal(); err != nil {
+		return nil, fmt.Errorf("state: refuse the checkpoint of session %s: %w", session, err)
 	}
 	var slices []event.CheckpointSlice
 	for _, holder := range r.mounted() {

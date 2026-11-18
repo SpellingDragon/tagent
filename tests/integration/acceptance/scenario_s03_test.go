@@ -11,6 +11,7 @@ import (
 	"github.com/SpellingDragon/tagent/api/event"
 	"github.com/SpellingDragon/tagent/api/model"
 	"github.com/SpellingDragon/tagent/assembly"
+	"github.com/SpellingDragon/tagent/memory/replay"
 
 	trpctool "trpc.group/trpc-go/trpc-agent-go/tool"
 )
@@ -323,14 +324,40 @@ func scenarioViewDigest(requests []model.Request) string {
 // its own call identity. The body may be presented as the observation message
 // of the closing decision or as the result message of the next request the late
 // settlement drives, so the read names the call identity and the body and never
-// one presentation role.
+// one presentation role. An entry carrying a committed fact key reaches the
+// request behind its ticket (assembly presentedProjectionContent), so the
+// material the message presents is compared, not the ticket in front of it.
 func scenarioBackgroundOf(messages []model.Message, callID, body string) (string, bool) {
 	for _, message := range messages {
-		if message.ToolID == callID && message.Content == body {
-			return message.Content, true
+		if message.ToolID != callID {
+			continue
+		}
+		if presented := scenarioPresentedMaterial(message.Content); presented == body {
+			return presented, true
 		}
 	}
 	return "", false
+}
+
+// scenarioPresentedMaterial reports the material one message presents without
+// the ticket the request presentation puts in front of it: a bracketed
+// [evt_<key>|<type>] token closing before the material, split at the first "]"
+// after the "[evt_" prefix. That split is safe because the key is not opaque
+// here: mintEventID mints it as a sequence number and hex, so it carries no "]"
+// and the first one after the prefix closes that very ticket. A message
+// presenting no ticket is its own material. Only the address is removed: the
+// material itself must still be the expected content, so a message that merely
+// mentions a body somewhere inside presents nothing.
+func scenarioPresentedMaterial(content string) string {
+	rest, framed := strings.CutPrefix(content, "[evt_")
+	if !framed {
+		return content
+	}
+	end := strings.Index(rest, "]")
+	if end < 0 || !strings.Contains(rest[:end], "|") {
+		return content
+	}
+	return strings.TrimSpace(rest[end+1:])
 }
 
 // scenarioReceiptRoles reports the closing view's role sequence through its last
@@ -372,7 +399,7 @@ func scenarioBoundaryPreserved(requests []model.Request, calls []string, bodies 
 			if message.ToolID == "" {
 				continue
 			}
-			if body := bodies[message.ToolID]; body != "" && message.Content == body {
+			if body := bodies[message.ToolID]; body != "" && scenarioPresentedMaterial(message.Content) == body {
 				settled[message.ToolID] = true
 				continue
 			}
@@ -387,4 +414,66 @@ func scenarioBoundaryPreserved(requests []model.Request, calls []string, bodies 
 		}
 	}
 	return true
+}
+
+// TestScenarioBackgroundRecognizesPresentedCallMaterial pins the read the S03 checks use for a settled body.
+//   - presented forms: the bare observation of the closing decision, or the body behind the ticket put before an entry carrying a committed fact key
+//   - writer: the presentation writes that ticket itself (assembly/request.go presentedProjectionContent)
+//   - fixture key: the key and the type are a CI artifact entry that reached the model, and the ticket comes from replay.TicketOf, not spelled here
+//   - negative: a message that only mentions the body elsewhere, and another call's identity, read as nothing
+func TestScenarioBackgroundRecognizesPresentedCallMaterial(t *testing.T) {
+	const callA, callB = "call-a", "call-b"
+	const bodyA, bodyB = "background-marker-a", "background-marker-b"
+	ticket := replay.TicketOf("5-8ec3a61d1727e7055f5c1c6cf8b2a4d3", event.TypeActionCommand)
+	if ticket == "" {
+		t.Fatalf("the fixture key answers no ticket, so no presented form can be built")
+	}
+	under := func(content string) model.Message {
+		return model.Message{Role: model.RoleTool, ToolID: callA, Content: content}
+	}
+
+	t.Run("bare_observation_is_the_background", func(t *testing.T) {
+		messages := []model.Message{under(bodyA)}
+		got, found := scenarioBackgroundOf(messages, callA, bodyA)
+		if !found || got != bodyA {
+			t.Fatalf("the bare observation of %s read as (%q, %t), want its body", callA, got, found)
+		}
+	})
+
+	t.Run("ticketed_entry_is_the_background", func(t *testing.T) {
+		messages := []model.Message{under(ticket + " " + bodyA)}
+		got, found := scenarioBackgroundOf(messages, callA, bodyA)
+		if !found || got != bodyA {
+			t.Fatalf("the presented entry %q read as (%q, %t), want the material behind the ticket %q",
+				ticket+" "+bodyA, got, found, bodyA)
+		}
+	})
+
+	t.Run("another_call_identity_is_not_this_background", func(t *testing.T) {
+		messages := []model.Message{{Role: model.RoleTool, ToolID: callB, Content: ticket + " " + bodyA}}
+		if got, found := scenarioBackgroundOf(messages, callA, bodyA); found {
+			t.Fatalf("the body of %s read as the background of %s: %q", callB, callA, got)
+		}
+	})
+
+	t.Run("a_body_mentioned_inside_other_material_is_not_presented", func(t *testing.T) {
+		messages := []model.Message{under(ticket + " " + bodyB + " and then " + bodyA)}
+		if got, found := scenarioBackgroundOf(messages, callA, bodyA); found {
+			t.Fatalf("material that only mentions %q read as presenting it: %q", bodyA, got)
+		}
+	})
+
+	t.Run("the_boundary_read_sees_both_calls_presented", func(t *testing.T) {
+		requests := []model.Request{{Messages: []model.Message{
+			{Role: model.RoleAssistant, ToolCalls: []model.ToolCall{{ID: callA}, {ID: callB}}},
+			{Role: model.RoleTool, ToolID: callA, Content: "ok"},
+			{Role: model.RoleTool, ToolID: callB, Content: "ok"},
+			under(ticket + " " + bodyA),
+			{Role: model.RoleTool, ToolID: callB, Content: ticket + " " + bodyB},
+		}}}
+		bodies := map[string]string{callA: bodyA, callB: bodyB}
+		if !scenarioBoundaryPreserved(requests, []string{callA, callB}, bodies) {
+			t.Fatalf("the boundary read lost a settled body presented behind a ticket: %s", scenarioViewDigest(requests))
+		}
+	})
 }
