@@ -64,7 +64,7 @@
     },
     {
       "id": "P4",
-      "criterion": "P4 有界恢复：boot 解码事件数/索引规模/durable load/墙钟不随历史线性增长（真量，非正文计数代理量）。",
+      "criterion": "P4 恢复成本与增长归因：boot 解码事件数/索引规模/durable load/墙钟不随历史线性增长（真量，非正文计数代理量）。",
       "measure": "wallClock",
       "scope": "a full boot of one generation beside the same boot of a longer chain: the open replays the window past the watermark the index files state to the log's end, the load publishes no resident index over the history, the durable load pays the tasks it seats, and the boot carries the turns, task settlements and checkpoints that generation serves",
       "anchor": {

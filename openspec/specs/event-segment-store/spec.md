@@ -1,5 +1,7 @@
 # event-segment-store Specification
 
+> **勘误（2026-11-19 契约同步核验）**：本规范原「关闭停掉生命周期与压实子系统」「compaction 源窗口读失败必须中止本轮」「TTL 扫描读失败必须可观测」三条条款要求的压实器、生命周期管理器、墓碑集与关系仓在 Go 树零定义，该压实与淘汰机制已整体退役。关闭现按提交屏障加写权交还重写；「读不完整不得被当成空」这一保证由「存储失败不可冒充正常缺失」承载，不再以压实陈述；TTL 淘汰路径已不存在，故不再有可观测对象。
+
 ## Purpose
 
 本规范定义 event-segment-store 能力。The system SHALL persist events in the RustViking KV store organized by time-windowed segments.
@@ -72,15 +74,12 @@ The system SHALL persist events in the RustViking KV store organized by time-win
 
 ### Requirement: eventCount 在进程生命期内反映实际事件数
 
-支持分区枚举的存储 SHALL 在启动扫描器前从事实链重建去重、排除墓碑的逻辑存活计数，并在成功提交事件后增量维护。物理清理已墓碑事件与压实搬迁 SHALL NOT 再递减。写失败和重复键拒绝 SHALL NOT 增计数。
-
-#### Scenario: eventCount decremented on compaction cleanup
-- **WHEN** 压实清理已墓碑事件或搬迁相同 EventKey 到新段
-- **THEN** live count 不重复减少，同一存活 EventKey 仅计一次
+计数 SHALL 是成功提交发布的事件数：打开时由链自述的计数一次读出，链不自述时由索引枚举重建，每条索引记录一条事件身份，窗口元数据未到达的条目不计；此后每次成功提交只加一。重复提交与写失败 SHALL NOT 增计数。
 
 #### Scenario: 重启后计数可恢复
-- **WHEN** 新进程打开含 600 个去重存活事件和 40 个墓碑的存储
-- **THEN** 扫描器启动前 live count 为 600，容量淘汰包括存量
+- **WHEN** 新进程打开一个已有成功提交的存储
+- **THEN** 计数 SHALL 等于该链已提交事件的数量
+- **AND** 未提交的条目与窗口元数据未到达的条目 SHALL NOT 被计入
 
 ### Requirement: QueryEvents 召回正确性（最新优先不丢失）
 
@@ -180,7 +179,7 @@ The system SHALL persist events in the RustViking KV store organized by time-win
 
 ### Requirement: 时间真相源单一
 
-`FullEvent.Timestamp` SHALL 是唯一语义时间轴：排序、时间过滤、TTL 年龄均 SHALL 只依据它。`EventKey` 内嵌的时间（写入时刻）SHALL 仅用于段放置与同毫秒全序决胜，SHALL NOT 参与语义时间判定。两者在异步事件下允许分叉；剪枝与早停仅读封口段的事件时间边界（见“段边界可信性”），故分叉 SHALL NOT 影响查询结果的正确性。
+`FullEvent.Timestamp` SHALL 是唯一语义时间轴：排序与时间过滤均 SHALL 只依据它。`EventKey` 内嵌的时间（写入时刻）SHALL 仅用于段放置与同毫秒全序决胜，SHALL NOT 参与语义时间判定。两者在异步事件下允许分叉；剪枝与早停仅读封口段的事件时间边界（见“段边界可信性”），故分叉 SHALL NOT 影响查询结果的正确性。
 
 段按写入时间放置是 **LSM 顺序追加的设计特性，不是缺陷**：段名与层级表示写入新近度与压实代数，与事件的逻辑时间正交。
 
@@ -222,25 +221,20 @@ QueryEvents SHALL 在单次查询内按 EventKey 去重：压实"先写目标层
 - **WHEN** 以 desc/asc × limit 边界 × 毫秒 since/until × keyword 的组合矩阵分别查询
 - **THEN** 两实现返回的 EventKey 序列 SHALL 逐位相等
 
-### Requirement: FileSegmentStore supports graceful shutdown via Close
+### Requirement: FileSegmentStore 以提交屏障关闭并交还写权
 
-`FileSegmentStore` SHALL provide a `Close() error` method that gracefully shuts down all lifecycle subsystems: stops LifecycleManager scanner loop, stops Compactor scheduler loop, flushes all dirty TombstoneSet state to KV, and closes the RelationStore journal file.
+关闭 SHALL 以一次空批提交作为屏障收尾，然后关掉该视图背后的事件引擎并交出它在该根上取得的写权，使下一个写者被接纳；写权的交还 MUST NOT 以屏障成功为条件，屏障失败 MUST NOT 留下已关闭视图仍占着根。关闭 MUST NOT 依赖任何后台扫描、压实或墓碑子系统停机。屏障失败与关引擎失败的任一者 SHALL 如实上报，MUST NOT 以另一者的成功掩盖。
 
-#### Scenario: Close stops background goroutines
+#### Scenario: 关闭先过屏障再关引擎
 
-- **WHEN** `FileSegmentStore.Close()` is called
-- **THEN** LifecycleManager SHALL stop scanning (no more TTL/capacity checks)
-- **AND** Compactor SHALL stop scheduling (no more compaction cycles)
+- **WHEN** 对一个事件段仓发起关闭
+- **THEN** 其实现 SHALL 先以一次提交屏障收尾，再关掉该视图背后的事件引擎，并交出该根的写权
+- **AND** 屏障失败时写权 SHALL 仍被交出
 
-#### Scenario: Close flushes dirty tombstones
+#### Scenario: 关闭重复调用不重复关引擎
 
-- **WHEN** `FileSegmentStore.Close()` is called and TombstoneSets have unpersisted markers
-- **THEN** all dirty tombstone markers SHALL be written to KV before Close returns
-
-#### Scenario: Close is safe to call multiple times
-
-- **WHEN** `FileSegmentStore.Close()` is called more than once
-- **THEN** subsequent calls SHALL be no-ops (idempotent)
+- **WHEN** 对同一个事件段仓再次关闭
+- **THEN** 第二次关闭 MUST NOT 再次关掉该引擎，且 MUST NOT 报出首次关闭未报的错误
 
 ### Requirement: LocalFileKV Sync 为原子快照屏障
 
@@ -266,15 +260,51 @@ LocalFileKV 的 `Sync()` SHALL 将全部键值整序列化并以临时文件写�
 #### Scenario: 不新增数据库规避屏障
 
 - **WHEN** 审查后端档位实现
-- **THEN** SHALL 保持 memory/localfile/file 既有档位与各自屏障证明，MUST NOT 引入新的数据库/WAL 以逃避「不假设批量原子」的合同
+- **THEN** SHALL 保持 memory/journal/file 三档及各自屏障证明（`localfile` 是耐久本地的退役名，构建按 journal 打开），MUST NOT 引入新的数据库/WAL 以逃避「不假设批量原子」的合同
 
 ### Requirement: 后端不可变与隔离一致性
 
-InMemoryStore 与 FileSegmentStore SHALL 拒绝已提交的重复 EventKey，SHALL 对缺少显式分区过滤的 QueryEvents 返回空，SHALL 隔离输入/返回值中的可变 map/slice。内部重放可核对同键同内容完成未提交写入，异内容 MUST 拒绝；公共写入不得悄悄覆写事实。
+存储 SHALL 保持已提交事实不可变、分区查询隔离及返回对象隔离。事实提交入口 SHALL 以领域等价规则判断同一身份是否已存在，底层位置与字节完整性校验 SHALL 保全原有记录；不得把调用方重新编码的字节相等作为领域重复提交的额外条件。
 
-#### Scenario: 内存与文件后端契约一致
-- **WHEN** 对两个后端执行重复键写入、无分区查询和返回对象修改
-- **THEN** 重复写被拒、查询为空、后续 GetEvent 原文及元数据不变
+一条事实的原文、引用、事件与必要位置索引 SHALL 在同一原子提交单元内保存。确定拒绝的提交 SHALL 不发布任何部分；新增成功 SHALL 只占一次事件编号与计数。提交结果不确定时 SHALL 保持不确定并通过可验证读取解决，SHALL NOT 假定零写入或回报确定成功。
+
+事实提交结果 SHALL 按五种结局如实答复：新增、已存在、冲突、不确定，以及**写前确定的拒绝**（`FactRefused`）。领域等价的重复提交返回原事实与原位置，不写入或刷新既有内容；领域不等价的同身份提交具名拒绝（冲突）；引擎在写盘前即判定不承载该提交时 SHALL 答确定的拒绝，MUST NOT 答不确定——该结局在其余四类中无槽位（什么都没落，故不是新增；无领域等价对象，故不是已存在；无身份或内容冲突，故不是冲突；确知零写入，故不是不确定），并进任何一类都会让调用方对一个必然失败的提交反复重读。只有引擎无法命名其耐久结局时 SHALL 答不确定。该判定与实际写入间的隔离 SHALL 由设计门证明覆盖真实写者。
+
+#### Scenario: 一条事实一次提交
+
+- **WHEN** 正式入口提交一条带独立原文的事实
+- **THEN** 原文、引用及事件索引 SHALL 同笔可见，重开后身份与原字节不变，计数只增加一次
+
+#### Scenario: 确定拒绝不发布部分
+
+- **WHEN** 引擎在部分物理写入后确认整笔提交未成立
+- **THEN** 该批任何部分 SHALL 不成为已提交可读状态，且不能由下一次提交带入
+
+#### Scenario: 领域等价但编码字节不同
+
+- **WHEN** 正常重提交只改变领域等价规则允许忽略的时间或运行戳，而领域内容仍等价
+- **THEN** 事实提交 SHALL 返回已存在的原事实与原位置，不重新编码并覆盖、不占号，也不把该差异判成内容冲突
+
+#### Scenario: 同身份内容冲突
+
+- **WHEN** 同一身份提交领域不等价的内容
+- **THEN** SHALL 具名拒绝，原记录和计数保持不变
+
+#### Scenario: 屏障结果不确定
+
+- **WHEN** 引擎不能确定整批是否已持久化
+- **THEN** SHALL 返回不确定，由受控重读确认是否已存在；不得以零写入断言掩盖已实际落盘的事实
+
+#### Scenario: 写前确定的拒绝不答不确定
+
+- **WHEN** 引擎在追加写盘之前就判定该批不承载（例如超出单帧界或写入权已关）
+- **THEN** 提交 SHALL 答复确定的拒绝，MUST NOT 答复不确定
+- **AND** 该批的任何键 SHALL 零落地（含原文族），且答复 SHALL 与其他四类结局可区分
+
+#### Scenario: 可变返回对象与分区隔离
+
+- **WHEN** 调用方修改返回对象或发起缺少规定分区过滤的查询
+- **THEN** 原事实 SHALL 不被修改，查询 SHALL 遵守既有分区隔离约束
 
 ### Requirement: 存储失败不可冒充正常缺失
 
@@ -288,67 +318,30 @@ KV/事件接口 SHALL 区分 typed not-found、duplicate 与存储 I/O 错误；
 - **WHEN** 原文已写而索引/meta 未完成，使用相同身份和内容重试
 - **THEN** 确定性补齐并经过屏障后才成功，不生成不同内容或重复投影
 
-### Requirement: compaction 源窗口读失败必须中止本轮
+> 退役（10.R5d）：原「ReplayEvent 窗口重入与 StoreEvent 同做 sealed 降级」要求已删除——其三项依赖（ReplayEvent、seqCounter、sealed 窗口元数据）在 Go 树零定义，窗口不封口、不搬迁、不按元数据包络剪枝，故「两处共用同一实现」无对象可言；重放与普通提交现走同一条提交路径（`CommitFact`／`StoreEvent`），事件可见性按事件自身 `Timestamp` 判定。
 
-Compactor 在读取任一源窗口事件（mergeEvents 的 KVScan）遇到错误时，SHALL 使本次压缩以错误终止，MUST NOT 跳过该窗口继续迁移——一次不完整的读取不能证明窗口为空，据此删除源段等于静默销毁事实。
+### Requirement: 未确认恢复材料的单属主 pin
 
-#### Scenario: 源窗口扫描瞬时失败
+未结投递义务的结算事实 SHALL 由恢复 owner 按义务身份 pin 在热窗上：登记表以义务身份为键，一条未结义务对应一条 pin，pin 集合挂在运行的热窗上。持有者是投递账户本身，不是任一 agent。登记与解除随义务状态：义务未结即登记、结清即解除，同一身份换用新结算事实时旧 pin 同批解除，已结义务 MUST NOT 重新持有 pin。pin 集合 MUST 在启动时由既有 checkpoint 重建，MUST NOT 引入第二张持久保留表或全历史去重集合。pin 是单属主登记：一个身份在表里恒有一条登记，解除不等待归零、不跨 agent 合并，MUST 幂等。**持久恢复档启用时**，若 store 缺少保护/回收协调能力，系统 SHALL **具名报告能力不完整并拒绝启动或禁止破坏性清理**（fail-closed），MUST NOT 以「无保护即成功」继续；**非耐久档**（不承诺进程恢复）缺少恢复能力 SHALL 以**显式 capability 缺失**声明，不得伪造保护已生效。
 
-- **WHEN** L1→L2（或 L2→L3）compaction 读取源窗口 A 时后端 KVScan 返回错误
-- **THEN** 本次 CompactL1ToL2/CompactL2ToL3 返回错误，源窗口 A 与其余源段的 evt 槽与 meta 全部保持原样（未被 deleteSegments 删除），目标层不写入不完整合并段
-- **THEN** 后续 scheduler 轮次重试同一 compaction，读恢复后正常完成迁移
+pin 存续期间，热窗裁剪 MUST NOT 物理销毁被 pin 的事实：裁剪把 pin 命中项移出待删集合，其余事实按普通窗口老化。保护只覆盖热窗裁剪这一条销毁路径：该裁剪的待删前缀由热窗边界给出——热窗投影仍在呈现的最旧原文之前的事实，pin 不改变这条判据，只把命中项从待删集合里摘出。义务结清后该事实按其原有时间戳恢复参与老化，MUST NOT 重新盖时间。恢复材料清除后的任意手工历史重放不属于自动恢复保证，MUST NOT 为此新增永久去重库。
 
-#### Scenario: 冷缓存读不因压缩丢失事实
+提交屏障与 pin SHALL 各自独立：屏障成功是提交对外可见的前提，pin 是「未结义务的结算事实仍在窗内」的登记，两者不得互相短路（屏障不因 pin 存在而放宽，pin 不因屏障成功而解除）。
 
-- **WHEN** 任一 compaction 曾因读失败中止且未重试成功
-- **THEN** 用同一 KV 后端构造的新 store 实例（冷缓存）GetEvent 仍能取回全部源窗口事实
+#### Scenario: 未结义务的结算事实不被热窗裁剪
 
-### Requirement: TTL 扫描读失败必须可观测
+- **WHEN** 一条链增长到热窗之外，而它对应的投递义务仍未结清
+- **THEN** 该结算事实仍在窗内可达，MUST NOT 被裁剪销毁；同一窗口内与未结义务无关的事实照常老化
 
-LifecycleManager 的 TTL 扫描对某窗口 KVScan 失败时 MAY 跳过该窗口本轮扫描（方向安全：跳过即推迟遗忘），但 MUST 记录告警日志，MUST NOT 静默无声。
+#### Scenario: 重启时 pin 先于首轮裁剪重建
 
-#### Scenario: TTL 扫描后端读失败
+- **WHEN** 进程从 checkpoint 恢复仍欠投递的义务
+- **THEN** pin 集合 SHALL 由该 checkpoint 的 pin 表重建，其后的裁剪 MUST NOT 把这些结算事实当作待删项
 
-- **WHEN** checkTTL 扫描某分区窗口时 KVScan 返回错误
-- **THEN** 该窗口本轮不产生墓碑（无数据销毁），日志中出现含分区与窗口标识的告警，下一轮扫描重试
+#### Scenario: 义务结清解除 pin
 
-### Requirement: ReplayEvent 窗口重入与 StoreEvent 同做 sealed 降级
-
-FileSegmentStore 的 ReplayEvent 在窗口重入（seqCounter 从零恢复）时 SHALL 与 StoreEvent 执行同一 sealed 窗口降级（Sealed→false，回到 memtable 语义恒扫描不被剪枝），两处 MUST 共用同一实现，杜绝行为发散。
-
-#### Scenario: 重放事实落入 sealed 包络之外的窗口
-
-- **WHEN** 一个 sealed 窗口的 MinTime/MaxTime 包络未覆盖某恢复重放事实的事件时间戳，ReplayEvent 将该事实 fresh-commit 进该窗口
-- **THEN** 窗口 meta 的 Sealed 被降级为 false，随后的时间范围查询（覆盖该事实时间戳）能在结果中看到该事实
-- **THEN** GetEvent 对该事实保持可达（idx 直达不受剪枝影响）
-
-### Requirement: 未确认恢复材料的有限保留租约
-
-未确认 inbox envelope 的 prepared fact key 与 receipt key、以及普通 spill 的待重放 key SHALL 由恢复 owner 注册进共享存储层的保留租约（内存守护集）；持有者是共享资源 owner，不是任一 agent。租约 MUST 在启动时由现有未确认材料重建，MUST NOT 引入第二张持久保留表或全历史去重集合。同一 key 可同时被多个 owner 保护：释放按引用计数递减、归零才解除，MUST 幂等。**持久恢复档启用时**，若 store 缺少保护/回收协调能力，系统 SHALL **具名报告能力不完整并拒绝启动或禁止破坏性清理**（fail-closed），MUST NOT 以「无保护即成功」继续；**非耐久档**（不承诺进程恢复）缺少恢复能力 SHALL 以**显式 capability 缺失**声明，不得伪造保护已生效。
-
-保护期内 TTL 过期、容量淘汰、内容降分辨率与墓碑最终清理 MUST NOT 物理销毁所需原文——只拒销毁，无损搬迁（压实复制原文到高层段）允许。显式删除受保护 key MUST 返回可判定的 protected 错误，MUST NOT 静默销毁。遗忘扫描的首轮破坏性动作 MUST 等待租约武装与登记屏障解除；无耐久恢复 owner 登记时该等待 MUST 有界（宽限值见 `memory/lifecycle.go` 的 `armGrace`），使租约缺位不会变成永久停止遗忘。envelope 安全清理（ack 目录同步成功或 spill 安全移除）后释放该 key，其后按原类型的年龄窗口、以其原有时间戳恢复参与淘汰，MUST NOT 重新盖时间。单个 agent 关闭 MUST NOT 释放共享存储仍然需要的 outstanding 保护。合法墓碑 MUST 被拒绝重放；恢复材料与墓碑皆已清除后的任意手工历史重放不属于自动恢复保证，MUST NOT 为此新增永久去重库。
-
-`Sync()` 屏障与保留租约 SHALL 协同：屏障成功是提交对外可见的前提，租约则是「恢复清点完成前不得销毁」的保护，两者不得互相短路（屏障不因租约存在而放宽，租约不因屏障成功而解除）。
-
-#### Scenario: 未确认材料越过普通 TTL
-
-- **WHEN** prepared 输入与 receipt 已超过其类型的年龄窗口，而 envelope 尚未清理
-- **THEN** 原文与确认依据保留，恢复仍能得到正确结论；envelope 清理并释放后，该 key 按其原有时间戳恢复参与年龄淘汰
-
-#### Scenario: 重启时登记先于淘汰
-
-- **WHEN** 后端打开时待恢复 key 名义上已过 TTL
-- **THEN** 租约重建先于首轮破坏性扫描，扫描器不得"先淘汰再登记"
-
-#### Scenario: 显式删除撞上受保护材料
-
-- **WHEN** 删除一个仍被未确认恢复租约保护的 key
-- **THEN** 调用返回 protected 错误，原文未被销毁
-
-#### Scenario: 共享存储下的单 agent 关闭
-
-- **WHEN** 一个 agent 关闭但仍有未确认材料，另一 agent 继续共享同一存储
-- **THEN** outstanding 保护仍由资源 owner 持有，运行中的扫描器不得清理它
+- **WHEN** 一条义务结清，或该身份的结算事实被新的替换
+- **THEN** 该身份的登记解除、旧 pin 同批解除，MUST NOT 留下无人认领的 pin；其后该事实按其原有时间戳恢复参与老化
 
 #### Scenario: 持久恢复档缺能力 fail-closed
 
@@ -366,9 +359,9 @@ FileSegmentStore 的 ReplayEvent 在窗口重入（seqCounter 从零恢复）时
 
 **持久恢复档启用时**，若内层缺少保护/回收协调能力，MUST fail-closed：**具名报告能力不完整**、拒绝启动或禁止破坏性清理，MUST NOT 静默降级为「无保护即成功」，也 MUST NOT 以「屏障类空操作」伪装协调已生效。**非耐久档**缺少恢复能力 SHALL 显式声明为 capability 缺失。
 
-重放成功时 SHALL 把**内层返回的 canonical fact** 交给下游消费，MUST NOT 以传入副本代替。重放错误 MUST 到达恢复 owner：可靠收件箱已自持这些事件的 at-least-once 重试，因此重放失败**不得**再落一份 mem_spill 兜底（那会在兜底文件里造出重复条目）；普通写入原有的 spill 行为不变。spill 重建出的保留租约若失败，MUST 以错误上抛由调用方 fail-closed，旧实例继续服务。
+重放成功时 SHALL 把**内层返回的 canonical fact** 交给下游消费，MUST NOT 以传入副本代替。重放错误 MUST 到达恢复 owner：可靠收件箱已自持这些事件的 at-least-once 重试，因此重放失败**不得**再落一份 mem_spill 兜底（那会在兜底文件里造出重复条目）；普通写入原有的 spill 行为不变。spill 重建出的 pin 若失败，MUST 以错误上抛由调用方 fail-closed、旧实例继续服务，MUST NOT 以「无 pin 即成功」继续。
 
-绝对事件计数只在真实提交路径递增；重放判定为「已修复」或「已提交」的分支 MUST NOT 递增（否则一次幂等重放会被当作新增抬高淘汰压力），容量提示因此至多是建议性观察，不作删除依据。
+绝对事件计数只在真实提交路径递增；判为「已存在」的重复提交 MUST NOT 递增，否则一次幂等重提会被当作新增而抬高计数。
 
 #### Scenario: 持久恢复档缺协调能力 fail-closed
 

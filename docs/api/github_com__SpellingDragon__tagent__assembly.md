@@ -673,10 +673,11 @@ type CompressionConsumer struct {
     MUST NOT execute a judgment whose material does not stand: it stays pending
     rather than answering a product of other material.
 
-func NewCompressionConsumer(sessions compressSessions) *CompressionConsumer
-    NewCompressionConsumer assembles the consumer over the session face of
-    one run. A nil face answers no session, so an assembly mounted beside none
-    executes nothing instead of failing on the first commit.
+func NewCompressionConsumer(sessions compressSessionSource, products compressProductStore) *CompressionConsumer
+    NewCompressionConsumer assembles the consumer over the session replay face
+    and the product ledger face of one run. A nil face answers no session and
+    files no product, so an assembly mounted beside none executes nothing
+    instead of failing on the first commit.
 
 func (c *CompressionConsumer) Execute(ctx context.Context, session event.SessionID) error
     Execute runs every judgment of one session no product answers yet: it reads
@@ -687,20 +688,24 @@ func (c *CompressionConsumer) Execute(ctx context.Context, session event.Session
 
     The pass reads the projection and never judges it: whether material is
     over its bound is already the request on the chain, and the plan only
-    answers which product that request names. - The plan is executed over the
-    accounting-free view the production judged (foldProjectionOf): the products
-    name the conversation material, and delivery settlement lines stay in the
-    projection the model reads. - A history summary covers every settlement
-    fact inside the band it folds: settlement lines never count as fold material
-    (foldProjectionOf), the summary consumes their accounting beside the turns,
-    and the facts stay on the chain readable by identity. - The checkpoint
-    is a pure whole-batch preflight, so its survivors equal the entries left
-    by applying that same batch. - The oldest-band gist is read before the
-    checkpoint, so the survivors a restart rebuilds state the text the chain
-    records rather than the mechanical form the fold minted. - Every product
-    is filed through the session face, which answers the judgment it names:
-    the batch shrinks as it is filed, so the account the consumer holds is never
-    one the chain disagrees with.
+    answers which product that request names. - The plan is executed over
+    the accounting-free view the production judged (foldProjectionOf):
+    the products name the conversation material, and delivery settlement lines
+    stay in the projection the model reads. - A history summary covers every
+    settlement fact inside the band it folds: settlement lines never count as
+    fold material (foldProjectionOf), the summary consumes their accounting
+    beside the turns, and the facts stay on the chain readable by identity.
+    - The checkpoint is a pure whole-batch preflight, so its survivors equal
+    the entries left by applying that same batch. - A judgment the chain already
+    answers is struck before the material is summarized: the product identity is
+    content-addressed over the judgment, the producer and the fold product key,
+    so the answer is read back by identity and the execution costs no model call
+    and no second product. - The oldest-band gist is read before the checkpoint,
+    so the survivors a restart rebuilds state the text the chain records rather
+    than the mechanical form the fold minted. - Every product is filed through
+    the product ledger face, which answers the judgment it names: the batch
+    shrinks as it is filed, so the account the consumer holds is never one the
+    chain disagrees with.
 
 func (c *CompressionConsumer) Material() plugin.Material
     Material declares what this consumer reads, when it reads it and what a
@@ -712,9 +717,11 @@ func (c *CompressionConsumer) Name() string
     Name reports the stable name of this plugin instance.
 
 func (c *CompressionConsumer) NoteProduct(product event.CompressProduct)
-    NoteProduct notes one product a chain already carries, so the judgment it
-    answers is never executed a second time: this is the restart path, where the
-    products of a chain answer judgments the process does not hold.
+    NoteProduct notes one product a chain already carries, so the judgment
+    it answers is never executed a second time: this is the restart path,
+    where the products of a chain answer judgments the process does not owe yet.
+    The account holds the batch still owed and never the answers it read, so the
+    note removes the judgment and the answer stays where the chain states it.
 
 func (c *CompressionConsumer) ObserveCommit(ctx context.Context, id event.EventID) error
     ObserveCommit executes the judgments one session filed that no product
@@ -1977,9 +1984,10 @@ func (r *Run) ReflectionInput() meditation.ReflectionInput
     as a fact of the observing agent's own partition, drives that agent's loop
     session with it and reports what became of the turn.
 
-func (r *Run) RegisterStateSlice(holder state.Stateful) (func(), error)
+func (r *Run) RegisterStateSlice(holder state.Stateful) (func() error, error)
     RegisterStateSlice mounts one consumer's recoverable state on the state seam
-    and answers the disposer that unmounts it.
+    and answers the disposer that unmounts it, which refuses by name while the
+    slice still declares unfinished work.
 
 func (r *Run) Rejections() []state.Rejection
     Rejections reports the feedback fact of every notification a target refused,

@@ -542,14 +542,30 @@ func smokeSettleNoticeOf(messages []smokeModelMessage, marker string) string {
 		if msg.Role != string(tagentmodel.RoleUser) {
 			continue
 		}
-		material, _ := smokePresentedMaterial(strings.TrimSpace(msg.Content))
-		noticeTask, result, notice := smokeSettleNoticeParts(material)
-		if !notice || noticeTask == "" || result != "worker result "+marker {
-			continue
+		if material, ok := smokeSettleNoticeBody(msg.Content, marker); ok {
+			return material
 		}
-		return material
 	}
 	return ""
+}
+
+// smokeSettleNoticeIs 报告一条已呈现的正文本身是否就是本次调用的结算通知。通知呈现给
+// 请求有两种形态：循环折成的观察帧是裸正文，请求装配给携带已提交事实键的材料加的票据
+// 排在正文之前。两种形态按同一身份判——通知点名的任务与它携带的结果正文——故同一条
+// 通知换一种形态再投递仍算同一条，计数不因形态而漏。
+func smokeSettleNoticeIs(presented, marker string) bool {
+	_, ok := smokeSettleNoticeBody(presented, marker)
+	return ok
+}
+
+// smokeSettleNoticeBody 报告一条已呈现正文里本次调用通知的材料；它不是本次结算时空串。
+func smokeSettleNoticeBody(presented, marker string) (string, bool) {
+	material, _ := smokePresentedMaterial(strings.TrimSpace(presented))
+	noticeTask, result, notice := smokeSettleNoticeParts(material)
+	if !notice || noticeTask == "" || result != "worker result "+marker {
+		return "", false
+	}
+	return material, true
 }
 
 // smokeSettleNoticeParts 把一条通知材料拆成它点名的任务与它携带的结果正文，形态为
@@ -2343,30 +2359,22 @@ func smokeIntegrityFoldBoundary(t *testing.T, rig *smokeRig, chat string) []repl
 func smokeIntegrityRebuildProjection(t *testing.T, rig *smokeRig, chat string) *replay.ReplayProjection {
 	t.Helper()
 	session := rig.addressOf(chat).SessionID
-	chainKey := replay.ChainKey{PartitionID: 1, SessionID: session}
-	chain := replay.NewMemoryEventChain()
+	rebuilt := replay.NewReplayProjection()
 	err := rig.host.Run().EachSessionFact(context.Background(), event.Address{SessionID: session}, func(evt event.Event) error {
 		if evt.Type == event.CompressRequestType || evt.Message.Content == "" {
 			return nil
 		}
-		if err := chain.Commit(context.Background(), replay.ChainFact{
+		rebuilt.Append(context.Background(), replay.ProjectionEntry{
 			Key:     evt.Key,
-			Chain:   chainKey,
 			Type:    evt.Type,
 			Summary: smokeIntegrityChainSummary(evt.Meta[event.MetaKeyEventSummary], evt.Message.Content),
 			Content: evt.Message.Content,
 			Time:    evt.Timestamp,
-		}); err != nil {
-			t.Fatalf("commit the chain fact %s: %v", evt.Key, err)
-		}
+		})
 		return nil
 	})
 	if err != nil {
 		t.Fatalf("read the committed chain of %s: %v", chat, err)
-	}
-	rebuilt := replay.NewReplayProjection()
-	if _, err := replay.RebuildProjectionFromWAL(context.Background(), rebuilt, chain, &replay.MemoryRelations{}, chainKey, replay.RebuildOptions{}); err != nil {
-		t.Fatalf("rebuild the projection from the session chain: %v", err)
 	}
 	return rebuilt
 }

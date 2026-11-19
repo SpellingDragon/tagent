@@ -160,7 +160,7 @@ func TestUnderThresholdUntouched(t *testing.T) {
 
 // TestRebuildRefoldsIdempotent anchors the fold's content-addressed keys.
 //   - the fold a commit triggers mints its products under content-addressed keys
-//   - a fresh projection rebuilt from the same chain folds to the same keys
+//   - a fresh projection replayed from the same chain folds to the same keys
 //
 // 契约: docs/wiki/agent/event-flow.md#projection-lifecycle
 func TestRebuildRefoldsIdempotent(t *testing.T) {
@@ -216,40 +216,32 @@ func TestRebuildRefoldsIdempotent(t *testing.T) {
 	if len(first) == 0 {
 		t.Fatalf("the committed turns minted no fold product in the projection")
 	}
-	chainKey := replay.ChainKey{PartitionID: 1, SessionID: addr.SessionID}
-	chain := replay.NewMemoryEventChain()
+	rebuilt := replay.NewReplayProjection()
 	for _, evt := range run.SessionFacts(event.Address{SessionID: addr.SessionID}) {
 		if evt.Type == event.CompressRequestType || evt.Message.Content == "" {
 			continue
 		}
-		if err := chain.Commit(ctx, replay.ChainFact{
+		rebuilt.Append(ctx, replay.ProjectionEntry{
 			Key:     evt.Key,
-			Chain:   chainKey,
 			Type:    evt.Type,
 			Summary: evt.Meta[event.MetaKeyEventSummary],
 			Content: evt.Message.Content,
 			Time:    evt.Timestamp,
-		}); err != nil {
-			t.Fatalf("commit the chain fact %s: %v", evt.Key, err)
-		}
+		})
 	}
-	rebuilt := replay.NewReplayProjection()
-	if _, err := replay.RebuildProjectionFromWAL(ctx, rebuilt, chain, &replay.MemoryRelations{}, chainKey, replay.RebuildOptions{}); err != nil {
-		t.Fatalf("rebuild the projection from the chain: %v", err)
-	}
-	report, err := rebuilt.FoldByAge(ctx, replay.AgeFoldPlan{
+	report, err := rebuilt.PlanByAge(ctx, replay.AgeFoldPlan{
 		KeepRecent:      config.DefaultKeepRecentTasks,
 		VolumeThreshold: ageFoldWindow(maxTokens).VolumeThresholdBytes(),
 	})
 	if err != nil {
-		t.Fatalf("fold the rebuilt projection: %v", err)
+		t.Fatalf("plan the fold of the replayed projection: %v", err)
 	}
 	if !report.Triggered {
-		t.Fatalf("the rebuilt projection stayed inside the threshold, want the same fold the commits triggered")
+		t.Fatalf("the replayed projection stayed inside the threshold, want the same fold the commits triggered")
 	}
 	rebuiltKeys := make([]event.EventID, 0, len(report.Products))
 	for _, product := range report.Products {
-		rebuiltKeys = append(rebuiltKeys, product.Key)
+		rebuiltKeys = append(rebuiltKeys, product.Entry.Key)
 	}
 	sort.Slice(rebuiltKeys, func(i, j int) bool { return rebuiltKeys[i] < rebuiltKeys[j] })
 	if len(first) != len(rebuiltKeys) {

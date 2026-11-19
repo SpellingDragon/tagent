@@ -2,6 +2,7 @@ package assembly
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -17,8 +18,10 @@ import (
 	"github.com/SpellingDragon/tagent/memory/ledger"
 	"github.com/SpellingDragon/tagent/memory/search"
 	"github.com/SpellingDragon/tagent/runtime/agent"
+	"github.com/SpellingDragon/tagent/tool/recall"
 
 	"trpc.group/trpc-go/trpc-agent-go/model"
+	trpctool "trpc.group/trpc-go/trpc-agent-go/tool"
 )
 
 // recordingEmbedder records every text the query-time embedder is asked to embed.
@@ -543,6 +546,36 @@ func TestReadCorruptionNamedError(t *testing.T) {
 	}
 }
 
+// commitParentFact commits one fact of a parent-lookup fixture into one
+// partition, stamped by that partition's own running sequence so the chain's
+// order is the commit order and a chain can stand among facts of other chains.
+func commitParentFact(t *testing.T, ctx context.Context, tier *ledger.Tier, seq map[int]int64, partition int, agent event.AgentID, session event.SessionID, key event.EventID) {
+	t.Helper()
+	seq[partition]++
+	at := time.Date(2026, 11, 6, 12, 0, 0, 0, time.UTC)
+	stamp := at.Add(time.Duration(seq[partition]) * time.Millisecond)
+	evt := event.Event{
+		Key:       key,
+		Type:      event.TypeExternalInput,
+		Timestamp: stamp,
+		Meta:      map[string]string{event.MetaKeyEventSummary: "ask"},
+		Message:   model.Message{Role: model.RoleUser, Content: "parent"},
+		Owner:     event.Address{AgentID: agent, SessionID: session},
+	}
+	body, err := memory.BodyFromEvent(evt, "test", "test")
+	if err != nil {
+		t.Fatalf("encode %s: %v", key, err)
+	}
+	encoded, err := body.Encode()
+	if err != nil {
+		t.Fatalf("marshal %s: %v", key, err)
+	}
+	record := ledger.SegmentRecord{PartitionID: partition, WindowTS: stamp.UnixMilli(), Seq: seq[partition], EventKey: key, EventTime: stamp.UnixMilli(), Body: encoded}
+	if err := tier.Segments.StoreEvent(ctx, record.WithChain(event.TypeExternalInput, session)); err != nil {
+		t.Fatalf("store %s: %v", key, err)
+	}
+}
+
 // parentLookupTier opens a journal store holding one named background history
 // beside a six-fact chain, committed so the chain's entries stand among the
 // history's own tail and a lookup steps over entries it does not answer.
@@ -552,39 +585,32 @@ func parentLookupTier(t *testing.T, ctx context.Context, history int) *ledger.Ti
 	if err != nil {
 		t.Fatalf("open the journal store: %v", err)
 	}
-	at := time.Date(2026, 11, 6, 12, 0, 0, 0, time.UTC)
 	seq := map[int]int64{}
-	commit := func(partition int, agent event.AgentID, session string, key event.EventID) {
-		t.Helper()
-		seq[partition]++
-		stamp := at.Add(time.Duration(seq[partition]) * time.Millisecond)
-		evt := event.Event{
-			Key:       key,
-			Type:      event.TypeExternalInput,
-			Timestamp: stamp,
-			Meta:      map[string]string{event.MetaKeyEventSummary: "ask"},
-			Message:   model.Message{Role: model.RoleUser, Content: "parent"},
-			Owner:     event.Address{AgentID: agent, SessionID: event.SessionID(session)},
-		}
-		body, err := memory.BodyFromEvent(evt, "test", "test")
-		if err != nil {
-			t.Fatalf("encode %s: %v", key, err)
-		}
-		encoded, err := body.Encode()
-		if err != nil {
-			t.Fatalf("marshal %s: %v", key, err)
-		}
-		record := ledger.SegmentRecord{PartitionID: partition, WindowTS: stamp.UnixMilli(), Seq: seq[partition], EventKey: key, EventTime: stamp.UnixMilli(), Body: encoded}
-		if err := tier.Segments.StoreEvent(ctx, record.WithChain(event.TypeExternalInput, event.SessionID(session))); err != nil {
-			t.Fatalf("store %s: %v", key, err)
-		}
-	}
 	for i := 1; i <= history; i++ {
-		commit(10, "agent-history", "session-history", event.EventID(fmt.Sprintf("history-%d", i)))
+		commitParentFact(t, ctx, tier, seq, 10, "agent-history", "session-history", event.EventID(fmt.Sprintf("history-%d", i)))
 	}
 	for i := 1; i <= 6; i++ {
-		commit(11, "agent-chain", "session-chain", event.EventID(fmt.Sprintf("chain-%d", i)))
-		commit(10, "agent-history", "session-history", event.EventID(fmt.Sprintf("lag-%d", i)))
+		commitParentFact(t, ctx, tier, seq, 11, "agent-chain", "session-chain", event.EventID(fmt.Sprintf("chain-%d", i)))
+		commitParentFact(t, ctx, tier, seq, 10, "agent-history", "session-history", event.EventID(fmt.Sprintf("lag-%d", i)))
+	}
+	return tier
+}
+
+// parentOldTargetTier opens a journal store holding a three-fact chain whose
+// target stands one fact from its own predecessor, beside the newer history the
+// lookup from the newest record must step over before it reaches that target.
+func parentOldTargetTier(t *testing.T, ctx context.Context, after int) *ledger.Tier {
+	t.Helper()
+	tier, err := ledger.OpenTier(ctx, ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: t.TempDir(), WriteRights: true})
+	if err != nil {
+		t.Fatalf("open the journal store: %v", err)
+	}
+	seq := map[int]int64{}
+	for _, key := range []event.EventID{"chain-root", "chain-mid", "chain-target"} {
+		commitParentFact(t, ctx, tier, seq, 11, "agent-chain", "session-chain", key)
+	}
+	for i := 1; i <= after; i++ {
+		commitParentFact(t, ctx, tier, seq, 10, "agent-history", "session-history", event.EventID(fmt.Sprintf("later-%d", i)))
 	}
 	return tier
 }
@@ -636,6 +662,142 @@ func TestParentLookupCostsItsOwnChainNotTheHistory(t *testing.T) {
 	}
 }
 
+// TestParentLookupCountsTheSearchBeforeTheTarget pins both segments one parent lookup pays.
+//   - the target stands one fact from its own predecessor at every depth, so only the history committed after it changes
+//   - the lookup names one more index entry per fact of that newer history, leaving the chain's own two counted entries
+//   - a measurement counting only the target-to-predecessor segment would answer the same entries at every depth
+//
+// 契约: docs/wiki/memory/memory-architecture.md#read-paths
+func TestParentLookupCountsTheSearchBeforeTheTarget(t *testing.T) {
+	ctx := context.Background()
+	depths := []int{16, 64, 256}
+	named := make([]int, 0, len(depths))
+	newest := make([]int, 0, len(depths))
+	for _, after := range depths {
+		tier := parentOldTargetTier(t, ctx, after)
+		direct := NewTierQuerySource(tier.Segments)
+		before, _, _ := tier.Segments.IndexWalkReads()
+		parent, err := direct.GetParent("chain-target")
+		if err != nil || parent != "chain-mid" {
+			t.Fatalf("the parent of chain-target = %q/%v, want chain-mid beside %d facts newer than it", parent, err, after)
+		}
+		counted, _, _ := tier.Segments.IndexWalkReads()
+		named = append(named, counted-before)
+		before, _, _ = tier.Segments.IndexWalkReads()
+		if parent, err := direct.GetParent(event.EventID(fmt.Sprintf("later-%d", after))); err != nil || parent != event.EventID(fmt.Sprintf("later-%d", after-1)) {
+			t.Fatalf("the parent of the newest fact = %q/%v, want the fact beside it", parent, err)
+		}
+		counted, _, _ = tier.Segments.IndexWalkReads()
+		newest = append(newest, counted-before)
+		t.Logf("newer-history=%d old-target-named=%d newest-named=%d", after, named[len(named)-1], newest[len(newest)-1])
+		if err := tier.Segments.Close(); err != nil {
+			t.Fatalf("close the store of %d newer facts: %v", after, err)
+		}
+	}
+	for at, after := range depths {
+		if named[at] != after+2 || newest[at] != 2 {
+			t.Fatalf("beside %d facts newer than the target the lookup named %d index entries and the newest lookup named %d, want %d and 2: the entries of the search before the target are not counted",
+				after, named[at], newest[at], after+2)
+		}
+	}
+	if named[len(named)-1]-named[0] != depths[len(depths)-1]-depths[0] {
+		t.Fatalf("the lookup named %d entries beside %d newer facts and %d beside %d: the counted cost does not follow the history committed after the target, so the first segment of the walk went unmeasured",
+			named[len(named)-1], depths[len(depths)-1], named[0], depths[0])
+	}
+}
+
+// TestParentLookupKeepsSessionIsolation pins what a lookup answers while it steps over other chains.
+//   - the target's nearest older entries stand in another session of its partition and in another partition of its session, and neither is answered
+//   - the walk names those skipped entries, so the cost of the isolation is counted beside the answer it keeps
+//   - an index entry carrying no session falls back to the bodies, which separate the chains as the index does
+//   - negative: a body the fallback cannot decode is named as corruption, never answered as a parent
+//
+// 契约: docs/wiki/memory/memory-architecture.md#read-paths
+func TestParentLookupKeepsSessionIsolation(t *testing.T) {
+	ctx := context.Background()
+	tier, err := ledger.OpenTier(ctx, ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: t.TempDir(), WriteRights: true})
+	if err != nil {
+		t.Fatalf("open the journal store: %v", err)
+	}
+	defer func() {
+		if err := tier.Segments.Close(); err != nil {
+			t.Fatalf("close the store: %v", err)
+		}
+	}()
+	seq := map[int]int64{}
+	for _, fact := range []struct {
+		partition int
+		agent     event.AgentID
+		session   event.SessionID
+		key       event.EventID
+	}{
+		{partition: 11, agent: "agent-chain", session: "session-iso-a", key: "iso-a1"},
+		{partition: 11, agent: "agent-chain", session: "session-iso-b", key: "iso-b1"},
+		{partition: 10, agent: "agent-other", session: "session-iso-a", key: "iso-p1"},
+		{partition: 11, agent: "agent-chain", session: "session-iso-b", key: "iso-b2"},
+		{partition: 11, agent: "agent-chain", session: "session-iso-a", key: "iso-a2"},
+	} {
+		commitParentFact(t, ctx, tier, seq, fact.partition, fact.agent, fact.session, fact.key)
+	}
+	direct := NewTierQuerySource(tier.Segments)
+	before, _, _ := tier.Segments.IndexWalkReads()
+	parent, err := direct.GetParent("iso-a2")
+	if err != nil {
+		t.Fatalf("the lookup over foreign chains answered %v", err)
+	}
+	counted, _, _ := tier.Segments.IndexWalkReads()
+	named := counted - before
+	t.Logf("isolated-lookup-named=%d answer=%s", named, parent)
+	if parent != "iso-a1" {
+		t.Fatalf("the lookup joined %q to iso-a2: a foreign session of its own partition or a foreign partition of its own session is never the parent", parent)
+	}
+	if named != 5 {
+		t.Fatalf("the isolated lookup named %d index entries, want the target, the three entries of other chains it stepped over and its parent", named)
+	}
+	if parent, err := direct.GetParent("iso-p1"); err != nil || parent != "" {
+		t.Fatalf("the lookup of a key whose chain stands in another partition answered %q/%v, want no parent", parent, err)
+	}
+	for _, fact := range []struct {
+		session event.SessionID
+		key     event.EventID
+	}{
+		{session: "session-bare-a", key: "bare-a1"},
+		{session: "session-bare-b", key: "bare-b1"},
+		{session: "session-bare-a", key: "bare-a2"},
+	} {
+		at := time.Date(2026, 11, 6, 12, 0, 0, 0, time.UTC)
+		seq[12]++
+		stamp := at.Add(time.Duration(seq[12]) * time.Millisecond)
+		evt := event.Event{Key: fact.key, Type: event.TypeExternalInput, Timestamp: stamp, Meta: map[string]string{event.MetaKeyEventSummary: "ask"}, Message: model.Message{Role: model.RoleUser, Content: "parent"}, Owner: event.Address{AgentID: "agent-bare", SessionID: fact.session}}
+		body, err := memory.BodyFromEvent(evt, "test", "test")
+		if err != nil {
+			t.Fatalf("encode %s: %v", fact.key, err)
+		}
+		encoded, err := body.Encode()
+		if err != nil {
+			t.Fatalf("marshal %s: %v", fact.key, err)
+		}
+		if err := tier.Segments.StoreEvent(ctx, ledger.SegmentRecord{PartitionID: 12, WindowTS: stamp.UnixMilli(), Seq: seq[12], EventKey: fact.key, EventTime: stamp.UnixMilli(), Body: encoded}); err != nil {
+			t.Fatalf("store %s without an index session: %v", fact.key, err)
+		}
+	}
+	before, _, _ = tier.Segments.IndexWalkReads()
+	if parent, err := direct.GetParent("bare-a2"); err != nil || parent != "bare-a1" {
+		t.Fatalf("the body walk over an index carrying no session answered %q/%v, want bare-a1", parent, err)
+	}
+	counted, _, _ = tier.Segments.IndexWalkReads()
+	t.Logf("fallback-lookup-named=%d", counted-before)
+	at := time.Date(2026, 11, 6, 12, 0, 0, 0, time.UTC)
+	seq[12]++
+	stamp := at.Add(time.Duration(seq[12]) * time.Millisecond)
+	if err := tier.Segments.StoreEvent(ctx, ledger.SegmentRecord{PartitionID: 12, WindowTS: stamp.UnixMilli(), Seq: seq[12], EventKey: "bare-corrupt", EventTime: stamp.UnixMilli(), Body: []byte("not-an-event")}); err != nil {
+		t.Fatalf("store the undecodable body: %v", err)
+	}
+	if parent, err := direct.GetParent("bare-corrupt"); !errors.Is(err, memory.ErrEventBody) || parent != "" {
+		t.Fatalf("the body walk over an undecodable body answered %q/%v, want the decode cause named and no parent", parent, err)
+	}
+}
+
 // TestAPointQueryThatWalksTheWholeHistoryIsRed pins the bound the parent lookup rests on.
 //   - the entries the newest lookup names are the chain's, and a lookup naming the history instead answers a count the chain cannot explain
 //
@@ -660,5 +822,90 @@ func TestAPointQueryThatWalksTheWholeHistoryIsRed(t *testing.T) {
 	if named > 8 {
 		t.Fatalf("the newest lookup named %d index entries beside a history of %d entries: the walk reads the history behind the chain and not the chain alone",
 			named, history)
+	}
+}
+
+// TestRecallTraceThroughTierCountsOldTargetLookup pins what the causal walk pays on the shipped surface.
+//   - the granted partition holds a three-fact chain committed behind a history its partition never named
+//   - the engine names that newer history once per step, while the newest chain of the same store names its own two
+//   - negative: a parent reader answering a constant would leave the walk paying nothing
+//
+// 契约: docs/wiki/tool/tool-architecture.md#recall-subtools
+func TestRecallTraceThroughTierCountsOldTargetLookup(t *testing.T) {
+	ctx := context.Background()
+	const history = 128
+	storage := WithStorage(ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: t.TempDir()})
+	run := windowChainRun(t, ctx, storage)
+	run.stopCheckpointFiler()
+	defer endRun(t, run)
+	seq := map[int]int64{}
+	chain := memory.PartitionIDFromName("agent-a")
+	for _, key := range []event.EventID{"old-root", "old-mid", "old-target"} {
+		commitParentFact(t, ctx, run.tier, seq, chain, "agent-a", "session-old", key)
+	}
+	for i := 1; i <= history; i++ {
+		commitParentFact(t, ctx, run.tier, seq, memory.PartitionIDFromName("agent-history"), "agent-history", "session-history", event.EventID(fmt.Sprintf("later-%d", i)))
+	}
+	for _, key := range []event.EventID{"new-older", "new-newest"} {
+		commitParentFact(t, ctx, run.tier, seq, chain, "agent-a", "session-new", key)
+	}
+	port := NewRecallPort(nil)
+	port.Bind(run)
+	reads := port.Reads()
+	reads.Table = port
+	reads.Originals = port
+	var trace trpctool.CallableTool
+	for _, tool := range recall.New(reads, memory.PartitionsOf("agent-a", nil)) {
+		if tool.Declaration().Name == recall.TraceToolName {
+			trace = tool
+		}
+	}
+	if trace == nil {
+		t.Fatal("the recall surface contributed no causal chain tool")
+	}
+	before, _, _ := run.tier.Segments.IndexWalkReads()
+	answered, err := trace.Call(ctx, []byte(`{"key":"old-target","max_steps":3}`))
+	if err != nil {
+		t.Fatalf("the causal walk over the old target failed: %v", err)
+	}
+	counted, _, _ := run.tier.Segments.IndexWalkReads()
+	oldNamed := counted - before
+	text, encoded := answered.(string)
+	if !encoded {
+		t.Fatalf("the causal walk answered %T, want the encoded answer the tool declares", answered)
+	}
+	var walk struct {
+		Count    int  `json:"count"`
+		Complete bool `json:"complete"`
+		Items    []struct {
+			Key event.EventID `json:"key"`
+		} `json:"items"`
+	}
+	if err := json.Unmarshal([]byte(text), &walk); err != nil {
+		t.Fatalf("decode the causal walk answer: %v", err)
+	}
+	t.Logf("newer-history=%d old-target-trace-named=%d answer=%s", history, oldNamed, text)
+	if !walk.Complete || walk.Count != 3 {
+		t.Fatalf("the causal walk answered count=%d complete=%v over three facts, want the whole chain", walk.Count, walk.Complete)
+	}
+	wantKeys := []event.EventID{"old-target", "old-mid", "old-root"}
+	for at, item := range walk.Items {
+		if item.Key != wantKeys[at] {
+			t.Fatalf("the causal walk answered %v, want %v: the walk follows the chain and not the history around it", walk.Items, wantKeys)
+		}
+	}
+	if wantNamed := 3*(history+2) + 8; oldNamed != wantNamed {
+		t.Fatalf("the old target's walk of three steps named %d index entries beside %d facts newer than it, want %d: each step pays the search from the newest record beside its own chain entries, two of them on the first step and three on the two behind it",
+			oldNamed, history, wantNamed)
+	}
+	before, _, _ = run.tier.Segments.IndexWalkReads()
+	if _, err := trace.Call(ctx, []byte(`{"key":"new-newest","max_steps":1}`)); err != nil {
+		t.Fatalf("the causal walk over the newest fact failed: %v", err)
+	}
+	counted, _, _ = run.tier.Segments.IndexWalkReads()
+	newNamed := counted - before
+	t.Logf("newest-trace-named=%d", newNamed)
+	if newNamed != 2 {
+		t.Fatalf("the newest fact's walk named %d index entries beside the same history, want its own two: the counted cost of the old target is attributable to the search before it and not to a constant the store adds to every walk", newNamed)
 	}
 }

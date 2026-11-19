@@ -3,6 +3,7 @@ package state
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"strings"
 	"sync"
@@ -366,5 +367,174 @@ func TestConcurrentFoldsKeepTheUnappliedFact(t *testing.T) {
 	wg.Wait()
 	if _, err := registry.SnapshotState(ctx); err != nil {
 		t.Fatalf("the cut over the settled fact states %v, want it filed", err)
+	}
+}
+
+// unfinishedSlice is a state slice that states the obligations it still owes
+// beside the ones a restore hands it, so the same holder answers what an unmount
+// would lose.
+type unfinishedSlice struct {
+	name string
+	mu   sync.Mutex
+	owed []string
+}
+
+// StateName reports the name the slice is keyed by.
+func (s *unfinishedSlice) StateName() string { return s.name }
+
+// SnapshotState states the open obligations.
+func (s *unfinishedSlice) SnapshotState(context.Context) ([]byte, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return json.Marshal(s.owed)
+}
+
+// RestoreState puts the stated obligations back.
+func (s *unfinishedSlice) RestoreState(_ context.Context, payload []byte) error {
+	var stated []string
+	if err := json.Unmarshal(payload, &stated); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.owed = append(s.owed, stated...)
+	return nil
+}
+
+// UnfinishedWork reports the obligations an unmount would lose.
+func (s *unfinishedSlice) UnfinishedWork() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.owed)
+}
+
+// open records the obligations the slice still owes.
+func (s *unfinishedSlice) open(items ...string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.owed = append(s.owed, items...)
+}
+
+// settle clears the obligations the slice answered.
+func (s *unfinishedSlice) settle() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.owed = nil
+}
+
+// TestUnregisterRefusesASliceWithUnfinishedWork is the negative anchor of the unmount edge: a slice that still owes work may not leave.
+// - the disposer refuses by name with the count of unfinished obligations, and the registry keeps that very holder
+// - the cut filed after the refusal still states the obligations the holder holds, including one it recorded after the refusal
+// - a disposer that deletes the holder, or that reports only after deleting it, fails the count, the identity or the payload
+//
+// 契约: docs/wiki/platform/platform-subsystems.md#framework-checkpoint
+func TestUnregisterRefusesASliceWithUnfinishedWork(t *testing.T) {
+	ctx := context.Background()
+	registry := NewStateRegistry()
+	holder := &unfinishedSlice{name: "owed-consumer", owed: []string{"notice-a", "notice-b"}}
+	dispose, err := registry.Register(holder)
+	if err != nil {
+		t.Fatalf("register the holder: %v", err)
+	}
+	refusal := dispose()
+	if refusal == nil {
+		t.Fatal("the unmount of a slice owing 2 obligation(s) answered nil, want it refused by name")
+	}
+	if !strings.Contains(refusal.Error(), `"owed-consumer"`) || !strings.Contains(refusal.Error(), "2 unfinished obligation(s)") {
+		t.Fatalf("the refusal states %q, want it to name the slice and the 2 unfinished obligation(s)", refusal)
+	}
+	mounted := registry.mounted()
+	if len(mounted) != 1 || mounted[0] != holder {
+		t.Fatalf("the registry holds %v after the refused unmount, want the very holder that owes the work", mounted)
+	}
+	if names := registry.Names(); len(names) != 1 || names[0] != "owed-consumer" {
+		t.Fatalf("the registry names %v after the refused unmount, want the slice kept", names)
+	}
+	holder.open("notice-c")
+	slices, cutErr := registry.SnapshotState(ctx)
+	if cutErr != nil {
+		t.Fatalf("file the cut beside the refused unmount: %v", cutErr)
+	}
+	if len(slices) != 1 || !strings.Contains(string(slices[0].Payload), "notice-c") {
+		t.Fatalf("the cut states %v, want the obligations of the holder the registry kept", slices)
+	}
+	holder.settle()
+	if err := dispose(); err != nil {
+		t.Fatalf("the unmount once the holder settled its account answered %v, want it to leave", err)
+	}
+	if names := registry.Names(); len(names) != 0 {
+		t.Fatalf("the registry names %v after the settled unmount, want the slice gone", names)
+	}
+}
+
+// TestUnregisterAllowsASettledSlice pins the other half of the refusal: a slice that owes nothing leaves as it registered.
+// - a holder that declares no unfinished work unmounts without an error and leaves no slice behind
+// - the cut of the registry after the unmount states no slice of that name
+// - a registry that refuses every unmount answers an error here
+//
+// 契约: docs/wiki/platform/platform-subsystems.md#framework-checkpoint
+func TestUnregisterAllowsASettledSlice(t *testing.T) {
+	ctx := context.Background()
+	registry := NewStateRegistry()
+	holder := &unfinishedSlice{name: "settled-consumer"}
+	dispose, err := registry.Register(holder)
+	if err != nil {
+		t.Fatalf("register the holder: %v", err)
+	}
+	if names := registry.Names(); len(names) != 1 {
+		t.Fatalf("the registry names %v after the registration, want the one slice", names)
+	}
+	if err := dispose(); err != nil {
+		t.Fatalf("the unmount of a slice owing nothing answered %v, want it to leave", err)
+	}
+	if mounted := registry.mounted(); len(mounted) != 0 {
+		t.Fatalf("the registry holds %v after the unmount, want no holder", mounted)
+	}
+	slices, cutErr := registry.SnapshotState(ctx)
+	if cutErr != nil {
+		t.Fatalf("file the cut after the unmount: %v", cutErr)
+	}
+	if len(slices) != 0 {
+		t.Fatalf("the cut states %v after the settled slice left, want no slice", slices)
+	}
+}
+
+// TestSliceHandoverKeepsTheUnfinishedObligations pins who holds the obligations after a refused unmount.
+// - the refused unmount keeps the name with the holder that owes, and a second holder of that name is refused beside it
+// - the name passes to a successor only once the holder settled, so no successor silently receives an account it was never handed
+//
+// 契约: docs/wiki/platform/platform-subsystems.md#framework-checkpoint
+func TestSliceHandoverKeepsTheUnfinishedObligations(t *testing.T) {
+	ctx := context.Background()
+	registry := NewStateRegistry()
+	holder := &unfinishedSlice{name: "owed-consumer", owed: []string{"notice-a"}}
+	dispose, err := registry.Register(holder)
+	if err != nil {
+		t.Fatalf("register the holder: %v", err)
+	}
+	if refusal := dispose(); refusal == nil || !strings.Contains(refusal.Error(), "1 unfinished obligation(s)") {
+		t.Fatalf("the unmount of a slice owing 1 obligation = %v, want it refused by name with the count", refusal)
+	}
+	successor := &unfinishedSlice{name: "owed-consumer"}
+	if _, err := registry.Register(successor); err == nil || !strings.Contains(err.Error(), "already mounted") {
+		t.Fatalf("mounting a second holder of the kept name answered %v, want the name kept by the holder that owes", err)
+	}
+	slices, cutErr := registry.SnapshotState(ctx)
+	if cutErr != nil {
+		t.Fatalf("file the cut beside the refused unmount: %v", cutErr)
+	}
+	if len(slices) != 1 || !strings.Contains(string(slices[0].Payload), "notice-a") {
+		t.Fatalf("the cut states %v, want the obligation still stated by the holder that owes it", slices)
+	}
+	holder.settle()
+	if err := dispose(); err != nil {
+		t.Fatalf("the unmount once the holder settled answered %v, want it to leave", err)
+	}
+	disposeSuccessor, err := registry.Register(successor)
+	if err != nil {
+		t.Fatalf("mount the successor of the settled name: %v", err)
+	}
+	if refusal := disposeSuccessor(); refusal != nil {
+		t.Fatalf("the successor owes nothing, so its unmount answered %v", refusal)
 	}
 }

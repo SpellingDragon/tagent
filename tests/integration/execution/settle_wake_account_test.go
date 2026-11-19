@@ -71,8 +71,8 @@ func wakeAccountLog(t *testing.T, root string) (*state.DurableCommit, *ledger.Ti
 	if err != nil {
 		t.Fatalf("open the storage tier of %s: %v", root, err)
 	}
-	durable, err := state.NewDurableCommit(ledger.TierFactLog(tier), nil)
-	if err != nil {
+	durable := state.NewEmptyDurableCommit(ledger.TierFactLog(tier), nil)
+	if err := durable.Seat(context.Background(), nil, nil); err != nil {
 		t.Fatalf("open the durable account of %s: %v", root, err)
 	}
 	if _, err := durable.Commit(context.Background(), task.CommitRecord{

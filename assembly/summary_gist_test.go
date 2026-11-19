@@ -114,7 +114,7 @@ func TestBandSummaryGistReportsAMissingModel(t *testing.T) {
 // - a product that is not the history summary keeps its text, so a segment fold is never reworded
 func TestCompressionSummaryRecordsTheGist(t *testing.T) {
 	ctx := context.Background()
-	consumer := NewCompressionConsumer(nil).withSummaryGist(&fakeSummaryGist{
+	consumer := NewCompressionConsumer(nil, nil).withSummaryGist(&fakeSummaryGist{
 		answer: func(string) (string, error) {
 			return strings.Repeat("[11-06 12:00|gen:?] one settled decision\n", 200), nil
 		},
@@ -153,7 +153,7 @@ func TestCompressionSummaryKeepsTheMechanicalForm(t *testing.T) {
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
-			consumer := NewCompressionConsumer(nil).withSummaryGist(&fakeSummaryGist{answer: answer})
+			consumer := NewCompressionConsumer(nil, nil).withSummaryGist(&fakeSummaryGist{answer: answer})
 			product := mechanicalSummary(t)
 			got := consumer.summarizeProduct(ctx, "session-gist", product, replay.DefaultAgeSummaryTextLimit)
 			if got.Entry.Content != product.Entry.Content {
@@ -166,7 +166,7 @@ func TestCompressionSummaryKeepsTheMechanicalForm(t *testing.T) {
 			}
 		})
 	}
-	if consumer := NewCompressionConsumer(nil); consumer.summarizeProduct(context.Background(), "session-gist", mechanicalSummary(t), replay.DefaultAgeSummaryTextLimit).Entry.Content != mechanicalSummary(t).Entry.Content {
+	if consumer := NewCompressionConsumer(nil, nil); consumer.summarizeProduct(context.Background(), "session-gist", mechanicalSummary(t), replay.DefaultAgeSummaryTextLimit).Entry.Content != mechanicalSummary(t).Entry.Content {
 		t.Fatal("a consumer beside no gist face reworded the summary, want the mechanical form")
 	}
 }

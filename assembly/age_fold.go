@@ -212,7 +212,9 @@ func (p *AgeFoldPlugin) ObserveCommit(ctx context.Context, id event.EventID) err
 
 // ageFoldSessions is the session face of one run the fold plugin observes
 // through: the live ledger of committed facts beside the replay registrations of
-// the sessions this run opened.
+// the sessions this run opened. The same face serves the compression consumer
+// through two narrower ports of itself — the replay source it reads a commit
+// through and the product ledger it files one execution through.
 type ageFoldSessions struct{ run *Run }
 
 // The face satisfies the session port the fold plugin reads.

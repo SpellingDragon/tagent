@@ -109,8 +109,8 @@ func runClaimThenCommitRetry(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open the durable tier: %v", err)
 	}
-	durable, err := state.NewDurableCommit(ledger.TierFactLog(tier), probe)
-	if err != nil {
+	durable := state.NewEmptyDurableCommit(ledger.TierFactLog(tier), probe)
+	if err := durable.Seat(ctx, nil, nil); err != nil {
 		t.Fatalf("build the durable commit: %v", err)
 	}
 	registry := task.NewMemoryRegistry(durable, task.NewMemoryAdmission())
@@ -176,8 +176,8 @@ func runClaimThenCommitRetry(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reopen the durable tier: %v", err)
 	}
-	reopened, err := state.NewDurableCommit(ledger.TierFactLog(reopenedTier), nil)
-	if err != nil {
+	reopened := state.NewEmptyDurableCommit(ledger.TierFactLog(reopenedTier), nil)
+	if err := reopened.Seat(ctx, nil, nil); err != nil {
 		t.Fatalf("rebuild the durable commit: %v", err)
 	}
 	chain, err := reopened.Records(ctx, receipt.TaskID)
@@ -230,8 +230,8 @@ func runConsumeOnlyAfterDurableCommit(t *testing.T) {
 		t.Fatalf("open the durable tier: %v", err)
 	}
 	recording := &consumptionBarrierLog{FactLog: ledger.TierFactLog(tier)}
-	durable, err := state.NewDurableCommit(recording, nil)
-	if err != nil {
+	durable := state.NewEmptyDurableCommit(recording, nil)
+	if err := durable.Seat(ctx, nil, nil); err != nil {
 		t.Fatalf("build the durable commit: %v", err)
 	}
 	spec := consumptionSpec("task-durable")
@@ -274,8 +274,8 @@ func runConsumeOnlyAfterDurableCommit(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reopen the durable tier: %v", err)
 	}
-	reopened, err := state.NewDurableCommit(ledger.TierFactLog(reopenedTier), nil)
-	if err != nil {
+	reopened := state.NewEmptyDurableCommit(ledger.TierFactLog(reopenedTier), nil)
+	if err := reopened.Seat(ctx, nil, nil); err != nil {
 		t.Fatalf("rebuild the durable commit: %v", err)
 	}
 	chain, err := reopened.Records(ctx, receipt.TaskID)
@@ -941,8 +941,8 @@ func consumptionSeedClaimedTask(t *testing.T, ctx context.Context, root string) 
 	if err != nil {
 		t.Fatalf("open the seed tier: %v", err)
 	}
-	durable, err := state.NewDurableCommit(ledger.TierFactLog(tier), nil)
-	if err != nil {
+	durable := state.NewEmptyDurableCommit(ledger.TierFactLog(tier), nil)
+	if err := durable.Seat(ctx, nil, nil); err != nil {
 		t.Fatalf("build the seed commit: %v", err)
 	}
 	registry := task.NewMemoryRegistry(durable, task.NewMemoryAdmission())
@@ -1813,40 +1813,21 @@ func projectionFactCountOf(run *assembly.Run, session event.SessionID, factType 
 	return count
 }
 
-// rebuildProjectionFromRun replays the mapped facts of one session chain into an
-// empty projection, as the cold start reads them: the live ledger holds the
-// window the projection still presents, so the chain streams from the durable
-// store instead of the resident window alone. A compress request carries no
-// message and maps onto no projection entry, so the rebuild reads back exactly
-// the material the commits mapped. It reports the rebuilt projection, the
-// rebuild report and how many mapped facts the chain carried.
-func rebuildProjectionFromRun(t *testing.T, ctx context.Context, run *assembly.Run, session event.SessionID) (*replay.ReplayProjection, replay.RebuildReport, int) {
+// rebuildProjectionFromRun walks the mapped facts of one session chain into a
+// fresh projection, the canonical sequence alone: the live ledger holds the window
+// the projection still presents, so the chain streams from the durable store
+// instead of the resident window alone. A compress request carries no message and
+// maps onto no projection entry, so the walk reads back exactly the material the
+// commits mapped. It reports the rebuilt projection and how many mapped facts the
+// chain carried.
+func rebuildProjectionFromRun(t *testing.T, ctx context.Context, run *assembly.Run, session event.SessionID) (*replay.ReplayProjection, int) {
 	t.Helper()
-	chainKey := replay.ChainKey{PartitionID: 1, SessionID: session}
-	chain := replay.NewMemoryEventChain()
-	mapped := 0
-	if err := run.EachSessionFact(ctx, event.Address{SessionID: session}, func(evt event.Event) error {
-		if evt.Type == event.CompressRequestType || evt.Message.Content == "" {
-			return nil
-		}
-		mapped++
-		return chain.Commit(ctx, replay.ChainFact{
-			Key:     evt.Key,
-			Chain:   chainKey,
-			Type:    evt.Type,
-			Summary: evt.Meta[event.MetaKeyEventSummary],
-			Content: evt.Message.Content,
-			Time:    evt.Timestamp.UTC(),
-		})
-	}); err != nil {
-		t.Fatalf("stream the session chain: %v", err)
-	}
+	facts := projectionCommitFactsOf(t, ctx, run, session)
 	rebuilt := replay.NewReplayProjection()
-	report, err := replay.RebuildProjectionFromWAL(ctx, rebuilt, chain, &replay.MemoryRelations{}, chainKey, replay.RebuildOptions{})
-	if err != nil {
-		t.Fatalf("rebuild the projection from the chain: %v", err)
+	for _, fact := range facts {
+		rebuilt.Append(ctx, replay.ProjectionEntry{Key: fact.Key, Type: fact.Type, Summary: fact.Summary, Content: fact.Content, Time: fact.Time})
 	}
-	return rebuilt, report, mapped
+	return rebuilt, len(facts)
 }
 
 // projectionWindowPlan reports the fold plan the declaration's window reads, so
@@ -1945,10 +1926,7 @@ func runSmallWindowFoldAndRestore(t *testing.T) {
 		t.Fatal("the folded original is no longer the text the chain committed")
 	}
 
-	rebuilt, report, mapped := rebuildProjectionFromRun(t, ctx, folded, addr.SessionID)
-	if !report.Fallback || report.FullBoundary != "" {
-		t.Fatalf("rebuild report = %+v, want the bounded fallback of a chain carrying no compaction", report)
-	}
+	rebuilt, mapped := rebuildProjectionFromRun(t, ctx, folded, addr.SessionID)
 	if rebuilt.Compaction() != nil {
 		t.Fatalf("the rebuild restored a compaction payload %+v the chain never carried", rebuilt.Compaction())
 	}
@@ -2051,22 +2029,11 @@ func runRebuildRefoldsFromWAL(t *testing.T) {
 
 	plan := projectionWindowPlan(projectionWindowTokens)
 	facts := projectionCommitFactsOf(t, ctx, run, addr.SessionID)
-	chainKey := replay.ChainKey{PartitionID: 1, SessionID: addr.SessionID}
-	chain := replay.NewMemoryEventChain()
 	committed := make([]string, 0, len(facts))
+	rebuilt := replay.NewReplayProjection()
 	for _, fact := range facts {
 		committed = append(committed, string(fact.Key))
-		if err := chain.Commit(ctx, fact); err != nil {
-			t.Fatalf("commit the WAL fact %s: %v", fact.Key, err)
-		}
-	}
-	rebuilt := replay.NewReplayProjection()
-	report, err := replay.RebuildProjectionFromWAL(ctx, rebuilt, chain, &replay.MemoryRelations{}, chainKey, replay.RebuildOptions{})
-	if err != nil {
-		t.Fatalf("rebuild the projection from the WAL: %v", err)
-	}
-	if !report.Fallback || !report.Scanned || report.Entries != len(facts) || report.FullBoundary != "" {
-		t.Fatalf("rebuild report = %+v, want the bounded fallback replaying the %d raw facts of a chain carrying no compaction", report, len(facts))
+		rebuilt.Append(ctx, replay.ProjectionEntry{Key: fact.Key, Type: fact.Type, Summary: fact.Summary, Content: fact.Content, Time: fact.Time})
 	}
 	if rebuilt.Compaction() != nil {
 		t.Fatalf("the rebuild restored the compaction payload %+v the chain never carried", rebuilt.Compaction())
@@ -2337,10 +2304,7 @@ func runRebuildDoesNotRefold(t *testing.T) {
 	}
 	filed := projectionFactCountOf(run, addr.SessionID, event.CompressRequestType)
 
-	rebuilt, report, mapped := rebuildProjectionFromRun(t, ctx, run, addr.SessionID)
-	if !report.Fallback || report.Entries != mapped || report.Dropped != 0 || !report.Scanned {
-		t.Fatalf("rebuild report = %+v, want the bounded fallback replaying %d mapped facts whole", report, mapped)
-	}
+	rebuilt, mapped := rebuildProjectionFromRun(t, ctx, run, addr.SessionID)
 	if rebuilt.Compaction() != nil {
 		t.Fatalf("the rebuild restored compaction=%+v from a chain that carries none", rebuilt.Compaction())
 	}
@@ -2439,7 +2403,7 @@ func runFoldProductNoSelfTrigger(t *testing.T) {
 		t.Fatal("the commits minted no fold product, so there is no product to rejudge")
 	}
 
-	rebuilt, _, _ := rebuildProjectionFromRun(t, ctx, run, addr.SessionID)
+	rebuilt, _ := rebuildProjectionFromRun(t, ctx, run, addr.SessionID)
 	plan := replay.AgeFoldPlan{KeepRecent: config.DefaultKeepRecentTasks, VolumeThreshold: 1}
 	first, err := rebuilt.FoldByAge(ctx, plan)
 	if err != nil {
@@ -2998,8 +2962,8 @@ func seedRestartProcess(t *testing.T, root, out string, phase restartPhase) {
 		t.Fatalf("open the seed tier: %v", err)
 	}
 	gate := newRestartGate(ledger.TierFactLog(tier), phase)
-	durable, err := state.NewDurableCommit(gate, nil)
-	if err != nil {
+	durable := state.NewEmptyDurableCommit(gate, nil)
+	if err := durable.Seat(ctx, nil, nil); err != nil {
 		t.Fatalf("build the seed commit: %v", err)
 	}
 	registry := task.NewMemoryRegistry(durable, task.NewMemoryAdmission())
@@ -3228,8 +3192,8 @@ func restartBoundary(t *testing.T, root string, report restartChildReport) resta
 	if err != nil {
 		t.Fatalf("open the durable root after the restart closed: %v", err)
 	}
-	probe, err := state.NewDurableCommit(ledger.TierFactLog(tier), nil)
-	if err != nil {
+	probe := state.NewEmptyDurableCommit(ledger.TierFactLog(tier), nil)
+	if err := probe.Seat(ctx, nil, nil); err != nil {
 		t.Fatalf("read the durable boundary after the restart closed: %v", err)
 	}
 	view := restartBoundaryView{Tasks: len(probe.TaskIDs())}
@@ -5333,8 +5297,8 @@ func restoreChainViews(t *testing.T, ctx context.Context, root string) []restore
 	if err != nil {
 		t.Fatalf("open the durable tier of the restart: %v", err)
 	}
-	durable, err := state.NewDurableCommit(ledger.TierFactLog(tier), nil)
-	if err != nil {
+	durable := state.NewEmptyDurableCommit(ledger.TierFactLog(tier), nil)
+	if err := durable.Seat(ctx, nil, nil); err != nil {
 		t.Fatalf("open the durable commit of the restart: %v", err)
 	}
 	var views []restoreChainView

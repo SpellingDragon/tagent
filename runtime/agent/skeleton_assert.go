@@ -132,7 +132,7 @@ var (
 
 	_ func(*Loop, context.Context, Invocation) (Turn, error) = (*Loop).drive
 
-	_ func(*Loop, event.InvocationID, task.Notice) = (*Loop).Backflow
+	_ func(*Loop, event.InvocationID, task.Notice) error = (*Loop).Backflow
 
 	// The session transcript face is attached through its own setter, so the
 	// declared construction shape above stays exactly as it is: the face crosses

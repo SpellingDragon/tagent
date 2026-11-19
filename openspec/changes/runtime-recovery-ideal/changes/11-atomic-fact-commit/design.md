@@ -249,6 +249,8 @@ const (
 - **`landedSeq` 只在 `FactCommitted` 推进**（R46 自裁二的补锚）：`landedSeq` 住在 `assembly/run.go:379` / 由 `assembly/facts.go:400` 推进，**`assembly/` 不在 11.R3 白名单**，故该负锚**未落地**。在 `memory/ledger` 侧写等价断言会是**假锚**——ledger 的 `commitSeq`/`EventCount` 在重复提交时本就零变动，该断言**修复前即绿**，量不到 `landedSeq` 的那处回归。须派 `assembly/facts_test.go`（11.R2 三例的落点）补，建议形状：同一事实提交两次后，下一新事实须落在 `landedSeq[partition]+1` 而非 `+2`（`Run.persistFact` 未导出，正式入口为 `Run.Invoke` 驱动的事实提交，或经 `CheckpointFiled()` 的 `event.CheckpointOffset` 读回该分区水位）。
 - `scripts/recover-kv/main.go` **未改**：其 restore 逐键提交（`main.go:162` 单键 `blob:` 批），不触多键拒绝面，语义无需收紧。
 
+**11.R4 回写**：上条 `landedSeq` 负锚**已落地**为 `assembly/facts_test.go` 的 `TestRepeatedFactDoesNotAdvanceLandedSequence`，走正式入口 `run.commitFactChecked` 读 `checkpointWatermark` 断言「重复不推进水位、不花新号」，并配非空转红绿对（把花号前移到重复前置判重处 → 红）。同轮把 `CommitFact` 的写前拒绝分类由名字白名单改为契约反演（只有 `ErrCommitUncertain` 归不确定，其余一概 `FactRefused`），证据见 tasks.md「11.R4 执行记录」。
+
 ### 八.6 全树验证（主树工作树，原始 exit）
 
 `go build ./...` **0**；`go vet ./memory/ledger/ ./scripts/recover-kv/` **0**；`./memory/ledger/` **0（32.251s）**；`./scripts/recover-kv/` **0（1.621s）**；`./tests/...` **0（13 包 ok，0 FAIL）**；`./assembly/` **0（281.152s）**；注释棘轮门 **0 findings／0 beyond baseline**；产品包零容忍门 **0 findings**；四锚合跑 **20 RUN／20 PASS／0 FAIL／exit 0**（新增三锚＋既有 `TestAtomicStoreContract` 全腿）。

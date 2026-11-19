@@ -151,8 +151,8 @@ func TestScenario08QueryWithoutOtel(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open the storage tier: %v", err)
 	}
-	durable, err := state.NewDurableCommit(ledger.TierFactLog(tier), nil)
-	if err != nil {
+	durable := state.NewEmptyDurableCommit(ledger.TierFactLog(tier), nil)
+	if err := durable.Seat(ctx, nil, nil); err != nil {
 		t.Fatalf("open the durable commit: %v", err)
 	}
 	registry := task.NewMemoryRegistry(durable, task.NewMemoryAdmission())

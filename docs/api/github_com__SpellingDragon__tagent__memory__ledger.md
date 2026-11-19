@@ -7,15 +7,13 @@ no adaptation and the same contract test runs over every engine.
 
 Package ledger is the runtime's durable original-text layer: it names one stored
 original and the reference metadata that scopes it, commits those bytes and
-returns them byte for byte, and carries the retention guard, the lifecycle and
-the storage tiers built beside them.
+returns them byte for byte, and carries the storage tiers built beside them.
 
 The package speaks the fact vocabulary of the event package and nothing above
 it, so the durable side cannot be reversed into the intelligent or governing
 side. Its files sit under the ledger unit by the mechanism-subpackage rule of
-CONTRIBUTING.md: the fact vocabulary (OriginalRef, Integrity), the consumer
-wiring (Retention, Lifecycle, the stores) and the per-tier strategies
-(localfile, rustviking).
+CONTRIBUTING.md: the fact vocabulary (OriginalRef, Integrity), the read face
+(the stores, RecallResult) and the per-tier strategies (localfile, rustviking).
 
 The journal is the localfile tier's persistent unit: one append-only file of
 frames, each carrying the length of its payload and a CRC32C of that payload.
@@ -39,24 +37,6 @@ The resident entry set every durable engine keeps beside its persisted record:
 an LRU over key-value pairs with a byte budget, so what the process holds is
 bounded whatever the store persists.
 
-Storage lifecycle: retention, tombstones, recovery inventory and reclamation
-coordination.
-
-TTL expiry and capacity eviction only tombstone a key; the physical destroy
-happens at compaction, and never to an original a retention lease still
-protects. The first destructive pass waits for the lease arming and the
-inventory barrier to lift — the recovery inventory runs before any reclamation —
-and a store that cannot protect or coordinate reclamation is reported by name on
-the durable recovery tier instead of being treated as unprotected success.
-
-Declarative lifecycle policy.
-
-The lifecycle policy is injected declaratively through the agent's memory
-configuration: the age window, the per-type overrides, the scan cadence and
-the per-partition capacity bound. An unset field falls back to the default and
-an explicit value wins, so no composition root hardcodes a second copy of the
-default beside the config it was handed.
-
 The one place that reads the retired sharded-snapshot layout: an operator
 migrating a deployment root reads that layout as the read-only source and writes
 the journal the build opens now. Every other caller reaches storage through the
@@ -69,16 +49,6 @@ Original references and the read scope that authorizes them: one reference names
 one stored original together with the metadata that scopes it, and the scoped
 read face serves only the references registered inside the scope the read runs
 under. See doc.go for the package's place in the memory axis.
-
-Retention leases.
-
-A retention lease is held by the shared resource owner — the recovery resource
-or the unsettled obligation the hold protects, never "an agent" — and protection
-is reference counted across holders: it stands until the last holder releases
-it, and every hold and release is idempotent. The guard is the single source of
-truth for that count; this layer registers what is held and the original time
-the key reclassifies under once released, and keeps no second lease system of
-its own.
 
 Skeleton compile-time assertions for the ledger shapes: every declared field
 name and type, every declared method signature, and every constant that must
@@ -104,25 +74,6 @@ const DefaultSegmentMaxBytes int64 = 64 << 10
 
 VARIABLES
 
-var (
-	// ErrCapabilityIncomplete reports a durable recovery tier whose store lacks
-	// the protection or reclamation coordination the tier promises: the system
-	// refuses to start instead of treating "no protection" as success.
-	ErrCapabilityIncomplete = errors.New("memory: storage lacks protection/reclamation coordination for the durable recovery tier")
-	// ErrRecoveryIncomplete reports a destructive pass attempted before the
-	// recovery inventory completed: potential recovery material is never let
-	// through by the grace deadline alone.
-	ErrRecoveryIncomplete = errors.New("memory: recovery inventory incomplete, destructive reclamation withheld")
-	// ErrEnumerationIncomplete reports a failed key enumeration: the partial
-	// view is never reconciled and no key is tombstoned off it.
-	ErrEnumerationIncomplete = errors.New("memory: key enumeration failed, no partial view is reconciled")
-	// ErrProtected reports a destructive action on a key a standing retention
-	// lease still protects: only a refusal by name, never a silent destroy.
-	ErrProtected = errors.New("memory: key is protected by a standing retention lease")
-	// ErrLifecycleUnwired reports a lifecycle constructed without the retention
-	// ledger or the store it coordinates.
-	ErrLifecycleUnwired = errors.New("memory: lifecycle needs a retention ledger and a store")
-)
 var ErrBatchNotAtomic = errors.New("memory: this engine lands one key per call and cannot commit a batch whole")
     ErrBatchNotAtomic reports a commit of a batch carrying several keys
     handed to an engine whose every call lands one key: the engine refuses
@@ -164,10 +115,6 @@ var ErrFactCommitUnsupported = errors.New("memory: the tier cannot commit a whol
     fact through: the caller states the tier it was handed instead of committing
     one family beside a judgment it never made.
 
-var ErrHolderRequired = errors.New("memory: protection hold names no holder")
-    ErrHolderRequired reports a protection hold that names no holder, so its
-    release could never be recognized as the same hold.
-
 var ErrIntegrityMismatch = errors.New("memory: bytes do not match the recorded integrity")
     ErrIntegrityMismatch reports original bytes that do not match the
     completeness information recorded for them, so the read is refused instead
@@ -199,11 +146,6 @@ var ErrJournalLegacyLayout = errors.New("memory: data directory holds the retire
 var ErrKeyRequired = errors.New("memory: original reference carries no key")
     ErrKeyRequired reports a commit that carries no key, so no read could ever
     name the original again.
-
-var ErrLeaseMismatch = errors.New("memory: release carries a lease that is not the hold's current lease")
-    ErrLeaseMismatch reports a release whose lease is not the current lease of
-    the hold it names: a superseded token from before a re-hold, or a token that
-    belongs to another hold. The named hold stays held.
 
 var ErrMigrateMismatch = errors.New("memory: migrated root does not read back the source")
     ErrMigrateMismatch reports a copied root that does not read back exactly
@@ -419,7 +361,10 @@ func CommitFact(ctx context.Context, tier *Tier, fact FactCommit) (FactCommitOut
       - A fact the store already holds stays the fact it is: no key moves,
         no sequence slot is taken and the window meta is not refreshed
       - A refusal the engine decides before writing is reported as the refusal
-        it is, never as an uncertain outcome the caller would re-read
+        it is, never as an uncertain outcome the caller would re-read: the seam
+        states that a commit returning an error published no part of its batch,
+        so only ErrCommitUncertain leaves the caller a read to make, and every
+        other failure names a fact that landed no key
       - An uncertain outcome publishes nothing to either store's in-process
         state, because that view answers absence beside a batch that landed
         whole
@@ -626,48 +571,6 @@ func (s *FileSegmentStore) StoreEvent(ctx context.Context, rec SegmentRecord) er
       - A fact the store holds is a committed fact: committing it again answers
         as the duplicate it is, never as a second landing of one identity.
 
-type Guard interface {
-	// Hold registers one protection hold on the original of ref for holder and
-	// returns the lease its release must carry back. Holding again as the same
-	// holder while the hold stands is idempotent: the hold counts once and the
-	// retry gets the lease it already holds, while a hold made after that holder
-	// released is a new hold with a fresh lease. A hold that names no holder is
-	// refused by name with ErrHolderRequired, so its release could always be
-	// recognized as the same hold.
-	Hold(ctx context.Context, ref OriginalRef, holder HolderID) (ProtectionLease, error)
-
-	// Release drops the hold of holder on the original of ref under the lease
-	// that hold returned. Releasing a hold that has already been released is a
-	// no-op, so a repeated release is not an error; a release whose lease is not
-	// the current lease of the named hold is refused by name with ErrLeaseMismatch
-	// and leaves every hold standing, so a late or foreign lease never releases
-	// the protection another hold keeps. The original is unprotected only once
-	// the last holder has released it.
-	Release(ctx context.Context, ref OriginalRef, holder HolderID, lease ProtectionLease) error
-
-	// Protected reports whether the original of ref is still held, so a
-	// reclaimer asks before it reclaims anything.
-	Protected(ctx context.Context, ref OriginalRef) (bool, error)
-}
-
-    Guard is the retention protection port: it holds and releases protection
-    on originals, and reports whether a reference is still held, so a reclaimer
-    consults it before any destructive reclamation rather than assuming that an
-    absence of protection is safety.
-
-    The redline list (4 rules): MUST keep a hold owned by the shared resource,
-    so it outlives any single agent relying on it. MUST answer whether a
-    reference is still held before any destructive reclamation. MUST NOT treat
-    the absence of protection, a timeout or an absent capability as safety.
-    MUST NOT treat a released hold as an unreadable reference.
-
-type HolderID string
-    HolderID is the stable identity of one protection holder: the recovery
-    resource or unsettled obligation the hold protects, not the agent name and
-    not the owner of the reference it protects. It is stable across retries,
-    so a retried hold is recognized as the same hold and counts once, while two
-    holders on one original hold and release independently of each other.
-
 type IndexEntry struct {
 	// Partition is the partition the entry places the event in.
 	Partition int
@@ -703,209 +606,6 @@ type Integrity struct {
     A read returns the digest and the length together with the bytes, so a
     truncated or substituted original is reported as a failed read instead of
     being served as if it were complete.
-
-type Lifecycle struct {
-	// Has unexported fields.
-}
-    Lifecycle coordinates the storage lifecycle with the retention leases: the
-    recovery inventory runs before the first destructive pass, TTL and capacity
-    tombstone rather than destroy, protected material is never tombstoned,
-    and the physical destroy waits for compaction.
-
-func NewLifecycle(cfg LifecycleConfig, retention *Retention, store LifecycleStore, caps LifecycleCapabilities) (*Lifecycle, error)
-    NewLifecycle coordinates one storage lifecycle over the retention
-    ledger, the store and the capabilities that store was opened with.
-    On the durable recovery tier a store missing protection or reclamation
-    coordination is refused by name with ErrCapabilityIncomplete (fail-closed):
-    the tier promises recovery, so "no protection" is never treated as success.
-    A non-durable tier keeps its capability gap explicit in the capabilities it
-    was opened under, and never fakes protection that did not take effect.
-
-func (l *Lifecycle) ArmGrace(deadline time.Time)
-    ArmGrace arms the retention lease wait of the first destructive pass under
-    the given deadline: destructive reclamation waits for the arming and the
-    inventory barrier, and once the bounded grace expires only a tier that
-    promises no process recovery and holds no registered recovery material lets
-    go — a missing lease must not stop forgetting forever, while the durable
-    tier's pending material is never let through by the clock alone.
-
-func (l *Lifecycle) Delete(ctx context.Context, key event.EventID, now time.Time) error
-    Delete is the explicit destroy request for one key: it tombstones the key,
-    and a key a standing retention lease protects is refused by name with
-    ErrProtected instead of being destroyed under the protection.
-
-func (l *Lifecycle) Reclaim(ctx context.Context, now time.Time) (int, error)
-    Reclaim physically destroys the tombstoned keys at compaction. Keys are
-    only ever destroyed here, so a release of protection never makes an original
-    immediately unreadable: the original stays readable between its tombstone
-    and this pass.
-
-func (l *Lifecycle) RecoveryComplete()
-    RecoveryComplete lifts the inventory barrier: the recovery inventory is done
-    and the first destructive pass may run once the lease arming stands.
-
-func (l *Lifecycle) RegisterRecovered(ctx context.Context, key StoredKey) error
-    RegisterRecovered registers one recovered key during the recovery inventory:
-    the restart registration that must precede every eviction. Registrations are
-    taken before the barrier lifts, so material a restart still has to account
-    for is never swept away by the first pass.
-
-func (l *Lifecycle) Scan(ctx context.Context, now time.Time) (ScanReport, error)
-    Scan runs one TTL/capacity pass: expired and over-capacity keys are
-    tombstoned for reclamation at compaction, never physically destroyed here,
-    and a key a retention lease still protects is kept out of the scan entirely.
-    A failed enumeration is reported by name and tombstones nothing, so a
-    partial view is never reconciled.
-
-func (l *Lifecycle) Tombstoned(key event.EventID) bool
-    Tombstoned reports whether one key is marked for reclamation at compaction.
-
-type LifecycleCapabilities struct {
-	// DurableRecovery reports the durable recovery tier: the store commits
-	// across process exit, so its material is potential recovery material.
-	DurableRecovery bool
-	// Protection reports that originals can be kept from physical destruction
-	// while a retention lease stands.
-	Protection bool
-	// Reclamation reports that tombstoned keys can be physically reclaimed at
-	// compaction.
-	Reclamation bool
-}
-    LifecycleCapabilities names the coordination capabilities of one store:
-    the durable recovery tier it commits under, and whether it can protect
-    originals against destruction and coordinate their reclamation. A tier that
-    holds nothing across process exit says so instead of appearing durable,
-    and a tier missing protection or reclamation coordination says so instead of
-    faking protection that never took effect.
-
-type LifecycleConfig struct {
-	// GlobalTTLDays is the age window every event type ages out under, in days.
-	// Zero means the default window; a negative value exempts every type from
-	// TTL tombstoning.
-	GlobalTTLDays int `json:"global_ttl_days" yaml:"global_ttl_days"`
-	// TypeTTL overrides the age window per frozen event type, in days; a
-	// negative value exempts that type from TTL tombstoning. A type absent from
-	// the map ages out under the global window.
-	TypeTTL map[string]int `json:"type_ttl" yaml:"type_ttl"`
-	// CheckInterval is the cadence the periodic TTL scan runs at. Zero means
-	// the default cadence.
-	CheckInterval time.Duration `json:"check_interval" yaml:"check_interval"`
-	// MaxEventsPerPartition bounds the event count of one partition; zero means
-	// unbounded.
-	MaxEventsPerPartition int `json:"max_events_per_partition" yaml:"max_events_per_partition"`
-}
-    LifecycleConfig is the declarative lifecycle policy: the age window every
-    event type ages out under, the per-type overrides, the TTL scan cadence and
-    the per-partition capacity bound. The fields are named for the memory config
-    map they are injected from.
-
-func DefaultLifecycleConfig() LifecycleConfig
-    DefaultLifecycleConfig returns the default lifecycle policy: the seven-day
-    global window, the delivery settlement family's negative (exempt) override,
-    the one-hour scan cadence and no capacity bound. It is the fallback every
-    unset field resolves to — never a value a composition root hardcodes beside
-    its config.
-
-func (c LifecycleConfig) Normalized() LifecycleConfig
-    Normalized returns the policy with every unset field filled from the default
-    and every explicit value kept as given, so the injected policy and the one
-    the lifecycle runs under are the same object.
-
-func (c LifecycleConfig) Window(eventType string) (time.Duration, bool)
-    Window returns the age window one frozen event type ages out under and
-    whether that type is exempt from TTL tombstoning entirely: a negative
-    override exempts the type, a negative global window exempts every type,
-    and an absent override falls back to the global window.
-
-    - The settlement family is exempt by construction: its facts are the read
-    face of obligations that outlive any age window, so no tombstone may age
-    them out.
-
-type LifecycleStore interface {
-	// EnumerateKeys lists every key the store holds, or fails by name: a
-	// partial list is never returned as an enumeration.
-	EnumerateKeys(ctx context.Context) ([]StoredKey, error)
-	// Tombstone marks one key for reclamation at compaction. Tombstoning is not
-	// a physical destroy: the original stays readable until compaction.
-	Tombstone(ctx context.Context, key event.EventID, at time.Time) error
-	// ReclaimTombstoned physically destroys the given tombstoned keys at
-	// compaction and returns how many were destroyed.
-	ReclaimTombstoned(ctx context.Context, keys []event.EventID) (int, error)
-}
-    LifecycleStore is the reclamation surface the storage lifecycle coordinates
-    with: enumerate the keys it holds, tombstone an expired key, and physically
-    reclaim the tombstoned ones at compaction. A failed enumeration is
-    reported by name and never returned as a partial list, so a reclaimer never
-    reconciles a partial view.
-
-    The redline list (4 rules): MUST enumerate every key it holds, or fail by
-    name. MUST keep an original readable until compaction once it is tombstoned.
-    MUST NOT answer a failed enumeration as a partial list. MUST NOT take the
-    capabilities of a store from the store's own claim: they are settled by the
-    wiring that opens it.
-
-type MemoryGuard struct {
-	// Has unexported fields.
-}
-
-    MemoryGuard is the in-memory retention protection: it keeps one hold per
-    key and holder, hands each hold the lease its release must carry back,
-    and reports to a reclaimer whether any holder still protects an original.
-    Protection is counted across holders, so a hold is gone only when the last
-    holder releases it.
-
-func NewMemoryGuard() *MemoryGuard
-    NewMemoryGuard returns an empty in-memory retention protection.
-
-func (g *MemoryGuard) Hold(ctx context.Context, ref OriginalRef, holder HolderID) (ProtectionLease, error)
-    Hold registers one protection hold on the original of ref for holder and
-    returns the lease its release must carry back. Holding the same original
-    again as the same holder while the hold stands stays one hold and hands
-    back the lease it already holds, so one release by that holder clears it;
-    a hold made after that release is a new hold under a fresh lease.
-
-func (g *MemoryGuard) Protected(ctx context.Context, ref OriginalRef) (bool, error)
-    Protected reports whether any holder still protects the original of ref,
-    so a reclaimer asks before it reclaims anything.
-
-func (g *MemoryGuard) Release(ctx context.Context, ref OriginalRef, holder HolderID, lease ProtectionLease) error
-    Release drops the hold of holder on the original of ref under lease.
-    Releasing a hold that has already been released is a no-op, and a release
-    whose lease is not the current lease of the named hold is refused by name
-    with ErrLeaseMismatch and leaves every hold standing: a late lease from
-    before a re-hold, or a lease belonging to another hold, releases nothing.
-
-type MemoryLifecycleStore struct {
-	// Has unexported fields.
-}
-    MemoryLifecycleStore is the in-memory lifecycle store: the reference
-    implementation of the reclamation surface, holding only what the process
-    holds and declaring no recovery across process exit.
-
-func NewMemoryLifecycleStore(caps LifecycleCapabilities) *MemoryLifecycleStore
-    NewMemoryLifecycleStore returns an empty in-memory lifecycle store under the
-    given declared capabilities.
-
-func (s *MemoryLifecycleStore) Capabilities() LifecycleCapabilities
-    Capabilities reports the capabilities the store was opened under, so the
-    wiring that constructs a lifecycle hands them back beside the store.
-
-func (s *MemoryLifecycleStore) EnumerateKeys(ctx context.Context) ([]StoredKey, error)
-    EnumerateKeys implements LifecycleStore.EnumerateKeys.
-
-func (s *MemoryLifecycleStore) Put(key StoredKey)
-    Put files one key under the store's enumeration.
-
-func (s *MemoryLifecycleStore) ReclaimTombstoned(ctx context.Context, keys []event.EventID) (int, error)
-    ReclaimTombstoned implements LifecycleStore.ReclaimTombstoned: only a key
-    that was tombstoned is physically destroyed, and destroying it once removes
-    it from the store.
-
-func (s *MemoryLifecycleStore) Tombstone(ctx context.Context, key event.EventID, at time.Time) error
-    Tombstone implements LifecycleStore.Tombstone.
-
-func (s *MemoryLifecycleStore) Tombstoned(key event.EventID) (time.Time, bool)
-    Tombstoned reports the tombstone time of one key, and whether it is marked.
 
 type MigrateReport struct {
 	// Keys is the number of keys the target now holds.
@@ -1022,14 +722,6 @@ type Pair struct {
 }
     Pair is one key-value entry a read returns or a commit writes.
 
-type ProtectionLease string
-    ProtectionLease is the opaque token one accepted hold returns and its
-    release must carry back. A lease is fresh per hold: a retry of a hold that
-    still stands gets the same token, while a hold made after an earlier release
-    gets a new one, so a late release carrying the earlier token matches nothing
-    and releases nothing. Callers treat a lease as opaque: they never construct
-    one, and its encoding is not a contract.
-
 type ReadScope struct {
 	// Owner is the address the reads are authorized for.
 	Owner event.Address
@@ -1090,94 +782,6 @@ type RecallResult struct {
     RecallResult is the outcome of exact recall for one key: the original bytes
     when they were found, and otherwise a named classification of why they were
     not, so a miss is reported instead of silently omitted.
-
-type Retention struct {
-	// Has unexported fields.
-}
-    Retention is the retention lease ledger over the shared guard: it registers
-    what each hold protects and hands back the guard's leases, so a reclaimer
-    asks one surface whether an original is still protected and on what original
-    timestamp it will reclassify. Holders are the stable identities of recovery
-    resources and unsettled obligations, so two holders on one key protect it
-    independently and the protection is gone only once the last one releases.
-
-    The ledger registers and retires holds: the guard is the one port that holds
-    them, so the ledger never declares a second surface of the same name.
-
-func NewRetention(guard Guard) *Retention
-    NewRetention returns a retention ledger over the given guard. The guard owns
-    the protection state and its reference count; the ledger adds registrations
-    and keeps no second truth.
-
-func (r *Retention) Held(ctx context.Context, key event.EventID) (bool, error)
-    Held reports whether any holder still protects the key, so a reclaimer asks
-    before it reclaims anything. Protection is reference counted in the guard:
-    it stands until the last holder has released.
-
-func (r *Retention) Record(key event.EventID) (RetentionRecord, bool)
-    Record returns the registration of one key: what its hold protects and the
-    original recorded time it reclassifies under once released.
-
-func (r *Retention) Register(ctx context.Context, key event.EventID, holder HolderID, record RetentionRecord) (ProtectionLease, error)
-    Register files one protection hold on the key for holder and returns the
-    lease its release must carry back, recording what the hold protects.
-    A repeat hold by the same holder while the hold stands is recognized as the
-    same hold and counts once, and the registered original time of a key is kept
-    from its first registration: a re-hold never re-stamps the material.
-
-func (r *Retention) ReleaseHolder(ctx context.Context, holder HolderID) (int, error)
-    ReleaseHolder drops every hold one holder still stands on and returns how
-    many were released. It is what a closing owner runs: it releases exactly
-    that holder's holds, so a shared protection another holder keeps on the same
-    key stays standing until that holder releases too.
-
-func (r *Retention) Retire(ctx context.Context, key event.EventID, holder HolderID, lease ProtectionLease) error
-    Retire drops the hold of holder on the key under the lease that hold
-    returned. Releasing a hold that is not standing is a no-op; a release whose
-    lease is not the current lease is refused by name with ErrLeaseMismatch
-    and leaves every hold standing. The registration is kept after release:
-    the key reclassifies under its recorded original time, which a release never
-    re-stamps.
-
-type RetentionKind string
-    RetentionKind names why one registration holds its material: an unsettled
-    delivery obligation, or material a recovery still has to take inventory of.
-
-const (
-	// RetentionUnconfirmed is the kind of a registration protecting material
-	// whose delivery is still unconfirmed.
-	RetentionUnconfirmed RetentionKind = "unconfirmed_delivery"
-	// RetentionRecovery is the kind of a registration protecting material a
-	// recovery inventory has not accounted for yet.
-	RetentionRecovery RetentionKind = "recovery_material"
-)
-type RetentionRecord struct {
-	// Kind names why the material is held.
-	Kind RetentionKind
-	// Type is the frozen event type of the material.
-	Type string
-	// RecordedAt is the original recorded time of the material, kept verbatim
-	// and never re-stamped.
-	RecordedAt time.Time
-}
-    RetentionRecord is what one retention registration remembers about the
-    material it protects: the kind of material, its frozen event type and the
-    original recorded time. The recorded time is the timestamp the key returns
-    to the age window under once its protection is released — a release never
-    re-stamps the material, so it reclassifies exactly as old as it always was.
-
-type ScanReport struct {
-	// Tombstoned lists the keys this scan marked for reclamation at compaction.
-	Tombstoned []event.EventID
-	// Protected lists the keys a standing retention lease kept out of the scan:
-	// within retention, TTL and capacity never tombstone what is protected.
-	Protected []event.EventID
-	// Exempt lists the keys the policy exempts from TTL tombstoning.
-	Exempt []event.EventID
-}
-    ScanReport is what one TTL/capacity scan did: the keys it tombstoned,
-    the keys a standing retention lease kept out of the scan, and the keys the
-    policy exempts from TTL tombstoning entirely.
 
 type ScopedOriginalStore interface {
 	// GetScoped returns the exact recall of key as visible inside scope: the
@@ -1401,20 +1005,6 @@ type StoredEvent struct {
 }
     StoredEvent is one committed event as a read returns it: the bytes that were
     committed and the index position they were committed at.
-
-type StoredKey struct {
-	// Key is the canonical identity of the key.
-	Key event.EventID
-	// Type is the frozen event type of the material.
-	Type string
-	// Partition is the partition the key is filed under.
-	Partition int
-	// RecordedAt is the time the material was recorded.
-	RecordedAt time.Time
-}
-    StoredKey is one key as the lifecycle enumerates it: its canonical identity,
-    its frozen event type, the partition it is filed under and the time it was
-    recorded, which is what its age window is measured from.
 
 type Tier struct {
 	// Originals commits and recalls original bytes.

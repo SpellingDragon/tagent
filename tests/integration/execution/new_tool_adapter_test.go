@@ -426,8 +426,8 @@ func (r *adapterRig) durable(t *testing.T) *state.DurableCommit {
 		t.Fatalf("open the durable tier: %v", err)
 	}
 	r.tier = tier
-	durable, err := state.NewDurableCommit(ledger.TierFactLog(tier), nil)
-	if err != nil {
+	durable := state.NewEmptyDurableCommit(ledger.TierFactLog(tier), nil)
+	if err := durable.Seat(r.ctx, nil, nil); err != nil {
 		t.Fatalf("open the durable commit: %v", err)
 	}
 	return durable
@@ -501,8 +501,8 @@ func (r *adapterRig) rebuild(t *testing.T, ctx context.Context, taskID event.Tas
 	if err != nil {
 		t.Fatalf("reopen the durable tier: %v", err)
 	}
-	restored, err := state.NewDurableCommit(ledger.TierFactLog(tier), nil)
-	if err != nil {
+	restored := state.NewEmptyDurableCommit(ledger.TierFactLog(tier), nil)
+	if err := restored.Seat(ctx, nil, nil); err != nil {
 		t.Fatalf("reopen the durable commit: %v", err)
 	}
 	chain, err := restored.Records(ctx, taskID)

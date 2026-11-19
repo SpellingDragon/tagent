@@ -747,6 +747,53 @@ class EventProfileTest(unittest.TestCase):
                 return
         self.fail("leaf {} has no checkbox to remove".format(leaf_id))
 
+    def emphasise_box(self, leaf_id):
+        """把该叶的 checkbox 编号写成粗体形态（`- [ ] **NN.M 标题`）。"""
+        for domain, _count in EVENT_DOMAIN_SPEC:
+            path = self.fixture.change / "changes" / domain / "tasks.md"
+            lines = path.read_text(encoding="utf-8").splitlines()
+            rewritten = []
+            hit = False
+            for line in lines:
+                for mark in ("- [ ] ", "- [x] "):
+                    if line.startswith(mark + leaf_id + " "):
+                        rewritten.append(mark + "**" + line[len(mark):])
+                        hit = True
+                        break
+                else:
+                    rewritten.append(line)
+            if hit:
+                path.write_text("\n".join(rewritten) + "\n", encoding="utf-8")
+                return
+        self.fail("leaf {} has no checkbox to emphasise".format(leaf_id))
+
+    def test_a_bold_leaf_checkbox_is_counted_too(self):
+        """粗体叶被漏数就是假绿：只认裸形态时该叶从计数与勾选账里一起消失。
+
+        编号外的强调形态是真实写过的（同一份计划里并存），所以解析两种形态不是
+        防御性冗余：漏读一侧的结果是门报出一个更小的计划，且退出码仍为 0。
+        """
+        code, out, err = self.check()
+        self.assertEqual(code, 0, out + err)
+        before = json.loads(out)["extra"]
+        before_counts = json.loads(out)["counts"]
+        self.assertIn("03.11", before["unchecked_leaf_ids"])
+        self.assertIn("03.1", before["checked_leaf_ids"])
+
+        self.emphasise_box("03.11")
+        self.emphasise_box("03.1")
+        code, out, err = self.check()
+        self.assertEqual(code, 0, out + err)
+        payload = json.loads(out)
+        counts = payload["counts"]
+        self.assertEqual(counts["checkboxes"], before_counts["checkboxes"])
+        self.assertEqual(counts["leaves_checked"], before_counts["leaves_checked"])
+        self.assertEqual(counts["leaves_unchecked"], before_counts["leaves_unchecked"])
+        self.assertNotIn("has no checkbox", out)
+        # 标记与编号读自同一行：粗体行不是被当成空行塞进总数，勾选状态仍在账上。
+        self.assertIn("03.11", payload["extra"]["unchecked_leaf_ids"])
+        self.assertIn("03.1", payload["extra"]["checked_leaf_ids"])
+
     def test_domain_profile_accepts_six_domains_and_38_leaves(self):
         code, out, err = self.check()
         self.assertEqual(code, 0, out + err)
@@ -824,6 +871,63 @@ with open(os.path.join(HERE, "plan_invocations.log"), "a", encoding="utf-8") as 
 sys.exit(subprocess.call(
     [sys.executable, os.path.join(HERE, "real_check_runtime_plan.py")] + sys.argv[1:]))
 '''
+# The DoD stand-in of the lint fixture. It judges one thing, and only one: that
+# the directory lint.sh hands it holds a product at all. The real gate's rules
+# (registration, verdict provenance, closure binding) are not restated here —
+# test_check_dod_coverage.py owns them against the real checker, including the
+# unset / empty / foreign-tree refusals.
+DOD_STUB = '''#!/usr/bin/env python3
+import os
+import sys
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+with open(os.path.join(HERE, "dod_invocations.log"), "a", encoding="utf-8") as handle:
+    print(" ".join(sys.argv[1:]), file=handle)
+named = sys.argv[sys.argv.index("--mutation-evidence") + 1]
+if not os.path.isfile(os.path.join(named, "evidence.json")):
+    sys.stderr.write("dod stand-in: {} holds no evidence.json\\n".format(named))
+    sys.exit(1)
+sys.exit(0)
+'''
+
+# A placeholder product, not evidence: the keys are the ones the producer
+# (check_event_integrity_mutations.py --out) writes, and nothing here parses it.
+# Its role is to make the fixture an environment where the DoD step has a product
+# to be handed, so "the fixture is green" cannot mean "an empty directory passed".
+STAND_IN_PRODUCT = {
+    "schema_version": 2,
+    "profile": "event-integrity",
+    "mode": "live",
+    "control_tree_green": True,
+    "not_evidence_backed": [],
+    "source_binding": {
+        "digest": "0" * 64,
+        "modules": [{"dir": ".", "module_path": "fixture", "role": "tested"}],
+        "edges": [],
+        "workspace": {"state": "fixture"},
+        "tool": "scripts/scenarios/run_runtime_scenarios.py",
+    },
+    "mutations": [
+        {
+            "id": "MUT-FIXTURE-stand-in",
+            "status": "killed",
+            "verdict": "killed",
+            "reason": "named_assertion",
+            "counted_killed": True,
+            "expect_assertion": "fixture assertion",
+            "assertion_site": "fixture/anchor_test.go:9",
+            "assertion_hit": True,
+            "test": {
+                "module": ".", "package": "fixture",
+                "file": "fixture/anchor_test.go",
+                "name": "TestFixtureAnchor",
+                "selector": "^TestFixtureAnchor$",
+            },
+            "gate": None,
+        },
+    ],
+}
+
 PY_STUB = "import sys\n\nsys.exit(0)\n"
 SH_STUB = "#!/usr/bin/env bash\nexit 0\n"
 GO_STUB = '''#!/usr/bin/env bash
@@ -893,15 +997,23 @@ class LintObjectSelectionTest(unittest.TestCase):
         for name in ("check_schema_allowlist.py", "check_assembly_symbols.py",
                      "check_durable_truth_registry.py", "check_spec_hygiene.py",
                      "check_window_bounds.py", "check_vocabulary_alignment.py",
-                     "check_plugin_mounting.py", "check_dod_coverage.py",
-                     "check_dead_producers.py"):
+                     "check_plugin_mounting.py", "check_dead_producers.py"):
             write(gates / name, PY_STUB)
+        write(gates / "check_dod_coverage.py", DOD_STUB)
         for name in ("test_check_schema_allowlist.py", "test_check_assembly_symbols.py",
                      "test_check_durable_truth_registry.py", "test_check_spec_hygiene.py",
                      "test_check_window_bounds.py", "test_check_vocabulary_alignment.py",
                      "test_check_plugin_mounting.py", "test_check_dod_coverage.py",
                      "test_check_dead_producers.py"):
             write(gates / name, SELFTEST_STUB)
+
+        # The run one evidence environment, in the shape preflight leaves behind:
+        # `mutations/evidence.json` under a directory the run names. The DoD step
+        # refuses an unset variable and a directory with no `mutations/` product,
+        # so a fixture without one only measures that refusal, not the plan gate.
+        self.evidence = self.root / "evidence" / "stand-in"
+        write(self.evidence / "mutations" / "evidence.json",
+              json.dumps(STAND_IN_PRODUCT, ensure_ascii=False, indent=2))
 
         self.bin = self.root / "bin"
         self.bin.mkdir()
@@ -917,25 +1029,55 @@ class LintObjectSelectionTest(unittest.TestCase):
     def tearDown(self):
         self._tmp.cleanup()
 
-    def run_lint(self):
+    def run_lint(self, evidence=None):
         env = dict(os.environ)
         # 只保留测试 bin：openspec 因此不可见，tail 的 spec-hygiene 门如实跳过。
         env["PATH"] = str(self.bin)
         env.pop("PYTHONPATH", None)
+        env.pop("TAGENT_RUNTIME_EVIDENCE_DIR", None)
+        if evidence is not None:
+            env["TAGENT_RUNTIME_EVIDENCE_DIR"] = str(evidence)
         return subprocess.run(["bash", "scripts/lint.sh", "--only", "contracts"],
                               cwd=str(self.root), env=env, capture_output=True, text=True)
 
     def test_active_graph_is_checked_not_archive(self):
-        proc = self.run_lint()
+        proc = self.run_lint(self.evidence)
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
         self.assertIn("lint: runtime plan contract", proc.stdout)
         self.assertNotIn("no active task-graph.json", proc.stdout)
+        dod = self.root / "scripts" / "gates" / "dod_invocations.log"
+        given = dod.read_text(encoding="utf-8").splitlines()
+        self.assertEqual(len(given), 1, proc.stdout)
+        self.assertIn("--mutation-evidence " + str(self.evidence / "mutations"), given[0])
         log = self.root / "scripts" / "gates" / "plan_invocations.log"
         lines = log.read_text(encoding="utf-8").splitlines()
         self.assertEqual(len(lines), 1, proc.stdout)
         expected = "--change-dir " + "/".join(["openspec", "changes", "runtime-rebuild"])
         self.assertIn(expected, lines[0])
         self.assertNotIn("archive", lines[0])
+
+    def test_missing_evidence_environment_still_fails(self):
+        """没有证据环境时 lint 仍在 DoD 步具名变红——夹具没有把这道门放宽。
+
+        两例：变量未给、给了目录但没有 `mutations/` 产物。两例都断言计划门从未
+        被调用（它排在 DoD 之后），故红在 DoD 而不是被跳过。
+        """
+        dod = self.root / "scripts" / "gates" / "dod_invocations.log"
+        plan = self.root / "scripts" / "gates" / "plan_invocations.log"
+
+        proc = self.run_lint()
+        self.assertNotEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("TAGENT_RUNTIME_EVIDENCE_DIR is unset", proc.stderr)
+        self.assertFalse(dod.exists(), proc.stdout)
+        self.assertFalse(plan.exists(), proc.stdout)
+
+        bare = self.root / "evidence" / "no-product"
+        bare.mkdir(parents=True)
+        proc = self.run_lint(bare)
+        self.assertNotEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("holds no mutations/ product", proc.stderr)
+        self.assertFalse(dod.exists(), proc.stdout)
+        self.assertFalse(plan.exists(), proc.stdout)
 
     def test_archive_graph_object_mismatch_fails(self):
         # 旧固定对象（归档路径）在新命名下本身就不自洽：图声明 change=runtime-rebuild，

@@ -1627,3 +1627,208 @@ func TestOneBatchRefusesWhatItCannotCarryWhole(t *testing.T) {
 		t.Fatalf("the reopened original = %v, want no body of a refused fact", got.Outcome)
 	}
 }
+
+// requirePrewriteRefusal holds one fact commit to the refusal it must answer: the
+// refused outcome beside the own name of the refusal, never the uncertain outcome a
+// caller would re-read, and no key family of the fact in the view that committed.
+func requirePrewriteRefusal(t *testing.T, ctx context.Context, tier *Tier, fact FactCommit, refuse error) {
+	t.Helper()
+	outcome, err := CommitFact(ctx, tier, fact)
+	if outcome != FactRefused {
+		t.Fatalf("the refused commit = %v, %v, want the refused outcome", outcome, err)
+	}
+	if !errors.Is(err, refuse) {
+		t.Fatalf("the refused commit = %v, want the refusal %v", err, refuse)
+	}
+	if errors.Is(err, ErrCommitUncertain) {
+		t.Fatalf("the refused commit = %v, want a refusal the engine decided rather than an outcome the caller re-reads", err)
+	}
+	if got := tier.Segments.EventCount(); got != 0 {
+		t.Fatalf("the refused commit counts %d event(s), want none", got)
+	}
+	assertNoFactKey(t, ctx, tier, fact)
+}
+
+// assertNoFactKey fails when a view answers any key family of one fact: the event
+// record, its original body or the reference that names it.
+func assertNoFactKey(t *testing.T, ctx context.Context, view *Tier, fact FactCommit) {
+	t.Helper()
+	keys, err := view.Store.Keys(ctx, "")
+	if err != nil {
+		t.Fatalf("read the keys of the view: %v", err)
+	}
+	if len(keys) != 0 {
+		t.Fatalf("the view holds %v, want no key of the fact it refused", keys)
+	}
+	if _, held, err := view.Segments.GetEventInPartition(ctx, fact.Record.EventKey, fact.Record.PartitionID); err != nil || held {
+		t.Fatalf("the refused fact = held %t, %v, want no record", held, err)
+	}
+	if got := view.Originals.Get(ctx, fact.Ref.Key); got.Outcome == RecallFound {
+		t.Fatalf("the refused fact answers an original of %v, want no body", got.Outcome)
+	}
+}
+
+// TestFactCommitClassifiesEveryPrewriteRefusal pins the answer one fact commit gives when the engine refuses it before writing any key.
+//   - the file engine carrying several keys, a view holding no write rights, a view Close ended and a record over the frame bound all answer the refused outcome
+//   - each of them answers its own name beside that outcome, and none of them answers the uncertain outcome
+//   - no key family of the refused fact lands, in the view that committed or in an open of the root that took no part in it
+//
+// 契约: docs/wiki/memory/memory-architecture.md#event-shape
+func TestFactCommitClassifiesEveryPrewriteRefusal(t *testing.T) {
+	ctx := context.Background()
+	fact := factProbeFact([]byte("the fact every refusal leaves unlanded"))
+
+	t.Run("the file engine refuses a batch carrying several keys", func(t *testing.T) {
+		root, cli := t.TempDir(), t.TempDir()
+		writeRustVikingStub(t, cli)
+		tier, err := OpenTier(ctx, StorageConfig{Type: StorageFile, Root: root, RustVikingBinary: rustVikingStubPath(cli), RustVikingConfig: cli})
+		if err != nil {
+			t.Fatalf("open the file tier: %v", err)
+		}
+		defer tier.Close()
+		requirePrewriteRefusal(t, ctx, tier, fact, ErrBatchNotAtomic)
+		if ran := rustVikingMutations(t, cli); ran != 0 {
+			t.Fatalf("the refused fact ran %d CLI mutation(s), want none: the tier refuses the batch before any call", ran)
+		}
+		if got := tier.Capabilities.AtomicBatch; got {
+			t.Fatalf("the file tier declares AtomicBatch=%v, want the limit its refusal states", got)
+		}
+	})
+
+	t.Run("the view holds no write rights", func(t *testing.T) {
+		root := t.TempDir()
+		reading, err := OpenTier(ctx, StorageConfig{Type: StorageJournal, Root: root})
+		if err != nil {
+			t.Fatalf("open the reading view of a fresh root: %v", err)
+		}
+		requirePrewriteRefusal(t, ctx, reading, fact, ErrCommitWithoutWriteRights)
+		if err := reading.Close(); err != nil {
+			t.Fatalf("close the reading view: %v", err)
+		}
+		writer, err := OpenTier(ctx, StorageConfig{Type: StorageJournal, Root: root, WriteRights: true})
+		if err != nil {
+			t.Fatalf("open the writer of the root the refusal left free: %v", err)
+		}
+		defer writer.Close()
+		assertNoFactKey(t, ctx, writer, fact)
+	})
+
+	t.Run("the view Close ended", func(t *testing.T) {
+		root := t.TempDir()
+		tier := factProbeRoot(t, ctx, root, &factProbeEngine{})
+		if err := tier.Close(); err != nil {
+			t.Fatalf("close the tier: %v", err)
+		}
+		outcome, err := CommitFact(ctx, tier, fact)
+		if outcome != FactRefused {
+			t.Fatalf("the commit through the ended view = %v, %v, want the refused outcome", outcome, err)
+		}
+		if !errors.Is(err, ErrReadAfterClose) {
+			t.Fatalf("the commit through the ended view = %v, want the closed view the judgment meets before it commits", err)
+		}
+		if errors.Is(err, ErrCommitUncertain) {
+			t.Fatalf("the commit through the ended view = %v, want a refusal the engine decided rather than an outcome the caller re-reads", err)
+		}
+		writer, err := OpenTier(ctx, StorageConfig{Type: StorageJournal, Root: root, WriteRights: true})
+		if err != nil {
+			t.Fatalf("open the writer of the root the ended view gave up: %v", err)
+		}
+		defer writer.Close()
+		assertNoFactKey(t, ctx, writer, fact)
+	})
+
+	t.Run("the engine reports the ended view at its commit", func(t *testing.T) {
+		root := t.TempDir()
+		probe := &factProbeEngine{refuse: func(Batch) error { return ErrCommitAfterClose }}
+		tier := factProbeRoot(t, ctx, root, probe)
+		defer tier.Close()
+		requirePrewriteRefusal(t, ctx, tier, fact, ErrCommitAfterClose)
+	})
+
+	t.Run("the record passes the frame bound", func(t *testing.T) {
+		root := t.TempDir()
+		tier := factProbeRoot(t, ctx, root, &factProbeEngine{})
+		oversized := factProbeFact(bytes.Repeat([]byte("x"), 33<<20))
+		requirePrewriteRefusal(t, ctx, tier, oversized, ErrJournalFrameTooLarge)
+		if err := tier.Close(); err != nil {
+			t.Fatalf("close the tier: %v", err)
+		}
+		reopened, err := OpenTier(ctx, StorageConfig{Type: StorageJournal, Root: root})
+		if err != nil {
+			t.Fatalf("reopen the root: %v", err)
+		}
+		defer reopened.Close()
+		assertNoFactKey(t, ctx, reopened, oversized)
+	})
+}
+
+// TestUncertainFactCommitRequiresAuthoritativeRead pins the read that decides one commit whose barrier named no outcome.
+//   - the commit answers the uncertain outcome, and the view that committed publishes nothing of it: its own read answers absence beside a batch the log holds
+//   - an open that took no part in the commit answers the fact by identity, with the very bytes and the very slot the commit carried
+//   - the repeat the decision allows lands no key and takes no second sequence slot
+//
+// 契约: docs/wiki/memory/memory-architecture.md#event-shape
+func TestUncertainFactCommitRequiresAuthoritativeRead(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	probe := &factProbeEngine{report: func(Batch) error {
+		return fmt.Errorf("tagent: the barrier reported beside the write: %w", ErrCommitUncertain)
+	}}
+	tier := factProbeRoot(t, ctx, root, probe)
+	fact := factProbeFact([]byte("the fact an unsettled commit landed"))
+	outcome, err := CommitFact(ctx, tier, fact)
+	if !errors.Is(err, ErrCommitUncertain) || outcome != FactUncertain {
+		t.Fatalf("the unsettled commit = %v, %v, want the uncertain outcome the engine names", outcome, err)
+	}
+	if _, held, err := tier.Segments.GetEvent(ctx, fact.Record.EventKey); err != nil || held {
+		t.Fatalf("the committing view answered the fact as held %t, %v, want the absence it publishes beside a commit it did not see return", held, err)
+	}
+	if got := tier.Segments.EventCount(); got != 0 {
+		t.Fatalf("the committing view counts %d event(s), want none beside the commit it could not name", got)
+	}
+	if err := tier.Close(); err != nil {
+		t.Fatalf("close the tier the unsettled commit wrote: %v", err)
+	}
+
+	authoritative, err := OpenTier(ctx, StorageConfig{Type: StorageJournal, Root: root, WriteRights: true})
+	if err != nil {
+		t.Fatalf("open the root the unsettled commit wrote: %v", err)
+	}
+	defer authoritative.Close()
+	landed, held, err := authoritative.Segments.GetEvent(ctx, fact.Record.EventKey)
+	if err != nil || !held {
+		t.Fatalf("the open that took no part answers the fact as held %t, %v, want the record the commit landed", held, err)
+	}
+	if !bytes.Equal(landed.Body, fact.Record.Body) {
+		t.Fatalf("the deciding open carries %d byte(s), want the %d the commit landed", len(landed.Body), len(fact.Record.Body))
+	}
+	if landed.PartitionID != fact.Record.PartitionID || landed.WindowTS != fact.Record.WindowTS || landed.Seq != fact.Record.Seq {
+		t.Fatalf("the deciding open answers the slot {%d %d %d}, want {%d %d %d}",
+			landed.PartitionID, landed.WindowTS, landed.Seq, fact.Record.PartitionID, fact.Record.WindowTS, fact.Record.Seq)
+	}
+	if got := authoritative.Segments.EventCount(); got != 1 {
+		t.Fatalf("the deciding open counts %d event(s), want the one the commit landed", got)
+	}
+	original := authoritative.Originals.Get(ctx, fact.Ref.Key)
+	if original.Outcome != RecallFound || !bytes.Equal(original.Body, []byte(fact.Body)) {
+		t.Fatalf("the deciding open answers the original as %v over %d byte(s), want the %d the commit carried", original.Outcome, len(original.Body), len(fact.Body))
+	}
+	settled, err := authoritative.Store.Keys(ctx, "")
+	if err != nil {
+		t.Fatalf("read the keys the root holds: %v", err)
+	}
+	outcome, err = CommitFact(ctx, authoritative, fact)
+	if err != nil || outcome != FactAlreadyPresent {
+		t.Fatalf("the repeat the decision allows = %v, %v, want the fact the store already holds", outcome, err)
+	}
+	after, err := authoritative.Store.Keys(ctx, "")
+	if err != nil {
+		t.Fatalf("read the keys the root holds after the repeat: %v", err)
+	}
+	if strings.Join(after, ",") != strings.Join(settled, ",") {
+		t.Fatalf("the repeat left %v, want the %v it found", after, settled)
+	}
+	if got := authoritative.Segments.EventCount(); got != 1 {
+		t.Fatalf("the repeat left the count at %d, want the one sequence slot the unsettled commit took", got)
+	}
+}

@@ -91,6 +91,7 @@ type ApprovalManager struct {
 	rescanInterval time.Duration
 	now            func() time.Time
 	seated         bool
+	stated         bool
 	factLog        durable.FactLog
 
 	chain *attentionLedger
@@ -136,25 +137,31 @@ func NewApprovalManager(dir string, ttl time.Duration, opts ...ApprovalOption) *
 }
 
 // BindAttention hands the book the durable face its attention chain is written to
-// and folds the facts a process before it filed: the questions still standing and
-// the rulings already stated, so a restarted book answers the same presence. The
-// request records folded beside them seat the identities those facts were filed
-// under, so an approver answering the identity the process before it named still
-// reaches the request it was asked about. The face is kept as the one every
-// registration writes its request record to, so the identity an approver is handed
-// outlives the process beside the facts it was filed with. The error belongs to the
-// caller that can stop the boot — a chain this book could not read leaves the
-// rulings behind the gate that serves them, and a book bound to no face writes no
-// record.
+// and reads it for the work the boot owes, and never for the history behind it.
+//
+// - A cut stated this book: the boot states the obligations still owed, so the read is each of their answer keys — the ruling a person filed while the process was down — and the resident set stays the cut's own. A request or a ruling of history is read by the reader that asks for it by identity (Lookup, Decide), never here.
+// - No cut stated this book: the face is the one record of that book, so the whole stream is folded — the questions still standing, the rulings already stated and the request records that seat the identities those facts were filed under.
+//
+// The face is kept as the one every registration writes its request record to, so
+// the identity an approver is handed outlives the process beside the facts it was
+// filed with. The error belongs to the caller that can stop the boot — a chain this
+// book could not read leaves the rulings behind the gate that serves them, and a
+// book bound to no face writes no record.
 func (a *ApprovalManager) BindAttention(ctx context.Context, log durable.FactLog) error {
 	if a == nil || log == nil {
 		return nil
 	}
-	if err := a.chain.bind(ctx, log); err != nil {
-		return err
-	}
-	if err := a.foldRequestRecords(ctx, log); err != nil {
-		return err
+	if a.statedByCut() {
+		if err := a.foldAnswersInForce(ctx, log); err != nil {
+			return err
+		}
+	} else {
+		if err := a.chain.bind(ctx, log); err != nil {
+			return err
+		}
+		if err := a.foldRequestRecords(ctx, log); err != nil {
+			return err
+		}
 	}
 	a.mu.Lock()
 	a.factLog = log
@@ -162,15 +169,28 @@ func (a *ApprovalManager) BindAttention(ctx context.Context, log durable.FactLog
 	return nil
 }
 
-// SnapshotEvidence reports the requests the book holds in force, for the framework
+// statedByCut reports whether a framework cut stated this book's obligations: a
+// seated book that read one owes the face the tail those obligations gained and
+// nothing else.
+func (a *ApprovalManager) statedByCut() bool {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.stated
+}
+
+// SnapshotEvidence reports the obligations the book still owes, for the framework
 // state slice to state: the identity each caller asked under, the evidence an
-// approver reads and the state each request stands in. A hold past its validity
-// with no ruling on it is not stated: a restore drops it, so stating it would cost
-// a cut a request no process keeps. The identity each entry is stated under is
-// separate from the request's own identity because a second registration aliases a
-// caller identity onto one standing request: the two answers a cut must carry are
-// the entry and the identity it is read under. The read takes the book's own read
-// lock and nothing else, so it never waits on a write of its own nor flushes one.
+// approver reads and the state each request stands in.
+//
+// - An expired hold is not stated: a restore drops it, so the cut would carry a request no process keeps.
+// - A ruled request is stated only beside no durable face: a bound book reads its ruling back by identity.
+// - A face-less book states its rulings: there the cut is the one record those arguments were ruled over.
+//
+// The identity each entry is stated under is separate from the request's own
+// identity because a second registration aliases a caller identity onto one
+// standing request: the two answers a cut must carry are the entry and the identity
+// it is read under. The read takes the book's own read lock and nothing else, so it
+// never waits on a write of its own nor flushes one.
 func (a *ApprovalManager) SnapshotEvidence() ([]ApprovalRequest, []string) {
 	if a == nil {
 		return nil, nil
@@ -178,13 +198,14 @@ func (a *ApprovalManager) SnapshotEvidence() ([]ApprovalRequest, []string) {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
 	now := a.now().UnixMilli()
+	rulingsStated := a.factLog == nil
 	type stated struct {
 		asked string
 		held  ApprovalRequest
 	}
 	pairs := make([]stated, 0, len(a.evidence))
 	for key, held := range a.evidence {
-		if expiredWithoutRuling(*held, now) {
+		if !statedByCut(*held, now, rulingsStated) {
 			continue
 		}
 		pairs = append(pairs, stated{asked: key, held: *held})
@@ -210,7 +231,9 @@ func (a *ApprovalManager) SnapshotEvidence() ([]ApprovalRequest, []string) {
 // A ruled request is kept past its validity instead: the answer it stands on is
 // the record that these exact arguments were refused or approved by a person, and
 // a book that forgot it would mint a fresh request the same person never saw —
-// the very request a restart must not be able to turn into an approval.
+// the very request a restart must not be able to turn into an approval. It also
+// states that a cut is this book's record, so the bind that follows reads that face
+// for the work the cut left and never for the history behind it.
 func (a *ApprovalManager) RestoreEvidence(ctx context.Context, stated []ApprovalRequest, keys []string) error {
 	if a == nil {
 		return nil
@@ -218,6 +241,7 @@ func (a *ApprovalManager) RestoreEvidence(ctx context.Context, stated []Approval
 	now := a.now().UnixMilli()
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	a.stated = true
 	for i, held := range stated {
 		if held.ID == "" || expiredWithoutRuling(held, now) {
 			continue
@@ -234,6 +258,16 @@ func (a *ApprovalManager) RestoreEvidence(ctx context.Context, stated []Approval
 		}
 	}
 	return nil
+}
+
+// statedByCut reports whether one held request is a cut's to state: an obligation
+// still open, and a ruled request only beside no durable face — a bound book reads
+// a ruling back through the chain, so a cut costs the work still owed.
+func statedByCut(held ApprovalRequest, nowMs int64, rulingsStated bool) bool {
+	if held.Status == ApprovalApproved || held.Status == ApprovalDenied {
+		return rulingsStated
+	}
+	return held.ExpiresMs <= 0 || nowMs < held.ExpiresMs
 }
 
 // expiredWithoutRuling reports whether one stated request is past its validity
@@ -370,23 +404,42 @@ func (a *ApprovalManager) Request(ctx context.Context, id, tool string, jsonArgs
 // question waits for, and reports the request with the ruling that took effect.
 // The first ruling takes effect and a repeated response is idempotent: it reports
 // the answer already on the chain instead of consuming a second one. A ruling over
-// an unknown identity is refused beside ErrApprovalNotFound, a ruling that names
-// no known decision is refused beside ErrApprovalRulingUnknown, and a ruling that
-// arrived after the request expired is refused beside ErrApprovalExpired — an
-// expired request is treated as not approved and is never made runnable by a late
-// response. The ruling reaches the request file as its mirror under the store lock
-// the evidence block is read and rewritten under, so a rescan never reads a
-// pending body back over a landed ruling.
+// an identity the book holds no request for is answered from the chain that holds
+// it, so a ruling filed before a restart still answers the identity the approver
+// was handed; an identity the chain states no ruling for is refused beside
+// ErrApprovalNotFound, a ruling that names no known decision is refused beside
+// ErrApprovalRulingUnknown, and a ruling that arrived after the request expired is
+// refused beside ErrApprovalExpired — an expired request is treated as not approved
+// and is never made runnable by a late response. The ruling reaches the request
+// file as its mirror under the store lock the evidence block is read and rewritten
+// under, so a rescan never reads a pending body back over a landed ruling, and it
+// reaches the request record of the answering identity, so the approver who ruled
+// it is read back beside the ruling after a restart. A book that reached the chain
+// drops the ruled request from its resident set once that record landed — the
+// ruling is read back through the chain — so the book keeps the obligations still
+// open; a book beside no face keeps it, the file being its only record. An identity
+// the book holds no resident request for is ruled from the record the chain keeps
+// under it, so an approver answering a request the cut left behind still rules that
+// request instead of one a book would have to mint.
 func (a *ApprovalManager) Decide(id string, status ApprovalStatus, by string) (*ApprovalRequest, error) {
 	if status != ApprovalApproved && status != ApprovalDenied {
 		return nil, ErrApprovalRulingUnknown
 	}
 	ctx := context.Background()
+	ruled, stated, err := a.rulingFromChain(ctx, id)
+	if err != nil || stated {
+		return ruled, err
+	}
+	log := a.boundFace()
 	a.mu.Lock()
 	req, ok := a.evidence[id]
 	if !ok {
-		a.mu.Unlock()
-		return nil, fmt.Errorf("%w: %s", ErrApprovalNotFound, id)
+		rulable, readErr := a.requestToRule(ctx, log, id)
+		if readErr != nil {
+			a.mu.Unlock()
+			return nil, readErr
+		}
+		req = rulable
 	}
 	facts := a.factsLocked(ctx)
 	if answer, answered := facts.answer(req.ToolName, req.ArgsDigest, id); answered {
@@ -408,9 +461,82 @@ func (a *ApprovalManager) Decide(id string, status ApprovalStatus, by string) (*
 		return nil, err
 	}
 	snapshot := *req
-	err := a.write(&snapshot)
+	recordErr := a.recordRequestLocked(ctx, id, snapshot)
+	writeErr := a.write(&snapshot)
+	if a.factLog != nil && recordErr == nil {
+		delete(a.evidence, id)
+	}
 	a.mu.Unlock()
-	return &snapshot, err
+	return &snapshot, errors.Join(writeErr, recordErr)
+}
+
+// rulingFromChain answers the ruling one identity already carries on the durable
+// face, for an approver answering a request this book holds no resident request
+// for: a cut states the obligations still open, so a ruled identity is read back
+// through the answer filed under the identity the record names. An identity the
+// face holds no record for, and one whose record carries no ruling, are answered as
+// unstated — the two reads a book answers from its own state. A face this book
+// cannot read is named to the caller instead, so a refusal is never reported as a
+// ruling that never landed.
+func (a *ApprovalManager) rulingFromChain(ctx context.Context, id string) (*ApprovalRequest, bool, error) {
+	log := a.boundFace()
+	if log == nil {
+		return nil, false, nil
+	}
+	req, stored, err := requestRecordOnFace(ctx, log, id)
+	if err != nil || !stored {
+		return nil, false, err
+	}
+	answer, answered, err := answerOnFace(ctx, log, req.ToolName, req.ArgsDigest, req.ID)
+	if err != nil || !answered {
+		return nil, false, err
+	}
+	ruling, known := rulingIn(answer)
+	if !known {
+		return nil, false, nil
+	}
+	req.Status = ruling
+	return &req, true, nil
+}
+
+// requestToRule answers the request one caller identity was issued under, for an
+// approver answering an identity this book holds no resident request for: the
+// record the chain keeps under that identity, beside the question it was registered
+// with, folded into the chain so the answer lands on the question the identity was
+// asked and never on one a second registration minted. The reads are the identity's
+// own keys — its record, its question — so the cost of answering an identity of
+// history is that identity's alone. An identity the face states no record for is
+// refused beside ErrApprovalNotFound rather than answered by a request minted here.
+func (a *ApprovalManager) requestToRule(ctx context.Context, log durable.FactLog, id string) (*ApprovalRequest, error) {
+	if log == nil {
+		return nil, fmt.Errorf("%w: %s", ErrApprovalNotFound, id)
+	}
+	req, stored, err := requestRecordOnFace(ctx, log, id)
+	if err != nil {
+		return nil, err
+	}
+	if !stored {
+		return nil, fmt.Errorf("%w: %s", ErrApprovalNotFound, id)
+	}
+	question, kept, err := questionOnFace(ctx, log, req.ToolName, req.ArgsDigest, req.ID)
+	if err != nil {
+		return nil, err
+	}
+	if !kept {
+		return nil, fmt.Errorf("%w: %s", task.ErrAttentionQuestionMissing, req.ID)
+	}
+	if err := a.chain.bindFacts([]event.Event{question}, log); err != nil {
+		return nil, err
+	}
+	return &req, nil
+}
+
+// boundFace reports the durable face this book files its facts on, read under the
+// book's read lock so a bind landing beside a read is never half seen.
+func (a *ApprovalManager) boundFace() durable.FactLog {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.factLog
 }
 
 // Lookup reports the request the gate reads one (tool, arguments) pair under: an
@@ -420,6 +546,9 @@ func (a *ApprovalManager) Decide(id string, status ApprovalStatus, by string) (*
 // folded from the attention facts and the effective status from the validity the
 // question was filed under, so a request whose validity ran out reads as expired
 // and never as a standing approval.
+//
+// - A pair with no resident request is answered from the chain, by the identity it was filed under: the newest record of that pair, ruled or still open.
+// - The read a ruling costs belongs to the gate that asks, never to the boot that restores the book.
 //
 // An unapproved read triggers a throttled rescan of the request directory, so a
 // ruling an external approver wrote to a request file lands on the chain at
@@ -431,7 +560,69 @@ func (a *ApprovalManager) Lookup(tool, argsDigest string) *ApprovalRequest {
 	if a.rescanDue() {
 		_ = a.rebuild(context.Background())
 	}
-	return a.lookupFacts(tool, argsDigest)
+	if req := a.lookupFacts(tool, argsDigest); req != nil {
+		return req
+	}
+	return a.lookupOnChain(tool, argsDigest)
+}
+
+// lookupOnChain answers the request one (tool, arguments) pair carries on the
+// durable face under the identity its request record names. The pair is read the
+// way the resident block is read — an unexpired approval wins, the newest
+// otherwise — so a restarted book and the process before it answer one status for
+// one pair, and an open record of that pair reads as the pending hold it stands in
+// rather than as no request at all. Nothing is seated: the record stays where it
+// landed, and the next ask reads it again.
+func (a *ApprovalManager) lookupOnChain(tool, argsDigest string) *ApprovalRequest {
+	log := a.boundFace()
+	if log == nil {
+		return nil
+	}
+	ctx := context.Background()
+	records, err := storedRequestRecords(ctx, log)
+	if err != nil {
+		a.recordGap(DeliveryGap{Err: err})
+		return nil
+	}
+	pairs := make([]ApprovalRequest, 0, len(records))
+	for _, record := range records {
+		if record.Request.ToolName != tool || record.Request.ArgsDigest != argsDigest {
+			continue
+		}
+		pairs = append(pairs, record.Request)
+	}
+	sort.Slice(pairs, func(i, j int) bool {
+		if pairs[i].CreatedMs != pairs[j].CreatedMs {
+			return pairs[i].CreatedMs > pairs[j].CreatedMs
+		}
+		return pairs[i].ID < pairs[j].ID
+	})
+	now := a.now().UnixMilli()
+	var newest *ApprovalRequest
+	for _, held := range pairs {
+		answer, answered, err := answerOnFace(ctx, log, held.ToolName, held.ArgsDigest, held.ID)
+		if err != nil {
+			a.recordGap(DeliveryGap{Request: held.ID, Err: err})
+			return nil
+		}
+		state := ApprovalState{CreatedMs: held.CreatedMs, ExpiresMs: held.ExpiresMs, Status: ApprovalPending}
+		if answered {
+			if ruling, known := rulingIn(answer); known {
+				state.Status = ruling
+				state.DecidedBy = held.DecidedBy
+			}
+		}
+		state.Status = effectiveStatus(state.Status, held.ExpiresMs, now)
+		snapshot := held
+		snapshot.ApprovalState = state
+		if state.Status == ApprovalApproved {
+			return &snapshot
+		}
+		if newest == nil {
+			newest = &snapshot
+		}
+	}
+	return newest
 }
 
 // AttentionPresence reports the approval questions the attention chain still
@@ -650,6 +841,7 @@ func (a *ApprovalManager) write(req *ApprovalRequest) error {
 //
 // - this is the row of request files, not the boot's reader: a book the framework state slice seats reads the stated state at boot and keeps this read for the runtime rescan
 // - a seated book takes its holds from the stated state alone: a file whose question the chain does not hold states no hold of that book, so it is neither seated nor filed, and only the ruling it carries lands
+// - a book that reached the chain seats the obligations still open and leaves a ruled request on the chain it is read back through, so a rescan costs the waits still owed
 // - a rescan that cannot read its directory leaves the standing book in place, and the wait it did not see is reported on the next read
 func (a *ApprovalManager) rebuild(ctx context.Context) error {
 	if a == nil || a.dir == "" {
@@ -689,6 +881,9 @@ func (a *ApprovalManager) rebuild(ctx context.Context) error {
 				_ = a.fileAnswer(ctx, &restored)
 				_ = os.Remove(path)
 			}
+			continue
+		}
+		if a.factLog != nil && asked && answered {
 			continue
 		}
 		a.evidence[req.ID] = &restored

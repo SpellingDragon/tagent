@@ -159,11 +159,18 @@ func (a *ApprovalManager) AttentionPresence(ctx context.Context) []task.Attentio
 
 func (a *ApprovalManager) BindAttention(ctx context.Context, log durable.FactLog) error
     BindAttention hands the book the durable face its attention chain is written
-    to and folds the facts a process before it filed: the questions still
-    standing and the rulings already stated, so a restarted book answers the
-    same presence. The request records folded beside them seat the identities
-    those facts were filed under, so an approver answering the identity the
-    process before it named still reaches the request it was asked about.
+    to and reads it for the work the boot owes, and never for the history behind
+    it.
+
+    - A cut stated this book: the boot states the obligations still owed,
+    so the read is each of their answer keys — the ruling a person filed while
+    the process was down — and the resident set stays the cut's own. A request
+    or a ruling of history is read by the reader that asks for it by identity
+    (Lookup, Decide), never here. - No cut stated this book: the face is the
+    one record of that book, so the whole stream is folded — the questions still
+    standing, the rulings already stated and the request records that seat the
+    identities those facts were filed under.
+
     The face is kept as the one every registration writes its request record to,
     so the identity an approver is handed outlives the process beside the facts
     it was filed with. The error belongs to the caller that can stop the boot
@@ -171,18 +178,28 @@ func (a *ApprovalManager) BindAttention(ctx context.Context, log durable.FactLog
     serves them, and a book bound to no face writes no record.
 
 func (a *ApprovalManager) Decide(id string, status ApprovalStatus, by string) (*ApprovalRequest, error)
-    Decide records the ruling of one approval request as the attention
-    answer its question waits for, and reports the request with the ruling
-    that took effect. The first ruling takes effect and a repeated response
-    is idempotent: it reports the answer already on the chain instead of
-    consuming a second one. A ruling over an unknown identity is refused beside
-    ErrApprovalNotFound, a ruling that names no known decision is refused
-    beside ErrApprovalRulingUnknown, and a ruling that arrived after the request
-    expired is refused beside ErrApprovalExpired — an expired request is treated
-    as not approved and is never made runnable by a late response. The ruling
-    reaches the request file as its mirror under the store lock the evidence
-    block is read and rewritten under, so a rescan never reads a pending body
-    back over a landed ruling.
+    Decide records the ruling of one approval request as the attention answer
+    its question waits for, and reports the request with the ruling that took
+    effect. The first ruling takes effect and a repeated response is idempotent:
+    it reports the answer already on the chain instead of consuming a second
+    one. A ruling over an identity the book holds no request for is answered
+    from the chain that holds it, so a ruling filed before a restart still
+    answers the identity the approver was handed; an identity the chain states
+    no ruling for is refused beside ErrApprovalNotFound, a ruling that names no
+    known decision is refused beside ErrApprovalRulingUnknown, and a ruling that
+    arrived after the request expired is refused beside ErrApprovalExpired — an
+    expired request is treated as not approved and is never made runnable by a
+    late response. The ruling reaches the request file as its mirror under the
+    store lock the evidence block is read and rewritten under, so a rescan never
+    reads a pending body back over a landed ruling, and it reaches the request
+    record of the answering identity, so the approver who ruled it is read back
+    beside the ruling after a restart. A book that reached the chain drops the
+    ruled request from its resident set once that record landed — the ruling is
+    read back through the chain — so the book keeps the obligations still open;
+    a book beside no face keeps it, the file being its only record. An identity
+    the book holds no resident request for is ruled from the record the chain
+    keeps under it, so an approver answering a request the cut left behind still
+    rules that request instead of one a book would have to mint.
 
 func (a *ApprovalManager) DeliveryGaps() []DeliveryGap
     DeliveryGaps reports the visible channel failures recorded so far.
@@ -195,6 +212,11 @@ func (a *ApprovalManager) Lookup(tool, argsDigest string) *ApprovalRequest
     The status is folded from the attention facts and the effective status from
     the validity the question was filed under, so a request whose validity ran
     out reads as expired and never as a standing approval.
+
+    - A pair with no resident request is answered from the chain, by the
+    identity it was filed under: the newest record of that pair, ruled or still
+    open. - The read a ruling costs belongs to the gate that asks, never to the
+    boot that restores the book.
 
     An unapproved read triggers a throttled rescan of the request directory,
     so a ruling an external approver wrote to a request file lands on the chain
@@ -258,19 +280,26 @@ func (a *ApprovalManager) RestoreEvidence(ctx context.Context, stated []Approval
     it stands on is the record that these exact arguments were refused or
     approved by a person, and a book that forgot it would mint a fresh request
     the same person never saw — the very request a restart must not be able to
-    turn into an approval.
+    turn into an approval. It also states that a cut is this book's record,
+    so the bind that follows reads that face for the work the cut left and never
+    for the history behind it.
 
 func (a *ApprovalManager) SnapshotEvidence() ([]ApprovalRequest, []string)
-    SnapshotEvidence reports the requests the book holds in force, for the
+    SnapshotEvidence reports the obligations the book still owes, for the
     framework state slice to state: the identity each caller asked under,
-    the evidence an approver reads and the state each request stands in. A hold
-    past its validity with no ruling on it is not stated: a restore drops it,
-    so stating it would cost a cut a request no process keeps. The identity each
-    entry is stated under is separate from the request's own identity because
-    a second registration aliases a caller identity onto one standing request:
-    the two answers a cut must carry are the entry and the identity it is read
-    under. The read takes the book's own read lock and nothing else, so it never
-    waits on a write of its own nor flushes one.
+    the evidence an approver reads and the state each request stands in.
+
+    - An expired hold is not stated: a restore drops it, so the cut would carry
+    a request no process keeps. - A ruled request is stated only beside no
+    durable face: a bound book reads its ruling back by identity. - A face-less
+    book states its rulings: there the cut is the one record those arguments
+    were ruled over.
+
+    The identity each entry is stated under is separate from the request's
+    own identity because a second registration aliases a caller identity onto
+    one standing request: the two answers a cut must carry are the entry and
+    the identity it is read under. The read takes the book's own read lock and
+    nothing else, so it never waits on a write of its own nor flushes one.
 
 type ApprovalOption func(*ApprovalManager)
     ApprovalOption configures an approval manager at construction.

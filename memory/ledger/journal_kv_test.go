@@ -290,3 +290,102 @@ func TestJournalStatesItsKeyOrderWithoutReadingValues(t *testing.T) {
 		t.Fatalf("the key walk visited %d key(s) after a visit answered false, want the one it stopped at", stops)
 	}
 }
+
+// TestCloseBarrierFailureStaysVisible pins the failure the close of a view reports when its index barrier does not complete.
+//   - a view whose index bytes stand staged answers the barrier's own failure at Close, so a stop the process cannot confirm is named
+//   - that failure is the barrier's and not a refusal decided before a write: neither the closed view nor one holding no write rights answers
+//   - the store's close reports a barrier that failed over the slot table the same way, so both index files' barriers reach the caller
+//   - a close over nothing staged takes no barrier and answers nil, and it states that it owed none, so the nil is a reading and not a swallow
+//   - the facts the commits landed read back from the root after the failed close, so the failure is the barrier over the derived files
+//
+// 契约: docs/wiki/memory/memory-architecture.md#local-file-kv
+func TestCloseBarrierFailureStaysVisible(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("a_failed_index_barrier_is_reported_by_the_views_close", func(t *testing.T) {
+		dir := t.TempDir()
+		kv, err := openJournalKV(dir)
+		if err != nil {
+			t.Fatalf("open the journal view: %v", err)
+		}
+		batch := Batch{Puts: []Pair{{Key: journalFactKey, Value: []byte("the settled fact")}}}
+		if err := kv.Commit(ctx, batch); err != nil {
+			t.Fatalf("commit the fact: %v", err)
+		}
+		if staged := journalBarrierStateOf(kv).indexStaged; staged <= 0 {
+			t.Fatalf("the view closes with %d index byte(s) staged, want the bytes a barrier has yet to confirm", staged)
+		}
+		writer := journalFailingBarrier(t)
+		kv.mu.Lock()
+		previous := kv.log.addr.order
+		kv.log.addr.order = writer
+		kv.mu.Unlock()
+		err = kv.Close()
+		kv.mu.Lock()
+		kv.log.addr.order = previous
+		kv.mu.Unlock()
+		if !errors.Is(err, ErrJournalBarrier) {
+			t.Fatalf("close beside an index barrier that did not complete = %v, want %v", err, ErrJournalBarrier)
+		}
+		if errors.Is(err, ErrCommitAfterClose) || errors.Is(err, ErrCommitWithoutWriteRights) {
+			t.Fatalf("close beside a failed index barrier answered %v, want the barrier's own failure and not a refusal decided before a write", err)
+		}
+		reopened, err := openJournalKV(dir)
+		if err != nil {
+			t.Fatalf("reopen the root the failed close released: %v", err)
+		}
+		t.Cleanup(func() { reopened.log.close() })
+		value, held := readOne(t, reopened, journalFactKey)
+		if !held || !bytes.Equal(value, []byte("the settled fact")) {
+			t.Fatalf("the reopened view read (%q, %v), want the fact the commit returned success for: the barrier that failed is the derived files' and never the log's", value, held)
+		}
+	})
+
+	t.Run("a_failed_slot_barrier_is_reported_by_the_stores_close", func(t *testing.T) {
+		kv, err := openJournalKV(t.TempDir())
+		if err != nil {
+			t.Fatalf("open the journal view: %v", err)
+		}
+		store, err := newFileSegmentStore(kv)
+		if err != nil {
+			t.Fatalf("open the store over the view: %v", err)
+		}
+		batch := Batch{Puts: []Pair{{Key: journalFactKey, Value: []byte("the settled fact")}}}
+		if err := kv.Commit(ctx, batch); err != nil {
+			t.Fatalf("commit the fact: %v", err)
+		}
+		if staged := journalBarrierStateOf(kv).indexStaged; staged <= 0 {
+			t.Fatalf("the store closes with %d index byte(s) staged, want the bytes a barrier has yet to confirm", staged)
+		}
+		writer := journalFailingBarrier(t)
+		kv.mu.Lock()
+		previous := kv.log.addr.slots
+		kv.log.addr.slots = writer
+		kv.mu.Unlock()
+		err = store.Close()
+		kv.mu.Lock()
+		kv.log.addr.slots = previous
+		kv.mu.Unlock()
+		if !errors.Is(err, ErrJournalBarrier) {
+			t.Fatalf("close the store beside a slot barrier that did not complete = %v, want %v", err, ErrJournalBarrier)
+		}
+		if errors.Is(err, ErrCommitAfterClose) || errors.Is(err, ErrCommitWithoutWriteRights) {
+			t.Fatalf("close the store beside a failed slot barrier answered %v, want the barrier's own failure and not a refusal decided before a write", err)
+		}
+	})
+
+	t.Run("a_close_over_nothing_staged_takes_no_barrier", func(t *testing.T) {
+		kv, err := openJournalKV(t.TempDir())
+		if err != nil {
+			t.Fatalf("open the journal view: %v", err)
+		}
+		owed := journalBarrierStateOf(kv)
+		if owed.indexStaged != 0 || owed.indexStagedLog != 0 || owed.logUnsynced != 0 {
+			t.Fatalf("the view closes owing %d index byte(s), %d staged log byte(s) and %d unsynced log byte(s), want a view that owes no barrier",
+				owed.indexStaged, owed.indexStagedLog, owed.logUnsynced)
+		}
+		if err := kv.Close(); err != nil {
+			t.Fatalf("close a view that owes no barrier = %v, want a clean close", err)
+		}
+	})
+}

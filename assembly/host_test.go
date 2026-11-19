@@ -2,6 +2,13 @@ package assembly
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -304,4 +311,398 @@ func TestCloseStopsTheResidentsTheRunMounted(t *testing.T) {
 				site.SessionID, fe)
 		}
 	}
+}
+
+// longHostSummaryAnswer is the gist the scripted endpoint answers a band summary
+// with: longer than the declared budget, so a summary that carries it whole
+// answers a bound other than the declared one.
+var longHostSummaryAnswer = strings.Repeat("[10-20 08:00|gen:?] the settled line of the band\n", 60)
+
+// hostSummaryEndpoint is the model face one booted host asks its band summaries
+// over: it answers the long gist and records every request body it served, so a
+// check reads what the fold asked rather than only what it filed.
+type hostSummaryEndpoint struct {
+	*httptest.Server
+	mu     sync.Mutex
+	bodies []string
+}
+
+// newHostSummaryEndpoint starts the scripted endpoint over the declared answer.
+func newHostSummaryEndpoint(t *testing.T) *hostSummaryEndpoint {
+	t.Helper()
+	endpoint := &hostSummaryEndpoint{}
+	answer, err := json.Marshal(longHostSummaryAnswer)
+	if err != nil {
+		t.Fatalf("render the scripted answer: %v", err)
+	}
+	endpoint.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasSuffix(r.URL.Path, "/chat/completions") {
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		endpoint.mu.Lock()
+		endpoint.bodies = append(endpoint.bodies, string(body))
+		endpoint.mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `{"id":"host-summary","object":"chat.completion","created":1699200000,"choices":[{"index":0,"message":{"role":"assistant","content":%s},"finish_reason":"stop"}]}`, answer)
+	}))
+	t.Cleanup(endpoint.Close)
+	return endpoint
+}
+
+// servedBodies reports the request bodies the endpoint served, in arrival order.
+func (e *hostSummaryEndpoint) servedBodies() []string {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return append([]string(nil), e.bodies...)
+}
+
+// commitHostSummaryTurns commits closed task turns under one booted run, letting
+// the fold fire between commits as it does online.
+func commitHostSummaryTurns(t *testing.T, ctx context.Context, run *Run, addr event.Address, turns int) {
+	t.Helper()
+	base := time.Date(2026, 10, 20, 8, 0, 0, 0, time.UTC)
+	for turn := 0; turn < turns; turn++ {
+		for position, leg := range []struct {
+			position string
+			typ      string
+			summary  string
+		}{
+			{"0-in", event.TypeExternalInput, fmt.Sprintf("ask %02d", turn)},
+			{"1-plan", event.TypeThinkingPlan, fmt.Sprintf("plan %02d", turn)},
+			{"2-call", event.TypeActionCommand, fmt.Sprintf("call %02d", turn)},
+			{"3-out", event.TypeAgentOutput, fmt.Sprintf("answer %02d", turn)},
+		} {
+			evt := event.Event{
+				Key:       event.EventID(fmt.Sprintf("%02d-%s", turn, leg.position)),
+				Type:      leg.typ,
+				Timestamp: base.Add(time.Duration(turn*10+position) * time.Minute),
+				Meta:      map[string]string{event.MetaKeyEventSummary: leg.summary},
+				Message:   model.Message{Role: model.RoleUser, Content: hostSummaryBody(turn, leg.position)},
+			}
+			if _, err := run.CommitToSession(ctx, addr, evt); err != nil {
+				t.Fatalf("commit turn %d leg %s: %v", turn, leg.position, err)
+			}
+		}
+	}
+}
+
+// hostSummaryBody reports the text one committed leg carries: long enough that a
+// few turns fill a small declared window.
+func hostSummaryBody(turn int, position string) string {
+	return strings.Repeat(fmt.Sprintf("host 正文 %s %02d。", position, turn), 12)
+}
+
+// hostHistorySummaries reports the text of the history summaries the chain of one
+// session holds, in commit order.
+func hostHistorySummaries(run *Run, addr event.Address) []string {
+	out := make([]string, 0, 4)
+	for _, evt := range run.SessionFacts(addr) {
+		if evt.Type != event.CompressProductType {
+			continue
+		}
+		if !strings.HasPrefix(evt.Meta[metaKeyCompressKey], "-hist-") {
+			continue
+		}
+		out = append(out, evt.Meta[metaKeyCompressText])
+	}
+	return out
+}
+
+// TestHostBootCompressionObeysTheDeclaredSummaryBudget anchors the declared budget over the host entry a deployment writes.
+//   - declaration: the boot document names summary_budget_bytes, and the check patches no field of its own
+//   - instruction: the band summary the host asks over that document states the declared bound
+//   - product: the history summary the fold files on the chain carries at most that many bytes
+//   - answer kept: the product carries the model answer rather than the mechanical form
+//
+// 契约: docs/wiki/agent/event-flow.md#projection-lifecycle
+func TestHostBootCompressionObeysTheDeclaredSummaryBudget(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+	if len(longHostSummaryAnswer) <= declaredHostSummaryBudget {
+		t.Fatalf("the scripted answer carries %d bytes, want it longer than the bound the fold applies",
+			len(longHostSummaryAnswer))
+	}
+	endpoint := newHostSummaryEndpoint(t)
+	root := t.TempDir()
+	configPath := filepath.Join(root, "tagent.yaml")
+	block := fmt.Sprintf("    replay_window: 60\n    summary_budget_bytes: %d\n", declaredHostSummaryBudget)
+	host := bootGenerationHost(t, configPath, generationDocument(root, endpoint.URL+"/v1", block))
+	run := host.Run()
+	if run == nil {
+		t.Fatal("the boot answered no run")
+	}
+	addr := event.Address{AgentID: "user", SessionID: "session-host-summary-budget"}
+	commitHostSummaryTurns(t, ctx, run, addr, 8)
+	summaries := hostHistorySummaries(run, addr)
+	if len(summaries) == 0 {
+		t.Fatal("the booted host filed no history summary, so the declared budget was never read")
+	}
+	stated := false
+	for _, body := range endpoint.servedBodies() {
+		if strings.Contains(body, fmt.Sprintf("within %d bytes", declaredHostSummaryBudget)) {
+			stated = true
+		}
+	}
+	for _, summary := range summaries {
+		if len(summary) > declaredHostSummaryBudget {
+			t.Fatalf("the history summary carries %d bytes, want at most the declared %d", len(summary), declaredHostSummaryBudget)
+		}
+		if !strings.Contains(summary, "the settled line of the band") {
+			t.Fatalf("the history summary = %q, want the model answer cut to the declared bound rather than the mechanical form", summary)
+		}
+	}
+	if !stated {
+		t.Fatalf("no band summary request stated the declared %d-byte bound", declaredHostSummaryBudget)
+	}
+}
+
+// deliveryFactObligationToolName names the one native call the settled
+// notification of the check belongs to.
+const deliveryFactObligationToolName = "echo-obligation"
+
+// deliveryFactObligationAnswer is the body the scripted model speaks from the
+// result the backflow handed on, so a turn that carries it drove the hand-over.
+const deliveryFactObligationAnswer = "the held result arrived"
+
+// TestDeliveryFactFailurePreservesTheNoticeObligation pins the obligation a refused delivery fact leaves standing.
+//   - the settled call of one native tool commits the delivery fact of its range, so the refusal injected below is the refusal the sink reads
+//   - the range drives the handed-on result in this process beside the refusal: the completed turn of two decisions is the hand-over that stands
+//   - the refusal leaves the notification owed and writes no consumption receipt, because the mark the restart pairs the result with never landed
+//   - the process after the restart restores the owed notification from the storage root the first left and hands it over once: one delivery fact and one receipt
+//   - a second hand-over of that notification meets the settled seat, so the redelivery writes no second receipt
+//
+// 契约: docs/wiki/reliability/durable-delivery.md#envelope-states
+func TestDeliveryFactFailurePreservesTheNoticeObligation(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+
+	root := t.TempDir()
+	addr := deliveryTestAddress("session-delivery-fact-obligation")
+	refusal := errors.New("the commit face refused the delivery fact of the settled call")
+	tool := &deliveryFactObligationTool{}
+	run := deliveryFactObligationRun(t, ctx, root, tool)
+
+	var mu sync.Mutex
+	refused := 0
+	run.loop.SetFactCommit(func(evt event.Event) (event.EventID, error) {
+		if evt.Type == event.TypeTaskSettled {
+			mu.Lock()
+			refused++
+			mu.Unlock()
+			return "", refusal
+		}
+		return run.commitFactChecked(ctx, evt)
+	})
+
+	turn, err := run.Invoke(ctx, InvokeRequest{
+		InvocationID:  "inv-delivery-fact-obligation",
+		Address:       addr,
+		TriggerSource: "user",
+		Input:         []model.Message{{Role: model.RoleUser, Content: "call the tool once"}},
+	})
+	if err != nil {
+		t.Fatalf("invoke the run beside the refused delivery fact: %v", err)
+	}
+	if turn.Terminal != model.KindCompleted || turn.DecisionCount != 2 {
+		t.Fatalf("the turn beside the refused delivery fact = (%v, %d decisions), want the completed turn of two decisions: the handed-on result drives the range beside the refusal",
+			turn.Terminal, turn.DecisionCount)
+	}
+	mu.Lock()
+	struck := refused
+	mu.Unlock()
+	if struck != 1 {
+		t.Fatalf("the commit face refused %d delivery fact(s), want the one the settled call commits", struck)
+	}
+	if facts := deliveryFactsOf(run.SessionFacts(addr)); len(facts) != 0 {
+		t.Fatalf("the chain holds %d delivery fact(s) beside the refusal, want none: %+v", len(facts), facts)
+	}
+	waitScopeGate(t, "the refused notification to stand owed on the mailbox", func() bool {
+		seats := run.store.Unconsumed()
+		return len(seats) == 1 && seats[0].Claim == state.ClaimPending
+	})
+	owed := run.store.Unconsumed()[0]
+	if keys := consumeReceiptKeys(t, ctx, run.tier); len(keys) != 0 {
+		t.Fatalf("the root holds %d consumption receipt(s) beside the refused delivery fact, want none: the notification stays owed", len(keys))
+	}
+	if _, _, err := run.Checkpoint(ctx); err != nil {
+		t.Fatalf("file the checkpoint of the process beside the owed notification: %v", err)
+	}
+	if _, err := run.Close(ctx, agent.CloseRequest{Timeout: time.Now().Add(2 * time.Second)}); err != nil {
+		t.Fatalf("close the process beside the owed notification: %v", err)
+	}
+
+	booted := deliveryFactObligationBoot(t, ctx, root, tool)
+	restored := booted.store.Unconsumed()
+	if len(restored) != 1 || restored[0].Notice != owed.Notice {
+		t.Fatalf("the booted mailbox owes %+v, want the notification the refused delivery fact left owed %+v", restored, owed.Notice)
+	}
+	if keys := consumeReceiptKeys(t, ctx, booted.tier); len(keys) != 0 {
+		t.Fatalf("the booted root holds %d consumption receipt(s), want none: the obligation crossed the restart", len(keys))
+	}
+	handover := task.WithCallFrame(context.WithoutCancel(ctx), tool.frameOf(t))
+	envelope := task.Envelope{
+		Notice:         restored[0].Notice,
+		Target:         restored[0].Address,
+		Source:         addr,
+		TargetInstance: restored[0].Instance,
+	}
+	if acceptance, err := booted.deliver(handover, envelope); err != nil || acceptance != task.DeliveryAccepted {
+		t.Fatalf("the process after the restart offered the owed notification and answered (%v, %v), want the accepted delivery that commits its settle fact", acceptance, err)
+	}
+	if facts := deliveryFactsOf(booted.SessionFacts(addr)); len(facts) != 1 {
+		t.Fatalf("the booted chain holds %d delivery fact(s) after the hand-over, want the one the refusal left missing: %+v (chain=%v)",
+			len(facts), facts, factTypesOf(booted.SessionFacts(addr)))
+	}
+	if turns := driveSettleTurns(t, booted, restored[0].Address); turns != 1 {
+		t.Fatalf("the boot drove %d follow-up turn(s) for the notification the refusal left owed, want the one turn", turns)
+	}
+	if keys := consumeReceiptKeys(t, ctx, booted.tier); len(keys) != 1 {
+		t.Fatalf("the booted root holds %d consumption receipt(s) after the handed-over notification settled, want one", len(keys))
+	}
+	if acceptance, err := booted.deliver(handover, envelope); err != nil || acceptance != task.DeliveryAccepted {
+		t.Fatalf("the second offer of the same notification answered (%v, %v), want the accepted delivery of the fact the chain already holds", acceptance, err)
+	}
+	if turns := driveSettleTurns(t, booted, restored[0].Address); turns != 0 {
+		t.Fatalf("the second offer drove %d follow-up turn(s) for a notification the root already settled, want none", turns)
+	}
+	if facts := deliveryFactsOf(booted.SessionFacts(addr)); len(facts) != 1 {
+		t.Fatalf("the chain holds %d delivery fact(s) after the second offer, want the one the first wrote: %+v", len(facts), facts)
+	}
+	if keys := consumeReceiptKeys(t, ctx, booted.tier); len(keys) != 1 {
+		t.Fatalf("the root holds %d consumption receipt(s) after the second offer, want the one the first wrote", len(keys))
+	}
+	if _, err := booted.Close(ctx, agent.CloseRequest{Timeout: time.Now().Add(2 * time.Second)}); err != nil {
+		t.Fatalf("close the process after the restart: %v", err)
+	}
+}
+
+// deliveryFactObligationRun assembles one process over the storage root the
+// restart of the check reads back: the scripted model calls the one native tool
+// and speaks from the result the backflow hands on.
+func deliveryFactObligationRun(t *testing.T, ctx context.Context, root string, tool *deliveryFactObligationTool) *Run {
+	t.Helper()
+	provider := &snapshotTestModel{answer: func(req *model.Request) *model.Response {
+		if settledToolResultOf(req, deliveryFactObligationToolName) {
+			return &model.Response{Choices: []model.Choice{{Message: model.Message{
+				Role: model.RoleAssistant, Content: deliveryFactObligationAnswer}}}, Done: true}
+		}
+		return &model.Response{Choices: []model.Choice{{Message: model.Message{
+			Role: model.RoleAssistant,
+			ToolCalls: []model.ToolCall{{
+				ID:   "call-obligation",
+				Type: "function",
+				Function: model.FunctionDefinitionParam{
+					Name:      deliveryFactObligationToolName,
+					Arguments: []byte(`{}`),
+				},
+			}},
+		}}}, Done: true}
+	}}
+	return deliveryFactObligationAssemble(t, ctx, root, provider, tool)
+}
+
+// deliveryFactObligationBoot assembles one more process over the same storage
+// root, so every record it reads comes from the root the first process left.
+func deliveryFactObligationBoot(t *testing.T, ctx context.Context, root string, tool *deliveryFactObligationTool) *Run {
+	t.Helper()
+	provider := &snapshotTestModel{answer: func(*model.Request) *model.Response {
+		return &model.Response{Choices: []model.Choice{{Message: model.Message{
+			Role: model.RoleAssistant, Content: deliveryFactObligationAnswer}}}, Done: true}
+	}}
+	return deliveryFactObligationAssemble(t, ctx, root, provider, tool)
+}
+
+// deliveryFactObligationAssemble assembles one process over the storage root the
+// check shares, beside the stand-in governance that answers every check pass.
+func deliveryFactObligationAssemble(t *testing.T, ctx context.Context, root string, provider model.Model, tool *deliveryFactObligationTool) *Run {
+	t.Helper()
+	run, err := assemble(ctx, &config.Declaration{
+		Entry:  "agent-a",
+		Agents: []config.AgentSpec{{ID: "agent-a", Model: "model-a", ReplayWindow: 60}},
+	}, map[event.AgentID]NativeAgent{
+		"agent-a": {Model: provider, Tools: []trpctool.CallableTool{tool}},
+	}, false,
+		WithGovernance(snapshotTestGovernance{}),
+		WithStorage(ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: root}))
+	if err != nil {
+		t.Fatalf("assemble the runtime over %s: %v", root, err)
+	}
+	return run
+}
+
+// settledToolResultOf reports whether one model request already carries the tool
+// result of the named call, so the scripted model speaks from a result it read
+// instead of from the call it issued.
+func settledToolResultOf(req *model.Request, tool string) bool {
+	for _, message := range req.Messages {
+		if message.Role == model.RoleTool && message.ToolName == tool {
+			return true
+		}
+	}
+	return false
+}
+
+// deliveryFactsOf reports the delivery facts one chain carries: the record a
+// restart pairs the handed-on result with.
+func deliveryFactsOf(facts []event.Event) []event.Event {
+	var out []event.Event
+	for _, fact := range facts {
+		if fact.Type == event.TypeTaskSettled {
+			out = append(out, fact)
+		}
+	}
+	return out
+}
+
+// deliveryFactObligationTool is the one native tool the settled call of the check
+// calls: it keeps the call frame of its own execution, which is the frame the
+// mailbox face reads, so the process after the restart hands the same
+// notification over through the frame the first process was driven with.
+type deliveryFactObligationTool struct {
+	mu     sync.Mutex
+	frames []task.CallFrame
+}
+
+// Declaration names the tool the scripted round calls.
+func (t *deliveryFactObligationTool) Declaration() *trpctool.Declaration {
+	return &trpctool.Declaration{Name: deliveryFactObligationToolName}
+}
+
+// Call executes the call once, keeping its frame, and answers the output the
+// result under test is handed on from.
+func (t *deliveryFactObligationTool) Call(ctx context.Context, _ []byte) (any, error) {
+	frame, ok := task.CallFrameFrom(ctx)
+	if !ok {
+		return nil, errors.New("the call of the check carries no frame")
+	}
+	t.mu.Lock()
+	t.frames = append(t.frames, frame)
+	t.mu.Unlock()
+	return deliveryFactObligationAnswer, nil
+}
+
+// frameOf reports the call frame of the one execution the check drove.
+func (t *deliveryFactObligationTool) frameOf(tb testing.TB) task.CallFrame {
+	tb.Helper()
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if len(t.frames) != 1 {
+		tb.Fatalf("the tool executed %d time(s), want the one call the settled notification belongs to", len(t.frames))
+	}
+	return t.frames[0]
+}
+
+// factTypesOf reports the types of one chain, so a check names what it read.
+func factTypesOf(facts []event.Event) []string {
+	out := make([]string, 0, len(facts))
+	for _, fact := range facts {
+		out = append(out, fact.Type)
+	}
+	return out
 }

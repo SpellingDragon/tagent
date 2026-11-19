@@ -847,3 +847,70 @@ func TestBootConvergesGenerationRetirement(t *testing.T) {
 		t.Fatalf("the restart derived the retirement of generation %d again (%v), want the record %v the chain already holds", published, again.Timestamp, converged.Timestamp)
 	}
 }
+
+// TestGenerationSwitchKeepsTheSameStateAuthority pins the replacement lifecycle: a generation switch rebinds no state slice.
+//   - three reloads publish three generations over one running host, and the slice mounted on the state seam keeps its name after each
+//   - the holder keeps the obligations across switches: the item it records after a switch is stated by that switch's cut, and the disposer refuses with the count
+//   - a switch that rebuilt the slice, bound a successor of the same name, or dropped the obligations fails the kept name, the payload or the count
+//   - consumer: Host.Reload, Run.RegisterStateSlice's disposer and Run.Checkpoint
+//
+// 契约: docs/adr/0007-generation-scoped-runtime-plugin-lifecycle.md
+func TestGenerationSwitchKeepsTheSameStateAuthority(t *testing.T) {
+	provider := newGenerationTestProvider(t)
+	root := t.TempDir()
+	configPath := filepath.Join(root, "tagent.yaml")
+	const sliceName = "assembly.generation-consumer"
+	const firstItem = "the-notice-held-before-the-first-switch"
+	blocks := []string{
+		"    tools:\n      - { kind: tool, id: " + tagentfile.ReadFileToolName + " }\n",
+		"    tools:\n      - { kind: tool, id: " + tagentfile.ReadFileToolName + " }\n" +
+			"      - { kind: tool, id: " + tagentfile.ListFileToolName + " }\n",
+		"    tools:\n      - { kind: tool, id: " + tagentfile.ReadFileToolName + " }\n" +
+			"      - { kind: tool, id: " + tagentfile.SearchFileToolName + " }\n",
+	}
+	for index := range blocks {
+		blocks[index] += "    file:\n      base_dir: \"" + root + "\"\n"
+	}
+	host := bootGenerationHost(t, configPath, generationDocument(root, provider.URL+"/v1", blocks[0]))
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+	run := host.Run()
+	boot := run.publisher.Current().Generation
+	holder := &owedSlice{name: sliceName}
+	holder.open(firstItem)
+	unmount, err := run.RegisterStateSlice(holder)
+	if err != nil {
+		t.Fatalf("mount the slice on the state seam: %v", err)
+	}
+	commitSessionTurns(t, ctx, run, event.Address{AgentID: "user", SessionID: "session-generation"}, "generation", 1)
+	owes := []string{firstItem}
+	for step := 1; step <= 3; step++ {
+		rewriteGenerationDocument(t, configPath, generationDocument(root, provider.URL+"/v1", blocks[step%len(blocks)]))
+		if _, err := host.Reload(ctx); err != nil {
+			t.Fatalf("reload the document that publishes generation %d: %v", boot+uint64(step), err)
+		}
+		if serving := run.publisher.Current().Generation; serving != boot+uint64(step) {
+			t.Fatalf("the reload serves generation %d, want %d", serving, boot+uint64(step))
+		}
+		if names := run.StateRegistry().Names(); !sliceContainsName(names, sliceName) {
+			t.Fatalf("the registry names %v after generation %d, want the slice kept beside the switch", names, boot+uint64(step))
+		}
+		next := fmt.Sprintf("the-notice-recorded-after-generation-%d", boot+uint64(step))
+		holder.open(next)
+		owes = append(owes, next)
+		key, filed, cutErr := run.Checkpoint(ctx)
+		if cutErr != nil || !filed {
+			t.Fatalf("file the cut after generation %d = (%t, %v), want a filed cut", boot+uint64(step), filed, cutErr)
+		}
+		payload := slicePayloadOf(t, checkpointOfIdentity(t, ctx, run, key), sliceName)
+		for _, item := range owes {
+			if !strings.Contains(payload, item) {
+				t.Fatalf("the cut after generation %d states %q, want the obligation %s the mounted holder recorded", boot+uint64(step), payload, item)
+			}
+		}
+		refusal := unmount()
+		if want := fmt.Sprintf("%d unfinished obligation(s)", len(owes)); refusal == nil || !strings.Contains(refusal.Error(), want) {
+			t.Fatalf("the unmount after generation %d answered %v, want a refusal naming %s", boot+uint64(step), refusal, want)
+		}
+	}
+}

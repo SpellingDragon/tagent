@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/SpellingDragon/tagent/api/config"
+	"github.com/SpellingDragon/tagent/api/event"
 	"github.com/SpellingDragon/tagent/api/plugin"
 	"github.com/SpellingDragon/tagent/runtime/agent"
 )
@@ -159,6 +160,62 @@ func TestPluginDeclarationRefusesARunLevelPluginName(t *testing.T) {
 	_, err := run.agentPlugins(nil, config.AgentSpec{ID: "agent-a", ReplayWindow: 60, Plugins: []string{"-compress-consumer"}})
 	if err == nil || !strings.Contains(err.Error(), "compress-consumer") || !strings.Contains(err.Error(), "run-level") {
 		t.Fatalf("the run-level declaration = %v, want a refusal naming the plugin and its scope", err)
+	}
+}
+
+// TestDisabledBuiltinHandsOverItsObligations pins what a plugins: declaration owes when it disables a plugin that holds an obligation.
+//   - the disabling declaration leaves the named agent-level builtin out of the pipeline while the run-level set stays mounted
+//   - the slice carrying the obligation keeps its name, its payload and its refusal, so nothing is handed to a successor the declaration never named
+//   - a declaration that dropped the run-level set, an unmount that deleted the holder, or a cut that stopped stating its payload fails one of the three checks
+//   - consumer: Run.agentPlugins — the resolution Publish mounts — Run.RegisterStateSlice's disposer and Run.Checkpoint
+//
+// 契约: docs/adr/0004-feature-mounting-is-a-plugin-registry.md
+func TestDisabledBuiltinHandsOverItsObligations(t *testing.T) {
+	ctx := context.Background()
+	const sliceName = "assembly.disabled-consumer"
+	const owedItem = "the-notice-of-the-disabled-consumer"
+	holder := &owedSlice{name: sliceName}
+	holder.open(owedItem)
+	var unmount func() error
+	run := windowChainRun(t, ctx, withBootConfigReconcile(func(ctx context.Context, run *Run, decl *config.Declaration, agents map[event.AgentID]NativeAgent) error {
+		dispose, err := run.RegisterStateSlice(holder)
+		if err != nil {
+			return err
+		}
+		unmount = dispose
+		_, err = run.Publish(ctx, decl, agents)
+		return err
+	}))
+	run.stopCheckpointFiler()
+	commitSessionTurns(t, ctx, run, event.Address{AgentID: "agent-a", SessionID: "session-disabled"}, "disabled", 1)
+
+	disabled, err := run.agentPlugins(nil, config.AgentSpec{ID: "agent-a", ReplayWindow: 60, Plugins: []string{"-age-fold"}})
+	if err != nil {
+		t.Fatalf("resolve the disabling declaration: %v", err)
+	}
+	if carriesInstance(disabled, isAgeFold) {
+		t.Fatalf("the disabling declaration left the age fold mounted: %v", disabled)
+	}
+	if !carriesInstance(disabled, isCompressionConsumer) {
+		t.Fatalf("the disabling declaration dropped the run-level plugins too: %v", disabled)
+	}
+	if names := run.StateRegistry().Names(); !sliceContainsName(names, sliceName) {
+		t.Fatalf("the registry names %v after the disabling declaration, want the slice kept", names)
+	}
+	key, filed, err := run.Checkpoint(ctx)
+	if err != nil || !filed {
+		t.Fatalf("file the cut after the disabling declaration = (%t, %v), want a filed cut", filed, err)
+	}
+	cut := checkpointOfIdentity(t, ctx, run, key)
+	if payload := slicePayloadOf(t, cut, sliceName); !strings.Contains(payload, owedItem) {
+		t.Fatalf("the cut states %q for %s, want the obligation %s the disabled plugin carried nowhere", payload, sliceName, owedItem)
+	}
+	refusal := unmount()
+	if refusal == nil || !strings.Contains(refusal.Error(), "1 unfinished obligation(s)") || !strings.Contains(refusal.Error(), sliceName) {
+		t.Fatalf("the unmount of the slice the declaration disabled = %v, want a refusal naming the slice and its 1 unfinished obligation(s)", refusal)
+	}
+	if names := run.StateRegistry().Names(); !sliceContainsName(names, sliceName) {
+		t.Fatalf("the registry names %v after the refused unmount, want the slice kept with its obligation", names)
 	}
 }
 

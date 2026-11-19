@@ -1720,3 +1720,121 @@ func replayRefFixturePartition(t *testing.T, ctx context.Context, run *Run, addr
 	}
 	return partition
 }
+
+// releaseLiveFact releases one fact from the live ledger of a run the way a trim and
+// a restart both do, so the durable chain answers a repeat of that fact while this
+// process holds no copy beside it.
+func releaseLiveFact(t *testing.T, run *Run, key event.EventID) {
+	t.Helper()
+	run.mu.Lock()
+	defer run.mu.Unlock()
+	evt, held := run.facts[key]
+	if !held {
+		t.Fatalf("the run holds no fact under %s, so the fixture releases nothing", key)
+	}
+	delete(run.facts, key)
+	if session := sessionOf(evt); session != "" {
+		run.sessionFactCount[session]--
+	}
+	run.compactFactOrderLocked(map[event.EventID]struct{}{key: {}})
+}
+
+// landedWatermark answers the sequence slot one partition landed last, read through
+// the watermark a cut reads.
+func landedWatermark(run *Run, partition int) int64 {
+	return run.checkpointWatermark()[partition]
+}
+
+// TestRepeatedFactDoesNotAdvanceLandedSequence pins the sequence a repeat of one fact leaves untouched through the entry that commits a run's facts.
+// - the chain answers the repeat as the fact it already holds: no key of it lands a second time and the landed sequence stays where the first commit left it
+// - the next new fact takes the slot after that sequence, so a repeat never spends one
+// - the identity keeps the bytes and the slot the first commit gave it, in this view and in a root reopened after it
+//
+// 契约: docs/wiki/memory/memory-architecture.md#event-shape
+func TestRepeatedFactDoesNotAdvanceLandedSequence(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	probe := &factCommitEngine{}
+	run := factCommitRun(t, ctx, root, probe)
+	addr := event.Address{AgentID: "agent-a", SessionID: "session-repeated-fact"}
+	partition := memory.PartitionIDFromName(string(addr.AgentID))
+	first := factCommitEvent("repeated-fact", addr, time.Date(2026, 11, 18, 9, 0, 0, 0, time.UTC), "the material one identity names")
+	if _, err := run.commitFactChecked(ctx, first); err != nil {
+		t.Fatalf("commit the fact the identity names: %v", err)
+	}
+	if got := landedWatermark(run, partition); got != 1 {
+		t.Fatalf("the first commit left the landed sequence at %d, want the one slot it took", got)
+	}
+	body, err := memory.BodyFromEvent(first, factCommitFormat, factCommitRetention)
+	if err != nil {
+		t.Fatalf("derive the body of the fact: %v", err)
+	}
+	encoded, err := body.Encode()
+	if err != nil {
+		t.Fatalf("encode the body of the fact: %v", err)
+	}
+	original := "blob:" + string(first.Key)
+	if got := len(probe.written(original)); got != 1 {
+		t.Fatalf("the first commit landed %d original commit(s), want one", got)
+	}
+
+	releaseLiveFact(t, run, first.Key)
+	if key, err := run.commitFactChecked(ctx, first); err != nil || key != first.Key {
+		t.Fatalf("the repeated fact = %s, %v, want the identity the chain already holds", key, err)
+	}
+	if got := landedWatermark(run, partition); got != 1 {
+		t.Fatalf("the repeat left the landed sequence at %d, want the one slot the first commit took", got)
+	}
+	if got := len(probe.written(original)); got != 1 {
+		t.Fatalf("the repeat landed %d original commit(s), want the one the first commit made", got)
+	}
+	if gotPartition, gotSeq := seqOfFact(t, run, first.Key); gotPartition != partition || gotSeq != 1 {
+		t.Fatalf("the repeat left the identity at {%d %d}, want the {%d 1} the first commit filed", gotPartition, gotSeq, partition)
+	}
+
+	second := factCommitEvent("later-fact", addr, first.Timestamp.Add(time.Second), "the material the next fact carries")
+	if _, err := run.commitFactChecked(ctx, second); err != nil {
+		t.Fatalf("commit the fact after the repeat: %v", err)
+	}
+	if got := landedWatermark(run, partition); got != 2 {
+		t.Fatalf("the fact after the repeat left the landed sequence at %d, want 2: a repeat of one fact must not spend a sequence slot", got)
+	}
+	if _, gotSeq := seqOfFact(t, run, second.Key); gotSeq != 2 {
+		t.Fatalf("the fact after the repeat landed at slot %d, want 2: a repeat of one fact must not spend a sequence slot", gotSeq)
+	}
+	stored, held, err := run.tier.Segments.GetEventInPartition(ctx, first.Key, partition)
+	if err != nil || !held {
+		t.Fatalf("the repeated identity = held %t, %v, want the record the first commit landed", held, err)
+	}
+	if stored.Seq != 1 || !bytes.Equal(stored.Body, encoded) {
+		t.Fatalf("the repeated identity = slot %d over %d byte(s), want the slot 1 over the %d bytes the first commit landed", stored.Seq, len(stored.Body), len(encoded))
+	}
+	recalled := run.tier.Originals.Get(ctx, first.Key)
+	if recalled.Outcome != ledger.RecallFound || string(recalled.Body) != first.Message.Content {
+		t.Fatalf("the repeated identity answers the original as %v over %q, want the %q the first commit carried", recalled.Outcome, string(recalled.Body), first.Message.Content)
+	}
+
+	endRun(t, run)
+	reopened, err := ledger.OpenTier(ctx, ledger.StorageConfig{Type: ledger.StorageJournal, Root: root})
+	if err != nil {
+		t.Fatalf("reopen the root: %v", err)
+	}
+	defer reopened.Close()
+	repeated, held, err := reopened.Segments.GetEventInPartition(ctx, first.Key, partition)
+	if err != nil || !held {
+		t.Fatalf("the reopened repeated identity = held %t, %v, want the record the first commit landed", held, err)
+	}
+	if repeated.Seq != 1 || !bytes.Equal(repeated.Body, encoded) {
+		t.Fatalf("the reopened repeated identity = slot %d over %d byte(s), want the slot 1 over the %d bytes the first commit landed", repeated.Seq, len(repeated.Body), len(encoded))
+	}
+	next, held, err := reopened.Segments.GetEventInPartition(ctx, second.Key, partition)
+	if err != nil || !held {
+		t.Fatalf("the reopened fact after the repeat = held %t, %v, want the record it landed", held, err)
+	}
+	if next.Seq != 2 {
+		t.Fatalf("the reopened fact after the repeat landed at slot %d, want 2: a repeat of one fact must not spend a sequence slot", next.Seq)
+	}
+	if got := reopened.Segments.EventCount(); got != 2 {
+		t.Fatalf("the reopened root counts %d event(s), want the two facts it landed", got)
+	}
+}

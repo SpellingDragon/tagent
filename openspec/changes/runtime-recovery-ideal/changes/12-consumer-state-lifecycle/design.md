@@ -8,9 +8,10 @@
 | 静态事实 | 当前判定与验收修正 | 承接 |
 |---|---|---|
 | `assembly/run.go:2794` 先折 `seedCoveredRange` 非幸存事实，`:2797` 后折幸存者 | 两组各自有序不等于总提交序；恢复按同一提交序进入 `Reduce`，以顺序敏感的合法消费者核对运行/恢复逐条序列与最终态 | 12.R2.1 |
+| 两条恢复走遍曾按「先 note 产物、后 seat 判决」，且降级走遍按索引遍历方向重放 | 索引遍历方向不是链的提交序（文档称 newest first，实测空类型索引给出升序，且 `anchorRef.typ` 为空）：产物先于其请求到达时，note 落空、已答判决永久留未完账。恢复必须按每条 ref 携带的 commit seq 重放，note 只在 seat 之后（R278 裁定A，已落地，证据见 tasks.md） | 12.R2.1（补充） |
 | `memory/replay/replay_budget.go:110` 以 `seen` 判 Append 重复，`:309` 清掉已移出投影的键 | 既有重试锚未覆盖已折叠旧输出；先证旧键确被移出，再重试，核呈现边界、轮次及生成/收据不重复，不以永久保留所有键换正确性 | 12.R2.2 |
 | 同通知跨进程与异常保义务冻结锚尚缺；`runtime/agent/loop.go:373` 的送达事实失败后继续投递尚无完整后果证据 | 在事实提交、应用、结算、消费、投递/收据真实切点建立身份轨迹与红锚；两个进程同一通知至多一收据，失败义务仍欠。调查属于 R2，不能等依赖 R2 的 R3 | 12.R2.3 |
-| `newestSurvivorSeq`（`assembly/run.go:3033-3044`）先逐键读取，之后才判覆盖区间是否为空 | 空区间不证明零额外读取；记录实际存储读、解码/分配，不仅 `Decoded` 或输出字节 | 12.R2.4 |
+| 边界读符号已更名：任务行原引的 `newestSurvivorSeq`（`assembly/run.go:3033-3044`）现行树**不存在**，同一读由 `survivorPositions`（`assembly/run.go:3083-3100`）承担，锚分支 `:2784`/`:2790` 各调一次，`restoreSurvivors` `:2904`（点读在 `:2908`）内联同形 | 事实不变：三处都先逐幸存者点读存储、之后才判覆盖区间是否为空；空区间不证明零额外读取。实测每名幸存者 3 次存储值读、空区间照付（§十九）；记录实际存储读/解码/分配/热层，不仅 `Decoded` 或输出字节 | 12.R2.4（已执行，证据见 tasks.md 同名节） |
 | `assembly/checkpoint_test.go:3432-3435` 的 S5 强制卸载后对象消失 | 与 §十已选「具名拒卸载」相反。正验：错误点名未完数，原对象/名字/义务仍在，后续 cut/重启不丢；负验：先删后报、静默删各失败，空/已结切片可正常卸载 | R1 纠正验收；12.R3 实施 |
 
 **乙案方向保留，策略不绝对化。** 不变量是未应用事实不被成功 cut 覆盖；任一拒绝阻塞全部会话 cut 是目前保守选择，不是唯一可行设计，也不由“已有整份切面失败路径”推导为唯一。R2.4 固定负载，对比无错、瞬时错后恢复、长期错，量无关会话受阻范围/时长、热层增长与恢复成本；再按证据决定保留或另行比较安全的细分方案。告警不能替代容量/延迟影响评估，TTL 不销毁义务，不新增第二真相。
@@ -395,3 +396,134 @@ G83（只读独立审）对 J1 提出三项 P1，本轮全部在主树复现红�
 - `go test ./runtime/state/ -race -count=10` 绿；`go test ./memory/replay/` 绿；全量 `go test ./assembly/` 仅剩 `TestUnmountKeepsTheOwedItemsOfItsSlice`（12.R3 已知红）。
 - `comment_policy` 对本轮触碰包零 findings（门整体 exit 1 为外来未跟踪 wechat-bot 文件的既有 scan-set 配置红，非本轮引入）。
 - `docs/api` 经 `gen_godoc.sh` 重生成（Append 签名与 state 文档）。
+
+## 十九、12.R2.4 成本刻度（2026-11-18，主树实测；本叶只量化、不改生产）
+
+> 本节只登记读数与结论，不改写 §十八；§十八·3 末尾「稳态…零额外成本」按本节 **十九·2** 收窄。执行记录、复跑凭据与可红演示见 tasks.md 同名节。
+
+### 十九·1 两笔钱要分开算
+
+| 面 | 载体 | 稳态（cut 落在日志末端） | 长期拒 cut |
+|---|---|---|---|
+| 边界定位 | `survivorPositions`（`assembly/run.go:3083-3100`）逐幸存者 `GetEventInPartition` | **每名幸存者 3 次存储值读**（索引条目 `segment_store.go:542`＋window meta `:560`＋正文 `:937`→`:962`）；热层持有后为 0 | 同左，另加整段阻塞窗口的重放 |
+| 覆盖区间折叠 | `seedCoveredRange` / seam 补折 | 区间为空 ⇒ **零额外折叠**（`decoded` 恰等于幸存者数） | 阻塞窗口内的事实全部重折 |
+
+实测（`TestCheckpointRefusalCostAcrossSessions`，`-count=10` 十轮逐字相同）：`survivors=3`、冷视界 `coldReads=9`、热视界 `warmReads=0`、`newest=8`（＝最新呈现事实 seq）、同一 boot `decoded=8` 且边界以上零事实。对链上从未存在的键同一函数答 `newest=0`、`absentReads=0` ⇒ 成本随**载荷点名的幸存者**走，不随历史长度走。
+
+### 十九·2 §十八·3「稳态零额外成本」收窄（R264 已撤销，此处给现行口径）
+
+- 成立的部分：**零额外折叠**——区间为空时不多折一条事实（`decoded` 读数钉住）。
+- 不成立的部分：**零额外读取**——边界值要靠逐幸存者点读才能得到，空区间照付。故只可称「稳态零额外折叠」，不得再称「稳态零额外成本」。
+- 「空区间≠零额外读取」正是任务行点名的事实，本轮从读数而非推断确认。
+
+### 十九·3 乙案不变量 vs 全局拒绝（保守选择，非唯一设计）
+
+- 不变量（不动）：未应用事实不得被成功 cut 覆盖；同身份再次完整应用后解除；无持久 AppliedThrough 水位。
+- 保守选择（可换）：拒绝按账户全局生效。实测三会话（1 条被点名＋2 条无关）`9/9` 次 cut 全被拒，`blocked=3`；解除后 boot 读数与无错臂逐项相同（`valueReads=92`、`walkVisits=4`、`walkValueBytes=273`、`decoded=36`）⇒ 瞬时错的代价是阻塞窗口，不是残留成本。
+- 长期错的代价落在**下一次 boot**：链更短（`history=40` 对 `44`，4 条 cut 从没落链）但 `valueReads 92→269`、`walkVisits 4→93`、走遍值字节 `273→8212`、分配 ≈1.80MB→≈2.37MB。即拒 cut 不省读，它把读推迟并放大。
+- 是否按链/按 holder 细分：**归编排者终裁**。§十八·2 已裁「框架不猜链」，本轮读数只说明该裁定的成本面，不推翻它。
+
+### 十九·4 可选的窄优化（登记，不在本叶实施）
+
+`survivorPositions` 只需要 seq，而 `GetEventInPartition` 连正文一起读出并装缓存。若改为只答 seq 的读，可省每名幸存者 1 次正文读（3 次→2 次），并把锚分支 `:2784`/`:2790` 对同一 ref 集（判分区不同除外）的两次调用合一次。收益量级：与幸存者数线性，与历史长度无关；代价是新读缝与其自身测试面。**本叶不改 `run.go`；需另冻结窄写面。**
+
+### 十九·5 未验证面
+
+①会话规模只取 3 条，未扫「受阻会话数 vs 阻塞时长」曲线；②阻塞时长（14–17ms）与分配量只作日志读数、**不作断言**（计数面才作断言）；③`rounds` 固定 3，未测多轮阻塞解除的折旧；④`loop.go:373` 送达事实写失败是否阻断投递，语义分叉不属本叶，未触碰未裁定；⑤独立只读审（R35）与整域全矩阵复跑未做。
+
+## 二十、12.R2.5 方向取证与分叉（2026-11-18，主树只读取证；无 .go 改动）
+
+任务行要求「实施第一步判方向三选一且不得预设答案」。本节先给取证读数，再按证据判方向，结论是**真分叉·停报待裁**，本叶未勾、未改生产代码。
+
+### 二十·1 四问取证（判方向的证据面）
+
+| 问 | 答 | 证据（行号只作定位） |
+|---|---|---|
+| `commitSettled` 提交何事实 | 提交**range 的送达/配对事实** `event.TypeTaskSettled`（本通知已进入该 range 的链记录） | `runtime/agent/loop.go:707-730`（`commitSettled`，`evt.Type=TypeTaskSettled`，键由 commit face 铸造）；`:371` 调用点。**不是**持久消费收据：`runtime/state/durable.go:421` 的 `settled()` 只读 consume/reject 键，其唯一写入者是 `:833 recordConsumption`（`:858 log.Put(consumeKey)`），调用链为 `assembly/facts.go:1003 store.Consume`。**也不是** settle 续轮的锚：`assembly/tools.go:149 settleDeliveryKey`=`settle-<hex>`，`assembly/settle_turn.go:529` 按此键点读 |
+| `in.deliver` 是否即可逆外部动作 | **不是外部动作**：进程内交接（channel 唤醒等待中的 drive，否则塞进 `in.settled` 内存表），不写任何持久面，重启即失 | `runtime/agent/loop.go:2074-2084`（`deliver`）、`:2209-2226`（`await`） |
+| 既有锚是否钉住「commit 失败仍投递」 | **没有**。两枚点名锚的 commit face 恒成功（`invariantCommitFace.commit` 无条件 append 返回 `evt.Key`），全仓无对 TypeTaskSettled 注入失败的测试 | `runtime/agent/loop_test.go:743-754`、`:882-890`（settled lane）、`:1198`（self-registered residents）；`SetFactCommit` 全仓仅 `assembly/host_delivery_test.go:396/:1814` 注入失败，且只拒 `TypeAgentOutput` |
+| commit-先-于-deliver 次序是否致「收据落但投递前崩溃⇒模型永失通知」 | **不致，丙的前提被证伪**。`assembly/facts.go:990-1003` 的 `sink` 序为 `bookNotice`→`loop.Backflow`→`store.Consume`，doc 明写「the receipt MUST follow the handover, and a stop between the two leaves the notification owed and the restart hands the same result over again」：崩溃发生在 Backflow 内部（commit 之后、deliver 之前）时 `Consume` 未执行⇒`settled()`（`durable.go:421`）读不到收据⇒重启按欠账重投同一身份；链上同身份事实按 key 幂等（`loop.go:452-460` `NoticeFactKey` 注释：retry keeps that identity）⇒不产生第二条 | 同上 |
+
+**一处对父叶表述的更正**（如实登记，不改父叶原文）：12.R2.5 原文「链无收据⇒重启 `settled()` 按身份读不到⇒同一通知再派」把 `settled()` 的收据归到 `loop.go:371-375`。实测该收据的写入者是 `assembly/facts.go:1003` 的 `store.Consume`（`durable.go:833/:858`），与 `commitSettled` 无关。故 `commitSettled` 失败的真实代价**不是**「收据缺失导致重派」，而是：①链上永久缺该通知的送达/配对标记（`memory/replay/fold.go:132`、`assembly/request.go:1288 callIdentityOf`、`assembly/host_tools.go:1002 hostDeliveryRecordOf` 三个读面各少一条）；②当 `resultFactOnChain` 为假时（`loop.go:367-369`），该事实**是**投递正文在链上的唯一记录⇒此时「模型可见而无链记录」成立。
+
+### 二十·2 三方向后果（按证据逐条，含不可兼得面）
+
+| 方向 | 只改 `runtime/agent/**` 的后果 | 需要的东西 |
+|---|---|---|
+| **甲**（commit 失败阻断 `in.deliver`） | **严格更坏**：`Backflow` 无返回值（`loop.go:350`），`sink` 在其返回后**无条件** `Consume`（`facts.go:1003`）⇒投递被阻断而收据照写＝该通知被标已消费且模型永不得见（比现状的「投递了但少一条标记」更差）。「义务回落欠账」半句在 `loop.go` 内无处安放：义务持有者是 mailbox/task 账户（`assembly` 侧） | 必须 `sink` 在交接被拒时**不 Consume 而保欠账**⇒写面越界到 `assembly/facts.go` |
+| **乙**（投递不停＋义务保欠账） | 「投递不停」是现状（可保持）；但「义务保欠账」同样无处安放——标记事实没有持有者，单元三模板的 `parkHeld`/`restoreHeldDelivery` 对应物在本侧不存在 | 与甲**同一处**越界（`facts.go` 复用既有 `retainNoticeOwed`，`:1011`），差别只在 in-process 是否投递 |
+| **丙**（重排次序） | 前提已在二十·1 证伪；且今日次序（事实先落、投递在后）在崩溃窗口下更安全：事实先落⇒重启重投补齐投递；反过来先在内存投递后落事实，崩溃即「模型见了、链永久无」且收据未写、重投会二次呈现 | ——（不成立，不实施） |
+
+### 二十·3 结论与建议（停报待裁，不盲改）
+
+- **判为真分叉**：甲、乙都要求同一处写面扩展（`assembly/facts.go:990-1003`：`Backflow` 报出拒收→`sink` 走 `retainNoticeOwed` 而非 `Consume`），差别是「in-process 是否先投递」；丙被证伪。故**不存在只改白名单内文件即可闭合该缺口且不引入更坏后果的方向**。
+- **建议（供编排者裁，非本叶自裁）**：取**乙＋窄写面**——`in.deliver` 保持（模型本轮照常推进，重合 12-design:41「不承诺外部发送 exactly-once」），`Backflow` 报出拒收，`sink` 复用既有 `retainNoticeOwed`（`facts.go:1011`，已在 close 路径用同一机制）把该通知还给未结池⇒重启重投，同一身份幂等补上那条标记。机制复用，不新造。
+- **若编排者选甲**：同写面扩展下另需接受「本进程该 call 无结果直至重启」；若编排者选纯乙（不扩写面）：必须显式**缩小本叶验收面**为「具名＋投递照旧＋链上标记缺失为已知代价」，并按 R29 在任务行改写，不得以现状冒充已闭合。
+- **负锚 `TestDeliveryFactFailurePreservesTheNoticeObligation` 未建**：方向未定前写入即为红（会留红树），故只冻结断言面草案：注入 TypeTaskSettled 提交失败；断言①注入确发生（失败计数=1）②链上确无该 key 的 settled 事实③按所选方向断言投递（乙：`in.await` 得该 item；甲：等待超时且欠账回到账户）④持久消费收据按所选方向断言「未落／恰一条」。判据不得恒真。
+
+### 二十·4 本轮已跑凭据与未跑面
+
+- `go build ./...` → exit 0；`go vet ./runtime/agent ./runtime/task` → exit 0；`gofmt -l runtime/agent/loop.go runtime/agent/loop_test.go runtime/task/unsettled_test.go` → 空。
+- 现状基线（既有锚，`-count=1`）：`go test ./runtime/agent/ -run '^(TestBackflowNotificationLanes|TestBackflowWakesSelfRegisteredResidents)$' -count=1 -v` → exit 0，2 用例 6 子用例全 PASS。
+- 联动既有负锚（`-race -count=10`）：`go test ./runtime/task/ -run '^(TestConsumptionFailureKeepsTheNoticeOwed|TestSettlementFailureIsReportedBeforeDelivery)$' -race -count=10` → exit 0。
+- **未跑未建**：`TestDeliveryFactFailurePreservesTheNoticeObligation`（本叶负锚，方向未定不建）；`go test ./assembly/ -run '^TestRedeliveredNoticeAfterRestartSettlesOnce$'`（本轮未复跑，属 R2.5 真实入口锚，待方向裁定后复跑）；跨进程「拒收后重启补标记」的端到端锚尚不存在；独立只读审（R35）未做。
+
+## 二十一、12.R2.5 乙案落地与机制复核（2026-11-18，实施叶；主树写面见 tasks 叶行）
+
+方向由编排者在 R287 裁定为乙，本节只记实施核实到的事实、落地形态与实施期新发现的勘误，不重开方向取证（§二十·2 的三方向后果表仍是裁定依据）。
+
+### 二十一·1 实施期核实的两个机制事实（§二十·1 未覆盖）
+
+1. **`TypeTaskSettled` 有两个写入者，不是一处**：`runtime/agent/loop.go:707 commitSettled`（无 Key，身份由 `assembly/facts.go:88-90 commitFactNoCadence` 逐次铸造）与 `assembly/tools.go:92 observeSettleDelivery`（键＝`settle-<hex>`，`tools.go:146-150` 明写「a retried delivery keeps its identity, so the chain carries one settle for one notification」）。§二十·1 只说前者，故「链上同身份事实按 key 幂等」这句**只对后者成立**：`commitSettled` 写的那条每提交一次就是一个新身份。
+2. **信封投递与邮箱投递是两条面**：`assembly/tools.go:50 deliver`（管理器 `EnvelopeDeliverer`，`assembly/run.go:641`）做 TrackDelivery→AcceptNotice→`observeSettleDelivery`；`assembly/tools.go:699 task.WithMailbox(r.sink)` 才是 `sink`（bookNotice→Backflow→Consume/release）。一次原生工具结算两条都过，故「标记被拒」时缺的是**两条**记录（血统标记与送达标记），`deliver` 同时返回 `task.DeliveryPending` 让管理器继续保留投递义务。
+
+对 §二十·3「重启重投后同一身份幂等补上那条标记」的后果：在**标记确未落**的窗口里，重投写下的就是唯一一条（无条件重发不会产生第二条标记）；但「先落标记、后写收据之间崩溃」这一窗口今天仍会因 `commitSettled` 逐次铸造身份而追加第二条 `TypeTaskSettled`。该窗口是 §二十·2 丙案证伪时点名的既有窗口，**本叶不修、不属乙案验收面**，如实登记为剩余风险（见二十一·3 未核项）。
+
+### 二十一·2 落地形态（与其为何不新造机制）
+
+- `runtime/agent/loop.go`：`Backflow(...) error`；终态分支 `return commitErr`，progress／被忽略种类 `return nil`；拒收上报由 `consumerWarn` 改为新增 `consumerError`（ERROR 级，静默语义改变⇒告警可见；`consumerDebug`/`consumerWarn` 的 bypass 三条红线逐条照搬）。`in.deliver` 位置未动（仍在 commit 之后、无条件执行）：乙案的「投递不停」是**保持现状**，不是新增行为。
+- `assembly/facts.go`：`sink` 在 `closeFinished()` 之后新增 `if refusal := r.loop.Backflow(...); refusal != nil { return r.retainNoticeOwed(...) }`。`retainNoticeOwed` 一行实现未改（仍是 Release＋保 acceptance），只把 doc 与 debug 文案从「close 之后」泛化为两成因（Release 一次、claim 来自同一 `bookNotice`，无双 Release 面）。**同一机制两处复用**的依据：两成因留下的缺口同形（下一次读该通知的进程拿不到它该配对的事实），处置同形（把 claim 还回池、保 acceptance、不写收据）。
+- `runtime/agent/skeleton_assert.go:135`：签名断言 `func(*Loop, event.InvocationID, task.Notice) error`。属白名单外但编译强制（否则 `go build ./...` 断）。
+
+### 二十一·3 新负锚的落点与判据（为何不落 runtime/agent）
+
+注入需要 `run.loop.SetFactCommit`（未导出字段），只有 `package assembly` 内可达（既有注入先例 `assembly/host_delivery_test.go:396/:1814`）；且断言②③需要真实 store／tier／重启读回，`runtime/agent` 内无此面。故按任务行预授权把冻结名 `TestDeliveryFactFailurePreservesTheNoticeObligation` 落在 `assembly/host_test.go:481`（原记 `delivery_fact_obligation_test.go` 不存在，R301 勘误），测试名逐字符不变，命令改为 `./assembly/`。判据（非空守卫，逐条可红）：拒收计数＝1；链零 `TypeTaskSettled`；座位回 `ClaimPending` 且根零 `tagent/task/v1/consume:` 键；该轮 `DecisionCount=2` 且 completed（投递照旧）；重启后 `deliver` 一次得 `DeliveryAccepted`、链恰一条 `TypeTaskSettled`、收据恰一条、二次要约零第二条、二次驱动零第二轮。
+
+### 二十一·4 新增的跨面后果（未修，待编排者裁）
+
+- **变异门锚漂移**：`scripts/gates/check_event_integrity_mutations.py:739-747` 的 `MUT-CAND-01.2-handover-confirm` 以两行原文为锚（`\tr.loop.Backflow(frame.Identity.InvocationID, notice)\n\treturn r.store.Consume(...)\n`）。乙案必须在这两行之间插入拒收分支，故该锚在 `assembly/facts.go` 现为 **0 次命中**：门自检（`:2065`）判 `stale mutation`，`apply_patch`（`:2405`）抛 `GateError`，且该变异 `--list` 为 `enabled`、CI `ci.yml:354` 与 `preflight.sh:138` 均 `--all`。按 `openspec/specs/architecture-guardrails/spec.md:272`「清单与源码锚点失配 MUST 使总门失败」，这是**本叶引入的红门**，但门脚本不在本叶写面（禁改 CI），已登记待重指：把 old 串改为新的四行形态（判据不变：收据先于交接）。
+- **注释/文档面**：`docs/EXTENSIONS.md:68` 与 `docs/api/github_com__SpellingDragon__tagent__runtime__agent.md:1348` 仍写 `Backflow(invocationID, notice)` 无返回值。不在本叶写面，登记为随代码走待补。
+
+## 二十二、12.R2.6 fuse 链增量回归根因（2026-11-19，实施叶；主树写面＝assembly＋runtime/state 缝）
+
+### 二十二·1 症状与取证边界
+
+`tests/integration/execution` 两 fuse 红：`TestResponseCallCapFuse/approval_admits_the_whole_batch`（`response_call_cap_fuse_test.go:88`）`actions=1` 但 `results=181..191 ≠ 200`；`TestStormPropagationFuse/an_approved_storm_leaves_a_bounded_chain_increment`（`storm_propagation_fuse_test.go:143`）`results=403/424/460 > 200`。`responseStormChain`（`response_call_cap_fuse_test.go:653`）只数 `run.ReplayEntries` 的 `TypeThinkingPlan`/`TypeActionCommand`，而同一用例的写侧断言全绿（`tool receipts=200`、`tasks=200`、`dispatched calls=200`）⇒ 写链完整、**读侧投影增量**失真；红读数逐次不同 ⇒ 非确定（并发面）。
+
+### 二十二·2 二分（HEAD 归档树＋逐组叠文件，禁 git 写仓库）
+
+- `git archive HEAD | tar -x -C /tmp/fuse-head`＝HEAD 树，同命令 `ok … 9.529s`（绿，复证 08.R3 结论）。
+- 全量叠当前候选生产 `.go`（19 个非测试文件）到 HEAD 树 ⇒ 红（191／460），复现非确定。
+- 单组回卷二分（`facts.go` 被 `checkpoint.go` 的 disposer 签名与 `compress_consumer.go` 的 `chainHoldsFact` 依赖，故按 hunk 回卷）：
+  - 删 `foldMapped` 的 `if r.newestOfChainLocked(replayAddressOf(evt)) != evt.Key { return }` ⇒ **绿**（`ok … 9.541s`）。引入 hunk 即此三行守卫＋其 `newestOfChainLocked`（`assembly/facts.go:520-556` 原形）。
+  - 归因实测（守卫处加 stderr 计数，仅 `/tmp` 副本树）：单次 storm 子用例 **50 次**守卫丢弃，全部 `resident=true`（该事实正是本次提交刚登记的自由事实），`newest` 指向同链并发已落地的另一事实。
+
+### 二十二·3 机理
+
+守卫把「不是本链最新事实」当作「重试既存事实」。两点不成立：①活体提交在同一响应里由 200 个并发结果事实驱动（`r.flight` 只锁会话飞行，不串行化同链提交），本事实登记后到折叠前同链可能已有新事实落地，故合法提交被判「非最新」而整条投影增量被丢弃；②丢弃 `foldMapped` 同时跳过 `endedAt/rangeOpen` 推进（`foldMapped` 的 boundary 分支），范围边界停在旧位置 ⇒ 下一轮范围重读已呈现材料并重驱（storm 的 403/424/460＝重驱产出的第二批结果事实；cap 的 181..191＝未重驱时的纯漏折）。一份根因解释两侧偏差。
+
+重试语义本不需要顺序判据：`commitFactNoCadence` 的两条重试分支（`seen`＝活账已存、`carried`＝`chainHoldsFact` 说耐久链已存）已把「重复事实」判在守卫之前，守卫只是把提交侧已知的类别改用提交顺序去猜。
+
+### 二十二·4 修法（缝增设 repeat 面，投影按提交类别回答）
+
+投影的重复抑制靠 `ReplayProjection.seen`（`Append` 按身份拒二次），但 `forgetDroppedLocked`（`memory/replay/replay_budget.go:309`）在每次改写字（fold／age band／product）后删掉被移出材料的身份去重键——为避免 `seen` 随历史无限增长。故「重试被折叠掉的输出」会以新材料的身份再次进入序列（这正是 `TestRetryOfFoldedOutputDoesNotReopenTheRound` 钉的负锚）。要保住该不变量又不再猜顺序，类别必须由提交侧传下来：
+
+- `runtime/state/checkpoint.go`：`StateRegistry.Reduce` 与新增 `ReduceRepeat` 共用 `fold(ctx, evt, repeat)`；声明面 `repeatReducer { ReduceRepeat(ctx, evt) error }`，只有声明者被以 repeat 折叠，其余 holder 照旧走 `Reduce`（缝契约「按身份幂等」对它们成立）。`reduceInto` 增一个 `repeat` 参数。选声明面而非按名清单，与同文件既有 `unfinishedWork`/`emitter` 一致：缝从不读消费者名字。
+- `assembly/checkpoint.go`：`projectionStateSlice.ReduceRepeat` 空实现——序列按提交顺序陈述每个身份一次，重复提交不陈述位置，故不改序列、不动边界。
+- `assembly/facts.go`：删守卫与 `newestOfChainLocked`；两处重试分支改走新增 `reduceCommittedRepeat`（经 `ReduceRepeat`），提交/重启播种（`seedFact`）仍走 `reduceCommitted`（`Reduce`）。doc 三处随真话改写（`commitFactNoCadence` 的 repeat 条目、`foldMapped` 的 boundary 条目）。
+
+不变量保持：链仍是唯一真源（投影只由提交事实派生）、活体与重放同一派生路径（`seedFact` 与 `commitFactNoCadence` 都走 `states.Reduce`）、不重复（`seen`＋repeat 类别）不遗漏（合法提交不再被顺序守卫丢弃）。
+
+### 二十二·5 归属
+
+根因与修法均在 `assembly`（投影增量）＋`runtime/state`（缝驱动，一处参数化、零新表）；未触及他域生产文件。

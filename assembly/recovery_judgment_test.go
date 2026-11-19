@@ -12,11 +12,11 @@ import (
 	"github.com/SpellingDragon/tagent/runtime/agent"
 )
 
-// productsByRequest counts the chain products answering each compression
-// judgment, read from the durable chain rather than from the consumer.
-func productsByRequest(t *testing.T, ctx context.Context, run *Run) map[event.EventID]int {
+// chainProducts lists the products one chain holds, read from the durable chain
+// rather than from the consumer.
+func chainProducts(t *testing.T, ctx context.Context, run *Run) []event.CompressProduct {
 	t.Helper()
-	out := map[event.EventID]int{}
+	var out []event.CompressProduct
 	if err := run.tier.Segments.EachIndexNewestFirst(ctx, func(key event.EventID, _ int, _ int64, typ string, _ event.SessionID) error {
 		if typ != event.CompressProductType {
 			return nil
@@ -31,13 +31,23 @@ func productsByRequest(t *testing.T, ctx context.Context, run *Run) map[event.Ev
 		}
 		evt := body.Event()
 		evt.Key = stored.Key
-		product, stated := compressProductOf(evt)
-		if stated {
-			out[product.Answers.Request]++
+		if product, stated := compressProductOf(evt); stated {
+			out = append(out, product)
 		}
 		return nil
 	}); err != nil {
 		t.Fatalf("read the chain products: %v", err)
+	}
+	return out
+}
+
+// productsByRequest counts the chain products answering each compression
+// judgment, read from the durable chain rather than from the consumer.
+func productsByRequest(t *testing.T, ctx context.Context, run *Run) map[event.EventID]int {
+	t.Helper()
+	out := map[event.EventID]int{}
+	for _, product := range chainProducts(t, ctx, run) {
+		out[product.Answers.Request]++
 	}
 	return out
 }

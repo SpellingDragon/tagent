@@ -26,7 +26,6 @@ import (
 // - a read runs inside the scope it is bound to, and a read that cannot serve names its failure
 // - segmented reading hands out whole lines that concatenate back to the exact bytes
 // - byte bounded segments stay bounded and resume exactly
-// - a protection hold is cleared only by the release its holder makes and outlives one holder
 // - every store opens through OpenTier with its recall windows registered by the storage config
 func TestOriginalReferenceIsolation(t *testing.T) {
 	ctx := context.Background()
@@ -302,62 +301,6 @@ func TestOriginalReferenceIsolation(t *testing.T) {
 			t.Fatalf("offset past end error = %v, want %v", err, ledger.ErrSegmentPastEnd)
 		}
 	})
-
-	t.Run("protection holds outlive one holder", func(t *testing.T) {
-		guard := ledger.NewMemoryGuard()
-		holderA := ledger.OriginalRef{Key: "0h08", Owner: event.Address{AgentID: "keeper-a", SessionID: "s1"}}
-		holderB := ledger.OriginalRef{Key: "0h08", Owner: event.Address{AgentID: "keeper-b", SessionID: "s2"}}
-		if _, err := guard.Hold(ctx, holderA, ""); !errors.Is(err, ledger.ErrHolderRequired) {
-			t.Fatalf("Hold(unnamed holder) error = %v, want %v", err, ledger.ErrHolderRequired)
-		}
-		leaseA, err := guard.Hold(ctx, holderA, ledger.HolderID("keeper-a"))
-		if err != nil {
-			t.Fatalf("Hold(keeper-a): %v", err)
-		}
-		assertProtected(t, guard, holderA, true)
-		retried, err := guard.Hold(ctx, holderA, ledger.HolderID("keeper-a"))
-		if err != nil {
-			t.Fatalf("Hold(keeper-a) repeated: %v", err)
-		}
-		if retried != leaseA {
-			t.Fatalf("Hold(keeper-a) repeated = lease %q, want the idempotent %q", retried, leaseA)
-		}
-		if err := guard.Release(ctx, holderA, ledger.HolderID("keeper-a"), leaseA); err != nil {
-			t.Fatalf("Release(keeper-a): %v", err)
-		}
-		assertProtected(t, guard, holderA, false)
-		freshA, err := guard.Hold(ctx, holderA, ledger.HolderID("keeper-a"))
-		if err != nil {
-			t.Fatalf("Hold(keeper-a) re-held: %v", err)
-		}
-		if freshA == leaseA {
-			t.Fatalf("Hold(keeper-a) after release = lease %q, want a fresh lease distinct from %q", freshA, leaseA)
-		}
-		if err := guard.Release(ctx, holderA, ledger.HolderID("keeper-a"), leaseA); !errors.Is(err, ledger.ErrLeaseMismatch) {
-			t.Fatalf("Release(keeper-a, stale lease) error = %v, want %v", err, ledger.ErrLeaseMismatch)
-		}
-		assertProtected(t, guard, holderA, true)
-		leaseB, err := guard.Hold(ctx, holderB, ledger.HolderID("keeper-b"))
-		if err != nil {
-			t.Fatalf("Hold(keeper-b): %v", err)
-		}
-		if err := guard.Release(ctx, holderA, ledger.HolderID("keeper-a"), freshA); err != nil {
-			t.Fatalf("Release(keeper-a, current lease): %v", err)
-		}
-		assertProtected(t, guard, holderB, true)
-		if err := guard.Release(ctx, holderB, ledger.HolderID("keeper-b"), freshA); !errors.Is(err, ledger.ErrLeaseMismatch) {
-			t.Fatalf("Release(keeper-b, foreign lease) error = %v, want %v", err, ledger.ErrLeaseMismatch)
-		}
-		assertProtected(t, guard, holderB, true)
-		if err := guard.Release(ctx, holderB, ledger.HolderID("keeper-b"), leaseB); err != nil {
-			t.Fatalf("Release(keeper-b): %v", err)
-		}
-		assertProtected(t, guard, holderB, false)
-		if err := guard.Release(ctx, holderB, ledger.HolderID("keeper-b"), leaseB); err != nil {
-			t.Fatalf("Release(keeper-b) repeated: %v", err)
-		}
-		assertProtected(t, guard, ledger.OriginalRef{Key: "0i09", Owner: holderB.Owner}, false)
-	})
 }
 
 // openOriginalTier opens the memory tier through the production config entry
@@ -374,17 +317,4 @@ func openOriginalTier(t *testing.T, windows map[string]time.Duration) ledger.Ori
 	}
 	t.Cleanup(func() { tier.Close() })
 	return tier.Originals
-}
-
-// assertProtected fails the test when the protection state of the original does
-// not match the expected one.
-func assertProtected(t *testing.T, guard ledger.Guard, ref ledger.OriginalRef, want bool) {
-	t.Helper()
-	got, err := guard.Protected(context.Background(), ref)
-	if err != nil {
-		t.Fatalf("Protected(%s): %v", ref.Key, err)
-	}
-	if got != want {
-		t.Fatalf("Protected(%s) = %v, want %v", ref.Key, got, want)
-	}
 }

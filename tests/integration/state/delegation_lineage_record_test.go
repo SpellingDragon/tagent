@@ -22,8 +22,8 @@ import (
 func TestDelegationLineageLandsOnTheAdmissionRecord(t *testing.T) {
 	ctx := context.Background()
 	log := newLineageFactLog()
-	durable, err := orgstate.NewDurableCommit(log, nil)
-	if err != nil {
+	durable := orgstate.NewEmptyDurableCommit(log, nil)
+	if err := durable.Seat(ctx, nil, nil); err != nil {
 		t.Fatalf("open the durable commit: %v", err)
 	}
 	registry := task.NewMemoryRegistry(durable, task.NewMemoryAdmission())
@@ -59,8 +59,8 @@ func TestDelegationLineageLandsOnTheAdmissionRecord(t *testing.T) {
 	if len(chain) == 0 || chain[0].Spec.TriggerSource != event.LineageDelegation {
 		t.Fatalf("stored task_spawned material = %+v, want the delegation lineage on the admission link", chain)
 	}
-	reopened, err := orgstate.NewDurableCommit(log, nil)
-	if err != nil {
+	reopened := orgstate.NewEmptyDurableCommit(log, nil)
+	if err := reopened.Seat(ctx, nil, nil); err != nil {
 		t.Fatalf("reopen the durable commit: %v", err)
 	}
 	replayed, err := reopened.Records(ctx, receipt.TaskID)

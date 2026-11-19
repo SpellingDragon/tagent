@@ -26,26 +26,11 @@ and a fold decides which material a segment still carries and replaces the
 consumed entries with the product it minted. Both read the same projection and
 neither writes the fact chain.
 
-The fold of one projection: the collapse of its foldable run into one compaction
-entry, stated as a fact of the chain rather than kept beside it. The retained
-refs keep the payload order, the payload records the boundary the tail is
-replayed after, and the summary entry is returned first on every restore.
-
-A fold is idempotent: every product is filed under a content-addressed negative
-key — the summary under the digest of the folded run, each synthetic ref under
-the digest of the entry it carries — so the same material always folds under the
-same keys and a second fold mints no second product. A projection that already
-carries a compaction payload answers it as it stands: one body of material folds
-once, and a projection rebuilt from the chain is folded no further.
-
 Cold-start replay: the projection is the pure replay of one fact chain.
 
-The projection holds no state outside the fact chain: a rebuild replays the
-committed facts and the compaction events among them, and nothing else.
-A compaction payload is restored from the chain exactly as the fold left it
-— synthetic refs carry their full text in the payload under a negative key,
-positive keys hydrate from the chain — and the tail is paged by minimum event
-key and appended in EventKey write order, never by timestamp approximation.
+The projection holds no state outside the fact chain: a cold start replays the
+committed facts among them and reads the chain back in EventKey write order,
+never by a timestamp approximation.
 
 The in-memory parent map used by a canonical replay. The zero value is ready to
 use; durable recall reads parents from the event chain instead of a journal.
@@ -61,10 +46,9 @@ inherits the shape of an earlier one. What a past request actually showed is the
 request snapshot's record, never a decision the projection keeps.
 
 Skeleton compile-time assertions for the replay shapes: the projection entry,
-the chain-isolated replay source and relation store, the compaction payload
-and its refs, the cold-start rebuild that replays a fact chain into an empty
-projection, and the segment-age axis the bands and their folds are declared
-under. A renamed field or a widened signature stops this file from compiling.
+the chain-isolated replay source and relation store, the compaction payload and
+its refs, and the segment-age axis the bands and their folds are declared under.
+A renamed field or a widened signature stops this file from compiling.
 
 CONSTANTS
 
@@ -104,15 +88,6 @@ const (
 	DefaultAgeSummaryTextLimit = 2048
 )
 const (
-	// RebuildPageSize is the page size the rebuild pages the fact chain with:
-	// minimum-event-key paging in EventKey write order.
-	RebuildPageSize = 64
-	// FallbackEventLimit bounds the fallback replay of a chain that carries no
-	// compaction event: the most recent facts are kept and the count left out is
-	// reported, so a non-empty chain is never rebuilt as an empty session.
-	FallbackEventLimit = 128
-)
-const (
 	// ProjectionTypeRecoveryHint is the entry type of the recovery hint an
 	// assembly carries first after a cold-start replay, so the model is told the
 	// context it sees was rebuilt rather than silently presented.
@@ -129,40 +104,17 @@ const CompactionEventType = event.TypeContextCompress
     committed to the fact chain under. A compaction fact is consumed as the
     snapshot it carries and never enters the projection as an entry of its own.
 
-const RebuildSkipNotEmpty = "projection not empty"
-    RebuildSkipNotEmpty is the recorded reason of a rebuild that found a
-    non-empty projection: the projection is never replaced by a replay.
-
 VARIABLES
 
-var (
-	// ErrChainKeyRequired reports a chain key that names no session, so a replay
-	// under it would join one user's facts to a shared partition chain.
-	ErrChainKeyRequired = errors.New("memory: chain key names no session")
-	// ErrRebuildUnwired reports a rebuild without the target projection, the fact
-	// chain or the parent map it maintains the causal chain through.
-	ErrRebuildUnwired = errors.New("memory: rebuild needs a target projection, a fact chain and a parent map")
-	// ErrChainPageLimit reports a chain page request that asks for no fact at all.
-	ErrChainPageLimit = errors.New("memory: chain page must read at least one fact")
-	// ErrChainScan reports a fact chain read that failed, so an empty result is
-	// never read as an empty chain.
-	ErrChainScan = errors.New("memory: fact chain read failed")
-	// ErrCompactionCorrupt reports a compaction payload that cannot be read back
-	// as the fold snapshot it claims to carry.
-	ErrCompactionCorrupt = errors.New("memory: compaction payload cannot be read")
-	// ErrRebuildPartial reports a rebuild that could not hydrate every positive
-	// ref of the snapshot from the fact chain. The result it accompanies is
-	// partial and is never reported as a byte-exact rebuild.
-	ErrRebuildPartial = errors.New("memory: rebuild is partial: the fact chain misses snapshot keys")
-)
 var (
 	// ErrBudgetInvalid reports a budget assembly asked to pack a request under a
 	// non-positive token budget.
 	ErrBudgetInvalid = errors.New("memory: budget assembly needs a positive token budget")
 )
-var ErrFoldEmpty = errors.New("memory: fold needs at least one projection entry")
-    ErrFoldEmpty reports a fold of an empty projection: there is no run to
-    collapse and no compaction payload to leave on the fact chain.
+var (
+	// ErrChainPageLimit reports a chain page request that asks for no fact at all.
+	ErrChainPageLimit = errors.New("memory: chain page must read at least one fact")
+)
 
 FUNCTIONS
 
@@ -181,12 +133,6 @@ func RenderProjection(entries []ProjectionEntry) []byte
     model view content and time. A rebuild that replays the same fact chain
     reproduces these bytes exactly — the byte-for-byte comparison a cold-start
     rebuild is judged by.
-
-func RetainRefType(typ string) bool
-    RetainRefType reports whether an entry of the frozen event type is kept as
-    a retained ref by a fold instead of being represented by the summary alone:
-    the tool and task facts a fold must not lose, while the conversational
-    entries are what the summary speaks for.
 
 func SyntheticKey(key event.EventID) bool
     SyntheticKey reports whether a ref key names a synthetic ref, whose full
@@ -330,9 +276,9 @@ type CompactionFact struct {
 	// Refs are the retained refs of the folded run, in payload order: a
 	// synthetic and a positive ref keep the order the payload recorded.
 	Refs []CompactionRef `json:"refs"`
-	// FullBoundary is the event key the snapshot covers up to. The rebuild pages
-	// the tail strictly after it, using this payload value and never a timestamp
-	// approximation.
+	// FullBoundary is the event key the snapshot covers up to. A tail replayed
+	// against this payload resumes strictly after it, using this value and never a
+	// timestamp approximation.
 	FullBoundary event.EventID `json:"full_boundary"`
 	// ConsumedKeys are the consumed keys the snapshot reseeds; the tail's own
 	// consumed keys are reseeded beside them from the replayed tail.
@@ -492,68 +438,13 @@ func (e ProjectionEntry) StatedRole() string
     StatedRole reports the role the fact's own message carried, empty beside a
     fact whose message stated none.
 
-type RebuildOptions struct {
-	// PageSize is the minimum-event-key page size of the tail pagination; zero
-	// means RebuildPageSize.
-	PageSize int
-	// FallbackBound bounds the fallback replay of a chain without compaction;
-	// zero means FallbackEventLimit.
-	FallbackBound int
-}
-    RebuildOptions shapes one cold-start replay.
-
-type RebuildReport struct {
-	// Entries is the number of entries the rebuild appended.
-	Entries int
-	// Fallback reports a chain without compaction, replayed under the bound.
-	Fallback bool
-	// Dropped is the count of chain facts the bounded fallback left out.
-	Dropped int
-	// Scanned reports a completed chain scan: an empty chain is a scanned empty
-	// chain and is never confused with a failed read.
-	Scanned bool
-	// Skipped is the recorded reason no rebuild ran, empty when one did.
-	Skipped string
-	// Partial reports snapshot keys the chain could not hydrate.
-	Partial bool
-	// Missing lists the snapshot keys the chain could not hydrate.
-	Missing []event.EventID
-	// Consumed lists the consumed keys reseeded, from the snapshot and the
-	// tail together.
-	Consumed []event.EventID
-	// FullBoundary is the boundary value the compaction payload carried.
-	FullBoundary event.EventID
-}
-    RebuildReport is the structured result of one cold-start replay: what the
-    rebuild appended, whether it ran the bounded fallback, and — for a partial
-    result that carries a non-nil error — the snapshot keys the chain could not
-    hydrate, so a partial rebuild is never reported as byte-exact.
-
-func RebuildProjectionFromWAL(ctx context.Context, target *ReplayProjection, chain EventChain, relations *MemoryRelations, session ChainKey, opts RebuildOptions) (RebuildReport, error)
-    RebuildProjectionFromWAL replays one fact chain into an empty projection:
-    the cold-start rebuild that runs before any other recovery replay.
-    A non-empty projection is never replaced and the skip reason is recorded.
-    With a valid compaction the snapshot is restored first — the summary entry
-    first, then the retained refs in payload order, positive keys hydrated from
-    the chain and synthetic refs from the payload text — and the tail is paged
-    by minimum event key and appended in EventKey write order after the payload
-    boundary. The restored payload is kept as the projection's compaction
-    payload, so a fold offered to the rebuilt projection answers it instead of
-    folding a second time. Without a compaction the rebuild runs the bounded
-    fallback instead of a no-op, and a successfully scanned empty chain is
-    reported as empty.
-
-    The causal chain is maintained through relations.SetParent inside this
-    (PartitionID, SessionID) chain alone: a replay never links one session's
-    facts into another's, and an empty session is refused by name.
-
 type ReplayProjection struct {
 	// Has unexported fields.
 }
 
-    ReplayProjection is the replayable projection: the ordered model view of one
-    fact chain and the compaction payload a fold left on the chain. It is what
-    RebuildProjectionFromWAL replays into.
+    ReplayProjection is the replayable projection: the ordered model view of
+    one fact chain. A cold start replays a chain into it and an assembly reads a
+    request from it.
 
     A projection holds no state outside the fact chain, so replaying the
     recorded facts reproduces the same entries, and it holds no presentation
@@ -566,8 +457,7 @@ type ReplayProjection struct {
         always is;
       - the original text of an entry is immutable input, and the model view is
         the assembly's output;
-      - a rebuild recomputes the deduplication key set from the entries it
-        keeps.
+      - the deduplication key set follows the entries the projection keeps.
 
 func NewReplayProjection() *ReplayProjection
     NewReplayProjection returns an empty replayable projection.
@@ -627,27 +517,6 @@ func (p *ReplayProjection) ConsumedKeys() []event.EventID
 
 func (p *ReplayProjection) Entries() []ProjectionEntry
     Entries returns a copy of the projection entries in their canonical form.
-
-func (p *ReplayProjection) Fold(ctx context.Context) (ProjectionEntry, error)
-    Fold collapses the foldable run of the projection into one compaction entry
-    and returns its summary entry, so the collapsed text is reported as a fact
-    of the chain rather than kept beside it.
-
-    The retained refs keep the payload order: a keyless tool-chain entry becomes
-    a synthetic ref carrying its full text in the payload, a keyed entry of
-    a retained type becomes a positive ref the fact chain hydrates back, and
-    the remaining entries are represented by the summary alone. The compaction
-    payload records the fullBoundary value the tail is replayed after, and the
-    summary entry is returned first on every restore.
-
-    - The entries the summary alone represents leave the projection with their
-    per-key material (the original text, the dedup key and the consumed mark)
-    while a retained ref keeps its own, so the rewritten sequence carries no
-    copy of the material the summary speaks for.
-
-    - A projection already carrying a compaction payload answers that payload's
-    summary entry and moves nothing, so one body of material folds once even
-    when a rebuilt projection is offered to the fold again.
 
 func (p *ReplayProjection) FoldByAge(ctx context.Context, plan AgeFoldPlan) (AgeFoldReport, error)
     FoldByAge folds the projection along its segment-age bands once its rendered

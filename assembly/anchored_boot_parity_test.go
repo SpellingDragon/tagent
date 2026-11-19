@@ -137,8 +137,11 @@ func counterlessProductOf(product event.CompressProduct) event.Event {
 //   - the anchored rebuild notes only the products it decodes, so the judgment it records is never one a chain product already answers
 //   - the fallback rebuild answers the same judgments as the full walk
 //   - neither rebuild states a compaction payload or a recovery hint
-//   - either checkpoint serves the rebuild (the newest checkpoint when the store holds one, else the newest per-chain anchor), covered material staying unread where the restored checkpoint vouches it
-//   - beside no restored checkpoint the anchor bounds the projection read alone, so the seam decodes the covered range too (negative: TestAnchorRebuildFoldsTheRangeNoCheckpointVouches) and the decode saving rides a checkpoint a real boot restores (TestDefaultBootRebuildsFromTheAnchor, TestSymptomAnchorSessionBootCostFlatAcrossGenerations)
+//   - either checkpoint serves the rebuild (the newest checkpoint when the store holds one, else the newest per-chain anchor)
+//   - covered material stays unread where the restored checkpoint vouches it
+//   - beside no restored checkpoint the anchor bounds the projection read alone, so the seam decodes the covered range too
+//   - negative: TestAnchorRebuildFoldsTheRangeNoCheckpointVouches
+//   - the decode saving rides a checkpoint a real boot restores: TestDefaultBootRebuildsFromTheAnchor, TestSymptomAnchorSessionBootCostFlatAcrossGenerations
 //
 // 契约: docs/wiki/reliability/durable-delivery.md#canonical-fact-resolution
 func TestAnchoredBootMatchesFullBoot(t *testing.T) {
@@ -240,18 +243,17 @@ func TestAnchoredBootMatchesFullBoot(t *testing.T) {
 }
 
 // resetCompression replaces the compression consumer of one run with an empty
-// one over the same session face, so the accounting a rebuild makes is what the
+// one over the same two faces, so the accounting a rebuild makes is what the
 // read answers instead of the accounting the assembly already made.
 func resetCompression(run *Run) {
-	run.compress = NewCompressionConsumer(run.compress.sessions)
+	run.compress = NewCompressionConsumer(run.compress.sessions, run.compress.products)
 }
 
-// answeredCount reports how many judgments one consumer holds as answered.
+// answeredCount reports how many judgments one consumer read an answer for: the
+// notes that struck a judgment it still owed.
 func answeredCount(t *testing.T, run *Run) int {
 	t.Helper()
-	run.compress.mu.Lock()
-	defer run.compress.mu.Unlock()
-	return len(run.compress.answered)
+	return run.compress.struckNotes()
 }
 
 // chainIndexSize counts the facts one tier indexes, the denominator the boot

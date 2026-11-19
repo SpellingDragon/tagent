@@ -797,7 +797,7 @@ const (
 // and neither family ever stands committed beside the other missing.
 //   - The duplicate judgment of both families and the commit under it run in one critical section, and the storage root's exclusive write rights keep every other writer out of that section, so no two writers interleave the judgment and the landing of one fact
 //   - A fact the store already holds stays the fact it is: no key moves, no sequence slot is taken and the window meta is not refreshed
-//   - A refusal the engine decides before writing is reported as the refusal it is, never as an uncertain outcome the caller would re-read
+//   - A refusal the engine decides before writing is reported as the refusal it is, never as an uncertain outcome the caller would re-read: the seam states that a commit returning an error published no part of its batch, so only ErrCommitUncertain leaves the caller a read to make, and every other failure names a fact that landed no key
 //   - An uncertain outcome publishes nothing to either store's in-process state, because that view answers absence beside a batch that landed whole
 //
 // 契约: docs/wiki/memory/memory-architecture.md#event-shape
@@ -847,11 +847,7 @@ func CommitFact(ctx context.Context, tier *Tier, fact FactCommit) (FactCommitOut
 		puts = append(puts, originalPlan.puts...)
 	}
 	if err := segments.kv.Commit(ctx, Batch{Puts: puts}); err != nil {
-		outcome := FactUncertain
-		if factCommitRefused(err) {
-			outcome = FactRefused
-		}
-		return outcome, fmt.Errorf("%w: %w", ErrSegmentBarrier, err)
+		return factCommitOutcomeOfCommit(err), fmt.Errorf("%w: %w", ErrSegmentBarrier, err)
 	}
 	segments.publishEventLocked(eventPlan)
 	if originalPlan != nil {
@@ -869,10 +865,16 @@ func factCommitOutcomeOf(err error) FactCommitOutcome {
 	return FactRefused
 }
 
-// factCommitRefused reports whether one failed commit was decided before it wrote
-// any key, so it names a refusal instead of an outcome the caller must re-read.
-func factCommitRefused(err error) bool {
-	return errors.Is(err, ErrJournalFrameTooLarge) || errors.Is(err, ErrCommitAfterClose)
+// factCommitOutcomeOfCommit classifies one commit the storage seam failed: the
+// seam states that a commit returning an error published no part of its batch and
+// that a durable outcome it cannot name answers ErrCommitUncertain, so the uncertain
+// answer is the one outcome a caller must read back and every other failure is a
+// refusal that landed no key — whichever name the engine gave it.
+func factCommitOutcomeOfCommit(err error) FactCommitOutcome {
+	if errors.Is(err, ErrCommitUncertain) {
+		return FactUncertain
+	}
+	return FactRefused
 }
 
 // GetEvent returns the committed event under key together with the index

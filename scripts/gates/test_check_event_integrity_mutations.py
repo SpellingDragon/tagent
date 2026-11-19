@@ -166,15 +166,51 @@ def control_with_parallel_cases(test_name):
     ], 0)
 
 
+def waived_race_report():
+    return ("==================\nWARNING: DATA RACE\nWrite at 0x00c0001 by goroutine 7:\n"
+            "  trpc-agent-go/internal/steer.go:10 +0x1\n"
+            "==================\n")
+
+
 def control_with_a_waived_race(test_name):
-    report = ("==================\nWARNING: DATA RACE\nWrite at 0x00c0001 by goroutine 7:\n"
-              "  trpc-agent-go/internal/steer.go:10 +0x1\n"
-              "==================\n")
     return run_result(test_name, [
         event("start"),
         event("run", test_name),
-        event("output", test_name, report),
+        event("output", test_name, waived_race_report()),
+        event("output", test_name, "    testing.go:1865: race detected during execution of test\n"),
         event("output", test_name, "--- FAIL: " + test_name + " (0.50s)\n"),
+        event("fail", test_name),
+        event("fail"),
+    ], 1)
+
+
+def control_failing_an_assertion_beside_a_waived_race(test_name):
+    """A real assertion failure under the same registered race report."""
+    return run_result(test_name, [
+        event("start"),
+        event("run", test_name),
+        event("output", test_name, waived_race_report()),
+        event("output", test_name,
+              "    event_integrity_test.go:52: no query face may report success\n"),
+        event("output", test_name, "--- FAIL: " + test_name + " (0.50s)\n"),
+        event("fail", test_name),
+        event("fail"),
+    ], 1)
+
+
+def control_with_a_waived_race_beside_an_asserting_case(test_name):
+    """One case raced, another failed for itself: the race explains only its own."""
+    raced, asserted = test_name + "/raced_case", test_name + "/asserted_case"
+    return run_result(test_name, [
+        event("start"),
+        event("run", test_name),
+        event("run", raced),
+        event("output", raced, waived_race_report()),
+        event("output", raced, "    testing.go:1865: race detected during execution of test\n"),
+        event("fail", raced),
+        event("run", asserted),
+        event("output", asserted, "    event_integrity_test.go:52: no query face may report success\n"),
+        event("fail", asserted),
         event("fail", test_name),
         event("fail"),
     ], 1)
@@ -532,6 +568,72 @@ class ControlTreeFaceTest(unittest.TestCase):
         control = self._control(control_with_a_waived_race(self.mutation.test_name))
         self.assertEqual(control["verdict"], "green")
         self.assertEqual(control["reason"], "green_race_waived")
+
+    def test_control_asserting_beside_a_waived_race_is_red(self):
+        result = control_failing_an_assertion_beside_a_waived_race(self.mutation.test_name)
+        verdict = gate.classify_control(result)
+        self.assertEqual(verdict["verdict"], "red")
+        self.assertEqual(verdict["reason"], "test_failed")
+        self.assertEqual(verdict["failing"], [self.mutation.test_name])
+        self.assertFalse(self._decision(self._control(result))["ok"])
+
+    def test_control_with_an_asserting_case_beside_a_raced_case_is_red(self):
+        result = control_with_a_waived_race_beside_an_asserting_case(self.mutation.test_name)
+        verdict = gate.classify_control(result)
+        self.assertEqual(verdict["verdict"], "red")
+        self.assertEqual(verdict["reason"], "test_failed")
+        self.assertIn(self.mutation.test_name + "/asserted_case", verdict["failing"])
+        self.assertFalse(self._decision(self._control(result))["ok"])
+
+
+class RepointedHandoverAnchorTest(unittest.TestCase):
+    """13.R2d: the handover confirmation anchor follows the sink 12.R2.5 reshaped.
+
+    The sink hands the settled result over through the refusal branch of the
+    backflow and records the consumption after it, so a registry still anchored on
+    the bare call names a form no tree carries. That form must read stale, and the
+    re-pointed registration must be the one that passes: the anchor moved with the
+    code instead of the check being loosened.
+    """
+
+    ID = "MUT-CAND-01.2-handover-confirm"
+
+    def setUp(self):
+        self.root = gate.DEFAULT_ROOT
+        self.mutation = [mutation for mutation in gate.MUTATIONS
+                         if mutation.id == self.ID][0]
+        self.old_form = dataclasses.replace(self.mutation, replacement=gate.Replacement(
+            file="assembly/facts.go",
+            old=("\tr.loop.Backflow(frame.Identity.InvocationID, notice)\n"
+                 "\treturn r.store.Consume(ctx, frame.Address, frame.Identity.InstanceID, seq)\n"),
+            new=("\tif err := r.store.Consume(ctx, frame.Address, frame.Identity.InstanceID, seq); "
+                 "err != nil {\n"
+                 "\t\treturn err\n"
+                 "\t}\n"
+                 "\tr.loop.Backflow(frame.Identity.InvocationID, notice)\n"
+                 "\treturn nil\n"),
+        ))
+
+    def test_the_anchor_the_sink_no_longer_carries_is_stale(self):
+        patched = [self.old_form if mutation.id == self.ID else mutation
+                   for mutation in gate.MUTATIONS]
+        problems = gate.validate_registry(self.root, patched)
+        stale = [problem for problem in problems if "stale mutation" in problem]
+        self.assertEqual(len(stale), 1, problems)
+        self.assertIn(self.ID, stale[0])
+        self.assertIn("assembly/facts.go", stale[0])
+
+    def test_the_registered_anchor_is_the_refusal_branch_of_the_sink(self):
+        self.assertEqual(gate.validate_registry(self.root, gate.MUTATIONS), [])
+        sink = (self.root / "assembly/facts.go").read_text(encoding="utf-8")
+        self.assertEqual(sink.count(self.mutation.replacement.old), 1)
+        self.assertIn("retainNoticeOwed", self.mutation.replacement.old)
+        self.assertTrue(self.mutation.replacement.old.rstrip().endswith(
+            "r.store.Consume(ctx, frame.Address, frame.Identity.InstanceID, seq)"))
+
+    def test_the_mutated_form_records_the_consumption_before_the_handover(self):
+        new = self.mutation.replacement.new
+        self.assertLess(new.index("r.store.Consume"), new.index("r.loop.Backflow"))
 
 
 class AssertionAttributionTest(unittest.TestCase):
@@ -927,32 +1029,53 @@ class MutationBaselineTest(unittest.TestCase):
         self.assertEqual(entry["module_path"], runtime_runner.MODULE_PATH)
         self.assertRegex(entry["revision"], r"^[0-9a-f]{7,40}$")
         self.assertRegex(entry["content_hash"], r"^sha256:[0-9a-f]{64}$")
-        # One definition: the report names exactly what the runner fingerprints.
-        self.assertEqual(
-            entry,
-            runtime_runner.module_fingerprint(str(self.root), ".",
-                                              runtime_runner.MODULE_PATH))
+        # One definition: the report names exactly what the runner fingerprints,
+        # plus the role that says why the module is in the closure.
+        self.assertEqual(entry["roles"], ["tested"])
+        shared = runtime_runner.module_fingerprint(str(self.root), ".",
+                                                  runtime_runner.MODULE_PATH)
+        self.assertEqual({field: entry[field] for field in shared}, shared)
+
+    def test_report_names_the_closure_and_the_gate_that_decided_it(self):
+        binding = self.payload["source_binding"]
+        self.assertEqual([entry["dir"] for entry in binding["modules"]], ["."])
+        self.assertEqual(binding["workspace"]["state"], "absent")
+        self.assertEqual(binding["edges"], [])
+        self.assertEqual(binding["before"], {"digest": binding["digest"], "modules": 1})
+        self.assertEqual(binding["after"], binding["before"])
+        # The gate whose verdict vocabulary decides "killed" names its own bytes.
+        self.assertEqual(self.payload["gate_tool"]["entrypoint"],
+                         "scripts/gates/check_event_integrity_mutations.py")
+        self.assertRegex(self.payload["gate_tool"]["digest"], r"^sha256:[0-9a-f]{64}$")
 
     def _bundle(self, name="producer-baseline"):
-        """A legal runner bundle whose root fingerprint is the real tested tree.
+        """A legal runner bundle describing the same tree as the report.
 
-        EventFixture's fingerprints are synthetic; the producer names the tree
-        it really fingerprinted, so the fixture's root module entry is replaced
-        with that same runner-side value and everything else stays untouched.
+        The checker re-resolves every closure against `--repo-root`, so the fixture
+        bundle has to describe the tested tree rather than a synthetic one: the
+        evidence is generated from the real repository and checked against it.
+        That includes the revision: the fixture resolves a tree with no checkout,
+        so its binding carries a placeholder there, while this bundle describes the
+        repository the report was driven in and the report names the revision it
+        read. Naming another revision is what the baseline gate refuses, so the
+        runs name the same one the report does.
         """
         fixture = runtime_evidence.EventFixture()
         fixture.setUp()
         self.addCleanup(fixture.tearDown)
-        bundle = fixture.write_bundle(name, mutation=False)
-        tested = self.payload["module_fingerprints"][0]
-        for directory in sorted(bundle.glob("short-*")):
-            path = directory / "evidence.json"
-            evidence = json.loads(path.read_text(encoding="utf-8"))
-            evidence["module_fingerprints"] = [
-                tested if item.get("module_path") == tested["module_path"] else item
-                for item in evidence["module_fingerprints"]]
-            path.write_text(json.dumps(evidence, ensure_ascii=False, indent=2),
-                            encoding="utf-8")
+        revision = self.payload["module_fingerprints"][0]["revision"]
+
+        def same_baseline(evidence):
+            for module in evidence["source_binding"]["modules"]:
+                module["revision"] = revision
+            for module in evidence["module_fingerprints"]:
+                module["revision"] = revision
+            return evidence
+
+        bundle = fixture.write_bundle(
+            name, mutation=False, tree=self.root,
+            short_hook=lambda index, evidence: same_baseline(evidence),
+            long_hook=lambda seed, window, evidence: same_baseline(evidence))
         mutations = bundle / "mutations"
         mutations.mkdir()
         return bundle, mutations
@@ -960,7 +1083,7 @@ class MutationBaselineTest(unittest.TestCase):
     def _check_bundle(self, bundle):
         return runtime_evidence.run_checker(
             "--contract", str(runtime_evidence.REAL_EVENT_CONTRACT),
-            "--bundle", str(bundle), "--json")
+            "--repo-root", str(self.root), "--bundle", str(bundle), "--json")
 
     def test_produced_report_passes_the_bundle_same_baseline_gate(self):
         bundle, mutations = self._bundle()

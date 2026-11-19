@@ -23,6 +23,17 @@ import (
 // invariantAddress is the explicit address every record and delivery of these invariants names.
 var invariantAddress = event.Address{AgentID: "agent-a", SessionID: "session-a"}
 
+// loadedDurableCommit answers the account of one fact log read whole, through the
+// entry a boot that holds no checkpoint seats with: a seat beside no payload falls
+// back to the whole log, so this is the read a caller without a cut pays.
+func loadedDurableCommit(ctx context.Context, log durable.FactLog, uncertain task.UncertainProbe) (*DurableCommit, error) {
+	d := NewEmptyDurableCommit(log, uncertain)
+	if err := d.Seat(ctx, nil, nil); err != nil {
+		return nil, err
+	}
+	return d, nil
+}
+
 // TestDurableFactChainInvariants pins the fact chain's idempotency and the single advance of a delivery.
 // - a repeated mutation identity stores one fact and leaves every delivery where it was
 // - one mutation identity beside other content, and a record expecting another revision, are refused by name
@@ -36,7 +47,7 @@ func TestDurableFactChainInvariants(t *testing.T) {
 	taskID := event.TaskID("task-1")
 
 	t.Run("a repeated mutation identity stores one fact and leaves every delivery where it was", func(t *testing.T) {
-		commit, err := NewDurableCommit(newInvariantFactLog(), nil)
+		commit, err := loadedDurableCommit(ctx, newInvariantFactLog(), nil)
 		if err != nil {
 			t.Fatalf("open the durable commit: %v", err)
 		}
@@ -71,7 +82,7 @@ func TestDurableFactChainInvariants(t *testing.T) {
 	})
 
 	t.Run("one mutation identity beside other content is refused by name", func(t *testing.T) {
-		commit, err := NewDurableCommit(newInvariantFactLog(), nil)
+		commit, err := loadedDurableCommit(ctx, newInvariantFactLog(), nil)
 		if err != nil {
 			t.Fatalf("open the durable commit: %v", err)
 		}
@@ -93,7 +104,7 @@ func TestDurableFactChainInvariants(t *testing.T) {
 	})
 
 	t.Run("a record expecting another revision is refused by name", func(t *testing.T) {
-		commit, err := NewDurableCommit(newInvariantFactLog(), nil)
+		commit, err := loadedDurableCommit(ctx, newInvariantFactLog(), nil)
 		if err != nil {
 			t.Fatalf("open the durable commit: %v", err)
 		}
@@ -107,7 +118,7 @@ func TestDurableFactChainInvariants(t *testing.T) {
 
 	t.Run("a commit the write barrier left unconfirmed reports uncertain and keeps no fact", func(t *testing.T) {
 		log := newInvariantFactLog()
-		commit, err := NewDurableCommit(log, nil)
+		commit, err := loadedDurableCommit(ctx, log, nil)
 		if err != nil {
 			t.Fatalf("open the durable commit: %v", err)
 		}
@@ -134,7 +145,7 @@ func TestDurableFactChainInvariants(t *testing.T) {
 
 	t.Run("a probed attempt is uncertain and is never counted as stored", func(t *testing.T) {
 		probe := func(task.CommitRecord) bool { return true }
-		commit, err := NewDurableCommit(newInvariantFactLog(), probe)
+		commit, err := loadedDurableCommit(ctx, newInvariantFactLog(), probe)
 		if err != nil {
 			t.Fatalf("open the durable commit: %v", err)
 		}
@@ -148,7 +159,7 @@ func TestDurableFactChainInvariants(t *testing.T) {
 
 	t.Run("a second commit over the same log revives the facts and every delivery as pending again", func(t *testing.T) {
 		log := newInvariantFactLog()
-		first, err := NewDurableCommit(log, nil)
+		first, err := loadedDurableCommit(ctx, log, nil)
 		if err != nil {
 			t.Fatalf("open the first durable commit: %v", err)
 		}
@@ -167,7 +178,7 @@ func TestDurableFactChainInvariants(t *testing.T) {
 		if err := first.Declare(ctx, taskID, spec); err != nil {
 			t.Fatalf("declare the admission material: %v", err)
 		}
-		second, err := NewDurableCommit(log, nil)
+		second, err := loadedDurableCommit(ctx, log, nil)
 		if err != nil {
 			t.Fatalf("reopen the durable commit over the same log: %v", err)
 		}
@@ -202,7 +213,7 @@ func TestDurableFactChainInvariants(t *testing.T) {
 	})
 
 	t.Run("the admission material is declared once and never replaced by other content", func(t *testing.T) {
-		commit, err := NewDurableCommit(newInvariantFactLog(), nil)
+		commit, err := loadedDurableCommit(ctx, newInvariantFactLog(), nil)
 		if err != nil {
 			t.Fatalf("open the durable commit: %v", err)
 		}
@@ -221,7 +232,7 @@ func TestDurableFactChainInvariants(t *testing.T) {
 	})
 
 	t.Run("an acceptance of a notification the commit owes nothing for is refused by name", func(t *testing.T) {
-		commit, err := NewDurableCommit(newInvariantFactLog(), nil)
+		commit, err := loadedDurableCommit(ctx, newInvariantFactLog(), nil)
 		if err != nil {
 			t.Fatalf("open the durable commit: %v", err)
 		}
@@ -645,7 +656,7 @@ func TestDurableCommitFailureObservation(t *testing.T) {
 		observer := &durableObserver{}
 		defer watchDurableLog(t, observer)()
 		log := newInvariantFactLog()
-		commit, err := NewDurableCommit(log, nil)
+		commit, err := loadedDurableCommit(ctx, log, nil)
 		if err != nil {
 			t.Fatalf("open the commit: %v", err)
 		}
@@ -663,7 +674,7 @@ func TestDurableCommitFailureObservation(t *testing.T) {
 		observer := &durableObserver{}
 		defer watchDurableLog(t, observer)()
 		log := newInvariantFactLog()
-		commit, err := NewDurableCommit(log, nil)
+		commit, err := loadedDurableCommit(ctx, log, nil)
 		if err != nil {
 			t.Fatalf("open the commit: %v", err)
 		}
@@ -681,7 +692,7 @@ func TestDurableCommitFailureObservation(t *testing.T) {
 		observer := &durableObserver{}
 		defer watchDurableLog(t, observer)()
 		log := newInvariantFactLog()
-		commit, err := NewDurableCommit(log, nil)
+		commit, err := loadedDurableCommit(ctx, log, nil)
 		if err != nil {
 			t.Fatalf("open the commit: %v", err)
 		}
@@ -699,7 +710,7 @@ func TestDurableCommitFailureObservation(t *testing.T) {
 		defer watchDurableLog(t, observer)()
 		log := newInvariantFactLog()
 		log.refuseScan(writeErr)
-		commit, err := NewDurableCommit(log, nil)
+		commit, err := loadedDurableCommit(ctx, log, nil)
 		if !errors.Is(err, writeErr) || commit != nil {
 			t.Fatalf("open beside an unreadable log = (%v, %v), want no commit beside the failure", commit, err)
 		}
@@ -712,7 +723,7 @@ func TestDurableCommitFailureObservation(t *testing.T) {
 		observer := &durableObserver{panicsLeft: 1}
 		defer watchDurableLog(t, observer)()
 		log := newInvariantFactLog()
-		commit, err := NewDurableCommit(log, nil)
+		commit, err := loadedDurableCommit(ctx, log, nil)
 		if err != nil {
 			t.Fatalf("open the commit beside a failing logger: %v", err)
 		}
@@ -865,7 +876,7 @@ func TestSettleAttemptRecordInvariants(t *testing.T) {
 
 	t.Run("the in-flight marker and the terminal are one record per notification", func(t *testing.T) {
 		log := &countingFactLog{FactLog: newInvariantFactLog()}
-		commit, err := NewDurableCommit(log, nil)
+		commit, err := loadedDurableCommit(ctx, log, nil)
 		if err != nil {
 			t.Fatalf("open the commit: %v", err)
 		}
@@ -897,14 +908,14 @@ func TestSettleAttemptRecordInvariants(t *testing.T) {
 
 	t.Run("a commit opened over the same log reads the attempt back", func(t *testing.T) {
 		log := newInvariantFactLog()
-		first, err := NewDurableCommit(log, nil)
+		first, err := loadedDurableCommit(ctx, log, nil)
 		if err != nil {
 			t.Fatalf("open the commit: %v", err)
 		}
 		if err := first.recordAttempt(ctx, notice, SettleAttempt{Terminal: "completed"}); err != nil {
 			t.Fatalf("record the attempt: %v", err)
 		}
-		second, err := NewDurableCommit(log, nil)
+		second, err := loadedDurableCommit(ctx, log, nil)
 		if err != nil {
 			t.Fatalf("reopen the commit: %v", err)
 		}
@@ -916,7 +927,7 @@ func TestSettleAttemptRecordInvariants(t *testing.T) {
 
 	t.Run("a repeated record of the same content stages no second pair", func(t *testing.T) {
 		log := &countingFactLog{FactLog: newInvariantFactLog()}
-		commit, err := NewDurableCommit(log, nil)
+		commit, err := loadedDurableCommit(ctx, log, nil)
 		if err != nil {
 			t.Fatalf("open the commit: %v", err)
 		}
@@ -932,7 +943,7 @@ func TestSettleAttemptRecordInvariants(t *testing.T) {
 
 	t.Run("a refused write confirms no attempt", func(t *testing.T) {
 		log := newInvariantFactLog()
-		commit, err := NewDurableCommit(log, nil)
+		commit, err := loadedDurableCommit(ctx, log, nil)
 		if err != nil {
 			t.Fatalf("open the commit: %v", err)
 		}
@@ -1049,7 +1060,7 @@ func durableRoundChain(t *testing.T, taskID event.TaskID, links []roundLink, con
 	t.Helper()
 	ctx := context.Background()
 	log := newInvariantFactLog()
-	commit, err := NewDurableCommit(log, nil)
+	commit, err := loadedDurableCommit(ctx, log, nil)
 	if err != nil {
 		t.Fatalf("open the durable commit: %v", err)
 	}
@@ -1089,7 +1100,7 @@ func durableRoundChain(t *testing.T, taskID event.TaskID, links []roundLink, con
 			t.Fatalf("record the consumption of round %d: %v", round, err)
 		}
 	}
-	reopened, err := NewDurableCommit(log, nil)
+	reopened, err := loadedDurableCommit(ctx, log, nil)
 	if err != nil {
 		t.Fatalf("reopen the durable commit: %v", err)
 	}
@@ -1116,7 +1127,7 @@ func (roundOwners) OwnerOf(_ context.Context, _ event.AgentID, target event.Agen
 func TestLoadScanCounts(t *testing.T) {
 	ctx := context.Background()
 	log := newInvariantFactLog()
-	first, err := NewDurableCommit(log, nil)
+	first, err := loadedDurableCommit(ctx, log, nil)
 	if err != nil {
 		t.Fatalf("open the first commit: %v", err)
 	}
@@ -1131,7 +1142,7 @@ func TestLoadScanCounts(t *testing.T) {
 	if err := first.recordConsumption(ctx, record.Outbox[0].Notice); err != nil {
 		t.Fatalf("record the consumption receipt: %v", err)
 	}
-	second, err := NewDurableCommit(log, nil)
+	second, err := loadedDurableCommit(ctx, log, nil)
 	if err != nil {
 		t.Fatalf("rebuild the commit from the same log: %v", err)
 	}
@@ -1239,7 +1250,7 @@ func seededSpec(tag string) task.Spec {
 // attempt and one refusal with its routing and moment frozen.
 func seedCommit(t *testing.T, ctx context.Context, log durable.FactLog, taskID event.TaskID, tag string) {
 	t.Helper()
-	commit, err := NewDurableCommit(log, nil)
+	commit, err := loadedDurableCommit(ctx, log, nil)
 	if err != nil {
 		t.Fatalf("open the seeding commit: %v", err)
 	}
@@ -1333,7 +1344,7 @@ func TestDurableCommitBarrier(t *testing.T) {
 		if err != nil {
 			t.Fatalf("reopen the journal tier: %v", err)
 		}
-		restored, err := NewDurableCommit(ledger.TierFactLog(reopened), nil)
+		restored, err := loadedDurableCommit(ctx, ledger.TierFactLog(reopened), nil)
 		if err != nil {
 			t.Fatalf("restore the commit beside the committed facts: %v", err)
 		}
@@ -1352,7 +1363,7 @@ func TestDurableCommitBarrier(t *testing.T) {
 			t.Fatalf("open the journal tier: %v", err)
 		}
 		log := barrierFailureLog{FactLog: ledger.TierFactLog(tier)}
-		commit, err := NewDurableCommit(log, nil)
+		commit, err := loadedDurableCommit(ctx, log, nil)
 		if err != nil {
 			t.Fatalf("open the commit behind the failing barrier: %v", err)
 		}
@@ -1415,7 +1426,7 @@ func TestDurableLoadReadsTheTaskSlice(t *testing.T) {
 	log := newInvariantFactLog()
 	taskID := event.TaskID("task-seat-covered")
 	seedCommit(t, ctx, log, taskID, "seat")
-	loaded, err := NewDurableCommit(log, nil)
+	loaded, err := loadedDurableCommit(ctx, log, nil)
 	if err != nil {
 		t.Fatalf("load the commit from the whole log: %v", err)
 	}
@@ -1567,7 +1578,7 @@ func TestOwedSetKeepsTheHoleWhenLaterNoticesComplete(t *testing.T) {
 	log := newInvariantFactLog()
 	taskID := event.TaskID("task-hole")
 	notices := seedThreeNoticeTask(t, ctx, log, taskID)
-	durable, err := NewDurableCommit(log, nil)
+	durable, err := loadedDurableCommit(ctx, log, nil)
 	if err != nil {
 		t.Fatalf("load the account: %v", err)
 	}
@@ -1650,7 +1661,7 @@ func TestSeatedAccountAgreesWithIdentityRead(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("record the refusal of the same task: %v", err)
 	}
-	loaded, err := NewDurableCommit(log, nil)
+	loaded, err := loadedDurableCommit(ctx, log, nil)
 	if err != nil {
 		t.Fatalf("load the whole log: %v", err)
 	}
@@ -1700,7 +1711,7 @@ func TestEffectiveTaskSetIsTheStatedAccountPlusTheTail(t *testing.T) {
 	seedCommit(t, ctx, log, covered, "covered")
 	seedCommit(t, ctx, log, young, "young")
 	seedCommit(t, ctx, log, dropped, "dropped")
-	loaded, err := NewDurableCommit(log, nil)
+	loaded, err := loadedDurableCommit(ctx, log, nil)
 	if err != nil {
 		t.Fatalf("load the whole log: %v", err)
 	}
@@ -1738,6 +1749,223 @@ func TestEffectiveTaskSetIsTheStatedAccountPlusTheTail(t *testing.T) {
 		ids, len(byIdentity.ReceiptsOf(dropped).Consumed))
 }
 
+// unloadedFinishedTask is one stopped process's localfile root beside the task it
+// finished: the checkpoint payload a boot seats (which states no entry for that
+// task), the notification whose consumption receipt the log holds, the
+// notification whose follow-up turn landed, and the notification nobody accepted.
+type unloadedFinishedTask struct {
+	cfg     ledger.StorageConfig
+	payload []byte
+	taskID  event.TaskID
+	settled task.Envelope
+	landed  task.Envelope
+	owed    task.Envelope
+}
+
+// finishOneUnloadedTask runs one process over a real localfile root: it admits a
+// task, settles it beside three notifications, consumes the first through the
+// mailbox consumer, lands the attempt of the second, leaves the third accepted by
+// nobody and files the checkpoint that states no entry for the finished task, then
+// closes the tier the way a stop leaves it. The root it answers is the storage a
+// boot reopens, and the payload is the account that boot seats.
+func finishOneUnloadedTask(t *testing.T, ctx context.Context) unloadedFinishedTask {
+	t.Helper()
+	cfg := ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: t.TempDir(), WriteRights: true}
+	tier, err := ledger.OpenTier(ctx, cfg)
+	if err != nil {
+		t.Fatalf("open the localfile root: %v", err)
+	}
+	commit, err := loadedDurableCommit(ctx, ledger.TierFactLog(tier), nil)
+	if err != nil {
+		t.Fatalf("open the durable account of the root: %v", err)
+	}
+	registry := task.NewMemoryRegistry(commit, task.NewMemoryAdmission())
+	spec := seededSpec("unloaded")
+	receipt, err := registry.Register(ctx, spec)
+	if err != nil || receipt.Kind != task.AdmissionFresh {
+		t.Fatalf("admit the task = (%+v, %v), want a fresh admission", receipt, err)
+	}
+	taskID := receipt.TaskID
+	notices := []task.Notice{invariantNotice(taskID, 1), invariantNotice(taskID, 2), invariantNotice(taskID, 3)}
+	record := invariantRecord(taskID, 0, task.StatusSettled, notices...)
+	for at := range record.Outbox {
+		record.Outbox[at].Target = spec.Target
+		record.Outbox[at].TargetInstance = spec.InstanceID
+	}
+	if result, err := registry.Advance(ctx, taskID, task.StatusSettled, record.MutationID, record.Outbox); err != nil || result != task.CommitCommitted {
+		t.Fatalf("settle the task = (%v, %v), want a committed change", result, err)
+	}
+
+	store := NewMemoryStore(NewAuthority(), commit)
+	if err := store.TrackDelivery(ctx, taskID, task.HandoffTarget{Target: spec.Target, TargetInstance: spec.InstanceID}); err != nil {
+		t.Fatalf("register the delivery route of the task: %v", err)
+	}
+	if err := store.restoreSeat(spec.Target, spec.InstanceID); err != nil {
+		t.Fatalf("open the site of the target: %v", err)
+	}
+	for _, notice := range notices {
+		if err := store.AcceptNotice(ctx, notice); err != nil {
+			t.Fatalf("accept %s: %v", notice.FactKey(), err)
+		}
+	}
+	seats := store.Unconsumed()
+	if len(seats) != len(notices) {
+		t.Fatalf("the mailbox holds %d accepted entrie(s), want the %d notifications the task committed", len(seats), len(notices))
+	}
+	if err := store.Claim(ctx, spec.Target, spec.InstanceID, seats[0].AcceptSeq); err != nil {
+		t.Fatalf("claim the first accepted entry: %v", err)
+	}
+	if err := store.Consume(ctx, spec.Target, spec.InstanceID, seats[0].AcceptSeq); err != nil {
+		t.Fatalf("consume the first accepted entry: %v", err)
+	}
+	if err := store.RecordAttempt(ctx, notices[1], SettleAttempt{Terminal: "completed"}); err != nil {
+		t.Fatalf("land the follow-up turn of the second notification: %v", err)
+	}
+	manager := task.NewMemoryManager(registry, func(context.Context, task.Notice) (task.DeliveryAcceptance, error) {
+		return task.DeliveryAccepted, nil
+	})
+	if err := manager.Flush(ctx, taskID); err != nil {
+		t.Fatalf("flush the deliveries the task still owes: %v", err)
+	}
+	payload, err := registry.SnapshotCheckpoint(ctx)
+	if err != nil {
+		t.Fatalf("file the task account: %v", err)
+	}
+	var wire task.RegistryCheckpoint
+	if err := json.Unmarshal(payload, &wire); err != nil {
+		t.Fatalf("read the filed task account: %v", err)
+	}
+	if len(wire.Tasks) != 0 {
+		t.Fatalf("the checkpoint states %d task entry(ies) of a task that finished with every obligation cleared, want none: its record stays on the chain",
+			len(wire.Tasks))
+	}
+	if err := tier.Close(); err != nil {
+		t.Fatalf("close the localfile root before the boot: %v", err)
+	}
+	return unloadedFinishedTask{cfg: cfg, payload: payload, taskID: taskID,
+		settled: record.Outbox[0], landed: record.Outbox[1], owed: record.Outbox[2]}
+}
+
+// bootUnloadedTask reopens the root of the stopped process and seats the account
+// its checkpoint states beside the empty tail: nil is a storage that states no
+// cut, and the empty set is the tail of a storage whose last commit is the
+// checkpoint, so nothing the checkpoint never stated is read into the account and
+// every receipt below is one the boot reads by identity or not at all.
+func bootUnloadedTask(t *testing.T, ctx context.Context, fixture unloadedFinishedTask) (*DurableCommit, *MemoryStore) {
+	t.Helper()
+	tier, err := ledger.OpenTier(ctx, fixture.cfg)
+	if err != nil {
+		t.Fatalf("reopen the localfile root: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := tier.Close(); err != nil {
+			t.Fatalf("close the reopened localfile root: %v", err)
+		}
+	})
+	account := NewEmptyDurableCommit(ledger.TierFactLog(tier), nil)
+	if err := account.Seat(ctx, fixture.payload, map[string]struct{}{}); err != nil {
+		t.Fatalf("seat the account the checkpoint states: %v", err)
+	}
+	return account, NewMemoryStore(NewAuthority(), account)
+}
+
+// staleMailboxPayload renders the mailbox slice a cut filed before the deliveries
+// below landed, so a boot restores obligations its account has since answered.
+func staleMailboxPayload(t *testing.T, owed ...task.Envelope) []byte {
+	t.Helper()
+	stated := make([]task.OutboxNotice, 0, len(owed))
+	for _, envelope := range owed {
+		stated = append(stated, task.OutboxNotice{Notice: envelope, Delivery: task.DeliveryPending})
+	}
+	payload, err := json.Marshal(mailboxSliceWire{Owed: stated})
+	if err != nil {
+		t.Fatalf("state the mailbox slice: %v", err)
+	}
+	return payload
+}
+
+// TestUnloadedSettledReceiptStaysSettled pins the receipt a boot reads for a task its checkpoint never stated.
+//   - fixture: one real localfile root holding a task the run finished, so the checkpoint states no entry for it and the tail states no key
+//   - positive: the consumption receipt the log holds reads back by the notification's own key, so the settled notification opens no delivery
+//   - positive: the terminal a follow-up turn landed reads back the same way, so a restart closes the entry beside it instead of driving a second turn
+//   - negative: a notification the log holds neither a receipt nor an attempt for stays owed
+//   - consumer: the mailbox restore folds a stale payload through settled, and MemoryStore.Attempt reads the turn through attemptOf
+//
+// 契约: docs/wiki/reliability/durable-delivery.md#canonical-fact-resolution
+func TestUnloadedSettledReceiptStaysSettled(t *testing.T) {
+	ctx := context.Background()
+	fixture := finishOneUnloadedTask(t, ctx)
+	account, store := bootUnloadedTask(t, ctx, fixture)
+	if ids := account.TaskIDs(); len(ids) != 0 {
+		t.Fatalf("the seated account holds the task(s) %v, want none: the finished task states no checkpoint entry and the tail states no key of it", ids)
+	}
+
+	if !account.settled(fixture.settled.Notice) {
+		t.Fatalf("the settled notification %s reads as unsettled, want the consumption receipt the log holds: the boot seats no identity of a finished task, and a receipt it cannot read is a delivery the restore owes a second time",
+			fixture.settled.Notice.FactKey())
+	}
+	attempt, held, err := store.Attempt(ctx, fixture.landed.Notice)
+	if err != nil || !held || attempt.Terminal != "completed" {
+		t.Fatalf("the attempt of %s reads as (%+v, held=%v, err=%v), want the completed terminal the log holds: a restart that cannot read it drives a second turn for the same notification",
+			fixture.landed.Notice.FactKey(), attempt, held, err)
+	}
+	if account.settled(fixture.owed.Notice) {
+		t.Fatalf("the notification %s nobody accepted reads as settled, want it owed", fixture.owed.Notice.FactKey())
+	}
+
+	if err := NewMailboxState(store).RestoreState(ctx, staleMailboxPayload(t, fixture.settled, fixture.landed, fixture.owed)); err != nil {
+		t.Fatalf("restore the mailbox the cut stated: %v", err)
+	}
+	seats := store.Unconsumed()
+	if len(seats) != 2 {
+		t.Fatalf("the restored mailbox owes %d entrie(s) %+v, want the two notifications nobody completed: the settled one is closed by the receipt the log holds",
+			len(seats), seats)
+	}
+	for _, seat := range seats {
+		if seat.Notice == fixture.settled.Notice {
+			t.Fatalf("the restored mailbox owes the settled notification %s, want it closed: the receipt the log holds is that notification's consumption result",
+				seat.Notice.FactKey())
+		}
+	}
+	t.Logf("unloaded account: settled=%v attempt=%+v owed seats=%d after a stale payload named all three",
+		account.settled(fixture.settled.Notice), attempt, len(seats))
+}
+
+// TestUnloadedOwedReceiptRemainsOwed pins the negative of the identity read: a notification nobody consumed stays owed.
+//   - positive: the notification no receipt and no attempt answers reads as owed, and the restored mailbox seats it beside its frozen routing
+//   - negative: the identity read is not a second account, so the task it answers for stays out of the seated receipts
+//
+// 契约: docs/wiki/reliability/durable-delivery.md#canonical-fact-resolution
+func TestUnloadedOwedReceiptRemainsOwed(t *testing.T) {
+	ctx := context.Background()
+	fixture := finishOneUnloadedTask(t, ctx)
+	account, store := bootUnloadedTask(t, ctx, fixture)
+	if account.settled(fixture.owed.Notice) {
+		t.Fatalf("the notification %s reads as settled, want it owed: no receipt and no attempt answers it, and a read that answered settled here would drop a delivery",
+			fixture.owed.Notice.FactKey())
+	}
+	if attempt, held := account.attemptOf(fixture.owed.Notice); held || attempt.Terminal != "" {
+		t.Fatalf("the notification %s answers the attempt (%+v, held=%v), want no attempt at all", fixture.owed.Notice.FactKey(), attempt, held)
+	}
+	receipts := account.ReceiptsOf(fixture.taskID)
+	if total := len(receipts.Consumed) + len(receipts.Attempts) + len(receipts.Rejected); total != 0 {
+		t.Fatalf("the seated account states %d receipt(s) of a task it never seated, want none: the identity read answers the reader and files no second account",
+			total)
+	}
+
+	if err := NewMailboxState(store).RestoreState(ctx, staleMailboxPayload(t, fixture.owed)); err != nil {
+		t.Fatalf("restore the mailbox the cut stated: %v", err)
+	}
+	seats := store.Unconsumed()
+	if len(seats) != 1 || seats[0].Notice != fixture.owed.Notice {
+		t.Fatalf("the restored mailbox owes %+v, want the one notification nobody completed", seats)
+	}
+	if seats[0].Address != fixture.owed.Target || seats[0].Instance != fixture.owed.TargetInstance {
+		t.Fatalf("the restored seat routes to (%v, %v), want the frozen routing (%v, %v)",
+			seats[0].Address, seats[0].Instance, fixture.owed.Target, fixture.owed.TargetInstance)
+	}
+}
+
 // TestRepeatCommitOfAStoredMutationReowsNothing pins the repeat of one stored mutation identity.
 //   - positive: the stored fact is answered, no second fact lands and no delivery state advances
 //   - negative: other content under the same identity is refused by name
@@ -1749,7 +1977,7 @@ func TestRepeatCommitOfAStoredMutationReowsNothing(t *testing.T) {
 	log := newInvariantFactLog()
 	taskID := event.TaskID("task-repeat")
 	notices := seedThreeNoticeTask(t, ctx, log, taskID)
-	durable, err := NewDurableCommit(log, nil)
+	durable, err := loadedDurableCommit(ctx, log, nil)
 	if err != nil {
 		t.Fatalf("load the account: %v", err)
 	}
@@ -1785,7 +2013,7 @@ func TestRuntimeCommitMustNotReoweAConsumedNotice(t *testing.T) {
 	log := newInvariantFactLog()
 	taskID := event.TaskID("task-reowe")
 	notices := seedThreeNoticeTask(t, ctx, log, taskID)
-	durable, err := NewDurableCommit(log, nil)
+	durable, err := loadedDurableCommit(ctx, log, nil)
 	if err != nil {
 		t.Fatalf("load the account: %v", err)
 	}
@@ -1931,7 +2159,7 @@ func TestReceiptsOfAnswersTheReceiptsOfOneTask(t *testing.T) {
 	ctx := context.Background()
 	log := newInvariantFactLog()
 	runtimeWritten, taskIDs := settledAccountPair(t, ctx, log)
-	written, err := NewDurableCommit(log, nil)
+	written, err := loadedDurableCommit(ctx, log, nil)
 	if err != nil {
 		t.Fatalf("load the account: %v", err)
 	}
@@ -2099,7 +2327,7 @@ func TestSeatStatesTheOpenWorkAndReadsAFinishedTaskBackByIdentity(t *testing.T) 
 	log := newInvariantFactLog()
 	taskID := event.TaskID("task-seat-finished")
 	seedCommit(t, ctx, log, taskID, "finished")
-	whole, err := NewDurableCommit(log, nil)
+	whole, err := loadedDurableCommit(ctx, log, nil)
 	if err != nil {
 		t.Fatalf("load the commit from the whole log: %v", err)
 	}

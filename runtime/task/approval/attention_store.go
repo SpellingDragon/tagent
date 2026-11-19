@@ -201,3 +201,14 @@ func stateOf(facts approvalFacts, held *ApprovalRequest) ApprovalState {
 	}
 	return state
 }
+
+// openObligation reports whether one recorded request states work still owed: a
+// question the chain holds with no answer beside it, within a validity the clock
+// has not run out. A ruled or expired record states history, which the reader that
+// asks for it reads from the chain, so the book keeps neither in its resident set.
+func openObligation(req ApprovalRequest, facts approvalFacts, nowMs int64) bool {
+	if _, answered := facts.answer(req.ToolName, req.ArgsDigest, req.ID); answered {
+		return false
+	}
+	return req.ExpiresMs <= 0 || nowMs < req.ExpiresMs
+}

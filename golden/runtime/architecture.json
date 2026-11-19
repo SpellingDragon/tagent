@@ -1429,12 +1429,12 @@
       "Stateful": {
         "concept": "one consumer's recoverable state as the framework sees it: the name it is keyed by, the state it states and the restore that puts it back",
         "kind": "port",
-        "spec": "compression-recovery-ticket"
+        "spec": "session-checkpoint-material"
       },
       "StateRegistry": {
         "concept": "ordered account of the state holders mounted on one runtime, aggregated at one cut and restored from one",
         "kind": "port",
-        "spec": "compression-recovery-ticket"
+        "spec": "session-checkpoint-material"
       },
       "StateSeat": {
         "concept": "governance recoverable state as the framework carries it: the tail each governance stream ended at, the index those streams folded and the approval book the rulings park calls with, restored as one slice and continued by the events past its cut",
@@ -1452,7 +1452,7 @@
         "spec": "task-registry-rebuild"
       },
       "Material": {
-        "concept": "one face's declaration of the material it reads: the routing it consumes, when it consumes it and what a failure of it leaves behind",
+        "concept": "the material one face reads: the routing it consumes, when it consumes it and what a failure of it leaves behind, declared by the face or read off the port it serves for a face that declares none",
         "kind": "declaration",
         "spec": "orchestration"
       },

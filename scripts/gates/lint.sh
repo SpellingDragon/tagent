@@ -140,9 +140,23 @@ run python3 scripts/gates/check_window_bounds.py
 # 定义做（DoD）纯度判据覆盖门：design 的每条判据须绑定一个真量锚、一个已杀死
 # 的变异与一个 CI 作业；锚只判断代理量（boot 读字节冒充墙钟）或判断口径比登记
 # 的界更松即红。判据集从 design 读，不从登记表读——两边不一致两个方向都红。
+#
+# 变异的判决只能来自运行产物（check_event_integrity_mutations.py --out 写的
+# evidence.json），登记表里手填的判决被判无效，产物还须描述本树。输出目录因此
+# 只能由本次运行给出：没给就具名失败，不搜索"最近一份绿结果"，也不把登记表当
+# 后备——缺证据的红就是这条门要的结果，不是可以绕过的环境问题。
 echo "lint: definition-of-done coverage"
 run python3 scripts/gates/test_check_dod_coverage.py
-run python3 scripts/gates/check_dod_coverage.py
+evidence_dir="${TAGENT_RUNTIME_EVIDENCE_DIR:-}"
+if [ -z "$evidence_dir" ]; then
+  echo "lint: TAGENT_RUNTIME_EVIDENCE_DIR is unset; the DoD gate counts mutation run products and there is no evidence directory to read" >&2
+  exit 1
+fi
+if [ ! -d "$evidence_dir/mutations" ]; then
+  echo "lint: the evidence directory $evidence_dir holds no mutations/ product; run check_event_integrity_mutations.py --out '$evidence_dir/mutations' (bash scripts/preflight.sh does this) and pass that directory" >&2
+  exit 1
+fi
+run python3 scripts/gates/check_dod_coverage.py --mutation-evidence "$evidence_dir/mutations"
 
 # 死生产者门：产品包内每个生产函数须有消费者。测试调用算消费者、skeleton_assert 断言不算，
 # 家族互相调用而无人可达仍判死；白名单只收「消费者在本仓之外」的已审豁免，过期豁免即红。

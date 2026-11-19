@@ -264,11 +264,13 @@ func (p *RecallPort) ChainFailure(key event.EventID) error {
 }
 
 // GetParent answers the preceding non-synthetic fact on the same chain. The
-// index normally proves the edge without bodies, so the walk stops at the first
-// entry of the key's chain older than the key: it costs the commits between the
-// key and that entry and reads no body, whether the history behind the entry is
-// one fact or a million. A key whose index entry carries no session falls back to
-// the body walk, so two sessions can never be joined accidentally.
+// index normally proves the edge without bodies: the walk reads the commit order
+// from the newest record down to the key before it can answer, and then on to the
+// first entry of the key's chain older than the key. Its cost is both segments —
+// the commits newer than the key, which grow with the history committed after it,
+// and the commits from the key to that older entry — and it reads no body whatever
+// the history behind that entry holds. A key whose index entry carries no session
+// falls back to the body walk, so two sessions can never be joined accidentally.
 func (s *tierQuerySource) GetParent(key event.EventID) (event.EventID, error) {
 	if key == "" {
 		return "", nil

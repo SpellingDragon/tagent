@@ -91,9 +91,9 @@ func TestDurableTaskRoundTrip(t *testing.T) {
 		if err != nil {
 			t.Fatalf("OpenTier: %v", err)
 		}
-		durable, err := state.NewDurableCommit(ledger.TierFactLog(tier), nil)
-		if err != nil {
-			t.Fatalf("NewDurableCommit: %v", err)
+		durable := state.NewEmptyDurableCommit(ledger.TierFactLog(tier), nil)
+		if err := durable.Seat(ctx, nil, nil); err != nil {
+			t.Fatalf("seat the durable commit: %v", err)
 		}
 		registry := task.NewMemoryRegistry(durable, task.NewMemoryAdmission())
 		receipt, err := registry.Register(ctx, spec)
@@ -119,9 +119,9 @@ func TestDurableTaskRoundTrip(t *testing.T) {
 		if err != nil {
 			t.Fatalf("reopen OpenTier: %v", err)
 		}
-		restored, err := state.NewDurableCommit(ledger.TierFactLog(reopened), nil)
-		if err != nil {
-			t.Fatalf("reopen NewDurableCommit: %v", err)
+		restored := state.NewEmptyDurableCommit(ledger.TierFactLog(reopened), nil)
+		if err := restored.Seat(ctx, nil, nil); err != nil {
+			t.Fatalf("reopen the durable commit: %v", err)
 		}
 		chain, err := restored.Records(ctx, receipt.TaskID)
 		if err != nil {
@@ -173,9 +173,9 @@ func TestDurableTaskRoundTrip(t *testing.T) {
 		if err != nil {
 			t.Fatalf("OpenTier: %v", err)
 		}
-		durable, err := state.NewDurableCommit(ledger.TierFactLog(tier), nil)
-		if err != nil {
-			t.Fatalf("NewDurableCommit: %v", err)
+		durable := state.NewEmptyDurableCommit(ledger.TierFactLog(tier), nil)
+		if err := durable.Seat(ctx, nil, nil); err != nil {
+			t.Fatalf("seat the durable commit: %v", err)
 		}
 		registry := task.NewMemoryRegistry(durable, task.NewMemoryAdmission())
 		receipt, err := registry.Register(ctx, spec)
@@ -244,9 +244,9 @@ func TestDurableTaskRoundTrip(t *testing.T) {
 		if err != nil {
 			t.Fatalf("OpenTier: %v", err)
 		}
-		durable, err := state.NewDurableCommit(ledger.TierFactLog(tier), nil)
-		if err != nil {
-			t.Fatalf("NewDurableCommit: %v", err)
+		durable := state.NewEmptyDurableCommit(ledger.TierFactLog(tier), nil)
+		if err := durable.Seat(ctx, nil, nil); err != nil {
+			t.Fatalf("seat the durable commit: %v", err)
 		}
 		registry := task.NewMemoryRegistry(durable, task.NewMemoryAdmission())
 		receipt, err := registry.Register(ctx, spec)
@@ -268,9 +268,9 @@ func TestDurableTaskRoundTrip(t *testing.T) {
 		if err != nil {
 			t.Fatalf("reopen OpenTier: %v", err)
 		}
-		restored, err := state.NewDurableCommit(ledger.TierFactLog(reopened), nil)
-		if err != nil {
-			t.Fatalf("reopen NewDurableCommit: %v", err)
+		restored := state.NewEmptyDurableCommit(ledger.TierFactLog(reopened), nil)
+		if err := restored.Seat(ctx, nil, nil); err != nil {
+			t.Fatalf("reopen the durable commit: %v", err)
 		}
 		owed := restored.Outbox(receipt.TaskID)
 		if len(owed) != 1 || owed[0].Delivery != task.DeliveryPending {
@@ -357,9 +357,9 @@ func TestDurableTaskRoundTrip(t *testing.T) {
 		if err != nil {
 			t.Fatalf("OpenTier: %v", err)
 		}
-		durable, err := state.NewDurableCommit(ledger.TierFactLog(tier), nil)
-		if err != nil {
-			t.Fatalf("NewDurableCommit: %v", err)
+		durable := state.NewEmptyDurableCommit(ledger.TierFactLog(tier), nil)
+		if err := durable.Seat(ctx, nil, nil); err != nil {
+			t.Fatalf("seat the durable commit: %v", err)
 		}
 		registry := task.NewMemoryRegistry(durable, task.NewMemoryAdmission())
 		receipt, err := registry.Register(ctx, spec)
@@ -459,9 +459,9 @@ func TestDurableTaskRoundTrip(t *testing.T) {
 		}); err != nil {
 			t.Fatalf("StoreEvent: %v", err)
 		}
-		durable, err := state.NewDurableCommit(ledger.TierFactLog(tier), nil)
-		if err != nil {
-			t.Fatalf("NewDurableCommit: %v", err)
+		durable := state.NewEmptyDurableCommit(ledger.TierFactLog(tier), nil)
+		if err := durable.Seat(ctx, nil, nil); err != nil {
+			t.Fatalf("seat the durable commit: %v", err)
 		}
 		registry := task.NewMemoryRegistry(durable, task.NewMemoryAdmission())
 		receipt, err := registry.Register(ctx, spec)
@@ -494,9 +494,9 @@ func TestDurableTaskRoundTrip(t *testing.T) {
 		if err != nil || !held || string(stored.Body) != string(eventBody) {
 			t.Fatalf("reopened event = held %v body %q, %v, want the committed event", held, stored.Body, err)
 		}
-		restored, err := state.NewDurableCommit(ledger.TierFactLog(reopened), nil)
-		if err != nil {
-			t.Fatalf("reopen NewDurableCommit: %v", err)
+		restored := state.NewEmptyDurableCommit(ledger.TierFactLog(reopened), nil)
+		if err := restored.Seat(ctx, nil, nil); err != nil {
+			t.Fatalf("reopen the durable commit: %v", err)
 		}
 		chain, err := restored.Records(ctx, receipt.TaskID)
 		if err != nil {

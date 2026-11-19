@@ -726,7 +726,9 @@ func smokeCalibrationRebindSamples(run *smokeCalibrationRun) []smokeCalibrationR
 }
 
 // smokeCalibrationReconcile 跨重启对账：每个输入标记恰好一次入口请求，每个
-// 重绑标记恰好一次，并统计重启后首轮携带上下文消息的输入数。
+// 重绑标记恰好一次，并统计重启后首轮携带上下文消息的输入数。入口模型不止一个：
+// reload 窗口内的输入由替换后的模型驱动，两个入口模型合并计数，恰一次仍按合计判
+// （同一条输入在两模型各来一次即重复）。
 func smokeCalibrationReconcile(provider *smokeProvider, plan smokeCalibrationPlan) smokeCalibrationReconciliation {
 	recon := smokeCalibrationReconciliation{ExpectedInputs: plan.inputs()}
 	counts := map[string]int{}
@@ -737,7 +739,7 @@ func smokeCalibrationReconcile(provider *smokeProvider, plan smokeCalibrationPla
 			recon.ReflectRequests++
 			continue
 		}
-		if req.Model != smokeEntryModel {
+		if req.Model != smokeEntryModel && req.Model != smokeReloadModel {
 			continue
 		}
 		last := strings.TrimSpace(smokeLastUserText(req.Messages))
@@ -798,6 +800,43 @@ func smokeCalibrationFirstInput(plan smokeCalibrationPlan, gen int, chat string)
 		}
 	}
 	return found, ok
+}
+
+// TestSmokeCalibrationReconcileAcrossReloadModels 是 reconcile 入口模型合并的正反两锚。
+// - reload_model_drives_the_same_input_once：只有替换模型那份请求时仍算驱动，不算缺失
+// - one_input_in_both_models_is_a_duplicate：两模型各来一份仍是重复，合并不放宽恰一次
+func TestSmokeCalibrationReconcileAcrossReloadModels(t *testing.T) {
+	plan := smokeCalibrationPlan{
+		Sessions: []string{"smoke-chat-a"},
+		Timeline: []smokeCalibrationStep{
+			{Kind: "input", Generation: 0, Session: "smoke-chat-a", Index: 0,
+				Marker: "SMOKE-R420000", Text: "SMOKE-R420000 plain"},
+		},
+	}
+	request := func(modelName string) smokeModelRequest {
+		return smokeModelRequest{Model: modelName, Messages: []smokeModelMessage{
+			{Role: string(tagentmodel.RoleUser), Content: "SMOKE-R420000 plain"},
+		}}
+	}
+	reconcile := func(requests ...smokeModelRequest) smokeCalibrationReconciliation {
+		return smokeCalibrationReconcile(&smokeProvider{requests: requests}, plan)
+	}
+
+	t.Run("reload_model_drives_the_same_input_once", func(t *testing.T) {
+		recon := reconcile(request(smokeReloadModel))
+		if recon.DrivenInputs != 1 || len(recon.MissingInputs) != 0 {
+			t.Fatalf("driven inputs = %d, missing = %v; the reload window's inputs are driven, not missing",
+				recon.DrivenInputs, recon.MissingInputs)
+		}
+	})
+
+	t.Run("one_input_in_both_models_is_a_duplicate", func(t *testing.T) {
+		recon := reconcile(request(smokeEntryModel), request(smokeReloadModel))
+		if len(recon.DuplicateInputs) != 1 || recon.DrivenInputs != 0 {
+			t.Fatalf("duplicate = %v, driven = %d; merging the two entry models must not weaken exactly-once",
+				recon.DuplicateInputs, recon.DrivenInputs)
+		}
+	})
 }
 
 // smokeCalibrationExtrapolate 把缩样成本外推到 03.11 单组合（1200 输入/120
@@ -3385,6 +3424,11 @@ func smokeCalibrationSpawn(t *testing.T, binary, planPath, runDir string, gen in
 	if err := os.MkdirAll(filepath.Dir(reportPath), 0o755); err != nil {
 		t.Fatalf("create the calibration report directory: %v", err)
 	}
+	for _, stale := range []string{reportPath, reportPath + ".ready"} {
+		if err := os.Remove(stale); err != nil && !os.IsNotExist(err) {
+			t.Fatalf("clear the stale generation artifact %s: %v", stale, err)
+		}
+	}
 	logPath := filepath.Join(runDir, "logs", fmt.Sprintf("gen%02d.log", gen))
 	if err := os.MkdirAll(filepath.Dir(logPath), 0o755); err != nil {
 		t.Fatalf("create the calibration log directory: %v", err)
@@ -3410,6 +3454,35 @@ func smokeCalibrationSpawn(t *testing.T, binary, planPath, runDir string, gen in
 		exited: make(chan error, 1)}
 	go func() { child.exited <- cmd.Wait() }()
 	return child
+}
+
+// TestSmokeCalibrationSpawnClearsStaleReport 是 spawn 清理同名代遗留产物的正反两锚。
+// - stale_report_is_not_this_generation：启动前未删的报告与 ready 会满足父侧的等文件判据，父侧随即杀掉刚起的一代
+func TestSmokeCalibrationSpawnClearsStaleReport(t *testing.T) {
+	binary, err := os.Executable()
+	if err != nil {
+		t.Fatalf("locate this test binary: %v", err)
+	}
+	runDir := t.TempDir()
+	reportPath := filepath.Join(runDir, "reports", "gen56.json")
+	if err := os.MkdirAll(filepath.Dir(reportPath), 0o755); err != nil {
+		t.Fatalf("create the stale report directory: %v", err)
+	}
+	for _, stale := range []string{reportPath, reportPath + ".ready"} {
+		if err := os.WriteFile(stale, []byte(`{"phase":"restart_point"}`), 0o644); err != nil {
+			t.Fatalf("write the stale generation artifact %s: %v", stale, err)
+		}
+	}
+
+	child := smokeCalibrationSpawn(t, binary, filepath.Join(runDir, "plan.json"), runDir, 56, "NoSuchGenerationTest")
+	defer func() { _ = child.LogFile.Close() }()
+	_ = child.wait()
+
+	for _, stale := range []string{reportPath, reportPath + ".ready"} {
+		if _, err := os.Stat(stale); !os.IsNotExist(err) {
+			t.Fatalf("stale generation artifact %s survived the spawn: the parent would read it as this generation's own report", stale)
+		}
+	}
 }
 
 // smokeCalibrationRun 是一轮场景（primary 或非 race 基线）的父侧观测。
@@ -4716,7 +4789,7 @@ func smokeLongReconcile(provider *smokeProvider, plan smokeCalibrationPlan, repo
 			}
 			got++
 			for j := i + 1; j < len(requests); j++ {
-				if strings.HasPrefix(lasts[j], "tagent: task ") && strings.Contains(lasts[j], "settled") && strings.Contains(lasts[j], step.Marker) {
+				if smokeSettleNoticeIs(lasts[j], step.Marker) {
 					got++
 				}
 			}
@@ -4883,6 +4956,127 @@ func TestSmokeLongReconcileCountsBatchedNotification(t *testing.T) {
 	if len(recon.MissingNotifications) != 0 || len(recon.DuplicateNotifications) != 0 {
 		t.Fatalf("batched notification identity = missing %v duplicate %v, want neither", recon.MissingNotifications, recon.DuplicateNotifications)
 	}
+}
+
+// smokeLongNoticePlan 是只含一次非故障委派输入的计划：核账的其余身份都为空，
+// 断言因此只落在结算通知上。
+func smokeLongNoticePlan(marker string) smokeCalibrationPlan {
+	return smokeCalibrationPlan{Timeline: []smokeCalibrationStep{{
+		Kind: "input", Shape: "delegate", Marker: marker,
+	}}}
+}
+
+// TestRepeatedPresentedNoticeIsCountedByIdentity 钉住：同一条结算通知换了呈现形态再投递一次时仍记第二次。
+// - 请求呈现面给携带事实键的材料加的票据排在正文之前，观察帧则是裸正文
+// - 两种形态是同一条通知的两种呈现，不是两条通知，重复因此不被呈现形态掩盖
+func TestRepeatedPresentedNoticeIsCountedByIdentity(t *testing.T) {
+	const marker = "SMOKE-R10391"
+	notice := smokeSettleNoticeText(marker)
+	ticketed := smokeSettleNoticeTicket(t) + " " + notice
+	delegate := "smoke delegate " + marker
+	for _, shape := range []struct {
+		name, first, second string
+		// bareSecond 声明第二次呈现是否以裸正文开头，即旧的前缀判据能否数到它；
+		// 判它为假的形状正是修复前漏计的那一支。
+		bareSecond bool
+	}{
+		{"bare_then_ticketed", notice, ticketed, false},
+		{"ticketed_then_bare", ticketed, notice, true},
+		{"ticketed_twice", ticketed, ticketed, false},
+	} {
+		t.Run(shape.name, func(t *testing.T) {
+			if got := strings.HasPrefix(strings.TrimSpace(shape.second), "tagent: task "); got != shape.bareSecond {
+				t.Fatalf("第二次呈现是裸正文=%t，声明的旧判据形状是 %t：夹具与所证分支不符", got, shape.bareSecond)
+			}
+			provider := &smokeProvider{requests: []smokeModelRequest{
+				{Messages: []smokeModelMessage{
+					{Role: string(tagentmodel.RoleUser), Content: delegate},
+					{Role: string(tagentmodel.RoleUser), Content: shape.first},
+				}},
+				{Messages: []smokeModelMessage{
+					{Role: string(tagentmodel.RoleUser), Content: delegate},
+					{Role: string(tagentmodel.RoleUser), Content: shape.first},
+					{Role: string(tagentmodel.RoleTool), Content: "ok", ToolCallID: "call-worker-" + marker},
+					{Role: string(tagentmodel.RoleUser), Content: shape.second},
+				}},
+			}}
+			recon := smokeLongReconcile(provider, smokeLongNoticePlan(marker), &smokeLongReport{})
+			if recon.NotificationRequests != 2 {
+				t.Fatalf("同一条通知按 %q 后再按 %q 呈现，核账记了 %d 次，want 2：重复投递被呈现形态掩盖",
+					shape.first, shape.second, recon.NotificationRequests)
+			}
+			if len(recon.DuplicateNotifications) != 1 || !strings.Contains(recon.DuplicateNotifications[0], marker) {
+				t.Fatalf("重复通知 = %v，want 恰有一条点名 %s", recon.DuplicateNotifications, marker)
+			}
+			if len(recon.MissingNotifications) != 0 {
+				t.Fatalf("缺通知 = %v，want 无：两条都已呈现", recon.MissingNotifications)
+			}
+			assembled := smokeLongAssemble(t, smokeLongNoticePlan(marker), &smokeCalibrationRun{},
+				provider, &smokeConfig{}, "", "", 0, 0, 0, 0, 0, 0, nil)
+			if assembled.Recon.NotificationRequests != 2 {
+				t.Fatalf("组合报告的核账记了 %d 次，want 2：计数没走到长测报告用的装配路径",
+					assembled.Recon.NotificationRequests)
+			}
+		})
+	}
+}
+
+// TestRepeatedNoticeRejectsAnotherCall 钉住：重复判断按通知身份而不是按正文形态。
+// - 别次调用的通知无论重复呈现多少次、换哪种形态，都不算本次的结算
+// - 只提到通知的别样材料与真正缺失的结算同样不被认成这次通知
+func TestRepeatedNoticeRejectsAnotherCall(t *testing.T) {
+	const marker, other = "SMOKE-R10392", "SMOKE-R10393"
+	notice := smokeSettleNoticeText(marker)
+	otherNotice := smokeSettleNoticeText(other)
+	ticket := smokeSettleNoticeTicket(t)
+
+	t.Run("another_call_presented_twice_is_not_this_settlement", func(t *testing.T) {
+		provider := &smokeProvider{requests: []smokeModelRequest{
+			{Messages: []smokeModelMessage{
+				{Role: string(tagentmodel.RoleUser), Content: "smoke delegate " + marker},
+				{Role: string(tagentmodel.RoleUser), Content: ticket + " " + otherNotice},
+			}},
+			{Messages: []smokeModelMessage{
+				{Role: string(tagentmodel.RoleUser), Content: "smoke delegate " + marker},
+				{Role: string(tagentmodel.RoleUser), Content: otherNotice},
+			}},
+		}}
+		this := smokeLongReconcile(provider, smokeLongNoticePlan(marker), &smokeLongReport{})
+		if this.NotificationRequests != 0 {
+			t.Fatalf("别次调用的通知记成 %s 的结算 %d 次，want 0", marker, this.NotificationRequests)
+		}
+		if len(this.MissingNotifications) != 1 || this.MissingNotifications[0] != marker {
+			t.Fatalf("缺通知 = %v，want 恰为 [%s]：真正缺失仍须报缺", this.MissingNotifications, marker)
+		}
+		if len(this.DuplicateNotifications) != 0 {
+			t.Fatalf("重复通知 = %v，want 无：两条都不是本次的通知", this.DuplicateNotifications)
+		}
+		theirs := smokeLongReconcile(provider, smokeLongNoticePlan(other), &smokeLongReport{})
+		if theirs.NotificationRequests != 2 || len(theirs.DuplicateNotifications) != 1 {
+			t.Fatalf("同两条通知按 %s 核账记 %d 次、重复 %v，want 2 次与一条重复：拒绝来自身份而不是夹具空转",
+				other, theirs.NotificationRequests, theirs.DuplicateNotifications)
+		}
+	})
+
+	t.Run("material_that_only_quotes_the_notice_is_not_the_notice", func(t *testing.T) {
+		quoted := marker + " business note\nquoted: " + notice
+		provider := &smokeProvider{requests: []smokeModelRequest{
+			{Messages: []smokeModelMessage{
+				{Role: string(tagentmodel.RoleUser), Content: quoted},
+			}},
+			{Messages: []smokeModelMessage{
+				{Role: string(tagentmodel.RoleUser), Content: quoted},
+			}},
+		}}
+		recon := smokeLongReconcile(provider, smokeLongNoticePlan(marker), &smokeLongReport{})
+		if recon.NotificationRequests != 0 || len(recon.DuplicateNotifications) != 0 {
+			t.Fatalf("只提到通知的别样材料记了 %d 次、重复 %v，want 0 与无",
+				recon.NotificationRequests, recon.DuplicateNotifications)
+		}
+		if len(recon.MissingNotifications) != 1 {
+			t.Fatalf("缺通知 = %v，want 恰一条：引用不是通知", recon.MissingNotifications)
+		}
+	})
 }
 
 // procTaskInfo is the kernel's proc_taskinfo record for one process. The

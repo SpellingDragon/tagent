@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -14,26 +15,30 @@ import (
 	"github.com/SpellingDragon/tagent/api/model"
 	"github.com/SpellingDragon/tagent/memory"
 	"github.com/SpellingDragon/tagent/memory/ledger"
+	"github.com/SpellingDragon/tagent/memory/replay"
 	"github.com/SpellingDragon/tagent/runtime/agent"
 )
 
 // compressAccount is the state a compression consumer derives from the commits it
-// observes: the judgments of every session chain in filing order, the identities
-// a product answers, and the judgments neither answers — the batch still owed.
+// observes: the judgments of every session chain it still owes, the identities the
+// products of those chains answer, and the batch that is owed.
 type compressAccount struct {
 	Judgments map[event.SessionID][]event.EventID
 	Answered  map[event.EventID]bool
 	Owed      map[event.SessionID][]event.EventID
 }
 
-// compressAccountOf reads the account one consumer holds.
+// compressAccountOf reads the account one consumer holds beside the answers its
+// chain states: the batch still owed is the consumer's own state, and the
+// identities a product answers are read from the chain, because the answer
+// outlives the account that read it.
 func compressAccountOf(t *testing.T, consumer *CompressionConsumer) compressAccount {
 	t.Helper()
 	consumer.mu.Lock()
 	defer consumer.mu.Unlock()
 	account := compressAccount{
 		Judgments: make(map[event.SessionID][]event.EventID, len(consumer.judgments)),
-		Answered:  make(map[event.EventID]bool, len(consumer.answered)),
+		Answered:  settledJudgments(t, consumer),
 		Owed:      map[event.SessionID][]event.EventID{},
 	}
 	for session, filed := range consumer.judgments {
@@ -42,27 +47,33 @@ func compressAccountOf(t *testing.T, consumer *CompressionConsumer) compressAcco
 			keys = append(keys, request.ID)
 		}
 		account.Judgments[session] = keys
-	}
-	for request := range consumer.answered {
-		account.Answered[request] = true
-	}
-	for session, filed := range account.Judgments {
-		owed := make([]event.EventID, 0, len(filed))
-		for _, request := range filed {
-			if !account.Answered[request] {
-				owed = append(owed, request)
-			}
-		}
-		if len(owed) > 0 {
-			account.Owed[session] = owed
+		if len(keys) > 0 {
+			account.Owed[session] = keys
 		}
 	}
 	return account
 }
 
-// judgedCount reports how many judgments one account holds.
+// settledJudgments answers the judgment identities the products of one consumer's
+// chain answer. A consumer of no session face, and a run beside no storage tier,
+// states no answer: the chain it would read is no chain this process holds.
+func settledJudgments(t *testing.T, consumer *CompressionConsumer) map[event.EventID]bool {
+	t.Helper()
+	out := map[event.EventID]bool{}
+	sessions, carried := consumer.sessions.(ageFoldSessions)
+	if !carried || sessions.run == nil || sessions.run.tier == nil {
+		return out
+	}
+	for _, product := range chainProducts(t, context.Background(), sessions.run) {
+		out[product.Answers.Request] = true
+	}
+	return out
+}
+
+// judgedCount reports how many judgments one account holds an answer for, on the
+// chain or in the batch still owed.
 func (a compressAccount) judgedCount() int {
-	count := 0
+	count := len(a.Answered)
 	for _, keys := range a.Judgments {
 		count += len(keys)
 	}
@@ -149,7 +160,12 @@ func TestCompressionJudgmentsSurviveTheBootCut(t *testing.T) {
 	}
 	live := compressAccountOf(t, source.compress)
 	if len(live.Answered) != products {
-		t.Fatalf("the live consumer answers %d judgment(s), want the %d products the chain holds", len(live.Answered), products)
+		t.Fatalf("the chain answers %d judgment(s), want the %d products it holds", len(live.Answered), products)
+	}
+	for request := range live.Answered {
+		if slices.Contains(live.Judgments[addr.SessionID], request) {
+			t.Fatalf("the live consumer still owes the judgment %s its product answers, want a settled judgment held nowhere beside %d on the chain", request, len(live.Answered))
+		}
 	}
 	if held := live.Owed[addr.SessionID]; !slices.Equal(held, []event.EventID{owed.ID}) {
 		t.Fatalf("the live consumer owes %v, want the judgment %s it filed beside the %d its products answer", held, owed.ID, products)
@@ -274,12 +290,9 @@ func TestCompressionSliceBodyIsBoundedByTheBatchItOwes(t *testing.T) {
 		}
 	}
 	accountBytes := func(count, answered int) int {
-		consumer := NewCompressionConsumer(nil)
-		for at := 0; at < count; at++ {
+		consumer := NewCompressionConsumer(nil, nil)
+		for at := answered; at < count; at++ {
 			consumer.judgments[session] = append(consumer.judgments[session], request(at))
-			if at < answered {
-				consumer.answered[request(at).ID] = struct{}{}
-			}
 		}
 		run := &Run{compress: consumer}
 		payload, err := compressStateSlice{run: run}.SnapshotState(ctx)
@@ -321,4 +334,277 @@ func TestCompressionSliceBodyIsBoundedByTheBatchItOwes(t *testing.T) {
 		t.Fatalf("the batch of 8 answered judgments states %d byte(s) beside the %d of the 8 owed ones, want the answered batch stated nowhere",
 			settled, middling)
 	}
+}
+
+// TestCompressionCheckpointTracksPendingWork pins what the account costs the checkpoint it states, beside the settled history that grows under it.
+//   - the batch still owed is the whole resident state: an account owing two judgments holds two entries
+//   - that holds at none, sixty-four and two hundred and fifty-six settled judgments
+//   - the slice bytes are the same bytes at every depth of settled history, so no settled judgment is restated and no depth grows the body
+//   - the build allocates the same bytes per call at every depth of settled history: the state the slice walks is the batch, never the history it settled
+//   - a new judgment grows the batch by one entry and the body by the one entry it states, so the pending work is what both faces track
+//   - the settled judgments are struck exactly once each and held nowhere, so the account of a settled history is no key at all
+//   - consumer: compressStateSlice.SnapshotState, the slice the framework checkpoint files
+//
+// 契约: docs/wiki/agent/event-flow.md#projection-lifecycle
+func TestCompressionCheckpointTracksPendingWork(t *testing.T) {
+	ctx := context.Background()
+	const session = event.SessionID("session-compress-pending-work")
+	const owed = 2
+	request := func(at int) event.CompressRequest {
+		return event.CompressRequest{
+			ID:     event.EventID(fmt.Sprintf("event-compress-pending-%03d", at)),
+			Reason: strings.Repeat("the reason the band was compressed ", 12),
+			At:     time.Date(2026, 11, 16, 13, 0, at, 0, time.UTC),
+		}
+	}
+	accountOf := func(settled int) *Run {
+		consumer := NewCompressionConsumer(nil, nil)
+		for at := 0; at < settled; at++ {
+			consumer.Record(session, request(at))
+			consumer.NoteProduct(event.CompressProductFor(request(at).ID, compressionProducer, event.EventID(fmt.Sprintf("key-%03d", at)), nil, ""))
+		}
+		for at := settled; at < settled+owed; at++ {
+			consumer.Record(session, request(at))
+		}
+		return &Run{compress: consumer}
+	}
+	bodyBytes := func(run *Run) int {
+		payload, err := compressStateSlice{run: run}.SnapshotState(ctx)
+		if err != nil {
+			t.Fatalf("state the compression slice: %v", err)
+		}
+		return len(payload)
+	}
+	buildBytes := func(run *Run) float64 {
+		const calls = 128
+		slice := compressStateSlice{run: run}
+		if _, err := slice.SnapshotState(ctx); err != nil {
+			t.Fatalf("state the compression slice: %v", err)
+		}
+		var before, after runtime.MemStats
+		runtime.ReadMemStats(&before)
+		for at := 0; at < calls; at++ {
+			if _, err := slice.SnapshotState(ctx); err != nil {
+				t.Fatalf("state the compression slice: %v", err)
+			}
+		}
+		runtime.ReadMemStats(&after)
+		return float64(after.TotalAlloc-before.TotalAlloc) / calls
+	}
+
+	none := accountOf(0)
+	if held := none.compress.pending(session); len(held) != owed {
+		t.Fatalf("the account of no settled judgment owes %d judgment(s), want the %d it filed", len(held), owed)
+	}
+	shallow, middling, deep := accountOf(64), accountOf(128), accountOf(256)
+	for _, probe := range []struct {
+		settled int
+		run     *Run
+	}{{64, shallow}, {128, middling}, {256, deep}} {
+		held := probe.run.compress.pending(session)
+		if len(held) != owed {
+			t.Fatalf("the account beside %d settled judgment(s) holds %d entr(ies), want the %d it still owes: the settled history is no resident state", probe.settled, len(held), owed)
+		}
+		if got := probe.run.compress.struckNotes(); got != probe.settled {
+			t.Fatalf("the account beside %d settled judgment(s) struck %d, want one strike per settled judgment", probe.settled, got)
+		}
+		if got := bodyBytes(probe.run); got != bodyBytes(none) {
+			t.Fatalf("the batch beside %d settled judgment(s) states %d byte(s) beside the %d of the same batch alone, want the settled history stated nowhere", probe.settled, got, bodyBytes(none))
+		}
+	}
+	alone := buildBytes(none)
+	for _, probe := range []struct {
+		settled int
+		run     *Run
+	}{{64, shallow}, {256, deep}} {
+		got := buildBytes(probe.run)
+		if got > alone+allocNoise {
+			t.Fatalf("stating the batch beside %d settled judgment(s) allocates %.0f byte(s) a call beside the %.0f of the batch alone, want a build bounded by the batch it owes", probe.settled, got, alone)
+		}
+	}
+
+	grown := accountOf(256)
+	grown.compress.Record(session, request(256+owed))
+	if held := grown.compress.pending(session); len(held) != owed+1 {
+		t.Fatalf("the account holds %d judgment(s) beside the one filed after the settled history, want the %d it owes", len(held), owed+1)
+	}
+	if got, want := bodyBytes(grown), bodyBytes(none); got <= want {
+		t.Fatalf("the batch grew to %d byte(s) beside the %d it owed, want the one entry the new judgment states", got, want)
+	}
+}
+
+// allocNoise is the slack one build of the compression slice is measured with:
+// the reconciler and the counter keep allocating beside the call, so the face is
+// pinned as a bound rather than as an equality.
+const allocNoise = 512.0
+
+// TestCompressionCheckpointPreservesOutOfOrderPendingRequest pins the batch an out-of-order answer leaves owed.
+//   - an answer that lands second removes its own judgment and neither the ones filed before it nor after it
+//   - so the account is never truncated to a prefix or to a watermark
+//   - the answers of the newest judgments leave the oldest owed, so the batch is not read as a suffix either
+//   - a repeated answer removes nothing more, so the charge is one strike per judgment
+//   - the slice states the judgment still owed alone: the answered judgments of the same session are stated nowhere
+//
+// 契约: docs/wiki/agent/event-flow.md#projection-lifecycle
+func TestCompressionCheckpointPreservesOutOfOrderPendingRequest(t *testing.T) {
+	ctx := context.Background()
+	const session = event.SessionID("session-compress-out-of-order")
+	filed := make([]event.CompressRequest, 0, 3)
+	for at := 0; at < 3; at++ {
+		filed = append(filed, event.CompressRequest{
+			ID:     event.EventID(fmt.Sprintf("event-compress-out-of-order-%d", at)),
+			Reason: "the band the walk answered out of order",
+			At:     time.Date(2026, 11, 16, 14, 0, at, 0, time.UTC),
+		})
+	}
+	answer := func(request event.CompressRequest) event.CompressProduct {
+		return event.CompressProductFor(request.ID, compressionProducer, event.EventID("key-"+request.ID), nil, "")
+	}
+	consumer := NewCompressionConsumer(nil, nil)
+	for _, request := range filed {
+		consumer.Record(session, request)
+	}
+	consumer.NoteProduct(answer(filed[1]))
+	if held := consumer.pending(session); !slices.Equal(identitiesOf(held), []event.EventID{filed[0].ID, filed[2].ID}) {
+		t.Fatalf("the account owes %v beside the answer of the middle judgment %s, want the ones filed before and after it",
+			identitiesOf(held), filed[1].ID)
+	}
+	consumer.NoteProduct(answer(filed[2]))
+	if held := consumer.pending(session); !slices.Equal(identitiesOf(held), []event.EventID{filed[0].ID}) {
+		t.Fatalf("the account owes %v beside the answers of the two newest judgments, want the oldest judgment %s alone: neither a prefix nor a suffix of the batch is the batch",
+			identitiesOf(held), filed[0].ID)
+	}
+	consumer.NoteProduct(answer(filed[2]))
+	if got := consumer.struckNotes(); got != 2 {
+		t.Fatalf("the account struck %d judged judgment(s) beside the repeated answer of %s, want the two it answered", got, filed[2].ID)
+	}
+	if held := consumer.pending(session); !slices.Equal(identitiesOf(held), []event.EventID{filed[0].ID}) {
+		t.Fatalf("the repeated answer left the account owing %v, want the oldest judgment %s alone", identitiesOf(held), filed[0].ID)
+	}
+
+	payload, err := compressStateSlice{run: &Run{compress: consumer}}.SnapshotState(ctx)
+	if err != nil {
+		t.Fatalf("state the compression slice: %v", err)
+	}
+	if !strings.Contains(string(payload), string(filed[0].ID)) {
+		t.Fatalf("the compression slice states no judgment beside the one %s the chain still owes, want the pending batch stated", filed[0].ID)
+	}
+	for _, settled := range filed[1:] {
+		if strings.Contains(string(payload), string(settled.ID)) {
+			t.Fatalf("the compression slice states the answered judgment %s, want the batch still owed alone", settled.ID)
+		}
+	}
+}
+
+// TestCompressionCheckpointDoesNotRepeatSettledRequest pins the answer a chain already states.
+//   - a judgment the chain answers is struck before the material is summarized: the execution files no product and asks no model, and the batch stops owing it
+//   - the answer is read at the identity the judgment and the fold product key mint
+//   - so the execution reaches the chain rather than an account of the answers it read
+//   - negative: the material still stands as foldable, so an execution that judged the projection instead of the answer would file the product again
+//
+// 契约: docs/wiki/agent/event-flow.md#projection-lifecycle
+func TestCompressionCheckpointDoesNotRepeatSettledRequest(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+	storage := WithStorage(ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: t.TempDir()})
+	addr := event.Address{AgentID: "agent-a", SessionID: "session-compress-settled"}
+	run := windowChainRun(t, ctx, storage)
+	run.compress.sessions = nil
+	run.ageFold.setExecutor(nil)
+	commitWindowTurns(t, ctx, run, addr, 12)
+	judged := pendingIdentities(run.compress, addr.SessionID)
+	if len(judged) == 0 {
+		t.Fatal("the fixture filed no compression judgment, so the settled answer proves nothing")
+	}
+
+	face := ageFoldSessions{run: run}
+	projection, window, carried := face.ProjectionOf(ctx, addr.SessionID)
+	if !carried {
+		t.Fatal("the chain registered no projection, so the fixture names no product")
+	}
+	folded := foldProjectionOf(ctx, projection)
+	if folded == nil {
+		t.Fatal("the projection folds to no accounting-free view, so the fixture names no product")
+	}
+	plan, err := folded.PlanByAge(ctx, replay.AgeFoldPlan{
+		KeepRecent:         window.KeepRecentTasks,
+		VolumeThreshold:    window.VolumeThresholdBytes(),
+		SummaryBudgetBytes: window.SummaryBudgetBytes,
+	})
+	if err != nil {
+		t.Fatalf("plan the fold of the chain: %v", err)
+	}
+	settled := replay.FoldProduct{}
+	for _, product := range plan.Products {
+		if judged[product.Request.ID] {
+			settled = product
+			break
+		}
+	}
+	if settled.Request.ID == "" {
+		t.Fatal("the plan names no product of a judgment the chain filed, so the settled answer proves nothing")
+	}
+	minted := event.CompressProductFor(settled.Request.ID, compressionProducer, settled.Entry.Key, settled.Covered, settled.Entry.Content)
+	run.mu.Lock()
+	agent := run.agentOfSessionLocked(addr.SessionID)
+	run.mu.Unlock()
+	if _, err := run.commitFactChecked(ctx, compressProductEvent(addr.SessionID, agent, minted, time.Now().UTC())); err != nil {
+		t.Fatalf("file the product the chain answers the judgment %s with: %v", settled.Request.ID, err)
+	}
+
+	counted := &countingCompressSessions{compressProductStore: face}
+	run.compress = NewCompressionConsumer(face, counted)
+	run.compress.Record(addr.SessionID, event.CompressRequest{ID: settled.Request.ID, Reason: settled.Request.Reason})
+	if held := run.compress.pending(addr.SessionID); !slices.Equal(identitiesOf(held), []event.EventID{settled.Request.ID}) {
+		t.Fatalf("the account owes %v beside the answer the chain states, want the judgment %s it was handed", identitiesOf(held), settled.Request.ID)
+	}
+	if err := run.compress.Execute(ctx, addr.SessionID); err != nil {
+		t.Fatalf("execute the batch: %v", err)
+	}
+	if counted.held == 0 {
+		t.Fatal("the execution read no answer back at the identity of the judgment, want the chain asked before the material folds")
+	}
+	if counted.filed != 0 {
+		t.Fatalf("the execution filed %d product(s) of a judgment its chain answers, want the answered judgment executed never again", counted.filed)
+	}
+	if held := run.compress.pending(addr.SessionID); len(held) != 0 {
+		t.Fatalf("the account still owes %v beside the answer the chain states, want the answered judgment struck", identitiesOf(held))
+	}
+	if got := run.compress.struckNotes(); got == 0 {
+		t.Fatal("the execution struck no judgment beside the answer it read, want the answered judgment charged once")
+	}
+	if answers := productsByRequest(t, ctx, run); answers[settled.Request.ID] != 1 {
+		t.Fatalf("the chain answers the judgment %s with %d product(s), want the one it states", settled.Request.ID, answers[settled.Request.ID])
+	}
+	endRun(t, run)
+}
+
+// countingCompressSessions counts what one execution asks the product ledger
+// face: the answers it reads back at their identity and the products it files.
+type countingCompressSessions struct {
+	compressProductStore
+	held  int
+	filed int
+}
+
+// HoldsCompressProduct asks the chain whether it answers one judgment.
+func (c *countingCompressSessions) HoldsCompressProduct(ctx context.Context, session event.SessionID, request, key event.EventID) (bool, error) {
+	c.held++
+	return c.compressProductStore.HoldsCompressProduct(ctx, session, request, key)
+}
+
+// FileCompressProduct files one execution result on the chain.
+func (c *countingCompressSessions) FileCompressProduct(ctx context.Context, session event.SessionID, product event.CompressProduct) error {
+	c.filed++
+	return c.compressProductStore.FileCompressProduct(ctx, session, product)
+}
+
+// identitiesOf reports the identities one batch of judgments is filed under, in
+// filing order.
+func identitiesOf(filed []event.CompressRequest) []event.EventID {
+	out := make([]event.EventID, 0, len(filed))
+	for _, request := range filed {
+		out = append(out, request.ID)
+	}
+	return out
 }

@@ -230,9 +230,93 @@ worker result SMOKE-R10097
 
 R2a 在真实操作前后独立采样开档、校验、恢复/重绑定、提交、点读、目录维护；保留原始区间，按独占时间或时间并集合计，未归因部分不以差值命名为某阶段。独立外层观测与阶段采样对照，并注入重复记账、漏阶段反例；单纯验证时间片恒等式无效。新锚全名、写面和命令见 tasks 的 R2a；若现出口不能支持采样，明确缺失插点与所属文件后再派，不凭计数推算墙钟。
 
+### R2a 阶段量义与独立开闭点（量义冻结；重绑定插点待授权）
+
+六段＋安全校验单列。每一段的开点、闭点都由**该段所属真实调用自己的一对时钟读**取，任何一段都不是另两段相减（`rebind=boot-open` 型代数在这一表里无处落地）；父子关系显式声明，嵌套段与父段不得相加。探针串由真实调用驱动：`journalBytes`／次数／常驻规模的逐代序列出自这些调用，不由计时反推。
+
+| 阶段 | 量义 | 开点（独立时钟读） | 闭点 | 所属调用 | 单位 | 冷/热条件 | 父子 |
+|---|---|---|---|---|---|---|---|
+| 启动总耗时 `boot` | 一次装配的整段 | 进 `assemble` 前 | `assemble` 返回后 | `noTrimChainRun`（anchored_boot_parity_test.go:283）→`assemble`（run.go:504） | ns | 冷＝开档回放了窗口（`JournalBytesOpen()>0`）；热＝0 | 父＝整代；含开档、安全校验、重绑定 |
+| 整代 `generation` | 一代的全部工作（装配＋提交＋结算＋两检查点＋关闭） | 代首，在读日志长度之后 | `Close` 返回后 | 夹具一代 | ns | 按该代所开的根 | 根（无父） |
+| 提交 `commit` | 一处会话链上一批提交 | 进 `CommitToSession` 前 | 返回后 | `commitSessionTurns`（checkpoint_test.go:1582）→`CommitToSession` | ns | 写视图 | 父＝整代；含目录维护 |
+| 按身份点读 `pointRead` | 一个身份的一次读 | 进 `GetEvent` 前 | 返回后 | `tier.Segments.GetEvent` | ns | 冷＝该读回日志取值（`ValueReads` 增量）；热＝常驻集命中 | 父＝整代 |
+| 目录维护 `directory` | 地址表重述：`grow`／`rebuild`／`resetTable` | 进维护分支前（journal.go:1379／1384／1229／1170） | 返回到 `fileOnce` | 写视图提交（`fileOnce`） | ns | 写视图（`statesIndexFiles`） | 父＝提交（嵌套，不得与提交相加） |
+| 重绑定 `rebind` | 一次装配的恢复/重绑定 | 进 `restoreChains` 前（run.go:1111） | 折叠结束并记链计数后（run.go:1174） | `restoreCheckpointState`（run.go:1077）→`restoreInMemoryState`（:1055）→`restoreChains` | ns | 同 `boot` | 父＝启动总耗时（嵌套，不得相加） |
+| 安全校验 `integrity`（**单列**） | 开档的完整帧校验 | 校验段前 | 段后 | `journalKV` 开档 | ns | 读日志全字节 | 父＝启动总耗时；**单列判读**：许可 O(日志字节)，不并入“恢复成本”结论 |
+
+未归因：`整代 − Σ(独占子区间)` 记作 `unattributed`，只陈述“未归因”，**不得命名为 rebind，也不得借用任何具名阶段的名字**。顺序支路按独占区间相扣，并发支路按时间并集，两者不得混用；一次装配的总耗时与整代工作合计不互比。
+
+**现出口状态与缺口**（取证：`grep -n "started := time.Now()\|time.Since(started)" assembly/run.go` → `1111`／`1174`；全树 `StageSample|stageSample|RestoreElapsed|RebindElapsed|BootStageCost` 0 命中；`assembly/host_diagnostics.go` 无任何时长字段）：
+
+- 测试侧可测（无需生产插点）：`generation`、`boot`、`commit`、`pointRead` 四段——包围 `assemble`、`CommitToSession`、`Segments.GetEvent` 三个真实入口。
+- 白名单内可补（`journal.go` 只读计量，不改恢复行为）：`directory` 与 `integrity` 各记一对起止，形状照既有 `LoadScan.Elapsed` 先例（runtime/state/durable.go:691-707）。`directory` 由真实提交驱动（`fileOnce` 在 `used*100 >= capacity*journalSlotLoadPercent` 时 `grow`），故其样本“是否发生”由只读计数判定，不以缺样本冒充没发生。
+- **缺口（2026-11-19 已由 R309 授权补齐，见下「R2a 落地」）**：`rebind` 的独立起止只存在于 `assembly/run.go` 内。现行唯一出口是 :1174 的日志行 `elapsed=%s`（`Round(time.Microsecond)`）——**只有时长、没有起止**，既不能满足本表“独立起止”，也无法核父子包含。同包的 `restoreCheckpointState` 虽可再调一次，但按 :1074 的契约“The checkpoint is read once per boot”，第二次调用量的是已恢复之后的幂等重读，不是本代的 rebind，以其充数即错归因。故须在 `assembly/run.go` 增一处**只读**阶段出口（`restoreCheckpointState`／`restoreChains` 的起止对＋只读 getter，零行为变更），或由拥有者裁定该段改归他域取样。
+
+### R2a 落地（2026-11-19，工作树；量义未改）
+
+三处只读出口，零恢复行为变更，导出面未抬：
+
+| 出口 | 落点 | 取法 |
+|---|---|---|
+| 重绑定 `rebind` | `assembly/run.go` `restoreChains` 首语句与闭合读 | 该调用自己的一对 `time.Now()` 入 `Run.restoreStage`（未导出 `stageSpan`），既有 INFO 行改读该对，文案与 `Round(time.Microsecond)` 不变；`restoreStageSpan()` 未导出，同包测试可读，导出面零新增 |
+| 安全校验 `integrity` | `memory/ledger/journal.go` `openJournalLogFace` | `journalReplay` 两侧成对入 `journalLog.integrityBegin/End`，出口 `journalKV.IntegrityPassSpan()`；未创建视图的读面留零对＝该趟未发生 |
+| 目录维护 `directory` | `memory/ledger/journal.go` `journalAddress` | `openPass(pass, parent)` 在开点计数、闭点记录（`passes`／`passRecords`），落 `grow`、`rebuild`（`rebuildFrom(parent)`）、`resetTable`（父＝`rebuild`）；出口 `DirectoryMaintenancePasses()`／`DirectoryMaintenancePass(at)` |
+
+**父账户据实现真值分列**：表内「目录维护 父＝提交」只在提交路径成立。`openAddressIndex` 的开档重建（header 不可信／order 落后）走 `rebuild`→`resetTable`，其父是 boot；读视图的 `lookup`／`eachRecord`／`eachNewestFirst` 重建父是 pointRead。故父账户由每次调用显式下传（`state`→`fileCommit`→`file`／`fileOnce`，`derive` 同），不设全局态，也不把开档重建错记为提交成本。此条更正表述、不改量义与判据。
+
+**锚与判定**：`assembly/symptom_anchor_recovery_test.go` 新增 `TestBootStageSamplesHaveIndependentEndpoints`（正锚）与 `TestBootStageSamplesRejectDoubleChargeAndMissingSpan`（负锚），四代真实驱动（`assemble`→`CommitToSession`→`tier.Segments.GetEvent`→registry→`CheckpointSession`／`Checkpoint`／`Close`）；首代以 120 字节键驱动真实 `grow`，第三代开档前删派生 `kv/slots` 驱动真实 `rebuild`+`resetTable`，均非测试直呼维护函数。判定器只判结构：覆盖（样本数＝夹具驱动的调用数，整趟不得缺阶段）、唯一（同阶段同调用一次）、独立起止（不得与他段同对、止必须晚于开）、父子包含；`unattributed = 整代 − Σ(boot,pointRead,commit)` 只陈述未归因。负锚八个注入逐条具名拒，其中漏段与重复两条注入前后 Σ 不变且 ≤ 整代，`sum≤total` 与 `rebind=boot-open` 型判法都会接受——即成对证据。
+
+**如实范围**：夹具每代结清任务，`restoreChains` 折叠的开放账户为空（既有 S2 夹具 260/260 次同样 `chains=0`），rebind 段取真实调用的一对读但未覆盖非空链折叠耗时；非空链耗时归 09.R2b 的隔离对照。
+
+**负锚注入设计**（不依赖 `sum≤total`，也不依赖 `rebind=boot-open`）：判定器只看样本集自身的结构——①**覆盖**：每个必需阶段恰有样本，缺则具名拒“the sample set charges no <阶段> stage”；②**唯一**：同一阶段同一次调用不得记两次费用，重复即具名拒；③**独立起止**：样本起止不得从另一段复制（起止与另一段完全同对，或止不晚于开，则具名拒“not independently opened”）；④**父子包含**。注入用的独立参照＝同一代真实样本序列：重复记账注入使 Σ 仍 ≤ 整代（`sum≤total` 抓不到），漏阶段注入使 Σ 变小（同样抓不到）——两条都只由结构判据具名拒，这才是“可失败”。
+
 R2b 同时交三类证据：①原始 boot/整代及分阶段墙钟、原 1.3× 判决；②实测安全校验线性项、其他阶段及未归因项，不能仅以“字节相等”推导耗时归因；③保持 CRC 安全检查不变的真实性能退化控制，计数不变但耗时增加也应触发墙钟拒绝。合成线性序列只证明判定器有分辨力，删 CRC 的红只证明安全覆盖，二者不替代生产路径性能反例。
 
 **校准门**：同机/镜像/工具链/输入/代序，冷热分记，独立根配对并交替次序，至少十轮且不与编译/race/其他负载实验并发；预热仅剥离编译，不剥离目标冷启动。1.3× 不放宽、不默默撤销墙钟；保留其实际 PASS/FAIL，并与已允许线性项归因并列。噪声、允许成本与新增回归不能分离时判未证，不因超界就归噪声。只有同条件正案、可失败负案及归因均成立才提交校准结论；若原绝对平坦目标与安全成本冲突，显式回到一级目标校正，不在本叶换宽数放行。
+
+### R2b 校准记录（2026-11-19，工作树；同机、同工具链、同输入/深度/缓存）
+
+**条件**：同一台机、同一 `go test` 二进制（编译缓存热，目标冷启动不剥离）、同一夹具形状（`turns=1`、`perGeneration=1`、代代同工）、同深度 252 代、每轮独立 `t.TempDir()` 根（无跨轮共享缓存）；十轮串行，期间不跑编译/race/其他负载实验。命令与原始输出：`GOFLAGS=-buildvcs=false TMPDIR=/tmp go test ./assembly -run '^TestSymptomAnchorPerGenerationCostFlatOverALongRun$' -count=10 -v -timeout 30m` → **exit 0，10 RUN／10 PASS（10 轮各 ~29–48s）**。下表每格为该轮「参照窗（第 1..5 代）中位数 ÷ 受判窗（末 5 代）中位数」的比值，total 列另给两侧毫秒读数。
+
+| 轮 | total 参照/受判 (ms) | total 比值 | 1.3× 判决 | commits | settling | sessions | frame | closing | boot | integrity | boot−integrity−rebind |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| 1 | 83.0 / 110.9 | 1.337 | **越界** | 1.062 | 1.081 | 0.974 | 1.003 | 0.997 | 3.045 | 16.136 | 2.785 |
+| 2 | 99.7 / 110.8 | 1.112 | 界内 | 0.979 | 0.969 | 0.846 | 0.838 | 0.938 | 1.978 | 10.698 | 1.843 |
+| 3 | 97.7 / 111.7 | 1.144 | 界内 | 0.853 | 0.985 | 0.841 | 0.830 | 0.796 | 3.486 | 11.958 | 3.127 |
+| 4 | 92.7 / 117.5 | 1.268 | 界内 | 1.043 | 1.009 | 0.859 | 0.905 | 1.001 | 3.451 | 12.978 | 3.010 |
+| 5 | 90.0 / 111.0 | 1.232 | 界内 | 0.966 | 1.008 | 1.006 | 0.981 | 0.987 | 3.455 | 8.190 | 3.102 |
+| 6 | 93.9 / 103.8 | 1.105 | 界内 | 0.907 | 0.919 | 0.901 | 0.909 | 0.946 | 1.877 | 10.350 | 1.624 |
+| 7 | 96.1 / 98.8 | 1.029 | 界内 | 0.937 | 0.842 | 0.903 | 0.969 | 0.962 | 2.105 | 12.347 | 1.699 |
+| 8 | 94.9 / 104.0 | 1.096 | 界内 | 0.922 | 0.914 | 0.788 | 0.827 | 0.953 | 2.960 | 14.594 | 2.653 |
+| 9 | 93.8 / 86.1 | 0.917 | 界内 | 0.825 | 0.674 | 0.729 | 0.780 | 0.792 | 1.965 | 7.811 | 1.719 |
+| 10 | 73.0 / 99.1 | 1.357 | **越界** | 1.185 | 1.260 | 1.050 | 1.031 | 1.154 | 3.917 | 18.757 | 3.366 |
+
+**判决并列（不合并、不互相豁免）**：
+
+| 面 | 十轮读数 | 1.3× 判决 |
+|---|---|---|
+| 五个工作阶段（锚的受判面） | commits 0.825–1.185、settling 0.674–1.260、sessions 0.729–1.050、frame 0.780–1.031、closing 0.792–1.154 | **10/10 轮在界内**（PASS） |
+| boot 配对轴（同深度、同工、两独立根，中位数） | 控制对 median 0.939–1.096（p10 0.755–0.878、p90 1.100–1.497） | **10/10 轮在界内**（PASS）；噪声中位数峰值距界 19% |
+| boot 深度分离（深根 p10 vs 控制 p90） | held p10 2.196–3.874 全部高于 control p90 1.163–1.428 | **10/10 轮分离**（增长与噪声可分） |
+| 安全完整帧校验（许可的线性项） | 3.27–3.92ms vs 参照 0.13–0.40ms，比值 7.811–18.757 | 线性项实测成立，按 O(日志字节) 单列，不承担其他面的豁免 |
+| **boot 减 integrity 减 rebind（未归因残项）** | 比值 1.624–3.366（中位 2.719） | **不豁免**：这截增长不被许可的线性项解释，如实记作未归因 |
+| **total（boot＋工作，非锚的判据）** | 比值 0.917–1.357，2/10 轮越过 1.3 | **并列留档**：越界成因是 boot 的未归因残项，不是任一工作阶段（其各阶段均 <1.3） |
+
+**结论与如实边界**：
+- 判据（工作阶段 ＋ boot 配对轴）在十轮里都有明确 PASS，且增长侧（深度分离）十轮都在噪声之上 ⇒ **噪声与增长可分**，不属于「区分不了即未证」。
+- 但 **total 不是锚的判据**（boot 的声明读随历史增长，故 boot 不被要求平坦），其 2/10 越界是自洽的：越界由 boot 的未归因残项带入。该残项当前**无名无主**，交 06/09.R3 归因，**不得**记入「已接受的线性成本」。
+- settling 单轮 1.260 距界仅 3%，且落在该阶段自身跨轮区间（0.674–1.260）内 ⇒ 属亚毫秒阶段的噪声；本表如实标注这一薄余量，不据此把界放宽，也不宣称该阶段有增长余量。
+
+**性能反例（可红；两类注入，安全面不变）**：
+
+1. **计数不变、独立阶段耗时增长**（`TestBootWallClockRejectsUnattributedGrowth`，本叶负锚）。held 根在真实读里重复工作（每 16 字节日志一步），`judgeCountedFacesUnmoved` 逐代核过全部计数面未动（`restored`／index walk visits／value bytes／value reads／slot scan bytes／addressed reads），完整性仍 1:1。十轮结果：控制对 median 0.939–1.095 被接受，held 对 median 1.602–2.334 全部越过 1.3 被**具名拒**（"…not subsumed by the counts"）。命令 `-run '^TestBootWallClockRejectsUnattributedGrowth$' -count=10 -v` → **exit 0，10/10 PASS**（refusal 断言在测内触发；若注入未被拒，该测即 `t.Fatal` 变红）。
+2. **全史枚举注入的红/绿对照**（隔离 overlay，真实数据零写）。同一命令 `-run '^TestSymptomAnchorPerGenerationCostFlatOverALongRun$' -count=1`：
+   - **红**：overlay 让深根走装饰引擎（`walkLongRunGenerationsOver(..., repeatedWorkSteps)`，深度 24）→ **exit 1**，具名拒 "generation 1 read 196608 slot table bytes scanned, want none: the boot addresses the keys it names, and a full-table enumeration pays the capacity of every family…"；同轮 `integrityBytesScanned` 与 `journalLogBytes` 逐代相等（安全面未变）。
+   - **绿**：同一命令在未改树上 → **exit 0**（十轮见上表）。
+   overlay 只替换 `assembly/symptom_anchor_longrun_test.go` 的副本（`/tmp/r2b-mutant/`＋`/tmp/r2b-overlay.json`），工作树零写。
+3. **不替代项**：合成线性序列只证判定器有分辨力；上表第 2 条的红是**计数面**被枚举顶穿，不是耗时代替计数。真实工作阶段回归的反例在本树尚不存在（无退化实现可注入），故阶段轴的可失败性由合成控制案证明，**这一半不冒充生产路径性能反例**。
+
+**注释形状迁移（原两 `Test` 头注的细节从测试文件搬到本节）**：`assembly/symptom_anchor_longrun_test.go` 的 `TestBootWallClockRejectsUnattributedGrowth` 与 `TestSymptomAnchorPerGenerationCostFlatOverALongRun` 头注此前有 6 行与 4 行超出 160 字符形状上限，按 `comment_policy` 拆短。搬出的细节即：反例三根形状与「两根本实为同一控制带」的用途；held 根每 16 字节一步的注入量与「步数只交给该根」的传递方式；配对读数为何奇偶反转、为何取 21 对；噪声带定义（控制对 p10–p90）与「增长只在中位数清过带时才算分离」；boot 深度分离**只报不判**的理由（restart 读的是链陈述的账户，故 boot 只受计数面与配对轴约束）；长跑锚的单句意图（工作在任意深度等价，boot 的声明读随历史）。
 
 ## 十、R3 最终候选矩阵与同条件对照
 
@@ -311,3 +395,19 @@ EXIT=1
     over the bound of 174.064257ms (13 tenths of the reference), so the whole cost of a generation grows
     with the chain it walked (the series below is indexed by generation, 0..251)
 ```
+
+## 十三、09.R3a 零填充尾的 torn 判据（09.R3 两片红的取证与修）
+
+**症状链**：(42,256) 与 (7,256) 的 `boot the host: memory: journal frame is corrupt: …/storage/kv/journal.log: record carries no object`（`journal.go:271` 经 `journalSpansAt`，由 `journalReplay` `journal.go:567-586` 交来空 payload）。
+
+**根因（已实测，非推断）**：`journalReplay` 的 torn 判据漏了「长度 0 的帧头」。空 payload 的 CRC32C 为 0，与零填充区的 CRC 字段相等，故全零帧头被当作**零长合法帧**接受：完整性一趟（`visit` 为空操作）静默吃掉整段零填充、`complete == size` 故 `openJournalLogFace` 不判 torn 也不截断；随后真正消费 payload 的重放（`replayWindow`／`derive`／`rebuildFrom`）拿到空 payload，在 `journalSpansAt` 报「record carries no object」。即**同一日志的两个读者对同一段字节判定不一致**：完整性趟说合法，跨距重放说损坏。
+
+**修法（最小）**：`journalReplay` 在 `length == 0 && crc == 0` 时不再当帧：零填充之后（读到日志尾）若全为 0，则该处即 torn 尾并交回 `offset`（写权视图按既有逻辑截断）；若零填充之后还有非零字节，则具名 `ErrJournalCorrupt`（`frame at offset %d carries no payload`），不静默吃、也不越权截断其后字节。
+
+**被否方案**：①在 `journalSpansAt` 拒空 payload——把可自愈的 torn 尾变成永久 boot 失败，且不解决完整性趟与重放趟的分歧；②把任何长度 0 当 torn 直接截断——删掉「零填充后仍有帧」这一真损坏形态的拒绝面，等于放宽判据凑绿。
+
+**取证与验证**：
+- 负锚（可红）`TestJournalReplayStatesAZeroFillTailAsTornAndRefusesAFillItResumesPast`（`memory/ledger/journal_test.go`）：整帧＋零填充（8 字节／4096 字节两形态）两面皆须开成 torn 尾于整帧末尾、写权视图截断、地址索引重建后可读回记录；零填充后接真帧两面皆须 `ErrJournalCorrupt` 且不截其后字节。**修前 overlay 复原同一测试 → exit 1**，两条 torn 子案原文即产品同一句 `…: record carries no object`；**修后同一测试 exit 0**。
+- 正锚 `GOFLAGS=-buildvcs=false go test ./memory/ledger/ -count=1` → **exit 0（83.797s）**；`go build ./...` → **exit 0**。
+- 未证（不按已核处理）：**零字节尾的来源**未证。本次 (42,256) 复跑（`/tmp/ri-42-256`，wall 293.02s、exit 1、`verdict=unattested`）保留根 `/tmp/ri-keep-42-256`，其 `storage/kv/journal.log` 逐帧核过：**12690 帧、CRC32C 全对、零长帧 0、≥8 字节零游程 0、尾部 0 字节、文件尾与最后一帧尾对齐**——本次红**没有**出现零填充尾，也没有 `record carries no object`。故「零填充尾由崩溃/延迟分配产生」仍只是机理推断，缺一次带零尾的实际进程崩溃取证。
+- **本次红是另一症状**（同一 (42,256) 组合）：`smoke_test.go:3643 input identity does not reconcile: missing=[SMOKE-R420560 … SMOKE-R420596]`（37/1200 输入）+ 一条重复动作 + `drain.drained=false`，`unsettled: task=task-f7623ff8 reason=the task stands at accepted`，收尾 `The close reached its budget before the final checkpoint was filed: context deadline exceeded` ＋ `cut with 1 unsettled item(s) on the chain`（`gen120.log:141-142`）。缺失集恰为 gen56 全部 37 条输入：`gen56.json` 记它们每条都 drive 成功且等到应答（ms 36–50，全代存活 1.1s），但 `gen56.log` 仅 144 行、四条 turn 全是启动重绑标记、无一条输入标记。定位到 `smokeCalibrationReconcile` 以「入口模型请求的最后一条 user 正文」计数（`smoke_harness_test.go:744-760`），而该代日志被截断，无法判是子进程侧丢输入还是对账口径错配；该链路的写入面不在本域白名单（`smoke_*`／任务链义务结清在 agent 侧），且 `gen56` 的 `recovered_tasks=38`／`restore folded chains=39` 未见任何 journal 报错。**因果未定 ⇒ 停产上报**（见 tasks.md 09.R3a 状态）。

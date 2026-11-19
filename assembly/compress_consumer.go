@@ -55,35 +55,53 @@ const compressCoveredSeparator = "\n"
 // MUST NOT judge material of its own: only the requests already on the chain are executed.
 // MUST NOT execute a judgment whose material does not stand: it stays pending rather than answering a product of other material.
 type CompressionConsumer struct {
-	sessions compressSessions
+	sessions compressSessionSource
+	products compressProductStore
 	// gists is the model face the consumer asks for the semantic summary of the
 	// oldest band. A consumer beside none records the mechanical form, which is
 	// the bounded text the fold itself minted.
 	gists summaryGists
 	mu    sync.Mutex
-	// judgments holds the requests one session filed, in filing order, keyed by
-	// the session whose material they name.
+	// judgments holds the requests one session filed that no product answers yet,
+	// in filing order, keyed by the session whose material they name. A judgment a
+	// product answers leaves this account: the request and the product that answers
+	// it stay on the chain, and the consumer reads that answer back by identity
+	// instead of holding every answer it ever saw.
 	judgments map[event.SessionID][]event.CompressRequest
-	// answered holds the request identities a product already answers, so a
-	// repeated observation of one request executes it once.
-	answered map[event.EventID]struct{}
+	// struck counts the judgments a product answered here: the notes that removed
+	// a pending judgment, so a note of an answer the account already struck counts
+	// once.
+	struck int
 }
 
-// compressSessions is the session face the consumer reads one commit through:
-// the session chain a committed fact belongs to, the projection and the window
-// that chain registered, and the filing of one execution result.
-type compressSessions interface {
+// compressSessionSource is the session face the consumer reads one commit
+// through: the session chain a committed fact belongs to, and the projection and
+// the window that chain registered.
+type compressSessionSource interface {
 	// SessionOf reports the session chain one committed fact belongs to.
 	SessionOf(ctx context.Context, id event.EventID) (event.SessionID, bool)
 	// ProjectionOf reports the projection one session registered for replay
 	// beside the window it was registered under.
 	ProjectionOf(ctx context.Context, session event.SessionID) (*replay.ReplayProjection, FoldWindow, bool)
+}
+
+// compressProductStore is the product ledger face the consumer files one
+// execution through: the filing of one execution result, and the answer the
+// chain of a session already states.
+type compressProductStore interface {
 	// FileCompressProduct files one execution result on the chain of the session
 	// whose material was folded, and answers the judgment it names: the answer
 	// follows the fact inside one unit of the run's quiet-point fence, so a cut
 	// taken after the landing states the answer beside the fact, and the execution
 	// the consumer reads as owed stops being owed.
 	FileCompressProduct(ctx context.Context, session event.SessionID, product event.CompressProduct) error
+	// HoldsCompressProduct answers whether the chain of one session already
+	// carries the product the execution of one judgment would file. The product
+	// identity is content-addressed over the judgment, the producer and the fold
+	// product key — never over the product text — so the identity is computed
+	// before the material folds again and the answer is read at that identity
+	// instead of through the answers the process happens to hold.
+	HoldsCompressProduct(ctx context.Context, session event.SessionID, request, key event.EventID) (bool, error)
 }
 
 // compressExecutor is the face a producer hands one session's judgments to, so
@@ -102,14 +120,15 @@ var (
 	_ compressExecutor          = (*CompressionConsumer)(nil)
 )
 
-// NewCompressionConsumer assembles the consumer over the session face of one
-// run. A nil face answers no session, so an assembly mounted beside none
-// executes nothing instead of failing on the first commit.
-func NewCompressionConsumer(sessions compressSessions) *CompressionConsumer {
+// NewCompressionConsumer assembles the consumer over the session replay face and
+// the product ledger face of one run. A nil face answers no session and files no
+// product, so an assembly mounted beside none executes nothing instead of
+// failing on the first commit.
+func NewCompressionConsumer(sessions compressSessionSource, products compressProductStore) *CompressionConsumer {
 	return &CompressionConsumer{
 		sessions:  sessions,
+		products:  products,
 		judgments: map[event.SessionID][]event.CompressRequest{},
-		answered:  map[event.EventID]struct{}{},
 	}
 }
 
@@ -148,7 +167,7 @@ func (c *CompressionConsumer) Material() plugin.Material {
 // yet: the fact that triggered it names the session, and every judgment of that
 // session stands where the producer left it.
 func (c *CompressionConsumer) ObserveCommit(ctx context.Context, id event.EventID) error {
-	if c == nil || c.sessions == nil {
+	if c == nil || c.sessions == nil || c.products == nil {
 		return nil
 	}
 	if err := ctx.Err(); err != nil {
@@ -180,14 +199,63 @@ func (c *CompressionConsumer) Record(session event.SessionID, request event.Comp
 
 // NoteProduct notes one product a chain already carries, so the judgment it
 // answers is never executed a second time: this is the restart path, where the
-// products of a chain answer judgments the process does not hold.
+// products of a chain answer judgments the process does not owe yet. The account
+// holds the batch still owed and never the answers it read, so the note removes
+// the judgment and the answer stays where the chain states it.
 func (c *CompressionConsumer) NoteProduct(product event.CompressProduct) {
 	if c == nil || product.Answers.Request == "" {
 		return
 	}
+	c.strike(product.Answers.Request)
+}
+
+// strike removes the judgment one product answers from the batch this account
+// still owes, and reports whether it removed one. The answer outlives the account:
+// the request and the product stay on the chain, so a judgment already struck is
+// an execution the consumer owes nothing for and a second note of it removes
+// nothing.
+func (c *CompressionConsumer) strike(request event.EventID) bool {
+	if c == nil || request == "" {
+		return false
+	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.answered[product.Answers.Request] = struct{}{}
+	return c.strikeLocked(request)
+}
+
+// strikeLocked removes one answered judgment from the session that filed it, so
+// the account of a chain that owes nothing is no key at all. The removal is by
+// identity and never by position: a judgment filed out of order is the judgment
+// whose own product answers it, whatever stands around it. The caller holds the
+// consumer lock.
+func (c *CompressionConsumer) strikeLocked(request event.EventID) bool {
+	for session, filed := range c.judgments {
+		for at, held := range filed {
+			if held.ID != request {
+				continue
+			}
+			rest := append(filed[:at], filed[at+1:]...)
+			if len(rest) == 0 {
+				delete(c.judgments, session)
+			} else {
+				c.judgments[session] = rest
+			}
+			c.struck++
+			return true
+		}
+	}
+	return false
+}
+
+// struckNotes reports how many judgments this consumer read an answer for: one
+// per answer that removed a judgment it still owed.
+func (c *CompressionConsumer) struckNotes() int {
+	if c == nil {
+		return 0
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.struck
 }
 
 // Execute runs every judgment of one session no product answers yet: it reads
@@ -202,10 +270,11 @@ func (c *CompressionConsumer) NoteProduct(product event.CompressProduct) {
 // - The plan is executed over the accounting-free view the production judged (foldProjectionOf): the products name the conversation material, and delivery settlement lines stay in the projection the model reads.
 // - A history summary covers every settlement fact inside the band it folds: settlement lines never count as fold material (foldProjectionOf), the summary consumes their accounting beside the turns, and the facts stay on the chain readable by identity.
 // - The checkpoint is a pure whole-batch preflight, so its survivors equal the entries left by applying that same batch.
+// - A judgment the chain already answers is struck before the material is summarized: the product identity is content-addressed over the judgment, the producer and the fold product key, so the answer is read back by identity and the execution costs no model call and no second product.
 // - The oldest-band gist is read before the checkpoint, so the survivors a restart rebuilds state the text the chain records rather than the mechanical form the fold minted.
-// - Every product is filed through the session face, which answers the judgment it names: the batch shrinks as it is filed, so the account the consumer holds is never one the chain disagrees with.
+// - Every product is filed through the product ledger face, which answers the judgment it names: the batch shrinks as it is filed, so the account the consumer holds is never one the chain disagrees with.
 func (c *CompressionConsumer) Execute(ctx context.Context, session event.SessionID) error {
-	if c == nil || c.sessions == nil || session == "" {
+	if c == nil || c.sessions == nil || c.products == nil || session == "" {
 		return nil
 	}
 	if err := ctx.Err(); err != nil {
@@ -242,9 +311,18 @@ func (c *CompressionConsumer) Execute(ctx context.Context, session event.Session
 	batch := make([]replay.FoldProduct, 0, len(pending))
 	for _, request := range pending {
 		product, stands := named[request.ID]
-		if stands {
-			batch = append(batch, coverSettlementFacts(product, projection))
+		if !stands {
+			continue
 		}
+		executed, err := c.products.HoldsCompressProduct(ctx, session, request.ID, product.Entry.Key)
+		if err != nil {
+			return err
+		}
+		if executed {
+			c.strike(request.ID)
+			continue
+		}
+		batch = append(batch, coverSettlementFacts(product, projection))
 	}
 	for at := range batch {
 		batch[at] = c.summarizeProduct(ctx, session, batch[at], window.SummaryBudgetBytes)
@@ -258,7 +336,7 @@ func (c *CompressionConsumer) Execute(ctx context.Context, session event.Session
 		if at == len(batch)-1 {
 			minted = minted.WithCheckpoint(checkpoint)
 		}
-		if err := c.sessions.FileCompressProduct(ctx, session, minted); err != nil {
+		if err := c.products.FileCompressProduct(ctx, session, minted); err != nil {
 			return err
 		}
 		projection.ApplyProducts([]replay.FoldProduct{product})
@@ -386,8 +464,9 @@ func coverSettlementFacts(product replay.FoldProduct, projection *replay.ReplayP
 	return product
 }
 
-// pending reports the judgments one session filed that no product answers yet,
-// in filing order.
+// pending reports the judgments one session filed that no product answers yet, in
+// filing order, as the batch an execution of this chain owes. The batch is a copy:
+// the execution strikes the judgments it answers as it goes.
 func (c *CompressionConsumer) pending(session event.SessionID) []event.CompressRequest {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -395,21 +474,7 @@ func (c *CompressionConsumer) pending(session event.SessionID) []event.CompressR
 	if len(filed) == 0 {
 		return nil
 	}
-	out := make([]event.CompressRequest, 0, len(filed))
-	for _, request := range filed {
-		if _, done := c.answered[request.ID]; done {
-			continue
-		}
-		out = append(out, request)
-	}
-	return out
-}
-
-// noteAnswered reports one judgment as answered by the product just filed.
-func (c *CompressionConsumer) noteAnswered(request event.EventID) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.answered[request] = struct{}{}
+	return append([]event.CompressRequest(nil), filed...)
 }
 
 // judgmentOf reads one committed fact back as the judgment it states: the session
@@ -486,6 +551,31 @@ func (s ageFoldSessions) FileCompressProduct(ctx context.Context, session event.
 	return s.run.fileCompressProduct(ctx, session, product)
 }
 
+// HoldsCompressProduct reads one judgment's answer back by identity.
+func (s ageFoldSessions) HoldsCompressProduct(ctx context.Context, session event.SessionID, request, key event.EventID) (bool, error) {
+	return s.run.holdsCompressProduct(ctx, session, request, key)
+}
+
+// holdsCompressProduct answers whether this run's chain already carries the
+// product one judgment would be executed as: the identity is content-addressed
+// over the judgment, the producer and the product key, so the answer is read at
+// one identity — the live ledger first, then the record the chain keeps — instead
+// of being restated in the account this process holds.
+func (r *Run) holdsCompressProduct(ctx context.Context, session event.SessionID, request, key event.EventID) (bool, error) {
+	if request == "" || key == "" {
+		return false, nil
+	}
+	minted := event.CompressProductFor(request, compressionProducer, key, nil, "")
+	r.mu.Lock()
+	_, live := r.facts[minted.ID]
+	agent := r.agentOfSessionLocked(session)
+	r.mu.Unlock()
+	if live {
+		return true, nil
+	}
+	return r.chainHoldsFact(ctx, event.Event{Key: minted.ID, Owner: event.Address{AgentID: agent, SessionID: session}})
+}
+
 // fileCompressProduct lands one execution result in the live ledger of this run
 // under the product's content-addressed identity: a product already on record is
 // left as it stands, so one judgment answers one product however often the
@@ -506,14 +596,14 @@ func (r *Run) fileCompressProduct(ctx context.Context, session event.SessionID, 
 	consumer := r.compress
 	r.mu.Unlock()
 	if filed {
-		consumer.noteAnswered(product.Answers.Request)
+		consumer.strike(product.Answers.Request)
 		return nil
 	}
 	if _, err := r.commitFactChecked(ctx, compressProductEvent(session, agent, product, time.Now())); err != nil {
 		assemblyWarn("tagent: the compression product of session %s was not committed err=%v", session, err)
 		return err
 	}
-	consumer.noteAnswered(product.Answers.Request)
+	consumer.strike(product.Answers.Request)
 	r.CheckpointAfterFold()
 	return nil
 }

@@ -51,9 +51,8 @@ const failureNoticeSummary = "failure-notice"
 
 // deliverySettlementType is the frozen event type of the delivery settlement
 // family. It is the spelling the request side maps onto a role
-// (runtime/agent/request_assembly.go, projectionTypeDeliverySettlement) and the
-// lifecycle policy exempts from TTL (memory/ledger/lifecycle_config.go): the
-// three spellings must stay byte-identical.
+// (runtime/agent/request_assembly.go, projectionTypeDeliverySettlement): the
+// two spellings must stay byte-identical.
 const deliverySettlementType = "delivery.settlement"
 
 // deliveryFactPrefix heads every settlement fact key: the family locator a

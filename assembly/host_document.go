@@ -105,15 +105,16 @@ type hostAgent struct {
 	// it. An absent section mounts every builtin plugin.
 	Plugins []string `yaml:"plugins"`
 
-	Temperature       *float64 `yaml:"temperature"`
-	ThinkingEnabled   *bool    `yaml:"thinking_enabled"`
-	ReasoningEffort   string   `yaml:"reasoning_effort"`
-	MaxTokens         int      `yaml:"max_tokens"`
-	MaxToolIterations int      `yaml:"max_tool_iterations"`
-	ReplayWindow      int      `yaml:"replay_window"`
-	ContextWindow     *int     `yaml:"context_window"`
-	CompressThreshold float64  `yaml:"compress_threshold"`
-	KeepRecentTasks   int      `yaml:"keep_recent_tasks"`
+	Temperature        *float64 `yaml:"temperature"`
+	ThinkingEnabled    *bool    `yaml:"thinking_enabled"`
+	ReasoningEffort    string   `yaml:"reasoning_effort"`
+	MaxTokens          int      `yaml:"max_tokens"`
+	MaxToolIterations  int      `yaml:"max_tool_iterations"`
+	ReplayWindow       int      `yaml:"replay_window"`
+	ContextWindow      *int     `yaml:"context_window"`
+	CompressThreshold  float64  `yaml:"compress_threshold"`
+	KeepRecentTasks    int      `yaml:"keep_recent_tasks"`
+	SummaryBudgetBytes int      `yaml:"summary_budget_bytes"`
 }
 
 // hostPrompt is the prompt section of one agent: the declared files resolved
@@ -192,23 +193,24 @@ func (d *hostDocument) mapDocument() (document.Document, error) {
 			finalRound.MaxRounds = entry.MaxToolIterations
 		}
 		spec := config.AgentSpec{
-			ID:                id,
-			Model:             d.modelName(id),
-			FinalRound:        finalRound,
-			Temperature:       entry.Temperature,
-			ThinkingEnabled:   entry.ThinkingEnabled,
-			ReasoningEffort:   entry.ReasoningEffort,
-			MaxTokens:         entry.MaxTokens,
-			MaxToolIterations: entry.MaxToolIterations,
-			ReplayWindow:      entry.ReplayWindow,
-			ContextWindow:     derefInt(entry.ContextWindow),
-			CompressThreshold: entry.CompressThreshold,
-			KeepRecentTasks:   entry.KeepRecentTasks,
-			Memory:            entry.Memory,
-			Meditation:        entry.Meditation,
-			File:              entry.File,
-			Exec:              entry.Exec,
-			Plugins:           append([]string(nil), entry.Plugins...),
+			ID:                 id,
+			Model:              d.modelName(id),
+			FinalRound:         finalRound,
+			Temperature:        entry.Temperature,
+			ThinkingEnabled:    entry.ThinkingEnabled,
+			ReasoningEffort:    entry.ReasoningEffort,
+			MaxTokens:          entry.MaxTokens,
+			MaxToolIterations:  entry.MaxToolIterations,
+			ReplayWindow:       entry.ReplayWindow,
+			ContextWindow:      derefInt(entry.ContextWindow),
+			CompressThreshold:  entry.CompressThreshold,
+			KeepRecentTasks:    entry.KeepRecentTasks,
+			SummaryBudgetBytes: entry.SummaryBudgetBytes,
+			Memory:             entry.Memory,
+			Meditation:         entry.Meditation,
+			File:               entry.File,
+			Exec:               entry.Exec,
+			Plugins:            append([]string(nil), entry.Plugins...),
 		}
 		files, err := d.promptFiles(id)
 		if err != nil {

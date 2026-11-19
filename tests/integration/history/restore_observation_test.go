@@ -237,8 +237,8 @@ func commitDamagedChain(ctx context.Context, cfg ledger.StorageConfig) (err erro
 			err = closeErr
 		}
 	}()
-	fixture, err := state.NewDurableCommit(ledger.TierFactLog(tier), nil)
-	if err != nil {
+	fixture := state.NewEmptyDurableCommit(ledger.TierFactLog(tier), nil)
+	if err := fixture.Seat(ctx, nil, nil); err != nil {
 		return err
 	}
 	result, err := fixture.Commit(ctx, task.CommitRecord{

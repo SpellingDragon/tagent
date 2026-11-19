@@ -11,6 +11,7 @@
 //
 //   - scan: without --restore the run writes nothing, stating the keys the folded root would hold and naming the ones it leaves behind
 //   - restore: the run holds the write rights of -root, states at most foldedBatchKeys original keys per commit, and reads every identity back through a freshly opened engine
+//   - offline source: the run stamps every journal of the source before it reads any of them and states them again once it has read them all, so a journal that moved under the read refuses the run instead of being folded as one consistent read of two journals
 //   - refusals: ledger.ErrMigrateSourceUnchanged, ErrSourceUnstated, ErrSourceConflict, ErrSourceIncomplete, ledger.ErrRootWriteLocked, ledger.ErrBatchNotAtomic
 //
 // 契约: docs/wiki/memory/memory-architecture.md#local-file-kv
@@ -28,6 +29,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/SpellingDragon/tagent/api/event"
 	"github.com/SpellingDragon/tagent/memory/ledger"
@@ -199,6 +201,27 @@ func main() {
 	printReport(*source, *root, *restore, plan, folded)
 }
 
+// journalStamp is what one journal log of a source root states before the fold reads
+// it: the byte count a commit appends to and the modification time a commit moves.
+type journalStamp struct {
+	// path is the log this stamp states.
+	path string
+	// size is the byte count the log stated.
+	size int64
+	// modTime is the modification time the log stated.
+	modTime time.Time
+}
+
+// journalReadHook is called with the directory of one source journal once the fold
+// has read it, and before the fold states that journal again.
+//
+// The command sets no hook: it folds a source an operator holds offline, and the
+// statement that the log stood still is taken with nothing between the read and
+// itself. A case that has to prove a source moving under the read is refused sets
+// one and moves the journal there, because a writer racing the read is a change no
+// case can schedule and the check it refuses on is the command's own.
+var journalReadHook func(dir string)
+
 // foldRoot reads the journals of sourceRoot as the facts they state and, when
 // restore is set, commits them into targetRoot and reads them back.
 //   - The plan holds the events of both journals at the commit sequence their index entries carry, oldest first, so a newest-first walk of the folded root states the order the source's commits landed in
@@ -206,13 +229,21 @@ func main() {
 //   - restore=true declares the write rights of targetRoot, is refused by name while another writer holds that root, and commits into a root that holds no key
 //   - The source and the target must name two directories, so the fold never writes the root it reads
 //   - The settled: keys state how far the cold journal reaches, and the folded root states the facts alone: the plan names them as keys it does not hold
+//   - The source must hold still: every journal is stamped before any of them is read and stated again after all of them are read, and a report of a folded root is only made for a source that held still through the whole run
 func foldRoot(ctx context.Context, sourceRoot, targetRoot string, restore bool) (foldPlan, foldReport, error) {
 	if filepath.Clean(sourceRoot) == filepath.Clean(targetRoot) {
 		return foldPlan{}, foldReport{}, fmt.Errorf("%w: the source and the target are one directory %s",
 			ledger.ErrMigrateTargetNotEmpty, targetRoot)
 	}
+	stamps, err := stampSource(sourceRoot)
+	if err != nil {
+		return foldPlan{}, foldReport{}, err
+	}
 	pairs, tiers, err := readSource(ctx, sourceRoot)
 	if err != nil {
+		return foldPlan{}, foldReport{}, err
+	}
+	if err := holdSource(stamps); err != nil {
 		return foldPlan{}, foldReport{}, err
 	}
 	plan, err := classify(pairs)
@@ -229,7 +260,51 @@ func foldRoot(ctx context.Context, sourceRoot, targetRoot string, restore bool) 
 	if err := verifyFold(ctx, targetRoot, plan); err != nil {
 		return plan, foldReport{}, err
 	}
+	if err := holdSource(stamps); err != nil {
+		return plan, foldReport{}, err
+	}
 	return plan, foldReport{Folded: len(plan.Events), Written: len(plan.Originals)}, nil
+}
+
+// stampSource states every journal log a source root holds, so the fold can state
+// the same logs once it has read all of them.
+//   - The hot journal is required and the cold one is optional, so a root that moved nothing is stamped by its hot journal alone
+//   - A stamp is taken of the log file itself, so a log a writer appends to moves the stamp and a directory that gains no byte does not
+func stampSource(sourceRoot string) ([]journalStamp, error) {
+	stamps := make([]journalStamp, 0, len(sourceTiers))
+	for _, tier := range sourceTiers {
+		dir := filepath.Join(sourceRoot, tier.Dir)
+		path := filepath.Join(dir, journalFileName)
+		info, err := os.Stat(path)
+		if errors.Is(err, os.ErrNotExist) {
+			if tier.Name != sourceTiers[0].Name {
+				continue
+			}
+			return nil, fmt.Errorf("%w: %s", ErrSourceUnstated, dir)
+		}
+		if err != nil {
+			return nil, fmt.Errorf("fold-cold-root: read the log of %s: %w", dir, err)
+		}
+		stamps = append(stamps, journalStamp{path: path, size: info.Size(), modTime: info.ModTime()})
+	}
+	return stamps, nil
+}
+
+// holdSource refuses a source whose journal moved since it was stamped: a fold
+// states the facts of a root an operator holds offline, so a log that grew or was
+// touched under the read names the log that moved instead of reporting a fold of a
+// source that was being written.
+func holdSource(stamps []journalStamp) error {
+	for _, stamp := range stamps {
+		info, err := os.Stat(stamp.path)
+		if err != nil {
+			return fmt.Errorf("fold-cold-root: read the log of %s: %w", stamp.path, err)
+		}
+		if info.Size() != stamp.size || !info.ModTime().Equal(stamp.modTime) {
+			return fmt.Errorf("%w: %s", ledger.ErrMigrateSourceUnchanged, stamp.path)
+		}
+	}
+	return nil
 }
 
 // readSource reads every key a source root states across its journal directories,
@@ -237,7 +312,6 @@ func foldRoot(ctx context.Context, sourceRoot, targetRoot string, restore bool) 
 //   - The hot journal is required and the cold one is optional, so a root that moved nothing reads as its own facts
 //   - A log is read where it lies, through a view that holds no write rights: it creates no file, cuts no torn tail, rebuilds no index file
 //   - An index this build cannot place costs that view a replay of the whole log, so the root keeps every byte it holds
-//   - A log whose size or modification time moved under the read is refused, so a fold never states half of a root that is still being written
 func readSource(ctx context.Context, sourceRoot string) ([]sourcePair, []string, error) {
 	var pairs []sourcePair
 	var tiers []string
@@ -256,19 +330,9 @@ func readSource(ctx context.Context, sourceRoot string) ([]sourcePair, []string,
 
 // readTier reads the keys one journal log of a source root holds, through a view that
 // holds no write rights over the directory stating that journal.
+//   - A journal directory that holds no log reads as no key, so a root that moved nothing is read by its hot journal alone
 func readTier(ctx context.Context, sourceRoot string, tier sourceTier) ([]sourcePair, error) {
 	dir := filepath.Join(sourceRoot, tier.Dir)
-	logPath := filepath.Join(dir, journalFileName)
-	before, err := os.Stat(logPath)
-	if errors.Is(err, os.ErrNotExist) {
-		if tier.Name != sourceTiers[0].Name {
-			return nil, nil
-		}
-		return nil, fmt.Errorf("%w: %s", ErrSourceUnstated, dir)
-	}
-	if err != nil {
-		return nil, fmt.Errorf("fold-cold-root: read the log of %s: %w", dir, err)
-	}
 	store, err := ledger.OpenAtomicStore(ctx, ledger.StorageConfig{
 		Type:        ledger.StorageJournal,
 		Root:        filepath.Dir(dir),
@@ -285,12 +349,8 @@ func readTier(ctx context.Context, sourceRoot string, tier sourceTier) ([]source
 	if closeErr != nil {
 		return nil, fmt.Errorf("fold-cold-root: close the journal of %s: %w", dir, closeErr)
 	}
-	after, err := os.Stat(logPath)
-	if err != nil {
-		return nil, fmt.Errorf("fold-cold-root: read the log of %s: %w", dir, err)
-	}
-	if before.Size() != after.Size() || !before.ModTime().Equal(after.ModTime()) {
-		return nil, fmt.Errorf("%w: %s", ledger.ErrMigrateSourceUnchanged, logPath)
+	if journalReadHook != nil {
+		journalReadHook(dir)
 	}
 	pairs := make([]sourcePair, 0, len(held))
 	for _, pair := range held {

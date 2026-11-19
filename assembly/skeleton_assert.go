@@ -138,10 +138,11 @@ var (
 	_ plugin.Instance           = (*CompressionConsumer)(nil)
 	_ plugin.PostCommitObserver = (*CompressionConsumer)(nil)
 	_ compressExecutor          = (*CompressionConsumer)(nil)
-	_ compressSessions          = ageFoldSessions{}
+	_ compressSessionSource     = ageFoldSessions{}
+	_ compressProductStore      = ageFoldSessions{}
 
-	_ func(compressSessions) *CompressionConsumer = NewCompressionConsumer
-	_ func(*AgeFoldPlugin, compressExecutor)      = (*AgeFoldPlugin).setExecutor
+	_ func(compressSessionSource, compressProductStore) *CompressionConsumer = NewCompressionConsumer
+	_ func(*AgeFoldPlugin, compressExecutor)                                 = (*AgeFoldPlugin).setExecutor
 
 	_ func(*CompressionConsumer, context.Context, event.SessionID) error = (*CompressionConsumer).Execute
 	_ func(*CompressionConsumer, event.SessionID, event.CompressRequest) = (*CompressionConsumer).Record

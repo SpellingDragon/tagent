@@ -189,3 +189,5 @@ C4 取「被 range 迭代」这一形态，是因为它排除了三类伪消费�
 **扫描面未缩、容器集未漂**：修前修后在真树上 `pipeline_containers` 的**名字集逐名相同**（`Plugins, contributed, elements, instances, plugins`）、文件集相同（32），`mounts=0 consumers=1 exceptions=0 registry_impl=2 present=2 errors=0`。另核：真树 `assembly/*.go` 里 `literal_sources` 逐个文件为空集，`plugin_catalog.go:388` 的 range 源 `contributed` 不在该集 ⇒ 闭合没有触及任何现存合法形态。
 
 **仍不闭的一项（原样保留在 §10.3 第 4 项）**：Go 侧消费者锚 `assembly/plugin_mount_test.go:71/:97` 本窗口禁跑 `go test`，两枚测试**未执行**，运行期证据未取得；01.R1 的框不勾。
+
+> **勘误（2026-11-18，01.R1a）**：上段与 §10.3 第 4 项所写的 `assembly/plugin_mount_test.go:71/:97` **已不存在**（该文件在早前重构中改名并入）。两枚用例现址为 `assembly/plugin_catalog_test.go:58`（`TestBuiltinCatalogMountsEveryFeature`）与 `:84`（`TestHostPluginsMountThroughTheCatalog`）。`go test ./assembly -run '^(TestBuiltinCatalogMountsEveryFeature|TestHostPluginsMountThroughTheCatalog)$' -count=1 -v` 于 2026-11-18 在树 `0f84b2d1` 工作树上 exit 0、两枚 PASS，故第 4 项的运行期证据**已取得**；仍不勾的只剩 01.R1b（生命周期接线后需复跑联合锚）。同批实测：自测 50 例绿、真树 `32/5/0/1/0/2/2/0`、发射点变异 29/29（控制组 50 例绿，每个变异的首个红例为其自有用例）。

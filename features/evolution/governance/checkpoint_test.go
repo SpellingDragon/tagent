@@ -226,11 +226,11 @@ func TestGovernanceSliceSnapshot(t *testing.T) {
 		if wire.DenialSeq != 2 {
 			t.Fatalf("stated denial stream = tail %d, want the two records the ledger folded", wire.DenialSeq)
 		}
-		if wire.GoalSeq != 2 || wire.GoalOrder != 1 || len(wire.Goals) != 1 {
-			t.Fatalf("stated goal stream = tail %d order %d over %d goals, want the declaration and its resolution", wire.GoalSeq, wire.GoalOrder, len(wire.Goals))
+		if wire.GoalSeq != 2 || wire.GoalOrder != 1 {
+			t.Fatalf("stated goal stream = tail %d order %d, want the declaration and its resolution the registry wrote", wire.GoalSeq, wire.GoalOrder)
 		}
-		if wire.Goals[0].Status != GoalAchieved {
-			t.Fatalf("stated goal status = %q, want the resolution the registry applied", wire.Goals[0].Status)
+		if len(wire.Goals) != 0 {
+			t.Fatalf("stated goals = %+v, want none: %s is resolved, so the cut states the work in force and its tail numbers that record", wire.Goals, declared)
 		}
 		if len(wire.Approvals) != 1 || wire.Approvals[0].ID != "approval-cut-1" {
 			t.Fatalf("stated approvals = %+v, want the request the book holds", wire.Approvals)
@@ -250,8 +250,14 @@ func TestGovernanceSliceSnapshot(t *testing.T) {
 		if len(records) != 2 || records[0].ToolName != "read_file" || records[1].ToolName != "shell_exec" {
 			t.Fatalf("restored records = %+v, want the two the cut numbers in the order they happened", records)
 		}
+		if goals := restarted.goals.List(); len(goals) != 0 {
+			t.Fatalf("goals beside the restored cut before its stream is bound = %+v, want none: the cut states the work in force, never the history its tail numbers", goals)
+		}
+		if err := restarted.goals.Bind(ctx, log); err != nil {
+			t.Fatalf("bind the goal stream the restored cut numbers: %v", err)
+		}
 		if goals := restarted.goals.List(); len(goals) != 1 || goals[0].ID != declared || goals[0].Status != GoalAchieved {
-			t.Fatalf("restored goals = %+v, want %s resolved", goals, declared)
+			t.Fatalf("restored goals = %+v, want %s resolved, answered from the stream behind the cut", goals, declared)
 		}
 		if active := restarted.goals.HasActive(); active {
 			t.Fatal("restored registry reports an active goal, want the resolution the cut stated")
@@ -455,6 +461,19 @@ func mustStateCut(t *testing.T, seat *StateSeat) []byte {
 		t.Fatalf("state the governance cut: %v", err)
 	}
 	return payload
+}
+
+// goalOnRecord reports the goal the registry answers under one identity, failing
+// the check when no list names it.
+func goalOnRecord(t *testing.T, goals *GoalRegistry, id string) *Goal {
+	t.Helper()
+	for _, goal := range goals.List() {
+		if goal.ID == id {
+			return goal
+		}
+	}
+	t.Fatalf("goal %s is answered by no list of the registry", id)
+	return nil
 }
 
 // TestGovernanceBindReportsAReadFailure pins the report of a stream a boot could not read.
@@ -1083,5 +1102,262 @@ func TestApprovalAliasCollapsesAcrossTheCut(t *testing.T) {
 			"copies of identity %q, and RestoreEvidence (:174) keys the book by restored.ID so only one survives; the tool fuse "+
 			"(runtime/agent/fuse.go:363) registers each batch under its own decision identity, so a ruling answered under the second "+
 			"identity is refused by name after a restart", err, len(wire.Approvals), second.ID)
+	}
+}
+
+// TestGovernanceGoalSliceTracksOnlyActiveWork pins what one goal slice states against the settled history.
+//   - positive: a cut carries the goals in force, so its bytes and the memory state follow the live work while the settled history grows
+//   - negative: the same live work over five generations must not state a longer goal list, and a goal past its validity must not stay in the memory state either
+//   - consumer: StateSeat.SnapshotState states the goal slice a boot restores, and the restored registry continues both numberings
+//
+// 契约: docs/wiki/platform/platform-subsystems.md#framework-checkpoint
+func TestGovernanceGoalSliceTracksOnlyActiveWork(t *testing.T) {
+	ctx := context.Background()
+	log := newSliceLog()
+	goals := NewGoalRegistry()
+	if err := goals.Bind(ctx, log); err != nil {
+		t.Fatalf("bind the registry: %v", err)
+	}
+	seat := NewStateSeat(NewDenialLedger(), goals, nil)
+
+	live := goals.Declare("keep the rollout watched", "entry", 0)
+	const generations = 5
+	var first, last []byte
+	for gen := 1; gen <= generations; gen++ {
+		settled := goals.Declare(fmt.Sprintf("settled work %d", gen), "entry", 0)
+		if !goals.Resolve(settled, GoalAchieved) {
+			t.Fatalf("generation %d: resolve the settled goal %s, which the registry must hold", gen, settled)
+		}
+		payload, err := seat.SnapshotState(ctx)
+		if err != nil {
+			t.Fatalf("state the cut of generation %d: %v", gen, err)
+		}
+		wire := statedWire(t, payload)
+		if wantSeq := int64(2*gen + 1); wire.GoalSeq != wantSeq {
+			t.Fatalf("generation %d states goal tail %d, want the %d declarations and resolutions the stream holds", gen, wire.GoalSeq, wantSeq)
+		}
+		if wire.GoalOrder != gen+1 {
+			t.Fatalf("generation %d states goal order %d, want the %d identities the registry minted", gen, wire.GoalOrder, gen+1)
+		}
+		if len(wire.Goals) != 1 || wire.Goals[0].ID != live {
+			t.Fatalf("generation %d states goals %+v, want the one goal in flight (%s) alone: a settled goal is the record of the stream the cut numbers", gen, wire.Goals, live)
+		}
+		if gen == 1 {
+			first = payload
+		}
+		last = payload
+		t.Logf("generation %d: stated goals=%d bytes=%d goal tail=%d; stored goal events=%d",
+			gen, len(wire.Goals), len(payload), wire.GoalSeq, len(log.keysOf(goalEventPrefix)))
+	}
+	if got := len(log.keysOf(goalEventPrefix)); got != 2*generations+1 {
+		t.Fatalf("stored goal events = %d, want %d: the fixture did not grow the history it measures", got, 2*generations+1)
+	}
+	if !goals.HasActive() || goals.Current() == nil || goals.Current().ID != live {
+		t.Fatalf("live goal = %+v, want the one goal in flight as the goal context, so the constant live work guard proves something", goals.Current())
+	}
+	goals.mu.RLock()
+	resident := len(goals.goals)
+	goals.mu.RUnlock()
+	if resident != 1 {
+		t.Fatalf("the memory state holds %d goals beside one goal in flight, want the work in force alone: a resolved goal belongs to the stream from the moment its event landed", resident)
+	}
+	if len(first) == 0 {
+		t.Fatal("the first generation stated nothing, so the growth bound has an empty denominator")
+	}
+	if len(last) > len(first)*2 {
+		t.Fatalf("the cut grew with the settled goal history: %d -> %d bytes over %d generations while the live work stayed "+
+			"1 goal in flight — a cut states the work in force, never the history its tail numbers; ratio %d/%d equals the generation ratio %d/1",
+			len(first), len(last), generations, len(last), len(first), generations)
+	}
+
+	expired := goals.Declare("work that outlived its validity", "entry", time.Now().UnixMilli()-1000)
+	if !goals.HasActive() {
+		t.Fatal("the goal in flight stopped counting, so the expiry probe would measure nothing")
+	}
+	if wire := statedWire(t, mustStateCut(t, seat)); len(wire.Goals) != 1 || wire.Goals[0].ID != live {
+		t.Fatalf("stated goals beside one expired goal = %+v, want %s alone: expired is derived from validity, so it states nothing", wire.Goals, live)
+	}
+	next := goals.Declare("work that starts after it", "entry", 0)
+	if next != "g-8" {
+		t.Fatalf("declaration after one expired goal = %q, want the identity past the seven already minted", next)
+	}
+	goals.mu.RLock()
+	resident = len(goals.goals)
+	goals.mu.RUnlock()
+	if resident != 2 {
+		t.Fatalf("the memory state holds %d goals after the expired one met the write boundary, want the two in flight", resident)
+	}
+	if read := goalOnRecord(t, goals, expired); read.Status != GoalActive || read.Statement != "work that outlived its validity" {
+		t.Fatalf("the expired goal answers %+v, want its declaration read back by identity: taking a goal out of the memory state must not take it out of the history", read)
+	}
+
+	cut := mustStateCut(t, seat)
+	restarted := newSliceFixture(t)
+	if err := restarted.seat.RestoreState(ctx, cut); err != nil {
+		t.Fatalf("restore the cut over the work in force: %v", err)
+	}
+	if err := restarted.seat.Bind(ctx, log); err != nil {
+		t.Fatalf("bind the goal stream the restored cut numbers: %v", err)
+	}
+	if !restarted.goals.HasActive() || restarted.goals.Current() == nil || restarted.goals.Current().ID != next {
+		t.Fatalf("restored goal context = %+v, want %s as the newest goal in flight beside the goal the first process kept", restarted.goals.Current(), next)
+	}
+	if got := restarted.goals.Declare("work after the restart", "entry", 0); got != "g-9" {
+		t.Fatalf("post-restart declaration = %q, want the identity past the ones the cut states: a restored registry continues the declaration order it was seated with", got)
+	}
+	if got := len(restarted.goals.List()); got != generations+4 {
+		t.Fatalf("the restarted registry answers %d goals, want the nine it declared across both processes", got)
+	}
+}
+
+// TestGovernanceHistoryStaysReadableByIdentity pins the read that answers the goals a cut leaves out of its list.
+//   - positive: every settled goal answers its own identity, statement and resolution after a restart, so a shorter list in the cut is not a shorter history
+//   - negative: a history read that cannot reach the stream answers the work in force and invents no goal
+//   - consumer: GoalRegistry.List answers the goals a process asks about, over the stream its cut numbers
+//
+// 契约: docs/wiki/agent/governance-enforcement.md#goal-registry
+func TestGovernanceHistoryStaysReadableByIdentity(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("every settled goal answers its own identity and statement", func(t *testing.T) {
+		log := newSliceLog()
+		goals := NewGoalRegistry()
+		if err := goals.Bind(ctx, log); err != nil {
+			t.Fatalf("bind the registry: %v", err)
+		}
+		seat := NewStateSeat(NewDenialLedger(), goals, nil)
+
+		type declared struct {
+			id        string
+			statement string
+			createdBy string
+			status    GoalStatus
+		}
+		want := make([]declared, 0, 4)
+		for i, word := range []GoalStatus{GoalAchieved, GoalAbandoned, GoalAchieved, GoalActive} {
+			statement, createdBy := fmt.Sprintf("goal number %d", i+1), fmt.Sprintf("entry-%d", i+1)
+			id := goals.Declare(statement, createdBy, 0)
+			if word != GoalActive && !goals.Resolve(id, word) {
+				t.Fatalf("resolve goal %s to %s, which the registry must hold", id, word)
+			}
+			want = append(want, declared{id: id, statement: statement, createdBy: createdBy, status: word})
+		}
+		cut := mustStateCut(t, seat)
+		if wire := statedWire(t, cut); len(wire.Goals) != 1 {
+			t.Fatalf("the cut states %+v, want the one goal still in flight", wire.Goals)
+		}
+
+		restarted := newSliceFixture(t)
+		if err := restarted.seat.RestoreState(ctx, cut); err != nil {
+			t.Fatalf("restore the cut: %v", err)
+		}
+		if err := restarted.seat.Bind(ctx, log); err != nil {
+			t.Fatalf("bind the goal stream the restored cut numbers: %v", err)
+		}
+		read := map[string]*Goal{}
+		for _, goal := range restarted.goals.List() {
+			read[goal.ID] = goal
+		}
+		if len(read) != len(want) {
+			t.Fatalf("the restarted registry answers %d goals, want the %d the first process declared: a cut that states the work in force must not shorten the history a reader asks about", len(read), len(want))
+		}
+		for _, w := range want {
+			got, ok := read[w.id]
+			if !ok {
+				t.Fatalf("goal %s is answered by no list after the restart, want it read back from the stream its cut numbers", w.id)
+			}
+			if got.Statement != w.statement || got.CreatedBy != w.createdBy || got.Status != w.status {
+				t.Fatalf("goal %s answers (%q by %q, %s), want (%q by %q, %s): the history is read per identity, with the statement and the resolution its declaration froze",
+					w.id, got.Statement, got.CreatedBy, got.Status, w.statement, w.createdBy, w.status)
+			}
+			if got.CreatedMs == 0 {
+				t.Fatalf("goal %s answers no declaration time, want the moment its event was stamped", w.id)
+			}
+		}
+	})
+
+	t.Run("a stream it cannot read answers the work in force and invents no goal", func(t *testing.T) {
+		log := newSliceLog()
+		donor := NewGoalRegistry()
+		if err := donor.Bind(ctx, log); err != nil {
+			t.Fatalf("bind the registry: %v", err)
+		}
+		settled := donor.Declare("work that closes", "entry", 0)
+		if !donor.Resolve(settled, GoalAchieved) {
+			t.Fatalf("resolve the settled goal %s", settled)
+		}
+		live := donor.Declare("work still in force", "entry", 0)
+		cut := mustStateCut(t, NewStateSeat(NewDenialLedger(), donor, nil))
+
+		restarted := NewGoalRegistry()
+		seat := NewStateSeat(NewDenialLedger(), restarted, nil)
+		if err := seat.RestoreState(ctx, cut); err != nil {
+			t.Fatalf("restore the cut: %v", err)
+		}
+		if err := seat.Bind(ctx, &failingLog{sliceLog: sliceLog{stored: map[string][]byte{}}, err: errors.New("the store answered no read")}); err == nil {
+			t.Fatal("a store that cannot be read must report the unread tail to the binder")
+		}
+		if got := restarted.List(); len(got) != 1 || got[0].ID != live {
+			t.Fatalf("the history read that could not reach the stream answers %+v, want the one goal in force and no goal it did not read", got)
+		}
+	})
+}
+
+// TestGovernanceCountAndQueryStateTheirBoundary pins what the history queries answer beside a cut that states tails alone.
+//   - positive: the queries answer the history behind the stated tails, so a restored cut never answers an empty history
+//   - negative: no query answers its stream's tail as a count, and a stream that numbers resolutions beside declarations answers the goals, not the events
+//   - consumer: DenialLedger.Query/Count and GoalRegistry.List are the faces a reader of the recovered process asks
+//
+// 契约: docs/wiki/platform/platform-subsystems.md#framework-checkpoint
+func TestGovernanceCountAndQueryStateTheirBoundary(t *testing.T) {
+	ctx := context.Background()
+	log := newSliceLog()
+	ledger, goals := NewDenialLedger(), NewGoalRegistry()
+	if err := ledger.Bind(ctx, log); err != nil {
+		t.Fatalf("bind the ledger: %v", err)
+	}
+	if err := goals.Bind(ctx, log); err != nil {
+		t.Fatalf("bind the registry: %v", err)
+	}
+	seat := NewStateSeat(ledger, goals, nil)
+
+	for _, tool := range []string{"first", "second", "third"} {
+		ledger.Record(DenialRecord{Subtype: SubtypeDenial, ToolName: tool, Level: plugin.RiskHigh, RuleID: "no-" + tool})
+	}
+	achieved := goals.Declare("work that closes", "entry", 0)
+	abandoned := goals.Declare("work that stops", "entry", 0)
+	if !goals.Resolve(achieved, GoalAchieved) || !goals.Resolve(abandoned, GoalAbandoned) {
+		t.Fatalf("resolve the two goals, which the registry must hold")
+	}
+
+	cut := mustStateCut(t, seat)
+	wire := statedWire(t, cut)
+	if wire.DenialSeq != 3 || wire.GoalSeq != 4 {
+		t.Fatalf("the cut states denial tail %d and goal tail %d, want the three records and the four goal operations the streams hold", wire.DenialSeq, wire.GoalSeq)
+	}
+	if len(wire.Goals) != 0 {
+		t.Fatalf("the cut states %+v, want no goal: both are settled, so the tails are their record", wire.Goals)
+	}
+
+	restarted := newSliceFixture(t)
+	if err := restarted.seat.RestoreState(ctx, cut); err != nil {
+		t.Fatalf("restore the cut: %v", err)
+	}
+	if err := restarted.seat.Bind(ctx, log); err != nil {
+		t.Fatalf("bind the streams the restored cut numbers: %v", err)
+	}
+	if got := restarted.ledger.Count(); got != 3 {
+		t.Fatalf("Count() beside a cut that numbers three records = %d, want the three the stream holds: a query that answers an empty history is a record that went missing in silence", got)
+	}
+	records := restarted.ledger.Query(0)
+	if len(records) != 3 || records[0].ToolName != "third" || records[2].ToolName != "first" {
+		t.Fatalf("Query(0) beside a cut that numbers three records = %+v, want the three in the order they happened, newest first", records)
+	}
+	read := restarted.goals.List()
+	if len(read) != 2 || read[0].ID != achieved || read[1].ID != abandoned {
+		t.Fatalf("List() beside a cut that numbers two goals = %+v, want the two in declaration order: the goal stream numbers a resolution beside every declaration, so its tail %d is not the goal count and no query answers it as one", read, wire.GoalSeq)
+	}
+	if len(read) == int(wire.GoalSeq) {
+		t.Fatalf("the goal history answers %d goals beside a stated tail of %d, want the goals counted and the tail left to the stream: a count read off the tail over-reports every resolution it numbers", len(read), wire.GoalSeq)
 	}
 }

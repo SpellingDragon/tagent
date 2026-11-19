@@ -432,6 +432,219 @@ func TestFoldColdRootCommandExitCodes(t *testing.T) {
 	assertCommitOrder(t, ctx, openTier(t, ctx, target), fixtureKeys(events))
 }
 
+// TestOfflineConversionPreservesEveryFact pins the conversion of an offline root through the command an operator runs.
+//   - the default scan writes no byte of the source and opens no target
+//   - the restore exits 0 and states the folded root read back by identity in the source's commit order
+//   - the folded root states every key of the history the source was split from, in the same bytes, and walks the same commit order
+//
+// 契约: docs/wiki/memory/memory-architecture.md#local-file-kv
+func TestOfflineConversionPreservesEveryFact(t *testing.T) {
+	ctx := context.Background()
+	binary := buildFoldColdRoot(t, ctx)
+	full, source := t.TempDir(), t.TempDir()
+	target := filepath.Join(t.TempDir(), "new-root")
+	events := fixtureEvents()
+	commitHistory(t, ctx, full, events)
+	splitSource(t, ctx, full, source, 2)
+	before := snapshotRoot(t, source)
+
+	out, errOut, code := runFoldColdRoot(t, ctx, binary, "-source", source, "-root", target)
+	if code != 0 || !strings.Contains(out, "dry run") {
+		t.Fatalf("the default scan exited %d with stdout %q and stderr %q, want 0 stating the dry run", code, out, errOut)
+	}
+	assertUnchanged(t, source, before)
+	if _, err := os.Stat(target); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("the default scan left %s at %v, want no target", target, err)
+	}
+
+	out, errOut, code = runFoldColdRoot(t, ctx, binary, "-source", source, "-root", target, "-restore")
+	if code != 0 || !strings.Contains(out, "read back by identity") {
+		t.Fatalf("the restore exited %d with stdout %q and stderr %q, want 0 stating the root read back by identity",
+			code, out, errOut)
+	}
+	assertUnchanged(t, source, before)
+
+	want := heldBytes(t, ctx, full)
+	got := heldBytes(t, ctx, target)
+	if len(got) != len(want) {
+		t.Fatalf("the folded root states %d key(s) beside the %d the source history holds", len(got), len(want))
+	}
+	for key, body := range want {
+		stated, held := got[key]
+		if !held {
+			t.Fatalf("the folded root states no %q, which the source history holds", key)
+		}
+		if !bytes.Equal(stated, body) {
+			t.Fatalf("the folded root states %d byte(s) for %q beside the %d the source history holds",
+				len(stated), key, len(body))
+		}
+	}
+
+	folded := openTier(t, ctx, target)
+	defer folded.Close()
+	for _, evt := range events {
+		stored, held, err := folded.Segments.GetEvent(ctx, event.EventID(evt.key))
+		if err != nil || !held {
+			t.Fatalf("the folded root answers the event %q: held=%t err=%v", evt.key, held, err)
+		}
+		if !bytes.Equal(stored.Body, []byte(evt.body)) {
+			t.Fatalf("the folded root answers %q for %q, want %q", stored.Body, evt.key, evt.body)
+		}
+		if evt.original == "" {
+			continue
+		}
+		recalled := folded.Originals.Get(ctx, event.EventID(evt.key))
+		if recalled.Outcome != ledger.RecallFound || !bytes.Equal(recalled.Body, []byte(evt.original)) {
+			t.Fatalf("the folded root answers %q with %+v, want %q", evt.key, recalled, evt.original)
+		}
+	}
+	if count := folded.Segments.EventCount(); count != len(events) {
+		t.Fatalf("the folded root counts %d events, want %d", count, len(events))
+	}
+	sourceTier := openTier(t, ctx, full)
+	defer sourceTier.Close()
+	if got, want := indexOrder(t, ctx, folded), indexOrder(t, ctx, sourceTier); !reflect.DeepEqual(got, want) {
+		t.Fatalf("the folded root walks the commit order %v, want the %v of the source history", got, want)
+	}
+}
+
+// TestSourceChangeRefusesConversion pins the refusal of a source that moves under the fold.
+//   - a journal the source gains a byte in while it is read is refused as ledger.ErrMigrateSourceUnchanged, naming the log that moved
+//   - the refused run states no plan, commits nothing, leaves no target and states no entry of its own in the source
+//
+// 契约: docs/wiki/memory/memory-architecture.md#local-file-kv
+func TestSourceChangeRefusesConversion(t *testing.T) {
+	ctx := context.Background()
+	full, source := t.TempDir(), t.TempDir()
+	target := filepath.Join(t.TempDir(), "new-root")
+	commitHistory(t, ctx, full, fixtureEvents())
+	splitSource(t, ctx, full, source, 2)
+	before := snapshotRoot(t, source)
+	hotLog := filepath.Join(kvDirName, journalFileName)
+	coldLog := filepath.Join(coldDirName, kvDirName, journalFileName)
+
+	stated := false
+	journalReadHook = func(dir string) {
+		if stated {
+			return
+		}
+		stated = true
+		commitPairs(t, ctx, source, ledger.Pair{
+			Key:   "fact-late",
+			Value: []byte("the fact a source still being written states mid-fold"),
+		})
+	}
+	defer func() { journalReadHook = nil }()
+
+	plan, folded, err := foldRoot(ctx, source, target, true)
+	if !errors.Is(err, ledger.ErrMigrateSourceUnchanged) {
+		t.Fatalf("the fold of a source that moved under the read = %v, want ErrMigrateSourceUnchanged", err)
+	}
+	if !strings.Contains(err.Error(), hotLog) {
+		t.Fatalf("the refusal %q does not name the log that moved %s", err, hotLog)
+	}
+	if len(plan.Events) != 0 || plan.Seated || len(plan.Originals) != 0 || len(plan.Tiers) != 0 {
+		t.Fatalf("the refused run stated the plan %+v, want none", plan)
+	}
+	if folded != (foldReport{}) {
+		t.Fatalf("the refused run committed %+v, want nothing", folded)
+	}
+	if _, err := os.Stat(target); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("the refused run left %s at %v, want no target", target, err)
+	}
+	after := snapshotRoot(t, source)
+	if len(after) != len(before) {
+		t.Fatalf("the refused run left %d entries under %s, want the %d the case left", len(after), source, len(before))
+	}
+	for name := range after {
+		if _, held := before[name]; !held {
+			t.Fatalf("the refused run stated %s under %s, which held no such entry", name, source)
+		}
+	}
+	if got, want := after[coldLog], before[coldLog]; got.sum != want.sum || got.size != want.size || !got.modTime.Equal(want.modTime) {
+		t.Fatalf("the refused run touched the %s of %s, which the case states no byte of", coldLog, source)
+	}
+}
+
+// TestPartialTargetIsNotReportedReady pins what a conversion that cannot finish states and leaves.
+//   - the restore states an original batch the journal frame bound refuses, naming the key it could not state
+//   - the failed run states no ready root and leaves the source as it found it
+//   - the events the failed run did commit stay in the target, and a second run is refused instead of overwriting them
+//
+// 契约: docs/wiki/memory/memory-architecture.md#local-file-kv
+func TestPartialTargetIsNotReportedReady(t *testing.T) {
+	ctx := context.Background()
+	binary := buildFoldColdRoot(t, ctx)
+	full, source := t.TempDir(), t.TempDir()
+	target := filepath.Join(t.TempDir(), "new-root")
+	events := fixtureEvents()
+	commitHistory(t, ctx, full, events)
+	splitSource(t, ctx, full, source, 2)
+	commitLargeOriginals(t, ctx, source, 17<<20, 2)
+	before := snapshotRoot(t, source)
+
+	if out, errOut, code := runFoldColdRoot(t, ctx, binary, "-source", source, "-root", target); code != 0 ||
+		!strings.Contains(out, "dry run") {
+		t.Fatalf("the default scan exited %d with stdout %q and stderr %q, want 0 stating the dry run", code, out, errOut)
+	}
+	assertUnchanged(t, source, before)
+
+	out, errOut, code := runFoldColdRoot(t, ctx, binary, "-source", source, "-root", target, "-restore")
+	if code == 0 {
+		t.Fatalf("the restore of an original batch over the frame bound exited 0 with stdout %q, want a nonzero exit", out)
+	}
+	for _, wants := range []string{"frame bound", blobPrefix} {
+		if !strings.Contains(errOut, wants) {
+			t.Fatalf("the refusal %q does not name %q", errOut, wants)
+		}
+	}
+	for _, unwanted := range []string{"read back by identity", "committed"} {
+		if strings.Contains(out, unwanted) {
+			t.Fatalf("the failed run stated %q on stdout %q, want no ready root", unwanted, out)
+		}
+	}
+	assertUnchanged(t, source, before)
+
+	half := heldBytes(t, ctx, target)
+	if len(half) == 0 {
+		t.Fatalf("the failed run left %s holding no key, want the events it committed before the refused batch", target)
+	}
+	for key := range half {
+		if strings.HasPrefix(key, blobPrefix) || strings.HasPrefix(key, refPrefix) {
+			t.Fatalf("the failed run stated the original key %q, want the refused batch to land as none", key)
+		}
+	}
+	folded := openTier(t, ctx, target)
+	if count := folded.Segments.EventCount(); count != len(events) {
+		t.Fatalf("the half stated root counts %d events, want the %d the source states", count, len(events))
+	}
+	folded.Close()
+
+	out, errOut, code = runFoldColdRoot(t, ctx, binary, "-source", source, "-root", target, "-restore")
+	if code == 0 {
+		t.Fatalf("the restore over a half stated root exited 0 with stdout %q, want a nonzero exit", out)
+	}
+	for _, wants := range []string{"already holds data", target} {
+		if !strings.Contains(errOut, wants) {
+			t.Fatalf("the refusal %q does not name %q", errOut, wants)
+		}
+	}
+	if strings.Contains(out, "read back by identity") {
+		t.Fatalf("the refused run stated the root ready on stdout %q", out)
+	}
+	kept := heldBytes(t, ctx, target)
+	if len(kept) != len(half) {
+		t.Fatalf("the refused run left %d key(s) in %s beside the %d the failed run stated", len(kept), target, len(half))
+	}
+	for key, body := range half {
+		stated, held := kept[key]
+		if !held || !bytes.Equal(stated, body) {
+			t.Fatalf("the refused run states %q with %d byte(s) beside the %d the failed run left", key, len(stated), len(body))
+		}
+	}
+	assertUnchanged(t, source, before)
+}
+
 // historyEvent is one event of a source fixture: the slot it takes and the body and
 // original it carries.
 type historyEvent struct {
@@ -602,6 +815,17 @@ func readPairs(t *testing.T, ctx context.Context, root string) []ledger.Pair {
 	return pairs
 }
 
+// heldBytes answers every key one journal root holds beside the value the root states
+// for it, so a case compares one root with another key by key.
+func heldBytes(t *testing.T, ctx context.Context, root string) map[string][]byte {
+	t.Helper()
+	held := map[string][]byte{}
+	for _, pair := range readPairs(t, ctx, root) {
+		held[pair.Key] = pair.Value
+	}
+	return held
+}
+
 // readKeys answers the keys one journal root holds, in key order.
 func readKeys(t *testing.T, ctx context.Context, root string) ([]string, error) {
 	t.Helper()
@@ -663,6 +887,20 @@ func openTier(t *testing.T, ctx context.Context, root string) *ledger.Tier {
 // the commit order the source stated.
 func assertCommitOrder(t *testing.T, ctx context.Context, tier *ledger.Tier, want []string) {
 	t.Helper()
+	walked := indexOrder(t, ctx, tier)
+	expected := make([]string, 0, len(want))
+	for at := len(want) - 1; at >= 0; at-- {
+		expected = append(expected, want[at])
+	}
+	if !reflect.DeepEqual(walked, expected) {
+		t.Fatalf("the newest-first walk = %v, want %v", walked, expected)
+	}
+}
+
+// indexOrder answers the event keys one root states, newest first, as the index walk
+// the folded root's consumers read.
+func indexOrder(t *testing.T, ctx context.Context, tier *ledger.Tier) []string {
+	t.Helper()
 	var walked []string
 	visit := func(key event.EventID, partition int, seq int64, typ string, session event.SessionID) error {
 		walked = append(walked, string(key))
@@ -671,12 +909,33 @@ func assertCommitOrder(t *testing.T, ctx context.Context, tier *ledger.Tier, wan
 	if err := tier.Segments.EachIndexNewestFirst(ctx, visit); err != nil {
 		t.Fatalf("walk the commit order: %v", err)
 	}
-	expected := make([]string, 0, len(want))
-	for at := len(want) - 1; at >= 0; at-- {
-		expected = append(expected, want[at])
+	return walked
+}
+
+// commitLargeOriginals commits count originals of size bytes each into the hot journal
+// of root, one commit per original, so a case can state a plan whose original keys do
+// not fit one journal frame together.
+func commitLargeOriginals(t *testing.T, ctx context.Context, root string, size, count int) {
+	t.Helper()
+	tier, err := ledger.OpenTier(ctx, ledger.StorageConfig{Type: ledger.StorageJournal, Root: root, WriteRights: true})
+	if err != nil {
+		t.Fatalf("open the writer of %s: %v", root, err)
 	}
-	if !reflect.DeepEqual(walked, expected) {
-		t.Fatalf("the newest-first walk = %v, want %v", walked, expected)
+	for at := 0; at < count; at++ {
+		key := event.EventID("bulk-" + strconv.Itoa(at))
+		body := bytes.Repeat([]byte{byte('a' + at)}, size)
+		ref := ledger.OriginalRef{
+			Key:             key,
+			Owner:           event.Address{AgentID: "fixture", SessionID: "session-a"},
+			Format:          "text/plain",
+			RetentionPolicy: "keep",
+		}
+		if err := tier.Originals.Put(ctx, ref, body); err != nil {
+			t.Fatalf("commit the original %q of %s: %v", key, root, err)
+		}
+	}
+	if err := tier.Close(); err != nil {
+		t.Fatalf("close the writer of %s: %v", root, err)
 	}
 }
 

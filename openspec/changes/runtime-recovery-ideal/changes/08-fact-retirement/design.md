@@ -146,3 +146,133 @@ D6.13 原文（[design.md](../../design.md)）：「正确性＝identity-read＋
 
 - 08.R2（判定，只读＋拟新增判别测试）→ 08.R1（整合，依 06.R2＋11.R2）。R2 先定留删，避免 R1 在两种形态上各写一遍。
 - **回退**：R1 的回退＝关闭退位开关（热层只追加，已搬事实冷层恒可读）；R2 选乙后的回退＝恢复脚手架文件与引用（回退后必须回到零调用原状，不得顺手留下半接线）。两者都不删已提交事实，也不触发迁移。
+## 十二、08.R5：外部转换的两条异常前置（源离线、失败目标不切换）
+
+**裁定在先**：本叶把「源必须离线」从运维约定升成脚本的**可判定前置**，并把「目标半成品」的可观察行为写死。既有契约（`docs/wiki/memory/memory-architecture.md` §六）已写「每个日志只复制，拷贝期间长度或修改时间变动即 `ledger.ErrMigrateSourceUnchanged`」；本节不改契约文本，只把实现与证据补到能过反事实检验的粒度。
+
+### 十二·一 整源盖戳而非逐日志自校验
+
+- **原实现的反例（实测）**：`readTier` 只在**各自**日志读前读后比较 size/mtime。热档读到一半时冷档被追加，冷档自己的「前」戳已在新状态 ⇒ 两次读取被折成一份「热旧冷新」的混合快照，且脚本会照常报 ready。这正是 requirements 里「不把多次源读取包装成在线一致快照」所禁的形态（负控实测：去掉 `holdSource` 后同一用例把变动后的源折成计划并列出 `Tiers:[hot cold]`）。
+- **修法**：`stampSource` 在读到任何一字节之前对每个存在的日志取「长度＋修改时间」；`readSource` 读完全部日志后 `holdSource` 一次；`-restore` 在 `verifyFold` 之后、`printReport` 之前再陈述一次。三点位置各有职责：第一处挡「读到了半新半旧」，第二处挡「报告了一个已在上电的源被折完」，第三处使 `-restore` 的整段执行都在「源未动」的声明之下。
+- **为什么不是「再读一遍比对键集」**（`migrate.go` 的 `ErrMigrateSourceUnchanged` 形态）：折回要的是**字节与提交序**保真，二次读键集只能证明键集没变，不能证明字节没被重写；盖戳比较的是日志文件本身，代价是两次 `stat`。
+- **为什么不是 flock 独占源根**：`acquireRootWriteLock` 会在源根里建 `.write-lock` 文件，与「源根一字节不动」和干跑零写的既有红线直接冲突。故本条只做**事后拒绝**，不假装能拦住不合作写者。
+
+### 十二·二 确定性同步点（受控注入，具名披露）
+
+「写入者恰在读窗口内改源」无法从外部调度：并发 + 睡眠碰撞会把这条锚变成 flaky，而按时间窗重试等于用非确定性证明确定性。故 `readTier` 读完一个日志后调用包级 `journalReadHook(dir)`（命令为 `nil`），用例在该点移动源，拒绝仍由命令自己的 `holdSource` 作出。
+
+- **这条结构的性质**：生产零消费者的测试注入点，不满足「第二使用方独立存在」，故**不据它主张任何生产语义**；它只换取「同一读窗口内的变动」这一无法从外部复现的输入。
+- **反面记录**：拒绝逻辑本身没有测试专用分支——用例走的是 `foldRoot` 的同一条 `holdSource`，故「守卫被接线」与「守卫判得对」是同一次测量；但「CLI 子进程内源变化被拒」**未**取证（注入点必须同进程），已在 tasks 记录为未验证面。
+
+### 十二·三 目标失败与半成品
+
+- **已判据**：目标已有键 → `ledger.ErrMigrateTargetNotEmpty`；目标被第二个写者持有 → `ledger.ErrRootWriteLocked`（既有锚保留）。
+- **本次写死的行为**：批次被日志帧上界拒（`ErrJournalFrameTooLarge`）或回读不等时，`foldRoot` 返回错误 ⇒ `printReport` 不执行 ⇒ stdout 无 `read back by identity`（ready 声明只出现在成功路径）。已落的事实留在目标根，**不删、不覆盖**：再跑一次以 `ErrMigrateTargetNotEmpty` 拒绝，须由操作方先移除该根。**不自动清理半成品根**：清理是删除事实的动作，脚本不持有「哪一半是垃圾」的授权；把删除留在运维手里，与「源不切换」同一取向。
+- **证据取材**：半成品用「原文批次越过 32 MiB 帧上界」构造（2×17 MiB），因为它是**内容驱动**的确定性失败，不依赖注入、不依赖盘空间；其它写入失败形态（盘满、权限撤销、进程被杀）共用同一错误出口，未逐个取证。
+
+### 十二·四 与 R3／R4 的验收关系
+
+本叶只补两条异常前置的证据与实现，不复活任何退位机制，也不改 `main.go` 之外的框架面：`08.R3/R4` 的删除与折回能力仍按各自锚验收，本叶不据「三锚绿」外推整域完成，也不触发 F 任务或归档。
+
+### 十二·五 运维前置的落点（08.R4 交付③）
+
+08.R4 交付③「升级说明记录该运维前置与 `file` 档 `ErrBatchNotAtomic` 后果」落在 **`docs/OPERATION.md` §F「存储面升级前置：带冷档的根必须先折回新根」**（`:246-250`，随 08.R5 同批落盘），不在本文件重复一遍：
+
+- `:248` 干跑 → `-restore` 的两步命令与「默认干跑零写」；
+- `:249` 源根只读且必须离线（整源盖戳，任一戳变动即 `ErrMigrateSourceUnchanged`）；
+- `:250` `file` 档对一条事实的三键批次答 `ErrBatchNotAtomic`，故它从未产生可折键集，脚本按 `ErrSourceUnstated` 具名拒绝；目标根须空、一根一写者（flock）、半成品不报 ready；
+- `:161` 是升级章节对该前置的入口指针（「带 `cold/kv/journal.log` 的根会缺一部分历史且缺得静默」）。
+
+选 `docs/OPERATION.md` 而非本节的理由：运维前置的读者是操作方而非实现者，OPERATION 的升级章已承载同一条红线；`check_doc_budget.py` 的正文体量棘轮余量为 0（`slack.lines: 0`），故本节只做指针、不搬运正文，两处内容不各写一遍。
+
+## 十三、6.1–6.5 旧实施行的 superseded 登记（08.R3 落地后）
+
+`tasks.md` 的 **6.1／6.2／6.3／6.4／6.5** 描述的是**已整体删除**的退位分层机制（建 `RetireFacts`、冷层根、排他安静点到 S1 字节有界），其正文与当年的锚表**原样保留为历史证据**（5.8：历史不可变，推翻结论记在后段，不改写历史原文）；本节的唯一作用是给出**勘误指针**：这五行**不得**按原口径复验、**不得**据其绿数宣称达成、**不得**勾为完成。
+
+取代关系（谁淘汰了谁）：
+
+| 旧行 | 原主张 | 现行处置 | 指针 |
+|---|---|---|---|
+| 6.1 | 建 `RetireFacts` 单能力＋冷层根＋原文族同批搬 | 机制整体删除，无冷层载体 | `tasks.md` 头部反转说明；[08.R3](tasks.md) 零残留 grep；一级 design D6.13 勘误 |
+| 6.2 | 排他安静点（引擎独占＋装配侧停写准入） | 无搬迁即无安静点；`settleGate` 与 `ErrColdArchiveNotQuiet` 零 Go 定义 | 06 design:661；`tasks.md` 08 锚对账段 |
+| 6.3 | `GetEvent` 三态透明回冷＋冷层具名拒绝 | 读路径回到两态（命中/不存在），`ErrSegmentBodyMissing` 仍管正文读不出 | 08.R3 零残留 grep；主 spec `storage-lifecycle-completion` |
+| 6.4 | lifecycle/retention/guard 接线（存活键集 oracle） | 未实施且不再派发（无搬迁可协调）；`Retention.Retire` 等不同义项保留 | 本文件 §十·三「不许留第三态」 |
+| 6.5 | S1 症状锚转绿＋回滚负锚 | 该锚已随机制删除退役；现行成本锚为 `TestSymptomAnchorPerGenerationCostFlatOverALongRun` | 一级 ORCHESTRATION R291 |
+
+已落地的取代交付＝**08.R3（删退位机制及其测试）／08.R4（删切面机制＋外部折回脚本）／08.R5（转换的离线源与失败目标前置）**；既有冷档数据的一次性搬运由框架外 `scripts/fold-cold-root` 承担，框架零分支。故本域验收面**不是** 6.x，而是 08.R3–R5 各自的三锚；6.x 的 `- [ ]` 保持未勾，勾选与否不再表达进度（永久 superseded 标记）。
+
+## 十四、08.R1／08.R2 交付项逐条取代判定（08.R4 落地后，2026-11-19）
+
+退位机制与切面族已整删（08.R3／08.R4），故 08.R1／08.R2 的多数交付项**失去了对象**。本节逐条登记取代关系与依据，两叶正文原文保留不动（5.8：历史不可变，推翻结论记在后段）；**未被取代者具名列在表下，两叶均不勾**。
+
+取代依据（本单复跑）：`RetireFacts`／`relocatableStorage`／`WithRetirement`／`placeIndexCut`／`cutOf`／`appendJournalIndexCut`／`writeJournalIndexCut`／`readJournalIndexCut`／`journalIndexCutVersion`／`journalIndexCutFileName` 在 `*.go` 全树 **0 命中**；`memory/ledger/journal.go` 现存方法表中 `rewrite`／`reopen`／`relocate`／`seedIndexCut` 均不存在。
+
+| 叶·交付项 | 判定 | 取代者／依据 |
+|---|---|---|
+| 08.R1① 搬迁单位对齐整事实提交后的键集（族拆不再是可构造状态） | **已取代** | 无搬迁即无搬迁单位（`RetireFacts` 0 命中）。族拆的现行防线＝`fold-cold-root` 的 `TestFoldRootRefusesAReferenceWithNoBody`；整事实提交形状归 11 域 |
+| 08.R1② 孤儿原文具名处置（甲留热／乙搬冷，禁第三态） | **已取代** | 甲乙两条分支的落点都是退位报告，报告不存在；孤儿原文的现行处置入口＝`scripts/recover-kv`（`TestRecoverOrphanOriginals*` 六锚）与上述折回拒绝 |
+| 08.R1③ 回退整合（关闭退位后热层只追加、已搬事实按身份可读、重复提交判已存在） | **已取代** | 开关本身已删（`relocatableStorage`／`WithRetirement` 0 命中），「关闭」与「删除」合一；已搬事实的现行读法＝外部脚本折回新根后按身份读（`TestOfflineConversionPreservesEveryFact`）。「重复提交判已存在」归 11.R4 提交语义 |
+| 08.R1④ 身份读三态在冷层损坏时具名拒绝 | **已取代** | 冷层已删，读路径回两态（命中／不存在）；`ErrSegmentBodyMissing` 仍管正文读不出。见 §十三 6.3 行 |
+| 08.R1⑤ spec 与代码同向（三方法条款与闸条款按单能力／阻塞语义重写） | **部分已取代** | 三方法条款与闸条款已不在本域 delta；「无损搬迁」→「压实复制」已由 08.R3 改。**残余＝下表脚手架判据**，故本项不单独勾 |
+| 08.R2 以真实消费者判定保护能力的留删 | **未取代，仍开** | 见下 |
+
+**未取代的残余（08.R2 主体，本单不勾）**：本域 delta 的 `storage-lifecycle-completion` MODIFIED 条款仍硬写「`NewLifecycle`／`NewRetention`／`NewMemoryGuard` 中任一构造 SHALL 要么有生产调用方并说明它并入的那一条判据，要么被移除；……MUST NOT 停留在只被测试与 `skeleton_assert.go:150` 引用的状态」，并带 Scenario「脚手架不零调用滞留」。本单复跑 `\b(NewLifecycle|NewRetention\(|NewMemoryGuard)\b` 于 `*.go` 全树：**生产命中 0**，命中面＝`memory/ledger/skeleton_assert.go:149` ＋ `memory/partition_test.go` ＋ `tests/integration/history/{recovery_before_reclamation,original_reference_isolation}_test.go`——正是该条款点名的第三态。10 域已把未接线脚手架的所有权转给 08（[10/tasks.md](../10-contract-sync-dead-code/tasks.md):72「未接线脚手架转 08 拥有者」），故本域是唯一归属方。
+
+- **原两条判别测试的锚已失效**：`TestRelocatedObligationMaterialStillServesItsConsumer`／`TestRetirementRejectsUnreadableObligationMaterial` 的构造前提是「搬冷后的未完义务材料」，随退位删除不可构造（两者本就「拟新增，尚未建立」）。本单**只登记其锚须由拥有者重定，不宣布该验收面不再需要**——按「验收面不追认缩水」，该叶重开与否由编排者裁定。
+- **待裁二选一**（两者都改 spec 条款，须另单承接）：**留**＝把 `Retention`／`MemoryGuard`／`Lifecycle` 接到某条现行判据（TTL／容量／租约）并具名说明它并入哪一条；**删**＝连同 `skeleton_assert.go:149` 与相关测试一并移除，同步删 spec 的「脚手架 SHALL 接线生产」硬要求。禁第三态。
+- **一处指针漂移（不属本单白名单）**：上述条款写 `skeleton_assert.go:150`，实际定义在 `:149`（`lifecycle.go:143`／`retention.go:70`／`guard_memory.go:32` 三处准确）。改该条款的叶须一并更正，本单不改。
+
+## 十五、08.R2 落地：甲案移除与两跨域锚判定（R307 裁定，方向不再取证）
+
+### 十五·一 裁定与依据（引用不复核）
+
+R307 已裁甲案（移除）。生产消费者实证：`NewLifecycle`／`NewRetention`／`NewMemoryGuard` 三构造全树零生产调用方，`Guard`／`MemoryGuard`／`LifecycleStore`／`LifecycleCapabilities`／`LifecycleConfig`／`StoredKey`／`RetentionRecord`／`HolderID`／`ProtectionLease`／`ScanReport` 生产引用全 0；两条保护语义各有活载体——**原文过期**由 `StorageConfig.RetentionWindows`→`kvOriginalStore`→`ErrOriginalExpired`／`RecallExpired` 承接，**未结义务**由热窗 pin（`assembly/run.go` `pinFact`／`keepPinnedLocked`／`deliveryPendingFor`，结算于 `host_delivery.go`）承接。再接一层 Lifecycle 即造 spec 明禁的销毁路径（`spec:7` 禁销毁已提交事实），Guard／Retention 则为第二真相。故不留「在册未接线」第三态。
+
+### 十五·二 删除清单（实测）
+
+| 落点 | 处置 | 依据 |
+|---|---|---|
+| `memory/ledger/{lifecycle,retention,guard_memory,lifecycle_config}.go` | 整文件删 | 三构造零生产调用方 |
+| `memory/ledger/guard.go` | 删 `Guard`／`HolderID`／`ProtectionLease`／`ErrLeaseMismatch`；`RecallOutcome`／`RecallResult` 迁 `reference.go`，随后整文件删 | 保留面属 `reference.go` 生产面（`kv_original_store.go`、`tool/recall/get.go`、`assembly/tools.go` 消费） |
+| `memory/ledger/skeleton_assert.go` | 删四类符号断言＋retention 块＋lifecycle 块（原 122-161），连带 `"time"` import | 被断言符号已不存在 |
+| `memory/ledger/doc.go` | 删保护/生命周期散文 | 「随代码走」 |
+| `memory/partition_test.go` | 删 `TestCapacityEvictionStaysInsideOnePartition`、`TestLeaseSegmentsProtectOnlyTheirOwnKeys` 与 helper `newLifecycleUnderTest`／`storedKeys`／`holdsKey` | 构造前提为被删对象 |
+| `tests/integration/history/recovery_before_reclamation_test.go` | 整文件删（见十五·四） | 六子测全打被删对象 |
+| `tests/integration/history/original_reference_isolation_test.go` | 删子测 `protection holds outlive one holder`、helper `assertProtected`、头注一条 | 见十五·四 |
+| `examples/contract/memory_ledger/{Guard,LifecycleStore}_example.go` | 删；包 `doc.go` 同步 | 例证对象不存在 |
+
+### 十五·三 保留项复核（逐项，不默认）
+
+- **`Retention.Retire`**：`Retention` 类型唯一构造为 `NewRetention`，生产调用 0、无其他生产嵌入点 ⇒ **类型整体无生产实例**，`Retire` 随类型删。不是「构造链不明」，是构造链已证断（与 R306 要求的「按类型消费者枚举」一致）。
+- **generation retirement**：`assembly/run.go` `generationRetireKey`／`recordGenerationRetirement`／`convergeGenerationRetirements` 属代际退位，与本文移除对象不同义项，**未动**。
+- **`migrate.go`、`ErrJournalLegacyLayout`**（`memory/ledger/config.go:122-146`）：**未动**，仍在生产路径。
+- **`RecallOutcome`／`RecallResult`**：保留，迁入 `reference.go`（唯一生产存续面）。
+
+### 十五·四 两跨域锚逐条判定（先读断言本体）
+
+**锚一 `protection holds outlive one holder`**（原 `original_reference_isolation_test.go:306-360`）：13 条断言点全部打 `Guard.Hold`／`Guard.Release`／`assertProtected`——无名 holder 拒绝、同 holder 重入幂等（`leaseA` 相等）、释放后不可保护、再持有换新 lease、陈旧 lease 报 `ErrLeaseMismatch` 且保护保留、双 holder 互不干扰、外来 lease 拒绝、重复释放幂等、无关键恒不保护。**零条**触及义务存在性、义务材料可读性或事实字节。判定：**测已删 `ProtectionLease` 机制**，非测活义务语义 ⇒ superseded。其承载的「多持有者引用计数保护」在现行设计无对应形状——pin 按事实单一属主（`pinFact`／`unpinFact`），结算即解除，不存在按 holder 计数。承接锚（均 exit 0）：`TestPinnedDeliveryFactsSpendTheWindowNotTheFoldProducts`、`TestCrossSessionDeliveryObligationSurvivesTheTargetSessionCut`、`TestPinnedFactsReseeded`。引用方为冻结 archive `2026-10-18-runtime-rebuild/changes/03-history/tasks.md`(03.1)，**不改写历史**，勘误登记于本节。
+
+**锚二 `TestRecoveryBeforeReclamation`**（原整文件 6 子测）：全打 `Lifecycle`／`Retention`／`MemoryLifecycleStore`／`StoredKey`。逐条判定：
+
+| 子测 | 断言本体 | 判定 | 承接 / 登记 |
+|---|---|---|---|
+| G2.1 重启登记先于淘汰 | 破坏性扫描先登记再执行 | superseded：扫描对象不存在 | 无活等价（登记，不宣布验收面不需） |
+| G2.2 未确认材料越 TTL 仍保留；释放后按原时间戳归类 | 前半＝pin 使结算事实留在热窗；后半＝原文过期具名拒绝 | **迁移** | `TestPinnedDeliveryFactsSpendTheWindowNotTheFoldProducts`／`TestOriginalReadEntrypointsPreserveBytesAndScope/a_reference_past_its_window_reads_as_expired` |
+| G2.3 显式删除撞保护 `ErrProtected` | 显式销毁路径 | superseded：无销毁路径；上层「已提交事实不销毁」仍活 | `TestOfflineConversionPreservesEveryFact`（源字节零改动＋按身份读回） |
+| G2.4 单 agent 关闭不释放共享保护 | 多 holder 形状 | superseded（同锚一） | 无活等价（形状被单一属主取代） |
+| G2.5 枚举失败不核对残缺视图 | 生命周期对账循环 | superseded：循环已删 | 活判据＝`TierFacts.Scan` 失败答 `nil`＋`err`（`tier_facts.go:36-40`） |
+| G2.6 持久档缺能力 fail-closed | `StoreCapabilities.Durable` 诚实自报 | **迁移** | `TestStorageCapabilities`（memory 档不声明恢复） |
+
+引用方为冻结 archive `2026-10-18-runtime-rebuild/changes/03-history/tasks.md`(03.5) 与 `expectations.md`(O2-5)，不改写。判定：文件整体 superseded；其上四条活语义已逐条指向具名活锚并实跑绿，失踪的两条（G2.1、G2.5 的对账循环面）随对象消失并在此具名登记——**不以「对象已删」为由抹掉仍成立的验收面**。
+
+### 十五·五 级联落点
+
+- `scripts/gates/product_surface_baseline.json`：清 `NewMemoryGuard`／`NewMemoryLifecycleStore` 两陈旧冻结项（37→35），门 0 error／0 warning。
+- `docs/wiki/memory/memory-architecture.md` 四处伪断言改真：`:48` 硬契约第 10 行 LifecycleStore 红线→`TierFacts.Scan`；`:94`「Retention 在册未接线」→原文过期唯一执行面＋删除说明；`:149`「仍在 lifecycle.go 在册」→已整体删除；`:254` 缺口行改为「已裁为删」。doc-budget 22149 行 / slack 0 未变（逐行原地改写）。
+- `assembly/host_delivery.go`：`deliverySettlementType` 注释删去对 `lifecycle_config.go` 的指引（TTL 豁免无对象），「两处拼写一致」契约保留。
+- `docs/api/`：重新生成。本单引起 `memory__ledger`、`examples__contract__memory_ledger` 两文件；其余 6 文件为工作树既有陈旧（已核 0 处 lifecycle 相关 hunk），非本单产生。
+- 08 delta spec：`REMOVED`「TTL check uses actual event timestamp」（执行面已删，时间真相由主规格 `event-segment-store`「时间真相源单一」承接）＋`MODIFIED`「保留保护与回收协调」重写为现行判据（无销毁路径、按身份恒可读、两条保护各一活载体、能力诚实 fail-closed），三器硬要求不留死条款。
+
+### 十五·六 验证（原始 exit）
+
+`go build ./...`=0；`go vet ./...`=0；`go test ./memory/ledger/ -count=1`=0；`go test ./assembly/ -count=1`=0；`go test ./tests/... -count=1`=0（13 包全 ok）。负锚：31 个移除符号词边界 grep 全树零残留，唯 `\bLifecycle\b` 命中宿主 `DiagnosticLifecycle` 字段（`assembly/host_diagnostics.go:245,246,271` 等，不同义项，R307 已注明）。门：`comment_policy` 两聚合均 0；`check_concept_budget.py --json`=0；`check_product_surface.py` 0/0/35；`check_dead_producers.py`=0；`check_doc_budget.py`=0；`check_doc_links.py`=0；`gen_godoc.sh --check`=0；`openspec validate runtime-recovery-ideal --strict` valid。基线未抬（反而收紧 2 项）、无活谓词删减凑绿。

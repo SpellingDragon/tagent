@@ -106,20 +106,14 @@ func scenarioFourTurns() []replay.ChainFact {
 	return facts
 }
 
-// scenarioProjection replays the given facts into one projection over the
-// scenario session, as a cold start reads them back.
+// scenarioProjection holds the given facts in one projection over the scenario
+// session, in chain order.
 func scenarioProjection(t *testing.T, facts []replay.ChainFact) *replay.ReplayProjection {
 	t.Helper()
 	ctx := context.Background()
-	chain := replay.NewMemoryEventChain()
-	for _, fact := range facts {
-		if err := chain.Commit(ctx, fact); err != nil {
-			t.Fatalf("commit the chain fact %s: %v", fact.Key, err)
-		}
-	}
 	projection := replay.NewReplayProjection()
-	if _, err := replay.RebuildProjectionFromWAL(ctx, projection, chain, &replay.MemoryRelations{}, scenarioChainKey, replay.RebuildOptions{}); err != nil {
-		t.Fatalf("rebuild the projection from the chain: %v", err)
+	for _, fact := range facts {
+		projection.Append(ctx, replay.ProjectionEntry{Key: fact.Key, Type: fact.Type, Summary: fact.Summary, Content: fact.Content, Time: fact.Time})
 	}
 	return projection
 }

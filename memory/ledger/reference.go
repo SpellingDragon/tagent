@@ -14,6 +14,38 @@ import (
 	"github.com/SpellingDragon/tagent/api/event"
 )
 
+// RecallOutcome names the classification of one exact recall result.
+type RecallOutcome int
+
+const (
+	// RecallUnclassified is the zero value: the outcome was not determined, so
+	// it is never reported as a successful recall.
+	RecallUnclassified RecallOutcome = iota
+	// RecallFound means the original bytes were returned.
+	RecallFound
+	// RecallMissing means no original is stored under the key.
+	RecallMissing
+	// RecallExpired means the original is outside the retention window of its policy.
+	RecallExpired
+	// RecallFailed means the read itself failed and Err carries the cause.
+	RecallFailed
+)
+
+// RecallResult is the outcome of exact recall for one key: the original bytes
+// when they were found, and otherwise a named classification of why they were
+// not, so a miss is reported instead of silently omitted.
+type RecallResult struct {
+	// Key is the identity that was recalled.
+	Key event.EventID
+	// Outcome is the named classification of this result.
+	Outcome RecallOutcome
+	// Body holds the returned original bytes, and is set only when Outcome is
+	// RecallFound.
+	Body []byte
+	// Err carries the cause when Outcome is RecallFailed, and is nil otherwise.
+	Err error
+}
+
 // OriginalRef names one stored original blob together with the reference
 // metadata that scopes it: the owner that registered the reference, the format
 // it was registered in, the retention policy it is held under, and the

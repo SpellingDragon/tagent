@@ -36,7 +36,10 @@ schema v2（`event-integrity` 合同）额外能力，v1 行为不变：
     test-log 与 evidence）；底层一律 `-count=1`，禁止用 `-count=N` 冒充多轮；
   * `--repeat-index I`：只跑第 I 轮（1..合同 repeat）并写该轮证据，repeat_total
     仍取合同值；与 `--repeat` 混用、越界或用于 v1 合同均具名拒绝；
-  * `--seed`/`--window`：必须是合同 matrix 内的成对组合，追加 `-args`；
+  * `--seed`/`--window`：必须是合同 matrix 内的成对组合；只随"编译了定义这两面
+    旗标的测试二进制"的那次调用以 `-args` 传递（`EVENT_CALIBRATION_FLAGS`：wechat-bot
+    的 smoke 构建），同组其余包另起不带 `-args` 的调用——`-args` 会到达一次调用里
+    的每个包，未定义者直接 `flag provided but not defined` 退出；
   * `--test-id <leaf>/<TestName>`（可重复）：按合同 id 精确选择子集，未登记即用法错误；
   * 零匹配即失败：进程退出 0 但日志里没有该测试的 run 终局时判 unattested，
     不把退出码单独当凭据；
@@ -50,6 +53,10 @@ schema v2（`event-integrity` 合同）额外能力，v1 行为不变：
     里具名 `go-test-bound`/`expired`，避免分片被 kill 后 CI 无产物可上传；
   * 指纹覆盖受影响第一方源码、未跟踪测试、fixture、合同与各模块 go.mod/go.sum，
     不只记 HEAD；
+  * `source_binding`：除所选模块外，还记录它们实际编译进来的本地依赖源码——各模块
+    go.mod 的本地 `replace` 目标（递归，即 wechat/cli-host 指向仓库根的那一条）、
+    生效 go.work 的 `use` 目录及其解析配置、运行前后闭包摘要与工具身份。指向本仓库
+    之外的替换一律具名拒绝，不把无关仓库塞进闭包；
   * `run_config.environment`：记录本轮实际继承的决定性环境变量
     （`EVENT_ENVIRONMENT_NAMES`）。子进程继承本进程环境，argv 之外还能改变判定或
     度量的取值必须与 argv 一并落盘；未设置的变量不写，凭证类变量名一律拒收。
@@ -81,6 +88,26 @@ EVENT_SCHEMA_VERSION = 2
 EVENT_PROFILE = "event-integrity"
 EVENT_FINGERPRINT_SUFFIXES = (".go", ".mod", ".sum")
 EVENT_FINGERPRINT_SKIP_DIRS = frozenset({".git", "node_modules", "vendor", "__pycache__"})
+# Why a module is part of a run's compiled sources: the scope selected a test in
+# it, a selected module's go.mod `replace` points at it, or the effective go.work
+# `use` directive adds it. The three sets are recorded separately because they
+# fail differently — a selected module with no test would be a contract bug, a
+# missing local replacement would let the tested bytes drift from the evidence.
+EVENT_SOURCE_ROLES = ("tested", "local-replacement", "workspace")
+EVENT_TOOL_ENTRYPOINT = "scripts/scenarios/run_runtime_scenarios.py"
+EVENT_WORKSPACE_NAME = "go.work"
+# A `replace` target is a local source tree — and therefore part of what the run
+# compiled — when it is a filesystem path rather than a module path@version.
+EVENT_LOCAL_REPLACE_PREFIXES = ("./", "../", "/")
+# Where the contract's matrix pair is actually parsed: `-seed`/`-window` are declared
+# in examples/wechat-bot/smoke_test.go, whose `//go:build smoke` line keeps that test
+# binary out of every build without `-tags smoke`. Any other package or build exits
+# on `flag provided but not defined: -seed` (measured on the toolchain), and
+# `go test … -args` hands the remaining tokens to every package one invocation names
+# — so this surface decides which invocation may carry the pair.
+EVENT_CALIBRATION_FLAGS = (
+    {"dir": "examples/wechat-bot", "package": ".", "tags": ("smoke",)},
+)
 RECORD_MARKER = "TAGENT-SCENARIO-RECORD:"
 SCOPE_COMPLETE = "complete"
 SOURCE_DIR = os.path.join("tests", "integration", "acceptance")
@@ -754,8 +781,8 @@ def event_groups(index: dict, selected: list) -> list:
     return ordered
 
 
-def event_command(group: dict, index: dict, seed, window, timeout: float = None) -> list:
-    """Build one `go -C <module> test ...` invocation with the declared flags."""
+def event_command(group: dict, index: dict, timeout: float = None) -> list:
+    """Build one `go -C <module> test ...` invocation for the group's packages."""
     names = sorted({index[test_id]["test_name"] for test_id in group["tests"]})
     pattern = "^({})$".format("|".join(names))
     command = ["go", "-C", group["dir"], "test"] + list(group["packages"])
@@ -769,9 +796,55 @@ def event_command(group: dict, index: dict, seed, window, timeout: float = None)
     if group["race"]:
         command.append("-race")
     command.append("-json")
-    if seed is not None:
-        command += ["-args", "-seed={}".format(seed), "-window={}".format(window)]
     return command
+
+
+def command_packages(command: list) -> list:
+    """Read the package arguments a `go test` argv names, ahead of its flags."""
+    packages = []
+    for argument in command[command.index("test") + 1:]:
+        if argument.startswith("-"):
+            break
+        packages.append(argument)
+    return packages
+
+
+def event_calibration_bearer(module_dir: str, tags, package: str) -> bool:
+    """State whether this build of this package parses the calibration flags.
+
+    A package bears them only when the build compiles the file that declares them,
+    so the declared build tags of that file must all be build tags of this build.
+    """
+    declared = set(tags or ())
+    for surface in EVENT_CALIBRATION_FLAGS:
+        if surface["dir"] == module_dir and surface["package"] == package:
+            if set(surface["tags"]) <= declared:
+                return True
+    return False
+
+
+def event_commands(group: dict, index: dict, seed, window, timeout: float = None) -> list:
+    """Build the invocation(s) for one group, keeping the matrix pair with its bearer.
+
+    Without a matrix pair there is nothing to hand over, so the group stays a single
+    invocation. With one, the group's packages are split by flag surface: argv after
+    `-args` reaches every package the invocation names, so naming a package that does
+    not define `-seed`/`-window` in the bearer's invocation makes that package exit
+    on `flag provided but not defined` before any test runs (R271).
+    """
+    if seed is None:
+        return [event_command(group, index, timeout)]
+    partitions = {}
+    for package in group["packages"]:
+        bearer = event_calibration_bearer(group["dir"], group["tags"], package)
+        partitions.setdefault(bearer, []).append(package)
+    commands = []
+    for bearer, packages in partitions.items():
+        command = event_command(dict(group, packages=packages), index, timeout)
+        if bearer:
+            command += ["-args", "-seed={}".format(seed), "-window={}".format(window)]
+        commands.append(command)
+    return commands
 
 
 def _fingerprint_entries(module_dir: str) -> list:
@@ -791,12 +864,12 @@ def _fingerprint_entries(module_dir: str) -> list:
     return sorted(entries)
 
 
-def module_fingerprint(repo_root: str, module_dir: str, module_path: str) -> dict:
-    """Fingerprint one module's sources, deps and the tests actually driven.
+def module_content_hash(repo_root: str, module_dir: str) -> str:
+    """Digest one module's fingerprinted bytes, independent of git state.
 
-    HEAD alone is not enough: uncommitted first-party code, untracked test files
-    and the module's go.mod/go.sum all change what a run means, so the digest is
-    computed over those bytes (nested modules are skipped, they have their own).
+    Split out of `module_fingerprint` so a consumer that has no git revision to
+    read (a fixture tree, a bundle checked on another machine) still recomputes
+    the same bytes: one definition of what "this module's content" means.
     """
     absolute = os.path.join(repo_root, module_dir)
     if not os.path.isdir(absolute):
@@ -814,9 +887,305 @@ def module_fingerprint(repo_root: str, module_dir: str, module_path: str) -> dic
         digest.update(rel.encode("utf-8"))
         digest.update(b"\0")
         digest.update(data)
+    return "sha256:" + digest.hexdigest()
+
+
+def module_fingerprint(repo_root: str, module_dir: str, module_path: str,
+                       revision: str = "auto") -> dict:
+    """Fingerprint one module's sources, deps and the tests actually driven.
+
+    HEAD alone is not enough: uncommitted first-party code, untracked test files
+    and the module's go.mod/go.sum all change what a run means, so the digest is
+    computed over those bytes (nested modules are skipped, they have their own).
+    `revision` is "auto" for a producer (the checkout it is running in) and an
+    explicit value — including None — for a consumer recomputing the same bytes
+    on a tree that is not a checkout.
+    """
+    if not os.path.isdir(os.path.join(repo_root, module_dir)):
+        raise RunnerError("module directory not found: {}".format(
+            os.path.join(repo_root, module_dir)))
     return {"module_path": module_path, "dir": module_dir.replace(os.sep, "/"),
-            "revision": git_revision(repo_root),
-            "content_hash": "sha256:" + digest.hexdigest()}
+            "revision": read_revision(repo_root) if revision == "auto" else revision,
+            "content_hash": module_content_hash(repo_root, module_dir)}
+
+
+def read_revision(root: str):
+    """The revision when it is readable; `None` rather than an invented SHA."""
+    try:
+        return git_revision(root)
+    except RunnerError:
+        return None
+
+
+def go_mod_local_replacements(module_abs: str) -> list:
+    """Every local `replace` one go.mod declares, as (module_path, target).
+
+    A local target is a filesystem path, so the target directory's sources are
+    compiled into the module that declares it. Remote targets (module path plus
+    version) are fetched modules, not this tree, and are deliberately absent.
+    Comments are stripped before parsing so a commented-out replacement can never
+    enter the closure.
+    """
+    path = os.path.join(module_abs, "go.mod")
+    if not os.path.isfile(path):
+        return []
+    try:
+        with open(path, encoding="utf-8") as handle:
+            text = handle.read()
+    except OSError as exc:
+        raise RunnerError("cannot read {}: {}".format(path, exc))
+    entries = []
+    in_block = False
+    for raw in text.splitlines():
+        line = raw.split("//", 1)[0].strip()
+        if not line:
+            continue
+        if in_block:
+            if line == ")":
+                in_block = False
+            else:
+                entries.append(line)
+            continue
+        if not line.startswith("replace"):
+            continue
+        rest = line[len("replace"):].strip()
+        if rest.startswith("("):
+            rest = rest[1:].strip()
+            in_block = rest != ")" and not rest.endswith(")")
+            if rest and not rest.startswith(")"):
+                entries.append(rest)
+            continue
+        entries.append(rest)
+    found = []
+    for entry in entries:
+        if "=>" not in entry:
+            continue
+        left, right = entry.split("=>", 1)
+        module_path = left.strip().split()[0]
+        target = right.strip().split()[0] if right.strip() else ""
+        if target.startswith(EVENT_LOCAL_REPLACE_PREFIXES) or target in (".", ".."):
+            found.append({"module_path": module_path, "target": target})
+    return found
+
+
+def go_work_use_dirs(path_abs: str) -> list:
+    """Every `use` directory a go.work declares, as written."""
+    try:
+        with open(path_abs, encoding="utf-8") as handle:
+            text = handle.read()
+    except OSError as exc:
+        raise RunnerError("cannot read {}: {}".format(path_abs, exc))
+    uses = []
+    in_block = False
+    for raw in text.splitlines():
+        line = raw.split("//", 1)[0].strip()
+        if not line:
+            continue
+        if in_block:
+            if line == ")":
+                in_block = False
+            else:
+                uses.append(line)
+            continue
+        if not line.startswith("use"):
+            continue
+        rest = line[len("use"):].strip()
+        if rest.startswith("("):
+            rest = rest[1:].strip()
+            in_block = rest != ")" and not rest.endswith(")")
+            if rest and not rest.startswith(")"):
+                uses.append(rest)
+            continue
+        uses.append(rest)
+    return [entry.split()[0] for entry in uses if entry.split()]
+
+
+def workspace_relative_dir(repo_root: str, base_dir: str, target: str) -> str:
+    """Resolve one path declared inside the repository, refusing to escape it."""
+    base = os.path.join(repo_root, base_dir)
+    resolved = os.path.normpath(target if os.path.isabs(target)
+                                else os.path.join(base, target))
+    relative = os.path.relpath(resolved, repo_root)
+    if relative == os.pardir or relative.startswith(os.pardir + os.sep):
+        raise RunnerError(
+            "{} {!r} resolves outside the repository ({}); sources outside the tested tree "
+            "cannot be bound to this evidence".format(EVENT_WORKSPACE_NAME, target, resolved))
+    return relative.replace(os.sep, "/")
+
+
+def resolve_workspace(repo_root: str, module_dirs, environ=None) -> dict:
+    """The go.work that governs these module directories, as it was resolved.
+
+    `GOWORK` is one of the recorded run determinants, so an explicit value wins
+    over the tree search; otherwise the file is found the way `go` finds it, by
+    walking up from each module directory.
+    """
+    env = os.environ if environ is None else environ
+    declared = env.get("GOWORK")
+    if declared == "off":
+        return {"state": "off"}
+    candidate = None
+    if declared:
+        candidate = os.path.normpath(declared if os.path.isabs(declared)
+                                     else os.path.join(os.getcwd(), declared))
+    else:
+        for module_dir in module_dirs:
+            current = os.path.normpath(os.path.join(repo_root, module_dir))
+            while True:
+                if os.path.isfile(os.path.join(current, EVENT_WORKSPACE_NAME)):
+                    candidate = os.path.join(current, EVENT_WORKSPACE_NAME)
+                    break
+                parent = os.path.dirname(current)
+                if parent == current:
+                    break
+                current = parent
+            if candidate:
+                break
+    if candidate is None:
+        return {"state": "absent"}
+    relative = os.path.relpath(candidate, repo_root)
+    if relative == os.pardir or relative.startswith(os.pardir + os.sep):
+        raise RunnerError("{} {} is outside the tested tree; a workspace that reaches another "
+                          "repository cannot be bound to this evidence".format(
+                              EVENT_WORKSPACE_NAME, candidate))
+    return {"state": "present", "path": relative.replace(os.sep, "/"),
+            "digest": "sha256:" + hashlib.sha256(
+                open(candidate, "rb").read()).hexdigest(),
+            "use": [workspace_relative_dir(repo_root, os.path.dirname(relative), use)
+                    for use in go_work_use_dirs(candidate)]}
+
+
+def go_version() -> str:
+    """The `go` the run drives, when the toolchain reports one."""
+    try:
+        result = subprocess.run(["go", "version"], capture_output=True, text=True, timeout=60)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return result.stdout.strip() or None if result.returncode == 0 else None
+
+
+def tool_identity(repo_root: str, name: str = "run_runtime_scenarios",
+                  entrypoint: str = EVENT_TOOL_ENTRYPOINT) -> dict:
+    """The tools whose bytes decide what a run means.
+
+    The gate script owns the fingerprint, the argv and the verdict vocabulary, so
+    its own bytes are part of the evidence identity. The interpreter and toolchain
+    versions are recorded beside it because they decide what compiles; a consumer
+    can compare the script digest with the tree it is checking, and can only read
+    the versions as a statement the producer made.
+    """
+    path = os.path.join(repo_root, entrypoint)
+    if not os.path.isfile(path):
+        raise RunnerError("tool entrypoint not found: {}".format(path))
+    try:
+        with open(path, "rb") as handle:
+            digest = hashlib.sha256(handle.read()).hexdigest()
+    except OSError as exc:
+        raise RunnerError("cannot fingerprint {}: {}".format(path, exc))
+    return {"name": name, "entrypoint": entrypoint.replace(os.sep, "/"),
+            "digest": "sha256:" + digest,
+            "python": platform.python_version(), "go": go_version()}
+
+
+def binding_digest(modules: list, edges: list, workspace: dict) -> str:
+    """One digest over the resolved closure, so drift is one comparable value.
+
+    Held to bytes and resolution only — the content digest, the module set, the
+    `replace`/`use` edges and the workspace file. Excluded on purpose: the
+    checkout revision (a tree can move without its bytes changing, and reading it
+    needs git, which a bundle checked on another machine need not have) and the
+    tool identity (it carries the producer's interpreter version, which would make
+    two trees with identical sources compare unequal). Both are checked on their
+    own terms instead.
+    """
+    material = json.dumps(
+        {"modules": [{"dir": entry["dir"], "module_path": entry["module_path"],
+                      "content_hash": entry["content_hash"], "roles": entry["roles"]}
+                     for entry in modules],
+         "edges": edges, "workspace": workspace},
+        sort_keys=True, separators=(",", ":"))
+    return "sha256:" + hashlib.sha256(material.encode("utf-8")).hexdigest()
+
+
+def binding_window(binding: dict) -> dict:
+    """The closure as it stood at one end of a run."""
+    return {"digest": binding["digest"], "modules": len(binding["modules"])}
+
+
+def go_mod_module_path(module_abs: str):
+    """The module path one go.mod declares, or None when it declares none."""
+    path = os.path.join(module_abs, "go.mod")
+    if not os.path.isfile(path):
+        return None
+    try:
+        with open(path, encoding="utf-8") as handle:
+            text = handle.read()
+    except OSError as exc:
+        raise RunnerError("cannot read {}: {}".format(path, exc))
+    for raw in text.splitlines():
+        line = raw.split("//", 1)[0].strip()
+        if line.startswith("module "):
+            parts = line[len("module"):].strip().strip('"').split()
+            return parts[0] if parts else None
+    return None
+
+
+def source_binding(repo_root: str, seeds, environ=None, revision: str = "auto") -> dict:
+    """Everything the selected modules actually compile, resolved and digested.
+
+    A selected module is not the whole compiled tree: `examples/wechat-bot` and
+    `examples/cli-host` both `replace github.com/SpellingDragon/tagent => ../..`,
+    so every one of their runs compiles the root module's sources. Fingerprinting
+    only the selected module would let the root change without moving the digest,
+    which is exactly the drift this binding has to catch. The closure is therefore
+    the selected modules plus their local `replace` targets (transitively) plus
+    every `use` directory of the effective go.work — and nothing else: a target
+    outside this repository is refused rather than fingerprinted.
+
+    `revision` follows `module_fingerprint`: a producer reads its own checkout, a
+    consumer that only has the bytes passes None.
+    """
+    env = os.environ if environ is None else environ
+    workspace = resolve_workspace(repo_root, sorted({seed["dir"] for seed in seeds}), env)
+    pending = [(seed["dir"], seed["module_path"], "tested") for seed in seeds]
+    for use_dir in workspace.get("use") or []:
+        pending.append((use_dir, go_mod_module_path(os.path.join(repo_root, use_dir)) or use_dir,
+                        "workspace"))
+    modules = {}
+    edges = []
+    processed = set()
+    while pending:
+        module_dir, module_path, role = pending.pop(0)
+        entry = modules.get(module_dir)
+        if entry is None:
+            entry = dict(module_fingerprint(repo_root, module_dir, module_path, revision),
+                         roles=[role])
+            modules[module_dir] = entry
+        else:
+            if entry["module_path"] != module_path:
+                raise RunnerError("module dir {!r} is resolved with two module paths ({!r}, {!r})"
+                                  .format(module_dir, entry["module_path"], module_path))
+            if role not in entry["roles"]:
+                entry["roles"].append(role)
+        if module_dir in processed:
+            continue
+        processed.add(module_dir)
+        for replacement in go_mod_local_replacements(os.path.join(repo_root, module_dir)):
+            target = workspace_relative_dir(repo_root, module_dir, replacement["target"])
+            edge = {"from_dir": module_dir, "module_path": replacement["module_path"],
+                    "target": replacement["target"], "resolved_dir": target}
+            if edge not in edges:
+                edges.append(edge)
+            pending.append((target,
+                            go_mod_module_path(os.path.join(repo_root, target))
+                            or replacement["module_path"], "local-replacement"))
+    ordered = [modules[key] for key in sorted(modules)]
+    for entry in ordered:
+        entry["roles"] = [role for role in EVENT_SOURCE_ROLES if role in entry["roles"]]
+    edges.sort(key=lambda edge: (edge["from_dir"], edge["module_path"]))
+    return {"repo_root": ".", "modules": ordered, "edges": edges,
+            "workspace": workspace, "tool": tool_identity(repo_root),
+            "digest": binding_digest(ordered, edges, workspace)}
 
 
 def resolve_log_package(package: str, module_paths) -> tuple:
@@ -1069,12 +1438,15 @@ def recorded_environment(environ) -> dict:
 
 def run_event_repeat(args, root: str, index: dict, groups: list, selected: list,
                      seed, window, repeat_index: int, repeat_total: int,
-                     out_dir: str, contract_digest: str, fingerprints: list) -> dict:
+                     out_dir: str, contract_digest: str, fingerprints: list,
+                     binding: dict = None) -> dict:
     """Run every group once, in its own directory, under one fresh run_id."""
     run_id = str(uuid.uuid4())
     # Captured before the invocations start: this is the environment the children
     # inherit, not a re-read of it after they ran.
     environment = recorded_environment(os.environ)
+    seeds = [{"dir": group["dir"], "module_path": group["module_path"]} for group in groups]
+    before = binding if binding is not None else source_binding(root, seeds, os.environ)
 
     repeat_dir = os.path.join(out_dir, "repeat-{}".format(repeat_index))
     os.makedirs(repeat_dir, exist_ok=True)
@@ -1085,19 +1457,29 @@ def run_event_repeat(args, root: str, index: dict, groups: list, selected: list,
     liveness = {"name": LIVENESS_GO_TEST_BOUND, "state": "completed",
                 "bound_seconds": args.timeout}
     for group in groups:
-        command = event_command(group, index, seed, window, args.timeout)
-        group_exit, stdout, stderr, group_liveness = run_go_test(command, root, args.timeout)
-        if group_liveness["state"] != "completed":
-            liveness = group_liveness
-        chunks.append(stdout)
-        if stderr.strip():
-            stderr_chunks.append("# {}\n{}".format(" ".join(command), stderr))
-        invocations.append({"module_path": group["module_path"], "dir": group["dir"],
-                            "packages": list(group["packages"]), "tags": list(group["tags"]),
-                            "race": group["race"], "command": " ".join(command),
-                            "exit_code": group_exit})
-        if group_exit != 0 and exit_code == 0:
-            exit_code = group_exit
+        for command in event_commands(group, index, seed, window, args.timeout):
+            group_exit, stdout, stderr, group_liveness = run_go_test(command, root, args.timeout)
+            if group_liveness["state"] != "completed":
+                liveness = group_liveness
+            chunks.append(stdout)
+            if stderr.strip():
+                stderr_chunks.append("# {}\n{}".format(" ".join(command), stderr))
+            invocations.append({"module_path": group["module_path"], "dir": group["dir"],
+                                "packages": command_packages(command),
+                                "tags": list(group["tags"]),
+                                "race": group["race"], "command": " ".join(command),
+                                "exit_code": group_exit})
+            if group_exit != 0 and exit_code == 0:
+                exit_code = group_exit
+    # The closure is re-resolved on the far side of the invocations. Evidence that
+    # names one tree while the run compiled two describes neither, so a drift is
+    # refused here instead of being written down as if it were a single tree.
+    after = source_binding(root, seeds, os.environ)
+    if after["digest"] != before["digest"]:
+        raise RunnerError(
+            "the local dependency closure changed while the run was in progress: {} -> {}; "
+            "the evidence would describe a tree that never stood still".format(
+                before["digest"], after["digest"]))
     log_path = os.path.join(repeat_dir, "test-log.jsonl")
     log_text = "".join(chunks)
     with open(log_path, "w", encoding="utf-8") as handle:
@@ -1124,7 +1506,9 @@ def run_event_repeat(args, root: str, index: dict, groups: list, selected: list,
         "repeat_total": repeat_total,
         "contract_digest": contract_digest,
         "test_ids": list(selected),
-        "module_fingerprints": fingerprints,
+        "module_fingerprints": fingerprints or before["modules"],
+        "source_binding": dict(before, before=binding_window(before),
+                               after=binding_window(after)),
         "run_config": {
             "seed": seed,
             "window": window,
@@ -1182,11 +1566,11 @@ def execute_event(args, root: str, contract: dict, contract_path: str) -> dict:
         repeat_total = event_scope_repeat(contract, args.scope)
         repeat_indexes = range(1, repeat_total + 1)
     groups = event_groups(index, selected)
-    collected = {}
-    for group in groups:
-        if group["dir"] not in collected:
-            collected[group["dir"]] = module_fingerprint(root, group["dir"], group["module_path"])
-    fingerprints = [collected[key] for key in sorted(collected)]
+    # The closure, not just the selected modules: a scope that drives only the
+    # wechat module still compiles the root module through its local `replace`.
+    binding = source_binding(root, [{"dir": group["dir"], "module_path": group["module_path"]}
+                                    for group in groups], os.environ)
+    fingerprints = binding["modules"]
     try:
         contract_digest = lib.sha256_file(contract_path)
     except lib.CheckFailure as exc:
@@ -1199,7 +1583,7 @@ def execute_event(args, root: str, contract: dict, contract_path: str) -> dict:
     for repeat_index in repeat_indexes:
         repeats.append(run_event_repeat(args, root, index, groups, selected, seed, window,
                                         repeat_index, repeat_total, out_dir,
-                                        contract_digest, fingerprints))
+                                        contract_digest, fingerprints, binding))
     durable_scan = None
     if args.generation_logs:
         durable_scan = durable_scan_attestation(args.generation_logs)

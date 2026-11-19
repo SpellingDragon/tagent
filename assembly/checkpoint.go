@@ -281,8 +281,9 @@ func (r *Run) StateRegistry() *state.StateRegistry {
 }
 
 // RegisterStateSlice mounts one consumer's recoverable state on the state seam
-// and answers the disposer that unmounts it.
-func (r *Run) RegisterStateSlice(holder state.Stateful) (func(), error) {
+// and answers the disposer that unmounts it, which refuses by name while the
+// slice still declares unfinished work.
+func (r *Run) RegisterStateSlice(holder state.Stateful) (func() error, error) {
 	if r == nil {
 		return nil, errors.New("assembly: the run is nil")
 	}
@@ -1172,6 +1173,18 @@ func (s projectionStateSlice) Reduce(ctx context.Context, evt event.Event) error
 		return nil
 	}
 	s.run.foldMapped(ctx, evt, entry)
+	return nil
+}
+
+// ReduceRepeat answers one fact the chain already carries: the sequence states each
+// identity where the commit filed it, and a repeat files no position of its own, so
+// the fold answers without appending. The judgment belongs to the commit that
+// classified the fact, never to the sequence's own order, because the sequence drops
+// the identity of the material a rewrite moves out of it (a fold, an age band, a
+// product): a repeat read as new material would state what the chain folded away a
+// second time, while a commit filing beside another of the same chain is a filing
+// however far the chain stands past it.
+func (s projectionStateSlice) ReduceRepeat(context.Context, event.Event) error {
 	return nil
 }
 

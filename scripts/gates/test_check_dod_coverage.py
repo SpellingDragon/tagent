@@ -34,15 +34,34 @@ import io
 import json
 import os
 import pathlib
+import re
+import shutil
+import subprocess
 import sys
 import tempfile
 from contextlib import redirect_stderr, redirect_stdout
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 CHECKER = os.path.join(HERE, "check_dod_coverage.py")
+SCRIPTS = pathlib.Path(HERE)
+REPO = SCRIPTS.parents[1]
+MODULE = "github.com/SpellingDragon/tagent"
+TOOL_ENTRYPOINT = pathlib.Path("scripts") / "scenarios" / "run_runtime_scenarios.py"
 
 FAILURES = []
 CASES = 0
+
+
+def load_runner():
+    """The producer whose digests the fixtures record, imported not re-implemented."""
+    scenarios = str(SCRIPTS.parent / "scenarios")
+    if scenarios not in sys.path:
+        sys.path.insert(0, scenarios)
+    import run_runtime_scenarios
+    return run_runtime_scenarios
+
+
+runner = load_runner()
 
 MUTATION_ID = "MUT-FIXTURE-cold-unbounded"
 GATE_MUTATION_ID = "MUT-FIXTURE-gate-clause"
@@ -351,7 +370,7 @@ def registry(predicates, verdicts=None, criteria_paths=None):
 
 def build(tmp, registry_value, anchor=ANCHOR_MEASURE, mutations=MUTATIONS,
           design=DESIGN, ci=CI, anchor_path="assembly/anchor_test.go",
-          evidence=True, extra_files=None):
+          evidence=True, extra_files=None, tool_copy=False, binding_from=None):
     root = pathlib.Path(tmp)
     write(root / "fixture-spec" / "design.md", design)
     write(root / "golden" / "runtime" / "dod_predicates.json",
@@ -363,11 +382,72 @@ def build(tmp, registry_value, anchor=ANCHOR_MEASURE, mutations=MUTATIONS,
     for rel, text in (extra_files or {}).items():
         if text is not None:
             write(root / rel, text)
+    source_tree(root, tool_copy=tool_copy)
     if evidence:
+        # The run product is written last: its recorded closure digests the bytes
+        # this fixture has now, which is what the gate reads it against.
+        binding = source_binding(root if binding_from is None else binding_from)
         write(root / EVIDENCE_PATH,
-              json.dumps(run_product(registry_value.get("mutation_verdicts") or []),
+              json.dumps(run_product(registry_value.get("mutation_verdicts") or [], binding),
                          ensure_ascii=False, indent=2))
     return root
+
+
+def source_tree(root, main="package app\n", tool_copy=False):
+    """The module tree a run product describes, laid out as the repository is."""
+    write(root / "go.mod", "module {}\n".format(MODULE))
+    write(root / "go.sum", "")
+    write(root / "main.go", main)
+    if tool_copy:
+        # The consumer imports the producer from the tree it judges, so a fixture
+        # whose entry point is exercised as a program carries the real module.
+        (root / TOOL_ENTRYPOINT).parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy(REPO / TOOL_ENTRYPOINT, root / TOOL_ENTRYPOINT)
+    else:
+        write(root / TOOL_ENTRYPOINT, "# fixture producer stand-in\n")
+
+
+def source_binding(root):
+    """The closure the producer records for `root`, as the consumer recomputes it."""
+    binding = runner.source_binding(str(root), [{"dir": ".", "module_path": MODULE}],
+                                    revision="0" * 40)
+    window = {"digest": binding["digest"], "modules": len(binding["modules"])}
+    binding["before"] = window
+    binding["after"] = dict(window)
+    return binding
+
+
+def drift(root):
+    """Move a compiled byte after the run product that describes it was written."""
+    write(root / "main.go", "package app\n\n// a later edit the product never saw\n")
+
+
+def strip_binding(root):
+    """Drop the closure from a run product, leaving the verdicts it states."""
+    path = root / EVIDENCE_PATH
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload.pop("source_binding", None)
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def restate_product(**fields):
+    """State `fields` on a run product's top level, leaving its records alone."""
+    def rewrite(root):
+        path = root / EVIDENCE_PATH
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        payload.update(fields)
+        path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    return rewrite
+
+
+def restate_first_record(**fields):
+    """State `fields` on a run product's first mutation record."""
+    def rewrite(root):
+        path = root / EVIDENCE_PATH
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        payload["mutations"][0].update(fields)
+        path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    return rewrite
 
 
 def write(path, text):
@@ -388,12 +468,14 @@ def judge(root, evidence=True):
 
 def run(name, want, registry_value, anchor=ANCHOR_MEASURE, mutations=MUTATIONS,
         design=DESIGN, ci=CI, anchor_path="assembly/anchor_test.go", evidence=True,
-        extra_files=None):
+        extra_files=None, tool_copy=False, binding_from=None, after=None):
     global CASES
     CASES += 1
     with tempfile.TemporaryDirectory() as tmp:
         root = build(tmp, registry_value, anchor, mutations, design, ci, anchor_path,
-                     evidence, extra_files)
+                     evidence, extra_files, tool_copy=tool_copy, binding_from=binding_from)
+        if after is not None:
+            after(root)
         code, output = judge(root, evidence)
     if want is None:
         if code != 0:
@@ -404,9 +486,13 @@ def run(name, want, registry_value, anchor=ANCHOR_MEASURE, mutations=MUTATIONS,
     if code == 0:
         FAILURES.append("%s: want red naming %r, got exit 0" % (name, want))
         return
-    if want not in output:
-        FAILURES.append("%s: want an error naming %r, got %r" % (name, want, output))
-        return
+    # A tuple states every message the case requires: a refusal that did not also
+    # stop the verdicts from counting would satisfy a single substring alone.
+    unwoven = (want,) if isinstance(want, str) else tuple(want)
+    for message in unwoven:
+        if message not in output:
+            FAILURES.append("%s: want an error naming %r, got %r" % (name, message, output))
+            return
     print("PASS", name)
 
 
@@ -418,14 +504,16 @@ def killed(assertion=KILL_TEXT, verdict="killed", mutation_id=MUTATION_ID,
              "evidence": "synthetic: the fixture records the kill"}]
 
 
-def run_product(verdicts):
+def run_product(verdicts, binding):
     """The report `check_event_integrity_mutations.py --out` writes.
 
     The fixtures state their verdicts once, here: a criterion is proven by what a
     run recorded, so the registry's own `mutation_verdicts` field is a claim beside
     it, never its source. The assertion text and the test a record names are the
     frozen registry's, which is how a run product states them. A gate verdict
-    names the gate it judged instead of a test.
+    names the gate it judged instead of a test. The report also carries the
+    closure it was written against, because a product that does not describe the
+    tree under judgement proves nothing about it.
     """
     records = []
     for entry in verdicts:
@@ -439,6 +527,7 @@ def run_product(verdicts):
             "counted_killed": verdict == "killed",
             "expect_assertion": entry.get("assertion"),
             "assertion_site": "assembly/anchor_test.go:9",
+            "assertion_hit": verdict == "killed",
             "test": {"module": ".", "package": "assembly",
                      "file": "assembly/anchor_test.go",
                      "name": entry.get("test_name"),
@@ -450,6 +539,8 @@ def run_product(verdicts):
         "profile": "event-integrity",
         "mode": "live",
         "control_tree_green": True,
+        "not_evidence_backed": [],
+        "source_binding": binding,
         "mutations": records,
     }
 
@@ -504,6 +595,350 @@ def run_anchor(name, want, entry, files=None):
         FAILURES.append("%s: want a gap naming %r, got %r" % (name, want, gaps))
         return
     print("PASS", name)
+
+
+# The formal shell entries drive the wiring, so the wiring is judged from the shell.
+#
+# The acceptance of this leaf is a command (`bash scripts/lint.sh`,
+# `bash scripts/preflight.sh`), not a helper call: what has to hold is the argv the
+# entry produces, the order the chain runs in and the exit it propagates. These
+# cases therefore build a miniature repository whose two entries and whose DoD and
+# evidence checkers are the real files, stand in for every other gate, and read the
+# argv the entry actually ran. The predicate registry, the criteria source, the CI
+# workflow, the anchor test and the run product are the fixtures the cases above
+# already use, so a green here means the same thing a green there means.
+
+REAL = (
+    "scripts/lint.sh",
+    "scripts/preflight.sh",
+    "scripts/gates/lint.sh",
+    "scripts/gates/preflight.sh",
+    "scripts/gates/check_dod_coverage.py",
+    "scripts/gates/check_runtime_evidence.py",
+    "scripts/gates/runtime_checklib.py",
+)
+
+REFERENCE = re.compile(r"(?:python3|bash)\s+[\"']?(scripts/[\w./-]+)")
+
+STUB_PY = """#!/usr/bin/env python3
+import sys
+
+print("stub: {}".format(" ".join(sys.argv[1:])))
+sys.exit(0)
+"""
+
+STUB_SH = """#!/usr/bin/env bash
+echo "stub: $*"
+exit 0
+"""
+
+# The interpreter the entry calls is shimmed, not replaced: every argv the chain
+# hands to python3 is recorded and then executed for real, so the record is what the
+# entry ran and the checker that ran is the checker in the tree.
+PYTHON_SHIM = """#!/bin/sh
+printf '%s\\n' "python3 $*" >> "$TAGENT_FIXTURE_RECORD"
+exec {python} "$@"
+"""
+
+# `go run ./scripts/codetools ...` and the comment-policy measurement both go
+# through this one: the measurement has to print a parsable zero, the rest just
+# passes, and neither touches a toolchain this fixture does not have.
+GO_SHIM = """#!/bin/sh
+printf '%s\\n' "go $*" >> "$TAGENT_FIXTURE_RECORD"
+if [ "$1" = "version" ]; then
+  echo "go version go1.23.0 darwin/arm64"
+  exit 0
+fi
+printf '%s\\n' "comment_policy: 0 finding(s)."
+exit 0
+"""
+
+# The mutations generator, stood in for: it declares the frozen registry this gate
+# parses, and when preflight calls it with --out it writes the run product of that
+# run instead of driving a matrix this fixture cannot drive.
+PRODUCER_MAIN = """
+
+def main(argv=None):
+    import argparse
+    import os
+    import shutil
+    import sys
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--all", action="store_true")
+    parser.add_argument("--json", action="store_true")
+    parser.add_argument("--out")
+    args = parser.parse_args(argv)
+    if not args.out:
+        print("producer stand-in: no --out given", file=sys.stderr)
+        return 2
+    os.makedirs(args.out, exist_ok=True)
+    product = os.path.join(args.out, "evidence.json")
+    shutil.copy(os.environ["TAGENT_FIXTURE_EVIDENCE"], product)
+    print("producer stand-in: wrote {}".format(product))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
+"""
+
+# The binding step, stood in for, and it is not a rubber stamp: it fails unless the
+# product the gate consumes is already on disk when it runs. Its exit is what places
+# it after generation and before consumption. The DoD gate imports this module for
+# the source binding the real checker owns, so the real one is imported beside it
+# rather than the binding being written a second time.
+BINDING_STUB = """#!/usr/bin/env python3
+import os
+import sys
+
+from runtime_evidence_impl import *  # noqa: F401,F403
+
+
+def main(argv=None):
+    args = sys.argv if argv is None else argv
+    bundle = args[args.index("--bundle") + 1]
+    product = os.path.join(bundle, "mutations", "evidence.json")
+    present = os.path.isfile(product)
+    print("binding stand-in: bundle={} product_present={}".format(bundle, present))
+    return 0 if present else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
+"""
+
+# Python 3.12 fails the discovery step when it finds no test at all, so the fixture
+# carries the one module the pattern matches.
+UNIT_TEST_STUB = """import unittest
+
+
+class FixtureChain(unittest.TestCase):
+    def test_the_fixture_chain_is_installed(self):
+        self.assertTrue(True)
+"""
+
+# The consumer imports the runner for its digest and closure definitions; the shell
+# entries call it as a program. This tree has no golden contract to drive, so the
+# program entry states that instead of failing the chain.
+RUNNER_SHIM = '''#!/usr/bin/env python3
+"""The real runner module, with a program entry that drives no matrix."""
+import sys
+
+from runtime_runner_impl import *  # noqa: F401,F403
+
+if __name__ == "__main__":
+    print("fixture runner: no scenario matrix was driven")
+    sys.exit(0)
+'''
+
+
+def referenced(repo):
+    """Every script the two shell entries name, as the entries name it."""
+    found = set()
+    for relative in ("scripts/gates/lint.sh", "scripts/gates/preflight.sh"):
+        found.update(REFERENCE.findall((repo / relative).read_text(encoding="utf-8")))
+    return sorted(found)
+
+
+def producer_module():
+    """The stand-in generator: the frozen registry plus the product it would write."""
+    return registered().replace("from dataclasses import dataclass",
+                                "import sys\nfrom dataclasses import dataclass") + PRODUCER_MAIN
+
+
+def write_product(path, root, verdicts):
+    """The run product a producer writes for `root`, bound to it."""
+    write(path, json.dumps(run_product(verdicts, source_binding(root)),
+                           ensure_ascii=False, indent=2))
+
+
+def shell_repo(tmp, verdicts, claimed=None, stub_binding=False):
+    """A repository whose shell entries are the real ones and whose gates are stubs."""
+    base = pathlib.Path(tmp)
+    root = base / "repo"
+    root.mkdir()
+    bound = [predicate("P1", "单一真相"), predicate("P4", "有界恢复")]
+    build(root, registry(bound, killed() if claimed is None else claimed),
+          mutations=registered(), tool_copy=True, evidence=False)
+    for relative in REAL:
+        target = root / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy(REPO / relative, target)
+    for relative in ("examples/wechat-bot", "examples/cli-host"):
+        write(root / relative / "go.mod", "module {}/{}\n".format(MODULE, relative))
+    stubbed = {"scripts/gates/check_runtime_evidence.py"} if stub_binding else set()
+    if stub_binding:
+        shutil.copy(root / "scripts" / "gates" / "check_runtime_evidence.py",
+                    root / "scripts" / "gates" / "runtime_evidence_impl.py")
+    for relative in referenced(REPO):
+        target = root / relative
+        if relative in stubbed:
+            write(target, BINDING_STUB)
+            continue
+        if relative in REAL or target.exists():
+            continue
+        write(target, STUB_SH if target.suffix == ".sh" else STUB_PY)
+    write(root / "scripts" / "gates" / "check_event_integrity_mutations.py", producer_module())
+    write(root / "scripts" / "gates" / "test_check_runtime_chain.py", UNIT_TEST_STUB)
+    write(root / "scripts" / "gates" / "test_check_doc_budget.py", UNIT_TEST_STUB)
+    write(root / "scripts" / "gates" / "check_doc_budget.py", STUB_PY)
+    scenarios = root / "scripts" / "scenarios"
+    shutil.copy(scenarios / "run_runtime_scenarios.py", scenarios / "runtime_runner_impl.py")
+    write(scenarios / "run_runtime_scenarios.py", RUNNER_SHIM)
+    bins = base / "bin"
+    bins.mkdir()
+    write(bins / "python3", PYTHON_SHIM.format(python=sys.executable))
+    write(bins / "go", GO_SHIM)
+    for name in ("python3", "go"):
+        (bins / name).chmod(0o755)
+    write_product(base / "producer-evidence.json", root, verdicts)
+    return root
+
+
+def shell_entry(root, argv, env_extra=None):
+    """Run one formal shell entry in the fixture, returning its result and its argv."""
+    base = root.parent
+    record = base / "record.log"
+    if record.exists():
+        record.unlink()
+    env = dict(os.environ)
+    env.pop("TAGENT_RUNTIME_EVIDENCE_DIR", None)
+    env["PATH"] = str(base / "bin") + os.pathsep + env["PATH"]
+    env["TAGENT_FIXTURE_RECORD"] = str(record)
+    env["TAGENT_FIXTURE_EVIDENCE"] = str(base / "producer-evidence.json")
+    env.update(env_extra or {})
+    proc = subprocess.run(["bash"] + list(argv), cwd=str(root), env=env,
+                          capture_output=True, text=True, timeout=900)
+    return proc, record.read_text(encoding="utf-8") if record.exists() else ""
+
+
+def expect(name, held, detail):
+    global CASES
+    CASES += 1
+    if held:
+        print("PASS", name)
+        return
+    FAILURES.append("%s: %s" % (name, detail))
+
+
+def told(proc, want):
+    """The entry's own words, both streams, for a case that wants a named refusal."""
+    return want in (proc.stdout + proc.stderr)
+
+
+def steps(record, *markers):
+    """Where each marker first appears in the recorded argv, verbatim."""
+    return [record.find(marker) for marker in markers]
+
+
+def test_formal_lint_consumes_bound_mutation_evidence():
+    """The shell entry hands the DoD gate this run's product, and the gate reads it.
+
+    Green here is not a stub saying yes: the checker is the real one, and without
+    the directory it would have no verdicts at all - the registry's own field is
+    refused - so exit 0 is the product being consumed.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        root = shell_repo(tmp, killed())
+        evidence_dir = pathlib.Path(tmp) / "run"
+        write_product(evidence_dir / "mutations" / "evidence.json", root, killed())
+        proc, record = shell_entry(root, ("scripts/lint.sh", "--only", "contracts"),
+                                   {"TAGENT_RUNTIME_EVIDENCE_DIR": str(evidence_dir)})
+        argv = "scripts/gates/check_dod_coverage.py --mutation-evidence {}".format(
+            evidence_dir / "mutations")
+        expect("the formal lint entry reaches the DoD gate with this run's product",
+               proc.returncode == 0 and argv in record,
+               "exit {}; argv {!r}; output {!r}".format(
+                   proc.returncode, record, (proc.stdout + proc.stderr)[-3000:]))
+        expect("the DoD gate proved both criteria from that product",
+               "dod_coverage: 2/2 criteria bound and proven" in proc.stdout,
+               "output {!r}".format((proc.stdout + proc.stderr)[-3000:]))
+
+
+def test_formal_lint_refuses_missing_stale_or_handwritten_evidence():
+    """Four ways to have no product for this tree, each red by name, none exit 0."""
+    with tempfile.TemporaryDirectory() as tmp:
+        root = shell_repo(tmp, killed())
+        proc, record = shell_entry(root, ("scripts/lint.sh", "--only", "contracts"))
+        expect("the formal lint entry names an unset evidence directory and fails",
+               proc.returncode != 0 and told(proc, "TAGENT_RUNTIME_EVIDENCE_DIR is unset")
+               and "scripts/gates/check_dod_coverage.py " not in record,
+               "exit {}; argv {!r}; output {!r}".format(
+                   proc.returncode, record, (proc.stdout + proc.stderr)[-3000:]))
+
+    with tempfile.TemporaryDirectory() as tmp:
+        root = shell_repo(tmp, killed())
+        empty = pathlib.Path(tmp) / "empty-run"
+        empty.mkdir()
+        proc, record = shell_entry(root, ("scripts/lint.sh", "--only", "contracts"),
+                                   {"TAGENT_RUNTIME_EVIDENCE_DIR": str(empty)})
+        expect("the formal lint entry names a directory with no product and fails",
+               proc.returncode != 0 and told(proc, "holds no mutations/ product")
+               and "scripts/gates/check_dod_coverage.py " not in record,
+               "exit {}; output {!r}".format(
+                   proc.returncode, (proc.stdout + proc.stderr)[-3000:]))
+
+    with tempfile.TemporaryDirectory() as tmp:
+        root = shell_repo(tmp, killed())
+        evidence_dir = pathlib.Path(tmp) / "run"
+        product = evidence_dir / "mutations" / "evidence.json"
+        write_product(product, root, killed())
+        drift(root)
+        proc, record = shell_entry(root, ("scripts/lint.sh", "--only", "contracts"),
+                                   {"TAGENT_RUNTIME_EVIDENCE_DIR": str(evidence_dir)})
+        expect("the formal lint entry refuses a product from another tree, by name",
+               proc.returncode != 0 and told(proc, "the evidence describes another source tree")
+               and "dod_coverage: 2/2" not in proc.stdout,
+               "exit {}; output {!r}".format(
+                   proc.returncode, (proc.stdout + proc.stderr)[-3000:]))
+
+    with tempfile.TemporaryDirectory() as tmp:
+        root = shell_repo(tmp, killed())
+        evidence_dir = pathlib.Path(tmp) / "run"
+        write_product(evidence_dir / "mutations" / "evidence.json", root, [])
+        proc, record = shell_entry(root, ("scripts/lint.sh", "--only", "contracts"),
+                                   {"TAGENT_RUNTIME_EVIDENCE_DIR": str(evidence_dir)})
+        expect("the formal lint entry refuses a registry that hands its own verdicts in",
+               proc.returncode != 0
+               and told(proc, "stated only by this registry's own field")
+               and "dod_coverage: 2/2" not in proc.stdout,
+               "exit {}; output {!r}".format(
+                   proc.returncode, (proc.stdout + proc.stderr)[-3000:]))
+
+
+def test_preflight_generates_evidence_before_dod_gate():
+    """Generation, then binding, then consumption - in that order, in one run.
+
+    The binding stand-in fails unless the product is already on disk, and the DoD
+    gate is the real one reading the real product the generator wrote, so the record
+    below is a chain and not three independent calls that happen to appear nearby.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        root = shell_repo(tmp, killed(), stub_binding=True)
+        evidence_dir = pathlib.Path(tmp) / "evidence"
+        proc, record = shell_entry(root, ("scripts/preflight.sh",),
+                                   {"TAGENT_RUNTIME_EVIDENCE_DIR": str(evidence_dir)})
+        produced = steps(record, "check_event_integrity_mutations.py --all --json --out "
+                                 "{}".format(evidence_dir / "mutations"))[0]
+        bound = steps(record, "check_runtime_evidence.py")[0]
+        consumed = steps(record, "check_dod_coverage.py --mutation-evidence {}".format(
+            evidence_dir / "mutations"))[0]
+        expect("preflight generated the product before it bound the evidence",
+               produced >= 0 and bound > produced,
+               "generated at {}; bound at {}; argv {!r}".format(produced, bound, record))
+        expect("preflight bound the evidence before the DoD gate consumed it",
+               bound >= 0 and consumed > bound,
+               "bound at {}; consumed at {}; argv {!r}".format(bound, consumed, record))
+        expect("the binding step saw the product the generator had written",
+               proc.returncode == 0
+               and "binding stand-in: bundle={} product_present=True".format(evidence_dir)
+               in proc.stdout,
+               "exit {}; output {!r}".format(
+                   proc.returncode, (proc.stdout + proc.stderr)[-3000:]))
+        expect("the DoD gate proved both criteria from the product preflight produced",
+               "dod_coverage: 2/2 criteria bound and proven" in proc.stdout,
+               "output {!r}".format((proc.stdout + proc.stderr)[-3000:]))
 
 
 def main():
@@ -670,7 +1105,7 @@ def main():
         registry(bound, killed()))
 
     run("a mutation whose run is recorded as surviving is red",
-        "is recorded 'not_killed'",
+        "status 'not_killed' is not 'killed'",
         registry(bound, killed(verdict="not_killed")), mutations=registered())
 
     run("a mutation with no recorded run is red",
@@ -679,6 +1114,32 @@ def main():
     run("a verdict stated only by the registry field is red",
         "stated only by this registry's own field",
         registry(bound, killed()), mutations=registered(), evidence=False)
+
+    # The run product proves a criterion only for the tree it compiled: the verdicts
+    # are read beside the closure, and the closure is recomputed against this tree.
+    run("a run product whose tree moved after the run is red",
+        "the evidence describes another source tree",
+        registry(bound, killed()), mutations=registered(), after=drift)
+
+    run("a run product that records no closure is red",
+        "must record source_binding",
+        registry(bound, killed()), mutations=registered(), after=strip_binding)
+
+    # 报告结构不过即整份 refuse：判词既不计数，缺口也必须具名。
+    run("a run product whose control tree was not green is refused",
+        ("the control tree must be green", "registered and unproven"),
+        registry(bound, killed()), mutations=registered(),
+        after=restate_product(control_tree_green=False))
+
+    run("a run product carrying an unproven candidate is refused",
+        ("not_evidence_backed must be empty", "registered and unproven"),
+        registry(bound, killed()), mutations=registered(),
+        after=restate_product(not_evidence_backed=["candidate-01"]))
+
+    run("a run product whose kill contradicts its own record is refused",
+        ("disagrees with itself", "registered and unproven"),
+        registry(bound, killed()), mutations=registered(),
+        after=restate_first_record(verdict="not_killed"))
 
     run("a kill recorded under another assertion is red",
         "the kill belongs to another assertion",
@@ -693,6 +1154,10 @@ def main():
         "matched no file",
         registry(bound, killed(), criteria_paths=["fixture-spec/absent/design.md"]),
         mutations=registered())
+
+    test_formal_lint_consumes_bound_mutation_evidence()
+    test_formal_lint_refuses_missing_stale_or_handwritten_evidence()
+    test_preflight_generates_evidence_before_dod_gate()
 
     if FAILURES:
         for failure in FAILURES:

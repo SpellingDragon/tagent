@@ -61,8 +61,10 @@ type stateSliceWire struct {
 	// GoalOrder is the declaration order the registry had reached: the sequence the
 	// goal identities are minted in, kept apart from the event stream numbering.
 	GoalOrder int `json:"goal_order"`
-	// Goals is the goals the registry still keeps in force: the ones in flight, the
-	// rulings the gate still reads beside them.
+	// Goals is the goals the registry holds in force: the ones still in flight, the
+	// work the gate rules on. A goal whose resolution landed, or whose validity
+	// passed, is not stated — its record is the stream this cut numbers, read back
+	// when a reader asks for the goals (see GoalRegistry.List).
 	Goals []*Goal `json:"goals,omitempty"`
 	// Approvals is every request the approval book holds in force: the holds a
 	// restoration keeps and the rulings that still decide the gate.

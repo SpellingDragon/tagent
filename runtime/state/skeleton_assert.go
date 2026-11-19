@@ -226,7 +226,7 @@ var (
 // stores through, the durable implementation of the task commit port and the
 // owner resolution over the current orchestration binding.
 var (
-	_ func(durable.FactLog, task.UncertainProbe) (*DurableCommit, error) = NewDurableCommit
+	_ func(durable.FactLog, task.UncertainProbe) *DurableCommit = NewEmptyDurableCommit
 
 	_ func(*DurableCommit, context.Context, task.CommitRecord) (task.CommitResult, error) = (*DurableCommit).Commit
 	_ func(*DurableCommit, context.Context, event.TaskID, task.Spec) error                = (*DurableCommit).Declare

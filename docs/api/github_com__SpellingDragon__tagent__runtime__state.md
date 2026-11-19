@@ -256,14 +256,6 @@ func GenLeaseKey(gen Generation, consumer string) string
     generation-scoped consumer: the generation the candidate publishes beside
     the consumer's registered name, in the frozen form "gen:<id>:<consumer>".
 
-func NewDurableCommit(log durable.FactLog, uncertain task.UncertainProbe) (*DurableCommit, error)
-    NewDurableCommit returns a DurableCommit over one fact log and loads every
-    fact and consumption receipt the log already holds, so a second process
-    over the same log sees exactly the facts the first one committed and owes no
-    delivery for a notice that process already consumed. uncertain, when it is
-    not nil, marks matching commit attempts as uncertain, so all three commit
-    outcomes stay observable.
-
 func NewStatePlan(plan OrgPlan, agents map[event.AgentID]AgentBinding, leases []LeaseRef) (StatePlan, error)
     NewStatePlan instantiates the candidate StatePlan of one configuration
     change: the Agents map is keyed by the identity of every declared agent,
@@ -626,9 +618,9 @@ func NewEmptyDurableCommit(log durable.FactLog, uncertain task.UncertainProbe) *
     NewEmptyDurableCommit answers the commit of one fact log with no record read
     into it: every table is empty and the caller states the account afterwards
     through Seat, which reads the account a checkpoint states instead of the
-    durable prefixes of the whole history. A boot that holds a checkpoint reads
-    it that way; NewDurableCommit is the entry for a caller that holds none and
-    pays the whole log.
+    durable prefixes of the whole history. A boot that holds a checkpoint
+    reads it that way; a boot that holds none seats beside no payload, and that
+    fallback reads the whole log.
 
 func (d *DurableCommit) Accept(ctx context.Context, notice task.Notice) (task.DeliveryAcceptance, error)
     Accept advances the delivery state of one notification to accepted.
@@ -1574,17 +1566,31 @@ func (r *StateRegistry) PendingRestore() []string
 
 func (r *StateRegistry) Reduce(ctx context.Context, evt event.Event) error
     Reduce folds one committed fact into the derived state of every mounted
-    holder that derives its state from facts, in registration order,
-    and answers the first refusal by the holder that made it. An unapplied fact
-    prevents a checkpoint of its state until a later successful pass over that
-    identity resolves the refusal. Holders without a reducer face are not asked;
-    no observation driver is invoked.
+    holder that derives its state from facts, in registration order, and answers
+    the first refusal by the holder that made it. An unapplied fact prevents a
+    checkpoint of its state until a later successful pass over that identity
+    resolves the refusal. A pass clears only the refusal it read when it began,
+    so a refusal recorded during that pass stands. Holders without a reducer
+    face are not asked; no observation driver is invoked.
 
-func (r *StateRegistry) Register(holder Stateful) (func(), error)
+func (r *StateRegistry) ReduceRepeat(ctx context.Context, evt event.Event) error
+    ReduceRepeat folds one fact the chain already carries into the derived
+    state of every mounted holder, under the same order and the same refusal
+    account Reduce keeps. A holder that declares the repeat face is told the
+    fact repeats one the chain holds, so a sequence is not asked to state an
+    identity twice; every other holder is folded as a filing commit folds it,
+    because a fold idempotent by the identity the fact carries answers the same
+    state either way.
+
+func (r *StateRegistry) Register(holder Stateful) (func() error, error)
     Register mounts one holder and answers the disposer that unmounts it. A
     holder naming no state and a name already mounted refuse the registration by
     name, so a wiring mistake stops the assembly instead of silently overwriting
-    a slice another consumer owns.
+    a slice another consumer owns. The disposer refuses by name while the
+    holder declares unfinished work: the obligations are the slice's own,
+    and unmounting it would state them nowhere, so the holder keeps the name,
+    the state and the accounts until it settles. A slice that owes nothing
+    leaves as it registered.
 
 func (r *StateRegistry) RestoreEmptyState(ctx context.Context) error
     RestoreEmptyState restores every mounted holder from the state a cut

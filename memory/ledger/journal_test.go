@@ -2345,6 +2345,99 @@ func TestJournalTornTailStatesZeroBytesThatAreNotWholeLog(t *testing.T) {
 	}
 }
 
+// TestJournalReplayStatesAZeroFillTailAsTornAndRefusesAFillItResumesPast pins zero-fill tail cuts.
+//   - both faces open a fill spanning a header or a page as the torn tail, and the writing view cuts it
+//   - the index rebuilds over that prefix and reads the last whole frame, so no consumer meets a frame with no object
+//   - a fill resumed by a committed frame is refused through both faces, and neither face cuts the bytes behind it
+//
+// 契约: docs/wiki/memory/memory-architecture.md#local-file-kv
+func TestJournalReplayStatesAZeroFillTailAsTornAndRefusesAFillItResumesPast(t *testing.T) {
+	frames := journalFrameOf(journalTestPayload(t, journalPut{Key: "0:evt:00001", Value: []byte("first")}))
+	for _, fill := range []struct {
+		name  string
+		bytes int
+	}{
+		{name: "a_whole_zero_header", bytes: journalFrameHeaderBytes},
+		{name: "a_zero_page", bytes: 4096},
+	} {
+		t.Run("torn_tail_"+fill.name, func(t *testing.T) {
+			dir := t.TempDir()
+			journalTestWriteLogBytes(t, dir, append(append([]byte{}, frames...), make([]byte, fill.bytes)...))
+			reader, err := openJournalView(dir, false)
+			if err != nil {
+				t.Fatalf("open the reading view over the fill: %v", err)
+			}
+			assertTornTail(t, "the reading view", reader, int64(len(frames)), true)
+			if err := reader.Close(); err != nil {
+				t.Fatalf("close the reading view: %v", err)
+			}
+			writer, err := openJournalView(dir, true)
+			if err != nil {
+				t.Fatalf("open the writing view over the fill: %v", err)
+			}
+			assertTornTail(t, "the writing view", writer, int64(len(frames)), true)
+			if writer.log.size != int64(len(frames)) {
+				t.Fatalf("the writing view serves %d byte(s), want the %d the last whole frame ends at", writer.log.size, len(frames))
+			}
+			if err := writer.Close(); err != nil {
+				t.Fatalf("close the writing view: %v", err)
+			}
+			kept, err := os.ReadFile(filepath.Join(dir, journalFileName))
+			if err != nil {
+				t.Fatalf("read the log after the writing view: %v", err)
+			}
+			if !bytes.Equal(kept, frames) {
+				t.Fatalf("the log holds %d byte(s) after the writing view, want the %d the last whole frame ends at", len(kept), len(frames))
+			}
+			log, err := openJournalLog(dir)
+			if err != nil {
+				t.Fatalf("open the journal of the rebuilt root: %v", err)
+			}
+			if err := log.openAddressIndex(true); err != nil {
+				log.close()
+				t.Fatalf("open the addressable index over the committed prefix: %v", err)
+			}
+			value, held, err := log.addr.read("0:evt:00001")
+			if err != nil || !held || string(value) != "first" {
+				log.close()
+				t.Fatalf("the addressable index read %q (held=%v err=%v), want the record the log holds whole", value, held, err)
+			}
+			if err := log.close(); err != nil {
+				t.Fatalf("close the journal: %v", err)
+			}
+		})
+	}
+
+	t.Run("fill_resumed_by_a_frame", func(t *testing.T) {
+		dir := t.TempDir()
+		body := append(append(append([]byte{}, frames...), make([]byte, journalFrameHeaderBytes)...), frames...)
+		journalTestWriteLogBytes(t, dir, body)
+		for _, face := range []struct {
+			name        string
+			writeRights bool
+		}{
+			{name: "the reading view"},
+			{name: "the writing view", writeRights: true},
+		} {
+			view, err := openJournalView(dir, face.writeRights)
+			if err == nil {
+				view.Close()
+				t.Fatalf("%s admits a log whose zero fill is resumed by a committed frame", face.name)
+			}
+			if !errors.Is(err, ErrJournalCorrupt) {
+				t.Fatalf("%s refuses that log as %v, want ErrJournalCorrupt", face.name, err)
+			}
+			kept, err := os.ReadFile(filepath.Join(dir, journalFileName))
+			if err != nil {
+				t.Fatalf("read the log after %s refused it: %v", face.name, err)
+			}
+			if !bytes.Equal(kept, body) {
+				t.Fatalf("%s cut %d byte(s) of a log it refused, want the %d byte(s) the writer left", face.name, len(body)-len(kept), len(body))
+			}
+		}
+	})
+}
+
 // assertTornTail requires one view to answer the torn tail a case states, naming the view
 // that answered.
 func assertTornTail(t *testing.T, face string, view *journalKV, want int64, torn bool) {
@@ -3000,4 +3093,215 @@ func TestSlotScanBytesFollowsTheTableNotTheAnswer(t *testing.T) {
 	t.Logf("zero-hit enumerations read %d byte(s) of the %d-slot table and %d of the %d-slot table",
 		small.log.addr.capacity*small.log.addr.stride, small.log.addr.capacity,
 		large.log.addr.capacity*large.log.addr.stride, large.log.addr.capacity)
+}
+
+// journalBarrierState is what one view states it still owes at one moment: the log
+// bytes appended since the last barrier over them, the index bytes written since
+// the last barrier over them, and the commit rank and watermark the index files
+// state. Those are the two durable points one commit stands behind, so a reading
+// taken around a commit names the point its barrier covered — or failed at —
+// instead of inferring a phase from how many barriers the process took in all.
+type journalBarrierState struct {
+	logUnsynced    int64
+	indexStaged    int64
+	indexStagedLog int64
+	seq            int64
+	statedSeq      int64
+}
+
+// journalBarrierStateOf reads what the view states it owes. The read takes the
+// view's own lock, which a commit holds while it appends, confirms and takes its
+// barriers, so one reading is one moment of that path rather than a count of the
+// barriers it took.
+func journalBarrierStateOf(kv *journalKV) journalBarrierState {
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+	state := journalBarrierState{}
+	if kv.log == nil {
+		return state
+	}
+	state.logUnsynced = kv.log.unsynced
+	addr := kv.log.addr
+	if addr == nil {
+		return state
+	}
+	state.indexStaged, state.indexStagedLog = addr.staged, addr.stagedLog
+	state.seq, state.statedSeq = addr.seq, addr.statedSeq
+	return state
+}
+
+// journalBarrierPhase names the durable points a commit's barrier covered, read
+// from what the engine states behind it: the log's barrier leaves nothing
+// unsynced, and the barrier over the index files leaves nothing staged for the
+// next one.
+func journalBarrierPhase(after journalBarrierState) string {
+	covered := make([]string, 0, 2)
+	if after.logUnsynced == 0 {
+		covered = append(covered, "log")
+	}
+	if after.indexStaged == 0 && after.indexStagedLog == 0 {
+		covered = append(covered, "index")
+	}
+	if len(covered) == 0 {
+		return "none"
+	}
+	return strings.Join(covered, "+")
+}
+
+// journalBarrierFailure names the durable point a failed commit's barrier belongs
+// to: the log while the bytes it appended stand unsynced, and the index files once
+// the log's own barrier returned under them.
+func journalBarrierFailure(after journalBarrierState) string {
+	if after.logUnsynced > 0 {
+		return "log"
+	}
+	return "index"
+}
+
+// journalFailingBarrier answers the writing end of a pipe, which accepts the bytes
+// a view writes through it and refuses the barrier over them: that is the failure
+// a device reports when it took the write and lost the sync, and it is the one
+// failure a fixture can hand the barrier itself instead of a wrapper in front of
+// it.
+func journalFailingBarrier(t *testing.T) *os.File {
+	t.Helper()
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("open the pipe a barrier fails over: %v", err)
+	}
+	t.Cleanup(func() { reader.Close(); writer.Close() })
+	return writer
+}
+
+// TestCommitBarrierMeasurementNamesItsPhase pins the durable points one commit's barrier covered, read from the engine's own state.
+//   - a commit inside both budgets pays the log's barrier alone: nothing stands unsynced and the index bytes it wrote stand staged
+//   - a commit whose appended bytes cross the log budget pays the log's barrier and the index files' barrier in one call, so neither is owed behind it
+//   - a commit whose log barrier fails is named the log's: its bytes stand unsynced, the index files stated no commit for it, the failure is the barrier's own
+//   - a commit whose index barrier fails is named the index's: the log's barrier returned under it and the statement it wrote was rolled back to the watermark
+//
+// 契约: docs/wiki/memory/memory-architecture.md#local-file-kv
+func TestCommitBarrierMeasurementNamesItsPhase(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("a_commit_inside_both_budgets_pays_the_logs_barrier_alone", func(t *testing.T) {
+		kv, err := openJournalKV(t.TempDir())
+		if err != nil {
+			t.Fatalf("open the journal view: %v", err)
+		}
+		t.Cleanup(func() { kv.log.close() })
+		batch := Batch{Puts: []Pair{{Key: journalFactKey, Value: []byte("the settled fact")}}}
+		if err := kv.Commit(ctx, batch); err != nil {
+			t.Fatalf("commit the fact: %v", err)
+		}
+		after := journalBarrierStateOf(kv)
+		if phase := journalBarrierPhase(after); phase != "log" {
+			t.Fatalf("the commit covered the %q barrier, want the log's alone: the barrier over the index files waits for its budget", phase)
+		}
+		if after.indexStaged <= 0 || after.indexStagedLog <= 0 {
+			t.Fatalf("the commit left %d index byte(s) and %d staged log byte(s) for the index files, want the bytes its statement and frame owe them",
+				after.indexStaged, after.indexStagedLog)
+		}
+	})
+
+	t.Run("a_commit_past_the_log_budget_pays_the_index_barrier_beside_it", func(t *testing.T) {
+		kv, err := openJournalKV(t.TempDir())
+		if err != nil {
+			t.Fatalf("open the journal view: %v", err)
+		}
+		t.Cleanup(func() { kv.log.close() })
+		value := bytes.Repeat([]byte("v"), journalLogSyncBytes)
+		batch := Batch{Puts: []Pair{{Key: journalFactKey, Value: value}}}
+		if err := kv.Commit(ctx, batch); err != nil {
+			t.Fatalf("commit the fact that crosses the log budget: %v", err)
+		}
+		after := journalBarrierStateOf(kv)
+		if phase := journalBarrierPhase(after); phase != "log+index" {
+			t.Fatalf("the commit that crossed the log budget covered the %q barrier, want the log's and the index files'", phase)
+		}
+		if after.seq != 1 {
+			t.Fatalf("the index states %d commit(s) behind the barrier, want the one it stated", after.seq)
+		}
+	})
+
+	t.Run("a_failed_log_barrier_is_named_the_logs", func(t *testing.T) {
+		kv, err := openJournalKV(t.TempDir())
+		if err != nil {
+			t.Fatalf("open the journal view: %v", err)
+		}
+		t.Cleanup(func() { kv.log.close() })
+		before := journalBarrierStateOf(kv)
+		writer := journalFailingBarrier(t)
+		kv.mu.Lock()
+		previous := kv.log.file
+		kv.log.file = writer
+		kv.mu.Unlock()
+		t.Cleanup(func() {
+			kv.mu.Lock()
+			kv.log.file = previous
+			kv.mu.Unlock()
+		})
+		batch := Batch{Puts: []Pair{{Key: journalFactKey, Value: []byte("the settled fact")}}}
+		err = kv.Commit(ctx, batch)
+		if !errors.Is(err, ErrJournalBarrier) {
+			t.Fatalf("commit beside a writer that took the frame and refused the barrier = %v, want %v", err, ErrJournalBarrier)
+		}
+		if !errors.Is(err, ErrCommitUncertain) {
+			t.Fatalf("commit beside a failed log barrier = %v, want %v: the log's own state is the one the process cannot name", err, ErrCommitUncertain)
+		}
+		after := journalBarrierStateOf(kv)
+		if phase := journalBarrierPhase(after); phase != "none" {
+			t.Fatalf("the failed commit covered the %q barrier, want none", phase)
+		}
+		if where := journalBarrierFailure(after); where != "log" {
+			t.Fatalf("the failed commit names the %q barrier, want the log's: the frame it appended stands unsynced", where)
+		}
+		if after.indexStaged != before.indexStaged {
+			t.Fatalf("the log's failed barrier left %d index byte(s) written, want the %d the index files held: a failed log barrier states no commit",
+				after.indexStaged, before.indexStaged)
+		}
+		if after.seq != before.seq {
+			t.Fatalf("the failed commit left the index at rank %d, want the %d it held", after.seq, before.seq)
+		}
+	})
+
+	t.Run("a_failed_index_barrier_is_named_the_indexs", func(t *testing.T) {
+		kv, err := openJournalKV(t.TempDir())
+		if err != nil {
+			t.Fatalf("open the journal view: %v", err)
+		}
+		t.Cleanup(func() { kv.log.close() })
+		before := journalBarrierStateOf(kv)
+		writer := journalFailingBarrier(t)
+		kv.mu.Lock()
+		previous := kv.log.addr.order
+		kv.log.addr.order = writer
+		kv.mu.Unlock()
+		t.Cleanup(func() {
+			kv.mu.Lock()
+			kv.log.addr.order = previous
+			kv.mu.Unlock()
+		})
+		value := bytes.Repeat([]byte("v"), journalLogSyncBytes)
+		batch := Batch{Puts: []Pair{{Key: journalFactKey, Value: value}}}
+		err = kv.Commit(ctx, batch)
+		if !errors.Is(err, ErrJournalBarrier) {
+			t.Fatalf("commit whose index barrier failed = %v, want %v", err, ErrJournalBarrier)
+		}
+		if !errors.Is(err, ErrCommitUncertain) {
+			t.Fatalf("commit whose index barrier failed = %v, want %v", err, ErrCommitUncertain)
+		}
+		after := journalBarrierStateOf(kv)
+		if phase := journalBarrierPhase(after); phase != "log" {
+			t.Fatalf("the commit covered the %q barrier, want the log's alone: its index bytes stand staged behind a failed barrier", phase)
+		}
+		if where := journalBarrierFailure(after); where != "index" {
+			t.Fatalf("the failed commit names the %q barrier, want the index files': the log's barrier returned under it", where)
+		}
+		if after.seq != before.seq {
+			t.Fatalf("the failed index barrier left the index at rank %d, want the %d it rolled back to", after.seq, before.seq)
+		}
+		if after.statedSeq != before.statedSeq {
+			t.Fatalf("the failed index barrier left the watermark at %d, want the %d it stated", after.statedSeq, before.statedSeq)
+		}
+	})
 }

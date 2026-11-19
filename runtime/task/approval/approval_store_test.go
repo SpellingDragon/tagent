@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 
@@ -259,5 +260,142 @@ func TestSeatedBookBindsBeforeItReadsTheDirectory(t *testing.T) {
 	}
 	if got := seated.Pending(); len(got) != 1 || got[0].ID != "seat-hold" {
 		t.Fatalf("the bound book answers %+v, want the hold its registration filed", got)
+	}
+}
+
+// TestSettledApprovalsStayReadableWithoutResidentEvidence pins what a bound book keeps beside growing history.
+//   - positive: a bound book states and keeps the obligations still open however many requests it settled
+//   - negative: the fixture grows the history it measures, so the constant resident set is a bounded book and not an empty store
+//   - consumer: ApprovalManager.Lookup is the read the production gate rules a critical call through, and Decide the approver's answers
+//
+// 契约: docs/wiki/agent/governance-enforcement.md#approval-channel
+func TestSettledApprovalsStayReadableWithoutResidentEvidence(t *testing.T) {
+	ctx := context.Background()
+	nowMs := time.Now().UnixMilli()
+	clock := func() time.Time { return time.UnixMilli(nowMs) }
+	store := newFactStore()
+	book := NewApprovalManager(t.TempDir(), time.Hour, WithApprovalClock(clock), WithApprovalRescanInterval(0))
+	if err := book.BindAttention(ctx, store); err != nil {
+		t.Fatalf("bind the durable face: %v", err)
+	}
+	args := func(round int) []byte { return []byte(fmt.Sprintf(`{"cmd":"settle-%d"}`, round)) }
+	identity := func(round int) string { return fmt.Sprintf("settled-%02d", round) }
+	if _, err := book.Request(ctx, "open-hold", "shell_exec", []byte(`{"cmd":"open"}`),
+		plugin.RiskCritical, "no-deploy", "critical risk awaits approval"); err != nil {
+		t.Fatalf("register the open hold: %v", err)
+	}
+	stated := func(t *testing.T, book *ApprovalManager) []ApprovalRequest {
+		t.Helper()
+		held, _ := book.SnapshotEvidence()
+		return held
+	}
+	resident := func(book *ApprovalManager) int {
+		book.mu.RLock()
+		defer book.mu.RUnlock()
+		return len(book.evidence)
+	}
+	if got := stated(t, book); len(got) != 1 || got[0].ID != "open-hold" {
+		t.Fatalf("stated approvals before any ruling = %+v, want the one obligation still open", got)
+	}
+
+	const settledRounds = 5
+	for round := 0; round < settledRounds; round++ {
+		if _, err := book.Request(ctx, identity(round), "shell_exec", args(round),
+			plugin.RiskCritical, "no-deploy", "critical risk awaits approval"); err != nil {
+			t.Fatalf("register the request of round %d: %v", round, err)
+		}
+		if _, err := book.Decide(identity(round), ApprovalDenied, testApprovalApprover); err != nil {
+			t.Fatalf("rule the request of round %d denied: %v", round, err)
+		}
+		if got := stated(t, book); len(got) != 1 || got[0].ID != "open-hold" {
+			t.Fatalf("stated approvals after %d rulings = %+v, want the one obligation still open: a cut costs the work still owed",
+				round+1, got)
+		}
+		if got := resident(book); got != 1 {
+			t.Fatalf("resident requests after %d rulings = %d, want the one obligation still open: a ruled request is read from the chain that ruled it",
+				round+1, got)
+		}
+	}
+
+	store.mu.Lock()
+	facts, records := 0, 0
+	for key := range store.stored {
+		if strings.HasPrefix(key, attentionFactPrefix) {
+			facts++
+		}
+		if strings.HasPrefix(key, approvalRequestPrefix) {
+			records++
+		}
+	}
+	store.mu.Unlock()
+	if facts != 2*settledRounds+1 || records != settledRounds+1 {
+		t.Fatalf("the store holds %d attention facts and %d request records, want the question of the open hold, one question and one answer per ruling and one record per identity: the fixture did not grow the history it measures",
+			facts, records)
+	}
+
+	restarted := NewApprovalManager(t.TempDir(), time.Hour, WithApprovalClock(clock), WithApprovalRescanInterval(0))
+	if err := restarted.BindAttention(ctx, store); err != nil {
+		t.Fatalf("bind the durable face of the restarted book: %v", err)
+	}
+	if got := restarted.Pending(); len(got) != 1 || got[0].ID != "open-hold" {
+		t.Fatalf("the restarted waiting face = %+v, want the one obligation still open", got)
+	}
+	if got := stated(t, restarted); len(got) != 1 || got[0].ID != "open-hold" {
+		t.Fatalf("stated approvals beside the restarted book = %+v, want the one obligation still open", got)
+	}
+	if got := resident(restarted); got != 1 {
+		t.Fatalf("resident requests beside the restarted book = %d, want the one obligation still open", got)
+	}
+
+	last := settledRounds - 1
+	repeat, err := restarted.Decide(identity(last), ApprovalApproved, "a-later-approver")
+	if err != nil {
+		t.Fatalf("the ruled identity %s no longer resolves after the restart: %v — the cut states the obligations still open, so the ruling is read back from the chain by the identity it was filed under",
+			identity(last), err)
+	}
+	if repeat.Status != ApprovalDenied || repeat.DecidedBy != testApprovalApprover {
+		t.Fatalf("the restarted book answers the identity %s with %s by %q, want the refusal the person stated",
+			identity(last), repeat.Status, repeat.DecidedBy)
+	}
+	seen := restarted.Lookup("shell_exec", ArgsDigest(args(last)))
+	if seen == nil || seen.ID != identity(last) || seen.Status != ApprovalDenied {
+		t.Fatalf("the gate reads %+v for the refused arguments, want the refusal named under %s: a restart that answered nothing would mint a request nobody was asked for",
+			seen, identity(last))
+	}
+	if got := resident(restarted); got != 1 {
+		t.Fatalf("resident requests beside a book that read two rulings back = %d, want the one obligation still open: reading a ruling back never seats the history",
+			got)
+	}
+	if got := stated(t, restarted); len(got) != 1 || got[0].ID != "open-hold" {
+		t.Fatalf("stated approvals after two rulings were read back = %+v, want the one obligation still open", got)
+	}
+
+	besideNoFace := NewApprovalManager(t.TempDir(), time.Hour, WithApprovalClock(clock), WithApprovalRescanInterval(0))
+	if _, err := besideNoFace.Request(ctx, "face-less-hold", "shell_exec", []byte(`{"cmd":"face-less"}`),
+		plugin.RiskCritical, "no-deploy", "critical risk awaits approval"); err != nil {
+		t.Fatalf("register the hold of the face-less book: %v", err)
+	}
+	if _, err := besideNoFace.Decide("face-less-hold", ApprovalDenied, testApprovalApprover); err != nil {
+		t.Fatalf("rule the hold of the face-less book denied: %v", err)
+	}
+	statedBesideNoFace, keysBesideNoFace := besideNoFace.SnapshotEvidence()
+	if len(statedBesideNoFace) != 1 || statedBesideNoFace[0].Status != ApprovalDenied {
+		t.Fatalf("the face-less book states %+v, want the ruling: a book beside no durable face has the cut alone as its record", statedBesideNoFace)
+	}
+	migrated := NewApprovalManager(t.TempDir(), time.Hour, WithApprovalClock(clock), WithApprovalRescanInterval(0))
+	if err := migrated.BindAttention(ctx, store); err != nil {
+		t.Fatalf("bind the durable face of the migrated book: %v", err)
+	}
+	if err := migrated.RestoreEvidence(ctx, statedBesideNoFace, keysBesideNoFace); err != nil {
+		t.Fatalf("restore the cut of the face-less book: %v", err)
+	}
+	for _, held := range stated(t, migrated) {
+		if held.Status == ApprovalDenied || held.Status == ApprovalApproved {
+			t.Fatalf("the migrated book states the ruled request %s, want the obligations still open alone: a book that reached the chain reads its rulings back instead of carrying them",
+				held.ID)
+		}
+	}
+	if seen := migrated.Lookup("shell_exec", ArgsDigest([]byte(`{"cmd":"face-less"}`))); seen == nil || seen.ID != "face-less-hold" || seen.Status != ApprovalDenied {
+		t.Fatalf("the migrated book reads %+v for the ruled arguments, want the refusal the face-less book stated", seen)
 	}
 }

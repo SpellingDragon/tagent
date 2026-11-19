@@ -326,6 +326,26 @@ func consumerWarn(format string, args ...any) {
 	logger.Warnf(format, args...)
 }
 
+// consumerError renders one line of the consumer face at ERROR beside a fact the
+// commit face refused where the absence of that fact changes what the run does
+// rather than only what it can be audited for: the delivery fact of a call is
+// the record three read faces answer from, so a run that carries on without it
+// drives a result the chain never names. The bypass discipline of the consumer
+// face applies to this line too.
+//
+// The redline list (3 rules):
+// MUST stay a bypass: a failing logger is a missing line, never a failed drive.
+// MUST carry the named cause beside the identity of the fact family it belongs to.
+// MUST NOT render transcript, message or tool-output content.
+func consumerError(format string, args ...any) {
+	logger := frameworkLogger()
+	if logger == nil {
+		return
+	}
+	defer func() { _ = recover() }()
+	logger.Errorf(format, args...)
+}
+
 // Backflow admits one notification of a call into the range of the invocation
 // that issued that call, so it drives that range's next decision and no other. A
 // progress notification commits as a notice fact of that range and nothing
@@ -347,14 +367,17 @@ func consumerWarn(format string, args ...any) {
 //
 // - The wake names the fact only while the task is not awaited by a flying segment and not already consumed: an awaited result is paired by that segment's harvest, and a consumed one drives nothing, so neither is read twice.
 // - A loop that drives no set keeps its backflow parked in the intake; a set that carries no instance for the address wakes nothing and starts none.
-func (l *Loop) Backflow(invocationID event.InvocationID, notice task.Notice) {
+// - A delivery fact the commit face refuses is reported to the caller beside the handover that stands anyway: the result reaches the intake of the range in this process, and the record of that handover is the one thing the chain is missing, so the caller holding the notification keeps it owed rather than recording a consumption for a hand-over no fact names.
+// - The refusal is reported at ERROR, because a run that drives the result beside no delivery fact answers three read faces — the replay fold, the call identity, the host delivery record — with material the chain does not carry.
+// - A refused progress fact answers no caller and is reported here alone: no notification is owed for a report of the pipeline's own rounds, so a progress report never reaches the return below.
+func (l *Loop) Backflow(invocationID event.InvocationID, notice task.Notice) error {
 	switch notice.Kind {
 	case task.NoticeProgress:
 		l.commitProgressFact(invocationID, notice)
-		return
+		return nil
 	case task.NoticeSettled, task.NoticeFailed, task.NoticeCancelled:
 	default:
-		return
+		return nil
 	}
 	msg := model.Message{Role: model.RoleTool}
 	if l.facts != nil {
@@ -370,12 +393,13 @@ func (l *Loop) Backflow(invocationID event.InvocationID, notice task.Notice) {
 	}
 	key, commitErr := l.commitSettled(context.Background(), invocationID, addr, notice, delivery)
 	if commitErr != nil {
-		consumerWarn("tagent: the delivery fact of task %s did not commit: %v", notice.TaskID, commitErr)
+		consumerError("tagent: the delivery fact of task %s did not commit: %v", notice.TaskID, commitErr)
 	}
 	in.deliver(notice.TaskID, delivered{msg: msg, fact: notice.Event})
 	if consumers := l.drivingSet(); consumers != nil {
 		consumers.wakeFact(addr, key)
 	}
+	return commitErr
 }
 
 // WakeAddress ensures the resident Consumer of one address and signals that facts

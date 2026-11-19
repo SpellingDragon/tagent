@@ -21,17 +21,17 @@
 
 ## 本轮补差（R265）
 
-- [ ] **05.R4 未加载历史收据与重复生成的联合闭环**。产出：辨明已结任务未预装时，旧信箱载荷如何判断已消费；先复现R10197两次生成的真实切点，证明或驳回`DurableCommit.settled()`只查内存是该现场根因，不从源码疑点直接裁修法。前置：11事实结果与12.R2共享失败语义；不依赖12.R3。写面：`runtime/state/durable.go`、`runtime/state/durable_test.go`、`assembly/checkpoint_test.go`、`examples/wechat-bot/smoke_test.go`、`examples/wechat-bot/smoke_harness_test.go`；与12/04相交时同单或串行，不新增第二份已消费真相。正/负锚（拟新增、未运行）：`go test ./runtime/state -run '^(TestUnloadedSettledReceiptStaysSettled|TestUnloadedOwedReceiptRemainsOwed)$' -count=10 -race -v`，按身份读取历史仍已结、真正未结仍欠账。消费者锚归12.R2的`TestRedeliveredNoticeAfterRestartSettlesOnce`，同一测试单一拥有者；实际重启后再次到达不产生第二收据或第二结算轮。原1.4、05.R2体积/加载量正负锚同时保持，不靠恢复预装全历史换取正确性。最终由独立审者核切点、数据来源与最终候选证据。
+- [x] 05.R4 未加载历史收据与重复生成的联合闭环。产出：辨明已结任务未预装时，旧信箱载荷如何判断已消费；先复现R10197两次生成的真实切点，证明或驳回`DurableCommit.settled()`只查内存是该现场根因，不从源码疑点直接裁修法。前置：11事实结果与12.R2共享失败语义；不依赖12.R3。写面：`runtime/state/durable.go`、`runtime/state/durable_test.go`、`assembly/checkpoint_test.go`、`examples/wechat-bot/smoke_test.go`、`examples/wechat-bot/smoke_harness_test.go`；与12/04相交时同单或串行，不新增第二份已消费真相。正/负锚（拟新增、未运行）：`go test ./runtime/state -run '^(TestUnloadedSettledReceiptStaysSettled|TestUnloadedOwedReceiptRemainsOwed)$' -count=10 -race -v`，按身份读取历史仍已结、真正未结仍欠账。消费者锚归12.R2的`TestRedeliveredNoticeAfterRestartSettlesOnce`，同一测试单一拥有者；实际重启后再次到达不产生第二收据或第二结算轮。原1.4、05.R2体积/加载量正负锚同时保持，不靠恢复预装全历史换取正确性。最终由独立审者核切点、数据来源与最终候选证据。
 
 # 本轮重整孙任务（05.R1 / 05.R2）
 
 > **阶段状态**：只规划、不实施。下列行登记验收面与实施期文件白名单；标「拟新增、尚未建立」的测试今天不存在，不得写作 passed。
 > verify 三要素随任务行冻结（R29）；**前置链**：05.R1 → G2（与 07.R1、12.R1 共用判据表）→ 05.R2（另依 11.R2 的事实提交结果）。共同门：每叶结账前 `go build ./...` exit 0（build/test 与 commit 永不串联），`go test` 命令 exit 0 且命中用例数 > 0。
 
-- [ ] **05.R1 设计门 G2（任务域）：有效集 / 判重身份保留边界 / 乱序完成 / 与 11 的衔接** —— 交付（全部落本域 design.md，不新增文件）：§八 四问逐条给出「判据 + 反例 + 可复跑命令」，产出与 07.R1/12.R1 合并的**一张**判据表；实施期文件白名单（候选）：只写 `assembly/task_account_size_anchor_test.go`（拟新增）与 `runtime/state/task_account_size_test.go`（拟新增）＋本域 `design.md`/`tasks.md`；**只读**：`runtime/state/durable.go`、`runtime/task/checkpoint.go`、`assembly/{checkpoint,task_checkpoint,run}.go`、`runtime/state/mailbox.go`；**禁写**生产代码、`openspec/specs/**`、`scripts/gates/**`、`golden/**`、`memory/ledger/**`、外来未跟踪文件。
+- [ ] 05.R1 设计门 G2（任务域）：有效集 / 判重身份保留边界 / 乱序完成 / 与 11 的衔接 —— 交付（全部落本域 design.md，不新增文件）：§八 四问逐条给出「判据 + 反例 + 可复跑命令」，产出与 07.R1/12.R1 合并的**一张**判据表；实施期文件白名单（候选）：只写 `assembly/task_account_size_anchor_test.go`（拟新增）与 `runtime/state/task_account_size_test.go`（拟新增）＋本域 `design.md`/`tasks.md`；**只读**：`runtime/state/durable.go`、`runtime/task/checkpoint.go`、`assembly/{checkpoint,task_checkpoint,run}.go`、`runtime/state/mailbox.go`；**禁写**生产代码、`openspec/specs/**`、`scripts/gates/**`、`golden/**`、`memory/ledger/**`、外来未跟踪文件。
   验证：正锚（拟新增、尚未建立，今天必红）`go test ./assembly/ -run '^TestTaskAccountStatedSizeTracksLiveWork$' -count=1`（同任务数、已结收据递增 N 代，切面陈述条目/字节不随已结收据线性增长；失败信息须点名「每任务遍历全库 map」的实测计数）；负锚（拟新增、尚未建立；**原名 `TestTaskSliceRefusesToDropAReceiptOfAnOwedNotice` 已按 R68 退役——重定后的两枚锚见下方「05.R2 执行记录（冻结锚重定）」**）`go test ./runtime/task/ -run '^(TestTaskSliceReadsBackTheReceiptItDoesNotState|TestTaskSliceTrustsAStatedEmptyReceiptSet)$' -count=1`（省略收据族 → 座后不得重新欠账且收据从链读回；陈述空集而链上有 → 账户信任陈述；红转绿后须 exit 0）；消费者锚（既有，须保持绿）`go test ./runtime/state/ -run '^(TestDurableLoadReadsTheTaskSlice|TestDurableLoadRefusesAMismatchedReceiptIdentity)$' -count=1`（runtime/state/durable_seat_test.go:57/:108）＋ `go test ./runtime/task/ -run '^(TestTaskSliceStatesTheSettleAccount|TestRegistryCheckpointStatesTheAccountNotTheHistory)$' -count=1`（runtime/task/checkpoint_test.go:278/:178）。
 
-- [ ] **05.R2 清减与恢复一致实现（依 G2 + 11.R2）** —— 交付：按 G2 择定实现经批准的候选（推荐甲：按任务键索引；乙仅在甲或等价索引存在时可用），使 `ReceiptsOf` 与切面收据陈述成本＝O(该任务收据)；清减判据写成「按身份判重仍可答」，MUST NOT 用 TTL 删除未完义务、MUST NOT 删三族；恢复侧沿用 `Seat`（切片入表＋尾段）/无切片整份读，并保持与运行期 `Commit` 同一记录应用路径。实施期文件白名单（候选）：`runtime/state/durable.go`、`runtime/task/checkpoint.go`、新增 `runtime/state/durable_receipts_index_test.go`、新增 `runtime/task/checkpoint_size_test.go`、本域 `design.md`/`tasks.md`；**禁写**：`assembly/run.go`（02/05 簇）、`assembly/checkpoint.go`（12.R2 在改，同触须串行或合单）、`memory/ledger/**`（06/08）、`features/evolution/governance/**`（07）、`openspec/specs/**`、`golden/**`。
+- [ ] 05.R2 清减与恢复一致实现（依 G2 + 11.R2） —— 交付：按 G2 择定实现经批准的候选（推荐甲：按任务键索引；乙仅在甲或等价索引存在时可用），使 `ReceiptsOf` 与切面收据陈述成本＝O(该任务收据)；清减判据写成「按身份判重仍可答」，MUST NOT 用 TTL 删除未完义务、MUST NOT 删三族；恢复侧沿用 `Seat`（切片入表＋尾段）/无切片整份读，并保持与运行期 `Commit` 同一记录应用路径。实施期文件白名单（候选）：`runtime/state/durable.go`、`runtime/task/checkpoint.go`、新增 `runtime/state/durable_receipts_index_test.go`、新增 `runtime/task/checkpoint_size_test.go`、本域 `design.md`/`tasks.md`；**禁写**：`assembly/run.go`（02/05 簇）、`assembly/checkpoint.go`（12.R2 在改，同触须串行或合单）、`memory/ledger/**`（06/08）、`features/evolution/governance/**`（07）、`openspec/specs/**`、`golden/**`。
   验证：正锚（拟新增、尚未建立）`go test ./assembly/ -run '^TestTaskAccountStatedSizeTracksLiveWork$' -count=1` 须由红转绿；另 `TestSettledTaskStateStaysConsistentAcrossRestore`（拟新增、尚未建立）`go test ./runtime/state/ -run '^TestSettledTaskStateStaysConsistentAcrossRestore$' -count=1`：清减后 restore 与全扫基线在欠账/已消费/尝试/拒绝四面上逐项相等；负锚（拟新增、尚未建立）`go test ./runtime/state/ -run '^(TestTaskAccountRefusesToClearAnOwedReceipt|TestSliceStatesUnstatedApartFromEmpty)$' -count=1`（判据写错 → 具名拒绝；「未陈述」与「陈述空」必须可区分，否则升级后首次 boot 把已消费通知重新欠账）；消费者锚（既有，须保持绿）`go test ./assembly/ -run '^(TestSymptomAnchorBootCostFlatAcrossGenerations|TestBootSeatsTheMailboxAfterTheDurableAccount)$' -count=1`（assembly/symptom_anchor_recovery_test.go:417、assembly/task_custody_anchor_test.go:27，`durableLoadCount` 不退化、欠账仍可投递）＋ 跨会话/跨进程原验收 `go test ./runtime/task/ -run '^TestRestoredTaskKeepsTheRevisionTheTailExpects$' -count=1`（checkpoint_test.go:235）与拟新增 `TestRedeliveredNoticeAfterRestartSettlesOnce`（尚未建立，跨进程重投至多一条收据）。
 
 ---
@@ -221,7 +221,7 @@
 
 ## 新增叶（阶段5自审 A5 回写，2026-11-16）
 
-- [ ] **05.R3 Seat尾谓词的三态与真实boot复核**。提交序入口已有实现；按所载`type==TypeCheckpoint ∧ session==""`识别最新框架检查点，不按键拼写。遵循design §十八·4/§十八·7：未找到框架检查点或引擎无提交序能力⇒nil并具名走完整恢复；找到框架检查点且确无更新任务⇒非nil空集，合法地恢复零年轻任务；确有更新任务⇒精确尾键集。删除“永不为空集”旧要求，不用人为填键掩盖来源错误。正/负锚均已存在、本轮未跑：`go test ./assembly -run '^(TestSeatTailNamesEveryTaskYoungerThanTheNewestFrameworkCheckpoint|TestASpellingBasedStopDropsTasksBehindASessionCheckpoint|TestAnEmptyNonNilTailMustNotSeatZeroYoungTasks)$' -count=10 -v`，第三枚属assembly而非runtime/state，钉有真实年轻任务时不可误给空尾，另在同场景核真正空尾合法。消费者锚：`go test ./assembly -run '^(TestBootSeatsTheMailboxAfterTheDurableAccount|TestTaskRestoreFoldsTheTailOfACoveredChain)$' -count=10 -v`，正式boot→任务账→信箱；原runtime/state、runtime/task、tests完整回归面仍在本叶终验内。独立审核三态来源、逐名命中及同候选结果，不借旧零匹配命令完成。
+- [x] 05.R3 Seat尾谓词的三态与真实boot复核。提交序入口已有实现；按所载`type==TypeCheckpoint ∧ session==""`识别最新框架检查点，不按键拼写。遵循design §十八·4/§十八·7：未找到框架检查点或引擎无提交序能力⇒nil并具名走完整恢复；找到框架检查点且确无更新任务⇒非nil空集，合法地恢复零年轻任务；确有更新任务⇒精确尾键集。删除“永不为空集”旧要求，不用人为填键掩盖来源错误。正/负锚均已存在、本轮未跑：`go test ./assembly -run '^(TestSeatTailNamesEveryTaskYoungerThanTheNewestFrameworkCheckpoint|TestASpellingBasedStopDropsTasksBehindASessionCheckpoint|TestAnEmptyNonNilTailMustNotSeatZeroYoungTasks)$' -count=10 -v`，第三枚属assembly而非runtime/state，钉有真实年轻任务时不可误给空尾，另在同场景核真正空尾合法。消费者锚：`go test ./assembly -run '^(TestBootSeatsTheMailboxAfterTheDurableAccount|TestTaskRestoreFoldsTheTailOfACoveredChain)$' -count=10 -v`，正式boot→任务账→信箱；原runtime/state、runtime/task、tests完整回归面仍在本叶终验内。独立审核三态来源、逐名命中及同候选结果，不借旧零匹配命令完成。
   - **文件白名单（精确）**：`assembly/checkpoint.go`（`tailFactKeys` 取法）、`runtime/state/durable.go`（仅 nil/empty 分支语义须调整时）、`runtime/state/durable_test.go`、`assembly/checkpoint_test.go`、本域四件套。
   - **前置**：**06.R4（S2）完成**（可寻址 order 可用后才谈「按 order 新→旧」）。**冲突**：与 09.R4／06.R4／assembly 锚合批单同触 `assembly/` → **串行**。**注意**：本叶与 08.R3 有顺序耦合——谓词须在退位删除**之前或同批**就位，否则删退位即触发静默漏座。
 
@@ -252,3 +252,68 @@
 **三枚冻结锚全部缺席**（主树 `grep` 零命中）：`TestSeatTailNamesEveryTaskYoungerThanTheNewestFrameworkCheckpoint`、`TestASpellingBasedStopDropsTasksBehindASessionCheckpoint`、`TestAnEmptyNonNilTailMustNotSeatZeroYoungTasks`。建立它们的前置是 `design.md §十八·4` 的甲案接缝；第三枚在 `runtime/state` 侧不能独立成立（空非 nil 尾是否漏座取决于尾的来源，状态层只能把陷阱钉成期望＝削弱锚）。
 
 **交给编排者两项**：①`design.md §十八·4` 的甲/乙分叉须按 R22 冻结签名（推荐甲：引擎新增 `EachCommittedNewestFirst(ctx, visit func(key string, value []byte) (bool, error)) error`，识别与尾集合留在 `assembly.tailFactKeys`；乙 repurpose `TailKeys` 与 §十九·一「引擎不得解释 idx 语义」冲突，且令 4 处 ledger 切面锚转红）；②该接缝落地后本叶方可派实施（三锚＋正锚转绿的实测），且**必须仍在 08.R3 之前或同批**——否则删退位即触发静默漏座。
+
+---
+
+## 05.R4 执行记录（05.R4＋12.R2.3 合单，2026-11-18）
+
+**根因（已实证，一级 ORCHESTRATION R268 B）**：`DurableCommit.settled()`/`attemptOf()` 只查内存表；已终态任务不在切片的 `tasks` 陈述内（`SnapshotCheckpoint` 按 `settledAtCut()` 跳过），尾段只读切后键 ⟹ 重启后该任务的 `consume:`/`attempt:` 键从不入表 ⟹ `settled=false`、`attemptOf=false`：去重（信箱载荷不再欠）与尝试拦截（不再驱动第二轮）**同一加载缺口同时失效**，boot 恢复于是再驱动一次结算并产出第二份结果。收据本身是耐久的，「从未落盘」被证伪。
+
+**修法（`runtime/state/durable.go`，唯一生产改动）**：内存未命中且该任务未入表时按身份点读——新增 `unseatedTaskLocked`（判据＝`d.facts` 无该任务，与既有 `Records` 的按需读同一先例）＋ `readReceiptLocked`（`d.log.Scan(ctx, key)` 精确键读，键为 `consumeKey`/`rejectKey`/`attemptKey`；`durable.FactLog` 端口只有 Put/Scan/Sync，`ledger.TierFacts.Get` 不是该端口的能力，故走精确键 Scan 单一路径）。约束守持：O(欠账) 有界点读；命中**不回写**内存表（不造第二份已消费真相）；`settledLocked`/`oweLocked`/`unowedLocked` 与提交路径零改动（G83 的 A/C 修复未回退，未把已结任务收据塞回切片）；attempt 不另建预装（同一 `readReceiptLocked` 承载）。读失败记 `durableError` 并按「未持有」作答（守 12.R2「失败仍欠」语义）。
+
+**正/负锚（本次新建、红转绿）**：`runtime/state/durable_test.go` 新增 `TestUnloadedSettledReceiptStaysSettled`（真 localfile 合成根，`Checkpoint` 后切片陈述零任务 → `NewEmptyDurableCommit`+`Seat` 重开 → 断 settled＝已结、`Attempt`＝completed、真未结仍欠、`RestoreState` 陈旧载荷只座 2 条而**不含已结那条**）与 `TestUnloadedOwedReceiptRemainsOwed`（未结者仍欠、且 `ReceiptsOf` 为空以禁止第二份账）。
+红证据（把 `unseatedTaskLocked` 临时短路成「永不点读」＝修复前账，探针已撤、`grep RED PROBE` 零残留）：`TestUnloadedSettledReceiptStaysSettled` FAIL `the settled notification … reads as unsettled`，同探针下 `TestUnloadedOwedReceiptRemainsOwed` 仍 PASS（该锚钉的是「不许多欠」，方向与修复正交，故不红——如实登记）。修复复原后二者转绿。
+
+**消费者锚归 12.R2（单一拥有者）**：`TestRedeliveredNoticeAfterRestartSettlesOnce`（`assembly/checkpoint_test.go`），本域只消费其结论：真实重启后同通知不再产生第二轮、根上恒一条收据。
+
+| 命令（逐条独立执行，不与 commit 串联） | exit | 命中 |
+|---|---|---|
+| `go build ./...` | 0 | — |
+| `go vet ./runtime/state ./runtime/task ./runtime/agent ./assembly` | 0 | — |
+| `go test ./runtime/state -run '^(TestUnloadedSettledReceiptStaysSettled\|TestUnloadedOwedReceiptRemainsOwed)$' -race -count=10 -v` | 0 | 10 RUN × 2 用例，20 PASS／0 FAIL |
+| `go test ./assembly -run '^TestRedeliveredNoticeAfterRestartSettlesOnce$' -race -count=10` | 0 | 10 RUN × 3 子用例，30 PASS／0 FAIL（157.2s） |
+| `go test ./runtime/task -run '^(TestConsumptionFailureKeepsTheNoticeOwed\|TestConsumptionFailureIsReportedByName\|TestSettlementFailureIsReportedBeforeDelivery)$' -race -count=10` | 0 | 10 RUN × 3 用例，30 PASS／0 FAIL |
+| `go test ./runtime/state ./runtime/task -count=1` | 0 | 两包全量 PASS |
+| （加跑）`go test ./runtime/agent -count=1` | 0 | 全量 PASS |
+
+**未验证面（如实）**：① 12.R2.4 的成本量化未做（本单只断「有界点读」，未测键数/字节；`LoadStats` 不记这三条点读，理由见 12.R2.3 记录）；② 一级 DoD 的整域复跑与独立审者放行未做（本单只勾 05.R4＋12.R2.3）；③ 真实故障现场 R10197 的报文级复现未做——本单以合成根复现同一加载缺口（切片不陈述已结任务 + 收据在链上），未取真实数据根（禁读）。
+
+## 05.R3 执行记录（复核核销，2026-11-18 第六轮）
+
+**框已勾。零生产改动**：三态语义在提交序入口已成立，本单只复跑锚并做变异鉴别，主树四个白名单文件开工前后 `sha256` 逐字相同（`checkpoint.go 524a1c5b…`／`durable.go df242611…`／`checkpoint_test.go c8e94458…`／`durable_test.go 52d76b08…`）。
+
+**三态现状（读码实证，file:line）**：
+
+| 态 | 触发 | 生产位置 | 钉住它的锚 |
+|---|---|---|---|
+| ① `nil`＋具名走完整恢复 | 走查未找到框架检查点 | `checkpoint.go:900-903`（`assemblyInfo` 具名后 `return nil, nil`）；引擎无提交序能力同答 | `checkpoint_test.go:2779-2781`（无检查点根 → `walked != nil` 即红）；行为侧 `durable.go:459` `tail == nil` → 整份读，`durable_test.go:1453-1461`（5 前缀扫） |
+| ② `nil`＋具名退化 | 引擎不声明 `ledger.CommitOrder` | `checkpoint.go:881-885`（具名 `assemblyInfo`，非静默、非假实现） | 同一 `Seat` 整份读路径 |
+| ③ 非 nil 且零年轻任务 | 找到框架检查点、无更新任务事实 | `checkpoint.go:886/904`（`tail` 以非 nil map 起、无条件返回） | `checkpoint_test.go:2769-2772`（覆盖根：尾非 nil 且不命名覆盖任务）；`durable_test.go:1429-1433`（`map[string]struct{}{}` → 零前缀扫，`len(scans)!=0` 即红） |
+| ④ 精确尾键集 | 确有更新任务 | `checkpoint.go:888-896`（按所载 `Type==TypeCheckpoint ∧ Session==""` 停走，**不按键拼写**） | `checkpoint_test.go:2679`（每个年轻任务命名、每个覆盖任务不命名）＋`:2710`（会话检查点不结束走查） |
+
+**「永不为空集」旧要求**：`design.md:606` 已由 R80 勘误改写；生产无该守卫——`stateSeatedAccount`（`checkpoint.go:847-850`）以 `tail != nil` 区分「未陈述」（cut=none）与「陈述为无」（cut=计数），nil 与非 nil 空集未混同。
+
+**08.R3 顺序耦合核验**：非测试代码 `grep 'TailKeys\|RetireFacts\|keptHotKeys\|retireSettled'` **零命中**（退位机制已删），而 Seat 尾谓词在位且唯一取数走 `seatDurableAccount → tailFactKeys`（`checkpoint.go:822/:877`），不依赖已删的 `TailKeys` ⇒ 无「删退位即静默漏座」缺口。
+
+**复跑凭据（主树原始退出码，逐条独立执行）**：
+
+| 命令 | exit | 读数 |
+|---|---|---|
+| `go build ./...` | 0 | — |
+| `go vet ./assembly ./runtime/state ./runtime/task` | 0 | — |
+| `gofmt -l` 四个白名单文件 | 0 | 空输出 |
+| `go test ./assembly -run '^(TestSeatTailNamesEveryTaskYoungerThanTheNewestFrameworkCheckpoint\|TestASpellingBasedStopDropsTasksBehindASessionCheckpoint\|TestAnEmptyNonNilTailMustNotSeatZeroYoungTasks)$' -count=10 -v` | 0 | 30 RUN／**30 PASS／0 FAIL**（9.1s） |
+| `go test ./assembly -run '^(TestBootSeatsTheMailboxAfterTheDurableAccount\|TestTaskRestoreFoldsTheTailOfACoveredChain)$' -count=10 -v` | 0 | 20 RUN／**20 PASS／0 FAIL**（52.2s） |
+| `go test ./runtime/state ./runtime/task ./assembly -count=1` | 0 | 三包全量 PASS（`state 0.748s`／`task 0.742s`／**`assembly 314.064s`**） |
+
+消费者锚走正式 boot 链路（`TestTaskRestoreFoldsTheTailOfACoveredChain`：源进程 `Checkpoint`→`Close`→重开档 `snapshotTestRun`→`Recovery()` 报出尾上结算态；日志锚 `restore folded chains=1 links=1 covered=0`），非测试内手工接线。`TestBootSeatsTheMailboxAfterTheDurableAccount` 钉「先座账后信箱」，未座者即重启静默丢失的工作项。
+
+**变异鉴别（`-overlay` 注入 `/tmp`，主树零落盘，复原后 sha256 同上且复跑绿）**：
+
+| 变异 | 命令 | exit | 红在哪 |
+|---|---|---|---|
+| M1 谓词丢掉 `Session==""`（退化为按键型停走） | 同正/负锚组 `-overlay` | **1** | `TestSeatTailNames…`＋`TestASpellingBasedStop…` 红（`checkpoint_test.go:2723`：会话检查点后的任务未被命名） |
+| M2 `tail == nil` → `len(tail) == 0`（非 nil 空集误判为 nil） | `./runtime/state -run '^TestDurableLoadReadsTheTaskSlice$' -overlay` | **1** | `durable_test.go:1433`：切片覆盖的任务被整份读（5 扫） |
+| M3 `!found` 分支返回非 nil 空集（两态混同的反向） | `./assembly -run '^TestAnEmptyNonNilTailMustNotSeatZeroYoungTasks$' -overlay` | **1** | `checkpoint_test.go:2780`：无检查点根答 0 键而非 nil |
+
+**未验证面（如实）**：① 未跑 `./tests/...`、`./features/...`、`./memory/ledger/`（本单验收面外，08.R3/R4 与 06 域归各自叶）；② 未验证真实数据根上的尾读数（禁读）；③ 本叶不宣告 05 域完成（05.R1/R2 未就绪）、不改一级编排文件、未提交。**建议后续**：引擎侧「无提交序即具名退化」的 spec 具名操作表条目落在引擎域 spec（`memory/ledger` / 06 域），不在本叶白名单内，待编排者派。

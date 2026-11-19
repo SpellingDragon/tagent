@@ -66,8 +66,8 @@ func seedSettleChain(t *testing.T) settleSeed {
 		TriggerSource: "user",
 		Execution:     task.Serialization("session-owed-serialized"),
 	}
-	commit, err := state.NewDurableCommit(log, nil)
-	if err != nil {
+	commit := state.NewEmptyDurableCommit(log, nil)
+	if err := commit.Seat(ctx, nil, nil); err != nil {
 		t.Fatalf("open the account: %v", err)
 	}
 	if err := commit.Declare(ctx, taskID, spec); err != nil {

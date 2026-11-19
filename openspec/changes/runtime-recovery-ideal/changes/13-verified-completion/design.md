@@ -231,3 +231,411 @@ R74 的 `check_event_environment` 拒「`GOFLAGS` 设了 argv 已决定的旗标
 ### 阶段提交不等于完成归档
 
 独立、确定完成的部分可作为后续分批提交候选，但先核精确文件/构建依赖闭包、代码/spec/golden/测试锚的原子一致和该树证据；未绑定依赖的六长或内部一致的旧 bundle 不足以支持“已确定”。本轮不 git 写，也不把候选提交视为整个变更完成。OpenSpec 完成归档继续等09成本与矩阵、10旧项、R2/R3/R4及其余产品缺口和独立审查；历史全文存档仅保全报告，不改变归档状态。
+
+## 十三、R2a/R2b 执行落地（R270 实测，2026-11-18）
+
+### 一、落地形态：闭包写进证据，消费时对现树重算
+
+§二「源树」组的两条独立条件各自落地，互不替代：**证据记录实际解析的闭包**（R2a），**检查器在消费时对 `--repo-root` 重算同一闭包**（R2b）。
+
+| 侧 | 落点 | 记录/核对的字段 | 判据 |
+|---|---|---|---|
+| 生产者（R2a） | `run_runtime_scenarios.py`：`source_binding()`／`binding_window()`／`tool_identity()` | `source_binding.modules[]`（`dir`／`module_path`／`roles`／`revision`／`content_hash`）、`edges[]`（local `replace` 的 from／target／resolved_dir）、`workspace`（`go.work` 状态与 `use` 目录）、`before`／`after`（闭包摘要＋模块数）、`repo_root`、`tool`（入口／digest／python／go） | 运行前解析、运行后复算，两次摘要不等即拒（`the local dependency closure changed while the run was in progress`） |
+| 生产者（变异，R2a） | `check_event_integrity_mutations.py`：`tested_source_binding()`／`baseline_evidence()`／`run_gate()` | 报告级 `source_binding`＋`module_fingerprints`＋`gate_tool`（脚本入口／digest／python／go） | 变异跑完后再次复算闭包，不等即拒（不写下一份描述"从未静止的树"的报告） |
+| 消费者（R2b） | `check_runtime_evidence.py`：`check_event_source_binding()` | 同一组字段，比对目标是 `--repo-root` 的**现树字节** | 每模块 `content_hash` 与现树重算值相等；按记录的 tested 模块重解 replace／work 边（漏一条即具名报缺，不折进 digest 差异）；工具身份须是本树的那一份；`before`／`after` 须等于闭包合计。缺 `source_binding` 即具名拒绝 |
+
+**`revision` 的分工不变**：字节是必须匹配的对象，`revision` 只作同一次 checkout 的两个制品之间的对齐（`check_mutation_baseline`）——一次不改编译字节的提交会移动 SHA，故不与树比对（§十二·2 的原判据保留）。
+
+**本轮真产物实测**（`/tmp/r270-short-ci/repeat-1/evidence.json`，event-short 第 1/10 轮）：
+
+- 闭包 **3 模块**：`.`（`roles` = `tested`+`local-replacement`，因两个 example 模块都 replace 到它）＋`examples/wechat-bot`＋`examples/cli-host`；**2 条** local replace 边（均 `../..` → `.`）；`workspace = absent`。
+- 这意味着 §十二·1 指出的缺口（六长的 wechat 模块实际编译根模块、而旧证据只绑 wechat）在字段面已闭：`. ` 以 `local-replacement` 身份进入同一份证据。
+- 运行前后摘要同值 `sha256:da458bf4…`（modules=3）；工具身份 `run_runtime_scenarios`／`sha256:9bca6859…`／python 3.12.8／`go1.27.1 darwin/arm64`。
+- **`golden/runtime/event_integrity_scenarios.json` 未改**：闭包由树内 `go.mod`／`go.work` 解析，合同不声明闭包；实测未动合同时 `--evidence` 校验 exit 0，故 §十二「若需证据字段声明」的条件不成立（合同摘要仍 `sha256:e1dfb96b…`）。同一结论在变异侧成立（见下）。
+
+### 二、锚漂移与重指（12.R2.2 级联，语义不变）
+
+`12.R2.2` 改 `assembly/facts.go`（`foldMapped` 只认链最新事实、`persistFact` 的存在性读局部名 `err`→`heldErr`）后，`validate_registry` 报 **3 条** stale 锚：一条属 `MUT-EVID-04-position-boundary`、两条属 `MUT-CAND-01.8-storage-success`。这是跨面锚漂移（另一叶净改产品文件），不是本域判据缺陷；按 2026-11-08 先例「facts.go 边界改动同步重锚」处理：
+
+| 变异 | 原锚失效原因 | 重指后的锚 | 变异语义 |
+|---|---|---|---|
+| `MUT-EVID-04-position-boundary` | 折叠段从「单条赋值＋两处 `endedAt`」变成「`var landed bool`＋多值赋值＋`if !landed` 早返」，锚 0 命中 | 现形整块；`position := held.projection.Len()` 记在折叠与早返**之前** | 不变：边界记成它追加的位置而非身份。补丁集仍 8 条／2 文件，自测的补丁数与断言无需改 |
+| `MUT-CAND-01.8-storage-success`（1/2） | `default: return err` 段的下一个标识因新增 `chainHoldsFact` 从 `// sameFactOf` 变 `// chainHoldsFact` | 改锚到 `// chainHoldsFact` | 不变：提交被拒仍答成功。新增的 `chainHoldsFact` 读拒仍会传播，故描述里点明本变异覆盖的是 `persistFact` 自己的出口（不把它说成"所有读也吞掉"） |
+| `MUT-CAND-01.8-storage-success`（2/2） | 存在性读的局部名 `err`→`heldErr` | 同名替换 | 不变。补丁集仍 4 条／1 文件 |
+
+重指**不是**放宽：判据（`apply_patch` 锚命中数须恰为 1、补丁须进被测编译面、killed 须由具名断言命中）一条未改，只把锚对准现形代码。重指后真跑变异门复验：两款均 `killed(named_assertion)`，`control_tree_green=true`，见 §十三·三。
+
+### 三、正式入口与三套自测实测（逐条可复跑）
+
+| 命令 | EXIT | 实际结果 | 红绿归属 |
+|---|---|---|---|
+| `python3 scripts/gates/test_check_event_integrity_mutations.py -v` | 0 | Ran **55** tests OK（修前 51 例：3 failures + 2 errors） | 收口绿 |
+| `python3 scripts/gates/check_event_integrity_mutations.py --mutation MUT-EVID-04-position-boundary --mutation MUT-CAND-01.8-storage-success --out /tmp/r270-mut-evidence --json` | 0 | `gate.ok=true`、`control_tree_green=true`、2/2 `killed(named_assertion)`（`assertion_hit=true`、`counted_killed=true`）；产物同带闭包 `sha256:3e42e6fd…` 与 `gate_tool` `sha256:b1270eaf…` | 重锚后仍 killed |
+| `python3 scripts/scenarios/test_run_runtime_scenarios.py` | 0 | Ran **39** tests OK | R2a 自测保持绿 |
+| `python3 scripts/gates/test_check_runtime_evidence.py` | 0 | Ran **116** tests OK | R2b 自测保持绿 |
+| `run_runtime_scenarios.py --scope event-short --repeat-index 1 --timeout 600`（= CI 逐分片形态） | 0 | `verdict=match`、`repeats: passed=1/10`、run_id `525f7dca-…` | 真产物绿 |
+| `check_runtime_evidence.py --evidence <上条产物> --repo-root . --json` | 0 | `ok=true`、29 test／135 anchor／9 包／180 事件行 | 单份现树绑定绿 |
+| `check_runtime_evidence.py --bundle <同一产物> --json` | 1 | 5 条错误**全是矩阵完整度**（short 1/10、long 0/6、mutations 0/1），树绑定/判词 0 条 | 整包绿待 09.R3/R4 齐矩阵，非本叶可造 |
+| `check_runtime_evidence.py --bundle <失败 runner 产物> --json` | 1 | **167** 条错误，`source_binding`／`closure`／工具身份类 **0** 条 | 消费者拒真红而不误判绑定 |
+
+**并发归因（实测一次）**：与另一修复叶同跑时，一次 short 运行被本域守卫中止——`the local dependency closure changed while the run was in progress: sha256:87be253f… -> sha256:48b238e2…`，期间该叶在写 `runtime/state/durable.go`／`durable_test.go`／`assembly/checkpoint_test.go`。该红归并发写单，非本域缺陷；文件静止 120 s 后重跑即绿。这条同时是 R2a 运行前后指纹判据的**真树正向证据**（构造字典造不出这个红）。
+
+### 四、未验证面与登记缺陷（如实列，不冒充闭合）
+
+1. **`--seed`／`--window` 对 short 域不可用（既有缺陷，本轮不改；已在 §十五 修复）**：`event_command` 把 `-args -seed=… -window=…` 追加给一次调用的**全部**包（`run_runtime_scenarios.py:773`，`git show HEAD` 逐字相同，非本波引入），而只有 `examples/wechat-bot` 定义了这两面旗标（`smoke_test.go:3452-3453`）。故 `--scope event-short --seed 1 --window 256` 下 9/9 包以 `flag provided but not defined: -seed` 退出、`repeats: passed=0/1`、EXIT=1（实测）。CI 的 short 分片本就不传 seed（`ci.yml:250`），long 分片传 seed 而 long 只选 wechat 包，故生产链未暴露此缺陷。**结论：short 域的 seed/window 形状面本轮无真跑证据**，修它要动 runner 的派生命令构造（本叶写面外），登记给后续叶（§十五 记修法、真跑红→绿与剩余未验证面）。
+2. **`--repeat 1` 与合同 `repeat: 10` 冲突**：单轮产物会被判 `repeat_total 1 does not match contract scope 'event-short' repeat 10`；CI 形态用 `--repeat-index I`（`repeat_total` 仍取合同值），本轮改用它取绿。
+3. **整包绿未取**：10 短 + 6 长 + 1 变异须同一棵树，长跑归 09.R3，本叶禁跑六长。
+4. **13.R2 的 N6（产品日志行）与 13.R3（外部权限／CI 接入）未动**，故 R2/R3/R4 的勾选状态不变；本轮只勾 R2a/R2b。**R3a 的接线已在 §十四 落并验证（单列一节，避免与本节的时点判断混淆）**。
+
+## 十四、R3a 执行落地（正式 DoD 证据输入与失败传播）
+
+### 一、落地形态：证据目录由本次运行给出，消费时对现树重判
+
+§十二「接线选择」里三条要各自落地，缺一条就只剩"手工补参绿"：
+
+| 侧 | 落点 | 形态 | 拒绝面 |
+|---|---|---|---|
+| 入口（lint） | `scripts/gates/lint.sh` 的 DoD 段 | 读 `TAGENT_RUNTIME_EVIDENCE_DIR`，把其 `mutations/` 子目录交给 `check_dod_coverage.py --mutation-evidence` | 变量未给／目录里没有 `mutations/` 产物，各**具名红并非零退出**，不搜索"最近一份绿结果"、不把登记表当后备 |
+| 链序（preflight） | `scripts/gates/preflight.sh` | 证据目录一次运行一份（`TAGENT_RUNTIME_EVIDENCE_DIR` 优先，否则 `run-<UTC>-<pid>`），序为生成 mutations → `check_runtime_evidence.py --bundle` 现树绑定 → 以 `env TAGENT_RUNTIME_EVIDENCE_DIR=<该目录>` 调 lint | 前两步失败即中止，DoD 段根本不到达＝"未执行"而非"通过"；`--skip-event-long` 时整包本就不完整，绑定步具名跳过并保留"不具备完整 MR 等价证据" |
+| 消费（DoD） | `check_dod_coverage.py` | 每份产物在计数判词之前先复算绑定：`check_event_source_binding()` 由 `check_runtime_evidence.py` **导入复用**（`_GapReport` 适配其 `error()` 汇入 gap 列表），绑定不过即 refuse，其判词一条不计 | 缺 `source_binding`、模块内容摘要不符、闭包摘要不符、工具身份不符、`mode=replay`，各具名红 |
+
+**转发脚本零改动（实测结论，非推断）**：`scripts/lint.sh`／`scripts/preflight.sh` 都是 `exec bash "$here/gates/…" "$@"`，`exec` 不重建环境，`TAGENT_RUNTIME_EVIDENCE_DIR` 随进程继承；壳入口用例走 `bash scripts/lint.sh`（真转发）取到绿，即透传成立，故不在本叶改它们。
+
+### 二、与 §十二 的偏离（一条，理由在判据面）
+
+原文"再由 lint 显式传其 mutation 子目录给 DoD、**将 bundle 交现树检查**"：bundle 面**没有**放进 lint，留在 preflight。理由有两条且都不是省事：
+
+1. bundle 的完整性判据是 **10 短 + 6 长 + 1 变异同树**，长跑只在 preflight 生成；在 lint 里跑 bundle 检查会把"今天没跑长跑"变成"lint 不可用"，而 CI 的 lint 作业并不产矩阵——这会把一条门债换成另一条。
+2. "错树"这条拒绝面不需要 bundle 也成立：DoD 端读产物时**自己**按 `--root` 复算闭包（上表第三行），单份产物即足以拒。故 lint 的拒绝面是"缺／空／错树／手填"四类，bundle 完整度归 preflight 与 CI。
+
+保留的代价（如实记）：`bash scripts/lint.sh` 单独跑不会验证 17 件套齐全，只验证它所消费的那份产物确实是本树产物；整包齐全由 `bash scripts/preflight.sh`（与 CI 的 `event-integrity-required` 同一命令）承担，归 09.R3／13.R3。
+
+### 三、自测与红绿归属（逐条可复跑）
+
+`test_check_dod_coverage.py` 39 → **51** 案：+2 条绑定负例（产物写出后树字节移动、产物不记闭包），+10 条壳入口判定（三个具名测试函数：`test_formal_lint_consumes_bound_mutation_evidence` 2 条、`test_formal_lint_refuses_missing_stale_or_handwritten_evidence` 4 条、`test_preflight_generates_evidence_before_dod_gate` 4 条）。
+
+夹具形态：真 `scripts/lint.sh`／`scripts/preflight.sh`／`gates/lint.sh`／`gates/preflight.sh`／`check_dod_coverage.py`／`check_runtime_evidence.py`／`runtime_checklib.py`，其余同链门一律 stub；`python3` 走 shim（**记录 argv 后 exec 真解释器**，故记录即入口真跑的命令），`go` 走 shim（`comment_policy: 0 finding(s).`）；变异生产者以"声明冻结登记表＋把本轮产物写到 `--out`"的替身承担，绑定步替身**以产物已在盘上为通过条件**（顺序判据不靠 argv 相邻）。夹具自测不代完整正式运行。
+
+| 命令 | EXIT | 实际结果 | 红绿归属 |
+|---|---|---|---|
+| `python3 scripts/gates/test_check_dod_coverage.py -v` | 0 | `51/51 cases passed` | 本叶新增 15 条判定全绿 |
+| `python3 scripts/gates/test_check_runtime_evidence.py` | 0 | Ran **116** tests OK | R2b 自测未回退 |
+| `python3 scripts/gates/test_check_runtime_workflow.py` | 0 | Ran **55** tests OK | preflight 结构断言（步骤名／旗标／长跑种子窗口）仍成立 |
+| 临时删 `--mutation-evidence` 后跑自测（演示后逐字节复原，sha256 相同） | 1 | **6/51 红**：consume 2 条、preflight 消费 2 条、另 2 条随判定归位 | 正锚红＝接线就是判据 |
+| 临时把 lint 步移到 mutations 之前（同上复原） | 1 | **4/51 红**：生成先于绑定、绑定先于消费、绑定步见到产物、DoD 从本轮产物取绿 | 顺序就是判据 |
+| `check_dod_coverage.py --mutation-evidence /tmp/r270-mut-evidence`（真树＋真变异产物） | 1 | **12** gap 中 2 条为绑定拒绝：`module '.' content digest … does not match this tree's …`、`closure digest … does not match this tree's …`，其后 P0..P8 全为"registered and unproven" | 真树上"旧树产物不计数"实测成立 |
+
+### 四、未验证面（停放，不冒认）
+
+1. **`bash scripts/lint.sh` 全量绿未取**：现树还有独立门债（`comment_policy` 超基线、DoD 的 `P4` 标题漂移与 `P0..P8` 无运行产物等），这些红与本叶接线无关，也非本叶写面。本叶只证"证据消费机制按设计工作"，全量绿待债清偿后回验。
+2. **`bash scripts/preflight.sh` 全链未真跑**：六长分片（每片 6270 s 上界）与 smoke 需实施期授权，本叶禁跑；壳入口顺序由夹具验证，真矩阵归 09.R3／13.R4。
+3. **CI 消费未接**：`.github/workflows/ci.yml` 不由本叶改（须单独授权），故 `TAGENT_RUNTIME_EVIDENCE_DIR` 在 CI 侧仍未设置；那一面归 13.R3。
+
+
+## 十五、R2c／R271 校准旗标按定义面传递（2026-11-18）
+
+### 一、缺陷机理（真机实测，非推断）
+
+`event_command()` 曾把合同 matrix 对写成 `-args -seed=… -window=…` 追加在**一次调用的包列表之后**。`-args` 之后的 token 由 `go test` 交给这次调用命名的**每一个**包的测试二进制，而 `-seed`／`-window` 只在 `examples/wechat-bot/smoke_test.go:3452-3453` 的 `flag.Int` 里定义，且该文件首行是 `//go:build smoke`。因此旗标面的身份是「模块目录 × 包 × 构建标签」，不是「模块目录 × 包」——同一包换个构建就不认这两面旗标。
+
+| 命令（go1.27.1 darwin/arm64，本树实测） | 结果 |
+|---|---|
+| `go -C . test ./tool/exec -run '^$' -count=1 -args -seed=1 -window=256` | `flag provided but not defined: -seed`，exit 1 |
+| `go -C examples/wechat-bot test . -run '^$' -count=1 -args -seed=1 -window=256`（无 `-tags smoke`） | 同上，exit 1——同包，仅因该构建不编译定义文件 |
+| `go -C examples/wechat-bot test . -run '^$' -count=1 -tags smoke -args -seed=1 -window=256` | `ok wechat-bot [no tests to run]`，exit 0 |
+
+short 域的 9 个包里，8 个非承载包＋wechat-bot 的无 tag 构建全部死在旗标解析，`repeats: passed=0/…`；long 域只选 wechat 的 smoke 构建，故生产链历史上未暴露（R271 登记／`git show HEAD` 逐字同形＝既有缺陷）。
+
+### 二、修法：声明定义面，按面分调用
+
+| 侧 | 落点 | 判据 |
+|---|---|---|
+| 声明 | `EVENT_CALIBRATION_FLAGS`＝`({"dir": "examples/wechat-bot", "package": ".", "tags": ("smoke",)},)`，注释随定义文件与其构建约束 | 只有当某构建的 tags 覆盖该条 `tags` 时，那个包才算承载者（`event_calibration_bearer()`）；自测另读真源文件核 `//go:build smoke` 与两条 `flag.Int` 仍在 |
+| 构造 | `event_commands()`：无 matrix 对时仍是一次调用（未校准与 v1 形态零变化）；有对时按承载面分组，**只有承载者的调用**追加 `-args`，同组其余包另起不带 `-args` 的调用 | 一次调用只管一面旗标，`flag provided but not defined` 结构性不可达 |
+| 记录 | invocation 的 `packages` 改由 `command_packages(command)` 从**实际 argv** 反读 | 记录与执行同源：拆分后不会照抄整组包名 |
+
+合同、golden 与消费者判据零改动：`check_runtime_evidence.py` 从不要求 argv 带 `-args`，其 invocation 校验按（`-C` 目录、`packages`、`-tags`、`-race`、`-run` 命名并集）成立，拆出不改判据；`test_check_runtime_evidence.py` 116 例未动即绿。
+
+### 三、被否的方案
+
+1. **在合同加「消费校准旗标」字段**——`golden/runtime/event_integrity_scenarios.json` 本变更冻结（§十三·一实测未改），且"哪面旗标在哪个构建里存在"是 Go 源码的构建约束事实，不是合同能声明的性质。
+2. **只按「组内含 03.11 长跑用例」传对**——把定义面与消费者面混同：short 域的 01.6、03.4–03.8 同样是 smoke 构建、同样能解析这对旗标，拒给它们没有依据；而"谁消费"在合同里没有字段可依。
+3. **每次运行扫源码反推 `flag.Int("seed"`**——把一条静态编译约束变成运行期文本猜测，`//go:build` 的判断会退化成 grep 文字。
+
+### 四、自测与红绿（逐条可复跑）
+
+| 命令 | EXIT | 实际结果 | 红绿归属 |
+|---|---|---|---|
+| `python3 scripts/scenarios/test_run_runtime_scenarios.py -v` | 0 | Ran **40** tests OK（39→40） | 新增 `test_seed_window_only_reach_defining_package` |
+| 同上，把声明面的 `tags` 清空（＝不看构建标签） | 1 | **1 red**：无 tag 的 wechat 组也被判承载，严格替身返回 exit 1／unattested | 变异对准"构建标签"这条轴 |
+| 同上，把声明面整表清空 | 1 | **1 red**：无承载者，承载调用数 0≠期望 | 变异对准"这对旗标该交给谁" |
+| 复原后 | 0 | 40 OK | 两个变异演示均逐值复原，不留痕 |
+
+新案四段判据：①**声明与真源对齐**（`examples/wechat-bot/smoke_test.go` 首行 `//go:build smoke`、`flag.Int("seed"`／`flag.Int("window"` 仍在，声明面含 `("examples/wechat-bot", ".", ("smoke",))`）；②**命令形状**（承载调用每轮 1 条、非承载 4 条，承载命令尾部恰为 `-json -args -seed=7 -window=32768`，无 tag 的 wechat 命令不带 `-args`）；③**证据记录**（每轮 3 条 invocation 的 `packages` 与 argv 逐字一致，`-args` 只出现在 tags 含 smoke 的那条）；④**负控**（把 `event_commands` 换回 HEAD 形态，用"像 go 一样解析旗标"的替身喂同一 contract，判 exit 1／unattested）。
+
+### 五、真树红→绿（同一命令形态，只差这一处）
+
+| 运行 | 结果 |
+|---|---|
+| HEAD 形态（运行期把 `event_commands` 换回"单调用＋对每包追加"；`--scope event-short --test-id 01.10a/TestEventIntegrityExecLifecycle --seed 1 --window 256 --repeat-index 1 --timeout 600 --out /tmp/r282-prefix`） | EXIT **1**、`verdict=unattested`、`repeats: passed=0/10`；test-log 内 `flag provided but not defined: -seed` 后随 `fail` |
+| 修复后（`--scope event-short --seed 1 --window 256 --repeat-index 1 --timeout 600 --out /tmp/r282-runner`，29 用例真跑） | EXIT **0**、`verdict=match`、`repeats: passed=1/10`、run_id `f0185bc9-…`；4 条 invocation 依序 `exit=0`（根模块 7 包／cli-host／wechat 无 tag／wechat smoke），只有 smoke 那条带 `-args` |
+| `python3 scripts/gates/check_runtime_evidence.py --contract golden/runtime/event_integrity_scenarios.json --repo-root . --evidence /tmp/r282-runner/repeat-1/evidence.json --json` | EXIT **0**、`ok=true`、29 test／135 anchor／9 包／180 事件行、`errors: []` |
+
+`--repeat` 与 `--repeat-index` 的关系（R271 登记的第二条）本叶不改也不该改：合同 `event-short` 的 `repeat` 是 10，`--repeat 1` 会让产物自报 `repeat_total=1` 并被消费者判「repeat_total 1 does not match contract scope 'event-short' repeat 10」；分片形态写 `--repeat-index I`（`repeat_total` 仍取合同 10）。CI 的 short 分片不传 seed、long 分片传 seed 而 long 只选 wechat 的 smoke 构建且 `repeat` 本就是 1，故生产链两处均不受本缺陷影响——本叶修的是「09.R3 矩阵前置面的可用性」。
+
+### 六、未验证面
+
+1. **`--scope event-long --seed … --window …` 真跑未在本叶重跑**（六长需授权、6270 s/片）：其命令形态由 §二 的构造与 §四 ②③④ 段覆盖，真产物归 09.R3。
+2. **同一 (dir, tags, race) 组里同时含承载包与非承载包**的拆分分支今天不存在于合同，故只在自测中验（root 组 7 包非承载、wechat 组单包承载）；将来若出现，承载调用与非承载调用各跑一次该组的 `-run` 选择器。
+3. **`EVENT_CALIBRATION_FLAGS` 是 runner 对"旗标定义在哪个构建里"的静态声明**：正确性由自测读真源文件＋真跑共同钉住；若 `smoke_test.go` 改构建标签或改名，`//go:build smoke` 断言先红。
+
+## 十六、R2d 执行落地（R294 R35 证据生产者两项坐实项的修复）
+
+### 一、两处缺陷的机理
+
+| 缺陷 | 现树事实 | 坏在哪 |
+|---|---|---|
+| 变异锚失配 | `12.R2.5` 后 sink 为「`closeFinished()`→`retainNoticeOwed`；`if refusal := r.loop.Backflow(...); refusal != nil { return r.retainNoticeOwed(...) }`；否则 `return r.store.Consume(...)`」。旧锚 `r.loop.Backflow(...); return r.store.Consume(...)` 命中 **0** 次 | `validate_registry` 报一条 stale ⇒ 自测 2 条确定性红，且注册表说的变异在现树不存在（假证据而非弱证据） |
+| race 豁免掩盖业务失败 | `go` 的 `testing` 包对**被测出竞争的那个测试自己**记 `race detected during execution of test`（`$GOROOT/src/testing/testing.go:1865`，同处注释明写父级不再重复上报），且 race 报告本身也归到该测试的输出 | 旧判据只核「全篇 race frames 全部匹配已登记上游签名」，不读这条逐测试归属；于是「普通业务断言失败 ＋ 同批次可豁免 race」直接 `green`，控制树绿了而它其实断言过 |
+
+### 二、修法与被否方案
+
+- **锚重指**：锚改为现行拒收分支整块；补丁形态改为「先 `Consume`（err 即返）→ 再 `Backflow`（拒收仍交 `retainNoticeOwed`）→ `return nil`」。变异语义不变（`confirm_before_handover`）：把完成消费记在交接之前，交接窗口内的停机就让通知不再欠着。判据一条未改（锚须恰命中 1 次、补丁须进被测编译面、killed 须由具名断言命中）。
+- **race 判据**：`classify_control` 的豁免条件由 `_race_waived(result)` 收紧为 `_race_waived(result)` **且** `_failures_beside_the_race(result)` 为空。逐测试归属：失败的 case 自己的记录里带那行 marker 才算被 race 解释；聚合父级自身不记（`testing` 有意如此），由其失败子级全被解释而解释；任何没有 marker 的失败 case ⇒ `red/test_failed`。
+- **被否①：一刀切禁 race 豁免**（`_race_waived` 直接不用）。那会误杀合法的上游 race 控制——登记的上游签名今天就会在控制树里冒报告，禁掉等于让门在别人修上游之前永久红。
+- **被否②：只核「race 报告出现在失败测试的输出里」**。这只证明该测试的输出里出现过报告，不证明**这次失败是它造成的**：一个先断言后踩雷的 case 同样满足，仍会掩盖业务失败。`testing` 自己的 `c.Errorf("race detected during execution of test")` 才是「它就是失败原因」的字段。
+- **被否③：靠字形识别断言失败行**（`file.go:NNN:` 前缀）。`t.Logf` 与 `t.Errorf` 打出来的行同形，用它判会把「顺手打日志的合法 race 控制」判红，正是要避免的误杀。
+
+### 三、自测与红绿（逐条可复跑）
+
+| 读数 | 结果 |
+|---|---|
+| 修前（原树）`test_check_event_integrity_mutations.py` | EXIT **1**、`Ran 51 tests`、`FAILED (failures=2, errors=1)`：两条红均为 `MUT-CAND-01.2… stale mutation, the patch anchor occurs 0 times in assembly/facts.go`，error 是 git-index 环境故障（见 §五） |
+| 修后（同命令） | EXIT **0**、`Ran 60 tests`、`OK`（51→60＝新增 5 例 ＋ `ClosureCliTest` 原被锚漂移挡在 `setUpClass` 的 4 例恢复执行） |
+| `validate_registry('.', MUTATIONS)` | `[]` |
+| 红绿①：`classify_control` 去掉 `and not _failures_beside_the_race(...)` | `ControlTreeFaceTest` 7 例中 **2 红**（`test_control_asserting_beside_a_waived_race_is_red`、`test_control_with_an_asserting_case_beside_a_raced_case_is_red`），纯 race 那例仍绿 ⇒ 判据对准的正是这两类形态，不是同义重复 |
+| 红绿②：登记锚回退成旧裸 `Backflow`+`Consume` | 全量 **3 红**（`test_registry_accepts_a_literal_beside_a_shared_log`、`test_control_tree_green_then_…`、新 `test_the_registered_anchor_is_the_refusal_branch_of_the_sink`）；另有 `ClosureCliTest` 因夹具「stale 锚→把产品文件回滚到 HEAD」的修复回路级联出 `MUT-CAND-01.8-storage-success` stale，属演示副产物，复原后不复现 |
+| 复原 | 两次演示后 `assembly/facts.go`、两门脚本 sha256 与演示前逐字节一致（`6c0d5f01…3119`／`cb23910a…7ecb`／`1aabd49b…a50b`） |
+| 相邻门 | `test_check_runtime_evidence.py` EXIT **0**、116 OK；`test_check_dod_coverage.py` EXIT **0**、`51/51 cases passed` |
+
+### 四、真跑（消费者锚）
+
+`python3 scripts/gates/check_event_integrity_mutations.py --mutation MUT-CAND-01.2-handover-confirm --out /tmp/r2d-mut --json`（两次同判）：EXIT **0**、`control_tree_green=true`、control `TestEventIntegrityConsumptionRecovery` `green/exit 0`；变异 `verdict=killed`、`reason=named_assertion`、`counted_killed=true`、`assertion_hit=true`；`run.jsonl` 内失败用例 `TestEventIntegrityConsumptionRecovery/handover_before_confirmation` 打印 `not recoverable after the restart: …`，即既有命名断言杀死了新锚。两次运行前后 `assembly/facts.go` sha256 不变 ⇒ 补丁应用与复原逐字节一致。
+
+### 五、环境故障（必须上报，已隔离未修复）
+
+本机 `.git/index`、`.git/HEAD` 是 iCloud 逐出占位：`ls -lO` 报 `dataless`、`stat` blocks=0，`bird` 与 `iCloudDriveFileProvider` 在跑，CloudDocs 上传报 `Quota exceeded`。直读 `TimeoutError [Errno 60]`；`HEAD` 一度读出 0 字节，使 `git rev-parse --git-dir` 直接报 `not a git repository`；`brctl download` 只救回 `HEAD`，`index` 持续 dataless。后果：`git ls-files` 失败（`fatal: .git/index: unable to map index file: Operation timed out`），`ClosureCliTest` 与真跑的 `source_files` 一并失效。本轮以 `GIT_INDEX_FILE=/tmp/r2d-index`（`git read-tree HEAD` 在**仓外**生成，488742 字节与原 index 同尺寸）临时恢复取文件表能力——判据零改动、零 git 写；等价性是「同尺寸＋`git status` 语义一致」的间接证据，真 index 今日不可读无法逐字节对照。仓库 `.git` 元数据目前不可读，**任何 git 操作（含 commit/archive）都会失败，须编排者处置**。
+
+### 六、未验证面
+
+1. 真跑只覆盖 `MUT-CAND-01.2` 单变异；全量 `--all`（17 件套＋控制树）未跑，需长跑授权，归 13.R4。
+2. 新 race 判据的全部证据是合成 `go test -json` 夹具，加上「真跑里 control 全绿」这一侧；「真实 waived race ＋ 普通业务断言失败」的样本今天在生产里不存在，真样本出现前该半面仍是构造证据。
+3. `GIT_INDEX_FILE` 隔离的等价性未与真 index 逐字节比对（见 §五）。
+
+
+## 十七、R2e 执行落地（R294 R35 四项消费者孤儿闭合，2026-11-18）
+
+### 一、四处孤儿：生产者写了，消费者没读
+
+| 孤儿 | 现树事实 | 后果 |
+|---|---|---|
+| seed/window 未核 argv | `check_event_invocations` 只核 `-run`/`-tags`/`-race`/`-count`/`-json`/`-timeout`/`-C`，`run_config.seed`/`window` 自报即算 | 删掉 `-args -seed/-window`（测试根本没收到校准）或把对广播给非承载包（那些包在解析旗标时即退出），证据仍可绿 |
+| `gate_tool` 身份无人读 | `check_event_integrity_mutations.py:2301` 写 `gate_tool`（entrypoint/digest），`check_mutation_baseline` 从不读 | 换一版门写下的判词（不同变异集/词表）与原树同权计入 |
+| 判词一致性无人读 | `check_mutation_evidence` 只核 `status=="killed"`，`verdict`/`counted_killed`/`assertion_hit` 不核（`assertion_hit` 仅「非 None 时须 true」，缺省放过） | 自相矛盾记录（`status=killed`＋`verdict=not_killed`/`counted_killed=false`）被当作杀死计入 |
+| DoD 只绑 source_binding | `run_verdicts`→`bind_mutation_evidence` 只调 `check_event_source_binding` | `control_tree_green=false`、`not_evidence_backed` 非空、结构非法的报告照样把判词递进 DoD |
+
+### 二、修法与单一来源
+
+| 缺陷 | 落点 | 判据 |
+|---|---|---|
+| seed/window 实际 argv | 新增 `check_event_matrix_args()`，由 `check_event_invocations` 每次调用调起 | 承载身份问生产者：`runner.event_calibration_bearer(dir, tags, package)`；argv 命名的包用生产者自己的 `runner.command_packages(tokens)` 反读（不信 invocation 自报的 `packages`）；「可带对」＝**命名包全为承载者**。`run_config.seed` 非空时承载调用必须带 `-args` 且 `-seed`/`-window` 值等于声明；非承载调用（含部分承载的混合调用）与「运行未声明对」一律不得带 |
+| `gate_tool` 身份 | 新增 `check_mutation_gate_tool()`，由 `check_mutation_baseline` 在 `check_event_source_binding` 之后调起 | 结构须为对象且 `entrypoint` 非空、`digest` 可读 sha256；`--repo-root` 现树内该路径须存在且 `lib.sha256_file()` 与 digest 相等（沿 `source_binding.tool` 的先例：同一比较目标是一棵树，不是另一份产物的自述） |
+| 判词一致 | `check_mutation_evidence()` 逐记录增判 | `verdict=="killed"`、`counted_killed is True`、`assertion_hit is True`（原「缺省放过」收紧为必真）；`not_evidence_backed` 非空仍拒（保留） |
+| DoD 可消费 | `check_dod_coverage.bind_mutation_evidence()` | 经 `_GapReport` 适配，先 `evidence_consumer().check_mutation_evidence()` 全量结构校验、再 `check_event_source_binding()`；任一 gap 即整份 refuse，`run_verdicts` 不为该产物产出任何判词，缺口经 `gaps.extend(refused)` 具名 |
+
+**为何不复制第二公式**：承载面与包列表分别由 `event_calibration_bearer()`、`command_packages()` 提供，二者是 R2c 已冻结的生产者定义面（`EVENT_CALIBRATION_FLAGS`），消费者只问不重写；「`-seed=<值>` 的写法」属旗标自身的 CLI 语法，不是对"哪次调用承载"的第二次推导。`run_config.seed` 的取值合法性仍由既有 `check_event_run_config` 绑合同 matrix，本叶不重算。
+
+### 三、被否的方案
+
+1. **在消费者里按 `module_path`/`tags` 重写一份承载表**——第二真相：`smoke_test.go` 改构建标签时，两张表可以各自绿着说不同的话；R2c 的自测（读真源 `//go:build smoke`）只钉住生产者那张。
+2. **整体 argv 等值比对**（重推 `event_commands` 后与记录串逐字相等）——会把既有 6 条既有判据（`-timeout` 宽松上界、包覆盖并集等）压成一条全等断言，红因难归因；本叶只补孤儿面，不改既有判据的粒度。
+3. **把 `gate_tool` 校验放进 `check_mutation_evidence`**——那里没有 `--repo-root`；与树比对的判据必须与 `source_binding` 同处（`check_mutation_baseline`），否则会退化成"证据间一致"的自证。
+4. **DoD 侧再写一份结构校验**——正是 R294 记的「只绑 source_binding」的镜像错误；复用消费者并只做 `_GapReport` 适配。
+
+### 四、自测与红绿（逐条可复跑，EXIT 为原始退出码）
+
+| 命令 | EXIT | 实际结果 | 红绿归属 |
+|---|---|---|---|
+| `python3 scripts/gates/test_check_runtime_evidence.py` | 0 | Ran **126** tests OK（116→126） | 新增 10 例：承载删参、非承载广播、值不符、无对运行带参、`gate_tool` 缺省/假路径/零 digest、判词三矛盾 |
+| `python3 scripts/gates/test_check_dod_coverage.py` | 0 | **54/54 cases passed**（51→54） | 新增红控制树/非空 `not_evidence_backed`/记录自相矛盾三例，每例同时要求「registered and unproven」＝判词确实没被计数 |
+| `python3 scripts/gates/test_check_event_integrity_mutations.py` | 0 | Ran **60** tests OK | 相邻面（R2d 生产者）不回退 |
+| `python3 scripts/scenarios/test_run_runtime_scenarios.py` | 0 | Ran **40** tests OK | 相邻面（R2c runner）不回退 |
+
+**夹具订正（非判据放宽）**：`test_check_runtime_evidence.event_invocations` 原来自写一份命令推导，且把 `-args` 对**广播给每次调用**——与生产者 R2c 后的实际形态不符（`flag provided but not defined` 会先炸）。改为当场调 `runner.event_groups()`／`runner.event_commands()`／`runner.command_packages()` 推导；随之无人引用的 `event_package_arg` 一并删除。DoD 夹具 `run_product` 补 `assertion_hit`、`not_evidence_backed` 两个生产者必写字段。原"存活判词"用例期望串由 `is recorded 'not_killed'` 改为 `status 'not_killed' is not 'killed'`：整份报告被结构拒收后不再产出逐条判词文案，红因仍是那条存活判词。
+
+### 五、真产物红→绿（消费者锚）
+
+| 运行 | 结果 |
+|---|---|
+| `python3 scripts/scenarios/run_runtime_scenarios.py --contract golden/runtime/event_integrity_scenarios.json --scope event-short --seed 1 --window 256 --repeat-index 1 --out /tmp/r2e-full` | EXIT **0**、`verdict=match`、`repeats: passed=1/10`、run_id `bcef5d71-0040-43d1-bda7-98aa1ed36753`；4 条 invocation 依序 `exit=0`（根模块 7 包／cli-host／wechat 无 tag／wechat smoke），**只有 smoke 那条带 `-args -seed=1 -window=256`** |
+| `python3 scripts/gates/check_runtime_evidence.py --contract golden/runtime/event_integrity_scenarios.json --repo-root . --evidence /tmp/r2e-full/repeat-1/evidence.json --json` | EXIT **0**、`ok=true`、`errors: []`、29 test／135 anchor／9 包／180 事件行——与 R271 同一读法，新判据不误杀真产物 |
+| 同上，把 smoke 那条的 ` -args -seed=1 -window=256` 删掉（真产物形态负锚） | EXIT **1**、`run_config.invocations[3]: … yet the argv carries no '-args'; the pair the run declares never reached the tests` |
+| 同上，把同一对追加到 cli-host 那条（真产物形态负锚） | EXIT **1**、`run_config.invocations[1]: … which do not all compile the file declaring those flags … exits on 'flag provided but not defined' before any test runs` |
+
+> 注：R294 记的既有产物 `/tmp/r282-runner/repeat-1/evidence.json` 今日已 stale（R2d 等叶改过源树，现树重算 digest 不符，属正确拒收），故按叶行允许的替代路径用 runner 真跑产物作消费者锚。
+
+### 六、未验证面
+
+1. **long 侧真跑未在本叶执行**（六长需授权、约 6270 s/片）：其 argv 形态由自测与生产者构造覆盖，真产物归 09.R3。
+2. **同一组内混合承载/非承载包**今天在合同里不存在，故该分支（`parses_pair` 为假且带了 `-args`）的真样本仍只有构造证据；判据按"全为承载者"取真，将来出现时按混合拒绝。
+3. **全量 `--all`（17 件套＋控制树）未跑**，归 13.R4。
+
+## 十八、R2f 执行落地（`MUT-DOD-P5-legacy-clause` 锚随规格退位重指，R316 待裁② 裁A，2026-11-19）
+
+### 一、缺陷机理：锚与被期望的标题同随主 spec 退位而消失
+
+P5 的门锚变异用一处精确文本替换向主 spec 要求正文注入 legacy 条款（一个 `.go` 文件名），期望 `check_spec_hygiene.py` 的 R4（`go-file`）具名拒绝。原锚打在 `openspec/specs/event-lifecycle/spec.md` 的 `for age calculation.`（原「Time-based TTL expiration」要求），而 10.R5b 已把该 spec 整体标为 superseded、五条要求合并为一条「历史条款已退役」：`grep -c "for age calculation" openspec/specs/event-lifecycle/spec.md` → **0**。锚 0 命中 ⇒ runner 判 `not_applied`（既非 killed 也非存活），门本身变成空转。这是「规格退位的级联」而非变异选错形态——变异要证明的性质（legacy 条款注入被拒）仍在位，缺的只是承载它的那条要求。
+
+### 二、重指落点与语义保持
+
+| 项 | 原值 | 现值 |
+|---|---|---|
+| 目标文件 | `openspec/specs/event-lifecycle/spec.md`（superseded） | `openspec/specs/storage-lifecycle-completion/spec.md`「保留保护与回收协调」（在位，`spec.md:13`） |
+| 补丁锚 | `for age calculation.` | `只拒销毁，不得以「先标墓碑、压实再删」的形态复活。`（文件内恰 1 次命中） |
+| 注入句 | `The TTL scanner lives in ttl_scanner.go.` | `TTL 扫描由 ttl_scanner.go 内的周期性全量扫描实现。` |
+| 期望断言 | `R4 go-file in requirement 'Time-based TTL expiration'` | `R4 go-file in requirement '保留保护与回收协调'` |
+
+**为何是这条要求**：10.R5b 把退役生命周期扫描的唯一仍在位承诺（任何路径不得物理销毁未确认恢复所需的原文等）交由 `storage-lifecycle-completion` 的这条要求唯一承载，它同时是那条退役机制的**禁入条款**（「TTL 扫描、容量淘汰、墓碑标记与物理回收 MUST NOT 作为运行期销毁路径存在」）。把 `ttl_scanner.go` 的实现细节重新写进这条要求的正文，就是字面意义的 legacy 条款复活——比另选一条与机制无关的要求更能保住门锚语义（门判的仍是「退役条款以实现细节形态回流」）。注入句只含一个 `.go` 名，故变异仍只触发 `go-file` 一条规则（真跑 `violations` 250→251、`errors=1`）。
+
+### 三、被否的方案
+
+1. **降级为 `pending` 或把 `must_be_killed` 改假**——用户已裁 A「不降级变异」：P5 要证明的是门拒绝 legacy 条款的能力，降级等于承认该性质无人证明。
+2. **删 `golden/runtime/dod_predicates.json` 的 P5 谓词或抬 `spec_hygiene` baseline**——前者抹掉判据，后者把违规当已审基线；两者都把「门能拒」换成「门不必拒」。
+3. **回改 `event-lifecycle` 主 spec 复活旧要求**——与 10.R5b 的退役裁定冲突，且让已退役机制重新成为权威正文。
+4. **改成英文注入句 + 英文断言**——锚语义可保，但目标要求正文是中文，注入处只能是中文句；断言字符串随 `expect_assertion` 的模板片段（`" in requirement "`）与 gate 源码绑定，语言不影响 `gate_states_literal` 的判定，故无理由再动目标。
+
+### 四、自测与红绿（逐条可复跑，EXIT 为原始退出码）
+
+| 命令 | EXIT | 实际结果 |
+|---|---|---|
+| `GIT_INDEX_FILE=/tmp/r2d-index python3 scripts/gates/test_check_event_integrity_mutations.py` | 0 | Ran **60** tests OK；`validate_registry(DEFAULT_ROOT, MUTATIONS)` → problems **`[]`**（无 stale、无 gate site 问题） |
+| `python3 scripts/gates/check_event_integrity_mutations.py --mutation MUT-DOD-P5-legacy-clause --out /tmp/r2f-mut2 --json` | 0 | 控制树 `check_spec_hygiene` EXIT 0（`violations=250 errors=0`）；变异 `status=killed`／`verdict=killed`／`reason=named_assertion`／`assertion_hit=true`／`counted_killed=true`／`control_tree_green=true`／`not_evidence_backed=[]`；变异树门输出 `…/spec.md:13: R4 go-file in requirement '保留保护与回收协调': …`、`violations=251 errors=1`、门退出码 1 |
+| `python3 scripts/gates/check_dod_coverage.py --mutation-evidence /tmp/r2f-mut2` | 1 | **8 gap(s)**（P0-P4/P6-P8）；同命令不给产物时 9 条——P5 因该产物而不再「registered and unproven」，证明 DoD 的 P5 绑定真读这份判词 |
+| `python3 scripts/gates/test_check_dod_coverage.py` | 0 | **54/54 cases passed**（不回退） |
+| `python3 scripts/gates/check_doc_budget.py` | 0 | `RESULT: ok`（本叶改动只在 `scripts/` 与预算外的 `openspec/changes/**`） |
+
+### 五、负锚（两类，均在真实判据上取）
+
+1. **退役锚必须被判 stale**：以 `dataclasses.replace` 把条目换回原 `file`/`old`/`expect_assertion` 后交同一 `validate_registry` → `MUT-DOD-P5-legacy-clause: stale mutation, the patch anchor occurs 0 times in openspec/specs/event-lifecycle/spec.md`。故本条不是「任意新锚都能过」，退役形态被具名拒绝。
+2. **期望标题必须与新要求绑定**：拿**真实门日志**（`/tmp/r2f-mut2/mutations/MUT-DOD-P5-legacy-clause/run.log`，退出码 1）交 `classify_gate`——用现行 `expect_assertion` 判 `killed`／`named_assertion`；换成退役的 `'Time-based TTL expiration'` 判 `not_killed`／`assertion_not_matched`（`assertion_hit=false`）。故标题改名不是文案调整，旧标题在新落点上不再计杀死。
+
+### 六、未验证面
+
+1. **全量 `--all`（17 件套＋控制树）未跑**（长跑需授权），归 13.R4；本叶只跑单变异加控制树。
+2. **`golden/runtime/dod_predicates.json` 零改动是本叶的判断，不是遗漏**：P5 块只登记 `measure`/`scope`/`anchor.gate`/`mutation.id`，从不指名目标文件或要求标题，故重指不牵动绑定；`mutation_verdicts` 仍 `[]`（DoD 运行产物由 13.R4 的正式入口一次性产出）。
+3. **`comment_policy` 两口径未复跑**：本叶只改 `description` 字符串（数据，非注释）与一处 patch 字面量，产品 Go 与脚本注释零改动。
+4. **环境故障未修（必须上报）**：首次 selftest 的 `ClosureCliTest.setUpClass` 因 `git ls-files … fatal: not a git repository` 报错（Ran 56 ＋1 error，4 例因此未跑），同一命令以 `GIT_INDEX_FILE=/tmp/r2d-index` 重跑即 Ran 60 OK。与 13.R2d 登记的 iCloud 逐出 `.git` 元数据故障同源；判据零改动、零 git 写，故障本体交编排者处理。
+
+**13.R3b 复验（2026-11-18，逐条重跑，EXIT 为原始退出码）**：`python3 scripts/gates/test_check_runtime_evidence.py` → EXIT 0、Ran **126** tests OK；`python3 scripts/gates/test_check_dod_coverage.py` → EXIT 0、**54/54 cases passed**；`python3 scripts/gates/test_check_event_integrity_mutations.py` → EXIT 0、Ran **60** tests OK（74.418 s）；`python3 scripts/scenarios/test_run_runtime_scenarios.py` → EXIT 0、Ran **40** tests OK；§五 的 run 产物 `check_runtime_evidence.py --contract golden/runtime/event_integrity_scenarios.json --repo-root . --evidence /tmp/r2e-full/repeat-1/evidence.json --json` → EXIT 0、`ok=true`／`errors: []`／29 test・135 anchor・9 包・180 事件行（本次改动落在 docs、`golden/runtime/dod_predicates.json` 与脚本夹具，不在该产物的闭包内，故旧产物仍绑现树）。四缺陷的代码落点在本次复验中逐条在位：`check_event_matrix_args`（:2327，由 `check_event_invocations` :2460 调起）、`check_mutation_gate_tool`（:2825，:2879 调起）、`check_mutation_evidence` 的 `counted_killed`/`assertion_hit` 必真（:2806/:2814）、`check_dod_coverage.bind_mutation_evidence` 调 `check_mutation_evidence`（:659）。
+
+## 十九、R4a 执行落地（mutation 全量真跑与 DoD 运行证据，2026-11-19）
+
+### 一、跑法与产物
+
+`--all` 在隔离副本树上驱动 23 条启用变异（17 条测试变异＋2 条门锚变异＋4 条折叠变异）与 19 项控制（17 个 go 控制测试＋`check_spec_hygiene.py`／`check_dead_producers.py` 两个门控制）。产物 `/tmp/r4a-mut2/evidence.json`：`mode=live`、`profile=event-integrity`、`git_head=0f84b2d1…`、`contract_digest=sha256:e1dfb96b…`、`source_binding.digest=sha256:93cc349d…`（`before`＝`after`，单模块 `.`／`roles=[tested]`／无 local replace 边）、`gate_tool.digest=sha256:363fe485…`、python 3.12.8／go1.27.1。gate 原始退出码 **0**、`gate.ok=true`、`failures=[]`、`not_evidence_backed=[]`。
+
+### 二、逐变异判词
+
+23/23 均为 `status=killed`／`verdict=killed`／`assertion_hit=true`／`counted_killed=true`：`MUT-EVID-02-dual-material-input`、`MUT-EVID-03-busy-notice-drop`、`MUT-G1-meditation-busy-drop`、`MUT-CAND-01.2-early-confirm`、`MUT-CAND-01.1-conflicting-body`、`MUT-CAND-02.2-wrong-target`、`MUT-EVID-04-position-boundary`、`MUT-CAND-01.8-storage-success`、`MUT-CAND-01.2-handover-confirm`、`MUT-CAND-01.10-alive-process-complete`、`MUT-FOLD-01..04`、`MUT-DOD-P0..P8`。无 `not_applied`、无 stale：`run_gate` 以 `validate_registry` 为前置，锚 0 命中或门锚不成立时直接 `GateError`，本次未触发。
+
+### 三、DoD 消费与两类负锚
+
+| 命令 | EXIT | 结果 |
+|---|---|---|
+| `check_dod_coverage.py --mutation-evidence /tmp/r4a-mut2` | **0** | `9/9 criteria bound and proven`（P0-P8 全闭，R3a 前的 9 gap 归零） |
+| `check_dod_coverage.py --mutation-evidence /tmp/r4a-mut`（首跑红控制产物） | **1** | **11 gap(s)**：`the control tree must be green before a mutation counts`、`mutations must be a non-empty list` ＋ P0-P8 九条 unproven |
+| `check_dod_coverage.py`（无产物） | **1** | 9 gap(s)，九条「registered and unproven」 |
+
+首跑的 `gate.failures` 里另有 `confirmed defect EVID-02/EVID-03/EVID-04 … must map to exactly one mutation, found 0` 三条 —— 那是 `evaluate_gate` 按 `records`（而非 `selected`）核确认缺陷映射，0 变异执行时必然为 0 命中，故它是红控制的下游症状，不是映射缺陷：注册表侧 `MUT-EVID-02`→`EVID-02-dual-material-input`、`MUT-EVID-03`→`EVID-03-busy-notice-loss`、`MUT-EVID-04`→`EVID-04-notice-visibility-loss` 单射成立，重跑全绿后这三条同时消失。
+
+### 四、bundle 现树绑定（本叶证明面）
+
+bundle＝`/tmp/r4a-bundle`：`event-short/repeat-1/{evidence.json,test-log.jsonl}`（新鲜短跑 `--scope event-short --seed 1 --window 256 --repeat-index 1`，`run_id=77d2965c-bb9e-4f00-b858-9ed2e3fa4fc2`、`verdict=match`、`repeats: passed=1/10`）＋`mutations/evidence.json`（`/tmp/r4a-mut2`）。
+
+`check_runtime_evidence.py --contract golden/runtime/event_integrity_scenarios.json --repo-root . --bundle /tmp/r4a-bundle --json` → EXIT **1**，4 条错误**全为矩阵完整度**（short 1/10、`repeat_index` 覆盖 `[1]`≠1..10、long 0/6、六组合缺），`counts={bundle_evidence_files:2, bundle_short_evidence:1, bundle_long_evidence:0, bundle_mutation_evidence:1, event_log_tests:180, event_log_packages:9}`；闭包/现树指纹/gate_tool/判词一致类错误 **0 条**。同短跑单份 `--evidence` → EXIT **0**／`ok=true`／`errors: []`／29 test・135 anchor・9 包・180 行。**整包（十短/六长）归 09.R3**：本叶只证 mutations 与 short 的绑定面成立，六长未跑，故整包绿不得在本叶宣称。
+
+### 五、自测不回退
+
+`test_check_event_integrity_mutations.py` EXIT 0／Ran **60** OK（79.103 s）；`test_check_dod_coverage.py` EXIT 0／**54/54 cases passed**；`test_check_runtime_evidence.py` EXIT 0／Ran **126** OK。
+
+### 六、环境故障与未验证面
+
+1. **首跑 `--all` 的 P4 控制红（加载态墙钟抖动，非树状态）**：`TestSymptomAnchorBootCostFlatAcrossGenerations` 报 `the wall clock of the assemble grows with the history: the boot of generation 4 took 40.74075ms beside the 18.870875ms of generation 1, over the bound 37.74175ms of 2 times the second boot`（`wallClock=[22.39 18.87 26.20 28.70 40.74]ms`），判 `red/test_failed` ⇒ 0 条变异执行、gate 以 `no mutation was run` 收尾（EXIT 1，产物留在 `/tmp/r4a-mut`）。同一用例在本树单跑 ×3 全绿（8.156 s／8.529 s／8.447 s），机器空闲后重跑 `--all` 全绿 ⇒ 归因机器负载，非树回归；两次跑的判据、产品代码、注册表零改动。**该墙钟判据（P4 的 `bound.factor=2` 打在 18-40 ms 量级）在高负载机上可复现红，属判据面设计问题**：改造需要动产品测试（`assembly/symptom_anchor_recovery_test.go`）与 P4 谓词，超出本叶写面，登记待裁。附带事实：一次红控制即让整份报告不可用（26 条判词全部归零），故 13.R4 终验若在 CI 并发负载下重跑，仍有同样风险。
+2. **六长真跑未跑**（六组合×6270 s 上界），`--bundle` 全绿与整包完整度归 09.R3；`bash scripts/lint.sh`／`bash scripts/preflight.sh` 全链未真跑，本叶只证 DoD 与绑定消费面。
+3. **`.git` 元数据仍是 iCloud 逐出占位**：全程用 `GIT_DIR=/tmp/ri-gitdir GIT_INDEX_FILE=/tmp/r2d-index`，零 git 写；故障本体交编排者。
+
+## 二十、R3 执行落地（公共拒绝入口与归档/合并接入，2026-11-19）
+
+### 一、落地形态：三判合一，接在「证据从这里来」的作业上
+
+归档这件事的判据有三条，缺一条就不该放行：**证据绑不绑这棵树**、**DoD 判词来自运行产物还是登记表**、**主规格归档后是否仍 strict**。§四 的三行入口因此各归其位：
+
+| 入口 | 落点 | 消费什么 |
+|---|---|---|
+| 本地链 | `scripts/gates/preflight.sh`（R3a 已排好生成→绑定→消费；本叶零改动） | 本次运行目录 `$event_out`，末尾 lint 的 DoD 段经 `TAGENT_RUNTIME_EVIDENCE_DIR` 读 `$event_out/mutations` |
+| CI 必跑作业 | `ci.yml` 的 `test` 作业：`needs: [event-integrity-mutations]` ＋ `if: always()` ＋ 下载 artifact 到 `${{ runner.temp }}/dod/mutations` ＋ `Lint` 步 `env: TAGENT_RUNTIME_EVIDENCE_DIR: ${{ runner.temp }}/dod` | 本次运行上传的 mutation 产物本体（`--out` 目录即 `mutations/` 的内容） |
+| 归档 | 新增 `scripts/gates/archive-preflight.sh`：证据门 → DoD 门 → `check-openspec.sh`，各自留原始退出码；`--commit REV [--base]` 从候选提交实算新增归档路径 | 同一份证据目录（`--evidence` 或 `TAGENT_RUNTIME_EVIDENCE_DIR`）＋ 候选提交的新增路径 |
+| 合并 | 外部 `required_status_checks` | **今日 `ABSENT`，本叶零改动**（须明示授权） |
+
+两处设计取舍值得写下：**为什么 DoD 消费放在 `test` 作业**——`golden/runtime/dod_predicates.json` 九条谓词的 `ci_gate` 全是 `test`，把消费挪进 `event-integrity-required` 或新作业会让这九条绑定变成假话，而改 golden 不在本叶写面；代价是 `test` 串在变异作业之后，关键路径约加该作业时长。**为什么 `always()`**——被跳过的作业在必需检查里显示为绿，而"上游失败所以没有产物"必须在本作业红（下载失败即红），不能以跳过代替。
+
+### 二、与计划差异与被否方案
+
+| 项 | 计划 | 实际 | 理由 |
+|---|---|---|---|
+| `scripts/gates/preflight.sh` | §四「追加证据拒绝一步」 | **未改** | 该链已按 `set -euo pipefail` 在 `event evidence binding` 步对非零证据中止，且末尾 lint 内含 DoD 与 openspec；再插一个包装步会在同一次命令里把三条判据各跑第二遍，不增判据只增时长。归档时点的问题是独立一问，归 `archive-preflight.sh` |
+| 归档包装 | 「包装脚本或 preflight 步骤」 | 只做**门**（不代跑 `openspec archive`） | 代跑会把"归档"这一动作藏进脚本；门只回答"能不能归档"，`openspec archive <change>` 仍由人显式执行，判据与动作分离 |
+| 绕行检测 | 「提交检查及服务端必需检查」 | `--commit` 模式 + 如实登记未安装 | 本地脚本拦不住不调用它的命令；把判据挂在候选提交的实际新增路径上是唯一不靠自觉的面，调用方（hook／必需检查）须授权后配置 |
+| 六反例的构造 | 拟新增 fixture | 用 `/tmp/r3neg/*` 硬链副本**只改一处** | 冻结证据仍合法，反例的红只能来自被改的那一处；不新造"像证据"的合成字典 |
+
+### 三、逐条可复跑（原始退出码，独立语句）
+
+| 命令 | EXIT | 结果 |
+|---|---|---|
+| `bash scripts/gates/archive-preflight.sh --evidence /tmp/r333-bundle` | **0** | `1/3` 绑定齐、`2/3` `9/9 criteria bound and proven`、`3/3` `OK: all main specs pass validate --strict` |
+| `… --evidence /tmp/r333-bundle --expect-rev HEAD` | **0** | `evidence git_head 0f84b2d…, candidate 0f84b2d…` |
+| `… --commit HEAD --evidence /tmp/r333-bundle` | **0** | `adds no path under the archive tree; nothing to judge` |
+| `… --commit ec03877… --evidence /tmp/r333-bundle` | **1** | `adds 74 archived path(s)` ＋ `the run products describe revision 0f84b2d…, not ec03877…` |
+| DoD 段（`lint.sh:148-159` 段体逐字单跑）＋合法产物 | **0** | `9/9 criteria bound and proven` ＋ 自测 `54/54 cases passed` |
+| 同上 ＋ 变量未设 | **1** | `TAGENT_RUNTIME_EVIDENCE_DIR is unset; the DoD gate counts mutation run products and there is no evidence directory to read` |
+| 同上 ＋ 目录无 `mutations/` | **1** | `the evidence directory … holds no mutations/ product` |
+| 同上 ＋ 手填 killed | **1** | `not counted as killed … cannot count here`；DoD 由 9/9 转 `11 gap(s)` |
+| `python3 scripts/gates/check_dod_coverage.py --mutation-evidence /tmp/r333-bundle/mutations`（改 `ci.yml` 后复跑） | **0** | `9/9`（证明作业名解析未被接线破坏） |
+| `python3 scripts/gates/test_check_dod_coverage.py` | **0** | `54/54 cases passed` |
+| `python3 scripts/gates/check_runtime_evidence.py --bundle /tmp/r333-bundle --repo-root .` | **0** | `ok=true`、`errors: []` |
+| `bash scripts/gates/check-openspec.sh` | **0** | `OK: all main specs pass validate --strict.` |
+| `openspec validate runtime-recovery-ideal --strict` | **0** | `Change 'runtime-recovery-ideal' is valid` |
+| `GOFLAGS=-buildvcs=false go run ./scripts/codetools proc-refs scripts .github/workflows` | **1** | 两处新改文件 **0 条** `PROCESS-ARTIFACT-CITE`；现存 1 条 `scripts/gates/test_check_no_prefix_criterion.py:24` 为外来 |
+| `gh api repos/SpellingDragon/tagent/branches/main/protection --jq '.required_status_checks // "ABSENT"'` | **0** | **`ABSENT`** |
+| `TAGENT_RUNTIME_EVIDENCE_DIR=/tmp/r333-bundle bash scripts/lint.sh`（全量） | **1** | 红在 DoD 段之前，归因见本节之五 |
+
+### 四、六条归档/合并反例（每条只改一处，全部具名拒）
+
+| # | 反例 | 构造 | EXIT | 具名拒绝（原文关键句） |
+|---|---|---|---|---|
+| 1 | 零测试 | 短跑 test-log 清空并重算 `test_log_sha256`（期望集合仍非空） | **1** | `no run/pass in test-log for …::TestEventIntegrityReproduction (zero match is a failure, even when the process exited 0)` |
+| 2 | 跳过 | 一条顶层 `pass` 动作改 `skip` | **1** | `…::TestEventIntegrityApproval recorded skip in test-log` |
+| 3 | 过期证据（源树指纹不一致） | `source_binding.modules[0].content_hash` 改全 0 | **1** | `module '.' content digest sha256:000… does not match this tree's sha256:cfc18188…; the evidence describes another source tree` |
+| 4 | 错提交 | `--expect-rev HEAD^`，证据仍绑 `0f84b2d…` | **1** | `the run products describe revision 0f84b2d…, not 9547fac…: evidence from another commit cannot archive this one` |
+| 5 | 手填 killed | 追加一条 `status=killed`／`counted_killed=False`／`assertion_hit=False` 的变异记录 | **1** | `is not counted as killed (counted_killed False); a kill the producer did not count cannot count here` ＋ `did not hit its named assertion` |
+| 6 | 缺分片 | 删 `long-s42-w32768` | **1** | `bundle is missing event-long matrix combination(s) [(42, 32768)]` |
+| 7 | 绕过包装（直接 `openspec archive -y`／`mv`） | `--commit <真实归档提交>` | **1** | 先列 `74 archived path(s)`，再以 `commit-identity` 拒绝；同一命令对不新增归档路径的 `HEAD` → EXIT **0** |
+
+第 7 条同时说明判据的形状：`--no-renames` 让 `git mv` 必须以**新增**出现，故"移动目录"与"直接 archive"走同一条判据。**它可判，但目前不自动执行**——`openspec archive` 自己不核 DoD，唯一能自动拦住的是提交检查与必需检查，二者今日均未配置。
+
+### 五、未验证面与外部权限（不冒认）
+
+1. **CI 未真跑**：接线只经 YAML 解析（作业名 10 个不变、`needs`／`if`／`env` 读出）与本地同一 `env` 语义验证；`gh run view`／触发一轮须授权。且今日 `test` 作业的 DoD 段仍被两处**外来**红挡在前面：`comment_policy` 棘轮（`new violations relative to the baseline are not allowed`，R293/R294 已登记）与 `test_check_runtime_symptoms.SymptomCheckerTest.test_registry_matches_the_module`（已提交的 `TestLocalSmokeSymptomBootDeployed` 未登记进 `check_event_semantics_symptoms.SYMPTOM_PARENTS`，`Ran 316` 中 `failures=1`）。两处都不在本叶写面，未放宽任何判据去凑绿。
+2. **`bash scripts/gates/preflight.sh` 全链未跑**（十短＋六长＋变异，需授权与约 30–60 min）；本叶未改该文件，"证据非零即中止"由既有 `set -euo pipefail` 与同三条判据继承。
+3. **分支保护／必需检查／`core.hooksPath` 未配置**：`required_status_checks` 实测 `ABSENT`，pre-commit 未启用，故 `--commit` 模式目前无日常调用方；L4 的"合并侧拒绝面"须用户明示授权后再配置并读取实际保护范围与绕过权限。
+4. **`docs/OPERATION.md` §5.1 过期**：其「CI 的 `test` 作业今天仍裸跑 `bash scripts/lint.sh`（`.github/workflows/ci.yml:109`）」已随本叶接线与行号变化失效；该文件不在本叶写面，登记待改。

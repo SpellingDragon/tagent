@@ -6,7 +6,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"reflect"
+	"runtime"
 	"slices"
 	"strings"
 	"sync"
@@ -1160,6 +1163,213 @@ func TestCloseFilesTheCheckpointTheNextBootReads(t *testing.T) {
 	if restored, _ := booted.CheckpointFiled(); restored != id {
 		t.Fatalf("the boot restored the checkpoint %q, want the %q the close filed", restored, id)
 	}
+}
+
+// errInjectedCloseBarrier names the failure a close fixture injects at the storage
+// engine seam: the barrier a commit completes did not complete.
+var errInjectedCloseBarrier = errors.New("the barrier over the journal did not complete")
+
+// closeBarrierEngine is the storage engine seam a close fixture wraps: it states
+// which batches carried keys and which only completed a barrier, and it fails the
+// barrier-completing ones once the fixture arms it. The seam is the one the engine
+// contract names for failure injection, so the same injection runs over any engine.
+type closeBarrierEngine struct {
+	ledger.AtomicStore
+	mu sync.Mutex
+	// writes counts the batches that carried keys.
+	writes int
+	// barriers counts the batches that carried none and only completed a barrier.
+	barriers int
+	// failed counts the armed barriers the wrapper answered with the failure.
+	failed int
+	// written holds the keys the batches carried, in commit order.
+	written []string
+	// armed answers every barrier-completing batch from then on.
+	armed bool
+	// calls counts the batches the engine was handed.
+	calls int
+	// failedAt is the call number of the first armed barrier, and -1 before one.
+	failedAt int
+}
+
+// Commit records the batch it is handed and answers the barrier the fixture armed.
+func (e *closeBarrierEngine) Commit(ctx context.Context, batch ledger.Batch) error {
+	carries := len(batch.Puts) > 0 || len(batch.Deletes) > 0
+	e.mu.Lock()
+	e.calls++
+	if carries {
+		e.writes++
+		for _, put := range batch.Puts {
+			e.written = append(e.written, put.Key)
+		}
+	} else {
+		e.barriers++
+	}
+	armed := e.armed
+	if armed && !carries {
+		e.failed++
+		if e.failedAt < 0 {
+			e.failedAt = e.calls
+		}
+	}
+	e.mu.Unlock()
+	if armed && !carries {
+		return fmt.Errorf("%w: %w", ledger.ErrJournalBarrier, errInjectedCloseBarrier)
+	}
+	return e.AtomicStore.Commit(ctx, batch)
+}
+
+// Close releases the engine the wrapper holds, so the storage root's write rights
+// leave with the view that holds them.
+func (e *closeBarrierEngine) Close() error {
+	if closer, held := e.AtomicStore.(interface{ Close() error }); held {
+		return closer.Close()
+	}
+	return nil
+}
+
+// arm fails every barrier-completing batch this engine is handed from now on.
+func (e *closeBarrierEngine) arm() {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.armed = true
+}
+
+// counted states what the engine was handed so far: the batches that carried keys,
+// the ones that only completed a barrier and the armed barriers it failed.
+func (e *closeBarrierEngine) counted() (writes, barriers, failed int) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.writes, e.barriers, e.failed
+}
+
+// afterFailure states how many batches the engine was handed after the first
+// armed barrier, and -1 while it was handed none that failed.
+func (e *closeBarrierEngine) afterFailure() int {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.failedAt < 0 {
+		return -1
+	}
+	return e.calls - e.failedAt
+}
+
+// writtenKeys states the keys the batches carried, in commit order.
+func (e *closeBarrierEngine) writtenKeys() []string {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return append([]string(nil), e.written...)
+}
+
+// closeBarrierRun assembles one run whose storage commits through probe over root,
+// so a test reads the batches of a commit beside the close that follows it.
+func closeBarrierRun(t *testing.T, ctx context.Context, root string, probe *closeBarrierEngine) *Run {
+	t.Helper()
+	engine, err := ledger.OpenAtomicStore(ctx, ledger.StorageConfig{Type: ledger.StorageJournal, Root: root, WriteRights: true})
+	if err != nil {
+		t.Fatalf("open the engine of the root: %v", err)
+	}
+	probe.AtomicStore = engine
+	return windowChainRun(t, ctx, WithStorage(ledger.StorageConfig{Type: ledger.StorageJournal, Root: root, Engine: probe}))
+}
+
+// TestCloseReportsTheActualBarrierFailure pins the barrier a close takes over the storage engine, and that a failed one reaches the caller.
+//   - the fixture's facts commit through the probe, so the keys the close's barrier is taken over are the ones the assertions read back
+//   - a barrier that does not complete inside the close answers the close, named as the barrier failure the engine states instead of a clean close
+//   - that failure is not a refusal decided before a write, and it is the last batch the close handed the engine
+//   - the checkpoint the close files before its last barrier stands filed, so the error comes from that barrier and not an earlier layer
+//   - the failed close still releases the storage root and leaves the facts the commits landed under it, so the error is not a state it broke
+//   - a close beside no armed barrier answers nil and takes that same barrier, so the failure above is the armed barrier (negative)
+//
+// 契约: docs/wiki/memory/memory-architecture.md#local-file-kv
+func TestCloseReportsTheActualBarrierFailure(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("an_armed_barrier_failure_reaches_the_callers_close", func(t *testing.T) {
+		root := t.TempDir()
+		probe := &closeBarrierEngine{failedAt: -1}
+		run := closeBarrierRun(t, ctx, root, probe)
+		run.checkpointEvery = 1 << 30
+		run.checkpointPeriod = 1000 * time.Hour
+		addr := event.Address{AgentID: "agent-a", SessionID: "session-checkpoint-barrier"}
+		commitWindowTurns(t, ctx, run, addr, 1)
+		if writes, _, _ := probe.counted(); writes == 0 {
+			t.Fatal("the fixture committed no fact through the probe, so a close under it proves nothing")
+		}
+		probe.arm()
+		_, err := run.Close(ctx, agent.CloseRequest{Timeout: time.Now().Add(30 * time.Second)})
+		writes, barriers, failed := probe.counted()
+		if failed == 0 {
+			t.Fatalf("the close was handed %d batch(es) carrying keys and completed %d barrier(s) through the probe without reaching the armed barrier, so the answer it states is not the barrier's",
+				writes, barriers)
+		}
+		if after := probe.afterFailure(); after != 0 {
+			t.Fatalf("the engine was handed %d batch(es) after the barrier that did not complete, want the failure the close ends on instead of one a later call of the close could have swallowed", after)
+		}
+		if id, _ := run.CheckpointFiled(); id == "" {
+			t.Fatalf("the close answered %v beside no checkpoint filed, want the checkpoint it files before the barrier it ends on", err)
+		}
+		if err == nil {
+			t.Fatalf("the close answered no failure beside %d barrier(s) that did not complete, want the barrier it could not take", failed)
+		}
+		if !errors.Is(err, ledger.ErrJournalBarrier) {
+			t.Fatalf("the close beside a barrier that did not complete answered %v, want %v", err, ledger.ErrJournalBarrier)
+		}
+		if !strings.Contains(err.Error(), errInjectedCloseBarrier.Error()) {
+			t.Fatalf("the close answered %q, want the failure the barrier answered", err)
+		}
+		for _, refusal := range []struct {
+			what string
+			err  error
+		}{
+			{"a view Close ended refusing a later commit", ledger.ErrCommitAfterClose},
+			{"a view holding no write rights", ledger.ErrCommitWithoutWriteRights},
+			{"a frame the size bound refuses", ledger.ErrJournalFrameTooLarge},
+		} {
+			if errors.Is(err, refusal.err) {
+				t.Fatalf("the close answered %v beside a barrier that did not complete, want the barrier's own failure and not %s", err, refusal.what)
+			}
+		}
+		engine, err := ledger.OpenAtomicStore(ctx, ledger.StorageConfig{Type: ledger.StorageJournal, Root: root, WriteRights: true})
+		if err != nil {
+			t.Fatalf("open the root the failed close ended on = %v, want a root the next writer is admitted to", err)
+		}
+		keys := probe.writtenKeys()
+		held := 0
+		for _, key := range keys {
+			pairs, err := engine.Read(ctx, ledger.Fetch{Key: key})
+			if err != nil {
+				t.Fatalf("read %s back from the released root: %v", key, err)
+			}
+			if len(pairs) > 0 {
+				held++
+			}
+		}
+		if held == 0 {
+			t.Fatalf("the released root holds no value under any of the %d key(s) the commits landed, want the facts the close's barrier was taken over", len(keys))
+		}
+		if closer, ok := engine.(interface{ Close() error }); ok {
+			if err := closer.Close(); err != nil {
+				t.Fatalf("close the root the fixture reopened: %v", err)
+			}
+		}
+	})
+
+	t.Run("a_close_beside_no_armed_barrier_answers_nil", func(t *testing.T) {
+		root := t.TempDir()
+		probe := &closeBarrierEngine{failedAt: -1}
+		run := closeBarrierRun(t, ctx, root, probe)
+		run.checkpointEvery = 1 << 30
+		run.checkpointPeriod = 1000 * time.Hour
+		addr := event.Address{AgentID: "agent-a", SessionID: "session-checkpoint-barrier-clean"}
+		commitWindowTurns(t, ctx, run, addr, 1)
+		if _, err := run.Close(ctx, agent.CloseRequest{Timeout: time.Now().Add(30 * time.Second)}); err != nil {
+			t.Fatalf("close a run whose barrier completes = %v, want a closed run", err)
+		}
+		if _, barriers, failed := probe.counted(); barriers == 0 || failed != 0 {
+			t.Fatalf("the unarmed close completed %d barrier(s) and failed %d of them through the probe, want the barrier this close takes completed", barriers, failed)
+		}
+	})
 }
 
 // refusingSlice is a state slice its holder refuses to state, so a cut that asks
@@ -2834,10 +3044,72 @@ func refusingBoot(consumers ...state.Stateful) Option {
 	})
 }
 
+// retryFoldedOutput commits windowed turns until the fold moves the first turn's output out of the projection, and answers that fact with the turn it belongs to.
+//   - the fold fires between commits as it does online, so the output the source query reads back by identity is material the projection has moved out: the retry of it is the one that must not state a second carriage
+func retryFoldedOutput(t *testing.T, ctx context.Context, run *Run, addr event.Address, turns int) event.Event {
+	t.Helper()
+	run.stopCheckpointFiler()
+	commitWindowTurns(t, ctx, run, addr, turns)
+	folded := event.EventID(timeStampKey(time.Date(2026, 11, 6, 12, 0, 0, 0, time.UTC), addr, 0, 3))
+	if slices.Contains(projectionKeysOf(t, run, addr), folded) {
+		t.Fatalf("the projection still carries %s: the fixture needs the fold to move it out", folded)
+	}
+	fact, err := run.CommittedEvent(ctx, folded)
+	if err != nil {
+		t.Fatalf("read the folded output back by identity: %v", err)
+	}
+	return fact
+}
+
+// retryFoldedOutputLeavesTheRangeAlone retries a folded output and requires the
+// presented range, the sequence and the filed products to stand as they were.
+func retryFoldedOutputLeavesTheRangeAlone(t *testing.T, ctx context.Context, run *Run, addr event.Address, fact event.Event) {
+	t.Helper()
+	run.mu.Lock()
+	_, held, carried := run.replaySlotLocked(addr)
+	run.mu.Unlock()
+	if !carried {
+		t.Fatalf("the chain %v presents no mapped sequence", addr)
+	}
+	endedAt, open := held.endedAt, held.rangeOpen
+	before := run.SessionPresented(addr)
+	keys := projectionKeysOf(t, run, addr)
+	products := countFoldProducts(t, ctx, run)
+	if _, err := run.CommitToSession(ctx, addr, fact); err != nil {
+		t.Fatalf("retry the folded output %s: %v", fact.Key, err)
+	}
+	run.mu.Lock()
+	_, after, _ := run.replaySlotLocked(addr)
+	run.mu.Unlock()
+	if after.endedAt != endedAt || after.rangeOpen != open {
+		t.Fatalf("the retry of the folded output %s moved the completed range from (%s, open=%t) to (%s, open=%t)",
+			fact.Key, endedAt, open, after.endedAt, after.rangeOpen)
+	}
+	if presented := run.SessionPresented(addr); !reflect.DeepEqual(presented, before) {
+		t.Fatalf("the retry of the folded output %s presented %v, want the range it stood at %v", fact.Key, presented, before)
+	}
+	if now := projectionKeysOf(t, run, addr); !slices.Equal(now, keys) {
+		t.Fatalf("the retry of the folded output %s restated the sequence as %v, want %v", fact.Key, now, keys)
+	}
+	if now := countFoldProducts(t, ctx, run); now != products {
+		t.Fatalf("the retry of the folded output %s filed %d products beside the %d the chain held: the fold stated the same material twice", fact.Key, now, products)
+	}
+}
+
 // TestRetryLeavesPresentedRangeAtTheLatestRound keeps successful consumers unchanged when an older fact is retried.
 //
 // 契约: docs/wiki/platform/platform-subsystems.md#framework-checkpoint
 func TestRetryLeavesPresentedRangeAtTheLatestRound(t *testing.T) {
+	t.Run("folded", func(t *testing.T) {
+		ctx := context.Background()
+		addr := event.Address{AgentID: "agent-a", SessionID: "retry-folded"}
+		run := windowChainRun(t, ctx)
+		fact := retryFoldedOutput(t, ctx, run, addr, 3)
+		if countFoldProducts(t, ctx, run) == 0 {
+			t.Fatalf("the fixture folded nothing: the retried output stands in the projection")
+		}
+		retryFoldedOutputLeavesTheRangeAlone(t, ctx, run, addr, fact)
+	})
 	for _, refuses := range []bool{false, true} {
 		t.Run(fmt.Sprintf("refuses=%t", refuses), func(t *testing.T) {
 			ctx := context.Background()
@@ -2869,6 +3141,50 @@ func TestRetryLeavesPresentedRangeAtTheLatestRound(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestRetryOfFoldedOutputDoesNotReopenTheRound pins the judgment the presented range advances under.
+//   - the retry of an output the fold already moved out of the sequence states no close of its own
+//   - so the range stays closed at the round that closed it and the sequence is not stated a second time
+//   - fixture: windowed turns whose fold replaced the first turn's output with a product, and the retry of that output through the live commit entry
+//   - positive: the range stays closed at the newest round and the presented range, the sequence and the filed products stand unchanged
+//   - negative: a judgment resting on what the projection retains answers the retried identity as newly carried
+//   - negative: that reopens the closed round and mints the same fold twice
+//   - consumer: the live commit entry (CommitToSession → commitFactNoCadence → StateRegistry.Reduce → projectionStateSlice.Reduce)
+//
+// 契约: docs/wiki/platform/platform-subsystems.md#framework-checkpoint
+func TestRetryOfFoldedOutputDoesNotReopenTheRound(t *testing.T) {
+	ctx := context.Background()
+	addr := event.Address{AgentID: "agent-a", SessionID: "retry-folded-range"}
+	run := windowChainRun(t, ctx)
+	fact := retryFoldedOutput(t, ctx, run, addr, 3)
+	retryFoldedOutputLeavesTheRangeAlone(t, ctx, run, addr, fact)
+}
+
+// TestRestartRetryOfFoldedOutputKeepsThePresentedRange pins the same judgment across a restart.
+//   - the chain on the storage tier already holds the folded output, so the retry of it after the rebuilt boot states no new position either
+//   - fixture: windowed turns over a durable root, the fold moving the first turn's output out, the source process closed
+//   - fixture: a rebuilt boot over the same root
+//   - positive: the retry leaves the presented range, the sequence and the filed products as the boot rebuilt them
+//   - negative: a retry the tier answers as already present and the fold answers as newly carried states the material the chain folded away a second time
+//   - consumer: the real boot entry (Assemble → seedAnchoredReplay → StateRegistry.Reduce) beside the live commit entry, over one durable root
+//
+// 契约: docs/wiki/platform/platform-subsystems.md#framework-checkpoint
+func TestRestartRetryOfFoldedOutputKeepsThePresentedRange(t *testing.T) {
+	ctx := context.Background()
+	storage := WithStorage(ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: t.TempDir()})
+	addr := event.Address{AgentID: "agent-a", SessionID: "retry-folded-restart"}
+	source := windowChainRun(t, ctx, storage)
+	fact := retryFoldedOutput(t, ctx, source, addr, 3)
+	endRun(t, source)
+
+	booted := windowChainRun(t, ctx, storage)
+	booted.stopCheckpointFiler()
+	if keys := projectionKeysOf(t, booted, addr); slices.Contains(keys, fact.Key) {
+		t.Fatalf("the rebuilt projection %v carries the folded output %s", keys, fact.Key)
+	}
+	retryFoldedOutputLeavesTheRangeAlone(t, ctx, booted, addr, fact)
+	endRun(t, booted)
 }
 
 // sessionBehalf states what its consumer folded in one session chain, so a cut of
@@ -2956,9 +3272,10 @@ func retryFactOf(identity string, addr event.Address) event.Event {
 	}
 }
 
-// TestConsumerBehindTheChainSurvivesARestart is symptom anchor S4: a cut over a fact no consumer applied is refused, and a restart resumes from the cut that landed.
+// TestConsumerBehindTheChainSurvivesARestart is symptom anchor S4: the cut over a fact no consumer applied is refused.
 //   - fixture: one consumer refuses one committed fact the projection never carries, after an earlier cut landed, and the process restarts
 //   - positive: the cut over it is refused by name, the earlier cut stays the newest, and the restarted consumer applies the fact it refused
+//   - positive: a restart resumes from the cut that landed
 //   - negative: a cut that covers a fact no consumer applied leaves that fact with no replay path, which the boot's derived set rejects
 //   - consumer: the real boot entry (restoreCheckpointState → seedAnchoredReplay → StateRegistry.Reduce) and the live commit entry
 //
@@ -2968,9 +3285,6 @@ func TestConsumerBehindTheChainSurvivesARestart(t *testing.T) {
 	defer cancel()
 	storage := WithStorage(ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: t.TempDir()})
 	addr := event.Address{AgentID: "agent-a", SessionID: "session-consumer-behind"}
-	// A delivery retry attempt is the fact the projection never carries: the fold
-	// that rebuilt the chain states it nowhere, so a cut standing past it leaves it
-	// with no replay path at all.
 	refusedFact := retryFactOf("notice-behind", addr)
 	refusedKey := refusedFact.Key
 	postCutKey := event.EventID("behind-1-0")
@@ -3145,7 +3459,8 @@ func TestCutRefusesToCoverAnUnappliedFact(t *testing.T) {
 // TestCutNeverCoversAnUnappliedFact pins that no chain scopes a refusal.
 // - the cut of the chain whose fact stands unapplied is refused, by the fact and the slice
 // - the cut of a chain the fact is not of is refused too: the framework guesses no chain a refusal belongs to
-// - the same identity committed again clears the refusal, every session cut files, and the slice of the chain beside it states that chain's facts and never the refused one
+//   - the same identity committed again clears the refusal, and every session cut files
+//   - the slice of the chain beside it states that chain's facts and never the refused one
 //
 // 契约: docs/wiki/platform/platform-subsystems.md#framework-checkpoint
 func TestCutNeverCoversAnUnappliedFact(t *testing.T) {
@@ -3283,6 +3598,218 @@ func TestAnchorRebuildFoldsTheRangeNoCheckpointVouches(t *testing.T) {
 	}
 }
 
+// orderObligation is the consumer of a chain whose state turns on the order its
+// facts arrive: it folds a fact only after one the chain committed earlier and
+// refuses any other by name. The rank map is the order a check read off the
+// living run, so the account states an obligation a rebuild that reorders the
+// chain breaks instead of folding a state no run derived.
+type orderObligation struct {
+	*foldRecorder
+	mu     sync.Mutex
+	rank   map[event.EventID]int
+	folded []event.EventID
+	last   int
+	begun  bool
+}
+
+// errOutOfOrderObligation names the refusal of a fact the chain committed before the fact folded last.
+var errOutOfOrderObligation = errors.New("the consumer refuses a fact the chain committed out of order")
+
+// Reduce folds one fact at the position the chain committed it.
+func (o *orderObligation) Reduce(ctx context.Context, evt event.Event) error {
+	position, ranked := o.rank[evt.Key]
+	o.mu.Lock()
+	if ranked && o.begun && position < o.last {
+		previous := o.folded[len(o.folded)-1]
+		o.mu.Unlock()
+		return fmt.Errorf("%w: %s stands before %s", errOutOfOrderObligation, evt.Key, previous)
+	}
+	if ranked {
+		o.begun, o.last = true, position
+	}
+	o.folded = append(o.folded, evt.Key)
+	o.mu.Unlock()
+	return o.foldRecorder.Reduce(ctx, evt)
+}
+
+// order reports the identities the consumer folded, in fold order.
+func (o *orderObligation) order() []event.EventID {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return append([]event.EventID(nil), o.folded...)
+}
+
+// anchorOrderChain boots a living run over one durable root, commits a chain of
+// three turns and commits the anchor payload the check names on top of it, and
+// answers the storage the restart opens with the consumer that folded the
+// living chain.
+func anchorOrderChain(t *testing.T, ctx context.Context, addr event.Address, tag string, survivors []anchorEntry) (Option, *orderObligation) {
+	t.Helper()
+	storage := WithStorage(ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: t.TempDir()})
+	live := &orderObligation{foldRecorder: &foldRecorder{name: "assembly.anchor-order-" + tag}}
+	source := wideWindowChainRun(t, ctx, storage, refusingBoot(live))
+	source.stopCheckpointFiler()
+	commitSessionTurns(t, ctx, source, addr, tag, 3)
+	payload, err := json.Marshal(survivors)
+	if err != nil {
+		t.Fatalf("encode the survivor payload: %v", err)
+	}
+	request := event.CompressRequestFor("assembly.test", "the commit order a rebuild folds", "the fixture folds a range beside the survivors it states")
+	product := event.CompressProductFor(request.ID, compressionProducer, event.EventID("-summary-"+tag), nil, "the folded summary").WithCheckpoint(payload)
+	if _, err := source.commitFactChecked(ctx, compressProductEvent(addr.SessionID, addr.AgentID, product, time.Now().UTC())); err != nil {
+		t.Fatalf("commit the anchor: %v", err)
+	}
+	endRun(t, source)
+	return storage, live
+}
+
+// TestAnchoredRecoveryPreservesCommitOrderAcrossSurvivors pins the one commit order a rebuild folds.
+// - positive: the facts a survivor payload states and the facts of the range beside it reach the state seam in commit order, element by element
+// - positive: the chain's survivors and its covered facts interleave in that order, so neither the payload nor the range alone states it
+// - positive: every fact folds once, the state each derives is the state the living run derived, and the projection still presents the payload's own order
+// - negative: a consumer whose obligation states any order but the commit order refuses the rebuild by name (TestAnchoredRecoveryRefusesAnOutOfOrderObligation)
+// - consumer: the real boot entry (Assemble → restoreCheckpointState → seedAnchoredReplay → seedFact → StateRegistry.Reduce)
+// - consumer: the live commit entry (commitFactNoCadence → StateRegistry.Reduce)
+//
+// 契约: docs/wiki/platform/platform-subsystems.md#framework-checkpoint
+func TestAnchoredRecoveryPreservesCommitOrderAcrossSurvivors(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+	addr := event.Address{AgentID: "agent-a", SessionID: "session-anchor-order"}
+	tag := "anchor-order"
+	first, last := event.EventID(tag+"-0-0"), event.EventID(tag+"-2-3")
+	survivors := []anchorEntry{
+		{Key: first, Type: event.TypeExternalInput, Summary: "ask"},
+		{Key: last, Type: event.TypeAgentOutput, Summary: "answer"},
+	}
+	storage, live := anchorOrderChain(t, ctx, addr, tag, survivors)
+	liveOrder := live.order()
+	rank := make(map[event.EventID]int, len(liveOrder))
+	for at, key := range liveOrder {
+		rank[key] = at
+	}
+
+	rebuilt := &orderObligation{foldRecorder: &foldRecorder{name: "assembly.anchor-order-rebuild"}, rank: rank}
+	rebuild := wideWindowChainRun(t, ctx, storage, refusingBoot(rebuilt))
+	rebuild.stopCheckpointFiler()
+
+	folded := make([]event.EventID, 0, len(rank))
+	for _, key := range rebuilt.order() {
+		if _, held := rank[key]; held {
+			folded = append(folded, key)
+		}
+	}
+	if len(folded) < 4 {
+		t.Fatalf("the rebuild folded %d chain fact(s), want the survivors beside the covered range", len(folded))
+	}
+	foldedSet := make(map[event.EventID]struct{}, len(folded))
+	for _, key := range folded {
+		foldedSet[key] = struct{}{}
+	}
+	want := make([]event.EventID, 0, len(folded))
+	for _, key := range liveOrder {
+		if _, held := foldedSet[key]; held {
+			want = append(want, key)
+		}
+	}
+	if !slices.Equal(want, folded) {
+		t.Fatalf("the rebuild folded the chain as %v, want the order the living run committed it in: %v", folded, want)
+	}
+
+	restored := map[event.EventID]struct{}{first: {}, last: {}}
+	var restoredSeen, coveredSeen, coveredAfter, survivorAfter bool
+	for _, key := range folded {
+		if _, held := restored[key]; held {
+			if coveredSeen {
+				survivorAfter = true
+			}
+			restoredSeen = true
+			continue
+		}
+		if restoredSeen {
+			coveredAfter = true
+		}
+		coveredSeen = true
+	}
+	if !coveredAfter || !survivorAfter {
+		t.Fatalf("the rebuild folded the survivors beside the covered range as %v, want the fixture's two classes to interleave so no per-class order states it", folded)
+	}
+
+	for key, count := range rebuilt.folds() {
+		if _, held := rank[key]; !held {
+			continue
+		}
+		if count != 1 {
+			t.Fatalf("the rebuild folded %s %d time(s), want the seam to take every fact once", key, count)
+		}
+		wantState, _ := live.derivedOf(key)
+		gotState, _ := rebuilt.derivedOf(key)
+		if gotState != wantState {
+			t.Fatalf("the rebuild derived %q for %s, want the state the living run derived: %q", gotState, key, wantState)
+		}
+	}
+
+	keys := projectionKeysOf(t, rebuild, addr)
+	if wantKeys := []event.EventID{first, last}; !slices.Equal(keys, wantKeys) {
+		t.Fatalf("the rebuilt projection presents %v, want the anchor's own display order %v with the covered range left to the seam", keys, wantKeys)
+	}
+	endRun(t, rebuild)
+}
+
+// TestAnchoredRecoveryRefusesAnOutOfOrderObligation pins that a rebuild refuses a reordered chain by name.
+// - negative: a consumer whose obligation states the covered range before the survivors it states refuses the boot, naming the fact and the fact it stands before
+// - consumer: the real boot entry (Assemble → restoreCheckpointState → seedAnchoredReplay → seedFact → StateRegistry.Reduce)
+//
+// 契约: docs/wiki/platform/platform-subsystems.md#framework-checkpoint
+func TestAnchoredRecoveryRefusesAnOutOfOrderObligation(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+	addr := event.Address{AgentID: "agent-a", SessionID: "session-anchor-order-refused"}
+	tag := "anchor-order-refused"
+	first, last := event.EventID(tag+"-0-0"), event.EventID(tag+"-2-3")
+	survivors := []anchorEntry{
+		{Key: first, Type: event.TypeExternalInput, Summary: "ask"},
+		{Key: last, Type: event.TypeAgentOutput, Summary: "answer"},
+	}
+	storage, live := anchorOrderChain(t, ctx, addr, tag, survivors)
+
+	restored := map[event.EventID]struct{}{first: {}, last: {}}
+	outOfOrder := make(map[event.EventID]int, len(live.order()))
+	for _, key := range live.order() {
+		if _, held := restored[key]; held {
+			continue
+		}
+		if key == event.EventID("-summary-"+tag) {
+			continue
+		}
+		outOfOrder[key] = len(outOfOrder)
+	}
+	outOfOrder[first] = len(outOfOrder)
+	outOfOrder[last] = len(outOfOrder)
+	if len(outOfOrder) < 4 {
+		t.Fatalf("the fixture states %d position(s), want the covered range beside the survivors", len(outOfOrder))
+	}
+
+	provider := &snapshotTestModel{answer: func(*model.Request) *model.Response {
+		return &model.Response{Choices: []model.Choice{{Message: model.Message{Role: model.RoleAssistant, Content: factWindowAnswer}}}, Done: true}
+	}}
+	_, err := Assemble(ctx, &config.Declaration{
+		Entry:  "agent-a",
+		Agents: []config.AgentSpec{{ID: "agent-a", Model: "model-a", ReplayWindow: 100000}},
+	}, map[event.AgentID]NativeAgent{"agent-a": {Model: provider}},
+		WithGovernance(snapshotTestGovernance{}), storage,
+		refusingBoot(&orderObligation{foldRecorder: &foldRecorder{name: "assembly.anchor-order-refused"}, rank: outOfOrder}))
+	if err == nil {
+		t.Fatal("the rebuild folded the chain beside an obligation that states no commit order, want it refused by name")
+	}
+	if !errors.Is(err, errOutOfOrderObligation) {
+		t.Fatalf("the rebuild answered %v, want it refused by the order obligation", err)
+	}
+	if !strings.Contains(err.Error(), string(first)) {
+		t.Fatalf("the refusal states %q, want it to name the survivor %s the out-of-order fact stands before", err, first)
+	}
+}
+
 // TestRestartResumesTheObligationTheConsumerFailed pins the retry a refusal waits for.
 // - the cut attempted beside the refusal is refused by name, so no cut states a position past the fact
 // - the same identity committed again folds it into the consumer that refused it and files no second record
@@ -3390,11 +3917,32 @@ func (s *owedSlice) open(item string) {
 	s.owed = append(s.owed, item)
 }
 
-// TestUnmountKeepsTheOwedItemsOfItsSlice is symptom anchor S5: an unmount must hand the owed work over or refuse by name.
-//   - fixture: one slice states an open obligation, a cut states it, the slice is unmounted, a second cut is filed, the process restarts
-//   - positive: the obligation survives the unmount — a named successor states it, or the unmount is refused by name with the unfinished count
-//   - negative: a disposer that deletes the holder leaves the obligation stated nowhere, which the second cut and the boot both reject
-//   - consumer: StateRegistry.Register's disposer, Run.Checkpoint and the real boot entry
+// UnfinishedWork reports the obligations an unmount would lose.
+func (s *owedSlice) UnfinishedWork() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.owed)
+}
+
+// owes reports the obligations the slice still holds.
+func (s *owedSlice) owes() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]string(nil), s.owed...)
+}
+
+// settle clears the obligations the slice answered.
+func (s *owedSlice) settle() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.owed = nil
+}
+
+// TestUnmountKeepsTheOwedItemsOfItsSlice is symptom anchor S5: a slice that still owes work may not be unmounted.
+//   - fixture: the slice states an open obligation, a cut states it, the disposer is called, the slice records a second one, a cut follows, the process restarts
+//   - positive: the disposer refuses by name with the count, the registry keeps that very holder, the restart hands both obligations back to that name
+//   - negative: a disposer that deletes the holder answers no refusal and states the obligations nowhere, which the count, the kept name and the payload each reject
+//   - consumer: Run.RegisterStateSlice's disposer, Run.Checkpoint and the real boot entry
 //
 // 契约: docs/wiki/platform/platform-subsystems.md#framework-checkpoint
 func TestUnmountKeepsTheOwedItemsOfItsSlice(t *testing.T) {
@@ -3404,9 +3952,10 @@ func TestUnmountKeepsTheOwedItemsOfItsSlice(t *testing.T) {
 	addr := event.Address{AgentID: "agent-a", SessionID: "session-owed-unmount"}
 	const sliceName = "assembly.owed-consumer"
 	const owedItem = "the-notice-still-owed"
+	const laterItem = "the-notice-that-arrived-after-the-refusal"
 
 	holder := &owedSlice{name: sliceName}
-	var unmount func()
+	var unmount func() error
 	source := windowChainRun(t, ctx, storage, withBootConfigReconcile(func(ctx context.Context, run *Run, decl *config.Declaration, agents map[event.AgentID]NativeAgent) error {
 		dispose, err := run.RegisterStateSlice(holder)
 		if err != nil {
@@ -3429,37 +3978,62 @@ func TestUnmountKeepsTheOwedItemsOfItsSlice(t *testing.T) {
 		t.Fatalf("the first cut states %q, want the open obligation %s (the fixture states nothing, so the unmount proves nothing)", slicePayloadOf(t, first, sliceName), owedItem)
 	}
 
-	unmount()
-	if names := source.StateRegistry().Names(); sliceContainsName(names, sliceName) {
-		t.Fatalf("the registry still names %v after the unmount, want the slice gone", names)
+	refusal := unmount()
+	if refusal == nil {
+		t.Fatal("the unmount of a slice stating an open obligation answered nil, want it refused by name")
 	}
+	if !strings.Contains(refusal.Error(), sliceName) || !strings.Contains(refusal.Error(), "1 unfinished obligation(s)") {
+		t.Fatalf("the refusal states %q, want it to name the slice %s and the 1 unfinished obligation(s)", refusal, sliceName)
+	}
+	if names := source.StateRegistry().Names(); !sliceContainsName(names, sliceName) {
+		t.Fatalf("the registry names %v after the refused unmount, want the slice kept", names)
+	}
+	holder.open(laterItem)
 	secondKey, filed, err := source.Checkpoint(ctx)
 	if err != nil || !filed {
 		t.Fatalf("file the second cut = (%t, %v), want a filed cut", filed, err)
 	}
-	second := checkpointOfIdentity(t, ctx, source, secondKey)
 	if secondKey == firstKey {
 		t.Fatalf("the second cut names the key %s of the first, want a later cut", secondKey)
+	}
+	second := checkpointOfIdentity(t, ctx, source, secondKey)
+	if payload := slicePayloadOf(t, second, sliceName); !strings.Contains(payload, owedItem) || !strings.Contains(payload, laterItem) {
+		t.Fatalf("the second cut states %q for %s, want the obligation of the first cut beside the one the holder recorded after the refusal — a same-name replacement states neither", payload, sliceName)
 	}
 	if _, err := source.Close(ctx, agent.CloseRequest{Timeout: time.Now().Add(30 * time.Second)}); err != nil {
 		t.Fatalf("close the live process: %v", err)
 	}
 
-	rebuilt := windowChainRun(t, ctx, storage)
+	restored := &owedSlice{name: sliceName}
+	var rebuiltUnmount func() error
+	rebuilt := windowChainRun(t, ctx, storage, withBootConfigReconcile(func(ctx context.Context, run *Run, decl *config.Declaration, agents map[event.AgentID]NativeAgent) error {
+		dispose, err := run.RegisterStateSlice(restored)
+		if err != nil {
+			return err
+		}
+		rebuiltUnmount = dispose
+		_, err = run.Publish(ctx, decl, agents)
+		return err
+	}))
 	rebuilt.stopCheckpointFiler()
-	restoredKey, _ := rebuilt.CheckpointFiled()
-	if restoredKey == "" {
-		t.Fatal("the boot restored no checkpoint, so the obligation comparison proves nothing")
+	if held := restored.owes(); len(held) != 2 || held[0] != owedItem || held[1] != laterItem {
+		t.Fatalf("the restart handed the slice %v, want the two obligations %v the cut states", held, []string{owedItem, laterItem})
 	}
-	if pending := rebuilt.StateRegistry().PendingRestore(); len(pending) != 0 {
-		t.Logf("the boot names the pending slices %v", pending)
+	thirdKey, filed, err := rebuilt.Checkpoint(ctx)
+	if err != nil || !filed {
+		t.Fatalf("file the cut of the restarted process = (%t, %v), want a filed cut", filed, err)
 	}
-	bootCut := checkpointOfIdentity(t, ctx, rebuilt, restoredKey)
-	if sliceContains(t, bootCut, sliceName) && strings.Contains(slicePayloadOf(t, bootCut, sliceName), owedItem) {
-		return
+	third := checkpointOfIdentity(t, ctx, rebuilt, thirdKey)
+	if payload := slicePayloadOf(t, third, sliceName); !strings.Contains(payload, owedItem) || !strings.Contains(payload, laterItem) {
+		t.Fatalf("the restarted cut states %q for %s, want both obligations kept across the restart", payload, sliceName)
 	}
-	t.Fatalf("the open obligation %s vanished with the unmount: the first cut %s stated it, the disposer deleted the holder without a named refusal or a named successor, the second cut %s states the slices %v, and the boot restored %s stating %v and naming no pending slice — the owed work is stated nowhere and nothing named the loss",
-		owedItem, firstKey, secondKey, second.CheckpointSliceNames(), restoredKey, bootCut.CheckpointSliceNames())
+	restored.settle()
+	if err := rebuiltUnmount(); err != nil {
+		t.Fatalf("the unmount of the settled slice answered %v, want it to leave", err)
+	}
+	if names := rebuilt.StateRegistry().Names(); sliceContainsName(names, sliceName) {
+		t.Fatalf("the registry names %v after the settled unmount, want the slice gone", names)
+	}
 }
 
 // sliceContains reports whether one checkpoint states a slice of the given name.
@@ -3492,4 +4066,778 @@ func sliceContainsName(names []string, name string) bool {
 		}
 	}
 	return false
+}
+
+// TestPendingSliceIsRefusedByName pins the boot half of the lifecycle: a checkpoint stating a slice no holder mounts stops the boot by name.
+//   - fixture: one process registers a slice stating an open obligation beside the framework's own and files the cut; a second boots the same root without it
+//   - positive: the boot is refused by name, naming the slice the checkpoint states and no holder mounts
+//   - negative: a boot that starts beside the unmounted slice reads work it does not hold, and reports the missing holder as nothing
+//   - consumer: the Host boot entry and Run.RegisterStateSlice
+//
+// 契约: docs/wiki/platform/platform-subsystems.md#framework-checkpoint
+func TestPendingSliceIsRefusedByName(t *testing.T) {
+	provider := newGenerationTestProvider(t)
+	root := t.TempDir()
+	configPath := filepath.Join(root, "tagent.yaml")
+	const sliceName = "assembly.pending-consumer"
+	const owedItem = "the-notice-no-holder-mounts"
+	t.Setenv("TAGENT_TEST_API_KEY", "test-key")
+	t.Setenv("TAGENT_HTTP_PORT", "0")
+	t.Setenv("TAGENT_RL_AUTH_TOKEN", "")
+	document := generationDocument(root, provider.URL+"/v1", "")
+	if err := os.WriteFile(configPath, []byte(document), 0o644); err != nil {
+		t.Fatalf("write the configuration source: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+	first, err := Boot(configPath)
+	if err != nil {
+		t.Fatalf("boot the process that mounts the slice: %v", err)
+	}
+	holder := &owedSlice{name: sliceName}
+	holder.open(owedItem)
+	if _, err := first.Run().RegisterStateSlice(holder); err != nil {
+		t.Fatalf("register the slice of the first process: %v", err)
+	}
+	commitSessionTurns(t, ctx, first.Run(), event.Address{AgentID: "user", SessionID: "session-pending"}, "pending", 1)
+	key, filed, err := first.Run().Checkpoint(ctx)
+	if err != nil || !filed {
+		t.Fatalf("file the cut of the first process = (%t, %v), want a filed cut", filed, err)
+	}
+	cut := checkpointOfIdentity(t, ctx, first.Run(), key)
+	if payload := slicePayloadOf(t, cut, sliceName); !strings.Contains(payload, owedItem) {
+		t.Fatalf("the first cut states %q for %s, want the open obligation %s (the fixture states nothing, so the boot refusal proves nothing)", payload, sliceName, owedItem)
+	}
+	if err := first.Close(ctx); err != nil {
+		t.Fatalf("close the process that mounted the slice: %v", err)
+	}
+
+	second, err := Boot(configPath)
+	if err == nil {
+		closeErr := second.Close(ctx)
+		t.Fatalf("the boot over a checkpoint naming %s answered success (close %v), want it refused by name", sliceName, closeErr)
+	}
+	if !strings.Contains(err.Error(), sliceName) || !strings.Contains(err.Error(), "no holder mounts") {
+		t.Fatalf("the boot refusal states %q, want it to name the slice %s and the missing holder", err, sliceName)
+	}
+}
+
+// redeliveredNoticeInstance is the runtime instance every process of the
+// redelivery check freezes the notification's routing under.
+const redeliveredNoticeInstance event.InstanceID = "instance-redelivered-settle"
+
+// redeliveredNoticeOf names the one notification identity the redelivery check
+// hands over: the first terminal notification of one round of one task, so every
+// process of the check answers the same four-part identity.
+func redeliveredNoticeOf(session string) task.Notice {
+	return task.Notice{
+		TaskID: event.TaskID("task-redelivered-" + session), Round: 1, Kind: task.NoticeSettled, Seq: 1,
+		Event: event.EventID("fact-redelivered-" + session),
+	}
+}
+
+// redeliveredNoticeAddr is the session address one notification of the check is
+// routed to and committed under.
+func redeliveredNoticeAddr(notice task.Notice) event.Address {
+	return deliveryTestAddress("session-" + string(notice.TaskID))
+}
+
+// redeliveredNoticeStorage is the one storage root the processes of the
+// redelivery check share, so each of them reads what the one before left.
+func redeliveredNoticeStorage(root string) Option {
+	return WithStorage(ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: root})
+}
+
+// redeliveredNoticeFact renders the settle fact the follow-up turn of one
+// notification reads, under the identity the settle pump looks it up by.
+func redeliveredNoticeFact(addr event.Address, notice task.Notice) event.Event {
+	return event.Event{
+		Key:       settleDeliveryKey(notice),
+		Type:      event.TypeTaskSettled,
+		Timestamp: time.Date(2026, 11, 18, 12, 0, 0, 0, time.UTC),
+		TaskID:    notice.TaskID,
+		Meta: map[string]string{
+			event.MetaKeyNoticeKind:   string(notice.Kind),
+			event.MetaKeyTaskID:       string(notice.TaskID),
+			event.MetaKeyEventSummary: string(notice.Kind),
+		},
+		Message: model.Message{Role: model.RoleUser, Content: "the settled task the follow-up turn answers"},
+		Owner:   addr, Source: addr, Target: addr,
+	}
+}
+
+// stopBesideTheCut runs the two processes of one cut over the storage root and answers the address the notification is routed to.
+//   - the first process commits the settle fact and files the checkpoint the record lands past, so the cut states neither the finished task nor its notification and a boot reaches both by identity
+//   - the record the stopped process leaves is the durable account's commitment: a settled task whose outbox states the notification, written beside the attempt of a turn that landed when the cut names one
+func stopBesideTheCut(t *testing.T, ctx context.Context, root string, notice task.Notice, landedAttempt bool) event.Address {
+	t.Helper()
+	addr := redeliveredNoticeAddr(notice)
+	source := noTrimChainRun(t, ctx, redeliveredNoticeStorage(root))
+	source.stopCheckpointFiler()
+	if _, err := source.CommitToSession(ctx, addr, redeliveredNoticeFact(addr, notice)); err != nil {
+		t.Fatalf("commit the settle fact of %s: %v", notice.FactKey(), err)
+	}
+	cutKey, filed, err := source.Checkpoint(ctx)
+	if err != nil || !filed || cutKey == "" {
+		t.Fatalf("the source process filed checkpoint %q filed=%v err=%v, want the cut the record is left past", cutKey, filed, err)
+	}
+	if _, err := source.Close(ctx, agent.CloseRequest{Timeout: time.Now().Add(5 * time.Second)}); err != nil {
+		t.Fatalf("close the source process: %v", err)
+	}
+
+	tier, err := ledger.OpenTier(ctx, ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: root, WriteRights: true})
+	if err != nil {
+		t.Fatalf("open the storage tier beside the cut: %v", err)
+	}
+	account := state.NewEmptyDurableCommit(ledger.TierFactLog(tier), nil)
+	if err := account.Seat(ctx, nil, nil); err != nil {
+		t.Fatalf("seat the account of the storage: %v", err)
+	}
+	if _, err := account.Commit(ctx, task.CommitRecord{
+		MutationID: task.MutationID("redelivered:" + string(notice.TaskID)),
+		TaskID:     notice.TaskID,
+		Status:     task.StatusSettled,
+		Outbox: []task.Envelope{{
+			Notice:         notice,
+			Target:         addr,
+			Source:         addr,
+			TargetInstance: redeliveredNoticeInstance,
+		}},
+	}); err != nil {
+		t.Fatalf("commit the settled task whose outbox states %s: %v", notice.FactKey(), err)
+	}
+	if owed := account.OwedNotices(); len(owed) != 1 {
+		t.Fatalf("the account past the cut owes %+v, want the one notification the settled task left", owed)
+	}
+	if landedAttempt {
+		store := state.NewMemoryStore(state.NewAuthority(), account)
+		if err := store.RecordAttempt(ctx, notice, state.SettleAttempt{Terminal: model.KindCompleted.String()}); err != nil {
+			t.Fatalf("land the attempt of %s: %v", notice.FactKey(), err)
+		}
+	}
+	if err := tier.Close(); err != nil {
+		t.Fatalf("release the storage tier beside the cut: %v", err)
+	}
+	return addr
+}
+
+// consumeTheOwedNotification lands the consumption receipt of one notification
+// past the cut the last process filed, the way a stop after the delivery leaves
+// it: the payload that cut wrote still names the notification as owed, and the
+// receipt the account commits here is the only record answering it.
+func consumeTheOwedNotification(t *testing.T, ctx context.Context, root string, notice task.Notice) {
+	t.Helper()
+	tier, err := ledger.OpenTier(ctx, ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: root, WriteRights: true})
+	if err != nil {
+		t.Fatalf("open the storage tier beside the receipt: %v", err)
+	}
+	account := state.NewEmptyDurableCommit(ledger.TierFactLog(tier), nil)
+	if err := account.Seat(ctx, nil, nil); err != nil {
+		t.Fatalf("seat the account of the storage: %v", err)
+	}
+	store := state.NewMemoryStore(state.NewAuthority(), account)
+	addr := redeliveredNoticeAddr(notice)
+	if _, err := store.Establish(ctx, addr, redeliveredNoticeInstance); err != nil {
+		t.Fatalf("establish the target site of %s: %v", notice.FactKey(), err)
+	}
+	if err := store.TrackDelivery(ctx, notice.TaskID, task.HandoffTarget{Target: addr, TargetInstance: redeliveredNoticeInstance}); err != nil {
+		t.Fatalf("register the delivery route of %s: %v", notice.TaskID, err)
+	}
+	if err := store.AcceptNotice(ctx, notice); err != nil {
+		t.Fatalf("accept %s at its target: %v", notice.FactKey(), err)
+	}
+	seat, held := seatOfTask(store.Unconsumed(), notice.TaskID)
+	if !held {
+		t.Fatalf("the mailbox of the receipt states no entry for %s, want the one it accepted", notice.TaskID)
+	}
+	if err := store.Claim(ctx, seat.Address, seat.Instance, seat.AcceptSeq); err != nil {
+		t.Fatalf("claim %s past the cut: %v", notice.FactKey(), err)
+	}
+	if err := store.Consume(ctx, seat.Address, seat.Instance, seat.AcceptSeq); err != nil {
+		t.Fatalf("consume %s past the cut: %v", notice.FactKey(), err)
+	}
+	if err := tier.Close(); err != nil {
+		t.Fatalf("release the storage tier beside the receipt: %v", err)
+	}
+}
+
+// stateTheOwedNotification runs one whole process over the root that restores the
+// notification the record left owed and files the checkpoint stating it, so the
+// next boot reads a cut that names a notification the account has already
+// answered: the stale payload every receipt fence has to read past.
+func stateTheOwedNotification(t *testing.T, ctx context.Context, root string, notice task.Notice) {
+	t.Helper()
+	stating := noTrimChainRun(t, ctx, redeliveredNoticeStorage(root))
+	stating.stopCheckpointFiler()
+	if _, held := seatOfTask(stating.store.Unconsumed(), notice.TaskID); !held {
+		t.Fatalf("the process that states the cut owes %+v, want the one notification the record left", stating.store.Unconsumed())
+	}
+	cutKey, filed, err := stating.Checkpoint(ctx)
+	if err != nil || !filed || cutKey == "" {
+		t.Fatalf("the stating process filed checkpoint %q filed=%v err=%v, want the cut that names the owed notification", cutKey, filed, err)
+	}
+	if _, err := stating.Close(ctx, agent.CloseRequest{Timeout: time.Now().Add(5 * time.Second)}); err != nil {
+		t.Fatalf("close the stating process: %v", err)
+	}
+}
+
+// bootBesideTheCut opens one more process over the same storage root and answers
+// the run it assembled there beside the checkpoint the last process filed:
+// nothing of a stopped process is rebuilt in this one, so every record it reads
+// comes from the root.
+func bootBesideTheCut(t *testing.T, ctx context.Context, root string) *Run {
+	t.Helper()
+	booted := noTrimChainRun(t, ctx, redeliveredNoticeStorage(root))
+	booted.stopCheckpointFiler()
+	if key, _ := booted.CheckpointFiled(); key == "" {
+		t.Fatal("the boot read no checkpoint, want the cut the redelivered notification is restored beside")
+	}
+	return booted
+}
+
+// driveSettleTurns drives the real settle pump over the mailbox account one
+// process restored and reports how many follow-up turns it fired. The pump reads
+// the settle fact through the run's own committed-fact face and leaves the
+// terminal on the account through the barrier the drive stamps, so a turn this
+// counts is a turn the account answered and not one the check answered for it.
+func driveSettleTurns(t *testing.T, run *Run, addr event.Address) int {
+	t.Helper()
+	var mu sync.Mutex
+	turns := 0
+	fire := func(ctx context.Context, _ event.Address, _ event.Event) error {
+		mu.Lock()
+		turns++
+		mu.Unlock()
+		barrier, held := settleBarrierFrom(ctx)
+		if !held {
+			return nil
+		}
+		return barrier.settle(ctx, model.KindCompleted)
+	}
+	driver := NewSettleDriver(run.CommittedEvent, func() SettleWake { return run.store }, fire)
+	driver.DeclareScope(string(addr.AgentID), string(addr.AgentID))
+	defer driver.Stop()
+	driver.Wake()
+	waitScopeGate(t, "the settle pump to rest beside the restored notification", func() bool {
+		return len(run.store.Unconsumed()) == 0
+	})
+	mu.Lock()
+	defer mu.Unlock()
+	return turns
+}
+
+// consumeReceiptKeys reports the consumption receipts one root holds, read from
+// the durable family the account commits them under rather than from the mailbox
+// of any single process.
+func consumeReceiptKeys(t *testing.T, ctx context.Context, tier *ledger.Tier) map[string][]byte {
+	t.Helper()
+	if tier == nil {
+		t.Fatal("the run opened no storage tier, want the durable root the receipts are read from")
+	}
+	keys, err := ledger.TierFactLog(tier).Scan(ctx, "tagent/task/v1/consume:")
+	if err != nil {
+		t.Fatalf("read the consumption receipts of the root: %v", err)
+	}
+	return keys
+}
+
+// seatOfTask reports the mailbox entry one task waits under, so a check reads the
+// acceptance sequence and the frozen routing the restore assigned.
+func seatOfTask(seats []state.WorkSeat, taskID event.TaskID) (state.WorkSeat, bool) {
+	for _, seat := range seats {
+		if seat.Notice.TaskID == taskID {
+			return seat, true
+		}
+	}
+	return state.WorkSeat{}, false
+}
+
+// TestRedeliveredNoticeAfterRestartSettlesOnce pins the fences a restart reads before it drives one notification again.
+//   - fixture: one real localfile root, an account left past the cut that states neither the finished task nor its notification
+//   - fixture: a boot whose every record comes from that root, so no cross-process step is faked by a rebuild in the process that drives
+//   - the account the boot seats states no task while the settle fact of the notification stays readable
+//   - so a boot that drove nothing proves the account answered instead of proving there was no work
+//   - cut_before_the_turn: the boot drives exactly one follow-up turn, and a third process that redelivers the same notification drives none
+//   - cut_before_the_turn: the root still holds one receipt
+//   - cut_before_the_receipt: the attempt of the turn that landed is read back by identity, so the boot drives no second turn
+//   - cut_before_the_receipt: the boot writes the one receipt the stopped process never wrote
+//   - redelivery_after_the_receipt: the receipt the cut states nowhere answers the redelivery, so the boot owes the notification nothing
+//   - consumer: the real settle pump over the mailbox account the boot restored, reading the settle fact through Run.CommittedEvent
+//
+// 契约: docs/wiki/agent/agent-architecture.md#settle-driver
+func TestRedeliveredNoticeAfterRestartSettlesOnce(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
+	defer cancel()
+
+	t.Run("cut_before_the_turn", func(t *testing.T) {
+		root := t.TempDir()
+		notice := redeliveredNoticeOf("before-turn")
+		addr := stopBesideTheCut(t, ctx, root, notice, false)
+		stateTheOwedNotification(t, ctx, root, notice)
+
+		booted := bootBesideTheCut(t, ctx, root)
+		restored, held := seatOfTask(booted.store.Unconsumed(), notice.TaskID)
+		if !held {
+			t.Fatalf("the booted mailbox owes %+v, want the notification the cut stated", booted.store.Unconsumed())
+		}
+		if restored.Address != addr {
+			t.Fatalf("the restored seat routes to %v, want the frozen routing %v", restored.Address, addr)
+		}
+		if turns := driveSettleTurns(t, booted, restored.Address); turns != 1 {
+			t.Fatalf("the boot drove %d follow-up turn(s) for the notification the cut left owed, want the one turn", turns)
+		}
+		if keys := consumeReceiptKeys(t, ctx, booted.tier); len(keys) != 1 {
+			t.Fatalf("the root holds %d consumption receipt(s) after the turn, want one", len(keys))
+		}
+		if _, err := booted.Close(ctx, agent.CloseRequest{Timeout: time.Now().Add(5 * time.Second)}); err != nil {
+			t.Fatalf("close the process beside the turn: %v", err)
+		}
+
+		redelivered := bootBesideTheCut(t, ctx, root)
+		if owed := redelivered.store.Unconsumed(); len(owed) != 0 {
+			t.Fatalf("the third process owes %+v, want nothing: the receipt of the one turn answers the redelivery", owed)
+		}
+		if _, err := redelivered.CommittedEvent(ctx, settleDeliveryKey(notice)); err != nil {
+			t.Fatalf("the settle fact of %s is unreadable beside the redelivery, so a turn that fired here would prove nothing: %v", notice.FactKey(), err)
+		}
+		if turns := driveSettleTurns(t, redelivered, addr); turns != 0 {
+			t.Fatalf("the redelivery drove %d follow-up turn(s) for a notification the root already settled, want none", turns)
+		}
+		if keys := consumeReceiptKeys(t, ctx, redelivered.tier); len(keys) != 1 {
+			t.Fatalf("the root holds %d consumption receipt(s) after the redelivery, want the one the first turn wrote", len(keys))
+		}
+		if _, err := redelivered.Close(ctx, agent.CloseRequest{Timeout: time.Now().Add(5 * time.Second)}); err != nil {
+			t.Fatalf("close the redelivery process: %v", err)
+		}
+	})
+
+	t.Run("cut_before_the_receipt", func(t *testing.T) {
+		root := t.TempDir()
+		notice := redeliveredNoticeOf("before-receipt")
+		stopBesideTheCut(t, ctx, root, notice, true)
+		stateTheOwedNotification(t, ctx, root, notice)
+
+		booted := bootBesideTheCut(t, ctx, root)
+		restored, held := seatOfTask(booted.store.Unconsumed(), notice.TaskID)
+		if !held {
+			t.Fatalf("the booted mailbox owes %+v, want the notification whose receipt the stop never wrote", booted.store.Unconsumed())
+		}
+		if _, err := booted.CommittedEvent(ctx, settleDeliveryKey(notice)); err != nil {
+			t.Fatalf("the settle fact of %s is unreadable beside the boot, so a turn that fired here would prove nothing: %v", notice.FactKey(), err)
+		}
+		if turns := driveSettleTurns(t, booted, restored.Address); turns != 0 {
+			t.Fatalf("the boot drove %d follow-up turn(s) for a notification whose attempt already landed, want none", turns)
+		}
+		if owed := booted.store.Unconsumed(); len(owed) != 0 {
+			t.Fatalf("the booted mailbox still owes %+v, want the entry closed beside the receipt it wrote", owed)
+		}
+		if keys := consumeReceiptKeys(t, ctx, booted.tier); len(keys) != 1 {
+			t.Fatalf("the root holds %d consumption receipt(s) after the boot, want the one receipt the landed attempt owes", len(keys))
+		}
+		if _, err := booted.Close(ctx, agent.CloseRequest{Timeout: time.Now().Add(5 * time.Second)}); err != nil {
+			t.Fatalf("close the process beside the receipt: %v", err)
+		}
+	})
+
+	t.Run("redelivery_after_the_receipt", func(t *testing.T) {
+		root := t.TempDir()
+		notice := redeliveredNoticeOf("after-receipt")
+		addr := stopBesideTheCut(t, ctx, root, notice, true)
+		stateTheOwedNotification(t, ctx, root, notice)
+		consumeTheOwedNotification(t, ctx, root, notice)
+
+		booted := bootBesideTheCut(t, ctx, root)
+		if owed := booted.store.Unconsumed(); len(owed) != 0 {
+			t.Fatalf("the booted mailbox owes %+v, want nothing: the receipt landed past the cut answers the notification", owed)
+		}
+		if _, err := booted.CommittedEvent(ctx, settleDeliveryKey(notice)); err != nil {
+			t.Fatalf("the settle fact of %s is unreadable beside the redelivery, so a turn that fired here would prove nothing: %v", notice.FactKey(), err)
+		}
+		if turns := driveSettleTurns(t, booted, addr); turns != 0 {
+			t.Fatalf("the redelivery drove %d follow-up turn(s) for a notification the root already consumed, want none", turns)
+		}
+		if keys := consumeReceiptKeys(t, ctx, booted.tier); len(keys) != 1 {
+			t.Fatalf("the root holds %d consumption receipt(s) after the redelivery, want the one the stopped process wrote", len(keys))
+		}
+		if _, err := booted.Close(ctx, agent.CloseRequest{Timeout: time.Now().Add(5 * time.Second)}); err != nil {
+			t.Fatalf("close the redelivery process: %v", err)
+		}
+	})
+}
+
+// refusalSliceName is the state slice every arm of
+// TestCheckpointRefusalCostAcrossSessions mounts, so the arms differ by the refusal
+// and never by the account a cut states.
+const refusalSliceName = "assembly.refusal-cost"
+
+// refusalArm names one condition an unapplied fact is measured under.
+type refusalArm int
+
+const (
+	// noRefusal is the arm nothing refuses: the reading the other two are read beside.
+	noRefusal refusalArm = iota
+	// transientRefusal is the arm one refusal ends by the same identity landing again.
+	transientRefusal
+	// standingRefusal is the arm the refusal holds to the end of the arm.
+	standingRefusal
+)
+
+// refusalArmName answers the arm as the readings name it.
+func refusalArmName(arm refusalArm) string {
+	switch arm {
+	case noRefusal:
+		return "no-refusal"
+	case transientRefusal:
+		return "transient-refusal"
+	case standingRefusal:
+		return "standing-refusal"
+	default:
+		return fmt.Sprintf("refusal-arm(%d)", int(arm))
+	}
+}
+
+// refusalArmReading is what one arm measured: the cuts it attempted, the ones the
+// refusal held over, and what the boot beside it read.
+//   - history and journalBytes are the control of the comparison: the three arms commit the same facts, so a reading that differs between them differs by the refusal and not by the chain behind it
+//   - decoded counts the bodies the boot beside the arm folded, valueReads the values the store answered it, and indexEntries plus the walk faces the resident index it published and what its commit-order walks named and read
+//   - allocated is the bytes one assemble allocated, read from the runtime's own counter around the boot: it is reported beside the read faces and never asserted, because an allocation total moves with the collector's own work
+type refusalArmReading struct {
+	arm            refusalArm
+	attempts       int
+	refusals       int
+	landed         int
+	blocked        []event.SessionID
+	blockedFor     time.Duration
+	history        int
+	journalBytes   int64
+	decoded        int
+	valueReads     int64
+	indexEntries   int
+	walkVisits     int
+	walkValueReads int
+	walkValueBytes int64
+	allocated      uint64
+}
+
+// measureRefusalArm runs one arm over its own durable root and answers what it
+// measured: the same commits in every arm, one cut of each session before the fact
+// the consumer decides on, `rounds` cut attempts per session under the arm's
+// refusal, and one boot beside the arm that files the read faces.
+func measureRefusalArm(t *testing.T, ctx context.Context, arm refusalArm, rounds, turns int) refusalArmReading {
+	t.Helper()
+	name := refusalArmName(arm)
+	reading := refusalArmReading{arm: arm}
+	root := t.TempDir()
+	storage := WithStorage(ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: root})
+	named := event.Address{AgentID: "agent-a", SessionID: "session-refusal-named"}
+	sessions := []event.Address{
+		named,
+		{AgentID: "agent-a", SessionID: "session-refusal-bystander"},
+		{AgentID: "agent-a", SessionID: "session-refusal-third"},
+	}
+	refusedFact := retryFactOf("notice-refusal-cost", named)
+	decided := refusedFact.Key
+	if arm == noRefusal {
+		decided = "notice-never-refused"
+	}
+	consumer := &refusingConsumer{foldRecorder: &foldRecorder{name: refusalSliceName}, refuse: decided}
+	writer := wideWindowChainRun(t, ctx, storage, refusingBoot(consumer))
+	writer.stopCheckpointFiler()
+
+	for at, addr := range sessions {
+		commitSessionTurns(t, ctx, writer, addr, fmt.Sprintf("arm-early-%d", at), 1)
+		if key, filed, err := writer.CheckpointSession(ctx, addr); err != nil || !filed || key == "" {
+			t.Fatalf("the %s arm files no cut of %v before the refusal = (%q, %t, %v), want it filed", name, addr, key, filed, err)
+		}
+	}
+	if _, err := writer.CommitToSession(ctx, named, refusedFact); err != nil {
+		t.Fatalf("the %s arm commits the fact the consumer decides on: %v", name, err)
+	}
+	for at, addr := range sessions {
+		commitSessionTurns(t, ctx, writer, addr, fmt.Sprintf("arm-behind-%d", at), turns)
+	}
+
+	attempts := rounds
+	if arm == noRefusal {
+		attempts = 1
+	}
+	var firstRefusal time.Time
+	for round := 0; round < attempts; round++ {
+		for _, addr := range sessions {
+			reading.attempts++
+			key, filed, err := writer.CheckpointSession(ctx, addr)
+			if arm == noRefusal {
+				if err != nil || !filed || key == "" {
+					t.Fatalf("the %s arm files the cut of %v = (%q, %t, %v), want the cut filed beside no refusal", name, addr, key, filed, err)
+				}
+				reading.landed++
+				continue
+			}
+			if err == nil || filed {
+				t.Fatalf("the %s arm files the cut of %v = (%q, %t), want it refused while a fact stands unapplied", name, addr, key, filed)
+			}
+			if !strings.Contains(err.Error(), string(refusedFact.Key)) || !strings.Contains(err.Error(), refusalSliceName) {
+				t.Fatalf("the %s arm refuses the cut of %v as %q, want it to name %s and the slice %q", name, addr, err, refusedFact.Key, refusalSliceName)
+			}
+			reading.refusals++
+			if firstRefusal.IsZero() {
+				firstRefusal = time.Now()
+			}
+			if !slices.Contains(reading.blocked, addr.SessionID) {
+				reading.blocked = append(reading.blocked, addr.SessionID)
+			}
+		}
+	}
+	if arm == transientRefusal {
+		consumer.allow()
+		if _, err := writer.CommitToSession(ctx, named, refusedFact); err != nil {
+			t.Fatalf("the %s arm lands the refused identity again: %v", name, err)
+		}
+		for _, addr := range sessions {
+			reading.attempts++
+			key, filed, err := writer.CheckpointSession(ctx, addr)
+			if err != nil || !filed || key == "" {
+				t.Fatalf("the %s arm files no cut of %v after the same identity landed = (%q, %t, %v)", name, addr, key, filed, err)
+			}
+			reading.landed++
+		}
+		reading.blockedFor = time.Since(firstRefusal)
+	}
+	if _, err := writer.Close(ctx, agent.CloseRequest{Timeout: time.Now().Add(10 * time.Second)}); err != nil {
+		if arm != standingRefusal || !strings.Contains(err.Error(), string(refusedFact.Key)) {
+			t.Fatalf("the %s arm closes the writing process = %v, want the owed cut refused by name beside the standing arm alone", name, err)
+		}
+	}
+
+	recovery, allocated := bootRefusalCost(t, ctx, storage, &foldRecorder{name: refusalSliceName})
+	recovery.stopCheckpointFiler()
+	reading.allocated = allocated
+	reading.decoded = recovery.CommittedFacts()
+	reading.history = recovery.tier.Segments.EventCount()
+	reading.journalBytes = journalLogBytesOf(t, root)
+	var err error
+	if reading.valueReads, err = addressedValueReadsOf(recovery.tier); err != nil {
+		t.Fatalf("the %s arm states the store reads of its boot: %v", name, err)
+	}
+	if reading.indexEntries, err = indexEntriesOf(recovery.tier); err != nil {
+		t.Fatalf("the %s arm states the resident index of its boot: %v", name, err)
+	}
+	if reading.walkVisits, reading.walkValueBytes, reading.walkValueReads, err = indexWalkReadsOf(recovery.tier); err != nil {
+		t.Fatalf("the %s arm states the walk reads of its boot: %v", name, err)
+	}
+	if _, err := recovery.Close(ctx, agent.CloseRequest{Timeout: time.Now().Add(10 * time.Second)}); err != nil {
+		t.Fatalf("the %s arm closes the booted process: %v", name, err)
+	}
+	return reading
+}
+
+// bootRefusalCost assembles one arm's boot on the declaration wideWindowChainRun
+// builds and answers the bytes the assemble allocated, so the three arms state
+// their allocation beside their reads under one fixture.
+func bootRefusalCost(t *testing.T, ctx context.Context, storage Option, recorder *foldRecorder) (*Run, uint64) {
+	t.Helper()
+	provider := &snapshotTestModel{answer: func(*model.Request) *model.Response {
+		return &model.Response{Choices: []model.Choice{{Message: model.Message{Role: model.RoleAssistant, Content: factWindowAnswer}}}, Done: true}
+	}}
+	var before, after runtime.MemStats
+	runtime.GC()
+	runtime.ReadMemStats(&before)
+	run, err := Assemble(ctx, &config.Declaration{
+		Entry:  "agent-a",
+		Agents: []config.AgentSpec{{ID: "agent-a", Model: "model-a", ReplayWindow: 100000}},
+	}, map[event.AgentID]NativeAgent{"agent-a": {Model: provider}}, WithGovernance(snapshotTestGovernance{}), storage, recordingBoot(recorder))
+	runtime.ReadMemStats(&after)
+	if err != nil {
+		t.Fatalf("boot the arm over its root: %v", err)
+	}
+	return run, after.TotalAlloc - before.TotalAlloc
+}
+
+// TestCheckpointRefusalCostAcrossSessions pins what one unapplied fact costs the cuts beside it and what the boundary a boot restores reads.
+//   - three arms over one fixture: no refusal, one refusal resolved by the same identity landing, and one refusal standing to the end of the arm
+//   - the scope is the account, not the fact's session: a refusal holds the cut of every session the arm attempted
+//   - the chain the refused fact names and the chains beside it are held too
+//   - the two arms that filed their cut boot over one chain, and the arm whose refusal stood boots the shorter one
+//   - because the cuts it never filed are absent from its log
+//   - a resolved refusal pays the boot the reads of the arm that never refused
+//   - a standing refusal pays more index walks and value reads over the shorter chain, which is what a cut that never landed leaves the next boot to replay
+//   - control: every arm's boot answers store reads and holds events, so the counts state reads the store made and not a store nothing was committed to
+//   - the boundary read costs one point read per survivor the restore path names, paid before the caller knows whether the range above the boundary is empty
+//   - the steady boot folds nothing past the cut and still pays those point reads
+//   - the survivors the chain never held answer no read, so the cost follows the survivors a payload names and no phantom key pays for them
+//
+// 契约: docs/wiki/platform/platform-subsystems.md#framework-checkpoint
+func TestCheckpointRefusalCostAcrossSessions(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Second)
+	defer cancel()
+	const rounds, turns = 3, 2
+	failureless := measureRefusalArm(t, ctx, noRefusal, rounds, turns)
+	transient := measureRefusalArm(t, ctx, transientRefusal, rounds, turns)
+	standing := measureRefusalArm(t, ctx, standingRefusal, rounds, turns)
+	arms := []refusalArmReading{failureless, transient, standing}
+	for _, arm := range arms {
+		name := refusalArmName(arm.arm)
+		if arm.history == 0 {
+			t.Fatalf("the %s arm boots over a store holding no event, so the reads it reports state a store nothing was committed to", name)
+		}
+		if arm.journalBytes == 0 {
+			t.Fatalf("the %s arm boots over no journal, so the log it opened states no history to read", name)
+		}
+		if arm.valueReads == 0 {
+			t.Fatalf("the %s arm's boot answered no value read, so these counts do not state the store the chain is filed in", name)
+		}
+		t.Logf("%s: attempts=%d landed=%d refusals=%d blocked=%d blockedFor=%s history=%d journalBytes=%d decoded=%d valueReads=%d indexEntries=%d walkVisits=%d walkValueReads=%d walkValueBytes=%d allocated=%d",
+			name, arm.attempts, arm.landed, arm.refusals, len(arm.blocked), arm.blockedFor, arm.history, arm.journalBytes,
+			arm.decoded, arm.valueReads, arm.indexEntries, arm.walkVisits, arm.walkValueReads, arm.walkValueBytes, arm.allocated)
+	}
+	if failureless.history != transient.history {
+		t.Fatalf("the no-refusal arm boots over %d event(s) and the transient arm over %d, want one chain: both filed the cuts they attempted",
+			failureless.history, transient.history)
+	}
+	if standing.history >= failureless.history {
+		t.Fatalf("the standing arm boots over %d event(s) beside the %d of the no-refusal arm, want the shorter chain: the cuts it never filed are the facts its refusals keep out of the log",
+			standing.history, failureless.history)
+	}
+	if failureless.refusals != 0 || failureless.landed != failureless.attempts {
+		t.Fatalf("the no-refusal arm refused %d cut(s) and landed %d of %d, want every attempted cut filed", failureless.refusals, failureless.landed, failureless.attempts)
+	}
+	for _, arm := range arms[1:] {
+		name := refusalArmName(arm.arm)
+		if arm.refusals != rounds*3 {
+			t.Fatalf("the %s arm refused %d cut(s) of the %d the fixture attempted", name, arm.refusals, rounds*3)
+		}
+		if len(arm.blocked) != 3 {
+			t.Fatalf("the %s arm held the cut of %v, want the three sessions it attempted: the refusal is held by the account and not by the chain the fact names", name, arm.blocked)
+		}
+	}
+	if transient.landed != 3 {
+		t.Fatalf("the transient arm landed %d cut(s) after the same identity landed, want the %d it attempted", transient.landed, 3)
+	}
+	if standing.landed != 0 {
+		t.Fatalf("the standing arm landed %d cut(s), want none while the fact stands unapplied", standing.landed)
+	}
+	blockage := 3*turns*4 + 1
+	if standing.decoded < blockage {
+		t.Fatalf("the boot beside the standing refusal folded %d fact(s), want the %d the blockage committed under a cut that never landed", standing.decoded, blockage)
+	}
+	if transient.valueReads != failureless.valueReads || transient.walkVisits != failureless.walkVisits {
+		t.Fatalf("the boot beside the transient refusal read %d value(s) in %d walk visit(s) beside the %d and %d of the no-refusal arm, want the reads of the cut that landed",
+			transient.valueReads, transient.walkVisits, failureless.valueReads, failureless.walkVisits)
+	}
+	if standing.valueReads <= failureless.valueReads || standing.walkVisits <= failureless.walkVisits {
+		t.Fatalf("the boot beside the standing refusal read %d value(s) in %d walk visit(s) beside the %d and %d of the no-refusal arm, want the replay of the window the refusal left open",
+			standing.valueReads, standing.walkVisits, failureless.valueReads, failureless.walkVisits)
+	}
+
+	t.Run("boundary_reads", func(t *testing.T) {
+		root := t.TempDir()
+		storage := WithStorage(ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: root})
+		addr := event.Address{AgentID: "agent-a", SessionID: "session-refusal-boundary"}
+		writer := wideWindowChainRun(t, ctx, storage, refusingBoot(&refusingConsumer{foldRecorder: &foldRecorder{name: refusalSliceName}, refuse: "notice-never-decided"}))
+		writer.stopCheckpointFiler()
+		commitSessionTurns(t, ctx, writer, addr, "boundary", 2)
+		if key, filed, err := writer.Checkpoint(ctx); err != nil || !filed || key == "" {
+			t.Fatalf("file the cut at the log's end = (%q, %t, %v), want the steady state the boundary is read in", key, filed, err)
+		}
+		if _, err := writer.Close(ctx, agent.CloseRequest{Timeout: time.Now().Add(10 * time.Second)}); err != nil {
+			t.Fatalf("close the writing process: %v", err)
+		}
+
+		recovery, _ := bootRefusalCost(t, ctx, storage, &foldRecorder{name: refusalSliceName})
+		recovery.stopCheckpointFiler()
+		presented := projectionKeysOf(t, recovery, addr)
+		if len(presented) < 3 {
+			t.Fatalf("the chain presents %d entr(ies), want the survivors the fixture committed to read the boundary over", len(presented))
+		}
+		survivors := make([]anchorEntry, 0, 3)
+		for _, key := range presented[len(presented)-3:] {
+			survivors = append(survivors, anchorEntry{Key: key})
+		}
+		partition := memory.PartitionIDFromName(string(addr.AgentID))
+		warmReads, positions, newest, err := measureBoundaryReads(t, ctx, recovery, recovery.tier, survivors, partition)
+		if err != nil {
+			t.Fatalf("read the boundary of the survivors the payload names on the boot's own view: %v", err)
+		}
+		if len(positions) != len(survivors) {
+			t.Fatalf("the boundary named %d survivor(s) of the %d the payload states, so the store does not hold the chain these reads are counted over", len(positions), len(survivors))
+		}
+		reader, err := ledger.OpenTier(ctx, ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: root})
+		if err != nil {
+			t.Fatalf("open the cold view a boot reads its boundary on: %v", err)
+		}
+		coldReads, coldPositions, coldNewest, err := measureBoundaryReads(t, ctx, recovery, reader, survivors, partition)
+		if err != nil {
+			t.Fatalf("read the boundary of the survivors the payload names on a cold view: %v", err)
+		}
+		if len(coldPositions) != len(survivors) || coldNewest != newest {
+			t.Fatalf("the cold view named %d survivor(s) at seq %d beside the %d at seq %d the boot's view named, want the same chain read twice",
+				len(coldPositions), coldNewest, len(positions), newest)
+		}
+		if coldReads < int64(len(survivors)) {
+			t.Fatalf("the boundary read %d value(s) for %d survivor(s), want at least one point read per survivor the payload names", coldReads, len(survivors))
+		}
+		if warmReads > coldReads {
+			t.Fatalf("the boundary read %d value(s) on the boot's view beside the %d of a cold one, want the resident entries the boot already read to cost no more", warmReads, coldReads)
+		}
+		_, newestSeq := seqOfFact(t, recovery, presented[len(presented)-1])
+		if newest != newestSeq {
+			t.Fatalf("the boundary stands at seq %d, want the %d of the newest survivor: the range above it is the one the steady cut leaves empty", newest, newestSeq)
+		}
+		if folded := recovery.CommittedFacts(); folded != len(presented) {
+			t.Fatalf("the steady boot folded %d fact(s) of the %d the chain presents, want the survivors alone: the cut stands at the log's end, so the range above the boundary is empty and the boundary reads were paid anyway", folded, len(presented))
+		}
+
+		absented := []anchorEntry{{Key: "boundary-absent-0"}, {Key: "boundary-absent-1"}, {Key: "boundary-absent-2"}}
+		absentReads, absentPositions, absentNewest, err := measureBoundaryReads(t, ctx, recovery, reader, absented, partition)
+		if err != nil {
+			t.Fatalf("read the boundary of the survivors the chain never held: %v", err)
+		}
+		if len(absentPositions) != 0 || absentNewest != 0 {
+			t.Fatalf("the boundary named %d survivor(s) and stood at seq %d for keys the chain never held, want none and the unnamed boundary 0", len(absentPositions), absentNewest)
+		}
+		if absentReads != 0 {
+			t.Fatalf("the boundary read %d value(s) for keys the chain never held, want none: a point read the store answers no entry for reads no value", absentReads)
+		}
+		t.Logf("boundary: survivors=%d coldReads=%d warmReads=%d newest=%d absentReads=%d history=%d bootValueReads=%d decoded=%d",
+			len(survivors), coldReads, warmReads, newest, absentReads, recovery.tier.Segments.EventCount(), mustStoreReads(t, recovery), recovery.CommittedFacts())
+		if err := reader.Close(); err != nil {
+			t.Fatalf("close the cold view: %v", err)
+		}
+		if _, err := recovery.Close(ctx, agent.CloseRequest{Timeout: time.Now().Add(10 * time.Second)}); err != nil {
+			t.Fatalf("close the booted process: %v", err)
+		}
+	})
+}
+
+// measureBoundaryReads answers what one boundary read costs: the value spans the
+// store of view answered while r.survivorPositions named the survivors, the
+// positions it answered and the newest sequence it named.
+//   - The count is that view's own value read measure taken around the call, so a survivor the view answers states a read and a survivor it answers no entry for states none.
+//   - A view that already read these entries serves them from its resident set, so the same call on the boot's own view beside a cold one is what states the hot layer apart from the store.
+func measureBoundaryReads(t *testing.T, ctx context.Context, run *Run, view *ledger.Tier, survivors []anchorEntry, partition int) (int64, map[event.EventID]int64, int64, error) {
+	t.Helper()
+	before, err := addressedValueReadsOf(view)
+	if err != nil {
+		return 0, nil, 0, err
+	}
+	positions, newest, err := run.survivorPositions(ctx, view, survivors, partition)
+	if err != nil {
+		return 0, nil, 0, err
+	}
+	after, err := addressedValueReadsOf(view)
+	if err != nil {
+		return 0, nil, 0, err
+	}
+	return after - before, positions, newest, nil
+}
+
+// mustStoreReads states the value reads one boot's store answered, and fails the
+// check beside a tier that keeps no such measure instead of answering a zero.
+func mustStoreReads(t *testing.T, run *Run) int64 {
+	t.Helper()
+	reads, err := addressedValueReadsOf(run.tier)
+	if err != nil {
+		t.Fatalf("state the store reads of the boot: %v", err)
+	}
+	return reads
 }

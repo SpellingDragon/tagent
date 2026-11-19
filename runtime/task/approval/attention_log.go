@@ -75,32 +75,32 @@ func (a *ApprovalManager) storeRequestRecord(ctx context.Context, log durable.Fa
 	return nil
 }
 
-// foldRequestRecords seats every stored request record in the evidence block, so
-// a restarted book answers the identities the process before it handed an
-// approver — beside the cut it restored, never instead of it. A pair storing
-// another identity than its key names is refused by name: a book that seated it
-// would answer an identity the store never held.
+// foldRequestRecords seats the request records of the obligations still owed, so
+// a restarted book answers the identities the process before it handed an approver
+// — beside the cut it restored, never instead of it. A record whose request the
+// chain already ruled, and one whose validity ran out, states no work left: it is
+// left on the face for the reader that asks for it, so a book whose history grows
+// keeps the same resident set. A pair storing another identity than its key names
+// is refused by name: a book that seated it would answer an identity the store
+// never held.
 func (a *ApprovalManager) foldRequestRecords(ctx context.Context, log durable.FactLog) error {
-	stored, err := log.Scan(ctx, approvalRequestPrefix)
+	records, err := storedRequestRecords(ctx, log)
 	if err != nil {
-		return fmt.Errorf("approval: read the request records: %w", err)
+		return err
 	}
-	keys := make([]string, 0, len(stored))
-	for key := range stored {
-		keys = append(keys, key)
+	held, err := a.chain.AttentionFacts(ctx)
+	if err != nil {
+		return fmt.Errorf("approval: read the attention facts: %w", err)
 	}
-	sort.Strings(keys)
+	facts := factsOf(held)
+	now := a.now().UnixMilli()
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	for _, key := range keys {
-		var record approvalRequestRecord
-		if err := json.Unmarshal(stored[key], &record); err != nil {
-			return fmt.Errorf("approval: read the request record at %s: %w", key, err)
+	for _, record := range records {
+		if _, seated := a.evidence[record.Asked]; seated {
+			continue
 		}
-		if record.Request.ID == "" || approvalRequestKey(record.Asked) != key {
-			return fmt.Errorf("%w: %s states the identity %q", errApprovalFactConflict, key, record.Asked)
-		}
-		if _, held := a.evidence[record.Asked]; held {
+		if !openObligation(record.Request, facts, now) {
 			continue
 		}
 		seated := record.Request
@@ -109,11 +109,125 @@ func (a *ApprovalManager) foldRequestRecords(ctx context.Context, log durable.Fa
 	return nil
 }
 
-// bind hands the chain its durable face and folds the facts it already holds back
-// into it, so a restarted process answers the same presence and the same rulings
-// the process before it answered. A pair whose body states another fact than its
-// key names is refused by name: a stream this chain cannot read is not a stream it
-// serves as empty.
+// storedRequestRecords reads every request record on the durable face in the order
+// its keys name, and refuses by name a pair whose body states another identity than
+// its key: a record read as an identity it does not name would answer for a caller
+// the store never held.
+func storedRequestRecords(ctx context.Context, log durable.FactLog) ([]approvalRequestRecord, error) {
+	stored, err := log.Scan(ctx, approvalRequestPrefix)
+	if err != nil {
+		return nil, fmt.Errorf("approval: read the request records: %w", err)
+	}
+	keys := make([]string, 0, len(stored))
+	for key := range stored {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	records := make([]approvalRequestRecord, 0, len(keys))
+	for _, key := range keys {
+		var record approvalRequestRecord
+		if err := json.Unmarshal(stored[key], &record); err != nil {
+			return nil, fmt.Errorf("approval: read the request record at %s: %w", key, err)
+		}
+		if record.Request.ID == "" || approvalRequestKey(record.Asked) != key {
+			return nil, fmt.Errorf("%w: %s states the identity %q", errApprovalFactConflict, key, record.Asked)
+		}
+		records = append(records, record)
+	}
+	return records, nil
+}
+
+// requestRecordOnFace reads the request record one caller identity is seated under,
+// by the key that identity names: one record is one key, so the read costs that key
+// and never the stream around it.
+func requestRecordOnFace(ctx context.Context, log durable.FactLog, asked string) (ApprovalRequest, bool, error) {
+	key := approvalRequestKey(asked)
+	stored, err := log.Scan(ctx, key)
+	if err != nil {
+		return ApprovalRequest{}, false, fmt.Errorf("approval: read the request record %s: %w", key, err)
+	}
+	raw, kept := stored[key]
+	if !kept {
+		return ApprovalRequest{}, false, nil
+	}
+	var record approvalRequestRecord
+	if err := json.Unmarshal(raw, &record); err != nil {
+		return ApprovalRequest{}, false, fmt.Errorf("approval: read the request record at %s: %w", key, err)
+	}
+	if record.Request.ID == "" || record.Asked != asked {
+		return ApprovalRequest{}, false, fmt.Errorf("%w: %s states the identity %q", errApprovalFactConflict, key, record.Asked)
+	}
+	return record.Request, true, nil
+}
+
+// factOnFace reads the one fact one request filed under a role, by the fact key
+// that request and role name: one fact is one key, so the read costs that key and
+// never the stream around it. A body stating another fact than its key names is
+// refused by name, so a fact read back is the one that was filed there.
+func factOnFace(ctx context.Context, log durable.FactLog, role, tool, argsDigest, id string) (event.Event, bool, error) {
+	key := factKey(event.EventID(approvalFact(role, tool, argsDigest, id).FactKey()))
+	stored, err := log.Scan(ctx, key)
+	if err != nil {
+		return event.Event{}, false, fmt.Errorf("approval: read the attention %s %s: %w", role, key, err)
+	}
+	raw, kept := stored[key]
+	if !kept {
+		return event.Event{}, false, nil
+	}
+	var fact event.Event
+	if err := json.Unmarshal(raw, &fact); err != nil {
+		return event.Event{}, false, fmt.Errorf("approval: read the attention %s at %s: %w", role, key, err)
+	}
+	if factKey(fact.Key) != key {
+		return event.Event{}, false, fmt.Errorf("%w: %s states the fact %s", errApprovalFactConflict, key, fact.Key)
+	}
+	return fact, true, nil
+}
+
+// answerOnFace reads the answer one request was ruled with, by the fact key the
+// question identity names.
+func answerOnFace(ctx context.Context, log durable.FactLog, tool, argsDigest, id string) (event.Event, bool, error) {
+	return factOnFace(ctx, log, event.TypeAttentionAnswer, tool, argsDigest, id)
+}
+
+// questionOnFace reads the question one request was registered under, by the fact
+// key that request names.
+func questionOnFace(ctx context.Context, log durable.FactLog, tool, argsDigest, id string) (event.Event, bool, error) {
+	return factOnFace(ctx, log, event.TypeAttentionQuestion, tool, argsDigest, id)
+}
+
+// foldAnswersInForce reads the tail each obligation the cut states may have gained
+// since that cut — the ruling a person filed while the process was down — and folds
+// it into the chain, so a restarted book answers the ruling the face holds instead
+// of the hold the cut still states. The read is each obligation's own answer key:
+// a book that states ten obligations pays ten reads however long the history behind
+// them is. A request or a ruling of history is read by the reader that asks for it
+// by identity (Lookup, Decide), never by the boot.
+func (a *ApprovalManager) foldAnswersInForce(ctx context.Context, log durable.FactLog) error {
+	a.mu.RLock()
+	held := make([]ApprovalRequest, 0, len(a.evidence))
+	for _, req := range a.evidence {
+		held = append(held, *req)
+	}
+	a.mu.RUnlock()
+	answers := make([]event.Event, 0, len(held))
+	for _, req := range held {
+		answer, answered, err := answerOnFace(ctx, log, req.ToolName, req.ArgsDigest, req.ID)
+		if err != nil {
+			return err
+		}
+		if answered {
+			answers = append(answers, answer)
+		}
+	}
+	return a.chain.bindFacts(answers, log)
+}
+
+// bind hands the chain its durable face and folds the whole stored stream back
+// into it, so a book beside no stated cut answers the same presence and the same
+// rulings the process before it answered. A pair whose body states another fact
+// than its key names is refused by name: a stream this chain cannot read is not a
+// stream it serves as empty.
 func (l *attentionLedger) bind(ctx context.Context, log durable.FactLog) error {
 	if l == nil || log == nil {
 		return nil
@@ -121,6 +235,15 @@ func (l *attentionLedger) bind(ctx context.Context, log durable.FactLog) error {
 	folded, err := foldAttentionFacts(ctx, log)
 	if err != nil {
 		return err
+	}
+	return l.bindFacts(folded, log)
+}
+
+// bindFacts folds one read of stored facts into the chain and hands it the face
+// they were read from: the read is the caller's to choose, the merge is not.
+func (l *attentionLedger) bindFacts(folded []event.Event, log durable.FactLog) error {
+	if l == nil || log == nil {
+		return nil
 	}
 	l.mu.Lock()
 	defer l.mu.Unlock()

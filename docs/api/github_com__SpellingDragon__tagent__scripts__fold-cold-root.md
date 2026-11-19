@@ -14,6 +14,10 @@ refused rather than read as complete.
   - restore: the run holds the write rights of -root, states at most
     foldedBatchKeys original keys per commit, and reads every identity back
     through a freshly opened engine
+  - offline source: the run stamps every journal of the source before it reads
+    any of them and states them again once it has read them all, so a journal
+    that moved under the read refuses the run instead of being folded as one
+    consistent read of two journals
   - refusals: ledger.ErrMigrateSourceUnchanged, ErrSourceUnstated,
     ErrSourceConflict, ErrSourceIncomplete, ledger.ErrRootWriteLocked,
     ledger.ErrBatchNotAtomic

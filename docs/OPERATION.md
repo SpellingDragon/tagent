@@ -69,7 +69,7 @@ go -C . test ./tests/integration/host -run '^TestSoakContinuity$' -count=1 -v -t
 
 ### 5.1 唯一入口 `scripts/lint.sh`
 
-CI 与本地的命令逐字相同。分阶段：
+CI 与本地的命令逐字相同（**DoD 段例外**：它读本次运行的证据目录，见下）。分阶段：
 
 | 阶段 | 内容 | 失败意味着 |
 |---|---|---|
@@ -91,13 +91,13 @@ CI 与本地的命令逐字相同。分阶段：
 用法：
 
 ```bash
-bash scripts/lint.sh                 # 全量（CI 口径）
+bash scripts/lint.sh                 # 全量；DoD 段要证据目录（见下），裸跑在缺证据时具名红
 bash scripts/lint.sh --only fmt      # 只跑 fmt；build/vet/policy 跳过，文档/脚本门照跑
 bash scripts/lint.sh --strict        # 要求零发现（收敛终态）
 bash scripts/lint.sh --update-baseline   # 批量降低注释计数后重写基线
 ```
 
-`--only <阶段>` 指定 fmt/build/vet/policy/contracts 中**只跑哪一个**（contracts 跳过 Go 四段，仍跑自测/运行时契约/尾部门）；它管不到文档/脚本门——那些始终会跑。§五.1 表之外 lint.sh 还跑 checker 自测、runtime plan/architecture/concept/implementation、scenarios contract、product comment policy、openspec strict 与 event-body 前缀检查。
+`--only <阶段>` 指定 fmt/build/vet/policy/contracts 中**只跑哪一个**（contracts 跳过 Go 四段，仍跑自测/运行时契约/尾部门）；它管不到文档/脚本门——那些始终会跑。§五.1 表之外 lint.sh 还跑 checker 自测、runtime plan/architecture/concept/implementation、scenarios contract、product comment policy、openspec strict 与 event-body 前缀检查。**DoD 段的证据环境**：`check_dod_coverage.py` 只认 `TAGENT_RUNTIME_EVIDENCE_DIR` 指向的那一次运行目录（`bash scripts/preflight.sh` 生成并打印该路径），变量未给即 `TAGENT_RUNTIME_EVIDENCE_DIR is unset` 非零退出，目录里没有 `mutations/` 产物即 `holds no mutations/ product` 非零退出，两者都不会回落到「最近一份绿」或登记表里的手填判词。因此该段在 `test` 作业（`.github/workflows/ci.yml` 的 `bash scripts/lint.sh`）今天仍缺证据目录，CI 侧的接线归 13.R3——「本地全量绿」与「CI 绿」在当前不是同一件事。
 
 ### 5.2 其余门与常用工具
 
@@ -243,12 +243,13 @@ defer clean(ctx)
 - **可复跑**：`go test ./runtime/agent ./features/evolution/governance ./runtime/state -run 'Observation' -count=1` 验三个机制（委派、审批、持久化）与事件消费面各一条输出断言与一条失败不阻断断言；消费者锚 `go test ./tests/integration/history ./tests/integration/execution -run 'Observation' -count=1` 走真实路径（委派受理与落定、重启折叠）读观测行；环境块计数锚 `go test ./tests/integration/host -run 'EnvironmentBlockGenerationIsObserved' -count=1`。压缩请求没有专用观察行，断言面只到 `telemetry.LogObserver` 的通用事实行。
 - **运行时内存观测面**（`oom-bounded-capture-and-storm-fuse`）：host face 提供 `/debug/pprof/{heap,goroutine,allocs}`（同 face 凭据门，仅回环）；`TAGENT_GCTRACE=1` 合并进 GODEBUG（子进程继承；对已启动进程库内不生效，Boot 打边界提示）。锚：`go test ./tests/integration/execution -run '^TestDebugPprofServesHeap$|^TestGCTraceSwitchStatesItsBoundary$' -count=1`。
 
-### F. 存储面升级前置：带冷档的根必须先折回新根 <a id="storage-fold-prerequisite"></a>
+### F. 存储面升级前置：带 `cold/` 目录的根必须先折回新根 <a id="storage-fold-prerequisite"></a>
 
 1. **折回命令**：`go run ./scripts/fold-cold-root -source <旧根> -root <新根>`，**默认干跑**（只报待折键数与留下的键，零写入）；加 `-restore` 才把事实写进 `-root` 指定的新根。`-source` 与 `-root` 拒绝指向同一目录（否则写权开档会先重建源根）。拒绝语义与写后自校验的细节见 `docs/wiki/memory/memory-architecture.md#local-file-kv`。
-2. **源根只读且必须离线**：脚本对每个日志只做复制，源根一字节不动；拷贝期间日志的长度或修改时间发生变动即具名拒绝（`ErrMigrateSourceUnchanged`），故**不要对正在运行的实例折回**。
-3. **`file` 档根无事实可折**：`file` 档引擎每次调用只落一个键，对一条事实的三键批次答 `ErrBatchNotAtomic`，故它从未产生可折的键集；脚本对这类根按「无热档日志」具名拒绝（`ErrSourceUnstated`）。同理，目标根必须是 `journal` 档（或 `memory` 档以外可供本构建读的形态）。
-4. **目标根须空，且一根一写者**：目标根已有键即拒；`-restore` 声明的写权由内核 flock 独占，同一根上另一个写者存在时以 `ErrRootWriteLocked` 具名拒绝，两个写者不会在同一槽位上各提交一次。写完后脚本经**新开引擎**逐身份回读原字节与提交序自校验，不等即非零退出。
+2. **源根只读且必须离线**：脚本对每个日志只做复制，源根一字节不动；**所有日志在读到任何一字节之前先逐个盖戳（长度＋修改时间），全部读完后陈述一次，报告可切换之前再陈述一次**，任一戳变动即具名拒绝（`ErrMigrateSourceUnchanged`，并点名移动的那个日志文件），故两次源读取不会被包装成一份"在线一致快照"，**不要对正在运行的实例折回**。
+3. **`file` 档根无事实可折**：`file` 档引擎每次调用只落一个键，对一条事实的三键批次答 `ErrBatchNotAtomic`——整批零落地、一个键都不留（`StoreCapabilities.AtomicBatch` 声明同一限度），故它从未产生可折的键集；脚本对这类根按「源根没有 `kv/journal.log`」具名拒绝（`ErrSourceUnstated`）。同理，目标根必须是 `journal` 档（或 `memory` 档以外可供本构建读的形态）。
+4. **目标根须空，且一根一写者**：目标根已有键即拒；`-restore` 声明的写权由内核 flock 独占，同一根上另一个写者存在时以 `ErrRootWriteLocked` 具名拒绝——**运行中的实例持有该根时，`fold-cold-root -restore` 与 `recover-kv -restore` 都以此名失败**（`recover-kv` 的干跑不取写权，可挨着在跑的实例读），两个写者不会在同一槽位上各提交一次。写完后脚本经**新开引擎**逐身份回读原字节与提交序自校验，不等即非零退出。**半成品不被报告为可切换**：某个批次被日志自身的帧上界拒（`ErrJournalFrameTooLarge`）或回读不等时，stdout 不出现 `read back by identity` 那行，源根不上电、不切换，已落的部分根**既不删除也不覆盖**——再跑一次即以 `ErrMigrateTargetNotEmpty` 具名拒绝，须由操作方先移除该根再折。可复跑：`go test ./scripts/fold-cold-root -run '^(TestOfflineConversionPreservesEveryFact|TestSourceChangeRefusesConversion|TestPartialTargetIsNotReportedReady)$' -count=10 -v`（逐身份/字节/提交序相等、源变化具名拒绝、半成品不报 ready 三条锚）。
+5. **磁盘增长显式声明，压实另立**：本构建只读一份 `kv/journal.log`，**不承诺该日志有界，也不承诺压实**：字节随历史增长，增长是显式声明的关切（MUST NOT 被声称有界）；压实（把仍持有的键重写成新日志再原子换入）是单独拥有的关切，当前没有实现。
 
 ---
 

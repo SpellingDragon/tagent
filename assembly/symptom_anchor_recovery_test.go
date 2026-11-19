@@ -1017,3 +1017,725 @@ func TestSymptomAnchorBootCostFlatAcrossGenerations(t *testing.T) {
 		}
 	}
 }
+
+// bootStageSample is one stage of one boot as the call that owns it states it: the
+// stage, the account the call gave for itself, the call, and the two clock reads that
+// call took. A pass of the address table names which pass it was, and a stage that ran
+// outside the table leaves it empty.
+type bootStageSample struct {
+	stage  string
+	pass   string
+	parent string
+	call   int
+	begin  time.Time
+	end    time.Time
+}
+
+// span answers how long the stage of the sample ran, as the two reads of its own call
+// state it.
+func (s bootStageSample) span() time.Duration {
+	return s.end.Sub(s.begin)
+}
+
+// stageGeneration and the stages beside it name one stage of a boot each, for the call
+// that owns it: the fold restores what the storage holds, the open verifies the log, and
+// the address table maintains itself inside the call that needed the maintenance.
+const (
+	stageGeneration = "generation"
+	stageBoot       = "boot"
+	stageRebind     = "rebind"
+	stageIntegrity  = "integrity"
+	stagePointRead  = "pointRead"
+	stageCommit     = "commit"
+	stageDirectory  = "directory"
+)
+
+// bootStageOrder is the stages one boot is judged in, so a walk that charges none of
+// one of them is refused by name instead of read as a stage that did not happen.
+var bootStageOrder = []string{
+	stageGeneration, stageBoot, stageRebind, stageIntegrity, stagePointRead, stageCommit, stageDirectory,
+}
+
+// stageExclusiveStages are the stages that stand beside each other inside one
+// generation: the boot, the point read and the commit overlap nothing, so what the
+// generation carries past them is the cost no stage of this set states.
+var stageExclusiveStages = []string{stageBoot, stagePointRead, stageCommit}
+
+// bootStageSet is what one generation's stages answer: one sample per stage per call
+// that ran it, beside the number of calls the fixture drove. The counts are the
+// independent side the samples are judged against, so a stage the walk drove and the
+// set charges no sample for is a stage the set does not state.
+type bootStageSet struct {
+	samples []bootStageSample
+	calls   map[string]int
+}
+
+// stageSampleParent answers the stage one recorded parent label names, which is the
+// stage a sample nests inside: an open is the boot that opened the view, a commit and a
+// read are the commit and the point read of the generation, and a rebuild is a pass of
+// the table that a reset of it runs inside.
+func stageSampleParent(label string) string {
+	switch label {
+	case "open":
+		return stageBoot
+	case "commit":
+		return stageCommit
+	case "read":
+		return stagePointRead
+	case "rebuild":
+		return stageDirectory
+	}
+	return label
+}
+
+// judgeBootStageWalk answers why the stage samples of one walk state no stage of a
+// boot, and nil beside a walk whose every generation states every call it drove once,
+// with a pair of its own endpoints, inside the stage it nests in.
+//   - every generation is judged: the stages it charges are exactly the calls the fixture drove, so a dropped sample fails as a stage the set does not state and a repeated one as a call charged twice
+//   - every stage of a boot is charged somewhere in the walk: a stage no generation states is a stage the anchor says nothing about, whatever the generations it did state
+//   - the sum of the stages is never the judgement: two stages inside each other add up to more than the stage they nest in, and one stage dropped leaves that sum untouched
+func judgeBootStageWalk(sets []bootStageSet) error {
+	if len(sets) == 0 {
+		return fmt.Errorf("the walk answers no generation, so the sample set states no stage of a boot")
+	}
+	for generation, set := range sets {
+		if err := judgeBootStageSet(set); err != nil {
+			return fmt.Errorf("generation %d: %w", generation, err)
+		}
+	}
+	for _, stage := range bootStageOrder {
+		charged := 0
+		for _, set := range sets {
+			for _, sample := range set.samples {
+				if sample.stage == stage {
+					charged++
+				}
+			}
+		}
+		if charged == 0 {
+			return fmt.Errorf("the walk charges no %s stage in any generation, so the anchor states nothing about that stage of the boot", stage)
+		}
+	}
+	return nil
+}
+
+// judgeBootStageSet answers why the samples of one generation state no stage of its
+// boot, and nil beside a set whose every stage is charged once per call it ran.
+func judgeBootStageSet(set bootStageSet) error {
+	charged := make(map[string][]bootStageSample, len(bootStageOrder))
+	for _, sample := range set.samples {
+		charged[sample.stage] = append(charged[sample.stage], sample)
+	}
+	if err := judgeStageUniqueness(charged); err != nil {
+		return err
+	}
+	for _, stage := range bootStageOrder {
+		want := set.calls[stage]
+		if got := len(charged[stage]); got != want {
+			return fmt.Errorf("the set charges %d %s stage(s) beside the %d call(s) the walk drove, so a stage the boot ran is unstated or charged for a call that did not run it",
+				got, stage, want)
+		}
+	}
+	if err := judgeStageEndpoints(set.samples); err != nil {
+		return err
+	}
+	return judgeStageContainment(set, charged)
+}
+
+// judgeStageUniqueness answers why one call pays a stage more than once, and nil
+// beside a set that charges every stage of every call it drove once.
+func judgeStageUniqueness(charged map[string][]bootStageSample) error {
+	for _, stage := range bootStageOrder {
+		seen := make(map[int]bool, len(charged[stage]))
+		for _, sample := range charged[stage] {
+			if seen[sample.call] {
+				return fmt.Errorf("the set charges the %s stage twice at call %d%s: one call pays one stage once",
+					stage, sample.call, stagePassSuffix(sample))
+			}
+			seen[sample.call] = true
+		}
+	}
+	return nil
+}
+
+// judgeStageEndpoints answers why the endpoints of one stage are not the pair its own
+// call took, and nil beside a stage that closes after it opens and states a pair no
+// other stage states.
+func judgeStageEndpoints(samples []bootStageSample) error {
+	for at, sample := range samples {
+		if !sample.end.After(sample.begin) {
+			return fmt.Errorf("the %s stage of call %d%s closes at %s beside its open at %s: a stage closes after it opens",
+				sample.stage, sample.call, stagePassSuffix(sample), sample.end.Format(time.RFC3339Nano), sample.begin.Format(time.RFC3339Nano))
+		}
+		for other := 0; other < at; other++ {
+			prior := samples[other]
+			if prior.begin.Equal(sample.begin) && prior.end.Equal(sample.end) {
+				return fmt.Errorf("the %s stage of call %d%s states the same pair as the %s stage of call %d: two stages of one boot are independently opened, never one from the pair of the other",
+					sample.stage, sample.call, stagePassSuffix(sample), prior.stage, prior.call)
+			}
+		}
+	}
+	return nil
+}
+
+// judgeStageContainment answers why a stage runs outside the stage it nests in, and nil
+// beside a set whose every nested stage sits inside a call the generation really drove.
+func judgeStageContainment(set bootStageSet, charged map[string][]bootStageSample) error {
+	for _, sample := range set.samples {
+		if sample.parent == "" {
+			continue
+		}
+		parent := stageSampleParent(sample.parent)
+		if set.calls[parent] == 0 {
+			return fmt.Errorf("the %s stage of call %d%s names the %s stage as the call that ran it, and this generation drove no %s stage: cost is accounted to a call the walk did not make",
+				sample.stage, sample.call, stagePassSuffix(sample), parent, parent)
+		}
+		inside := false
+		for _, held := range charged[parent] {
+			if !sample.begin.Before(held.begin) && !sample.end.After(held.end) {
+				inside = true
+				break
+			}
+		}
+		if !inside {
+			return fmt.Errorf("the %s stage of call %d%s runs from %s to %s, outside every %s stage the set charges: a stage is paid inside the call that ran it",
+				sample.stage, sample.call, stagePassSuffix(sample), sample.begin.Format(time.RFC3339Nano), sample.end.Format(time.RFC3339Nano), parent)
+		}
+	}
+	return nil
+}
+
+// stagePassSuffix states which pass of the address table a sample is, and nothing
+// beside a stage the table did not run.
+func stagePassSuffix(sample bootStageSample) string {
+	if sample.pass == "" {
+		return ""
+	}
+	return " (" + sample.pass + ")"
+}
+
+// stageExclusiveSpan answers the span of one stage that stands beside the others of
+// its generation, and the failure of a stage the set charges twice.
+func stageExclusiveSpan(set bootStageSet, stage string) (time.Duration, error) {
+	held := time.Duration(0)
+	charged := false
+	for _, sample := range set.samples {
+		if sample.stage != stage {
+			continue
+		}
+		if charged {
+			return 0, fmt.Errorf("the set charges the %s stage twice, so the generation it stands in is stated once", stage)
+		}
+		held, charged = sample.span(), true
+	}
+	return held, nil
+}
+
+// stageExclusiveSum answers what the stages standing beside each other inside one
+// generation add up to, which is the sum a judgement of cost must not rest on: a stage
+// nested inside another is charged in both, and a stage of the set dropped leaves the
+// sum unchanged.
+func stageExclusiveSum(set bootStageSet) (time.Duration, error) {
+	sum := time.Duration(0)
+	for _, stage := range stageExclusiveStages {
+		held, err := stageExclusiveSpan(set, stage)
+		if err != nil {
+			return 0, err
+		}
+		sum += held
+	}
+	return sum, nil
+}
+
+// stageSamplingUnattributed answers what one generation carries past the stages that
+// stand beside each other: the whole generation less the boot, the point read and the
+// commit it holds. The remainder is named for what it is, because it is the part no
+// stage of this set states and it belongs to no stage by construction.
+func stageSamplingUnattributed(set bootStageSet) (time.Duration, error) {
+	total, err := stageExclusiveSpan(set, stageGeneration)
+	if err != nil {
+		return 0, err
+	}
+	sum, err := stageExclusiveSum(set)
+	if err != nil {
+		return 0, err
+	}
+	if sum > total {
+		return 0, fmt.Errorf("the stages standing beside each other charge %s beside a generation of %s, so the spans they state do not stand inside it", sum, total)
+	}
+	return total - sum, nil
+}
+
+// integrityPassSpanOf answers the two clock reads one boot's open took around the
+// verification of the log, read from the engine's own pair through the structural
+// interface it states. An engine that keeps no journal answers the named failure,
+// never a zero pair a walk would read as a pass that took no time.
+func integrityPassSpanOf(tier *ledger.Tier) (time.Time, time.Time, error) {
+	if tier == nil {
+		return time.Time{}, time.Time{}, fmt.Errorf("the boot holds no storage tier, so the probe read no integrity pass of the boot")
+	}
+	probe, held := tier.Store.(interface{ IntegrityPassSpan() (time.Time, time.Time) })
+	if !held {
+		return time.Time{}, time.Time{}, fmt.Errorf("the tier holds the engine %T, which states no integrity pass span, so the probe read no endpoint of the verification", tier.Store)
+	}
+	begin, end := probe.IntegrityPassSpan()
+	return begin, end, nil
+}
+
+// directoryPassesOf answers how many maintenance passes of the address table one boot
+// opened, read from the engine's own count through the structural interface it states.
+func directoryPassesOf(tier *ledger.Tier) (int, error) {
+	if tier == nil {
+		return 0, fmt.Errorf("the boot holds no storage tier, so the probe read no maintenance pass of the boot")
+	}
+	probe, held := tier.Store.(interface{ DirectoryMaintenancePasses() int })
+	if !held {
+		return 0, fmt.Errorf("the tier holds the engine %T, which states no maintenance pass count, so the probe read no pass of the address table", tier.Store)
+	}
+	return probe.DirectoryMaintenancePasses(), nil
+}
+
+// directoryPassOf answers one maintenance pass of the address table one boot opened:
+// the pass, the account the call that ran it gave, and the two clock reads it took.
+func directoryPassOf(tier *ledger.Tier, at int) (string, string, time.Time, time.Time, error) {
+	if tier == nil {
+		return "", "", time.Time{}, time.Time{}, fmt.Errorf("the boot holds no storage tier, so the probe read no maintenance pass of the boot")
+	}
+	probe, held := tier.Store.(interface {
+		DirectoryMaintenancePass(int) (string, string, time.Time, time.Time, bool)
+	})
+	if !held {
+		return "", "", time.Time{}, time.Time{}, fmt.Errorf("the tier holds the engine %T, which states no maintenance pass, so the probe read no pair of the address table", tier.Store)
+	}
+	pass, parent, begin, end, ok := probe.DirectoryMaintenancePass(at)
+	if !ok {
+		return "", "", time.Time{}, time.Time{}, fmt.Errorf("the engine states no maintenance pass %d, so the count and the passes of the address table disagree", at)
+	}
+	return pass, parent, begin, end, nil
+}
+
+// stageWalkGenerations is how many generations the stage anchors walk: the first
+// commits the fact that grows the address table, the third boots over a root whose
+// derived table was dropped and rebuilds it, and the two beside them boot, read and
+// commit over a root the storage tier states.
+const stageWalkGenerations = 4
+
+// stageWalkRebuildGeneration is the generation that opens over a root whose derived
+// address table is gone, which is the root a process that stopped before stating its
+// table leaves behind: the open derives the table from the log again.
+const stageWalkRebuildGeneration = 2
+
+// stageWalkLongKey states more bytes than one slot of the address table holds, so the
+// commit that files it grows the table: a key of the length a session identity of the
+// host reaches, filed the way every other fact is filed.
+var stageWalkLongKey = strings.Repeat("k", 120)
+
+// dropDerivedSlotTable drops the address table of one durable root, which is derived
+// from the log and rebuilt by the next open: the log and the order statements beside it
+// are left in place, so nothing but the table's own statement is gone.
+func dropDerivedSlotTable(t *testing.T, root string) {
+	t.Helper()
+	path := filepath.Join(root, "kv", "slots")
+	if err := os.Remove(path); err != nil {
+		t.Fatalf("drop the derived address table of %s: %v", root, err)
+	}
+}
+
+// stageWalkFact builds one fact the stage walk commits: a distinct key, so the walk
+// never rewrites a fact the chain holds, and the material one turn of the session
+// carries.
+func stageWalkFact(key string, addr event.Address, generation int) event.Event {
+	return event.Event{
+		Key:       event.EventID(key),
+		Type:      event.TypeAgentOutput,
+		Timestamp: time.Date(2026, 12, 1, 12, generation, 0, 0, time.UTC),
+		Meta:      map[string]string{event.MetaKeyEventSummary: "answer"},
+		Message:   model.Message{Role: model.RoleUser, Content: "the material of the stage walk"},
+		Owner:     addr, Source: addr, Target: addr,
+	}
+}
+
+// sampleBootStageGenerations boots one durable root the named number of generations
+// and answers the samples of every generation's stages, each read from the call that
+// ran it.
+//   - every generation boots through the assemble of a real run, commits one fact through CommitToSession and reads one fact of the generation before it through the segment store, so the boot, the commit and the point read are the calls the host makes
+//   - the first generation commits a fact whose key states more bytes than a slot of the address table holds, so the table grows inside that commit and inside no call the test made
+//   - the third generation opens over a root whose derived table was dropped, so the open rebuilds the table and resets it from the log
+//   - a generation settles one task through the registry, files both checkpoints and closes the process inside the span the generation states, so the remainder that span carries past its stages is the work beside them
+func sampleBootStageGenerations(t *testing.T, ctx context.Context, root string, addr event.Address, generations int) []bootStageSet {
+	t.Helper()
+	storage := WithStorage(ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: root})
+	sets := make([]bootStageSet, 0, generations)
+	committed := ""
+	for generation := 0; generation < generations; generation++ {
+		generationBegin := time.Now()
+		set := bootStageSet{calls: map[string]int{stageGeneration: 1}}
+		if generation == stageWalkRebuildGeneration {
+			dropDerivedSlotTable(t, root)
+		}
+		bootBegin := time.Now()
+		boot := noTrimChainRun(t, ctx, storage)
+		bootEnd := time.Now()
+		boot.stopCheckpointFiler()
+		set.calls[stageBoot]++
+		set.samples = append(set.samples, bootStageSample{stage: stageBoot, call: generation, begin: bootBegin, end: bootEnd})
+		restored := boot.restoreStageSpan()
+		if restored.begin.IsZero() != restored.end.IsZero() {
+			t.Fatalf("the boot of generation %d states the recovery stage open at %v and closed at %v, want both reads or neither", generation, restored.begin, restored.end)
+		}
+		if !restored.begin.IsZero() {
+			set.calls[stageRebind]++
+			set.samples = append(set.samples, bootStageSample{stage: stageRebind, call: generation, parent: stageBoot, begin: restored.begin, end: restored.end})
+		}
+		verifiedBegin, verifiedEnd, err := integrityPassSpanOf(boot.tier)
+		if err != nil {
+			t.Fatalf("read the verification stage of the boot of generation %d: %v", generation, err)
+		}
+		if verifiedBegin.IsZero() != verifiedEnd.IsZero() {
+			t.Fatalf("the boot of generation %d states the verification opened at %v and closed at %v, want both reads or neither", generation, verifiedBegin, verifiedEnd)
+		}
+		if !verifiedBegin.IsZero() {
+			set.calls[stageIntegrity]++
+			set.samples = append(set.samples, bootStageSample{stage: stageIntegrity, call: generation, parent: stageBoot, begin: verifiedBegin, end: verifiedEnd})
+		}
+		if committed != "" {
+			readBegin := time.Now()
+			stored, held, err := boot.tier.Segments.GetEvent(ctx, event.EventID(committed))
+			readEnd := time.Now()
+			if err != nil || !held {
+				t.Fatalf("read the fact %s the generation before committed = held %t, %v, want the fact the storage tier holds", committed, held, err)
+			}
+			if len(stored.Body) == 0 {
+				t.Fatalf("the fact %s the generation before committed reads back no body, want the material it landed", committed)
+			}
+			set.calls[stagePointRead]++
+			set.samples = append(set.samples, bootStageSample{stage: stagePointRead, call: generation, begin: readBegin, end: readEnd})
+		}
+		key := fmt.Sprintf("gen-%d-answer", generation)
+		if generation == 0 {
+			key = stageWalkLongKey
+		}
+		commitBegin := time.Now()
+		landed, err := boot.CommitToSession(ctx, addr, stageWalkFact(key, addr, generation))
+		commitEnd := time.Now()
+		if err != nil {
+			t.Fatalf("commit the fact %s of generation %d: %v", key, generation, err)
+		}
+		set.calls[stageCommit]++
+		set.samples = append(set.samples, bootStageSample{stage: stageCommit, call: set.calls[stageCommit], begin: commitBegin, end: commitEnd})
+		committed = string(landed)
+		passes, err := directoryPassesOf(boot.tier)
+		if err != nil {
+			t.Fatalf("read the maintenance passes of the boot of generation %d: %v", generation, err)
+		}
+		set.calls[stageDirectory] = passes
+		for at := 0; at < passes; at++ {
+			pass, parent, begin, end, err := directoryPassOf(boot.tier, at)
+			if err != nil {
+				t.Fatalf("read the maintenance pass %d of the boot of generation %d: %v", at, generation, err)
+			}
+			set.samples = append(set.samples, bootStageSample{stage: stageDirectory, pass: pass, parent: parent, call: at, begin: begin, end: end})
+		}
+		settleTasks(t, ctx, boot, taskCheckpointCalls(fmt.Sprintf("gen-%d", generation), 1))
+		if _, _, err := boot.CheckpointSession(ctx, addr); err != nil {
+			t.Fatalf("file the session checkpoint of generation %d: %v", generation, err)
+		}
+		if _, _, err := boot.Checkpoint(ctx); err != nil {
+			t.Fatalf("file the framework checkpoint of generation %d: %v", generation, err)
+		}
+		if _, err := boot.Close(ctx, agent.CloseRequest{Timeout: time.Now().Add(2 * time.Second)}); err != nil {
+			t.Fatalf("close the process of generation %d: %v", generation, err)
+		}
+		set.samples = append(set.samples, bootStageSample{stage: stageGeneration, call: generation, begin: generationBegin, end: time.Now()})
+		sets = append(sets, set)
+	}
+	return sets
+}
+
+// copyBootStageWalk answers a copy of one walk's samples and counts, so an anchor that
+// judges a broken set leaves the walk the fixture measured untouched.
+func copyBootStageWalk(sets []bootStageSet) []bootStageSet {
+	copied := make([]bootStageSet, len(sets))
+	for at, set := range sets {
+		calls := make(map[string]int, len(set.calls))
+		for stage, count := range set.calls {
+			calls[stage] = count
+		}
+		copied[at] = bootStageSet{samples: append([]bootStageSample(nil), set.samples...), calls: calls}
+	}
+	return copied
+}
+
+// stageSampleAt answers the position of the nth sample of one stage in a set, so an
+// anchor breaks the sample it names rather than one it guessed.
+func stageSampleAt(set bootStageSet, stage string, nth int) (int, error) {
+	seen := 0
+	for at, sample := range set.samples {
+		if sample.stage != stage {
+			continue
+		}
+		if seen == nth {
+			return at, nil
+		}
+		seen++
+	}
+	return 0, fmt.Errorf("the set charges no %s sample %d, so the anchor has no stage of that name to break", stage, nth)
+}
+
+// dropStageSample answers a copy of a set without the sample at one position and with
+// every count it states left as the fixture drove them, which is a set that charges one
+// call fewer than the walk made.
+func dropStageSample(set bootStageSet, at int) bootStageSet {
+	dropped := set
+	dropped.samples = append(append([]bootStageSample(nil), set.samples[:at]...), set.samples[at+1:]...)
+	return dropped
+}
+
+// TestBootStageSamplesHaveIndependentEndpoints pins that one boot states each stage by the call that owns it.
+//   - the walk drives every stage of a boot, and each stage is charged once per call the fixture made
+//   - no two stages state the same pair, and every stage closes after it opens, so no stage is derived from another's endpoints
+//   - every nested stage runs inside the stage it names as its parent: the recovery and the verification in the boot, a maintenance pass in its own call
+//   - the generation carries a remainder past the stages beside each other, and that remainder is stated as what no stage of the set accounts for
+func TestBootStageSamplesHaveIndependentEndpoints(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	addr := event.Address{AgentID: "agent-a", SessionID: "session-stage-samples"}
+	sets := sampleBootStageGenerations(t, ctx, root, addr, stageWalkGenerations)
+	if err := judgeBootStageWalk(sets); err != nil {
+		t.Fatalf("the stage samples of one walk: %v", err)
+	}
+	for generation, set := range sets {
+		unattributed, err := stageSamplingUnattributed(set)
+		if err != nil {
+			t.Fatalf("state the remainder of generation %d: %v", generation, err)
+		}
+		for _, stage := range bootStageOrder {
+			if stage == stageGeneration {
+				continue
+			}
+			charged := 0
+			for _, sample := range set.samples {
+				if sample.stage != stage {
+					continue
+				}
+				charged++
+				t.Logf("generation %d states the %s stage%s from its own call over %s",
+					generation, stage, stagePassSuffix(sample), sample.span())
+			}
+			if charged == 0 {
+				t.Logf("generation %d drove no %s stage", generation, stage)
+			}
+		}
+		t.Logf("generation %d carries %s past the boot, the point read and the commit it states", generation, unattributed)
+	}
+}
+
+// stagePassAt answers the position of the first maintenance pass of the address table
+// one account ran in a set, so an anchor breaks the pass that call really paid for.
+func stagePassAt(set bootStageSet, parent string) (int, error) {
+	for at, sample := range set.samples {
+		if sample.stage == stageDirectory && sample.parent == parent {
+			return at, nil
+		}
+	}
+	return 0, fmt.Errorf("the set charges no maintenance pass inside the %s stage, so the anchor has no pass of that account to break", parent)
+}
+
+// stageWalkPasses counts which maintenance passes one walk charges, so an anchor states
+// that the stages it judges are the passes the storage tier ran rather than the ones a
+// test asked for.
+func stageWalkPasses(sets []bootStageSet) map[string]int {
+	passes := make(map[string]int, 3)
+	for _, set := range sets {
+		for _, sample := range set.samples {
+			if sample.stage == stageDirectory {
+				passes[sample.pass]++
+			}
+		}
+	}
+	return passes
+}
+
+// stageWalkExclusiveSums answers the sum the stages standing beside each other charge
+// in every generation of one walk: the arithmetic a judgement of cost must not rest on.
+func stageWalkExclusiveSums(sets []bootStageSet) ([]time.Duration, error) {
+	sums := make([]time.Duration, len(sets))
+	for at, set := range sets {
+		sum, err := stageExclusiveSum(set)
+		if err != nil {
+			return nil, err
+		}
+		sums[at] = sum
+	}
+	return sums, nil
+}
+
+// TestBootStageSamplesRejectDoubleChargeAndMissingSpan pins that a missing stage and a repeated one are refused by name.
+//   - every broken set is judged beside the walk the fixture measured, which is green before it is broken
+//   - a walk that states no verification stage is refused at the walk, because a stage no generation charges is the one hole a sum cannot show
+//   - a set that charges one call fewer than the walk drove is refused at that generation, so a dropped sample never stands for a stage that did not happen
+//   - a stage charged twice is refused by the call it names, and one whose endpoints are copied or that runs past its parent is refused as the stage it is
+//   - the sum of the stages beside each other is unchanged by either injection, so a judgement resting on that sum accepts a set these refusals reject
+func TestBootStageSamplesRejectDoubleChargeAndMissingSpan(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	addr := event.Address{AgentID: "agent-a", SessionID: "session-stage-refusals"}
+	walk := sampleBootStageGenerations(t, ctx, root, addr, stageWalkGenerations)
+	if err := judgeBootStageWalk(walk); err != nil {
+		t.Fatalf("the walk the refusals are judged beside is not green itself: %v", err)
+	}
+	passes := stageWalkPasses(walk)
+	for _, pass := range []string{"grow", "rebuild", "resetTable"} {
+		if passes[pass] == 0 {
+			t.Fatalf("the walk charges no %s pass of the address table, so the injection of a maintenance stage would be judged over no pass the storage tier ran", pass)
+		}
+	}
+	before, err := stageWalkExclusiveSums(walk)
+	if err != nil {
+		t.Fatalf("state the sum of the stages standing beside each other: %v", err)
+	}
+	cases := []struct {
+		name   string
+		broken func([]bootStageSet) error
+		want   string
+	}{
+		{
+			name: "a walk that states no verification stage",
+			broken: func(sets []bootStageSet) error {
+				for at, set := range sets {
+					for {
+						position, err := stageSampleAt(set, stageIntegrity, 0)
+						if err != nil {
+							break
+						}
+						set = dropStageSample(set, position)
+					}
+					set.calls[stageIntegrity] = 0
+					sets[at] = set
+				}
+				return nil
+			},
+			want: "charges no integrity stage",
+		},
+		{
+			name: "a generation charging one call fewer than the walk drove",
+			broken: func(sets []bootStageSet) error {
+				position, err := stageSampleAt(sets[1], stageIntegrity, 0)
+				if err != nil {
+					return err
+				}
+				sets[1] = dropStageSample(sets[1], position)
+				return nil
+			},
+			want: "charges 0 integrity stage(s) beside the 1 call(s)",
+		},
+		{
+			name: "a stage charged twice for one call",
+			broken: func(sets []bootStageSet) error {
+				position, err := stageSampleAt(sets[1], stageRebind, 0)
+				if err != nil {
+					return err
+				}
+				repeated := sets[1].samples[position]
+				sets[1].samples = append(sets[1].samples, repeated)
+				return nil
+			},
+			want: "charges the rebind stage twice at call",
+		},
+		{
+			name: "a stage stating the pair of another",
+			broken: func(sets []bootStageSet) error {
+				rebind, err := stageSampleAt(sets[1], stageRebind, 0)
+				if err != nil {
+					return err
+				}
+				boot, err := stageSampleAt(sets[1], stageBoot, 0)
+				if err != nil {
+					return err
+				}
+				sets[1].samples[rebind].begin = sets[1].samples[boot].begin
+				sets[1].samples[rebind].end = sets[1].samples[boot].end
+				return nil
+			},
+			want: "states the same pair as the boot stage",
+		},
+		{
+			name: "a stage closing before it opens",
+			broken: func(sets []bootStageSet) error {
+				rebind, err := stageSampleAt(sets[1], stageRebind, 0)
+				if err != nil {
+					return err
+				}
+				sets[1].samples[rebind].end = sets[1].samples[rebind].begin
+				return nil
+			},
+			want: "a stage closes after it opens",
+		},
+		{
+			name: "a stage running past its parent",
+			broken: func(sets []bootStageSet) error {
+				rebind, err := stageSampleAt(sets[1], stageRebind, 0)
+				if err != nil {
+					return err
+				}
+				boot, err := stageSampleAt(sets[1], stageBoot, 0)
+				if err != nil {
+					return err
+				}
+				sets[1].samples[rebind].end = sets[1].samples[boot].end.Add(time.Millisecond)
+				return nil
+			},
+			want: "outside every boot stage the set charges",
+		},
+		{
+			name: "a maintenance pass running past the call that needed it",
+			broken: func(sets []bootStageSet) error {
+				pass, err := stagePassAt(sets[0], "commit")
+				if err != nil {
+					return err
+				}
+				commit, err := stageSampleAt(sets[0], stageCommit, 0)
+				if err != nil {
+					return err
+				}
+				sets[0].samples[pass].end = sets[0].samples[commit].end.Add(10 * time.Millisecond)
+				return nil
+			},
+			want: "outside every commit stage the set charges",
+		},
+		{
+			name: "a maintenance pass accounted to a call the walk did not make",
+			broken: func(sets []bootStageSet) error {
+				pass, err := stagePassAt(sets[0], "commit")
+				if err != nil {
+					return err
+				}
+				sets[0].samples[pass].parent = "read"
+				return nil
+			},
+			want: "this generation drove no pointRead stage",
+		},
+	}
+	for _, held := range cases {
+		broken := copyBootStageWalk(walk)
+		if err := held.broken(broken); err != nil {
+			t.Fatalf("%s: build the broken walk: %v", held.name, err)
+		}
+		err := judgeBootStageWalk(broken)
+		if err == nil {
+			t.Fatalf("%s: the walk is judged green, want a refusal naming what the set fails to state", held.name)
+		}
+		if !strings.Contains(err.Error(), held.want) {
+			t.Fatalf("%s: the refusal states %q, want it to name %q", held.name, err.Error(), held.want)
+		}
+		if after, sumErr := stageWalkExclusiveSums(broken); sumErr == nil {
+			for at := range after {
+				if at < len(before) && after[at] != before[at] {
+					t.Fatalf("%s: the sum of the stages standing beside each other moves from %s to %s at generation %d, want the injection to leave the sum alone so the refusal is the stages rather than the arithmetic",
+						held.name, before[at], after[at], at)
+				}
+			}
+		}
+		t.Logf("%s: refused by name — %v", held.name, err)
+	}
+}

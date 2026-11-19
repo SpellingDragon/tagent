@@ -209,9 +209,9 @@ func newRuntimeFixture(t *testing.T) *runtimeFixture {
 	if err != nil {
 		t.Fatalf("OpenTier: %v", err)
 	}
-	durable, err := state.NewDurableCommit(ledger.TierFactLog(tier), nil)
-	if err != nil {
-		t.Fatalf("NewDurableCommit: %v", err)
+	durable := state.NewEmptyDurableCommit(ledger.TierFactLog(tier), nil)
+	if err := durable.Seat(ctx, nil, nil); err != nil {
+		t.Fatalf("seat the durable commit: %v", err)
 	}
 	registry := task.NewMemoryRegistry(durable, task.NewMemoryAdmission())
 	authority := state.NewAuthority()

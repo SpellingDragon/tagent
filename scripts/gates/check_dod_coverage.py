@@ -31,6 +31,14 @@ verdict is read off the run products named by `--mutation-evidence` — the
 `evidence.json` reports `check_event_integrity_mutations.py --out` writes. A
 verdict whose only source is a field of this registry is judged invalid and
 named as such: a hand-filled verdict states a conclusion, not a measurement.
+
+A run product also has to describe the tree being judged. Its recorded closure is
+read against `--root` by the consumer that owns that comparison
+(check_runtime_evidence.check_event_source_binding), and a report written against
+another tree is named and refused instead of counted: evidence of a kill in some
+other description of the code proves nothing about this one. The formal entry
+(`scripts/lint.sh`) therefore passes `$TAGENT_RUNTIME_EVIDENCE_DIR/mutations`;
+an invocation without that argument judges a tree no run has described.
 """
 from __future__ import annotations
 
@@ -605,12 +613,61 @@ def evidence_files(source: Path) -> list:
     raise GateError("the mutation evidence is missing: {}".format(source))
 
 
-def run_verdicts(sources: list) -> tuple:
+class _GapReport:
+    """The evidence consumer's error sink, mapped onto this gate's gap list.
+
+    `check_event_source_binding` states its refusals through a report object and
+    this gate collects gaps. One adapter keeps the binding judged by the consumer
+    that owns the comparison instead of a second reading of it written here.
+    """
+
+    def __init__(self, gaps: list):
+        self.gaps = gaps
+
+    def error(self, message: str) -> None:
+        self.gaps.append(message)
+
+
+def evidence_consumer():
+    """The evidence checker owning the source binding, imported not copied."""
+    gate_dir = str(Path(__file__).resolve().parent)
+    if gate_dir not in sys.path:
+        sys.path.insert(0, gate_dir)
+    try:
+        import check_runtime_evidence
+    except ImportError as exc:
+        raise GateError(
+            "cannot load the evidence checker to read the mutation run products against this "
+            "tree: {}".format(exc))
+    return check_runtime_evidence
+
+
+def bind_mutation_evidence(path: Path, payload: dict, root: Path, refused: list) -> bool:
+    """True when the run product is legal on its own terms and describes `root`.
+
+    Two questions, both owned by the evidence consumer: whether the product is a
+    usable mutation report at all — a green control tree, a non-empty mutation list
+    whose own fields agree with the kill each one claims, an empty
+    `not_evidence_backed` — and whether the closure it names is this tree's. A
+    report that fails either proves nothing about this tree, so its verdicts are
+    refused rather than counted; a control tree that was not green makes every kill
+    in the report unattributable, and a summary field could not see that.
+    """
+    before = len(refused)
+    consumer = evidence_consumer()
+    report = _GapReport(refused)
+    consumer.check_mutation_evidence(report, str(path), payload)
+    consumer.check_event_source_binding(report, str(path), payload, str(root))
+    return len(refused) == before
+
+
+def run_verdicts(sources: list, root: Path) -> tuple:
     """The mutation verdicts the run products state, and every source refused.
 
     A verdict is usable only as the run product's own record of a counted kill:
     a replay report judges recorded streams rather than a live mutation, so it is
-    not a run product and its verdicts never count.
+    not a run product and its verdicts never count, and a report whose structure
+    or closure is not this tree's verdicts for some other description of the code.
     """
     verdicts = {}
     refused = []
@@ -627,6 +684,8 @@ def run_verdicts(sources: list) -> tuple:
                     "{}: the report states profile {!r} beside {!r}, so it is not a run of "
                     "the mutation gate".format(path, payload.get("profile"),
                                                MUTATION_PROFILE))
+                continue
+            if not bind_mutation_evidence(path, payload, root, refused):
                 continue
             for record in payload.get("mutations") or []:
                 if not isinstance(record, dict):
@@ -814,7 +873,7 @@ def check(root: Path, registry: dict, ci_workflow: Path, mutation_registry: Path
     jobs = ci_jobs(ci_workflow)
     mutation_module = load_mutation_module(mutation_registry)
     mutations = frozen_mutations(mutation_module)
-    verdicts, refused = run_verdicts(mutation_evidence)
+    verdicts, refused = run_verdicts(mutation_evidence, root)
     gaps.extend(refused)
     registry_verdicts(registry, verdicts, gaps)
 
@@ -846,7 +905,9 @@ def main(argv=None) -> int:
                         metavar="PATH",
                         help="a run product of check_event_integrity_mutations.py --out (a "
                              "report file or a directory holding evidence.json reports); the "
-                             "verdicts are read off these, never off the registry")
+                             "verdicts are read off these, never off the registry, and each "
+                             "report must describe --root. The formal entry scripts/lint.sh "
+                             "passes $TAGENT_RUNTIME_EVIDENCE_DIR/mutations")
     args = parser.parse_args(argv)
     root = Path(args.root).resolve()
     try:

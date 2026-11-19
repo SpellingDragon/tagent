@@ -20,7 +20,8 @@ func compressConsumerPlugin() builtinPlugin {
 		name:  compressConsumerPluginName,
 		scope: runPluginScope,
 		run: func(r *Run) ([]plugin.Instance, error) {
-			r.compress = NewCompressionConsumer(ageFoldSessions{run: r}).withSummaryGist(bandSummaries{run: r})
+			face := ageFoldSessions{run: r}
+			r.compress = NewCompressionConsumer(face, face).withSummaryGist(bandSummaries{run: r})
 			r.ageFold.setExecutor(r.compress)
 			return []plugin.Instance{r.compress}, nil
 		},

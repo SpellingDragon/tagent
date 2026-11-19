@@ -244,7 +244,7 @@ type Goal struct {
 type GoalRegistry struct {
 	// Has unexported fields.
 }
-    GoalRegistry is the goal registry: every declared goal in memory beside the
+    GoalRegistry is the goal registry: the goals in force in memory beside the
     governance events the declarations and resolutions also write. A declaration
     activates the governance goal gate, and a refusal of a goal-required call
     permeates the goal context into its record.
@@ -255,6 +255,14 @@ type GoalRegistry struct {
     registry holds, so a restart keeps the goals it already declared. The cut
     is seated by the framework state slice (see StateSeat); a registry beside no
     seat holds the zero cut, so the events past it are the whole stream.
+
+      - a registry with a durable face holds the work in force alone: a goal
+        whose resolution landed, or whose validity passed, belongs to the stream
+        from then on, so the memory state and the cut stated from it follow the
+        in-flight work instead of the history it accumulates (see List for the
+        read that answers the history).
+      - a registry beside no store holds every goal it declared, because the
+        memory state is the only place they live.
 
 func NewGoalRegistry() *GoalRegistry
     NewGoalRegistry builds one goal registry in memory state. Bind hands it the
@@ -283,21 +291,37 @@ func (g *GoalRegistry) Current() *Goal
 func (g *GoalRegistry) Declare(statement, createdBy string, expiresMs int64) string
     Declare registers one goal and returns its identity. The declaration writes
     its governance event beside the memory entry, so a restart replays it back.
+    The declaration is the write boundary that takes the goals holding nothing
+    in force out of the memory state (see pruneOutOfForceLocked), and it runs
+    before the new identity is minted, so a goal just declared is never the one
+    taken out.
 
 func (g *GoalRegistry) HasActive() bool
     HasActive reports whether an unexpired active goal exists — the judgment the
     governance goal gate rules on.
 
 func (g *GoalRegistry) List() []*Goal
-    List returns a snapshot copy of every goal the registry holds, in no
-    particular order. The copy keeps a reader from mutating registry state.
+    List returns every goal the registry answers, in declaration order: the work
+    in force it holds in memory and the history the stream behind it keeps.
+    A registry with a durable face derives the history on each question,
+    so a cut that states the live work alone never shortens the list of goals a
+    reader asks about; the read costs the stream behind the cut, and the memory
+    state never keeps the history it serves. A registry beside no store answers
+    its memory state, which is every goal it declared.
 
 func (g *GoalRegistry) Resolve(id string, status GoalStatus) bool
-    Resolve moves one goal to its resolution and reports whether the goal
-    exists. The two writable resolutions are achieved and abandoned; expired
+    Resolve moves one goal to its resolution and reports whether the registry
+    held it. The two writable resolutions are achieved and abandoned; expired
     is derived and never written here. The registry guards no terminal state: a
     repeated resolution is applied as it arrives, and the tool layer's two-value
     enumeration is what keeps an unwritten word out.
+
+    A resolution whose event landed takes the goal out of the memory state,
+    beside the goals that already left force: from then on the stream is the
+    record of that goal and List answers it from there. A registry beside no
+    store keeps it, because nothing else would. A goal the registry has released
+    answers false — the live state is the work in force, not every goal ever
+    declared.
 
 type GoalStatus string
     GoalStatus is the lifecycle state of one goal. The four words are the ones

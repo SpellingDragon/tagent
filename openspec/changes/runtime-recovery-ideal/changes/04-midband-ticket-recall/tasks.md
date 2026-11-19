@@ -2,7 +2,7 @@
 
 > **当前承接（R265）**：04.R1原识别修复保留历史勾选，但带票据的重复通知续扫仍有补差，由04.R3承接；原4.5并入04.R2终验，不继续等待已撤销的物理S1封顶。04.R0不授权改另一变更，本轮只在本域记录依赖，实际跨变更写面另核授权。
 
-- [ ] **04.R3 带票据重复通知的计数与正式消费者补差**。产出：裸正文与带票据正文对同一通知身份的重复判断一致，错误来源和真正缺失仍被拒绝；不修改产品迁就测试模型。前置：已存在04.R1识别入口与12.R2同身份收据场景定义；识别修复不等待12.R3。写面：`examples/wechat-bot/smoke_test.go`、`examples/wechat-bot/smoke_harness_test.go`及本域计划；复用已跟踪文件，不新建会被忽略的测试文件。正/负锚（拟新增、未运行）：`go test -C examples/wechat-bot -tags smoke . -run '^(TestRepeatedPresentedNoticeIsCountedByIdentity|TestRepeatedNoticeRejectsAnotherCall)$' -count=10 -v`，分别证明格式变化不漏计、别的调用不混入；消费者锚：09.R3原同参数长测，并与12.R2联合验证两次生成和同输出重发的区别。独立审查核身份来源及反例路径，不以调用次数代替业务身份。
+- [x] 04.R3 带票据重复通知的计数与正式消费者补差。产出：裸正文与带票据正文对同一通知身份的重复判断一致，错误来源和真正缺失仍被拒绝；不修改产品迁就测试模型。前置：已存在04.R1识别入口与12.R2同身份收据场景定义；识别修复不等待12.R3。写面：`examples/wechat-bot/smoke_test.go`、`examples/wechat-bot/smoke_harness_test.go`及本域计划；复用已跟踪文件，不新建会被忽略的测试文件。正/负锚（拟新增、未运行）：`go test -C examples/wechat-bot -tags smoke . -run '^(TestRepeatedPresentedNoticeIsCountedByIdentity|TestRepeatedNoticeRejectsAnotherCall)$' -count=10 -v`，分别证明格式变化不漏计、别的调用不混入；消费者锚：09.R3原同参数长测，并与12.R2联合验证两次生成和同输出重发的区别。独立审查核身份来源及反例路径，不以调用次数代替业务身份。
 
 ## 当前重整叶
 
@@ -45,4 +45,17 @@
 - 票据形态漏枚举的最后一个生产者（4.5 级联检查的一部分，本轮补齐）：`tool/subagent/handoff.go:end` 的 refs 截断标记仍写旧串 `…\n  full text retrievable by segment`（旧 `ticketText` 文案，指向已不存在的读法），已改为 `…` ＋ `replay.TicketOf(named.Key, named.Type)`，复用 §五 唯一生成点（`tool/subagent -> memory/replay` 已在 architecture edges 允许面内，无新边）。
 - 4.5 未勾（验收面不缩水）：`go build ./...` exit 0；`go test ./memory/replay/ ./assembly/ ./tool/recall/ ./tests/integration/capabilities/` 全绿；`go test ./tests/integration/history/` 仍红 1 例 `TestJournalBytesBoundedByLiveSet`（S1 设计红，归 W4 退位），故 4.5 的 `history` 门按原验收面留待 S1 转绿。
 - 待拨（域 10 contract-sync，本域不改主 spec）：主 spec `event-key-visibility` 仍写旧 `BeforeModel` 位置匹配形态；且 `presentedProjectionContent` 对**空呈现条目**不发票据的行为本域 spec 有条款（"the address is owed to material the request carries"），主 spec 的 Scenario 无对应表述——域 10 转正时一并同步。
+
+## 执行证据（2026-11-18 · 04.R3 带票据重复通知的计数）
+
+- 症状定位：`smokeLongReconcile` 的续扫用裸正文前缀判据 `strings.HasPrefix(lasts[j], "tagent: task ")`（原 smoke_harness_test.go:4719；`lasts[j]` 是各请求末条用户正文），首次出现却按身份判（`smokeSettleNoticeOf`，smoke_test.go:540）。同一条通知第二次带票据呈现（`[evt_…|feedback] tagent: task … settled`）时前缀判据不成立，重复只记 1 次——真实重复投递因此可被掩盖。反向形状同样漏：`ticketed_then_bare` 下第二次若是裸正文才数得到，判据读的是"末条正文的形态"而不是"通知的身份"。
+- 修法（只动测试台架，产品零改动）：身份判定收成单一定义 `smokeSettleNoticeBody` / `smokeSettleNoticeIs`（smoke_test.go:552-569：先去票据，再判通知头四字段与结果段逐字符等于 `worker result <marker>`），`smokeSettleNoticeOf`（:540-551）改为复用同一判定——回答路径与计数路径用同一个身份来源；续扫改为 `smokeSettleNoticeIs(lasts[j], step.Marker)`（smoke_harness_test.go:4719-4722）。`answerFor` 的按类型决策、产品呈现与形态均未动。
+- 正锚（红→绿，R29）：修复前 `go test -C examples/wechat-bot -tags smoke . -run '^(TestRepeatedPresentedNoticeIsCountedByIdentity|TestRepeatedNoticeRejectsAnotherCall)$' -count=1 -v` → **FAIL**，`bare_then_ticketed` 与 `ticketed_twice` 报「核账记了 1 次，want 2：重复投递被呈现形态掩盖」（`ticketed_then_bare` 通过，正说明旧判据只读末条正文形态）。修复后同命令 `-count=10 -v` → **exit 0**，`--- PASS` 70 行、`--- FAIL` 0 行（每轮 7 行＝正锚 1+3 子测试、负锚 1+2 子测试）。夹具自带旧判据形状声明（`bareSecond`，smoke_harness_test.go:4906-4914）：判为假的两种形状正是修复前漏计的那一支，测试不因夹具选择而空转。
+- 负锚：`TestRepeatedNoticeRejectsAnotherCall`（:4956）——别次调用的通知按票据与裸正文各呈现一次 → 本次 `NotificationRequests=0`、`MissingNotifications=[marker]`、无重复；同两条按 `other` 核账 → 2 次且一条重复（拒绝来自通知身份而不是夹具空转）；只提到通知的别样材料×2 → 0 次并报缺。错误来源与真正缺失仍被拒。
+- 装配路径锚：正锚每轮另走 `smokeLongAssemble`（:4600-4637，长测组合报告的唯一装配入口）并断言 `report.Recon.NotificationRequests == 2`（:4943-4948），证明计数不是只在直调 `smokeLongReconcile` 的测试里成立。
+- 既有识别测试保持绿：`go test -C examples/wechat-bot -tags smoke . -run '^(TestSettlementNoticeRecognizesPresentedFact|TestSettlementNoticeRejectsOtherCallMaterial|TestSmokeLongReconcileCountsBatchedNotification)$' -count=10` → exit 0（同参数 `-v` 计 `--- PASS` 100 行）。
+- 编译：`go build -C examples/wechat-bot -tags smoke ./...` → exit 0。`go vet -C examples/wechat-bot -tags smoke .` → exit 1，唯一 finding 是 `smoke_test.go:2666:2: unreachable code`；HEAD 的同一行在 :2650（`git show HEAD:examples/wechat-bot/smoke_test.go`），本单未触该区域，属既有。
+- 同类排查：全文仅余两处裸字面判据 `smoke_test.go:4237`、`:4254`（症状锚 G2 的脚本钩子与结算回合定位），二者用 `Contains` 而非前缀判据，带票据正文同样命中，不属本缺陷同一支，未改。
+- 未验证面（不缩水）：消费者锚 `TestEventIntegrityLongRun`（smoke_test.go:3619，:3668 断言通知身份）**未在本单跑**，按任务行归 09.R3 原同参数长测；与 12.R2「两次生成 vs 同输出重发」的联合区分同样未跑。真机路径、长跑矩阵、成本计量均未触及。
+- 写面：仅 `examples/wechat-bot/smoke_test.go`（+21/−5）与 `examples/wechat-bot/smoke_harness_test.go`（+124/−1）与本文件；无新建文件、无产品代码、无门禁/权限/主 spec 改动、未 git 写。
 

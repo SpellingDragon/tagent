@@ -129,7 +129,7 @@ func TestCompressionSummaryCutsToTheDeclaredBudget(t *testing.T) {
 	gists := &fakeSummaryGist{answer: func(string) (string, error) {
 		return strings.Repeat("[11-06 12:00|gen:?] one settled decision\n", 200), nil
 	}}
-	consumer := NewCompressionConsumer(nil).withSummaryGist(gists)
+	consumer := NewCompressionConsumer(nil, nil).withSummaryGist(gists)
 	got := consumer.summarizeProduct(ctx, "session-gist", mechanicalSummary(t), 512)
 	if len(got.Entry.Content) > 512 {
 		t.Fatalf("summary carries %d bytes, want at most the declared 512", len(got.Entry.Content))

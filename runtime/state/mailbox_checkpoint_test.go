@@ -18,7 +18,7 @@ import (
 func TestMailboxSliceRestoresEveryObligationTheCutAndTheAccountState(t *testing.T) {
 	ctx := context.Background()
 	taskID := eventTaskID()
-	account, err := NewDurableCommit(newInvariantFactLog(), nil)
+	account, err := loadedDurableCommit(ctx, newInvariantFactLog(), nil)
 	if err != nil {
 		t.Fatalf("open the durable account: %v", err)
 	}
@@ -68,7 +68,7 @@ func TestMailboxSliceRestoresEveryObligationTheCutAndTheAccountState(t *testing.
 func TestMailboxSliceRestoreSeatsThePayloadBesideNoAccount(t *testing.T) {
 	ctx := context.Background()
 	taskID := eventTaskID()
-	account, err := NewDurableCommit(newInvariantFactLog(), nil)
+	account, err := loadedDurableCommit(ctx, newInvariantFactLog(), nil)
 	if err != nil {
 		t.Fatalf("open the durable account: %v", err)
 	}
@@ -99,7 +99,7 @@ func TestMailboxSliceRestoreSeatsThePayloadBesideNoAccount(t *testing.T) {
 func TestMailboxSliceRestoresTheOwedSetBesideACutThatStatesNothing(t *testing.T) {
 	ctx := context.Background()
 	taskID := eventTaskID()
-	account, err := NewDurableCommit(newInvariantFactLog(), nil)
+	account, err := loadedDurableCommit(ctx, newInvariantFactLog(), nil)
 	if err != nil {
 		t.Fatalf("open the durable account: %v", err)
 	}
@@ -140,7 +140,7 @@ func TestMailboxSliceRestoreSkipsANoticeTheAccountSettledPastTheCut(t *testing.T
 	log := newInvariantFactLog()
 	taskID := eventTaskID()
 	notices := seedThreeNoticeTask(t, ctx, log, taskID)
-	account, err := NewDurableCommit(log, nil)
+	account, err := loadedDurableCommit(ctx, log, nil)
 	if err != nil {
 		t.Fatalf("open the durable account: %v", err)
 	}

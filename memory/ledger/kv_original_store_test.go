@@ -466,6 +466,314 @@ func TestCommitReadsTheOriginalOfItsOwnIdentityAtEveryDepth(t *testing.T) {
 	}
 }
 
+// originalReadEntrypoint is one of the read faces a caller reaches an original
+// through, as the pair of shapes one face offers: a whole read that classifies
+// its own outcome, and a segmented read that names its refusals as errors and
+// assembles back to the stored bytes.
+type originalReadEntrypoint struct {
+	// name tells the faces apart in a failure.
+	name string
+	// whole answers the faces that return the original whole, and is nil for a
+	// segmented face.
+	whole func(key event.EventID) RecallResult
+	// segments answers the segmented faces: the original assembled from every
+	// segment the face served, or the error it named.
+	segments func(key event.EventID) ([]byte, error)
+}
+
+// originalReadEntrypointsOf answers the six original read entry points over one
+// binding: OriginalStore.Get and ReadSegment, ScopedOriginalStore.GetScoped and
+// ReadSegmentScoped read through the interface the recall port forwards to, and
+// ScopedReader.Get and ReadSegment of the reader bound to scope.
+func originalReadEntrypointsOf(t *testing.T, original OriginalStore, scoped ScopedOriginalStore, scope ReadScope) []originalReadEntrypoint {
+	t.Helper()
+	reader, err := NewScopedReader(scoped, scope)
+	if err != nil {
+		t.Fatalf("bind the reader to the scope %+v: %v", scope, err)
+	}
+	return []originalReadEntrypoint{
+		{
+			name:  "OriginalStore.Get",
+			whole: func(key event.EventID) RecallResult { return original.Get(context.Background(), key) },
+		},
+		{
+			name: "OriginalStore.ReadSegment",
+			segments: func(key event.EventID) ([]byte, error) {
+				var out []byte
+				for line := 1; ; line++ {
+					whole, err := original.ReadSegment(context.Background(), key, line, 1)
+					if errors.Is(err, ErrSegmentPastEnd) {
+						return out, nil
+					}
+					if err != nil {
+						return nil, err
+					}
+					out = append(out, whole...)
+				}
+			},
+		},
+		{
+			name:  "ScopedOriginalStore.GetScoped",
+			whole: func(key event.EventID) RecallResult { return scoped.GetScoped(context.Background(), key, scope) },
+		},
+		{
+			name: "ScopedOriginalStore.ReadSegmentScoped",
+			segments: func(key event.EventID) ([]byte, error) {
+				return assembleSegments(func(from SegmentPosition) (SegmentResult, error) {
+					return scoped.ReadSegmentScoped(context.Background(), key, scope, SegmentRequest{From: from, MaxBytes: 8})
+				})
+			},
+		},
+		{
+			name:  "ScopedReader.Get",
+			whole: func(key event.EventID) RecallResult { return reader.Get(context.Background(), key) },
+		},
+		{
+			name: "ScopedReader.ReadSegment",
+			segments: func(key event.EventID) ([]byte, error) {
+				return assembleSegments(func(from SegmentPosition) (SegmentResult, error) {
+					return reader.ReadSegment(context.Background(), key, SegmentRequest{From: from, MaxBytes: 8})
+				})
+			},
+		},
+	}
+}
+
+// assembleSegments reads segments through read until it reaches the end of the
+// original and answers them concatenated. A segment that does not advance the
+// position is reported instead of read again, so a bound that never moves is a
+// named failure rather than an endless read.
+func assembleSegments(read func(from SegmentPosition) (SegmentResult, error)) ([]byte, error) {
+	var out []byte
+	from := SegmentPosition{}
+	for {
+		segment, err := read(from)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, segment.Body...)
+		if segment.EOF {
+			return out, nil
+		}
+		if segment.Next.Offset <= from.Offset {
+			return nil, fmt.Errorf("the segment at byte %d did not advance: next is byte %d", from.Offset, segment.Next.Offset)
+		}
+		from = segment.Next
+	}
+}
+
+// TestOriginalReadEntrypointsPreserveBytesAndScope pins the original read entry points a caller reaches an original through.
+//   - every entry point answers the bytes Put accepted, byte for byte: the segmented faces cut at byte boundaries and assemble back to the body
+//   - the line-bounded face answers whole lines, so the last line it serves is the one before the bound it names
+//   - the line face is checked against the standard library's splitter, so the lines it serves are the lines the bytes hold
+//   - a scope that registered no reference reads the key as missing while the bare key face beside it still answers
+//   - every authorized read therefore runs through the scoped faces, never the face that cannot decide visibility
+//   - a second scope the store accepted beside the first reads the same body, so the refusal names the unregistered scope and not the key
+//   - an uncommitted key reads as missing and a reference past the window of its policy as expired, each on every face
+//   - altered bytes read as an integrity mismatch and an unreadable reference record as a corrupt snapshot, each on every face
+//   - the whole faces answer a refusal as an outcome and the segmented faces return the error that outcome carries
+//   - a policy registered with a zero window holds no reference readable, so the expiry fixture is stored state and never a race against a clock
+//   - each class of fixture is seeded into a state of its own, because the scoped faces load the whole original family
+//   - the damaged fixture is committed state: the body is replaced behind the reference record that still names the integrity of the bytes it was committed with
+//   - the tier hands its originals out as a value satisfying ScopedOriginalStore, the port the assembled run binds the recall read face through
+//
+// 契约: docs/wiki/memory/memory-architecture.md#event-shape
+func TestOriginalReadEntrypointsPreserveBytesAndScope(t *testing.T) {
+	ctx := context.Background()
+	// The body carries a multi-byte character inside a line and no trailing
+	// newline, so a byte-bounded segment cuts inside a character and the
+	// line-bounded face ends on a last line the split never sees a newline for.
+	const body = "第一行 the first line\n第二行 breaks a character\nthird line"
+	scope := ReadScope{Owner: event.Address{AgentID: "agent-a", SessionID: "session-a"}, Format: "text", RetentionPolicy: "durable"}
+	beside := ReadScope{Owner: event.Address{AgentID: "agent-b", SessionID: "session-b"}, Format: "text", RetentionPolicy: "durable"}
+	outside := ReadScope{Owner: event.Address{AgentID: "agent-c", SessionID: "session-c"}, Format: "text", RetentionPolicy: "durable"}
+	const (
+		scopedKey  event.EventID = "0a01"
+		expiredKey event.EventID = "0e05"
+		absentKey  event.EventID = "0b03"
+	)
+
+	windows := map[string]time.Duration{"transient": 0}
+	scopedRef := OriginalRef{Key: scopedKey, Owner: scope.Owner, Format: scope.Format, RetentionPolicy: scope.RetentionPolicy}
+	besideRef := OriginalRef{Key: scopedKey, Owner: beside.Owner, Format: beside.Format, RetentionPolicy: beside.RetentionPolicy}
+	expiredRef := OriginalRef{Key: expiredKey, Owner: scope.Owner, Format: scope.Format, RetentionPolicy: "transient"}
+
+	seed := func(refs ...OriginalRef) (*kvOriginalStore, AtomicStore) {
+		t.Helper()
+		backing := newMemKV()
+		writer, err := newKVOriginalStore(backing, windows)
+		if err != nil {
+			t.Fatalf("open the seeding original store: %v", err)
+		}
+		for _, ref := range refs {
+			if err := writer.Put(ctx, ref, []byte(body)); err != nil {
+				t.Fatalf("commit the original of %q under %+v: %v", ref.Key, ref.Owner, err)
+			}
+		}
+		reader, err := newKVOriginalStore(backing, windows)
+		if err != nil {
+			t.Fatalf("open the reading original store: %v", err)
+		}
+		return reader, backing
+	}
+
+	expectFound := func(t *testing.T, entry originalReadEntrypoint, key event.EventID) {
+		t.Helper()
+		if entry.whole != nil {
+			got := entry.whole(key)
+			if got.Outcome != RecallFound || got.Err != nil || !bytes.Equal(got.Body, []byte(body)) {
+				t.Fatalf("%s(%q) = %+v, want the committed bytes", entry.name, key, got)
+			}
+			return
+		}
+		assembled, err := entry.segments(key)
+		if err != nil || !bytes.Equal(assembled, []byte(body)) {
+			t.Fatalf("%s(%q) = (%q, %v), want the committed bytes assembled from its segments", entry.name, key, assembled, err)
+		}
+	}
+	expectRefusal := func(t *testing.T, entry originalReadEntrypoint, key event.EventID, outcome RecallOutcome, named error) {
+		t.Helper()
+		if entry.whole != nil {
+			got := entry.whole(key)
+			if got.Outcome != outcome {
+				t.Fatalf("%s(%q) = %+v, want the outcome %v", entry.name, key, got, outcome)
+			}
+			if outcome == RecallFailed && !errors.Is(got.Err, named) {
+				t.Fatalf("%s(%q) carries %v, want the named refusal %v", entry.name, key, got.Err, named)
+			}
+			if outcome != RecallFailed && got.Err != nil {
+				t.Fatalf("%s(%q) answers the outcome %v carrying %v, want no cause beside it", entry.name, key, outcome, got.Err)
+			}
+			if len(got.Body) != 0 {
+				t.Fatalf("%s(%q) returned %q beside the refusal %v, want no original", entry.name, key, got.Body, outcome)
+			}
+			return
+		}
+		assembled, err := entry.segments(key)
+		if !errors.Is(err, named) || len(assembled) != 0 {
+			t.Fatalf("%s(%q) = (%q, %v), want the named refusal %v", entry.name, key, assembled, err, named)
+		}
+	}
+
+	t.Run("every_entry_point_answers_the_committed_bytes", func(t *testing.T) {
+		original, _ := seed(scopedRef, besideRef)
+		// The scoped faces are read through the interface, which is the dispatch
+		// the recall port forwards to the store through.
+		var scoped ScopedOriginalStore = original
+		for _, entry := range originalReadEntrypointsOf(t, original, scoped, scope) {
+			expectFound(t, entry, scopedKey)
+		}
+		for at, want := range strings.SplitAfter(body, "\n") {
+			got, err := original.ReadSegment(ctx, scopedKey, at+1, 1)
+			if err != nil || string(got) != want {
+				t.Fatalf("ReadSegment(%q, line %d, 1) = (%q, %v), want the line %q", scopedKey, at+1, got, err, want)
+			}
+		}
+		if _, err := original.ReadSegment(ctx, scopedKey, len(strings.SplitAfter(body, "\n"))+1, 1); !errors.Is(err, ErrSegmentPastEnd) {
+			t.Fatalf("ReadSegment(%q) past its last line = %v, want the named refusal %v", scopedKey, err, ErrSegmentPastEnd)
+		}
+	})
+
+	t.Run("a_scope_that_registered_no_reference_reads_as_missing", func(t *testing.T) {
+		original, _ := seed(scopedRef, besideRef)
+		var scoped ScopedOriginalStore = original
+		authorized := originalReadEntrypointsOf(t, original, scoped, outside)
+		for _, entry := range authorized[2:] {
+			expectRefusal(t, entry, scopedKey, RecallMissing, ErrOriginalMissing)
+		}
+		for _, entry := range authorized[:2] {
+			expectFound(t, entry, scopedKey)
+		}
+		for _, entry := range originalReadEntrypointsOf(t, original, scoped, beside)[2:] {
+			expectFound(t, entry, scopedKey)
+		}
+		if _, err := NewScopedReader(scoped, ReadScope{}); !errors.Is(err, ErrScopeRequired) {
+			t.Fatalf("binding the scope that names nothing = %v, want the named refusal %v", err, ErrScopeRequired)
+		}
+	})
+
+	t.Run("an_uncommitted_key_reads_as_missing", func(t *testing.T) {
+		original, _ := seed(scopedRef)
+		var scoped ScopedOriginalStore = original
+		for _, entry := range originalReadEntrypointsOf(t, original, scoped, scope) {
+			expectRefusal(t, entry, absentKey, RecallMissing, ErrOriginalMissing)
+		}
+	})
+
+	t.Run("a_reference_past_its_window_reads_as_expired", func(t *testing.T) {
+		original, _ := seed(expiredRef)
+		var scoped ScopedOriginalStore = original
+		for _, entry := range originalReadEntrypointsOf(t, original, scoped, expiredRef.ReadScope()) {
+			expectRefusal(t, entry, expiredKey, RecallExpired, ErrOriginalExpired)
+		}
+	})
+
+	t.Run("altered_bytes_read_as_an_integrity_mismatch", func(t *testing.T) {
+		_, backing := seed(scopedRef)
+		blob, err := backing.Read(ctx, Fetch{Key: blobKVKey(scopedKey)})
+		if err != nil || len(blob) != 1 {
+			t.Fatalf("read the stored body of %q = (%d pair(s), %v), want the one body committed", scopedKey, len(blob), err)
+		}
+		altered := append([]byte(nil), blob[0].Value...)
+		altered[0] ^= 0xff
+		if err := backing.Commit(ctx, Batch{Puts: []Pair{{Key: blobKVKey(scopedKey), Value: altered}}}); err != nil {
+			t.Fatalf("replace the stored body of %q: %v", scopedKey, err)
+		}
+		damaged, err := newKVOriginalStore(backing, windows)
+		if err != nil {
+			t.Fatalf("open the original store over the altered body: %v", err)
+		}
+		var scoped ScopedOriginalStore = damaged
+		for _, entry := range originalReadEntrypointsOf(t, damaged, scoped, scope) {
+			expectRefusal(t, entry, scopedKey, RecallFailed, ErrIntegrityMismatch)
+		}
+	})
+
+	t.Run("an_unreadable_reference_record_reads_as_a_corrupt_snapshot", func(t *testing.T) {
+		_, backing := seed(scopedRef)
+		if err := backing.Commit(ctx, Batch{Puts: []Pair{{Key: refKVKey(scopedKey), Value: []byte("not-json")}}}); err != nil {
+			t.Fatalf("corrupt the reference record of %q: %v", scopedKey, err)
+		}
+		damaged, err := newKVOriginalStore(backing, windows)
+		if err != nil {
+			t.Fatalf("open the original store over the unreadable reference: %v", err)
+		}
+		var scoped ScopedOriginalStore = damaged
+		for _, entry := range originalReadEntrypointsOf(t, damaged, scoped, scope) {
+			expectRefusal(t, entry, scopedKey, RecallFailed, ErrSnapshotCorrupt)
+		}
+	})
+
+	t.Run("the_tier_originals_satisfy_the_scoped_port_the_recall_tool_forwards_to", func(t *testing.T) {
+		tier, err := OpenTier(ctx, StorageConfig{Type: StorageMemory})
+		if err != nil {
+			t.Fatalf("open the memory tier of the fixture: %v", err)
+		}
+		defer func() {
+			if err := tier.Close(); err != nil {
+				t.Fatalf("close the tier of the fixture: %v", err)
+			}
+		}()
+		ref := OriginalRef{Key: scopedKey, Owner: scope.Owner, Format: scope.Format, RetentionPolicy: scope.RetentionPolicy}
+		if err := tier.Originals.Put(ctx, ref, []byte(body)); err != nil {
+			t.Fatalf("commit the original of the fixture: %v", err)
+		}
+		forwarded, held := tier.Originals.(ScopedOriginalStore)
+		if !held {
+			t.Fatalf("the tier holds its originals as %T, want a value satisfying ScopedOriginalStore", tier.Originals)
+		}
+		if got := forwarded.GetScoped(ctx, scopedKey, scope); got.Outcome != RecallFound || !bytes.Equal(got.Body, []byte(body)) {
+			t.Fatalf("GetScoped(%q) through the scoped port = %+v, want the committed bytes", scopedKey, got)
+		}
+		assembled, err := assembleSegments(func(from SegmentPosition) (SegmentResult, error) {
+			return forwarded.ReadSegmentScoped(ctx, scopedKey, scope, SegmentRequest{From: from, MaxBytes: 8})
+		})
+		if err != nil || !bytes.Equal(assembled, []byte(body)) {
+			t.Fatalf("ReadSegmentScoped(%q) through the scoped port = (%q, %v), want the committed bytes assembled from its segments", scopedKey, assembled, err)
+		}
+	})
+}
+
 // TestCommitFactMemoryTierRecallsTheOriginalByBareKey pins the memory tier's whole-fact commit: the original it commits reads back by bare key.
 //   - fixture: one memory tier opened without an engine, one fact committed through CommitFact
 //   - the scoped read runs before the bare recall, so the whole-set load publishes the stored family the recall answers from

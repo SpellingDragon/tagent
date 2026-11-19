@@ -12,8 +12,6 @@
     "NewChainExporter",
     "NewEvidenceExporter",
     "NewMemoryEventChain",
-    "NewMemoryGuard",
-    "NewMemoryLifecycleStore",
     "NewNativeConnector",
     "NewScopedReader",
     "NewTmuxExecutor",

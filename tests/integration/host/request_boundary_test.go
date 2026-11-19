@@ -346,8 +346,8 @@ func TestNativeToolFamiliesAdmitted(t *testing.T) {
 
 // TestProjectedContextKeepsItsFixedLayout checks the parts one decision is assembled from and the order they take.
 //   - the fixed file contents lead the request as one system prefix, in the order the binding carries them
-//   - the folded projection follows the prefix, its compaction summary first under the frozen event-type role table
-//   - the invocation's own input closes the request, so no fourth part sits between them
+//   - the folded projection follows the prefix in its replay order, each entry under the frozen event-type role table
+//   - the invocation's own input closes the request, so no fifth part sits between them
 //   - every callable face the binding carries sits on the request's tool field, not among the messages
 //
 // 契约: docs/wiki/agent/event-flow.md#projection-lifecycle
@@ -361,20 +361,28 @@ func TestProjectedContextKeepsItsFixedLayout(t *testing.T) {
 	base := time.Date(2026, 9, 1, 10, 0, 0, 0, time.UTC)
 	proj := replay.NewReplayProjection()
 	for _, entry := range []replay.ProjectionEntry{
-		{Key: "p-0001", Type: event.TypeExternalInput, Summary: "in", Content: "投影原文一", Time: base},
-		{Key: "p-0002", Type: event.TypeAgentOutput, Summary: "out", Content: "投影原文二", Time: base.Add(time.Minute)},
+		{Key: "p-0001", Type: event.TypeExternalInput, Summary: "in 1", Content: "投影原文一", Time: base},
+		{Key: "p-0002", Type: event.TypeThinkingPlan, Summary: "plan 1", Content: "投影原文二", Time: base.Add(time.Minute)},
+		{Key: "p-0003", Type: event.TypeAgentOutput, Summary: "out 1", Content: "投影原文三", Time: base.Add(2 * time.Minute)},
+		{Key: "p-0004", Type: event.TypeExternalInput, Summary: "in 2", Content: "投影原文四", Time: base.Add(3 * time.Minute)},
+		{Key: "p-0005", Type: event.TypeAgentOutput, Summary: "out 2", Content: "投影原文五", Time: base.Add(4 * time.Minute)},
 	} {
 		proj.Append(ctx, entry)
 	}
-	summary, err := proj.Fold(ctx)
+	report, err := proj.PlanByAge(ctx, replay.AgeFoldPlan{KeepRecent: 1, VolumeThreshold: 1})
 	if err != nil {
-		t.Fatalf("Fold: %v", err)
+		t.Fatalf("PlanByAge: %v", err)
 	}
-	if proj.Len() != 1 {
-		t.Fatalf("folded projection holds %d entries, want the one compaction entry the fold answers with", proj.Len())
+	if !report.Triggered || len(report.Products) == 0 {
+		t.Fatalf("the plan judged %d product(s) over volume %d, want the age fold the projection's volume asks for", len(report.Products), report.Volume)
 	}
-	if !strings.HasPrefix(summary.Content, "compaction: ") {
-		t.Fatalf("compaction entry content = %q, want the summary line the fold minted", summary.Content)
+	proj.ApplyProducts(report.Products)
+	folded := proj.Entries()
+	if len(folded) != 5 {
+		t.Fatalf("folded projection holds %d entries, want the five committed entries with the segment product standing in for the one it folded: %v", len(folded), folded)
+	}
+	if folded[1].Type != replay.ProjectionTypeSegmentFold {
+		t.Fatalf("entry 1 type = %q, want the %q product standing where the process detail it folded stood", folded[1].Type, replay.ProjectionTypeSegmentFold)
 	}
 
 	provider := &entryModel{name: "model-a", answer: func(*model.Request) *model.Response {
@@ -415,8 +423,8 @@ func TestProjectedContextKeepsItsFixedLayout(t *testing.T) {
 		t.Fatalf("recorded requests = %d, want exactly one formal request", len(requests))
 	}
 	got := requests[0].Messages
-	if len(got) != 4 {
-		t.Fatalf("request carries %d messages, want the two fixed files, the folded entry and the input and nothing else: %v", len(got), got)
+	if len(got) != len(folded)+3 {
+		t.Fatalf("request carries %d messages, want the two fixed files, the %d folded entries and the input and nothing else: %v", len(got), len(folded), got)
 	}
 	if got[0].Role != model.RoleSystem || !strings.Contains(got[0].Content, "system prompt") {
 		t.Fatalf("message 0 = (%q, %q), want the prompt file content leading the request", got[0].Role, got[0].Content)
@@ -424,24 +432,37 @@ func TestProjectedContextKeepsItsFixedLayout(t *testing.T) {
 	if got[1].Role != model.RoleSystem || !strings.Contains(got[1].Content, "greet body v1") {
 		t.Fatalf("message 1 = (%q, %q), want the skill file content beside the prompt in the static prefix", got[1].Role, got[1].Content)
 	}
-	want, err := agent.RoleOf(replay.CompactionEventType)
-	if err != nil {
-		t.Fatalf("map %s onto a role: %v", replay.CompactionEventType, err)
+	for at, entry := range folded {
+		want, err := agent.RoleOf(entry.Type)
+		if err != nil {
+			t.Fatalf("map %s onto a role: %v", entry.Type, err)
+		}
+		if got[at+2].Role != want {
+			t.Fatalf("message %d role = %q, want the frozen %s role %q", at+2, got[at+2].Role, entry.Type, want)
+		}
+		if presented := presentedContentOf(entry); got[at+2].Content != presented {
+			t.Fatalf("message %d content = %q, want the folded entry presented under its ticket %q", at+2, got[at+2].Content, presented)
+		}
 	}
-	if got[2].Role != want {
-		t.Fatalf("message 2 role = %q, want the frozen %s role %q", got[2].Role, replay.CompactionEventType, want)
-	}
-	if got[2].Content != summary.Content {
-		t.Fatalf("message 2 content = %q, want the compaction summary %q the fold answers with", got[2].Content, summary.Content)
-	}
-	if got[3].Role != model.RoleUser || got[3].Content != "装配序的请求" {
-		t.Fatalf("message 3 = (%q, %q), want the invocation input closing the request", got[3].Role, got[3].Content)
+	if closing := got[len(got)-1]; closing.Role != model.RoleUser || closing.Content != "装配序的请求" {
+		t.Fatalf("message %d = (%q, %q), want the invocation input closing the request", len(got)-1, closing.Role, closing.Content)
 	}
 	for _, name := range []string{"read_file", "save_file", "skill_load"} {
 		if face := requests[0].Tools[name]; face == nil {
 			t.Errorf("request tools carry no %q, want every registered native tool family on the tool field", name)
 		}
 	}
+}
+
+// presentedContentOf reports the text one projected entry reaches the model as:
+// its content behind the ticket line that names the fact the entry speaks for,
+// in the shape the request boundary presents projected material under.
+func presentedContentOf(entry replay.ProjectionEntry) string {
+	ticket := replay.TicketOf(entry.Key, entry.Type)
+	if ticket == "" {
+		return entry.Content
+	}
+	return ticket + " " + entry.Content
 }
 
 // writePromptAt writes one prompt file at the named path.

@@ -63,8 +63,8 @@ var (
 // 契约: docs/wiki/agent/event-flow.md#projection-lifecycle
 //
 // ReplayProjection is the replayable projection: the ordered model view of one
-// fact chain and the compaction payload a fold left on the chain. It is what
-// RebuildProjectionFromWAL replays into.
+// fact chain. A cold start replays a chain into it and an assembly reads a
+// request from it.
 //
 // A projection holds no state outside the fact chain, so replaying the recorded
 // facts reproduces the same entries, and it holds no presentation decision: the
@@ -75,7 +75,7 @@ var (
 //
 //   - a keyed entry already present is appended once, and a keyless entry always is;
 //   - the original text of an entry is immutable input, and the model view is the assembly's output;
-//   - a rebuild recomputes the deduplication key set from the entries it keeps.
+//   - the deduplication key set follows the entries the projection keeps.
 type ReplayProjection struct {
 	mu        sync.Mutex
 	entries   []ProjectionEntry
@@ -364,16 +364,6 @@ func cutBytes(text string, n int) string {
 		n--
 	}
 	return text[:n]
-}
-
-// seedConsumed marks one consumed key as reseeded, so the consumed state a
-// snapshot and its tail carried survives a rebuild.
-func (p *ReplayProjection) seedConsumed(key event.EventID) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	if key != "" {
-		p.consumed[key] = struct{}{}
-	}
 }
 
 // noteRecovery records the recovery hint one cold-start replay leaves behind,

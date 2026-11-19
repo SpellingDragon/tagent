@@ -552,8 +552,18 @@ MUTATIONS: Tuple[Mutation, ...] = (
                 # commit and the replay fold share one append-plus-trim step,
                 # so the mutant records the position the entry lands at in the
                 # sequence as it stood before that step.
+                # Anchor re-taken again after 12.R2.2 (foldMapped only moves the
+                # boundary for the chain's newest fact): the boundary the mutant
+                # overwrites is unchanged, but the step it sits in now states a
+                # landing beside the fold, so the position is recorded ahead of
+                # both and the anchor names the whole block.
                 old=(
-                    "\theld.projection = foldIntoProjection(ctx, held.projection, entry, held.window)\n"
+                    "\tvar landed bool\n"
+                    "\theld.projection, landed = foldIntoProjection(ctx, held.projection, entry, held.window)\n"
+                    "\tif !landed {\n"
+                    "\t\tr.replays[slot] = held\n"
+                    "\t\treturn\n"
+                    "\t}\n"
                     "\tif evt.Type == event.TypeAgentOutput {\n"
                     "\t\theld.endedAt = entry.Key\n"
                     "\t\theld.rangeOpen = false\n"
@@ -565,7 +575,12 @@ MUTATIONS: Tuple[Mutation, ...] = (
                 ),
                 new=(
                     "\tposition := held.projection.Len()\n"
-                    "\theld.projection = foldIntoProjection(ctx, held.projection, entry, held.window)\n"
+                    "\tvar landed bool\n"
+                    "\theld.projection, landed = foldIntoProjection(ctx, held.projection, entry, held.window)\n"
+                    "\tif !landed {\n"
+                    "\t\tr.replays[slot] = held\n"
+                    "\t\treturn\n"
+                    "\t}\n"
                     "\tif evt.Type == event.TypeAgentOutput {\n"
                     "\t\theld.ended = position\n"
                     "\t\theld.rangeOpen = false\n"
@@ -635,34 +650,41 @@ MUTATIONS: Tuple[Mutation, ...] = (
             # the same refusal this exit carries, not a second one. The defect
             # claim is unchanged — a refused segment is reported as a committed
             # fact and the barrier failure is answered as success.
+            # The exits named here are the ones `persistFact` owns; the retry
+            # pre-check 12.R2.2 added beside it (chainHoldsFact) is a read whose
+            # refusal still propagates under the mutant, and the named assertion
+            # of this entry is decided at the commit these exits carry.
             old=(
                 "\tdefault:\n"
                 "\t\treturn err\n"
                 "\t}\n"
                 "}\n\n"
-                "// sameFactOf"
+                "// chainHoldsFact"
             ),
             new=(
                 "\tdefault:\n"
                 "\t\treturn nil\n"
                 "\t}\n"
                 "}\n\n"
-                "// sameFactOf"
+                "// chainHoldsFact"
             ),
         ),
         companion=(
             Replacement(
                 file="assembly/facts.go",
                 # The presence read under the fact's partition answers as committed.
+                # Re-taken after 12.R2.2: the retry pre-check chainHoldsFact holds
+                # the same read, so this anchor names the read `persistFact` makes
+                # by the local name it answers with.
                 old=(
-                    "\tstored, held, err := tier.Segments.GetEventInPartition(ctx, evt.Key, partition)\n"
-                    "\tif err != nil {\n"
-                    "\t\treturn err\n"
+                    "\tstored, held, heldErr := tier.Segments.GetEventInPartition(ctx, evt.Key, partition)\n"
+                    "\tif heldErr != nil {\n"
+                    "\t\treturn heldErr\n"
                     "\t}\n"
                 ),
                 new=(
-                    "\tstored, held, err := tier.Segments.GetEventInPartition(ctx, evt.Key, partition)\n"
-                    "\tif err != nil {\n"
+                    "\tstored, held, heldErr := tier.Segments.GetEventInPartition(ctx, evt.Key, partition)\n"
+                    "\tif heldErr != nil {\n"
                     "\t\treturn nil\n"
                     "\t}\n"
                 ),
@@ -714,7 +736,10 @@ MUTATIONS: Tuple[Mutation, ...] = (
         replacement=Replacement(
             file="assembly/facts.go",
             old=(
-                "\tr.loop.Backflow(frame.Identity.InvocationID, notice)\n"
+                "\tif refusal := r.loop.Backflow(frame.Identity.InvocationID, notice); "
+                "refusal != nil {\n"
+                "\t\treturn r.retainNoticeOwed(ctx, frame, notice, seq)\n"
+                "\t}\n"
                 "\treturn r.store.Consume(ctx, frame.Address, frame.Identity.InstanceID, seq)\n"
             ),
             new=(
@@ -722,7 +747,10 @@ MUTATIONS: Tuple[Mutation, ...] = (
                 "err != nil {\n"
                 "\t\treturn err\n"
                 "\t}\n"
-                "\tr.loop.Backflow(frame.Identity.InvocationID, notice)\n"
+                "\tif refusal := r.loop.Backflow(frame.Identity.InvocationID, notice); "
+                "refusal != nil {\n"
+                "\t\treturn r.retainNoticeOwed(ctx, frame, notice, seq)\n"
+                "\t}\n"
                 "\treturn nil\n"
             ),
         ),
@@ -1109,17 +1137,21 @@ MUTATIONS: Tuple[Mutation, ...] = (
         ),
         description=(
             "State an implementation detail in a main spec's requirement prose: "
-            "append a sentence naming a .go file to the TTL expiration requirement, "
-            "so the requirement carries a legacy clause the hygiene rule refuses."
+            "append a sentence naming a .go file to the live requirement that retired "
+            "the lifecycle scanner, so the retired mechanism returns as a legacy clause "
+            "the hygiene rule refuses."
         ),
         replacement=Replacement(
-            file="openspec/specs/event-lifecycle/spec.md",
-            old="for age calculation.",
-            new="for age calculation. The TTL scanner lives in ttl_scanner.go.",
+            file="openspec/specs/storage-lifecycle-completion/spec.md",
+            old="只拒销毁，不得以「先标墓碑、压实再删」的形态复活。",
+            new=(
+                "只拒销毁，不得以「先标墓碑、压实再删」的形态复活。"
+                "TTL 扫描由 ttl_scanner.go 内的周期性全量扫描实现。"
+            ),
         ),
         gate_path="scripts/gates/check_spec_hygiene.py",
         gate_selftest="scripts/gates/test_check_spec_hygiene.py",
-        expect_assertion="R4 go-file in requirement 'Time-based TTL expiration'",
+        expect_assertion="R4 go-file in requirement '保留保护与回收协调'",
         expect_assertion_site="scripts/gates/check_spec_hygiene.py#main",
     ),
     Mutation(
@@ -1729,6 +1761,37 @@ def _race_waived(result: RunResult) -> bool:
     return bool(frames)
 
 
+# RACE_FAILURE_MARKER is the testing package's own statement that a failure is a
+# detected race: `testing.go` logs it on the racing test's own record and keeps it
+# off the parents, which is the per-test attribution a waiver can rest on.
+RACE_FAILURE_MARKER = "race detected during execution of test"
+
+
+def _race_failed(result: RunResult, name: str) -> bool:
+    """Whether the testing package logged this test as failed by a race."""
+    return any(RACE_FAILURE_MARKER in str(event.get("Output") or "")
+               for event in result.events
+               if event.get("Action") in ("output", "build-output")
+               and event.get("Test", "") == name)
+
+
+def _failures_beside_the_race(result: RunResult) -> List[str]:
+    """The failures a waived race does not explain, so a waived race cannot hide them.
+
+    A test the race detector failed states that reason on its own record, and a
+    parent that failed for such a child states nothing of its own because the
+    testing package keeps the race off the parents: those are explained. A case
+    that failed for an assertion carries no such marker, and a race elsewhere in
+    the same run never explains it.
+    """
+    failures = _failing_tests(result)
+    raced = {name for name in failures if _race_failed(result, name)}
+    return [name for name in failures
+            if name not in raced
+            and not any(other != name and other.startswith(name + "/")
+                        for other in failures)]
+
+
 def control_record(mutation: Mutation, result: RunResult,
                    verdict: Dict[str, object]) -> Dict[str, object]:
     """One control's evidence: the selector it drove and what the rule ruled."""
@@ -1763,7 +1826,10 @@ def classify_control(result: RunResult) -> Dict[str, object]:
     frames are the whole race report) stays green here: the two gates share one
     ruling table, so a control never flips on a waived upstream race. That ruling
     rests on an actual race report, which only a real run emits, so it is read
-    before the pass-terminal rule instead of being overridden by it."""
+    before the pass-terminal rule instead of being overridden by it. The waiver
+    covers the failures the race explains and nothing else: an ordinary assertion
+    failure beside the same report leaves the control red, because a control that
+    really asserted is not the execution the mutations are compared to."""
     if result.timed_out:
         return {"verdict": "red", "reason": "timeout", "exit_code": result.exit_code}
     if not _ran_test(result):
@@ -1773,7 +1839,8 @@ def classify_control(result: RunResult) -> Dict[str, object]:
         return {"verdict": "red", "reason": "skipped", "exit_code": result.exit_code,
                 "skipped": skipped}
     failures = _failing_tests(result)
-    if (result.exit_code != 0 or failures) and _race_waived(result):
+    if (result.exit_code != 0 or failures) and _race_waived(result) \
+            and not _failures_beside_the_race(result):
         return {"verdict": "green", "reason": "green_race_waived", "exit_code": result.exit_code}
     if result.exit_code != 0 or failures:
         return {"verdict": "red", "reason": "test_failed", "exit_code": result.exit_code,
@@ -2183,6 +2250,29 @@ def _runner_module():
     return run_runtime_scenarios
 
 
+MUTATION_TOOL_NAME = "check_event_integrity_mutations"
+
+
+def tested_source_binding(root: Path) -> Dict[str, object]:
+    """The closure these mutations compile, resolved from the tree they run on.
+
+    Every registered mutation drives `go -C <root> test`, so the tested module is
+    the root module — but a selected module is not the whole compiled tree: a local
+    `replace` in the root's go.mod and a go.work `use` list both add sources, and a
+    report that named only the root would leave those free to change.
+    """
+    runner = _runner_module()
+    try:
+        return runner.source_binding(str(root), [{"dir": ".", "module_path": runner.MODULE_PATH}])
+    except runner.RunnerError as exc:
+        raise GateError("cannot bind the tested sources: {}".format(exc))
+
+
+def binding_window(binding: Dict[str, object]) -> Dict[str, object]:
+    """One end of the run: the closure digest and how many modules it covered."""
+    return {"digest": binding["digest"], "modules": len(binding["modules"])}
+
+
 def baseline_evidence(root: Path, contract_path: Optional[str]) -> Dict[str, object]:
     """The baseline a `--bundle` ties this mutation report to.
 
@@ -2190,8 +2280,13 @@ def baseline_evidence(root: Path, contract_path: Optional[str]) -> Dict[str, obj
     per-module source fingerprint as the evidence the runner produced. The
     digest is the sha256 of the schema-v2 event contract — the very file the
     runner digests — and the fingerprint comes from the runner's own
-    `module_fingerprint`. Every registered mutation drives `go -C <root> test`,
+    `source_binding`. Every registered mutation drives `go -C <root> test`,
     so the tested module is the root module.
+
+    The closure and the tool identity are recorded beside it because a mutation
+    verdict is only as good as the tree and the gate that produced it: the same
+    check that walks the sources also names the script whose bytes decide what
+    "killed" means.
     """
     relative = contract_path or DEFAULT_EVENT_CONTRACT
     path = Path(relative)
@@ -2205,13 +2300,19 @@ def baseline_evidence(root: Path, contract_path: Optional[str]) -> Dict[str, obj
             "{} is not the schema v2 {} contract; its digest cannot tie the "
             "mutations to the runner baseline".format(path, PROFILE))
     runner = _runner_module()
+    binding = tested_source_binding(root)
     try:
-        fingerprint = runner.module_fingerprint(str(root), ".", runner.MODULE_PATH)
+        gate_tool = runner.tool_identity(str(root), name=MUTATION_TOOL_NAME,
+                                         entrypoint=os.path.relpath(
+                                             os.path.abspath(__file__), str(root)))
     except runner.RunnerError as exc:
-        raise GateError("cannot fingerprint the tested module: {}".format(exc))
+        raise GateError("cannot fingerprint the mutation gate: {}".format(exc))
     return {
         "contract_digest": file_digest(path),
-        "module_fingerprints": [fingerprint],
+        "module_fingerprints": binding["modules"],
+        "source_binding": dict(binding, before=binding_window(binding),
+                               after=binding_window(binding)),
+        "gate_tool": gate_tool,
     }
 
 
@@ -2836,6 +2937,19 @@ def run_gate(root: Path, out_dir: Path, timeout: int,
             gate["failures"].append(
                 "not_evidence_backed mutations cannot count: " + ", ".join(not_backed))
             gate["ok"] = False
+        # The closure is re-resolved on the far side of the mutants. A report that
+        # names one tree while the mutations ran against another describes neither,
+        # so the drift is refused instead of being written down as one baseline.
+        after = tested_source_binding(root)
+        if after["digest"] != baseline["source_binding"]["digest"]:
+            raise GateError(
+                "the tested source closure changed while the mutations ran: {} -> {}; the "
+                "report would describe a tree that never stood still".format(
+                    baseline["source_binding"]["digest"], after["digest"]))
+        baseline = dict(baseline, source_binding=dict(
+            baseline["source_binding"],
+            before=binding_window(baseline["source_binding"]),
+            after=binding_window(after)))
         payload = summarize(records, controls, gate, root, source_digest,
                             baseline=baseline, replay=replay)
         write_evidence(out_dir, payload, evidence_name(replay))

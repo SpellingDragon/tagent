@@ -120,8 +120,8 @@ func TestScenario06DurableCommitAndReplay(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open the storage tier: %v", err)
 	}
-	durable, err := state.NewDurableCommit(ledger.TierFactLog(tier), nil)
-	if err != nil {
+	durable := state.NewEmptyDurableCommit(ledger.TierFactLog(tier), nil)
+	if err := durable.Seat(ctx, nil, nil); err != nil {
 		t.Fatalf("open the durable commit: %v", err)
 	}
 	registry := task.NewMemoryRegistry(durable, task.NewMemoryAdmission())
@@ -157,8 +157,8 @@ func TestScenario06DurableCommitAndReplay(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reopen the storage tier: %v", err)
 	}
-	restored, err := state.NewDurableCommit(ledger.TierFactLog(reopened), nil)
-	if err != nil {
+	restored := state.NewEmptyDurableCommit(ledger.TierFactLog(reopened), nil)
+	if err := restored.Seat(ctx, nil, nil); err != nil {
 		t.Fatalf("reopen the durable commit: %v", err)
 	}
 	chain, err := restored.Records(ctx, taskID)

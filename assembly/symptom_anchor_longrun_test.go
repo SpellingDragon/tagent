@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -25,6 +26,8 @@ import (
 //   - integrityBytes is the log span the boot's open verified and slotScanBytes the slot table bytes its enumerations read, both from the engine's own measures
 //   - addressedValueReads is the values the boot read back by address, from the engine's own measure: one per key a lookup answers, whatever family it belongs to
 //   - journalLogBytes is the log the boot opened over, read from the file before the boot opens it, the denominator the integrity face tracks one to one
+//   - integritySpan is how long that verification took, read from the pair of clock reads the open itself took: it is the one linear term of the boot the wall clock attributes, and nothing else is exempted by it
+//   - rebindSpan is how long the fold of the same boot took, read from the pair that call took: a stage sampled on its own rather than derived from the boot
 type longRunGeneration struct {
 	boot                time.Duration
 	commits             time.Duration
@@ -45,6 +48,8 @@ type longRunGeneration struct {
 	slotScanBytes       int64
 	addressedValueReads int64
 	journalLogBytes     int64
+	integritySpan       time.Duration
+	rebindSpan          time.Duration
 }
 
 // longRunStage is one part of a generation judged on its own: the stage of a growing
@@ -82,20 +87,58 @@ func (g longRunGeneration) total() time.Duration {
 	return g.boot + g.work
 }
 
+// bootBeyondVerification answers the boot with the one linear term it declares taken out: the complete-frame check reads every byte the log holds, so its own span is attributed and the rest of the assemble is what the wall clock judges.
+func (g longRunGeneration) bootBeyondVerification() time.Duration {
+	return g.boot - g.integritySpan
+}
+
+// bootUnattributed answers the part of the boot no sampled stage states: the whole assemble less the verification and the fold that run inside it. The remainder is named for what it is, because it belongs to no stage by construction.
+func (g longRunGeneration) bootUnattributed() time.Duration {
+	return g.boot - g.integritySpan - g.rebindSpan
+}
+
 // walkLongRunGenerations boots the named number of generations over one durable root, each over the history the generations before it committed.
 //   - each generation boots the run through the assemble that restores the framework checkpoint and seeds the anchored replay, commits the turns of its session through CommitToSession, settles its tasks through the registry, files the session and the framework checkpoints, and closes the process
 //   - the counted probes are read between the timed spans, so no span carries them
 //   - the first generation boots a store nothing was seated on, and the cost judgement holds it out of both windows
 func walkLongRunGenerations(t *testing.T, ctx context.Context, root string, addr event.Address, generations, turns, perGeneration int) []longRunGeneration {
 	t.Helper()
-	storage := WithStorage(ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: root})
+	return walkLongRunGenerationsOver(t, ctx, root, addr, generations, turns, perGeneration, nil)
+}
+
+// walkLongRunGenerationsOver is the same walk with the engine of every generation opened through the work the named function states for that root: it repeats those steps inside every read it answers, and opens the engine the tier names unchanged beside no function.
+//   - the decorator wraps the real durable engine of the root, so the boot, the commits and the closes stay the calls the host makes and the injection rides a real call rather than a stand-in
+//   - the steps are read from the log length of the root before the generation boots it, so the repeated work is proportional to the history that generation opens over
+func walkLongRunGenerationsOver(t *testing.T, ctx context.Context, root string, addr event.Address, generations, turns, perGeneration int, steps func(logBytes int64) int) []longRunGeneration {
+	t.Helper()
 	run := make([]longRunGeneration, generations)
 	for generation := 0; generation < generations; generation++ {
 		logBytes := journalLogBytesOf(t, root)
+		storage := WithStorage(ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: root})
+		if steps != nil {
+			storage = WithStorage(ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: root, Engine: decoratedEngine(root, steps(logBytes))})
+		}
 		bootStarted := time.Now()
 		boot := noTrimChainRun(t, ctx, storage)
 		entry := longRunGeneration{boot: time.Since(bootStarted), journalLogBytes: logBytes}
 		boot.stopCheckpointFiler()
+		verifiedBegin, verifiedEnd, err := integrityPassSpanOf(boot.tier)
+		if err != nil {
+			t.Fatalf("generation %d read the verification span of its boot: %v", generation, err)
+		}
+		if verifiedBegin.IsZero() != verifiedEnd.IsZero() {
+			t.Fatalf("the boot of generation %d states the verification opened at %v and closed at %v, want both reads or neither", generation, verifiedBegin, verifiedEnd)
+		}
+		if !verifiedBegin.IsZero() {
+			entry.integritySpan = verifiedEnd.Sub(verifiedBegin)
+		}
+		fold := boot.restoreStageSpan()
+		if fold.begin.IsZero() != fold.end.IsZero() {
+			t.Fatalf("the boot of generation %d states the fold opened at %v and closed at %v, want both reads or neither", generation, fold.begin, fold.end)
+		}
+		if !fold.begin.IsZero() {
+			entry.rebindSpan = fold.end.Sub(fold.begin)
+		}
 		segments := boot.tier.Segments
 		entry.walkVisits, entry.walkValueBytes, entry.walkValueReads = segments.IndexWalkReads()
 		probe, held := boot.tier.Store.(interface {
@@ -356,6 +399,290 @@ func judgeCountedFaces(run []longRunGeneration, window, boundTenths int) error {
 	return nil
 }
 
+// judgeStageSpansAccounted answers why the boot's one declared linear term and its fold are not both stated by the boot they belong to, and nil beside a walk whose every boot states them.
+//   - the verification span and the fold are read from the pair of clock reads their own calls took, so a boot that reports neither is refused by name rather than attributed from a difference
+//   - a span longer than the assemble it runs inside means the pair belongs to another call, so the containment is refused instead of subtracted
+//   - this is the accounting the table of the domain's design states as 未归因: the row states what is left over after the named stages, and never renames it after one of them
+func judgeStageSpansAccounted(run []longRunGeneration) error {
+	for generation, entry := range run {
+		if generation > 0 && entry.integritySpan <= 0 {
+			return fmt.Errorf("the boot of generation %d states no verification span beside the %d byte(s) its log holds, so the one linear term of the boot is unmeasured", generation, entry.journalLogBytes)
+		}
+		for _, stage := range []struct {
+			name string
+			span time.Duration
+		}{{name: "completeness check", span: entry.integritySpan}, {name: "fold", span: entry.rebindSpan}} {
+			if stage.span > entry.boot {
+				return fmt.Errorf("the boot of generation %d states its %s for %s inside an assemble of %s: a stage runs inside the boot it belongs to, never beside it", generation, stage.name, stage.span, entry.boot)
+			}
+		}
+	}
+	return nil
+}
+
+// judgeCountedFacesUnmoved answers why one walk states a different count from another over the same work, and nil beside two walks whose every counted read agrees generation by generation.
+//   - the count a boot paid is the side no machine noise moves, so a run that repeats work inside a real call leaves every read face of this list exactly where the control left it
+//   - the integrity bytes are held to the log the same generation opened over, because the log length is what the fixture wrote while the check is one pass over it: two roots of one shape write frames whose length follows their own timing, so the pair states the same reading of its own log rather than the same absolute byte count
+//   - the faces are compared generation by generation, so a count that agrees at the windows and differs elsewhere is refused by name
+func judgeCountedFacesUnmoved(control, held []longRunGeneration) error {
+	if len(control) != len(held) {
+		return fmt.Errorf("the control walked %d generation(s) beside the %d of the run it is held against, so no two generations are the same work", len(control), len(held))
+	}
+	faces := []struct {
+		name   string
+		series func(longRunGeneration) int64
+	}{
+		{name: "restored facts", series: func(g longRunGeneration) int64 { return int64(g.restored) }},
+		{name: "index walk visits", series: func(g longRunGeneration) int64 { return int64(g.walkVisits) }},
+		{name: "index walk value bytes", series: func(g longRunGeneration) int64 { return g.walkValueBytes }},
+		{name: "index walk value reads", series: func(g longRunGeneration) int64 { return int64(g.walkValueReads) }},
+		{name: "slot table bytes scanned", series: func(g longRunGeneration) int64 { return g.slotScanBytes }},
+		{name: "addressed value reads", series: func(g longRunGeneration) int64 { return g.addressedValueReads }},
+	}
+	for generation := range control {
+		for _, face := range faces {
+			if got, want := face.series(held[generation]), face.series(control[generation]); got != want {
+				return fmt.Errorf("generation %d read %d %s beside the %d the control read over the same work: the injected work names no key, verifies no byte and commits nothing, so no counted face may move",
+					generation, got, face.name, want)
+			}
+		}
+		for _, walk := range []struct {
+			name  string
+			entry longRunGeneration
+		}{{name: "held", entry: held[generation]}, {name: "control", entry: control[generation]}} {
+			if walk.entry.integrityBytes != walk.entry.journalLogBytes {
+				return fmt.Errorf("the %s boot of generation %d verified %d byte(s) of a log holding %d, want one pass over the whole log: the injected work scans no byte of its own",
+					walk.name, generation, walk.entry.integrityBytes, walk.entry.journalLogBytes)
+			}
+		}
+	}
+	return nil
+}
+
+// repeatedWorkSteps answers how many fixed steps one read repeats for the history a root holds: one step per sixteen bytes of the log a generation opens over, so a longer history repeats more work inside the same call.
+//   - the size is what separates the held arm from the control at the depth the counter-example walks: a step per kibibyte paid a few tenths of the boot, so the ratio it produced sat inside the machine's own dispersion
+//   - the steps stay fixed arithmetic over one field, so the compiler keeps the loop and the work names nothing the engine can answer from
+func repeatedWorkSteps(logBytes int64) int {
+	return int(logBytes / 16)
+}
+
+// noRepeatedWork is the steps of a pair whose roots both boot the plain engine: the control band and the restored shape of the counter-example read through it.
+func noRepeatedWork(string, int64) int {
+	return 0
+}
+
+// engineProbe is the measure face the durable engine states to this anchor: the bytes each pass scanned and the values it read back, beside the pair of clock reads the verification took.
+type engineProbe interface {
+	IntegrityBytesScanned() int64
+	SlotTableBytesScanned() int64
+	ValueReads() int64
+	IntegrityPassSpan() (time.Time, time.Time)
+}
+
+// repeatWorkStore decorates one engine with work proportional to the history its root holds, opening the engine the tier names on its first use.
+//   - every read and every walk it answers repeats the steps its root names, and the repeated work names no key, verifies no byte and commits nothing, so no counted face of the boot states it
+//   - the engine opens on the first call the boot makes, so the open runs inside the timed assemble exactly as the undecorated open does
+//   - the committed order is handed through, so the boot's walks take the path the undecorated engine takes and their counts stay the control's counts
+//   - the measure face and the close are handed through, so the boot states the same bytes, values and verification span the undecorated engine states
+type repeatWorkStore struct {
+	mu     sync.Mutex
+	engine ledger.AtomicStore
+	root   string
+	steps  int
+	sink   uint64
+}
+
+// opened answers the decorated engine, opening the durable engine of its root on the first call.
+func (s *repeatWorkStore) opened(ctx context.Context) (ledger.AtomicStore, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.engine != nil {
+		return s.engine, nil
+	}
+	store, err := ledger.OpenAtomicStore(ctx, ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: s.root, WriteRights: true})
+	if err != nil {
+		return nil, err
+	}
+	s.engine = store
+	return store, nil
+}
+
+// probe answers the measure face of the decorated engine, which a boot that opened it states.
+func (s *repeatWorkStore) probe() engineProbe {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	face, held := s.engine.(engineProbe)
+	if !held {
+		return nil
+	}
+	return face
+}
+
+// repeated spends the steps one read repeats: fixed arithmetic over a field of the decorator, so the work survives and states nothing but itself.
+func (s *repeatWorkStore) repeated() {
+	for step := 0; step < s.steps; step++ {
+		s.sink = s.sink*6364136223846793005 + 1442695040888963407
+	}
+}
+
+// Read answers the pairs the fetch names after repeating the work this root's history states.
+func (s *repeatWorkStore) Read(ctx context.Context, fetch ledger.Fetch) ([]ledger.Pair, error) {
+	s.repeated()
+	engine, err := s.opened(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return engine.Read(ctx, fetch)
+}
+
+// Keys answers the keys the prefix names after repeating the work this root's history states.
+func (s *repeatWorkStore) Keys(ctx context.Context, prefix string) ([]string, error) {
+	s.repeated()
+	engine, err := s.opened(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return engine.Keys(ctx, prefix)
+}
+
+// Namespaces answers the key namespaces the store holds, through the engine this open wraps.
+func (s *repeatWorkStore) Namespaces(ctx context.Context) ([]string, error) {
+	engine, err := s.opened(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return engine.Namespaces(ctx)
+}
+
+// Commit applies the batch through the engine this open wraps, committing nothing of its own.
+func (s *repeatWorkStore) Commit(ctx context.Context, batch ledger.Batch) error {
+	engine, err := s.opened(ctx)
+	if err != nil {
+		return err
+	}
+	return engine.Commit(ctx, batch)
+}
+
+// EachCommittedNewestFirst hands the walk to the engine's own committed order after repeating the work this root's history states.
+func (s *repeatWorkStore) EachCommittedNewestFirst(ctx context.Context, visit func(key string, value []byte) (bool, error)) error {
+	engine, err := s.opened(ctx)
+	if err != nil {
+		return err
+	}
+	ordered, held := engine.(ledger.CommitOrder)
+	if !held {
+		return fmt.Errorf("the engine %T states no committed order, so a decorated walk states none", engine)
+	}
+	s.repeated()
+	return ordered.EachCommittedNewestFirst(ctx, visit)
+}
+
+// IntegrityBytesScanned answers the bytes the engine's complete-frame check scanned, and a view no boot opened scans none.
+func (s *repeatWorkStore) IntegrityBytesScanned() int64 {
+	if face := s.probe(); face != nil {
+		return face.IntegrityBytesScanned()
+	}
+	return 0
+}
+
+// SlotTableBytesScanned answers the slot table bytes the engine's enumerations read, and a view no boot opened reads none.
+func (s *repeatWorkStore) SlotTableBytesScanned() int64 {
+	if face := s.probe(); face != nil {
+		return face.SlotTableBytesScanned()
+	}
+	return 0
+}
+
+// ValueReads answers the values the engine read back by address, and a view no boot opened reads none.
+func (s *repeatWorkStore) ValueReads() int64 {
+	if face := s.probe(); face != nil {
+		return face.ValueReads()
+	}
+	return 0
+}
+
+// IntegrityPassSpan answers the pair of clock reads the engine's verification took, and a view no boot opened states none.
+func (s *repeatWorkStore) IntegrityPassSpan() (time.Time, time.Time) {
+	if face := s.probe(); face != nil {
+		return face.IntegrityPassSpan()
+	}
+	return time.Time{}, time.Time{}
+}
+
+// Close ends the decorated engine's view, so a boot that opened the engine hands the close to it and a boot that never opened it closes nothing.
+func (s *repeatWorkStore) Close() error {
+	s.mu.Lock()
+	engine := s.engine
+	s.engine = nil
+	s.mu.Unlock()
+	if engine == nil {
+		return nil
+	}
+	closer, held := engine.(interface{ Close() error })
+	if !held {
+		return nil
+	}
+	return closer.Close()
+}
+
+// decoratedEngine answers the engine the tier of one root opens over: the durable engine of that root, opened on the first call the boot makes, beside the number of steps every read repeats.
+func decoratedEngine(root string, steps int) ledger.AtomicStore {
+	return &repeatWorkStore{root: root, steps: steps}
+}
+
+// TestBootWallClockRejectsUnattributedGrowth is the performance counter-example: a boot repeating work inside a real call pays past the bound.
+//   - three roots of one shape each boot the real assemble, commit, settle, file both checkpoints and close over one generation of history
+//   - two hold the plain engine and are the control band the target anchor also reads: the same walk twice states this machine's own noise
+//   - the held root repeats one fixed step per sixteen bytes of the log it opens, inside the reads the boot really makes, to that root alone
+//   - the injected work names no key, verifies no byte and commits nothing: every counted face of every generation reads what the control read
+//   - the judgement that accepts the control pair refuses the held pair by name, so identical work is held to a bound a paying boot breaks
+//   - the refusal is physical: the held boot pays more beside the control's boot at one depth, with no count and no byte moved
+//
+// 契约: docs/wiki/memory/memory-architecture.md#gaps
+func TestBootWallClockRejectsUnattributedGrowth(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Second)
+	defer cancel()
+	addr := event.Address{AgentID: "agent-a", SessionID: "session-unattributed-growth"}
+	const generations, turns, perGeneration = 24, 1, 1
+	controlRoot, mirrorRoot, heldRoot := t.TempDir(), t.TempDir(), t.TempDir()
+	restored := walkLongRunGenerationsOver(t, ctx, controlRoot, addr, generations, turns, perGeneration, func(int64) int { return 0 })
+	mirror := walkLongRunGenerationsOver(t, ctx, mirrorRoot, addr, generations, turns, perGeneration, func(int64) int { return 0 })
+	held := walkLongRunGenerationsOver(t, ctx, heldRoot, addr, generations, turns, perGeneration, repeatedWorkSteps)
+	for _, walk := range []struct {
+		name string
+		run  []longRunGeneration
+	}{{name: "control", run: restored}, {name: "mirror", run: mirror}, {name: "held", run: held}} {
+		if err := judgeLongRunFixture(walk.run, generations, perGeneration); err != nil {
+			t.Fatalf("the %s walk proves nothing, so no bound below is a claim about it: %v", walk.name, err)
+		}
+	}
+	if err := judgeCountedFacesUnmoved(restored, held); err != nil {
+		t.Fatalf("the injected work moved a counted face of the boot: %v", err)
+	}
+	t.Logf("the control walk paid: %s", longRunCostSeries(restored))
+	t.Logf("the held walk paid: %s", longRunCostSeries(held))
+	controlPair := pairedBootRatios(t, ctx, controlRoot, mirrorRoot, dispersionBootPairs, noRepeatedWork)
+	heldPair := pairedBootRatios(t, ctx, heldRoot, controlRoot, dispersionBootPairs, func(root string, logBytes int64) int {
+		if root != heldRoot {
+			return 0
+		}
+		return repeatedWorkSteps(logBytes)
+	})
+	t.Logf("the control pair read median %.3f p10 %.3f p90 %.3f and the held pair read median %.3f p10 %.3f p90 %.3f",
+		bootRatioPercentile(controlPair, 50), bootRatioPercentile(controlPair, 10), bootRatioPercentile(controlPair, 90),
+		bootRatioPercentile(heldPair, 50), bootRatioPercentile(heldPair, 10), bootRatioPercentile(heldPair, 90))
+	if err := judgePairedBootGrowth("control pair", "the bound sits inside the dispersion of this machine on the boot axis", controlPair, perGenerationCostBoundTenths); err != nil {
+		t.Fatalf("the judgement refused the boot of two roots of one shape walking the same work, so it decides nothing about the held one: %v", err)
+	}
+	err := judgePairedBootGrowth("held pair", "the boot that repeats work inside its reads pays more than the work the counts state, so the wall clock is not subsumed by the counts", heldPair, perGenerationCostBoundTenths)
+	if err == nil {
+		t.Fatal("the judgement accepted a boot that repeats work with the history while every counted face stood still, want it refused by name: the wall clock must not be subsumed by the counts")
+	}
+	if !strings.Contains(err.Error(), "not subsumed by the counts") {
+		t.Fatalf("the judgement refused the held pair with %v, want the boot that pays more than its counts named", err)
+	}
+}
+
 // historyProportionalCost answers the cost series a generation that carries the history it opens over would show: every generation costs what the middle reference generation costs, scaled by the facts its own boot restored.
 //   - the scale is the restored facts this walk measured, so the control is built from the walk's own denominator rather than from an invented series
 //   - the walk restores strictly more facts every generation, so the middle of a window is its middle generation
@@ -377,19 +704,19 @@ func historyProportionalCost(run []longRunGeneration, cost []time.Duration, wind
 //   - odd pairs reverse the order, so a drift in the load lands on both sides of the series instead of one root
 const dispersionBootPairs = 21
 
-// judgeFixtureDispersion answers why a bound cannot decide this fixture on this machine, and nil beside a noise band whose middle stays inside the bound.
-//   - the ratios pair two independent roots of one shape at the same depth, boot against boot, so the series is what the machine adds to identical work on the axis the bound judges
-//   - the middle of the pair ratios is the statistic the bound reads: a median over the bound decides the machine rather than the walk, which the refusal states
-//   - the p10 to p90 of the series is the explicit noise band the growth separation reads, so a held growth clears the machine only above the control p90
+// judgePairedBootGrowth answers why the boot of one root cost more beside its pair than the bound allows, and nil beside a pair whose middle stays inside it.
+//   - the ratios pair two roots at the same depth whose walk is the same work, boot against boot, so the series is what the machine adds to identical work on the axis the bound judges
+//   - the subject and the consequence are stated by the caller, because two pairs of the same work are refused for two different reasons: two plain roots state the dispersion of the machine, while a root whose engine repeats work inside every read states a boot that pays more than its work
+//   - the middle of the pair ratios is the statistic the bound reads: a median over the bound decides the machine rather than the walk
 //   - the series takes at least dispersionBootPairs pairs, so a thin sample never stands in for the band
-func judgeFixtureDispersion(ratios []float64, boundTenths int) error {
+func judgePairedBootGrowth(subject, consequence string, ratios []float64, boundTenths int) error {
 	if len(ratios) < dispersionBootPairs {
-		return fmt.Errorf("the dispersion guard read %d pair(s), want at least the %d the band takes: one sample cannot tell the machine from the walk", len(ratios), dispersionBootPairs)
+		return fmt.Errorf("the %s read %d pair(s), want at least the %d the band takes: one sample cannot tell the machine from the walk", subject, len(ratios), dispersionBootPairs)
 	}
 	middle := bootRatioPercentile(ratios, 50)
 	if middle*10 > float64(boundTenths) {
-		return fmt.Errorf("two independent roots of one shape paid a boot ratio median of %.3f for identical work, over the bound of %d tenths, so the bound sits inside the dispersion of this machine on the boot axis and a series over it decides nothing",
-			middle, boundTenths)
+		return fmt.Errorf("the %s paid a boot ratio median of %.3f (p10 %.3f, p90 %.3f) over the bound of %d tenths: %s",
+			subject, middle, bootRatioPercentile(ratios, 10), bootRatioPercentile(ratios, 90), boundTenths, consequence)
 	}
 	return nil
 }
@@ -403,13 +730,17 @@ func bootRatioPercentile(ratios []float64, p int) float64 {
 
 // pairedBootRatios boots two closed roots back to back the named number of pairs, odd pairs reversed, and answers the ratio of the first root's boot to the second's.
 //   - each boot is the real assemble beside no work, so the pair measures the open and the restore alone
+//   - the steps the caller states are handed to the engine of the root they name and to no other, so one arm of the pair carries repeated work while the other stays the plain engine
 //   - the order alternates so a drift in the machine's load lands on both sides of the series
-//   - each boot adopts the publication record the chain already holds, so the pair is identical work: the difference the depth carries is the whole ratio
-func pairedBootRatios(t *testing.T, ctx context.Context, first, second string, pairs int) []float64 {
+//   - each boot adopts the publication record the chain already holds, so the pair is identical work: the difference the pair carries is the whole ratio
+func pairedBootRatios(t *testing.T, ctx context.Context, first, second string, pairs int, steps func(root string, logBytes int64) int) []float64 {
 	t.Helper()
 	boot := func(root string) time.Duration {
 		t.Helper()
 		storage := WithStorage(ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: root})
+		if count := steps(root, journalLogBytesOf(t, root)); count > 0 {
+			storage = WithStorage(ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: root, Engine: decoratedEngine(root, count)})
+		}
 		started := time.Now()
 		run := noTrimChainRun(t, ctx, storage)
 		elapsed := time.Since(started)
@@ -450,6 +781,10 @@ func longRunCostSeries(run []longRunGeneration) string {
 	slotScan := make([]int64, 0, len(run))
 	addressed := make([]int64, 0, len(run))
 	logBytes := make([]int64, 0, len(run))
+	integritySpan := make([]time.Duration, 0, len(run))
+	rebindSpan := make([]time.Duration, 0, len(run))
+	beyond := make([]time.Duration, 0, len(run))
+	unattributed := make([]time.Duration, 0, len(run))
 	for _, entry := range run {
 		total = append(total, entry.total())
 		boot = append(boot, entry.boot)
@@ -467,9 +802,13 @@ func longRunCostSeries(run []longRunGeneration) string {
 		slotScan = append(slotScan, entry.slotScanBytes)
 		addressed = append(addressed, entry.addressedValueReads)
 		logBytes = append(logBytes, entry.journalLogBytes)
+		integritySpan = append(integritySpan, entry.integritySpan)
+		rebindSpan = append(rebindSpan, entry.rebindSpan)
+		beyond = append(beyond, entry.bootBeyondVerification())
+		unattributed = append(unattributed, entry.bootUnattributed())
 	}
-	return fmt.Sprintf("total=%v boot=%v commits=%v settling=%v sessions=%v frame=%v closing=%v indexWalkVisits=%v indexWalkValueBytes=%v indexWalkValueReads=%v restored=%v history=%v integrityBytesScanned=%v slotTableBytesScanned=%v addressedValueReads=%v journalLogBytes=%v",
-		total, boot, commits, settling, sessions, frame, closing, visits, valueBytes, valueReads, restored, history, integrity, slotScan, addressed, logBytes)
+	return fmt.Sprintf("total=%v boot=%v commits=%v settling=%v sessions=%v frame=%v closing=%v indexWalkVisits=%v indexWalkValueBytes=%v indexWalkValueReads=%v restored=%v history=%v integrityBytesScanned=%v slotTableBytesScanned=%v addressedValueReads=%v journalLogBytes=%v integritySpan=%v rebindSpan=%v bootBeyondVerification=%v bootUnattributed=%v",
+		total, boot, commits, settling, sessions, frame, closing, visits, valueBytes, valueReads, restored, history, integrity, slotScan, addressed, logBytes, integritySpan, rebindSpan, beyond, unattributed)
 }
 
 // TestSymptomAnchorPerGenerationCostFlatOverALongRun is the long-run anchor: work costs the same at every depth; the boot's declared reads follow the history.
@@ -477,19 +816,24 @@ func longRunCostSeries(run []longRunGeneration) string {
 //   - each generation boots through the real assemble, commits through CommitToSession, settles through the registry, files both checkpoints and closes
 //   - the work stages are judged flat apart: the commits, the settlements, the two checkpoints and the close, each on its own window pair
 //   - the boot is judged by its counted faces: the integrity pass one to one, the slot scan face at zero, the addressed reads flat over the chain it serves
+//   - the boot's wall clock is judged on the paired axis: two independent roots of one shape pay the same boot inside the bound
+//   - that is the reading a boot repeating work in a real call breaks, which TestBootWallClockRejectsUnattributedGrowth holds red
+//   - the boot's depth separation is reported beside the account it restores rather than asserted flat: a restart reads the account the chain states
+//   - so the boot is held to its counted faces and never to a constant
+//   - the boot states the spans of the two stages whose calls take their own pair of clock reads, and each one is held inside the assemble it belongs to
 //   - one work stage carrying the history is a defect of that stage, and a sum of the stages hides it behind a stage that stayed flat
 //   - the chain is the denominator: every boot restores more facts than the last, and every generation adds tasks to a history the account never restates
 //   - assertion: the middle of the last window stays inside the bound of the middle of the first window that opens a store with history, stage by stage
 //   - the empty-root generation is held out of both windows, because it restores nothing and so costs a generation over no history
-//   - negative: a work stage that carries the history fails the bound naming the stage and the generation, and a boot that enumerates the table fails the zero face
+//   - negative: a work stage that carries the history fails the bound naming the stage and the generation; a boot that enumerates the table fails the zero face
 //   - control one: an even series is accepted, so the judgement is not a refusal of every series
 //   - control two: the measured series scaled by the facts each boot restored is refused, so the bound can fail on a series that stays flat here
 //   - control three: the median of 21 paired boots over two independent roots of one shape stays inside the bound on the boot axis, odd pairs reversed
 //   - control four: a paired series whose median carries the bound is refused by name, so the guard still refuses a machine the bound cannot decide
-//   - the noise band is explicit: the control pairs' p10 to p90 is what the machine adds to identical work, and growth is separated only when the held p10 clears it
+//   - the noise band is explicit: the control pairs' p10 to p90 is what the machine adds to identical work, and growth clears it only above that
 //   - the bound is a candidate: the calibration that fixes a threshold owns the number, and no definition of done names one
 //   - depth: three times the generations the timed-out long run reached, where the ratio reads what dispersion reads and past it clears the bound
-//   - proxy: the boot alone is not the whole cost, because a commit reads the journal a growing history left and a checkpoint relocates it
+//   - proxy: the boot alone is not the whole cost, because a commit reads the journal a growing history left and a checkpoint states its account over it
 //   - the boot stage states its index walks beside its wall clock: the entries they named and the value bytes they read
 //   - the counted faces are judged first and on their own windows: a walk that followed the history is refused by the count it named, whatever the machine added
 //   - the values a boot reads are held to the entries it named, which is the face a walk that reads a value per held key breaks
@@ -529,7 +873,7 @@ func TestSymptomAnchorPerGenerationCostFlatOverALongRun(t *testing.T) {
 	for at := range biased {
 		biased[at] = 1.5
 	}
-	if err := judgeFixtureDispersion(biased, perGenerationCostBoundTenths); err == nil {
+	if err := judgePairedBootGrowth("control pair", "the bound sits inside the dispersion of this machine on the boot axis and a series over it decides nothing", biased, perGenerationCostBoundTenths); err == nil {
 		t.Fatal("the dispersion guard accepted a boot ratio median of 1.5 for identical work, want it refused by name: the guard must still refuse a machine whose noise carries the bound")
 	} else if !strings.Contains(err.Error(), "dispersion of this machine") {
 		t.Fatalf("the dispersion guard refused the biased series with %v, want the machine dispersion named", err)
@@ -543,15 +887,15 @@ func TestSymptomAnchorPerGenerationCostFlatOverALongRun(t *testing.T) {
 	secondShallow := walkLongRunGenerations(t, ctx, secondShallowRoot, addr, window+1, turns, perGeneration)
 	t.Logf("two independent roots of one shape paid boot %s and %s at the reference depth",
 		medianDuration(stageCost(firstShallow, longRunStages[0])), medianDuration(stageCost(secondShallow, longRunStages[0])))
-	controlRatios := pairedBootRatios(t, ctx, firstShallowRoot, secondShallowRoot, dispersionBootPairs)
+	controlRatios := pairedBootRatios(t, ctx, firstShallowRoot, secondShallowRoot, dispersionBootPairs, noRepeatedWork)
 	t.Logf("the control boot ratios paid median %.3f p10 %.3f p90 %.3f",
 		bootRatioPercentile(controlRatios, 50), bootRatioPercentile(controlRatios, 10), bootRatioPercentile(controlRatios, 90))
-	if err := judgeFixtureDispersion(controlRatios, perGenerationCostBoundTenths); err != nil {
+	if err := judgePairedBootGrowth("control pair", "the bound sits inside the dispersion of this machine on the boot axis and a series over it decides nothing", controlRatios, perGenerationCostBoundTenths); err != nil {
 		t.Fatalf("the bound decides the dispersion of this machine rather than the walk: %v", err)
 	}
 	heldShallowRoot := t.TempDir()
 	walkLongRunGenerations(t, ctx, heldShallowRoot, addr, window+1, turns, perGeneration)
-	heldRatios := pairedBootRatios(t, ctx, deepRoot, heldShallowRoot, dispersionBootPairs)
+	heldRatios := pairedBootRatios(t, ctx, deepRoot, heldShallowRoot, dispersionBootPairs, noRepeatedWork)
 	heldP10, controlP90 := bootRatioPercentile(heldRatios, 10), bootRatioPercentile(controlRatios, 90)
 	if heldP10 > controlP90 {
 		t.Logf("the boot growth at depth %d is separated from the machine: held p10 %.3f over control p90 %.3f, and the counted faces hold it to the declared reads",
@@ -562,6 +906,10 @@ func TestSymptomAnchorPerGenerationCostFlatOverALongRun(t *testing.T) {
 	}
 	if err := judgeGenerationStages(run, window, perGenerationCostBoundTenths); err != nil {
 		t.Fatalf("a stage of the generation grows with the chain: %v (the series below is indexed by generation, 0..%d)\n%s",
+			err, generations-1, series)
+	}
+	if err := judgeStageSpansAccounted(run); err != nil {
+		t.Fatalf("a stage the boot states is not accounted inside it: %v (the series below is indexed by generation, 0..%d)\n%s",
 			err, generations-1, series)
 	}
 }

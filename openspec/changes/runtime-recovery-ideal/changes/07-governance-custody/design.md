@@ -381,3 +381,220 @@
 | `./runtime/task/` | 1 | 2 FAIL＝R63 已登记的既有红（`TestConsumptionFailureIsReportedByName`＝12 域冻结负锚；`TestTaskSliceRefusesToDropAReceiptOfAnOwedNotice`＝05.R2 清减面未实施），与审批面无关 |
 
 **仍未跑（不声称绿）**：`./assembly/`（并发单）、`./tests/integration/**`（并发单＋禁跑）。任务行 07.R2 的两条 `./assembly/` 生产接线消费者锚因此**未经本轮实测**；`tests/integration/capabilities/` 的 29 处 `Query(0)`／`Count()`／`List()` 消费点（§十一答 3 表）本轮**未改未跑**，其恢复断言在本轮语义下应仍成立（派生读补齐历史），但**未实测不声称**。
+
+## 二十、07.R2.1 实施（已决审批按身份读链，主树，2026-11-18）
+
+**写面（白名单内，实际改动四文件）**：`runtime/task/approval/approval_store.go`、`runtime/task/approval/attention_log.go`、`runtime/task/approval/attention_store.go`、`runtime/task/approval/approval_store_test.go`、`assembly/governance_checkpoint_test.go`，以及本 `design.md`／`tasks.md`。`runtime/task/approval/attention_log_test.go` 在册但**未改**（无需改，其用例全绿）；`features/evolution/governance/checkpoint_test.go` **零改动**（`git diff --stat` 对该文件无输出），四枚负锚原样绿。数据根一律 `t.TempDir()`；未读真实数据根；未做任何 git 写。
+
+### 前置取证（裁定四的落地条件，先证后用）
+
+- 链上确实携带可判定的 answer：`Decide` → `fileAnswer` → `Commit` 写 `tagent/attention/v1/fact:<FactKey>`；answer 事实键由 `(tool, argsDigest, id)` 经 `approvalFact` 直接算出，**不需拆 lineage**（`attention_store.go:16` 红线不动）。
+- 按身份读回所需两族齐备：`tagent/approval/v1/request:<asked>`（§十九裁定 2 已落，键＝调用方身份）＋上述 answer 事实族。故本单**无需补产品落链**，直接进入清减。
+- 实测旁证：真实入口锚在正式 `Boot` 之后扫 `tagent/attention/v1/fact:` 得 **2 键**（question＋answer），扫 request 族得被测身份一键；撤去 `<root>/approvals` 后第二个 `Boot` 仍读到该裁决。
+
+### 实现（四件事，最小面）
+
+1. **切面/内存只留开放义务**：`statedByCut`（`approval_store.go:247`）——已决（approved/denied）仅在 `rulingsStated`＝`a.factLog == nil` 时陈述；未决按 `ExpiresMs` 过滤（沿用 §十九「过期且未裁决不陈述」）。**载体判据**：有耐久面＝裁决归链、切面不载；无耐久面（tier 为 nil 的进程）＝切面是唯一载体，照旧陈述。这是保持四枚冻结负锚（它们构造的正是无面书）零改动的唯一办法。
+2. **`Decide` 先按身份读链**：`rulingFromChain`（`:454`）＝`requestRecordOnFace`（`attention_log.go:143`，精确键 `tagent/approval/v1/request:<id>`）＋`answerOnFace`（`:166`，精确 answer 键）；命中即返回已决快照（`DecidedBy` 一并读回），不再走「无此身份」分支。裁决落链后**镜像 request 记录**并**驱逐常驻项**（`:440` `delete(a.evidence, id)`，仅在 `a.factLog != nil && recordErr == nil` 时执行；无面书不驱逐，否则 `Lookup` 无物可读）。
+3. **`Lookup` 索取时才付读代价**：末位兜底 `lookupRuledFacts`（`:516`）扫 request 族、按 tool＋digest 过滤、`CreatedMs` 降序（ID 升序定序）逐条读 answer，「未过期 approved 优先，否则最新 denied」，过 `effectiveStatus` 判有效期；读失败记既有 `DeliveryGap` 并返回 nil（不伪造、不重造请求），**不 seat**。成本落在问的闸门侧，不在 `Boot` 侧——这是裁定四「按身份读」的直接代价。
+4. **绑定阶段只恢复有效态**：`foldRequestRecords`（`attention_log.go:86`）先折链事实，再只 seat `openObligation`（`attention_store.go:209`＝未答且有有效期）；`storedRequestRecords`（`:116`）做族扫描＋定序＋身份校验（错误文案保持 `…states the identity %q`，旧锚 `TestRequestRecordKeepsTheIdentityItsKeyNames` 不变）。`rebuild` 补一条 `if a.factLog != nil && asked && answered { continue }`（`approval_store.go:831`），令有面书不从文件把已决项重新 seat 回来。
+   **边界（本单不做）**：`attention_log.go` 的**绑定全扫**（`:83-108`/`:117-137` 的三次全族扫描）本单只做到「只 seat 开放项」，扫描次数本身未减——那属 **07.R2.3** 的成本面，按派单约定停放，不在本单伪装完成。
+
+### 锚与实测（逐条可复跑，独立语句，未与 git 操作串联）
+
+| 命令 | exit | 命中 |
+|---|---|---|
+| `go build ./...` | 0 | — |
+| `go vet ./runtime/task/approval ./features/evolution/governance ./assembly` | 0 | — |
+| `go test ./runtime/task/approval -run '^TestSettledApprovalsStayReadableWithoutResidentEvidence$' -race -count=10 -v`（正锚，新增） | 0 | **10 RUN／10 PASS／0 FAIL**，0 DATA RACE |
+| `go test ./features/evolution/governance -run '^(TestDeniedRulingMustSurviveItsValidityAcrossRestart\|TestExpiredApprovalNeverRunsAfterRestart\|TestOpenApprovalIdentityMustSurviveTheCut\|TestApprovalAliasCollapsesAcrossTheCut)$' -race -count=10 -v`（负锚，既有、零改动） | 0 | **40 PASS**（4×10），0 DATA RACE |
+| `go test ./assembly -run '^TestGovernanceBootReadsSettledAnswerByIdentity$' -count=10 -v`（真实入口锚，新增） | 0 | **10 RUN／10 PASS** |
+| `go test ./runtime/task/approval ./features/evolution/governance -count=1` | 0 | 两包 ok |
+| `go test ./assembly -count=1` | 0 | ok（337.4s，全包） |
+| `go test ./runtime/task/... -count=1` | 0 | `runtime/task`、`runtime/task/approval` 均 ok（无 §十九所述既有红复发） |
+| `go run ./scripts/comment_policy -no-baseline -v runtime/task/approval assembly` | 0 | 本次四文件 **0 findings**（余 19 条为既有、不在本次改动行） |
+
+**正锚测什么**（`approval_store_test.go:272`）：绑链书放 1 条开放 hold，再逐轮注册＋裁决 `settled-00..04`；每轮断言「切面陈述项＝1」「常驻 `len(evidence)`＝1」，而链上 `facts == 2*settled+1`、`records == settled+1` 持续增长（证明开放量固定不是因为历史没长）。重启重绑同链：`Pending/stated/resident` 仍各 1；`Decide(settled-04, Approved, "a-later-approver")` 仍答 **Denied by 原审批者**；`Lookup("shell_exec", digest(4))` 读回该拒绝。末尾第三段：无面书 `face-less-hold` 的切面**确实陈述**该裁决，把该切面灌进绑链书后断言「陈述项中无 approved/denied」，且 `Lookup` 仍读到拒绝——即「无面靠切面、有面靠链」两态皆被钉住。
+
+**变异实测（证明锚可红，非空转）**：
+
+| 变异 | 正锚 | 真实入口锚 |
+|---|---|---|
+| M-A `statedByCut` 对已决恒返 true | **红** `approval_store_test.go:394: the migrated book states the ruled request face-less-hold, want the obligations still open alone` | 绿（该锚的已决项已在 `Decide` 时驱逐，切面本就无物可陈述——如实登记，此变异由正锚覆盖） |
+| M-B `Decide` 不读链（`if false && (err != nil \|\| stated)`） | **红** `approval_store_test.go:353: the ruled identity settled-04 no longer resolves after the restart` | **红** `governance_checkpoint_test.go:360: the identity … no longer resolves after the restart` |
+| M-C `Lookup` 兜底恒 nil | **红** `approval_store_test.go:362: the gate reads <nil> for the refused arguments` | **红** `governance_checkpoint_test.go:367: the restarted gate reads <nil> for the refused arguments` |
+
+三次变异均以 `/tmp` 备份复原，`diff -q` 验 `RESTORED_IDENTICAL`，复原后 `gofmt -l` 空、`go build ./...` exit 0、两锚复绿。
+
+### 消费者链（正式入口，非测试补接线）
+
+`Boot`（`assembly/run.go`）→ `seatGovernance`（`assembly/governance_checkpoint.go`：`log = ledger.TierFactLog(run.tier)`）→ `run.RegisterStateSlice` → `seat.Bind(ctx, log)` → `BindAttention`（`features/evolution/governance/checkpoint.go:172-186`）→ `ApprovalManager` 持面。真实入口锚走的就是这条：两次 `bootGovernanceHost` 共用同一 `governanceDoc(t)` 合成耐久根，第二次之前删掉 `<root>/approvals`，仍读到链上裁决。
+
+### 本轮明确未覆盖（不声称）
+
+- `tests/integration/capabilities/**`、`tests/integration/host/**`：派单禁跑，未跑未改。
+- `attention_log.go` 绑定阶段的**扫描次数**清减（07.R2.3）；goal 载荷清减（07.R2.2）——两处均按域计划留在各自叶。
+- 读失败语义（`DeliveryGap` ＋返回 nil）本单只复用既有通道，其「不因此重造请求」的具名锚属 07.R2.3 的 `TestApprovalHistoryReadFailureDoesNotMintANewRequest`，本单未写。
+- F 任务未勾、未 archive、未宣告整域完成。
+
+## 二十一、07.R2.2 实施（清减目标载荷并保留历史查询语义，主树，2026-11-18）
+
+**写面（白名单内，实际改动三文件）**：`features/evolution/governance/goal.go`（实质改动）、`features/evolution/governance/checkpoint.go`（仅 `stateSliceWire.Goals` 注释）、`features/evolution/governance/checkpoint_test.go`（1 处断言改写＋1 个辅助＋3 枚锚），以及本 `design.md`／`tasks.md`。白名单内**零改动**：`denial.go`、`denial_test.go`、`tests/integration/capabilities/governance_recovery_test.go`、`tests/integration/capabilities/critical_calls_hold_through_formal_path_test.go`、`tests/integration/capabilities/event_integrity_test.go`（`git status --porcelain features/evolution/governance/ tests/integration/capabilities/` 只列出上列三文件）。`skeleton_assert.go` 零改动，其 7 条目标族编译断言（`Declare`／`Resolve`／`List`／`HasActive`／`Active`／`Current`／`NewGoalRegistry`）签名全部不变，`go build ./...` exit 0 与 `go vet` exit 0 即其通过证据。数据根一律 `t.TempDir()`；未读真实数据根；未做任何 git 写。
+
+### 载体判据（沿用 §十九裁定 3／§二十 的同一条规则）
+
+有耐久面（`g.log != nil`）＝已结／过期目标的记录是切面所编号的那条流派，切面**只陈述在力**；无耐久面＝切面／内存是该进程唯一载体，**照旧全量陈述**。判据写在一处（`stated()` 的 `historyBehindTheStream`），`pruneOutOfForceLocked` 自身在 `g.log == nil` 时直接返回，二者不得分散到调用点——分散即在两处各写一遍同一条规则，读的人要为一次读去对齐两处。
+
+**反事实检验**（元规则一）：删掉「无面书全量陈述」这条分支会坏什么？会坏 `TestGovernanceRecovery` 的 "the goal state words are kept verbatim" 子用例与 07.R2.1 四枚冻结负锚——它们构造的正是无面书，切面是唯一载体；删掉后切面无物陈述，重启即丢目标。故该分支不是防御直觉，而是被真实夹具钉住的载体要求。
+
+### 实现（五件事，最小面）
+
+1. **`stated()` 只陈述在力**（`goal.go:191-209`）：`historyBehindTheStream := g.log != nil`；循环内 `if historyBehindTheStream && !inFlight(goal, now) { continue }`；仍按 ID 排序、仍在 `RLock` 下取快照。切面里的 `GoalSeq`／`GoalOrder` 两个尾号不动——它们是流派序号与身份铸造序号，与「在力几项」不是一回事（见本单负锚）。
+2. **`pruneOutOfForceLocked(nowMs)` 是唯一的出列口**：`g.log == nil` 立即返回；否则删掉每个 `!inFlight(goal, nowMs)` 的目标。三处调用：`Declare`（在 `g.seq++` **之前**，故刚声明的目标绝不会自己是出列者）、`Resolve`（仅在事件落链后，失败分支 `return false` 不触碰内存）、`foldTail`（折完流派立刻把已结／过期项移出常驻）。初版曾另设 `release(id)` 单点助手，因只有一个调用方且与 `pruneOutOfForceLocked` 语义重复，按「单使用方不抽象」合并回该函数。
+3. **`List()` 是「历史按身份可读」的现有面孔，不新增访问器**：先 `RLock` 拷常驻、**放锁**，再与 `streamGoals(ctx, log)` 合并（常驻按 ID 胜出），最后按 `goalSeqOf(ID)` 再按 ID 排序（声明序，确定）。选 `List` 而非新开 `Read(id)` 的理由：生产侧 `Query(0)`／`Count()`／`List()` 的调用点为 **0**（`grep` 于非测试代码 `features/evolution/governance`＋`runtime/task/approval` 得 0 行；治理只经 `HasActive`／`Current` 接入 `policy.go:264`／`:510`），新开访问器即单使用方抽象；且「历史仍按身份可读」被表达为**每个历史目标各自答出自己的身份／陈述／结局**，这正是 `List` 已承担的面。
+4. **`streamGoals(ctx, log)` 按需读回**（`goal.go`）：`log == nil` 返回 nil；`Scan(goalEventPrefix)`，键排序后逐键 `json.Unmarshal`，坏正文走既有 `governanceHistoryUnreadable(key, err)` 并 `continue`；跳过非 `TypeGovernance`；折 `goalOpDeclared`（以 `evt.Timestamp.UnixMilli()` 为 `CreatedMs`）与 `goalOpResolved`（把状态写到已有项）。**拒绝的 Scan 只具名报 ERROR 并返回 nil——不伪造、不重造**。不做历史缓存（与 denial 的 `records` 不同）：本叶要求常驻**不随已结历史增长**，代价落在问的人（`List`），不落在 `Boot`。
+5. **`writeGoalEvent` 改为返回 `bool`（是否落链）**：失败分支一律 `return false`，成功 `return true`；`Resolve` 据此决定是否把该目标交给流派（落链才剪，未落链则它仍在力，留在常驻）。
+
+### 验收面改写（需编排者知悉，非缩水）
+
+`TestGovernanceSliceSnapshot` 子用例 1 原断言「切面陈述声明＋其裁决共 2 项」——那是本叶**要清掉**的载荷。改写为：切面陈述**两个尾号而无任何目标**，且 `goals.Bind` 之后该已结目标仍由流派答出（`checkpoint_test.go:230` 附近）。判定面未缩小：来源从切面搬到流派，「恢复后仍读得到」这条判断一字未减，只是不再以「切面必须装着它」为证。
+
+### 锚与实测（逐条可复跑，独立语句，未与 git 操作串联）
+
+| 命令 | exit | 命中 |
+|---|---|---|
+| `go build ./...` | 0 | — |
+| `go vet ./features/evolution/governance` | 0 | — |
+| `gofmt -l features/evolution/governance/` | 0 | 无输出 |
+| `go test ./features/evolution/governance -run '^(TestGovernanceGoalSliceTracksOnlyActiveWork\|TestGovernanceHistoryStaysReadableByIdentity\|TestGovernanceCountAndQueryStateTheirBoundary\|TestDenialTailSeqIsNotTheRecordCount)$' -race -count=10 -v`（正锚×2＋负锚×1＋既有绿×1） | 0 | **40 RUN／40 PASS／0 FAIL**，`DATA RACE` 计数 **0** |
+| `go test ./features/evolution/governance -count=1`（全包） | 0 | ok 0.273s／0.319s（两次） |
+| `go test ./tests/integration/capabilities -run '^TestGovernanceRecovery$' -count=10 -v`（真实入口锚） | 0 | **10 PASS**，6 个子用例（含 "the goal state words are kept verbatim…"、"a restart replays the governance events back…"、"a failing store and a bad snapshot degrade…"） |
+| `go test ./tests/integration/capabilities -count=1`（全包，含历史查询 26 处消费点） | 0 | ok 2.279s |
+| `go test ./features/evolution/governance -run '^(TestOpenApprovalIdentityMustSurviveTheCut\|TestDeniedRulingMustSurviveItsValidityAcrossRestart\|TestExpiredApprovalNeverRunsAfterRestart\|TestApprovalAliasCollapsesAcrossTheCut)$' -race -count=3 -v`（07.R2.1 冻结负锚） | 0 | **12 PASS** |
+| `go test ./runtime/task/approval -run '^TestSettledApprovalsStayReadableWithoutResidentEvidence$' -race -count=3 -v`（07.R2.1 正锚） | 0 | **3 PASS** |
+
+**包指派勘误（R29 实测）**：派单把上述五枚 R2.1 锚写在 `./runtime/task/approval` 一条命令里。按原文执行只命中 1 枚（`TestSettledApprovalsStayReadableWithoutResidentEvidence`），另 4 枚在 `features/evolution/governance/checkpoint_test.go:811/868/957/1065`，零匹配而 `go test` 仍 exit 0——正是空转陷阱。故按真实包分两条执行，命中数如上表。
+
+**正锚一 `TestGovernanceGoalSliceTracksOnlyActiveWork` 测什么**（`checkpoint_test.go:1114`）：固定一个在飞目标 `live`，再跑 5 代「声明＋结案」，每代断言 `GoalSeq == 2*gen+1`、`GoalOrder == gen+1`、`len(wire.Goals) == 1 且 ID == live`，并记录实测：
+
+```
+generation 1: stated goals=1 bytes=184 goal tail=3; stored goal events=3
+generation 2: stated goals=1 bytes=184 goal tail=5; stored goal events=5
+generation 3: stated goals=1 bytes=184 goal tail=7; stored goal events=7
+generation 4: stated goals=1 bytes=184 goal tail=9; stored goal events=9
+generation 5: stated goals=1 bytes=185 goal tail=11; stored goal events=11
+```
+
+链上目标事件 3→11 而切面字节 184→185、项数恒 1：**开放量固定不是因为历史没长**。随后断言 `HasActive/Current` 仍点名 `live`、常驻 `len(goals.goals) == 1`、末代字节 ≤ 首代 2 倍；再放一个已过期目标（`ExpiresMs = now-1000`）断言其不被陈述、下一次 `Declare` 得 `g-8`（七个身份已铸）、常驻 2；`goalOnRecord(expired)` 仍答出其陈述与状态；最后 restore＋Bind，断言 `Current().ID == g-8`、再声明得 `g-9`、`len(List()) == 9`。
+
+**正锚二 `TestGovernanceHistoryStaysReadableByIdentity` 测什么**（`:1219`，两子用例）：(a) 四个目标陈述各异、`CreatedBy` 各异、结局分别为 achieved／abandoned／achieved／active；切面只陈述 1 项；restore＋Bind 后每个目标答出自己的 ID、陈述、`CreatedBy`、状态与非零 `CreatedMs`，总数 4（**不得变短**）。(b) 负向：用拒绝读的 `*failingLog` 令 `Bind` 返回错误，此时 `List()` 只答出在力的那 1 项，**不凭空造目标**。
+
+**负锚 `TestGovernanceCountAndQueryStateTheirBoundary` 测什么**（`:1312`）：3 条拒绝记录＋2 个已声明已结目标；切面陈述 `DenialSeq==3`、`GoalSeq==4`、`len(wire.Goals)==0`；restore＋Bind 后 `Count()==3`、`Query(0)` 是 3 条倒序记录、`List()` 是 2 个目标按声明序——并显式断言「目标历史答 2 而切面尾号是 4」（`checkpoint_test.go:1358`）：「尾序号冒充记录数会把它编号的每一次结案都多算一项」。
+
+**变异实测（证明锚可红，非空转）**：
+
+| 变异 | 红在哪（原文关键行） |
+|---|---|
+| M1 `stated()` 的 `historyBehindTheStream` 恒 false（陈述全部目标） | `checkpoint_test.go:1178: stated goals beside one expired goal = [2 项], want g-1 alone: expired is derived from validity, so it states nothing` |
+| M2 `List()` 丢掉流派合并（只答常驻） | `:1190: goal g-7 is answered by no list of the registry`；`:1262: the restarted registry answers 1 goals, want the 4 the first process declared`；`:1358: List() beside a cut that numbers two goals = [], want the two in declaration order` |
+| M3 `Resolve` 落链后不剪（已结目标留在常驻） | `:1162: the memory state holds 2 goals beside one goal in flight, want the work in force alone: a resolved goal belongs to the stream from the moment its event landed` |
+| M4 `Declare` 不剪（过期目标留在常驻） | `:1188: the memory state holds 3 goals after the expired one met the write boundary, want the two in flight` |
+
+四次变异均以 `/tmp` 备份复原，`diff -q` 验 `RESTORED_IDENTICAL`，复原后 `gofmt -l` 空、`go build ./...` exit 0、全包复绿。
+
+### 消费者链（正式入口，非测试补接线）
+
+`Boot` → `assembly/host.go:577-578`（`NewGoalRegistry()` → `NewStateSeat(ledger, goals, approvals)`）→ `seat.Bind(ctx, log)`（`g.log` 自此非 nil，剪枝生效）→ `:626` `WithGoals(goals)` → `policy.go:264` `p.goals.HasActive()`（目标闸门判定）与 `:510` `p.goals.Current()`（进目标上下文）。真实入口锚 `TestGovernanceRecovery` 走的就是这条：声明后闸门激活、拒绝渗入目标上下文、重启后回放、坏存储／坏快照降级而不倒闸，10 次复跑全绿。
+
+### 本轮明确未覆盖（不声称）
+
+- **`assembly` 包本单未能复跑**：`go test ./assembly -run 'Governance|Goal'` 因**编译失败**（`anchored_boot_parity_test.go:254`／`compress_checkpoint_test.go:36,46,281`：`CompressionConsumer has no field or method answered`）而红。归属：03.R2 正在改 `assembly/compress_consumer.go`（HEAD 该文件 `answered` 出现 8 次，工作树 3 次），与本单写面不相交；`go build ./...` exit 0 说明非测试代码可编译，红项纯属 03.R2 在飞状态。待其落地后由编排者统一复跑 `./assembly`。
+- `tests/integration/host/**` 未跑（派单未要求）。
+- 「29 处消费点」对账口径与实际：本单在**非测试**代码中实测 `Query(0)`／`Count()`／`List()` 调用点 **0** 处（治理只经 `HasActive`／`Current` 接入），故 29 处系测试侧消费；`tests/integration/capabilities` 全包 exit 0（2.279s）覆盖其中全部消费，未逐条改写——本单未使任何一个面变短，无需改写消费点。
+- 目标历史的**读取代价**（每次 `List` 全扫目标族）本单不优化；是否缓存属后续裁决，本叶只保证常驻不随历史增长。
+- F 任务未勾、未 archive、未宣告整域完成。
+
+## 二十二、07.R2.3 实施（移除绑定阶段的全历史恢复工作，主树，2026-11-18）
+
+**写面（白名单内，本叶实际改动四文件）**：`runtime/task/approval/approval_store.go`、`runtime/task/approval/attention_log.go`、`runtime/task/approval/attention_log_test.go`、`assembly/governance_checkpoint_test.go`，以及本 `design.md`／`tasks.md`。白名单内**本叶零改动**：`runtime/task/approval/attention_store.go`、`runtime/task/approval/approval_store_test.go`、`features/evolution/governance/checkpoint.go`、`features/evolution/governance/checkpoint_test.go`（前两文件里 `git diff` 的行属 07.R2.1，后两文件属 07.R2.1／R2.2；本叶未编辑、未回退）。数据根一律 `t.TempDir()`；未读真实数据根；未做任何 git 写。
+
+### 绑定判据（本叶唯一新增的裁决面，写在一处）
+
+`ApprovalManager.stated`（`RestoreEvidence` 置真）陈述「**框架切面是本册的记录**」：
+
+- **有切面陈述**（生产 boot 必经 `RestoreState`→`RestoreEvidence`）＝在力义务由切面给出，绑定只读**这些义务各自 gained 的尾**：逐项按该身份的 answer 键点读（`answerOnFace`）。请求族与 attention 族的全扫一概不做，常驻集即切面那几项。
+- **无切面陈述**（面是这一册的唯一记录）＝照旧 `chain.bind`（全折 attention 流）＋`foldRequestRecords`（全扫请求族并只 seat 开放项）。此分支不是防御直觉，而是被三枚面锚钉住的载体要求，见下。
+
+判据落在 `statedByCut()` 一个返回值上，两条读法分在 `BindAttention` 的两支；不分散到调用点。
+
+**反事实检验**（元规则一）：删掉「无切面陈述＝全折」会坏什么？坏 `TestAttentionChainOutlivesTheProcess`（面是唯一记录，重启后 `Pending()==0` 且链上持有该 question 必须成立）、`TestAttentionChainRefusesAStoredBodyOfAnotherFact`、`TestRequestRecordKeepsTheIdentityItsKeyNames`（两枚负锚都在无切面书上立）、`TestSeatedBookBindsBeforeItReadsTheDirectory`、以及 `TestSettledApprovalsStayReadableWithoutResidentEvidence` 的**重启册**（`restarted` 无 `RestoreEvidence`，靠绑定折出唯一开放项）。反过来，删掉「有切面陈述＝只读尾」则整叶归零（本叶产出）。
+
+### 「成本归索取者」的边界（与 R2.1 的分工）
+
+- `Lookup`：常驻命中即答，零读；未命中才走 `lookupOnChain`（原有 `storedRequestRecords` 族扫）。R2.1 已把它放在索取侧；本叶**没有**把它挪进首次 Judge——相反，切面陈述的在力义务恒为常驻，装得下「首次及再次索取不读历史」这条断言（见真实入口锚的 `DeliveryGaps()==0` 钉）。
+- `Decide`：切面未陈述的身份，新增 `requestToRule`——按身份点读请求记录，再点读该身份的 question 折进链（`task.Attention.Commit` 要求答先有问），答仍落在同一身份上。**不铸新请求**，也不 seat 到常驻（答落地即出列）。
+- `lookupOnChain`（原 `lookupRuledFacts`）：除既有「已决记录」外，**同 pair 的开放记录**也答出其 pending 态。理由是被既有锚钉住的语义缺口，不是新功能：`Lookup` 的契约本就写「otherwise the newest request of that pair with its effective status: pending, denied, or expired」；旧实现 `continue` 掉未答记录，切面丢身份时唯一的开放记录读不到 ⇒ 闸门铸新请求（变异 M3 原文证据在下面表里）。
+
+### 实现（四件事，最小面）
+
+1. `attention_log.go`：`answerOnFace` 的读体抽为 `factOnFace(role,…)`（同一个键点读，多一个角色参数），`answerOnFace`／新增 `questionOnFace` 各自一行转调——两份逐字同构的读取收敛到一处，键拼装与「正文陈述别的 fact」拒绝只留一份。
+2. `attention_log.go`：新增 `foldAnswersInForce`——按常驻每项读自己的 answer 键，读到的折进链；`bind` 拆为 `bind(ctx,log)`（全扫）＋`bindFacts(folded,log)`（合并与接管面），两条读法共用一个合并实现。
+3. `approval_store.go`：`stated` 字段＋`statedByCut()`；`BindAttention` 两支；`RestoreEvidence` 置 `stated = true`（并补一行注释说明「切面是本册的记录」）；`Decide` 的 `!ok` 分支改走 `requestToRule`；`lookupRuledFacts`→`lookupOnChain` 且开放记录也答 pending。
+4. 切片侧零改动：`checkpoint.go` 的 `SnapshotState`／`RestoreState`／`Bind` 一字未动，**切片字节由既有 R2.1／R2.2 语义决定**（见下方实测：已结历史翻倍而切面字节逐字节相同），本叶不以改切片冒充绑定清减。
+
+### 三面读数（本叶要求「分别量绑定扫描/解码/分配、常驻项与切片字节」）
+
+**包内（`factStore` 计数：`scans`／`pairs`；`runtime.MemStats.TotalAlloc`）**，出自 `TestAttentionBindReadsTheObligationsNotTheHistory` 的 `t.Logf`：
+
+| 臂 | 已结历史 | 绑定扫描 | 解码正文 | 常驻项 | 分配字节 |
+|---|---|---|---|---|---|
+| 有切面陈述 | 12 轮 | **3** | **0** | **3** | **3,472** |
+| 有切面陈述 | 24 轮（翻倍） | **3** | **0** | **3** | **3,472** |
+| 无切面陈述（对照臂） | 24 轮 | 2 | **78** | 3 | — |
+
+前三行逐字相同＝绑定工作量与已结历史无关；第三行证明同一个 store 确实装着那 78 份正文（对照臂只是把读法换回全扫），故前两行的平坦不是「测试看不见」。
+
+**生产切片字节（`assembly` 真实入口）**：同一合成根、固定 3 个开放 hold，已结历史 6 轮、12 轮的两次 `run.Checkpoint()` 切出的 governance 载荷**字符串逐字节相同**；两次都只陈述 3 项（`governanceSliceState.Approvals` 长度 3）。重启册 `Pending()` 为 2（开放 3 项里 1 项在停机期间被裁）——即「切面字节不随已结增长」与「绑定只恢复在力项」两件事各自有读数。
+
+### 锚与实测（逐条可复跑，独立语句，未与 git 操作串联）
+
+| 命令 | exit | 命中 |
+|---|---|---|
+| `go build ./...` | 0 | — |
+| `go vet ./runtime/task/approval ./features/evolution/governance` | 0 | — |
+| `gofmt -l runtime/task/approval/ assembly/` | 0 | 无输出 |
+| `go test ./runtime/task/approval -run '^(TestApprovalHistoryReadFailureDoesNotMintANewRequest\|TestAttentionChainRefusesAStoredBodyOfAnotherFact\|TestRequestRecordKeepsTheIdentityItsKeyNames\|TestSettledApprovalsStayReadableWithoutResidentEvidence)$' -race -count=10 -v`（冻结负锚×1＋既有负锚×2＋R2.1 正锚×1） | 0 | **40 RUN／40 PASS／0 FAIL**，`DATA RACE` 0 |
+| `go test ./features/evolution/governance -run '^(TestDeniedRulingMustSurviveItsValidityAcrossRestart\|TestOpenApprovalIdentityMustSurviveTheCut\|TestGovernanceGoalSliceTracksOnlyActiveWork)$' -race -count=5 -v` | 0 | **15 RUN／15 PASS** |
+| `go test ./assembly -run '^TestGovernanceBootWorkTracksOpenItemsAndTail$' -count=10 -v`（正/真实入口锚） | 0 | **10 RUN／10 PASS** |
+| `go test ./runtime/task/approval -run '^(TestAttentionBindReadsTheObligationsNotTheHistory\|TestAttentionChainOutlivesTheProcess\|TestUnseatedBookBindsAfterItsDirectoryFold\|TestSeatedBookBindsBeforeItReadsTheDirectory\|TestUnseatedBookBindsARuledRequestFromItsFile)$' -race -count=10 -v`（本叶读数锚＋四条绑定路径锚） | 0 | **50 RUN／50 PASS** |
+| `go test ./runtime/task/approval -count=1`、`go test ./features/evolution/governance -count=1` | 0 | ok 0.693s／ok 0.304s |
+| `go test ./assembly -count=1`（全包，337s） | 0 | ok 337.843s（改动前基线）；改动后见下方「本轮未覆盖」 |
+
+### 锚测什么
+
+- **`TestGovernanceBootWorkTracksOpenItemsAndTail`**（`assembly/governance_checkpoint_test.go`，正式 Boot×2＋中间一次「停机期间的审批人」）：① 3 个 `exec`/critical 停机 hold 与 6 轮已结（拒绝）历史；切面陈述 3 项 → 再加 6 轮已结 → 切面仍 3 项且**载荷逐字节相同**。② 关宿主，用 `WriteRights` 打开同一个 tier：另一册（无目录）绑同一 face 并 `Decide(open-02, Approved)`，把「停机期间落到链上的裁决」写进真实档；随后把**一条已结请求记录**与**一条已结 answer 正文**改写成不合法 JSON。③ 再正式 Boot：必须成功（旧绑定在此按名拒绝并倒掉 boot，见 M1）；`Pending()` == 2 且顺序为 open-00／open-01；`Lookup(open-02 的 args)` 读到 approved（尾读），`Decide(open-02)` 按身份把裁定人 `the-production-approver` 读回。④ 首次 Judge 真参数（`judgeGradedArguments` 带 `Arguments`）：`DispositionHold` 且 reason 含 `open-00`，并且 `DeliveryGaps()` 为空——**族扫一旦发生就会在坏记录上落 gap**，故空 gap 是「首次 Judge 没读历史」的机器证据，而不是仅仅「快」。⑤ `Decide(settled-00)` 按名拒绝坏记录键、`Decide(settled-01)` 按名拒绝坏 answer 键：历史归索取者、且具名。
+- **`TestApprovalHistoryReadFailureDoesNotMintANewRequest`**（`attention_log_test.go`）：一册由切面陈述 1 个开放 hold（另有 1 条已结），绑定前令 store 只拒绝该身份 answer 键的读。断言绑定**按名拒绝**（错误含该键与 store 原话），且拒绝后 `Pending()` 仍是原 hold、`Lookup` 仍答原身份（pending）——闸门读到 nil 就会铸新请求，故此处同时钉「不铸」；并断言 store 里 request 记录仍恰 2 条（没有多铸一条）。
+- **`TestAttentionBindReadsTheObligationsNotTheHistory`**：三面读数锚（表见上），第三臂为对照全扫臂，防止「测试看不见的 store」。
+
+### 变异实测（证明锚可红，非空转）
+
+| 变异 | 红在哪（原文关键行） |
+|---|---|
+| M1 `statedByCut()` 恒 `false`（绑定回退为全扫） | `attention_log_test.go:282: a face refusing the hold's own answer key bound as landed, want the refusal named to the boot`；`attention_log_test.go:373: the stated bind served 2 scans, want the 3 answer keys of the obligations it states`（同轮读数 `scans=2 decoded=42 allocated=168968`，对比基线的 `3/0/3472`）；`assembly/…:503: boot the host: governance: read the attention facts past the state cut: … invalid character 't' looking for beginning of object key string` |
+| M2 有切面分支不读尾（`foldAnswersInForce` 调用置空） | `governance_checkpoint_test.go:510: pending approvals beside the restart = [3 项], want the 2 holds still open` |
+| M3 `lookupOnChain` 恢复「跳过未答记录」 | `features/evolution/governance/checkpoint_test.go:795: the gate parked under reason "critical risk awaits approval (approval request approval-b576ab4c4edbe50612ffa5494e774f54)", want the original identity open-hold named: a freshly minted hold is not the dropped one surviving` |
+| M4 `Decide` 去掉 `requestToRule`（回到 ErrApprovalNotFound） | `checkpoint_test.go:799: the approval identity the first process handed the approver does not resolve after the dropped cut: approval: no approval request names that identity: open-hold` |
+
+四次变异均以 `/tmp` 备份复原，复原后 `gofmt -l` 空、`go vet` 两包 exit 0、`go build ./...` exit 0、两包 `-count=1` 复绿。M3／M4 说明本叶在 `Lookup`／`Decide` 上的两处扩展**不是顺手加的功能**：既有锚 `TestGovernanceSliceRefusesToDropAnOpenApproval`（切面显式不陈述该开放项）靠它们才不铸新请求。
+
+### 消费者链（正式入口，非测试补接线）
+
+`Boot`（`assembly/host.go`）→ `run.RegisterStateSlice`（`assembly/checkpoint.go`）→ `StateRegistry.RestoreState`（切面存在时 `seat.RestoreState` → `checkpoint.go:193` `s.approvals.BindAttention(ctx, log)`；零切面走 `RestoreBoot`）→ `ApprovalManager.BindAttention`（本叶两支）→ 运行期 `policy.go:342` `p.approvals.Lookup(tool, digest)`（`riskCritical`）与审批人 `Decide`。真实入口锚就是这条链：`judgeGradedArguments` 打的是 `run.governorInEffect().Judge`，即生产闸门本体，非测试夹具。
+
+### 本轮明确未覆盖（不声称）
+
+- `tests/integration/capabilities/**` 与 `tests/integration/host/**` 未跑（派单未要求、且上一轮已声明禁跑）。
+- 停机期间被裁的那一项，其**裁定人名字**在 `Lookup` 的常驻路径里读不到（`stateOf` 的 `DecidedBy` 取常驻项的字段，而切面陈述的开放项尚无裁定人）；answer 正文只带状态词。此事**改动前亦如此**（旧绑定同样只折 fact、不补名字），故本叶不修、不声称，只把它记进「未覆盖」——修它要改 answer 正文承载或 `stateOf`，属新面。断言改走 `Decide`（记录里带裁定人）。
+- 生产 boot 的**精确**读次数无法在 `assembly` 层计数：`assembly/governance_checkpoint.go:63` 的 `ledger.TierFactLog(run.tier)` 无计数缝，`TierFacts.kv` 未导出。故 `assembly` 侧用「坏正文必须不被读」与「`DeliveryGaps()` 必须为空」两个可观测的间接证据，精确计数留在包内 `factStore`（上表）。这一分工不是缩水：包内计的是同一份 `BindAttention`，`assembly` 计的是同一条生产链。
+- `attention_store.go` 的 `openObligation`／`stateOf` 未改；「切面陈述的开放项不校验其 question 是否仍在链上（presence 由 `RestoreEvidence` 的 `fileQuestion` 供货）」保持原样，属 07.R2.1 的裁定面。
+- F 任务未勾、未 archive、未宣告整域完成。

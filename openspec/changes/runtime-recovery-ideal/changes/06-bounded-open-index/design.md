@@ -1736,3 +1736,193 @@ PROBE an unstated root costs a rebuild at open: order=69 bytes slotTable=98368 b
 - **`QueryEvents` 未按 type／时间收窄**：事件类型与时间只在索引**携带值**里，读面能收窄的粒度是分区前缀；要在读正文前按类型收窄需要引擎「按携带值收窄」的前缀能力，今日不存在。故声明轴是 O(命名空间条目)，不冒充 O(匹配集)。
 - **锚的绝对耗时不入表**：夹具每提交约 5ms（含 fsync），三深度构建约 40s；判据只用增长轴与控制案比值。
 - **未跑**：`go test ./tests/... -count=1` 全树（按派发令只跑指定面）。
+
+## 二十七、06.R5.a 执行记录：旧屏障锚按存活路径重出判据（2026-11-18）
+
+§二十四·五「屏障本身在生产里没有计数器（不新增测试后门）」是本叶的硬约束：判据只能读引擎**自身已持**的状态，不加计数器，也不能从总 fsync 次数反推阶段。结论：**无需生产修改**——`journalLog.unsynced`（journal.go:2194 增、:2231 归零）与 `journalAddress.staged`／`stagedLog`（journal.go:1222 增、:1686 归零、:1253 回滚）已足以命名「本次提交覆盖了哪个耐久点」。
+
+### 二十七·一 旧锚 → 现行存活路径映射（逐一）
+
+| 旧锚（08.R3 已删） | 旧判据 | 现行路径（行号） | 承接方式 |
+|---|---|---|---|
+| `TestCheckpointAndClosePayOneIndexBarrier` 的 frame 段 | 退位搬迁步 `log.relocate` 的重述条数 | 写入：`journalKV.Commit`（journal_kv.go:188）→ `journalLog.append`（journal.go:2194）→ `journalLog.sync`（journal.go:2231，日志屏障 `file.Sync`）→ `addr.confirm`（journal.go:1222）→ `flush(false)`（journal.go:1686，两索引文件屏障，仅当 `staged`／`stagedLog` 越 64 KiB） | 正锚 `TestCommitBarrierMeasurementNamesItsPhase`：按 `unsynced`／`staged`／`stagedLog` 归零情况命名**阶段**（`log`／`index`／`log+index`／`none`），不数总数 |
+| 同上 closing 段 | 关档时退位重写的重述条数 | 关档：`Run.Close`（assembly/invoke.go:118，defer 并入 `closeStorage`）→ `Tier.Close`（config.go:316）→ `FileSegmentStore.Close`（segment_store.go:1316，空批只需完成屏障）→ `journalKV.Close`（journal_kv.go:229）→ `journalLog.close`（journal.go:2275）→ `flush(true)`（强制两索引文件屏障） | 负锚 `TestCloseBarrierFailureStaysVisible`：`order`／`slots` 各自换成 `os.Pipe` 写端（写成功、`Sync` 失败）后，`journalKV.Close`／`FileSegmentStore.Close` 必须答 `ErrJournalBarrier`，且不得是 `ErrCommitAfterClose`／`ErrCommitWithoutWriteRights`；空账关档须答 nil，并**陈述**它 owed none（nil 是读数而非吞掉） |
+| 负锚「把重述退回 `reopened→rebuild`」 | 退位不生效 | 无对应机制（退位已随 08.R3 删除，见本文件:1533 勘误） | **不承接**：错误路径随机制消失，不造替代假设 |
+| helper `judgeOneIndexBarrier`／`oneIndexBarrierReading`／`controlReadingLine` | 计数读数 | 无（随机制删除） | `journalBarrierStateOf`（memory/ledger/journal_test.go:3023）持 `kv.mu`（提交同锁）读 `unsynced`／`staged`／`stagedLog`／`seq`／`statedSeq`；失败点由 `journalBarrierFailure`（:3061）命名（`unsynced > 0` ⇒ 日志屏障，否则 ⇒ 索引屏障） |
+| 旧「一条屏障计数」判据 | 总 fsync 次数 | — | 明令禁止：新锚一律读「哪个耐久点仍欠账」，不读次数 |
+
+### 二十七·二 运行凭据（原始退出码，非管道退出码）
+
+| 命令 | 结果 |
+|---|---|
+| `go test ./memory/ledger -run '^(TestCommitBarrierMeasurementNamesItsPhase\|TestCloseBarrierFailureStaysVisible)$' -count=10 -race -v` | exit **0**；顶层 PASS 20（2×10），子测试 PASS 70（4+3 各 ×10） |
+| `go test ./assembly -run '^(TestFactCommitLandsOriginalAndRecordInOneCommit\|TestCloseFilesTheCheckpointTheNextBootReads)$' -count=10 -v` | exit **0**；顶层 PASS 20（2×10） |
+| `go test ./assembly -run '^TestCloseReportsTheActualBarrierFailure$' -race -count=10 -v` | exit **0**；顶层 PASS 10，子测试 PASS 20 |
+| `go test ./memory/ledger -count=1`（整包） | exit **0**，76.9s |
+| `go test ./assembly -count=1`（整包） | exit **0**，315.4s |
+| `go build ./...` | exit **0** |
+| `go vet ./memory/ledger/`、`go vet ./assembly/` | exit **0** |
+
+### 二十七·三 可红演示（变异→红→复原→绿，sha256 一致）
+
+- **阶段计量坍缩为总计数**：把 `journalBarrierPhase` 改成「凡欠账归零即 `log+index`」（取消两点区分）⇒ `go test ./memory/ledger -run '^TestCommitBarrierMeasurementNamesItsPhase$'` exit **1**，红项 `a_commit_inside_both_budgets_pays_the_logs_barrier_alone`（「the commit covered the "log+index" barrier, want the log's alone」）与 `a_failed_index_barrier_is_named_the_indexs`。复原后 exit **0**，`journal_test.go` sha256 = `fe594dc12a9055314a5777a25a5976f16c3ae325669a69785b4cc4a93667d8ed`（变异前同值）。
+- **包装层提前拒绝**：让装配探针在屏障批上答 `ErrJournalFrameTooLarge`（写入前的具名拒绝）⇒ `go test ./assembly -run '^TestCloseReportsTheActualBarrierFailure$'` exit **1**（「answered memory: journal record is over the frame bound: …, want memory: journal barrier failed」）。复原后 exit **0**，`assembly/checkpoint_test.go` sha256 = `c8e94458aa9962c8413a2dfbb8131ca857d7cfd6b9293accb13596dd9af7e27b`（变异前同值）。
+
+### 二十七·四 承接判据的组成（每条都非空转）
+
+- **提交屏障阶段**（`TestCommitBarrierMeasurementNamesItsPhase`，4 段）：`log` 段（67 B 提交只付日志屏障，索引字节仍 staged）；`log+index` 段（65,536 B 值使帧越过 `journalLogSyncBytes`，同一次提交付两个屏障，`seq == 1` 落定）；`log` 失败段（`log.file` 换管道 ⇒ `ErrJournalBarrier` 且 `ErrCommitUncertain`，阶段 `none`，失败点 `log`，索引字节与 `seq` 未动）；`index` 失败段（`addr.order` 换管道 ⇒ 阶段 `log`，失败点 `index`，`seq`／`statedSeq` 回滚到水位）。每段都断言「本次提交覆盖什么」而非「总数是多少」。
+- **关闭屏障失败可见**（`TestCloseBarrierFailureStaysVisible`，3 段）：视图关档（`order` 管道）+ 存储关档（`slots` 管道）各自具名 `ErrJournalBarrier`、排除两类写入前拒绝、失败后新开视图仍读回已落事实；空账关档答 nil 且先陈述 owed＝0。
+- **生产关档路径可见**（`TestCloseReportsTheActualBarrierFailure`，2 段）：走 `Run.Close` 正式入口；探针记录「带键批」与「仅完成屏障批」，`failed > 0` 证明关档确实到达屏障调用；`afterFailure() == 0` 证明**该失败批是关档交给引擎的最后一批**（诊断跑观测到的调用序列 `w b w w w w w b`，7 次写 + 2 次屏障，armed 失败落在最后一格）；`CheckpointFiled() != ""` 证明关档已越过检查点阶段（错误不是更早一层）；排除 `ErrCommitAfterClose`／`ErrCommitWithoutWriteRights`／`ErrJournalFrameTooLarge` 三类「写前拒绝」；失败关档后根仍可被 `WriteRights: true` 新开，且探针记下的键在该根上仍读得到（失败是派生文件的屏障，不是日志损坏）；控制臂（不 armed）答 nil 且同样取到至少一次屏障调用。
+
+### 二十七·五 未做／未证（如实）
+
+- **装配层注入点不是 OS 级 fsync**：`memory/ledger` 不导出日志／索引文件句柄，装配层只能经 `StorageConfig.Engine`（config.go:64）这一条**契约明写的注入缝**（atomic_store.go「Failure injection belongs at this seam」）在「提交／完成屏障」调用处失败，测不到真正 `Sync(2)` 的 EINVAL。真 OS 级屏障失败由 ledger 层两枚锚（`os.Pipe` 写端）负责；装配层锚的判据是「错误确实是屏障的名字、且是关档最后一批」，不外推到 syscall 层。
+- **探针答的哨兵是产品哨兵**：探针答 `ErrJournalBarrier`（`journalLog.sync` 与 `flush` 在真实失败时答的同一枚），因此 `errors.Is(err, ErrJournalBarrier)` 断言的是产品契约而不是自造名字；判据强度由「排除写前拒绝 + 最后一批 + 检查点已落 + 根已释放 + 事实仍在」五条共同保证。
+- **未跑**：`go test ./tests/... -count=1` 全树、`go test ./... -race` 全包（按派发令只跑指定面与两整包）。
+- **`comment_policy` 现状**：`scripts/comment_policy/baseline.json` 的 `counts` 为空 ⇒ 全树任何 finding 都算「超基线」，该闸今日在**本变更之前**即为红（与本叶无关，且改基线被明令禁止）。已用 `go run ./scripts/comment_policy -v -no-baseline memory assembly` 逐条核对：新增的三枚锚与其 helper（`journalBarrierStateOf`／`journalBarrierPhase`／`journalBarrierFailure`／`journalFailingBarrier`／`closeBarrierEngine`／`closeBarrierRun`／`errInjectedCloseBarrier`）**零 finding**；残留 finding 全部落在本叶写面之外的既有行（如 checkpoint_test.go:3048／3291／4178）。
+
+## 二十八、06.R5 接续记录：08.R3 退位删除后的重测、存活路径屏障判据与核销（2026-11-18）
+
+**性质**：只读取证＋重测＋判据重钉。主树**零 `.go` 写**（生产与测试文件均未改），计量与突变经 `-overlay` 注入 `/tmp/r5continue/probes/`。§一–§二十七 一字未改。
+
+### 二十八·〇 时点变化（重测前提）
+
+- **08.R3 退位机制已删除**：`rewriteInto`／`reopened(`／`restate(`／`keptHotKeys`／`RetireFacts`／`retireSettled`／`.relocate(` 全树 Go 源**零命中**（grep 实证）。即 §二十四·四 具名的「差额唯一降法①：少一次重写」**已由 08 域兑现**，本叶不必扩白名单。
+- **现行屏障面只有 5 个 `Sync()`**（`memory/ledger/journal.go`）：日志（:2233）、`flush` 的 order（:1693）与 slots（:1696）、`resetTable`（:1642）、`grow`（:1609）。改前 frame/closing 多出的 `rewrite`／`table` 道数**无载体**。
+- `flush(force)` 的零字节短路仍在树（:1687-1689）；预算常量 `journalIndexSyncBytes`／`journalLogSyncBytes`＝64 KiB（:127／:138），判定在 :1690。
+- 产物：`journalAddress.close()`（:1961-1968）→ `flush(true)`；夹具无重述步可走。
+
+### 二十八·一 正锚重测（5 跑独立进程，全绿）
+
+命令 `go test ./assembly/ -run '^TestSymptomAnchorPerGenerationCostFlatOverALongRun$' -count=1 -v`，每跑 **exit 0**（24.96s／25.36s（`ok`）／25.84s／26.48s／26.09s；252 代／窗口 5／界 13 tenths 未改）：
+
+| 跑次 | 首窗 total | 末窗 total | 末/首 | frame 首→末 | closing 首→末 |
+|---|---|---|---|---|---|
+| 1 | 81.85 | 91.13 | 1.113 | 5.05→3.91 | 14.00→13.14 |
+| 2 | 80.85 | 94.93 | 1.174 | 5.03→5.08 | 13.15→13.99 |
+| 3 | 86.77 | 89.04 | 1.026 | 4.97→3.82 | 15.07→12.22 |
+| 4 | 82.07 | 85.82 | 1.046 | 5.01→3.88 | 15.88→12.12 |
+| 5 | 75.00 | 87.83 | 1.171 | 5.11→4.10 | 13.82→12.88 |
+
+- **跑间中位**：首窗 81.85／末窗 89.04／比值 1.113。**区间**：首窗 75.00–86.77、末窗 85.82–94.93、frame 4.97–5.11→3.82–5.08、closing 13.15–15.88→12.12–13.99（单位 ms，均为窗口内五代中位）。
+- **逐阶段全平**（frame 不增反降、closing 平），没有阶段随链增长；判据是绝对读数与逐阶段窗口，**比值只如实并列、不作结论**。
+- **与 §二十四 的对照口径**：该节的「改前 147.80／262.36」与「改后 271.05–323.87」都是**退位世代**的形状（frame/closing 内嵌 `relocate→rewrite` 的整表重述）。退位删除后该带**无对应机制**，故「绝对成本回到该带」不再是可测命题；现读数**低于该带两端**（首窗 81.85 对 132–140、末窗 89.04 对 243–264），§二十四·三 记的有害方向（+3.3%…+23.5%）**消失**。
+- **不是夹具变轻**：同跑计数面 `journalLogBytes` 19619→8227792 逐代恒等于 `integrityBytesScanned`、`slotTableBytesScanned` 恒 0、`addressedValueReads` 第 2 代起恒 31，与 ORCHESTRATION-HISTORY:5167 记的绿读数逐项相同；夹具形状 `turns=1, perGeneration=1` 与 HISTORY:1338 同形。
+
+### 二十八·二 屏障道数重测（存活路径，08.R3 后）
+
+探针：`-overlay` 把 `memory/ledger/journal.go` 换成计数副本（`probeBarrierCounts`：Log／Order／Slots／Reset／Grow）＋新增 `assembly/zz_probe_r5c_test.go`（8 代，按症状锚同形逐代走，在 `Checkpoint` 与 `Close` 前后取计数差）。命令 `go test -overlay /tmp/r5continue/probes/overlay.json ./assembly/ -run '^TestProbeR5CloseFrameBarriers$' -count=1 -v` → **exit 0**。
+
+| 相位 | 道数 | 分解 | 耗时 | 8 代间 |
+|---|---|---|---|---|
+| frame（框架检查点落盘） | **1** | log=1 order=0 slots=0 | 4.68–6.09ms | 恒定 |
+| closing（`Run.Close`） | **3** | log=1 order=1 slots=1 | 12.68–15.92ms | 恒定 |
+
+- `reset=0 grow=0` 逐代：closing 的 order+slots **不是整表重述**，是最后若干次提交暂存的增量索引字节被关档强制确认（`flush(true)`），即 S1c 字节预算规则本身。
+- 对照：§二十四·一 改前 frame **7**（log=2 order=1 slots=1 rewrite=1 table=2）／closing **9**；§二十四·二 改后 frame **3**／closing **5**。现 frame **1**／closing **3** — 多出的道数随退位机制一并消失，**只剩 closing 的 order+slots 一对＝每载体一道的本征价**（§二十四·四 三案已排除「不写表头」「原地补丁」「搬到开档重述」）。
+
+### 二十八·三 判据按存活路径重出（取代已删的 `TestCheckpointAndClosePayOneIndexBarrier`）
+
+复用 06.R5.a 两锚（§二十七）**不重复造**，逐条映射本叶要的「一次检查点落盘与一次关闭各付的载体屏障」：
+
+| 判据 | 承接锚（现有、已跑） | 观察面（不新增生产计数器） |
+|---|---|---|
+| 一次提交只付日志屏障，索引字节留暂存（＝预算覆盖提交路径） | `TestCommitBarrierMeasurementNamesItsPhase/a_commit_inside_both_budgets_pays_the_logs_barrier_alone` | `unsynced==0` 且 `staged>0`／`stagedLog>0` |
+| 越过预算才付索引对 | 同锚 `a_commit_past_the_log_budget_pays_the_index_barrier_beside_it` | `staged==stagedLog==0`、`seq==1` |
+| 两索引文件的屏障各自具名失败、不提前拒绝 | 同锚两失败段＋`TestCloseBarrierFailureStaysVisible` 三段（order 管道／slots 管道／空账 nil） | `errors.Is(ErrJournalBarrier)`、排除 `ErrCommitAfterClose`／`ErrCommitWithoutWriteRights`；空账关档先陈述 owed=0 再答 nil |
+| **界可失败**（「每载体一道」的增长控制） | 待测——本轮以 overlay 突变补足，见·四 | frame 道数与耗时 |
+
+- 关档相位由 `TestCloseBarrierFailureStaysVisible` 覆盖（两个索引文件各被点名为失败点、空账关档不取屏障）；**提交相位与帧落盘相位共用同一条 `journalKV.Commit`→`journalLog.sync`→`addr.confirm`→`flush` 路径**（`assembly/checkpoint.go` 无独立屏障点），故不为「检查点落盘」再造第二枚同形锚（§〇元规则二：结构不得自证）。
+
+### 二十八·四 「每载体一道」的增长控制案（突变→红→复原→绿，实测）
+
+突变：把 `flush` 的字节预算判定去掉（索引文件凡有暂存即取屏障对），即派发令的负锚形状「预算规则不再覆盖检查点/关闭路径」。
+
+| 命令 | 退出码 | 结果 |
+|---|---|---|
+| `go test -overlay /tmp/r5continue/probes/overlay-mutant.json ./memory/ledger -run '^TestCommitBarrierMeasurementNamesItsPhase$' -count=1 -v` | **1** | 红文 `journal_test.go:3105: the commit covered the "log+index" barrier, want the log's alone: the barrier over the index files waits for its budget`；3 子测试绿、1 红，失败面精确落在预算判定 |
+| `go test -overlay /tmp/r5continue/probes/overlay-mutant-counted.json ./assembly -run '^TestProbeR5CloseFrameBarriers$' -count=1 -v` | 0 | 探针读数 frame **1→3 道**（log=1 order=1 slots=1）、耗时 **5.0→21.0–35.1ms**；closing 仍 3 道 |
+| `go test ./memory/ledger -run '^(TestCommitBarrierMeasurementNamesItsPhase|TestCloseBarrierFailureStaysVisible)$' -count=1 -v`（复原） | **0** | 两锚 PASS，`ok … 0.551s` |
+
+⇒ 「frame 只付日志屏障」这条界**能失败、失败有名字有读数**，不是恒真。
+
+### 二十八·五 归属判定与核销依据
+
+- §二十四·四 具名的两条降法：**①少一次重写＝08 域退位删除，已在树**（·〇 grep 零命中）；**②少一个载体＝§二十一 冻结载体表，不需动用**。
+- 重测后 frame/closing 的差额为 **0**（逐阶段窗口全平，绝对读数低于退位世代两端）；派发令的停报条件（剩余差额降法在白名单外）**不成立**。
+- 白名单内无残留可消除浪费：`flush` 是唯一索引屏障点、零字节短路在树、关档不重述（`reset=grow=0`）、`Reset`／`Grow` 只在重建与生长路径。故**本轮零生产改动**。
+
+### 二十八·六 命令与退出码（原始退出码，非管道退出码）
+
+| 命令 | 退出码 | 读数 |
+|---|---|---|
+| `go test ./assembly/ -run '^TestSymptomAnchorPerGenerationCostFlatOverALongRun$' -count=1 -v`（×5） | 0／0／0／0／0 | 见·一；24.96–26.48s |
+| `go test ./memory/ledger/ -count=1` | **0** | `ok … 80.136s` |
+| `go test ./assembly/ -count=1` | **0** | `ok … 317.545s` |
+| `go build ./...` | **0** | — |
+| `go vet ./memory/ledger/` | **0** | — |
+| `gofmt -l memory/ledger/{journal,journal_kv,segment_store,journal_test,segment_store_test}.go` | 空 | — |
+| `go run ./scripts/codetools tracked-hygiene` | **0** | — |
+| `go run ./scripts/comment_policy -no-baseline assembly api runtime memory features tool internal cli` | 0（测量模式） | **63 finding(s)**，其中 memory 17，全部落在 `kv_original_store_test.go`／`segment_store_test.go` 等其他叶写面（本叶零 `.go` 写，见·七） |
+
+### 二十八·七 未做／未证（如实）
+
+- `go test ./tests/... -count=1` 全树未跑（派发令只点名两整包）；`-race` 本轮未重跑（06.R5.a §二十七·二 已记 `-race -count=10` 绿）。
+- **`comment_policy` 零 findings 闸今日为红**（63 条，基线 `counts` 为空、改基线被明令禁止）：本叶未改任何 `.go`，故这些 finding 与本次重测无关，逐条未处置。
+- 探针样本是 **8 代**（与 §二十四·〇 的 8 代取样同法）；逐代恒定已示无增长，但「代数极大时的常数」未另取读。
+- 掉电窗口未测；本轮无重述路径，§二十四·六 的「宽窗口」问题随机制消失，但不因此声明掉电安全已证。
+- 正锚的读数含本机负载（同日 load 波动未标定），故并列区间与跑间中位，不单取一跑。
+
+## 二十九、06.R3.a 执行记录：旧键前驱定位的完整成本轴（2026-11-18）
+
+**性质**：计量补差，**恢复行为零改**。写面＝`assembly/read.go`（`GetParent` 成本断言归真，一行注释）、`assembly/read_test.go`（三枚新锚＋夹具 helper `commitParentFact` 提取）、本域 `design.md`／`tasks.md`。引擎零改：既有计数面 `IndexWalkReads()`（`segment_store.go:1070`）已同时覆盖两段——`indexWalkVisits` 在每次 visit **之前**累加（`:1250`／`:1286`），故「最新→目标」与「目标→前驱」两侧同计入。据此**不需新引擎接口**，未触白名单外的共享面冻结程序。零 git 写。
+
+### 二十九·一 两段成本轴（实测，固件判据）
+
+夹具 `parentOldTargetTier`：同链三事实（`chain-root`→`chain-mid`→`chain-target`，分区 11／会话 `session-chain`）先落，随后落「目标之后」的 `later-*` 背景事实（分区 10／会话 `session-history`）；**目标与前驱间距恒为 1 条目**，唯一变动量＝目标之后的历史。
+
+| 目标之后历史 | 旧目标 named | 同档最新事实 named |
+|---|---|---|
+| 16 | **18** | 2 |
+| 64 | **66** | 2 |
+| 256 | **258** | 2 |
+
+⇒ `named = 之后历史 + 2`（目标本身＋前驱），与之后历史 **1:1**；同 store 同档「最新事实」的查找恒为 **2**。两者同夹具同命令并列，故「只量后一段」的读法（恒 2）无法解释 18/66/258。
+
+**§二十六·三 该行由此改口径**（原行只写段乙，读来像「旧键常数」）：`GetParent` 成本＝**【段甲】**最新记录→目标键的提交数（＝目标之后的历史）＋**【段乙】**目标键→同链更旧首条目的提交数（跨分区、跨会话被跳过的条目都算）。**段甲随「目标之后的历史」线性**，是旧键定位的真实成本；§二十六·三／·四「不随前驱之后（更旧）的历史增长」仍成立且仅覆盖段乙。
+
+### 二十九·二 原生成本 vs 可消除扫描（独立审查用）
+
+- **段甲＝现布局本征**。引擎只声明「从最新提交倒走」的序（`CommitOrder`／`indexKeyOrder` → `journal_kv.go:279` `eachCommittedNewestFirst` → `log.eachKeyNewestFirst`），**无按键位置起点**的可寻址走查；可寻址点读（`{pid}:idx:{key}`，`segment_store.go:543`）能 O(分区数) 答出目标自身的位点与会话，但**更旧条目只能从最新倒走才可达**，故点读不能消去段甲。修复面仍是 §二十六·四 登记的「引擎按起点寻址」，超本叶白名单，未动。
+- **段乙＝不可消**：隔离要求把跨分区／跨会话的条目走过，跳过的条目都在账上（负锚 named=5＝目标＋三条被跳过＋前驱）。
+- **可消除但本叶未取**：索引不带会话的回退 `parentFromBodies`（`read.go:325`）在快路已定位到键之后**再从最新倒走一遍**（`read.go:343`），段甲因此付**两次**。一次性 overlay 探针（**未入树**，夹具可重建）：目标身后 64 条新历史时回退 named=**132**（＝2×64＋4），同形状快路 named=**69**；树内负锚的同路径读数为 `fallback-lookup-named=4`（该夹具无更旧历史，故只有 1＋3 两段可见）。**不改理由**：只影响索引不带会话的旧形状，且合并两趟走查要重排快路与回退的边界，未见第二个使用方要求；登记为后续可修项，由审批决定是否立叶。
+- **链根无前驱**：本征整读（§二十六·三 原行保持，未改）。
+
+### 二十九·三 三锚（原始退出码，非管道退出码）
+
+| 命令 | 退出码 | 读数 |
+|---|---|---|
+| `go test ./assembly -run '^(TestParentLookupCountsTheSearchBeforeTheTarget\|TestParentLookupKeepsSessionIsolation)$' -count=10 -v` | **0** | 20 PASS；18/66/258 与 named=5、fallback=4 逐跑复现 |
+| `go test ./assembly -run '^TestRecallTraceThroughTierCountsOldTargetLookup$' -count=10 -v` | **0** | 10 PASS；旧目标 named=**398**，最新 named=**2** |
+| `go test ./assembly -run '^(TestTierParentSurvivesDurableReopen\|TestRecallPortLateBindsParentReader)$' -count=10 -v` | **0** | 20 PASS（101.078s） |
+| `go test ./tool/recall -run '^TestTraceOfDepthDPaysDLocalLookupsNotDHistoryWalks$' -count=10 -v` | **0** | 10 PASS |
+| `go test ./assembly -count=1` | **0** | `ok … 337.185s`，零具名红 |
+| `go build ./...`／`go vet ./assembly ./tool/recall ./memory/ledger`／`gofmt -l assembly tool/recall memory/ledger` | **0**／**0**／空 | — |
+
+**可红演示（overlay 突变，主树零改，原始退出码 1）**：
+
+- 只量后一段（`segment_store.go` 的 `indexWalkVisits` 改为仅 visit 答 false 时累加）：正锚 exit **1**，红文 `beside 16 facts newer than the target the lookup named 1 index entries and the newest lookup named 1, want 18 and 2`；消费者锚 exit **1**，红文 `the old target's walk of three steps named 2 index entries beside 128 facts newer than it, want 398`。
+- 跨会话合并（`read.go` 去掉 `sess != session` 判据）：负锚 exit **1**，红文 `the lookup joined "iso-b2" to iso-a2: a foreign session of its own partition or a foreign partition of its own session is never the parent`。
+
+### 二十九·四 消费者锚：正式 recall_trace ＋ 真实 Tier
+
+- **路径与生产同构**：`NewRecallPort(nil)` → `Bind(run)` → `port.Reads()`（`reads.Table=port`）→ `recall.New(reads, memory.PartitionsOf("agent-a", nil))` → 取 `recall.TraceToolName` → `Call`，与 `hostDocument.toolsFor`（`host_document.go:775-782`）同一构造。**未用替身恒定 `GetParent`**（`tool/recall` 的 `TestTraceOfDepthDPaysDLocalLookupsNotDHistoryWalks` 用恒等替身，只量工具层，本叶不据此放行引擎成本）。
+- **读数**：Tier＝`StorageLocalFile` 真实根；history=128、链 3 条、另有 2 条同分区更新事实 ⇒ 三步走查 named=**398**＝3×(128+2)+8（每步都付段甲，第一步另付目标＋前驱 2 条，其后两步各 3 条）；同一 store 的最新事实一次 step named=**2**。**D=3 而 visits=398**，即工具层「D 次本地查找」与引擎完整成本是两个数，前者不能冒充后者。
+- 答案面同时校验：`count=3`、`complete=true`、`items` 逐项＝`old-target`→`old-mid`→`old-root`（走查跟链不跟周围历史）。
+
+### 二十九·五 未做／未证（如实）
+
+- `-race` 本叶未跑（三锚均无并发共享态；负锚的 4 与正锚的 18/66/258 为确定性计数）。
+- 段甲的消除（引擎按起点寻址）**未原型、未计量**，只登记修复面。
+- 回退「段甲付两次」的树内读数是对应夹具形状的（无更旧历史）；132 那个数来自一次性 overlay 探针，**未入树、不可由树内命令复跑**。
+- `gofmt`／`vet` 只覆盖三个被读包；`go test ./tool/...` 全包未跑，只跑 `./tool/recall` 单锚（派发令点名面）。

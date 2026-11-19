@@ -128,8 +128,8 @@ func TestRestoreRefusesChainWithoutSpec(t *testing.T) {
 		if err != nil {
 			t.Fatalf("open the fixture tier: %v", err)
 		}
-		fixture, err := state.NewDurableCommit(ledger.TierFactLog(tier), nil)
-		if err != nil {
+		fixture := state.NewEmptyDurableCommit(ledger.TierFactLog(tier), nil)
+		if err := fixture.Seat(ctx, nil, nil); err != nil {
 			t.Fatalf("build the fixture chain: %v", err)
 		}
 		if result, err := fixture.Commit(ctx, task.CommitRecord{

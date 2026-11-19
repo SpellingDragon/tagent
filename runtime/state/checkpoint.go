@@ -68,6 +68,19 @@ type reducer interface {
 	Reduce(ctx context.Context, evt event.Event) error
 }
 
+// repeatReducer is the derivation face of a holder whose idempotence rests on the
+// identity standing where it was folded: a holder that states a sequence and drops
+// the identity of the material a rewrite moves out of it reads one identity reaching
+// it twice as new material and states it a second time, so the seam tells it which
+// fact repeats one the chain already carries. The commit classifies the fact — one
+// the live ledger or the storage tier already holds is a repeat — and a holder that
+// declares no such face is folded either way, because its fold keeps nothing the
+// identity of a dropped entry would answer for.
+type repeatReducer interface {
+	// ReduceRepeat folds one fact the chain already carries into the holder's state.
+	ReduceRepeat(ctx context.Context, evt event.Event) error
+}
+
 // emitter is the declaration face of a holder that also drives observation: the
 // consumer seats its state through Reduce and starts work of its own — a send, a
 // fold, a follow-up turn — beside it. The declaration is what keeps the two apart:
@@ -100,6 +113,17 @@ type sessionSnapshotter interface {
 	SnapshotSessionState(ctx context.Context, session event.SessionID) ([]byte, error)
 }
 
+// unfinishedWork is the declaration face of a holder that keeps work its snapshot
+// does not state back: obligations no committed fact records, which a slice leaving
+// the registry would lose. The count is the holder's own business — the registry
+// never reads what the items are, only how many the unmount would lose — and a
+// holder that declares no such face is asked nothing, because the registry reads no
+// account a holder did not open.
+type unfinishedWork interface {
+	// UnfinishedWork reports how many obligations leaving the registry would lose.
+	UnfinishedWork() int
+}
+
 // StateRegistry is the ordered account of the state holders mounted on one
 // runtime. The order is the registration order, never map iteration, so the same
 // wiring aggregates the same slice order and a checkpoint renders the same bytes
@@ -128,8 +152,11 @@ func NewStateRegistry() *StateRegistry {
 // Register mounts one holder and answers the disposer that unmounts it. A holder
 // naming no state and a name already mounted refuse the registration by name, so
 // a wiring mistake stops the assembly instead of silently overwriting a slice
-// another consumer owns.
-func (r *StateRegistry) Register(holder Stateful) (func(), error) {
+// another consumer owns. The disposer refuses by name while the holder declares
+// unfinished work: the obligations are the slice's own, and unmounting it would
+// state them nowhere, so the holder keeps the name, the state and the accounts
+// until it settles. A slice that owes nothing leaves as it registered.
+func (r *StateRegistry) Register(holder Stateful) (func() error, error) {
 	if r == nil {
 		return nil, errors.New("state: the registry is nil")
 	}
@@ -170,20 +197,32 @@ func (r *StateRegistry) Register(holder Stateful) (func(), error) {
 			}
 		}
 	}
-	return func() {
+	return func() error {
+		r.mu.Lock()
+		held, mounted := r.holders[name]
+		r.mu.Unlock()
+		if !mounted {
+			return nil
+		}
+		if owes, declares := held.(unfinishedWork); declares {
+			if count := owes.UnfinishedWork(); count > 0 {
+				return fmt.Errorf("state: refuse to unmount the %q state slice: %d unfinished obligation(s) would be lost", name, count)
+			}
+		}
 		r.mu.Lock()
 		defer r.mu.Unlock()
-		if _, held := r.holders[name]; !held {
-			return
+		if _, still := r.holders[name]; !still {
+			return nil
 		}
 		delete(r.holders, name)
 		kept := r.names[:0]
-		for _, held := range r.names {
-			if held != name {
-				kept = append(kept, held)
+		for _, mounted := range r.names {
+			if mounted != name {
+				kept = append(kept, mounted)
 			}
 		}
 		r.names = kept
+		return nil
 	}, nil
 }
 
@@ -213,8 +252,29 @@ func (r *StateRegistry) mounted() []Stateful {
 // that derives its state from facts, in registration order, and answers the first
 // refusal by the holder that made it. An unapplied fact prevents a checkpoint of
 // its state until a later successful pass over that identity resolves the refusal.
-// Holders without a reducer face are not asked; no observation driver is invoked.
+// A pass clears only the refusal it read when it began, so a refusal recorded
+// during that pass stands. Holders without a reducer face are not asked; no
+// observation driver is invoked.
 func (r *StateRegistry) Reduce(ctx context.Context, evt event.Event) error {
+	return r.fold(ctx, evt, false)
+}
+
+// ReduceRepeat folds one fact the chain already carries into the derived state of
+// every mounted holder, under the same order and the same refusal account Reduce
+// keeps. A holder that declares the repeat face is told the fact repeats one the
+// chain holds, so a sequence is not asked to state an identity twice; every other
+// holder is folded as a filing commit folds it, because a fold idempotent by the
+// identity the fact carries answers the same state either way.
+func (r *StateRegistry) ReduceRepeat(ctx context.Context, evt event.Event) error {
+	return r.fold(ctx, evt, true)
+}
+
+// fold drives one pass over the mounted holders, stating which of the two commits
+// the fact is: one the ledger files, or one repeating a fact the chain already
+// carries. The refusal account is the pass's own: a fact that landed in every
+// holder clears the identity, and a fact a holder refused keeps it until a later
+// pass resolves it.
+func (r *StateRegistry) fold(ctx context.Context, evt event.Event, repeat bool) error {
 	if r == nil {
 		return nil
 	}
@@ -222,7 +282,7 @@ func (r *StateRegistry) Reduce(ctx context.Context, evt event.Event) error {
 	prior := r.unapplied[evt.Key]
 	r.mu.Unlock()
 	for _, holder := range r.mounted() {
-		if err := reduceInto(ctx, holder, evt); err != nil {
+		if err := reduceInto(ctx, holder, evt, repeat); err != nil {
 			refused := fmt.Errorf("state: fold the fact %s into the %q state slice: %w", evt.Key, holder.StateName(), err)
 			r.mu.Lock()
 			if r.unapplied == nil {
@@ -234,7 +294,6 @@ func (r *StateRegistry) Reduce(ctx context.Context, evt event.Event) error {
 		}
 	}
 	r.mu.Lock()
-	// A successful pass cannot clear a refusal recorded after that pass began.
 	if r.unapplied[evt.Key] == prior {
 		delete(r.unapplied, evt.Key)
 	}
@@ -244,8 +303,15 @@ func (r *StateRegistry) Reduce(ctx context.Context, evt event.Event) error {
 
 // reduceInto folds one fact into one holder when that holder derives its state
 // from facts. The read is a type assertion on the declaration, never a table of
-// consumer names: a holder that states an account of its own answers nothing.
-func reduceInto(ctx context.Context, holder Stateful, evt event.Event) error {
+// consumer names: a holder that states an account of its own answers nothing. A
+// repeat reaches the holder through the face it declared for it, and a holder
+// declaring none is folded by the one derivation it states.
+func reduceInto(ctx context.Context, holder Stateful, evt event.Event, repeat bool) error {
+	if repeat {
+		if told, declared := holder.(repeatReducer); declared {
+			return told.ReduceRepeat(ctx, evt)
+		}
+	}
 	derives, declared := holder.(reducer)
 	if !declared {
 		return nil

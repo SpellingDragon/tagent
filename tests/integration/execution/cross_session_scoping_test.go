@@ -243,21 +243,20 @@ func TestCrossSessionContentIsRefused(t *testing.T) {
 	ctx := context.Background()
 	const alphaContent = "alpha-only fact: the private material of session alpha"
 	alpha := replay.ChainKey{PartitionID: 1, SessionID: "session-alpha"}
-	chain := replay.NewMemoryEventChain()
-	if err := chain.Commit(ctx, replay.ChainFact{
+	alphaFact := replay.ChainFact{
 		Key:     event.EventID("a-0001"),
 		Chain:   alpha,
 		Type:    event.TypeExternalInput,
 		Summary: "alpha asks",
 		Content: alphaContent,
 		Time:    time.Now(),
-	}); err != nil {
+	}
+	chain := replay.NewMemoryEventChain()
+	if err := chain.Commit(ctx, alphaFact); err != nil {
 		t.Fatalf("commit the alpha fact: %v", err)
 	}
 	projection := replay.NewReplayProjection()
-	if _, err := replay.RebuildProjectionFromWAL(ctx, projection, chain, &replay.MemoryRelations{}, alpha, replay.RebuildOptions{}); err != nil {
-		t.Fatalf("rebuild the alpha chain: %v", err)
-	}
+	projection.Append(ctx, replay.ProjectionEntry{Key: alphaFact.Key, Type: alphaFact.Type, Summary: alphaFact.Summary, Content: alphaFact.Content, Time: alphaFact.Time})
 
 	provider := &convModel{name: "model-a", answer: func(*model.Request) *model.Response {
 		return convFinalTurn("answered")

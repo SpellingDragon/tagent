@@ -413,3 +413,167 @@ func TestSettlementFailureIsReportedBeforeDelivery(t *testing.T) {
 		t.Fatalf("settlement failure reports = %q, want one line naming task %s and the uncommitted settlement", lines, taskID)
 	}
 }
+
+// TestConsumptionFailureKeepsTheNoticeOwed pins the notification a refused consumption leaves behind.
+//   - positive: after the mailbox write fails and after a flush the target never answers, the task still owes one delivery obligation
+//   - positive: the identity it owes is the one notification the settlement committed, the same four parts handed over again rather than replaced by a new one
+//   - positive: the reason is named beside that identity, so a caller reads which notification could not be consumed and why
+//   - negative: the same fixture answers the next flush with the target's acceptance and the obligation closes
+//   - negative: so the identity the two unanswered handoffs carried is the notice itself and not an entry a second attempt opened
+//   - consumer: Wrapper.execute for the failed write and MemoryManager.Flush for the retry, the two faces a committed result travels
+//
+// 契约: docs/wiki/reliability/durable-delivery.md#envelope-states
+func TestConsumptionFailureKeepsTheNoticeOwed(t *testing.T) {
+	ctx := context.Background()
+	observer := &consumeFailureLog{}
+	original := trpclog.Default
+	trpclog.Default = observer
+	t.Cleanup(func() { trpclog.Default = original })
+
+	registry, commit := invariantRegistry(t)
+	refused := errors.New("the mailbox of the target refused the notification")
+	silent := errors.New("the target of the notification did not answer")
+
+	var mu sync.Mutex
+	var handed []Notice
+	unanswered := 0
+	deliver := Deliverer(func(_ context.Context, notice Notice) (DeliveryAcceptance, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		handed = append(handed, notice)
+		if unanswered > 0 {
+			unanswered--
+			return DeliveryPending, silent
+		}
+		return DeliveryAccepted, nil
+	})
+	manager := NewMemoryManager(registry, deliver)
+	taskID := invariantRegister(t, registry, "call-notice-stays-owed", "dedup-notice-stays-owed")
+
+	var sinkMu sync.Mutex
+	var wrote []Notice
+	wrapper := Wrap(manager, &taskToolStub{name: "plan_update"},
+		WithResultRecorder(func(_ context.Context, result Result) (event.EventID, error) {
+			return event.EventID("result:" + result.CallID), nil
+		}),
+		WithMailbox(func(_ context.Context, notice Notice) error {
+			sinkMu.Lock()
+			wrote = append(wrote, notice)
+			sinkMu.Unlock()
+			return refused
+		}))
+	frame := CallFrame{
+		Identity:  CallIdentity{InstanceID: "instance-a", InvocationID: "invocation-1", DecisionID: "decision-1", CallID: "call-notice-stays-owed"},
+		Address:   invariantTaskAddress,
+		Execution: Serialization("session-serialized"),
+	}
+	wrapper.execute(WithCallFrame(ctx, frame), frame, taskID, "plan_update", []byte(`{}`))
+
+	sinkMu.Lock()
+	written := append([]Notice(nil), wrote...)
+	sinkMu.Unlock()
+	if len(written) != 1 {
+		t.Fatalf("the mailbox sink was called %d time(s), want one failed write (a write that never happened proves nothing about the notice it kept)", len(written))
+	}
+	owed := written[0]
+
+	before, err := manager.Obligations(ctx, taskID)
+	if err != nil {
+		t.Fatalf("read the obligations of %s after the failed write: %v", taskID, err)
+	}
+	delivery := deliveryObligationOf(t, before, owed)
+	if delivery.Notice != owed {
+		t.Fatalf("the obligation after the failed write points at %+v, want the notice the mailbox refused %+v", delivery.Notice, owed)
+	}
+
+	unanswered = 1
+	if err := manager.Flush(ctx, taskID); err != nil {
+		t.Fatalf("flush %s beside its unanswered delivery: %v", taskID, err)
+	}
+	mu.Lock()
+	flushed := append([]Notice(nil), handed...)
+	mu.Unlock()
+	if len(flushed) != 1 {
+		t.Fatalf("the deliverer saw %d notification(s) on the unanswered flush, want the one the task owes", len(flushed))
+	}
+	if flushed[0] != owed {
+		t.Fatalf("the unanswered flush handed over %+v, want the notice the failed write kept owed %+v", flushed[0], owed)
+	}
+	blocked, err := manager.Obligations(ctx, taskID)
+	if err != nil {
+		t.Fatalf("read the obligations of %s after the unanswered flush: %v", taskID, err)
+	}
+	if _, held := openDeliveryOf(blocked, owed); !held {
+		t.Fatalf("the task owes %+v after the unanswered flush, want the delivery of %+v still open", blocked.Open, owed)
+	}
+	named := false
+	for _, entry := range blocked.Blocked {
+		if entry.Notice == owed && strings.Contains(entry.Reason, silent.Error()) {
+			named = true
+		}
+	}
+	if !named {
+		t.Fatalf("the unanswered flush recorded %+v, want %q named beside the notice %+v", blocked.Blocked, silent, owed)
+	}
+
+	if err := manager.Flush(ctx, taskID); err != nil {
+		t.Fatalf("flush %s beside an accepting target: %v", taskID, err)
+	}
+	mu.Lock()
+	accepted := append([]Notice(nil), handed...)
+	mu.Unlock()
+	if len(accepted) != 2 {
+		t.Fatalf("the deliverer saw %d notification(s) across the two flushes, want the one owed notification handed over twice", len(accepted))
+	}
+	if accepted[1] != owed {
+		t.Fatalf("the accepting flush handed over %+v, want the same notification identity %+v", accepted[1], owed)
+	}
+	settled, err := manager.Obligations(ctx, taskID)
+	if err != nil {
+		t.Fatalf("read the obligations of %s after the accepted flush: %v", taskID, err)
+	}
+	if _, held := openDeliveryOf(settled, owed); held {
+		t.Fatalf("the task still owes the delivery of %+v after the target accepted it: %+v", owed, settled.Open)
+	}
+
+	settlements := 0
+	for _, fact := range commit.Facts(taskID) {
+		if fact.Status == StatusSettled {
+			settlements++
+		}
+	}
+	if settlements != 1 {
+		t.Fatalf("the commit port holds %d settled fact(s), want the one settlement the three handoffs answer", settlements)
+	}
+	reported := false
+	for _, line := range observer.lines() {
+		if strings.Contains(line, string(taskID)) && strings.Contains(line, refused.Error()) {
+			reported = true
+		}
+	}
+	if !reported {
+		t.Fatalf("the failed mailbox write of task %s was reported by no line: %d error line(s) recorded, none naming the task and the refusal", taskID, len(observer.lines()))
+	}
+}
+
+// deliveryObligationOf reports the open delivery obligation of one notification
+// and fails when the report holds none: an obligation the task has settled
+// answers nothing about the notice it kept.
+func deliveryObligationOf(t *testing.T, report Obligations, notice Notice) Obligation {
+	t.Helper()
+	held, ok := openDeliveryOf(report, notice)
+	if !ok {
+		t.Fatalf("the task owes %+v, want the delivery obligation of %+v still open", report.Open, notice)
+	}
+	return held
+}
+
+// openDeliveryOf reports the open delivery obligation of one notification.
+func openDeliveryOf(report Obligations, notice Notice) (Obligation, bool) {
+	for _, entry := range report.Open {
+		if entry.Kind == ObligationAwaitingDelivery && entry.Notice == notice {
+			return entry, true
+		}
+	}
+	return Obligation{}, false
+}

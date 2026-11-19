@@ -24,6 +24,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 )
 
 // ErrJournalCorrupt reports a frame that is fully present in the log and does
@@ -218,6 +219,13 @@ type journalLog struct {
 	// index replay reads the window past the watermark, the integrity pass reads the
 	// log whole, and a boot pays both.
 	integrityBytes int64
+	// integrityBegin and integrityEnd are the two clock reads the open took around
+	// that pass: the read before the verification of the log starts and the read the
+	// moment it answered. They are set once at open and never move, and they stay
+	// zero beside a view that ran no verification pass, which is a pass that did not
+	// happen rather than a pass of no duration.
+	integrityBegin time.Time
+	integrityEnd   time.Time
 	// tornTail is the byte the last frame of the log starts at when that frame is not
 	// whole, and zero beside a log whose frames are whole. A read view serves the
 	// complete frames and names the byte it stopped at instead of cutting the bytes
@@ -540,7 +548,10 @@ func journalPayloadOf(frame []byte) ([]byte, error) {
 // torn tail: they are what a writer left when it stopped mid-frame, and the offset
 // answered is where they start. A frame that is fully present and fails its
 // checksum is not a torn tail, so the replay stops with the named corruption
-// instead of dropping the records behind it.
+// instead of dropping the records behind it. A frame header of zero states no
+// payload and no checksum, which no commit writes, so the zeros a stopped
+// writer leaves past its last frame end the replay as a torn tail at that
+// offset, and a log resuming past such zeros is the named corruption.
 //
 // - The frames are read through one sequential buffered reader and one payload buffer, so a log of any size costs one read per buffer instead of two reads and one allocation per frame.
 //   - The payload handed to visit is valid for that visit alone: the buffer it points into is reused by the next frame.
@@ -557,6 +568,16 @@ func journalReplay(file *os.File, from, size int64, visit func(payload []byte, a
 			return 0, fmt.Errorf("%w: %s: %w", ErrJournalCorrupt, file.Name(), err)
 		}
 		length := int(binary.BigEndian.Uint32(header[0:4]))
+		if length == 0 && binary.BigEndian.Uint32(header[4:8]) == 0 {
+			zero, err := journalRestStatesZeroBytes(reader)
+			if err != nil {
+				return 0, fmt.Errorf("%w: %s: %w", ErrJournalCorrupt, file.Name(), err)
+			}
+			if zero {
+				return offset, nil
+			}
+			return 0, fmt.Errorf("%w: frame at offset %d carries no payload", ErrJournalCorrupt, offset)
+		}
 		if length > journalMaxFrameBytes || size-offset-journalFrameHeaderBytes < int64(length) {
 			return offset, nil
 		}
@@ -576,6 +597,26 @@ func journalReplay(file *os.File, from, size int64, visit func(payload []byte, a
 		offset += journalFrameHeaderBytes + int64(length)
 	}
 	return offset, nil
+}
+
+// journalRestStatesZeroBytes reports whether the bytes left in reader are all
+// zero, the fill a stopped writer leaves past its last committed frame.
+func journalRestStatesZeroBytes(reader io.Reader) (bool, error) {
+	buffer := make([]byte, journalReplayBufferBytes)
+	for {
+		read, err := reader.Read(buffer)
+		for _, b := range buffer[:read] {
+			if b != 0 {
+				return false, nil
+			}
+		}
+		if errors.Is(err, io.EOF) {
+			return true, nil
+		}
+		if err != nil {
+			return false, err
+		}
+	}
 }
 
 // openJournalLog opens the journal of one directory as the view that holds its write
@@ -628,11 +669,13 @@ func openJournalLogFace(dir string, writeRights bool) (*journalLog, error) {
 	if watermark, stated := journalStatedWatermark(dir); stated && watermark <= size {
 		from = watermark
 	}
+	integrityBegin := time.Now()
 	complete, err := journalReplay(file, 0, size, func([]byte, int64) error { return nil })
 	if err != nil {
 		file.Close()
 		return nil, err
 	}
+	integrityEnd := time.Now()
 	if complete != size {
 		log.torn, log.tornTail = true, complete
 		if writeRights {
@@ -644,6 +687,7 @@ func openJournalLogFace(dir string, writeRights bool) (*journalLog, error) {
 	}
 	log.size = complete
 	log.integrityBytes = complete
+	log.integrityBegin, log.integrityEnd = integrityBegin, integrityEnd
 	log.openBytes = size - from
 	if err := log.openAddressIndex(writeRights); err != nil {
 		file.Close()
@@ -943,6 +987,36 @@ type journalAddress struct {
 	// statement rebuilds the index files from the log instead of appending beside a
 	// half-stated line.
 	broken bool
+	// passes counts the address-table maintenance passes this index opened, one per
+	// pass, and passRecords holds the pair of clock reads each pass took beside the
+	// call that ran it. The count is written where a pass opens and the record where
+	// it closes, so a reader states that a pass happened from the count and reads the
+	// span it took from the record.
+	passes      int
+	passRecords []journalAddressPass
+}
+
+// journalAddressPass is one maintenance pass of the address table as the call that
+// ran it states it: the pass, the caller's account of what it was doing, and the two
+// clock reads that call took around the pass.
+type journalAddressPass struct {
+	pass   string
+	parent string
+	begin  time.Time
+	end    time.Time
+}
+
+// openPass opens one maintenance pass of the address table and answers the function
+// that closes it. The call that runs the pass names it and names what it was doing
+// around it, so the pass states its own endpoints and the stage it nests inside.
+func (a *journalAddress) openPass(pass, parent string) func() {
+	a.passes++
+	begin := time.Now()
+	return func() {
+		a.passRecords = append(a.passRecords, journalAddressPass{
+			pass: pass, parent: parent, begin: begin, end: time.Now(),
+		})
+	}
 }
 
 // openJournalAddress opens the addressable index of one log and brings its
@@ -979,7 +1053,7 @@ func openJournalAddress(log *journalLog) (*journalAddress, error) {
 			ErrJournalCorrupt, log.path, log.size, header.ValuesSize)
 	}
 	if !stated || header.OrderSize > orderSize {
-		if err := a.rebuild(); err != nil {
+		if err := a.rebuildFrom("open"); err != nil {
 			a.closeIndex()
 			return nil, err
 		}
@@ -994,7 +1068,7 @@ func openJournalAddress(log *journalLog) (*journalAddress, error) {
 		}
 	}
 	if a.valuesSize < log.size {
-		if err := a.derive(a.valuesSize, false); err != nil {
+		if err := a.derive(a.valuesSize, false, "open"); err != nil {
 			a.closeIndex()
 			return nil, err
 		}
@@ -1162,7 +1236,7 @@ func (a *journalAddress) orderBytes() (int64, error) {
 // trust: a header written before this build, a header torn by a stop, a record the
 // table cannot place and a header whose order statements were lost all take this
 // one path.
-func (a *journalAddress) rebuild() error {
+func (a *journalAddress) rebuild(parent string) error {
 	if err := a.order.Truncate(0); err != nil {
 		return fmt.Errorf("tagent: discard the order file of %s: %w", a.log.dir, err)
 	}
@@ -1170,7 +1244,16 @@ func (a *journalAddress) rebuild() error {
 	if err := a.resetTable(journalSlotCapacity, journalSlotStride); err != nil {
 		return err
 	}
-	return a.derive(0, true)
+	return a.derive(0, true, parent)
+}
+
+// rebuildFrom runs one rebuild of the address table as the call that asked for it
+// states what it was doing, so the pass records its own pair of clock reads beside
+// the account of the caller rather than under a name no caller stated.
+func (a *journalAddress) rebuildFrom(parent string) error {
+	closed := a.openPass("rebuild", parent)
+	defer closed()
+	return a.rebuild(parent)
 }
 
 // derive states every commit of the log from the given byte on: one order line and
@@ -1178,7 +1261,7 @@ func (a *journalAddress) rebuild() error {
 // cut by the open that read the log before this runs, so the span it is given holds
 // whole frames alone. The statements already on disk past from are discarded by the
 // caller, so a derived index file never merges with the one it replaces.
-func (a *journalAddress) derive(from int64, rewrite bool) error {
+func (a *journalAddress) derive(from int64, rewrite bool, parent string) error {
 	if rewrite {
 		if err := a.order.Truncate(0); err != nil {
 			return fmt.Errorf("tagent: discard the order file of %s: %w", a.log.dir, err)
@@ -1193,7 +1276,7 @@ func (a *journalAddress) derive(from int64, rewrite bool) error {
 		if spans.version != journalFormatVersion {
 			return fmt.Errorf("%w: record version %d", ErrJournalFormat, spans.version)
 		}
-		return a.state(spans, at+int64(len(payload)))
+		return a.state(spans, at+int64(len(payload)), parent)
 	})
 	if err != nil {
 		return err
@@ -1226,11 +1309,11 @@ func (a *journalAddress) confirm() error {
 	if a.broken {
 		a.pending = a.pending[:0]
 		a.broken = false
-		return a.rebuild()
+		return a.rebuildFrom("commit")
 	}
 	seq, valuesSize, orderSize := a.seq, a.valuesSize, a.orderSize
 	for _, commit := range a.pending {
-		if err := a.state(commit.spans, commit.valuesEnd); err != nil {
+		if err := a.state(commit.spans, commit.valuesEnd, "commit"); err != nil {
 			a.rollback(seq, valuesSize, orderSize)
 			return err
 		}
@@ -1260,8 +1343,8 @@ func (a *journalAddress) rollback(seq, valuesSize, orderSize int64) {
 // state appends one commit's order line and states the slot record of every key it
 // names, so the index files move by the keys of that commit and never by the history
 // behind it.
-func (a *journalAddress) state(spans journalSpans, valuesEnd int64) error {
-	return a.fileCommit(orderStatementOf(a.seq+1, valuesEnd, spans))
+func (a *journalAddress) state(spans journalSpans, valuesEnd int64, parent string) error {
+	return a.fileCommit(orderStatementOf(a.seq+1, valuesEnd, spans), parent)
 }
 
 // orderStatementOf answers one commit as the order file states it: the rank that
@@ -1319,7 +1402,7 @@ func journalOrderStatementOfLine(line []byte) (journalOrderStatement, error) {
 // fileCommit appends one commit's order line and states the slot record of every key
 // it names, so the index files move by the keys of that commit and never by the
 // history behind it.
-func (a *journalAddress) fileCommit(statement journalOrderStatement) error {
+func (a *journalAddress) fileCommit(statement journalOrderStatement, parent string) error {
 	line, err := journalOrderLine(statement)
 	if err != nil {
 		return fmt.Errorf("tagent: state the commit of %s: %w", a.log.dir, err)
@@ -1330,13 +1413,13 @@ func (a *journalAddress) fileCommit(statement journalOrderStatement) error {
 	a.orderSize += int64(len(line))
 	a.staged += int64(len(line))
 	for _, put := range statement.Puts {
-		if err := a.file(put.Key, journalSlotHeld, put.journalAddressSpan); err != nil {
+		if err := a.file(put.Key, journalSlotHeld, put.journalAddressSpan, parent); err != nil {
 			return err
 		}
 		a.staged += a.stride
 	}
 	for _, key := range statement.Deletes {
-		if err := a.file(key, journalSlotAbsent, journalAddressSpan{}); err != nil {
+		if err := a.file(key, journalSlotAbsent, journalAddressSpan{}, parent); err != nil {
 			return err
 		}
 		a.staged += a.stride
@@ -1350,15 +1433,15 @@ func (a *journalAddress) fileCommit(statement journalOrderStatement) error {
 // probe chain that holds that key or is empty. A key the table already addresses is
 // replaced in place, which is what a later commit of the same identity is, and a key
 // a commit deletes is stated absent so the chain it sits inside stays walkable.
-func (a *journalAddress) file(key string, state uint8, span journalAddressSpan) error {
-	err := a.fileOnce(key, state, span)
+func (a *journalAddress) file(key string, state uint8, span journalAddressSpan, parent string) error {
+	err := a.fileOnce(key, state, span, parent)
 	if !errors.Is(err, errSlotUnplaceable) || !a.statesIndexFiles() {
 		return err
 	}
-	if rebuildErr := a.rebuild(); rebuildErr != nil {
+	if rebuildErr := a.rebuildFrom(parent); rebuildErr != nil {
 		return rebuildErr
 	}
-	return a.fileOnce(key, state, span)
+	return a.fileOnce(key, state, span, parent)
 }
 
 // statesIndexFiles reports whether this view states the index files of its log: a
@@ -1370,18 +1453,18 @@ func (a *journalAddress) statesIndexFiles() bool {
 
 // fileOnce states one key's record in the table as it reads, which is what the
 // repair of file retries after the table is stated again.
-func (a *journalAddress) fileOnce(key string, state uint8, span journalAddressSpan) error {
+func (a *journalAddress) fileOnce(key string, state uint8, span journalAddressSpan, parent string) error {
 	if int64(len(key)) > a.stride-journalSlotRecordHeaderBytes {
 		stride := a.stride
 		for int64(len(key)) > stride-journalSlotRecordHeaderBytes {
 			stride *= 2
 		}
-		if err := a.grow(a.capacity, stride); err != nil {
+		if err := a.grow(a.capacity, stride, parent); err != nil {
 			return err
 		}
 	}
 	if a.used*100 >= a.capacity*journalSlotLoadPercent {
-		if err := a.grow(a.capacity*2, a.stride); err != nil {
+		if err := a.grow(a.capacity*2, a.stride, parent); err != nil {
 			return err
 		}
 	}
@@ -1446,7 +1529,7 @@ func (a *journalAddress) lookup(key string) (journalAddressSpan, bool, error) {
 	if !errors.Is(err, errSlotUnplaceable) || !a.statesIndexFiles() {
 		return span, held, err
 	}
-	if rebuildErr := a.rebuild(); rebuildErr != nil {
+	if rebuildErr := a.rebuildFrom("read"); rebuildErr != nil {
 		return journalAddressSpan{}, false, rebuildErr
 	}
 	return a.lookupOnce(key)
@@ -1541,7 +1624,7 @@ func (a *journalAddress) eachRecord(visit func(state uint8, key string, span jou
 	if !errors.Is(err, errSlotUnplaceable) || !a.statesIndexFiles() {
 		return err
 	}
-	if rebuildErr := a.rebuild(); rebuildErr != nil {
+	if rebuildErr := a.rebuildFrom("read"); rebuildErr != nil {
 		return rebuildErr
 	}
 	return a.eachRecordOnce(visit)
@@ -1575,7 +1658,9 @@ func (a *journalAddress) eachRecordOnce(visit func(state uint8, key string, span
 // renamed over the table: a table that could not state a key's whole name, or one
 // that filled, is replaced by a wider one instead of half rewritten, so a stop
 // during the pass leaves the table it started with.
-func (a *journalAddress) grow(capacity, stride int64) error {
+func (a *journalAddress) grow(capacity, stride int64, parent string) error {
+	closed := a.openPass("grow", parent)
+	defer closed()
 	staged := a.slotsPath + journalAddressStageSuffix
 	file, err := os.OpenFile(staged, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0o600)
 	if err != nil {
@@ -1630,6 +1715,8 @@ func (a *journalAddress) grow(capacity, stride int64) error {
 // the header states the watermark, so a header never names a table that a stop can
 // empty: every slot reads as empty or as a record whose checksum holds.
 func (a *journalAddress) resetTable(capacity, stride int64) error {
+	closed := a.openPass("resetTable", "rebuild")
+	defer closed()
 	if err := a.slots.Truncate(0); err != nil {
 		return fmt.Errorf("tagent: discard the slot table of %s: %w", a.log.dir, err)
 	}
@@ -1840,7 +1927,7 @@ func (a *journalAddress) eachNewestFirst(visit func(key string, span journalAddr
 		return err
 	}
 	if a.window == nil {
-		if rebuildErr := a.rebuild(); rebuildErr != nil {
+		if rebuildErr := a.rebuildFrom("read"); rebuildErr != nil {
 			return rebuildErr
 		}
 		return a.eachNewestFirstOnce(visit, seen)
@@ -2331,4 +2418,52 @@ func (k *journalKV) ValueReads() int64 {
 		return 0
 	}
 	return k.log.addr.valueReads
+}
+
+// IntegrityPassSpan reports the two clock reads this view's open took around the
+// verification of the log: the read before the pass started and the read the moment
+// it answered. Both stay zero beside a view that ran no pass, which is a pass that
+// did not happen, so a caller that names the verification stage of a boot reads its
+// endpoints here instead of deriving them from another stage. It is read-only and
+// takes no lock, because the open sets it before any caller holds the view.
+func (k *journalKV) IntegrityPassSpan() (time.Time, time.Time) {
+	if k == nil || k.log == nil {
+		return time.Time{}, time.Time{}
+	}
+	return k.log.integrityBegin, k.log.integrityEnd
+}
+
+// DirectoryMaintenancePasses reports how many passes of the address table this view
+// opened since its open: a pass that grew the table, one that rebuilt it and one that
+// reset it are each one. The count is written where a pass opens, so a caller states
+// that a pass happened from this count and reads the span it took from
+// DirectoryMaintenancePass. The caller reads it under the same lock a commit takes,
+// because a pass moves it while the view is held.
+func (k *journalKV) DirectoryMaintenancePasses() int {
+	if k == nil || k.log == nil {
+		return 0
+	}
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	if k.log.addr == nil {
+		return 0
+	}
+	return k.log.addr.passes
+}
+
+// DirectoryMaintenancePass reports one pass of the address table this view ran: the
+// pass, the account the call that ran it stated for itself, and the two clock reads
+// that call took around it. A pass of one of these is one entry, oldest first, in the
+// order the view ran them. The caller reads it under the same lock a commit takes.
+func (k *journalKV) DirectoryMaintenancePass(at int) (pass, parent string, begin, end time.Time, held bool) {
+	if k == nil || k.log == nil {
+		return "", "", time.Time{}, time.Time{}, false
+	}
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	if k.log.addr == nil || at < 0 || at >= len(k.log.addr.passRecords) {
+		return "", "", time.Time{}, time.Time{}, false
+	}
+	record := k.log.addr.passRecords[at]
+	return record.pass, record.parent, record.begin, record.end, true
 }

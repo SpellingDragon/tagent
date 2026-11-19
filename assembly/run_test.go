@@ -131,7 +131,9 @@ func TestLandedSeqRidesTheWalk(t *testing.T) {
 // TestAnchoredRebuildEqualsFullWalk pins the fold anchor theorem.
 // - the newest product fact of each session carries the post-batch survivors
 // - rebuilding from the anchor answers the full walk entry by entry
-// - beside no checkpoint the anchor bounds the projection read alone, so the bodies the seam decodes equal the full walk: only a cut vouches covered material, and the saving rides a checkpoint a real boot restores (TestDefaultBootRebuildsFromTheAnchor, TestSymptomAnchorSessionBootCostFlatAcrossGenerations)
+// - beside no checkpoint the anchor bounds the projection read alone, so the bodies the seam decodes equal the full walk
+// - only a cut vouches covered material, and the saving rides a checkpoint a real boot restores
+// - the saving anchors: TestDefaultBootRebuildsFromTheAnchor, TestSymptomAnchorSessionBootCostFlatAcrossGenerations
 // - the index answers the same landed slots as the full walk
 // - the checkpoint filer ends before the walk that arms it, so the chain the two reads compare stands still
 //
@@ -923,9 +925,9 @@ func TestYoungLogBootRestoresTheOwedMailboxThroughTheSlice(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open the storage tier: %v", err)
 	}
-	account, err := state.NewDurableCommit(ledger.TierFactLog(tier), nil)
-	if err != nil {
-		t.Fatalf("open the durable account: %v", err)
+	account := state.NewEmptyDurableCommit(ledger.TierFactLog(tier), nil)
+	if err := account.Seat(ctx, nil, nil); err != nil {
+		t.Fatalf("seat the durable account of the log: %v", err)
 	}
 	if _, err := account.Commit(ctx, task.CommitRecord{
 		MutationID: "young-owed:0",

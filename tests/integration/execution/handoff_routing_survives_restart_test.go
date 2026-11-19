@@ -85,9 +85,9 @@ func TestHandoffRoutingSurvivesRestart(t *testing.T) {
 	if err != nil {
 		t.Fatalf("OpenTier: %v", err)
 	}
-	durable, err := state.NewDurableCommit(ledger.TierFactLog(tier), nil)
-	if err != nil {
-		t.Fatalf("NewDurableCommit: %v", err)
+	durable := state.NewEmptyDurableCommit(ledger.TierFactLog(tier), nil)
+	if err := durable.Seat(ctx, nil, nil); err != nil {
+		t.Fatalf("seat the durable commit: %v", err)
 	}
 	var attempts1 []task.Envelope
 	registry := task.NewMemoryRegistry(durable, task.NewMemoryAdmission())
@@ -158,9 +158,9 @@ func TestHandoffRoutingSurvivesRestart(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reopen OpenTier: %v", err)
 	}
-	restored, err := state.NewDurableCommit(ledger.TierFactLog(reopened), nil)
-	if err != nil {
-		t.Fatalf("reopen NewDurableCommit: %v", err)
+	restored := state.NewEmptyDurableCommit(ledger.TierFactLog(reopened), nil)
+	if err := restored.Seat(ctx, nil, nil); err != nil {
+		t.Fatalf("reopen the durable commit: %v", err)
 	}
 	chain, err := restored.Records(ctx, taskID)
 	if err != nil {

@@ -84,6 +84,8 @@ func (r *Run) commitFactChecked(ctx context.Context, evt event.Event) (event.Eve
 //   - a checkpoint fact stays on the store the boot reads it from and enters no session chain: it is a framework state checkpoint, not material of any chain, so the live ledger keeps the window of the chains it serves and never one fact per cut.
 //   - the whole commit holds the quiet-point fence, so a cut that drained the pipeline reads every state this fact left behind instead of one caught between the landing and its application. The derived state of every consumer mounted on the state seam is folded inside that unit for the same reason: the fact and the state it leaves behind are one step, never a landing a consumer beside it has not read yet.
 //   - a product is the moment the projection drops material, so the chain's checkpoint is worth refreshing whatever the cadence clock says. The request is a signal: the filer takes the cut on its own goroutine, where this commit's unit of work is not held.
+//   - a fact the chain already carries files no position of its own: filing it would put a fact the chain committed past at the end of the order the fold states, and the fold runs over a sequence that already states the material.
+//   - a repeat of the fact the chain holds is reduced again, because the repeat is what retries an earlier refusal, and the seam is told the fact repeats one the chain carries, so a holder whose idempotence rests on an identity its own rewrite can drop answers without restating the material (see reduceCommittedRepeat).
 func (r *Run) commitFactNoCadence(ctx context.Context, evt event.Event) (event.EventID, error) {
 	if evt.Key == "" {
 		evt.Key = r.mintEventID()
@@ -102,14 +104,21 @@ func (r *Run) commitFactNoCadence(ctx context.Context, evt event.Event) (event.E
 		if !same {
 			return "", fmt.Errorf("%w: %s", memory.ErrFactKeyConflict, evt.Key)
 		}
-		// Reducers are identity-idempotent; repeating them retries an earlier refusal.
-		r.reduceCommitted(ctx, held)
+		r.reduceCommittedRepeat(ctx, held)
 		return evt.Key, nil
+	}
+	carried, err := r.chainHoldsFact(ctx, evt)
+	if err != nil {
+		return "", err
 	}
 	if err := r.persistFact(ctx, evt); err != nil {
 		return "", err
 	}
 	if evt.Type == event.TypeCheckpoint {
+		return evt.Key, nil
+	}
+	if carried {
+		r.reduceCommittedRepeat(ctx, evt)
 		return evt.Key, nil
 	}
 	_, mapped := mappedEntryOf(evt)
@@ -147,15 +156,41 @@ func (r *Run) reduceCommitted(ctx context.Context, evt event.Event) {
 	if r == nil {
 		return
 	}
-	r.mu.Lock()
-	states := r.states
-	r.mu.Unlock()
+	states := r.stateRegistry()
 	if states == nil {
 		return
 	}
 	if err := states.Reduce(ctx, evt); err != nil {
 		assemblyError("tagent: the committed fact %s was not folded into the state of its consumers: %v", evt.Key, err)
 	}
+}
+
+// reduceCommittedRepeat folds one fact the chain already carries through the same
+// seam the filing commit drives, told that it repeats one the chain holds instead of
+// filing a position of its own. The live ledger answers a repeat of a resident fact
+// and the storage tier answers a repeat of a fact this process released, so both
+// commit branches reach here; a holder that states a sequence drops the identity of
+// the material a rewrite moves out of it, and the repeat is the one commit that must
+// not restate that material (see projectionStateSlice.ReduceRepeat).
+func (r *Run) reduceCommittedRepeat(ctx context.Context, evt event.Event) {
+	if r == nil {
+		return
+	}
+	states := r.stateRegistry()
+	if states == nil {
+		return
+	}
+	if err := states.ReduceRepeat(ctx, evt); err != nil {
+		assemblyError("tagent: the repeated fact %s was not folded into the state of its consumers: %v", evt.Key, err)
+	}
+}
+
+// stateRegistry answers the state seam this run mounted, under the lock every other
+// read of it takes.
+func (r *Run) stateRegistry() *state.StateRegistry {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.states
 }
 
 // trimFacts holds one session chain to what its projection still presents — and
@@ -372,9 +407,9 @@ func (r *Run) persistFact(ctx context.Context, evt event.Event) error {
 		return err
 	}
 	partition := memory.PartitionIDFromName(string(evt.Owner.AgentID))
-	stored, held, err := tier.Segments.GetEventInPartition(ctx, evt.Key, partition)
-	if err != nil {
-		return err
+	stored, held, heldErr := tier.Segments.GetEventInPartition(ctx, evt.Key, partition)
+	if heldErr != nil {
+		return heldErr
 	}
 	if held {
 		return storedFactConflict(evt.Key, stored, body)
@@ -417,6 +452,28 @@ func (r *Run) persistFact(ctx context.Context, evt event.Event) error {
 	default:
 		return err
 	}
+}
+
+// chainHoldsFact answers whether the chain already carries the fact under the
+// identity it names: the record the commit asks for before it states a position
+// of its own, so a retry of a fact the chain committed earlier lands nothing new.
+// The lookup addresses the fact's partition and reads no body unless the identity
+// is taken, which is why it costs one index read on the commits that state
+// something. A run beside no storage tier and a fact naming no owning agent keep
+// no durable record, so the live ledger is the only order they state.
+func (r *Run) chainHoldsFact(ctx context.Context, evt event.Event) (bool, error) {
+	r.mu.Lock()
+	tier := r.tier
+	r.mu.Unlock()
+	if tier == nil || evt.Owner.AgentID == "" {
+		return false, nil
+	}
+	partition := memory.PartitionIDFromName(string(evt.Owner.AgentID))
+	_, held, err := tier.Segments.GetEventInPartition(ctx, evt.Key, partition)
+	if err != nil {
+		return false, err
+	}
+	return held, nil
 }
 
 // sameFactOf reports whether one live fact and one commit name the same fact:
@@ -481,7 +538,7 @@ func foldIntoProjection(ctx context.Context, projection *replay.ReplayProjection
 // increment instead of from a lane of its own.
 //
 // - Boundary move on close: the agent_output that closed a segment lands the segment itself as ended material — the boundary moves onto it (inclusive, see endedPrefix), so a later arrival presents everything the closed segment committed, the input that reached the chain while it flew but no decision of it read included.
-// - Boundary move on first carriage only: a repeated fold of an identity the sequence already holds — the retry of a committed fact retried through the same fold — is appended once and moves the boundary once, so the retry of an earlier round's output leaves the boundary of the latest completed round where it stands.
+// - Boundary move on a newly carried entry only: the append answers whether the sequence took the entry at all, and only that fact can close a range. The commit tells a repeat apart from a filing before the fold runs (see reduceCommittedRepeat), so a retried commit of an earlier fact never reaches this step and leaves the boundary of the latest completed round where it stands.
 func (r *Run) foldMapped(ctx context.Context, evt event.Event, entry replay.ProjectionEntry) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -933,6 +990,9 @@ func (r *Run) factPipeline(agentID event.AgentID) (plugin.Pipeline, error) {
 // process reads the notification as the work it still owes. While the close still
 // runs, the result is handed over exactly as it is beside no close at all — the
 // quiesce is the turn that finishes it, not a stop that strands it.
+//
+// - A hand-over whose delivery fact the backflow refuses is booked and handed on exactly as it is, and is not consumed: the range drives the result in this process, while the record the restart pairs that result with is what the chain is missing, so the notification stays owed and the next process hands the same result over again beside the fact that then lands.
+// - The hand-over is not undone to spare the drive the result: the in-process delivery is no external action, and a record the chain refused is the one thing a restart redoes for free.
 func (r *Run) sink(ctx context.Context, notice task.Notice) error {
 	frame, ok := task.CallFrameFrom(ctx)
 	if !ok {
@@ -945,20 +1005,26 @@ func (r *Run) sink(ctx context.Context, notice task.Notice) error {
 	if r.closeFinished() {
 		return r.retainNoticeOwed(ctx, frame, notice, seq)
 	}
-	r.loop.Backflow(frame.Identity.InvocationID, notice)
+	if refusal := r.loop.Backflow(frame.Identity.InvocationID, notice); refusal != nil {
+		return r.retainNoticeOwed(ctx, frame, notice, seq)
+	}
 	return r.store.Consume(ctx, frame.Address, frame.Identity.InstanceID, seq)
 }
 
-// retainNoticeOwed keeps one booked notification owed on the mailbox after the
-// close of this run returned: the acceptance stays the record the next process
-// restores, and the claimed entry is handed back to the pending pool so no
-// current that stopped with the close can consume it. A seat already consumed by
-// the turn the close waited out is answered as settled and keeps its receipt.
+// retainNoticeOwed keeps one booked notification owed on the mailbox rather than
+// recording its consumption: the acceptance stays the record the next process
+// restores, and the claimed entry is handed back to the pending pool so the
+// receipt the restart reads is never written for a hand-over the chain holds no
+// record of. Two causes reach it — the close of this run returned before the
+// hand-over, and the backflow refused the delivery fact of the hand-over — and
+// both answer the same way, because both leave the same thing missing: the fact
+// a restart pairs the result with. A seat already consumed by the turn the close
+// waited out is answered as settled and keeps its receipt.
 func (r *Run) retainNoticeOwed(ctx context.Context, frame task.CallFrame, notice task.Notice, seq state.AcceptSeq) error {
 	if err := r.store.Release(context.WithoutCancel(ctx), frame.Address, frame.Identity.InstanceID, seq); err != nil && !errors.Is(err, state.ErrClaimSettled) {
-		return fmt.Errorf("tagent: keep the notice of task %s owed after the close: %w", notice.TaskID, err)
+		return fmt.Errorf("tagent: keep the notice of task %s owed: %w", notice.TaskID, err)
 	}
-	assemblyDebug("tagent: the notice of task %s stays owed after the close returned", notice.TaskID)
+	assemblyDebug("tagent: the notice of task %s stays owed", notice.TaskID)
 	return nil
 }
 
