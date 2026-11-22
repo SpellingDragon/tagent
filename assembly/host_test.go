@@ -8,7 +8,9 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -19,6 +21,7 @@ import (
 	"github.com/SpellingDragon/tagent/api/event"
 	"github.com/SpellingDragon/tagent/api/model"
 	"github.com/SpellingDragon/tagent/api/plugin"
+	"github.com/SpellingDragon/tagent/memory/embedder"
 	"github.com/SpellingDragon/tagent/memory/ledger"
 	"github.com/SpellingDragon/tagent/runtime/agent"
 	"github.com/SpellingDragon/tagent/runtime/state"
@@ -907,4 +910,452 @@ func TestBackflowFailureRecoversWithoutManualSettle(t *testing.T) {
 		t.Fatalf("the process after the restart answered %d delivery fact(s), %d receipt(s) and %d follow-up turn(s) with no driver of this check, want the one of each the recovery owes: the notification the refused write left stands owed over every restart",
 			len(facts), len(receipts), turns)
 	}
+}
+
+// contributedStateSlice is the consumer state a check contributes through the
+// public option: it states a seal no committed fact carries beside the facts it
+// folds, so a check tells a holder the checkpoint restored from one the chain
+// replay alone rebuilt.
+type contributedStateSlice struct {
+	name string
+	mu   sync.Mutex
+	// seal is the state only the snapshot carries: no fact derives it, so a
+	// holder that answers it states the cut that restored it.
+	seal string
+	// facts states one line per fact the holder folded, keyed by identity.
+	facts map[event.EventID]string
+	// restored counts the payloads the state seam handed back, and early records
+	// whether a fact reached the holder before any payload did.
+	restored int
+	early    bool
+	// folded names the facts the holder derived itself, so a check tells a bounded
+	// boot that folds the tail from one that rebuilt the whole chain: a payload the
+	// seam restored states facts the holder never derived, and counting them as
+	// derived would read every boot as a whole-chain one.
+	folded map[event.EventID]struct{}
+}
+
+// StateName reports the name the contributed slice is keyed by.
+func (s *contributedStateSlice) StateName() string { return s.name }
+
+// contributedSliceState is the payload one contributed slice states.
+type contributedSliceState struct {
+	Seal  string   `json:"seal"`
+	Facts []string `json:"facts"`
+}
+
+// SnapshotState states the seal beside the folded facts in identity order, so the
+// same account renders the same bytes.
+func (s *contributedStateSlice) SnapshotState(context.Context) ([]byte, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	keys := make([]string, 0, len(s.facts))
+	for key := range s.facts {
+		keys = append(keys, string(key))
+	}
+	slices.Sort(keys)
+	stated := make([]string, 0, len(keys))
+	for _, key := range keys {
+		stated = append(stated, key+"="+s.facts[event.EventID(key)])
+	}
+	return json.Marshal(contributedSliceState{Seal: s.seal, Facts: stated})
+}
+
+// RestoreState puts one stated payload back; the empty cut is the null state the
+// seam states for a holder that states nothing.
+func (s *contributedStateSlice) RestoreState(_ context.Context, payload []byte) error {
+	if string(payload) == "null" {
+		return nil
+	}
+	var stated contributedSliceState
+	if err := json.Unmarshal(payload, &stated); err != nil {
+		return fmt.Errorf("the contributed slice states no readable payload: %w", err)
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.restored++
+	s.seal = stated.Seal
+	if s.facts == nil {
+		s.facts = map[event.EventID]string{}
+	}
+	for _, line := range stated.Facts {
+		at := strings.IndexByte(line, '=')
+		if at <= 0 {
+			return fmt.Errorf("the contributed slice states no entry in %q", line)
+		}
+		s.facts[event.EventID(line[:at])] = line[at+1:]
+	}
+	return nil
+}
+
+// Reduce folds one committed fact into the stated account.
+func (s *contributedStateSlice) Reduce(_ context.Context, evt event.Event) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.restored == 0 && len(s.facts) == 0 {
+		s.early = true
+	}
+	if s.facts == nil {
+		s.facts = map[event.EventID]string{}
+	}
+	if s.folded == nil {
+		s.folded = map[event.EventID]struct{}{}
+	}
+	s.folded[evt.Key] = struct{}{}
+	s.facts[evt.Key] = evt.Type + ":" + evt.Message.Content
+	return nil
+}
+
+// derived reports the identities the holder folded itself, apart from the facts
+// the seam restored into it.
+func (s *contributedStateSlice) derived() map[event.EventID]struct{} {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	folded := make(map[event.EventID]struct{}, len(s.folded))
+	for key := range s.folded {
+		folded[key] = struct{}{}
+	}
+	return folded
+}
+
+// stated reports the seal, the folded facts and what the seam handed back.
+func (s *contributedStateSlice) stated() (string, map[event.EventID]string, int, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	facts := make(map[event.EventID]string, len(s.facts))
+	for key, state := range s.facts {
+		facts[key] = state
+	}
+	return s.seal, facts, s.restored, s.early
+}
+
+// TestBootMountsAContributedStateSliceAndRestoresIt pins the public state entry: a contributed slice mounts ahead of the restore and states its own cut.
+//   - positive: the booted run names the contributed slice and its checkpoint states the seal only the snapshot carries
+//   - positive: the restart hands that payload back before any fact of the tail folds, and the holder states every fact the live process derived
+//   - negative: a boot that dropped the contribution answers none of the above, and refuses the cut by name instead
+//   - consumer: the public Boot entry with Run.Checkpoint, never Assemble direct
+//
+// 契约: docs/wiki/platform/platform-subsystems.md#framework-checkpoint
+func TestBootMountsAContributedStateSliceAndRestoresIt(t *testing.T) {
+	t.Setenv("TAGENT_TEST_API_KEY", "test-key")
+	t.Setenv("TAGENT_HTTP_PORT", "0")
+	t.Setenv("TAGENT_RL_AUTH_TOKEN", "")
+	provider := newGenerationTestProvider(t)
+	root := t.TempDir()
+	configPath := filepath.Join(root, "tagent.yaml")
+	if err := os.WriteFile(configPath, []byte(generationDocument(root, provider.URL+"/v1", "")), 0o644); err != nil {
+		t.Fatalf("write the configuration source: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
+	defer cancel()
+	const sliceName = "assembly.contributed-state-slice"
+	live := &contributedStateSlice{name: sliceName, seal: "seal-the-live-process-states"}
+	first, err := Boot(configPath, WithStateSlice(live))
+	if err != nil {
+		t.Fatalf("boot the host beside the contributed state slice: %v", err)
+	}
+	first.Run().stopCheckpointFiler()
+	if !slices.Contains(first.Run().StateRegistry().Names(), sliceName) {
+		t.Fatalf("the booted run mounts the state slices %v, want the contributed %s among them", first.Run().StateRegistry().Names(), sliceName)
+	}
+	addr := event.Address{AgentID: "user", SessionID: "session-contributed-state-slice"}
+	commitSessionTurns(t, ctx, first.Run(), addr, "contributed-state-slice", 3)
+	key, filed, err := first.Run().Checkpoint(ctx)
+	if err != nil || !filed {
+		t.Fatalf("file the cut of the booted run = (%t, %v), want a filed checkpoint", filed, err)
+	}
+	if payload := slicePayloadOf(t, checkpointOfIdentity(t, ctx, first.Run(), key), sliceName); !strings.Contains(payload, live.seal) {
+		t.Fatalf("the cut states %q for the contributed slice, want the seal %q only the snapshot carries", payload, live.seal)
+	}
+	commitSessionTurns(t, ctx, first.Run(), addr, "contributed-state-slice-tail", 1)
+	liveSeal, liveFacts, _, _ := live.stated()
+	tailed := 0
+	for key := range liveFacts {
+		if strings.HasPrefix(string(key), "contributed-state-slice-") {
+			tailed++
+		}
+	}
+	if tailed != 16 {
+		t.Fatalf("the live holder folded %d session fact(s), want the twelve of the cut and the four of the tail", tailed)
+	}
+	if err := first.Close(ctx); err != nil {
+		t.Fatalf("close the process that contributed the slice: %v", err)
+	}
+
+	booted := &contributedStateSlice{name: sliceName}
+	second, err := Boot(configPath, WithStateSlice(booted))
+	if err != nil {
+		t.Fatalf("boot the host beside the contribution and the cut: %v", err)
+	}
+	t.Cleanup(func() { closeLiveness(t, second) })
+	bootedSeal, bootedFacts, restores, early := booted.stated()
+	if bootedSeal != liveSeal {
+		t.Fatalf("the restarted holder states the seal %q, want the %q the checkpoint carries: the cut never landed in the contributed slice", bootedSeal, liveSeal)
+	}
+	if restores == 0 {
+		t.Fatal("the state seam handed the restarted holder no payload, want the cut restored into the contributed slice")
+	}
+	if early {
+		t.Fatal("a fact reached the restarted holder before the checkpoint payload did, want the restore ahead of the tail fold")
+	}
+	if len(bootedFacts) != len(liveFacts) {
+		t.Fatalf("the restarted holder states %d fact(s), want the %d the cut and the tail state", len(bootedFacts), len(liveFacts))
+	}
+	restoredSession := 0
+	for key, want := range liveFacts {
+		got, held := bootedFacts[key]
+		if !held {
+			t.Fatalf("the restarted holder states no fact %s the live process derived", key)
+		}
+		if got != want {
+			t.Fatalf("the restarted holder derives %q for the fact %s, want the %q the live process derived", got, key, want)
+		}
+		if strings.HasPrefix(string(key), "contributed-state-slice-") {
+			restoredSession++
+		}
+	}
+	if restoredSession != tailed {
+		t.Fatalf("the restarted holder states %d session fact(s), want the %d the cut and the tail state", restoredSession, tailed)
+	}
+}
+
+// TestUncoveredContributedSliceReplaysTheWholeChain pins the boot of a contribution no restored cut states a slice of.
+//   - fixture: one process commits six turns, files the cut, commits two turns past it and stops, so the chain holds 32 facts with 24 below the cut and 8 past it
+//   - negative: a bounded replay alone would leave the holder the 8 facts past the cut and nothing of the 24 below it
+//   - positive: the restarted holder derives all 32 facts of the chain and every line it states is the one that fact derives
+//   - consumer: Assemble beside the public WithStateSlice option, the entry a caller contributes through, never a hand-driven rebuild
+//
+// 契约: docs/wiki/platform/platform-subsystems.md#framework-checkpoint
+func TestUncoveredContributedSliceReplaysTheWholeChain(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+	addr := event.Address{AgentID: "agent-a", SessionID: "session-uncovered-contribution"}
+	storage := WithStorage(ledger.StorageConfig{Type: ledger.StorageJournal, Root: t.TempDir()})
+	fileContributionChainWithCut(t, ctx, storage, addr)
+
+	const sliceName = "assembly.uncovered-contribution"
+	fresh := &contributedStateSlice{name: sliceName}
+	booted := windowChainRun(t, ctx, storage, WithStateSlice(fresh))
+	defer endRun(t, booted)
+	if !slices.Contains(booted.StateRegistry().Names(), sliceName) {
+		t.Fatalf("the booted run mounts the state slices %v, want the contributed %s among them", booted.StateRegistry().Names(), sliceName)
+	}
+	_, stated, restores, _ := fresh.stated()
+	if restores != 0 {
+		t.Fatalf("the returned cut handed the contributed slice %d payload(s), want none: the cut states no slice of it", restores)
+	}
+	chain := contributionChainKeys(addr)
+	derived := fresh.derived()
+	if len(derived) < len(chain) {
+		t.Fatalf("the restarted holder derived %d fact(s), want the one it derives for every fact of the %d the chain holds: the boot folded a subset of the chain", len(derived), len(chain))
+	}
+	for _, key := range chain {
+		if _, folded := derived[key]; !folded {
+			t.Fatalf("the restarted holder derived no fact %s: the account the chain holds below the cut is missing from it", key)
+		}
+		want := derivationOf(t, ctx, booted, key)
+		if got := stated[key]; got != want {
+			t.Fatalf("the restarted holder states %q for the fact %s, want the %q that fact derives", got, key, want)
+		}
+	}
+}
+
+// TestCoveredContributedSliceKeepsTheBoundedBoot pins the boot of a contribution the restored cut states.
+//   - fixture: the same chain, with the contributing holder mounted in the process that files the cut, so the cut carries its slice
+//   - positive: the seam hands the payload back and the holder states every chain fact, the 24 below the cut from the payload and the 8 past it from the fold
+//   - negative: the derivation count is the holder's own, so a boot that replayed the whole chain instead would derive all 32 and fail here
+//   - consumer: Assemble beside the public WithStateSlice option, never a hand-driven rebuild
+//
+// 契约: docs/wiki/platform/platform-subsystems.md#framework-checkpoint
+func TestCoveredContributedSliceKeepsTheBoundedBoot(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+	addr := event.Address{AgentID: "agent-a", SessionID: "session-covered-contribution"}
+	storage := WithStorage(ledger.StorageConfig{Type: ledger.StorageJournal, Root: t.TempDir()})
+	const sliceName = "assembly.covered-contribution"
+	fileContributionChainWithCut(t, ctx, storage, addr, WithStateSlice(&contributedStateSlice{name: sliceName}))
+
+	fresh := &contributedStateSlice{name: sliceName}
+	booted := windowChainRun(t, ctx, storage, WithStateSlice(fresh))
+	defer endRun(t, booted)
+	_, stated, restores, early := fresh.stated()
+	if restores == 0 {
+		t.Fatal("the state seam handed the restarted holder no payload, want the cut the source process filed into it")
+	}
+	if early {
+		t.Fatal("a fact reached the restarted holder before the cut it states did")
+	}
+	chain := contributionChainKeys(addr)
+	derived := fresh.derived()
+	for _, key := range chain[len(chain)-8:] {
+		if _, folded := derived[key]; !folded {
+			t.Fatalf("the restarted holder derived no fact %s, want the 8 that landed past the cut", key)
+		}
+	}
+	folded := 0
+	for _, key := range chain {
+		if _, held := derived[key]; held {
+			folded++
+		}
+		if _, held := stated[key]; !held {
+			t.Fatalf("the restarted holder states no fact %s, want the one the payload of its own cut carried", key)
+		}
+	}
+	if folded == len(chain) {
+		t.Fatalf("the restarted holder derived all %d facts of the chain, want the tail past the cut alone: a cut that states the slice keeps the bounded replay", len(chain))
+	}
+}
+
+// fileContributionChainWithCut commits the chain both contribution checks restart
+// over and ends the process that filed its cut: eight turns of four legs, the cut
+// filed between the sixth and the seventh, so 24 facts stand below the cut and 8
+// past it.
+func fileContributionChainWithCut(t *testing.T, ctx context.Context, storage Option, addr event.Address, opts ...Option) {
+	t.Helper()
+	source := windowChainRun(t, ctx, append([]Option{storage}, opts...)...)
+	source.stopCheckpointFiler()
+	commitWindowTurns(t, ctx, source, addr, 6)
+	if _, filed, err := source.Checkpoint(ctx); err != nil || !filed {
+		t.Fatalf("file the cut of the source chain = (%t, %v), want a filed checkpoint", filed, err)
+	}
+	commitWindowTurnsFrom(t, ctx, source, addr, 6, 2)
+	endRun(t, source)
+}
+
+// contributionChainKeys answers the identities the contribution fixture commits, in
+// chain order: the denominators of both checks are the chain the tier holds, never
+// the replay that read it.
+func contributionChainKeys(addr event.Address) []event.EventID {
+	base := time.Date(2026, 11, 6, 12, 0, 0, 0, time.UTC)
+	keys := make([]event.EventID, 0, 32)
+	for turn := 0; turn < 8; turn++ {
+		for position := 0; position < 4; position++ {
+			keys = append(keys, event.EventID(timeStampKey(base, addr, turn, position)))
+		}
+	}
+	return keys
+}
+
+// derivationOf reads one committed fact back from the tier and answers the line the
+// contributed holder states for it, so a check compares the restarted state against
+// the chain itself instead of against the replay that read it.
+func derivationOf(t *testing.T, ctx context.Context, run *Run, key event.EventID) string {
+	t.Helper()
+	evt, err := run.CommittedEvent(ctx, key)
+	if err != nil {
+		t.Fatalf("read the committed fact %s back: %v", key, err)
+	}
+	return evt.Type + ":" + evt.Message.Content
+}
+
+// TestBootRefusesTwoStateSlicesOfOneName pins the named refusal of a repeated contribution: the assembly stops instead of overwriting the owned slice.
+//   - negative: the boot answers an error naming the slice and the already-mounted state
+//
+// 契约: docs/wiki/platform/platform-subsystems.md#framework-checkpoint
+func TestBootRefusesTwoStateSlicesOfOneName(t *testing.T) {
+	t.Setenv("TAGENT_TEST_API_KEY", "test-key")
+	t.Setenv("TAGENT_HTTP_PORT", "0")
+	t.Setenv("TAGENT_RL_AUTH_TOKEN", "")
+	provider := newGenerationTestProvider(t)
+	root := t.TempDir()
+	configPath := filepath.Join(root, "tagent.yaml")
+	if err := os.WriteFile(configPath, []byte(generationDocument(root, provider.URL+"/v1", "")), 0o644); err != nil {
+		t.Fatalf("write the configuration source: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+	const sliceName = "assembly.contributed-state-slice-repeat"
+	host, err := Boot(configPath,
+		WithStateSlice(&contributedStateSlice{name: sliceName}),
+		WithStateSlice(&contributedStateSlice{name: sliceName}))
+	if err == nil {
+		closeErr := host.Close(ctx)
+		t.Fatalf("the boot over two contributions of %s answered success (close %v), want it refused by name", sliceName, closeErr)
+	}
+	if !strings.Contains(err.Error(), sliceName) || !strings.Contains(err.Error(), "already mounted") {
+		t.Fatalf("the boot refusal states %q, want it to name the slice %s and the already-mounted state", err, sliceName)
+	}
+}
+
+// TestBootRefusesAnOptionItCannotHonor pins the seam between the two entries: a face Boot builds itself is never dropped in silence.
+//   - negative: WithCapture, WithEmbedder, WithMemoryPlan, WithReflectionAnchors, withBootConfigReconcile and withTaskTerminalTTL are refused by name
+//   - negative: the refusal names the option and the Assemble entry that seats it, answers no host and leaves the storage the boot would have opened unopened
+//   - positive: the same document boots beside a supported contribution, so the refusal is the option's and never the document's
+//   - consumer: the public Boot entry beside the public options a caller holds, never Assemble direct
+//
+// 契约: docs/wiki/platform/platform-subsystems.md#composition-root
+func TestBootRefusesAnOptionItCannotHonor(t *testing.T) {
+	t.Setenv("TAGENT_TEST_API_KEY", "test-key")
+	t.Setenv("TAGENT_HTTP_PORT", "0")
+	t.Setenv("TAGENT_RL_AUTH_TOKEN", "")
+	provider := newGenerationTestProvider(t)
+	root := t.TempDir()
+	configPath := filepath.Join(root, "tagent.yaml")
+	if err := os.WriteFile(configPath, []byte(generationDocument(root, provider.URL+"/v1", "")), 0o644); err != nil {
+		t.Fatalf("write the configuration source: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+	for _, refused := range []struct {
+		name   string
+		option Option
+	}{
+		{name: "WithCapture", option: WithCapture(snapshotTestCapture(t))},
+		{name: "WithEmbedder", option: WithEmbedder(embedder.NewHashEmbedder(0))},
+		{name: "WithMemoryPlan", option: WithMemoryPlan(&MemoryPlan{})},
+		{name: "WithReflectionAnchors", option: WithReflectionAnchors(filepath.Join(root, "anchors.json"))},
+		{name: "withBootConfigReconcile", option: withBootConfigReconcile(func(context.Context, *Run, *config.Declaration, map[event.AgentID]NativeAgent) error {
+			return nil
+		})},
+		{name: "withTaskTerminalTTL", option: withTaskTerminalTTL(time.Second)},
+	} {
+		host, err := Boot(configPath, refused.option)
+		if err == nil {
+			closeErr := host.Close(ctx)
+			t.Fatalf("the boot beside %s answered success (close %v), want the option refused by name", refused.name, closeErr)
+		}
+		if host != nil {
+			closeErr := host.Close(ctx)
+			t.Fatalf("the boot beside %s answered the host %+v (close %v), want no host started", refused.name, host, closeErr)
+		}
+		if !strings.Contains(err.Error(), refused.name) || !strings.Contains(err.Error(), "Assemble") {
+			t.Fatalf("the boot refusal states %q, want it to name %s and the Assemble entry that seats the face", err, refused.name)
+		}
+		if _, statErr := os.Stat(filepath.Join(root, "storage", hostApprovalsDir)); !os.IsNotExist(statErr) {
+			t.Fatalf("the boot refused for %s opened %s (stat %v), want nothing of the boot to have run",
+				refused.name, filepath.Join(root, "storage", hostApprovalsDir), statErr)
+		}
+	}
+
+	const sliceName = "assembly.refused-option-control"
+	control, err := Boot(configPath, WithStateSlice(&contributedStateSlice{name: sliceName}))
+	if err != nil {
+		t.Fatalf("the same document booted beside the supported contribution %s = %v, want success: the refusals above must be the options'", sliceName, err)
+	}
+	closeLiveness(t, control)
+}
+
+// TestContributedSliceNamedLikeAFrameworkFaceIsRefused pins the framework's reserved slice names.
+//   - a contributed holder naming a framework slice is refused by name before any holder mounts
+//   - the refusal covers a name only the framework reserves beside one the host mounts itself
+//
+// 契约: docs/wiki/platform/platform-subsystems.md#framework-checkpoint
+func TestContributedSliceNamedLikeAFrameworkFaceIsRefused(t *testing.T) {
+	ctx := context.Background()
+	for _, name := range []string{"delivery", "governance"} {
+		_, err := contributedSliceRun(ctx, name)
+		if err == nil || !strings.Contains(err.Error(), name) || !strings.Contains(err.Error(), "reserved") {
+			t.Fatalf("the contributed slice named %q = %v, want a refusal naming the reserved framework slice", name, err)
+		}
+	}
+}
+
+// contributedSliceRun assembles a run beside one contributed state slice of the given name.
+func contributedSliceRun(ctx context.Context, name string) (*Run, error) {
+	return Assemble(ctx, &config.Declaration{
+		Entry:  "agent-a",
+		Agents: []config.AgentSpec{{ID: "agent-a", Model: "model-a", ReplayWindow: 60}},
+	}, map[event.AgentID]NativeAgent{}, WithGovernance(snapshotTestGovernance{}),
+		WithStorage(ledger.StorageConfig{Type: ledger.StorageMemory}),
+		WithStateSlice(&foldRecorder{name: name}))
 }

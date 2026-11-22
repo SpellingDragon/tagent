@@ -403,8 +403,8 @@ func TestSettledApprovalsStayReadableWithoutResidentEvidence(t *testing.T) {
 
 // approvalWriteSeam is one attention store a check arms: it stages writes and
 // publishes them behind a barrier, and it refuses the n-th write or the n-th
-// barrier on demand, so each leg of a filing answers the failure a real store
-// answers there.
+// barrier on demand, or lands the n-th barrier and refuses its acknowledgement, so
+// each leg of a filing answers the failure a real store answers there.
 type approvalWriteSeam struct {
 	mu       sync.Mutex
 	stored   map[string][]byte
@@ -413,6 +413,7 @@ type approvalWriteSeam struct {
 	syncs    int
 	failPut  int
 	failSync int
+	noAck    int
 }
 
 // newApprovalWriteSeam returns one empty seam.
@@ -432,6 +433,18 @@ func (s *approvalWriteSeam) Put(_ context.Context, key string, value []byte) err
 	return nil
 }
 
+// Get answers one published pair by its own key: a staged write whose barrier did
+// not complete is not published to a reader.
+func (s *approvalWriteSeam) Get(_ context.Context, key string) ([]byte, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	value, held := s.stored[key]
+	if !held {
+		return nil, false, nil
+	}
+	return append([]byte(nil), value...), true, nil
+}
+
 // Scan answers every published pair under the prefix: a staged write whose
 // barrier did not complete is not published to a reader.
 func (s *approvalWriteSeam) Scan(_ context.Context, prefix string) (map[string][]byte, error) {
@@ -447,7 +460,9 @@ func (s *approvalWriteSeam) Scan(_ context.Context, prefix string) (map[string][
 }
 
 // Sync completes the barrier over everything staged so far, or refuses it, in
-// which case the staged writes stay unpublished.
+// which case the staged writes stay unpublished; the armed acknowledgement leg
+// publishes the staged writes and answers the failure a store answers when it
+// cannot confirm the barrier it completed.
 func (s *approvalWriteSeam) Sync(context.Context) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -459,6 +474,9 @@ func (s *approvalWriteSeam) Sync(context.Context) error {
 		s.stored[key] = value
 	}
 	s.staged = map[string][]byte{}
+	if s.noAck != 0 && s.syncs == s.noAck {
+		return fmt.Errorf("the store completed the barrier and answered no acknowledgement")
+	}
 	return nil
 }
 
@@ -466,7 +484,16 @@ func (s *approvalWriteSeam) Sync(context.Context) error {
 func (s *approvalWriteSeam) arm(failPut, failSync int) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.failPut, s.failSync = failPut, failSync
+	s.failPut, s.failSync, s.noAck = failPut, failSync, 0
+}
+
+// armUnconfirmedBarrier names the barrier that lands its staged writes and then
+// answers no acknowledgement, which is the uncertainty a writer cannot resolve
+// on its own.
+func (s *approvalWriteSeam) armUnconfirmedBarrier(sync int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.noAck = sync
 }
 
 // TestApprovalWriteFailureDoesNotGrantPermission pins the ruling one failed write leaves behind against the ruling the chain states.
@@ -531,6 +558,133 @@ func TestApprovalWriteFailureDoesNotGrantPermission(t *testing.T) {
 			again := reopened.Lookup("shell_exec", digest)
 			if again == nil || again.Status != ApprovalApproved {
 				t.Fatalf("the book opened over the same store answers %+v, want the ruling the retry landed", again)
+			}
+		})
+	}
+}
+
+// TestSymptomAnchorFailedRulingKeepsTheHold is the approval symptom anchor: a refused answer write leaves the request owed and unsanctioned.
+//   - positive: the cut a bound book states still names the request after the answer leg failed
+//   - so the obligation outlives the process instead of leaving with the ruling that never landed
+//   - negative: the same book never reads the failed ruling as an approval, so a refused write grants nothing
+//   - the restarted book, restored from that cut, answers the parked call as a hold rather than as no request at all
+//   - the armed leg is the next write of the ruling, so the fixture refuses the answer and never the two writes the registration already made
+//   - consumer: Request, Decide, SnapshotEvidence, RestoreEvidence, Pending and Lookup, driven by the gate and the boot seat, never a helper
+//
+// 契约: docs/wiki/agent/governance-enforcement.md#approval-channel
+func TestSymptomAnchorFailedRulingKeepsTheHold(t *testing.T) {
+	ctx := context.Background()
+	const identity = "symptom-anchor-hold"
+	args := []byte(`{"cmd":"deploy"}`)
+	digest := ArgsDigest(args)
+
+	seam := newApprovalWriteSeam()
+	book := NewApprovalManager("", time.Hour, WithApprovalRescanInterval(0))
+	if err := book.BindAttention(ctx, seam); err != nil {
+		t.Fatalf("bind the durable face: %v", err)
+	}
+	if _, err := book.Request(ctx, identity, "shell_exec", args,
+		plugin.RiskCritical, "no-deploy", "critical risk awaits approval"); err != nil {
+		t.Fatalf("park the call through the approval channel: %v", err)
+	}
+	seam.mu.Lock()
+	answerWrite := seam.puts + 1
+	seam.mu.Unlock()
+	seam.arm(answerWrite, 0)
+	if _, err := book.Decide(identity, ApprovalApproved, testApprovalApprover); err == nil {
+		t.Fatal("the ruling answered no failure beside the refused answer write, want the refusal the store answered")
+	}
+	seam.arm(0, 0)
+
+	if seen := book.Lookup("shell_exec", digest); seen != nil && seen.Status == ApprovalApproved {
+		t.Fatalf("the gate reads %+v for the parked call, want it unruled: the ruling never reached the chain", seen)
+	}
+	stated, keys := book.SnapshotEvidence()
+	if len(stated) != 1 || stated[0].ID != identity || stated[0].Status != ApprovalPending {
+		t.Fatalf("the cut states %+v under %v, want the one hold the refused ruling left owed: a request the chain answers nothing for is work still owed, and a cut that drops it lets the process after this one forget a wait nobody ruled",
+			stated, keys)
+	}
+
+	restarted := NewApprovalManager("", time.Hour, WithApprovalRescanInterval(0))
+	if err := restarted.BindAttention(ctx, seam); err != nil {
+		t.Fatalf("bind the durable face of the restarted book: %v", err)
+	}
+	if err := restarted.RestoreEvidence(ctx, stated, keys); err != nil {
+		t.Fatalf("restore the cut the first book stated: %v", err)
+	}
+	if got := restarted.Pending(); len(got) != 1 || got[0].ID != identity {
+		t.Fatalf("the restarted waiting face = %+v, want the one hold the cut states", got)
+	}
+	if seen := restarted.Lookup("shell_exec", digest); seen == nil || seen.Status == ApprovalApproved {
+		t.Fatalf("the restarted gate reads %+v for the parked call, want the hold it never approved", seen)
+	}
+}
+
+// TestApprovalUncertainRulingIsNotReportedAsAbsent pins what a ruling write whose barrier never answered leaves behind.
+//   - a barrier that refused the answer leaves the request owed: the waiting face, the cut and the gate all still name the hold
+//   - such a refusal never reads as the approval it did not land, so the gate that reads it runs nothing
+//   - a barrier that completed the write and answered no acknowledgement is the ruling the person stated, read back by identity
+//   - so an uncertain write answers the fact the chain holds, never no request at all and never the failing call's guess
+//   - consumer: Request, Decide, Pending, SnapshotEvidence and Lookup, the gate and the cut the boot runs, never a helper
+//
+// 契约: docs/wiki/agent/governance-enforcement.md#approval-channel
+func TestApprovalUncertainRulingIsNotReportedAsAbsent(t *testing.T) {
+	const identity = "uncertain-ruling"
+	args := []byte(`{"cmd":"deploy"}`)
+	digest := ArgsDigest(args)
+	for _, leg := range []struct {
+		name   string
+		status ApprovalStatus
+		landed bool
+	}{
+		{name: "the barrier refuses the answer", status: ApprovalApproved, landed: false},
+		{name: "the barrier lands the answer and answers no acknowledgement", status: ApprovalDenied, landed: true},
+	} {
+		t.Run(leg.name, func(t *testing.T) {
+			ctx := context.Background()
+			seam := newApprovalWriteSeam()
+			book := NewApprovalManager("", time.Hour, WithApprovalRescanInterval(0))
+			if err := book.BindAttention(ctx, seam); err != nil {
+				t.Fatalf("bind the durable face: %v", err)
+			}
+			if _, err := book.Request(ctx, identity, "shell_exec", args,
+				plugin.RiskCritical, "no-deploy", "critical risk awaits approval"); err != nil {
+				t.Fatalf("park the call through the approval channel: %v", err)
+			}
+			seam.mu.Lock()
+			answerBarrier := seam.syncs + 1
+			seam.mu.Unlock()
+			if leg.landed {
+				seam.armUnconfirmedBarrier(answerBarrier)
+			} else {
+				seam.arm(0, answerBarrier)
+			}
+			if _, err := book.Decide(identity, leg.status, testApprovalApprover); err == nil {
+				t.Fatalf("the ruling answered no failure beside the uncertain barrier, want the store's refusal")
+			}
+			seam.arm(0, 0)
+
+			if leg.landed {
+				if got := book.Pending(); len(got) != 0 {
+					t.Fatalf("the waiting face after the landed write = %+v, want no hold: the chain already answers the ruling the barrier landed", got)
+				}
+				if stated, keys := book.SnapshotEvidence(); len(stated) != 0 {
+					t.Fatalf("the cut after the landed write states %+v under %v, want the ruling left to the chain it landed on", stated, keys)
+				}
+				if seen := book.Lookup("shell_exec", digest); seen == nil || seen.ID != identity || seen.Status != leg.status {
+					t.Fatalf("the gate reads %+v after the landed write, want the %s ruling the chain holds, never no request at all",
+						seen, leg.status)
+				}
+				return
+			}
+			if got := book.Pending(); len(got) != 1 || got[0].ID != identity {
+				t.Fatalf("the waiting face after the unconfirmed write = %+v, want the one hold: a write no barrier confirmed is not a ruling", got)
+			}
+			if stated, keys := book.SnapshotEvidence(); len(stated) != 1 || stated[0].ID != identity || stated[0].Status != ApprovalPending {
+				t.Fatalf("the cut after the unconfirmed write states %+v under %v, want the hold still owed", stated, keys)
+			}
+			if seen := book.Lookup("shell_exec", digest); seen == nil || seen.Status != ApprovalPending {
+				t.Fatalf("the gate reads %+v after the unconfirmed write, want the hold it never approved", seen)
 			}
 		})
 	}

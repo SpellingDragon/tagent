@@ -276,10 +276,14 @@ func (d pluginDeclaration) keeps(instance plugin.Instance) bool {
 // catalog nor a contributed instance registers, are refused by name: a
 // declaration that silently mounts nothing is a misconfiguration reported as a
 // missing summary instead of a rejected boot.
-func declaredPluginsOf(spec config.AgentSpec, contributed []plugin.Instance) (pluginDeclaration, error) {
+func declaredPluginsOf(spec config.AgentSpec, contributed []plugin.Instance, runLevel []plugin.Instance) (pluginDeclaration, error) {
 	carried := make(map[string]bool, len(contributed))
 	for _, instance := range contributed {
 		carried[instance.Name()] = true
+	}
+	runLevelCarried := make(map[string]bool, len(runLevel))
+	for _, instance := range runLevel {
+		runLevelCarried[instance.Name()] = true
 	}
 	resolved := pluginDeclaration{disabled: map[string]bool{}, unmounted: map[string]bool{}}
 	for _, entry := range spec.Plugins {
@@ -291,6 +295,11 @@ func declaredPluginsOf(spec config.AgentSpec, contributed []plugin.Instance) (pl
 		}
 		mount, known := builtinPluginNamed(name)
 		if !known {
+			if runLevelCarried[name] {
+				return pluginDeclaration{}, fmt.Errorf(
+					"agent %q declares the %s-level plugin %q, which %s (agent plugins: %s)",
+					spec.ID, scopeName(runPluginScope), name, carriedBy(runPluginScope), strings.Join(agentPluginNames(), ", "))
+			}
 			if !carried[name] {
 				return pluginDeclaration{}, fmt.Errorf(
 					"agent %q declares the plugin %q, which no plugin registers and no contributed instance carries (agent plugins: %s)",
@@ -382,7 +391,7 @@ func hostPlugins(seam *hostRunPluginSeam) ([]plugin.Instance, error) {
 // generation carries, and the agent-scope builtins the declaration leaves
 // mounted, in catalog order.
 func (r *Run) agentPlugins(contributed []plugin.Instance, spec config.AgentSpec) ([]plugin.Instance, error) {
-	declared, err := declaredPluginsOf(spec, contributed)
+	declared, err := declaredPluginsOf(spec, contributed, r.plugins)
 	if err != nil {
 		return nil, err
 	}

@@ -274,6 +274,185 @@ func commitCheckpointWithoutTheCompressionSlice(t *testing.T, ctx context.Contex
 	return key
 }
 
+// strippedCompressionCut runs one chain to a checkpoint that states its compression
+// account, files that checkpoint again without the account, and answers what a boot
+// over the stripped cut opens beside.
+//
+// - The owed judgment is filed, then the chain commits past it, so the newest survivor the projection states stands beyond it and a boot bounded by that coverage reads no fact of it.
+// - Negative: a fixture whose account answers no judgment, or whose owed judgment stands past the projection's boundary, fails here instead of proving nothing below.
+func strippedCompressionCut(t *testing.T, ctx context.Context, storage Option) (event.Address, compressAccount, event.CompressRequest, event.EventID) {
+	t.Helper()
+	addr := event.Address{AgentID: "agent-a", SessionID: "session-compress-stripped"}
+	source := windowChainRun(t, ctx, storage)
+	source.stopCheckpointFiler()
+	commitWindowTurns(t, ctx, source, addr, 12)
+	if countFoldProducts(t, ctx, source) == 0 {
+		t.Fatal("the fixture folded nothing, so the account the cut states proves nothing")
+	}
+	owed := event.CompressRequest{
+		ID:     event.EventID("event-compress-stripped-owed"),
+		Reason: "the material over the window no product answers yet",
+		At:     time.Date(2026, 11, 22, 12, 0, 0, 0, time.UTC),
+	}
+	if err := source.fileCompressRequest(ctx, addr.SessionID, owed); err != nil {
+		t.Fatalf("file the owed judgment of the chain: %v", err)
+	}
+	commitWindowTurns(t, ctx, source, addr, 16)
+	products := countFoldProducts(t, ctx, source)
+	live := compressAccountOf(t, source.compress)
+	if len(live.Answered) != products {
+		t.Fatalf("the account answers %d judgment(s), want the %d products the chain holds", len(live.Answered), products)
+	}
+	if held := live.Owed[addr.SessionID]; !slices.Equal(held, []event.EventID{owed.ID}) {
+		t.Fatalf("the account owes %v, want the judgment %s beside the %d its products answer", held, owed.ID, products)
+	}
+	checkpointID, filed, err := source.Checkpoint(ctx)
+	if err != nil || !filed {
+		t.Fatalf("file the checkpoint of the chain = (%t, %v), want a filed fact", filed, err)
+	}
+	stored, err := source.CommittedEvent(ctx, checkpointID)
+	if err != nil {
+		t.Fatalf("read the checkpoint back: %v", err)
+	}
+	checkpoint, stated := event.CheckpointOf(stored)
+	if !stated {
+		t.Fatalf("the checkpoint %s states no readable checkpoint", checkpointID)
+	}
+	partition := memory.PartitionIDFromName(string(addr.AgentID))
+	request, held, err := source.tier.Segments.GetEventInPartition(ctx, owed.ID, partition)
+	if err != nil || !held {
+		t.Fatalf("read the owed judgment %s back by identity = (%t, %v), want the fact the chain holds", owed.ID, held, err)
+	}
+	if cut, named := checkpoint.Offset[partition]; !named || request.Seq > cut {
+		t.Fatalf("the owed judgment %s stands at %d beside the cut %d, want it inside the range the projection cut covers: a boot that read past the cut anyway would prove nothing",
+			owed.ID, request.Seq, cut)
+	}
+	if boundary := statedSurvivorBoundary(t, ctx, source, checkpoint, addr, partition); request.Seq > boundary {
+		t.Fatalf("the owed judgment %s stands at %d beside the newest survivor %d the projection states, want it inside the range the projection presents: a boot bounded by that coverage would read no fact of it",
+			owed.ID, request.Seq, boundary)
+	}
+	stripped := commitCheckpointWithoutTheCompressionSlice(t, ctx, source, checkpoint)
+	endRun(t, source)
+	return addr, live, owed, stripped
+}
+
+// statedSurvivorBoundary answers the newest chain position the projection slice of
+// one checkpoint names for one chain, or zero beside a checkpoint stating no entry
+// of it: the boundary a boot bounded by the projection's coverage replays past.
+func statedSurvivorBoundary(t *testing.T, ctx context.Context, run *Run, checkpoint event.Checkpoint, addr event.Address, partition int) int64 {
+	t.Helper()
+	boundary := int64(0)
+	for _, slice := range checkpoint.Slices {
+		if slice.Name != checkpointSliceProjection {
+			continue
+		}
+		var wire projectionSliceWire
+		if err := json.Unmarshal([]byte(slice.Payload), &wire); err != nil {
+			t.Fatalf("the projection slice states no readable payload: %v", err)
+		}
+		for _, session := range wire.Sessions {
+			if session.Session != string(addr.SessionID) {
+				continue
+			}
+			for _, entry := range session.Entries {
+				stored, held, err := run.tier.Segments.GetEventInPartition(ctx, entry.Key, partition)
+				if err != nil || !held {
+					continue
+				}
+				if stored.Seq > boundary {
+					boundary = stored.Seq
+				}
+			}
+		}
+	}
+	if boundary == 0 {
+		t.Fatalf("the checkpoint states no survivor of %s, so the boundary a boot replays past proves nothing", addr.SessionID)
+	}
+	return boundary
+}
+
+// TestProjectionCoverageDoesNotStandForOtherConsumers pins the account a cut that states no compression slice leaves unstated.
+//   - the owed judgment stands inside the range the projection cut covers, so a boot bounded by that cut reads no fact of it
+//   - the compression account reads the facts its own slice does not state, so the boot owes the batch the stopped process owed
+//   - the boot restores the stripped cut and reads no compression slice of it, so the account is that read's answer and no slice's
+//   - consumer: the real boot restore over a stripped cut, from the checkpoint restore to the coverage read its mount declared
+//
+// 契约: docs/wiki/agent/event-flow.md#projection-lifecycle
+func TestProjectionCoverageDoesNotStandForOtherConsumers(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+	storage := WithStorage(ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: t.TempDir()})
+	addr, live, owed, stripped := strippedCompressionCut(t, ctx, storage)
+
+	booted := windowChainRun(t, ctx, storage)
+	if restored, _ := booted.CheckpointFiled(); restored != stripped {
+		t.Fatalf("the boot restored the checkpoint %s, want the stripped cut %s", restored, stripped)
+	}
+	booted.mu.Lock()
+	statedCompress := booted.checkpointSlices[checkpointSliceCompress]
+	booted.mu.Unlock()
+	if statedCompress {
+		t.Fatal("the boot read a compression slice of the stripped cut, so the account below could be that slice's")
+	}
+	requireSameAccount(t, "booted", compressAccountOf(t, booted.compress), live)
+	if held := pendingIdentities(booted.compress, addr.SessionID); !held[owed.ID] {
+		t.Fatalf("the boot owes %v, want the judgment %s the cut states no account of", held, owed.ID)
+	}
+	t.Logf("the boot restored the cut %s stating no compression slice and owed the judgment %s beside the %d the chain answers",
+		stripped, owed.ID, len(live.Answered))
+	endRun(t, booted)
+}
+
+// TestMissingCompressionSliceDoesNotReplayExecutedJudgments pins that the read a missing slice leaves owed strikes every settled judgment.
+//   - the read folds a judgment before the product that answers it, so the answer strikes it instead of leaving it owed
+//   - so the boot owes no judgment the chain answers: an execution over that account plans no model call and files no second product
+//   - negative: a read that folded the products first would owe every answered judgment, which the count of strikes and the products answer
+//   - consumer: the real boot restore and CompressionConsumer.Execute behind it
+//
+// 契约: docs/wiki/agent/event-flow.md#projection-lifecycle
+func TestMissingCompressionSliceDoesNotReplayExecutedJudgments(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+	storage := WithStorage(ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: t.TempDir()})
+	addr, live, owed, stripped := strippedCompressionCut(t, ctx, storage)
+
+	booted := windowChainRun(t, ctx, storage)
+	if restored, _ := booted.CheckpointFiled(); restored != stripped {
+		t.Fatalf("the boot restored the checkpoint %s, want the stripped cut %s", restored, stripped)
+	}
+	pending := pendingIdentities(booted.compress, addr.SessionID)
+	for request := range live.Answered {
+		if pending[request] {
+			t.Fatalf("the boot owes the answered judgment %s, want the answer the chain states to strike it: an account owing it executes it a second time", request)
+		}
+	}
+	if !pending[owed.ID] {
+		t.Fatalf("the boot owes %v, want the judgment %s no product answers", pending, owed.ID)
+	}
+	if struck := answeredCount(t, booted); struck < len(live.Answered) {
+		t.Fatalf("the boot struck %d answered judgment(s), want at least the %d the read folded", struck, len(live.Answered))
+	}
+
+	before := productsByRequest(t, ctx, booted)
+	if err := booted.compress.Execute(ctx, addr.SessionID); err != nil {
+		t.Fatalf("execute the batch the boot owes: %v", err)
+	}
+	after := productsByRequest(t, ctx, booted)
+	if len(after) != len(before) {
+		t.Fatalf("the execution left %d answered judgment(s) on the chain beside the %d it found, want no judgment the chain answers executed again", len(after), len(before))
+	}
+	for request, count := range after {
+		if count != before[request] {
+			t.Fatalf("the execution filed %d product(s) for the judgment %s beside the %d the chain stated, want one product per judgment", count, request, before[request])
+		}
+	}
+	if held := pendingIdentities(booted.compress, addr.SessionID); !held[owed.ID] {
+		t.Fatalf("the execution owes %v, want the judgment %s whose material no product names to stay owed", held, owed.ID)
+	}
+	t.Logf("the boot struck %d answered judgment(s) while owing the judgment %s alone", answeredCount(t, booted), owed.ID)
+	endRun(t, booted)
+}
+
 // TestCompressionSliceBodyIsBoundedByTheBatchItOwes pins what the compression slice costs the checkpoint body.
 //   - an all-answered account states nothing at four, eight and sixteen answered judgments, so no depth grows the body and no settled judgment is restated
 //   - one more owed judgment costs the same bytes at four, eight and sixteen of them, so no depth grows an entry either

@@ -112,7 +112,11 @@ func (a *ApprovalManager) foldRequestRecords(ctx context.Context, log durable.Fa
 // storedRequestRecords reads every request record on the durable face in the order
 // its keys name, and refuses by name a pair whose body states another identity than
 // its key: a record read as an identity it does not name would answer for a caller
-// the store never held.
+// the store never held. The read is the family's and is a prefix scan by design: a
+// key names one caller identity, while the boot fold and the lookup by tool and
+// arguments want every record the face holds, so no reader can name the keys it
+// asks for. A scan the store could not complete is reported as that failure, never
+// as a face that holds no record.
 func storedRequestRecords(ctx context.Context, log durable.FactLog) ([]approvalRequestRecord, error) {
 	stored, err := log.Scan(ctx, approvalRequestPrefix)
 	if err != nil {
@@ -137,16 +141,27 @@ func storedRequestRecords(ctx context.Context, log durable.FactLog) ([]approvalR
 	return records, nil
 }
 
+// pointReadLog is the fact surface that answers one key by name: a request
+// record and the fact a role filed are each one key their readers name, so the
+// read costs that key and never the attention stream around it. A face that
+// states no such read refuses the read by name instead of scanning the stream.
+type pointReadLog interface {
+	Get(ctx context.Context, key string) ([]byte, bool, error)
+}
+
 // requestRecordOnFace reads the request record one caller identity is seated under,
 // by the key that identity names: one record is one key, so the read costs that key
 // and never the stream around it.
 func requestRecordOnFace(ctx context.Context, log durable.FactLog, asked string) (ApprovalRequest, bool, error) {
 	key := approvalRequestKey(asked)
-	stored, err := log.Scan(ctx, key)
+	reader, statesPointRead := log.(pointReadLog)
+	if !statesPointRead {
+		return ApprovalRequest{}, false, fmt.Errorf("approval: the durable face states no point read of the request record %s", key)
+	}
+	raw, kept, err := reader.Get(ctx, key)
 	if err != nil {
 		return ApprovalRequest{}, false, fmt.Errorf("approval: read the request record %s: %w", key, err)
 	}
-	raw, kept := stored[key]
 	if !kept {
 		return ApprovalRequest{}, false, nil
 	}
@@ -166,11 +181,14 @@ func requestRecordOnFace(ctx context.Context, log durable.FactLog, asked string)
 // refused by name, so a fact read back is the one that was filed there.
 func factOnFace(ctx context.Context, log durable.FactLog, role, tool, argsDigest, id string) (event.Event, bool, error) {
 	key := factKey(event.EventID(approvalFact(role, tool, argsDigest, id).FactKey()))
-	stored, err := log.Scan(ctx, key)
+	reader, statesPointRead := log.(pointReadLog)
+	if !statesPointRead {
+		return event.Event{}, false, fmt.Errorf("approval: the durable face states no point read of the attention %s %s", role, key)
+	}
+	raw, kept, err := reader.Get(ctx, key)
 	if err != nil {
 		return event.Event{}, false, fmt.Errorf("approval: read the attention %s %s: %w", role, key, err)
 	}
-	raw, kept := stored[key]
 	if !kept {
 		return event.Event{}, false, nil
 	}
@@ -291,7 +309,10 @@ func (l *attentionLedger) putAttentionFact(ctx context.Context, log durable.Fact
 
 // foldAttentionFacts reads every stored fact in landing order: the stamp the fact
 // was filed at, ties read by the identity the key names, so two reads of one store
-// answer the same order.
+// answer the same order. The read is the stream's and is a prefix scan by design:
+// the facts a stream holds are the log's to name, not the folder's, and the fold
+// must reach every one of them. A scan the store could not complete is reported as
+// that failure, never as a stream that holds no fact.
 func foldAttentionFacts(ctx context.Context, log durable.FactLog) ([]event.Event, error) {
 	stored, err := log.Scan(ctx, attentionFactPrefix)
 	if err != nil {

@@ -481,7 +481,7 @@ class MutationGateTest(unittest.TestCase):
     def test_patch_set_is_applied_and_restored_as_one(self):
         mutation = [item for item in gate.MUTATIONS
                     if item.id == "MUT-EVID-04-position-boundary"][0]
-        self.assertEqual(len(mutation.patch_set()), 8)
+        self.assertEqual(len(mutation.patch_set()), 9)
         files = {replacement.file for replacement in mutation.patch_set()}
         self.assertEqual(files, {"assembly/request.go", "assembly/facts.go"})
 
@@ -500,6 +500,11 @@ class MutationGateTest(unittest.TestCase):
             self.assertNotIn("endedPrefix", mutated["assembly/request.go"])
             self.assertIn("held.ended = position", mutated["assembly/facts.go"])
             self.assertIn("\tboundary := held.ended\n", mutated["assembly/facts.go"])
+            # Every read of the boundary is relocated: one left on the deleted
+            # method is a mutant the package refuses to build, which the gate
+            # reports as a compile_failure rather than a kill.
+            self.assertNotIn("held.endedPrefix()", mutated["assembly/facts.go"])
+            self.assertNotIn("held.endedPrefix()", mutated["assembly/request.go"])
             gate.restore_patch(tree, pristine)
             for name in files:
                 self.assertEqual((tree / name).read_text(encoding="utf-8"),
@@ -627,7 +632,8 @@ class RepointedHandoverAnchorTest(unittest.TestCase):
         self.assertEqual(gate.validate_registry(self.root, gate.MUTATIONS), [])
         sink = (self.root / "assembly/facts.go").read_text(encoding="utf-8")
         self.assertEqual(sink.count(self.mutation.replacement.old), 1)
-        self.assertIn("retainNoticeOwed", self.mutation.replacement.old)
+        self.assertIn("if refusal := r.loop.Backflow(", self.mutation.replacement.old)
+        self.assertNotIn("retainNoticeOwed", self.mutation.replacement.old)
         self.assertTrue(self.mutation.replacement.old.rstrip().endswith(
             "r.store.Consume(ctx, frame.Address, frame.Identity.InstanceID, seq)"))
 

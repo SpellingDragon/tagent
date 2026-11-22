@@ -441,6 +441,65 @@ func applyHostGCTrace() {
 		hostGCTraceEnv, hostGCTraceSetting, merged)
 }
 
+// bootSeam is one assembly face Boot builds itself and therefore cannot carry
+// from its caller: the option a caller would name it by and the config field that
+// option fills.
+type bootSeam struct {
+	// option is the assembly option that names this face.
+	option string
+	// set reports whether the caller's options filled this field.
+	set func(*assemblyConfig) bool
+}
+
+// bootUnhonoredSeams lists every field of assemblyConfig that Boot never replays
+// into the option set it builds: the faces this entry derives from its own
+// document or wires from its own consumers, so a caller's value would be dropped
+// without a word. The list is the complement of the faces Boot carries — the
+// forwarded WithPlugins, WithStateSlice, WithGenerationConsumer, WithGovernance,
+// WithApprover, WithPolicy, WithApprovals, WithEnforcement and WithStorage, beside
+// the two host-level faces WithSender and WithDeliveryRuler it holds itself. A
+// field added to assemblyConfig without a seat here or a replay there is a silent
+// drop, which is why the check reads this list instead of each option in turn.
+//
+// 契约: docs/wiki/platform/platform-subsystems.md#composition-root
+var bootUnhonoredSeams = []bootSeam{
+	{"WithCapture", func(c *assemblyConfig) bool { return c.capture != nil }},
+	{"WithEmbedder", func(c *assemblyConfig) bool { return c.embedder != nil }},
+	{"WithExecManager", func(c *assemblyConfig) bool { return c.execManager != nil }},
+	{"WithGenerationFaces", func(c *assemblyConfig) bool { return c.genFaces != nil }},
+	{"WithMemoryPlan", func(c *assemblyConfig) bool { return c.memory != nil }},
+	{"WithModelLease", func(c *assemblyConfig) bool { return len(c.leases) > 0 }},
+	{"WithRecorder", func(c *assemblyConfig) bool { return c.recorder != nil }},
+	{"WithReflectionAnchors", func(c *assemblyConfig) bool { return c.reflectionAnchors != "" }},
+	{"WithTelemetry", func(c *assemblyConfig) bool { return c.observer != nil }},
+	{"withBootConfigReconcile", func(c *assemblyConfig) bool { return c.bootReconcile != nil }},
+	{"withHostGenerationPorts", func(c *assemblyConfig) bool { return len(c.genPorts) > 0 }},
+	{"withTaskTerminalTTL", func(c *assemblyConfig) bool { return c.taskTerminalTTL != 0 }},
+}
+
+// refuseUnhonoredBootOptions refuses a boot whose caller declared an assembly face
+// this entry builds itself: the option would take no effect, so it is named
+// instead of dropped. The check reads the caller's options alone, because it runs
+// before this entry appends its own, so every face Boot wires for itself is
+// untouched by it.
+//
+// 契约: docs/wiki/platform/platform-subsystems.md#composition-root
+func refuseUnhonoredBootOptions(cfg *assemblyConfig) error {
+	if cfg == nil {
+		return nil
+	}
+	var refused []string
+	for _, seam := range bootUnhonoredSeams {
+		if seam.set(cfg) {
+			refused = append(refused, seam.option)
+		}
+	}
+	if len(refused) == 0 {
+		return nil
+	}
+	return fmt.Errorf("tagent: Boot cannot honor %s: this entry builds that face itself from its document, so the option would be dropped without effect. Use Assemble to seat the face the option declares", strings.Join(refused, ", "))
+}
+
 // Boot reads one host document and returns the assembled host: the
 // declaration is resolved from the document, the models, tool instances,
 // storage tier, embedder and reflection plan are built for it, the run is
@@ -462,6 +521,9 @@ func applyHostGCTrace() {
 // - The reflection instance is mounted unconditionally and forwards every commit to the driver of the generation in effect, so a reload that moves or adds a meditation section replaces the driver behind an instance this run already holds.
 // - The host's own native face consumer mounts last, after the meditation consumer whose reflection plan the tool, skill and file face it composes builds over: the order these options are applied in is the order the registry builds.
 // - The reflection anchor store is wired whether or not the boot document enables meditation: each generation mounts its loop over the store of the record its own plan names, so a generation that enables, moves or drops meditation reads the anchor record it declares and a rebuilt loop continues from the watermark the previous one consumed.
+// - The caller's own contributions reach this assembly: every builder attached through WithPlugins and every consumer mounted through WithGenerationConsumer is replayed ahead of the ones this entry mounts itself, so a contributed factory runs once in the caller's declared order and a caller's consumer registers before the host's own.
+// - Every state slice the caller mounts through WithStateSlice is replayed into the same assembly, so it mounts on the run's state seam before the boot restore and the cut restores into the caller's holder; a slice the checkpoint states beside no holder is still refused by name.
+// - A face this entry builds itself — the capture, the embedder, the memory plan, the model leases, the observation and recording faces, the execution ledger, the generation faces and ports, the reflection anchors, the task terminal TTL and the boot reconciliation — is refused by name when a caller declares one through an option, because the value would be dropped without effect; Assemble is the entry that seats a caller's face. The contributions listed above are replayed as before.
 func Boot(configPath string, opts ...HostOption) (*Host, error) {
 	traceStart := time.Now()
 	trace := func(name string) {
@@ -479,6 +541,9 @@ func Boot(configPath string, opts ...HostOption) (*Host, error) {
 	var cfg assemblyConfig
 	for _, opt := range opts {
 		opt(&cfg)
+	}
+	if err := refuseUnhonoredBootOptions(&cfg); err != nil {
+		return nil, err
 	}
 	decl, err := doc.Declaration()
 	if err != nil {
@@ -629,7 +694,17 @@ func Boot(configPath string, opts ...HostOption) (*Host, error) {
 	} else {
 		governanceFaces = newHostGovernanceFaces(specs, nil)
 	}
-	options := []Option{
+	var options []Option
+	for _, build := range cfg.pluginBuilders {
+		options = append(options, WithPlugins(build))
+	}
+	for _, registration := range cfg.genRegistrations {
+		options = append(options, WithGenerationConsumer(registration))
+	}
+	for _, holder := range cfg.stateSlices {
+		options = append(options, WithStateSlice(holder))
+	}
+	options = append(options,
 		WithGovernance(governanceOf(cfg.governance)),
 		WithTelemetry(observer),
 		withHostGenerationPorts(telemetryFaces, governanceFaces),
@@ -637,7 +712,7 @@ func Boot(configPath string, opts ...HostOption) (*Host, error) {
 		WithGenerationConsumer(governanceFaces.registration()),
 		WithGenerationConsumer(memoryFaces.registration()),
 		WithGenerationConsumer(meditationFaces.registration()),
-	}
+	)
 	execManager = tagentexec.NewManager(tagentexec.NewDeferredTmuxExecutor(), tagentexec.WithStateObserver(func(evt tagentexec.StateEvent) {
 		if host != nil {
 			host.observeExecState(evt)

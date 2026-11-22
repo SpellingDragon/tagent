@@ -2,6 +2,7 @@
 package governance
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -15,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/SpellingDragon/tagent/api/event"
 	"github.com/SpellingDragon/tagent/api/plugin"
 	"github.com/SpellingDragon/tagent/runtime/state"
 	"github.com/SpellingDragon/tagent/runtime/task/approval"
@@ -58,6 +60,18 @@ func (l *sliceLog) Put(_ context.Context, key string, value []byte) error {
 	defer l.mu.Unlock()
 	l.stored[key] = append([]byte(nil), value...)
 	return nil
+}
+
+// Get answers one stored pair by its own key and records the read.
+func (l *sliceLog) Get(_ context.Context, key string) ([]byte, bool, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.scans = append(l.scans, key)
+	value, held := l.stored[key]
+	if !held {
+		return nil, false, nil
+	}
+	return append([]byte(nil), value...), true, nil
 }
 
 // Scan answers every stored pair under the prefix and records the read.
@@ -447,6 +461,11 @@ func TestGovernanceRecoveryFromStateSlice(t *testing.T) {
 type failingLog struct {
 	sliceLog
 	err error
+}
+
+// Get answers the read failure of the store.
+func (l *failingLog) Get(context.Context, string) ([]byte, bool, error) {
+	return nil, false, l.err
 }
 
 // Scan answers the read failure of the store.
@@ -1304,6 +1323,233 @@ func TestGovernanceHistoryStaysReadableByIdentity(t *testing.T) {
 	})
 }
 
+// TestGovernanceMissingSliceReadsTheWholeChain pins the seat a composition restores when no checkpoint states the governance state.
+//   - positive: both streams are read whole past the zero cut, so the record and the goal committed before the restart are answered
+//   - negative: the hold is seated from the whole attention stream and its request record, so the cut that states nothing is not the record it is read from
+//   - consumer: a composition that finds no governance slice restores no cut and binds the durable face
+//
+// 契约: docs/wiki/platform/platform-subsystems.md#framework-checkpoint
+func TestGovernanceMissingSliceReadsTheWholeChain(t *testing.T) {
+	ctx := context.Background()
+	log := newSliceLog()
+	donorBook := approval.NewApprovalManager("", 0, approval.WithApprovalSeat())
+	donorLedger, donorGoals := NewDenialLedger(), NewGoalRegistry()
+	donor := NewStateSeat(donorLedger, donorGoals, donorBook)
+	if err := donor.RestoreState(ctx, nil); err != nil {
+		t.Fatalf("seat the first process at the zero cut: %v", err)
+	}
+	if err := donor.Bind(ctx, log); err != nil {
+		t.Fatalf("bind the first process to its chain: %v", err)
+	}
+	donorLedger.Record(DenialRecord{Subtype: SubtypeDenial, ToolName: "shell_exec", Level: plugin.RiskHigh, RuleID: "no-deploy", Reason: "refused"})
+	declared := donorGoals.Declare("ship the release", "entry", 0)
+	held, err := donorBook.Request(ctx, "approval-no-cut-1", "exec", []byte(`{"cmd":"deploy"}`), plugin.RiskCritical, "no-deploy", "critical risk awaits approval")
+	if err != nil {
+		t.Fatalf("park one critical call: %v", err)
+	}
+
+	restartedLedger, restartedGoals := NewDenialLedger(), NewGoalRegistry()
+	restartedBook := approval.NewApprovalManager("", 0, approval.WithApprovalSeat())
+	seat := NewStateSeat(restartedLedger, restartedGoals, restartedBook)
+	if err := seat.RestoreState(ctx, nil); err != nil {
+		t.Fatalf("restore the seat a missing slice leaves: %v", err)
+	}
+	if err := seat.Bind(ctx, log); err != nil {
+		t.Fatalf("bind the durable face past the zero cut: %v", err)
+	}
+	if got := restartedLedger.Query(0); len(got) != 1 || got[0].ToolName != "shell_exec" {
+		t.Fatalf("the records beside a missing slice = %+v, want the one the whole stream holds", got)
+	}
+	if got := restartedGoals.List(); len(got) != 1 || got[0].ID != declared {
+		t.Fatalf("the goals beside a missing slice = %+v, want the one %s the whole stream holds", got, declared)
+	}
+	if pending := restartedBook.Pending(); len(pending) != 1 || pending[0].ID != held.ID {
+		t.Fatalf("the book beside a missing slice answers %+v, want the hold %s the whole chain holds: the cut states nothing, so the face is the one record", pending, held.ID)
+	}
+}
+
+// chainReadFailureLog refuses the reads of the approval chain keys a probe names
+// and answers every other read from the store beside it.
+type chainReadFailureLog struct {
+	*sliceLog
+	refused map[string]bool
+	err     error
+
+	refusalMu sync.Mutex
+	refusals  []string
+}
+
+// Get answers one stored pair, or names the one key a probe refuses: the readers
+// that name one key by identity read it here, so the refusal a probe states is
+// the read failure those readers see instead of "the store holds no such key".
+func (l *chainReadFailureLog) Get(ctx context.Context, key string) ([]byte, bool, error) {
+	if !l.refused[key] {
+		return l.sliceLog.Get(ctx, key)
+	}
+	l.mu.Lock()
+	l.scans = append(l.scans, key)
+	l.mu.Unlock()
+	l.refusalMu.Lock()
+	l.refusals = append(l.refusals, key)
+	l.refusalMu.Unlock()
+	return nil, false, l.err
+}
+
+// Scan answers the stored pairs, or names the one key a probe refuses.
+func (l *chainReadFailureLog) Scan(ctx context.Context, prefix string) (map[string][]byte, error) {
+	if !l.refused[prefix] {
+		return l.sliceLog.Scan(ctx, prefix)
+	}
+	l.mu.Lock()
+	l.scans = append(l.scans, prefix)
+	l.mu.Unlock()
+	l.refusalMu.Lock()
+	l.refusals = append(l.refusals, prefix)
+	l.refusalMu.Unlock()
+	return nil, l.err
+}
+
+// refusedKeys reports the keys the store refused, in the order they were asked.
+func (l *chainReadFailureLog) refusedKeys() []string {
+	l.refusalMu.Lock()
+	defer l.refusalMu.Unlock()
+	return append([]string(nil), l.refusals...)
+}
+
+// approvalChainKeys reports the request record key and the answer key one ruled
+// request left on a store, so a probe refuses the very reads an identity costs.
+func approvalChainKeys(t *testing.T, log *sliceLog) (recordKey, answerKey string) {
+	t.Helper()
+	log.mu.Lock()
+	defer log.mu.Unlock()
+	for key, raw := range log.stored {
+		if strings.HasPrefix(key, "tagent/approval/v1/request:") {
+			recordKey = key
+			continue
+		}
+		var evt event.Event
+		if err := json.Unmarshal(raw, &evt); err != nil {
+			continue
+		}
+		if evt.Type == event.TypeAttentionAnswer {
+			answerKey = key
+		}
+	}
+	if recordKey == "" || answerKey == "" {
+		t.Fatalf("the store holds record=%q answer=%q, want the request record and the ruling this probe reads by identity", recordKey, answerKey)
+	}
+	return recordKey, answerKey
+}
+
+// TestGovernanceHistoryReadFailureIsNamedNotAbsent pins the chain read one settled identity costs after a restart.
+//   - positive: the identity a person ruled resolves that ruling after a restart, read from the chain the seat bound
+//   - negative: a chain read that fails answers the read failure by name instead of the identity having never been asked
+//   - negative: no second request is minted over the identity a person was handed, and the stored record stays as it landed
+//   - consumer: StateSeat.Bind hands the approval book the durable face, and Decide answers an approver by identity
+//
+// 契约: docs/wiki/agent/governance-enforcement.md#approval-channel
+func TestGovernanceHistoryReadFailureIsNamedNotAbsent(t *testing.T) {
+	ctx := context.Background()
+	const identity = "approval-history-1"
+	const approver = "the-first-approver"
+	const laterApprover = "a-later-approver"
+	args := []byte(`{"cmd":"deploy"}`)
+
+	log := newSliceLog()
+	book := approval.NewApprovalManager("", 0, approval.WithApprovalSeat())
+	seat := NewStateSeat(NewDenialLedger(), NewGoalRegistry(), book)
+	if err := seat.RestoreState(ctx, []byte(fmt.Sprintf(`{"version":%d}`, stateSliceVersion))); err != nil {
+		t.Fatalf("seat the cut that states no approval: %v", err)
+	}
+	if err := seat.Bind(ctx, log); err != nil {
+		t.Fatalf("bind the approval chain: %v", err)
+	}
+	if _, err := book.Request(ctx, identity, "exec", args, plugin.RiskCritical, "no-deploy", "critical risk awaits approval"); err != nil {
+		t.Fatalf("park one critical call: %v", err)
+	}
+	if _, err := book.Decide(identity, approval.ApprovalDenied, approver); err != nil {
+		t.Fatalf("rule the parked call denied: %v", err)
+	}
+	cut := mustStateCut(t, seat)
+	if wire := statedWire(t, cut); len(wire.Approvals) != 0 {
+		t.Fatalf("the cut states the approvals %+v, want none: a book that reached the chain leaves a ruled request to be read back by identity", wire.Approvals)
+	}
+	recordKey, answerKey := approvalChainKeys(t, log)
+	log.mu.Lock()
+	recordBody := append([]byte(nil), log.stored[recordKey]...)
+	log.mu.Unlock()
+	if recordBody == nil {
+		t.Fatalf("the store holds no request record at %s, want the record the identity was filed under", recordKey)
+	}
+
+	t.Run("the identity answers its ruling when the chain reads", func(t *testing.T) {
+		restarted := approval.NewApprovalManager("", 0, approval.WithApprovalSeat())
+		restartedSeat := NewStateSeat(NewDenialLedger(), NewGoalRegistry(), restarted)
+		if err := restartedSeat.RestoreState(ctx, cut); err != nil {
+			t.Fatalf("restore the cut: %v", err)
+		}
+		if err := restartedSeat.Bind(ctx, log); err != nil {
+			t.Fatalf("bind the chain the restored cut numbers: %v", err)
+		}
+		ruled, err := restarted.Decide(identity, approval.ApprovalApproved, laterApprover)
+		if err != nil {
+			t.Fatalf("the identity the first process handed the approver no longer resolves after the restart: %v", err)
+		}
+		if ruled.ID != identity || ruled.Status != approval.ApprovalDenied || ruled.DecidedBy != approver {
+			t.Fatalf("the restarted book answers %s with %s by %q, want the refusal %q stated: a ruling read back is the one that landed",
+				ruled.ID, ruled.Status, ruled.DecidedBy, approver)
+		}
+	})
+
+	for _, leg := range []struct{ name, key string }{
+		{name: "the identity record", key: recordKey},
+		{name: "the ruling filed under it", key: answerKey},
+	} {
+		t.Run("a refused chain read of "+leg.name+" is named", func(t *testing.T) {
+			readErr := fmt.Errorf("the store answered no read of %s", leg.key)
+			failing := &chainReadFailureLog{sliceLog: log, refused: map[string]bool{leg.key: true}, err: readErr}
+			restarted := approval.NewApprovalManager("", 0, approval.WithApprovalSeat())
+			restartedSeat := NewStateSeat(NewDenialLedger(), NewGoalRegistry(), restarted)
+			if err := restartedSeat.RestoreState(ctx, cut); err != nil {
+				t.Fatalf("restore the cut: %v", err)
+			}
+			if err := restartedSeat.Bind(ctx, failing); err != nil {
+				t.Fatalf("bind the chain beside a refusal the boot does not pay: %v", err)
+			}
+			_, err := restarted.Decide(identity, approval.ApprovalApproved, laterApprover)
+			if err == nil {
+				t.Fatalf("answering the identity beside a refused read of %s = nil, want the read failure named: an unread ruling is not a ruling that never landed", leg.key)
+			}
+			if !errors.Is(err, readErr) {
+				t.Fatalf("the answer beside a refused read of %s = %v, want %v named", leg.key, err, readErr)
+			}
+			if errors.Is(err, approval.ErrApprovalNotFound) {
+				t.Fatalf("the answer beside a refused read of %s = %v, want the read failure: the identity a person was handed is not one the chain never held", leg.key, err)
+			}
+			if got := failing.refusedKeys(); len(got) != 1 || got[0] != leg.key {
+				t.Fatalf("the identity read paid for %v, want the one key %s the identity names", got, leg.key)
+			}
+			if pending := restarted.Pending(); len(pending) != 0 {
+				t.Fatalf("the book holds %+v after the refused read, want no request: the identity is not re-parked", pending)
+			}
+			stated, keys := restarted.SnapshotEvidence()
+			if len(stated) != 0 || len(keys) != 0 {
+				t.Fatalf("the book states %d request(s) under %v after the refused read, want none: a read this process could not answer is not a request it holds", len(stated), keys)
+			}
+			records := log.keysOf("tagent/approval/v1/request:")
+			if len(records) != 1 || records[0] != recordKey {
+				t.Fatalf("the store holds the request records %v after the refused read, want the one %s: a second identity over one parked call is a request nobody was asked", records, recordKey)
+			}
+			log.mu.Lock()
+			after := append([]byte(nil), log.stored[recordKey]...)
+			log.mu.Unlock()
+			if !bytes.Equal(after, recordBody) {
+				t.Fatalf("the request record at %s was rewritten beside a refused read (before=%s after=%s): a read that never landed cannot move the record it could not read", recordKey, recordBody, after)
+			}
+		})
+	}
+}
+
 // TestGovernanceCountAndQueryStateTheirBoundary pins what the history queries answer beside a cut that states tails alone.
 //   - positive: the queries answer the history behind the stated tails, so a restored cut never answers an empty history
 //   - negative: no query answers its stream's tail as a count, and a stream that numbers resolutions beside declarations answers the goals, not the events
@@ -1391,6 +1637,17 @@ func (s *goalWriteSeam) Put(_ context.Context, key string, value []byte) error {
 	}
 	s.staged[key] = append([]byte(nil), value...)
 	return nil
+}
+
+// Get answers one published pair by its own key.
+func (s *goalWriteSeam) Get(_ context.Context, key string) ([]byte, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	value, held := s.stored[key]
+	if !held {
+		return nil, false, nil
+	}
+	return append([]byte(nil), value...), true, nil
 }
 
 // Scan answers every published pair under the prefix.

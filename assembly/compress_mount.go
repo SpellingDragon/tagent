@@ -5,6 +5,10 @@
 // mount also installs it as that plugin's executor; the age fold finds it
 // constructed whichever order the catalog lists the two in.
 //
+// The mount is also where the account declares the read a restored cut leaves it:
+// the slice states its own coverage, so the boot reads the compression facts a cut
+// carrying no such slice leaves unstated without the coordinator naming a consumer.
+//
 // 契约: docs/wiki/agent/event-flow.md#projection-lifecycle
 package assembly
 
@@ -23,6 +27,7 @@ func compressConsumerPlugin() builtinPlugin {
 			face := ageFoldSessions{run: r}
 			r.compress = NewCompressionConsumer(face, face).withSummaryGist(bandSummaries{run: r})
 			r.ageFold.setExecutor(r.compress)
+			r.coverageRestores = append(r.coverageRestores, compressStateSlice{run: r})
 			return []plugin.Instance{r.compress}, nil
 		},
 	}

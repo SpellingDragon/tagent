@@ -490,6 +490,11 @@ func (recFailingLog) Put(ctx context.Context, key string, value []byte) error {
 	return errors.New("rec failing log: the store is down")
 }
 
+// Get fails, as the store is down.
+func (recFailingLog) Get(ctx context.Context, key string) ([]byte, bool, error) {
+	return nil, false, errors.New("rec failing log: the store is down")
+}
+
 // Scan fails, as the store is down.
 func (recFailingLog) Scan(ctx context.Context, prefix string) (map[string][]byte, error) {
 	return nil, errors.New("rec failing log: the store is down")

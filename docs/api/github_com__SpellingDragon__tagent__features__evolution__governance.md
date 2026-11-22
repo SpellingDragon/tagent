@@ -523,6 +523,31 @@ type StateSeat struct {
     composition mounts on the runtime's state seam, so one checkpoint cut states
     the governance state and one restore puts it back.
 
+    The seat states the recovery it owns, and it answers four questions:
+      - what the cut states: the sequence each stream ended at, the goal
+        declaration order with the goals in force — every goal beside no store,
+        where the cut is their only record — and the approval book — the holds a
+        restore keeps under the identity each was asked under, and a ruling only
+        beside no durable face, where the cut is its one record. The history
+        behind a sequence — denial records, resolutions, and the rulings a
+        bound book reads back by identity — is not stated: the cut numbers it,
+        and the reader that asks for it reads the stream.
+      - what a missing slice reads: no cut is the zero cut. Both streams
+        continue from their first key and the events past it are the whole
+        stream; the approval book seats nothing from the cut and takes its boot
+        restore, then reads the whole attention stream with the request records
+        on it, so the holds and rulings of a process that took no cut are
+        answered by the face.
+      - what corruption refuses: a body that is no governance state, a layout
+        this code does not read, a negative watermark, and a tail this process
+        cannot read are refused by name. None of them restores an empty state
+        over a committed cut, because an empty state beside a committed cut
+        hands the stream keys to a writer that re-keys over events already
+        stored.
+      - what Bind folds: the events that landed past the restored cut, read from
+        each stream's own tail. A read the bind cannot answer fails the bind by
+        name instead of leaving the state short of its stream.
+
 func NewStateSeat(ledger *DenialLedger, goals *GoalRegistry, approvals *approval.ApprovalManager) *StateSeat
     NewStateSeat returns the governance state of one process as a state seam
     slice: the ledger, the goal registry and the approval book that stand behind
@@ -544,10 +569,9 @@ func (s *StateSeat) RestoreState(ctx context.Context, payload []byte) error
     bound (StateSeat.Bind), so a boot states the same governance as the process
     that cut it.
 
-    A cut that states nothing is the zero cut: the streams continue from their
-    first key, the events past it are the whole stream, and the approval book
-    reads the request files, because a process that took no cut left them as its
-    only record.
+    A payload that states nothing is the zero cut the seat declares: the holders
+    are seated at their first key, and the approval book takes the restore a
+    process that took no cut takes.
 
 func (s *StateSeat) SnapshotState(_ context.Context) ([]byte, error)
     SnapshotState states the governance state as JSON: the tail each stream

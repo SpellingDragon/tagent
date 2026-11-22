@@ -612,6 +612,23 @@ MUTATIONS: Tuple[Mutation, ...] = (
                 old="\tboundary := held.endedPrefix()\n",
                 new="\tboundary := held.ended\n",
             ),
+            # Anchor added 2026-11-22 (04.402b). The fold-time registration
+            # grew a third read of the boundary in assembly/facts.go —
+            # chainAlreadyPresented, the commit asking where the identity stands
+            # against the material the chain already presented — and it resolved
+            # the boundary through endedPrefix like the two reads above. Left
+            # unrelocated, the mutation renamed the field and deleted the method
+            # while that read still named the method, so the package failed to
+            # build and the mutant counted as a compile_failure instead of a
+            # kill. Relocating this read restores the build and keeps the fault
+            # whole: the stored position this read follows carries the same
+            # stale value after a fold, so the already-presented judgment drifts
+            # with the boundary it reads.
+            Replacement(
+                file="assembly/facts.go",
+                old="\tprefix := held.endedPrefix()\n",
+                new="\tprefix := held.ended\n",
+            ),
             # The presentation read resolves its prefix from the same position:
             # the mutant keeps the position here too, so the read compiles and
             # stays wrong in the same way as the boundary it follows.

@@ -322,6 +322,17 @@ type Run struct {
 	// states is the state seam of this run: the registry every consumer's
 	// recoverable state slice is mounted on, aggregated into one checkpoint.
 	states *state.StateRegistry
+	// restoreSeats is every owner that declared a restore prerequisite: its state
+	// is seated before any holder is handed a slice, because the holders read that
+	// state while they restore. The wiring of the owner appends here, so the
+	// coordinator seats the account without reading what any slice states.
+	restoreSeats []restoreSeat
+	// coverageRestores is every owner that declared the facts a restored cut leaves
+	// unstated for it: the owner reads them from the chain, so a cut carrying no
+	// slice of that owner never stands for the account it does not state. The wiring
+	// of the owner appends here, so the coordinator names no consumer and reads no
+	// payload of one.
+	coverageRestores []coverageRestore
 	// obligations is the account every landed fact is applied to (see
 	// mountObligationAccount): the delivery account of the host mounted on this
 	// run. A run beside no mounted account lands its facts without one.
@@ -369,6 +380,17 @@ type Run struct {
 	// reader reads only past the cut of a checkpoint that actually states its
 	// state and reads the whole chain beside one that does not.
 	checkpointSlices map[string]bool
+	// restoredSlices names every state slice the cuts this boot restored state: the
+	// framework's cut beside the newest cut of every session chain. A mounted holder
+	// the accumulated set does not name started from the empty state the seam gave
+	// it, which the boot answers by replaying every chain whole beside a cut that
+	// bounds its own replay (see judgeContributedSliceCoverage).
+	restoredSlices map[string]bool
+	// fullReplayOnBoot reports that this boot replays every chain from its beginning
+	// instead of past the cuts it restored, because a mounted holder states a slice
+	// none of them carries and that holder declares no read of its own for the
+	// material below the cut.
+	fullReplayOnBoot bool
 	// restoredInputs is the input rounds the newest checkpoint stated with no
 	// answer: they stand before every fact that landed past the cut, so the rest
 	// criterion judges the owed drives of a restart beside the tail it replays.
@@ -501,6 +523,8 @@ type Run struct {
 // - The consumer of compression judgments is an instance of the material flow like the fold that judges them, so every agent's After pass executes the judgments already filed instead of waiting for a producer to hand them over.
 // - The producer of the closing round is an instance of the same flow: every agent's After pass judges the budget of the segment its commit grew, so the closing round of a spent budget stands on the chain as the fact it is.
 // - The loop builds the writer ledger for itself and the run reads it through the loop, so the close judges the very registrations the productions made.
+// - The run-level plugin factories run in the order their options were applied and each exactly once, and a factory that fails stops the sequence with its position named and mounts nothing any factory answered.
+// - The recoverable state a caller contributes mounts on the run's state seam ahead of the boot restore, so the cut restores into the holder the caller declared instead of waiting for a mount that comes after it.
 func Assemble(ctx context.Context, decl *config.Declaration, agents map[event.AgentID]NativeAgent, opts ...Option) (*Run, error) {
 	return assemble(ctx, decl, agents, true, opts...)
 }
@@ -568,6 +592,14 @@ func assemble(ctx context.Context, decl *config.Declaration, agents map[event.Ag
 			return nil, err
 		}
 	}
+	for position, holder := range cfg.stateSlices {
+		if reserved := holder.StateName(); restoredFallbackSlices[reserved] {
+			return nil, fmt.Errorf("tagent: the contributed state slice %q is named like the framework's own slice; the name is reserved for the framework holder its fallback states", reserved)
+		}
+		if _, err := r.states.Register(holder); err != nil {
+			return nil, fmt.Errorf("tagent: mount the state slice %d of %d the caller contributed: %w", position+1, len(cfg.stateSlices), err)
+		}
+	}
 	for id, held := range cfg.leases {
 		lease := held
 		r.leases[id] = &lease
@@ -595,12 +627,16 @@ func assemble(ctx context.Context, decl *config.Declaration, agents map[event.Ag
 		}
 		r.watermark = anchors
 	}
-	if cfg.plugins != nil {
-		instances, err := cfg.plugins(r)
-		if err != nil {
-			return nil, err
+	if len(cfg.pluginBuilders) > 0 {
+		var contributed []plugin.Instance
+		for position, build := range cfg.pluginBuilders {
+			instances, err := build(r)
+			if err != nil {
+				return nil, fmt.Errorf("tagent: build the run-level plugins of factory %d of %d: %w", position+1, len(cfg.pluginBuilders), err)
+			}
+			contributed = append(contributed, instances...)
 		}
-		r.plugins = instances
+		r.plugins = contributed
 	}
 	if err := r.mountBuiltinPlugins(); err != nil {
 		return nil, err
@@ -639,8 +675,12 @@ func assemble(ctx context.Context, decl *config.Declaration, agents map[event.Ag
 	if _, err := r.states.Register(state.NewMailboxState(r.store)); err != nil {
 		return nil, err
 	}
-	if _, err := r.states.Register(tasksStateSlice{registry: r.registry, receipts: durableReceipts(durable)}); err != nil {
+	tasks := tasksStateSlice{registry: r.registry, receipts: durableReceipts(durable), account: durable, tier: tier}
+	if _, err := r.states.Register(tasks); err != nil {
 		return nil, err
+	}
+	if durable != nil {
+		r.restoreSeats = append(r.restoreSeats, tasks)
 	}
 	r.movement = runMovement{registry: r.registry, store: r.store}
 	r.manager = task.NewMemoryManager(r.registry, nil, task.WithEnvelopeDeliverer(r.deliver))
@@ -684,6 +724,7 @@ func assemble(ctx context.Context, decl *config.Declaration, agents map[event.Ag
 		if err := r.restoreCheckpointState(ctx, tier); err != nil {
 			return nil, err
 		}
+		r.judgeContributedSliceCoverage()
 		for _, s := range durable.LoadStats().Scans {
 			assemblyInfo("tagent: durable load scan prefix=%s keys=%d bytes=%d elapsed=%s",
 				s.Prefix, s.Keys, s.Bytes, s.Elapsed.Round(time.Microsecond))
@@ -1066,8 +1107,9 @@ func (r *Run) restoreInMemoryState(ctx context.Context, durable *state.DurableCo
 //   - A tier holding no checkpoint states the empty cut, and the holders are restored from that the same way: each starts from the empty state and the replay past the cut rebuilds it, which past the zero cut is the whole chain.
 //   - The mailbox states the obligations its durable account still owes on either cut, so the work a stopped process left open is seated by this restore and no consumer keeps a restore path of its own.
 //   - The checkpoint is read once per boot: a holder mounted after this call states its slice from the pending set, and the chain rebuild that follows takes the state this call restored instead of restoring it again.
-//   - The account is seated from the whole log before the empty cut is restored, because the mailbox reads the notifications that account owes: an account seated after it delivers nothing a stopped process left open.
+//   - Every owner that declares a restore prerequisite is seated before any holder is handed a slice, because the mailbox reads the notifications the durable task account owes: an account seated after that holder restores delivers nothing a stopped process left open, and the empty cut seats it from the whole log before the holders start from that state.
 //   - The framework's checkpoint states the whole account and each session checkpoint states one chain, so both are restored: the framework one first, which covers the holders that keep no state of a chain, then the newest checkpoint of every chain the storage holds, which states the chains past the framework cut. The restores merge, so a chain named by both stands once at the newer state.
+//   - Every owner that declared the facts a restored cut leaves unstated for it reads them once every slice is back, so a consumer the cut carries no slice of starts from the account the chain states rather than from an empty one; the read follows the restores because a slice restore replaces the batch it states, and a tier holding no checkpoint reads every chain whole, so no declaration is asked there.
 func (r *Run) restoreCheckpointState(ctx context.Context, tier *ledger.Tier) error {
 	if tier == nil {
 		return nil
@@ -1079,14 +1121,20 @@ func (r *Run) restoreCheckpointState(ctx context.Context, tier *ledger.Tier) err
 		restored = held
 	}
 	if !restored {
-		if err := r.seatDurableAccount(ctx, tier, nil); err != nil {
+		if err := r.seatRestoreState(ctx, nil); err != nil {
 			return err
 		}
 		if err := r.states.RestoreEmptyState(ctx); err != nil {
 			return err
 		}
 	}
-	return r.restoreSessionCheckpoints(ctx, tier)
+	if err := r.restoreSessionCheckpoints(ctx, tier); err != nil {
+		return err
+	}
+	if !restored {
+		return nil
+	}
+	return r.restoreCoverageState(ctx, tier)
 }
 
 // restoreChains folds the durable fact chains the storage already holds back
@@ -1360,10 +1408,18 @@ type assemblyConfig struct {
 	// reflectionAnchors is the anchor record path whose watermark the
 	// reflection face reports.
 	reflectionAnchors string
-	// plugins builds the run-level plugin instances every agent's binding
+	// pluginBuilders builds the run-level plugin instances every agent's binding
 	// generation carries: the event-driven faces that observe every commit of
-	// the run, whoever made it.
-	plugins func(*Run) ([]plugin.Instance, error)
+	// the run, whoever made it. The builders are a sequence: each runs once, in
+	// the order it was contributed, and the run-level set is their answers in
+	// that order.
+	pluginBuilders []func(*Run) ([]plugin.Instance, error)
+	// stateSlices are the recoverable state holders the caller contributes:
+	// each mounts on the run's state seam before the boot restore runs, so a
+	// checkpoint stating the slice lands in the holder the caller declared
+	// instead of being refused as a slice no holder mounts. The sequence is the
+	// order the options were applied.
+	stateSlices []state.Stateful
 	// memory is the merged memory declaration the assembly opens: the storage
 	// tier, the embedding binding and the retrieval tuning the declaration
 	// names. An option that states one of those faces directly keeps it, so a
@@ -1451,13 +1507,15 @@ func WithApprovals(approvals *approval.ApprovalManager) Option {
 	return func(c *assemblyConfig) { c.approvals = approvals }
 }
 
-// WithPolicy attaches the governance policy every call admitted through the
-// registration wrapper of this assembly is ruled by: the ruling consumes the
-// one Before pass the call carries — the final call beside the risk grade its
-// risk faces rendered — exactly once per call, before any execution. The
-// policy occupies the approval seat, so it is the sole pre-execution ruling of
-// the assembly: a refused call is turned away before any execution with its
-// named paired result, and a held call parks in the approval wait.
+// WithPolicy attaches the governance policy the calls admitted through the
+// registration wrapper of this assembly are ruled by when the published pipeline
+// declares no Governor of its own: the ruling consumes the one Before pass the
+// call carries — the final call beside the risk grade its risk faces rendered —
+// exactly once per call, before any execution. A Governor a published pipeline
+// declares is the ruling of that pipeline's calls instead, so this policy is the
+// default a declaration supersedes rather than a second ruling beside it. A
+// refused call is turned away before any execution with its named paired result,
+// and a held call parks in the approval wait.
 func WithPolicy(policy plugin.Governor) Option {
 	return func(c *assemblyConfig) { c.policy = policy }
 }
@@ -1530,14 +1588,37 @@ func WithReflectionAnchors(path string) Option {
 	return func(c *assemblyConfig) { c.reflectionAnchors = path }
 }
 
-// WithPlugins builds the run-level plugin instances every agent generation
-// carries: an event-driven face attached here observes every commit of the run,
-// whichever agent session committed it, exactly as a contributed instance
-// observes the commits of its own agent. The builder runs once, after the
-// watermark gate is established and before the first publication, and the
-// instances it answers are never replaced.
+// WithPlugins appends one builder of the run-level plugin instances every agent
+// generation carries: an event-driven face attached here observes every commit
+// of the run, whichever agent session committed it, exactly as a contributed
+// instance observes the commits of its own agent. Each builder runs once per
+// assembly, in the order its option was applied, after the watermark gate is
+// established and before the first publication, and the run-level set is the
+// answers of the builders in that order. A reload publishes a new generation of
+// the generation-scoped consumers and leaves this set in place, so changing it
+// takes another boot.
+//
+// - A builder that fails stops the sequence: the failure names the position it holds beside the cause it answered, and no instance any builder answered reaches the run.
 func WithPlugins(build func(*Run) ([]plugin.Instance, error)) Option {
-	return func(c *assemblyConfig) { c.plugins = build }
+	return func(c *assemblyConfig) {
+		if build == nil {
+			return
+		}
+		c.pluginBuilders = append(c.pluginBuilders, build)
+	}
+}
+
+// WithStateSlice appends one consumer's recoverable state to this assembly: the
+// holder mounts on the run's state seam before the boot restore runs, through
+// the same StateRegistry.Register a consumer mounts with after boot, so a
+// checkpoint stating the slice restores into this holder instead of failing as
+// a slice no holder mounts. Slices append in the order the options are applied,
+// so the wiring renders the same order and the same bytes.
+//
+// - The holder states and restores its own payload; the assembly interprets none of it and names no consumer.
+// - A holder naming no state, and a name another slice already owns, refuse the assembly by name instead of overwriting a slice a consumer owns.
+func WithStateSlice(holder state.Stateful) Option {
+	return func(c *assemblyConfig) { c.stateSlices = append(c.stateSlices, holder) }
 }
 
 // WithGenerationConsumer mounts one consumer on the generation-scoped registry
@@ -2154,15 +2235,72 @@ func (r *Run) observationWired() bool {
 	return r.observationEnabled
 }
 
+// declaredGovernor reports the ruling face the published pipeline declares: the
+// first instance of the binding in effect that serves the call->ruling port and
+// implements Governor. The pipeline is assembled from those instances at dispatch
+// (plugin.NewFlow), but its governor set answers no pass of its own — the one
+// pre-execution ruling of a call is the admission ruling of this run — so the
+// declared face is read here instead of being left declared and never asked.
+//
+// The agents are walked in declaration order over the published bindings, so a
+// pipeline declaring one governor answers that one and a run whose agents declare
+// more than one is ruled by the first declared: one run carries one admission
+// ruling.
+func (r *Run) declaredGovernor() plugin.Governor {
+	if r == nil {
+		return nil
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	decl := r.current.Plan.Declaration
+	if decl == nil {
+		return nil
+	}
+	for _, spec := range decl.Agents {
+		binding, published := r.current.Agents[event.AgentID(spec.ID)]
+		if !published {
+			continue
+		}
+		if governor := declaredGovernorOf(binding.Plugins); governor != nil {
+			return governor
+		}
+	}
+	return nil
+}
+
+// declaredGovernorOf reports the first instance of one published pipeline that
+// serves the call->ruling port as a Governor, in the published order. The port an
+// instance declares is the face it serves, so an instance declaring another port
+// is no governor of this pipeline whatever ruling method it carries: the flow
+// collects a Governor under the call->ruling port alone (api/plugin assemble), and
+// reading the method beside that table would rule a call through a face the
+// instance never declared.
+func declaredGovernorOf(instances []plugin.Instance) plugin.Governor {
+	for _, instance := range instances {
+		governor, ok := instance.(plugin.Governor)
+		if !ok || instance.Port() != plugin.PortCallRuling {
+			continue
+		}
+		return governor
+	}
+	return nil
+}
+
 // admissionRuling resolves the ruling of one call when the call is admitted: the
-// governance policy of the generation in effect rules it, and beside no policy
-// the approver this assembly was configured with rules it, or the strict grade
-// refuses it. The ruling is resolved per call, so a governance table a reload
-// installed rules the bindings already in service.
+// Governor the published pipeline declares rules it, and a pipeline declaring
+// none is ruled by the governance policy of the generation in effect; beside
+// neither the approver this assembly was configured with rules it, or the strict
+// grade refuses it. The ruling is resolved per call, so a governance table a
+// reload installed rules the bindings already in service and a governor a
+// generation declared rules the calls published beside it.
 func (r *Run) admissionRuling() task.Approver {
 	return func(ctx context.Context, name string, jsonArgs []byte) (task.Ruling, error) {
-		if policy := r.governorInEffect(); policy != nil {
-			return policyRuling(policy)(ctx, name, jsonArgs)
+		governor := r.declaredGovernor()
+		if governor == nil {
+			governor = r.governorInEffect()
+		}
+		if governor != nil {
+			return policyRuling(governor)(ctx, name, jsonArgs)
 		}
 		if r.approver != nil {
 			return r.approver(ctx, name, jsonArgs)
@@ -2470,8 +2608,11 @@ type seedReport struct {
 // Every chain the walk registered is established as a site of this instance, so
 // the active set and the unanswered rounds survive the restart instead of
 // resetting with the process.
+// The rebuild a boot runs is the one seedBootChains answers: the anchored replay
+// beside a cut that states every mounted holder, and the whole chain beside one
+// that states no slice of a holder declaring no read of its own.
 func (r *Run) seedReplay(ctx context.Context, tier *ledger.Tier) (map[int]int64, error) {
-	seeds, report, err := r.seedAnchoredReplay(ctx, tier)
+	seeds, report, err := r.seedBootChains(ctx, tier)
 	if err != nil {
 		return nil, err
 	}
@@ -2501,6 +2642,29 @@ func (r *Run) seedReplay(ctx context.Context, tier *ledger.Tier) (map[int]int64,
 		assemblyInfo("tagent: the rebuild folded the state slices of the chains it replayed and drove none of the observation drivers %v", drivers)
 	}
 	return report.Landed, nil
+}
+
+// seedBootChains answers the chain rebuild one boot runs, in the shape both paths
+// already answer: the seeds every chain replays into a request, the report of what
+// the pass read and the sequence each partition landed at.
+//
+//   - A boot that restored a cut stating every mounted holder, and one that restored no cut at all, read past the cut: the anchored replay folds each chain from the newest product the index names, which the boot's own boundary already bounds.
+//   - A boot beside a holder no restored cut states reads every chain whole, because the material below that cut is in no slice the boot restored and the anchored replay would fold only the tail (see judgeContributedSliceCoverage).
+//   - The projection a cut stated is the state the whole-chain fold reaches on its own: the fold appends every mapped entry the chain holds, so the seeds the slice answered are taken and dropped instead of standing beside it.
+func (r *Run) seedBootChains(ctx context.Context, tier *ledger.Tier) (map[event.Address]*sessionSeed, seedReport, error) {
+	r.mu.Lock()
+	whole := r.fullReplayOnBoot
+	r.mu.Unlock()
+	if !whole {
+		return r.seedAnchoredReplay(ctx, tier)
+	}
+	r.takeRestoredProjection()
+	seeds, landed, report, err := r.seedFullReplay(ctx, tier)
+	if err != nil {
+		return nil, report, err
+	}
+	report.Landed = landed
+	return seeds, report, nil
 }
 
 // seedSites makes every session chain a restart rebuilt a site of this
@@ -2608,6 +2772,7 @@ type anchorSlot struct {
 //   - The newest framework checkpoint states the cut of every partition it covered and the projection of every chain it covers, so the entries at or behind that cut are material the restored state already presents and the boot owes them no read.
 //   - The walk therefore stops once every partition the cut names has answered an entry at or behind its own cut: nothing older than that entry can stand past a cut the walk already crossed.
 //   - The bound rests on the checkpoint stating the chains it covers: the partition a cut does not name, and the count that disagrees with the entries the walk named past the cut, answer the whole chain instead, so a bound is never taken over a chain the boot still owes a read.
+//   - The bound states the projection's own coverage and no other consumer's: an owner whose account the cut states no slice of declares the read it owes (see coverageRestore), so the cut never stands for a slice it does not carry.
 func (r *Run) bootIndexWalk(ctx context.Context, tier *ledger.Tier) ([]anchorRef, map[int]int64, error) {
 	cut := r.checkpointCut(checkpointSliceProjection)
 	if len(cut) > 0 {
@@ -2699,7 +2864,8 @@ func (r *Run) walkIndexWhole(ctx context.Context, tier *ledger.Tier) ([]anchorRe
 // - The checkpoint slices this boot restored are the state every slice of the runtime had reached at the cut. A chain beside a fold product reads only the bodies of the facts committed past that product's newest survivor, so the entries the product covers never reach a body read and the chain's boot costs the increment. A chain the restored slices carry beside no fold product reads the bodies of its survivors and of the facts committed past the newest of them, so that boot costs the survivor count plus the increment instead of the history the survivors already state. Configuration records belong to no session chain and stay, being the declaration ledger the restarted run states that no slice carries.
 // - A chain the checkpoint stated is a chain of this run even beside no fact past its cut, so its slot joins the rebuild and the tail of its chain is replayed onto the state the checkpoint states.
 // - The boundary both checkpoints are read past is the newest survivor the payload names, which is the material the projection states rather than the cut the checkpoint states: a cut read before the holders were asked may state a position the survivors behind it already present, and a fact between the two is one the projection already holds.
-// - A compression fact the cut did not cover but the boundary did is handed to the compression account alone, because the projection states the material it folded and the account does not state the judgment or the answer it carries.
+// - The compression account reads the facts the restored cut states no slice of its own for, before this walk runs (see compressStateSlice.RestoreCoverage): the account's coverage is its own slice, so a compression fact the projection presents below that boundary is one the account reads for itself instead of one this walk hands it.
+// - The facts this walk replays reach every reducer the seam mounts, the compression account among them: a fact past the projection boundary that the account read already states the account once, because the fold is idempotent by the identity the fact carries.
 // - The anchor's own product is noted after the walk that seats its judgment: a note strikes only a judgment the account already holds, so noting it first leaves an answered judgment owed and every checkpoint states it.
 // - The replay notes each product after the judgment it answers is seated, because a note of a judgment the account does not hold yet strikes nothing and the answered judgment then stays owed. That order is the commit sequence each entry carries, never the direction the index walk hands the entries in: the direction is the store's and differs from tier to tier over one chain, while the sequence is the chain's own.
 func (r *Run) seedAnchoredReplay(ctx context.Context, tier *ledger.Tier) (map[event.Address]*sessionSeed, seedReport, error) {
@@ -2710,7 +2876,6 @@ func (r *Run) seedAnchoredReplay(ctx context.Context, tier *ledger.Tier) (map[ev
 	}
 	report.Landed = landed
 	seedsRestored := r.takeRestoredProjection()
-	compressCut := r.checkpointCut(checkpointSliceCompress)
 	anchors := map[anchorSlot]int{}
 	seen := map[anchorSlot]struct{}{}
 	var order []anchorSlot
@@ -2761,7 +2926,7 @@ func (r *Run) seedAnchoredReplay(ctx context.Context, tier *ledger.Tier) (map[ev
 				return nil, report, err
 			}
 			seed.projection = trimReplayProjection(ctx, seed.projection, seed.window)
-			tailProducts, err = r.replayChainPastCut(ctx, tier, refs, slot, seed, boundary, boundary, compressCut, "", &report)
+			tailProducts, err = r.replayChainPastCut(ctx, tier, refs, slot, seed, boundary, "", &report)
 			if err != nil {
 				return nil, report, err
 			}
@@ -2812,7 +2977,7 @@ func (r *Run) seedAnchoredReplay(ctx context.Context, tier *ledger.Tier) (map[ev
 					seed.projection = trimReplayProjection(ctx, seed.projection, seed.window)
 					report.Anchors++
 					seeds[addr] = seed
-					tailProducts, err = r.replayChainPastCut(ctx, tier, refs, slot, seed, anchorBoundary, seamBoundary, compressCut, refs[at].key, &report)
+					tailProducts, err = r.replayChainPastCut(ctx, tier, refs, slot, seed, anchorBoundary, refs[at].key, &report)
 					if err != nil {
 						return nil, report, err
 					}
@@ -2970,20 +3135,16 @@ func (r *Run) hydrateSurvivors(ctx context.Context, seed *sessionSeed, survivors
 
 // replayChainPastCut replays one chain onto the state its checkpoint states and
 // answers the products a restart applies on top of that state: a fact committed
-// past the boundary is replayed whole, a compression fact the checkpoint's cut did
-// not cover but the boundary did is handed to the compression account alone, and
-// the material the boundary covers is read by neither path because the checkpoint
-// already states it.
+// past the boundary is replayed whole, and the material the boundary covers is
+// read by no path because the checkpoint already states it.
 //
 //   - The boundary is the newest survivor the checkpoint names, never the cut it states: the state read at the quiet point carries every commit that landed before the holders were asked, so the survivors may stand past the watermark. A fact between the two landed after the cut and before the boundary, so the checkpoint holds the material it folded and the replay must not seat it twice.
-//   - The seam boundary names what a checkpoint vouches beside an anchor rebuild: the anchor bounds only the projection, so the facts it covered down to this boundary are folded before this walk runs (see seedAnchorSurvivors) and this walk reads none of them again, while the compression facts at or below it still reach the account the way they do beside a checkpoint.
+//   - A consumer whose account the cut states no slice of reads the material this boundary covers for itself (see coverageRestore): the boundary divides the projection's presentation and stands for no consumer the cut does not state.
 //   - A checkpoint names the chain it states without entering it: the state it carries is the boundary this replay starts from, never material the chain replays.
 //
-// The covered range costs one index walk and no body read. The exception is a
-// compression fact of that range, which the checkpoint's account states only up to
-// the cut: a checkpoint stating no account at all leaves the range unread.
-func (r *Run) replayChainPastCut(ctx context.Context, tier *ledger.Tier, refs []anchorRef, slot anchorSlot, seed *sessionSeed, boundary, seamBoundary int64, compressCut event.CheckpointOffset, skip event.EventID, report *seedReport) ([]event.CompressProduct, error) {
-	var tail, behind []anchorRef
+// The covered range costs one index walk and no body read.
+func (r *Run) replayChainPastCut(ctx context.Context, tier *ledger.Tier, refs []anchorRef, slot anchorSlot, seed *sessionSeed, boundary int64, skip event.EventID, report *seedReport) ([]event.CompressProduct, error) {
+	var tail []anchorRef
 	for _, ref := range refs {
 		if ref.session != slot.session || ref.partition != slot.partition || ref.key == skip {
 			continue
@@ -2993,19 +3154,6 @@ func (r *Run) replayChainPastCut(ctx context.Context, tier *ledger.Tier, refs []
 		}
 		if ref.seq > boundary {
 			tail = append(tail, ref)
-			continue
-		}
-		if ref.seq > seamBoundary {
-			continue
-		}
-		if compressCut != nil && event.CompressionMechanism(ref.typ) && pastCut(compressCut, ref) {
-			behind = append(behind, ref)
-		}
-	}
-	sort.Slice(behind, func(i, j int) bool { return behind[i].seq < behind[j].seq })
-	for _, ref := range behind {
-		if _, err := r.seedFactAt(ctx, tier, ref.key, ref.partition, report); err != nil {
-			return nil, err
 		}
 	}
 	sort.Slice(tail, func(i, j int) bool { return tail[i].seq < tail[j].seq })

@@ -508,6 +508,15 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Install openspec
+        # This job's third judgement (check-openspec.sh) runs the `openspec` CLI
+        # and exits 2 when the command is absent, so the CLI is installed here to
+        # the same pinned version the `openspec` job uses: the gate judges the
+        # candidate commit, not whether the runner image ships the tool.
+        run: npm install -g @fission-ai/openspec@1.2.0
       - name: Download event evidence
         uses: actions/download-artifact@v4
         with:

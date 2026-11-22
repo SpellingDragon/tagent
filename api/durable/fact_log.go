@@ -9,6 +9,11 @@
 // attention facts all speak it alike. Its signatures carry built-in types only,
 // so any backend satisfies it structurally and no package edge is required in
 // either direction — the memory tier's key-value port among them.
+//
+// A log that also answers one key by name states that read through its own
+// method, and a caller naming its own keys asks for it through the narrow
+// capability its consumer declares, so this surface stays the obligation every
+// backend satisfies while a point read costs the one key where the log states it.
 package durable
 
 import "context"

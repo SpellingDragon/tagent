@@ -357,9 +357,15 @@ func (l *DenialLedger) writeGovernanceEvent(log durable.FactLog, rec DenialRecor
 		l.appendIndex(rec)
 		return
 	}
-	held, scanErr := log.Scan(context.Background(), key)
-	if scanErr == nil {
-		if prior, ok := held[key]; ok {
+	reader, statesPointRead := log.(pointReadLog)
+	if !statesPointRead {
+		governanceWriteFailure(key, rec.Subtype, rec.ToolName, fmt.Errorf("governance: the event log states no point read of %s", key))
+		l.appendIndex(rec)
+		return
+	}
+	prior, held, readErr := reader.Get(context.Background(), key)
+	if readErr == nil {
+		if held {
 			if bytes.Equal(prior, raw) {
 				l.advanceSeq(seq)
 				return
@@ -633,6 +639,14 @@ func governanceEventsPast(ctx context.Context, log durable.FactLog, prefix strin
 	return out, newest, nil
 }
 
+// pointReadLog is the fact surface that answers one key by name: the governance
+// tail names each next sequence's key, so the read costs that key and never the
+// stream around it. A face that states no such read refuses the tail by name
+// instead of scanning the stream for a key it already names.
+type pointReadLog interface {
+	Get(ctx context.Context, key string) ([]byte, bool, error)
+}
+
 // governanceTail reads the stored pairs of one stream that landed past a cut: the
 // stream prefix beside no cut, and the single key each next sequence names past
 // one. The two readings state the same set, and only the second one leaves the
@@ -650,18 +664,20 @@ func governanceTail(ctx context.Context, log durable.FactLog, prefix string, cut
 		return stored, nil
 	}
 	tail := map[string][]byte{}
+	reader, statesPointRead := log.(pointReadLog)
+	if !statesPointRead {
+		return nil, fmt.Errorf("read the %s events: the log states no point read", prefix)
+	}
 	for seq := cut + 1; ; seq++ {
 		key := fmt.Sprintf("%s%019d", prefix, seq)
-		stored, err := log.Scan(ctx, key)
+		raw, held, err := reader.Get(ctx, key)
 		if err != nil {
 			return nil, fmt.Errorf("read the %s event: %w", key, err)
 		}
-		if len(stored) == 0 {
+		if !held {
 			return tail, nil
 		}
-		for held, raw := range stored {
-			tail[held] = raw
-		}
+		tail[key] = raw
 	}
 }
 

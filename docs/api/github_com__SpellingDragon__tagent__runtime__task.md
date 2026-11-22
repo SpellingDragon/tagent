@@ -1265,6 +1265,10 @@ func (r *MemoryRegistry) Reactivate(ctx context.Context, taskID event.TaskID) (i
     its chain first, so a restart re-enters the settled outcome the record holds
     instead of answering that the task is unknown.
 
+      - The shared apply derives the round the re-entry opened; only the
+        deadline stamp and the reported verdict stay outside it, so a chain fold
+        leaves both empty rather than inferring them (see applyFactLocked).
+
 func (r *MemoryRegistry) Reentrant(ctx context.Context, taskID event.TaskID) error
     Reentrant reports whether the task may be re-entered, without moving it:
     the settled status design D7 admits, and the named refusal of every status

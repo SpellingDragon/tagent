@@ -7,6 +7,6 @@ implementation beside the Example function that drives it.
 FUNCTIONS
 
 func ExampleFactLog()
-    ExampleFactLog stages two keys, scans them all in full and completes the
-    barrier before anything is reported durable.
+    ExampleFactLog stages two keys, reads one back by its own key, scans them
+    all in full and completes the barrier before anything is reported durable.
 

@@ -91,9 +91,12 @@ const (
 	// statements in between. It is a derived index on the same terms as the two files
 	// beside it — the table it parallels is itself derived from the log, so a word that is
 	// missing, unknown or past the order bytes the header states costs the walk its seek
-	// and never its answer — and it carries the slot table's watermark, never one of its
-	// own: its size is the capacity the header states times the word, so a table stated
-	// again, grown or reset states this file again behind it.
+	// and never its answer, and one that states some other byte is caught by the walk it
+	// places: a walk entered at a word names the key that word was read for before it ends,
+	// and one that never names it takes the order from the newest commit — and it carries
+	// the slot table's watermark, never one of its own: its size is the capacity the header
+	// states times the word, so a table stated again, grown or reset states this file again
+	// behind it.
 	journalOrderLineFileName = "order.line"
 	// journalOrderLineUnknown is the word a slot states when no commit stated its key:
 	// an empty slot names no order line, so a seek answers none and the caller walks the

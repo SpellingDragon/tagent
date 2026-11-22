@@ -150,6 +150,20 @@ func (l *lineageFactLog) Put(ctx context.Context, key string, value []byte) erro
 	return nil
 }
 
+// Get answers the value held under one key and whether the log holds it.
+func (l *lineageFactLog) Get(ctx context.Context, key string) ([]byte, bool, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, false, err
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	value, held := l.values[key]
+	if !held {
+		return nil, false, nil
+	}
+	return append([]byte(nil), value...), true, nil
+}
+
 // Scan returns every stored pair under the key prefix as key and value.
 func (l *lineageFactLog) Scan(ctx context.Context, prefix string) (map[string][]byte, error) {
 	if err := ctx.Err(); err != nil {

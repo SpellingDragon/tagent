@@ -223,17 +223,10 @@ func (r *MemoryRegistry) resolveOutcomeOwnersLocked(ctx context.Context, report 
 // foldLocked applies one chain link to the registry. A link the registry
 // already folded reports no recovery and adds no second fact; a fresh link
 // rebuilds its task from the admission material the chain carries and derives
-// its obligations from the facts alone.
-//
-// The fold is where a stored status and the task's round are rebuilt. A link
-// written while progress was still a status stores the reserved ordinal that
-// replayedStatus reads as the running phase, its progress notification staying
-// on the chain; the round is the highest the chain really opened — a terminal
-// notice names it, a settle or rollback mutation encodes the one it consumed,
-// and a reactivation or resume opens exactly one new round. Notices a restart
-// still owes are stripped from their outbox once the log confirms consumption,
-// so the round reads from the mutations beside them too: a confirmed terminal
-// is consumed, not unopened.
+// its obligations from the facts alone. The fact itself is applied through the
+// one rule the live commit path runs too (see applyFactLocked), so a rebuilt
+// task and a task the run kept derive one status, revision, round and set of
+// obligations from the same record.
 //
 //   - a link carries no instant, so the movement stamp its transition leaves is unknown rather than the one a checkpoint stated before the cut: a record a fold moved is stamped exactly as a record rebuilt from the chain alone, and the sweep and the logical read answer the same thing on both recovery paths.
 func (r *MemoryRegistry) foldLocked(record TaskRecord) (bool, error) {
@@ -244,7 +237,6 @@ func (r *MemoryRegistry) foldLocked(record TaskRecord) (bool, error) {
 	if fact.Status == StatusUnknown {
 		return false, ErrStatusUnknown
 	}
-	fact.Status = replayedStatus(fact.Status)
 	taskID := fact.TaskID
 	entry, held := r.tasks[taskID]
 	recovered := false
@@ -268,7 +260,7 @@ func (r *MemoryRegistry) foldLocked(record TaskRecord) (bool, error) {
 			r.admission.AdmitKey(record.Spec.DedupKey, record.Spec.CallID, taskID)
 		}
 	} else if prior, ok := entry.mutations[fact.MutationID]; ok {
-		if prior.Status != fact.Status || !slices.Equal(prior.Outbox, fact.Outbox) {
+		if prior.Status != replayedStatus(fact.Status) || !slices.Equal(prior.Outbox, fact.Outbox) {
 			return false, ErrMutationConflict
 		}
 		return false, nil
@@ -276,27 +268,7 @@ func (r *MemoryRegistry) foldLocked(record TaskRecord) (bool, error) {
 		return false, fmt.Errorf("%w: task %s expects revision %d, the chain carries %d",
 			ErrChainBroken, taskID, entry.revision, fact.ExpectedRevision)
 	}
-	entry.markMovement(fact.Status, time.Time{})
-	entry.status = fact.Status
-	entry.revision = fact.ExpectedRevision + 1
-	entry.mutations[fact.MutationID] = fact
-	if target, carried := handoffTargetOf(fact.MutationID); carried {
-		entry.applyHandoff(taskID, target)
-	}
-	entry.round = replayedRound(taskID, entry.round, fact)
-	for _, envelope := range fact.Outbox {
-		entry.obligations = append(entry.obligations, obligationEntry{
-			obligation: Obligation{Kind: ObligationAwaitingDelivery, TaskID: taskID, Notice: envelope.Notice},
-			envelope:   envelope,
-		})
-		r.seq.Observe(envelope.Notice)
-		if envelope.Notice.Round > entry.round {
-			entry.round = envelope.Notice.Round
-		}
-	}
-	if isTerminal(fact.Status) {
-		entry.closeExecutionObligation("")
-	}
+	r.applyFactLocked(entry, fact, time.Time{})
 	return recovered, nil
 }
 

@@ -202,6 +202,13 @@ func (a *ApprovalManager) Decide(id string, status ApprovalStatus, by string) (*
     keeps under it, so an approver answering a request the cut left behind still
     rules that request instead of one a book would have to mint.
 
+    - a ruling is filed before the mirror moves: the resident status changes
+    only once the answer landed, so a refused write leaves the request owed in
+    the cut - a write this book could not confirm is answered by reading the
+    answer key back, so the ruling is the fact the store kept and never this
+    call's guess - a face this book cannot read is named to the caller, never
+    folded into "no ruling": an unread answer is not an answer that never landed
+
 func (a *ApprovalManager) DeliveryGaps() []DeliveryGap
     DeliveryGaps reports the visible channel failures recorded so far.
 

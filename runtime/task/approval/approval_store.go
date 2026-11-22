@@ -421,6 +421,10 @@ func (a *ApprovalManager) Request(ctx context.Context, id, tool string, jsonArgs
 // the book holds no resident request for is ruled from the record the chain keeps
 // under it, so an approver answering a request the cut left behind still rules that
 // request instead of one a book would have to mint.
+//
+// - a ruling is filed before the mirror moves: the resident status changes only once the answer landed, so a refused write leaves the request owed in the cut
+// - a write this book could not confirm is answered by reading the answer key back, so the ruling is the fact the store kept and never this call's guess
+// - a face this book cannot read is named to the caller, never folded into "no ruling": an unread answer is not an answer that never landed
 func (a *ApprovalManager) Decide(id string, status ApprovalStatus, by string) (*ApprovalRequest, error) {
 	if status != ApprovalApproved && status != ApprovalDenied {
 		return nil, ErrApprovalRulingUnknown
@@ -454,20 +458,32 @@ func (a *ApprovalManager) Decide(id string, status ApprovalStatus, by string) (*
 		a.mu.Unlock()
 		return nil, fmt.Errorf("%w: %s", ErrApprovalExpired, id)
 	}
-	req.Status = status
-	req.DecidedBy = by
-	if err := a.fileAnswer(ctx, req); err != nil {
-		a.mu.Unlock()
-		return nil, err
+	ruling := *req
+	ruling.Status = status
+	ruling.DecidedBy = by
+	answerErr := a.fileAnswer(ctx, &ruling)
+	if answerErr != nil {
+		landed, filed, readErr := a.foldFiledRuling(ctx, log, req)
+		if readErr != nil {
+			a.mu.Unlock()
+			return nil, errors.Join(answerErr, readErr)
+		}
+		if !landed {
+			a.mu.Unlock()
+			return nil, answerErr
+		}
+		ruling.Status = filed
 	}
-	snapshot := *req
-	recordErr := a.recordRequestLocked(ctx, id, snapshot)
-	writeErr := a.write(&snapshot)
+	recordErr := a.recordRequestLocked(ctx, id, ruling)
+	writeErr := a.write(&ruling)
+	if resident, seated := a.evidence[id]; seated {
+		*resident = ruling
+	}
 	if a.factLog != nil && recordErr == nil {
 		delete(a.evidence, id)
 	}
 	a.mu.Unlock()
-	return &snapshot, errors.Join(writeErr, recordErr)
+	return &ruling, errors.Join(answerErr, writeErr, recordErr)
 }
 
 // rulingFromChain answers the ruling one identity already carries on the durable
@@ -775,6 +791,35 @@ func (a *ApprovalManager) fileAnswer(ctx context.Context, req *ApprovalRequest) 
 	filing.Detail = task.AttentionDetail{Text: string(req.Status), By: req.DecidedBy}
 	_, err := a.face.Commit(ctx, filing)
 	return err
+}
+
+// foldFiledRuling answers the ruling one identity carries on the durable face after
+// a ruling write this book could not confirm, and folds that answer back into the
+// chain, so the presence and the ruling every later read takes is the fact the
+// store kept.
+//
+// - the read is the identity's own answer key: a write that landed behind a failed barrier is read back by the question it was filed on
+// - a face holding no answer under that key states the write never landed, which leaves the request owed exactly as it stood
+// - a face that cannot be read, and a landed answer that names no ruling, are refused by name instead: neither is "no ruling"
+func (a *ApprovalManager) foldFiledRuling(ctx context.Context, log durable.FactLog, req *ApprovalRequest) (bool, ApprovalStatus, error) {
+	if log == nil {
+		return false, "", nil
+	}
+	answer, answered, err := answerOnFace(ctx, log, req.ToolName, req.ArgsDigest, req.ID)
+	if err != nil {
+		return false, "", err
+	}
+	if !answered {
+		return false, "", nil
+	}
+	ruling, known := rulingIn(answer)
+	if !known {
+		return false, "", fmt.Errorf("%w: %s states no ruling", errApprovalFactConflict, answer.Key)
+	}
+	if err := a.chain.bindFacts([]event.Event{answer}, log); err != nil {
+		return false, "", err
+	}
+	return true, ruling, nil
 }
 
 // rescanDue reports whether the throttled window since the last rescan has

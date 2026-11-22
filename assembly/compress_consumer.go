@@ -390,6 +390,16 @@ type anchorEntry struct {
 
 // carriedTextOf reports the text one projection entry states in a checkpoint: the
 // text a fold minted, and nothing for an entry the chain states itself.
+//
+// The minted text is the only readable statement of that entry at boot, so the
+// payload keeps it: the entry names the fold product key, and the fact that states
+// the text is keyed by the identity minted from the request, the producer and that
+// key — the request is no field of the entry — so no identity the payload carries
+// reaches the fact. Reading it back would mean scanning every product fact of the
+// chain for the key, and re-minting it is refused: a restore that asked the model
+// again would state a second summary beside the one the chain records.
+//
+// 契约: docs/wiki/agent/event-flow.md#projection-lifecycle
 func carriedTextOf(entry replay.ProjectionEntry) string {
 	switch entry.Type {
 	case replay.ProjectionTypeSegmentFold, replay.ProjectionTypeHistorySummary:

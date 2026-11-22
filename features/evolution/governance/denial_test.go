@@ -17,9 +17,9 @@ import (
 type refusingLog struct {
 	sliceLog
 	refusePut  map[string]bool
-	refuseScan bool
+	refuseRead bool
 	putErr     error
-	scanErr    error
+	readErr    error
 	refused    int
 }
 
@@ -37,13 +37,24 @@ func (l *refusingLog) Put(ctx context.Context, key string, value []byte) error {
 	return l.sliceLog.Put(ctx, key, value)
 }
 
+// Get answers the read refusal or the stored pair.
+func (l *refusingLog) Get(ctx context.Context, key string) ([]byte, bool, error) {
+	l.mu.Lock()
+	refuse := l.refuseRead
+	l.mu.Unlock()
+	if refuse {
+		return nil, false, l.readErr
+	}
+	return l.sliceLog.Get(ctx, key)
+}
+
 // Scan answers the read refusal or the stored pairs.
 func (l *refusingLog) Scan(ctx context.Context, prefix string) (map[string][]byte, error) {
 	l.mu.Lock()
-	refuse := l.refuseScan
+	refuse := l.refuseRead
 	l.mu.Unlock()
 	if refuse {
-		return nil, l.scanErr
+		return nil, l.readErr
 	}
 	return l.sliceLog.Scan(ctx, prefix)
 }
@@ -62,7 +73,7 @@ func TestRefusedDurableWriteIsNamedNeitherToCallerNorLog(t *testing.T) {
 		sliceLog:  sliceLog{stored: map[string][]byte{}},
 		refusePut: map[string]bool{denialEventPrefix + "0000000000000000001": true},
 		putErr:    errors.New("the store refused the governance write"),
-		scanErr:   errors.New("the store answered no read"),
+		readErr:   errors.New("the store answered no read"),
 	}
 	ledger := NewDenialLedger()
 	if err := ledger.Bind(ctx, log); err != nil {
@@ -90,7 +101,7 @@ func TestRefusedDurableWriteIsNamedNeitherToCallerNorLog(t *testing.T) {
 		t.Fatalf("restore the stated cut: %v", err)
 	}
 	log.mu.Lock()
-	log.refuseScan = true
+	log.refuseRead = true
 	log.mu.Unlock()
 	readErr := recovery.Bind(ctx, log)
 
@@ -456,6 +467,71 @@ func TestGovernanceTailHoleContinuesPastTheHighestCommitted(t *testing.T) {
 	}
 	if !observer.mentions("error", denialEventPrefix+"0000000000000000003") {
 		t.Fatalf("the continuation named no hole at key 3 (lines=%v): a hole is a stated boundary, never a silent chain end", observer.all())
+	}
+}
+
+// tailReadFailureLog refuses the point read of one governance key and answers the
+// other reads from the store beside it.
+type tailReadFailureLog struct {
+	*sliceLog
+	key string
+	err error
+}
+
+// Get answers the stored pair, or the named failure of the one key a probe
+// refuses, and records the read either way.
+func (l *tailReadFailureLog) Get(ctx context.Context, key string) ([]byte, bool, error) {
+	if key == l.key {
+		l.mu.Lock()
+		l.scans = append(l.scans, key)
+		l.mu.Unlock()
+		return nil, false, l.err
+	}
+	return l.sliceLog.Get(ctx, key)
+}
+
+// TestGovernanceTailReadFailureIsNamed pins the read a recovery pays for the governance tail past a cut.
+//   - positive: the tail is the one key each next sequence names, read as a point read of that key
+//   - negative: a point read the store refused fails the recovery by name instead of ending the tail like a hole
+//   - consumer: StateSeat.Bind folds the denial stream past the cut a restored slice states
+//
+// 契约: docs/wiki/agent/governance-enforcement.md#denial-ledger
+func TestGovernanceTailReadFailureIsNamed(t *testing.T) {
+	ctx := context.Background()
+	key := func(seq int) string { return fmt.Sprintf("%s%019d", denialEventPrefix, seq) }
+	records := []DenialRecord{
+		{Subtype: SubtypeDenial, ToolName: "tail-a", Level: plugin.RiskHigh},
+		{Subtype: SubtypeDenial, ToolName: "tail-b", Level: plugin.RiskHigh},
+		{Subtype: SubtypeDenial, ToolName: "tail-c", Level: plugin.RiskHigh},
+	}
+	store := newSliceLog()
+	for i, rec := range records {
+		store.stored[key(i+1)] = eventBytes(t, key(i+1), rec)
+	}
+	readErr := errors.New("the store answered no read of the governance tail")
+	log := &tailReadFailureLog{sliceLog: store, key: key(2), err: readErr}
+
+	ledger := NewDenialLedger()
+	seat := NewStateSeat(ledger, nil, nil)
+	if err := seat.RestoreState(ctx, []byte(fmt.Sprintf(`{"version":%d,"denial_seq":1}`, stateSliceVersion))); err != nil {
+		t.Fatalf("seat the cut below the tail: %v", err)
+	}
+	mark := log.mark()
+	err := seat.Bind(ctx, log)
+	if !errors.Is(err, readErr) {
+		t.Fatalf("the recovery beside a refused tail read = %v, want %v: a read folded into the end of the tail turns a stored event into a hole", err, readErr)
+	}
+	if !strings.Contains(err.Error(), key(2)) {
+		t.Fatalf("the refused tail read = %v, want the key %s it could not read named beside the failure", err, key(2))
+	}
+	if reads := log.scansSince(mark); strings.Join(reads, " ") != key(2) {
+		t.Fatalf("the tail read paid for %v, want the one key %s the first sequence past the cut names: a known sequence is a point read, never a scan of the stream behind it", reads, key(2))
+	}
+	if tail := ledger.evtSeq; tail != 1 {
+		t.Fatalf("the tail read stopped at %d, want the cut it was seated at: the refused read served no event and moved no number", tail)
+	}
+	if got := ledger.Count(); got != 1 {
+		t.Fatalf("the index holds %d record(s), want the one the cut states: the refused tail read folded nothing", got)
 	}
 }
 

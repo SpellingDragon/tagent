@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"context"
@@ -13,11 +14,14 @@ import (
 	"testing"
 
 	"github.com/SpellingDragon/tagent/api/event"
+	"github.com/SpellingDragon/tagent/api/plugin"
 	"github.com/SpellingDragon/tagent/memory"
 	"github.com/SpellingDragon/tagent/memory/ledger"
 	"github.com/SpellingDragon/tagent/memory/replay"
 	"github.com/SpellingDragon/tagent/runtime/state"
 	"github.com/SpellingDragon/tagent/runtime/task"
+
+	trpctool "trpc.group/trpc-go/trpc-agent-go/tool"
 )
 
 // windowChainRun assembles one run with a small replay window, so the fold
@@ -60,8 +64,17 @@ func endRun(t *testing.T, run *Run) {
 // turns count, letting the fold fire between commits as it does online.
 func commitWindowTurns(t *testing.T, ctx context.Context, run *Run, addr event.Address, turns int) {
 	t.Helper()
+	commitWindowTurnsFrom(t, ctx, run, addr, 0, turns)
+}
+
+// commitWindowTurnsFrom commits turns count closed turns of four legs from the
+// turn the caller names, so a fixture commits material past a cut without
+// re-committing the identities the chain already holds: a turn is one key per leg,
+// and the same turn committed twice is a repeat the chain files no position of.
+func commitWindowTurnsFrom(t *testing.T, ctx context.Context, run *Run, addr event.Address, from, turns int) {
+	t.Helper()
 	base := time.Date(2026, 11, 6, 12, 0, 0, 0, time.UTC)
-	for turn := 0; turn < turns; turn++ {
+	for turn := from; turn < from+turns; turn++ {
 		for position, leg := range []struct {
 			typ     string
 			summary string
@@ -998,4 +1011,314 @@ func TestReplayRefNamesAMissingBody(t *testing.T) {
 	if report.Decoded != 0 {
 		t.Fatalf("the walk decoded %d fact(s) of a body it never read, want none counted", report.Decoded)
 	}
+}
+
+// pipelineRuler is the Governor these checks contribute through WithPlugins: one
+// declared call->ruling face that records every pass it was asked and answers the
+// decision its check scripted.
+type pipelineRuler struct {
+	name     string
+	mu       sync.Mutex
+	asked    []plugin.CallPass
+	decision func(plugin.CallPass) plugin.Decision
+}
+
+// Name returns the stable name of this instance.
+func (g *pipelineRuler) Name() string { return g.name }
+
+// Port reports the port this instance serves.
+func (g *pipelineRuler) Port() plugin.Port { return plugin.PortCallRuling }
+
+// Judge records the pass and answers the scripted ruling over it.
+func (g *pipelineRuler) Judge(pass plugin.CallPass) (plugin.Decision, error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.asked = append(g.asked, pass)
+	if g.decision != nil {
+		return g.decision(pass), nil
+	}
+	return plugin.Decision{Disposition: plugin.DispositionAllow}, nil
+}
+
+// ruled reports the passes the face was asked to rule, in the order it was asked.
+func (g *pipelineRuler) ruled() []plugin.CallPass {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return append([]plugin.CallPass(nil), g.asked...)
+}
+
+// pipelineRuledTool is the native tool the declared ruler rules: it counts its
+// executions, so a check tells a call that ran from one the ruling refused.
+type pipelineRuledTool struct {
+	name  string
+	mu    sync.Mutex
+	calls int
+}
+
+// Declaration returns the declaration naming the ruled tool.
+func (t *pipelineRuledTool) Declaration() *trpctool.Declaration {
+	return &trpctool.Declaration{Name: t.name}
+}
+
+// Call executes the ruled tool once and reports its output.
+func (t *pipelineRuledTool) Call(context.Context, []byte) (any, error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.calls++
+	return "ruled-output", nil
+}
+
+// executions reports how many times the tool ran.
+func (t *pipelineRuledTool) executions() int {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.calls
+}
+
+// pipelineRuledRun assembles one run over a scripted provider whose first
+// decision calls the ruled tool and whose second settles the turn, with the
+// options the check attaches.
+func pipelineRuledRun(t *testing.T, ctx context.Context, opts ...Option) (*Run, *pipelineRuledTool, *snapshotTestModel) {
+	t.Helper()
+	tool := &pipelineRuledTool{name: "pipeline-ruled"}
+	round := 0
+	var mu sync.Mutex
+	provider := &snapshotTestModel{answer: func(*model.Request) *model.Response {
+		mu.Lock()
+		defer mu.Unlock()
+		round++
+		if round == 1 {
+			return &model.Response{
+				Choices: []model.Choice{{Message: model.Message{
+					Role: model.RoleAssistant,
+					ToolCalls: []model.ToolCall{{
+						ID:   "call-pipeline",
+						Type: "function",
+						Function: model.FunctionDefinitionParam{
+							Name:      tool.name,
+							Arguments: []byte(`{}`),
+						},
+					}},
+				}}},
+				Done: true,
+			}
+		}
+		return &model.Response{
+			Choices: []model.Choice{{Message: model.Message{Role: model.RoleAssistant, Content: "settled"}}},
+			Done:    true,
+		}
+	}}
+	options := append([]Option{WithGovernance(snapshotTestGovernance{})}, opts...)
+	run, err := Assemble(ctx, &config.Declaration{
+		Entry:  "agent-a",
+		Agents: []config.AgentSpec{{ID: "agent-a", Model: "model-a"}},
+	}, map[event.AgentID]NativeAgent{
+		"agent-a": {Model: provider, Tools: []trpctool.CallableTool{tool}},
+	}, options...)
+	if err != nil {
+		t.Fatalf("assemble the run: %v", err)
+	}
+	return run, tool, provider
+}
+
+// pipelineRuledInvoke drives the one invocation that calls the ruled tool through
+// the formal entry of the assembled run and answers the turn it served.
+func pipelineRuledInvoke(t *testing.T, ctx context.Context, run *Run, invocation string) {
+	t.Helper()
+	turn, err := run.Invoke(ctx, InvokeRequest{
+		InvocationID:  event.InvocationID(invocation),
+		Address:       event.Address{AgentID: "agent-a", SessionID: event.SessionID("session-" + invocation)},
+		TriggerSource: "user",
+		Input:         []model.Message{{Role: model.RoleUser, Content: "drive the ruled call"}},
+	})
+	if err != nil {
+		t.Fatalf("invoke the assembled run: %v", err)
+	}
+	if turn.Terminal != model.KindCompleted {
+		t.Fatalf("terminal of the turn = %q, want the completed answer", turn.Terminal)
+	}
+}
+
+// TestGovernorDeclaredInThePipelineRulesTheCall pins the ruling face a declared pipeline carries.
+//   - the Governor a WithPlugins contribution publishes is asked to rule the real call, once, over the final call of the Before pass
+//   - the call it allows executes once, and the policy WithPolicy attached is never asked beside the declaration
+//   - the same Governor refusing refuses the call before execution: the tool runs zero times, the model reads the reason and rule
+//   - consumer: the public Assemble entry, the Run.Invoke turn it serves, the admission wrapper every registered tool goes through
+//
+// 契约: docs/wiki/plugin/plugin-architecture.md#overview
+func TestGovernorDeclaredInThePipelineRulesTheCall(t *testing.T) {
+	t.Run("the declared governor rules the call and the assembly policy is not consulted", func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		defer cancel()
+		ruler := &pipelineRuler{name: "pipeline-ruler"}
+		poison := &pipelineRuler{name: "assembly-policy", decision: func(plugin.CallPass) plugin.Decision {
+			return plugin.Decision{Disposition: plugin.DispositionAllow, Reason: "the assembly policy ruled a call beside a declared governor"}
+		}}
+		run, tool, provider := pipelineRuledRun(t, ctx,
+			WithPlugins(func(*Run) ([]plugin.Instance, error) {
+				return []plugin.Instance{ruler}, nil
+			}),
+			WithPolicy(poison),
+		)
+		pipelineRuledInvoke(t, ctx, run, "inv-governor-declared-allow")
+
+		asked := ruler.ruled()
+		if len(asked) != 1 {
+			t.Fatalf("the declared governor was asked %d time(s), want the one ruling of the call", len(asked))
+		}
+		if got := asked[0].Final.Function.Name; got != tool.name {
+			t.Fatalf("the declared governor ruled the call of %q, want the final call of %q", got, tool.name)
+		}
+		if got := tool.executions(); got != 1 {
+			t.Fatalf("the allowed call executed %d time(s), want the one execution of the ruling that allowed it", got)
+		}
+		if got := len(poison.ruled()); got != 0 {
+			t.Fatalf("the assembly policy was asked %d time(s), want none beside the governor the pipeline declared", got)
+		}
+		if len(provider.requests) < 2 {
+			t.Fatalf("the turn was driven %d time(s), want the decision that called the tool beside the one that settled it", len(provider.requests))
+		}
+		receipt := provider.requests[1].Messages[len(provider.requests[1].Messages)-1].Content
+		if !strings.Contains(receipt, "ruled-output") {
+			t.Fatalf("the receipt the model read = %q, want the output of the call the declared ruling allowed", receipt)
+		}
+	})
+
+	t.Run("the same governor refuses the call before any execution", func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		defer cancel()
+		ruler := &pipelineRuler{name: "pipeline-ruler", decision: func(pass plugin.CallPass) plugin.Decision {
+			return plugin.Decision{
+				Disposition: plugin.DispositionAllow,
+				Rule:        "declared-no-call",
+				Reason:      "the declared ruler refuses this call",
+				Denial:      &plugin.Denial{CallID: pass.Final.ID, Tool: pass.Final.Function.Name},
+			}
+		}}
+		run, tool, provider := pipelineRuledRun(t, ctx,
+			WithPlugins(func(*Run) ([]plugin.Instance, error) {
+				return []plugin.Instance{ruler}, nil
+			}),
+		)
+		pipelineRuledInvoke(t, ctx, run, "inv-governor-declared-refuse")
+
+		if got := len(ruler.ruled()); got != 1 {
+			t.Fatalf("the declared governor was asked %d time(s), want the one ruling of the refused call", got)
+		}
+		if got := tool.executions(); got != 0 {
+			t.Fatalf("the refused call executed %d time(s), want no execution of a call the declared governor refused", got)
+		}
+		if len(provider.requests) < 2 {
+			t.Fatalf("the turn was driven %d time(s), want the refusal read back to the model", len(provider.requests))
+		}
+		receipt := provider.requests[1].Messages[len(provider.requests[1].Messages)-1].Content
+		if !strings.Contains(receipt, "the declared ruler refuses this call") || !strings.Contains(receipt, "declared-no-call") {
+			t.Fatalf("the receipt the model read = %q, want the reason and the rule of the declared refusal", receipt)
+		}
+	})
+}
+
+// observationPortRuler is a face that declares the fact->observation port while
+// implementing Judge as well: the declaration is the routing, so the call->ruling
+// face it never declared is never asked. It answers the observation duty of the
+// port it declares and refuses every call it is asked to rule, so a pipeline
+// reading the method instead of the port rules the call through a face declared
+// elsewhere.
+type observationPortRuler struct {
+	name  string
+	mu    sync.Mutex
+	asked []plugin.CallPass
+}
+
+// Name returns the stable name of this instance.
+func (g *observationPortRuler) Name() string { return g.name }
+
+// Port reports the port this instance serves: the observation port, never the
+// ruling one.
+func (g *observationPortRuler) Port() plugin.Port { return plugin.PortFactObservation }
+
+// ObserveCommit answers the observation duty of the port this face declares.
+func (g *observationPortRuler) ObserveCommit(context.Context, event.EventID) error {
+	return nil
+}
+
+// Judge records the pass and refuses the call: a pipeline asking this face to
+// rule is one that read the method instead of the declared port.
+func (g *observationPortRuler) Judge(pass plugin.CallPass) (plugin.Decision, error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.asked = append(g.asked, pass)
+	return plugin.Decision{
+		Disposition: plugin.DispositionAllow,
+		Rule:        "declared-on-another-port",
+		Reason:      "a face declaring another port ruled this call",
+		Denial:      &plugin.Denial{CallID: pass.Final.ID, Tool: pass.Final.Function.Name},
+	}, nil
+}
+
+// ruled reports the passes this face was asked to rule, in the order it was asked.
+func (g *observationPortRuler) ruled() []plugin.CallPass {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return append([]plugin.CallPass(nil), g.asked...)
+}
+
+// TestGovernorDeclaredOnAnotherPortDoesNotRule pins the declaration a ruling face is read by.
+//   - negative: a WithPlugins instance implementing Judge while declaring the fact->observation port is published in the pipeline and asked to rule zero calls
+//   - positive: the policy WithPolicy attached rules that same call instead, once, and the call executes once
+//   - the instance is published in the agent's pipeline, so the zero rulings are the port's and not a contribution that never landed
+//   - consumer: the public Assemble entry, the Run.Invoke turn it serves, the admission wrapper every registered tool goes through
+//
+// 契约: docs/wiki/plugin/plugin-architecture.md#overview
+func TestGovernorDeclaredOnAnotherPortDoesNotRule(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	misdeclared := &observationPortRuler{name: "observation-port-ruler"}
+	policy := &pipelineRuler{name: "assembly-policy"}
+	run, tool, provider := pipelineRuledRun(t, ctx,
+		WithPlugins(func(*Run) ([]plugin.Instance, error) {
+			return []plugin.Instance{misdeclared}, nil
+		}),
+		WithPolicy(policy),
+	)
+	pipelineRuledInvoke(t, ctx, run, "inv-governor-other-port")
+
+	run.mu.Lock()
+	published := run.current.Agents[event.AgentID("agent-a")].Plugins
+	run.mu.Unlock()
+	mounted := false
+	for _, instance := range published {
+		if instance.Name() == misdeclared.name {
+			mounted = true
+		}
+	}
+	if !mounted {
+		t.Fatalf("the pipeline publishes the instances %v, want the contributed %s among them: the check must rule out a contribution that never landed", namesOfInstances(published), misdeclared.name)
+	}
+	if got := len(misdeclared.ruled()); got != 0 {
+		t.Fatalf("the face declaring fact->observation was asked to rule %d call(s), want none beside the port it declares", got)
+	}
+	if got := len(policy.ruled()); got != 1 {
+		t.Fatalf("the policy WithPolicy attached was asked %d time(s), want the one ruling of a pipeline declaring no governor", got)
+	}
+	if got := tool.executions(); got != 1 {
+		t.Fatalf("the call executed %d time(s), want the one execution of the call the attached policy allowed", got)
+	}
+	if len(provider.requests) < 2 {
+		t.Fatalf("the turn was driven %d time(s), want the decision that called the tool beside the one that settled it", len(provider.requests))
+	}
+	receipt := provider.requests[1].Messages[len(provider.requests[1].Messages)-1].Content
+	if !strings.Contains(receipt, "ruled-output") {
+		t.Fatalf("the receipt the model read = %q, want the output of the call the attached policy allowed", receipt)
+	}
+}
+
+// namesOfInstances reports the names of one published pipeline, in the published
+// order, so a refusal can state what it saw.
+func namesOfInstances(instances []plugin.Instance) []string {
+	names := make([]string, 0, len(instances))
+	for _, instance := range instances {
+		names = append(names, instance.Name())
+	}
+	return names
 }

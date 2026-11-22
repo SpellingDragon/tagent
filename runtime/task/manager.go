@@ -132,15 +132,12 @@ func (m *MemoryManager) Handoff(ctx context.Context, taskID event.TaskID, target
 		entry.applyHandoff(taskID, target)
 		return nil
 	}
-	result, applied, err := m.registry.applyCommitLocked(ctx, entry, record)
+	result, _, err := m.registry.applyCommitLocked(ctx, entry, record)
 	if result != CommitCommitted {
 		if err == nil {
 			err = ErrCommitUncertain
 		}
 		return err
-	}
-	if applied {
-		entry.applyHandoff(taskID, target)
 	}
 	return nil
 }

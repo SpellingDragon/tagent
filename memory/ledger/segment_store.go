@@ -1177,6 +1177,7 @@ func (s *FileSegmentStore) EachIndexNewestFirst(ctx context.Context, visit func(
 //   - a caller that already knows the key it is looking for pays its own commit and the ones behind it instead of every commit filed after it
 //   - the walk starts where the engine's order-line index states the commit that last stated the key ended, which costs one probe of the identity index and one read of that index
 //   - so the walk costs the history committed after the key nothing
+//   - the seek is answered only once the walk names the key it was read for, because one order line states every key of its commit: a walk that ends without naming that key discards the seek and walks the index from the newest entry, so a word stating some other byte costs the walk its seek and never its answer
 //   - an engine that states no such index, a key this store holds no published entry of, and an entry the engine names no commit for all walk the index from the newest entry
 //   - so a seek that cannot be placed costs the walk it always took and never an entry it skipped
 func (s *FileSegmentStore) EachIndexNewestFirstFrom(ctx context.Context, from event.EventID, visit func(key event.EventID, partition int, seq int64, typ string, session event.SessionID) (bool, error)) error {
@@ -1194,9 +1195,22 @@ func (s *FileSegmentStore) EachIndexNewestFirstFrom(ctx context.Context, from ev
 	if !named {
 		return s.eachIndexEntryNewestFirst(ctx, entryVisit)
 	}
-	return s.walkIndexValues(entryVisit, func(step func(rawKey string, value []byte) (bool, error)) error {
+	namedFrom := false
+	namingVisit := func(key event.EventID, position indexPosition) (bool, error) {
+		if key == from {
+			namedFrom = true
+		}
+		return entryVisit(key, position)
+	}
+	if err := s.walkIndexValues(namingVisit, func(step func(rawKey string, value []byte) (bool, error)) error {
 		return seek.EachCommittedNewestFirstFrom(ctx, lineEnd, step)
-	})
+	}); err != nil {
+		return err
+	}
+	if namedFrom {
+		return nil
+	}
+	return s.eachIndexEntryNewestFirst(ctx, entryVisit)
 }
 
 // indexEntrySeek answers the order byte a walk over the index enters at to reach one key's

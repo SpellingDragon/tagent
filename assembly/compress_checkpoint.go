@@ -17,6 +17,8 @@ import (
 	"time"
 
 	"github.com/SpellingDragon/tagent/api/event"
+	"github.com/SpellingDragon/tagent/memory"
+	"github.com/SpellingDragon/tagent/memory/ledger"
 )
 
 // compressStateSlice is the compression slice of one run: the account the
@@ -183,4 +185,89 @@ func (r *Run) compressSliceOf(session event.SessionID) ([]byte, error) {
 	return json.Marshal(compressSliceWire{
 		Sessions: []compressSliceSession{{Session: string(session), Judgments: owedJudgments(filed)}},
 	})
+}
+
+// RestoreCoverage reads the compression facts the restored cut does not state, so
+// the account of a boot whose checkpoint carries no compression slice is the
+// account the chain states instead of an empty one.
+//
+//   - The cut names this consumer's own slice, so no other consumer's coverage bounds this read and no payload of another consumer is read here.
+//   - A cut that states the slice leaves the read unowed: the slice was taken at the quiet point the projection's survivors were, so every judgment and answer at or below the boundary the rebuild replays from is one the account already carries, and the rebuild folds the facts past it.
+//   - The facts are folded in the commit order the tier records, so a judgment is read before the answer that follows it and an answered judgment is struck by its own product rather than staying owed.
+//   - The read folds into the account and files no fact: the rebuild reads the material the projection presents on its own path, and a fact this read reached states the account once because the fold is idempotent by the identity the fact carries.
+func (s compressStateSlice) RestoreCoverage(ctx context.Context, tier *ledger.Tier) error {
+	if tier == nil {
+		return nil
+	}
+	if cut := s.run.checkpointCut(s.StateName()); cut != nil {
+		return nil
+	}
+	r := s.run
+	read, owed, err := r.readCompressionHistory(ctx, tier)
+	if err != nil {
+		return err
+	}
+	assemblyInfo("tagent: boot restored the compression account from the chain it states facts=%d owed=%d", read, owed)
+	return nil
+}
+
+// readCompressionHistory folds every compression fact of the tier into the account
+// in commit order and answers the facts it read beside the judgments still owed,
+// for a boot whose restored cut states no compression slice.
+func (r *Run) readCompressionHistory(ctx context.Context, tier *ledger.Tier) (int, int, error) {
+	var refs []anchorRef
+	if err := tier.Segments.EachIndexNewestFirst(ctx, func(key event.EventID, partition int, seq int64, typ string, session event.SessionID) error {
+		if typ == event.TypeCheckpoint || !event.CompressionMechanism(typ) {
+			return nil
+		}
+		refs = append(refs, anchorRef{key: key, partition: partition, seq: seq, typ: typ, session: session})
+		return nil
+	}); err != nil {
+		return 0, 0, fmt.Errorf("tagent: walk the compression facts of the chain: %w", err)
+	}
+	for at := len(refs) - 1; at >= 0; at-- {
+		if err := r.foldCompressionFact(ctx, tier, refs[at]); err != nil {
+			return 0, 0, err
+		}
+	}
+	r.mu.Lock()
+	consumer := r.compress
+	r.mu.Unlock()
+	if consumer == nil {
+		return len(refs), 0, nil
+	}
+	consumer.mu.Lock()
+	owed := 0
+	for _, filed := range consumer.judgments {
+		owed += len(filed)
+	}
+	consumer.mu.Unlock()
+	return len(refs), owed, nil
+}
+
+// foldCompressionFact reads one compression fact by the identity the index named
+// and folds it into the account alone: the projection rebuild reads the material it
+// presents through the seam, and a fact the account states here reaches no state of
+// another consumer.
+func (r *Run) foldCompressionFact(ctx context.Context, tier *ledger.Tier, ref anchorRef) error {
+	stored, held, err := tier.Segments.GetEventInPartition(ctx, ref.key, ref.partition)
+	if err != nil {
+		return err
+	}
+	if !held {
+		return fmt.Errorf("%w: %s", ledger.ErrSegmentBodyMissing, ref.key)
+	}
+	body, err := memory.DecodeEventBody(stored.Body)
+	if err != nil {
+		return fmt.Errorf("tagent: replay the compression fact %s: %w", stored.Key, err)
+	}
+	evt := body.Event()
+	evt.Key = stored.Key
+	r.mu.Lock()
+	consumer := r.compress
+	r.mu.Unlock()
+	if consumer == nil {
+		return nil
+	}
+	return consumer.Reduce(ctx, evt)
 }

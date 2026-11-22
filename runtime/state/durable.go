@@ -796,6 +796,15 @@ func (d *DurableCommit) unseatedTaskLocked(notice task.Notice) bool {
 	return !held
 }
 
+// pointReadLog is the fact surface that answers one key by name: a receipt read
+// names its own key, so the log it reads through states that key's value and
+// never scans the family beside it. A log that states no such read refuses the
+// receipt by name instead of falling back to a family scan, because a read
+// folded into "nothing here" would owe a settled notification a second delivery.
+type pointReadLog interface {
+	Get(ctx context.Context, key string) ([]byte, bool, error)
+}
+
 // readReceiptLocked reads one durable record back by its own key, and reports
 // whether the log holds it: the point read a boot pays for a notification whose
 // task its checkpoint never stated, never a scan of the family. A failed read
@@ -805,13 +814,16 @@ func (d *DurableCommit) unseatedTaskLocked(notice task.Notice) bool {
 // account already closed. The read is outside the prefix measurement of the load,
 // which states what a whole-family read costs. The caller holds the lock.
 func (d *DurableCommit) readReceiptLocked(notice task.Notice, key string) ([]byte, bool, error) {
-	pairs, err := d.log.Scan(context.Background(), key)
+	reader, statesPointRead := d.log.(pointReadLog)
+	if !statesPointRead {
+		return nil, false, fmt.Errorf("tagent: the durable log states no point read of the receipt %s", key)
+	}
+	body, held, err := reader.Get(context.Background(), key)
 	if err != nil {
 		durableError("tagent: durable receipt read failed task=%s notice=%s err=%v",
 			notice.TaskID, notice.FactKey(), err)
 		return nil, false, err
 	}
-	body, held := pairs[key]
 	return body, held, nil
 }
 

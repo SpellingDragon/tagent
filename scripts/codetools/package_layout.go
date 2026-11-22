@@ -64,6 +64,9 @@ var mirrorExemptTrees = []string{contractExamplesDir, "tests/integration/"}
 //   - assembly/symptom_anchor_recovery_test.go: one boot's four quantities beside the integrity, slot-table and index walks it pays, across run, checkpoint, facts, commit, settle_turn, host_delivery and the ledger engines
 //   - assembly/symptom_anchor_longrun_test.go: one generation's whole cost face, across the same boot, checkpoint, settlement and delivery files plus the ledger engines and the durable load account
 //   - runtime/task/task_slice_receipt_anchor_test.go: the receipt seam between task.StateSettleAccount and state.DurableCommit.Seat; state imports task, so the proof stays in the external test package where checkpoint_test.go already holds the internal name
+//   - assembly/symptom_anchor_coherence_test.go: the host-entry contribution anchor across host's boot wiring, run's option face and the invocation it publishes; naming it after one file would misstate the entry it proves
+//   - assembly/plugin_assembly_test.go: the contributed factory sequence across run's option face, host's boot handoff and the reload path that keeps the set; no single production file carries the assembly it guards
+//   - memory/replay/fold_test.go: the independent measurements the fold-cost decision cites, read from repository files; the production fold it once mirrored is retired while the measurement pin outlives it
 var mirrorExemptFiles = []string{
 	"examples/wechat-bot/smoke_test.go",
 	"examples/wechat-bot/smoke_harness_test.go",
@@ -86,7 +89,10 @@ var mirrorExemptFiles = []string{
 	"assembly/retired_state_hygiene_test.go",
 	"assembly/symptom_anchor_longrun_test.go",
 	"assembly/symptom_anchor_recovery_test.go",
+	"assembly/symptom_anchor_coherence_test.go",
+	"assembly/plugin_assembly_test.go",
 	"memory/ledger/original_write_ahead_test.go",
+	"memory/replay/fold_test.go",
 	"runtime/agent/consumer_round_seed_test.go",
 	"runtime/agent/effective_config_test.go",
 	"runtime/task/task_slice_receipt_anchor_test.go",

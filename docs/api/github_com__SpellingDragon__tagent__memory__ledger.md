@@ -455,6 +455,11 @@ func (s *FileSegmentStore) EachIndexNewestFirstFrom(ctx context.Context, from ev
         that last stated the key ended, which costs one probe of the identity
         index and one read of that index
       - so the walk costs the history committed after the key nothing
+      - the seek is answered only once the walk names the key it was read for,
+        because one order line states every key of its commit: a walk that ends
+        without naming that key discards the seek and walks the index from the
+        newest entry, so a word stating some other byte costs the walk its seek
+        and never its answer
       - an engine that states no such index, a key this store holds no published
         entry of, and an entry the engine names no commit for all walk the index
         from the newest entry

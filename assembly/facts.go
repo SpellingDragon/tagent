@@ -85,11 +85,11 @@ func (r *Run) commitFactChecked(ctx context.Context, evt event.Event) (event.Eve
 //   - the whole commit holds the quiet-point fence, so a cut that drained the pipeline reads every state this fact left behind instead of one caught between the landing and its application. The derived state of every consumer mounted on the state seam is folded inside that unit for the same reason: the fact and the state it leaves behind are one step, never a landing a consumer beside it has not read yet.
 //   - the landing fence covers that step whole: the slot, the registration that states it and the fold that derives the state of every consumer run inside one critical section, so two facts of one chain reach the seam in the order the storage committed them and the derived state of this process is the state a replay of the same committed order derives. The reads that answer the identity stand outside that section, so a commit of an identity another commit just landed still meets the chain before the fence.
 //   - a product is the moment the projection drops material, so the chain's checkpoint is worth refreshing whatever the cadence clock says. The request is a signal: the filer takes the cut on its own goroutine, where this commit's unit of work is not held.
-//   - a fact the chain already carries files no position of its own: filing it would put a fact the chain committed past at the end of the order the fold states, and the fold runs over a sequence that already states the material.
+//   - a fact the chain already carries as material it has presented files no position of its own: filing it would put a fact the chain committed past at the end of the order the fold states, and the fold runs over a sequence that already states the material.
 //   - a repeat of the fact the chain holds is reduced again, because the repeat is what retries an earlier refusal, and the seam is told the fact repeats one the chain carries, so a holder whose idempotence rests on an identity its own rewrite can drop answers without restating the material (see reduceCommittedRepeat).
-//   - the write's own answer decides what this entry does next: a fact that landed here files its position and folds, a fact the chain already held whole files and folds nothing, and a conflict or an outcome the store cannot name answers beside no registration, no fold and no success.
+//   - the write's own answer decides what this entry does next: a fact that landed here files its position and folds, a fact the chain already held whole files no second position, and a conflict or an outcome the store cannot name answers beside no registration, no fold and no success.
 //   - FactCommitted: the fact landed here, so this entry files its position and folds it below.
-//   - FactAlreadyPresent: the chain holds the fact whole, so a repeat of a fact this process registered folds again and files no second position; a fact the chain holds beside no registration of this process is the landing of a commit whose barrier named no outcome, and this entry states that landing — registration and fold — as the commit that landed it would have, because a process that answers it as a plain repeat leaves the seam with state no replay of the same chain derives.
+//   - FactAlreadyPresent: the chain holds the fact whole, so this commit states no position of that chain's own; what it does instead is read from where the identity stands against the material the chain has presented (see chainAlreadyPresented). A fact at or before that material is a repeat: it registers nothing and reduces through the repeat face, because a holder that states a sequence dropped the identity of the material its own rewrite moved out, and filing that identity again states the material a second time (see reduceCommittedRepeat). A fact beyond it is a landing this process never folded — the write the barrier answered with no outcome is exactly that fact — so this entry states the landing a commit that landed would have: registration and fold, because answering it as a plain repeat leaves the seam with state no replay of the same chain derives.
 //   - FactConflict: another content stands under the identity, named by the conflict the write answered.
 //   - FactUncertain: the store cannot name what it left behind, because only a fresh read decides which landed.
 //   - an outcome this entry does not classify is refused rather than filed: the classification is what decides whether a position and a fold belong to it.
@@ -135,6 +135,12 @@ func (r *Run) commitFactNoCadence(ctx context.Context, evt event.Event) (event.E
 		r.mu.Unlock()
 		if registered {
 			if carried && evt.Type != event.TypeCheckpoint {
+				r.reduceCommittedRepeat(ctx, evt)
+			}
+			return evt.Key, nil
+		}
+		if r.chainAlreadyPresented(evt) {
+			if evt.Type != event.TypeCheckpoint {
 				r.reduceCommittedRepeat(ctx, evt)
 			}
 			return evt.Key, nil
@@ -218,6 +224,43 @@ func (r *Run) reduceCommittedRepeat(ctx context.Context, evt event.Event) {
 	if err := states.ReduceRepeat(ctx, evt); err != nil {
 		assemblyError("tagent: the repeated fact %s was not folded into the state of its consumers: %v", evt.Key, err)
 	}
+}
+
+// chainAlreadyPresented reports whether the session chain of one fact has already
+// presented the position that fact stands at: the mapped sequence the chain registered
+// carries material a request reads, and the fact was recorded at or before the newest
+// of it. The commit asks this where its own registration set cannot answer — a fact the
+// chain holds whole beside no registration of this process is either a retry of material
+// the live window released, whose registration trimFacts dropped together with the
+// entries the fold moved out, or a landing whose barrier named no outcome and which no
+// sequence has stated yet — and the judgment rests on the sequence, never on the
+// released set: that registration is the one signal the trim erases.
+//
+//   - A chain that registered no sequence presents no position, and a sequence whose ended material is empty presents none either: nothing has reached a request, so the fact is the commit that states it.
+//   - The presented position reaches the end of the ended material (see replayEntry.endedPrefix): every entry before that boundary, and the output that closed a segment on it, is material a request already read, while the input that opened the range in flight is carried by the drive of that range.
+//   - The two sides are compared by the time each fact was recorded: a fold rewrites the positions around the boundary, so the times the entries carry are what a rewrite leaves standing, and two facts recorded at one instant stand at one position the sequence presents once.
+func (r *Run) chainAlreadyPresented(evt event.Event) bool {
+	r.mu.Lock()
+	_, held, carried := r.replaySlotLocked(replayAddressOf(evt))
+	r.mu.Unlock()
+	if !carried || held.projection == nil {
+		return false
+	}
+	entries := held.projection.Entries()
+	prefix := held.endedPrefix()
+	if prefix <= 0 {
+		return false
+	}
+	if prefix > len(entries) {
+		prefix = len(entries)
+	}
+	presented := entries[0].Time
+	for _, entry := range entries[:prefix] {
+		if entry.Time.After(presented) {
+			presented = entry.Time
+		}
+	}
+	return !evt.Timestamp.After(presented)
 }
 
 // stateRegistry answers the state seam this run mounted, under the lock every other

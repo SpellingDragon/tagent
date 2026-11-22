@@ -37,6 +37,10 @@ var (
 
 	_ func(context.Context, *config.Declaration, map[event.AgentID]NativeAgent, ...Option) (*Run, error) = Assemble
 
+	// The recoverable state a caller contributes takes the seam a consumer mounts
+	// through after boot, so the option and the registry entry keep one contract.
+	_ func(state.Stateful) Option = WithStateSlice
+
 	// The post-commit observation face is attached through its own option, so
 	// the composed observer reads committed facts and observes nothing else.
 	_ func(plugin.Observer) Option = WithTelemetry

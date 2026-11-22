@@ -1150,6 +1150,20 @@ func (l *deliveryTestCountingLog) Put(ctx context.Context, key string, value []b
 	return l.inner.Put(ctx, key, value)
 }
 
+// Get reads one key from the wrapped log and counts the read.
+func (l *deliveryTestCountingLog) Get(ctx context.Context, key string) ([]byte, bool, error) {
+	reader, statesPointRead := l.inner.(interface {
+		Get(ctx context.Context, key string) ([]byte, bool, error)
+	})
+	if !statesPointRead {
+		return nil, false, fmt.Errorf("the wrapped log states no point read")
+	}
+	l.mu.Lock()
+	l.reads = append(l.reads, "get:"+key)
+	l.mu.Unlock()
+	return reader.Get(ctx, key)
+}
+
 // Scan reads one prefix from the wrapped log and counts the read.
 func (l *deliveryTestCountingLog) Scan(ctx context.Context, prefix string) (map[string][]byte, error) {
 	l.mu.Lock()
@@ -1163,14 +1177,15 @@ func (l *deliveryTestCountingLog) Sync(ctx context.Context) error {
 	return l.inner.Sync(ctx)
 }
 
-// scanCount reports how often the retired prefix was read, and reset clears the
-// count so one phase of a check is judged alone.
+// scanCount reports how often the retired prefix was read — a prefix scan and
+// the point read of one key of it alike — and reset clears the count so one
+// phase of a check is judged alone.
 func (l *deliveryTestCountingLog) scanCount() int {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	count := 0
 	for _, read := range l.reads {
-		if strings.HasPrefix(read, "scan:"+hostDeliveryPrefix) {
+		if _, key, cut := strings.Cut(read, ":"); cut && strings.HasPrefix(key, hostDeliveryPrefix) {
 			count++
 		}
 	}

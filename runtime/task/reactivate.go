@@ -57,6 +57,8 @@ const rollbackPrefix = "reactivate-rollback:"
 // newest checkpoint stated no entry for is read back from its chain first, so a
 // restart re-enters the settled outcome the record holds instead of answering
 // that the task is unknown.
+//
+//   - The shared apply derives the round the re-entry opened; only the deadline stamp and the reported verdict stay outside it, so a chain fold leaves both empty rather than inferring them (see applyFactLocked).
 func (r *MemoryRegistry) Reactivate(ctx context.Context, taskID event.TaskID) (int64, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -84,12 +86,8 @@ func (r *MemoryRegistry) Reactivate(ctx context.Context, taskID event.TaskID) (i
 		return 0, err
 	}
 	if applied {
-		entry.round++
 		entry.ttlAnchor = entry.changedAt
 		entry.reported = LogicalActive
-		entry.obligations = append(entry.obligations, obligationEntry{
-			obligation: Obligation{Kind: ObligationAwaitingTool, TaskID: taskID},
-		})
 	}
 	return entry.round, nil
 }
@@ -163,15 +161,12 @@ func (r *MemoryRegistry) RollbackReactivation(ctx context.Context, taskID event.
 		ExpectedRevision: entry.revision,
 		Status:           StatusSettled,
 	}
-	result, applied, err := r.applyCommitLocked(ctx, entry, record)
+	result, _, err := r.applyCommitLocked(ctx, entry, record)
 	if result != CommitCommitted {
 		if err == nil {
 			err = ErrCommitUncertain
 		}
 		return err
-	}
-	if applied {
-		entry.closeExecutionObligation("")
 	}
 	return nil
 }

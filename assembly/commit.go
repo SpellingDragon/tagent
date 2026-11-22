@@ -417,6 +417,17 @@ func (l *memoryFactLog) Put(_ context.Context, key string, value []byte) error {
 	return nil
 }
 
+// Get answers one key's value and whether this log holds it.
+func (l *memoryFactLog) Get(_ context.Context, key string) ([]byte, bool, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	value, held := l.pairs[key]
+	if !held {
+		return nil, false, nil
+	}
+	return append([]byte(nil), value...), true, nil
+}
+
 // Scan answers every pair under a prefix.
 func (l *memoryFactLog) Scan(_ context.Context, prefix string) (map[string][]byte, error) {
 	l.mu.Lock()

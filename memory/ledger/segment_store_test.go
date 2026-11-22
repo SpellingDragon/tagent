@@ -9,9 +9,12 @@ package ledger
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
@@ -586,6 +589,132 @@ func TestEachIndexNewestFirstStreamsTheCommitOrder(t *testing.T) {
 	if firsts != 3 {
 		t.Fatalf("the walk visited %d entries, want every published one", firsts)
 	}
+}
+
+// TestZeroedOrderWordNeverChangesTheLedgerWalk pins that a damaged order-line word cannot change what a walk from one key answers.
+//   - every key's own seek names that key and the entries behind it, and pays the entries it names alone
+//   - the words the last commit stated are then set to zero, which the index accepts as legal bytes: no record is unplaceable and no repair path runs
+//   - the walk entered there names what the walk from the newest entry names, because a seek is answered only once the walk names the key it was read for
+//   - the reading view that discarded it states no word beside the log, so the fallback is the walk such a root takes and never a repair of the index
+//
+// 契约: docs/wiki/memory/memory-architecture.md#local-file-kv
+func TestZeroedOrderWordNeverChangesTheLedgerWalk(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	writer, _ := openJournalSegmentStore(t, root)
+	committed := []event.EventID{"walk-first", "walk-second", "walk-third"}
+	for at, key := range committed {
+		if err := writer.StoreEvent(ctx, segmentRecord(0, 1000, int64(at+1), string(key), 8)); err != nil {
+			t.Fatalf("commit %s: %v", key, err)
+		}
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatalf("close the writing view: %v", err)
+	}
+	openReader := func() (*FileSegmentStore, *journalKV) {
+		t.Helper()
+		kv, err := openJournalView(root, false)
+		if err != nil {
+			t.Fatalf("open the reading view: %v", err)
+		}
+		store, err := newFileSegmentStore(kv)
+		if err != nil {
+			kv.Close()
+			t.Fatalf("open the segment store over the reading view: %v", err)
+		}
+		return store, kv
+	}
+	walkFrom := func(store *FileSegmentStore, from event.EventID) []event.EventID {
+		t.Helper()
+		var walked []event.EventID
+		if err := store.EachIndexNewestFirstFrom(ctx, from, func(key event.EventID, _ int, _ int64, _ string, _ event.SessionID) (bool, error) {
+			walked = append(walked, key)
+			return true, nil
+		}); err != nil {
+			t.Fatalf("walk the index from %s: %v", from, err)
+		}
+		return walked
+	}
+	reader, readerView := openReader()
+	var whole []event.EventID
+	if err := reader.EachIndexNewestFirst(ctx, func(key event.EventID, _ int, _ int64, _ string, _ event.SessionID) error {
+		whole = append(whole, key)
+		return nil
+	}); err != nil {
+		t.Fatalf("walk the index: %v", err)
+	}
+	if len(whole) != len(committed) {
+		t.Fatalf("the walk names %v, want the %d committed event(s)", whole, len(committed))
+	}
+	for _, key := range committed {
+		want := []event.EventID(nil)
+		for at, walked := range whole {
+			if walked == key {
+				want = whole[at:]
+			}
+		}
+		visitsBefore, _, _ := reader.IndexWalkReads()
+		answer := walkFrom(reader, key)
+		visits, _, _ := reader.IndexWalkReads()
+		if !slices.Equal(answer, want) {
+			t.Fatalf("the walk from %s named %v, want %v: the seek costs the commits after the key and never an entry behind it", key, answer, want)
+		}
+		if paid := visits - visitsBefore; paid != len(answer) {
+			t.Fatalf("the walk from %s paid %d visit(s) for %d entry(ies), want the entries it named alone", key, paid, len(answer))
+		}
+	}
+	if err := readerView.Close(); err != nil {
+		t.Fatalf("close the reading view: %v", err)
+	}
+
+	linesPath := filepath.Join(root, journalOrderLineFileName)
+	words, err := os.ReadFile(linesPath)
+	if err != nil {
+		t.Fatalf("read the order-line index: %v", err)
+	}
+	if len(words) == 0 || len(words)%journalOrderLineWordBytes != 0 {
+		t.Fatalf("the order-line index states %d byte(s), want whole %d-byte words", len(words), journalOrderLineWordBytes)
+	}
+	newest := int64(0)
+	for at := 0; at < len(words); at += journalOrderLineWordBytes {
+		if word := int64(binary.LittleEndian.Uint64(words[at:])); word > newest {
+			newest = word
+		}
+	}
+	if newest <= 0 {
+		t.Fatal("the order-line index states no seek, want the word of the last commit")
+	}
+	zeroed := 0
+	for at := 0; at < len(words); at += journalOrderLineWordBytes {
+		if int64(binary.LittleEndian.Uint64(words[at:])) == newest {
+			binary.LittleEndian.PutUint64(words[at:], 0)
+			zeroed++
+		}
+	}
+	if err := os.WriteFile(linesPath, words, 0o600); err != nil {
+		t.Fatalf("zero the words of the last commit: %v", err)
+	}
+	t.Logf("order.line: %d of %d word(s) stated %d and now state 0", zeroed, len(words)/journalOrderLineWordBytes, newest)
+
+	before := journalTestRootState(t, root)
+	damaged, damagedView := openReader()
+	last := committed[len(committed)-1]
+	if lineEnd, named, err := damagedView.OrderLineEnd(ctx, fmt.Sprintf("%d:%s%s", 0, segmentIndexPrefix, last)); err != nil || !named || lineEnd != 0 {
+		t.Fatalf("the seek of %s = (%d, %v, %v), want the zero the index accepts as a legal byte", last, lineEnd, named, err)
+	}
+	visitsBefore, _, _ := damaged.IndexWalkReads()
+	answer := walkFrom(damaged, last)
+	visits, _, _ := damaged.IndexWalkReads()
+	if !slices.Equal(answer, whole) {
+		t.Fatalf("the walk entered at the zeroed word named %v, want %v: a seek that never names the key it was read for is discarded for the walk from the newest entry", answer, whole)
+	}
+	if paid := visits - visitsBefore; paid != len(whole) {
+		t.Fatalf("the discarded seek paid %d visit(s) for a walk of %d entry(ies), want the walk such a root takes and no second walk of the seek", paid, len(whole))
+	}
+	if err := damagedView.Close(); err != nil {
+		t.Fatalf("close the reading view over the damaged index: %v", err)
+	}
+	journalTestRequireSameFiles(t, before, journalTestRootState(t, root))
 }
 
 // TestEachIndexNewestFirstRanksCarriedCommitsWithoutEngineOrder pins the walk over an engine stating no commit order.

@@ -324,10 +324,7 @@ func (r *MemoryRegistry) Advance(ctx context.Context, taskID event.TaskID, to St
 	case entry.status == StatusAwaitingApproval && !leavesApprovalWait(to):
 		return CommitNotCommitted, ErrIllegalTransition
 	}
-	result, applied, err := r.applyCommitLocked(ctx, entry, record)
-	if applied && isTerminal(to) {
-		entry.closeExecutionObligation("")
-	}
+	result, _, err := r.applyCommitLocked(ctx, entry, record)
 	return result, err
 }
 
@@ -376,42 +373,75 @@ func (r *MemoryRegistry) Resume(ctx context.Context, taskID event.TaskID, input 
 	case StatusCancelled:
 		return AdmissionReceipt{TaskID: taskID, Accepted: false, Kind: AdmissionRejected}, ErrResumeCancelled
 	}
-	result, applied, err := r.applyCommitLocked(ctx, entry, record)
+	result, _, err := r.applyCommitLocked(ctx, entry, record)
 	if result != CommitCommitted {
 		if err == nil {
 			err = ErrCommitUncertain
 		}
 		return AdmissionReceipt{TaskID: taskID, Accepted: false, Kind: AdmissionRejected}, err
 	}
-	if applied {
-		entry.round++
+	return AdmissionReceipt{TaskID: taskID, Accepted: true, Kind: AdmissionFresh}, nil
+}
+
+// applyFactLocked applies one committed fact to the task entry it belongs to: the
+// one rule the live commit path and the chain fold both run, so a task a run kept
+// and a task its chain rebuilds derive the same status, revision, round, delivery
+// obligations, execution obligation and handoff from the same fact.
+//
+// The movement stamp is the caller's: a live move carries the instant it landed, a
+// chain link carries none because a link states no instant of its own. The activity
+// pulse stays outside the rule — a restore applies facts while waking nothing. The
+// caller holds the registry lock and has already established that the fact is
+// committed.
+//
+// - the record decides the status: a link written while progress was still a status stores the reserved ordinal replayedStatus reads as the running phase, its progress notification staying on the chain
+// - the round is the highest the chain really opened: a terminal notice names it, a settle or rollback mutation encodes the one it consumed, and a reactivation or resume opens exactly one new round
+// - a reactivation or resume opens the execution obligation of the round it opened, so the fact is the whole reason the task owes a turn again: a task its chain rebuilds owes the turn that round waits for instead of standing in flight owing nothing
+// - a terminal fact closes the execution obligation the task holds, whichever fact opened it; the obligation a re-entry opens is read before that close, so a settled, failed or cancelled task owes no turn
+// - the entry a rebuild creates opens the admission's own execution obligation when it is created, the way a live admission does beside its first commit; an admission fact opens no second one here
+// - a notice a restart still owes is stripped from its outbox once the log confirms consumption, so the round reads from the mutations beside them too: a confirmed terminal is consumed, not unopened
+func (r *MemoryRegistry) applyFactLocked(entry *memoryTask, fact CommitRecord, stamp time.Time) {
+	taskID := fact.TaskID
+	fact.Status = replayedStatus(fact.Status)
+	entry.markMovement(fact.Status, stamp)
+	entry.status = fact.Status
+	entry.revision = fact.ExpectedRevision + 1
+	entry.mutations[fact.MutationID] = fact
+	if target, carried := handoffTargetOf(fact.MutationID); carried {
+		entry.applyHandoff(taskID, target)
+	}
+	entry.round = replayedRound(taskID, entry.round, fact)
+	for _, envelope := range fact.Outbox {
+		entry.obligations = append(entry.obligations, obligationEntry{
+			obligation: Obligation{Kind: ObligationAwaitingDelivery, TaskID: taskID, Notice: envelope.Notice},
+			envelope:   envelope,
+		})
+		r.seq.Observe(envelope.Notice)
+		if envelope.Notice.Round > entry.round {
+			entry.round = envelope.Notice.Round
+		}
+	}
+	if opensRound(taskID, fact.MutationID) {
 		entry.obligations = append(entry.obligations, obligationEntry{
 			obligation: Obligation{Kind: ObligationAwaitingTool, TaskID: taskID},
 		})
 	}
-	return AdmissionReceipt{TaskID: taskID, Accepted: true, Kind: AdmissionFresh}, nil
+	if isTerminal(fact.Status) {
+		entry.closeExecutionObligation("")
+	}
 }
 
 // applyCommitLocked submits one record to the commit port and applies the stored
-// fact to the task: its status and revision move, the mutation is remembered, and each
-// notification the record carries opens a delivery obligation. The applied fact is
-// reported through the activity pulse once it is visible to every reader, so a close
-// waiting on the account re-reads it instead of polling for it.
+// fact to the task through the rule a chain fold runs too (see applyFactLocked).
+// The applied fact is reported through the activity pulse once it is visible to
+// every reader, so a close waiting on the account re-reads it instead of polling
+// for it.
 func (r *MemoryRegistry) applyCommitLocked(ctx context.Context, entry *memoryTask, record CommitRecord) (CommitResult, bool, error) {
 	result, err := r.commit.Commit(ctx, record)
 	if result != CommitCommitted {
 		return result, false, err
 	}
-	entry.markMovement(record.Status, r.now())
-	entry.status = record.Status
-	entry.revision = record.ExpectedRevision + 1
-	entry.mutations[record.MutationID] = record
-	for _, envelope := range record.Outbox {
-		entry.obligations = append(entry.obligations, obligationEntry{
-			obligation: Obligation{Kind: ObligationAwaitingDelivery, TaskID: record.TaskID, Notice: envelope.Notice},
-			envelope:   envelope,
-		})
-	}
+	r.applyFactLocked(entry, record, r.now())
 	r.noteActivity()
 	return CommitCommitted, true, nil
 }

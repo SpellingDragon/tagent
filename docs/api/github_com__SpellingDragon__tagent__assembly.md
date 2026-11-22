@@ -53,6 +53,11 @@ is constructed. The consumer executes the judgments the age fold files,
 so its mount also installs it as that plugin's executor; the age fold finds it
 constructed whichever order the catalog lists the two in.
 
+The mount is also where the account declares the read a restored cut leaves it:
+the slice states its own coverage, so the boot reads the compression facts a
+cut carrying no such slice leaves unstated without the coordinator naming a
+consumer.
+
 The governance state of a host as the framework checkpoint carries it:
 the ledger and the goal registry that fold the two governance streams and
 the approval book the rulings park calls with. The host seats that state on
@@ -251,6 +256,11 @@ run knows its open work before it reads a single chain. A task the run finished
 states nothing here, and the chain stays the truth of it: the slice spares the
 covered part of every open chain and nothing else, which is what keeps its body
 equal however many tasks the storage already settled.
+
+The slice is also the owner of the restore prerequisite that account carries: it
+seats the durable account from the payload it states before any holder restores
+the state that reads it (see SeatRestore), so the boot that restores the mailbox
+reads a seated account without the coordinator reading what this slice states.
 
 CONSTANTS
 
@@ -515,6 +525,12 @@ func Assemble(ctx context.Context, decl *config.Declaration, agents map[event.Ag
     the closing round of a spent budget stands on the chain as the fact it is.
     - The loop builds the writer ledger for itself and the run reads it through
     the loop, so the close judges the very registrations the productions made.
+    - The run-level plugin factories run in the order their options were applied
+    and each exactly once, and a factory that fails stops the sequence with its
+    position named and mounts nothing any factory answered. - The recoverable
+    state a caller contributes mounts on the run's state seam ahead of the boot
+    restore, so the cut restores into the holder the caller declared instead of
+    waiting for a mount that comes after it.
 
 func Boot(configPath string, opts ...HostOption) (*Host, error)
     Boot reads one host document and returns the assembled host: the declaration
@@ -571,7 +587,22 @@ func Boot(configPath string, opts ...HostOption) (*Host, error)
     the boot document enables meditation: each generation mounts its loop over
     the store of the record its own plan names, so a generation that enables,
     moves or drops meditation reads the anchor record it declares and a rebuilt
-    loop continues from the watermark the previous one consumed.
+    loop continues from the watermark the previous one consumed. - The caller's
+    own contributions reach this assembly: every builder attached through
+    WithPlugins and every consumer mounted through WithGenerationConsumer
+    is replayed ahead of the ones this entry mounts itself, so a contributed
+    factory runs once in the caller's declared order and a caller's consumer
+    registers before the host's own. - Every state slice the caller mounts
+    through WithStateSlice is replayed into the same assembly, so it mounts
+    on the run's state seam before the boot restore and the cut restores into
+    the caller's holder; a slice the checkpoint states beside no holder is
+    still refused by name. - A face this entry builds itself — the capture, the
+    embedder, the memory plan, the model leases, the observation and recording
+    faces, the execution ledger, the generation faces and ports, the reflection
+    anchors, the task terminal TTL and the boot reconciliation — is refused by
+    name when a caller declares one through an option, because the value would
+    be dropped without effect; Assemble is the entry that seats a caller's face.
+    The contributions listed above are replayed as before.
 
 func DiagnosticSwitchesFromEnv() (DiagnosticSwitches, error)
     DiagnosticSwitchesFromEnv reads the diagnostic switches the host process
@@ -1476,21 +1507,30 @@ func WithModelLease(agentID event.AgentID, lease *rl.ModelLease, opts ...ModelLe
     refused by name.
 
 func WithPlugins(build func(*Run) ([]plugin.Instance, error)) Option
-    WithPlugins builds the run-level plugin instances every agent generation
-    carries: an event-driven face attached here observes every commit of
-    the run, whichever agent session committed it, exactly as a contributed
-    instance observes the commits of its own agent. The builder runs once,
+    WithPlugins appends one builder of the run-level plugin instances
+    every agent generation carries: an event-driven face attached here
+    observes every commit of the run, whichever agent session committed it,
+    exactly as a contributed instance observes the commits of its own agent.
+    Each builder runs once per assembly, in the order its option was applied,
     after the watermark gate is established and before the first publication,
-    and the instances it answers are never replaced.
+    and the run-level set is the answers of the builders in that order. A reload
+    publishes a new generation of the generation-scoped consumers and leaves
+    this set in place, so changing it takes another boot.
+
+    - A builder that fails stops the sequence: the failure names the position
+    it holds beside the cause it answered, and no instance any builder answered
+    reaches the run.
 
 func WithPolicy(policy plugin.Governor) Option
-    WithPolicy attaches the governance policy every call admitted through the
-    registration wrapper of this assembly is ruled by: the ruling consumes the
-    one Before pass the call carries — the final call beside the risk grade
-    its risk faces rendered — exactly once per call, before any execution.
-    The policy occupies the approval seat, so it is the sole pre-execution
-    ruling of the assembly: a refused call is turned away before any execution
-    with its named paired result, and a held call parks in the approval wait.
+    WithPolicy attaches the governance policy the calls admitted through the
+    registration wrapper of this assembly are ruled by when the published
+    pipeline declares no Governor of its own: the ruling consumes the one Before
+    pass the call carries — the final call beside the risk grade its risk
+    faces rendered — exactly once per call, before any execution. A Governor a
+    published pipeline declares is the ruling of that pipeline's calls instead,
+    so this policy is the default a declaration supersedes rather than a second
+    ruling beside it. A refused call is turned away before any execution with
+    its named paired result, and a held call parks in the approval wait.
 
 func WithRecorder(recorder rl.Recorder) Option
     WithRecorder attaches the training record pipeline this assembly derives
@@ -1509,6 +1549,19 @@ func WithReflectionAnchors(path string) Option
     answers the watermark the diagnostic reading reports. An assembly beside
     no path carries no reflection anchor store, and its reflection face reports
     that absence instead of a watermark of its own.
+
+func WithStateSlice(holder state.Stateful) Option
+    WithStateSlice appends one consumer's recoverable state to this assembly:
+    the holder mounts on the run's state seam before the boot restore runs,
+    through the same StateRegistry.Register a consumer mounts with after boot,
+    so a checkpoint stating the slice restores into this holder instead of
+    failing as a slice no holder mounts. Slices append in the order the options
+    are applied, so the wiring renders the same order and the same bytes.
+
+    - The holder states and restores its own payload; the assembly interprets
+    none of it and names no consumer. - A holder naming no state, and a
+    name another slice already owns, refuse the assembly by name instead of
+    overwriting a slice a consumer owns.
 
 func WithStorage(cfg ledger.StorageConfig) Option
     WithStorage opens the named storage tier for this assembly and stores the

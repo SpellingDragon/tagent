@@ -84,6 +84,36 @@ const (
 	checkpointSliceCompress = "compress"
 )
 
+// checkpointSliceGovernance is the state slice the governance seat states. Its name
+// is owned by features/evolution/governance beside the seat that answers it, which
+// this assembly names here to know the seat reads a cut that states no slice of it.
+const checkpointSliceGovernance = "governance"
+
+// restoredFallbackSlices names the state slices the framework's own wiring mounts.
+// Each answers a cut that carries no slice of it out of what it serves instead of
+// from an empty account: the projection bound falls back to the whole index walk,
+// the task account seats itself from the whole log, the mailbox seats the
+// obligations its durable account owes, the owed input rounds derive from the fact
+// ledger, the compression account reads the judgments its cut covers none of, the
+// delivery account rebuilds from the fact chain alone, and the governance seat
+// reads the whole stream past its zero cut.
+//
+// The set is the framework's own faces, never a list a contributed holder joins: a
+// holder outside it states no such read, so a cut that never stated its slice
+// leaves it empty and the boot answers that by replaying every chain from its
+// beginning (see judgeContributedSliceCoverage). A consumer added beside these
+// needs no change here — it is answered a whole chain, which is the safe side of
+// the judgment.
+var restoredFallbackSlices = map[string]bool{
+	checkpointSliceProjection: true,
+	checkpointSliceDelivery:   true,
+	checkpointSliceTasks:      true,
+	checkpointSliceInputs:     true,
+	checkpointSliceCompress:   true,
+	state.StateSliceMailbox:   true,
+	checkpointSliceGovernance: true,
+}
+
 // ErrCheckpointUnreadable reports a checkpoint fact whose payload does not state
 // the cut and slices its identity was content-addressed over, so no state is
 // restored from it.
@@ -798,6 +828,7 @@ func newestCheckpointRef(ctx context.Context, tier *ledger.Tier) (anchorRef, boo
 // boot never starts beside state it read as empty.
 //
 //   - The read names the partition the reference carries, so it addresses that one index entry instead of probing the partitions the seat states: a checkpoint whose partition the seat under-states is still read back.
+//   - Every owner that declared a restore prerequisite is seated before a slice is handed out, so a holder that reads the account another consumer states restores from a seated one; the slices the seat reads are the owner's, and this call names no slice of any consumer.
 func (r *Run) restoreCheckpoint(ctx context.Context, tier *ledger.Tier, ref anchorRef) (event.CheckpointOffset, error) {
 	stored, held, err := tier.Segments.GetEventInPartition(ctx, ref.key, ref.partition)
 	if err != nil {
@@ -816,7 +847,7 @@ func (r *Run) restoreCheckpoint(ctx context.Context, tier *ledger.Tier, ref anch
 	if !stated {
 		return nil, fmt.Errorf("%w: %s", ErrCheckpointUnreadable, ref.key)
 	}
-	if err := r.seatDurableAccount(ctx, tier, checkpoint.Slices); err != nil {
+	if err := r.seatRestoreState(ctx, checkpoint.Slices); err != nil {
 		return nil, err
 	}
 	if err := r.states.RestoreState(ctx, checkpoint.Slices); err != nil {
@@ -831,65 +862,123 @@ func (r *Run) restoreCheckpoint(ctx context.Context, tier *ledger.Tier, ref anch
 	r.checkpointOffset = checkpoint.Offset
 	r.checkpointSlices = slices
 	r.mu.Unlock()
+	r.noteRestoredSlices(checkpoint.Slices)
 	return checkpoint.Offset, nil
 }
 
-// seatDurableAccount seats the durable task account before the slices are handed
-// to their holders: the mailbox reads the notifications that account still owes,
-// so an account seated after the mailbox restore leaves every notice past the cut
-// unseated and undelivered, which is a work item a restart silently loses.
-//
-// The account is read from the tasks slice of this checkpoint beside the keys the
-// storage committed past the newest framework checkpoint, so the tasks the
-// checkpoint covers cost no durable prefix read and the chains younger than it cost
-// their own length. A checkpoint that states no tasks slice, a walk that finds no
-// framework checkpoint, and a storage that states no commit order seat nothing here
-// and the boot reads the whole log instead. The boot states what the seat read back
-// by identity, because the reads this account costs are the ones the boot pays and
-// no other record of them reaches a boot report.
-func (r *Run) seatDurableAccount(ctx context.Context, tier *ledger.Tier, slices []event.CheckpointSlice) error {
-	durable := r.durableAccount()
-	if durable == nil || durable.Seated() {
-		return nil
+// noteRestoredSlices adds the state slices one restored cut states to the set this
+// boot accumulates across the cuts it restores: the framework's cut beside the
+// newest cut of every session chain. A holder whose slice the accumulated set names
+// started from the state its cut stated, and a holder it does not name started from
+// the empty state the seam hands a holder no slice names — which only the holders
+// that read their own fallback answer (see judgeContributedSliceCoverage).
+func (r *Run) noteRestoredSlices(slices []event.CheckpointSlice) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.restoredSlices == nil {
+		r.restoredSlices = make(map[string]bool, len(slices))
 	}
-	var stated json.RawMessage
 	for _, slice := range slices {
-		if slice.Name == checkpointSliceTasks {
-			stated = slice.Payload
-			break
+		r.restoredSlices[slice.Name] = true
+	}
+}
+
+// judgeContributedSliceCoverage decides whether this boot replays every chain from
+// its beginning instead of past the cuts it restored.
+//
+// A cut states the state of the slices it carries and of no other: a mounted holder
+// the cut states no slice of keeps the empty state the seam gave it, and the anchored
+// replay that follows folds only the material committed past the cut, so the account
+// the chain holds below the cut is absent from that holder (audit #6: eight of
+// twenty-four facts folded, the rest silently missing). The framework's own faces
+// answer that by reading the facts their cut leaves unstated for them; a holder the
+// caller contributed declares no such read, so the whole chain is what answers it.
+//
+//   - The whole-chain replay is safe for the holders the cut did state: every reducer is idempotent by the identity the fact carries, which the derivation contract freezes in §一 and §五, so folding a fact a slice already stated leaves the state it derives once.
+//   - The cost is one O(history) read on the boot that first carries a contribution whose slice an older cut cannot state, never on a steady boot: the framework's own faces stay out of the judgment, so a cut that states their slices keeps the bounded replay.
+//   - A boot that restored no cut, and a cut that states no slice at all, bound no read: the anchored replay reads every chain whole there, so the contribution is covered without this set.
+//   - The judgment names no consumer: it reads the mounted slice names the seam already holds, and the fallback set is the framework's own faces rather than a list a contributed holder joins.
+//
+// 契约: docs/wiki/platform/platform-subsystems.md#framework-checkpoint
+func (r *Run) judgeContributedSliceCoverage() {
+	r.mu.Lock()
+	stated := make(map[string]bool, len(r.restoredSlices))
+	for name := range r.restoredSlices {
+		stated[name] = true
+	}
+	states := r.states
+	r.mu.Unlock()
+	if len(stated) == 0 || states == nil {
+		return
+	}
+	for _, name := range states.Names() {
+		if restoredFallbackSlices[name] || stated[name] {
+			continue
+		}
+		r.mu.Lock()
+		r.fullReplayOnBoot = true
+		r.mu.Unlock()
+		assemblyInfo("tagent: the restored cut states no slice of %q, so this boot replays every chain from its beginning", name)
+		return
+	}
+}
+
+// restoreSeat is the declaration face of an owner whose state the holders read
+// while they restore: the boot seats that state before it hands any holder a
+// slice, because a holder restored ahead of the seat reads an account the boot
+// has not read yet and silently drops the work it still owes.
+//
+// The declaration carries the ownership of the prerequisite: the owner that
+// states the account names the slices it seats itself, so the coordinator never
+// reads what a slice of another consumer states and a consumer added beside it
+// changes no restore step of this file; the wiring that mounts the holder is the
+// one that declares it.
+type restoreSeat interface {
+	// SeatRestore seats the state this owner holds from the slices of one cut. A
+	// cut stating no slice passes none, and the seat then reads the account it
+	// serves whole.
+	SeatRestore(ctx context.Context, slices []event.CheckpointSlice) error
+}
+
+// seatRestoreState seats every owner that declared a restore prerequisite, in the
+// order the wiring declared them, before any holder is handed a slice.
+func (r *Run) seatRestoreState(ctx context.Context, slices []event.CheckpointSlice) error {
+	for _, seat := range r.restoreSeats {
+		if err := seat.SeatRestore(ctx, slices); err != nil {
+			return err
 		}
 	}
-	tail, err := tailFactKeys(ctx, tier)
-	if err != nil {
-		return fmt.Errorf("tagent: walk the commit order of the task account: %w", err)
-	}
-	if err := durable.Seat(ctx, stated, tail); err != nil {
-		return fmt.Errorf("tagent: seat the durable task account of the checkpoint: %w", err)
-	}
-	stateSeatedAccount(durable, tail)
 	return nil
 }
 
-// stateSeatedAccount states what a boot read back by identity when it seated the
-// task account: the tasks the account holds, the size of the tail the storage
-// stated for those reads, and the reads and the keys they answered. A tail of
-// none is the boot that read the whole log, so its reads are the family scans
-// beside a storage that states no cut; a seated account that read no key states
-// zero, which is the checkpoint covering every task the account holds.
+// coverageRestore is the declaration face of a consumer whose account one restored
+// cut covers only as far as the cut states that consumer's slice: the owner that
+// states the account reads the facts the cut leaves unstated, so no other
+// consumer's coverage stands for its own.
 //
-// 契约: docs/wiki/memory/memory-architecture.md#store-instance-sharing
-func stateSeatedAccount(durable *state.DurableCommit, tail map[string]struct{}) {
-	scans := durable.LoadStats().Scans
-	keys := 0
-	for _, scan := range scans {
-		keys += scan.Keys
+// The declaration carries the ownership of the read: the owner names the slice it
+// states itself, so the coordinator reads no payload and names no consumer, and
+// the wiring that mounts the consumer is the one that declares it.
+type coverageRestore interface {
+	// RestoreCoverage folds, from the storage tier, the facts the restored cut
+	// states no slice of this consumer for. A cut that states the consumer's slice
+	// leaves the owner reading past the cut it states; a run that restored no cut
+	// declares nothing here, because its rebuild reads every chain whole.
+	RestoreCoverage(ctx context.Context, tier *ledger.Tier) error
+}
+
+// restoreCoverageState reads what every owner declared the restored cut does not
+// state for it, in the order the wiring declared them. The cut states one account
+// per consumer only where it carries that consumer's slice; a consumer the cut
+// carries no slice of reads the history its account derives from instead of
+// starting beside an empty one.
+func (r *Run) restoreCoverageState(ctx context.Context, tier *ledger.Tier) error {
+	for _, owner := range r.coverageRestores {
+		if err := owner.RestoreCoverage(ctx, tier); err != nil {
+			return err
+		}
 	}
-	cut := "none"
-	if tail != nil {
-		cut = strconv.Itoa(len(tail))
-	}
-	assemblyInfo("tagent: boot seated the task account tasks=%d tail=%s reads=%d keys=%d",
-		len(durable.TaskIDs()), cut, len(scans), keys)
+	return nil
 }
 
 // durableAccount answers the durable task account this run commits through, and
@@ -1114,6 +1203,7 @@ func (r *Run) restoreSessionCheckpoint(ctx context.Context, tier *ledger.Tier, r
 	if err := r.states.RestoreState(ctx, checkpoint.Slices); err != nil {
 		return err
 	}
+	r.noteRestoredSlices(checkpoint.Slices)
 	return nil
 }
 

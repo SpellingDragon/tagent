@@ -744,6 +744,222 @@ func TestMigrationSilentlyRejudgesNothing(t *testing.T) {
 	})
 }
 
+// TestDeclaredMaterialDrivesItsPass pins that a declaration decides what a failed face leaves behind.
+// - two faces of one port declaring the gap and the obligation semantics are answered differently
+// - swapping the two declarations swaps the answers, so one answer follows the declaration it was handed
+// - the driver marker never outranks a declared gap, and its absence never hides a declared obligation
+// - the assembled flow carries each face's own declaration instead of one material per port
+// 契约: docs/wiki/plugin/plugin-architecture.md#overview
+func TestDeclaredMaterialDrivesItsPass(t *testing.T) {
+	ctx := context.Background()
+	failure := errors.New("the reading did not land")
+
+	answers := func(t *testing.T, carriedByMarked, carriedByUnmarked Failure) (bool, bool) {
+		t.Helper()
+		var order []string
+		marked := markerObserver{
+			invariantObserver: invariantObserver{
+				invariantPlugin: invariantPlugin{name: "marked", port: PortFactObservation},
+				order:           &order,
+				err:             failure,
+			},
+			statesMaterial: statesMaterial{material: observationMaterial(carriedByMarked)},
+		}
+		unmarked := migratedObserver{
+			invariantObserver: invariantObserver{
+				invariantPlugin: invariantPlugin{name: "unmarked", port: PortFactObservation},
+				order:           &order,
+				err:             failure,
+			},
+			statesMaterial: statesMaterial{material: observationMaterial(carriedByUnmarked)},
+		}
+		pipeline := newFlow(t, marked, unmarked)
+		carried := []Material{pipeline.observers[0].material, pipeline.observers[1].material}
+		if carried[0].Failure != carriedByMarked || carried[1].Failure != carriedByUnmarked {
+			t.Fatalf("carried declarations = %+v, want each face's own declaration", carried)
+		}
+		gaps := pipeline.After(ctx, "fact-1").Gaps
+		if len(gaps) != 2 || gaps[0].Plugin != "marked" || gaps[1].Plugin != "unmarked" {
+			t.Fatalf("gaps = %+v, want one gap per face in declared order", gaps)
+		}
+		if !errors.Is(gaps[0].Err, failure) || !errors.Is(gaps[1].Err, failure) {
+			t.Fatalf("gaps = %+v, want the cause readable through either answer", gaps)
+		}
+		return errors.Is(gaps[0].Err, ErrObservationObligationRetained), errors.Is(gaps[1].Err, ErrObservationObligationRetained)
+	}
+
+	t.Run("two faces of one port answering by their own declarations", func(t *testing.T) {
+		marked, unmarked := answers(t, PreserveObligation, RecordGap)
+		if !marked || unmarked {
+			t.Fatalf("answers = (marked owed %v, unmarked owed %v), want the obligation for the face declaring it and a reading gap for the other", marked, unmarked)
+		}
+	})
+
+	t.Run("swapping the declarations swaps the answers", func(t *testing.T) {
+		marked, unmarked := answers(t, RecordGap, PreserveObligation)
+		if marked || !unmarked {
+			t.Fatalf("answers = (marked owed %v, unmarked owed %v), want the answer to follow the declaration rather than the face carrying it", marked, unmarked)
+		}
+	})
+}
+
+// TestCompatMaterialKeepsPortBehavior pins what a face declaring only its port reads.
+// - every port-only face reads the timing and the failure its port's pass admits
+// - the observation port's duty decides which of its two admitted failures the read answers
+// - the driver duty reads the obligation while an observer-only face reads the gap
+// - the two duties read one material at one timing, so the pass answers them by what each face carries
+// 契约: docs/wiki/plugin/plugin-architecture.md#overview
+func TestCompatMaterialKeepsPortBehavior(t *testing.T) {
+	ctx := context.Background()
+
+	rows := []struct {
+		name     string
+		instance Instance
+		want     Material
+	}{
+		{
+			name:     "call->call",
+			instance: &invariantTransform{invariantPlugin: invariantPlugin{name: "face", port: PortCallTransform}},
+			want:     Material{Reads: PortCallTransform, Timing: TimingPreSideEffect, Failure: FailClosed},
+		},
+		{
+			name:     "call->ruling",
+			instance: invariantRisk{invariantPlugin: invariantPlugin{name: "face", port: PortCallRuling}},
+			want:     Material{Reads: PortCallRuling, Timing: TimingPreSideEffect, Failure: FailClosed},
+		},
+		{
+			name:     "request->environment",
+			instance: invariantInject{invariantPlugin: invariantPlugin{name: "face", port: PortRequestEnvironment}},
+			want:     Material{Reads: PortRequestEnvironment, Timing: TimingRead, Failure: FailClosed},
+		},
+		{
+			name:     "fact->observation observer-only",
+			instance: &invariantObserver{invariantPlugin: invariantPlugin{name: "face", port: PortFactObservation}, order: newOrder()},
+			want:     observationMaterial(RecordGap),
+		},
+		{
+			name:     "fact->observation driver",
+			instance: &layeredDriver{layeredReading: layeredReading{invariantPlugin: invariantPlugin{name: "face", port: PortFactObservation}, seen: newSeen()}, owed: new(bool)},
+			want:     observationMaterial(PreserveObligation),
+		},
+		{
+			name:     "fact->view",
+			instance: invariantPresenter{invariantPlugin: invariantPlugin{name: "face", port: PortFactView}},
+			want:     Material{Reads: PortFactView, Timing: TimingPostCommit, Failure: ReportLoss},
+		},
+		{
+			name:     "fact->compression",
+			instance: invariantTrigger{invariantPlugin: invariantPlugin{name: "face", port: PortFactCompression}},
+			want:     Material{Reads: PortFactCompression, Timing: TimingPostCommit, Failure: PreserveObligation},
+		},
+	}
+	for _, row := range rows {
+		t.Run(row.name, func(t *testing.T) {
+			if got := materialOf(row.instance); got != row.want {
+				t.Fatalf("material = %+v, want the port's admitted material %+v", got, row.want)
+			}
+			if got := compatMaterialOf(row.instance); got != row.want {
+				t.Fatalf("compat material = %+v, want %+v", got, row.want)
+			}
+			rule, declared := admitted[row.want.Reads]
+			if !declared || rule.timing != row.want.Timing {
+				t.Fatalf("admitted[%s] = %+v, want the timing the compat read answered", row.want.Reads, rule)
+			}
+		})
+	}
+
+	t.Run("the pass answers each port-only duty by the failure it carries", func(t *testing.T) {
+		failure := errors.New("the reading did not land")
+		owed := false
+		reading := &invariantObserver{invariantPlugin: invariantPlugin{name: "reading", port: PortFactObservation}, order: newOrder(), err: failure}
+		driving := &layeredDriver{layeredReading: layeredReading{invariantPlugin: invariantPlugin{name: "driving", port: PortFactObservation}, seen: newSeen(), err: failure}, owed: &owed}
+		gaps := newFlow(t, reading, driving).After(ctx, "fact-1").Gaps
+		if len(gaps) != 2 {
+			t.Fatalf("gaps = %+v, want one gap per failed reading", gaps)
+		}
+		if errors.Is(gaps[0].Err, ErrObservationObligationRetained) {
+			t.Fatalf("observer-only gap = %v, want a reading gap: the port's first failure is the gap and the face owes nothing", gaps[0].Err)
+		}
+		if !errors.Is(gaps[1].Err, ErrObservationObligationRetained) {
+			t.Fatalf("driver gap = %v, want the obligation the driver duty reads", gaps[1].Err)
+		}
+		if !owed {
+			t.Fatalf("the obligation was cleared by the pass: it stays in the account that owes it")
+		}
+	})
+}
+
+// TestMaterialContradictingItsPassIsRefused pins the declarations the flow refuses at assembly.
+// - a face whose declared reads name another port than the one it serves is refused, naming both
+// - a timing its port's pass does not run at is refused, naming the timing that pass runs at
+// - a failure its port's pass cannot land is refused, naming the failures that pass can land
+// - a refused declaration leaves no partially assembled face set behind
+// 契约: docs/wiki/plugin/plugin-architecture.md#overview
+func TestMaterialContradictingItsPassIsRefused(t *testing.T) {
+	refusals := []struct {
+		name     string
+		instance Instance
+		want     string
+	}{
+		{
+			name:     "a call->call face declaring the ruling material",
+			instance: &migratedTransform{invariantTransform: &invariantTransform{invariantPlugin: invariantPlugin{name: "moved", port: PortCallTransform}}, statesMaterial: statesMaterial{material: Material{Reads: PortCallRuling, Timing: TimingPreSideEffect, Failure: FailClosed}}},
+			want:     "declares the port call->call but its material reads call->ruling",
+		},
+		{
+			name:     "a call->ruling face declaring the call material",
+			instance: migratedRisk{invariantRisk: invariantRisk{invariantPlugin: invariantPlugin{name: "moved", port: PortCallRuling}}, statesMaterial: statesMaterial{material: Material{Reads: PortCallTransform, Timing: TimingPreSideEffect, Failure: FailClosed}}},
+			want:     "declares the port call->ruling but its material reads call->call",
+		},
+		{
+			name:     "a request->environment face declaring the call material",
+			instance: migratedInject{invariantInject: invariantInject{invariantPlugin: invariantPlugin{name: "moved", port: PortRequestEnvironment}}, statesMaterial: statesMaterial{material: Material{Reads: PortCallTransform, Timing: TimingPreSideEffect, Failure: FailClosed}}},
+			want:     "declares the port request->environment but its material reads call->call",
+		},
+		{
+			name:     "a fact->observation face declaring the view material",
+			instance: migratedObserver{invariantObserver: invariantObserver{invariantPlugin: invariantPlugin{name: "moved", port: PortFactObservation}, order: newOrder()}, statesMaterial: statesMaterial{material: Material{Reads: PortFactView, Timing: TimingPostCommit, Failure: ReportLoss}}},
+			want:     "declares the port fact->observation but its material reads fact->view",
+		},
+		{
+			name:     "a fact->view face declaring the observation material",
+			instance: migratedPresenter{invariantPresenter: invariantPresenter{invariantPlugin: invariantPlugin{name: "moved", port: PortFactView}, order: newOrder()}, statesMaterial: statesMaterial{material: observationMaterial(RecordGap)}},
+			want:     "declares the port fact->view but its material reads fact->observation",
+		},
+		{
+			name:     "a fact->compression face declaring the view material",
+			instance: migratedTrigger{invariantTrigger: invariantTrigger{invariantPlugin: invariantPlugin{name: "moved", port: PortFactCompression}}, statesMaterial: statesMaterial{material: Material{Reads: PortFactView, Timing: TimingPostCommit, Failure: ReportLoss}}},
+			want:     "declares the port fact->compression but its material reads fact->view",
+		},
+		{
+			name:     "a pre-side-effect face declared post-commit",
+			instance: migratedObserver{invariantObserver: invariantObserver{invariantPlugin: invariantPlugin{name: "timed", port: PortCallRuling}, order: newOrder()}, statesMaterial: statesMaterial{material: Material{Reads: PortCallRuling, Timing: TimingPostCommit, Failure: FailClosed}}},
+			want:     "call->ruling runs at the pre-side-effect timing, not post-commit",
+		},
+		{
+			name:     "a committing face declared closed",
+			instance: migratedObserver{invariantObserver: invariantObserver{invariantPlugin: invariantPlugin{name: "closed", port: PortFactCompression}, order: newOrder()}, statesMaterial: statesMaterial{material: Material{Reads: PortFactCompression, Timing: TimingPostCommit, Failure: FailClosed}}},
+			want:     "fact->compression lands [preserve-obligation], not fail-closed",
+		},
+	}
+	for _, row := range refusals {
+		t.Run(row.name, func(t *testing.T) {
+			pipeline, err := NewFlow([]Instance{row.instance})
+			if err == nil || !strings.Contains(err.Error(), row.want) {
+				t.Fatalf("register the contradiction = (%v, %v), want a named refusal containing %q", pipeline, err, row.want)
+			}
+			if !strings.Contains(err.Error(), `"`+row.instance.Name()+`"`) {
+				t.Fatalf("refusal = %q, want the declaring face named", err)
+			}
+			faces := len(pipeline.transforms) + len(pipeline.risks) + len(pipeline.governors) + len(pipeline.injects) +
+				len(pipeline.observers) + len(pipeline.presenters) + len(pipeline.triggers)
+			if faces != 0 {
+				t.Fatalf("refused flow carries %d face(s), want no partially assembled face set", faces)
+			}
+		})
+	}
+}
+
 // newOrder returns one empty record of the faces a pass dispatched.
 func newOrder() *[]string {
 	order := make([]string, 0, 2)

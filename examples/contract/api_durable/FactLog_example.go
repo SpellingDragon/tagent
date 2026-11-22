@@ -7,8 +7,9 @@ import (
 	"github.com/SpellingDragon/tagent/api/durable"
 )
 
-// stagedLog is the canonical durable fact surface: it stages keys, answers prefix scans in
-// full and only reports durable success behind a completed barrier.
+// stagedLog is the canonical durable fact surface: it stages keys, answers one key's point
+// read and every prefix scan in full, and only reports durable success behind a completed
+// barrier.
 type stagedLog struct {
 	staged   map[string][]byte
 	barriers int
@@ -21,6 +22,15 @@ func (l *stagedLog) Put(_ context.Context, key string, value []byte) error {
 	}
 	l.staged[key] = append([]byte(nil), value...)
 	return nil
+}
+
+// Get answers one key's staged value and whether the log holds it.
+func (l *stagedLog) Get(_ context.Context, key string) ([]byte, bool, error) {
+	value, held := l.staged[key]
+	if !held {
+		return nil, false, nil
+	}
+	return append([]byte(nil), value...), true, nil
 }
 
 // Scan returns every staged pair under the key prefix.
@@ -42,8 +52,8 @@ func (l *stagedLog) Sync(context.Context) error {
 
 var _ durable.FactLog = (*stagedLog)(nil)
 
-// ExampleFactLog stages two keys, scans them all in full and completes the barrier before
-// anything is reported durable.
+// ExampleFactLog stages two keys, reads one back by its own key, scans them all in full and
+// completes the barrier before anything is reported durable.
 //
 // 契约: docs/wiki/reliability/durable-delivery.md#canonical-fact-resolution
 func ExampleFactLog() {
@@ -54,6 +64,9 @@ func ExampleFactLog() {
 		return
 	}
 	if err := log.Put(ctx, "task/1/notice", []byte("delivered")); err != nil {
+		return
+	}
+	if body, held, err := log.Get(ctx, "task/1/fact"); err != nil || !held || string(body) != "committed" {
 		return
 	}
 	pairs, err := log.Scan(ctx, "task/1/")

@@ -560,6 +560,7 @@ type invariantFactLog struct {
 	failSync bool
 	failPut  error
 	failScan error
+	failGet  error
 }
 
 // newInvariantFactLog returns an empty log beside a barrier that completes.
@@ -578,10 +579,13 @@ func (l *invariantFactLog) Put(_ context.Context, key string, value []byte) erro
 	return nil
 }
 
-// Get returns one pair the barrier completed.
+// Get returns one pair the barrier completed, unless a probe made the read fail.
 func (l *invariantFactLog) Get(_ context.Context, key string) ([]byte, bool, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	if l.failGet != nil {
+		return nil, false, l.failGet
+	}
 	value, ok := l.barrier[key]
 	return value, ok, nil
 }
@@ -637,6 +641,14 @@ func (l *invariantFactLog) refuseScan(err error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	l.failScan = err
+}
+
+// refuseGet makes every point read answer the failure handed over, or read
+// again when it is nil.
+func (l *invariantFactLog) refuseGet(err error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.failGet = err
 }
 
 // TestDurableCommitFailureObservation pins the lines the persistence face writes for every write it could not store.
@@ -977,7 +989,7 @@ func TestSettleAttemptRecordInvariants(t *testing.T) {
 // TestUnreadableAttemptRefusesTheDriveByIdentity pins the attempt read that decides whether a follow-up turn is driven a second time.
 //   - positive: an attempt record the log holds decodes back as the terminal the turn landed, read by the notification identity a seated task never touched
 //   - negative: bytes the reader cannot decode are reported by name beside no answer, so the pump never reads "no attempt" where the record exists
-//   - negative: a scan the log refused is reported by name beside no answer
+//   - negative: a read the log refused is reported by name beside no answer
 //
 // 契约: docs/wiki/reliability/durable-delivery.md#canonical-fact-resolution
 func TestUnreadableAttemptRefusesTheDriveByIdentity(t *testing.T) {
@@ -1033,7 +1045,7 @@ func TestUnreadableAttemptRefusesTheDriveByIdentity(t *testing.T) {
 		}
 	})
 
-	t.Run("a scan the log refused is named beside no answer", func(t *testing.T) {
+	t.Run("a read the log refused is named beside no answer", func(t *testing.T) {
 		log := newInvariantFactLog()
 		commit, err := loadedDurableCommit(ctx, log, nil)
 		if err != nil {
@@ -1046,10 +1058,10 @@ func TestUnreadableAttemptRefusesTheDriveByIdentity(t *testing.T) {
 			t.Fatalf("complete the barrier: %v", err)
 		}
 		readErr := errors.New("the log refused the read of the attempt family")
-		log.refuseScan(readErr)
+		log.refuseGet(readErr)
 		read, held, err := NewMemoryStore(nil, commit).Attempt(ctx, notice)
 		if !errors.Is(err, readErr) {
-			t.Fatalf("the attempt read beside a refused scan = (%+v, held=%v, err=%v), want %v",
+			t.Fatalf("the attempt read beside a refused read = (%+v, held=%v, err=%v), want %v",
 				read, held, err, readErr)
 		}
 		if read.Terminal != "" || held {
@@ -1086,7 +1098,7 @@ func TestUnreadableReceiptFailsTheRestoreByName(t *testing.T) {
 		}
 	})
 
-	t.Run("a scan the log refused fails the restore by name", func(t *testing.T) {
+	t.Run("a read the log refused fails the restore by name", func(t *testing.T) {
 		log := newInvariantFactLog()
 		commit, err := loadedDurableCommit(ctx, log, nil)
 		if err != nil {
@@ -1094,7 +1106,7 @@ func TestUnreadableReceiptFailsTheRestoreByName(t *testing.T) {
 		}
 		store := NewMemoryStore(NewAuthority(), commit)
 		readErr := errors.New("the log refused the read of the receipt family")
-		log.refuseScan(readErr)
+		log.refuseGet(readErr)
 		err = NewMailboxState(store).RestoreState(ctx, payload)
 		if !errors.Is(err, readErr) {
 			t.Fatalf("the restore beside a refused receipt read = %v, want %v: a read folded into \"not settled\" hands a settled notification to a second turn",
@@ -1104,6 +1116,97 @@ func TestUnreadableReceiptFailsTheRestoreByName(t *testing.T) {
 			t.Fatalf("the refused restore owes %+v, want none: the account states no receipt this reader reached", seats)
 		}
 	})
+}
+
+// receiptReadLog records the reads one commit makes: every key a point read names
+// and every prefix a scan names, in the order they happen.
+type receiptReadLog struct {
+	durable.FactLog
+	mu    sync.Mutex
+	gets  []string
+	scans []string
+}
+
+// Get records the key and forwards the point read.
+func (l *receiptReadLog) Get(ctx context.Context, key string) ([]byte, bool, error) {
+	reader, statesPointRead := l.FactLog.(pointReadLog)
+	if !statesPointRead {
+		return nil, false, fmt.Errorf("the wrapped log states no point read")
+	}
+	l.mu.Lock()
+	l.gets = append(l.gets, key)
+	l.mu.Unlock()
+	return reader.Get(ctx, key)
+}
+
+// Scan records the prefix and forwards the scan.
+func (l *receiptReadLog) Scan(ctx context.Context, prefix string) (map[string][]byte, error) {
+	l.mu.Lock()
+	l.scans = append(l.scans, prefix)
+	l.mu.Unlock()
+	return l.FactLog.Scan(ctx, prefix)
+}
+
+// readMark is the point one observation window began at.
+type readMark struct {
+	gets  int
+	scans int
+}
+
+// mark starts a new observation window and reports where it began.
+func (l *receiptReadLog) mark() readMark {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return readMark{gets: len(l.gets), scans: len(l.scans)}
+}
+
+// readsSince reports the point reads and the scans made since one mark.
+func (l *receiptReadLog) readsSince(mark readMark) ([]string, []string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return append([]string(nil), l.gets[mark.gets:]...), append([]string(nil), l.scans[mark.scans:]...)
+}
+
+// TestReceiptReadIsTheOneKeyItNames pins the read a restore pays for one notification.
+//   - positive: the receipt read is the two keys of that notification's identity, each a point read
+//   - negative: no read of the receipt families is a scan, so the read never costs the pairs beside the key
+//   - positive: the receipt read stays outside the load's prefix measurement, which states what a whole-family read costs
+//   - consumer: the mailbox restore folds a payload through the commit the boot opened (MailboxState.RestoreState)
+//
+// 契约: docs/wiki/reliability/durable-delivery.md#canonical-fact-resolution
+func TestReceiptReadIsTheOneKeyItNames(t *testing.T) {
+	ctx := context.Background()
+	notice := task.Notice{TaskID: "task-one-key", Round: 1, Kind: task.NoticeSettled, Seq: 0,
+		Event: event.EventID("task-one-key-settled")}
+	envelope := task.Envelope{Notice: notice, Target: invariantAddress, Source: invariantAddress,
+		TargetInstance: event.InstanceID("instance-a")}
+	log := &receiptReadLog{FactLog: newInvariantFactLog()}
+	commit, err := loadedDurableCommit(ctx, log, nil)
+	if err != nil {
+		t.Fatalf("open the commit: %v", err)
+	}
+	store := NewMemoryStore(NewAuthority(), commit)
+	measured := len(commit.LoadStats().Scans)
+	mark := log.mark()
+
+	if err := NewMailboxState(store).RestoreState(ctx, staleMailboxPayload(t, envelope)); err != nil {
+		t.Fatalf("restore the mailbox slice: %v", err)
+	}
+	if seats := store.Unconsumed(); len(seats) != 1 || seats[0].Notice != notice {
+		t.Fatalf("the restored mailbox owes %+v, want the one notification the account states no receipt for", seats)
+	}
+
+	gets, scans := log.readsSince(mark)
+	want := []string{consumeKey(notice), rejectKey(notice)}
+	if strings.Join(gets, " ") != strings.Join(want, " ") {
+		t.Fatalf("the receipt read paid for the keys %v, want the two keys of the notification's own identity %v", gets, want)
+	}
+	if len(scans) != 0 {
+		t.Fatalf("the receipt read scanned %v, want no scan at all: a known key pays for its own pair, never for the family beside it", scans)
+	}
+	if got := len(commit.LoadStats().Scans); got != measured {
+		t.Fatalf("the load measurement states %d prefix read(s) after the receipt read, want the %d it states before it: the receipt read is not a whole-family read", got, measured)
+	}
 }
 
 // TestRestoredTaskRoundHighWater pins the round a rebuilt task re-enters at.
@@ -1329,6 +1432,15 @@ type selectiveScanLog struct {
 // Put stages one pair on the inner log.
 func (l *selectiveScanLog) Put(ctx context.Context, key string, value []byte) error {
 	return l.inner.Put(ctx, key, value)
+}
+
+// Get forwards one key's point read to the inner log.
+func (l *selectiveScanLog) Get(ctx context.Context, key string) ([]byte, bool, error) {
+	reader, statesPointRead := l.inner.(pointReadLog)
+	if !statesPointRead {
+		return nil, false, fmt.Errorf("the wrapped log states no point read")
+	}
+	return reader.Get(ctx, key)
 }
 
 // Scan refuses the named prefixes and forwards the rest.

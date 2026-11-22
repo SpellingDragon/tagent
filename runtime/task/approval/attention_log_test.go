@@ -20,7 +20,7 @@ import (
 type factStore struct {
 	mu        sync.Mutex
 	stored    map[string][]byte
-	scans     int
+	reads     int
 	pairs     int
 	refuse    int
 	refuseKey string
@@ -43,6 +43,24 @@ func (s *factStore) Put(_ context.Context, key string, value []byte) error {
 	return nil
 }
 
+// Get answers one stored fact by its own key, and refuses the read of one key on
+// demand exactly as the scan of that key is refused. The read and the body it
+// handed back are counted, so a check reads the cost a point read paid.
+func (s *factStore) Get(_ context.Context, key string) ([]byte, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.refuseKey != "" && key == s.refuseKey {
+		return nil, false, fmt.Errorf("the store refused the read at %s", key)
+	}
+	s.reads++
+	value, held := s.stored[key]
+	if !held {
+		return nil, false, nil
+	}
+	s.pairs++
+	return append([]byte(nil), value...), true, nil
+}
+
 // Scan answers every stored pair under the prefix, and refuses the read of one key
 // on demand.
 func (s *factStore) Scan(_ context.Context, prefix string) (map[string][]byte, error) {
@@ -51,7 +69,6 @@ func (s *factStore) Scan(_ context.Context, prefix string) (map[string][]byte, e
 	if s.refuseKey != "" && prefix == s.refuseKey {
 		return nil, fmt.Errorf("the store refused the read at %s", prefix)
 	}
-	s.scans++
 	found := map[string][]byte{}
 	for key, value := range s.stored {
 		if strings.HasPrefix(key, prefix) {
@@ -62,12 +79,12 @@ func (s *factStore) Scan(_ context.Context, prefix string) (map[string][]byte, e
 	return found, nil
 }
 
-// counters answers the reads this store served so far: the scans, and the pairs
-// those scans handed back for a reader to decode.
-func (s *factStore) counters() (scans, pairs int) {
+// counters answers the reads this store served so far: the point reads, and the
+// bodies those reads handed back for a reader to decode.
+func (s *factStore) counters() (reads, pairs int) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.scans, s.pairs
+	return s.reads, s.pairs
 }
 
 // Sync completes the write barrier of one staged write.
@@ -307,7 +324,7 @@ func TestApprovalHistoryReadFailureDoesNotMintANewRequest(t *testing.T) {
 
 // TestAttentionBindReadsTheObligationsNotTheHistory pins what a stated boot pays.
 //   - positive: a book whose cut states three obligations binds beside a settled history at the cost of those three keys, seating the same three
-//   - negative: the same bind over a history twice as long costs the same scans, decodes and residents
+//   - negative: the same bind over a history twice as long costs the same reads, decodes and residents
 //   - negative: a book beside no stated cut decodes the whole stream, so the flat read is the cut's and not a store this test cannot see
 //   - consumer: BindAttention is the boot read the governance seat runs, and Lookup the gate read the settled history answers by identity
 //
@@ -343,15 +360,15 @@ func TestAttentionBindReadsTheObligationsNotTheHistory(t *testing.T) {
 	}
 	settle(settledRows)
 
-	boot := func() (scans, pairs, resident int, allocated uint64) {
+	boot := func() (reads, pairs, resident int, allocated uint64) {
 		return statedBootCost(t, ctx, store, writer, openRows)
 	}
 
-	scans, pairs, resident, bytes := boot()
-	t.Logf("stated bind beside %d settled rounds: scans=%d decoded=%d resident=%d allocated=%d bytes",
-		settledRows, scans, pairs, resident, bytes)
-	if scans != openRows {
-		t.Fatalf("the stated bind served %d scans, want the %d answer keys of the obligations it states", scans, openRows)
+	reads, pairs, resident, bytes := boot()
+	t.Logf("stated bind beside %d settled rounds: reads=%d decoded=%d resident=%d allocated=%d bytes",
+		settledRows, reads, pairs, resident, bytes)
+	if reads != openRows {
+		t.Fatalf("the stated bind served %d reads, want the %d answer keys of the obligations it states", reads, openRows)
 	}
 	if pairs > openRows {
 		t.Fatalf("the stated bind decoded %d bodies, want no more than the %d obligations it states", pairs, openRows)
@@ -361,21 +378,21 @@ func TestAttentionBindReadsTheObligationsNotTheHistory(t *testing.T) {
 	}
 
 	settle(settledRows)
-	grownScans, grownPairs, grownResident, grownBytes := boot()
-	t.Logf("stated bind beside %d settled rounds: scans=%d decoded=%d resident=%d allocated=%d bytes",
-		2*settledRows, grownScans, grownPairs, grownResident, grownBytes)
-	if grownScans != scans || grownPairs != pairs || grownResident != resident {
-		t.Fatalf("the bind of one stated cut cost scans=%d decoded=%d resident=%d beside %d settled rounds and scans=%d decoded=%d resident=%d beside %d, want the cut's own work either way",
-			scans, pairs, resident, settledRows, grownScans, grownPairs, grownResident, 2*settledRows)
+	grownReads, grownPairs, grownResident, grownBytes := boot()
+	t.Logf("stated bind beside %d settled rounds: reads=%d decoded=%d resident=%d allocated=%d bytes",
+		2*settledRows, grownReads, grownPairs, grownResident, grownBytes)
+	if grownReads != reads || grownPairs != pairs || grownResident != resident {
+		t.Fatalf("the bind of one stated cut cost reads=%d decoded=%d resident=%d beside %d settled rounds and reads=%d decoded=%d resident=%d beside %d, want the cut's own work either way",
+			reads, pairs, resident, settledRows, grownReads, grownPairs, grownResident, 2*settledRows)
 	}
 
 	bare := NewApprovalManager("", time.Hour, WithApprovalRescanInterval(0))
-	beforeScans, beforePairs := store.counters()
+	beforeReads, beforePairs := store.counters()
 	if err := bare.BindAttention(ctx, store); err != nil {
 		t.Fatalf("bind the durable face beside no stated cut: %v", err)
 	}
-	afterScans, afterPairs := store.counters()
-	t.Logf("bind beside no stated cut: scans=%d decoded=%d", afterScans-beforeScans, afterPairs-beforePairs)
+	afterReads, afterPairs := store.counters()
+	t.Logf("bind beside no stated cut: point reads=%d decoded=%d", afterReads-beforeReads, afterPairs-beforePairs)
 	if afterPairs-beforePairs <= pairs {
 		t.Fatalf("the bind beside no stated cut decoded %d bodies, want the whole stream — this store answered only %d, so the flat read above is not a store the test cannot see",
 			afterPairs-beforePairs, pairs)
@@ -394,7 +411,7 @@ func TestAttentionBindReadsTheObligationsNotTheHistory(t *testing.T) {
 // statedBootCost measures one bind of the stated cut: the store reads and decoded
 // bodies it served, the requests it seated, and the bytes it allocated, all beside
 // whatever settled history the store holds at that moment.
-func statedBootCost(t *testing.T, ctx context.Context, store *factStore, writer *ApprovalManager, openRows int) (scans, pairs, resident int, allocated uint64) {
+func statedBootCost(t *testing.T, ctx context.Context, store *factStore, writer *ApprovalManager, openRows int) (reads, pairs, resident int, allocated uint64) {
 	t.Helper()
 	stated, keys := writer.SnapshotEvidence()
 	if len(stated) != openRows {
@@ -404,7 +421,7 @@ func statedBootCost(t *testing.T, ctx context.Context, store *factStore, writer 
 	if err := book.RestoreEvidence(ctx, stated, keys); err != nil {
 		t.Fatalf("restore the stated evidence: %v", err)
 	}
-	beforeScans, beforePairs := store.counters()
+	beforeReads, beforePairs := store.counters()
 	var beforeAllocated runtime.MemStats
 	runtime.ReadMemStats(&beforeAllocated)
 	if err := book.BindAttention(ctx, store); err != nil {
@@ -412,7 +429,7 @@ func statedBootCost(t *testing.T, ctx context.Context, store *factStore, writer 
 	}
 	var afterAllocated runtime.MemStats
 	runtime.ReadMemStats(&afterAllocated)
-	afterScans, afterPairs := store.counters()
-	return afterScans - beforeScans, afterPairs - beforePairs, len(book.evidence),
+	afterReads, afterPairs := store.counters()
+	return afterReads - beforeReads, afterPairs - beforePairs, len(book.evidence),
 		afterAllocated.TotalAlloc - beforeAllocated.TotalAlloc
 }
