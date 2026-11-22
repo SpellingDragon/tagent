@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -397,5 +398,140 @@ func TestSettledApprovalsStayReadableWithoutResidentEvidence(t *testing.T) {
 	}
 	if seen := migrated.Lookup("shell_exec", ArgsDigest([]byte(`{"cmd":"face-less"}`))); seen == nil || seen.ID != "face-less-hold" || seen.Status != ApprovalDenied {
 		t.Fatalf("the migrated book reads %+v for the ruled arguments, want the refusal the face-less book stated", seen)
+	}
+}
+
+// approvalWriteSeam is one attention store a check arms: it stages writes and
+// publishes them behind a barrier, and it refuses the n-th write or the n-th
+// barrier on demand, so each leg of a filing answers the failure a real store
+// answers there.
+type approvalWriteSeam struct {
+	mu       sync.Mutex
+	stored   map[string][]byte
+	staged   map[string][]byte
+	puts     int
+	syncs    int
+	failPut  int
+	failSync int
+}
+
+// newApprovalWriteSeam returns one empty seam.
+func newApprovalWriteSeam() *approvalWriteSeam {
+	return &approvalWriteSeam{stored: map[string][]byte{}, staged: map[string][]byte{}}
+}
+
+// Put stages one fact, or refuses the write of the armed leg.
+func (s *approvalWriteSeam) Put(_ context.Context, key string, value []byte) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.puts++
+	if s.failPut != 0 && s.puts == s.failPut {
+		return fmt.Errorf("the store refused the write at %s", key)
+	}
+	s.staged[key] = append([]byte(nil), value...)
+	return nil
+}
+
+// Scan answers every published pair under the prefix: a staged write whose
+// barrier did not complete is not published to a reader.
+func (s *approvalWriteSeam) Scan(_ context.Context, prefix string) (map[string][]byte, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	found := map[string][]byte{}
+	for key, value := range s.stored {
+		if strings.HasPrefix(key, prefix) {
+			found[key] = append([]byte(nil), value...)
+		}
+	}
+	return found, nil
+}
+
+// Sync completes the barrier over everything staged so far, or refuses it, in
+// which case the staged writes stay unpublished.
+func (s *approvalWriteSeam) Sync(context.Context) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.syncs++
+	if s.failSync != 0 && s.syncs == s.failSync {
+		return fmt.Errorf("the store refused the barrier")
+	}
+	for key, value := range s.staged {
+		s.stored[key] = value
+	}
+	s.staged = map[string][]byte{}
+	return nil
+}
+
+// arm names the leg the next write or barrier refuses.
+func (s *approvalWriteSeam) arm(failPut, failSync int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.failPut, s.failSync = failPut, failSync
+}
+
+// TestApprovalWriteFailureDoesNotGrantPermission pins the ruling one failed write leaves behind against the ruling the chain states.
+//   - a question write or barrier the store refused leaves the pair unruled, so the gate that reads it approves nothing
+//   - an answer write or barrier the store refused leaves the chain holding no answer, so the pair the gate reads stands unruled until the ruling lands
+//   - a ruling that landed afterwards is read back by a book opened over the same store, so the retry and the chain answer one status for one pair
+//
+// 契约: docs/wiki/agent/governance-enforcement.md#approval-channel
+func TestApprovalWriteFailureDoesNotGrantPermission(t *testing.T) {
+	ctx := context.Background()
+	args := []byte(`{"cmd":"deploy"}`)
+	digest := ArgsDigest(args)
+	for _, held := range []struct {
+		name     string
+		arming   string
+		failPut  int
+		failSync int
+	}{
+		{name: "the question write is refused", arming: "registration", failPut: 1},
+		{name: "the question barrier fails", arming: "registration", failSync: 1},
+		{name: "the answer write is refused", arming: "ruling", failPut: 3},
+		{name: "the answer barrier fails", arming: "ruling", failSync: 3},
+	} {
+		t.Run(held.name, func(t *testing.T) {
+			seam := newApprovalWriteSeam()
+			book := NewApprovalManager("", time.Hour, WithApprovalRescanInterval(0))
+			if err := book.BindAttention(ctx, seam); err != nil {
+				t.Fatalf("bind the durable face: %v", err)
+			}
+			id := "approval-write-" + held.arming
+			if held.arming == "registration" {
+				seam.arm(held.failPut, held.failSync)
+				if _, err := book.Request(ctx, id, "shell_exec", args, plugin.RiskCritical, "no-deploy", "critical risk awaits approval"); err == nil {
+					t.Fatalf("the registration answered no failure beside the armed %s leg, want the refusal the store answered", held.name)
+				}
+				seam.arm(0, 0)
+			} else {
+				if _, err := book.Request(ctx, id, "shell_exec", args, plugin.RiskCritical, "no-deploy", "critical risk awaits approval"); err != nil {
+					t.Fatalf("register the request over a store that carried every write: %v", err)
+				}
+				seam.arm(held.failPut, held.failSync)
+				if _, err := book.Decide(id, ApprovalApproved, "approver"); err == nil {
+					t.Fatalf("the ruling answered no failure beside the armed %s leg, want the refusal the store answered", held.name)
+				}
+				seam.arm(0, 0)
+			}
+			if req := book.Lookup("shell_exec", digest); req != nil && req.Status == ApprovalApproved {
+				t.Fatalf("the gate approves the pair beside the failed %s leg %+v, want it unruled: the ruling never reached the chain",
+					held.arming, req)
+			}
+			if _, err := book.Decide(id, ApprovalApproved, "approver"); err != nil {
+				t.Fatalf("rule the pair again after the failed leg: %v", err)
+			}
+			req := book.Lookup("shell_exec", digest)
+			if req == nil || req.Status != ApprovalApproved {
+				t.Fatalf("the gate answers %+v after the ruling landed, want the approval", req)
+			}
+			reopened := NewApprovalManager("", time.Hour, WithApprovalRescanInterval(0))
+			if err := reopened.BindAttention(ctx, seam); err != nil {
+				t.Fatalf("bind the durable face of the second book: %v", err)
+			}
+			again := reopened.Lookup("shell_exec", digest)
+			if again == nil || again.Status != ApprovalApproved {
+				t.Fatalf("the book opened over the same store answers %+v, want the ruling the retry landed", again)
+			}
+		})
 	}
 }

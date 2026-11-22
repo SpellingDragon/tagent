@@ -774,10 +774,131 @@ func TestOriginalReadEntrypointsPreserveBytesAndScope(t *testing.T) {
 	})
 }
 
+// TestScopedReadResolvesTheNamedIdentity pins what one scoped read costs and how far its failure reaches.
+//   - a scoped read resolves the one identity it names: two point reads of that identity and no load of the original family, whatever that family grew to
+//   - a hot read of the same identity reads no key again, so the two reads are the first read of one identity and not a constant the read adds every time
+//   - a key whose references all stand outside the scope reads as missing beside the same two point reads, so a refused scope leaks nothing and reads no family
+//   - the whole-set load stays reachable and measured, so the zero above is a zero this check drives instead of a counter nothing runs
+//
+// 契约: docs/wiki/memory/memory-architecture.md#local-file-kv
+func TestScopedReadResolvesTheNamedIdentity(t *testing.T) {
+	ctx := context.Background()
+	const generations = 24
+	identity := func(at int) event.EventID { return event.EventID(fmt.Sprintf("scoped-identity-%02d", at)) }
+	scopeOf := func(at int) ReadScope {
+		return ReadScope{
+			Owner:           event.Address{AgentID: "agent-scoped", SessionID: event.SessionID(fmt.Sprintf("session-%02d", at))},
+			Format:          "text",
+			RetentionPolicy: "durable",
+		}
+	}
+	bodyOf := func(at int) []byte { return []byte(fmt.Sprintf("the original of identity %02d", at)) }
+	seed := func() (*kvOriginalStore, AtomicStore) {
+		t.Helper()
+		backing := newMemKV()
+		writer, err := newKVOriginalStore(backing, nil)
+		if err != nil {
+			t.Fatalf("open the seeding original store: %v", err)
+		}
+		for at := 0; at < generations; at++ {
+			scope := scopeOf(at)
+			ref := OriginalRef{Key: identity(at), Owner: scope.Owner, Format: scope.Format, RetentionPolicy: scope.RetentionPolicy}
+			if err := writer.Put(ctx, ref, bodyOf(at)); err != nil {
+				t.Fatalf("commit the original of generation %d: %v", at, err)
+			}
+		}
+		reader, err := newKVOriginalStore(backing, nil)
+		if err != nil {
+			t.Fatalf("open the reading original store: %v", err)
+		}
+		return reader, backing
+	}
+
+	reader, backing := seed()
+	target := generations / 3
+	beforeLoads, beforePairs, beforeKeys := reader.OriginalsReads()
+	got := reader.GetScoped(ctx, identity(target), scopeOf(target))
+	afterLoads, afterPairs, afterKeys := reader.OriginalsReads()
+	if got.Outcome != RecallFound || got.Err != nil || !bytes.Equal(got.Body, bodyOf(target)) {
+		t.Fatalf("GetScoped(%q) = %+v, want the committed bytes of that identity", identity(target), got)
+	}
+	if loads := afterLoads - beforeLoads; loads != 0 {
+		t.Fatalf("the first scoped read loaded the whole original family %d time(s), want none beside the %d identit(ies) it holds", loads, generations)
+	}
+	if pairs := afterPairs - beforePairs; pairs != 0 {
+		t.Fatalf("the first scoped read fetched %d record(s) of the whole original family, want none", pairs)
+	}
+	if keys := afterKeys - beforeKeys; keys != 2 {
+		t.Fatalf("the first scoped read read %d key(s), want the body and the reference of the identity it names", keys)
+	}
+	hotLoads, hotPairs, hotKeys := reader.OriginalsReads()
+	if again := reader.GetScoped(ctx, identity(target), scopeOf(target)); again.Outcome != RecallFound {
+		t.Fatalf("the hot scoped read = %+v, want the same committed bytes", again)
+	}
+	reLoads, rePairs, reKeys := reader.OriginalsReads()
+	if reLoads != hotLoads || rePairs != hotPairs || reKeys != hotKeys {
+		t.Fatalf("the hot scoped read read (%d load(s), %d record(s), %d key(s)) more, want a read that pays nothing behind the first",
+			reLoads-hotLoads, rePairs-hotPairs, reKeys-hotKeys)
+	}
+	outside := ReadScope{Owner: event.Address{AgentID: "agent-outside", SessionID: "session-outside"}, Format: "text", RetentionPolicy: "durable"}
+	outsider, err := newKVOriginalStore(backing, nil)
+	if err != nil {
+		t.Fatalf("open the original store of the refused scope: %v", err)
+	}
+	outLoads, _, outKeysBefore := outsider.OriginalsReads()
+	if refused := outsider.GetScoped(ctx, identity(target), outside); refused.Outcome != RecallMissing {
+		t.Fatalf("GetScoped(%q) outside its scope = %+v, want the named missing a refused scope answers", identity(target), refused)
+	}
+	refusedLoads, _, outKeysAfter := outsider.OriginalsReads()
+	if loads := refusedLoads - outLoads; loads != 0 {
+		t.Fatalf("the read outside the scope loaded the whole original family %d time(s), want none: the scope decides over the identity and never over the family", loads)
+	}
+	if keys := outKeysAfter - outKeysBefore; keys != 2 {
+		t.Fatalf("the read outside the scope read %d key(s), want the two of the identity it names", keys)
+	}
+	if counted := reader.BlobCount(); counted != generations {
+		t.Fatalf("the whole-store read answers %d identit(ies) of the %d the family holds, want the whole family: the load face is not measured", counted, generations)
+	}
+	if loads, pairs, _ := reader.OriginalsReads(); loads != 1 || pairs != 2*generations {
+		t.Fatalf("the whole-store read loaded %d time(s) and fetched %d record(s), want the one load of the %d records the family holds: a load the counter never sees makes the zero above a zero nothing measures",
+			loads, pairs, 2*generations)
+	}
+
+	t.Run("a damaged identity fails its own read alone", func(t *testing.T) {
+		_, backing := seed()
+		broken := identity(0)
+		if err := backing.Commit(ctx, Batch{Puts: []Pair{{Key: refKVKey(broken), Value: []byte("not-json")}}}); err != nil {
+			t.Fatalf("corrupt the reference record of %q: %v", broken, err)
+		}
+		reopened, err := newKVOriginalStore(backing, nil)
+		if err != nil {
+			t.Fatalf("open the original store over the damaged reference: %v", err)
+		}
+		failed := reopened.GetScoped(ctx, broken, scopeOf(0))
+		if failed.Outcome != RecallFailed || !errors.Is(failed.Err, ErrSnapshotCorrupt) {
+			t.Fatalf("GetScoped(%q) over its unreadable reference = %+v, want the named corruption", broken, failed)
+		}
+		if !strings.Contains(failed.Err.Error(), string(broken)) {
+			t.Fatalf("the corruption of %q = %v, want the record that failed named", broken, failed.Err)
+		}
+		beside := generations - 1
+		kept := reopened.GetScoped(ctx, identity(beside), scopeOf(beside))
+		if kept.Outcome != RecallFound || !bytes.Equal(kept.Body, bodyOf(beside)) {
+			t.Fatalf("GetScoped(%q) beside the damaged identity = %+v, want its own committed bytes: one identity's damage reaches no read beside it", identity(beside), kept)
+		}
+		segment, err := reopened.ReadSegmentScoped(ctx, identity(beside), scopeOf(beside), SegmentRequest{MaxBytes: 8})
+		if err != nil || len(segment.Body) == 0 || !bytes.HasPrefix(bodyOf(beside), segment.Body) {
+			t.Fatalf("ReadSegmentScoped(%q) beside the damaged identity = (%q, %v), want the first segment of its own body", identity(beside), segment.Body, err)
+		}
+	})
+}
+
 // TestCommitFactMemoryTierRecallsTheOriginalByBareKey pins the memory tier's whole-fact commit: the original it commits reads back by bare key.
 //   - fixture: one memory tier opened without an engine, one fact committed through CommitFact
 //   - the scoped read runs before the bare recall, so the whole-set load publishes the stored family the recall answers from
 //   - the bare recall serves the committed text byte for byte, and the scoped read serves it inside the reference's own scope
+//
+// 契约: docs/wiki/memory/memory-architecture.md#local-file-kv
 func TestCommitFactMemoryTierRecallsTheOriginalByBareKey(t *testing.T) {
 	ctx := context.Background()
 	tier, err := OpenTier(ctx, StorageConfig{Type: StorageMemory})

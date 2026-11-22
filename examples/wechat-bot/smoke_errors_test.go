@@ -117,6 +117,8 @@ func smokeErrorsModelTurn(t *testing.T) {
 
 // smokeErrorsReloadRefused 把入口模型热换到未声明的 provider：替换事实照常提交，
 // 租约的重建被拒，下一次请求仍按 lease 持有的版本发出。
+// 回执按 config-hot-reload 规格回失败与具名原因（install-failed）：安装失败不回成功，
+// 故这里判 500 与正文，而不是解码一份 200 的判定表；判定的变更（agent 从→到）由正文具名。
 func smokeErrorsReloadRefused(t *testing.T) {
 	logs := installSmokeLog(t)
 	cfg := newSmokeConfig(t, "http://127.0.0.1:1/v1")
@@ -130,18 +132,16 @@ func smokeErrorsReloadRefused(t *testing.T) {
 	rig.waitText(chat, "answer "+smokeErrorsReloadTurn, 60*time.Second)
 
 	cfg.Doc = smokeErrorsBadProviderDocument
-	answer := rig.reload(smokeReloadModel)
-	if !answer.Reloaded || len(answer.ModelChanges) != 1 {
-		t.Fatalf("reload = %+v, want one judged model change", answer)
+	status, body := rig.postReload(smokeReloadModel)
+	if status != http.StatusInternalServerError {
+		t.Fatalf("reload status = %d, want 500: %s", status, body)
 	}
-	change := answer.ModelChanges[0]
-	wantTo := smokeErrorsMissingProvider + "/" + smokeReloadModel
-	if change.Agent != smokeSessionTag || change.From != "local/"+smokeEntryModel || change.To != wantTo {
-		t.Fatalf("model change = %+v, want %s local/%s -> %s",
-			change, smokeSessionTag, smokeEntryModel, wantTo)
+	if !strings.Contains(body, "install-failed") {
+		t.Fatalf("the refused replacement = %q, want the named cause install-failed", body)
 	}
-	if change.Fact == "" {
-		t.Fatalf("the judged change carries no replacement fact")
+	from, to := "local/"+smokeEntryModel, smokeErrorsMissingProvider+"/"+smokeReloadModel
+	if !strings.Contains(body, from) || !strings.Contains(body, to) {
+		t.Fatalf("the refusal = %q, want it to name the judged change %s -> %s", body, from, to)
 	}
 
 	run := rig.host.Run()
@@ -153,9 +153,6 @@ func smokeErrorsReloadRefused(t *testing.T) {
 	}
 	gapFound := false
 	for _, presentation := range run.Presentations() {
-		if string(presentation.Fact) != change.Fact {
-			continue
-		}
 		for _, gap := range presentation.Gaps {
 			if gap.Plugin != "model-lease" {
 				continue
@@ -170,7 +167,7 @@ func smokeErrorsReloadRefused(t *testing.T) {
 		}
 	}
 	if !gapFound {
-		t.Fatalf("no model-lease observation gap on the replacement fact %s", change.Fact)
+		t.Fatalf("no model-lease observation gap on the replacement fact")
 	}
 	if logs.count("plugin=model-lease") == 0 || logs.count("result=refused") == 0 {
 		t.Fatalf("the refused replacement left no model-lease refusal line")
@@ -190,7 +187,7 @@ func smokeErrorsReloadRefused(t *testing.T) {
 		t.Fatalf("health after the refused replacement: %v", err)
 	}
 	t.Logf("[wave2-errors] reload judged %s -> %s and refused it; %s kept serving %s",
-		change.From, change.To, smokeErrorsReloadAfterTurn, smokeEntryModel)
+		from, to, smokeErrorsReloadAfterTurn, smokeEntryModel)
 }
 
 // smokeErrorsApprovalExpired 用配置面的最小有效期加可推进时钟：扣留的请求过期后

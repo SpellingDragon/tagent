@@ -237,19 +237,6 @@ type segmentIndexCarried struct {
 	Commit  int64           `json:"commit"`
 }
 
-// IndexEntry is one store index entry as a commit filed it: the partition and event
-// identity the key places beside the frozen type and session the value states.
-type IndexEntry struct {
-	// Partition is the partition the entry places the event in.
-	Partition int
-	// Key is the canonical identity of the event the entry places.
-	Key event.EventID
-	// Type is the frozen event type the entry states.
-	Type string
-	// Session is the session chain the entry states, empty beside a framework record.
-	Session event.SessionID
-}
-
 // FileSegmentStore commits events into time-window segments over one atomic
 // store engine; it names no engine and no file layout, so any engine backs it. One commit stages the event body, its index entry, the window meta
 // the window needs, the store's seat and the partition set as one batch, and
@@ -1003,23 +990,6 @@ func indexPositionOf(partition int, value []byte) (indexPosition, bool) {
 	return position, true
 }
 
-// CommittedIndexEntry answers the store index entry one committed key carries: the
-// partition and event identity it places beside the frozen type and session the
-// entry states, and false beside a key that carries none, such as a fact the tier's
-// fact log committed on the same engine. It reads no store, so a caller that walks
-// an engine's commit order identifies an entry from the pair the walk handed it.
-func CommittedIndexEntry(key string, value []byte) (IndexEntry, bool) {
-	partition, id, named := segmentIndexEntry(key)
-	if !named {
-		return IndexEntry{}, false
-	}
-	position, named := indexPositionOf(partition, value)
-	if !named {
-		return IndexEntry{}, false
-	}
-	return IndexEntry{Partition: partition, Key: id, Type: position.typ, Session: position.session}, true
-}
-
 // segmentMetaSlot splits one window meta key into the window it describes and
 // answers false for a key of another family.
 func segmentMetaSlot(key string) (windowSlot, bool) {
@@ -1203,6 +1173,46 @@ func (s *FileSegmentStore) EachIndexNewestFirst(ctx context.Context, visit func(
 	})
 }
 
+// EachIndexNewestFirstFrom streams the index from the entry of one key onwards in the order EachIndexNewestFirstUntil states.
+//   - a caller that already knows the key it is looking for pays its own commit and the ones behind it instead of every commit filed after it
+//   - the walk starts where the engine's order-line index states the commit that last stated the key ended, which costs one probe of the identity index and one read of that index
+//   - so the walk costs the history committed after the key nothing
+//   - an engine that states no such index, a key this store holds no published entry of, and an entry the engine names no commit for all walk the index from the newest entry
+//   - so a seek that cannot be placed costs the walk it always took and never an entry it skipped
+func (s *FileSegmentStore) EachIndexNewestFirstFrom(ctx context.Context, from event.EventID, visit func(key event.EventID, partition int, seq int64, typ string, session event.SessionID) (bool, error)) error {
+	entryVisit := func(key event.EventID, position indexPosition) (bool, error) {
+		return visit(key, position.partition, position.seq, position.typ, position.session)
+	}
+	seek, holds := s.kv.(commitOrderSeek)
+	if !holds {
+		return s.eachIndexEntryNewestFirst(ctx, entryVisit)
+	}
+	lineEnd, named, err := s.indexEntrySeek(ctx, seek, from)
+	if err != nil {
+		return err
+	}
+	if !named {
+		return s.eachIndexEntryNewestFirst(ctx, entryVisit)
+	}
+	return s.walkIndexValues(entryVisit, func(step func(rawKey string, value []byte) (bool, error)) error {
+		return seek.EachCommittedNewestFirstFrom(ctx, lineEnd, step)
+	})
+}
+
+// indexEntrySeek answers the order byte a walk over the index enters at to reach one key's
+// entry: the partition the store published that entry under, named to the engine so the
+// engine's own identity index answers the commit, one small read per partition the seat
+// states and never a walk of the entries behind them.
+func (s *FileSegmentStore) indexEntrySeek(ctx context.Context, seek commitOrderSeek, from event.EventID) (int64, bool, error) {
+	s.mu.Lock()
+	position, held, err := s.publishedPositionLocked(ctx, from)
+	s.mu.Unlock()
+	if err != nil || !held {
+		return 0, false, err
+	}
+	return seek.OrderLineEnd(ctx, fmt.Sprintf("%d:%s%s", position.partition, segmentIndexPrefix, from))
+}
+
 // indexKeyOrder is one engine whose walk names the held keys newest commit first and
 // reads no value, so the store reads the value of the keys it names and never the
 // value of the event, window-meta, seat and original families committed beside them.
@@ -1252,24 +1262,8 @@ func (s *FileSegmentStore) eachIndexEntryNewestFirst(ctx context.Context, visit 
 		})
 	}
 	if ordered, holds := s.kv.(CommitOrder); holds {
-		walked := map[event.EventID]struct{}{}
-		return ordered.EachCommittedNewestFirst(ctx, func(rawKey string, value []byte) (bool, error) {
-			partition, key, named := segmentIndexEntry(rawKey)
-			if !named {
-				return true, nil
-			}
-			if _, placed := walked[key]; placed {
-				return true, nil
-			}
-			s.indexWalkValueBytes.Add(int64(len(value)))
-			s.indexWalkValueReads.Add(1)
-			position, named := indexPositionOf(partition, value)
-			if !named {
-				return true, nil
-			}
-			walked[key] = struct{}{}
-			s.indexWalkVisits.Add(1)
-			return visit(key, position)
+		return s.walkIndexValues(visit, func(step func(rawKey string, value []byte) (bool, error)) error {
+			return ordered.EachCommittedNewestFirst(ctx, step)
 		})
 	}
 	entries, err := s.publishedEntriesOf(ctx, s.statedPartitions(nil))
@@ -1293,6 +1287,32 @@ func (s *FileSegmentStore) eachIndexEntryNewestFirst(ctx context.Context, visit 
 		}
 	}
 	return nil
+}
+
+// walkIndexValues names the index entries one engine's commit-order walk states, newest
+// first, and hands each one the position it filed: the body every walk over the index
+// family runs, so an entry point decides where the walk starts and never which entries it
+// names. It reads the value of the index keys it names and counts what that cost.
+func (s *FileSegmentStore) walkIndexValues(visit func(key event.EventID, position indexPosition) (bool, error), walk func(step func(rawKey string, value []byte) (bool, error)) error) error {
+	walked := map[event.EventID]struct{}{}
+	return walk(func(rawKey string, value []byte) (bool, error) {
+		partition, key, named := segmentIndexEntry(rawKey)
+		if !named {
+			return true, nil
+		}
+		if _, placed := walked[key]; placed {
+			return true, nil
+		}
+		s.indexWalkValueBytes.Add(int64(len(value)))
+		s.indexWalkValueReads.Add(1)
+		position, named := indexPositionOf(partition, value)
+		if !named {
+			return true, nil
+		}
+		walked[key] = struct{}{}
+		s.indexWalkVisits.Add(1)
+		return visit(key, position)
+	})
 }
 
 // Events returns every published event in index order. It is the materialized

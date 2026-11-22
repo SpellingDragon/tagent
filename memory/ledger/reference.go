@@ -273,30 +273,38 @@ var _ ScopedOriginalStore = (*kvOriginalStore)(nil)
 
 // GetScoped returns the exact recall of key as visible inside scope, exactly
 // as the in-memory tier serves it.
+//
+// The read resolves the one identity it names rather than the original family behind
+// it, so it costs the body and the reference of that identity and its failure surface
+// is the same identity: a record the store cannot read back fails this read, and a
+// record of another identity fails only the reads of that identity.
 func (s *kvOriginalStore) GetScoped(ctx context.Context, key event.EventID, scope ReadScope) RecallResult {
 	if err := ctx.Err(); err != nil {
 		return RecallResult{Key: key, Outcome: RecallFailed, Err: err}
 	}
-	if err := s.ensureLoaded(); err != nil {
-		return RecallResult{Key: key, Outcome: RecallFailed, Err: err}
-	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return scopedRecall(s.byKey, s.windows, key, scope)
+	one, err := s.scopedOnlyLocked(ctx, key)
+	if err != nil {
+		return RecallResult{Key: key, Outcome: RecallFailed, Err: err}
+	}
+	return scopedRecall(one, s.windows, key, scope)
 }
 
 // ReadSegmentScoped returns one byte-bounded segment of the original stored
 // under key as visible inside scope, exactly as the in-memory tier serves it.
+// It resolves the identity it names on the terms GetScoped states.
 func (s *kvOriginalStore) ReadSegmentScoped(ctx context.Context, key event.EventID, scope ReadScope, req SegmentRequest) (SegmentResult, error) {
 	if err := ctx.Err(); err != nil {
 		return SegmentResult{}, err
 	}
-	if err := s.ensureLoaded(); err != nil {
-		return SegmentResult{}, err
-	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return scopedSegment(s.byKey, s.windows, key, scope, req)
+	one, err := s.scopedOnlyLocked(ctx, key)
+	if err != nil {
+		return SegmentResult{}, err
+	}
+	return scopedSegment(one, s.windows, key, scope, req)
 }
 
 // scopedRecall evaluates the exact recall of key inside scope over the given

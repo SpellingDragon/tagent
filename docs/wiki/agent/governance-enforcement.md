@@ -14,7 +14,7 @@
 
 <a id="approval-channel"></a>
 ## 三、批准通道：外部裁决，一个请求一个身份
-状态四态 `pending`（等待裁决，被治理的操作不执行）/`approved`/`denied`/`expired`（**超期未裁决按未获批准处理，迟到的裁决不得让它重新可跑**）。请求经 `ApprovalChannel.Deliver` 交外部审批者，三条红线：一 call 一请求、以请求自带的批准身份为键；**投递失败不得读成裁决**（门继续等）；不得改写交给它的请求。失败落成可见的 `DeliveryGap`，既不吞掉也不当放行。请求与参数用 `ArgsDigest`（SHA-256）绑定：裁决绑在**被拦下的那份参数**上，换参数再批即拒。任务层的那份等待凭据是 `task.Hold{TaskID, Reason, ApprovalID, ExpectedDigest}`——回执只报「在等」，不读成终结。
+状态四态 `pending`（等待裁决，被治理的操作不执行）/`approved`/`denied`/`expired`（**超期未裁决按未获批准处理，迟到的裁决不得让它重新可跑**）。请求经 `ApprovalChannel.Deliver` 交外部审批者，三条红线：一 call 一请求、以请求自带的批准身份为键；**投递失败不得读成裁决**（门继续等）；不得改写交给它的请求。失败落成可见的 `DeliveryGap`，既不吞掉也不当放行。请求与参数用 `ArgsDigest`（SHA-256）绑定：裁决绑在**被拦下的那份参数**上，换参数再批即拒。任务层的那份等待凭据是 `task.Hold{TaskID, Reason, ApprovalID, ExpectedDigest}`——回执只报「在等」，不读成终结。审批簿的写入次序与目标登记表同一口径：**裁决先进链、后进有效态**，写被拒时门读到的是链上仍无裁决而不是一次放行；唯一例外是**问题本身（hold）**——链拒绝它的写入时仍留在簿上，否则这次等待连可裁决的对象都没有，门将永远等不到裁决，而拒绝本身照样具名上报。
 
 <a id="budget-epoch"></a>
 ## 四、预算与 epoch：快照带 epoch 一起持久化

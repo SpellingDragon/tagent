@@ -360,10 +360,10 @@ func consumerError(format string, args ...any) {
 // The committed delivery fact is named to the consumer of the range beside the
 // wake: a result whose segment already closed stands behind the answer that
 // segment landed, so no position of the chain opens a segment on it by itself,
-// and the wake that names it is the account that says this fact still drives.
-// The observation the result carries rides on the fact, so the segment the name
-// opens reads the very result the notification delivered instead of a second
-// reading of it.
+// and the wake that names it is the account that says this fact still drives. The
+// message the tool result carries reaches the intake of the range beside that
+// fact, so the in-process drive reads the very result the notification delivered;
+// a reader of the chain reads it from the result fact the notification names.
 //
 // - The wake names the fact only while the task is not awaited by a flying segment and not already consumed: an awaited result is paired by that segment's harvest, and a consumed one drives nothing, so neither is read twice.
 // - A loop that drives no set keeps its backflow parked in the intake; a set that carries no instance for the address wakes nothing and starts none.
@@ -387,11 +387,7 @@ func (l *Loop) Backflow(invocationID event.InvocationID, notice task.Notice) err
 	}
 	in := l.intakeFor(invocationID)
 	addr := in.rangeAddress()
-	delivery := msg
-	if l.resultFactOnChain(addr, notice.Event) {
-		delivery = model.Message{Role: model.RoleTool}
-	}
-	key, commitErr := l.commitSettled(context.Background(), invocationID, addr, notice, delivery)
+	key, commitErr := l.commitSettled(context.Background(), invocationID, addr, notice)
 	if commitErr != nil {
 		consumerError("tagent: the delivery fact of task %s did not commit: %v", notice.TaskID, commitErr)
 	}
@@ -699,52 +695,22 @@ func (l *Loop) commitCalls(ctx context.Context, inv Invocation, decision Decisio
 	})
 }
 
-// resultFactOnChain reports whether the chain of one address already carries the
-// result fact a settled notification points at. The result fact is the one text
-// of the tool result — the delivery fact names the delivery and never a second
-// copy of the body — so a delivery that finds it on the chain commits the fact
-// of the delivery alone and leaves the observation to the result fact the pull
-// reads.
-func (l *Loop) resultFactOnChain(addr event.Address, key event.EventID) bool {
-	if key == "" {
-		return false
-	}
-	for _, evt := range l.sessionFacts(addr) {
-		if evt.Key == key {
-			return true
-		}
-	}
-	return false
-}
-
 // commitSettled commits one settled notification as the delivery fact of the
 // range it settles into, beside the task it belongs to and the address the
 // notification was accepted at, and answers the identity it landed under. The
-// observation the notification delivered rides on the fact, so a segment that
-// opens on that fact reads the result itself; a notification that carries no
-// observation commits the fact of the delivery alone. A notification that
-// arrived before the range recorded its own address commits no fact: the fact
-// of a delivery names the range it lands in. A refused commit answers no
-// identity beside the named cause.
+// fact is the one the delivery family renders from the notification, so the
+// delivery face that commits the same notification later meets this fact and its
+// commit is the repeat rather than a second record. A notification that arrived
+// before the range recorded its own address commits no fact: the fact of a
+// delivery names the range it lands in. A refused commit answers no identity
+// beside the named cause.
 //
-// - The delivery fact carries the observation only when the chain holds no result fact to read it from, so the history reads each result once.
-func (l *Loop) commitSettled(ctx context.Context, invocationID event.InvocationID, addr event.Address, notice task.Notice, msg model.Message) (event.EventID, error) {
+// - The result the notification carries is not copied onto the fact: the result fact the notice names is its own record on the chain, and the in-process hand-over carries the message to the intake that drives on it.
+func (l *Loop) commitSettled(ctx context.Context, invocationID event.InvocationID, addr event.Address, notice task.Notice) (event.EventID, error) {
 	if addr.AgentID == "" || addr.SessionID == "" {
 		return "", nil
 	}
-	evt := event.Event{
-		Type:         event.TypeTaskSettled,
-		Timestamp:    time.Now(),
-		TaskID:       notice.TaskID,
-		Owner:        addr,
-		Source:       addr,
-		Target:       addr,
-		InvocationID: invocationID,
-		InstanceID:   l.instance,
-	}
-	if msg.Content != "" || msg.ToolID != "" || msg.ToolName != "" || len(msg.ToolCalls) > 0 {
-		evt.Message = msg
-	}
+	evt := task.DeliveryFactOf(notice, addr, l.instance, invocationID)
 	return l.commitFactKey(ctx, addr.AgentID, evt)
 }
 

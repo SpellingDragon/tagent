@@ -4,6 +4,7 @@ package assembly
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"runtime"
 	"slices"
@@ -11,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/SpellingDragon/tagent/api/config"
 	"github.com/SpellingDragon/tagent/api/event"
 	"github.com/SpellingDragon/tagent/api/model"
 	"github.com/SpellingDragon/tagent/memory"
@@ -607,4 +609,318 @@ func identitiesOf(filed []event.CompressRequest) []event.EventID {
 		out = append(out, request.ID)
 	}
 	return out
+}
+
+// locatingChainRun assembles one run of the folding fixture beside the model face
+// it answers, so a restore that asked the model again is counted.
+func locatingChainRun(t *testing.T, ctx context.Context, opts ...Option) (*Run, *snapshotTestModel) {
+	t.Helper()
+	provider := &snapshotTestModel{answer: func(*model.Request) *model.Response {
+		return &model.Response{Choices: []model.Choice{{Message: model.Message{Role: model.RoleAssistant, Content: factWindowAnswer}}}, Done: true}
+	}}
+	options := append([]Option{
+		WithGovernance(snapshotTestGovernance{}),
+		WithStorage(ledger.StorageConfig{Type: ledger.StorageMemory}),
+	}, opts...)
+	run, err := Assemble(ctx, &config.Declaration{
+		Entry:  "agent-a",
+		Agents: []config.AgentSpec{{ID: "agent-a", Model: "model-a", ReplayWindow: 60}, {ID: "agent-b", Model: "model-a", ReplayWindow: 60}},
+	}, map[event.AgentID]NativeAgent{"agent-a": {Model: provider}, "agent-b": {Model: provider}}, options...)
+	if err != nil {
+		t.Fatalf("assemble the run: %v", err)
+	}
+	return run, provider
+}
+
+// TestCompressionAnchorLocatesEveryProducerWithoutRerunningModel pins that every filed product is reached again through what filed it, asking no model.
+//   - the restore states that product's text without asking the model a second time
+//   - producer: an executed judgment files one product, and the identity the fact is keyed under is minted from the request, the producer and the key alone
+//   - producer: the fact itself states the fields that identity was minted from, so a product is located from the fact rather than from the account a process holds
+//   - producer: the locator a producer asks before executing a judgment answers the filed products and answers nothing for one the chain never filed
+//   - producer: the fold checkpoint names every entry it leaves beside the text it minted
+//   - restorer: the product fact reads back as the product it states, field by field
+//   - restorer: a boot over the root states the recorded text of every fold entry, from both checkpoints, and asks no model
+//   - negative: a fact missing the key or the request, and a fact stating an identity another fact is keyed under, restore no product instead of inventing one
+//   - negative: a checkpoint naming a survivor the chain holds no entry for and carrying no text refuses the restore by name
+//
+// 契约: docs/wiki/agent/event-flow.md#projection-lifecycle
+func TestCompressionAnchorLocatesEveryProducerWithoutRerunningModel(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+	storage := WithStorage(ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: t.TempDir()})
+	addr := event.Address{AgentID: "agent-a", SessionID: "session-compress-locating"}
+
+	source, asked := locatingChainRun(t, ctx, storage)
+	commitWindowTurns(t, ctx, source, addr, 12)
+	products := chainProducts(t, ctx, source)
+	if len(products) == 0 {
+		t.Fatal("the fold filed no product, so no locating below is a claim about one")
+	}
+	if len(asked.requests) == 0 {
+		t.Fatal("the fold asked the model nothing, so a restore that asked it again would prove nothing")
+	}
+	survivors := latestFoldCheckpointSurvivors(t, ctx, source)
+	if len(survivors) == 0 {
+		t.Fatal("the fold checkpoint names no survivor, so the text the restore states proves nothing")
+	}
+
+	for _, product := range products {
+		stored, err := source.CommittedEvent(ctx, product.ID)
+		if err != nil {
+			t.Fatalf("read the product %s back by its identity: %v", product.ID, err)
+		}
+		for _, field := range []struct{ name, held string }{
+			{name: "request", held: stored.Meta[metaKeyCompressRequest]},
+			{name: "producer", held: stored.Meta[metaKeyCompressProducer]},
+			{name: "key", held: stored.Meta[metaKeyCompressKey]},
+		} {
+			if field.held == "" {
+				t.Fatalf("the product fact %s states no %s, so nothing a reader holds reaches the identity it is keyed under", stored.Key, field.name)
+			}
+		}
+		read, stated := compressProductOf(stored)
+		if !stated {
+			t.Fatalf("the product fact %s states no product, want the fields it was filed with", stored.Key)
+		}
+		if read.ID != stored.Key {
+			t.Fatalf("the product fact %s reads back as %s, want the identity it is keyed under", stored.Key, read.ID)
+		}
+		if read.Answers != product.Answers || read.Key != product.Key || read.Text != product.Text || !slices.Equal(read.Covered, product.Covered) {
+			t.Fatalf("the product %s reads back as request %s producer %s key %s text %q, want the request %s producer %s key %s text %q it was filed with",
+				stored.Key, read.Answers.Request, read.Answers.Producer, read.Key, read.Text,
+				product.Answers.Request, product.Answers.Producer, product.Key, product.Text)
+		}
+		if reminted := event.CompressProductFor(read.Answers.Request, read.Answers.Producer, read.Key, read.Covered, read.Text); reminted.ID != stored.Key {
+			t.Fatalf("the product %s is minted as %s from the fields its fact states, want the identity it is keyed under: the text is no part of the address",
+				stored.Key, reminted.ID)
+		}
+		held, err := source.holdsCompressProduct(ctx, addr.SessionID, product.Answers.Request, product.Key)
+		if err != nil {
+			t.Fatalf("ask the chain whether it answers the judgment %s: %v", product.Answers.Request, err)
+		}
+		if !held {
+			t.Fatalf("the locator answered no product for the judgment %s the chain answers, so the execution would fold its material again", product.Answers.Request)
+		}
+	}
+	if held, err := source.holdsCompressProduct(ctx, addr.SessionID, event.EventID("event-compress-never-filed"), event.EventID("-hist-never-filed")); err != nil || held {
+		t.Fatalf("the locator answered (%t, %v) for a judgment the chain never filed, want no product and no error", held, err)
+	}
+
+	carried := 0
+	for _, survivor := range survivors {
+		switch survivor.Type {
+		case replay.ProjectionTypeSegmentFold, replay.ProjectionTypeHistorySummary:
+			if survivor.Content == "" {
+				t.Fatalf("the checkpoint names the fold product %s carrying no text, want the text a restore states it from: the chain states that text under no key this entry names", survivor.Key)
+			}
+			carried++
+		default:
+			if survivor.Content != "" {
+				t.Fatalf("the checkpoint names the mapped entry %s carrying %d byte(s), want the text read back from the chain under that key", survivor.Key, len(survivor.Content))
+			}
+		}
+	}
+	if carried == 0 {
+		t.Fatal("the fold checkpoint carries no text, so the restore below restates nothing a second reading could not")
+	}
+	t.Logf("the fold asked the model %d time(s) producing %d product(s)", len(asked.requests), len(products))
+	t.Logf("located %d product(s) by the identity their facts state, and the locator answered each of them once", len(products))
+	t.Logf("the fold checkpoint names %d survivor(s), %d of them carrying the text this anchor restates", len(survivors), carried)
+	factTexts := make(map[string]bool, len(products))
+	for _, product := range products {
+		if product.Text != "" {
+			factTexts[product.Text] = true
+		}
+	}
+	for _, survivor := range survivors {
+		if survivor.Content == "" {
+			continue
+		}
+		if !factTexts[survivor.Content] {
+			t.Fatalf("the checkpoint carries the text %q of the survivor %s, want the text the product fact states under its own identity: the checkpoint copy restates that text instead of minting a second one", survivor.Content, survivor.Key)
+		}
+	}
+
+	checkpointID, filed, err := source.Checkpoint(ctx)
+	if err != nil || !filed {
+		t.Fatalf("file the framework checkpoint of the chain = (%t, %v), want a filed fact", filed, err)
+	}
+	endRun(t, source)
+	filedProducts := len(products)
+
+	booted, bootAsked := locatingChainRun(t, ctx, storage)
+	if carried, _ := booted.CheckpointFiled(); carried != checkpointID {
+		t.Fatalf("the boot restored the checkpoint %s, want the one %s the chain states", carried, checkpointID)
+	}
+	requireRecordedSurvivorText(t, ctx, booted, addr, survivors, "the boot")
+	requireMappedSurvivorText(t, ctx, booted, addr, survivors)
+	if len(bootAsked.requests) != 0 {
+		t.Fatalf("the boot asked the model %d time(s) restoring %d survivor(s), want the restated text alone: a restore never mints a second summary", len(bootAsked.requests), len(survivors))
+	}
+	if got := countFoldProducts(t, ctx, booted); got != filedProducts {
+		t.Fatalf("the boot left %d product(s) on the chain beside the %d already filed, want the restore to fold nothing again", got, filedProducts)
+	}
+	endRun(t, booted)
+
+	anchoredSource, _ := locatingChainRun(t, ctx, WithStorage(ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: t.TempDir()}))
+	commitWindowTurns(t, ctx, anchoredSource, addr, 12)
+	anchoredSurvivors := latestFoldCheckpointSurvivors(t, ctx, anchoredSource)
+	if len(anchoredSurvivors) == 0 {
+		t.Fatal("the fold checkpoint of the anchored root names no survivor, so the anchored restore below restates nothing")
+	}
+	anchored, anchoredAsked := locatingChainRun(t, ctx)
+	seeds, report, err := anchored.seedAnchoredReplay(ctx, anchoredSource.tier)
+	if err != nil {
+		t.Fatalf("rebuild the chain from the fold checkpoint: %v", err)
+	}
+	if report.Anchors == 0 {
+		t.Fatal("the rebuild used no anchor, so the fold checkpoint restore below is the only path read")
+	}
+	seed, registered := seeds[addr]
+	if !registered {
+		t.Fatalf("the anchored rebuild registered no projection for %s", addr.SessionID)
+	}
+	requireSurvivorText(t, seed.projection.Entries(), anchoredSurvivors, "the anchored rebuild")
+	if len(anchoredAsked.requests) != 0 {
+		t.Fatalf("the anchored rebuild asked the model %d time(s), want the text the checkpoint carries restated", len(anchoredAsked.requests))
+	}
+	endRun(t, anchored)
+	endRun(t, anchoredSource)
+
+	if err := requireUnstatedProductRefusals(t, products[0]); err != nil {
+		t.Fatal(err)
+	}
+	requireUnstatedSurvivorRefusal(t, ctx)
+}
+
+// requireRecordedSurvivorText reports whether the projection one boot registered
+// states, for every survivor that carries text, the text the checkpoint recorded.
+func requireRecordedSurvivorText(t *testing.T, ctx context.Context, run *Run, addr event.Address, survivors []anchorEntry, name string) {
+	t.Helper()
+	projection, _, carried := run.compress.sessions.ProjectionOf(ctx, addr.SessionID)
+	if !carried {
+		t.Fatalf("%s registered no projection for %s", name, addr.SessionID)
+	}
+	requireSurvivorText(t, projection.Entries(), survivors, name)
+}
+
+// requireSurvivorText reports whether one restored projection states the text the
+// fold checkpoint recorded for every survivor that carries one.
+func requireSurvivorText(t *testing.T, entries []replay.ProjectionEntry, survivors []anchorEntry, name string) {
+	t.Helper()
+	stated := make(map[event.EventID]replay.ProjectionEntry, len(entries))
+	for _, entry := range entries {
+		stated[entry.Key] = entry
+	}
+	for _, survivor := range survivors {
+		if survivor.Content == "" {
+			continue
+		}
+		entry, held := stated[survivor.Key]
+		if !held {
+			t.Fatalf("%s states no entry for the survivor %s the checkpoint names", name, survivor.Key)
+		}
+		if entry.Content != survivor.Content {
+			t.Fatalf("%s states %q for the survivor %s, want the %q the checkpoint recorded: a restore reads the text it was filed with instead of minting a second one",
+				name, entry.Content, survivor.Key, survivor.Content)
+		}
+	}
+}
+
+// requireMappedSurvivorText reports whether the projection one boot registered states,
+// for every survivor carrying no text of its own, the message the chain states under the
+// key the survivor names: the entry's text is the chain's, read back by key.
+func requireMappedSurvivorText(t *testing.T, ctx context.Context, run *Run, addr event.Address, survivors []anchorEntry) {
+	t.Helper()
+	projection, _, carried := run.compress.sessions.ProjectionOf(ctx, addr.SessionID)
+	if !carried {
+		t.Fatalf("the boot registered no projection for %s", addr.SessionID)
+	}
+	stated := make(map[event.EventID]replay.ProjectionEntry, len(projection.Entries()))
+	for _, entry := range projection.Entries() {
+		stated[entry.Key] = entry
+	}
+	restated := 0
+	for _, survivor := range survivors {
+		if survivor.Content != "" {
+			continue
+		}
+		entry, held := stated[survivor.Key]
+		if !held {
+			continue
+		}
+		stored, err := run.CommittedEvent(ctx, survivor.Key)
+		if err != nil {
+			t.Fatalf("read the mapped survivor %s back by key: %v", survivor.Key, err)
+		}
+		mapped, holdsEntry := mappedEntryOf(stored)
+		if !holdsEntry {
+			continue
+		}
+		if entry.Content != mapped.Content {
+			t.Fatalf("the boot states %q for the mapped survivor %s, want the %q the chain states under that key", entry.Content, survivor.Key, mapped.Content)
+		}
+		restated++
+	}
+	if restated == 0 {
+		t.Fatal("the boot states no mapped survivor, so the text read back by key proves nothing")
+	}
+	t.Logf("the boot restated the chain's own text of %d mapped survivor(s)", restated)
+}
+
+// requireUnstatedProductRefusals reports whether a product fact states no product
+// when the fields its identity was minted from are missing or name another fact:
+// a half-stated fact restores nothing rather than inventing material.
+func requireUnstatedProductRefusals(t *testing.T, product event.CompressProduct) error {
+	t.Helper()
+	fact := compressProductEvent("session-compress-locating", "agent-a", product, time.Now().UTC())
+	if _, stated := compressProductOf(fact); !stated {
+		return fmt.Errorf("the product fact of %s states no product, so the refusals below say nothing", product.ID)
+	}
+	for _, absent := range []string{metaKeyCompressKey, metaKeyCompressRequest} {
+		mutated := fact
+		mutated.Meta = make(map[string]string, len(fact.Meta))
+		for key, value := range fact.Meta {
+			mutated.Meta[key] = value
+		}
+		delete(mutated.Meta, absent)
+		if _, stated := compressProductOf(mutated); stated {
+			return fmt.Errorf("a product fact stating no %s restored a product, want it refused: nothing a reader holds reaches the material it names", absent)
+		}
+		t.Logf("a product fact stating no %s restored nothing", absent)
+	}
+	conflicting := fact
+	conflicting.Meta = make(map[string]string, len(fact.Meta))
+	for key, value := range fact.Meta {
+		conflicting.Meta[key] = value
+	}
+	conflicting.Meta[metaKeyCompressProducer] = "assembly.another-producer"
+	if _, stated := compressProductOf(conflicting); stated {
+		return fmt.Errorf("a product fact stating another identity than the one it is keyed under restored a product, want it refused: one identity, one fact")
+	}
+	t.Log("a product fact stating another identity than the one it is keyed under restored nothing")
+	return nil
+}
+
+// requireUnstatedSurvivorRefusal reports whether a checkpoint naming a survivor the
+// chain holds no entry for, and carrying no text, refuses the restore by name.
+func requireUnstatedSurvivorRefusal(t *testing.T, ctx context.Context) {
+	t.Helper()
+	addr := event.Address{AgentID: "agent-a", SessionID: "session-compress-unstated"}
+	run, _ := locatingChainRun(t, ctx)
+	payload, err := json.Marshal([]anchorEntry{{Key: event.EventID("event-compress-unstated"), Type: event.TypeExternalInput}})
+	if err != nil {
+		t.Fatalf("encode the survivor payload: %v", err)
+	}
+	request := event.CompressRequestFor("assembly.test", "the unstated survivor", "the fixture names a survivor no fact states")
+	product := event.CompressProductFor(request.ID, compressionProducer, event.EventID("-hist-unstated"), nil, "the folded summary").WithCheckpoint(payload)
+	if _, err := run.commitFactChecked(ctx, compressProductEvent(addr.SessionID, addr.AgentID, product, time.Now().UTC())); err != nil {
+		t.Fatalf("commit the anchor naming an unstated survivor: %v", err)
+	}
+	if _, _, err := run.seedAnchoredReplay(ctx, run.tier); !errors.Is(err, ErrCheckpointSurvivorUnstated) {
+		t.Fatalf("the rebuild of a checkpoint naming an unstated survivor answered %v, want the refusal named %v", err, ErrCheckpointSurvivorUnstated)
+	} else {
+		t.Logf("a checkpoint naming a survivor the chain states no entry for refused the rebuild with: %v", err)
+	}
+	endRun(t, run)
 }

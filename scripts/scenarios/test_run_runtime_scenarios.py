@@ -15,9 +15,11 @@ The e2e assertions deliberately do NOT hard-code today's drift values: golden is
 a comparison target, so a legitimate contract or product fix must be able to turn
 a drift into a match without editing this file.
 """
+import hashlib
 import io
 import json
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -30,6 +32,7 @@ SCRIPTS = Path(__file__).resolve().parent
 REPO = SCRIPTS.parents[1]
 RUNNER = SCRIPTS / "run_runtime_scenarios.py"
 CHECKER = SCRIPTS.parent / "gates" / "check_runtime_evidence.py"
+PREFLIGHT = SCRIPTS.parent / "gates" / "preflight.sh"
 REAL_CONTRACT = REPO / "golden" / "runtime" / "scenarios.json"
 REAL_EVENT_CONTRACT = REPO / "golden" / "runtime" / "event_integrity_scenarios.json"
 MODULE = "github.com/SpellingDragon/tagent"
@@ -749,6 +752,85 @@ class EventRunnerTest(unittest.TestCase):
         self.assertEqual(payload["counts"]["event_tests_checked"], 4)
         self.assertEqual(payload["counts"]["event_anchors_checked"], 8)
         self.assertIsNone(payload["productVerified"])
+
+    def preflight_contract(self):
+        """preflight 的短跑段带 `--repeat 10`，合同声明的 repeat 必须与它一致。"""
+        contract = json.loads(json.dumps(self.contract))
+        for scope in contract["scopes"]:
+            if scope["name"] == "event-short":
+                scope["repeat"] = 10
+        path = self.root / "preflight-event-contract.json"
+        path.write_text(json.dumps(contract), encoding="utf-8")
+        return contract, path
+
+    def test_preflight_rejects_corrupt_generated_evidence(self):
+        """生成之后、读取之前改产物：正式消费者非零并点名它。
+
+        生产段用 `scripts/gates/preflight.sh` 自己的 event-short argv（`--scope
+        event-short --repeat 10`），消费段用 preflight binding 步跑的那个 checker 的
+        单件入口——binding 的 `--bundle` 形态另需六个长跑分片与一份变异产物，夹具造不出
+        来，故此处判一份产物本身。runner 与 checker 都是真的，被改的产物取自真跑结果。
+        控制组用同一份产物、同一个入口跑一遍为绿；随后只删日志里某一枚锚的原始子行
+        （evidence 一字未动，仍自报 pass），同一入口转红并点名该日志；再把摘要同步成
+        与篡改后日志一致（自洽的假），此时剩下的唯一拒绝理由就是判词本身。
+        """
+        script = PREFLIGHT.read_text(encoding="utf-8")
+        self.assertIn("--scope event-short --repeat 10", script)
+        self.assertIn("check_runtime_evidence.py", script)
+
+        contract, contract_path = self.preflight_contract()
+        bundle = self.root / "preflight-bundle" / "event-short"
+        report = self.execute(FakeGo(contract), "--contract", str(contract_path),
+                              "--scope", "event-short", "--repeat", "10",
+                              "--out", str(bundle))
+        self.assertEqual(report["verdict"], "match", report)
+        self.assertEqual(report["counts"]["repeats_passed"], 10)
+        self.assertEqual(sorted(Path(repeat["directory"]).name for repeat in report["repeats"]),
+                         sorted("repeat-{}".format(index) for index in range(1, 11)))
+
+        # 隔离副本：真跑产物复制到别处再改；原产物不再被任何一方读取。
+        produced = Path(report["repeats"][2]["directory"])
+        isolated = self.root / "tampered" / "event-short"
+        shutil.copytree(str(produced), str(isolated))
+
+        def consume():
+            return run_tool(CHECKER, "--contract", str(contract_path),
+                            "--evidence", str(isolated / "evidence.json"),
+                            "--repo-root", str(self.root), "--json")
+
+        code, out, err = consume()
+        self.assertEqual(code, 0, out + err)
+        self.assertTrue(json.loads(out)["ok"])
+
+        test = contract["tests"][0]
+        anchor = test["test_name"] + "/" + test["subtests"][0]["name"]
+        log = isolated / "test-log.jsonl"
+        rows = [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()]
+        anchor_rows = [row for row in rows if row.get("Test") == anchor]
+        self.assertGreaterEqual(len(anchor_rows), 2,
+                                "the anchor carried its own run row and pass row")
+        kept = [row for row in rows if row.get("Test") != anchor]
+        self.assertEqual(len(kept), len(rows) - len(anchor_rows))
+        log.write_text("".join(json.dumps(row) + "\n" for row in kept), encoding="utf-8")
+
+        code, out, err = consume()
+        self.assertNotEqual(code, 0, out + err)
+        self.assertFalse(json.loads(out)["ok"])
+        self.assertIn("the log was replaced after the run", out)
+        self.assertIn(str(log), out)
+
+        # 只认摘要就能过的产物，改成"自洽的假"：摘要跟着更新，产物内部处处一致，
+        # 只有日志子行不再承认那枚锚。此时剩下的唯一拒绝理由就是判词本身。
+        evidence_path = isolated / "evidence.json"
+        evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
+        evidence["test_log_sha256"] = "sha256:" + hashlib.sha256(
+            log.read_bytes()).hexdigest()
+        evidence_path.write_text(json.dumps(evidence), encoding="utf-8")
+        code, out, err = consume()
+        self.assertNotEqual(code, 0, out + err)
+        self.assertNotIn("the log was replaced after the run", out)
+        self.assertIn("({},{}) states 'pass' but the test-log child events show 'missing'".format(
+            test["id"], test["subtests"][0]["name"]), out)
 
     def test_the_evidence_records_the_environment_the_run_inherited(self):
         ambient = {"GOMAXPROCS": "3", "GOFLAGS": "-count=1 -json",

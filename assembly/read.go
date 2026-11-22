@@ -264,13 +264,16 @@ func (p *RecallPort) ChainFailure(key event.EventID) error {
 }
 
 // GetParent answers the preceding non-synthetic fact on the same chain. The
-// index normally proves the edge without bodies: the walk reads the commit order
-// from the newest record down to the key before it can answer, and then on to the
-// first entry of the key's chain older than the key. Its cost is both segments —
-// the commits newer than the key, which grow with the history committed after it,
-// and the commits from the key to that older entry — and it reads no body whatever
-// the history behind that entry holds. A key whose index entry carries no session
-// falls back to the body walk, so two sessions can never be joined accidentally.
+// index normally proves the edge without bodies: the walk enters the commit order
+// at the commit that last stated the key, and then reads on to the first entry of
+// the key's chain older than the key. Its cost is the commits from the key to that
+// older entry — the distance along the chain — and it reads no body whatever the
+// history behind that entry holds. The history committed after the key is not part
+// of that cost: the store enters the order where the key's own commit ended, and an
+// engine that states no order-line index (or a key it states none for) costs the walk
+// from the newest record that this reading replaces. A key whose index entry carries
+// no session falls back to the body walk, so two sessions can never be joined
+// accidentally.
 func (s *tierQuerySource) GetParent(key event.EventID) (event.EventID, error) {
 	if key == "" {
 		return "", nil
@@ -280,7 +283,7 @@ func (s *tierQuerySource) GetParent(key event.EventID) (event.EventID, error) {
 	partition := 0
 	session := event.SessionID("")
 	parent := event.EventID("")
-	err := s.segments.EachIndexNewestFirstUntil(context.Background(), func(candidate event.EventID, part int, _ int64, _ string, sess event.SessionID) (bool, error) {
+	err := s.segments.EachIndexNewestFirstFrom(context.Background(), key, func(candidate event.EventID, part int, _ int64, _ string, sess event.SessionID) (bool, error) {
 		if !found {
 			if candidate != key {
 				return true, nil
@@ -323,7 +326,9 @@ func (s *tierQuerySource) GetParent(key event.EventID) (event.EventID, error) {
 // older entries of the key's partition alone, one body at a time, and stops at the
 // first one of the key's chain: the answer costs the bodies down to that entry and
 // never every body of the partition, and no entry of the partition is collected
-// ahead of the read that answers.
+// ahead of the read that answers. The walk enters the commit order at the commit
+// that last stated the key on the terms GetParent states, so the entries of the key's
+// own partition that this read already placed are read once.
 func (s *tierQuerySource) parentFromBodies(key event.EventID, partition int) (event.EventID, error) {
 	ctx := context.Background()
 	stored, held, err := s.segments.GetEventInPartition(ctx, key, partition)
@@ -342,7 +347,7 @@ func (s *tierQuerySource) parentFromBodies(key event.EventID, partition int) (ev
 	chain := replay.ChainKey{PartitionID: stored.PartitionID, SessionID: sessionOf(evt)}
 	newer := true
 	parent := event.EventID("")
-	err = s.segments.EachIndexNewestFirstUntil(ctx, func(candidate event.EventID, part int, _ int64, _ string, _ event.SessionID) (bool, error) {
+	err = s.segments.EachIndexNewestFirstFrom(ctx, key, func(candidate event.EventID, part int, _ int64, _ string, _ event.SessionID) (bool, error) {
 		if newer {
 			if candidate == key {
 				newer = false

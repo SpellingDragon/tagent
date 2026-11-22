@@ -76,8 +76,8 @@ type attemptRecorder interface {
 	// repeated record of the same content stages no second pair.
 	recordAttempt(ctx context.Context, notice task.Notice, attempt SettleAttempt) error
 	// attemptOf reports the attempt record of one notification and whether the
-	// log holds one at all.
-	attemptOf(notice task.Notice) (SettleAttempt, bool)
+	// log holds one at all; a record the log could not reach is named.
+	attemptOf(notice task.Notice) (SettleAttempt, bool, error)
 }
 
 // Rejection is the durable feedback fact of one notification a target refused:
@@ -388,38 +388,35 @@ func (d *DurableCommit) oweLocked(record task.CommitRecord) {
 	}
 }
 
-// settled reports whether the account already answered one notification: the
-// consumption receipt or the refusal the log holds for it. A restore reads the
-// account through it so a payload stating a notice the account settled past the
-// cut opens no delivery for it.
-//
-// A notification whose task this account never seated is answered by the notice's
-// own receipt keys. A task that finished before the cut states no checkpoint entry
-// and names no tail key, so its chain stays on the log and the account holds no
-// identity of it until a reader names it: asking the tables alone answers "not
-// settled" for a consumption the log confirms, and the restore owes that
-// notification one more delivery beside the answer it already landed. The read is
-// the two keys of the one notice identity — a receipt read per notification the
-// restore states, never a scan of the families — and it files nothing, so the
-// account still answers only what its own sources seated.
-func (d *DurableCommit) settled(notice task.Notice) bool {
+// settled reports whether the account already answered one notification: the consumption receipt or the refusal the log holds for it.
+//   - a restore reads the account through it, so a payload stating a notice the account settled past the cut opens no delivery for it
+//   - a notification whose task this account never seated is answered by the notice's own receipt keys, because a task that finished before the cut states no checkpoint entry and names no tail key
+//   - its chain stays on the log and the account holds no identity of it until a reader names it: asking the tables alone answers "not settled" for a consumption the log confirms
+//   - so the restore owes that notification one more delivery beside the answer it already landed
+//   - the read is the two keys of the one notice identity, a receipt read per notification the restore states and never a scan of the families
+//   - it files nothing, so the account still answers only what its own sources seated
+//   - a read of those keys the storage could not complete is reported by name rather than answered as no receipt
+//   - a consumption the reader could not reach is not a notification still owed, and a restore that opened it again would deliver work the account already settled
+func (d *DurableCommit) settled(notice task.Notice) (bool, error) {
 	if d == nil {
-		return false
+		return false, nil
 	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	key := noticeKeyOf(notice)
 	if d.settledLocked(key) {
-		return true
+		return true, nil
 	}
 	if !d.unseatedTaskLocked(notice) {
-		return false
+		return false, nil
 	}
-	if _, held := d.readReceiptLocked(notice, consumeKey(notice)); held {
-		return true
+	if _, held, err := d.readReceiptLocked(notice, consumeKey(notice)); err != nil {
+		return false, err
+	} else if held {
+		return true, nil
 	}
-	_, held := d.readReceiptLocked(notice, rejectKey(notice))
-	return held
+	_, held, err := d.readReceiptLocked(notice, rejectKey(notice))
+	return held, err
 }
 
 // Seat reads the account this commit holds from the tasks one checkpoint states
@@ -751,31 +748,36 @@ func (d *DurableCommit) recordAttempt(ctx context.Context, notice task.Notice, a
 // attempt key, for the reason settled reads the receipt keys: the turn a stopped
 // process drove landed on the log beside a task that finished before the cut, and
 // the attempt is the fence a restart closes that entry beside instead of driving
-// the notification a second time.
-func (d *DurableCommit) attemptOf(notice task.Notice) (SettleAttempt, bool) {
+// the notification a second time. A record the read could not reach — a refused
+// scan, bytes no reader decodes — is reported by name instead of answered as no
+// attempt: the pump records a second attempt and drives the turn again on that
+// answer, and one notification may start one turn however often a process reads
+// the account.
+func (d *DurableCommit) attemptOf(notice task.Notice) (SettleAttempt, bool, error) {
 	if d == nil {
-		return SettleAttempt{}, false
+		return SettleAttempt{}, false, nil
 	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	key := noticeKeyOf(notice)
 	if attempt, held := d.attempts[key]; held {
-		return attempt, true
+		return attempt, true, nil
 	}
 	if !d.unseatedTaskLocked(notice) {
-		return SettleAttempt{}, false
+		return SettleAttempt{}, false, nil
 	}
-	body, held := d.readReceiptLocked(notice, attemptKey(notice))
-	if !held {
-		return SettleAttempt{}, false
+	body, held, err := d.readReceiptLocked(notice, attemptKey(notice))
+	if err != nil || !held {
+		return SettleAttempt{}, false, err
 	}
 	var record attemptRecord
 	if err := json.Unmarshal(body, &record); err != nil {
 		durableError("tagent: durable attempt read failed task=%s notice=%s err=%v",
 			notice.TaskID, notice.FactKey(), err)
-		return SettleAttempt{}, false
+		return SettleAttempt{}, false, fmt.Errorf("tagent: read the attempt record of task %s notice %s: %w",
+			notice.TaskID, notice.FactKey(), err)
 	}
-	return record.Attempt, true
+	return record.Attempt, true, nil
 }
 
 // unseatedTaskLocked reports whether one notification belongs to a task this
@@ -797,19 +799,20 @@ func (d *DurableCommit) unseatedTaskLocked(notice task.Notice) bool {
 // readReceiptLocked reads one durable record back by its own key, and reports
 // whether the log holds it: the point read a boot pays for a notification whose
 // task its checkpoint never stated, never a scan of the family. A failed read
-// reports the failure and answers no record, so the caller keeps the notification
-// owed rather than closing it on a read the storage did not complete. The read is
-// outside the prefix measurement of the load, which states what a whole-family
-// read costs. The caller holds the lock.
-func (d *DurableCommit) readReceiptLocked(notice task.Notice, key string) ([]byte, bool) {
+// reports the failure by name and answers no record, so the caller tells a record
+// it could not reach from one the log does not hold: a read error folded into
+// "nothing here" makes a settled notification owed again and drives work the
+// account already closed. The read is outside the prefix measurement of the load,
+// which states what a whole-family read costs. The caller holds the lock.
+func (d *DurableCommit) readReceiptLocked(notice task.Notice, key string) ([]byte, bool, error) {
 	pairs, err := d.log.Scan(context.Background(), key)
 	if err != nil {
 		durableError("tagent: durable receipt read failed task=%s notice=%s err=%v",
 			notice.TaskID, notice.FactKey(), err)
-		return nil, false
+		return nil, false, err
 	}
 	body, held := pairs[key]
-	return body, held
+	return body, held, nil
 }
 
 // recordConsumption stores the receipt of one completed logical consumption

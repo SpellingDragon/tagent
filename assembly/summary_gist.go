@@ -19,6 +19,7 @@ import (
 	"github.com/SpellingDragon/tagent/api/event"
 	"github.com/SpellingDragon/tagent/api/model"
 	"github.com/SpellingDragon/tagent/features/rl"
+	"github.com/SpellingDragon/tagent/memory/replay"
 )
 
 // ErrNoSummaryModel reports a band summary asked of a session whose agent holds
@@ -38,8 +39,9 @@ type summaryGists interface {
 // bandSummaryInstruction opens the one user message a band summary request
 // carries: the anchored reads of the band follow it after a blank line, so the
 // model compresses the text after each anchor and keeps the anchors themselves.
-// The byte bound is the declared budget rather than a literal, so the
-// instruction and the cut the consumer applies state the same number.
+// The byte bound is the declared budget rather than a literal, so a summary
+// answers inside the same number the fold folds under; the cut the consumer
+// applies is that number less the label the request puts beside the text.
 func bandSummaryInstruction(budget int) string {
 	return "Compress the task-turn reads below into one bounded summary. " +
 		"Keep every line's leading [MM-DD HH:MM|gen:...] anchor exactly as it stands and shorten only the text after it. " +
@@ -126,16 +128,41 @@ func modelTextOf(outcome model.Outcome) string {
 	return strings.Join(parts, "\n")
 }
 
+// summaryPresentedProbe is the placeholder text one summary is measured with:
+// any content that neither opens with a ticket nor reads as empty is presented
+// beside its label alone, so what the measurement takes away is the presentation
+// and nothing else.
+const summaryPresentedProbe = "x"
+
+// summaryTextRoomOf reports the byte room the text of one history summary may
+// take inside the declared budget: the budget less the label the request
+// composes ahead of the text. The number is measured through
+// presentedProjectionContent itself instead of restating its label here, so the
+// bound the fold answers and the message the model reads can never state two
+// different labels.
+func summaryTextRoomOf(entry replay.ProjectionEntry, budget int) int {
+	probe := entry
+	probe.Content = summaryPresentedProbe
+	room := budget - (len(presentedProjectionContent(probe)) - len(summaryPresentedProbe))
+	if room < 0 {
+		return 0
+	}
+	return room
+}
+
 // boundedSummaryGist cuts one model answer down to the bound a history summary
 // obeys, on a rune boundary so the recorded text stays valid UTF-8: the bound is
 // the summary's own declared budget, because the text a gist replaces answers it
-// too.
-func boundedSummaryGist(gist string, budget int) string {
+// too, less the label the request composes ahead of that text, because the
+// message the model reads is the label beside the text and the budget bounds the
+// message.
+func boundedSummaryGist(entry replay.ProjectionEntry, gist string, budget int) string {
+	room := summaryTextRoomOf(entry, budget)
 	text := strings.TrimSpace(gist)
-	if len(text) <= budget {
+	if len(text) <= room {
 		return text
 	}
-	cut := budget
+	cut := room
 	for cut > 0 && !utf8.RuneStart(text[cut]) {
 		cut--
 	}

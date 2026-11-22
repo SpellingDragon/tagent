@@ -22,6 +22,8 @@ import (
 // - one decision admits every call before any settlement wait, so a slow call never blocks the admission of its sibling
 // - the receipt pairs each call with its admitted task before that task settles, beside no settled body
 // - the settled body enters the next decision as its own observation: call identity preserved, body byte-identical, no second synchronous tool response
+// - each settled call lands the delivery fact of its own task as a settle line of its own
+// - it stands beside the body the call returned, so a call answers once and is noticed once
 // - the next invocation of the session reads the shared history the drives already ended committed
 // - the settled notification is booked acceptance, claim and consumption in the state mailbox
 // - R23 迁移：requests[2] 断言随 RoleOf 契约（request_assembly.go "a replayed settled fact renders under the tool role"），意图保留于 requests[1]
@@ -176,12 +178,7 @@ func TestReceiptAndBackgroundStaySeparate(t *testing.T) {
 		}
 	}
 	for at, req := range requests {
-		slots := map[string]int{}
-		for _, msg := range req.Messages {
-			if msg.Role == model.RoleTool && msg.ToolID != "" {
-				slots[msg.ToolID]++
-			}
-		}
+		slots := sepToolSlots(req.Messages)
 		for callID, n := range slots {
 			if n > 1 {
 				t.Fatalf("request %d carries %d tool-role messages under call %s, want at most one slot per call per request", at, n, callID)
@@ -231,6 +228,11 @@ func TestReceiptAndBackgroundStaySeparate(t *testing.T) {
 		t.Fatalf("requests = %d, want the decisions of the driven invocations", len(requests))
 	}
 	shared := awaitSepFlush(t, provider)
+	for callID, n := range sepToolSlots(shared) {
+		if n > 1 {
+			t.Fatalf("the flush view carries %d tool-role messages under call %s, want at most one slot per call", n, callID)
+		}
+	}
 	latest := ""
 	for _, msg := range shared {
 		if material := withoutPresentedTicket(msg.Content); msg.Role == model.RoleUser &&
@@ -248,6 +250,7 @@ func TestReceiptAndBackgroundStaySeparate(t *testing.T) {
 	}
 	counts := map[string]int{}
 	answers := 0
+	settleNotices := map[string]event.TaskID{}
 	for _, msg := range shared {
 		material := withoutPresentedTicket(msg.Content)
 		switch {
@@ -263,15 +266,26 @@ func TestReceiptAndBackgroundStaySeparate(t *testing.T) {
 			counts["slow settled body"]++
 		case msg.Role == model.RoleTool && msg.ToolID == "call-b" && msg.ToolName == "fast-tool" && material == "bg-fast":
 			counts["fast settled body"]++
+		case msg.Role == model.RoleTool && msg.ToolID != "" && sepPresentedTicketKind(msg.Content) == event.TypeTaskSettled:
+			noticeTask, ok := sepSettleNotice(msg)
+			if !ok {
+				t.Fatalf("settle notice under %s = %+v, want the settle line of its own task beside no result text", msg.ToolID, msg)
+			}
+			settleNotices[msg.ToolID] = noticeTask
+			counts[msg.ToolID+" settle notice"]++
 		case msg.Role == model.RoleAssistant:
 			answers++
 		default:
 			counts["unexpected"]++
 		}
 	}
-	wantCounts := map[string]int{"first input": 1, "second input": 1, "third input": 1, "tool call turn": 1, "slow settled body": 1, "fast settled body": 1}
+	wantCounts := map[string]int{"first input": 1, "second input": 1, "third input": 1, "tool call turn": 1,
+		"slow settled body": 1, "fast settled body": 1, "call-a settle notice": 1, "call-b settle notice": 1}
 	if !reflect.DeepEqual(counts, wantCounts) {
 		t.Fatalf("second invocation message ledger = %v, want the full history of the first drive read back exactly once each", counts)
+	}
+	if settleNotices["call-a"] == settleNotices["call-b"] {
+		t.Fatalf("settle notices read as %v, want the task of its own under each settled call", settleNotices)
 	}
 	if answers < 2 {
 		t.Fatalf("history answers = %d, want the driven turns the session already ended", answers)
@@ -319,6 +333,57 @@ func TestReceiptAndBackgroundStaySeparate(t *testing.T) {
 	if len(booked) != 2 {
 		t.Fatalf("booked notification tasks = %v, want the two settled calls booked beside their own task identities", booked)
 	}
+}
+
+// sepToolSlots counts the tool-role messages a view carries under each call, leaving the
+// settle notice of a call's own task out: that line is the delivery fact of the settlement
+// rather than an answer to the call, so the one-slot rule counts answers only.
+func sepToolSlots(view []model.Message) map[string]int {
+	slots := map[string]int{}
+	for _, msg := range view {
+		if msg.Role != model.RoleTool || msg.ToolID == "" {
+			continue
+		}
+		if sepPresentedTicketKind(msg.Content) == event.TypeTaskSettled {
+			continue
+		}
+		slots[msg.ToolID]++
+	}
+	return slots
+}
+
+// sepPresentedTicketKind reports the vocabulary a presented message opens with: the ticket
+// names the fact and the kind names what it states, so a check reads one family of messages
+// out of a view that carries several. A message opening with no ticket carries none.
+func sepPresentedTicketKind(content string) string {
+	if !strings.HasPrefix(content, "[evt_") {
+		return ""
+	}
+	bar := strings.Index(content, "|")
+	end := strings.Index(content, "] ")
+	if bar < 0 || end < 0 || end < bar {
+		return ""
+	}
+	return content[bar+1 : end]
+}
+
+// sepSettleNotice reports the task the settle notice of one call stands for. The line
+// states the task and the kind alone: the result the call returned already stands under the
+// call identity, so a notice carrying a result text is no settle line and is refused here.
+func sepSettleNotice(msg model.Message) (event.TaskID, bool) {
+	const line = "tagent: task "
+	body := withoutPresentedTicket(msg.Content)
+	if !strings.HasPrefix(body, line) || !strings.HasSuffix(body, " settled") {
+		return "", false
+	}
+	if strings.Contains(body, "result:") {
+		return "", false
+	}
+	taskID := event.TaskID(strings.TrimSuffix(strings.TrimPrefix(body, line), " settled"))
+	if taskID == "" {
+		return "", false
+	}
+	return taskID, true
 }
 
 // awaitSepFlush reports the last request view that presents the three inputs

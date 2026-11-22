@@ -883,16 +883,16 @@ func TestSettleAttemptRecordInvariants(t *testing.T) {
 		if err := commit.recordAttempt(ctx, notice, SettleAttempt{}); err != nil {
 			t.Fatalf("record the in-flight attempt: %v", err)
 		}
-		read, held := commit.attemptOf(notice)
-		if !held || read.Terminal != "" {
-			t.Fatalf("attempt = (%+v, %v), want the in-flight marker the drive lands before its turn", read, held)
+		read, held, err := commit.attemptOf(notice)
+		if err != nil || !held || read.Terminal != "" {
+			t.Fatalf("attempt = (%+v, %v, %v), want the in-flight marker the drive lands before its turn", read, held, err)
 		}
 		if err := commit.recordAttempt(ctx, notice, SettleAttempt{Terminal: "completed"}); err != nil {
 			t.Fatalf("record the terminal: %v", err)
 		}
-		read, held = commit.attemptOf(notice)
-		if !held || read.Terminal != "completed" {
-			t.Fatalf("attempt = (%+v, %v), want the terminal the turn ended on", read, held)
+		read, held, err = commit.attemptOf(notice)
+		if err != nil || !held || read.Terminal != "completed" {
+			t.Fatalf("attempt = (%+v, %v, %v), want the terminal the turn ended on", read, held, err)
 		}
 		staged, err := log.Scan(ctx, attemptPrefix)
 		if err != nil {
@@ -919,9 +919,9 @@ func TestSettleAttemptRecordInvariants(t *testing.T) {
 		if err != nil {
 			t.Fatalf("reopen the commit: %v", err)
 		}
-		read, held := second.attemptOf(notice)
-		if !held || read.Terminal != "completed" {
-			t.Fatalf("attempt read by the second commit = (%+v, %v), want the terminal the first one landed", read, held)
+		read, held, err := second.attemptOf(notice)
+		if err != nil || !held || read.Terminal != "completed" {
+			t.Fatalf("attempt read by the second commit = (%+v, %v, %v), want the terminal the first one landed", read, held, err)
 		}
 	})
 
@@ -951,8 +951,8 @@ func TestSettleAttemptRecordInvariants(t *testing.T) {
 		if err := commit.recordAttempt(ctx, notice, SettleAttempt{}); !errors.Is(err, attemptWriteErr) {
 			t.Fatalf("record beside a refused write = %v, want the failure of the log", err)
 		}
-		if _, held := commit.attemptOf(notice); held {
-			t.Fatalf("attempt held beside a refused write = true, want nothing confirmed")
+		if _, held, err := commit.attemptOf(notice); held || err != nil {
+			t.Fatalf("attempt held beside a refused write = (%v, %v), want nothing confirmed", held, err)
 		}
 	})
 
@@ -970,6 +970,138 @@ func TestSettleAttemptRecordInvariants(t *testing.T) {
 		}
 		if err := store.RecordAttempt(ctx, task.Notice{}, SettleAttempt{}); !errors.Is(err, ErrNoticeIdentityMissing) {
 			t.Fatalf("record beside no notice identity = %v, want the missing identity by name", err)
+		}
+	})
+}
+
+// TestUnreadableAttemptRefusesTheDriveByIdentity pins the attempt read that decides whether a follow-up turn is driven a second time.
+//   - positive: an attempt record the log holds decodes back as the terminal the turn landed, read by the notification identity a seated task never touched
+//   - negative: bytes the reader cannot decode are reported by name beside no answer, so the pump never reads "no attempt" where the record exists
+//   - negative: a scan the log refused is reported by name beside no answer
+//
+// 契约: docs/wiki/reliability/durable-delivery.md#canonical-fact-resolution
+func TestUnreadableAttemptRefusesTheDriveByIdentity(t *testing.T) {
+	ctx := context.Background()
+	notice := task.Notice{TaskID: "task-unreadable", Round: 1, Kind: task.NoticeSettled, Seq: 0,
+		Event: event.EventID("task-unreadable-settled")}
+	body, err := json.Marshal(attemptRecord{
+		TaskID: notice.TaskID, Round: notice.Round, Kind: notice.Kind, Seq: notice.Seq,
+		Attempt: SettleAttempt{Terminal: "completed"},
+	})
+	if err != nil {
+		t.Fatalf("render the attempt record: %v", err)
+	}
+
+	t.Run("a record the log holds answers the terminal it states", func(t *testing.T) {
+		log := newInvariantFactLog()
+		commit, err := loadedDurableCommit(ctx, log, nil)
+		if err != nil {
+			t.Fatalf("open the commit: %v", err)
+		}
+		if err := log.Put(ctx, attemptKey(notice), body); err != nil {
+			t.Fatalf("stage the attempt record: %v", err)
+		}
+		if err := log.Sync(ctx); err != nil {
+			t.Fatalf("complete the barrier: %v", err)
+		}
+		read, held, err := NewMemoryStore(nil, commit).Attempt(ctx, notice)
+		if err != nil || !held || read.Terminal != "completed" {
+			t.Fatalf("the attempt by identity = (%+v, held=%v, err=%v), want the completed terminal the log holds",
+				read, held, err)
+		}
+	})
+
+	t.Run("bytes no reader decodes are named beside no answer", func(t *testing.T) {
+		log := newInvariantFactLog()
+		commit, err := loadedDurableCommit(ctx, log, nil)
+		if err != nil {
+			t.Fatalf("open the commit: %v", err)
+		}
+		if err := log.Put(ctx, attemptKey(notice), []byte("this is not an attempt record")); err != nil {
+			t.Fatalf("stage the unreadable record: %v", err)
+		}
+		if err := log.Sync(ctx); err != nil {
+			t.Fatalf("complete the barrier: %v", err)
+		}
+		read, held, err := NewMemoryStore(nil, commit).Attempt(ctx, notice)
+		if err == nil {
+			t.Fatalf("the attempt by identity = (%+v, held=%v, err=nil), want the unreadable record named: a read folded into \"no attempt\" drives the turn a second time",
+				read, held)
+		}
+		if read.Terminal != "" || held {
+			t.Fatalf("the unreadable attempt answered (%+v, held=%v) beside its failure, want no attempt reported", read, held)
+		}
+	})
+
+	t.Run("a scan the log refused is named beside no answer", func(t *testing.T) {
+		log := newInvariantFactLog()
+		commit, err := loadedDurableCommit(ctx, log, nil)
+		if err != nil {
+			t.Fatalf("open the commit: %v", err)
+		}
+		if err := log.Put(ctx, attemptKey(notice), body); err != nil {
+			t.Fatalf("stage the attempt record: %v", err)
+		}
+		if err := log.Sync(ctx); err != nil {
+			t.Fatalf("complete the barrier: %v", err)
+		}
+		readErr := errors.New("the log refused the read of the attempt family")
+		log.refuseScan(readErr)
+		read, held, err := NewMemoryStore(nil, commit).Attempt(ctx, notice)
+		if !errors.Is(err, readErr) {
+			t.Fatalf("the attempt read beside a refused scan = (%+v, held=%v, err=%v), want %v",
+				read, held, err, readErr)
+		}
+		if read.Terminal != "" || held {
+			t.Fatalf("the refused attempt read answered (%+v, held=%v) beside its failure, want no attempt reported", read, held)
+		}
+	})
+}
+
+// TestUnreadableReceiptFailsTheRestoreByName pins the receipt read a mailbox restore makes over a notification its account never seated.
+//   - positive: a notification the account holds no receipt for is seated by the restore beside its frozen routing
+//   - negative: a scan the log refused fails the restore by name and seats nothing
+//   - so a receipt the reader could not reach is never folded into "not settled" and handed to the follow-up turn the account already closed
+//
+// 契约: docs/wiki/reliability/durable-delivery.md#canonical-fact-resolution
+func TestUnreadableReceiptFailsTheRestoreByName(t *testing.T) {
+	ctx := context.Background()
+	notice := task.Notice{TaskID: "task-restored-receipt", Round: 1, Kind: task.NoticeSettled, Seq: 0,
+		Event: event.EventID("task-restored-receipt-settled")}
+	envelope := task.Envelope{Notice: notice, Target: invariantAddress, Source: invariantAddress,
+		TargetInstance: event.InstanceID("instance-a")}
+	payload := staleMailboxPayload(t, envelope)
+
+	t.Run("a notification the account holds no receipt for is seated", func(t *testing.T) {
+		commit, err := loadedDurableCommit(ctx, newInvariantFactLog(), nil)
+		if err != nil {
+			t.Fatalf("open the commit: %v", err)
+		}
+		store := NewMemoryStore(NewAuthority(), commit)
+		if err := NewMailboxState(store).RestoreState(ctx, payload); err != nil {
+			t.Fatalf("restore the mailbox slice: %v", err)
+		}
+		if seats := store.Unconsumed(); len(seats) != 1 || seats[0].Notice != notice {
+			t.Fatalf("the restored mailbox owes %+v, want the one notification the account states no receipt for", seats)
+		}
+	})
+
+	t.Run("a scan the log refused fails the restore by name", func(t *testing.T) {
+		log := newInvariantFactLog()
+		commit, err := loadedDurableCommit(ctx, log, nil)
+		if err != nil {
+			t.Fatalf("open the commit: %v", err)
+		}
+		store := NewMemoryStore(NewAuthority(), commit)
+		readErr := errors.New("the log refused the read of the receipt family")
+		log.refuseScan(readErr)
+		err = NewMailboxState(store).RestoreState(ctx, payload)
+		if !errors.Is(err, readErr) {
+			t.Fatalf("the restore beside a refused receipt read = %v, want %v: a read folded into \"not settled\" hands a settled notification to a second turn",
+				err, readErr)
+		}
+		if seats := store.Unconsumed(); len(seats) != 0 {
+			t.Fatalf("the refused restore owes %+v, want none: the account states no receipt this reader reached", seats)
 		}
 	})
 }
@@ -1900,17 +2032,19 @@ func TestUnloadedSettledReceiptStaysSettled(t *testing.T) {
 		t.Fatalf("the seated account holds the task(s) %v, want none: the finished task states no checkpoint entry and the tail states no key of it", ids)
 	}
 
-	if !account.settled(fixture.settled.Notice) {
-		t.Fatalf("the settled notification %s reads as unsettled, want the consumption receipt the log holds: the boot seats no identity of a finished task, and a receipt it cannot read is a delivery the restore owes a second time",
-			fixture.settled.Notice.FactKey())
+	answered, err := account.settled(fixture.settled.Notice)
+	if err != nil || !answered {
+		t.Fatalf("the settled notification %s reads as (settled=%v, err=%v), want the consumption receipt the log holds: the boot seats no identity of a finished task, and a receipt it cannot read is a delivery the restore owes a second time",
+			fixture.settled.Notice.FactKey(), answered, err)
 	}
 	attempt, held, err := store.Attempt(ctx, fixture.landed.Notice)
 	if err != nil || !held || attempt.Terminal != "completed" {
 		t.Fatalf("the attempt of %s reads as (%+v, held=%v, err=%v), want the completed terminal the log holds: a restart that cannot read it drives a second turn for the same notification",
 			fixture.landed.Notice.FactKey(), attempt, held, err)
 	}
-	if account.settled(fixture.owed.Notice) {
-		t.Fatalf("the notification %s nobody accepted reads as settled, want it owed", fixture.owed.Notice.FactKey())
+	answered, err = account.settled(fixture.owed.Notice)
+	if err != nil || answered {
+		t.Fatalf("the notification %s reads as (settled=%v, err=%v), want it owed", fixture.owed.Notice.FactKey(), answered, err)
 	}
 
 	if err := NewMailboxState(store).RestoreState(ctx, staleMailboxPayload(t, fixture.settled, fixture.landed, fixture.owed)); err != nil {
@@ -1927,8 +2061,9 @@ func TestUnloadedSettledReceiptStaysSettled(t *testing.T) {
 				seat.Notice.FactKey())
 		}
 	}
+	answered, _ = account.settled(fixture.settled.Notice)
 	t.Logf("unloaded account: settled=%v attempt=%+v owed seats=%d after a stale payload named all three",
-		account.settled(fixture.settled.Notice), attempt, len(seats))
+		answered, attempt, len(seats))
 }
 
 // TestUnloadedOwedReceiptRemainsOwed pins the negative of the identity read: a notification nobody consumed stays owed.
@@ -1940,12 +2075,13 @@ func TestUnloadedOwedReceiptRemainsOwed(t *testing.T) {
 	ctx := context.Background()
 	fixture := finishOneUnloadedTask(t, ctx)
 	account, store := bootUnloadedTask(t, ctx, fixture)
-	if account.settled(fixture.owed.Notice) {
-		t.Fatalf("the notification %s reads as settled, want it owed: no receipt and no attempt answers it, and a read that answered settled here would drop a delivery",
-			fixture.owed.Notice.FactKey())
+	answered, err := account.settled(fixture.owed.Notice)
+	if err != nil || answered {
+		t.Fatalf("the notification %s reads as (settled=%v, err=%v), want it owed: no receipt and no attempt answers it, and a read that answered settled here would drop a delivery",
+			fixture.owed.Notice.FactKey(), answered, err)
 	}
-	if attempt, held := account.attemptOf(fixture.owed.Notice); held || attempt.Terminal != "" {
-		t.Fatalf("the notification %s answers the attempt (%+v, held=%v), want no attempt at all", fixture.owed.Notice.FactKey(), attempt, held)
+	if attempt, held, err := account.attemptOf(fixture.owed.Notice); err != nil || held || attempt.Terminal != "" {
+		t.Fatalf("the notification %s answers the attempt (%+v, held=%v, err=%v), want no attempt at all", fixture.owed.Notice.FactKey(), attempt, held, err)
 	}
 	receipts := account.ReceiptsOf(fixture.taskID)
 	if total := len(receipts.Consumed) + len(receipts.Attempts) + len(receipts.Rejected); total != 0 {

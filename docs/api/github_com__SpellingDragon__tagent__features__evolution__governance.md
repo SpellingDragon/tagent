@@ -290,11 +290,14 @@ func (g *GoalRegistry) Current() *Goal
 
 func (g *GoalRegistry) Declare(statement, createdBy string, expiresMs int64) string
     Declare registers one goal and returns its identity. The declaration writes
-    its governance event beside the memory entry, so a restart replays it back.
-    The declaration is the write boundary that takes the goals holding nothing
-    in force out of the memory state (see pruneOutOfForceLocked), and it runs
-    before the new identity is minted, so a goal just declared is never the one
-    taken out.
+    its governance event first and mints the goal only once that event landed,
+    so the goals the gate rules on are the goals a restart reads back: a
+    declaration the stream refused answers no identity and leaves the effective
+    state where the stream stands. The declaration is the write boundary that
+    takes the goals holding nothing in force out of the memory state (see
+    pruneOutOfForceLocked), and it runs before the new identity is minted, so a
+    goal just declared is never the one taken out. A registry beside no stream
+    mints the goal on the memory state alone, because nothing else keeps it.
 
 func (g *GoalRegistry) HasActive() bool
     HasActive reports whether an unexpired active goal exists — the judgment the
@@ -311,17 +314,19 @@ func (g *GoalRegistry) List() []*Goal
 
 func (g *GoalRegistry) Resolve(id string, status GoalStatus) bool
     Resolve moves one goal to its resolution and reports whether the registry
-    held it. The two writable resolutions are achieved and abandoned; expired
-    is derived and never written here. The registry guards no terminal state: a
-    repeated resolution is applied as it arrives, and the tool layer's two-value
-    enumeration is what keeps an unwritten word out.
+    held it and the resolution became the recorded one. The two writable
+    resolutions are achieved and abandoned; expired is derived and never written
+    here. The registry guards no terminal state: a repeated resolution is
+    applied as it arrives, and the tool layer's two-value enumeration is what
+    keeps an unwritten word out.
 
-    A resolution whose event landed takes the goal out of the memory state,
-    beside the goals that already left force: from then on the stream is the
-    record of that goal and List answers it from there. A registry beside no
-    store keeps it, because nothing else would. A goal the registry has released
-    answers false — the live state is the work in force, not every goal ever
-    declared.
+    A resolution writes its event before the memory state follows it,
+    so a refused write answers false and leaves the goal in the state the stream
+    keeps. A landed resolution takes the goal out of the memory state, beside
+    the goals that already left force: from then on the stream is the record of
+    that goal and List answers it from there. A registry beside no store keeps
+    it, because nothing else would. A goal the registry has released answers
+    false — the live state is the work in force, not every goal ever declared.
 
 type GoalStatus string
     GoalStatus is the lifecycle state of one goal. The four words are the ones

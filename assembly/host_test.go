@@ -476,6 +476,7 @@ const deliveryFactObligationAnswer = "the held result arrived"
 //   - the refusal leaves the notification owed and writes no consumption receipt, because the mark the restart pairs the result with never landed
 //   - the process after the restart restores the owed notification from the storage root the first left and hands it over once: one delivery fact and one receipt
 //   - a second hand-over of that notification meets the settled seat, so the redelivery writes no second receipt
+//   - the entry keeps the claim the hand-over took; it stood pending while the refusal handed the claim back, which let a pump here drive the notice twice
 //
 // 契约: docs/wiki/reliability/durable-delivery.md#envelope-states
 func TestDeliveryFactFailurePreservesTheNoticeObligation(t *testing.T) {
@@ -522,9 +523,9 @@ func TestDeliveryFactFailurePreservesTheNoticeObligation(t *testing.T) {
 	if facts := deliveryFactsOf(run.SessionFacts(addr)); len(facts) != 0 {
 		t.Fatalf("the chain holds %d delivery fact(s) beside the refusal, want none: %+v", len(facts), facts)
 	}
-	waitScopeGate(t, "the refused notification to stand owed on the mailbox", func() bool {
+	waitScopeGate(t, "the refused notification to stand owed under the claim this process took", func() bool {
 		seats := run.store.Unconsumed()
-		return len(seats) == 1 && seats[0].Claim == state.ClaimPending
+		return len(seats) == 1 && seats[0].Claim == state.ClaimClaimed
 	})
 	owed := run.store.Unconsumed()[0]
 	if keys := consumeReceiptKeys(t, ctx, run.tier); len(keys) != 0 {
@@ -618,14 +619,21 @@ func deliveryFactObligationBoot(t *testing.T, ctx context.Context, root string, 
 	return deliveryFactObligationAssemble(t, ctx, root, provider, tool)
 }
 
+// deliveryFactObligationDeclaration names the one agent every process of the
+// check assembles, so the run and the plugin seam mounted over it read the same
+// declaration rather than two copies of one target set.
+func deliveryFactObligationDeclaration() *config.Declaration {
+	return &config.Declaration{
+		Entry:  "agent-a",
+		Agents: []config.AgentSpec{{ID: "agent-a", Model: "model-a", ReplayWindow: 60}},
+	}
+}
+
 // deliveryFactObligationAssemble assembles one process over the storage root the
 // check shares, beside the stand-in governance that answers every check pass.
 func deliveryFactObligationAssemble(t *testing.T, ctx context.Context, root string, provider model.Model, tool *deliveryFactObligationTool) *Run {
 	t.Helper()
-	run, err := assemble(ctx, &config.Declaration{
-		Entry:  "agent-a",
-		Agents: []config.AgentSpec{{ID: "agent-a", Model: "model-a", ReplayWindow: 60}},
-	}, map[event.AgentID]NativeAgent{
+	run, err := assemble(ctx, deliveryFactObligationDeclaration(), map[event.AgentID]NativeAgent{
 		"agent-a": {Model: provider, Tools: []trpctool.CallableTool{tool}},
 	}, false,
 		WithGovernance(snapshotTestGovernance{}),
@@ -698,6 +706,19 @@ func (t *deliveryFactObligationTool) frameOf(tb testing.TB) task.CallFrame {
 	return t.frames[0]
 }
 
+// noticeTurnsOf reports the follow-up turns one chain carries: the distinct
+// notification invocations the settle pump drives, named by the notification's
+// own identity rather than by a count this check keeps beside it.
+func noticeTurnsOf(facts []event.Event) int {
+	seen := map[event.InvocationID]bool{}
+	for _, fact := range facts {
+		if strings.HasPrefix(string(fact.InvocationID), "notice:") {
+			seen[fact.InvocationID] = true
+		}
+	}
+	return len(seen)
+}
+
 // factTypesOf reports the types of one chain, so a check names what it read.
 func factTypesOf(facts []event.Event) []string {
 	out := make([]string, 0, len(facts))
@@ -705,4 +726,185 @@ func factTypesOf(facts []event.Event) []string {
 		out = append(out, fact.Type)
 	}
 	return out
+}
+
+// corruptTheLandedAttempt rewrites every attempt record one root holds with bytes
+// no reader decodes, so a boot that reads the attempt of a notification whose turn
+// already landed meets a record it cannot read.
+func corruptTheLandedAttempt(t *testing.T, ctx context.Context, root string) int {
+	t.Helper()
+	tier, err := ledger.OpenTier(ctx, ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: root, WriteRights: true})
+	if err != nil {
+		t.Fatalf("open the storage tier beside the landed attempt: %v", err)
+	}
+	log := ledger.TierFactLog(tier)
+	stored, err := log.Scan(ctx, "tagent/task/v1/attempt:")
+	if err != nil {
+		t.Fatalf("read the attempt records of the root: %v", err)
+	}
+	if len(stored) == 0 {
+		t.Fatalf("the root states no attempt record, want the landed attempt this check makes unreadable")
+	}
+	for key := range stored {
+		if err := log.Put(ctx, key, []byte("{the attempt record this reader cannot decode")); err != nil {
+			t.Fatalf("write the unreadable attempt at %s: %v", key, err)
+		}
+	}
+	if err := log.Sync(ctx); err != nil {
+		t.Fatalf("complete the barrier over the unreadable attempt: %v", err)
+	}
+	if err := tier.Close(); err != nil {
+		t.Fatalf("release the storage tier beside the unreadable attempt: %v", err)
+	}
+	return len(stored)
+}
+
+// TestUnreadableReceiptDoesNotDriveAgain pins the fence a restart reads over a notification whose turn landed beside an unreadable record.
+//   - the fixture leaves a settled task past the cut whose attempt landed a completed terminal, then makes that attempt record undecodable
+//   - a boot either refuses the unreadable account by name or closes the entry beside the terminal it already states; it never drives the turn twice
+//   - the settle fact is readable beside the boot, so a turn that fired here would be the re-drive under test and not a missing fact
+//   - a boot that refuses the account by name drives no turn, and the refusal still stands owed: the root holds no consumption receipt
+//
+// 契约: docs/wiki/reliability/durable-delivery.md#envelope-states
+func TestUnreadableReceiptDoesNotDriveAgain(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
+	defer cancel()
+	root := t.TempDir()
+	notice := redeliveredNoticeOf("unreadable-receipt")
+	addr := stopBesideTheCut(t, ctx, root, notice, true)
+	stateTheOwedNotification(t, ctx, root, notice)
+	if corrupted := corruptTheLandedAttempt(t, ctx, root); corrupted == 0 {
+		t.Fatal("the fixture corrupted no attempt record, so the restart reads no unreadable receipt")
+	}
+
+	booted, err := assembleTheRoot(ctx, root)
+	if err != nil {
+		if !strings.Contains(fmt.Sprint(err), "attempt") && !strings.Contains(fmt.Sprint(err), "task") {
+			t.Fatalf("the boot beside an unreadable attempt record answered %v, want the refusal by the identity it could not read", err)
+		}
+		tier, openErr := ledger.OpenTier(ctx, ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: root})
+		if openErr != nil {
+			t.Fatalf("open the root the refused boot left: %v", openErr)
+		}
+		defer func() {
+			if closeErr := tier.Close(); closeErr != nil {
+				t.Fatalf("release the root the refused boot left: %v", closeErr)
+			}
+		}()
+		receipts, scanErr := ledger.TierFactLog(tier).Scan(ctx, "tagent/task/v1/consume:")
+		if scanErr != nil {
+			t.Fatalf("read the consumption receipts of the refused root: %v", scanErr)
+		}
+		if len(receipts) != 0 {
+			t.Fatalf("the root holds %d consumption receipt(s) beside the refused boot, want none: the notification stays owed", len(receipts))
+		}
+		t.Logf("the boot refused the unreadable attempt record and kept the notification owed: %v", err)
+		return
+	}
+	defer func() {
+		if _, closeErr := booted.Close(ctx, agent.CloseRequest{Timeout: time.Now().Add(5 * time.Second)}); closeErr != nil {
+			t.Fatalf("close the booted process: %v", closeErr)
+		}
+	}()
+	if _, held := seatOfTask(booted.store.Unconsumed(), notice.TaskID); !held {
+		t.Fatalf("the booted mailbox owes %+v, want the notification whose attempt record a stop left behind", booted.store.Unconsumed())
+	}
+	if turns := driveSettleTurns(t, booted, addr); turns != 0 {
+		t.Fatalf("the boot drove %d follow-up turn(s) for a notification whose attempt already landed a terminal, want none: the unreadable record states a turn that ran, not a blank seat",
+			turns)
+	}
+}
+
+// assembleTheRoot assembles one process over a storage root and hands the error
+// back, so a check reads the refusal a boot answers instead of stopping there.
+func assembleTheRoot(ctx context.Context, root string) (*Run, error) {
+	provider := &snapshotTestModel{answer: func(*model.Request) *model.Response {
+		return &model.Response{Choices: []model.Choice{{Message: model.Message{Role: model.RoleAssistant, Content: factWindowAnswer}}}, Done: true}
+	}}
+	return assemble(ctx, &config.Declaration{
+		Entry:  "agent-a",
+		Agents: []config.AgentSpec{{ID: "agent-a", Model: "model-a", ReplayWindow: 60}, {ID: "agent-b", Model: "model-a", ReplayWindow: 60}},
+	}, map[event.AgentID]NativeAgent{"agent-a": {Model: provider}, "agent-b": {Model: provider}}, false,
+		WithGovernance(snapshotTestGovernance{}), redeliveredNoticeStorage(root))
+}
+
+// TestBackflowFailureRecoversWithoutManualSettle pins the obligation a refused delivery fact leaves for the next process to recover on its own.
+//   - the settled call of one native tool commits the delivery fact of its range, and the commit face refuses it
+//   - the process that follows reads the owed notification back from the root the refused one left
+//   - the boot hands that notification over and closes it without the check building a driver, naming a commit face or writing a settle fact
+//   - the pump is the one the builtin catalog mounts for the host, so the obligation reaches a turn by the recovery the product runs
+//   - the refused hand-over keeps its claim with the process that took it, so the owed entry is no pending work that process reads again
+//   - the product's own recovery runs here beside the commit face and the fire face the catalog hands the pump, and no driver of this check
+//   - the declared scope is the document's own, and the gate waits for the loop of the owed address to rest, so the driver stops between drives
+//
+// 契约: docs/wiki/reliability/durable-delivery.md#envelope-states
+func TestBackflowFailureRecoversWithoutManualSettle(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+	root := t.TempDir()
+	addr := deliveryTestAddress("session-backflow-recovery")
+	refusal := errors.New("the commit face refused the delivery fact of the settled call")
+	tool := &deliveryFactObligationTool{}
+	run := deliveryFactObligationRun(t, ctx, root, tool)
+	run.loop.SetFactCommit(func(evt event.Event) (event.EventID, error) {
+		if evt.Type == event.TypeTaskSettled {
+			return "", refusal
+		}
+		return run.commitFactChecked(ctx, evt)
+	})
+	if _, err := run.Invoke(ctx, InvokeRequest{
+		InvocationID:  "inv-backflow-recovery",
+		Address:       addr,
+		TriggerSource: "user",
+		Input:         []model.Message{{Role: model.RoleUser, Content: "call the tool once"}},
+	}); err != nil {
+		t.Fatalf("invoke the run beside the refused delivery fact: %v", err)
+	}
+	waitScopeGate(t, "the refused notification to stand owed under the claim this process took", func() bool {
+		seats := run.store.Unconsumed()
+		return len(seats) == 1 && seats[0].Claim == state.ClaimClaimed
+	})
+	if _, _, err := run.Checkpoint(ctx); err != nil {
+		t.Fatalf("file the checkpoint of the process beside the owed notification: %v", err)
+	}
+	if _, err := run.Close(ctx, agent.CloseRequest{Timeout: time.Now().Add(2 * time.Second)}); err != nil {
+		t.Fatalf("close the process beside the owed notification: %v", err)
+	}
+
+	booted := deliveryFactObligationBoot(t, ctx, root, tool)
+	defer func() {
+		if _, err := booted.Close(ctx, agent.CloseRequest{Timeout: time.Now().Add(2 * time.Second)}); err != nil {
+			t.Fatalf("close the process after the restart: %v", err)
+		}
+	}()
+	restored := booted.store.Unconsumed()
+	if len(restored) != 1 {
+		t.Fatalf("the booted mailbox owes %+v, want the one notification the refused delivery fact left", restored)
+	}
+	host := deliveryTestHost(ctx, booted, nil)
+	seam := &hostRunPluginSeam{
+		run:  booted,
+		host: func() *Host { return host },
+		port: &hostMeditationPort{},
+		decl: deliveryFactObligationDeclaration(),
+	}
+	if _, err := hostPlugins(seam); err != nil {
+		t.Fatalf("mount the host plugins of the booted run: %v", err)
+	}
+	if seam.settle == nil {
+		t.Fatal("the catalog mounted no settle driver: the assembly the host builds carries no recovery of the obligation a refused delivery fact leaves")
+	}
+	consumer := host.consumersOf().Ensure(restored[0].Address)
+	seam.settle.Wake()
+	waitScopeGate(t, "the catalog-assembled pump to drive the owed notification to rest", func() bool {
+		return len(booted.store.Unconsumed()) == 0 && consumer.Resting()
+	})
+	seam.settle.Stop()
+	facts := deliveryFactsOf(booted.SessionFacts(addr))
+	receipts := consumeReceiptKeys(t, ctx, booted.tier)
+	turns := noticeTurnsOf(booted.SessionFacts(addr))
+	if len(facts) != 1 || len(receipts) != 1 || turns != 1 {
+		t.Fatalf("the process after the restart answered %d delivery fact(s), %d receipt(s) and %d follow-up turn(s) with no driver of this check, want the one of each the recovery owes: the notification the refused write left stands owed over every restart",
+			len(facts), len(receipts), turns)
+	}
 }

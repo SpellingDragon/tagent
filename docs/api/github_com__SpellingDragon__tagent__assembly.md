@@ -198,8 +198,11 @@ blacklist:
 
   - Only the terminal kinds settled, failed and cancelled fire; accepted and
     progress do not.
-  - Only a delivery fact carries the settle-lineage meta key, so a backflow
-    settle never fires.
+  - A backflow settle commits the very delivery fact the delivery face commits,
+    so the trigger table reads it as one fact family; what keeps the fired
+    turn from firing itself is the account, not the fact: the entry such a
+    commit settles is claimed or consumed by the process that drove the call,
+    and the pump drives only entries still pending.
   - The fired turn commits no settle fact with a lineage, so it can never fire
     itself again.
   - The mailbox is the one account that answers whether work waits:
@@ -210,6 +213,10 @@ blacklist:
     landed its terminal is closed with its consumption receipt instead of driven
     again, so a stop between the terminal fact and the receipt replays no second
     turn.
+  - A delivery fact the chain does not hold is supplied by the pump from the
+    owed seat through the family's own renderer, so a refused write costs
+    the notification a turn it drives instead of an obligation no reader ever
+    closes.
 
 The semantic summary of one oldest band: the model face behind the history
 summary a fold files. The bounded mechanical reads of the band are handed to the
@@ -2108,6 +2115,7 @@ func NewSettleDriver(
 	lookup func(context.Context, event.EventID) (event.Event, error),
 	wake func() SettleWake,
 	fire func(context.Context, event.Address, event.Event) error,
+	opts ...settleDriverOption,
 ) *SettleDriver
     NewSettleDriver assembles the settle face over the fact lookup of one run,
     the mailbox account of that run and the follow-up drive of its host.

@@ -168,6 +168,19 @@ func (k *journalKV) TornTailBytesOpen() (int64, bool) {
 	return k.log.tornTail, k.log.torn
 }
 
+// journalRecordOf answers the one frame a commit unit is appended as: the puts copied
+// beside the deletes of the batch, under the format version this build writes. Both
+// faces that append a record build it here, so a commit and an ordered append state the
+// same frame for the same batch.
+func journalRecordOf(batch Batch) journalRecord {
+	record := journalRecord{Version: journalFormatVersion}
+	for _, put := range batch.Puts {
+		record.Puts = append(record.Puts, journalPut{Key: put.Key, Value: append([]byte{}, put.Value...)})
+	}
+	record.Deletes = append(record.Deletes, batch.Deletes...)
+	return record
+}
+
 // Commit appends one record of the batch, completes the barrier over it and
 // publishes its values once that barrier returned success. An empty batch
 // carries nothing to append and only completes the barrier, which confirms what
@@ -198,11 +211,7 @@ func (k *journalKV) Commit(ctx context.Context, batch Batch) error {
 		if k.log.addr != nil && k.log.addr.window != nil {
 			return ErrCommitWithoutWriteRights
 		}
-		record := journalRecord{Version: journalFormatVersion}
-		for _, put := range batch.Puts {
-			record.Puts = append(record.Puts, journalPut{Key: put.Key, Value: append([]byte{}, put.Value...)})
-		}
-		record.Deletes = append(record.Deletes, batch.Deletes...)
+		record := journalRecordOf(batch)
 		if err := k.log.append(record); err != nil {
 			if errors.Is(err, ErrJournalFrameTooLarge) {
 				return err
@@ -218,6 +227,39 @@ func (k *journalKV) Commit(ctx context.Context, batch Batch) error {
 	}
 	for _, key := range batch.Deletes {
 		k.resident.remove(key)
+	}
+	return nil
+}
+
+// AppendOrdered enters one record of the batch in this view's append order without
+// completing the barrier a commit does, so a caller that states a position in the
+// order pays one frame and never a flush of the log.
+//   - The order is all this face states: every record appended before it stays before it and every record appended after it lands behind it, so the barrier a later commit completes flushes this frame ahead of the frames that commit carries
+//   - A successful return states the record is in the order, never that it landed durably: a stop before that later barrier may leave the frame absent or torn at the tail, and the open that reads a torn tail cuts it, so a reader answers the key as absent — the record is whole or not there, never partly applied
+//   - No read face answers the record until a commit completes a barrier over the frame: the index states it behind that commit, so a view never serves a position its own barrier did not confirm
+//   - An empty batch enters nothing and completes no barrier, because this face states no durability to confirm
+//   - A batch carrying keys through a view Close ended is refused as ErrCommitAfterClose and one through a view holding no write rights as ErrCommitWithoutWriteRights, both before any byte is appended
+//   - A record the frame bound refuses is answered by name before the write, and any other failed append answers ErrCommitUncertain, because the bytes it left are ones the process cannot name
+func (k *journalKV) AppendOrdered(ctx context.Context, batch Batch) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	if len(batch.Puts) == 0 && len(batch.Deletes) == 0 {
+		return nil
+	}
+	if k.closed {
+		return ErrCommitAfterClose
+	}
+	if k.log.addr != nil && k.log.addr.window != nil {
+		return ErrCommitWithoutWriteRights
+	}
+	if err := k.log.append(journalRecordOf(batch)); err != nil {
+		if errors.Is(err, ErrJournalFrameTooLarge) {
+			return err
+		}
+		return fmt.Errorf("%w: %w", ErrCommitUncertain, err)
 	}
 	return nil
 }
@@ -292,13 +334,53 @@ func (k *journalKV) eachCommittedNewestFirst(ctx context.Context, visit func(key
 	})
 }
 
-// EachCommittedKeyNewestFirst names the held keys from the newest commit to the
-// oldest and stops when visit answers false. The walk pays the records it walks and
-// reads no value, so it orders the statements one log holds without the values those
-// statements carry; a caller that reads the value of each key it names asks
-// EachCommittedNewestFirst, which answers that value beside the order.
-func (k *journalKV) EachCommittedKeyNewestFirst(ctx context.Context, visit func(key string) (bool, error)) error {
-	return k.eachCommittedNewestFirst(ctx, visit)
+// commitOrderSeek is the capability of an engine whose commit order can be entered at the commit that last stated one key, instead of only from the newest commit.
+//   - it is a capability and not a method every engine carries: an engine that keeps no commit order answers none of it
+//   - a caller reads the answer through the type assertion, so a walk without it stays the walk it always was
+//   - OrderLineEnd answers where the commit that last stated the key ends in the commit order, in one probe of the identity index and one read of the order-line index
+//   - EachCommittedNewestFirstFrom names the held keys from that byte to the oldest on the terms EachCommittedNewestFirst states
+//   - so an entry point decides what the walk reads and never what it answers
+type commitOrderSeek interface {
+	OrderLineEnd(ctx context.Context, key string) (int64, bool, error)
+	EachCommittedNewestFirstFrom(ctx context.Context, from int64, visit func(key string, value []byte) (bool, error)) error
+}
+
+var _ commitOrderSeek = (*journalKV)(nil)
+
+// OrderLineEnd answers the byte the order line of the commit that last stated one key ends
+// at, and whether this view states one. A view that holds no order-line index, a key the
+// index holds none of and a record outside the bytes this view states all answer false, so
+// a caller walks the order file as it did before this index existed.
+func (k *journalKV) OrderLineEnd(ctx context.Context, key string) (int64, bool, error) {
+	if err := ctx.Err(); err != nil {
+		return 0, false, err
+	}
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	if k.closed {
+		return 0, false, ErrReadAfterClose
+	}
+	return k.log.addr.orderLineOf(key)
+}
+
+// EachCommittedNewestFirstFrom names the held keys from the commit that ends at the given
+// order byte to the oldest, beside the value each key's newest statement carries, on the
+// terms EachCommittedNewestFirst states: it names a key once, skips a key the newest commit
+// that touched it deleted, and hands the view back before every visit.
+func (k *journalKV) EachCommittedNewestFirstFrom(ctx context.Context, from int64, visit func(key string, value []byte) (bool, error)) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	if k.closed {
+		return ErrReadAfterClose
+	}
+	return k.log.addr.eachNewestFirstAtValue(from, func(key string, value []byte) (bool, error) {
+		k.mu.Unlock()
+		defer k.mu.Lock()
+		return visit(key, value)
+	})
 }
 
 // EachCommittedNewestFirst names the held keys from the newest commit to the oldest

@@ -205,66 +205,104 @@ func (g *GoalRegistry) stated() (int64, int, []*Goal) {
 }
 
 // Declare registers one goal and returns its identity. The declaration writes
-// its governance event beside the memory entry, so a restart replays it back. The
-// declaration is the write boundary that takes the goals holding nothing in force
-// out of the memory state (see pruneOutOfForceLocked), and it runs before the new
-// identity is minted, so a goal just declared is never the one taken out.
+// its governance event first and mints the goal only once that event landed, so
+// the goals the gate rules on are the goals a restart reads back: a declaration
+// the stream refused answers no identity and leaves the effective state where the
+// stream stands. The declaration is the write boundary that takes the goals
+// holding nothing in force out of the memory state (see pruneOutOfForceLocked),
+// and it runs before the new identity is minted, so a goal just declared is never
+// the one taken out. A registry beside no stream mints the goal on the memory
+// state alone, because nothing else keeps it.
 func (g *GoalRegistry) Declare(statement, createdBy string, expiresMs int64) string {
 	if g == nil {
 		return ""
 	}
-	g.mu.Lock()
 	now := time.Now().UnixMilli()
+	g.mu.Lock()
 	g.pruneOutOfForceLocked(now)
 	g.seq++
-	id := fmt.Sprintf("g-%d", g.seq)
+	seq := g.seq
+	log := g.log
+	g.mu.Unlock()
+	id := fmt.Sprintf("g-%d", seq)
 	goal := &Goal{
 		ID: id, Statement: statement, CreatedBy: createdBy,
 		Status: GoalActive, CreatedMs: now, ExpiresMs: expiresMs,
 	}
-	g.goals[id] = goal
-	log := g.log
-	g.mu.Unlock()
-	g.writeGoalEvent(log, goalEventPayload{
+	if !g.recordsOperation(log, goalEventPayload{
 		GoalID: id, Op: goalOpDeclared, Statement: statement,
 		CreatedBy: createdBy, ExpiresMs: expiresMs,
-	}, now, SubtypeGoalDeclared)
+	}, now, SubtypeGoalDeclared) {
+		g.unmint(seq)
+		return ""
+	}
+	g.mu.Lock()
+	g.goals[id] = goal
+	g.mu.Unlock()
 	return id
 }
 
+// unmint hands one declaration number back when the event never landed and no
+// later declaration minted past it: the identity a refused declaration reserved
+// is the one the next declaration takes, so the order this registry hands out is
+// the order the stream records instead of a sequence punctuated by numbers no
+// goal ever held.
+func (g *GoalRegistry) unmint(seq int) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.seq == seq {
+		g.seq = seq - 1
+	}
+}
+
+// recordsOperation writes one goal operation and reports whether the effective
+// state may follow it: an event the stream landed, or a registry beside no stream,
+// where the memory state is the only record the goal has. A stream that refused
+// the event answers false, so the goal the gate rules on is the goal a restart
+// reads back instead of one the stream never kept.
+func (g *GoalRegistry) recordsOperation(log durable.FactLog, p goalEventPayload, ts int64, subtype string) bool {
+	if log == nil {
+		return true
+	}
+	return g.writeGoalEvent(log, p, ts, subtype)
+}
+
 // Resolve moves one goal to its resolution and reports whether the registry held
-// it. The two writable resolutions are achieved and abandoned; expired is derived
-// and never written here. The registry guards no terminal state: a repeated
-// resolution is applied as it arrives, and the tool layer's two-value
-// enumeration is what keeps an unwritten word out.
+// it and the resolution became the recorded one. The two writable resolutions are
+// achieved and abandoned; expired is derived and never written here. The registry
+// guards no terminal state: a repeated resolution is applied as it arrives, and
+// the tool layer's two-value enumeration is what keeps an unwritten word out.
 //
-// A resolution whose event landed takes the goal out of the memory state, beside
-// the goals that already left force: from then on the stream is the record of
-// that goal and List answers it from there. A registry beside no store keeps it,
-// because nothing else would. A goal the registry has released answers false —
-// the live state is the work in force, not every goal ever declared.
+// A resolution writes its event before the memory state follows it, so a refused
+// write answers false and leaves the goal in the state the stream keeps. A landed
+// resolution takes the goal out of the memory state, beside the goals that already
+// left force: from then on the stream is the record of that goal and List answers
+// it from there. A registry beside no store keeps it, because nothing else would.
+// A goal the registry has released answers false — the live state is the work in
+// force, not every goal ever declared.
 func (g *GoalRegistry) Resolve(id string, status GoalStatus) bool {
 	if g == nil {
 		return false
 	}
 	g.mu.Lock()
-	goal, ok := g.goals[id]
-	if ok {
-		goal.Status = status
-	}
+	_, ok := g.goals[id]
 	now := time.Now().UnixMilli()
 	log := g.log
 	g.mu.Unlock()
 	if !ok {
 		return false
 	}
-	if g.writeGoalEvent(log, goalEventPayload{
+	if !g.recordsOperation(log, goalEventPayload{
 		GoalID: id, Op: goalOpResolved, Status: string(status),
 	}, now, SubtypeGoalResolved) {
-		g.mu.Lock()
-		g.pruneOutOfForceLocked(now)
-		g.mu.Unlock()
+		return false
 	}
+	g.mu.Lock()
+	if goal, held := g.goals[id]; held {
+		goal.Status = status
+	}
+	g.pruneOutOfForceLocked(now)
+	g.mu.Unlock()
 	return true
 }
 
@@ -467,10 +505,10 @@ func goalSeqOf(id string) int {
 // declaration or resolution requires, and numbers the stream only behind a barrier
 // it confirmed: the write path is serialized, a refused write hands its number
 // back, and a barrier that did not confirm stops the stream from numbering on. The
-// memory entry stands either way — the goal gate keeps working — and the failure
-// is named at ERROR instead of dropping out of the durable stream in silence. It
-// reports whether the event landed, because a landed event is what lets the caller
-// hand the goal itself to the stream.
+// failure is named at ERROR instead of dropping out of the durable stream in
+// silence, and the caller that reads the false it answers leaves the effective
+// state where the stream stands. It reports whether the event landed, because a
+// landed event is what lets the caller hand the goal itself to the stream.
 func (g *GoalRegistry) writeGoalEvent(log durable.FactLog, p goalEventPayload, ts int64, subtype string) bool {
 	if log == nil {
 		return false

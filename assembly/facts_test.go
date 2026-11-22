@@ -1298,6 +1298,10 @@ type factCommitEngine struct {
 	batches [][]string
 	// refuse answers a batch before the engine commits it.
 	refuse func(ledger.Batch) error
+	// report answers a batch the engine already committed, so a fixture reads what a
+	// commit landed beside an outcome the engine names: an outcome the caller cannot
+	// place leaves its keys durable all the same.
+	report func(ledger.Batch) error
 }
 
 // Commit records the batch it is handed and answers what the fixture named.
@@ -1309,13 +1313,20 @@ func (e *factCommitEngine) Commit(ctx context.Context, batch ledger.Batch) error
 	e.mu.Lock()
 	e.batches = append(e.batches, keys)
 	refuse := e.refuse
+	report := e.report
 	e.mu.Unlock()
 	if refuse != nil && len(batch.Puts) > 0 {
 		if err := refuse(batch); err != nil {
 			return err
 		}
 	}
-	return e.AtomicStore.Commit(ctx, batch)
+	if err := e.AtomicStore.Commit(ctx, batch); err != nil {
+		return err
+	}
+	if report != nil && len(batch.Puts) > 0 {
+		return report(batch)
+	}
+	return nil
 }
 
 // Close releases the engine the wrapper holds, so the storage root's write rights
@@ -1392,6 +1403,21 @@ func factFamilyKeys(t *testing.T, ctx context.Context, store ledger.AtomicStore,
 	return out
 }
 
+// persistOneFact lands one fact through the write step the commit entry runs: the
+// identity is read first, as a commit reads it before it states a position, and the
+// write then runs under the landing fence the entry holds across the registration and
+// the fold that follow it in a commit of this run.
+func persistOneFact(t *testing.T, ctx context.Context, run *Run, evt event.Event) (ledger.FactCommitOutcome, error) {
+	t.Helper()
+	stored, chainHolds, err := run.chainRecord(ctx, evt)
+	if err != nil {
+		return ledger.FactRefused, err
+	}
+	run.landing.Lock()
+	defer run.landing.Unlock()
+	return run.persistFactOrdered(ctx, evt, stored, chainHolds)
+}
+
 // TestFactCommitLandsOriginalAndRecordInOneCommit pins the commit unit of one fact through the entry that commits a run's facts.
 //   - the one commit carries the event body, its index entry, the window meta, the original body and its reference
 //   - the reopened root answers the record by identity and the original by reference, and the commit took one sequence slot
@@ -1405,7 +1431,7 @@ func TestFactCommitLandsOriginalAndRecordInOneCommit(t *testing.T) {
 	addr := event.Address{AgentID: "agent-a", SessionID: "session-whole-fact"}
 	content := "the material one fact commits whole"
 	evt := factCommitEvent("whole-fact", addr, time.Date(2026, 11, 16, 9, 0, 0, 0, time.UTC), content)
-	if err := run.persistFact(ctx, evt); err != nil {
+	if _, err := persistOneFact(t, ctx, run, evt); err != nil {
 		t.Fatalf("commit one fact: %v", err)
 	}
 	body, err := memory.BodyFromEvent(evt, factCommitFormat, factCommitRetention)
@@ -1483,7 +1509,7 @@ func TestRefusedFactCommitPublishesNoKey(t *testing.T) {
 	addr := event.Address{AgentID: "agent-a", SessionID: "session-refused-fact"}
 	partition := memory.PartitionIDFromName(string(addr.AgentID))
 	evt := factCommitEvent("refused-fact", addr, time.Date(2026, 11, 16, 9, 30, 0, 0, time.UTC), "the material a refused fact carries")
-	if err := run.persistFact(ctx, evt); err == nil {
+	if _, err := persistOneFact(t, ctx, run, evt); err == nil {
 		t.Fatal("the refused commit answered success, want the refusal the engine named")
 	} else if !errors.Is(err, refused) {
 		t.Fatalf("the refused commit = %v, want the %v it answered", err, refused)
@@ -1527,7 +1553,7 @@ func TestFactCommitJudgesTheDomainBeforeTheEngineBytes(t *testing.T) {
 	addr := event.Address{AgentID: "agent-a", SessionID: "session-domain-equivalence"}
 	at := time.Date(2026, 11, 16, 10, 0, 0, 0, time.UTC)
 	first := factCommitEvent("domain-equivalent-fact", addr, at, "the material one identity names")
-	if err := run.persistFact(ctx, first); err != nil {
+	if _, err := persistOneFact(t, ctx, run, first); err != nil {
 		t.Fatalf("commit the fact the identity names: %v", err)
 	}
 	second := first
@@ -1567,7 +1593,7 @@ func TestFactCommitJudgesTheDomainBeforeTheEngineBytes(t *testing.T) {
 	if err := run.tier.Segments.StoreEvent(ctx, record); !errors.Is(err, ledger.ErrContentConflict) {
 		t.Fatalf("the engine under the one identity = %v, want the byte conflict it judges", err)
 	}
-	if err := run.persistFact(ctx, second); err != nil {
+	if _, err := persistOneFact(t, ctx, run, second); err != nil {
 		t.Fatalf("the fact entry under the one identity = %v, want the duplicate this layer judged", err)
 	}
 	if got := run.tier.Segments.EventCount(); got != 1 {
@@ -1836,5 +1862,495 @@ func TestRepeatedFactDoesNotAdvanceLandedSequence(t *testing.T) {
 	}
 	if got := reopened.Segments.EventCount(); got != 2 {
 		t.Fatalf("the reopened root counts %d event(s), want the two facts it landed", got)
+	}
+}
+
+// factApplyRecorder is one state holder that states the order the facts it is
+// folded with reached the state seam, so a check reads the order a commit applied
+// its facts in beside the order the storage committed them in. A recorder built
+// with one fact named parks that fact's fold until the check releases it, so the
+// interleaving is reached by the fold the product runs and not by timing.
+type factApplyRecorder struct {
+	mu      sync.Mutex
+	order   []event.EventID
+	gated   event.EventID
+	gate    chan struct{}
+	arrived chan struct{}
+	reached bool
+	once    sync.Once
+}
+
+// newFactApplyRecorder returns one recorder, parking the fold of gated when it is
+// not empty.
+func newFactApplyRecorder(gated event.EventID) *factApplyRecorder {
+	recorder := &factApplyRecorder{gated: gated, gate: make(chan struct{})}
+	if gated != "" {
+		recorder.arrived = make(chan struct{})
+	}
+	return recorder
+}
+
+// StateName names the slice this recorder states.
+func (r *factApplyRecorder) StateName() string { return "assembly.fact-apply-order" }
+
+// SnapshotState states nothing: the order is this check's own observation and no
+// cut carries it.
+func (r *factApplyRecorder) SnapshotState(context.Context) ([]byte, error) {
+	return []byte("null"), nil
+}
+
+// RestoreState accepts the empty state the cut states for this slice.
+func (r *factApplyRecorder) RestoreState(context.Context, []byte) error { return nil }
+
+// Reduce folds one fact by appending its identity to the order this recorder
+// states. The gated fact parks here until the check releases it, so the commit of
+// that fact stands between its landing and the application the seam derives.
+func (r *factApplyRecorder) Reduce(_ context.Context, evt event.Event) error {
+	r.mu.Lock()
+	park := evt.Key == r.gated && !r.reached
+	if park {
+		r.reached = true
+	}
+	r.mu.Unlock()
+	if park {
+		r.once.Do(func() { close(r.arrived) })
+		<-r.gate
+	}
+	r.mu.Lock()
+	r.order = append(r.order, evt.Key)
+	r.mu.Unlock()
+	return nil
+}
+
+// awaitArrival waits until the gated fact reaches the seam, failing the check
+// when it never does.
+func (r *factApplyRecorder) awaitArrival(t *testing.T) {
+	t.Helper()
+	if r.arrived == nil {
+		t.Fatal("the recorder names no fact to park, so the check would wait for a fold it never asked for")
+	}
+	select {
+	case <-r.arrived:
+	case <-time.After(60 * time.Second):
+		t.Fatal("the gated fact never reached the state seam, so the interleaving of this check is unreachable")
+	}
+}
+
+// release lets the parked fold proceed.
+func (r *factApplyRecorder) release() {
+	r.once.Do(func() {})
+	select {
+	case <-r.gate:
+	default:
+		close(r.gate)
+	}
+}
+
+// appliedOrder reports the order the facts reached the seam in.
+func (r *factApplyRecorder) appliedOrder() []event.EventID {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]event.EventID(nil), r.order...)
+}
+
+// countOf reports how many times one identity was folded into this recorder.
+func (r *factApplyRecorder) countOf(key event.EventID) int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	folded := 0
+	for _, held := range r.order {
+		if held == key {
+			folded++
+		}
+	}
+	return folded
+}
+
+// factReadCounter wraps one engine and counts the reads of one index key, so a
+// check knows both commits of one identity have looked at a chain holding nothing
+// before either of them lands. The count is the engine's own call order, so the
+// interleaving is deterministic and names no sleep.
+type factReadCounter struct {
+	ledger.AtomicStore
+	mu      sync.Mutex
+	watch   string
+	want    int
+	reads   int
+	ready   chan struct{}
+	relayed sync.Once
+}
+
+// newFactReadCounter returns one counter that answers ready once the wanted reads
+// of watch happened.
+func newFactReadCounter(store ledger.AtomicStore, watch string, want int) *factReadCounter {
+	return &factReadCounter{AtomicStore: store, watch: watch, want: want, ready: make(chan struct{})}
+}
+
+// Read answers one fetch and counts the reads of the watched key.
+func (c *factReadCounter) Read(ctx context.Context, fetch ledger.Fetch) ([]ledger.Pair, error) {
+	pairs, err := c.AtomicStore.Read(ctx, fetch)
+	if fetch.Key != "" && fetch.Key == c.watch {
+		c.mu.Lock()
+		c.reads++
+		reached := c.reads >= c.want
+		reads := c.reads
+		c.mu.Unlock()
+		if reached && reads >= c.want {
+			c.relayed.Do(func() { close(c.ready) })
+		}
+	}
+	return pairs, err
+}
+
+// await waits until both commits have read the identity.
+func (c *factReadCounter) await(t *testing.T) {
+	t.Helper()
+	select {
+	case <-c.ready:
+	case <-time.After(60 * time.Second):
+		c.mu.Lock()
+		reads := c.reads
+		c.mu.Unlock()
+		t.Fatalf("the %d reads of %s this check needs never happened: the engine answered %d, so the two commits never stood together before the landing",
+			c.want, c.watch, reads)
+	}
+}
+
+// count reports the reads of the watched key answered so far.
+func (c *factReadCounter) count() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.reads
+}
+
+// factLandedSeq answers the sequence slot one fact landed at, read back from the
+// storage root the run committed it to.
+func factLandedSeq(t *testing.T, ctx context.Context, run *Run, key event.EventID, partition int) int64 {
+	t.Helper()
+	stored, held, err := run.tier.Segments.GetEventInPartition(ctx, key, partition)
+	if err != nil || !held {
+		t.Fatalf("the storage root answers the fact %s = held %t, %v, want the record the commit landed", key, held, err)
+	}
+	return stored.Seq
+}
+
+// TestFactLandedBesideAnUncertainBarrierIsStatedByItsRetry pins the retry of a commit whose barrier named no outcome.
+// - the first commit lands the batch and reports the outcome the engine cannot name, so the process states neither the registration nor a fold
+// - the retry meets a fact the chain holds whole and a process that never registered it, so it states that landing: one registration, one fold
+// - the control is the state of the seam: a retry answered as a plain repeat of a fact this process never registered folds nothing
+// - a seam state so left is the state no replay of the same chain derives
+//
+// 契约: docs/wiki/memory/memory-architecture.md#event-shape
+func TestFactLandedBesideAnUncertainBarrierIsStatedByItsRetry(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	addr := event.Address{AgentID: "agent-a", SessionID: "session-uncertain-landing"}
+	key := event.EventID("uncertain-landing")
+	fact := factCommitEvent(string(key), addr, time.Date(2026, 11, 16, 12, 0, 0, 0, time.UTC), "the fact the unsettled barrier left durable")
+	engine, err := ledger.OpenAtomicStore(ctx, ledger.StorageConfig{Type: ledger.StorageJournal, Root: root, WriteRights: true})
+	if err != nil {
+		t.Fatalf("open the engine of the root: %v", err)
+	}
+	probe := &factCommitEngine{AtomicStore: engine}
+	run := windowChainRun(t, ctx, WithStorage(ledger.StorageConfig{Type: ledger.StorageJournal, Root: root, Engine: probe}))
+	run.stopCheckpointFiler()
+	defer endRun(t, run)
+	recorder := newFactApplyRecorder("")
+	if _, err := run.RegisterStateSlice(recorder); err != nil {
+		t.Fatalf("mount the state holder this check reads the folds from: %v", err)
+	}
+	reported := false
+	probe.report = func(ledger.Batch) error {
+		if reported {
+			return nil
+		}
+		reported = true
+		return fmt.Errorf("tagent: the barrier reported beside the write: %w", ledger.ErrCommitUncertain)
+	}
+
+	if _, err := run.CommitToSession(ctx, addr, fact); !errors.Is(err, ledger.ErrCommitUncertain) {
+		t.Fatalf("the commit whose barrier named no outcome answered %v, want the uncertain outcome the engine named", err)
+	}
+	if folded := recorder.countOf(key); folded != 0 {
+		t.Fatalf("the state seam folded the identity %d time(s) beside the commit the process could not name, want none", folded)
+	}
+
+	if _, err := run.CommitToSession(ctx, addr, fact); err != nil {
+		t.Fatalf("the retry of the fact the chain already holds answered %v, want the commitment it is", err)
+	}
+	if folded := recorder.countOf(key); folded != 1 {
+		t.Fatalf("the state seam folded the identity %d time(s) after the retry, want one: the landing the unsettled barrier left is the state a replay of the same chain derives", folded)
+	}
+	stated := 0
+	for _, held := range run.SessionFacts(addr) {
+		if held.Key == key {
+			stated++
+		}
+	}
+	if stated != 1 {
+		t.Fatalf("the live ledger states the identity %d time(s) after the retry, want one registration", stated)
+	}
+}
+
+// TestConcurrentCommitPreservesApplicationOrder pins the order two concurrent commits reach the state seam in against the durable order.
+//   - the first fact lands and its fold parks before the seam states it, so the ordered unit the commit holds stands inside that application
+//   - the landing fence is held there, so a second commit cannot state a position beside it: the fence it must take is the one the parked fold holds
+//   - a fold outside the ordered unit leaves the fence free here, which is the control this check reads
+//   - the second commit is in flight — its two reads of the identity are done — and has applied nothing, because it waits on that fence
+//   - the count of those reads is what tells this check the second commit is in flight and waiting on the fence
+//   - once the first fold is released both commits land and the seam states them in the order the storage committed them
+//   - the same facts stated in another order are another state, and a replay of this chain folds them by the durable order
+//
+// 契约: docs/wiki/platform/platform-subsystems.md#framework-checkpoint
+func TestConcurrentCommitPreservesApplicationOrder(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	addr := event.Address{AgentID: "agent-a", SessionID: "session-commit-order"}
+	partition := memory.PartitionIDFromName(string(addr.AgentID))
+	first := factCommitEvent("order-first", addr, time.Date(2026, 11, 16, 10, 0, 0, 0, time.UTC), "the fact the storage committed first")
+	second := factCommitEvent("order-second", addr, time.Date(2026, 11, 16, 10, 0, 1, 0, time.UTC), "the fact that reaches the seam first")
+	engine, err := ledger.OpenAtomicStore(ctx, ledger.StorageConfig{Type: ledger.StorageJournal, Root: root, WriteRights: true})
+	if err != nil {
+		t.Fatalf("open the engine of the root: %v", err)
+	}
+	counter := newFactReadCounter(engine, fmt.Sprintf("%d:idx:%s", partition, second.Key), 2)
+	run := windowChainRun(t, ctx, WithStorage(ledger.StorageConfig{Type: ledger.StorageJournal, Root: root, Engine: counter}))
+	run.stopCheckpointFiler()
+	defer endRun(t, run)
+	recorder := newFactApplyRecorder(first.Key)
+	if _, err := run.RegisterStateSlice(recorder); err != nil {
+		t.Fatalf("mount the state holder this check reads the order from: %v", err)
+	}
+
+	landed := make(chan error, 1)
+	go func() {
+		_, err := run.CommitToSession(ctx, addr, first)
+		landed <- err
+	}()
+	recorder.awaitArrival(t)
+	if run.landing.TryLock() {
+		run.landing.Unlock()
+		t.Fatal("the landing fence stood free beside the parked fold of the first fact, want it held: the registration and the fold of a commit run inside the unit that lands it")
+	}
+	landing := make(chan error, 1)
+	go func() {
+		_, err := run.CommitToSession(ctx, addr, second)
+		landing <- err
+	}()
+	counter.await(t)
+	if applied := recorder.countOf(second.Key); applied != 0 {
+		t.Fatalf("the second fact reached the state seam %d time(s) beside the parked fold of the first, want nothing applied: the fence the first commit holds is the one the second states its position under",
+			applied)
+	}
+	recorder.release()
+	if err := <-landed; err != nil {
+		t.Fatalf("commit the first fact: %v", err)
+	}
+	if err := <-landing; err != nil {
+		t.Fatalf("commit the second fact beside the parked fold of the first: %v", err)
+	}
+
+	firstSeq := factLandedSeq(t, ctx, run, first.Key, partition)
+	secondSeq := factLandedSeq(t, ctx, run, second.Key, partition)
+	if firstSeq >= secondSeq {
+		t.Fatalf("the storage committed the two facts at slots %d and %d, want the first before the second: this check needs that order to read a divergence",
+			firstSeq, secondSeq)
+	}
+	durable := []event.EventID{first.Key, second.Key}
+	applied := recorder.appliedOrder()
+	if !slices.Equal(applied, durable) {
+		t.Fatalf("the state seam applied %v while the storage committed %v: the derived state of this chain is not the state a replay of the same durable order derives",
+			applied, durable)
+	}
+}
+
+// TestConcurrentSameFactKeepsOneApplication pins one identity committed twice at once, and the storage answers the repeat as the commitment it already is.
+//   - the equivalent case keeps one record, one registration and one fold: the repeat is not a second fact and the seam is asked to state it once
+//   - the conflicting case refuses the second commit by name and folds nothing under the identity, leaving the first content as the original
+//   - the probe parks the first commit before the engine sees it and reads the chain until the second commit has looked: both lookups answer absence
+//   - each commit reads the identity twice before it takes a landing slot, once as its lookup of the chain and once as the read its own persist repeats
+//   - the landing lock the check holds keeps both commits between those reads and the commit that lands
+//   - the released landing slot wakes the two commits in no stated order, so the outcomes are read as a set
+//   - one identity landed, and the content it never named is refused beside the key conflict
+//
+// 契约: docs/wiki/memory/memory-architecture.md#event-shape
+func TestConcurrentSameFactKeepsOneApplication(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+	for _, held := range []struct {
+		name    string
+		content string
+	}{
+		{name: "the same fact twice", content: "the material one identity carries"},
+		{name: "another content under one identity", content: "another material the identity never named"},
+	} {
+		t.Run(held.name, func(t *testing.T) {
+			root := t.TempDir()
+			addr := event.Address{AgentID: "agent-a", SessionID: "session-same-fact"}
+			key := event.EventID("same-fact-once")
+			partition := memory.PartitionIDFromName(string(addr.AgentID))
+			indexKey := fmt.Sprintf("%d:idx:%s", partition, key)
+			engine, err := ledger.OpenAtomicStore(ctx, ledger.StorageConfig{Type: ledger.StorageJournal, Root: root, WriteRights: true})
+			if err != nil {
+				t.Fatalf("open the engine of the root: %v", err)
+			}
+			counter := newFactReadCounter(engine, indexKey, 4)
+			run := windowChainRun(t, ctx, WithStorage(ledger.StorageConfig{Type: ledger.StorageJournal, Root: root, Engine: counter}))
+			run.stopCheckpointFiler()
+			defer endRun(t, run)
+			recorder := newFactApplyRecorder("")
+			if _, err := run.RegisterStateSlice(recorder); err != nil {
+				t.Fatalf("mount the state holder this check reads the folds from: %v", err)
+			}
+
+			first := factCommitEvent(string(key), addr, time.Date(2026, 11, 16, 11, 0, 0, 0, time.UTC), "the material one identity carries")
+			second := factCommitEvent(string(key), addr, time.Date(2026, 11, 16, 11, 0, 1, 0, time.UTC), held.content)
+			type outcome struct {
+				key event.EventID
+				err error
+			}
+			run.landing.Lock()
+			firstDone := make(chan outcome, 1)
+			secondDone := make(chan outcome, 1)
+			go func() {
+				id, err := run.CommitToSession(ctx, addr, first)
+				firstDone <- outcome{key: id, err: err}
+			}()
+			go func() {
+				id, err := run.CommitToSession(ctx, addr, second)
+				secondDone <- outcome{key: id, err: err}
+			}()
+			counter.await(t)
+			run.landing.Unlock()
+			firstOutcome := <-firstDone
+			secondOutcome := <-secondDone
+			equivalent := held.content == "the material one identity carries"
+			committed, refused := 0, 0
+			for _, outcome := range []outcome{firstOutcome, secondOutcome} {
+				switch {
+				case outcome.err == nil:
+					committed++
+				case errors.Is(outcome.err, memory.ErrFactKeyConflict):
+					refused++
+				default:
+					t.Fatalf("a commit of one identity answered %v, want the commitment or the key conflict the storage answers", outcome.err)
+				}
+			}
+			if equivalent {
+				if committed != 2 || refused != 0 {
+					t.Fatalf("the two commits of one fact answered %d commitment(s) and %d refusal(s), want both answered as the commitment the storage already holds",
+						committed, refused)
+				}
+			} else if committed != 1 || refused != 1 {
+				t.Fatalf("the two commits of two contents under one identity answered %d commitment(s) and %d refusal(s), want one of each",
+					committed, refused)
+			}
+			if folded := recorder.countOf(key); folded != 1 {
+				t.Fatalf("the state seam folded the identity %d time(s), want one: the order %v names it that many times",
+					folded, recorder.appliedOrder())
+			}
+			run.mu.Lock()
+			named := 0
+			for _, held := range run.factOrder {
+				if held == key {
+					named++
+				}
+			}
+			facts := len(run.factOrder)
+			run.mu.Unlock()
+			if named != 1 {
+				t.Fatalf("the commit order names the identity %s %d time(s), want one: a second registration states a fact the storage holds once", key, named)
+			}
+			if facts != 1 {
+				t.Fatalf("the commit order names %d fact(s) beside the one identity this check committed, want one", facts)
+			}
+			stored, found, err := run.tier.Segments.GetEventInPartition(ctx, key, partition)
+			if err != nil || !found {
+				t.Fatalf("the root answers the identity = held %t, %v, want the one record", found, err)
+			}
+			if stored.Seq != 1 {
+				t.Fatalf("the identity landed at slot %d, want the one slot the commitment takes", stored.Seq)
+			}
+		})
+	}
+}
+
+// noTierChainRun assembles one run beside no storage tier at all: no option names
+// a tier and the declaration names no memory plan, so the run keeps its facts in
+// memory alone and claims no durability for any of them.
+func noTierChainRun(t *testing.T, ctx context.Context) *Run {
+	t.Helper()
+	provider := &snapshotTestModel{answer: func(*model.Request) *model.Response {
+		return &model.Response{Choices: []model.Choice{{Message: model.Message{Role: model.RoleAssistant, Content: factWindowAnswer}}}, Done: true}
+	}}
+	run, err := assemble(ctx, &config.Declaration{
+		Entry:  "agent-a",
+		Agents: []config.AgentSpec{{ID: "agent-a", Model: "model-a", ReplayWindow: 60}},
+	}, map[event.AgentID]NativeAgent{"agent-a": {Model: provider}}, false, WithGovernance(snapshotTestGovernance{}))
+	if err != nil {
+		t.Fatalf("assemble the run beside no storage tier: %v", err)
+	}
+	return run
+}
+
+// TestNoTierCommitPreservesApplicationOrder pins the ordered unit of a run opened over no storage tier at all.
+//   - the run opened no tier, so no durable account states its commits and none of them promises a record that outlives the process
+//   - the fold of one commit parks inside the ordered unit, so the landing fence is held beside it: a fold outside that unit leaves the fence free
+//   - the seam derives the two facts in the order the run filed their positions, which is the order the commits reached that unit
+//   - negative: an application outside the unit folds the second fact beside the parked one, which the order assertion reads as a divergence
+//
+// 契约: docs/wiki/platform/platform-subsystems.md#framework-checkpoint
+func TestNoTierCommitPreservesApplicationOrder(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+	run := noTierChainRun(t, ctx)
+	run.stopCheckpointFiler()
+	if run.tier != nil {
+		t.Fatalf("the run opened the tier %q, want the run beside no storage tier this case pins", run.tier.Capabilities.Tier)
+	}
+	if durable := run.durableAccount(); durable != nil {
+		t.Fatal("the run holds a durable account, want the in-memory authority alone: a run beside no tier states no account to seat")
+	}
+	addr := event.Address{AgentID: "agent-a", SessionID: "session-no-tier-order"}
+	first := factCommitEvent("no-tier-first", addr, time.Date(2026, 11, 22, 10, 0, 0, 0, time.UTC), "the fact the run files first")
+	second := factCommitEvent("no-tier-second", addr, time.Date(2026, 11, 22, 10, 0, 1, 0, time.UTC), "the fact the run files second")
+	recorder := newFactApplyRecorder(first.Key)
+	if _, err := run.RegisterStateSlice(recorder); err != nil {
+		t.Fatalf("mount the state holder this check reads the order from: %v", err)
+	}
+
+	landed := make(chan error, 1)
+	go func() {
+		_, err := run.CommitToSession(ctx, addr, first)
+		landed <- err
+	}()
+	recorder.awaitArrival(t)
+	if run.landing.TryLock() {
+		run.landing.Unlock()
+		t.Fatal("the landing fence stood free beside the parked fold of the no-tier commit, want it held: the position and the fold of one commit run inside the unit that lands it")
+	}
+	beside := make(chan error, 1)
+	go func() {
+		_, err := run.CommitToSession(ctx, addr, second)
+		beside <- err
+	}()
+	recorder.release()
+	if err := <-landed; err != nil {
+		t.Fatalf("commit the first fact beside no tier: %v", err)
+	}
+	if err := <-beside; err != nil {
+		t.Fatalf("commit the second fact beside no tier: %v", err)
+	}
+
+	want := []event.EventID{first.Key, second.Key}
+	if applied := recorder.appliedOrder(); !slices.Equal(applied, want) {
+		t.Fatalf("the state seam applied %v, want the %v the commits filed: the derived order of a run beside no tier is the order its own commit order states",
+			applied, want)
+	}
+	if facts := run.SessionFacts(addr); len(facts) != len(want) {
+		t.Fatalf("the run holds %d fact(s) of %v, want the %d it committed: the run states no record beside the two", len(facts), addr, len(want))
+	}
+	if entries, carried := run.ReplayEntries(addr.SessionID); !carried || len(entries) != len(want) {
+		t.Fatalf("the run presents %d entry(ies) (carried %t), want the %d facts it folded in memory", len(entries), carried, len(want))
 	}
 }

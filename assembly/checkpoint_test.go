@@ -2798,6 +2798,183 @@ func TestAnEmptyNonNilTailMustNotSeatZeroYoungTasks(t *testing.T) {
 	}
 }
 
+// quietMarkerRun opens one durable run beside a stopped checkpoint filer and attaches
+// the chain a framework cut names, so a check files cuts on a root it reads itself.
+func quietMarkerRun(t *testing.T, ctx context.Context, root string) *Run {
+	t.Helper()
+	run := noTrimChainRun(t, ctx, WithStorage(ledger.StorageConfig{Type: ledger.StorageJournal, Root: root}))
+	run.stopCheckpointFiler()
+	t.Cleanup(func() {
+		if _, err := run.Close(ctx, agent.CloseRequest{Timeout: time.Now().Add(5 * time.Second)}); err != nil {
+			t.Logf("close the quiet marker run: %v", err)
+		}
+	})
+	commitSessionTurns(t, ctx, run, deliveryTestAddress("session-quiet-marker"), "quiet-marker", 1)
+	return run
+}
+
+// quietMarkers answers the quiet points one root states, in key order.
+func quietMarkers(t *testing.T, ctx context.Context, tier *ledger.Tier) []string {
+	t.Helper()
+	keys, err := tier.Store.Keys(ctx, quietPointKeyPrefix)
+	if err != nil {
+		t.Fatalf("read the quiet points of the root: %v", err)
+	}
+	return keys
+}
+
+// markerValue answers the bytes one quiet point states, which is the key of the cut it
+// stands beside.
+func markerValue(t *testing.T, ctx context.Context, tier *ledger.Tier, marker string) []byte {
+	t.Helper()
+	pairs, err := tier.Store.Read(ctx, ledger.Fetch{Key: marker})
+	if err != nil || len(pairs) != 1 {
+		t.Fatalf("read the quiet point %s = %d pair(s), %v, want the cut it names", marker, len(pairs), err)
+	}
+	return pairs[0].Value
+}
+
+// TestQuietMarkerBoundsTheTailToTheWindow pins the position a boot bounds the task account at against the cut's window.
+//   - a task that settled before the cut is not named by the tail: the slice states the account behind the quiet point
+//   - a task that settled after the cut drained and before its slices were read is named by the tail, which is the window the cut cannot state
+//   - a root whose cut states no quiet point answers nil, so the boot reads the whole log rather than the position the checkpoint itself landed at
+//   - a quiet point that names no filed cut answers nil, so a cut that refused after taking its position bounds no account
+//   - the fixture drops the quiet point of a filed cut whose slices stay in the root, so the whole log is the only place the account stands
+//   - each cut states a quiet point of its own and no later cut rewrites the one an earlier cut stated
+//
+// 契约: docs/wiki/platform/platform-subsystems.md#framework-checkpoint
+func TestQuietMarkerBoundsTheTailToTheWindow(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
+	defer cancel()
+
+	t.Run("the quiet point bounds the tail to the window", func(t *testing.T) {
+		run := quietMarkerRun(t, ctx, t.TempDir())
+		covered := settleTasks(t, ctx, run, taskCheckpointCalls("covered", 1))
+		hold := newCutHoldSlice()
+		if _, err := run.RegisterStateSlice(hold); err != nil {
+			t.Fatalf("mount the state slice this check parks the cut in: %v", err)
+		}
+		type cutOutcome struct {
+			key     event.EventID
+			filed   bool
+			failure error
+		}
+		cutDone := make(chan cutOutcome, 1)
+		go func() {
+			key, filed, err := run.Checkpoint(ctx)
+			cutDone <- cutOutcome{key: key, filed: filed, failure: err}
+		}()
+		hold.awaitEntered(t)
+		window := settleTasks(t, ctx, run, taskCheckpointCalls("window", 1))
+		hold.release()
+		cut := <-cutDone
+		if cut.failure != nil || !cut.filed || cut.key == "" {
+			t.Fatalf("the cut that states its slices beside a landing task = (%q, %t, %v), want the checkpoint it files", cut.key, cut.filed, cut.failure)
+		}
+
+		tail, err := tailFactKeys(ctx, run.tier)
+		if err != nil {
+			t.Fatalf("walk the commit order of the cut root: %v", err)
+		}
+		if tail == nil {
+			t.Fatal("the walk of a root holding a filed cut answered nil, want the tail its account is seated from")
+		}
+		for _, id := range covered {
+			if seatTailNames(tail, []event.TaskID{id})[id] {
+				t.Fatalf("the tail names the task %s that settled before the cut, want the window alone: the slice states that task and the tail states what the cut never read", id)
+			}
+		}
+		for _, id := range window {
+			if !seatTailNames(tail, []event.TaskID{id})[id] {
+				t.Fatalf("the tail names no key of the task %s that settled inside the cut's window beside the %d key(s) it does name, want it named: a boot bounded before it seats no notice that task owes", id, len(tail))
+			}
+		}
+
+		markers := quietMarkers(t, ctx, run.tier)
+		if len(markers) != 1 {
+			t.Fatalf("the cut stated %d quiet point(s) %v, want the one position of the cut it filed", len(markers), markers)
+		}
+		stated := markerValue(t, ctx, run.tier, markers[0])
+		if string(stated) != string(cut.key) {
+			t.Fatalf("the quiet point states %q, want the key of the cut it was taken for %q", stated, cut.key)
+		}
+		if _, filed, err := run.Checkpoint(ctx); err != nil || !filed {
+			t.Fatalf("file the second cut of the root = (%t, %v), want the checkpoint it files", filed, err)
+		}
+		if next := quietMarkers(t, ctx, run.tier); len(next) != 2 {
+			t.Fatalf("two cuts stated %d quiet point(s) %v, want one position each", len(next), next)
+		}
+		if kept := markerValue(t, ctx, run.tier, markers[0]); !bytes.Equal(kept, stated) {
+			t.Fatalf("the quiet point of the first cut states %q after a second cut, want the %q it was written with: a later cut writes its own position and rewrites no earlier one", kept, stated)
+		}
+	})
+
+	t.Run("no quiet point reads the whole log", func(t *testing.T) {
+		run := quietMarkerRun(t, ctx, t.TempDir())
+		settleTasks(t, ctx, run, taskCheckpointCalls("covered", 1))
+		cut, filed, err := run.Checkpoint(ctx)
+		if err != nil || !filed {
+			t.Fatalf("file the cut of the root = (%t, %v), want the checkpoint it files", filed, err)
+		}
+		markers := quietMarkers(t, ctx, run.tier)
+		if len(markers) != 1 {
+			t.Fatalf("the cut stated %d quiet point(s) %v, want the one position it was taken at", len(markers), markers)
+		}
+		if err := run.tier.Store.Commit(ctx, ledger.Batch{Deletes: markers}); err != nil {
+			t.Fatalf("drop the quiet point of the cut: %v", err)
+		}
+		if _, held, err := run.tier.Segments.GetEvent(ctx, cut); err != nil || !held {
+			t.Fatalf("the root answers the cut it filed = held %t, %v, want the checkpoint the walk must not bound the account at", held, err)
+		}
+		tail, err := tailFactKeys(ctx, run.tier)
+		if err != nil {
+			t.Fatalf("walk the commit order of the root holding no quiet point: %v", err)
+		}
+		if tail != nil {
+			t.Fatalf("the walk of a root whose cut states no quiet point answered %d key(s), want nil: nil sends the seat to the whole log, and the position the checkpoint landed at leaves the window unread", len(tail))
+		}
+	})
+
+	t.Run("a quiet point beside no filed cut bounds no account", func(t *testing.T) {
+		run := quietMarkerRun(t, ctx, t.TempDir())
+		covered := settleTasks(t, ctx, run, taskCheckpointCalls("covered", 1))
+		if _, filed, err := run.Checkpoint(ctx); err != nil || !filed {
+			t.Fatalf("file the cut of the root = (%t, %v), want the checkpoint it files", filed, err)
+		}
+		markers := quietMarkers(t, ctx, run.tier)
+		if len(markers) != 1 {
+			t.Fatalf("the cut stated %d quiet point(s) %v, want the one position it was taken at", len(markers), markers)
+		}
+		partition, cut, named := quietPointCut(markers[0])
+		if !named || string(markerValue(t, ctx, run.tier, markers[0])) != string(cut) {
+			t.Fatalf("the quiet point %s names no cut of this root, want the cut the fixture just filed", markers[0])
+		}
+		refused := event.EventID(event.CheckpointKey(partition, 999999))
+		if _, held, err := run.tier.Segments.GetEvent(ctx, refused); err != nil || held {
+			t.Fatalf("the root answers the cut no fixture filed = held %t, %v, want no record", held, err)
+		}
+		young := settleTasks(t, ctx, run, taskCheckpointCalls("young", 1))
+		if err := run.tier.Store.Commit(ctx, ledger.Batch{Puts: []ledger.Pair{{
+			Key:   quietPointKey(partition, 999999),
+			Value: []byte(refused),
+		}}}); err != nil {
+			t.Fatalf("state the quiet point of the refused cut: %v", err)
+		}
+		tail, err := tailFactKeys(ctx, run.tier)
+		if err != nil {
+			t.Fatalf("walk the commit order beside a quiet point that names no filed cut: %v", err)
+		}
+		if tail != nil {
+			t.Fatalf("the walk bounded at a quiet point that names no filed cut answered %d key(s), want nil: the account before that position was stated by no checkpoint, so a tail from it drops the tasks between them (%v)", len(tail), young)
+		}
+		for _, id := range covered {
+			if seatTailNames(tail, []event.TaskID{id})[id] {
+				t.Fatalf("the tail names the task %s, want nil instead", id)
+			}
+		}
+	})
+}
+
 // TestBootSeatsTheMailboxAfterTheDurableAccount pins the order one boot states the durable account in.
 //   - the account is seated before the slices are restored, so a notification that landed past the checkpoint's cut is seated by the mailbox of the same boot
 //   - a boot that restored the slices first would wait for a checkpoint that never states that notification
@@ -4840,4 +5017,864 @@ func mustStoreReads(t *testing.T, run *Run) int64 {
 		t.Fatalf("state the store reads of the boot: %v", err)
 	}
 	return reads
+}
+
+// cutHoldSlice is the state slice a check parks: its first snapshot answers the
+// check and holds until the check releases it, so a commit lands between the cut's
+// watermark and the checkpoint fact it files.
+type cutHoldSlice struct {
+	entered chan struct{}
+	hold    chan struct{}
+	parked  sync.Once
+	first   bool
+	mu      sync.Mutex
+}
+
+// newCutHoldSlice returns one slice that parks its first snapshot.
+func newCutHoldSlice() *cutHoldSlice {
+	return &cutHoldSlice{entered: make(chan struct{}), hold: make(chan struct{})}
+}
+
+// StateName names the slice this holder states.
+func (s *cutHoldSlice) StateName() string { return "assembly.cut-hold" }
+
+// SnapshotState states nothing and, on the first call, holds the cut open until
+// the check releases it.
+func (s *cutHoldSlice) SnapshotState(context.Context) ([]byte, error) {
+	s.mu.Lock()
+	first := !s.first
+	s.first = true
+	s.mu.Unlock()
+	if first {
+		close(s.entered)
+		<-s.hold
+	}
+	return []byte("null"), nil
+}
+
+// RestoreState accepts the empty state a cut states for this slice.
+func (s *cutHoldSlice) RestoreState(context.Context, []byte) error { return nil }
+
+// awaitEntered waits until the cut stands inside this slice's snapshot.
+func (s *cutHoldSlice) awaitEntered(t *testing.T) {
+	t.Helper()
+	select {
+	case <-s.entered:
+	case <-time.After(60 * time.Second):
+		t.Fatal("the cut never reached the state slice this check parks, so the window between its watermark and its landing is unreachable")
+	}
+}
+
+// release lets the parked cut state the rest of its slices and land.
+func (s *cutHoldSlice) release() {
+	select {
+	case <-s.hold:
+	default:
+		close(s.hold)
+	}
+}
+
+// TestTaskSnapshotReplaysInterleavedCommit pins the tasks a cut states against the tasks that land between its watermark and its checkpoint fact.
+//   - the cut reads its watermark, drains the pipeline and states the tasks slice
+//   - a task is then admitted and settled with an owed notification, so its records are committed before the checkpoint fact that follows them
+//   - inside the window a task is admitted, one is settled, and the covered task advances to its own terminal beside the notification it then owes
+//   - the boot of a root holding that cut restores the account the same slice and tail name, so the task whose record landed inside the window is not lost
+//   - a covered task is seated beside it, one it does not cover is read back from the chain it committed, and the boot seats the notification that account owes
+//   - the control settles one more task past the cut, so its record lands after the checkpoint fact and the boot that seats it reads what landed past the cut
+//
+// 契约: docs/wiki/agent/task-lifecycle.md#restore-rebuild
+func TestTaskSnapshotReplaysInterleavedCommit(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
+	defer cancel()
+	root := t.TempDir()
+	storage := WithStorage(ledger.StorageConfig{Type: ledger.StorageJournal, Root: root})
+	addr := deliveryTestAddress("session-task-snapshot-interleaved")
+	instance := event.InstanceID("instance-task-snapshot-interleaved")
+	admit := func(t *testing.T, run *Run, call string) event.TaskID {
+		t.Helper()
+		spec := taskCheckpointSpec(call, "dedup-"+call)
+		spec.Source, spec.Target = addr, addr
+		receipt, err := run.registry.Register(ctx, spec)
+		if err != nil {
+			t.Fatalf("admit the task of %s: %v", call, err)
+		}
+		if receipt.Kind != task.AdmissionFresh {
+			t.Fatalf("admission of %s = %+v, want a fresh admission", call, receipt)
+		}
+		return receipt.TaskID
+	}
+
+	source := noTrimChainRun(t, ctx, storage)
+	source.stopCheckpointFiler()
+	commitSessionTurns(t, ctx, source, addr, "interleaved", 2)
+	covered := admit(t, source, "covered")
+	hold := newCutHoldSlice()
+	if _, err := source.RegisterStateSlice(hold); err != nil {
+		t.Fatalf("mount the state slice this check parks the cut in: %v", err)
+	}
+	type cutOutcome struct {
+		key     event.EventID
+		filed   bool
+		failure error
+	}
+	cutDone := make(chan cutOutcome, 1)
+	go func() {
+		key, filed, err := source.Checkpoint(ctx)
+		cutDone <- cutOutcome{key: key, filed: filed, failure: err}
+	}()
+	hold.awaitEntered(t)
+
+	youngOpen := admit(t, source, "window-open")
+	youngSettled := admit(t, source, "window-settled")
+	if result, err := source.registry.Advance(ctx, covered, task.StatusSettled,
+		task.MutationID("settle-covered-window"), []task.Envelope{{
+			Notice: task.Notice{
+				TaskID: covered, Round: 1, Kind: task.NoticeProgress, Seq: 1,
+				Event: "fact-covered-window", Text: "the progress of the task the cut states, advanced inside the window",
+			},
+			Target: addr, Source: addr, TargetInstance: instance,
+		}}); err != nil || result != task.CommitCommitted {
+		t.Fatalf("advance the task the cut states inside the window = (%v, %v), want a committed change", result, err)
+	}
+	if result, err := source.registry.Advance(ctx, youngSettled, task.StatusSettled,
+		task.MutationID("settle-window-settled"), []task.Envelope{{
+			Notice: task.Notice{
+				TaskID: youngSettled, Round: 1, Kind: task.NoticeProgress, Seq: 1,
+				Event: "fact-window-settled", Text: "the progress the cut never stated",
+			},
+			Target: addr, Source: addr, TargetInstance: instance,
+		}}); err != nil || result != task.CommitCommitted {
+		t.Fatalf("settle the task that lands inside the cut window = (%v, %v), want a committed change", result, err)
+	}
+
+	hold.release()
+	cut := <-cutDone
+	if cut.failure != nil || !cut.filed || cut.key == "" {
+		t.Fatalf("the cut that states its slices beside a landing task = (%q, %t, %v), want the checkpoint it files", cut.key, cut.filed, cut.failure)
+	}
+	pastCut := admit(t, source, "past-cut")
+	if result, err := source.registry.Advance(ctx, pastCut, task.StatusSettled,
+		task.MutationID("settle-past-cut"), []task.Envelope{{
+			Notice: task.Notice{
+				TaskID: pastCut, Round: 1, Kind: task.NoticeProgress, Seq: 1,
+				Event: "fact-past-cut", Text: "the progress that landed past the cut",
+			},
+			Target: addr, Source: addr, TargetInstance: instance,
+		}}); err != nil || result != task.CommitCommitted {
+		t.Fatalf("settle the task past the cut = (%v, %v), want a committed change", result, err)
+	}
+	endRun(t, source)
+
+	booted := noTrimChainRun(t, ctx, storage)
+	booted.stopCheckpointFiler()
+	if key, _ := booted.CheckpointFiled(); key == "" {
+		t.Fatal("the boot read no checkpoint, want the cut the interleaved records landed beside")
+	}
+	for _, held := range []struct {
+		id   event.TaskID
+		what string
+	}{
+		{id: covered, what: "the task the cut states"},
+		{id: youngOpen, what: "the task admitted between the watermark and the landing"},
+	} {
+		if _, _, err := booted.registry.Lookup(ctx, held.id); err != nil {
+			t.Fatalf("the boot names no task %s (%s): %v", held.id, held.what, err)
+		}
+	}
+	seats := booted.store.Unconsumed()
+	seated := func(id event.TaskID) bool {
+		for _, seat := range seats {
+			if seat.Notice.TaskID == id {
+				if seat.Address != addr {
+					t.Fatalf("the restored seat of %s routes to %v, want the frozen routing %v", id, seat.Address, addr)
+				}
+				return true
+			}
+		}
+		return false
+	}
+	if !seated(pastCut) {
+		t.Fatalf("the booted mailbox seats %+v, want the notification that landed past the cut: without it this check states nothing about the window it reads",
+			seats)
+	}
+	if !seated(youngSettled) {
+		t.Fatalf("the booted mailbox seats %+v, want the notification the task that landed inside the cut window owes beside the one that landed past it",
+			seats)
+	}
+	if !seated(covered) {
+		t.Fatalf("the booted mailbox seats %+v, want the notification the task the cut states owes after it advanced inside the window: the slice states the task open and the tail names nothing of the advance",
+			seats)
+	}
+	if _, err := booted.Close(ctx, agent.CloseRequest{Timeout: time.Now().Add(5 * time.Second)}); err != nil {
+		t.Fatalf("close the booted process: %v", err)
+	}
+}
+
+const (
+	// recoveryMappedFacts is the number of mapped chain facts one scenario
+	// commits: the material its projection presents and the survivors its anchor
+	// or its cut names.
+	recoveryMappedFacts = 4
+	// recoveryTailFacts is the number of mapped facts one scenario commits past its
+	// cut or anchor, so the tail every branch replays is non-empty.
+	recoveryTailFacts = 2
+	// recoverySlotSurvivors is the number of survivors the anchor of one scenario
+	// states: the newest facts of its chain, fewer than the chain holds.
+	recoverySlotSurvivors = 2
+)
+
+// recoveryStorage is the one durable root the processes of one recovery scenario
+// share, so every record a boot reads comes from the root and none from a process
+// still in flight.
+func recoveryStorage(root string) Option {
+	return WithStorage(ledger.StorageConfig{Type: ledger.StorageJournal, Root: root})
+}
+
+// assembleRecovery assembles one process of a recovery scenario over a root: the
+// seed trim off, so the live ledger holds exactly the facts the boot decoded, and
+// a window wide enough that no age fold judges the chain, so the material the
+// scenario commits is the material the boot reads.
+func assembleRecovery(ctx context.Context, root string) (*Run, error) {
+	provider := &snapshotTestModel{answer: func(*model.Request) *model.Response {
+		return &model.Response{Choices: []model.Choice{{Message: model.Message{Role: model.RoleAssistant, Content: factWindowAnswer}}}, Done: true}
+	}}
+	return assemble(ctx, &config.Declaration{
+		Entry:  "agent-a",
+		Agents: []config.AgentSpec{{ID: "agent-a", Model: "model-a", ReplayWindow: 100000}},
+	}, map[event.AgentID]NativeAgent{"agent-a": {Model: provider}}, false,
+		WithGovernance(snapshotTestGovernance{}), recoveryStorage(root))
+}
+
+// bootRecovery assembles the boot one scenario measures and ends the check beside
+// a refusal the scenario states no premise for.
+func bootRecovery(t *testing.T, ctx context.Context, root string) *Run {
+	t.Helper()
+	boot, err := assembleRecovery(ctx, root)
+	if err != nil {
+		t.Fatalf("boot the recovery root %s: %v", root, err)
+	}
+	boot.stopCheckpointFiler()
+	return boot
+}
+
+// recoverySlot is the material one scenario of the recovery matrix leaves behind:
+// the chain it commits, the judgments it carries and the account it owes.
+type recoverySlot struct {
+	addr     event.Address
+	instance event.InstanceID
+	owed     task.Notice
+	settled  task.Notice
+	requests []event.CompressRequest
+	mapped   []event.EventID
+	tail     []event.EventID
+}
+
+// recoverySlotOf names the material of one scenario: the two tasks its account
+// states, the judgments its chain carries, the material it presents and the facts
+// it commits past the cut.
+func recoverySlotOf(tag string) recoverySlot {
+	slot := recoverySlot{
+		addr:     event.Address{AgentID: "agent-a", SessionID: event.SessionID("session-recovery-" + tag)},
+		instance: event.InstanceID("instance-recovery-" + tag),
+		owed: task.Notice{
+			TaskID: event.TaskID("task-recovery-owed-" + tag), Round: 1, Kind: task.NoticeProgress, Seq: 1,
+			Event: event.EventID("fact-recovery-owed-" + tag),
+		},
+		settled: task.Notice{
+			TaskID: event.TaskID("task-recovery-settled-" + tag), Round: 1, Kind: task.NoticeSettled, Seq: 1,
+			Event: event.EventID("fact-recovery-settled-" + tag),
+		},
+		requests: []event.CompressRequest{
+			event.CompressRequestFor("assembly.test", tag+"-material", "the fixture judges the material due for compression"),
+			event.CompressRequestFor("assembly.test", tag+"-band", "the fixture judges a second body due for compression"),
+		},
+	}
+	for at := 0; at < recoveryMappedFacts; at++ {
+		slot.mapped = append(slot.mapped, event.EventID(fmt.Sprintf("%s-mapped-%d", tag, at)))
+	}
+	for at := 0; at < recoveryTailFacts; at++ {
+		slot.tail = append(slot.tail, event.EventID(fmt.Sprintf("%s-tail-%d", tag, at)))
+	}
+	return slot
+}
+
+// recoveryFactOf renders one mapped fact of a recovery chain: its text is its
+// own, so a boot that presents the chain reads that text back from the chain.
+func recoveryFactOf(key event.EventID, addr event.Address, at time.Time) event.Event {
+	return event.Event{
+		Key:       key,
+		Type:      event.TypeExternalInput,
+		Timestamp: at,
+		Meta:      map[string]string{event.MetaKeyEventSummary: "the material " + string(key)},
+		Message:   model.Message{Role: model.RoleUser, Content: "the material of the recovery walk " + string(key)},
+		Owner:     addr, Source: addr, Target: addr,
+	}
+}
+
+// recoveryRequestFactOf renders one judgment of a recovery chain: the chain
+// carries it and no projection presents it.
+func recoveryRequestFactOf(request event.CompressRequest, addr event.Address, at time.Time) event.Event {
+	return event.Event{
+		Key:       request.ID,
+		Type:      request.FactType(),
+		Timestamp: at,
+		Meta:      map[string]string{event.MetaKeyEventSummary: request.Reason},
+		Owner:     addr, Source: addr, Target: addr,
+	}
+}
+
+// recoveryJudgmentFacts renders the judgments one scenario's chain carries, in
+// commit order: the products the scenario states answer the first of them.
+func recoveryJudgmentFacts(slot recoverySlot, base time.Time) []event.Event {
+	facts := make([]event.Event, 0, len(slot.requests))
+	at := base
+	for _, request := range slot.requests {
+		facts = append(facts, recoveryRequestFactOf(request, slot.addr, at))
+		at = at.Add(time.Minute)
+	}
+	return facts
+}
+
+// recoveryMaterialFacts renders the mapped facts of one key list in commit order.
+func recoveryMaterialFacts(keys []event.EventID, addr event.Address, base time.Time) []event.Event {
+	facts := make([]event.Event, 0, len(keys))
+	at := base
+	for _, key := range keys {
+		facts = append(facts, recoveryFactOf(key, addr, at))
+		at = at.Add(time.Minute)
+	}
+	return facts
+}
+
+// recoverySurvivorsOf states the newest mapped facts of one chain as the payload
+// of an anchor, in the reverse of the order the chain committed them: the display
+// order the payload records, which a boot that walked the chain cannot answer.
+func recoverySurvivorsOf(material []event.Event, newest int) []anchorEntry {
+	survivors := make([]anchorEntry, 0, newest)
+	for at := len(material) - 1; at >= 0 && len(survivors) < newest; at-- {
+		evt := material[at]
+		survivors = append(survivors, anchorEntry{
+			Key:     evt.Key,
+			Type:    evt.Type,
+			Summary: evt.Meta[event.MetaKeyEventSummary],
+			Time:    evt.Timestamp.UnixMilli(),
+		})
+	}
+	return survivors
+}
+
+// recoveryAnchorOf renders the one compress product a scenario's chain files: it
+// answers the first judgment of the chain and states the survivor payload the
+// scenario hands it.
+func recoveryAnchorOf(t *testing.T, slot recoverySlot, survivors []anchorEntry, base time.Time) event.Event {
+	t.Helper()
+	product := event.CompressProductFor(slot.requests[0].ID, compressionProducer,
+		event.EventID("summary-"+string(slot.addr.SessionID)), nil, "the folded summary of the recovery fixture")
+	payload, err := json.Marshal(survivors)
+	if err != nil {
+		t.Fatalf("encode the survivor payload of the recovery fixture: %v", err)
+	}
+	return compressProductEvent(slot.addr.SessionID, slot.addr.AgentID, product.WithCheckpoint(payload), base)
+}
+
+// recoveryUnreadableAnchorOf renders the one product a scenario's chain files with
+// a survivor payload no reader decodes: every field of the product is stated and
+// the payload states no survivor, which is the optional metadata a boot may leave
+// unanswered without a damaged authority.
+func recoveryUnreadableAnchorOf(slot recoverySlot, base time.Time) event.Event {
+	product := event.CompressProductFor(slot.requests[0].ID, compressionProducer,
+		event.EventID("summary-degraded-"+string(slot.addr.SessionID)), nil, "the folded summary of the degraded fixture")
+	return compressProductEvent(slot.addr.SessionID, slot.addr.AgentID, product.WithCheckpoint([]byte("{not-a-survivor-payload")), base)
+}
+
+// commitRecoveryFacts commits the facts of one recovery chain in the order the
+// fixture states them.
+func commitRecoveryFacts(t *testing.T, ctx context.Context, run *Run, facts ...event.Event) {
+	t.Helper()
+	for _, evt := range facts {
+		if _, err := run.CommitToSession(ctx, evt.Owner, evt); err != nil {
+			t.Fatalf("commit %s of the recovery fixture: %v", evt.Key, err)
+		}
+	}
+}
+
+// commitRecoveryAccount writes the durable account one scenario restores: a task
+// the receipt answers and a task the stopped process still owes one notification.
+// The records are written through the durable commit the runtime commits through,
+// beside the storage tier rather than through a live run, so the boot that follows
+// reads them from the root alone.
+func commitRecoveryAccount(t *testing.T, ctx context.Context, root string, slot recoverySlot) {
+	t.Helper()
+	tier, err := ledger.OpenTier(ctx, ledger.StorageConfig{Type: ledger.StorageJournal, Root: root, WriteRights: true})
+	if err != nil {
+		t.Fatalf("open the storage tier beside the account: %v", err)
+	}
+	account := state.NewEmptyDurableCommit(ledger.TierFactLog(tier), nil)
+	if err := account.Seat(ctx, nil, nil); err != nil {
+		t.Fatalf("seat the account of the storage: %v", err)
+	}
+	for _, held := range []struct {
+		notice task.Notice
+		status task.Status
+	}{
+		{notice: slot.settled, status: task.StatusSettled},
+		{notice: slot.owed, status: task.StatusRunning},
+	} {
+		if _, err := account.Commit(ctx, task.CommitRecord{
+			MutationID: task.MutationID("recovery:" + string(held.notice.TaskID)),
+			TaskID:     held.notice.TaskID,
+			Status:     held.status,
+			Outbox: []task.Envelope{{
+				Notice:         held.notice,
+				Target:         slot.addr,
+				Source:         slot.addr,
+				TargetInstance: slot.instance,
+			}},
+		}); err != nil {
+			t.Fatalf("commit the record of %s: %v", held.notice.TaskID, err)
+		}
+	}
+	store := state.NewMemoryStore(state.NewAuthority(), account)
+	if _, err := store.Establish(ctx, slot.addr, slot.instance); err != nil {
+		t.Fatalf("establish the target site of the account: %v", err)
+	}
+	if err := store.TrackDelivery(ctx, slot.settled.TaskID, task.HandoffTarget{Target: slot.addr, TargetInstance: slot.instance}); err != nil {
+		t.Fatalf("register the delivery route of %s: %v", slot.settled.TaskID, err)
+	}
+	if err := store.AcceptNotice(ctx, slot.settled); err != nil {
+		t.Fatalf("accept the delivered notification %s: %v", slot.settled.FactKey(), err)
+	}
+	seat, held := seatOfTask(store.Unconsumed(), slot.settled.TaskID)
+	if !held {
+		t.Fatalf("the account of the storage owes %+v, want the delivered notification this fixture consumes", store.Unconsumed())
+	}
+	if err := store.Claim(ctx, seat.Address, seat.Instance, seat.AcceptSeq); err != nil {
+		t.Fatalf("claim the delivered notification %s: %v", slot.settled.FactKey(), err)
+	}
+	if err := store.Consume(ctx, seat.Address, seat.Instance, seat.AcceptSeq); err != nil {
+		t.Fatalf("consume the delivered notification %s: %v", slot.settled.FactKey(), err)
+	}
+	if owed := store.Unconsumed(); len(owed) != 0 {
+		t.Fatalf("the mailbox of the fixture owes %+v after the receipt, want the delivered notification closed", owed)
+	}
+	if owed := account.OwedNotices(); len(owed) != 1 || owed[0].Notice.Notice.TaskID != slot.owed.TaskID {
+		t.Fatalf("the account states %+v owed, want the one notification %s the receipt never answers", owed, slot.owed.TaskID)
+	}
+	if err := tier.Close(); err != nil {
+		t.Fatalf("release the storage tier beside the account: %v", err)
+	}
+}
+
+// indexProductCount counts the compress products the index of one root names, read
+// through a view that holds no write rights: the premise of every branch that
+// states what the anchored rebuild found.
+func indexProductCount(t *testing.T, ctx context.Context, root string) int {
+	t.Helper()
+	view, err := ledger.OpenTier(ctx, ledger.StorageConfig{Type: ledger.StorageJournal, Root: root})
+	if err != nil {
+		t.Fatalf("open the read view of the root: %v", err)
+	}
+	count := 0
+	if err := view.Segments.EachIndexNewestFirst(ctx, func(_ event.EventID, _ int, _ int64, typ string, _ event.SessionID) error {
+		if typ == event.CompressProductType {
+			count++
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("walk the index of the root: %v", err)
+	}
+	if err := view.Close(); err != nil {
+		t.Fatalf("release the read view of the root: %v", err)
+	}
+	return count
+}
+
+// projectionSurvivorsOf answers the survivor entries one checkpoint states for one
+// chain, in the display order it states them.
+func projectionSurvivorsOf(t *testing.T, checkpoint event.Checkpoint, addr event.Address) []anchorEntry {
+	t.Helper()
+	payload := slicePayloadOf(t, checkpoint, checkpointSliceProjection)
+	if payload == "" {
+		t.Fatalf("the checkpoint states no projection slice, want the survivors this branch restores")
+	}
+	var wire projectionSliceWire
+	if err := json.Unmarshal([]byte(payload), &wire); err != nil {
+		t.Fatalf("decode the projection slice of the checkpoint: %v", err)
+	}
+	for _, session := range wire.Sessions {
+		if session.Agent != string(addr.AgentID) || session.Session != string(addr.SessionID) {
+			continue
+		}
+		return session.Entries
+	}
+	t.Fatalf("the projection slice names no chain %v", addr)
+	return nil
+}
+
+// entryKeysOfRequests reports the identities of the judgments one scenario's
+// chain carries, in commit order.
+func entryKeysOfRequests(slot recoverySlot) []event.EventID {
+	keys := make([]event.EventID, 0, len(slot.requests))
+	for _, request := range slot.requests {
+		keys = append(keys, request.ID)
+	}
+	return keys
+}
+
+// seededFactOf reports whether the live ledger of one boot holds the given
+// identity: the facts a replay seeded, beside the ones a live commit landed.
+func seededFactOf(run *Run, key event.EventID) bool {
+	run.mu.Lock()
+	defer run.mu.Unlock()
+	_, held := run.facts[key]
+	return held
+}
+
+// entryKeysOf reports the identities one payload states, in the order it states them.
+func entryKeysOf(entries []anchorEntry) []event.EventID {
+	keys := make([]event.EventID, 0, len(entries))
+	for _, entry := range entries {
+		keys = append(keys, entry.Key)
+	}
+	return keys
+}
+
+// observedLine reports whether the observer recorded one line of the given level
+// carrying every fragment.
+func observedLine(observer *foldObserver, level string, fragments ...string) bool {
+	observer.mu.Lock()
+	defer observer.mu.Unlock()
+	for _, line := range observer.lines {
+		if !strings.HasPrefix(line, level+": ") {
+			continue
+		}
+		holds := true
+		for _, fragment := range fragments {
+			if !strings.Contains(line, fragment) {
+				holds = false
+				break
+			}
+		}
+		if holds {
+			return true
+		}
+	}
+	return false
+}
+
+// assertRecoveryRestored reads back what one boot of the matrix restored: the
+// facts it holds and their own texts through the run's committed-fact face, the
+// projection it presents, the notification still owed beside the receipt one
+// delivered notification left, and the routing that obligation was frozen to.
+func assertRecoveryRestored(t *testing.T, ctx context.Context, boot *Run, slot recoverySlot, want []event.EventID) {
+	t.Helper()
+	facts := boot.SessionFacts(slot.addr)
+	if len(facts) == 0 {
+		t.Fatalf("the boot holds no fact of %v, want the material the branch restored", slot.addr)
+	}
+	got := make([]event.EventID, 0, len(facts))
+	for _, evt := range facts {
+		got = append(got, evt.Key)
+		stored, err := boot.CommittedEvent(ctx, evt.Key)
+		if err != nil {
+			t.Fatalf("read the restored fact %s back by identity: %v", evt.Key, err)
+		}
+		if stored.Message.Content != evt.Message.Content {
+			t.Fatalf("the boot reads %s as %q, want the text the chain committed %q: a restore that invents text presents a chain the storage never stated",
+				evt.Key, stored.Message.Content, evt.Message.Content)
+		}
+	}
+	if !slices.Equal(got, want) {
+		t.Fatalf("the boot holds %v of %v, want %v: this is the fact set the branch it read restores", got, slot.addr, want)
+	}
+	entries, carried := boot.ReplayEntries(slot.addr.SessionID)
+	if !carried || len(entries) == 0 {
+		t.Fatalf("the boot presents no projection entry for %v, want the survivors and the tail it restored", slot.addr)
+	}
+	seats := boot.store.Unconsumed()
+	if len(seats) != 1 || seats[0].Notice.TaskID != slot.owed.TaskID {
+		t.Fatalf("the booted mailbox owes %+v, want the one notification %s the account still owes (the delivered one is answered by its receipt)",
+			seats, slot.owed.TaskID)
+	}
+	if seats[0].Address != slot.addr || seats[0].Instance != slot.instance {
+		t.Fatalf("the restored seat routes to %v at %s, want the frozen routing %v at %s",
+			seats[0].Address, seats[0].Instance, slot.addr, slot.instance)
+	}
+	if receipts := consumeReceiptKeys(t, ctx, boot.tier); len(receipts) != 1 {
+		t.Fatalf("the root holds %d consumption receipt(s), want the one the delivered notification left", len(receipts))
+	}
+}
+
+// TestRecoveryEntriesPreserveStateAndObligations drives the full-path recovery matrix through the public Boot/Assemble entry.
+//   - the matrix states one case per production branch of the rebuild, each over its own durable root and each reading what the branch restored
+//   - the branch a boot took is read from what it restored (facts, projection, seated account) beside the premise the root states, never from a hand-driven seed
+//   - no_usable_anchor: a young chain that names no product and no cut answers the full walk of its own facts, with the account seated past no quiet point
+//   - checkpoint_without_a_compress_anchor: a cut stating its survivors over a chain no product covers restores them and the tail past them
+//   - it reads none of the judgments that cut accounts for
+//   - valid_anchor_without_a_checkpoint: a product stating a survivor payload rebuilds the seam in commit order and presents the payload's display order
+//   - the judgment that product answers is never owed again, while the one beside it still is
+//   - valid_anchor_beside_a_checkpoint: the same anchor beside a cut reads neither the material behind the survivors the cut states
+//   - it reads none of the judgments that cut accounts for either, and still presents the payload's display order
+//   - allowed_degradation: a product whose survivor payload no reader decodes answers the full walk of its chain, the fallback the boot reports and no success
+//   - corrupt_anchor_is_refused: an anchor whose own body no reader decodes stops the boot by name, so a damaged authority is never read as a degradation
+//   - every case reads the same five state families: the facts and their own texts, the task account and its owed notification
+//   - the receipt one delivered notification left, the obligations still owed, and the routing they froze
+//   - consumer: the real Assemble entry over a durable root, never a hand-driven seed (TestAnchoredBootMatchesFullBoot is the algorithm contrast alone)
+//
+// 契约: docs/wiki/reliability/durable-delivery.md#canonical-fact-resolution
+func TestRecoveryEntriesPreserveStateAndObligations(t *testing.T) {
+	base := time.Date(2026, 11, 22, 9, 0, 0, 0, time.UTC)
+
+	t.Run("no_usable_anchor", func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+		defer cancel()
+		root := t.TempDir()
+		slot := recoverySlotOf("young")
+		source := bootRecovery(t, ctx, root)
+		commitRecoveryFacts(t, ctx, source, recoveryJudgmentFacts(slot, base)...)
+		commitRecoveryFacts(t, ctx, source, recoveryMaterialFacts(slot.mapped, slot.addr, base.Add(10*time.Minute))...)
+		endRun(t, source)
+		commitRecoveryAccount(t, ctx, root, slot)
+
+		if products := indexProductCount(t, ctx, root); products != 0 {
+			t.Fatalf("the root indexes %d compress product(s), want the young chain the full walk of this branch reads: a chain a fold covered is another branch",
+				products)
+		}
+		observer := &foldObserver{}
+		previous := trpclog.Default
+		trpclog.Default = observer
+		t.Cleanup(func() { trpclog.Default = previous })
+		boot := bootRecovery(t, ctx, root)
+		if key, _ := boot.CheckpointFiled(); key != "" {
+			t.Fatalf("the boot read the checkpoint %s, want a chain no cut covers", key)
+		}
+		want := append(entryKeysOfRequests(slot), slot.mapped...)
+		assertRecoveryRestored(t, ctx, boot, slot, want)
+		if !observedLine(observer, "info", "restore folded", "chains=2 links=2 covered=0") {
+			t.Fatalf("the boot stated no fold of the two chains beside no covered one: %v", observer.lines)
+		}
+		if !observedLine(observer, "info", "boot seated the task account", "tail=none") {
+			t.Fatalf("the boot seated the account past no quiet point, want the whole task log: %v", observer.lines)
+		}
+		if observedLine(observer, "warn", "states no readable survivor payload") {
+			t.Fatalf("the boot reported a degradation beside a chain that names no anchor: %v", observer.lines)
+		}
+		if pending := boot.compress.pending(slot.addr.SessionID); len(pending) != len(slot.requests) {
+			t.Fatalf("the booted account owes %d judgment(s), want the %d the chain states and no product answers", len(pending), len(slot.requests))
+		}
+		endRun(t, boot)
+	})
+
+	t.Run("checkpoint_without_a_compress_anchor", func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+		defer cancel()
+		root := t.TempDir()
+		slot := recoverySlotOf("checkpoint")
+		source := bootRecovery(t, ctx, root)
+		commitRecoveryFacts(t, ctx, source, recoveryJudgmentFacts(slot, base)...)
+		commitRecoveryFacts(t, ctx, source, recoveryMaterialFacts(slot.mapped, slot.addr, base.Add(10*time.Minute))...)
+		cutKey, filed, err := source.Checkpoint(ctx)
+		if err != nil || !filed || cutKey == "" {
+			t.Fatalf("file the cut of the chain = (%q, %t, %v), want the cut the survivors are restored beside", cutKey, filed, err)
+		}
+		survivors := projectionSurvivorsOf(t, checkpointOfIdentity(t, ctx, source, cutKey), slot.addr)
+		if len(survivors) == 0 {
+			t.Fatal("the cut states no survivor, so this branch restores no projection and the case states nothing")
+		}
+		commitRecoveryFacts(t, ctx, source, recoveryMaterialFacts(slot.tail, slot.addr, base.Add(30*time.Minute))...)
+		endRun(t, source)
+		commitRecoveryAccount(t, ctx, root, slot)
+
+		if products := indexProductCount(t, ctx, root); products != 0 {
+			t.Fatalf("the root indexes %d compress product(s), want the chain the cut alone covers: the checkpoint sub-branch is the branch beside no anchor",
+				products)
+		}
+		boot := bootRecovery(t, ctx, root)
+		if key, _ := boot.CheckpointFiled(); key != cutKey {
+			t.Fatalf("the boot read the cut %q, want the one the chain filed %q", key, cutKey)
+		}
+		want := append(entryKeysOf(survivors), slot.tail...)
+		assertRecoveryRestored(t, ctx, boot, slot, want)
+		entries, _ := boot.ReplayEntries(slot.addr.SessionID)
+		if len(entries) == 0 {
+			t.Fatalf("the boot presents no projection entry for %v", slot.addr)
+		}
+		wantPresented := append(entryKeysOf(survivors), slot.tail...)
+		if presented := projectionKeysOf(t, boot, slot.addr); !slices.Equal(presented, wantPresented) {
+			t.Fatalf("the boot presents %v, want the %v the cut states beside the tail past it: the covered material is neither replayed nor dropped from the tail",
+				presented, wantPresented)
+		}
+		for _, request := range slot.requests {
+			if seededFactOf(boot, request.ID) {
+				t.Fatalf("the boot holds the judgment %s the cut accounts for, want it stated by the cut's own slice and read by no body walk", request.ID)
+			}
+		}
+		if pending := boot.compress.pending(slot.addr.SessionID); len(pending) != len(slot.requests) {
+			t.Fatalf("the booted account owes %d judgment(s), want the %d the cut states: the slice covers what the ledger never read",
+				len(pending), len(slot.requests))
+		}
+		endRun(t, boot)
+	})
+
+	t.Run("valid_anchor_without_a_checkpoint", func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+		defer cancel()
+		root := t.TempDir()
+		slot := recoverySlotOf("anchor")
+		material := recoveryMaterialFacts(slot.mapped, slot.addr, base.Add(10*time.Minute))
+		survivors := recoverySurvivorsOf(material, recoverySlotSurvivors)
+		source := bootRecovery(t, ctx, root)
+		commitRecoveryFacts(t, ctx, source, recoveryJudgmentFacts(slot, base)...)
+		commitRecoveryFacts(t, ctx, source, material...)
+		anchor := recoveryAnchorOf(t, slot, survivors, base.Add(20*time.Minute))
+		commitRecoveryFacts(t, ctx, source, anchor)
+		commitRecoveryFacts(t, ctx, source, recoveryMaterialFacts(slot.tail, slot.addr, base.Add(30*time.Minute))...)
+		endRun(t, source)
+		commitRecoveryAccount(t, ctx, root, slot)
+
+		if products := indexProductCount(t, ctx, root); products != 1 {
+			t.Fatalf("the root indexes %d compress product(s), want the one anchor this branch rebuilds from", products)
+		}
+		boot := bootRecovery(t, ctx, root)
+		if key, _ := boot.CheckpointFiled(); key != "" {
+			t.Fatalf("the boot read the checkpoint %s, want the anchor alone to bound this chain", key)
+		}
+		want := append(entryKeysOfRequests(slot), slot.mapped...)
+		want = append(want, slot.tail...)
+		assertRecoveryRestored(t, ctx, boot, slot, want)
+		wantPresented := append(entryKeysOf(survivors), slot.tail...)
+		if presented := projectionKeysOf(t, boot, slot.addr); !slices.Equal(presented, wantPresented) {
+			t.Fatalf("the boot presents %v, want the %v the payload states beside the tail past it: the projection the payload records is the one the boot rebuilt, not the chain re-walked in commit order",
+				presented, wantPresented)
+		}
+		if pending := boot.compress.pending(slot.addr.SessionID); len(pending) != len(slot.requests)-1 {
+			t.Fatalf("the booted account owes %d judgment(s), want the %d the anchor does not answer", len(pending), len(slot.requests)-1)
+		}
+		if struck := boot.compress.struckNotes(); struck != 1 {
+			t.Fatalf("the boot struck %d judgment(s) beside the one anchor, want the one its product answers: an answered judgment is never executed again", struck)
+		}
+		if seededFactOf(boot, anchor.Key) {
+			t.Fatalf("the boot holds the anchor %s as a chain fact, want the branch that folds its survivors and notes its product without seeding it", anchor.Key)
+		}
+		endRun(t, boot)
+	})
+
+	t.Run("valid_anchor_beside_a_checkpoint", func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+		defer cancel()
+		root := t.TempDir()
+		slot := recoverySlotOf("seam")
+		material := recoveryMaterialFacts(slot.mapped, slot.addr, base.Add(10*time.Minute))
+		survivors := recoverySurvivorsOf(material, recoverySlotSurvivors)
+		source := bootRecovery(t, ctx, root)
+		commitRecoveryFacts(t, ctx, source, recoveryJudgmentFacts(slot, base)...)
+		commitRecoveryFacts(t, ctx, source, material...)
+		cutKey, filed, err := source.Checkpoint(ctx)
+		if err != nil || !filed || cutKey == "" {
+			t.Fatalf("file the cut of the chain = (%q, %t, %v), want the seam the anchor is read beside", cutKey, filed, err)
+		}
+		if stated := projectionSurvivorsOf(t, checkpointOfIdentity(t, ctx, source, cutKey), slot.addr); len(stated) != len(slot.mapped) {
+			t.Fatalf("the cut states %d survivor(s), want all %d facts the chain presents at the cut: the seam this case reads is the boundary the cut vouches for",
+				len(stated), len(slot.mapped))
+		}
+		commitRecoveryFacts(t, ctx, source, recoveryAnchorOf(t, slot, survivors, base.Add(20*time.Minute)))
+		commitRecoveryFacts(t, ctx, source, recoveryMaterialFacts(slot.tail, slot.addr, base.Add(30*time.Minute))...)
+		endRun(t, source)
+		commitRecoveryAccount(t, ctx, root, slot)
+
+		if products := indexProductCount(t, ctx, root); products != 1 {
+			t.Fatalf("the root indexes %d compress product(s), want the one anchor this branch rebuilds from", products)
+		}
+		boot := bootRecovery(t, ctx, root)
+		if key, _ := boot.CheckpointFiled(); key != cutKey {
+			t.Fatalf("the boot read the cut %q, want the one the chain filed %q", key, cutKey)
+		}
+		if seededFactOf(boot, slot.mapped[0]) {
+			t.Fatalf("the boot holds %s, want the material the cut covers read from the cut and no chain walk: the seam boundary is the newest survivor the cut states",
+				slot.mapped[0])
+		}
+		want := append(append([]event.EventID{}, slot.mapped[len(slot.mapped)-recoverySlotSurvivors:]...), slot.tail...)
+		assertRecoveryRestored(t, ctx, boot, slot, want)
+		wantPresented := append(entryKeysOf(survivors), slot.tail...)
+		if presented := projectionKeysOf(t, boot, slot.addr); !slices.Equal(presented, wantPresented) {
+			t.Fatalf("the boot presents %v, want the %v the payload states beside the tail past it: the display order is the payload's while the seam folds the commit order",
+				presented, wantPresented)
+		}
+		if pending := boot.compress.pending(slot.addr.SessionID); len(pending) != len(slot.requests)-1 {
+			t.Fatalf("the booted account owes %d judgment(s), want the %d the anchor does not answer", len(pending), len(slot.requests)-1)
+		}
+		endRun(t, boot)
+	})
+
+	t.Run("allowed_degradation", func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+		defer cancel()
+		root := t.TempDir()
+		slot := recoverySlotOf("degraded")
+		source := bootRecovery(t, ctx, root)
+		commitRecoveryFacts(t, ctx, source, recoveryJudgmentFacts(slot, base)...)
+		commitRecoveryFacts(t, ctx, source, recoveryMaterialFacts(slot.mapped, slot.addr, base.Add(10*time.Minute))...)
+		anchor := recoveryUnreadableAnchorOf(slot, base.Add(20*time.Minute))
+		commitRecoveryFacts(t, ctx, source, anchor)
+		commitRecoveryFacts(t, ctx, source, recoveryMaterialFacts(slot.tail, slot.addr, base.Add(30*time.Minute))...)
+		endRun(t, source)
+		commitRecoveryAccount(t, ctx, root, slot)
+
+		if products := indexProductCount(t, ctx, root); products != 1 {
+			t.Fatalf("the root indexes %d compress product(s), want the one anchor whose payload states no readable survivor", products)
+		}
+		observer := &foldObserver{}
+		previous := trpclog.Default
+		trpclog.Default = observer
+		t.Cleanup(func() { trpclog.Default = previous })
+		boot := bootRecovery(t, ctx, root)
+		if key, _ := boot.CheckpointFiled(); key != "" {
+			t.Fatalf("the boot read the checkpoint %s, want the degraded anchor answered by the full walk", key)
+		}
+		want := append(entryKeysOfRequests(slot), slot.mapped...)
+		want = append(want, anchor.Key)
+		want = append(want, slot.tail...)
+		assertRecoveryRestored(t, ctx, boot, slot, want)
+		if !observedLine(observer, "warn", string(anchor.Key), "states no readable survivor payload", "falling back to the full replay") {
+			t.Fatalf("the boot reported no degradation of the anchor %s: %v", anchor.Key, observer.lines)
+		}
+		if pending := boot.compress.pending(slot.addr.SessionID); len(pending) != len(slot.requests) {
+			t.Fatalf("the booted account owes %d judgment(s), want the %d a product states no readable payload for: the answer a boot reads is the one the payload decodes, and this one decodes none",
+				len(pending), len(slot.requests))
+		}
+		endRun(t, boot)
+	})
+
+	t.Run("unrestorable_survivor_is_refused", func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+		defer cancel()
+		root := t.TempDir()
+		slot := recoverySlotOf("corrupt")
+		material := recoveryMaterialFacts(slot.mapped, slot.addr, base.Add(10*time.Minute))
+		phantom := anchorEntry{
+			Key:     event.EventID("recovery-phantom-survivor-" + string(slot.addr.SessionID)),
+			Type:    event.TypeExternalInput,
+			Summary: "the survivor the chain never carried",
+		}
+		source := bootRecovery(t, ctx, root)
+		commitRecoveryFacts(t, ctx, source, recoveryJudgmentFacts(slot, base)...)
+		commitRecoveryFacts(t, ctx, source, material...)
+		survivors := append(recoverySurvivorsOf(material, recoverySlotSurvivors), phantom)
+		anchor := recoveryAnchorOf(t, slot, survivors, base.Add(20*time.Minute))
+		commitRecoveryFacts(t, ctx, source, anchor)
+		endRun(t, source)
+		if products := indexProductCount(t, ctx, root); products != 1 {
+			t.Fatalf("the root indexes %d compress product(s), want the one anchor this case makes unrestorable", products)
+		}
+
+		refused, err := assembleRecovery(ctx, root)
+		if err == nil {
+			endRun(t, refused)
+			t.Fatalf("the boot answered a run beside the anchor %s naming the survivor %s the chain never carried, want it refused: a survivor no read reaches is never a degradation",
+				anchor.Key, phantom.Key)
+		}
+		if !errors.Is(err, ErrCheckpointSurvivorUnstated) || !strings.Contains(err.Error(), string(phantom.Key)) {
+			t.Fatalf("the boot refused with %v, want the unrestorable survivor %s refused by name: a damaged authority is never a degradation", err, phantom.Key)
+		}
+	})
 }

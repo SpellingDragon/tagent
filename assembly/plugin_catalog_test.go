@@ -3,12 +3,16 @@ package assembly
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/SpellingDragon/tagent/api/config"
 	"github.com/SpellingDragon/tagent/api/event"
+	"github.com/SpellingDragon/tagent/api/model"
 	"github.com/SpellingDragon/tagent/api/plugin"
+	"github.com/SpellingDragon/tagent/memory/ledger"
 	"github.com/SpellingDragon/tagent/runtime/agent"
 )
 
@@ -258,5 +262,134 @@ func TestPluginDeclarationCarriesAContributedInstance(t *testing.T) {
 	}
 	if carriesInstance(dropped, func(instance plugin.Instance) bool { return instance.Name() == "transform-a" }) {
 		t.Fatalf("the disabling declaration left the contributed instance mounted: %v", dropped)
+	}
+}
+
+// TestDeclaredPluginChoiceSurvivesRestart pins the two answers one plugins: declaration gets.
+//   - a supported agent-level choice takes real effect: naming the age fold mounts it, and the "-" prefix leaves it out
+//   - the run-level set stays mounted across either choice, so a disabling declaration narrows one agent and not the assembly
+//   - a name the run or the host carries is refused by name beside its scope, so a deployment never believes it turned one off
+//   - the second process over the root the first one left answers both the same way: the choice belongs to the declaration
+//
+// 契约: docs/adr/0004-feature-mounting-is-a-plugin-registry.md
+func TestDeclaredPluginChoiceSurvivesRestart(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	storage := WithStorage(ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: root})
+	first := windowChainRun(t, ctx, storage)
+	commitWindowTurns(t, ctx, first, event.Address{AgentID: "agent-a", SessionID: "session-declared-choice"}, 2)
+	assertDeclaredPluginChoice(t, first)
+	endRun(t, first)
+
+	booted := windowChainRun(t, ctx, storage)
+	defer endRun(t, booted)
+	if entries, held := booted.ReplayEntries("session-declared-choice"); !held || len(entries) == 0 {
+		t.Fatalf("the second process reads %d entr(ies) of the session the first one folded, want the chain it left: the restart proves nothing about the declaration without it", len(entries))
+	}
+	assertDeclaredPluginChoice(t, booted)
+}
+
+// assertDeclaredPluginChoice pins what one process answers for the supported and
+// the unsupported halves of a plugins: declaration.
+func assertDeclaredPluginChoice(t *testing.T, run *Run) {
+	t.Helper()
+	named, err := run.agentPlugins(nil, config.AgentSpec{ID: "agent-a", ReplayWindow: 60, Plugins: []string{"age-fold"}})
+	if err != nil {
+		t.Fatalf("resolve the supported naming declaration: %v", err)
+	}
+	if got := countInstances(named, isAgeFold); got != 1 {
+		t.Fatalf("the supported declaration mounted %d age fold(s), want the one it names", got)
+	}
+	disabled, err := run.agentPlugins(nil, config.AgentSpec{ID: "agent-a", ReplayWindow: 60, Plugins: []string{"-age-fold"}})
+	if err != nil {
+		t.Fatalf("resolve the supported disabling declaration: %v", err)
+	}
+	if carriesInstance(disabled, isAgeFold) {
+		t.Fatalf("the supported disabling declaration left the age fold mounted: %v", disabled)
+	}
+	if !carriesInstance(disabled, isCompressionConsumer) {
+		t.Fatalf("the supported disabling declaration dropped the run-level set too: %v", disabled)
+	}
+	_, err = run.agentPlugins(nil, config.AgentSpec{ID: "agent-a", ReplayWindow: 60, Plugins: []string{"-settle-driver"}})
+	if err == nil || !strings.Contains(err.Error(), "settle-driver") || !strings.Contains(err.Error(), "host-level") {
+		t.Fatalf("the host-level declaration = %v, want a refusal naming the plugin and its scope", err)
+	}
+}
+
+// TestSettleFactRepairRunsOnTheCatalogAssembly pins the commit face the catalog hands the settle pump.
+//   - the catalog mounts the driver beside the run's own commit entry, so a boot supplies the fact a refused delivery write left owed
+//   - that boot is the assembly the host builds: the check wires no commit face and drives no delivery seam of its own
+//   - the turn stays owed, because the drive belongs to the host and a seam beside none records no receipt for an unrun turn
+//
+// 契约: docs/wiki/reliability/durable-delivery.md#envelope-states
+func TestSettleFactRepairRunsOnTheCatalogAssembly(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+	root := t.TempDir()
+	addr := deliveryTestAddress("session-catalog-settle-repair")
+	refusal := errors.New("the commit face refused the delivery fact of the settled call")
+	tool := &deliveryFactObligationTool{}
+	run := deliveryFactObligationRun(t, ctx, root, tool)
+	run.loop.SetFactCommit(func(evt event.Event) (event.EventID, error) {
+		if evt.Type == event.TypeTaskSettled {
+			return "", refusal
+		}
+		return run.commitFactChecked(ctx, evt)
+	})
+	if _, err := run.Invoke(ctx, InvokeRequest{
+		InvocationID:  "inv-catalog-settle-repair",
+		Address:       addr,
+		TriggerSource: "user",
+		Input:         []model.Message{{Role: model.RoleUser, Content: "call the tool once"}},
+	}); err != nil {
+		t.Fatalf("invoke the run beside the refused delivery fact: %v", err)
+	}
+	waitScopeGate(t, "the refused notification to stand owed under the claim this process took", func() bool {
+		return len(run.store.Unconsumed()) == 1
+	})
+	if _, _, err := run.Checkpoint(ctx); err != nil {
+		t.Fatalf("file the checkpoint of the process beside the owed notification: %v", err)
+	}
+	if _, err := run.Close(ctx, agent.CloseRequest{Timeout: time.Now().Add(2 * time.Second)}); err != nil {
+		t.Fatalf("close the process beside the owed notification: %v", err)
+	}
+
+	booted := deliveryFactObligationBoot(t, ctx, root, tool)
+	defer func() {
+		if _, err := booted.Close(ctx, agent.CloseRequest{Timeout: time.Now().Add(2 * time.Second)}); err != nil {
+			t.Fatalf("close the process after the restart: %v", err)
+		}
+	}()
+	restored := booted.store.Unconsumed()
+	if len(restored) != 1 {
+		t.Fatalf("the booted mailbox owes %+v, want the one notification the refused delivery fact left", restored)
+	}
+	if facts := deliveryFactsOf(booted.SessionFacts(addr)); len(facts) != 0 {
+		t.Fatalf("the booted chain already holds %d delivery fact(s), want the refused write to have left none", len(facts))
+	}
+
+	seam := &hostRunPluginSeam{
+		run:  booted,
+		host: func() *Host { return nil },
+		port: &hostMeditationPort{},
+	}
+	if _, err := hostPlugins(seam); err != nil {
+		t.Fatalf("mount the host plugins of the booted run: %v", err)
+	}
+	if seam.settle == nil {
+		t.Fatal("the catalog mounted no settle driver: the assembly the host builds carries no recovery of the obligation a refused delivery fact leaves")
+	}
+	seam.settle.DeclareScope(string(restored[0].Address.AgentID), string(restored[0].Address.AgentID))
+	seam.settle.Wake()
+	waitScopeGate(t, "the catalog-assembled pump to supply the fact the refused write left owed", func() bool {
+		return len(deliveryFactsOf(booted.SessionFacts(addr))) == 1
+	})
+	seam.settle.Stop()
+
+	if keys := consumeReceiptKeys(t, ctx, booted.tier); len(keys) != 0 {
+		t.Fatalf("the root holds %d consumption receipt(s), want none: the turn belongs to the host and this seam has none", len(keys))
+	}
+	if seats := booted.store.Unconsumed(); len(seats) != 1 {
+		t.Fatalf("the booted mailbox owes %+v after the repair, want the one notification whose turn is still owed", seats)
 	}
 }

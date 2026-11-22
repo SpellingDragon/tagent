@@ -9,6 +9,7 @@ import (
 	"context"
 	"errors"
 	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -571,5 +572,52 @@ func TestBandSummaryGistCarriesTheDeclaredSampling(t *testing.T) {
 	}
 	if asked.MaxTokens == nil || *asked.MaxTokens != 777 {
 		t.Fatalf("summary request max tokens = %v, want the declared 777", asked.MaxTokens)
+	}
+}
+
+// TestTinySummaryBudgetIncludesPresentationOverhead pins the bound a tiny summary budget leaves.
+//   - the presented message is the summary's label beside the text, so the text is cut to the budget less that label
+//   - the request states the declared budget, and the cut applies that budget less the label, so the message stays inside it
+//   - a budget with no room left beside the label records no text and keeps the mechanical form
+//
+// 契约: docs/wiki/agent/event-flow.md#unified-compression
+func TestTinySummaryBudgetIncludesPresentationOverhead(t *testing.T) {
+	ctx := context.Background()
+	const declared = 64
+	gists := &fakeSummaryGist{answer: func(string) (string, error) {
+		return strings.Repeat("a summary line the bound has to cut\n", 20), nil
+	}}
+	consumer := NewCompressionConsumer(nil, nil).withSummaryGist(gists)
+	summary := mechanicalSummary(t)
+	got := consumer.summarizeProduct(ctx, "session-gist", summary, declared)
+
+	if len(got.Entry.Content) == 0 {
+		t.Fatal("the summary records no text, want the gist cut to the room a tiny budget leaves")
+	}
+	presented := presentedProjectionContent(got.Entry)
+	if len(presented) > declared {
+		t.Fatalf("the presented summary carries %d bytes (%q), want at most the declared %d: the bound is the message and the label is part of it",
+			len(presented), presented, declared)
+	}
+	room := summaryTextRoomOf(summary.Entry, declared)
+	if room >= declared || room != len(got.Entry.Content) {
+		t.Fatalf("the room beside the label = %d and the recorded text = %d bytes, want the text to fill the room the %d-byte budget leaves", room, len(got.Entry.Content), declared)
+	}
+	if len(gists.budgets) != 1 || gists.budgets[0] != declared {
+		t.Fatalf("the gist face was asked under %v, want the declared %d-byte budget", gists.budgets, declared)
+	}
+	if instruction := bandSummaryInstruction(gists.budgets[0]); !strings.Contains(instruction, "within "+strconv.Itoa(declared)+" bytes") {
+		t.Fatalf("instruction = %q, want it to state the declared %d-byte budget", instruction, declared)
+	}
+
+	if room := summaryTextRoomOf(summary.Entry, 0); room != 0 {
+		t.Fatalf("a budget of 0 leaves a room of %d, want none: the label alone already exceeds it", room)
+	}
+	kept := NewCompressionConsumer(nil, nil).withSummaryGist(&fakeSummaryGist{answer: func(string) (string, error) {
+		return strings.Repeat("a", 200), nil
+	}}).summarizeProduct(ctx, "session-gist", summary, 0)
+	if kept.Entry.Content != summary.Entry.Content {
+		t.Fatalf("the summary records %q, want the mechanical form %q the fold minted: a budget that cannot carry one byte beside the label degrades instead of exceeding it",
+			kept.Entry.Content, summary.Entry.Content)
 	}
 }

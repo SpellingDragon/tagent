@@ -407,7 +407,7 @@
     },
     {
       "id": "S13",
-      "title": "上下文闭集：静态头（prompt/skill 结构序）→折叠摘要→投影→环境块→transcript（W1.3 布局），每个消息恰属一部件且五部件齐全",
+      "title": "上下文闭集：静态头（prompt/skill 结构序）→投影→环境块→transcript（W1.3 布局），每个消息恰属一部件；首折态记四部件，综述部件与领投影由晋升折后的 history 锚承接",
       "task_ids": [
         "03.4",
         "02.5"
@@ -425,14 +425,14 @@
           "prompt",
           "skill"
         ],
-        "folded_summary_leads_projection": true,
+        "folded_summary_leads_projection": false,
         "environment_block_before_transcript": false,
-        "part_count_closed": 5
+        "part_count_closed": 4
       }
     },
     {
       "id": "S14",
-      "title": "三龄段：段龄折叠产出（新→中一段进程折、中+老→老一份历史摘要）且摘要领投影；阈值不达整投影原样未动",
+      "title": "三龄段：首折把中带三段的进程细节各折一段产物（不铸综述）；晋升折把该材料收成老带一份历史摘要并领投影；阈值不达整投影原样未动",
       "task_ids": [
         "03.4"
       ],
@@ -441,16 +441,16 @@
       "status": "planned",
       "scope": "deterministic",
       "anchor_tests": [
-        "memory/replay:TestAgeFoldFoldsTheNewBandIntoOneProduct",
+        "memory/replay:TestAgeFoldFoldsTheMiddleBandIntoOneProduct",
         "memory/replay:TestAgeFoldFoldsTheOlderBandsIntoOneHistorySummary",
         "memory/replay:TestAgeFoldWaitsForTheVolumeThreshold"
       ],
       "observations": {
         "age_fold_products": {
-          "segment_fold": 1,
-          "history_summary": 1
+          "segment_fold": 3,
+          "history_summary": 0
         },
-        "history_summary_leads": true,
+        "history_summary_leads": false,
         "under_threshold_untouched": true
       }
     },

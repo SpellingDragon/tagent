@@ -47,7 +47,8 @@ the answer an approver rules it with and the clearance that removes it, each
 filed as a fact on a chain instead of an index of the store's own. The manager
 keeps the evidence an approver reads and the file an external approver answers;
 presence and ruling are folded from the facts, so what a restart reads back is
-what landed.
+what landed — a ruling enters the chain only behind its own write, and the one
+filing a refused store leaves here is the hold it could not land (statesAHold).
 
 - one approval question is identified by its kind, its target and its lineage;
 the lineage names the tool, the digest of the exact argument bytes and the

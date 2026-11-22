@@ -55,15 +55,14 @@ name and type, every declared method signature, and every constant that must
 stay a compile-time constant. A rename or a widened signature stops this file
 from compiling, so the storage face cannot drift silently.
 
-TierFacts is the durable fact surface of one opened tier: put, prefix scan,
-the point read of one key, the commit order its engine states and the sync
-barrier a commit reports its success behind. It commits through the same atomic
-store engine the tier's segment store uses, so the replay and the durable task
-commit share one database with the events already stored there. Its fact-log
-signatures carry built-in types only, so it matches the shared durable fact-log
-port structurally and no package edge is required in either direction — the port
-is declared once for every ledger that fills it (see api/durable) and this tier
-names the one surface it offers.
+TierFacts is the durable fact surface of one opened tier: put, prefix scan, the
+point read of one key and the sync barrier a commit reports its success behind.
+It commits through the same atomic store engine the tier's segment store uses,
+so the replay and the durable task commit share one database with the events
+already stored there. Its fact-log signatures carry built-in types only,
+so it matches the shared durable fact-log port structurally and no package edge
+is required in either direction — the port is declared once for every ledger
+that fills it (see api/durable) and this tier names the one surface it offers.
 
 CONSTANTS
 
@@ -447,6 +446,21 @@ func (s *FileSegmentStore) EachIndexNewestFirst(ctx context.Context, visit func(
         visit, so a visit reads one event body beside the walk and never waits
         on it.
 
+func (s *FileSegmentStore) EachIndexNewestFirstFrom(ctx context.Context, from event.EventID, visit func(key event.EventID, partition int, seq int64, typ string, session event.SessionID) (bool, error)) error
+    EachIndexNewestFirstFrom streams the index from the entry of one key onwards
+    in the order EachIndexNewestFirstUntil states.
+      - a caller that already knows the key it is looking for pays its own
+        commit and the ones behind it instead of every commit filed after it
+      - the walk starts where the engine's order-line index states the commit
+        that last stated the key ended, which costs one probe of the identity
+        index and one read of that index
+      - so the walk costs the history committed after the key nothing
+      - an engine that states no such index, a key this store holds no published
+        entry of, and an entry the engine names no commit for all walk the index
+        from the newest entry
+      - so a seek that cannot be placed costs the walk it always took and never
+        an entry it skipped
+
 func (s *FileSegmentStore) EachIndexNewestFirstUntil(ctx context.Context, visit func(key event.EventID, partition int, seq int64, typ string, session event.SessionID) (bool, error)) error
     EachIndexNewestFirstUntil streams the index in commit order, newest commit
     first, and stops where the visit answers false: a point query reads the
@@ -570,28 +584,6 @@ func (s *FileSegmentStore) StoreEvent(ctx context.Context, rec SegmentRecord) er
         leaves nothing published.
       - A fact the store holds is a committed fact: committing it again answers
         as the duplicate it is, never as a second landing of one identity.
-
-type IndexEntry struct {
-	// Partition is the partition the entry places the event in.
-	Partition int
-	// Key is the canonical identity of the event the entry places.
-	Key event.EventID
-	// Type is the frozen event type the entry states.
-	Type string
-	// Session is the session chain the entry states, empty beside a framework record.
-	Session event.SessionID
-}
-    IndexEntry is one store index entry as a commit filed it: the partition and
-    event identity the key places beside the frozen type and session the value
-    states.
-
-func CommittedIndexEntry(key string, value []byte) (IndexEntry, bool)
-    CommittedIndexEntry answers the store index entry one committed key carries:
-    the partition and event identity it places beside the frozen type and
-    session the entry states, and false beside a key that carries none, such as
-    a fact the tier's fact log committed on the same engine. It reads no store,
-    so a caller that walks an engine's commit order identifies an entry from the
-    pair the walk handed it.
 
 type Integrity struct {
 	// Digest is the digest over the stored bytes, in the canonical text form of
@@ -1079,13 +1071,6 @@ func TierFactLog(tier *Tier) *TierFacts
     TierFactLog returns the durable fact surface of one opened tier, so a
     durable commit and a replay run on the same engine the tier's events are
     committed through — no second database is introduced for either.
-
-func (l TierFacts) CommitOrder() (CommitOrder, bool)
-    CommitOrder answers the commit-order walk of the engine this log holds, and
-    whether that engine states one: an engine that keeps no commit order answers
-    false, and a caller that walked to a key reads the prefix whole instead.
-    The walk is the engine's own, so it names the keys newest commit first and
-    stops where the visitor answers false.
 
 func (l TierFacts) Get(ctx context.Context, key string) ([]byte, bool, error)
     Get answers the value held under one key, and whether the log holds it: the

@@ -64,8 +64,9 @@ type durableConsumption interface {
 	consumptionRecorder
 	OwedNotices() []task.OutboxNotice
 	// settled reports whether the receipt or the refusal of one notification is
-	// already in the account, so a restore opens no delivery for it.
-	settled(notice task.Notice) bool
+	// already in the account, so a restore opens no delivery for it; a read the
+	// account could not complete is named instead of answered as no receipt.
+	settled(notice task.Notice) (bool, error)
 }
 
 // noticeKey is the stable identity of one notification: the task, the execution

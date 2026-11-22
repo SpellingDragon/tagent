@@ -107,6 +107,9 @@ type hostRunPluginSeam struct {
 // builtinPluginCatalog lists every builtin plugin in mount order: the run-level
 // set keeps the order the pipeline had while these features were constructed in
 // the assembly root, and the agent-level set keeps the order its agents carried.
+// The settle entry is assembled beside the run's own commit face, so a boot
+// beside an obligation a refused delivery fact left repairs it on the production
+// assembly rather than on a driver a caller wired by hand.
 var builtinPluginCatalog = []builtinPlugin{
 	compressConsumerPlugin(),
 	{
@@ -157,6 +160,7 @@ var builtinPluginCatalog = []builtinPlugin{
 				func(ctx context.Context, addr event.Address, fact event.Event) error {
 					return seam.host().fireNoticeTurn(ctx, addr, fact)
 				},
+				withSettleFactCommit(seam.run.commitFactChecked),
 			)
 			driver.setHandoff(func(ctx context.Context, addr event.Address, notice task.Notice) error {
 				return seam.host().handoffSettledBodies(ctx, addr, notice)

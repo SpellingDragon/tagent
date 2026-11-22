@@ -1038,11 +1038,14 @@ func (m *MemoryStore) AcceptNotice(ctx context.Context, notice task.Notice) erro
 
 func (m *MemoryStore) Attempt(ctx context.Context, notice task.Notice) (SettleAttempt, bool, error)
     Attempt reports the attempt record of one notification and whether
-    this mailbox holds one at all: the record of the one follow-up turn the
-    notification started, beside the terminal that turn ended on. A durable
-    account behind the mailbox answers from the log, so a process that starts
-    over the same log reads the attempt the stopped process left; a mailbox
-    beside none answers from its own bookkeeping alone.
+    this mailbox holds one at all: the record of the one follow-up turn
+    the notification started, beside the terminal that turn ended on.
+    A durable account behind the mailbox answers from the log, so a process
+    that starts over the same log reads the attempt the stopped process left;
+    a mailbox beside none answers from its own bookkeeping alone. A record
+    the durable account could not reach is reported by name beside no answer,
+    so a caller that drives a turn on "no attempt" never drives it on a read the
+    storage did not complete.
 
 func (m *MemoryStore) Claim(ctx context.Context, addr event.Address, instance event.InstanceID, seq AcceptSeq) error
     Claim moves one accepted input from pending to claimed in the mailbox of the

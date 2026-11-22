@@ -9,10 +9,11 @@
 // blacklist:
 //
 //   - Only the terminal kinds settled, failed and cancelled fire; accepted and progress do not.
-//   - Only a delivery fact carries the settle-lineage meta key, so a backflow settle never fires.
+//   - A backflow settle commits the very delivery fact the delivery face commits, so the trigger table reads it as one fact family; what keeps the fired turn from firing itself is the account, not the fact: the entry such a commit settles is claimed or consumed by the process that drove the call, and the pump drives only entries still pending.
 //   - The fired turn commits no settle fact with a lineage, so it can never fire itself again.
 //   - The mailbox is the one account that answers whether work waits: a notification waits there until a turn claims it, drives it and consumes it on that same account, so one notification starts one turn however often it is observed.
 //   - The attempt record is the second fence a restart reads: a turn that already landed its terminal is closed with its consumption receipt instead of driven again, so a stop between the terminal fact and the receipt replays no second turn.
+//   - A delivery fact the chain does not hold is supplied by the pump from the owed seat through the family's own renderer, so a refused write costs the notification a turn it drives instead of an obligation no reader ever closes.
 package assembly
 
 import (
@@ -228,6 +229,13 @@ type SettleDriver struct {
 	// the run already holds.
 	lookup func(ctx context.Context, id event.EventID) (event.Event, error)
 
+	// commit files the delivery fact of one notification the chain does not hold
+	// yet: the offer a refused write left owed is the fact a restart supplies, and
+	// the one identity of the family makes the repair the same fact the delivery
+	// faces commit. A driver wired beside no commit face drives only the entries
+	// whose fact already landed.
+	commit func(ctx context.Context, evt event.Event) (event.EventID, error)
+
 	// wake resolves the mailbox account the pump drives: the store one run
 	// assembles, resolved when the turn is driven and never before.
 	wake func() SettleWake
@@ -268,6 +276,21 @@ var (
 	_ interface{ DrivesObligation() } = (*SettleDriver)(nil)
 )
 
+// settleDriverOption configures a settle driver at construction. It stays
+// unexported because it names a construction step rather than a concept of the
+// settle face: the faces that assemble a driver are the run's own catalog and the
+// checks beside it, both of this package.
+type settleDriverOption func(*SettleDriver)
+
+// withSettleFactCommit hands the driver the commit face of the run it serves, so
+// the pump supplies the delivery fact of a notification whose commit was refused
+// instead of leaving the obligation to a reader that never comes. The face is the
+// run's own commit entry, so the repair lands under the same identity, the same
+// ordering and the same folds as every other commit of that run.
+func withSettleFactCommit(commit func(ctx context.Context, evt event.Event) (event.EventID, error)) settleDriverOption {
+	return func(d *SettleDriver) { d.commit = commit }
+}
+
 // NewSettleDriver assembles the settle face over the fact lookup of one run,
 // the mailbox account of that run and the follow-up drive of its host. The
 // pump starts beside the driver and rests until a wake or an observation asks
@@ -276,12 +299,16 @@ func NewSettleDriver(
 	lookup func(context.Context, event.EventID) (event.Event, error),
 	wake func() SettleWake,
 	fire func(context.Context, event.Address, event.Event) error,
+	opts ...settleDriverOption,
 ) *SettleDriver {
 	d := &SettleDriver{
 		lookup: lookup,
 		wake:   wake,
 		fire:   fire,
 		wakeCh: make(chan struct{}, 1),
+	}
+	for _, opt := range opts {
+		opt(d)
 	}
 	d.stopCtx, d.stopCancel = context.WithCancel(context.Background())
 	d.wg.Add(1)
@@ -408,10 +435,7 @@ func (d *SettleDriver) ObserveCommit(ctx context.Context, id event.EventID) erro
 	if err != nil {
 		return err
 	}
-	if fact.Type != event.TypeTaskSettled || noticeTaskIDOf(fact) == "" {
-		return nil
-	}
-	if !terminalSettleKinds[noticeKindOf(fact)] {
+	if !terminalDelivery(fact) {
 		return nil
 	}
 	d.Wake()
@@ -520,13 +544,9 @@ func (d *SettleDriver) drain() {
 // it; beside a turn that completed, the consumption receipt is written without
 // the pump's cancellation and closes the entry even as the driver stops.
 func (d *SettleDriver) driveSeat(ctx context.Context, wake SettleWake, seat state.WorkSeat) {
-	fact, err := d.lookup(ctx, settleDeliveryKey(seat.Notice))
+	fact, err := d.deliveryFactOf(ctx, seat)
 	if err != nil {
 		assemblyWarn("tagent: the settle fact of %s could not be read: %v", seat.Notice.FactKey(), err)
-		d.releaseSeat(wake, seat)
-		return
-	}
-	if fact.Type != event.TypeTaskSettled || noticeTaskIDOf(fact) == "" || !terminalSettleKinds[noticeKindOf(fact)] {
 		d.releaseSeat(wake, seat)
 		return
 	}
@@ -624,6 +644,60 @@ func (d *SettleDriver) releaseSeat(wake SettleWake, seat state.WorkSeat) {
 	if err := wake.Release(context.WithoutCancel(context.Background()), seat.Address, seat.Instance, seat.AcceptSeq); err != nil && !errors.Is(err, state.ErrClaimSettled) {
 		assemblyWarn("tagent: the settle release of %s reported: %v", seat.Notice.FactKey(), err)
 	}
+}
+
+// deliveryFactOf reads the delivery fact one owed seat points at and, when the
+// chain holds none, commits it from the seat through the family's own renderer:
+// a delivery fact the commit face refused is exactly what the notification still
+// owes, and the identity the renderer states is the one the delivery faces use, so
+// the repair converges on the single fact the notification names instead of a
+// second one. A repair that still fails is named and keeps the entry owed — a
+// turn driven beside no delivery fact would record a hand-over the chain cannot
+// pair. A read the storage refused is reported as it stands: only a missing fact
+// is what this entry supplies.
+func (d *SettleDriver) deliveryFactOf(ctx context.Context, seat state.WorkSeat) (event.Event, error) {
+	key := task.DeliveryFactKey(seat.Notice)
+	fact, err := d.lookup(ctx, key)
+	if err == nil && terminalDelivery(fact) {
+		return fact, nil
+	}
+	if err != nil && !errors.Is(err, ErrCommittedFactMissing) {
+		return event.Event{}, err
+	}
+	commit := d.factCommit()
+	if commit == nil {
+		return event.Event{}, fmt.Errorf("tagent: the delivery fact %s of task %s is missing beside no commit face: %w",
+			key, seat.Notice.TaskID, ErrSettleDriverUnwired)
+	}
+	if _, err := commit(ctx, task.DeliveryFactOf(seat.Notice, seat.Address, seat.Instance, "")); err != nil {
+		return event.Event{}, fmt.Errorf("tagent: the missing delivery fact %s of task %s did not commit: %w",
+			key, seat.Notice.TaskID, err)
+	}
+	fact, err = d.lookup(ctx, key)
+	if err != nil {
+		return event.Event{}, err
+	}
+	if !terminalDelivery(fact) {
+		return event.Event{}, fmt.Errorf("tagent: the committed delivery fact %s of task %s states no terminal settle",
+			key, seat.Notice.TaskID)
+	}
+	return fact, nil
+}
+
+// factCommit reports the commit face this driver files a missing delivery fact
+// through, read under the driver's own lock so a face wired beside a drive is
+// never half seen.
+func (d *SettleDriver) factCommit() func(ctx context.Context, evt event.Event) (event.EventID, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.commit
+}
+
+// terminalDelivery reports whether one fact is the terminal delivery fact of a
+// notification: the settle family, beside the task it settles and the terminal
+// kind the settle trigger table fires on.
+func terminalDelivery(fact event.Event) bool {
+	return fact.Type == event.TypeTaskSettled && noticeTaskIDOf(fact) != "" && terminalSettleKinds[noticeKindOf(fact)]
 }
 
 // stoppedNow reports whether the driver has been stopped.

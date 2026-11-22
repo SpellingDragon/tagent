@@ -1027,6 +1027,402 @@ def run_event_profile(report, graph, change_dir, change_name, main_root, as_json
     return report.emit(as_json)
 
 
+# 13.103：runtime-recovery-ideal 三单元十八叶图（12 状态／06 索引／13 验证）。
+# 判定对象与解析层与既有 profile 共用；叶集不写成对象状态，而与三单元 tasks.md 的
+# checkbox 双向核对，前置边也逐叶与「前置」行双向核对——依赖的唯一真相在
+# tasks.md，图与它漂移即红，否则会出现第二套执行计划。
+RUNTIME_RECOVERY_PROFILE = "runtime-recovery-ideal"
+RUNTIME_RECOVERY_DOMAINS = (
+    "12-consumer-state-lifecycle",
+    "06-bounded-open-index",
+    "13-verified-completion",
+)
+RUNTIME_RECOVERY_LEAF_COUNT = 18
+RUNTIME_RECOVERY_FINAL_TASKS = ("F1", "F2", "F3", "F4")
+RUNTIME_RECOVERY_LEAF_ID_RE = re.compile(r"^\d{2}\.\d{3}$")
+# 引用两侧不能要求 `\b`：中文正文里「13.102且C7签发完整」的 id 与汉字同属 word
+# 字符，词边界在那里根本不存在，会静默读出空前置集。用显式排除数字/点的环视。
+RUNTIME_RECOVERY_LEAF_REF_RE = re.compile(r"(?<![\d.])\d{2}\.\d{3}(?![\d.])")
+RUNTIME_RECOVERY_ANY_REF_RE = re.compile(r"(?<![\w.])(?:\d{2}\.\d{3}|F[1-4])(?![0-9])")
+RUNTIME_RECOVERY_FINAL_LINE_RE = re.compile(
+    r"^-\s*\[(?P<mark>[ xX])\]\s*\*{0,2}(?P<id>F[1-4])\b")
+# 签态词表：只有 signed 才能派发；pending 是「设计门还没批」的显式状态，不是缺省。
+SIGNATURE_STATES = ("signed", "pending")
+# 「前置」在正文里也作复合词出现（前置后、共同前置、前置；），所以只有紧跟冒号的
+# 那一处才是该叶声明的前置行：`- **前置**：...` 与 `阶段：...；前置：...`。
+PREREQUISITE_RE = re.compile(r"前置\*{0,2}[：:]")
+
+
+def read_runtime_recovery_units(report, change_dir):
+    """三单元 tasks.md 的叶 checkbox 与「前置」叶 id（依赖的唯一真相）。
+
+    十域／六域 profile 的叶集来自固定常量或图自身；本变更的叶集来自三份 tasks.md，
+    前置边也来自各叶「前置」行。图只是同一关系的机器可读投影：任一方向多出或缺少
+    一条都红——只改图的依赖而不改 tasks.md 就是第二套计划。
+
+    三种既有写法都要读：`- **前置**：13.101。`、`- 阶段：取证；前置：**13.101**。`、
+    `  - 阶段：实施；前置：13.102且C7签发完整；未签时不可派。`。故先截到「前置」，
+    再截到第一个句读／分号（分号之后是条件叙述，不是前置叶），最后取叶 id。
+    """
+    marks = {}
+    depends = {}
+    for domain in RUNTIME_RECOVERY_DOMAINS:
+        path = os.path.join(change_dir, "changes", domain, "tasks.md")
+        if not os.path.isfile(path):
+            report.error("changes/{}/tasks.md missing".format(domain))
+            continue
+        try:
+            with open(path, "r", encoding="utf-8") as handle:
+                lines = handle.read().splitlines()
+        except OSError as exc:
+            report.error("cannot read {}: {}".format(path, exc))
+            continue
+        current = None
+        for lineno, line in enumerate(lines, start=1):
+            site = "changes/{}/tasks.md:{}".format(domain, lineno)
+            if line.startswith("## "):
+                current = None
+            match = lib.CHECKBOX_RE.match(line)
+            if match and RUNTIME_RECOVERY_LEAF_ID_RE.match(match.group("id")):
+                leaf_id = match.group("id")
+                if leaf_id in marks:
+                    report.error("duplicate leaf checkbox {} at {} (already at {})".format(
+                        leaf_id, site, marks[leaf_id]["site"]))
+                else:
+                    marks[leaf_id] = {"site": site, "domain": domain,
+                                      "checked": match.group("mark").lower() == "x"}
+                current = leaf_id
+                continue
+            found = PREREQUISITE_RE.search(line)
+            if current is None or found is None:
+                continue
+            if current in depends:
+                report.error("{}: second 前置 line for leaf {}".format(site, current))
+                continue
+            tail = line[found.end():].replace("*", "")
+            for stop in ("；", ";", "。"):
+                tail = tail.split(stop, 1)[0]
+            depends[current] = RUNTIME_RECOVERY_LEAF_REF_RE.findall(tail)
+    return marks, depends
+
+
+def read_runtime_recovery_final(report, change_dir):
+    """顶层 tasks.md 的 F1–F4「依」行：最终收工任务的依赖，同样双向核对。"""
+    path = os.path.join(change_dir, "tasks.md")
+    if not os.path.isfile(path):
+        report.error("tasks.md missing (the top-level ledger names F1–F4)")
+        return {}, {}
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            lines = handle.read().splitlines()
+    except OSError as exc:
+        report.error("cannot read {}: {}".format(path, exc))
+        return {}, {}
+    marks = {}
+    depends = {}
+    for lineno, line in enumerate(lines, start=1):
+        match = RUNTIME_RECOVERY_FINAL_LINE_RE.match(line)
+        if not match:
+            continue
+        task_id = match.group("id")
+        site = "tasks.md:{}".format(lineno)
+        if task_id in depends:
+            report.error("duplicate final task {} at {}".format(task_id, site))
+            continue
+        marks[task_id] = {"site": site, "checked": match.group("mark").lower() == "x"}
+        tail = line[match.end():]
+        if "依" not in tail:
+            report.error("{}: final task {} names no 依 prerequisite".format(site, task_id))
+            depends[task_id] = []
+            continue
+        tail = tail.split("依", 1)[1]
+        for stop in ("）", ")"):
+            tail = tail.split(stop, 1)[0]
+        depends[task_id] = RUNTIME_RECOVERY_ANY_REF_RE.findall(tail)
+    return marks, depends
+
+
+def check_runtime_recovery_leaves(report, rows, marks, declared_depends):
+    """叶集与前置边：图里与三单元 tasks.md 双向相等，图内无自环、无未知、无环。
+
+    勾选与签态在这一层绑定：勾了的叶必须是签过的（未签即勾＝未批的实现），
+    done 的叶必须勾选并带旧 profile 同款的四字段证据；反之不成立——勾选说的是
+    「该叶的结果已入账」，其证据形态不由本门在此重述。
+    """
+    ids = [row["id"] for row in rows]
+    for leaf_id in sorted({item for item in ids if ids.count(item) > 1}):
+        report.error("duplicate leaf id in graph: {}".format(leaf_id))
+    report.count("graph_leaves", len(ids))
+    report.count("graph_leaf_ids_unique", len(set(ids)))
+    if len(rows) != RUNTIME_RECOVERY_LEAF_COUNT:
+        report.error("task-graph declares {} leaf/leaves; the profile judges the {} leaves of "
+                     "the three units, not a smaller or larger set".format(
+                         len(rows), RUNTIME_RECOVERY_LEAF_COUNT))
+    for leaf_id in sorted(set(marks) - set(ids)):
+        report.error("leaf {} has a checkbox in {} but no entry in task-graph".format(
+            leaf_id, marks[leaf_id]["site"]))
+    for leaf_id in sorted(set(ids) - set(marks)):
+        report.error("leaf {} is in task-graph but no unit tasks.md carries its checkbox".format(
+            leaf_id))
+    for row in rows:
+        site = marks.get(row["id"], {}).get("site", "task-graph")
+        want = declared_depends.get(row["id"])
+        if want is None:
+            report.error("{}: leaf {} has no 前置 line, so its depends_on cannot be checked "
+                         "against its own source".format(site, row["id"]))
+            continue
+        if sorted(want) != sorted(row["depends_on"]):
+            report.error("{}: leaf {} declares 前置 {} but task-graph depends_on {} (the "
+                         "dependency source is tasks.md; drift is a second plan)".format(
+                             site, row["id"], sorted(want), sorted(row["depends_on"])))
+    for leaf_id in sorted(set(declared_depends) - set(ids)):
+        report.error("{}: a 前置 line names leaf {} which task-graph does not declare".format(
+            declared_depends[leaf_id] and leaf_id, leaf_id))
+    known = set(ids)
+    adjacency = {}
+    for row in rows:
+        adjacency[row["id"]] = []
+        if len(row["depends_on"]) != len(set(row["depends_on"])):
+            report.error("leaf {} has duplicate depends_on".format(row["id"]))
+        for dep in row["depends_on"]:
+            if dep == row["id"]:
+                report.error("leaf {} depends on itself".format(row["id"]))
+            elif dep not in known:
+                report.error("leaf {} depends on unknown leaf {}".format(row["id"], dep))
+            else:
+                adjacency[row["id"]].append(dep)
+    order = kahn_order(sorted(known), adjacency)
+    if len(order) != len(known):
+        cycle = find_cycle(adjacency)
+        report.error("leaf dependency graph is not acyclic: {}".format(
+            " -> ".join(cycle) if cycle else "only {}/{} sort".format(len(order), len(known))))
+    report.count("graph_edges", sum(len(row["depends_on"]) for row in rows))
+    checked = sorted(leaf_id for leaf_id, mark in marks.items() if mark["checked"])
+    unchecked = sorted(leaf_id for leaf_id, mark in marks.items() if not mark["checked"])
+    report.count("checkboxes", len(marks))
+    report.count("leaves_checked", len(checked))
+    report.count("leaves_unchecked", len(unchecked))
+    report.extra["checked_leaf_ids"] = checked
+    report.extra["unchecked_leaf_ids"] = unchecked
+    return adjacency
+
+
+def check_runtime_recovery_final(report, final_leaves, marks, declared_depends, leaf_ids):
+    """F1–F4：与顶层 tasks.md 双向相等，依赖可解析且无环。"""
+    declared = [entry.get("id") for entry in final_leaves if isinstance(entry, dict)]
+    for task_id in sorted(set(RUNTIME_RECOVERY_FINAL_TASKS) - set(declared)):
+        report.error("task-graph is missing final task {} (F1–F4 close the whole change)"
+                     .format(task_id))
+    for task_id in sorted(set(declared) - set(RUNTIME_RECOVERY_FINAL_TASKS)):
+        report.error("final task {} is not one of {}".format(
+            task_id, list(RUNTIME_RECOVERY_FINAL_TASKS)))
+    for task_id in sorted(set(RUNTIME_RECOVERY_FINAL_TASKS) - set(marks)):
+        report.error("tasks.md declares no checkbox for final task {}".format(task_id))
+    known = set(leaf_ids) | set(RUNTIME_RECOVERY_FINAL_TASKS)
+    adjacency = {}
+    for entry in final_leaves:
+        if not isinstance(entry, dict):
+            report.error("final task entry must be an object")
+            continue
+        task_id = entry.get("id")
+        depends_on = entry.get("depends_on")
+        if not isinstance(depends_on, list) or any(not isinstance(dep, str)
+                                                  for dep in depends_on):
+            report.error("final task {} depends_on must be a list of leaf/F ids".format(task_id))
+            depends_on = []
+        if len(depends_on) != len(set(depends_on)):
+            report.error("final task {} has duplicate depends_on".format(task_id))
+        want = declared_depends.get(task_id)
+        if want is not None and sorted(want) != sorted(depends_on):
+            report.error("tasks.md: final task {} names 依 {} but task-graph depends_on {}".format(
+                task_id, sorted(want), sorted(depends_on)))
+        adjacency[task_id] = []
+        for dep in depends_on:
+            if dep == task_id:
+                report.error("final task {} depends on itself".format(task_id))
+            elif dep not in known:
+                report.error("final task {} depends on unknown task {}".format(task_id, dep))
+            else:
+                adjacency[task_id].append(dep)
+    order = kahn_order(sorted(set(adjacency) | known), adjacency)
+    if len(order) != len(known):
+        cycle = find_cycle(adjacency)
+        report.error("final task graph is not acyclic: {}".format(
+            " -> ".join(cycle) if cycle else "only {}/{} sort".format(len(order), len(known))))
+    report.count("final_tasks", len(declared))
+
+
+def check_runtime_recovery_signatures(report, rows, signatures):
+    """每叶一条签态：签了必须带证据指针；未签的叶不可派（本函数只核形状）。"""
+    by_leaf = {}
+    for position, entry in enumerate(signatures):
+        where = "signatures[{}]".format(position)
+        if not isinstance(entry, dict):
+            report.error("{} must be an object".format(where))
+            continue
+        leaf_id = entry.get("leaf")
+        if leaf_id in by_leaf:
+            report.error("{}: duplicate signature for leaf {}".format(where, leaf_id))
+            continue
+        state = entry.get("state")
+        if state not in SIGNATURE_STATES:
+            report.error("{}: leaf {} state {!r} not in {}".format(
+                where, leaf_id, state, SIGNATURE_STATES))
+            continue
+        evidence = entry.get("evidence")
+        if state == "signed" and (not isinstance(evidence, str) or not evidence.strip()):
+            report.error("{}: signed leaf {} must point at the contract that signed it".format(
+                where, leaf_id))
+        by_leaf[leaf_id] = state
+    known = {row["id"] for row in rows}
+    for leaf_id in sorted(known - set(by_leaf)):
+        report.error("leaf {} has no signature entry; an unsigned leaf states no approval"
+                     .format(leaf_id))
+    for leaf_id in sorted(set(by_leaf) - known):
+        report.error("signature names leaf {} which task-graph does not declare".format(leaf_id))
+    report.count("signatures_signed", sum(1 for state in by_leaf.values() if state == "signed"))
+    report.count("signatures_pending", sum(1 for state in by_leaf.values() if state == "pending"))
+    return by_leaf
+
+
+def check_runtime_recovery_dispatch(report, rows, state_by_leaf, marks, active_leaf):
+    """派发门：只有签过且前置已勾选的叶可派；未签叶不进入实施。
+
+    前置是否满足读三单元 tasks.md 的 checkbox（执行记录的唯一真相），不读本图的
+    `status`：图的状态是本 profile 的机器可判态，前置「做完了没有」写在 tasks.md。
+    `active_leaf` 缺键与 null 不同：null 明确说「本轮没有在飞的叶」，缺键则是图
+    没声明派发事实，无法判定——两者都必须可判，故缺键按错误处理。
+    """
+    depends_by_id = {row["id"]: row["depends_on"] for row in rows}
+    status_by_id = {row["id"]: row["status"] for row in rows}
+    for row in rows:
+        if row["status"] == "in_progress" and state_by_leaf.get(row["id"]) != "signed":
+            report.error("leaf {} is 'in_progress' without a design signature ({!r}); work in "
+                         "flight states an approval its own graph does not record".format(
+                             row["id"], state_by_leaf.get(row["id"])))
+    if active_leaf is None:
+        report.count("active_leaf", 0)
+        return
+    if not isinstance(active_leaf, str) or not active_leaf.strip():
+        report.error("task-graph active_leaf must be null or a leaf id, got {!r}".format(active_leaf))
+        return
+    report.count("active_leaf", 1)
+    if active_leaf not in status_by_id:
+        report.error("active leaf {!r} is not a declared leaf; an unknown leaf cannot be "
+                     "dispatched".format(active_leaf))
+        return
+    blockers = []
+    if state_by_leaf.get(active_leaf) != "signed":
+        blockers.append("no design signature ({!r})".format(state_by_leaf.get(active_leaf)))
+    unmet = sorted(dep for dep in depends_by_id.get(active_leaf, [])
+                   if not marks.get(dep, {}).get("checked"))
+    if unmet:
+        blockers.append("prerequisite(s) {} not ticked in their unit tasks.md".format(unmet))
+    if blockers:
+        report.error("leaf {} is not dispatchable: {}".format(active_leaf, "; ".join(blockers)))
+
+
+def check_runtime_recovery_graph(report, graph, change_name):
+    """十八叶图的形状：域归属、任务文件、状态、verify、done 证据。"""
+    if graph.get("schema_version") != 1:
+        report.error("task-graph schema_version must be 1, got {!r}".format(
+            graph.get("schema_version")))
+    if graph.get("change") != change_name:
+        report.error("task-graph change {!r} != change dir name {!r}".format(
+            graph.get("change"), change_name))
+    if graph.get("domain_profile") != RUNTIME_RECOVERY_PROFILE:
+        report.error("this profile requires domain_profile {!r}, got {!r}".format(
+            RUNTIME_RECOVERY_PROFILE, graph.get("domain_profile")))
+    leaves = graph.get("leaves")
+    if not isinstance(leaves, list) or not leaves:
+        report.error("task-graph leaves must be a non-empty list")
+        return []
+    rows = []
+    for position, leaf in enumerate(leaves):
+        where = "leaves[{}]".format(position)
+        if not isinstance(leaf, dict):
+            report.error("{} must be an object".format(where))
+            continue
+        leaf_id = leaf.get("id")
+        if not isinstance(leaf_id, str) or not RUNTIME_RECOVERY_LEAF_ID_RE.match(leaf_id):
+            report.error("{} has invalid id {!r}".format(where, leaf_id))
+            continue
+        where = "leaf {}".format(leaf_id)
+        domain = leaf.get("domain")
+        if domain not in RUNTIME_RECOVERY_DOMAINS:
+            report.error("{} domain {!r} is not one of {}".format(
+                where, domain, list(RUNTIME_RECOVERY_DOMAINS)))
+        elif not domain.startswith(leaf_id.split(".", 1)[0] + "-"):
+            report.error("{} belongs to prefix {} but domain is {!r}".format(
+                where, leaf_id.split(".", 1)[0], domain))
+        task_file = leaf.get("task_file")
+        if not isinstance(task_file, str) or not task_file.strip():
+            report.error("{} task_file must be a non-empty string".format(where))
+        elif not isinstance(domain, str) or not task_file.endswith(
+                "changes/{}/tasks.md".format(domain)):
+            report.error("{} task_file {!r} does not point at changes/{}/tasks.md".format(
+                where, task_file, domain))
+        depends_on = leaf.get("depends_on")
+        if not isinstance(depends_on, list) or any(not isinstance(dep, str)
+                                                   for dep in depends_on):
+            report.error("{} depends_on must be a list of leaf-id strings".format(where))
+            depends_on = []
+        status = leaf.get("status")
+        if status not in STATUSES:
+            report.error("{} status {!r} not in {}".format(where, status, STATUSES))
+        elif status == "done":
+            check_done_evidence(report, where, leaf.get("evidence"))
+        verification = leaf.get("verification")
+        if not isinstance(verification, dict):
+            report.error("{} verification must be an object".format(where))
+        else:
+            commands = verification.get("commands")
+            if (not isinstance(commands, list) or not commands
+                    or any(not isinstance(item, str) or not item.strip()
+                           for item in commands)):
+                report.error("{} verification.commands must be a non-empty string list".format(
+                    where))
+        verify = leaf.get("verify")
+        if not isinstance(verify, list) or not verify:
+            report.error("{} verify must be a non-empty list of anchor names".format(where))
+            verify = []
+        for anchor_position, anchor in enumerate(verify):
+            name = anchor.get("name") if isinstance(anchor, dict) else None
+            if not isinstance(name, str) or not name.strip():
+                report.error("{} verify[{}] must name the anchor it stands for".format(
+                    where, anchor_position))
+        rows.append({"id": leaf_id, "domain": domain, "depends_on": depends_on,
+                     "status": status})
+    return rows
+
+
+def run_runtime_recovery_profile(report, graph, change_dir, change_name, main_root, as_json):
+    rows = check_runtime_recovery_graph(report, graph, change_name)
+    marks, declared_depends = read_runtime_recovery_units(report, change_dir)
+    final_marks, final_depends = read_runtime_recovery_final(report, change_dir)
+    check_runtime_recovery_leaves(report, rows, marks, declared_depends)
+    check_runtime_recovery_final(report, graph.get("final_leaves") or [],
+                                 final_marks, final_depends, [row["id"] for row in rows])
+    state_by_leaf = check_runtime_recovery_signatures(report, rows, graph.get("signatures") or [])
+    if "active_leaf" not in graph:
+        report.error("task-graph declares no active_leaf key; null states 'nothing in flight', "
+                     "an absent key states nothing")
+    else:
+        check_runtime_recovery_dispatch(report, rows, state_by_leaf, marks,
+                                        graph.get("active_leaf"))
+    for row in rows:
+        if row["status"] == "done" and row["id"] in marks and not marks[row["id"]]["checked"]:
+            report.error("leaf {} is 'done' in task-graph but its checkbox in {} is unchecked"
+                         .format(row["id"], marks[row["id"]]["site"]))
+    check_artifacts(report, change_dir, RUNTIME_RECOVERY_DOMAINS)
+    check_specs(report, change_dir, main_root, RUNTIME_RECOVERY_DOMAINS)
+    report.note("domain_profile {!r}: the leaf set and every prerequisite edge are read from the "
+                "three unit tasks.md files and compared in both directions; the legacy ten-domain "
+                "and event-integrity constants are neither used nor relaxed on this path".format(
+                    RUNTIME_RECOVERY_PROFILE))
+    return report.emit(as_json)
+
+
 def run_legacy_profile(report, graph, change_dir, change_name, args, main_root):
     tasks = check_graph_shape(report, graph, change_name)
     check_dependency_graph(report, tasks)
@@ -1061,9 +1457,13 @@ def run(argv):
     profile = graph.get("domain_profile")
     if profile in (None, ""):
         return run_legacy_profile(report, graph, change_dir, change_name, args, main_root)
+    if profile == RUNTIME_RECOVERY_PROFILE:
+        return run_runtime_recovery_profile(report, graph, change_dir, change_name, main_root,
+                                            args.json)
     if profile != EVENT_PROFILE:
         report.error("unknown domain_profile {!r}; supported profiles are the legacy "
-                     "ten-domain graph (no field) and {!r}".format(profile, EVENT_PROFILE))
+                     "ten-domain graph (no field), {!r} and {!r}".format(
+                         profile, EVENT_PROFILE, RUNTIME_RECOVERY_PROFILE))
         return report.emit(args.json)
     return run_event_profile(report, graph, change_dir, change_name, main_root, args.json)
 

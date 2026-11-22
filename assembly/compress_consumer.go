@@ -351,6 +351,10 @@ func (c *CompressionConsumer) Execute(ctx context.Context, session event.Session
 // answer all keep the mechanical text the fold minted, so a summary is never
 // empty, never blocks the fold and never grows past the budget: the degradation
 // is the form the fold already states, and the reason it was taken is reported.
+//
+// The budget bounds the message the model reads, and that message is the
+// summary's label beside its text, so the answer is cut to the budget less the
+// label even though the request states the budget itself.
 func (c *CompressionConsumer) summarizeProduct(ctx context.Context, session event.SessionID, product replay.FoldProduct, budget int) replay.FoldProduct {
 	if c == nil || c.gists == nil || product.Entry.Type != replay.ProjectionTypeHistorySummary {
 		return product
@@ -360,7 +364,7 @@ func (c *CompressionConsumer) summarizeProduct(ctx context.Context, session even
 		assemblyWarn("tagent: the semantic summary of session %s stayed mechanical err=%v", session, err)
 		return product
 	}
-	bounded := boundedSummaryGist(gist, budget)
+	bounded := boundedSummaryGist(product.Entry, gist, budget)
 	if bounded == "" {
 		assemblyWarn("tagent: the semantic summary of session %s answered no text, kept mechanical", session)
 		return product
@@ -375,7 +379,7 @@ func (c *CompressionConsumer) summarizeProduct(ctx context.Context, session even
 // kind off a key's spelling.
 //
 //   - A mapped entry carries no text: the fact the entry names states its message, so a restore reads that text back by key and the checkpoint stays the size of the entries it names instead of the size of the bodies behind them.
-//   - A fold product carries the text it minted, because the product fact files that text under an identity of its own: the entry names the material the fold covered, and the fact's key is content-addressed over the material and the text together, so no read of the entry's key reaches it. That text is the bounded summary the age bound already holds, never the material it covered.
+//   - A fold product carries the text it minted: the product fact files that text under the identity CompressProductFor mints from the request, the producer and the key, which no read of the entry's key reaches, so a restore states the entry from the text the payload carries. That text is the bounded summary the age bound already holds, never the material it covered, so the checkpoint carries the startup state's own copy of it and no second authority over what the product states.
 type anchorEntry struct {
 	Key     event.EventID
 	Type    string

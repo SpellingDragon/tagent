@@ -12,8 +12,8 @@ import (
 const scenarioS14Threshold = 600
 
 // TestScenario14AgeBandProducts drives the age fold of one projection over four closed turns.
-// - the fold produces one segment fold for the process detail of the newest band and one history summary for the middle and oldest bands
-// - the history summary leads the projection the next request reads
+// - the first fold produces one segment product per middle band (three at this depth) and no history summary
+// - promotion folds the bands into one summary that then leads the projection
 // - a projection inside the volume threshold is left exactly as it stands
 // 契约: docs/wiki/memory/memory-architecture.md#event-shape
 func TestScenario14AgeBandProducts(t *testing.T) {

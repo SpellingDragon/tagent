@@ -601,7 +601,14 @@ func parentLookupTier(t *testing.T, ctx context.Context, history int) *ledger.Ti
 // lookup from the newest record must step over before it reaches that target.
 func parentOldTargetTier(t *testing.T, ctx context.Context, after int) *ledger.Tier {
 	t.Helper()
-	tier, err := ledger.OpenTier(ctx, ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: t.TempDir(), WriteRights: true})
+	return parentOldTargetTierAt(t, ctx, t.TempDir(), after)
+}
+
+// parentOldTargetTierAt opens the same fixture at a root the caller names, so the
+// caller can reopen that root with a face the writer does not hold.
+func parentOldTargetTierAt(t *testing.T, ctx context.Context, root string, after int) *ledger.Tier {
+	t.Helper()
+	tier, err := ledger.OpenTier(ctx, ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: root, WriteRights: true})
 	if err != nil {
 		t.Fatalf("open the journal store: %v", err)
 	}
@@ -662,19 +669,25 @@ func TestParentLookupCostsItsOwnChainNotTheHistory(t *testing.T) {
 	}
 }
 
-// TestParentLookupCountsTheSearchBeforeTheTarget pins both segments one parent lookup pays.
+// TestPredecessorQueryBoundsTheWalkToTheChain pins what one parent lookup pays of the history beside it.
 //   - the target stands one fact from its own predecessor at every depth, so only the history committed after it changes
-//   - the lookup names one more index entry per fact of that newer history, leaving the chain's own two counted entries
-//   - a measurement counting only the target-to-predecessor segment would answer the same entries at every depth
+//   - the lookup enters the commit order at the commit that last stated the target, so it names that entry and its predecessor's at every depth
+//   - it never names a fact committed after them
+//   - the newest fact of the same store names its own two, so the constant is the chain and not a count every walk adds
+//   - the three-step walk of the old target names five entries: two for each fact with a predecessor and one for the root
+//   - (negative) the same lookup over a root whose order-line index is gone names one entry per fact committed after the target, which is the walk the seek replaces
+//   - the control reads the same root through a view that states no index, and the fixture answers the growing prefix when the seek is absent
 //
 // 契约: docs/wiki/memory/memory-architecture.md#read-paths
-func TestParentLookupCountsTheSearchBeforeTheTarget(t *testing.T) {
+func TestPredecessorQueryBoundsTheWalkToTheChain(t *testing.T) {
 	ctx := context.Background()
 	depths := []int{16, 64, 256}
 	named := make([]int, 0, len(depths))
 	newest := make([]int, 0, len(depths))
+	controls := make([]int, 0, len(depths))
 	for _, after := range depths {
-		tier := parentOldTargetTier(t, ctx, after)
+		root := t.TempDir()
+		tier := parentOldTargetTierAt(t, ctx, root, after)
 		direct := NewTierQuerySource(tier.Segments)
 		before, _, _ := tier.Segments.IndexWalkReads()
 		parent, err := direct.GetParent("chain-target")
@@ -689,20 +702,156 @@ func TestParentLookupCountsTheSearchBeforeTheTarget(t *testing.T) {
 		}
 		counted, _, _ = tier.Segments.IndexWalkReads()
 		newest = append(newest, counted-before)
-		t.Logf("newer-history=%d old-target-named=%d newest-named=%d", after, named[len(named)-1], newest[len(newest)-1])
 		if err := tier.Segments.Close(); err != nil {
 			t.Fatalf("close the store of %d newer facts: %v", after, err)
 		}
+		if err := os.Remove(filepath.Join(root, "kv", "order.line")); err != nil {
+			t.Fatalf("drop the order-line index of %d newer facts: %v", after, err)
+		}
+		control, err := ledger.OpenTier(ctx, ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: root})
+		if err != nil {
+			t.Fatalf("open the reading view of %d newer facts: %v", after, err)
+		}
+		before, _, _ = control.Segments.IndexWalkReads()
+		parent, err = NewTierQuerySource(control.Segments).GetParent("chain-target")
+		counted, _, _ = control.Segments.IndexWalkReads()
+		if err != nil || parent != "chain-mid" {
+			t.Fatalf("the parent of chain-target through the walk = %q/%v, want chain-mid beside %d facts newer than it", parent, err, after)
+		}
+		controls = append(controls, counted-before)
+		if err := control.Segments.Close(); err != nil {
+			t.Fatalf("close the reading view of %d newer facts: %v", after, err)
+		}
+		if _, err := os.Stat(filepath.Join(root, "kv", "order.line")); !os.IsNotExist(err) {
+			t.Fatalf("the reading view of %d newer facts left the order-line index behind (%v), want the byte it never stated", after, err)
+		}
+		t.Logf("newer-history=%d old-target-named=%d newest-named=%d walk-named=%d",
+			after, named[len(named)-1], newest[len(newest)-1], controls[len(controls)-1])
 	}
 	for at, after := range depths {
-		if named[at] != after+2 || newest[at] != 2 {
-			t.Fatalf("beside %d facts newer than the target the lookup named %d index entries and the newest lookup named %d, want %d and 2: the entries of the search before the target are not counted",
-				after, named[at], newest[at], after+2)
+		if named[at] != 2 || newest[at] != 2 {
+			t.Fatalf("beside %d facts newer than the target the lookup named %d index entries and the newest lookup named %d, want the chain's own two at both: the walk does not enter the order at the commit that stated the target",
+				after, named[at], newest[at])
+		}
+		if controls[at] != after+2 {
+			t.Fatalf("the walk over the root without an order-line index named %d entries beside %d facts newer than the target, want %d: the fixture no longer shows the walk this lookup replaces",
+				controls[at], after, after+2)
 		}
 	}
-	if named[len(named)-1]-named[0] != depths[len(depths)-1]-depths[0] {
-		t.Fatalf("the lookup named %d entries beside %d newer facts and %d beside %d: the counted cost does not follow the history committed after the target, so the first segment of the walk went unmeasured",
-			named[len(named)-1], depths[len(depths)-1], named[0], depths[0])
+	if controls[len(controls)-1]-controls[0] != depths[len(depths)-1]-depths[0] {
+		t.Fatalf("the walk named %d entries beside %d newer facts and %d beside %d: the control does not follow the history committed after the target, so it cannot tell a bounded walk from an unbounded one",
+			controls[len(controls)-1], depths[len(depths)-1], controls[0], depths[0])
+	}
+}
+
+// TestHistoricalReadsAvoidUnrelatedHistory pins what a historical read pays and answers once the history beside it grows.
+//   - a fixed chain answers its parent at a fixed cost whether the store holds sixteen or a hundred facts committed after it
+//   - the walk enters the order at the commit that stated the key, so neither the unrelated history nor the entries of it are read
+//   - the grant decides the answer: the same read names the events of the partition it is granted and none of the partition the unrelated history stands in
+//   - an original inside the granted scope reads back its exact bytes on its first read and on the read after it, beside the originals another owner registered
+//   - one of those reads answers as the missing a refused scope returns
+//   - a root whose order-line index is gone states it again when the writer opens it, and the same lookup answers the same parent at the same cost
+//   - the derived index is the accelerator of the order file and never a second truth
+//
+// 契约: docs/wiki/memory/memory-architecture.md#read-paths
+func TestHistoricalReadsAvoidUnrelatedHistory(t *testing.T) {
+	ctx := context.Background()
+	const (
+		history = 64
+		chain   = 11
+		away    = 10
+		body    = "the original the chain answers with"
+	)
+	root := t.TempDir()
+	open := func() *ledger.Tier {
+		t.Helper()
+		tier, err := ledger.OpenTier(ctx, ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: root, WriteRights: true})
+		if err != nil {
+			t.Fatalf("open the journal store: %v", err)
+		}
+		return tier
+	}
+	tier := open()
+	seq := map[int]int64{}
+	for _, key := range []event.EventID{"chain-root", "chain-mid", "chain-target"} {
+		commitParentFact(t, ctx, tier, seq, chain, "agent-chain", "session-chain", key)
+	}
+	granted := ledger.ReadScope{Owner: event.Address{AgentID: "agent-chain", SessionID: "session-chain"}, Format: "text", RetentionPolicy: "durable"}
+	foreign := ledger.ReadScope{Owner: event.Address{AgentID: "agent-elsewhere", SessionID: "session-elsewhere"}, Format: "text", RetentionPolicy: "durable"}
+	if err := tier.Originals.Put(ctx, ledger.OriginalRef{Key: "chain-mid", Owner: granted.Owner, Format: granted.Format, RetentionPolicy: granted.RetentionPolicy}, []byte(body)); err != nil {
+		t.Fatalf("commit the original the chain answers with: %v", err)
+	}
+	for at := 1; at <= history; at++ {
+		commitParentFact(t, ctx, tier, seq, away, "agent-history", "session-history", event.EventID(fmt.Sprintf("later-%d", at)))
+		ref := ledger.OriginalRef{
+			Key:             event.EventID(fmt.Sprintf("later-original-%02d", at)),
+			Owner:           foreign.Owner,
+			Format:          foreign.Format,
+			RetentionPolicy: foreign.RetentionPolicy,
+		}
+		if err := tier.Originals.Put(ctx, ref, []byte(fmt.Sprintf("the original of the fact committed %02d after the chain", at))); err != nil {
+			t.Fatalf("commit the original %d committed after the chain: %v", at, err)
+		}
+	}
+	direct := NewTierQuerySource(tier.Segments)
+	before, _, _ := tier.Segments.IndexWalkReads()
+	parent, err := direct.GetParent("chain-target")
+	if err != nil || parent != "chain-mid" {
+		t.Fatalf("the parent of chain-target = %q/%v, want chain-mid beside %d fact(s) newer than it", parent, err, history)
+	}
+	counted, _, _ := tier.Segments.IndexWalkReads()
+	named := counted - before
+	if named != 2 {
+		t.Fatalf("the lookup named %d index entries beside %d fact(s) newer than the target, want the chain's own two: the unrelated history is not part of the answer", named, history)
+	}
+	inGrant, err := direct.QueryEvents(ctx, memory.QueryOptions{PartitionID: chain})
+	if err != nil {
+		t.Fatalf("read the granted partition: %v", err)
+	}
+	outsideGrant, err := direct.QueryEvents(ctx, memory.QueryOptions{PartitionID: away})
+	if err != nil {
+		t.Fatalf("read the partition the history stands in: %v", err)
+	}
+	t.Logf("newer-history=%d old-target-named=%d granted=%d elsewhere=%d", history, named, len(inGrant), len(outsideGrant))
+	if len(inGrant) != 3 || len(outsideGrant) != history {
+		t.Fatalf("the granted read named %d event(s) and the read beside it %d, want the three of the chain and the %d of the history: the grant decides the answer", len(inGrant), len(outsideGrant), history)
+	}
+	scoped, held := tier.Originals.(ledger.ScopedOriginalStore)
+	if !held {
+		t.Fatalf("the durable tier holds its originals as %T, want a value satisfying ScopedOriginalStore", tier.Originals)
+	}
+	for _, when := range []string{"the first read", "the read after it"} {
+		got := scoped.GetScoped(ctx, "chain-mid", granted)
+		if got.Outcome != ledger.RecallFound || got.Err != nil || string(got.Body) != body {
+			t.Fatalf("%s of the original inside the granted scope = %+v, want %q", when, got, body)
+		}
+	}
+	refused := scoped.GetScoped(ctx, event.EventID(fmt.Sprintf("later-original-%02d", history)), granted)
+	if refused.Outcome != ledger.RecallMissing || len(refused.Body) != 0 {
+		t.Fatalf("the original another owner registered beside the chain = %+v, want the missing a refused scope answers", refused)
+	}
+	if err := tier.Segments.Close(); err != nil {
+		t.Fatalf("close the store of the fixture: %v", err)
+	}
+	lines := filepath.Join(root, "kv", "order.line")
+	if err := os.Remove(lines); err != nil {
+		t.Fatalf("drop the order-line index of the root: %v", err)
+	}
+	tier = open()
+	before, _, _ = tier.Segments.IndexWalkReads()
+	parent, err = NewTierQuerySource(tier.Segments).GetParent("chain-target")
+	counted, _, _ = tier.Segments.IndexWalkReads()
+	if err != nil || parent != "chain-mid" {
+		t.Fatalf("the parent of chain-target over a root stated again = %q/%v, want chain-mid", parent, err)
+	}
+	if rebuilt := counted - before; rebuilt != 2 {
+		t.Fatalf("the lookup over the root stated again named %d index entries, want the chain's own two: the writer states the derived index again instead of answering through it", rebuilt)
+	}
+	if stat, err := os.Stat(lines); err != nil || stat.Size() == 0 {
+		t.Fatalf("the order-line index of the root stated again = (%v, %v), want the file the writer states", stat, err)
+	}
+	if err := tier.Segments.Close(); err != nil {
+		t.Fatalf("close the store stated again: %v", err)
 	}
 }
 
@@ -827,7 +976,8 @@ func TestAPointQueryThatWalksTheWholeHistoryIsRed(t *testing.T) {
 
 // TestRecallTraceThroughTierCountsOldTargetLookup pins what the causal walk pays on the shipped surface.
 //   - the granted partition holds a three-fact chain committed behind a history its partition never named
-//   - the engine names that newer history once per step, while the newest chain of the same store names its own two
+//   - every step enters the commit order at the commit that stated the key it asks about, so the walk names the chain's own entries and never a fact of that history
+//   - the newest chain of the same store names its own two, so the counted cost follows the chain and not a constant the store adds
 //   - negative: a parent reader answering a constant would leave the walk paying nothing
 //
 // 契约: docs/wiki/tool/tool-architecture.md#recall-subtools
@@ -894,8 +1044,8 @@ func TestRecallTraceThroughTierCountsOldTargetLookup(t *testing.T) {
 			t.Fatalf("the causal walk answered %v, want %v: the walk follows the chain and not the history around it", walk.Items, wantKeys)
 		}
 	}
-	if wantNamed := 3*(history+2) + 8; oldNamed != wantNamed {
-		t.Fatalf("the old target's walk of three steps named %d index entries beside %d facts newer than it, want %d: each step pays the search from the newest record beside its own chain entries, two of them on the first step and three on the two behind it",
+	if wantNamed := 5; oldNamed != wantNamed {
+		t.Fatalf("the old target's walk of three steps named %d index entries beside %d facts newer than it, want %d: each step enters the order at the commit that stated its own key and names the chain from there",
 			oldNamed, history, wantNamed)
 	}
 	before, _, _ = run.tier.Segments.IndexWalkReads()

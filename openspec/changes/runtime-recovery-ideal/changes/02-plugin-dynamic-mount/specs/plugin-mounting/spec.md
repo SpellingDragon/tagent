@@ -1,3 +1,5 @@
+> **历史输入（2026-11-20）**：本目录不再作为当前派发或自动规格同步输入；下文旧勾选、方案与限制按原时点保留，不授权后续实施。当前只按[编排入口](../../../../ORCHESTRATION.md)派发三个语义单元，全部旧要求由[承接表](../../../../CARRYOVER.md)逐项接收，不因转历史而取消。
+
 # plugin-mounting 增量（W2）
 
 > ⚠️ 该能力在 `openspec/specs/` 与冻结归档中均无既存主规格（`grep -rn plugin-mounting openspec/` 仅命中一级 design.md），故一级 D2 表记的 MODIFIED 落为 **ADDED**；主规格转正与 golden 同步归 10 域。

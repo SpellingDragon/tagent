@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -220,11 +219,7 @@ func (c *configChain) loadLocked(ctx context.Context) error {
 		return fmt.Errorf("tagent: the configuration chain is not attached")
 	}
 	if addressed, held := c.log.(addressedChainLog); held {
-		if order, states := addressed.CommitOrder(); states {
-			if keys, names := order.(addressedKeyOrder); names {
-				return c.loadAddressedLocked(ctx, addressed, keys)
-			}
-		}
+		return c.loadAddressedLocked(ctx, addressed)
 	}
 	pairs, err := c.log.Scan(ctx, configChainPrefix)
 	if err != nil {
@@ -248,69 +243,88 @@ func (c *configChain) loadLocked(ctx context.Context) error {
 	return nil
 }
 
-// addressedChainLog is the fact surface that answers one key by name and states
-// the commit order of its engine: a chain whose keys it names itself reads them
-// by address, so the load costs the facts the chain holds and never the keys of
-// every other family the log stores beside them.
+// addressedChainLog is the fact surface that answers one key by name: a chain whose
+// keys it names itself reads them by address, so the load costs the facts the chain
+// holds and never the keys of every other family the log stores beside them.
 type addressedChainLog interface {
 	Get(ctx context.Context, key string) ([]byte, bool, error)
-	CommitOrder() (ledger.CommitOrder, bool)
 }
 
-// addressedKeyOrder is the commit order that names the keys of its commits alone:
-// the newest fact of the chain is found by key, so the discovery pays the records it
-// walks and reads no value of the statements it passes. A caller that reads the value
-// of each key it names asks ledger.CommitOrder instead, which answers that value
-// beside the order.
-type addressedKeyOrder interface {
-	EachCommittedKeyNewestFirst(ctx context.Context, visit func(key string) (bool, error)) error
-}
-
-// loadAddressedLocked reads the chain by the addresses its own keys name: the
-// newest committed fact bounds the sequence, and every fact below it is read by
-// its key alone.
-//   - the key order names the newest fact first, so the walk stops at the first key carrying the prefix and reads no statement older than it, and it reads no value on the way
-//   - the newest fact is read back by its key, the one value the discovery costs, because the order states which key is newest and never what it carries
-//   - the sequence numbers are contiguous: the chain is append-only and its sole writer numbers each fact after the last, so a number the newest fact states but the log holds no fact for is a named refusal, never a shorter chain
-//   - a commit order naming no fact of the chain loads an empty ledger, the same answer a scan of no pair gives; proving that absence walks the order whole, which is the one read an empty chain costs
-//   - an engine that states the order but no key-only walk loads the chain through the prefix scan below, the answer every engine beside no order reads
-func (c *configChain) loadAddressedLocked(ctx context.Context, log addressedChainLog, keys addressedKeyOrder) error {
-	var newestKey string
-	err := keys.EachCommittedKeyNewestFirst(ctx, func(key string) (bool, error) {
-		if !strings.HasPrefix(key, configChainPrefix) {
-			return true, nil
+// loadAddressedLocked reads the chain by the addresses its own keys name: the probe
+// bounds the sequence, and every fact below that bound is read by its key alone.
+//   - the probe doubles the sequence from the first fact to the first the log does not hold and bisects the two, so the discovery pays the binary digits of the chain's length and reads no statement of the families stored beside it
+//   - the value a probe answers is the value the load decodes, so the chain costs one value read per fact and the discovery adds none of its own
+//   - the sequence numbers are contiguous: the chain is append-only and its sole writer numbers each fact after the last, so a sequence inside the bound the log holds no fact for is a named refusal, never a shorter chain
+//   - a chain holding no first fact is answered beside its second, so a log numbering from the first that holds a fact past a missing first fact is the damaged ledger the refusal names, and one holding neither answers the empty ledger a scan of no pair answers
+//   - an engine that answers no key by name loads the chain through the prefix scan of the load, the answer every engine beside no point read reads
+func (c *configChain) loadAddressedLocked(ctx context.Context, log addressedChainLog) error {
+	read := map[uint64][]byte{}
+	probe := func(seq uint64) ([]byte, bool, error) {
+		value, held, err := log.Get(ctx, fmt.Sprintf("%s%020d", configChainPrefix, seq))
+		if err != nil {
+			return nil, false, fmt.Errorf("tagent: read the configuration chain: %w", err)
 		}
-		newestKey = key
-		return false, nil
-	})
-	if err != nil {
-		return fmt.Errorf("tagent: read the configuration chain: %w", err)
+		if held {
+			read[seq] = value
+		}
+		return value, held, nil
 	}
-	if newestKey == "" {
+	_, head, err := probe(1)
+	if err != nil {
+		return err
+	}
+	if !head {
+		_, second, err := probe(2)
+		if err != nil {
+			return err
+		}
+		if second {
+			return fmt.Errorf("tagent: the configuration chain states fact %d and holds no fact %d: the chain is append-only, so a hole is a damaged ledger", 2, 1)
+		}
 		c.facts = nil
 		c.loaded = true
 		return nil
 	}
-	seq, err := strconv.ParseUint(strings.TrimPrefix(newestKey, configChainPrefix), 10, 64)
-	if err != nil || seq == 0 {
-		return fmt.Errorf("tagent: the configuration fact %s names no sequence number of the chain", newestKey)
-	}
-	newestValue, held, err := log.Get(ctx, newestKey)
-	if err != nil {
-		return fmt.Errorf("tagent: read the configuration chain: %w", err)
-	}
-	if !held {
-		return fmt.Errorf("tagent: the commit order names the configuration fact %s and the log holds no value for it", newestKey)
-	}
-	var facts []configFact
-	for at := uint64(1); at < seq; at++ {
-		key := fmt.Sprintf("%s%020d", configChainPrefix, at)
-		value, held, err := log.Get(ctx, key)
+	var bound uint64
+	for bound = 2; ; bound *= 2 {
+		_, held, err := probe(bound)
 		if err != nil {
-			return fmt.Errorf("tagent: read the configuration chain: %w", err)
+			return err
 		}
 		if !held {
-			return fmt.Errorf("tagent: the configuration chain states fact %d and holds no fact %d: the chain is append-only, so a hole is a damaged ledger", seq, at)
+			low, high := bound/2, bound
+			for high-low > 1 {
+				middle := low + (high-low)/2
+				_, held, err := probe(middle)
+				if err != nil {
+					return err
+				}
+				if held {
+					low = middle
+				} else {
+					high = middle
+				}
+			}
+			bound = low
+			break
+		}
+		if bound > 1<<62 {
+			return fmt.Errorf("tagent: the configuration chain holds the fact %d and no absent sequence above it in the uint64 its keys address", bound)
+		}
+	}
+	facts := make([]configFact, 0, bound)
+	for at := uint64(1); at <= bound; at++ {
+		key := fmt.Sprintf("%s%020d", configChainPrefix, at)
+		value, kept := read[at]
+		if !kept {
+			readValue, held, err := probe(at)
+			if err != nil {
+				return err
+			}
+			if !held {
+				return fmt.Errorf("tagent: the configuration chain states fact %d and holds no fact %d: the chain is append-only, so a hole is a damaged ledger", bound, at)
+			}
+			value = readValue
 		}
 		var fact configFact
 		if err := json.Unmarshal(value, &fact); err != nil {
@@ -318,11 +332,7 @@ func (c *configChain) loadAddressedLocked(ctx context.Context, log addressedChai
 		}
 		facts = append(facts, fact)
 	}
-	var newest configFact
-	if err := json.Unmarshal(newestValue, &newest); err != nil {
-		return fmt.Errorf("tagent: decode the configuration fact %s: %w", newestKey, err)
-	}
-	c.facts = append(facts, newest)
+	c.facts = facts
 	c.loaded = true
 	return nil
 }

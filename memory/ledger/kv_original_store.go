@@ -87,9 +87,9 @@ var _ OriginalStore = (*kvOriginalStore)(nil)
 
 // ensureLoaded runs the whole-store load on first access. Failures are returned
 // without being cached, so a repaired backend can be retried. It is the load of a
-// caller that needs the whole set, which is the count of keys holding a body and
-// the scoped read faces that take the stored state as a map; a caller that names
-// one identity reads that identity through entryLocked instead.
+// caller that needs the whole set, which is the count of keys holding a body; a
+// caller that names one identity — a bare read, a commit of one fact and a scoped
+// read of one key alike — reads that identity through entryLocked instead.
 func (s *kvOriginalStore) ensureLoaded() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -132,6 +132,23 @@ func (s *kvOriginalStore) entryLocked(ctx context.Context, key event.EventID) (*
 	}
 	s.byKey[key] = entry
 	return entry, true, nil
+}
+
+// scopedOnlyLocked answers the state a scoped read of one key decides over: the one
+// identity the read names, resolved through the two entries that identity holds, never
+// the original family behind it. It is what keeps a scoped read's cost and its failure
+// at the identity: a record the store cannot place fails the read of that identity and
+// no read beside it, and a family the store has not loaded is not a failure this read
+// can meet. The caller holds the lock.
+func (s *kvOriginalStore) scopedOnlyLocked(ctx context.Context, key event.EventID) (map[event.EventID]*originalEntry, error) {
+	entry, held, err := s.entryLocked(ctx, key)
+	if err != nil {
+		return nil, err
+	}
+	if !held {
+		return map[event.EventID]*originalEntry{}, nil
+	}
+	return map[event.EventID]*originalEntry{key: entry}, nil
 }
 
 // load publishes references only with the independent body of the same event

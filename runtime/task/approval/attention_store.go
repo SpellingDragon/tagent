@@ -3,7 +3,8 @@
 // filed as a fact on a chain instead of an index of the store's own. The manager
 // keeps the evidence an approver reads and the file an external approver answers;
 // presence and ruling are folded from the facts, so what a restart reads back is
-// what landed.
+// what landed — a ruling enters the chain only behind its own write, and the one
+// filing a refused store leaves here is the hold it could not land (statesAHold).
 //
 // - one approval question is identified by its kind, its target and its lineage; the lineage names the tool, the digest of the exact argument bytes and the approval identity the registration was issued under
 // - presence is a question the chain holds with no answer and no clearance beside it, judged against the validity it was filed under
@@ -90,9 +91,12 @@ func newAttentionLedger() *attentionLedger {
 // RecordAttention stores one attention fact and reports whether this call stored
 // it: a repeat of the fact the key already names answers false and stores
 // nothing, and a key already standing for other content is refused by name. A
-// chain beside a durable face writes the fact behind that face's barrier, and a
-// write the store refused is reported to the caller beside the fact it keeps in
-// memory.
+// chain beside a durable face writes the fact behind that face's barrier before
+// the chain holds it, so what a reader files is what the store keeps; a write the
+// store refused is reported to the caller and leaves the chain where the store
+// stands. The one exception is the hold a question states: see statesAHold. A
+// concurrent filing of one identity writes the same fact twice and the second
+// arrival finds the first already recorded, so one landing enters the order once.
 func (l *attentionLedger) RecordAttention(ctx context.Context, fact event.Event) (bool, error) {
 	l.mu.Lock()
 	if held, ok := l.held[fact.Key]; ok {
@@ -103,14 +107,41 @@ func (l *attentionLedger) RecordAttention(ctx context.Context, fact event.Event)
 		}
 		return false, nil
 	}
-	l.held[fact.Key] = fact
-	l.order = append(l.order, fact)
 	log := l.log
 	l.mu.Unlock()
-	if log == nil {
-		return true, nil
+	var refused error
+	if log != nil {
+		refused = l.storeAttention(ctx, log, fact)
 	}
-	return true, l.storeAttention(ctx, log, fact)
+	if refused != nil && !statesAHold(fact) {
+		return false, refused
+	}
+	l.mu.Lock()
+	held, published := l.held[fact.Key]
+	switch {
+	case published && !sameFact(held, fact):
+		l.mu.Unlock()
+		return false, fmt.Errorf("%w: %s", errApprovalFactConflict, fact.Key)
+	case published:
+		l.mu.Unlock()
+		return false, refused
+	}
+	l.held[fact.Key] = fact
+	l.order = append(l.order, fact)
+	l.mu.Unlock()
+	return true, refused
+}
+
+// statesAHold reports whether one attention fact states the hold a question puts
+// in place rather than the ruling an answer or a clearance states over it. A hold
+// is the wait the caller is standing in — the identity an approver was handed —
+// so a store that refused its write must not leave that wait unanswerable: the
+// chain refuses an answer naming no question it holds, and a hold this book cannot
+// name is a gate that waits forever on a ruling the channel will not file, which
+// is the wall the channel MUST NOT be. A ruling decides the wait, so the gate may
+// act on it only once the store kept it; the refusal is reported beside it.
+func statesAHold(fact event.Event) bool {
+	return fact.Type == event.TypeAttentionQuestion
 }
 
 // AttentionFacts returns every attention fact the chain holds, in landing order.

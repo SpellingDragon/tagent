@@ -183,6 +183,31 @@ else
 fi
 echo "lint: architecture policy"
 run python3 scripts/gates/check_runtime_architecture.py --check-policy --json
+# 归档拦截：把路径放进 openspec 归档树时，先过归档前门。判据是运行产物与这次
+# 变更绑定，故两个模式各判一种真实对象：
+#   * 这次提交带来了归档路径 → 判这次提交（`--commit HEAD`，语义与 CI 作业一致）；
+#   * 归档移动还在工作树里（`openspec archive` 刚跑完、尚未提交）→ 还没有 revision
+#     可判，判本次运行目录的产物与本树是否绑定（`--evidence`）。
+# 先判提交再判工作树：只有本次提交新增的路径进判据，历史归档留在树里不会让链每次
+# 都红；两个都在时以提交为准（它是 CI 会判的那个对象）。非 git 树如实跳过——门只
+# 核它真正读到的对象，没有对象时不假装判过。
+echo "lint: archive preflight (archived paths in this tree)"
+if git rev-parse --git-dir >/dev/null 2>&1; then
+  committed_paths="$(git diff --no-renames --name-only --diff-filter=A HEAD^ HEAD -- openspec 2>/dev/null \
+    | grep -E '^openspec/[^/]+/archive/' || true)"
+  pending_paths="$( { git diff --no-renames --name-only --diff-filter=A HEAD -- openspec 2>/dev/null
+    git ls-files --others --exclude-standard -- openspec 2>/dev/null; } \
+    | grep -E '^openspec/[^/]+/archive/' || true)"
+  if [ -n "$committed_paths" ]; then
+    run bash scripts/gates/archive-preflight.sh --commit HEAD
+  elif [ -n "$pending_paths" ]; then
+    run bash scripts/gates/archive-preflight.sh --evidence "$evidence_dir"
+  else
+    echo "  (no path added under the openspec archive tree; the archive gate has no object, skipped)"
+  fi
+else
+  echo "  (not a git work tree; the archive gate reads a commit and has no object here, skipped)"
+fi
 echo "lint: concept budget"
 run python3 scripts/gates/check_concept_budget.py --json
 echo "lint: architecture implementation coverage"

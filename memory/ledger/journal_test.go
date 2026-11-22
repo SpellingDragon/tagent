@@ -1092,6 +1092,124 @@ func TestAddressableIndexStatesADamagedStatementAgainFromTheLog(t *testing.T) {
 	}
 }
 
+// TestAddressableIndexRefusesATableWithNoEmptySlot pins what a lookup answers beside a table that states no empty slot.
+//   - every slot of the table is filled by a record of another key and the header states that
+//   - so the chain of any key runs to the end of the table without meeting an empty slot
+//   - the key the table cannot place is answered from the order file the table is stated again from, never as absence and never as corruption
+//   - the records disagree with no commit, so the key is missing from a table that was rewritten rather than from the log
+//   - the key no commit wrote answers absence after that repair, which is the answer the walked table owed it all along
+//
+// 契约: docs/wiki/memory/memory-architecture.md#local-file-kv
+func TestAddressableIndexRefusesATableWithNoEmptySlot(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	addressableTestPopulate(t, dir, 4)
+	header := addressableTestHeader(t, dir)
+	path := filepath.Join(dir, journalSlotFileName)
+	body, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read the slot table: %v", err)
+	}
+	for at := int64(0); at < header.Capacity; at++ {
+		span := journalAddressSpan{Offset: header.ValuesSize + 4, Length: 8}
+		record := encodeSlotRecord(header.Stride, journalSlotHeld, fmt.Sprintf("0:pad:%08d", at), span)
+		copy(body[journalSlotHeaderBytes+at*header.Stride:], record)
+	}
+	full := header
+	full.Used = header.Capacity
+	copy(body[:journalSlotHeaderBytes], encodeSlotHeader(full))
+	if err := os.WriteFile(path, body, 0o600); err != nil {
+		t.Fatalf("state the table no slot leaves empty: %v", err)
+	}
+	view, err := openJournalKV(dir)
+	if err != nil {
+		t.Fatalf("open the view over the table no slot leaves empty: %v", err)
+	}
+	defer view.Close()
+	held, err := view.Read(ctx, Fetch{Key: "0:evt:00000:0"})
+	if err != nil || len(held) != 1 {
+		t.Fatalf("read the key the log holds beside a table that states no empty slot = (%d pair(s), %v), want the one pair the order file states", len(held), err)
+	}
+	if want := bytes.Repeat([]byte("v"), addressableTestValueBytes); !bytes.Equal(held[0].Value, want) {
+		t.Fatalf("the repaired read answered %q, want the bytes the commit stated", held[0].Value)
+	}
+	absent, err := view.Read(ctx, Fetch{Key: "0:evt:never"})
+	if err != nil || len(absent) != 0 {
+		t.Fatalf("read a key no commit wrote = (%d pair(s), %v), want absence: a table stated again from the order file answers the keys the log holds", len(absent), err)
+	}
+	if after := addressableTestHeader(t, dir); after.Used > after.Capacity || after.Used >= header.Capacity {
+		t.Fatalf("the table states %d used slot(s) of %d after the repair, want the keys the log holds", after.Used, after.Capacity)
+	}
+}
+
+// TestOrderLineIndexFollowsTheTableItParallels pins where the order-line index sends a walk.
+//   - the table grows under the fixture, so the slot a key addresses and the slot it sits in were stated at two different shapes of the same table
+//   - a key committed before that growth and a key committed after it both seek to the order line that states their newest commit
+//   - so the walk entered there names that key first
+//   - a reopen answers the same seeks, so the words are stated by the watermark the table states and not by a state the process kept
+//
+// 契约: docs/wiki/memory/memory-architecture.md#local-file-kv
+func TestOrderLineIndexFollowsTheTableItParallels(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	view, err := openJournalKV(dir)
+	if err != nil {
+		t.Fatalf("open the journal view: %v", err)
+	}
+	const keys = journalSlotCapacity*journalSlotLoadPercent/100 + 8
+	for at := 0; at < keys; at++ {
+		key := fmt.Sprintf("0:grow:%06d", at)
+		if err := view.Commit(ctx, Batch{Puts: []Pair{{Key: key, Value: []byte("v")}}}); err != nil {
+			t.Fatalf("commit %q: %v", key, err)
+		}
+	}
+	if view.log.addr.capacity <= journalSlotCapacity {
+		t.Fatalf("the table states %d slot(s) beside %d key(s), want the table grown: the fixture spans two shapes", view.log.addr.capacity, keys)
+	}
+	seekAndName := func(view *journalKV, key string) {
+		t.Helper()
+		lineEnd, held, err := view.OrderLineEnd(ctx, key)
+		if err != nil || !held {
+			t.Fatalf("the seek of %q = (%d, %v, %v), want the byte its newest commit ends at", key, lineEnd, held, err)
+		}
+		named := ""
+		if err := view.EachCommittedNewestFirstFrom(ctx, lineEnd, func(found string, _ []byte) (bool, error) {
+			named = found
+			return false, nil
+		}); err != nil {
+			t.Fatalf("the walk entered at the seek of %q: %v", key, err)
+		}
+		if named != key {
+			t.Fatalf("the walk entered at the seek of %q named %q first, want the key the seek was read for", key, named)
+		}
+	}
+	moved := make([]string, 0, 4)
+	for at := 0; at < keys-1 && len(moved) < 4; at++ {
+		key := fmt.Sprintf("0:grow:%06d", at)
+		if slotAddressOf(key, journalSlotCapacity*2) != slotAddressOf(key, journalSlotCapacity) {
+			moved = append(moved, key)
+		}
+	}
+	if len(moved) == 0 {
+		t.Fatal("the fixture names no key the growth of the table moves")
+	}
+	moved = append(moved, fmt.Sprintf("0:grow:%06d", keys-1))
+	for _, key := range moved {
+		seekAndName(view, key)
+	}
+	if err := view.Close(); err != nil {
+		t.Fatalf("close the view of the grown table: %v", err)
+	}
+	reopened, err := openJournalKV(dir)
+	if err != nil {
+		t.Fatalf("reopen the root of the grown table: %v", err)
+	}
+	defer reopened.Close()
+	for _, key := range moved {
+		seekAndName(reopened, key)
+	}
+}
+
 // journalTestRequireWalkAndPointReads requires the walk to name the given entries in
 // order, twice, and the point read of every one of them to answer the same value.
 func journalTestRequireWalkAndPointReads(t *testing.T, ctx context.Context, read *journalKV, want []string) {
@@ -1322,7 +1440,7 @@ func slotTestRecordOffset(t *testing.T, dir, key string) (int64, int64) {
 		t.Fatalf("read the slot table of %s: %v", dir, err)
 	}
 	base := slotAddressOf(key, header.Capacity)
-	for step := int64(0); step < journalSlotMaxProbe; step++ {
+	for step := int64(0); step <= header.Capacity; step++ {
 		index := (base + step) % header.Capacity
 		at := journalSlotHeaderBytes + index*header.Stride
 		state, name, _, ok := decodeSlotRecord(body[at : at+header.Stride])
@@ -1410,7 +1528,7 @@ func TestAddressableIndexDiscardsARecordItsFrameNeverCarried(t *testing.T) {
 	}
 	base := slotAddressOf(orphan, header.Capacity)
 	written := false
-	for step := int64(0); step < journalSlotMaxProbe && !written; step++ {
+	for step := int64(0); step <= header.Capacity && !written; step++ {
 		index := (base + step) % header.Capacity
 		at := journalSlotHeaderBytes + index*header.Stride
 		state, _, _, ok := decodeSlotRecord(body[at : at+header.Stride])
@@ -1460,7 +1578,7 @@ func TestAddressableIndexDiscardsARecordItsFrameNeverCarried(t *testing.T) {
 
 // TestAddressableIndexKeepsItsAddressIndependentOfTheKeyFamily pins that the address spreads a key family.
 // - the keys of one family spread over the slots the table states
-// - the longest chain stays inside the probe bound the lookup relies on
+// - the longest chain stays far inside the slots the table states, so the spread is the address and not one chain
 //
 // 契约: docs/wiki/memory/memory-architecture.md#local-file-kv
 func TestAddressableIndexKeepsItsAddressIndependentOfTheKeyFamily(t *testing.T) {
@@ -1485,13 +1603,101 @@ func TestAddressableIndexKeepsItsAddressIndependentOfTheKeyFamily(t *testing.T) 
 			}
 		}
 	}
-	if longest >= journalSlotMaxProbe {
-		t.Fatalf("the longest chain of %d keys reached %d slots, want it inside the %d bound",
-			keys, longest, journalSlotMaxProbe)
-	}
 	if longest > 40 {
 		t.Fatalf("the longest chain of %d keys reached %d slots, want the family spread", keys, longest)
 	}
+}
+
+// TestLegalClusteredKeysSurviveCommitAndReopen pins that the keys one slot addresses stay legal keys.
+//   - 129 keys whose address is one slot commit through the store's write face: one stated key per slot the chain walks, and one past it
+//   - every held key of the cluster reads back the bytes it committed, and the table holds them far under the load rule that grows it
+//   - the tombstoned key of the cluster and the key of the cluster no commit wrote both read as absence, never as corruption
+//   - a reopen of the closed root answers the same keys, so the cluster survives a restart instead of stating a table no commit wrote
+//
+// 契约: docs/wiki/memory/memory-architecture.md#local-file-kv
+func TestLegalClusteredKeysSurviveCommitAndReopen(t *testing.T) {
+	ctx := context.Background()
+	// The cluster states 129 keys of one slot: a chain far longer than any probe bound a
+	// measured key family reached, and a load that stays far below the share the load
+	// rule grows the table at. The cluster is legal, so a lookup that read the chain as
+	// damage would answer absence for a key the store holds.
+	const stated = 129
+	base := slotAddressOf("0:cluster:00000000", journalSlotCapacity)
+	keys := make([]string, 0, stated+1)
+	for at := 0; len(keys) <= int(stated); at++ {
+		if at > 1<<20 {
+			t.Fatalf("the scan named %d of the %d key(s) one slot addresses in its first %d candidate(s)",
+				len(keys), stated+1, at)
+		}
+		if key := fmt.Sprintf("0:cluster:%08d", at); slotAddressOf(key, journalSlotCapacity) == base {
+			keys = append(keys, key)
+		}
+	}
+	tombstoned, absent := keys[0], keys[len(keys)-1]
+	held := keys[1 : len(keys)-1]
+	dir := t.TempDir()
+	view, err := openJournalKV(dir)
+	if err != nil {
+		t.Fatalf("open the journal view: %v", err)
+	}
+	if err := view.Commit(ctx, Batch{Puts: []Pair{{Key: tombstoned, Value: []byte("gone")}}}); err != nil {
+		t.Fatalf("commit the key the cluster tombstones: %v", err)
+	}
+	if err := view.Commit(ctx, Batch{Deletes: []string{tombstoned}}); err != nil {
+		t.Fatalf("tombstone %q: %v", tombstoned, err)
+	}
+	began := time.Now()
+	committed := make([]string, 0, len(held))
+	refused := make([]string, 0)
+	var refusal error
+	for _, key := range held {
+		if err := view.Commit(ctx, Batch{Puts: []Pair{{Key: key, Value: []byte(key)}}}); err != nil {
+			if refusal == nil {
+				refusal = err
+			}
+			refused = append(refused, key)
+			continue
+		}
+		committed = append(committed, key)
+	}
+	t.Logf("committed %d of the %d held key(s) one slot addresses in %s", len(committed), len(held), time.Since(began))
+	if len(refused) != 0 {
+		capacity := int64(0)
+		if body, readErr := os.ReadFile(filepath.Join(dir, journalSlotFileName)); readErr == nil {
+			if header, ok := decodeSlotHeader(body); ok {
+				capacity = header.Capacity
+			}
+		}
+		t.Errorf("%d of the %d held key(s) one slot addresses were refused, the first %q: %v; the table states %d slot(s) and the load rule grows it at %d percent, so the cluster is the address of legal keys and not a table no commit wrote",
+			len(refused), len(held), refused[0], refusal, capacity, journalSlotLoadPercent)
+	}
+	readBack := func(view *journalKV, when string) {
+		for _, key := range committed {
+			pairs, err := view.Read(ctx, Fetch{Key: key})
+			if err != nil || len(pairs) != 1 || pairs[0].Key != key || !bytes.Equal(pairs[0].Value, []byte(key)) {
+				t.Errorf("%s: read %q = %d pair(s) (err=%v), want the bytes the commit stated", when, key, len(pairs), err)
+			}
+		}
+		for _, key := range []string{tombstoned, absent} {
+			pairs, err := view.Read(ctx, Fetch{Key: key})
+			if err != nil || len(pairs) != 0 {
+				t.Errorf("%s: read %q = %d pair(s) (err=%v), want absence: a tombstoned key and a key no commit wrote are missing, never corruption",
+					when, key, len(pairs), err)
+			}
+		}
+	}
+	readBack(view, "the view that committed the cluster")
+	if err := view.Close(); err != nil {
+		t.Fatalf("close the view that committed the cluster: %v", err)
+	}
+	began = time.Now()
+	reopened, err := openJournalKV(dir)
+	if err != nil {
+		t.Fatalf("reopen the root holding %d key(s) one slot addresses: %v", len(committed), err)
+	}
+	defer reopened.Close()
+	t.Logf("reopened the root holding %d key(s) one slot addresses in %s", len(committed), time.Since(began))
+	readBack(reopened, "a reopened view of the same root")
 }
 
 // TestJournalNamespacesAnswerOnlyTheHeldKeys states that the engine answers the namespaces its held keys carry.

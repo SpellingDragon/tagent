@@ -304,6 +304,23 @@
       ],
       "reason": "A framework checkpoint is filed under checkpoint:<partitionSeq> and read back by the frozen event type: the key is the partition sequence the cut advanced to and the payload carries the state slices, so the fact itself is the only truth of the state it states.",
       "review_by": "2027-05-05"
+    },
+    {
+      "id": "assembly.checkpoint-quiet-point",
+      "kind": "kv-store",
+      "owner": "assembly",
+      "files": [
+        "assembly/checkpoint.go"
+      ],
+      "prefixes": [
+        {
+          "file": "assembly/checkpoint.go",
+          "name": "quietPointKeyPrefix",
+          "value": "tagent/checkpoint/v1/quiet:"
+        }
+      ],
+      "reason": "The quiet point of a framework cut is derived position data, never a fact: each cut commits one key (one key, one barrier, never rewritten, in no chain) at the position in the commit order its slices begin at, and the only reader is tailFactKeys, which bounds the task account's tail there instead of at the checkpoint's own landing. The fact ledger stays the truth of the facts; this key states only where a cut's state begins, so a cut that files nothing bounds no account and a root without one reads the whole log.",
+      "review_by": "2027-05-05"
     }
   ],
   "non_truth_files": [

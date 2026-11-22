@@ -1,3 +1,5 @@
+> **历史输入（2026-11-20）**：本目录不再作为当前派发或自动规格同步输入；下文旧勾选、方案与限制按原时点保留，不授权后续实施。当前只按[编排入口](../../../../ORCHESTRATION.md)派发三个语义单元，全部旧要求由[承接表](../../../../CARRYOVER.md)逐项接收，不因转历史而取消。
+
 > **取代关系（本轮重整）**：`openspec/specs/` 中无 `checkpoint-state` 能力，本块**保留为历史时点证据**（W2 时的 delta 文本与其 Scenario）。当前生效条款为主规格 `session-checkpoint-material` 的「governance 恢复读切片而非全流扫」（已由 10 域同步转正）；本轮新增 delta 见同域 `specs/session-checkpoint-material/spec.md`，在其上追加「切片限于有效态」「审批有效期以链上事实读取时判定」「历史查询边界具名」三条。本块下列 Scenario 的断言面**不撤回**，逐条由新文件与主规格承接（生产接线非测试态 / 尾 seq 读切片 / 序号连续性 / 审批态恢复一致），另含主规格中「落链 checkpoint 携带偏移与切片」「最新 checkpoint 读取不随历史增长」两条不在本域改变范围。
 
 ## MODIFIED Requirements

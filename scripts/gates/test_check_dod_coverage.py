@@ -39,6 +39,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import unittest
 from contextlib import redirect_stderr, redirect_stdout
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -832,6 +833,83 @@ def steps(record, *markers):
     return [record.find(marker) for marker in markers]
 
 
+# 归档前门的正式入口是 scripts/gates/archive-preflight.sh：`--commit` 判的是"这个
+# 提交带了什么"，所以负例必须真造一个把路径放进归档树的提交，而不是调 helper。
+ARCHIVE_GATE = pathlib.Path("scripts") / "gates" / "archive-preflight.sh"
+ARCHIVE_TREE_DIR = "/".join(["openspec", "changes", "archive", "2026-01-01-fixture"])
+
+
+def git(root, *args):
+    """Run one git command inside the fixture repository."""
+    proc = subprocess.run(["git", "-c", "user.name=fixture",
+                           "-c", "user.email=fixture@example.invalid"] + list(args),
+                          cwd=str(root), capture_output=True, text=True)
+    if proc.returncode != 0:
+        raise AssertionError("git {} failed: {}".format(" ".join(args), proc.stderr))
+    return proc.stdout.strip()
+
+
+def archive_repo(tmp):
+    """A git tree carrying the real archive gate plus one clean base commit."""
+    root = pathlib.Path(tmp) / "repo"
+    (root / "scripts" / "gates").mkdir(parents=True)
+    shutil.copy(REPO / ARCHIVE_GATE, root / ARCHIVE_GATE)
+    git(root, "init", "-q")
+    write(root / "README.md", "fixture\n")
+    git(root, "add", "-A")
+    git(root, "commit", "-q", "-m", "base")
+    return root
+
+
+def archive_commit(root, relative):
+    """Add one path in its own commit and return that commit's id."""
+    write(root / relative, "fixture\n")
+    git(root, "add", "-A")
+    git(root, "commit", "-q", "-m", "add {}".format(relative))
+    return git(root, "rev-parse", "HEAD")
+
+
+def run_archive_gate(root, *args, evidence=None):
+    """The real gate, run from the fixture root with no inherited evidence pointer."""
+    env = {key: value for key, value in os.environ.items()
+           if key != "TAGENT_RUNTIME_EVIDENCE_DIR"}
+    if evidence is not None:
+        env["TAGENT_RUNTIME_EVIDENCE_DIR"] = str(evidence)
+    return subprocess.run(["bash", str(ARCHIVE_GATE)] + list(args), cwd=str(root),
+                          capture_output=True, text=True, env=env)
+
+
+class ArchivePreflightTest(unittest.TestCase):
+    """归档树的新增路径必须绑定同一提交的运行产物，否则归档前门拒绝。"""
+
+    def test_archive_tree_change_without_evidence_is_refused(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = archive_repo(tmp)
+            # 控制：同一棵树、同样的调用，提交只加一条非归档路径——门明说"没有对象"。
+            control = archive_commit(root, "docs/notes.md")
+            proc = run_archive_gate(root, "--commit", control, "--base", control + "^")
+            self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+            self.assertIn("adds no path under the archive tree", proc.stdout)
+
+            # 负例：提交把路径放进归档树，而没有任何证据目录——拒绝并点名该路径。
+            archived = "{}/proposal.md".format(ARCHIVE_TREE_DIR)
+            candidate = archive_commit(root, archived)
+            proc = run_archive_gate(root, "--commit", candidate, "--base", candidate + "^")
+            self.assertEqual(proc.returncode, 1, proc.stdout + proc.stderr)
+            self.assertIn("adds 1 archived path(s)", proc.stdout)
+            self.assertIn(archived, proc.stdout)
+            self.assertIn("REFUSED", proc.stderr)
+            self.assertIn("no evidence directory", proc.stderr)
+
+            # 证据目录存在但没有运行产物：仍拒绝，并点名缺的那个产物。
+            empty = pathlib.Path(tmp) / "empty-run"
+            empty.mkdir()
+            proc = run_archive_gate(root, "--commit", candidate, "--base", candidate + "^",
+                                    evidence=empty)
+            self.assertEqual(proc.returncode, 1, proc.stdout + proc.stderr)
+            self.assertIn("holds no mutations/evidence.json", proc.stderr)
+
+
 def test_formal_lint_consumes_bound_mutation_evidence():
     """The shell entry hands the DoD gate this run's product, and the gate reads it.
 
@@ -1169,4 +1247,9 @@ def main():
 
 
 if __name__ == "__main__":
+    # 主干是自建用例串，没有"按名选一条"的能力；带 `-k` 时交给 unittest 选择，
+    # 让一条锚能被单独复跑（不带 `-k` 的全量跑仍是自建串，口径不变）。
+    if any(argument == "-k" or argument.startswith("-k")
+           for argument in sys.argv[1:]):
+        unittest.main()
     sys.exit(main())

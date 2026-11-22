@@ -439,6 +439,25 @@ func (r *residentInstanceRig) landAnswer(addr event.Address, content string) eve
 	return key
 }
 
+// landResult commits one tool result as the result fact of its task, the way the
+// settle face lands the body a settled notification points at: the notification
+// names that fact, so the observation a segment drives on is read back here and
+// never carried a second time on the delivery fact.
+func (r *residentInstanceRig) landResult(addr event.Address, key event.EventID, taskID event.TaskID, msg model.Message) event.EventID {
+	r.history.land(event.Event{
+		Key:       key,
+		Type:      event.TypeActionCommand,
+		Timestamp: time.Now(),
+		Message:   msg,
+		TaskID:    taskID,
+		CallID:    msg.ToolID,
+		Owner:     addr,
+		Source:    addr,
+		Target:    addr,
+	})
+	return key
+}
+
 // restart mounts a fresh consumption set over the same run, the way a process
 // that opens the chain again does: nothing of the ended attempt's read state
 // survives it.
@@ -541,6 +560,18 @@ func (r *residentInstanceRig) outputs(addr event.Address) []event.Event {
 	var out []event.Event
 	for _, evt := range r.history.SessionFacts(addr) {
 		if evt.Type == event.TypeAgentOutput {
+			out = append(out, evt)
+		}
+	}
+	return out
+}
+
+// settledFactsOf reports the delivery facts one address committed for the named
+// task, in commit order.
+func (r *residentInstanceRig) settledFactsOf(addr event.Address, taskID event.TaskID) []event.Event {
+	var out []event.Event
+	for _, evt := range r.history.SessionFacts(addr) {
+		if evt.Type == event.TypeTaskSettled && evt.TaskID == taskID {
 			out = append(out, evt)
 		}
 	}
@@ -1937,7 +1968,7 @@ func keysOf(events []event.Event) []string {
 // - an address closes its first segment on the input it was handed
 // - a settlement fact lands after that segment closed, and nothing else lands
 // - the fact alone wakes the consumer and opens the next segment
-// - the observation the fact carries is the material of the next request, not a value re-read from the chain
+// - the delivery fact states the settle line alone, so the observation of that segment is read back from the result fact the notification names
 //
 // 契约: docs/wiki/agent/event-flow.md#runner-flow
 func TestOrphanSettlementDrivesNewSegment(t *testing.T) {
@@ -1961,15 +1992,16 @@ func TestOrphanSettlementDrivesNewSegment(t *testing.T) {
 	}
 
 	const lateFact = event.EventID("fact-late-settlement")
+	const lateTask = event.TaskID("task-late-settlement")
 	const observation = "the observation the late settlement carries"
-	rig.loop.facts = func(id event.EventID) (model.Message, bool) {
-		if id != lateFact {
-			return model.Message{}, false
-		}
-		return model.Message{Role: model.RoleTool, Content: observation, ToolID: "call-late", ToolName: "late"}, true
-	}
+	rig.landResult(addr, lateFact, lateTask, model.Message{
+		Role:     model.RoleTool,
+		Content:  observation,
+		ToolID:   "call-late",
+		ToolName: "late",
+	})
 	rig.loop.Backflow(first.Turn.InvocationID, task.Notice{
-		TaskID: "task-late-settlement",
+		TaskID: lateTask,
 		Kind:   task.NoticeSettled,
 		Event:  lateFact,
 	})
@@ -1985,8 +2017,15 @@ func TestOrphanSettlementDrivesNewSegment(t *testing.T) {
 	if len(requests) != 2 {
 		t.Fatalf("model requests of %s = %d, want the closing answer beside the one the late settlement drove", addr.SessionID, len(requests))
 	}
-	if !invariantCarries(requests[1], observation) {
-		t.Fatalf("the request the late settlement drove carries no observation: %+v", requests[1])
+	result, _, held := resultFactOf(rig.history.SessionFacts(addr), lateTask)
+	if !held || result.Key != lateFact || result.Message.Content != observation || result.Message.ToolID != "call-late" {
+		t.Fatalf("the result fact of %q = (%+v, %v), want the observation read back from the fact the notification names (%q)",
+			lateTask, result, held, lateFact)
+	}
+	settled := rig.settledFactsOf(addr, lateTask)
+	if len(settled) != 1 || settled[0].Message.ToolID != "" {
+		t.Fatalf("the delivery facts of %q = %+v, want the one settle line beside no tool result: the observation stands at the result fact alone",
+			lateTask, settled)
 	}
 	if got := len(rig.outputs(addr)); got != 2 {
 		t.Fatalf("agent_output facts of %s = %d, want the closed segment beside the one the settlement drove", addr.SessionID, got)

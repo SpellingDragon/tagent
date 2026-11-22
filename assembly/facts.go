@@ -83,9 +83,18 @@ func (r *Run) commitFactChecked(ctx context.Context, evt event.Event) (event.Eve
 //
 //   - a checkpoint fact stays on the store the boot reads it from and enters no session chain: it is a framework state checkpoint, not material of any chain, so the live ledger keeps the window of the chains it serves and never one fact per cut.
 //   - the whole commit holds the quiet-point fence, so a cut that drained the pipeline reads every state this fact left behind instead of one caught between the landing and its application. The derived state of every consumer mounted on the state seam is folded inside that unit for the same reason: the fact and the state it leaves behind are one step, never a landing a consumer beside it has not read yet.
+//   - the landing fence covers that step whole: the slot, the registration that states it and the fold that derives the state of every consumer run inside one critical section, so two facts of one chain reach the seam in the order the storage committed them and the derived state of this process is the state a replay of the same committed order derives. The reads that answer the identity stand outside that section, so a commit of an identity another commit just landed still meets the chain before the fence.
 //   - a product is the moment the projection drops material, so the chain's checkpoint is worth refreshing whatever the cadence clock says. The request is a signal: the filer takes the cut on its own goroutine, where this commit's unit of work is not held.
 //   - a fact the chain already carries files no position of its own: filing it would put a fact the chain committed past at the end of the order the fold states, and the fold runs over a sequence that already states the material.
 //   - a repeat of the fact the chain holds is reduced again, because the repeat is what retries an earlier refusal, and the seam is told the fact repeats one the chain carries, so a holder whose idempotence rests on an identity its own rewrite can drop answers without restating the material (see reduceCommittedRepeat).
+//   - the write's own answer decides what this entry does next: a fact that landed here files its position and folds, a fact the chain already held whole files and folds nothing, and a conflict or an outcome the store cannot name answers beside no registration, no fold and no success.
+//   - FactCommitted: the fact landed here, so this entry files its position and folds it below.
+//   - FactAlreadyPresent: the chain holds the fact whole, so a repeat of a fact this process registered folds again and files no second position; a fact the chain holds beside no registration of this process is the landing of a commit whose barrier named no outcome, and this entry states that landing — registration and fold — as the commit that landed it would have, because a process that answers it as a plain repeat leaves the seam with state no replay of the same chain derives.
+//   - FactConflict: another content stands under the identity, named by the conflict the write answered.
+//   - FactUncertain: the store cannot name what it left behind, because only a fresh read decides which landed.
+//   - an outcome this entry does not classify is refused rather than filed: the classification is what decides whether a position and a fold belong to it.
+//   - the identity is read twice and the two answers are never one read: the first says whether the chain carried the fact before this commit looked.
+//   - the second is the record this commit's own write repeats; both reads stand before the ordered unit, so no fence serializes the lookups themselves.
 func (r *Run) commitFactNoCadence(ctx context.Context, evt event.Event) (event.EventID, error) {
 	if evt.Key == "" {
 		evt.Key = r.mintEventID()
@@ -107,12 +116,38 @@ func (r *Run) commitFactNoCadence(ctx context.Context, evt event.Event) (event.E
 		r.reduceCommittedRepeat(ctx, held)
 		return evt.Key, nil
 	}
-	carried, err := r.chainHoldsFact(ctx, evt)
+	_, carried, err := r.chainRecord(ctx, evt)
 	if err != nil {
 		return "", err
 	}
-	if err := r.persistFact(ctx, evt); err != nil {
+	stored, chainHolds, err := r.chainRecord(ctx, evt)
+	if err != nil {
 		return "", err
+	}
+	r.landing.Lock()
+	defer r.landing.Unlock()
+	outcome, err := r.persistFactOrdered(ctx, evt, stored, chainHolds)
+	switch outcome {
+	case ledger.FactCommitted:
+	case ledger.FactAlreadyPresent:
+		r.mu.Lock()
+		_, registered := r.facts[evt.Key]
+		r.mu.Unlock()
+		if registered {
+			if carried && evt.Type != event.TypeCheckpoint {
+				r.reduceCommittedRepeat(ctx, evt)
+			}
+			return evt.Key, nil
+		}
+		carried = false
+	case ledger.FactConflict:
+		return "", err
+	case ledger.FactUncertain:
+		return "", fmt.Errorf("tagent: the fact %s reached an outcome the storage cannot name: %w", evt.Key, err)
+	case ledger.FactRefused:
+		return "", err
+	default:
+		return "", fmt.Errorf("tagent: the fact %s answered the storage outcome %d this entry does not classify", evt.Key, outcome)
 	}
 	if evt.Type == event.TypeCheckpoint {
 		return evt.Key, nil
@@ -383,43 +418,44 @@ func (r *Run) compactFactOrderLocked(dropped map[event.EventID]struct{}) {
 	r.controlFacts = control
 }
 
-// persistFact writes one fact of this run to the storage tier it declares: the
-// body and the record commit as one unit behind the segment barrier, the record
-// taking the next sequence slot of the fact's partition; a query reads the chain
-// directly, so the same process recalls what it just committed without a landing
-// step.
-// - A run beside no storage tier, and a fact naming no owning agent, keep the fact in memory alone: no tier means no durable ledger to write.
-// - The duplicate judgment runs on this layer's semantics, which the tier's byte comparison cannot answer: the very fact the identity already names is answered as the commitment it is, and another content under that identity is refused by name, so a retry of one fact keeps one record and a second fact never lands beside it.
-// - The tier commits one fact whole or not at all, so a refused commit leaves neither the body nor the record behind.
-func (r *Run) persistFact(ctx context.Context, evt event.Event) error {
+// persistFactOrdered writes one fact of this run to the storage tier it declares and
+// answers what the write left there: the body and the record commit as one unit
+// behind the segment barrier, the record taking the next sequence slot of the fact's
+// partition; a query reads the chain directly, so the same process recalls what it
+// just committed without a landing step.
+//
+//   - The caller holds the landing fence: the write, the registration that states its position and the fold that derives the state of the consumers are one ordered unit, so the sequence the storage committed and the order the state seam derives are the same order.
+//   - The record the identity already carries is the caller's read, taken before that fence: this entry judges its content and commits nothing twice, but the lookup itself stands where two commits of one identity still meet on a chain holding nothing.
+//   - A run beside no storage tier, and a fact naming no owning agent, keep the fact in memory alone: no tier means no durable ledger to write, and the commit answers the fact as one that landed a position of its own.
+//   - The duplicate judgment runs on this layer's semantics, which the tier's byte comparison cannot answer: the very fact the identity already names is answered as the commitment it is, and another content under that identity is refused by name, so a retry of one fact keeps one record and a second fact never lands beside it.
+//   - The tier commits one fact whole or not at all, so a refused commit leaves neither the body nor the record behind.
+//   - The answer is the store's own five-value outcome, handed on unwrapped: the entry that commits the fact classifies what the write left, instead of reading every refusal as one failure and every duplicate as one landing. `FactUncertain` answers a write whose durable outcome the store cannot name, which is neither the refusal nor the commitment the caller reads a position from.
+func (r *Run) persistFactOrdered(ctx context.Context, evt event.Event, stored ledger.StoredEvent, chainHolds bool) (ledger.FactCommitOutcome, error) {
 	r.mu.Lock()
 	tier := r.tier
 	r.mu.Unlock()
 	if tier == nil || evt.Owner.AgentID == "" {
-		return nil
+		return ledger.FactCommitted, nil
 	}
 	body, err := memory.BodyFromEvent(evt, factCommitFormat, factCommitRetention)
 	if err != nil {
-		return err
+		return ledger.FactRefused, err
 	}
 	encoded, err := body.Encode()
 	if err != nil {
-		return err
+		return ledger.FactRefused, err
 	}
 	partition := memory.PartitionIDFromName(string(evt.Owner.AgentID))
-	stored, held, heldErr := tier.Segments.GetEventInPartition(ctx, evt.Key, partition)
-	if heldErr != nil {
-		return heldErr
-	}
-	if held {
-		return storedFactConflict(evt.Key, stored, body)
+	if chainHolds {
+		if err := storedFactConflict(evt.Key, stored, body); err != nil {
+			return ledger.FactConflict, err
+		}
+		return ledger.FactAlreadyPresent, nil
 	}
 	window := evt.Timestamp.UnixMilli()
 	if window < 0 {
-		return fmt.Errorf("tagent: the fact %s carries no event time", evt.Key)
+		return ledger.FactRefused, fmt.Errorf("tagent: the fact %s carries no event time", evt.Key)
 	}
-	r.landing.Lock()
-	defer r.landing.Unlock()
 	seq := r.landedSeq[partition] + 1
 	record := ledger.SegmentRecord{
 		PartitionID: partition,
@@ -437,43 +473,52 @@ func (r *Run) persistFact(ctx context.Context, evt event.Event) error {
 	switch outcome {
 	case ledger.FactCommitted:
 		r.landedSeq[partition] = seq
-		return nil
+		return ledger.FactCommitted, nil
 	case ledger.FactAlreadyPresent:
-		return nil
+		return ledger.FactAlreadyPresent, nil
 	case ledger.FactConflict:
 		prior, held, getErr := tier.Segments.GetEventInPartition(ctx, evt.Key, partition)
 		if getErr != nil {
-			return getErr
+			return ledger.FactConflict, getErr
 		}
 		if !held {
-			return err
+			return ledger.FactConflict, err
 		}
-		return storedFactConflict(evt.Key, prior, body)
+		if err := storedFactConflict(evt.Key, prior, body); err != nil {
+			return ledger.FactConflict, err
+		}
+		return ledger.FactAlreadyPresent, nil
 	default:
-		return err
+		return outcome, err
 	}
 }
 
-// chainHoldsFact answers whether the chain already carries the fact under the
-// identity it names: the record the commit asks for before it states a position
-// of its own, so a retry of a fact the chain committed earlier lands nothing new.
-// The lookup addresses the fact's partition and reads no body unless the identity
-// is taken, which is why it costs one index read on the commits that state
-// something. A run beside no storage tier and a fact naming no owning agent keep
-// no durable record, so the live ledger is the only order they state.
-func (r *Run) chainHoldsFact(ctx context.Context, evt event.Event) (bool, error) {
+// chainRecord answers the record the chain already carries under the identity the
+// commit names, beside whether the chain carries one at all: the lookup a commit
+// asks before it states a position of its own, so a retry of a fact the chain
+// committed earlier lands nothing new. The read addresses the fact's partition and
+// answers no body unless the identity is taken, which is why it costs one index read
+// on the commits that state something. A run beside no storage tier and a fact
+// naming no owning agent keep no durable record, so the live ledger is the only
+// order they state.
+func (r *Run) chainRecord(ctx context.Context, evt event.Event) (ledger.StoredEvent, bool, error) {
 	r.mu.Lock()
 	tier := r.tier
 	r.mu.Unlock()
 	if tier == nil || evt.Owner.AgentID == "" {
-		return false, nil
+		return ledger.StoredEvent{}, false, nil
 	}
 	partition := memory.PartitionIDFromName(string(evt.Owner.AgentID))
-	_, held, err := tier.Segments.GetEventInPartition(ctx, evt.Key, partition)
-	if err != nil {
-		return false, err
-	}
-	return held, nil
+	return tier.Segments.GetEventInPartition(ctx, evt.Key, partition)
+}
+
+// chainHoldsFact answers whether the chain already carries the fact under the identity
+// it names, for the callers that ask nothing about the record: a retry of a fact the
+// chain committed earlier lands nothing new, and a product whose identity the chain
+// already states costs no second write.
+func (r *Run) chainHoldsFact(ctx context.Context, evt event.Event) (bool, error) {
+	_, held, err := r.chainRecord(ctx, evt)
+	return held, err
 }
 
 // sameFactOf reports whether one live fact and one commit name the same fact:
@@ -991,7 +1036,8 @@ func (r *Run) factPipeline(agentID event.AgentID) (plugin.Pipeline, error) {
 // runs, the result is handed over exactly as it is beside no close at all — the
 // quiesce is the turn that finishes it, not a stop that strands it.
 //
-// - A hand-over whose delivery fact the backflow refuses is booked and handed on exactly as it is, and is not consumed: the range drives the result in this process, while the record the restart pairs that result with is what the chain is missing, so the notification stays owed and the next process hands the same result over again beside the fact that then lands.
+// - A hand-over whose delivery fact the backflow refuses is booked and handed on exactly as it is, and is not consumed: the range drives the result in this process, while the record the restart pairs that result with is what the chain is missing, so the notification stays owed under the claim this process took and the next process hands the same result over again beside the fact that then lands.
+// - That claim stays with this process instead of returning to the pending pool: the hand-over it records already ran here, so an entry the pool would offer again is the same notice handed on twice, while the entry an unconsumed seat leaves is exactly the work the next process restores.
 // - The hand-over is not undone to spare the drive the result: the in-process delivery is no external action, and a record the chain refused is the one thing a restart redoes for free.
 func (r *Run) sink(ctx context.Context, notice task.Notice) error {
 	frame, ok := task.CallFrameFrom(ctx)
@@ -1006,7 +1052,8 @@ func (r *Run) sink(ctx context.Context, notice task.Notice) error {
 		return r.retainNoticeOwed(ctx, frame, notice, seq)
 	}
 	if refusal := r.loop.Backflow(frame.Identity.InvocationID, notice); refusal != nil {
-		return r.retainNoticeOwed(ctx, frame, notice, seq)
+		assemblyDebug("tagent: the notice of task %s stays owed under the claim of this process", notice.TaskID)
+		return nil
 	}
 	return r.store.Consume(ctx, frame.Address, frame.Identity.InstanceID, seq)
 }
@@ -1015,11 +1062,10 @@ func (r *Run) sink(ctx context.Context, notice task.Notice) error {
 // recording its consumption: the acceptance stays the record the next process
 // restores, and the claimed entry is handed back to the pending pool so the
 // receipt the restart reads is never written for a hand-over the chain holds no
-// record of. Two causes reach it — the close of this run returned before the
-// hand-over, and the backflow refused the delivery fact of the hand-over — and
-// both answer the same way, because both leave the same thing missing: the fact
-// a restart pairs the result with. A seat already consumed by the turn the close
-// waited out is answered as settled and keeps its receipt.
+// record of. The close of this run returned before the hand-over, so no consumer
+// set of this process would drive the result, and the next process reads the
+// notification as the work it still owes. A seat already consumed by the turn the
+// close waited out is answered as settled and keeps its receipt.
 func (r *Run) retainNoticeOwed(ctx context.Context, frame task.CallFrame, notice task.Notice, seq state.AcceptSeq) error {
 	if err := r.store.Release(context.WithoutCancel(ctx), frame.Address, frame.Identity.InstanceID, seq); err != nil && !errors.Is(err, state.ErrClaimSettled) {
 		return fmt.Errorf("tagent: keep the notice of task %s owed: %w", notice.TaskID, err)

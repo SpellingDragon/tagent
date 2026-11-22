@@ -486,3 +486,34 @@ jobs:
           name: event-semantics-symptoms
           path: ${{ runner.temp }}/symptom
           if-no-files-found: error
+
+  # 归档前门（13.103）：提交把路径放进 openspec 归档树时，该提交必须带绑定同一
+  # revision 的运行产物，否则拒绝。`--commit` 的语义是"判这个提交带了什么"，所以
+  # 这条门看的是候选提交本身，不是调用者的意图；`openspec archive -y` 或手工 mv
+  # 也一样被它看见。它是本文件能给出的最强保证——是不是 required check 由分支保护
+  # 决定，配置审查不等于服务端已拦截。
+  archive-preflight:
+    runs-on: ubuntu-latest
+    steps:
+      # 提交范围要跨父提交，浅克隆会让 `--base REV^` 解析不到。
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      # PR 的 base 与 push 的上一提交不是一回事：前者要从 origin/<base_ref> 解析，
+      # 后者由 --base 的默认值（REV^）给出。两者都以环境变量传入，不在引号里内联
+      # 表达式——空值必须显式落空，而不是变成一个字面的 "origin/"。
+      - name: Archive preflight (candidate commit)
+        env:
+          CANDIDATE_SHA: ${{ github.sha }}
+          PR_BASE_REF: ${{ github.base_ref }}
+        run: |
+          set -euo pipefail
+          if [ -n "$PR_BASE_REF" ]; then
+            base="$(git rev-parse "origin/$PR_BASE_REF")"
+            bash scripts/gates/archive-preflight.sh --commit "$CANDIDATE_SHA" --base "$base"
+          else
+            bash scripts/gates/archive-preflight.sh --commit "$CANDIDATE_SHA"
+          fi

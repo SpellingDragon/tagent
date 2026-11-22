@@ -252,13 +252,21 @@ func smokeRecallDocument(c *smokeConfig, embeddingEndpoint string) string {
 }
 
 // smokeRecallSeed commits the fixed parent and child events into the tier before Boot observes it.
+// 种子的开面按写入面声明 WriteRights（memory/ledger/config.go:65-71）：一个根只有一个写者，
+// 不声明的开面是旁读视面，提交按 ErrCommitWithoutWriteRights 具名拒绝；写完即 Close 把根让给
+// 随后的 Boot（config.go:310），否则同根的第二写者按 ErrRootWriteLocked 被拒。
 func smokeRecallSeed(t *testing.T, root string) {
 	t.Helper()
 	ctx := context.Background()
-	tier, err := ledger.OpenTier(ctx, ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: root})
+	tier, err := ledger.OpenTier(ctx, ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: root, WriteRights: true})
 	if err != nil {
 		t.Fatalf("open the seed tier: %v", err)
 	}
+	defer func() {
+		if err := tier.Close(); err != nil {
+			t.Errorf("close the seed tier: %v", err)
+		}
+	}()
 	owner := event.Address{AgentID: event.AgentID(smokeSessionTag), SessionID: event.SessionID(smokeChats[0])}
 	partition := memory.PartitionIDFromName(smokeSessionTag)
 	seeds := []struct {

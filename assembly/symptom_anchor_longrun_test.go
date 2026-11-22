@@ -4,6 +4,7 @@ package assembly
 import (
 	"context"
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -912,4 +913,466 @@ func TestSymptomAnchorPerGenerationCostFlatOverALongRun(t *testing.T) {
 		t.Fatalf("a stage the boot states is not accounted inside it: %v (the series below is indexed by generation, 0..%d)\n%s",
 			err, generations-1, series)
 	}
+}
+
+// boundaryWork is what one stage of a recovery generation really spent at the engine
+// boundary: the calls the process made and the value bytes those calls carried,
+// counted by the view that answered them rather than by a measure the engine keeps.
+type boundaryWork struct {
+	reads        int
+	readPairs    int
+	readBytes    int
+	enumerations int
+	enumerated   int
+	walkEntries  int
+	walkBytes    int
+	commits      int
+	commitPairs  int
+}
+
+// unmeteredJournal is one root's durable engine behind a view that keeps no measure of its own, counting the calls it really answered.
+//   - it states the zero of every count and no verification span
+//   - repeat makes every read run the named number of extra times against the engine the view wraps, so a root pays the work of a second read while no measure moves
+//   - the duplication traverses and drops its answer, so the caller's own visitor runs once and the boot states the same facts beside the repeated work
+//   - the engine opens on the first call, so the open runs inside the stage that pays it exactly as the undecorated open does
+type unmeteredJournal struct {
+	mu     sync.Mutex
+	root   string
+	engine ledger.AtomicStore
+	repeat int
+	stage  string
+	work   map[string]*boundaryWork
+}
+
+// opened answers the engine the view wraps, opening the durable engine of its root on
+// the first call.
+func (s *unmeteredJournal) opened(ctx context.Context) (ledger.AtomicStore, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.engine != nil {
+		return s.engine, nil
+	}
+	store, err := ledger.OpenAtomicStore(ctx, ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: s.root, WriteRights: true})
+	if err != nil {
+		return nil, err
+	}
+	s.engine = store
+	return store, nil
+}
+
+// begin states the stage the walk is spending, so the calls below are counted there.
+func (s *unmeteredJournal) begin(stage string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.stage = stage
+}
+
+// stages answers the work every stage spent, read after the stage closed.
+func (s *unmeteredJournal) stages() map[string]boundaryWork {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make(map[string]boundaryWork, len(s.work))
+	for name, work := range s.work {
+		out[name] = *work
+	}
+	return out
+}
+
+// counted answers the work record of the stage the walk named, created on first use.
+// The caller holds the lock.
+func (s *unmeteredJournal) counted() *boundaryWork {
+	work, held := s.work[s.stage]
+	if !held {
+		work = &boundaryWork{}
+		s.work[s.stage] = work
+	}
+	return work
+}
+
+// Read answers the pairs the fetch names after the view counted the call it really made.
+func (s *unmeteredJournal) Read(ctx context.Context, fetch ledger.Fetch) ([]ledger.Pair, error) {
+	engine, err := s.opened(ctx)
+	if err != nil {
+		return nil, err
+	}
+	var pairs []ledger.Pair
+	for pass := 0; pass <= s.repeat; pass++ {
+		answer, err := engine.Read(ctx, fetch)
+		if err != nil {
+			return nil, err
+		}
+		s.mu.Lock()
+		work := s.counted()
+		work.reads++
+		work.readPairs += len(answer)
+		for _, pair := range answer {
+			work.readBytes += len(pair.Value)
+		}
+		s.mu.Unlock()
+		pairs = answer
+	}
+	return pairs, nil
+}
+
+// Keys answers the keys the prefix names after the view counted the enumeration.
+func (s *unmeteredJournal) Keys(ctx context.Context, prefix string) ([]string, error) {
+	engine, err := s.opened(ctx)
+	if err != nil {
+		return nil, err
+	}
+	var keys []string
+	for pass := 0; pass <= s.repeat; pass++ {
+		answer, err := engine.Keys(ctx, prefix)
+		if err != nil {
+			return nil, err
+		}
+		s.mu.Lock()
+		work := s.counted()
+		work.enumerations++
+		work.enumerated += len(answer)
+		s.mu.Unlock()
+		keys = answer
+	}
+	return keys, nil
+}
+
+// Namespaces answers the namespaces the store holds, counted as an enumeration.
+func (s *unmeteredJournal) Namespaces(ctx context.Context) ([]string, error) {
+	engine, err := s.opened(ctx)
+	if err != nil {
+		return nil, err
+	}
+	names, err := engine.Namespaces(ctx)
+	if err != nil {
+		return nil, err
+	}
+	s.mu.Lock()
+	s.counted().enumerations++
+	s.mu.Unlock()
+	return names, nil
+}
+
+// Commit applies the batch through the engine the view wraps, counted as the one write
+// the process asked for: the repeated work below is read work, never a second write.
+func (s *unmeteredJournal) Commit(ctx context.Context, batch ledger.Batch) error {
+	engine, err := s.opened(ctx)
+	if err != nil {
+		return err
+	}
+	s.mu.Lock()
+	work := s.counted()
+	work.commits++
+	work.commitPairs += len(batch.Puts)
+	s.mu.Unlock()
+	return engine.Commit(ctx, batch)
+}
+
+// EachCommittedNewestFirst hands the walk to the engine's own committed order after
+// the view counted the entries it named, repeating the traversal alone so the visitor
+// this process handed in runs once.
+func (s *unmeteredJournal) EachCommittedNewestFirst(ctx context.Context, visit func(key string, value []byte) (bool, error)) error {
+	engine, err := s.opened(ctx)
+	if err != nil {
+		return err
+	}
+	ordered, held := engine.(ledger.CommitOrder)
+	if !held {
+		return fmt.Errorf("the engine %T states no committed order, so a view beside it states none", engine)
+	}
+	for pass := 0; pass <= s.repeat; pass++ {
+		last := pass == s.repeat
+		if err := ordered.EachCommittedNewestFirst(ctx, func(key string, value []byte) (bool, error) {
+			s.mu.Lock()
+			work := s.counted()
+			work.walkEntries++
+			work.walkBytes += len(value)
+			s.mu.Unlock()
+			if !last {
+				return true, nil
+			}
+			return visit(key, value)
+		}); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// IntegrityBytesScanned answers the zero this view states: the engine's own count is
+// what a deployment removing it states nowhere.
+func (s *unmeteredJournal) IntegrityBytesScanned() int64 { return 0 }
+
+// SlotTableBytesScanned answers the zero this view states.
+func (s *unmeteredJournal) SlotTableBytesScanned() int64 { return 0 }
+
+// ValueReads answers the zero this view states.
+func (s *unmeteredJournal) ValueReads() int64 { return 0 }
+
+// IntegrityPassSpan answers the empty pair this view states: the verification runs
+// behind it, and the pair it took is the measure a deployment switched off.
+func (s *unmeteredJournal) IntegrityPassSpan() (time.Time, time.Time) {
+	return time.Time{}, time.Time{}
+}
+
+// Close ends the view over the engine it wrapped, and closes nothing beside no engine.
+func (s *unmeteredJournal) Close() error {
+	s.mu.Lock()
+	engine := s.engine
+	s.engine = nil
+	s.mu.Unlock()
+	if engine == nil {
+		return nil
+	}
+	closer, held := engine.(interface{ Close() error })
+	if !held {
+		return nil
+	}
+	return closer.Close()
+}
+
+// unmeteredGeneration is what one generation of the metrics-off walk did and the
+// boundary work each stage of it really spent.
+type unmeteredGeneration struct {
+	restored        int
+	committed       int
+	journalLogBytes int64
+	stages          map[string]boundaryWork
+}
+
+// recoveryStages names the stages one generation of the metrics-off walk spends, in
+// the order it spends them.
+var recoveryStages = []string{"boot", "commits", "closing"}
+
+// walkUnmeteredGenerations boots the named number of generations over one durable root
+// through an engine that states no measure of its own, and answers the boundary work
+// every stage really spent.
+func walkUnmeteredGenerations(t *testing.T, ctx context.Context, root string, addr event.Address, generations, turns int) []unmeteredGeneration {
+	t.Helper()
+	walk := make([]unmeteredGeneration, generations)
+	for generation := 0; generation < generations; generation++ {
+		view := &unmeteredJournal{root: root, work: map[string]*boundaryWork{}}
+		logBytes := journalLogBytesOf(t, root)
+		view.begin("boot")
+		boot := noTrimChainRun(t, ctx, WithStorage(ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: root, Engine: view}))
+		restored := boot.tier.Segments.EventCount()
+		boot.stopCheckpointFiler()
+		view.begin("commits")
+		commitSessionTurns(t, ctx, boot, addr, fmt.Sprintf("unmetered-%d", generation), turns)
+		committed := boot.tier.Segments.EventCount() - restored
+		view.begin("closing")
+		if _, err := boot.Close(ctx, agent.CloseRequest{Timeout: time.Now().Add(2 * time.Second)}); err != nil {
+			t.Fatalf("close the process of generation %d: %v", generation, err)
+		}
+		walk[generation] = unmeteredGeneration{
+			restored:        restored,
+			committed:       committed,
+			journalLogBytes: logBytes,
+			stages:          view.stages(),
+		}
+	}
+	return walk
+}
+
+// unmeteredBoot boots one root through a view that states no measure of its own,
+// answers the work its boot stage really spent beside the log it opened, and closes
+// without committing, so two boots of one log are the same work.
+func unmeteredBoot(t *testing.T, ctx context.Context, root string, repeat int) (boundaryWork, int64) {
+	t.Helper()
+	view := &unmeteredJournal{root: root, repeat: repeat, work: map[string]*boundaryWork{}}
+	logBytes := journalLogBytesOf(t, root)
+	view.begin("boot")
+	run := noTrimChainRun(t, ctx, WithStorage(ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: root, Engine: view}))
+	work := view.stages()["boot"]
+	if integrity, slot, values, span, stated := engineMeasures(run.tier); !stated {
+		t.Fatalf("the boot holds the engine %T, which states no measure face, so the switched-off state below is not the one judged", run.tier.Store)
+	} else if integrity != 0 || slot != 0 || values != 0 || span {
+		t.Fatalf("the boot states %d, %d and %d byte(s) beside a stated verification span %t, want the zero of a measure a deployment switched off", integrity, slot, values, span)
+	}
+	run.stopCheckpointFiler()
+	endRun(t, run)
+	return work, logBytes
+}
+
+// engineMeasures answers what one boot's engine states about its own work: the bytes a
+// complete-frame check scanned, the slot table bytes the enumerations read, the values
+// read back by address, and whether a verification span stands at all.
+func engineMeasures(tier *ledger.Tier) (integrity, slot, values int64, span bool, stated bool) {
+	probe, held := tier.Store.(interface {
+		IntegrityBytesScanned() int64
+		SlotTableBytesScanned() int64
+		ValueReads() int64
+		IntegrityPassSpan() (time.Time, time.Time)
+	})
+	if !held {
+		return 0, 0, 0, false, false
+	}
+	begin, end := probe.IntegrityPassSpan()
+	return probe.IntegrityBytesScanned(), probe.SlotTableBytesScanned(), probe.ValueReads(), !begin.IsZero() || !end.IsZero(), true
+}
+
+// judgeUnmeteredFixture answers why one walk proves nothing about recovery over a
+// growing chain, and nil beside a walk whose chain really grew.
+func judgeUnmeteredFixture(walk []unmeteredGeneration, generations int) error {
+	if len(walk) != generations {
+		return fmt.Errorf("the walk booted %d generation(s), want the %d it was asked for", len(walk), generations)
+	}
+	if walk[0].restored != 0 {
+		return fmt.Errorf("the first generation boots a store holding %d fact(s), want the empty root a walk starts on", walk[0].restored)
+	}
+	for generation := 1; generation < len(walk); generation++ {
+		if walk[generation].restored <= walk[generation-1].restored {
+			return fmt.Errorf("the boot of generation %d restored %d fact(s) beside the %d its predecessor restored, want a chain that grew", generation, walk[generation].restored, walk[generation-1].restored)
+		}
+	}
+	if last := walk[len(walk)-1].journalLogBytes; last <= walk[0].journalLogBytes {
+		return fmt.Errorf("the last generation opened a log of %d byte(s) beside the %d the first opened, want a log that grew", last, walk[0].journalLogBytes)
+	}
+	return nil
+}
+
+// judgeRecoveryWorkUnmoved answers why one stage really spent more at the engine boundary than another over the same work, and nil beside two readings whose every count agrees.
+//   - the counts are what the process asked the engine for, so a repeated read moves them whether or not any measure the engine keeps states it
+//   - every face is compared, so a reading that hides its growth behind an unchanged total is refused by name
+func judgeRecoveryWorkUnmoved(name string, control, held map[string]boundaryWork) error {
+	faces := []struct {
+		face  string
+		count func(boundaryWork) int
+	}{
+		{face: "reads", count: func(w boundaryWork) int { return w.reads }},
+		{face: "read pairs", count: func(w boundaryWork) int { return w.readPairs }},
+		{face: "read bytes", count: func(w boundaryWork) int { return w.readBytes }},
+		{face: "enumerations", count: func(w boundaryWork) int { return w.enumerations }},
+		{face: "enumerated keys", count: func(w boundaryWork) int { return w.enumerated }},
+		{face: "walk entries", count: func(w boundaryWork) int { return w.walkEntries }},
+		{face: "walk bytes", count: func(w boundaryWork) int { return w.walkBytes }},
+		{face: "commits", count: func(w boundaryWork) int { return w.commits }},
+		{face: "commit pairs", count: func(w boundaryWork) int { return w.commitPairs }},
+	}
+	stages := make([]string, 0, len(control))
+	for stage := range control {
+		stages = append(stages, stage)
+	}
+	sort.Strings(stages)
+	for _, stage := range stages {
+		want, held := held[stage]
+		if !held {
+			return fmt.Errorf("the %s reading states no work for the stage %q the control states, want the calls that stage really made", name, stage)
+		}
+		for _, face := range faces {
+			if got := face.count(want); got != face.count(control[stage]) {
+				return fmt.Errorf("the %s stage %q asked the engine for %d %s beside the %d of the control over the same work: the work the process really spent grew while no measure states it",
+					name, stage, got, face.face, face.count(control[stage]))
+			}
+		}
+	}
+	return nil
+}
+
+// judgeRecoveryStagesRan answers why one generation states no work for a stage the walk really spends, and nil beside a reading that names the calls of every stage.
+//   - a stage the record does not hold at all is a stage the account dropped, so it is refused by name instead of read as a stage the process skipped
+//   - a boot over a log holding bytes reads, enumerates or walks, so a boot stating none of them restored nothing
+//   - a generation that committed asked for at least one write
+func judgeRecoveryStagesRan(walk []unmeteredGeneration) error {
+	for generation, entry := range walk {
+		for _, stage := range recoveryStages {
+			work, stated := entry.stages[stage]
+			if !stated {
+				return fmt.Errorf("the generation %d states no work for the stage %q the walk spends, want the calls that stage made: a stage an account drops is no stage the process skipped", generation, stage)
+			}
+			if stage == "boot" && entry.journalLogBytes > 0 && work.reads == 0 && work.enumerations == 0 && work.walkEntries == 0 {
+				return fmt.Errorf("the boot of generation %d states no read, no enumeration and no walk over a log holding %d byte(s), want the facts it restored", generation, entry.journalLogBytes)
+			}
+			if stage == "commits" && entry.committed > 0 && work.commits == 0 {
+				return fmt.Errorf("the commits of generation %d state no write beside the %d fact(s) the chain grew, want the commits that stage made", generation, entry.committed)
+			}
+		}
+	}
+	return nil
+}
+
+// withoutStage answers one walk with the work of one stage dropped from one generation,
+// which is the shape of an account that stops stating a stage it really spends.
+func withoutStage(walk []unmeteredGeneration, at int, stage string) []unmeteredGeneration {
+	out := slices.Clone(walk)
+	stages := make(map[string]boundaryWork, len(out[at].stages))
+	for name, work := range out[at].stages {
+		if name == stage {
+			continue
+		}
+		stages[name] = work
+	}
+	out[at].stages = stages
+	return out
+}
+
+// TestRecoveryCostDetectsGrowthWithInstrumentationDisabled is the growth counter-example of a deployment that keeps no measure of its own.
+//   - fixture: three generations boot, commit and close over one durable root, so every boot restores more facts than the one before it
+//   - every generation is booted through a view that states the zero of every count and no verification span, so no measure below can be what catches a growth
+//   - the view counts the calls the process really made: the reads, the enumerations and the entries of every walk, stage by stage
+//   - two boots of one log ask for the same work, so the judgement holds them equal and is no blanket refusal
+//   - a third boot of that log repeats every read: the judgement refuses it by name
+//   - the counts the process asked for are the face a switched-off measure leaves
+//   - a reading that drops a stage is refused by name rather than read as a stage the process skipped, so no walked stage is folded into "took no time"
+//   - the guarantee the switch does not touch: an engine stating its measures still verifies the whole log it opens, and the log it opened is the one on disk
+//
+// 契约: docs/wiki/memory/memory-architecture.md#gaps
+func TestRecoveryCostDetectsGrowthWithInstrumentationDisabled(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Second)
+	defer cancel()
+	addr := event.Address{AgentID: "agent-a", SessionID: "session-unmetered-cost"}
+	const generations, turns = 3, 1
+	root := t.TempDir()
+	walk := walkUnmeteredGenerations(t, ctx, root, addr, generations, turns)
+	if err := judgeUnmeteredFixture(walk, generations); err != nil {
+		t.Fatalf("the walk proves nothing, so no reading below is a claim about a growing chain: %v", err)
+	}
+	if err := judgeRecoveryStagesRan(walk); err != nil {
+		t.Fatalf("a stage the walk really spends states no work: %v", err)
+	}
+	t.Logf("the metrics-off walk read %d value(s) and walked %d entry(ies) at the deepest boot",
+		walk[len(walk)-1].stages["boot"].reads, walk[len(walk)-1].stages["boot"].walkEntries)
+
+	plain, logBytes := unmeteredBoot(t, ctx, root, 0)
+	mirror, mirrorBytes := unmeteredBoot(t, ctx, root, 0)
+	if mirrorBytes != logBytes {
+		t.Fatalf("the second boot opened a log of %d byte(s) beside the %d the first opened, want one boot to commit nothing", mirrorBytes, logBytes)
+	}
+	control := map[string]boundaryWork{"boot": plain}
+	if err := judgeRecoveryWorkUnmoved("control", control, map[string]boundaryWork{"boot": mirror}); err != nil {
+		t.Fatalf("the judgement refused two boots of one log, so it decides nothing about the work a boot repeats: %v", err)
+	}
+	held, heldBytes := unmeteredBoot(t, ctx, root, 1)
+	if heldBytes != logBytes {
+		t.Fatalf("the repeated boot opened a log of %d byte(s) beside the %d the control opened, want the same log", heldBytes, logBytes)
+	}
+	err := judgeRecoveryWorkUnmoved("held", control, map[string]boundaryWork{"boot": held})
+	if err == nil {
+		t.Fatal("the judgement accepted a boot that read the log twice beside every measure switched off, want it refused by name: the counts the process asks for are the only face left")
+	}
+	if !strings.Contains(err.Error(), "no measure states it") {
+		t.Fatalf("the judgement refused the repeated boot with %v, want the work the process repeated named", err)
+	}
+	t.Logf("the repeated boot was refused with: %v", err)
+
+	dropped := withoutStage(walk, len(walk)-1, "commits")
+	if err := judgeRecoveryStagesRan(dropped); err == nil {
+		t.Fatal("the judgement accepted a generation stating no work for a stage it spends, want it refused by name")
+	} else if !strings.Contains(err.Error(), "states no work for the stage") {
+		t.Fatalf("the judgement refused the dropped stage with %v, want the dropped stage named", err)
+	} else {
+		t.Logf("the dropped stage was refused with: %v", err)
+	}
+
+	guard := journalLogBytesOf(t, root)
+	instrumented := noTrimChainRun(t, ctx, WithStorage(ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: root}))
+	integrity, slot, values, span, stated := engineMeasures(instrumented.tier)
+	if !stated {
+		t.Fatalf("the boot holds the engine %T, which states no measure face, so the guarantee below is read on no engine", instrumented.tier.Store)
+	}
+	if integrity != guard {
+		t.Fatalf("the engine verified %d byte(s) of a log holding %d, want one pass over the whole log: switching the measures off is no licence to skip the check (%d slot byte(s), %d value(s), span stated %t)",
+			integrity, guard, slot, values, span)
+	}
+	instrumented.stopCheckpointFiler()
+	endRun(t, instrumented)
 }

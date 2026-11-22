@@ -1,51 +1,43 @@
-# 12 消费态生命周期（consumer-state-lifecycle）
+# A 提交—应用—义务
 
-> 状态：本轮规划重整**新增域**，四件套为首版。**只规划、不实施**；本文出现的类型名、字段名、切片载荷、接口签名一律是**候选、未冻结**，不得作为已批准实现签名引用。
->
-> 域边界一句话：05 管任务账、07 管治理账、03 管压缩账（他域负责），本域只负责**跨域的两条横切契约**——「已提交」与「已消费」的边界，以及消费者生命周期（挂载/禁用/卸载/替换）中的状态与义务交接。
+> 活动目录沿用 `12-consumer-state-lifecycle`。本轮只重整计划；六个新叶均未执行，实施方案未签发。共同合同见 [顶层 proposal](../../proposal.md)、[design](../../design.md)、[tasks](../../tasks.md) 与 [ORCHESTRATION](../../ORCHESTRATION.md)。
 
 ## Why
 
-一级 [design.md](../../design.md) D1 P2（单一 g(x)）/P3（全部托管）/P4（有界恢复）与 D10 行「单一状态消费、不丢义务」在本域范围内未兑现。D8 的 E6 已登记「状态应用失败只记错误 / StateRegistry 卸载与 pending 恢复」，但未给出行为证据与边界定义；本轮读码补齐（✅ 实测，行号只作定位不作契约）：
+用户要求恢复后接着做，不漏掉未完工作，不重复已经完成的处理，也不把失败说成成功。当前候选已有原子提交、状态托管和失败保欠机制，但这些机制是否在同一条真实调用链上闭合，不能由旧勾选或局部测试代替证明。
 
-1. **应用失败仍推进切面**：`reduceCommitted`（assembly/facts.go:142-155）把消费者折叠失败交给 `assemblyError` 记录后返回，`commitFactNoCadence`（facts.go:86-130，:124 调用）不因此失败；切面水位取自分区落地序号（assembly/checkpoint.go:297-306），`checkpointLocked` 只在 `flight.await`（checkpoint.go:355，等待在途提交单元结束，不等待其成功）之后取 `SnapshotState` 并把该水位写入 `r.checkpointOffset`（:373）。故一条「已提交、未应用」的事实会被下一个切面覆盖，而恢复只重放**水位之后**的事实（`eachFactPastCut` assembly/checkpoint.go:1124-1157、`pastCut` :1158-1166），该消费者此后永远落后于链，且无具名失败。
-2. **消费失败被静默吞掉**：结算结果已经落链（`Advance` 返回 `CommitCommitted`）之后，`Wrapper.execute` 对信箱写入 `if err := w.mailbox(ctx, notice); err != nil { return }`（runtime/task/wrapper.go:312-314）直接返回，既不记录也不上抛；同一函数对 `Advance` 失败同样是裸 `return`（:309-311）。这就是「静默吞消费错误仍推进」的现存路径。
-3. **生命周期无义务交接**：`StateRegistry.Register` 的 disposer（runtime/state/checkpoint.go:171-188）只删 `holders[name]` 与 `names` 条目，被删切片已陈述的状态与未完义务就地消失；`PendingRestore`（:402-415）只在 boot 期由 host 具名拒绝（assembly/host.go:777-779），运行期注销无对应检查。代际注册表 `GenRegistry`（runtime/state/genregistry.go:121-144）只有 `Register`/`Build`，替换代际时 `GenResources.Restore` 仅在候选未生效时回滚（:71-83），**成功切换的新实例不继承旧实例的已陈述状态**。
-4. **切片注册早于插件挂载**：三个 run 级切片在装配期无条件注册（assembly/run.go:576-580），插件实例在之后挂载（:596-607）。`plugins: -<name>` 禁用某个 builtin 时，其切片仍然 `SnapshotState`/`RestoreState`，而消费方不存在；`compressSlice`（assembly/compress_checkpoint.go:73-80）对 `r.compress` 无 nil 保护（⚠️ 读码推断，**未实跑**，结论只写「无交接声明」，不写「必 panic」）。
-5. **本域不重定义他域账**：tasks 切片与 mailbox 切片只实现三方法，无 `SnapshotSessionState`（assembly/task_checkpoint.go:32-50、runtime/state/mailbox_checkpoint.go 无会话面），故**任务账是 registry 全局账、不进会话切面**；压缩账的 `judgments/answered` 不清减属 03 域；governance 账的有效态属 07 域。本域不为它们各立一份清减判据。
+静态读码发现待反证的窗口：任务快照读取与 checkpoint 落盘之间的新提交；落盘锁外的 A/B 应用顺序及同键预查；审批和目标写失败后的内存可见性；收据读错被当成不存在；Backflow 保欠返回与任务投递义务、恢复泵所需事实之间的衔接。它们都是候选疑点，不是本轮已复现缺陷。
 
-用户原话锚（不得被工程化目标替换）：用户要的是「恢复后能接着做、不重不漏、不假装完成」。本域的症状直译锚草案见 design §五。
+## What Changes
 
-## What
+本单元吸收旧 05 任务托管、07 审批治理、11 原子提交的提交消费语义，以及旧 12 消费状态生命周期；不再把同一次提交后的状态、收据和义务拆给互相等待的旧域。
 
-承一级 D8 的 G2 与 D9 的「12.R2 依 G1/G2、12.R3 依 12.R2」：
+| 阶段 | 产出 | 叶 |
+|---|---|---|
+| 取证 | 真实时序、失败切点、成立/驳回/未证及最小反证 | 12.101 |
+| 设计 | 保留、最小修正、删并比较；独立设计审与完整实施签发 | 12.102 |
+| 实施 | 所选提交/应用/快照截止语义，再闭合审批/目标/通知义务 | 12.103、12.104 |
+| 验收 | 全路径回归、独立审及结构删除核销 | 12.105、12.106 |
 
-- **12.R1 设计门（与 05.R1、07.R1 共用一张 G2 判据表）**：分别证明各族状态的处理水位、未完集合、有效历史状态与按身份查询入口；补齐「已提交未消费」与「插件生命周期」两类证据，并把缺口固化成**红着的**验收锚。只允许调查、只读取证与红锚原型，未通过不得进入 R2/R3 的实现。
-- **12.R2 已提交但未消费的处理边界与同一状态应用（依 11.R2 + G2）**：定义并实现「一条事实被切面覆盖前必须已被其消费者应用」的边界（拒绝切面 / 保留该切片的应用水位 / 重放补齐，三选一由 R1 裁定，**均未冻结**）；把静默吞掉的消费失败改为具名上报并保留义务；运行期与恢复期继续走同一条 `Reduce`。不承诺无接收方支持的 exactly-once，不把多个外部动作塞进一个事务。
-- **12.R3 动态挂载/禁用/卸载/替换的义务交接（依 12.R2）**：状态切片与消费实例的**生命周对齐**——禁用/卸载/替换时，未完义务与已陈述状态具名交接或具名拒绝，不得静默消失；复用**既有**注册声明（builtin 目录 + `plugins:` 声明 + `Stateful` 注册），**不新增第四挂点、不新建第二注册体系**。
+保留事实原字节与原序、领域身份等价、整批原子性和耐久屏障、结果未知不冒成功；保留任务三族收据、审批原身份与有效期、目标和历史查询、未完义务与原授权 scope。运行和恢复的可观察状态一致；有效态随有效工作计费，不以删历史或 TTL 清欠换取有界。
 
-**不做的（显式登记）**：不在本域清减压缩账（03 负责）；不改 tasks/governance 切片的字段语义（05/07 负责）；不承诺「每种状态 O(1)」，也不以删除 `answered`/已结身份来伪造有界；不因为跨代际重启而额外承诺 exactly-once。
+有序队列、持久游标字段、Repeat 面去留、全局拒 cut 范围以及 Backflow 先投或后投均未选定。旧实现裁定可由新证据推翻；改变的是实现，不是上述用户行为目标。已驳回的“前 holder 失败跳过 projection”不作为修复理由。
 
 ## Capabilities
 
-四能力**全部复用既有主规格**，不新建同义能力（先查重叠后的准确 Requirement 标题）：
+复用四份验收增量：[session-checkpoint-material](specs/session-checkpoint-material/spec.md)、[consumer-loop-convergence](specs/consumer-loop-convergence/spec.md)、[runtime-resource-ownership](specs/runtime-resource-ownership/spec.md)、[config-hot-reload](specs/config-hot-reload/spec.md)。规格陈述可验收行为，不冻结字段、接口数量或调度算法。
 
-- `session-checkpoint-material`：
-  - 「派生态有界且不删除已提交事实」——本域追加「水位不得覆盖未应用事实」「清减不得删除判重所需的已结身份」「当前态按有效工作计费」三条。
-  - 「`Stateful` 收编消费者读态且不新增挂点」——本域追加「注销/替换不得静默丢义务」「复用既有声明面」两条。
-- `consumer-loop-convergence`：「重入输入恰一次」——消费失败保留义务、由具名错误上报，重启后仍恰一次。
-- `runtime-resource-ownership`：「递归获取责任与关闭责任唯一」——持有可恢复态的消费者卸载/替换时责任按名转移。
-- `config-hot-reload`：「执行代绑定完整性」——结构热更换入/移除消费者时新代绑定同一状态权威。
+旧 05/07/11 的要求来源仍保留；本单元覆盖其行为不代表把旧 delta 原样拼入主规格。唯一合并输入与同能力冲突校验由 13.105 承接。
 
 ## 边界与依赖
 
-- **依赖**：G2 判据表（05.R1/07.R1 共建，本域只消费）；11.R2 的事实提交结果（「已提交」的权威定义与新增/已存在/冲突语义）；`Stateful` 接缝（runtime/state/checkpoint.go:36-45，签名冻结，一级 §五）；切面水位与重放（assembly/checkpoint.go:297-306/:341-373/:1124-1157）；结算与信箱（runtime/task/wrapper.go:301-316、runtime/state/{mailbox,memory}.go）；插件声明面（`assembly/plugin_catalog.go`、`plugins:` 解析、`state.GenRegistry`）。
-- **被依赖方**：05.R2/07.R2 的清减实现以本域「水位不覆盖未应用事实」为前置；其后所有清单减消费方（含 03 压缩账清减）继承同一条边界；F3 级联回滚证据需要本域的负锚（静默吞错 → 红）。
-- **接口面（候选、未冻结）**：`Stateful` 三方法**不变**；可能的改动只有两处候选——切片应用水位（候选名 `AppliedThrough`）与注销/替换时的交接声明（候选名 `HandsOver`），二者都必须在 R1 与编排者冻结后才可实施；不给每个消费者新增挂点或端口。
-- **禁止事项**：
-  - **SHALL NOT 删除/覆盖/改写已提交事实**（`session-checkpoint-material` 的 Requirement「派生态有界且不删除已提交事实」）；有界化只改「读什么、切面覆盖到哪」，不改链。
-  - 不造第四挂点、不建第二注册体系；builtin 与扩展走**同一**注册声明。
-  - 不承诺无接收方支持的 exactly-once；不把多外部动作强行合成一个事务。
-  - 不触外来未跟踪文件（`runtime-architecture-convergence/`、`scripts/gates/check_event_semantics_symptoms.py`、`runtime_budgets.py`、`test_check_runtime_symptoms.py`、`skills/interview/agent-interview-helper/`）；不触 `config-surface-normalization` 未提交变更。
-  - 不改写冻结归档（`openspec/changes/archive/**` 零 diff，只附勘误）；不改主规格（`openspec/specs/**`）、不改 `scripts/gates/**` 与 `golden/**`。
-  - 本文档阶段**只规划不实施**；不提交、不推送、不归档。
+- **依赖**：13.101 是目标/旧项/候选身份的入口证据；06.101 与 13.102 是设计输入，不是待实现接口。12.103 另依 06.102 的设计签发；12.105 另依 13.104 的真实能力接线。具体前置只见 [tasks](tasks.md)，不等待旧域归档。
+- **被依赖方**：B（06）使用 A 定义的快照覆盖与应用所需位置；C（13）使用 A 的真实失败/恢复/生命周期证据核能力与规格；最终 F 使用 12.106 的独立核销，不继承旧测试绿。
+- **接口面**：事实身份与提交结局、状态应用和快照截止、任务账户与信箱、审批/目标查询、通知接收/收据/恢复泵、注册与代际绑定。既有面是比较起点，不是签名冻结；A/B 共享语义在 [design D5](design.md#d5-与-bc-的共享语义) 指定唯一签发归属。
+- **禁止事项**：不代 B 重做存储引擎/派生索引，不代 C 扩展能力声明或验证框架；不以无真实消费者的队列、hook、状态字段或第二注册体系填补想象缺口；不承诺接收方不支持的外部 exactly-once。本轮写面与安全纪律以顶层合同及本次指定文件为限。
+
+## 完成条件与历史
+
+12.102 的未签发区完整填写并经独立设计审后，才可按精确写面派实施；12.105 逐名非零执行三锚及完整模式矩阵，12.106 按旧目标、已选设计和全部调用方核销。反证不成立时关闭怀疑而非删除目标；未证不等于通过。
+
+旧版原文见 [历史快照](../../history/7b0cde16-before-replan/changes/12-consumer-state-lifecycle/)。本次重写不改历史，不承接旧完成状态，不宣称运行时问题已解决。

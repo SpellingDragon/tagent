@@ -286,12 +286,24 @@ func (p *reentryProvider) answer(request intakeRequest, terminal func(kind strin
 		return delegation(reentryCallAbsent, "absent", reentryAbsentModel)
 	case failed != "" && p.claim(reentryCallSendFailed):
 		return send(reentryCallSendFailed, failed)
-	case symptomCarries(request, reentryFailedDenial) && p.claim(reentryCallSendNowhere):
+	case p.answered(reentryCallSendFailed) && p.claim(reentryCallSendNowhere):
 		return send(reentryCallSendNowhere, reentryNowhereTask)
-	case symptomCarries(request, reentryUnknownDenial) && settled != "" && p.claim(reentryCallSendSettle):
+	case p.answered(reentryCallSendNowhere) && settled != "" && p.claim(reentryCallSendSettle):
 		return send(reentryCallSendSettle, settled)
 	}
 	return intakeFinalAnswer(reentryTurnDone)
+}
+
+// answered reports whether the endpoint already issued the named call. The three send
+// decisions stand in an order of their own rather than in the order their refusals reach a
+// decision: every settled call of the range lands its own delivery fact beside the refusal
+// of the call before it, so which of them a decision carries is pacing, not the subject.
+// Each refusal is pinned where it really lives — the fact it was answered with, read by
+// call identity — never by the request that asked for the next call.
+func (p *reentryProvider) answered(call string) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.issued[call]
 }
 
 // claim reports whether the named call is this request's to issue, exactly once.
@@ -318,12 +330,20 @@ func (p *reentryProvider) requests() []intakeRequest {
 
 // reentryTerminalTask reports the task the last terminal notification of one kind in a
 // session chain belongs to: the settled or the failed notification the entry turn reads.
+//
+// The notice kind alone names no such notification: every settled call of a range commits
+// the delivery fact of its own task under the same kind, and that fact states the settle
+// line alone. The terminal this reads is the one carrying the round's own result — the
+// delegated round that was handed back, never the settle of the call that carried it.
 func reentryTerminalTask(facts []event.Event, kind string) event.TaskID {
 	for at := len(facts) - 1; at >= 0; at-- {
 		if facts[at].Type != event.TypeTaskSettled || facts[at].TaskID == "" {
 			continue
 		}
 		if facts[at].Meta[event.MetaKeyNoticeKind] != kind {
+			continue
+		}
+		if !strings.Contains(facts[at].Message.Content, "result:") {
 			continue
 		}
 		return facts[at].TaskID

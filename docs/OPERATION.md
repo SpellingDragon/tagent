@@ -9,7 +9,7 @@
 ## 一、结论层：接手第一天只需三件事
 
 1. **仓库是三个 module**：根 module、`examples/wechat-bot`、`examples/cli-host`（各自独立 module，无 `go.work`）。根 `./...` 永远到不了这两个示例 module，构建/测试/vet 都必须各跑一遍。
-2. **五个门禁入口**：`bash scripts/lint.sh`（格式+构建+vet+注释棘轮+文档/脚本门）、`go mod verify`、`bash scripts/gates/check-openspec.sh`、`./scripts/gates/race_check.sh`、`bash scripts/gates/gen_godoc.sh --check`。CI 与本地跑的是同一批脚本，所以"本地绿"与"CI 绿"不会是两个意思。
+2. **五个门禁入口**：`bash scripts/lint.sh`（格式+构建+vet+注释棘轮+文档/脚本门）、`go mod verify`、`bash scripts/gates/check-openspec.sh`、`./scripts/gates/race_check.sh`、`bash scripts/gates/gen_godoc.sh --check`。CI 与本地跑的是同一批脚本，所以"本地绿"与"CI 绿"不会是两个意思。归档另有拒绝入口 `bash scripts/gates/archive-preflight.sh`（`--evidence DIR` 或 `--commit REV`）：`lint.sh` 在提交含 `openspec/*/archive/` 路径变化时自动调用，CI 归档作业按 revision 绑定调用——证据不绑定该树即拒绝归档（R13，2026-11-22 补记）。
 3. **三条风险面**：配置严格解码（未知键**拒启动**）、pre-release 无迁移承诺、依赖 pin 与白盒测试欠账（§七·D）。
 
 ---

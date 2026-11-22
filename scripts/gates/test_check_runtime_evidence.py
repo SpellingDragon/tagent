@@ -1505,6 +1505,99 @@ class EventEvidenceTest(EventFixture, unittest.TestCase):
         self.assertNotEqual(code, 0)
         self.assertIn("missing verdict for mandatory anchor", out)
 
+    def anchor_rows(self, tests, anchor):
+        """One anchor's rows in a legal log, as (package, [rows]) for rewriting."""
+        package = event_full_package(tests[0]["module_path"], tests[0]["test_package"])
+        return package, [row for row in event_log(self.contract, tests)
+                         if row["Package"] == package and row["Test"] == anchor]
+
+    def test_raw_child_events_determine_subtest_verdict(self):
+        """合法原始 run/pass 被接受，且被判的那个判词就是日志子行派生的判词。
+
+        证据里的 `subtests[].status` 是生产者自己的话；run 的原始子测试行才是判据。
+        两件事同时成立才算这条锚成立：合法日志被接受，且 checker 的判词与生产者的
+        派生（import 而非复述）逐条相同——否则同一份日志会有两个解释。
+        """
+        tests = event_tests(self.contract, "event-short")
+        rows = event_log(self.contract, tests)
+        evidence = self.evidence("event-short", tests)
+        actions = runner.index_event_actions(
+            rows, sorted({test["module_path"] for test in tests}))
+        derived = {}
+        for test in tests:
+            for state in runner.event_subtest_states(test, actions):
+                derived[(test["id"], state["name"])] = state["status"]
+        self.assertEqual(set(derived.values()), {"pass"})
+        self.assertEqual({(entry["test_id"], entry["name"]): entry["status"]
+                          for entry in evidence["subtests"]}, derived)
+        code, out, err = self.verify(evidence, rows)
+        self.assertEqual(code, 0, out + err)
+        self.assertEqual(json.loads(out)["counts"]["event_anchors_checked"], len(derived))
+
+    def test_subtest_without_run_is_refused(self):
+        """父测试通过而子锚从未 run：自报 pass 不再成立，按缺 run 点名该 (parent,name)。"""
+        tests = event_tests(self.contract, "event-short")
+        test = tests[0]
+        anchor = test["test_name"] + "/" + test["subtests"][0]["name"]
+        package, _ = self.anchor_rows(tests, anchor)
+        rows = [row for row in event_log(self.contract, tests)
+                if not (row["Package"] == package and row["Test"] == anchor)]
+        code, out, _ = self.verify(self.evidence("event-short", tests), rows)
+        self.assertNotEqual(code, 0, out)
+        self.assertIn("({},{}) states 'pass' but the test-log child events show 'missing'".format(
+            test["id"], test["subtests"][0]["name"]), out)
+
+    def test_parent_pass_cannot_invent_a_subtest_pass(self):
+        """父的 run+pass 有效，不能因此替一个没出现的子锚作保。
+
+        这里子测试行仍在日志里，但记在另一个名字下：父 pass 与某一子行的 pass 一起
+        存在，只有被证据点名的那枚锚没有任何行。父通过不是子通过的凭据。
+        """
+        tests = event_tests(self.contract, "event-short")
+        test = tests[0]
+        claimed = test["subtests"][0]["name"]
+        anchor = test["test_name"] + "/" + claimed
+        package, anchor_rows = self.anchor_rows(tests, anchor)
+        self.assertEqual(len(anchor_rows), 2)
+        rows = event_log(self.contract, tests)
+        for row in rows:
+            if row["Package"] == package and row["Test"] == anchor:
+                row["Test"] = anchor + "-other"
+        parent_terminals = [row for row in rows
+                            if row["Package"] == package and row["Test"] == test["test_name"]
+                            and row["Action"] == "pass"]
+        self.assertEqual(len(parent_terminals), 1)
+        code, out, _ = self.verify(self.evidence("event-short", tests), rows)
+        self.assertNotEqual(code, 0, out)
+        self.assertIn("({},{}) states 'pass' but the test-log child events show 'missing'".format(
+            test["id"], claimed), out)
+
+    def test_same_log_has_one_verdict_across_consumers(self):
+        """同一份日志在 runner 与 checker 里是同一个判词，不是两个。
+
+        runner 用 `attest_event_test` 说该测试未被证明并点名那枚锚；checker 必须
+        对同一份日志给出同一个派生（该锚 missing）并拒绝，否则一条日志就有了两套解释。
+        """
+        tests = event_tests(self.contract, "event-short")
+        test = tests[0]
+        claimed = test["subtests"][0]["name"]
+        anchor = test["test_name"] + "/" + claimed
+        package, _ = self.anchor_rows(tests, anchor)
+        rows = [row for row in event_log(self.contract, tests)
+                if not (row["Package"] == package and row["Test"] == anchor)]
+        actions = runner.index_event_actions(
+            rows, sorted({entry["module_path"] for entry in tests}))
+        attested = runner.attest_event_test(test, actions)
+        self.assertEqual(attested["state"], "unattested")
+        self.assertIn(claimed, attested["reason"])
+        derived = {state["name"]: state["status"]
+                   for state in runner.event_subtest_states(test, actions)}
+        self.assertEqual(derived[claimed], "missing")
+        code, out, _ = self.verify(self.evidence("event-short", tests), rows)
+        self.assertNotEqual(code, 0, out)
+        self.assertIn("({},{}) states 'pass' but the test-log child events show {!r}".format(
+            test["id"], claimed, derived[claimed]), out)
+
     def test_off_matrix_seed_window_is_rejected(self):
         tests = event_tests(self.contract, "event-long")
         evidence = self.evidence("event-long", tests, seed=1, window=512)

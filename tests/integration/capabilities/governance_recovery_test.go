@@ -29,7 +29,7 @@ import (
 // - an exhausted budget window refuses the call whatever the grade says, and a restart resumes the spent window
 // - a restart replays the governance events back and keeps the denial records with their goal permeation
 // - concurrent declarations and records keep every counter exact
-// - a failing store and a bad snapshot degrade instead of failing the gate
+// - a declaration the stream refused leaves the effective state where the stream stands, and a bad snapshot degrades instead of failing the gate
 // 契约: docs/wiki/agent/governance-enforcement.md#goal-registry
 func TestGovernanceRecovery(t *testing.T) {
 	t.Run("a declared goal activates the goal gate and a refusal permeates the goal context", func(t *testing.T) {
@@ -351,7 +351,7 @@ func TestGovernanceRecovery(t *testing.T) {
 		}
 	})
 
-	t.Run("a failing store and a bad snapshot degrade instead of failing the gate", func(t *testing.T) {
+	t.Run("a refused stream leaves the effective state where the stream stands and a bad snapshot degrades", func(t *testing.T) {
 		failing := recFailingLog{}
 		goals := governance.NewGoalRegistry()
 		if err := goals.Bind(context.Background(), failing); err == nil {
@@ -361,12 +361,19 @@ func TestGovernanceRecovery(t *testing.T) {
 		if err := ledger.Bind(context.Background(), failing); err == nil {
 			t.Fatalf("a store that cannot be read must report the unread tail to the binder")
 		}
-		if id := goals.Declare("keep going", "entry", 0); id == "" {
-			t.Fatalf("a failing store must not swallow the declaration")
+		if id := goals.Declare("keep going", "entry", 0); id != "" {
+			t.Fatalf("the declaration a refused stream answers = %q, want no identity: the goal the gate rules on is the goal a restart reads back", id)
 		}
 		ledger.Record(governance.DenialRecord{Subtype: governance.SubtypeDenial, ToolName: "shell_exec", Level: plugin.RiskMedium, Reason: "store down"})
-		if ledger.Count() != 1 || len(goals.List()) != 1 {
-			t.Fatalf("a failing store must never block the operation: goals=%d records=%d", len(goals.List()), ledger.Count())
+		if ledger.Count() != 1 {
+			t.Fatalf("a failing store must never block the denial record: records=%d", ledger.Count())
+		}
+		restarted := governance.NewGoalRegistry()
+		if err := restarted.Bind(context.Background(), failing); err == nil {
+			t.Fatalf("a store that cannot be read must report the unread tail to the binder")
+		}
+		if live, rebuilt := len(goals.List()), len(restarted.List()); live != rebuilt {
+			t.Fatalf("the goals in force = %d beside the %d a restart reads back: a declaration the stream refused may not rule the gate", live, rebuilt)
 		}
 		memGoals := governance.NewGoalRegistry()
 		if err := memGoals.Bind(context.Background(), nil); err != nil {

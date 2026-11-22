@@ -212,6 +212,22 @@ func journalLogBytesOf(t *testing.T, root string) int64 {
 	return stat.Size()
 }
 
+// orderLineBytesOf answers the bytes of the derived order-line index one durable
+// root states: one word per slot the slot table addresses, so the size is the
+// capacity that table holds and never the commits the log carries. A root no writer
+// has opened states no such file and answers zero.
+func orderLineBytesOf(t *testing.T, root string) int64 {
+	t.Helper()
+	stat, err := os.Stat(filepath.Join(root, "kv", "order.line"))
+	if os.IsNotExist(err) {
+		return 0
+	}
+	if err != nil {
+		t.Fatalf("state the order-line index of %s: %v", root, err)
+	}
+	return stat.Size()
+}
+
 // judgeSeatedHistory answers why the history a boot could name its tasks from is
 // no evidence of a bounded recovery, and nil for a chain that holds tasks.
 //   - A boot that pays no durable prefix key is the bound this domain states, and that zero is a claim about recovery only beside a chain something was seated on: over a store nothing was seated on the same zero states that there was nothing to read.
@@ -483,6 +499,103 @@ func TestBootFixtureGrowsTasksAcrossGenerations(t *testing.T) {
 		t.Fatal("the fixture judgement accepted a fixture that settled no task, want it refused by name, so the anchors measured over this fixture are never green because nothing happened")
 	} else if !strings.Contains(err.Error(), "the fixture settled no task") {
 		t.Fatalf("the fixture judgement refused the empty fixture with %v, want the settled count named", err)
+	}
+}
+
+// orderLineShape is what one durable root states on the two axes the derived
+// order-line table is read along: the bytes of the table, one word per slot, beside
+// the bytes of the log, which is the whole committed history.
+type orderLineShape struct {
+	orderLine int64
+	journal   int64
+}
+
+// commitsOfShape commits the named number of keys through one durable root of root
+// in the named number of commits, every commit rewriting every key, so the history
+// grows by the commits while the held-key set stands still.
+func commitsOfShape(t *testing.T, ctx context.Context, root string, keys, commits int) orderLineShape {
+	t.Helper()
+	store, err := ledger.OpenAtomicStore(ctx, ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: root, WriteRights: true})
+	if err != nil {
+		t.Fatalf("open the engine of %s: %v", root, err)
+	}
+	for commit := 0; commit < commits; commit++ {
+		puts := make([]ledger.Pair, 0, keys)
+		for at := 0; at < keys; at++ {
+			puts = append(puts, ledger.Pair{Key: fmt.Sprintf("0:bound:%06d", at), Value: []byte(fmt.Sprintf("v%d", commit))})
+		}
+		if err := store.Commit(ctx, ledger.Batch{Puts: puts}); err != nil {
+			t.Fatalf("commit %d of %s: %v", commit, root, err)
+		}
+	}
+	if closer, held := store.(interface{ Close() error }); held {
+		if err := closer.Close(); err != nil {
+			t.Fatalf("close the engine of %s: %v", root, err)
+		}
+	}
+	return orderLineShape{orderLine: orderLineBytesOf(t, root), journal: journalLogBytesOf(t, root)}
+}
+
+// TestBootIndexEntriesBoundedAcrossGenerations pins that the index a boot opens grows with the slots its chain holds, not its history.
+//   - every later generation's boot enumerates at most twice the second generation's entries, though the chain behind it grows every generation
+//   - the entries a boot enumerates stay under half the facts the chain indexes, so a load that fell back to the index answers the whole chain
+//   - the order-line table states one word per slot: the same held keys under one commit and under fifty state the same bytes
+//   - a wider held-key set states more of them, so the table grows along the slots a chain holds and not along its commits
+//   - the generations are the real boot entry over a durable root, read through the same probes the symptom anchors read
+//
+// 契约: docs/wiki/memory/memory-architecture.md#overview
+func TestBootIndexEntriesBoundedAcrossGenerations(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+	addr := event.Address{AgentID: "agent-a", SessionID: "session-boot-index-bound"}
+	const trials, generations, turns, perGeneration = 1, 5, 6, 4
+	root := t.TempDir()
+	observed, history := walkBootGenerations(t, ctx, root, addr, trials, generations, turns, perGeneration)
+	series := bootQuantitySeries(observed, history)
+	t.Logf("the generations paid %s", series)
+	if err := judgeBootFixture(observed, history, generations, perGeneration); err != nil {
+		t.Fatalf("the boot fixture proves nothing, so no bound below is a claim about recovery: %v", err)
+	}
+
+	// The entries a bounded load publishes are the surviving key set beside the tail
+	// its newest cut leaves past: both are the generation's own work and neither grows
+	// with the history behind them.
+	const indexBound = 2
+	for generation := 1; generation < generations; generation++ {
+		held := observed[generation].quantities.indexEntries
+		if bound := observed[1].quantities.indexEntries * indexBound; held > bound {
+			t.Fatalf("the boot of generation %d enumerated %d index entr(ies) beside the %d of generation 1, over the bound %d: the load reads the index of the history instead of the seat that states the account and the partitions (%s)",
+				generation, held, observed[1].quantities.indexEntries, bound, series)
+		}
+		if held*indexBound >= observed[generation].indexed {
+			t.Fatalf("the boot of generation %d enumerated %d index entr(ies) beside the %d facts the chain indexes, want at most half: a load that fell back to the index answers the whole chain, and a bounded one answers the account its newest cut leaves (%s)",
+				generation, held, observed[generation].indexed, series)
+		}
+	}
+
+	// The order-line table is keyed by the slot a key addresses and never by the
+	// commit that stated it, so the same held keys state the same bytes whatever the
+	// number of commits, and a wider held-key set states more of them.
+	const heldKeys, rewrites, wideKeys = 100, 50, 5000
+	narrow := commitsOfShape(t, ctx, filepath.Join(root, "order-line-narrow"), heldKeys, 1)
+	rewritten := commitsOfShape(t, ctx, filepath.Join(root, "order-line-rewritten"), heldKeys, rewrites)
+	wide := commitsOfShape(t, ctx, filepath.Join(root, "order-line-wide"), wideKeys, 1)
+	t.Logf("the order-line table states %d byte(s) beside %d journal byte(s) for %d keys under one commit, %d byte(s) beside %d journal byte(s) for the same keys under %d commits, and %d byte(s) for %d keys",
+		narrow.orderLine, narrow.journal, heldKeys, rewritten.orderLine, rewritten.journal, rewrites, wide.orderLine, wideKeys)
+	if narrow.orderLine == 0 {
+		t.Fatalf("the root holding %d keys states no order-line byte, so the readings below stand beside an unmeasured table", heldKeys)
+	}
+	if rewritten.journal <= narrow.journal {
+		t.Fatalf("the root rewritten under %d commit(s) holds %d journal byte(s) beside the %d of the one-commit root, want a longer history so the equal table below is a claim about the axis",
+			rewrites, rewritten.journal, narrow.journal)
+	}
+	if rewritten.orderLine != narrow.orderLine {
+		t.Fatalf("the root rewritten under %d commit(s) states %d order-line byte(s) beside the %d of the one-commit root holding the same %d keys, want the table sized by the slots the chain addresses and never by the commits it carries",
+			rewrites, rewritten.orderLine, narrow.orderLine, heldKeys)
+	}
+	if wide.orderLine <= narrow.orderLine {
+		t.Fatalf("the root holding %d keys states %d order-line byte(s) beside the %d of the root holding %d keys, want a table that grows with the held-key set it addresses",
+			wideKeys, wide.orderLine, narrow.orderLine, heldKeys)
 	}
 }
 

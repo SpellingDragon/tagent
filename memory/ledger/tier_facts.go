@@ -1,8 +1,8 @@
 // 契约: docs/wiki/reliability/durable-delivery.md#envelope-states
 //
 // TierFacts is the durable fact surface of one opened tier: put, prefix scan,
-// the point read of one key, the commit order its engine states and the sync
-// barrier a commit reports its success behind. It commits through the same atomic
+// the point read of one key and the sync barrier a commit reports its success
+// behind. It commits through the same atomic
 // store engine the tier's segment store uses, so the replay and the durable task
 // commit share one database with the events already stored there. Its fact-log
 // signatures carry built-in types only, so it matches the shared durable fact-log
@@ -54,16 +54,6 @@ func (l TierFacts) Get(ctx context.Context, key string) ([]byte, bool, error) {
 		return nil, false, err
 	}
 	return pairs[0].Value, true, nil
-}
-
-// CommitOrder answers the commit-order walk of the engine this log holds, and
-// whether that engine states one: an engine that keeps no commit order answers
-// false, and a caller that walked to a key reads the prefix whole instead. The
-// walk is the engine's own, so it names the keys newest commit first and stops
-// where the visitor answers false.
-func (l TierFacts) CommitOrder() (CommitOrder, bool) {
-	ordered, held := l.kv.(CommitOrder)
-	return ordered, held
 }
 
 // Sync completes the write barrier over everything staged so far.

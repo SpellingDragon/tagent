@@ -15,9 +15,9 @@ const scenarioS13Input = "闭合集场景的输入。"
 
 // TestScenario13ContextClosedSet drives one request whose boundary carries every part of the fixed layout.
 // - the static head opens the request with the fixed prompt and skill bodies, in structural order
-// - the folded history summary leads the replayed projection
+// - the replayed projection leads without a folded summary at this depth; promotion folds one later
 // - the dynamic environment block stands ahead of the transcript and closes the assembly
-// - every message of the request belongs to exactly one part of the closed five-part set, and the set is whole
+// - every message of the request belongs to exactly one part of the closed four-part set, and the set is whole
 // 契约: docs/wiki/agent/event-flow.md#e2e-turn-sequence
 func TestScenario13ContextClosedSet(t *testing.T) {
 	ctx := context.Background()

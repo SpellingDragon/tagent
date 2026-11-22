@@ -300,8 +300,14 @@ type Run struct {
 	// resume, since a hold lives in memory alone and a wait restored from the
 	// chain carries none.
 	holds []*task.HoldBook
-	// landing serializes the sequence slot of one partition beside the segment
-	// commit that takes it, so two facts committed at once never claim one slot.
+	// landing is the ordered unit of this run's commits: it serializes the
+	// sequence slot of one partition beside the segment commit that takes it, and it
+	// is held until the registration that states the landed position and the fold
+	// that derives the state of every consumer are done, so two facts committed at
+	// once never claim one slot and never reach the state seam in the other order.
+	// It stays the one point that allocates a landing slot, and no holder's Reduce
+	// commits a fact from inside it: a commit taken there would wait on the fence
+	// this one holds.
 	landing sync.Mutex
 	// checkpointMu serializes the framework checkpoint cuts of this run with each
 	// other, so one account is stated by one cut: two cuts over one slot would
@@ -341,13 +347,6 @@ type Run struct {
 	// for: a chain asks for its own checkpoint when its context reached a moment
 	// worth stating, and the filer takes those cuts on its own goroutine.
 	checkpointSessionPending map[event.Address]struct{}
-	// sessionFiled, sessionCuts and sessionSlices are the session face of the
-	// checkpoint account: the checkpoint each chain last filed or restored, the cut
-	// that state corresponds to, and the slices that checkpoint stated. A chain the
-	// run filed no checkpoint of reads the framework's own cut instead.
-	sessionFiled  map[event.SessionID]event.EventID
-	sessionCuts   map[event.SessionID]event.CheckpointOffset
-	sessionSlices map[event.SessionID]map[string]bool
 	// checkpointStop ends the filer once the close of this run began, and the once
 	// makes a repeated close stop it once. checkpointDone states that the filer
 	// goroutine has returned, so a close joins the cut in flight instead of
@@ -681,17 +680,6 @@ func assemble(ctx context.Context, decl *config.Declaration, agents map[event.Ag
 			return nil, err
 		}
 	}
-	r.mu.Lock()
-	if r.sessionFiled == nil {
-		r.sessionFiled = map[event.SessionID]event.EventID{}
-	}
-	if r.sessionCuts == nil {
-		r.sessionCuts = map[event.SessionID]event.CheckpointOffset{}
-	}
-	if r.sessionSlices == nil {
-		r.sessionSlices = map[event.SessionID]map[string]bool{}
-	}
-	r.mu.Unlock()
 	if durable != nil {
 		if err := r.restoreCheckpointState(ctx, tier); err != nil {
 			return nil, err

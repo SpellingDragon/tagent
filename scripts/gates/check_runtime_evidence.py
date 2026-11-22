@@ -2658,8 +2658,37 @@ def check_event_evidence_shape(report, evidence, index, contract_digest):
             "exit_code": exit_code}
 
 
-def check_event_evidence_subtests(report, evidence, index, selected):
-    """Every mandatory (parent,name) anchor must carry a pass verdict."""
+def event_log_anchor_states(report, index, selected, log_index):
+    """The verdict each anchor earned in this log, derived by the producer.
+
+    `evidence.subtests[].status` is the producer's own claim; the run's raw child
+    rows are what decides it. `run_runtime_scenarios.event_subtest_states` is the
+    derivation the runner's report already uses, so it is imported instead of
+    restated: two derivations could drift while both stayed green, and then one
+    log would carry two verdicts.
+    """
+    try:
+        runner = _event_runner()
+    except lib.CheckFailure as exc:
+        report.error(str(exc))
+        return None
+    states = {}
+    for test_id in selected:
+        test = index["tests"].get(test_id)
+        if not isinstance(test, dict):
+            continue
+        try:
+            derived = runner.event_subtest_states(test, log_index["actions"])
+        except runner.RunnerError as exc:
+            report.error("record {}: cannot derive its anchor verdicts: {}".format(test_id, exc))
+            continue
+        for state in derived:
+            states[(test_id, state.get("name"))] = state.get("status")
+    return states
+
+
+def check_event_evidence_subtests(report, evidence, index, selected, observed):
+    """Every mandatory (parent,name) anchor must carry a pass verdict the log shows."""
     entries = evidence.get("subtests")
     if not isinstance(entries, list) or not entries:
         report.error("evidence.subtests must be a non-empty list of named anchor verdicts")
@@ -2689,6 +2718,11 @@ def check_event_evidence_subtests(report, evidence, index, selected):
         if status not in EVENT_ANCHOR_STATUSES:
             report.error("{}: status {!r} not in {}".format(where, status, EVENT_ANCHOR_STATUSES))
             continue
+        earned = None if observed is None else observed.get(key, "missing")
+        if earned is not None and status != earned:
+            report.error("{}: ({},{}) states {!r} but the test-log child events show {!r}; a "
+                         "verdict the run's own log does not show is the producer's claim, not "
+                         "the anchor's outcome".format(where, test_id, name, status, earned))
         if status != "pass":
             report.error("{}: mandatory anchor ({},{}) verdict {!r}; fail/skip/missing/running "
                          "are all failures".format(where, test_id, name, status))
@@ -2709,6 +2743,7 @@ def check_event_evidence(report, index, contract_digest, evidence, evidence_path
         return None
     check_event_source_binding(report, "evidence {}".format(os.path.basename(evidence_path)),
                                evidence, repo_root or EVENT_REPO_ROOT)
+    observed = None
     log_path = info["log_ref"]
     if isinstance(log_path, str) and log_path.strip():
         if not os.path.isabs(log_path):
@@ -2736,10 +2771,11 @@ def check_event_evidence(report, index, contract_digest, evidence, evidence_path
                                for test_id in info["test_ids"]})
         log_index = index_event_log(report, rows, module_paths,
                                     "evidence {}".format(os.path.basename(evidence_path)))
+        observed = event_log_anchor_states(report, index, info["test_ids"], log_index)
         for test_id in info["test_ids"]:
             check_event_test_selector(report, "record {}".format(test_id),
                                       index["tests"][test_id], log_index)
-    check_event_evidence_subtests(report, evidence, index, info["test_ids"])
+    check_event_evidence_subtests(report, evidence, index, info["test_ids"], observed)
     return info
 
 

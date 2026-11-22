@@ -1673,6 +1673,22 @@ type smokeReloadAnswer struct {
 // reload 改写文档里的模型名并 POST /reload。
 func (r *smokeRig) reload(model string) smokeReloadAnswer {
 	r.t.Helper()
+	status, body := r.postReload(model)
+	if status != http.StatusOK {
+		r.t.Fatalf("reload status = %d, want 200: %s", status, body)
+	}
+	var answer smokeReloadAnswer
+	if err := json.Unmarshal([]byte(body), &answer); err != nil {
+		r.t.Fatalf("decode the reload answer %q: %v", body, err)
+	}
+	return answer
+}
+
+// postReload 改写文档里的模型名并 POST /reload，原样交回状态码与正文：
+// 发布被拒时回执是失败正文（config-hot-reload 规格：install-failed MUST NOT 返回成功），
+// 所以读回执的一侧要能看见非 200 的正文，而不是只在 200 上解码。
+func (r *smokeRig) postReload(model string) (int, string) {
+	r.t.Helper()
 	r.cfg.Model = model
 	r.cfg.write(r.t)
 	client := &http.Client{Timeout: 60 * time.Second}
@@ -1682,14 +1698,7 @@ func (r *smokeRig) reload(model string) smokeReloadAnswer {
 	}
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-	if resp.StatusCode != http.StatusOK {
-		r.t.Fatalf("reload status = %d, want 200: %s", resp.StatusCode, body)
-	}
-	var answer smokeReloadAnswer
-	if err := json.Unmarshal(body, &answer); err != nil {
-		r.t.Fatalf("decode the reload answer %q: %v", body, err)
-	}
-	return answer
+	return resp.StatusCode, string(body)
 }
 
 // recorded 报告替身通道记下的全部外发。

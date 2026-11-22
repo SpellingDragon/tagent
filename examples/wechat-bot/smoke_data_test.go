@@ -186,22 +186,36 @@ func TestLocalSmokeWave2Data(t *testing.T) {
 		rig.drive(chat, marker+" smoke subagent")
 		rig.waitText(chat, "settle-ack "+marker, 120*time.Second)
 
-		var receipt string
+		// 同一调用身份下的 tool 行不止一条：准入回执（action_command "ok"）与每次结算的
+		// 投递事实行（task_settled，D9.10.5-1②）各成一条，且正文前置已签呈现票据（H05，
+		// presentedProjectionContent）。故取"最后一次请求里最后一条非结算行"作为模型看到的
+		// 回执，按票据后的正文比 ok——票据读法因此是载重的，不是顺带。
+		var settled string
+		admission := ""
 		for _, req := range provider.recorded() {
 			if req.Model != smokeEntryModel {
 				continue
 			}
 			for _, msg := range req.Messages {
-				if msg.Role == string(tagentmodel.RoleTool) && msg.ToolCallID == callID {
-					receipt = msg.Content
+				if msg.Role != string(tagentmodel.RoleTool) || msg.ToolCallID != callID {
+					continue
 				}
+				if strings.Contains(msg.Content, "|task_settled] ") {
+					settled = msg.Content
+					continue
+				}
+				admission = msg.Content
 			}
 		}
-		if receipt != "ok" {
-			t.Fatalf("call_subagent receipt = %q, want the minimal ok admission confirmation", receipt)
+		if got := smokePresentedContent(admission); got != "ok" {
+			t.Fatalf("call_subagent admission receipt = %q (reads %q), want the minimal ok admission confirmation",
+				admission, got)
 		}
-		if strings.Contains(receipt, "[call_subagent_denied]") {
-			t.Fatalf("call_subagent receipt = %q, want the admission, not a named refusal", receipt)
+		if strings.Contains(admission, "[call_subagent_denied]") {
+			t.Fatalf("call_subagent admission receipt = %q, want the admission, not a named refusal", admission)
+		}
+		if !strings.Contains(settled, "tagent: task ") {
+			t.Fatalf("call_subagent settle line = %q, want the settled line as its own tool message beside the receipt", settled)
 		}
 		if got := smokeRequestsFor(provider, smokeWorkerModel); got == 0 {
 			t.Fatal("the explicit source ran no worker model request")
@@ -210,7 +224,7 @@ func TestLocalSmokeWave2Data(t *testing.T) {
 			t.Fatalf("no settle follow-up read the worker body %q", "worker result "+marker)
 		}
 
-		t.Logf("[wave2-data] call_subagent receipt = %q", receipt)
+		t.Logf("[wave2-data] call_subagent admission receipt = %q, settle line = %q", admission, settled)
 		t.Logf("[wave2-data] worker requests=%d, settle notice carried %q, delivery = %q",
 			smokeRequestsFor(provider, smokeWorkerModel), "worker result "+marker, "settle-ack "+marker)
 	})

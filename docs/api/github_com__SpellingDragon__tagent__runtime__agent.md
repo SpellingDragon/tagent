@@ -1362,9 +1362,10 @@ func (l *Loop) Backflow(invocationID event.InvocationID, notice task.Notice) err
     wake: a result whose segment already closed stands behind the answer that
     segment landed, so no position of the chain opens a segment on it by itself,
     and the wake that names it is the account that says this fact still drives.
-    The observation the result carries rides on the fact, so the segment the
-    name opens reads the very result the notification delivered instead of a
-    second reading of it.
+    The message the tool result carries reaches the intake of the range beside
+    that fact, so the in-process drive reads the very result the notification
+    delivered; a reader of the chain reads it from the result fact the
+    notification names.
 
     - The wake names the fact only while the task is not awaited by a flying
     segment and not already consumed: an awaited result is paired by that

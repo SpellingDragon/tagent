@@ -256,7 +256,7 @@ func TestJournalStatesItsKeyOrderWithoutReadingValues(t *testing.T) {
 	want := []string{"1:idx:newer", "1:evt:1:1", "1:idx:older"}
 	var walked []string
 	before := kv.ValueReads()
-	if err := kv.EachCommittedKeyNewestFirst(ctx, func(key string) (bool, error) {
+	if err := kv.eachCommittedNewestFirst(ctx, func(key string) (bool, error) {
 		walked = append(walked, key)
 		return true, nil
 	}); err != nil {
@@ -280,7 +280,7 @@ func TestJournalStatesItsKeyOrderWithoutReadingValues(t *testing.T) {
 		t.Fatalf("the value walk read %d value(s) of the %d key(s) it named, want one each: the two faces are told apart by the values they read", reads, named)
 	}
 	stops := 0
-	if err := kv.EachCommittedKeyNewestFirst(ctx, func(string) (bool, error) {
+	if err := kv.eachCommittedNewestFirst(ctx, func(string) (bool, error) {
 		stops++
 		return false, nil
 	}); err != nil {

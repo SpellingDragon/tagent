@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -216,5 +217,105 @@ func TestSymptomAnchorMidbandProcessRecalledByTicket(t *testing.T) {
 	if recalled.Body != committed.Message.Content {
 		t.Fatalf("recall_get(%q) answered %q, want the committed text %q of the folded entry",
 			ticketOf(target, committed.Type), recalled.Body, committed.Message.Content)
+	}
+}
+
+// earlyFactTicket matches one ticket the request hands the model: the key under
+// the recall prefix beside the frozen type of the entry it names.
+var earlyFactTicket = regexp.MustCompile(`\[evt_([^\]|]+)\|([^\]]*)\]`)
+
+// TestEarlyFactRemainsDiscoverableAfterRepeatedCompression pins what an early fact keeps after repeated folds.
+//   - fixture: one session over the declared replay window, five closed turns, so the folds ran more than once and the oldest band left as a summary
+//   - discovery: the request carries the one-line read of the turn the folds consumed first, and no byte of its body
+//   - so the model learns the fact exists without being handed the text
+//   - recall: every ticket the request itself hands out answers its own committed text, and the folded process detail of the early band is among them
+//   - no hand-given key: the identities this anchor recalls are read out of the request, never out of a key the check kept
+//   - premise: the early body is on the chain and long, so a request carrying none of it is a fold that worked and not a lost fact
+//   - failure report: the bound names the early read it wanted, the folded set, the tickets and the messages presented
+//
+// 契约: docs/wiki/memory/memory-architecture.md#event-shape
+func TestEarlyFactRemainsDiscoverableAfterRepeatedCompression(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+	provider := &replayModel{name: "model-a"}
+	run, addr := newProjectionRun(t, symptomAnchorWindowTokens, provider)
+	for turn := 0; turn < 5; turn++ {
+		commitProjectionTurn(t, ctx, run, addr, turn)
+	}
+
+	presented := projectionEntriesOf(t, run, addr.SessionID)
+	products, summarised := segmentFoldProducts(presented)
+	folded := foldedProcessKeys(chainProcessDetail(t, ctx, run, addr.SessionID), presented)
+	if products == 0 || len(folded) == 0 {
+		t.Fatalf("the presented sequence holds %d segment-fold product(s) and the fold took %d process entr(ies), want the folds this anchor is about", products, len(folded))
+	}
+	if !summarised {
+		t.Fatalf("the presented sequence carries no history summary, want the oldest band already folded away: the fixture has not compressed repeatedly and proves nothing here")
+	}
+
+	early := event.EventID("00-0-in")
+	committed, err := run.CommittedEvent(ctx, early)
+	if err != nil {
+		t.Fatalf("read the early fact %s the folds consumed first: %v", early, err)
+	}
+	if len(committed.Message.Content) == 0 {
+		t.Fatalf("the early fact %s carries no body, want the premise this anchor stands on", early)
+	}
+	if _, err := run.Invoke(ctx, assembly.InvokeRequest{
+		InvocationID: "inv-early-discovery",
+		Address:      addr,
+		Input:        []model.Message{{Role: model.RoleUser, Content: "多轮压缩后仍应记得最早的那次请求。"}},
+	}); err != nil {
+		t.Fatalf("invoke the formal request: %v", err)
+	}
+	requests := provider.recorded()
+	if len(requests) != 1 {
+		t.Fatalf("recorded requests = %d, want exactly one formal request", len(requests))
+	}
+	carried := strings.Join(contentsOf(requests[0].Messages), "\n")
+
+	if read := committed.Meta[event.MetaKeyEventSummary]; !strings.Contains(carried, read) {
+		t.Fatalf("the request carries none of the early read %q of %s, want the summary line the fold left so the model can discover the fact exists (messages=%q)",
+			read, early, carried)
+	}
+	if strings.Contains(carried, committed.Message.Content) {
+		t.Fatalf("the request carries the body of the early fact %s, want the fold's summary of it instead of the text", early)
+	}
+
+	tickets := earlyFactTicket.FindAllStringSubmatch(carried, -1)
+	if len(tickets) == 0 {
+		t.Fatalf("the request hands the model no ticket at all, want the addresses the folded material is recalled by (messages=%q)", carried)
+	}
+	reads := run.RecallReads()
+	partitions := []string{string(addr.AgentID)}
+	recalled := 0
+	foldedLanded := 0
+	isFolded := make(map[event.EventID]struct{}, len(folded))
+	for _, id := range folded {
+		isFolded[id] = struct{}{}
+	}
+	for _, match := range tickets {
+		key := event.EventID(match[1])
+		answer := recallGet(t, ctx, reads, partitions, match[0])
+		if !answer.Found || answer.Body == "" {
+			t.Fatalf("recall_get answered the ticket %q the request carried with %+v, want the committed text of %s: a ticket the model cannot read is a promised address that answers nothing",
+				match[0], answer, key)
+		}
+		recalled++
+		if _, took := isFolded[key]; !took {
+			continue
+		}
+		foldedLanded++
+		fact, err := run.CommittedEvent(ctx, key)
+		if err != nil {
+			t.Fatalf("read the folded fact %s the request named: %v", key, err)
+		}
+		if answer.Body != fact.Message.Content {
+			t.Fatalf("recall_get(%q) answered %q, want the committed text %q of the folded entry", match[0], answer.Body, fact.Message.Content)
+		}
+	}
+	if recalled == 0 || foldedLanded == 0 {
+		t.Fatalf("the request handed %d readable ticket(s) and %d of them name folded material (folded=%v), want the recall of the material the folds took (messages=%q)",
+			recalled, foldedLanded, folded, carried)
 	}
 }

@@ -254,8 +254,16 @@ MUTATIONS: Tuple[Mutation, ...] = (
             # Patch 1 — the observation of a notice arriving while the pump
             # drives (busy) wakes nothing: the busy notice is dropped instead of
             # kept on the account for a later round.
+            # Anchor migrated 2026-11-22 (F2 closing gate, leaf 13.103). The old
+            # anchor named the gate of `ObserveCommit` as the raw table read
+            # `terminalSettleKinds[noticeKindOf(fact)]`; the settle face now asks
+            # the one predicate `terminalDelivery(fact)`, which folds the same
+            # table beside the family and the task test. The wake the patch
+            # guards is the same statement at the same site, so the fault —
+            # a busy observation wakes nothing — is unchanged. Patches 2–4 (the
+            # driving flag and the one-round drain) still anchor byte for byte.
             old=(
-                "\tif !terminalSettleKinds[noticeKindOf(fact)] {\n"
+                "\tif !terminalDelivery(fact) {\n"
                 "\t\treturn nil\n"
                 "\t}\n"
                 "\td.Wake()\n"
@@ -263,7 +271,7 @@ MUTATIONS: Tuple[Mutation, ...] = (
                 "}\n"
             ),
             new=(
-                "\tif !terminalSettleKinds[noticeKindOf(fact)] {\n"
+                "\tif !terminalDelivery(fact) {\n"
                 "\t\treturn nil\n"
                 "\t}\n"
                 "\td.mu.Lock()\n"
@@ -639,77 +647,59 @@ MUTATIONS: Tuple[Mutation, ...] = (
         ),
         replacement=Replacement(
             file="assembly/facts.go",
-            # The refusal exits of the persist path all answer as committed. The
-            # first registry form swallowed the segment store error alone; the
-            # live persist path splits one refusal over several exits (the
-            # presence read under the fact's partition, the commit itself, the
-            # conflict read, the conflict refusal), so one swallow left the turn
-            # failing beside an unnamed error or hid the mutant entirely. The commit exit is the
-            # one the tier's own refusals reach: the body and the record commit as
-            # one unit, so the earlier originals-put exit this registry named is
-            # the same refusal this exit carries, not a second one. The defect
-            # claim is unchanged — a refused segment is reported as a committed
-            # fact and the barrier failure is answered as success.
-            # The exits named here are the ones `persistFact` owns; the retry
-            # pre-check 12.R2.2 added beside it (chainHoldsFact) is a read whose
-            # refusal still propagates under the mutant, and the named assertion
-            # of this entry is decided at the commit these exits carry.
+            # The storage-tier refusal exits of the persist path answer as
+            # committed. The first registry form swallowed the segment store error
+            # alone; the live persist path splits one refusal over several exits,
+            # so one swallow left the turn failing beside an unnamed error or hid
+            # the mutant entirely.
+            # Anchors re-taken 2026-11-22 (F2 closing gate, leaf 13.103). The old
+            # `default: return err` exit belonged to `persistFact`, whose answer was
+            # one error; H02b made the write step answer the store's own five-value
+            # outcome, so the same exit now reads `return outcome, err` and the
+            # mutant answers the tier's refusal as `ledger.FactCommitted, nil` —
+            # the refused segment reported as a committed fact, answered as success
+            # instead of reported by name. The old presence-read exit
+            # (`stored, held, heldErr := …GetEventInPartition`) and the old
+            # conflict-refusal exit (`if !held { return err }`) have no counterpart
+            # in this function any more: the presence read moved out of the write
+            # step into `chainRecord`, a pre-write read whose refusal still
+            # propagates under the mutant, and the conflict refusal now carries the
+            # store's named outcome beside its error. Both were the same refusal
+            # this `default` exit carries, not a second one.
             old=(
                 "\tdefault:\n"
-                "\t\treturn err\n"
+                "\t\treturn outcome, err\n"
                 "\t}\n"
                 "}\n\n"
-                "// chainHoldsFact"
+                "// chainRecord"
             ),
             new=(
                 "\tdefault:\n"
-                "\t\treturn nil\n"
+                "\t\treturn ledger.FactCommitted, nil\n"
                 "\t}\n"
                 "}\n\n"
-                "// chainHoldsFact"
+                "// chainRecord"
             ),
         ),
         companion=(
             Replacement(
                 file="assembly/facts.go",
-                # The presence read under the fact's partition answers as committed.
-                # Re-taken after 12.R2.2: the retry pre-check chainHoldsFact holds
-                # the same read, so this anchor names the read `persistFact` makes
-                # by the local name it answers with.
-                old=(
-                    "\tstored, held, heldErr := tier.Segments.GetEventInPartition(ctx, evt.Key, partition)\n"
-                    "\tif heldErr != nil {\n"
-                    "\t\treturn heldErr\n"
-                    "\t}\n"
-                ),
-                new=(
-                    "\tstored, held, heldErr := tier.Segments.GetEventInPartition(ctx, evt.Key, partition)\n"
-                    "\tif heldErr != nil {\n"
-                    "\t\treturn nil\n"
-                    "\t}\n"
-                ),
-            ),
-            Replacement(
-                file="assembly/facts.go",
-                # The conflict-branch read answers as committed.
+                # The conflict-branch read refusal answers as committed: the tier
+                # refused the read behind its own conflict answer, and the mutant
+                # reports the segment as committed instead of naming the read's
+                # failure.
                 old=(
                     "\t\tprior, held, getErr := tier.Segments.GetEventInPartition(ctx, evt.Key, partition)\n"
                     "\t\tif getErr != nil {\n"
-                    "\t\t\treturn getErr\n"
+                    "\t\t\treturn ledger.FactConflict, getErr\n"
                     "\t\t}\n"
                 ),
                 new=(
                     "\t\tprior, held, getErr := tier.Segments.GetEventInPartition(ctx, evt.Key, partition)\n"
                     "\t\tif getErr != nil {\n"
-                    "\t\t\treturn nil\n"
+                    "\t\t\treturn ledger.FactCommitted, nil\n"
                     "\t\t}\n"
                 ),
-            ),
-            Replacement(
-                file="assembly/facts.go",
-                # The conflict-branch refusal answers as committed.
-                old="\t\tif !held {\n\t\t\treturn err\n\t\t}\n",
-                new="\t\tif !held {\n\t\t\treturn nil\n\t\t}\n",
             ),
         ),
         test_package="./tests/integration/history",
@@ -735,10 +725,22 @@ MUTATIONS: Tuple[Mutation, ...] = (
         ),
         replacement=Replacement(
             file="assembly/facts.go",
+            # Patch 1 — the completed consumption is recorded before the settled
+            # result is handed back into the intake, so a stop inside the handover
+            # leaves the notification no longer owed and the restart has no result
+            # to hand over again.
+            # Anchor migrated 2026-11-22 (F2 closing gate, leaf 13.103). The old
+            # anchor named the refusal branch releasing the claim
+            # (`return r.retainNoticeOwed(…)`) and the consume as the tail; H05
+            # keeps the claim with the process that already handed the result on,
+            # so that branch now logs and returns nil. The two statements the fault
+            # reorders — `r.loop.Backflow(…)` before `r.store.Consume(…)` — stand
+            # unchanged in `sink`, which is what this mutation swaps.
             old=(
                 "\tif refusal := r.loop.Backflow(frame.Identity.InvocationID, notice); "
                 "refusal != nil {\n"
-                "\t\treturn r.retainNoticeOwed(ctx, frame, notice, seq)\n"
+                "\t\tassemblyDebug(\"tagent: the notice of task %s stays owed under the claim of this process\", notice.TaskID)\n"
+                "\t\treturn nil\n"
                 "\t}\n"
                 "\treturn r.store.Consume(ctx, frame.Address, frame.Identity.InstanceID, seq)\n"
             ),
@@ -749,7 +751,8 @@ MUTATIONS: Tuple[Mutation, ...] = (
                 "\t}\n"
                 "\tif refusal := r.loop.Backflow(frame.Identity.InvocationID, notice); "
                 "refusal != nil {\n"
-                "\t\treturn r.retainNoticeOwed(ctx, frame, notice, seq)\n"
+                "\t\tassemblyDebug(\"tagent: the notice of task %s stays owed under the claim of this process\", notice.TaskID)\n"
+                "\t\treturn nil\n"
                 "\t}\n"
                 "\treturn nil\n"
             ),

@@ -83,6 +83,27 @@ const (
 	// a table that is missing, torn or behind the watermark is stated again from the
 	// order file and the log.
 	journalSlotFileName = "slots"
+	// journalOrderLineFileName is the file beside the log that states where one commit's
+	// order line ends, one 8-byte word per slot: the offset of the line the commit that
+	// last stated that slot's key filed. The table states one word per slot rather than
+	// one per commit because a read enters the order at the commit a key names, and the
+	// slot the key addresses is the only place it learns that commit without walking the
+	// statements in between. It is a derived index on the same terms as the two files
+	// beside it — the table it parallels is itself derived from the log, so a word that is
+	// missing, unknown or past the order bytes the header states costs the walk its seek
+	// and never its answer — and it carries the slot table's watermark, never one of its
+	// own: its size is the capacity the header states times the word, so a table stated
+	// again, grown or reset states this file again behind it.
+	journalOrderLineFileName = "order.line"
+	// journalOrderLineUnknown is the word a slot states when no commit stated its key:
+	// an empty slot names no order line, so a seek answers none and the caller walks the
+	// order file it would have walked without this file. Every other word is a byte of the
+	// order file, and zero is one of them, so the unknown word is not zero.
+	journalOrderLineUnknown int64 = -1
+	// journalOrderLineWordBytes is the width of one word of the order-line index: the
+	// byte the order line of one commit ends at, so a file of capacity words states the
+	// seek of every slot the table addresses.
+	journalOrderLineWordBytes = 8
 	// journalSlotVersion is the slot table format this build writes and the only one
 	// it reads: another version is a table this build cannot place, and the index
 	// files are rebuilt from the log rather than trusted through a record it cannot
@@ -109,14 +130,11 @@ const (
 	// journalSlotLoadPercent bounds the share of slots a commit may fill before the
 	// table doubles, so a probe chain stays short instead of growing into a walk of
 	// the table on every read. Half is the measured bound: at seven tenths the longest
-	// chain of 32,000 keys this engine writes reached 54 slots, which is the bound a
-	// damaged table is supposed to answer by name.
+	// chain of 32,000 keys this engine writes reached 54 slots. The share is a cost
+	// rule and not a correctness one: a chain longer than any measured value is still
+	// the address of legal keys, so a probe walks until it meets an empty slot and the
+	// table itself is the only bound it may trust (see journalAddress.probe).
 	journalSlotLoadPercent = 50
-	// journalSlotMaxProbe bounds the slots one lookup inspects, which is the chain a
-	// table at the load bound stays well inside — 32,000 keys measured a longest chain
-	// of 12 slots at the doubled capacity — so a chain that reaches it states a table
-	// no commit wrote rather than a full one.
-	journalSlotMaxProbe = 128
 	// journalSlotScanBatch is the slots one sequential read of an enumeration takes,
 	// so listing the held keys costs one read per batch instead of one per slot.
 	journalSlotScanBatch = 512
@@ -921,11 +939,19 @@ type journalAddress struct {
 	orderPath string
 	// slotsPath is the slot table beside the log.
 	slotsPath string
+	// linePath is the order-line index beside the log, whose one word per slot states
+	// where the order line of the commit that last stated that slot's key ends.
+	linePath string
 	// order is the writer's append handle on the order file, nil beside an index
 	// that retired its index files for a rewrite and has not rebuilt them yet.
 	order *os.File
 	// slots is the writer's handle on the slot table.
 	slots *os.File
+	// lines is the handle on the order-line index: the writer's in-place handle, a read
+	// view's read-only handle, or nil beside a view that holds no file this build states
+	// — a root an older build left, or a read view opened beside one. A nil handle
+	// answers no seek, so the caller walks the order file as it did before this index.
+	lines *os.File
 	// window is the window of a read view: non-nil beside a view that holds no write
 	// rights, which states nothing and answers the commits past the stated watermark
 	// from its own replay, and nil beside a write view, whose watermark advances with
@@ -1031,6 +1057,7 @@ func openJournalAddress(log *journalLog) (*journalAddress, error) {
 		log:       log,
 		orderPath: filepath.Join(log.dir, journalOrderFileName),
 		slotsPath: filepath.Join(log.dir, journalSlotFileName),
+		linePath:  filepath.Join(log.dir, journalOrderLineFileName),
 		capacity:  journalSlotCapacity,
 		stride:    journalSlotStride,
 	}
@@ -1039,6 +1066,10 @@ func openJournalAddress(log *journalLog) (*journalAddress, error) {
 	}
 	if err := a.openSlots(); err != nil {
 		a.order.Close()
+		return nil, err
+	}
+	if err := a.openLines(); err != nil {
+		a.closeIndex()
 		return nil, err
 	}
 	header, stated := a.readHeader()
@@ -1061,6 +1092,13 @@ func openJournalAddress(log *journalLog) (*journalAddress, error) {
 	}
 	a.seq, a.valuesSize, a.orderSize = header.Seq, header.ValuesSize, header.OrderSize
 	a.statedSeq = header.Seq
+	if !a.linesState(header.Capacity) {
+		if err := a.rebuildFrom("open"); err != nil {
+			a.closeIndex()
+			return nil, err
+		}
+		return a, nil
+	}
 	if orderSize > a.orderSize {
 		if err := a.order.Truncate(a.orderSize); err != nil {
 			a.closeIndex()
@@ -1090,6 +1128,7 @@ func openJournalReadAddress(log *journalLog) (*journalAddress, error) {
 		log:       log,
 		orderPath: filepath.Join(log.dir, journalOrderFileName),
 		slotsPath: filepath.Join(log.dir, journalSlotFileName),
+		linePath:  filepath.Join(log.dir, journalOrderLineFileName),
 		window:    &journalAddressWindow{values: map[string]journalValue{}},
 	}
 	if missing, err := a.openReadHandles(); err != nil {
@@ -1187,6 +1226,7 @@ func (a *journalAddress) openReadHandles() (string, error) {
 		return "", fmt.Errorf("tagent: open the slot table of %s for reading: %w", a.log.dir, err)
 	}
 	a.slots = slots
+	a.openReadLines()
 	return "", nil
 }
 
@@ -1210,6 +1250,106 @@ func (a *journalAddress) openSlots() error {
 	return nil
 }
 
+// openLines opens the writer's in-place handle on the order-line index of this address.
+func (a *journalAddress) openLines() error {
+	lines, err := os.OpenFile(a.linePath, os.O_RDWR|os.O_CREATE, 0o600)
+	if err != nil {
+		return fmt.Errorf("tagent: open the order-line index of %s: %w", a.log.dir, err)
+	}
+	a.lines = lines
+	return nil
+}
+
+// openReadLines opens the read view's handle on the order-line index when the root holds
+// one, and answers none beside a root without one: a read view states no word and
+// creates no file, so an index it cannot read costs the walk its seek and never its
+// answer.
+func (a *journalAddress) openReadLines() {
+	lines, err := os.Open(a.linePath)
+	if err != nil {
+		a.lines = nil
+		return
+	}
+	a.lines = lines
+}
+
+// linesState reports whether the order-line index states one word for every slot of the
+// table the header states. A file of any other size states words for slots the table does
+// not hold or none for the slots it does, so it is stated again from the log beside them
+// rather than trusted word by word.
+func (a *journalAddress) linesState(capacity int64) bool {
+	if a.lines == nil {
+		return false
+	}
+	stat, err := a.lines.Stat()
+	if err != nil {
+		return false
+	}
+	return stat.Size() == capacity*journalOrderLineWordBytes
+}
+
+// resizeLines states an order-line index of capacity words, every one of them unknown:
+// a table stated again names no commit, which is the same state an empty slot states.
+func (a *journalAddress) resizeLines(capacity int64) error {
+	if a.lines == nil {
+		return nil
+	}
+	if err := a.lines.Truncate(0); err != nil {
+		return fmt.Errorf("tagent: discard the order-line index of %s: %w", a.log.dir, err)
+	}
+	if err := a.lines.Truncate(capacity * journalOrderLineWordBytes); err != nil {
+		return fmt.Errorf("tagent: size the order-line index of %s: %w", a.log.dir, err)
+	}
+	word := lineOffsetWord(journalOrderLineUnknown)
+	batch := make([]byte, journalOrderLineWordBytes*min(journalSlotScanBatch, capacity))
+	for at := 0; at < len(batch); at += journalOrderLineWordBytes {
+		copy(batch[at:], word)
+	}
+	for base := int64(0); base < capacity; base += journalSlotScanBatch {
+		records := min(journalSlotScanBatch, capacity-base)
+		if _, err := a.lines.WriteAt(batch[:records*journalOrderLineWordBytes], base*journalOrderLineWordBytes); err != nil {
+			return fmt.Errorf("tagent: state the unknown words of %s: %w", a.log.dir, err)
+		}
+	}
+	return nil
+}
+
+// readLineOffset answers the word one slot states: the byte the order line of the commit
+// that last stated that slot's key ends at, or journalOrderLineUnknown beside a slot no
+// commit stated or a view that holds no such file.
+func (a *journalAddress) readLineOffset(index int64) (int64, error) {
+	if a.lines == nil {
+		return journalOrderLineUnknown, nil
+	}
+	word := make([]byte, journalOrderLineWordBytes)
+	if _, err := a.lines.ReadAt(word, index*journalOrderLineWordBytes); err != nil {
+		return journalOrderLineUnknown, fmt.Errorf("tagent: read the order-line index of %s: %w", a.log.dir, err)
+	}
+	return int64(binary.LittleEndian.Uint64(word)), nil
+}
+
+// writeLineOffset states the word of one slot, which is what makes the next read of that
+// key's order line one read of the index instead of a walk of the statements in front of
+// it. A view that holds no such file states nothing and is not a failure: the seek is an
+// accelerator over the order file, never the order file itself.
+func (a *journalAddress) writeLineOffset(index, lineEnd int64) error {
+	if a.lines == nil {
+		return nil
+	}
+	if _, err := a.lines.WriteAt(lineOffsetWord(lineEnd), index*journalOrderLineWordBytes); err != nil {
+		return fmt.Errorf("tagent: state the order-line index of %s: %w", a.log.dir, err)
+	}
+	a.staged += journalOrderLineWordBytes
+	return nil
+}
+
+// lineOffsetWord answers the bytes one word of the order-line index states.
+func lineOffsetWord(offset int64) []byte {
+	word := make([]byte, journalOrderLineWordBytes)
+	binary.LittleEndian.PutUint64(word, uint64(offset))
+	return word
+}
+
 // closeIndex releases both handles of an index that failed to open.
 func (a *journalAddress) closeIndex() {
 	if a.order != nil {
@@ -1219,6 +1359,10 @@ func (a *journalAddress) closeIndex() {
 	if a.slots != nil {
 		a.slots.Close()
 		a.slots = nil
+	}
+	if a.lines != nil {
+		a.lines.Close()
+		a.lines = nil
 	}
 }
 
@@ -1413,13 +1557,13 @@ func (a *journalAddress) fileCommit(statement journalOrderStatement, parent stri
 	a.orderSize += int64(len(line))
 	a.staged += int64(len(line))
 	for _, put := range statement.Puts {
-		if err := a.file(put.Key, journalSlotHeld, put.journalAddressSpan, parent); err != nil {
+		if err := a.file(put.Key, journalSlotHeld, put.journalAddressSpan, parent, a.orderSize); err != nil {
 			return err
 		}
 		a.staged += a.stride
 	}
 	for _, key := range statement.Deletes {
-		if err := a.file(key, journalSlotAbsent, journalAddressSpan{}, parent); err != nil {
+		if err := a.file(key, journalSlotAbsent, journalAddressSpan{}, parent, a.orderSize); err != nil {
 			return err
 		}
 		a.staged += a.stride
@@ -1433,15 +1577,15 @@ func (a *journalAddress) fileCommit(statement journalOrderStatement, parent stri
 // probe chain that holds that key or is empty. A key the table already addresses is
 // replaced in place, which is what a later commit of the same identity is, and a key
 // a commit deletes is stated absent so the chain it sits inside stays walkable.
-func (a *journalAddress) file(key string, state uint8, span journalAddressSpan, parent string) error {
-	err := a.fileOnce(key, state, span, parent)
+func (a *journalAddress) file(key string, state uint8, span journalAddressSpan, parent string, lineEnd int64) error {
+	err := a.fileOnce(key, state, span, parent, lineEnd)
 	if !errors.Is(err, errSlotUnplaceable) || !a.statesIndexFiles() {
 		return err
 	}
 	if rebuildErr := a.rebuildFrom(parent); rebuildErr != nil {
 		return rebuildErr
 	}
-	return a.fileOnce(key, state, span, parent)
+	return a.fileOnce(key, state, span, parent, lineEnd)
 }
 
 // statesIndexFiles reports whether this view states the index files of its log: a
@@ -1453,7 +1597,7 @@ func (a *journalAddress) statesIndexFiles() bool {
 
 // fileOnce states one key's record in the table as it reads, which is what the
 // repair of file retries after the table is stated again.
-func (a *journalAddress) fileOnce(key string, state uint8, span journalAddressSpan, parent string) error {
+func (a *journalAddress) fileOnce(key string, state uint8, span journalAddressSpan, parent string, lineEnd int64) error {
 	if int64(len(key)) > a.stride-journalSlotRecordHeaderBytes {
 		stride := a.stride
 		for int64(len(key)) > stride-journalSlotRecordHeaderBytes {
@@ -1475,6 +1619,9 @@ func (a *journalAddress) fileOnce(key string, state uint8, span journalAddressSp
 	if err := a.writeRecord(index, encodeSlotRecord(a.stride, state, key, span)); err != nil {
 		return err
 	}
+	if err := a.writeLineOffset(index, lineEnd); err != nil {
+		return err
+	}
 	if !taken {
 		a.used++
 	}
@@ -1483,11 +1630,18 @@ func (a *journalAddress) fileOnce(key string, state uint8, span journalAddressSp
 
 // probe answers the slot index one key's record belongs at, and whether the table
 // already addresses that key there. It stops at the first empty slot, which is what
-// files a key without an offset table, and refuses a chain longer than the probe
-// bound: a table that dense is one the load rule grows before it is searched.
+// files a key without an offset table.
+//
+// The slots the walk inspects are bounded by the table and never by a measured chain:
+// a linear probe inserts at the first empty slot, so a chain that meets an empty slot
+// proves the key absent, and every slot the chain walks but its own holds another key,
+// which makes used+1 the tight bound a table of used keys can state. A walk that
+// exhausts it met a table whose records disagree with the used count its header
+// states, which errSlotUnplaceable reports so the caller repairs the table from the
+// order file — the one repair rule this index has.
 func (a *journalAddress) probe(key string) (int64, bool, error) {
 	base := slotAddressOf(key, a.capacity)
-	for step := int64(0); step < journalSlotMaxProbe; step++ {
+	for step := int64(0); step <= a.used; step++ {
 		index := (base + step) % a.capacity
 		record, err := a.readRecord(index)
 		if err != nil {
@@ -1504,8 +1658,8 @@ func (a *journalAddress) probe(key string) (int64, bool, error) {
 			return index, true, nil
 		}
 	}
-	return 0, false, fmt.Errorf("%w: %s holds no free slot within %d of %q",
-		ErrJournalCorrupt, a.slotsPath, journalSlotMaxProbe, key)
+	return 0, false, fmt.Errorf("%w: %s holds no empty slot in the %d the chain of %q may walk",
+		errSlotUnplaceable, a.slotsPath, a.used+1, key)
 }
 
 // lookup answers the span a key's record states, and whether the table holds that
@@ -1535,6 +1689,42 @@ func (a *journalAddress) lookup(key string) (journalAddressSpan, bool, error) {
 	return a.lookupOnce(key)
 }
 
+// orderLineOf answers the byte the order line of the commit that last stated one key ends
+// at, which is where a walk of the commit order starts when the caller already knows the
+// key it wants: one probe of the slot table and one read of the order-line index, whatever
+// the history committed after that commit holds. It answers false beside a key the table
+// holds none of, a record outside the bytes this view states, and a view that states no
+// order-line index — a caller that gets no line walks the order file as it did before this
+// index existed.
+//
+// A record the table cannot place takes the one repair rule of this index: a write view
+// states both index files again from the log, and a read view answers no seek and walks the
+// whole order file, so the repair never answers a line nobody stated.
+func (a *journalAddress) orderLineOf(key string) (int64, bool, error) {
+	lineEnd, held, err := a.orderLineOnce(key)
+	if !errors.Is(err, errSlotUnplaceable) || !a.statesIndexFiles() {
+		return lineEnd, held, err
+	}
+	if rebuildErr := a.rebuildFrom("read"); rebuildErr != nil {
+		return 0, false, rebuildErr
+	}
+	return a.orderLineOnce(key)
+}
+
+// orderLineOnce answers the seek of one key from the table as it reads, which is what the
+// repair of orderLineOf retries after the table is stated again.
+func (a *journalAddress) orderLineOnce(key string) (int64, bool, error) {
+	index, state, span, err := a.findRecord(key)
+	if err != nil || index < 0 || state != journalSlotHeld || !a.stated(span) {
+		return 0, false, err
+	}
+	lineEnd, err := a.readLineOffset(index)
+	if err != nil || lineEnd == journalOrderLineUnknown || lineEnd > a.orderSize {
+		return 0, false, err
+	}
+	return lineEnd, true, nil
+}
+
 // windowValue answers the position a read view's window states for one key, and
 // whether the window names that key at all: a key it does not name is answered by the
 // index files.
@@ -1549,33 +1739,51 @@ func (a *journalAddress) windowValue(key string) (journalValue, bool) {
 // lookupOnce answers one key from the table as it reads, which is what the repair
 // of lookup retries after the table is stated again.
 func (a *journalAddress) lookupOnce(key string) (journalAddressSpan, bool, error) {
+	index, state, span, err := a.findRecord(key)
+	if err != nil || index < 0 {
+		return journalAddressSpan{}, false, err
+	}
+	if state == journalSlotAbsent {
+		return journalAddressSpan{}, false, nil
+	}
+	if !a.stated(span) {
+		return journalAddressSpan{}, false, nil
+	}
+	return span, true, nil
+}
+
+// findRecord answers the slot position one key's record sits at as this table reads,
+// the state that record states and the span it names, and answers position -1 beside
+// a chain that meets an empty slot before the key: an empty slot is the proof that a
+// linear probe never filed that key.
+//
+// The walk is bounded by the table alone, for the reason probe states: used+1 slots
+// cover every chain a table of used keys can state, and a walk that exhausts it met
+// records that disagree with the used count the header states, which
+// errSlotUnplaceable reports instead of answering the key absent — a table this build
+// cannot place is not a table that holds no key, and a caller that reads it as absence
+// would answer a legal miss as a fact the store lost.
+func (a *journalAddress) findRecord(key string) (int64, uint8, journalAddressSpan, error) {
 	base := slotAddressOf(key, a.capacity)
-	for step := int64(0); step < journalSlotMaxProbe; step++ {
+	for step := int64(0); step <= a.used; step++ {
 		index := (base + step) % a.capacity
 		record, err := a.readRecord(index)
 		if err != nil {
-			return journalAddressSpan{}, false, err
+			return -1, journalSlotEmpty, journalAddressSpan{}, err
 		}
 		state, name, span, ok := decodeSlotRecord(record)
 		if !ok {
-			return journalAddressSpan{}, false, fmt.Errorf("%w: %s at %d", errSlotUnplaceable, a.slotsPath, index)
+			return -1, journalSlotEmpty, journalAddressSpan{}, fmt.Errorf("%w: %s at %d", errSlotUnplaceable, a.slotsPath, index)
 		}
 		if state == journalSlotEmpty {
-			return journalAddressSpan{}, false, nil
+			return -1, journalSlotEmpty, journalAddressSpan{}, nil
 		}
-		if name != key {
-			continue
+		if name == key {
+			return index, state, span, nil
 		}
-		if state == journalSlotAbsent {
-			return journalAddressSpan{}, false, nil
-		}
-		if !a.stated(span) {
-			return journalAddressSpan{}, false, nil
-		}
-		return span, true, nil
 	}
-	return journalAddressSpan{}, false, fmt.Errorf("%w: %s holds no free slot within %d of %q",
-		ErrJournalCorrupt, a.slotsPath, journalSlotMaxProbe, key)
+	return -1, journalSlotEmpty, journalAddressSpan{}, fmt.Errorf("%w: %s holds no empty slot in the %d the chain of %q may walk",
+		errSlotUnplaceable, a.slotsPath, a.used+1, key)
 }
 
 // stated reports that one span names bytes this view states, which is the guard that
@@ -1620,19 +1828,22 @@ func (a *journalAddress) recordOffset(index int64) int64 {
 // point read takes: a listing answers the held keys or nothing, never a prefix of
 // them read through a slot nobody wrote.
 func (a *journalAddress) eachRecord(visit func(state uint8, key string, span journalAddressSpan) error) error {
-	err := a.eachRecordOnce(visit)
+	once := func(_ int64, state uint8, key string, span journalAddressSpan) error {
+		return visit(state, key, span)
+	}
+	err := a.eachRecordOnce(once)
 	if !errors.Is(err, errSlotUnplaceable) || !a.statesIndexFiles() {
 		return err
 	}
 	if rebuildErr := a.rebuildFrom("read"); rebuildErr != nil {
 		return rebuildErr
 	}
-	return a.eachRecordOnce(visit)
+	return a.eachRecordOnce(once)
 }
 
 // eachRecordOnce visits every slot the table reads, in batches, so an enumeration
 // pays one sequential read of the table instead of one read per slot.
-func (a *journalAddress) eachRecordOnce(visit func(state uint8, key string, span journalAddressSpan) error) error {
+func (a *journalAddress) eachRecordOnce(visit func(index int64, state uint8, key string, span journalAddressSpan) error) error {
 	batch := make([]byte, a.stride*journalSlotScanBatch)
 	for base := int64(0); base < a.capacity; base += journalSlotScanBatch {
 		records := min(journalSlotScanBatch, a.capacity-base)
@@ -1646,7 +1857,7 @@ func (a *journalAddress) eachRecordOnce(visit func(state uint8, key string, span
 			if !ok {
 				return fmt.Errorf("%w: %s at %d", errSlotUnplaceable, a.slotsPath, base+at)
 			}
-			if err := visit(state, key, span); err != nil {
+			if err := visit(base+at, state, key, span); err != nil {
 				return err
 			}
 		}
@@ -1670,8 +1881,13 @@ func (a *journalAddress) grow(capacity, stride int64, parent string) error {
 		file.Close()
 		return err
 	}
+	stagedLines, err := a.stageLines(capacity)
+	if err != nil {
+		file.Close()
+		return err
+	}
 	used := int64(0)
-	err = a.eachRecordOnce(func(state uint8, key string, span journalAddressSpan) error {
+	err = a.eachRecordOnce(func(at int64, state uint8, key string, span journalAddressSpan) error {
 		if state == journalSlotEmpty {
 			return nil
 		}
@@ -1680,10 +1896,16 @@ func (a *journalAddress) grow(capacity, stride int64, parent string) error {
 			return err
 		}
 		used++
-		_, err = file.WriteAt(encodeSlotRecord(stride, state, key, span), journalSlotHeaderBytes+index*stride)
-		return err
+		if _, err := file.WriteAt(encodeSlotRecord(stride, state, key, span), journalSlotHeaderBytes+index*stride); err != nil {
+			return err
+		}
+		return a.stageLineWord(stagedLines, at, index)
 	})
 	if err != nil {
+		if stagedLines != nil {
+			stagedLines.Close()
+			os.Remove(stagedLines.Name())
+		}
 		file.Close()
 		return err
 	}
@@ -1707,6 +1929,77 @@ func (a *journalAddress) grow(capacity, stride int64, parent string) error {
 		return fmt.Errorf("tagent: reopen the slot table of %s: %w", a.log.dir, err)
 	}
 	a.slots, a.capacity, a.stride, a.used = reopened, capacity, stride, used
+	return a.replaceLines(stagedLines, capacity)
+}
+
+// stageLines opens the file the order-line index of a table being staged is written into,
+// filled with the word an unknown slot states.
+func (a *journalAddress) stageLines(capacity int64) (*os.File, error) {
+	if a.lines == nil {
+		return nil, nil
+	}
+	staged, err := os.OpenFile(a.linePath+journalAddressStageSuffix, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0o600)
+	if err != nil {
+		return nil, fmt.Errorf("tagent: open the staged order-line index of %s: %w", a.log.dir, err)
+	}
+	live := a.lines
+	a.lines = staged
+	resizeErr := a.resizeLines(capacity)
+	a.lines = live
+	if resizeErr != nil {
+		staged.Close()
+		os.Remove(staged.Name())
+		return nil, resizeErr
+	}
+	return staged, nil
+}
+
+// stageLineWord states where the order line of one staged slot ends: the word the slot a key
+// moves to takes is the word the slot it came from stated, so the seek survives a table
+// stated again at another shape.
+func (a *journalAddress) stageLineWord(staged *os.File, from, to int64) error {
+	if staged == nil {
+		return nil
+	}
+	lineEnd, err := a.readLineOffset(from)
+	if err != nil {
+		return err
+	}
+	if lineEnd == journalOrderLineUnknown {
+		return nil
+	}
+	if _, err := staged.WriteAt(lineOffsetWord(lineEnd), to*journalOrderLineWordBytes); err != nil {
+		return fmt.Errorf("tagent: state the staged order-line index of %s: %w", a.log.dir, err)
+	}
+	return nil
+}
+
+// replaceLines states the staged order-line index in place of this address's file and
+// reopens it, on the terms the staged table is renamed over the table it replaces: a stop
+// during the pass leaves the file it started with.
+func (a *journalAddress) replaceLines(staged *os.File, capacity int64) error {
+	if staged == nil {
+		return nil
+	}
+	if err := staged.Sync(); err != nil {
+		staged.Close()
+		return fmt.Errorf("%w: %w", ErrJournalBarrier, err)
+	}
+	if err := staged.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(staged.Name(), a.linePath); err != nil {
+		return fmt.Errorf("tagent: replace the order-line index of %s: %w", a.log.dir, err)
+	}
+	if a.lines != nil {
+		a.lines.Close()
+	}
+	reopened, err := os.OpenFile(a.linePath, os.O_RDWR, 0o600)
+	if err != nil {
+		a.lines = nil
+		return fmt.Errorf("tagent: reopen the order-line index of %s: %w", a.log.dir, err)
+	}
+	a.lines = reopened
 	return nil
 }
 
@@ -1724,6 +2017,9 @@ func (a *journalAddress) resetTable(capacity, stride int64) error {
 		return fmt.Errorf("tagent: size the slot table of %s: %w", a.log.dir, err)
 	}
 	if err := fillEmptySlots(a.slots, capacity, stride); err != nil {
+		return err
+	}
+	if err := a.resizeLines(capacity); err != nil {
 		return err
 	}
 	if err := a.slots.Sync(); err != nil {
@@ -1782,6 +2078,11 @@ func (a *journalAddress) flush(force bool) error {
 	}
 	if err := a.slots.Sync(); err != nil {
 		return fmt.Errorf("%w: %w", ErrJournalBarrier, err)
+	}
+	if a.lines != nil {
+		if err := a.lines.Sync(); err != nil {
+			return fmt.Errorf("%w: %w", ErrJournalBarrier, err)
+		}
 	}
 	a.staged, a.stagedLog = 0, 0
 	return a.writeHeader()
@@ -1921,8 +2222,22 @@ func (a *journalAddress) namespaces() ([]string, error) {
 //
 //   - A line the statement checksum refuses takes the repair rule of this index: a write view states the index files again from the log, and a read view replays the whole log and reads no statement after it, so the keys the walk answers are the log's and it resumes at the keys it has not named
 func (a *journalAddress) eachNewestFirst(visit func(key string, span journalAddressSpan) (bool, error)) error {
+	return a.eachNewestFirstAt(a.orderSize, visit)
+}
+
+// eachNewestFirstAt walks the commits this view states from the given order byte to the
+// oldest, newest of them first: a caller that already knows where its own commit stands
+// enters the order there instead of naming every commit filed after it. It answers exactly
+// the commits, the order inside a commit and the repair of the whole walk, so the entry
+// point decides what the walk reads and never what it answers.
+//   - A byte past the statements this view states enters at the newest one, so a seek the
+//     index cannot place costs the walk it would have taken and never a statement it skipped
+func (a *journalAddress) eachNewestFirstAt(from int64, visit func(key string, span journalAddressSpan) (bool, error)) error {
+	if from > a.orderSize || from < 0 {
+		from = a.orderSize
+	}
 	seen := map[string]struct{}{}
-	err := a.eachNewestFirstOnce(visit, seen)
+	err := a.eachNewestFirstOnce(visit, seen, from)
 	if !errors.Is(err, errOrderUnplaceable) {
 		return err
 	}
@@ -1930,19 +2245,19 @@ func (a *journalAddress) eachNewestFirst(visit func(key string, span journalAddr
 		if rebuildErr := a.rebuildFrom("read"); rebuildErr != nil {
 			return rebuildErr
 		}
-		return a.eachNewestFirstOnce(visit, seen)
+		return a.eachNewestFirstOnce(visit, seen, a.orderSize)
 	}
 	if _, fallbackErr := a.wholeLog(fmt.Sprintf("%s states no commit its checksum holds", a.orderPath)); fallbackErr != nil {
 		return fallbackErr
 	}
 	a.orderSize = 0
-	return a.eachNewestFirstOnce(visit, seen)
+	return a.eachNewestFirstOnce(visit, seen, a.orderSize)
 }
 
 // eachNewestFirstOnce walks the commits this view states and names the ones seen does
 // not hold yet, which is what a walk resumes at after the index files were stated
 // again from the log.
-func (a *journalAddress) eachNewestFirstOnce(visit func(key string, span journalAddressSpan) (bool, error), seen map[string]struct{}) error {
+func (a *journalAddress) eachNewestFirstOnce(visit func(key string, span journalAddressSpan) (bool, error), seen map[string]struct{}, from int64) error {
 	if a.window != nil {
 		for at := len(a.window.order) - 1; at >= 0; at-- {
 			key := a.window.order[at]
@@ -1969,7 +2284,7 @@ func (a *journalAddress) eachNewestFirstOnce(visit func(key string, span journal
 		chunkBuffer = pooled
 	}
 	defer func() { a.orderChunks.Put(chunkBuffer) }()
-	for pos := a.orderSize; pos > 0; {
+	for pos := from; pos > 0; {
 		start := pos - journalOrderChunkBytes
 		if start < 0 {
 			start = 0
@@ -2030,7 +2345,15 @@ func (a *journalAddress) eachNewestFirstOnce(visit func(key string, span journal
 // reads: one order walk for the keys and one value span read per key it names,
 // nothing of the history behind the stop.
 func (a *journalAddress) eachNewestFirstValue(visit func(key string, value []byte) (bool, error)) error {
-	return a.eachNewestFirst(func(key string, span journalAddressSpan) (bool, error) {
+	return a.eachNewestFirstAtValue(a.orderSize, visit)
+}
+
+// eachNewestFirstAtValue answers the held keys from the given order byte to the oldest
+// beside the value each key's newest statement carries, on the terms eachNewestFirstAt
+// states: the same commits, the same order inside a commit and the same repair, entered at
+// the commit the caller names instead of at the newest one.
+func (a *journalAddress) eachNewestFirstAtValue(from int64, visit func(key string, value []byte) (bool, error)) error {
+	return a.eachNewestFirstAt(from, func(key string, span journalAddressSpan) (bool, error) {
 		value, held, err := a.value(span)
 		if err != nil {
 			return false, err
@@ -2050,9 +2373,19 @@ func (a *journalAddress) close() error {
 		return nil
 	}
 	flushErr := a.flush(true)
-	order, slots := a.order, a.slots
-	a.order, a.slots = nil, nil
-	return errors.Join(flushErr, order.Close(), slots.Close())
+	order, slots, lines := a.order, a.slots, a.lines
+	a.order, a.slots, a.lines = nil, nil, nil
+	closed := []error{flushErr}
+	if order != nil {
+		closed = append(closed, order.Close())
+	}
+	if slots != nil {
+		closed = append(closed, slots.Close())
+	}
+	if lines != nil {
+		closed = append(closed, lines.Close())
+	}
+	return errors.Join(closed...)
 }
 
 // readHeader reads the watermark and the shape one slot table states, and answers
@@ -2160,10 +2493,16 @@ func fillEmptySlots(file *os.File, capacity, stride int64) error {
 
 // stageProbe answers the slot one key's record belongs at inside a table that is
 // being staged, which is the same linear probe the table itself answers.
+//
+// The staged table holds at most the used slots its source states, so capacity is the
+// bound its chains can need: every slot the chain walks but its own holds another key,
+// and a table whose records fill it states no empty slot for the next key. A walk that
+// exhausts it answers errSlotUnplaceable, so the caller repairs the table from the
+// order file instead of staging a table that lost a record.
 func stageProbe(file *os.File, capacity, stride int64, key string) (int64, error) {
 	base := slotAddressOf(key, capacity)
 	record := make([]byte, stride)
-	for step := int64(0); step < journalSlotMaxProbe; step++ {
+	for step := int64(0); step < capacity; step++ {
 		index := (base + step) % capacity
 		if _, err := file.ReadAt(record, journalSlotHeaderBytes+index*stride); err != nil && !errors.Is(err, io.EOF) {
 			return 0, err
@@ -2176,8 +2515,8 @@ func stageProbe(file *os.File, capacity, stride int64, key string) (int64, error
 			return index, nil
 		}
 	}
-	return 0, fmt.Errorf("%w: the staged table of %s holds no free slot within %d of %q",
-		ErrJournalCorrupt, file.Name(), journalSlotMaxProbe, key)
+	return 0, fmt.Errorf("%w: the staged table of %s holds no empty slot in its %d slot(s) for %q",
+		errSlotUnplaceable, file.Name(), capacity, key)
 }
 
 // encodeSlotRecord answers the bytes one slot states: its checksum, the state of the

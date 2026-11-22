@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -1359,5 +1360,135 @@ func TestGovernanceCountAndQueryStateTheirBoundary(t *testing.T) {
 	}
 	if len(read) == int(wire.GoalSeq) {
 		t.Fatalf("the goal history answers %d goals beside a stated tail of %d, want the goals counted and the tail left to the stream: a count read off the tail over-reports every resolution it numbers", len(read), wire.GoalSeq)
+	}
+}
+
+// goalWriteSeam is one goal store a check arms: it stages writes and publishes
+// them behind a barrier, and it refuses the n-th write or the n-th barrier on
+// demand, so the two legs of one filing answer the failures a real store answers.
+type goalWriteSeam struct {
+	mu       sync.Mutex
+	stored   map[string][]byte
+	staged   map[string][]byte
+	puts     int
+	syncs    int
+	failPut  int
+	failSync int
+}
+
+// newGoalWriteSeam returns one empty seam.
+func newGoalWriteSeam() *goalWriteSeam {
+	return &goalWriteSeam{stored: map[string][]byte{}, staged: map[string][]byte{}}
+}
+
+// Put stages one governance event, or refuses the write of the armed leg.
+func (s *goalWriteSeam) Put(_ context.Context, key string, value []byte) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.puts++
+	if s.failPut != 0 && s.puts == s.failPut {
+		return fmt.Errorf("the store refused the write at %s", key)
+	}
+	s.staged[key] = append([]byte(nil), value...)
+	return nil
+}
+
+// Scan answers every published pair under the prefix.
+func (s *goalWriteSeam) Scan(_ context.Context, prefix string) (map[string][]byte, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	found := map[string][]byte{}
+	for key, value := range s.stored {
+		if strings.HasPrefix(key, prefix) {
+			found[key] = append([]byte(nil), value...)
+		}
+	}
+	return found, nil
+}
+
+// Sync completes the barrier over everything staged so far, or refuses it, in
+// which case the staged writes stay unpublished.
+func (s *goalWriteSeam) Sync(context.Context) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.syncs++
+	if s.failSync != 0 && s.syncs == s.failSync {
+		return fmt.Errorf("the store refused the barrier")
+	}
+	for key, value := range s.staged {
+		s.stored[key] = value
+	}
+	s.staged = map[string][]byte{}
+	return nil
+}
+
+// arm names the leg the next write or barrier refuses.
+func (s *goalWriteSeam) arm(failPut, failSync int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.failPut, s.failSync = failPut, failSync
+}
+
+// goalIDs names one set of goals by identity, so a check compares two readings of
+// the same effective state.
+func goalIDs(goals []*Goal) []string {
+	out := make([]string, 0, len(goals))
+	for _, goal := range goals {
+		out = append(out, goal.ID+":"+string(goal.Status))
+	}
+	sort.Strings(out)
+	return out
+}
+
+// TestGoalWriteFailureDoesNotChangeEffectiveState pins the goals one failed write leaves in force against the goals the stream behind the registry states.
+//   - a declaration whose event or barrier the store refused leaves the effective state on the work that landed: the goal gate rules on what the stream keeps
+//   - a resolution whose event or barrier the store refused leaves the goal it was ruled over in force, so a restart does not read another effective state
+//   - the registry opened over the same store answers the same goals, so the retry and the stream agree on the work the gate rules on
+//
+// 契约: docs/wiki/platform/platform-subsystems.md#framework-checkpoint
+func TestGoalWriteFailureDoesNotChangeEffectiveState(t *testing.T) {
+	ctx := context.Background()
+	for _, held := range []struct {
+		name     string
+		leg      string
+		failPut  int
+		failSync int
+	}{
+		{name: "the declaration event is refused", leg: "declaration", failPut: 2},
+		{name: "the declaration barrier does not confirm", leg: "declaration", failSync: 2},
+		{name: "the resolution event is refused", leg: "resolution", failPut: 2},
+		{name: "the resolution barrier does not confirm", leg: "resolution", failSync: 2},
+	} {
+		t.Run(held.name, func(t *testing.T) {
+			seam := newGoalWriteSeam()
+			live := NewGoalRegistry()
+			if err := live.Bind(ctx, seam); err != nil {
+				t.Fatalf("bind the goal registry: %v", err)
+			}
+			landed := live.Declare("ship the release", "entry", 0)
+			if landed == "" {
+				t.Fatal("the registry declared no goal over a store that carried the write")
+			}
+			seam.arm(held.failPut, held.failSync)
+			if held.leg == "declaration" {
+				live.Declare("a goal whose event never landed", "entry", 0)
+			} else {
+				live.Resolve(landed, GoalAchieved)
+			}
+			seam.arm(0, 0)
+
+			reopened := NewGoalRegistry()
+			if err := reopened.Bind(ctx, seam); err != nil {
+				t.Fatalf("bind the registry opened over the same store: %v", err)
+			}
+			if got, want := goalIDs(live.Active()), goalIDs(reopened.Active()); !slices.Equal(got, want) {
+				t.Fatalf("the registry holds %v in force while the store states %v after the failed %s: the goal gate rules on work the stream never kept, and a restart rules on another state",
+					got, want, held.leg)
+			}
+			if got, want := goalIDs(live.List()), goalIDs(reopened.List()); !slices.Equal(got, want) {
+				t.Fatalf("the registry lists %v while the store states %v after the failed %s: one reader answers a goal the other never saw",
+					got, want, held.leg)
+			}
+		})
 	}
 }

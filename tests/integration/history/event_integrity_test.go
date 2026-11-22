@@ -885,16 +885,25 @@ func (p *handoverProbe) Port() plugin.Port {
 	return plugin.PortFactObservation
 }
 
+// deliveryFactKeyPrefix opens the identity the delivery family mints for one
+// terminal notification, so a fact key says which family wrote it.
+const deliveryFactKeyPrefix = "settle-"
+
 // ObserveCommit holds the settled delivery of a tool call at the handover
-// boundary: a delivery fact carrying no settle-lineage stamp is the one the
-// backflow commits, so the probe tells it apart from the fact a delivery flush
-// observes and holds exactly that pass until the parent interrupts the process.
+// boundary: the fact is the one the delivery family renders for a notification,
+// so the hold names the family by its identity and covers the pass that follows
+// whichever face committed it — the backflow of this process and the delivery a
+// restart flushes write the same fact, and the window this anchor needs is the
+// one between its commit and the notification reaching the intake.
 func (p *handoverProbe) ObserveCommit(ctx context.Context, id event.EventID) error {
 	fact, err := p.run.CommittedEvent(ctx, id)
 	if err != nil {
 		return err
 	}
-	if fact.Type != event.TypeTaskSettled || fact.TaskID == "" || fact.Meta[event.MetaKeySettleTriggerSource] != "" {
+	if fact.Type != event.TypeTaskSettled || fact.TaskID == "" {
+		return nil
+	}
+	if !strings.HasPrefix(string(fact.Key), deliveryFactKeyPrefix) {
 		return nil
 	}
 	p.once.Do(func() { close(p.reached) })
@@ -1209,6 +1218,14 @@ func restoreAssertPairing(t *testing.T, outcome func(*testing.T, string) restore
 	}
 }
 
+// settleLineOf renders the body the delivery fact of one settled task carries:
+// the settle line the delivery family states for the notification, so a check
+// reading a request can name the record beside the material it was committed
+// from.
+func settleLineOf(taskID event.TaskID) string {
+	return "tagent: task " + string(taskID) + " settled"
+}
+
 // restoreAssertNextRequest proves the next actual model request of the restarted
 // process carries the restored material ahead of its own input.
 func restoreAssertNextRequest(t *testing.T, outcome func(*testing.T, string) restoreOutcome) {
@@ -1230,6 +1247,7 @@ func restoreAssertNextRequest(t *testing.T, outcome func(*testing.T, string) res
 			{string(model.RoleUser), o.Seed.Input, o.Seed.InputFact, event.TypeExternalInput, "the conversation input"},
 			{string(model.RoleAssistant), persistenceCallText, "", event.TypeThinkingPlan, "the assistant tool call"},
 			{string(model.RoleTool), o.Seed.ResultText, o.Seed.ResultFact, event.TypeActionCommand, "the tool result"},
+			{string(model.RoleTool), settleLineOf(o.Seed.TaskID), "", event.TypeTaskSettled, "the delivery fact of the settled call"},
 			{string(model.RoleAssistant), o.Seed.Answer, o.Seed.AnswerFact, event.TypeAgentOutput, "the assistant output"},
 		}
 		if len(messages) < len(want)+1 {
@@ -2802,7 +2820,8 @@ type restartChildReport struct {
 	Notices    []consumptionNoticeView   `json:"notices"`
 	Mailbox    []consumptionMailboxView  `json:"mailbox"`
 	Requests   int                       `json:"requests"`
-	Prompt     string                    `json:"prompt"`
+	Prompts    []string                  `json:"prompts"`
+	NoticeReqs int                       `json:"notice_requests"`
 	Sends      []string                  `json:"sends"`
 	Drain      restartDrainView          `json:"drain"`
 	Settles    int                       `json:"settles"`
@@ -3028,7 +3047,10 @@ func seedRestartProcess(t *testing.T, root, out string, phase restartPhase) {
 // recoverRestartProcess boots the formal host over the same durable root, drives
 // the first actual request of the restart beside the face it sends through,
 // drains, and reads the durable boundary a third opener sees: every reading is
-// this process's own, never a mirror of the seed's memory.
+// this process's own, never a mirror of the seed's memory. The model face is
+// read after the close, because the delivery the pump owes the recovered
+// notification drives a turn of its own beside the invocation and the two
+// requests race for which lands first.
 func recoverRestartProcess(t *testing.T, root, out string, phase restartPhase) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
@@ -3056,13 +3078,14 @@ func recoverRestartProcess(t *testing.T, root, out string, phase restartPhase) {
 	}); err != nil {
 		t.Fatalf("the restarted process refused its first invocation: %v", err)
 	}
-	report.Requests = provider.count()
-	report.Prompt = provider.firstPrompt()
-	report.Sends = sender.bodies()
 	drain, err := run.Close(ctx, agent.CloseRequest{Deadline: time.Now().Add(restartDrainWindow)})
 	if err != nil && !errors.Is(err, agent.ErrDrainUnsettled) {
 		t.Fatalf("the restarted run refused its drain: %v", err)
 	}
+	report.Requests = provider.count()
+	report.Prompts = provider.prompts()
+	report.NoticeReqs = provider.requestsCarrying(restartNoticeBody)
+	report.Sends = sender.bodies()
 	report.Drain = restartDrainView{Drained: drain.Drained}
 	for _, unsettled := range drain.Unsettled {
 		report.Drain.Unsettled = append(report.Drain.Unsettled, string(unsettled.TaskID)+": "+unsettled.Reason)
@@ -3121,21 +3144,16 @@ func (p *restartProvider) count() int {
 	return len(p.bodies)
 }
 
-// firstPrompt reports the last user message the first request carried, so a
-// check reads the input the restart itself drove instead of a replayed one.
-func (p *restartProvider) firstPrompt() string {
+// prompts reports the last user message of every request the process really
+// sent, in request order, so a check reads what drove each turn instead of a
+// replayed or bookkeeping one.
+func (p *restartProvider) prompts() []string {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	prompts := make([]string, 0, len(p.bodies))
 	for _, body := range p.bodies {
-		raw, held := body["messages"]
-		if !held {
-			continue
-		}
-		var messages []struct {
-			Role    string `json:"role"`
-			Content string `json:"content"`
-		}
-		if json.Unmarshal(raw, &messages) != nil {
+		messages, ok := restartRequestMessages(body)
+		if !ok {
 			continue
 		}
 		prompt := ""
@@ -3144,9 +3162,50 @@ func (p *restartProvider) firstPrompt() string {
 				prompt = message.Content
 			}
 		}
-		return prompt
+		prompts = append(prompts, prompt)
 	}
-	return ""
+	return prompts
+}
+
+// requestsCarrying reports how many of the requests really sent carried the
+// material in any message, so a delivery is read from the face the model sees
+// instead of from an outbound body a same-session notification never produces.
+func (p *restartProvider) requestsCarrying(material string) int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	carrying := 0
+	for _, body := range p.bodies {
+		messages, ok := restartRequestMessages(body)
+		if !ok {
+			continue
+		}
+		for _, message := range messages {
+			if strings.Contains(message.Content, material) {
+				carrying++
+				break
+			}
+		}
+	}
+	return carrying
+}
+
+// restartRequestMessage is one message of one recorded request.
+type restartRequestMessage struct {
+	Role    string `json:"role"`
+	Content string `json:"content"`
+}
+
+// restartRequestMessages decodes the messages one recorded request carried.
+func restartRequestMessages(body map[string]json.RawMessage) ([]restartRequestMessage, bool) {
+	raw, held := body["messages"]
+	if !held {
+		return nil, false
+	}
+	var messages []restartRequestMessage
+	if json.Unmarshal(raw, &messages) != nil {
+		return nil, false
+	}
+	return messages, true
 }
 
 // restartSender is the outbound face of the restarted host: every accepted body
@@ -3430,58 +3489,58 @@ func restartAssertNothingCommitted(t *testing.T, o restartOutcome) {
 }
 
 // restartAssertOwed proves an interruption after the commit, after the claim or
-// before the confirmation leaves the notification owed or really delivered, and
-// never silently dropped. The restart rebuilds the task and keeps the duty
-// honest in one of the two ways the contract admits: the unconsumed notice
-// stays owed beside the durable boundary that still holds it (the mailbox
-// branch, because an unconsumed notice is kept across the restart until a wake
-// claims it), or it really delivered the duty and left the receipt the boundary
-// reads. Both branches read the restart's own first actual request and send.
+// before the confirmation leaves the notification delivered once and never
+// silently dropped: the restart reads it as owed, finishes the duty the durable
+// root still carried, commits exactly one delivery fact, carries the material
+// into a real model request, and leaves the boundary closed by the receipt.
 func restartAssertOwed(t *testing.T, o restartOutcome) {
 	t.Helper()
 	taskID, ok := restartSoleTask(o.Recover)
 	if !ok {
 		t.Fatalf("the %s restart recovered %+v, want exactly one rebuilt task", o.Phase, o.Recover.Recovery)
 	}
-	switch o.Recover.Boundary.Owed {
-	case 1:
-		if len(o.Recover.Notices) != 1 || o.Recover.Notices[0].TaskID != taskID {
-			t.Fatalf("the %s restart reads %+v, want the one unconsumed notice of the task %s kept owed across the restart", o.Phase, o.Recover.Notices, taskID)
-		}
-		if phase := o.Recover.Notices[0].Phase; phase == string(query.NoticePhaseConsumed) {
-			t.Fatalf("the %s restart reads the notification of %s as %q, want an unconsumed notice kept owed", o.Phase, taskID, phase)
-		}
-		if restartNoticeDelivered(o.Recover) {
-			t.Fatalf("the %s restart delivered %q beside an owed unconsumed notice, want no delivery without a wake claiming it", o.Phase, o.Recover.Sends)
-		}
-		if o.Recover.Boundary.Accept != "accepted" || o.Recover.Boundary.AcceptErr != "" {
-			t.Fatalf("the durable boundary answered the seeded notification %q err=%q, want its delivery still open to acceptance", o.Recover.Boundary.Accept, o.Recover.Boundary.AcceptErr)
-		}
-	case 0:
-		if !o.Recover.Drain.Drained || len(o.Recover.Drain.Unsettled) != 0 {
-			t.Fatalf("the %s restart drain = %+v, want a drained run beside the delivered duty", o.Phase, o.Recover.Drain)
-		}
-		if !restartNoticeDelivered(o.Recover) {
-			t.Fatalf("the %s restart sent %q, want the one delivery of the recovered notification carrying %q", o.Phase, o.Recover.Sends, restartNoticeBody)
-		}
-		if !strings.Contains(o.Recover.Boundary.AcceptErr, "no delivery obligation") {
-			t.Fatalf("the durable boundary answered the delivered notification %q err=%q, want its receipt to close the delivery", o.Recover.Boundary.Accept, o.Recover.Boundary.AcceptErr)
-		}
-	default:
-		t.Fatalf("the durable boundary owes %d notifications, want the unconfirmed notification kept owed or really delivered", o.Recover.Boundary.Owed)
+	if len(o.Recover.Notices) != 1 || o.Recover.Notices[0].TaskID != taskID {
+		t.Fatalf("the %s restart reads %+v, want the one unconsumed notice of the task %s kept owed across the restart", o.Phase, o.Recover.Notices, taskID)
+	}
+	if phase := o.Recover.Notices[0].Phase; phase == string(query.NoticePhaseConsumed) {
+		t.Fatalf("the %s restart reads the notification of %s as %q, want an unconsumed notice kept owed", o.Phase, taskID, phase)
+	}
+	if o.Recover.Boundary.Owed != 0 {
+		t.Fatalf("the %s restart left %d notification(s) owed, want the duty it found owed finished before the run closed", o.Phase, o.Recover.Boundary.Owed)
+	}
+	if !o.Recover.Drain.Drained || len(o.Recover.Drain.Unsettled) != 0 {
+		t.Fatalf("the %s restart drain = %+v, want a drained run beside the finished duty", o.Phase, o.Recover.Drain)
+	}
+	if !strings.Contains(o.Recover.Boundary.AcceptErr, "no delivery obligation") {
+		t.Fatalf("the durable boundary answered the delivered notification %q err=%q, want its receipt to close the delivery", o.Recover.Boundary.Accept, o.Recover.Boundary.AcceptErr)
+	}
+	if o.Recover.Settles != 1 {
+		t.Fatalf("the %s restart committed %d delivery fact(s) for the notification it found owed, want exactly one", o.Phase, o.Recover.Settles)
+	}
+	if !restartNoticeReachedModel(o.Recover) {
+		t.Fatalf("the %s restart closed the duty while no model request carried %q: the delivery MUST reach the face the model sees", o.Phase, restartNoticeBody)
 	}
 }
 
-// restartNoticeDelivered reports whether the restart really delivered the
-// seeded notification body through its own sender face, so a delivery is read
-// from the face that sends and never from a bookkeeping mirror.
-func restartNoticeDelivered(recovered restartChildReport) bool {
-	for _, body := range recovered.Sends {
-		if strings.Contains(body, restartNoticeBody) {
-			return true
+// restartNoticeReachedModel reports whether a real model request of the restarted
+// process carried the material of the recovered notification, so a delivery is
+// read from the face the model sees and not from an outbound body, which a
+// notification routed to the recovering session never produces.
+func restartNoticeReachedModel(report restartChildReport) bool {
+	return report.NoticeReqs > 0
+}
+
+// restartTurnsCarrying reports how many requests of the restarted process the
+// material drove: a request is counted when its last user message states the
+// material, so the count names the turns that input alone drove.
+func restartTurnsCarrying(report restartChildReport, material string) int {
+	turns := 0
+	for _, prompt := range report.Prompts {
+		if strings.Contains(prompt, material) {
+			turns++
 		}
 	}
-	return false
+	return turns
 }
 
 // restartAssertConfirmed proves an interruption after the confirmation leaves a
@@ -3498,6 +3557,9 @@ func restartAssertConfirmed(t *testing.T, o restartOutcome) {
 	}
 	if o.Recover.Settles != 0 {
 		t.Fatalf("the restart committed %d settle facts, want no second delivery of a confirmed consumption", o.Recover.Settles)
+	}
+	if restartNoticeReachedModel(o.Recover) {
+		t.Fatalf("the restart carried %q into %d model request(s), want a confirmed consumption delivered no second time", restartNoticeBody, o.Recover.NoticeReqs)
 	}
 	if !o.Recover.Drain.Drained || len(o.Recover.Drain.Unsettled) != 0 {
 		t.Fatalf("the restart drain = %+v, want a drained run beside no obligation", o.Recover.Drain)
@@ -3527,33 +3589,30 @@ func restartAssertConfirmedNotResent(t *testing.T, o restartOutcome) {
 
 // restartAssertUnconfirmedNotLost fails when a notification whose consumption
 // receipt never landed is dropped by the restart: the rebuilt task is gone, the
-// duty is neither kept owed beside the durable boundary nor really delivered
-// beside a receipt, or an open duty is kept owed and delivered a second time.
+// duty the durable root still carried is left owed instead of finished, the
+// finish commits no delivery fact or carries no material into a model request,
+// or the restart finishes the same duty twice.
 func restartAssertUnconfirmedNotLost(t *testing.T, o restartOutcome) {
 	t.Helper()
 	if _, ok := restartSoleTask(o.Recover); !ok {
 		t.Fatalf("the restart dropped the task whose consumption receipt never landed: recovery=%+v", o.Recover.Recovery)
 	}
-	switch o.Recover.Boundary.Owed {
-	case 1:
-		if len(o.Recover.Notices) != 1 {
-			t.Fatalf("the restart kept a duty whose consumption receipt never landed but dropped it from the account: notices=%+v boundary=%+v", o.Recover.Notices, o.Recover.Boundary)
-		}
-		if restartNoticeDelivered(o.Recover) {
-			t.Fatalf("the restart kept a duty whose consumption receipt never landed owed and delivered it too: sends=%q: an unconfirmed notification MUST NOT be delivered a second time", o.Recover.Sends)
-		}
-	case 0:
-		if !restartNoticeDelivered(o.Recover) {
-			t.Fatalf("the restart closed the duty without a real delivery: sends=%q: an unconfirmed notification MUST stay owed or be delivered once", o.Recover.Sends)
-		}
-	default:
-		t.Fatalf("the durable boundary owes %d notifications for a duty whose consumption receipt never landed: an unconfirmed notification MUST NOT be lost", o.Recover.Boundary.Owed)
+	if owed := o.Recover.Boundary.Owed; owed != 0 {
+		t.Fatalf("the durable boundary owes %d notification(s) for a duty whose consumption receipt never landed: an unconfirmed notification MUST be finished by the restart, not left owed", owed)
+	}
+	if !restartNoticeReachedModel(o.Recover) {
+		t.Fatalf("the restart closed the duty without carrying %q into a model request: an unconfirmed notification MUST be delivered once on the face the model sees", restartNoticeBody)
+	}
+	turns := restartTurnsCarrying(o.Recover, restartNoticeBody)
+	if o.Recover.Settles != 1 || turns > 1 {
+		t.Fatalf("the restart committed %d delivery fact(s) over %d turn(s) of the notification, want one delivery of an unconfirmed notification and no second turn", o.Recover.Settles, turns)
 	}
 }
 
 // restartAssertCrossBoundary fails when the restart reads a claim as a
-// confirmation or a confirmation as a claim: the claimed side must stay owed and
-// acceptable, the confirmed side must owe nothing and refuse acceptance.
+// confirmation or a confirmation as a claim: the claimed side still owed the
+// delivery its claim never confirmed, so the restart MUST finish it, while the
+// confirmed side owes nothing and drives no second delivery.
 func restartAssertCrossBoundary(t *testing.T, claimed, confirmed restartOutcome) {
 	t.Helper()
 	phase := ""
@@ -3563,27 +3622,30 @@ func restartAssertCrossBoundary(t *testing.T, claimed, confirmed restartOutcome)
 	if phase == string(query.NoticePhaseConsumed) {
 		t.Fatalf("the restart read a claim as a confirmation: the %s notification stands consumed although no receipt landed", claimed.Phase)
 	}
-	if claimed.Recover.Boundary.Owed != 1 || claimed.Recover.Boundary.Accept != "accepted" {
-		t.Fatalf("the claimed side of the boundary owes %d and answered %q err=%q, want it owed and still acceptable",
-			claimed.Recover.Boundary.Owed, claimed.Recover.Boundary.Accept, claimed.Recover.Boundary.AcceptErr)
+	if len(claimed.Recover.Notices) != 1 || claimed.Recover.Settles != 1 || !restartNoticeReachedModel(claimed.Recover) {
+		t.Fatalf("the claimed side of the boundary read notices=%+v settles=%d notice requests=%d, want the claim finished by the one delivery the durable root still owed",
+			claimed.Recover.Notices, claimed.Recover.Settles, claimed.Recover.NoticeReqs)
 	}
-	if len(confirmed.Recover.Notices) != 0 || confirmed.Recover.Boundary.Owed != 0 {
-		t.Fatalf("the restart read a confirmation as a claim: the confirmed side holds notices=%+v owed=%d, want neither",
-			confirmed.Recover.Notices, confirmed.Recover.Boundary.Owed)
+	if len(confirmed.Recover.Notices) != 0 || confirmed.Recover.Settles != 0 || restartNoticeReachedModel(confirmed.Recover) {
+		t.Fatalf("the restart read a confirmation as a claim: the confirmed side holds notices=%+v settles=%d notice requests=%d, want neither",
+			confirmed.Recover.Notices, confirmed.Recover.Settles, confirmed.Recover.NoticeReqs)
 	}
 	if confirmed.Recover.Boundary.AcceptErr == "" {
 		t.Fatalf("the durable boundary accepted the confirmed notification %q, want it refused by name", confirmed.Recover.Boundary.Accept)
 	}
-	if claimed.Recover.Boundary.Owed == confirmed.Recover.Boundary.Owed {
-		t.Fatalf("the boundary read the same on both sides (owed=%d), want a claim kept apart from a confirmation", claimed.Recover.Boundary.Owed)
+	if claimed.Recover.Boundary.Owed != 0 || confirmed.Recover.Boundary.Owed != 0 {
+		t.Fatalf("the boundary owes %d notification(s) on the claimed side and %d on the confirmed side, want the receipt to close both",
+			claimed.Recover.Boundary.Owed, confirmed.Recover.Boundary.Owed)
 	}
 }
 
-// restartAssertFirstRequest is the consumer anchor of the restart: every
-// restarted phase made exactly one actual request carrying the input the
-// restart was driven with, and sent exactly the answer the provider returned,
-// so the record is a real Boot request and send instead of a bookkeeping
-// mirror.
+// restartAssertFirstRequest is the consumer anchor of the restart: the restarted
+// process really drives its own turn once with the input it was handed, drives
+// the recovered notification as a turn of its own no more than once, and sends
+// only the answer its provider returned, so the record is a real Boot request
+// and send instead of a bookkeeping mirror. Each drive is counted on its own
+// rather than in total, because the delivery turn the pump owes races with the
+// invocation turn for which lands first.
 func restartAssertFirstRequest(t *testing.T, outcome func(*testing.T, restartPhase) restartOutcome) {
 	t.Helper()
 	for _, phase := range []restartPhase{
@@ -3591,11 +3653,20 @@ func restartAssertFirstRequest(t *testing.T, outcome func(*testing.T, restartPha
 		restartBeforeConfirmation, restartAfterConfirmation,
 	} {
 		o := outcome(t, phase)
-		if o.Recover.Requests != 1 || o.Recover.Prompt != restartRecoverInput {
-			t.Fatalf("the %s restart made %d requests carrying %q, want its first actual request carrying the restart input", phase, o.Recover.Requests, o.Recover.Prompt)
+		if drove := restartTurnsCarrying(o.Recover, restartRecoverInput); drove != 1 {
+			t.Fatalf("the %s restart drove %d turn(s) with %q out of %d request(s), want its first actual request carrying the restart input",
+				phase, drove, restartRecoverInput, o.Recover.Requests)
 		}
-		if len(o.Recover.Sends) != 1 || !strings.Contains(o.Recover.Sends[0], restartAnswerBody) {
-			t.Fatalf("the %s restart sent %+v, want the one answer the provider returned", phase, o.Recover.Sends)
+		if drove := restartTurnsCarrying(o.Recover, restartNoticeBody); drove > 1 {
+			t.Fatalf("the %s restart drove %d turn(s) with %q, want the recovered notification driven no more than once", phase, drove, restartNoticeBody)
+		}
+		if len(o.Recover.Sends) == 0 {
+			t.Fatalf("the %s restart sent nothing, want the answer the provider returned", phase)
+		}
+		for _, body := range o.Recover.Sends {
+			if !strings.Contains(body, restartAnswerBody) {
+				t.Fatalf("the %s restart sent %q, want every send to carry the one answer the provider returned", phase, body)
+			}
 		}
 	}
 }

@@ -32,6 +32,7 @@ import (
 	"fmt"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -340,6 +341,8 @@ func (r *Run) Checkpoint(ctx context.Context) (event.EventID, bool, error) {
 // it is taken by no commit, so it never stands between a fact and its landing.
 //
 //   - every cut states a key no earlier cut stated: the key names the owner partition beside the sequence that partition stands at, and the checkpoint's own landing takes a slot past the cut it states, so the next cut of one owner names a later slot and a cut whose owner moved names another partition's key instead of the filed one.
+//   - the cut states a quiet point of the commit order between its drain and its state, so the account this cut does not state is the one that lands after it: a fact that landed before the marker is applied and in the slices this cut reads, and a fact that lands after it is outside the state and read back by the boot from its own chain.
+//   - a cut whose quiet point cannot be committed files nothing: a boot reads the account past the marker, so a cut the storage holds no position for is a cut that would state an account no restore can bound.
 func (r *Run) checkpointLocked(ctx context.Context) (event.EventID, bool, error) {
 	if err := ctx.Err(); err != nil {
 		return "", false, err
@@ -356,6 +359,9 @@ func (r *Run) checkpointLocked(ctx context.Context) (event.EventID, bool, error)
 	key := event.EventID(event.CheckpointKey(partition, offset[partition]))
 	if err := r.flight.await(ctx); err != nil {
 		return "", false, err
+	}
+	if err := r.stateQuietPoint(ctx, tier, partition, offset[partition], key); err != nil {
+		return "", false, fmt.Errorf("tagent: state the quiet point of the framework checkpoint %s: %w", key, err)
 	}
 	slices, err := r.states.SnapshotState(ctx)
 	if err != nil {
@@ -377,6 +383,49 @@ func (r *Run) checkpointLocked(ctx context.Context) (event.EventID, bool, error)
 	r.checkpointAt = time.Now()
 	r.mu.Unlock()
 	return key, true, nil
+}
+
+// orderedAppend is the append face a cut states its quiet point through: one record
+// enters the engine's append order without the barrier a commit completes, because the
+// position has to stand before the snapshot and every later commit's barrier flushes the
+// frame ahead of its own.
+//   - the record is a position in the order and not a fact: no read face answers it before a later barrier, and a stop may leave it absent or torn, which tailFactKeys reads as no position at all
+//   - an engine that keeps no commit order states no position at all; one that states the order without this face writes the marker behind the barrier it always did, so a decorated engine keeps the bound it had instead of silently losing it
+type orderedAppend interface {
+	AppendOrdered(ctx context.Context, batch ledger.Batch) error
+}
+
+// stateQuietPoint states the quiet point of one cut: the key that separates the
+// facts this cut's slices state from the facts a boot reads as the tail of the task
+// account. The record is one key in the append order and states no fact of any chain,
+// so a storage that keeps no commit order states no position here and this cut bounds
+// no tail either.
+//
+// The landing fence is what makes the separation exact on that order. It is taken after
+// the pipeline drained, so every fact the storage committed before the marker is applied
+// — the registration and the fold of a fact are inside the same fence — and the marker
+// enters the append order inside it, so a fact committed after it is one this cut's state
+// cannot promise: the boot reads it again by identity, and a slice that folded it already
+// states it twice rather than not at all. Order and durability are separate here: the cut
+// pays one frame of the log rather than a barrier of its own, and the barrier the
+// checkpoint's own commit completes flushes the marker ahead of it. A stop between the
+// marker and that commit leaves the frame absent or torn, and both read as no position: a
+// cut that files nothing after this write leaves the marker behind, and the boot tells
+// that position apart instead of reading it as the end of an account (see tailFactKeys).
+func (r *Run) stateQuietPoint(ctx context.Context, tier *ledger.Tier, partition int, seq int64, cut event.EventID) error {
+	if _, ordered := tier.Store.(ledger.CommitOrder); !ordered {
+		return nil
+	}
+	r.landing.Lock()
+	defer r.landing.Unlock()
+	batch := ledger.Batch{Puts: []ledger.Pair{{
+		Key:   quietPointKey(partition, seq),
+		Value: []byte(cut),
+	}}}
+	if appender, holds := tier.Store.(orderedAppend); holds {
+		return appender.AppendOrdered(ctx, batch)
+	}
+	return tier.Store.Commit(ctx, batch)
 }
 
 // CheckpointSession takes one cut of the named session chain and files the fact
@@ -440,15 +489,6 @@ func (r *Run) checkpointSessionLocked(ctx context.Context, addr event.Address) (
 	if _, err := r.commitFactNoCadence(ctx, evt); err != nil {
 		return "", false, fmt.Errorf("tagent: file the session checkpoint %s of session %s: %w", key, addr.SessionID, err)
 	}
-	names := make(map[string]bool, len(slices))
-	for _, slice := range slices {
-		names[slice.Name] = true
-	}
-	r.mu.Lock()
-	r.sessionFiled[addr.SessionID] = key
-	r.sessionCuts[addr.SessionID] = offset
-	r.sessionSlices[addr.SessionID] = names
-	r.mu.Unlock()
 	return key, true, nil
 }
 
@@ -866,14 +906,74 @@ func (r *Run) durableAccount() *state.DurableCommit {
 	return durable
 }
 
-// tailFactKeys answers the keys the storage tier committed past its newest framework
-// checkpoint, and nil beside a walk that found no such checkpoint or an engine that
-// states no commit order: nil is the boot that reads the whole log, never a boot that
-// reads an empty tail. The walk ranks entries by the order the engine states and stops
-// at the newest checkpoint the framework itself filed, so the keys between the two are
-// the chains younger than the account and naming them costs their count instead of the
-// history. A checkpoint one session chain filed ends no walk, because the tasks behind
-// it are still younger than the framework checkpoint the walk is looking for.
+// quietPointKeyPrefix names the key family one cut's quiet point stands under: the
+// position in the commit order a boot bounds the tail of the task account at. The
+// family is derived data of the storage and never a fact: it is one key per cut, it
+// enters no chain, and the only reader of it is tailFactKeys.
+const quietPointKeyPrefix = "tagent/checkpoint/v1/quiet:"
+
+// quietPointKey is the key one cut's quiet point stands under: the partition the cut
+// is filed in beside the sequence that partition stood at, so each cut of one owner
+// names a key no earlier cut named and no cut rewrites the marker of another.
+func quietPointKey(partition int, seq int64) string {
+	return quietPointKeyPrefix + strconv.Itoa(partition) + ":" + strconv.FormatInt(seq, 10)
+}
+
+// quietPointCut answers the cut one quiet point names: the key the checkpoint of that
+// cut is filed under, whose partition and sequence are the ones the marker's own key
+// carries. A key this family does not spell answers false, so a position this run
+// cannot read bounds no account.
+func quietPointCut(marker string) (int, event.EventID, bool) {
+	spelled, held := strings.CutPrefix(marker, quietPointKeyPrefix)
+	if !held {
+		return 0, "", false
+	}
+	partitionSpelling, sequenceSpelling, held := strings.Cut(spelled, ":")
+	if !held {
+		return 0, "", false
+	}
+	partition, err := strconv.Atoi(partitionSpelling)
+	if err != nil {
+		return 0, "", false
+	}
+	seq, err := strconv.ParseInt(sequenceSpelling, 10, 64)
+	if err != nil {
+		return 0, "", false
+	}
+	return partition, event.EventID(event.CheckpointKey(partition, seq)), true
+}
+
+// quietPointBoundsTheAccount answers whether the cut a quiet point names is in the
+// storage. A cut that refused after taking its quiet point, and one whose checkpoint
+// commit never landed, leave the marker behind beside no slices: no checkpoint covers
+// the facts between the newest account the storage states and that marker, so a tail
+// bounded at it drops every task that landed in between and the boot seats an account
+// without the work it owes.
+func quietPointBoundsTheAccount(ctx context.Context, tier *ledger.Tier, marker string) (bool, error) {
+	partition, cut, named := quietPointCut(marker)
+	if !named {
+		return false, nil
+	}
+	_, held, err := tier.Segments.GetEventInPartition(ctx, cut, partition)
+	if err != nil {
+		return false, fmt.Errorf("tagent: read the cut %s a quiet point names: %w", cut, err)
+	}
+	return held, nil
+}
+
+// tailFactKeys answers the keys the storage tier committed past the quiet point of its
+// newest framework cut, and nil beside a walk that found no such quiet point, a
+// position that names no filed cut, or an engine that states no commit order: nil is
+// the boot that reads the whole log, never a boot that reads an empty tail. The walk
+// ranks entries by the order the engine states and stops at the newest quiet point the
+// framework itself stated, so the keys between the two are the chains younger than the
+// account and naming them costs their count instead of the history. A checkpoint one
+// session chain filed states no quiet point, because the account is bounded by the
+// framework cut alone and the tasks behind a session cut are still younger than it.
+//
+// The walk never falls back to where a checkpoint landed: a fact lands between a cut's
+// quiet point and that checkpoint's own slot, and a boot bounded there reads neither
+// the slices nor the tail of the work that landed in between.
 func tailFactKeys(ctx context.Context, tier *ledger.Tier) (map[string]struct{}, error) {
 	if tier == nil || tier.Store == nil {
 		return nil, nil
@@ -884,11 +984,10 @@ func tailFactKeys(ctx context.Context, tier *ledger.Tier) (map[string]struct{}, 
 		return nil, nil
 	}
 	tail := map[string]struct{}{}
-	found := false
+	marker := ""
 	err := order.EachCommittedNewestFirst(ctx, func(key string, value []byte) (bool, error) {
-		if entry, named := ledger.CommittedIndexEntry(key, value); named &&
-			entry.Type == event.TypeCheckpoint && entry.Session == "" {
-			found = true
+		if strings.HasPrefix(key, quietPointKeyPrefix) {
+			marker = key
 			return false, nil
 		}
 		tail[key] = struct{}{}
@@ -897,8 +996,16 @@ func tailFactKeys(ctx context.Context, tier *ledger.Tier) (map[string]struct{}, 
 	if err != nil {
 		return nil, err
 	}
-	if !found {
-		assemblyInfo("tagent: the commit order states no framework checkpoint, so the boot reads the whole task log")
+	if marker == "" {
+		assemblyInfo("tagent: the commit order states no quiet point of a cut, so the boot reads the whole task log")
+		return nil, nil
+	}
+	bounded, err := quietPointBoundsTheAccount(ctx, tier, marker)
+	if err != nil {
+		return nil, err
+	}
+	if !bounded {
+		assemblyInfo("tagent: the quiet point %s names no filed cut, so the boot reads the whole task log", marker)
 		return nil, nil
 	}
 	return tail, nil
@@ -1007,15 +1114,6 @@ func (r *Run) restoreSessionCheckpoint(ctx context.Context, tier *ledger.Tier, r
 	if err := r.states.RestoreState(ctx, checkpoint.Slices); err != nil {
 		return err
 	}
-	slices := make(map[string]bool, len(checkpoint.Slices))
-	for _, slice := range checkpoint.Slices {
-		slices[slice.Name] = true
-	}
-	r.mu.Lock()
-	r.sessionFiled[ref.session] = event.EventID(checkpoint.Key)
-	r.sessionCuts[ref.session] = checkpoint.Offset
-	r.sessionSlices[ref.session] = slices
-	r.mu.Unlock()
 	return nil
 }
 

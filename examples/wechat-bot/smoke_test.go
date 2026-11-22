@@ -813,10 +813,14 @@ func smokeResidencySeries(warmupHeap, heapPerRound, virtualPerRound int64, reada
 	return samples
 }
 
-// runSmokeFoldChecks 断言折叠：每个会话的投影都长出合成产物，且早期的用户输入
-// 真的被历史摘要带进了之后某一次请求的上下文。
-// - a session driven only before the restart has no projection; the check skips it
-// - the summary may fold more than once, so only the early input is asserted
+// runSmokeFoldChecks 断言折叠：每个会话的投影都长出合成产物，最早的回合真的被折出
+// 投影（压缩发生），且折出的历史综述进了之后某一次请求的上下文。
+//   - a session driven only before the restart has no projection; the check skips it
+//   - the summary may fold more than once, so the earliest turn's own entry is what is asserted gone: the
+//     product's text is bounded, and the original stays on the chain by its ticket (spec: a folded original is still recallable)
+//   - the summary body stays inside its declared budget: the newest reading is kept and earlier material is summarized by existing product references, so the earliest turn's marker need not remain in the text
+//
+// 契约: docs/wiki/memory/memory-architecture.md#hard-contracts
 func runSmokeFoldChecks(t *testing.T, rig *smokeRig, provider *smokeProvider, obs *smokeObservation) {
 	t.Helper()
 	if planned := smokePlannedRounds(); planned < smokeFoldMinRounds {
@@ -837,16 +841,22 @@ func runSmokeFoldChecks(t *testing.T, rig *smokeRig, provider *smokeProvider, ob
 		early := smokeEarlyPrefix + "-" + chat
 		proof := ""
 		for _, entry := range synthetics {
-			if entry.Type == replay.ProjectionTypeHistorySummary && strings.Contains(entry.Content, early) {
+			if entry.Type == replay.ProjectionTypeHistorySummary && entry.Content != "" {
 				proof = entry.Content
 				break
 			}
 		}
 		if proof == "" {
-			t.Fatalf("session %s folded no history summary carrying %q (products=%d)", chat, early, len(synthetics))
+			t.Fatalf("session %s folded no history summary (%d products)", chat, len(synthetics))
 		}
-		if !smokeUserRequestContains(provider, "external_input: "+early) {
-			t.Fatalf("no model request rendered the history summary carrying %q\nprojection:\n%s\nhistory-summary requests:\n%s",
+		for _, entry := range entries {
+			if entry.Type == event.TypeExternalInput && strings.Contains(entry.Content, early) {
+				t.Fatalf("session %s kept the early input %q whole in the projection beside the fold (%d entries)",
+					chat, early, len(entries))
+			}
+		}
+		if !smokeUserRequestContains(provider, "history summary: ") {
+			t.Fatalf("no model request rendered the folded history summary of %q\nprojection:\n%s\nhistory-summary requests:\n%s",
 				early, smokeEntryDigest(entries), smokeRequestsContaining(provider, "history summary"))
 		}
 		obs.FoldedSessions++
@@ -854,7 +864,7 @@ func runSmokeFoldChecks(t *testing.T, rig *smokeRig, provider *smokeProvider, ob
 		if obs.SyntheticProof == "" {
 			obs.SyntheticProof = proof
 		}
-		t.Logf("[matrix 8] session %s: entries=%d synthetic=%d, the history summary keeps the early input",
+		t.Logf("[matrix 8] session %s: entries=%d synthetic=%d, the fold moved the early input out of the projection",
 			chat, len(entries), len(synthetics))
 	}
 	if obs.FoldedSessions == 0 {
@@ -961,10 +971,14 @@ func smokeRequestsFor(provider *smokeProvider, model string) int {
 	return count
 }
 
-// runSmokeTrajectoryCheck 收尾关闭宿主并核对轨迹：attempts.jsonl 的行数对模型
-// 调用数，seal.json 的清单对最后一次装配的请求数。
-// - every model call the provider served enters attempts.jsonl, delegated worker calls included
-// - the seal accounts for every call of the last boot, entry and delegated alike
+// runSmokeTrajectoryCheck 收尾关闭宿主并核对轨迹：attempts.jsonl 的 attempt 行对
+// 消费决策数（入口与委派子 agent 各一次），请求证据行对同一决策面，seal.json 的清单
+// 对最后一次装配写下的记录数。
+// - every consumption decision the provider served, entry or delegated, lands exactly one attempt line: one loop decision mints one attempt identity (runtime/agent/loop.go attempt-<decision>)
+// - every decision lands exactly one request evidence line, and the decision identity that line carries joins the attempt of that same decision (features/rl/sink.go:296, features/rl/line.go:27)
+// - a band summary request is not a decision: the fold asks the session's model beside the loop, so the request carries no attempt and no evidence line and its answer lands as the fold product's own fact (assembly/summary_gist.go)
+// - the seal accounts for every record the last boot wrote, one attempt and one evidence line per decision
+// - the pairing is read in both directions by decision identity: equal totals cannot hide one duplicated evidence line beside one decision with none
 func runSmokeTrajectoryCheck(t *testing.T, rig *smokeRig, cfg *smokeConfig, provider *smokeProvider, obs *smokeObservation) {
 	t.Helper()
 	obs.CloseErr = rig.close()
@@ -989,19 +1003,77 @@ func runSmokeTrajectoryCheck(t *testing.T, rig *smokeRig, cfg *smokeConfig, prov
 	if seal.Dropped != 0 {
 		t.Fatalf("the trajectory capture dropped %d record(s)", seal.Dropped)
 	}
-	total := provider.count()
-	if got := trajectory.Records; got != total {
-		t.Fatalf("attempts.jsonl = %d lines against %d model calls (worker calls=%d): every call, entry or delegated, must enter the trajectory\nattempt heads:\n%s\nrequests:\n%s",
-			got, total, obs.WorkerRequests, strings.Join(trajectory.Heads, "\n"), smokeRequestHeads(provider))
+	lines, err := smokeIntegrityAttemptLines(cfg.StorageRoot)
+	if err != nil {
+		t.Fatalf("read the record lines under %s: %v", cfg.StorageRoot, err)
 	}
-	lastBoot := total - obs.RestartRequests
-	lastBootWorker := obs.WorkerRequests - obs.RestartWorkerRequests
-	if got := int(seal.Records); got != lastBoot {
-		t.Fatalf("seal records = %d against the %d model calls of the last boot (%d total, %d worker calls): the seal must account for every call of its boot\nattempt heads:\n%s\nrequests:\n%s",
-			got, lastBoot, total, lastBootWorker, strings.Join(trajectory.Heads, "\n"), smokeRequestHeads(provider))
+	attempts, requests := smokeIntegrityRecordKinds(t, lines)
+	if len(lines) != trajectory.Records {
+		t.Fatalf("the read-back counts %d record(s) and the file holds %d line(s)", trajectory.Records, len(lines))
 	}
-	t.Logf("[matrix 12] trajectory reconciled: attempts=%d model-calls=%d entry-calls=%d sub-agent-calls=%d seal-records=%d last-boot-calls=%d files=%d sealed=%t",
-		trajectory.Records, total, total-obs.WorkerRequests, obs.WorkerRequests, seal.Records, lastBoot, len(seal.Files), seal.Sealed)
+	calls := provider.count()
+	summaries, restartSummaries := smokeBandSummaryCalls(provider.recorded(), obs.RestartRequests)
+	decisions := calls - summaries
+	lastBootDecisions := (calls - obs.RestartRequests) - (summaries - restartSummaries)
+	t.Logf("[matrix 12] trajectory accounted: lines=%d attempts=%d request-evidence=%d model-calls=%d band-summaries=%d decisions=%d entry-calls=%d sub-agent-calls=%d seal-records=%d last-boot-decisions=%d files=%d sealed=%t",
+		len(lines), attempts, requests, calls, summaries, decisions, decisions-obs.WorkerRequests, obs.WorkerRequests,
+		seal.Records, lastBootDecisions, len(seal.Files), seal.Sealed)
+	if attempts != decisions {
+		t.Fatalf("attempt lines = %d against %d decisions (%d model calls, %d of them band summaries that are not decisions; worker calls=%d): every decision, entry or delegated, must enter the trajectory once\nattempt heads:\n%s\nrequests:\n%s",
+			attempts, decisions, calls, summaries, obs.WorkerRequests, strings.Join(trajectory.Heads, "\n"), smokeRequestHeads(provider))
+	}
+	if requests != decisions {
+		t.Fatalf("request evidence lines = %d against %d decisions (%d model calls, %d band summaries): every decision lands one request evidence line\nattempt heads:\n%s\nrequests:\n%s",
+			requests, decisions, calls, summaries, strings.Join(trajectory.Heads, "\n"), smokeRequestHeads(provider))
+	}
+	attemptsOf := make(map[event.DecisionID]int, attempts)
+	evidenceOf := make(map[event.DecisionID]int, requests)
+	for _, line := range lines {
+		switch line.Kind {
+		case rl.RecordKindAttempt:
+			attemptsOf[line.Attempt.DecisionID]++
+		case rl.RecordKindRequest:
+			evidenceOf[line.RequestEvidence().DecisionID]++
+		}
+	}
+	for decision, count := range attemptsOf {
+		if count != 1 {
+			t.Fatalf("decision %s carries %d attempt lines, want one", decision, count)
+		}
+	}
+	for decision, count := range evidenceOf {
+		if count != 1 {
+			t.Fatalf("decision %s carries %d request evidence lines, want one", decision, count)
+		}
+		if attemptsOf[decision] != 1 {
+			t.Fatalf("request evidence names decision %s, which carries no attempt line", decision)
+		}
+	}
+	for decision := range attemptsOf {
+		if evidenceOf[decision] != 1 {
+			t.Fatalf("decision %s carries an attempt line and no request evidence line", decision)
+		}
+	}
+	if got, want := int(seal.Records), 2*lastBootDecisions; got != want {
+		t.Fatalf("seal records = %d against the %d record(s) the %d decisions of the last boot wrote (%d decisions total, %d band summaries, %d worker calls): the seal must account for every record of its boot\nattempt heads:\n%s\nrequests:\n%s",
+			got, want, lastBootDecisions, decisions, summaries, obs.WorkerRequests-obs.RestartWorkerRequests, strings.Join(trajectory.Heads, "\n"), smokeRequestHeads(provider))
+	}
+}
+
+// smokeBandSummaryCalls 数出发给端点却不成决策的请求：老带的语义摘要是折叠拿会话自己
+// 的模型求 gist，不算一轮决策（smokeBandSummaryMaterial 的判据即台架回答摘要请求的
+// 判据）。restart 之前的摘要请求数单独报出，供最后一次装配的账目使用。
+func smokeBandSummaryCalls(requests []smokeModelRequest, restart int) (summaries, restartSummaries int) {
+	for index, req := range requests {
+		if _, summary := smokeBandSummaryMaterial(req.Messages, req.Tools); !summary {
+			continue
+		}
+		summaries++
+		if index < restart {
+			restartSummaries++
+		}
+	}
+	return summaries, restartSummaries
 }
 
 // smokeUserTurnsMatching 报告最后一条用户消息恰为该文本的模型请求数。
@@ -1030,6 +1102,27 @@ func smokeUserRequestContains(provider *smokeProvider, want string) bool {
 		}
 	}
 	return false
+}
+
+// smokePresentedContent 剥离一张已签呈现票据并交回正文：带已签事实键的投影条目前置
+// [evt_<KEY>|<type>] 票据（D8.1-H05 单一渲染器，presentedProjectionContent），读断言须按
+// 票据后的正文比。只剥一张且要求键、类型与分隔空格俱全；空键、空类型、缺分隔空格、
+// 半截票据一律原样交回，故"剥到首个空格"的宽松读法不会冒充本读法。
+func smokePresentedContent(content string) string {
+	const open = "[evt_"
+	if !strings.HasPrefix(content, open) {
+		return content
+	}
+	rest := content[len(open):]
+	bar := strings.Index(rest, "|")
+	if bar <= 0 {
+		return content
+	}
+	closing := strings.Index(rest[bar:], "] ")
+	if closing <= 1 {
+		return content
+	}
+	return rest[bar+closing+2:]
 }
 
 // smokeAnyRequestContains 报告是否有一次模型请求读到给定子串。
