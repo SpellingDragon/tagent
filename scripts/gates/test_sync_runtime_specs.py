@@ -34,7 +34,9 @@ from pathlib import Path
 
 SCRIPTS = Path(__file__).resolve().parent
 REPO_ROOT = SCRIPTS.parents[1]
-CHANGE_DIR = REPO_ROOT / "openspec" / "changes" / "runtime-recovery-ideal"
+_ACTIVE = REPO_ROOT / "openspec" / "changes" / "runtime-recovery-ideal"
+_ARCHIVE = REPO_ROOT / "openspec" / "changes" / "archive" / "2026-11-22-runtime-recovery-ideal"
+CHANGE_DIR = _ACTIVE if _ACTIVE.is_dir() else _ARCHIVE
 
 CLI = "openspec"
 PINNED_VERSION = "1.2.0"
