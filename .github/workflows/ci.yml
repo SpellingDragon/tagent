@@ -493,6 +493,12 @@ jobs:
   # 也一样被它看见。它是本文件能给出的最强保证——是不是 required check 由分支保护
   # 决定，配置审查不等于服务端已拦截。
   archive-preflight:
+    # The evidence this gate reads is produced by the event-integrity chain of
+    # this same run: waiting for its required aggregate both orders the check
+    # after the evidence exists and binds the commit identity for free (the
+    # mutations evidence records the SHA this workflow checked out).
+    needs: [event-integrity-required]
+    if: always()
     runs-on: ubuntu-latest
     steps:
       # 提交范围要跨父提交，浅克隆会让 `--base REV^` 解析不到。
@@ -502,6 +508,20 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
+      - name: Download event evidence
+        uses: actions/download-artifact@v4
+        with:
+          pattern: event-integrity-*
+          path: ${{ runner.temp }}/bundle
+          merge-multiple: false
+      - name: Assemble evidence layout
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/ev/mutations"
+          cp -R "$RUNNER_TEMP/bundle/event-integrity-mutations/." "$RUNNER_TEMP/ev/mutations/"
+          rm -rf "$RUNNER_TEMP/bundle/event-integrity-mutations" \
+                 "$RUNNER_TEMP/bundle/event-gate-required-report"
+          cp -R "$RUNNER_TEMP/bundle/." "$RUNNER_TEMP/ev/"
       # PR 的 base 与 push 的上一提交不是一回事：前者要从 origin/<base_ref> 解析，
       # 后者由 --base 的默认值（REV^）给出。两者都以环境变量传入，不在引号里内联
       # 表达式——空值必须显式落空，而不是变成一个字面的 "origin/"。
@@ -513,7 +533,7 @@ jobs:
           set -euo pipefail
           if [ -n "$PR_BASE_REF" ]; then
             base="$(git rev-parse "origin/$PR_BASE_REF")"
-            bash scripts/gates/archive-preflight.sh --commit "$CANDIDATE_SHA" --base "$base"
+            bash scripts/gates/archive-preflight.sh --commit "$CANDIDATE_SHA" --base "$base" --evidence "$RUNNER_TEMP/ev"
           else
-            bash scripts/gates/archive-preflight.sh --commit "$CANDIDATE_SHA"
+            bash scripts/gates/archive-preflight.sh --commit "$CANDIDATE_SHA" --evidence "$RUNNER_TEMP/ev"
           fi
