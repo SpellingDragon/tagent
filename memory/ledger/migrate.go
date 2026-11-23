@@ -65,25 +65,25 @@ type MigrateReport struct {
 // journal root under targetRoot, in bounded batches, and reads the copy back
 // through a freshly opened view before it reports success.
 //
-// The source is read-only: this function only enumerates and reads it, so the
-// build that wrote that layout still reads it after the copy, and a migration
-// interrupted anywhere leaves the source exactly as it was. The target is
-// refused when it already holds keys, so no copy overwrites a root in use. A
-// root whose copy does not read back byte for byte returns ErrMigrateMismatch
-// naming the key that differs. A copied root whose reference names no
-// independent body returns ErrSnapshotCorrupt naming the orphaned key, the same
-// refusal the original store's load reports at boot.
-func MigrateShardedRoot(ctx context.Context, sourceRoot, targetRoot string) (MigrateReport, error) {
+// The source is read-only: this function only enumerates and reads it, so the build that wrote that layout still reads it after the copy, and a migration interrupted anywhere leaves the source exactly as it was. The target is refused when it already holds keys, so no copy overwrites a root in use. A root whose copy does not read back byte for byte returns ErrMigrateMismatch naming the key that differs, and a copied root whose reference names no independent body returns ErrSnapshotCorrupt naming the orphaned key, the same refusal the original store's load reports at boot. The copy writes the target, so it takes that root's write rights and gives them up when it returns, and the verifying pass it takes in between opens the copy as a component view that reads beside the writer instead of being refused by it.
+func MigrateShardedRoot(ctx context.Context, sourceRoot, targetRoot string) (report MigrateReport, err error) {
 	if sourceRoot == "" || targetRoot == "" {
 		return MigrateReport{}, ErrRootRequired
 	}
 	if sourceRoot == targetRoot {
 		return MigrateReport{}, fmt.Errorf("%w: the source and the target are the same directory %s", ErrMigrateTargetNotEmpty, targetRoot)
 	}
-	target, err := OpenAtomicStore(ctx, StorageConfig{Type: StorageJournal, Root: targetRoot})
+	target, err := OpenAtomicStore(ctx, StorageConfig{Type: StorageJournal, Root: targetRoot, WriteRights: true})
 	if err != nil {
 		return MigrateReport{}, fmt.Errorf("open the migration target %s: %w", targetRoot, err)
 	}
+	defer func() {
+		closer, held := target.(interface{ Close() error })
+		if !held {
+			return
+		}
+		err = errors.Join(err, closer.Close())
+	}()
 	held, err := target.Keys(ctx, "")
 	if err != nil {
 		return MigrateReport{}, fmt.Errorf("enumerate the migration target %s: %w", targetRoot, err)
@@ -91,7 +91,7 @@ func MigrateShardedRoot(ctx context.Context, sourceRoot, targetRoot string) (Mig
 	if len(held) > 0 {
 		return MigrateReport{}, fmt.Errorf("%w: %s holds %d keys", ErrMigrateTargetNotEmpty, targetRoot, len(held))
 	}
-	report := MigrateReport{}
+	report = MigrateReport{}
 	batch := Batch{Puts: make([]Pair, 0, migrateBatchKeys)}
 	commitBatch := func() error {
 		if len(batch.Puts) == 0 {

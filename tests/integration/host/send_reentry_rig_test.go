@@ -253,14 +253,31 @@ func sendRigAwaitReviewerBody(t *testing.T, rig *sendRig) {
 	}
 }
 
-// sendRigSettledTaskID reports the task of the last settled notification the chain holds.
+// sendRigSettledTaskID reports the task of the last terminal notification the chain
+// holds under a notice of its own. Every settled call the range ran lands a delivery
+// fact, so the notification this reads is the one the chain also files the follow-up
+// material for: that is the round the checks below await, never the settle of the call
+// that carried the re-entry.
 func sendRigSettledTaskID(host *assembly.Host, addr event.Address) event.TaskID {
 	facts := host.Run().SessionFacts(addr)
+	notified := map[event.TaskID]bool{}
+	for _, fact := range facts {
+		if fact.Type != event.TypeFeedback || fact.TaskID == "" {
+			continue
+		}
+		if !strings.HasPrefix(string(fact.InvocationID), "notice:") {
+			continue
+		}
+		notified[fact.TaskID] = true
+	}
 	for at := len(facts) - 1; at >= 0; at-- {
 		if facts[at].Type != event.TypeTaskSettled || facts[at].TaskID == "" {
 			continue
 		}
 		if facts[at].Meta[event.MetaKeyNoticeKind] != "settled" {
+			continue
+		}
+		if !notified[facts[at].TaskID] {
 			continue
 		}
 		return facts[at].TaskID

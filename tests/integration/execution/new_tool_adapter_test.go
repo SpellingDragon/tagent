@@ -26,7 +26,7 @@ import (
 
 // TestNewToolAdapterNeedsNoHostCompensation drives the contract a new tool is registered under.
 // - a tool placed in NativeAgent.Tools runs admission, execution, settlement and delivery through the formal entry
-// - a restart replays the settled tool task from the fact its result was recorded as, and asks the adapter for nothing
+// - a restart states no outcome for the tool task settled before the cut and still answers its chain by identity, asking the adapter for nothing
 // - a failing adapter ends its task failed through the same faces, beside no second notice
 // - progress and stop evidence travel between the executor and the task face, and a late settlement compensates nothing
 // - the lifecycle vocabulary stays the closed set the core declares, so a new tool introduces no status
@@ -96,7 +96,7 @@ func TestNewToolAdapterNeedsNoHostCompensation(t *testing.T) {
 		}
 	})
 
-	t.Run("a restart replays the settled tool task from the fact the adapter's result was recorded as", func(t *testing.T) {
+	t.Run("a restart states no outcome for the settled tool task and still answers its chain by identity", func(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 		cfg := ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: t.TempDir()}
@@ -118,6 +118,11 @@ func TestNewToolAdapterNeedsNoHostCompensation(t *testing.T) {
 		if got := adapter.calls(); got != 1 {
 			t.Fatalf("adapter executions = %d, want the admitted call executed exactly once", got)
 		}
+		admitted := listObjects(t, ctx, run, addr, query.ObjectTask)
+		if len(admitted) != 1 {
+			t.Fatalf("task objects before the restart = %+v, want the one task the admitted call was opened as", admitted)
+		}
+		taskID := admitted[0].Ref.TaskID
 		if _, err := run.Close(ctx, agent.CloseRequest{Timeout: time.Now().Add(5 * time.Second)}); err != nil {
 			t.Fatalf("drain the first run's settlement writers before rebuilding from the same store (a slow runner otherwise leaves the notice owed): %v", err)
 		}
@@ -130,19 +135,15 @@ func TestNewToolAdapterNeedsNoHostCompensation(t *testing.T) {
 			t.Fatalf("restart the durable runtime: %v", err)
 		}
 		report := second.Recovery()
-		if len(report.Tasks) != 1 || !report.Tasks[0].Recovered || report.Tasks[0].Refused != nil {
-			t.Fatalf("recovery report = %+v, want the one admitted task rebuilt from its chain", report.Tasks)
-		}
-		assertClosedStatus(t, "the restored task", report.Tasks[0].Status)
-		if report.Tasks[0].Status != task.StatusSettled {
-			t.Fatalf("restored status = %s, want the settlement the chain already carried", statusName(report.Tasks[0].Status))
+		if len(report.Tasks) != 0 {
+			t.Fatalf("recovery report = %+v, want no outcome for the task settled before the cut, while the chain still answers it by identity: the boot seats the account from the checkpoint slice instead of re-reading the task fact families", report.Tasks)
 		}
 		if got := restarted.calls(); got != 0 {
 			t.Fatalf("adapter executions after the restart = %d, want none asked beside a landed settlement", got)
 		}
 		tasks := listObjects(t, ctx, second, addr, query.ObjectTask)
-		if len(tasks) != 1 || tasks[0].State.TaskStatus != task.StatusSettled {
-			t.Fatalf("task objects after the restart = %+v, want the one settled task and no task opened beside it", tasks)
+		if len(tasks) != 1 || tasks[0].Ref.TaskID != taskID || tasks[0].State.TaskStatus != task.StatusSettled {
+			t.Fatalf("task objects after the restart = %+v, want the settled task %s answered by identity beside no task opened beside it", tasks, taskID)
 		}
 		for _, notice := range listObjects(t, ctx, second, addr, query.ObjectNotice) {
 			if notice.State != query.DetailRetired {
@@ -387,6 +388,7 @@ var errAdapterStopped = errors.New("adapter: the work was stopped")
 type adapterRig struct {
 	ctx      context.Context
 	cfg      ledger.StorageConfig
+	tier     *ledger.Tier
 	registry *task.MemoryRegistry
 	manager  *task.MemoryManager
 	recorded chan task.Result
@@ -401,7 +403,7 @@ func newAdapterRig(t *testing.T, ctx context.Context) *adapterRig {
 	t.Helper()
 	rig := &adapterRig{
 		ctx:      ctx,
-		cfg:      ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: t.TempDir()},
+		cfg:      ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: t.TempDir(), WriteRights: true},
 		recorded: make(chan task.Result, 4),
 	}
 	registry := task.NewMemoryRegistry(rig.durable(t), task.NewMemoryAdmission())
@@ -415,15 +417,17 @@ func newAdapterRig(t *testing.T, ctx context.Context) *adapterRig {
 	return rig
 }
 
-// durable opens the rig's tier as the commit the registry writes to.
+// durable opens the rig's tier under write rights as the commit the registry
+// writes to, and keeps the tier so the restart can hand the root up.
 func (r *adapterRig) durable(t *testing.T) *state.DurableCommit {
 	t.Helper()
 	tier, err := ledger.OpenTier(r.ctx, r.cfg)
 	if err != nil {
 		t.Fatalf("open the durable tier: %v", err)
 	}
-	durable, err := state.NewDurableCommit(ledger.TierFactLog(tier), nil)
-	if err != nil {
+	r.tier = tier
+	durable := state.NewEmptyDurableCommit(ledger.TierFactLog(tier), nil)
+	if err := durable.Seat(r.ctx, nil, nil); err != nil {
 		t.Fatalf("open the durable commit: %v", err)
 	}
 	return durable
@@ -483,18 +487,22 @@ type rebuildReport struct {
 	Remaining int
 }
 
-// rebuild reopens the rig's tier and restores the named task from its chain, so
-// a sub-case reads what recovery answers without the live registry: the
-// obligations the chain carries are then settled through the same task face the
-// live run uses, and never through a pass of the restart's own.
+// rebuild closes the rig's live tier, reopens the root under write rights, and
+// restores the named task from its chain, so a sub-case reads what recovery
+// answers without the live registry: the obligations the chain carries are then
+// settled through the same task face the live run uses, and never through a pass
+// of the restart's own.
 func (r *adapterRig) rebuild(t *testing.T, ctx context.Context, taskID event.TaskID) rebuildReport {
 	t.Helper()
+	if err := r.tier.Close(); err != nil {
+		t.Fatalf("close the live tier before the restart opens the root: %v", err)
+	}
 	tier, err := ledger.OpenTier(ctx, r.cfg)
 	if err != nil {
 		t.Fatalf("reopen the durable tier: %v", err)
 	}
-	restored, err := state.NewDurableCommit(ledger.TierFactLog(tier), nil)
-	if err != nil {
+	restored := state.NewEmptyDurableCommit(ledger.TierFactLog(tier), nil)
+	if err := restored.Seat(ctx, nil, nil); err != nil {
 		t.Fatalf("reopen the durable commit: %v", err)
 	}
 	chain, err := restored.Records(ctx, taskID)

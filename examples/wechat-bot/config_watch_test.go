@@ -29,7 +29,7 @@ providers:
 agents:
   user:
     model: %s
-    max_tokens: 256
+    replay_window: 256
 storage: { type: localfile, root: %s }
 `, model, root, model, filepath.Join(root, "storage"))
 }

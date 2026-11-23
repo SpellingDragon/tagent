@@ -2,19 +2,15 @@
 //
 // Cold-start replay: the projection is the pure replay of one fact chain.
 //
-// The projection holds no state outside the fact chain: a rebuild replays the
-// committed facts and the compaction events among them, and nothing else. A
-// compaction payload is restored from the chain exactly as the fold left it —
-// synthetic refs carry their full text in the payload under a negative key,
-// positive keys hydrate from the chain — and the tail is paged by minimum event
-// key and appended in EventKey write order, never by timestamp approximation.
+// The projection holds no state outside the fact chain: a cold start replays the
+// committed facts among them and reads the chain back in EventKey write order,
+// never by a timestamp approximation.
 package replay
 
 import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"sort"
 	"strings"
 	"sync"
@@ -78,38 +74,8 @@ type ChainKey struct {
 }
 
 var (
-	// ErrChainKeyRequired reports a chain key that names no session, so a replay
-	// under it would join one user's facts to a shared partition chain.
-	ErrChainKeyRequired = errors.New("memory: chain key names no session")
-	// ErrRebuildUnwired reports a rebuild without the target projection, the fact
-	// chain or the parent map it maintains the causal chain through.
-	ErrRebuildUnwired = errors.New("memory: rebuild needs a target projection, a fact chain and a parent map")
 	// ErrChainPageLimit reports a chain page request that asks for no fact at all.
 	ErrChainPageLimit = errors.New("memory: chain page must read at least one fact")
-	// ErrChainScan reports a fact chain read that failed, so an empty result is
-	// never read as an empty chain.
-	ErrChainScan = errors.New("memory: fact chain read failed")
-	// ErrCompactionCorrupt reports a compaction payload that cannot be read back
-	// as the fold snapshot it claims to carry.
-	ErrCompactionCorrupt = errors.New("memory: compaction payload cannot be read")
-	// ErrRebuildPartial reports a rebuild that could not hydrate every positive
-	// ref of the snapshot from the fact chain. The result it accompanies is
-	// partial and is never reported as a byte-exact rebuild.
-	ErrRebuildPartial = errors.New("memory: rebuild is partial: the fact chain misses snapshot keys")
-)
-
-// RebuildSkipNotEmpty is the recorded reason of a rebuild that found a
-// non-empty projection: the projection is never replaced by a replay.
-const RebuildSkipNotEmpty = "projection not empty"
-
-const (
-	// RebuildPageSize is the page size the rebuild pages the fact chain with:
-	// minimum-event-key paging in EventKey write order.
-	RebuildPageSize = 64
-	// FallbackEventLimit bounds the fallback replay of a chain that carries no
-	// compaction event: the most recent facts are kept and the count left out is
-	// reported, so a non-empty chain is never rebuilt as an empty session.
-	FallbackEventLimit = 128
 )
 
 // CompactionEventType names the frozen event type a compaction payload is
@@ -241,9 +207,9 @@ type CompactionFact struct {
 	// Refs are the retained refs of the folded run, in payload order: a
 	// synthetic and a positive ref keep the order the payload recorded.
 	Refs []CompactionRef `json:"refs"`
-	// FullBoundary is the event key the snapshot covers up to. The rebuild pages
-	// the tail strictly after it, using this payload value and never a timestamp
-	// approximation.
+	// FullBoundary is the event key the snapshot covers up to. A tail replayed
+	// against this payload resumes strictly after it, using this value and never a
+	// timestamp approximation.
 	FullBoundary event.EventID `json:"full_boundary"`
 	// ConsumedKeys are the consumed keys the snapshot reseeds; the tail's own
 	// consumed keys are reseeded beside them from the replayed tail.
@@ -273,198 +239,6 @@ type CompactionRef struct {
 // the payload carries, rather than a fact the chain hydrates.
 func SyntheticKey(key event.EventID) bool {
 	return strings.HasPrefix(string(key), "-")
-}
-
-// RebuildOptions shapes one cold-start replay.
-type RebuildOptions struct {
-	// PageSize is the minimum-event-key page size of the tail pagination; zero
-	// means RebuildPageSize.
-	PageSize int
-	// FallbackBound bounds the fallback replay of a chain without compaction;
-	// zero means FallbackEventLimit.
-	FallbackBound int
-}
-
-// RebuildReport is the structured result of one cold-start replay: what the
-// rebuild appended, whether it ran the bounded fallback, and — for a partial
-// result that carries a non-nil error — the snapshot keys the chain could not
-// hydrate, so a partial rebuild is never reported as byte-exact.
-type RebuildReport struct {
-	// Entries is the number of entries the rebuild appended.
-	Entries int
-	// Fallback reports a chain without compaction, replayed under the bound.
-	Fallback bool
-	// Dropped is the count of chain facts the bounded fallback left out.
-	Dropped int
-	// Scanned reports a completed chain scan: an empty chain is a scanned empty
-	// chain and is never confused with a failed read.
-	Scanned bool
-	// Skipped is the recorded reason no rebuild ran, empty when one did.
-	Skipped string
-	// Partial reports snapshot keys the chain could not hydrate.
-	Partial bool
-	// Missing lists the snapshot keys the chain could not hydrate.
-	Missing []event.EventID
-	// Consumed lists the consumed keys reseeded, from the snapshot and the
-	// tail together.
-	Consumed []event.EventID
-	// FullBoundary is the boundary value the compaction payload carried.
-	FullBoundary event.EventID
-}
-
-// entryOf projects one canonical fact onto the projection entry shape: the
-// summary and the original text stay apart, never conflated.
-func entryOf(fact ChainFact) ProjectionEntry {
-	return ProjectionEntry{Key: fact.Key, Type: fact.Type, Summary: fact.Summary, Content: fact.Content, Time: fact.Time}
-}
-
-// entryOfRef restores one compaction ref as a projection entry: a synthetic ref
-// is restored from the payload text it carries, exactly as the fold left it.
-func entryOfRef(ref CompactionRef) ProjectionEntry {
-	return ProjectionEntry{Key: ref.Key, Type: ref.Type, Summary: ref.Summary, Content: ref.Content, Time: ref.Time}
-}
-
-// RebuildProjectionFromWAL replays one fact chain into an empty projection: the
-// cold-start rebuild that runs before any other recovery replay. A non-empty
-// projection is never replaced and the skip reason is recorded. With a valid
-// compaction the snapshot is restored first — the summary entry first, then the
-// retained refs in payload order, positive keys hydrated from the chain and
-// synthetic refs from the payload text — and the tail is paged by minimum event
-// key and appended in EventKey write order after the payload boundary. The
-// restored payload is kept as the projection's compaction payload, so a fold
-// offered to the rebuilt projection answers it instead of folding a second
-// time. Without a compaction the rebuild runs the bounded fallback instead of a
-// no-op, and a successfully scanned empty chain is reported as empty.
-//
-// The causal chain is maintained through relations.SetParent inside this
-// (PartitionID, SessionID) chain alone: a replay never links one session's
-// facts into another's, and an empty session is refused by name.
-func RebuildProjectionFromWAL(ctx context.Context, target *ReplayProjection, chain EventChain, relations *MemoryRelations, session ChainKey, opts RebuildOptions) (RebuildReport, error) {
-	if target == nil || chain == nil || relations == nil {
-		return RebuildReport{}, ErrRebuildUnwired
-	}
-	if session.SessionID == "" {
-		return RebuildReport{}, fmt.Errorf("%w: partition %d", ErrChainKeyRequired, session.PartitionID)
-	}
-	if target.Len() > 0 {
-		return RebuildReport{Skipped: RebuildSkipNotEmpty}, nil
-	}
-	page := opts.PageSize
-	if page < 1 {
-		page = RebuildPageSize
-	}
-	bound := opts.FallbackBound
-	if bound < 1 {
-		bound = FallbackEventLimit
-	}
-	report := RebuildReport{}
-	var facts []ChainFact
-	for after := event.EventID(""); ; {
-		batch, err := chain.ScanFrom(ctx, after, page)
-		if err != nil {
-			return RebuildReport{}, fmt.Errorf("%w: %w", ErrChainScan, err)
-		}
-		if len(batch) == 0 {
-			break
-		}
-		for _, fact := range batch {
-			if fact.Chain == session {
-				facts = append(facts, fact)
-			}
-		}
-		after = batch[len(batch)-1].Key
-	}
-	report.Scanned = true
-	var compaction *ChainFact
-	for i := range facts {
-		if facts[i].Type == CompactionEventType {
-			compaction = &facts[i]
-		}
-	}
-	prev := event.EventID("")
-	link := func(key event.EventID) error {
-		if key == "" || SyntheticKey(key) {
-			return nil
-		}
-		if err := relations.SetParent(key, prev); err != nil {
-			return err
-		}
-		prev = key
-		return nil
-	}
-	seed := func(fact ChainFact) {
-		target.Append(ctx, entryOf(fact))
-		report.Entries++
-		if fact.Type == event.TypeThinkingPlan {
-			report.Consumed = append(report.Consumed, fact.Key)
-		}
-	}
-	if compaction != nil {
-		var payload CompactionFact
-		if err := json.Unmarshal([]byte(compaction.Content), &payload); err != nil {
-			return RebuildReport{}, fmt.Errorf("%w: %w", ErrCompactionCorrupt, err)
-		}
-		report.FullBoundary = payload.FullBoundary
-		target.fold = &payload
-		target.Append(ctx, entryOfRef(payload.Summary))
-		report.Entries++
-		report.Consumed = append(report.Consumed, payload.ConsumedKeys...)
-		for _, ref := range payload.Refs {
-			if SyntheticKey(ref.Key) {
-				target.Append(ctx, entryOfRef(ref))
-				report.Entries++
-				continue
-			}
-			fact, held, err := chain.Fact(ctx, ref.Key)
-			if err != nil {
-				return report, fmt.Errorf("%w: %w", ErrChainScan, err)
-			}
-			if !held {
-				report.Partial = true
-				report.Missing = append(report.Missing, ref.Key)
-				continue
-			}
-			seed(fact)
-			if err := link(fact.Key); err != nil {
-				return report, err
-			}
-		}
-		for _, fact := range facts {
-			if fact.Type == CompactionEventType || string(fact.Key) <= string(payload.FullBoundary) {
-				continue
-			}
-			seed(fact)
-			if err := link(fact.Key); err != nil {
-				return report, err
-			}
-		}
-	} else {
-		report.Fallback = true
-		run := make([]ChainFact, 0, len(facts))
-		for _, fact := range facts {
-			if fact.Type != CompactionEventType {
-				run = append(run, fact)
-			}
-		}
-		if len(run) > bound {
-			report.Dropped = len(run) - bound
-			run = run[len(run)-bound:]
-		}
-		for _, fact := range run {
-			seed(fact)
-			if err := link(fact.Key); err != nil {
-				return report, err
-			}
-		}
-	}
-	for _, key := range report.Consumed {
-		target.seedConsumed(key)
-	}
-	target.noteRecovery(report.Entries, report.Fallback)
-	if report.Partial {
-		return report, fmt.Errorf("%w: %v", ErrRebuildPartial, report.Missing)
-	}
-	return report, nil
 }
 
 // renderEntryLine reports the canonical line RenderProjection writes for one

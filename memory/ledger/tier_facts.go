@@ -1,13 +1,14 @@
 // 契约: docs/wiki/reliability/durable-delivery.md#envelope-states
 //
-// TierFacts is the durable fact surface of one opened tier: put, get, prefix
-// scan and the sync barrier a commit reports its success behind. It commits
-// through the same atomic store engine the tier's segment store uses, so the
-// replay and the durable task commit share one database with the events already
-// stored there. Its signatures carry built-in types only, so it matches the
-// state layer's fact-log port structurally and no package edge is required in
-// either direction — the port is declared where it is consumed (see state's
-// FactLog) and this tier names the one surface it offers.
+// TierFacts is the durable fact surface of one opened tier: put, prefix scan,
+// the point read of one key and the sync barrier a commit reports its success
+// behind. It commits through the same atomic
+// store engine the tier's segment store uses, so the replay and the durable task
+// commit share one database with the events already stored there. Its fact-log
+// signatures carry built-in types only, so it matches the shared durable fact-log
+// port structurally and no package edge is required in either direction — the
+// port is declared once for every ledger that fills it (see api/durable) and this
+// tier names the one surface it offers.
 package ledger
 
 import (
@@ -31,18 +32,6 @@ func (l TierFacts) Put(ctx context.Context, key string, value []byte) error {
 	return l.kv.Commit(ctx, Batch{Puts: []Pair{{Key: key, Value: value}}})
 }
 
-// Get returns the value stored under key and whether one is held.
-func (l TierFacts) Get(ctx context.Context, key string) ([]byte, bool, error) {
-	pairs, err := l.kv.Read(ctx, Fetch{Key: key})
-	if err != nil {
-		return nil, false, err
-	}
-	if len(pairs) == 0 {
-		return nil, false, nil
-	}
-	return pairs[0].Value, true, nil
-}
-
 // Scan returns every stored pair under the key prefix as key and value.
 func (l TierFacts) Scan(ctx context.Context, prefix string) (map[string][]byte, error) {
 	pairs, err := l.kv.Read(ctx, Fetch{Prefix: prefix})
@@ -54,6 +43,17 @@ func (l TierFacts) Scan(ctx context.Context, prefix string) (map[string][]byte, 
 		found[pair.Key] = pair.Value
 	}
 	return found, nil
+}
+
+// Get answers the value held under one key, and whether the log holds it: the
+// point read a caller that names its own keys pays instead of a prefix scan, so
+// the read costs the one value and the probe that locates it.
+func (l TierFacts) Get(ctx context.Context, key string) ([]byte, bool, error) {
+	pairs, err := l.kv.Read(ctx, Fetch{Key: key})
+	if err != nil || len(pairs) == 0 {
+		return nil, false, err
+	}
+	return pairs[0].Value, true, nil
 }
 
 // Sync completes the write barrier over everything staged so far.

@@ -86,14 +86,14 @@ func TestDurableTaskRoundTrip(t *testing.T) {
 	}
 
 	t.Run("G2.1 持久提交往返: durable commit round trip across a restart", func(t *testing.T) {
-		cfg := ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: t.TempDir()}
+		cfg := ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: t.TempDir(), WriteRights: true}
 		tier, err := ledger.OpenTier(ctx, cfg)
 		if err != nil {
 			t.Fatalf("OpenTier: %v", err)
 		}
-		durable, err := state.NewDurableCommit(ledger.TierFactLog(tier), nil)
-		if err != nil {
-			t.Fatalf("NewDurableCommit: %v", err)
+		durable := state.NewEmptyDurableCommit(ledger.TierFactLog(tier), nil)
+		if err := durable.Seat(ctx, nil, nil); err != nil {
+			t.Fatalf("seat the durable commit: %v", err)
 		}
 		registry := task.NewMemoryRegistry(durable, task.NewMemoryAdmission())
 		receipt, err := registry.Register(ctx, spec)
@@ -111,14 +111,17 @@ func TestDurableTaskRoundTrip(t *testing.T) {
 		if err != nil || result != task.CommitCommitted {
 			t.Fatalf("Advance settle = %v, %v, want committed", result, err)
 		}
+		if err := tier.Close(); err != nil {
+			t.Fatalf("close the tier before the reopen: %v", err)
+		}
 
 		reopened, err := ledger.OpenTier(ctx, cfg)
 		if err != nil {
 			t.Fatalf("reopen OpenTier: %v", err)
 		}
-		restored, err := state.NewDurableCommit(ledger.TierFactLog(reopened), nil)
-		if err != nil {
-			t.Fatalf("reopen NewDurableCommit: %v", err)
+		restored := state.NewEmptyDurableCommit(ledger.TierFactLog(reopened), nil)
+		if err := restored.Seat(ctx, nil, nil); err != nil {
+			t.Fatalf("reopen the durable commit: %v", err)
 		}
 		chain, err := restored.Records(ctx, receipt.TaskID)
 		if err != nil {
@@ -165,14 +168,14 @@ func TestDurableTaskRoundTrip(t *testing.T) {
 	})
 
 	t.Run("G2.2 重复提交幂等不新增: repeated commit returns the stored fact and delivers nothing", func(t *testing.T) {
-		cfg := ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: t.TempDir()}
+		cfg := ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: t.TempDir(), WriteRights: true}
 		tier, err := ledger.OpenTier(ctx, cfg)
 		if err != nil {
 			t.Fatalf("OpenTier: %v", err)
 		}
-		durable, err := state.NewDurableCommit(ledger.TierFactLog(tier), nil)
-		if err != nil {
-			t.Fatalf("NewDurableCommit: %v", err)
+		durable := state.NewEmptyDurableCommit(ledger.TierFactLog(tier), nil)
+		if err := durable.Seat(ctx, nil, nil); err != nil {
+			t.Fatalf("seat the durable commit: %v", err)
 		}
 		registry := task.NewMemoryRegistry(durable, task.NewMemoryAdmission())
 		receipt, err := registry.Register(ctx, spec)
@@ -236,14 +239,14 @@ func TestDurableTaskRoundTrip(t *testing.T) {
 	})
 
 	t.Run("G2.3 未确认投递重放并定位 owner: unconfirmed replay locates its owner and advances only behind acceptance", func(t *testing.T) {
-		cfg := ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: t.TempDir()}
+		cfg := ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: t.TempDir(), WriteRights: true}
 		tier, err := ledger.OpenTier(ctx, cfg)
 		if err != nil {
 			t.Fatalf("OpenTier: %v", err)
 		}
-		durable, err := state.NewDurableCommit(ledger.TierFactLog(tier), nil)
-		if err != nil {
-			t.Fatalf("NewDurableCommit: %v", err)
+		durable := state.NewEmptyDurableCommit(ledger.TierFactLog(tier), nil)
+		if err := durable.Seat(ctx, nil, nil); err != nil {
+			t.Fatalf("seat the durable commit: %v", err)
 		}
 		registry := task.NewMemoryRegistry(durable, task.NewMemoryAdmission())
 		receipt, err := registry.Register(ctx, spec)
@@ -257,14 +260,17 @@ func TestDurableTaskRoundTrip(t *testing.T) {
 		if result, err := registry.Advance(ctx, receipt.TaskID, task.StatusSettled, settle.MutationID, settle.Outbox); err != nil || result != task.CommitCommitted {
 			t.Fatalf("Advance settle = %v, %v, want committed", result, err)
 		}
+		if err := tier.Close(); err != nil {
+			t.Fatalf("close the tier before the reopen: %v", err)
+		}
 
 		reopened, err := ledger.OpenTier(ctx, cfg)
 		if err != nil {
 			t.Fatalf("reopen OpenTier: %v", err)
 		}
-		restored, err := state.NewDurableCommit(ledger.TierFactLog(reopened), nil)
-		if err != nil {
-			t.Fatalf("reopen NewDurableCommit: %v", err)
+		restored := state.NewEmptyDurableCommit(ledger.TierFactLog(reopened), nil)
+		if err := restored.Seat(ctx, nil, nil); err != nil {
+			t.Fatalf("reopen the durable commit: %v", err)
 		}
 		owed := restored.Outbox(receipt.TaskID)
 		if len(owed) != 1 || owed[0].Delivery != task.DeliveryPending {
@@ -346,14 +352,14 @@ func TestDurableTaskRoundTrip(t *testing.T) {
 	})
 
 	t.Run("G2.4 目标已移除明确拒绝: removed target refused by name with its obligation kept", func(t *testing.T) {
-		cfg := ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: t.TempDir()}
+		cfg := ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: t.TempDir(), WriteRights: true}
 		tier, err := ledger.OpenTier(ctx, cfg)
 		if err != nil {
 			t.Fatalf("OpenTier: %v", err)
 		}
-		durable, err := state.NewDurableCommit(ledger.TierFactLog(tier), nil)
-		if err != nil {
-			t.Fatalf("NewDurableCommit: %v", err)
+		durable := state.NewEmptyDurableCommit(ledger.TierFactLog(tier), nil)
+		if err := durable.Seat(ctx, nil, nil); err != nil {
+			t.Fatalf("seat the durable commit: %v", err)
 		}
 		registry := task.NewMemoryRegistry(durable, task.NewMemoryAdmission())
 		receipt, err := registry.Register(ctx, spec)
@@ -438,7 +444,7 @@ func TestDurableTaskRoundTrip(t *testing.T) {
 	})
 
 	t.Run("G2.5 无需更换数据库: events and task facts round trip on one database", func(t *testing.T) {
-		cfg := ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: t.TempDir()}
+		cfg := ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: t.TempDir(), WriteRights: true}
 		tier, err := ledger.OpenTier(ctx, cfg)
 		if err != nil {
 			t.Fatalf("OpenTier: %v", err)
@@ -453,9 +459,9 @@ func TestDurableTaskRoundTrip(t *testing.T) {
 		}); err != nil {
 			t.Fatalf("StoreEvent: %v", err)
 		}
-		durable, err := state.NewDurableCommit(ledger.TierFactLog(tier), nil)
-		if err != nil {
-			t.Fatalf("NewDurableCommit: %v", err)
+		durable := state.NewEmptyDurableCommit(ledger.TierFactLog(tier), nil)
+		if err := durable.Seat(ctx, nil, nil); err != nil {
+			t.Fatalf("seat the durable commit: %v", err)
 		}
 		registry := task.NewMemoryRegistry(durable, task.NewMemoryAdmission())
 		receipt, err := registry.Register(ctx, spec)
@@ -468,6 +474,9 @@ func TestDurableTaskRoundTrip(t *testing.T) {
 		}
 		if result, err := registry.Advance(ctx, receipt.TaskID, task.StatusSettled, settle.MutationID, settle.Outbox); err != nil || result != task.CommitCommitted {
 			t.Fatalf("Advance settle = %v, %v, want committed", result, err)
+		}
+		if err := tier.Close(); err != nil {
+			t.Fatalf("close the tier before the reopen: %v", err)
 		}
 
 		reopened, err := ledger.OpenTier(ctx, cfg)
@@ -485,9 +494,9 @@ func TestDurableTaskRoundTrip(t *testing.T) {
 		if err != nil || !held || string(stored.Body) != string(eventBody) {
 			t.Fatalf("reopened event = held %v body %q, %v, want the committed event", held, stored.Body, err)
 		}
-		restored, err := state.NewDurableCommit(ledger.TierFactLog(reopened), nil)
-		if err != nil {
-			t.Fatalf("reopen NewDurableCommit: %v", err)
+		restored := state.NewEmptyDurableCommit(ledger.TierFactLog(reopened), nil)
+		if err := restored.Seat(ctx, nil, nil); err != nil {
+			t.Fatalf("reopen the durable commit: %v", err)
 		}
 		chain, err := restored.Records(ctx, receipt.TaskID)
 		if err != nil {

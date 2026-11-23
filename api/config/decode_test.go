@@ -71,6 +71,14 @@ func TestStrictDecodeRefusesEveryUndeclaredShape(t *testing.T) {
 			wantLine: 3,
 		},
 		{
+			name:     "misspelled summary budget key",
+			file:     "org.yaml",
+			body:     "agents:\n  - id: main\n    summary_budget_byte: 512\n",
+			field:    "agents[0].summary_budget_byte",
+			reason:   "unknown field",
+			wantLine: 3,
+		},
+		{
 			name:     "unknown agent section",
 			file:     "org.yaml",
 			body:     "agents:\n  - id: main\n    memori:\n      type: localfile\n",
@@ -105,8 +113,8 @@ func TestStrictDecodeRefusesEveryUndeclaredShape(t *testing.T) {
 		{
 			name:     "duplicate parameter key",
 			file:     "org.yaml",
-			body:     "agents:\n  - id: main\n    params:\n      temperature: 1\n      temperature: 2\n",
-			field:    "agents[0].params.temperature",
+			body:     "refs:\n  - name: remote\n    params:\n      token: a\n      token: b\n",
+			field:    "refs[0].params.token",
 			reason:   "duplicate field",
 			wantLine: 5,
 		},
@@ -180,14 +188,6 @@ func TestStrictDecodeRefusesEveryUndeclaredShape(t *testing.T) {
 			field:    "agents[0].files[0].kind",
 			reason:   "unknown kind \"binary\"",
 			wantLine: 5,
-		},
-		{
-			name:     "parameter value is not a number",
-			file:     "org.yaml",
-			body:     "agents:\n  - id: main\n    params:\n      temperature: hot\n",
-			field:    "agents[0].params.temperature",
-			reason:   "expected a number",
-			wantLine: 4,
 		},
 		{
 			name:     "unknown watchdog budget key",
@@ -460,6 +460,13 @@ func TestStrictDecodeRefusesUndeclaredSectionKeys(t *testing.T) {
 			wantLine: 4,
 		},
 		{
+			name:     "retired agent model params",
+			body:     "entry: main\nagents:\n  - id: main\n    params:\n      temperature: 0.2\n",
+			field:    "agents[0].params",
+			reason:   "unknown field",
+			wantLine: 4,
+		},
+		{
 			name:     "retired vector leg bound",
 			body:     "entry: main\nagents:\n  - id: main\n    memory:\n      engine:\n        vector_top_k: 20\n",
 			field:    "agents[0].memory.engine.vector_top_k",
@@ -558,6 +565,20 @@ func TestStrictDecodeMapsEmptyDocumentsOntoTheZeroDeclaration(t *testing.T) {
 				t.Fatalf("decodeConfigFile(%q) = %+v, want the zero declaration with no raw document", tc.body, decl)
 			}
 		})
+	}
+}
+
+// TestSummaryBudgetReadsTheDeclaration pins that a declared summary_budget_bytes is the bound the fold reads.
+//
+// 契约: docs/wiki/agent/agent-architecture.md#request-budget
+func TestSummaryBudgetReadsTheDeclaration(t *testing.T) {
+	body := "entry: main\nagents:\n  - id: main\n    replay_window: 4096\n    summary_budget_bytes: 512\n"
+	decl, err := decodeConfigFile(context.Background(), writeConfigSource(t, "org.yaml", body))
+	if err != nil {
+		t.Fatalf("decodeConfigFile over a declared summary budget = %v, want the budget read", err)
+	}
+	if got := decl.Agents[0].SummaryBudgetBytes; got != 512 {
+		t.Fatalf("summary budget = %d, want the declared 512", got)
 	}
 }
 

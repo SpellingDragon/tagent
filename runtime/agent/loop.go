@@ -326,6 +326,26 @@ func consumerWarn(format string, args ...any) {
 	logger.Warnf(format, args...)
 }
 
+// consumerError renders one line of the consumer face at ERROR beside a fact the
+// commit face refused where the absence of that fact changes what the run does
+// rather than only what it can be audited for: the delivery fact of a call is
+// the record three read faces answer from, so a run that carries on without it
+// drives a result the chain never names. The bypass discipline of the consumer
+// face applies to this line too.
+//
+// The redline list (3 rules):
+// MUST stay a bypass: a failing logger is a missing line, never a failed drive.
+// MUST carry the named cause beside the identity of the fact family it belongs to.
+// MUST NOT render transcript, message or tool-output content.
+func consumerError(format string, args ...any) {
+	logger := frameworkLogger()
+	if logger == nil {
+		return
+	}
+	defer func() { _ = recover() }()
+	logger.Errorf(format, args...)
+}
+
 // Backflow admits one notification of a call into the range of the invocation
 // that issued that call, so it drives that range's next decision and no other. A
 // progress notification commits as a notice fact of that range and nothing
@@ -340,21 +360,24 @@ func consumerWarn(format string, args ...any) {
 // The committed delivery fact is named to the consumer of the range beside the
 // wake: a result whose segment already closed stands behind the answer that
 // segment landed, so no position of the chain opens a segment on it by itself,
-// and the wake that names it is the account that says this fact still drives.
-// The observation the result carries rides on the fact, so the segment the name
-// opens reads the very result the notification delivered instead of a second
-// reading of it.
+// and the wake that names it is the account that says this fact still drives. The
+// message the tool result carries reaches the intake of the range beside that
+// fact, so the in-process drive reads the very result the notification delivered;
+// a reader of the chain reads it from the result fact the notification names.
 //
 // - The wake names the fact only while the task is not awaited by a flying segment and not already consumed: an awaited result is paired by that segment's harvest, and a consumed one drives nothing, so neither is read twice.
 // - A loop that drives no set keeps its backflow parked in the intake; a set that carries no instance for the address wakes nothing and starts none.
-func (l *Loop) Backflow(invocationID event.InvocationID, notice task.Notice) {
+// - A delivery fact the commit face refuses is reported to the caller beside the handover that stands anyway: the result reaches the intake of the range in this process, and the record of that handover is the one thing the chain is missing, so the caller holding the notification keeps it owed rather than recording a consumption for a hand-over no fact names.
+// - The refusal is reported at ERROR, because a run that drives the result beside no delivery fact answers three read faces — the replay fold, the call identity, the host delivery record — with material the chain does not carry.
+// - A refused progress fact answers no caller and is reported here alone: no notification is owed for a report of the pipeline's own rounds, so a progress report never reaches the return below.
+func (l *Loop) Backflow(invocationID event.InvocationID, notice task.Notice) error {
 	switch notice.Kind {
 	case task.NoticeProgress:
 		l.commitProgressFact(invocationID, notice)
-		return
+		return nil
 	case task.NoticeSettled, task.NoticeFailed, task.NoticeCancelled:
 	default:
-		return
+		return nil
 	}
 	msg := model.Message{Role: model.RoleTool}
 	if l.facts != nil {
@@ -364,18 +387,15 @@ func (l *Loop) Backflow(invocationID event.InvocationID, notice task.Notice) {
 	}
 	in := l.intakeFor(invocationID)
 	addr := in.rangeAddress()
-	delivery := msg
-	if l.resultFactOnChain(addr, notice.Event) {
-		delivery = model.Message{Role: model.RoleTool}
-	}
-	key, commitErr := l.commitSettled(context.Background(), invocationID, addr, notice, delivery)
+	key, commitErr := l.commitSettled(context.Background(), invocationID, addr, notice)
 	if commitErr != nil {
-		consumerWarn("tagent: the delivery fact of task %s did not commit: %v", notice.TaskID, commitErr)
+		consumerError("tagent: the delivery fact of task %s did not commit: %v", notice.TaskID, commitErr)
 	}
 	in.deliver(notice.TaskID, delivered{msg: msg, fact: notice.Event})
 	if consumers := l.drivingSet(); consumers != nil {
 		consumers.wakeFact(addr, key)
 	}
+	return commitErr
 }
 
 // WakeAddress ensures the resident Consumer of one address and signals that facts
@@ -650,38 +670,6 @@ func (l *Loop) closingTurnOf(invocationID event.InvocationID) (decisions int, fi
 	return in.decisions, in.finalRound, in.trigger
 }
 
-// inputKeysOf returns the stable identities of the facts a direct drive consumed,
-// in their original order and without duplicates.
-func inputKeysOf(events []event.Event) []event.EventID {
-	keys := make([]event.EventID, 0, len(events))
-	seen := map[event.EventID]bool{}
-	for _, evt := range events {
-		if evt.Key == "" || seen[evt.Key] {
-			continue
-		}
-		seen[evt.Key] = true
-		keys = append(keys, evt.Key)
-	}
-	return keys
-}
-
-// appendInputKeys appends only identities not already consumed, preserving the
-// order in which the facts actually entered the drive.
-func appendInputKeys(keys []event.EventID, additions []event.EventID) []event.EventID {
-	seen := make(map[event.EventID]bool, len(keys))
-	for _, key := range keys {
-		seen[key] = true
-	}
-	for _, key := range additions {
-		if key == "" || seen[key] {
-			continue
-		}
-		seen[key] = true
-		keys = append(keys, key)
-	}
-	return keys
-}
-
 // commitCalls commits the assistant message one decision issued its tool calls
 // as the call fact of the range, before the calls it names are admitted: the
 // message the model produced beside every call identity, function name and the
@@ -707,52 +695,22 @@ func (l *Loop) commitCalls(ctx context.Context, inv Invocation, decision Decisio
 	})
 }
 
-// resultFactOnChain reports whether the chain of one address already carries the
-// result fact a settled notification points at. The result fact is the one text
-// of the tool result — the delivery fact names the delivery and never a second
-// copy of the body — so a delivery that finds it on the chain commits the fact
-// of the delivery alone and leaves the observation to the result fact the pull
-// reads.
-func (l *Loop) resultFactOnChain(addr event.Address, key event.EventID) bool {
-	if key == "" {
-		return false
-	}
-	for _, evt := range l.sessionFacts(addr) {
-		if evt.Key == key {
-			return true
-		}
-	}
-	return false
-}
-
 // commitSettled commits one settled notification as the delivery fact of the
 // range it settles into, beside the task it belongs to and the address the
 // notification was accepted at, and answers the identity it landed under. The
-// observation the notification delivered rides on the fact, so a segment that
-// opens on that fact reads the result itself; a notification that carries no
-// observation commits the fact of the delivery alone. A notification that
-// arrived before the range recorded its own address commits no fact: the fact
-// of a delivery names the range it lands in. A refused commit answers no
-// identity beside the named cause.
+// fact is the one the delivery family renders from the notification, so the
+// delivery face that commits the same notification later meets this fact and its
+// commit is the repeat rather than a second record. A notification that arrived
+// before the range recorded its own address commits no fact: the fact of a
+// delivery names the range it lands in. A refused commit answers no identity
+// beside the named cause.
 //
-// - The delivery fact carries the observation only when the chain holds no result fact to read it from, so the history reads each result once.
-func (l *Loop) commitSettled(ctx context.Context, invocationID event.InvocationID, addr event.Address, notice task.Notice, msg model.Message) (event.EventID, error) {
+// - The result the notification carries is not copied onto the fact: the result fact the notice names is its own record on the chain, and the in-process hand-over carries the message to the intake that drives on it.
+func (l *Loop) commitSettled(ctx context.Context, invocationID event.InvocationID, addr event.Address, notice task.Notice) (event.EventID, error) {
 	if addr.AgentID == "" || addr.SessionID == "" {
 		return "", nil
 	}
-	evt := event.Event{
-		Type:         event.TypeTaskSettled,
-		Timestamp:    time.Now(),
-		TaskID:       notice.TaskID,
-		Owner:        addr,
-		Source:       addr,
-		Target:       addr,
-		InvocationID: invocationID,
-		InstanceID:   l.instance,
-	}
-	if msg.Content != "" || msg.ToolID != "" || msg.ToolName != "" || len(msg.ToolCalls) > 0 {
-		evt.Message = msg
-	}
+	evt := task.DeliveryFactOf(notice, addr, l.instance, invocationID)
 	return l.commitFactKey(ctx, addr.AgentID, evt)
 }
 
@@ -1022,9 +980,9 @@ func (l *Loop) requestBoundary(ctx context.Context, inv Invocation, binding stat
 
 // budgetedRequest assembles the final request of one decision under the request
 // budget the boundary declared. The gate is open exactly when the declaration
-// names a provider window — explicitly or derived from MaxTokens (see
-// assembly.requestBudgetPolicy) — and a closed gate runs the request whole, the
-// debug fact of a declaration that names no budget.
+// names a provider window (ContextWindow > 0; see assembly.requestBudgetPolicy) —
+// and a closed gate runs the request whole, the debug fact of a declaration that
+// names no context window.
 //
 // An open gate degrades the request in the one order the declaration can
 // observe: the dynamic environment block yields first, the skill bodies next
@@ -1042,7 +1000,7 @@ func (l *Loop) budgetedRequest(ctx context.Context, inv Invocation, binding stat
 	}
 	policy := view.budget
 	if !policy.gateOpen() {
-		consumerDebug("tagent: request budget gate closed invocation=%s agent=%s max_tokens=0 provider_window=0",
+		consumerDebug("tagent: request budget gate closed invocation=%s agent=%s provider_window=0",
 			inv.InvocationID, inv.Address.AgentID)
 		return view, model.Request{Messages: finalRequestMessages(view.Messages, transcript, round, view.dynamicParts()), Tools: tools, ToolOrder: toolOrder}, nil
 	}

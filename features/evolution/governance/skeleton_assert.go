@@ -95,12 +95,9 @@ const (
 )
 
 // The 04.6 governance recovery declarations keep their exact shapes: the goal
-// registry entry points, the budget gate, the denial ledger and the durable
-// governance event face the two bind to for recovery.
+// registry entry points, the budget gate and the denial ledger.
 var (
 	_ func() *GoalRegistry = NewGoalRegistry
-
-	_ func(*GoalRegistry, GovernanceEventLog) = (*GoalRegistry).BindStore
 
 	_ func(*GoalRegistry, string, string, int64) string = (*GoalRegistry).Declare
 
@@ -122,8 +119,6 @@ var (
 
 	_ func() *DenialLedger = NewDenialLedger
 
-	_ func(*DenialLedger, GovernanceEventLog) = (*DenialLedger).BindStore
-
 	_ func(*DenialLedger, DenialRecord) = (*DenialLedger).Record
 
 	_ func(*DenialLedger, int) []DenialRecord = (*DenialLedger).Query
@@ -132,11 +127,6 @@ var (
 
 	_ error = ErrBudgetExhausted
 )
-
-// The governance event log stays a declared interface whose method signatures
-// carry built-in types only: the structural match the memory tier's fact log
-// satisfies without a package edge in either direction.
-var _ GovernanceEventLog = (GovernanceEventLog)(nil)
 
 // The 04.6 declarations keep every documented field.
 var (

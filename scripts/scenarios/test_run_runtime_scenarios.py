@@ -15,9 +15,11 @@ The e2e assertions deliberately do NOT hard-code today's drift values: golden is
 a comparison target, so a legitimate contract or product fix must be able to turn
 a drift into a match without editing this file.
 """
+import hashlib
 import io
 import json
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -30,6 +32,7 @@ SCRIPTS = Path(__file__).resolve().parent
 REPO = SCRIPTS.parents[1]
 RUNNER = SCRIPTS / "run_runtime_scenarios.py"
 CHECKER = SCRIPTS.parent / "gates" / "check_runtime_evidence.py"
+PREFLIGHT = SCRIPTS.parent / "gates" / "preflight.sh"
 REAL_CONTRACT = REPO / "golden" / "runtime" / "scenarios.json"
 REAL_EVENT_CONTRACT = REPO / "golden" / "runtime" / "event_integrity_scenarios.json"
 MODULE = "github.com/SpellingDragon/tagent"
@@ -281,6 +284,22 @@ def event_row(package, test, action):
             "Package": package, "Test": test, "Output": ""}
 
 
+TOOL_ENTRYPOINT = Path("scripts") / "scenarios" / "run_runtime_scenarios.py"
+
+
+def write_tool(root):
+    """The fixture tree carries the gate script whose bytes the evidence names.
+
+    A real tree holds the runner that produced the evidence; the fixture tree has
+    to stand in for it, otherwise the tool identity would have nothing to hash and
+    the fixture tree would not be a tree the runner could have run in.
+    """
+    path = Path(root) / TOOL_ENTRYPOINT
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("# fixture runner stand-in\n", encoding="utf-8")
+    return path
+
+
 class FakeGo:
     """Synthetic `go test -json` producer; no Go toolchain is ever invoked."""
 
@@ -325,6 +344,36 @@ class FakeGo:
                  "bound_seconds": timeout})
 
 
+class FlagStrictGo(FakeGo):
+    """Model go's own flag parsing: argv after `-args` reaches every named package.
+
+    A test binary that never declared `-seed` exits on `flag provided but not
+    defined` before any test runs (measured on the toolchain: `go -C . test
+    ./tool/exec -run '^$' -count=1 -args -seed=1` exits 1), so an invocation that
+    names such a package cannot stand for a green round.
+    """
+
+    def __call__(self, command, root, timeout):
+        if "-args" in command:
+            module_dir = command[command.index("-C") + 1]
+            tags = command_tags(command)
+            unknown = [package for package in runner.command_packages(command)
+                       if not runner.event_calibration_bearer(module_dir, tags, package)]
+            if unknown:
+                self.commands.append(list(command))
+                return (1, "", "flag provided but not defined: -seed\n",
+                        {"name": runner.LIVENESS_GO_TEST_BOUND, "state": "completed",
+                         "bound_seconds": timeout})
+        return FakeGo.__call__(self, command, root, timeout)
+
+
+def command_tags(command):
+    """Read the build tags an argv compiles with."""
+    if "-tags" not in command:
+        return []
+    return [tag for tag in command[command.index("-tags") + 1].split(",") if tag]
+
+
 class EventRunnerTest(unittest.TestCase):
     """Fixture contract + fake go, in a temp repository root."""
 
@@ -340,6 +389,7 @@ class EventRunnerTest(unittest.TestCase):
         alpha = self.root / "tests" / "integration" / "alpha"
         alpha.mkdir(parents=True)
         (alpha / "alpha_test.go").write_text("package alpha\n", encoding="utf-8")
+        write_tool(self.root)
 
     def tearDown(self):
         self._tmp.cleanup()
@@ -347,7 +397,9 @@ class EventRunnerTest(unittest.TestCase):
     def write_module(self, relative, module_path):
         base = self.root / relative if relative else self.root
         base.mkdir(parents=True, exist_ok=True)
-        (base / "go.mod").write_text("module {}\n".format(module_path), encoding="utf-8")
+        replacement = "\nreplace example.com/app => ../..\n" if relative else ""
+        (base / "go.mod").write_text("module {}\n{}".format(module_path, replacement),
+                                     encoding="utf-8")
         (base / "go.sum").write_text("", encoding="utf-8")
         if relative:
             (base / "smoke_test.go").write_text("package smoke\n", encoding="utf-8")
@@ -495,6 +547,62 @@ class EventRunnerTest(unittest.TestCase):
         with self.assertRaises(runner.RunnerError):
             self.execute(FakeGo(self.contract), "--scope", "event-long", "--seed", "7")
 
+    def test_seed_window_only_reach_defining_package(self):
+        """R271: `-args` reaches every named package, so only the flag bearer carries it."""
+        # The declaration is true only while the file it names still declares both
+        # flags behind the build tag it records: read that file, not the constant.
+        source = (REPO / "examples" / "wechat-bot" / "smoke_test.go").read_text(encoding="utf-8")
+        self.assertIn('flag.Int("seed"', source)
+        self.assertIn('flag.Int("window"', source)
+        self.assertEqual(source.splitlines()[0].strip(), "//go:build smoke")
+        surfaces = {(surface["dir"], surface["package"], tuple(surface["tags"]))
+                    for surface in runner.EVENT_CALIBRATION_FLAGS}
+        self.assertIn(("examples/wechat-bot", ".", ("smoke",)), surfaces)
+
+        fake = FlagStrictGo(self.contract)
+        report = self.execute(fake, "--scope", "event-short", "--seed", "7", "--window", "32768")
+        self.assertEqual(report["verdict"], "match")
+        self.assertEqual(report["counts"]["repeats_passed"], 2)
+        bearing = [command for command in fake.commands if "-args" in command]
+        plain = [command for command in fake.commands if "-args" not in command]
+        self.assertEqual(len(bearing), 2, "one bearer invocation per repeat")
+        self.assertEqual(len(plain), 4, "each non-bearing group stays bare in both repeats")
+        for command in bearing:
+            self.assertEqual(command[command.index("-C") + 1], "examples/wechat-bot")
+            self.assertEqual(command_tags(command), ["smoke"])
+            self.assertEqual(runner.command_packages(command), ["."])
+            self.assertEqual(command[-4:], ["-json", "-args", "-seed=7", "-window=32768"])
+        for command in plain:
+            if command[command.index("-C") + 1] == "examples/wechat-bot":
+                # Same package, untagged build: smoke_test.go is not compiled, so
+                # neither flag exists there either.
+                self.assertEqual(command_tags(command), [])
+        root_commands = [command for command in plain if command[command.index("-C") + 1] == "."]
+        self.assertEqual(sorted({package for command in root_commands
+                                 for package in runner.command_packages(command)}),
+                         [".", "./tests/integration/alpha"])
+        # What the evidence records must be what ran: one invocation per command,
+        # the pair present exactly where the build declares it.
+        invocations = self.evidence_of(report)["run_config"]["invocations"]
+        self.assertEqual(len(invocations), 3)
+        for entry in invocations:
+            self.assertEqual("-args" in entry["command"].split(), "smoke" in entry["tags"])
+            self.assertEqual(entry["packages"],
+                             runner.command_packages(entry["command"].split()))
+
+        # The pre-R271-fix shape, reproduced: one invocation per group with the pair
+        # appended to all of it. Under the same model go uses, that round is red.
+        def one_invocation_per_group(group, index, seed, window, timeout=None):
+            command = runner.event_command(group, index, timeout)
+            if seed is not None:
+                command += ["-args", "-seed={}".format(seed), "-window={}".format(window)]
+            return [command]
+        with mock.patch.object(runner, "event_commands", one_invocation_per_group):
+            broken = self.execute(FlagStrictGo(self.contract), "--scope", "event-short",
+                                  "--seed", "7", "--window", "32768")
+        self.assertEqual(broken["go_test_exit_code"], 1)
+        self.assertEqual(broken["verdict"], "unattested")
+
     def test_fingerprint_covers_uncommitted_and_untracked_sources(self):
         def fingerprint(module_dir, module_path):
             with mock.patch.object(runner, "git_revision", lambda _root: "a" * 40):
@@ -518,6 +626,70 @@ class EventRunnerTest(unittest.TestCase):
                          third["content_hash"])
         self.assertNotEqual(fingerprint("examples/wechat-bot", "wechat-bot")["content_hash"],
                             third["content_hash"])
+
+    def test_long_scope_fingerprints_local_replacement(self):
+        # event-long selects only `examples/wechat-bot`, whose go.mod replaces the
+        # root module: the root sources are compiled by every one of these runs, so
+        # evidence that named only the selected module would describe half a tree.
+        seeds = [{"dir": "examples/wechat-bot", "module_path": "wechat-bot"}]
+        report = self.execute(FakeGo(self.contract), "--scope", "event-long", "--repeat", "1")
+        evidence = self.evidence_of(report, 0)
+        binding = evidence["source_binding"]
+        self.assertEqual([entry["dir"] for entry in binding["modules"]],
+                         [".", "examples/wechat-bot"])
+        by_dir = {entry["dir"]: entry for entry in binding["modules"]}
+        self.assertEqual(by_dir["examples/wechat-bot"]["roles"], ["tested"])
+        self.assertEqual(by_dir["."]["roles"], ["local-replacement"])
+        self.assertEqual(by_dir["."]["module_path"], "example.com/app")
+        self.assertEqual(binding["edges"], [{
+            "from_dir": "examples/wechat-bot", "module_path": "example.com/app",
+            "target": "../..", "resolved_dir": "."}])
+        self.assertEqual(binding["workspace"], {"state": "absent"})
+        self.assertEqual(binding["tool"]["entrypoint"],
+                         "scripts/scenarios/run_runtime_scenarios.py")
+        self.assertRegex(binding["tool"]["digest"], r"^sha256:[0-9a-f]{64}$")
+        self.assertEqual(binding["before"], {"digest": binding["digest"], "modules": 2})
+        self.assertEqual(binding["after"], binding["before"])
+        # The selected set and the compiled set are both recorded, and they differ.
+        self.assertEqual([entry["dir"] for entry in evidence["module_fingerprints"]],
+                         [".", "examples/wechat-bot"])
+        with mock.patch.object(runner, "git_revision", lambda _root: "0" * 40):
+            recomputed = runner.source_binding(str(self.root), seeds)
+        self.assertEqual(recomputed["digest"], binding["digest"])
+
+    def test_dependency_change_invalidates_long_evidence(self):
+        def binding_of():
+            report = self.execute(FakeGo(self.contract), "--scope", "event-long", "--repeat", "1")
+            return self.evidence_of(report, 0)["source_binding"]
+        original = binding_of()
+        # The root module is not selected here, only replaced into the run.
+        (self.root / "main.go").write_text("package app // edited\n", encoding="utf-8")
+        after_root = binding_of()
+        self.assertNotEqual(after_root["digest"], original["digest"])
+        self.assertEqual([entry["dir"] for entry in after_root["modules"]],
+                         [".", "examples/wechat-bot"])
+        # A dependency edit — the replaced module's own sources — also invalidates.
+        (self.root / "examples" / "wechat-bot" / "smoke_test.go").write_text(
+            "package smoke // edited\n", encoding="utf-8")
+        after_dependency = binding_of()
+        self.assertNotEqual(after_dependency["digest"], after_root["digest"])
+        # And an edit outside the closure leaves it alone, so the digest is about
+        # what compiled, not about the tree having been touched.
+        outside = self.root / "unrelated"
+        outside.mkdir()
+        (outside / "notes.txt").write_text("not compiled\n", encoding="utf-8")
+        self.assertEqual(binding_of()["digest"], after_dependency["digest"])
+
+    def test_source_change_during_run_is_refused(self):
+        def move_the_root(position, rows):
+            (self.root / "main.go").write_text("package app // moved\n", encoding="utf-8")
+            return rows, 0
+        with self.assertRaises(runner.RunnerError) as caught:
+            self.execute(FakeGo(self.contract, move_the_root), "--scope", "event-long",
+                         "--repeat", "1")
+        self.assertIn("changed while the run was in progress", str(caught.exception))
+        # Nothing was written that would claim to describe a single tree.
+        self.assertEqual(list((self.root / "out").rglob("evidence.json")), [])
 
     def test_zero_match_with_exit_zero_is_rejected(self):
         def zero_match(position, rows):
@@ -568,9 +740,11 @@ class EventRunnerTest(unittest.TestCase):
     def test_runner_evidence_is_accepted_by_the_v2_checker(self):
         report = self.execute(FakeGo(self.contract), "--scope", "event-short")
         repeat = report["repeats"][0]
+        # The checker recomputes the binding against the tree it is pointed at, so
+        # the fixture root is the only tree this evidence may pass against.
         code, stdout, stderr = run_tool(
-            CHECKER, "--contract", str(self.contract_path), "--evidence",
-            str(Path(repeat["directory"]) / "evidence.json"), "--test-log",
+            CHECKER, "--contract", str(self.contract_path), "--repo-root", str(self.root),
+            "--evidence", str(Path(repeat["directory"]) / "evidence.json"), "--test-log",
             str(repeat["test_log"]), "--json")
         self.assertEqual(code, 0, stdout + stderr)
         payload = json.loads(stdout)
@@ -578,6 +752,126 @@ class EventRunnerTest(unittest.TestCase):
         self.assertEqual(payload["counts"]["event_tests_checked"], 4)
         self.assertEqual(payload["counts"]["event_anchors_checked"], 8)
         self.assertIsNone(payload["productVerified"])
+
+    def preflight_contract(self):
+        """preflight 的短跑段带 `--repeat 10`，合同声明的 repeat 必须与它一致。"""
+        contract = json.loads(json.dumps(self.contract))
+        for scope in contract["scopes"]:
+            if scope["name"] == "event-short":
+                scope["repeat"] = 10
+        path = self.root / "preflight-event-contract.json"
+        path.write_text(json.dumps(contract), encoding="utf-8")
+        return contract, path
+
+    def test_preflight_rejects_corrupt_generated_evidence(self):
+        """生成之后、读取之前改产物：正式消费者非零并点名它。
+
+        生产段用 `scripts/gates/preflight.sh` 自己的 event-short argv（`--scope
+        event-short --repeat 10`），消费段用 preflight binding 步跑的那个 checker 的
+        单件入口——binding 的 `--bundle` 形态另需六个长跑分片与一份变异产物，夹具造不出
+        来，故此处判一份产物本身。runner 与 checker 都是真的，被改的产物取自真跑结果。
+        控制组用同一份产物、同一个入口跑一遍为绿；随后只删日志里某一枚锚的原始子行
+        （evidence 一字未动，仍自报 pass），同一入口转红并点名该日志；再把摘要同步成
+        与篡改后日志一致（自洽的假），此时剩下的唯一拒绝理由就是判词本身。
+        """
+        script = PREFLIGHT.read_text(encoding="utf-8")
+        self.assertIn("--scope event-short --repeat 10", script)
+        self.assertIn("check_runtime_evidence.py", script)
+
+        contract, contract_path = self.preflight_contract()
+        bundle = self.root / "preflight-bundle" / "event-short"
+        report = self.execute(FakeGo(contract), "--contract", str(contract_path),
+                              "--scope", "event-short", "--repeat", "10",
+                              "--out", str(bundle))
+        self.assertEqual(report["verdict"], "match", report)
+        self.assertEqual(report["counts"]["repeats_passed"], 10)
+        self.assertEqual(sorted(Path(repeat["directory"]).name for repeat in report["repeats"]),
+                         sorted("repeat-{}".format(index) for index in range(1, 11)))
+
+        # 隔离副本：真跑产物复制到别处再改；原产物不再被任何一方读取。
+        produced = Path(report["repeats"][2]["directory"])
+        isolated = self.root / "tampered" / "event-short"
+        shutil.copytree(str(produced), str(isolated))
+
+        def consume():
+            return run_tool(CHECKER, "--contract", str(contract_path),
+                            "--evidence", str(isolated / "evidence.json"),
+                            "--repo-root", str(self.root), "--json")
+
+        code, out, err = consume()
+        self.assertEqual(code, 0, out + err)
+        self.assertTrue(json.loads(out)["ok"])
+
+        test = contract["tests"][0]
+        anchor = test["test_name"] + "/" + test["subtests"][0]["name"]
+        log = isolated / "test-log.jsonl"
+        rows = [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()]
+        anchor_rows = [row for row in rows if row.get("Test") == anchor]
+        self.assertGreaterEqual(len(anchor_rows), 2,
+                                "the anchor carried its own run row and pass row")
+        kept = [row for row in rows if row.get("Test") != anchor]
+        self.assertEqual(len(kept), len(rows) - len(anchor_rows))
+        log.write_text("".join(json.dumps(row) + "\n" for row in kept), encoding="utf-8")
+
+        code, out, err = consume()
+        self.assertNotEqual(code, 0, out + err)
+        self.assertFalse(json.loads(out)["ok"])
+        self.assertIn("the log was replaced after the run", out)
+        self.assertIn(str(log), out)
+
+        # 只认摘要就能过的产物，改成"自洽的假"：摘要跟着更新，产物内部处处一致，
+        # 只有日志子行不再承认那枚锚。此时剩下的唯一拒绝理由就是判词本身。
+        evidence_path = isolated / "evidence.json"
+        evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
+        evidence["test_log_sha256"] = "sha256:" + hashlib.sha256(
+            log.read_bytes()).hexdigest()
+        evidence_path.write_text(json.dumps(evidence), encoding="utf-8")
+        code, out, err = consume()
+        self.assertNotEqual(code, 0, out + err)
+        self.assertNotIn("the log was replaced after the run", out)
+        self.assertIn("({},{}) states 'pass' but the test-log child events show 'missing'".format(
+            test["id"], test["subtests"][0]["name"]), out)
+
+    def test_the_evidence_records_the_environment_the_run_inherited(self):
+        ambient = {"GOMAXPROCS": "3", "GOFLAGS": "-count=1 -json",
+                   "TAGENT_CALIBRATION_MODE": "host"}
+        with mock.patch.dict(runner.os.environ, ambient):
+            expected = {name: runner.os.environ[name]
+                        for name in runner.EVENT_ENVIRONMENT_NAMES
+                        if name in runner.os.environ}
+            report = self.execute(FakeGo(self.contract), "--scope", "event-short",
+                                  "--repeat", "1")
+        recorded = self.evidence_of(report, 0)["run_config"]["environment"]
+        self.assertEqual(recorded, expected)
+        self.assertEqual(recorded["GOMAXPROCS"], "3")
+        self.assertEqual(recorded["TAGENT_CALIBRATION_MODE"], "host")
+        # Recorded as inherited: the runner does not normalise or re-derive GOFLAGS.
+        self.assertEqual(recorded["GOFLAGS"], "-count=1 -json")
+
+    def test_an_unset_determinant_is_recorded_as_absent(self):
+        with mock.patch.dict(runner.os.environ, {}, clear=True):
+            report = self.execute(FakeGo(self.contract), "--scope", "event-short",
+                                  "--repeat", "1")
+        self.assertEqual(self.evidence_of(report, 0)["run_config"]["environment"], {})
+
+    def test_a_credential_bearing_variable_is_never_recorded(self):
+        secrets = {"TAGENT_RL_AUTH_TOKEN": "s3cret-token", "SMOKE_API_KEY": "smoke-key",
+                   "TAGENT_REAL_JUDGE_API_KEY": "judge-key", "OPENAI_API_KEY": "openai-key"}
+        with mock.patch.dict(runner.os.environ, secrets, clear=True):
+            report = self.execute(FakeGo(self.contract), "--scope", "event-short",
+                                  "--repeat", "1")
+        self.assertEqual(self.evidence_of(report, 0)["run_config"]["environment"], {})
+        written = (Path(report["repeats"][0]["directory"]) / "evidence.json").read_text(
+            encoding="utf-8")
+        for value in secrets.values():
+            self.assertNotIn(value, written)
+
+    def test_a_declared_credential_name_is_refused(self):
+        with mock.patch.object(runner, "EVENT_ENVIRONMENT_NAMES",
+                               runner.EVENT_ENVIRONMENT_NAMES + ("TAGENT_REAL_JUDGE_API_KEY",)):
+            with self.assertRaises(runner.RunnerError) as caught:
+                runner.recorded_environment({"TAGENT_REAL_JUDGE_API_KEY": "judge-key"})
+        self.assertIn("credential marker", str(caught.exception))
 
     def test_v1_command_shape_is_unchanged(self):
         self.assertEqual(
@@ -637,6 +931,7 @@ class TestEventRepeatIndexPreservesTotal(unittest.TestCase):
         alpha = self.root / "tests" / "integration" / "alpha"
         alpha.mkdir(parents=True)
         (alpha / "alpha_test.go").write_text("package alpha\n", encoding="utf-8")
+        write_tool(self.root)
 
     def tearDown(self):
         self._tmp.cleanup()
@@ -644,7 +939,9 @@ class TestEventRepeatIndexPreservesTotal(unittest.TestCase):
     def write_module(self, relative, module_path):
         base = self.root / relative if relative else self.root
         base.mkdir(parents=True, exist_ok=True)
-        (base / "go.mod").write_text("module {}\n".format(module_path), encoding="utf-8")
+        replacement = "\nreplace example.com/app => ../..\n" if relative else ""
+        (base / "go.mod").write_text("module {}\n{}".format(module_path, replacement),
+                                     encoding="utf-8")
         (base / "go.sum").write_text("", encoding="utf-8")
         if relative:
             (base / "smoke_test.go").write_text("package smoke\n", encoding="utf-8")

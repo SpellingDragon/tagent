@@ -4,6 +4,7 @@ import (
 	"context"
 
 	"github.com/SpellingDragon/tagent/api/config"
+	"github.com/SpellingDragon/tagent/api/durable"
 	"github.com/SpellingDragon/tagent/api/event"
 	"github.com/SpellingDragon/tagent/api/model"
 	"github.com/SpellingDragon/tagent/api/plugin"
@@ -221,13 +222,11 @@ var (
 	_ Borrow              = (*Publisher)(nil)
 )
 
-// The durable commit face keeps its documented shapes: the byte-level fact
-// log, the durable implementation of the task commit port and the owner
-// resolution over the current orchestration binding.
+// The durable commit face keeps its documented shapes: the durable fact log it
+// stores through, the durable implementation of the task commit port and the
+// owner resolution over the current orchestration binding.
 var (
-	_ FactLog = (FactLog)(nil)
-
-	_ func(FactLog, task.UncertainProbe) (*DurableCommit, error) = NewDurableCommit
+	_ func(durable.FactLog, task.UncertainProbe) *DurableCommit = NewEmptyDurableCommit
 
 	_ func(*DurableCommit, context.Context, task.CommitRecord) (task.CommitResult, error) = (*DurableCommit).Commit
 	_ func(*DurableCommit, context.Context, event.TaskID, task.Spec) error                = (*DurableCommit).Declare
@@ -312,30 +311,4 @@ var (
 	_ error = ErrFileRootMissing
 	_ error = ErrSkillRepositoryMissing
 	_ error = ErrFileKindUnknown
-)
-
-// The archive migration face keeps its documented shapes: the import report
-// beside its named gaps, the rollback accounting, the structural ports the two
-// entry points run over, and the entry points themselves.
-var (
-	_ = MigrationReport{SourceDigest: "", Tasks: []MigratedTask{}, Originals: []MigratedOriginal{}, Gaps: []MigrationGap{}}
-	_ = MigratedTask{TaskID: "", Source: "", Status: task.StatusUnknown, MutationID: ""}
-	_ = MigratedOriginal{Key: "", Source: "", Digest: "", Length: 0}
-	_ = MigrationGap{Kind: GapMissingExternalFile, Name: "", Detail: ""}
-	_ = RollbackReport{SourceDigest: "", Items: []RollbackItem{}}
-	_ = RollbackItem{Name: "", Present: false, Verified: false}
-
-	_ GapKind = GapMissingExternalFile
-	_ GapKind = GapUnrecoverableTask
-
-	_ OriginalMigrator  = (OriginalMigrator)(nil)
-	_ OriginalReader    = (OriginalReader)(nil)
-	_ ArchiveTaskWriter = (ArchiveTaskWriter)(nil)
-	_ ArchiveTaskReader = (ArchiveTaskReader)(nil)
-
-	_ func(context.Context, string, ArchiveTaskWriter, OriginalMigrator) (MigrationReport, error) = MigrateArchive
-	_ func(context.Context, string, ArchiveTaskReader, OriginalReader) (RollbackReport, error)    = RollbackArchive
-	_ func(string) (string, error)                                                                = ArchiveDigest
-
-	_ error = ErrArchiveUnreadable
 )

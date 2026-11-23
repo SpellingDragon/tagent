@@ -98,7 +98,11 @@ func recordOfTierEvent(stored ledger.StoredEvent) (memory.EventRecord, ledger.Or
 	return body.Record(stored.PartitionID, stored.WindowTS), body.Ref(), true, nil
 }
 
-// QueryEvents answers through the existing query kernel over a temporary read.
+// QueryEvents answers through the existing query kernel over a temporary read. The
+// read names the authorized partitions the caller already holds, so an enumeration
+// pays the index of those partitions and reads the body of every event it admits:
+// the scope is applied before any body is read, and a fact of a partition outside
+// the scope is never decoded.
 func (s *tierQuerySource) QueryEvents(ctx context.Context, opts memory.QueryOptions) ([]memory.EventReference, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -110,18 +114,12 @@ func (s *tierQuerySource) QueryEvents(ctx context.Context, opts memory.QueryOpti
 	if len(partitions) == 0 {
 		return []memory.EventReference{}, nil
 	}
+	scoped := make([]int, 0, len(partitions))
+	for partition := range partitions {
+		scoped = append(scoped, partition)
+	}
 	query := memory.NewMemoryEventQuery()
-	if err := s.segments.EachIndexNewestFirst(ctx, func(key event.EventID, partition int, _ int64, _ string, _ event.SessionID) error {
-		if !partitions[partition] {
-			return nil
-		}
-		stored, held, err := s.segments.GetEvent(ctx, key)
-		if err != nil {
-			return err
-		}
-		if !held {
-			return fmt.Errorf("%w: %s", ledger.ErrSegmentBodyMissing, key)
-		}
+	if err := s.segments.EachEventOfPartitions(ctx, scoped, func(stored ledger.StoredEvent) error {
 		record, _, admitted, err := recordOfTierEvent(stored)
 		if err != nil {
 			return err
@@ -266,8 +264,16 @@ func (p *RecallPort) ChainFailure(key event.EventID) error {
 }
 
 // GetParent answers the preceding non-synthetic fact on the same chain. The
-// index normally proves the edge without bodies; an index entry with no session
-// falls back to the body walk so two sessions can never be joined accidentally.
+// index normally proves the edge without bodies: the walk enters the commit order
+// at the commit that last stated the key, and then reads on to the first entry of
+// the key's chain older than the key. Its cost is the commits from the key to that
+// older entry — the distance along the chain — and it reads no body whatever the
+// history behind that entry holds. The history committed after the key is not part
+// of that cost: the store enters the order where the key's own commit ended, and an
+// engine that states no order-line index (or a key it states none for) costs the walk
+// from the newest record that this reading replaces. A key whose index entry carries
+// no session falls back to the body walk, so two sessions can never be joined
+// accidentally.
 func (s *tierQuerySource) GetParent(key event.EventID) (event.EventID, error) {
 	if key == "" {
 		return "", nil
@@ -277,75 +283,101 @@ func (s *tierQuerySource) GetParent(key event.EventID) (event.EventID, error) {
 	partition := 0
 	session := event.SessionID("")
 	parent := event.EventID("")
-	if err := s.segments.EachIndexNewestFirst(context.Background(), func(candidate event.EventID, part int, _ int64, _ string, sess event.SessionID) error {
+	err := s.segments.EachIndexNewestFirstFrom(context.Background(), key, func(candidate event.EventID, part int, _ int64, _ string, sess event.SessionID) (bool, error) {
 		if !found {
-			if candidate == key {
-				found = true
-				partition = part
-				session = sess
-				if session == "" {
-					fallback = true
-				}
+			if candidate != key {
+				return true, nil
 			}
-			return nil
+			found = true
+			partition = part
+			session = sess
+			if session == "" {
+				fallback = true
+				return false, nil
+			}
+			return true, nil
 		}
-		if parent != "" || part != partition {
-			return nil
+		if part != partition {
+			return true, nil
 		}
 		if sess == "" {
 			fallback = true
-			return nil
+			return false, nil
 		}
 		if sess != session || replay.SyntheticKey(candidate) {
-			return nil
+			return true, nil
 		}
 		parent = candidate
-		return nil
-	}); err != nil {
+		return false, nil
+	})
+	if err != nil {
 		return "", err
 	}
 	if fallback {
 		return s.parentFromBodies(key, partition)
 	}
+	if !found {
+		return "", nil
+	}
 	return parent, nil
 }
 
-// parentFromBodies resolves chains whose index carries no session. Only the
-// key's partition is decoded; an empty session remains its own chain.
+// parentFromBodies resolves chains whose index carries no session. It reads the
+// older entries of the key's partition alone, one body at a time, and stops at the
+// first one of the key's chain: the answer costs the bodies down to that entry and
+// never every body of the partition, and no entry of the partition is collected
+// ahead of the read that answers. The walk enters the commit order at the commit
+// that last stated the key on the terms GetParent states, so the entries of the key's
+// own partition that this read already placed are read once.
 func (s *tierQuerySource) parentFromBodies(key event.EventID, partition int) (event.EventID, error) {
-	var refs []anchorRef
-	if err := s.segments.EachIndexNewestFirst(context.Background(), func(candidate event.EventID, part int, seq int64, typ string, session event.SessionID) error {
-		if part == partition {
-			refs = append(refs, anchorRef{key: candidate, partition: part, seq: seq, typ: typ, session: session})
-		}
-		return nil
-	}); err != nil {
+	ctx := context.Background()
+	stored, held, err := s.segments.GetEventInPartition(ctx, key, partition)
+	if err != nil {
 		return "", err
 	}
-	previous := map[replay.ChainKey]event.EventID{}
+	if !held {
+		return "", fmt.Errorf("%w: %s", ledger.ErrSegmentBodyMissing, key)
+	}
+	own, err := memory.DecodeEventBody(stored.Body)
+	if err != nil {
+		return "", err
+	}
+	evt := own.Event()
+	evt.Key = stored.Key
+	chain := replay.ChainKey{PartitionID: stored.PartitionID, SessionID: sessionOf(evt)}
+	newer := true
 	parent := event.EventID("")
-	for i := len(refs) - 1; i >= 0; i-- {
-		stored, held, err := s.segments.GetEvent(context.Background(), refs[i].key)
+	err = s.segments.EachIndexNewestFirstFrom(ctx, key, func(candidate event.EventID, part int, _ int64, _ string, _ event.SessionID) (bool, error) {
+		if newer {
+			if candidate == key {
+				newer = false
+			}
+			return true, nil
+		}
+		if part != partition || replay.SyntheticKey(candidate) {
+			return true, nil
+		}
+		older, held, err := s.segments.GetEventInPartition(ctx, candidate, partition)
 		if err != nil {
-			return "", err
+			return false, err
 		}
 		if !held {
-			return "", fmt.Errorf("%w: %s", ledger.ErrSegmentBodyMissing, refs[i].key)
+			return false, fmt.Errorf("%w: %s", ledger.ErrSegmentBodyMissing, candidate)
 		}
-		body, err := memory.DecodeEventBody(stored.Body)
+		body, err := memory.DecodeEventBody(older.Body)
 		if err != nil {
-			return "", err
+			return false, err
 		}
-		evt := body.Event()
-		evt.Key = stored.Key
-		if replay.SyntheticKey(evt.Key) {
-			continue
+		previous := body.Event()
+		previous.Key = candidate
+		if (replay.ChainKey{PartitionID: older.PartitionID, SessionID: sessionOf(previous)}) != chain {
+			return true, nil
 		}
-		chain := replay.ChainKey{PartitionID: stored.PartitionID, SessionID: sessionOf(evt)}
-		if evt.Key == key {
-			parent = previous[chain]
-		}
-		previous[chain] = evt.Key
+		parent = candidate
+		return false, nil
+	})
+	if err != nil {
+		return "", err
 	}
 	return parent, nil
 }
@@ -428,11 +460,21 @@ func (s runReading) Sites(ctx context.Context) ([]query.SiteReading, error) {
 	return sites, nil
 }
 
-// Tasks returns every task this run holds, each beside the status it stands in,
-// the obligations its manager still keeps open and the notifications its commit
-// record still owes.
+// Tasks returns every task the storage behind this run holds, each beside the
+// status it stands in, the obligations its manager still keeps open and the
+// notifications its commit record still owes.
+//
+// The identity set is the whole task history of the storage, not the open account
+// a boot restored: a task that finished before the newest checkpoint is listed
+// here beside the ones still driving, and its status is read from its own chain
+// the first time this read names it. The read is therefore linear in the history
+// of the storage — O(history) — which is the price of a reading that names every
+// task ever admitted, and it is paid by this query alone and never by a boot.
 func (t runReading) Tasks(ctx context.Context) ([]query.TaskReading, error) {
-	ids := t.run.commit.TaskIDs()
+	ids, err := t.run.taskHistoryIDs(ctx)
+	if err != nil {
+		return nil, err
+	}
 	readings := make([]query.TaskReading, 0, len(ids))
 	for _, id := range ids {
 		spec, status, err := t.run.registry.Lookup(ctx, id)
@@ -452,4 +494,16 @@ func (t runReading) Tasks(ctx context.Context) ([]query.TaskReading, error) {
 		})
 	}
 	return readings, nil
+}
+
+// taskHistoryIDs answers the identities of every task the storage behind this run
+// holds, across its whole fact history. A run committing through a durable chain
+// reads that history from the log, which is the linear read the caller asked for;
+// a run over the in-memory commit answers the tasks it remembers, because it keeps
+// no chain across exit and its history is its memory.
+func (r *Run) taskHistoryIDs(ctx context.Context) ([]event.TaskID, error) {
+	if durable := r.durableAccount(); durable != nil {
+		return durable.HistoryTaskIDs(ctx)
+	}
+	return r.commit.TaskIDs(), nil
 }

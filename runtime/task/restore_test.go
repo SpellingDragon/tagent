@@ -2,7 +2,10 @@ package task
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -334,4 +337,344 @@ func (o invariantOwners) OwnerOf(context.Context, event.AgentID, event.AgentID) 
 		return "", ErrTargetRemoved
 	}
 	return event.AgentID("agent-a"), nil
+}
+
+// taskDerivation is the part of one task a committed fact decides: the answers a
+// live move and a chain fold must state alike.
+type taskDerivation struct {
+	Status      Status
+	Revision    int64
+	Round       int64
+	Mutations   []CommitRecord
+	Obligations []checkpointObligation
+}
+
+// derivationOf reads one task's derivation out of a checkpoint payload.
+func derivationOf(t *testing.T, payload []byte, taskID event.TaskID) taskDerivation {
+	t.Helper()
+	var wire RegistryCheckpoint
+	if err := json.Unmarshal(payload, &wire); err != nil {
+		t.Fatalf("read the stated account: %v", err)
+	}
+	for _, stated := range wire.Tasks {
+		if stated.TaskID == taskID {
+			return taskDerivation{
+				Status:      stated.Status,
+				Revision:    stated.Revision,
+				Round:       stated.Round,
+				Mutations:   stated.Mutations,
+				Obligations: stated.Obligations,
+			}
+		}
+	}
+	t.Fatalf("the stated account names no task %s", taskID)
+	return taskDerivation{}
+}
+
+// TestTaskOnlineAndRestoreApplyOneRule pins the one rule a committed fact is applied by.
+//   - positive: a task the live path moved and the same chain folded into a fresh registry derive one status, revision and round
+//   - positive: they derive one mutation set and one obligation set, reactivation included
+//   - positive: the round a re-entry opened states one status, revision, round, mutation set and obligation set on both sides
+//   - consumer: MemoryRegistry.Advance, MemoryRegistry.Reactivate and MemoryRegistry.Resume on the live side, MemoryRegistry.Restore on the recovery side
+//
+// 契约: docs/wiki/agent/task-lifecycle.md#restore-rebuild
+func TestTaskOnlineAndRestoreApplyOneRule(t *testing.T) {
+	t.Run("the two settled rounds of one task", twoSettledRoundsState)
+	t.Run("the round a re-entry opened", reentryParity)
+}
+
+// twoSettledRoundsState states one chain of two settled rounds on both paths and pins
+// the account they derive from it.
+func twoSettledRoundsState(t *testing.T) {
+	ctx := context.Background()
+	live, commit := invariantRegistry(t)
+	taskID := invariantRegister(t, live, "call-one-rule", "dedup-one-rule")
+	if result, err := live.Advance(ctx, taskID, StatusRunning, MutationID("run:"+string(taskID)),
+		[]Envelope{invariantEnvelope(taskID, NoticeAccepted, 0)}); err != nil || result != CommitCommitted {
+		t.Fatalf("move the task under way = (%v, %v), want a committed change", result, err)
+	}
+	if result, err := live.Advance(ctx, taskID, StatusSettled, MutationID("settle:"+string(taskID)+":1"),
+		[]Envelope{invariantEnvelope(taskID, NoticeSettled, 0)}); err != nil || result != CommitCommitted {
+		t.Fatalf("settle the first round = (%v, %v), want a committed change", result, err)
+	}
+	round, err := live.Reactivate(ctx, taskID)
+	if err != nil {
+		t.Fatalf("re-enter the settled task: %v", err)
+	}
+	second := Envelope{
+		Notice:         Notice{TaskID: taskID, Round: round, Kind: NoticeSettled, Seq: 0, Event: "fact-2"},
+		Target:         invariantTaskAddress,
+		Source:         invariantTaskAddress,
+		TargetInstance: "instance-a",
+	}
+	if result, err := live.Advance(ctx, taskID, StatusSettled, MutationID(fmt.Sprintf("settle:%s:%d", taskID, round)),
+		[]Envelope{second}); err != nil || result != CommitCommitted {
+		t.Fatalf("settle the second round = (%v, %v), want a committed change", result, err)
+	}
+	livePayload, err := live.SnapshotCheckpoint(ctx)
+	if err != nil {
+		t.Fatalf("state the live account: %v", err)
+	}
+
+	records := commit.Facts(taskID)
+	chain := make([]TaskRecord, 0, len(records))
+	for i, fact := range records {
+		link := TaskRecord{Fact: fact}
+		if i == 0 {
+			link.Spec = invariantTaskSpec("call-one-rule", "dedup-one-rule")
+		}
+		chain = append(chain, link)
+	}
+	recovered, _ := invariantRegistry(t)
+	report, err := recovered.Restore(ctx, chain, invariantOwners{})
+	if err != nil {
+		t.Fatalf("fold the chain the live path committed: %v", err)
+	}
+	if len(report.Tasks) != 1 || !report.Tasks[0].Recovered || report.Tasks[0].Refused != nil {
+		t.Fatalf("the fold reported %+v, want the one task rebuilt from its chain", report.Tasks)
+	}
+	restoredPayload, err := recovered.SnapshotCheckpoint(ctx)
+	if err != nil {
+		t.Fatalf("state the recovered account: %v", err)
+	}
+
+	liveState := derivationOf(t, livePayload, taskID)
+	restoredState := derivationOf(t, restoredPayload, taskID)
+	if !reflect.DeepEqual(liveState, restoredState) {
+		t.Fatalf("the live path derives %+v, the fold of the same chain derives %+v: one committed fact is applied by one rule", liveState, restoredState)
+	}
+	if restoredState.Status != StatusSettled || restoredState.Revision != int64(len(records)) || restoredState.Round != round {
+		t.Fatalf("the recovered task stands at %+v, want the settled round %d at revision %d", restoredState, round, len(records))
+	}
+	if len(restoredState.Mutations) != len(records) {
+		t.Fatalf("the recovered task holds %d mutation(s), want the %d the chain committed", len(restoredState.Mutations), len(records))
+	}
+	if len(restoredState.Obligations) != 3 {
+		t.Fatalf("the recovered task owes %+v, want the three notifications the chain committed and no execution obligation: the two settles closed it", restoredState.Obligations)
+	}
+	for _, held := range restoredState.Obligations {
+		if held.Kind != ObligationAwaitingDelivery {
+			t.Fatalf("the recovered task owes %+v, want delivery obligations alone", held)
+		}
+	}
+}
+
+// reentryLeg is one way a task re-enters a round: the name the leg is reported under
+// and the call it re-enters by.
+type reentryLeg struct {
+	name    string
+	reenter func(t *testing.T, registry *MemoryRegistry, taskID event.TaskID)
+}
+
+// reentryLegs answers the two re-entries a task opens a round by: a reactivation of a
+// settled task and a resume of one.
+func reentryLegs() []reentryLeg {
+	return []reentryLeg{
+		{
+			name: "reactivate",
+			reenter: func(t *testing.T, registry *MemoryRegistry, taskID event.TaskID) {
+				t.Helper()
+				if _, err := registry.Reactivate(context.Background(), taskID); err != nil {
+					t.Fatalf("re-enter the settled task: %v", err)
+				}
+			},
+		},
+		{
+			name: "resume",
+			reenter: func(t *testing.T, registry *MemoryRegistry, taskID event.TaskID) {
+				t.Helper()
+				if _, err := registry.Resume(context.Background(), taskID, event.Event{Key: "input-reentry"}); err != nil {
+					t.Fatalf("resume the settled task: %v", err)
+				}
+			},
+		},
+	}
+}
+
+// reentryParity pins that the round a re-entry opened states the same account on the
+// live path and on the fold of its own chain.
+func reentryParity(t *testing.T) {
+	for _, leg := range reentryLegs() {
+		t.Run(leg.name, func(t *testing.T) {
+			liveState, foldedState := reentryDerivation(t, leg)
+			if !reflect.DeepEqual(liveState, foldedState) {
+				t.Fatalf("the live path derives %+v, the fold of the same chain derives %+v: one committed re-entry is applied by one rule", liveState, foldedState)
+			}
+			if liveState.Status != StatusRunning || liveState.Round != 2 {
+				t.Fatalf("the re-entered task stands at %+v, want the running second round", liveState)
+			}
+		})
+	}
+}
+
+// reentryDerivation drives one re-entry on the live path and answers what both sides
+// state for the task it re-entered: the live registry and a fresh registry folding the
+// chain the live path committed.
+//
+// The leg starts from a settled task that owes no execution obligation, so the one read
+// afterwards is the turn the re-entry opened rather than one a settlement left behind.
+func reentryDerivation(t *testing.T, leg reentryLeg) (taskDerivation, taskDerivation) {
+	t.Helper()
+	ctx := context.Background()
+	live, commit := invariantRegistry(t)
+	taskID := invariantRegister(t, live, "call-reentry", "dedup-reentry")
+	if result, err := live.Advance(ctx, taskID, StatusRunning, MutationID("run:"+string(taskID)),
+		[]Envelope{invariantEnvelope(taskID, NoticeAccepted, 0)}); err != nil || result != CommitCommitted {
+		t.Fatalf("move the task under way = (%v, %v), want a committed change", result, err)
+	}
+	if result, err := live.Advance(ctx, taskID, StatusSettled, MutationID("settle:"+string(taskID)+":1"),
+		[]Envelope{invariantEnvelope(taskID, NoticeSettled, 0)}); err != nil || result != CommitCommitted {
+		t.Fatalf("settle the first round = (%v, %v), want a committed change", result, err)
+	}
+	if settled := statedAccountOf(t, live, taskID); executionObligations(settled.Obligations) != 0 {
+		t.Fatalf("the settled task owes %+v with %d execution obligation(s): the leg must start from none",
+			settled.Obligations, executionObligations(settled.Obligations))
+	}
+	leg.reenter(t, live, taskID)
+	return statedAccountOf(t, live, taskID),
+		derivationOf(t, foldedAccountOf(t, commit, taskID, invariantTaskSpec("call-reentry", "dedup-reentry")), taskID)
+}
+
+// statedAccountOf states one registry's account and answers the derivation of the named task.
+func statedAccountOf(t *testing.T, registry *MemoryRegistry, taskID event.TaskID) taskDerivation {
+	t.Helper()
+	payload, err := registry.SnapshotCheckpoint(context.Background())
+	if err != nil {
+		t.Fatalf("state the account: %v", err)
+	}
+	return derivationOf(t, payload, taskID)
+}
+
+// foldedAccountOf folds the chain one live registry committed into a fresh registry and
+// answers the account the fold states.
+func foldedAccountOf(t *testing.T, commit *MemoryCommit, taskID event.TaskID, spec Spec) []byte {
+	t.Helper()
+	records := commit.Facts(taskID)
+	chain := make([]TaskRecord, 0, len(records))
+	for i, fact := range records {
+		link := TaskRecord{Fact: fact}
+		if i == 0 {
+			link.Spec = spec
+		}
+		chain = append(chain, link)
+	}
+	folded, _ := invariantRegistry(t)
+	report, err := folded.Restore(context.Background(), chain, invariantOwners{})
+	if err != nil {
+		t.Fatalf("fold the chain the live path committed: %v", err)
+	}
+	if len(report.Tasks) != 1 || !report.Tasks[0].Recovered || report.Tasks[0].Refused != nil {
+		t.Fatalf("the fold reported %+v, want the one task rebuilt from its chain", report.Tasks)
+	}
+	payload, err := folded.SnapshotCheckpoint(context.Background())
+	if err != nil {
+		t.Fatalf("state the recovered account: %v", err)
+	}
+	return payload
+}
+
+// executionObligations counts the execution obligations one stated account holds: the
+// turns the task still owes, beside the delivery obligations it holds as well.
+func executionObligations(held []checkpointObligation) int {
+	count := 0
+	for _, obligation := range held {
+		if obligation.Kind == ObligationAwaitingTool {
+			count++
+		}
+	}
+	return count
+}
+
+// TestReactivatedTaskKeepsItsExecutionObligationAcrossRestore pins the execution obligation a re-entry opens to the fact that opened it.
+//   - positive: a settled task re-entered on the live path owes the turn of the round it opened
+//   - negative: the chain folded into a fresh registry states that obligation too; a fold that dropped it rebuilds the task in flight owing nothing
+//   - positive: the execution obligation points at the task itself and carries no delivery of its own, on both sides alike
+//   - consumer: MemoryRegistry.Reactivate and MemoryRegistry.Resume on the live side, MemoryRegistry.Restore on the recovery side
+//
+// 契约: docs/wiki/agent/task-lifecycle.md#restore-rebuild
+func TestReactivatedTaskKeepsItsExecutionObligationAcrossRestore(t *testing.T) {
+	for _, leg := range reentryLegs() {
+		t.Run(leg.name, func(t *testing.T) {
+			liveState, foldedState := reentryDerivation(t, leg)
+			if held := executionObligations(liveState.Obligations); held != 1 {
+				t.Fatalf("the live task owes %d execution obligation(s) beside %+v, want the one turn the round it opened waits for",
+					held, liveState.Obligations)
+			}
+			if held := executionObligations(foldedState.Obligations); held != 1 {
+				t.Fatalf("the task folded from its chain owes %d execution obligation(s) beside %+v, want the one turn the round it opened waits for: the chain carries the re-entry alone",
+					held, foldedState.Obligations)
+			}
+			if !reflect.DeepEqual(liveState.Obligations, foldedState.Obligations) {
+				t.Fatalf("the live task owes %+v, the fold of the same chain owes %+v", liveState.Obligations, foldedState.Obligations)
+			}
+			for _, held := range foldedState.Obligations {
+				if held.Kind != ObligationAwaitingTool {
+					continue
+				}
+				if held.Notice != (Notice{}) || held.Envelope != (Envelope{}) {
+					t.Fatalf("the execution obligation = %+v, want the task itself and no delivery of its own", held)
+				}
+			}
+		})
+	}
+}
+
+// TestTaskApplyRefusesABrokenRevision pins the revision one chain link must follow.
+//   - negative: a link whose expected revision does not follow the entry is refused by name
+//   - positive: the refused link applies nothing, so the task keeps the status, revision and round the links before it landed
+//   - consumer: MemoryRegistry.Restore folds the chain
+//
+// 契约: docs/wiki/agent/task-lifecycle.md#restore-rebuild
+func TestTaskApplyRefusesABrokenRevision(t *testing.T) {
+	ctx := context.Background()
+	const taskID = event.TaskID("task-broken-revision")
+	registry, _ := invariantRegistry(t)
+	chain := []TaskRecord{
+		{Spec: invariantTaskSpec("call-broken", "dedup-broken"), Fact: CommitRecord{
+			MutationID: MutationID("admit:" + string(taskID)), TaskID: taskID, ExpectedRevision: 0, Status: StatusAccepted}},
+		{Fact: CommitRecord{
+			MutationID: MutationID("run:" + string(taskID)), TaskID: taskID, ExpectedRevision: 5, Status: StatusRunning}},
+	}
+	if _, err := registry.Restore(ctx, chain, invariantOwners{}); !errors.Is(err, ErrChainBroken) {
+		t.Fatalf("a link that does not follow its chain = %v, want %v", err, ErrChainBroken)
+	}
+	payload, err := registry.SnapshotCheckpoint(ctx)
+	if err != nil {
+		t.Fatalf("state the account beside a refused link: %v", err)
+	}
+	state := derivationOf(t, payload, taskID)
+	if state.Status != StatusAccepted || state.Revision != 1 || state.Round != 1 {
+		t.Fatalf("the task beside a refused link stands at %+v, want the accepted link at revision 1 and round 1: the refused link applied nothing", state)
+	}
+}
+
+// TestTaskApplyRefusesAConflictingMutation pins the one mutation identity rule of the apply.
+//   - negative: a second link under a mutation identity the task already stores with other content is refused by name
+//   - positive: the refused link applies nothing, so the task keeps the fact that identity already names and no second mutation
+//   - consumer: MemoryRegistry.Restore folds the chain
+//
+// 契约: docs/wiki/agent/task-lifecycle.md#restore-rebuild
+func TestTaskApplyRefusesAConflictingMutation(t *testing.T) {
+	ctx := context.Background()
+	const taskID = event.TaskID("task-conflicting-mutation")
+	registry, _ := invariantRegistry(t)
+	chain := []TaskRecord{
+		{Spec: invariantTaskSpec("call-conflict", "dedup-conflict"), Fact: CommitRecord{
+			MutationID: MutationID("admit:" + string(taskID)), TaskID: taskID, ExpectedRevision: 0, Status: StatusAccepted}},
+		{Fact: CommitRecord{
+			MutationID: MutationID("run:" + string(taskID)), TaskID: taskID, ExpectedRevision: 1, Status: StatusRunning}},
+		{Fact: CommitRecord{
+			MutationID: MutationID("run:" + string(taskID)), TaskID: taskID, ExpectedRevision: 2, Status: StatusSettled}},
+	}
+	if _, err := registry.Restore(ctx, chain, invariantOwners{}); !errors.Is(err, ErrMutationConflict) {
+		t.Fatalf("a mutation identity carrying other content = %v, want %v", err, ErrMutationConflict)
+	}
+	payload, err := registry.SnapshotCheckpoint(ctx)
+	if err != nil {
+		t.Fatalf("state the account beside a refused link: %v", err)
+	}
+	state := derivationOf(t, payload, taskID)
+	if state.Status != StatusRunning || state.Revision != 2 || len(state.Mutations) != 2 {
+		t.Fatalf("the task beside a refused link stands at %+v, want the running fact at revision 2 and no second mutation", state)
+	}
 }

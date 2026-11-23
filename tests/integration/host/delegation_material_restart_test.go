@@ -12,6 +12,7 @@ import (
 	"github.com/SpellingDragon/tagent/api/model"
 	"github.com/SpellingDragon/tagent/assembly"
 	"github.com/SpellingDragon/tagent/memory/ledger"
+	"github.com/SpellingDragon/tagent/runtime/agent"
 	"github.com/SpellingDragon/tagent/tool/subagent"
 )
 
@@ -90,6 +91,9 @@ func TestDelegatedMaterialSurvivesRestart(t *testing.T) {
 	online := delegatedRestartMaterials(run, site)
 	if len(online) != 1 || online[0].Message.Content != brief {
 		t.Fatalf("material facts of the site before the restart = %+v, want the one fact carrying %q", online, brief)
+	}
+	if _, err := run.Close(ctx, agent.CloseRequest{Timeout: time.Now().Add(2 * time.Second)}); err != nil {
+		t.Fatalf("close the first runtime before the restart: %v", err)
 	}
 
 	restartedCaller := &entryModel{name: "model-caller", answer: func(*model.Request) *model.Response {

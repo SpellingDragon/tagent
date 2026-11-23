@@ -24,6 +24,7 @@ import (
 	"github.com/SpellingDragon/tagent/memory"
 	"github.com/SpellingDragon/tagent/memory/ledger"
 	"github.com/SpellingDragon/tagent/memory/replay"
+	"github.com/SpellingDragon/tagent/runtime/agent"
 )
 
 // productFactRequest, productFactKey and productFactText are the metadata keys a
@@ -358,9 +359,9 @@ func TestCompressPipelineJudgesThenExecutes(t *testing.T) {
 	decl := &config.Declaration{
 		Entry: "agent-a",
 		Agents: []config.AgentSpec{{
-			ID:        "agent-a",
-			Model:     "model-a",
-			MaxTokens: 100,
+			ID:           "agent-a",
+			Model:        "model-a",
+			ReplayWindow: 100,
 		}},
 	}
 	run, err := assembly.Assemble(ctx, decl, map[event.AgentID]assembly.NativeAgent{
@@ -462,7 +463,7 @@ func TestCompressProductRestoresAfterRestart(t *testing.T) {
 	storage := ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: t.TempDir()}
 	decl := &config.Declaration{
 		Entry:  "agent-a",
-		Agents: []config.AgentSpec{{ID: "agent-a", Model: "model-a", MaxTokens: 100, ProviderContextWindow: 200}},
+		Agents: []config.AgentSpec{{ID: "agent-a", Model: "model-a", ReplayWindow: 100, ContextWindow: 200}},
 	}
 	newAgents := func(provider *entryModel) map[event.AgentID]assembly.NativeAgent {
 		return map[event.AgentID]assembly.NativeAgent{"agent-a": {Model: provider}}
@@ -500,6 +501,11 @@ func TestCompressProductRestoresAfterRestart(t *testing.T) {
 	probe := &entryModel{name: "model-a", answer: func(req *model.Request) *model.Response {
 		return compressAnswerOf(*req, "the restarted answer")
 	}}
+	if report, closeErr := run.Close(ctx, agent.CloseRequest{Deadline: time.Now().Add(20 * time.Second)}); closeErr != nil {
+		t.Fatalf("close the first assembly before the restart: %v", closeErr)
+	} else if report.Outcome != agent.CloseQuiesced {
+		t.Fatalf("close of the first assembly = (%+v), want the run at rest so the root it wrote reaches the restart", report)
+	}
 	chainBefore := compressChainFactsOf(t, storage.Root, addr.SessionID)
 	restarted, err := assembly.Assemble(ctx, decl, newAgents(probe), assembly.WithGovernance(passPolicy{}), assembly.WithStorage(storage))
 	if err != nil {

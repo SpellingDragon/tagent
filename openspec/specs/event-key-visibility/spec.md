@@ -2,30 +2,106 @@
 
 ## Purpose
 
-本规范定义 event-key-visibility 能力。ContextIntervention.BeforeModel SHALL inject event_key prefixes into message content by positionally matching args.Request.Messages to Session.Events.
+模型手里的材料 SHALL 自带可召回的地址：一条投影条目成为模型消息时，请求装配在**呈现面**为它前置事件键票据 `[evt_<KEY>|<type>]`，模型据此经召回读工具自主取回原文。票据只由条目自身的身份构成，呈现不写回投影；中带段的过程细节折叠产物逐行携带被折条目自己的事件键票据，框架不把被折原文或模型摘要喂进请求。
 
 ## Requirements
 
-### Requirement: Event key injection in BeforeModel
+### Requirement: 事件键在请求呈现面注入
 
-ContextIntervention.BeforeModel SHALL inject event_key prefixes into message content by positionally matching args.Request.Messages to Session.Events. The prefix format SHALL be `[evt_<KEY>|<type>] ` prepended to the original message content.
+请求装配 SHALL 在呈现面为每条携带已提交事实键的投影条目注入事件键票据，使模型手里的材料自带可召回的地址。挂点 SHALL 是「一条投影条目成为一条模型消息」的那一处呈现；MUST NOT 注入在折叠、产物铸造或事实提交处——那是派生载体与事实面，改写即篡改已提交事实。
 
-The injection SHALL be idempotent: if a message's content already starts with `[evt_`, the injection SHALL be skipped for that message. This prevents duplicate prefixes when LLM outputs imitate the prefix format and those outputs are subsequently read back from session.Events by ContentRequestProcessor.
+票据格式 SHALL 是 `[evt_<KEY>|<type>]` 后接一个空格与原呈现内容，键为条目的事实键、类型为其冻结类型；格式 SHALL 由单一生成点单写并被各处复用，MUST NOT 各处自拼。票据 SHALL 只由条目自身携带的身份构成，注入 MUST NOT 依赖按位置匹配请求消息与会话事件：消息经装配、降级与配对还原后位置不可靠，而条目本就携带键与类型。
 
-#### Scenario: First-time injection adds prefix
+注入 SHALL 幂等：呈现内容已以 `[evt_` 开头时 SHALL 跳过该条目，MUST NOT 追加第二张票据。键为空或为合成键的条目 SHALL NOT 注入票据——合成键不是可召回的事实身份，给它发票据等于承诺一个必然答 missing 的地址。票据 SHALL 跟随材料：预算把该条目呈现为无内容时 SHALL NOT 单独呈现票据，因为票据的地址属于请求真正携带的材料。注入 MUST NOT 写回投影，MUST NOT 改写条目正文。
 
-- **WHEN** a message with content "hello" is processed by InjectEventKeys
-- **AND** the message does not already start with `[evt_`
-- **THEN** the content SHALL become `[evt_1234|external_input] hello`
+#### Scenario: 首次呈现注入票据
 
-#### Scenario: Idempotent injection skips existing prefix
+- **WHEN** 一条携带已提交事实键的条目被装配成模型消息，其内容不以 `[evt_` 开头
+- **THEN** 消息内容 SHALL 以 `[evt_<KEY>|<type>] ` 开头，键与类型分别等于该条目的事实键与冻结类型，其后 SHALL 是原呈现内容一字不改
 
-- **WHEN** a message with content `[evt_1234|external_input] hello` is processed by InjectEventKeys
-- **THEN** the content SHALL remain unchanged (no duplicate prefix added)
+#### Scenario: 幂等注入不加第二张票据
 
-#### Scenario: LLM output with imitated prefix is not double-injected
+- **WHEN** 一条条目的呈现内容已以 `[evt_` 开头（模型模仿票据形态并被读回）
+- **THEN** 该内容 SHALL 保持原样，MUST NOT 出现第二张票据
 
-- **WHEN** LLM outputs `[evt_1234|external_input] 我来帮你获取` and this message is stored in session.Events
-- **AND** the next ReAct iteration's ContentRequestProcessor reads this message from session.Events
-- **AND** InjectEventKeys processes this message
-- **THEN** the prefix SHALL NOT be duplicated; the message retains a single `[evt_` prefix
+#### Scenario: 产物条目不按合成键发票据
+
+- **WHEN** 呈现条目是折叠产物（`segment_fold` 或 `history_summary`），其键为合成键
+- **THEN** 该消息 SHALL NOT 前置任何以合成键为地址的票据
+- **AND** MUST NOT 出现「模型拿到票据而召回读工具答 missing」的地址
+
+#### Scenario: 空呈现不单独呈现票据
+
+- **WHEN** 预算把一条携带事实键的条目呈现为无内容（该条目本轮不进入请求）
+- **THEN** 该条目 SHALL NOT 呈现一张孤立票据
+- **AND** MUST NOT 出现「票据承诺了模型从未见过的材料的读取」或「票据把已拟合进预算的请求撑过预算」
+
+#### Scenario: 呈现不写回投影
+
+- **WHEN** 一条条目经呈现注入了票据
+- **THEN** 投影与该事实的正文 SHALL 保持注入前的字节，MUST NOT 被呈现改写
+
+### Requirement: 中带过程以事件键票据呈现并可自主召回
+
+中带段的过程细节折叠产物 SHALL 逐条携带**被折条目自己**的事件键票据：既有的一行读法（类型 + 摘要）与其来源锚 SHALL 保留，票据 SHALL 站在来源锚之后，正文每行 SHALL 由该票据与一行读法构成。票据键 SHALL 是产物所覆盖的原事件键集，MUST NOT 是产物自身的合成键。
+
+票据 SHALL 是召回读工具兼容的形态：召回侧 SHALL 把 `[evt_<KEY>|<type>]`、`evt_<KEY>` 与裸键三种写法解析到同一事件键，并 SHALL 认「整行读法」——参数中出现带 `evt_` 前缀且以 `]` 闭合的票据时取其键，未出现时完全按既有三种写法解析，MUST NOT 猜键；带来源锚而无票据的整行 SHALL 答 missing 而不是解析出锚里的内容。
+
+框架 SHALL NOT 把被折原文内联进请求，也 SHALL NOT 用模型摘要替代中段票据：模型自主经召回读工具取全文，投影 MUST NOT 为召回保留第二份原文。中带产物正文 MUST NOT 被模型生成文本覆盖；只允许老段历史综述的正文由压缩消费插件改写。
+
+呈现降级梯 SHALL 对产物条目按自身正文降级：全文不下的产物条目 SHALL 按整行边界截断并至少保留一行完整票据行，一行都放不下时才降级到条目摘要；MUST NOT 产出半张票据，MUST NOT 为产物补发合成键票据。
+
+#### Scenario: 中段过程呈现事件键票据
+
+- **WHEN** 一个已离开近期窗口且未被折叠过的段含 `thinking_plan`/`action_command` 过程细节，折叠触发
+- **THEN** 该段的过程细节 SHALL 折为一条 `segment_fold` 产物，其正文每行 SHALL 携带该被折条目自己的 `[evt_<KEY>|<type>]` 票据
+- **AND** 票据键集 SHALL 恰等于该产物覆盖的条目集，顺序同折前，每行的来源锚与一行读法 SHALL 保持原样
+
+#### Scenario: 票据为召回读工具兼容形态
+
+- **WHEN** 模型把呈现里的票据（`[evt_<KEY>|<type>]`、`evt_<KEY>`、裸键之一）交给召回读工具
+- **THEN** 三种写法 SHALL 解析到同一事件键并读回原正文
+- **AND** 模型直接贴整行（来源锚 + 票据 + 一行读法）时，SHALL 取出行内票据的键并读回原正文，MUST NOT 把锚里的实例来源段误当作键
+
+#### Scenario: 票据引用原事件键而非合成键
+
+- **WHEN** 中带产物落链，其事实键与投影条目键都带合成前缀
+- **THEN** 呈现里的票据 SHALL 指名词条目的原事件键，MUST NOT 出现合成形态的票据键
+- **AND** 以该原键调召回读工具 SHALL 答 found 而非 missing
+
+#### Scenario: 模型自主召回，框架不喂摘要
+
+- **WHEN** 中带已折叠，下一次请求装配完成
+- **THEN** 请求里该中带材料 SHALL 只呈现为一行一条的票据读法，被折原文 MUST NOT 内联进请求
+- **AND** 取全文的唯一路径 SHALL 是模型自主调用召回读工具，框架 MUST NOT 代替模型把原文或摘要喂进请求
+
+#### Scenario: 中带票据正文不被模型摘要覆盖
+
+- **WHEN** 压缩消费执行为中带产物与老段历史综述各铸一次产物
+- **THEN** 中带产物正文 SHALL 保持机械票据行，MUST NOT 被模型生成文本改写
+- **AND** 老段历史综述正文 SHALL 仍可为模型产出的有界语义综述（恢复基底保留）
+
+#### Scenario: 降级梯绝不产出半张票据
+
+- **WHEN** 预算不足以容纳中带产物的整段正文
+- **THEN** 截断 SHALL 落在整行边界并至少保留一行完整票据行；一行都放不下时才降级到条目摘要
+- **AND** MUST NOT 呈现被截断的半个票据 token
+
+### Requirement: 真实呈现消费者认识已批准的票据
+
+验收使用的模型替身及结果匹配 SHALL 读取真实请求中的身份、正文与调用归属，SHALL NOT 因合法的票据呈现而遗漏已到达的结算通知；错误来源、错误调用和真正缺失的结果 SHALL 仍被拒绝。
+
+#### Scenario: 已到请求的结算通知带票据
+
+- **WHEN** 结算通知已进入真实模型请求且正文前有合法事件票据
+- **THEN** 测试模型 SHALL 识别该结算而不是走普通委派应答；同场景真实缺少结算时仍不能通过
+
+#### Scenario: 背景结果属于另一次调用
+
+- **WHEN** 请求中有相同正文但调用身份或来源不属于等待对象
+- **THEN** 消费者验收 SHALL 不把它计为等待对象的结果，不以去掉票据后文字相等掩盖归属错误
+
+#### Scenario: 呈现所有权重构尚未交付
+
+- **WHEN** 独立no-prefix变更中的呈现单一拥有者或身份格式重构尚未实现
+- **THEN** 本域 SHALL 只陈述已验证的票据可见性与消费者匹配，不宣称已解决重复注入或未计量增量；验收依赖冲突在归档前具名解决

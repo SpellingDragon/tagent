@@ -1,0 +1,125 @@
+{
+  "source_commit": "7b0cde162627ad37f1d364bbf3508b3bd0518431",
+  "files": {
+    "proposal.md": {
+      "sha256": "9b1d49cd3e5ac514b3f65f5a085cef672ee1926f762f52dd9c14993ae6e0f765",
+      "bytes": 11635
+    },
+    "design.md": {
+      "sha256": "b68b2695cd685b94efda46642bcf5109c52439f26834f655a3c92b5789102cca",
+      "bytes": 30919
+    },
+    "tasks.md": {
+      "sha256": "2cfe5bc55cf77e89e4129da36dc7c6e981e7110e56cdd72ae37802787b72bda4",
+      "bytes": 7831
+    },
+    "ORCHESTRATION.md": {
+      "sha256": "21a90133f97824111f8128154d294eed06773dd7bc9e2dc620bd08d19a1120a7",
+      "bytes": 115991
+    },
+    "specs/orchestration/spec.md": {
+      "sha256": "d7cfefff00188d220f405da56a8d97a2df9ed7d295e97a79b37a19261ff6452f",
+      "bytes": 6693
+    },
+    "changes/12-consumer-state-lifecycle/proposal.md": {
+      "sha256": "46b4663cc2ccdcecc29b679d3c202e802194ba914de86bf36a5ddba2b5c962ce",
+      "bytes": 8556
+    },
+    "changes/12-consumer-state-lifecycle/design.md": {
+      "sha256": "be6c4666558b1c2426b7d01c99f2322c789246e62cc2509c3b7e38c75f1324f2",
+      "bytes": 83841
+    },
+    "changes/12-consumer-state-lifecycle/tasks.md": {
+      "sha256": "4f8c35311ef2d22a40a29ebc5448e75af6bca07d870fc4d6001d5db9ca1aac7d",
+      "bytes": 68831
+    },
+    "changes/12-consumer-state-lifecycle/specs/config-hot-reload/spec.md": {
+      "sha256": "d512c0e768d573d5a78014c5ee0b7751fb868d7204a07747197b4375ae7f1ce9",
+      "bytes": 2544
+    },
+    "changes/12-consumer-state-lifecycle/specs/consumer-loop-convergence/spec.md": {
+      "sha256": "3b3b91a64b27c7bc12e55ba7ed08a7a9c3bb151d2997323090e094efcb97780a",
+      "bytes": 1767
+    },
+    "changes/12-consumer-state-lifecycle/specs/runtime-resource-ownership/spec.md": {
+      "sha256": "f780cb386dfae01f186efa9a38e85f5449a3c1c21d2d0d79e82e7b6ddb89f596",
+      "bytes": 1931
+    },
+    "changes/12-consumer-state-lifecycle/specs/session-checkpoint-material/spec.md": {
+      "sha256": "758aa4dd95f913d4254d11b0fc6debca2608e8df9672f0c5fd3378a9ff102b27",
+      "bytes": 6269
+    },
+    "changes/06-bounded-open-index/proposal.md": {
+      "sha256": "15cd51d80b666e7c228c3341e91687eca3da35ee47668d7d350584f3cbd149b2",
+      "bytes": 12860
+    },
+    "changes/06-bounded-open-index/design.md": {
+      "sha256": "a0249a1f60bb4cb19df86858d001b54d91f11476453e8ea9aa3a64653f18ae32",
+      "bytes": 273573
+    },
+    "changes/06-bounded-open-index/tasks.md": {
+      "sha256": "9975c60f5d53382717ac0daad1155176bb3fecdd954373f88710a70d8c436b3b",
+      "bytes": 64723
+    },
+    "changes/06-bounded-open-index/specs/bounded-recovery/spec.md": {
+      "sha256": "49082f485f30762d51b7c8cb570c3c85fd1ed5c65d19c6cc45df1027c78c631c",
+      "bytes": 11597
+    },
+    "changes/13-verified-completion/proposal.md": {
+      "sha256": "d7100f4719587b85cd7b486f90248e611ddafefecd0a3eea57833a736e923bd1",
+      "bytes": 5428
+    },
+    "changes/13-verified-completion/design.md": {
+      "sha256": "6374b707ad5ddd1427ec6eeb4032645d255ede084e7d615705b877aeafb8475f",
+      "bytes": 93157
+    },
+    "changes/13-verified-completion/tasks.md": {
+      "sha256": "dd57797f95c330c7c1608a3532319d42754ca8dd09bbdbb59eec4276de0ae2e8",
+      "bytes": 64650
+    },
+    "changes/13-verified-completion/specs/architecture-guardrails/spec.md": {
+      "sha256": "b23970495f355ccc9b20bbb4b9c161b3337eb6de49ed4a773314814cb8850380",
+      "bytes": 9851
+    },
+    "changes/01-three-hooks-golden/tasks.md": {
+      "sha256": "50ee781ab712d975229f60bf2f1818a031357c8f340d121d317c8fe74f77735d",
+      "bytes": 15669
+    },
+    "changes/02-plugin-dynamic-mount/tasks.md": {
+      "sha256": "e5594424a35a0956b17f36997514b71820c3c62a3e393c9a3416ed9a52c1af9d",
+      "bytes": 11632
+    },
+    "changes/03-compression-configurable/tasks.md": {
+      "sha256": "da0afdabb1902e2f7d6f88f8fe27b04a69f8dc058e681c42fafcd6aa472654e3",
+      "bytes": 53037
+    },
+    "changes/04-midband-ticket-recall/tasks.md": {
+      "sha256": "1633f889a12f3a01e4646f9c5919eb3e4e53c3b71428805362bb385de8d1c4c1",
+      "bytes": 26132
+    },
+    "changes/05-task-custody/tasks.md": {
+      "sha256": "bc9c96d2cc298e4fda0fc88d3f25d1e7b946309fc28dc99912d8235e01a04793",
+      "bytes": 50372
+    },
+    "changes/07-governance-custody/tasks.md": {
+      "sha256": "a76d92e4eec731dcc991adb9b49368b4ded42bce3662954299ceb4da95c11a0c",
+      "bytes": 31273
+    },
+    "changes/08-fact-retirement/tasks.md": {
+      "sha256": "89aea5e257eedd122ad3ab5b9d92fd15119f46574436d4da93c082b93995980e",
+      "bytes": 65902
+    },
+    "changes/09-acceptance-real-measure/tasks.md": {
+      "sha256": "dbeccd379504904d6fddc3c042b26454421cfe42486a9895042843fc509bb883",
+      "bytes": 34998
+    },
+    "changes/10-contract-sync-dead-code/tasks.md": {
+      "sha256": "5e5641a18c79ffa133ae5f545ea504ec477a9f3e2437155f886c579290254feb",
+      "bytes": 141639
+    },
+    "changes/11-atomic-fact-commit/tasks.md": {
+      "sha256": "765963a08234a27f7c36d7c647cac90724e1181ab6b57eee066b1c65ab10429e",
+      "bytes": 37353
+    }
+  }
+}

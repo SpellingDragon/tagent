@@ -31,7 +31,7 @@ const settlePendingSession = "session-settle-pending"
 
 const settlePendingAgentSections = "  user:\n" +
 	"    model: model-entry\n" +
-	"    max_tokens: 32000\n" +
+	"    replay_window: 32000\n" +
 	"    tools:\n" +
 	"      - { kind: tool, id: call_subagent }\n" +
 	"  reviewer:\n" +
@@ -67,7 +67,7 @@ func TestSettleDeliveryCommitFailureStaysPending(t *testing.T) {
 	)
 
 	root := t.TempDir()
-	engine, err := ledger.OpenAtomicStore(context.Background(), ledger.StorageConfig{Type: ledger.StorageJournal, Root: root})
+	engine, err := ledger.OpenAtomicStore(context.Background(), ledger.StorageConfig{Type: ledger.StorageJournal, Root: root, WriteRights: true})
 	if err != nil {
 		t.Fatalf("open the storage engine the settle-pending host commits into: %v", err)
 	}

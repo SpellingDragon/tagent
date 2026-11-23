@@ -59,20 +59,14 @@ func ageBandTurn(step int, seed string) []replay.ChainFact {
 	return facts
 }
 
-// ageBandProjection replays the given facts into one projection over the age
-// session, as a cold start reads them back.
+// ageBandProjection holds the given facts in one projection over the age
+// session, in chain order.
 func ageBandProjection(t *testing.T, facts []replay.ChainFact) *replay.ReplayProjection {
 	t.Helper()
 	ctx := context.Background()
-	chain := replay.NewMemoryEventChain()
-	for _, fact := range facts {
-		if err := chain.Commit(ctx, fact); err != nil {
-			t.Fatalf("Commit %s: %v", fact.Key, err)
-		}
-	}
 	projection := replay.NewReplayProjection()
-	if _, err := replay.RebuildProjectionFromWAL(ctx, projection, chain, &replay.MemoryRelations{}, ageChainKey, replay.RebuildOptions{}); err != nil {
-		t.Fatalf("RebuildProjectionFromWAL: %v", err)
+	for _, fact := range facts {
+		projection.Append(ctx, replay.ProjectionEntry{Key: fact.Key, Type: fact.Type, Summary: fact.Summary, Content: fact.Content, Time: fact.Time})
 	}
 	return projection
 }

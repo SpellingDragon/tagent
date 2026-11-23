@@ -1,9 +1,9 @@
 {
   "concept_ratchet": {
     "removed_min": 5,
-    "new_max": 47,
-    "exported_interfaces_max": 83,
-    "note": "new_max 1->4 (boundary-closure), 4->7 (restart-recovery: RecoveryTicket/LoadScan/LoadStats), 7->38 (hot-update-and-purity-closure: generation-scoped registry GenRegistry/GenBuilder/GenBuilt/GenInstances/GenRegistration/GenResources/GenerationFaces/GenerationConsumer/GenHostSpec, storage engine AtomicStore/Batch/Fetch/Pair/MigrateReport, training export SFTInput/SFTSample/SFTDataset/SFTRow/PreferenceDataset/PreferenceRow/DatasetRefusal/RefusalName/EvidenceOptions/EvidenceExporter/EvidenceLines/FileEvidenceLines/SnapshotReadBack/RequestEvidenceRecord, meditation mount Plan/Faces, ChainFailureNamer, GenerationConfig), 38->44 (hot-update-and-purity-closure 12 checkpoint state: Checkpoint/CheckpointOffset/CheckpointSlice/CheckpointPayload 事实族、Stateful/StateRegistry 状态接缝、RegistryCheckpoint/TaskCheckpoint 任务账; 同波 CheckpointMeta/MailboxState/CheckpointObligation 内化不出公共面); 44->47 (session-checkpoint-material-unification U3 material contract: Material 声明面 + Timing/Failure 两个策略枚举，六端口保留为兼容读法、不新增端口，reducer/emitter 内化，exported_interfaces 不抬)；exported_interfaces_max 78->82 (AtomicStore, ChainFailureNamer, GenerationFaces, EvidenceLines, SnapshotReadBack), 82->83 (Stateful). 两个数都是本波实测值，非收敛目标：后续波次每新增一个导出名，棘轮按名判红而不是抬升到新常态。 勘误（W8-VOCAB）：`TaskCheckpoint` 已更名 `StatedTask`（任务账只有一个 checkpoint 术语，`RegistryCheckpoint` 为容器），绑定键与 S2 基线行同名改，new_max/removed_min 两个数未动。"
+    "new_max": 57,
+    "exported_interfaces_max": 85,
+    "note": "new_max 1->4 (boundary-closure), 4->7 (restart-recovery: RecoveryTicket/LoadScan/LoadStats), 7->38 (hot-update-and-purity-closure: generation-scoped registry GenRegistry/GenBuilder/GenBuilt/GenInstances/GenRegistration/GenResources/GenerationFaces/GenerationConsumer/GenHostSpec, storage engine AtomicStore/Batch/Fetch/Pair/MigrateReport, training export SFTInput/SFTSample/SFTDataset/SFTRow/PreferenceDataset/PreferenceRow/DatasetRefusal/RefusalName/EvidenceOptions/EvidenceExporter/EvidenceLines/FileEvidenceLines/SnapshotReadBack/RequestEvidenceRecord, meditation mount Plan/Faces, ChainFailureNamer, GenerationConfig), 38->44 (hot-update-and-purity-closure 12 checkpoint state: Checkpoint/CheckpointOffset/CheckpointSlice/CheckpointPayload 事实族、Stateful/StateRegistry 状态接缝、RegistryCheckpoint/TaskCheckpoint 任务账; 同波 CheckpointMeta/MailboxState/CheckpointObligation 内化不出公共面); 44->47 (session-checkpoint-material-unification U3 material contract: Material 声明面 + Timing/Failure 两个策略枚举，六端口保留为兼容读法、不新增端口，reducer/emitter 内化，exported_interfaces 不抬)；exported_interfaces_max 78->82 (AtomicStore, ChainFailureNamer, GenerationFaces, EvidenceLines, SnapshotReadBack), 82->83 (Stateful). 两个数都是本波实测值，非收敛目标：后续波次每新增一个导出名，棘轮按名判红而不是抬升到新常态。 勘误（W8-VOCAB）：`TaskCheckpoint` 已更名 `StatedTask`（任务账只有一个 checkpoint 术语，`RegistryCheckpoint` 为容器），绑定键与 S2 基线行同名改，new_max/removed_min 两个数未动。 47->54 (runtime-recovery-ideal W3 实测值，按名抬升而非收敛目标: task 托管 05 增添 StatedConsumption/StatedAttempt/StatedRefusal/Receipts 四个 checkpoint 账目类型，governance/退位 增添 RelocateReport 声明面与 SettleAccount 结算账读面，TicketOf 是函数不入类型清单); exported_interfaces_max 83->84 (SettleAccount 是退位/结算账的读面接口，按名抬升). 抬升理由与逐名清单记于 openspec/changes/runtime-recovery-ideal/ORCHESTRATION.md 台账与 04 tasks.md 执行证据。 54->56 (runtime-recovery-ideal R83 逐名裁定: FactCommitOutcome 是 CommitFact 的五分类提交结果契约 memory/ledger/segment_store.go——FactAlreadyPresent 不是错误故不退化 typed error; AttentionFactLog 是冻结包边下的结构端口 runtime/task/approval/attention_log.go——runtime/task/approval 与 features/evolution/governance 的 forbidden 均含 memory，签名只用内置类型使 memory tier 的 fact log 结构满足而两向无需包边); exported_interfaces_max 84->85 (AttentionFactLog，冻结包边下唯一跨边界形态，按名抬升). 逐名清单与裁定依据记于 openspec/changes/runtime-recovery-ideal/ORCHESTRATION.md R83。 56->58 (runtime-recovery-ideal G4 逐名裁定，按名抬升非收敛目标: CommitOrder 是存储引擎陈述提交序的能力 memory/ledger/atomic_store.go——引擎实现它、boot 经类型断言据此点名比最新框架 checkpoint 更新的尾部，读不到该能力的引擎读全史; IndexEntry 是一次提交归档的存储索引条目 memory/ledger/segment_store.go——CommittedIndexEntry 的返回面被 assembly 的提交序走查跨包读取，索引条目是 event-segment-store 的已登记记录形态; ChainSource 是一任务事实链的按身份读面 runtime/task/checkpoint.go——checkpoint 以水位陈述已结任务时由 assembly 的 tasksStateSlice.RestoreState 接线，签名只用内置与 event 类型故两向无需包边); exported_interfaces_max 85->87 (CommitOrder 与 ChainSource 两个新导出接口，各 1 方法，不触 S1；IndexEntry 是声明面不入接口计数). 逐名裁定与生产消费者记于 openspec/changes/runtime-recovery-ideal/ORCHESTRATION.md 台账（G4）。 58->57 (runtime-recovery-ideal 10.R8b 端口收口实测下调，非放宽: 三个同族持久面端口收口为 api/durable.FactLog，AttentionFactLog 整条删除，该名原在 new 集合内故随之落 removed 5->6；GovernanceEventLog 与 FactLog 均在基线集合内，不出 new，FactLog 由 runtime/state 迁 api/durable 故 relocations 1->2，net -1 逐名指向 AttentionFactLog)；exported_interfaces_max 87->85 (按声明数实测: FactLog 1->1 搬迁净 0、GovernanceEventLog 1->0、AttentionFactLog 1->0；三份同名异构的持久面声明连同其 doc 块删除，消费者一并改指 durability 叶的同一端口)。逐名清单与归属推导记于 openspec/changes/runtime-recovery-ideal/changes/10-contract-sync-dead-code/design.md 与 ORCHESTRATION.md R85/R98。 勘误（R7）：`IndexEntry` 与其唯一候选消费者 `CommittedIndexEntry` 均已删除（后者随 12.103 判词净删成为死生产者，处置见 06 design D12.8），绑定与类型同批移除，实测 bindings 57→56、new 57→56、removed 34 不动；new_max 57 未抬未降。"
   },
   "schema_version": 1,
   "config_facts": {
@@ -47,6 +47,24 @@
       "examples/wechat-bot->assembly"
     ]
   },
+  "mounting": {
+    "invariant": [
+      "装配根 SHALL NOT 直接构造具体特性组件再挂进插件管道：对插件管道集合的成员增补 SHALL 只来自转发已解析集合，或取声明名集与代际注册表的解析结果。",
+      "特性 SHALL 经 plugins: 声明与代际注册表按名挂载；装配根 SHALL NOT 把「先具体构造、再无条件挂入」当作挂载方式，挂载动态性 SHALL 是不变量而非实现选项。",
+      "plugins: 声明 SHALL 有生产消费方：声明名集 SHALL 被逐项迭代求值；配置包自身的编解码、克隆与指纹映射 SHALL NOT 计为消费方，仅出现在变更提示中的引用 SHALL NOT 计为消费方。"
+    ],
+    "gate": "scripts/gates/check_plugin_mounting.py",
+    "declaration": {
+      "key": "plugins",
+      "accepted_by": "api/config/decode.go agentKeys",
+      "dialect": "assembly/host_document.go hostAgent",
+      "mapped_by": "assembly/host_document.go mapDocument"
+    },
+    "registry_implementation": [
+      "assembly/compress_mount.go",
+      "assembly/plugin_catalog.go"
+    ]
+  },
   "change": "runtime-rebuild",
   "module_path": "github.com/SpellingDragon/tagent",
   "root_package": "assembly",
@@ -88,6 +106,11 @@
       "required": true,
       "reason": "事件身份与事实载体；纯叶子，原生模型载荷可来自外部框架类型。"
     },
+    {
+      "pattern": "api/durable",
+      "role": "durable-facts",
+      "required": true,
+      "reason": "事实的耐久写读面（FactLog：Put/Scan/Sync）；纯叶子只引 stdlib。三个同族持久面端口（state 的任务事实账、governance 的治理事件流、approval 的注意力链）收口于此：三者签名逐字同构且由同一对生产类型承担（memory/ledger.TierFacts、assembly.memoryFactLog），三消费者 allow 三元交集只有 api/event 与 api/plugin，前者 reason 是事件身份与事实载体、唯一接口 Fact 无 context/error，装下存储行为端口须改宽其 reason（边界跟实现走，否决），后者是三拓展点插件协议；故新建叶子，类型名沿用 FactLog 不造第三名（runtime-recovery-ideal 10.R8）。"},
     {
       "pattern": "api/config",
       "role": "declaration",
@@ -147,7 +170,7 @@
       "pattern": "features/evolution/governance",
       "role": "governance-implementation",
       "required": true,
-      "reason": "三拓展点之一 Governor 的实现域：策略、预算、目标与拒绝台账（Policy/BudgetManager/GoalRegistry/DenialLedger/GovernanceEventLog）实现 plugin.Governor 的裁决窄口，只读 event 与审批通道，不拥有运行时状态（package-zero-debt 终审反转显式登记）。"
+      "reason": "三拓展点之一 Governor 的实现域：策略、预算、目标与拒绝台账（Policy/BudgetManager/GoalRegistry/DenialLedger）实现 plugin.Governor 的裁决窄口，只读 event 与审批通道，不拥有运行时状态（package-zero-debt 终审反转显式登记）。"
     },
     {
       "pattern": "features/telemetry",
@@ -313,6 +336,7 @@
       "allow": [
         "api/config",
         "api/document",
+        "api/durable",
         "runtime/state",
         "runtime/agent",
         "runtime/task",
@@ -390,6 +414,23 @@
       "reason": "事件是纯叶子：不得 import 任何其他一方包。"
     },
     {
+      "from": "api/durable",
+      "allow": [],
+      "forbidden": [
+        "api/event",
+        "api/config",
+        "runtime/state",
+        "runtime/agent",
+        "runtime/task",
+        "memory",
+        "api/plugin",
+        "api/model",
+        "features/rl",
+        "features/evolution"
+      ],
+      "reason": "事实的耐久写读面是纯叶子：签名只用 context 与内置类型，只引 stdlib，不 import 任何其他一方包——正因如此三本账（任务事实、治理事件、审批注意力）与它们的实现者（memory/ledger.TierFacts、assembly.memoryFactLog）两向都无需包边（runtime-recovery-ideal 10.R8）。"
+    },
+    {
       "from": "api/view",
       "allow": [
         "api/event"
@@ -459,6 +500,7 @@
         "api/config",
         "api/model",
         "api/plugin",
+        "api/durable",
         "runtime/task"
       ],
       "forbidden": [
@@ -653,6 +695,7 @@
       "allow": [
         "api/event",
         "api/plugin",
+        "api/durable",
         "runtime/task/approval"
       ],
       "forbidden": [
@@ -672,6 +715,7 @@
       "allow": [
         "api/event",
         "api/plugin",
+        "api/durable",
         "runtime/task"
       ],
       "forbidden": [
@@ -1182,11 +1226,6 @@
       "commit": "3b727199d1084f655dfc1a4912051d6885f1a576"
     },
     "bindings": {
-      "ConfigChange": {
-        "concept": "configuration change",
-        "kind": "fact",
-        "spec": "config-hot-reload"
-      },
       "Task": {
         "concept": "live benchmark task",
         "kind": "declaration",
@@ -1390,12 +1429,17 @@
       "Stateful": {
         "concept": "one consumer's recoverable state as the framework sees it: the name it is keyed by, the state it states and the restore that puts it back",
         "kind": "port",
-        "spec": "compression-recovery-ticket"
+        "spec": "session-checkpoint-material"
       },
       "StateRegistry": {
         "concept": "ordered account of the state holders mounted on one runtime, aggregated at one cut and restored from one",
         "kind": "port",
-        "spec": "compression-recovery-ticket"
+        "spec": "session-checkpoint-material"
+      },
+      "StateSeat": {
+        "concept": "governance recoverable state as the framework carries it: the tail each governance stream ended at, the index those streams folded and the approval book the rulings park calls with, restored as one slice and continued by the events past its cut",
+        "kind": "declaration",
+        "spec": "session-checkpoint-material"
       },
       "RegistryCheckpoint": {
         "concept": "task account a checkpoint states: one entry per task record the registry holds at the cut",
@@ -1408,7 +1452,7 @@
         "spec": "task-registry-rebuild"
       },
       "Material": {
-        "concept": "one face's declaration of the material it reads: the routing it consumes, when it consumes it and what a failure of it leaves behind",
+        "concept": "the material one face reads: the routing it consumes, when it consumes it and what a failure of it leaves behind, declared by the face or read off the port it serves for a face that declares none",
         "kind": "declaration",
         "spec": "orchestration"
       },
@@ -1421,6 +1465,47 @@
         "concept": "what one failed face leaves behind: a refused pass, a named gap, an obligation kept in the account that owes it, or a dropped product",
         "kind": "declaration",
         "spec": "orchestration"
+      },
+      "StatedConsumption": {
+        "concept": "one completed logical consumption of a task a checkpoint states: the notice identity the receipt answers beside the committed event the notice pointed at",
+        "kind": "declaration",
+        "spec": "task-registry-rebuild"
+      },
+      "StatedAttempt": {
+        "concept": "the follow-up turn of one notification as a checkpoint states it: the notice the attempt belongs to beside the terminal that turn ended on, empty while it is in flight",
+        "kind": "declaration",
+        "spec": "task-registry-rebuild"
+      },
+      "StatedRefusal": {
+        "concept": "the feedback fact of one notification a delivery target refused, as a checkpoint states it: the notice, the routing it was offered to, the offering instance, the reason and the instant",
+        "kind": "declaration",
+        "spec": "task-registry-rebuild"
+      },
+      "Receipts": {
+        "concept": "the settle account one task's durable record holds: the consumptions it completed, the attempts its follow-up turns are and the refusals its targets answered",
+        "kind": "declaration",
+        "spec": "task-registry-rebuild"
+      },
+      "SettleAccount": {
+        "concept": "read face of the receipts one task settled, so a checkpoint states the account of the tasks it names instead of scanning the durable history they already closed",
+        "kind": "read",
+        "spec": "task-registry-rebuild"
+      },
+      "FactCommitOutcome": {
+        "concept": "what one whole-fact commit left in the store: the fact landed whole and took one sequence slot, the store already held it whole, the identity is held under another content, the durable outcome the store cannot name, or the refusal",
+        "kind": "read",
+        "spec": "session-fact-lifecycle"
+      },
+
+      "CommitOrder": {
+        "concept": "the order an engine's commits landed in: the keys it holds beside the value each key's newest statement carries, named from the newest committed record to the oldest, so a boot names the chains younger than the newest framework checkpoint instead of reading the whole log",
+        "kind": "port",
+        "spec": "session-checkpoint-material"
+      },
+      "ChainSource": {
+        "concept": "the durable fact chain of one task read by its identity: the read a checkpoint spares for the tasks it states whole, and the read a task stated as a watermark answers the first time a reader names it",
+        "kind": "port",
+        "spec": "session-checkpoint-material"
       }
     }
   }

@@ -44,45 +44,42 @@
 - **WHEN** 一次实际 Agent 请求由投影装配
 - **THEN** 原文与模型视图 SHALL 分层；视图按当前事实、声明与预算现算，全文视图才与原文相同，MUST NOT 以视图反推原文
 
-### Requirement: 历史 compaction 事实的冷启动只读重建
+### Requirement: 历史 compaction 事实的冷启动恢复
 
-对携带历史 compaction 事实的链，系统 SHALL 提供 `RebuildProjectionFromWAL` 的只读恢复兼容：对空投影执行，先于 inbox/mem_spill 重放；非空投影 SHALL 不被 Replace，并记录 skipped 原因。存在有效 compaction 事实时 SHALL 按 retained-ref 交错顺序复原：负 key 合成 ref 使用载荷全文，正 key 从唯一事实链水合；尾部 SHALL 经 MinEventKey 分页读取并按 EventKey 写入序追加，不使用 Timestamp/StartTime 近似。fullBoundary SHALL 使用载荷值，snapshot 与尾部冥想键均须回种。compaction 事实自身 SHALL NOT 独立进入投影。该路径 MUST NOT 产生新的 compaction 事实；现行正常重启恢复走 `compress.product`（见 `compression-pipeline`），本路径只服务历史链的只读兼容。
+对携带历史 compaction 事实的链，重启恢复 SHALL 经 `compress.product` 事实复原，MUST NOT 重新折叠：有 checkpoint 锚点时按锚点陈述的 survivor 清单逐条定位、再回放锚点之后的部分，锚点缺失或其载荷不可读时退回全链回放；两条路径都按提交序（索引项的 `seq`）回放，不使用 Timestamp 近似。已记录的产物经 `RestoreProducts` 放回并覆盖其 covered 条目，压缩产物事实自身 SHALL NOT 独立进入投影。恢复 MUST NOT 产生新的 compaction 事实。
 
-相同事实链、配置与 TTL 存活前提下，正常 snapshot 路径的 render SHALL 字节一致。缺键或读取失败 SHALL 形成结构化 partial/failed 结果，不假称逐字节。无 compaction 事实时 SHALL 进入有界 fallback，不再 no-op；空库必须经成功扫描确认。
+相同事实链、配置与存活前提下，复原后的投影渲染 SHALL 与折叠时字节一致；缺键或读取失败 SHALL 形成结构化 partial/failed 结果，不假称逐字节；无 compaction 事实时 SHALL 走全链回放，MUST NOT 把非空链当空会话（空库须经成功扫描确认）。
 
-重建结果 SHALL 进入实际 Agent 请求（与「投影是事实链的纯回放」装配一致）；因果链按 `(PartitionID, SessionID)` 隔离（见 `causal-chain-isolation`），回放 MUST NOT 跨会话连链。
+恢复结果 SHALL 进入实际 Agent 请求（与「投影是事实链的纯回放」装配一致）；因果链按 `(PartitionID, SessionID)` 隔离（见 `causal-chain-isolation`），回放 MUST NOT 跨会话连链。
 
-#### Scenario: 逐字节重建（snapshot + 尾部）
+> 退役（10.R6）：原「历史 compaction 事实的冷启动只读重建」以 `RebuildProjectionFromWAL` 为载体，该入口与其 `RebuildOptions`／`RebuildReport` 已随 10.R9b 裁删（Go 树零定义）。其独占语义一并退役：非空投影跳过并记 skipped 原因、原重建载荷的 `fullBoundary`／`meditationKeys` 回种、按最小事件键分页的尾部读取与有界 fallback（`FallbackBound`／`Dropped`）。现行恢复只认锚点 survivor 清单与 `compress.product` 事实，无数量截断上限（见「无锚恢复不静默截断」）。
+
+#### Scenario: 逐字节复原（锚点 + 尾部）
 
 - **WHEN** 使用 Content 不等于 EventSummary 的数据，折叠后继续写尾部并独立进程重启
-- **THEN** retained refs、合成 ref、边界和尾部恢复后渲染字节一致
+- **THEN** 产物覆盖的条目与尾部复原后渲染字节一致
 
 #### Scenario: 综述前置首位 + 交错顺序
 
-- **WHEN** 恢复交错 retained refs
-- **THEN** 综述在首位，合成与正 key refs 保持载荷次序
+- **WHEN** 恢复交错记录的产物
+- **THEN** 综述在首位，其余产物保持事实链次序
 
 #### Scenario: 尾部不丢
 
-- **WHEN** snapshot 后存在跨多页尾部
-- **THEN** 所有可见尾部均按 EventKey 追加，不静默截最新端
+- **WHEN** 锚点之后存在跨多页的尾部
+- **THEN** 所有可见尾部均按提交序回放，不静默截最新端
 
 #### Scenario: bus 滞留事件顺序保真
 
 - **WHEN** Timestamp 与写入序相反
-- **THEN** 恢复遵循 EventKey 写入序而非 Timestamp
-
-#### Scenario: fullBoundary 与 meditationKeys 正确恢复
-
-- **WHEN** snapshot 与尾部都含冥想产出
-- **THEN** boundary 使用载荷值，双方冥想 keys 均回种
+- **THEN** 恢复遵循提交序而非 Timestamp
 
 #### Scenario: 无 compaction 事实时恢复
 
 - **WHEN** 事实链有原始事件但从未折叠
-- **THEN** 执行 fallback，非空链不被默认为空会话
+- **THEN** 执行全链回放，非空链不被默认为空会话
 
-#### Scenario: 重建不跨会话连链
+#### Scenario: 恢复不跨会话连链
 
 - **WHEN** 冷启动回放遇多会话事实
 - **THEN** 因果链与投影 SHALL 按 `(PartitionID, SessionID)` 隔离，MUST NOT 把另一会话事件连入
@@ -153,7 +150,7 @@ SessionProjection SHALL 支持通道分区（对话/遥测/反思）：assembleR
 
 ### Requirement: 折叠的幂等与不回流
 
-`FoldByAge` MUST 以折叠材料的内容寻址身份幂等：对同一投影、同一窗口参数重复折叠 SHALL 产出同一组产物键或退回 no-op，MUST NOT 追加第二份同义产物（第二份段折叠、第二份历史综述或第二条压缩事实）。折叠已完成的投影（既有 fold 状态非空或已无待折材料）再次进入折叠 SHALL 短路，MUST NOT 递归折叠自身产物。`ApplyProducts`/`RestoreProducts` SHALL 幂等：同一产物条目已存在时 MUST NOT 改变投影。`RebuildProjectionFromWAL` SHALL 只复原投影，MUST NOT 触发折叠、MUST NOT 因重建向事实链写入压缩事实；重建后再次装配请求 MUST NOT 产生新的折叠副作用。幂等判定 SHALL 以产物键与事实链条目为证据，MUST NOT 以时间窗或内容相似度代替键比较。
+`FoldByAge` MUST 以折叠材料的内容寻址身份幂等：对同一投影、同一窗口参数重复折叠 SHALL 产出同一组产物键或退回 no-op，MUST NOT 追加第二份同义产物（第二份段折叠、第二份历史综述或第二条压缩事实）。折叠已完成的投影（既有 fold 状态非空或已无待折材料）再次进入折叠 SHALL 短路，MUST NOT 递归折叠自身产物。`ApplyProducts`/`RestoreProducts` SHALL 幂等：同一产物条目已存在时 MUST NOT 改变投影。`RestoreProducts` SHALL 只复原链上记录的产物，MUST NOT 触发折叠、MUST NOT 因恢复向事实链写入压缩事实；恢复后再次装配请求 MUST NOT 产生新的折叠副作用。幂等判定 SHALL 以产物键与事实链条目为证据，MUST NOT 以时间窗或内容相似度代替键比较。
 
 #### Scenario: 重复折叠不追加第二份产物
 
@@ -161,10 +158,10 @@ SessionProjection SHALL 支持通道分区（对话/遥测/反思）：assembleR
 - **THEN** 产物键集合 SHALL 保持不变，投影与事实链 MUST NOT 新增同义段折叠或历史综述
 - **AND** 折叠计数 SHALL 如实反映本次为 no-op，而非第二次产出
 
-#### Scenario: 重建不触发折叠（失败）
+#### Scenario: 恢复不触发折叠（失败）
 
-- **WHEN** 冷启动对含折叠产物的历史事实链执行 `RebuildProjectionFromWAL`
-- **THEN** 重建 MUST NOT 调用折叠，事实链 MUST NOT 新增压缩事实
+- **WHEN** 冷启动对含折叠产物的历史事实链走锚点恢复或全链回放
+- **THEN** 恢复 MUST NOT 调用折叠，事实链 MUST NOT 新增压缩事实
 - **AND** 复原后的投影渲染 SHALL 与折叠时逐字节一致（既有逐字节义务不变）
 
 #### Scenario: 折叠产物不触发自身（失败）

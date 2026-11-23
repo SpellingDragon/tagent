@@ -25,6 +25,11 @@ CHECKER = SCRIPTS / "check_runtime_evidence.py"
 REAL_CONTRACT = REPO / "golden" / "runtime" / "scenarios.json"
 MODULE = "github.com/SpellingDragon/tagent"
 
+sys.path.insert(0, str(SCRIPTS))
+import check_runtime_evidence as checker  # noqa: E402
+
+CHECKER_ENVIRONMENT_NAMES = checker.EVENT_ENVIRONMENT_NAMES
+
 
 def run_checker(*args):
     proc = subprocess.run([sys.executable, str(CHECKER)] + list(args),
@@ -628,50 +633,89 @@ def event_log(contract, tests):
     return rows
 
 
-def event_fingerprints(scope):
-    """The modules one scope actually drives, one digest per module.
+RUNNER_ENTRYPOINT = Path("scripts") / "scenarios" / "run_runtime_scenarios.py"
+GATE_ENTRYPOINT = Path("scripts") / "gates" / "check_event_integrity_mutations.py"
+GATE_TOOL_NAME = "check_event_integrity_mutations"
 
-    The runner fingerprints the groups a scope selects: event-short drives the
-    root, the CLI host and the smoke module, event-long drives the smoke module
-    alone. The shared module must carry the same digest in both lists; the
-    modules only one scope covers are a scope difference, not baseline drift.
-    """
-    shared = {"module_path": "wechat-bot", "dir": "examples/wechat-bot",
-              "revision": "0" * 40, "content_hash": "sha256:" + "2" * 64}
-    if scope == "event-long":
-        return [shared]
-    return [
-        {"module_path": MODULE, "dir": ".", "revision": "0" * 40,
-         "content_hash": "sha256:" + "1" * 64},
-        shared,
-        {"module_path": "tagent-cli-host", "dir": "examples/cli-host", "revision": "0" * 40,
-         "content_hash": "sha256:" + "3" * 64},
-    ]
+
+def load_runner():
+    """The producer module the checker imports, so the fixtures hold real digests."""
+    scenarios = str(SCRIPTS.parent / "scenarios")
+    if scenarios not in sys.path:
+        sys.path.insert(0, scenarios)
+    import run_runtime_scenarios
+    return run_runtime_scenarios
+
+
+runner = load_runner()
+
+
+def scope_seeds(contract, scope):
+    """The module groups one scope selects, as the runner names them."""
+    seeds = {}
+    for test in event_tests(contract, scope):
+        seeds.setdefault(test["dir"], test["module_path"])
+    return [{"dir": directory, "module_path": seeds[directory]} for directory in sorted(seeds)]
 
 
 def event_digest(path):
     return "sha256:" + hashlib.sha256(Path(path).read_bytes()).hexdigest()
 
 
-def mutation_evidence(contract_digest=None, fingerprints=None):
+EVENT_FIXTURE_BOUND = 600
+
+
+def event_selectors(tests):
+    """The selectors a run declares: the contract's own module/package/name rows."""
+    return [{"test_id": test["id"], "module_path": test["module_path"],
+             "test_package": test["test_package"], "test_name": test["test_name"]}
+            for test in tests]
+
+
+def event_invocations(tests, seed=None, window=None, bound=EVENT_FIXTURE_BOUND):
+    """The argv the runner derives: one invocation per (module dir, tags, race) group.
+
+    Read through the producer rather than restated here: which groups exist, which
+    packages share one invocation, and which invocation may carry the matrix pair
+    are the runner's own decisions, so a fixture that re-derived them could agree
+    with the checker while disagreeing with the tool that writes the evidence.
+    """
+    index = {test["id"]: test for test in tests}
+    invocations = []
+    for group in runner.event_groups(index, list(index)):
+        for command in runner.event_commands(group, index, seed, window, bound):
+            invocations.append({"module_path": group["module_path"], "dir": group["dir"],
+                                "packages": runner.command_packages(command),
+                                "tags": list(group["tags"]), "race": True,
+                                "command": " ".join(command), "exit_code": 0})
+    return invocations
+
+
+
+def mutation_evidence(contract_digest=None, fingerprints=None, binding=None, tree=None):
     """The 04.4 mutation report plus the baseline the bundle ties it to.
 
     A legal report names the tested baseline in the runner's own vocabulary —
-    the contract digest and the per-module source fingerprints — so the bundle
-    can prove the mutations were driven against the tree the runs exercised.
+    the contract digest, the per-module source fingerprints and the source binding
+    — so the bundle can prove the mutations were driven against the tree the runs
+    exercised, and can re-resolve that closure against the tree it is checked on.
+    It also names the gate that decided the verdicts, fingerprinted from `tree`,
+    which is the tree the checker reads the report against.
     """
     return {
         "schema_version": 2,
         "profile": "event-integrity",
         "contract_digest": contract_digest,
-        "module_fingerprints": (event_fingerprints("event-short")
-                                if fingerprints is None else fingerprints),
+        "module_fingerprints": fingerprints,
+        "source_binding": binding,
+        "gate_tool": runner.tool_identity(str(tree or REPO), name=GATE_TOOL_NAME,
+                                          entrypoint=GATE_ENTRYPOINT.as_posix()),
         "control_tree_green": True,
         "mutations": [
-            {"id": "M01", "status": "killed", "expect_assertion": "TestAlpha/positive",
-             "assertion_hit": True},
-            {"id": "M02", "status": "killed", "expect_assertion": "TestBeta/negative",
-             "assertion_hit": True},
+            {"id": "M01", "status": "killed", "verdict": "killed", "counted_killed": True,
+             "expect_assertion": "TestAlpha/positive", "assertion_hit": True},
+            {"id": "M02", "status": "killed", "verdict": "killed", "counted_killed": True,
+             "expect_assertion": "TestBeta/negative", "assertion_hit": True},
         ],
         "not_evidence_backed": [],
     }
@@ -1037,16 +1081,66 @@ class EventFixture:
         self.root = Path(self._tmp.name)
         self.contract = load_event_contract()
         self.digest = event_digest(REAL_EVENT_CONTRACT)
+        self.tree = self.root / "tree"
+        self.bindings = {}
+        self.write_source_tree()
 
     def tearDown(self):
         self._tmp.cleanup()
 
+    def write_source_tree(self):
+        """The tree the evidence claims to describe, laid out as the repository is.
+
+        The checker re-resolves the recorded closure against `--repo-root` and
+        recomputes every module's content digest, so a fixture that only agreed
+        with itself would now be rejected — correctly. The fixture tree therefore
+        holds the same module layout the real repository has: the root module plus
+        the two example modules whose go.mod replaces it.
+        """
+        self.tree.mkdir()
+        (self.tree / "main.go").write_text("package app\n", encoding="utf-8")
+        (self.tree / "go.mod").write_text("module {}\n".format(MODULE), encoding="utf-8")
+        (self.tree / "go.sum").write_text("", encoding="utf-8")
+        for relative, module_path in (("examples/wechat-bot", "wechat-bot"),
+                                      ("examples/cli-host", "tagent-cli-host")):
+            base = self.tree / relative
+            base.mkdir(parents=True)
+            (base / "go.mod").write_text(
+                "module {}\n\nreplace {} => ../..\n".format(module_path, MODULE),
+                encoding="utf-8")
+            (base / "go.sum").write_text("", encoding="utf-8")
+            (base / "smoke_test.go").write_text("package smoke\n", encoding="utf-8")
+        tool = self.tree / RUNNER_ENTRYPOINT
+        tool.parent.mkdir(parents=True)
+        tool.write_text("# fixture runner stand-in\n", encoding="utf-8")
+        gate = self.tree / GATE_ENTRYPOINT
+        gate.parent.mkdir(parents=True, exist_ok=True)
+        gate.write_text("# fixture mutation gate stand-in\n", encoding="utf-8")
+
+    def binding(self, scope, revision="0" * 40, tree=None):
+        """The closure one scope compiles in the fixture tree, as the runner records it.
+
+        Cached per (scope, tree): a bundle carries seventeen evidence files and one
+        closure, and re-hashing the tree seventeen times would only cost time.
+        """
+        key = (scope, str(tree or self.tree), revision)
+        if key not in self.bindings:
+            self.bindings[key] = copy.deepcopy(
+                runner.source_binding(str(tree or self.tree),
+                                      scope_seeds(self.contract, scope), revision=revision))
+        binding = copy.deepcopy(self.bindings[key])
+        window = {"digest": binding["digest"], "modules": len(binding["modules"])}
+        binding["before"] = window
+        binding["after"] = dict(window)
+        return binding
+
     def evidence(self, scope, tests=None, run_id=None, repeat_index=1, repeat_total=None,
-                 seed=None, window=None):
+                 seed=None, window=None, tree=None):
         tests = tests if tests is not None else event_tests(self.contract, scope)
         if repeat_total is None:
             repeat_total = next(entry["repeat"] for entry in self.contract["scopes"]
                                 if entry["name"] == scope)
+        binding = self.binding(scope, tree=tree)
         return {
             "schema_version": 2,
             "profile": "event-integrity",
@@ -1056,13 +1150,19 @@ class EventFixture:
             "repeat_total": repeat_total,
             "contract_digest": self.digest,
             "test_ids": [test["id"] for test in tests],
-            "module_fingerprints": event_fingerprints(scope),
+            "module_fingerprints": binding["modules"],
+            "source_binding": binding,
             "run_config": {
                 "seed": seed,
                 "window": window,
                 "tags": sorted({tag for test in tests for tag in test.get("tags") or []}),
                 "race": True,
+                "environment": {"GOMAXPROCS": "4"},
+                "selectors": event_selectors(tests),
+                "invocations": event_invocations(tests, seed, window),
             },
+            "liveness": {"name": "go_test_bound", "state": "completed",
+                         "bound_seconds": EVENT_FIXTURE_BOUND},
             "go_test_exit_code": 0,
             "test_log": "",
             "test_log_sha256": "",
@@ -1088,13 +1188,14 @@ class EventFixture:
         path.write_text(json.dumps(evidence, ensure_ascii=False, indent=2), encoding="utf-8")
         return path
 
-    def verify(self, evidence, rows, *extra):
+    def verify(self, evidence, rows, *extra, repo_root=None):
         path = self.write_run(self.root / "run", evidence, rows)
-        return run_checker("--contract", str(REAL_EVENT_CONTRACT), "--evidence", str(path),
+        return run_checker("--contract", str(REAL_EVENT_CONTRACT),
+                           "--repo-root", str(repo_root or self.tree), "--evidence", str(path),
                            "--json", *extra)
 
     def write_bundle(self, name, short_count=10, combos=None, mutation=True,
-                     short_hook=None, long_hook=None):
+                     short_hook=None, long_hook=None, tree=None):
         bundle = self.root / name
         bundle.mkdir(parents=True, exist_ok=True)
         short_tests = event_tests(self.contract, "event-short")
@@ -1105,26 +1206,30 @@ class EventFixture:
             combos = [(seed, window) for seed in (1, 7, 42) for window in (256, 32768)]
         for index in range(1, short_count + 1):
             evidence = self.evidence("event-short", short_tests, repeat_index=index,
-                                     repeat_total=10)
+                                     repeat_total=10, tree=tree)
             if short_hook:
                 evidence = short_hook(index, evidence)
             self.write_run(bundle / "short-{}".format(index), evidence, short_log)
         for seed, window in combos:
             evidence = self.evidence("event-long", long_tests, repeat_index=1,
-                                     repeat_total=1, seed=seed, window=window)
+                                     repeat_total=1, seed=seed, window=window, tree=tree)
             if long_hook:
                 evidence = long_hook(seed, window, evidence)
             self.write_run(bundle / "long-{}-{}".format(seed, window), evidence, long_log)
         if mutation:
             mutations = bundle / "mutations"
             mutations.mkdir()
+            short_binding = self.binding("event-short", tree=tree)
             (mutations / "evidence.json").write_text(
-                json.dumps(mutation_evidence(self.digest), ensure_ascii=False, indent=2),
+                json.dumps(mutation_evidence(self.digest, short_binding["modules"],
+                                             short_binding, tree=tree or self.tree),
+                           ensure_ascii=False, indent=2),
                 encoding="utf-8")
         return bundle
 
-    def check_bundle(self, bundle):
-        return run_checker("--contract", str(REAL_EVENT_CONTRACT), "--bundle", str(bundle),
+    def check_bundle(self, bundle, repo_root=None):
+        return run_checker("--contract", str(REAL_EVENT_CONTRACT),
+                           "--repo-root", str(repo_root or self.tree), "--bundle", str(bundle),
                            "--json")
 
 
@@ -1152,6 +1257,153 @@ class EventEvidenceTest(EventFixture, unittest.TestCase):
         code, out, err = self.verify(self.evidence("event-long", tests, seed=7, window=256),
                                      event_log(self.contract, tests))
         self.assertEqual(code, 0, out + err)
+
+    def test_a_command_without_count_one_is_rejected(self):
+        tests = event_tests(self.contract, "event-short")
+        evidence = self.evidence("event-short", tests)
+        evidence["run_config"]["invocations"][0]["command"] = (
+            evidence["run_config"]["invocations"][0]["command"].replace(" -count=1", ""))
+        code, out, err = self.verify(evidence, event_log(self.contract, tests))
+        self.assertNotEqual(code, 0)
+        self.assertIn("no '-count=1'", out)
+
+    def test_a_command_run_in_another_directory_is_rejected(self):
+        tests = event_tests(self.contract, "event-short")
+        evidence = self.evidence("event-short", tests)
+        invocation = evidence["run_config"]["invocations"][0]
+        invocation["command"] = invocation["command"].replace(
+            "go -C {} test".format(invocation["dir"]), "go -C /elsewhere test")
+        code, out, err = self.verify(evidence, event_log(self.contract, tests))
+        self.assertNotEqual(code, 0)
+        self.assertIn("the recorded argv runs in", out)
+
+    def test_a_command_that_omits_a_selected_package_is_rejected(self):
+        tests = event_tests(self.contract, "event-short")
+        evidence = self.evidence("event-short", tests)
+        invocation = evidence["run_config"]["invocations"][0]
+        dropped = invocation["packages"].pop()
+        invocation["command"] = invocation["command"].replace(" " + dropped, "", 1)
+        code, out, err = self.verify(evidence, event_log(self.contract, tests))
+        self.assertNotEqual(code, 0)
+        self.assertIn("no invocation runs selected package", out)
+
+    def test_a_command_that_names_another_test_is_rejected(self):
+        tests = event_tests(self.contract, "event-short")
+        evidence = self.evidence("event-short", tests)
+        invocation = evidence["run_config"]["invocations"][0]
+        dropped = sorted({test["test_name"] for test in tests
+                          if test["dir"] == invocation["dir"]})[0]
+        tokens = invocation["command"].split()
+        tokens[tokens.index("-run") + 1] = tokens[tokens.index("-run") + 1].replace(
+            dropped, "TestUnrelated")
+        invocation["command"] = " ".join(tokens)
+        code, out, err = self.verify(evidence, event_log(self.contract, tests))
+        self.assertNotEqual(code, 0)
+        self.assertIn("no '-run' selector names selected test", out)
+
+    def test_a_selector_that_names_another_test_is_rejected(self):
+        tests = event_tests(self.contract, "event-short")
+        evidence = self.evidence("event-short", tests)
+        evidence["run_config"]["selectors"][0]["test_name"] = "TestSomethingElse"
+        code, out, err = self.verify(evidence, event_log(self.contract, tests))
+        self.assertNotEqual(code, 0)
+        self.assertIn("drives test", out)
+
+    def test_a_run_whose_own_bound_fired_is_rejected(self):
+        tests = event_tests(self.contract, "event-short")
+        evidence = self.evidence("event-short", tests)
+        evidence["liveness"]["state"] = "expired"
+        code, out, err = self.verify(evidence, event_log(self.contract, tests))
+        self.assertNotEqual(code, 0)
+        self.assertIn("the run's own bound fired", out)
+
+    def test_an_inner_timeout_outliving_the_runner_bound_is_rejected(self):
+        tests = event_tests(self.contract, "event-short")
+        evidence = self.evidence("event-short", tests)
+        evidence["run_config"]["invocations"][0]["command"] = (
+            evidence["run_config"]["invocations"][0]["command"].replace(
+                "-timeout {}s".format(EVENT_FIXTURE_BOUND),
+                "-timeout {}s".format(EVENT_FIXTURE_BOUND * 2)))
+        code, out, err = self.verify(evidence, event_log(self.contract, tests))
+        self.assertNotEqual(code, 0)
+        self.assertIn("nested interval", out)
+
+    def test_a_command_without_its_own_timeout_is_rejected(self):
+        tests = event_tests(self.contract, "event-short")
+        evidence = self.evidence("event-short", tests)
+        evidence["run_config"]["invocations"][0]["command"] = (
+            evidence["run_config"]["invocations"][0]["command"].replace(
+                " -timeout {}s".format(EVENT_FIXTURE_BOUND), ""))
+        code, out, err = self.verify(evidence, event_log(self.contract, tests))
+        self.assertNotEqual(code, 0)
+        self.assertIn("nested interval", out)
+
+    def test_a_failed_invocation_is_rejected(self):
+        tests = event_tests(self.contract, "event-short")
+        evidence = self.evidence("event-short", tests)
+        evidence["run_config"]["invocations"][0]["exit_code"] = 2
+        code, out, err = self.verify(evidence, event_log(self.contract, tests))
+        self.assertNotEqual(code, 0)
+        self.assertIn("cannot be evidence for a green round", out)
+
+    def test_a_goflags_flag_no_recorded_argv_decides_is_rejected(self):
+        tests = event_tests(self.contract, "event-short")
+        evidence = self.evidence("event-short", tests)
+        evidence["run_config"]["environment"] = {"GOFLAGS": "-short -count=1"}
+        code, out, err = self.verify(evidence, event_log(self.contract, tests))
+        self.assertNotEqual(code, 0)
+        self.assertIn("would not be the command that ran", out)
+        self.assertIn("-short", out)
+        self.assertNotIn("-count=1', which no recorded argv", out)
+
+    def test_a_complete_consistent_environment_record_is_accepted(self):
+        tests = event_tests(self.contract, "event-short")
+        evidence = self.evidence("event-short", tests)
+        evidence["run_config"]["environment"] = {
+            "GOFLAGS": "-count=1 -json",
+            "GOMAXPROCS": "4",
+            "GODEBUG": "",
+            "TAGENT_CALIBRATION_MODE": "host",
+        }
+        code, out, err = self.verify(evidence, event_log(self.contract, tests))
+        self.assertEqual(code, 0, out + err)
+
+    def test_a_missing_environment_record_is_rejected(self):
+        tests = event_tests(self.contract, "event-short")
+        evidence = self.evidence("event-short", tests)
+        del evidence["run_config"]["environment"]
+        code, out, err = self.verify(evidence, event_log(self.contract, tests))
+        self.assertNotEqual(code, 0)
+        self.assertIn("run_config.environment is absent", out)
+
+    def test_a_gomaxprocs_the_runtime_ignores_is_rejected(self):
+        tests = event_tests(self.contract, "event-short")
+        evidence = self.evidence("event-short", tests)
+        evidence["run_config"]["environment"] = {"GOMAXPROCS": "auto"}
+        code, out, err = self.verify(evidence, event_log(self.contract, tests))
+        self.assertNotEqual(code, 0)
+        self.assertIn("the runtime ignores", out)
+        self.assertIn("GOMAXPROCS", out)
+
+    def test_a_credential_bearing_variable_is_rejected_and_its_value_never_echoed(self):
+        tests = event_tests(self.contract, "event-short")
+        evidence = self.evidence("event-short", tests)
+        evidence["run_config"]["environment"] = {"TAGENT_RL_AUTH_TOKEN": "s3cret-token"}
+        code, out, err = self.verify(evidence, event_log(self.contract, tests))
+        self.assertNotEqual(code, 0)
+        self.assertIn("outside the recorded determinants", out)
+        self.assertIn("TAGENT_RL_AUTH_TOKEN", out)
+        self.assertNotIn("s3cret-token", out + err)
+
+    def test_the_recorded_determinants_match_the_runner_declaration(self):
+        """The checker's declaration and the producer's must not drift apart."""
+        sys.path.insert(0, str(REPO / "scripts" / "scenarios"))
+        try:
+            import run_runtime_scenarios as runner
+        finally:
+            sys.path.pop(0)
+        self.assertEqual(tuple(sorted(runner.EVENT_ENVIRONMENT_NAMES)),
+                         tuple(sorted(CHECKER_ENVIRONMENT_NAMES)))
 
     def test_skipped_subtest_is_rejected(self):
         tests = event_tests(self.contract, "event-short")
@@ -1253,12 +1505,153 @@ class EventEvidenceTest(EventFixture, unittest.TestCase):
         self.assertNotEqual(code, 0)
         self.assertIn("missing verdict for mandatory anchor", out)
 
+    def anchor_rows(self, tests, anchor):
+        """One anchor's rows in a legal log, as (package, [rows]) for rewriting."""
+        package = event_full_package(tests[0]["module_path"], tests[0]["test_package"])
+        return package, [row for row in event_log(self.contract, tests)
+                         if row["Package"] == package and row["Test"] == anchor]
+
+    def test_raw_child_events_determine_subtest_verdict(self):
+        """合法原始 run/pass 被接受，且被判的那个判词就是日志子行派生的判词。
+
+        证据里的 `subtests[].status` 是生产者自己的话；run 的原始子测试行才是判据。
+        两件事同时成立才算这条锚成立：合法日志被接受，且 checker 的判词与生产者的
+        派生（import 而非复述）逐条相同——否则同一份日志会有两个解释。
+        """
+        tests = event_tests(self.contract, "event-short")
+        rows = event_log(self.contract, tests)
+        evidence = self.evidence("event-short", tests)
+        actions = runner.index_event_actions(
+            rows, sorted({test["module_path"] for test in tests}))
+        derived = {}
+        for test in tests:
+            for state in runner.event_subtest_states(test, actions):
+                derived[(test["id"], state["name"])] = state["status"]
+        self.assertEqual(set(derived.values()), {"pass"})
+        self.assertEqual({(entry["test_id"], entry["name"]): entry["status"]
+                          for entry in evidence["subtests"]}, derived)
+        code, out, err = self.verify(evidence, rows)
+        self.assertEqual(code, 0, out + err)
+        self.assertEqual(json.loads(out)["counts"]["event_anchors_checked"], len(derived))
+
+    def test_subtest_without_run_is_refused(self):
+        """父测试通过而子锚从未 run：自报 pass 不再成立，按缺 run 点名该 (parent,name)。"""
+        tests = event_tests(self.contract, "event-short")
+        test = tests[0]
+        anchor = test["test_name"] + "/" + test["subtests"][0]["name"]
+        package, _ = self.anchor_rows(tests, anchor)
+        rows = [row for row in event_log(self.contract, tests)
+                if not (row["Package"] == package and row["Test"] == anchor)]
+        code, out, _ = self.verify(self.evidence("event-short", tests), rows)
+        self.assertNotEqual(code, 0, out)
+        self.assertIn("({},{}) states 'pass' but the test-log child events show 'missing'".format(
+            test["id"], test["subtests"][0]["name"]), out)
+
+    def test_parent_pass_cannot_invent_a_subtest_pass(self):
+        """父的 run+pass 有效，不能因此替一个没出现的子锚作保。
+
+        这里子测试行仍在日志里，但记在另一个名字下：父 pass 与某一子行的 pass 一起
+        存在，只有被证据点名的那枚锚没有任何行。父通过不是子通过的凭据。
+        """
+        tests = event_tests(self.contract, "event-short")
+        test = tests[0]
+        claimed = test["subtests"][0]["name"]
+        anchor = test["test_name"] + "/" + claimed
+        package, anchor_rows = self.anchor_rows(tests, anchor)
+        self.assertEqual(len(anchor_rows), 2)
+        rows = event_log(self.contract, tests)
+        for row in rows:
+            if row["Package"] == package and row["Test"] == anchor:
+                row["Test"] = anchor + "-other"
+        parent_terminals = [row for row in rows
+                            if row["Package"] == package and row["Test"] == test["test_name"]
+                            and row["Action"] == "pass"]
+        self.assertEqual(len(parent_terminals), 1)
+        code, out, _ = self.verify(self.evidence("event-short", tests), rows)
+        self.assertNotEqual(code, 0, out)
+        self.assertIn("({},{}) states 'pass' but the test-log child events show 'missing'".format(
+            test["id"], claimed), out)
+
+    def test_same_log_has_one_verdict_across_consumers(self):
+        """同一份日志在 runner 与 checker 里是同一个判词，不是两个。
+
+        runner 用 `attest_event_test` 说该测试未被证明并点名那枚锚；checker 必须
+        对同一份日志给出同一个派生（该锚 missing）并拒绝，否则一条日志就有了两套解释。
+        """
+        tests = event_tests(self.contract, "event-short")
+        test = tests[0]
+        claimed = test["subtests"][0]["name"]
+        anchor = test["test_name"] + "/" + claimed
+        package, _ = self.anchor_rows(tests, anchor)
+        rows = [row for row in event_log(self.contract, tests)
+                if not (row["Package"] == package and row["Test"] == anchor)]
+        actions = runner.index_event_actions(
+            rows, sorted({entry["module_path"] for entry in tests}))
+        attested = runner.attest_event_test(test, actions)
+        self.assertEqual(attested["state"], "unattested")
+        self.assertIn(claimed, attested["reason"])
+        derived = {state["name"]: state["status"]
+                   for state in runner.event_subtest_states(test, actions)}
+        self.assertEqual(derived[claimed], "missing")
+        code, out, _ = self.verify(self.evidence("event-short", tests), rows)
+        self.assertNotEqual(code, 0, out)
+        self.assertIn("({},{}) states 'pass' but the test-log child events show {!r}".format(
+            test["id"], claimed, derived[claimed]), out)
+
     def test_off_matrix_seed_window_is_rejected(self):
         tests = event_tests(self.contract, "event-long")
         evidence = self.evidence("event-long", tests, seed=1, window=512)
         code, out, _ = self.verify(evidence, event_log(self.contract, tests))
         self.assertNotEqual(code, 0)
         self.assertIn("not a contract matrix combination", out)
+
+    def test_a_bearer_command_that_drops_the_matrix_pair_is_rejected(self):
+        # 负锚（long 删参）：长跑唯一的调用正是解析 -seed/-window 的那一次构建，
+        # run_config 仍自报 1/256，但 argv 里没有 -args，测试什么也没收到。
+        tests = event_tests(self.contract, "event-long")
+        evidence = self.evidence("event-long", tests, seed=1, window=256)
+        invocation = evidence["run_config"]["invocations"][0]
+        invocation["command"] = invocation["command"].replace(
+            " -args -seed=1 -window=256", "")
+        code, out, _ = self.verify(evidence, event_log(self.contract, tests))
+        self.assertNotEqual(code, 0, out)
+        self.assertIn("carries no '-args'", out)
+        self.assertIn("never reached the tests", out)
+
+    def test_a_matrix_pair_broadcast_to_packages_that_cannot_parse_it_is_rejected(self):
+        # 负锚（short 错广播每包）：-args 会到达一次调用命名的每个包，根模块与
+        # cli-host 都没有编译声明 -seed/-window 的文件，广播即在测试前退出。
+        tests = event_tests(self.contract, "event-short")
+        evidence = self.evidence("event-short", tests, seed=1, window=256)
+        invocation = next(entry for entry in evidence["run_config"]["invocations"]
+                          if entry["module_path"] == MODULE)
+        invocation["command"] += " -args -seed=1 -window=256"
+        code, out, _ = self.verify(evidence, event_log(self.contract, tests))
+        self.assertNotEqual(code, 0, out)
+        self.assertIn("do not all compile the file declaring those flags", out)
+        self.assertIn("flag provided but not defined", out)
+
+    def test_a_matrix_pair_the_argv_does_not_state_is_rejected(self):
+        # 负锚（值一致）：承载调用带了 -args，但给测试的是 7/256，run_config 说 1/256。
+        tests = event_tests(self.contract, "event-long")
+        evidence = self.evidence("event-long", tests, seed=1, window=256)
+        invocation = evidence["run_config"]["invocations"][0]
+        invocation["command"] = invocation["command"].replace("-seed=1", "-seed=7")
+        code, out, _ = self.verify(evidence, event_log(self.contract, tests))
+        self.assertNotEqual(code, 0, out)
+        self.assertIn("hands '-seed=7'", out)
+
+    def test_a_run_declaring_no_pair_cannot_carry_matrix_args(self):
+        # 负锚（无对不成对）：短跑不声明 seed/window，argv 却把一次校准塞给测试。
+        tests = event_tests(self.contract, "event-short")
+        evidence = self.evidence("event-short", tests)
+        invocation = next(entry for entry in evidence["run_config"]["invocations"]
+                          if entry["module_path"] == "wechat-bot"
+                          and entry["tags"] == ["smoke"])
+        invocation["command"] += " -args -seed=1 -window=256"
+        code, out, _ = self.verify(evidence, event_log(self.contract, tests))
+        self.assertNotEqual(code, 0, out)
+        self.assertIn("declares no matrix pair", out)
 
     def test_replaced_test_log_is_rejected(self):
         tests = event_tests(self.contract, "event-short")
@@ -1304,22 +1697,29 @@ class EventBundleTest(EventFixture, unittest.TestCase):
         self.assertEqual(json.loads(out)["counts"]["bundle_evidence_files"], 17)
 
     def test_scope_specific_module_sets_are_not_baseline_drift(self):
-        # The runner fingerprints only the groups a scope selects, so a legal
-        # bundle carries different module sets per scope. The gate must accept
-        # that difference instead of demanding identical fingerprint lists.
+        # Every scope records the closure it compiles, not just the modules it
+        # selected: event-short drives the root, the CLI host and the smoke module,
+        # event-long drives the smoke module alone and still compiles the root
+        # through `replace ... => ../..`. The gate must accept that difference
+        # instead of demanding identical closure lists.
         bundle = self.write_bundle("scope-specific-modules")
         short = json.loads((bundle / "short-1" / "evidence.json").read_text(encoding="utf-8"))
         long_evidence = json.loads((bundle / "long-1-256" / "evidence.json").read_text(
             encoding="utf-8"))
-        self.assertEqual(len(short["module_fingerprints"]), 3)
+        self.assertEqual([entry["module_path"] for entry in short["module_fingerprints"]],
+                         [MODULE, "tagent-cli-host", "wechat-bot"])
         self.assertEqual([entry["module_path"] for entry in long_evidence["module_fingerprints"]],
-                         ["wechat-bot"])
+                         [MODULE, "wechat-bot"])
+        self.assertEqual({entry["dir"] for entry in long_evidence["module_fingerprints"]},
+                         {".", "examples/wechat-bot"})
         code, out, err = self.check_bundle(bundle)
         self.assertEqual(code, 0, out + err)
 
         # The shared module is the one place both scopes can contradict each
         # other: a different digest on the smoke module is drift, not scope.
-        long_evidence["module_fingerprints"][0]["content_hash"] = "sha256:" + "9" * 64
+        shared = next(entry for entry in long_evidence["module_fingerprints"]
+                      if entry["module_path"] == "wechat-bot")
+        shared["content_hash"] = "sha256:" + "9" * 64
         (bundle / "long-1-256" / "evidence.json").write_text(
             json.dumps(long_evidence, ensure_ascii=False, indent=2), encoding="utf-8")
         code, out, _ = self.check_bundle(bundle)
@@ -1331,7 +1731,9 @@ class EventBundleTest(EventFixture, unittest.TestCase):
         bundle = self.write_bundle("scope-specific-revision")
         path = bundle / "long-1-256" / "evidence.json"
         payload = json.loads(path.read_text(encoding="utf-8"))
-        payload["module_fingerprints"][0]["revision"] = "f" * 40
+        drifted = next(entry for entry in payload["module_fingerprints"]
+                       if entry["module_path"] == "wechat-bot")
+        drifted["revision"] = "f" * 40
         path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
         code, out, _ = self.check_bundle(bundle)
         self.assertNotEqual(code, 0)
@@ -1443,7 +1845,7 @@ class EventBundleTest(EventFixture, unittest.TestCase):
 
     def test_mutation_evidence_structure_is_enforced(self):
         bundle = self.write_bundle("mutations-survived", mutation=False)
-        payload = mutation_evidence(self.digest)
+        payload = mutation_evidence(self.digest, tree=self.tree)
         payload["mutations"][0]["status"] = "survived"
         payload["not_evidence_backed"] = ["candidate-01"]
         directory = bundle / "mutations"
@@ -1510,6 +1912,153 @@ class EventBundleTest(EventFixture, unittest.TestCase):
         self.assertNotEqual(code, 0, out)
         self.assertIn("must declare contract_digest", out)
         self.assertIn("module_fingerprints must be a non-empty list", out)
+
+    def test_a_mutation_report_naming_no_gate_is_rejected(self):
+        # 负锚（门身份）：报告结构全绿、闭包是本树的，但没有申报写下判词的工具。
+        bundle = self.write_bundle("mutation-no-gate")
+        path = bundle / "mutations" / "evidence.json"
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        payload.pop("gate_tool")
+        path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        code, out, _ = self.check_bundle(bundle)
+        self.assertNotEqual(code, 0, out)
+        self.assertIn("must record gate_tool", out)
+
+    def test_a_mutation_report_naming_a_gate_outside_the_tree_is_rejected(self):
+        # 负锚（假路径）：entrypoint 在本树不存在，判词无法在此复算。
+        bundle = self.write_bundle("mutation-gate-absent")
+        path = bundle / "mutations" / "evidence.json"
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        payload["gate_tool"]["entrypoint"] = "scripts/gates/absent_gate.py"
+        path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        code, out, _ = self.check_bundle(bundle)
+        self.assertNotEqual(code, 0, out)
+        self.assertIn("is not in the tree under", out)
+        self.assertIn("scripts/gates/absent_gate.py", out)
+
+    def test_a_mutation_report_from_another_gate_is_rejected(self):
+        # 负锚（零 digest）：路径存在但字节不匹配，等于另一版门写下的判词。
+        bundle = self.write_bundle("mutation-gate-drifted")
+        path = bundle / "mutations" / "evidence.json"
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        payload["gate_tool"]["digest"] = "sha256:" + "0" * 64
+        path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        code, out, _ = self.check_bundle(bundle)
+        self.assertNotEqual(code, 0, out)
+        self.assertIn("were decided by a different", out)
+        self.assertIn(GATE_ENTRYPOINT.as_posix(), out)
+
+    def _bundle_with_mutation(self, name, **fields):
+        """A legal bundle whose mutation report states `fields` on its first record."""
+        bundle = self.write_bundle(name)
+        path = bundle / "mutations" / "evidence.json"
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        payload["mutations"][0].update(fields)
+        path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        return bundle
+
+    def test_a_kill_whose_verdict_contradicts_its_status_is_rejected(self):
+        # 负锚（判词一致）：status=killed 但 verdict=not_killed 的记录自相矛盾。
+        bundle = self._bundle_with_mutation("mutation-verdict", verdict="not_killed")
+        code, out, _ = self.check_bundle(bundle)
+        self.assertNotEqual(code, 0, out)
+        self.assertIn("disagrees with itself", out)
+
+    def test_a_kill_the_producer_did_not_count_is_rejected(self):
+        # 负锚（判词一致）：status=killed 但 counted_killed=false。
+        bundle = self._bundle_with_mutation("mutation-uncounted", counted_killed=False)
+        code, out, _ = self.check_bundle(bundle)
+        self.assertNotEqual(code, 0, out)
+        self.assertIn("is not counted as killed", out)
+
+    def test_a_kill_that_never_reached_its_assertion_is_rejected(self):
+        # 负锚（判词一致）：status=killed 但 assertion_hit≠true。
+        bundle = self._bundle_with_mutation("mutation-assertion-missed", assertion_hit=False)
+        code, out, _ = self.check_bundle(bundle)
+        self.assertNotEqual(code, 0, out)
+        self.assertIn("did not hit its named assertion", out)
+
+
+class EventTreeBindingTest(EventFixture, unittest.TestCase):
+    """Evidence is read against a tree, never against its own agreement.
+
+    A long-scope run selects `examples/wechat-bot`, which compiles the root module
+    through `replace ... => ../..`; a bundle that agrees with itself can still
+    describe a tree that has since moved. These are the cases that separate
+    "the artifacts agree" from "the evidence is about this tree".
+    """
+
+    def test_current_tree_bundle_is_accepted(self):
+        bundle = self.write_bundle("current-tree")
+        code, out, err = self.check_bundle(bundle)
+        self.assertEqual(code, 0, out + err)
+        payload = json.loads(out)
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["counts"]["bundle_evidence_files"], 17)
+        # Acceptance is not vacuous: the evidence names the replaced root, which
+        # is the module a long-scope run compiles without selecting.
+        long_evidence = json.loads((bundle / "long-1-256" / "evidence.json").read_text(
+            encoding="utf-8"))
+        by_dir = {entry["dir"]: entry for entry in long_evidence["source_binding"]["modules"]}
+        self.assertEqual(by_dir["."]["roles"], ["local-replacement"])
+        self.assertEqual(long_evidence["source_binding"]["workspace"], {"state": "absent"})
+
+    def test_consistent_stale_bundle_is_rejected(self):
+        # The whole bundle is internally consistent: ten short rounds, six combo
+        # rounds and the mutation report all name one closure. The tree then moves.
+        # Agreement between artifacts cannot rescue them.
+        bundle = self.write_bundle("stale-bundle")
+        (self.tree / "main.go").write_text("package app // moved\n", encoding="utf-8")
+        code, out, err = self.check_bundle(bundle)
+        self.assertNotEqual(code, 0, out + err)
+        self.assertIn("does not match this tree's", out)
+        self.assertIn("describes another source tree", out)
+        self.assertNotIn("different baseline content digest", out)
+
+    def test_long_replacement_root_drift_is_rejected(self):
+        # event-long selects only the smoke module. Before R2a/R2b the root could
+        # change without any digest moving, because the root was never recorded.
+        tests = event_tests(self.contract, "event-long")
+        rows = event_log(self.contract, tests)
+        evidence = self.evidence("event-long", tests, seed=1, window=256)
+        code, out, err = self.verify(evidence, rows)
+        self.assertEqual(code, 0, out + err)
+        (self.tree / "main.go").write_text("package app // edited by another branch\n",
+                                          encoding="utf-8")
+        code, out, err = self.verify(evidence, rows)
+        self.assertNotEqual(code, 0, out + err)
+        self.assertIn("module '.'", out)
+        self.assertIn("does not match this tree's", out)
+
+    def test_ab_evidence_is_checked_against_its_own_tree(self):
+        # Two trees, each with its own sources. Each set of evidence must pass
+        # against the tree it was produced in and fail against the other, so a
+        # legal A/B comparison is neither collapsed nor falsely rejected.
+        tree_b = self.root / "tree-b"
+        shutil.copytree(self.tree, tree_b)
+        (tree_b / "main.go").write_text("package app // variant b\n", encoding="utf-8")
+        (tree_b / "examples" / "wechat-bot" / "smoke_test.go").write_text(
+            "package smoke // variant b\n", encoding="utf-8")
+        tests = event_tests(self.contract, "event-long")
+        rows = event_log(self.contract, tests)
+        evidence_a = self.evidence("event-long", tests, seed=1, window=256)
+        evidence_b = self.evidence("event-long", tests, seed=1, window=256, tree=tree_b)
+        self.assertNotEqual(evidence_a["source_binding"]["digest"],
+                            evidence_b["source_binding"]["digest"])
+        for evidence, label in ((evidence_a, "a"), (evidence_b, "b")):
+            path = self.write_run(self.root / "run-{}".format(label), evidence, rows)
+            code, out, err = run_checker(
+                "--contract", str(REAL_EVENT_CONTRACT),
+                "--repo-root", str(self.tree if label == "a" else tree_b),
+                "--evidence", str(path), "--json")
+            self.assertEqual(code, 0, out + err)
+        # Swapping the trees is not a matter of taste: A's evidence is not B's.
+        path = self.write_run(self.root / "run-cross", evidence_a, rows)
+        code, out, err = run_checker("--contract", str(REAL_EVENT_CONTRACT),
+                                     "--repo-root", str(tree_b), "--evidence", str(path),
+                                     "--json")
+        self.assertNotEqual(code, 0, out + err)
+        self.assertIn("describes another source tree", out)
 
 
 if __name__ == "__main__":

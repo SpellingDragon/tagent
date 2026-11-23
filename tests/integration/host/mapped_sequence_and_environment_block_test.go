@@ -50,9 +50,9 @@ func TestProjectionCarriesTheCommittedSequence(t *testing.T) {
 	decl := &config.Declaration{
 		Entry: "agent-a",
 		Agents: []config.AgentSpec{{
-			ID:        "agent-a",
-			Model:     "model-a",
-			MaxTokens: 100,
+			ID:           "agent-a",
+			Model:        "model-a",
+			ReplayWindow: 100,
 		}},
 	}
 	run, err := assembly.Assemble(ctx, decl, map[event.AgentID]assembly.NativeAgent{
@@ -76,12 +76,16 @@ func TestProjectionCarriesTheCommittedSequence(t *testing.T) {
 	if len(got) != 3 {
 		t.Fatalf("second request carries %d messages, want the two mapped facts and the range input: %v", len(got), got)
 	}
-	if got[0].Role != model.RoleUser || got[0].Content != "第一轮输入" {
-		t.Fatalf("message 0 = (%q, %q), want the earlier range's input mapped as a user message", got[0].Role, got[0].Content)
+	key, typ, rest := splitPresentedTicket(t, got[0].Content)
+	if got[0].Role != model.RoleUser || typ != event.TypeExternalInput || rest != "第一轮输入" {
+		t.Fatalf("message 0 = (%q, %q), want the earlier range's input mapped as a user message under the ticket of its %s fact", got[0].Role, got[0].Content, event.TypeExternalInput)
 	}
-	if got[1].Role != model.RoleAssistant || got[1].Content != "回答第1轮" {
-		t.Fatalf("message 1 = (%q, %q), want the earlier range's output mapped as an assistant message", got[1].Role, got[1].Content)
+	requireTicketNamesACommittedFact(t, run, addr, key)
+	key, typ, rest = splitPresentedTicket(t, got[1].Content)
+	if got[1].Role != model.RoleAssistant || typ != event.TypeAgentOutput || rest != "回答第1轮" {
+		t.Fatalf("message 1 = (%q, %q), want the earlier range's output mapped as an assistant message under the ticket of its %s fact", got[1].Role, got[1].Content, event.TypeAgentOutput)
 	}
+	requireTicketNamesACommittedFact(t, run, addr, key)
 	if got[2].Role != model.RoleUser || got[2].Content != "第二轮输入" {
 		t.Fatalf("message 2 = (%q, %q), want the range in flight carried by the transcript alone", got[2].Role, got[2].Content)
 	}
@@ -129,15 +133,27 @@ func TestProjectionAbsentKeepsTheTranscript(t *testing.T) {
 	}
 	wantCarried := []struct {
 		role    model.Role
+		typ     string
 		content string
 	}{
-		{model.RoleUser, "第一轮输入"},
-		{model.RoleAssistant, "回答第1轮"},
-		{model.RoleUser, "第二轮输入"},
+		{model.RoleUser, event.TypeExternalInput, "第一轮输入"},
+		{model.RoleAssistant, event.TypeAgentOutput, "回答第1轮"},
+		{model.RoleUser, "", "第二轮输入"},
 	}
 	for i, want := range wantCarried {
-		if got[i].Role != want.role || got[i].Content != want.content {
-			t.Fatalf("message %d = (%q, %q), want (%q, %q): the ended range must reach the model through the mapped sequence", i, got[i].Role, got[i].Content, want.role, want.content)
+		if got[i].Role != want.role {
+			t.Fatalf("message %d role = (%q, %q), want (%q, %q): the ended range must reach the model through the mapped sequence", i, got[i].Role, got[i].Content, want.role, want.content)
+		}
+		if want.typ == "" {
+			if got[i].Content != want.content {
+				t.Fatalf("message %d = (%q, %q), want (%q, %q): the range in flight is carried by the transcript alone", i, got[i].Role, got[i].Content, want.role, want.content)
+			}
+			continue
+		}
+		_, typ, rest := splitPresentedTicket(t, got[i].Content)
+		if typ != want.typ || rest != want.content {
+			t.Fatalf("message %d = (%q, %q), want (%q, %q): the ended range must reach the model through the mapped sequence under the ticket of its %s fact",
+				i, got[i].Role, got[i].Content, want.role, want.content, want.typ)
 		}
 	}
 	for _, message := range got {
@@ -147,7 +163,7 @@ func TestProjectionAbsentKeepsTheTranscript(t *testing.T) {
 	}
 	carried := 0
 	for _, message := range got {
-		if message.Content == "第一轮输入" {
+		if withoutPresentedTicket(message.Content) == "第一轮输入" {
 			carried++
 		}
 	}
@@ -223,7 +239,7 @@ func TestEnvironmentBlockClosesTheRequestAssembly(t *testing.T) {
 		Agents: []config.AgentSpec{{
 			ID:               "agent-a",
 			Model:            "model-a",
-			MaxTokens:        100,
+			ReplayWindow:     100,
 			EnvironmentBlock: true,
 		}},
 	}

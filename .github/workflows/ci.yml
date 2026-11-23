@@ -28,6 +28,16 @@ concurrency:
 jobs:
   test:
     runs-on: ubuntu-latest
+    # The definition-of-done gate inside lint counts mutation run products, and
+    # only the mutation job produces them. Waiting for that producer and reading
+    # its uploaded artifact keeps the count on products this run wrote; a
+    # directory kept from an earlier green run is exactly what the gate refuses.
+    # always() keeps the test signal when the producer fails — a skipped job
+    # renders green for a required check, so the gates would report success for
+    # work that never happened — and the download below then fails, which is the
+    # honest answer to "there are no products".
+    needs: [event-integrity-mutations]
+    if: always()
     steps:
       # fetch-depth 0 keeps every citation-introducing commit reachable for the
       # doc-refs citation-level anchors, and still gives commit-scope a parent:
@@ -105,8 +115,26 @@ jobs:
       # keyed by rule alone, not by (file, rule), so moving comment text between files
       # can neither look clean nor look dirty. The same script runs locally, so CI and
       # the batch author cannot mean different things by "lint passed".
+
+      # The definition-of-done gate INSIDE lint reads
+      # <TAGENT_RUNTIME_EVIDENCE_DIR>/mutations, and the mutation artifact IS that
+      # producer's --out directory, so the download path below is the variable's
+      # value plus the one directory name the gate looks for. Nothing here copies
+      # a remembered run: the directory comes from the job this run waited for.
+      - name: Download mutation evidence
+        uses: actions/download-artifact@v4
+        with:
+          name: event-integrity-mutations
+          path: ${{ runner.temp }}/dod/mutations
+
+      # This job downloads the mutation artifact alone, and lint.sh's archive
+      # preflight reads the full evidence bundle (10 short + 6 long + mutations):
+      # run here it refuses on evidence that this job never receives. The
+      # archive-preflight job owns that gate after event-integrity-required.
       - name: Lint (gofmt · build · vet · comment ratchet · docs/api freshness · name/doc/proc refs)
-        run: bash scripts/lint.sh
+        env:
+          TAGENT_RUNTIME_EVIDENCE_DIR: ${{ runner.temp }}/dod
+        run: bash scripts/lint.sh --no-preflight
 
   race:
     runs-on: ubuntu-latest
@@ -144,7 +172,7 @@ jobs:
       # no Go package at all is refused — so the declared surface is unchanged and
       # a directory that gains Go files joins it without a second edit.
       - name: Race (every first-party package + all integration suites)
-        run: ./scripts/gates/race_check.sh . ./assembly/... ./cli/... ./api/event/... ./api/config/... ./api/document/... ./api/model/... ./api/view/... ./api/plugin/... ./runtime/agent/... ./runtime/task/... ./runtime/state/... ./memory/... ./features/... ./tool/... ./bench/... ./internal/... ./tests/integration/execution/... ./tests/integration/history/... ./tests/integration/host/... ./tests/integration/capabilities/... ./tests/integration/evolution/... ./tests/integration/learning/...
+        run: ./scripts/gates/race_check.sh . ./assembly/... ./cli/... ./api/durable/... ./api/event/... ./api/config/... ./api/document/... ./api/model/... ./api/view/... ./api/plugin/... ./runtime/agent/... ./runtime/task/... ./runtime/state/... ./memory/... ./features/... ./tool/... ./bench/... ./internal/... ./tests/integration/execution/... ./tests/integration/history/... ./tests/integration/host/... ./tests/integration/capabilities/... ./tests/integration/evolution/... ./tests/integration/learning/...
       # 05/5.7: the wechat-bot module is an independent module (no go.work), so
       # the root module's ./... never reaches it. It runs the same race flags as
       # the root gate (race, -count=1, package-serial -p 1); its plain tests (the
@@ -462,3 +490,63 @@ jobs:
           name: event-semantics-symptoms
           path: ${{ runner.temp }}/symptom
           if-no-files-found: error
+
+  # 归档前门（13.103）：提交把路径放进 openspec 归档树时，该提交必须带绑定同一
+  # revision 的运行产物，否则拒绝。`--commit` 的语义是"判这个提交带了什么"，所以
+  # 这条门看的是候选提交本身，不是调用者的意图；`openspec archive -y` 或手工 mv
+  # 也一样被它看见。它是本文件能给出的最强保证——是不是 required check 由分支保护
+  # 决定，配置审查不等于服务端已拦截。
+  archive-preflight:
+    # The evidence this gate reads is produced by the event-integrity chain of
+    # this same run: waiting for its required aggregate both orders the check
+    # after the evidence exists and binds the commit identity for free (the
+    # mutations evidence records the SHA this workflow checked out).
+    needs: [event-integrity-required]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      # 提交范围要跨父提交，浅克隆会让 `--base REV^` 解析不到。
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Install openspec
+        # This job's third judgement (check-openspec.sh) runs the `openspec` CLI
+        # and exits 2 when the command is absent, so the CLI is installed here to
+        # the same pinned version the `openspec` job uses: the gate judges the
+        # candidate commit, not whether the runner image ships the tool.
+        run: npm install -g @fission-ai/openspec@1.2.0
+      - name: Download event evidence
+        uses: actions/download-artifact@v4
+        with:
+          pattern: event-integrity-*
+          path: ${{ runner.temp }}/bundle
+          merge-multiple: false
+      - name: Assemble evidence layout
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/ev/mutations"
+          cp -R "$RUNNER_TEMP/bundle/event-integrity-mutations/." "$RUNNER_TEMP/ev/mutations/"
+          rm -rf "$RUNNER_TEMP/bundle/event-integrity-mutations" \
+                 "$RUNNER_TEMP/bundle/event-gate-required-report"
+          cp -R "$RUNNER_TEMP/bundle/." "$RUNNER_TEMP/ev/"
+      # PR 的 base 与 push 的上一提交不是一回事：前者要从 origin/<base_ref> 解析，
+      # 后者由 --base 的默认值（REV^）给出。两者都以环境变量传入，不在引号里内联
+      # 表达式——空值必须显式落空，而不是变成一个字面的 "origin/"。
+      - name: Archive preflight (candidate commit)
+        env:
+          CANDIDATE_SHA: ${{ github.sha }}
+          PR_BASE_REF: ${{ github.base_ref }}
+        run: |
+          set -euo pipefail
+          if [ -n "$PR_BASE_REF" ]; then
+            base="$(git rev-parse "origin/$PR_BASE_REF")"
+            bash scripts/gates/archive-preflight.sh --commit "$CANDIDATE_SHA" --base "$base" --evidence "$RUNNER_TEMP/ev"
+          else
+            bash scripts/gates/archive-preflight.sh --commit "$CANDIDATE_SHA" --evidence "$RUNNER_TEMP/ev"
+          fi

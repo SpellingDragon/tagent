@@ -716,9 +716,8 @@ func bindingChangeDescription(before, after config.AgentSpec) string {
 	note("tools", !reflect.DeepEqual(declaredToolRefs(before.Tools), declaredToolRefs(after.Tools)))
 	note("plugins", !reflect.DeepEqual(before.Plugins, after.Plugins))
 	note("task_policy", before.TaskPolicy != after.TaskPolicy)
-	note("params", !reflect.DeepEqual(before.Params, after.Params))
 	note("final_round", before.FinalRound != after.FinalRound)
-	note("replay_window", before.MaxTokens != after.MaxTokens ||
+	note("replay_window", before.ReplayWindow != after.ReplayWindow ||
 		before.CompressThreshold != after.CompressThreshold ||
 		before.KeepRecentTasks != after.KeepRecentTasks)
 	note("environment_block", before.EnvironmentBlock != after.EnvironmentBlock)

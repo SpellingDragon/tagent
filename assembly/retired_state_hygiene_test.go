@@ -312,6 +312,7 @@ func TestPinnedFactsReseeded(t *testing.T) {
 	if _, held := early.factOf(key); held {
 		t.Fatal("the early-trim control kept the settlement fact, so it does not exercise the pin the boot restores")
 	}
+	endRun(t, early)
 
 	restarted, err := Boot(path)
 	if err != nil {

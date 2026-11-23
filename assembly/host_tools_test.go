@@ -16,6 +16,7 @@ import (
 	"github.com/SpellingDragon/tagent/api/event"
 	"github.com/SpellingDragon/tagent/api/model"
 	"github.com/SpellingDragon/tagent/runtime/task"
+	tagentexec "github.com/SpellingDragon/tagent/tool/exec"
 	"github.com/SpellingDragon/tagent/tool/subagent"
 
 	trpctool "trpc.group/trpc-go/trpc-agent-go/tool"
@@ -1225,4 +1226,130 @@ func reentryAwaitServed(stub *reentryContinuationsStub, want int) string {
 		}
 		time.Sleep(time.Millisecond)
 	}
+}
+
+// recordingExecBackend is the deterministic execution face of the isolation
+// anchor: it records every declaration it was asked to start and holds the
+// directory each resource runs in, so a restart reads back what the executor of
+// the first process opened.
+type recordingExecBackend struct {
+	mu      sync.Mutex
+	decls   []tagentexec.ExecutionDecl
+	live    map[tagentexec.ResourceKey]tagentexec.ExecutionDecl
+	unfound string
+}
+
+// newRecordingExecBackend returns the recording face beside an empty ledger.
+func newRecordingExecBackend() *recordingExecBackend {
+	return &recordingExecBackend{live: map[tagentexec.ResourceKey]tagentexec.ExecutionDecl{}}
+}
+
+// Start opens the resource the declaration names and keeps the declaration it
+// was started under, so the directory a later process reads is the one the first
+// declared rather than a value the check remembers.
+func (b *recordingExecBackend) Start(_ context.Context, decl tagentexec.ExecutionDecl) (tagentexec.ResourceKey, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.decls = append(b.decls, decl)
+	b.live[decl.Resource] = decl
+	return decl.Resource, nil
+}
+
+// Probe reports whether the resource behind the key is still open.
+func (b *recordingExecBackend) Probe(_ context.Context, key tagentexec.ResourceKey) (tagentexec.ProbeResult, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if _, held := b.live[key]; held {
+		return tagentexec.ProbeResult{State: tagentexec.ProbeAlive}, nil
+	}
+	return tagentexec.ProbeResult{State: tagentexec.ProbeDead, Detail: b.unfound}, nil
+}
+
+// Capture answers the frame the resource holds.
+func (b *recordingExecBackend) Capture(_ context.Context, key tagentexec.ResourceKey) ([]byte, error) {
+	return []byte("frame:" + key.Key), nil
+}
+
+// Stop ends the resource behind the key.
+func (b *recordingExecBackend) Stop(_ context.Context, key tagentexec.ResourceKey) (tagentexec.StopEvidence, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	delete(b.live, key)
+	return tagentexec.StopEvidence{Resource: key, Confirmed: true, ExitCode: 0}, nil
+}
+
+// startedDir reports the directory the executor opened the named resource in,
+// and whether it started one at all.
+func (b *recordingExecBackend) startedDir(key tagentexec.ResourceKey) (string, bool) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	decl, held := b.live[key]
+	return decl.Dir, held
+}
+
+// starts reports how many executions the face was asked to open.
+func (b *recordingExecBackend) starts() int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return len(b.decls)
+}
+
+// TestExecutionIsolationSurvivesSessionRestart pins the two faces of an execution declaration that cross a restart.
+//   - the resource identity and the directory the declaration names are what the executor opens, so neither is minted inside the assembly
+//   - the second process over the same executor re-attaches the live resource instead of opening a second one
+//   - that process reads back the directory the first one declared, so the working directory survives the restart unchanged
+//   - an execution user and an execution environment are not fields of the declaration, so nothing here fabricates them
+//
+// 契约: docs/wiki/tool/tmux-action.md#quiet-vs-dead
+func TestExecutionIsolationSurvivesSessionRestart(t *testing.T) {
+	ctx := context.Background()
+	backend := newRecordingExecBackend()
+	decl := tagentexec.ExecutionDecl{
+		Command:  "probe",
+		Args:     []string{fixtureDirName(t)},
+		Dir:      t.TempDir(),
+		Resource: tagentexec.ResourceKey{Kind: "session-restart", Key: "resource-a"},
+	}
+
+	first := tagentexec.NewManager(backend)
+	key, err := first.Acquire(ctx, decl)
+	if err != nil {
+		t.Fatalf("acquire the declared resource: %v", err)
+	}
+	if key != decl.Resource {
+		t.Fatalf("the acquisition holds %s, want the declared identity %s: a resource the assembly minted would be one no restart can name", key, decl.Resource)
+	}
+	if dir, held := backend.startedDir(key); !held || dir != decl.Dir {
+		t.Fatalf("the executor opened %q for %s, want the declared directory %q", dir, key, decl.Dir)
+	}
+	if starts := backend.starts(); starts != 1 {
+		t.Fatalf("the executor was asked to open %d execution(s), want the one the declaration names", starts)
+	}
+
+	restarted := tagentexec.NewManager(backend)
+	if err := restarted.Adopt(ctx, key); err != nil {
+		t.Fatalf("adopt the resource the first process opened: %v", err)
+	}
+	if starts := backend.starts(); starts != 1 {
+		t.Fatalf("the restart opened %d execution(s), want the one the still-live resource stands for", starts)
+	}
+	explanation, err := restarted.Explain(key)
+	if err != nil || !explanation.Held {
+		t.Fatalf("the restarted assembly explains %s as held=%t (%v), want the resource identity to survive the restart", key, explanation.Held, err)
+	}
+	if dir, held := backend.startedDir(key); !held || dir != decl.Dir {
+		t.Fatalf("the restarted assembly reads %q for %s, want the directory %q the first process declared", dir, key, decl.Dir)
+	}
+	if err := restarted.Adopt(ctx, key); !errors.Is(err, tagentexec.ErrResourceHeld) {
+		t.Fatalf("the second adoption of %s = %v, want the refusal that keeps one resource identity beside one holder", key, err)
+	}
+	if _, err := restarted.Release(ctx, key); err != nil {
+		t.Fatalf("release the resource the restart took over: %v", err)
+	}
+}
+
+// fixtureDirName renders a stable argument for the declarations of this file.
+func fixtureDirName(t *testing.T) string {
+	t.Helper()
+	return filepath.Base(t.TempDir())
 }

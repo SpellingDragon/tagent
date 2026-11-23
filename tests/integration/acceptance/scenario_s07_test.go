@@ -20,6 +20,7 @@ var scenarioOriginalBody = []byte("first line\nsecond line\n")
 // - two owners keep their own reference over identical bytes without overwriting one another, and one blob serves both
 // - the readback returns the committed bytes
 // - a projection entry carries the full original exactly when its recorded decision is a full-text one
+// - the tier opens through OpenTier with the retention window registered by the storage config
 // 契约: docs/wiki/memory/memory-architecture.md#read-paths
 func TestScenario07OwnerIsolation(t *testing.T) {
 	ctx := context.Background()
@@ -35,13 +36,28 @@ func TestScenario07OwnerIsolation(t *testing.T) {
 	refA := ledger.OriginalRef{Key: "result-a", Owner: ownerA, Format: "tool-output", RetentionPolicy: "keep"}
 	refB := ledger.OriginalRef{Key: "result-a", Owner: ownerB, Format: "text/markdown", RetentionPolicy: "keep"}
 
-	store := ledger.NewMemoryOriginalStore(ledger.WithRetentionWindow("keep", 24*time.Hour))
+	tier, err := ledger.OpenTier(ctx, ledger.StorageConfig{
+		Type:             ledger.StorageMemory,
+		RetentionWindows: map[string]time.Duration{"keep": 24 * time.Hour},
+	})
+	if err != nil {
+		t.Fatalf("open the memory tier: %v", err)
+	}
+	t.Cleanup(func() { tier.Close() })
+	store := tier.Originals
+	inspect, ok := store.(interface {
+		References(event.EventID) []ledger.OriginalRef
+		BlobCount() int
+	})
+	if !ok {
+		t.Fatalf("the memory tier holds %T, want the reference and blob inspection face", store)
+	}
 	for _, ref := range []ledger.OriginalRef{refA, refB} {
 		if err := store.Put(ctx, ref, scenarioOriginalBody); err != nil {
 			t.Fatalf("put the original of %s/%s: %v", ref.Owner.AgentID, ref.Format, err)
 		}
 	}
-	registered := store.References(refA.Key)
+	registered := inspect.References(refA.Key)
 	observations["distinct_owner_references"] = len(registered)
 	bothKept := len(registered) == 2
 	for _, want := range []ledger.OriginalRef{refA, refB} {
@@ -56,7 +72,7 @@ func TestScenario07OwnerIsolation(t *testing.T) {
 		}
 	}
 	observations["owner_references_nonoverwriting"] = bothKept
-	observations["same_bytes_content_equal"] = store.BlobCount() == 1
+	observations["same_bytes_content_equal"] = inspect.BlobCount() == 1
 	recalled := store.Get(ctx, refA.Key)
 	observations["original_bytes_equal_readback"] = recalled.Outcome == ledger.RecallFound &&
 		bytes.Equal(recalled.Body, scenarioOriginalBody)

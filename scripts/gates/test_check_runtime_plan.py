@@ -747,6 +747,53 @@ class EventProfileTest(unittest.TestCase):
                 return
         self.fail("leaf {} has no checkbox to remove".format(leaf_id))
 
+    def emphasise_box(self, leaf_id):
+        """把该叶的 checkbox 编号写成粗体形态（`- [ ] **NN.M 标题`）。"""
+        for domain, _count in EVENT_DOMAIN_SPEC:
+            path = self.fixture.change / "changes" / domain / "tasks.md"
+            lines = path.read_text(encoding="utf-8").splitlines()
+            rewritten = []
+            hit = False
+            for line in lines:
+                for mark in ("- [ ] ", "- [x] "):
+                    if line.startswith(mark + leaf_id + " "):
+                        rewritten.append(mark + "**" + line[len(mark):])
+                        hit = True
+                        break
+                else:
+                    rewritten.append(line)
+            if hit:
+                path.write_text("\n".join(rewritten) + "\n", encoding="utf-8")
+                return
+        self.fail("leaf {} has no checkbox to emphasise".format(leaf_id))
+
+    def test_a_bold_leaf_checkbox_is_counted_too(self):
+        """粗体叶被漏数就是假绿：只认裸形态时该叶从计数与勾选账里一起消失。
+
+        编号外的强调形态是真实写过的（同一份计划里并存），所以解析两种形态不是
+        防御性冗余：漏读一侧的结果是门报出一个更小的计划，且退出码仍为 0。
+        """
+        code, out, err = self.check()
+        self.assertEqual(code, 0, out + err)
+        before = json.loads(out)["extra"]
+        before_counts = json.loads(out)["counts"]
+        self.assertIn("03.11", before["unchecked_leaf_ids"])
+        self.assertIn("03.1", before["checked_leaf_ids"])
+
+        self.emphasise_box("03.11")
+        self.emphasise_box("03.1")
+        code, out, err = self.check()
+        self.assertEqual(code, 0, out + err)
+        payload = json.loads(out)
+        counts = payload["counts"]
+        self.assertEqual(counts["checkboxes"], before_counts["checkboxes"])
+        self.assertEqual(counts["leaves_checked"], before_counts["leaves_checked"])
+        self.assertEqual(counts["leaves_unchecked"], before_counts["leaves_unchecked"])
+        self.assertNotIn("has no checkbox", out)
+        # 标记与编号读自同一行：粗体行不是被当成空行塞进总数，勾选状态仍在账上。
+        self.assertIn("03.11", payload["extra"]["unchecked_leaf_ids"])
+        self.assertIn("03.1", payload["extra"]["checked_leaf_ids"])
+
     def test_domain_profile_accepts_six_domains_and_38_leaves(self):
         code, out, err = self.check()
         self.assertEqual(code, 0, out + err)
@@ -824,6 +871,63 @@ with open(os.path.join(HERE, "plan_invocations.log"), "a", encoding="utf-8") as 
 sys.exit(subprocess.call(
     [sys.executable, os.path.join(HERE, "real_check_runtime_plan.py")] + sys.argv[1:]))
 '''
+# The DoD stand-in of the lint fixture. It judges one thing, and only one: that
+# the directory lint.sh hands it holds a product at all. The real gate's rules
+# (registration, verdict provenance, closure binding) are not restated here —
+# test_check_dod_coverage.py owns them against the real checker, including the
+# unset / empty / foreign-tree refusals.
+DOD_STUB = '''#!/usr/bin/env python3
+import os
+import sys
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+with open(os.path.join(HERE, "dod_invocations.log"), "a", encoding="utf-8") as handle:
+    print(" ".join(sys.argv[1:]), file=handle)
+named = sys.argv[sys.argv.index("--mutation-evidence") + 1]
+if not os.path.isfile(os.path.join(named, "evidence.json")):
+    sys.stderr.write("dod stand-in: {} holds no evidence.json\\n".format(named))
+    sys.exit(1)
+sys.exit(0)
+'''
+
+# A placeholder product, not evidence: the keys are the ones the producer
+# (check_event_integrity_mutations.py --out) writes, and nothing here parses it.
+# Its role is to make the fixture an environment where the DoD step has a product
+# to be handed, so "the fixture is green" cannot mean "an empty directory passed".
+STAND_IN_PRODUCT = {
+    "schema_version": 2,
+    "profile": "event-integrity",
+    "mode": "live",
+    "control_tree_green": True,
+    "not_evidence_backed": [],
+    "source_binding": {
+        "digest": "0" * 64,
+        "modules": [{"dir": ".", "module_path": "fixture", "role": "tested"}],
+        "edges": [],
+        "workspace": {"state": "fixture"},
+        "tool": "scripts/scenarios/run_runtime_scenarios.py",
+    },
+    "mutations": [
+        {
+            "id": "MUT-FIXTURE-stand-in",
+            "status": "killed",
+            "verdict": "killed",
+            "reason": "named_assertion",
+            "counted_killed": True,
+            "expect_assertion": "fixture assertion",
+            "assertion_site": "fixture/anchor_test.go:9",
+            "assertion_hit": True,
+            "test": {
+                "module": ".", "package": "fixture",
+                "file": "fixture/anchor_test.go",
+                "name": "TestFixtureAnchor",
+                "selector": "^TestFixtureAnchor$",
+            },
+            "gate": None,
+        },
+    ],
+}
+
 PY_STUB = "import sys\n\nsys.exit(0)\n"
 SH_STUB = "#!/usr/bin/env bash\nexit 0\n"
 GO_STUB = '''#!/usr/bin/env bash
@@ -841,6 +945,232 @@ exit 0
 # none of them makes `unittest` exit 5 (`NO TESTS RAN`) on Python >= 3.11, so the
 # fixture carries one passing stub: the object under test is the plan gate, not
 # the selftest count.
+# 三单元十八叶图的 fixture：叶集/前置边与真实计划同形（12/06/13 各 6 叶、33 条边），
+# 但文件内容是最小合成体——判定的是 profile 规则本身，不是复制真实计划。change 名
+# 与路径在这里按片段拼出：scripts 下的过程工件引用门按子串扫描，字面写死即命中。
+RUNTIME_RECOVERY_UNITS = (
+    ("12-consumer-state-lifecycle", "state-lifecycle"),
+    ("06-bounded-open-index", "bounded-recovery"),
+    ("13-verified-completion", "architecture-guardrails"),
+)
+RUNTIME_RECOVERY_DEPENDS = {
+    "12.101": ["13.101"], "12.102": ["12.101", "06.101", "13.102"],
+    "12.103": ["12.102", "06.102"], "12.104": ["12.103"],
+    "12.105": ["12.104", "13.104"], "12.106": ["12.105"],
+    "06.101": ["13.101"], "06.102": ["06.101", "12.101", "13.102"],
+    "06.103": ["06.102", "12.102"], "06.104": ["06.103", "12.103"],
+    "06.105": ["06.104", "12.105"], "06.106": ["06.105"],
+    "13.101": [], "13.102": ["13.101"], "13.103": ["13.102"],
+    "13.104": ["13.102", "12.104", "06.104"],
+    "13.105": ["12.105", "06.105", "13.103", "13.104"],
+    "13.106": ["12.106", "06.106", "13.105"],
+}
+RUNTIME_RECOVERY_CHECKED = {"06.101", "12.101", "13.101", "13.102"}
+RUNTIME_RECOVERY_SIGNED = {"06.101", "13.101", "13.102", "13.103", "13.104", "13.105"}
+RUNTIME_RECOVERY_FINAL_DEPENDS = (("F1", ["13.106"]), ("F2", ["F1"]),
+                                  ("F3", ["F2"]), ("F4", ["F3"]))
+
+
+def runtime_recovery_precondition_line(unit, leaf):
+    """三单元各有各的「前置」写法，fixture 三种都写一遍（解析器必须都读）。"""
+    deps = RUNTIME_RECOVERY_DEPENDS[leaf]
+    if unit.startswith("12-"):
+        return "- **前置**：{}。".format("、".join(deps)) if deps else "- **前置**：无。"
+    if unit.startswith("06-"):
+        return "- 阶段：取证；前置：**{}**。".format("、".join(deps)) if deps \
+            else "- 阶段：取证；前置：无。"
+    joined = "、".join(deps)
+    if leaf == "13.103":
+        return "  - 阶段：实施；前置：{}且C7签发完整；未签时不可派。".format(joined)
+    return "  - 阶段：实施；前置：{}。".format(joined) if deps else "  - 阶段：实施；前置：无。"
+
+
+class RuntimeRecoveryFixture:
+    """三单元十八叶 / 33 条前置边 / F1–F4 的合成变更目录。"""
+
+    def __init__(self, root):
+        self.root = Path(root)
+        self.name = "runtime-recovery-fixture"
+        self.change = self.root.joinpath("openspec", "changes", self.name)
+        self.main_specs = self.root / "openspec" / "specs"
+
+    def unit_dir(self, domain):
+        return self.change.joinpath("changes", domain)
+
+    def leaves(self):
+        entries = []
+        for domain, _cap in RUNTIME_RECOVERY_UNITS:
+            prefix = domain.split("-", 1)[0]
+            for index in range(101, 107):
+                leaf_id = "{}.{}".format(prefix, index)
+                entries.append({
+                    "id": leaf_id,
+                    "domain": domain,
+                    "task_file": "/".join(["openspec", "changes", self.name,
+                                           "changes", domain, "tasks.md"]),
+                    "depends_on": list(RUNTIME_RECOVERY_DEPENDS[leaf_id]),
+                    "status": "in_progress" if leaf_id == "13.103" else "planned",
+                    "verification": {"commands": ["go test ./... -count=1"]},
+                    "verify": [{"name": "Test{}Anchor".format(leaf_id.replace(".", ""))}],
+                })
+        return entries
+
+    def graph(self):
+        return {
+            "schema_version": 1,
+            "change": self.name,
+            "domain_profile": "runtime-recovery-ideal",
+            "active_leaf": "13.103",
+            "leaves": self.leaves(),
+            "final_leaves": [{"id": task_id, "depends_on": list(deps), "status": "planned"}
+                             for task_id, deps in RUNTIME_RECOVERY_FINAL_DEPENDS],
+            "signatures": [{"leaf": leaf["id"],
+                            "state": "signed" if leaf["id"] in RUNTIME_RECOVERY_SIGNED
+                                     else "pending",
+                            "evidence": "design fixture#C7" if leaf["id"] in RUNTIME_RECOVERY_SIGNED
+                                        else ""}
+                           for leaf in self.leaves()],
+        }
+
+    def build(self):
+        caps = [cap for _domain, cap in RUNTIME_RECOVERY_UNITS]
+        proposal = ["## Why", "fixture", "", "## Capabilities", "",
+                    "### Modified Capabilities", ""]
+        proposal += ["- `{}`：fixture 能力。".format(cap) for cap in caps + ["orchestration"]]
+        write(self.change / "proposal.md", "\n".join(proposal) + "\n")
+        write(self.change / "design.md", "## Decisions\n\n- D1 fixture\n")
+        write(self.change / "ORCHESTRATION.md", ORCHESTRATION)
+        write(self.change / "specs" / "orchestration" / "spec.md",
+              GOOD_SPEC.format(cap="orchestration"))
+        final_lines = ["## F1–F4", ""]
+        for task_id, deps in RUNTIME_RECOVERY_FINAL_DEPENDS:
+            final_lines.append("- [ ] **{} 收尾 fixture**（依{}）：fixture。".format(
+                task_id, "、".join(deps)))
+        ledger = ["## 三单元", ""] + final_lines + [""]
+        write(self.change / "tasks.md", "\n".join(ledger))
+        for domain, cap in RUNTIME_RECOVERY_UNITS:
+            base = self.unit_dir(domain)
+            write(base / "proposal.md", "## 边界\n\n能力 `{}` 已声明。\n".format(cap))
+            write(base / "design.md", "## 设计\n\nfixture\n")
+            prefix = domain.split("-", 1)[0]
+            lines = ["## 叶任务", ""]
+            for index in range(101, 107):
+                leaf_id = "{}.{}".format(prefix, index)
+                mark = "x" if leaf_id in RUNTIME_RECOVERY_CHECKED else " "
+                lines.append("- [{}] {} fixture 叶任务".format(mark, leaf_id))
+                lines.append(runtime_recovery_precondition_line(domain, leaf_id))
+            write(base / "tasks.md", "\n".join(lines) + "\n")
+            write(base / "specs" / cap / "spec.md", GOOD_SPEC.format(cap=cap))
+        write(self.change / "task-graph.json", json.dumps(
+            self.graph(), ensure_ascii=False, indent=2) + "\n")
+
+    def load_graph(self):
+        return json.loads((self.change / "task-graph.json").read_text(encoding="utf-8"))
+
+    def save_graph(self, graph):
+        (self.change / "task-graph.json").write_text(
+            json.dumps(graph, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
+class RuntimeRecoveryProfileTest(unittest.TestCase):
+    """domain_profile=runtime-recovery-ideal：十八叶 / 双向依赖 / 签态派发门。"""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.fixture = RuntimeRecoveryFixture(self._tmp.name)
+        self.fixture.build()
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def check(self):
+        return run_checker("--change-dir", str(self.fixture.change), "--json")
+
+    def test_the_three_unit_leaf_set_and_edges_are_checked_in_both_directions(self):
+        code, out, err = self.check()
+        self.assertEqual(code, 0, out + err)
+        payload = json.loads(out)
+        self.assertEqual(payload["counts"]["graph_leaves"], 18)
+        self.assertEqual(payload["counts"]["graph_edges"], 33)
+        self.assertEqual(payload["counts"]["final_tasks"], 4)
+
+        # 只改图里的一条前置边：tasks.md 是依赖的唯一真相，图与它漂移即红。
+        graph = self.fixture.load_graph()
+        for leaf in graph["leaves"]:
+            if leaf["id"] == "13.103":
+                leaf["depends_on"] = ["13.101"]
+        self.fixture.save_graph(graph)
+        code, out, _ = self.check()
+        self.assertNotEqual(code, 0)
+        self.assertIn("declares 前置 ['13.102'] but task-graph depends_on ['13.101']", out)
+
+        # 只改 tasks.md 的叶：叶集双向核对，缺一侧或另一侧多出都红。
+        graph["leaves"] = [leaf for leaf in graph["leaves"] if leaf["id"] != "06.106"]
+        for leaf in graph["leaves"]:
+            if leaf["id"] == "13.103":
+                leaf["depends_on"] = ["13.102"]
+        self.fixture.save_graph(graph)
+        code, out, _ = self.check()
+        self.assertNotEqual(code, 0)
+        self.assertIn("leaf 06.106 has a checkbox", out)
+
+    def test_unknown_or_missing_active_leaf_is_refused(self):
+        """active_leaf 未知即红；整键缺失也是红（null 才是「没有在飞的叶」）。"""
+        graph = self.fixture.load_graph()
+        graph["active_leaf"] = "13.199"
+        self.fixture.save_graph(graph)
+        code, out, _ = self.check()
+        self.assertNotEqual(code, 0)
+        self.assertIn("active leaf '13.199' is not a declared leaf", out)
+
+        graph = self.fixture.load_graph()
+        graph.pop("active_leaf")
+        self.fixture.save_graph(graph)
+        code, out, _ = self.check()
+        self.assertNotEqual(code, 0)
+        self.assertIn("declares no active_leaf key", out)
+
+        graph = self.fixture.load_graph()
+        graph["active_leaf"] = None
+        self.fixture.save_graph(graph)
+        code, out, err = self.check()
+        self.assertEqual(code, 0, out + err)
+        self.assertEqual(json.loads(out)["counts"]["active_leaf"], 0)
+
+    def test_unapproved_leaf_is_not_dispatchable(self):
+        """前置未勾选的叶即便签过也不可派；前置齐了才放行。"""
+        graph = self.fixture.load_graph()
+        graph["active_leaf"] = "13.104"
+        self.fixture.save_graph(graph)
+        code, out, _ = self.check()
+        self.assertNotEqual(code, 0)
+        self.assertIn("leaf 13.104 is not dispatchable", out)
+        self.assertIn("prerequisite(s) ['06.104', '12.104'] not ticked", out)
+
+        graph["active_leaf"] = "13.103"
+        self.fixture.save_graph(graph)
+        code, out, err = self.check()
+        self.assertEqual(code, 0, out + err)
+
+    def test_missing_design_signature_blocks_implementation(self):
+        """未签的叶既不能派发，也不能以 in_progress 冒充已批准的实施。"""
+        graph = self.fixture.load_graph()
+        for leaf in graph["leaves"]:
+            if leaf["id"] == "06.103":
+                leaf["status"] = "in_progress"
+        self.fixture.save_graph(graph)
+        code, out, _ = self.check()
+        self.assertNotEqual(code, 0)
+        self.assertIn("leaf 06.103 is 'in_progress' without a design signature ('pending')", out)
+
+        graph = self.fixture.load_graph()
+        graph["active_leaf"] = "06.103"
+        self.fixture.save_graph(graph)
+        code, out, _ = self.check()
+        self.assertNotEqual(code, 0)
+        self.assertIn("leaf 06.103 is not dispatchable: no design signature ('pending')", out)
+
+
 SELFTEST_STUB = '''import unittest
 
 
@@ -892,12 +1222,24 @@ class LintObjectSelectionTest(unittest.TestCase):
         write(gates / "check_config_liveness.py", PY_STUB)
         for name in ("check_schema_allowlist.py", "check_assembly_symbols.py",
                      "check_durable_truth_registry.py", "check_spec_hygiene.py",
-                     "check_window_bounds.py", "check_vocabulary_alignment.py"):
+                     "check_window_bounds.py", "check_vocabulary_alignment.py",
+                     "check_plugin_mounting.py", "check_dead_producers.py"):
             write(gates / name, PY_STUB)
+        write(gates / "check_dod_coverage.py", DOD_STUB)
         for name in ("test_check_schema_allowlist.py", "test_check_assembly_symbols.py",
                      "test_check_durable_truth_registry.py", "test_check_spec_hygiene.py",
-                     "test_check_window_bounds.py", "test_check_vocabulary_alignment.py"):
+                     "test_check_window_bounds.py", "test_check_vocabulary_alignment.py",
+                     "test_check_plugin_mounting.py", "test_check_dod_coverage.py",
+                     "test_check_dead_producers.py"):
             write(gates / name, SELFTEST_STUB)
+
+        # The run one evidence environment, in the shape preflight leaves behind:
+        # `mutations/evidence.json` under a directory the run names. The DoD step
+        # refuses an unset variable and a directory with no `mutations/` product,
+        # so a fixture without one only measures that refusal, not the plan gate.
+        self.evidence = self.root / "evidence" / "stand-in"
+        write(self.evidence / "mutations" / "evidence.json",
+              json.dumps(STAND_IN_PRODUCT, ensure_ascii=False, indent=2))
 
         self.bin = self.root / "bin"
         self.bin.mkdir()
@@ -913,25 +1255,55 @@ class LintObjectSelectionTest(unittest.TestCase):
     def tearDown(self):
         self._tmp.cleanup()
 
-    def run_lint(self):
+    def run_lint(self, evidence=None):
         env = dict(os.environ)
         # 只保留测试 bin：openspec 因此不可见，tail 的 spec-hygiene 门如实跳过。
         env["PATH"] = str(self.bin)
         env.pop("PYTHONPATH", None)
+        env.pop("TAGENT_RUNTIME_EVIDENCE_DIR", None)
+        if evidence is not None:
+            env["TAGENT_RUNTIME_EVIDENCE_DIR"] = str(evidence)
         return subprocess.run(["bash", "scripts/lint.sh", "--only", "contracts"],
                               cwd=str(self.root), env=env, capture_output=True, text=True)
 
     def test_active_graph_is_checked_not_archive(self):
-        proc = self.run_lint()
+        proc = self.run_lint(self.evidence)
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
         self.assertIn("lint: runtime plan contract", proc.stdout)
         self.assertNotIn("no active task-graph.json", proc.stdout)
+        dod = self.root / "scripts" / "gates" / "dod_invocations.log"
+        given = dod.read_text(encoding="utf-8").splitlines()
+        self.assertEqual(len(given), 1, proc.stdout)
+        self.assertIn("--mutation-evidence " + str(self.evidence / "mutations"), given[0])
         log = self.root / "scripts" / "gates" / "plan_invocations.log"
         lines = log.read_text(encoding="utf-8").splitlines()
         self.assertEqual(len(lines), 1, proc.stdout)
         expected = "--change-dir " + "/".join(["openspec", "changes", "runtime-rebuild"])
         self.assertIn(expected, lines[0])
         self.assertNotIn("archive", lines[0])
+
+    def test_missing_evidence_environment_still_fails(self):
+        """没有证据环境时 lint 仍在 DoD 步具名变红——夹具没有把这道门放宽。
+
+        两例：变量未给、给了目录但没有 `mutations/` 产物。两例都断言计划门从未
+        被调用（它排在 DoD 之后），故红在 DoD 而不是被跳过。
+        """
+        dod = self.root / "scripts" / "gates" / "dod_invocations.log"
+        plan = self.root / "scripts" / "gates" / "plan_invocations.log"
+
+        proc = self.run_lint()
+        self.assertNotEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("TAGENT_RUNTIME_EVIDENCE_DIR is unset", proc.stderr)
+        self.assertFalse(dod.exists(), proc.stdout)
+        self.assertFalse(plan.exists(), proc.stdout)
+
+        bare = self.root / "evidence" / "no-product"
+        bare.mkdir(parents=True)
+        proc = self.run_lint(bare)
+        self.assertNotEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("holds no mutations/ product", proc.stderr)
+        self.assertFalse(dod.exists(), proc.stdout)
+        self.assertFalse(plan.exists(), proc.stdout)
 
     def test_archive_graph_object_mismatch_fails(self):
         # 旧固定对象（归档路径）在新命名下本身就不自洽：图声明 change=runtime-rebuild，

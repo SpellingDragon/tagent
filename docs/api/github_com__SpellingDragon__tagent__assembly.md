@@ -35,17 +35,41 @@ states each owed round beside the address it belongs to and the instance that
 accepted it, and a boot reads it as the rounds committed before the cut so an
 answer that landed past the cut still settles the round it answers.
 
-The compression consumer's state slice: the judgments a producer filed and the
-request identities a product answers, both of which the consumer derives as
-it observes the chain. The cut states that account beside the projections it
-serves, so a boot answers every judgment the covered facts filed without reading
-one of those facts back, and the judgments the cut left owed stay owed.
+The compression consumer's state slice: the judgments a chain filed that no
+product answers yet. The cut states that batch beside the projections it serves,
+so a boot executes every judgment the covered facts filed without reading one of
+those facts back, and a judgment a product answers states nothing: its request,
+its answer and the folding it caused stay on the chain, which is what bounds the
+slice by the batch still owed instead of by the judgments the chain ever filed.
 
 The compression consumer: the execution half of compression. A producer judges
 material over its bound and files a compress request; the consumer reads the
 material that request names, folds it through the projection and files the
 compress product the execution minted. Judgment and execution share no step,
 so what material went is a fact of the chain beside why it went.
+
+The compression consumer's own mount: the one place its concrete type
+is constructed. The consumer executes the judgments the age fold files,
+so its mount also installs it as that plugin's executor; the age fold finds it
+constructed whichever order the catalog lists the two in.
+
+The mount is also where the account declares the read a restored cut leaves it:
+the slice states its own coverage, so the boot reads the compression facts a
+cut carrying no such slice leaves unstated without the coordinator naming a
+consumer.
+
+The governance state of a host as the framework checkpoint carries it:
+the ledger and the goal registry that fold the two governance streams and
+the approval book the rulings park calls with. The host seats that state on
+the run's state seam, so one cut states it and one restore puts it back — a
+restarted process reads a state the size of the governance state it holds
+instead of the stream and the request files it committed.
+
+The seat and the streams are one recovery: the cut states where each stream
+ended and the index it folded, and the events past the cut are the tail the bind
+folds beside it. A process whose checkpoint states no governance cut restores
+the zero cut, so the tail past it is the whole stream and the approval book
+reads the request files — the same state a young run starts from.
 
 Boot is the turnkey entry of the composition root: it reads one host document,
 resolves the declaration it carries, and returns the Host the application
@@ -116,12 +140,12 @@ counter face authorizes through the one gate before it answers, and a face that
 is switched off names that state in its reason instead of answering a request it
 never accepted.
 
-The model sampling of one declared agent: the temperature, thinking switch
-and reasoning effort a host document declares flow onto every request of that
-agent's model. The wrapper sits between the published binding and the model the
-provider registry built, so a parameter declared in the document reaches the
-provider even though the trpc model constructors accept no per-model sampling of
-their own.
+The model sampling of one declared agent: the temperature, thinking switch,
+reasoning effort and output limit a host document declares flow onto every
+request of that agent's model. The wrapper sits between the published binding
+and the model the provider registry built, so a parameter declared in the
+document reaches the provider even though the trpc model constructors accept no
+per-model sampling of their own.
 
 The wrapper fills a value only while the request itself names none:
 an undeclared parameter is never written as a zero, and a sampling a request
@@ -145,6 +169,18 @@ session, and the request shape an inbound channel posts to the task endpoint.
 Each one is a face the host contributes to the assembly, so the host builds it
 here rather than leaving the wiring to every deployment.
 
+The builtin plugin catalog: one entry per feature the framework mounts out of
+the box, beside the resolution the default boot flow, the host assembly and a
+plugins: declaration drive. The assembly root names no feature: it forwards
+the collections this file resolves, so adding a plugin is a catalog line plus,
+for an agent plugin, a declaration line.
+
+This file and assembly/compress_mount.go are the plugin registry
+implementation registered under mounting.registry_implementation in
+golden/runtime/architecture.json. That is why the R5a mount rule does not judge
+the concrete constructions they carry: they are the one legal place a plugin is
+built, and judging them would make the rule unsatisfiable.
+
 The minimal public assembly entry of the runtime: one Run assembles the shared
 faces once, publishes the candidate bindings of one declaration through the
 sole publication entry, and drives the agent's own persistent event loop per
@@ -167,8 +203,11 @@ blacklist:
 
   - Only the terminal kinds settled, failed and cancelled fire; accepted and
     progress do not.
-  - Only a delivery fact carries the settle-lineage meta key, so a backflow
-    settle never fires.
+  - A backflow settle commits the very delivery fact the delivery face commits,
+    so the trigger table reads it as one fact family; what keeps the fired
+    turn from firing itself is the account, not the fact: the entry such a
+    commit settles is claimed or consumed by the process that drove the call,
+    and the pump drives only entries still pending.
   - The fired turn commits no settle fact with a lineage, so it can never fire
     itself again.
   - The mailbox is the one account that answers whether work waits:
@@ -179,6 +218,10 @@ blacklist:
     landed its terminal is closed with its consumption receipt instead of driven
     again, so a stop between the terminal fact and the receipt replays no second
     turn.
+  - A delivery fact the chain does not hold is supplied by the pump from the
+    owed seat through the family's own renderer, so a refused write costs
+    the notification a turn it drives instead of an obligation no reader ever
+    closes.
 
 The semantic summary of one oldest band: the model face behind the history
 summary a fold files. The bounded mechanical reads of the band are handed to the
@@ -208,11 +251,16 @@ durable fact chain instead of restoring a body snapshot kept beside the facts.
 
 The task state slice: the account of the task registry as the framework
 checkpoint carries it. Every other slice states work the process holds in
-flight; this one states the tasks it settled beside the ones it is still
-driving, so a restarted run knows its tasks before it reads a single chain.
-The chain stays the truth of a task and the source of the links that landed past
-the cut: the slice only spares the covered part of it, which is what stops the
-recovery cost from growing with the tasks the storage already settled.
+flight; this one states the tasks the registry is still driving, so a restarted
+run knows its open work before it reads a single chain. A task the run finished
+states nothing here, and the chain stays the truth of it: the slice spares the
+covered part of every open chain and nothing else, which is what keeps its body
+equal however many tasks the storage already settled.
+
+The slice is also the owner of the restore prerequisite that account carries: it
+seats the durable account from the payload it states before any holder restores
+the state that reads it (see SeatRestore), so the boot that restores the mailbox
+reads a seated account without the coordinator reading what this slice states.
 
 CONSTANTS
 
@@ -477,6 +525,12 @@ func Assemble(ctx context.Context, decl *config.Declaration, agents map[event.Ag
     the closing round of a spent budget stands on the chain as the fact it is.
     - The loop builds the writer ledger for itself and the run reads it through
     the loop, so the close judges the very registrations the productions made.
+    - The run-level plugin factories run in the order their options were applied
+    and each exactly once, and a factory that fails stops the sequence with its
+    position named and mounts nothing any factory answered. - The recoverable
+    state a caller contributes mounts on the run's state seam ahead of the boot
+    restore, so the cut restores into the holder the caller declared instead of
+    waiting for a mount that comes after it.
 
 func Boot(configPath string, opts ...HostOption) (*Host, error)
     Boot reads one host document and returns the assembled host: the declaration
@@ -533,7 +587,22 @@ func Boot(configPath string, opts ...HostOption) (*Host, error)
     the boot document enables meditation: each generation mounts its loop over
     the store of the record its own plan names, so a generation that enables,
     moves or drops meditation reads the anchor record it declares and a rebuilt
-    loop continues from the watermark the previous one consumed.
+    loop continues from the watermark the previous one consumed. - The caller's
+    own contributions reach this assembly: every builder attached through
+    WithPlugins and every consumer mounted through WithGenerationConsumer
+    is replayed ahead of the ones this entry mounts itself, so a contributed
+    factory runs once in the caller's declared order and a caller's consumer
+    registers before the host's own. - Every state slice the caller mounts
+    through WithStateSlice is replayed into the same assembly, so it mounts
+    on the run's state seam before the boot restore and the cut restores into
+    the caller's holder; a slice the checkpoint states beside no holder is
+    still refused by name. - A face this entry builds itself — the capture, the
+    embedder, the memory plan, the model leases, the observation and recording
+    faces, the execution ledger, the generation faces and ports, the reflection
+    anchors, the task terminal TTL and the boot reconciliation — is refused by
+    name when a caller declares one through an option, because the value would
+    be dropped without effect; Assemble is the entry that seats a caller's face.
+    The contributions listed above are replayed as before.
 
 func DiagnosticSwitchesFromEnv() (DiagnosticSwitches, error)
     DiagnosticSwitchesFromEnv reads the diagnostic switches the host process
@@ -642,10 +711,11 @@ type CompressionConsumer struct {
     MUST NOT execute a judgment whose material does not stand: it stays pending
     rather than answering a product of other material.
 
-func NewCompressionConsumer(sessions compressSessions) *CompressionConsumer
-    NewCompressionConsumer assembles the consumer over the session face of
-    one run. A nil face answers no session, so an assembly mounted beside none
-    executes nothing instead of failing on the first commit.
+func NewCompressionConsumer(sessions compressSessionSource, products compressProductStore) *CompressionConsumer
+    NewCompressionConsumer assembles the consumer over the session replay face
+    and the product ledger face of one run. A nil face answers no session and
+    files no product, so an assembly mounted beside none executes nothing
+    instead of failing on the first commit.
 
 func (c *CompressionConsumer) Execute(ctx context.Context, session event.SessionID) error
     Execute runs every judgment of one session no product answers yet: it reads
@@ -656,20 +726,24 @@ func (c *CompressionConsumer) Execute(ctx context.Context, session event.Session
 
     The pass reads the projection and never judges it: whether material is
     over its bound is already the request on the chain, and the plan only
-    answers which product that request names. - The plan is executed over the
-    accounting-free view the production judged (foldProjectionOf): the products
-    name the conversation material, and delivery settlement lines stay in the
-    projection the model reads. - A history summary covers every settlement
-    fact inside the band it folds: settlement lines never count as fold material
-    (foldProjectionOf), the summary consumes their accounting beside the turns,
-    and the facts stay on the chain readable by identity. - The checkpoint
-    is a pure whole-batch preflight, so its survivors equal the entries left
-    by applying that same batch. - The oldest-band gist is read before the
-    checkpoint, so the survivors a restart rebuilds state the text the chain
-    records rather than the mechanical form the fold minted. - Every product
-    is filed through the session face, which answers the judgment it names:
-    the batch shrinks as it is filed, so the account the consumer holds is never
-    one the chain disagrees with.
+    answers which product that request names. - The plan is executed over
+    the accounting-free view the production judged (foldProjectionOf):
+    the products name the conversation material, and delivery settlement lines
+    stay in the projection the model reads. - A history summary covers every
+    settlement fact inside the band it folds: settlement lines never count as
+    fold material (foldProjectionOf), the summary consumes their accounting
+    beside the turns, and the facts stay on the chain readable by identity.
+    - The checkpoint is a pure whole-batch preflight, so its survivors equal
+    the entries left by applying that same batch. - A judgment the chain already
+    answers is struck before the material is summarized: the product identity is
+    content-addressed over the judgment, the producer and the fold product key,
+    so the answer is read back by identity and the execution costs no model call
+    and no second product. - The oldest-band gist is read before the checkpoint,
+    so the survivors a restart rebuilds state the text the chain records rather
+    than the mechanical form the fold minted. - Every product is filed through
+    the product ledger face, which answers the judgment it names: the batch
+    shrinks as it is filed, so the account the consumer holds is never one the
+    chain disagrees with.
 
 func (c *CompressionConsumer) Material() plugin.Material
     Material declares what this consumer reads, when it reads it and what a
@@ -681,9 +755,11 @@ func (c *CompressionConsumer) Name() string
     Name reports the stable name of this plugin instance.
 
 func (c *CompressionConsumer) NoteProduct(product event.CompressProduct)
-    NoteProduct notes one product a chain already carries, so the judgment it
-    answers is never executed a second time: this is the restart path, where the
-    products of a chain answer judgments the process does not hold.
+    NoteProduct notes one product a chain already carries, so the judgment
+    it answers is never executed a second time: this is the restart path,
+    where the products of a chain answer judgments the process does not owe yet.
+    The account holds the batch still owed and never the answers it read, so the
+    note removes the judgment and the answer stays where the chain states it.
 
 func (c *CompressionConsumer) ObserveCommit(ctx context.Context, id event.EventID) error
     ObserveCommit executes the judgments one session filed that no product
@@ -969,12 +1045,16 @@ type FoldWindow struct {
 	CompressThreshold float64
 	// KeepRecentTasks is the number of recent task turns the age fold keeps whole.
 	KeepRecentTasks int
+	// SummaryBudgetBytes is the byte bound one history summary obeys: the
+	// declared summary budget of the agent, read by both the mechanical fold and
+	// the model gist the fold asks for, so the two sides bound the same text.
+	SummaryBudgetBytes int
 }
     FoldWindow is the replay window one session chain registered: the model
     window the chain is replayed into, in tokens, and the fold settings the
     declaration gave that window. The unset settings read their declaration
     defaults when the window is normalized, so a declaration naming only
-    max_tokens folds under the default share of its own window.
+    replay_window folds under the default share of its own window.
 
 func (w FoldWindow) VolumeThresholdBytes() int
     VolumeThresholdBytes reports the rendered volume a projection of this window
@@ -1427,21 +1507,30 @@ func WithModelLease(agentID event.AgentID, lease *rl.ModelLease, opts ...ModelLe
     refused by name.
 
 func WithPlugins(build func(*Run) ([]plugin.Instance, error)) Option
-    WithPlugins builds the run-level plugin instances every agent generation
-    carries: an event-driven face attached here observes every commit of
-    the run, whichever agent session committed it, exactly as a contributed
-    instance observes the commits of its own agent. The builder runs once,
+    WithPlugins appends one builder of the run-level plugin instances
+    every agent generation carries: an event-driven face attached here
+    observes every commit of the run, whichever agent session committed it,
+    exactly as a contributed instance observes the commits of its own agent.
+    Each builder runs once per assembly, in the order its option was applied,
     after the watermark gate is established and before the first publication,
-    and the instances it answers are never replaced.
+    and the run-level set is the answers of the builders in that order. A reload
+    publishes a new generation of the generation-scoped consumers and leaves
+    this set in place, so changing it takes another boot.
+
+    - A builder that fails stops the sequence: the failure names the position
+    it holds beside the cause it answered, and no instance any builder answered
+    reaches the run.
 
 func WithPolicy(policy plugin.Governor) Option
-    WithPolicy attaches the governance policy every call admitted through the
-    registration wrapper of this assembly is ruled by: the ruling consumes the
-    one Before pass the call carries — the final call beside the risk grade
-    its risk faces rendered — exactly once per call, before any execution.
-    The policy occupies the approval seat, so it is the sole pre-execution
-    ruling of the assembly: a refused call is turned away before any execution
-    with its named paired result, and a held call parks in the approval wait.
+    WithPolicy attaches the governance policy the calls admitted through the
+    registration wrapper of this assembly are ruled by when the published
+    pipeline declares no Governor of its own: the ruling consumes the one Before
+    pass the call carries — the final call beside the risk grade its risk
+    faces rendered — exactly once per call, before any execution. A Governor a
+    published pipeline declares is the ruling of that pipeline's calls instead,
+    so this policy is the default a declaration supersedes rather than a second
+    ruling beside it. A refused call is turned away before any execution with
+    its named paired result, and a held call parks in the approval wait.
 
 func WithRecorder(recorder rl.Recorder) Option
     WithRecorder attaches the training record pipeline this assembly derives
@@ -1460,6 +1549,19 @@ func WithReflectionAnchors(path string) Option
     answers the watermark the diagnostic reading reports. An assembly beside
     no path carries no reflection anchor store, and its reflection face reports
     that absence instead of a watermark of its own.
+
+func WithStateSlice(holder state.Stateful) Option
+    WithStateSlice appends one consumer's recoverable state to this assembly:
+    the holder mounts on the run's state seam before the boot restore runs,
+    through the same StateRegistry.Register a consumer mounts with after boot,
+    so a checkpoint stating the slice restores into this holder instead of
+    failing as a slice no holder mounts. Slices append in the order the options
+    are applied, so the wiring renders the same order and the same bytes.
+
+    - The holder states and restores its own payload; the assembly interprets
+    none of it and names no consumer. - A holder naming no state, and a
+    name another slice already owns, refuse the assembly by name instead of
+    overwriting a slice a consumer owns.
 
 func WithStorage(cfg ledger.StorageConfig) Option
     WithStorage opens the named storage tier for this assembly and stores the
@@ -1646,7 +1748,7 @@ func (r *Run) CheckpointSession(ctx context.Context, addr event.Address) (event.
     MUST state nothing about a holder that keeps no state of a session, rather
     than copy another chain's account into this checkpoint.
 
-func (r *Run) Close(ctx context.Context, req agent.CloseRequest) (agent.DrainReport, error)
+func (r *Run) Close(ctx context.Context, req agent.CloseRequest) (report agent.DrainReport, closeErr error)
     Close closes the runtime's own side for the named session address: the
     request is judged first, new input is refused next, the run quiesces to its
     fixed point, and only then does the session side close. The close reports
@@ -1660,17 +1762,35 @@ func (r *Run) Close(ctx context.Context, req agent.CloseRequest) (agent.DrainRep
     cancelling anything they fly, so the obligations they hold are finished
     for real inside the budget or stay named on the chain — and joined under
     the same deadline, so a close beside a producer that never stops answers
-    Cut beside that producer's name instead of waiting on it without an end. A
-    repeated close retries the quiesce the same way until the run reaches rest.
-    The redline list (5 rules): MUST judge the timeout of the close before any
+    Cut beside that producer's name instead of waiting on it without an end.
+    A repeated close retries the quiesce the same way until the run reaches
+    rest. The storage tier the run opened ends exactly when the process holds
+    no further commit to that root: a resident consumption loop the close left
+    inside a model production, and a writer that has not confirmed its stop,
+    are the two sources a commit after this return could come from, so the root
+    goes to a next writer when neither stands and is kept when either does,
+    whatever state the report names. An obligation left standing on the chain —
+    an input no answer closed, a notice no turn consumed — is state a restart
+    reads and not a commit this process owes, so a cut beside those alone gives
+    the root up; a cut beside work still in flight keeps its write rights, and
+    the refusal a released worker owes a closed session lands through the view
+    the run holds. The kernel drops the lock when the process exits, so a root a
+    close keeps is never a lock a later process inherits nor one anybody has to
+    clear. A repeated close files no second checkpoint, because the first close
+    filed the one it owed through the view it held and that view ends with it.
+    The redline list (7 rules): MUST judge the timeout of the close before any
     side effect it would take, so a close naming none is refused with the run
     untouched. MUST refuse new input before the first quiesce of the close.
     MUST mark the resident consumption loops the loop mounted for itself before
     the first read of the rest criterion, and join them inside the budget the
     request named, so a segment those loops still fly is waited out or named
-    — never unbounded before Cut and never cancelled by the close itself. MUST
-    judge the run by the one rest criterion, never by an emptied queue or an
-    elapsed wait. MUST NOT report a run at rest while a writer has not stopped.
+    — never unbounded before Cut and never cancelled by the close itself.
+    MUST judge the run by the one rest criterion, never by an emptied queue
+    or an elapsed wait. MUST NOT report a run at rest while a writer has not
+    stopped. MUST release the storage tier by the commit sources that stand
+    at the release, never by the state the report names. MUST read the writer
+    ledger again at the release it takes, so a production that began after the
+    criterion keeps the root it would commit through.
 
 func (r *Run) CloseMCPServers() error
     CloseMCPServers releases every MCP server the live registry holds: the close
@@ -1903,8 +2023,13 @@ func (r *Run) RecordingLosses() []agent.RecordingLoss
 
 func (r *Run) Recovery() task.RestoreReport
     Recovery reports how the assembly folded the durable chains its storage
-    already held at startup: one outcome per task the chains covered. The report
-    is empty for an assembly beside no storage.
+    already held at startup: one outcome per task the fold covered, which is
+    the open work of the cut beside the chains the storage committed past it.
+    A task that finished before the cut states no outcome here — the checkpoint
+    that cut carries names none of them, so the boot never enumerated them
+    — and the whole history behind the report is the read a caller asks for
+    through the task account's own enumeration, which is linear in that history.
+    The report is empty for an assembly beside no storage.
 
 func (r *Run) ReflectionGate() meditation.WatermarkGate
     ReflectionGate reports the watermark gate of the generation in effect:
@@ -1919,9 +2044,10 @@ func (r *Run) ReflectionInput() meditation.ReflectionInput
     as a fact of the observing agent's own partition, drives that agent's loop
     session with it and reports what became of the turn.
 
-func (r *Run) RegisterStateSlice(holder state.Stateful) (func(), error)
+func (r *Run) RegisterStateSlice(holder state.Stateful) (func() error, error)
     RegisterStateSlice mounts one consumer's recoverable state on the state seam
-    and answers the disposer that unmounts it.
+    and answers the disposer that unmounts it, which refuses by name while the
+    slice still declares unfinished work.
 
 func (r *Run) Rejections() []state.Rejection
     Rejections reports the feedback fact of every notification a target refused,
@@ -2042,6 +2168,7 @@ func NewSettleDriver(
 	lookup func(context.Context, event.EventID) (event.Event, error),
 	wake func() SettleWake,
 	fire func(context.Context, event.Address, event.Event) error,
+	opts ...settleDriverOption,
 ) *SettleDriver
     NewSettleDriver assembles the settle face over the fact lookup of one run,
     the mailbox account of that run and the follow-up drive of its host.

@@ -7,12 +7,14 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/signal"
 	"syscall"
 
 	"github.com/SpellingDragon/tagent/assembly"
+	"github.com/SpellingDragon/tagent/memory/ledger"
 )
 
 func main() {
@@ -32,6 +34,9 @@ func main() {
 	defer cancel()
 
 	host, err := assembly.Boot(path, app.options()...)
+	if errors.Is(err, ledger.ErrJournalLegacyLayout) {
+		fmt.Fprintln(os.Stderr, "hint: migrate the retired root with `go run github.com/SpellingDragon/tagent/scripts/migrate-kv --source <old root> --target <new root>`, then point every agent's memory.path at the new root")
+	}
 	dieIf(err, "Boot the host")
 	defer app.close(host)
 

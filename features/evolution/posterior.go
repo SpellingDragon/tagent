@@ -141,10 +141,9 @@ type Guardrail struct {
 	CriticalCount int
 }
 
-// JudgePolicy is the threshold set of the post-hoc judgment. The wiki defaults
-// are carried by DefaultJudgePolicy, and a zero field means "not set" and folds
-// to that default; a negative rate ceiling explicitly disables that rate
-// criterion instead of pretending it never fires.
+// JudgePolicy is the threshold set of the post-hoc judgment. A zero field means
+// "not set" and folds to that default; a negative rate ceiling explicitly
+// disables that rate criterion instead of pretending it never fires.
 //
 // A rate is a count over the turn count of the version (the real requests
 // recorded as consuming it) and a criterion is breached strictly above its
@@ -178,16 +177,6 @@ const (
 	DefaultDenialRateMax   = 0.3
 	DefaultCriticalRateMax = 0.2
 )
-
-// DefaultJudgePolicy returns the wiki default thresholds.
-func DefaultJudgePolicy() JudgePolicy {
-	return JudgePolicy{
-		MinSamples:      DefaultMinSamples,
-		NegativeRateMax: DefaultNegativeRateMax,
-		DenialRateMax:   DefaultDenialRateMax,
-		CriticalRateMax: DefaultCriticalRateMax,
-	}
-}
 
 // normalized folds one policy into its effective form: a zero field takes the
 // default and a negative rate ceiling stays negative as the explicit "criterion

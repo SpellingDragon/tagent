@@ -32,7 +32,7 @@ func TestJourneyBootForwardsGovernance(t *testing.T) {
 		provider.script(journeyEntryModel, journeyReply{body: journeyToolCall("call-policy-1", "send", callArgs)})
 		provider.scriptAnswers(journeyEntryModel, refusal)
 		host := bootJourney(t, provider,
-			journeySpec{EntryTools: []string{"send"}, MaxTokens: 4096},
+			journeySpec{EntryTools: []string{"send"}, ReplayWindow: 4096},
 			assembly.WithPolicy(governance.Open(
 				governance.WithStrict(),
 				governance.WithRules(governance.RiskRule{
@@ -66,7 +66,7 @@ func TestJourneyBootForwardsGovernance(t *testing.T) {
 		provider.script(journeyEntryModel, journeyReply{body: journeyToolCall("call-strict-1", "send", callArgs)})
 		provider.scriptAnswers(journeyEntryModel, refusal)
 		host := bootJourney(t, provider,
-			journeySpec{EntryTools: []string{"send"}, MaxTokens: 4096},
+			journeySpec{EntryTools: []string{"send"}, ReplayWindow: 4096},
 			assembly.WithEnforcement(governance.EnforcementStrict),
 		)
 		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)

@@ -204,7 +204,8 @@ func runHeadlessOwedRetiredOnBoot(t *testing.T) {
 }
 
 // writeDeliveryRecord commits the durable record of one delivery obligation to a
-// storage root, the state a process of another generation leaves behind.
+// storage root under write rights and hands the root up, the state a process of
+// another generation leaves behind.
 func writeDeliveryRecord(t *testing.T, root string, record owedDeliveryRecord) {
 	t.Helper()
 	payload, err := json.Marshal(record)
@@ -212,8 +213,9 @@ func writeDeliveryRecord(t *testing.T, root string, record owedDeliveryRecord) {
 		t.Fatalf("encode the delivery record %s: %v", record.ID, err)
 	}
 	tier, err := ledger.OpenTier(context.Background(), ledger.StorageConfig{
-		Type: ledger.StorageLocalFile,
-		Root: root,
+		Type:        ledger.StorageLocalFile,
+		Root:        root,
+		WriteRights: true,
 	})
 	if err != nil {
 		t.Fatalf("open the storage tier of %s: %v", root, err)
@@ -224,6 +226,9 @@ func writeDeliveryRecord(t *testing.T, root string, record owedDeliveryRecord) {
 	}
 	if err := facts.Sync(context.Background()); err != nil {
 		t.Fatalf("commit the delivery record %s: %v", record.ID, err)
+	}
+	if err := tier.Close(); err != nil {
+		t.Fatalf("close the staging tier of %s: %v", root, err)
 	}
 }
 

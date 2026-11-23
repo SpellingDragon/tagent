@@ -68,7 +68,7 @@ func TestRequestBudgetEnforced(t *testing.T) {
 		if err != nil {
 			t.Fatalf("AssembleBudget: %v", err)
 		}
-		if len(first) != 1 || !strings.Contains(first[0].Content, "[ticket fact-1:") {
+		if len(first) != 1 || !strings.Contains(first[0].Content, "[evt_fact-1|") {
 			t.Fatalf("first assembly = %+v, want the ticket settlement the budget affords", first)
 		}
 		stale := first[0].Content
@@ -272,7 +272,7 @@ func TestNoticeCardKeepsItsBound(t *testing.T) {
 		if total := contentBytes(tight); total > 240 {
 			t.Fatalf("the request carried %d bytes under a 240-byte budget: %q", total, card)
 		}
-		if !strings.HasPrefix(card, "[notice ") || !strings.HasSuffix(card, ticketText(key)) {
+		if !strings.HasPrefix(card, "[notice ") || !strings.HasSuffix(card, TicketOf(key, event.TypeFeedback)) {
 			t.Fatalf("notice card = %q, want a status frame and the ticket that reaches the original", card)
 		}
 	})
@@ -293,8 +293,8 @@ func TestNoticeCardKeepsItsBound(t *testing.T) {
 		if len(card) > noticeCardChars {
 			t.Fatalf("the notice card carried %d bytes, want at most %d: the ticket is reserved before the status and the head", len(card), noticeCardChars)
 		}
-		if !strings.HasSuffix(card, ticketText(key)) {
-			t.Fatalf("the notice card = %q, want it to end with the whole ticket %q", card, ticketText(key))
+		if !strings.HasSuffix(card, TicketOf(key, event.TypeFeedback)) {
+			t.Fatalf("the notice card = %q, want it to end with the whole ticket %q", card, TicketOf(key, event.TypeFeedback))
 		}
 	})
 
@@ -314,83 +314,10 @@ func TestNoticeCardKeepsItsBound(t *testing.T) {
 		if total := contentBytes(tight); total > 240 {
 			t.Fatalf("the request carried %d bytes under a 240-byte budget: %q", total, card)
 		}
-		if !strings.HasPrefix(ticketText(key), card) {
+		if !strings.HasPrefix(TicketOf(key, event.TypeFeedback), card) {
 			t.Fatalf("the tight notice card = %q, want the ticket the room can carry rather than a card built past its bound", card)
 		}
 	})
-}
-
-// TestFoldDropsTheMaterialOfTheEntriesItFolded pins the cleanup the compaction fold owes the projection's keyed maps.
-//   - a key the summary alone represents keeps neither its kept original, its dedup key nor its consumed mark
-//   - the retained ref keeps its kept original and is appended once, so the rewrite loses no material it still carries
-//   - every key the three maps speak for is a key the entries carry
-//   - the rewritten sequence presents the summary and the retained ref, and nothing of the entries it folded
-//
-// 契约: docs/wiki/agent/event-flow.md#projection-lifecycle
-func TestFoldDropsTheMaterialOfTheEntriesItFolded(t *testing.T) {
-	ctx := context.Background()
-	base := time.Date(2026, 10, 30, 9, 0, 0, 0, time.UTC)
-	projection := NewReplayProjection()
-	for _, entry := range []ProjectionEntry{
-		{Key: "c-in", Type: event.TypeExternalInput, Summary: "in", Content: "输入的原文正文", Time: base},
-		{Key: "c-plan", Type: event.TypeThinkingPlan, Summary: "plan", Content: "计划的原文正文", Time: base.Add(time.Minute)},
-		{Key: "c-cmd", Type: event.TypeActionCommand, Summary: "call", Content: "工具结果的原文正文", Time: base.Add(2 * time.Minute)},
-		{Key: "c-out", Type: event.TypeAgentOutput, Summary: "out", Content: "回答的原文正文", Time: base.Add(3 * time.Minute)},
-		{Key: "c-note", Type: event.TypeFeedback, Summary: "note", Content: "通知的原文正文", Time: base.Add(4 * time.Minute)},
-	} {
-		projection.Append(ctx, entry)
-	}
-	if _, err := projection.Fold(ctx); err != nil {
-		t.Fatalf("Fold: %v", err)
-	}
-
-	for _, key := range []event.EventID{"c-in", "c-plan", "c-out", "c-note"} {
-		if original, kept := projection.Original(key); kept {
-			t.Fatalf("the folded key %q still answers the original %q", key, original)
-		}
-		projection.mu.Lock()
-		_, seen := projection.seen[key]
-		_, consumed := projection.consumed[key]
-		projection.mu.Unlock()
-		if seen || consumed {
-			t.Fatalf("the folded key %q still speaks for material the projection dropped (seen=%v consumed=%v)", key, seen, consumed)
-		}
-	}
-	if consumed := projection.ConsumedKeys(); len(consumed) != 0 {
-		t.Fatalf("consumed keys = %v, want the consumed marks of the folded plans dropped with them", consumed)
-	}
-
-	if original, kept := projection.Original("c-cmd"); !kept || original != "工具结果的原文正文" {
-		t.Fatalf("retained ref c-cmd original = %q kept=%v, want its own text kept", original, kept)
-	}
-	held := projection.Len()
-	projection.Append(ctx, ProjectionEntry{Key: "c-cmd", Type: event.TypeActionCommand, Summary: "call", Content: "工具结果的原文正文", Time: base.Add(2 * time.Minute)})
-	if projection.Len() != held {
-		t.Fatalf("a second append of the retained ref moved the projection: %d -> %d", held, projection.Len())
-	}
-
-	assertMapsSpeakForEntries(t, projection)
-
-	assembled, err := projection.AssembleBudget(ctx, 4096)
-	if err != nil {
-		t.Fatalf("AssembleBudget: %v", err)
-	}
-	var presented strings.Builder
-	for _, entry := range assembled {
-		presented.WriteString(entry.Content)
-		presented.WriteString("\n")
-	}
-	if !strings.Contains(presented.String(), "工具结果的原文正文") {
-		t.Fatalf("assembly = %q, want the retained ref presented from the entry it still carries", presented.String())
-	}
-	if !strings.Contains(presented.String(), "compaction: in; plan; call; out; note") {
-		t.Fatalf("assembly = %q, want the compaction summary presented first", presented.String())
-	}
-	for _, folded := range []string{"输入的原文正文", "计划的原文正文", "回答的原文正文", "通知的原文正文"} {
-		if strings.Contains(presented.String(), folded) {
-			t.Fatalf("assembly still carries %q, want nothing of the entries the summary speaks for", folded)
-		}
-	}
 }
 
 // TestApplyProductsDropsTheMaterialOfTheCoveredEntries pins the same cleanup on the production fold face: the products a consumer applies under PlanByAge.
@@ -525,5 +452,31 @@ func assertMapsSpeakForEntries(t *testing.T, projection *ReplayProjection) {
 		if _, holds := carried[key]; !holds {
 			t.Fatalf("the consumed marks still hold %q, want a key of an entry the projection carries", key)
 		}
+	}
+}
+
+// TestTicketTextIsTheRecallTicketOfTheEntry pins the one ticket form.
+//   - the ticket of a fact key is [evt_<key>|<type>], the form the recall surface parses
+//   - the empty key and the synthetic key of a fold product answer no ticket: the address would answer missing
+//   - the presented view the budget degrades to a shortened entry ends with the same ticket the fold writes
+//
+// 契约: docs/GLOSSARY.md
+func TestTicketTextIsTheRecallTicketOfTheEntry(t *testing.T) {
+	if got, want := TicketOf("02-1-plan", event.TypeActionCommand), "[evt_02-1-plan|action_command]"; got != want {
+		t.Fatalf("TicketOf = %q, want %q: one form, written by one producer", got, want)
+	}
+	for _, key := range []event.EventID{"", "-seg-abc123", "-hist-abc123", "-recovery"} {
+		if got := TicketOf(key, event.TypeActionCommand); got != "" {
+			t.Fatalf("TicketOf(%q) = %q, want no ticket: a key naming no committed fact is an address that answers missing", key, got)
+		}
+	}
+
+	entry := ProjectionEntry{Key: "e-9", Type: event.TypeThinkingPlan, Summary: "plan", Content: strings.Repeat("过程细节。", 40), Time: ageBase}
+	view, ok := presentWithin(entry, entry.Content, 500)
+	if !ok {
+		t.Fatal("the budget presented nothing for an entry it had room to shorten")
+	}
+	if !strings.HasSuffix(view.Content, "\n"+TicketOf(entry.Key, entry.Type)) {
+		t.Fatalf("the shortened view = %q, want it to end with the ticket the fold writes for the same entry", view.Content)
 	}
 }

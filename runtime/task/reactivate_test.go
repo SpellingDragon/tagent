@@ -2,6 +2,7 @@ package task
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"strconv"
 	"sync"
@@ -386,4 +387,58 @@ func reactivationRollbackFact(commit *MemoryCommit, taskID event.TaskID, round i
 		}
 	}
 	return CommitRecord{}, false
+}
+
+// TestRestartReentryReadASettledTaskFromItsChain pins re-entry against the account a restart keeps.
+//   - a task settled before the cut states no checkpoint entry, so the registry holds none until named
+//   - positive: Reentrant reads the settled task back from its chain and admits the re-entry
+//   - positive: Reactivate opens the next round of that same identity from the chain
+//   - negative: an identity no chain holds answers ErrTaskNotFound from both faces
+//
+// 契约: docs/wiki/agent/task-lifecycle.md#status-machine
+func TestRestartReentryReadASettledTaskFromItsChain(t *testing.T) {
+	ctx := context.Background()
+	source, commit := invariantRegistry(t)
+	taskID := invariantRegister(t, source, "call-reentry-restart", "dedup-reentry-restart")
+	if result, err := source.Advance(ctx, taskID, StatusRunning, "run-reentry-restart", nil); err != nil || result != CommitCommitted {
+		t.Fatalf("move the task under way = (%v, %v), want a committed change", result, err)
+	}
+	if result, err := source.Advance(ctx, taskID, StatusSettled, "end-reentry-restart", nil); err != nil || result != CommitCommitted {
+		t.Fatalf("settle the task = (%v, %v), want a committed change", result, err)
+	}
+	payload, err := source.SnapshotCheckpoint(ctx)
+	if err != nil {
+		t.Fatalf("state the account: %v", err)
+	}
+	var stated RegistryCheckpoint
+	if err := json.Unmarshal(payload, &stated); err != nil {
+		t.Fatalf("the snapshot states no readable account: %v", err)
+	}
+	if len(stated.Tasks) != 0 {
+		t.Fatalf("the account states %+v, want no entry: the task finished before the cut and stays on its chain", stated.Tasks)
+	}
+
+	restored := NewMemoryRegistry(commit, NewMemoryAdmission())
+	restored.RestoreChainSource(chainOf{commit: commit, specs: map[event.TaskID]Spec{taskID: source.tasks[taskID].spec}})
+	if err := restored.RestoreCheckpoint(ctx, payload); err != nil {
+		t.Fatalf("put the account back: %v", err)
+	}
+	if err := restored.Reentrant(ctx, taskID); err != nil {
+		t.Fatalf("the restart read the settled task as %v, want the re-entry its chain admits", err)
+	}
+	round, err := restored.Reactivate(ctx, taskID)
+	if err != nil {
+		t.Fatalf("the restart re-entered the settled task beside: %v", err)
+	}
+	if round != 2 {
+		t.Fatalf("the re-entered round = %d, want the second round of the same identity", round)
+	}
+
+	stranger := event.TaskID("task-no-chain-holds")
+	if err := restored.Reentrant(ctx, stranger); !errors.Is(err, ErrTaskNotFound) {
+		t.Fatalf("Reentrant of an identity no chain holds = %v, want %v", err, ErrTaskNotFound)
+	}
+	if _, err := restored.Reactivate(ctx, stranger); !errors.Is(err, ErrTaskNotFound) {
+		t.Fatalf("Reactivate of an identity no chain holds = %v, want %v", err, ErrTaskNotFound)
+	}
 }

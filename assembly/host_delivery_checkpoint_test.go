@@ -748,6 +748,10 @@ func TestCrossSessionObligationsStayInTheirTargetSlice(t *testing.T) {
 		}
 	}
 
+	keptPayload := deliverySlicePayloadOf(t, ctx, run, keptKey)
+	otherPayload := deliverySlicePayloadOf(t, ctx, run, otherKey)
+	endRun(t, run)
+
 	restarted := windowChainRun(t, ctx, storage)
 	restarted.stopCheckpointFiler()
 	recovered := deliveryTestHost(ctx, restarted, newDeliveryTestSender(nil))
@@ -756,8 +760,8 @@ func TestCrossSessionObligationsStayInTheirTargetSlice(t *testing.T) {
 	}
 	sender := recovered.sender.(*deliveryTestSender)
 	if err := restarted.states.RestoreState(ctx, []event.CheckpointSlice{
-		{Name: checkpointSliceDelivery, Payload: deliverySlicePayloadOf(t, ctx, run, keptKey)},
-		{Name: checkpointSliceDelivery, Payload: deliverySlicePayloadOf(t, ctx, run, otherKey)},
+		{Name: checkpointSliceDelivery, Payload: keptPayload},
+		{Name: checkpointSliceDelivery, Payload: otherPayload},
 	}); err != nil {
 		t.Fatalf("restore the delivery checkpoints of the two chains: %v", err)
 	}

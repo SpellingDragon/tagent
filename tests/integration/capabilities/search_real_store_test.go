@@ -104,7 +104,7 @@ func realBodyOf(t *testing.T, ev realStoreEvent) []byte {
 func newRealStoreChain(t *testing.T, embedder memory.Embedder) *realStoreChain {
 	t.Helper()
 	ctx := context.Background()
-	tier, err := ledger.OpenTier(ctx, ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: t.TempDir()})
+	tier, err := ledger.OpenTier(ctx, ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: t.TempDir(), WriteRights: true})
 	if err != nil {
 		t.Fatalf("OpenTier(localfile): %v", err)
 	}

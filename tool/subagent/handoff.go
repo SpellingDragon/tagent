@@ -17,6 +17,7 @@ import (
 	"sort"
 
 	"github.com/SpellingDragon/tagent/api/event"
+	"github.com/SpellingDragon/tagent/memory/replay"
 	"github.com/SpellingDragon/tagent/runtime/agent"
 
 	trpctool "trpc.group/trpc-go/trpc-agent-go/tool"
@@ -167,7 +168,10 @@ func externalMaterial(ctx context.Context, turn Turn, read FactReader) string {
 				body = named.Type
 			}
 			if runes := []rune(body); len(runes) > 128 {
-				body = string(runes[:128]) + "…\n  full text retrievable by segment"
+				body = string(runes[:128]) + "…"
+				if ticket := replay.TicketOf(named.Key, named.Type); ticket != "" {
+					body += "\n" + ticket
+				}
 			}
 			block += fmt.Sprintf("refs:\n- %s\n  %s\n", named.Key, body)
 		}

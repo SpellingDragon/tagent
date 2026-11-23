@@ -33,6 +33,8 @@ import (
 	"github.com/SpellingDragon/tagent/assembly"
 	"github.com/SpellingDragon/tagent/features/evolution/meditation"
 	"github.com/SpellingDragon/tagent/features/rl"
+	"github.com/SpellingDragon/tagent/memory"
+	"github.com/SpellingDragon/tagent/memory/ledger"
 	"github.com/SpellingDragon/tagent/memory/replay"
 	"github.com/SpellingDragon/tagent/runtime/task/approval"
 	tagentexec "github.com/SpellingDragon/tagent/tool/exec"
@@ -531,19 +533,70 @@ func smokeSettleRequestSeen(provider *smokeProvider, marker string) bool {
 }
 
 // smokeSettleNoticeOf 报告请求里那条结算通知的正文，没有时回报空串：通知是循环折成
-// 用户角色帧之外的独立材料，正文以 tagent: task 起、带 settled 字样并携带子 agent 结果。
+// 用户角色帧之外的独立材料，正文先由终态行（tagent: task <task> settled）点名任务与终态，
+// 再由 result 段携带子 agent 的结果正文。请求装配给携带已提交事实键的条目加的票据排在
+// 材料之前（memory/replay/replay_budget.go:334），故先按地址读出材料再判它的两段形态；
+// 结果段必须恰是本次调用的结果正文，别次调用的通知因此不被认成本次结算。
 func smokeSettleNoticeOf(messages []smokeModelMessage, marker string) string {
 	for _, msg := range messages {
 		if msg.Role != string(tagentmodel.RoleUser) {
 			continue
 		}
-		content := strings.TrimSpace(msg.Content)
-		if strings.HasPrefix(content, "tagent: task") && strings.Contains(content, "settled") &&
-			strings.Contains(content, "worker result "+marker) {
-			return content
+		if material, ok := smokeSettleNoticeBody(msg.Content, marker); ok {
+			return material
 		}
 	}
 	return ""
+}
+
+// smokeSettleNoticeIs 报告一条已呈现的正文本身是否就是本次调用的结算通知。通知呈现给
+// 请求有两种形态：循环折成的观察帧是裸正文，请求装配给携带已提交事实键的材料加的票据
+// 排在正文之前。两种形态按同一身份判——通知点名的任务与它携带的结果正文——故同一条
+// 通知换一种形态再投递仍算同一条，计数不因形态而漏。
+func smokeSettleNoticeIs(presented, marker string) bool {
+	_, ok := smokeSettleNoticeBody(presented, marker)
+	return ok
+}
+
+// smokeSettleNoticeBody 报告一条已呈现正文里本次调用通知的材料；它不是本次结算时空串。
+func smokeSettleNoticeBody(presented, marker string) (string, bool) {
+	material, _ := smokePresentedMaterial(strings.TrimSpace(presented))
+	noticeTask, result, notice := smokeSettleNoticeParts(material)
+	if !notice || noticeTask == "" || result != "worker result "+marker {
+		return "", false
+	}
+	return material, true
+}
+
+// smokeSettleNoticeParts 把一条通知材料拆成它点名的任务与它携带的结果正文，形态为
+// 「tagent: task <task> settled\nresult:\n<结果>」。只认这两段，故仅仅提到通知的别样材料
+// 不被读成通知本身，进度通知（"reports progress in round N"）也不被读成结算。
+func smokeSettleNoticeParts(material string) (noticeTask, result string, notice bool) {
+	head, carried, twoParts := strings.Cut(material, "\nresult:\n")
+	if !twoParts {
+		return "", "", false
+	}
+	fields := strings.Fields(head)
+	if len(fields) != 4 || fields[0] != "tagent:" || fields[1] != "task" || fields[3] != "settled" {
+		return "", "", false
+	}
+	return fields[2], carried, true
+}
+
+// smokePresentedMaterial 报告一条呈现消息去掉前置票据之后的材料，并报告是否读到了票据。
+// 装配把条目的事实键与冻结类型渲染成 [evt_<key>|<type>] 排在材料之前；票据按整 token 读
+// （读到闭合的 ] 为止），故键里带 NUL、冒号一类字面字节也不影响切分，没有票据的消息就是
+// 它自己的材料。
+func smokePresentedMaterial(content string) (material string, addressed bool) {
+	rest, framed := strings.CutPrefix(content, "[evt_")
+	if !framed {
+		return content, false
+	}
+	end := strings.Index(rest, "]")
+	if end < 0 || !strings.Contains(rest[:end], "|") {
+		return content, false
+	}
+	return strings.TrimSpace(rest[end+1:]), true
 }
 
 // smokeDelegateAnsweredAlone 报告委派结果是否由一次还没读到结算通知的请求回答：那次
@@ -760,10 +813,14 @@ func smokeResidencySeries(warmupHeap, heapPerRound, virtualPerRound int64, reada
 	return samples
 }
 
-// runSmokeFoldChecks 断言折叠：每个会话的投影都长出合成产物，且早期的用户输入
-// 真的被历史摘要带进了之后某一次请求的上下文。
-// - a session driven only before the restart has no projection; the check skips it
-// - the summary may fold more than once, so only the early input is asserted
+// runSmokeFoldChecks 断言折叠：每个会话的投影都长出合成产物，最早的回合真的被折出
+// 投影（压缩发生），且折出的历史综述进了之后某一次请求的上下文。
+//   - a session driven only before the restart has no projection; the check skips it
+//   - the summary may fold more than once, so the earliest turn's own entry is what is asserted gone: the
+//     product's text is bounded, and the original stays on the chain by its ticket (spec: a folded original is still recallable)
+//   - the summary body stays inside its declared budget: the newest reading is kept and earlier material is summarized by existing product references, so the earliest turn's marker need not remain in the text
+//
+// 契约: docs/wiki/memory/memory-architecture.md#hard-contracts
 func runSmokeFoldChecks(t *testing.T, rig *smokeRig, provider *smokeProvider, obs *smokeObservation) {
 	t.Helper()
 	if planned := smokePlannedRounds(); planned < smokeFoldMinRounds {
@@ -784,16 +841,22 @@ func runSmokeFoldChecks(t *testing.T, rig *smokeRig, provider *smokeProvider, ob
 		early := smokeEarlyPrefix + "-" + chat
 		proof := ""
 		for _, entry := range synthetics {
-			if entry.Type == replay.ProjectionTypeHistorySummary && strings.Contains(entry.Content, early) {
+			if entry.Type == replay.ProjectionTypeHistorySummary && entry.Content != "" {
 				proof = entry.Content
 				break
 			}
 		}
 		if proof == "" {
-			t.Fatalf("session %s folded no history summary carrying %q (products=%d)", chat, early, len(synthetics))
+			t.Fatalf("session %s folded no history summary (%d products)", chat, len(synthetics))
 		}
-		if !smokeUserRequestContains(provider, "external_input: "+early) {
-			t.Fatalf("no model request rendered the history summary carrying %q\nprojection:\n%s\nhistory-summary requests:\n%s",
+		for _, entry := range entries {
+			if entry.Type == event.TypeExternalInput && strings.Contains(entry.Content, early) {
+				t.Fatalf("session %s kept the early input %q whole in the projection beside the fold (%d entries)",
+					chat, early, len(entries))
+			}
+		}
+		if !smokeUserRequestContains(provider, "history summary: ") {
+			t.Fatalf("no model request rendered the folded history summary of %q\nprojection:\n%s\nhistory-summary requests:\n%s",
 				early, smokeEntryDigest(entries), smokeRequestsContaining(provider, "history summary"))
 		}
 		obs.FoldedSessions++
@@ -801,7 +864,7 @@ func runSmokeFoldChecks(t *testing.T, rig *smokeRig, provider *smokeProvider, ob
 		if obs.SyntheticProof == "" {
 			obs.SyntheticProof = proof
 		}
-		t.Logf("[matrix 8] session %s: entries=%d synthetic=%d, the history summary keeps the early input",
+		t.Logf("[matrix 8] session %s: entries=%d synthetic=%d, the fold moved the early input out of the projection",
 			chat, len(entries), len(synthetics))
 	}
 	if obs.FoldedSessions == 0 {
@@ -908,10 +971,14 @@ func smokeRequestsFor(provider *smokeProvider, model string) int {
 	return count
 }
 
-// runSmokeTrajectoryCheck 收尾关闭宿主并核对轨迹：attempts.jsonl 的行数对模型
-// 调用数，seal.json 的清单对最后一次装配的请求数。
-// - every model call the provider served enters attempts.jsonl, delegated worker calls included
-// - the seal accounts for every call of the last boot, entry and delegated alike
+// runSmokeTrajectoryCheck 收尾关闭宿主并核对轨迹：attempts.jsonl 的 attempt 行对
+// 消费决策数（入口与委派子 agent 各一次），请求证据行对同一决策面，seal.json 的清单
+// 对最后一次装配写下的记录数。
+// - every consumption decision the provider served, entry or delegated, lands exactly one attempt line: one loop decision mints one attempt identity (runtime/agent/loop.go attempt-<decision>)
+// - every decision lands exactly one request evidence line, and the decision identity that line carries joins the attempt of that same decision (features/rl/sink.go:296, features/rl/line.go:27)
+// - a band summary request is not a decision: the fold asks the session's model beside the loop, so the request carries no attempt and no evidence line and its answer lands as the fold product's own fact (assembly/summary_gist.go)
+// - the seal accounts for every record the last boot wrote, one attempt and one evidence line per decision
+// - the pairing is read in both directions by decision identity: equal totals cannot hide one duplicated evidence line beside one decision with none
 func runSmokeTrajectoryCheck(t *testing.T, rig *smokeRig, cfg *smokeConfig, provider *smokeProvider, obs *smokeObservation) {
 	t.Helper()
 	obs.CloseErr = rig.close()
@@ -936,19 +1003,77 @@ func runSmokeTrajectoryCheck(t *testing.T, rig *smokeRig, cfg *smokeConfig, prov
 	if seal.Dropped != 0 {
 		t.Fatalf("the trajectory capture dropped %d record(s)", seal.Dropped)
 	}
-	total := provider.count()
-	if got := trajectory.Records; got != total {
-		t.Fatalf("attempts.jsonl = %d lines against %d model calls (worker calls=%d): every call, entry or delegated, must enter the trajectory\nattempt heads:\n%s\nrequests:\n%s",
-			got, total, obs.WorkerRequests, strings.Join(trajectory.Heads, "\n"), smokeRequestHeads(provider))
+	lines, err := smokeIntegrityAttemptLines(cfg.StorageRoot)
+	if err != nil {
+		t.Fatalf("read the record lines under %s: %v", cfg.StorageRoot, err)
 	}
-	lastBoot := total - obs.RestartRequests
-	lastBootWorker := obs.WorkerRequests - obs.RestartWorkerRequests
-	if got := int(seal.Records); got != lastBoot {
-		t.Fatalf("seal records = %d against the %d model calls of the last boot (%d total, %d worker calls): the seal must account for every call of its boot\nattempt heads:\n%s\nrequests:\n%s",
-			got, lastBoot, total, lastBootWorker, strings.Join(trajectory.Heads, "\n"), smokeRequestHeads(provider))
+	attempts, requests := smokeIntegrityRecordKinds(t, lines)
+	if len(lines) != trajectory.Records {
+		t.Fatalf("the read-back counts %d record(s) and the file holds %d line(s)", trajectory.Records, len(lines))
 	}
-	t.Logf("[matrix 12] trajectory reconciled: attempts=%d model-calls=%d entry-calls=%d sub-agent-calls=%d seal-records=%d last-boot-calls=%d files=%d sealed=%t",
-		trajectory.Records, total, total-obs.WorkerRequests, obs.WorkerRequests, seal.Records, lastBoot, len(seal.Files), seal.Sealed)
+	calls := provider.count()
+	summaries, restartSummaries := smokeBandSummaryCalls(provider.recorded(), obs.RestartRequests)
+	decisions := calls - summaries
+	lastBootDecisions := (calls - obs.RestartRequests) - (summaries - restartSummaries)
+	t.Logf("[matrix 12] trajectory accounted: lines=%d attempts=%d request-evidence=%d model-calls=%d band-summaries=%d decisions=%d entry-calls=%d sub-agent-calls=%d seal-records=%d last-boot-decisions=%d files=%d sealed=%t",
+		len(lines), attempts, requests, calls, summaries, decisions, decisions-obs.WorkerRequests, obs.WorkerRequests,
+		seal.Records, lastBootDecisions, len(seal.Files), seal.Sealed)
+	if attempts != decisions {
+		t.Fatalf("attempt lines = %d against %d decisions (%d model calls, %d of them band summaries that are not decisions; worker calls=%d): every decision, entry or delegated, must enter the trajectory once\nattempt heads:\n%s\nrequests:\n%s",
+			attempts, decisions, calls, summaries, obs.WorkerRequests, strings.Join(trajectory.Heads, "\n"), smokeRequestHeads(provider))
+	}
+	if requests != decisions {
+		t.Fatalf("request evidence lines = %d against %d decisions (%d model calls, %d band summaries): every decision lands one request evidence line\nattempt heads:\n%s\nrequests:\n%s",
+			requests, decisions, calls, summaries, strings.Join(trajectory.Heads, "\n"), smokeRequestHeads(provider))
+	}
+	attemptsOf := make(map[event.DecisionID]int, attempts)
+	evidenceOf := make(map[event.DecisionID]int, requests)
+	for _, line := range lines {
+		switch line.Kind {
+		case rl.RecordKindAttempt:
+			attemptsOf[line.Attempt.DecisionID]++
+		case rl.RecordKindRequest:
+			evidenceOf[line.RequestEvidence().DecisionID]++
+		}
+	}
+	for decision, count := range attemptsOf {
+		if count != 1 {
+			t.Fatalf("decision %s carries %d attempt lines, want one", decision, count)
+		}
+	}
+	for decision, count := range evidenceOf {
+		if count != 1 {
+			t.Fatalf("decision %s carries %d request evidence lines, want one", decision, count)
+		}
+		if attemptsOf[decision] != 1 {
+			t.Fatalf("request evidence names decision %s, which carries no attempt line", decision)
+		}
+	}
+	for decision := range attemptsOf {
+		if evidenceOf[decision] != 1 {
+			t.Fatalf("decision %s carries an attempt line and no request evidence line", decision)
+		}
+	}
+	if got, want := int(seal.Records), 2*lastBootDecisions; got != want {
+		t.Fatalf("seal records = %d against the %d record(s) the %d decisions of the last boot wrote (%d decisions total, %d band summaries, %d worker calls): the seal must account for every record of its boot\nattempt heads:\n%s\nrequests:\n%s",
+			got, want, lastBootDecisions, decisions, summaries, obs.WorkerRequests-obs.RestartWorkerRequests, strings.Join(trajectory.Heads, "\n"), smokeRequestHeads(provider))
+	}
+}
+
+// smokeBandSummaryCalls 数出发给端点却不成决策的请求：老带的语义摘要是折叠拿会话自己
+// 的模型求 gist，不算一轮决策（smokeBandSummaryMaterial 的判据即台架回答摘要请求的
+// 判据）。restart 之前的摘要请求数单独报出，供最后一次装配的账目使用。
+func smokeBandSummaryCalls(requests []smokeModelRequest, restart int) (summaries, restartSummaries int) {
+	for index, req := range requests {
+		if _, summary := smokeBandSummaryMaterial(req.Messages, req.Tools); !summary {
+			continue
+		}
+		summaries++
+		if index < restart {
+			restartSummaries++
+		}
+	}
+	return summaries, restartSummaries
 }
 
 // smokeUserTurnsMatching 报告最后一条用户消息恰为该文本的模型请求数。
@@ -977,6 +1102,27 @@ func smokeUserRequestContains(provider *smokeProvider, want string) bool {
 		}
 	}
 	return false
+}
+
+// smokePresentedContent 剥离一张已签呈现票据并交回正文：带已签事实键的投影条目前置
+// [evt_<KEY>|<type>] 票据（D8.1-H05 单一渲染器，presentedProjectionContent），读断言须按
+// 票据后的正文比。只剥一张且要求键、类型与分隔空格俱全；空键、空类型、缺分隔空格、
+// 半截票据一律原样交回，故"剥到首个空格"的宽松读法不会冒充本读法。
+func smokePresentedContent(content string) string {
+	const open = "[evt_"
+	if !strings.HasPrefix(content, open) {
+		return content
+	}
+	rest := content[len(open):]
+	bar := strings.Index(rest, "|")
+	if bar <= 0 {
+		return content
+	}
+	closing := strings.Index(rest[bar:], "] ")
+	if closing <= 1 {
+		return content
+	}
+	return rest[bar+closing+2:]
 }
 
 // smokeAnyRequestContains 报告是否有一次模型请求读到给定子串。
@@ -2306,30 +2452,22 @@ func smokeIntegrityFoldBoundary(t *testing.T, rig *smokeRig, chat string) []repl
 func smokeIntegrityRebuildProjection(t *testing.T, rig *smokeRig, chat string) *replay.ReplayProjection {
 	t.Helper()
 	session := rig.addressOf(chat).SessionID
-	chainKey := replay.ChainKey{PartitionID: 1, SessionID: session}
-	chain := replay.NewMemoryEventChain()
+	rebuilt := replay.NewReplayProjection()
 	err := rig.host.Run().EachSessionFact(context.Background(), event.Address{SessionID: session}, func(evt event.Event) error {
 		if evt.Type == event.CompressRequestType || evt.Message.Content == "" {
 			return nil
 		}
-		if err := chain.Commit(context.Background(), replay.ChainFact{
+		rebuilt.Append(context.Background(), replay.ProjectionEntry{
 			Key:     evt.Key,
-			Chain:   chainKey,
 			Type:    evt.Type,
 			Summary: smokeIntegrityChainSummary(evt.Meta[event.MetaKeyEventSummary], evt.Message.Content),
 			Content: evt.Message.Content,
 			Time:    evt.Timestamp,
-		}); err != nil {
-			t.Fatalf("commit the chain fact %s: %v", evt.Key, err)
-		}
+		})
 		return nil
 	})
 	if err != nil {
 		t.Fatalf("read the committed chain of %s: %v", chat, err)
-	}
-	rebuilt := replay.NewReplayProjection()
-	if _, err := replay.RebuildProjectionFromWAL(context.Background(), rebuilt, chain, &replay.MemoryRelations{}, chainKey, replay.RebuildOptions{}); err != nil {
-		t.Fatalf("rebuild the projection from the session chain: %v", err)
 	}
 	return rebuilt
 }
@@ -3221,7 +3359,7 @@ func smokeIntegrityWaitStandingSummary(t *testing.T, rig *smokeRig, chat string)
 
 // smokeIntegrityAssertFold 驱动小窗口折叠并断言三件事：投影长出带早期输入的历史
 // 摘要、触发轮之后的请求真的读到了综述、原文在事实链上逐字节仍在而投影已用
-// 综述取代它。体积断言取文档声明的窗口（max_tokens 2000 × 4 × 0.3）。
+// 综述取代它。体积断言取文档声明的窗口（replay_window 2000 × 4 × 0.3）。
 //
 // 原文按身份从已提交的事实链上读回，而不是从热窗上找：折叠按契约把被覆盖的原文
 // 移出热窗（热窗只保留投影仍呈现的原文），事实链本身不随之减少。返回的 original
@@ -3677,9 +3815,9 @@ func TestEventIntegrityLongRun(t *testing.T) {
 				if fault.StorageProbe == "" {
 					t.Fatalf("the storage deny fault @%s/round%d left no denied write probe", fault.Session, fault.Round)
 				}
-				if fault.FactsAfter < fault.FactsBefore {
-					t.Fatalf("facts went backwards under the storage deny: %d→%d", fault.FactsBefore, fault.FactsAfter)
-				}
+				smokeLongDenyKeptCommittedFacts(t, report, fault)
+				t.Logf("[negative] the storage deny @%s/round%d left the live window at %d→%d facts (recorded, not judged: the window releases what the chain keeps)",
+					fault.Session, fault.Round, fault.FactsBefore, fault.FactsAfter)
 			case smokeLongFaultModel:
 				if fault.AnswerBody == "" && fault.DriveError == "" && fault.NamedLogs == 0 {
 					t.Fatalf("the model fault @%s/round%d left no user-visible or named failure", fault.Session, fault.Round)
@@ -3745,23 +3883,167 @@ func TestEventIntegrityLongRun(t *testing.T) {
 	})
 
 	t.Run("restart-evidence", func(t *testing.T) {
-		counts, missing, err := smokeLongScanEvidence(report.ChildLogs)
+		smokeLongRestartEvidence(t, report)
+	})
+}
+
+// smokeLongRestartEvidence 钉住重启证据的两面：scan 五行须齐，数据族前缀须证明耐久载荷被读过。
+func smokeLongRestartEvidence(t *testing.T, report *smokeLongReport) {
+	t.Helper()
+	counts, missing, err := smokeLongScanEvidence(report.ChildLogs)
+	if err != nil {
+		t.Fatalf("read the host logs: %v", err)
+	}
+	if len(missing) > 0 {
+		t.Fatalf("the host logs under %s carry no durable load scan line for %v over %d generations: "+
+			"the restart evidence has no producer, so the shard can never attest",
+			report.RunDir, missing, len(report.ChildLogs))
+	}
+	for _, prefix := range smokeLongScanDataPrefixes {
+		proved, err := smokeLongScanProvesFamily(report.ChildLogs, counts, prefix)
 		if err != nil {
 			t.Fatalf("read the host logs: %v", err)
 		}
-		if len(missing) > 0 {
-			t.Fatalf("the host logs under %s carry no durable load scan line for %v over %d generations: "+
-				"the restart evidence has no producer, so the shard can never attest",
-				report.RunDir, missing, len(report.ChildLogs))
+		if proved {
+			continue
 		}
-		for _, prefix := range smokeLongScanDataPrefixes {
-			if counts[prefix] <= 0 {
-				t.Fatalf("every durable load read %d keys under %s: the restarts proved nothing about that chain",
-					counts[prefix], prefix)
+		t.Fatalf("every durable load read 0 keys under %s and no seat states the account that covers it: "+
+			"the restarts proved nothing about that chain", prefix)
+	}
+	t.Logf("[restart-evidence] generations=%d scans=%v", len(report.ChildLogs), counts)
+}
+
+// smokeLongScanProvesFamily 报告一个数据族前缀的读面确被行使：族前缀全量扫与按任务身份读
+// 任一有键即算，二者皆零时须有 seat 行解释账目的零读。
+func smokeLongScanProvesFamily(paths []string, counts map[string]int, prefix string) (bool, error) {
+	if smokeLongScanKeysRead(counts, prefix) > 0 {
+		return true, nil
+	}
+	return smokeLongScanSeatExplainsZero(paths)
+}
+
+// smokeLongScanKeysRead 汇总一个族前缀读到的键：族前缀的全量扫与按任务身份读都计入该族。
+func smokeLongScanKeysRead(counts map[string]int, prefix string) int {
+	keys := counts[prefix]
+	for seen, held := range counts {
+		if seen != prefix && strings.HasPrefix(seen, prefix) {
+			keys += held
+		}
+	}
+	return keys
+}
+
+// smokeLongSeatMarker 是 boot 声明其任务账户 seat 读路径的行前缀。
+const smokeLongSeatMarker = "tagent: boot seated the task account tasks="
+
+// smokeLongScanSeatExplainsZero 报告代日志是否有 seat 行解释族前缀的零读：有界 seat 由
+// checkpoint 覆盖账目，整日志 seat 只解释空账目，且须有 seat 声明过非空账目。
+func smokeLongScanSeatExplainsZero(paths []string) (bool, error) {
+	explained, seated := false, false
+	for _, path := range paths {
+		payload, err := os.ReadFile(path)
+		if err != nil {
+			return false, fmt.Errorf("read the host log %s: %v", path, err)
+		}
+		for _, line := range strings.Split(string(payload), "\n") {
+			at := strings.Index(line, smokeLongSeatMarker)
+			if at < 0 {
+				continue
+			}
+			digits, rest, ok := strings.Cut(line[at+len(smokeLongSeatMarker):], " tail=")
+			if !ok {
+				continue
+			}
+			tasks, err := strconv.Atoi(strings.TrimSpace(digits))
+			if err != nil {
+				continue
+			}
+			tail, _, _ := strings.Cut(rest, " ")
+			if tasks > 0 {
+				seated = true
+			}
+			if tail != "none" || tasks == 0 {
+				explained = true
 			}
 		}
-		t.Logf("[restart-evidence] generations=%d scans=%v", len(report.ChildLogs), counts)
-	})
+	}
+	return explained && seated, nil
+}
+
+// smokeLongDenyKeptCommittedFacts 钉住存储拒写点的契约：故障轮之前驱动的每条输入事实，
+// 在拒写之后的链上仍按身份读得出、正文与驱动的字节逐字相同。活窗计数只作记录，判断
+// 不取它；读回发生在整轮长跑结束后，故障之后任何一次丢失都落在这条断言上。
+func smokeLongDenyKeptCommittedFacts(t *testing.T, report *smokeLongReport, fault smokeLongFaultOutcome) {
+	t.Helper()
+	var plan smokeCalibrationPlan
+	if err := smokeCalibrationReadJSON(report.PlanPath, &plan); err != nil {
+		t.Fatalf("read the long-run plan %s: %v", report.PlanPath, err)
+	}
+	want := make([]string, 0, fault.Round)
+	for _, step := range plan.Timeline {
+		if step.Kind != "input" || step.Session != fault.Session || step.Index >= fault.Round {
+			continue
+		}
+		want = append(want, step.Text)
+	}
+	if len(want) == 0 {
+		t.Fatalf("the plan carries no input of %s before round %d: the deny round pins nothing", fault.Session, fault.Round)
+	}
+	texts, identities := smokeLongDurableChainTexts(t, plan.StorageRoot, fault.Session)
+	if identities == 0 {
+		t.Fatalf("the storage tier holds no committed fact of %s: the deny round pins nothing", fault.Session)
+	}
+	for _, text := range want {
+		if texts[text] {
+			continue
+		}
+		t.Fatalf("the input %q driven before the storage deny is not readable by identity after it: "+
+			"want every committed fact still readable by identity across the storage deny: the live window may release what the chain keeps",
+			smokeLongClip(text, 96))
+	}
+	t.Logf("[negative] %s holds %d identities on the chain; the %d inputs driven before round %d read back byte for byte after the storage deny",
+		fault.Session, identities, len(want), fault.Round)
+}
+
+// smokeLongDurableChainTexts 按身份读回一条会话的耐久链：返回链上每条事实的正文集合与
+// 读回的身份数。一条身份读不出正文即按名失败，读的是存储层的身份读，不经活窗。
+func smokeLongDurableChainTexts(t *testing.T, root, chat string) (map[string]bool, int) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	defer cancel()
+	tier, err := ledger.OpenTier(ctx, ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: root})
+	if err != nil {
+		t.Fatalf("open the storage tier %s: %v", root, err)
+	}
+	defer func() {
+		if err := tier.Close(); err != nil {
+			t.Errorf("close the storage tier %s: %v", root, err)
+		}
+	}()
+	texts := make(map[string]bool, 4096)
+	identities := 0
+	if err := tier.Segments.EachIndexNewestFirst(ctx, func(key event.EventID, partition int, seq int64, typ string, session event.SessionID) error {
+		if typ == string(event.TypeCheckpoint) || !strings.HasSuffix(string(session), ":"+chat) {
+			return nil
+		}
+		stored, found, err := tier.Segments.GetEvent(ctx, key)
+		if err != nil {
+			return err
+		}
+		if !found {
+			return fmt.Errorf("the committed fact %s names no body: %w", key, ledger.ErrSegmentBodyMissing)
+		}
+		body, err := memory.DecodeEventBody(stored.Body)
+		if err != nil {
+			return err
+		}
+		identities++
+		texts[body.Event().Message.Content] = true
+		return nil
+	}); err != nil {
+		t.Fatalf("read the committed chain of %s by identity under %s: %v", chat, root, err)
+	}
+	return texts, identities
 }
 
 // TestLocalSmokeInjectedSession 验证可选 session 字段的注入驱动独立会话。
@@ -4263,8 +4545,8 @@ agents:
     model: %s
     tools:
       - { kind: tool, id: exec }
-    max_tokens: %d
-    provider_context_window: %d
+    replay_window: %d
+    context_window: %d
     exec:
       monitor: { interval: 50ms, stable_duration: 150ms, interactive_stable_duration: 150ms, fake_dead_duration: 700ms }
 storage: { type: localfile, root: %s }
@@ -4284,7 +4566,7 @@ app:
     approvers: [%s]
 `,
 		smokeSessionTag, c.Model, c.PromptDir, c.Endpoint,
-		smokeSessionTag, c.Model, c.maxTokens(), c.maxTokens()*2,
+		smokeSessionTag, c.Model, c.replayWindow(), c.replayWindow()*2,
 		c.StorageRoot, c.ApprovalDir,
 		c.ConfigDir, filepath.Join(c.ConfigDir, "token.json"), c.ContextDir,
 		c.WorkspaceDir, smokeApproverChat,
@@ -4655,4 +4937,131 @@ func symptomDeliveryRefusalFact(t *testing.T, rig *smokeRig, chat string) event.
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
+}
+
+// smokeSettleNoticeKey 是 CI 制品里真实到达模型的那条通知材料键的形态（run 43706847576
+// 的 event-integrity-long(1,32768) 制品 generations/provider-requests-failed.json 第 139 条
+// 请求的 last_user_text）。键由通知的范围身份与四元身份拼成，故它含 NUL 与冒号
+// （runtime/agent/loop.go:451 NoticeFactKey 与 :459 noticeKeyPrefix），票据因此只能按整
+// token 读：读到闭合的 ] 为止，不按键里的字面字节切。
+//
+// 结算通知呈现面的识别：到达模型的那条通知有两种呈现形态——循环折成的观察帧是裸正文，
+// 请求装配给携带已提交事实键的条目加的地址则是正文前的票据
+// （memory/replay/replay_budget.go:334 TicketOf）。识别按事实本身判——通知头（task 与终态）
+// 加本次调用的结果正文——不按整条正文的前缀判，也不把别次调用的材料认成本次结算。
+//
+// 契约: docs/wiki/agent/event-flow.md#projection-lifecycle
+const smokeSettleNoticeKey = "notice\x0057\x00notice:task-58eed042f932181630c80df4aa2ec913:1:settled:0\x00task-58eed042f932181630c80df4aa2ec913"
+
+// smokeSettleNoticeText 渲染一条结算通知的正文，与生产渲染同形
+// （assembly/host.go:1461 settleNoticeText）：终态行在前，携带的结果正文另起一行。
+func smokeSettleNoticeText(marker string) string {
+	return "tagent: task task-58eed042f932181630c80df4aa2ec913 settled\nresult:\nworker result " + marker
+}
+
+// smokeSettleNoticeTicket 渲染那条通知在请求呈现面拿到的票据。材料事实由
+// assembly/host.go:1429 以 event.TypeFeedback 提交，故票据类型即该类型。
+func smokeSettleNoticeTicket(t *testing.T) string {
+	t.Helper()
+	ticket := replay.TicketOf(smokeSettleNoticeKey, event.TypeFeedback)
+	if ticket == "" {
+		t.Fatalf("the notice material key %q answers no ticket, so the fixture presents no address", smokeSettleNoticeKey)
+	}
+	return ticket
+}
+
+// smokeDelegateRequest 是一次已带工具结果、正在等结算的请求材料：委派输入在前，结算
+// 通知（若到）居中，工具结果帧殿后。并合形态正是这一形态——通知与工具结果并进同一次
+// 消费批次，末条消息因此是工具结果帧而不是通知（CI 制品第 139 条请求即此形态：通知是
+// 最新一条用户材料，请求末条是工具结果）。
+func smokeDelegateRequest(marker string, notices ...string) []smokeModelMessage {
+	messages := make([]smokeModelMessage, 0, 2+len(notices))
+	messages = append(messages, smokeModelMessage{
+		Role: string(tagentmodel.RoleUser), Content: marker + " smoke delegate artifact",
+	})
+	for _, notice := range notices {
+		messages = append(messages, smokeModelMessage{Role: string(tagentmodel.RoleUser), Content: notice})
+	}
+	return append(messages, smokeModelMessage{
+		Role: string(tagentmodel.RoleTool), Content: "ok", ToolCallID: "call-worker-" + marker,
+	})
+}
+
+// TestSettlementNoticeRecognizesPresentedFact 钉住：带票据呈现的结算通知与裸正文形态都被认成结算，脚本模型因此答 settle-ack 而不是走普通委派答复。
+func TestSettlementNoticeRecognizesPresentedFact(t *testing.T) {
+	const marker = "SMOKE-R10097"
+	notice := smokeSettleNoticeText(marker)
+	ticket := smokeSettleNoticeTicket(t)
+	ticketed := ticket + " " + notice
+
+	t.Run("ticketed_notice_is_the_settlement", func(t *testing.T) {
+		messages := smokeDelegateRequest(marker, ticketed)
+		if got := smokeSettleNoticeOf(messages, marker); got != notice {
+			t.Fatalf("the ticketed settlement notice read as %q, want the notice body %q\npresented content:\n%s",
+				got, notice, ticketed)
+		}
+	})
+
+	t.Run("bare_notice_is_still_the_settlement", func(t *testing.T) {
+		messages := smokeDelegateRequest(marker, notice)
+		if got := smokeSettleNoticeOf(messages, marker); got != notice {
+			t.Fatalf("the bare settlement notice read as %q, want the notice body %q", got, notice)
+		}
+	})
+
+	t.Run("the_scripted_model_closes_the_segment_with_the_settle_answer", func(t *testing.T) {
+		messages := smokeDelegateRequest(marker, ticketed)
+		answer := (&smokeProvider{}).answerFor(smokeEntryModel, messages, nil, 1)
+		if !strings.Contains(answer, "settle-ack "+marker) {
+			t.Fatalf("the request carrying the ticketed notice answered %q, want the closing settle-ack: the notice reached the model", answer)
+		}
+		if strings.Contains(answer, "delegate ack ") {
+			t.Fatalf("the request carrying the ticketed notice answered %q: it read the settlement as an ordinary delegation", answer)
+		}
+	})
+}
+
+// TestSettlementNoticeRejectsOtherCallMaterial 钉住：别次调用的通知与只提到通知的别样材料都不被认成本次结算，真正缺失结算的工具结果也不被认成结算。
+func TestSettlementNoticeRejectsOtherCallMaterial(t *testing.T) {
+	const marker, other = "SMOKE-R10097", "SMOKE-R10096"
+	ticket := smokeSettleNoticeTicket(t)
+
+	t.Run("another_call_ticketed_notice_is_not_this_call", func(t *testing.T) {
+		messages := []smokeModelMessage{
+			{Role: string(tagentmodel.RoleUser), Content: ticket + " " + smokeSettleNoticeText(other)},
+		}
+		if got := smokeSettleNoticeOf(messages, marker); got != "" {
+			t.Fatalf("the notice of %s read as the settlement of %s: %q", other, marker, got)
+		}
+		if got := smokeSettleNoticeOf(messages, other); got != smokeSettleNoticeText(other) {
+			t.Fatalf("the notice of %s read as %q, want its own body: the marker decides whose settlement it is", other, got)
+		}
+	})
+
+	t.Run("another_call_bare_notice_is_not_this_call", func(t *testing.T) {
+		messages := []smokeModelMessage{
+			{Role: string(tagentmodel.RoleUser), Content: smokeSettleNoticeText(other)},
+		}
+		if got := smokeSettleNoticeOf(messages, marker); got != "" {
+			t.Fatalf("the bare notice of %s read as the settlement of %s: %q", other, marker, got)
+		}
+	})
+
+	t.Run("material_that_only_mentions_the_notice_is_not_the_notice", func(t *testing.T) {
+		messages := []smokeModelMessage{
+			{Role: string(tagentmodel.RoleUser), Content: ticket + " " +
+				marker + " business note\nquoted: " + smokeSettleNoticeText(marker)},
+		}
+		if got := smokeSettleNoticeOf(messages, marker); got != "" {
+			t.Fatalf("material that only quotes the notice read as the settlement itself: %q", got)
+		}
+	})
+
+	t.Run("a_request_without_a_settlement_answers_the_delegation", func(t *testing.T) {
+		answer := (&smokeProvider{}).answerFor(smokeEntryModel, smokeDelegateRequest(marker), nil, 1)
+		if !strings.Contains(answer, "delegate ack "+marker) {
+			t.Fatalf("the tool result beside no settlement answered %q, want the delegation answer: a missing settlement must not pass",
+				answer)
+		}
+	})
 }

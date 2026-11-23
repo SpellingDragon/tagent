@@ -43,11 +43,17 @@ func replayedStatus(status Status) Status {
 // The round a task is at is not readable from the chain alone — folding a chain
 // advances the round past the notices it carries — so a round-scoped read would
 // answer differently for a live task and for the task restored from its own
-// chain. The chain-wide read is the one both faces agree on.
+// chain. The chain-wide read is the one both faces agree on. A task the newest
+// checkpoint stated no entry for is read back from its chain here, so a restart
+// derives the progress read of a finished task from the record it committed
+// instead of answering that the task is unknown.
 func (r *MemoryRegistry) ProgressReported(ctx context.Context, taskID event.TaskID) (bool, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	entry, ok := r.tasks[taskID]
+	entry, ok, err := r.hydrateLocked(ctx, taskID)
+	if err != nil {
+		return false, err
+	}
 	if !ok {
 		return false, ErrTaskNotFound
 	}

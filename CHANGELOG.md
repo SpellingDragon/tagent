@@ -5,42 +5,42 @@
 
 ## [Unreleased]
 
+### Changed（runtime-coherence：状态/装配/存储三线收敛，2026-11-22）
+
+- **修复“复杂实现外泄为复杂架构”的五条主链路**：任务在线与恢复共用 `applyFactLocked`（reactivate/resume 开轮与 awaiting-tool 义务同态；时间戳/唤醒仍在 apply 外）；重复事实语义由链的呈现边界判定（`chainAlreadyPresented`：已折叠材料不重述、不移动已完成范围）；`Boot` 转交调用者插件工厂、代际注册与状态切片，未支持的 12 个 HostOption 具名拒；新增公开入口 `WithStateSlice`（框架切片名保留具名拒），未被恢复 cut 覆盖的非内置持有者触发本次 boot 全链回放（reducer 按身份幂等，稳态有界不变）；存储已知键点读经消费者侧 `pointReadLog` 窄口（`FactLog` 公开面不变、缺席具名拒），派生索引 `order.line` 走查做进入键身份校验、失效回退不修盘；审批裁决先提交后镜像（未提交/不确定/已提交镜像失败三态，失败保未决不放行）；管线声明的 `Governor` 仅 `PortCallRuling` 参与裁决，未声明时回落 `WithPolicy`。
+- **影响范围**：`assembly`（Boot 装配、checkpoint 恢复序与覆盖判定、facts 重复语义、Governor 裁决）、`runtime/task`（lifecycle/restore/reactivate）、`runtime/task/approval`、`features/evolution/governance`、`memory/ledger`（索引走查）、`api/durable` 文档口径；`WithPlugins` 由赋值改追加（声明序即执行序、各工厂恰一次）；CI `archive-preflight` 增加固定版本 OpenSpec CLI 安装。
+- **触发条件**：任何重启恢复、经 `Boot` 装配贡献插件/状态切片、重复提交或重试、审批回答写失败、派生索引损坏、管线内声明 Governor 的调用。
+- **自查方法**：`go test ./assembly -run '^(TestSymptomAnchorHostBootMountsContributedPlugin|TestSymptomAnchorFailedRulingKeepsTheHold|TestUncoveredContributedSliceReplaysTheWholeChain|TestCoveredContributedSliceKeepsTheBoundedBoot|TestGovernorDeclaredInThePipelineRulesTheCall)$' -count=1` exit 0；`go test ./runtime/task -run '^(TestTaskOnlineAndRestoreApplyOneRule|TestReactivatedTaskKeepsItsExecutionObligationAcrossRestore)$' -count=1` exit 0；`python3 scripts/gates/check_event_integrity_mutations.py --all --json --out /tmp/m` 23/23 killed。
+
+### Changed（runtime-recovery-ideal：退位分层删除，存储面只读一份日志，2026-11-16）
+
+- **退位分层机制整体删除，存储面只读一份日志**：`RetireFacts`／`relocate`／`keptHotKeys`／`RelocateReport`／`coldDirName`／`WithRetirement`／`WithColdRoot`／`ColdReadCost`／`ColdWriteCost`／`ErrColdArchiveUnavailable` 与其测试整批删除，框架内不留任何兼容分支（无冷档检测谓词、无遗留具名错误、无退位配置开关）；带 `cold/kv/journal.log` 的旧根由操作方显式折入新根——`go run ./scripts/fold-cold-root -source <旧根> -root <新根>`（默认干跑，`-restore` 才写；源根只读须离线、目标根须空、一根一写者以 `ErrRootWriteLocked` 拒、`file` 档按 `ErrBatchNotAtomic` 无事实可折，详见 `docs/OPERATION.md` §七·F）；只读视图不再截断在写帧——裁剪只发生在持写权的开档，撕裂尾字节经 `TornTailBytesOpen() (int64, bool)` 具名报告；开档只重放上次索引陈述水位以来的窗口（键→位置由槽表、提交序由 `order.log` 回答，两者均可从日志重建），派生索引不可信时退化读链（整篇重放＋具名通知，零写盘不变），表头声明字节数大于日志实长仍 `ErrJournalCorrupt` 拒绝；本构建不承诺 `journal.log` 有界，也不承诺压实。**影响范围**：`memory/ledger`（开档与读面）、`assembly`（`relocatableStorage` 及其调用点）、`tests/integration/history`、`scripts/fold-cold-root`、`scripts/recover-kv` 的诊断输出，以及任何以「磁盘有界」为前提的文档与判定口径（`session-checkpoint-material` 的「派生态有界且不删除已提交事实」）。**触发条件**：任何持久 journal 根的开档与提交；用本构建服务退位时代产出过冷档的既有根；崩溃后残留半帧；任何以「磁盘有界」为前提的承诺。**自查方法**：`grep -rn 'RetireFacts\|relocate\|keptHotKeys\|RelocateReport\|WithRetirement\|ColdReadCost\|ColdWriteCost' --include='*.go' .` 零命中，`go test ./scripts/fold-cold-root/ -count=1` exit 0，`go test ./memory/ledger/ -run 'TestJournalOpenReadStatesTheWindowPastTheWatermark|TestJournalWindowStaysWithinTheLogBudget' -count=1` exit 0，且 `grep -rn '热 journal 有界\|热层有界\|journal 物理有界' docs/ openspec/changes/runtime-recovery-ideal/` 零命中。
+
+### Changed（config-surface-normalization：配置面预算归位，2026-11-13）
+
+- **预算两键归位，`max_tokens` 收回输出限**：声明面回放窗键 `max_tokens` 更名 `replay_window`（只管折叠节律）；预算容量键 `provider_context_window` 更名 `context_window`（预算门唯一来源）；`max_tokens` 一名收回为真实输出限，经 decorate 送达 `GenerationConfig.MaxTokens`，与预算预留同一来源；删除 `output_reserve`/`DefaultOutputReserveDivisor`/`OutputReserveOf` 与死字段 `AgentSpec.Params`（连带 `canonicalFloat` 级联）。预算门语义：`context_window>0` 才开门，未声明即门闭整包发；输出限未声明则预留 0，不再凭空按回放窗 1/4 派生。**影响范围**：`api/config`（`AgentSpec` 声明与解码）、`assembly`（预算门/预留/decorate）、`runtime/agent`、`examples/wechat-bot/tagent.yaml` 与全部消费者文档。**触发条件**：任何声明了 `replay_window`/`context_window`/`max_tokens` 的 agent 配置，或读旧键名的外部配置。**自查方法**：`go test ./assembly -run 'TestSymptomAnchor(PhantomReserve|ReplayWindowAlone|OutputLimitServed)' -count=1`（未声明输出限不再产生幻影预留、只声明回放窗不开门、声明的输出限真达 provider）。
+
 ### Changed（0 债务清理：非预期设计与实现，2026-11-06）
 
 - **术语更名「转世」→「重启恢复」**：项目术语与生产标识符统一（`maybeInjectReincarnationNotice`→`injectRestartNotice`、`detectReincarnation`→`detectRestartMarker`），历史快照与已发布条目保持原文。冻结契约拼写不随更名：`"reincarnation"`、`[reincarnation]`、`REINCARNATION_NOTICE`、`[转世通报]` 与两个验收测试名，登记见 [GLOSSARY「五、契约拼写」](docs/GLOSSARY.md)。
-
 - **九个 TBD Purpose 补齐**：归档生成的主 spec 骨架 Purpose 是 CLI 占位文本（长度恰好绕过 ≥50 字符门），全部改写为对应能力的真实用途。**影响范围**：九个主 spec 的 Purpose；**触发条件**：读主 spec Purpose；**自查方法**：`grep -rl '^TBD' openspec/specs/*/spec.md` 零命中。
-
 - **幽灵 spec 删除**：`prompt-loader-fallback` 主 spec 描述 2026-10-26 已移除的 prompt 装载回退子系统（6 个符号全仓 0 命中），整个目录删除；`event-segment-store` 里 DeleteEvent/count_known 两族无实现条款与 scenario 删除。**影响范围**：主 spec 集合 149→148；**自查方法**：`bash scripts/gates/check-openspec.sh` exit 0。
-
 - **旧叙事与幽灵路径清理**：根 `resources/prompts/meditation.md` 的 ticker 时代「定时冥想/自我改进引擎/refine/三类产物」叙事改写为事件驱动反思（169→29 行，产品未加载该文件）；`GLOSSARY.md` 五处「实施中」与两处已归档幽灵路径、`ADR 0002` 依据路径、`fact-vocabulary` 陈旧登记指令同步落地事实；`self-improvement-meditation` 与 `meditation-agent-partition` 主 spec 对齐当前机制。**自查方法**：`grep -rn 'boundary-closure 实施中\|前瞻豁免\|refine register' docs/ openspec/specs/` 零命中。
-
 - **中位数聚合真实落地**：06 域 design 原写「每任务 3 重复取中位数」，实现却是均值且 design 自相矛盾；`bench/metrics.Aggregate` 改为 cold/hot 首 token 与完整延迟的中位数聚合（偶数取两中值平均），新增单测钉住「10/20/300→20 而非 110」，design 偏差自白删除。**影响范围**：`bench/metrics/`、06 归档 design；**自查方法**：`go test ./bench/... -count=1`。
-
 - **TTL 前瞻豁免删除**：`delivery.settlement` 族的负 TTL 注册被明确标注「当前无生产挂载的前瞻豁免」，而 `LifecycleConfig.Window` 已按族构造性豁免；删除冗余注册与 `TestSettlementTTLEntryRegistered`，保留 Window 构造性保证，spec/文档/归档措辞同步。**影响范围**：`memory/ledger/lifecycle_config.go`、`assembly/host_delivery_test.go`、FACT-VOCABULARY 与相关 spec；**自查方法**：`go test ./memory/ledger ./assembly -count=1`。
-
 - **债务措辞清零**：L5 桥、reward 派生、判定结论事实族、中位数偏差自白、规格债单列、归档 12 个未勾任务行，全部改为「不在本变更范围」的干净边界或如实补勾；`spec_hygiene` grandfather 基线 291→287（只清 stale、零新增违规）。**自查方法**：`python3 scripts/gates/check_spec_hygiene.py` errors=0。
-
 - **CI 长分片就绪窗对齐**：03.11 长跑父进程用固定 5m 就绪窗早于子进程自身 15m 硬超时杀掉正常但慢的世代（W2 结算事实进链后每代恢复链单调增长，CI 6 分片并行放大）；就绪窗改为复用子进程硬超时，单一上限。**影响范围**：`examples/wechat-bot/smoke_harness_test.go`；**触发条件**：CI event-integrity-long 分片；**自查方法**：`go -C examples/wechat-bot test -tags smoke . -run '^TestLocalSmokeSymptom' -count=1`。
 
 ### Changed（boundary-closure：九域纯化，2026-11-05）
 
 - **交付义务事件化**：`agent_output.Meta` 携带 owed 声明，与答案同笔成立；发送结果落 `delivery.settlement` 结算事实（追加式、键含终态），恢复只读链、旧 KV 仅迁移读；删除旧 KV 写入面、实验开关与兼容回退。**影响范围**：`assembly/host_delivery.go`、`assembly/host.go`、失败/延迟告知与重启补送；**触发条件**：任一跨 task、会话送达或进程重启；**自查方法**：`go test ./assembly -run 'TestDeliveryEventificationIsUnconditional|TestSymptomAnchor' -count=1`。
-
 - **统一最终请求预算**：模型请求离开系统前整包核算（system/messages/工具 schema/reasoning/ContentParts/任务板/恢复提示），按可降级次序裁剪，删无可删时具名拒绝；`ProviderContextWindow`/`OutputReserve` 在 `api/config` 声明，`MaxTokens` 保持回放窗口语义。**影响范围**：`runtime/agent/loop.go`、`request_assembly.go`、`api/config`；**触发条件**：任一模型回合；**自查方法**：`go test ./runtime/agent -run 'Budget' -count=1`。
-
 - **资源有界**：本地 KV 条目驻留预算 1MiB、段缓存 1MiB，地址空闲回收，真占用常驻斜率门（300 轮 `slope=103789 B/round <= 131072`）。**影响范围**：`memory/ledger`、`examples/wechat-bot` 冒烟；**触发条件**：长跑与重启；**自查方法**：`go test ./examples/wechat-bot -tags smoke -run '^TestLocalSmoke$' -count=1`（日志含 slope）。
-
 - **exec 代际与折叠溯源**：会话代际令牌无条件探活、死屏重建；折叠摘要携带完整 `instance_id` 世代前缀。**影响范围**：`tool/exec`、`memory/replay`；**触发条件**：复用历史会话执行；**自查方法**：`go test ./tool/exec -run 'TestGenerationCheckIsUnconditional|TestSymptomAnchor' -count=1`。
-
 - **配置链真相**：`config.declaration` 事实 + 发布记录 + 失败回执上链，watcher 消费变更，Boot 对账；安装失败如实返回错误而非假成功。**影响范围**：`assembly/host_reload.go`、`examples/wechat-bot/config_watch.go`；**触发条件**：配置热更新或重启；**自查方法**：`go test ./tests/integration/config -count=1`。
-
 - **冥想自持状态机**：激活是真实 `external_input`（带因果元数据），宿主自身在 `tagent-session:tagent:reflection` 会话反思，idle-gating 内化，独立 meditator 退役为可选策展注释；插件按三挂点挂载。**影响范围**：`features/evolution/meditation`、`examples/wechat-bot/tagent.yaml`；**触发条件**：空闲或状态激活；**自查方法**：`go test ./features/evolution/meditation -count=1`。
-
 - **真实任务对照与样本回路**：`bench` 夹具/验收器/三方 runner，真实 run `bench-20261105T150446Z-9a9d7d`（三方各 36/36、369 次调用、五指标）；训练样本 annex 与资格门（回读 failure-closed）。**影响范围**：`bench/`、`features/rl/sample/`；**触发条件**：基准运行或样本导出；**自查方法**：`go test ./bench/... ./features/rl/... -count=1`。
-
 - **三挂点机械守护**：ADR 0006 + 四条门禁规则（schema 白名单/装配符号/持久真相登记/spec 卫生），突破协议需 ADR＋用户裁定＋注册表例外三缺一即红。**影响范围**：`scripts/gates/check_*.py`、`golden/runtime/`、lint/CI；**触发条件**：新增特性节、持久面或规格条款；**自查方法**：`bash scripts/gates/lint.sh --only contracts`。
-
 - **preflight 提速**：长事件矩阵由 6 分片改为 2 分片并行、新增 `--skip-event-long`（本地快检约 3 分钟），CI 保留全 6 分片覆盖。**影响范围**：`scripts/gates/preflight.sh`、CI 校验器自测；**触发条件**：本地 MR 等价门；**自查方法**：`bash -n scripts/gates/preflight.sh`。
 
 ### Changed

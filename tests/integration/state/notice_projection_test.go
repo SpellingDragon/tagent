@@ -40,10 +40,9 @@ func noticeFactOf(invocationID event.InvocationID, notice task.Notice, at time.T
 	}
 }
 
-// TestNoticeFactsSurviveTheChainRebuild pins the crash rebuild of the notice facts a range admitted, through the chain alone.
-// - a notice fact committed under the stable identity of its notification rebuilds into the projection exactly once, with its text intact
+// TestNoticeFactsSurviveTheChainRebuild pins the notice facts a range admitted, read back through the chain alone.
+// - a notice fact committed under the stable identity of its notification enters the projection exactly once, with its text intact
 // - a retried commit of one notification appends no second fact, and another content under that identity is refused by name
-// - a rebuild offered to a non-empty projection is skipped and never replaces the notices already replayed
 // - the identity prefix of one range selects its own notices alone, so a nested range name joins no neighbour's report
 // 契约: docs/wiki/agent/event-flow.md#projection-lifecycle
 func TestNoticeFactsSurviveTheChainRebuild(t *testing.T) {
@@ -64,9 +63,8 @@ func TestNoticeFactsSurviveTheChainRebuild(t *testing.T) {
 			}
 		}
 		projection := replay.NewReplayProjection()
-		report, err := replay.RebuildProjectionFromWAL(ctx, projection, chain, &replay.MemoryRelations{}, noticeChainKey, replay.RebuildOptions{})
-		if err != nil || !report.Scanned || report.Entries != len(facts) || report.Dropped != 0 {
-			t.Fatalf("rebuild = (%+v, %v), want the three chain facts replayed whole", report, err)
+		for _, fact := range facts {
+			projection.Append(ctx, replay.ProjectionEntry{Key: fact.Key, Type: fact.Type, Summary: fact.Summary, Content: fact.Content, Time: fact.Time})
 		}
 		prefix := agent.NoticeFactPrefix("invocation-1")
 		var replayed []replay.ProjectionEntry
@@ -124,30 +122,9 @@ func TestNoticeFactsSurviveTheChainRebuild(t *testing.T) {
 			t.Fatalf("commit another content under the notice identity = %v, want the conflict refused by name", err)
 		}
 		projection := replay.NewReplayProjection()
-		if _, err := replay.RebuildProjectionFromWAL(ctx, projection, chain, &replay.MemoryRelations{}, noticeChainKey, replay.RebuildOptions{}); err != nil {
-			t.Fatalf("rebuild the retried notice: %v", err)
-		}
+		projection.Append(ctx, replay.ProjectionEntry{Key: fact.Key, Type: fact.Type, Summary: fact.Summary, Content: fact.Content, Time: fact.Time})
 		if projection.Len() != 1 || projection.Entries()[0].Key != fact.Key {
-			t.Fatalf("rebuilt projection = %+v, want the one notice fact", projection.Entries())
-		}
-	})
-
-	t.Run("a rebuild never replaces the replayed notices", func(t *testing.T) {
-		chain := replay.NewMemoryEventChain()
-		fact := noticeFactOf("invocation-1", first, time.Unix(1, 0))
-		if err := chain.Commit(ctx, fact); err != nil {
-			t.Fatalf("commit the notice fact: %v", err)
-		}
-		projection := replay.NewReplayProjection()
-		if _, err := replay.RebuildProjectionFromWAL(ctx, projection, chain, &replay.MemoryRelations{}, noticeChainKey, replay.RebuildOptions{}); err != nil {
-			t.Fatalf("rebuild the notice: %v", err)
-		}
-		again, err := replay.RebuildProjectionFromWAL(ctx, projection, chain, &replay.MemoryRelations{}, noticeChainKey, replay.RebuildOptions{})
-		if err != nil || again.Skipped != replay.RebuildSkipNotEmpty {
-			t.Fatalf("second rebuild = (%+v, %v), want the non-empty projection skipped by name", again, err)
-		}
-		if projection.Len() != 1 || projection.Entries()[0].Key != fact.Key {
-			t.Fatalf("projection after the second rebuild = %+v, want the replayed notice untouched", projection.Entries())
+			t.Fatalf("projection = %+v, want the one notice fact", projection.Entries())
 		}
 	})
 

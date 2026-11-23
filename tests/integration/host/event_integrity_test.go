@@ -64,7 +64,7 @@ func bootReproductionHost(t *testing.T, provider *scriptedProvider, sender recor
 	return bootIntegrityHostWithAgents(t, provider, sender,
 		"  user:\n"+
 			"    model: model-entry\n"+
-			"    max_tokens: 32000\n"+
+			"    replay_window: 32000\n"+
 			"    tools:\n"+
 			"      - { kind: tool, id: send }\n"+
 			"      - { kind: agent, agent: worker }\n"+
@@ -245,7 +245,7 @@ func reproductionUserCopies(request scriptedRequest, material string) int {
 	material = strings.TrimSpace(material)
 	copies := 0
 	for _, message := range request.Messages {
-		if message.Role == string(model.RoleUser) && strings.TrimSpace(message.Content) == material {
+		if message.Role == string(model.RoleUser) && strings.TrimSpace(withoutPresentedTicket(message.Content)) == material {
 			copies++
 		}
 	}
@@ -284,7 +284,7 @@ func reproductionRequestsCarrying(requests []scriptedRequest, material string) [
 	var out []int
 	for index, request := range requests {
 		for _, message := range request.Messages {
-			if message.Role == string(model.RoleUser) && strings.TrimSpace(message.Content) == material {
+			if message.Role == string(model.RoleUser) && strings.TrimSpace(withoutPresentedTicket(message.Content)) == material {
 				out = append(out, index)
 				break
 			}
@@ -2677,7 +2677,7 @@ func reflectionDeliveryHostDocument(root, endpoint, deliverTo string) string {
 	b.WriteString("providers:\n")
 	b.WriteString("  local: { provider: openai, api_endpoint: \"" + endpoint + "\", api_key_env: TAGENT_TEST_API_KEY }\n")
 	b.WriteString("agents:\n")
-	b.WriteString("  user: { max_tokens: 32000 }\n")
+	b.WriteString("  user: { replay_window: 32000 }\n")
 	b.WriteString("  meditator:\n")
 	b.WriteString("    model: model-meditator\n")
 	b.WriteString("    tools:\n")
@@ -2933,9 +2933,9 @@ func newReplacementRig(t *testing.T, initial model.Model, version string, rebuil
 		t.Fatalf("build the model lease: %v", err)
 	}
 	decl := &config.Declaration{Entry: "user", Agents: []config.AgentSpec{{
-		ID:        "user",
-		Model:     initial.Info().Name,
-		MaxTokens: 32000,
+		ID:           "user",
+		Model:        initial.Info().Name,
+		ReplayWindow: 32000,
 	}}}
 	run, err := assembly.Assemble(context.Background(), decl, map[event.AgentID]assembly.NativeAgent{
 		"user": {Model: initial},
@@ -3567,7 +3567,7 @@ func identityMatrixEntryCount(entries []replay.ProjectionEntry, key event.EventI
 func identityMatrixRequestCarries(request scriptedRequest, body string) bool {
 	body = strings.TrimSpace(body)
 	for _, message := range request.Messages {
-		if strings.TrimSpace(message.Content) == body {
+		if strings.TrimSpace(withoutPresentedTicket(message.Content)) == body {
 			return true
 		}
 	}
@@ -4774,7 +4774,7 @@ func decisionFlowSwapUserCopy(messages []scriptedMessage, from, to string) []scr
 	swapped := make([]scriptedMessage, 0, len(messages))
 	swappedOne := false
 	for _, message := range messages {
-		if !swappedOne && message.Role == string(model.RoleUser) && strings.TrimSpace(message.Content) == from {
+		if !swappedOne && message.Role == string(model.RoleUser) && strings.TrimSpace(withoutPresentedTicket(message.Content)) == from {
 			message.Content = to
 			swappedOne = true
 		}
@@ -5156,8 +5156,8 @@ func bootSmallWindowHost(t *testing.T, provider *scriptedProvider, sender record
 	return bootIntegrityHostWithAgents(t, provider, sender,
 		"  user:\n"+
 			"    model: model-entry\n"+
-			"    max_tokens: 256\n"+
-			"    provider_context_window: 2048\n"+
+			"    replay_window: 256\n"+
+			"    context_window: 2048\n"+
 			"    compress_threshold: 0.3\n"+
 			"    keep_recent_tasks: 1\n"+
 			"    tools:\n"+
@@ -5361,8 +5361,8 @@ func bootProjectionlessHost(t *testing.T, provider *scriptedProvider, sender rec
 func runNoticeInputWithoutProjection(t *testing.T) {
 	states := []projectionlessState{
 		{name: "no_declared_window", projection: true},
-		{name: "zero_window", window: "    max_tokens: 0\n", projection: true},
-		{name: "declared_window", window: "    max_tokens: 256\n    provider_context_window: 2048\n", projection: true},
+		{name: "zero_window", window: "    replay_window: 0\n", projection: true},
+		{name: "declared_window", window: "    replay_window: 256\n    context_window: 2048\n", projection: true},
 	}
 	for _, state := range states {
 		t.Run(state.name, func(t *testing.T) {

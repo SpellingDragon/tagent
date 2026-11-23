@@ -46,7 +46,7 @@ func restartMailbox(t *testing.T, ctx context.Context, store *state.MemoryStore,
 // 契约: docs/wiki/reliability/durable-delivery.md#envelope-states
 func TestHandoffRoutingSurvivesRestart(t *testing.T) {
 	ctx := context.Background()
-	cfg := ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: t.TempDir()}
+	cfg := ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: t.TempDir(), WriteRights: true}
 	oldTarget := event.Address{AgentID: "agent-recv", SessionID: "session-old"}
 	newTarget := event.Address{AgentID: "agent-recv", SessionID: "session-new"}
 	const sourceInstance event.InstanceID = "instance-source"
@@ -85,9 +85,9 @@ func TestHandoffRoutingSurvivesRestart(t *testing.T) {
 	if err != nil {
 		t.Fatalf("OpenTier: %v", err)
 	}
-	durable, err := state.NewDurableCommit(ledger.TierFactLog(tier), nil)
-	if err != nil {
-		t.Fatalf("NewDurableCommit: %v", err)
+	durable := state.NewEmptyDurableCommit(ledger.TierFactLog(tier), nil)
+	if err := durable.Seat(ctx, nil, nil); err != nil {
+		t.Fatalf("seat the durable commit: %v", err)
 	}
 	var attempts1 []task.Envelope
 	registry := task.NewMemoryRegistry(durable, task.NewMemoryAdmission())
@@ -151,13 +151,16 @@ func TestHandoffRoutingSurvivesRestart(t *testing.T) {
 		t.Fatalf("new-instance mailbox = %+v, want the started notification never delivered to the new instance", got)
 	}
 
+	if err := tier.Close(); err != nil {
+		t.Fatalf("close the tier before the reopen: %v", err)
+	}
 	reopened, err := ledger.OpenTier(ctx, cfg)
 	if err != nil {
 		t.Fatalf("reopen OpenTier: %v", err)
 	}
-	restored, err := state.NewDurableCommit(ledger.TierFactLog(reopened), nil)
-	if err != nil {
-		t.Fatalf("reopen NewDurableCommit: %v", err)
+	restored := state.NewEmptyDurableCommit(ledger.TierFactLog(reopened), nil)
+	if err := restored.Seat(ctx, nil, nil); err != nil {
+		t.Fatalf("reopen the durable commit: %v", err)
 	}
 	chain, err := restored.Records(ctx, taskID)
 	if err != nil {

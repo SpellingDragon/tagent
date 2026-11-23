@@ -14,6 +14,38 @@ import (
 	"github.com/SpellingDragon/tagent/api/event"
 )
 
+// RecallOutcome names the classification of one exact recall result.
+type RecallOutcome int
+
+const (
+	// RecallUnclassified is the zero value: the outcome was not determined, so
+	// it is never reported as a successful recall.
+	RecallUnclassified RecallOutcome = iota
+	// RecallFound means the original bytes were returned.
+	RecallFound
+	// RecallMissing means no original is stored under the key.
+	RecallMissing
+	// RecallExpired means the original is outside the retention window of its policy.
+	RecallExpired
+	// RecallFailed means the read itself failed and Err carries the cause.
+	RecallFailed
+)
+
+// RecallResult is the outcome of exact recall for one key: the original bytes
+// when they were found, and otherwise a named classification of why they were
+// not, so a miss is reported instead of silently omitted.
+type RecallResult struct {
+	// Key is the identity that was recalled.
+	Key event.EventID
+	// Outcome is the named classification of this result.
+	Outcome RecallOutcome
+	// Body holds the returned original bytes, and is set only when Outcome is
+	// RecallFound.
+	Body []byte
+	// Err carries the cause when Outcome is RecallFailed, and is nil otherwise.
+	Err error
+}
+
 // OriginalRef names one stored original blob together with the reference
 // metadata that scopes it: the owner that registered the reference, the format
 // it was registered in, the retention policy it is held under, and the
@@ -237,37 +269,42 @@ func (r *ScopedReader) ReadSegment(ctx context.Context, key event.EventID, req S
 	return r.store.ReadSegmentScoped(ctx, key, r.scope, req)
 }
 
-var (
-	_ ScopedOriginalStore = (*MemoryOriginalStore)(nil)
-	_ ScopedOriginalStore = (*kvOriginalStore)(nil)
-)
+var _ ScopedOriginalStore = (*kvOriginalStore)(nil)
 
 // GetScoped returns the exact recall of key as visible inside scope, exactly
 // as the in-memory tier serves it.
+//
+// The read resolves the one identity it names rather than the original family behind
+// it, so it costs the body and the reference of that identity and its failure surface
+// is the same identity: a record the store cannot read back fails this read, and a
+// record of another identity fails only the reads of that identity.
 func (s *kvOriginalStore) GetScoped(ctx context.Context, key event.EventID, scope ReadScope) RecallResult {
 	if err := ctx.Err(); err != nil {
 		return RecallResult{Key: key, Outcome: RecallFailed, Err: err}
 	}
-	if err := s.ensureLoaded(); err != nil {
-		return RecallResult{Key: key, Outcome: RecallFailed, Err: err}
-	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return scopedRecall(s.byKey, s.windows, key, scope)
+	one, err := s.scopedOnlyLocked(ctx, key)
+	if err != nil {
+		return RecallResult{Key: key, Outcome: RecallFailed, Err: err}
+	}
+	return scopedRecall(one, s.windows, key, scope)
 }
 
 // ReadSegmentScoped returns one byte-bounded segment of the original stored
 // under key as visible inside scope, exactly as the in-memory tier serves it.
+// It resolves the identity it names on the terms GetScoped states.
 func (s *kvOriginalStore) ReadSegmentScoped(ctx context.Context, key event.EventID, scope ReadScope, req SegmentRequest) (SegmentResult, error) {
 	if err := ctx.Err(); err != nil {
 		return SegmentResult{}, err
 	}
-	if err := s.ensureLoaded(); err != nil {
-		return SegmentResult{}, err
-	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return scopedSegment(s.byKey, s.windows, key, scope, req)
+	one, err := s.scopedOnlyLocked(ctx, key)
+	if err != nil {
+		return SegmentResult{}, err
+	}
+	return scopedSegment(one, s.windows, key, scope, req)
 }
 
 // scopedRecall evaluates the exact recall of key inside scope over the given

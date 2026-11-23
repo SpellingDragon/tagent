@@ -2,6 +2,7 @@ package acceptance
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -69,7 +70,7 @@ func TestScenario02DualInvocationIsolation(t *testing.T) {
 	shared := false
 	for _, req := range requests[1:] {
 		for _, message := range req.Messages {
-			if message.Content == "turn-a" {
+			if scenarioPresentedContent(message.Content) == "turn-a" {
 				shared = true
 			}
 		}
@@ -162,4 +163,31 @@ func TestScenario02DualInvocationIsolation(t *testing.T) {
 	refs = append(refs, string(receiptA.TaskID), string(receiptB.TaskID))
 
 	EmitScenarioRecord(t, scenario, refs, observations)
+}
+
+// scenarioPresentedContent reports the content one request message carries once
+// the presentation ticket is set aside: a presented entry that carries a
+// committed fact key opens with `[evt_<KEY>|<type>] ` and keeps its own content
+// unchanged behind that ticket. Content opening with no well-formed ticket is
+// reported as it stands, never truncated.
+// 契约: docs/wiki/agent/event-flow.md#projection-lifecycle
+func scenarioPresentedContent(content string) string {
+	const ticket = "[evt_"
+	if !strings.HasPrefix(content, ticket) {
+		return content
+	}
+	rest := content[len(ticket):]
+	bar := strings.IndexByte(rest, '|')
+	if bar <= 0 {
+		return content
+	}
+	end := strings.IndexByte(rest[bar:], ']')
+	if end <= 1 {
+		return content
+	}
+	body := rest[bar+end+1:]
+	if !strings.HasPrefix(body, " ") {
+		return content
+	}
+	return body[1:]
 }

@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/SpellingDragon/tagent/api/config"
+	"github.com/SpellingDragon/tagent/api/durable"
 	"github.com/SpellingDragon/tagent/api/event"
 	"github.com/SpellingDragon/tagent/api/model"
 	"github.com/SpellingDragon/tagent/api/plugin"
@@ -29,7 +30,7 @@ import (
 	"github.com/SpellingDragon/tagent/memory/replay"
 	"github.com/SpellingDragon/tagent/runtime/agent"
 	"github.com/SpellingDragon/tagent/runtime/state"
-	trpclog "trpc.group/trpc-go/trpc-agent-go/log"
+	"github.com/SpellingDragon/tagent/runtime/task"
 	trpctool "trpc.group/trpc-go/trpc-agent-go/tool"
 )
 
@@ -1139,7 +1140,7 @@ func (t *deliveryTestBlockingTool) Call(context.Context, []byte) (any, error) {
 // deliveryTestCountingLog wraps one fact log and counts the reads a check is
 // judging, so a scan of the retired prefix is counted where it happens.
 type deliveryTestCountingLog struct {
-	inner state.FactLog
+	inner durable.FactLog
 	mu    sync.Mutex
 	reads []string
 }
@@ -1149,12 +1150,18 @@ func (l *deliveryTestCountingLog) Put(ctx context.Context, key string, value []b
 	return l.inner.Put(ctx, key, value)
 }
 
-// Get reads one key from the wrapped log.
+// Get reads one key from the wrapped log and counts the read.
 func (l *deliveryTestCountingLog) Get(ctx context.Context, key string) ([]byte, bool, error) {
+	reader, statesPointRead := l.inner.(interface {
+		Get(ctx context.Context, key string) ([]byte, bool, error)
+	})
+	if !statesPointRead {
+		return nil, false, fmt.Errorf("the wrapped log states no point read")
+	}
 	l.mu.Lock()
 	l.reads = append(l.reads, "get:"+key)
 	l.mu.Unlock()
-	return l.inner.Get(ctx, key)
+	return reader.Get(ctx, key)
 }
 
 // Scan reads one prefix from the wrapped log and counts the read.
@@ -1170,14 +1177,15 @@ func (l *deliveryTestCountingLog) Sync(ctx context.Context) error {
 	return l.inner.Sync(ctx)
 }
 
-// scanCount reports how often the retired prefix was read, and reset clears the
-// count so one phase of a check is judged alone.
+// scanCount reports how often the retired prefix was read — a prefix scan and
+// the point read of one key of it alike — and reset clears the count so one
+// phase of a check is judged alone.
 func (l *deliveryTestCountingLog) scanCount() int {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	count := 0
 	for _, read := range l.reads {
-		if strings.HasPrefix(read, "scan:"+hostDeliveryPrefix) {
+		if _, key, cut := strings.Cut(read, ":"); cut && strings.HasPrefix(key, hostDeliveryPrefix) {
 			count++
 		}
 	}
@@ -1267,6 +1275,7 @@ func TestKVDeliveryMigratedToFacts(t *testing.T) {
 	})
 
 	sender := newDeliveryTestSender(nil)
+	endRun(t, first)
 	second := deliveryTestTwoAgentRun(t, ctx, WithStorage(ledger.StorageConfig{Type: ledger.StorageJournal, Root: root}))
 	host := deliveryTestHost(ctx, second, sender)
 	host.deliveryBackoff = time.Hour
@@ -1955,7 +1964,7 @@ func TestSymptomAnchorRetryAutoRedrive(t *testing.T) {
 
 // TestSymptomAnchorUnifiedRequestBudget pins that the declared window bounds the final request as one total.
 //
-// - 场景：经真实 AgentSpec 与正式装配链驱动一轮，历史窗口声明 32 token，固定提示约 10KB。
+// - 场景：经真实 AgentSpec 与正式装配链驱动一轮，预算窗口 context_window 声明 32 token（乙下门唯一来源），固定提示约 10KB。
 // - 最终请求必须被统一预算约束：要么降级到窗口内，要么显式拒发；不得静默全量进入。
 // - 显式拒发是合法出口，但“没有请求”本身还不够，拒绝必须被观测到。
 //
@@ -1974,7 +1983,8 @@ func TestSymptomAnchorUnifiedRequestBudget(t *testing.T) {
 	}
 
 	spec := boundaryAnchorSpec()
-	spec.MaxTokens = boundaryAnchorWindow
+	spec.ReplayWindow = boundaryAnchorWindow
+	spec.ContextWindow = boundaryAnchorWindow
 	spec.Files = []config.FileRef{{Path: promptPath, Kind: config.FileKindPrompt}}
 	run, provider := boundaryAnchorAssemble(t, ctx, spec, boundaryAnchorAnswer("the request was served"))
 	addr := boundaryAnchorAddress("session-anchor-budget")
@@ -2360,10 +2370,13 @@ func (o *foldObserver) mentions(fragments ...string) bool {
 	return false
 }
 
-// TestRestoreFoldCounts pins the restore observation of a chain a checkpoint covers.
-// - the first run commits a full tool turn and closes behind its own barrier, filing the checkpoint of its final state
-// - the second boot costs no chain read at all: the checkpoint states the tasks the chains settled, and its info line carries chains=0 links=0 covered=1
+// TestRestoreFoldCounts pins the restart account of a tool task settled before the cut.
+// - the first run commits one full tool turn whose sent delivery cleared every obligation, then closes behind its own barrier
+// - the second boot states nothing of the settled task: its recovery report is empty and its task load scanned no durable key
+// - the settled chain reads back by identity with the exact state the first run committed, hydrated when a reader first names it
+// - negative: a detached chain source answers the same identity with ErrTaskNotFound, and re-attaching the source restores the read
 // 契约: docs/wiki/reliability/durable-delivery.md#canonical-fact-resolution
+// 契约: docs/wiki/platform/platform-subsystems.md#framework-checkpoint
 func TestRestoreFoldCounts(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
@@ -2398,15 +2411,23 @@ func TestRestoreFoldCounts(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("drive the committing turn: %v", err)
 	}
+	ids := first.commit.TaskIDs()
+	if len(ids) != 1 {
+		t.Fatalf("the first run holds %d task(s) %v, want the one tool task of the turn", len(ids), ids)
+	}
+	taskID := ids[0]
+	if owing, err := first.manager.Obligations(ctx, taskID); err != nil || owing.Count != 0 {
+		t.Fatalf("obligations of the finished turn = (%+v, %v), want every delivery obligation cleared", owing, err)
+	}
+	want := chainStateOf(t, ctx, first, taskID)
+	if want.status != task.StatusSettled {
+		t.Fatalf("the tool task stands at %v, want the settled state the scenario commits", want.status)
+	}
 	stopHost()
 	if _, err := first.Close(ctx, agent.CloseRequest{Timeout: time.Now().Add(5 * time.Second)}); err != nil {
 		t.Fatalf("drain the first run: %v", err)
 	}
 
-	observer := &foldObserver{}
-	original := trpclog.Default
-	trpclog.Default = observer
-	t.Cleanup(func() { trpclog.Default = original })
 	second, err := Assemble(ctx, &config.Declaration{
 		Entry:  string(deliveryTestAgent),
 		Agents: []config.AgentSpec{{ID: string(deliveryTestAgent), Model: "model-a"}},
@@ -2416,11 +2437,27 @@ func TestRestoreFoldCounts(t *testing.T) {
 	if err != nil {
 		t.Fatalf("restart beside the committed chain: %v", err)
 	}
-	if report := second.Recovery(); len(report.Tasks) != 1 || !report.Tasks[0].Recovered {
-		t.Fatalf("recovery report = %+v, want the one chain rebuilt", report.Tasks)
+	if report := second.Recovery(); len(report.Tasks) != 0 {
+		t.Fatalf("recovery report = %+v, want nothing stated of the task whose obligations cleared before the cut", report.Tasks)
 	}
-	if !observer.mentions("restore folded", "chains=0", "links=0", "covered=1") {
-		t.Fatalf("info lines = %v, want the fold beside the chains the checkpoint covered", observer.lines)
+	scanned, err := durableLoadCountOf(second.commit.inner)
+	if err != nil {
+		t.Fatalf("read the load stats of the second boot: %v", err)
+	}
+	if scanned != 0 {
+		t.Fatalf("the second boot scanned %d durable task key(s), want the settled chain costed by identity alone", scanned)
+	}
+	second.registry.RestoreChainSource(nil)
+	if _, _, err := second.registry.Lookup(ctx, taskID); !errors.Is(err, task.ErrTaskNotFound) {
+		t.Fatalf("the settled identity beside a detached chain source = %v, want the named refusal %v", err, task.ErrTaskNotFound)
+	}
+	durable, held := second.commit.inner.(*state.DurableCommit)
+	if !held {
+		t.Fatalf("the second run holds the commit %T, which keeps no chain to re-attach", second.commit.inner)
+	}
+	second.registry.RestoreChainSource(durable)
+	if got := chainStateOf(t, ctx, second, taskID); !sameSettledState(got, want) {
+		t.Fatalf("the settled chain read back by identity = %+v, want the state the first run committed %+v", got, want)
 	}
 }
 
@@ -2448,6 +2485,7 @@ func TestRestartRecoveryPinsBeforeTrim(t *testing.T) {
 	root := t.TempDir()
 	storage := WithStorage(ledger.StorageConfig{Type: ledger.StorageJournal, Root: root})
 	first := snapshotTestRun(t, ctx, storage)
+	first.stopCheckpointFiler()
 	addr := deliveryTestAddress("session-restart-pin-order")
 	host := deliveryTestHost(ctx, first, newDeliveryTestSender(nil))
 	identity := "delivery-restart-pin-order"
@@ -2464,11 +2502,13 @@ func TestRestartRecoveryPinsBeforeTrim(t *testing.T) {
 			t.Fatalf("commit filler %d: %v", index, err)
 		}
 	}
+	endRun(t, first)
 	negative := snapshotTestRunWithTrim(t, ctx, false, storage)
 	negative.trimSeededFacts()
 	if _, held := negative.factOf(key); held {
 		t.Fatal("the early-trim control kept the fact, so it did not exercise the defect")
 	}
+	endRun(t, negative)
 	restarted := snapshotTestRunWithTrim(t, ctx, false, storage)
 	recoveredHost := deliveryTestHost(ctx, restarted, newDeliveryTestSender(nil))
 	if err := recoveredHost.restoreUnconsumedEvents(ctx, nil); err != nil {
@@ -2544,6 +2584,7 @@ func TestRestartRestoresHeldSequence(t *testing.T) {
 	if err := host.writeDeliverySettlement(ctx, addr, "delivery-7", heldStateOf(deliveryReasonApproval), delivery, time.Now(), nil); err != nil {
 		t.Fatalf("write delivery-7: %v", err)
 	}
+	endRun(t, first)
 	restarted := snapshotTestRun(t, ctx, storage)
 	recovered := deliveryTestHost(ctx, restarted, newDeliveryTestSender(nil))
 	if err := recovered.restoreUnconsumedEvents(ctx, nil); err != nil {

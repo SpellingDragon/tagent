@@ -37,6 +37,10 @@ var (
 
 	_ func(context.Context, *config.Declaration, map[event.AgentID]NativeAgent, ...Option) (*Run, error) = Assemble
 
+	// The recoverable state a caller contributes takes the seam a consumer mounts
+	// through after boot, so the option and the registry entry keep one contract.
+	_ func(state.Stateful) Option = WithStateSlice
+
 	// The post-commit observation face is attached through its own option, so
 	// the composed observer reads committed facts and observes nothing else.
 	_ func(plugin.Observer) Option = WithTelemetry
@@ -138,10 +142,11 @@ var (
 	_ plugin.Instance           = (*CompressionConsumer)(nil)
 	_ plugin.PostCommitObserver = (*CompressionConsumer)(nil)
 	_ compressExecutor          = (*CompressionConsumer)(nil)
-	_ compressSessions          = ageFoldSessions{}
+	_ compressSessionSource     = ageFoldSessions{}
+	_ compressProductStore      = ageFoldSessions{}
 
-	_ func(compressSessions) *CompressionConsumer = NewCompressionConsumer
-	_ func(*AgeFoldPlugin, compressExecutor)      = (*AgeFoldPlugin).setExecutor
+	_ func(compressSessionSource, compressProductStore) *CompressionConsumer = NewCompressionConsumer
+	_ func(*AgeFoldPlugin, compressExecutor)                                 = (*AgeFoldPlugin).setExecutor
 
 	_ func(*CompressionConsumer, context.Context, event.SessionID) error = (*CompressionConsumer).Execute
 	_ func(*CompressionConsumer, event.SessionID, event.CompressRequest) = (*CompressionConsumer).Record

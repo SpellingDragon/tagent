@@ -63,45 +63,45 @@ type AgentSpec struct {
 	// request carries is a subset of it, the full list by default, and the host
 	// narrows it at run time without republishing the binding.
 	Tools []ToolRef
-	// Plugins lists the agent's plugin references in pipeline order.
+	// Plugins customizes the agent's builtin plugin set: an entry names a
+	// builtin plugin the framework mounts by default, and a "-" prefix disables
+	// it. An empty list mounts every builtin plugin, so a declaration that
+	// customizes one plugin never drops the others silently.
 	Plugins []string
 	// TaskPolicy references the task policy applied to the agent's tasks.
 	TaskPolicy string
 	// Files lists the prompt and skill files the agent is assembled from, in
 	// assembly order.
 	Files []FileRef
-	// Params holds the agent's declaration-time model parameters.
-	Params map[string]float64
 	// FinalRound is the watchdog budget the invocations of this agent run
 	// under. Every field of the zero budget is zero, which places no bound on
 	// any invocation.
 	FinalRound FinalRoundSpec
-	// MaxTokens is the model window this agent's session chain is replayed
+	// ReplayWindow is the model window this agent's session chain is replayed
 	// into, in tokens. A positive window attaches the mapped sequence of the
 	// chain to every request boundary and bounds its assembly; zero attaches no
 	// replay, so every request runs on its fixed files and transcript alone.
-	MaxTokens int
+	ReplayWindow int
 	// CompressThreshold is the share of that window the replayed projection may
 	// fill before the age fold runs, as a ratio of the window. Zero reads the
-	// declaration default of 0.8, so a declaration naming only max_tokens still
+	// declaration default of 0.8, so a declaration naming only replay_window still
 	// folds before its replay overflows the window.
 	CompressThreshold float64
 	// KeepRecentTasks is the number of recent task turns the age fold keeps
 	// whole while it folds the older ones. Zero reads the declaration default
 	// of 2.
 	KeepRecentTasks int
-	// ProviderContextWindow is the provider context window this agent's final
-	// requests are budgeted against, in tokens. Zero declares no window of its
-	// own, so the request budget derives the provider window from MaxTokens; a
-	// declaration naming neither opens no budget gate, and every request runs
-	// whole. This field never changes the replay window MaxTokens names.
-	ProviderContextWindow int
-	// OutputReserve is the token allowance the input budget leaves for the
-	// model's output. Zero reads the declaration default share of the provider
-	// window (runtime/agent.DefaultOutputReserveDivisor); a positive value
-	// declares the allowance itself. The input budget is the provider window
-	// minus this allowance.
-	OutputReserve int
+	// SummaryBudgetBytes bounds the text one history summary carries, in bytes:
+	// the declared bound the mechanical fold and the model gist both obey. Zero
+	// reads the declaration default of 2048, so a declaration naming only
+	// replay_window still bounds its summaries.
+	SummaryBudgetBytes int
+	// ContextWindow is the provider context window this agent's final requests
+	// are budgeted against, in tokens: the physical input capacity the declaration
+	// names. It is the sole source of the request budget gate — zero declares no
+	// capacity, so the gate stays closed and every request runs whole. The replay
+	// window ReplayWindow drives folding alone and never stands in for it.
+	ContextWindow int
 	// EnvironmentBlock states whether every request of this agent closes with
 	// the dynamic environment block: the tool, skill and MCP faces the request
 	// carries beside the open asynchronous task state. False keeps a request
@@ -119,6 +119,14 @@ type AgentSpec struct {
 	// ReasoningEffort names the reasoning effort every request of this agent
 	// carries. Empty declares no effort, so the model default stands.
 	ReasoningEffort string
+	// MaxTokens is the output limit every request of this agent carries: the
+	// most tokens the model may generate, served as the provider's
+	// GenerationConfig.MaxTokens. The input budget reserves this same limit from
+	// ContextWindow, so one declaration drives both the provider cap and the
+	// budget. Zero declares no limit, so the model default stands and the budget
+	// reserves nothing. This is the API-universal max_tokens, distinct from
+	// ReplayWindow (the fold cadence) and ContextWindow (the physical capacity).
+	MaxTokens int
 	// MaxToolIterations bounds the tool-calling rounds one invocation of this
 	// agent may take. Zero declares no bound of its own, which leaves the
 	// watchdog budget of the final round section as the only round bound.

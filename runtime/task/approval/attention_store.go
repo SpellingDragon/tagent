@@ -3,7 +3,8 @@
 // filed as a fact on a chain instead of an index of the store's own. The manager
 // keeps the evidence an approver reads and the file an external approver answers;
 // presence and ruling are folded from the facts, so what a restart reads back is
-// what landed.
+// what landed — a ruling enters the chain only behind its own write, and the one
+// filing a refused store leaves here is the hold it could not land (statesAHold).
 //
 // - one approval question is identified by its kind, its target and its lineage; the lineage names the tool, the digest of the exact argument bytes and the approval identity the registration was issued under
 // - presence is a question the chain holds with no answer and no clearance beside it, judged against the validity it was filed under
@@ -23,6 +24,7 @@ import (
 	"fmt"
 	"sync"
 
+	"github.com/SpellingDragon/tagent/api/durable"
 	"github.com/SpellingDragon/tagent/api/event"
 	"github.com/SpellingDragon/tagent/runtime/task"
 )
@@ -71,12 +73,14 @@ func rulingIn(answer event.Event) (ApprovalStatus, bool) {
 
 // attentionLedger is the fact chain the manager files attention facts on when the
 // composition wires no chain of its own: the facts in landing order beside the
-// fact each key landed as. It carries no presence of its own, so a face rebuilt
-// over it answers the same presence.
+// fact each key landed as, and the durable face they are written to once one is
+// bound. It carries no presence of its own, so a face rebuilt over it answers the
+// same presence, and a bound store answers the same presence after a restart.
 type attentionLedger struct {
 	mu    sync.Mutex
 	order []event.Event
 	held  map[event.EventID]event.Event
+	log   durable.FactLog
 }
 
 // newAttentionLedger returns an empty fact chain the manager files on.
@@ -86,19 +90,58 @@ func newAttentionLedger() *attentionLedger {
 
 // RecordAttention stores one attention fact and reports whether this call stored
 // it: a repeat of the fact the key already names answers false and stores
-// nothing, and a key already standing for other content is refused by name.
-func (l *attentionLedger) RecordAttention(_ context.Context, fact event.Event) (bool, error) {
+// nothing, and a key already standing for other content is refused by name. A
+// chain beside a durable face writes the fact behind that face's barrier before
+// the chain holds it, so what a reader files is what the store keeps; a write the
+// store refused is reported to the caller and leaves the chain where the store
+// stands. The one exception is the hold a question states: see statesAHold. A
+// concurrent filing of one identity writes the same fact twice and the second
+// arrival finds the first already recorded, so one landing enters the order once.
+func (l *attentionLedger) RecordAttention(ctx context.Context, fact event.Event) (bool, error) {
 	l.mu.Lock()
-	defer l.mu.Unlock()
 	if held, ok := l.held[fact.Key]; ok {
-		if held.Type != fact.Type || held.Message.Content != fact.Message.Content || !sameMeta(held.Meta, fact.Meta) {
+		conflict := !sameFact(held, fact)
+		l.mu.Unlock()
+		if conflict {
 			return false, fmt.Errorf("%w: %s", errApprovalFactConflict, fact.Key)
 		}
 		return false, nil
 	}
+	log := l.log
+	l.mu.Unlock()
+	var refused error
+	if log != nil {
+		refused = l.storeAttention(ctx, log, fact)
+	}
+	if refused != nil && !statesAHold(fact) {
+		return false, refused
+	}
+	l.mu.Lock()
+	held, published := l.held[fact.Key]
+	switch {
+	case published && !sameFact(held, fact):
+		l.mu.Unlock()
+		return false, fmt.Errorf("%w: %s", errApprovalFactConflict, fact.Key)
+	case published:
+		l.mu.Unlock()
+		return false, refused
+	}
 	l.held[fact.Key] = fact
 	l.order = append(l.order, fact)
-	return true, nil
+	l.mu.Unlock()
+	return true, refused
+}
+
+// statesAHold reports whether one attention fact states the hold a question puts
+// in place rather than the ruling an answer or a clearance states over it. A hold
+// is the wait the caller is standing in — the identity an approver was handed —
+// so a store that refused its write must not leave that wait unanswerable: the
+// chain refuses an answer naming no question it holds, and a hold this book cannot
+// name is a gate that waits forever on a ruling the channel will not file, which
+// is the wall the channel MUST NOT be. A ruling decides the wait, so the gate may
+// act on it only once the store kept it; the refusal is reported beside it.
+func statesAHold(fact event.Event) bool {
+	return fact.Type == event.TypeAttentionQuestion
 }
 
 // AttentionFacts returns every attention fact the chain holds, in landing order.
@@ -188,4 +231,15 @@ func stateOf(facts approvalFacts, held *ApprovalRequest) ApprovalState {
 		}
 	}
 	return state
+}
+
+// openObligation reports whether one recorded request states work still owed: a
+// question the chain holds with no answer beside it, within a validity the clock
+// has not run out. A ruled or expired record states history, which the reader that
+// asks for it reads from the chain, so the book keeps neither in its resident set.
+func openObligation(req ApprovalRequest, facts approvalFacts, nowMs int64) bool {
+	if _, answered := facts.answer(req.ToolName, req.ArgsDigest, req.ID); answered {
+		return false
+	}
+	return req.ExpiresMs <= 0 || nowMs < req.ExpiresMs
 }

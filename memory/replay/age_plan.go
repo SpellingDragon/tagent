@@ -79,6 +79,14 @@ func thresholdOf(plan AgeFoldPlan) int {
 	return plan.VolumeThreshold
 }
 
+// summaryBudgetOf reports the summary text bound one plan folds under.
+func summaryBudgetOf(plan AgeFoldPlan) int {
+	if plan.SummaryBudgetBytes <= 0 {
+		return DefaultAgeSummaryTextLimit
+	}
+	return plan.SummaryBudgetBytes
+}
+
 // planFold judges one plan over a fixed entry sequence and the volume the
 // projection keeps for it.
 func planFold(entries []ProjectionEntry, plan AgeFoldPlan, volume int) AgeFoldPlanReport {
@@ -87,6 +95,7 @@ func planFold(entries []ProjectionEntry, plan AgeFoldPlan, volume int) AgeFoldPl
 		keepRecent = DefaultAgeKeepRecent
 	}
 	threshold := thresholdOf(plan)
+	budget := summaryBudgetOf(plan)
 	report := AgeFoldPlanReport{Volume: volume, Threshold: threshold}
 	if len(entries) == 0 || volume <= threshold {
 		return report
@@ -112,7 +121,7 @@ func planFold(entries []ProjectionEntry, plan AgeFoldPlan, volume int) AgeFoldPl
 	}
 	report.Counts.Middle = len(oldest)
 	if len(oldest) > 0 {
-		summary := historySummaryOf(oldest)
+		summary := historySummaryOf(oldest, budget)
 		if _, stands := heldKeysOf(entries)[summary.Key]; !stands {
 			report.Products = append(report.Products, FoldProduct{
 				Entry:   summary,

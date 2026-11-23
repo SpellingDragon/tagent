@@ -3,18 +3,30 @@
 # be green together before a change lands. It lives next to the gates it drives;
 # scripts/preflight.sh is the stable forwarding entry point.
 #
-#   * lint.sh             gofmt/build/vet, comment + doc budgets, checker selftests,
-#                         runtime contracts and the repository hygiene gates
 #   * golden deterministic  the real runtime driven against the frozen scenarios
 #   * go test ./...       root module (and both example modules) unit tests
 #   * wechat-bot smoke    the long-range end-to-end matrix behind the smoke tag
 #   * event integrity     the same runner/checker entry points CI runs: ten
 #                         independent short rounds, the six long matrix shards and
 #                         the fault mutations
+#   * event evidence      the same bundle check the MR gate runs: the evidence set
+#     binding             is read against this tree, not against itself
+#   * lint.sh             gofmt/build/vet, comment + doc budgets, checker selftests,
+#                         runtime contracts and the repository hygiene gates —
+#                         including the definition-of-done gate, which counts the
+#                         mutation run products the steps above produced
 #
 # Green here means "CI is very likely green", not "the product behaves": the
 # deterministic suite is mocked and smoke covers one deployment shape. CI adds
 # the race job, the scheduling-floor witnesses and a clean checkout.
+#
+# **Order: produce, then bind, then consume.** The definition-of-done gate reads
+# run products and refuses hand-filled verdicts, so it cannot run before the
+# products exist: a lint-first chain either reds for a missing artifact the chain
+# would have produced a minute later, or (worse) passes by reading the registry.
+# The registry is never a substitute for the run. Every step's own output stays
+# in one run directory that later steps are pointed at, so the gate reads exactly
+# the artifacts this run wrote.
 #
 # The event entry runs by default. There is no opt-in switch that would close the
 # long shards by default: a preflight that silently drops them is not the local
@@ -44,12 +56,17 @@ run() {
   "$@"
 }
 
-step "lint"
-run bash scripts/gates/lint.sh
+# 本次运行的证据目录：一次运行一份，不覆盖历史轮次（同一个目录里既有失败轮次的
+# 产物也有本轮产物，判词就说不清是谁的）。调用方显式给 TAGENT_RUNTIME_EVIDENCE_DIR
+# 就用它，目录唯一性由调用方负责；否则每次生成一个新目录并打印出来，供事后单独
+# 用 `TAGENT_RUNTIME_EVIDENCE_DIR=<该目录> bash scripts/lint.sh` 复核。
+event_out="${TAGENT_RUNTIME_EVIDENCE_DIR:-${TMPDIR:-/tmp}/event-consumption-integrity/run-$(date -u +%Y%m%dT%H%M%SZ)-$$}"
+mkdir -p "$event_out"
+echo "preflight: evidence directory $event_out"
 
 # 配置链两钉：golden 登记（声明/发布事实类型＋唯一入口，lint 的 architecture
 # 契约段已跑）与静态唯一路径检查（第二装载/发布路径、特性专属装配路径都红）。
-# lint 已跑两门；这里再显式跑一次，让提交前的输出直接点名配置链。
+# 这里显式跑一次，让提交前的输出直接点名配置链。
 step "config liveness (chain truth)"
 run python3 scripts/gates/test_check_config_liveness.py
 run python3 scripts/gates/check_config_liveness.py
@@ -78,7 +95,6 @@ fi
 # independent runner processes; the long scope is the six (seed, window) shards,
 # one independent process each; mutations runs the frozen fault registry. These
 # stay unconditional: --skip-smoke must not turn the long shards into an opt-in.
-event_out="${TMPDIR:-/tmp}/event-consumption-integrity/preflight"
 
 step "event integrity short"
 run python3 scripts/scenarios/run_runtime_scenarios.py \
@@ -120,5 +136,24 @@ fi
 
 step "event integrity mutations"
 run python3 scripts/gates/check_event_integrity_mutations.py --all --json --out "$event_out/mutations"
+
+# 生成之后、消费之前：整包证据与现树比对（CI 的 event-integrity-required 跑的是
+# 同一条命令）。整包一致性只会在产物之间自洽，故比对目标是树，不是彼此。缺长跑
+# 分片时整包本就不完整，这一步如实跳过并保留"不具备完整 MR 等价证据"的陈述，不
+# 拿更小的集合冒充整包绑定。
+step "event evidence binding (current tree)"
+if [ -n "$skip_event_long" ]; then
+  echo "preflight: --skip-event-long given; the bundle the MR gate judges is incomplete, so its current-tree binding was not run"
+  echo "preflight: 长跑分片未运行，本次 preflight 不具备完整 MR 等价证据"
+else
+  run python3 scripts/gates/check_runtime_evidence.py \
+    --contract golden/runtime/event_integrity_scenarios.json \
+    --bundle "$event_out" --repo-root . --json
+fi
+
+# 消费：lint 里的 DoD 门只认运行产物，故它排在上面两步之后，并被指向本次运行的
+# 证据目录——而不是"最近一份绿结果"，也不是登记表。
+step "lint (definition of done reads the run products above)"
+run env TAGENT_RUNTIME_EVIDENCE_DIR="$event_out" bash scripts/gates/lint.sh
 
 printf '\npreflight: ok\n'

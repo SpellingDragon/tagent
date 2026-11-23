@@ -1,96 +1,59 @@
 # storage-lifecycle-completion Specification
 
+> **勘误（2026-11-19 契约同步核验）**：本规范原「L1→L2 自动调度」「L2→L3 自动调度」「墓碑过滤」「TTL 按真实事件时间戳」四条条款要求的压实器、墓碑集与生命周期管理器在 Go 树零定义，其分层次压实与 TTL 淘汰机制已整体退役；移除与改写的裁定记录在本域 `08-fact-retirement` 的规格增量里。保留保护条款按该增量重写为「两条保护语义各由唯一活载体承接」。
+
 ## Purpose
 
-本规范定义 storage-lifecycle-completion 能力。Compactor.checkAndCompact SHALL check L1 segment count per partition and trigger CompactL1ToL2 when the count reaches L1Threshold.
+本规范定义 storage-lifecycle-completion 能力：已提交事实的保护与回收边界——任何路径不得物理销毁已提交事实、已提交事实按身份恒可读、未结义务与原文过期两条保护语义各由唯一活载体承接，以及能力诚实落在打开档位的声明上（fail-closed）。
 
 ## Requirements
 
-### Requirement: L1 to L2 compaction is automatically scheduled
-
-Compactor.checkAndCompact SHALL check L1 segment count per partition and trigger CompactL1ToL2 when the count reaches L1Threshold. The scheduling SHALL run in the existing schedulerLoop.
-
-#### Scenario: L1 segments reach threshold
-
-- **WHEN** a partition has 24 L1 segments (L1Threshold=24)
-- **THEN** checkAndCompact triggers CompactL1ToL2, merging 24 L1 segments into 1 L2 segment
-
-#### Scenario: L1 segments below threshold
-
-- **WHEN** a partition has 10 L1 segments (L1Threshold=24)
-- **THEN** checkAndCompact does not trigger L1→L2 compaction
-
-### Requirement: L2 to L3 compaction is automatically scheduled
-
-Compactor.checkAndCompact SHALL check L2 segment count per partition and trigger CompactL2ToL3 when the count reaches L2Threshold.
-
-#### Scenario: L2 segments reach threshold
-
-- **WHEN** a partition has 7 L2 segments (L2Threshold=7)
-- **THEN** checkAndCompact triggers CompactL2ToL3, merging 7 L2 segments into 1 L3 segment
-
-### Requirement: filterTombstoned removes tombstoned events
-
-Compactor.filterTombstoned SHALL check each event against TombstoneSet and remove tombstoned events. The no-op stub SHALL be replaced with actual tombstone filtering.
-
-#### Scenario: Tombstoned events in compaction input
-
-- **WHEN** compaction input contains events [E1, E2, E3] and E2 is tombstoned
-- **THEN** filterTombstoned returns [E1, E3]
-
-#### Scenario: No tombstone set configured
-
-- **WHEN** Compactor.tombstone is nil
-- **THEN** filterTombstoned returns all events unchanged (safe degradation)
-
-### Requirement: TTL check uses actual event timestamp
-
-LifecycleManager.checkTTL SHALL parse the Timestamp field from event JSON for age calculation, not use the segment window timestamp approximation.
-
-#### Scenario: Event near window boundary
-
-- **WHEN** an event created at 10:59 has TTL of 1 hour, and checkTTL runs at 12:01
-- **THEN** the event is marked tombstoned (age = ~2 hours > 1 hour TTL), because the actual Timestamp (10:59) is used, not the window timestamp (10:00)
-
-#### Scenario: Event JSON unparseable
-
-- **WHEN** event JSON cannot be unmarshaled
-- **THEN** the event is skipped (not marked tombstoned, no crash)
-
 ### Requirement: 保留保护与回收协调
 
-存储生命周期（TTL 扫描、容量淘汰、压实清理）SHALL 与保留租约**在同一存储生命周期内**协调：保留期内 TTL 过期、容量淘汰、内容降分辨率与墓碑最终清理 MUST NOT 物理销毁所需原文——只拒销毁，无损搬迁（压实复制原文到高层段）允许。恢复清点未完成时 MUST NOT 以宽限时间放行潜在恢复材料。释放保护不等于原文立即不可读。
+**任何路径 MUST NOT 物理销毁已提交事实**：TTL 扫描、容量淘汰、墓碑标记与物理回收 MUST NOT 作为运行期销毁路径存在——只拒销毁，不得以「先标墓碑、压实再删」的形态复活。
 
-保留租约 SHALL 由**共享资源 owner** 持有（非任一 agent），SHALL 支持多持有者引用计数递减、归零才解除，MUST 幂等。保护/回收协调能力 SHALL 复用存储生命周期既有能力，端口按**真实 consumer 所需**表达，具体名称/签名**不在此冻结**（DESIGN-GATE(G1)），不另立旧方法清单。遗忘扫描的首轮破坏性动作 MUST 等待租约武装与登记屏障解除。
+**已提交事实的可读性 SHALL NOT 因任何有界化手段下降**：按身份读一条已提交事实 SHALL 恒返回其原字节与原索引位置，SHALL NOT 答 missing；任何路径 MUST NOT 删除、覆盖或改写已提交事实。热层字节的增长 SHALL 显式声明，MUST NOT 被声称为本要求已达成的有界。
 
-回收/保留协调能力缺失的处置 SHALL **分档**：**持久恢复档**启用时，若存储缺少保护/回收协调能力，系统 SHALL **具名报告能力不完整**并**拒绝启动或禁止破坏性清理**（fail-closed），MUST NOT 当作「无保护即成功」；**非耐久档**（不承诺进程恢复）SHALL 以**显式 capability 缺失**声明，不得伪造保护已生效。
+**两条保护语义 SHALL 各由唯一活载体承接，MUST NOT 另立第二层**：未结投递义务的结算事实 SHALL 由热窗 pin 承接——pin 随义务未结登记、随结清解除，重启按链与 checkpoint 重建，已结义务 MUST NOT 重新持有 pin；原文过期 SHALL 由原文仓按召回窗口判定，窗口外的读取 SHALL 具名拒绝。MUST NOT 引入与这两条载体并行的保留租约账本、守卫计数或生命周期执行器，也 MUST NOT 留成「已定义、零调用、语义与现行判据冲突」的第三态。
 
-#### Scenario: 保留期内不物理销毁
+**能力诚实 SHALL 落在打开档位的声明上（fail-closed）**：不承诺跨进程恢复的档位 SHALL 自报不持久，装配面 SHALL 具名告警；MUST NOT 把「无保护／无恢复面」当作成功，MUST NOT 伪造保护或恢复已生效。
 
-- **WHEN** 一个受保留租约保护的原文到达 TTL 或超容量
-- **THEN** 该原文 MUST NOT 被物理销毁（墓碑可标记），无损搬迁 SHALL 允许
+#### Scenario: 已提交事实按身份恒可读
 
-#### Scenario: 释放保护后按原时间戳复归类
+- **WHEN** 按身份读一条已提交事实
+- **THEN** 以同一身份读取 SHALL 返回原字节与原索引位置，MUST NOT 答复 missing
+- **AND** 正文读不出时 SHALL 具名拒绝（`ErrSegmentBodyMissing`），MUST NOT 静默丢事实
 
-- **WHEN** 保留租约释放
-- **THEN** 该 key SHALL 按其**原有时间戳**、原类型的年龄窗口恢复参与淘汰，MUST NOT 被重新盖时间
+#### Scenario: 销毁路径不存在
 
-#### Scenario: 恢复清点未完成不放行
+- **WHEN** 审查提交后事实的任何后台动作（折叠、压缩、装配、开档）
+- **THEN** 每个动作 SHALL 只改变可见性，MUST NOT 删除、覆盖或改写已提交事实
+- **AND** MUST NOT 存在以 TTL 到期、容量超限或墓碑清理为条件的物理销毁调用点
 
-- **WHEN** 恢复清点尚未完成
-- **THEN** 破坏性回收 MUST NOT 以宽限时间放行潜在恢复材料
+#### Scenario: 未结义务的原文不被窗口裁掉
 
-#### Scenario: 多持有者引用计数
+- **WHEN** 一条投递义务仍处未结（owed/held）状态
+- **THEN** 其结算事实 SHALL 因 pin 留在热窗内，窗口裁剪 MUST NOT 把它移出
+- **AND** 义务结清后 SHALL 解除 pin，该事实从此按普通窗口老化
 
-- **WHEN** 同一 key 被多个 owner 同时保护，其中一个释放
-- **THEN** 保护 SHALL 因计数未归零而继续有效，直到最后一个持有者释放；重复释放 MUST 幂等
+#### Scenario: 重启后按身份重建 pin
 
-#### Scenario: 持久恢复档缺能力 fail-closed
+- **WHEN** 进程重启
+- **THEN** 未结义务的 pin SHALL 按链上结算事实与 checkpoint 切片重建
+- **AND** 已结义务 MUST NOT 重新持有 pin
 
-- **WHEN** 启用持久恢复档而存储缺少保护/回收协调能力
-- **THEN** 系统 SHALL 具名报告能力不完整并拒绝启动或禁止破坏性清理（fail-closed），MUST NOT 当作「无保护即成功」处理
+#### Scenario: 原文窗口外具名拒绝
 
-#### Scenario: 非耐久档显式 capability
+- **WHEN** 一条原文的引用全部落在其召回窗口之外
+- **THEN** 读取 SHALL 具名 `RecallExpired`／`ErrOriginalExpired`，MUST NOT 答复空召回或伪造命中
 
-- **WHEN** 使用不承诺进程恢复的存储档位
-- **THEN** 其保护/恢复能力缺失 SHALL 以显式 capability 声明呈现，MUST NOT 伪造保护已生效
+#### Scenario: 不承诺恢复的档位自报不持久
+
+- **WHEN** 打开一个不承诺跨进程恢复的存储档位
+- **THEN** 其 `StoreCapabilities.Durable` SHALL 为 false，装配面 SHALL 具名告警，MUST NOT 当作已具备恢复面
+
+#### Scenario: 已移除的保护机制不得以零调用形态复活
+
+- **WHEN** 审查 storage lifecycle 面
+- **THEN** 生命周期、保留租约与内存守卫三个构造 SHALL 全部不存在（无定义、无引用），MUST NOT 以「在册未接线」形态重新引入
+- **AND** 新增保护能力 SHALL 先具名它并入的那一条现行判据，MUST NOT 另立第二真相

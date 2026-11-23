@@ -10,16 +10,20 @@
 #   * the comment policy measured over product packages at zero findings
 #   * the OpenSpec strict spec-hygiene gate when the CLI is installed
 #   * the ADR 0006 three-hook guards (schema allowlist, assembly symbols,
-#     durable truth registry, main-spec hygiene), each with its negative selftest
+#     durable truth registry, main-spec hygiene, plugin mounting), each with its
+#     negative selftest
 #
 # This file holds the rules; scripts/lint.sh is the stable forwarding entry point
 # every caller uses, so CI, the docs and a batch author run the same command.
 #
-# usage: lint.sh [--strict] [--update-baseline] [--only policy|fmt|build|vet|contracts]
+# usage: lint.sh [--strict] [--update-baseline] [--only policy|fmt|build|vet|contracts] [--no-preflight]
 #   --strict           require zero findings (the converged end state, §D8)
 #   --update-baseline  rewrite the baseline after a batch lowered counts
 #   --only contracts   skip the Go fmt/build/vet/policy blocks; the checker selftests,
 #                      the runtime contracts below and the tail gates still run
+#   --no-preflight     skip the archive preflight; for a caller whose evidence directory
+#                      holds the mutation product alone (the CI test job) — the
+#                      archive-preflight job owns that gate with the full evidence bundle
 #
 # CI runs this script; a batch author runs the same command, so "it passed
 # locally" and "CI is green" cannot mean different things.
@@ -37,11 +41,13 @@ POLICY_DIRS=(. examples/wechat-bot examples/cli-host)
 only=""
 strict=""
 update=""
+skip_preflight=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --strict) strict=1; shift ;;
     --update-baseline) update=1; shift ;;
     --only) only="${2:-}"; shift 2 ;;
+    --no-preflight) skip_preflight=1; shift ;;
     *) echo "lint.sh: unknown argument $1" >&2; exit 2 ;;
   esac
 done
@@ -111,7 +117,8 @@ run bash scripts/gates/test_race_check.sh
 
 # ADR 0006 三挂点守护（每条规则先跑正反样例自测，再判现树）：
 # R1 agent 声明的 schema 节白名单；R2 装配根的专属路径符号；
-# R3 持久真相登记；R4 主 spec requirement 文本的机制细节。
+# R3 持久真相登记；R4 主 spec requirement 文本的机制细节；
+# R5 插件挂载动态性（装配根零具体特性构造＋plugins: 声明活体）。
 # 规则修改必须同时更新自测；自测只打印 PASS 不拒绝负例时这里先红。
 echo "lint: three-hook guards (ADR 0006)"
 run python3 scripts/gates/test_check_schema_allowlist.py
@@ -122,6 +129,8 @@ run python3 scripts/gates/test_check_durable_truth_registry.py
 run python3 scripts/gates/check_durable_truth_registry.py
 run python3 scripts/gates/test_check_spec_hygiene.py
 run python3 scripts/gates/check_spec_hygiene.py
+run python3 scripts/gates/test_check_plugin_mounting.py
+run python3 scripts/gates/check_plugin_mounting.py
 # 词汇对齐（docs/GLOSSARY）：纯短语禁，无基线/豁免，命中即红。carrier 全退役子串禁
 # （carries/carried/carrying 不含子串故放行）；压缩晋升禁 generational／fold generation；
 # api/plugin 禁 Product；退役词禁；注释续行归并匹配跨行短语，单行命中只计一次。
@@ -132,6 +141,33 @@ run python3 scripts/gates/check_vocabulary_alignment.py
 echo "lint: window and bound registry"
 run python3 scripts/gates/test_check_window_bounds.py
 run python3 scripts/gates/check_window_bounds.py
+
+# 定义做（DoD）纯度判据覆盖门：design 的每条判据须绑定一个真量锚、一个已杀死
+# 的变异与一个 CI 作业；锚只判断代理量（boot 读字节冒充墙钟）或判断口径比登记
+# 的界更松即红。判据集从 design 读，不从登记表读——两边不一致两个方向都红。
+#
+# 变异的判决只能来自运行产物（check_event_integrity_mutations.py --out 写的
+# evidence.json），登记表里手填的判决被判无效，产物还须描述本树。输出目录因此
+# 只能由本次运行给出：没给就具名失败，不搜索"最近一份绿结果"，也不把登记表当
+# 后备——缺证据的红就是这条门要的结果，不是可以绕过的环境问题。
+echo "lint: definition-of-done coverage"
+run python3 scripts/gates/test_check_dod_coverage.py
+evidence_dir="${TAGENT_RUNTIME_EVIDENCE_DIR:-}"
+if [ -z "$evidence_dir" ]; then
+  echo "lint: TAGENT_RUNTIME_EVIDENCE_DIR is unset; the DoD gate counts mutation run products and there is no evidence directory to read" >&2
+  exit 1
+fi
+if [ ! -d "$evidence_dir/mutations" ]; then
+  echo "lint: the evidence directory $evidence_dir holds no mutations/ product; run check_event_integrity_mutations.py --out '$evidence_dir/mutations' (bash scripts/preflight.sh does this) and pass that directory" >&2
+  exit 1
+fi
+run python3 scripts/gates/check_dod_coverage.py --mutation-evidence "$evidence_dir/mutations"
+
+# 死生产者门：产品包内每个生产函数须有消费者。测试调用算消费者、skeleton_assert 断言不算，
+# 家族互相调用而无人可达仍判死；白名单只收「消费者在本仓之外」的已审豁免，过期豁免即红。
+echo "lint: dead producers (no producer without a consumer)"
+run python3 scripts/gates/test_check_dead_producers.py
+run python3 scripts/gates/check_dead_producers.py
 
 # 运行时契约（CI 的 format-and-contract job）：计划/场景契约在无 task-graph 时
 # 没有判定对象，如实打印 skip；架构政策、概念预算与实现覆盖对现树恒判定。
@@ -152,6 +188,33 @@ else
 fi
 echo "lint: architecture policy"
 run python3 scripts/gates/check_runtime_architecture.py --check-policy --json
+# 归档拦截：把路径放进 openspec 归档树时，先过归档前门。判据是运行产物与这次
+# 变更绑定，故两个模式各判一种真实对象：
+#   * 这次提交带来了归档路径 → 判这次提交（`--commit HEAD`，语义与 CI 作业一致）；
+#   * 归档移动还在工作树里（`openspec archive` 刚跑完、尚未提交）→ 还没有 revision
+#     可判，判本次运行目录的产物与本树是否绑定（`--evidence`）。
+# 先判提交再判工作树：只有本次提交新增的路径进判据，历史归档留在树里不会让链每次
+# 都红；两个都在时以提交为准（它是 CI 会判的那个对象）。非 git 树如实跳过——门只
+# 核它真正读到的对象，没有对象时不假装判过。
+echo "lint: archive preflight (archived paths in this tree)"
+if [ -n "$skip_preflight" ]; then
+  echo "  (--no-preflight: skipped here; the archive-preflight job owns this gate with the full evidence bundle)"
+elif git rev-parse --git-dir >/dev/null 2>&1; then
+  committed_paths="$(git diff --no-renames --name-only --diff-filter=A HEAD^ HEAD -- openspec 2>/dev/null \
+    | grep -E '^openspec/[^/]+/archive/' || true)"
+  pending_paths="$( { git diff --no-renames --name-only --diff-filter=A HEAD -- openspec 2>/dev/null
+    git ls-files --others --exclude-standard -- openspec 2>/dev/null; } \
+    | grep -E '^openspec/[^/]+/archive/' || true)"
+  if [ -n "$committed_paths" ]; then
+    run bash scripts/gates/archive-preflight.sh --commit HEAD
+  elif [ -n "$pending_paths" ]; then
+    run bash scripts/gates/archive-preflight.sh --evidence "$evidence_dir"
+  else
+    echo "  (no path added under the openspec archive tree; the archive gate has no object, skipped)"
+  fi
+else
+  echo "  (not a git work tree; the archive gate reads a commit and has no object here, skipped)"
+fi
 echo "lint: concept budget"
 run python3 scripts/gates/check_concept_budget.py --json
 echo "lint: architecture implementation coverage"

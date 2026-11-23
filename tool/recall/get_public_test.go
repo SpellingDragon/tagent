@@ -56,6 +56,10 @@ func corruptSurface(t *testing.T) map[string]trpctool.CallableTool {
 		t.Fatalf("open the durable tier: %v", err)
 	}
 	t.Cleanup(func() { tier.Segments.Close() })
+	scoped, ok := tier.Originals.(ledger.ScopedOriginalStore)
+	if !ok {
+		t.Fatalf("the memory tier holds %T, want the scoped original read face", tier.Originals)
+	}
 	at := time.Date(2026, 11, 9, 12, 0, 0, 0, time.UTC)
 	partition := memory.PartitionIDFromName("agent-a")
 	store := func(key event.EventID, body []byte) {
@@ -92,7 +96,7 @@ func corruptSurface(t *testing.T) map[string]trpctool.CallableTool {
 	store(corruptKey, []byte("not-an-event"))
 	tools := recall.New(recall.Reads{
 		Table:     assembly.NewTierQuerySource(tier.Segments),
-		Originals: ledger.NewMemoryOriginalStore(),
+		Originals: scoped,
 	}, []string{"agent-a"})
 	surface := make(map[string]trpctool.CallableTool, len(tools))
 	for _, tool := range tools {

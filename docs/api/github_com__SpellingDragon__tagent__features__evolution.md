@@ -439,17 +439,14 @@ type JudgePolicy struct {
 	// disables this criterion explicitly.
 	CriticalRateMax float64
 }
-    JudgePolicy is the threshold set of the post-hoc judgment. The wiki defaults
-    are carried by DefaultJudgePolicy, and a zero field means "not set" and
-    folds to that default; a negative rate ceiling explicitly disables that rate
-    criterion instead of pretending it never fires.
+    JudgePolicy is the threshold set of the post-hoc judgment. A zero field
+    means "not set" and folds to that default; a negative rate ceiling
+    explicitly disables that rate criterion instead of pretending it never
+    fires.
 
     A rate is a count over the turn count of the version (the real requests
     recorded as consuming it) and a criterion is breached strictly above its
     ceiling, so a rate exactly at the ceiling is not a breach.
-
-func DefaultJudgePolicy() JudgePolicy
-    DefaultJudgePolicy returns the wiki default thresholds.
 
 type Judgment struct {
 	// Decidable reports whether the judgment carries a usable verdict.

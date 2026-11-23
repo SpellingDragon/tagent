@@ -304,7 +304,7 @@ func retroBoot(t *testing.T, rig *retroRig, root string) *assembly.Host {
 // decorator a check arms, so the rig boots over a seam rather than a layout.
 func retroDecorate(t *testing.T, rig *retroRig, root string) {
 	t.Helper()
-	inner, err := ledger.OpenAtomicStore(context.Background(), ledger.StorageConfig{Type: ledger.StorageJournal, Root: root})
+	inner, err := ledger.OpenAtomicStore(context.Background(), ledger.StorageConfig{Type: ledger.StorageJournal, Root: root, WriteRights: true})
 	if err != nil {
 		t.Fatalf("open the storage engine over %s: %v", root, err)
 	}

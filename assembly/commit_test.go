@@ -15,23 +15,26 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/SpellingDragon/tagent/api/config"
 	"github.com/SpellingDragon/tagent/api/event"
+	"github.com/SpellingDragon/tagent/api/model"
+	"github.com/SpellingDragon/tagent/memory/ledger"
 )
 
 // livenessDoc is one source document of the configuration liveness fixture:
 // two agents, one provider, an optional durable storage root.
 type livenessDoc struct {
-	Root          string
-	UserProvider  string
-	UserModel     string
-	WorkerModel   string
-	UserMaxTokens int
-	WorkerMax     int
-	Storage       bool
+	Root             string
+	UserProvider     string
+	UserModel        string
+	WorkerModel      string
+	UserReplayWindow int
+	WorkerMax        int
+	Storage          bool
 }
 
 // yaml renders the source document.
@@ -40,7 +43,7 @@ func (d livenessDoc) yaml() string {
 	if d.Storage {
 		storage = "storage: { type: localfile, root: " + filepath.Join(d.Root, "storage") + " }\n"
 	}
-	maxTokens := d.UserMaxTokens
+	maxTokens := d.UserReplayWindow
 	if maxTokens == 0 {
 		maxTokens = 256
 	}
@@ -63,10 +66,10 @@ agents:
   user:
     provider: %s
     model: %s
-    max_tokens: %d
+    replay_window: %d
   worker:
     model: %s
-    max_tokens: %d
+    replay_window: %d
 %s`, d.UserModel, d.Root, userProvider, d.UserModel, maxTokens, d.WorkerModel, workerMax, storage)
 }
 
@@ -203,7 +206,7 @@ func TestPublishConsumesDeclarationFact(t *testing.T) {
 	host := bootLiveness(t, path)
 	run := host.Run()
 
-	doc.UserMaxTokens = 512
+	doc.UserReplayWindow = 512
 	if err := os.WriteFile(path, []byte(doc.yaml()), 0o644); err != nil {
 		t.Fatalf("rewrite the configuration source: %v", err)
 	}
@@ -269,7 +272,7 @@ func TestRevertedReloadAnswersTheChainDeclaration(t *testing.T) {
 	}
 	previous := bootDecl.FactKey()
 	for i, maxTokens := range []int{512, 256, 512, 256} {
-		doc.UserMaxTokens = maxTokens
+		doc.UserReplayWindow = maxTokens
 		if err := os.WriteFile(path, []byte(doc.yaml()), 0o644); err != nil {
 			t.Fatalf("rewrite the configuration source: %v", err)
 		}
@@ -327,14 +330,14 @@ func TestRevertedDeclarationSurvivesRestart(t *testing.T) {
 	if err != nil || !held {
 		t.Fatalf("read the boot declaration: held=%v err=%v", held, err)
 	}
-	doc.UserMaxTokens = 512
+	doc.UserReplayWindow = 512
 	if err := os.WriteFile(path, []byte(doc.yaml()), 0o644); err != nil {
 		t.Fatalf("rewrite the configuration source: %v", err)
 	}
 	if report, err := host.Reload(ctx); err != nil || !report.Publication.Published {
 		t.Fatalf("reload the moved document: publication=%+v err=%v", report.Publication, err)
 	}
-	doc.UserMaxTokens = 256
+	doc.UserReplayWindow = 256
 	if err := os.WriteFile(path, []byte(doc.yaml()), 0o644); err != nil {
 		t.Fatalf("revert the configuration source: %v", err)
 	}
@@ -446,7 +449,7 @@ func TestLoadFailureFactAuditable(t *testing.T) {
 		t.Fatalf("generation in effect after a load failure = %d, want %d", got, before.Generation)
 	}
 
-	doc.UserMaxTokens = 640
+	doc.UserReplayWindow = 640
 	if err := os.WriteFile(path, []byte(doc.yaml()), 0o644); err != nil {
 		t.Fatalf("repair the configuration source: %v", err)
 	}
@@ -516,7 +519,7 @@ func TestRestartReconcilesFileWithChain(t *testing.T) {
 	if generation := first.Run().publisher.Current().Generation; generation != 1 {
 		t.Fatalf("first boot generation = %d, want 1", generation)
 	}
-	doc.UserMaxTokens = 512
+	doc.UserReplayWindow = 512
 	if err := os.WriteFile(path, []byte(doc.yaml()), 0o644); err != nil {
 		t.Fatalf("rewrite the configuration source: %v", err)
 	}
@@ -542,7 +545,7 @@ func TestRestartReconcilesFileWithChain(t *testing.T) {
 		t.Fatalf("publication records after a consistent restart = %d, want 2", recordsBefore)
 	}
 
-	doc.UserMaxTokens = 768
+	doc.UserReplayWindow = 768
 	if err := os.WriteFile(path, []byte(doc.yaml()), 0o644); err != nil {
 		t.Fatalf("rewrite the newer configuration source: %v", err)
 	}
@@ -559,7 +562,7 @@ func TestRestartReconcilesFileWithChain(t *testing.T) {
 	}
 	closeLiveness(t, third)
 
-	doc.UserMaxTokens = 512
+	doc.UserReplayWindow = 512
 	if err := os.WriteFile(path, []byte(doc.yaml()), 0o644); err != nil {
 		t.Fatalf("roll the configuration source back: %v", err)
 	}
@@ -730,4 +733,378 @@ func TestCarriedGenerationAddsNoRecord(t *testing.T) {
 	if fact := latestAttempt(t, run); fact.Result != publicationResultUnchanged {
 		t.Fatalf("carried reload attempt = %+v, want unchanged", fact)
 	}
+}
+
+// TestConfigChainFindsItsNewestFactByKeyAlone pins the discovery the chain's keys bound.
+//   - the newest fact of the chain is found through the commit order's keys, so the statements of other families the walk passes cost no value
+//   - the values the load reads are the facts of the chain alone, and the chain it answers is every fact it holds
+//
+// 契约: docs/wiki/platform/org-hot-reload.md#generations
+func TestConfigChainFindsItsNewestFactByKeyAlone(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	tier, err := ledger.OpenTier(ctx, ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: root, WriteRights: true})
+	if err != nil {
+		t.Fatalf("open the storage tier of the chain fixture: %v", err)
+	}
+	defer func() {
+		if err := tier.Close(); err != nil {
+			t.Fatalf("close the storage tier of the chain fixture: %v", err)
+		}
+	}()
+	writer := &configChain{}
+	writer.attach(ledger.TierFactLog(tier))
+	for at := 1; at <= 2; at++ {
+		if _, err := writer.append(ctx, configFact{Kind: configDeclarationKind}); err != nil {
+			t.Fatalf("commit configuration fact %d: %v", at, err)
+		}
+	}
+	for at := 1; at <= 6; at++ {
+		if err := ledger.TierFactLog(tier).Put(ctx, fmt.Sprintf("1:evt:%d:1", at), []byte("body")); err != nil {
+			t.Fatalf("commit event fact %d: %v", at, err)
+		}
+	}
+	readerTier, err := ledger.OpenTier(ctx, ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: root})
+	if err != nil {
+		t.Fatalf("open the reading view of the chain fixture: %v", err)
+	}
+	defer func() {
+		if err := readerTier.Close(); err != nil {
+			t.Fatalf("close the reading view of the chain fixture: %v", err)
+		}
+	}()
+	probe, held := readerTier.Store.(interface{ ValueReads() int64 })
+	if !held {
+		t.Fatalf("the reading view holds the engine %T, which states no value read measure, so the discovery is not measured", readerTier.Store)
+	}
+	before := probe.ValueReads()
+	reader := &configChain{}
+	reader.attach(ledger.TierFactLog(readerTier))
+	if err := reader.load(ctx); err != nil {
+		t.Fatalf("load the configuration chain: %v", err)
+	}
+	if got := len(reader.facts); got != 2 {
+		t.Fatalf("the load answers %d fact(s), want the 2 the chain holds", got)
+	}
+	if reads := probe.ValueReads() - before; reads != 2 {
+		t.Fatalf("the load read %d value(s) for the 2 fact(s) of the chain, want the chain alone: the discovery read a value of the 6 statement(s) it walked past", reads)
+	}
+}
+
+// TestConfigChainRefusesAHoleInItsSequence pins the refusal of a chain missing a fact.
+//   - a chain whose newest fact states a sequence the log holds no fact of is refused by name
+//   - the refusal is the load's, so a boot never serves a chain shorter than the one the ledger states
+//
+// 契约: docs/wiki/platform/org-hot-reload.md#generations
+func TestConfigChainRefusesAHoleInItsSequence(t *testing.T) {
+	ctx := context.Background()
+	tier, err := ledger.OpenTier(ctx, ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: t.TempDir(), WriteRights: true})
+	if err != nil {
+		t.Fatalf("open the storage tier of the chain fixture: %v", err)
+	}
+	defer func() {
+		if err := tier.Close(); err != nil {
+			t.Fatalf("close the storage tier of the chain fixture: %v", err)
+		}
+	}()
+	log := ledger.TierFactLog(tier)
+	writer := &configChain{}
+	writer.attach(log)
+	for at := 1; at <= 2; at++ {
+		if _, err := writer.append(ctx, configFact{Kind: configDeclarationKind}); err != nil {
+			t.Fatalf("commit configuration fact %d: %v", at, err)
+		}
+	}
+	first := fmt.Sprintf("%s%020d", configChainPrefix, 1)
+	if err := tier.Store.Commit(ctx, ledger.Batch{Deletes: []string{first}}); err != nil {
+		t.Fatalf("delete the first fact of the chain: %v", err)
+	}
+	reader := &configChain{}
+	reader.attach(log)
+	err = reader.load(ctx)
+	if err == nil {
+		t.Fatalf("the load answered %d fact(s) of a chain missing the fact %s, want the hole refused by name", len(reader.facts), first)
+	}
+	if !strings.Contains(err.Error(), "a hole is a damaged ledger") {
+		t.Fatalf("the load refused the chain with %v, want the hole in its own sequence named", err)
+	}
+}
+
+// chainDiscoveryView is one root's durable engine behind a view that counts what a boot
+// asks of the configuration chain's discovery.
+//   - A point read and a prefix read under the chain's prefix are counted apart, so a discovery that names its keys is told apart from one that reads the family whole
+//   - The key-only commit-order walk counts the keys it names, and the value walk is forwarded uncounted: every boot names its index entries through the value walk, so the key-only walk is what answers whether the discovery walks the history
+//   - The engine opens on the first call, so the boot pays the one open the tier pays beside no wrapper
+type chainDiscoveryView struct {
+	mu       sync.Mutex
+	root     string
+	engine   ledger.AtomicStore
+	points   int
+	prefixes int
+	walked   int
+}
+
+// open answers the engine the view wraps, opening the durable engine of its root on the
+// first call.
+func (v *chainDiscoveryView) open(ctx context.Context) (ledger.AtomicStore, error) {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	if v.engine != nil {
+		return v.engine, nil
+	}
+	store, err := ledger.OpenAtomicStore(ctx, ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: v.root, WriteRights: true})
+	if err != nil {
+		return nil, err
+	}
+	v.engine = store
+	return store, nil
+}
+
+// Read answers the fetch through the engine the view wraps, counting what the fetch
+// named of the chain's own family.
+func (v *chainDiscoveryView) Read(ctx context.Context, fetch ledger.Fetch) ([]ledger.Pair, error) {
+	engine, err := v.open(ctx)
+	if err != nil {
+		return nil, err
+	}
+	v.mu.Lock()
+	if fetch.Key != "" && strings.HasPrefix(fetch.Key, configChainPrefix) {
+		v.points++
+	}
+	if fetch.Prefix != "" && strings.HasPrefix(fetch.Prefix, configChainPrefix) {
+		v.prefixes++
+	}
+	v.mu.Unlock()
+	return engine.Read(ctx, fetch)
+}
+
+// Keys answers the keys the prefix names through the engine the view wraps, counting an
+// enumeration of the chain's own family.
+func (v *chainDiscoveryView) Keys(ctx context.Context, prefix string) ([]string, error) {
+	engine, err := v.open(ctx)
+	if err != nil {
+		return nil, err
+	}
+	v.mu.Lock()
+	if strings.HasPrefix(prefix, configChainPrefix) {
+		v.prefixes++
+	}
+	v.mu.Unlock()
+	return engine.Keys(ctx, prefix)
+}
+
+// Namespaces answers the namespaces the store holds through the engine the view wraps.
+func (v *chainDiscoveryView) Namespaces(ctx context.Context) ([]string, error) {
+	engine, err := v.open(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return engine.Namespaces(ctx)
+}
+
+// Commit applies one batch through the engine the view wraps.
+func (v *chainDiscoveryView) Commit(ctx context.Context, batch ledger.Batch) error {
+	engine, err := v.open(ctx)
+	if err != nil {
+		return err
+	}
+	return engine.Commit(ctx, batch)
+}
+
+// EachCommittedNewestFirst hands the value walk to the order the engine states.
+func (v *chainDiscoveryView) EachCommittedNewestFirst(ctx context.Context, visit func(key string, value []byte) (bool, error)) error {
+	engine, err := v.open(ctx)
+	if err != nil {
+		return err
+	}
+	ordered, held := engine.(ledger.CommitOrder)
+	if !held {
+		return fmt.Errorf("tagent: the engine %T states no committed order, so the view beside it states none", engine)
+	}
+	return ordered.EachCommittedNewestFirst(ctx, visit)
+}
+
+// EachCommittedKeyNewestFirst hands the key-only walk to the order the engine states,
+// counting the keys it names.
+func (v *chainDiscoveryView) EachCommittedKeyNewestFirst(ctx context.Context, visit func(key string) (bool, error)) error {
+	engine, err := v.open(ctx)
+	if err != nil {
+		return err
+	}
+	keys, held := engine.(interface {
+		EachCommittedKeyNewestFirst(ctx context.Context, visit func(key string) (bool, error)) error
+	})
+	if !held {
+		return fmt.Errorf("tagent: the engine %T states no key-only committed order, so the view beside it states none", engine)
+	}
+	return keys.EachCommittedKeyNewestFirst(ctx, func(key string) (bool, error) {
+		v.mu.Lock()
+		v.walked++
+		v.mu.Unlock()
+		return visit(key)
+	})
+}
+
+// counted answers what the view counted so far.
+func (v *chainDiscoveryView) counted() chainDiscoveryCounts {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	return chainDiscoveryCounts{points: v.points, prefixes: v.prefixes, walkKeys: v.walked}
+}
+
+// chainDiscoveryCounts is what one boot asked of the chain's discovery.
+type chainDiscoveryCounts struct {
+	points   int
+	prefixes int
+	walkKeys int
+}
+
+// chainDiscovery is what one boot asked of the chain's discovery beside the chain it
+// answered.
+type chainDiscovery struct {
+	counts      chainDiscoveryCounts
+	facts       []configFact
+	fingerprint string
+	generation  uint64
+	recordHeld  bool
+}
+
+// chainDiscoveryDeclaration answers the declaration every discovery fixture boots with:
+// two agents over one model reference, which is the declaration the assembly fixture
+// publishes.
+func chainDiscoveryDeclaration() *config.Declaration {
+	return &config.Declaration{
+		Entry:  "agent-a",
+		Agents: []config.AgentSpec{{ID: "agent-a", Model: "model-a", ReplayWindow: 60}, {ID: "agent-b", Model: "model-a", ReplayWindow: 60}},
+	}
+}
+
+// measureChainDiscovery boots one root holding the named number of configuration facts
+// beside the named number of unrelated commits, and answers what the boot asked of the
+// chain's discovery.
+//   - The newest configuration fact is the publication record of the declaration the boot carries, so the boot adopts the generation its chain records and files no fact of its own: the facts the boot answers are the fixture's
+//   - The writer view closes before the boot opens, so the boot reads a log no other writer handle holds
+func measureChainDiscovery(t *testing.T, ctx context.Context, facts, unrelated int) chainDiscovery {
+	t.Helper()
+	decl := chainDiscoveryDeclaration()
+	fingerprint := decl.FactKey()
+	if fingerprint == "" {
+		t.Fatalf("the declaration of the discovery fixture answers no canonical fingerprint")
+	}
+	root := t.TempDir()
+	tier, err := ledger.OpenTier(ctx, ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: root, WriteRights: true})
+	if err != nil {
+		t.Fatalf("open the writer view of the discovery fixture: %v", err)
+	}
+	writer := &configChain{}
+	writer.attach(ledger.TierFactLog(tier))
+	if _, err := writer.append(ctx, configFact{
+		Kind:        configPublicationRecordKind,
+		Type:        configPublicationFactType,
+		Fingerprint: fingerprint,
+		Generation:  1,
+		Publication: &configPublicationWire{Generation: 1, Fingerprint: fingerprint, At: time.Now().UTC()},
+	}); err != nil {
+		t.Fatalf("commit the publication record of the discovery fixture: %v", err)
+	}
+	for at := 1; at < facts; at++ {
+		if _, err := writer.append(ctx, configFact{
+			Kind:        configPublicationResultKind,
+			Type:        configPublicationFactType,
+			Fingerprint: fingerprint,
+			Generation:  1,
+		}); err != nil {
+			t.Fatalf("commit the configuration fact %d of the discovery fixture: %v", at+1, err)
+		}
+	}
+	log := ledger.TierFactLog(tier)
+	for at := 1; at <= unrelated; at++ {
+		if err := log.Put(ctx, fmt.Sprintf("1:evt:%d:1", at), []byte("body")); err != nil {
+			t.Fatalf("commit the unrelated fact %d of the discovery fixture: %v", at, err)
+		}
+	}
+	if err := tier.Close(); err != nil {
+		t.Fatalf("close the writer view of the discovery fixture: %v", err)
+	}
+	view := &chainDiscoveryView{root: root}
+	provider := &snapshotTestModel{answer: func(*model.Request) *model.Response {
+		return &model.Response{Choices: []model.Choice{{Message: model.Message{Role: model.RoleAssistant, Content: factWindowAnswer}}}, Done: true}
+	}}
+	run, err := assemble(ctx, decl, map[event.AgentID]NativeAgent{"agent-a": {Model: provider}, "agent-b": {Model: provider}}, false,
+		WithGovernance(snapshotTestGovernance{}),
+		WithStorage(ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: root, Engine: view}))
+	if err != nil {
+		t.Fatalf("boot the discovery fixture: %v", err)
+	}
+	measured := chainDiscovery{counts: view.counted(), facts: chainFacts(t, run)}
+	record, held, err := run.latestPublishedRecord(ctx)
+	if err != nil {
+		t.Fatalf("read the publication record the discovery fixture booted from: %v", err)
+	}
+	measured.fingerprint = record.Fingerprint
+	measured.generation = uint64(record.Generation)
+	measured.recordHeld = held
+	run.stopCheckpointFiler()
+	endRun(t, run)
+	return measured
+}
+
+// TestConfigChainDiscoveryCostsTheChainNotTheHistory pins the cost of the one discovery a boot pays before it reads the chain.
+//   - The newest fact is found by naming the keys the chain can hold, so no commit-order walk runs
+//   - The discovery costs the chain and never the history committed after it
+//   - No enumeration of the configuration family runs: the discovery pays point reads of the names it asks for
+//   - The point reads of the discovery are one count after 16 and after 512 unrelated commits, so the cost is a function of the chain
+//   - At 1 and at 64 configuration facts the point reads stay inside the chain plus the binary digits of its length
+//   - The bound is the chain's own values plus two probes per binary digit of its length
+//   - So the discovery follows the chain and not the history
+//   - Neither boot answers a shorter chain: both hold the same single fact and serve the same publication record
+//
+// 契约: docs/wiki/platform/org-hot-reload.md#generations
+func TestConfigChainDiscoveryCostsTheChainNotTheHistory(t *testing.T) {
+	ctx := context.Background()
+	short := measureChainDiscovery(t, ctx, 1, 16)
+	long := measureChainDiscovery(t, ctx, 1, 512)
+	for _, measured := range []struct {
+		name string
+		got  chainDiscovery
+	}{{"16 unrelated commits", short}, {"512 unrelated commits", long}} {
+		if measured.got.counts.walkKeys != 0 {
+			t.Fatalf("the discovery walked %d commit key(s) after %s, want none: the newest fact is found by the names the chain can hold, so the history beside it is never walked", measured.got.counts.walkKeys, measured.name)
+		}
+		if measured.got.counts.prefixes != 0 {
+			t.Fatalf("the discovery enumerated the configuration family %d time(s) after %s, want none: the discovery names its keys instead of reading the family whole", measured.got.counts.prefixes, measured.name)
+		}
+	}
+	if short.counts.walkKeys != long.counts.walkKeys {
+		t.Fatalf("the discovery walked %d key(s) after 16 unrelated commits and %d after 512, want one count: the cost is a function of the chain", short.counts.walkKeys, long.counts.walkKeys)
+	}
+	if short.counts.points != long.counts.points {
+		t.Fatalf("the discovery read %d point key(s) after 16 unrelated commits and %d after 512, want one count: the cost is a function of the chain", short.counts.points, long.counts.points)
+	}
+	want := chainDiscoveryDeclaration().FactKey()
+	for _, measured := range []struct {
+		name string
+		got  chainDiscovery
+	}{{"16 unrelated commits", short}, {"512 unrelated commits", long}} {
+		if len(measured.got.facts) != 1 {
+			t.Fatalf("the boot after %s answered %d configuration fact(s), want the 1 the fixture committed: the discovery skipped a fact of the chain", measured.name, len(measured.got.facts))
+		}
+		if !measured.got.recordHeld || measured.got.generation != 1 || measured.got.fingerprint != want {
+			t.Fatalf("the boot after %s served record %q of generation %d (held=%t), want the record of generation 1 the fixture committed", measured.name, measured.got.fingerprint, measured.got.generation, measured.got.recordHeld)
+		}
+	}
+	one := measureChainDiscovery(t, ctx, 1, 16)
+	deep := measureChainDiscovery(t, ctx, 64, 16)
+	if bound := 1 + 2*0 + 2; one.counts.points > bound {
+		t.Fatalf("the discovery of a 1-fact chain read %d point key(s), want at most %d: the discovery is bounded by the chain", one.counts.points, bound)
+	}
+	if bound := 64 + 2*6 + 2; deep.counts.points > bound {
+		t.Fatalf("the discovery of a 64-fact chain read %d point key(s), want at most %d: the discovery is bounded by the chain and its binary digits", deep.counts.points, bound)
+	}
+	if len(deep.facts) != 64 {
+		t.Fatalf("the boot of a 64-fact chain answered %d fact(s), want the 64 the fixture committed", len(deep.facts))
+	}
+	t.Logf("discovery over 16 and 512 unrelated commits: point reads %d/%d, prefix reads %d/%d, walked keys %d/%d",
+		short.counts.points, long.counts.points, short.counts.prefixes, long.counts.prefixes, short.counts.walkKeys, long.counts.walkKeys)
+	t.Logf("discovery over 1 and 64 configuration facts: point reads %d/%d", one.counts.points, deep.counts.points)
 }

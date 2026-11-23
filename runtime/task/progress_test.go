@@ -2,6 +2,7 @@ package task
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/SpellingDragon/tagent/api/event"
@@ -167,4 +168,60 @@ func TestProgressReadsFromTheCommittedChain(t *testing.T) {
 			}
 		}
 	})
+}
+
+// TestRestartProgressReportedReadsASettledTaskFromItsChain pins the progress read against the account a restart keeps.
+// - positive: ProgressReported answers a finished task the checkpoint never stated, deriving the read from its chain
+// - a terminal task reads as no progress beside the progress notification its chain really carries
+// - negative: an identity no chain holds answers ErrTaskNotFound
+// 契约: docs/wiki/agent/task-lifecycle.md#status-machine
+func TestRestartProgressReportedReadsASettledTaskFromItsChain(t *testing.T) {
+	ctx := context.Background()
+	source, commit := invariantRegistry(t)
+	taskID := invariantRegister(t, source, "call-progress-restart", "dedup-progress-restart")
+	if result, err := source.Advance(ctx, taskID, StatusRunning, "run-progress-restart", nil); err != nil || result != CommitCommitted {
+		t.Fatalf("move the task under way = (%v, %v), want a committed change", result, err)
+	}
+	progress, err := source.IssueNotice(ctx, taskID, NoticeProgress, "fact-progress")
+	if err != nil {
+		t.Fatalf("issue the progress notification: %v", err)
+	}
+	if result, err := source.Advance(ctx, taskID, StatusRunning, "progress-restart", []Envelope{progress}); err != nil || result != CommitCommitted {
+		t.Fatalf("commit the progress notification = (%v, %v), want a committed change", result, err)
+	}
+	accepting := NewMemoryManager(source, func(ctx context.Context, notice Notice) (DeliveryAcceptance, error) {
+		return DeliveryAccepted, nil
+	})
+	if err := accepting.Flush(ctx, taskID); err != nil {
+		t.Fatalf("deliver the progress notification before the cut: %v", err)
+	}
+	if result, err := source.Advance(ctx, taskID, StatusSettled, "end-progress-restart", nil); err != nil || result != CommitCommitted {
+		t.Fatalf("settle the task = (%v, %v), want a committed change", result, err)
+	}
+	carried := false
+	for _, fact := range commit.Facts(taskID) {
+		for _, envelope := range fact.Outbox {
+			if envelope.Notice.Kind == NoticeProgress {
+				carried = true
+			}
+		}
+	}
+	if !carried {
+		t.Fatalf("chain of %s carries no progress notification, want the fact the read derives from", taskID)
+	}
+
+	restored := restartAccount(t, source, commit, taskID)
+	restartUnheld(t, restored, taskID)
+	reported, err := restored.ProgressReported(ctx, taskID)
+	if err != nil {
+		t.Fatalf("the restart read the settled task as %v, want the progress read its chain holds", err)
+	}
+	if reported {
+		t.Fatal("progress of the finished task = true, want no progress beside a closed round")
+	}
+
+	stranger := event.TaskID("task-no-chain-holds")
+	if _, err := restored.ProgressReported(ctx, stranger); !errors.Is(err, ErrTaskNotFound) {
+		t.Fatalf("ProgressReported of an identity no chain holds = %v, want %v", err, ErrTaskNotFound)
+	}
 }

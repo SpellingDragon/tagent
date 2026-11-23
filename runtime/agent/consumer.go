@@ -715,11 +715,15 @@ func (c *Consumer) pullDriving() pulledEvents {
 		if !carries {
 			continue
 		}
-		if evt.Type == event.TypeTaskSettled && observationless(evt.Message) {
-			if result, resultAt, held := resultFactOf(facts, evt.TaskID); held && !presentedFact(result, resultAt, lastOutput, shown, byPrefix) {
+		if evt.Type == event.TypeTaskSettled && !carriesSettledBody(evt.Message) {
+			result, resultAt, held := resultFactOf(facts, evt.TaskID)
+			if held && !presentedFact(result, resultAt, lastOutput, shown, byPrefix) {
 				pull.material = append(pull.material, result)
+				continue
 			}
-			continue
+			if evt.Message.Content == "" {
+				continue
+			}
 		}
 		pull.material = append(pull.material, evt)
 	}
@@ -763,11 +767,21 @@ func terminalTaskNotice(evt event.Event) bool {
 	return false
 }
 
-// observationless reports whether one delivery fact carries no settled body:
-// the notification names the result, and the result fact is where its text
-// stands.
-func observationless(msg model.Message) bool {
-	return msg.Content == "" && msg.ToolID == "" && msg.ToolName == "" && len(msg.ToolCalls) == 0
+// resultBodyMarker opens the result section a delivery fact renders its settled
+// body under. It is spelled here as the frozen word it is: the family is
+// rendered by task.DeliveryFactOf (deliveryFactText), and the two spellings must
+// stay byte-identical or a settle fact that carries its own body reads as one
+// that names it elsewhere.
+const resultBodyMarker = "\nresult:\n"
+
+// carriesSettledBody reports whether one delivery fact states the settled body
+// itself: the settle line of a notification carries no result section, so the
+// body stands at the result fact the notification names instead. A settle the
+// chain holds no readable result beside still names what settled, so a settle
+// line with an empty body drives no material of its own — the pull leaves it
+// out rather than hand the range a fact with nothing to read.
+func carriesSettledBody(msg model.Message) bool {
+	return strings.Contains(msg.Content, resultBodyMarker)
 }
 
 // resultFactOf reports the result fact a delivery fact points at, beside its
@@ -1839,14 +1853,6 @@ func (cs *Consumers) wakeFact(addr event.Address, key event.EventID) {
 		consumer.Drive(key)
 	}
 	consumer.Wake()
-}
-
-// Has reports whether one address carries a resident consumption loop.
-func (cs *Consumers) Has(addr event.Address) bool {
-	if cs == nil || cs.loop == nil {
-		return false
-	}
-	return cs.loop.drivesAddress(addr)
 }
 
 // Resting reports whether every loop this set mounted stands between segments,

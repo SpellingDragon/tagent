@@ -72,12 +72,18 @@
 
 ### Requirement: 重启对账不漂移
 
-发布记录 MUST 在重启后可回读（durable 账），MUST NOT 只存活于内存。重启对账 MUST 以文件指纹与链上最新声明指纹判定：一致即静默，MUST NOT 产生无变更的发布；文件滞后时 MUST NOT 回退链上已发布事实（不漂移）。
+发布记录 MUST 在本构建写出的根上重启后可回读（durable 账），MUST NOT 只存活于内存；根下的 `cold/kv/journal.log` 由旧构建写出，其冷档事实不在本构建读面内：该形态 SHALL 先经 `scripts/fold-cold-root` 折回新根再供本构建服务，折回前查询落在冷档的发布记录答不存在，该退化是已声明的运维前置，不构成本要求的违反。重启对账 MUST 以文件指纹与链上最新声明指纹判定：一致即静默，MUST NOT 产生无变更的发布；文件滞后时 MUST NOT 回退链上已发布事实（不漂移）。
 
 #### Scenario: 重启后账可回读
 
 - **WHEN** 进程重启后查询发布记录
 - **THEN** 记录完整可读，重启不改变已发布事实
+
+#### Scenario: 旧冷档根未折回时查询发布记录答不存在
+
+- **WHEN** 根下存在旧构建写出的 `cold/kv/journal.log` 而该根尚未折回
+- **THEN** 本构建查询落在冷档的发布记录 SHALL 答不存在，该形态 SHALL 被读作已声明的运维前置，MUST NOT 被读作本要求的违反
+- **AND** 该形态 SHALL 先以 `go run ./scripts/fold-cold-root -source <旧根> -root <新根>` 折回新根（默认干跑只报待折键数，加 `-restore` 才写入），折回后查询 SHALL 返回原发布记录与源提交序
 
 #### Scenario: 对账不产生幽灵发布
 

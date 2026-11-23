@@ -33,7 +33,12 @@ PHASES = ("design", "skeleton", "tooling", "implementation", "acceptance")
 # Leaf-task ids come in two shapes: the 65 stage-two tasks `NN.M` and the 24
 # stage-one skeleton tasks `NN.P0.M` (total 89).
 TASK_ID_RE = re.compile(r"^\d{2}\.(?:P0\.\d+|\d+)$")
-CHECKBOX_RE = re.compile(r"^\s*-\s*\[(?P<mark>[ xX])\]\s+(?P<id>\d{2}\.(?:P0\.\d+|\d+[a-z]?))\b")
+# The id may be emphasised (`- [ ] **NN.R 标题**`) as well as bare. One plan wrote
+# both shapes at once and a bare-only pattern then tallied 26 of its 33 leaves
+# without an error: the seven written bold dropped out of the count. Read both;
+# a parser that reads one shape reports a smaller plan as if it were the whole.
+CHECKBOX_RE = re.compile(
+    r"^\s*-\s*\[(?P<mark>[ xX])\]\s+\*{0,2}(?P<id>\d{2}\.(?:P0\.\d+|\d+[a-z]?))\b")
 REQUIREMENT_RE = re.compile(r"^###\s+Requirement:\s*(?P<title>.+?)\s*$")
 SCENARIO_RE = re.compile(r"^####\s+Scenario:\s*(?P<title>.+?)\s*$")
 DELTA_KIND_RE = re.compile(

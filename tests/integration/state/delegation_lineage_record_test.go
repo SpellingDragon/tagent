@@ -2,6 +2,7 @@ package state
 
 import (
 	"context"
+	"sort"
 	"sync"
 	"testing"
 
@@ -21,8 +22,8 @@ import (
 func TestDelegationLineageLandsOnTheAdmissionRecord(t *testing.T) {
 	ctx := context.Background()
 	log := newLineageFactLog()
-	durable, err := orgstate.NewDurableCommit(log, nil)
-	if err != nil {
+	durable := orgstate.NewEmptyDurableCommit(log, nil)
+	if err := durable.Seat(ctx, nil, nil); err != nil {
 		t.Fatalf("open the durable commit: %v", err)
 	}
 	registry := task.NewMemoryRegistry(durable, task.NewMemoryAdmission())
@@ -58,8 +59,8 @@ func TestDelegationLineageLandsOnTheAdmissionRecord(t *testing.T) {
 	if len(chain) == 0 || chain[0].Spec.TriggerSource != event.LineageDelegation {
 		t.Fatalf("stored task_spawned material = %+v, want the delegation lineage on the admission link", chain)
 	}
-	reopened, err := orgstate.NewDurableCommit(log, nil)
-	if err != nil {
+	reopened := orgstate.NewEmptyDurableCommit(log, nil)
+	if err := reopened.Seat(ctx, nil, nil); err != nil {
 		t.Fatalf("reopen the durable commit: %v", err)
 	}
 	replayed, err := reopened.Records(ctx, receipt.TaskID)
@@ -149,15 +150,18 @@ func (l *lineageFactLog) Put(ctx context.Context, key string, value []byte) erro
 	return nil
 }
 
-// Get returns the value stored under key and whether one is held.
+// Get answers the value held under one key and whether the log holds it.
 func (l *lineageFactLog) Get(ctx context.Context, key string) ([]byte, bool, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, false, err
 	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	value, ok := l.values[key]
-	return append([]byte(nil), value...), ok, nil
+	value, held := l.values[key]
+	if !held {
+		return nil, false, nil
+	}
+	return append([]byte(nil), value...), true, nil
 }
 
 // Scan returns every stored pair under the key prefix as key and value.
@@ -173,6 +177,23 @@ func (l *lineageFactLog) Scan(ctx context.Context, prefix string) (map[string][]
 			out[key] = append([]byte(nil), value...)
 		}
 	}
+	return out, nil
+}
+
+// Keys returns the stored keys under the key prefix in key order.
+func (l *lineageFactLog) Keys(ctx context.Context, prefix string) ([]string, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	out := make([]string, 0, len(l.values))
+	for key := range l.values {
+		if len(key) >= len(prefix) && key[:len(prefix)] == prefix {
+			out = append(out, key)
+		}
+	}
+	sort.Strings(out)
 	return out, nil
 }
 

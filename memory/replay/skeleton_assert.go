@@ -2,8 +2,7 @@
 //
 // Skeleton compile-time assertions for the replay shapes: the projection entry,
 // the chain-isolated replay source and relation store, the compaction payload and
-// its refs, the cold-start rebuild that replays a fact chain into an empty
-// projection, and the segment-age axis the bands and their folds are declared
+// its refs, and the segment-age axis the bands and their folds are declared
 // under. A renamed field or a widened signature stops this file from compiling.
 package replay
 
@@ -27,9 +26,7 @@ var (
 
 // The replay projection keeps its declared methods.
 var (
-	_ func(*ReplayProjection, context.Context, ProjectionEntry) = (*ReplayProjection).Append
-
-	_ func(*ReplayProjection, context.Context) (ProjectionEntry, error) = (*ReplayProjection).Fold
+	_ func(*ReplayProjection, context.Context, ProjectionEntry) bool = (*ReplayProjection).Append
 
 	_ func(*ReplayProjection, context.Context, int) ([]ProjectionEntry, error) = (*ReplayProjection).AssembleBudget
 
@@ -81,15 +78,12 @@ var (
 )
 
 // The projection replay keeps its declared shapes: the chain-isolated replay
-// source and relation store, the compaction payload and its refs, and the
-// cold-start rebuild that replays a fact chain into an empty projection.
+// source and relation store, and the compaction payload and its refs.
 var (
 	_ = ChainKey{PartitionID: 0, SessionID: ""}
 	_ = ChainFact{Key: "", Chain: ChainKey{}, Type: "", Summary: "", Content: "", Time: time.Time{}}
 	_ = CompactionFact{Summary: CompactionRef{}, Refs: []CompactionRef{}, FullBoundary: "", ConsumedKeys: []event.EventID{}}
 	_ = CompactionRef{Key: "", Type: "", Summary: "", Content: "", Time: time.Time{}}
-	_ = RebuildOptions{PageSize: 0, FallbackBound: 0}
-	_ = RebuildReport{Entries: 0, Fallback: false, Dropped: 0, Scanned: false, Skipped: "", Partial: false, Missing: []event.EventID{}, Consumed: []event.EventID{}, FullBoundary: ""}
 
 	_ EventChain = (EventChain)(nil)
 	_            = (*MemoryRelations)(nil)
@@ -97,18 +91,10 @@ var (
 	_ func(*MemoryRelations, event.EventID, event.EventID) error   = (*MemoryRelations).SetParent
 	_ func(*MemoryRelations, event.EventID) (event.EventID, error) = (*MemoryRelations).GetParent
 
-	_ func() *ReplayProjection                                                                                                = NewReplayProjection
-	_ func(context.Context, *ReplayProjection, EventChain, *MemoryRelations, ChainKey, RebuildOptions) (RebuildReport, error) = RebuildProjectionFromWAL
-	_ func([]ProjectionEntry) []byte                                                                                          = RenderProjection
-	_ func(string) bool                                                                                                       = RetainRefType
+	_ func() *ReplayProjection       = NewReplayProjection
+	_ func([]ProjectionEntry) []byte = RenderProjection
 
-	_ error = ErrChainKeyRequired
-	_ error = ErrRebuildUnwired
 	_ error = ErrChainPageLimit
-	_ error = ErrChainScan
-	_ error = ErrCompactionCorrupt
-	_ error = ErrRebuildPartial
-	_ error = ErrFoldEmpty
 	_ error = ErrBudgetInvalid
 
 	_ = ProjectionTypeRecoveryHint

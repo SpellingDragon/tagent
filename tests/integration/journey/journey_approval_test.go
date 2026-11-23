@@ -72,8 +72,8 @@ func TestJourneyApprovalHoldThenRun(t *testing.T) {
 	provider.scriptAnswers(journeyEntryModel, finalBody)
 	provider.scriptAnswers(journeyWorkerModel, peerSeedBody, peerBody)
 	host := bootJourney(t, provider, journeySpec{
-		EntryTools: []string{"send"},
-		MaxTokens:  4096,
+		EntryTools:   []string{"send"},
+		ReplayWindow: 4096,
 		EntryExtra: []string{
 			"    memory:",
 			"      read_namespaces: [" + peerAgent + "]",

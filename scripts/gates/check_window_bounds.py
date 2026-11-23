@@ -5,9 +5,11 @@ Rule: the declaration surface and the product sources may name a window, a
 request budget, a compression policy or a mechanism constant, but each one must
 be registered in golden/runtime/window_bounds.json with its class:
 
-  window     the one replay window (max_tokens); exactly one, and it is external
-  budget     request budget face (provider window, output reserve); declared,
-             defaults derived from the replay window
+  window     the one replay window (replay_window); exactly one, and it is external
+  budget     request budget face: the budget gate's sole window source
+             (context_window, undeclared = the gate is off) and the output limit
+             (max_tokens, undeclared = 0 = no reserve); the reserve derives from
+             the effective output limit, never from the replay window
   policy     adjustable compression/retention/approval policy
   constant   mechanism constant (conversion, page bound, algorithm, memory cap);
              never a declaration key

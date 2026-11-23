@@ -32,6 +32,7 @@ import (
 	"time"
 
 	"github.com/SpellingDragon/tagent/api/config"
+	"github.com/SpellingDragon/tagent/api/durable"
 	"github.com/SpellingDragon/tagent/api/event"
 	"github.com/SpellingDragon/tagent/api/model"
 	"github.com/SpellingDragon/tagent/api/plugin"
@@ -93,7 +94,7 @@ func TestEventIntegrityConsumptionRecovery(t *testing.T) {
 func runClaimThenCommitRetry(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
-	cfg := ledger.StorageConfig{Type: ledger.StorageJournal, Root: t.TempDir()}
+	cfg := ledger.StorageConfig{Type: ledger.StorageJournal, Root: t.TempDir(), WriteRights: true}
 	spec := consumptionSpec("task-retry")
 	notice := task.Notice{TaskID: "", Round: 1, Kind: task.NoticeSettled, Seq: 0, Event: "evt-settle-retry"}
 	uncertain := true
@@ -108,8 +109,8 @@ func runClaimThenCommitRetry(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open the durable tier: %v", err)
 	}
-	durable, err := state.NewDurableCommit(ledger.TierFactLog(tier), probe)
-	if err != nil {
+	durable := state.NewEmptyDurableCommit(ledger.TierFactLog(tier), probe)
+	if err := durable.Seat(ctx, nil, nil); err != nil {
 		t.Fatalf("build the durable commit: %v", err)
 	}
 	registry := task.NewMemoryRegistry(durable, task.NewMemoryAdmission())
@@ -167,13 +168,16 @@ func runClaimThenCommitRetry(t *testing.T) {
 	if len(owed) != 1 || owed[0].Delivery != task.DeliveryPending || owed[0].Notice.Notice != notice {
 		t.Fatalf("outbox after the retried commit = %+v, want %s owed and pending", owed, notice.FactKey())
 	}
+	if err := tier.Close(); err != nil {
+		t.Fatalf("close the tier before the reopen: %v; the rebuild below opens the same root, so this view ends first", err)
+	}
 
 	reopenedTier, err := ledger.OpenTier(ctx, cfg)
 	if err != nil {
 		t.Fatalf("reopen the durable tier: %v", err)
 	}
-	reopened, err := state.NewDurableCommit(ledger.TierFactLog(reopenedTier), nil)
-	if err != nil {
+	reopened := state.NewEmptyDurableCommit(ledger.TierFactLog(reopenedTier), nil)
+	if err := reopened.Seat(ctx, nil, nil); err != nil {
 		t.Fatalf("rebuild the durable commit: %v", err)
 	}
 	chain, err := reopened.Records(ctx, receipt.TaskID)
@@ -220,14 +224,14 @@ func runClaimThenCommitRetry(t *testing.T) {
 func runConsumeOnlyAfterDurableCommit(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
-	cfg := ledger.StorageConfig{Type: ledger.StorageJournal, Root: t.TempDir()}
+	cfg := ledger.StorageConfig{Type: ledger.StorageJournal, Root: t.TempDir(), WriteRights: true}
 	tier, err := ledger.OpenTier(ctx, cfg)
 	if err != nil {
 		t.Fatalf("open the durable tier: %v", err)
 	}
 	recording := &consumptionBarrierLog{FactLog: ledger.TierFactLog(tier)}
-	durable, err := state.NewDurableCommit(recording, nil)
-	if err != nil {
+	durable := state.NewEmptyDurableCommit(recording, nil)
+	if err := durable.Seat(ctx, nil, nil); err != nil {
 		t.Fatalf("build the durable commit: %v", err)
 	}
 	spec := consumptionSpec("task-durable")
@@ -262,13 +266,16 @@ func runConsumeOnlyAfterDurableCommit(t *testing.T) {
 	if syncs <= syncsBefore || barrier < put {
 		t.Fatalf("barrier order = put@%d sync@%d (barriers %d before %d), want the record staged before the barrier it reports durable behind", put, barrier, syncsBefore, syncs)
 	}
+	if err := tier.Close(); err != nil {
+		t.Fatalf("close the tier before the reopen: %v; the reopen below reads the same root beside this view and the acceptance that follows reads the mailbox this process holds, so nothing writes here again", err)
+	}
 
 	reopenedTier, err := ledger.OpenTier(ctx, cfg)
 	if err != nil {
 		t.Fatalf("reopen the durable tier: %v", err)
 	}
-	reopened, err := state.NewDurableCommit(ledger.TierFactLog(reopenedTier), nil)
-	if err != nil {
+	reopened := state.NewEmptyDurableCommit(ledger.TierFactLog(reopenedTier), nil)
+	if err := reopened.Seat(ctx, nil, nil); err != nil {
 		t.Fatalf("rebuild the durable commit: %v", err)
 	}
 	chain, err := reopened.Records(ctx, receipt.TaskID)
@@ -619,7 +626,7 @@ func (s *consumptionSite) entry(t *testing.T, seq state.AcceptSeq) (state.Mailbo
 // log it delegates to: the record it stages, the barrier behind which the
 // commit reports it durable, and how many barriers returned.
 type consumptionBarrierLog struct {
-	state.FactLog
+	durable.FactLog
 	mu       sync.Mutex
 	step     int
 	lastPut  int
@@ -878,16 +885,25 @@ func (p *handoverProbe) Port() plugin.Port {
 	return plugin.PortFactObservation
 }
 
+// deliveryFactKeyPrefix opens the identity the delivery family mints for one
+// terminal notification, so a fact key says which family wrote it.
+const deliveryFactKeyPrefix = "settle-"
+
 // ObserveCommit holds the settled delivery of a tool call at the handover
-// boundary: a delivery fact carrying no settle-lineage stamp is the one the
-// backflow commits, so the probe tells it apart from the fact a delivery flush
-// observes and holds exactly that pass until the parent interrupts the process.
+// boundary: the fact is the one the delivery family renders for a notification,
+// so the hold names the family by its identity and covers the pass that follows
+// whichever face committed it — the backflow of this process and the delivery a
+// restart flushes write the same fact, and the window this anchor needs is the
+// one between its commit and the notification reaching the intake.
 func (p *handoverProbe) ObserveCommit(ctx context.Context, id event.EventID) error {
 	fact, err := p.run.CommittedEvent(ctx, id)
 	if err != nil {
 		return err
 	}
-	if fact.Type != event.TypeTaskSettled || fact.TaskID == "" || fact.Meta[event.MetaKeySettleTriggerSource] != "" {
+	if fact.Type != event.TypeTaskSettled || fact.TaskID == "" {
+		return nil
+	}
+	if !strings.HasPrefix(string(fact.Key), deliveryFactKeyPrefix) {
 		return nil
 	}
 	p.once.Do(func() { close(p.reached) })
@@ -929,13 +945,13 @@ func assembleHandoverRun(t *testing.T, ctx context.Context, root string, probe *
 // the notification the seed claims but never consumes.
 func consumptionSeedClaimedTask(t *testing.T, ctx context.Context, root string) (task.Spec, task.Notice) {
 	t.Helper()
-	cfg := ledger.StorageConfig{Type: ledger.StorageJournal, Root: root}
+	cfg := ledger.StorageConfig{Type: ledger.StorageJournal, Root: root, WriteRights: true}
 	tier, err := ledger.OpenTier(ctx, cfg)
 	if err != nil {
 		t.Fatalf("open the seed tier: %v", err)
 	}
-	durable, err := state.NewDurableCommit(ledger.TierFactLog(tier), nil)
-	if err != nil {
+	durable := state.NewEmptyDurableCommit(ledger.TierFactLog(tier), nil)
+	if err := durable.Seat(ctx, nil, nil); err != nil {
 		t.Fatalf("build the seed commit: %v", err)
 	}
 	registry := task.NewMemoryRegistry(durable, task.NewMemoryAdmission())
@@ -957,6 +973,9 @@ func consumptionSeedClaimedTask(t *testing.T, ctx context.Context, root string) 
 	result, err := registry.Advance(ctx, receipt.TaskID, task.StatusSettled, task.MutationID("settle:"+string(receipt.TaskID)), []task.Envelope{envelope})
 	if err != nil || result != task.CommitCommitted {
 		t.Fatalf("commit the claimed task = %v, %v, want committed", result, err)
+	}
+	if err := tier.Close(); err != nil {
+		t.Fatalf("close the seed tier: %v; the caller assembles a runtime over this root next, so this view ends first", err)
 	}
 	return spec, notice
 }
@@ -1114,8 +1133,11 @@ func restoreAssertAttribution(t *testing.T, outcome func(*testing.T, string) res
 					mode, o.Seed.TaskID, view.Owner, persistenceAgentID)
 			}
 		}
-		if !recovered {
-			t.Fatalf("the %s restart rebuilt no task %s; recovery=%+v", mode, o.Seed.TaskID, o.Recover.Recovery)
+		if mode == restoreModeSeedGraceful && recovered {
+			t.Fatalf("the %s restart stated the settled task %s in recovery=%+v; the checkpoint a drained close files states nothing of a task settled before the cut", mode, o.Seed.TaskID, o.Recover.Recovery)
+		}
+		if mode == restoreModeSeedKill && !recovered {
+			t.Fatalf("the %s restart rebuilt no task %s; recovery=%+v, want the full-load fallback beside no checkpoint to fold the chain", mode, o.Seed.TaskID, o.Recover.Recovery)
 		}
 
 		invocation, held := restoreInvocationOf(o.Recover, o.Seed.TurnInvocation)
@@ -1196,6 +1218,14 @@ func restoreAssertPairing(t *testing.T, outcome func(*testing.T, string) restore
 	}
 }
 
+// settleLineOf renders the body the delivery fact of one settled task carries:
+// the settle line the delivery family states for the notification, so a check
+// reading a request can name the record beside the material it was committed
+// from.
+func settleLineOf(taskID event.TaskID) string {
+	return "tagent: task " + string(taskID) + " settled"
+}
+
 // restoreAssertNextRequest proves the next actual model request of the restarted
 // process carries the restored material ahead of its own input.
 func restoreAssertNextRequest(t *testing.T, outcome func(*testing.T, string) restoreOutcome) {
@@ -1210,21 +1240,30 @@ func restoreAssertNextRequest(t *testing.T, outcome func(*testing.T, string) res
 		want := []struct {
 			role    string
 			content string
+			key     event.EventID
+			typ     string
 			what    string
 		}{
-			{string(model.RoleUser), o.Seed.Input, "the conversation input"},
-			{string(model.RoleAssistant), persistenceCallText, "the assistant tool call"},
-			{string(model.RoleTool), o.Seed.ResultText, "the tool result"},
-			{string(model.RoleAssistant), o.Seed.Answer, "the assistant output"},
+			{string(model.RoleUser), o.Seed.Input, o.Seed.InputFact, event.TypeExternalInput, "the conversation input"},
+			{string(model.RoleAssistant), persistenceCallText, "", event.TypeThinkingPlan, "the assistant tool call"},
+			{string(model.RoleTool), o.Seed.ResultText, o.Seed.ResultFact, event.TypeActionCommand, "the tool result"},
+			{string(model.RoleTool), settleLineOf(o.Seed.TaskID), "", event.TypeTaskSettled, "the delivery fact of the settled call"},
+			{string(model.RoleAssistant), o.Seed.Answer, o.Seed.AnswerFact, event.TypeAgentOutput, "the assistant output"},
 		}
 		if len(messages) < len(want)+1 {
 			t.Fatalf("the %s restart's next request carried %d message(s) %s, want the restored material beside its own input",
 				mode, len(messages), restoreDescribe(messages))
 		}
 		for at, expectation := range want {
-			if messages[at].Role != expectation.role || !bytes.Equal([]byte(messages[at].Content), []byte(expectation.content)) {
-				t.Fatalf("the %s restart's next request message %d = %s %q, want %s %q (the restored material must be carried, not only read from the ledger); messages=%s",
-					mode, at, messages[at].Role, messages[at].Content, expectation.role, expectation.content, restoreDescribe(messages))
+			typ, addressed := presentedTicketType(messages[at].Content)
+			addressed = addressed && typ == expectation.typ
+			if expectation.key != "" {
+				addressed = addressed && strings.HasPrefix(messages[at].Content, presentedTicket(expectation.key, expectation.typ)+" ")
+			}
+			material := withoutPresentedTicket(messages[at].Content)
+			if messages[at].Role != expectation.role || !bytes.Equal([]byte(material), []byte(expectation.content)) || !addressed {
+				t.Fatalf("the %s restart's next request message %d = %s %q, want %s %q behind the ticket %q (the restored material must be carried, not only read from the ledger); messages=%s",
+					mode, at, messages[at].Role, messages[at].Content, expectation.role, expectation.content, presentedTicket(expectation.key, expectation.typ), restoreDescribe(messages))
 			}
 		}
 		carriedCalls := messages[1].ToolCalls
@@ -1263,19 +1302,36 @@ func restoreAssertLedgerIsNotCompletion(t *testing.T, outcome func(*testing.T, s
 		}
 		carried := map[string]bool{}
 		for _, message := range o.Recover.Messages {
-			carried[message.Content] = true
+			carried[withoutPresentedTicket(message.Content)] = true
 		}
 		for _, want := range []struct {
 			what string
 			text string
+			key  event.EventID
+			typ  string
 		}{
-			{"conversation input", o.Seed.Input},
-			{"tool result", o.Seed.ResultText},
-			{"assistant output", o.Seed.Answer},
+			{"conversation input", o.Seed.Input, o.Seed.InputFact, event.TypeExternalInput},
+			{"tool result", o.Seed.ResultText, o.Seed.ResultFact, event.TypeActionCommand},
+			{"assistant output", o.Seed.Answer, o.Seed.AnswerFact, event.TypeAgentOutput},
 		} {
 			if !carried[want.text] {
 				t.Fatalf("restore_only_ledger_is_not_completion: the %s restart recovered the %s in the ledger but its next actual request carried none of it; messages=%s",
 					mode, want.what, restoreDescribe(o.Recover.Messages))
+			}
+			address := presentedTicket(want.key, want.typ) + " "
+			matched := false
+			for _, message := range o.Recover.Messages {
+				if !strings.HasPrefix(message.Content, address) {
+					continue
+				}
+				if withoutPresentedTicket(message.Content) == want.text {
+					matched = true
+					break
+				}
+			}
+			if !matched {
+				t.Fatalf("restore_only_ledger_is_not_completion: the %s restart carried the %s without the ticket %q of the fact it was restored from; messages=%s",
+					mode, want.what, strings.TrimSuffix(address, " "), restoreDescribe(o.Recover.Messages))
 			}
 		}
 	}
@@ -1675,7 +1731,7 @@ func newProjectionRun(t *testing.T, maxTokens int, provider model.Model) (*assem
 	t.Helper()
 	run, err := assembly.Assemble(context.Background(), &config.Declaration{
 		Entry:  "agent-a",
-		Agents: []config.AgentSpec{{ID: "agent-a", Model: "model-a", MaxTokens: maxTokens, ProviderContextWindow: maxTokens * 2}},
+		Agents: []config.AgentSpec{{ID: "agent-a", Model: "model-a", ReplayWindow: maxTokens, ContextWindow: maxTokens * 2}},
 	}, map[event.AgentID]assembly.NativeAgent{
 		"agent-a": {Model: provider},
 	}, assembly.WithGovernance(passPolicy{}), assembly.WithStorage(ledger.StorageConfig{Type: ledger.StorageMemory}))
@@ -1775,40 +1831,21 @@ func projectionFactCountOf(run *assembly.Run, session event.SessionID, factType 
 	return count
 }
 
-// rebuildProjectionFromRun replays the mapped facts of one session chain into an
-// empty projection, as the cold start reads them: the live ledger holds the
-// window the projection still presents, so the chain streams from the durable
-// store instead of the resident window alone. A compress request carries no
-// message and maps onto no projection entry, so the rebuild reads back exactly
-// the material the commits mapped. It reports the rebuilt projection, the
-// rebuild report and how many mapped facts the chain carried.
-func rebuildProjectionFromRun(t *testing.T, ctx context.Context, run *assembly.Run, session event.SessionID) (*replay.ReplayProjection, replay.RebuildReport, int) {
+// rebuildProjectionFromRun walks the mapped facts of one session chain into a
+// fresh projection, the canonical sequence alone: the live ledger holds the window
+// the projection still presents, so the chain streams from the durable store
+// instead of the resident window alone. A compress request carries no message and
+// maps onto no projection entry, so the walk reads back exactly the material the
+// commits mapped. It reports the rebuilt projection and how many mapped facts the
+// chain carried.
+func rebuildProjectionFromRun(t *testing.T, ctx context.Context, run *assembly.Run, session event.SessionID) (*replay.ReplayProjection, int) {
 	t.Helper()
-	chainKey := replay.ChainKey{PartitionID: 1, SessionID: session}
-	chain := replay.NewMemoryEventChain()
-	mapped := 0
-	if err := run.EachSessionFact(ctx, event.Address{SessionID: session}, func(evt event.Event) error {
-		if evt.Type == event.CompressRequestType || evt.Message.Content == "" {
-			return nil
-		}
-		mapped++
-		return chain.Commit(ctx, replay.ChainFact{
-			Key:     evt.Key,
-			Chain:   chainKey,
-			Type:    evt.Type,
-			Summary: evt.Meta[event.MetaKeyEventSummary],
-			Content: evt.Message.Content,
-			Time:    evt.Timestamp.UTC(),
-		})
-	}); err != nil {
-		t.Fatalf("stream the session chain: %v", err)
-	}
+	facts := projectionCommitFactsOf(t, ctx, run, session)
 	rebuilt := replay.NewReplayProjection()
-	report, err := replay.RebuildProjectionFromWAL(ctx, rebuilt, chain, &replay.MemoryRelations{}, chainKey, replay.RebuildOptions{})
-	if err != nil {
-		t.Fatalf("rebuild the projection from the chain: %v", err)
+	for _, fact := range facts {
+		rebuilt.Append(ctx, replay.ProjectionEntry{Key: fact.Key, Type: fact.Type, Summary: fact.Summary, Content: fact.Content, Time: fact.Time})
 	}
-	return rebuilt, report, mapped
+	return rebuilt, len(facts)
 }
 
 // projectionWindowPlan reports the fold plan the declaration's window reads, so
@@ -1907,10 +1944,7 @@ func runSmallWindowFoldAndRestore(t *testing.T) {
 		t.Fatal("the folded original is no longer the text the chain committed")
 	}
 
-	rebuilt, report, mapped := rebuildProjectionFromRun(t, ctx, folded, addr.SessionID)
-	if !report.Fallback || report.FullBoundary != "" {
-		t.Fatalf("rebuild report = %+v, want the bounded fallback of a chain carrying no compaction", report)
-	}
+	rebuilt, mapped := rebuildProjectionFromRun(t, ctx, folded, addr.SessionID)
 	if rebuilt.Compaction() != nil {
 		t.Fatalf("the rebuild restored a compaction payload %+v the chain never carried", rebuilt.Compaction())
 	}
@@ -2013,22 +2047,11 @@ func runRebuildRefoldsFromWAL(t *testing.T) {
 
 	plan := projectionWindowPlan(projectionWindowTokens)
 	facts := projectionCommitFactsOf(t, ctx, run, addr.SessionID)
-	chainKey := replay.ChainKey{PartitionID: 1, SessionID: addr.SessionID}
-	chain := replay.NewMemoryEventChain()
 	committed := make([]string, 0, len(facts))
+	rebuilt := replay.NewReplayProjection()
 	for _, fact := range facts {
 		committed = append(committed, string(fact.Key))
-		if err := chain.Commit(ctx, fact); err != nil {
-			t.Fatalf("commit the WAL fact %s: %v", fact.Key, err)
-		}
-	}
-	rebuilt := replay.NewReplayProjection()
-	report, err := replay.RebuildProjectionFromWAL(ctx, rebuilt, chain, &replay.MemoryRelations{}, chainKey, replay.RebuildOptions{})
-	if err != nil {
-		t.Fatalf("rebuild the projection from the WAL: %v", err)
-	}
-	if !report.Fallback || !report.Scanned || report.Entries != len(facts) || report.FullBoundary != "" {
-		t.Fatalf("rebuild report = %+v, want the bounded fallback replaying the %d raw facts of a chain carrying no compaction", report, len(facts))
+		rebuilt.Append(ctx, replay.ProjectionEntry{Key: fact.Key, Type: fact.Type, Summary: fact.Summary, Content: fact.Content, Time: fact.Time})
 	}
 	if rebuilt.Compaction() != nil {
 		t.Fatalf("the rebuild restored the compaction payload %+v the chain never carried", rebuilt.Compaction())
@@ -2299,10 +2322,7 @@ func runRebuildDoesNotRefold(t *testing.T) {
 	}
 	filed := projectionFactCountOf(run, addr.SessionID, event.CompressRequestType)
 
-	rebuilt, report, mapped := rebuildProjectionFromRun(t, ctx, run, addr.SessionID)
-	if !report.Fallback || report.Entries != mapped || report.Dropped != 0 || !report.Scanned {
-		t.Fatalf("rebuild report = %+v, want the bounded fallback replaying %d mapped facts whole", report, mapped)
-	}
+	rebuilt, mapped := rebuildProjectionFromRun(t, ctx, run, addr.SessionID)
 	if rebuilt.Compaction() != nil {
 		t.Fatalf("the rebuild restored compaction=%+v from a chain that carries none", rebuilt.Compaction())
 	}
@@ -2339,7 +2359,7 @@ func runRestartRestoresFoldForm(t *testing.T) {
 	storage := ledger.StorageConfig{Type: ledger.StorageJournal, Root: t.TempDir()}
 	declaration := &config.Declaration{
 		Entry:  "agent-a",
-		Agents: []config.AgentSpec{{ID: "agent-a", Model: "model-a", MaxTokens: projectionWindowTokens, ProviderContextWindow: projectionWindowTokens * 32}},
+		Agents: []config.AgentSpec{{ID: "agent-a", Model: "model-a", ReplayWindow: projectionWindowTokens, ContextWindow: projectionWindowTokens * 32}},
 	}
 	agents := map[event.AgentID]assembly.NativeAgent{
 		"agent-a": {Model: &replayModel{name: "model-a"}},
@@ -2363,6 +2383,9 @@ func runRestartRestoresFoldForm(t *testing.T) {
 	filed := projectionFactCountOf(run, addr.SessionID, event.CompressRequestType)
 	if filed == 0 {
 		t.Fatal("the online fold filed no compress request, so the restart proves no judgment")
+	}
+	if _, err := run.Close(ctx, agent.CloseRequest{Timeout: time.Now().Add(20 * time.Second)}); err != nil {
+		t.Fatalf("close the first runtime: %v; the restart opens the same root, so this runtime ends first", err)
 	}
 
 	restarted, err := assembly.Assemble(ctx, declaration, agents, assembly.WithGovernance(passPolicy{}), assembly.WithStorage(storage))
@@ -2398,7 +2421,7 @@ func runFoldProductNoSelfTrigger(t *testing.T) {
 		t.Fatal("the commits minted no fold product, so there is no product to rejudge")
 	}
 
-	rebuilt, _, _ := rebuildProjectionFromRun(t, ctx, run, addr.SessionID)
+	rebuilt, _ := rebuildProjectionFromRun(t, ctx, run, addr.SessionID)
 	plan := replay.AgeFoldPlan{KeepRecent: config.DefaultKeepRecentTasks, VolumeThreshold: 1}
 	first, err := rebuilt.FoldByAge(ctx, plan)
 	if err != nil {
@@ -2539,17 +2562,21 @@ func runActualRequestAssembly(t *testing.T) {
 		at   int
 		name string
 		body string
+		key  event.EventID
+		typ  string
 		role model.Role
 	}{
-		{1, "input", projectionBody(2, "0-in"), model.RoleUser},
-		{3, "output", projectionBody(2, "3-out"), model.RoleAssistant},
-		{4, "input", projectionBody(3, "0-in"), model.RoleUser},
-		{5, "reasoning", projectionBody(3, "1-plan"), model.RoleAssistant},
-		{6, "tool command", projectionBody(3, "2-call"), model.RoleTool},
-		{7, "output", projectionBody(3, "3-out"), model.RoleAssistant},
+		{1, "input", projectionBody(2, "0-in"), projectionKey(2, "0-in"), event.TypeExternalInput, model.RoleUser},
+		{3, "output", projectionBody(2, "3-out"), projectionKey(2, "3-out"), event.TypeAgentOutput, model.RoleAssistant},
+		{4, "input", projectionBody(3, "0-in"), projectionKey(3, "0-in"), event.TypeExternalInput, model.RoleUser},
+		{5, "reasoning", projectionBody(3, "1-plan"), projectionKey(3, "1-plan"), event.TypeThinkingPlan, model.RoleAssistant},
+		{6, "tool command", projectionBody(3, "2-call"), projectionKey(3, "2-call"), event.TypeActionCommand, model.RoleTool},
+		{7, "output", projectionBody(3, "3-out"), projectionKey(3, "3-out"), event.TypeAgentOutput, model.RoleAssistant},
 	} {
-		if messages[leg.at].Content != leg.body || messages[leg.at].Role != leg.role {
-			t.Fatalf("message %d = (%q, %q), want the raw %s %q presented as a %q message", leg.at, messages[leg.at].Content, messages[leg.at].Role, leg.name, leg.body, leg.role)
+		want := presentedTicket(leg.key, leg.typ) + " " + leg.body
+		if messages[leg.at].Content != want || messages[leg.at].Role != leg.role {
+			t.Fatalf("message %d = (%q, %q), want the raw %s %q presented as a %q message behind the ticket of the fact it carries",
+				leg.at, messages[leg.at].Content, messages[leg.at].Role, leg.name, want, leg.role)
 		}
 	}
 
@@ -2793,7 +2820,8 @@ type restartChildReport struct {
 	Notices    []consumptionNoticeView   `json:"notices"`
 	Mailbox    []consumptionMailboxView  `json:"mailbox"`
 	Requests   int                       `json:"requests"`
-	Prompt     string                    `json:"prompt"`
+	Prompts    []string                  `json:"prompts"`
+	NoticeReqs int                       `json:"notice_requests"`
 	Sends      []string                  `json:"sends"`
 	Drain      restartDrainView          `json:"drain"`
 	Settles    int                       `json:"settles"`
@@ -2863,7 +2891,7 @@ func runRestartChild(t *testing.T, mode string) {
 // barrier has not returned: the parent kills it there, and the log keeps
 // nothing of the record a later process could read.
 type restartGate struct {
-	state.FactLog
+	durable.FactLog
 	barrier string
 	watch   string
 	marker  string
@@ -2876,7 +2904,7 @@ type restartGate struct {
 
 // newRestartGate returns the gate of one phase, withholding the barrier that
 // phase must not cross.
-func newRestartGate(log state.FactLog, phase restartPhase) *restartGate {
+func newRestartGate(log durable.FactLog, phase restartPhase) *restartGate {
 	gate := &restartGate{FactLog: log, entered: make(chan struct{}), hold: make(chan struct{})}
 	switch phase {
 	case restartBeforeCommit:
@@ -2948,13 +2976,13 @@ func seedRestartProcess(t *testing.T, root, out string, phase restartPhase) {
 	defer cancel()
 	report := restartChildReport{Mode: restartModeSeed, Phase: string(phase), PID: os.Getpid()}
 
-	tier, err := ledger.OpenTier(ctx, ledger.StorageConfig{Type: ledger.StorageJournal, Root: root})
+	tier, err := ledger.OpenTier(ctx, ledger.StorageConfig{Type: ledger.StorageJournal, Root: root, WriteRights: true})
 	if err != nil {
 		t.Fatalf("open the seed tier: %v", err)
 	}
 	gate := newRestartGate(ledger.TierFactLog(tier), phase)
-	durable, err := state.NewDurableCommit(gate, nil)
-	if err != nil {
+	durable := state.NewEmptyDurableCommit(gate, nil)
+	if err := durable.Seat(ctx, nil, nil); err != nil {
 		t.Fatalf("build the seed commit: %v", err)
 	}
 	registry := task.NewMemoryRegistry(durable, task.NewMemoryAdmission())
@@ -3019,7 +3047,10 @@ func seedRestartProcess(t *testing.T, root, out string, phase restartPhase) {
 // recoverRestartProcess boots the formal host over the same durable root, drives
 // the first actual request of the restart beside the face it sends through,
 // drains, and reads the durable boundary a third opener sees: every reading is
-// this process's own, never a mirror of the seed's memory.
+// this process's own, never a mirror of the seed's memory. The model face is
+// read after the close, because the delivery the pump owes the recovered
+// notification drives a turn of its own beside the invocation and the two
+// requests race for which lands first.
 func recoverRestartProcess(t *testing.T, root, out string, phase restartPhase) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
@@ -3047,13 +3078,14 @@ func recoverRestartProcess(t *testing.T, root, out string, phase restartPhase) {
 	}); err != nil {
 		t.Fatalf("the restarted process refused its first invocation: %v", err)
 	}
-	report.Requests = provider.count()
-	report.Prompt = provider.firstPrompt()
-	report.Sends = sender.bodies()
 	drain, err := run.Close(ctx, agent.CloseRequest{Deadline: time.Now().Add(restartDrainWindow)})
 	if err != nil && !errors.Is(err, agent.ErrDrainUnsettled) {
 		t.Fatalf("the restarted run refused its drain: %v", err)
 	}
+	report.Requests = provider.count()
+	report.Prompts = provider.prompts()
+	report.NoticeReqs = provider.requestsCarrying(restartNoticeBody)
+	report.Sends = sender.bodies()
 	report.Drain = restartDrainView{Drained: drain.Drained}
 	for _, unsettled := range drain.Unsettled {
 		report.Drain.Unsettled = append(report.Drain.Unsettled, string(unsettled.TaskID)+": "+unsettled.Reason)
@@ -3112,21 +3144,16 @@ func (p *restartProvider) count() int {
 	return len(p.bodies)
 }
 
-// firstPrompt reports the last user message the first request carried, so a
-// check reads the input the restart itself drove instead of a replayed one.
-func (p *restartProvider) firstPrompt() string {
+// prompts reports the last user message of every request the process really
+// sent, in request order, so a check reads what drove each turn instead of a
+// replayed or bookkeeping one.
+func (p *restartProvider) prompts() []string {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	prompts := make([]string, 0, len(p.bodies))
 	for _, body := range p.bodies {
-		raw, held := body["messages"]
-		if !held {
-			continue
-		}
-		var messages []struct {
-			Role    string `json:"role"`
-			Content string `json:"content"`
-		}
-		if json.Unmarshal(raw, &messages) != nil {
+		messages, ok := restartRequestMessages(body)
+		if !ok {
 			continue
 		}
 		prompt := ""
@@ -3135,9 +3162,50 @@ func (p *restartProvider) firstPrompt() string {
 				prompt = message.Content
 			}
 		}
-		return prompt
+		prompts = append(prompts, prompt)
 	}
-	return ""
+	return prompts
+}
+
+// requestsCarrying reports how many of the requests really sent carried the
+// material in any message, so a delivery is read from the face the model sees
+// instead of from an outbound body a same-session notification never produces.
+func (p *restartProvider) requestsCarrying(material string) int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	carrying := 0
+	for _, body := range p.bodies {
+		messages, ok := restartRequestMessages(body)
+		if !ok {
+			continue
+		}
+		for _, message := range messages {
+			if strings.Contains(message.Content, material) {
+				carrying++
+				break
+			}
+		}
+	}
+	return carrying
+}
+
+// restartRequestMessage is one message of one recorded request.
+type restartRequestMessage struct {
+	Role    string `json:"role"`
+	Content string `json:"content"`
+}
+
+// restartRequestMessages decodes the messages one recorded request carried.
+func restartRequestMessages(body map[string]json.RawMessage) ([]restartRequestMessage, bool) {
+	raw, held := body["messages"]
+	if !held {
+		return nil, false
+	}
+	var messages []restartRequestMessage
+	if json.Unmarshal(raw, &messages) != nil {
+		return nil, false
+	}
+	return messages, true
 }
 
 // restartSender is the outbound face of the restarted host: every accepted body
@@ -3183,8 +3251,8 @@ func restartBoundary(t *testing.T, root string, report restartChildReport) resta
 	if err != nil {
 		t.Fatalf("open the durable root after the restart closed: %v", err)
 	}
-	probe, err := state.NewDurableCommit(ledger.TierFactLog(tier), nil)
-	if err != nil {
+	probe := state.NewEmptyDurableCommit(ledger.TierFactLog(tier), nil)
+	if err := probe.Seat(ctx, nil, nil); err != nil {
 		t.Fatalf("read the durable boundary after the restart closed: %v", err)
 	}
 	view := restartBoundaryView{Tasks: len(probe.TaskIDs())}
@@ -3421,58 +3489,58 @@ func restartAssertNothingCommitted(t *testing.T, o restartOutcome) {
 }
 
 // restartAssertOwed proves an interruption after the commit, after the claim or
-// before the confirmation leaves the notification owed or really delivered, and
-// never silently dropped. The restart rebuilds the task and keeps the duty
-// honest in one of the two ways the contract admits: the unconsumed notice
-// stays owed beside the durable boundary that still holds it (the mailbox
-// branch, because an unconsumed notice is kept across the restart until a wake
-// claims it), or it really delivered the duty and left the receipt the boundary
-// reads. Both branches read the restart's own first actual request and send.
+// before the confirmation leaves the notification delivered once and never
+// silently dropped: the restart reads it as owed, finishes the duty the durable
+// root still carried, commits exactly one delivery fact, carries the material
+// into a real model request, and leaves the boundary closed by the receipt.
 func restartAssertOwed(t *testing.T, o restartOutcome) {
 	t.Helper()
 	taskID, ok := restartSoleTask(o.Recover)
 	if !ok {
 		t.Fatalf("the %s restart recovered %+v, want exactly one rebuilt task", o.Phase, o.Recover.Recovery)
 	}
-	switch o.Recover.Boundary.Owed {
-	case 1:
-		if len(o.Recover.Notices) != 1 || o.Recover.Notices[0].TaskID != taskID {
-			t.Fatalf("the %s restart reads %+v, want the one unconsumed notice of the task %s kept owed across the restart", o.Phase, o.Recover.Notices, taskID)
-		}
-		if phase := o.Recover.Notices[0].Phase; phase == string(query.NoticePhaseConsumed) {
-			t.Fatalf("the %s restart reads the notification of %s as %q, want an unconsumed notice kept owed", o.Phase, taskID, phase)
-		}
-		if restartNoticeDelivered(o.Recover) {
-			t.Fatalf("the %s restart delivered %q beside an owed unconsumed notice, want no delivery without a wake claiming it", o.Phase, o.Recover.Sends)
-		}
-		if o.Recover.Boundary.Accept != "accepted" || o.Recover.Boundary.AcceptErr != "" {
-			t.Fatalf("the durable boundary answered the seeded notification %q err=%q, want its delivery still open to acceptance", o.Recover.Boundary.Accept, o.Recover.Boundary.AcceptErr)
-		}
-	case 0:
-		if !o.Recover.Drain.Drained || len(o.Recover.Drain.Unsettled) != 0 {
-			t.Fatalf("the %s restart drain = %+v, want a drained run beside the delivered duty", o.Phase, o.Recover.Drain)
-		}
-		if !restartNoticeDelivered(o.Recover) {
-			t.Fatalf("the %s restart sent %q, want the one delivery of the recovered notification carrying %q", o.Phase, o.Recover.Sends, restartNoticeBody)
-		}
-		if !strings.Contains(o.Recover.Boundary.AcceptErr, "no delivery obligation") {
-			t.Fatalf("the durable boundary answered the delivered notification %q err=%q, want its receipt to close the delivery", o.Recover.Boundary.Accept, o.Recover.Boundary.AcceptErr)
-		}
-	default:
-		t.Fatalf("the durable boundary owes %d notifications, want the unconfirmed notification kept owed or really delivered", o.Recover.Boundary.Owed)
+	if len(o.Recover.Notices) != 1 || o.Recover.Notices[0].TaskID != taskID {
+		t.Fatalf("the %s restart reads %+v, want the one unconsumed notice of the task %s kept owed across the restart", o.Phase, o.Recover.Notices, taskID)
+	}
+	if phase := o.Recover.Notices[0].Phase; phase == string(query.NoticePhaseConsumed) {
+		t.Fatalf("the %s restart reads the notification of %s as %q, want an unconsumed notice kept owed", o.Phase, taskID, phase)
+	}
+	if o.Recover.Boundary.Owed != 0 {
+		t.Fatalf("the %s restart left %d notification(s) owed, want the duty it found owed finished before the run closed", o.Phase, o.Recover.Boundary.Owed)
+	}
+	if !o.Recover.Drain.Drained || len(o.Recover.Drain.Unsettled) != 0 {
+		t.Fatalf("the %s restart drain = %+v, want a drained run beside the finished duty", o.Phase, o.Recover.Drain)
+	}
+	if !strings.Contains(o.Recover.Boundary.AcceptErr, "no delivery obligation") {
+		t.Fatalf("the durable boundary answered the delivered notification %q err=%q, want its receipt to close the delivery", o.Recover.Boundary.Accept, o.Recover.Boundary.AcceptErr)
+	}
+	if o.Recover.Settles != 1 {
+		t.Fatalf("the %s restart committed %d delivery fact(s) for the notification it found owed, want exactly one", o.Phase, o.Recover.Settles)
+	}
+	if !restartNoticeReachedModel(o.Recover) {
+		t.Fatalf("the %s restart closed the duty while no model request carried %q: the delivery MUST reach the face the model sees", o.Phase, restartNoticeBody)
 	}
 }
 
-// restartNoticeDelivered reports whether the restart really delivered the
-// seeded notification body through its own sender face, so a delivery is read
-// from the face that sends and never from a bookkeeping mirror.
-func restartNoticeDelivered(recovered restartChildReport) bool {
-	for _, body := range recovered.Sends {
-		if strings.Contains(body, restartNoticeBody) {
-			return true
+// restartNoticeReachedModel reports whether a real model request of the restarted
+// process carried the material of the recovered notification, so a delivery is
+// read from the face the model sees and not from an outbound body, which a
+// notification routed to the recovering session never produces.
+func restartNoticeReachedModel(report restartChildReport) bool {
+	return report.NoticeReqs > 0
+}
+
+// restartTurnsCarrying reports how many requests of the restarted process the
+// material drove: a request is counted when its last user message states the
+// material, so the count names the turns that input alone drove.
+func restartTurnsCarrying(report restartChildReport, material string) int {
+	turns := 0
+	for _, prompt := range report.Prompts {
+		if strings.Contains(prompt, material) {
+			turns++
 		}
 	}
-	return false
+	return turns
 }
 
 // restartAssertConfirmed proves an interruption after the confirmation leaves a
@@ -3489,6 +3557,9 @@ func restartAssertConfirmed(t *testing.T, o restartOutcome) {
 	}
 	if o.Recover.Settles != 0 {
 		t.Fatalf("the restart committed %d settle facts, want no second delivery of a confirmed consumption", o.Recover.Settles)
+	}
+	if restartNoticeReachedModel(o.Recover) {
+		t.Fatalf("the restart carried %q into %d model request(s), want a confirmed consumption delivered no second time", restartNoticeBody, o.Recover.NoticeReqs)
 	}
 	if !o.Recover.Drain.Drained || len(o.Recover.Drain.Unsettled) != 0 {
 		t.Fatalf("the restart drain = %+v, want a drained run beside no obligation", o.Recover.Drain)
@@ -3518,33 +3589,30 @@ func restartAssertConfirmedNotResent(t *testing.T, o restartOutcome) {
 
 // restartAssertUnconfirmedNotLost fails when a notification whose consumption
 // receipt never landed is dropped by the restart: the rebuilt task is gone, the
-// duty is neither kept owed beside the durable boundary nor really delivered
-// beside a receipt, or an open duty is kept owed and delivered a second time.
+// duty the durable root still carried is left owed instead of finished, the
+// finish commits no delivery fact or carries no material into a model request,
+// or the restart finishes the same duty twice.
 func restartAssertUnconfirmedNotLost(t *testing.T, o restartOutcome) {
 	t.Helper()
 	if _, ok := restartSoleTask(o.Recover); !ok {
 		t.Fatalf("the restart dropped the task whose consumption receipt never landed: recovery=%+v", o.Recover.Recovery)
 	}
-	switch o.Recover.Boundary.Owed {
-	case 1:
-		if len(o.Recover.Notices) != 1 {
-			t.Fatalf("the restart kept a duty whose consumption receipt never landed but dropped it from the account: notices=%+v boundary=%+v", o.Recover.Notices, o.Recover.Boundary)
-		}
-		if restartNoticeDelivered(o.Recover) {
-			t.Fatalf("the restart kept a duty whose consumption receipt never landed owed and delivered it too: sends=%q: an unconfirmed notification MUST NOT be delivered a second time", o.Recover.Sends)
-		}
-	case 0:
-		if !restartNoticeDelivered(o.Recover) {
-			t.Fatalf("the restart closed the duty without a real delivery: sends=%q: an unconfirmed notification MUST stay owed or be delivered once", o.Recover.Sends)
-		}
-	default:
-		t.Fatalf("the durable boundary owes %d notifications for a duty whose consumption receipt never landed: an unconfirmed notification MUST NOT be lost", o.Recover.Boundary.Owed)
+	if owed := o.Recover.Boundary.Owed; owed != 0 {
+		t.Fatalf("the durable boundary owes %d notification(s) for a duty whose consumption receipt never landed: an unconfirmed notification MUST be finished by the restart, not left owed", owed)
+	}
+	if !restartNoticeReachedModel(o.Recover) {
+		t.Fatalf("the restart closed the duty without carrying %q into a model request: an unconfirmed notification MUST be delivered once on the face the model sees", restartNoticeBody)
+	}
+	turns := restartTurnsCarrying(o.Recover, restartNoticeBody)
+	if o.Recover.Settles != 1 || turns > 1 {
+		t.Fatalf("the restart committed %d delivery fact(s) over %d turn(s) of the notification, want one delivery of an unconfirmed notification and no second turn", o.Recover.Settles, turns)
 	}
 }
 
 // restartAssertCrossBoundary fails when the restart reads a claim as a
-// confirmation or a confirmation as a claim: the claimed side must stay owed and
-// acceptable, the confirmed side must owe nothing and refuse acceptance.
+// confirmation or a confirmation as a claim: the claimed side still owed the
+// delivery its claim never confirmed, so the restart MUST finish it, while the
+// confirmed side owes nothing and drives no second delivery.
 func restartAssertCrossBoundary(t *testing.T, claimed, confirmed restartOutcome) {
 	t.Helper()
 	phase := ""
@@ -3554,27 +3622,30 @@ func restartAssertCrossBoundary(t *testing.T, claimed, confirmed restartOutcome)
 	if phase == string(query.NoticePhaseConsumed) {
 		t.Fatalf("the restart read a claim as a confirmation: the %s notification stands consumed although no receipt landed", claimed.Phase)
 	}
-	if claimed.Recover.Boundary.Owed != 1 || claimed.Recover.Boundary.Accept != "accepted" {
-		t.Fatalf("the claimed side of the boundary owes %d and answered %q err=%q, want it owed and still acceptable",
-			claimed.Recover.Boundary.Owed, claimed.Recover.Boundary.Accept, claimed.Recover.Boundary.AcceptErr)
+	if len(claimed.Recover.Notices) != 1 || claimed.Recover.Settles != 1 || !restartNoticeReachedModel(claimed.Recover) {
+		t.Fatalf("the claimed side of the boundary read notices=%+v settles=%d notice requests=%d, want the claim finished by the one delivery the durable root still owed",
+			claimed.Recover.Notices, claimed.Recover.Settles, claimed.Recover.NoticeReqs)
 	}
-	if len(confirmed.Recover.Notices) != 0 || confirmed.Recover.Boundary.Owed != 0 {
-		t.Fatalf("the restart read a confirmation as a claim: the confirmed side holds notices=%+v owed=%d, want neither",
-			confirmed.Recover.Notices, confirmed.Recover.Boundary.Owed)
+	if len(confirmed.Recover.Notices) != 0 || confirmed.Recover.Settles != 0 || restartNoticeReachedModel(confirmed.Recover) {
+		t.Fatalf("the restart read a confirmation as a claim: the confirmed side holds notices=%+v settles=%d notice requests=%d, want neither",
+			confirmed.Recover.Notices, confirmed.Recover.Settles, confirmed.Recover.NoticeReqs)
 	}
 	if confirmed.Recover.Boundary.AcceptErr == "" {
 		t.Fatalf("the durable boundary accepted the confirmed notification %q, want it refused by name", confirmed.Recover.Boundary.Accept)
 	}
-	if claimed.Recover.Boundary.Owed == confirmed.Recover.Boundary.Owed {
-		t.Fatalf("the boundary read the same on both sides (owed=%d), want a claim kept apart from a confirmation", claimed.Recover.Boundary.Owed)
+	if claimed.Recover.Boundary.Owed != 0 || confirmed.Recover.Boundary.Owed != 0 {
+		t.Fatalf("the boundary owes %d notification(s) on the claimed side and %d on the confirmed side, want the receipt to close both",
+			claimed.Recover.Boundary.Owed, confirmed.Recover.Boundary.Owed)
 	}
 }
 
-// restartAssertFirstRequest is the consumer anchor of the restart: every
-// restarted phase made exactly one actual request carrying the input the
-// restart was driven with, and sent exactly the answer the provider returned,
-// so the record is a real Boot request and send instead of a bookkeeping
-// mirror.
+// restartAssertFirstRequest is the consumer anchor of the restart: the restarted
+// process really drives its own turn once with the input it was handed, drives
+// the recovered notification as a turn of its own no more than once, and sends
+// only the answer its provider returned, so the record is a real Boot request
+// and send instead of a bookkeeping mirror. Each drive is counted on its own
+// rather than in total, because the delivery turn the pump owes races with the
+// invocation turn for which lands first.
 func restartAssertFirstRequest(t *testing.T, outcome func(*testing.T, restartPhase) restartOutcome) {
 	t.Helper()
 	for _, phase := range []restartPhase{
@@ -3582,11 +3653,20 @@ func restartAssertFirstRequest(t *testing.T, outcome func(*testing.T, restartPha
 		restartBeforeConfirmation, restartAfterConfirmation,
 	} {
 		o := outcome(t, phase)
-		if o.Recover.Requests != 1 || o.Recover.Prompt != restartRecoverInput {
-			t.Fatalf("the %s restart made %d requests carrying %q, want its first actual request carrying the restart input", phase, o.Recover.Requests, o.Recover.Prompt)
+		if drove := restartTurnsCarrying(o.Recover, restartRecoverInput); drove != 1 {
+			t.Fatalf("the %s restart drove %d turn(s) with %q out of %d request(s), want its first actual request carrying the restart input",
+				phase, drove, restartRecoverInput, o.Recover.Requests)
 		}
-		if len(o.Recover.Sends) != 1 || !strings.Contains(o.Recover.Sends[0], restartAnswerBody) {
-			t.Fatalf("the %s restart sent %+v, want the one answer the provider returned", phase, o.Recover.Sends)
+		if drove := restartTurnsCarrying(o.Recover, restartNoticeBody); drove > 1 {
+			t.Fatalf("the %s restart drove %d turn(s) with %q, want the recovered notification driven no more than once", phase, drove, restartNoticeBody)
+		}
+		if len(o.Recover.Sends) == 0 {
+			t.Fatalf("the %s restart sent nothing, want the answer the provider returned", phase)
+		}
+		for _, body := range o.Recover.Sends {
+			if !strings.Contains(body, restartAnswerBody) {
+				t.Fatalf("the %s restart sent %q, want every send to carry the one answer the provider returned", phase, body)
+			}
 		}
 	}
 }
@@ -3616,12 +3696,12 @@ func newFoldWindowRun(t *testing.T, ctx context.Context, provider model.Model) (
 	run, err := assembly.Assemble(ctx, &config.Declaration{
 		Entry: "agent-a",
 		Agents: []config.AgentSpec{{
-			ID:                    "agent-a",
-			Model:                 "model-a",
-			MaxTokens:             projectionWindowTokens,
-			ProviderContextWindow: projectionWindowTokens * 32,
-			CompressThreshold:     0.3,
-			KeepRecentTasks:       1,
+			ID:                "agent-a",
+			Model:             "model-a",
+			ReplayWindow:      projectionWindowTokens,
+			ContextWindow:     projectionWindowTokens * 32,
+			CompressThreshold: 0.3,
+			KeepRecentTasks:   1,
 		}},
 	}, map[event.AgentID]assembly.NativeAgent{
 		"agent-a": {Model: provider},
@@ -3705,6 +3785,7 @@ func runNoticeVisibleUnderFold(t *testing.T) {
 // that opened it a second time as ended material beside the transcript.
 // - the notice that opens the range lands, then a fold rewrites the sequence under it
 // - the request of that range reads the notice identity exactly once, in no presentation form beside the transcript
+// - the counted forms: the notice's material, the ticket that addresses it, the notice card and the one-line read the budget degrades it to, with the ticket peeled off before the degraded read is matched, so the address a correct presentation carries in front of that read is not mistaken for a second copy
 func runRangeHeadSurvivesFoldRewrite(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
@@ -3720,9 +3801,10 @@ func runRangeHeadSurvivesFoldRewrite(t *testing.T) {
 		material   = "tagent: task task-77 settled\nresult:\nthe fold-rewritten head worker reports 91"
 	)
 	notice := task.Notice{TaskID: taskID, Kind: task.NoticeSettled}
+	noticeKey := agent.NoticeFactKey(invocation, notice)
 	before := projectionKeysOf(projectionEntriesOf(t, run, addr.SessionID))
 	if _, err := run.CommitToSession(ctx, addr, event.Event{
-		Key:       agent.NoticeFactKey(invocation, notice),
+		Key:       noticeKey,
 		Type:      event.TypeFeedback,
 		Timestamp: projectionBase.Add(time.Hour),
 		Meta: map[string]string{
@@ -3754,10 +3836,12 @@ func runRangeHeadSurvivesFoldRewrite(t *testing.T) {
 	}
 	copies := 0
 	for _, msg := range requests[len(requests)-1].Messages {
+		read := withoutPresentedTicket(msg.Content)
 		if strings.Contains(msg.Content, "task-77 settled") ||
-			strings.HasPrefix(msg.Content, "[ticket ") ||
-			strings.HasPrefix(msg.Content, "[notice ") ||
-			msg.Content == "settled" {
+			strings.Contains(msg.Content, string(noticeKey)) ||
+			strings.HasPrefix(read, "[ticket ") ||
+			strings.HasPrefix(read, "[notice ") ||
+			read == "settled" {
 			copies++
 		}
 	}
@@ -4151,7 +4235,7 @@ func persistenceHostDocument(root, chatEndpoint, embeddingEndpoint string) strin
 		"agents:\n"+
 		"  %s:\n"+
 		"    model: %s\n"+
-		"    max_tokens: 4096\n"+
+		"    replay_window: 4096\n"+
 		"    max_tool_iterations: 12\n"+
 		"    tools:\n"+
 		"      - { kind: tool, id: %s }\n"+
@@ -4279,7 +4363,7 @@ func newPersistenceRigOver(t *testing.T, decorate bool) *persistenceRig {
 		sender:     &persistenceSender{},
 	}
 	if decorate {
-		inner, err := ledger.OpenAtomicStore(context.Background(), ledger.StorageConfig{Type: ledger.StorageJournal, Root: rig.root})
+		inner, err := ledger.OpenAtomicStore(context.Background(), ledger.StorageConfig{Type: ledger.StorageJournal, Root: rig.root, WriteRights: true})
 		if err != nil {
 			t.Fatalf("open the storage engine over %s: %v", rig.root, err)
 		}
@@ -5284,8 +5368,8 @@ func restoreChainViews(t *testing.T, ctx context.Context, root string) []restore
 	if err != nil {
 		t.Fatalf("open the durable tier of the restart: %v", err)
 	}
-	durable, err := state.NewDurableCommit(ledger.TierFactLog(tier), nil)
-	if err != nil {
+	durable := state.NewEmptyDurableCommit(ledger.TierFactLog(tier), nil)
+	if err := durable.Seat(ctx, nil, nil); err != nil {
 		t.Fatalf("open the durable commit of the restart: %v", err)
 	}
 	var views []restoreChainView

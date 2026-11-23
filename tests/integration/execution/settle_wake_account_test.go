@@ -56,20 +56,23 @@ var wakeAccountFact = event.Event{
 	},
 }
 
-// wakeAccountLog opens one durable account over the named root and commits the
-// settled notification into it exactly as the task layer does, so the notice
-// stands owed beside its frozen routing until a turn consumes it.
-func wakeAccountLog(t *testing.T, root string) *state.DurableCommit {
+// wakeAccountLog opens one durable account over the named root under write
+// rights and commits the settled notification into it exactly as the task layer
+// does, so the notice stands owed beside its frozen routing until a turn
+// consumes it. The returned tier carries the root's write lock, so a caller
+// reopening the same root closes it first.
+func wakeAccountLog(t *testing.T, root string) (*state.DurableCommit, *ledger.Tier) {
 	t.Helper()
 	tier, err := ledger.OpenTier(context.Background(), ledger.StorageConfig{
-		Type: ledger.StorageLocalFile,
-		Root: root,
+		Type:        ledger.StorageLocalFile,
+		Root:        root,
+		WriteRights: true,
 	})
 	if err != nil {
 		t.Fatalf("open the storage tier of %s: %v", root, err)
 	}
-	durable, err := state.NewDurableCommit(ledger.TierFactLog(tier), nil)
-	if err != nil {
+	durable := state.NewEmptyDurableCommit(ledger.TierFactLog(tier), nil)
+	if err := durable.Seat(context.Background(), nil, nil); err != nil {
 		t.Fatalf("open the durable account of %s: %v", root, err)
 	}
 	if _, err := durable.Commit(context.Background(), task.CommitRecord{
@@ -85,7 +88,7 @@ func wakeAccountLog(t *testing.T, root string) *state.DurableCommit {
 	}); err != nil {
 		t.Fatalf("commit the settled notification into %s: %v", root, err)
 	}
-	return durable
+	return durable, tier
 }
 
 // wakeAccountMailbox opens the mailbox over the named durable account as the
@@ -207,7 +210,7 @@ func wakeAccountDriver(
 // 契约: docs/wiki/agent/agent-architecture.md#settle-driver
 func TestSettleWakeAccount(t *testing.T) {
 	t.Run("one notification starts one turn however often the pump is woken", func(t *testing.T) {
-		durable := wakeAccountLog(t, t.TempDir())
+		durable, _ := wakeAccountLog(t, t.TempDir())
 		store := wakeAccountMailbox(t, durable)
 		hold := make(chan struct{})
 		fire := newWakeFire(hold)
@@ -238,7 +241,7 @@ func TestSettleWakeAccount(t *testing.T) {
 
 	t.Run("a stop keeps the unconsumed notice and the next process resumes it", func(t *testing.T) {
 		root := t.TempDir()
-		durable := wakeAccountLog(t, root)
+		durable, tier := wakeAccountLog(t, root)
 		store := wakeAccountMailbox(t, durable)
 		hold := make(chan struct{})
 		fire := newWakeFire(hold)
@@ -253,7 +256,10 @@ func TestSettleWakeAccount(t *testing.T) {
 			t.Fatalf("unconsumed entries beside the stop = %d, want the stopped attempt's notice kept", got)
 		}
 
-		restored := wakeAccountLog(t, root)
+		if err := tier.Close(); err != nil {
+			t.Fatalf("close the stopped account's tier before the next process opens the root: %v", err)
+		}
+		restored, _ := wakeAccountLog(t, root)
 		resumed := wakeAccountMailbox(t, restored)
 		resumedFire := newWakeFire(nil)
 		next := wakeAccountDriver(wakeAccountLookup(t), resumed, resumedFire.fire)
@@ -272,7 +278,7 @@ func TestSettleWakeAccount(t *testing.T) {
 
 	t.Run("a consumed notice never replays and the repeated consumption is refused by name", func(t *testing.T) {
 		ctx := context.Background()
-		durable := wakeAccountLog(t, t.TempDir())
+		durable, _ := wakeAccountLog(t, t.TempDir())
 		store := wakeAccountMailbox(t, durable)
 		hold := make(chan struct{})
 		fire := newWakeFire(hold)

@@ -7,15 +7,13 @@ no adaptation and the same contract test runs over every engine.
 
 Package ledger is the runtime's durable original-text layer: it names one stored
 original and the reference metadata that scopes it, commits those bytes and
-returns them byte for byte, and carries the retention guard, the lifecycle and
-the storage tiers built beside them.
+returns them byte for byte, and carries the storage tiers built beside them.
 
 The package speaks the fact vocabulary of the event package and nothing above
 it, so the durable side cannot be reversed into the intelligent or governing
 side. Its files sit under the ledger unit by the mechanism-subpackage rule of
-CONTRIBUTING.md: the fact vocabulary (OriginalRef, Integrity), the consumer
-wiring (Retention, Lifecycle, the stores) and the per-tier strategies
-(localfile, rustviking).
+CONTRIBUTING.md: the fact vocabulary (OriginalRef, Integrity), the read face
+(the stores, RecallResult) and the per-tier strategies (localfile, rustviking).
 
 The journal is the localfile tier's persistent unit: one append-only file of
 frames, each carrying the length of its payload and a CRC32C of that payload.
@@ -39,57 +37,32 @@ The resident entry set every durable engine keeps beside its persisted record:
 an LRU over key-value pairs with a byte budget, so what the process holds is
 bounded whatever the store persists.
 
-Storage lifecycle: retention, tombstones, recovery inventory and reclamation
-coordination.
-
-TTL expiry and capacity eviction only tombstone a key; the physical destroy
-happens at compaction, and never to an original a retention lease still
-protects. The first destructive pass waits for the lease arming and the
-inventory barrier to lift — the recovery inventory runs before any reclamation —
-and a store that cannot protect or coordinate reclamation is reported by name on
-the durable recovery tier instead of being treated as unprotected success.
-
-Declarative lifecycle policy.
-
-The lifecycle policy is injected declaratively through the agent's memory
-configuration: the age window, the per-type overrides, the scan cadence and
-the per-partition capacity bound. An unset field falls back to the default and
-an explicit value wins, so no composition root hardcodes a second copy of the
-default beside the config it was handed.
-
 The one place that reads the retired sharded-snapshot layout: an operator
 migrating a deployment root reads that layout as the read-only source and writes
 the journal the build opens now. Every other caller reaches storage through the
 atomic store seam and names no layout at all.
+
+The original-text model: the named refusals of commit and recall, and the blob
+and reference records one event key holds.
 
 Original references and the read scope that authorizes them: one reference names
 one stored original together with the metadata that scopes it, and the scoped
 read face serves only the references registered inside the scope the read runs
 under. See doc.go for the package's place in the memory axis.
 
-Retention leases.
-
-A retention lease is held by the shared resource owner — the recovery resource
-or the unsettled obligation the hold protects, never "an agent" — and protection
-is reference counted across holders: it stands until the last holder releases
-it, and every hold and release is idempotent. The guard is the single source of
-truth for that count; this layer registers what is held and the original time
-the key reclassifies under once released, and keeps no second lease system of
-its own.
-
 Skeleton compile-time assertions for the ledger shapes: every declared field
 name and type, every declared method signature, and every constant that must
 stay a compile-time constant. A rename or a widened signature stops this file
 from compiling, so the storage face cannot drift silently.
 
-TierFacts is the durable fact surface of one opened tier: put, get, prefix scan
-and the sync barrier a commit reports its success behind. It commits through the
-same atomic store engine the tier's segment store uses, so the replay and the
-durable task commit share one database with the events already stored there.
-Its signatures carry built-in types only, so it matches the state layer's
-fact-log port structurally and no package edge is required in either direction
-— the port is declared where it is consumed (see state's FactLog) and this tier
-names the one surface it offers.
+TierFacts is the durable fact surface of one opened tier: put, prefix scan, the
+point read of one key and the sync barrier a commit reports its success behind.
+It commits through the same atomic store engine the tier's segment store uses,
+so the replay and the durable task commit share one database with the events
+already stored there. Its fact-log signatures carry built-in types only,
+so it matches the shared durable fact-log port structurally and no package edge
+is required in either direction — the port is declared once for every ledger
+that fills it (see api/durable) and this tier names the one surface it offers.
 
 CONSTANTS
 
@@ -100,25 +73,18 @@ const DefaultSegmentMaxBytes int64 = 64 << 10
 
 VARIABLES
 
-var (
-	// ErrCapabilityIncomplete reports a durable recovery tier whose store lacks
-	// the protection or reclamation coordination the tier promises: the system
-	// refuses to start instead of treating "no protection" as success.
-	ErrCapabilityIncomplete = errors.New("memory: storage lacks protection/reclamation coordination for the durable recovery tier")
-	// ErrRecoveryIncomplete reports a destructive pass attempted before the
-	// recovery inventory completed: potential recovery material is never let
-	// through by the grace deadline alone.
-	ErrRecoveryIncomplete = errors.New("memory: recovery inventory incomplete, destructive reclamation withheld")
-	// ErrEnumerationIncomplete reports a failed key enumeration: the partial
-	// view is never reconciled and no key is tombstoned off it.
-	ErrEnumerationIncomplete = errors.New("memory: key enumeration failed, no partial view is reconciled")
-	// ErrProtected reports a destructive action on a key a standing retention
-	// lease still protects: only a refusal by name, never a silent destroy.
-	ErrProtected = errors.New("memory: key is protected by a standing retention lease")
-	// ErrLifecycleUnwired reports a lifecycle constructed without the retention
-	// ledger or the store it coordinates.
-	ErrLifecycleUnwired = errors.New("memory: lifecycle needs a retention ledger and a store")
-)
+var ErrBatchNotAtomic = errors.New("memory: this engine lands one key per call and cannot commit a batch whole")
+    ErrBatchNotAtomic reports a commit of a batch carrying several keys
+    handed to an engine whose every call lands one key: the engine refuses
+    the batch before any call runs, so a reader never meets the first keys
+    landed beside a key that failed. A caller reads the same limit off
+    StoreCapabilities.AtomicBatch instead of inferring it from this error.
+
+var ErrCommitAfterClose = errors.New("memory: commit through a closed view")
+    ErrCommitAfterClose reports a commit through a view whose Close ended it,
+    so a caller that kept writing states the closed view instead of writing
+    beside the process that took the root over.
+
 var ErrCommitBarrier = errors.New("memory: commit barrier failed")
     ErrCommitBarrier reports a commit whose barrier did not complete, so nothing
     of it is published.
@@ -129,6 +95,12 @@ var ErrCommitUncertain = errors.New("memory: commit outcome uncertain")
     could not confirm what the store holds, so the caller re-reads instead of
     reporting either outcome.
 
+var ErrCommitWithoutWriteRights = errors.New("memory: commit through a view that holds no write rights")
+    ErrCommitWithoutWriteRights reports a commit carrying keys through a view
+    that declared no write rights at open: one root carries one writer, so a
+    view holding none reads beside that writer and its commit is refused by name
+    before any byte is appended, never admitted as a second writer of the root.
+
 var ErrContentConflict = errors.New("memory: key already names other bytes")
     ErrContentConflict reports a commit whose key already names other bytes:
     one key names one original, so the second content is refused.
@@ -137,9 +109,10 @@ var ErrEventKeyRequired = errors.New("memory: segment record carries no event ke
     ErrEventKeyRequired reports a segment record that carries no event key,
     so no read could ever name the event again.
 
-var ErrHolderRequired = errors.New("memory: protection hold names no holder")
-    ErrHolderRequired reports a protection hold that names no holder, so its
-    release could never be recognized as the same hold.
+var ErrFactCommitUnsupported = errors.New("memory: the tier cannot commit a whole fact")
+    ErrFactCommitUnsupported reports a tier this build cannot commit a whole
+    fact through: the caller states the tier it was handed instead of committing
+    one family beside a judgment it never made.
 
 var ErrIntegrityMismatch = errors.New("memory: bytes do not match the recorded integrity")
     ErrIntegrityMismatch reports original bytes that do not match the
@@ -158,6 +131,12 @@ var ErrJournalFormat = errors.New("memory: journal format version is not support
     ErrJournalFormat reports a log written under a format version this build
     does not read.
 
+var ErrJournalFrameTooLarge = errors.New("memory: journal record is over the frame bound")
+    ErrJournalFrameTooLarge reports one record whose encoded payload is over
+    the frame bound: the refusal is decided before any byte of the record is
+    written, so no part of it is staged and a caller states the refusal instead
+    of an uncertain outcome.
+
 var ErrJournalLegacyLayout = errors.New("memory: data directory holds the retired shard layout, open a new directory")
     ErrJournalLegacyLayout reports a data directory that holds the retired
     sharded-snapshot layout instead of a journal, so the caller is told to open
@@ -166,11 +145,6 @@ var ErrJournalLegacyLayout = errors.New("memory: data directory holds the retire
 var ErrKeyRequired = errors.New("memory: original reference carries no key")
     ErrKeyRequired reports a commit that carries no key, so no read could ever
     name the original again.
-
-var ErrLeaseMismatch = errors.New("memory: release carries a lease that is not the hold's current lease")
-    ErrLeaseMismatch reports a release whose lease is not the current lease of
-    the hold it names: a superseded token from before a re-hold, or a token that
-    belongs to another hold. The named hold stays held.
 
 var ErrMigrateMismatch = errors.New("memory: migrated root does not read back the source")
     ErrMigrateMismatch reports a copied root that does not read back exactly
@@ -195,9 +169,21 @@ var ErrOriginalExpired = errors.New("memory: every reference is outside its rete
 var ErrOriginalMissing = errors.New("memory: no reference names the key")
     ErrOriginalMissing reports a segmented read of a key no reference names.
 
+var ErrReadAfterClose = errors.New("memory: read through a closed view")
+    ErrReadAfterClose reports a read through a view whose Close ended it:
+    the view states the closed view by name instead of answering the absence its
+    released handle states, so a caller tells a view it ended from a body the
+    log cannot answer.
+
 var ErrRootRequired = errors.New("memory: persistent tiers require a root directory")
     ErrRootRequired reports a persistent tier opened without the directory it
     persists under.
+
+var ErrRootWriteLocked = errors.New("memory: another process holds write rights on this storage root")
+    ErrRootWriteLocked reports a write-rights open of a storage root another
+    process already holds write rights on: one root carries one writer,
+    so the second open is refused by name instead of committing over the slots
+    the first one's index points at.
 
 var ErrRustViking = errors.New("memory: rustviking CLI call failed")
     ErrRustViking reports a rustviking CLI call that did not succeed, carrying
@@ -277,6 +263,19 @@ type AtomicStore interface {
       - A commit whose durable outcome the engine cannot name returns
         ErrCommitUncertain, and the caller re-reads to decide instead of
         reporting success or failure
+      - An engine that can decide before writing that it cannot carry the
+        batch refuses it by name instead, so a refusal that landed no key never
+        answers ErrCommitUncertain
+      - That re-read is an open that took no part in the commit, because the
+        view that committed publishes nothing from a commit it did not see
+        return success: its own read answers absence even beside a batch that
+        landed whole
+      - ErrCommitUncertain never means that nothing landed: a caller that reads
+        a refusal as zero writes re-commits a fact the store already holds
+      - An engine whose every call lands one key keeps this contract by refusing
+        a batch that carries several keys: it names ErrBatchNotAtomic and no
+        key lands, and the tier's StoreCapabilities.AtomicBatch states the same
+        limit
       - Failure injection belongs at this seam: a caller wraps an AtomicStore
         and fails, delays or drops a commit or a read, so the same injection
         runs over any engine and never names a file layout
@@ -297,6 +296,78 @@ type Batch struct {
     deletes. A key stands on one side or the other, so the order the two sides
     are applied in names no different state.
 
+type CommitOrder interface {
+	EachCommittedNewestFirst(ctx context.Context, visit func(key string, value []byte) (bool, error)) error
+}
+    CommitOrder is the capability of stating the order an engine's commits
+    landed in: the keys it holds beside the value each key's newest statement
+    carries, named from the newest committed record to the oldest, stopping
+    when visit answers false. An append-log engine keeps that order on disk,
+    so naming it costs the records walked and the values those records state;
+    a key-ordered key-value engine keeps no such order and does not answer this
+    capability at all, so a caller reads the answer through the type assertion
+    instead of a method every engine carries.
+      - EachCommittedNewestFirst names a key once, at its newest commit,
+        and skips a key the newest commit that touched it deleted
+      - The value is the one that newest statement left under the key, so a
+        caller identifies an entry without a second read
+      - visit answers false to end the walk where it stands, so a caller reads
+        the prefix its order bounds instead of the whole history
+
+    The redline list (4 rules): MUST answer every key once, from the newest
+    committed record to the oldest. MUST end the walk where visit answers
+    false and return the error visit reports. MUST answer the value the newest
+    statement left under the key, so a caller never reads it twice. MUST NOT
+    name a key at an older commit or name a key the newest commit that touched
+    it deleted.
+
+type FactCommit struct {
+	// Record is the segment record the fact commits as.
+	Record SegmentRecord
+	// Ref names the original the fact commits.
+	Ref OriginalRef
+	// Body is the original bytes the reference names.
+	Body []byte
+}
+    FactCommit is one fact's whole key set: the record that places it and the
+    original bytes the recall face reads back. The two name one fact, so the
+    record's event key and the reference's key carry one identity.
+
+type FactCommitOutcome int
+    FactCommitOutcome names what one whole-fact commit left in the store.
+
+const (
+	// FactCommitted reports a fact that landed whole and took one sequence slot.
+	FactCommitted FactCommitOutcome = iota
+	// FactAlreadyPresent reports a fact the store already held whole: no key moved and no slot was taken.
+	FactAlreadyPresent
+	// FactConflict reports an identity the store holds under another content: no key moved.
+	FactConflict
+	// FactUncertain reports a commit whose durable outcome the store cannot name: only an open that took no part in it can decide what landed.
+	FactUncertain
+	// FactRefused reports a fact that landed no key, with the error naming the cause.
+	FactRefused
+)
+func CommitFact(ctx context.Context, tier *Tier, fact FactCommit) (FactCommitOutcome, error)
+    CommitFact commits one fact of one tier as one unit: the original family
+    and the event family travel in one batch, so a reader meets the fact whole
+    or not at all and neither family ever stands committed beside the other
+    missing.
+      - The duplicate judgment of both families and the commit under it run in
+        one critical section, and the storage root's exclusive write rights keep
+        every other writer out of that section, so no two writers interleave the
+        judgment and the landing of one fact
+      - A fact the store already holds stays the fact it is: no key moves,
+        no sequence slot is taken and the window meta is not refreshed
+      - A refusal the engine decides before writing is reported as the refusal
+        it is, never as an uncertain outcome the caller would re-read: the seam
+        states that a commit returning an error published no part of its batch,
+        so only ErrCommitUncertain leaves the caller a read to make, and every
+        other failure names a fact that landed no key
+      - An uncertain outcome publishes nothing to either store's in-process
+        state, because that view answers absence beside a batch that landed
+        whole
+
 type Fetch struct {
 	// Key names the one entry to read.
 	Key string
@@ -312,23 +383,32 @@ type FileSegmentStore struct {
 }
     FileSegmentStore commits events into time-window segments over one atomic
     store engine; it names no engine and no file layout, so any engine backs it.
-    One commit stages the event body, its index entry and the window meta the
-    window needs as one batch, and publishes the event to the read cache, the
-    resident index and the event count only when that commit returns success.
-    A commit that fails names the barrier as its step, carries its cause,
-    unstages what it wrote, and publishes no part of the record.
+    One commit stages the event body, its index entry, the window meta the
+    window needs, the store's seat and the partition set as one batch,
+    and publishes the event to the read cache and the event count only when that
+    commit returns success. A commit that fails names the barrier as its step,
+    carries its cause, unstages what it wrote, and publishes no part of the
+    record.
 
-    The resident state is bounded: the index keeps one small position per event
-    key (the projection of the persisted index entries), the order keeps those
-    keys in the order their commits landed, the read cache keeps bodies under a
-    byte budget, and Load reads only the index, the window meta and the engine's
-    commit order at startup. An event body the cache evicted is read back from
-    its persisted {pid}:evt:{window}:{seq} entry, so a bounded process still
-    answers every read.
+    The resident state is bounded by the chain's shape and never by its history:
+    the seat states the count and the commit sequence, the partition set states
+    the partitions holding at least one event, and the read cache keeps bodies
+    under a byte budget. Load reads the seat and the partition set and both
+    are single keys, so opening a store reads no index entry whatever the
+    history behind it. A point read probes the index entry of the identity in
+    each stated partition and reads the value that entry spans, and a point
+    read that names the partition probes that one entry and consults no set,
+    so the set is an accelerator over the index and never the bound a caller
+    that placed the event pays; a newest-first walk reads the commit order the
+    engine states and stops where a caller stops; an enumeration reads the index
+    of the partitions it names and therefore costs their entries. No window meta
+    is held: the {pid}:meta:{window} key a window is filed under is the record,
+    and the one commit that reads it reads that key.
 
 func (s *FileSegmentStore) Close() error
     Close ends the store with a final barrier over whatever the backend still
-    holds staged, and repeats as a no-op.
+    holds staged, releases the write rights this store's open took on its
+    storage root and the journal handle behind them, and repeats as a no-op.
 
 func (s *FileSegmentStore) EachEvent(ctx context.Context, visit func(StoredEvent) error) error
     EachEvent streams every published event in index order: partition first,
@@ -338,16 +418,73 @@ func (s *FileSegmentStore) EachEvent(ctx context.Context, visit func(StoredEvent
     holds the whole store in memory. A visit error ends the enumeration and is
     returned.
 
+    It reads the index of every partition the chain states, so the enumeration
+    costs the entries of the whole history: that is the cost of the question,
+    and no narrower answer names every event.
+
+func (s *FileSegmentStore) EachEventOfPartitions(ctx context.Context, partitions []int, visit func(StoredEvent) error) error
+    EachEventOfPartitions streams every published event of the named partitions
+    in the index order EachEvent states, reading the index of those partitions
+    alone. A nil or empty set names every partition the chain states. It is the
+    face a scoped query reads: a caller that names the partitions it may read
+    pays their entries rather than the entries of the whole chain.
+
+    A partition the chain states no entry in answers nothing rather than a
+    failure: a partition no commit filed an event under holds no event to
+    present.
+
 func (s *FileSegmentStore) EachIndexNewestFirst(ctx context.Context, visit func(key event.EventID, partition int, seq int64, typ string, session event.SessionID) error) error
-    EachIndexNewestFirst streams the published index in commit order, newest
-    commit first, handing each entry its key, position, frozen event type and
-    session without reading any body. The order is the one the engine's records
-    sit in, so it ranks every entry against every other — a commit of one
-    partition that landed after a commit of another comes first — and a caller
-    that wants commit order walks it backwards. Nothing is copied or sorted:
-    the walk reads the order in place, one entry at a time, so a visit may read
-    the store again. An entry whose type is empty leaves the caller to read its
-    body.
+    EachIndexNewestFirst streams the index of the whole history in commit order,
+    newest commit first, handing each entry its key, position, frozen event type
+    and session without reading any body. It is the walk of a caller that names
+    every entry — a replay, an export, a listing — and it holds no stop of its
+    own, so a caller that reads a bounded prefix asks EachIndexNewestFirstUntil
+    instead.
+
+      - A visit that answers an error ends the walk and answers it.
+      - A visit reads the store: the walk hands the engine back before every
+        visit, so a visit reads one event body beside the walk and never waits
+        on it.
+
+func (s *FileSegmentStore) EachIndexNewestFirstFrom(ctx context.Context, from event.EventID, visit func(key event.EventID, partition int, seq int64, typ string, session event.SessionID) (bool, error)) error
+    EachIndexNewestFirstFrom streams the index from the entry of one key onwards
+    in the order EachIndexNewestFirstUntil states.
+      - a caller that already knows the key it is looking for pays its own
+        commit and the ones behind it instead of every commit filed after it
+      - the walk starts where the engine's order-line index states the commit
+        that last stated the key ended, which costs one probe of the identity
+        index and one read of that index
+      - so the walk costs the history committed after the key nothing
+      - the seek is answered only once the walk names the key it was read for,
+        because one order line states every key of its commit: a walk that ends
+        without naming that key discards the seek and walks the index from the
+        newest entry, so a word stating some other byte costs the walk its seek
+        and never its answer
+      - an engine that states no such index, a key this store holds no published
+        entry of, and an entry the engine names no commit for all walk the index
+        from the newest entry
+      - so a seek that cannot be placed costs the walk it always took and never
+        an entry it skipped
+
+func (s *FileSegmentStore) EachIndexNewestFirstUntil(ctx context.Context, visit func(key event.EventID, partition int, seq int64, typ string, session event.SessionID) (bool, error)) error
+    EachIndexNewestFirstUntil streams the index in commit order, newest commit
+    first, and stops where the visit answers false: a point query reads the
+    prefix its own answer bounds instead of the history behind it.
+
+    The order is the one the engine's records sit in, so it ranks every entry
+    against every other — a commit of one partition that landed after a commit
+    of another comes first — and a caller that wants commit order walks it
+    backwards. The walk streams the order the engine states, so it holds no
+    entry between two visits and costs the commits it walks.
+
+      - false is the stop: the walk ends where the visit stands and answers nil,
+        so a query that has its answer pays the commits down to it and not the
+        ones behind it.
+      - An error ends the walk and is answered as the failure it is, so a stop
+        is never spelled as a failure a caller has to recognize.
+      - A visit reads the store: the walk hands the engine back before every
+        visit, so a visit reads one event body beside the walk and never waits
+        on it.
 
 func (s *FileSegmentStore) EventCount() int
     EventCount returns the number of events published by successful commits,
@@ -360,83 +497,98 @@ func (s *FileSegmentStore) Events(ctx context.Context) ([]StoredEvent, error)
 
 func (s *FileSegmentStore) GetEvent(ctx context.Context, key event.EventID) (StoredEvent, bool, error)
     GetEvent returns the committed event under key together with the index
-    position it was committed at, and reports whether any is published. A body
-    the cache evicted is read back from its persisted entry; an index entry
-    whose body cannot be read reports ErrSegmentBodyMissing instead of an absent
-    event.
+    position it was committed at, and reports whether any is published.
+    The position is the index entry of that identity in one of the partitions
+    the chain states, so the answer costs one small read per partition and no
+    walk of the history behind them. A body the cache evicted is read back
+    from its persisted entry; an index entry whose body cannot be read reports
+    ErrSegmentBodyMissing instead of an absent event.
+
+      - This read serves the callers an identity reaches without a partition:
+        the seat is the only index such a caller has, because enumerating the
+        index behind it is the walk the seat replaces, so the answer is exactly
+        as wide as the partitions the seat states and the seat that under-states
+        one answers absence beside a body the log holds.
+      - A caller that holds the partition SHALL name it with
+        GetEventInPartition, which addresses that partition's index entry and
+        consults no seat.
+
+func (s *FileSegmentStore) GetEventInPartition(ctx context.Context, key event.EventID, partition int) (StoredEvent, bool, error)
+    GetEventInPartition returns the committed event under key that one named
+    partition files, and reports whether that partition published one. The read
+    addresses the index entry of the identity in the partition the caller names,
+    so it pays one small read and probes no partition set. A caller that names
+    the partition pays that read whatever the seat states. A body the cache
+    evicted is read back from its persisted entry; an index entry whose body
+    cannot be read reports ErrSegmentBodyMissing instead of an absent event.
+
+func (s *FileSegmentStore) IndexEntriesRead() int
+    IndexEntriesRead reports the index entries this store's load enumerated:
+    none beside a chain that states its seat and its partition set,
+    and the whole index of every partition beside a chain that states neither.
+    It is the quantity a bounded recovery is measured by, and never EventCount,
+    which counts the whole committed history: a load that enumerated every entry
+    answers the same number twice, which is exactly the unbounded recovery the
+    measure has to be able to tell apart from a bounded one.
+
+func (s *FileSegmentStore) IndexWalkReads() (visits int, valueBytes int64, valueReads int)
+    IndexWalkReads reports what the commit-order walks of this store cost:
+    the index entries they named, the value bytes they read to name them and how
+    many values those bytes were. It is the quantity a bounded boot is measured
+    by after the entries stopped being materialized, because a walk that reads
+    a value per held key and one that reads the index family alone name the
+    same entries at different costs, and only the bytes tell the two apart.
+    Both are counted by the walk, so a caller reads what the boot paid, never an
+    estimate kept beside it.
 
 func (s *FileSegmentStore) Load(ctx context.Context) error
-    Load rebuilds the resident index and window table from the persisted store
-    without returning an event body. It enumerates the engine's key namespaces
-    to discover the partitions, then reads the index and meta prefixes of each
-    partition: both are small entries, and no {pid}:evt:{window}:{seq} body is
-    read. A record whose index and window meta did not both arrive stays out of
-    the published state, EventCount counts the published records, and the commit
-    order is the one the engine states for the records it published.
+    Load states the count, the commit sequence and the partitions the chain
+    holds events in, without reading one index entry and without returning an
+    event body: one read of the seat states all three, so the open costs one
+    small read whatever the history behind it.
+      - The seat states the count, the commit sequence and the partitions of the
+        whole history with one read of one key, so neither the count nor the set
+        of partitions a point read probes costs a reader an aggregate over the
+        entries behind them
+      - A seat the chain does not state, states unreadably, states a commit
+        sequence below its count, or states a count beside no partition falls
+        back to the count and the partitions the index states: one enumeration
+        of the index, which is the derived answer a chain that states no seat
+        costs
+      - A store that writes again states the seat in the frame of its next
+        commit, so a root whose seat could not be read is read without an
+        aggregate from the next commit on
 
-func (s *FileSegmentStore) NewestOfType(ctx context.Context, typ string) (event.EventID, bool, error)
-    NewestOfType answers the identity of the newest published index entry of one
-    frozen event type: the walk reads the resident commit order from the newest
-    commit backwards and stops at the first entry of the type, so a lookup
-    beside a checkpoint filed every cadence commits reads a bounded prefix
-    of the order whatever the history behind it, copies and sorts nothing,
-    and reads no event body. The answer spans partitions: an identity is newer
-    than another because its commit landed later, never because its window,
-    its sequence slot or its partition is higher, so a run whose owner moved
-    between processes reads the checkpoint its newest process filed instead of
-    the one of the highest partition.
+func (s *FileSegmentStore) NewestOfType(ctx context.Context, typ string) (event.EventID, int, bool, error)
+    NewestOfType answers the identity of the newest index entry of one frozen
+    event type beside the partition that entry landed in: the walk reads the
+    store's commit order from the newest commit backwards and stops at the
+    first entry of the type, so a lookup beside a checkpoint filed every cadence
+    commits reads a bounded prefix of the order whatever the history behind it,
+    sorts nothing, and reads no event body.
 
-    A type the store holds no entry of answers found=false and no error.
+      - The answer spans partitions: an identity is newer than another because
+        its commit landed later, never because its window, its sequence slot or
+        its partition is higher, so a run whose owner moved between processes
+        reads the checkpoint its newest process filed.
+      - The partition travels beside the identity because the walk already
+        holds the position it answered, so the caller reads that body back
+        with GetEventInPartition and pays one read instead of a probe of the
+        partitions the seat states.
+      - A type the store holds no entry of answers found=false, partition 0 and
+        no error.
 
 func (s *FileSegmentStore) StoreEvent(ctx context.Context, rec SegmentRecord) error
     StoreEvent commits one event behind the segment commit barrier: the event
     body, its index entry and the window meta the window needs are one batch
-    committed before the event reaches the read cache, the resident index, the
-    event count or the caller. A repeat of the committed record returns success
-    without a second fact, other bytes under the same event key are refused,
-    and a failed commit leaves nothing published.
+    committed before the event reaches the read cache, the partition set,
+    the event count or the caller.
 
-type Guard interface {
-	// Hold registers one protection hold on the original of ref for holder and
-	// returns the lease its release must carry back. Holding again as the same
-	// holder while the hold stands is idempotent: the hold counts once and the
-	// retry gets the lease it already holds, while a hold made after that holder
-	// released is a new hold with a fresh lease. A hold that names no holder is
-	// refused by name with ErrHolderRequired, so its release could always be
-	// recognized as the same hold.
-	Hold(ctx context.Context, ref OriginalRef, holder HolderID) (ProtectionLease, error)
-
-	// Release drops the hold of holder on the original of ref under the lease
-	// that hold returned. Releasing a hold that has already been released is a
-	// no-op, so a repeated release is not an error; a release whose lease is not
-	// the current lease of the named hold is refused by name with ErrLeaseMismatch
-	// and leaves every hold standing, so a late or foreign lease never releases
-	// the protection another hold keeps. The original is unprotected only once
-	// the last holder has released it.
-	Release(ctx context.Context, ref OriginalRef, holder HolderID, lease ProtectionLease) error
-
-	// Protected reports whether the original of ref is still held, so a
-	// reclaimer asks before it reclaims anything.
-	Protected(ctx context.Context, ref OriginalRef) (bool, error)
-}
-
-    Guard is the retention protection port: it holds and releases protection
-    on originals, and reports whether a reference is still held, so a reclaimer
-    consults it before any destructive reclamation rather than assuming that an
-    absence of protection is safety.
-
-    The redline list (4 rules): MUST keep a hold owned by the shared resource,
-    so it outlives any single agent relying on it. MUST answer whether a
-    reference is still held before any destructive reclamation. MUST NOT treat
-    the absence of protection, a timeout or an absent capability as safety.
-    MUST NOT treat a released hold as an unreadable reference.
-
-type HolderID string
-    HolderID is the stable identity of one protection holder: the recovery
-    resource or unsettled obligation the hold protects, not the agent name and
-    not the owner of the reference it protects. It is stable across retries,
-    so a retried hold is recognized as the same hold and counts once, while two
-    holders on one original hold and release independently of each other.
+      - A repeat of the committed record returns success without a second fact,
+        other bytes under the same event key are refused, and a failed commit
+        leaves nothing published.
+      - A fact the store holds is a committed fact: committing it again answers
+        as the duplicate it is, never as a second landing of one identity.
 
 type Integrity struct {
 	// Digest is the digest over the stored bytes, in the canonical text form of
@@ -452,275 +604,6 @@ type Integrity struct {
     truncated or substituted original is reported as a failed read instead of
     being served as if it were complete.
 
-type Lifecycle struct {
-	// Has unexported fields.
-}
-    Lifecycle coordinates the storage lifecycle with the retention leases: the
-    recovery inventory runs before the first destructive pass, TTL and capacity
-    tombstone rather than destroy, protected material is never tombstoned,
-    and the physical destroy waits for compaction.
-
-func NewLifecycle(cfg LifecycleConfig, retention *Retention, store LifecycleStore, caps LifecycleCapabilities) (*Lifecycle, error)
-    NewLifecycle coordinates one storage lifecycle over the retention
-    ledger, the store and the capabilities that store was opened with.
-    On the durable recovery tier a store missing protection or reclamation
-    coordination is refused by name with ErrCapabilityIncomplete (fail-closed):
-    the tier promises recovery, so "no protection" is never treated as success.
-    A non-durable tier keeps its capability gap explicit in the capabilities it
-    was opened under, and never fakes protection that did not take effect.
-
-func (l *Lifecycle) ArmGrace(deadline time.Time)
-    ArmGrace arms the retention lease wait of the first destructive pass under
-    the given deadline: destructive reclamation waits for the arming and the
-    inventory barrier, and once the bounded grace expires only a tier that
-    promises no process recovery and holds no registered recovery material lets
-    go — a missing lease must not stop forgetting forever, while the durable
-    tier's pending material is never let through by the clock alone.
-
-func (l *Lifecycle) Delete(ctx context.Context, key event.EventID, now time.Time) error
-    Delete is the explicit destroy request for one key: it tombstones the key,
-    and a key a standing retention lease protects is refused by name with
-    ErrProtected instead of being destroyed under the protection.
-
-func (l *Lifecycle) Reclaim(ctx context.Context, now time.Time) (int, error)
-    Reclaim physically destroys the tombstoned keys at compaction. Keys are
-    only ever destroyed here, so a release of protection never makes an original
-    immediately unreadable: the original stays readable between its tombstone
-    and this pass.
-
-func (l *Lifecycle) RecoveryComplete()
-    RecoveryComplete lifts the inventory barrier: the recovery inventory is done
-    and the first destructive pass may run once the lease arming stands.
-
-func (l *Lifecycle) RegisterRecovered(ctx context.Context, key StoredKey) error
-    RegisterRecovered registers one recovered key during the recovery inventory:
-    the restart registration that must precede every eviction. Registrations are
-    taken before the barrier lifts, so material a restart still has to account
-    for is never swept away by the first pass.
-
-func (l *Lifecycle) Scan(ctx context.Context, now time.Time) (ScanReport, error)
-    Scan runs one TTL/capacity pass: expired and over-capacity keys are
-    tombstoned for reclamation at compaction, never physically destroyed here,
-    and a key a retention lease still protects is kept out of the scan entirely.
-    A failed enumeration is reported by name and tombstones nothing, so a
-    partial view is never reconciled.
-
-func (l *Lifecycle) Tombstoned(key event.EventID) bool
-    Tombstoned reports whether one key is marked for reclamation at compaction.
-
-type LifecycleCapabilities struct {
-	// DurableRecovery reports the durable recovery tier: the store commits
-	// across process exit, so its material is potential recovery material.
-	DurableRecovery bool
-	// Protection reports that originals can be kept from physical destruction
-	// while a retention lease stands.
-	Protection bool
-	// Reclamation reports that tombstoned keys can be physically reclaimed at
-	// compaction.
-	Reclamation bool
-}
-    LifecycleCapabilities names the coordination capabilities of one store:
-    the durable recovery tier it commits under, and whether it can protect
-    originals against destruction and coordinate their reclamation. A tier that
-    holds nothing across process exit says so instead of appearing durable,
-    and a tier missing protection or reclamation coordination says so instead of
-    faking protection that never took effect.
-
-type LifecycleConfig struct {
-	// GlobalTTLDays is the age window every event type ages out under, in days.
-	// Zero means the default window; a negative value exempts every type from
-	// TTL tombstoning.
-	GlobalTTLDays int `json:"global_ttl_days" yaml:"global_ttl_days"`
-	// TypeTTL overrides the age window per frozen event type, in days; a
-	// negative value exempts that type from TTL tombstoning. A type absent from
-	// the map ages out under the global window.
-	TypeTTL map[string]int `json:"type_ttl" yaml:"type_ttl"`
-	// CheckInterval is the cadence the periodic TTL scan runs at. Zero means
-	// the default cadence.
-	CheckInterval time.Duration `json:"check_interval" yaml:"check_interval"`
-	// MaxEventsPerPartition bounds the event count of one partition; zero means
-	// unbounded.
-	MaxEventsPerPartition int `json:"max_events_per_partition" yaml:"max_events_per_partition"`
-}
-    LifecycleConfig is the declarative lifecycle policy: the age window every
-    event type ages out under, the per-type overrides, the TTL scan cadence and
-    the per-partition capacity bound. The fields are named for the memory config
-    map they are injected from.
-
-func DefaultLifecycleConfig() LifecycleConfig
-    DefaultLifecycleConfig returns the default lifecycle policy: the seven-day
-    global window, the delivery settlement family's negative (exempt) override,
-    the one-hour scan cadence and no capacity bound. It is the fallback every
-    unset field resolves to — never a value a composition root hardcodes beside
-    its config.
-
-func (c LifecycleConfig) Normalized() LifecycleConfig
-    Normalized returns the policy with every unset field filled from the default
-    and every explicit value kept as given, so the injected policy and the one
-    the lifecycle runs under are the same object.
-
-func (c LifecycleConfig) Window(eventType string) (time.Duration, bool)
-    Window returns the age window one frozen event type ages out under and
-    whether that type is exempt from TTL tombstoning entirely: a negative
-    override exempts the type, a negative global window exempts every type,
-    and an absent override falls back to the global window.
-
-    - The settlement family is exempt by construction: its facts are the read
-    face of obligations that outlive any age window, so no tombstone may age
-    them out.
-
-type LifecycleStore interface {
-	// EnumerateKeys lists every key the store holds, or fails by name: a
-	// partial list is never returned as an enumeration.
-	EnumerateKeys(ctx context.Context) ([]StoredKey, error)
-	// Tombstone marks one key for reclamation at compaction. Tombstoning is not
-	// a physical destroy: the original stays readable until compaction.
-	Tombstone(ctx context.Context, key event.EventID, at time.Time) error
-	// ReclaimTombstoned physically destroys the given tombstoned keys at
-	// compaction and returns how many were destroyed.
-	ReclaimTombstoned(ctx context.Context, keys []event.EventID) (int, error)
-}
-    LifecycleStore is the reclamation surface the storage lifecycle coordinates
-    with: enumerate the keys it holds, tombstone an expired key, and physically
-    reclaim the tombstoned ones at compaction. A failed enumeration is
-    reported by name and never returned as a partial list, so a reclaimer never
-    reconciles a partial view.
-
-    The redline list (4 rules): MUST enumerate every key it holds, or fail by
-    name. MUST keep an original readable until compaction once it is tombstoned.
-    MUST NOT answer a failed enumeration as a partial list. MUST NOT take the
-    capabilities of a store from the store's own claim: they are settled by the
-    wiring that opens it.
-
-type MemoryGuard struct {
-	// Has unexported fields.
-}
-
-    MemoryGuard is the in-memory retention protection: it keeps one hold per
-    key and holder, hands each hold the lease its release must carry back,
-    and reports to a reclaimer whether any holder still protects an original.
-    Protection is counted across holders, so a hold is gone only when the last
-    holder releases it.
-
-func NewMemoryGuard() *MemoryGuard
-    NewMemoryGuard returns an empty in-memory retention protection.
-
-func (g *MemoryGuard) Hold(ctx context.Context, ref OriginalRef, holder HolderID) (ProtectionLease, error)
-    Hold registers one protection hold on the original of ref for holder and
-    returns the lease its release must carry back. Holding the same original
-    again as the same holder while the hold stands stays one hold and hands
-    back the lease it already holds, so one release by that holder clears it;
-    a hold made after that release is a new hold under a fresh lease.
-
-func (g *MemoryGuard) Protected(ctx context.Context, ref OriginalRef) (bool, error)
-    Protected reports whether any holder still protects the original of ref,
-    so a reclaimer asks before it reclaims anything.
-
-func (g *MemoryGuard) Release(ctx context.Context, ref OriginalRef, holder HolderID, lease ProtectionLease) error
-    Release drops the hold of holder on the original of ref under lease.
-    Releasing a hold that has already been released is a no-op, and a release
-    whose lease is not the current lease of the named hold is refused by name
-    with ErrLeaseMismatch and leaves every hold standing: a late lease from
-    before a re-hold, or a lease belonging to another hold, releases nothing.
-
-type MemoryLifecycleStore struct {
-	// Has unexported fields.
-}
-    MemoryLifecycleStore is the in-memory lifecycle store: the reference
-    implementation of the reclamation surface, holding only what the process
-    holds and declaring no recovery across process exit.
-
-func NewMemoryLifecycleStore(caps LifecycleCapabilities) *MemoryLifecycleStore
-    NewMemoryLifecycleStore returns an empty in-memory lifecycle store under the
-    given declared capabilities.
-
-func (s *MemoryLifecycleStore) Capabilities() LifecycleCapabilities
-    Capabilities reports the capabilities the store was opened under, so the
-    wiring that constructs a lifecycle hands them back beside the store.
-
-func (s *MemoryLifecycleStore) EnumerateKeys(ctx context.Context) ([]StoredKey, error)
-    EnumerateKeys implements LifecycleStore.EnumerateKeys.
-
-func (s *MemoryLifecycleStore) Put(key StoredKey)
-    Put files one key under the store's enumeration.
-
-func (s *MemoryLifecycleStore) ReclaimTombstoned(ctx context.Context, keys []event.EventID) (int, error)
-    ReclaimTombstoned implements LifecycleStore.ReclaimTombstoned: only a key
-    that was tombstoned is physically destroyed, and destroying it once removes
-    it from the store.
-
-func (s *MemoryLifecycleStore) Tombstone(ctx context.Context, key event.EventID, at time.Time) error
-    Tombstone implements LifecycleStore.Tombstone.
-
-func (s *MemoryLifecycleStore) Tombstoned(key event.EventID) (time.Time, bool)
-    Tombstoned reports the tombstone time of one key, and whether it is marked.
-
-type MemoryOption func(*MemoryOriginalStore)
-    MemoryOption shapes one MemoryOriginalStore at construction.
-
-func WithRetentionWindow(policy string, window time.Duration) MemoryOption
-    WithRetentionWindow registers the window one retention policy keeps its
-    references readable for. A policy with no registered window keeps its
-    references readable indefinitely, and a window of zero or less reports every
-    read as expired.
-
-type MemoryOriginalStore struct {
-	// Has unexported fields.
-}
-
-    MemoryOriginalStore is the in-memory OriginalStore: the reference and
-    blob model of the original text — each event key commits its own bytes,
-    every reference registered under its own owner, format and retention policy,
-    exact recall served byte for byte and segmented reading handing out whole
-    lines.
-
-    The model is implemented once over the key-value seam, and this tier
-    is that implementation held in a view that never leaves the process: a
-    durable tier runs the same code over its own view, so nothing about recall,
-    retention is restated per tier. The tier holds only what the process holds:
-    it survives no restart, and no result it returns claims otherwise.
-
-func NewMemoryOriginalStore(options ...MemoryOption) *MemoryOriginalStore
-    NewMemoryOriginalStore returns an empty in-memory original store, shaped by
-    the given options.
-
-func (s MemoryOriginalStore) BlobCount() int
-    BlobCount returns the number of event keys holding an original body.
-
-func (s MemoryOriginalStore) Get(ctx context.Context, key event.EventID) RecallResult
-    Get returns the exact recall result for key, classified exactly as the
-    in-memory tier classifies it: the committed bytes while a reference of the
-    key is inside its retention window, and a named missing, expired or failed
-    result otherwise.
-
-func (s MemoryOriginalStore) GetScoped(ctx context.Context, key event.EventID, scope ReadScope) RecallResult
-    GetScoped returns the exact recall of key as visible inside scope, exactly
-    as the in-memory tier serves it.
-
-func (s MemoryOriginalStore) Put(ctx context.Context, ref OriginalRef, body []byte) error
-    Put commits the original bytes of ref and publishes the reference once its
-    barrier returns success.
-      - Different event keys always own independent bodies; a second scope on
-        the same key joins its references, and other bytes under a held key are
-        refused
-      - The body and the reference that names it travel in one batch, so a
-        reader never sees a reference whose body is missing and a failed commit
-        leaves neither behind
-
-func (s MemoryOriginalStore) ReadSegment(ctx context.Context, key event.EventID, startLine, numLines int) ([]byte, error)
-    ReadSegment returns at most numLines whole lines of the original stored
-    under key, starting at line startLine, and names every read it cannot serve
-    exactly as the in-memory tier names it.
-
-func (s MemoryOriginalStore) ReadSegmentScoped(ctx context.Context, key event.EventID, scope ReadScope, req SegmentRequest) (SegmentResult, error)
-    ReadSegmentScoped returns one byte-bounded segment of the original stored
-    under key as visible inside scope, exactly as the in-memory tier serves it.
-
-func (s MemoryOriginalStore) References(key event.EventID) []OriginalRef
-    References returns every reference registered under key, one per reference
-    scope in a stable order, so which owners, formats and retention policies
-    still name the original stays observable.
-
 type MigrateReport struct {
 	// Keys is the number of keys the target now holds.
 	Keys int
@@ -731,7 +614,7 @@ type MigrateReport struct {
 }
     MigrateReport counts what one migration copied.
 
-func MigrateShardedRoot(ctx context.Context, sourceRoot, targetRoot string) (MigrateReport, error)
+func MigrateShardedRoot(ctx context.Context, sourceRoot, targetRoot string) (report MigrateReport, err error)
     MigrateShardedRoot copies every key of a retired sharded-snapshot root into
     a journal root under targetRoot, in bounded batches, and reads the copy back
     through a freshly opened view before it reports success.
@@ -741,9 +624,13 @@ func MigrateShardedRoot(ctx context.Context, sourceRoot, targetRoot string) (Mig
     and a migration interrupted anywhere leaves the source exactly as it was.
     The target is refused when it already holds keys, so no copy overwrites
     a root in use. A root whose copy does not read back byte for byte returns
-    ErrMigrateMismatch naming the key that differs. A copied root whose
+    ErrMigrateMismatch naming the key that differs, and a copied root whose
     reference names no independent body returns ErrSnapshotCorrupt naming the
     orphaned key, the same refusal the original store's load reports at boot.
+    The copy writes the target, so it takes that root's write rights and gives
+    them up when it returns, and the verifying pass it takes in between opens
+    the copy as a component view that reads beside the writer instead of being
+    refused by it.
 
 type OriginalRef struct {
 	// Key is the EventID that owns this original. Different keys never share
@@ -832,14 +719,6 @@ type Pair struct {
 }
     Pair is one key-value entry a read returns or a commit writes.
 
-type ProtectionLease string
-    ProtectionLease is the opaque token one accepted hold returns and its
-    release must carry back. A lease is fresh per hold: a retry of a hold that
-    still stands gets the same token, while a hold made after an earlier release
-    gets a new one, so a late release carrying the earlier token matches nothing
-    and releases nothing. Callers treat a lease as opaque: they never construct
-    one, and its encoding is not a contract.
-
 type ReadScope struct {
 	// Owner is the address the reads are authorized for.
 	Owner event.Address
@@ -900,94 +779,6 @@ type RecallResult struct {
     RecallResult is the outcome of exact recall for one key: the original bytes
     when they were found, and otherwise a named classification of why they were
     not, so a miss is reported instead of silently omitted.
-
-type Retention struct {
-	// Has unexported fields.
-}
-    Retention is the retention lease ledger over the shared guard: it registers
-    what each hold protects and hands back the guard's leases, so a reclaimer
-    asks one surface whether an original is still protected and on what original
-    timestamp it will reclassify. Holders are the stable identities of recovery
-    resources and unsettled obligations, so two holders on one key protect it
-    independently and the protection is gone only once the last one releases.
-
-    The ledger registers and retires holds: the guard is the one port that holds
-    them, so the ledger never declares a second surface of the same name.
-
-func NewRetention(guard Guard) *Retention
-    NewRetention returns a retention ledger over the given guard. The guard owns
-    the protection state and its reference count; the ledger adds registrations
-    and keeps no second truth.
-
-func (r *Retention) Held(ctx context.Context, key event.EventID) (bool, error)
-    Held reports whether any holder still protects the key, so a reclaimer asks
-    before it reclaims anything. Protection is reference counted in the guard:
-    it stands until the last holder has released.
-
-func (r *Retention) Record(key event.EventID) (RetentionRecord, bool)
-    Record returns the registration of one key: what its hold protects and the
-    original recorded time it reclassifies under once released.
-
-func (r *Retention) Register(ctx context.Context, key event.EventID, holder HolderID, record RetentionRecord) (ProtectionLease, error)
-    Register files one protection hold on the key for holder and returns the
-    lease its release must carry back, recording what the hold protects.
-    A repeat hold by the same holder while the hold stands is recognized as the
-    same hold and counts once, and the registered original time of a key is kept
-    from its first registration: a re-hold never re-stamps the material.
-
-func (r *Retention) ReleaseHolder(ctx context.Context, holder HolderID) (int, error)
-    ReleaseHolder drops every hold one holder still stands on and returns how
-    many were released. It is what a closing owner runs: it releases exactly
-    that holder's holds, so a shared protection another holder keeps on the same
-    key stays standing until that holder releases too.
-
-func (r *Retention) Retire(ctx context.Context, key event.EventID, holder HolderID, lease ProtectionLease) error
-    Retire drops the hold of holder on the key under the lease that hold
-    returned. Releasing a hold that is not standing is a no-op; a release whose
-    lease is not the current lease is refused by name with ErrLeaseMismatch
-    and leaves every hold standing. The registration is kept after release:
-    the key reclassifies under its recorded original time, which a release never
-    re-stamps.
-
-type RetentionKind string
-    RetentionKind names why one registration holds its material: an unsettled
-    delivery obligation, or material a recovery still has to take inventory of.
-
-const (
-	// RetentionUnconfirmed is the kind of a registration protecting material
-	// whose delivery is still unconfirmed.
-	RetentionUnconfirmed RetentionKind = "unconfirmed_delivery"
-	// RetentionRecovery is the kind of a registration protecting material a
-	// recovery inventory has not accounted for yet.
-	RetentionRecovery RetentionKind = "recovery_material"
-)
-type RetentionRecord struct {
-	// Kind names why the material is held.
-	Kind RetentionKind
-	// Type is the frozen event type of the material.
-	Type string
-	// RecordedAt is the original recorded time of the material, kept verbatim
-	// and never re-stamped.
-	RecordedAt time.Time
-}
-    RetentionRecord is what one retention registration remembers about the
-    material it protects: the kind of material, its frozen event type and the
-    original recorded time. The recorded time is the timestamp the key returns
-    to the age window under once its protection is released — a release never
-    re-stamps the material, so it reclassifies exactly as old as it always was.
-
-type ScanReport struct {
-	// Tombstoned lists the keys this scan marked for reclamation at compaction.
-	Tombstoned []event.EventID
-	// Protected lists the keys a standing retention lease kept out of the scan:
-	// within retention, TTL and capacity never tombstone what is protected.
-	Protected []event.EventID
-	// Exempt lists the keys the policy exempts from TTL tombstoning.
-	Exempt []event.EventID
-}
-    ScanReport is what one TTL/capacity scan did: the keys it tombstoned,
-    the keys a standing retention lease kept out of the scan, and the keys the
-    policy exempts from TTL tombstoning entirely.
 
 type ScopedOriginalStore interface {
 	// GetScoped returns the exact recall of key as visible inside scope: the
@@ -1144,6 +935,18 @@ type StorageConfig struct {
 	// engine and never names a file layout. A tier beside no wrapper opens the
 	// engine Type names.
 	Engine AtomicStore
+	// WriteRights declares that this open writes the root it names: it holds that
+	// root's exclusive write lock for as long as the view lives, so a second such
+	// open, in this process or another, is refused by name. A caller that commits
+	// to the root declares it, and the boot that stands for one runtime instance
+	// over that root does too. An open that declares nothing is a component view:
+	// it holds no write rights and reads beside the writer that does.
+	WriteRights bool
+	// RetentionWindows registers, per retention policy, the window an original
+	// recall keeps the references of that policy readable for. A policy with no
+	// registered window keeps its references readable indefinitely, and a window
+	// of zero or less reports every read of that policy as expired.
+	RetentionWindows map[string]time.Duration
 }
     StorageConfig locates one storage tier: the tier name, the root directory
     the persistent tiers persist under, and the rustviking executable and config
@@ -1177,6 +980,10 @@ type StoreCapabilities struct {
 	// Durable reports whether a successful commit outlives the process that made
 	// it.
 	Durable bool
+	// AtomicBatch reports whether a commit carrying several keys lands whole or
+	// not at all. A tier that declares false lands one key per call and answers
+	// ErrBatchNotAtomic for every larger batch, having landed none of it.
+	AtomicBatch bool
 }
     StoreCapabilities names what one opened tier guarantees, so a tier that
     holds nothing across process exit says so instead of appearing durable.
@@ -1196,20 +1003,6 @@ type StoredEvent struct {
     StoredEvent is one committed event as a read returns it: the bytes that were
     committed and the index position they were committed at.
 
-type StoredKey struct {
-	// Key is the canonical identity of the key.
-	Key event.EventID
-	// Type is the frozen event type of the material.
-	Type string
-	// Partition is the partition the key is filed under.
-	Partition int
-	// RecordedAt is the time the material was recorded.
-	RecordedAt time.Time
-}
-    StoredKey is one key as the lifecycle enumerates it: its canonical identity,
-    its frozen event type, the partition it is filed under and the time it was
-    recorded, which is what its age window is measured from.
-
 type Tier struct {
 	// Originals commits and recalls original bytes.
 	Originals OriginalStore
@@ -1221,6 +1014,8 @@ type Tier struct {
 	Store AtomicStore
 	// Capabilities names what the backend guarantees.
 	Capabilities StoreCapabilities
+
+	// Has unexported fields.
 }
     Tier is one opened storage tier: the original store and the segment store of
     the same backend, together with the capabilities that backend guarantees and
@@ -1239,13 +1034,38 @@ func OpenTier(ctx context.Context, cfg StorageConfig) (*Tier, error)
         unchanged
       - The journal tier's write path is one append-only file with one writer
         handle per opened view, and each commit is appended as one whole frame,
-        so two views of the same directory cannot interleave half frames
-      - A second runtime instance over one directory is refused by the
-        production open path that owns that root, not by an exclusive lock here:
-        in-process checks of the same root appear in the test suite of this
-        repository
-      - Durability holds without that lock, because a frame is appended whole
-        and the barrier is the log's own sync
+        so a view reading beside a writer cannot see half a frame
+      - One directory carries one writer: an open that declares
+        StorageConfig.WriteRights holds the root's write lock, and a second
+        such open, in this process or another, is refused by name with
+        ErrRootWriteLocked, so two writers never commit over one slot
+      - This open hands the declaration through unchanged, so a caller that
+        commits to the root declares the rights and every other caller holds
+        none: a component view opens beside the live writer, a commit carrying
+        keys through it is refused as ErrCommitWithoutWriteRights, and Close
+        gives the root up to the next writer
+      - The kernel holds the lock, so it drops when the holding process exits;
+        no recovery pass clears a stale lock, and durability never depended on
+        the lock, because the barrier is the log's own sync
+      - The config's RetentionWindows register the original-recall window of
+        each retention policy on the tier's original store, so a read of a
+        reference outside its registered window is named expired; a policy the
+        config leaves unregistered keeps its references readable indefinitely
+
+func (t *Tier) Close() error
+    Close ends this tier's view of its backend: the segment store completes its
+    final barrier, the engine behind it closes, and a durable tier gives its
+    storage root up to the next writer.
+      - The root's write rights leave with this close, so the next writer — in
+        this process or another — is admitted instead of being refused for a
+        view that already ended
+      - The release happens however the barrier ended, because the engine closes
+        the journal handle and the write lock together, so a failed barrier
+        never leaves the root locked
+      - A repeated Close ends nothing twice and answers nil, so a caller that
+        closes a run twice does not see an error the first close did not report
+      - The engine closes once, through the segment store, because both stores
+        of a tier read and commit through that one engine
 
 type TierFacts struct {
 	// Has unexported fields.
@@ -1258,7 +1078,9 @@ func TierFactLog(tier *Tier) *TierFacts
     committed through — no second database is introduced for either.
 
 func (l TierFacts) Get(ctx context.Context, key string) ([]byte, bool, error)
-    Get returns the value stored under key and whether one is held.
+    Get answers the value held under one key, and whether the log holds it: the
+    point read a caller that names its own keys pays instead of a prefix scan,
+    so the read costs the one value and the probe that locates it.
 
 func (l TierFacts) Put(ctx context.Context, key string, value []byte) error
     Put stages one key and its value.

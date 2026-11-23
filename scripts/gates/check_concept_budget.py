@@ -125,10 +125,11 @@ BASELINE = (
     # 枚举、前缀键序、命名空间清单）与一次带屏障提交，拆成两个接口会让前缀枚举或命名
     # 空间清单绕开内存脏合并另立一条读路，与本域“不立第二读路”的裁决冲突。
     ("iface-methods", "memory/ledger/atomic_store.go:AtomicStore", 4),
-    # features/evolution/governance GovernanceEventLog 3m（2026-11-05 03 收口）：治理账的
-    # 持久面＝写入、前缀回放与同步屏障三种动作，同一本账；拆窄口会让前缀回放绕开
-    # Sync 屏障另立一条读路，与本域“一条链一本账”的裁决冲突。
-    ("iface-methods", "features/evolution/governance/denial.go:GovernanceEventLog", 3),
+    # api/durable FactLog 3m（runtime-recovery-ideal 10.R8b 收口，合并原 governance
+    # GovernanceEventLog 3m 与 state FactLog 4m 两条）：一份耐久面的三种动作＝写入一事实、
+    # 前缀回放、同步屏障。拆窄口会让前缀回放绕开 Sync 屏障另立一条读路。两个生产实现者
+    # （ledger.TierFacts、assembly.memoryFactLog）在冻结包边下结构满足它；Get 生产零调用方故删。
+    ("iface-methods", "api/durable/fact_log.go:FactLog", 3),
     ("struct-fields", "runtime/agent/delegate.go:Delegation", 9),
     ("struct-fields", "runtime/task/spec.go:Spec", 9),
     ("struct-fields", "tool/subagent/builder.go:Builder", 8),
@@ -139,7 +140,6 @@ BASELINE = (
     ("struct-fields", "tool/subagent/target.go:TargetOptions", 8),
     # S1 iface-methods — 8 项（observed=实测接口方法数）
     ("iface-methods", "runtime/agent/delegate.go:DelegationTasks", 4),
-    ("iface-methods", "runtime/state/durable.go:FactLog", 4),
     ("iface-methods", "runtime/state/store.go:Store", 4),
     # hot-update-and-purity-closure 12 引入叶：Stateful 是一份可恢复状态切片在接缝上的
     # 三问（键名/说出状态/放回状态），5 个实现者（投影、送达账、邮箱、任务账、输入轮）。
@@ -158,8 +158,10 @@ BASELINE = (
     ("struct-fields", "tool/subagent/subagent.go:Definition", 10),
     # Declaration 6f（声明面本体）：组织声明=入口/代理/引用/基线/MCP 服务器代际/原始文档，MCP 面随 mcp_servers 声明下沉各成一格，拆开会让声明面出现影子结构。
     ("struct-fields", "api/config/config.go:Declaration", 6),
-    # AgentSpec 26f（声明面本体）：单个 agent 的声明格＝核心（身份/模型/引用/参数/回合预算/回放窗口）＋熔断两镜（max_calls_per_response/long_context_tokens，单响应调用量与长上下文阈值，人审挂起式）＋捕获预算（capture_budget_mb，轨迹常驻上限）＋请求预算两字段（provider_context_window/output_reserve，provider 窗口与输出余量的可选声明；导出是 YAML 解码前提，MUST NOT 退回未导出访问）＋ memory/meditation/file/exec 四个域段平铺在同一格；窗口三字段（max_tokens/compress_threshold/keep_recent_tasks）替代 replay_budget；三个熔断/预算键与 max_tool_iterations 同模式，是声明字段不是影子结构（oom-bounded-capture-and-storm-fuse）。
-    ("struct-fields", "api/config/config.go:AgentSpec", 26),
+    # AgentSpec 25f（声明面本体）：单个 agent 的声明格＝核心（身份/模型/引用/任务策略/回合预算）＋回放窗（replay_window）＋请求预算两字段（context_window 预算门唯一来源、max_tokens 输出限；导出是 YAML 解码前提，MUST NOT 退回未导出访问）＋折叠策略（compress_threshold/keep_recent_tasks）＋摘要预算（summary_budget_bytes，03 compression-configurable 引入：老段摘要的生成上限是声明格而非硬编码常数，与 compress_threshold 同是折叠策略的一格）＋采样三字段（temperature/thinking_enabled/reasoning_effort）＋熔断两镜（max_calls_per_response/long_context_tokens，单响应调用量与长上下文阈值，人审挂起式）＋ max_tool_iterations/environment_block ＋ memory/meditation/file/exec 四个域段平铺在同一格；这些键与 max_tool_iterations 同模式，是声明字段不是影子结构。
+    # runtime-recovery-ideal W3 按名抬升 24->25（03 compression-configurable 新增
+    # SummaryBudgetBytes：摘要预算必须由部署配置，硬编码常数不允许；M4 先例具名抬升）。
+    ("struct-fields", "api/config/config.go:AgentSpec", 25),
     # MeditationSpec 6f：冥想运行声明本体，六个格分别是启用、节奏两格、提示、观察面与回流白名单，字段即声明形状。
     ("struct-fields", "api/config/config.go:MeditationSpec", 6),
     # event.ParsedMeta 9f（00.25 具名登记）：ParseEventMeta 的解析结果本体＝数据面，
@@ -178,7 +180,6 @@ BASELINE = (
     ("struct-fields", "cli/host_face.go:ApprovalDecision", 8),
     ("struct-fields", "memory/event_body.go:EventBody", 20),  # 2026-10-26: full-fact fidelity (fidelity-and-recovery 2.2) names every field a restore needs; ratchet kept, count follows the declared design
     ("struct-fields", "memory/replay/projection.go:ChainFact", 7),
-    ("struct-fields", "memory/replay/projection.go:RebuildReport", 9),
     ("struct-fields", "memory/query_events.go:EventRecord", 7),
     ("struct-fields", "memory/query_events.go:QueryOptions", 9),
     ("struct-fields", "memory/replay.go:DeliveryRecord", 8),
@@ -219,7 +220,18 @@ BASELINE = (
     # StatedTask 是框架 checkpoint 状态的任务账本体＝数据保真面——一格对应「重启后
     # 与链折叠逐格相等」所需的一条数据（声明/状态/链修订/轮次/四个移动戳/改道两格/
     # 幂等变更账/未结义务），收窄字段即让恢复面在链折叠侧二次归并或丢掉一格保真。
-    ("struct-fields", "runtime/task/checkpoint.go:StatedTask", 13),
+    # runtime-recovery-ideal W3 按名抬升 13->16（task 托管 05 新增三个结算账目族：
+    # Consumed/Attempts/Rejected——「该任务已结清什么」必须随 checkpoint 一起stated，
+    # 否则 boot 要重扫它已关闭的 durable 前缀；三者各成一格是账目本体）。
+    ("struct-fields", "runtime/task/checkpoint.go:StatedTask", 16),
+    # runtime-recovery-ideal W3（08 fact-retirement 引入叶）：StorageConfig 是存储层
+    # 定位与两个注入面（Engine 观察/延迟/失败注入、RetireFacts 退位选择）的配置本体。
+    # 七个格＝一份配置的语义本体（tier/Root 两个定位、rustviking 两格、两个注入面、
+    # 原文召回窗口），收窄即让拆块调用方二次归并同一份定位；按 M4 先例具名登记，非收敛目标。
+    # 按名抬升 6->7：RetentionWindows 是原文召回窗口的生产注册入口（OpenTier 传进
+    # newKVOriginalStore），取代已删的测试专用 WithRetentionWindow；窗口是配置语义本体，
+    # 与 Type/Root 同生命周期，另立一份配置即造第二份存储定位。
+    ("struct-fields", "memory/ledger/config.go:StorageConfig", 7),
     # 04.2 执行资源解释（引入叶）：租约/续期/停滞/义务的只读投影，字段即
     # Manager.Explain 的回复本体，拆块即解释面需要二次装配。
     ("struct-fields", "tool/exec/exec.go:Explanation", 10),
@@ -245,7 +257,6 @@ BASELINE = (
     ("ctx-bare", "api/plugin/phases.go:*", 1),   # CallPassFrom：派发→受理 pass 传输（锁定工具端口无第二通道）
     ("ctx-bare", "runtime/task/wrapper.go:*", 1),    # CallFrameFrom：per-call 身份经端口唯一通道
     ("ctx-bare", "assembly/settle_turn.go:*", 1),    # settleBarrierFrom：回合终态屏障经类型化 accessor 落到驱动与投递之间
-    ("ctx-bare", "assembly/checkpoint.go:*", 1),     # flightHeldBy：切面排水判 caller 是否持 fence 单元，经类型化 accessor 单通道
     # S4 contract-surface 已出清（叶 00.24）：全部导出接口的 canonical 范例与 Godoc
     # 红线均已落地，本表不再登记 S4 债务。以下一条为再次登记：ResultDelegation 是
     # 结算携带结果正文引入的可选拓展面，范例与红线随后续批次补齐；在此之前显式
@@ -1373,23 +1384,33 @@ def check_ratchet(report, arch_path, metrics, domain_counts):
         report.warn("concept ratchet: {} names no concept_ratchet; the frozen "
                     "floors are not enforced".format(arch_path))
         return
-    removed = domain_counts.get("domain_surface.removed", 0)
-    new = domain_counts.get("domain_surface.new", 0)
     interfaces = metrics["exported_interfaces"]
-    if removed < int(ratchet.get("removed_min", 0)):
-        report.error("concept ratchet: domain_surface.removed={} below the frozen floor {}".format(
-            removed, ratchet["removed_min"]))
-    if new > int(ratchet.get("new_max", 0)):
-        report.error("concept ratchet: domain_surface.new={} exceeds the frozen ceiling {}".format(
-            new, ratchet["new_max"]))
+    # A rule scope that leaves D1 out never measures the domain surface, so its two
+    # floors have no object here: judging them against the empty counts would state
+    # removed=0 and fail a scope that measured nothing about removals.
+    if "domain_surface.removed" in domain_counts:
+        removed = domain_counts["domain_surface.removed"]
+        new = domain_counts["domain_surface.new"]
+        if removed < int(ratchet.get("removed_min", 0)):
+            report.error("concept ratchet: domain_surface.removed={} below the frozen floor {}".format(
+                removed, ratchet["removed_min"]))
+        if new > int(ratchet.get("new_max", 0)):
+            report.error("concept ratchet: domain_surface.new={} exceeds the frozen ceiling {}".format(
+                new, ratchet["new_max"]))
+        domain_floors = "removed>={}, new<={}".format(
+            ratchet.get("removed_min", 0), ratchet.get("new_max", 0))
+    else:
+        report.warn("concept ratchet: this rule scope measures no domain surface, so the "
+                    "removed floor {} and the new ceiling {} are unjudged".format(
+                        ratchet.get("removed_min", 0), ratchet.get("new_max", 0)))
+        domain_floors = "removed/new unjudged (no domain surface in this scope)"
     if interfaces > int(ratchet.get("exported_interfaces_max", 1000000000)):
         report.error("concept ratchet: exported_interfaces={} exceeds the frozen ceiling {}".format(
             interfaces, ratchet["exported_interfaces_max"]))
     if report.errors:
         return
-    report.note("concept ratchet held: removed>={}, new<={}, interfaces<={}".format(
-        ratchet.get("removed_min", 0), ratchet.get("new_max", 0),
-        ratchet.get("exported_interfaces_max", 0)))
+    report.note("concept ratchet held: {}, interfaces<={}".format(
+        domain_floors, ratchet.get("exported_interfaces_max", 0)))
 
 
 if __name__ == "__main__":

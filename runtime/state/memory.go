@@ -369,7 +369,9 @@ func (m *MemoryStore) Unconsumed() []WorkSeat {
 // notification started, beside the terminal that turn ended on. A durable
 // account behind the mailbox answers from the log, so a process that starts over
 // the same log reads the attempt the stopped process left; a mailbox beside none
-// answers from its own bookkeeping alone.
+// answers from its own bookkeeping alone. A record the durable account could not
+// reach is reported by name beside no answer, so a caller that drives a turn on
+// "no attempt" never drives it on a read the storage did not complete.
 func (m *MemoryStore) Attempt(ctx context.Context, notice task.Notice) (SettleAttempt, bool, error) {
 	if notice.TaskID == "" {
 		return SettleAttempt{}, false, ErrNoticeIdentityMissing
@@ -380,8 +382,8 @@ func (m *MemoryStore) Attempt(ctx context.Context, notice task.Notice) (SettleAt
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.attemptsLog != nil {
-		attempt, held := m.attemptsLog.attemptOf(notice)
-		return attempt, held, nil
+		attempt, held, err := m.attemptsLog.attemptOf(notice)
+		return attempt, held, err
 	}
 	attempt, held := m.attempts[noticeKeyOf(notice)]
 	return attempt, held, nil

@@ -68,7 +68,7 @@
       "type": "segment_fold",
       "key": "-seg-43689e98ee8be1fa",
       "summary": "segment fold",
-      "content": "[11-06 12:02|gen:?] thinking_plan: plan s1; [11-06 12:03|gen:?] action_command: call s1",
+      "content": "[11-06 12:02|gen:?] [evt_plan-s1|thinking_plan] thinking_plan: plan s1; [11-06 12:03|gen:?] [evt_cmd-s1|action_command] action_command: call s1",
       "time_ms": 1793966520000,
       "covered": [
         "plan-s1",
@@ -81,7 +81,7 @@
       "type": "segment_fold",
       "key": "-seg-75c269bd18eb9cf4",
       "summary": "segment fold",
-      "content": "[11-06 12:06|gen:?] thinking_plan: plan s2; [11-06 12:07|gen:?] action_command: call s2",
+      "content": "[11-06 12:06|gen:?] [evt_plan-s2|thinking_plan] thinking_plan: plan s2; [11-06 12:07|gen:?] [evt_cmd-s2|action_command] action_command: call s2",
       "time_ms": 1793966760000,
       "covered": [
         "plan-s2",
@@ -94,7 +94,7 @@
       "type": "segment_fold",
       "key": "-seg-111ad9c57c1a083e",
       "summary": "segment fold",
-      "content": "[11-06 12:10|gen:?] thinking_plan: plan s3; [11-06 12:11|gen:?] action_command: call s3",
+      "content": "[11-06 12:10|gen:?] [evt_plan-s3|thinking_plan] thinking_plan: plan s3; [11-06 12:11|gen:?] [evt_cmd-s3|action_command] action_command: call s3",
       "time_ms": 1793967000000,
       "covered": [
         "plan-s3",
@@ -107,7 +107,7 @@
       "type": "segment_fold",
       "key": "-seg-0f343093bc5c4129",
       "summary": "segment fold",
-      "content": "[11-06 12:14|gen:?] thinking_plan: plan s4; [11-06 12:15|gen:?] action_command: call s4",
+      "content": "[11-06 12:14|gen:?] [evt_plan-s4|thinking_plan] thinking_plan: plan s4; [11-06 12:15|gen:?] [evt_cmd-s4|action_command] action_command: call s4",
       "time_ms": 1793967240000,
       "covered": [
         "plan-s4",
@@ -120,7 +120,7 @@
       "type": "segment_fold",
       "key": "-seg-b9968ce58c56c4f7",
       "summary": "segment fold",
-      "content": "[11-06 12:18|gen:?] thinking_plan: plan s5; [11-06 12:19|gen:?] action_command: call s5",
+      "content": "[11-06 12:18|gen:?] [evt_plan-s5|thinking_plan] thinking_plan: plan s5; [11-06 12:19|gen:?] [evt_cmd-s5|action_command] action_command: call s5",
       "time_ms": 1793967480000,
       "covered": [
         "plan-s5",

@@ -31,6 +31,8 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -81,6 +83,36 @@ const (
 	// executing the ones it skipped.
 	checkpointSliceCompress = "compress"
 )
+
+// checkpointSliceGovernance is the state slice the governance seat states. Its name
+// is owned by features/evolution/governance beside the seat that answers it, which
+// this assembly names here to know the seat reads a cut that states no slice of it.
+const checkpointSliceGovernance = "governance"
+
+// restoredFallbackSlices names the state slices the framework's own wiring mounts.
+// Each answers a cut that carries no slice of it out of what it serves instead of
+// from an empty account: the projection bound falls back to the whole index walk,
+// the task account seats itself from the whole log, the mailbox seats the
+// obligations its durable account owes, the owed input rounds derive from the fact
+// ledger, the compression account reads the judgments its cut covers none of, the
+// delivery account rebuilds from the fact chain alone, and the governance seat
+// reads the whole stream past its zero cut.
+//
+// The set is the framework's own faces, never a list a contributed holder joins: a
+// holder outside it states no such read, so a cut that never stated its slice
+// leaves it empty and the boot answers that by replaying every chain from its
+// beginning (see judgeContributedSliceCoverage). A consumer added beside these
+// needs no change here — it is answered a whole chain, which is the safe side of
+// the judgment.
+var restoredFallbackSlices = map[string]bool{
+	checkpointSliceProjection: true,
+	checkpointSliceDelivery:   true,
+	checkpointSliceTasks:      true,
+	checkpointSliceInputs:     true,
+	checkpointSliceCompress:   true,
+	state.StateSliceMailbox:   true,
+	checkpointSliceGovernance: true,
+}
 
 // ErrCheckpointUnreadable reports a checkpoint fact whose payload does not state
 // the cut and slices its identity was content-addressed over, so no state is
@@ -280,8 +312,9 @@ func (r *Run) StateRegistry() *state.StateRegistry {
 }
 
 // RegisterStateSlice mounts one consumer's recoverable state on the state seam
-// and answers the disposer that unmounts it.
-func (r *Run) RegisterStateSlice(holder state.Stateful) (func(), error) {
+// and answers the disposer that unmounts it, which refuses by name while the
+// slice still declares unfinished work.
+func (r *Run) RegisterStateSlice(holder state.Stateful) (func() error, error) {
 	if r == nil {
 		return nil, errors.New("assembly: the run is nil")
 	}
@@ -338,6 +371,8 @@ func (r *Run) Checkpoint(ctx context.Context) (event.EventID, bool, error) {
 // it is taken by no commit, so it never stands between a fact and its landing.
 //
 //   - every cut states a key no earlier cut stated: the key names the owner partition beside the sequence that partition stands at, and the checkpoint's own landing takes a slot past the cut it states, so the next cut of one owner names a later slot and a cut whose owner moved names another partition's key instead of the filed one.
+//   - the cut states a quiet point of the commit order between its drain and its state, so the account this cut does not state is the one that lands after it: a fact that landed before the marker is applied and in the slices this cut reads, and a fact that lands after it is outside the state and read back by the boot from its own chain.
+//   - a cut whose quiet point cannot be committed files nothing: a boot reads the account past the marker, so a cut the storage holds no position for is a cut that would state an account no restore can bound.
 func (r *Run) checkpointLocked(ctx context.Context) (event.EventID, bool, error) {
 	if err := ctx.Err(); err != nil {
 		return "", false, err
@@ -354,6 +389,9 @@ func (r *Run) checkpointLocked(ctx context.Context) (event.EventID, bool, error)
 	key := event.EventID(event.CheckpointKey(partition, offset[partition]))
 	if err := r.flight.await(ctx); err != nil {
 		return "", false, err
+	}
+	if err := r.stateQuietPoint(ctx, tier, partition, offset[partition], key); err != nil {
+		return "", false, fmt.Errorf("tagent: state the quiet point of the framework checkpoint %s: %w", key, err)
 	}
 	slices, err := r.states.SnapshotState(ctx)
 	if err != nil {
@@ -375,6 +413,49 @@ func (r *Run) checkpointLocked(ctx context.Context) (event.EventID, bool, error)
 	r.checkpointAt = time.Now()
 	r.mu.Unlock()
 	return key, true, nil
+}
+
+// orderedAppend is the append face a cut states its quiet point through: one record
+// enters the engine's append order without the barrier a commit completes, because the
+// position has to stand before the snapshot and every later commit's barrier flushes the
+// frame ahead of its own.
+//   - the record is a position in the order and not a fact: no read face answers it before a later barrier, and a stop may leave it absent or torn, which tailFactKeys reads as no position at all
+//   - an engine that keeps no commit order states no position at all; one that states the order without this face writes the marker behind the barrier it always did, so a decorated engine keeps the bound it had instead of silently losing it
+type orderedAppend interface {
+	AppendOrdered(ctx context.Context, batch ledger.Batch) error
+}
+
+// stateQuietPoint states the quiet point of one cut: the key that separates the
+// facts this cut's slices state from the facts a boot reads as the tail of the task
+// account. The record is one key in the append order and states no fact of any chain,
+// so a storage that keeps no commit order states no position here and this cut bounds
+// no tail either.
+//
+// The landing fence is what makes the separation exact on that order. It is taken after
+// the pipeline drained, so every fact the storage committed before the marker is applied
+// — the registration and the fold of a fact are inside the same fence — and the marker
+// enters the append order inside it, so a fact committed after it is one this cut's state
+// cannot promise: the boot reads it again by identity, and a slice that folded it already
+// states it twice rather than not at all. Order and durability are separate here: the cut
+// pays one frame of the log rather than a barrier of its own, and the barrier the
+// checkpoint's own commit completes flushes the marker ahead of it. A stop between the
+// marker and that commit leaves the frame absent or torn, and both read as no position: a
+// cut that files nothing after this write leaves the marker behind, and the boot tells
+// that position apart instead of reading it as the end of an account (see tailFactKeys).
+func (r *Run) stateQuietPoint(ctx context.Context, tier *ledger.Tier, partition int, seq int64, cut event.EventID) error {
+	if _, ordered := tier.Store.(ledger.CommitOrder); !ordered {
+		return nil
+	}
+	r.landing.Lock()
+	defer r.landing.Unlock()
+	batch := ledger.Batch{Puts: []ledger.Pair{{
+		Key:   quietPointKey(partition, seq),
+		Value: []byte(cut),
+	}}}
+	if appender, holds := tier.Store.(orderedAppend); holds {
+		return appender.AppendOrdered(ctx, batch)
+	}
+	return tier.Store.Commit(ctx, batch)
 }
 
 // CheckpointSession takes one cut of the named session chain and files the fact
@@ -438,41 +519,7 @@ func (r *Run) checkpointSessionLocked(ctx context.Context, addr event.Address) (
 	if _, err := r.commitFactNoCadence(ctx, evt); err != nil {
 		return "", false, fmt.Errorf("tagent: file the session checkpoint %s of session %s: %w", key, addr.SessionID, err)
 	}
-	names := make(map[string]bool, len(slices))
-	for _, slice := range slices {
-		names[slice.Name] = true
-	}
-	r.mu.Lock()
-	r.sessionFiled[addr.SessionID] = key
-	r.sessionCuts[addr.SessionID] = offset
-	r.sessionSlices[addr.SessionID] = names
-	r.mu.Unlock()
 	return key, true, nil
-}
-
-// sessionCut reports the cut the newest checkpoint of one session states for one
-// state slice: the boundary the boot replays that chain past. A session the
-// restored checkpoints did not state, and a checkpoint that states no such slice,
-// answer the framework's own cut instead, which is what bounds a boot that read
-// no checkpoint of that chain.
-func (r *Run) sessionCut(session event.SessionID, slice string) event.CheckpointOffset {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if len(r.sessionCuts[session]) != 0 && r.sessionSlices[session][slice] {
-		cut := make(event.CheckpointOffset, len(r.sessionCuts[session]))
-		for partition, seq := range r.sessionCuts[session] {
-			cut[partition] = seq
-		}
-		return cut
-	}
-	if len(r.checkpointOffset) == 0 || !r.checkpointSlices[slice] {
-		return nil
-	}
-	cut := make(event.CheckpointOffset, len(r.checkpointOffset))
-	for partition, seq := range r.checkpointOffset {
-		cut[partition] = seq
-	}
-	return cut
 }
 
 // checkpointEventOf renders one checkpoint as the fact it commits as: the
@@ -765,20 +812,25 @@ func (r *Run) CheckpointFiled() (event.EventID, event.CheckpointOffset) {
 // a run whose owner moved between processes filed its newest checkpoint in the
 // partition of its newest process, and reading the highest partition instead
 // would restore the state of a process that stopped earlier.
+//
+//   - The reference carries the partition the answered entry landed in, so the restore reads that body by naming it and never by probing the partitions the seat states: a seat that under-states a partition answers absence beside a body the log holds.
 func newestCheckpointRef(ctx context.Context, tier *ledger.Tier) (anchorRef, bool, error) {
-	key, held, err := tier.Segments.NewestOfType(ctx, event.TypeCheckpoint)
+	key, partition, held, err := tier.Segments.NewestOfType(ctx, event.TypeCheckpoint)
 	if err != nil || !held {
 		return anchorRef{}, false, err
 	}
-	return anchorRef{key: key, typ: event.TypeCheckpoint}, true, nil
+	return anchorRef{key: key, partition: partition, typ: event.TypeCheckpoint}, true, nil
 }
 
 // restoreCheckpoint reads one checkpoint fact back and hands every slice to the
 // holder that states it, then reports the cut the restored state corresponds to.
 // A fact that states no readable checkpoint refuses the restore by name: the
 // boot never starts beside state it read as empty.
+//
+//   - The read names the partition the reference carries, so it addresses that one index entry instead of probing the partitions the seat states: a checkpoint whose partition the seat under-states is still read back.
+//   - Every owner that declared a restore prerequisite is seated before a slice is handed out, so a holder that reads the account another consumer states restores from a seated one; the slices the seat reads are the owner's, and this call names no slice of any consumer.
 func (r *Run) restoreCheckpoint(ctx context.Context, tier *ledger.Tier, ref anchorRef) (event.CheckpointOffset, error) {
-	stored, held, err := tier.Segments.GetEvent(ctx, ref.key)
+	stored, held, err := tier.Segments.GetEventInPartition(ctx, ref.key, ref.partition)
 	if err != nil {
 		return nil, err
 	}
@@ -795,6 +847,9 @@ func (r *Run) restoreCheckpoint(ctx context.Context, tier *ledger.Tier, ref anch
 	if !stated {
 		return nil, fmt.Errorf("%w: %s", ErrCheckpointUnreadable, ref.key)
 	}
+	if err := r.seatRestoreState(ctx, checkpoint.Slices); err != nil {
+		return nil, err
+	}
 	if err := r.states.RestoreState(ctx, checkpoint.Slices); err != nil {
 		return nil, err
 	}
@@ -807,13 +862,243 @@ func (r *Run) restoreCheckpoint(ctx context.Context, tier *ledger.Tier, ref anch
 	r.checkpointOffset = checkpoint.Offset
 	r.checkpointSlices = slices
 	r.mu.Unlock()
+	r.noteRestoredSlices(checkpoint.Slices)
 	return checkpoint.Offset, nil
 }
 
-// errStopIndexWalk ends an index walk the visitor has answered: the walk is read
-// newest commit first, so the first entry that answers the question is the one
-// the caller asked for and nothing behind it can answer better.
-var errStopIndexWalk = errors.New("assembly: the index walk answered")
+// noteRestoredSlices adds the state slices one restored cut states to the set this
+// boot accumulates across the cuts it restores: the framework's cut beside the
+// newest cut of every session chain. A holder whose slice the accumulated set names
+// started from the state its cut stated, and a holder it does not name started from
+// the empty state the seam hands a holder no slice names — which only the holders
+// that read their own fallback answer (see judgeContributedSliceCoverage).
+func (r *Run) noteRestoredSlices(slices []event.CheckpointSlice) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.restoredSlices == nil {
+		r.restoredSlices = make(map[string]bool, len(slices))
+	}
+	for _, slice := range slices {
+		r.restoredSlices[slice.Name] = true
+	}
+}
+
+// judgeContributedSliceCoverage decides whether this boot replays every chain from
+// its beginning instead of past the cuts it restored.
+//
+// A cut states the state of the slices it carries and of no other: a mounted holder
+// the cut states no slice of keeps the empty state the seam gave it, and the anchored
+// replay that follows folds only the material committed past the cut, so the account
+// the chain holds below the cut is absent from that holder (audit #6: eight of
+// twenty-four facts folded, the rest silently missing). The framework's own faces
+// answer that by reading the facts their cut leaves unstated for them; a holder the
+// caller contributed declares no such read, so the whole chain is what answers it.
+//
+//   - The whole-chain replay is safe for the holders the cut did state: every reducer is idempotent by the identity the fact carries, which the derivation contract freezes in §一 and §五, so folding a fact a slice already stated leaves the state it derives once.
+//   - The cost is one O(history) read on the boot that first carries a contribution whose slice an older cut cannot state, never on a steady boot: the framework's own faces stay out of the judgment, so a cut that states their slices keeps the bounded replay.
+//   - A boot that restored no cut, and a cut that states no slice at all, bound no read: the anchored replay reads every chain whole there, so the contribution is covered without this set.
+//   - The judgment names no consumer: it reads the mounted slice names the seam already holds, and the fallback set is the framework's own faces rather than a list a contributed holder joins.
+//
+// 契约: docs/wiki/platform/platform-subsystems.md#framework-checkpoint
+func (r *Run) judgeContributedSliceCoverage() {
+	r.mu.Lock()
+	stated := make(map[string]bool, len(r.restoredSlices))
+	for name := range r.restoredSlices {
+		stated[name] = true
+	}
+	states := r.states
+	r.mu.Unlock()
+	if len(stated) == 0 || states == nil {
+		return
+	}
+	for _, name := range states.Names() {
+		if restoredFallbackSlices[name] || stated[name] {
+			continue
+		}
+		r.mu.Lock()
+		r.fullReplayOnBoot = true
+		r.mu.Unlock()
+		assemblyInfo("tagent: the restored cut states no slice of %q, so this boot replays every chain from its beginning", name)
+		return
+	}
+}
+
+// restoreSeat is the declaration face of an owner whose state the holders read
+// while they restore: the boot seats that state before it hands any holder a
+// slice, because a holder restored ahead of the seat reads an account the boot
+// has not read yet and silently drops the work it still owes.
+//
+// The declaration carries the ownership of the prerequisite: the owner that
+// states the account names the slices it seats itself, so the coordinator never
+// reads what a slice of another consumer states and a consumer added beside it
+// changes no restore step of this file; the wiring that mounts the holder is the
+// one that declares it.
+type restoreSeat interface {
+	// SeatRestore seats the state this owner holds from the slices of one cut. A
+	// cut stating no slice passes none, and the seat then reads the account it
+	// serves whole.
+	SeatRestore(ctx context.Context, slices []event.CheckpointSlice) error
+}
+
+// seatRestoreState seats every owner that declared a restore prerequisite, in the
+// order the wiring declared them, before any holder is handed a slice.
+func (r *Run) seatRestoreState(ctx context.Context, slices []event.CheckpointSlice) error {
+	for _, seat := range r.restoreSeats {
+		if err := seat.SeatRestore(ctx, slices); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// coverageRestore is the declaration face of a consumer whose account one restored
+// cut covers only as far as the cut states that consumer's slice: the owner that
+// states the account reads the facts the cut leaves unstated, so no other
+// consumer's coverage stands for its own.
+//
+// The declaration carries the ownership of the read: the owner names the slice it
+// states itself, so the coordinator reads no payload and names no consumer, and
+// the wiring that mounts the consumer is the one that declares it.
+type coverageRestore interface {
+	// RestoreCoverage folds, from the storage tier, the facts the restored cut
+	// states no slice of this consumer for. A cut that states the consumer's slice
+	// leaves the owner reading past the cut it states; a run that restored no cut
+	// declares nothing here, because its rebuild reads every chain whole.
+	RestoreCoverage(ctx context.Context, tier *ledger.Tier) error
+}
+
+// restoreCoverageState reads what every owner declared the restored cut does not
+// state for it, in the order the wiring declared them. The cut states one account
+// per consumer only where it carries that consumer's slice; a consumer the cut
+// carries no slice of reads the history its account derives from instead of
+// starting beside an empty one.
+func (r *Run) restoreCoverageState(ctx context.Context, tier *ledger.Tier) error {
+	for _, owner := range r.coverageRestores {
+		if err := owner.RestoreCoverage(ctx, tier); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// durableAccount answers the durable task account this run commits through, and
+// nil beside a run over the in-memory commit, which keeps no record across exit
+// and therefore states no account to seat.
+func (r *Run) durableAccount() *state.DurableCommit {
+	if r == nil || r.commit == nil {
+		return nil
+	}
+	durable, held := r.commit.inner.(*state.DurableCommit)
+	if !held {
+		return nil
+	}
+	return durable
+}
+
+// quietPointKeyPrefix names the key family one cut's quiet point stands under: the
+// position in the commit order a boot bounds the tail of the task account at. The
+// family is derived data of the storage and never a fact: it is one key per cut, it
+// enters no chain, and the only reader of it is tailFactKeys.
+const quietPointKeyPrefix = "tagent/checkpoint/v1/quiet:"
+
+// quietPointKey is the key one cut's quiet point stands under: the partition the cut
+// is filed in beside the sequence that partition stood at, so each cut of one owner
+// names a key no earlier cut named and no cut rewrites the marker of another.
+func quietPointKey(partition int, seq int64) string {
+	return quietPointKeyPrefix + strconv.Itoa(partition) + ":" + strconv.FormatInt(seq, 10)
+}
+
+// quietPointCut answers the cut one quiet point names: the key the checkpoint of that
+// cut is filed under, whose partition and sequence are the ones the marker's own key
+// carries. A key this family does not spell answers false, so a position this run
+// cannot read bounds no account.
+func quietPointCut(marker string) (int, event.EventID, bool) {
+	spelled, held := strings.CutPrefix(marker, quietPointKeyPrefix)
+	if !held {
+		return 0, "", false
+	}
+	partitionSpelling, sequenceSpelling, held := strings.Cut(spelled, ":")
+	if !held {
+		return 0, "", false
+	}
+	partition, err := strconv.Atoi(partitionSpelling)
+	if err != nil {
+		return 0, "", false
+	}
+	seq, err := strconv.ParseInt(sequenceSpelling, 10, 64)
+	if err != nil {
+		return 0, "", false
+	}
+	return partition, event.EventID(event.CheckpointKey(partition, seq)), true
+}
+
+// quietPointBoundsTheAccount answers whether the cut a quiet point names is in the
+// storage. A cut that refused after taking its quiet point, and one whose checkpoint
+// commit never landed, leave the marker behind beside no slices: no checkpoint covers
+// the facts between the newest account the storage states and that marker, so a tail
+// bounded at it drops every task that landed in between and the boot seats an account
+// without the work it owes.
+func quietPointBoundsTheAccount(ctx context.Context, tier *ledger.Tier, marker string) (bool, error) {
+	partition, cut, named := quietPointCut(marker)
+	if !named {
+		return false, nil
+	}
+	_, held, err := tier.Segments.GetEventInPartition(ctx, cut, partition)
+	if err != nil {
+		return false, fmt.Errorf("tagent: read the cut %s a quiet point names: %w", cut, err)
+	}
+	return held, nil
+}
+
+// tailFactKeys answers the keys the storage tier committed past the quiet point of its
+// newest framework cut, and nil beside a walk that found no such quiet point, a
+// position that names no filed cut, or an engine that states no commit order: nil is
+// the boot that reads the whole log, never a boot that reads an empty tail. The walk
+// ranks entries by the order the engine states and stops at the newest quiet point the
+// framework itself stated, so the keys between the two are the chains younger than the
+// account and naming them costs their count instead of the history. A checkpoint one
+// session chain filed states no quiet point, because the account is bounded by the
+// framework cut alone and the tasks behind a session cut are still younger than it.
+//
+// The walk never falls back to where a checkpoint landed: a fact lands between a cut's
+// quiet point and that checkpoint's own slot, and a boot bounded there reads neither
+// the slices nor the tail of the work that landed in between.
+func tailFactKeys(ctx context.Context, tier *ledger.Tier) (map[string]struct{}, error) {
+	if tier == nil || tier.Store == nil {
+		return nil, nil
+	}
+	order, holds := tier.Store.(ledger.CommitOrder)
+	if !holds {
+		assemblyInfo("tagent: the storage states no commit order, so the boot reads the whole task log")
+		return nil, nil
+	}
+	tail := map[string]struct{}{}
+	marker := ""
+	err := order.EachCommittedNewestFirst(ctx, func(key string, value []byte) (bool, error) {
+		if strings.HasPrefix(key, quietPointKeyPrefix) {
+			marker = key
+			return false, nil
+		}
+		tail[key] = struct{}{}
+		return true, nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	if marker == "" {
+		assemblyInfo("tagent: the commit order states no quiet point of a cut, so the boot reads the whole task log")
+		return nil, nil
+	}
+	bounded, err := quietPointBoundsTheAccount(ctx, tier, marker)
+	if err != nil {
+		return nil, err
+	}
+	if !bounded {
+		assemblyInfo("tagent: the quiet point %s names no filed cut, so the boot reads the whole task log", marker)
+		return nil, nil
+	}
+	return tail, nil
+}
 
 // newestSessionCheckpointRef answers the newest checkpoint one session chain filed,
 // by the frozen type and the session the index records beside it. The walk reads
@@ -826,20 +1111,20 @@ func newestSessionCheckpointRef(ctx context.Context, tier *ledger.Tier, session 
 		return anchorRef{}, false, nil
 	}
 	held := anchorRef{}
-	err := tier.Segments.EachIndexNewestFirst(ctx, func(key event.EventID, partition int, seq int64, typ string, tagged event.SessionID) error {
+	err := tier.Segments.EachIndexNewestFirstUntil(ctx, func(key event.EventID, partition int, seq int64, typ string, tagged event.SessionID) (bool, error) {
 		if typ != event.TypeCheckpoint || tagged != session {
-			return nil
+			return true, nil
 		}
 		held = anchorRef{key: key, partition: partition, seq: seq, typ: typ, session: tagged}
-		return errStopIndexWalk
+		return false, nil
 	})
-	if errors.Is(err, errStopIndexWalk) {
-		return held, true, nil
-	}
 	if err != nil {
 		return anchorRef{}, false, err
 	}
-	return anchorRef{}, false, nil
+	if held.key == "" {
+		return anchorRef{}, false, nil
+	}
+	return held, true, nil
 }
 
 // restoreSessionCheckpoints reads the newest checkpoint of every session chain the
@@ -862,21 +1147,21 @@ func (r *Run) restoreSessionCheckpoints(ctx context.Context, tier *ledger.Tier) 
 	}
 	newest := map[event.SessionID]anchorRef{}
 	var order []event.SessionID
-	err := tier.Segments.EachIndexNewestFirst(ctx, func(key event.EventID, partition int, seq int64, typ string, session event.SessionID) error {
+	err := tier.Segments.EachIndexNewestFirstUntil(ctx, func(key event.EventID, partition int, seq int64, typ string, session event.SessionID) (bool, error) {
 		if typ != event.TypeCheckpoint {
-			return nil
+			return true, nil
 		}
 		if session == "" {
-			return errStopIndexWalk
+			return false, nil
 		}
 		if _, held := newest[session]; held {
-			return nil
+			return true, nil
 		}
 		newest[session] = anchorRef{key: key, partition: partition, seq: seq, typ: typ, session: session}
 		order = append(order, session)
-		return nil
+		return true, nil
 	})
-	if err != nil && !errors.Is(err, errStopIndexWalk) {
+	if err != nil {
 		return err
 	}
 	if len(newest) == 0 {
@@ -898,7 +1183,7 @@ func (r *Run) restoreSessionCheckpoints(ctx context.Context, tier *ledger.Tier) 
 // whole account, so the two restores name one state per holder without one
 // erasing the other.
 func (r *Run) restoreSessionCheckpoint(ctx context.Context, tier *ledger.Tier, ref anchorRef) error {
-	stored, held, err := tier.Segments.GetEvent(ctx, ref.key)
+	stored, held, err := tier.Segments.GetEventInPartition(ctx, ref.key, ref.partition)
 	if err != nil {
 		return err
 	}
@@ -918,15 +1203,7 @@ func (r *Run) restoreSessionCheckpoint(ctx context.Context, tier *ledger.Tier, r
 	if err := r.states.RestoreState(ctx, checkpoint.Slices); err != nil {
 		return err
 	}
-	slices := make(map[string]bool, len(checkpoint.Slices))
-	for _, slice := range checkpoint.Slices {
-		slices[slice.Name] = true
-	}
-	r.mu.Lock()
-	r.sessionFiled[ref.session] = event.EventID(checkpoint.Key)
-	r.sessionCuts[ref.session] = checkpoint.Offset
-	r.sessionSlices[ref.session] = slices
-	r.mu.Unlock()
+	r.noteRestoredSlices(checkpoint.Slices)
 	return nil
 }
 
@@ -980,23 +1257,31 @@ func (r *Run) restoreNewestCheckpoint(ctx context.Context, tier *ledger.Tier) (e
 // covers: the index walk names the positions without bodies, so the recovery of
 // one consumer costs the material committed since the cut instead of the whole
 // chain.
+//
+//   - The walk stops once every partition the cut names has answered an entry at or behind its own cut: nothing older than that entry can stand past a cut the walk already crossed, so the walk costs the tail and not the history the cut covers.
+//   - The stop rests on the count the walk named: a chain that states more entries past the cut than the seat's count less the cut's slots is one the stop cannot answer for, and the walk reads the whole index instead of answering a tail it cannot bound.
 func (r *Run) eachFactPastCut(ctx context.Context, tier *ledger.Tier, cut event.CheckpointOffset, visit func(ledger.StoredEvent) error) error {
 	var refs []anchorRef
-	if err := tier.Segments.EachIndexNewestFirst(ctx, func(key event.EventID, partition int, seq int64, typ string, session event.SessionID) error {
-		ref := anchorRef{key: key, partition: partition, seq: seq, typ: typ, session: session}
-		if typ == event.TypeCheckpoint {
-			return nil
+	walked, _, past, bounded := r.walkIndexPastCut(ctx, tier, cut)
+	if bounded && past == tier.Segments.EventCount()-coveredEntries(cut) {
+		for _, ref := range walked {
+			if ref.typ == event.TypeCheckpoint || !pastCut(cut, ref) {
+				continue
+			}
+			refs = append(refs, ref)
 		}
-		if !pastCut(cut, ref) {
-			return nil
+	} else if err := tier.Segments.EachIndexNewestFirstUntil(ctx, func(key event.EventID, partition int, seq int64, typ string, session event.SessionID) (bool, error) {
+		ref := anchorRef{key: key, partition: partition, seq: seq, typ: typ, session: session}
+		if typ == event.TypeCheckpoint || !pastCut(cut, ref) {
+			return true, nil
 		}
 		refs = append(refs, ref)
-		return nil
+		return true, nil
 	}); err != nil {
 		return err
 	}
 	for i := len(refs) - 1; i >= 0; i-- {
-		stored, held, err := tier.Segments.GetEvent(ctx, refs[i].key)
+		stored, held, err := tier.Segments.GetEventInPartition(ctx, refs[i].key, refs[i].partition)
 		if err != nil {
 			return err
 		}
@@ -1076,6 +1361,18 @@ func (s projectionStateSlice) Reduce(ctx context.Context, evt event.Event) error
 		return nil
 	}
 	s.run.foldMapped(ctx, evt, entry)
+	return nil
+}
+
+// ReduceRepeat answers one fact the chain already carries: the sequence states each
+// identity where the commit filed it, and a repeat files no position of its own, so
+// the fold answers without appending. The judgment belongs to the commit that
+// classified the fact, never to the sequence's own order, because the sequence drops
+// the identity of the material a rewrite moves out of it (a fold, an age band, a
+// product): a repeat read as new material would state what the chain folded away a
+// second time, while a commit filing beside another of the same chain is a filing
+// however far the chain stands past it.
+func (s projectionStateSlice) ReduceRepeat(context.Context, event.Event) error {
 	return nil
 }
 

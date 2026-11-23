@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"strings"
 	"sync"
-	"time"
 
 	"github.com/SpellingDragon/tagent/api/config"
 	"github.com/SpellingDragon/tagent/api/event"
@@ -14,7 +13,6 @@ import (
 	"github.com/SpellingDragon/tagent/api/plugin"
 	"github.com/SpellingDragon/tagent/features/evolution/meditation"
 	"github.com/SpellingDragon/tagent/features/rl"
-	"github.com/SpellingDragon/tagent/features/telemetry"
 	"github.com/SpellingDragon/tagent/memory"
 	"github.com/SpellingDragon/tagent/memory/ledger"
 	"github.com/SpellingDragon/tagent/memory/search"
@@ -79,7 +77,10 @@ func (r *Run) settleFactLanded(key event.EventID) bool {
 
 // observeSettleDelivery commits the delivery fact of one terminal notification
 // and runs its After pass, so the settle that no live invocation reads is
-// observed exactly as every other committed fact of this run is.
+// observed exactly as every other committed fact of this run is. The fact itself
+// is rendered by the one renderer of its family, so the backflow that commits the
+// same notification writes the very fact this face does and the second commit is
+// its repeat.
 //
 // The commit participates in the acceptance the delivery reports: a refusal is
 // answered to the caller, which leaves the delivery pending beside it, so the
@@ -98,30 +99,15 @@ func (r *Run) observeSettleDelivery(ctx context.Context, envelope task.Envelope)
 	if !addr.IsComplete() {
 		return nil
 	}
-	fact := event.Event{
-		Key:       settleDeliveryKey(notice),
-		Type:      event.TypeTaskSettled,
-		Timestamp: time.Now(),
-		Meta: map[string]string{
-			event.MetaKeySettleTriggerSource: string(notice.Kind),
-			event.MetaKeyEventSummary:        string(notice.Kind),
-			event.MetaKeyNoticeKind:          string(notice.Kind),
-			event.MetaKeyTaskID:              string(notice.TaskID),
-		},
-		Message:    model.Message{Role: model.RoleUser, Content: settleNoticeText(notice)},
-		Owner:      addr,
-		Source:     addr,
-		Target:     addr,
-		TaskID:     notice.TaskID,
-		InstanceID: r.instance,
-	}
+	invocation := event.InvocationID("")
 	if frame, ok := task.CallFrameFrom(ctx); ok {
-		fact.InvocationID = frame.Identity.InvocationID
+		invocation = frame.Identity.InvocationID
 	} else if r.delegations != nil {
 		if owner, ok := r.delegations.OwnerOf(notice.TaskID); ok {
-			fact.InvocationID = owner
+			invocation = owner
 		}
 	}
+	fact := task.DeliveryFactOf(notice, addr, r.instance, invocation)
 	r.mu.Lock()
 	_, held := r.facts[fact.Key]
 	r.mu.Unlock()
@@ -146,9 +132,10 @@ func (r *Run) observeSettleDelivery(ctx context.Context, envelope task.Envelope)
 
 // settleDeliveryKey reports the canonical identity the delivery fact of one
 // terminal notification commits under: a retried delivery keeps its identity,
-// so the chain carries one settle for one notification.
+// so the chain carries one settle for one notification. The identity is the
+// family's own, so every face of the delivery names one fact.
 func settleDeliveryKey(notice task.Notice) event.EventID {
-	return event.EventID(fmt.Sprintf("settle-%x", notice.FactKey()))
+	return task.DeliveryFactKey(notice)
 }
 
 // RecallReads returns the recall read faces this run wires beside the retrieval
@@ -244,19 +231,7 @@ func (r *Run) suppliers(decl *config.Declaration, agents map[event.AgentID]Nativ
 				return state.PromptSource{Files: spec.Files}, nil
 			},
 			plugins: func(_ context.Context, spec config.AgentSpec) ([]plugin.Instance, error) {
-				elements := append([]plugin.Instance(nil), contributed.Plugins...)
-				elements = append(elements, r.plugins...)
-				if observer := r.leaseObserverOf(event.AgentID(spec.ID)); observer != nil {
-					elements = append(elements, observer)
-				}
-				if spec.MaxTokens > 0 && r.ageFold != nil {
-					elements = append(elements, r.ageFold)
-				}
-				if r.observationWired() {
-					elements = append(elements,
-						observePlugin{observer: telemetry.NewCommitObserver(runFacts{run: r}, generationObserver{run: r})})
-				}
-				return elements, nil
+				return r.agentPlugins(contributed.Plugins, spec)
 			},
 			wrap:              r.wrap,
 			reflectionSession: contributed.reflectionSession,

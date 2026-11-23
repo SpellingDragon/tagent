@@ -15,6 +15,7 @@ import (
 	"github.com/SpellingDragon/tagent/api/model"
 	"github.com/SpellingDragon/tagent/api/plugin"
 	"github.com/SpellingDragon/tagent/assembly"
+	"github.com/SpellingDragon/tagent/memory/ledger"
 	"github.com/SpellingDragon/tagent/memory/query"
 	"github.com/SpellingDragon/tagent/runtime/agent"
 	"github.com/SpellingDragon/tagent/runtime/task"
@@ -120,7 +121,7 @@ func TestAttentionClearsNoticeOnWorkEnd(t *testing.T) {
 	writeHostDocumentFile(t, configPath, scriptedHostDocumentWithAgentSections(root, provider.endpoint(), "model-entry",
 		"  user:\n"+
 			"    model: model-entry\n"+
-			"    max_tokens: 32000\n"+
+			"    replay_window: 32000\n"+
 			"    tools:\n"+
 			"      - { kind: agent, agent: worker }\n"+
 			"  worker:\n"+
@@ -151,7 +152,8 @@ func TestAttentionClearsNoticeOnWorkEnd(t *testing.T) {
 		t.Fatalf("drain the work to its end: %v", err)
 	}
 
-	snapshot, err := host.Run().Query(ctx, query.ListFilter{
+	ended := reopenDrainedHost(t, configPath)
+	snapshot, err := ended.Run().Query(ctx, query.ListFilter{
 		Scope: query.AuthorizationScope{Agents: []event.AgentID{addr.AgentID}, Sessions: []event.Address{addr}},
 		Kinds: []query.ObjectKind{query.ObjectNotice},
 	})
@@ -170,12 +172,13 @@ func TestAttentionClearsNoticeOnWorkEnd(t *testing.T) {
 //
 // - the delegated task settles and its notification stands on the chain unconsumed while its follow-up is held
 // - the attention dimension reports that notification as one notice question before the close
-// - the close drains the held follow-up, and the same read reports no notice question afterwards
+// - the close drains the held follow-up and ends the storage view, so the closed run refuses a projection read by name
+// - the reopened read of the same root reports no notice question, which is the durable consumption leg
 // - the assertion reads the ObjectAttention dimension, not the ObjectNotice phase the merge line drains
 //
 // 契约: docs/wiki/agent/event-flow.md#projection-lifecycle
 func TestAttentionNoticeQuestionClearsOnWorkEnd(t *testing.T) {
-	host, addr, followUp, releaseFollowUp := bootUnconsumedNoticeScene(t)
+	host, configPath, addr, followUp, releaseFollowUp := bootUnconsumedNoticeScene(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
 
@@ -221,8 +224,15 @@ func TestAttentionNoticeQuestionClearsOnWorkEnd(t *testing.T) {
 	if report := host.CloseReport(); report.Outcome != agent.CloseQuiesced || !report.Drained {
 		t.Fatalf("close report = (%+v), want the held follow-up drained to rest before the work end is read", report)
 	}
+	if _, err := host.Run().Query(ctx, query.ListFilter{
+		Scope: query.AuthorizationScope{Agents: []event.AgentID{addr.AgentID}, Sessions: []event.Address{addr}},
+		Kinds: []query.ObjectKind{query.ObjectAttention},
+	}); !errors.Is(err, ledger.ErrReadAfterClose) {
+		t.Fatalf("the projection read of the drained and closed run = %v, want %v: the work end ends the storage view, so the post-drain reading of this root is the reopened one", err, ledger.ErrReadAfterClose)
+	}
 
-	after := attentionOfKind(attentionDetails(t, ctx, host, addr), task.AttentionKindNotice)
+	ended := reopenDrainedHost(t, configPath)
+	after := attentionOfKind(attentionDetails(t, ctx, ended, addr), task.AttentionKindNotice)
 	if len(after) != 0 {
 		t.Fatalf("notice questions after the drained close = %d, want none: a question the work ended on is gone from the attention presence", len(after))
 	}
@@ -241,7 +251,7 @@ func TestAttentionNoticeQuestionClearsOnWorkEnd(t *testing.T) {
 // failed answer settles the notice), so it cannot leave the notification
 // unconsumed. The held turn is what the close's drain owes, so the work end is the
 // gate that settles the notice the case read as a question.
-func bootUnconsumedNoticeScene(t *testing.T) (host *assembly.Host, addr event.Address, followUp <-chan struct{}, releaseFollowUp func()) {
+func bootUnconsumedNoticeScene(t *testing.T) (host *assembly.Host, configPath string, addr event.Address, followUp <-chan struct{}, releaseFollowUp func()) {
 	t.Helper()
 	t.Setenv("TAGENT_TEST_API_KEY", "test-key")
 	t.Setenv("TAGENT_HTTP_PORT", "0")
@@ -271,11 +281,11 @@ func bootUnconsumedNoticeScene(t *testing.T) (host *assembly.Host, addr event.Ad
 		}
 	}
 	root := t.TempDir()
-	configPath := writeScriptedHostDocument(t, root, provider.endpoint(), "model-entry")
+	configPath = writeScriptedHostDocument(t, root, provider.endpoint(), "model-entry")
 	writeHostDocumentFile(t, configPath, scriptedHostDocumentWithAgentSections(root, provider.endpoint(), "model-entry",
 		"  user:\n"+
 			"    model: model-entry\n"+
-			"    max_tokens: 32000\n"+
+			"    replay_window: 32000\n"+
 			"    tools:\n"+
 			"      - { kind: agent, agent: worker }\n"+
 			"  worker:\n"+
@@ -299,5 +309,5 @@ func bootUnconsumedNoticeScene(t *testing.T) (host *assembly.Host, addr event.Ad
 		}
 		return false
 	})
-	return host, addr, arrived, func() { releaseOnce.Do(func() { close(held) }) }
+	return host, configPath, addr, arrived, func() { releaseOnce.Do(func() { close(held) }) }
 }

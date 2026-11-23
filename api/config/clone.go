@@ -55,7 +55,6 @@ func cloneAgentSpec(in AgentSpec) AgentSpec {
 	out.Tools = cloneToolRefs(in.Tools)
 	out.Plugins = cloneStrings(in.Plugins)
 	out.Files = cloneFileRefs(in.Files)
-	out.Params = cloneFloatMap(in.Params)
 	out.Memory.ReadNamespaces = cloneStrings(in.Memory.ReadNamespaces)
 	out.Meditation.ObservedNamespaces = cloneStrings(in.Meditation.ObservedNamespaces)
 	out.Meditation.DeliverTo = cloneStrings(in.Meditation.DeliverTo)
@@ -136,18 +135,6 @@ func cloneStringMap(in map[string]string) map[string]string {
 		return nil
 	}
 	out := make(map[string]string, len(in))
-	for k, v := range in {
-		out[k] = v
-	}
-	return out
-}
-
-// cloneFloatMap deep copies a float map.
-func cloneFloatMap(in map[string]float64) map[string]float64 {
-	if in == nil {
-		return nil
-	}
-	out := make(map[string]float64, len(in))
 	for k, v := range in {
 		out[k] = v
 	}

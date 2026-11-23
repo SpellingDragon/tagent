@@ -137,7 +137,11 @@ func counterlessProductOf(product event.CompressProduct) event.Event {
 //   - the anchored rebuild notes only the products it decodes, so the judgment it records is never one a chain product already answers
 //   - the fallback rebuild answers the same judgments as the full walk
 //   - neither rebuild states a compaction payload or a recovery hint
-//   - either checkpoint serves the rebuild (the newest checkpoint when the store holds one, else the newest per-chain anchor), covered material staying unread
+//   - either checkpoint serves the rebuild (the newest checkpoint when the store holds one, else the newest per-chain anchor)
+//   - covered material stays unread where the restored checkpoint vouches it
+//   - beside no restored checkpoint the anchor bounds the projection read alone, so the seam decodes the covered range too
+//   - negative: TestAnchorRebuildFoldsTheRangeNoCheckpointVouches
+//   - the decode saving rides a checkpoint a real boot restores: TestDefaultBootRebuildsFromTheAnchor, TestSymptomAnchorSessionBootCostFlatAcrossGenerations
 //
 // 契约: docs/wiki/reliability/durable-delivery.md#canonical-fact-resolution
 func TestAnchoredBootMatchesFullBoot(t *testing.T) {
@@ -145,28 +149,33 @@ func TestAnchoredBootMatchesFullBoot(t *testing.T) {
 	addr := event.Address{AgentID: "agent-a", SessionID: "session-anchored-boot"}
 	storage := WithStorage(ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: t.TempDir()})
 	source := windowChainRun(t, ctx, storage)
+	source.stopCheckpointFiler()
 	commitWindowTurns(t, ctx, source, addr, 12)
-	if count := countFoldProducts(t, ctx, source); count == 0 {
+	products := countFoldProducts(t, ctx, source)
+	if products == 0 {
 		t.Fatal("the fixture folded nothing, so the anchored boot proves nothing")
 	}
-	if _, err := source.Close(ctx, agent.CloseRequest{Timeout: time.Now().Add(2 * time.Second)}); err != nil {
-		t.Fatalf("close the source process: %v", err)
-	}
+	endRun(t, source)
 
-	products := countFoldProducts(t, ctx, source)
 	full := windowChainRun(t, ctx, storage)
+	full.stopCheckpointFiler()
 	resetCompression(full)
 	fullSeeds, fullLanded, fullReport, err := full.seedFullReplay(ctx, full.tier)
 	if err != nil {
 		t.Fatalf("replay the whole chain: %v", err)
 	}
+	endRun(t, full)
 	anchored := windowChainRun(t, ctx, storage)
+	anchored.stopCheckpointFiler()
 	resetCompression(anchored)
 	anchoredSeeds, anchoredReport, err := anchored.seedAnchoredReplay(ctx, anchored.tier)
 	if err != nil {
 		t.Fatalf("rebuild from the anchors: %v", err)
 	}
+	answeredOnChain := productsByRequest(t, ctx, anchored)
+	endRun(t, anchored)
 	fallback := windowChainRun(t, ctx, storage)
+	fallback.stopCheckpointFiler()
 	resetCompression(fallback)
 	fallbackSeeds, fallbackReport, err := fallback.seedAnchoredReplay(ctx, blankTypedTier(t, ctx, fallback.tier))
 	if err != nil {
@@ -182,8 +191,8 @@ func TestAnchoredBootMatchesFullBoot(t *testing.T) {
 	if anchoredReport.Anchors == 0 && anchoredReport.Checkpoints == 0 {
 		t.Fatal("the folded chain minted no checkpoint the rebuild could use")
 	}
-	if anchoredReport.Decoded >= fullReport.Decoded {
-		t.Fatalf("the anchored rebuild decoded %d bodies, want fewer than the full walk %d", anchoredReport.Decoded, fullReport.Decoded)
+	if anchoredReport.Decoded != fullReport.Decoded {
+		t.Fatalf("the anchored rebuild decoded %d bodies beside the %d the full walk holds, want the same read: no checkpoint vouches the anchor's range, so the seam skips nothing", anchoredReport.Decoded, fullReport.Decoded)
 	}
 	if len(anchoredReport.Landed) != len(fullLanded) {
 		t.Fatalf("the anchored rebuild landed %d partitions, want the %d the full walk lands", len(anchoredReport.Landed), len(fullLanded))
@@ -220,7 +229,6 @@ func TestAnchoredBootMatchesFullBoot(t *testing.T) {
 	if got := answeredCount(t, full); got != products {
 		t.Fatalf("the full walk answers %d judgments, want the %d products the chain holds", got, products)
 	}
-	answeredOnChain := productsByRequest(t, ctx, anchored)
 	if got := answeredCount(t, anchored); got == 0 {
 		t.Fatal("the anchored rebuild notes no answered judgment, want the products it decoded noted")
 	}
@@ -235,26 +243,32 @@ func TestAnchoredBootMatchesFullBoot(t *testing.T) {
 }
 
 // resetCompression replaces the compression consumer of one run with an empty
-// one over the same session face, so the accounting a rebuild makes is what the
+// one over the same two faces, so the accounting a rebuild makes is what the
 // read answers instead of the accounting the assembly already made.
 func resetCompression(run *Run) {
-	run.compress = NewCompressionConsumer(run.compress.sessions)
+	run.compress = NewCompressionConsumer(run.compress.sessions, run.compress.products)
 }
 
-// answeredCount reports how many judgments one consumer holds as answered.
+// answeredCount reports how many judgments one consumer read an answer for: the
+// notes that struck a judgment it still owed.
 func answeredCount(t *testing.T, run *Run) int {
 	t.Helper()
-	run.compress.mu.Lock()
-	defer run.compress.mu.Unlock()
-	return len(run.compress.answered)
+	return run.compress.struckNotes()
 }
 
 // chainIndexSize counts the facts one tier indexes, the denominator the boot
 // decode count is measured against.
 func chainIndexSize(t *testing.T, ctx context.Context, run *Run) int {
 	t.Helper()
+	return tierIndexSize(t, ctx, run.tier)
+}
+
+// tierIndexSize counts the facts one tier indexes, through the tier alone, so a
+// reading view opened over a filed root answers the same denominator a live run does.
+func tierIndexSize(t *testing.T, ctx context.Context, tier *ledger.Tier) int {
+	t.Helper()
 	count := 0
-	if err := run.tier.Segments.EachIndexNewestFirst(ctx, func(event.EventID, int, int64, string, event.SessionID) error {
+	if err := tier.Segments.EachIndexNewestFirst(ctx, func(event.EventID, int, int64, string, event.SessionID) error {
 		count++
 		return nil
 	}); err != nil {
@@ -277,7 +291,7 @@ func noTrimChainRun(t *testing.T, ctx context.Context, opts ...Option) *Run {
 	}, opts...)
 	run, err := assemble(ctx, &config.Declaration{
 		Entry:  "agent-a",
-		Agents: []config.AgentSpec{{ID: "agent-a", Model: "model-a", MaxTokens: 60}, {ID: "agent-b", Model: "model-a", MaxTokens: 60}},
+		Agents: []config.AgentSpec{{ID: "agent-a", Model: "model-a", ReplayWindow: 60}, {ID: "agent-b", Model: "model-a", ReplayWindow: 60}},
 	}, map[event.AgentID]NativeAgent{"agent-a": {Model: provider}, "agent-b": {Model: provider}}, false, options...)
 	if err != nil {
 		t.Fatalf("assemble the run: %v", err)
@@ -307,7 +321,14 @@ func TestDefaultBootRebuildsFromTheAnchor(t *testing.T) {
 	if _, err := source.Close(ctx, agent.CloseRequest{Timeout: time.Now().Add(2 * time.Second)}); err != nil {
 		t.Fatalf("close the source process: %v", err)
 	}
-	indexed := chainIndexSize(t, ctx, source)
+	filed, err := ledger.OpenTier(ctx, ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: root})
+	if err != nil {
+		t.Fatalf("open the reading view of the filed root: %v", err)
+	}
+	indexed := tierIndexSize(t, ctx, filed)
+	if err := filed.Close(); err != nil {
+		t.Fatalf("close the reading view of the filed root: %v", err)
+	}
 
 	booted := noTrimChainRun(t, ctx, storage)
 	decoded := booted.CommittedFacts()
@@ -321,6 +342,7 @@ func TestDefaultBootRebuildsFromTheAnchor(t *testing.T) {
 	if served.projection.Len() == 0 {
 		t.Fatal("the default boot served an empty projection beside a folded chain")
 	}
+	endRun(t, booted)
 	full := noTrimChainRun(t, ctx, storage)
 	if _, _, _, err := full.seedFullReplay(ctx, full.tier); err != nil {
 		t.Fatalf("replay the whole chain: %v", err)
@@ -398,6 +420,7 @@ func TestTheRestoredProjectionReadsOnlyPastItsSurvivors(t *testing.T) {
 			t.Fatal("the boot restored no checkpoint, so the bound proves nothing")
 		}
 		reads[filler] = booted.CommittedFacts()
+		endRun(t, booted)
 
 		full := noTrimNoWindowRun(t, ctx, storage)
 		fullSeeds, _, _, err := full.seedFullReplay(ctx, full.tier)

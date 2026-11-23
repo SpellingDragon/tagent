@@ -6,6 +6,7 @@ import (
 	"fmt"
 
 	"github.com/SpellingDragon/tagent/api/event"
+	trpclog "trpc.group/trpc-go/trpc-agent-go/log"
 	trpctool "trpc.group/trpc-go/trpc-agent-go/tool"
 )
 
@@ -307,9 +308,11 @@ func (w *Wrapper) execute(ctx context.Context, frame CallFrame, taskID event.Tas
 	result, err := w.manager.registry.Advance(ctx, taskID, status,
 		MutationID(fmt.Sprintf("settle:%s:%d", taskID, round)), []Envelope{envelope})
 	if err != nil || result != CommitCommitted {
+		trpclog.Errorf("tagent: task %s settlement round %d was not committed (result %v): %v", taskID, round, result, err)
 		return
 	}
 	if err := w.mailbox(ctx, notice); err != nil {
+		trpclog.Errorf("tagent: task %s notice round %d kind %s was not accepted by the mailbox: %v", taskID, round, kind, err)
 		return
 	}
 	w.manager.acceptDelivery(notice)

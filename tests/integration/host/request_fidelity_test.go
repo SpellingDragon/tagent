@@ -124,17 +124,52 @@ func requireCallResultPair(t *testing.T, request scriptedRequest, callID, name, 
 	}
 }
 
-// fidelityCountToolMessages reports how many role=tool messages one request
-// carries, so a scenario proves its pairing check ran over real material
-// instead of passing over a request that carries no call at all.
-func fidelityCountToolMessages(request scriptedRequest) int {
+// fidelityCountToolTickets counts the role=tool messages whose presented ticket
+// names the frozen type: a request carries one message per recorded fact, and the
+// ticket is what says which family the fact belongs to when two families share
+// the tool role.
+func fidelityCountToolTickets(request scriptedRequest, typ string) int {
 	count := 0
 	for _, message := range request.Messages {
-		if message.Role == string(model.RoleTool) {
+		if message.Role != string(model.RoleTool) {
+			continue
+		}
+		if ticketType(message.Content) == typ {
 			count++
 		}
 	}
 	return count
+}
+
+// ticketType answers the frozen type the presented ticket of one content names,
+// and the empty string beside content carrying no ticket.
+func ticketType(content string) string {
+	if !strings.HasPrefix(content, "[evt_") {
+		return ""
+	}
+	at := strings.Index(content, "] ")
+	if at < 0 {
+		return ""
+	}
+	token := content[len("[evt_"):at]
+	bar := strings.IndexByte(token, '|')
+	if bar <= 0 || bar == len(token)-1 {
+		return ""
+	}
+	return token[bar+1:]
+}
+
+// fidelitySettleMaterial answers the material the delivery fact of one request
+// carries with its ticket peeled off, and the empty string beside a request that
+// carries none.
+func fidelitySettleMaterial(request scriptedRequest) string {
+	for _, message := range request.Messages {
+		if message.Role != string(model.RoleTool) || ticketType(message.Content) != event.TypeTaskSettled {
+			continue
+		}
+		return withoutPresentedTicket(message.Content)
+	}
+	return ""
 }
 
 // fidelityEntrySections renders the entry agent section of one fidelity host:
@@ -242,7 +277,7 @@ func runFidelityNextTurnAfterToolCall(t *testing.T) {
 	provider.decide = fidelityGate(script.decide)
 
 	sender := newRecordingSender()
-	host, _ := bootFidelityHost(t, provider, sender, t.TempDir(), "    max_tokens: 32000\n")
+	host, _ := bootFidelityHost(t, provider, sender, t.TempDir(), "    replay_window: 32000\n")
 	keepIntegrityHost(t, script, host)
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
@@ -264,8 +299,8 @@ func runFidelityNextTurnAfterToolCall(t *testing.T) {
 		}
 	}
 	requireFidelityPairing(t, provider, "the turn after a tool call")
-	if fidelityCountToolMessages(target) == 0 {
-		t.Fatalf("the turn-after request carries no role=tool call-result material, so the pairing check proves nothing: %+v", target.Messages)
+	if results := fidelityCountToolTickets(target, event.TypeActionCommand); results == 0 {
+		t.Fatalf("the turn-after request carries no %s tool message, so the pairing check proves nothing: %+v", event.TypeActionCommand, target.Messages)
 	}
 	requireCallResultPair(t, target, callID, "send", arguments)
 	if turnTwoErr != nil {
@@ -319,8 +354,8 @@ func runFidelityRequestAfterCompression(t *testing.T) {
 
 	sender := newRecordingSender()
 	host, _ := bootFidelityHost(t, provider, sender, t.TempDir(),
-		"    max_tokens: 440\n"+
-			"    provider_context_window: 2048\n"+
+		"    replay_window: 440\n"+
+			"    context_window: 2048\n"+
 			"    compress_threshold: 1.0\n"+
 			"    keep_recent_tasks: 1\n")
 	keepIntegrityHost(t, script, host)
@@ -370,8 +405,16 @@ func runFidelityRequestAfterCompression(t *testing.T) {
 		}
 	}
 	requireFidelityPairing(t, provider, "the request after compression")
-	if tools := fidelityCountToolMessages(target); tools != 1 {
-		t.Fatalf("the compressed request carries %d role=tool call-result message(s), want the one result of %q the fold kept whole: %+v", tools, callID, target.Messages)
+	if tools := fidelityCountToolTickets(target, event.TypeActionCommand); tools != 1 {
+		t.Fatalf("the compressed request carries %d %s tool message(s), want the one result of %q the fold kept whole: %+v",
+			tools, event.TypeActionCommand, callID, target.Messages)
+	}
+	if settled := fidelityCountToolTickets(target, event.TypeTaskSettled); settled != 1 {
+		t.Fatalf("the compressed request carries %d %s tool message(s), want the one delivery fact of the settled call the fold also kept whole: %+v",
+			settled, event.TypeTaskSettled, target.Messages)
+	}
+	if material := fidelitySettleMaterial(target); !strings.HasPrefix(material, "tagent: task ") || !strings.HasSuffix(material, " settled") {
+		t.Fatalf("the delivery fact reaches the compressed request as %q, want the settle line the delivery family renders for the notification", material)
 	}
 	requireCallResultPair(t, target, callID, "send", arguments)
 	if turnTwoErr != nil {
@@ -418,7 +461,7 @@ func runFidelityRequestAfterColdBoot(t *testing.T) {
 	provider.decide = fidelityGate(script.decide)
 
 	sender := newRecordingSender()
-	host, configPath := bootFidelityHost(t, provider, sender, t.TempDir(), "    max_tokens: 32000\n")
+	host, configPath := bootFidelityHost(t, provider, sender, t.TempDir(), "    replay_window: 32000\n")
 	keepIntegrityHost(t, script, host)
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
@@ -447,8 +490,8 @@ func runFidelityRequestAfterColdBoot(t *testing.T) {
 		}
 	}
 	requireFidelityPairing(t, provider, "the turn after a cold boot")
-	if fidelityCountToolMessages(target) == 0 {
-		t.Fatalf("the cold-boot request carries no role=tool call-result material, so the pairing check proves nothing: %+v", target.Messages)
+	if results := fidelityCountToolTickets(target, event.TypeActionCommand); results == 0 {
+		t.Fatalf("the cold-boot request carries no %s tool message, so the pairing check proves nothing: %+v", event.TypeActionCommand, target.Messages)
 	}
 	requireCallResultPair(t, target, callID, "send", arguments)
 	if turnTwoErr != nil {

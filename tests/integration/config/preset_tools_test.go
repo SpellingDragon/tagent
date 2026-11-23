@@ -208,12 +208,13 @@ func describePresetRequests(requests []model.Request) string {
 	return strings.Join(lines, "; ")
 }
 
-// seedPresetRecall commits one event into a real storage tier, so the recall
-// face of a later assembly reads a committed event rather than a fixture.
+// seedPresetRecall commits one event into a real storage tier under write rights
+// and hands the root up, so the recall face of a later assembly reads a
+// committed event rather than a fixture.
 func seedPresetRecall(t *testing.T, root string) {
 	t.Helper()
 	ctx := context.Background()
-	tier, err := ledger.OpenTier(ctx, ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: root})
+	tier, err := ledger.OpenTier(ctx, ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: root, WriteRights: true})
 	if err != nil {
 		t.Fatalf("OpenTier(localfile): %v", err)
 	}
@@ -244,6 +245,9 @@ func seedPresetRecall(t *testing.T, root string) {
 	}
 	if err := tier.Originals.Put(ctx, body.Ref(), []byte(presetRecallText)); err != nil {
 		t.Fatalf("Put(original %s): %v", presetRecallKey, err)
+	}
+	if err := tier.Close(); err != nil {
+		t.Fatalf("close the seeding tier of %s: %v", root, err)
 	}
 }
 

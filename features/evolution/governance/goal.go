@@ -4,9 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"sync"
 	"time"
 
+	"github.com/SpellingDragon/tagent/api/durable"
 	"github.com/SpellingDragon/tagent/api/event"
 )
 
@@ -92,15 +94,20 @@ type goalEventPayload struct {
 	ExpiresMs int64  `json:"expires_ms,omitempty"`
 }
 
-// GoalRegistry is the goal registry: every declared goal in memory beside the
+// GoalRegistry is the goal registry: the goals in force in memory beside the
 // governance events the declarations and resolutions also write. A declaration
 // activates the governance goal gate, and a refusal of a goal-required call
 // permeates the goal context into its record.
 //
 // The registry is concurrent safe, and its durable face is late-bound and nil
 // safe: without a store it degrades to memory state instead of failing, and
-// binding one replays the stored goal events back into the registry, so a
-// restart keeps the goals it already declared.
+// binding one folds the stored goal events that landed past the state cut this
+// registry holds, so a restart keeps the goals it already declared. The cut is
+// seated by the framework state slice (see StateSeat); a registry beside no seat
+// holds the zero cut, so the events past it are the whole stream.
+//
+//   - a registry with a durable face holds the work in force alone: a goal whose resolution landed, or whose validity passed, belongs to the stream from then on, so the memory state and the cut stated from it follow the in-flight work instead of the history it accumulates (see List for the read that answers the history).
+//   - a registry beside no store holds every goal it declared, because the memory state is the only place they live.
 //
 // 契约: docs/wiki/agent/governance-enforcement.md#goal-registry
 type GoalRegistry struct {
@@ -108,95 +115,302 @@ type GoalRegistry struct {
 	goals map[string]*Goal
 	seq   int
 
-	log    GovernanceEventLog
+	log    durable.FactLog
 	evtSeq int64
+
+	writeMu sync.Mutex
+	stopped error
 }
 
-// NewGoalRegistry builds one goal registry in memory state. BindStore hands it
-// the durable face whenever the wiring has one.
+// NewGoalRegistry builds one goal registry in memory state. Bind hands it the
+// durable face whenever the wiring has one.
 func NewGoalRegistry() *GoalRegistry {
 	return &GoalRegistry{goals: make(map[string]*Goal)}
 }
 
-// BindStore hands the registry its durable face and replays the goal events
-// already stored there back into it — declarations and resolutions in the
+// Bind hands the registry its durable face and folds the goal events that landed
+// past the state cut it holds back into it — declarations and resolutions in the
 // order the operations happened, so a resolved goal is never resurrected and a
-// later declaration never reuses an identity. It is nil safe, and it runs
-// single threaded at construction.
-func (g *GoalRegistry) BindStore(log GovernanceEventLog) {
+// later declaration never reuses an identity. It is nil safe, and it runs single
+// threaded at construction.
+//
+// The error of a fold belongs to the caller that can stop the boot: a stream this
+// registry could not read leaves the goals behind the chain that serves them.
+func (g *GoalRegistry) Bind(ctx context.Context, log durable.FactLog) error {
 	if g == nil || log == nil {
-		return
+		return nil
 	}
 	g.mu.Lock()
 	g.log = log
-	g.evtSeq = g.seedSeqLocked()
+	cut := g.evtSeq
 	g.mu.Unlock()
-	g.rebuildFromStore()
+	return g.foldTail(ctx, log, cut)
+}
+
+// seat states the registry the cut, the declaration order and the goals one
+// framework state slice restored, so a restarted registry continues both
+// numberings where the stated stream ended. The declaration order never lands
+// below an identity the stated goals already took: a payload that understates it
+// would hand a later declaration an identity a stored goal holds.
+func (g *GoalRegistry) seat(goals []*Goal, order int, cut int64) {
+	if g == nil {
+		return
+	}
+	g.writeMu.Lock()
+	defer g.writeMu.Unlock()
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	seated := make(map[string]*Goal, len(goals))
+	for _, goal := range goals {
+		if goal == nil || goal.ID == "" {
+			continue
+		}
+		cp := *goal
+		seated[cp.ID] = &cp
+		if seq := goalSeqOf(cp.ID); seq > order {
+			order = seq
+		}
+	}
+	g.goals = seated
+	g.seq = order
+	g.evtSeq = cut
+	g.stopped = nil
+}
+
+// stated reports the cut, the declaration order and the goals the framework state
+// slice states for this registry. One rule decides what the goals are: a
+// registry with a durable face states the work in force alone, because the record
+// of a resolved or expired goal is the stream the cut numbers, while a registry
+// beside no store states every goal it holds, because nothing else keeps them. The
+// state is read under the registry lock and states no history, so one cut costs the
+// live work instead of the history behind it.
+func (g *GoalRegistry) stated() (int64, int, []*Goal) {
+	if g == nil {
+		return 0, 0, nil
+	}
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	now := time.Now().UnixMilli()
+	historyBehindTheStream := g.log != nil
+	goals := make([]*Goal, 0, len(g.goals))
+	for _, goal := range g.goals {
+		if historyBehindTheStream && !inFlight(goal, now) {
+			continue
+		}
+		cp := *goal
+		goals = append(goals, &cp)
+	}
+	sort.Slice(goals, func(i, j int) bool { return goals[i].ID < goals[j].ID })
+	return g.evtSeq, g.seq, goals
 }
 
 // Declare registers one goal and returns its identity. The declaration writes
-// its governance event beside the memory entry, so a restart replays it back.
+// its governance event first and mints the goal only once that event landed, so
+// the goals the gate rules on are the goals a restart reads back: a declaration
+// the stream refused answers no identity and leaves the effective state where the
+// stream stands. The declaration is the write boundary that takes the goals
+// holding nothing in force out of the memory state (see pruneOutOfForceLocked),
+// and it runs before the new identity is minted, so a goal just declared is never
+// the one taken out. A registry beside no stream mints the goal on the memory
+// state alone, because nothing else keeps it.
 func (g *GoalRegistry) Declare(statement, createdBy string, expiresMs int64) string {
 	if g == nil {
 		return ""
 	}
-	g.mu.Lock()
-	g.seq++
-	id := fmt.Sprintf("g-%d", g.seq)
 	now := time.Now().UnixMilli()
+	g.mu.Lock()
+	g.pruneOutOfForceLocked(now)
+	g.seq++
+	seq := g.seq
+	log := g.log
+	g.mu.Unlock()
+	id := fmt.Sprintf("g-%d", seq)
 	goal := &Goal{
 		ID: id, Statement: statement, CreatedBy: createdBy,
 		Status: GoalActive, CreatedMs: now, ExpiresMs: expiresMs,
 	}
-	g.goals[id] = goal
-	evtKey := g.eventKeyLocked()
-	log := g.log
-	g.mu.Unlock()
-	g.writeGoalEvent(log, goalEventPayload{
+	if !g.recordsOperation(log, goalEventPayload{
 		GoalID: id, Op: goalOpDeclared, Statement: statement,
 		CreatedBy: createdBy, ExpiresMs: expiresMs,
-	}, evtKey, now, SubtypeGoalDeclared)
+	}, now, SubtypeGoalDeclared) {
+		g.unmint(seq)
+		return ""
+	}
+	g.mu.Lock()
+	g.goals[id] = goal
+	g.mu.Unlock()
 	return id
 }
 
-// Resolve moves one goal to its resolution and reports whether the goal exists.
-// The two writable resolutions are achieved and abandoned; expired is derived
-// and never written here. The registry guards no terminal state: a repeated
-// resolution is applied as it arrives, and the tool layer's two-value
-// enumeration is what keeps an unwritten word out.
+// unmint hands one declaration number back when the event never landed and no
+// later declaration minted past it: the identity a refused declaration reserved
+// is the one the next declaration takes, so the order this registry hands out is
+// the order the stream records instead of a sequence punctuated by numbers no
+// goal ever held.
+func (g *GoalRegistry) unmint(seq int) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.seq == seq {
+		g.seq = seq - 1
+	}
+}
+
+// recordsOperation writes one goal operation and reports whether the effective
+// state may follow it: an event the stream landed, or a registry beside no stream,
+// where the memory state is the only record the goal has. A stream that refused
+// the event answers false, so the goal the gate rules on is the goal a restart
+// reads back instead of one the stream never kept.
+func (g *GoalRegistry) recordsOperation(log durable.FactLog, p goalEventPayload, ts int64, subtype string) bool {
+	if log == nil {
+		return true
+	}
+	return g.writeGoalEvent(log, p, ts, subtype)
+}
+
+// Resolve moves one goal to its resolution and reports whether the registry held
+// it and the resolution became the recorded one. The two writable resolutions are
+// achieved and abandoned; expired is derived and never written here. The registry
+// guards no terminal state: a repeated resolution is applied as it arrives, and
+// the tool layer's two-value enumeration is what keeps an unwritten word out.
+//
+// A resolution writes its event before the memory state follows it, so a refused
+// write answers false and leaves the goal in the state the stream keeps. A landed
+// resolution takes the goal out of the memory state, beside the goals that already
+// left force: from then on the stream is the record of that goal and List answers
+// it from there. A registry beside no store keeps it, because nothing else would.
+// A goal the registry has released answers false — the live state is the work in
+// force, not every goal ever declared.
 func (g *GoalRegistry) Resolve(id string, status GoalStatus) bool {
 	if g == nil {
 		return false
 	}
 	g.mu.Lock()
-	goal, ok := g.goals[id]
-	if ok {
-		goal.Status = status
-	}
-	evtKey := g.eventKeyLocked()
+	_, ok := g.goals[id]
 	now := time.Now().UnixMilli()
 	log := g.log
 	g.mu.Unlock()
-	if ok {
-		g.writeGoalEvent(log, goalEventPayload{
-			GoalID: id, Op: goalOpResolved, Status: string(status),
-		}, evtKey, now, SubtypeGoalResolved)
+	if !ok {
+		return false
 	}
-	return ok
+	if !g.recordsOperation(log, goalEventPayload{
+		GoalID: id, Op: goalOpResolved, Status: string(status),
+	}, now, SubtypeGoalResolved) {
+		return false
+	}
+	g.mu.Lock()
+	if goal, held := g.goals[id]; held {
+		goal.Status = status
+	}
+	g.pruneOutOfForceLocked(now)
+	g.mu.Unlock()
+	return true
 }
 
-// List returns a snapshot copy of every goal the registry holds, in no
-// particular order. The copy keeps a reader from mutating registry state.
+// pruneOutOfForceLocked takes the goals holding nothing in force out of the memory
+// state: a resolved goal is the stream's record from the moment its event landed,
+// and a goal past its validity stops counting as active and holds no budget. The
+// write boundaries that learn a goal left force — a declaration, a resolution and
+// the fold a bind runs — prune it, so the cut stated from this state follows the
+// work in force instead of the history the registry accumulates. Only a registry
+// with a durable face prunes: without one the memory state is the only place
+// every goal it declared lives, so nothing is taken out of it.
+func (g *GoalRegistry) pruneOutOfForceLocked(nowMs int64) {
+	if g.log == nil {
+		return
+	}
+	for id, goal := range g.goals {
+		if !inFlight(goal, nowMs) {
+			delete(g.goals, id)
+		}
+	}
+}
+
+// List returns every goal the registry answers, in declaration order: the work in
+// force it holds in memory and the history the stream behind it keeps. A registry
+// with a durable face derives the history on each question, so a cut that states
+// the live work alone never shortens the list of goals a reader asks about; the
+// read costs the stream behind the cut, and the memory state never keeps the
+// history it serves. A registry beside no store answers its memory state, which is
+// every goal it declared.
 func (g *GoalRegistry) List() []*Goal {
 	if g == nil {
 		return nil
 	}
 	g.mu.RLock()
-	defer g.mu.RUnlock()
-	out := make([]*Goal, 0, len(g.goals))
-	for _, goal := range g.goals {
+	log := g.log
+	held := make(map[string]*Goal, len(g.goals))
+	for id, goal := range g.goals {
 		cp := *goal
-		out = append(out, &cp)
+		held[id] = &cp
+	}
+	g.mu.RUnlock()
+	for id, goal := range g.streamGoals(context.Background(), log) {
+		if _, inForce := held[id]; !inForce {
+			held[id] = goal
+		}
+	}
+	out := make([]*Goal, 0, len(held))
+	for _, goal := range held {
+		out = append(out, goal)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if si, sj := goalSeqOf(out[i].ID), goalSeqOf(out[j].ID); si != sj {
+			return si < sj
+		}
+		return out[i].ID < out[j].ID
+	})
+	return out
+}
+
+// streamGoals reads the goals the goal stream records: every declaration and its
+// resolutions in the order the keys number them, so one identity answers the
+// statement it was declared with and the resolution that closed it. A body the
+// store will not parse is named at ERROR beside the goals around it, and a read the
+// store refuses answers no goal at all — a history read that cannot reach the
+// stream never invents the record it could not read.
+func (g *GoalRegistry) streamGoals(ctx context.Context, log durable.FactLog) map[string]*Goal {
+	if log == nil {
+		return nil
+	}
+	stored, err := log.Scan(ctx, goalEventPrefix)
+	if err != nil {
+		governanceHistoryUnreadable(goalEventPrefix, err)
+		return nil
+	}
+	keys := make([]string, 0, len(stored))
+	for key := range stored {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	out := make(map[string]*Goal, len(keys))
+	for _, key := range keys {
+		var evt event.Event
+		if err := json.Unmarshal(stored[key], &evt); err != nil {
+			governanceHistoryUnreadable(key, err)
+			continue
+		}
+		if evt.Type != event.TypeGovernance {
+			continue
+		}
+		var p goalEventPayload
+		if err := json.Unmarshal([]byte(evt.Message.Content), &p); err != nil {
+			governanceHistoryUnreadable(key, err)
+			continue
+		}
+		if p.GoalID == "" {
+			continue
+		}
+		switch p.Op {
+		case goalOpDeclared:
+			out[p.GoalID] = &Goal{
+				ID: p.GoalID, Statement: p.Statement, CreatedBy: p.CreatedBy,
+				Status: GoalActive, CreatedMs: evt.Timestamp.UnixMilli(), ExpiresMs: p.ExpiresMs,
+			}
+		case goalOpResolved:
+			if goal, ok := out[p.GoalID]; ok {
+				goal.Status = GoalStatus(p.Status)
+			}
+		}
 	}
 	return out
 }
@@ -287,31 +501,33 @@ func goalSeqOf(id string) int {
 	return n
 }
 
-// eventKeyLocked allocates the ordered identity of the next goal event. The
-// caller holds the lock, so the key order is the operation order and a replay
-// reconstructs it exactly — a resolved goal is never resurrected by a rebuild.
-func (g *GoalRegistry) eventKeyLocked() string {
-	g.evtSeq++
-	return fmt.Sprintf("%s%019d", goalEventPrefix, g.evtSeq)
-}
-
-// seedSeqLocked continues the event numbering where the stored stream ends, so
-// a restarted registry never reuses a key. The caller holds the lock.
-func (g *GoalRegistry) seedSeqLocked() int64 {
-	return seedEventSeq(context.Background(), g.log, goalEventPrefix)
-}
-
 // writeGoalEvent writes one goal operation as the governance event its
-// declaration or resolution requires. A write that fails is dropped beside the
-// standing memory entry: the goal gate keeps working and the audit
-// persistence stays best effort.
-func (g *GoalRegistry) writeGoalEvent(log GovernanceEventLog, p goalEventPayload, key string, ts int64, subtype string) {
+// declaration or resolution requires, and numbers the stream only behind a barrier
+// it confirmed: the write path is serialized, a refused write hands its number
+// back, and a barrier that did not confirm stops the stream from numbering on. The
+// failure is named at ERROR instead of dropping out of the durable stream in
+// silence, and the caller that reads the false it answers leaves the effective
+// state where the stream stands. It reports whether the event landed, because a
+// landed event is what lets the caller hand the goal itself to the stream.
+func (g *GoalRegistry) writeGoalEvent(log durable.FactLog, p goalEventPayload, ts int64, subtype string) bool {
 	if log == nil {
-		return
+		return false
+	}
+	g.writeMu.Lock()
+	defer g.writeMu.Unlock()
+	g.mu.Lock()
+	stopped := g.stopped
+	seq := g.evtSeq + 1
+	g.mu.Unlock()
+	key := fmt.Sprintf("%s%019d", goalEventPrefix, seq)
+	if stopped != nil {
+		governanceWriteFailure(key, subtype, p.GoalID, stopped)
+		return false
 	}
 	content, err := json.Marshal(p)
 	if err != nil {
-		return
+		governanceWriteFailure(key, subtype, p.GoalID, err)
+		return false
 	}
 	meta := map[string]string{
 		MetaKeySubtype: subtype,
@@ -325,22 +541,43 @@ func (g *GoalRegistry) writeGoalEvent(log GovernanceEventLog, p goalEventPayload
 		Meta:      meta,
 		Message:   contentMessage(string(content)),
 	}
-	putGovernanceEvent(context.Background(), log, key, evt)
+	staged, err := putGovernanceEvent(context.Background(), log, key, evt)
+	if err == nil {
+		g.mu.Lock()
+		if seq > g.evtSeq {
+			g.evtSeq = seq
+		}
+		g.mu.Unlock()
+		return true
+	}
+	if staged {
+		g.mu.Lock()
+		if seq > g.evtSeq {
+			g.evtSeq = seq
+		}
+		if g.stopped == nil {
+			g.stopped = fmt.Errorf("the write barrier at %s%019d did not confirm: %w", goalEventPrefix, seq, err)
+		}
+		g.mu.Unlock()
+	}
+	governanceWriteFailure(key, subtype, p.GoalID, err)
+	return false
 }
 
-// rebuildFromStore replays the stored goal events back into the registry: the
-// declared goals and their resolutions in the order the operations happened,
-// with the declaration order realigned so a later declaration never reuses an
-// identity a stored goal already took. A malformed event is skipped rather
-// than failing the rebuild.
-func (g *GoalRegistry) rebuildFromStore() {
-	g.mu.RLock()
-	log := g.log
-	g.mu.RUnlock()
-	if log == nil {
-		return
+// foldTail folds the stored goal events that landed past one cut into the
+// registry — the declared goals and their resolutions in the order the
+// operations happened, with the declaration order realigned so a later
+// declaration never reuses an identity a stored goal already took — and
+// continues the stream numbering from the newest event it read. An event body
+// this fold cannot read as a goal operation is skipped, while an event the store
+// cannot parse at all fails the read that returns it (see governanceEventsPast).
+// The goals the fold took out of force are then taken out of the memory state,
+// because the stream this fold read is their record from then on.
+func (g *GoalRegistry) foldTail(ctx context.Context, log durable.FactLog, cut int64) error {
+	events, newest, err := governanceEventsPast(ctx, log, goalEventPrefix, cut)
+	if err != nil {
+		return err
 	}
-	events := replayGovernanceEvents(context.Background(), log, goalEventPrefix)
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	maxSeq := g.seq
@@ -368,4 +605,9 @@ func (g *GoalRegistry) rebuildFromStore() {
 		}
 	}
 	g.seq = maxSeq
+	if newest > g.evtSeq {
+		g.evtSeq = newest
+	}
+	g.pruneOutOfForceLocked(time.Now().UnixMilli())
+	return nil
 }

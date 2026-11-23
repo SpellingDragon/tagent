@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/SpellingDragon/tagent/api/durable"
 	"github.com/SpellingDragon/tagent/api/event"
 	"github.com/SpellingDragon/tagent/api/model"
 	"github.com/SpellingDragon/tagent/api/plugin"
@@ -28,14 +29,16 @@ import (
 // - an exhausted budget window refuses the call whatever the grade says, and a restart resumes the spent window
 // - a restart replays the governance events back and keeps the denial records with their goal permeation
 // - concurrent declarations and records keep every counter exact
-// - a failing store and a bad snapshot degrade instead of failing the gate
+// - a declaration the stream refused leaves the effective state where the stream stands, and a bad snapshot degrades instead of failing the gate
 // 契约: docs/wiki/agent/governance-enforcement.md#goal-registry
 func TestGovernanceRecovery(t *testing.T) {
 	t.Run("a declared goal activates the goal gate and a refusal permeates the goal context", func(t *testing.T) {
-		logFace := recOpenLog(t, "")
+		logFace, _ := recOpenLog(t, "")
 		goals := governance.NewGoalRegistry()
 		ledger := governance.NewDenialLedger()
-		ledger.BindStore(logFace)
+		if err := ledger.Bind(context.Background(), logFace); err != nil {
+			t.Fatalf("bind the ledger to the governance store: %v", err)
+		}
 		rig := newGovRig(t, govConfig{mode: governance.EnforcementStrict, grade: plugin.RiskHigh, tool: "shell_exec", rules: []governance.RiskRule{recDeployRule()}, goals: goals, ledger: ledger, goalRequired: []string{"model"}})
 
 		if _, err := rig.call("call-goal-missing", "shell_exec", `{"cmd":"deploy"}`); !errors.Is(err, task.ErrDenied) {
@@ -201,11 +204,15 @@ func TestGovernanceRecovery(t *testing.T) {
 
 	t.Run("a restart replays the governance events back and keeps the records it made", func(t *testing.T) {
 		root := t.TempDir()
-		firstLog := recOpenLog(t, root)
+		firstLog, firstTier := recOpenLog(t, root)
 		goals1 := governance.NewGoalRegistry()
-		goals1.BindStore(firstLog)
+		if err := goals1.Bind(context.Background(), firstLog); err != nil {
+			t.Fatalf("bind the registry to the first store: %v", err)
+		}
 		ledger1 := governance.NewDenialLedger()
-		ledger1.BindStore(firstLog)
+		if err := ledger1.Bind(context.Background(), firstLog); err != nil {
+			t.Fatalf("bind the ledger to the first store: %v", err)
+		}
 
 		g1 := goals1.Declare("ship the release", "entry", 0)
 		g2 := goals1.Declare("watch the rollout", "entry", 0)
@@ -247,11 +254,18 @@ func TestGovernanceRecovery(t *testing.T) {
 			t.Fatalf("goal events = %d declared / %d resolved, want the two declarations and the one resolution on the wire", declared, resolved)
 		}
 
-		secondLog := recOpenLog(t, root)
+		if err := firstTier.Close(); err != nil {
+			t.Fatalf("close the first governance tier before the restart: %v", err)
+		}
+		secondLog, _ := recOpenLog(t, root)
 		goals2 := governance.NewGoalRegistry()
-		goals2.BindStore(secondLog)
+		if err := goals2.Bind(context.Background(), secondLog); err != nil {
+			t.Fatalf("bind the registry to the second store: %v", err)
+		}
 		ledger2 := governance.NewDenialLedger()
-		ledger2.BindStore(secondLog)
+		if err := ledger2.Bind(context.Background(), secondLog); err != nil {
+			t.Fatalf("bind the ledger to the second store: %v", err)
+		}
 
 		if got := recGoal(t, goals2, g1).Status; got != governance.GoalAchieved {
 			t.Fatalf("replayed goal %s status = %q, want achieved replayed in operation order", g1, got)
@@ -275,11 +289,15 @@ func TestGovernanceRecovery(t *testing.T) {
 	})
 
 	t.Run("concurrent declarations and records keep every counter exact", func(t *testing.T) {
-		logFace := recOpenLog(t, "")
+		logFace, _ := recOpenLog(t, "")
 		goals := governance.NewGoalRegistry()
-		goals.BindStore(logFace)
+		if err := goals.Bind(context.Background(), logFace); err != nil {
+			t.Fatalf("bind the registry to the governance store: %v", err)
+		}
 		ledger := governance.NewDenialLedger()
-		ledger.BindStore(logFace)
+		if err := ledger.Bind(context.Background(), logFace); err != nil {
+			t.Fatalf("bind the ledger to the governance store: %v", err)
+		}
 		budget := governance.NewBudgetManager(governance.BudgetConfig{}, "")
 
 		const workers, perWorker = 8, 10
@@ -333,23 +351,38 @@ func TestGovernanceRecovery(t *testing.T) {
 		}
 	})
 
-	t.Run("a failing store and a bad snapshot degrade instead of failing the gate", func(t *testing.T) {
+	t.Run("a refused stream leaves the effective state where the stream stands and a bad snapshot degrades", func(t *testing.T) {
 		failing := recFailingLog{}
 		goals := governance.NewGoalRegistry()
-		goals.BindStore(failing)
+		if err := goals.Bind(context.Background(), failing); err == nil {
+			t.Fatalf("a store that cannot be read must report the unread tail to the binder")
+		}
 		ledger := governance.NewDenialLedger()
-		ledger.BindStore(failing)
-		if id := goals.Declare("keep going", "entry", 0); id == "" {
-			t.Fatalf("a failing store must not swallow the declaration")
+		if err := ledger.Bind(context.Background(), failing); err == nil {
+			t.Fatalf("a store that cannot be read must report the unread tail to the binder")
+		}
+		if id := goals.Declare("keep going", "entry", 0); id != "" {
+			t.Fatalf("the declaration a refused stream answers = %q, want no identity: the goal the gate rules on is the goal a restart reads back", id)
 		}
 		ledger.Record(governance.DenialRecord{Subtype: governance.SubtypeDenial, ToolName: "shell_exec", Level: plugin.RiskMedium, Reason: "store down"})
-		if ledger.Count() != 1 || len(goals.List()) != 1 {
-			t.Fatalf("a failing store must never block the operation: goals=%d records=%d", len(goals.List()), ledger.Count())
+		if ledger.Count() != 1 {
+			t.Fatalf("a failing store must never block the denial record: records=%d", ledger.Count())
+		}
+		restarted := governance.NewGoalRegistry()
+		if err := restarted.Bind(context.Background(), failing); err == nil {
+			t.Fatalf("a store that cannot be read must report the unread tail to the binder")
+		}
+		if live, rebuilt := len(goals.List()), len(restarted.List()); live != rebuilt {
+			t.Fatalf("the goals in force = %d beside the %d a restart reads back: a declaration the stream refused may not rule the gate", live, rebuilt)
 		}
 		memGoals := governance.NewGoalRegistry()
-		memGoals.BindStore(nil)
+		if err := memGoals.Bind(context.Background(), nil); err != nil {
+			t.Fatalf("a registry bound to no store must report nothing: %v", err)
+		}
 		memLedger := governance.NewDenialLedger()
-		memLedger.BindStore(nil)
+		if err := memLedger.Bind(context.Background(), nil); err != nil {
+			t.Fatalf("a ledger bound to no store must report nothing: %v", err)
+		}
 		if memGoals.Declare("memory only", "entry", 0) == "" {
 			t.Fatalf("a registry without a store must degrade to memory state")
 		}
@@ -391,19 +424,20 @@ func recJudge(t *testing.T, policy *governance.Policy, callID, args string) plug
 }
 
 // recOpenLog opens the durable governance event face over the real memory
-// tier: the in-memory tier when root is empty, the localfile tier otherwise.
-// Reopening the same root is the restart these sub-cases recover across.
-func recOpenLog(t *testing.T, root string) governance.GovernanceEventLog {
+// tier: the in-memory tier when root is empty, the localfile tier under write
+// rights otherwise. Reopening the same root is the restart these sub-cases
+// recover across, so the caller closes the returned tier before the next open.
+func recOpenLog(t *testing.T, root string) (durable.FactLog, *ledger.Tier) {
 	t.Helper()
 	cfg := ledger.StorageConfig{Type: ledger.StorageMemory}
 	if root != "" {
-		cfg = ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: root}
+		cfg = ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: root, WriteRights: true}
 	}
 	tier, err := ledger.OpenTier(context.Background(), cfg)
 	if err != nil {
 		t.Fatalf("open the memory tier under %q: %v", root, err)
 	}
-	return ledger.TierFactLog(tier)
+	return ledger.TierFactLog(tier), tier
 }
 
 // recFind reports the newest ledger record filed under the subtype, or nil
@@ -454,6 +488,11 @@ type recFailingLog struct{}
 // Put fails, as the store is down.
 func (recFailingLog) Put(ctx context.Context, key string, value []byte) error {
 	return errors.New("rec failing log: the store is down")
+}
+
+// Get fails, as the store is down.
+func (recFailingLog) Get(ctx context.Context, key string) ([]byte, bool, error) {
+	return nil, false, errors.New("rec failing log: the store is down")
 }
 
 // Scan fails, as the store is down.

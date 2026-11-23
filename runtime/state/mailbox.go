@@ -54,14 +54,19 @@ type consumptionRecorder interface {
 }
 
 // durableConsumption is the durable account one mailbox may be opened over: the
-// receipt of each completed logical consumption and the open obligations a
-// restore folds back into the mailbox, so the same account answers both the
-// consumption the account records and the work it still owes. The attempt
-// record of a notification's follow-up turn is served by its own narrow port
-// beside this one, because a mailbox reads the two accounts for two decisions.
+// receipt of each completed logical consumption, the open obligations a restore
+// folds back into the mailbox, and whether one notification is already answered.
+// The same account answers a consumption the mailbox records and the work it
+// still owes. The attempt record of a notification's follow-up turn is served by
+// its own narrow port beside this one, because a mailbox reads the two accounts
+// for two decisions.
 type durableConsumption interface {
 	consumptionRecorder
 	OwedNotices() []task.OutboxNotice
+	// settled reports whether the receipt or the refusal of one notification is
+	// already in the account, so a restore opens no delivery for it; a read the
+	// account could not complete is named instead of answered as no receipt.
+	settled(notice task.Notice) (bool, error)
 }
 
 // noticeKey is the stable identity of one notification: the task, the execution
@@ -145,14 +150,6 @@ func (m *MemoryStore) refuse(ctx context.Context, notice task.Notice, target sit
 // identity the notification carries.
 func noticeKeyOf(notice task.Notice) noticeKey {
 	return noticeKey{task: notice.TaskID, round: notice.Round, kind: notice.Kind, seq: notice.Seq}
-}
-
-// noticeSeatOf reads the accepted seat of one notice under the store lock: the read-only precheck
-// face for callers that hold no lock.
-func (m *MemoryStore) noticeSeatOf(notice task.Notice) (AcceptSeq, bool, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	return m.noticeSeat(notice)
 }
 
 // noticeSeat reports where one notification already sits: the acceptance sequence it took beside

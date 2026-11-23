@@ -83,7 +83,29 @@ EVENT_SCOPES = ("event-short", "event-long")
 EVENT_TEST_ID_RE = re.compile(r"^\d{2}\.\d+[a-z]?/Test[A-Za-z0-9_]+$")
 EVENT_SUBTEST_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_./-]*$")
 EVENT_WHOLE_CHAIN_ID_RE = re.compile(r"^EI\d{2}$")
+# The ambient variables an event run may declare beside its argv. The producer
+# (`scripts/scenarios/run_runtime_scenarios.py`: EVENT_ENVIRONMENT_NAMES) records
+# the ones it inherited; declaring anything else here would accept a determinant
+# the runner never claimed, so the two lists are deliberately compared the strict
+# way — a name the runner starts recording without being declared below is
+# rejected rather than silently trusted.
+EVENT_ENVIRONMENT_NAMES = (
+    "GOFLAGS", "GODEBUG", "GOMAXPROCS", "GOWORK",
+    "TAGENT_BOOT_TRACE", "TAGENT_GCTRACE", "TAGENT_HTTP_PORT", "TAGENT_SESSION_ID",
+    "SMOKE_ROUNDS", "TAGENT_CALIBRATION_BASELINE", "TAGENT_CALIBRATION_COLD_BUILD_MS",
+    "TAGENT_CALIBRATION_MODE", "TAGENT_CALIBRATION_PLAN", "TAGENT_CALIBRATION_RUN_DIR",
+)
+# `go test` flags that decide what an invocation runs or measures. GOFLAGS supplies
+# them as defaults for commands that do not pass the flag themselves, so a GOFLAGS
+# entry is only described by the recorded argv when that argv decides the same flag.
+EVENT_RUN_SHAPING_FLAGS = ("-count", "-cpu", "-failfast", "-json", "-parallel", "-race",
+                           "-run", "-short", "-shuffle", "-skip", "-tags", "-timeout")
+# The runtime parses GOMAXPROCS as a positive integer and ignores anything else
+# (runtime/proc.go: `strconv.ParseInt(gogetenv("GOMAXPROCS"), 10, 32)`), so a
+# declared non-integer names a width the run did not apply.
+EVENT_GOMAXPROCS_RE = re.compile(r"^[1-9][0-9]*$")
 EVENT_TEST_FUNC_RE = re.compile(r"^func (Test[A-Za-z0-9_]+)\(", re.MULTILINE)
+
 EVENT_RUN_RE = re.compile(r"\bt\.Run\(\s*\"([^\"]+)\"")
 EVENT_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 # Fixed policy values from 04 design D1: any shrink or arithmetic drift is rejected.
@@ -124,8 +146,9 @@ def parse_args(argv):
                         help="验收集：complete（默认，全部场景）或合同登记的唯一子集标签")
     parser.add_argument("--module-path", default=lib.MODULE_PATH)
     parser.add_argument("--repo-root", default=EVENT_REPO_ROOT,
-                        help="v2 合同模式：源码树根（默认仓库根）；selftest 用隔离的 fixture 树"
-                             "验证 selector/发现逻辑")
+                        help="源码树根（默认仓库根）：合同模式的 selector/发现逻辑与证据模式对"
+                             "指标、工具与合同的重算都以它为实际受测树；selftest 用隔离的 "
+                             "fixture 树验证")
     parser.add_argument("--json", action="store_true")
     return parser.parse_args(argv)
 
@@ -1982,6 +2005,205 @@ def check_event_fingerprints(report, fingerprints):
             seen.add(key)
 
 
+EVENT_SOURCE_ROLES = ("tested", "local-replacement", "workspace")
+EVENT_BINDING_CACHE = {}
+
+
+def _event_runner():
+    """The scenario runner that owns the digest definitions, imported not copied.
+
+    `scripts/scenarios/run_runtime_scenarios.py` decides what one module's content
+    digest and the closure digest mean. A second implementation here could drift
+    from it while both stay green, so the producer is imported instead.
+    """
+    scenarios = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                             "scenarios")
+    if scenarios not in sys.path:
+        sys.path.insert(0, scenarios)
+    try:
+        import run_runtime_scenarios
+    except ImportError as exc:
+        raise lib.CheckFailure(
+            "cannot load the scenario runner to recompute the source binding: {}".format(exc))
+    return run_runtime_scenarios
+
+
+def tree_content_hash(runner, root, module_dir):
+    """One module's content digest in `root`, recomputed at most once per tree."""
+    key = (root, module_dir)
+    if key not in EVENT_BINDING_CACHE:
+        try:
+            EVENT_BINDING_CACHE[key] = runner.module_content_hash(root, module_dir)
+        except runner.RunnerError as exc:
+            raise lib.CheckFailure(str(exc))
+    return EVENT_BINDING_CACHE[key]
+
+
+def tree_source_binding(runner, root, seeds):
+    """The closure those seeds resolve to in `root`, resolved at most once."""
+    key = (root, tuple(sorted((seed["dir"], seed["module_path"]) for seed in seeds)))
+    if key not in EVENT_BINDING_CACHE:
+        try:
+            EVENT_BINDING_CACHE[key] = runner.source_binding(root, seeds, revision=None)
+        except runner.RunnerError as exc:
+            raise lib.CheckFailure(str(exc))
+    return EVENT_BINDING_CACHE[key]
+
+
+def check_event_source_binding(report, where, payload, repo_root):
+    """The evidence must name the tree it compiled, and this tree must be that tree.
+
+    A selected module is not the whole compiled tree: `examples/wechat-bot` and
+    `examples/cli-host` both `replace github.com/SpellingDragon/tagent => ../..`,
+    so long-scope runs compile the root module's sources. Evidence that lists only
+    the selected modules therefore leaves the root free to change without moving
+    any digest, which is why the producer records the resolved closure, the
+    workspace, the tool identity and the digest at both ends of the run — and why
+    this reads them against `repo_root` instead of against each other:
+
+      * every recorded module's content digest must equal the digest of the bytes
+        now under `repo_root/<dir>`;
+      * the closure re-resolved from the recorded tested modules must resolve the
+        same directories through the same local `replace`/`use` edges — an omitted
+        local dependency is reported by name, not folded into a digest mismatch;
+      * the tool that wrote the evidence must be the tool in this tree;
+      * the digest recorded before the run must equal the one recorded after it,
+        and both must be the digest the recorded closure adds up to.
+
+    Consistency between artifacts is checked elsewhere and is not evidence: ten
+    files can agree on one stale digest, so the comparison target here is a tree.
+    `revision` is deliberately not compared with the tree — a commit that changes
+    no compiled byte moves the SHA and nothing the compiler saw, so the bytes are
+    what must match; two artifacts that must agree on the same checkout keep
+    comparing revisions with each other (`check_mutation_baseline`).
+    """
+    binding = payload.get("source_binding")
+    if not isinstance(binding, dict):
+        report.error("{}: must record source_binding — the tested closure, the local "
+                     "replace/go.work edges it resolves, the pre/post digests and the tool "
+                     "identity; a list of selected modules does not say what compiled".format(
+                         where))
+        return
+    recorded = {}
+    modules = binding.get("modules")
+    if not isinstance(modules, list) or not modules:
+        report.error("{}.source_binding.modules must be a non-empty list".format(where))
+        return
+    for position, entry in enumerate(modules):
+        ewhere = "{}.source_binding.modules[{}]".format(where, position)
+        if not isinstance(entry, dict):
+            report.error("{} must be an object".format(ewhere))
+            continue
+        directory = entry.get("dir")
+        if not isinstance(directory, str) or not directory.strip():
+            report.error("{}.dir must be a non-empty module directory".format(ewhere))
+            continue
+        if directory in recorded:
+            report.error("{}: duplicate closure entry for module dir {!r}".format(ewhere, directory))
+            continue
+        recorded[directory] = entry
+        if not isinstance(entry.get("module_path"), str) or not entry["module_path"].strip():
+            report.error("{}.module_path must be a non-empty string".format(ewhere))
+        content_hash = entry.get("content_hash")
+        if not isinstance(content_hash, str) or not CONTENT_HASH_RE.match(content_hash):
+            report.error("{}.content_hash must be a readable sha256 digest".format(ewhere))
+        roles = entry.get("roles")
+        if (not isinstance(roles, list) or not roles
+                or any(role not in EVENT_SOURCE_ROLES for role in roles)):
+            report.error("{}.roles must be drawn from {}; every closure entry says why it is "
+                         "in the closure".format(ewhere, list(EVENT_SOURCE_ROLES)))
+    tested = sorted(directory for directory, entry in recorded.items()
+                    if "tested" in (entry.get("roles") or []))
+    if not tested:
+        report.error("{}.source_binding names no module with the 'tested' role, so the closure "
+                     "has no selected module to re-resolve from".format(where))
+    if not isinstance(binding.get("edges"), list):
+        report.error("{}.source_binding.edges must be a list of the local replace edges that "
+                     "were resolved".format(where))
+    workspace = binding.get("workspace")
+    if (not isinstance(workspace, dict)
+            or workspace.get("state") not in ("present", "off", "absent")):
+        report.error("{}.source_binding.workspace must declare its resolution state "
+                     "(present/off/absent)".format(where))
+    tool = binding.get("tool")
+    if not isinstance(tool, dict) or not isinstance(tool.get("entrypoint"), str):
+        report.error("{}.source_binding.tool must name the entrypoint whose bytes decided the "
+                     "run".format(where))
+        tool = None
+    digest = binding.get("digest")
+    if not isinstance(digest, str) or not CONTENT_HASH_RE.match(digest):
+        report.error("{}.source_binding.digest must be a readable sha256 digest of the "
+                     "closure".format(where))
+    for window in ("before", "after"):
+        recorded_window = binding.get(window)
+        if not isinstance(recorded_window, dict) or recorded_window.get("digest") != digest:
+            report.error("{}: source_binding.{} must name the closure digest {}; a closure that "
+                         "moved between the two ends of the run describes no single tree".format(
+                             where, window, digest))
+    root = os.path.abspath(repo_root)
+    if not os.path.isdir(root):
+        report.error("{}: the tree to re-resolve the closure against was not found: {}".format(
+            where, root))
+        return
+    try:
+        runner = _event_runner()
+    except lib.CheckFailure as exc:
+        report.error(str(exc))
+        return
+    if tool is not None and tool["entrypoint"].strip():
+        entrypoint = os.path.join(root, tool["entrypoint"])
+        if not os.path.isfile(entrypoint):
+            report.error("{}: the recorded tool {} is not in the tree under {}; evidence from "
+                         "another toolchain cannot be recomputed here".format(
+                             where, tool["entrypoint"], root))
+        else:
+            try:
+                actual_tool = lib.sha256_file(entrypoint)
+            except lib.CheckFailure as exc:
+                report.error(str(exc))
+                actual_tool = None
+            if actual_tool is not None and actual_tool != tool.get("digest"):
+                report.error("{}: the evidence was produced by a different {} ({} in this tree, "
+                             "{} recorded); the tool decides the fingerprint, the argv and the "
+                             "verdict".format(where, tool["entrypoint"], actual_tool,
+                                              tool.get("digest")))
+    for directory in sorted(recorded):
+        try:
+            actual_hash = tree_content_hash(runner, root, directory)
+        except lib.CheckFailure as exc:
+            report.error("{}: module {!r}: {}".format(where, directory, exc))
+            continue
+        declared_hash = recorded[directory].get("content_hash")
+        if isinstance(declared_hash, str) and declared_hash != actual_hash:
+            report.error("{}: module {!r} content digest {} does not match this tree's {}; the "
+                         "evidence describes another source tree".format(
+                             where, directory, declared_hash, actual_hash))
+    if not tested:
+        return
+    seeds = [{"dir": directory, "module_path": recorded[directory].get("module_path")}
+             for directory in tested]
+    try:
+        recomputed = tree_source_binding(runner, root, seeds)
+    except lib.CheckFailure as exc:
+        report.error("{}: cannot re-resolve the tested closure against {}: {}".format(
+            where, root, exc))
+        return
+    resolved = {entry["dir"] for entry in recomputed["modules"]}
+    omitted = sorted(resolved - set(recorded))
+    surplus = sorted(set(recorded) - resolved)
+    if omitted:
+        report.error("{}: the recorded closure omits {} which this tree compiles into the tested "
+                     "modules through their local replace/use edges; a change to those sources "
+                     "would not move the recorded digest".format(where, omitted))
+    if surplus:
+        report.error("{}: the recorded closure names {} which this tree does not resolve; the "
+                     "evidence was written somewhere else".format(where, surplus))
+    if not omitted and not surplus and isinstance(digest, str) and recomputed["digest"] != digest:
+        report.error("{}: closure digest {} does not match this tree's {}; the recorded module "
+                     "set is the right shape but its bytes, edges or workspace are not this "
+                     "tree's".format(where, digest, recomputed["digest"]))
+
+
 def check_event_run_config(report, run_config, index, selected):
     if not isinstance(run_config, dict):
         report.error("evidence.run_config must be an object")
@@ -2011,6 +2233,355 @@ def check_event_run_config(report, run_config, index, selected):
                          .format(tags, expected))
     if run_config.get("race") is not True:
         report.error("run_config.race must be true (all event tests run under -race)")
+
+
+def _event_command_flags(tokens, name):
+    """Every value the argv gives `name`, in both `-flag=v` and `-flag v` forms."""
+    values = []
+    index = 0
+    while index < len(tokens):
+        token = tokens[index]
+        if token == name and index + 1 < len(tokens):
+            values.append(tokens[index + 1])
+            index += 2
+            continue
+        if token.startswith(name + "="):
+            values.append(token[len(name) + 1:])
+        index += 1
+    return values
+
+
+def check_event_liveness(report, liveness):
+    """The run's own measurement interval, named and bounded.
+
+    `bound_seconds` is the only quantity this evidence face carries: the runner's
+    wait. It must be declared with a name and a positive integer bound, and it
+    must not itself be expired — a bound that fired means the log was cut short,
+    so whatever the log still holds cannot stand for a completed run.
+    """
+    if not isinstance(liveness, dict):
+        report.error("evidence.liveness must be an object naming the run's bound")
+        return None
+    name = liveness.get("name")
+    if not isinstance(name, str) or not name.strip():
+        report.error("evidence.liveness.name must be a non-empty quantity name")
+    if liveness.get("state") != "completed":
+        report.error("evidence.liveness.state {!r}: the run's own bound fired, so the log is "
+                     "a truncated run and cannot stand for a completed one".format(
+                         liveness.get("state")))
+    bound = liveness.get("bound_seconds")
+    if type(bound) not in (int, float) or bound <= 0:
+        report.error("evidence.liveness.bound_seconds {!r} must be a positive number of seconds"
+                     .format(bound))
+        return None
+    return bound
+
+
+def check_event_selectors(report, run_config, index, selected):
+    """The selectors the run declares must be the contract's own selectors.
+
+    `test_ids` alone states which contract rows were claimed; the selector list
+    states which test each invocation actually drove. Reading only the ids trusts
+    the claim, so a run could name one test and drive another. One selector per
+    selected id, in the contract's own module/package/name vocabulary.
+    """
+    selectors = run_config.get("selectors")
+    if not isinstance(selectors, list) or not selectors:
+        report.error("run_config.selectors must be a non-empty list of the tests actually driven")
+        return
+    seen = {}
+    for position, entry in enumerate(selectors):
+        where = "run_config.selectors[{}]".format(position)
+        if not isinstance(entry, dict):
+            report.error("{} must be an object".format(where))
+            continue
+        test_id = entry.get("test_id")
+        if test_id not in selected:
+            report.error("{}: test_id {!r} is not one of the selected tests".format(where, test_id))
+            continue
+        if test_id in seen:
+            report.error("{}: duplicate selector for {}".format(where, test_id))
+            continue
+        seen[test_id] = entry
+        declared = index["tests"][test_id]
+        if entry.get("module_path") != declared.get("module_path"):
+            report.error("{}: {} drives module {!r}, the contract registers {!r}".format(
+                where, test_id, entry.get("module_path"), declared.get("module_path")))
+        expected_package = _event_package_rel(report, where, declared.get("module_path"),
+                                              declared.get("test_package"))
+        observed_package = _event_package_rel(report, where, declared.get("module_path"),
+                                             entry.get("test_package"))
+        if expected_package is not None and observed_package is not None \
+                and expected_package != observed_package:
+            report.error("{}: {} drives package {!r}, the contract registers {!r}".format(
+                where, test_id, observed_package, expected_package))
+        if entry.get("test_name") != declared.get("test_name"):
+            report.error("{}: {} drives test {!r}, the contract registers {!r}".format(
+                where, test_id, entry.get("test_name"), declared.get("test_name")))
+    for test_id in selected:
+        if test_id not in seen:
+            report.error("run_config.selectors names no selector for selected test {}".format(
+                test_id))
+
+
+def check_event_matrix_args(report, where, directory, tags, tokens, seed, window):
+    """The declared matrix pair must be on the argv that can parse it, and only there.
+
+    `run_config.seed` states what the run meant to drive; what the tests received is
+    in the argv. `go test … -args` hands every remaining token to every package one
+    invocation names, and a package whose build does not compile the file declaring
+    `-seed`/`-window` exits on `flag provided but not defined` before any test runs.
+    The surface where the pair is parsed is the runner's own declaration
+    (`EVENT_CALIBRATION_FLAGS` through `event_calibration_bearer`), so the question
+    "may this command carry it" is asked of the producer, and the packages it names
+    are read with the producer's own argv reader instead of the invocation's
+    self-reported list.
+    """
+    try:
+        runner = _event_runner()
+    except lib.CheckFailure as exc:
+        report.error(str(exc))
+        return
+    if "test" not in tokens:
+        report.error("{}: the recorded argv is not a `go test` command, so it drove no test"
+                     .format(where))
+        return
+    packages = runner.command_packages(tokens)
+    parses_pair = bool(packages) and all(
+        runner.event_calibration_bearer(directory, tags, package) for package in packages)
+    carries = "-args" in tokens
+    observed = (_event_command_flags(tokens, "-seed"), _event_command_flags(tokens, "-window"))
+    if seed is None:
+        if carries or observed[0] or observed[1]:
+            report.error("{}: the recorded argv hands the test binary '-args'/seed/window {}, but "
+                         "the run declares no matrix pair; a calibration the run does not declare "
+                         "cannot be evidence of a matrix combination".format(
+                             where, [value for pair in observed for value in pair]))
+        return
+    if not parses_pair:
+        if carries or observed[0] or observed[1]:
+            report.error("{}: the recorded argv hands '-args'/seed/window {} to packages {}, which "
+                         "do not all compile the file declaring those flags; '-args' reaches every "
+                         "package the invocation names, so a package without them exits on 'flag "
+                         "provided but not defined' before any test runs".format(
+                             where, [value for pair in observed for value in pair], packages))
+        return
+    if not carries:
+        report.error("{}: this invocation's packages {} are the build that parses '-seed'/'-window', "
+                     "yet the argv carries no '-args'; the pair the run declares never reached the "
+                     "tests".format(where, packages))
+        return
+    if observed[0] != [str(seed)]:
+        report.error("{}: the recorded argv hands '-seed={}' to the tests, the run declares {!r}"
+                     .format(where, ",".join(observed[0]) or "", seed))
+    if observed[1] != [str(window)]:
+        report.error("{}: the recorded argv hands '-window={}' to the tests, the run declares {!r}"
+                     .format(where, ",".join(observed[1]) or "", window))
+
+
+def check_event_invocations(report, run_config, fingerprints, index, selected, bound):
+    """Every command the run declares must be the one the contract derives.
+
+    The runner records one invocation per (module dir, tags, race) group: its
+    argv, working directory, packages, tags, race flag and exit code. Recording
+    them proves nothing unless they are read, so this binds the argv to the
+    selection: the packages each command names must cover exactly the selected
+    packages, `-run` must name exactly the selected tests, the flags must carry a
+    fresh (`-count=1`) machine-readable (`-json`) race run with the declared tags,
+    the working directory must be the fingerprinted module directory, and the
+    exit code must be zero. A command whose own `-timeout` is missing or longer
+    than the runner's wait measures an interval that contains the runner's, so a
+    killed call and a completed one would read alike. The matrix pair the run
+    declares is read off the argv too, not off `run_config`.
+    """
+    invocations = run_config.get("invocations")
+    if not isinstance(invocations, list) or not invocations:
+        report.error("run_config.invocations must be a non-empty list of the commands actually run")
+        return
+    seed = run_config.get("seed")
+    window = run_config.get("window")
+    dirs = {}
+    for entry in fingerprints or []:
+        if isinstance(entry, dict) and isinstance(entry.get("module_path"), str):
+            dirs[entry["module_path"]] = entry.get("dir")
+    expected = {}
+    for test_id in selected:
+        declared = index["tests"][test_id]
+        module_path = declared.get("module_path")
+        package = _event_package_rel(report, "test {}".format(test_id), module_path,
+                                     declared.get("test_package"))
+        if package is None:
+            continue
+        expected.setdefault(module_path, {}).setdefault(package, set()).add(
+            declared.get("test_name"))
+    covered = {}
+    covered_selected = {}
+    for position, entry in enumerate(invocations):
+        where = "run_config.invocations[{}]".format(position)
+        if not isinstance(entry, dict):
+            report.error("{} must be an object".format(where))
+            continue
+        module_path = entry.get("module_path")
+        if module_path not in dirs:
+            report.error("{}: module {!r} carries no module_fingerprints entry, so the command "
+                         "cannot be tied to the tree it was run against".format(where, module_path))
+            continue
+        directory = entry.get("dir")
+        if directory != dirs[module_path]:
+            report.error("{}: working directory {!r} is not the fingerprinted module directory "
+                         "{!r}; the command ran against another tree".format(
+                             where, directory, dirs[module_path]))
+        tags = entry.get("tags")
+        if (not isinstance(tags, list)
+                or any(not isinstance(tag, str) or not tag.strip() for tag in tags)):
+            report.error("{}: tags must be a list of non-empty strings".format(where))
+            tags = []
+        if entry.get("race") is not True:
+            report.error("{}: race must be true; every event test runs under -race".format(where))
+        if type(entry.get("exit_code")) is not int or entry.get("exit_code") != 0:
+            report.error("{}: exit_code {!r} is not a successful integer 0; a command that failed "
+                         "cannot be evidence for a green round".format(where, entry.get("exit_code")))
+        packages = entry.get("packages")
+        if (not isinstance(packages, list) or not packages
+                or any(not isinstance(package, str) or not package.strip() for package in packages)):
+            report.error("{}: packages must be a non-empty list of package arguments".format(where))
+            continue
+        resolved = []
+        for package in packages:
+            rel = _event_package_rel(report, where, module_path, package)
+            if rel is not None:
+                resolved.append(rel)
+                covered.setdefault(module_path, set()).add(rel)
+        command = entry.get("command")
+        if not isinstance(command, str) or not command.strip():
+            report.error("{}: command must be the non-empty argv the runner executed".format(where))
+            continue
+        tokens = command.split()
+        check_event_matrix_args(report, where, directory, tags, tokens, seed, window)
+        if "-count=1" not in tokens:
+            report.error("{}: the recorded argv carries no '-count=1'; a cached run is not a "
+                         "fresh execution".format(where))
+        if "-json" not in tokens:
+            report.error("{}: the recorded argv carries no '-json'; the log cannot be attributed "
+                         "to this command".format(where))
+        if "-race" not in tokens:
+            report.error("{}: the recorded argv carries no '-race'".format(where))
+        module_flag = _event_command_flags(tokens, "-C")
+        if module_flag != [directory]:
+            report.error("{}: the recorded argv runs in {!r}, the invocation declares {!r}".format(
+                where, module_flag, directory))
+        for package in packages:
+            if package not in tokens:
+                report.error("{}: the recorded argv does not name package {!r}".format(
+                    where, package))
+        declared_tags = sorted(tags)
+        if declared_tags:
+            observed = _event_command_flags(tokens, "-tags")
+            observed_tags = sorted({tag for value in observed for tag in value.split(",") if tag})
+            if observed_tags != declared_tags:
+                report.error("{}: the recorded argv builds with tags {}, the invocation declares "
+                             "{}".format(where, observed_tags, declared_tags))
+        elif _event_command_flags(tokens, "-tags"):
+            report.error("{}: the recorded argv builds with -tags the invocation does not declare"
+                         .format(where))
+        inner = _event_command_flags(tokens, "-timeout")
+        if not inner:
+            report.error("{}: the recorded argv declares no '-timeout', so the child's own "
+                         "default bound nests inside the runner's wait (nested interval)".format(
+                             where))
+        else:
+            for value in inner:
+                seconds = value[:-1] if value.endswith("s") else value
+                if not seconds.isdigit():
+                    report.error("{}: '-timeout {}' is not a whole number of seconds".format(
+                        where, value))
+                    continue
+                if bound is not None and int(seconds) > bound:
+                    report.error("{}: '-timeout {}' outlives the runner's bound of {}s, so the "
+                                 "measured interval contains another (nested interval)".format(
+                                     where, value, bound))
+        pattern = _event_command_flags(tokens, "-run")
+        if not pattern:
+            report.error("{}: the recorded argv carries no '-run' selector".format(where))
+            continue
+        named = set()
+        for value in pattern:
+            named.update(re.findall(r"[A-Za-z0-9_]+", value))
+        for package in resolved:
+            # A package can be driven twice in one round (different build tags), so
+            # what must hold is that the union of the selectors naming this package
+            # covers every selected test of it, not that one command names them all.
+            covered_selected.setdefault((module_path, package), set()).update(named)
+    for module_path in sorted(expected):
+        for package in sorted(expected[module_path]):
+            if package not in covered.get(module_path, set()):
+                report.error("no invocation runs selected package {!r} of module {!r}".format(
+                    package, module_path))
+                continue
+            missing = expected[module_path][package] - covered_selected.get(
+                (module_path, package), set())
+            if missing:
+                report.error("no '-run' selector names selected test(s) {} of package {!r} in "
+                             "module {!r}".format(sorted(missing), package, module_path))
+
+
+def check_event_environment(report, run_config):
+    """The recorded environment must be the one the recorded argv ran under.
+
+    The runner inherits its environment, so it records the declared determinants
+    it held. Nothing here can prove the ambient values; the record is the
+    runner's own statement. What it can reject is a record that is not a possible
+    environment for a green round: a determinant the runner never declares, a
+    credential-bearing name (evidence is written to disk), a `GOMAXPROCS` the
+    runtime would ignore, and a `GOFLAGS` entry that decides a flag no recorded
+    argv decides. That last one is directional: GOFLAGS supplies defaults and the
+    command line overrides them ("go help environment"), so a flag the argv does
+    decide stays described by the argv, while an extra flag the argv omits means
+    the run was shaped by something the recorded command does not show.
+    """
+    environment = run_config.get("environment")
+    if environment is None:
+        report.error("run_config.environment is absent; the runner records the ambient "
+                     "determinants the invocations ran under, and an argv alone does not "
+                     "describe them")
+        return
+    if not isinstance(environment, dict):
+        report.error("run_config.environment must be an object of name/value strings")
+        return
+    for name, value in sorted(environment.items()):
+        if not isinstance(name, str) or not name.strip():
+            report.error("run_config.environment holds a non-string variable name")
+            continue
+        if name not in EVENT_ENVIRONMENT_NAMES:
+            report.error("run_config.environment variable {!r} is outside the recorded "
+                         "determinants {}".format(name, list(EVENT_ENVIRONMENT_NAMES)))
+            continue
+        if not isinstance(value, str):
+            report.error("run_config.environment[{}] must be a string".format(name))
+            continue
+        if name == "GOMAXPROCS" and not EVENT_GOMAXPROCS_RE.match(value):
+            report.error("run_config.environment.GOMAXPROCS {!r} is not a positive integer, "
+                         "which the runtime ignores; the declared width was not the one the "
+                         "run used".format(value))
+    flags = environment.get("GOFLAGS")
+    if isinstance(flags, str):
+        invocations = run_config.get("invocations")
+        commands = [entry.get("command") for entry in invocations or []
+                    if isinstance(entry, dict) and isinstance(entry.get("command"), str)]
+        for token in flags.split():
+            flag = next((name for name in EVENT_RUN_SHAPING_FLAGS
+                         if token == name or token.startswith(name + "=")), None)
+            if flag is None:
+                continue
+            undecided = next((position for position, command in enumerate(commands)
+                              if not any(word == flag or word.startswith(flag + "=")
+                                         for word in command.split())), None)
+            if undecided is not None:
+                report.error(
+                    "run_config.environment.GOFLAGS sets {!r}, which no recorded argv decides "
+                    "(run_config.invocations[{}] does not pass it); GOFLAGS supplies the default "
+                    "the argv does not override, so the recorded command would not be the "
+                    "command that ran".format(token, undecided))
 
 
 def check_event_evidence_shape(report, evidence, index, contract_digest):
@@ -2063,6 +2634,12 @@ def check_event_evidence_shape(report, evidence, index, contract_digest):
     check_event_fingerprints(report, evidence.get("module_fingerprints"))
     run_config = evidence.get("run_config")
     check_event_run_config(report, run_config, index, selected)
+    bound = check_event_liveness(report, evidence.get("liveness"))
+    if isinstance(run_config, dict):
+        check_event_selectors(report, run_config, index, selected)
+        check_event_invocations(report, run_config, evidence.get("module_fingerprints"),
+                                index, selected, bound)
+        check_event_environment(report, run_config)
     exit_code = evidence.get("go_test_exit_code")
     if type(exit_code) is not int or exit_code != 0:
         report.error("evidence.go_test_exit_code must be successful integer exit 0")
@@ -2081,8 +2658,37 @@ def check_event_evidence_shape(report, evidence, index, contract_digest):
             "exit_code": exit_code}
 
 
-def check_event_evidence_subtests(report, evidence, index, selected):
-    """Every mandatory (parent,name) anchor must carry a pass verdict."""
+def event_log_anchor_states(report, index, selected, log_index):
+    """The verdict each anchor earned in this log, derived by the producer.
+
+    `evidence.subtests[].status` is the producer's own claim; the run's raw child
+    rows are what decides it. `run_runtime_scenarios.event_subtest_states` is the
+    derivation the runner's report already uses, so it is imported instead of
+    restated: two derivations could drift while both stayed green, and then one
+    log would carry two verdicts.
+    """
+    try:
+        runner = _event_runner()
+    except lib.CheckFailure as exc:
+        report.error(str(exc))
+        return None
+    states = {}
+    for test_id in selected:
+        test = index["tests"].get(test_id)
+        if not isinstance(test, dict):
+            continue
+        try:
+            derived = runner.event_subtest_states(test, log_index["actions"])
+        except runner.RunnerError as exc:
+            report.error("record {}: cannot derive its anchor verdicts: {}".format(test_id, exc))
+            continue
+        for state in derived:
+            states[(test_id, state.get("name"))] = state.get("status")
+    return states
+
+
+def check_event_evidence_subtests(report, evidence, index, selected, observed):
+    """Every mandatory (parent,name) anchor must carry a pass verdict the log shows."""
     entries = evidence.get("subtests")
     if not isinstance(entries, list) or not entries:
         report.error("evidence.subtests must be a non-empty list of named anchor verdicts")
@@ -2112,6 +2718,11 @@ def check_event_evidence_subtests(report, evidence, index, selected):
         if status not in EVENT_ANCHOR_STATUSES:
             report.error("{}: status {!r} not in {}".format(where, status, EVENT_ANCHOR_STATUSES))
             continue
+        earned = None if observed is None else observed.get(key, "missing")
+        if earned is not None and status != earned:
+            report.error("{}: ({},{}) states {!r} but the test-log child events show {!r}; a "
+                         "verdict the run's own log does not show is the producer's claim, not "
+                         "the anchor's outcome".format(where, test_id, name, status, earned))
         if status != "pass":
             report.error("{}: mandatory anchor ({},{}) verdict {!r}; fail/skip/missing/running "
                          "are all failures".format(where, test_id, name, status))
@@ -2124,11 +2735,15 @@ def check_event_evidence_subtests(report, evidence, index, selected):
                     test_id, sub.get("name")))
 
 
-def check_event_evidence(report, index, contract_digest, evidence, evidence_path, test_log_arg=None):
-    """Check one v2 evidence file against its contract and its own test-log."""
+def check_event_evidence(report, index, contract_digest, evidence, evidence_path, test_log_arg=None,
+                         repo_root=None):
+    """Check one v2 evidence file against its contract, its own test-log and a tree."""
     info = check_event_evidence_shape(report, evidence, index, contract_digest)
     if info is None:
         return None
+    check_event_source_binding(report, "evidence {}".format(os.path.basename(evidence_path)),
+                               evidence, repo_root or EVENT_REPO_ROOT)
+    observed = None
     log_path = info["log_ref"]
     if isinstance(log_path, str) and log_path.strip():
         if not os.path.isabs(log_path):
@@ -2156,10 +2771,11 @@ def check_event_evidence(report, index, contract_digest, evidence, evidence_path
                                for test_id in info["test_ids"]})
         log_index = index_event_log(report, rows, module_paths,
                                     "evidence {}".format(os.path.basename(evidence_path)))
+        observed = event_log_anchor_states(report, index, info["test_ids"], log_index)
         for test_id in info["test_ids"]:
             check_event_test_selector(report, "record {}".format(test_id),
                                       index["tests"][test_id], log_index)
-    check_event_evidence_subtests(report, evidence, index, info["test_ids"])
+    check_event_evidence_subtests(report, evidence, index, info["test_ids"], observed)
     return info
 
 
@@ -2193,7 +2809,14 @@ def bundle_kind(payload):
 
 
 def check_mutation_evidence(report, where, payload):
-    """Structural gate for the 04.4 mutation report the bundle consumes."""
+    """Structural gate for the 04.4 mutation report the bundle consumes.
+
+    A counted kill is the producer's own four-part statement — `status`, `verdict`,
+    `counted_killed` and `assertion_hit` — and the report is only usable when they
+    agree: a record that says 'killed' beside a surviving verdict, an uncounted
+    kill, or an assertion it never reached states no kill at all. Reading `status`
+    alone would accept a report whose own fields contradict the kill it claims.
+    """
     if payload.get("control_tree_green") is not True:
         report.error("{}: the control tree must be green before a mutation counts".format(where))
     mutations = payload.get("mutations")
@@ -2211,13 +2834,22 @@ def check_mutation_evidence(report, where, payload):
         if mutation.get("status") != "killed":
             report.error("{}: mutation {} status {!r} is not 'killed'".format(
                 mwhere, mutation_id, mutation.get("status")))
+        if mutation.get("verdict") != "killed":
+            report.error("{}: mutation {} states verdict {!r} beside status {!r}; a record that "
+                         "disagrees with itself states no verdict".format(
+                             mwhere, mutation_id, mutation.get("verdict"),
+                             mutation.get("status")))
+        if mutation.get("counted_killed") is not True:
+            report.error("{}: mutation {} is not counted as killed (counted_killed {!r}); a kill "
+                         "the producer did not count cannot count here".format(
+                             mwhere, mutation_id, mutation.get("counted_killed")))
         assertion = mutation.get("expect_assertion")
         if not isinstance(assertion, str) or not assertion.strip():
             report.error("{}: mutation {} must name the expect_assertion it hit".format(
                 mwhere, mutation_id))
-        if mutation.get("assertion_hit") is not None and mutation.get("assertion_hit") is not True:
-            report.error("{}: mutation {} did not hit its named assertion".format(
-                mwhere, mutation_id))
+        if mutation.get("assertion_hit") is not True:
+            report.error("{}: mutation {} did not hit its named assertion (assertion_hit {!r})"
+                         .format(mwhere, mutation_id, mutation.get("assertion_hit")))
     not_backed = payload.get("not_evidence_backed")
     if not isinstance(not_backed, list):
         report.error("{}: not_evidence_backed must be a list".format(where))
@@ -2226,15 +2858,61 @@ def check_mutation_evidence(report, where, payload):
                      .format(where))
 
 
-def check_mutation_baseline(report, where, payload, runner_baseline):
+def check_mutation_gate_tool(report, where, payload, repo_root):
+    """The gate that decided the verdicts must be the gate in this tree.
+
+    `source_binding.tool` names the scenario runner, whose bytes decide what a run
+    means; the verdicts are decided by another program, whose bytes decide the
+    mutation set, the patch faces and the vocabulary a record's fields are drawn
+    from. A report that names no gate, or names a gate this tree does not hold,
+    states verdicts no run of this tree's gate would produce.
+    """
+    tool = payload.get("gate_tool")
+    if not isinstance(tool, dict):
+        report.error("{}: must record gate_tool — the entrypoint and digest of the gate that "
+                     "decided these verdicts".format(where))
+        return
+    entrypoint = tool.get("entrypoint")
+    if not isinstance(entrypoint, str) or not entrypoint.strip():
+        report.error("{}.gate_tool.entrypoint must name the gate that decided the verdicts"
+                     .format(where))
+        return
+    digest = tool.get("digest")
+    if not isinstance(digest, str) or not CONTENT_HASH_RE.match(digest):
+        report.error("{}.gate_tool.digest must be a readable sha256 digest of that gate"
+                     .format(where))
+        return
+    root = os.path.abspath(repo_root or EVENT_REPO_ROOT)
+    path = os.path.join(root, entrypoint)
+    if not os.path.isfile(path):
+        report.error("{}: the recorded gate {} is not in the tree under {}; verdicts stated by "
+                     "another gate cannot be recomputed here".format(where, entrypoint, root))
+        return
+    try:
+        actual = lib.sha256_file(path)
+    except lib.CheckFailure as exc:
+        report.error(str(exc))
+        return
+    if actual != digest:
+        report.error("{}: the verdicts were decided by a different {} ({} in this tree, {} "
+                     "recorded); that gate owns the mutation set and the verdict vocabulary"
+                     .format(where, entrypoint, actual, digest))
+
+
+def check_mutation_baseline(report, where, payload, runner_baseline, repo_root=None):
     """The mutation verdicts must describe the same baseline the runs tested.
 
     A mutation report can be perfectly green on its own and still come from an
     older tree; tied against the runner evidence it must name the same contract
     digest and the same per-module source fingerprint for every module both of
     them cover.  A report that declares no baseline at all cannot be tied and
-    therefore cannot count.
+    therefore cannot count. Its own `source_binding` is read against the tree too,
+    so a report whose closure is stale is rejected even when every artifact in the
+    bundle agrees with it. The gate that wrote the verdicts is read against the
+    tree on the same terms.
     """
+    check_event_source_binding(report, where, payload, repo_root or EVENT_REPO_ROOT)
+    check_mutation_gate_tool(report, where, payload, repo_root or EVENT_REPO_ROOT)
     if not runner_baseline["modules"]:
         return  # no runner evidence survived parsing; already reported above
     digest = payload.get("contract_digest")
@@ -2316,7 +2994,7 @@ def check_bundle_module_fingerprints(report, runner_entries):
                     module_path, len(values), label, detail))
 
 
-def run_event_bundle_mode(report, contract, contract_path, bundle_dir, as_json):
+def run_event_bundle_mode(report, contract, contract_path, bundle_dir, as_json, repo_root=None):
     """Summarise the short/long/mutation evidence set the MR gate consumes."""
     index = load_event_contract_index(report, contract)
     if index is None:
@@ -2341,7 +3019,8 @@ def run_event_bundle_mode(report, contract, contract_path, bundle_dir, as_json):
         if kind is None:
             report.error("bundle file {} is not a recognised evidence object".format(path))
             continue
-        info = check_event_evidence(report, index, contract_digest, payload, path)
+        info = check_event_evidence(report, index, contract_digest, payload, path,
+                                    repo_root=repo_root)
         if info is None:
             continue
         if payload.get("scope") == "event-short":
@@ -2458,7 +3137,7 @@ def run_event_bundle_mode(report, contract, contract_path, bundle_dir, as_json):
     for path, payload in mutations:
         where = "mutations evidence {}".format(path)
         check_mutation_evidence(report, where, payload)
-        check_mutation_baseline(report, where, payload, runner_baseline)
+        check_mutation_baseline(report, where, payload, runner_baseline, repo_root=repo_root)
     report.count("mode", "bundle")
     report.count("bundle_evidence_files", len(entries))
     report.count("bundle_short_evidence", len(short))
@@ -2498,7 +3177,7 @@ def run_event_evidence_mode(report, args, contract, contract_path):
         return report.emit(args.json)
     report.count("mode", "evidence")
     info = check_event_evidence(report, index, contract_digest, evidence, evidence_path,
-                                args.test_log)
+                                args.test_log, repo_root=args.repo_root)
     if info is not None:
         report.extra["scope"] = info["scope"]
         report.extra["repeat_index"] = info["repeat_index"]
@@ -2584,7 +3263,8 @@ def run(argv):
     if contract.get("schema_version") == EVENT_SCHEMA_VERSION:
         if bundle_mode:
             return run_event_bundle_mode(report, contract, contract_path,
-                                         os.path.abspath(args.bundle), args.json)
+                                         os.path.abspath(args.bundle), args.json,
+                                         repo_root=args.repo_root)
         if evidence_mode:
             return run_event_evidence_mode(report, args, contract, contract_path)
         return run_event_contract_mode(report, args, contract, contract_path)

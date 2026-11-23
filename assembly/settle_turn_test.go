@@ -6,11 +6,14 @@ package assembly
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/SpellingDragon/tagent/api/event"
+	"github.com/SpellingDragon/tagent/api/model"
+	"github.com/SpellingDragon/tagent/runtime/agent"
 	"github.com/SpellingDragon/tagent/runtime/state"
 	"github.com/SpellingDragon/tagent/runtime/task"
 )
@@ -223,4 +226,154 @@ func waitScopeGate(t *testing.T, what string, landed func() bool) {
 		time.Sleep(5 * time.Millisecond)
 	}
 	t.Fatalf("waited %s for %s, want it landed", scopeGateWindow, what)
+}
+
+// TestInProcessSettleFailureDrivesNoSecondTurn pins the one turn a refused delivery fact leaves this process to drive.
+//   - the settled call of one native tool commits the delivery fact of its range, and the commit face refuses it
+//   - the range drives the handed-on result in this process: the completed turn of two decisions is that hand-over
+//   - the pump of the same process reads the account the hand-over left and drives no second turn
+//   - the entry keeps the claim the hand-over took; it stood pending while the refusal handed the claim back, which let a pump here drive the notice twice
+//   - the notification stays owed to the next process: the entry is unconsumed under that claim, the chain holds no delivery fact and the root holds no receipt
+//
+// 契约: docs/wiki/reliability/durable-delivery.md#envelope-states
+func TestInProcessSettleFailureDrivesNoSecondTurn(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+	root := t.TempDir()
+	addr := deliveryTestAddress("session-in-process-refusal")
+	refusal := errors.New("the commit face refused the delivery fact of the settled call")
+	tool := &deliveryFactObligationTool{}
+	run := deliveryFactObligationRun(t, ctx, root, tool)
+
+	var mu sync.Mutex
+	refused := 0
+	run.loop.SetFactCommit(func(evt event.Event) (event.EventID, error) {
+		if evt.Type == event.TypeTaskSettled {
+			mu.Lock()
+			refused++
+			mu.Unlock()
+			return "", refusal
+		}
+		return run.commitFactChecked(ctx, evt)
+	})
+
+	turn, err := run.Invoke(ctx, InvokeRequest{
+		InvocationID:  "inv-in-process-refusal",
+		Address:       addr,
+		TriggerSource: "user",
+		Input:         []model.Message{{Role: model.RoleUser, Content: "call the tool once"}},
+	})
+	if err != nil {
+		t.Fatalf("invoke the run beside the refused delivery fact: %v", err)
+	}
+	mu.Lock()
+	struck := refused
+	mu.Unlock()
+	if struck != 1 {
+		t.Fatalf("the commit face refused %d delivery fact(s), want the one the settled call commits", struck)
+	}
+	if turn.Terminal != model.KindCompleted || turn.DecisionCount != 2 {
+		t.Fatalf("the turn beside the refused delivery fact = (%v, %d decisions), want the completed turn of two decisions: the hand-over ran in this process, so a second drive is the same notice handed on twice",
+			turn.Terminal, turn.DecisionCount)
+	}
+
+	turns := 0
+	fire := func(ctx context.Context, _ event.Address, _ event.Event) error {
+		mu.Lock()
+		turns++
+		mu.Unlock()
+		if barrier, held := settleBarrierFrom(ctx); held {
+			return barrier.settle(ctx, model.KindCompleted)
+		}
+		return nil
+	}
+	account := &settleAccountReading{inner: run.store}
+	driver := NewSettleDriver(run.CommittedEvent, func() SettleWake { return account }, fire,
+		withSettleFactCommit(run.commitFactChecked))
+	driver.DeclareScope(string(addr.AgentID), string(addr.AgentID))
+	driver.Wake()
+	waitScopeGate(t, "the settle pump to read the account the refused hand-over left", func() bool {
+		return account.readCount() >= 1
+	})
+	driver.Wake()
+	waitScopeGate(t, "the settle pump to read that account again, which it takes only after returning from the first reading", func() bool {
+		return account.readCount() >= 2
+	})
+	driver.Stop()
+
+	mu.Lock()
+	driven := turns
+	mu.Unlock()
+	if driven != 0 {
+		t.Fatalf("the pump of this process drove %d follow-up turn(s) beside the refused delivery fact (%d claim(s)), want none: the result was handed on here already, so a second turn is the same notice driven twice",
+			driven, account.claimCount())
+	}
+	if claims := account.claimCount(); claims != 0 {
+		t.Fatalf("the pump of this process claimed %d entry(s) of the account the hand-over left, want none: the claim the hand-over took leaves no pending work to read", claims)
+	}
+	seats := run.store.Unconsumed()
+	if len(seats) != 1 || seats[0].Claim != state.ClaimClaimed {
+		t.Fatalf("the account after the pump = %+v, want the one notification owed under the claim this process took (%d)", seats, state.ClaimClaimed)
+	}
+	if facts := deliveryFactsOf(run.SessionFacts(addr)); len(facts) != 0 {
+		t.Fatalf("the chain holds %d delivery fact(s) after the pump, want none: the record of the refused hand-over lands with the process that restores the owed notification", len(facts))
+	}
+	if keys := consumeReceiptKeys(t, ctx, run.tier); len(keys) != 0 {
+		t.Fatalf("the root holds %d consumption receipt(s) after the pump, want none: the notification stays owed", len(keys))
+	}
+	if _, err := run.Close(ctx, agent.CloseRequest{Timeout: time.Now().Add(2 * time.Second)}); err != nil {
+		t.Fatalf("close the process beside the owed notification: %v", err)
+	}
+}
+
+// settleAccountReading is the mailbox account one pump drives, read through the
+// production faces that pump calls: the reads of the account and the claims taken
+// from it are counted, so a check reads whether the pump of one process found
+// work where the hand-over left none.
+type settleAccountReading struct {
+	inner SettleWake
+
+	mu     sync.Mutex
+	reads  int
+	claims int
+}
+
+// Unconsumed reports the account and counts the reading.
+func (a *settleAccountReading) Unconsumed() []state.WorkSeat {
+	a.mu.Lock()
+	a.reads++
+	a.mu.Unlock()
+	return a.inner.Unconsumed()
+}
+
+// Claim takes one pending entry for the pump and counts the attempt.
+func (a *settleAccountReading) Claim(ctx context.Context, addr event.Address, instance event.InstanceID, seq state.AcceptSeq) error {
+	a.mu.Lock()
+	a.claims++
+	a.mu.Unlock()
+	return a.inner.Claim(ctx, addr, instance, seq)
+}
+
+// Release hands one claimed entry back to the pending pool.
+func (a *settleAccountReading) Release(ctx context.Context, addr event.Address, instance event.InstanceID, seq state.AcceptSeq) error {
+	return a.inner.Release(ctx, addr, instance, seq)
+}
+
+// Consume records the completed consumption of one claimed entry.
+func (a *settleAccountReading) Consume(ctx context.Context, addr event.Address, instance event.InstanceID, seq state.AcceptSeq) error {
+	return a.inner.Consume(ctx, addr, instance, seq)
+}
+
+// readCount reports how often the pump read the account.
+func (a *settleAccountReading) readCount() int {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.reads
+}
+
+// claimCount reports how often the pump claimed an entry of the account.
+func (a *settleAccountReading) claimCount() int {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.claims
 }

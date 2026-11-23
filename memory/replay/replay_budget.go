@@ -63,8 +63,8 @@ var (
 // 契约: docs/wiki/agent/event-flow.md#projection-lifecycle
 //
 // ReplayProjection is the replayable projection: the ordered model view of one
-// fact chain and the compaction payload a fold left on the chain. It is what
-// RebuildProjectionFromWAL replays into.
+// fact chain. A cold start replays a chain into it and an assembly reads a
+// request from it.
 //
 // A projection holds no state outside the fact chain, so replaying the recorded
 // facts reproduces the same entries, and it holds no presentation decision: the
@@ -75,7 +75,7 @@ var (
 //
 //   - a keyed entry already present is appended once, and a keyless entry always is;
 //   - the original text of an entry is immutable input, and the model view is the assembly's output;
-//   - a rebuild recomputes the deduplication key set from the entries it keeps.
+//   - the deduplication key set follows the entries the projection keeps.
 type ReplayProjection struct {
 	mu        sync.Mutex
 	entries   []ProjectionEntry
@@ -103,13 +103,16 @@ func NewReplayProjection() *ReplayProjection {
 // fact's own text, which is what the projection keeps — an append never shapes
 // the text for a model, so the same entry presents differently under different
 // budgets and the fact reads back unchanged either way. An append is an
-// in-memory mutation, so it takes the port's context with nothing to cancel.
-func (p *ReplayProjection) Append(_ context.Context, entry ProjectionEntry) {
+// in-memory mutation, so it takes the port's context with nothing to cancel. It
+// answers whether the entry was newly carried, so a caller that moves a boundary
+// onto the entry it folds does not move it again for a fact the projection
+// already holds.
+func (p *ReplayProjection) Append(_ context.Context, entry ProjectionEntry) bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if entry.Key != "" {
 		if _, dup := p.seen[entry.Key]; dup {
-			return
+			return false
 		}
 		p.seen[entry.Key] = struct{}{}
 		p.originals[entry.Key] = entry.Content
@@ -119,6 +122,7 @@ func (p *ReplayProjection) Append(_ context.Context, entry ProjectionEntry) {
 	}
 	p.entries = append(p.entries, entry)
 	p.volume += renderedEntryVolume(entry)
+	return true
 }
 
 // recomputeVolumeLocked reseeds the rendered volume after a rewrite of the
@@ -208,7 +212,7 @@ func noticeCard(entry ProjectionEntry, original string, room int) string {
 	if bound > noticeCardChars {
 		bound = noticeCardChars
 	}
-	ticket := ticketText(entry.Key)
+	ticket := TicketOf(entry.Key, entry.Type)
 	if bound <= len(ticket) {
 		return cutBytes(ticket, bound)
 	}
@@ -219,14 +223,17 @@ func noticeCard(entry ProjectionEntry, original string, room int) string {
 	if statusRoom := bound - len(ticket) - 1 - len(noticeStatusFrame); statusRoom < len(status) {
 		status = cutBytes(status, statusRoom)
 	}
-	if status == "" {
-		return ticket
-	}
 	head := original
 	if at := strings.IndexByte(head, '\n'); at >= 0 {
 		head = head[:at]
 	}
 	prefix := "[notice " + status + "] "
+	if ticket == "" {
+		return cutBytes(prefix+head, bound)
+	}
+	if status == "" {
+		return ticket
+	}
 	headRoom := bound - len(prefix) - len(ticket) - 1
 	if headRoom <= 0 || head == "" {
 		return prefix + ticket
@@ -244,7 +251,10 @@ func shown(entry ProjectionEntry, content string) ProjectionEntry {
 
 // presentWithin presents one entry at the first form from the full text down
 // that fits the room the assembly leaves: the full text, the ticket, the stored
-// summary and, for a notice, the identity card. An entry no form fits is
+// summary and, for a notice, the identity card. A fold product is its own form:
+// its text is the folded lines, so the room takes the whole lines it carries —
+// each line a complete read the model can hand back — and a room too small for
+// one line degrades the product to its summary. An entry no form fits is
 // presented by nothing at all, so a roomier assembly can still present it in
 // full; a notice card is the one form cut to the room instead of skipped, because
 // the arrival of a notice is material the model must see.
@@ -255,8 +265,14 @@ func presentWithin(entry ProjectionEntry, original string, room int) (Projection
 	if len(original) <= room {
 		return shown(entry, original), true
 	}
-	if ticket := boundedText(original, ticketPreviewBytes) + "\n" + ticketText(entry.Key); len(ticket) <= room {
-		return shown(entry, ticket), true
+	if SyntheticKey(entry.Key) {
+		if view, ok := productTextWithin(original, room); ok {
+			return shown(entry, view), true
+		}
+	} else if ticket := TicketOf(entry.Key, entry.Type); ticket != "" {
+		if view := boundedText(original, ticketPreviewBytes) + "\n" + ticket; len(view) <= room {
+			return shown(entry, view), true
+		}
 	}
 	if len(entry.Summary) <= room {
 		return shown(entry, entry.Summary), true
@@ -314,13 +330,16 @@ func (p *ReplayProjection) forgetDroppedLocked() {
 	}
 }
 
-// ticketText renders the ticket that reaches the full original by segment, so a
-// presented ticket stays usable without re-carrying the full text.
-func ticketText(key event.EventID) string {
-	if key == "" {
-		return "[ticket: full text retrievable by segment]"
+// TicketOf renders the ticket one entry reaches the model as: the fact key under
+// the recall prefix beside the frozen type of the entry, in the one form the
+// recall surface parses. A key naming no committed fact — the empty key, or the
+// synthetic key a fold minted — answers the empty ticket, because that address
+// can only answer missing: a caller states no ticket rather than promise one.
+func TicketOf(key event.EventID, typ string) string {
+	if key == "" || SyntheticKey(key) {
+		return ""
 	}
-	return "[ticket " + string(key) + ": full text retrievable by segment]"
+	return "[evt_" + string(key) + "|" + typ + "]"
 }
 
 // boundedText bounds text to n bytes on a rune boundary, marking the cut.
@@ -345,16 +364,6 @@ func cutBytes(text string, n int) string {
 		n--
 	}
 	return text[:n]
-}
-
-// seedConsumed marks one consumed key as reseeded, so the consumed state a
-// snapshot and its tail carried survives a rebuild.
-func (p *ReplayProjection) seedConsumed(key event.EventID) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	if key != "" {
-		p.consumed[key] = struct{}{}
-	}
 }
 
 // noteRecovery records the recovery hint one cold-start replay leaves behind,

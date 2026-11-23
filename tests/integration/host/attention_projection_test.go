@@ -21,6 +21,22 @@ import (
 	"github.com/SpellingDragon/tagent/runtime/task/approval"
 )
 
+// reopenDrainedHost boots a second host over the root the closed one gave up, so a
+// reading of the state the work ended in goes through a view the close did not end.
+func reopenDrainedHost(t *testing.T, configPath string) *assembly.Host {
+	t.Helper()
+	reopened, err := assembly.Boot(configPath, assembly.WithSender(&deliveryRecorder{}))
+	if err != nil {
+		t.Fatalf("boot a second host over the root the close gave up: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := reopened.Close(context.Background()); err != nil {
+			t.Errorf("close the second host: %v", err)
+		}
+	})
+	return reopened
+}
+
 // attentionDetails reads the ObjectAttention dimension of the booted run for one
 // address, so a case reads the presence exactly as the projection answers it.
 func attentionDetails(t *testing.T, ctx context.Context, host *assembly.Host, addr event.Address) []query.Detail {
@@ -80,7 +96,7 @@ func bootNoticeHost(t *testing.T, provider *scriptedProvider) *assembly.Host {
 	writeHostDocumentFile(t, configPath, scriptedHostDocumentWithAgentSections(root, provider.endpoint(), "model-entry",
 		"  user:\n"+
 			"    model: model-entry\n"+
-			"    max_tokens: 32000\n"+
+			"    replay_window: 32000\n"+
 			"    tools:\n"+
 			"      - { kind: agent, agent: worker }\n"+
 			"  worker:\n"+
@@ -367,11 +383,11 @@ func TestWorkEndClearsNothingOnFailedDrain(t *testing.T) {
 	}
 }
 
-// TestSummaryAttentionClearsWhenRead pins the summary presence: it stands until the target session answers, and leaves when the work ends unread.
+// TestSummaryAttentionClearsWhenRead pins the summary presence: it leaves on the target session's answer and stands past a work end the drain never settled.
 //
 // - the delivery fact lands in the target chain and stands in the presence as one summary
 // - the target session's next output drops it from the presence while the delivery fact stays on the chain
-// - a second summary nobody read leaves the presence once the host closes over a drained work
+// - a second summary nobody read still stands past a close that owes the in-flight turn an answer, beside no task at all
 //
 // 契约: docs/wiki/mechanism-tour.md#冥想
 func TestSummaryAttentionClearsWhenRead(t *testing.T) {
@@ -380,10 +396,26 @@ func TestSummaryAttentionClearsWhenRead(t *testing.T) {
 	t.Setenv("TAGENT_RL_AUTH_TOKEN", "")
 
 	provider := newScriptedProvider(t)
-	provider.answer = func(int) string { return scriptedTerminalAnswer }
+	arrived := make(chan struct{}, 1)
+	release := make(chan struct{})
+	var released sync.Once
+	unblock := func() { released.Do(func() { close(release) }) }
+	defer unblock()
+	const heldInput = "hold the work end beside one turn in flight"
+	provider.decide = func(request scriptedRequest) (string, error) {
+		if scriptedInvocationInput(request) != heldInput {
+			return scriptedTerminalAnswer, nil
+		}
+		select {
+		case arrived <- struct{}{}:
+		default:
+		}
+		<-release
+		return scriptedTerminalAnswer, nil
+	}
 	root := t.TempDir()
 	configPath := writeScriptedHostDocument(t, root, provider.endpoint(), "model-a")
-	writeHostDocumentFile(t, configPath, wiringHostDocument(root, provider.endpoint(), "", ""))
+	writeHostDocumentFile(t, configPath, wiringHostDocument(root, provider.endpoint(), "    model: model-a\n", ""))
 	host, err := assembly.Boot(configPath, assembly.WithSender(&deliveryRecorder{}))
 	if err != nil {
 		t.Fatalf("boot the host: %v", err)
@@ -428,13 +460,139 @@ func TestSummaryAttentionClearsWhenRead(t *testing.T) {
 		t.Fatalf("summary questions beside the unread delivery = %+v, want the one summary still standing", presence)
 	}
 
+	driving := make(chan error, 1)
+	go func() {
+		_, invokeErr := host.Invoke(ctx, assembly.InvokeRequest{
+			Address: event.Address{AgentID: "user", SessionID: "session-attention-summary-in-flight"},
+			Input:   []model.Message{{Role: model.RoleUser, Content: heldInput}},
+		})
+		driving <- invokeErr
+	}()
+	select {
+	case <-arrived:
+	case err := <-driving:
+		t.Fatalf("invoke the turn that holds the work end: %v", err)
+	case <-ctx.Done():
+		t.Fatalf("the held turn reached no model production: %v", ctx.Err())
+	}
+
 	closeCtx, closeCancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer closeCancel()
-	if err := host.Close(closeCtx); err != nil {
-		t.Fatalf("close the host: %v", err)
+	report, err := host.Run().Close(closeCtx, agent.CloseRequest{Deadline: time.Now().Add(3 * time.Second)})
+	if err != nil {
+		t.Fatalf("end the work beside the turn in flight: %v", err)
 	}
-	if kept := attentionOfKind(attentionDetails(t, context.Background(), host, unread), task.AttentionKindSummary); len(kept) != 0 {
-		t.Fatalf("the unread summary stands in the presence after the work ended as %+v, want it gone with the work", kept)
+	if report.Outcome != agent.CloseCut || report.Drained {
+		t.Fatalf("the close beside the turn in flight reports %+v, want the unread delivery left as an obligation the drain never settled", report)
+	}
+	for _, entry := range report.Unsettled {
+		if entry.TaskID != "" {
+			t.Fatalf("unsettled entry = %+v, want the unread delivery beside no task at all: a model in flight admits none", entry)
+		}
+	}
+	if kept := attentionOfKind(attentionDetails(t, ctx, host, unread), task.AttentionKindSummary); len(kept) != 1 {
+		t.Fatalf("the unread summary beside a work end that did not drain = %+v, want the summary still standing: an unread delivery is an obligation the drain has not settled, and a close that did not drain must not clear the presence", kept)
+	}
+	unblock()
+	select {
+	case <-driving:
+	case <-ctx.Done():
+		t.Fatalf("the held turn never closed beside its released production: %v", ctx.Err())
+	}
+}
+
+// TestSummaryAttentionStandsOnUnsettledTaskObligation pins the work-end gate beside a task obligation the drain left open.
+//
+// - the held turn parks a critical call, so the close counts an obligation of that task as open
+// - the delivery nobody read still stands in the presence after that close
+//
+// 契约: docs/wiki/mechanism-tour.md#冥想
+func TestSummaryAttentionStandsOnUnsettledTaskObligation(t *testing.T) {
+	t.Setenv("TAGENT_TEST_API_KEY", "test-key")
+	t.Setenv("TAGENT_HTTP_PORT", "0")
+	t.Setenv("TAGENT_RL_AUTH_TOKEN", "")
+
+	provider := newScriptedProvider(t)
+	arrived := make(chan struct{}, 1)
+	release := make(chan struct{})
+	var released sync.Once
+	unblock := func() { released.Do(func() { close(release) }) }
+	defer unblock()
+	const heldInput = "hold the work end beside one held call"
+	provider.decide = func(request scriptedRequest) (string, error) {
+		if scriptedInvocationInput(request) != heldInput {
+			return scriptedTerminalAnswer, nil
+		}
+		if !scriptedDelegatedTo(request, "send") {
+			return scriptedToolCallAnswer, nil
+		}
+		select {
+		case arrived <- struct{}{}:
+		default:
+		}
+		<-release
+		return scriptedTerminalAnswer, nil
+	}
+	root := t.TempDir()
+	agentBlock := "    model: model-a\n" +
+		"    tools:\n" +
+		"      - { kind: tool, id: send }\n"
+	topBlock := "governance:\n" +
+		"  risk_rules:\n" +
+		"    - { tool: send, level: critical }\n"
+	configPath := writeScriptedHostDocument(t, root, provider.endpoint(), "model-a")
+	writeHostDocumentFile(t, configPath, wiringHostDocument(root, provider.endpoint(), agentBlock, topBlock))
+	host, err := assembly.Boot(configPath, assembly.WithSender(&deliveryRecorder{}))
+	if err != nil {
+		t.Fatalf("boot the host: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+	unread := event.Address{AgentID: "user", SessionID: "session-attention-summary-obligation"}
+	if _, err := host.Run().CommitToSession(ctx, unread, reflectionDelivery(unread, "the reflection body nobody reads")); err != nil {
+		t.Fatalf("deliver one reflection summary nobody reads: %v", err)
+	}
+
+	driving := make(chan error, 1)
+	go func() {
+		_, invokeErr := host.Invoke(ctx, assembly.InvokeRequest{
+			Address: event.Address{AgentID: "user", SessionID: "session-attention-obligation-in-flight"},
+			Input:   []model.Message{{Role: model.RoleUser, Content: heldInput}},
+		})
+		driving <- invokeErr
+	}()
+	select {
+	case <-arrived:
+	case err := <-driving:
+		t.Fatalf("invoke the turn that holds the work end: %v", err)
+	case <-ctx.Done():
+		t.Fatalf("the held turn reached no model production: %v", ctx.Err())
+	}
+
+	closeCtx, closeCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer closeCancel()
+	report, err := host.Run().Close(closeCtx, agent.CloseRequest{Deadline: time.Now().Add(3 * time.Second)})
+	if err != nil {
+		t.Fatalf("end the work beside the held call: %v", err)
+	}
+	if report.Outcome != agent.CloseCut || report.Drained {
+		t.Fatalf("the close beside the held call reports %+v, want the task obligation left open", report)
+	}
+	obligation := false
+	for _, entry := range report.Unsettled {
+		obligation = obligation || entry.TaskID != ""
+	}
+	if !obligation {
+		t.Fatalf("the close beside the held call names %+v, want the open obligation of the task the parked call admitted", report.Unsettled)
+	}
+	if kept := attentionOfKind(attentionDetails(t, ctx, host, unread), task.AttentionKindSummary); len(kept) != 1 {
+		t.Fatalf("the unread summary beside a work end that did not drain = %+v, want the summary still standing: a close that did not drain must not clear the presence", kept)
+	}
+	unblock()
+	select {
+	case <-driving:
+	case <-ctx.Done():
+		t.Fatalf("the held turn never closed beside its released production: %v", ctx.Err())
 	}
 }
 

@@ -8,6 +8,13 @@ function that drives it through its real caller.
 
 FUNCTIONS
 
+func ExampleChainSource()
+    ExampleChainSource names one task a restored checkpoint stated no entry for:
+    the registry reads its chain once, rebuilds the declaration and the status
+    the links carry, and answers the next read of the same identity from the
+    record it now holds. An identity the source holds no link for reads as
+    unknown.
+
 func ExampleCommit()
     ExampleCommit stores one transition with its notification, reports a
     repeated mutation identity with the same content as committed and refuses
@@ -27,6 +34,12 @@ func ExampleRegistry()
     ExampleRegistry registers one task, reports a repeated admission as a dedup
     of the same task, resumes it under the same identity and cancels it without
     touching any other task.
+
+func ExampleSettleAccount()
+    ExampleSettleAccount states the settle account of the tasks one checkpoint
+    names: the task that consumed a notification and refused another is stated
+    with both families beside its record, and the task beside no receipt is
+    stated with the three families as empty lists rather than left out.
 
 func ExampleUnsettledSource()
     ExampleUnsettledSource reads one rest criterion at the commit sequence the

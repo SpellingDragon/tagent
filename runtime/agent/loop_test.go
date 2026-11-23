@@ -600,7 +600,7 @@ func TestConsumerObservation(t *testing.T) {
 		if !logger.mentions("debug", "consumer decision", "invocation=invocation-1", "terminal=completed", "calls=0", "closing=false") {
 			t.Fatalf("debug lines = %v, want the decision line of the one answer", logger.at("debug"))
 		}
-		if !logger.mentions("debug", "request budget gate closed", "invocation=invocation-1", "max_tokens=0", "provider_window=0") {
+		if !logger.mentions("debug", "request budget gate closed", "invocation=invocation-1", "provider_window=0") {
 			t.Fatalf("debug lines = %v, want the gate-closed fact of a declaration naming no budget", logger.at("debug"))
 		}
 		if !logger.mentions("debug", "consumer drive end", "invocation=invocation-1", "decisions=1", "terminal=completed", "failed=false") {

@@ -84,5 +84,5 @@ app:
     # approvers: ["wxid_owner"]
 
 # 待接线(本宿主不读,启用前须先在 host_runtime.go 接 schema 与装配):
-#   memory / compress / meditation / max_tool_iterations / max_tokens / temperature /
+#   memory / compress / meditation / max_tool_iterations / replay_window / temperature /
 #   thinking_enabled / compress_threshold,以及除 send 与已声明的 recall_* 外的工具面与子 agent 委派。

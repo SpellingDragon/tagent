@@ -56,7 +56,8 @@ func (s mailboxState) SnapshotState(ctx context.Context) ([]byte, error) {
 // the log folded — the ones past the cut included — so this restore states the
 // whole owed set whenever the framework restores the slice. The fold is
 // idempotent by the notification identity, so an obligation both sources name is
-// seated once.
+// seated once, and an account one notification could not be read from fails the
+// restore by name instead of seating a set that counts it as still owed.
 func (s mailboxState) RestoreState(ctx context.Context, payload []byte) error {
 	if s.store == nil {
 		return nil
@@ -65,34 +66,60 @@ func (s mailboxState) RestoreState(ctx context.Context, payload []byte) error {
 	if err := json.Unmarshal(payload, &wire); err != nil {
 		return err
 	}
-	return s.store.foldOwed(ctx, s.owedOfWork(wire.Owed))
+	owed, err := s.owedOfWork(wire.Owed)
+	if err != nil {
+		return err
+	}
+	return s.store.foldOwed(ctx, owed)
 }
 
 // owedOfWork reports the obligations this restore folds: the ones the cut
 // stated beside the ones the account behind the mailbox still owes, each named
 // once by the notification identity acceptance answers to, so one obligation
-// two sources state is seated once.
-func (s mailboxState) owedOfWork(stated []task.OutboxNotice) []task.OutboxNotice {
+// two sources state is seated once. A notice the account already answered opens
+// nothing, whichever source names it: the payload the cut wrote can predate the
+// receipt or the refusal a stopped process landed past that cut, and a
+// settlement is the notification's consumption result, not work a boot owes
+// again. A mailbox beside no account settles nothing, so the stated payload is
+// its only source. An answer the account could not reach is reported by name:
+// a read error folded into "not settled" would seat a notice the account already
+// consumed and hand it to a second turn.
+func (s mailboxState) owedOfWork(stated []task.OutboxNotice) ([]task.OutboxNotice, error) {
 	owed := make([]task.OutboxNotice, 0, len(stated))
 	seen := make(map[noticeKey]bool, len(stated))
+	settled := func(notice task.Notice) (bool, error) {
+		if s.store.consumptions == nil {
+			return false, nil
+		}
+		return s.store.consumptions.settled(notice)
+	}
+	fold := func(notice task.OutboxNotice) error {
+		key := noticeKeyOf(notice.Notice.Notice)
+		if seen[key] {
+			return nil
+		}
+		seen[key] = true
+		answered, err := settled(notice.Notice.Notice)
+		if err != nil {
+			return err
+		}
+		if answered {
+			return nil
+		}
+		owed = append(owed, notice)
+		return nil
+	}
 	for _, notice := range stated {
-		key := noticeKeyOf(notice.Notice.Notice)
-		if seen[key] {
-			continue
+		if err := fold(notice); err != nil {
+			return nil, err
 		}
-		seen[key] = true
-		owed = append(owed, notice)
 	}
-	if s.store.consumptions == nil {
-		return owed
-	}
-	for _, notice := range s.store.consumptions.OwedNotices() {
-		key := noticeKeyOf(notice.Notice.Notice)
-		if seen[key] {
-			continue
+	if s.store.consumptions != nil {
+		for _, notice := range s.store.consumptions.OwedNotices() {
+			if err := fold(notice); err != nil {
+				return nil, err
+			}
 		}
-		seen[key] = true
-		owed = append(owed, notice)
 	}
-	return owed
+	return owed, nil
 }

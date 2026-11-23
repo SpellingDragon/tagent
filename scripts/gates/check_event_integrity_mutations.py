@@ -18,6 +18,12 @@
 一个变异是一组**补丁**（`replacement` 加可选的 `companion`）：一个缺陷落在几处编辑
 或几个文件上时，整组一起应用、一起复原，锚文本逐处必须恰好命中一次。
 
+门锚变异（`gate_path` 非空）不驱动 `go test`：在副本树内跑具名 Python 门
+（`--root` 指向副本树），进程非零**且**输出命中登记的 `expect_assertion` 才记
+`killed`，归因到门路径（记录的 `gate` 字段）而非 Go 测试名。控制是该门在未变异
+副本上的绿判决；门照绿、崩溃、超时或失败文案不命中一律判“验证失败”。门锚变异
+不得同时声明 Go 测试。Go 变异的判据与编译面检查不变。
+
 登记项有两种状态：
 
 * `enabled`：进入执行集，未杀死即门失败。
@@ -39,14 +45,23 @@ sha256，后者复用 runner 的 `module_fingerprint` 给受测（根）模块�
 
 写树纪律（R26）：只在 `TMPDIR` 下的副本树内替换产品文件；仓库工作树零写入、
 零 index 变更；原始日志只写 `--out` 指定的仓库外目录。
+
+`--replay <dir>` 是离线回放：不驱动 `go test`，改读 `<dir>/control/<测试名>.jsonl`
+与 `<dir>/mutations/<id>/run.jsonl` 的录制流（布局与 `--out` 产物一致），判决仍走
+同一套判据函数。录制流不含进程状态，故回放读的退出码是流自己声明的包终局
+（无 `Test` 的 `fail`／`build-fail` 即非零）。回放不是活的运行证据：它只写
+`evidence.replay.json`，而 bundle 收集器只认 `evidence.json`，故回放报告在机制上
+进不了 `--bundle`。它用于把判据本身钉在录制证据上，不用于证明产品通过。
 """
 from __future__ import annotations
 
 import argparse
+import ast
 import hashlib
 import json
 import re
 import os
+import platform
 import shutil
 import subprocess
 import sys
@@ -70,7 +85,8 @@ DEFAULT_FROZEN_CONTRACT = (
 # the same digest so the two can be tied to one baseline.
 DEFAULT_EVENT_CONTRACT = "golden/runtime/event_integrity_scenarios.json"
 # examples/ holds two nested Go modules (1.3G); the root-module tests never
-# build them, so the isolated copy keeps only the module under test.
+# build them, so a Go-only copy keeps only the module under test. A run carrying
+# gate mutations includes them: a Python gate reads them as part of its corpus.
 COPY_EXCLUDED_PREFIXES = ("examples/",)
 COMPILE_MARKERS = (
     "build failed",
@@ -82,6 +98,9 @@ COMPILE_MARKERS = (
 )
 KILLED = "killed"
 NOT_KILLED = "not_killed"
+# A patch that never entered the selector's compiled face leaves the run
+# unmutated; its verdict is neither a kill nor a surviving mutation.
+NOT_APPLIED = "not_applied"
 ENABLED = "enabled"
 PENDING = "pending"
 
@@ -109,13 +128,21 @@ class Mutation:
     evidence_kind: str  # confirmed_defect | reproduction | named_assertion
     evidence_ref: str
     description: str
-    test_package: str
-    test_file: str
-    test_name: str
-    test_selector: str
+    test_package: str = ""
+    test_file: str = ""
+    test_name: str = ""
+    test_selector: str = ""
     # The literal text of the named business assertion that must appear on the
     # failing test: a pending entry may leave it empty until its anchor lands.
     expect_assertion: str = ""
+    # The source site of that assertion, `<test file>#<func>`: the function whose
+    # body states the literal inside a failing construct. The function is named
+    # rather than a line, so moving that statement inside the body never stales the
+    # registration. A kill is the failure record carrying the literal at a location
+    # the body reports (or at a `t.Helper()` caller bubbling it, see
+    # `assertion_report_sites`); a same-case mention from another assertion prints
+    # its own location and is no hit.
+    expect_assertion_site: str = ""
     # A fault spanning several edits declares its first edit here and the rest
     # in `companion`: the set is applied and restored as one patch, so a defect
     # that lives in two files is one mutation, never two half-kills.
@@ -126,6 +153,13 @@ class Mutation:
     # pending entry is released as soon as this subtest appears in its file.
     anchor_subtest: str = ""
     pending_reason: str = ""
+    # A gate-anchor mutation is judged by a named Python gate instead of a Go
+    # test: the gate runs on the patched copy tree, and a kill is a non-zero
+    # exit whose output carries `expect_assertion`. The selftest is the gate's
+    # own rejection proof, named so the registration states both faces of the
+    # anchor. The Go test fields stay empty for such a mutation.
+    gate_path: str = ""
+    gate_selftest: str = ""
 
     @property
     def enabled(self) -> bool:
@@ -190,16 +224,14 @@ MUTATIONS: Tuple[Mutation, ...] = (
         test_file="tests/integration/host/event_integrity_test.go",
         test_name="TestEventIntegrityTaskContinuation",
         test_selector="^TestEventIntegrityTaskContinuation$",
-        # The witness moved from the fact-count wording to the request wording
-        # after the quiesce restructure: the duplicate material now trips the
-        # consumer-side copy check on the follow-up request before the fact count
-        # is read, so two named assertions inside the anchored subtest kill this
-        # mutation and which one speaks first varies run to run. The literal is
-        # the static part of that copy check — a request carrying more than one
-        # copy of one notice material — and it was observed on every run of the
-        # three probed, where the two single-site literals each spoke on only
-        # some of them.
+        # The literal is the static part of the copy check of continuationSingleCopy,
+        # the helper that states it beside the request it judges. The helper reports
+        # the line of its caller, so the sites this run may print are its call sites:
+        # the continuation subtest that first carries a duplicate speaks first.
+        # runDuplicateNoticeMaterial states the literal too, but it belongs to
+        # TestEventIntegrityReproduction, which this selector never runs.
         expect_assertion="user copies of",
+        expect_assertion_site="tests/integration/host/event_integrity_test.go#continuationSingleCopy",
     ),
     Mutation(
         id="MUT-EVID-03-busy-notice-drop",
@@ -222,8 +254,16 @@ MUTATIONS: Tuple[Mutation, ...] = (
             # Patch 1 — the observation of a notice arriving while the pump
             # drives (busy) wakes nothing: the busy notice is dropped instead of
             # kept on the account for a later round.
+            # Anchor migrated 2026-11-22 (F2 closing gate, leaf 13.103). The old
+            # anchor named the gate of `ObserveCommit` as the raw table read
+            # `terminalSettleKinds[noticeKindOf(fact)]`; the settle face now asks
+            # the one predicate `terminalDelivery(fact)`, which folds the same
+            # table beside the family and the task test. The wake the patch
+            # guards is the same statement at the same site, so the fault —
+            # a busy observation wakes nothing — is unchanged. Patches 2–4 (the
+            # driving flag and the one-round drain) still anchor byte for byte.
             old=(
-                "\tif !terminalSettleKinds[noticeKindOf(fact)] {\n"
+                "\tif !terminalDelivery(fact) {\n"
                 "\t\treturn nil\n"
                 "\t}\n"
                 "\td.Wake()\n"
@@ -231,7 +271,7 @@ MUTATIONS: Tuple[Mutation, ...] = (
                 "}\n"
             ),
             new=(
-                "\tif !terminalSettleKinds[noticeKindOf(fact)] {\n"
+                "\tif !terminalDelivery(fact) {\n"
                 "\t\treturn nil\n"
                 "\t}\n"
                 "\td.mu.Lock()\n"
@@ -290,6 +330,7 @@ MUTATIONS: Tuple[Mutation, ...] = (
         test_name="TestEventIntegrityTaskContinuation",
         test_selector="^TestEventIntegrityTaskContinuation$",
         expect_assertion="no request carried the notice material",
+        expect_assertion_site="tests/integration/host/event_integrity_test.go#continuationWaitForRequest",
     ),
     Mutation(
         id="MUT-G1-meditation-busy-drop",
@@ -324,6 +365,7 @@ MUTATIONS: Tuple[Mutation, ...] = (
         test_name="TestEventIntegrityMeditationSchedule",
         test_selector="^TestEventIntegrityMeditationSchedule$",
         expect_assertion="the busy observation was dropped",
+        expect_assertion_site="tests/integration/evolution/event_integrity_test.go#TestEventIntegrityMeditationSchedule",
     ),
     Mutation(
         id="MUT-CAND-01.2-early-confirm",
@@ -357,6 +399,7 @@ MUTATIONS: Tuple[Mutation, ...] = (
         test_name="TestEventIntegrityConsumptionRecovery",
         test_selector="^TestEventIntegrityConsumptionRecovery$",
         expect_assertion="want exactly one claimed entry",
+        expect_assertion_site="tests/integration/history/event_integrity_test.go#consumptionClaimedEntry",
     ),
     Mutation(
         id="MUT-CAND-01.1-conflicting-body",
@@ -388,6 +431,7 @@ MUTATIONS: Tuple[Mutation, ...] = (
         test_name="TestEventIntegrityNoticeIdentity",
         test_selector="^TestEventIntegrityNoticeIdentity$",
         expect_assertion="same identity beside a different body",
+        expect_assertion_site="tests/integration/execution/event_integrity_test.go#runConflictingNoticeBody",
     ),
     Mutation(
         id="MUT-CAND-02.2-wrong-target",
@@ -418,6 +462,7 @@ MUTATIONS: Tuple[Mutation, ...] = (
         test_name="TestSendCrossSessionGates",
         test_selector="^TestSendCrossSessionGates$",
         expect_assertion="want the white list refusal naming",
+        expect_assertion_site="tests/integration/execution/send_cross_session_gates_test.go#TestSendCrossSessionGates",
     ),
     Mutation(
         id="MUT-EVID-04-position-boundary",
@@ -515,8 +560,18 @@ MUTATIONS: Tuple[Mutation, ...] = (
                 # commit and the replay fold share one append-plus-trim step,
                 # so the mutant records the position the entry lands at in the
                 # sequence as it stood before that step.
+                # Anchor re-taken again after 12.R2.2 (foldMapped only moves the
+                # boundary for the chain's newest fact): the boundary the mutant
+                # overwrites is unchanged, but the step it sits in now states a
+                # landing beside the fold, so the position is recorded ahead of
+                # both and the anchor names the whole block.
                 old=(
-                    "\theld.projection = foldIntoProjection(ctx, held.projection, entry, held.window)\n"
+                    "\tvar landed bool\n"
+                    "\theld.projection, landed = foldIntoProjection(ctx, held.projection, entry, held.window)\n"
+                    "\tif !landed {\n"
+                    "\t\tr.replays[slot] = held\n"
+                    "\t\treturn\n"
+                    "\t}\n"
                     "\tif evt.Type == event.TypeAgentOutput {\n"
                     "\t\theld.endedAt = entry.Key\n"
                     "\t\theld.rangeOpen = false\n"
@@ -528,7 +583,12 @@ MUTATIONS: Tuple[Mutation, ...] = (
                 ),
                 new=(
                     "\tposition := held.projection.Len()\n"
-                    "\theld.projection = foldIntoProjection(ctx, held.projection, entry, held.window)\n"
+                    "\tvar landed bool\n"
+                    "\theld.projection, landed = foldIntoProjection(ctx, held.projection, entry, held.window)\n"
+                    "\tif !landed {\n"
+                    "\t\tr.replays[slot] = held\n"
+                    "\t\treturn\n"
+                    "\t}\n"
                     "\tif evt.Type == event.TypeAgentOutput {\n"
                     "\t\theld.ended = position\n"
                     "\t\theld.rangeOpen = false\n"
@@ -552,6 +612,23 @@ MUTATIONS: Tuple[Mutation, ...] = (
                 old="\tboundary := held.endedPrefix()\n",
                 new="\tboundary := held.ended\n",
             ),
+            # Anchor added 2026-11-22 (04.402b). The fold-time registration
+            # grew a third read of the boundary in assembly/facts.go —
+            # chainAlreadyPresented, the commit asking where the identity stands
+            # against the material the chain already presented — and it resolved
+            # the boundary through endedPrefix like the two reads above. Left
+            # unrelocated, the mutation renamed the field and deleted the method
+            # while that read still named the method, so the package failed to
+            # build and the mutant counted as a compile_failure instead of a
+            # kill. Relocating this read restores the build and keeps the fault
+            # whole: the stored position this read follows carries the same
+            # stale value after a fold, so the already-presented judgment drifts
+            # with the boundary it reads.
+            Replacement(
+                file="assembly/facts.go",
+                old="\tprefix := held.endedPrefix()\n",
+                new="\tprefix := held.ended\n",
+            ),
             # The presentation read resolves its prefix from the same position:
             # the mutant keeps the position here too, so the read compiles and
             # stays wrong in the same way as the boundary it follows.
@@ -566,6 +643,7 @@ MUTATIONS: Tuple[Mutation, ...] = (
         test_name="TestEventIntegrityProjection",
         test_selector="^TestEventIntegrityProjection$",
         expect_assertion="copies of the range-opening notice in its own request",
+        expect_assertion_site="tests/integration/history/event_integrity_test.go#runRangeHeadSurvivesFoldRewrite",
     ),
     # MUT-EVID-05-restart-flat-restore retired: see RETIRED_DEFECTS (equivalent
     # mutant post-purification; the defect is structurally resolved).
@@ -580,89 +658,65 @@ MUTATIONS: Tuple[Mutation, ...] = (
         ),
         description=(
             "Report a segment the storage tier refused as a committed fact: every "
-            "storage-tier refusal in the persist path is answered as a committed "
-            "fact, the fact enters the live ledger and the turn keeps going, so the "
-            "barrier failure is answered as success instead of reported by name."
+            "storage-tier refusal in the persist path answers as committed, so the "
+            "turn keeps going beside a refused commit and the barrier failure is "
+            "answered as success instead of reported by name."
         ),
         replacement=Replacement(
             file="assembly/facts.go",
-            # The refusal exits of the persist path all answer as committed. The
-            # first registry form swallowed the segment store error alone; the
-            # live persist path splits one refusal over several exits (the read
-            # that flushes staged writes, the originals put, the conflict read),
+            # The storage-tier refusal exits of the persist path answer as
+            # committed. The first registry form swallowed the segment store error
+            # alone; the live persist path splits one refusal over several exits,
             # so one swallow left the turn failing beside an unnamed error or hid
-            # the mutant entirely. The defect claim is unchanged — a refused
-            # segment is reported as a committed fact and the barrier failure is
-            # answered as success.
+            # the mutant entirely.
+            # Anchors re-taken 2026-11-22 (F2 closing gate, leaf 13.103). The old
+            # `default: return err` exit belonged to `persistFact`, whose answer was
+            # one error; H02b made the write step answer the store's own five-value
+            # outcome, so the same exit now reads `return outcome, err` and the
+            # mutant answers the tier's refusal as `ledger.FactCommitted, nil` —
+            # the refused segment reported as a committed fact, answered as success
+            # instead of reported by name. The old presence-read exit
+            # (`stored, held, heldErr := …GetEventInPartition`) and the old
+            # conflict-refusal exit (`if !held { return err }`) have no counterpart
+            # in this function any more: the presence read moved out of the write
+            # step into `chainRecord`, a pre-write read whose refusal still
+            # propagates under the mutant, and the conflict refusal now carries the
+            # store's named outcome beside its error. Both were the same refusal
+            # this `default` exit carries, not a second one.
             old=(
-                "\tif err != nil {\n"
-                "\t\treturn err\n"
+                "\tdefault:\n"
+                "\t\treturn outcome, err\n"
                 "\t}\n"
-                "\treturn nil\n"
                 "}\n\n"
-                "// sameFactOf"
+                "// chainRecord"
             ),
             new=(
-                "\tif err != nil {\n"
-                "\t\treturn nil\n"
+                "\tdefault:\n"
+                "\t\treturn ledger.FactCommitted, nil\n"
                 "\t}\n"
-                "\treturn nil\n"
                 "}\n\n"
-                "// sameFactOf"
+                "// chainRecord"
             ),
         ),
         companion=(
             Replacement(
                 file="assembly/facts.go",
-                # The read that flushes staged writes answers as committed.
+                # The conflict-branch read refusal answers as committed: the tier
+                # refused the read behind its own conflict answer, and the mutant
+                # reports the segment as committed instead of naming the read's
+                # failure.
                 old=(
-                    "\tstored, held, err := tier.Segments.GetEvent(ctx, evt.Key)\n"
-                    "\tif err != nil {\n"
-                    "\t\treturn err\n"
-                    "\t}\n"
-                ),
-                new=(
-                    "\tstored, held, err := tier.Segments.GetEvent(ctx, evt.Key)\n"
-                    "\tif err != nil {\n"
-                    "\t\treturn nil\n"
-                    "\t}\n"
-                ),
-            ),
-            Replacement(
-                file="assembly/facts.go",
-                # The originals write answers as committed.
-                old=(
-                    "\tif err := tier.Originals.Put(ctx, body.Ref(), []byte(body.Message.Content)); err != nil {\n"
-                    "\t\treturn err\n"
-                    "\t}\n"
-                ),
-                new=(
-                    "\tif err := tier.Originals.Put(ctx, body.Ref(), []byte(body.Message.Content)); err != nil {\n"
-                    "\t\treturn nil\n"
-                    "\t}\n"
-                ),
-            ),
-            Replacement(
-                file="assembly/facts.go",
-                # The conflict-branch read answers as committed.
-                old=(
-                    "\t\tprior, held, getErr := tier.Segments.GetEvent(ctx, evt.Key)\n"
+                    "\t\tprior, held, getErr := tier.Segments.GetEventInPartition(ctx, evt.Key, partition)\n"
                     "\t\tif getErr != nil {\n"
-                    "\t\t\treturn getErr\n"
+                    "\t\t\treturn ledger.FactConflict, getErr\n"
                     "\t\t}\n"
                 ),
                 new=(
-                    "\t\tprior, held, getErr := tier.Segments.GetEvent(ctx, evt.Key)\n"
+                    "\t\tprior, held, getErr := tier.Segments.GetEventInPartition(ctx, evt.Key, partition)\n"
                     "\t\tif getErr != nil {\n"
-                    "\t\t\treturn nil\n"
+                    "\t\t\treturn ledger.FactCommitted, nil\n"
                     "\t\t}\n"
                 ),
-            ),
-            Replacement(
-                file="assembly/facts.go",
-                # The conflict-branch refusal answers as committed.
-                old="\t\tif !held {\n\t\t\treturn err\n\t\t}\n",
-                new="\t\tif !held {\n\t\t\treturn nil\n\t\t}\n",
             ),
         ),
         test_package="./tests/integration/history",
@@ -670,6 +724,7 @@ MUTATIONS: Tuple[Mutation, ...] = (
         test_name="TestEventIntegrityPersistence",
         test_selector="^TestEventIntegrityPersistence$",
         expect_assertion="the turn beside a failing storage tier returned no failure",
+        expect_assertion_site="tests/integration/history/event_integrity_test.go#runPersistenceStorageFailure",
     ),
     Mutation(
         id="MUT-CAND-01.2-handover-confirm",
@@ -687,8 +742,23 @@ MUTATIONS: Tuple[Mutation, ...] = (
         ),
         replacement=Replacement(
             file="assembly/facts.go",
+            # Patch 1 — the completed consumption is recorded before the settled
+            # result is handed back into the intake, so a stop inside the handover
+            # leaves the notification no longer owed and the restart has no result
+            # to hand over again.
+            # Anchor migrated 2026-11-22 (F2 closing gate, leaf 13.103). The old
+            # anchor named the refusal branch releasing the claim
+            # (`return r.retainNoticeOwed(…)`) and the consume as the tail; H05
+            # keeps the claim with the process that already handed the result on,
+            # so that branch now logs and returns nil. The two statements the fault
+            # reorders — `r.loop.Backflow(…)` before `r.store.Consume(…)` — stand
+            # unchanged in `sink`, which is what this mutation swaps.
             old=(
-                "\tr.loop.Backflow(frame.Identity.InvocationID, notice)\n"
+                "\tif refusal := r.loop.Backflow(frame.Identity.InvocationID, notice); "
+                "refusal != nil {\n"
+                "\t\tassemblyDebug(\"tagent: the notice of task %s stays owed under the claim of this process\", notice.TaskID)\n"
+                "\t\treturn nil\n"
+                "\t}\n"
                 "\treturn r.store.Consume(ctx, frame.Address, frame.Identity.InstanceID, seq)\n"
             ),
             new=(
@@ -696,7 +766,11 @@ MUTATIONS: Tuple[Mutation, ...] = (
                 "err != nil {\n"
                 "\t\treturn err\n"
                 "\t}\n"
-                "\tr.loop.Backflow(frame.Identity.InvocationID, notice)\n"
+                "\tif refusal := r.loop.Backflow(frame.Identity.InvocationID, notice); "
+                "refusal != nil {\n"
+                "\t\tassemblyDebug(\"tagent: the notice of task %s stays owed under the claim of this process\", notice.TaskID)\n"
+                "\t\treturn nil\n"
+                "\t}\n"
                 "\treturn nil\n"
             ),
         ),
@@ -705,6 +779,7 @@ MUTATIONS: Tuple[Mutation, ...] = (
         test_name="TestEventIntegrityConsumptionRecovery",
         test_selector="^TestEventIntegrityConsumptionRecovery$",
         expect_assertion="not recoverable after the restart",
+        expect_assertion_site="tests/integration/history/event_integrity_test.go#runHandoverBeforeConfirmation",
     ),
     Mutation(
         id="MUT-CAND-01.10-alive-process-complete",
@@ -735,6 +810,7 @@ MUTATIONS: Tuple[Mutation, ...] = (
         test_name="TestEventIntegrityExecLifecycle",
         test_selector="^TestEventIntegrityExecLifecycle$",
         expect_assertion="no query face may report success or completion",
+        expect_assertion_site="tool/exec/event_integrity_test.go#eventIntegrityAssertNoCompletionVerdict",
         anchor_subtest="partial_output_is_not_completion",
     ),
     Mutation(
@@ -757,6 +833,7 @@ MUTATIONS: Tuple[Mutation, ...] = (
         test_name="TestFoldPlanGolden",
         test_selector="^TestFoldPlanGolden$",
         expect_assertion="the fold plan golden drifted",
+        expect_assertion_site="memory/replay/age_plan_test.go#TestFoldPlanGolden",
     ),
     Mutation(
         id="MUT-FOLD-02-mid-level-window",
@@ -778,6 +855,7 @@ MUTATIONS: Tuple[Mutation, ...] = (
         test_name="TestFoldPlanGolden",
         test_selector="^TestFoldPlanGolden$",
         expect_assertion="the fold plan golden drifted",
+        expect_assertion_site="memory/replay/age_plan_test.go#TestFoldPlanGolden",
     ),
     Mutation(
         id="MUT-FOLD-03-inflight-fold",
@@ -799,6 +877,7 @@ MUTATIONS: Tuple[Mutation, ...] = (
         test_name="TestAgeFoldKeepsTheSegmentInProgressWhole",
         test_selector="^TestAgeFoldKeepsTheSegmentInProgressWhole$",
         expect_assertion="want the segment in progress beside the whole new band",
+        expect_assertion_site="memory/replay/age_segments_test.go#TestAgeFoldKeepsTheSegmentInProgressWhole",
     ),
     Mutation(
         id="MUT-FOLD-04-product-type",
@@ -820,8 +899,323 @@ MUTATIONS: Tuple[Mutation, ...] = (
         test_name="TestFoldPlanGolden",
         test_selector="^TestFoldPlanGolden$",
         expect_assertion="the fold plan golden drifted",
+        expect_assertion_site="memory/replay/age_plan_test.go#TestFoldPlanGolden",
+    ),
+    Mutation(
+        id="MUT-DOD-P0-concrete-mount",
+        basis="DOD-P0-concrete-mount",
+        evidence_kind="named_assertion",
+        evidence_ref=(
+            "golden/runtime/dod_predicates.json P0 (measure mountedBuiltinFeatures); "
+            "scripts/gates/check_dod_coverage.py; anchor "
+            "assembly/plugin_catalog_test.go#TestBuiltinCatalogMountsEveryFeature"
+        ),
+        description=(
+            "Mount a builtin by a construction of the assembly root instead of the "
+            "catalog: drop the final-round feature from the catalog beside its now "
+            "unused import, so the boot serves a run-level set the catalog does not "
+            "mount."
+        ),
+        replacement=Replacement(
+            file="assembly/plugin_catalog.go",
+            old=(
+                "\t{\n"
+                "\t\tname:  finalRoundPluginName,\n"
+                "\t\tscope: runPluginScope,\n"
+                "\t\trun: func(r *Run) ([]plugin.Instance, error) {\n"
+                "\t\t\tr.finalRound = agent.NewFinalRoundPlanner(finalRoundChain{run: r}, r.finalRoundPolicyOf)\n"
+                "\t\t\treturn []plugin.Instance{r.finalRound}, nil\n"
+                "\t\t},\n"
+                "\t},\n"
+            ),
+            new="",
+        ),
+        companion=(
+            Replacement(
+                file="assembly/plugin_catalog.go",
+                old="\t\"github.com/SpellingDragon/tagent/runtime/agent\"\n",
+                new="",
+            ),
+        ),
+        test_package="./assembly",
+        test_file="assembly/plugin_catalog_test.go",
+        test_name="TestBuiltinCatalogMountsEveryFeature",
+        test_selector="^TestBuiltinCatalogMountsEveryFeature$",
+        expect_assertion="want the 7 builtin plugins",
+        expect_assertion_site="assembly/plugin_catalog_test.go#TestBuiltinCatalogMountsEveryFeature",
+    ),
+    Mutation(
+        id="MUT-DOD-P1-identity-overwrite",
+        basis="DOD-P1-identity-overwrite",
+        evidence_kind="named_assertion",
+        evidence_ref=(
+            "golden/runtime/dod_predicates.json P1 (measure committedIdentityFacts); "
+            "scripts/gates/check_dod_coverage.py; anchor "
+            "memory/ledger/segment_store_test.go#TestFactCommitAnswersNewExistingConflictUncertain"
+        ),
+        description=(
+            "Answer other bytes under an identity the chain already holds as the "
+            "duplicate it holds: drop the byte comparison that refuses the conflicting "
+            "commit, so one identity names whichever bytes were written last."
+        ),
+        replacement=Replacement(
+            file="memory/ledger/segment_store.go",
+            old=(
+                "\t\tif !bytes.Equal(existing, rec.Body) {\n"
+                "\t\t\treturn nil, ErrContentConflict\n"
+                "\t\t}\n"
+            ),
+            new=(
+                "\t\tif !bytes.Equal(existing, rec.Body) {\n"
+                "\t\t\treturn &segmentEventPlan{duplicate: true}, nil\n"
+                "\t\t}\n"
+            ),
+        ),
+        test_package="./memory/ledger",
+        test_file="memory/ledger/segment_store_test.go",
+        test_name="TestFactCommitAnswersNewExistingConflictUncertain",
+        test_selector="^TestFactCommitAnswersNewExistingConflictUncertain$",
+        expect_assertion="want the byte conflict the engine names",
+        expect_assertion_site="memory/ledger/segment_store_test.go#TestFactCommitAnswersNewExistingConflictUncertain",
+    ),
+    Mutation(
+        id="MUT-DOD-P2-reducer-bypass",
+        basis="DOD-P2-reducer-bypass",
+        evidence_kind="named_assertion",
+        evidence_ref=(
+            "golden/runtime/dod_predicates.json P2 (measure bootFoldedFacts); "
+            "scripts/gates/check_dod_coverage.py; anchor "
+            "assembly/checkpoint_test.go#TestSeedFactReusesTheReducer"
+        ),
+        description=(
+            "Recover through a reader of the boot's own: seedFact lands the replayed "
+            "fact in the map and never folds it into the mounted state slices, so the "
+            "boot derives none of the state the live commit derives."
+        ),
+        replacement=Replacement(
+            file="assembly/run.go",
+            old=(
+                "\tif err := states.Reduce(ctx, evt); err != nil {\n"
+                "\t\treturn fmt.Errorf(\"tagent: fold the replayed fact %s into the state of its consumers: %w\", evt.Key, err)\n"
+                "\t}\n"
+                "\treturn nil\n"
+            ),
+            new="\treturn nil\n",
+        ),
+        test_package="./assembly",
+        test_file="assembly/checkpoint_test.go",
+        test_name="TestSeedFactReusesTheReducer",
+        test_selector="^TestSeedFactReusesTheReducer$",
+        expect_assertion="want the reducer the live commit drives",
+        expect_assertion_site="assembly/checkpoint_test.go#TestSeedFactReusesTheReducer",
+    ),
+    Mutation(
+        id="MUT-DOD-P3-slice-bypass",
+        basis="DOD-P3-slice-bypass",
+        evidence_kind="named_assertion",
+        evidence_ref=(
+            "golden/runtime/dod_predicates.json P3 (measure "
+            "durablePrefixScansOfASeatedAccount); scripts/gates/check_dod_coverage.py; "
+            "anchor runtime/state/durable_test.go#TestDurableLoadReadsTheTaskSlice"
+        ),
+        description=(
+            "Seat a task the checkpoint states and read its chain anyway: add every "
+            "seated task to the identities read by prefix, so a boot pays the durable "
+            "prefixes of a task it already holds whole."
+        ),
+        replacement=Replacement(
+            file="runtime/state/durable.go",
+            old=(
+                "\t\tif err := d.seatTaskLocked(entry); err != nil {\n"
+                "\t\t\treturn err\n"
+                "\t\t}\n"
+            ),
+            new=(
+                "\t\tif err := d.seatTaskLocked(entry); err != nil {\n"
+                "\t\t\treturn err\n"
+                "\t\t}\n"
+                "\t\tyoung[entry.TaskID] = struct{}{}\n"
+            ),
+        ),
+        test_package="./runtime/state",
+        test_file="runtime/state/durable_test.go",
+        test_name="TestDurableLoadReadsTheTaskSlice",
+        test_selector="^TestDurableLoadReadsTheTaskSlice$",
+        expect_assertion="want no durable prefix read",
+        expect_assertion_site="runtime/state/durable_test.go#TestDurableLoadReadsTheTaskSlice",
+    ),
+    Mutation(
+        id="MUT-DOD-P4-window-unbounded",
+        basis="DOD-P4-window-unbounded",
+        evidence_kind="named_assertion",
+        evidence_ref=(
+            "golden/runtime/dod_predicates.json P4 (measure wallClock); "
+            "scripts/gates/check_dod_coverage.py; anchor "
+            "assembly/symptom_anchor_recovery_test.go"
+            "#TestSymptomAnchorBootCostFlatAcrossGenerations"
+        ),
+        description=(
+            "Rebuild from the whole index instead of the window past the cut: drop "
+            "the bounded walk the newest checkpoint's cut drives, so every boot walks "
+            "the history the chain holds and the entries it names grow with it."
+        ),
+        replacement=Replacement(
+            file="assembly/run.go",
+            old=(
+                "\tcut := r.checkpointCut(checkpointSliceProjection)\n"
+                "\tif len(cut) > 0 {\n"
+                "\t\trefs, landed, past, bounded := r.walkIndexPastCut(ctx, tier, cut)\n"
+                "\t\tif bounded && past == tier.Segments.EventCount()-coveredEntries(cut) {\n"
+                "\t\t\treturn refs, landed, nil\n"
+                "\t\t}\n"
+                "\t}\n"
+                "\treturn r.walkIndexWhole(ctx, tier)\n"
+            ),
+            new="\treturn r.walkIndexWhole(ctx, tier)\n",
+        ),
+        test_package="./assembly",
+        test_file="assembly/symptom_anchor_recovery_test.go",
+        test_name="TestSymptomAnchorBootCostFlatAcrossGenerations",
+        test_selector="^TestSymptomAnchorBootCostFlatAcrossGenerations$",
+        expect_assertion="the walk follows the history the chain holds instead of stopping at the cut its newest checkpoint states",
+        expect_assertion_site="assembly/symptom_anchor_recovery_test.go#TestSymptomAnchorBootCostFlatAcrossGenerations",
+    ),
+    Mutation(
+        id="MUT-DOD-P7-midband-summary-feed",
+        basis="DOD-P7-midband-summary-feed",
+        evidence_kind="named_assertion",
+        evidence_ref=(
+            "golden/runtime/dod_predicates.json P7 (measure "
+            "eventKeyTicketsInThePresentedRequest); scripts/gates/check_dod_coverage.py; "
+            "anchor tests/integration/history/symptom_anchor_midband_test.go"
+            "#TestSymptomAnchorMidbandProcessRecalledByTicket"
+        ),
+        description=(
+            "Fold the process-detail entry into its product line with no handle on its "
+            "own event key: drop the ticket from the one-line read the fold writes into "
+            "the product, so the request built after the fold carries the product's "
+            "summary and no address that recalls the process text the fold consumed."
+        ),
+        replacement=Replacement(
+            file="memory/replay/age_segments.go",
+            old=(
+                "\tticket := TicketOf(entry.Key, entry.Type)\n"
+                "\tif ticket == \"\" {\n"
+                "\t\treturn foldLineOf(entry)\n"
+                "\t}\n"
+                "\treturn provenancePrefixOf(entry) + ticket + \" \" + entry.Type + \": \" + entry.Summary\n"
+            ),
+            new="\treturn foldLineOf(entry)\n",
+        ),
+        test_package="./tests/integration/history",
+        test_file="tests/integration/history/symptom_anchor_midband_test.go",
+        test_name="TestSymptomAnchorMidbandProcessRecalledByTicket",
+        test_selector="^TestSymptomAnchorMidbandProcessRecalledByTicket$",
+        expect_assertion="the request carries no ticket",
+        expect_assertion_site="tests/integration/history/symptom_anchor_midband_test.go#TestSymptomAnchorMidbandProcessRecalledByTicket",
+    ),
+    Mutation(
+        id="MUT-DOD-P8-fixed-budget",
+        basis="DOD-P8-fixed-budget",
+        evidence_kind="named_assertion",
+        evidence_ref=(
+            "golden/runtime/dod_predicates.json P8 (measure "
+            "summaryTextBytesUnderTheDeclaredBudget); scripts/gates/check_dod_coverage.py; "
+            "anchor memory/replay/age_segments_test.go"
+            "#TestHistorySummaryObeysThePlanBudget"
+        ),
+        description=(
+            "Fold every history summary under the policy default instead of the plan's "
+            "declared bound: the fold reads the hardcoded limit and ignores the budget "
+            "the plan states."
+        ),
+        replacement=Replacement(
+            file="memory/replay/age_plan.go",
+            old=(
+                "\tif plan.SummaryBudgetBytes <= 0 {\n"
+                "\t\treturn DefaultAgeSummaryTextLimit\n"
+                "\t}\n"
+                "\treturn plan.SummaryBudgetBytes\n"
+            ),
+            new="\treturn DefaultAgeSummaryTextLimit\n",
+        ),
+        test_package="./memory/replay",
+        test_file="memory/replay/age_segments_test.go",
+        test_name="TestHistorySummaryObeysThePlanBudget",
+        test_selector="^TestHistorySummaryObeysThePlanBudget$",
+        expect_assertion="the bound comes from the plan",
+        expect_assertion_site="memory/replay/age_segments_test.go#TestHistorySummaryObeysThePlanBudget",
+    ),
+    Mutation(
+        id="MUT-DOD-P5-legacy-clause",
+        basis="DOD-P5-legacy-clause",
+        evidence_kind="named_assertion",
+        evidence_ref=(
+            "golden/runtime/dod_predicates.json P5 (measure legacyRequirementText); "
+            "scripts/gates/check_dod_coverage.py; anchor "
+            "scripts/gates/check_spec_hygiene.py#main"
+        ),
+        description=(
+            "State an implementation detail in a main spec's requirement prose: "
+            "append a sentence naming a .go file to the live requirement that retired "
+            "the lifecycle scanner, so the retired mechanism returns as a legacy clause "
+            "the hygiene rule refuses."
+        ),
+        replacement=Replacement(
+            file="openspec/specs/storage-lifecycle-completion/spec.md",
+            old="只拒销毁，不得以「先标墓碑、压实再删」的形态复活。",
+            new=(
+                "只拒销毁，不得以「先标墓碑、压实再删」的形态复活。"
+                "TTL 扫描由 ttl_scanner.go 内的周期性全量扫描实现。"
+            ),
+        ),
+        gate_path="scripts/gates/check_spec_hygiene.py",
+        gate_selftest="scripts/gates/test_check_spec_hygiene.py",
+        expect_assertion="R4 go-file in requirement '保留保护与回收协调'",
+        expect_assertion_site="scripts/gates/check_spec_hygiene.py#main",
+    ),
+    Mutation(
+        id="MUT-DOD-P6-dead-producer",
+        basis="DOD-P6-dead-producer",
+        evidence_kind="named_assertion",
+        evidence_ref=(
+            "golden/runtime/dod_predicates.json P6 (measure deadProducerCalls); "
+            "scripts/gates/check_dod_coverage.py; anchor "
+            "scripts/gates/check_dead_producers.py#main"
+        ),
+        description=(
+            "Add a production function no consumer reaches: declare DeadProducerProbe "
+            "in tool/spec beside the operation set, so the package carries a producer "
+            "without a consumer."
+        ),
+        replacement=Replacement(
+            file="tool/spec/spec.go",
+            old='const allowedOps = "init, new, status, validate, archive, instructions, list"\n',
+            new=(
+                'const allowedOps = "init, new, status, validate, archive, instructions, list"\n'
+                "\n"
+                "// DeadProducerProbe is a probe no consumer reaches.\n"
+                "func DeadProducerProbe() {}\n"
+            ),
+        ),
+        gate_path="scripts/gates/check_dead_producers.py",
+        gate_selftest="scripts/gates/test_check_dead_producers.py",
+        expect_assertion=(
+            "tool/spec/DeadProducerProbe has no consumer (declared in tool/spec/spec.go)"
+        ),
+        expect_assertion_site="scripts/gates/check_dead_producers.py#main",
     ),
 )
+
+# MUT-DOD-P4-cold-unbounded is retired rather than disabled: its one edit replaced a
+# case over the index-cut struct the retirement pass deleted, and its anchor
+# `cut.Offset < 0 || cut.Size > size` is absent from memory/ledger/journal.go
+# (grep: no match), so the patch can never be applied or run. Its basis is a
+# named_assertion, not a confirmed defect, so RETIRED_DEFECTS does not carry it; the
+# registry has no disabled state to move it to. golden/runtime/dod_predicates.json P4
+# binds MUT-DOD-P4-window-unbounded in its place: that counterexample drops the bounded
+# index walk of assembly/run.go and is killed by the walk face of
+# TestSymptomAnchorBootCostFlatAcrossGenerations.
 
 # 五类候选形态（04 design D5）：每一类都必须由至少一条已启用变异承载；
 # 未证实形态不得为凑数开启。忙时忽略一类含随动驱动与冥想驱动两个落点。
@@ -911,6 +1305,24 @@ def _ran_test(result: RunResult) -> bool:
                for event in result.events)
 
 
+def _in_selector(result: RunResult, name: str) -> bool:
+    """Whether a `go test -json` test name belongs to the declared selector."""
+    return name == result.test_name or name.startswith(result.test_name + "/")
+
+
+def _skipped_cases(result: RunResult) -> List[str]:
+    """Every case of the selector the stream records as skipped."""
+    return [event.get("Test", "") for event in result.events
+            if event.get("Action") == "skip"
+            and _in_selector(result, event.get("Test", ""))]
+
+
+def _passed_selector(result: RunResult) -> bool:
+    """Whether the declared selector itself reached a `pass` terminal."""
+    return any(event.get("Action") == "pass" and event.get("Test") == result.test_name
+               for event in result.events)
+
+
 def _failing_tests(result: RunResult) -> List[str]:
     return [event.get("Test", "") for event in result.events
             if event.get("Action") == "fail" and event.get("Test")]
@@ -932,24 +1344,365 @@ def _test_output(result: RunResult) -> str:
     return "".join(parts)
 
 
-def _assertion_hit(result: RunResult, expect_assertion: str) -> bool:
-    """The assertion must appear on a failing test, not in a passing log."""
-    failing = _failing_tests(result)
-    if not failing:
+def _failing_cases(result: RunResult) -> List[str]:
+    """The failing cases of the selector that failed for themselves.
+
+    `go test -json` puts the aggregate `fail` on a parent whose case failed, so a
+    parent's own `fail` states that something below it failed, not that the parent
+    asserted anything. A test that still has a failing descendant is therefore not
+    a place a named assertion can be attributed to.
+    """
+    failing = [name for name in _failing_tests(result) if _in_selector(result, name)]
+    return [name for name in failing
+            if not any(other != name and other.startswith(name + "/")
+                       for other in failing)]
+
+
+def assertion_report_sites(test_text: str, site_line: int) -> frozenset:
+    """Every source location a run may print when the registered assertion fires.
+
+    `site_line` is the line of the anchored function's body that states the
+    literal. `go test` prints the position of the first frame above the failure
+    that is not a `t.Helper()`, so an assertion written inside a helper reports the
+    *caller's* line: the sites a kill may print are that line plus the call sites of
+    every helper that encloses it, resolved transitively because a helper may call a
+    helper.
+    """
+    lines = test_text.splitlines()
+    if not 1 <= site_line <= len(lines):
+        return frozenset()
+    sites = {site_line}
+    pending = [site_line]
+    seen_functions = set()
+    while pending and len(seen_functions) < _REPORT_SITE_DEPTH_LIMIT:
+        line = pending.pop()
+        name, definition = _enclosing_function(lines, line - 1)
+        if not name or name in seen_functions:
+            continue
+        seen_functions.add(name)
+        if not _declares_helper(lines, definition):
+            continue
+        for call_line in _call_sites(lines, name, definition):
+            caller, caller_definition = _enclosing_function(lines, call_line - 1)
+            if caller and _declares_helper(lines, caller_definition):
+                # A call inside another helper bubbles past that frame too.
+                pending.append(call_line)
+                continue
+            sites.add(call_line)
+    return frozenset(sites)
+
+
+# A helper chain deeper than this is not a shape this suite writes; the bound
+# keeps the transitive walk finite beside a recursive helper.
+_REPORT_SITE_DEPTH_LIMIT = 16
+_FUNCTION_HEAD = re.compile(r"^func\s")
+_LOCATED_OUTPUT = re.compile(r"^[ \t]*(?P<file>[^\s:]+\.go):(?P<line>\d+):(?P<text>.*)$")
+# The constructs that fail a test and print a location: only these can report a
+# kill, so a registered site naming anything else is a stale anchor.
+FAILING_CONSTRUCTS = ("t.Fatalf(", "t.Fatal(", "t.Errorf(", "t.Error(")
+
+
+def _enclosing_function(lines: List[str], index: int) -> Tuple[str, int]:
+    """The name and 0-based definition line of the function holding `index`."""
+    for cursor in range(index, -1, -1):
+        if not _FUNCTION_HEAD.match(lines[cursor]):
+            continue
+        match = re.match(r"^func\s+(?:\([^)]*\)\s*)?(?P<name>\w+)", lines[cursor])
+        if match:
+            return match.group("name"), cursor
+    return "", -1
+
+
+def _declares_helper(lines: List[str], definition: int) -> bool:
+    """Whether the function defined at `definition` marks itself with `t.Helper()`."""
+    if definition < 0:
         return False
-    for event in result.events:
-        if event.get("Action") != "output":
-            continue
-        test = event.get("Test", "")
-        if not test:
-            continue
-        related = test in failing or any(name.startswith(test + "/") for name in failing)
-        if related and expect_assertion in event.get("Output", ""):
+    for cursor in range(definition + 1, len(lines)):
+        if _FUNCTION_HEAD.match(lines[cursor]):
+            return False
+        if "t.Helper()" in lines[cursor]:
             return True
     return False
 
 
-def classify(result: RunResult, expect_assertion: str) -> Dict[str, object]:
+def _call_sites(lines: List[str], name: str, definition: int) -> List[int]:
+    """The 1-based lines calling `name`, excluding its own definition."""
+    call = re.compile(r"\b" + re.escape(name) + r"\s*\(")
+    return [number for number, line in enumerate(lines, 1)
+            if number != definition + 1 and call.search(line)]
+
+
+def failure_records(result: RunResult) -> List[Dict[str, object]]:
+    """Each failure report a failing case printed, keyed by its source location.
+
+    `go test` prefixes a report with `<file>:<line>: ` and continues a multi-line
+    message on the lines after it, which carry no location of their own. The
+    record is therefore the located line plus the continuation lines up to the
+    next located one: the position discriminates two assertions of one case,
+    while the text keeps a message whose literal sits on a later line.
+    """
+    cases = set(_failing_cases(result))
+    if not cases:
+        return []
+    records: List[Dict[str, object]] = []
+    current: Optional[Dict[str, object]] = None
+    for event in result.events:
+        if event.get("Action") != "output" or event.get("Test", "") not in cases:
+            current = None
+            continue
+        text = event.get("Output", "")
+        match = _LOCATED_OUTPUT.match(text)
+        if match:
+            current = {"file": os.path.basename(match.group("file")),
+                       "line": int(match.group("line")),
+                       "test": event.get("Test", ""), "text": match.group("text")}
+            records.append(current)
+        elif current is not None:
+            current["text"] = str(current["text"]) + text
+    return records
+
+
+def parse_assertion_site(site: str) -> Tuple[str, str]:
+    """Split a registered `<test file>#<func>` site; `("", "")` when unparseable."""
+    site_file, _, site_func = (site or "").partition("#")
+    if not site_file or not site_func:
+        return "", ""
+    return site_file, site_func
+
+
+# String and rune literals of one source line. Braces inside them open or close no
+# block, so the body walk counts a line only after they are blanked.
+_GO_LITERAL = re.compile(r'`[^`]*`|"(?:[^"\\]|\\.)*"|\'(?:[^\'\\]|\\.)*\'')
+
+
+def _block_code(line: str) -> str:
+    """The line as the block walk reads it: literals and trailing comment blanked."""
+    return _GO_LITERAL.sub('""', line).split("//")[0]
+
+
+def _function_span(lines: List[str], name: str) -> Tuple[int, int]:
+    """The 0-based declaration and close lines of the top-level `func name(...)`.
+
+    `(-1, -1)` when the file declares no such function. The declaration has to
+    start at column 0: a closure inside a test is indented, so a function literal
+    is never mistaken for the function the registry names.
+    """
+    head = re.compile(r"^func\s+(?:\([^)]*\)\s*)?" + re.escape(name) + r"\s*\(")
+    for index, line in enumerate(lines):
+        if not head.match(line):
+            continue
+        depth, opened = 0, False
+        for cursor in range(index, len(lines)):
+            code = _block_code(lines[cursor])
+            opened = opened or "{" in code
+            depth += code.count("{") - code.count("}")
+            if opened and depth <= 0:
+                return index, cursor
+        return index, len(lines) - 1
+    return -1, -1
+
+
+def assertion_body_lines(lines: List[str], name: str, literal: str) -> List[int]:
+    """The 1-based lines inside `name`'s body that state `literal`.
+
+    The body, never the file: a neighbour test stating the same literal is no
+    evidence that this function's failing statement carries it.
+    """
+    start, end = _function_span(lines, name)
+    if start < 0:
+        return []
+    return [number for number in range(start + 1, end + 2)
+            if literal in lines[number - 1]]
+
+
+def assertion_sites_of(mutation: Mutation, root: Optional[Path] = None) -> frozenset:
+    """The (file basename, line) locations a run may print for this assertion."""
+    if mutation.gate_path:
+        return gate_assertion_sites(mutation, root)
+    site_file, site_func = parse_assertion_site(mutation.expect_assertion_site)
+    if not site_file:
+        return frozenset()
+    source = Path(root or DEFAULT_ROOT) / site_file
+    try:
+        text = source.read_text(encoding="utf-8")
+    except OSError:
+        return frozenset()
+    lines = text.splitlines()
+    basename = os.path.basename(site_file)
+    sites = set()
+    for number in assertion_body_lines(lines, site_func, mutation.expect_assertion):
+        if any(call in lines[number - 1] for call in FAILING_CONSTRUCTS):
+            sites |= assertion_report_sites(text, number)
+    return frozenset((basename, number) for number in sites)
+
+
+def assertion_site_problem(mutation: Mutation, root: Path) -> str:
+    """Why the registered assertion site cannot be the report of a kill.
+
+    The site is a shape anchor — the test file and the function inside it — like a
+    patch anchor: the function has to exist, and its body has to state the literal
+    inside a construct that fails the test. A function the file does not declare, or
+    a body that states no such literal, is stale; and a site the run could never
+    print would let a true kill go uncounted. A gate mutation's site is judged by
+    the gate's own source instead.
+    """
+    if mutation.gate_path:
+        return gate_site_problem(mutation, root)
+    site_file, site_func = parse_assertion_site(mutation.expect_assertion_site)
+    if not site_file:
+        return "an enabled mutation must register the source site of its assertion"
+    if site_file != mutation.test_file:
+        return "the assertion site {} is outside the test file {}".format(
+            site_file, mutation.test_file)
+    source = root / site_file
+    if not source.is_file():
+        return "the assertion site file is missing: {}".format(site_file)
+    lines = source.read_text(encoding="utf-8").splitlines()
+    if _function_span(lines, site_func)[0] < 0:
+        return ("the assertion site {}#{} names no function the file declares"
+                .format(site_file, site_func))
+    inside = assertion_body_lines(lines, site_func, mutation.expect_assertion)
+    if not inside:
+        found = [number for number, line in enumerate(lines, 1)
+                 if mutation.expect_assertion in line]
+        return ("the assertion site {}#{} states no {!r} inside that function body; "
+                "the literal is stated at line(s) {}"
+                .format(site_file, site_func, mutation.expect_assertion,
+                        ", ".join(str(number) for number in found) or "nowhere"))
+    failing = [number for number in inside
+               if any(call in lines[number - 1] for call in FAILING_CONSTRUCTS)]
+    if not failing:
+        return ("the assertion site {}#{} states {!r} at line(s) {} where no failing "
+                "construct is asserted, so a run never reports a failure there"
+                .format(site_file, site_func, mutation.expect_assertion,
+                        ", ".join(str(number) for number in inside)))
+    return ""
+
+
+def gate_function(tree, name: str):
+    """The named function of a parsed gate, or None."""
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == name:
+            return node
+    return None
+
+
+def gate_states_literal(func, body_text: str, literal: str) -> bool:
+    """Whether the function's source states the registered rejection text.
+
+    A gate renders its report through format templates, so the literal a run
+    prints need not stand verbatim in the source: it is stated when it appears
+    verbatim, or when it carries the longest static fragment of a template the
+    function formats. The fragment is the tie that survives interpolation; a
+    fragment shorter than four characters names no report.
+    """
+    if literal in body_text:
+        return True
+    for node in ast.walk(func):
+        if not isinstance(node, ast.Constant) or not isinstance(node.value, str):
+            continue
+        fragments = [part for part in re.split(r"\{[^{}]*\}", node.value) if part.strip()]
+        if not fragments:
+            continue
+        longest = max(fragments, key=len)
+        if len(longest.strip()) >= 4 and longest in literal:
+            return True
+    return False
+
+
+def gate_text_states(text: str, literal: str) -> bool:
+    """Whether a gate's source states a rejection text, verbatim or through a
+    template one of its functions formats."""
+    if literal in text:
+        return True
+    try:
+        tree = ast.parse(text)
+    except SyntaxError:
+        return False
+    lines = text.splitlines()
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        body = "\n".join(lines[node.lineno - 1:node.end_lineno])
+        if gate_states_literal(node, body, literal):
+            return True
+    return False
+
+
+def gate_site_problem(mutation: Mutation, root: Path) -> str:
+    """Why the registered gate site cannot be the report of a kill.
+
+    The gate-anchor form names the gate file and the function whose body states
+    the rejection text; the function has to exist and state the literal, so a
+    registration the gate's own source no longer supports is stale.
+    """
+    site_file, site_func = parse_assertion_site(mutation.expect_assertion_site)
+    if not site_file:
+        return "an enabled gate mutation must register the gate site of its assertion"
+    if site_file != mutation.gate_path:
+        return "the assertion site {} is outside the anchor gate {}".format(
+            site_file, mutation.gate_path)
+    source = root / site_file
+    if not source.is_file():
+        return "the assertion site file is missing: {}".format(site_file)
+    text = source.read_text(encoding="utf-8")
+    try:
+        tree = ast.parse(text)
+    except SyntaxError as exc:
+        return "the anchor gate {} does not parse: {}".format(site_file, exc)
+    func = gate_function(tree, site_func)
+    if func is None:
+        return "the assertion site {}#{} names no function the gate declares".format(
+            site_file, site_func)
+    lines = text.splitlines()
+    body = "\n".join(lines[func.lineno - 1:func.end_lineno])
+    if not gate_states_literal(func, body, mutation.expect_assertion):
+        return ("the assertion site {}#{} states no {!r} inside that function body"
+                .format(site_file, site_func, mutation.expect_assertion))
+    return ""
+
+
+def gate_assertion_sites(mutation: Mutation, root: Optional[Path] = None) -> frozenset:
+    """The gate declaration line the registered assertion site names."""
+    site_file, site_func = parse_assertion_site(mutation.expect_assertion_site)
+    if not site_file:
+        return frozenset()
+    source = Path(root or DEFAULT_ROOT) / site_file
+    try:
+        func = gate_function(ast.parse(source.read_text(encoding="utf-8")), site_func)
+    except (OSError, SyntaxError):
+        return frozenset()
+    if func is None:
+        return frozenset()
+    return frozenset(((os.path.basename(site_file), func.lineno),))
+
+
+def _assertion_hit(result: RunResult, mutation: Mutation,
+                   sites: frozenset) -> bool:
+    """The failure record at the assertion's own location carries the literal.
+
+    `go test -json` attributes every line to the test that printed it, so a line
+    printed by an aggregating parent, by a passing sibling, or by a test outside
+    the selector is no evidence that this test's assertion failed. Nor is another
+    assertion of the same failing case: its record prints its own location, and
+    the registered location is what ties the report to this assertion. The
+    registry separately refuses a literal a logging call in the test file could
+    print (`emitter_sites`).
+
+    Declared residual: two assertions written on ONE source line report the same
+    location, so a literal of the second still reads as a hit. Closing that would
+    need the column, which neither the registry nor `go test` states.
+    """
+    for record in failure_records(result):
+        if (record["file"], record["line"]) not in sites:
+            continue
+        if mutation.expect_assertion in str(record["text"]):
+            return True
+    return False
+
+
+def classify(result: RunResult, mutation: Mutation,
+             sites: Optional[frozenset] = None) -> Dict[str, object]:
     """Classify one mutated run: only a named-assertion failure is a kill."""
     text = _test_output(result)
     built_failed = any(event.get("Action") == "build-fail" for event in result.events)
@@ -961,7 +1714,9 @@ def classify(result: RunResult, expect_assertion: str) -> Dict[str, object]:
     if not _ran_test(result):
         reason = "zero_match" if result.exit_code == 0 else "no_test_run"
         return {"verdict": NOT_KILLED, "reason": reason, "assertion_hit": False}
-    hit = _assertion_hit(result, expect_assertion)
+    if sites is None:
+        sites = assertion_sites_of(mutation)
+    hit = _assertion_hit(result, mutation, sites)
     if result.exit_code == 0:
         return {"verdict": NOT_KILLED, "reason": "test_green", "assertion_hit": hit}
     if hit:
@@ -970,6 +1725,33 @@ def classify(result: RunResult, expect_assertion: str) -> Dict[str, object]:
         return {"verdict": NOT_KILLED, "reason": "panic_without_assertion",
                 "assertion_hit": False}
     return {"verdict": NOT_KILLED, "reason": "assertion_not_matched", "assertion_hit": False}
+
+
+def classify_gate(result: RunResult, mutation: Mutation) -> Dict[str, object]:
+    """Classify one mutated gate run: a non-zero exit carrying the literal is a kill.
+
+    A Python gate states its verdict as one process exit beside its own output,
+    so the failure text is the whole output rather than a located test record.
+    A gate that stays green, crashes, or reports a rejection the registration
+    does not name is a verification failure, never a kill.
+    """
+    if result.timed_out:
+        return {"verdict": NOT_KILLED, "reason": "timeout", "assertion_hit": False}
+    hit = bool(mutation.expect_assertion) and mutation.expect_assertion in result.raw_text
+    if result.exit_code == 0:
+        return {"verdict": NOT_KILLED, "reason": "gate_green", "assertion_hit": hit}
+    if hit:
+        return {"verdict": KILLED, "reason": "named_assertion", "assertion_hit": True}
+    return {"verdict": NOT_KILLED, "reason": "assertion_not_matched", "assertion_hit": False}
+
+
+def classify_gate_control(result: RunResult) -> Dict[str, object]:
+    """The unmutated control gate must end green on the same tree face."""
+    if result.timed_out:
+        return {"verdict": "red", "reason": "timeout", "exit_code": result.exit_code}
+    if result.exit_code != 0:
+        return {"verdict": "red", "reason": "gate_failed", "exit_code": result.exit_code}
+    return {"verdict": "green", "reason": "green", "exit_code": result.exit_code}
 
 
 # CONTROL_RACE_WAIVERS mirrors the RACE_WAIVER_SIGNATURES table of
@@ -999,22 +1781,93 @@ def _race_waived(result: RunResult) -> bool:
     return bool(frames)
 
 
+# RACE_FAILURE_MARKER is the testing package's own statement that a failure is a
+# detected race: `testing.go` logs it on the racing test's own record and keeps it
+# off the parents, which is the per-test attribution a waiver can rest on.
+RACE_FAILURE_MARKER = "race detected during execution of test"
+
+
+def _race_failed(result: RunResult, name: str) -> bool:
+    """Whether the testing package logged this test as failed by a race."""
+    return any(RACE_FAILURE_MARKER in str(event.get("Output") or "")
+               for event in result.events
+               if event.get("Action") in ("output", "build-output")
+               and event.get("Test", "") == name)
+
+
+def _failures_beside_the_race(result: RunResult) -> List[str]:
+    """The failures a waived race does not explain, so a waived race cannot hide them.
+
+    A test the race detector failed states that reason on its own record, and a
+    parent that failed for such a child states nothing of its own because the
+    testing package keeps the race off the parents: those are explained. A case
+    that failed for an assertion carries no such marker, and a race elsewhere in
+    the same run never explains it.
+    """
+    failures = _failing_tests(result)
+    raced = {name for name in failures if _race_failed(result, name)}
+    return [name for name in failures
+            if name not in raced
+            and not any(other != name and other.startswith(name + "/")
+                        for other in failures)]
+
+
+def control_record(mutation: Mutation, result: RunResult,
+                   verdict: Dict[str, object]) -> Dict[str, object]:
+    """One control's evidence: the selector it drove and what the rule ruled."""
+    return {
+        "test": {
+            "module": ".",
+            "package": mutation.test_package,
+            "file": mutation.test_file,
+            "name": mutation.test_name,
+            "selector": mutation.test_selector,
+        },
+        "gate": gate_anchor_record(mutation),
+        "verdict": verdict["verdict"],
+        "reason": verdict["reason"],
+        "exit_code": result.exit_code,
+        "timed_out": result.timed_out,
+        "skipped": list(verdict.get("skipped", [])),
+        "command": list(result.command),
+        "log_ref": result.log_ref,
+    }
+
+
 def classify_control(result: RunResult) -> Dict[str, object]:
     """The unmutated control must run the selector and end green.
 
+    A green exit code is not enough: the selector has to reach a `pass` terminal
+    with no skipped case, because a control tree of start-only, skipped or
+    zero-hit cases proves nothing about the run the mutations are compared to and
+    would let every later verdict count on no execution at all.
+
     A race the race gate already waives (registered upstream signatures whose
     frames are the whole race report) stays green here: the two gates share one
-    ruling table, so a control never flips on a waived upstream race."""
+    ruling table, so a control never flips on a waived upstream race. That ruling
+    rests on an actual race report, which only a real run emits, so it is read
+    before the pass-terminal rule instead of being overridden by it. The waiver
+    covers the failures the race explains and nothing else: an ordinary assertion
+    failure beside the same report leaves the control red, because a control that
+    really asserted is not the execution the mutations are compared to."""
     if result.timed_out:
         return {"verdict": "red", "reason": "timeout", "exit_code": result.exit_code}
     if not _ran_test(result):
         return {"verdict": "red", "reason": "zero_match", "exit_code": result.exit_code}
+    skipped = _skipped_cases(result)
+    if skipped:
+        return {"verdict": "red", "reason": "skipped", "exit_code": result.exit_code,
+                "skipped": skipped}
     failures = _failing_tests(result)
-    if (result.exit_code != 0 or failures) and _race_waived(result):
+    if (result.exit_code != 0 or failures) and _race_waived(result) \
+            and not _failures_beside_the_race(result):
         return {"verdict": "green", "reason": "green_race_waived", "exit_code": result.exit_code}
     if result.exit_code != 0 or failures:
         return {"verdict": "red", "reason": "test_failed", "exit_code": result.exit_code,
                 "failing": failures}
+    if not _passed_selector(result):
+        return {"verdict": "red", "reason": "no_pass_terminal",
+                "exit_code": result.exit_code}
     return {"verdict": "green", "reason": "green", "exit_code": result.exit_code}
 
 
@@ -1030,10 +1883,20 @@ def evidence_status_for(basis: str, confirmed_ids: Iterable[str],
     return "not_evidence_backed"
 
 
+def gate_anchor_record(mutation: Mutation) -> Optional[Dict[str, str]]:
+    """The gate a verdict is attributed to; None for a Go-test mutation."""
+    if not mutation.gate_path:
+        return None
+    return {"path": mutation.gate_path, "selftest": mutation.gate_selftest}
+
+
 def judge_mutation(mutation: Mutation, result: RunResult,
-                   evidence_status: str) -> Dict[str, object]:
+                   evidence_status: str,
+                   source_root: Optional[Path] = None) -> Dict[str, object]:
     """Build the per-mutation record; unbacked candidates never count as kills."""
-    outcome = classify(result, mutation.expect_assertion)
+    sites = assertion_sites_of(mutation, source_root)
+    outcome = (classify_gate(result, mutation) if mutation.gate_path
+               else classify(result, mutation, sites))
     # A test-sensitivity mutation is evidenced by the kill itself: if the named
     # assertion does not kill it, the mutation stays unbacked instead of being
     # reported as if the suite already covered the form.
@@ -1057,7 +1920,11 @@ def judge_mutation(mutation: Mutation, result: RunResult,
             "name": mutation.test_name,
             "selector": mutation.test_selector,
         },
+        "gate": gate_anchor_record(mutation),
         "expect_assertion": mutation.expect_assertion,
+        "assertion_site": mutation.expect_assertion_site,
+        "assertion_locations": [
+            "{}:{}".format(name, line) for name, line in sorted(sites)],
         "status": outcome["verdict"],
         "verdict": outcome["verdict"],
         "reason": outcome["reason"],
@@ -1081,10 +1948,11 @@ def evaluate_gate(records: Sequence[Dict[str, object]],
         failures.append("no control run was recorded")
     for control in controls:
         if control.get("verdict") != "green":
+            source = ((control.get("test") or {}).get("selector")
+                      or (control.get("gate") or {}).get("path"))
             failures.append(
                 "control {} is {} ({})".format(
-                    control.get("test", {}).get("selector"), control.get("verdict"),
-                    control.get("reason")))
+                    source, control.get("verdict"), control.get("reason")))
     if not records:
         failures.append("no mutation was run")
     for record in records:
@@ -1093,9 +1961,11 @@ def evaluate_gate(records: Sequence[Dict[str, object]],
                 "mutation {} is not evidence-backed ({})".format(
                     record.get("id"), record.get("basis")))
         if record.get("verdict") != KILLED:
+            detail = record.get("patch_face")
             failures.append(
-                "mutation {} status {!r} is not 'killed' ({})".format(
-                    record.get("id"), record.get("verdict"), record.get("reason")))
+                "mutation {} status {!r} is not 'killed' ({}{})".format(
+                    record.get("id"), record.get("verdict"), record.get("reason"),
+                    "" if not detail else ": " + str(detail)))
     for defect_id in (confirmed_ids if require_confirmed_mapping else ()):
         hits = [record for record in records if record.get("basis") == defect_id]
         if len(hits) != 1:
@@ -1167,6 +2037,43 @@ def anchor_landed(root: Path, mutation: Mutation) -> bool:
     return bool(leaf) and "t.Run(\"{}\")".format(leaf) in text
 
 
+# Constructs that print text without failing the test. A recorded kill is judged
+# by the literal appearing on a failing case, and a line printed by one of these
+# has no failure behind it, so a registered literal reachable from one of them
+# would let a mention pass as a kill.
+NON_FAILING_EMITTERS = (
+    "t.Log(", "t.Logf(", "t.Logln(",
+    "fmt.Print(", "fmt.Printf(", "fmt.Println(", "fmt.Fprint",
+    "log.Print", "log.Printf", "log.Println", "println(", "os.Stdout", "os.Stderr",
+)
+
+
+def emitter_sites(text: str, literal: str) -> List[int]:
+    """The 1-based lines where a logging call could print the registered literal."""
+    return [number for number, line in enumerate(text.splitlines(), 1)
+            if literal in line and any(token in line for token in NON_FAILING_EMITTERS)]
+
+
+def gate_registration_problems(root: Path, mutation: Mutation) -> List[str]:
+    """The static anchors of one gate mutation: the gate and its selftest."""
+    problems: List[str] = []
+    if (mutation.test_package or mutation.test_file or mutation.test_name
+            or mutation.test_selector):
+        problems.append(
+            "a gate mutation declares a Go test beside its gate, so it states "
+            "two measurements")
+    if not mutation.gate_path.endswith(".py"):
+        problems.append("the anchor gate {} is not a Python gate".format(mutation.gate_path))
+    if not (root / mutation.gate_path).is_file():
+        problems.append("the anchor gate is missing: {}".format(mutation.gate_path))
+    if not mutation.gate_selftest:
+        problems.append("the anchor gate names no selftest")
+    elif not (root / mutation.gate_selftest).is_file():
+        problems.append(
+            "the anchor gate's selftest is missing: {}".format(mutation.gate_selftest))
+    return problems
+
+
 def validate_registry(root: Path, mutations: Sequence[Mutation]) -> List[str]:
     """Static anchors: no go run, but every patch and assertion must exist once."""
     problems: List[str] = []
@@ -1207,6 +2114,12 @@ def validate_registry(root: Path, mutations: Sequence[Mutation]) -> List[str]:
             problems.append(
                 "{}: an enabled mutation must name the assertion that kills it".format(
                     mutation.id))
+        if mutation.gate_path:
+            for problem in gate_registration_problems(root, mutation):
+                problems.append("{}: {}".format(mutation.id, problem))
+        site_problem = assertion_site_problem(mutation, root)
+        if site_problem:
+            problems.append("{}: {}".format(mutation.id, site_problem))
         for replacement in patches:
             if replacement.file.endswith("_test.go"):
                 problems.append("{} targets a test file".format(mutation.id))
@@ -1220,14 +2133,25 @@ def validate_registry(root: Path, mutations: Sequence[Mutation]) -> List[str]:
                         mutation.id,
                         source.read_text(encoding="utf-8").count(replacement.old),
                         replacement.file))
+        if mutation.gate_path:
+            continue
         target = root / mutation.test_file
         if not target.is_file():
             problems.append("{}: test file is missing: {}".format(
                 mutation.id, mutation.test_file))
-        elif mutation.expect_assertion not in target.read_text(encoding="utf-8"):
-            problems.append(
-                "{}: expect_assertion is absent from {}".format(
-                    mutation.id, mutation.test_file))
+        else:
+            test_text = target.read_text(encoding="utf-8")
+            if mutation.expect_assertion not in test_text:
+                problems.append(
+                    "{}: expect_assertion is absent from {}".format(
+                        mutation.id, mutation.test_file))
+            printed = emitter_sites(test_text, mutation.expect_assertion)
+            if printed:
+                problems.append(
+                    "{}: the registered literal is emittable by a logging call in {} "
+                    "at line(s) {}; a mention is not a failed assertion".format(
+                        mutation.id, mutation.test_file,
+                        ", ".join(str(line) for line in printed)))
         if "^{}$".format(mutation.test_name) != mutation.test_selector:
             problems.append(
                 "{}: test_selector must anchor the parent test name".format(mutation.id))
@@ -1259,15 +2183,21 @@ def _git(root: Path, *args: str) -> bytes:
     return proc.stdout
 
 
-def source_files(root: Path) -> List[str]:
-    """Tracked plus untracked-but-not-ignored files, minus nested modules."""
+def source_files(root: Path, include_examples: bool = False) -> List[str]:
+    """Tracked plus untracked-but-not-ignored files, minus nested modules.
+
+    A Go selector never compiles the nested example modules, so its copy leaves
+    them out; a Python gate reads them as part of its corpus (the dead-producer
+    consumer face walks every Go file under the root), so a run carrying gate
+    mutations copies them too.
+    """
     raw = _git(root, "ls-files", "-z", "--cached", "--others", "--exclude-standard")
     names = []
     for chunk in raw.split(b"\0"):
         if not chunk:
             continue
         name = chunk.decode("utf-8")
-        if name.startswith(COPY_EXCLUDED_PREFIXES):
+        if not include_examples and name.startswith(COPY_EXCLUDED_PREFIXES):
             continue
         names.append(name)
     return sorted(set(names))
@@ -1340,6 +2270,29 @@ def _runner_module():
     return run_runtime_scenarios
 
 
+MUTATION_TOOL_NAME = "check_event_integrity_mutations"
+
+
+def tested_source_binding(root: Path) -> Dict[str, object]:
+    """The closure these mutations compile, resolved from the tree they run on.
+
+    Every registered mutation drives `go -C <root> test`, so the tested module is
+    the root module — but a selected module is not the whole compiled tree: a local
+    `replace` in the root's go.mod and a go.work `use` list both add sources, and a
+    report that named only the root would leave those free to change.
+    """
+    runner = _runner_module()
+    try:
+        return runner.source_binding(str(root), [{"dir": ".", "module_path": runner.MODULE_PATH}])
+    except runner.RunnerError as exc:
+        raise GateError("cannot bind the tested sources: {}".format(exc))
+
+
+def binding_window(binding: Dict[str, object]) -> Dict[str, object]:
+    """One end of the run: the closure digest and how many modules it covered."""
+    return {"digest": binding["digest"], "modules": len(binding["modules"])}
+
+
 def baseline_evidence(root: Path, contract_path: Optional[str]) -> Dict[str, object]:
     """The baseline a `--bundle` ties this mutation report to.
 
@@ -1347,8 +2300,13 @@ def baseline_evidence(root: Path, contract_path: Optional[str]) -> Dict[str, obj
     per-module source fingerprint as the evidence the runner produced. The
     digest is the sha256 of the schema-v2 event contract — the very file the
     runner digests — and the fingerprint comes from the runner's own
-    `module_fingerprint`. Every registered mutation drives `go -C <root> test`,
+    `source_binding`. Every registered mutation drives `go -C <root> test`,
     so the tested module is the root module.
+
+    The closure and the tool identity are recorded beside it because a mutation
+    verdict is only as good as the tree and the gate that produced it: the same
+    check that walks the sources also names the script whose bytes decide what
+    "killed" means.
     """
     relative = contract_path or DEFAULT_EVENT_CONTRACT
     path = Path(relative)
@@ -1362,13 +2320,19 @@ def baseline_evidence(root: Path, contract_path: Optional[str]) -> Dict[str, obj
             "{} is not the schema v2 {} contract; its digest cannot tie the "
             "mutations to the runner baseline".format(path, PROFILE))
     runner = _runner_module()
+    binding = tested_source_binding(root)
     try:
-        fingerprint = runner.module_fingerprint(str(root), ".", runner.MODULE_PATH)
+        gate_tool = runner.tool_identity(str(root), name=MUTATION_TOOL_NAME,
+                                         entrypoint=os.path.relpath(
+                                             os.path.abspath(__file__), str(root)))
     except runner.RunnerError as exc:
-        raise GateError("cannot fingerprint the tested module: {}".format(exc))
+        raise GateError("cannot fingerprint the mutation gate: {}".format(exc))
     return {
         "contract_digest": file_digest(path),
-        "module_fingerprints": [fingerprint],
+        "module_fingerprints": binding["modules"],
+        "source_binding": dict(binding, before=binding_window(binding),
+                               after=binding_window(binding)),
+        "gate_tool": gate_tool,
     }
 
 
@@ -1380,6 +2344,36 @@ def baseline_evidence(root: Path, contract_path: Optional[str]) -> Dict[str, obj
 def go_test_command(tree: Path, mutation: Mutation) -> List[str]:
     return ["go", "-C", str(tree), "test", mutation.test_package,
             "-run", mutation.test_selector, "-count=1", "-race", "-json"]
+
+
+def gate_command(tree: Path, mutation: Mutation) -> List[str]:
+    return [sys.executable, str(tree / mutation.gate_path), "--root", str(tree)]
+
+
+def run_gate_check(tree: Path, mutation: Mutation, timeout: int,
+                   log_path: Path) -> RunResult:
+    """Run the named Python gate on the copy tree; its exit is the verdict."""
+    command = gate_command(tree, mutation)
+    timed_out = False
+    try:
+        proc = subprocess.run(command, cwd=str(tree), capture_output=True, text=True,
+                              encoding="utf-8", errors="replace", timeout=timeout)
+        exit_code = proc.returncode
+        stdout, stderr = proc.stdout, proc.stderr
+    except subprocess.TimeoutExpired as exc:
+        timed_out = True
+        exit_code = -1
+        stdout = exc.stdout or ""
+        stderr = exc.stderr or ""
+        if isinstance(stdout, bytes):
+            stdout = stdout.decode("utf-8", "replace")
+        if isinstance(stderr, bytes):
+            stderr = stderr.decode("utf-8", "replace")
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    log_path.write_text(stdout + ("\n" + stderr if stderr else ""), encoding="utf-8")
+    raw = stdout + ("\n" + stderr if stderr else "")
+    return RunResult(test_name="", exit_code=exit_code, events=[], raw_text=raw,
+                     log_ref=str(log_path), command=tuple(command), timed_out=timed_out)
 
 
 def run_go_test(tree: Path, mutation: Mutation, timeout: int,
@@ -1407,6 +2401,62 @@ def run_go_test(tree: Path, mutation: Mutation, timeout: int,
                                 timed_out=timed_out)
 
 
+def replay_result(log_path: Path, mutation: Mutation) -> RunResult:
+    """Parse one recorded `go test -json` stream into the run the gate judges.
+
+    A recording carries no process status, so the exit code is the package
+    outcome the stream states: a package-level `fail` or `build-fail` is the
+    non-zero exit `go test` would have returned. A missing recording is a gate
+    error, never a green run.
+    """
+    if not log_path.is_file():
+        raise GateError("replay log is missing: {}".format(log_path))
+    result = parse_go_test_output(log_path.read_text(encoding="utf-8"), "",
+                                  mutation.test_name, 0, log_ref=str(log_path),
+                                  command=("replay", str(log_path)))
+    failed = any(event.get("Action") in ("fail", "build-fail")
+                 and not event.get("Test") for event in result.events)
+    result.exit_code = 1 if failed else 0
+    return result
+
+
+def control_result(tree: Path, mutation: Mutation, timeout: int, out_dir: Path,
+                   replay: Optional[Path]) -> RunResult:
+    """One control run: live `go test` or gate, or its recording under `--replay`."""
+    if mutation.gate_path:
+        if replay is not None:
+            raise GateError(
+                "{}: a gate verdict is a live process exit; --replay carries no gate "
+                "recordings".format(mutation.id))
+        return run_gate_check(tree, mutation, timeout,
+                              out_dir / "control" / (Path(mutation.gate_path).name + ".log"))
+    if replay is None:
+        return run_go_test(tree, mutation, timeout,
+                           out_dir / "control" / (mutation.test_name + ".jsonl"))
+    return replay_result(replay / "control" / (mutation.test_name + ".jsonl"), mutation)
+
+
+def mutation_result(tree: Path, mutation: Mutation, timeout: int, out_dir: Path,
+                    replay: Optional[Path]) -> RunResult:
+    """One mutated run: live `go test` or gate, or its recording under `--replay`."""
+    if mutation.gate_path:
+        if replay is not None:
+            raise GateError(
+                "{}: a gate verdict is a live process exit; --replay carries no gate "
+                "recordings".format(mutation.id))
+        return run_gate_check(tree, mutation, timeout,
+                              out_dir / "mutations" / mutation.id / "run.log")
+    if replay is None:
+        return run_go_test(tree, mutation, timeout,
+                           out_dir / "mutations" / mutation.id / "run.jsonl")
+    return replay_result(replay / "mutations" / mutation.id / "run.jsonl", mutation)
+
+
+def evidence_name(replay: Optional[Path]) -> str:
+    """The report name; a replay report must stay outside every `--bundle`."""
+    return "evidence.json" if replay is None else "evidence.replay.json"
+
+
 def apply_patch(tree: Path, mutation: Mutation) -> Dict[str, str]:
     """Apply every edit of one mutation; return the pristine text per file."""
     pristine: Dict[str, str] = {}
@@ -1432,12 +2482,313 @@ def restore_patch(tree: Path, pristine: Dict[str, str]) -> None:
         (tree / name).write_text(text, encoding="utf-8")
 
 
+# ---------------------------------------------------------------------------
+# 编译面：补丁必须落在该选择器真正编译的包、构建标签、模块里
+# ---------------------------------------------------------------------------
+
+
+GOOS_NAMES = frozenset((
+    "aix", "android", "darwin", "dragonfly", "freebsd", "hurd", "illumos",
+    "ios", "js", "linux", "nacl", "netbsd", "openbsd", "plan9", "solaris",
+    "wasip1", "windows", "zos",
+))
+GOARCH_NAMES = frozenset((
+    "386", "amd64", "arm", "arm64", "loong64", "mips", "mips64", "mips64le",
+    "mipsle", "ppc64", "ppc64le", "riscv64", "s390x", "wasm",
+))
+# The registered command never passes `-tags`; these are the only tags a `go
+# test -race` invocation sets by itself besides the platform and release tags.
+CONSTRAINT_TAGS = frozenset(("gc", "race"))
+_GO_BUILD_PATTERN = re.compile(r"^//go:build\s+(.+)$")
+_GO_LEGACY_PATTERN = re.compile(r"^//\s*\+build\s+(.+)$")
+_IMPORT_ONE = re.compile(r'^import\s+(?:[\w.]+\s+|_\s+|\.\s+)?"([^"]+)"\s*$')
+_IMPORT_IN_BLOCK = re.compile(r'^\s*(?:[\w.]+\s+|_\s+|\.\s+)?"([^"]+)"\s*$')
+_FACE_CACHE: Dict[Tuple[str, str], frozenset] = {}
+
+
+def platform_tags() -> frozenset:
+    """The platform tags the gate's own `go test` invocation compiles under."""
+    system = platform.system().lower()
+    goos = {"darwin": "darwin", "linux": "linux", "windows": "windows"}.get(system, system)
+    machine = platform.machine().lower()
+    goarch = {"arm64": "arm64", "aarch64": "arm64", "x86_64": "amd64",
+              "amd64": "amd64", "i386": "386", "i686": "386"}.get(machine, machine)
+    return frozenset((goos, goarch))
+
+
+def release_tags(go_mod_text: str) -> frozenset:
+    """The `go1.N` release tags a module at the declared version satisfies."""
+    match = re.search(r"^go\s+(\d+)\.(\d+)", go_mod_text, re.M)
+    if match is None:
+        return frozenset()
+    major, minor = int(match.group(1)), int(match.group(2))
+    if major != 1:
+        return frozenset()
+    return frozenset("go1.{}".format(level) for level in range(1, minor + 1))
+
+
+def _split_constraint_tokens(expr: str) -> List[str]:
+    return re.findall(r"\(|\)|!|&&|\|\||[A-Za-z0-9_.]+", expr)
+
+
+def _eval_constraint(expr: str, tags: frozenset) -> bool:
+    """Evaluate one `//go:build` expression; an unset tag is false, as in Go."""
+    tokens = _split_constraint_tokens(expr)
+    position = [0]
+
+    def peek() -> str:
+        return tokens[position[0]] if position[0] < len(tokens) else ""
+
+    def eat(text: str) -> bool:
+        if peek() == text:
+            position[0] += 1
+            return True
+        return False
+
+    def parse_or() -> bool:
+        value = parse_and()
+        while eat("||"):
+            right = parse_and()
+            value = value or right
+        return value
+
+    def parse_and() -> bool:
+        value = parse_unary()
+        while eat("&&"):
+            right = parse_unary()
+            value = value and right
+        return value
+
+    def parse_unary() -> bool:
+        if eat("!"):
+            return not parse_unary()
+        if eat("("):
+            value = parse_or()
+            eat(")")
+            return value
+        token = peek()
+        if not token:
+            return False
+        position[0] += 1
+        return token in tags
+
+    if not tokens:
+        return False
+    return parse_or()
+
+
+def build_constraint_excludes(path: Path, tags: frozenset) -> str:
+    """Why the build constraints keep this file out of the gate's build, if any."""
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()[:40]
+    except OSError as exc:
+        raise GateError("cannot read {}: {}".format(path, exc))
+    expressions = [match.group(1) for match in map(_GO_BUILD_PATTERN.match, lines) if match]
+    legacy = [match.group(1) for match in map(_GO_LEGACY_PATTERN.match, lines) if match]
+    for expression in expressions:
+        if not _eval_constraint(expression, tags):
+            return "//go:build {} is false for the tags the gate sets ({})".format(
+                expression, " ".join(sorted(tags)))
+    for line in legacy:
+        # `// +build` lines AND together; each line ORs its comma-separated terms.
+        terms = [term.strip() for term in line.split() if term.strip()]
+        allowed = False
+        for term in terms:
+            options = [option for option in term.split(",") if option]
+            if options and all((option.startswith("!") and option[1:] not in tags)
+                               or (not option.startswith("!") and option in tags)
+                               for option in options):
+                allowed = True
+                break
+        if terms and not allowed:
+            return "// +build {} is false for the tags the gate sets ({})".format(
+                line, " ".join(sorted(tags)))
+    # A `name_GOOS.go`, `name_GOARCH.go` or `name_GOOS_GOARCH.go` file only
+    # enters the build whose platform it names.
+    stem = path.name[:-3] if path.name.endswith(".go") else path.name
+    parts = stem.split("_")
+    platform_set = platform_tags()
+    named = parts[-1:]
+    if len(parts) >= 3 and parts[-2] in GOOS_NAMES and parts[-1] in GOARCH_NAMES:
+        named = parts[-2:]
+    for part in named:
+        if (part in GOOS_NAMES or part in GOARCH_NAMES) and part not in platform_set:
+            return "{} names the {} build, which the gate does not compile".format(
+                path.name, part)
+    return ""
+
+
+def module_root_of(path: Path) -> Path:
+    """The nearest ancestor holding a go.mod, i.e. the module a file belongs to."""
+    for parent in [path] + list(path.parents):
+        if (parent / "go.mod").is_file():
+            return parent
+    return path.parent
+
+
+def _file_imports(path: Path) -> List[str]:
+    """The import paths one Go file names."""
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return []
+    found: List[str] = []
+    in_block = False
+    for line in lines:
+        stripped = line.strip()
+        if in_block:
+            if stripped.startswith(")"):
+                in_block = False
+                continue
+            match = _IMPORT_IN_BLOCK.match(line)
+            if match:
+                found.append(match.group(1))
+            continue
+        if stripped.startswith("import ("):
+            in_block = True
+            continue
+        match = _IMPORT_ONE.match(stripped)
+        if match:
+            found.append(match.group(1))
+    return found
+
+
+def compiled_packages(tree: Path, test_package: str) -> frozenset:
+    """Every package directory the selector's package compiles, transitively.
+
+    The set is the transitive import closure of the test package, read from the
+    source files the build would compile. A file whose package is outside it is
+    never built by `go test <test_package>`, so a patch to it cannot change what
+    the selector runs.
+    """
+    key = (str(tree.resolve()), test_package)
+    cached = _FACE_CACHE.get(key)
+    if cached is not None:
+        return cached
+    go_mod = tree / "go.mod"
+    if not go_mod.is_file():
+        raise GateError("no go.mod under {}".format(tree))
+    module_text = go_mod.read_text(encoding="utf-8")
+    match = re.search(r"^module\s+(\S+)", module_text, re.M)
+    if match is None:
+        raise GateError("{} names no module path".format(go_mod))
+    module_path = match.group(1)
+    tags = frozenset(CONSTRAINT_TAGS | platform_tags() | release_tags(module_text))
+    start = (tree / test_package).resolve()
+    if not start.is_dir():
+        raise GateError("test package is missing: {}".format(start))
+    seen = {start}
+    queue = [start]
+    while queue:
+        directory = queue.pop()
+        for source in sorted(directory.glob("*.go")):
+            if build_constraint_excludes(source, tags):
+                continue
+            for imported in _file_imports(source):
+                if imported == module_path:
+                    target = tree
+                elif imported.startswith(module_path + "/"):
+                    target = (tree / imported[len(module_path) + 1:]).resolve()
+                else:
+                    continue
+                if target.is_dir() and target not in seen:
+                    seen.add(target)
+                    queue.append(target)
+    result = frozenset(seen)
+    _FACE_CACHE[key] = result
+    return result
+
+
+def gate_face_problem(tree: Path, mutation: Mutation) -> str:
+    """Why a gate mutation's patch cannot enter the gate's read face.
+
+    A Python gate's read face is observable only through its verdict, so the
+    static check names the files that must stand in the copy; the causal tie is
+    the green control beside the named rejection, which only the patch can have
+    changed. A gate that reads the patch and stays green is a surviving
+    mutation, never an unapplied one.
+    """
+    if not (tree / mutation.gate_path).is_file():
+        return "the anchor gate is missing from the isolated tree: {}".format(
+            mutation.gate_path)
+    for replacement in mutation.patch_set():
+        if not (tree / replacement.file).is_file():
+            return "the patch target is missing from the isolated tree: {}".format(
+                replacement.file)
+    return ""
+
+
+def compiled_face_problem(tree: Path, mutation: Mutation) -> str:
+    """Why the mutation's patch would not enter the selector's compiled face.
+
+    A patch that changes no file the selector builds leaves the run unmutated, so
+    whatever the run then says — green or red — is not a kill of this mutation.
+    Empty string means every patched file is compiled by `go test <test_package>`.
+    A gate mutation is judged by its gate's read face instead.
+    """
+    if mutation.gate_path:
+        return gate_face_problem(tree, mutation)
+    modules = {module_root_of((tree / replacement.file).resolve())
+               for replacement in mutation.patch_set()}
+    if len(modules) > 1 or (modules and next(iter(modules)) != tree.resolve()):
+        return "the patch spans modules {} while the selector compiles {}".format(
+            sorted(str(module) for module in modules), tree.resolve())
+    tags = frozenset(CONSTRAINT_TAGS | platform_tags()
+                     | release_tags((tree / "go.mod").read_text(encoding="utf-8")))
+    compiled = None
+    for replacement in mutation.patch_set():
+        path = tree / replacement.file
+        excluded = build_constraint_excludes(path, tags)
+        if excluded:
+            return "{}: {}".format(replacement.file, excluded)
+        if compiled is None:
+            compiled = compiled_packages(tree, mutation.test_package)
+        if path.resolve().parent not in compiled:
+            return ("{} is outside the import closure of the {} selector, so the "
+                    "selector never compiles it".format(replacement.file,
+                                                        mutation.test_package))
+    return ""
+
+
+def not_applied_record(mutation: Mutation, problem: str,
+                       evidence_status: str) -> Dict[str, object]:
+    """One mutation whose patch never entered the compiled face: not a kill."""
+    targets = [replacement.file for replacement in mutation.patch_set()]
+    return {
+        "id": mutation.id,
+        "basis": mutation.basis,
+        "evidence_kind": mutation.evidence_kind,
+        "evidence_status": evidence_status,
+        "evidence_ref": mutation.evidence_ref,
+        "description": mutation.description,
+        "target": targets[0] if targets else "",
+        "targets": targets,
+        "test": {
+            "module": ".",
+            "package": mutation.test_package,
+            "file": mutation.test_file,
+            "name": mutation.test_name,
+            "selector": mutation.test_selector,
+        },
+        "gate": gate_anchor_record(mutation),
+        "expect_assertion": mutation.expect_assertion,
+        "assertion_site": mutation.expect_assertion_site,
+        "status": NOT_APPLIED,
+        "verdict": NOT_APPLIED,
+        "reason": "not_in_compiled_face",
+        "patch_face": problem,
+        "assertion_hit": False,
+        "counted_killed": False,
+        "patch_digest": patch_digest(mutation),
+    }
+
+
 def controls_for(mutations: Sequence[Mutation]) -> List[Mutation]:
-    """One control per unique (package, selector); the first mutation carries it."""
+    """One control per unique verdict source; the first mutation carries it."""
     seen = set()
     out: List[Mutation] = []
     for mutation in mutations:
-        key = (mutation.test_package, mutation.test_selector)
+        key = (mutation.gate_path, mutation.test_package, mutation.test_selector)
         if key in seen:
             continue
         seen.add(key)
@@ -1489,11 +2840,16 @@ def summarize(records: Sequence[Dict[str, object]],
               controls: Sequence[Dict[str, object]],
               gate: Dict[str, object],
               root: Path, source_digest: str,
-              baseline: Optional[Dict[str, object]] = None) -> Dict[str, object]:
+              baseline: Optional[Dict[str, object]] = None,
+              replay: Optional[Path] = None) -> Dict[str, object]:
     payload = {
         "schema_version": SCHEMA_VERSION,
         "profile": PROFILE,
         "phase": "04.4",
+        # A live run is the only evidence a bundle may consume; a replay report
+        # names the recordings it judged instead of a process it drove.
+        "mode": "live" if replay is None else "replay",
+        "replay": None if replay is None else str(replay),
         "control_tree_green": bool(
             controls and all(control.get("verdict") == "green" for control in controls)),
         "control": list(controls),
@@ -1513,9 +2869,10 @@ def summarize(records: Sequence[Dict[str, object]],
     return payload
 
 
-def write_evidence(out_dir: Path, payload: Dict[str, object]) -> Path:
+def write_evidence(out_dir: Path, payload: Dict[str, object],
+                   name: str = "evidence.json") -> Path:
     out_dir.mkdir(parents=True, exist_ok=True)
-    path = out_dir / "evidence.json"
+    path = out_dir / name
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
                     encoding="utf-8")
     return path
@@ -1524,8 +2881,9 @@ def write_evidence(out_dir: Path, payload: Dict[str, object]) -> Path:
 def run_gate(root: Path, out_dir: Path, timeout: int,
              requested: Sequence[str], keep_tree: bool,
              frozen_contract: Optional[str],
-             event_contract: Optional[str] = None) -> Dict[str, object]:
-    if shutil.which("go") is None:
+             event_contract: Optional[str] = None,
+             replay: Optional[Path] = None) -> Dict[str, object]:
+    if replay is None and shutil.which("go") is None:
         raise GateError("go toolchain is not on PATH")
     problems = validate_registry(root, MUTATIONS)
     if problems:
@@ -1550,7 +2908,7 @@ def run_gate(root: Path, out_dir: Path, timeout: int,
     # The report must name the runner's baseline even when a control or a
     # mutation later fails: a red report from another tree is still another tree.
     baseline = baseline_evidence(root, event_contract)
-    files = source_files(root)
+    files = source_files(root, include_examples=any(m.gate_path for m in selected))
     tree_root = Path(tempfile.mkdtemp(prefix="event-integrity-mutations-"))
     tree = tree_root / "tree"
     source_digest = tree_digest(root, files)
@@ -1560,25 +2918,10 @@ def run_gate(root: Path, out_dir: Path, timeout: int,
         copy_working_tree(root, tree, files)
         enabled = [mutation for mutation in MUTATIONS if mutation.enabled]
         for control_mutation in controls_for(selected):
-            result = run_go_test(tree, control_mutation, timeout,
-                                 out_dir / "control" / (
-                                     control_mutation.test_name + ".jsonl"))
-            verdict = classify_control(result)
-            controls.append({
-                "test": {
-                    "module": ".",
-                    "package": control_mutation.test_package,
-                    "file": control_mutation.test_file,
-                    "name": control_mutation.test_name,
-                    "selector": control_mutation.test_selector,
-                },
-                "verdict": verdict["verdict"],
-                "reason": verdict["reason"],
-                "exit_code": result.exit_code,
-                "timed_out": result.timed_out,
-                "command": list(result.command),
-                "log_ref": result.log_ref,
-            })
+            result = control_result(tree, control_mutation, timeout, out_dir, replay)
+            verdict = (classify_gate_control(result) if control_mutation.gate_path
+                       else classify_control(result))
+            controls.append(control_record(control_mutation, result, verdict))
         not_backed = [mutation.id for mutation in enabled
                       if evidence_status_for(
                           mutation.basis, confirmed, REPRODUCED_DEFECTS,
@@ -1587,10 +2930,16 @@ def run_gate(root: Path, out_dir: Path, timeout: int,
         control_green = bool(controls) and all(c.get("verdict") == "green" for c in controls)
         if control_green and not not_backed:
             for mutation in selected:
+                status = evidence_status_for(
+                    mutation.basis, confirmed, REPRODUCED_DEFECTS,
+                    [m.basis for m in enabled if m.evidence_kind == "named_assertion"])
+                face_problem = compiled_face_problem(tree, mutation)
+                if face_problem:
+                    records.append(not_applied_record(mutation, face_problem, status))
+                    continue
                 pristine = apply_patch(tree, mutation)
                 try:
-                    result = run_go_test(tree, mutation, timeout,
-                                         out_dir / "mutations" / mutation.id / "run.jsonl")
+                    result = mutation_result(tree, mutation, timeout, out_dir, replay)
                 finally:
                     restore_patch(tree, pristine)
                 for name in pristine:
@@ -1598,10 +2947,7 @@ def run_gate(root: Path, out_dir: Path, timeout: int,
                         raise GateError(
                             "{}: the isolated tree was not restored to the baseline ({})"
                             .format(mutation.id, name))
-                status = evidence_status_for(
-                    mutation.basis, confirmed, REPRODUCED_DEFECTS,
-                    [m.basis for m in enabled if m.evidence_kind == "named_assertion"])
-                records.append(judge_mutation(mutation, result, status))
+                records.append(judge_mutation(mutation, result, status, tree))
         gate = evaluate_gate(records, controls, confirmed,
                              require_confirmed_mapping=not requested)
         if not control_green:
@@ -1611,9 +2957,22 @@ def run_gate(root: Path, out_dir: Path, timeout: int,
             gate["failures"].append(
                 "not_evidence_backed mutations cannot count: " + ", ".join(not_backed))
             gate["ok"] = False
+        # The closure is re-resolved on the far side of the mutants. A report that
+        # names one tree while the mutations ran against another describes neither,
+        # so the drift is refused instead of being written down as one baseline.
+        after = tested_source_binding(root)
+        if after["digest"] != baseline["source_binding"]["digest"]:
+            raise GateError(
+                "the tested source closure changed while the mutations ran: {} -> {}; the "
+                "report would describe a tree that never stood still".format(
+                    baseline["source_binding"]["digest"], after["digest"]))
+        baseline = dict(baseline, source_binding=dict(
+            baseline["source_binding"],
+            before=binding_window(baseline["source_binding"]),
+            after=binding_window(after)))
         payload = summarize(records, controls, gate, root, source_digest,
-                            baseline=baseline)
-        write_evidence(out_dir, payload)
+                            baseline=baseline, replay=replay)
+        write_evidence(out_dir, payload, evidence_name(replay))
         return payload
     finally:
         if keep_tree:
@@ -1650,6 +3009,11 @@ def build_parser() -> argparse.ArgumentParser:
                         help="per go test timeout in seconds")
     parser.add_argument("--keep-tree", action="store_true",
                         help="keep the isolated copy tree for inspection")
+    parser.add_argument("--replay", default=None, metavar="DIR",
+                        help="judge recorded test-log streams under DIR "
+                             "(control/<test>.jsonl, mutations/<id>/run.jsonl) "
+                             "instead of driving go test; writes "
+                             "evidence.replay.json, which no --bundle consumes")
     parser.add_argument("--list", action="store_true",
                         help="list the frozen mutation registry and exit")
     return parser
@@ -1667,6 +3031,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             "evidence_kind": mutation.evidence_kind,
             "targets": [replacement.file for replacement in mutation.patch_set()],
             "test": mutation.test_package + " " + mutation.test_selector,
+            "gate": mutation.gate_path,
             "expect_assertion": mutation.expect_assertion,
             "status": mutation.status,
             "anchor_subtest": mutation.anchor_subtest,
@@ -1689,9 +3054,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             return 2
     else:
         out_dir = Path(tempfile.mkdtemp(prefix="event-integrity-mutations-out-"))
+    replay = Path(args.replay).resolve() if args.replay else None
+    if replay is not None and not replay.is_dir():
+        print("--replay directory does not exist: {}".format(replay), file=sys.stderr)
+        return 2
     try:
         payload = run_gate(root, out_dir, args.timeout, args.mutation,
-                           args.keep_tree, args.frozen_contract, args.contract)
+                           args.keep_tree, args.frozen_contract, args.contract,
+                           replay)
     except GateError as exc:
         failure = {
             "schema_version": SCHEMA_VERSION,
@@ -1710,7 +3080,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             # The failure itself may be the missing/unreadable baseline; report
             # the named gate failure rather than inventing fields.
             pass
-        write_evidence(out_dir, failure)
+        write_evidence(out_dir, failure, evidence_name(replay))
         print("gate failed: {}".format(exc), file=sys.stderr)
         if args.json:
             print(json.dumps(failure, ensure_ascii=False, indent=2))
@@ -1719,11 +3089,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         print(json.dumps(payload, ensure_ascii=False, indent=2))
     else:
         for control in payload["control"]:
-            print("control {test[selector]}: {verdict} ({reason})".format(**control))
+            source = (control["test"]["selector"]
+                      or (control.get("gate") or {}).get("path") or "")
+            print("control {}: {} ({})".format(source, control["verdict"], control["reason"]))
         for mutation in payload["mutations"]:
             print("{}: {} ({})".format(mutation["id"], mutation["status"],
                                        mutation["reason"]))
-        print("evidence: {}".format(out_dir / "evidence.json"))
+        print("evidence: {}".format(out_dir / evidence_name(replay)))
         print("gate: {}".format("ok" if payload["gate"]["ok"] else "FAILED"))
         for failure in payload["gate"]["failures"]:
             print("  - {}".format(failure))

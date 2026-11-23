@@ -205,23 +205,6 @@
       "review_by": "2027-05-05"
     },
     {
-      "id": "runtime.state.migration",
-      "kind": "fact-key",
-      "owner": "runtime/state",
-      "files": [
-        "runtime/state/migrate.go"
-      ],
-      "prefixes": [
-        {
-          "file": "runtime/state/migrate.go",
-          "name": "ArchiveSourcePrefix",
-          "value": "archive:"
-        }
-      ],
-      "reason": "Migrated legacy records carry this durable archive identity namespace.",
-      "review_by": "2027-05-05"
-    },
-    {
       "id": "runtime.task.mutation-identities",
       "kind": "fact-key",
       "owner": "runtime/task",
@@ -267,6 +250,28 @@
       "review_by": "2027-05-05"
     },
     {
+      "id": "runtime.task.approval-attention-facts",
+      "kind": "fact-key",
+      "owner": "runtime/task/approval",
+      "files": [
+        "runtime/task/approval/attention_log.go"
+      ],
+      "prefixes": [
+        {
+          "file": "runtime/task/approval/attention_log.go",
+          "name": "attentionFactPrefix",
+          "value": "tagent/attention/v1/fact:"
+        },
+        {
+          "file": "runtime/task/approval/attention_log.go",
+          "name": "approvalRequestPrefix",
+          "value": "tagent/approval/v1/request:"
+        }
+      ],
+      "reason": "attentionFactPrefix carries the approval channel's attention chain: putAttentionFact writes one event.Event per question, answer or clearance under factKey(id) behind the store's Sync barrier, and foldAttentionFacts reads the stream back in landing order, so a restarted process answers the presence and the rulings the process before it answered. approvalRequestPrefix carries one approvalRequestRecord per caller identity under approvalRequestKey(asked): foldRequestRecords seats the identities a process before it was asked for, and a record whose body states another identity than its key names is refused rather than seated. Both streams are the truth of the approval gate across a restart, and the production seam reads them back through BindAttention: assembly/host.go mounts the governance seat and assembly/governance_checkpoint.go seatGovernance hands it ledger.TierFactLog before features/evolution/governance/checkpoint.go StateSeat.Bind folds both streams. The request-record write leg (storeRequestRecord) runs behind the same face BindAttention publishes: the book keeps that face as the one every registration writes its record to, so a production book writes the attention facts and the request records alike, and a book bound to no face writes no record.",
+      "review_by": "2027-05-05"
+    },
+    {
       "id": "assembly.generation-retirement",
       "kind": "fact-key",
       "owner": "assembly",
@@ -298,6 +303,23 @@
         }
       ],
       "reason": "A framework checkpoint is filed under checkpoint:<partitionSeq> and read back by the frozen event type: the key is the partition sequence the cut advanced to and the payload carries the state slices, so the fact itself is the only truth of the state it states.",
+      "review_by": "2027-05-05"
+    },
+    {
+      "id": "assembly.checkpoint-quiet-point",
+      "kind": "kv-store",
+      "owner": "assembly",
+      "files": [
+        "assembly/checkpoint.go"
+      ],
+      "prefixes": [
+        {
+          "file": "assembly/checkpoint.go",
+          "name": "quietPointKeyPrefix",
+          "value": "tagent/checkpoint/v1/quiet:"
+        }
+      ],
+      "reason": "The quiet point of a framework cut is derived position data, never a fact: each cut commits one key (one key, one barrier, never rewritten, in no chain) at the position in the commit order its slices begin at, and the only reader is tailFactKeys, which bounds the task account's tail there instead of at the checkpoint's own landing. The fact ledger stays the truth of the facts; this key states only where a cut's state begins, so a cut that files nothing bounds no account and a root without one reads the whole log.",
       "review_by": "2027-05-05"
     }
   ],
@@ -337,6 +359,10 @@
     {
       "file": "bench/runners/tagent.go",
       "reason": "Benchmark run artifacts (temp workspaces, task outputs, run directories under gitignored bench/runs/): ephemeral evidence, not a durable truth surface read back as system state."
+    },
+    {
+      "file": "memory/ledger/config.go",
+      "reason": "acquireRootWriteLock prepares the storage root and creates its write-lock marker .write-lock (rootWriteLockFileName), which the kernel flock holds for the life of one write-rights view. The marker is created zero-byte and is never written to or read back, and the kernel releases the flock when the holding process exits, so it states no fact a restart needs: the root's durable truth is the journal under it, registered as memory.ledger.local-file-kv, and this file only admits one writer to that journal."
     }
   ],
   "non_truth_prefixes": [
@@ -377,19 +403,7 @@
       "reason": "Pane output marker used to bind a captured frame to a generation, not persisted truth."
     }
   ],
-  "content_addressed_artifacts": [
-    {
-      "id": "runtime.state.migration-archive",
-      "surface": "runtime.state.migration",
-      "files": [
-        "runtime/state/migrate.go"
-      ],
-      "ticket_fact": "archive:",
-      "content_address": "sha256",
-      "reason": "ArchiveDigest is the tree digest of the source the import read, and each migrated original records that digest beside its key and length; the archived material is never its own truth.",
-      "review_by": "2027-05-05"
-    }
-  ],
+  "content_addressed_artifacts": [],
   "content_address_exempt": [
     {
       "file": "memory/replay/age_segments.go",

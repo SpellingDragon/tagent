@@ -1,10 +1,12 @@
 // 契约: docs/wiki/agent/event-flow.md#projection-lifecycle
 //
-// The compression consumer's state slice: the judgments a producer filed and the
-// request identities a product answers, both of which the consumer derives as it
-// observes the chain. The cut states that account beside the projections it
-// serves, so a boot answers every judgment the covered facts filed without
-// reading one of those facts back, and the judgments the cut left owed stay owed.
+// The compression consumer's state slice: the judgments a chain filed that no
+// product answers yet. The cut states that batch beside the projections it
+// serves, so a boot executes every judgment the covered facts filed without
+// reading one of those facts back, and a judgment a product answers states
+// nothing: its request, its answer and the folding it caused stay on the chain,
+// which is what bounds the slice by the batch still owed instead of by the
+// judgments the chain ever filed.
 package assembly
 
 import (
@@ -15,6 +17,8 @@ import (
 	"time"
 
 	"github.com/SpellingDragon/tagent/api/event"
+	"github.com/SpellingDragon/tagent/memory"
+	"github.com/SpellingDragon/tagent/memory/ledger"
 )
 
 // compressStateSlice is the compression slice of one run: the account the
@@ -23,27 +27,42 @@ import (
 type compressStateSlice struct{ run *Run }
 
 // compressSliceWire is the payload of the compression slice: the judgments of
-// every session chain in session order, and the request identities a product
-// answers in identity order, so the same account renders the same bytes.
+// every session chain that no product answers yet, in session order, so the same
+// account renders the same bytes. A chain that owes nothing is stated nowhere, so
+// the payload is the batch still owed and never the judgments the chain executed.
 type compressSliceWire struct {
 	Sessions []compressSliceSession `json:"sessions"`
-	Answered []event.EventID        `json:"answered"`
 }
 
-// compressSliceSession is the judgments one session chain filed, in the order
+// compressSliceSession is the judgments one session chain still owes, in the order
 // they were filed: the order the consumer executes an owed batch in.
 type compressSliceSession struct {
 	Session   string                  `json:"session"`
 	Judgments []compressSliceJudgment `json:"judgments"`
 }
 
-// compressSliceJudgment is one judgment as the checkpoint states it: the identity
-// the judgment is quoted by, the reason the request fact carries and the moment
-// it was filed on the millisecond axis.
+// compressSliceJudgment is one owed judgment as the checkpoint states it: the
+// identity the judgment is quoted by, the reason the request fact carries and the
+// moment it was filed on the millisecond axis. The judgment is stated whole
+// because it is still owed: a boot executes it without reading the request fact
+// back. A judgment a product answers is stated nowhere, because its request and
+// its answer stay on the chain and no boot owes it again.
 type compressSliceJudgment struct {
 	ID     event.EventID `json:"id"`
-	Reason string        `json:"reason"`
-	At     int64         `json:"at"`
+	Reason string        `json:"reason,omitempty"`
+	At     int64         `json:"at,omitempty"`
+}
+
+// owedJudgments states the batch one session chain still owes, in filing order,
+// as the checkpoint states it. The consumer holds no other judgment, so the batch
+// is the account: a judgment a product answers stands on the chain and costs the
+// checkpoint nothing. The caller holds the consumer lock.
+func owedJudgments(filed []event.CompressRequest) []compressSliceJudgment {
+	out := make([]compressSliceJudgment, 0, len(filed))
+	for _, request := range filed {
+		out = append(out, compressSliceJudgment{ID: request.ID, Reason: request.Reason, At: request.At.UnixMilli()})
+	}
+	return out
 }
 
 // StateName reports the name the compression slice is keyed by.
@@ -69,45 +88,41 @@ func (s compressStateSlice) RestoreState(_ context.Context, payload []byte) erro
 	return s.run.restoreCompressSlice(payload)
 }
 
-// compressSlice states the account the compression consumer of this run holds:
-// the judgments of every session chain in session order and the identities its
-// products answer in identity order. The read is the consumer's own derived
-// state — it flushes nothing and commits nothing, because the facts that account
-// derives from are already on the chain.
+// compressSlice states the batch the compression consumer of this run still
+// owes: the judgments of every session chain no product answers yet, in filing
+// order. The read is the consumer's own derived state — it flushes nothing and
+// commits nothing, because the facts that account derives from are already on the
+// chain. A judgment a product answers is stated nowhere, because its request and
+// its answer stay on the chain: the checkpoint costs the batch the consumer still
+// owes beside nothing per judgment it already executed.
 func (r *Run) compressSlice() ([]byte, error) {
 	r.mu.Lock()
 	consumer := r.compress
 	r.mu.Unlock()
 	consumer.mu.Lock()
 	defer consumer.mu.Unlock()
-	wire := compressSliceWire{
-		Sessions: make([]compressSliceSession, 0, len(consumer.judgments)),
-		Answered: make([]event.EventID, 0, len(consumer.answered)),
-	}
+	sessions := make([]compressSliceSession, 0, len(consumer.judgments))
 	for session, filed := range consumer.judgments {
-		judgments := make([]compressSliceJudgment, 0, len(filed))
-		for _, request := range filed {
-			judgments = append(judgments, compressSliceJudgment{ID: request.ID, Reason: request.Reason, At: request.At.UnixMilli()})
-		}
-		wire.Sessions = append(wire.Sessions, compressSliceSession{Session: string(session), Judgments: judgments})
+		sessions = append(sessions, compressSliceSession{Session: string(session), Judgments: owedJudgments(filed)})
 	}
-	sort.Slice(wire.Sessions, func(i, j int) bool { return wire.Sessions[i].Session < wire.Sessions[j].Session })
-	for request := range consumer.answered {
-		wire.Answered = append(wire.Answered, request)
+	if len(sessions) == 0 {
+		return nil, nil
 	}
-	sort.Slice(wire.Answered, func(i, j int) bool { return wire.Answered[i] < wire.Answered[j] })
-	return json.Marshal(wire)
+	sort.Slice(sessions, func(i, j int) bool { return sessions[i].Session < sessions[j].Session })
+	return json.Marshal(compressSliceWire{Sessions: sessions})
 }
 
-// restoreCompressSlice puts the judgments and answers the checkpoint states back
-// into the consumer of this run. The facts the boot replays afterwards land on
-// this account and never beside it: a request recorded twice is one judgment, a
-// product noted twice is one answer, and a judgment the checkpoint leaves unanswered
-// is the execution the chain still owes.
+// restoreCompressSlice puts the owed judgments the checkpoint states back into
+// the consumer of this run. The facts the boot replays afterwards land on this
+// account and never beside it: a request recorded twice is one judgment, and a
+// product the replay reads notes the judgment it answers, so a judgment the
+// checkpoint leaves owed is the execution the chain still owes.
 //
-// The restore merges: a checkpoint states the account of the chains it covers, and a
+// The restore merges: a checkpoint states the batch of the chains it covers, and a
 // boot reads the framework's checkpoint beside the checkpoint of every chain, so each
 // restore states the chain it carries and leaves the chains beside it standing.
+//   - A judgment a product answered before the cut is restored by no checkpoint: the chain states its request and its answer, and no boot owes it again, so the restore seats the batch still owed and never the answers the chain already holds.
+//   - A chain the slice states beside no judgment is seated nowhere, so the account holds only the chains that owe a fold and the snapshot of it states them alone.
 func (r *Run) restoreCompressSlice(payload []byte) error {
 	var wire compressSliceWire
 	if err := json.Unmarshal(payload, &wire); err != nil {
@@ -123,13 +138,13 @@ func (r *Run) restoreCompressSlice(payload []byte) error {
 			if judgment.ID == "" {
 				return fmt.Errorf("assembly: the compression slice states a judgment of session %s with no identity", session.Session)
 			}
-			filed = append(filed, event.CompressRequest{ID: judgment.ID, Reason: judgment.Reason, At: time.UnixMilli(judgment.At)})
+			request := event.CompressRequest{ID: judgment.ID, Reason: judgment.Reason}
+			if judgment.At != 0 {
+				request.At = time.UnixMilli(judgment.At)
+			}
+			filed = append(filed, request)
 		}
 		judgments[event.SessionID(session.Session)] = filed
-	}
-	answered := make(map[event.EventID]struct{}, len(wire.Answered))
-	for _, request := range wire.Answered {
-		answered[request] = struct{}{}
 	}
 	r.mu.Lock()
 	consumer := r.compress
@@ -139,23 +154,21 @@ func (r *Run) restoreCompressSlice(payload []byte) error {
 	if consumer.judgments == nil {
 		consumer.judgments = map[event.SessionID][]event.CompressRequest{}
 	}
-	if consumer.answered == nil {
-		consumer.answered = map[event.EventID]struct{}{}
-	}
 	for session, filed := range judgments {
+		if len(filed) == 0 {
+			continue
+		}
 		consumer.judgments[session] = filed
-	}
-	for request := range answered {
-		consumer.answered[request] = struct{}{}
 	}
 	return nil
 }
 
-// compressSliceOf states the account one session chain owes: the judgments it
-// filed in filing order and the identities a product answers among them, in
-// identity order, so the same account renders the same bytes. A chain that filed
-// no judgment states nothing, because the checkpoint of that chain has no account to
-// carry.
+// compressSliceOf states the batch one session chain still owes: the judgments it
+// filed that no product answers yet, in filing order. A judgment a product
+// answers states nothing, because the request it was filed as and the answer it
+// drew stay on the chain. A chain that owes no judgment states nothing, so the
+// session checkpoint of a chain the fold already executed carries no compression
+// account at all.
 func (r *Run) compressSliceOf(session event.SessionID) ([]byte, error) {
 	if session == "" {
 		return nil, nil
@@ -166,20 +179,95 @@ func (r *Run) compressSliceOf(session event.SessionID) ([]byte, error) {
 	consumer.mu.Lock()
 	defer consumer.mu.Unlock()
 	filed, held := consumer.judgments[session]
-	if !held || len(filed) == 0 {
+	if !held {
 		return nil, nil
 	}
-	judgments := make([]compressSliceJudgment, 0, len(filed))
-	answered := make([]event.EventID, 0, len(filed))
-	for _, request := range filed {
-		judgments = append(judgments, compressSliceJudgment{ID: request.ID, Reason: request.Reason, At: request.At.UnixMilli()})
-		if _, answeredByAProduct := consumer.answered[request.ID]; answeredByAProduct {
-			answered = append(answered, request.ID)
+	return json.Marshal(compressSliceWire{
+		Sessions: []compressSliceSession{{Session: string(session), Judgments: owedJudgments(filed)}},
+	})
+}
+
+// RestoreCoverage reads the compression facts the restored cut does not state, so
+// the account of a boot whose checkpoint carries no compression slice is the
+// account the chain states instead of an empty one.
+//
+//   - The cut names this consumer's own slice, so no other consumer's coverage bounds this read and no payload of another consumer is read here.
+//   - A cut that states the slice leaves the read unowed: the slice was taken at the quiet point the projection's survivors were, so every judgment and answer at or below the boundary the rebuild replays from is one the account already carries, and the rebuild folds the facts past it.
+//   - The facts are folded in the commit order the tier records, so a judgment is read before the answer that follows it and an answered judgment is struck by its own product rather than staying owed.
+//   - The read folds into the account and files no fact: the rebuild reads the material the projection presents on its own path, and a fact this read reached states the account once because the fold is idempotent by the identity the fact carries.
+func (s compressStateSlice) RestoreCoverage(ctx context.Context, tier *ledger.Tier) error {
+	if tier == nil {
+		return nil
+	}
+	if cut := s.run.checkpointCut(s.StateName()); cut != nil {
+		return nil
+	}
+	r := s.run
+	read, owed, err := r.readCompressionHistory(ctx, tier)
+	if err != nil {
+		return err
+	}
+	assemblyInfo("tagent: boot restored the compression account from the chain it states facts=%d owed=%d", read, owed)
+	return nil
+}
+
+// readCompressionHistory folds every compression fact of the tier into the account
+// in commit order and answers the facts it read beside the judgments still owed,
+// for a boot whose restored cut states no compression slice.
+func (r *Run) readCompressionHistory(ctx context.Context, tier *ledger.Tier) (int, int, error) {
+	var refs []anchorRef
+	if err := tier.Segments.EachIndexNewestFirst(ctx, func(key event.EventID, partition int, seq int64, typ string, session event.SessionID) error {
+		if typ == event.TypeCheckpoint || !event.CompressionMechanism(typ) {
+			return nil
+		}
+		refs = append(refs, anchorRef{key: key, partition: partition, seq: seq, typ: typ, session: session})
+		return nil
+	}); err != nil {
+		return 0, 0, fmt.Errorf("tagent: walk the compression facts of the chain: %w", err)
+	}
+	for at := len(refs) - 1; at >= 0; at-- {
+		if err := r.foldCompressionFact(ctx, tier, refs[at]); err != nil {
+			return 0, 0, err
 		}
 	}
-	sort.Slice(answered, func(i, j int) bool { return answered[i] < answered[j] })
-	return json.Marshal(compressSliceWire{
-		Sessions: []compressSliceSession{{Session: string(session), Judgments: judgments}},
-		Answered: answered,
-	})
+	r.mu.Lock()
+	consumer := r.compress
+	r.mu.Unlock()
+	if consumer == nil {
+		return len(refs), 0, nil
+	}
+	consumer.mu.Lock()
+	owed := 0
+	for _, filed := range consumer.judgments {
+		owed += len(filed)
+	}
+	consumer.mu.Unlock()
+	return len(refs), owed, nil
+}
+
+// foldCompressionFact reads one compression fact by the identity the index named
+// and folds it into the account alone: the projection rebuild reads the material it
+// presents through the seam, and a fact the account states here reaches no state of
+// another consumer.
+func (r *Run) foldCompressionFact(ctx context.Context, tier *ledger.Tier, ref anchorRef) error {
+	stored, held, err := tier.Segments.GetEventInPartition(ctx, ref.key, ref.partition)
+	if err != nil {
+		return err
+	}
+	if !held {
+		return fmt.Errorf("%w: %s", ledger.ErrSegmentBodyMissing, ref.key)
+	}
+	body, err := memory.DecodeEventBody(stored.Body)
+	if err != nil {
+		return fmt.Errorf("tagent: replay the compression fact %s: %w", stored.Key, err)
+	}
+	evt := body.Event()
+	evt.Key = stored.Key
+	r.mu.Lock()
+	consumer := r.compress
+	r.mu.Unlock()
+	if consumer == nil {
+		return nil
+	}
+	return consumer.Reduce(ctx, evt)
 }

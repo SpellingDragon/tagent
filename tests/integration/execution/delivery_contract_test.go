@@ -186,6 +186,8 @@ func TestInstancesSymptomMultiTargetLedger(t *testing.T) {
 // - positive: the two records carry the same four delivery entries, so a reader consumes both through one vocabulary
 // - negative (fact_type_distinct): the records keep their own fact types, so the fact still says who was speaking
 // - negative (dedup_rule_identical): every record's identity is the canonical identity of its own committed fact
+// - positive (admission_beside_the_round): the review turn settles two tasks at that target
+// - the round the delegation carried beside the admission of the call that carried it, and each keeps its own identity, so neither stands for the other
 // - consumer: the send call is one Host.Invoke over a booted host, and the settle fact is the one the framework commits for a settled delegated task
 //
 // 契约: docs/wiki/reliability/durable-delivery.md#lineage-visibility
@@ -221,27 +223,28 @@ func TestInstancesSymptomTwoEntriesOneAccount(t *testing.T) {
 
 	ledger := host.Run().DeliveryLedger()
 	byTarget := deliveryByTarget(t, ledger, peer)
-	if len(byTarget) != 2 {
-		t.Fatalf("deliveries the account lists for %q = %d, want the body a session sent beside the settle the framework delivered:\n%s",
-			peer.SessionID, len(byTarget), deliveryDescribe(byTarget))
+	sent, settles := deliverySplitFamilies(t, byTarget)
+	if len(sent) != 1 || len(settles) != 2 {
+		t.Fatalf("deliveries the account lists for %q = %d sent beside %d settles, want the body a session sent beside the two settles the review turn committed for that target:\n%s",
+			peer.SessionID, len(sent), len(settles), deliveryDescribe(byTarget))
 	}
-	sent, settled := deliverySplitFamilies(t, byTarget)
-	if sent.FactType != event.TypeExternalInput {
-		t.Fatalf("fact type of the sent body = %q, want %q", sent.FactType, event.TypeExternalInput)
+	if sent[0].FactType != event.TypeExternalInput {
+		t.Fatalf("fact type of the sent body = %q, want the %q an agent's own body lands as",
+			sent[0].FactType, event.TypeExternalInput)
 	}
-	if settled.FactType != event.TypeTaskSettled {
-		t.Fatalf("fact type of the framework settle = %q, want %q", settled.FactType, event.TypeTaskSettled)
-	}
-	if sent.FactType == settled.FactType {
-		t.Fatalf("both records report the fact type %q, want the two delivery families kept apart", sent.FactType)
-	}
-	if got, want := deliveryKeySet(sent.Meta()), deliveryKeySet(settled.Meta()); !deliverySameKeys(got, want) {
-		t.Fatalf("delivery entry keys of the sent body = %v, of the framework settle = %v, want one isomorphic set under the frozen keys",
-			got, want)
-	}
-	if sent.Meta()[event.MetaKeyDeliveryTarget] != settled.Meta()[event.MetaKeyDeliveryTarget] {
-		t.Fatalf("target entry of the sent body = %q, of the framework settle = %q, want the one address both reached",
-			sent.Meta()[event.MetaKeyDeliveryTarget], settled.Meta()[event.MetaKeyDeliveryTarget])
+	for _, settled := range settles {
+		if settled.FactType != event.TypeTaskSettled {
+			t.Fatalf("fact type of the framework settle %q = %q, want %q: the two delivery families keep their own type, so the fact still says who was speaking",
+				settled.Identity, settled.FactType, event.TypeTaskSettled)
+		}
+		if got, want := deliveryKeySet(sent[0].Meta()), deliveryKeySet(settled.Meta()); !deliverySameKeys(got, want) {
+			t.Fatalf("delivery entry keys of the sent body = %v, of the framework settle = %v, want one isomorphic set under the frozen keys",
+				got, want)
+		}
+		if sent[0].Meta()[event.MetaKeyDeliveryTarget] != settled.Meta()[event.MetaKeyDeliveryTarget] {
+			t.Fatalf("target entry of the sent body = %q, of the framework settle = %q, want the one address both reached",
+				sent[0].Meta()[event.MetaKeyDeliveryTarget], settled.Meta()[event.MetaKeyDeliveryTarget])
+		}
 	}
 	for _, record := range byTarget {
 		fact, err := host.Run().CommittedEvent(ctx, event.EventID(record.Identity))
@@ -253,26 +256,73 @@ func TestInstancesSymptomTwoEntriesOneAccount(t *testing.T) {
 				record.Identity, fact.Key, fact.Type)
 		}
 	}
+	round, admission := deliverySplitSettles(t, ctx, host, settles, deliveryReviewAnswer)
+	if round.Identity == admission.Identity {
+		t.Fatalf("the two settles of the review turn read as the one identity %q, want the round beside the admission of the call that carried it",
+			round.Identity)
+	}
 	deliveryRequireBodyUnread(t, host, byTarget, deliveryTwoBody)
 }
 
-// deliverySplitFamilies reports the record of the sent body and the record of the
-// framework settle, so each assertion names which family it reads.
-func deliverySplitFamilies(t *testing.T, records []assembly.DeliveryRecord) (sent, settled assembly.DeliveryRecord) {
+// deliverySettleIdentityPrefix is the family prefix the delivery fact of a terminal
+// notification commits under, so an account record is named a settle by its own identity
+// rather than by the fact type a check is about to assert. The family key is
+// `task.DeliveryFactKey`, one notification one identity.
+const deliverySettleIdentityPrefix = "settle-"
+
+// deliverySplitFamilies reports the records of the body a session sent and of the settles
+// the framework delivered, so each assertion names which family it reads. A settled call
+// commits one fact for the round it carried and one for its own admission, so the settle
+// family is read as the set it is rather than as a single record.
+func deliverySplitFamilies(t *testing.T, records []assembly.DeliveryRecord) (sent, settled []assembly.DeliveryRecord) {
 	t.Helper()
 	for _, record := range records {
-		switch record.FactType {
-		case event.TypeExternalInput:
-			sent = record
-		case event.TypeTaskSettled:
-			settled = record
+		if strings.HasPrefix(record.Identity, deliverySettleIdentityPrefix) {
+			settled = append(settled, record)
+			continue
 		}
+		sent = append(sent, record)
 	}
-	if sent.Identity == "" || settled.Identity == "" {
-		t.Fatalf("the account of one target holds sent=%q settled=%q, want one record of each family:\n%s",
-			sent.Identity, settled.Identity, deliveryDescribe(records))
+	if len(sent) == 0 || len(settled) == 0 {
+		t.Fatalf("the account of one target holds sent=%d settled=%d, want the body of each family beside the settles:\n%s",
+			len(sent), len(settled), deliveryDescribe(records))
 	}
 	return sent, settled
+}
+
+// deliverySplitSettles reads the settles of one call apart by what they state: the round
+// the call carried answers with its own result text, and the admission of the call lands
+// the settle line alone. A settle that states any other result names a round this anchor
+// did not drive, so it is reported rather than counted as one of the two.
+func deliverySplitSettles(t *testing.T, ctx context.Context, host *assembly.Host, settles []assembly.DeliveryRecord, answer string) (round, admission assembly.DeliveryRecord) {
+	t.Helper()
+	for _, record := range settles {
+		fact, err := host.Run().CommittedEvent(ctx, event.EventID(record.Identity))
+		if err != nil {
+			t.Fatalf("the delivery identity %q names no committed fact: %v", record.Identity, err)
+		}
+		switch {
+		case strings.Contains(fact.Message.Content, answer):
+			if round.Identity != "" {
+				t.Fatalf("two settles state the review answer, want the one round of the call beside its own admission:\n%s",
+					deliveryDescribe(settles))
+			}
+			round = record
+		case strings.Contains(fact.Message.Content, "result:"):
+			t.Fatalf("settle %q states a result that is not the review answer:\n%s", record.Identity, fact.Message.Content)
+		default:
+			if admission.Identity != "" {
+				t.Fatalf("two settles state no result, want the one admission of the call that carried the review:\n%s",
+					deliveryDescribe(settles))
+			}
+			admission = record
+		}
+	}
+	if round.Identity == "" || admission.Identity == "" {
+		t.Fatalf("the settles of the review turn read as round=%q admission=%q, want one of each:\n%s",
+			round.Identity, admission.Identity, deliveryDescribe(settles))
+	}
+	return round, admission
 }
 
 // deliveryKeySet reports the sorted entry keys of one record metadata map.
@@ -371,12 +421,18 @@ func deliveryBind(t *testing.T, ctx context.Context, host *assembly.Host, peer e
 	}
 }
 
-// deliverySettledTask reports the task the settle fact of the peer chain belongs to.
+// deliverySettledTask reports the task the settled round of the peer chain belongs to: the
+// settle whose body carries the round's own result. Every settled call also lands the
+// settle line of its own admission, so the result text names the round that was delegated.
 func deliverySettledTask(facts []event.Event) event.TaskID {
 	for at := len(facts) - 1; at >= 0; at-- {
-		if facts[at].Type == event.TypeTaskSettled && facts[at].TaskID != "" {
-			return facts[at].TaskID
+		if facts[at].Type != event.TypeTaskSettled || facts[at].TaskID == "" {
+			continue
 		}
+		if !strings.Contains(facts[at].Message.Content, "result:") {
+			continue
+		}
+		return facts[at].TaskID
 	}
 	return ""
 }

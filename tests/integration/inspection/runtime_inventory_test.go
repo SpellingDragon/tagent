@@ -205,13 +205,13 @@ func newRuntimeFixture(t *testing.T) *runtimeFixture {
 	addrA := event.Address{AgentID: event.AgentID("agent-a"), SessionID: event.SessionID("s1")}
 	addrB := event.Address{AgentID: event.AgentID("agent-b"), SessionID: event.SessionID("s1")}
 	addrC := event.Address{AgentID: event.AgentID("agent-c"), SessionID: event.SessionID("s1")}
-	tier, err := ledger.OpenTier(ctx, ledger.StorageConfig{Type: ledger.StorageJournal, Root: t.TempDir()})
+	tier, err := ledger.OpenTier(ctx, ledger.StorageConfig{Type: ledger.StorageJournal, Root: t.TempDir(), WriteRights: true})
 	if err != nil {
 		t.Fatalf("OpenTier: %v", err)
 	}
-	durable, err := state.NewDurableCommit(ledger.TierFactLog(tier), nil)
-	if err != nil {
-		t.Fatalf("NewDurableCommit: %v", err)
+	durable := state.NewEmptyDurableCommit(ledger.TierFactLog(tier), nil)
+	if err := durable.Seat(ctx, nil, nil); err != nil {
+		t.Fatalf("seat the durable commit: %v", err)
 	}
 	registry := task.NewMemoryRegistry(durable, task.NewMemoryAdmission())
 	authority := state.NewAuthority()

@@ -89,7 +89,7 @@
 | `recall_recent` | 最近一页事件引用 | 同 `maxPage` |
 | `recall_trace` | 沿父链做一次因果回走 | 步数缺省 20、上限 50；首 key 不在读面即 `ErrRecallMissing` |
 
-**原文来自原文仓，且按字节切**：`recall_get` 走 `Originals.ReadSegmentScoped`（经 `ledger.ScopedReader` 的 `ReadSegment`／`Get` 形态），请求带字节位置与字节上界，分段在**字节边界**切开、拼回去等于原始字节；读之前先取该事件的读范围（`Reference.ReadScope()`），**持有 key 不等于获得读授权**——范围外的引用不参与可见性判定，key 在范围外就读成 missing，一点字节都不漏。
+**原文来自原文仓，且按字节切**：`recall_get` 走 `RecallPort.ReadSegmentScoped` → `Originals.ReadSegmentScoped`（`tool/recall/get.go` 调端口，`assembly/tools.go` 的端口转 `tier.Originals`；装配期 `hostDocument.toolsFor` 把 `reads.Originals` 接到该端口），请求带字节位置与字节上界，分段在**字节边界**切开、拼回去等于原始字节；读之前先取该事件的读范围（`Reference.ReadScope()`），**持有 key 不等于获得读授权**——范围外的引用不参与可见性判定，key 在范围外就读成 missing，一点字节都不漏。
 
 <a id="declaration-stability"></a>
 ## 六、声明稳定性：召回声明与向量能力隔离
@@ -98,7 +98,7 @@
 
 **是否做语义检索在运行期判定**：判据是 `Reads.Embedder` 是否接线（`tool/recall/query.go` 的 `Call`）；未接线即 `ErrRecallUnwired`，没有第二个能力探测位——把"能力探测"错写成召回分支的前提，声明就会随部署漂移，前缀缓存整段失效。
 
-`tool/recall/skeleton_assert.go` 把工具约定做成**编译期断言**：四把工具都是 `CallableTool`（所以每次调用都先过任务包装）、`New` 的签名与三个具名错误不变、`ledger.ScopedOriginalStore` 由 `ledger.MemoryOriginalStore` 满足；`assembly/skeleton_assert.go` 另以真实 `tierQuerySource` 钉住 `Table` 与父边读取，均不使用测试替身。
+`tool/recall/skeleton_assert.go` 把工具约定做成**编译期断言**：四把工具都是 `CallableTool`（所以每次调用都先过任务包装）、`New` 的签名与三个具名错误不变；`ledger.ScopedOriginalStore` 的满足由 `memory/ledger/reference.go` 在档的原文仓（`kvOriginalStore`）上编译期钉住，装配时再对开档的 tier 断言同一读面；`assembly/skeleton_assert.go` 另以真实 `tierQuerySource` 钉住 `Table` 与父边读取，均不使用测试替身。
 
 ## 七、其余工具面速记
 

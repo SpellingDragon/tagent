@@ -42,7 +42,7 @@ func commitRefusalRun(t *testing.T) *assembly.Run {
 	t.Helper()
 	decl := &config.Declaration{
 		Entry:  "agent-a",
-		Agents: []config.AgentSpec{{ID: "agent-a", Model: "model-a", MaxTokens: 32000}},
+		Agents: []config.AgentSpec{{ID: "agent-a", Model: "model-a", ReplayWindow: 32000}},
 	}
 	native := &entryModel{name: "model-a", answer: func(*model.Request) *model.Response {
 		return entryFinalTurn("the commit-refusal run drives no decision of its own")

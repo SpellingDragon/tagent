@@ -98,13 +98,6 @@ const (
     meter; the total is their sum, so a material the meter cannot measure still
     reports its face instead of folding into another.
 
-const DefaultOutputReserveDivisor = 4
-    DefaultOutputReserveDivisor is the fixed ratio of the provider context
-    window a declaration that names no output reserve leaves for the model's
-    answer. The input budget is the window minus that share; the constant
-    is frozen here because a silent change of the default would move every
-    undeclared budget.
-
 const FinalRoundPlannerName = "final-round-planner"
     FinalRoundPlannerName is the stable name the final round planner answers.
 
@@ -257,13 +250,6 @@ func NoticeFactPrefix(invocationID event.InvocationID) event.EventID
     carries: the range marker of the fact family, spelled as hex so the identity
     stays a canonical event key. A read face selects the notifications of that
     range alone through it.
-
-func OutputReserveOf(providerWindow int) int
-    OutputReserveOf reports the default output allowance of one provider context
-    window: the fixed share of the window the declaration leaves for the model's
-    answer. A window of zero declares no budget and both sides report zero;
-    a window that divides below one token still reserves the one token it can,
-    so the input budget never silently swallows the whole window.
 
 func PendingInputs(facts []event.Event) []event.Event
     PendingInputs reports the driving facts one session chain holds with no
@@ -637,9 +623,6 @@ func (cs *Consumers) Ensure(addr event.Address) *Consumer
     addresses it already drives first, so an address that rested a full idle
     window ends here and the mount this call answers reads the chain from its
     own head instead of a parked driver.
-
-func (cs *Consumers) Has(addr event.Address) bool
-    Has reports whether one address carries a resident consumption loop.
 
 func (cs *Consumers) RecycleIdle(now time.Time) int
     RecycleIdle runs one reclamation sweep at the given clock reading and
@@ -1362,7 +1345,7 @@ func NewLoop(borrow state.Borrow, slots *state.Occupancy, instance event.Instanc
     the session decision-slot ledger and the fact resolver that turns a recorded
     result fact into the native tool message it carries.
 
-func (l *Loop) Backflow(invocationID event.InvocationID, notice task.Notice)
+func (l *Loop) Backflow(invocationID event.InvocationID, notice task.Notice) error
     Backflow admits one notification of a call into the range of the invocation
     that issued that call, so it drives that range's next decision and no other.
     A progress notification commits as a notice fact of that range and nothing
@@ -1379,16 +1362,27 @@ func (l *Loop) Backflow(invocationID event.InvocationID, notice task.Notice)
     wake: a result whose segment already closed stands behind the answer that
     segment landed, so no position of the chain opens a segment on it by itself,
     and the wake that names it is the account that says this fact still drives.
-    The observation the result carries rides on the fact, so the segment the
-    name opens reads the very result the notification delivered instead of a
-    second reading of it.
+    The message the tool result carries reaches the intake of the range beside
+    that fact, so the in-process drive reads the very result the notification
+    delivered; a reader of the chain reads it from the result fact the
+    notification names.
 
     - The wake names the fact only while the task is not awaited by a flying
     segment and not already consumed: an awaited result is paired by that
     segment's harvest, and a consumed one drives nothing, so neither is read
     twice. - A loop that drives no set keeps its backflow parked in the intake;
     a set that carries no instance for the address wakes nothing and starts
-    none.
+    none. - A delivery fact the commit face refuses is reported to the caller
+    beside the handover that stands anyway: the result reaches the intake of
+    the range in this process, and the record of that handover is the one
+    thing the chain is missing, so the caller holding the notification keeps
+    it owed rather than recording a consumption for a hand-over no fact names.
+    - The refusal is reported at ERROR, because a run that drives the result
+    beside no delivery fact answers three read faces — the replay fold, the call
+    identity, the host delivery record — with material the chain does not carry.
+    - A refused progress fact answers no caller and is reported here alone:
+    no notification is owed for a report of the pipeline's own rounds, so a
+    progress report never reaches the return below.
 
 func (w Loop) Begin(name string) func()
     Begin registers one writer that is starting now and answers the confirmation
@@ -1497,10 +1491,6 @@ func (l *Loop) SetHistory(face HistoryFace)
     read through this same attachment, so the loop has no second presentation
     seam to inject.
 
-func (l *Loop) SetLongContextTokens(tokens int)
-    SetLongContextTokens attaches the long-context threshold alone; zero or a
-    negative value leaves the fuse off.
-
 func (l *Loop) SetNoticeFeed(feed NoticeFeed)
     SetNoticeFeed attaches the incremental read face the drive reads the
     progress notifications of its range through: the notices are facts of
@@ -1523,11 +1513,6 @@ func (l *Loop) SetRequestFace(face RequestFace)
     skill bodies and the replayed projection of the session chain. A nil face
     keeps every request at its transcript alone. The setter is separate from the
     constructor so the declared construction shape of the loop stays as it is.
-
-func (l *Loop) SetResponseCallCap(cap int)
-    SetResponseCallCap attaches the per-response tool call cap alone; zero or
-    a negative value leaves the cap off. The composition root that carries only
-    this key wires it without assembling a second declaration.
 
 func (l *Loop) StopResidents()
     StopResidents ends the loop's one current Consumer set: no further instance

@@ -53,11 +53,19 @@ const rollbackPrefix = "reactivate-rollback:"
 // still in flight is refused by name beside the round already running. The
 // transition is committed on the commit port with the revision it applies to, so
 // two reactivations racing on one task commit one round: the first moves the
-// task out of its settled status and the second is refused by name.
+// task out of its settled status and the second is refused by name. A task the
+// newest checkpoint stated no entry for is read back from its chain first, so a
+// restart re-enters the settled outcome the record holds instead of answering
+// that the task is unknown.
+//
+//   - The shared apply derives the round the re-entry opened; only the deadline stamp and the reported verdict stay outside it, so a chain fold leaves both empty rather than inferring them (see applyFactLocked).
 func (r *MemoryRegistry) Reactivate(ctx context.Context, taskID event.TaskID) (int64, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	entry, ok := r.tasks[taskID]
+	entry, ok, err := r.hydrateLocked(ctx, taskID)
+	if err != nil {
+		return 0, err
+	}
 	if !ok {
 		return 0, ErrTaskNotFound
 	}
@@ -78,12 +86,8 @@ func (r *MemoryRegistry) Reactivate(ctx context.Context, taskID event.TaskID) (i
 		return 0, err
 	}
 	if applied {
-		entry.round++
 		entry.ttlAnchor = entry.changedAt
 		entry.reported = LogicalActive
-		entry.obligations = append(entry.obligations, obligationEntry{
-			obligation: Obligation{Kind: ObligationAwaitingTool, TaskID: taskID},
-		})
 	}
 	return entry.round, nil
 }
@@ -92,11 +96,17 @@ func (r *MemoryRegistry) Reactivate(ctx context.Context, taskID event.TaskID) (i
 // settled status design D7 admits, and the named refusal of every status it does
 // not. A caller that settles more than one precondition before it opens a round
 // reads this first, so the round it opens is the only thing it has to put back
-// when a later precondition turns out to be gone.
+// when a later precondition turns out to be gone. A task the newest checkpoint
+// stated no entry for is read back from its chain here, so a restart answers the
+// re-entry from the settled outcome the record holds instead of answering that
+// the task is unknown.
 func (r *MemoryRegistry) Reentrant(ctx context.Context, taskID event.TaskID) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	entry, ok := r.tasks[taskID]
+	entry, ok, err := r.hydrateLocked(ctx, taskID)
+	if err != nil {
+		return err
+	}
 	if !ok {
 		return ErrTaskNotFound
 	}
@@ -151,15 +161,12 @@ func (r *MemoryRegistry) RollbackReactivation(ctx context.Context, taskID event.
 		ExpectedRevision: entry.revision,
 		Status:           StatusSettled,
 	}
-	result, applied, err := r.applyCommitLocked(ctx, entry, record)
+	result, _, err := r.applyCommitLocked(ctx, entry, record)
 	if result != CommitCommitted {
 		if err == nil {
 			err = ErrCommitUncertain
 		}
 		return err
-	}
-	if applied {
-		entry.closeExecutionObligation("")
 	}
 	return nil
 }

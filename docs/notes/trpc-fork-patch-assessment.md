@@ -181,9 +181,7 @@ go test -run '^$' -bench '^(BenchmarkAssemble|BenchmarkAssembleInvoke|BenchmarkI
 ## 附：证据命令索引
 
 ```bash
-# 4 commit 可溯
-git -C /Users/pengweiye/Documents/codes/trpc-agent-go log --oneline --no-decorate v1.11.2..v1.11.2-tagent.1
-git -C /Users/pengweiye/Documents/codes/trpc-agent-go rev-list --count v1.11.2..v1.11.2-tagent.1
+# 4 commit 的清单与计数见 §2.1（同一命令，不在此重述）
 git -C /Users/pengweiye/Documents/codes/trpc-agent-go diff --shortstat v1.11.2..v1.11.2-tagent.1
 
 # 依赖闭包可达性

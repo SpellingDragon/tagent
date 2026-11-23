@@ -62,3 +62,30 @@ func TestTrackedHygieneReportsOneFindingPerTopDir(t *testing.T) {
 	got := rules(t, []string{"bogus/a.go", "bogus/b.go"}, map[string]int64{"bogus/a.go": 1, "bogus/b.go": 1})
 	require.Len(t, got, 1, "an unregistered top directory is reported once, not per file")
 }
+
+func unnamed(t *testing.T, entries []string) []string {
+	t.Helper()
+	var got []string
+	for _, f := range checkWhitelistUnnamedSource(entries) {
+		got = append(got, f.path+"="+f.rule)
+	}
+	return got
+}
+
+// TestWhitelistUnnamedSourceRejectsAnUnnamedGoFile 钉住 白名单模式吞掉的新 Go 文件必被拒。
+func TestWhitelistUnnamedSourceRejectsAnUnnamedGoFile(t *testing.T) {
+	got := unnamed(t, []string{
+		"examples/wechat-bot/settlement_presentation_test.go",
+		"examples/wechat-bot/knowledge_base/",
+		"examples/wechat-bot/archive/scratch.py",
+		"examples/wechat-bot/.env",
+	})
+	assert.Equal(t, []string{
+		"examples/wechat-bot/settlement_presentation_test.go=whitelist-unnamed-source",
+	}, got, "only Go source is judged; a nested checkout, a scratch script and a secret are not")
+}
+
+func TestWhitelistUnnamedSourcePassesACleanTree(t *testing.T) {
+	require.Empty(t, unnamed(t, nil))
+	require.Empty(t, unnamed(t, []string{"examples/wechat-bot/data/runtime.json"}))
+}
