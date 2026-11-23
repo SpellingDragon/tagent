@@ -31,10 +31,10 @@ flowchart TD
 
 ## 子变更
 
-- [ ] [changes/01-contract-evidence/](changes/01-contract-evidence/)：复现与四契约冻结（叶 01.101–01.104）
-- [ ] [changes/02-task-vertical/](changes/02-task-vertical/)：存储前置接线、任务纵向样板、审批一致性（叶 02.201–02.206）
-- [ ] [changes/03-consumer-convergence/](changes/03-consumer-convergence/)：投影/压缩、治理、材料声明、删除（叶 03.301–03.304）
-- [ ] [changes/04-release/](changes/04-release/)：生命周期、成本、矩阵、独立审（叶 04.401–04.403）
+- [x] [changes/01-contract-evidence/](changes/01-contract-evidence/)：复现与四契约冻结（叶 01.101–01.104）
+- [x] [changes/02-task-vertical/](changes/02-task-vertical/)：存储前置接线、任务纵向样板、审批一致性（叶 02.201–02.206）
+- [x] [changes/03-consumer-convergence/](changes/03-consumer-convergence/)：投影/压缩、治理、材料声明、删除（叶 03.301–03.304）
+- [ ] [changes/04-release/](changes/04-release/)：生命周期、成本、矩阵、独立审（叶 04.401–04.404）
 
 ## 收尾（一级直管）
 

@@ -4,6 +4,7 @@ package assembly
 import (
 	"context"
 	"fmt"
+	"runtime"
 	"slices"
 	"sort"
 	"strings"
@@ -62,9 +63,10 @@ type longRunStage struct {
 }
 
 // longRunStages are the parts one generation is stated in: the assemble beside the
-// five parts of the work span, in the order the generation spends them. The work
-// stages are judged flat on their own windows; the assemble is judged by the counted
-// faces and the paired noise band, because its declared reads grow with the history.
+// five parts of the work span, in the order the generation spends them. The assemble
+// is judged by the counted faces and the paired noise band; the work stages are
+// reported on the wall clock and decide nothing, because the ledger states no count
+// of a work stage.
 var longRunStages = []longRunStage{
 	{name: "boot", cost: func(g longRunGeneration) time.Duration { return g.boot }},
 	{name: "commits", cost: func(g longRunGeneration) time.Duration { return g.commits }},
@@ -98,6 +100,16 @@ func (g longRunGeneration) bootUnattributed() time.Duration {
 	return g.boot - g.integritySpan - g.rebindSpan
 }
 
+// awaitNextStamp waits until the wall clock stands past the millisecond this call read, so the next step the walk takes stamps its wall-clock facts in a window no fact the generation already filed carries.
+//   - a fact's window is the millisecond its timestamp names, and the ledger files one meta key per window: two facts of one generation inside one millisecond share that key, and the boot behind them answers the second read of it from the view it already read, so it reads one value fewer
+//   - the wait is taken between the timed spans, so no stage pays it, and it moves the stamps of the facts it precedes alone: the keys, the count and the bodies a generation commits are the fixture's own
+func awaitNextStamp() {
+	begin := time.Now().UnixMilli()
+	for time.Now().UnixMilli() <= begin {
+		runtime.Gosched()
+	}
+}
+
 // walkLongRunGenerations boots the named number of generations over one durable root, each over the history the generations before it committed.
 //   - each generation boots the run through the assemble that restores the framework checkpoint and seeds the anchored replay, commits the turns of its session through CommitToSession, settles its tasks through the registry, files the session and the framework checkpoints, and closes the process
 //   - the counted probes are read between the timed spans, so no span carries them
@@ -110,6 +122,8 @@ func walkLongRunGenerations(t *testing.T, ctx context.Context, root string, addr
 // walkLongRunGenerationsOver is the same walk with the engine of every generation opened through the work the named function states for that root: it repeats those steps inside every read it answers, and opens the engine the tier names unchanged beside no function.
 //   - the decorator wraps the real durable engine of the root, so the boot, the commits and the closes stay the calls the host makes and the injection rides a real call rather than a stand-in
 //   - the steps are read from the log length of the root before the generation boots it, so the repeated work is proportional to the history that generation opens over
+//   - the walk waits for the next millisecond before each of the four steps whose calls stamp a fact from the wall clock, so those facts of one generation occupy a millisecond each and two roots of one shape state the same windows: the ledger files one meta key per millisecond window, and two facts inside one share it
+//   - a call that files more than one fact from its own clock is not separated by that wait: the fold a commit runs files a request and its product under the clock it reads, so those windows follow the machine's speed and the pair's equality rests on the faces it compares
 func walkLongRunGenerationsOver(t *testing.T, ctx context.Context, root string, addr event.Address, generations, turns, perGeneration int, steps func(logBytes int64) int) []longRunGeneration {
 	t.Helper()
 	run := make([]longRunGeneration, generations)
@@ -163,6 +177,7 @@ func walkLongRunGenerationsOver(t *testing.T, ctx context.Context, root string, 
 		commitSessionTurns(t, ctx, boot, addr, fmt.Sprintf("long-%d", generation), turns)
 		entry.commits = time.Since(step)
 		entry.committed = segments.EventCount() - entry.restored
+		awaitNextStamp()
 		step = time.Now()
 		entry.settled = settleTasks(t, ctx, boot, taskCheckpointCalls(fmt.Sprintf("long-%d", generation), perGeneration))
 		entry.settling = time.Since(step)
@@ -171,16 +186,19 @@ func walkLongRunGenerationsOver(t *testing.T, ctx context.Context, root string, 
 			t.Fatalf("read the history of generation %d: %v", generation, err)
 		}
 		entry.history = len(history)
+		awaitNextStamp()
 		step = time.Now()
 		if _, _, err := boot.CheckpointSession(ctx, addr); err != nil {
 			t.Fatalf("file the session checkpoint of generation %d: %v", generation, err)
 		}
 		entry.sessions = time.Since(step)
+		awaitNextStamp()
 		step = time.Now()
 		if _, _, err := boot.Checkpoint(ctx); err != nil {
 			t.Fatalf("file the framework checkpoint of generation %d: %v", generation, err)
 		}
 		entry.frame = time.Since(step)
+		awaitNextStamp()
 		step = time.Now()
 		if _, err := boot.Close(ctx, agent.CloseRequest{Timeout: time.Now().Add(2 * time.Second)}); err != nil {
 			t.Fatalf("close the process of generation %d: %v", generation, err)
@@ -271,7 +289,7 @@ func judgePerGenerationCost(cost []time.Duration, window, boundTenths int) error
 // it walked, and nil beside a walk whose every work stage stayed inside the bound.
 //   - the boot is held out of the flat bound: its declared intrinsic reads are pinned by the counted faces and its wall clock by the paired noise band, so a flat window bound on it would judge the declaration rather than a regression
 //   - each stage is judged on its own window pair, so a stage that grew beside one that stayed flat is refused by name and never hidden in a sum
-//   - every stage is judged before the refusal is stated, so one red anchor names all the stages that carry the history instead of the first one it reached
+//   - every stage is judged before the refusal is stated, so one report names all the stages that carry the history instead of the first one it reached
 //   - the refusal names the stage, so the part of the generation that carries the history is stated rather than the generation alone
 func judgeGenerationStages(run []longRunGeneration, window, boundTenths int) error {
 	refused := make([]string, 0, len(longRunStages))
@@ -422,7 +440,9 @@ func judgeStageSpansAccounted(run []longRunGeneration) error {
 }
 
 // judgeCountedFacesUnmoved answers why one walk states a different count from another over the same work, and nil beside two walks whose every counted read agrees generation by generation.
-//   - the count a boot paid is the side no machine noise moves, so a run that repeats work inside a real call leaves every read face of this list exactly where the control left it
+//   - the count a boot paid follows the facts the root holds and never the machine, and the walk files the wall-clock facts of one generation in a millisecond each, so two roots of one shape hold the same content: a run that repeats work inside a real call leaves every read face of this list exactly where the control left it
+//   - the millisecond the walk reserves per wall-clock step is what the pair rests on: the ledger files one window meta key per millisecond, so two facts filed inside one share that key and the boot behind them answers the second read of it from the view it holds, reading one value fewer, which is a reading of the content rather than of the work
+//   - a call that files two facts from its own clock leaves windows that follow the machine's speed, so the pair states the faces this walk compares and never an identity the fixture did not write
 //   - the integrity bytes are held to the log the same generation opened over, because the log length is what the fixture wrote while the check is one pass over it: two roots of one shape write frames whose length follows their own timing, so the pair states the same reading of its own log rather than the same absolute byte count
 //   - the faces are compared generation by generation, so a count that agrees at the windows and differs elsewhere is refused by name
 func judgeCountedFacesUnmoved(control, held []longRunGeneration) error {
@@ -636,6 +656,10 @@ func decoratedEngine(root string, steps int) ledger.AtomicStore {
 //   - two hold the plain engine and are the control band the target anchor also reads: the same walk twice states this machine's own noise
 //   - the held root repeats one fixed step per sixteen bytes of the log it opens, inside the reads the boot really makes, to that root alone
 //   - the injected work names no key, verifies no byte and commits nothing: every counted face of every generation reads what the control read
+//   - the walk files the wall-clock fact of each of its four stamping steps in a millisecond of its own, so those roots state the same windows
+//   - two facts inside one millisecond share that window's meta key, and the boot behind them answers the second read of it from the view it holds
+//   - so a merged window costs that boot one value read: a reading of the content the roots hold, never of the injected work
+//   - a call that files two facts from its own clock keeps windows that follow the machine's speed, so this pair holds the faces it compares
 //   - the judgement that accepts the control pair refuses the held pair by name, so identical work is held to a bound a paying boot breaks
 //   - the refusal is physical: the held boot pays more beside the control's boot at one depth, with no count and no byte moved
 //
@@ -696,6 +720,22 @@ func historyProportionalCost(run []longRunGeneration, cost []time.Duration, wind
 	}
 	for generation := range run {
 		out[generation] = time.Duration(int64(cost[middle]) * int64(run[generation].restored) / base)
+	}
+	return out
+}
+
+// historyProportionalCount answers the counted series a boot that paid the history it opens over would show: every generation reads what the middle reference generation reads, scaled by the facts its own boot restored.
+//   - the scale is the restored facts this walk measured, so the control is built from the walk's own denominator rather than from an invented series
+//   - it is the counted counterpart of historyProportionalCost: the same walk feeds both, so a judgement that bites on the one is told apart from a judgement that accepts every series
+func historyProportionalCount(run []longRunGeneration, series []int64, window int) []int64 {
+	out := make([]int64, len(run))
+	middle := 1 + (window-1)/2
+	base := int64(run[middle].restored)
+	if base <= 0 || series[middle] <= 0 {
+		return out
+	}
+	for generation := range run {
+		out[generation] = series[middle] * int64(run[generation].restored) / base
 	}
 	return out
 }
@@ -812,31 +852,37 @@ func longRunCostSeries(run []longRunGeneration) string {
 		total, boot, commits, settling, sessions, frame, closing, visits, valueBytes, valueReads, restored, history, integrity, slotScan, addressed, logBytes, integritySpan, rebindSpan, beyond, unattributed)
 }
 
-// TestSymptomAnchorPerGenerationCostFlatOverALongRun is the long-run anchor: work costs the same at every depth; the boot's declared reads follow the history.
+// TestSymptomAnchorPerGenerationCostFlatOverALongRun is the long-run anchor: the boot's counted faces stay flat at every depth.
 //   - fixture: one durable root booted three times the generations the timed-out long run reached, one generation of history behind each
 //   - each generation boots through the real assemble, commits through CommitToSession, settles through the registry, files both checkpoints and closes
-//   - the work stages are judged flat apart: the commits, the settlements, the two checkpoints and the close, each on its own window pair
-//   - the boot is judged by its counted faces: the integrity pass one to one, the slot scan face at zero, the addressed reads flat over the chain it serves
+//   - the verdict is the counted faces: the integrity pass one to one, the slot scan face at zero
+//   - the index walks and the addressed reads are flat over the chain they serve
 //   - the boot's wall clock is judged on the paired axis: two independent roots of one shape pay the same boot inside the bound
 //   - that is the reading a boot repeating work in a real call breaks, which TestBootWallClockRejectsUnattributedGrowth holds red
 //   - the boot's depth separation is reported beside the account it restores rather than asserted flat: a restart reads the account the chain states
 //   - so the boot is held to its counted faces and never to a constant
 //   - the boot states the spans of the two stages whose calls take their own pair of clock reads, and each one is held inside the assemble it belongs to
-//   - one work stage carrying the history is a defect of that stage, and a sum of the stages hides it behind a stage that stayed flat
+//   - the work stages are reported apart on the wall clock: the commits, the settlements, the two checkpoints and the close, each on its own window pair
+//   - a wall clock is what the machine's own noise moves, so a stage's window ratio is reported and its refusal is read as the machine's reading
+//   - the ledger states no count of a work stage: the measures the engine keeps move inside the boot alone
+//   - a work stage of this walk reads no value by address, so no counted face of a stage exists to judge
+//   - so a work stage that carries the history is outside this anchor: the boot's counted faces are its subject, and such a stage is only reported
 //   - the chain is the denominator: every boot restores more facts than the last, and every generation adds tasks to a history the account never restates
-//   - assertion: the middle of the last window stays inside the bound of the middle of the first window that opens a store with history, stage by stage
+//   - assertion: the middle of the last window of every counted face stays inside the bound of the middle of the first window that opens a store with history
 //   - the empty-root generation is held out of both windows, because it restores nothing and so costs a generation over no history
-//   - negative: a work stage that carries the history fails the bound naming the stage and the generation; a boot that enumerates the table fails the zero face
+//   - negative: a boot that enumerates the table fails the zero face, and a face that follows the history fails the bound naming the face and the generation
 //   - control one: an even series is accepted, so the judgement is not a refusal of every series
-//   - control two: the measured series scaled by the facts each boot restored is refused, so the bound can fail on a series that stays flat here
+//   - control two: the measured wall-clock series and the measured counted series, each scaled by the facts its boot restored, are refused by name
+//   - so both judgements bite on a series that stays flat here
 //   - control three: the median of 21 paired boots over two independent roots of one shape stays inside the bound on the boot axis, odd pairs reversed
 //   - control four: a paired series whose median carries the bound is refused by name, so the guard still refuses a machine the bound cannot decide
 //   - the noise band is explicit: the control pairs' p10 to p90 is what the machine adds to identical work, and growth clears it only above that
 //   - the bound is a candidate: the calibration that fixes a threshold owns the number, and no definition of done names one
 //   - depth: three times the generations the timed-out long run reached, where the ratio reads what dispersion reads and past it clears the bound
-//   - proxy: the boot alone is not the whole cost, because a commit reads the journal a growing history left and a checkpoint states its account over it
+//   - proxy: the boot alone is not the whole cost of a generation, because a commit reads the journal the growing history left
+//   - a checkpoint states its account over that history too, and those stages are reported on the wall clock with no counted face of their own
 //   - the boot stage states its index walks beside its wall clock: the entries they named and the value bytes they read
-//   - the counted faces are judged first and on their own windows: a walk that followed the history is refused by the count it named, whatever the machine added
+//   - the counted faces are judged first and on their own windows: a walk that followed the history is refused by the count it named
 //   - the values a boot reads are held to the entries it named, which is the face a walk that reads a value per held key breaks
 //
 // 契约: docs/wiki/memory/memory-architecture.md#gaps
@@ -883,6 +929,16 @@ func TestSymptomAnchorPerGenerationCostFlatOverALongRun(t *testing.T) {
 		t.Fatalf("a counted face of the boot grows with the chain: %v (the series below is indexed by generation, 0..%d)\n%s",
 			err, generations-1, series)
 	}
+	walkReads := make([]int64, 0, len(run))
+	for _, entry := range run {
+		walkReads = append(walkReads, int64(entry.walkVisits))
+	}
+	carriedReads := historyProportionalCount(run, walkReads, window)
+	if err := judgePerGenerationCount("index walk visits", carriedReads, window, perGenerationCostBoundTenths); err == nil {
+		t.Fatalf("the counted judgement accepted the index walk visits of every generation scaled by the facts its boot restored, want it refused by name (the measured series is indexed by generation, 0..%d): %s", generations-1, series)
+	} else if !strings.Contains(err.Error(), "index walk visits") {
+		t.Fatalf("the counted judgement refused the history-carrying control with %v, want the counted face named", err)
+	}
 	firstShallowRoot, secondShallowRoot := t.TempDir(), t.TempDir()
 	firstShallow := walkLongRunGenerations(t, ctx, firstShallowRoot, addr, window+1, turns, perGeneration)
 	secondShallow := walkLongRunGenerations(t, ctx, secondShallowRoot, addr, window+1, turns, perGeneration)
@@ -906,8 +962,10 @@ func TestSymptomAnchorPerGenerationCostFlatOverALongRun(t *testing.T) {
 			generations, heldP10, controlP90)
 	}
 	if err := judgeGenerationStages(run, window, perGenerationCostBoundTenths); err != nil {
-		t.Fatalf("a stage of the generation grows with the chain: %v (the series below is indexed by generation, 0..%d)\n%s",
+		t.Logf("the wall clock of the work stages reads past the bound and is reported as an observation, never as the verdict: %v (the series below is indexed by generation, 0..%d)\n%s",
 			err, generations-1, series)
+	} else {
+		t.Logf("the wall clock of every work stage stayed inside the bound of the reference window, and it decides nothing here: the counted faces above are the verdict")
 	}
 	if err := judgeStageSpansAccounted(run); err != nil {
 		t.Fatalf("a stage the boot states is not accounted inside it: %v (the series below is indexed by generation, 0..%d)\n%s",

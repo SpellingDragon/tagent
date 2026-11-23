@@ -48,6 +48,8 @@ func passingCheck(name state.CheckName) state.CheckAnswer {
 // - each request ends on its own invocation's input while the session history already committed may sit in front of it
 // - a settled task backflow drives the next decision of the invocation that issued the call on the binding generation effective when that decision begins
 // - each settled result enters the next decision as its own observation under the preserved call identifier, never a second tool response
+// - a settlement that lands after the segment that issued its call closed drives the next segment of the address, and that segment reads its body
+// - the late-settlement case holds its call open by the gate until the turn is over, so it is deterministic rather than a race on which result lands first
 // 契约: docs/wiki/agent/execution-generations.md#turn-outcome
 func TestNativeConversationRoundTrip(t *testing.T) {
 	t.Run("a native multi-turn tool-call roundtrip keeps the messages and the pairings", func(t *testing.T) {
@@ -75,9 +77,10 @@ func TestNativeConversationRoundTrip(t *testing.T) {
 			t.Fatalf("assemble the runtime: %v", err)
 		}
 
+		addr := event.Address{AgentID: "agent-a", SessionID: "session-roundtrip"}
 		turn, err := run.Invoke(ctx, assembly.InvokeRequest{
 			InvocationID: "inv-roundtrip",
-			Address:      event.Address{AgentID: "agent-a", SessionID: "session-roundtrip"},
+			Address:      addr,
 			Input:        []model.Message{{Role: model.RoleUser, Content: "hello"}},
 		})
 		if err != nil {
@@ -90,7 +93,7 @@ func TestNativeConversationRoundTrip(t *testing.T) {
 			t.Fatalf("turn invocation = %q, want the answer minted by the session's resident consumer segment", turn.InvocationID)
 		}
 
-		requests := awaitRoundTripResults(t, provider, []roundTripResult{
+		requests := awaitRoundTripResults(t, run, addr, provider, []roundTripResult{
 			{callID: "call-1", tool: "echo-a", body: "out-a"},
 			{callID: "call-2", tool: "echo-b", body: "out-b"},
 		}, 10*time.Second)
@@ -247,7 +250,7 @@ func TestNativeConversationRoundTrip(t *testing.T) {
 	t.Run("a settled task backflow drives the next decision on the generation effective then", func(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
-		gated := &convGatedTool{name: "gated-tool", entered: make(chan struct{}), gate: make(chan struct{})}
+		gated := &convGatedTool{name: "gated-tool", entered: make(chan struct{}), gate: make(chan struct{}), output: "released"}
 		first := &convModel{name: "model-gen-1", answer: func(req *model.Request) *model.Response {
 			if len(req.Messages) == 1 {
 				return convToolTurn(convCall("call-g1", "gated-tool", `{"wait":true}`))
@@ -343,6 +346,88 @@ func TestNativeConversationRoundTrip(t *testing.T) {
 			t.Fatalf("gated tool executions = %d, want the admitted call executed once", gated.calls())
 		}
 	})
+
+	t.Run("a settlement landing after its segment closed drives the next segment with its body", func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		late := &convGatedTool{name: "late-tool", entered: make(chan struct{}), gate: make(chan struct{}), output: "out-late"}
+		fast := &convTool{name: "fast-tool", output: "out-fast"}
+		provider := &convModel{name: "model-a", answer: func(req *model.Request) *model.Response {
+			if len(req.Messages) == 1 {
+				return convToolTurn(
+					convCall("call-l", "late-tool", `{"wait":true}`),
+					convCall("call-f", "fast-tool", `{}`),
+				)
+			}
+			return convFinalTurn("closed")
+		}}
+		decl := &config.Declaration{
+			Entry:  "agent-a",
+			Agents: []config.AgentSpec{{ID: "agent-a", Model: "model-a"}},
+		}
+		run, err := assembly.Assemble(ctx, decl, map[event.AgentID]assembly.NativeAgent{
+			"agent-a": {Model: provider, Tools: []trpctool.CallableTool{late, fast}},
+		}, assembly.WithGovernance(passPolicy{}))
+		if err != nil {
+			t.Fatalf("assemble the runtime: %v", err)
+		}
+		addr := event.Address{AgentID: "agent-a", SessionID: "session-late"}
+		type driven struct {
+			turn agent.Turn
+			err  error
+		}
+		result := make(chan driven, 1)
+		go func() {
+			turn, err := run.Invoke(ctx, assembly.InvokeRequest{
+				InvocationID: "inv-late",
+				Address:      addr,
+				Input:        []model.Message{{Role: model.RoleUser, Content: "run"}},
+			})
+			result <- driven{turn: turn, err: err}
+		}()
+		select {
+		case <-late.entered:
+		case <-time.After(20 * time.Second):
+			t.Fatal("timed out waiting for the gated tool to be entered")
+		}
+		var turn agent.Turn
+		select {
+		case one := <-result:
+			if one.err != nil {
+				t.Fatalf("invoke the roundtrip: %v", one.err)
+			}
+			turn = one.turn
+		case <-time.After(20 * time.Second):
+			t.Fatal("timed out waiting for the turn to close beside the call still running")
+		}
+		if turn.Terminal != model.KindCompleted || turn.DecisionCount < 2 {
+			t.Fatalf("turn = (%v, %d decisions), want one completed terminal beside the decision that read the fast result", turn.Terminal, turn.DecisionCount)
+		}
+		if roundTripResultReached(provider.recorded(), "call-l", "late-tool", "out-late") {
+			t.Fatalf("model requests = %s, want the body of call-l unread while the call still runs", describeConvRequests(provider.recorded()))
+		}
+		close(late.gate)
+		requests := awaitRoundTripResults(t, run, addr, provider, []roundTripResult{
+			{callID: "call-l", tool: "late-tool", body: "out-late"},
+		}, 10*time.Second)
+		if len(requests) != 3 {
+			t.Fatalf("model requests = %d (%s), want the opening decision, the round that read the fast result and the one the late settlement drove",
+				len(requests), describeConvRequests(requests))
+		}
+		served := false
+		for _, msg := range requests[2].Messages {
+			if msg.ToolID == "call-l" && msg.ToolName == "late-tool" && msg.Content == "out-late" {
+				served = true
+			}
+		}
+		if !served {
+			t.Fatalf("request of the late settlement = %s, want the settled body of call-l read under its own call identity",
+				describeConvRequests(requests[2:]))
+		}
+		if late.calls() != 1 {
+			t.Fatalf("late tool executions = %d, want the admitted call executed once", late.calls())
+		}
+	})
 }
 
 // roundTripResult is one admitted call whose settled body the roundtrip expects
@@ -358,7 +443,7 @@ type roundTripResult struct {
 // address served at that moment. The first result drives the next decision, so a
 // result that lands after the closing decision drives the next segment of the
 // address; the wait spans both, never a single turn.
-func awaitRoundTripResults(t *testing.T, provider *convModel, want []roundTripResult, wait time.Duration) []model.Request {
+func awaitRoundTripResults(t *testing.T, run *assembly.Run, addr event.Address, provider *convModel, want []roundTripResult, wait time.Duration) []model.Request {
 	t.Helper()
 	deadline := time.Now().Add(wait)
 	for {
@@ -373,28 +458,59 @@ func awaitRoundTripResults(t *testing.T, provider *convModel, want []roundTripRe
 			return requests
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("settled observation(s) of %v never reached a model request in %s (%s), want each result body read under its call identity",
-				missing, wait, describeConvRequests(requests))
+			t.Fatalf("settled observation(s) of %v never reached a model request in %s (%s) chain=%s, want each result body read under its call identity",
+				missing, wait, describeConvRequests(requests), describeConvFacts(run.SessionFacts(addr)))
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
 }
 
+// describeConvFacts renders the session chain of one address, so a failure names
+// what the chain held when the wait gave up.
+func describeConvFacts(facts []event.Event) string {
+	lines := make([]string, 0, len(facts))
+	for at, evt := range facts {
+		content := evt.Message.Content
+		if len(content) > 40 {
+			content = content[:40] + "…"
+		}
+		lines = append(lines, fmt.Sprintf("#%d %s %s task=%s call=%s content=%q", at, evt.Key, evt.Type, evt.TaskID, evt.CallID, content))
+	}
+	return "[" + strings.Join(lines, " | ") + "]"
+}
+
 // roundTripResultReached reports whether one settled body reached a model
 // request under the call identity it was admitted for. The harvest path renders
-// the settled result as user material carrying the body while the chain-restored
-// history renders it under the tool role, so the check reads the call identity,
-// the tool name and the body instead of one rendering: an admission receipt
+// the settled result as material carrying the body as it stands, while a request
+// whose prefix presents the result fact opens that entry with the recall ticket
+// the request boundary gives every presented fact, so the check reads the body
+// behind one well-formed ticket instead of one rendering: an admission receipt
 // answers "ok" and never carries the body.
 func roundTripResultReached(requests []model.Request, callID, tool, body string) bool {
 	for _, req := range requests {
 		for _, msg := range req.Messages {
-			if msg.ToolID == callID && msg.ToolName == tool && msg.Content == body {
+			if msg.ToolID == callID && msg.ToolName == tool && convSettledBodyOf(msg.Content) == body {
 				return true
 			}
 		}
 	}
 	return false
+}
+
+// convSettledBodyOf reports the material one message carries behind the recall
+// ticket a presented projection entry opens with: "[evt_<key>|<type>] " is the
+// one form the request boundary composes, and a content that opens no such
+// ticket is its own body.
+func convSettledBodyOf(content string) string {
+	const ticketPrefix, ticketClose = "[evt_", "] "
+	if !strings.HasPrefix(content, ticketPrefix) {
+		return content
+	}
+	end := strings.Index(content, ticketClose)
+	if end < len(ticketPrefix) || !strings.Contains(content[len(ticketPrefix):end], "|") {
+		return content
+	}
+	return content[end+len(ticketClose):]
 }
 
 // describeConvRequests renders the model requests the address served, so a
@@ -488,11 +604,12 @@ func (t *convTool) args() string {
 }
 
 // convGatedTool is the native tool stand-in whose call blocks until the
-// sub-case opens its gate, so a publication can land between the admission and
-// the settled backflow.
+// sub-case opens its gate, so a settlement can land after the segment that
+// admitted the call closed.
 type convGatedTool struct {
 	mu      sync.Mutex
 	name    string
+	output  string
 	entered chan struct{}
 	gate    chan struct{}
 	count   int
@@ -510,7 +627,7 @@ func (t *convGatedTool) Call(ctx context.Context, jsonArgs []byte) (any, error) 
 	t.mu.Unlock()
 	close(t.entered)
 	<-t.gate
-	return "released", nil
+	return t.output, nil
 }
 
 // calls reports how often the gated tool executed.

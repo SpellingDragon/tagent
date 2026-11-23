@@ -2182,3 +2182,26 @@ func TestDecisionResourcesReleaseBesideAnAbnormalExit(t *testing.T) {
 		t.Fatalf("restored answer = %q, want the body the alive decision produced", answer.Body)
 	}
 }
+
+// TestDeliveryFactRenderMatchesSettledBodyMarker pins the marker the reader shares with the writer of delivery facts.
+// - with body: task.DeliveryFactOf renders a fact carrying the result section, and carriesSettledBody answers true
+// - bare: a notice whose body is blank renders no section, and the answer is false
+//
+// 契约: docs/wiki/agent/event-flow.md#runner-flow
+func TestDeliveryFactRenderMatchesSettledBodyMarker(t *testing.T) {
+	addr := event.Address{AgentID: "agent-a", SessionID: "session"}
+	withBody := task.DeliveryFactOf(
+		task.Notice{TaskID: "task-1", Kind: task.NoticeSettled, Text: "the settled body"},
+		addr, event.InstanceID("instance-1"), event.InvocationID("inv-1"),
+	)
+	if !carriesSettledBody(withBody.Message) {
+		t.Fatalf("a delivery fact carrying its settled body reads as one naming it elsewhere: %q", withBody.Message.Content)
+	}
+	bare := task.DeliveryFactOf(
+		task.Notice{TaskID: "task-2", Kind: task.NoticeSettled, Text: "  "},
+		addr, event.InstanceID("instance-1"), event.InvocationID("inv-1"),
+	)
+	if carriesSettledBody(bare.Message) {
+		t.Fatalf("a delivery fact carrying no body reads as one carrying it: %q", bare.Message.Content)
+	}
+}

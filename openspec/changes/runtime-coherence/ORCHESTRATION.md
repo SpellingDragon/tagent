@@ -1,12 +1,12 @@
 # ORCHESTRATION · runtime-coherence
 
-## ① 结论
+## 一、结论
 
 抵达 DoD 的唯一路径：先冻结四份契约（01），用一个任务纵向样板证明机制（02），再收敛其余消费者并删除被替代路径（03），最后在冻结候选上取完整证据与真实 CI（04）。当前最大风险：把“统一”做成新的中间层，或把未复现的静态反例当已修缺陷，导致计划再次打转。
 
 本文件是唯一派发入口。先读本文件与 [design.md](design.md)，再读被派叶所在子变更的四件套；历史只经 [归档承接账](../archive/2026-11-22-runtime-recovery-ideal/CARRYOVER.md) 追溯。
 
-## ② 编排四问
+## 二、编排四问
 
 ### 次序：就绪叶与触碰集
 
@@ -75,7 +75,7 @@ CI 红项分诊：非计时项（retry 三项、场景 03、会话往返）在 W
 
 释放事件即触发：确认释放后当场补派等待表中的就绪单，不以“下一波”悬置。
 
-## ③ 明细
+## 三、明细
 
 ### 派发单与合单
 
@@ -103,7 +103,7 @@ CI 红项分诊：非计时项（retry 三项、场景 03、会话往返）在 W
 - archive-preflight：evidence-binding exit 1；spec-hygiene exit 2（`openspec CLI not found`）
 - 处置：产品红项入阶段 0 归因；CI 接线单独修；未归因前不进入“架构已收敛”的放行结论。
 
-## ④ 当场账
+## 四、台账
 
 | 事项 | 当前事实 |
 |---|---|
@@ -150,3 +150,12 @@ CI 红项分诊：非计时项（retry 三项、场景 03、会话往返）在 W
 | 注释收口＋二轮审派发 | 23/23 清零（分类：坏索引 6/测试 doc 8/external-coord 3/process-artifact 3/free-standing 2/doc-not-brief 1），直接入口 `comment_policy` rc=0、0 beyond baseline、非注释行 diff＝0；组合 `lint.sh --only policy` 残余 rc=1＝外来未跟踪自测注册表失配（C7.3 在案，不触）。**矩阵证据已过期**（修复轮改 .go）：最终重取排二轮审后冻结（F2）。**二轮 R35 已派**：F1/F3/F5 复跑、F6 拒绝表逐字段反核（含 examples/cli Boot 面不误拒）、注释零行为抽样、新面扫雷、记账一致性；frontier 空才进 F1–F4 |
 | 二轮裁定与修复 | frontier 5 项全成立：R35-1（Reactivate 文档 bullet 失真＋godoc 未重生成）→ 改写 bullet 为真话＋全量重生成（check rc=0）；R35-2（保留名可按名冒充内置）→ `WithStateSlice` 注册前 `restoredFallbackSlices` 命中具名拒，新锚 `TestContributedSliceNamedLikeAFrameworkFaceIsRefused`；R35-3（store-reads §二 approval 段过期）→ 改「W4b 已迁移」；R35-4（F1 证据假锚＋wiki 缺规则）→ 证据改真、wiki §六 补「未覆盖非内置→全链回放」、删 PendingRestore 假句；R35-5（F5 反向语义未入契约）→ §四 补反向句＋回落顺序。复验：godoc/build/vet/gofmt/policy 全绿、三锚 PASS。**三轮窄审已派**（只验 5 项咬合＋无误拒）；空后冻结重取全矩阵（F2） |
 | 三轮收口＝R35 关闭 | 三轮 PASS×4＋FAIL 仅字面 3 项（plugin-assembly §四 U+FFFD×2、store-reads 行号 :157/:184→实 :161/:188、§二表为迁移记录未标注）——均按字节修复并客观复核（FFFD=0、`reader.Get` :161/:188 实证、表注显式、godoc/doc-refs/policy 全 0）。判据：字面文本可字节验证，不另开四轮。**冻结树（matrix-final/freeze.txt）**：重取十短/六长/变异/计时＋三 module/root 全量 short/lint/openspec/race 串行后台；期间仅写 md，不碰 .go |
+| 提交与推送 | 用户明示「commit and push」。精确暂存：`git add -u`＋新文件/变更目录，**排除外来九项**；矩阵运行产物（1568 文件）误入后已 `git reset` 出索引，证据只留 md（归档前删 matrix 目录）。提交 `bde7f394`（106 文件，+8175/−327），`52d7b664..bde7f394 dev→dev` 已推送；CI 终局观察已挂后台。本地 matrix-final/F2 全门后台仍在其上跑（工作树字节未变）。F4 余项：主 spec 同步/归档/CI 实效核销 |
+| 中间产物清理 | 已清：旧波临时树与日志（/tmp 下 w1*/rr-*/0220x/f1|b-baseline/rc-repro/m401-* 等）、残留 worktree（list 仅主树）、仓内已被取代的 `evidence/matrix/`。保留：当前在跑的 `matrix-final/` 与其 /tmp/mf-* 现场、`/tmp/mf-mutations`。**待终局后**：裁剪 matrix-final 至小结（exits/timing/f2/freeze＋README），运行产物不入库也不入归档 |
+| CI@bde7f394 归因 | race×2＋test×2 红（同一提交双触发）。原文提取：①`:661`＝**计数面 ±1**（injected 44 vs control 45 addressed value reads，“不动计数面”前提被破坏，疑 30s checkpoint 节奏在慢机多落/读漂移）；②`:858`＝按**墙钟**判世代平坦（违 bounded-recovery:104/118“墙钟/磁盘不得充当有界判据”）；③NativeRoundTrip 10s 超时复发（本地 3/10，按“复发即回修”）。**本地 matrix-final 已停**（新 .go 修复将使其证据过期，终审后统一重冻结）。已派专项单：A 计数漂移根因与节奏解耦（禁 ±1 放宽）、B 世代判据改计数面（保变异咬合）、C roundtrip flake 根因修复（禁以加超时掩盖） |
+| 后继目标：磁盘有界 | 用户 2026-11-22 裁定：journal.log 磁盘无界不符预期，取 **A 档＝热盘有界＋归档可读**；现行“无界＝已接受成本”口径撤销。已立后继变更 `openspec/changes/bounded-hot-log/`（proposal/design/specs/tasks/ORCHESTRATION＋三子变更 18 文件，`validate --strict` 通过）：01 增长实测→有界判据（跨代平台）→归档契约/配置面→签发；02 段轮转/搬迁/manifest/GC/定位读；03 消费一致性与 S1/S2 锚；F1–F4。启动门＝本变更 CI 收口。**不在 runtime-coherence 内实施**，避免范围膨胀。用户随后校准层模型：checkpoint/tail 属逻辑层、WAL/段/归档属物理层；有界性是 P 的属性，L 承诺不变（已写入 bounded-hot-log D0，删除“修订 P1 措辞”说法） |
+| 04.404 撞限→拆双续单 | 前单改 `assembly/symptom_anchor_longrun_test.go`（+56/−8）：A＝**夹具确定性**（`awaitNextStamp` 把每步 wall-clock 事实分到独立毫秒，两棵同形树内容一致；计数相等断言未放宽；A 本地 `-count=3` 绿）；B＝判据改计数面（新增 `historyProportionalCount`）但测试体未收尾、负腿未证；C 未动；证据未落。派 04.404c（B 收尾＋A/B 负载复验）∥04.404d（C roundtrip 根因修复）两单并行，写面不相交 |
+| 结构门债（2026-11-23） | 技能 `validate.sh` 对本变更 review red：ORCHESTRATION 四层标题为 ①②③④（模板要求「一、结论/二、编排四问/三、明细/四、台账」）；四域任务行验证面为缩进续行（模板要求 `- [ ]` 行内含「验证：」）；α⁺/αᶜ 字面未冻结。属工件形态债，不影响工程证据。**与 04.404 收尾的台账回填同批一次修缮**（同文件并行写会冲突），修后 top/orch/review/逐域 sub 全 exit 0 方可进 F 归档 |
+| 04.404c/d 收口（2026-11-23） | c 单输出停在 02:39 但产物完整（evidence 五节：A 探针 ±1、夹具毫秒确定性、B 计数判据与负腿红证 2733vs27、验证表）——按产物收口不重派。编排者裁定两待裁：①步内折叠对毫秒掷币＝推 CI 实测，禁 ±1 容差与重试，红了按设计层修；②墙钟 control-pair 带 1.3＝设计意图（控制三自检），负载超带红属「测量不可用」，不放宽。d 单（roundtrip）已亲验：产品判据由「空消息」改「含 result 段」（marker 与 delivery_fact.go:70 字节一致）、夹具剥 ticket 一层断言仍严格、`-overlay` 负锚咬合；编排者补 `consumer_settled_body_test.go` 封 marker 双拼写。测试名 Cost 错位随 F1。下一步：亲验完 → 重取矩阵 → 暂存提交推送（用户已授权）→ CI 观察 |
+| 矩阵重取与用法错（2026-11-23） | 冻结重取（matrix-04404）：**十短首轮全部 rc=2 属编排者传参错**（runner 原文：「--repeat-index and --repeat are mutually exclusive」，CI 口径只传 `--repeat-index`）——非测试红；修正后单独串行重跑十短。六长首个 long-1-256 rc=0。亲验面已另行全绿：A/B 锚各 `-count=10`（90.9s/256.8s）、assembly 全包 359.6s、agent、execution `-short`、vet、gofmt（`/tmp/04404-verify.log`） |
+| 矩阵终局与提交（2026-11-23） | **十短 10/10**（short-1 首轮＝负载 flake：孤儿 `yes`×8 清理前 load 8–11；串行×5 绿＋重跑 match run_id=679f204c，不修不放宽）；**六长 6/6；变异 survived=0；boot 墙钟高载/静默双绿；长跑锚 3/3**（计数面判决）。矩阵后仅注释/gofmt 形态改动（comment_policy 0 findings）。运行产物目录已删（小结入 evidence §七）。本批含 bounded-hot-log 四域立项（含 04-ci-throughput）与四域任务行结构修缮。提交推送（用户已授权）→ CI 观察 |
