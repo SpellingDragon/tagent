@@ -16,11 +16,14 @@
 # This file holds the rules; scripts/lint.sh is the stable forwarding entry point
 # every caller uses, so CI, the docs and a batch author run the same command.
 #
-# usage: lint.sh [--strict] [--update-baseline] [--only policy|fmt|build|vet|contracts]
+# usage: lint.sh [--strict] [--update-baseline] [--only policy|fmt|build|vet|contracts] [--no-preflight]
 #   --strict           require zero findings (the converged end state, §D8)
 #   --update-baseline  rewrite the baseline after a batch lowered counts
 #   --only contracts   skip the Go fmt/build/vet/policy blocks; the checker selftests,
 #                      the runtime contracts below and the tail gates still run
+#   --no-preflight     skip the archive preflight; for a caller whose evidence directory
+#                      holds the mutation product alone (the CI test job) — the
+#                      archive-preflight job owns that gate with the full evidence bundle
 #
 # CI runs this script; a batch author runs the same command, so "it passed
 # locally" and "CI is green" cannot mean different things.
@@ -38,11 +41,13 @@ POLICY_DIRS=(. examples/wechat-bot examples/cli-host)
 only=""
 strict=""
 update=""
+skip_preflight=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --strict) strict=1; shift ;;
     --update-baseline) update=1; shift ;;
     --only) only="${2:-}"; shift 2 ;;
+    --no-preflight) skip_preflight=1; shift ;;
     *) echo "lint.sh: unknown argument $1" >&2; exit 2 ;;
   esac
 done
@@ -192,7 +197,9 @@ run python3 scripts/gates/check_runtime_architecture.py --check-policy --json
 # 都红；两个都在时以提交为准（它是 CI 会判的那个对象）。非 git 树如实跳过——门只
 # 核它真正读到的对象，没有对象时不假装判过。
 echo "lint: archive preflight (archived paths in this tree)"
-if git rev-parse --git-dir >/dev/null 2>&1; then
+if [ -n "$skip_preflight" ]; then
+  echo "  (--no-preflight: skipped here; the archive-preflight job owns this gate with the full evidence bundle)"
+elif git rev-parse --git-dir >/dev/null 2>&1; then
   committed_paths="$(git diff --no-renames --name-only --diff-filter=A HEAD^ HEAD -- openspec 2>/dev/null \
     | grep -E '^openspec/[^/]+/archive/' || true)"
   pending_paths="$( { git diff --no-renames --name-only --diff-filter=A HEAD -- openspec 2>/dev/null

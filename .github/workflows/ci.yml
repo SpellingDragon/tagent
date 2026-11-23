@@ -127,10 +127,14 @@ jobs:
           name: event-integrity-mutations
           path: ${{ runner.temp }}/dod/mutations
 
+      # This job downloads the mutation artifact alone, and lint.sh's archive
+      # preflight reads the full evidence bundle (10 short + 6 long + mutations):
+      # run here it refuses on evidence that this job never receives. The
+      # archive-preflight job owns that gate after event-integrity-required.
       - name: Lint (gofmt · build · vet · comment ratchet · docs/api freshness · name/doc/proc refs)
         env:
           TAGENT_RUNTIME_EVIDENCE_DIR: ${{ runner.temp }}/dod
-        run: bash scripts/lint.sh
+        run: bash scripts/lint.sh --no-preflight
 
   race:
     runs-on: ubuntu-latest
