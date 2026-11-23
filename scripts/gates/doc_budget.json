@@ -1,7 +1,7 @@
 {
   "baseline": {
-    "files": 234,
-    "lines": 22455
+    "files": 239,
+    "lines": 22850
   },
   "measured_at": "2026-11-23",
   "measured_by": "python3 scripts/gates/check_doc_budget.py --json",
@@ -19,6 +19,19 @@
       "to": {
         "files": 234,
         "lines": 22463
+      }
+    },
+    {
+      "authority": "user 归档指令 2026-11-23（commit and push + @openspec-archive-change）",
+      "date": "2026-11-23",
+      "from": {
+        "files": 234,
+        "lines": 22455
+      },
+      "reason": "runtime-coherence 归档转正：新建 5 篇能力 spec（durable-store-point-reads/recovery-derivation-contract/task-recovery-vertical/consumer-recovery-convergence/coherence-release）＋ plugin-mounting 追加 3 条 Requirement；一级 orchestration delta 经 openspec archive CLI 合入。来源 archive/2026-11-23-runtime-coherence。",
+      "to": {
+        "files": 239,
+        "lines": 22850
       }
     }
   ],
