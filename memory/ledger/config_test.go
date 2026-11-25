@@ -13,6 +13,7 @@ import (
 	"os/exec"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/SpellingDragon/tagent/api/event"
 )
@@ -28,6 +29,66 @@ const secondWriterSlot = 1
 
 // secondWriterAdmitted marks a child process whose open of the root succeeded.
 const secondWriterAdmitted = "admitted"
+
+// TestOpenTierRefusesHalfArchiveConfig pins the public tier's archive declaration gate.
+//
+// 契约: docs/wiki/memory/memory-architecture.md#store-instance-sharing
+func TestOpenTierRefusesHalfArchiveConfig(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		set  func(*StorageConfig)
+	}{
+		{name: "budget without root", set: func(c *StorageConfig) { c.HotLogMaxBytes = 1 }},
+		{name: "root without budget", set: func(c *StorageConfig) { c.ArchiveRoot = t.TempDir() }},
+		{name: "age without root", set: func(c *StorageConfig) { c.ArchiveMaxAge = time.Hour }},
+		{name: "negative budget", set: func(c *StorageConfig) {
+			c.ArchiveRoot = t.TempDir()
+			c.HotLogMaxBytes = -1
+		}},
+		{name: "negative age", set: func(c *StorageConfig) {
+			c.ArchiveRoot = t.TempDir()
+			c.HotLogMaxBytes = 1
+			c.ArchiveMaxAge = -time.Hour
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			cfg := StorageConfig{Type: StorageJournal, Root: t.TempDir()}
+			test.set(&cfg)
+			tier, err := OpenTier(context.Background(), cfg)
+			if tier != nil {
+				tier.Close()
+			}
+			if !errors.Is(err, ErrArchiveConfig) {
+				t.Fatalf("OpenTier with %s = (%v, %v), want ErrArchiveConfig", test.name, tier, err)
+			}
+		})
+	}
+}
+
+// TestArchiveMaxAgeReachesJournalView pins the storage configuration's archive window.
+//   - OpenAtomicStore passes the configured duration to the journal view unchanged
+//   - an omitted duration leaves the view's archive age at zero
+func TestArchiveMaxAgeReachesJournalView(t *testing.T) {
+	for _, age := range []time.Duration{0, 2 * time.Hour} {
+		cfg := StorageConfig{Type: StorageJournal, Root: t.TempDir()}
+		cfg.ArchiveMaxAge = age
+		store, err := OpenAtomicStore(context.Background(), cfg)
+		if err != nil {
+			t.Fatalf("open the store with archive age %s: %v", age, err)
+		}
+		kv, ok := store.(*journalKV)
+		if !ok {
+			t.Fatalf("OpenAtomicStore returned %T, want the journal view", store)
+		}
+		if kv.archiveMaxAge != age {
+			kv.log.close()
+			t.Fatalf("the journal view states archive age %s, want %s", kv.archiveMaxAge, age)
+		}
+		if err := kv.log.close(); err != nil {
+			t.Fatalf("close the store with archive age %s: %v", age, err)
+		}
+	}
+}
 
 // TestSecondProcessOnOneRootIsRefusedWriteRights pins the one-writer admission of one storage root across two processes.
 //   - the second process is refused the root by name, so it never lands a body over the slot the first writer's index points at

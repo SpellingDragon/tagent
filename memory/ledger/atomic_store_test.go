@@ -313,7 +313,10 @@ func capabilityEngines() []capabilityEngine {
 			return StorageConfig{Type: StorageMemory}
 		}},
 		{name: "file", cfg: func(root, cli string) StorageConfig {
-			return StorageConfig{Type: StorageFile, Root: root, RustVikingBinary: rustVikingStubPath(cli), RustVikingConfig: cli}
+			cfg := StorageConfig{Type: StorageFile, Root: root}
+			cfg.RustVikingBinary = rustVikingStubPath(cli)
+			cfg.RustVikingConfig = cli
+			return cfg
 		}},
 	}
 }
@@ -374,7 +377,9 @@ func TestASecondKeyFailureLeavesNoFirstKeyPublished(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(cli, "fail-at"), []byte("2\n"), 0o600); err != nil {
 		t.Fatalf("arm the stub to fail its second mutation: %v", err)
 	}
-	cfg := StorageConfig{Type: StorageFile, Root: root, RustVikingBinary: rustVikingStubPath(cli), RustVikingConfig: cli}
+	cfg := StorageConfig{Type: StorageFile, Root: root}
+	cfg.RustVikingBinary = rustVikingStubPath(cli)
+	cfg.RustVikingConfig = cli
 	store, err := OpenAtomicStore(ctx, cfg)
 	if err != nil {
 		t.Fatalf("open the file engine: %v", err)
@@ -403,7 +408,10 @@ func TestTheFileTierNamesTheFactLayerItCannotCarry(t *testing.T) {
 	ctx := context.Background()
 	root, cli := t.TempDir(), t.TempDir()
 	writeRustVikingStub(t, cli)
-	tier, err := OpenTier(ctx, StorageConfig{Type: StorageFile, Root: root, RustVikingBinary: rustVikingStubPath(cli), RustVikingConfig: cli})
+	cfg := StorageConfig{Type: StorageFile, Root: root}
+	cfg.RustVikingBinary = rustVikingStubPath(cli)
+	cfg.RustVikingConfig = cli
+	tier, err := OpenTier(ctx, cfg)
 	if err != nil {
 		t.Fatalf("open the file tier: %v", err)
 	}

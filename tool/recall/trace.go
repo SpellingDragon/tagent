@@ -8,9 +8,11 @@ package recall
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 
 	"github.com/SpellingDragon/tagent/api/event"
+	"github.com/SpellingDragon/tagent/memory/ledger"
 	trpctool "trpc.group/trpc-go/trpc-agent-go/tool"
 )
 
@@ -107,6 +109,11 @@ func (t *traceTool) Call(ctx context.Context, jsonArgs []byte) (any, error) {
 		}
 		read[current] = true
 		landed, held := t.reads.Table.Event(current)
+		if !held {
+			if err := chainFailure(t.reads.Table, current); err != nil {
+				return nil, fmt.Errorf("%s: read %s: %w", TraceToolName, current, err)
+			}
+		}
 		if !held || !t.admits(landed.PartitionID) {
 			if current == start {
 				return nil, fmt.Errorf("%s: %w: %s", TraceToolName, ErrRecallMissing, current)
@@ -117,6 +124,9 @@ func (t *traceTool) Call(ctx context.Context, jsonArgs []byte) (any, error) {
 		answer.Items = append(answer.Items, itemOf(landed))
 		parent, err := t.reads.Trace.GetParent(current)
 		if err != nil {
+			if errors.Is(err, ledger.ErrArchiveMissing) || errors.Is(err, ledger.ErrArchiveCorrupt) {
+				return nil, fmt.Errorf("%s: read the parent of %s: %w", TraceToolName, current, err)
+			}
 			answer.Reason = reasonRelationError
 			break
 		}
@@ -133,6 +143,16 @@ func (t *traceTool) Call(ctx context.Context, jsonArgs []byte) (any, error) {
 	}
 	answer.Count = len(answer.Items)
 	return encode(TraceToolName, answer)
+}
+
+// chainFailure names why table holds no readable event for key, or answers nil
+// when the table carries no failure face or names no failure.
+func chainFailure(table Table, key event.EventID) error {
+	namer, ok := table.(ChainFailureNamer)
+	if !ok {
+		return nil
+	}
+	return namer.ChainFailure(key)
 }
 
 // missingReason names why one link of the walk could not be read: the table

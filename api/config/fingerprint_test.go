@@ -189,6 +189,9 @@ func TestFingerprintNamesSectionsOnlyWhenDeclared(t *testing.T) {
 		mutate func(*AgentSpec)
 	}{
 		{name: "memory tier", mutate: func(s *AgentSpec) { s.Memory.Type = "localfile" }},
+		{name: "archive root", mutate: func(s *AgentSpec) { s.Memory.ArchiveRoot = "/tmp/archive" }},
+		{name: "hot log budget", mutate: func(s *AgentSpec) { s.Memory.HotLogMaxBytes = 1 << 20 }},
+		{name: "archive window", mutate: func(s *AgentSpec) { s.Memory.ArchiveMaxAge = 24 * time.Hour }},
 		{name: "embedding connection", mutate: func(s *AgentSpec) { s.Memory.Engine.Embedding.Model = "embedding-3" }},
 		{name: "meditation switch", mutate: func(s *AgentSpec) { s.Meditation.Enabled = true }},
 		{name: "meditation cadence", mutate: func(s *AgentSpec) { s.Meditation.Interval = time.Minute }},
@@ -239,6 +242,61 @@ agents:
 	}
 	if got := agent.File.ReadRoots[0]; got != "/tmp/a" {
 		t.Fatalf("mutating a clone reached the source read roots: %q", got)
+	}
+}
+
+// TestFingerprintNamesTheArchiveFace pins that each archive field reaches the fingerprint beside an otherwise equal declaration.
+// - changing archive_root, hot_log_max_bytes or archive_max_age moves the fingerprint
+// - a zero budget spelled out fingerprints as one omitted, because neither enables an archive
+// 契约: docs/wiki/platform/org-hot-reload.md#fingerprint
+func TestFingerprintNamesTheArchiveFace(t *testing.T) {
+	const tier = "entry: main\nagents:\n  - id: main\n    memory:\n      type: localfile\n      path: /srv/hot\n"
+	base := loadConfigDeclaration(t, tier)
+	bare := fingerprintOf(t, *base)
+	for _, tc := range []struct {
+		name   string
+		mutate func(*MemorySpec)
+	}{
+		{name: "archive root", mutate: func(s *MemorySpec) { s.ArchiveRoot = "/srv/archive" }},
+		{name: "hot log budget", mutate: func(s *MemorySpec) { s.HotLogMaxBytes = 1 << 20 }},
+		{name: "archive window", mutate: func(s *MemorySpec) { s.ArchiveMaxAge = 24 * time.Hour }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			bound := *base.Clone()
+			tc.mutate(&bound.Agents[0].Memory)
+			if got := fingerprintOf(t, bound); got == bare {
+				t.Fatalf("fingerprint did not move when the declaration named %s: %q", tc.name, got)
+			}
+		})
+	}
+	spelled := loadConfigDeclaration(t, tier+"      hot_log_max_bytes: 0\n")
+	if got, want := fingerprintOf(t, *spelled), bare; got != want {
+		t.Fatalf("fingerprint of a spelled zero budget = %q, want the %q of an omitted one", got, want)
+	}
+}
+
+// TestCloneCarriesEveryArchiveField pins that a copied declaration keeps the archive face of its memory section.
+// - the three archive fields reach the copy unchanged
+// - the copy fingerprints as the source does, so a copy is indistinguishable from what it copies
+// 契约: docs/wiki/platform/org-hot-reload.md#config-clone
+func TestCloneCarriesEveryArchiveField(t *testing.T) {
+	decl := loadConfigDeclaration(t, `entry: main
+agents:
+  - id: main
+    memory:
+      type: localfile
+      path: /srv/hot
+      archive_root: /srv/archive
+      hot_log_max_bytes: 1048576
+      archive_max_age: 24h
+`)
+	clone := decl.Clone()
+	got := clone.Agents[0].Memory
+	if got.ArchiveRoot != "/srv/archive" || got.HotLogMaxBytes != 1048576 || got.ArchiveMaxAge != 24*time.Hour {
+		t.Fatalf("cloned memory archive face = %+v, want the three declared fields carried", got)
+	}
+	if want, other := fingerprintOf(t, *decl), fingerprintOf(t, *clone); want != other {
+		t.Fatalf("fingerprint of the clone = %q, want the %q of its source", other, want)
 	}
 }
 

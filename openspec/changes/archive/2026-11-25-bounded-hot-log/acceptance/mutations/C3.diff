@@ -1,0 +1,11 @@
+--- a/memory/ledger/journal_kv.go
++++ b/memory/ledger/journal_kv.go
+@@ -505,7 +505,7 @@
+ 	candidates := make([]journalSealedSegment, 0, len(segments)-1)
+ 	var previous int64
+ 	for _, segment := range segments {
+-		if segment.id >= newest || stated[journalSegmentLabelOf(segment.id)] {
++		if false && segment.id >= newest || stated[journalSegmentLabelOf(segment.id)] {
+ 			continue
+ 		}
+ 		if len(candidates) > 0 && segment.id != previous+1 {

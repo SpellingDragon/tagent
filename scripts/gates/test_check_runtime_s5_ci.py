@@ -14,6 +14,7 @@ orchestrator; this anchor only tests the CI surface that the spec constrains.
 """
 import copy
 import json
+import subprocess
 import unittest
 from pathlib import Path
 
@@ -56,20 +57,15 @@ def race_command(workflow):
 
 
 def declared_patterns(command):
-    """The package arguments after race_check.sh, never shell operators."""
-    tokens = command.split()
-    positions = [index for index, token in enumerate(tokens)
-                 if token.endswith("race_check.sh")]
-    if len(positions) != 1:
-        raise AssertionError("the race command must name race_check.sh exactly once")
-    patterns = tokens[positions[0] + 1:]
+    """The canonical package union declared by race_check.sh's shard table."""
+    result = subprocess.run(
+        ["bash", str(RACE_SCRIPT), "--shard-union-check"],
+        cwd=REPO, text=True, capture_output=True, check=False)
+    if result.returncode != 0:
+        raise AssertionError("race shard union check failed: {}".format(result.stderr.strip()))
+    patterns = [line.strip() for line in result.stdout.splitlines() if line.strip().startswith(".")]
     if not patterns:
-        raise AssertionError("the race command declares no package at all")
-    for pattern in patterns:
-        if not pattern.startswith("."):
-            raise AssertionError(
-                "race package argument {!r} is not a package pattern (shell "
-                "operators or flags must not be mistaken for packages)".format(pattern))
+        raise AssertionError("race shard union declares no package at all")
     return patterns
 
 
@@ -93,8 +89,7 @@ def first_party_packages():
     return packages
 
 
-def assert_race_gate_covers_first_party(workflow, packages):
-    patterns = declared_patterns(race_command(workflow))
+def assert_race_patterns_cover(patterns, packages):
     missing = [package for package in packages
                if not any(covers(token, package) for token in patterns)]
     if missing:
@@ -109,15 +104,24 @@ def assert_race_gate_covers_first_party(workflow, packages):
             "printed note while it carries no Go files")
 
 
+def assert_race_gate_covers_first_party(workflow, packages):
+    assert_race_patterns_cover(declared_patterns(race_command(workflow)), packages)
+
+
 WECHAT_COMMAND_PREFIX = "go -C examples/wechat-bot test"
 
 
 def wechat_race_step(workflow):
-    steps = [step for step in job_steps(race_job(workflow))
-             if WECHAT_COMMAND_PREFIX in (step.get("run") or "")]
+    jobs = workflow.get("jobs") or {}
+    steps = []
+    for job_name in ("race", "race-aggregate"):
+        job = jobs.get(job_name)
+        if isinstance(job, dict):
+            steps.extend(step for step in job_steps(job)
+                         if WECHAT_COMMAND_PREFIX in (step.get("run") or ""))
     if len(steps) != 1:
         raise AssertionError(
-            "the race job must run the wechat-bot module under race exactly "
+            "the race matrix/aggregate must run the wechat-bot module under race exactly "
             "once (the independent module is not reached by the root module's "
             "./...), found {}".format(len(steps)))
     return steps[0]
@@ -178,23 +182,17 @@ class TestRaceGateCoversEveryFirstPartyPackage(unittest.TestCase):
             "a set that contains only the module root would prove nothing")
 
     def test_negative_control_shrinking_the_set_turns_the_check_red(self):
-        # The historical shrunken set (host/history only) must not satisfy the
-        # contract; neither may a set missing one registered package.
-        for label, mutate in (
-                ("host/history only", lambda workflow: set_race_run(
-                    workflow, "./scripts/gates/race_check.sh ./tests/integration/host/... "
-                               "./tests/integration/history/...")),
-                ("assembly dropped", lambda workflow: set_race_run(
-                    workflow, race_command(workflow).replace(" ./assembly/...", ""))),
-                ("no root entry", lambda workflow: set_race_run(
-                    workflow, " ".join(token for token in race_command(workflow).split()
-                                       if token != "."))),
-        ):
+        # Coverage is read from the shard union, so the negative controls mutate
+        # the declared set or the registered package list rather than CI argv.
+        canonical = declared_patterns(race_command(self.workflow))
+        for label, patterns, packages in (
+                ("host/history only", ["./tests/integration/host/...", "./tests/integration/history/..."], self.packages),
+                ("assembly dropped", [pattern for pattern in canonical if pattern != "./assembly/..."], self.packages),
+                ("no root entry", [pattern for pattern in canonical if pattern != "."], self.packages),
+                ("unregistered package", canonical, self.packages + ["./unregistered/..."])):
             with self.subTest(mutation=label):
-                mutated = copy.deepcopy(self.workflow)
-                mutate(mutated)
                 with self.assertRaises(AssertionError):
-                    assert_race_gate_covers_first_party(mutated, self.packages)
+                    assert_race_patterns_cover(patterns, packages)
 
     def test_negative_control_dropping_or_hollowing_the_wechat_run_turns_red(self):
         for label, mutate in (
@@ -206,12 +204,6 @@ class TestRaceGateCoversEveryFirstPartyPackage(unittest.TestCase):
                 mutate(mutated)
                 with self.assertRaises(AssertionError):
                     assert_wechat_module_raced(mutated)
-
-
-def set_race_run(workflow, run):
-    step = next(step for step in job_steps(race_job(workflow))
-                if "race_check.sh" in (step.get("run") or ""))
-    step["run"] = run
 
 
 def remove_wechat_step(workflow):

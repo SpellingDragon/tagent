@@ -210,6 +210,45 @@ func TestJournalFraming(t *testing.T) {
 	})
 }
 
+// TestOversizedFrameRefusesJournalOpen pins an over-bound declared length as corruption rather than a torn tail.
+//   - both writing and reading opens answer ErrJournalCorrupt
+//   - neither open cuts bytes from the refused journal
+//
+// 契约: docs/wiki/memory/memory-architecture.md#local-file-kv
+func TestOversizedFrameRefusesJournalOpen(t *testing.T) {
+	raw := make([]byte, journalFrameHeaderBytes+4)
+	binary.BigEndian.PutUint32(raw[0:4], uint32(journalMaxFrameBytes+1))
+	for _, face := range []struct {
+		name        string
+		writeRights bool
+	}{
+		{name: "writer", writeRights: true},
+		{name: "reader", writeRights: false},
+	} {
+		t.Run(face.name, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, journalFileName)
+			if err := os.WriteFile(path, raw, 0o600); err != nil {
+				t.Fatalf("write the oversized frame header: %v", err)
+			}
+			log, err := openJournalLogFace(dir, face.writeRights)
+			if log != nil {
+				log.close()
+			}
+			if !errors.Is(err, ErrJournalCorrupt) {
+				t.Fatalf("open of the oversized frame = %v, want ErrJournalCorrupt", err)
+			}
+			after, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatalf("read the refused journal: %v", err)
+			}
+			if !bytes.Equal(after, raw) {
+				t.Fatalf("the refused journal holds %d byte(s), want the original %d", len(after), len(raw))
+			}
+		})
+	}
+}
+
 // TestJournalKVCommit pins the key-value seam over the journal.
 // - a committed batch reads back, survives a reopen, and a delete stops answering
 // - a barrier that did not complete reports the named failure, over a writer that accepts the record and refuses the sync
@@ -337,14 +376,21 @@ func TestJournalKVCommit(t *testing.T) {
 		if !bytes.HasPrefix(after, before) {
 			t.Fatal("the second commit rewrote the records already committed")
 		}
-		payload, err := json.Marshal(journalRecord{Version: journalFormatVersion,
-			Puts: []journalPut{{Key: "0:evt:00002", Value: []byte("second")}}})
+		appended := after[len(before):]
+		payload, err := journalPayloadOf(appended)
 		if err != nil {
-			t.Fatalf("render the expected frame: %v", err)
+			t.Fatalf("read the frame the second commit appended: %v", err)
 		}
-		if growth := len(after) - len(before); growth != journalFrameHeaderBytes+len(payload) {
-			t.Fatalf("the second commit appended %d bytes, want the %d-byte frame alone",
-				growth, journalFrameHeaderBytes+len(payload))
+		var record journalRecord
+		if err := json.Unmarshal(payload, &record); err != nil {
+			t.Fatalf("decode the frame the second commit appended: %v", err)
+		}
+		if record.Version != journalFormatVersion || record.CommittedAtNS == 0 ||
+			len(record.Puts) != 1 || record.Puts[0].Key != "0:evt:00002" || string(record.Puts[0].Value) != "second" {
+			t.Fatalf("the second commit appended %+v, want its version two record and commit time", record)
+		}
+		if len(appended) != journalFrameHeaderBytes+len(payload) {
+			t.Fatalf("the second commit appended %d bytes beside a %d-byte payload", len(appended), len(payload))
 		}
 		var snapshots []string
 		walkErr := filepath.WalkDir(dir, func(path string, entry os.DirEntry, err error) error {
@@ -463,8 +509,8 @@ func TestJournalValueSpans(t *testing.T) {
 			t.Fatalf("reopen the journal: %v", err)
 		}
 		defer reopened.close()
-		span, held, err := reopened.addr.lookup("0:idx:small")
-		if err != nil || !held {
+		span, state, err := reopened.addr.lookup("0:idx:small")
+		if err != nil || state != journalSlotHeld {
 			t.Fatalf("the small key holds no span after the replay: %+v (err=%v)", span, err)
 		}
 		if want := len(jsonTokenOf(t, []byte("small"))); span.Length != want {
@@ -1250,9 +1296,19 @@ func journalTestSwappedOffsets(t *testing.T, order []byte) []byte {
 		t.Fatalf("the first statement states %d offset(s), want the two writes a swap takes", len(spans))
 	}
 	first, second := spans[0], spans[1]
-	if second[1]-second[0] != first[1]-first[0] {
-		t.Fatalf("the two offsets are %d and %d digit(s) wide, want one width so the swap keeps the line's byte count",
-			first[1]-first[0], second[1]-second[0])
+	pairFound := false
+	for left := 0; left < len(spans) && !pairFound; left++ {
+		for right := left + 1; right < len(spans); right++ {
+			if spans[right][1]-spans[right][0] == spans[left][1]-spans[left][0] &&
+				!bytes.Equal(line[spans[left][0]:spans[left][1]], line[spans[right][0]:spans[right][1]]) {
+				first, second = spans[left], spans[right]
+				pairFound = true
+				break
+			}
+		}
+	}
+	if !pairFound {
+		t.Fatalf("the first statement states no two different offsets of one width, want a pair whose swap keeps the line's byte count")
 	}
 	held := append([]byte(nil), line[first[0]:first[1]]...)
 	copy(line[first[0]:first[1]], line[second[0]:second[1]])

@@ -28,7 +28,7 @@ import (
 )
 
 // ErrJournalCorrupt reports a frame that is fully present in the log and does
-// not match the checksum written beside it.
+// not match its checksum, or declares a payload past the frame bound.
 var ErrJournalCorrupt = errors.New("memory: journal frame is corrupt")
 
 // ErrJournalFormat reports a log written under a format version this build does
@@ -49,9 +49,10 @@ const (
 	// journalFileName is the file one journal directory holds: the whole log of
 	// that directory, appended to and never rewritten.
 	journalFileName = "journal.log"
-	// journalFormatVersion is the format this build writes and the only one it
-	// reads; any other value in a record refuses the open.
-	journalFormatVersion = 1
+	// journalFormatVersion is the record format this build writes. Version one
+	// remains readable and states an unknown commit time when its field is absent.
+	journalFormatVersion   = 2
+	journalFormatVersionV1 = 1
 	// journalFrameHeaderBytes is the fixed cost of one frame in front of its
 	// payload: the payload length and the payload checksum.
 	journalFrameHeaderBytes = 8
@@ -184,12 +185,13 @@ type journalPut struct {
 }
 
 // journalRecord is the payload of one frame: the format version it was written
-// under beside the writes it commits. One frame carries one commit, so a frame
-// is all of a commit or none of it.
+// under, the commit time shared by every write in the batch, and the writes it
+// commits. One frame carries one commit, so a frame is all of a commit or none of it.
 type journalRecord struct {
-	Version int          `json:"version"`
-	Puts    []journalPut `json:"puts,omitempty"`
-	Deletes []string     `json:"deletes,omitempty"`
+	Version       int          `json:"version"`
+	CommittedAtNS int64        `json:"committed_at_ns"`
+	Puts          []journalPut `json:"puts,omitempty"`
+	Deletes       []string     `json:"deletes,omitempty"`
 }
 
 // journalValue locates one key's latest value: the byte span of the JSON token
@@ -264,14 +266,33 @@ type journalLog struct {
 	// it before any caller reads the log: the view that holds the root's write rights
 	// states it, and a view holding none keeps the read face of it.
 	addr *journalAddress
+	// segments are the sealed segments of this log, oldest first: each one carries the
+	// bytes of the interval [begin, begin+bytes) of the log, copied verbatim behind the
+	// header that states it. They are the intervals a cut closed, and the bytes they
+	// carry are read from the segment files, never from the open file behind them.
+	segments []journalSealedSegment
+	// openBase is the log byte the open segment starts at: the sum of the bytes the
+	// sealed segments carry. It is zero beside a log no seal has closed, so every read
+	// of such a log reads the one file it always read.
+	openBase int64
+	// baseSeq is the commit rank in front of the first frame of the hot log: one less
+	// than the first rank the oldest sealed segment states. A rebuild of the index
+	// numbers the hot commits by the ranks the segment headers state, so a seal behind
+	// it continues from the interval the log kept. It is zero beside a log whose oldest
+	// sealed interval starts at the first commit.
+	baseSeq int64
 }
 
 // journalSpans is the index material one record states: the format version it was
-// written under beside the value span of every write and the keys it deletes.
+// written under, its commit time, the value span of every write and the keys it deletes.
 type journalSpans struct {
 	version int
-	puts    []journalPutSpan
-	deletes []string
+	// committedAtNS is the time a barrier confirmed. Version two states zero for
+	// an ordered append that confirmed no commit; version one states zero because
+	// the format carried no time.
+	committedAtNS int64
+	puts          []journalPutSpan
+	deletes       []string
 }
 
 // journalPutSpan is one write of a record as the index files it: the key it
@@ -279,6 +300,11 @@ type journalSpans struct {
 type journalPutSpan struct {
 	key   string
 	value journalValue
+}
+
+// journalRecordVersionReadable reports whether a record version is one this build replays.
+func journalRecordVersionReadable(version int) bool {
+	return version == journalFormatVersionV1 || version == journalFormatVersion
 }
 
 // journalSpansAt reads the index material of one record payload, whose first
@@ -318,6 +344,15 @@ func journalSpansAt(payload []byte, at int64) (journalSpans, error) {
 			}
 			if err := json.Unmarshal(payload[at2:end], &out.version); err != nil {
 				return out, fmt.Errorf("read the record version: %w", err)
+			}
+			at2 = end
+		case "committed_at_ns":
+			end, err := journalSkipValue(payload, at2)
+			if err != nil {
+				return out, err
+			}
+			if err := json.Unmarshal(payload[at2:end], &out.committedAtNS); err != nil {
+				return out, fmt.Errorf("read the record commit time: %w", err)
 			}
 			at2 = end
 		case "puts":
@@ -562,22 +597,49 @@ func journalPayloadOf(frame []byte) ([]byte, error) {
 	return payload, nil
 }
 
+// journalByteSource is the bytes of one log as a pass reads them: one address space
+// over the sealed segments and the open segment, named as the file the log is so an
+// error states the log it read.
+type journalByteSource interface {
+	io.ReaderAt
+	Name() string
+}
+
+// journalLogBytes is the bytes of one journal log as its own passes read them: every
+// offset is a logical log byte, and a byte of a sealed interval is read from the
+// segment file that states it.
+type journalLogBytes struct {
+	log *journalLog
+}
+
+// ReadAt answers the log bytes at one logical offset.
+func (b journalLogBytes) ReadAt(p []byte, off int64) (int, error) {
+	return b.log.readAt(p, off)
+}
+
+// Name answers the log's file, which is the record every position of the log is
+// stated against.
+func (b journalLogBytes) Name() string {
+	return b.log.path
+}
+
 // journalReplay reads every complete frame of one log from the given offset
 // through visit, which is answered the payload and the offset it starts at, and
 // answers the offset just past the last complete frame. Bytes shorter than a
 // frame, or a frame whose declared payload is not all present, end the replay as a
 // torn tail: they are what a writer left when it stopped mid-frame, and the offset
-// answered is where they start. A frame that is fully present and fails its
-// checksum is not a torn tail, so the replay stops with the named corruption
-// instead of dropping the records behind it. A frame header of zero states no
+// answered is where they start. A declared payload past the frame bound, or a
+// fully present frame that fails its checksum, is not a torn tail, so the replay
+// stops with the named corruption instead of dropping the records behind it. A
+// frame header of zero states no
 // payload and no checksum, which no commit writes, so the zeros a stopped
 // writer leaves past its last frame end the replay as a torn tail at that
 // offset, and a log resuming past such zeros is the named corruption.
 //
 // - The frames are read through one sequential buffered reader and one payload buffer, so a log of any size costs one read per buffer instead of two reads and one allocation per frame.
 //   - The payload handed to visit is valid for that visit alone: the buffer it points into is reused by the next frame.
-func journalReplay(file *os.File, from, size int64, visit func(payload []byte, at int64) error) (int64, error) {
-	reader := bufio.NewReaderSize(io.NewSectionReader(file, from, size-from), journalReplayBufferBytes)
+func journalReplay(source journalByteSource, from, size int64, visit func(payload []byte, at int64) error) (int64, error) {
+	reader := bufio.NewReaderSize(io.NewSectionReader(source, from, size-from), journalReplayBufferBytes)
 	offset := from
 	header := make([]byte, journalFrameHeaderBytes)
 	var payload []byte
@@ -586,20 +648,24 @@ func journalReplay(file *os.File, from, size int64, visit func(payload []byte, a
 			return offset, nil
 		}
 		if _, err := io.ReadFull(reader, header); err != nil {
-			return 0, fmt.Errorf("%w: %s: %w", ErrJournalCorrupt, file.Name(), err)
+			return 0, fmt.Errorf("%w: %s: %w", ErrJournalCorrupt, source.Name(), err)
 		}
 		length := int(binary.BigEndian.Uint32(header[0:4]))
 		if length == 0 && binary.BigEndian.Uint32(header[4:8]) == 0 {
 			zero, err := journalRestStatesZeroBytes(reader)
 			if err != nil {
-				return 0, fmt.Errorf("%w: %s: %w", ErrJournalCorrupt, file.Name(), err)
+				return 0, fmt.Errorf("%w: %s: %w", ErrJournalCorrupt, source.Name(), err)
 			}
 			if zero {
 				return offset, nil
 			}
 			return 0, fmt.Errorf("%w: frame at offset %d carries no payload", ErrJournalCorrupt, offset)
 		}
-		if length > journalMaxFrameBytes || size-offset-journalFrameHeaderBytes < int64(length) {
+		if length > journalMaxFrameBytes {
+			return 0, fmt.Errorf("%w: frame at offset %d declares %d payload bytes past the %d-byte bound",
+				ErrJournalCorrupt, offset, length, journalMaxFrameBytes)
+		}
+		if size-offset-journalFrameHeaderBytes < int64(length) {
 			return offset, nil
 		}
 		if cap(payload) < length {
@@ -607,7 +673,7 @@ func journalReplay(file *os.File, from, size int64, visit func(payload []byte, a
 		}
 		payload = payload[:length]
 		if _, err := io.ReadFull(reader, payload); err != nil {
-			return 0, fmt.Errorf("%w: %s: %w", ErrJournalCorrupt, file.Name(), err)
+			return 0, fmt.Errorf("%w: %s: %w", ErrJournalCorrupt, source.Name(), err)
 		}
 		if want := binary.BigEndian.Uint32(header[4:8]); crc32.Checksum(payload, journalCRCTable) != want {
 			return 0, fmt.Errorf("%w: frame at offset %d", ErrJournalCorrupt, offset)
@@ -657,6 +723,7 @@ func openJournalLog(dir string) (*journalLog, error) {
 //
 //   - A torn tail is recorded by both faces: the writing view cuts it off the log and the reading view serves the frames before it, so either open states the bytes its writer never finished
 //   - The open verifies the checksum of every complete frame of the log, the history behind the watermark included: the index files are derived from the log, so a watermark they state accelerates the index replay but never vouches for the integrity of the bytes it skips
+//   - The integrity verification reads the whole log as one address space: every sealed segment in id order and then the open segment, so the bytes a segment carries are verified at the open that reads them and no seal is trusted on the header's own word
 //   - The index replay reads the window past the watermark alone, which is the span openBytes states; the integrity verification reads the whole log and is not that span
 func openJournalLogFace(dir string, writeRights bool) (*journalLog, error) {
 	if writeRights {
@@ -667,7 +734,17 @@ func openJournalLogFace(dir string, writeRights bool) (*journalLog, error) {
 	if err := rejectLegacyShardLayout(dir); err != nil {
 		return nil, err
 	}
+	segments, err := openSealedSegments(dir)
+	if err != nil {
+		return nil, err
+	}
 	path := filepath.Join(dir, journalFileName)
+	if len(segments) > 0 {
+		if _, err := os.Stat(path); errors.Is(err, os.ErrNotExist) {
+			return nil, fmt.Errorf("%w: %s is not held beside the %d sealed segment(s) of %s",
+				ErrJournalCorrupt, path, len(segments), dir)
+		}
+	}
 	flags := os.O_RDWR | os.O_CREATE | os.O_APPEND
 	if !writeRights {
 		flags = os.O_RDONLY
@@ -679,7 +756,13 @@ func openJournalLogFace(dir string, writeRights bool) (*journalLog, error) {
 		}
 		return openUncreatedJournalReadView(dir, path)
 	}
-	log := &journalLog{dir: dir, path: path, file: file}
+	log := &journalLog{dir: dir, path: path, file: file, segments: segments}
+	for _, segment := range segments {
+		log.openBase += segment.bytes
+	}
+	if len(segments) > 0 {
+		log.baseSeq = segments[0].firstSeq - 1
+	}
 	stat, err := file.Stat()
 	if err != nil {
 		file.Close()
@@ -691,7 +774,7 @@ func openJournalLogFace(dir string, writeRights bool) (*journalLog, error) {
 		from = watermark
 	}
 	integrityBegin := time.Now()
-	complete, err := journalReplay(file, 0, size, func([]byte, int64) error { return nil })
+	complete, err := journalReplay(journalLogBytes{log: log}, 0, size, func([]byte, int64) error { return nil })
 	if err != nil {
 		file.Close()
 		return nil, err
@@ -826,9 +909,14 @@ type journalSlotHeader struct {
 	Capacity int64
 	// Stride is the width of one slot record in bytes.
 	Stride int64
-	// Seq is the number of commits the derived index files state.
+	// Seq is the commit rank the derived index files reach: the rank of the newest
+	// commit they state, counted in the one order of the log.
 	Seq int64
-	// ValuesSize is the byte of journal.log those commits end at.
+	// ValuesSize is the byte of the log those commits end at. The byte is a logical
+	// log offset and a segment boundary does not move it: the sealed segments and the
+	// open segment are one address space, so a watermark stated before a seal still
+	// names the same bytes after it, and an open replays from it across the segment
+	// that carries them.
 	ValuesSize int64
 	// OrderSize is the byte of order.log those commits end at.
 	OrderSize int64
@@ -965,8 +1053,12 @@ type journalAddress struct {
 	// The ledger package keeps no logger, so the open names the fallback here and the
 	// caller that holds one states it.
 	notice string
-	// seq is the number of commits the index files state.
+	// seq is the commit rank the index files reach, which is the rank of the newest
+	// commit they state and the rank in front of the next one they file.
 	seq int64
+	// baseSeq is the commit rank in front of the log's first hot frame, which a rebuild
+	// of the index numbers the hot commits from.
+	baseSeq int64
 	// valuesSize is the byte of the log those commits end at.
 	valuesSize int64
 	// orderSize is the byte of the order file those commits end at.
@@ -1063,6 +1155,7 @@ func openJournalAddress(log *journalLog) (*journalAddress, error) {
 		linePath:  filepath.Join(log.dir, journalOrderLineFileName),
 		capacity:  journalSlotCapacity,
 		stride:    journalSlotStride,
+		baseSeq:   log.baseSeq,
 	}
 	if err := a.openOrder(); err != nil {
 		return nil, err
@@ -1133,6 +1226,7 @@ func openJournalReadAddress(log *journalLog) (*journalAddress, error) {
 		slotsPath: filepath.Join(log.dir, journalSlotFileName),
 		linePath:  filepath.Join(log.dir, journalOrderLineFileName),
 		window:    &journalAddressWindow{values: map[string]journalValue{}},
+		baseSeq:   log.baseSeq,
 	}
 	if missing, err := a.openReadHandles(); err != nil {
 		return nil, err
@@ -1186,13 +1280,13 @@ func (a *journalAddress) wholeLog(cause string) (*journalAddress, error) {
 // that fails its checksum refuses the open as corruption, the refusal the write face's
 // replay answers too, so a damaged record is named instead of dropped from the window.
 func (a *journalAddress) replayWindow(from int64) error {
-	_, err := journalReplay(a.log.file, from, a.log.size, func(payload []byte, at int64) error {
+	_, err := journalReplay(journalLogBytes{log: a.log}, from, a.log.size, func(payload []byte, at int64) error {
 		a.openBytes += int64(journalFrameHeaderBytes + len(payload))
 		spans, err := journalSpansAt(payload, at)
 		if err != nil {
 			return fmt.Errorf("%w: %s: %w", ErrJournalCorrupt, a.log.path, err)
 		}
-		if spans.version != journalFormatVersion {
+		if !journalRecordVersionReadable(spans.version) {
 			return fmt.Errorf("%w: record version %d", ErrJournalFormat, spans.version)
 		}
 		a.window.fold(spans)
@@ -1387,7 +1481,7 @@ func (a *journalAddress) rebuild(parent string) error {
 	if err := a.order.Truncate(0); err != nil {
 		return fmt.Errorf("tagent: discard the order file of %s: %w", a.log.dir, err)
 	}
-	a.seq, a.valuesSize, a.orderSize, a.statedSeq = 0, 0, 0, 0
+	a.seq, a.valuesSize, a.orderSize, a.statedSeq = a.baseSeq, 0, 0, 0
 	if err := a.resetTable(journalSlotCapacity, journalSlotStride); err != nil {
 		return err
 	}
@@ -1414,13 +1508,13 @@ func (a *journalAddress) derive(from int64, rewrite bool, parent string) error {
 			return fmt.Errorf("tagent: discard the order file of %s: %w", a.log.dir, err)
 		}
 	}
-	complete, err := journalReplay(a.log.file, from, a.log.size, func(payload []byte, at int64) error {
+	complete, err := journalReplay(journalLogBytes{log: a.log}, from, a.log.size, func(payload []byte, at int64) error {
 		a.openBytes += int64(journalFrameHeaderBytes + len(payload))
 		spans, err := journalSpansAt(payload, at)
 		if err != nil {
 			return fmt.Errorf("%w: %s: %w", ErrJournalCorrupt, a.log.path, err)
 		}
-		if spans.version != journalFormatVersion {
+		if !journalRecordVersionReadable(spans.version) {
 			return fmt.Errorf("%w: record version %d", ErrJournalFormat, spans.version)
 		}
 		return a.state(spans, at+int64(len(payload)), parent)
@@ -1665,29 +1759,27 @@ func (a *journalAddress) probe(key string) (int64, bool, error) {
 		errSlotUnplaceable, a.slotsPath, a.used+1, key)
 }
 
-// lookup answers the span a key's record states, and whether the table holds that
-// key at all, stating the table again from the order file when the record it meets
-// cannot be placed: the key a torn record held is unknowable from the record, so a
-// table beside one is rebuilt rather than answered through a slot nobody wrote. A
-// read view answers its window first, because a commit the writer has not stated is
-// named there and in no slot record, and a view that opened no table answers the
-// window alone.
-func (a *journalAddress) lookup(key string) (journalAddressSpan, bool, error) {
+// lookup answers the span a key's record states and whether the hot index holds
+// the key, states it absent, or never states it, rebuilding the table from the order
+// file when a record cannot be placed. A read view answers its window first because
+// a commit the writer has not stated is named there and in no slot record; a view
+// that opened no table answers the window alone.
+func (a *journalAddress) lookup(key string) (journalAddressSpan, uint8, error) {
 	if value, named := a.windowValue(key); named {
 		if value.deleted {
-			return journalAddressSpan{}, false, nil
+			return journalAddressSpan{}, journalSlotAbsent, nil
 		}
-		return spanOf(value), true, nil
+		return spanOf(value), journalSlotHeld, nil
 	}
 	if a.slots == nil {
-		return journalAddressSpan{}, false, nil
+		return journalAddressSpan{}, journalSlotEmpty, nil
 	}
-	span, held, err := a.lookupOnce(key)
+	span, state, err := a.lookupOnce(key)
 	if !errors.Is(err, errSlotUnplaceable) || !a.statesIndexFiles() {
-		return span, held, err
+		return span, state, err
 	}
 	if rebuildErr := a.rebuildFrom("read"); rebuildErr != nil {
-		return journalAddressSpan{}, false, rebuildErr
+		return journalAddressSpan{}, journalSlotEmpty, rebuildErr
 	}
 	return a.lookupOnce(key)
 }
@@ -1739,20 +1831,20 @@ func (a *journalAddress) windowValue(key string) (journalValue, bool) {
 	return value, named
 }
 
-// lookupOnce answers one key from the table as it reads, which is what the repair
-// of lookup retries after the table is stated again.
-func (a *journalAddress) lookupOnce(key string) (journalAddressSpan, bool, error) {
+// lookupOnce answers one key's span and state from the table as it reads, which
+// is what lookup retries after the table is rebuilt.
+func (a *journalAddress) lookupOnce(key string) (journalAddressSpan, uint8, error) {
 	index, state, span, err := a.findRecord(key)
 	if err != nil || index < 0 {
-		return journalAddressSpan{}, false, err
+		return journalAddressSpan{}, journalSlotEmpty, err
 	}
 	if state == journalSlotAbsent {
-		return journalAddressSpan{}, false, nil
+		return journalAddressSpan{}, state, nil
 	}
 	if !a.stated(span) {
-		return journalAddressSpan{}, false, nil
+		return journalAddressSpan{}, journalSlotEmpty, nil
 	}
-	return span, true, nil
+	return span, state, nil
 }
 
 // findRecord answers the slot position one key's record sits at as this table reads,
@@ -2096,22 +2188,24 @@ func (a *journalAddress) flush(force bool) error {
 // held, and the read costs the value alone — never the frame that carries it and
 // never a walk of the statements behind it.
 func (a *journalAddress) read(key string) ([]byte, bool, error) {
-	span, held, err := a.lookup(key)
-	if err != nil || !held {
+	span, state, err := a.lookup(key)
+	if err != nil || state != journalSlotHeld {
 		return nil, false, err
 	}
 	return a.value(span)
 }
 
 // value answers the bytes one stated span names in the log, which is the read a
-// point lookup and a walk alike pay for the value they answer.
+// point lookup and a walk alike pay for the value they answer. The span is a logical
+// log position, so a value a segment carries is read from that segment and one the
+// open segment carries from the writer's file.
 func (a *journalAddress) value(span journalAddressSpan) ([]byte, bool, error) {
 	if span.Null {
 		return nil, true, nil
 	}
 	a.valueReads++
 	token := make([]byte, span.Length)
-	if _, err := a.log.file.ReadAt(token, span.Offset); err != nil {
+	if _, err := a.log.readAt(token, span.Offset); err != nil {
 		return nil, false, fmt.Errorf("%w: %s: %w", ErrJournalCorrupt, a.log.path, err)
 	}
 	var body []byte
@@ -2257,11 +2351,49 @@ func (a *journalAddress) eachNewestFirstAt(from int64, visit func(key string, sp
 	return a.eachNewestFirstOnce(visit, seen, a.orderSize)
 }
 
+// eachStatementAtOrBelow walks every hot order statement through start in commit order,
+// including deletes and repeated writes. It is the history a cross-tier snapshot needs
+// when it enters below the newest slot state.
+func (a *journalAddress) eachStatementAtOrBelow(start int64, visit func(key string, deleted bool) error) error {
+	if start <= 0 {
+		return nil
+	}
+	if start > a.orderSize {
+		start = a.orderSize
+	}
+	reader := bufio.NewReader(io.NewSectionReader(a.order, 0, start))
+	for {
+		line, readErr := reader.ReadBytes('\n')
+		if len(line) > 0 {
+			statement, err := journalOrderStatementOfLine(bytes.TrimSpace(line))
+			if err != nil {
+				return fmt.Errorf("%w: %s: %w", ErrJournalCorrupt, a.orderPath, err)
+			}
+			for _, key := range statement.Deletes {
+				if err := visit(key, true); err != nil {
+					return err
+				}
+			}
+			for _, put := range statement.Puts {
+				if err := visit(put.Key, false); err != nil {
+					return err
+				}
+			}
+		}
+		if errors.Is(readErr, io.EOF) {
+			return nil
+		}
+		if readErr != nil {
+			return fmt.Errorf("tagent: read the order file of %s: %w", a.log.dir, readErr)
+		}
+	}
+}
+
 // eachNewestFirstOnce walks the commits this view states and names the ones seen does
 // not hold yet, which is what a walk resumes at after the index files were stated
 // again from the log.
 func (a *journalAddress) eachNewestFirstOnce(visit func(key string, span journalAddressSpan) (bool, error), seen map[string]struct{}, from int64) error {
-	if a.window != nil {
+	if a.window != nil && from >= a.orderSize {
 		for at := len(a.window.order) - 1; at >= 0; at-- {
 			key := a.window.order[at]
 			if _, walked := seen[key]; walked {
@@ -2679,6 +2811,12 @@ func (l *journalLog) sync() error {
 // than the frame that carries both. The caller holds the lock.
 func (l *journalLog) read(key string) ([]byte, bool, error) {
 	return l.addr.read(key)
+}
+
+// lookup answers one key's span and hot-index state without reading its value.
+// The caller holds the lock.
+func (l *journalLog) lookup(key string) (journalAddressSpan, uint8, error) {
+	return l.addr.lookup(key)
 }
 
 // keys answers the held keys carrying prefix, in key order, from this log's address:

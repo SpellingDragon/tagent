@@ -417,12 +417,12 @@ MUTATIONS: Tuple[Mutation, ...] = (
             file="runtime/state/mailbox.go",
             old=(
                 "\tif prior.notice != notice {\n"
-                "\t\treturn 0, false, ErrNoticeConflict\n"
+                "\t\treturn acceptedNotice{}, false, ErrNoticeConflict\n"
                 "\t}\n"
             ),
             new=(
                 "\tif prior.notice != notice {\n"
-                "\t\treturn prior.seq, true, nil\n"
+                "\t\treturn prior, true, nil\n"
                 "\t}\n"
             ),
         ),
@@ -752,17 +752,18 @@ MUTATIONS: Tuple[Mutation, ...] = (
             # keeps the claim with the process that already handed the result on,
             # so that branch now logs and returns nil. The two statements the fault
             # reorders — `r.loop.Backflow(…)` before `r.store.Consume(…)` — stand
-            # unchanged in `sink`, which is what this mutation swaps.
+            # in `sink`; consumption uses the site and sequence returned by the
+            # atomic acceptance, which is what this mutation swaps.
             old=(
                 "\tif refusal := r.loop.Backflow(frame.Identity.InvocationID, notice); "
                 "refusal != nil {\n"
                 "\t\tassemblyDebug(\"tagent: the notice of task %s stays owed under the claim of this process\", notice.TaskID)\n"
                 "\t\treturn nil\n"
                 "\t}\n"
-                "\treturn r.store.Consume(ctx, frame.Address, frame.Identity.InstanceID, seq)\n"
+                "\treturn r.store.Consume(ctx, seat.Address, seat.Instance, seat.AcceptSeq)\n"
             ),
             new=(
-                "\tif err := r.store.Consume(ctx, frame.Address, frame.Identity.InstanceID, seq); "
+                "\tif err := r.store.Consume(ctx, seat.Address, seat.Instance, seat.AcceptSeq); "
                 "err != nil {\n"
                 "\t\treturn err\n"
                 "\t}\n"

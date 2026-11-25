@@ -1375,13 +1375,14 @@ func factCommitEvent(key string, addr event.Address, at time.Time, content strin
 }
 
 // factCommitKeys answers the keys one fact of partition, window and slot commits
-// under, beside the seat the store states its count in.
+// under, beside the seat the store states its count in. The original family lands
+// as the reference that names the text its event carries, so no body key travels
+// beside the event that already holds those bytes.
 func factCommitKeys(partition int, window int64, seq int, key event.EventID) []string {
 	return []string{
 		fmt.Sprintf("%d:evt:%d:%d", partition, window, seq),
 		fmt.Sprintf("%d:idx:%s", partition, key),
 		fmt.Sprintf("%d:meta:%d", partition, window),
-		"blob:" + string(key),
 		"ref:" + string(key),
 		"store:seat",
 	}
@@ -1799,7 +1800,7 @@ func TestRepeatedFactDoesNotAdvanceLandedSequence(t *testing.T) {
 	if err != nil {
 		t.Fatalf("encode the body of the fact: %v", err)
 	}
-	original := "blob:" + string(first.Key)
+	original := "ref:" + string(first.Key)
 	if got := len(probe.written(original)); got != 1 {
 		t.Fatalf("the first commit landed %d original commit(s), want one", got)
 	}

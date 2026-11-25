@@ -348,6 +348,8 @@ type Run struct {
 	// since the epoch.
 	checkpointCommits int
 	checkpointAt      time.Time
+	// hotBudgetWarning deduplicates the warning for one continuous over-budget interval.
+	hotBudgetWarning bool
 	// checkpointDue wakes the goroutine that files the checkpoint the cadence owes:
 	// a commit that reaches the due signals it and takes no cut itself.
 	checkpointDue chan struct{}
@@ -2140,6 +2142,29 @@ func (r *Run) SessionFacts(addr event.Address) []event.Event {
 	return out
 }
 
+// DurableFactReader returns the read-only export face over this run's durable
+// session chains. EachSessionFact enumerates the identities and reads their bodies
+// by identity, so archived facts use the same locator as hot facts and a failed
+// read is returned rather than hidden behind a partial chain.
+func (r *Run) DurableFactReader() rl.FactReader {
+	return durableFactReader{run: r}
+}
+
+type durableFactReader struct {
+	run *Run
+}
+
+func (r durableFactReader) SessionFacts(ctx context.Context, addr event.Address) ([]event.Event, error) {
+	facts := make([]event.Event, 0)
+	if err := r.run.EachSessionFact(ctx, addr, func(fact event.Event) error {
+		facts = append(facts, fact)
+		return nil
+	}); err != nil {
+		return nil, err
+	}
+	return facts, nil
+}
+
 // CommittedFacts reports how many facts this run holds: the counter the metrics
 // endpoint reports beside the turns and deliveries of the host.
 //
@@ -2492,8 +2517,9 @@ func (r *Run) CommittedEvent(ctx context.Context, id event.EventID) (event.Event
 // eachCommittedEvent reads every stored event in the order its commits landed
 // in, ranked across partitions rather than by partition and sequence: the index
 // walk answers commit order newest first, so reversing its references gives the
-// commit order itself. The index walk carries no bodies; one commit-order read
-// seam serves the full replay and the session reader.
+// commit order itself. The index walk carries no bodies; each body is read back
+// through GetEventInPartition at the partition the index entry names, so the walk
+// reads archived bodies beside hot ones and consults no seat.
 func eachCommittedEvent(ctx context.Context, tier *ledger.Tier, visit func(ledger.StoredEvent) error) error {
 	var refs []anchorRef
 	if err := tier.Segments.EachIndexNewestFirst(ctx, func(key event.EventID, partition int, seq int64, typ string, session event.SessionID) error {
@@ -2518,14 +2544,13 @@ func eachCommittedEvent(ctx context.Context, tier *ledger.Tier, visit func(ledge
 }
 
 // EachSessionFact streams the durable chain of one session in commit order: the
-// cold-start read of a chain, which names every fact the session committed —
-// beside the window the live ledger still presents — decoded from the tier the
-// way CommittedEvent decodes one identity, ordered by the partition sequence
-// the landing path numbers commits with — the order the run committed in, which
-// a replay refolds at the boundaries the commits recorded, while the segment
-// index orders by event time and a later-judged product names a later moment of
-// than the material it folded. A run beside no storage tier holds
-// no durable chain, so the visit answers the resident window alone in commit
+// cold-start read of a chain, which names every fact the session committed beside
+// the window the live ledger still presents. The store seat and index entries
+// name hot and moved identities; each body used below is read through GetEvent and
+// decoded the way CommittedEvent decodes one identity. The order is the global
+// commit rank the landing path assigned, which a replay refolds at the boundaries
+// the commits recorded. A run beside no storage tier
+// holds no durable chain, so the visit answers the resident window alone in commit
 // order. A visit error ends the stream and is returned.
 //
 // A framework checkpoint names the chain it states without entering it,
@@ -2536,11 +2561,17 @@ func eachCommittedEvent(ctx context.Context, tier *ledger.Tier, visit func(ledge
 // read the stored checkpoint back would hand a reader — a projection rebuild above
 // all — the state slices as transcript lines the run never committed.
 func (r *Run) EachSessionFact(ctx context.Context, addr event.Address, visit func(event.Event) error) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	r.mu.Lock()
 	tier := r.tier
 	r.mu.Unlock()
 	if tier == nil {
 		for _, key := range r.factOrder {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
 			evt, held := r.facts[key]
 			if !held || sessionOf(evt) != addr.SessionID {
 				continue
@@ -3446,8 +3477,13 @@ type MemoryPlan struct {
 // level. Every declaring agent must name the same tier and the same engine: a
 // shared store read under two different engines would answer one query two
 // ways. An engine beside no tier is refused by name: without a durable chain
-// query-time embedding has no candidates. A document that declares
-// neither reports a nil plan, which wires no storage face and no embedder.
+// query-time embedding has no candidates. An archive the declaration cannot
+// complete is refused by name at its own field path: half of the pair, an
+// archive beside no tier, or a retention window beside no archive. The
+// top-level storage section states a tier and nothing of the archive face, so a
+// document stating both agrees on the type and root and keeps the archive face
+// the agent memory declaration's own. A document that declares neither reports
+// a nil plan, which wires no storage face and no embedder.
 func MemoryPlanOf(decl *config.Declaration, storageType, storageRoot string) (*MemoryPlan, error) {
 	if decl == nil {
 		return nil, fmt.Errorf("%w: the assembly carries no declaration", ErrMemoryDeclaration)
@@ -3464,8 +3500,22 @@ func MemoryPlanOf(decl *config.Declaration, storageType, storageRoot string) (*M
 		if storageDeclared && (storageType == "" || storagePath == "") {
 			return nil, fmt.Errorf("%w: agent %q names half a storage tier (type and path are both required)", ErrMemoryDeclaration, id)
 		}
+		archiveRoot := strings.TrimSpace(entry.ArchiveRoot)
+		switch {
+		case archiveRoot != "" && !storageDeclared:
+			return nil, fmt.Errorf("%w: %s: archive_root requires the storage tier's own type and path", ErrMemoryDeclaration, memoryFieldPath(id))
+		case archiveRoot == "" && entry.HotLogMaxBytes > 0:
+			return nil, fmt.Errorf("%w: %s: hot_log_max_bytes requires archive_root", ErrMemoryDeclaration, memoryFieldPath(id))
+		case archiveRoot != "" && entry.HotLogMaxBytes <= 0:
+			return nil, fmt.Errorf("%w: %s: archive_root requires hot_log_max_bytes above zero", ErrMemoryDeclaration, memoryFieldPath(id))
+		case archiveRoot == "" && entry.ArchiveMaxAge != 0:
+			return nil, fmt.Errorf("%w: %s: archive_max_age requires archive_root", ErrMemoryDeclaration, memoryFieldPath(id))
+		}
 		if storageDeclared {
 			candidate := ledger.StorageConfig{Type: ledger.StorageType(storageType), Root: storagePath}
+			candidate.ArchiveRoot = archiveRoot
+			candidate.HotLogMaxBytes = entry.HotLogMaxBytes
+			candidate.ArchiveMaxAge = entry.ArchiveMaxAge
 			if !plan.hasStore {
 				plan.storage = candidate
 				plan.hasStore = true
@@ -3487,12 +3537,11 @@ func MemoryPlanOf(decl *config.Declaration, storageType, storageRoot string) (*M
 	topType := strings.TrimSpace(storageType)
 	topRoot := strings.TrimSpace(storageRoot)
 	if topType != "" {
-		top := ledger.StorageConfig{Type: ledger.StorageType(topType), Root: topRoot}
-		if plan.hasStore && !reflect.DeepEqual(plan.storage, top) {
+		if plan.hasStore && (plan.storage.Type != ledger.StorageType(topType) || plan.storage.Root != topRoot) {
 			return nil, fmt.Errorf("%w: the top-level storage disagrees with the memory tier agent %q declares", ErrMemoryDeclaration, declaredBy)
 		}
 		if !plan.hasStore {
-			plan.storage = top
+			plan.storage = ledger.StorageConfig{Type: ledger.StorageType(topType), Root: topRoot}
 			plan.hasStore = true
 		}
 	}

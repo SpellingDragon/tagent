@@ -323,11 +323,11 @@ func TestStorageCapabilities(t *testing.T) {
 			binary = "rustviking"
 		}
 		cfg := ledger.StorageConfig{
-			Type:             ledger.StorageFile,
-			Root:             t.TempDir(),
-			RustVikingBinary: binary,
-			RustVikingConfig: os.Getenv("TAGENT_RUSTVIKING_CONFIG"),
+			Type: ledger.StorageFile,
+			Root: t.TempDir(),
 		}
+		cfg.RustVikingBinary = binary
+		cfg.RustVikingConfig = os.Getenv("TAGENT_RUSTVIKING_CONFIG")
 		tier, err := ledger.OpenTier(ctx, cfg)
 		if errors.Is(err, ledger.ErrRustVikingMissing) {
 			t.Skipf("rustviking CLI %q is not executable here: the file tier barrier evidence belongs to the resource-gated run, and no mock stands in for it", binary)

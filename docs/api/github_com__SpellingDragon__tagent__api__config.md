@@ -393,11 +393,12 @@ type MemorySpec struct {
 	// Engine is the semantic engine the recall retrieval runs under; its zero
 	// value names no engine, which is the keyword-only retrieval.
 	Engine EngineSpec `yaml:"engine"`
+	// Has unexported fields.
 }
     MemorySpec is the memory declaration of one agent: the storage tier its
     facts persist through, the namespaces it is authorized to read across
-    partitions, and the semantic engine its recall vocabulary generates its
-    embeddings with.
+    partitions, the semantic engine its recall vocabulary generates its
+    embeddings with, and the archive face the tier's segments move under.
 
     The tier is a type and a root, both required together; an engine beside no
     tier names no durable chain for query-time candidates to read.

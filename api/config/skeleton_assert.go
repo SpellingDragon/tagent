@@ -62,6 +62,11 @@ var (
 		Path:           "",
 		ReadNamespaces: []string{},
 		Engine:         EngineSpec{},
+		archiveFields: archiveFields{
+			ArchiveRoot:    "",
+			HotLogMaxBytes: 0,
+			ArchiveMaxAge:  0,
+		},
 	}
 
 	_ = EngineSpec{

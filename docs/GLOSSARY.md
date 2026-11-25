@@ -18,7 +18,12 @@
 | 消费循环（consumption loop） | 一个 `(agent, session)` 地址一条常驻 goroutine：拉取已到达的事件、按类型分派、有驱动事件时调一次模型，然后回到拉取，不等派发的工具返回；入口只提交事实并唤醒它。实例按地址装配（`Consumers.Ensure`），入口 agent 之外也挂（委派的会址也有自己的一个），一个地址绝不跑两个驱动者。 | 值班员守着收件箱：来一件处理一件，不站在传送带前等某一台机器。 | `runtime/agent/consumer.go`；`assembly/host.go`（`invokeConsumed`） |
 | 答案的链上形态（commitOutput／answerOfChain） | 答案的事实形态：`agent_output` 携带 `input_events`（本段消费了哪些输入）与终态元数据（terminal/failure/final_round/trigger/decision_count）。进程内缓存只是读加速副本：淘汰后由 `answerOfChain` 按输入键从链重建；链上没有输出事实可重建的答案豁免淘汰。 | 账本是正本，白板只是抄写板：抄写擦了就重抄，正本永远在。 | `runtime/agent/loop.go`（`commitOutput`）；`runtime/agent/consumer.go`（`answerOfChain`） |
 | 失败观察（failure observation） | 失败终态落成链上事实（正文=原始失败原因，meta=终态/任务/调用身份），并按唤醒法则驱动目标地址的后续消费——失败可见、可续、不无限重驱。 | 坏消息也记在案并递到该看的人手里，而不是塞抽屉里反复重试。 | `assembly/host.go`（`noteFailureObservation`）；`runtime/agent/delegate.go`（`DrainReport.Failed`） |
-| 段（segment） | 消费循环的一次连续处理：从驱动事件开段（范围身份 `<session>#cN`），跨工具结果与新输入续轮，到模型无工具调用的最终回复落 `agent_output` 时闭合；它就是投影折叠与 turn 的单位。 | 一张工单：从受理到结论，中途补材料不换单，结案才归档。 | `runtime/agent/consumer.go`（`openSegment`/`closeSegment`）；`assembly/facts.go`（`foldMapped`） |
+| 段（segment） | 消费循环的一次连续处理：从驱动事件开段（范围身份 `<session>#cN`），跨工具结果与新输入续轮，到模型无工具调用的最终回复落 `agent_output` 时闭合；它就是投影折叠与 turn（口语「回合」）的单位。物理文件的「段界／封段」是另一回事，见下行。 | 一张工单：从受理到结论，中途补材料不换单，结案才归档。 | `runtime/agent/consumer.go`（`openSegment`/`closeSegment`）；`assembly/facts.go`（`foldMapped`） |
+| 切点（cut） | 一条提交携带框架 checkpoint 事实时构成的逻辑切点；它确定安静点提交批、checkpoint 身份与提交序，不依赖时间或调度顺序。 | 结账动作：账页在这一笔完结，后续另起活页。 | `memory/ledger/journal_segment.go`（`checkpointCutOf`／段头）；`assembly/checkpoint.go` |
+| 封段（sealed segment） | 声明 `archive_root` 与 `hot_log_max_bytes` 的视图在 cut 屏障成功后，把开段区间**原样抄进** `segments/seg-<id>.log` 形成的物理段界：段头陈述段号、跨越的提交序号、切点与字节数；段是只追加的不可变字节，boot 按段号顺序接开段重放，提交偏移跨段界不变。 | 结账后把已结账页整页影印成册：页码连续、原样不抄错，柜台上的活页从空白继续。 | `memory/ledger/journal_segment.go`（`sealSegment`／段头）；`assembly/checkpoint.go` |
+| 归档（archive） | 封段搬进 `archive_root`、由一份 manifest 世代陈述（段身份／键域／字节数与 SHA-256／切点／偏移图）：固定序是**先把段与段索引抄成临时件并完成屏障 → 写 manifest 双槽陈述目标名与摘要（同序，读者取可解码的更大世代）→ 临时件 rename 成目标名 → 最后才删热副本**，并把热日志切到保留区间。manifest 是归档唯一陈述：热目录有它未陈述的区间即拒搬，热文件与它陈述的热窗口不符即拒；**双槽皆无且段目录无最终名制品＝空归档**，有最终名段或段索引而 manifest 全丢，或有效 manifest 未陈述该最终名＝`ErrArchiveCorrupt`（不删该名文件），未被陈述的段／索引 `.tmp` 临时件才可由开档清理；停在任一切点都按 manifest 回读续做。 | 另开一间档案室：入册才算入库，册子没写的箱子不动。 | `memory/ledger/archive.go`（`moveSealedSegmentsToArchive`／`writeArchiveManifest`／`convergeArchiveStructure`）；`memory/ledger/hot_shrink.go` |
+| 物理重放水位（replay watermark） | 派生索引自述「已陈述到第几字节／第几提交」，开档只重放其后的热窗；完整性校验有界于热窗——热日志逐帧校验、封段另按段头与 stat 字节数核对结构，稳态归档段开档不预扫，其 digest 与索引在该段首次被读时校验；崩溃残留删除最后热副本前对对应本代段／索引补验摘要。 | 账本边角记下已核到第几页：翻到下一页继续，不必从第一页重核。 | `memory/ledger/hot_shrink.go`（`archiveWatermark`／`settleShrunkHotLog`）；`memory/ledger/journal.go` |
+| 定位读（located read） | 热索引不陈述某个键时的读法：按 manifest 键域挑候选段→段索引取帧→按段 digest 校验后读值；三态分开——谁都没陈述答 `ErrOriginalMissing`，manifest 陈述而段／记录不在答 `ErrArchiveMissing`，字节不过 digest 答 `ErrArchiveCorrupt`。manifest 双槽皆无且无最终名制品＝空归档（不是错误）；有最终名制品则 `ErrArchiveCorrupt`（口径见上行），所以归档根必须在线且与 manifest 一致，否则「读不到」会静默成「不存在」。 | 本地查不到转档案室：按册挑柜、按卡片取卷；册在柜空与册毁卷坏是两回事。 | `memory/ledger/archive_read.go`（`archiveReadLocator`）；`memory/ledger/journal_kv.go`（`valueLocked`） |
 | 投递账目（delivery ledger） | 进程内投递的回读面：按源事件、目标与投递身份列出本 run 提交过的投递事实及回执；两族投递（agent 主动发送 / 框架结算通知）共用一套五键，所以不按来路分两种读法；查询不解析正文。 | 快递底单存根：谁寄的、寄给谁、对方签收没，一查就知道，不用重读包裹。 | `assembly/host_tools.go`（`DeliveryLedger`／`Records`／`BySource`／`ByTarget`）；`api/event/meta.go`（五个 `delivery.*` 键） |
 | 风暴熔断（storm fuse） | 一个模型响应发出过多调用、或请求提示已过长时，整批调用不截断也不降级，而是停成一条人审请求（摘要只列工具与参数指纹）；等待发生在原本要派发它的那次派发内，批准=整批按序执行、拒绝/超期/取消=零执行，没有审批簿就整批拒绝。 | 关口安检：一件行李也不拆，整车排队等签字；没盖章的整车原路退回。 | `runtime/agent/fuse.go`（`FuseLimits`/`parkedBatchOf`/`awaitBatch`）；`runtime/task/approval/approval_store.go`（审批簿） |
 | 交付义务事实（delivery obligation fact） | 随答案**同一笔**落链的对外发送承诺：**owed 声明+四结算态+迁移专用 owed 态**（held/sent/refused/headless-retired；held 的 reason 含 approval/retrying/retry-exhausted/unknown）都在链上销账；重启照链补送，收方按身份去重。状态变化必达模型（感知是构造保证，投影侧有类型→角色映射），对用户怎么说由模型自主。 | 出库单钉在货物交接单上：单货同笔，货在单必在；缺单的货重启时对账补开。 | `openspec/specs/delivery-closure/spec.md`；`assembly/host_delivery.go`（结算事实读写与旧账迁移） |
@@ -37,21 +42,19 @@
 | 3 | 训练记录 | 一次决策尝试成一条记录：同 ID 幂等，重复派生不改写既有记录。 | `features/rl/` |
 | 4 | 声明 | 一份组织声明：规范指纹定身份，同内容重载仍是同一身份。 | `api/config/fact.go` |
 | 5 | 引用票据 | 指向原文的票据：同一份原文可有多张票据，共用一个内容键。 | `memory/ledger/reference.go` |
-| 7 | 压缩请求 | 一次"该压了"的判定：同判定同身份，消费后单次退位。 | `api/event/compress_request.go` |
-| 8 | 压缩产物 | 一条压缩请求至多一条的产物：同身份重试不分叉，键与正文是投影恢复的唯一来源；产物按 **band 晋升**铸（新档保留；中档把过程细节折进 `segment_fold` 产物，正文逐行一条事件键票据 `[evt_<键>|<类型>]`，框架既不内联被折原文也不代模型摘要，取全文只经模型自主调 `recall_get`；老档收成一条 `history_summary`，正文是模型摘要、受声明预算截断），一次折叠晋升一档，不用 generational／fold generation 说法。 | `api/event/compress_product.go` |
+| 7／8 | 压缩请求与产物 | 一次"该压了"的判定（同判定同身份，消费后单次退位）与它至多一条的产物（同身份重试不分叉，键与正文是投影恢复的唯一来源）：产物按 **band 晋升**铸——新档保留；中档把过程细节折进 `segment_fold` 产物，正文逐行一条事件键票据 `[evt_<键>|<类型>]`，框架既不内联被折原文也不代模型摘要，取全文只经模型自主调 `recall_get`；老档收成一条 `history_summary`，正文是模型摘要、受声明预算截断。一次折叠晋升一档，不用 generational／fold generation 说法。 | `api/event/compress_request.go`；`api/event/compress_product.go` |
 | 9 | 收尾判定 | 一次"该收尾了"的判定：同一 range 同原因至多一条。 | `api/event/final_round_request.go` |
 | 10 | 注意力 | 一条在场问题／回答／清除记录：同键拒二落，answer/clearance 具名拒绝。 | `runtime/task/attention.go` |
 | 11 | 交付结算 | 一条对外发送承诺的状态：随答案同笔声明 owed、按身份+状态追加落链，重启照链对账。 | `assembly/host_delivery.go`（`deliverySettlementKey`） |
 | 13 | 框架检查点 | 框架在安静点（先读水位、排水到无在飞提交与状态应用）不持锁纯读各切片、按分区 Seq 水位落链的 checkpoint 事实：切片由持有者经状态接缝 `Stateful`（`StateName`／`SnapshotState`／`RestoreState`）声明，载投影幸存者、送达账（派生态；`DeliveryLedger` 是它的读回面）、任务账（逐任务的终态与已消费／尝试／具名拒绝三族收据）、邮箱欠账与未应答输入、治理账（两流尾序号、审批簿与派生索引）、压缩账（生产者已提交的压缩判定与产物应答的身份），恢复只经它加偏移后隔离回放。 | `api/event/checkpoint.go`、`assembly/checkpoint.go`、`assembly/task_checkpoint.go`、`features/evolution/governance/checkpoint.go` |
 
-## 三、读代码前的五个通用词
+## 三、读代码前的四个通用词
 
 | 词 | 一句话 | 在哪看 |
 |---|---|---|
 | 事件 | agent 收到或产出的每条记录（消息、工具调用、告警），带类型进总线。 | `api/event/` |
 | 事实 | 有身份、可被引用的产出：产出即锁定，之后只追加。 | `api/event/fact.go` |
 | 投影 | 由事实链装配出的有界读视图：只读，不写回事实链。 | `memory/query/` |
-| 回合 | 一次从输入到产出终态的完整处理；血统按回合盖。 | `runtime/agent/consumer.go`（常驻消费循环开段/闭段） |
 | 装配根 | 把组织声明变成活动运行时的唯一入口。 | `assembly/run.go`（`Assemble`） |
 
 ## 四、新增词的判据（一句话说不清、且不含本页未出现的词，就不加词而写成既有能力的字段；完整判据见 [CONTRIBUTING](../CONTRIBUTING.md)「七、文档要求」）

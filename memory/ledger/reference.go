@@ -275,16 +275,17 @@ var _ ScopedOriginalStore = (*kvOriginalStore)(nil)
 // as the in-memory tier serves it.
 //
 // The read resolves the one identity it names rather than the original family behind
-// it, so it costs the body and the reference of that identity and its failure surface
-// is the same identity: a record the store cannot read back fails this read, and a
-// record of another identity fails only the reads of that identity.
+// it, and decides scope and expiry from that identity's reference before it reads any
+// body: a read refused inside scope costs the reference alone. Its failure surface is
+// the same identity: a record the store cannot read back fails this read, and a record
+// of another identity fails only the reads of that identity.
 func (s *kvOriginalStore) GetScoped(ctx context.Context, key event.EventID, scope ReadScope) RecallResult {
 	if err := ctx.Err(); err != nil {
 		return RecallResult{Key: key, Outcome: RecallFailed, Err: err}
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	one, err := s.scopedOnlyLocked(ctx, key)
+	one, err := s.scopedOnlyLocked(ctx, key, scope)
 	if err != nil {
 		return RecallResult{Key: key, Outcome: RecallFailed, Err: err}
 	}
@@ -300,7 +301,7 @@ func (s *kvOriginalStore) ReadSegmentScoped(ctx context.Context, key event.Event
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	one, err := s.scopedOnlyLocked(ctx, key)
+	one, err := s.scopedOnlyLocked(ctx, key, scope)
 	if err != nil {
 		return SegmentResult{}, err
 	}
@@ -354,10 +355,11 @@ func scopedSegment(byKey map[event.EventID]*originalEntry, windows map[string]ti
 // scopedReference resolves the reference of key registered inside scope and the
 // blob it names. The last return reports whether any such reference exists: a
 // key whose references all lie outside scope resolves to none of them, exactly
-// as a key no reference names at all.
+// as a key no reference names at all. The blob may be nil for an expired
+// reference, whose read ends before blob verification.
 func scopedReference(byKey map[event.EventID]*originalEntry, key event.EventID, scope ReadScope) (referenceRecord, *originalBlob, bool) {
 	entry, held := byKey[key]
-	if !held || entry.blob == nil {
+	if !held {
 		return referenceRecord{}, nil, false
 	}
 	record, registered := entry.refs[scope.identity()]

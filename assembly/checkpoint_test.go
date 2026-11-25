@@ -3,6 +3,7 @@ package assembly
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -28,6 +29,8 @@ import (
 	"github.com/SpellingDragon/tagent/runtime/agent"
 	"github.com/SpellingDragon/tagent/runtime/state"
 	"github.com/SpellingDragon/tagent/runtime/task"
+	"github.com/SpellingDragon/tagent/tool/recall"
+	trpctool "trpc.group/trpc-go/trpc-agent-go/tool"
 )
 
 // TestCheckpointEmittedAtCadenceAndFold pins the bounded cadence and the cut it files.
@@ -5877,4 +5880,1335 @@ func TestRecoveryEntriesPreserveStateAndObligations(t *testing.T) {
 			t.Fatalf("the boot refused with %v, want the unrestorable survivor %s refused by name: a damaged authority is never a degradation", err, phantom.Key)
 		}
 	})
+}
+
+// sealedSegmentState is one sealed segment as the file states it: the id its name carries, the commit ranks its header spans, the cut it was closed at and the byte count of the interval behind the header.
+type sealedSegmentState struct {
+	Name         string
+	FirstSeq     int64
+	LastSeq      int64
+	CutPartition int
+	CutSeq       int64
+	Bytes        int64
+}
+
+// segmentBoundary is the statement a segment header makes about where a boundary
+// stands: its id, the commit ranks it spans and the cut that closed it. The bytes of
+// the interval behind that statement follow the frames it carries, and a frame of
+// this run states the wall clock its fact was published at, so two runs of one
+// fixture state one boundary over intervals whose byte counts differ by the digits
+// that clock takes.
+type segmentBoundary struct {
+	Name         string
+	FirstSeq     int64
+	LastSeq      int64
+	CutPartition int
+	CutSeq       int64
+}
+
+// boundariesOf answers the statements of the given segments, in their order.
+func boundariesOf(segments []sealedSegmentState) []segmentBoundary {
+	out := make([]segmentBoundary, 0, len(segments))
+	for _, segment := range segments {
+		out = append(out, segmentBoundary{
+			Name:         segment.Name,
+			FirstSeq:     segment.FirstSeq,
+			LastSeq:      segment.LastSeq,
+			CutPartition: segment.CutPartition,
+			CutSeq:       segment.CutSeq,
+		})
+	}
+	return out
+}
+
+// sealedSegmentStates answers the segments one storage root holds, oldest first, as
+// their own headers state them: the frame every record of the log is written as, then
+// the header of the segment.
+func sealedSegmentStates(t *testing.T, root string) []sealedSegmentState {
+	t.Helper()
+	return sealedSegmentStatesInDir(t, filepath.Join(root, "kv", "segments"))
+}
+
+// sealedSegmentStatesInDir reads the segment headers in one hot or archive directory.
+func sealedSegmentStatesInDir(t *testing.T, dir string) []sealedSegmentState {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		t.Fatalf("read the segment directory %s: %v", dir, err)
+	}
+	states := make([]sealedSegmentState, 0, len(entries))
+	for _, entry := range entries {
+		if !strings.HasSuffix(entry.Name(), ".log") {
+			continue
+		}
+		body, err := os.ReadFile(filepath.Join(dir, entry.Name()))
+		if err != nil {
+			t.Fatalf("read the segment %s: %v", entry.Name(), err)
+		}
+		if len(body) < 8 {
+			t.Fatalf("the segment %s states %d byte(s), want at least a frame header", entry.Name(), len(body))
+		}
+		length := int(binary.BigEndian.Uint32(body[0:4]))
+		if length <= 0 || 8+length > len(body) {
+			t.Fatalf("the segment %s states a %d byte header beside %d byte(s)", entry.Name(), length, len(body))
+		}
+		var header struct {
+			SegmentID    string `json:"segment_id"`
+			FirstSeq     int64  `json:"first_seq"`
+			LastSeq      int64  `json:"last_seq"`
+			CutPartition int    `json:"cut_partition"`
+			CutSeq       int64  `json:"cut_seq"`
+			Bytes        int64  `json:"bytes"`
+		}
+		if err := json.Unmarshal(body[8:8+length], &header); err != nil {
+			t.Fatalf("read the header of the segment %s: %v", entry.Name(), err)
+		}
+		if header.SegmentID != strings.TrimSuffix(entry.Name(), ".log") {
+			t.Fatalf("the segment %s states the id %q, want the id its name carries", entry.Name(), header.SegmentID)
+		}
+		if int64(len(body)) != int64(8+length)+header.Bytes {
+			t.Fatalf("the segment %s holds %d byte(s) beside a header stating %d behind %d",
+				entry.Name(), len(body), header.Bytes, 8+length)
+		}
+		states = append(states, sealedSegmentState{
+			Name:         header.SegmentID,
+			FirstSeq:     header.FirstSeq,
+			LastSeq:      header.LastSeq,
+			CutPartition: header.CutPartition,
+			CutSeq:       header.CutSeq,
+			Bytes:        header.Bytes,
+		})
+	}
+	return states
+}
+
+// rotateAtCuts drives one run over the named root through the same input: two turns,
+// a cut, one more turn and a second cut, so the root holds two intervals closed by
+// two cuts. It answers the segments the root states.
+func rotateAtCuts(t *testing.T, ctx context.Context, root string) []sealedSegmentState {
+	t.Helper()
+	storage := ledger.StorageConfig{Type: ledger.StorageJournal, Root: root}
+	storage.ArchiveRoot = t.TempDir()
+	storage.HotLogMaxBytes = 1 << 20
+	run := windowChainRun(t, ctx, WithStorage(storage))
+	run.stopCheckpointFiler()
+	addr := event.Address{AgentID: "agent-a", SessionID: "session-segment-rotation"}
+	commitWindowTurns(t, ctx, run, addr, 2)
+	if _, filed, err := run.Checkpoint(ctx); err != nil || !filed {
+		t.Fatalf("take the first cut: filed=%v err=%v", filed, err)
+	}
+	commitWindowTurnsFrom(t, ctx, run, addr, 2, 1)
+	if _, filed, err := run.Checkpoint(ctx); err != nil || !filed {
+		t.Fatalf("take the second cut: filed=%v err=%v", filed, err)
+	}
+	endRun(t, run)
+	return sealedSegmentStates(t, root)
+}
+
+// TestSegmentRotationIsDeterministic pins the boundary of a segment against the event that states it.
+//   - the same input closes the same segments: the same ids, the same commit ranks and the same cut at each one
+//   - the ids increase and the commit ranks of the segments continue, so the intervals of one log partition its commits
+//   - the cut a header states is the cut the run filed, so a boundary is a cut and never a moment of the writer
+//
+// 契约: docs/wiki/memory/memory-architecture.md#local-file-kv
+func TestSegmentRotationIsDeterministic(t *testing.T) {
+	ctx := context.Background()
+	first := rotateAtCuts(t, ctx, t.TempDir())
+	second := rotateAtCuts(t, ctx, t.TempDir())
+	if len(first) != 2 {
+		t.Fatalf("the run stated %d segment(s), want the two its cuts closed", len(first))
+	}
+	if !reflect.DeepEqual(boundariesOf(first), boundariesOf(second)) {
+		t.Fatalf("the same input stated the boundaries %+v beside %+v, want the same boundary for the same cut",
+			boundariesOf(first), boundariesOf(second))
+	}
+	for at, segment := range first {
+		if want := fmt.Sprintf("seg-%06d", at+1); segment.Name != want {
+			t.Fatalf("the segment at %d is %q, want %q", at, segment.Name, want)
+		}
+		if segment.Bytes <= 0 || segment.LastSeq < segment.FirstSeq {
+			t.Fatalf("the segment %q states the commits %d to %d in %d byte(s), want one interval of the log",
+				segment.Name, segment.FirstSeq, segment.LastSeq, segment.Bytes)
+		}
+		if at > 0 && segment.FirstSeq != first[at-1].LastSeq+1 {
+			t.Fatalf("the segment %q opens at the commit %d beside %q, which states the commits to %d",
+				segment.Name, segment.FirstSeq, first[at-1].Name, first[at-1].LastSeq)
+		}
+		if segment.CutPartition < 0 || segment.CutSeq <= 0 {
+			t.Fatalf("the segment %q states the cut %d:%d, want the cut that closed it",
+				segment.Name, segment.CutPartition, segment.CutSeq)
+		}
+	}
+	if first[0].CutSeq >= first[1].CutSeq {
+		t.Fatalf("the second cut states the sequence %d beside the first's %d, want the cut after it",
+			first[1].CutSeq, first[0].CutSeq)
+	}
+}
+
+// TestSegmentRotationSealsAfterACutCommit pins the one event a segment boundary follows.
+//   - commits alone state no segment: the log stays the one open interval it was
+//   - a cut that files its fact closes the interval behind it, and the header states that cut
+//   - a commit after the cut states no boundary of its own, so the second segment waits for the second cut
+//   - the values committed before a boundary still read back through the segments that carry them
+//
+// 契约: docs/wiki/memory/memory-architecture.md#local-file-kv
+func TestSegmentRotationSealsAfterACutCommit(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	storage := ledger.StorageConfig{Type: ledger.StorageJournal, Root: root}
+	storage.ArchiveRoot = t.TempDir()
+	storage.HotLogMaxBytes = 1 << 20
+	run := windowChainRun(t, ctx, WithStorage(storage))
+	run.stopCheckpointFiler()
+	addr := event.Address{AgentID: "agent-a", SessionID: "session-segment-cut"}
+	commitWindowTurns(t, ctx, run, addr, 2)
+	run.mu.Lock()
+	owner := run.checkpointOwnerLocked()
+	run.mu.Unlock()
+	if segments := sealedSegmentStates(t, root); len(segments) != 0 {
+		t.Fatalf("the commits stated the segments %+v beside no cut, want the one open interval", segments)
+	}
+	id, filed, err := run.Checkpoint(ctx)
+	if err != nil || !filed {
+		t.Fatalf("take the cut: filed=%v err=%v", filed, err)
+	}
+	stored, err := run.CommittedEvent(ctx, id)
+	if err != nil {
+		t.Fatalf("read the checkpoint of the cut back: %v", err)
+	}
+	checkpoint, stated := event.CheckpointOf(stored)
+	if !stated {
+		t.Fatalf("the fact %s states no readable checkpoint", id)
+	}
+	partition := memory.PartitionIDFromName(string(owner.AgentID))
+	segments := sealedSegmentStates(t, root)
+	if len(segments) != 1 {
+		t.Fatalf("the cut stated the segments %+v, want the one interval it closed", segments)
+	}
+	if segments[0].CutPartition != partition || segments[0].CutSeq != checkpoint.Offset[partition] {
+		t.Fatalf("the segment states the cut %d:%d, want the cut %d:%d the checkpoint states",
+			segments[0].CutPartition, segments[0].CutSeq, partition, checkpoint.Offset[partition])
+	}
+	if segments[0].Name != "seg-000001" {
+		t.Fatalf("the first segment is %q, want the first id of the log", segments[0].Name)
+	}
+	commitWindowTurnsFrom(t, ctx, run, addr, 2, 1)
+	if after := sealedSegmentStates(t, root); len(after) != 1 {
+		t.Fatalf("a commit after the cut stated the segments %+v, want the boundary to wait for the next cut", after)
+	}
+	if _, filed, err := run.Checkpoint(ctx); err != nil || !filed {
+		t.Fatalf("take the second cut: filed=%v err=%v", filed, err)
+	}
+	after := sealedSegmentStates(t, root)
+	if len(after) != 2 || after[1].Name != "seg-000002" {
+		t.Fatalf("the second cut stated the segments %+v, want the id after the first", after)
+	}
+	endRun(t, run)
+
+	reopenStorage := ledger.StorageConfig{Type: ledger.StorageJournal, Root: root}
+	reopenStorage.ArchiveRoot = t.TempDir()
+	reopenStorage.HotLogMaxBytes = 1 << 20
+	reopened, err := ledger.OpenTier(ctx, reopenStorage)
+	if err != nil {
+		t.Fatalf("reopen the root the cuts rotated: %v", err)
+	}
+	defer reopened.Close()
+	first := event.EventID(timeStampKey(time.Date(2026, 11, 6, 12, 0, 0, 0, time.UTC), addr, 0, 0))
+	if _, held, err := reopened.Segments.GetEvent(ctx, first); err != nil || !held {
+		t.Fatalf("the reopened root read (%v, %v) for the first fact, want the fact the segment carries", held, err)
+	}
+}
+
+// hotLogBudgetProbe is the journal's named read face for an early-cut request and
+// the continuous over-budget intervals observed since the view opened.
+type hotLogBudgetProbe interface {
+	HotLogCutRequested() bool
+	HotLogOverBudget() int64
+}
+
+// hotLogBudgetOf returns the real journal budget probe of one assembled run.
+func hotLogBudgetOf(t *testing.T, run *Run) hotLogBudgetProbe {
+	t.Helper()
+	probe, held := run.tier.Store.(hotLogBudgetProbe)
+	if !held {
+		t.Fatalf("the run holds the store %T, which states no hot-log budget probe", run.tier.Store)
+	}
+	return probe
+}
+
+// TestHotLogBudgetRequestsEarlierCut pins the early-cut request and its live archive maintenance.
+//   - a cut the window can hold leaves every interval it sealed hot, and states no request and no interval
+//   - a generation that grows past the effective limit latches the request, and the real checkpoint filer turns it into a cut
+//   - that cut moves the oldest intervals and shrinks the hot journal without a direct move call
+//   - an under-budget view requests no cut, and age eligibility alone moves no segment
+func TestHotLogBudgetRequestsEarlierCut(t *testing.T) {
+	ctx := context.Background()
+	t.Run("over_budget_cut_moves_and_shrinks", func(t *testing.T) {
+		root, archiveRoot := t.TempDir(), t.TempDir()
+		storage := ledger.StorageConfig{Type: ledger.StorageJournal, Root: root}
+		storage.ArchiveRoot = archiveRoot
+		storage.HotLogMaxBytes = hotLogBudgetWindow
+		run := windowChainRun(t, ctx, WithStorage(storage))
+		t.Cleanup(func() { endRun(t, run) })
+		run.checkpointEvery = 1 << 30
+		run.checkpointPeriod = 1000 * time.Hour
+		probe := hotLogBudgetOf(t, run)
+		addr := event.Address{AgentID: "agent-a", SessionID: "session-hot-budget-cut"}
+		large := strings.Repeat("a", hotLogPlateauBodyBytes)
+		commit := func(label, body string) {
+			t.Helper()
+			if _, err := run.commitOnly(ctx, addr, event.Event{
+				Key:          event.EventID(label),
+				Type:         event.TypeExternalInput,
+				Meta:         map[string]string{event.MetaKeyEventSummary: label},
+				Message:      model.Message{Role: model.RoleUser, Content: body},
+				InvocationID: event.InvocationID(label),
+			}); err != nil {
+				t.Fatalf("commit %s: %v", label, err)
+			}
+		}
+
+		for at := 0; at < 4; at++ {
+			commit(fmt.Sprintf("hot-budget-large-%d", at), large)
+		}
+		first, filed, err := run.Checkpoint(ctx)
+		if err != nil || !filed {
+			t.Fatalf("take the first cut: filed=%t err=%v", filed, err)
+		}
+		if got := len(sealedSegmentStates(t, root)); got != 1 {
+			t.Fatalf("the first cut sealed %d segment(s), want one", got)
+		}
+		if probe.HotLogCutRequested() || probe.HotLogOverBudget() != 0 {
+			t.Fatalf("the first cut of window=%d requested=%t over_budget=%d, want the window a cut can hold",
+				storage.HotLogMaxBytes, probe.HotLogCutRequested(), probe.HotLogOverBudget())
+		}
+		before, err := os.Stat(filepath.Join(root, "kv", "journal.log"))
+		if err != nil {
+			t.Fatalf("stat the hot journal after the first cut: %v", err)
+		}
+
+		commit("hot-budget-tiny", "tiny")
+		second, filed, err := run.Checkpoint(ctx)
+		if err != nil || !filed || second == first {
+			t.Fatalf("take the second cut: filed=%t id=%q err=%v", filed, second, err)
+		}
+		if got := len(sealedSegmentStates(t, root)); got != 2 {
+			t.Fatalf("the cut the window could hold left %d hot segment(s), want both intervals", got)
+		}
+		if probe.HotLogCutRequested() || probe.HotLogOverBudget() != 0 {
+			t.Fatalf("the window under its limit requested=%t over_budget=%d, want neither",
+				probe.HotLogCutRequested(), probe.HotLogOverBudget())
+		}
+
+		run.flight.enter()
+		released := false
+		t.Cleanup(func() {
+			if !released {
+				run.flight.leave()
+			}
+		})
+		commit("hot-budget-over", large)
+		if !probe.HotLogCutRequested() || probe.HotLogOverBudget() == 0 {
+			t.Fatalf("the commit past the window requested=%t over_budget=%d, want the request and its interval",
+				probe.HotLogCutRequested(), probe.HotLogOverBudget())
+		}
+		run.flight.leave()
+		released = true
+		maintaining, _ := awaitCadenceCheckpoint(t, run, second)
+		if maintaining == second {
+			t.Fatal("the real filer filed no cut past the second")
+		}
+		if probe.HotLogCutRequested() {
+			t.Fatalf("the requested cut %q left the early-cut request standing", maintaining)
+		}
+		if got := len(sealedSegmentStates(t, root)); got != 1 {
+			t.Fatalf("the maintaining cut left %d hot segment(s), want the newest interval alone", got)
+		}
+		manifestBody, err := os.ReadFile(filepath.Join(archiveRoot, "manifest.a"))
+		if err != nil {
+			t.Fatalf("read the manifest written by the maintaining cut: %v", err)
+		}
+		var manifest struct {
+			Segments []json.RawMessage `json:"segments"`
+		}
+		if err := json.Unmarshal(manifestBody, &manifest); err != nil || len(manifest.Segments) == 0 {
+			t.Fatalf("the maintaining cut wrote segments=%d err=%v, want a nonempty manifest", len(manifest.Segments), err)
+		}
+		after, err := os.Stat(filepath.Join(root, "kv", "journal.log"))
+		if err != nil {
+			t.Fatalf("stat the hot journal after maintenance: %v", err)
+		}
+		if after.Size() >= before.Size() {
+			t.Fatalf("maintenance left %d hot journal byte(s) beside %d after the first cut", after.Size(), before.Size())
+		}
+	})
+
+	t.Run("under_budget_and_age_alone_stay_hot", func(t *testing.T) {
+		root, archiveRoot := t.TempDir(), t.TempDir()
+		storage := ledger.StorageConfig{Type: ledger.StorageJournal, Root: root}
+		storage.ArchiveRoot = archiveRoot
+		storage.HotLogMaxBytes = 16 << 20
+		run := windowChainRun(t, ctx, WithStorage(storage))
+		t.Cleanup(func() { endRun(t, run) })
+		run.checkpointEvery = 1 << 30
+		run.checkpointPeriod = 1000 * time.Hour
+		probe := hotLogBudgetOf(t, run)
+		addr := event.Address{AgentID: "agent-a", SessionID: "session-hot-budget-under"}
+		if _, err := run.commitOnly(ctx, addr, event.Event{
+			Key:     "hot-budget-under-one",
+			Type:    event.TypeExternalInput,
+			Meta:    map[string]string{event.MetaKeyEventSummary: "one"},
+			Message: model.Message{Role: model.RoleUser, Content: "one"},
+		}); err != nil {
+			t.Fatalf("commit the under-budget fact: %v", err)
+		}
+		if probe.HotLogCutRequested() || probe.HotLogOverBudget() != 0 {
+			t.Fatalf("the under-budget view requested=%t over_budget=%d, want neither", probe.HotLogCutRequested(), probe.HotLogOverBudget())
+		}
+		if _, filed, err := run.Checkpoint(ctx); err != nil || !filed {
+			t.Fatalf("take the first age-only cut: filed=%t err=%v", filed, err)
+		}
+		if _, err := run.commitOnly(ctx, addr, event.Event{
+			Key:     "hot-budget-under-two",
+			Type:    event.TypeExternalInput,
+			Meta:    map[string]string{event.MetaKeyEventSummary: "two"},
+			Message: model.Message{Role: model.RoleUser, Content: "two"},
+		}); err != nil {
+			t.Fatalf("commit between the age-only cuts: %v", err)
+		}
+		if _, filed, err := run.Checkpoint(ctx); err != nil || !filed {
+			t.Fatalf("take the second age-only cut: filed=%t err=%v", filed, err)
+		}
+		if _, err := os.Stat(filepath.Join(archiveRoot, "manifest.a")); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("age-only cuts stated an archive manifest: %v", err)
+		}
+		if got := len(sealedSegmentStates(t, root)); got != 2 {
+			t.Fatalf("age-only cuts left %d hot segment(s), want both", got)
+		}
+		if probe.HotLogCutRequested() || probe.HotLogOverBudget() != 0 {
+			t.Fatalf("the window under its limit requested=%t over_budget=%d after the age-only cuts, want neither",
+				probe.HotLogCutRequested(), probe.HotLogOverBudget())
+		}
+	})
+}
+
+// TestQuietPointUnreachableToleratesOverBudget pins the over-budget wait without a second cut path.
+//   - two cuts the window can hold leave a movable surplus hot, so the request below asks for a cut that has bytes to move
+//   - the real filer waits on an occupied flight while the journal stays unsealed and records the interval
+//   - releasing the flight files the pending cut, which moves the surplus, clears the request and resolves the interval
+//   - the same run keeps committing and reaches the next cut after quiet returns
+func TestQuietPointUnreachableToleratesOverBudget(t *testing.T) {
+	ctx := context.Background()
+	root, archiveRoot := t.TempDir(), t.TempDir()
+	storage := ledger.StorageConfig{Type: ledger.StorageJournal, Root: root}
+	storage.ArchiveRoot = archiveRoot
+	storage.HotLogMaxBytes = hotLogBudgetWindow
+	run := windowChainRun(t, ctx, WithStorage(storage))
+	t.Cleanup(func() { endRun(t, run) })
+	run.checkpointEvery = 1 << 30
+	run.checkpointPeriod = 1000 * time.Hour
+	probe := hotLogBudgetOf(t, run)
+	addr := event.Address{AgentID: "agent-a", SessionID: "session-hot-budget-quiet"}
+	large := strings.Repeat("b", hotLogPlateauBodyBytes)
+	commit := func(label, body string) {
+		t.Helper()
+		if _, err := run.commitOnly(ctx, addr, event.Event{
+			Key:          event.EventID(label),
+			Type:         event.TypeExternalInput,
+			Meta:         map[string]string{event.MetaKeyEventSummary: label},
+			Message:      model.Message{Role: model.RoleUser, Content: body},
+			InvocationID: event.InvocationID(label),
+		}); err != nil {
+			t.Fatalf("commit %s: %v", label, err)
+		}
+	}
+	for at := 0; at < 4; at++ {
+		commit(fmt.Sprintf("hot-budget-quiet-%d", at), large)
+	}
+	if _, filed, err := run.Checkpoint(ctx); err != nil || !filed {
+		t.Fatalf("take the first cut: filed=%t err=%v", filed, err)
+	}
+	commit("hot-budget-quiet-tiny", "tiny")
+	rested, filed, err := run.Checkpoint(ctx)
+	if err != nil || !filed {
+		t.Fatalf("take the second cut: filed=%t err=%v", filed, err)
+	}
+	if got := len(sealedSegmentStates(t, root)); got != 2 {
+		t.Fatalf("the cuts the window could hold left %d hot segment(s), want the movable surplus of both", got)
+	}
+
+	run.flight.enter()
+	released := false
+	t.Cleanup(func() {
+		if !released {
+			run.flight.leave()
+		}
+	})
+	commit("hot-budget-waiting", large)
+	if !probe.HotLogCutRequested() || probe.HotLogOverBudget() == 0 {
+		t.Fatalf("the waiting view requested=%t over_budget=%d, want a request and a named interval",
+			probe.HotLogCutRequested(), probe.HotLogOverBudget())
+	}
+	deadline := time.Now().Add(20 * time.Second)
+	for {
+		run.mu.Lock()
+		pending := run.checkpointDuePending
+		run.mu.Unlock()
+		if !pending {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the real checkpoint filer never took the pending early-cut request")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if got := len(sealedSegmentStates(t, root)); got != 2 {
+		t.Fatalf("the unreachable quiet point sealed %d segment(s) beside the two it met, want none", got)
+	}
+
+	run.flight.leave()
+	released = true
+	recovered, _ := awaitCadenceCheckpoint(t, run, rested)
+	if recovered == rested {
+		t.Fatal("the recovered quiet point filed no cut past the rested one")
+	}
+	if probe.HotLogCutRequested() || probe.HotLogOverBudget() != 0 {
+		t.Fatalf("the recovered cut requested=%t over_budget=%d, want no request and the resolved interval",
+			probe.HotLogCutRequested(), probe.HotLogOverBudget())
+	}
+	commit("hot-budget-after-quiet", "after quiet")
+	if _, filed, err := run.Checkpoint(ctx); err != nil || !filed {
+		t.Fatalf("take the cut after quiet returned: filed=%t err=%v", filed, err)
+	}
+}
+
+// TestHotLogOverBudgetStandsBelowTheStructuralFloor pins the floor's observation.
+//   - a window below the derived index files states a configured limit under the structural floor, so no cut brings the hot bytes under it
+//   - the interval stands from the commit that passes the window and a seal does not clear it: the cut the cadence files resolves nothing
+//   - the same window states no early-cut request of its own, because a cut reclaims no floor byte and the cut timing stays the deployment's
+//   - the production warning names the standing interval once, rather than once per commit
+//
+// 契约: docs/wiki/memory/memory-architecture.md#local-file-kv
+func TestHotLogOverBudgetStandsBelowTheStructuralFloor(t *testing.T) {
+	ctx := context.Background()
+	root, archiveRoot := t.TempDir(), t.TempDir()
+	storage := ledger.StorageConfig{Type: ledger.StorageJournal, Root: root}
+	storage.ArchiveRoot = archiveRoot
+	storage.HotLogMaxBytes = hotLogFloorWindow
+	run := windowChainRun(t, ctx, WithStorage(storage))
+	t.Cleanup(func() { endRun(t, run) })
+	observer := &foldObserver{}
+	previous := trpclog.Default
+	trpclog.Default = observer
+	t.Cleanup(func() { trpclog.Default = previous })
+	run.checkpointEvery = 1 << 30
+	run.checkpointPeriod = 1000 * time.Hour
+	probe := hotLogBudgetOf(t, run)
+	addr := event.Address{AgentID: "agent-a", SessionID: "session-hot-budget-floor"}
+	commit := func(label string) {
+		t.Helper()
+		if _, err := run.commitOnly(ctx, addr, event.Event{
+			Key:          event.EventID(label),
+			Type:         event.TypeExternalInput,
+			Meta:         map[string]string{event.MetaKeyEventSummary: label},
+			Message:      model.Message{Role: model.RoleUser, Content: label},
+			InvocationID: event.InvocationID(label),
+		}); err != nil {
+			t.Fatalf("commit %s: %v", label, err)
+		}
+	}
+	commit("hot-budget-floor-one")
+	if probe.HotLogOverBudget() == 0 {
+		t.Fatal("the commit past a window under the floor stated no over-budget interval")
+	}
+	if probe.HotLogCutRequested() {
+		t.Fatal("the window under the floor requested a cut of its own, want the cadence's timing")
+	}
+	if _, filed, err := run.Checkpoint(ctx); err != nil || !filed {
+		t.Fatalf("take the first cut: filed=%t err=%v", filed, err)
+	}
+	if got := probe.HotLogOverBudget(); got == 0 {
+		t.Fatalf("the first cut cleared the interval of a window no cut brings under its limit: over_budget=%d", got)
+	}
+	if probe.HotLogCutRequested() {
+		t.Fatal("the first cut requested another cut, want the cadence's timing")
+	}
+	commit("hot-budget-floor-two")
+	if _, filed, err := run.Checkpoint(ctx); err != nil || !filed {
+		t.Fatalf("take the second cut: filed=%t err=%v", filed, err)
+	}
+	if got := probe.HotLogOverBudget(); got == 0 {
+		t.Fatalf("the second cut cleared the interval of a window no cut brings under its limit: over_budget=%d", got)
+	}
+	if probe.HotLogCutRequested() {
+		t.Fatal("the maintained window requested a cut of its own, want the cadence's timing")
+	}
+	hotSegments := sealedSegmentStates(t, root)
+	if len(hotSegments) != 1 {
+		t.Fatalf("the maintained window kept %d hot segment(s), want the newest interval alone", len(hotSegments))
+	}
+	hotMaxSegment := int64(0)
+	for _, segment := range hotSegments {
+		if segment.Bytes > hotMaxSegment {
+			hotMaxSegment = segment.Bytes
+		}
+	}
+	configured := int64(storage.HotLogMaxBytes) + 2*hotMaxSegment
+	floor := hotLogFloorBytes(t, root)
+	if configured >= floor {
+		t.Fatalf("the anchor's window states configured=%d beside floor=%d, want a window below the floor", configured, floor)
+	}
+	observer.mu.Lock()
+	warnings := 0
+	for _, line := range observer.lines {
+		if strings.HasPrefix(line, "warn: ") && strings.Contains(line, "hot log remains over its effective byte limit") {
+			warnings++
+		}
+	}
+	observer.mu.Unlock()
+	if warnings != 1 {
+		t.Fatalf("the standing interval emitted %d warning(s), want one", warnings)
+	}
+}
+
+// TestCommitCutDrivesArchiveAndShrink pins the production lifecycle of one moved key.
+//   - two cuts the window can hold leave the movable surplus hot, and the generation past the window asks for the cut that moves it
+//   - that requested cut moves the oldest segment and shrinks the hot journal without a direct mover call
+//   - the same view keeps committing and reads both the archived key and the new hot key
+//   - a reopened tier reads both keys by identity, so the archive is a read path rather than a tombstone
+//
+// 契约: docs/wiki/memory/memory-architecture.md#local-file-kv
+func TestCommitCutDrivesArchiveAndShrink(t *testing.T) {
+	ctx := context.Background()
+	root, archiveRoot := t.TempDir(), t.TempDir()
+	storage := ledger.StorageConfig{Type: ledger.StorageJournal, Root: root}
+	storage.ArchiveRoot = archiveRoot
+	storage.HotLogMaxBytes = hotLogBudgetWindow
+	run := windowChainRun(t, ctx, WithStorage(storage))
+	closed := false
+	t.Cleanup(func() {
+		if !closed {
+			endRun(t, run)
+		}
+	})
+	run.checkpointEvery = 1 << 30
+	run.checkpointPeriod = 1000 * time.Hour
+	probe := hotLogBudgetOf(t, run)
+	addr := event.Address{AgentID: "agent-a", SessionID: "session-hot-budget-lifecycle"}
+	largeBody := strings.Repeat("a", hotLogPlateauBodyBytes)
+	commit := func(label, body string) event.EventID {
+		t.Helper()
+		key, err := run.commitOnly(ctx, addr, event.Event{
+			Key:          event.EventID(label),
+			Type:         event.TypeExternalInput,
+			Meta:         map[string]string{event.MetaKeyEventSummary: label},
+			Message:      model.Message{Role: model.RoleUser, Content: body},
+			InvocationID: event.InvocationID(label),
+		})
+		if err != nil {
+			t.Fatalf("commit %s: %v", label, err)
+		}
+		return key
+	}
+
+	oldKey := commit("hot-budget-lifecycle-old", largeBody)
+	for at := 0; at < 3; at++ {
+		commit(fmt.Sprintf("hot-budget-lifecycle-filler-%d", at), largeBody)
+	}
+	if _, filed, err := run.Checkpoint(ctx); err != nil || !filed {
+		t.Fatalf("take the first cut: filed=%t err=%v", filed, err)
+	}
+	before, err := os.Stat(filepath.Join(root, "kv", "journal.log"))
+	if err != nil {
+		t.Fatalf("stat the journal after the first cut: %v", err)
+	}
+	commit("hot-budget-lifecycle-between", "between")
+	rested, filed, err := run.Checkpoint(ctx)
+	if err != nil || !filed {
+		t.Fatalf("take the second cut: filed=%t err=%v", filed, err)
+	}
+	if got := len(sealedSegmentStates(t, root)); got != 2 {
+		t.Fatalf("the cuts the window could hold left %d hot segment(s), want the movable surplus of both", got)
+	}
+	if probe.HotLogCutRequested() || probe.HotLogOverBudget() != 0 {
+		t.Fatalf("the window under its limit requested=%t over_budget=%d, want neither",
+			probe.HotLogCutRequested(), probe.HotLogOverBudget())
+	}
+	commit("hot-budget-lifecycle-over", largeBody)
+	if !probe.HotLogCutRequested() {
+		t.Fatal("the generation past the window latched no early-cut request")
+	}
+	second, _ := awaitCadenceCheckpoint(t, run, rested)
+	if second == rested {
+		t.Fatal("the requested cut filed no later checkpoint")
+	}
+	if probe.HotLogCutRequested() {
+		t.Fatal("the maintaining cut left the early-cut request standing")
+	}
+	after, err := os.Stat(filepath.Join(root, "kv", "journal.log"))
+	if err != nil {
+		t.Fatalf("stat the journal after maintenance: %v", err)
+	}
+	if after.Size() >= before.Size() {
+		t.Fatalf("maintenance left %d journal byte(s) beside %d after the first cut", after.Size(), before.Size())
+	}
+	manifestBody, err := os.ReadFile(filepath.Join(archiveRoot, "manifest.a"))
+	if err != nil {
+		t.Fatalf("read the manifest the maintaining cut wrote: %v", err)
+	}
+	var manifest struct {
+		Segments []json.RawMessage `json:"segments"`
+	}
+	if err := json.Unmarshal(manifestBody, &manifest); err != nil || len(manifest.Segments) == 0 {
+		t.Fatalf("the maintaining cut wrote segments=%d err=%v, want a nonempty archive", len(manifest.Segments), err)
+	}
+
+	newKey := commit("hot-budget-lifecycle-new", "after maintenance")
+	for key, body := range map[event.EventID]string{oldKey: largeBody, newKey: "after maintenance"} {
+		stored, held, err := run.tier.Segments.GetEvent(ctx, key)
+		if err != nil || !held {
+			t.Fatalf("the live view reads key=%q held=%t err=%v", key, held, err)
+		}
+		decoded, err := memory.DecodeEventBody(stored.Body)
+		if err != nil {
+			t.Fatalf("decode the live event %q: %v", key, err)
+		}
+		if got := decoded.Event().Message.Content; got != body {
+			t.Fatalf("the live view reads key=%q body=%d, want the %d-byte value it committed", key, len(got), len(body))
+		}
+	}
+	endRun(t, run)
+	closed = true
+	reopened, err := ledger.OpenTier(ctx, storage)
+	if err != nil {
+		t.Fatalf("reopen the tier after maintenance: %v", err)
+	}
+	t.Cleanup(func() { reopened.Close() })
+	for key, body := range map[event.EventID]string{oldKey: largeBody, newKey: "after maintenance"} {
+		stored, held, err := reopened.Segments.GetEvent(ctx, key)
+		if err != nil || !held {
+			t.Fatalf("the reopened view reads key=%q held=%t err=%v", key, held, err)
+		}
+		decoded, err := memory.DecodeEventBody(stored.Body)
+		if err != nil {
+			t.Fatalf("decode the reopened event %q: %v", key, err)
+		}
+		if got := decoded.Event().Message.Content; got != body {
+			t.Fatalf("the reopened view reads key=%q body=%d, want the %d-byte value it committed", key, len(got), len(body))
+		}
+	}
+}
+
+const (
+	hotLogPlateauGenerations = 4
+	hotLogPlateauEvents      = 4
+	hotLogPlateauBodyBytes   = 64 << 10
+	hotLogPlateauWindow      = 256 << 10
+	hotLogPlateauBandPercent = 130
+	// hotLogBudgetWindow is the retention window the budget anchors declare: above
+	// the derived slot and order files, so a cut can hold it, and small enough that
+	// one generation of the workload does not fit inside it.
+	hotLogBudgetWindow = 128 << 10
+	// hotLogFloorWindow is a retention window below the derived index files, so no
+	// cut can bring the hot window under it: the deployment the floor's observation
+	// belongs to.
+	hotLogFloorWindow = 1 << 10
+)
+
+type hotLogWindow struct {
+	MaxBytes int64
+}
+
+type hotLogGeneration struct {
+	generation        int
+	hotBytes          int64
+	journalBytes      int64
+	indexSideBytes    int64
+	historyMaxSegment int64
+	hotMaxSegment     int64
+	configured        int64
+	floor             int64
+	archiveBytes      int64
+	commits           int
+	cuts              int
+	overBudget        int64
+	hotSegments       int
+	manifestSegments  int
+	latestCutSeq      int64
+	newestHotCutSeq   int64
+}
+
+func (g hotLogGeneration) overhead() int64 { return 2 * g.hotMaxSegment }
+
+type hotLogVerdict struct {
+	plateau bool
+	reasons []string
+}
+
+type hotLogManifestSegment struct {
+	SegmentID string `json:"segment_id"`
+}
+
+type hotLogManifest struct {
+	Version    int                     `json:"version"`
+	Generation int                     `json:"generation"`
+	Segments   []hotLogManifestSegment `json:"segments"`
+}
+
+type hotLogPlateauRun struct {
+	samples  []hotLogGeneration
+	facts    map[event.EventID]string
+	firstKey event.EventID
+	lastKey  event.EventID
+}
+
+func evaluateHotLogPlatform(window hotLogWindow, gens []hotLogGeneration) hotLogVerdict {
+	verdict := hotLogVerdict{}
+	add := func(format string, args ...any) {
+		verdict.reasons = append(verdict.reasons, fmt.Sprintf(format, args...))
+	}
+	if len(gens) != hotLogPlateauGenerations {
+		add("generations: got %d, want %d", len(gens), hotLogPlateauGenerations)
+	}
+	if window.MaxBytes <= 0 {
+		add("window-never-fills: hot_log_max_bytes=%d states no retention window", window.MaxBytes)
+		verdict.plateau = false
+		return verdict
+	}
+	if len(gens) == 0 {
+		verdict.plateau = false
+		return verdict
+	}
+	smallest, largest := gens[0].hotBytes, gens[0].hotBytes
+	for at, g := range gens {
+		if g.hotBytes < smallest {
+			smallest = g.hotBytes
+		}
+		if g.hotBytes > largest {
+			largest = g.hotBytes
+		}
+		if limit := window.MaxBytes + g.overhead(); g.hotBytes > limit {
+			add("absolute-breach: gen%d hot_bytes=%d > window=%d + B_overhead=%d", g.generation, g.hotBytes, window.MaxBytes, g.overhead())
+		}
+		if g.configured < g.floor {
+			add("floor-above-window: gen%d configured=%d < floor=%d, so no cut holds this window and the plateau states no bound",
+				g.generation, g.configured, g.floor)
+		}
+		if g.overBudget != 0 {
+			add("over-budget: gen%d hot_over_budget=%d, want zero", g.generation, g.overBudget)
+		}
+		if at > 0 {
+			prior := gens[at-1]
+			if g.commits < prior.commits {
+				add("denominator-shrinks: gen%d commits=%d < gen%d commits=%d", g.generation, g.commits, prior.generation, prior.commits)
+			}
+			if g.cuts < prior.cuts {
+				add("cut-frequency-falls: gen%d cuts=%d < gen%d cuts=%d", g.generation, g.cuts, prior.generation, prior.cuts)
+			}
+			if g.archiveBytes < prior.archiveBytes {
+				add("archive-shrinks: gen%d archive_bytes=%d < gen%d archive_bytes=%d", g.generation, g.archiveBytes, prior.generation, prior.archiveBytes)
+			}
+		}
+	}
+	if largest*100 > smallest*hotLogPlateauBandPercent {
+		add("band-breach: max hot_bytes=%d > min hot_bytes=%d x 1.30", largest, smallest)
+	}
+	verdict.plateau = len(verdict.reasons) == 0
+	return verdict
+}
+
+func hotLogStructureGaps(gens []hotLogGeneration) []string {
+	var gaps []string
+	for _, g := range gens {
+		if g.hotSegments != 1 {
+			gaps = append(gaps, fmt.Sprintf("hot-segments: gen%d holds %d .log segment(s), want the newest cut segment only", g.generation, g.hotSegments))
+		}
+		if total := g.manifestSegments + g.hotSegments; total != g.cuts {
+			gaps = append(gaps, fmt.Sprintf("segments-sealed: gen%d manifest=%d + hot=%d != cuts=%d", g.generation, g.manifestSegments, g.hotSegments, g.cuts))
+		}
+		if g.hotSegments == 1 && g.newestHotCutSeq != g.latestCutSeq {
+			gaps = append(gaps, fmt.Sprintf("newest-cut-not-hot: gen%d hot cut=%d != latest cut=%d", g.generation, g.newestHotCutSeq, g.latestCutSeq))
+		}
+		if g.journalBytes <= 0 {
+			gaps = append(gaps, fmt.Sprintf("open-segment-missing: gen%d journal.log=%d", g.generation, g.journalBytes))
+		}
+	}
+	return gaps
+}
+
+func hotLogLogSamples(t *testing.T, label string, window hotLogWindow, gens []hotLogGeneration, verdict hotLogVerdict) {
+	t.Helper()
+	t.Logf("%s window=%d plateau=%t", label, window.MaxBytes, verdict.plateau)
+	for _, g := range gens {
+		t.Logf("%s gen=%d hot_bytes=%d journal_bytes=%d index_side=%d history_max_segment=%d hot_max_segment=%d configured=%d floor=%d B_overhead=%d archive_bytes=%d commits=%d cuts=%d hot_over_budget=%d hot_segments=%d manifest_segments=%d",
+			label, g.generation, g.hotBytes, g.journalBytes, g.indexSideBytes, g.historyMaxSegment, g.hotMaxSegment, g.configured, g.floor, g.overhead(), g.archiveBytes, g.commits, g.cuts, g.overBudget, g.hotSegments, g.manifestSegments)
+	}
+	for _, reason := range verdict.reasons {
+		t.Logf("%s reason: %s", label, reason)
+	}
+}
+
+// hotLogFloorBytes measures the hot bytes no cut can reclaim: the journal file, the
+// newest cut segment and its index, and the derived order and slot files. It is the
+// floor a deployment's retention window is held against, measured from the files the
+// run left instead of the figures the view states.
+func hotLogFloorBytes(t *testing.T, root string) int64 {
+	t.Helper()
+	kv := filepath.Join(root, "kv")
+	size := func(path string) int64 {
+		info, err := os.Stat(path)
+		if errors.Is(err, os.ErrNotExist) {
+			return 0
+		}
+		if err != nil {
+			t.Fatalf("stat hot file %s: %v", path, err)
+		}
+		return info.Size()
+	}
+	floor := size(filepath.Join(kv, "journal.log")) +
+		size(filepath.Join(kv, "order.log")) +
+		size(filepath.Join(kv, "slots")) +
+		size(filepath.Join(kv, "order.line"))
+	segments := sealedSegmentStates(t, root)
+	if len(segments) > 0 {
+		newest := segments[len(segments)-1].Name
+		floor += size(filepath.Join(kv, "segments", newest+".log"))
+		floor += size(filepath.Join(kv, "segments", newest+".idx"))
+	}
+	return floor
+}
+
+func runHotLogPlateau(t *testing.T, ctx context.Context, storage ledger.StorageConfig) hotLogPlateauRun {
+	t.Helper()
+	run := windowChainRun(t, ctx, WithStorage(storage))
+	closed := false
+	t.Cleanup(func() {
+		if !closed {
+			endRun(t, run)
+		}
+	})
+	run.stopCheckpointFiler()
+	run.checkpointEvery = 1 << 30
+	run.checkpointPeriod = 1000 * time.Hour
+	probe := hotLogBudgetOf(t, run)
+	addr := event.Address{AgentID: "agent-a", SessionID: "session-hot-log-plateau"}
+	body := strings.Repeat("p", hotLogPlateauBodyBytes)
+	result := hotLogPlateauRun{facts: make(map[event.EventID]string, hotLogPlateauGenerations*hotLogPlateauEvents)}
+	commits, cuts := 0, 0
+	for generation := 1; generation <= hotLogPlateauGenerations; generation++ {
+		for at := 0; at < hotLogPlateauEvents; at++ {
+			evt := event.Event{
+				Key:          event.EventID(fmt.Sprintf("hot-log-gen-%d-event-%d", generation, at)),
+				Type:         event.TypeExternalInput,
+				Timestamp:    checkpointBase().Add(time.Duration(generation*hotLogPlateauEvents+at) * time.Minute),
+				Meta:         map[string]string{event.MetaKeyEventSummary: "bounded hot log plateau"},
+				Message:      model.Message{Role: model.RoleUser, Content: body},
+				Owner:        addr,
+				Source:       addr,
+				Target:       addr,
+				InvocationID: event.InvocationID(fmt.Sprintf("hot-log-gen-%d-event-%d", generation, at)),
+			}
+			key, err := run.commitOnly(ctx, addr, evt)
+			if err != nil {
+				t.Fatalf("generation %d event %d commit: %v", generation, at, err)
+			}
+			if key == "" {
+				t.Fatalf("generation %d event %d committed under an empty key", generation, at)
+			}
+			result.facts[key] = body
+			if result.firstKey == "" {
+				result.firstKey = key
+			}
+			result.lastKey = key
+			commits++
+		}
+		cutID, filed, err := run.Checkpoint(ctx)
+		if err != nil || !filed {
+			t.Fatalf("generation %d checkpoint: filed=%t err=%v", generation, filed, err)
+		}
+		partition, cutSeq := seqOfFact(t, run, cutID)
+		if partition < 0 || cutSeq <= 0 {
+			t.Fatalf("generation %d checkpoint %s states partition=%d seq=%d", generation, cutID, partition, cutSeq)
+		}
+		commits++
+		cuts++
+		hot, journal := hotLogPhysicalBytes(t, storage.Root)
+		hotSegments := sealedSegmentStates(t, storage.Root)
+		var archiveSegments []sealedSegmentState
+		if storage.ArchiveRoot != "" {
+			archiveSegments = sealedSegmentStatesInDir(t, filepath.Join(storage.ArchiveRoot, "segments"))
+		}
+		maxSegment := int64(0)
+		for _, segment := range append(append([]sealedSegmentState(nil), hotSegments...), archiveSegments...) {
+			if segment.Bytes > maxSegment {
+				maxSegment = segment.Bytes
+			}
+		}
+		hotMaxSegment := int64(0)
+		for _, segment := range hotSegments {
+			if segment.Bytes > hotMaxSegment {
+				hotMaxSegment = segment.Bytes
+			}
+		}
+		manifest, _ := hotLogManifestOf(t, storage.ArchiveRoot)
+		newestHotCut := int64(0)
+		if len(hotSegments) > 0 {
+			newestHotCut = hotSegments[len(hotSegments)-1].CutSeq
+		}
+		result.samples = append(result.samples, hotLogGeneration{
+			generation:        generation,
+			hotBytes:          hot,
+			journalBytes:      journal,
+			indexSideBytes:    hot - journal,
+			historyMaxSegment: maxSegment,
+			hotMaxSegment:     hotMaxSegment,
+			configured:        int64(storage.HotLogMaxBytes) + 2*hotMaxSegment,
+			floor:             hotLogFloorBytes(t, storage.Root),
+			archiveBytes:      hotLogDirectoryBytes(t, storage.ArchiveRoot),
+			commits:           commits,
+			cuts:              cuts,
+			overBudget:        probe.HotLogOverBudget(),
+			hotSegments:       len(hotSegments),
+			manifestSegments:  len(manifest.Segments),
+			latestCutSeq:      cutSeq - 1,
+			newestHotCutSeq:   newestHotCut,
+		})
+	}
+	endRun(t, run)
+	closed = true
+	if len(result.facts) != hotLogPlateauGenerations*hotLogPlateauEvents {
+		t.Fatalf("the workload committed %d distinct fact(s), want %d", len(result.facts), hotLogPlateauGenerations*hotLogPlateauEvents)
+	}
+	return result
+}
+
+func hotLogPhysicalBytes(t *testing.T, root string) (total, journal int64) {
+	t.Helper()
+	kv := filepath.Join(root, "kv")
+	size := func(path string) int64 {
+		info, err := os.Stat(path)
+		if errors.Is(err, os.ErrNotExist) {
+			return 0
+		}
+		if err != nil {
+			t.Fatalf("stat hot file %s: %v", path, err)
+		}
+		return info.Size()
+	}
+	journal = size(filepath.Join(kv, "journal.log"))
+	total = journal
+	for _, name := range []string{"order.log", "slots", "order.line"} {
+		total += size(filepath.Join(kv, name))
+	}
+	entries, err := os.ReadDir(filepath.Join(kv, "segments"))
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("read hot segments: %v", err)
+	}
+	for _, entry := range entries {
+		if entry.IsDir() || (!strings.HasSuffix(entry.Name(), ".log") && !strings.HasSuffix(entry.Name(), ".idx")) {
+			continue
+		}
+		total += size(filepath.Join(kv, "segments", entry.Name()))
+	}
+	return total, journal
+}
+
+func hotLogDirectoryBytes(t *testing.T, root string) int64 {
+	t.Helper()
+	if root == "" {
+		return 0
+	}
+	var total int64
+	err := filepath.WalkDir(root, func(path string, entry os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if entry.IsDir() {
+			return nil
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		total += info.Size()
+		return nil
+	})
+	if errors.Is(err, os.ErrNotExist) {
+		return 0
+	}
+	if err != nil {
+		t.Fatalf("measure archive bytes under %s: %v", root, err)
+	}
+	return total
+}
+
+func hotLogManifestOf(t *testing.T, root string) (hotLogManifest, bool) {
+	t.Helper()
+	if root == "" {
+		return hotLogManifest{}, false
+	}
+	var best hotLogManifest
+	var bestRaw []byte
+	found := false
+	for _, name := range []string{"manifest.a", "manifest.b"} {
+		raw, err := os.ReadFile(filepath.Join(root, name))
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			t.Fatalf("read archive %s: %v", name, err)
+		}
+		var candidate hotLogManifest
+		if err := json.Unmarshal(raw, &candidate); err != nil {
+			t.Fatalf("decode archive %s: %v", name, err)
+		}
+		if candidate.Version != 1 || candidate.Generation < 1 {
+			t.Fatalf("archive %s states version=%d generation=%d", name, candidate.Version, candidate.Generation)
+		}
+		switch {
+		case !found || candidate.Generation > best.Generation:
+			best, bestRaw, found = candidate, raw, true
+		case candidate.Generation == best.Generation && !bytes.Equal(raw, bestRaw):
+			t.Fatalf("archive slots state generation %d differently", candidate.Generation)
+		}
+	}
+	return best, found
+}
+
+func hotLogRecallBody(t *testing.T, ctx context.Context, tier *ledger.Tier, agent string, key event.EventID) (string, time.Duration) {
+	t.Helper()
+	scoped, held := tier.Originals.(ledger.ScopedOriginalStore)
+	if !held {
+		t.Fatalf("the tier holds originals as %T, want ScopedOriginalStore", tier.Originals)
+	}
+	var get trpctool.CallableTool
+	for _, tool := range recall.New(recall.Reads{Table: NewTierQuerySource(tier.Segments), Originals: scoped}, memory.PartitionsOf(agent, nil)) {
+		if tool.Declaration().Name == recall.GetToolName {
+			get = tool
+			break
+		}
+	}
+	if get == nil {
+		t.Fatal("the recall surface contributed no recall_get tool")
+	}
+	started := time.Now()
+	var body strings.Builder
+	offset := int64(0)
+	for {
+		args, err := json.Marshal(map[string]any{"key": string(key), "offset": offset, "max_bytes": 32 << 10})
+		if err != nil {
+			t.Fatalf("encode recall_get for %s: %v", key, err)
+		}
+		answered, err := get.Call(ctx, args)
+		if err != nil {
+			t.Fatalf("recall_get %s at offset %d: %v", key, offset, err)
+		}
+		text, ok := answered.(string)
+		if !ok {
+			t.Fatalf("recall_get %s answered %T, want JSON text", key, answered)
+		}
+		var response struct {
+			Found  bool   `json:"found"`
+			Reason string `json:"reason"`
+			Body   string `json:"body"`
+			Offset int64  `json:"offset"`
+			Next   int64  `json:"next"`
+			EOF    bool   `json:"eof"`
+		}
+		if err := json.Unmarshal([]byte(text), &response); err != nil {
+			t.Fatalf("decode recall_get %s: %v", key, err)
+		}
+		if !response.Found || response.Reason != "" {
+			t.Fatalf("recall_get %s answered found=%t reason=%q", key, response.Found, response.Reason)
+		}
+		if response.Offset != offset {
+			t.Fatalf("recall_get %s answered offset=%d, want %d", key, response.Offset, offset)
+		}
+		body.WriteString(response.Body)
+		if response.EOF {
+			return body.String(), time.Since(started)
+		}
+		if response.Next <= offset {
+			t.Fatalf("recall_get %s did not advance past offset %d", key, offset)
+		}
+		offset = response.Next
+	}
+}
+
+func hotLogAssertEvent(t *testing.T, ctx context.Context, tier *ledger.Tier, key event.EventID, want string) {
+	t.Helper()
+	stored, held, err := tier.Segments.GetEvent(ctx, key)
+	if err != nil || !held {
+		t.Fatalf("GetEvent %s: held=%t err=%v", key, held, err)
+	}
+	decoded, err := memory.DecodeEventBody(stored.Body)
+	if err != nil {
+		t.Fatalf("decode event %s: %v", key, err)
+	}
+	if got := decoded.Event().Message.Content; got != want {
+		t.Fatalf("GetEvent %s returned %d byte(s), want the %d committed", key, len(got), len(want))
+	}
+}
+
+func hotLogAssertRecall(t *testing.T, ctx context.Context, tier *ledger.Tier, key event.EventID, want string) {
+	t.Helper()
+	got, _ := hotLogRecallBody(t, ctx, tier, "agent-a", key)
+	if got != want {
+		t.Fatalf("recall_get %s returned %d byte(s), want the %d committed", key, len(got), len(want))
+	}
+}
+
+func hotLogPercentile(samples []time.Duration, percentile int) time.Duration {
+	ordered := append([]time.Duration(nil), samples...)
+	slices.Sort(ordered)
+	return ordered[(percentile*len(ordered))/100]
+}
+
+func hotLogCloseTier(t *testing.T, tier *ledger.Tier) {
+	t.Helper()
+	if err := tier.Close(); err != nil {
+		t.Errorf("close tier: %v", err)
+	}
+}
+
+// TestHotLogPlateausAcrossGenerationsAndOldFactsStayReadable records the four-generation plateau, archive reads, reopen cost, and no-archive rollback.
+//
+// 契约: docs/wiki/memory/memory-architecture.md#local-file-kv
+func TestHotLogPlateausAcrossGenerationsAndOldFactsStayReadable(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
+	defer cancel()
+	storage := ledger.StorageConfig{Type: ledger.StorageJournal, Root: t.TempDir()}
+	storage.ArchiveRoot = t.TempDir()
+	storage.HotLogMaxBytes = hotLogPlateauWindow
+	archived := runHotLogPlateau(t, ctx, storage)
+	window := hotLogWindow{MaxBytes: int64(storage.HotLogMaxBytes)}
+	verdict := evaluateHotLogPlatform(window, archived.samples)
+	hotLogLogSamples(t, "archive", window, archived.samples, verdict)
+	if !verdict.plateau {
+		t.Errorf("the archive workload does not satisfy the plateau criterion: %v", verdict.reasons)
+	}
+	for _, gap := range hotLogStructureGaps(archived.samples) {
+		t.Errorf("archive structure: %s", gap)
+	}
+	for key, body := range archived.facts {
+		if len(body) != hotLogPlateauBodyBytes {
+			t.Fatalf("fact %s states %d byte(s), want the 64KiB workload", key, len(body))
+		}
+	}
+	manifest, _ := hotLogManifestOf(t, storage.ArchiveRoot)
+	firstArchived := false
+	for _, segment := range manifest.Segments {
+		if segment.SegmentID == "seg-000001" {
+			firstArchived = true
+			break
+		}
+	}
+	if !firstArchived {
+		t.Error("the first generation's segment is not stated by the archive manifest")
+	}
+
+	started := time.Now()
+	reopened, err := ledger.OpenTier(ctx, storage)
+	if err != nil {
+		t.Fatalf("reopen the archive tier: %v", err)
+	}
+	t.Cleanup(func() { hotLogCloseTier(t, reopened) })
+	bootDuration := time.Since(started)
+	journalOpen, err := journalBytesOf(reopened)
+	if err != nil {
+		t.Fatalf("read JournalBytesOpen: %v", err)
+	}
+	integrityScanned, err := integrityBytesScannedOf(reopened)
+	if err != nil {
+		t.Fatalf("read IntegrityBytesScanned: %v", err)
+	}
+	lastHot := archived.samples[len(archived.samples)-1].hotBytes
+	if journalOpen > lastHot {
+		t.Errorf("boot JournalBytesOpen=%d > final hot_bytes=%d", journalOpen, lastHot)
+	}
+	if integrityScanned > lastHot {
+		t.Errorf("boot IntegrityBytesScanned=%d > final hot_bytes=%d", integrityScanned, lastHot)
+	}
+	t.Logf("boot duration=%s JournalBytesOpen=%d IntegrityBytesScanned=%d final_hot_bytes=%d", bootDuration, journalOpen, integrityScanned, lastHot)
+
+	for key, body := range archived.facts {
+		hotLogAssertEvent(t, ctx, reopened, key, body)
+	}
+	latencies := make([]time.Duration, 21)
+	for at := range latencies {
+		body, elapsed := hotLogRecallBody(t, ctx, reopened, "agent-a", archived.firstKey)
+		if body != archived.facts[archived.firstKey] {
+			t.Fatalf("archived recall_get %s returned %d byte(s), want %d", archived.firstKey, len(body), len(archived.facts[archived.firstKey]))
+		}
+		latencies[at] = elapsed
+	}
+	hotLogAssertRecall(t, ctx, reopened, archived.lastKey, archived.facts[archived.lastKey])
+	t.Logf("archive_read_latency p50=%.3fms p90=%.3fms samples=%d", float64(hotLogPercentile(latencies, 50))/float64(time.Millisecond), float64(hotLogPercentile(latencies, 90))/float64(time.Millisecond), len(latencies))
+
+	controlStorage := ledger.StorageConfig{Type: ledger.StorageJournal, Root: t.TempDir()}
+	control := runHotLogPlateau(t, ctx, controlStorage)
+	controlWindow := hotLogWindow{}
+	controlVerdict := evaluateHotLogPlatform(controlWindow, control.samples)
+	hotLogLogSamples(t, "no_archive", controlWindow, control.samples, controlVerdict)
+	if controlVerdict.plateau {
+		t.Error("the no-archive workload passed the same plateau criterion, want the rollback anchor red")
+	}
+	if !slices.Contains(controlVerdict.reasons, "window-never-fills: hot_log_max_bytes=0 states no retention window") {
+		t.Errorf("the no-archive verdict named %v, want window-never-fills", controlVerdict.reasons)
+	}
+	for at, sample := range control.samples {
+		if sample.hotSegments != 0 || sample.manifestSegments != 0 || sample.archiveBytes != 0 {
+			t.Errorf("no-archive gen%d produced hot_segments=%d manifest_segments=%d archive_bytes=%d", sample.generation, sample.hotSegments, sample.manifestSegments, sample.archiveBytes)
+		}
+		if at > 0 && sample.hotBytes <= control.samples[at-1].hotBytes {
+			t.Errorf("no-archive hot_bytes did not grow at gen%d: %d <= %d", sample.generation, sample.hotBytes, control.samples[at-1].hotBytes)
+		}
+	}
+	if !reflect.DeepEqual(control.facts, archived.facts) {
+		t.Error("the no-archive workload changed the committed event keys or bodies")
+	}
+	if artifacts := hotLogArchiveArtifacts(t, controlStorage.Root); len(artifacts) > 0 {
+		t.Errorf("the no-archive root produced archive artifacts: %v", artifacts)
+	}
+	controlTier, err := ledger.OpenTier(ctx, controlStorage)
+	if err != nil {
+		t.Fatalf("reopen the no-archive tier: %v", err)
+	}
+	t.Cleanup(func() { hotLogCloseTier(t, controlTier) })
+	for key, body := range control.facts {
+		hotLogAssertEvent(t, ctx, controlTier, key, body)
+		hotLogAssertRecall(t, ctx, controlTier, key, body)
+	}
+}
+
+func hotLogArchiveArtifacts(t *testing.T, root string) []string {
+	t.Helper()
+	var artifacts []string
+	for _, path := range []string{
+		filepath.Join(root, "manifest.a"),
+		filepath.Join(root, "manifest.b"),
+		filepath.Join(root, "kv", "manifest.a"),
+		filepath.Join(root, "kv", "manifest.b"),
+	} {
+		if _, err := os.Stat(path); err == nil {
+			artifacts = append(artifacts, path)
+		} else if !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("stat possible archive artifact %s: %v", path, err)
+		}
+	}
+	dir := filepath.Join(root, "kv", "segments")
+	entries, err := os.ReadDir(dir)
+	if errors.Is(err, os.ErrNotExist) {
+		return artifacts
+	}
+	if err != nil {
+		t.Fatalf("read possible segment directory %s: %v", dir, err)
+	}
+	for _, entry := range entries {
+		artifacts = append(artifacts, filepath.Join(dir, entry.Name()))
+	}
+	return artifacts
 }

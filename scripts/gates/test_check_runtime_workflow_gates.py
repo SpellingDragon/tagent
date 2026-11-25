@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""05/5.4 + 05/5.5 anchors: ten independent short shards and one root-gate owner.
+"""04.402 + 05/5.4 + 05/5.5 anchors: race shards and one root-gate owner.
 
-Both contracts are structural, so they are parsed from the YAML (and the
+These contracts are structural, so they are parsed from the YAML (and the
 negative controls mutate parsed copies) rather than grepped from the text:
 
 * TestCIShortMatrixPreservesTenIndependentRounds: event-integrity-short is a
@@ -10,19 +10,32 @@ negative controls mutate parsed copies) rather than grepped from the text:
   binding (no --repeat batch, no -count amplification, no --test-id subset),
   uploads exactly one artifact named per index, and all ten expanded artifact
   names are collected by the required job's existing download pattern.
-* TestRootProductGatesHaveOneOwner: root build/vet/short run exactly once
-  across ci.yml and runtime-contracts.yml, and that one owner is ci.yml's
-  stable "test" job; runtime-contracts keeps the stable "format-and-contract"
-  check name.
+* TestRootProductGatesHaveOneOwner: root build/vet/short and the isolated
+  response-call cap-fuse consumer-path rerun each run exactly once across
+  ci.yml and runtime-contracts.yml, and that one owner is ci.yml's stable
+  "test" job; runtime-contracts keeps the stable "format-and-contract" check
+  name. The short run skips the exact case and the isolated step reruns it
+  without -short.
+* TestGoCacheCoversThreeModules: every setup-go enables module/build caching
+  and hashes the root, wechat-bot and cli-host go.sum files.
+* TestRaceShardsHaveOneFailClosedAggregate: race is exactly three canonical
+  shards, each uploading its selected package manifest; race-aggregate refuses
+  non-success results, compares the uploaded union with the script's full set,
+  and owns the only consumer-path and wechat-bot race reruns.
 
 Negative controls mutate parsed COPIES (the real workflows are never touched):
 a missing/duplicated index, an unbound env, a count-amplified run, a colliding
 artifact name, an empty artifact path, a missing/duplicated/migrated root gate
-and a renamed stable check must each turn the corresponding assertion red.
+(including either half of the consumer-path isolation), a renamed stable check,
+a stripped module checksum, a missing/duplicated race shard, a lost shard
+manifest or union check, a non-fail-closed aggregate, and a duplicated or
+migrated consumer/wechat-bot rerun must each turn the corresponding assertion
+red.
 """
 import copy
 import fnmatch
 import re
+import subprocess
 import unittest
 from pathlib import Path
 
@@ -46,12 +59,42 @@ REPEAT_INDEX_VALUE = "${{ matrix.repeat-index }}"
 # of the protected set, so both the job id and the rendered check name stay put.
 ROOT_OWNER_WORKFLOW = "ci.yml"
 ROOT_OWNER_JOB = "test"
+RACE_JOB = "race"
+RACE_SHARDS = [1, 2, 3]
+RACE_MAIN_STEP = "Race (every first-party package + all integration suites)"
+RACE_CONSUMER_STEP = "Race (response-call cap fuse consumer path)"
+RACE_WECHAT_STEP = "Race (wechat-bot module)"
+RACE_AGGREGATE_JOB = "race-aggregate"
+RACE_SHARD_ENV = "RACE_SHARD"
+RACE_SHARD_VALUE = "${{ matrix.shard }}"
+RACE_MANIFEST_ENV = "RACE_CHECK_PACKAGE_FILE"
+RACE_MANIFEST_PATH = "${{ runner.temp }}/race-shard-${{ matrix.shard }}/packages.txt"
+RACE_ARTIFACT = "race-shard-${{ matrix.shard }}"
+RACE_ARTIFACT_PATH = "${{ runner.temp }}/race-shard-${{ matrix.shard }}"
+RACE_BUNDLE_PATH = "${{ runner.temp }}/race-bundle"
+CONSUMER_SKIP = "^TestResponseCallCapFuse$/^consumer_path_holds_the_batch_for_approval$"
+RACE_CONSUMER_COMMAND = (
+    "go test -race -count=1 -p 1 ./tests/integration/execution "
+    "-run '^TestResponseCallCapFuse$/^consumer_path_holds_the_batch_for_approval$'")
+RACE_WECHAT_COMMAND = "go -C examples/wechat-bot test -race -count=1 -p 1 ./..."
 CONTRACTS_JOB = "contracts"
 CONTRACTS_CHECK_NAME = "format-and-contract"
 ROOT_GATES = (
     ("Build (root module)", "go build ./..."),
     ("Vet (root module)", "go vet ./..."),
-    ("Test (root module, short)", "go test ./... -short -count=1"),
+    ("Test (root module, short)",
+     "go test ./... -short -count=1 -p 4 -skip "
+     "'^TestResponseCallCapFuse$/^consumer_path_holds_the_batch_for_approval$'"),
+    ("Test (root module, response-call cap fuse consumer path)",
+     "go test ./tests/integration/execution "
+     "-run '^TestResponseCallCapFuse$/^consumer_path_holds_the_batch_for_approval$' "
+     "-count=1"),
+)
+
+GO_CACHE_DEPENDENCY_PATHS = (
+    "go.sum",
+    "examples/wechat-bot/go.sum",
+    "examples/cli-host/go.sum",
 )
 
 
@@ -65,6 +108,47 @@ def jobs(parsed):
 
 def steps(job):
     return job.get("steps") or []
+
+
+def go_setup_steps(workflow):
+    return [(job_name, step)
+            for job_name, job in jobs(workflow).items()
+            for step in steps(job)
+            if str(step.get("uses", "")).startswith("actions/setup-go")]
+
+
+def assert_go_cache_covers_all_modules(workflow):
+    """Hash every module's checksums into setup-go's module/build cache key."""
+    setups = go_setup_steps(workflow)
+    if not setups:
+        raise AssertionError("ci.yml has no actions/setup-go step")
+    setup_jobs = {job_name for job_name, _setup in setups}
+    for required_job in (RACE_JOB, RACE_AGGREGATE_JOB):
+        if required_job not in setup_jobs:
+            raise AssertionError(
+                "{} must keep actions/setup-go module/build caching".format(
+                    required_job))
+    for job_name, setup in setups:
+        config = setup.get("with") or {}
+        if config.get("cache") is not True:
+            raise AssertionError(
+                "{} setup-go must enable cache: true to restore module/build "
+                "caches".format(job_name))
+        dependency_paths = config.get("cache-dependency-path")
+        if not isinstance(dependency_paths, str) or not dependency_paths.strip():
+            raise AssertionError(
+                "{} setup-go cache-dependency-path must name all three modules' "
+                "go.sum files".format(job_name))
+        declared = {line.strip() for line in dependency_paths.splitlines()
+                    if line.strip()}
+        missing = [path for path in GO_CACHE_DEPENDENCY_PATHS
+                   if path not in declared]
+        if missing:
+            raise AssertionError(
+                "{} setup-go cache-dependency-path is missing {}: checksum "
+                "changes in any of the three independent modules must invalidate "
+                "the shared module/build cache".format(
+                    job_name, ", ".join(missing)))
 
 
 def normalize(command):
@@ -276,6 +360,182 @@ def assert_root_gates_have_one_owner(ci_parsed, contracts_parsed):
                 "root gate {!r} must be owned by ci.yml's {!r} job, found {}/{}: "
                 "a second executor doubles every failure and every toolchain "
                 "upgrade".format(name, ROOT_OWNER_JOB, owner[0], owner[1]))
+        if name == "Test (root module, response-call cap fuse consumer path)":
+            owner_step = next(step for label, job_name, step, hit in hits if hit == command)
+            if owner_step.get("env", {}).get("TMPDIR") != "/dev/shm":
+                raise AssertionError("short consumer step must use tmpfs for its fsync-heavy fixture")
+
+
+def named_steps(job, name, where):
+    hits = [step for step in steps(job) if step.get("name") == name]
+    if len(hits) != 1:
+        raise AssertionError(
+            "{} must have exactly one {!r} step, found {}".format(
+                where, name, len(hits)))
+    return hits[0]
+
+
+def command_owners(ci_parsed, contracts_parsed, predicate):
+    owners = []
+    for label, parsed in (("ci.yml", ci_parsed),
+                          ("runtime-contracts.yml", contracts_parsed)):
+        for job_name, job in jobs(parsed).items():
+            for step in steps(job):
+                if predicate(normalize(step.get("run"))):
+                    owners.append((label, job_name, step))
+    return owners
+
+
+def is_consumer_race(command):
+    return all(needle in command for needle in (
+        "go test", "-race", "./tests/integration/execution",
+        "TestResponseCallCapFuse", "consumer_path_holds_the_batch_for_approval"))
+
+
+def is_wechat_race(command):
+    return "go -C examples/wechat-bot test" in command and \
+        "-race" in command and "./..." in command
+
+
+def assert_race_sharding_and_aggregate(ci_parsed, contracts_parsed):
+    """Three canonical shards feed one fail-closed aggregate and one rerun."""
+    race = jobs(ci_parsed).get(RACE_JOB)
+    if race is None:
+        raise AssertionError("ci.yml is missing the race matrix job")
+    strategy = race.get("strategy") or {}
+    if strategy.get("fail-fast") is not False:
+        raise AssertionError("race matrix must keep fail-fast: false")
+    if strategy.get("matrix") != {"shard": RACE_SHARDS}:
+        raise AssertionError(
+            "race matrix must be exactly shard [1, 2, 3], found {!r}".format(
+                strategy.get("matrix")))
+    if race.get("if") or race.get("continue-on-error"):
+        raise AssertionError("race matrix must not have a skip hatch or continue-on-error")
+    for step in steps(race):
+        if step.get("continue-on-error"):
+            raise AssertionError("race shard steps must not continue on error")
+
+    main = named_steps(race, RACE_MAIN_STEP, RACE_JOB)
+    runners = [step for step in steps(race) if "race_check.sh" in (step.get("run") or "")]
+    if runners != [main]:
+        raise AssertionError("race matrix must have exactly one race_check.sh runner")
+    env = main.get("env") or {}
+    if env.get(RACE_SHARD_ENV) != RACE_SHARD_VALUE:
+        raise AssertionError("race main step must bind RACE_SHARD to matrix.shard")
+    if env.get(RACE_MANIFEST_ENV) != RACE_MANIFEST_PATH:
+        raise AssertionError("race main step must write the per-shard package manifest")
+    goflags = str(env.get("GOFLAGS", ""))
+    if normalize(goflags) != "-skip=" + CONSUMER_SKIP:
+        raise AssertionError("race main step must skip only the consumer path")
+    run = normalize(main.get("run"))
+    expected_run = (
+        'set -euo pipefail mkdir -p "$(dirname "$RACE_CHECK_PACKAGE_FILE")" '
+        './scripts/gates/race_check.sh --shard "$RACE_SHARD"')
+    if run != expected_run:
+        raise AssertionError(
+            "race main step must only create its manifest directory and select "
+            "the canonical shard by number, found {!r}".format(run))
+    consumer = named_steps(race, RACE_CONSUMER_STEP, RACE_JOB)
+    if consumer.get("if") != "matrix.shard == 2":
+        raise AssertionError("consumer race step must run only in shard 2")
+    if normalize(consumer.get("run")) != RACE_CONSUMER_COMMAND:
+        raise AssertionError("shard 2 must rerun the exact consumer path once with -race")
+    if consumer.get("env", {}).get("TMPDIR") != "/dev/shm":
+        raise AssertionError("shard 2 consumer step must use tmpfs")
+    wechat = named_steps(race, RACE_WECHAT_STEP, RACE_JOB)
+    if wechat.get("if") != "matrix.shard == 3":
+        raise AssertionError("wechat race step must run only in shard 3")
+    if normalize(wechat.get("run")) != RACE_WECHAT_COMMAND:
+        raise AssertionError("wechat-bot must preserve its independent-module race command")
+
+    uploads = [step for step in steps(race)
+               if str(step.get("uses", "")).startswith("actions/upload-artifact")]
+    if len(uploads) != 1:
+        raise AssertionError("race matrix must upload exactly one manifest per shard")
+    upload = uploads[0]
+    if upload.get("if") != "always()":
+        raise AssertionError("race shard manifests must upload even when the race run fails")
+    with_block = upload.get("with") or {}
+    if with_block.get("name") != RACE_ARTIFACT:
+        raise AssertionError("race artifact name must include matrix.shard")
+    if with_block.get("path") != RACE_ARTIFACT_PATH:
+        raise AssertionError("race artifact path must contain the shard manifest")
+    if with_block.get("if-no-files-found") != "error":
+        raise AssertionError("a shard with no package manifest must fail")
+    ordered_race = steps(race)
+    if not ordered_race.index(main) < ordered_race.index(consumer) < \
+            ordered_race.index(wechat) < ordered_race.index(upload):
+        raise AssertionError("consumer and wechat steps must follow the shard run and precede manifest upload")
+
+    aggregate = jobs(ci_parsed).get(RACE_AGGREGATE_JOB)
+    if aggregate is None:
+        raise AssertionError("ci.yml is missing race-aggregate")
+    if aggregate.get("needs") != [RACE_JOB]:
+        raise AssertionError("race-aggregate must need the complete race matrix")
+    if aggregate.get("if") != "always()":
+        raise AssertionError(
+            "race-aggregate must use always() so failed/skipped/cancelled shards stay red")
+    if aggregate.get("continue-on-error"):
+        raise AssertionError("race-aggregate must not continue on error")
+
+    ordered = steps(aggregate)
+    results = named_steps(aggregate, "Check race shard results", RACE_AGGREGATE_JOB)
+    results_env = results.get("env") or {}
+    if results_env.get("RACE_RESULT") != "${{ needs.race.result }}":
+        raise AssertionError("aggregate must read the race matrix result through env")
+    results_run = normalize(results.get("run"))
+    if results_run != (
+            'set -euo pipefail test -n "$RACE_RESULT" '
+            'test "$RACE_RESULT" = "success"'):
+        raise AssertionError("aggregate must refuse empty, failed, skipped and cancelled results")
+
+    downloads = [step for step in ordered
+                 if str(step.get("uses", "")).startswith("actions/download-artifact")]
+    if len(downloads) != 1:
+        raise AssertionError("race-aggregate must download the shard manifests exactly once")
+    download_with = downloads[0].get("with") or {}
+    if download_with.get("pattern") != "race-shard-*":
+        raise AssertionError("aggregate download pattern must collect every race shard")
+    if download_with.get("path") != RACE_BUNDLE_PATH:
+        raise AssertionError("aggregate must keep one directory per shard artifact")
+    if download_with.get("merge-multiple") is not False:
+        raise AssertionError("aggregate must not merge same-named shard manifests")
+
+    union = named_steps(aggregate, "Check race shard package union", RACE_AGGREGATE_JOB)
+    if normalize(union.get("run")) != \
+            './scripts/gates/race_check.sh --shard-union-check "$RUNNER_TEMP/race-bundle"':
+        raise AssertionError("aggregate must compare uploaded manifests with the canonical set")
+    union_runners = [step for step in ordered
+                     if "race_check.sh" in (step.get("run") or "")]
+    if union_runners != [union]:
+        raise AssertionError("race-aggregate must have exactly one race_check.sh union runner")
+
+    for step in ordered:
+        if step.get("if"):
+            raise AssertionError(
+                "race-aggregate steps must not have conditional skip hatches")
+        if step.get("continue-on-error"):
+            raise AssertionError("race-aggregate steps must not continue on error")
+    if not ordered.index(results) < ordered.index(downloads[0]) < ordered.index(union):
+        raise AssertionError("aggregate order must be results, manifests, union")
+
+    for predicate, command, step_name, owner_job in (
+            (is_consumer_race, RACE_CONSUMER_COMMAND, RACE_CONSUMER_STEP, RACE_JOB),
+            (is_wechat_race, RACE_WECHAT_COMMAND, RACE_WECHAT_STEP, RACE_JOB)):
+        owners = command_owners(ci_parsed, contracts_parsed, predicate)
+        if len(owners) != 1:
+            raise AssertionError(
+                "{!r} must run exactly once across both workflows, found {}".format(
+                    step_name, [(label, job_name) for label, job_name, _step in owners]))
+        label, job_name, owner_step = owners[0]
+        if (label, job_name) != ("ci.yml", owner_job):
+            raise AssertionError(
+                "{!r} must be owned only by ci.yml/{}, found {}/{}".format(
+                    step_name, owner_job, label, job_name))
+        if normalize(owner_step.get("run")) != command:
+            raise AssertionError(
+                "{!r} must keep its exact race command, found {!r}".format(
+                    step_name, normalize(owner_step.get("run"))))
 
 
 class TestCIShortMatrixPreservesTenIndependentRounds(unittest.TestCase):
@@ -355,7 +615,7 @@ class TestCIShortMatrixPreservesTenIndependentRounds(unittest.TestCase):
 
 
 class TestRootProductGatesHaveOneOwner(unittest.TestCase):
-    """05/5.5: root build/vet/short run once, in ci.yml's stable test job."""
+    """05/5.5: root gates and the isolated consumer-path rerun execute once."""
 
     @classmethod
     def setUpClass(cls):
@@ -365,7 +625,7 @@ class TestRootProductGatesHaveOneOwner(unittest.TestCase):
     def copy_pair(self):
         return copy.deepcopy(self.ci), copy.deepcopy(self.contracts)
 
-    def test_root_build_vet_short_have_one_owner(self):
+    def test_root_build_vet_short_and_consumer_path_have_one_owner(self):
         assert_root_gates_have_one_owner(self.ci, self.contracts)
 
     def test_negative_control_missing_root_gate_turns_check_red(self):
@@ -425,6 +685,168 @@ class TestRootProductGatesHaveOneOwner(unittest.TestCase):
         with self.subTest(mutation="test check name duplicated"):
             with self.assertRaises(AssertionError):
                 assert_root_gates_have_one_owner(duplicate_ci, duplicate_contracts)
+
+
+class TestRaceShardsHaveOneFailClosedAggregate(unittest.TestCase):
+    """Package shards preserve coverage; consumer and bot reruns execute once."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.ci = load_workflow(CI_WORKFLOW)
+        cls.contracts = load_workflow(CONTRACTS_WORKFLOW)
+
+    def copy_pair(self):
+        return copy.deepcopy(self.ci), copy.deepcopy(self.contracts)
+
+    def test_race_matrix_aggregate_and_isolated_reruns_have_one_owner(self):
+        assert_race_sharding_and_aggregate(self.ci, self.contracts)
+
+    def test_negative_control_missing_or_duplicated_shard_turns_check_red(self):
+        for label, values in (("missing shard", [1, 2]),
+                              ("duplicated shard", [1, 2, 2]),
+                              ("out-of-range shard", [1, 2, 4])):
+            ci, contracts = self.copy_pair()
+            ci["jobs"][RACE_JOB]["strategy"]["matrix"]["shard"] = values
+            with self.subTest(mutation=label):
+                with self.assertRaises(AssertionError):
+                    assert_race_sharding_and_aggregate(ci, contracts)
+        extra_dimension = self.copy_pair()
+        extra_dimension[0]["jobs"][RACE_JOB]["strategy"]["matrix"]["os"] = ["ubuntu-latest"]
+        with self.subTest(mutation="extra matrix dimension"):
+            with self.assertRaises(AssertionError):
+                assert_race_sharding_and_aggregate(*extra_dimension)
+
+    def test_negative_control_missing_artifact_or_union_turns_check_red(self):
+        for mutation in ("upload", "artifact-name", "artifact-path", "no-files",
+                         "download", "union"):
+            ci, contracts = self.copy_pair()
+            race_steps = ci["jobs"][RACE_JOB]["steps"]
+            aggregate_steps = ci["jobs"][RACE_AGGREGATE_JOB]["steps"]
+            if mutation == "upload":
+                ci["jobs"][RACE_JOB]["steps"] = [
+                    step for step in race_steps
+                    if not str(step.get("uses", "")).startswith("actions/upload-artifact")]
+            elif mutation in ("artifact-name", "artifact-path", "no-files"):
+                upload = [step for step in race_steps
+                          if str(step.get("uses", "")).startswith("actions/upload-artifact")][0]
+                if mutation == "artifact-name":
+                    upload["with"]["name"] = "race-shard"
+                elif mutation == "artifact-path":
+                    upload["with"]["path"] = ""
+                else:
+                    upload["with"]["if-no-files-found"] = "warn"
+            elif mutation == "download":
+                ci["jobs"][RACE_AGGREGATE_JOB]["steps"] = [
+                    step for step in aggregate_steps
+                    if not str(step.get("uses", "")).startswith("actions/download-artifact")]
+            else:
+                ci["jobs"][RACE_AGGREGATE_JOB]["steps"] = [
+                    step for step in aggregate_steps
+                    if step.get("name") != "Check race shard package union"]
+            with self.subTest(mutation=mutation):
+                with self.assertRaises(AssertionError):
+                    assert_race_sharding_and_aggregate(ci, contracts)
+
+    def test_aggregate_result_command_rejects_every_non_success_value(self):
+        aggregate = self.ci["jobs"][RACE_AGGREGATE_JOB]
+        command = named_steps(aggregate, "Check race shard results",
+                              RACE_AGGREGATE_JOB)["run"]
+        for result in ("success", "failure", "cancelled", "skipped", ""):
+            proc = subprocess.run(
+                ["bash", "-c", command], env={"RACE_RESULT": result},
+                capture_output=True, text=True)
+            with self.subTest(result=result):
+                if result == "success":
+                    self.assertEqual(proc.returncode, 0, proc.stderr)
+                else:
+                    self.assertNotEqual(proc.returncode, 0)
+
+    def test_negative_control_aggregate_fail_closed_turns_check_red(self):
+        for mutation in ("always", "needs", "result", "continue-on-error",
+                         "step-if", "step-continue-on-error",
+                         "shard-step-continue-on-error", "extra-runner"):
+            ci, contracts = self.copy_pair()
+            aggregate = ci["jobs"][RACE_AGGREGATE_JOB]
+            if mutation == "always":
+                aggregate.pop("if")
+            elif mutation == "needs":
+                aggregate["needs"] = []
+            elif mutation == "result":
+                named_steps(aggregate, "Check race shard results", RACE_AGGREGATE_JOB)["run"] = "true"
+            elif mutation == "continue-on-error":
+                aggregate["continue-on-error"] = True
+            elif mutation == "step-if":
+                named_steps(aggregate, "Check race shard package union",
+                            RACE_AGGREGATE_JOB)["if"] = "always()"
+            elif mutation == "step-continue-on-error":
+                named_steps(aggregate, "Check race shard package union",
+                            RACE_AGGREGATE_JOB)["continue-on-error"] = True
+            elif mutation == "shard-step-continue-on-error":
+                named_steps(ci["jobs"][RACE_JOB], RACE_MAIN_STEP, RACE_JOB)[
+                    "continue-on-error"] = True
+            else:
+                aggregate["steps"].append({
+                    "name": "Second race runner",
+                    "run": './scripts/gates/race_check.sh --shard 1',
+                })
+            with self.subTest(mutation=mutation):
+                with self.assertRaises(AssertionError):
+                    assert_race_sharding_and_aggregate(ci, contracts)
+
+    def test_negative_control_duplicate_or_migrated_consumer_turns_check_red(self):
+        for mutation in ("duplicate", "reordered-duplicate", "migrated", "missing-skip"):
+            ci, contracts = self.copy_pair()
+            if mutation in ("duplicate", "reordered-duplicate"):
+                command = RACE_CONSUMER_COMMAND
+                if mutation == "reordered-duplicate":
+                    command = command.replace("-race -count=1", "-count=1 -race")
+                ci["jobs"][RACE_JOB]["steps"].append({
+                    "name": "Duplicate consumer race",
+                    "run": command,
+                })
+            elif mutation == "migrated":
+                race_steps = ci["jobs"][RACE_JOB]["steps"]
+                consumer = named_steps(ci["jobs"][RACE_JOB],
+                                       RACE_CONSUMER_STEP, RACE_JOB)
+                race_steps.remove(consumer)
+                ci["jobs"][RACE_AGGREGATE_JOB]["steps"].append(consumer)
+            else:
+                named_steps(ci["jobs"][RACE_JOB], RACE_MAIN_STEP, RACE_JOB)["env"].pop("GOFLAGS")
+            with self.subTest(mutation=mutation):
+                with self.assertRaises(AssertionError):
+                    assert_race_sharding_and_aggregate(ci, contracts)
+
+    def test_negative_control_duplicate_wechat_race_turns_check_red(self):
+        ci, contracts = self.copy_pair()
+        ci["jobs"][RACE_JOB]["steps"].append({
+            "name": RACE_WECHAT_STEP,
+            "run": RACE_WECHAT_COMMAND,
+        })
+        with self.assertRaises(AssertionError):
+            assert_race_sharding_and_aggregate(ci, contracts)
+
+
+class TestGoCacheCoversThreeModules(unittest.TestCase):
+    """Every Go job shares a cache keyed by all three independent modules."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.workflow = load_workflow(CI_WORKFLOW)
+
+    def test_all_go_jobs_cache_with_three_module_checksums(self):
+        assert_go_cache_covers_all_modules(self.workflow)
+
+    def test_negative_control_stripped_module_checksum_turns_check_red(self):
+        for missing in GO_CACHE_DEPENDENCY_PATHS:
+            mutated = copy.deepcopy(self.workflow)
+            for _job_name, setup in go_setup_steps(mutated):
+                dependency_paths = setup["with"]["cache-dependency-path"]
+                setup["with"]["cache-dependency-path"] = "\n".join(
+                    line for line in dependency_paths.splitlines()
+                    if line.strip() != missing)
+            with self.subTest(missing=missing):
+                with self.assertRaisesRegex(AssertionError, re.escape(missing)):
+                    assert_go_cache_covers_all_modules(mutated)
 
 
 if __name__ == "__main__":

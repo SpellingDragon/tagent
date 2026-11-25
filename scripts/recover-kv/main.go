@@ -1,14 +1,19 @@
-// Command recover-kv rebuilds the independent bodies a journal root's references
-// name but whose blob: keys are absent, the state the original store's load
-// refuses by name as ErrSnapshotCorrupt.
+// Command recover-kv verifies that every reference a journal root holds is
+// answered by the text of its original: a fact commit stages the reference alone
+// and commits the text inside the event body of the same key, so the chain is the
+// one place that text lives and the recall reads it back from there.
 //
-// The chain holds the same text: assembly's persistFact commits
-// body.Message.Content as the blob and the whole encoded EventBody as the segment
-// record of one key, so a missing body is rebuilt from the event of that key and
-// accepted only when its sha256 digest and byte length equal the ones the
-// reference recorded. The scan is a dry run unless --restore is given. It only
-// adds missing bodies: no reference is deleted, no chain record is touched, and a
-// body the chain cannot answer for is named with its owner and exits nonzero.
+// The command writes nothing. For every reference key of the root it reads the
+// copies the root holds of that text — the event body of the key, and the
+// independent body a bare commit staged beside the reference — and compares the
+// sha256 digest and byte length of each with the ones the references recorded. A
+// key the root holds no text for is named truly lost, a copy whose bytes are not
+// the ones the reference names is named a mismatch, and either one exits nonzero;
+// a root whose every reference is answered by the text it names exits zero. The
+// root is read through the one journal view that locates a key in the hot index and
+// in the archive manifest alike, so a text the hot files do not carry is read from
+// the archive root the operator names and an archive that cannot answer is reported
+// by name.
 //
 // 契约: docs/wiki/memory/memory-architecture.md#event-shape
 package main
@@ -30,9 +35,9 @@ import (
 )
 
 // storedRef is the persisted reference record this command reads: the scope the
-// reference was accepted under and the completeness information its body carries.
-// One event key names one body, so every record of a key states one digest and
-// length and the first record answers for all of them.
+// reference was accepted under and the completeness information of the text it
+// names. Every record of a key states the completeness of the same text, so each
+// is checked against the copies the root holds.
 type storedRef struct {
 	OwnerAgent   string `json:"owner_agent"`
 	OwnerSession string `json:"owner_session"`
@@ -40,20 +45,20 @@ type storedRef struct {
 	Length       int64  `json:"length"`
 }
 
-// orphan is one reference whose independent body the root does not hold, named
-// with the owner the reference was registered under.
-type orphan struct {
-	// Key is the event key the reference and the missing body share.
+// reference is one key the root holds references for, named with the owner of the
+// first reference registered under it.
+type reference struct {
+	// Key is the event key the references and the text they name share.
 	Key string
-	// OwnerAgent is the agent the reference was accepted for.
+	// OwnerAgent is the agent the first reference was accepted for.
 	OwnerAgent string
 	// OwnerSession is the session of that agent the reference was accepted for.
 	OwnerSession string
 }
 
-// report is one scan of a journal root: what the open stated about the log's tail and
-// the index it read, then every orphan reference classified by what the chain holds for
-// its key, each list in key order.
+// report is one verification of a journal root: what the open stated about the log's
+// tail and the index it read, then every reference the root holds no text for and
+// every reference whose text differs from the one it names, each list in key order.
 type report struct {
 	// TornTailBytes is the byte of the log the last frame the open read starts at, taken
 	// from the open itself: the frame at that byte is torn, so the log ends there.
@@ -65,20 +70,17 @@ type report struct {
 	// IndexNotice states what the open said about the index files of the root, and is
 	// empty beside an open that read the commits past an index watermark.
 	IndexNotice string
-	// Recoverable holds the orphans whose body the chain rebuilds, as a dry run
-	// reports them.
-	Recoverable []orphan
-	// Restored holds the orphans whose rebuilt body was committed.
-	Restored []orphan
-	// TrulyLost holds the orphans whose key the chain holds no event for.
-	TrulyLost []orphan
-	// Mismatch holds the orphans whose chain body is not the body the reference
-	// names.
-	Mismatch []orphan
+	// TrulyLost holds the references the root holds no text for: neither an event
+	// body nor an independent body carries the text they name.
+	TrulyLost []reference
+	// Mismatch holds the references holding a copy whose digest or length is not the
+	// one they recorded.
+	Mismatch []reference
 }
 
-// exitCode answers 0 when every orphan of the scan is rebuildable and 1 when any
-// is not, so a root that still cannot boot is reported as a failure.
+// exitCode answers 0 when every reference of the root is answered by the text it
+// names and 1 when any is not, so a root whose recall cannot serve every original
+// is reported as a failure.
 func (r report) exitCode() int {
 	if len(r.TrulyLost) > 0 || len(r.Mismatch) > 0 {
 		return 1
@@ -87,40 +89,42 @@ func (r report) exitCode() int {
 }
 
 func main() {
-	root := flag.String("root", "", "live journal root to repair")
-	restore := flag.Bool("restore", false, "commit the rebuilt bodies; without it the scan writes nothing")
+	root := flag.String("root", "", "journal root whose references to verify")
+	archiveRoot := flag.String("archive-root", "", "archive root whose manifest locates the segments the hot log does not state")
 	flag.Parse()
 	if *root == "" {
 		fail(fmt.Errorf("--root is required"))
 	}
-	scanned, err := recoverOrphanOriginals(context.Background(), *root, *restore)
+	verified, err := verifyOriginalReferences(context.Background(), *root, *archiveRoot)
 	if err != nil {
 		fail(err)
 	}
-	printReport(*root, *restore, scanned)
-	if scanned.exitCode() != 0 {
-		fail(fmt.Errorf("%d truly lost and %d mismatched references leave %s unable to boot", len(scanned.TrulyLost), len(scanned.Mismatch), *root))
+	printReport(*root, verified)
+	if verified.exitCode() != 0 {
+		fail(fmt.Errorf("%d truly lost and %d mismatched references leave %s unable to serve every original", len(verified.TrulyLost), len(verified.Mismatch), *root))
 	}
 }
 
-// recoverOrphanOriginals scans the journal root for references whose independent
-// body is absent and rebuilds each one the chain answers for.
-//   - The orphan keys are walked in key order, so one root reports the same classes in the same order on every run
-//   - A rebuilt body is committed only when its sha256 digest and byte length equal the ones the reference recorded; a key the chain holds no event for and a body that differs are reported by name and left untouched
-//   - restore=false writes nothing and reports the rebuildable keys as recoverable
-//   - The open declares the root's write rights only when restore is set, so a dry run reads beside the live runtime instead of being refused by it, and a restore is refused by name while that runtime holds the root
-//   - After a commit the root is re-read through a freshly opened engine, and a restored key whose body or reference is not held is reported as an error
-//   - A reference or chain body that does not decode is reported as an error naming its key; the bodies already committed stay, each having matched its reference before it was written
-//   - What the open found at the end of the log and in the index files is taken from it before any commit, so the report states the root the scan met
-func recoverOrphanOriginals(ctx context.Context, root string, restore bool) (report, error) {
-	tier, err := ledger.OpenTier(ctx, ledger.StorageConfig{Type: ledger.StorageJournal, Root: root, WriteRights: restore})
+// verifyOriginalReferences verifies every reference of the journal root against the
+// text the root holds for its key.
+//   - The reference keys are walked in key order, so one root reports the same classes in the same order on every run
+//   - A key the root holds no text for — no event body and no independent body — is reported truly lost by name, and a copy whose sha256 digest or byte length is not the one the reference recorded is reported a mismatch; a reference every copy agrees with is not reported
+//   - Every copy the root holds of the text is checked: the event body of the key, and the independent body a bare commit staged beside the reference, so a root holding both states a copy that drifted
+//   - The open declares no write rights, so the scan reads beside the live runtime and writes no byte
+//   - A reference record or an event body that does not decode is reported as an error naming its key
+//   - A key the hot log does not state is read through the archive root, so a text that moved reads back instead of being reported truly lost, and a segment or record the archive cannot serve is reported by its own name
+//   - What the open found at the end of the log and in the index files is taken from it, so the report states the root the scan met
+func verifyOriginalReferences(ctx context.Context, root, archiveRoot string) (report, error) {
+	config := ledger.StorageConfig{Type: ledger.StorageJournal, Root: root}
+	config.ArchiveRoot = archiveRoot
+	tier, err := ledger.OpenTier(ctx, config)
 	if err != nil {
 		return report{}, err
 	}
 	var scanned report
 	scanned.TornTailBytes, scanned.TornTail = tornTailOf(tier)
 	scanned.IndexNotice = indexNoticeOf(tier)
-	blobKeys, err := tier.Store.Keys(ctx, "blob:")
+	blobPairs, err := tier.Store.Read(ctx, ledger.Fetch{Prefix: "blob:"})
 	if err != nil {
 		return report{}, err
 	}
@@ -128,7 +132,12 @@ func recoverOrphanOriginals(ctx context.Context, root string, restore bool) (rep
 	if err != nil {
 		return report{}, err
 	}
-	blobs := keySet(blobKeys)
+	blobs := map[string][]byte{}
+	for _, pair := range blobPairs {
+		if key, named := strings.CutPrefix(pair.Key, "blob:"); named {
+			blobs[key] = pair.Value
+		}
+	}
 	refs := map[string][]byte{}
 	var keys []string
 	for _, pair := range refPairs {
@@ -137,9 +146,7 @@ func recoverOrphanOriginals(ctx context.Context, root string, restore bool) (rep
 			continue
 		}
 		refs[key] = pair.Value
-		if _, paired := blobs["blob:"+key]; !paired {
-			keys = append(keys, key)
-		}
+		keys = append(keys, key)
 	}
 	sort.Strings(keys)
 	for _, key := range keys {
@@ -148,106 +155,72 @@ func recoverOrphanOriginals(ctx context.Context, root string, restore bool) (rep
 			return scanned, fmt.Errorf("recover-kv: reference record %q: %w", key, err)
 		}
 		if len(records) == 0 {
-			return scanned, fmt.Errorf("recover-kv: reference record %q names no body to rebuild", key)
+			return scanned, fmt.Errorf("recover-kv: reference record %q names no text to verify", key)
 		}
-		record := records[0]
-		item := orphan{Key: key, OwnerAgent: record.OwnerAgent, OwnerSession: record.OwnerSession}
-		stored, held, err := tier.Segments.GetEvent(ctx, event.EventID(key))
+		item := reference{Key: key, OwnerAgent: records[0].OwnerAgent, OwnerSession: records[0].OwnerSession}
+		body, held := blobs[key]
+		drifted := held && differs(body, records)
+		stored, onChain, err := tier.Segments.GetEvent(ctx, event.EventID(key))
 		if err != nil {
 			return scanned, err
 		}
-		if !held {
+		if onChain {
+			committed, err := memory.DecodeEventBody(stored.Body)
+			if err != nil {
+				return scanned, fmt.Errorf("recover-kv: chain body of %q: %w", key, err)
+			}
+			if differs([]byte(committed.Message.Content), records) {
+				drifted = true
+			}
+		}
+		if !held && !onChain {
 			scanned.TrulyLost = append(scanned.TrulyLost, item)
 			continue
 		}
-		body, err := memory.DecodeEventBody(stored.Body)
-		if err != nil {
-			return scanned, fmt.Errorf("recover-kv: chain body of %q: %w", key, err)
-		}
-		content := []byte(body.Message.Content)
-		if digestOf(content) != record.Digest || int64(len(content)) != record.Length {
+		if drifted {
 			scanned.Mismatch = append(scanned.Mismatch, item)
-			continue
-		}
-		if !restore {
-			scanned.Recoverable = append(scanned.Recoverable, item)
-			continue
-		}
-		if err := tier.Store.Commit(ctx, ledger.Batch{Puts: []ledger.Pair{{Key: "blob:" + key, Value: content}}}); err != nil {
-			return scanned, fmt.Errorf("recover-kv: commit the rebuilt body of %q: %w", key, err)
-		}
-		scanned.Restored = append(scanned.Restored, item)
-	}
-	if len(scanned.Restored) > 0 {
-		if err := verifyRestored(ctx, root, scanned.Restored); err != nil {
-			return scanned, err
 		}
 	}
 	return scanned, nil
 }
 
-// verifyRestored re-reads the two original namespaces of the root through a
-// freshly opened engine and reports the first restored key whose reference or
-// rebuilt body is not held, so a commit that did not land is named instead of
-// counted.
-func verifyRestored(ctx context.Context, root string, restored []orphan) error {
-	store, err := ledger.OpenAtomicStore(ctx, ledger.StorageConfig{Type: ledger.StorageJournal, Root: root})
-	if err != nil {
-		return err
-	}
-	blobKeys, err := store.Keys(ctx, "blob:")
-	if err != nil {
-		return err
-	}
-	refKeys, err := store.Keys(ctx, "ref:")
-	if err != nil {
-		return err
-	}
-	blobs, refs := keySet(blobKeys), keySet(refKeys)
-	for _, item := range restored {
-		if _, held := blobs["blob:"+item.Key]; !held {
-			return fmt.Errorf("recover-kv: the rebuilt body of %q is not held after the commit", item.Key)
-		}
-		if _, held := refs["ref:"+item.Key]; !held {
-			return fmt.Errorf("recover-kv: the reference of %q is not held after the commit", item.Key)
+// differs reports whether body is not the text the reference records of one key
+// name: they all state the completeness of that one text, so a single digest or
+// length that does not match the bytes is a drift.
+func differs(body []byte, records []storedRef) bool {
+	digest, length := digestOf(body), int64(len(body))
+	for _, record := range records {
+		if record.Digest != digest || record.Length != length {
+			return true
 		}
 	}
-	return nil
+	return false
 }
 
-// printReport writes the summary of one scan: what the open stated about the log's tail
-// and the index it read, the count of every class, each reference named with its owner,
-// and whether anything was committed.
-func printReport(root string, restore bool, scanned report) {
+// printReport writes the summary of one verification: what the open stated about the
+// log's tail and the index it read, the count of every class, and each reference
+// named with its owner.
+func printReport(root string, scanned report) {
 	if scanned.IndexNotice != "" {
 		fmt.Printf("recover-kv: %s: %s\n", root, scanned.IndexNotice)
 	}
 	if scanned.TornTail {
-		if restore {
-			fmt.Printf("recover-kv: %s: the open cut the torn tail the log ended in: it now ends at %d, the byte its last whole frame ends at\n", root, scanned.TornTailBytes)
-		} else {
-			fmt.Printf("recover-kv: %s: the log ends in a torn tail at %d, and the dry run cut nothing: the scan served the whole frames before it\n", root, scanned.TornTailBytes)
-		}
+		fmt.Printf("recover-kv: %s: the log ends in a torn tail at %d, and the scan cut nothing: it read the whole frames before it\n", root, scanned.TornTailBytes)
 	}
-	total := len(scanned.Recoverable) + len(scanned.Restored) + len(scanned.TrulyLost) + len(scanned.Mismatch)
+	total := len(scanned.TrulyLost) + len(scanned.Mismatch)
 	if total == 0 {
-		fmt.Printf("recover-kv: %s: nothing to recover, every reference names its independent body\n", root)
+		fmt.Printf("recover-kv: %s: every reference is answered by the text it names\n", root)
 		return
 	}
-	fmt.Printf("recover-kv: %s: %d orphan references: %d recoverable, %d restored, %d truly lost, %d mismatch\n",
-		root, total, len(scanned.Recoverable), len(scanned.Restored), len(scanned.TrulyLost), len(scanned.Mismatch))
-	if !restore {
-		fmt.Println("recover-kv: dry run, nothing written; rerun with --restore to commit the rebuilt bodies")
-	}
-	printOrphans("recoverable: the chain rebuilds the body", scanned.Recoverable)
-	printOrphans("restored: the rebuilt body was committed", scanned.Restored)
-	printOrphans("truly lost: the chain holds no event for the key", scanned.TrulyLost)
-	printOrphans("mismatch: the chain body is not the body the reference names", scanned.Mismatch)
+	fmt.Printf("recover-kv: %s: %d references not answered by the text they name: %d truly lost, %d mismatch\n",
+		root, total, len(scanned.TrulyLost), len(scanned.Mismatch))
+	printReferences("truly lost: the root holds no text for the key", scanned.TrulyLost)
+	printReferences("mismatch: the text held for the key is not the text the reference names", scanned.Mismatch)
 }
 
-// printOrphans names every reference of one class with the owner it was
+// printReferences names every reference of one class with the owner it was
 // registered under, so the operator can decide what to do with it.
-func printOrphans(class string, list []orphan) {
+func printReferences(class string, list []reference) {
 	if len(list) == 0 {
 		return
 	}
@@ -278,15 +251,6 @@ func indexNoticeOf(tier *ledger.Tier) string {
 	return probe.IndexUnstatedNotice()
 }
 
-// keySet returns the keys as a membership set.
-func keySet(keys []string) map[string]struct{} {
-	set := make(map[string]struct{}, len(keys))
-	for _, key := range keys {
-		set[key] = struct{}{}
-	}
-	return set
-}
-
 // digestOf returns the canonical digest text of body, the form the original store
 // records for the bytes it commits.
 func digestOf(body []byte) string {
@@ -294,7 +258,7 @@ func digestOf(body []byte) string {
 	return "sha256:" + hex.EncodeToString(sum[:])
 }
 
-// fail reports one recovery failure to stderr and exits nonzero.
+// fail reports one verification failure to stderr and exits nonzero.
 func fail(err error) {
 	fmt.Fprintln(os.Stderr, "recover-kv:", err)
 	os.Exit(1)

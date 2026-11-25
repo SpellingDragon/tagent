@@ -118,6 +118,60 @@ func (m *MemoryStore) AcceptNotice(ctx context.Context, notice task.Notice) erro
 	return nil
 }
 
+// AcceptNoticeClaimed accepts one notification and claims its entry in the same
+// critical section, so no resident consumer can take the entry between the two
+// steps. It returns the site and sequence actually claimed. A replay claims a
+// still-pending entry in its original site; an entry another executor already
+// claimed or consumed is refused with ErrClaimConflict.
+func (m *MemoryStore) AcceptNoticeClaimed(ctx context.Context, notice task.Notice) (WorkSeat, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	prior, accepted, err := m.noticeSeat(notice)
+	if err != nil {
+		return WorkSeat{}, err
+	}
+	var held *site
+	var target siteKey
+	var seq AcceptSeq
+	if accepted {
+		held, err = m.openSite(prior.site.addr, prior.site.instance)
+		if err != nil {
+			return WorkSeat{}, err
+		}
+		target = prior.site
+		seq = prior.seq
+	} else {
+		route, ok := m.deliveries[notice.TaskID]
+		if !ok {
+			return WorkSeat{}, ErrDeliveryNotAllowed
+		}
+		target = siteKey{addr: route.Target, instance: route.TargetInstance}
+		held, err = m.openTarget(target)
+		if err != nil {
+			if errors.Is(err, ErrSessionClosed) {
+				return WorkSeat{}, m.refuse(ctx, notice, target, err)
+			}
+			return WorkSeat{}, err
+		}
+		seq = m.appendEntry(ctx, held, notice, target)
+	}
+	entry := entryAt(&held.session, seq)
+	if entry == nil {
+		return WorkSeat{}, ErrEntryUnknown
+	}
+	if entry.Claim != ClaimPending {
+		return WorkSeat{}, ErrClaimConflict
+	}
+	entry.Claim = ClaimClaimed
+	return WorkSeat{
+		Address:   target.addr,
+		Instance:  target.instance,
+		AcceptSeq: seq,
+		Notice:    entry.Notice,
+		Claim:     entry.Claim,
+	}, nil
+}
+
 // refuse answers one notification the target site refused: the refusal lands as
 // the feedback fact it is, carrying the notification it answers beside the
 // routing it was offered to and the reason the site gave, and the notification is
@@ -152,21 +206,21 @@ func noticeKeyOf(notice task.Notice) noticeKey {
 	return noticeKey{task: notice.TaskID, round: notice.Round, kind: notice.Kind, seq: notice.Seq}
 }
 
-// noticeSeat reports where one notification already sits: the acceptance sequence it took beside
-// whether it was accepted at all; a notification that reuses a recorded identity with different
-// content is refused by name.
-func (m *MemoryStore) noticeSeat(notice task.Notice) (AcceptSeq, bool, error) {
+// noticeSeat reports where one notification already sits: its first acceptance
+// record beside whether it was accepted at all; a notification that reuses a
+// recorded identity with different content is refused by name.
+func (m *MemoryStore) noticeSeat(notice task.Notice) (acceptedNotice, bool, error) {
 	if notice.TaskID == "" {
-		return 0, false, ErrNoticeIdentityMissing
+		return acceptedNotice{}, false, ErrNoticeIdentityMissing
 	}
 	prior, ok := m.accepted[noticeKeyOf(notice)]
 	if !ok {
-		return 0, false, nil
+		return acceptedNotice{}, false, nil
 	}
 	if prior.notice != notice {
-		return 0, false, ErrNoticeConflict
+		return acceptedNotice{}, false, ErrNoticeConflict
 	}
-	return prior.seq, true, nil
+	return prior, true, nil
 }
 
 // appendEntry appends one notification to the mailbox of the target site under

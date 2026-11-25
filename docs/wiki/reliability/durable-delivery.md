@@ -13,7 +13,7 @@
 
 | 动作 | 前置 | 结果与具名拒绝 |
 |---|---|---|
-| `AcceptNotice` | 目标地址完整、投递已登记 | 依 `noticeKey{task, round, kind, seq}` 幂等；同身份不同内容 → `ErrNoticeConflict`；**无投递登记 → `ErrDeliveryNotAllowed`**（fail-closed：没路由就不收） |
+| `AcceptNotice` / `AcceptNoticeClaimed` | 目标地址完整、投递已登记（新 acceptance） | 依 `noticeKey{task, round, kind, seq}` 幂等；同身份不同内容 → `ErrNoticeConflict`；**无投递登记 → `ErrDeliveryNotAllowed`**（fail-closed：没路由就不收）。后者在同一临界区接受并认领、返回实际站点与序列；重放沿用首次站点，仅认领仍 pending 的条目，已认领或已消费 → `ErrClaimConflict` |
 | `Claim` | 席位未认领 | 认领成功记下实例与调用帧；已被认领 → `ErrClaimConflict` |
 | `Consume` | 席位已被本实例认领 | **先把消费回执落盘，再把席位标记为已消费**；重复消费 → `ErrClaimSettled`；未认领 → `ErrNotClaimed` |
 | `Reclaim` / `Release` | 席位属于本实例 | 退回可认领 / 交还，供崩溃后重新驱动 |

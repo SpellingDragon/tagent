@@ -18,12 +18,18 @@ import (
 type chainFacts struct {
 	sessions map[event.SessionID][]event.Event
 	reads    []event.SessionID
+	contexts []context.Context
+	readErrs map[event.SessionID]error
 }
 
 // SessionFacts reports the standardised facts of one session.
-func (f *chainFacts) SessionFacts(addr event.Address) []event.Event {
+func (f *chainFacts) SessionFacts(ctx context.Context, addr event.Address) ([]event.Event, error) {
 	f.reads = append(f.reads, addr.SessionID)
-	return append([]event.Event(nil), f.sessions[addr.SessionID]...)
+	f.contexts = append(f.contexts, ctx)
+	if err := f.readErrs[addr.SessionID]; err != nil {
+		return nil, err
+	}
+	return append([]event.Event(nil), f.sessions[addr.SessionID]...), nil
 }
 
 // chainInput is one external input fact of the chain.
@@ -135,6 +141,31 @@ func TestChainExporterRefusals(t *testing.T) {
 	cancel()
 	if _, err := NewChainExporter(&chainFacts{}).Export(cancelled, ExportOptions{SessionIDs: []event.SessionID{"session-1"}}); !errors.Is(err, context.Canceled) {
 		t.Fatalf("export on a cancelled context = %v, want context.Canceled", err)
+	}
+}
+
+// TestChainExporterPassesContextAndReaderError pins context propagation and unchanged reader errors without partial samples.
+func TestChainExporterPassesContextAndReaderError(t *testing.T) {
+	type contextKey struct{}
+	ctx := context.WithValue(context.Background(), contextKey{}, "export-bound")
+	readErr := errors.New("the fact reader failed")
+	facts := &chainFacts{
+		sessions: map[event.SessionID][]event.Event{
+			"session-1": {chainInput("inv-1", "episode-1", "question"), chainOutput("inv-1", "episode-1", "answer")},
+		},
+		readErrs: map[event.SessionID]error{"session-2": readErr},
+	}
+	samples, err := NewChainExporter(facts).Export(ctx, ExportOptions{
+		SessionIDs: []event.SessionID{"session-1", "session-2"},
+	})
+	if err != readErr {
+		t.Fatalf("export error = %v, want the reader's unchanged error", err)
+	}
+	if samples != nil {
+		t.Fatalf("samples = %+v, want no partial export", samples)
+	}
+	if len(facts.contexts) != 2 || facts.contexts[0] != ctx || facts.contexts[1] != ctx {
+		t.Fatalf("reader contexts = %v, want the caller's context on both reads", facts.contexts)
 	}
 }
 

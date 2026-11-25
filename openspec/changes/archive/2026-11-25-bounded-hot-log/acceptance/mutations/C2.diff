@@ -1,0 +1,11 @@
+--- a/memory/ledger/archive_read.go
++++ b/memory/ledger/archive_read.go
+@@ -63,7 +63,7 @@
+ 	if err != nil {
+ 		return nil, false, err
+ 	}
+-	if !found {
++	if !found || found {
+ 		return nil, false, ErrOriginalMissing
+ 	}
+ 	segments, err := archiveSegmentsOf(manifest)

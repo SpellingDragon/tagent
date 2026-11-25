@@ -14,6 +14,13 @@
 // method, and a caller naming its own keys asks for it through the narrow
 // capability its consumer declares, so this surface stays the obligation every
 // backend satisfies while a point read costs the one key where the log states it.
+// A point read that crosses a hot log and an archive answers in one order — the hot
+// index, the archive manifest's key domain, the segment index, the segment bytes —
+// and names its failures apart: ErrOriginalMissing for a key neither statement
+// carries, ErrArchiveMissing for a segment or record the archive states and does not
+// hold, and ErrArchiveCorrupt for bytes that do not match their recorded digest or
+// checksum. A storage that cannot be read is never answered as a fact that does not
+// exist.
 package durable
 
 import "context"

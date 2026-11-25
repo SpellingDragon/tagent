@@ -618,9 +618,14 @@ func MemoryPlanOf(decl *config.Declaration, storageType, storageRoot string) (*M
     MemoryPlanOf merges every agent's memory declaration into the one plan the
     assembly opens, beside the storage section the document states at its top
     level. Every declaring agent must name the same tier and the same engine:
-    a shared store read under two different engines would answer one query two
-    ways. An engine beside no tier is refused by name: without a durable chain
-    query-time embedding has no candidates. A document that declares neither
+    a shared store read under two different engines would answer one query
+    two ways. An engine beside no tier is refused by name: without a durable
+    chain query-time embedding has no candidates. An archive the declaration
+    cannot complete is refused by name at its own field path: half of the pair,
+    an archive beside no tier, or a retention window beside no archive.
+    The top-level storage section states a tier and nothing of the archive face,
+    so a document stating both agrees on the type and root and keeps the archive
+    face the agent memory declaration's own. A document that declares neither
     reports a nil plan, which wires no storage face and no embedder.
 
 func NewSkillLoadSink(agent event.AgentID) knowledge.LoadSink
@@ -1870,15 +1875,20 @@ func (r *Run) Diagnostics(ctx context.Context, filter query.ListFilter, switches
     face is closed. A face the assembly carries no wiring for names that state
     in its reason instead of failing the whole read.
 
+func (r *Run) DurableFactReader() rl.FactReader
+    DurableFactReader returns the read-only export face over this run's durable
+    session chains. EachSessionFact enumerates the identities and reads their
+    bodies by identity, so archived facts use the same locator as hot facts and
+    a failed read is returned rather than hidden behind a partial chain.
+
 func (r *Run) EachSessionFact(ctx context.Context, addr event.Address, visit func(event.Event) error) error
     EachSessionFact streams the durable chain of one session in commit order:
     the cold-start read of a chain, which names every fact the session committed
-    — beside the window the live ledger still presents — decoded from the tier
-    the way CommittedEvent decodes one identity, ordered by the partition
-    sequence the landing path numbers commits with — the order the run committed
-    in, which a replay refolds at the boundaries the commits recorded, while the
-    segment index orders by event time and a later-judged product names a later
-    moment of than the material it folded. A run beside no storage tier holds
+    beside the window the live ledger still presents. The store seat and index
+    entries name hot and moved identities; each body used below is read through
+    GetEvent and decoded the way CommittedEvent decodes one identity. The order
+    is the global commit rank the landing path assigned, which a replay refolds
+    at the boundaries the commits recorded. A run beside no storage tier holds
     no durable chain, so the visit answers the resident window alone in commit
     order. A visit error ends the stream and is returned.
 

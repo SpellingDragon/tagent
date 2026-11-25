@@ -25,6 +25,8 @@ concurrency:
 # later, BOTH keys are optional and independent: ZAI_API_KEY (GLM Coding
 # Plan family: glm models / zhipu embedding / web-search-prime MCP) and
 # TENCENT_HY_API_KEY (hunyuan family, hy3 tests only).
+# setup-go owns the module/build cache. Every Go job hashes all three modules'
+# go.sum files so a dependency change in either example invalidates the key.
 jobs:
   test:
     runs-on: ubuntu-latest
@@ -50,6 +52,11 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: '1.24'
+          cache: true
+          cache-dependency-path: |
+            go.sum
+            examples/wechat-bot/go.sum
+            examples/cli-host/go.sum
 
       # tmux is required by exec-tool / async-task-layer tests (agent package
       # guards with skip when absent, but install to keep the signal on CI).
@@ -70,8 +77,19 @@ jobs:
 
       # All unit tests use mocks — no API keys needed. real-LLM tests under
       # tests/ self-skip without credentials and never block CI.
+      # Package-level parallelism is bounded: the integration suites carry
+      # timing windows calibrated on an idle machine, and an unbounded -p on a
+      # shared runner starves them. The response-call cap-fuse consumer-path case
+      # reached 365s under the consumer storm, so the short run skips that exact
+      # case and the next step reruns it without package-level competition.
+      # No test, assertion, or timeout changes.
       - name: Test (short)
-        run: go test ./... -short -count=1
+        run: go test ./... -short -count=1 -p 4 -skip '^TestResponseCallCapFuse$/^consumer_path_holds_the_batch_for_approval$'
+
+      - name: Test (response-call cap fuse consumer path)
+        env:
+          TMPDIR: /dev/shm
+        run: go test ./tests/integration/execution -run '^TestResponseCallCapFuse$/^consumer_path_holds_the_batch_for_approval$' -count=1
 
       # Separate modules: examples/wechat-bot and examples/cli-host are
       # independent modules with no go.work, so the root `./...` never reaches
@@ -138,49 +156,83 @@ jobs:
 
   race:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
           go-version: '1.24'
+          cache: true
+          cache-dependency-path: |
+            go.sum
+            examples/wechat-bot/go.sum
+            examples/cli-host/go.sum
       - name: Install tmux
         run: sudo apt-get update && sudo apt-get install -y tmux
-      # Known upstream trpc-agent-go@v1.10.0 internal races (invocation /
-      # steer.Queue / inmemory session service — LEDGER 红色耦合台账 U2/U3) are
-      # excluded per-test via the `raceEnabled` build-tag skip (see
-      # agent/race_enabled_test.go); agent core now JOINS the race gate
-      # (implementation-hardening 8.1/8.2). Upstream issue to be filed.
-      #
-      # resident-remaining-hardening 3.5: the gate runs through
-      # scripts/gates/race_check.sh, whose exit-code fidelity is the contract —
-      # go test's status is authoritative, waivers apply ONLY when every top
-      # offending frame matches a registered upstream signature AND there is
-      # no plain (non-race) failure. A green-looking race log from a failed
-      # command (compile error / bad package / timeout) can never be reported
-      # as success. The package set is mapped from every modified product
-      # package and every formal integration suite, not just host/history: the
-      # event work touched runtime/{agent,task,state}, memory, evolution, rl,
-      # tool, api/{event,plugin} and all six integration trees, and a shrunken
-      # set would quietly drop them from the race gate.
-      #
-      # The leading `.` stays in the set as the root-module entry and is SKIPPED
-      # by the gate: the module root itself carries no Go files (the composition
-      # root is its own directory), so `go test -race .` answers `[setup failed]`
-      # beside "no Go files" and a root-only failure would mask the whole job.
-      # The skip is narrower than "go list failed" — only that exact answer is
-      # skipped, a misspelt package still turns the gate red, and a set left with
-      # no Go package at all is refused — so the declared surface is unchanged and
-      # a directory that gains Go files joins it without a second edit.
+      # Package names live only in race_check.sh. Each shard writes the exact
+      # selected set before go test so the aggregate compares executed coverage,
+      # not merely the matrix declaration. The heavy consumer path stays skipped
+      # here and runs once in race-aggregate.
       - name: Race (every first-party package + all integration suites)
-        run: ./scripts/gates/race_check.sh . ./assembly/... ./cli/... ./api/durable/... ./api/event/... ./api/config/... ./api/document/... ./api/model/... ./api/view/... ./api/plugin/... ./runtime/agent/... ./runtime/task/... ./runtime/state/... ./memory/... ./features/... ./tool/... ./bench/... ./internal/... ./tests/integration/execution/... ./tests/integration/history/... ./tests/integration/host/... ./tests/integration/capabilities/... ./tests/integration/evolution/... ./tests/integration/learning/...
-      # 05/5.7: the wechat-bot module is an independent module (no go.work), so
-      # the root module's ./... never reaches it. It runs the same race flags as
-      # the root gate (race, -count=1, package-serial -p 1); its plain tests (the
-      # channel lock, notice delivery/re-delivery) are the concurrency surface,
-      # while the smoke-tagged anchors stay out of this job's build. go test's
-      # own exit status is the verdict, so a compile error is never green.
+        env:
+          GOFLAGS: >-
+            -skip=^TestResponseCallCapFuse$/^consumer_path_holds_the_batch_for_approval$
+          RACE_SHARD: ${{ matrix.shard }}
+          RACE_CHECK_PACKAGE_FILE: ${{ runner.temp }}/race-shard-${{ matrix.shard }}/packages.txt
+        run: |
+          set -euo pipefail
+          mkdir -p "$(dirname "$RACE_CHECK_PACKAGE_FILE")"
+          ./scripts/gates/race_check.sh --shard "$RACE_SHARD"
+      - name: Race (response-call cap fuse consumer path)
+        if: matrix.shard == 2
+        env:
+          TMPDIR: /dev/shm
+        run: go test -race -count=1 -p 1 ./tests/integration/execution -run '^TestResponseCallCapFuse$/^consumer_path_holds_the_batch_for_approval$'
       - name: Race (wechat-bot module)
+        if: matrix.shard == 3
         run: go -C examples/wechat-bot test -race -count=1 -p 1 ./...
+      - name: Upload race shard package manifest
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: race-shard-${{ matrix.shard }}
+          path: ${{ runner.temp }}/race-shard-${{ matrix.shard }}
+          if-no-files-found: error
+
+  race-aggregate:
+    needs: [race]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check race shard results
+        env:
+          RACE_RESULT: ${{ needs.race.result }}
+        run: |
+          set -euo pipefail
+          test -n "$RACE_RESULT"
+          test "$RACE_RESULT" = "success"
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+          cache: true
+          cache-dependency-path: |
+            go.sum
+            examples/wechat-bot/go.sum
+            examples/cli-host/go.sum
+      # Consumer and the non-smoke wechat race run need no tmux; installing it
+      # here only lengthens the aggregate critical path.
+      - name: Download race shard manifests
+        uses: actions/download-artifact@v4
+        with:
+          pattern: race-shard-*
+          path: ${{ runner.temp }}/race-bundle
+          merge-multiple: false
+      - name: Check race shard package union
+        run: ./scripts/gates/race_check.sh --shard-union-check "$RUNNER_TEMP/race-bundle"
 
   validators:
     # resident-remaining-hardening 3.5: the doc/restart prefix checkers are the
@@ -230,6 +282,11 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: '1.24'
+          cache: true
+          cache-dependency-path: |
+            go.sum
+            examples/wechat-bot/go.sum
+            examples/cli-host/go.sum
       # `go test -list '^TestSoak' ./tests/integration/host` names the real
       # test: TestSoakContinuity in tests/integration/host, with no build tag.
       # The old command pointed at a non-existent ./tests package and a
@@ -262,6 +319,11 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: '1.24'
+          cache: true
+          cache-dependency-path: |
+            go.sum
+            examples/wechat-bot/go.sum
+            examples/cli-host/go.sum
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
@@ -327,6 +389,11 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: '1.24'
+          cache: true
+          cache-dependency-path: |
+            go.sum
+            examples/wechat-bot/go.sum
+            examples/cli-host/go.sum
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
@@ -370,6 +437,11 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: '1.24'
+          cache: true
+          cache-dependency-path: |
+            go.sum
+            examples/wechat-bot/go.sum
+            examples/cli-host/go.sum
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
@@ -469,6 +541,11 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: '1.24'
+          cache: true
+          cache-dependency-path: |
+            go.sum
+            examples/wechat-bot/go.sum
+            examples/cli-host/go.sum
       # Same reason as the test job: exec/async cases skip when tmux is absent,
       # and a symptom anchor that lands on a skip proves nothing.
       - name: Install tmux
@@ -497,11 +574,11 @@ jobs:
   # 也一样被它看见。它是本文件能给出的最强保证——是不是 required check 由分支保护
   # 决定，配置审查不等于服务端已拦截。
   archive-preflight:
-    # The evidence this gate reads is produced by the event-integrity chain of
-    # this same run: waiting for its required aggregate both orders the check
-    # after the evidence exists and binds the commit identity for free (the
-    # mutations evidence records the SHA this workflow checked out).
-    needs: [event-integrity-required]
+    # The evidence this gate reads is produced by the three event-integrity
+    # producers. It runs beside their required aggregate: both judge the same
+    # committed evidence, while the aggregate remains an independent fail-closed
+    # consumer and no serial runner startup is added to the run's critical path.
+    needs: [event-integrity-short, event-integrity-long, event-integrity-mutations]
     if: always()
     runs-on: ubuntu-latest
     steps:

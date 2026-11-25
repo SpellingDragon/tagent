@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 )
 
 // 契约: docs/wiki/platform/org-hot-reload.md#fingerprint
@@ -105,6 +106,9 @@ type canonicalMemory struct {
 	Path           string           `json:"path"`
 	ReadNamespaces []string         `json:"read_namespaces"`
 	Engine         *canonicalEngine `json:"engine,omitempty"`
+	ArchiveRoot    string           `json:"archive_root,omitempty"`
+	HotLogMaxBytes int              `json:"hot_log_max_bytes,omitempty"`
+	ArchiveMaxAge  time.Duration    `json:"archive_max_age,omitempty"`
 }
 
 // canonicalEngine is one semantic engine in canonical field order.
@@ -242,12 +246,16 @@ func (s MemorySpec) canonical() *canonicalMemory {
 		Path:           s.Path,
 		ReadNamespaces: canonicalStrings(s.ReadNamespaces),
 		Engine:         s.Engine.canonical(),
+		ArchiveRoot:    s.ArchiveRoot,
+		HotLogMaxBytes: s.HotLogMaxBytes,
+		ArchiveMaxAge:  s.ArchiveMaxAge,
 	}
 }
 
 // isZero reports whether the memory declaration names no binding at all.
 func (s MemorySpec) isZero() bool {
-	return s.Type == "" && s.Path == "" && len(s.ReadNamespaces) == 0 && s.Engine.isZero()
+	return s.Type == "" && s.Path == "" && len(s.ReadNamespaces) == 0 && s.Engine.isZero() &&
+		s.ArchiveRoot == "" && s.HotLogMaxBytes == 0 && s.ArchiveMaxAge == 0
 }
 
 // canonical maps one semantic engine onto its canonical form, or names no

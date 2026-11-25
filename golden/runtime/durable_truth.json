@@ -122,7 +122,8 @@
       "kind": "kv-store",
       "owner": "memory/ledger",
       "files": [
-        "memory/ledger/journal.go"
+        "memory/ledger/journal.go",
+        "memory/ledger/hot_shrink.go"
       ],
       "prefixes": [],
       "reason": "The local-file KV tier keeps one durable unit: an append-only journal of checksummed frames, which journal.go opens and appends to, and which the tier's key-value view reads as its key order. A torn tail is cut at open and a mismatched frame refuses the open, so no snapshot or shard becomes a second truth.",
@@ -321,6 +322,34 @@
       ],
       "reason": "The quiet point of a framework cut is derived position data, never a fact: each cut commits one key (one key, one barrier, never rewritten, in no chain) at the position in the commit order its slices begin at, and the only reader is tailFactKeys, which bounds the task account's tail there instead of at the checkpoint's own landing. The fact ledger stays the truth of the facts; this key states only where a cut's state begins, so a cut that files nothing bounds no account and a root without one reads the whole log.",
       "review_by": "2027-05-05"
+    },
+    {
+      "id": "ledger.journal-segments",
+      "kind": "filesystem-store",
+      "owner": "memory/ledger",
+      "files": [
+        "memory/ledger/journal_segment.go"
+      ],
+      "prefixes": [
+        {
+          "file": "memory/ledger/journal_segment.go",
+          "name": "journalSegmentNamePrefix",
+          "value": "seg-"
+        }
+      ],
+      "reason": "A sealed journal segment is one interval of the log copied verbatim under kv/segments/seg-<id>.log; the directory and the name prefix are the only place a sealed interval lives before the archive contract moves it.",
+      "review_by": "2027-05-05"
+    },
+    {
+      "id": "ledger.archive-manifest",
+      "kind": "filesystem-store",
+      "owner": "memory/ledger",
+      "files": [
+        "memory/ledger/archive.go"
+      ],
+      "prefixes": [],
+      "reason": "The archive statement lives in the manifest.a/manifest.b slot pair: each write states the next generation in both under one barrier, the reader takes the greater generation it decodes, and the manifest is the only statement of which segments the archive carries.",
+      "review_by": "2027-05-05"
     }
   ],
   "non_truth_files": [
@@ -403,7 +432,19 @@
       "reason": "Pane output marker used to bind a captured frame to a generation, not persisted truth."
     }
   ],
-  "content_addressed_artifacts": [],
+  "content_addressed_artifacts": [
+    {
+      "id": "ledger.archive-segment-digest",
+      "surface": "ledger.archive-manifest",
+      "files": [
+        "memory/ledger/archive.go"
+      ],
+      "ticket_fact": "seg-",
+      "content_address": "sha256",
+      "reason": "The manifest states each archived segment's byte count and sha256; recoverArchive recomputes both over the segment file and refuses a mismatch, so the digest verifies stored material rather than minting a key.",
+      "review_by": "2027-05-05"
+    }
+  ],
   "content_address_exempt": [
     {
       "file": "memory/replay/age_segments.go",

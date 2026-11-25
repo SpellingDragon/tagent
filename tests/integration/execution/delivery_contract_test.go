@@ -117,6 +117,7 @@ func TestInstancesSymptomMultiTargetLedger(t *testing.T) {
 		targets = append(targets, event.Address{AgentID: deliveryPeerAgent, SessionID: event.SessionID(session)})
 	}
 	for _, target := range targets {
+		deliveryAwaitTarget(t, ledger, target, 1, deliveryWindow)
 		records := deliveryByTarget(t, ledger, target)
 		if len(records) != 1 {
 			t.Fatalf("deliveries the account lists for %q = %d, want the one body its call carried:\n%s",
@@ -222,6 +223,7 @@ func TestInstancesSymptomTwoEntriesOneAccount(t *testing.T) {
 	deliveryAwaitReceipts(t, provider, 1)
 
 	ledger := host.Run().DeliveryLedger()
+	deliveryAwaitTarget(t, ledger, peer, 3, deliveryWindow)
 	byTarget := deliveryByTarget(t, ledger, peer)
 	sent, settles := deliverySplitFamilies(t, byTarget)
 	if len(sent) != 1 || len(settles) != 2 {
@@ -676,6 +678,25 @@ func deliveryByTarget(t *testing.T, ledger *assembly.DeliveryLedger, target even
 		t.Fatalf("the deliveries of target %+v could not be read: %v", target, err)
 	}
 	return records
+}
+
+// deliveryAwaitTarget waits until the account lists the expected number of deliveries for
+// the target, so a check reads the landings the ledger holds instead of the window before
+// they land.
+// - The wait is bounded: a target the account never fills names the gap with the whole account.
+func deliveryAwaitTarget(t *testing.T, ledger *assembly.DeliveryLedger, target event.Address, want int, window time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(window)
+	for {
+		if got := len(deliveryByTarget(t, ledger, target)); got >= want {
+			return
+		}
+		if !time.Now().Before(deadline) {
+			t.Fatalf("the account lists %d delivery(s) for %q within %s, want at least %d:\n%s",
+				len(deliveryByTarget(t, ledger, target)), target.SessionID, window, want, deliveryDescribe(deliveryRecords(t, ledger)))
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 }
 
 // deliveryBySource reads one source event's deliveries for a check.

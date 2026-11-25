@@ -224,14 +224,6 @@ BASELINE = (
     # Consumed/Attempts/Rejected——「该任务已结清什么」必须随 checkpoint 一起stated，
     # 否则 boot 要重扫它已关闭的 durable 前缀；三者各成一格是账目本体）。
     ("struct-fields", "runtime/task/checkpoint.go:StatedTask", 16),
-    # runtime-recovery-ideal W3（08 fact-retirement 引入叶）：StorageConfig 是存储层
-    # 定位与两个注入面（Engine 观察/延迟/失败注入、RetireFacts 退位选择）的配置本体。
-    # 七个格＝一份配置的语义本体（tier/Root 两个定位、rustviking 两格、两个注入面、
-    # 原文召回窗口），收窄即让拆块调用方二次归并同一份定位；按 M4 先例具名登记，非收敛目标。
-    # 按名抬升 6->7：RetentionWindows 是原文召回窗口的生产注册入口（OpenTier 传进
-    # newKVOriginalStore），取代已删的测试专用 WithRetentionWindow；窗口是配置语义本体，
-    # 与 Type/Root 同生命周期，另立一份配置即造第二份存储定位。
-    ("struct-fields", "memory/ledger/config.go:StorageConfig", 7),
     # 04.2 执行资源解释（引入叶）：租约/续期/停滞/义务的只读投影，字段即
     # Manager.Explain 的回复本体，拆块即解释面需要二次装配。
     ("struct-fields", "tool/exec/exec.go:Explanation", 10),

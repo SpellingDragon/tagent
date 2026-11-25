@@ -635,7 +635,7 @@ class RepointedHandoverAnchorTest(unittest.TestCase):
         self.assertIn("if refusal := r.loop.Backflow(", self.mutation.replacement.old)
         self.assertNotIn("retainNoticeOwed", self.mutation.replacement.old)
         self.assertTrue(self.mutation.replacement.old.rstrip().endswith(
-            "r.store.Consume(ctx, frame.Address, frame.Identity.InstanceID, seq)"))
+            "r.store.Consume(ctx, seat.Address, seat.Instance, seat.AcceptSeq)"))
 
     def test_the_mutated_form_records_the_consumption_before_the_handover(self):
         new = self.mutation.replacement.new

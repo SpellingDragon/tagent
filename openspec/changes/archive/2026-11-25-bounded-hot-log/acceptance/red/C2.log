@@ -1,0 +1,7 @@
+command: go test -overlay=/tmp/tagent-bhl-f3/C2/overlay.json ./memory/ledger -count=1 -run '^TestIdentityReadCrossesHotAndArchive$' -v
+exit: 1
+=== RUN   TestIdentityReadCrossesHotAndArchive
+    archive_read_test.go:71: the archived read of "seg-01-a" = [] want the bytes the commit wrote
+--- FAIL: TestIdentityReadCrossesHotAndArchive (0.33s)
+FAIL
+FAIL	github.com/SpellingDragon/tagent/memory/ledger	0.522s

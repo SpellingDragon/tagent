@@ -43,19 +43,15 @@ const (
 const kvDirName = "kv"
 
 // StorageConfig locates one storage tier: the tier name, the root directory the
-// persistent tiers persist under, and the rustviking executable and config the
-// file tier drives.
+// persistent tiers persist under, the archive face the segments move under, and
+// the rustviking executable and config the file tier drives.
 type StorageConfig struct {
 	// Type names the tier to open.
 	Type StorageType
 	// Root is the directory the localfile and file tiers persist under.
 	Root string
-	// RustVikingBinary names or locates the rustviking executable; empty means
-	// "rustviking" looked up on PATH.
-	RustVikingBinary string
-	// RustVikingConfig is the config file passed to the rustviking CLI; empty
-	// means the config.toml under Root.
-	RustVikingConfig string
+	archiveOptions
+	rustVikingOptions
 	// Engine, when set, is the engine the tier opens over instead of the one Type
 	// names. It is the seam a caller wraps to observe, delay or fail commits: the
 	// wrapper implements the same AtomicStore, so the injection works over any
@@ -74,6 +70,35 @@ type StorageConfig struct {
 	// registered window keeps its references readable indefinitely, and a window
 	// of zero or less reports every read of that policy as expired.
 	RetentionWindows map[string]time.Duration
+}
+
+// archiveOptions is the archive face of one storage tier: the directory the
+// archived segments live under, the byte budget the hot log is held to and the
+// window a segment's commits must all precede before it may move.
+type archiveOptions struct {
+	// ArchiveRoot is the directory the archived segments live under, or is empty
+	// for no archive. It is a second directory beside Root and never the same
+	// name: the hot log stays bounded by Root's own volume, so merging the two
+	// would bound a directory instead of the deployment.
+	ArchiveRoot string
+	// HotLogMaxBytes is the byte budget the hot log is held to, or is zero for
+	// no budget. Cutting and archiving both need it above zero beside a set
+	// ArchiveRoot.
+	HotLogMaxBytes int
+	// ArchiveMaxAge is the window a segment's commits must all precede before
+	// it may move to the archive, or is zero for no window.
+	ArchiveMaxAge time.Duration
+}
+
+// rustVikingOptions names the rustviking CLI one file tier drives: the
+// executable to run and the config file to pass it.
+type rustVikingOptions struct {
+	// RustVikingBinary names or locates the rustviking executable; empty means
+	// "rustviking" looked up on PATH.
+	RustVikingBinary string
+	// RustVikingConfig is the config file passed to the rustviking CLI; empty
+	// means the config.toml under Root.
+	RustVikingConfig string
 }
 
 // StoreCapabilities names what one opened tier guarantees, so a tier that holds
@@ -119,6 +144,9 @@ var ErrUnknownTier = errors.New("memory: unknown storage tier")
 // persists under.
 var ErrRootRequired = errors.New("memory: persistent tiers require a root directory")
 
+// ErrArchiveConfig reports a half or invalid archive declaration at the tier boundary.
+var ErrArchiveConfig = errors.New("memory: archive_root and hot_log_max_bytes must be declared together with a valid archive_max_age")
+
 // ErrJournalLegacyLayout reports a data directory that holds the retired
 // sharded-snapshot layout instead of a journal, so the caller is told to open a
 // new directory rather than being handed a half-read store.
@@ -140,6 +168,9 @@ func rejectLegacyShardLayout(dir string) error {
 	}
 	for _, entry := range entries {
 		if entry.IsDir() {
+			if entry.Name() == journalSegmentDirName {
+				continue
+			}
 			return fmt.Errorf("%w: %s", ErrJournalLegacyLayout, filepath.Join(dir, entry.Name()))
 		}
 		if name := entry.Name(); strings.HasPrefix(name, "shard_") && strings.HasSuffix(name, ".json") {
@@ -240,7 +271,7 @@ func OpenAtomicStore(ctx context.Context, cfg StorageConfig) (AtomicStore, error
 			}
 			lock = held
 		}
-		store, err := openJournalView(filepath.Join(cfg.Root, kvDirName), cfg.WriteRights)
+		store, err := openJournalViewWithArchive(filepath.Join(cfg.Root, kvDirName), cfg.WriteRights, cfg.HotLogMaxBytes, cfg.ArchiveRoot, cfg.ArchiveMaxAge)
 		if err != nil {
 			lock.release()
 			return nil, err
@@ -277,9 +308,20 @@ func OpenAtomicStore(ctx context.Context, cfg StorageConfig) (AtomicStore, error
 //   - This open hands the declaration through unchanged, so a caller that commits to the root declares the rights and every other caller holds none: a component view opens beside the live writer, a commit carrying keys through it is refused as ErrCommitWithoutWriteRights, and Close gives the root up to the next writer
 //   - The kernel holds the lock, so it drops when the holding process exits; no recovery pass clears a stale lock, and durability never depended on the lock, because the barrier is the log's own sync
 //   - The config's RetentionWindows register the original-recall window of each retention policy on the tier's original store, so a read of a reference outside its registered window is named expired; a policy the config leaves unregistered keeps its references readable indefinitely
+//   - The archive face is declared whole or not at all: archive_root and hot_log_max_bytes are set together, archive_max_age is never negative and never declares a window beside no root, and a half or invalid declaration is refused as ErrArchiveConfig before any store opens
 //
 // 契约: docs/wiki/memory/memory-architecture.md#store-instance-sharing
 func OpenTier(ctx context.Context, cfg StorageConfig) (*Tier, error) {
+	switch {
+	case cfg.ArchiveRoot == "" && cfg.HotLogMaxBytes != 0:
+		return nil, fmt.Errorf("%w: hot_log_max_bytes requires archive_root", ErrArchiveConfig)
+	case cfg.ArchiveRoot != "" && cfg.HotLogMaxBytes <= 0:
+		return nil, fmt.Errorf("%w: archive_root requires hot_log_max_bytes above zero", ErrArchiveConfig)
+	case cfg.ArchiveRoot == "" && cfg.ArchiveMaxAge != 0:
+		return nil, fmt.Errorf("%w: archive_max_age requires archive_root", ErrArchiveConfig)
+	case cfg.ArchiveMaxAge < 0:
+		return nil, fmt.Errorf("%w: archive_max_age is never negative", ErrArchiveConfig)
+	}
 	store := cfg.Engine
 	if store == nil {
 		opened, err := OpenAtomicStore(ctx, cfg)

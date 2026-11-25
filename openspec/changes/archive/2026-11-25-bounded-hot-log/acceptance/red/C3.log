@@ -1,0 +1,7 @@
+command: go test -overlay=/tmp/tagent-bhl-f3/C3/overlay.json ./memory/ledger -count=1 -run '^TestHottestSegmentNeverArchived$' -v
+exit: 1
+=== RUN   TestHottestSegmentNeverArchived
+    archive_test.go:637: the candidates = [{id:1 path:/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/TestHottestSegmentNeverArchived2783219520/001/segments/seg-000001.log begin:0 bytes:368 firstSeq:1 lastSeq:3 headerBytes:217 version:2 commitTimeMinNS:1795530567995146000 commitTimeMaxNS:1795530568004919000} {id:2 path:/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/TestHottestSegmentNeverArchived2783219520/001/segments/seg-000002.log begin:368 bytes:368 firstSeq:4 lastSeq:6 headerBytes:217 version:2 commitTimeMinNS:1795530568028423000 commitTimeMaxNS:1795530568037021000} {id:3 path:/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/TestHottestSegmentNeverArchived2783219520/001/segments/seg-000003.log begin:736 bytes:368 firstSeq:7 lastSeq:9 headerBytes:217 version:2 commitTimeMinNS:1795530568060936000 commitTimeMaxNS:1795530568070293000}], want only the two intervals older than seg-000003
+--- FAIL: TestHottestSegmentNeverArchived (0.16s)
+FAIL
+FAIL	github.com/SpellingDragon/tagent/memory/ledger	0.356s

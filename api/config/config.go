@@ -165,7 +165,8 @@ type AgentSpec struct {
 
 // MemorySpec is the memory declaration of one agent: the storage tier its facts
 // persist through, the namespaces it is authorized to read across partitions,
-// and the semantic engine its recall vocabulary generates its embeddings with.
+// the semantic engine its recall vocabulary generates its embeddings with, and
+// the archive face the tier's segments move under.
 //
 // The tier is a type and a root, both required together; an engine beside no
 // tier names no durable chain for query-time candidates to read.
@@ -179,7 +180,30 @@ type MemorySpec struct {
 	ReadNamespaces []string `yaml:"read_namespaces"`
 	// Engine is the semantic engine the recall retrieval runs under; its zero
 	// value names no engine, which is the keyword-only retrieval.
-	Engine EngineSpec `yaml:"engine"`
+	Engine        EngineSpec `yaml:"engine"`
+	archiveFields `yaml:",inline"`
+}
+
+// archiveFields is the archive face of one memory declaration: the directory the
+// archived segments live under, the byte budget the hot log is held to and the
+// window a segment must age past before it may move. It is inlined into the
+// memory section, so the three stay keys of that section rather than of a
+// subsection of their own.
+type archiveFields struct {
+	// ArchiveRoot is the directory the archived segments live under, or is
+	// empty for no archive. It names a second directory beside Path, never the
+	// same one: bounding the hot volume bounds the deployment only while this
+	// one sits on another volume, which the deployment states and the runtime
+	// never probes.
+	ArchiveRoot string `yaml:"archive_root"`
+	// HotLogMaxBytes is the byte budget the hot log is held to, or is zero for
+	// no budget. A budget below the always-hot floor is read as that floor,
+	// which never moves a cut point.
+	HotLogMaxBytes int `yaml:"hot_log_max_bytes"`
+	// ArchiveMaxAge is the window a segment's commits must all precede before
+	// it may move to the archive, or is zero for no window. It adds a
+	// retention condition beside the byte budget and never replaces it.
+	ArchiveMaxAge time.Duration `yaml:"archive_max_age"`
 }
 
 // EngineSpec is the semantic engine behind one memory declaration: the

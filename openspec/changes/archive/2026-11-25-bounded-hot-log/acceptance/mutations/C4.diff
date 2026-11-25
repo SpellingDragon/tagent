@@ -1,0 +1,22 @@
+--- a/memory/ledger/journal.go
++++ b/memory/ledger/journal.go
+@@ -2824,7 +2824,18 @@
+ 	if k == nil || k.log == nil {
+ 		return 0
+ 	}
+-	return k.log.integrityBytes
++	total := k.log.integrityBytes
++	if k.archive != nil {
++		manifest, found, err := readArchiveManifest(k.archive.root)
++		if err == nil && found {
++			for _, segment := range manifest.Segments {
++				if stat, err := os.Stat(filepath.Join(k.archive.root, journalSegmentDirName, segment.SegmentID+journalSegmentNameSuffix)); err == nil {
++					total += stat.Size()
++				}
++			}
++		}
++	}
++	return total
+ }
+ 
+ // SlotTableBytesScanned reports the slot table bytes this view's enumerations read

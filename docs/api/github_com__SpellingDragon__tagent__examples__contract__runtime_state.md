@@ -25,6 +25,6 @@ func ExamplePublicationRecorder()
 
 func ExampleStore()
     ExampleStore establishes one site, publishes two generations of which the
-    repeated content yields no new one, closes the site and accepts the same
-    notification twice as one fact.
+    repeated content yields no new one, accepts the same notification twice as
+    one fact, claims it once and closes the site.
 

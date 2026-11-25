@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -11,12 +13,12 @@ import (
 	"context"
 	"github.com/SpellingDragon/tagent/api/config"
 	"github.com/SpellingDragon/tagent/api/model"
+	"github.com/SpellingDragon/tagent/memory/ledger"
 	"testing"
 
 	"github.com/SpellingDragon/tagent/api/event"
 	"github.com/SpellingDragon/tagent/api/plugin"
 	"github.com/SpellingDragon/tagent/memory"
-	"github.com/SpellingDragon/tagent/memory/ledger"
 	"github.com/SpellingDragon/tagent/memory/replay"
 	"github.com/SpellingDragon/tagent/runtime/state"
 	"github.com/SpellingDragon/tagent/runtime/task"
@@ -641,6 +643,240 @@ func TestFullReplayUsesCommitOrder(t *testing.T) {
 	entries := seeds[addr].projection.Entries()
 	if len(entries) != 2 || entries[0].Key != "later-commit" || entries[1].Key != "earlier-commit" {
 		t.Fatalf("the full replay ordered %v by event time instead of commit sequence", entries)
+	}
+}
+
+// TestEachSessionFactUsesIndexCommitOrderForLegacyArchivedEvents pins the durable session read against old index values that carry no commit rank.
+//   - interleaved partitions commit in an order partition/window/sequence cannot express
+//   - the archived bodies remain readable through the identity locator
+//   - reversing EachIndexNewestFirst gives the exact stream order
+//
+// 契约: docs/wiki/agent/event-flow.md#projection-lifecycle
+func TestEachSessionFactUsesIndexCommitOrderForLegacyArchivedEvents(t *testing.T) {
+	ctx := context.Background()
+	root, archiveRoot := t.TempDir(), t.TempDir()
+	cfg := ledger.StorageConfig{Type: ledger.StorageJournal, Root: root, WriteRights: true}
+	cfg.ArchiveRoot = archiveRoot
+	cfg.HotLogMaxBytes = 1
+	writer, err := ledger.OpenTier(ctx, cfg)
+	if err != nil {
+		t.Fatalf("open the archive-backed writer: %v", err)
+	}
+	t.Cleanup(func() { writer.Close() })
+	addr := event.Address{AgentID: "agent-a", SessionID: "session-legacy-archive-order"}
+	at := time.Date(2026, 11, 6, 12, 0, 0, 0, time.UTC)
+	type position struct {
+		key       event.EventID
+		partition int
+		seq       int64
+		content   string
+	}
+	positions := []position{
+		{key: "legacy-high-first", partition: 20, seq: 1, content: "first"},
+		{key: "legacy-low-first", partition: 10, seq: 1, content: "second"},
+		{key: "legacy-high-second", partition: 20, seq: 2, content: "third"},
+		{key: "legacy-low-second", partition: 10, seq: 2, content: "fourth"},
+	}
+	contents := make(map[event.EventID]string, len(positions))
+	for _, item := range positions {
+		evt := event.Event{
+			Key:       item.key,
+			Type:      event.TypeExternalInput,
+			Timestamp: at,
+			Message:   model.Message{Role: model.RoleUser, Content: item.content},
+			Owner:     addr,
+		}
+		body, err := memory.BodyFromEvent(evt, "test", "test")
+		if err != nil {
+			t.Fatalf("encode %s: %v", item.key, err)
+		}
+		encoded, err := body.Encode()
+		if err != nil {
+			t.Fatalf("marshal %s: %v", item.key, err)
+		}
+		if err := writer.Segments.StoreEvent(ctx, ledger.SegmentRecord{
+			PartitionID: item.partition,
+			WindowTS:    at.UnixMilli(),
+			Seq:         item.seq,
+			EventKey:    item.key,
+			EventTime:   at.UnixMilli(),
+			Body:        encoded,
+		}.WithChain(evt.Type, addr.SessionID)); err != nil {
+			t.Fatalf("store %s: %v", item.key, err)
+		}
+		contents[item.key] = item.content
+	}
+	for _, cut := range []position{{partition: 20, seq: 2}, {partition: 10, seq: 2}} {
+		if err := writer.Store.Commit(ctx, ledger.Batch{Puts: []ledger.Pair{{
+			Key:   fmt.Sprintf("checkpoint:%d:%d", cut.partition, cut.seq),
+			Value: []byte("cut"),
+		}}}); err != nil {
+			t.Fatalf("commit the archive cut: %v", err)
+		}
+	}
+	archived, err := os.ReadDir(filepath.Join(archiveRoot, "segments"))
+	if err != nil || len(archived) == 0 {
+		t.Fatalf("read the archived segments: count=%d err=%v", len(archived), err)
+	}
+	for _, item := range positions {
+		if err := writer.Store.Commit(ctx, ledger.Batch{Puts: []ledger.Pair{{
+			Key:   fmt.Sprintf("%d:idx:%s", item.partition, item.key),
+			Value: []byte(fmt.Sprintf("%d:%d", at.UnixMilli(), item.seq)),
+		}}}); err != nil {
+			t.Fatalf("write the legacy index for %s: %v", item.key, err)
+		}
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatalf("close the archive writer: %v", err)
+	}
+	cfg.WriteRights = false
+	reader, err := ledger.OpenTier(ctx, cfg)
+	if err != nil {
+		t.Fatalf("reopen the archive reader: %v", err)
+	}
+	t.Cleanup(func() { reader.Close() })
+
+	var newest []event.EventID
+	if err := reader.Segments.EachIndexNewestFirst(ctx, func(key event.EventID, _ int, _ int64, _ string, _ event.SessionID) error {
+		newest = append(newest, key)
+		return nil
+	}); err != nil {
+		t.Fatalf("walk the true commit order: %v", err)
+	}
+	want := make([]event.EventID, len(newest))
+	for i := range newest {
+		want[i] = newest[len(newest)-1-i]
+	}
+	if len(want) != len(positions) {
+		t.Fatalf("the index names %d events, want %d", len(want), len(positions))
+	}
+	for i, item := range positions {
+		if want[i] != item.key {
+			t.Fatalf("the fixture commit order at %d = %s, want %s", i, want[i], item.key)
+		}
+	}
+
+	run := &Run{tier: reader}
+	var got []event.EventID
+	if err := run.EachSessionFact(ctx, addr, func(evt event.Event) error {
+		got = append(got, evt.Key)
+		if evt.Message.Content != contents[evt.Key] {
+			return fmt.Errorf("event %s carries body %q, want %q", evt.Key, evt.Message.Content, contents[evt.Key])
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("read the legacy archived chain: %v", err)
+	}
+	if len(got) != len(want) {
+		t.Fatalf("the session read returned %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("the session read returned %v, want index commit order %v", got, want)
+		}
+	}
+}
+
+// TestEachSessionFactReadsAPartitionTheSeatUnderstates pins the replay against a seat that lost a partition.
+//   - the seat states partition 10 alone beside committed entries the index files under partition 20, so the seat-wide identity read answers absence
+//   - the full walk reads each body at the partition its index entry named, and answers the true commit order rather than a missing body
+//   - every body it answers is the one its own commit landed
+//
+// 契约: docs/wiki/agent/event-flow.md#projection-lifecycle
+func TestEachSessionFactReadsAPartitionTheSeatUnderstates(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	writer, err := ledger.OpenTier(ctx, ledger.StorageConfig{Type: ledger.StorageJournal, Root: root, WriteRights: true})
+	if err != nil {
+		t.Fatalf("open the journal writer: %v", err)
+	}
+	t.Cleanup(func() { writer.Close() })
+	addr := event.Address{AgentID: "agent-a", SessionID: "session-seat-understates"}
+	at := time.Date(2026, 11, 6, 12, 0, 0, 0, time.UTC)
+	type position struct {
+		key       event.EventID
+		partition int
+		seq       int64
+		content   string
+	}
+	positions := []position{
+		{key: "seat-high-first", partition: 20, seq: 1, content: "first"},
+		{key: "seat-low-first", partition: 10, seq: 1, content: "second"},
+		{key: "seat-high-second", partition: 20, seq: 2, content: "third"},
+		{key: "seat-low-second", partition: 10, seq: 2, content: "fourth"},
+	}
+	contents := make(map[event.EventID]string, len(positions))
+	for _, item := range positions {
+		evt := event.Event{
+			Key:       item.key,
+			Type:      event.TypeExternalInput,
+			Timestamp: at,
+			Message:   model.Message{Role: model.RoleUser, Content: item.content},
+			Owner:     addr,
+		}
+		body, err := memory.BodyFromEvent(evt, "test", "test")
+		if err != nil {
+			t.Fatalf("encode %s: %v", item.key, err)
+		}
+		encoded, err := body.Encode()
+		if err != nil {
+			t.Fatalf("marshal %s: %v", item.key, err)
+		}
+		if err := writer.Segments.StoreEvent(ctx, ledger.SegmentRecord{
+			PartitionID: item.partition,
+			WindowTS:    at.UnixMilli(),
+			Seq:         item.seq,
+			EventKey:    item.key,
+			EventTime:   at.UnixMilli(),
+			Body:        encoded,
+		}.WithChain(evt.Type, addr.SessionID)); err != nil {
+			t.Fatalf("store %s: %v", item.key, err)
+		}
+		contents[item.key] = item.content
+	}
+	if err := writer.Store.Commit(ctx, ledger.Batch{Puts: []ledger.Pair{{
+		Key:   "store:seat",
+		Value: []byte(fmt.Sprintf(`{"count":%d,"commitSeq":%d,"partitions":[10]}`, len(positions), len(positions))),
+	}}}); err != nil {
+		t.Fatalf("state the seat without partition 20: %v", err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatalf("close the journal writer: %v", err)
+	}
+	reader, err := ledger.OpenTier(ctx, ledger.StorageConfig{Type: ledger.StorageJournal, Root: root})
+	if err != nil {
+		t.Fatalf("reopen the journal reader: %v", err)
+	}
+	t.Cleanup(func() { reader.Close() })
+	if _, held, err := reader.Segments.GetEventInPartition(ctx, "seat-high-first", 20); err != nil || !held {
+		t.Fatalf("the entry of partition 20 = held=%t err=%v, want the index entry and body its commit landed", held, err)
+	}
+	if _, held, err := reader.Segments.GetEvent(ctx, "seat-high-first"); err != nil || held {
+		t.Fatalf("the seat-wide read of partition 20 = held=%t err=%v, want absence beside the partition the seat dropped", held, err)
+	}
+
+	run := &Run{tier: reader}
+	var got []event.EventID
+	if err := run.EachSessionFact(ctx, addr, func(evt event.Event) error {
+		got = append(got, evt.Key)
+		if evt.Message.Content != contents[evt.Key] {
+			return fmt.Errorf("event %s carries body %q, want %q", evt.Key, evt.Message.Content, contents[evt.Key])
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("read the chain of the understated seat: %v", err)
+	}
+	want := make([]event.EventID, len(positions))
+	for i, item := range positions {
+		want[i] = item.key
+	}
+	if len(got) != len(want) {
+		t.Fatalf("the session read returned %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("the session read returned %v, want the commit order %v", got, want)
+		}
 	}
 }
 
@@ -1321,4 +1557,206 @@ func namesOfInstances(instances []plugin.Instance) []string {
 		names = append(names, instance.Name())
 	}
 	return names
+}
+
+// TestMemoryDeclarationRefusesHalfAnArchiveConfig pins the four incomplete archive declarations the load refuses by name.
+// - a byte budget beside no archive_root, and an archive_root beside no byte budget, are each refused
+// - an archive_root beside no storage tier of its own is refused
+// - a retention window beside no archive_root is refused
+// - every refusal is the memory declaration one and names agents.user.memory
+// - a complete archive declaration beside a declared tier is accepted, and the tier carries all three fields
+// 契约: docs/wiki/platform/platform-subsystems.md#config-surface
+func TestMemoryDeclarationRefusesHalfAnArchiveConfig(t *testing.T) {
+	tier := func(mutate func(*config.MemorySpec)) *config.Declaration {
+		spec := config.MemorySpec{Type: "localfile", Path: "/srv/hot"}
+		mutate(&spec)
+		return &config.Declaration{Agents: []config.AgentSpec{{ID: "user", Memory: spec}}}
+	}
+	archiveOnly := config.MemorySpec{}
+	archiveOnly.ArchiveRoot = "/srv/archive"
+	archiveOnly.HotLogMaxBytes = 1 << 20
+	cases := []struct {
+		name    string
+		decl    *config.Declaration
+		refusal string
+	}{
+		{
+			name:    "byte budget beside no archive root",
+			decl:    tier(func(s *config.MemorySpec) { s.HotLogMaxBytes = 1 << 20 }),
+			refusal: "hot_log_max_bytes requires archive_root",
+		},
+		{
+			name:    "archive root beside no byte budget",
+			decl:    tier(func(s *config.MemorySpec) { s.ArchiveRoot = "/srv/archive" }),
+			refusal: "archive_root requires hot_log_max_bytes above zero",
+		},
+		{
+			name:    "archive root beside no storage tier",
+			decl:    &config.Declaration{Agents: []config.AgentSpec{{ID: "user", Memory: archiveOnly}}},
+			refusal: "archive_root requires the storage tier's own type and path",
+		},
+		{
+			name:    "retention window beside no archive root",
+			decl:    tier(func(s *config.MemorySpec) { s.ArchiveMaxAge = 24 * time.Hour }),
+			refusal: "archive_max_age requires archive_root",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			plan, err := MemoryPlanOf(tc.decl, "", "")
+			if !errors.Is(err, ErrMemoryDeclaration) {
+				t.Fatalf("MemoryPlanOf over %s = %v, want the memory declaration refusal", tc.name, err)
+			}
+			if plan != nil {
+				t.Fatalf("MemoryPlanOf over %s returned a plan beside the refusal: %+v", tc.name, plan)
+			}
+			if !strings.Contains(err.Error(), "agents.user.memory") {
+				t.Fatalf("refusal %q does not name the field path agents.user.memory", err)
+			}
+			if !strings.Contains(err.Error(), tc.refusal) {
+				t.Fatalf("refusal %q does not name %q", err, tc.refusal)
+			}
+		})
+	}
+
+	complete := tier(func(s *config.MemorySpec) {
+		s.ArchiveRoot = "/srv/archive"
+		s.HotLogMaxBytes = 1 << 20
+		s.ArchiveMaxAge = 24 * time.Hour
+	})
+	plan, err := MemoryPlanOf(complete, "", "")
+	if err != nil {
+		t.Fatalf("MemoryPlanOf over a complete archive declaration = %v, want the tier built", err)
+	}
+	built := plan.Storage()
+	if built == nil {
+		t.Fatalf("the plan carries no storage tier over a declared archive face")
+	}
+	if built.Type != "localfile" || built.Root != "/srv/hot" {
+		t.Fatalf("tier = %+v, want the declared type and root", *built)
+	}
+	if built.ArchiveRoot != "/srv/archive" || built.HotLogMaxBytes != 1<<20 || built.ArchiveMaxAge != 24*time.Hour {
+		t.Fatalf("tier archive face = %+v, want the three declared fields carried through the bridge", *built)
+	}
+}
+
+// TestArchiveConfigOnlyUnderAgentMemory pins where the three archive fields may be declared.
+// - each of the three keys is refused as an unknown field under the top-level storage section
+// - a key outside the three is refused under the memory section too, so inlining keeps that section a whitelist
+// - the agent memory section reads all three, and one plan carries them beside a top-level tier naming the same type and root
+// 契约: docs/wiki/platform/platform-subsystems.md#strict-decode
+func TestArchiveConfigOnlyUnderAgentMemory(t *testing.T) {
+	root := t.TempDir()
+	for _, tc := range []struct {
+		name string
+		line string
+	}{
+		{name: "archive root", line: "  archive_root: /srv/archive\n"},
+		{name: "hot log budget", line: "  hot_log_max_bytes: 1048576\n"},
+		{name: "retention window", line: "  archive_max_age: 24h\n"},
+	} {
+		t.Run("top level "+tc.name, func(t *testing.T) {
+			path := filepath.Join(root, strings.ReplaceAll(tc.name, " ", "-")+".yaml")
+			document := "entry: user\nagents:\n  user: {}\nstorage:\n  type: localfile\n  root: /srv/hot\n" + tc.line
+			if err := os.WriteFile(path, []byte(document), 0o644); err != nil {
+				t.Fatalf("write the host document: %v", err)
+			}
+			_, err := loadHostDocument(path)
+			if !errors.Is(err, config.ErrUnknownConfigKey) {
+				t.Fatalf("loadHostDocument over %s at the top level = %v, want the unknown key refusal", tc.name, err)
+			}
+			if !strings.Contains(err.Error(), "storage.") {
+				t.Fatalf("refusal %q does not name the storage section the key landed in", err)
+			}
+		})
+	}
+
+	typo := filepath.Join(root, "agent-memory-typo.yaml")
+	const misspelled = `entry: user
+agents:
+  user:
+    memory:
+      type: localfile
+      path: /srv/hot
+      archive_roots: /srv/archive
+`
+	if err := os.WriteFile(typo, []byte(misspelled), 0o644); err != nil {
+		t.Fatalf("write the host document: %v", err)
+	}
+	if _, err := loadHostDocument(typo); !errors.Is(err, config.ErrUnknownConfigKey) ||
+		!strings.Contains(err.Error(), "agents.user.memory.archive_roots") {
+		t.Fatalf("loadHostDocument over a key outside the inlined archive face = %v, want the unknown key refusal at agents.user.memory.archive_roots", err)
+	}
+
+	path := filepath.Join(root, "agent-memory.yaml")
+	const declared = `entry: user
+agents:
+  user:
+    memory:
+      type: localfile
+      path: /srv/hot
+      archive_root: /srv/archive
+      hot_log_max_bytes: 1048576
+      archive_max_age: 24h
+storage:
+  type: localfile
+  root: /srv/hot
+`
+	if err := os.WriteFile(path, []byte(declared), 0o644); err != nil {
+		t.Fatalf("write the host document: %v", err)
+	}
+	doc, err := loadHostDocument(path)
+	if err != nil {
+		t.Fatalf("loadHostDocument over the archive face under agents.user.memory = %v, want it read", err)
+	}
+	decl, err := doc.Declaration()
+	if err != nil {
+		t.Fatalf("Declaration over the loaded document = %v", err)
+	}
+	entry := decl.Agents[0].Memory
+	if entry.ArchiveRoot != "/srv/archive" || entry.HotLogMaxBytes != 1048576 || entry.ArchiveMaxAge != 24*time.Hour {
+		t.Fatalf("memory = %+v, want the three fields read from agents.user.memory", entry)
+	}
+	plan, err := MemoryPlanOf(decl, doc.Storage.Type, doc.Storage.Root)
+	if err != nil {
+		t.Fatalf("MemoryPlanOf beside a top-level tier naming the same type and root = %v, want the plan built", err)
+	}
+	built := plan.Storage()
+	if built == nil {
+		t.Fatalf("the plan carries no storage tier over the declared agent archive face")
+	}
+	if built.ArchiveRoot != "/srv/archive" || built.HotLogMaxBytes != 1048576 || built.ArchiveMaxAge != 24*time.Hour {
+		t.Fatalf("tier archive face = %+v, want the agent declaration kept beside the top-level tier", *built)
+	}
+}
+
+// TestMovedArchiveFieldIsNotTheSameTier pins that the archive face is part of the restart judgement.
+// - a generation naming the same type and root but another archive field is not the tier this process opened
+// - an unchanged archive face is the same tier
+// 契约: docs/wiki/platform/org-hot-reload.md#restart-required-dimensions
+func TestMovedArchiveFieldIsNotTheSameTier(t *testing.T) {
+	storage := ledger.StorageConfig{Type: "localfile", Root: "/srv/hot"}
+	storage.ArchiveRoot = "/srv/archive"
+	storage.HotLogMaxBytes = 1 << 20
+	storage.ArchiveMaxAge = 24 * time.Hour
+	opened := &MemoryPlan{hasStore: true, storage: storage}
+	if !sameMemoryTier(opened, opened, false) {
+		t.Fatalf("sameMemoryTier over one unchanged plan = false, want the tier this process opened")
+	}
+	for _, tc := range []struct {
+		name   string
+		mutate func(*ledger.StorageConfig)
+	}{
+		{name: "archive root", mutate: func(c *ledger.StorageConfig) { c.ArchiveRoot = "/srv/other" }},
+		{name: "hot log budget", mutate: func(c *ledger.StorageConfig) { c.HotLogMaxBytes = 1 << 21 }},
+		{name: "retention window", mutate: func(c *ledger.StorageConfig) { c.ArchiveMaxAge = 48 * time.Hour }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			moved := &MemoryPlan{hasStore: true, storage: opened.storage}
+			tc.mutate(&moved.storage)
+			if sameMemoryTier(opened, moved, false) {
+				t.Fatalf("sameMemoryTier over a moved %s = true, want the restart-required verdict", tc.name)
+			}
+		})
+	}
 }

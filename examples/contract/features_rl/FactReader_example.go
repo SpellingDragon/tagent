@@ -4,6 +4,7 @@
 package rlexample
 
 import (
+	"context"
 	"fmt"
 
 	"github.com/SpellingDragon/tagent/api/event"
@@ -14,13 +15,19 @@ import (
 // committed, in commit order, as the chain holds them.
 type sessionFacts struct{}
 
-func (sessionFacts) SessionFacts(addr event.Address) []event.Event { return nil }
+func (sessionFacts) SessionFacts(context.Context, event.Address) ([]event.Event, error) {
+	return nil, nil
+}
 
 var _ rl.FactReader = sessionFacts{}
 
 // ExampleFactReader demonstrates reading one session fact stream.
 func ExampleFactReader() {
 	var reader rl.FactReader = sessionFacts{}
-	facts := reader.SessionFacts(event.Address{AgentID: "a", SessionID: "s"})
+	facts, err := reader.SessionFacts(context.Background(), event.Address{AgentID: "a", SessionID: "s"})
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
 	fmt.Println(len(facts))
 }

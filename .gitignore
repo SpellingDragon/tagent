@@ -58,6 +58,7 @@ data/
 
 # Logs
 *.log
+!openspec/changes/archive/2026-11-25-bounded-hot-log/acceptance/red/*.log
 
 # Hidden directories (except .git and .github)
 # Ignore all dot-directories
